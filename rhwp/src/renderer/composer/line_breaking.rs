@@ -103,11 +103,6 @@ impl LineBandPlan {
         hwpunit_to_px(line_height_hwp + line_spacing_hwp, self.dpi)
     }
 
-    /// 앞선 줄들의 폰트 크기 목록으로 현재 줄 대역 상단 y 를 얻는다.
-    fn band_top(&self, prior_font_sizes: impl Iterator<Item = f64>) -> f64 {
-        prior_font_sizes.map(|fs| self.advance_px(fs)).sum()
-    }
-
     /// 대역 [y, y+한 줄 전진량) 에서 쓸 수 있는 가장 넓은 구간 (시작 x, 폭).
     /// 렌더러 재생이 줄당 단일 세그먼트만 지원하므로 구간이 갈리면 넓은 쪽을
     /// 택한다(양쪽 어울림의 반대편은 비워 둔다 — 겹침 없음이 우선).
@@ -999,10 +994,12 @@ fn fill_lines(
         Some(plan) => plan.interval_at(0.0, 0.0).1,
         None => available_width_px,
     });
+    let current_band_top = std::cell::Cell::new(0.0);
     let advance_band = |results: &[LineBreakResult]| {
         if let Some(plan) = band_plan {
-            let y = plan.band_top(results.iter().map(|r| r.max_font_size));
             let fs = results.last().map(|r| r.max_font_size).unwrap_or(0.0);
+            let y = current_band_top.get() + plan.advance_px(fs);
+            current_band_top.set(y);
             current_line_w.set(plan.interval_at(y, fs).1);
         }
     };
@@ -1546,6 +1543,48 @@ fn char_level_break_hwp(
     }
 
     (results, lw, line_max_fs)
+}
+
+#[cfg(test)]
+mod wrap_band_perf_tests {
+    use super::*;
+    use crate::model::shape::TextFlow;
+
+    #[test]
+    #[ignore = "수동 장문단 성능 계측"]
+    fn long_wrap_band_fill_perf() {
+        const LINE_COUNT: usize = 20_000;
+        let text_chars = vec!['\n'; LINE_COUNT];
+        let tokens = (0..LINE_COUNT)
+            .map(|idx| BreakToken::LineBreak { idx })
+            .collect::<Vec<_>>();
+        let plan = LineBandPlan {
+            exclusions: vec![FloatExclusion {
+                rect: LayoutRect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 80.0,
+                    height: 2_000.0,
+                },
+                geometry: WrapGeometry::Side(TextFlow::BothSides),
+            }],
+            column_w_px: 600.0,
+            ls_type: LineSpacingType::Percent,
+            ls_value: 160.0,
+            dpi: 96.0,
+        };
+
+        let started = std::time::Instant::now();
+        let results = fill_lines(&tokens, &text_chars, 600.0, 0.0, 48.0, 0, 0, Some(&plan));
+        let elapsed = started.elapsed();
+
+        assert_eq!(results.len(), LINE_COUNT + 1);
+        eprintln!(
+            "long_wrap_band_fill lines={} elapsed_us={}",
+            LINE_COUNT,
+            elapsed.as_micros()
+        );
+    }
 }
 
 #[cfg(test)]

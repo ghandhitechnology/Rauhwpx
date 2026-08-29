@@ -2622,7 +2622,7 @@ fn issue2308_deferred_cell_edit_uses_path_revision_without_section_invalidation(
 #[test]
 fn issue2308_immediate_edit_rederives_existing_compat_projection() {
     use crate::model::image::Picture;
-    use crate::model::shape::{CommonObjAttr, TextWrap};
+    use crate::model::shape::{CommonObjAttr, HorzAlign, HorzRelTo, TextWrap};
 
     fn floating_picture() -> Control {
         Control::Picture(Box::new(Picture {
@@ -2631,6 +2631,8 @@ fn issue2308_immediate_edit_rederives_existing_compat_projection() {
                 text_wrap: TextWrap::Square,
                 allow_overlap: false,
                 treat_as_char: false,
+                horz_rel_to: HorzRelTo::Para,
+                horz_align: HorzAlign::Left,
                 ..Default::default()
             },
             ..Default::default()

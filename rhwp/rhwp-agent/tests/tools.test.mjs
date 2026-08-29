@@ -17,8 +17,8 @@ import {
 
 const byName = new Map(TOOL_DEFINITIONS.map((d) => [d.name, d]));
 
-test('도구는 정확히 73개, 이름 중복 없음', () => {
-  assert.equal(TOOL_DEFINITIONS.length, 73);
+test('도구는 정확히 75개, 이름 중복 없음', () => {
+  assert.equal(TOOL_DEFINITIONS.length, 75);
   assert.equal(byName.size, TOOL_DEFINITIONS.length, 'duplicate tool names');
 });
 
@@ -50,7 +50,9 @@ test('document-write annotations stay non-destructive so safe mode can edit', ()
 
 test('도구 프로필은 direct 호환성과 planning/implementing 가시성을 지킨다', () => {
   const direct = new Set(filterToolDefinitions('direct').map((definition) => definition.name));
-  assert.equal(direct.size, 63);
+  assert.equal(direct.size, 65);
+  assert.ok(direct.has('read_agent_instructions'));
+  assert.ok(direct.has('update_agent_instructions'));
   assert.ok(direct.has('materialize_document_snapshot'));
   assert.ok(direct.has('publish_artifact'));
   assert.ok(direct.has('apply_edits'));
@@ -81,7 +83,16 @@ test('도구 프로필은 direct 호환성과 planning/implementing 가시성을
   assert.ok(planning.has('present_implementation_plan'));
   assert.ok(planning.has('read_reference_chunk'));
   assert.ok(planning.has('read_reference_image'));
+  assert.ok(planning.has('read_agent_instructions'));
+  assert.ok(!planning.has('update_agent_instructions'));
   assert.ok(!planning.has('insert_text'));
+
+  const question = new Set(filterToolDefinitions('question').map((definition) => definition.name));
+  assert.ok(question.has('get_structure'));
+  assert.ok(question.has('download_file'));
+  assert.ok(question.has('browserbase_act'));
+  assert.ok(!question.has('present_implementation_plan'));
+  assert.ok(!question.has('insert_text'));
 
   const implementing = new Set(filterToolDefinitions('implementing').map((definition) => definition.name));
   assert.equal(implementing.size, TOOL_DEFINITIONS.length - 3);
@@ -100,6 +111,22 @@ test('도구 프로필은 direct 호환성과 planning/implementing 가시성을
     'update_copy_layout_job',
     'complete_copy_layout_job',
   ]);
+});
+
+test('app-only AGENTS.md tools separate reads from bounded revision-checked writes', () => {
+  const read = byName.get('read_agent_instructions');
+  const update = byName.get('update_agent_instructions');
+  assert.equal(read?.category, 'instruction-read');
+  assert.equal(update?.category, 'instruction-write');
+  assert.deepEqual(Object.keys(read?.shape ?? {}), []);
+  assert.ok(update?.shape.content.safeParse('keep answers concise').success);
+  assert.ok(!update?.shape.content.safeParse('x'.repeat(30_001)).success);
+  assert.ok(update?.shape.expectedRevision.safeParse(1).success);
+  assert.ok(!update?.shape.expectedRevision.safeParse(0).success);
+  assert.match(update?.description ?? '', /one-off task details/);
+  assert.match(update?.description ?? '', /not persisted until the user explicitly confirms/);
+  assert.match(update?.description ?? '', /Settings > 지시/);
+  assert.match(read?.description ?? '', /outside this app/);
 });
 
 test('template tools separate read-only inspection from pending document writes', () => {
@@ -137,7 +164,7 @@ test('present_implementation_plan 스키마가 완전한 구조를 강제한다'
   assert.ok(!IMPLEMENTATION_PLAN_SHAPE.steps.safeParse([]).success);
 });
 
-test('신규 도구 5개가 모두 있다', () => {
+test('핵심 시맨틱 쓰기 도구 5개가 모두 있다', () => {
   for (const name of ['apply_list', 'list_numberings', 'get_para_format', 'get_char_format', 'verify_changes']) {
     assert.ok(byName.has(name), `missing tool: ${name}`);
   }

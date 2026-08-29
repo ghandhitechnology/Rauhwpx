@@ -5,7 +5,9 @@ use super::utils::{expand_numbering_format, numbering_format_to_number_format};
 use super::*;
 use crate::model::page::{ColumnDef, PageDef};
 use crate::model::paragraph::{CharShapeRef, LineSeg, Paragraph};
-use crate::model::shape::{CommonObjAttr, RectangleShape, TextWrap, VertRelTo};
+use crate::model::shape::{
+    CommonObjAttr, HorzAlign, HorzRelTo, RectangleShape, TextWrap, VertAlign, VertRelTo,
+};
 use crate::model::style::{Numbering, NumberingHead};
 use crate::model::table::{Cell, Table, TablePageBreak};
 use crate::renderer::composer::compose_paragraph;
@@ -25,6 +27,341 @@ fn a4_page_def() -> PageDef {
         margin_gutter: 0,
         ..Default::default()
     }
+}
+
+fn native_whitespace_coanchored_table_pair() -> Paragraph {
+    let table = |treat_as_char: bool, horz_rel_to: HorzRelTo| Table {
+        row_count: 2,
+        col_count: 2,
+        page_break: TablePageBreak::RowBreak,
+        outer_margin_left: 141,
+        outer_margin_right: 141,
+        outer_margin_top: 141,
+        outer_margin_bottom: 141,
+        common: CommonObjAttr {
+            treat_as_char,
+            text_wrap: TextWrap::TopAndBottom,
+            vert_rel_to: VertRelTo::Para,
+            vert_align: VertAlign::Top,
+            horz_rel_to,
+            horz_align: HorzAlign::Left,
+            width: 47_966,
+            ..Default::default()
+        },
+        cells: vec![
+            Cell::default(),
+            Cell::default(),
+            Cell::default(),
+            Cell::default(),
+        ],
+        ..Default::default()
+    };
+    Paragraph {
+        text: " ".into(),
+        controls: vec![
+            Control::Table(Box::new(table(true, HorzRelTo::Para))),
+            Control::Table(Box::new(table(false, HorzRelTo::Column))),
+        ],
+        line_segs: vec![
+            LineSeg {
+                vertical_pos: 3_648,
+                ..Default::default()
+            },
+            LineSeg {
+                vertical_pos: 0,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn native_whitespace_coanchored_pair_uses_margin_contract_for_both_tables() {
+    let para = native_whitespace_coanchored_table_pair();
+    assert!(native_whitespace_coanchored_table_margin_pair(
+        true, &para, 0
+    ));
+    assert!(native_whitespace_coanchored_table_margin_pair(
+        true, &para, 1
+    ));
+}
+
+#[test]
+fn native_whitespace_coanchored_pair_rejects_nearby_non_witnesses() {
+    let para = native_whitespace_coanchored_table_pair();
+    assert!(!native_whitespace_coanchored_table_margin_pair(
+        false, &para, 0
+    ));
+
+    let mut pua_filler = para.clone();
+    pua_filler.text = "\u{F081C}".into();
+    assert!(!native_whitespace_coanchored_table_margin_pair(
+        true,
+        &pua_filler,
+        0
+    ));
+
+    let mut visible_text = para.clone();
+    visible_text.text = "caption".into();
+    assert!(!native_whitespace_coanchored_table_margin_pair(
+        true,
+        &visible_text,
+        0
+    ));
+
+    let mut no_reset = para.clone();
+    no_reset.line_segs[1].vertical_pos = 7_000;
+    assert!(!native_whitespace_coanchored_table_margin_pair(
+        true, &no_reset, 0
+    ));
+
+    let mut ordinary_single_table = para.clone();
+    ordinary_single_table.controls.pop();
+    assert!(!native_whitespace_coanchored_table_margin_pair(
+        true,
+        &ordinary_single_table,
+        0
+    ));
+
+    let mut zero_margin = para.clone();
+    let Control::Table(table) = &mut zero_margin.controls[0] else {
+        unreachable!();
+    };
+    table.outer_margin_left = 0;
+    assert!(!native_whitespace_coanchored_table_margin_pair(
+        true,
+        &zero_margin,
+        0
+    ));
+
+    let mut reversed = para;
+    reversed.controls.reverse();
+    assert!(!native_whitespace_coanchored_table_margin_pair(
+        true, &reversed, 0
+    ));
+}
+
+#[test]
+fn native_whitespace_coanchored_pair_rejects_cell_signature_mismatch() {
+    let para = native_whitespace_coanchored_table_pair();
+
+    let mut topology_mismatch = para.clone();
+    let Control::Table(floating) = &mut topology_mismatch.controls[1] else {
+        unreachable!();
+    };
+    floating.cells[0].col = 1;
+    assert!(!native_whitespace_coanchored_table_margin_pair(
+        true,
+        &topology_mismatch,
+        0,
+    ));
+
+    let mut width_mismatch = para;
+    let Control::Table(floating) = &mut width_mismatch.controls[1] else {
+        unreachable!();
+    };
+    floating.cells[0].width = 1_800;
+    assert!(!native_whitespace_coanchored_table_margin_pair(
+        true,
+        &width_mismatch,
+        0,
+    ));
+}
+
+#[test]
+fn picture_in_table_page9_uses_authored_saved_outer_frame() {
+    fn table_node(
+        node: &RenderNode,
+        para_index: usize,
+        control_index: usize,
+    ) -> Option<&RenderNode> {
+        if let RenderNodeType::Table(table) = &node.node_type {
+            if table.para_index == Some(para_index) && table.control_index == Some(control_index) {
+                return Some(node);
+            }
+        }
+        node.children
+            .iter()
+            .find_map(|child| table_node(child, para_index, control_index))
+    }
+
+    fn nested_evidence_table(node: &RenderNode) -> Option<&RenderNode> {
+        node.children.iter().find_map(|child| {
+            if matches!(child.node_type, RenderNodeType::Table(ref table)
+                if table.row_count == 1 && table.col_count == 2)
+            {
+                Some(child)
+            } else {
+                nested_evidence_table(child)
+            }
+        })
+    }
+
+    fn body_node(node: &RenderNode) -> Option<&RenderNode> {
+        if matches!(node.node_type, RenderNodeType::Body { .. }) {
+            return Some(node);
+        }
+        node.children.iter().find_map(body_node)
+    }
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/pic-in-table-01.hwp");
+    let bytes = std::fs::read(path).expect("read picture-in-table fixture");
+    let core = crate::document_core::DocumentCore::from_bytes(&bytes)
+        .expect("parse picture-in-table fixture");
+    assert_eq!(core.page_count(), 22, "Hancom oracle page count");
+
+    let tree = core
+        .build_page_render_tree(8)
+        .expect("render picture-in-table page 9");
+    let body = body_node(&tree.root).expect("body node");
+    let outer = table_node(&tree.root, 29, 0).expect("saved single-cell outer table");
+    let nested = nested_evidence_table(outer).expect("nested evidence table");
+    let expected_x = body.bbox.x + hwpunit_to_px(141, DEFAULT_DPI);
+    let expected_y = body.bbox.y + hwpunit_to_px(2_885 + 141, DEFAULT_DPI);
+    let expected_height = hwpunit_to_px(69_017, DEFAULT_DPI);
+
+    assert!(
+        (outer.bbox.x - expected_x).abs() < 0.05,
+        "outer frame must use the authored 141HU horizontal inset: {:?}",
+        outer.bbox
+    );
+    assert!(
+        (outer.bbox.y - expected_y).abs() < 0.05,
+        "outer frame must use saved host vpos plus 141HU top inset: {:?}",
+        outer.bbox
+    );
+    assert!(
+        (outer.bbox.height - expected_height).abs() < 0.05,
+        "outer frame must use common.height instead of the larger cached cell height: {:?}",
+        outer.bbox
+    );
+    assert!(
+        (nested.bbox.y - 862.896).abs() < 1.0,
+        "nested evidence table must follow the corrected centered-cell geometry: {:?}",
+        nested.bbox
+    );
+    assert!(
+        (nested.bbox.height - 92.379).abs() < 0.5,
+        "nested evidence table height must remain unchanged: {:?}",
+        nested.bbox
+    );
+}
+
+#[test]
+fn picture_in_table_page8_tac_tables_keep_saved_vertical_positions() {
+    fn table_node(
+        node: &RenderNode,
+        para_index: usize,
+        control_index: usize,
+    ) -> Option<&RenderNode> {
+        if let RenderNodeType::Table(table) = &node.node_type {
+            if table.para_index == Some(para_index) && table.control_index == Some(control_index) {
+                return Some(node);
+            }
+        }
+        node.children
+            .iter()
+            .find_map(|child| table_node(child, para_index, control_index))
+    }
+
+    fn body_node(node: &RenderNode) -> Option<&RenderNode> {
+        if matches!(node.node_type, RenderNodeType::Body { .. }) {
+            return Some(node);
+        }
+        node.children.iter().find_map(body_node)
+    }
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/pic-in-table-01.hwp");
+    let bytes = std::fs::read(path).expect("read picture-in-table fixture");
+    let core = crate::document_core::DocumentCore::from_bytes(&bytes)
+        .expect("parse picture-in-table fixture");
+    let tree = core
+        .build_page_render_tree(7)
+        .expect("render picture-in-table page 8");
+    let body = body_node(&tree.root).expect("body node");
+    let upper = table_node(&tree.root, 25, 0).expect("upper TAC table");
+    let lower = table_node(&tree.root, 27, 0).expect("lower TAC table");
+    let outer_top = hwpunit_to_px(141, DEFAULT_DPI);
+
+    assert!(
+        (upper.bbox.y - (body.bbox.y + hwpunit_to_px(4_094, DEFAULT_DPI) + outer_top)).abs() < 0.05,
+        "upper TAC table moved: {:?}",
+        upper.bbox
+    );
+    assert!(
+        (lower.bbox.y - (body.bbox.y + hwpunit_to_px(35_344, DEFAULT_DPI) + outer_top)).abs()
+            < 0.05,
+        "lower TAC table moved: {:?}",
+        lower.bbox
+    );
+}
+
+#[test]
+fn picture_in_table_page10_rebases_pair_to_authored_margin_box() {
+    fn table_node(
+        node: &RenderNode,
+        para_index: usize,
+        control_index: usize,
+    ) -> Option<&RenderNode> {
+        if let RenderNodeType::Table(table) = &node.node_type {
+            if table.para_index == Some(para_index) && table.control_index == Some(control_index) {
+                return Some(node);
+            }
+        }
+        node.children
+            .iter()
+            .find_map(|child| table_node(child, para_index, control_index))
+    }
+
+    fn host_space_run(node: &RenderNode, para_index: usize) -> Option<&RenderNode> {
+        if let RenderNodeType::TextRun(run) = &node.node_type {
+            if run.para_index == Some(para_index) && run.text.chars().all(char::is_whitespace) {
+                return Some(node);
+            }
+        }
+        node.children
+            .iter()
+            .find_map(|child| host_space_run(child, para_index))
+    }
+
+    fn body_node(node: &RenderNode) -> Option<&RenderNode> {
+        if matches!(node.node_type, RenderNodeType::Body { .. }) {
+            return Some(node);
+        }
+        node.children.iter().find_map(body_node)
+    }
+
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/pic-in-table-01.hwp");
+    let bytes = std::fs::read(path).expect("read picture-in-table fixture");
+    let core = crate::document_core::DocumentCore::from_bytes(&bytes)
+        .expect("parse picture-in-table fixture");
+    let tree = core
+        .build_page_render_tree(9)
+        .expect("render picture-in-table page 10");
+    let body = body_node(&tree.root).expect("body node");
+    let tac = table_node(&tree.root, 32, 0).expect("coanchored TAC table");
+    let floating = table_node(&tree.root, 32, 1).expect("coanchored non-TAC table");
+    let host_space = host_space_run(&tree.root, 32).expect("ordinary whitespace host run");
+    let outer_margin = hwpunit_to_px(141, DEFAULT_DPI);
+    let expected_x = body.bbox.x + outer_margin;
+
+    assert!(
+        (tac.bbox.x - expected_x).abs() < 0.05,
+        "TAC border origin must ignore the 8px host space and retain 141HU left margin: {:?}",
+        tac.bbox
+    );
+    assert!(
+        (floating.bbox.x - expected_x).abs() < 0.05,
+        "coanchored non-TAC border origin must retain the same 141HU left margin: {:?}",
+        floating.bbox
+    );
+    assert!(
+        (floating.bbox.y - host_space.bbox.y - outer_margin).abs() < 0.05,
+        "non-TAC table must apply the authored 141HU top margin exactly once: table={:?} host={:?}",
+        floating.bbox,
+        host_space.bbox
+    );
 }
 
 #[test]
@@ -199,6 +536,164 @@ fn issue2439_full_table_top_matches_first_partial_fragment_top() {
     // The generic empty-host float contract remains unchanged when the strict structural
     // evidence is absent, and negative offsets remain clamped at the host paragraph top.
     assert_eq!(empty_host_float_raw_top(para_y, -8.0, 0.0), para_y);
+}
+
+fn native_single_cell_para_float_margin_fixture() -> Table {
+    Table {
+        row_count: 1,
+        col_count: 1,
+        cells: vec![Cell::default()],
+        common: CommonObjAttr {
+            text_wrap: TextWrap::TopAndBottom,
+            vert_rel_to: VertRelTo::Para,
+            horz_rel_to: crate::model::shape::HorzRelTo::Para,
+            vert_align: crate::model::shape::VertAlign::Top,
+            horz_align: crate::model::shape::HorzAlign::Left,
+            flow_with_text: true,
+            ..Default::default()
+        },
+        outer_margin_left: 283,
+        outer_margin_right: 283,
+        outer_margin_top: 283,
+        outer_margin_bottom: 283,
+        ..Default::default()
+    }
+}
+
+fn native_saved_single_cell_text_frame_fixture() -> Table {
+    let mut table = native_single_cell_para_float_margin_fixture();
+    table.page_break = TablePageBreak::RowBreak;
+    table.common.flow_with_text = false;
+    table.common.width = 47_907;
+    table.common.height = 69_017;
+    table.cell_spacing = 0;
+    table.cells[0] = Cell {
+        row: 0,
+        col: 0,
+        row_span: 1,
+        col_span: 1,
+        width: 47_907,
+        height: 69_812,
+        vertical_align: crate::model::table::VerticalAlign::Center,
+        paragraphs: vec![Paragraph {
+            text: "saved text".into(),
+            char_count: 10,
+            line_segs: vec![LineSeg {
+                line_height: 1_100,
+                ..Default::default()
+            }],
+            controls: vec![Control::Table(Box::default())],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    table
+}
+
+fn native_saved_text_frame_host(table: &Table) -> Paragraph {
+    Paragraph {
+        text: String::new(),
+        controls: vec![Control::Table(Box::new(table.clone()))],
+        line_segs: vec![LineSeg {
+            vertical_pos: 2_885,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn native_saved_text_frame_requires_exact_empty_stored_host() {
+    let table = native_saved_single_cell_text_frame_fixture();
+    let host = native_saved_text_frame_host(&table);
+    assert!(native_empty_host_saved_single_cell_text_frame(
+        true, &host, 0, &table
+    ));
+
+    let mut visible_host = host.clone();
+    visible_host.text = "visible host".into();
+    assert!(!native_empty_host_saved_single_cell_text_frame(
+        true,
+        &visible_host,
+        0,
+        &table,
+    ));
+
+    let mut zero_vpos = host.clone();
+    zero_vpos.line_segs[0].vertical_pos = 0;
+    assert!(!native_empty_host_saved_single_cell_text_frame(
+        true, &zero_vpos, 0, &table,
+    ));
+
+    let mut synthetic_line = host;
+    synthetic_line.line_segs[0].tag = LineSeg::TAG_IMPLEMENTATION_PROPERTY;
+    assert!(!native_empty_host_saved_single_cell_text_frame(
+        true,
+        &synthetic_line,
+        0,
+        &table,
+    ));
+}
+
+#[test]
+fn native_single_cell_outer_top_floor_applies_for_empty_host() {
+    let table = native_single_cell_para_float_margin_fixture();
+    let empty_host = Paragraph::new_empty();
+    let is_empty_host =
+        is_para_topbottom_float(&table.common) && !para_has_visible_text(&empty_host);
+    let para_y = 120.0;
+    let outer_top = hwpunit_to_px(table.outer_margin_top as i32, DEFAULT_DPI);
+
+    let placed = native_empty_host_single_cell_outer_top_floor(
+        true,
+        is_empty_host,
+        false,
+        &table,
+        para_y,
+        para_y,
+        DEFAULT_DPI,
+    );
+    assert!((placed - (para_y + outer_top)).abs() < 0.001);
+
+    // A float lane that already includes the outer-top inset remains unchanged.
+    let lane_top = para_y + outer_top;
+    assert_eq!(
+        native_empty_host_single_cell_outer_top_floor(
+            true,
+            is_empty_host,
+            false,
+            &table,
+            para_y,
+            lane_top,
+            DEFAULT_DPI,
+        ),
+        lane_top
+    );
+}
+
+#[test]
+fn native_single_cell_outer_top_floor_rejects_visible_host() {
+    let table = native_single_cell_para_float_margin_fixture();
+    let visible_host = Paragraph {
+        text: "visible title".to_string(),
+        ..Default::default()
+    };
+    let is_empty_host =
+        is_para_topbottom_float(&table.common) && !para_has_visible_text(&visible_host);
+    let para_y = 120.0;
+
+    assert_eq!(
+        native_empty_host_single_cell_outer_top_floor(
+            true,
+            is_empty_host,
+            false,
+            &table,
+            para_y,
+            para_y,
+            DEFAULT_DPI,
+        ),
+        para_y
+    );
 }
 
 #[test]
@@ -2414,11 +2909,15 @@ where
     find(header, predicate).expect("matching header child should be rendered")
 }
 
-fn render_tree_with_header_control(control: Control) -> PageRenderTree {
+fn render_tree_with_header_control_with_profile(
+    control: Control,
+    profile: crate::model::provenance::LayoutCompatibilityProfile,
+) -> PageRenderTree {
     use crate::model::header_footer::Header;
     use crate::renderer::pagination::HeaderFooterRef;
 
     let engine = LayoutEngine::with_default_dpi();
+    engine.set_layout_profile(profile);
     let layout = PageLayoutInfo::from_page_def_default(&a4_page_def(), &ColumnDef::default());
     let paragraphs = vec![Paragraph {
         controls: vec![Control::Header(Box::new(Header {
@@ -2465,6 +2964,10 @@ fn render_tree_with_header_control(control: Control) -> PageRenderTree {
     )
 }
 
+fn render_tree_with_header_control(control: Control) -> PageRenderTree {
+    render_tree_with_header_control_with_profile(control, Default::default())
+}
+
 #[test]
 fn header_paper_relative_shape_uses_page_origin() {
     let tree = render_tree_with_header_control(Control::Shape(Box::new(ShapeObject::Rectangle(
@@ -2491,7 +2994,7 @@ fn header_paper_relative_shape_uses_page_origin() {
 }
 
 #[test]
-fn header_paper_relative_picture_uses_page_origin() {
+fn header_paper_relative_picture_uses_header_area_origin() {
     let tree =
         render_tree_with_header_control(Control::Picture(Box::new(crate::model::image::Picture {
             common: CommonObjAttr {
@@ -2510,6 +3013,42 @@ fn header_paper_relative_picture_uses_page_origin() {
     let bbox = first_header_child_bbox(&tree, |node_type| {
         // [Task #2225] 데이터 없는 픽스처 그림은 MissingPicture placeholder 로
         // 방출된다 — 위치 검증 프로브이므로 두 형태 모두 수용 (bbox 동일).
+        matches!(
+            node_type,
+            RenderNodeType::Image(_) | RenderNodeType::Placeholder(_)
+        )
+    });
+    assert!(
+        (bbox.x - hwpunit_to_px(a4_page_def().margin_left as i32 + 1_500, DEFAULT_DPI)).abs()
+            < 0.01
+    );
+    assert!(
+        (bbox.y - hwpunit_to_px(a4_page_def().margin_top as i32 + 2_250, DEFAULT_DPI)).abs() < 0.01
+    );
+}
+
+#[test]
+fn non_native_header_paper_relative_picture_uses_physical_paper_origin() {
+    let profile =
+        crate::model::provenance::LayoutCompatibilityProfile::new(false, false, true, false, false);
+    let tree = render_tree_with_header_control_with_profile(
+        Control::Picture(Box::new(crate::model::image::Picture {
+            common: CommonObjAttr {
+                width: 7_500,
+                height: 3_000,
+                horizontal_offset: 1_500,
+                vertical_offset: 2_250,
+                horz_rel_to: HorzRelTo::Paper,
+                vert_rel_to: VertRelTo::Paper,
+                text_wrap: TextWrap::InFrontOfText,
+                ..Default::default()
+            },
+            ..Default::default()
+        })),
+        profile,
+    );
+
+    let bbox = first_header_child_bbox(&tree, |node_type| {
         matches!(
             node_type,
             RenderNodeType::Image(_) | RenderNodeType::Placeholder(_)

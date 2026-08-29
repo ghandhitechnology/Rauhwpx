@@ -1515,7 +1515,6 @@ impl DocumentCore {
             transparency: 0,
             external_path: None,
         };
-
         if !cell_path.is_empty() {
             if cell_path_is_textbox {
                 // === 글상자 내부 picture 분기 (#1322 maintainer fix) ===
@@ -1526,6 +1525,16 @@ impl DocumentCore {
                 let (offset_x_hu, offset_y_hu) = match (paper_offset_x_hu, paper_offset_y_hu) {
                     (Some(x), Some(y)) => (x, y),
                     _ => (0, 0),
+                };
+                let new_z_order = {
+                    let section = &mut self.document.sections[section_idx];
+                    let target_para =
+                        Self::resolve_cell_paragraph_mut(section, para_idx, cell_path)?;
+                    // Nested controls have their own paint scope. A high body-layer z-order
+                    // must not leak into a text box's local controls.
+                    super::max_control_layer_z_order(&target_para.controls)
+                        .max(0)
+                        .saturating_add(1)
                 };
 
                 // CommonObjAttr (text_box 내부 floating):
@@ -1545,7 +1554,7 @@ impl DocumentCore {
                     vertical_offset: offset_y_hu.max(0) as u32,
                     width,
                     height,
-                    z_order: 1,
+                    z_order: new_z_order,
                     description: description.to_string(),
                     ..Default::default()
                 };
@@ -1691,6 +1700,8 @@ impl DocumentCore {
         //   bits 15-17=width_criterion(4=Absolute), bits 18-20=height_criterion(2=Absolute),
         //   bits 21-23=text_wrap(0=Square)
         let common_attr: u32 = (4 << 15) | (2 << 18);
+        let new_z_order =
+            super::max_layer_z_order(&self.document.sections[section_idx]).saturating_add(1);
         let common = CommonObjAttr {
             ctrl_id: 0x67736F20, // "gso " — GenShape
             attr: common_attr,
@@ -1702,7 +1713,7 @@ impl DocumentCore {
             vertical_offset: offset_y_hu.max(0) as u32,
             width,
             height,
-            z_order: 1,
+            z_order: new_z_order,
             description: description.to_string(),
             ..Default::default()
         };
@@ -1898,6 +1909,11 @@ mod issue_1151_cell_picture_insert_tests {
             .expect("create 1x1 table");
         let table_para_idx = parse_idx(&table_res, "paraIdx");
         let table_ctrl_idx = parse_idx(&table_res, "controlIdx");
+        if let Control::Table(table) =
+            &mut core.document.sections[0].paragraphs[table_para_idx].controls[table_ctrl_idx]
+        {
+            table.common.z_order = 75;
+        }
 
         let cell_path: Vec<(usize, usize, usize)> = vec![(table_ctrl_idx, 0, 0)];
         let image = minimal_png();
@@ -1958,6 +1974,10 @@ mod issue_1151_cell_picture_insert_tests {
             ),
             "floating picture wrap=Square (어울림) 이어야 한다. got: {:?}",
             picture.common.text_wrap
+        );
+        assert_eq!(
+            picture.common.z_order, 1,
+            "셀 삽입 그림은 top-level table z-order를 상속하면 안 된다"
         );
     }
 
@@ -3728,6 +3748,11 @@ mod issue_1280_textbox_creation_tests {
 
         let mut core = make_test_core();
         let (para, ctrl) = create_textbox_with(&mut core, false, "InFrontOfText");
+        if let Control::Shape(shape) =
+            &mut core.document.sections[0].paragraphs[para].controls[ctrl]
+        {
+            shape.common_mut().z_order = 80;
+        }
         let body_control_count_before = core.document.sections[0].paragraphs[para].controls.len();
         let cell_path = vec![(ctrl, 0, 0)];
         let image = minimal_png();
@@ -3774,6 +3799,10 @@ mod issue_1280_textbox_creation_tests {
         assert_eq!(picture.common.vertical_offset, 1500);
         assert_eq!(picture.common.width, 5000);
         assert_eq!(picture.common.height, 4000);
+        assert_eq!(
+            picture.common.z_order, 1,
+            "글상자 내부 그림은 top-level shape z-order를 상속하면 안 된다"
+        );
     }
 
     #[test]
@@ -4071,6 +4100,54 @@ mod bindata_storage_id_collision_tests {
         assert!(
             datas.iter().any(|d| *d == minimal_png().as_slice()),
             "저장 왕복 후 신규 이미지가 소실됨"
+        );
+    }
+
+    #[test]
+    fn insert_into_storage_hole_doc_hwpx_ref_points_to_inserted_image() {
+        use std::io::Read;
+
+        let mut core = make_core_with_storage_hole();
+        core.insert_picture_native(
+            0,
+            0,
+            0,
+            &[],
+            &minimal_png(),
+            9000,
+            6000,
+            1,
+            1,
+            "png",
+            "",
+            None,
+            None,
+        )
+        .expect("insert_picture_native");
+
+        let saved = core.export_hwpx_native().expect("export HWPX");
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(saved)).expect("HWPX ZIP");
+        let mut section_xml = String::new();
+        archive
+            .by_name("Contents/section0.xml")
+            .expect("section0.xml")
+            .read_to_string(&mut section_xml)
+            .expect("read section0.xml");
+        assert!(
+            section_xml.contains(r#"binaryItemIDRef="image2""#),
+            "두 번째 BinData 위치를 참조해야 함"
+        );
+
+        let mut referenced_data = Vec::new();
+        archive
+            .by_name("BinData/image2.png")
+            .expect("referenced image2.png")
+            .read_to_end(&mut referenced_data)
+            .expect("read image2.png");
+        assert_eq!(
+            referenced_data,
+            minimal_png(),
+            "공식 편집기는 manifest ID를 직접 해석하므로 image2가 신규 그림이어야 함"
         );
     }
 }

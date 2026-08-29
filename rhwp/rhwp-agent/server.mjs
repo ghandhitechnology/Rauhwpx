@@ -12,14 +12,21 @@ import { createPiSession } from './agents/pi.mjs';
 import { createGrokSession, prepareGrokHome } from './agents/grok.mjs';
 import { createCursorSession, prepareCursorHome } from './agents/cursor.mjs';
 import { generateChatTitle } from './agents/title.mjs';
+import {
+  CHECKPOINT_TITLE_OVERALL_TIMEOUT_MS,
+  findDeepSeekV4FlashModel,
+  generateCheckpointTitle,
+  resolveCheckpointTitleCliRoute,
+} from './agents/checkpoint-title.mjs';
 import { SkillRegistry } from './skills.mjs';
 import { generateSkillDraft } from './skill-generator.mjs';
 import { WritingStyleStore, assertWritingStyleAppendCompatible } from './writing-style.mjs';
+import { AgentInstructionsStore } from './agent-instructions.mjs';
 import { calibrateWritingStyle } from './style-calibrator.mjs';
 import { buildWritingStyleCatalog, resolveWritingStyleSelection } from './writing-style-catalog.mjs';
 import { filterToolDefinitions, TOOL_DEFINITIONS } from './tools.mjs';
 import { replayMissedTurnEnd } from './turn-outcome-replay.mjs';
-import { PlanningState, authorizeToolCall, buildApprovedPlanPrompt, workflowError } from './planning-state.mjs';
+import { PlanningState, authorizeToolCall, buildApprovedPlanPrompt, buildPlanningDocumentSavedPrompt, workflowError } from './planning-state.mjs';
 import { DownloadManager } from './download-manager.mjs';
 import { DocumentSnapshotManager } from './document-snapshot-manager.mjs';
 import { ArtifactStore } from './artifact-store.mjs';
@@ -132,6 +139,7 @@ async function findSourceCodexAuthPath() {
 }
 let sourceCodexAuthPath = await findSourceCodexAuthPath();
 const writingStyleStore = await new WritingStyleStore().init();
+const agentInstructionsStore = await new AgentInstructionsStore().init();
 const skillRegistry = await new SkillRegistry({ bundledRoot: BUNDLED_SKILLS, writingStyleStore }).init();
 const PI_ROOT = defaultPiRoot();
 const openRouter = createOpenRouter({ cacheDir: PI_ROOT });
@@ -226,10 +234,13 @@ const sessions = new HubSessionRegistry({
       sessionGeneration: 0,
       missedTurnEnd: null,
       styleCalibration: null,
+      pendingInstructionDraft: null,
       auxiliaryProcesses: new Set(),
+      checkpointTitleControllers: new Set(),
       templateJobs: new Map(),
       activeTemplateJobId: null,
       pendingTemplateCompletions: [],
+      pendingDocumentSaved: null,
       browserbaseSession: new BrowserbaseSession({ log }),
       downloadManager: new DownloadManager({ rootDir: workDir }),
       documentSnapshotManager: new DocumentSnapshotManager({ rootDir: workDir }),
@@ -255,6 +266,85 @@ function broadcastToStudios(message) {
   for (const record of sessions.values()) sendJson(record.studioSocket, message);
 }
 
+function broadcastAgentInstructions(status, changedBy) {
+  for (const record of sessions.values()) {
+    if (record.pendingInstructionDraft
+      && record.pendingInstructionDraft.expectedRevision !== status.revision) {
+      clearInstructionDraft(record, 'stale');
+    }
+  }
+  broadcastToStudios({ v: 1, type: 'agent-instructions', status, changedBy });
+}
+
+function instructionDraftFrame(draft) {
+  return {
+    id: draft.id,
+    content: draft.content,
+    expectedRevision: draft.expectedRevision,
+    reason: draft.reason,
+    requestedBy: draft.requestedBy,
+    createdAt: new Date(draft.createdAt).toISOString(),
+    expiresAt: new Date(draft.expiresAt).toISOString(),
+    confirmationToken: draft.confirmationToken,
+  };
+}
+
+function clearInstructionDraft(record, outcome) {
+  const draft = record.pendingInstructionDraft;
+  if (!draft) return null;
+  record.pendingInstructionDraft = null;
+  if (draft.expiryTimer) clearTimeout(draft.expiryTimer);
+  sendJson(record.studioSocket, {
+    v: 1,
+    type: 'agent-instructions-draft-cleared',
+    draftId: draft.id,
+    outcome,
+  });
+  return draft;
+}
+
+function currentInstructionDraft(record) {
+  const draft = record.pendingInstructionDraft;
+  if (!draft) return null;
+  if (draft.expiresAt <= Date.now()) {
+    clearInstructionDraft(record, 'expired');
+    return null;
+  }
+  return draft;
+}
+
+function sendInstructionDraft(record, sock = record.studioSocket) {
+  const draft = currentInstructionDraft(record);
+  if (!draft) return false;
+  return sendJson(sock, {
+    v: 1,
+    type: 'agent-instructions-draft',
+    draft: instructionDraftFrame(draft),
+  });
+}
+
+function authorizedInstructionDraft(record, msg) {
+  const draft = currentInstructionDraft(record);
+  if (!draft
+    || typeof msg.draftId !== 'string'
+    || msg.draftId !== draft.id
+    || typeof msg.confirmationToken !== 'string'
+    || !timingSafeTextEqual(msg.confirmationToken, draft.confirmationToken)) {
+    throw workflowError(
+      'INSTRUCTIONS_CONFIRMATION_INVALID',
+      'The instruction proposal is missing, expired, or no longer authorized.',
+    );
+  }
+  return draft;
+}
+
+function consumeAuthorizedInstructionDraft(record, msg) {
+  const draft = authorizedInstructionDraft(record, msg);
+  record.pendingInstructionDraft = null;
+  if (draft.expiryTimer) clearTimeout(draft.expiryTimer);
+  return draft;
+}
+
 function refreshSessionCredentials(agent) {
   for (const record of sessions.values()) {
     if (agent === 'codex') prepareCodexHome(record.codexHome, sourceCodexAuthPath);
@@ -267,6 +357,7 @@ function refreshSessionCredentials(agent) {
 /** CLI 설치·인증을 cli-setup-manager 가 관리하는 에이전트들. */
 const CLI_SETUP_AGENTS = ['claude', 'codex', 'grok', 'cursor'];
 const KNOWN_AGENTS = new Set([...CLI_SETUP_AGENTS, 'pi']);
+const AGENT_INSTRUCTION_DRAFT_TTL_MS = 5 * 60 * 1000;
 
 const CLAUDE_MODELS = new Set(['opus', 'fable', 'sonnet', 'haiku']);
 const CODEX_MODELS = new Set(['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol']);
@@ -498,6 +589,11 @@ function resolveEffort(agent, model, requested) {
   const preferred = DEFAULT_EFFORT[agent];
   return allowed.has(preferred) ? preferred : [...allowed][0];
 }
+
+function resolveServiceTier(agent, requested) {
+  if (agent !== 'codex') return 'standard';
+  return requested === 'fast' ? 'fast' : 'standard';
+}
 // 새 탭·새로고침이 스튜디오 자리를 넘겨받으면 이전 페이지의 실행기와 함께 인플라이트 호출도
 // 사라진다 — 30초 타임아웃까지 기다리지 말고 즉시 NO_STUDIO 로 실패시킨다.
 // 단순히 소켓만 잠깐 끊긴 경우(같은 인스턴스가 곧바로 재접속)에는 호출을 살려 둔다.
@@ -675,6 +771,64 @@ async function stopAuxiliaryProcesses(record) {
   })));
 }
 
+function cancelCheckpointTitleJobs(record) {
+  const controllers = [...record.checkpointTitleControllers];
+  record.checkpointTitleControllers.clear();
+  for (const controller of controllers) controller.abort();
+}
+
+function checkpointTitleDeps(record, health, signal) {
+  const deepSeek = findDeepSeekV4FlashModel(piStatus.models);
+  const codex = resolveCheckpointTitleCliRoute(
+    'codex', health?.codex, cliSetupStatus.codex, cliSetup.binPath('codex'),
+  );
+  const grok = resolveCheckpointTitleCliRoute(
+    'grok', health?.grok, cliSetupStatus.grok, cliSetup.binPath('grok'),
+  );
+  const claude = resolveCheckpointTitleCliRoute(
+    'claude', health?.claude, cliSetupStatus.claude, cliSetup.binPath('claude'),
+  );
+  return {
+    readiness: {
+      pi: {
+        ready: Boolean(
+          deepSeek
+          && health?.pi?.available === true
+          && piStatus.installed
+          && piStatus.keyConfigured,
+        ),
+        model: deepSeek?.id ?? '',
+      },
+      codex: { ready: codex.ready, model: 'gpt-5.6-luna' },
+      grok: { ready: grok.ready, model: 'grok-4.6' },
+      claude: { ready: claude.ready, model: 'haiku' },
+    },
+    piManager,
+    openRouter,
+    workDir: record.workDir,
+    isolatedHome: record.isolatedHome,
+    sessionId: record.sessionId,
+    commands: {
+      codex: codex.command,
+      grok: grok.command,
+      claude: claude.command,
+    },
+    providerEnvs: {
+      codex: { ...cliSetup.envFor('codex'), CODEX_HOME: record.codexHome },
+      grok: {
+        ...cliSetup.envFor('grok'),
+        GROK_HOME: record.grokHome,
+        GROK_DISABLE_AUTOUPDATER: '1',
+        GROK_MEMORY: '0',
+      },
+      claude: cliSetup.envFor('claude'),
+    },
+    spawnProcess: (command, args, options) => spawnAuxiliaryProcess(record, command, args, options),
+    terminateProcess: terminateProcessTree,
+    signal,
+  };
+}
+
 function auxDeps(record, requestedAgent, cliAgent) {
   const agent = requestedAgent === 'pi' || requestedAgent === 'claude' || requestedAgent === 'codex'
     ? requestedAgent
@@ -703,6 +857,7 @@ function sessionInfo(record) {
       model: activeSession.model,
       effort: activeSession.effort,
       permissionProfile: activeSession.permissionProfile,
+      serviceTier: activeSession.serviceTier,
       sessionId: activeSession.sessionId,
       threadId: activeSession.threadId,
       documentId: activeSession.documentId,
@@ -764,11 +919,75 @@ function drainTemplateCompletion(record) {
   const [entry] = record.pendingTemplateCompletions.splice(index, 1);
   activeSession.status = 'running';
   try {
-    activeSession.backend.sendUserMessage(buildCopyLayoutCompletionPrompt(entry.result));
+    activeSession.backend.sendUserMessage(addAgentInstructionsContext(
+      buildCopyLayoutCompletionPrompt(entry.result),
+    ));
   } catch (error) {
     activeSession.status = 'idle';
     record.pendingTemplateCompletions.splice(index, 0, entry);
     log(`copy-layout completion dispatch failed: ${error?.message ?? error}`);
+  }
+}
+
+function planningDocumentSavedAllowed(activeSession) {
+  const workflow = activeSession?.planning?.workflow;
+  const phase = activeSession?.planning?.phase;
+  return workflow === 'question'
+    || (workflow === 'plan' && (phase === 'planning' || phase === 'awaiting-approval'));
+}
+
+function queuePlanningDocumentSaved(record, msg) {
+  const activeSession = record.agentSession;
+  if (!planningDocumentSavedAllowed(activeSession)) return;
+  record.pendingDocumentSaved = {
+    threadId: activeSession.threadId,
+    revision: Number.isSafeInteger(msg.revision) ? msg.revision : undefined,
+    fileName: typeof msg.fileName === 'string' ? msg.fileName : undefined,
+  };
+  drainPlanningDocumentSaved(record);
+}
+
+function drainPlanningDocumentSaved(record) {
+  const activeSession = record.agentSession;
+  const pending = record.pendingDocumentSaved;
+  if (!pending || !activeSession || activeSession.status !== 'idle') return;
+  if (pending.threadId !== activeSession.threadId || !planningDocumentSavedAllowed(activeSession)) {
+    record.pendingDocumentSaved = null;
+    return;
+  }
+  const phase = activeSession.planning.phase;
+  record.pendingDocumentSaved = null;
+  const prompt = buildPlanningDocumentSavedPrompt(pending);
+  activeSession.status = 'running';
+  if (phase === 'awaiting-approval') {
+    const planId = activeSession.planning.latestPlan?.planId;
+    if (!planId) {
+      activeSession.status = 'idle';
+      return;
+    }
+    void requestImplementationPlanChanges(record, record.studioSocket, {
+      planId,
+      reason: 'document-saved',
+      promptOverride: prompt,
+      sessionStatusOverride: 'idle',
+    }).catch((error) => {
+      if (record.agentSession === activeSession) {
+        if (activeSession.status === 'running') activeSession.status = 'idle';
+        if (!record.pendingDocumentSaved) record.pendingDocumentSaved = pending;
+      }
+      sendChatError(record.studioSocket, error);
+    });
+    return;
+  }
+  try {
+    activeSession.backend.sendUserMessage(addAgentInstructionsContext(addActiveDocumentContext(
+      activeSession,
+      addTemplateContext(record, activeSession, prompt),
+    )));
+  } catch (error) {
+    activeSession.status = 'idle';
+    record.pendingDocumentSaved = pending;
+    log(`planning document-saved dispatch failed: ${error?.message ?? error}`);
   }
 }
 
@@ -972,11 +1191,13 @@ function makeBackendEventHandler(record, generation) {
     const delivered = sendJson(record.studioSocket, { v: 1, type: 'agent-event', event: evt });
     if (evt.type === 'turn-end' && !delivered) record.missedTurnEnd = evt;
     if (evt.type === 'turn-end') drainTemplateCompletion(record);
+    if (evt.type === 'turn-end') drainPlanningDocumentSaved(record);
   };
 }
 
 function disposeSession(record) {
   record.pendingReferenceMessage = null;
+  record.pendingDocumentSaved = null;
   const activeSession = record.agentSession;
   if (!activeSession) return Promise.resolve();
   const wasRunning = activeSession.status === 'running';
@@ -1005,7 +1226,7 @@ function resolvePermissionProfile(value) {
 }
 
 function resolveWorkflow(value) {
-  return value === 'plan' ? 'plan' : 'direct';
+  return value === 'plan' || value === 'question' ? value : 'direct';
 }
 
 const CHAT_HISTORY_MAX_MESSAGES = 40;
@@ -1057,6 +1278,10 @@ function addReferenceContext(activeSession, query, prompt, messageAttachments = 
   }
 }
 
+function addAgentInstructionsContext(prompt) {
+  return `${agentInstructionsStore.promptBlock()}\n\n${prompt}`;
+}
+
 function addTemplateContext(record, activeSession, prompt) {
   if (!activeSession?.activeTemplateId) return prompt;
   try {
@@ -1102,7 +1327,7 @@ function dispatchUserMessage(record, sock, msg, activeSession, messageAttachment
   })
     .then((prompt) => {
       if (record.agentSession !== activeSession) throw new Error('Agent session changed before the message was dispatched');
-      activeSession.backend.sendUserMessage(addReopenedChatHistory(
+      activeSession.backend.sendUserMessage(addAgentInstructionsContext(addReopenedChatHistory(
         activeSession,
         addActiveDocumentContext(
           activeSession,
@@ -1112,7 +1337,7 @@ function dispatchUserMessage(record, sock, msg, activeSession, messageAttachment
             addReferenceContext(activeSession, msg.text, prompt, messageAttachments),
           ),
         ),
-      ));
+      )));
     })
     .catch((e) => {
       if (record.agentSession === activeSession) activeSession.status = 'idle';
@@ -1167,10 +1392,12 @@ async function startSession(
   requestedDocumentName,
   requestedHistory,
   force = false,
+  requestedServiceTier,
 ) {
   const model = resolveModel(agent, requestedModel);
   const effort = resolveEffort(agent, model, requestedEffort);
   const permissionProfile = resolvePermissionProfile(requestedPermission);
+  const serviceTier = resolveServiceTier(agent, requestedServiceTier);
   const workflow = resolveWorkflow(requestedWorkflow);
   const { threadId, documentId, documentName } = resolveSessionIdentity({
     threadId: requestedThreadId,
@@ -1187,6 +1414,7 @@ async function startSession(
     && currentSession.model === model
     && currentSession.effort === effort
     && currentSession.permissionProfile === permissionProfile
+    && currentSession.serviceTier === serviceTier
     && currentSession.planning.workflow === workflow
     && currentSession.threadId === threadId
     && currentSession.documentId === documentId
@@ -1211,6 +1439,7 @@ async function startSession(
     model,
     effort,
     permissionProfile,
+    serviceTier,
     isolatedHome: record.isolatedHome,
     codexHome: record.codexHome,
     codexAuthPath: sourceCodexAuthPath,
@@ -1242,6 +1471,7 @@ async function startSession(
     model,
     effort,
     permissionProfile,
+    serviceTier,
     backend,
     generation,
     status: 'idle',
@@ -1258,6 +1488,7 @@ async function startSession(
     workflowTransition: Promise.resolve(),
   };
   queueMicrotask(() => drainTemplateCompletion(record));
+  queueMicrotask(() => drainPlanningDocumentSaved(record));
   return record.agentSession;
 }
 
@@ -1319,7 +1550,7 @@ async function approveImplementationPlan(record, sock, msg) {
     });
     activeSession.status = 'running';
     const approvedPrompt = buildApprovedPlanPrompt(transition.approvedPlan);
-    activeSession.backend.sendUserMessage(addTemplateContext(
+    activeSession.backend.sendUserMessage(addAgentInstructionsContext(addTemplateContext(
       record,
       activeSession,
       addReferenceContext(
@@ -1327,7 +1558,7 @@ async function approveImplementationPlan(record, sock, msg) {
         JSON.stringify(transition.approvedPlan.plan),
         approvedPrompt,
       ),
-    ));
+    )));
   } catch (error) {
     if (record.agentSession === activeSession && activeSession.planning.phase === 'switching') {
       activeSession.planning.failSwitch(transition.approvedPlan.planId);
@@ -1344,19 +1575,31 @@ async function requestImplementationPlanChanges(record, sock, msg) {
   requireWorkflowSwitchBackend(activeSession);
   activeSession.planning.requestChanges({
     planId: String(msg.planId ?? ''),
-    sessionStatus: activeSession.status,
+    sessionStatus: msg.sessionStatusOverride ?? activeSession.status,
   });
   sendJson(sock, {
     v: 1,
     type: 'plan-invalidated',
     planId: String(msg.planId ?? ''),
-    reason: typeof msg.feedback === 'string' ? msg.feedback : 'changes-requested',
+    reason: typeof msg.reason === 'string' && msg.reason
+      ? msg.reason
+      : (typeof msg.feedback === 'string' ? msg.feedback : 'changes-requested'),
     ...activeSession.planning.snapshot(),
     latestPlan: null,
   });
   try {
     await activeSession.backend.setExecutionMode(providerModeRequest(activeSession, 'planning'));
     if (record.agentSession !== activeSession) return;
+    const promptOverride = typeof msg.promptOverride === 'string' ? msg.promptOverride.trim() : '';
+    if (promptOverride) {
+      activeSession.status = 'running';
+      activeSession.backend.sendUserMessage(addAgentInstructionsContext(addTemplateContext(
+        record,
+        activeSession,
+        addReferenceContext(activeSession, promptOverride, promptOverride),
+      )));
+      return;
+    }
     if (typeof msg.feedback === 'string' && msg.feedback.trim()) {
       activeSession.status = 'running';
       const revisionPrompt = [
@@ -1364,11 +1607,11 @@ async function requestImplementationPlanChanges(record, sock, msg) {
         'Return to discovery: inspect the affected current state and evaluate the feedback. If it is ambiguous or changes an assumption, discuss it with the user and ask one focused question in normal chat instead of immediately presenting a replacement. If it is already concrete, do not invent a question; follow the planning checkpoint and presentation rules before presenting a complete replacement.',
         `Feedback: ${msg.feedback.trim()}`,
       ].join('\n\n');
-      activeSession.backend.sendUserMessage(addTemplateContext(
+      activeSession.backend.sendUserMessage(addAgentInstructionsContext(addTemplateContext(
         record,
         activeSession,
         addReferenceContext(activeSession, msg.feedback, revisionPrompt),
-      ));
+      )));
     }
   } catch (error) {
     if (record.agentSession === activeSession) activeSession.status = 'idle';
@@ -1377,7 +1620,7 @@ async function requestImplementationPlanChanges(record, sock, msg) {
 }
 
 async function setChatWorkflow(record, sock, msg) {
-  if (msg.workflow !== 'direct' && msg.workflow !== 'plan') {
+  if (msg.workflow !== 'direct' && msg.workflow !== 'plan' && msg.workflow !== 'question') {
     throw workflowError('INVALID_WORKFLOW', `Unknown workflow: ${String(msg.workflow)}`);
   }
   const activeSession = record.agentSession;
@@ -1402,19 +1645,31 @@ async function setChatWorkflow(record, sock, msg) {
   }
   requireWorkflowSwitchBackend(activeSession);
   const previousPlanId = activeSession.planning.latestPlan?.planId ?? null;
+  const previousPlanning = activeSession.planning;
   const nextPlanning = new PlanningState({
     workflow: msg.workflow,
     initialCapabilityEpoch: record.nextCapabilityEpoch++,
     allocateEpoch: () => record.nextCapabilityEpoch++,
   });
-  const phase = msg.workflow === 'plan' ? 'planning' : 'implementing';
-  await activeSession.backend.setExecutionMode({
-    workflow: msg.workflow,
-    phase,
-    capabilityEpoch: nextPlanning.capabilityEpoch,
-  });
-  if (record.agentSession !== activeSession) return;
+  const phase = msg.workflow === 'plan'
+    ? 'planning'
+    : msg.workflow === 'question'
+      ? 'questioning'
+      : 'implementing';
+  // Codex setExecutionMode 는 자식 재시작을 기다리므로, 스냅샷·도구 게이트는
+  // 재시작 전에 구상으로 바꿔 둔다. 실패하면 이전 상태로 되돌린다.
   activeSession.planning = nextPlanning;
+  try {
+    await activeSession.backend.setExecutionMode({
+      workflow: msg.workflow,
+      phase,
+      capabilityEpoch: nextPlanning.capabilityEpoch,
+    });
+  } catch (error) {
+    if (record.agentSession === activeSession) activeSession.planning = previousPlanning;
+    throw error;
+  }
+  if (record.agentSession !== activeSession) return;
   if (msg.workflow === 'direct') void record.browserbaseSession.cleanup('workflow changed to direct');
   if (previousPlanId) {
     sendJson(sock, {
@@ -1431,6 +1686,9 @@ async function setChatWorkflow(record, sock, msg) {
 async function handleStudioMessage(record, sock, msg) {
   switch (msg.type) {
     case 'chat-start': {
+      if (record.agentSession?.workflowTransition) {
+        await record.agentSession.workflowTransition;
+      }
       const agent = msg.agent;
       if (!KNOWN_AGENTS.has(agent)) {
         sendJson(sock, { v: 1, type: 'chat-error', code: 'INVALID_REQUEST', message: `unknown agent: ${String(agent)}` });
@@ -1457,6 +1715,7 @@ async function handleStudioMessage(record, sock, msg) {
           msg.documentName,
           msg.history,
           Boolean(msg.force),
+          msg.serviceTier,
         );
         sendJson(sock, {
           v: 1,
@@ -1465,6 +1724,7 @@ async function handleStudioMessage(record, sock, msg) {
           model: s.model,
           effort: s.effort,
           permissionProfile: s.permissionProfile,
+          serviceTier: s.serviceTier,
           sessionId: s.sessionId,
           threadId: s.threadId,
           documentId: s.documentId,
@@ -1508,6 +1768,48 @@ async function handleStudioMessage(record, sock, msg) {
             title: null,
           });
         });
+      return;
+    }
+    case 'checkpoint-title-request': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      if (!requestId) return;
+      const startedAt = Date.now();
+      const controller = new AbortController();
+      record.checkpointTitleControllers.add(controller);
+      const input = {
+        commitId: msg.commitId,
+        titleRevision: msg.titleRevision,
+        appLanguage: msg.appLanguage,
+        summary: msg.summary,
+      };
+      const cachedHealth = providerHealth.cached();
+      void (cachedHealth ? Promise.resolve(cachedHealth) : providerHealth.check())
+        .then((health) => {
+          const remainingMs = Math.max(
+            1,
+            CHECKPOINT_TITLE_OVERALL_TIMEOUT_MS - (Date.now() - startedAt),
+          );
+          return generateCheckpointTitle(input, {
+            ...checkpointTitleDeps(record, health, controller.signal),
+            overallTimeoutMs: remainingMs,
+          });
+        })
+        .then((result) => replyToStudio(record, sock, {
+          v: 1,
+          type: 'checkpoint-title-result',
+          requestId,
+          result,
+        }))
+        .catch((error) => {
+          log(`checkpoint-title-request failed: ${error?.message ?? error}`);
+          replyToStudio(record, sock, {
+            v: 1,
+            type: 'checkpoint-title-result',
+            requestId,
+            result: null,
+          });
+        })
+        .finally(() => record.checkpointTitleControllers.delete(controller));
       return;
     }
     case 'chat-user-message': {
@@ -1583,6 +1885,114 @@ async function handleStudioMessage(record, sock, msg) {
       sendJson(sock, { v: 1, type: 'templates-catalog', ...templateStore.list() });
       return;
     }
+    case 'agent-instructions-request': {
+      sendJson(sock, {
+        v: 1,
+        type: 'agent-instructions',
+        requestId: msg.requestId ?? null,
+        status: agentInstructionsStore.snapshot(),
+        changedBy: 'system',
+      });
+      sendInstructionDraft(record, sock);
+      return;
+    }
+    case 'agent-instructions-save': {
+      void agentInstructionsStore.update(msg.content, {
+        expectedRevision: Number(msg.expectedRevision),
+      }).then((status) => {
+        sendJson(sock, {
+          v: 1,
+          type: 'agent-instructions',
+          requestId: msg.requestId ?? null,
+          status,
+          changedBy: 'user',
+        });
+        broadcastAgentInstructions(status, 'user');
+      }).catch((error) => sendJson(sock, {
+        v: 1,
+        type: 'agent-instructions-error',
+        requestId: msg.requestId ?? null,
+        code: error?.code ?? 'INSTRUCTIONS_SAVE_FAILED',
+        message: String(error?.message ?? error),
+        status: agentInstructionsStore.snapshot(),
+      }));
+      return;
+    }
+    case 'agent-instructions-draft-confirm': {
+      let draft;
+      try {
+        draft = consumeAuthorizedInstructionDraft(record, msg);
+        // Consume the one-use capability before the asynchronous write.
+      } catch (error) {
+        sendJson(sock, {
+          v: 1,
+          type: 'agent-instructions-error',
+          requestId: msg.requestId ?? null,
+          code: error?.code ?? 'INSTRUCTIONS_CONFIRMATION_INVALID',
+          message: String(error?.message ?? error),
+          status: agentInstructionsStore.snapshot(),
+        });
+        return;
+      }
+      void agentInstructionsStore.update(draft.content, {
+        expectedRevision: draft.expectedRevision,
+      }).then((status) => {
+        sendJson(sock, {
+          v: 1,
+          type: 'agent-instructions',
+          requestId: msg.requestId ?? null,
+          status,
+          changedBy: `agent-confirmed:${draft.requestedBy}`,
+        });
+        sendJson(sock, {
+          v: 1,
+          type: 'agent-instructions-draft-cleared',
+          draftId: draft.id,
+          outcome: 'confirmed',
+        });
+        broadcastAgentInstructions(status, `agent-confirmed:${draft.requestedBy}`);
+      }).catch((error) => {
+        sendJson(sock, {
+          v: 1,
+          type: 'agent-instructions-draft-cleared',
+          draftId: draft.id,
+          outcome: 'stale',
+        });
+        sendJson(sock, {
+          v: 1,
+          type: 'agent-instructions-error',
+          requestId: msg.requestId ?? null,
+          code: error?.code ?? 'INSTRUCTIONS_SAVE_FAILED',
+          message: String(error?.message ?? error),
+          status: agentInstructionsStore.snapshot(),
+        });
+      });
+      return;
+    }
+    case 'agent-instructions-draft-reject': {
+      let draft;
+      try {
+        draft = consumeAuthorizedInstructionDraft(record, msg);
+      } catch (error) {
+        sendJson(sock, {
+          v: 1,
+          type: 'agent-instructions-error',
+          requestId: msg.requestId ?? null,
+          code: error?.code ?? 'INSTRUCTIONS_CONFIRMATION_INVALID',
+          message: String(error?.message ?? error),
+          status: agentInstructionsStore.snapshot(),
+        });
+        return;
+      }
+      sendJson(sock, {
+        v: 1,
+        type: 'agent-instructions-draft-cleared',
+        requestId: msg.requestId ?? null,
+        draftId: draft.id,
+        outcome: 'rejected',
+      });
+      return;
+    }
     case 'chat-permission-set': {
       if (!record.agentSession) {
         sendJson(sock, { v: 1, type: 'chat-error', code: 'AGENT_NOT_STARTED', message: 'Start a chat before changing permissions.' });
@@ -1602,10 +2012,33 @@ async function handleStudioMessage(record, sock, msg) {
       }
       return;
     }
+    case 'chat-service-tier-set': {
+      if (!record.agentSession) {
+        sendJson(sock, { v: 1, type: 'chat-error', code: 'AGENT_NOT_STARTED', message: 'Start a chat before changing the service tier.' });
+        return;
+      }
+      if (record.agentSession.status === 'running') {
+        sendJson(sock, { v: 1, type: 'chat-error', code: 'AGENT_BUSY', message: 'Service tier can only change between turns.' });
+        return;
+      }
+      const tier = resolveServiceTier(record.agentSession.agent, msg.serviceTier);
+      try {
+        record.agentSession.backend.setServiceTier?.(tier);
+        record.agentSession.serviceTier = tier;
+        sendJson(sock, { v: 1, type: 'chat-service-tier-changed', serviceTier: tier });
+      } catch (e) {
+        sendJson(sock, { v: 1, type: 'chat-error', code: 'SERVICE_TIER_CHANGE_FAILED', message: String(e?.message ?? e) });
+      }
+      return;
+    }
     case 'chat-workflow-set': {
       const transitionOwner = record.agentSession;
       if (!transitionOwner) {
-        void setChatWorkflow(record, sock, msg).catch((error) => sendChatError(sock, error));
+        try {
+          await setChatWorkflow(record, sock, msg);
+        } catch (error) {
+          sendChatError(sock, error);
+        }
         return;
       }
       const transition = transitionOwner.workflowTransition.then(() => {
@@ -1613,7 +2046,13 @@ async function handleStudioMessage(record, sock, msg) {
         return setChatWorkflow(record, sock, msg);
       });
       transitionOwner.workflowTransition = transition.catch(() => undefined);
-      void transition.catch((error) => sendChatError(sock, error));
+      // studioMessageQueue 가 이 전환을 기다리지 않으면 Codex 재시작 중에
+      // chat-user-message 가 바로 실행 모드 턴으로 들어가 문서를 잠근다.
+      try {
+        await transition;
+      } catch (error) {
+        sendChatError(sock, error);
+      }
       return;
     }
     case 'chat-plan-approve':
@@ -1626,6 +2065,10 @@ async function handleStudioMessage(record, sock, msg) {
     case 'implementation-plan-request-changes':
     case 'plan-request-changes': {
       void requestImplementationPlanChanges(record, sock, msg).catch((error) => sendChatError(sock, error));
+      return;
+    }
+    case 'chat-document-saved': {
+      queuePlanningDocumentSaved(record, msg);
       return;
     }
     case 'skills-list': {
@@ -2069,6 +2512,7 @@ async function handleStudioMessage(record, sock, msg) {
       return;
     }
     case 'chat-stop': {
+      cancelCheckpointTitleJobs(record);
       await disposeSession(record);
       return;
     }
@@ -2290,6 +2734,66 @@ function handleMcpMessage(record, sock, msg) {
           .catch((error) => sendError(error, 'TEMPLATE_REGISTER_FAILED'));
         return;
       }
+      if (tool === 'read_agent_instructions') {
+        sendResult(agentInstructionsStore.snapshot());
+        return;
+      }
+      if (tool === 'update_agent_instructions') {
+        try {
+          const status = agentInstructionsStore.snapshot();
+          const prepared = agentInstructionsStore.prepareUpdate(args.content, {
+            expectedRevision: args.expectedRevision,
+          });
+          if (prepared.content === status.content) {
+            sendResult({ ...status, changed: false, pendingConfirmation: false });
+            return;
+          }
+          if (!record.studioSocket || record.studioSocket.readyState !== record.studioSocket.OPEN) {
+            throw workflowError(
+              'INSTRUCTIONS_CONFIRMATION_UNAVAILABLE',
+              'Rauhwpx Studio must be connected so the user can confirm the instruction proposal.',
+            );
+          }
+          if (record.pendingInstructionDraft) clearInstructionDraft(record, 'replaced');
+          const requestedBy = sock.agentLabel ?? record.agentSession?.agent ?? 'unknown';
+          const createdAt = Date.now();
+          const draft = {
+            id: crypto.randomUUID(),
+            confirmationToken: crypto.randomUUID(),
+            content: prepared.content,
+            expectedRevision: prepared.expectedRevision,
+            reason: typeof args.reason === 'string' ? args.reason : null,
+            requestedBy,
+            createdAt,
+            expiresAt: createdAt + AGENT_INSTRUCTION_DRAFT_TTL_MS,
+          };
+          record.pendingInstructionDraft = draft;
+          draft.expiryTimer = setTimeout(() => {
+            if (record.pendingInstructionDraft?.id === draft.id) {
+              clearInstructionDraft(record, 'expired');
+            }
+          }, AGENT_INSTRUCTION_DRAFT_TTL_MS);
+          draft.expiryTimer.unref?.();
+          if (!sendInstructionDraft(record)) {
+            record.pendingInstructionDraft = null;
+            throw workflowError(
+              'INSTRUCTIONS_CONFIRMATION_UNAVAILABLE',
+              'Rauhwpx Studio disconnected before the instruction proposal could be shown.',
+            );
+          }
+          sendResult({
+            ...status,
+            changed: false,
+            pendingConfirmation: true,
+            draftId: draft.id,
+            expiresAt: new Date(draft.expiresAt).toISOString(),
+            ...(draft.reason ? { reason: draft.reason } : {}),
+          });
+        } catch (error) {
+          sendError(error, 'INSTRUCTIONS_DRAFT_FAILED');
+        }
+        return;
+      }
       if (definition.category === 'reference-read') {
         void executeReferenceTool({ tool, args, store: referenceStore, session: record.agentSession })
           .then(({ handled, result }) => {
@@ -2423,6 +2927,7 @@ function handleMcpMessage(record, sock, msg) {
         tool,
         args,
         ...(activeTemplate ? { template: activeTemplate } : {}),
+        workflow: record.agentSession?.planning.snapshot().workflow,
         phase: record.agentSession?.planning.snapshot().phase,
         capabilityEpoch: record.agentSession?.planning.capabilityEpoch,
       });
@@ -2839,6 +3344,13 @@ httpServer.on('upgrade', (req, socket, head) => {
         hubSessionId: record.sessionId,
         session: sessionInfo(record),
       });
+      sendJson(ws, {
+        v: 1,
+        type: 'agent-instructions',
+        status: agentInstructionsStore.snapshot(),
+        changedBy: 'system',
+      });
+      sendInstructionDraft(record, ws);
       const activeSession = record.agentSession;
       if (activeSession?.planning.latestPlan && activeSession.planning.phase === 'awaiting-approval') {
         sendJson(ws, {
@@ -2939,6 +3451,11 @@ httpServer.on('error', (err) => {
 let shutdownPromise = null;
 async function disposeRecord(record, reason) {
   record.disposed = true;
+  cancelCheckpointTitleJobs(record);
+  if (record.pendingInstructionDraft?.expiryTimer) {
+    clearTimeout(record.pendingInstructionDraft.expiryTimer);
+  }
+  record.pendingInstructionDraft = null;
   clearStudioReattachGrace(record);
   failAllPendingCalls(record, 'Hub session is shutting down');
   const backendExit = disposeSession(record);

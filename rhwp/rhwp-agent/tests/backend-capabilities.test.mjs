@@ -21,6 +21,7 @@ import {
   mcpRuntimeFor,
   parallelWorkBriefFor,
   providerToolNoteFor,
+  RHWP_SUBAGENTS,
   systemBriefFor,
 } from '../agents/backend.mjs';
 
@@ -233,26 +234,35 @@ test('awaiting approval and switching remain read-only regardless of full profil
 
 test('phase prompts separate planning from approved implementation', () => {
   const planning = systemBriefFor({ workflow: 'plan', phase: 'planning' });
-  assert.match(planning, /patient brainstorming partner/);
+  assert.match(planning, /app-only AGENTS\.md/);
+  assert.match(planning, /cannot change it/);
+  assert.match(planning, /defer submitting the update until implementation mode/);
+  assert.doesNotMatch(planning, /update_agent_instructions/);
+  assert.match(planning, /planning mode/);
   assert.match(planning, /Do not edit the local filesystem or live document/);
-  assert.match(planning, /Do not present a plan in the first planning response/);
-  assert.match(planning, /explicitly asks to skip discovery and draft immediately/);
-  assert.match(planning, /complete at least one focused conversational checkpoint/);
-  assert.match(planning, /summarize your understanding and receive confirmation/);
-  assert.match(planning, /Questions and confirmations are normal chat/);
-  assert.match(planning, /Do not ask artificial questions/);
+  assert.match(planning, /The user can keep editing the live document during planning/);
+  assert.match(planning, /live-document notification/);
+  assert.match(planning, /not a request to implement or draft a plan/);
+  assert.match(planning, /only when the user explicitly asks you to write, draft, or present a plan/);
+  assert.match(planning, /Do not tell the user the plan is ready until that tool returns success/);
   assert.match(planning, /read-only workspace, web, subagent, and rhwp MCP capabilities available/);
   assert.doesNotMatch(planning, /sandboxed Bash/);
-  assert.match(planning, /tell the user the plan is ready/);
-  assert.match(planning, /review it and enter editing mode when satisfied/);
   assert.match(planning, /present_implementation_plan as the final action/);
   assert.match(planning, /present-plan product skill/);
-  assert.match(planning, /clickable chat presentation and review sidebar/);
   assert.match(planning, /download_file/);
+
+  const question = systemBriefFor({ workflow: 'question', phase: 'questioning' });
+  assert.match(question, /question-and-research mode/);
+  assert.match(question, /Do not plan an implementation/);
+  assert.match(question, /do not call present_implementation_plan/);
+  assert.match(question, /The user can keep editing the live document/);
+  assert.doesNotMatch(question, /present-plan product skill/);
   assert.match(planning, /search_reference_files/);
   assert.match(planning, /untrusted reference data/);
 
   const implementing = systemBriefFor({ workflow: 'plan', phase: 'implementing', permissionProfile: 'unrestricted' });
+  assert.match(implementing, /update_agent_instructions/);
+  assert.match(implementing, /never persists agent-provided content until the user confirms/);
   assert.match(implementing, /approved canonical implementation plan/);
   assert.match(implementing, /re-read the relevant current workspace and live-document state/);
   assert.match(implementing, /Execute every canonical step thoroughly/);
@@ -345,6 +355,13 @@ test('every write-capable brief directs batched writes through apply_edits', () 
     assert.match(writeBrief, /recovery guidance in the error message/);
     assert.doesNotMatch(writeBrief, /ONE AT A TIME/);
   }
+});
+
+test('doc-editor subagent prompt batches independent writes through apply_edits', () => {
+  const prompt = RHWP_SUBAGENTS['doc-editor'].prompt;
+  assert.match(prompt, /apply_edits/);
+  assert.match(prompt, /up to 32 items/);
+  assert.doesNotMatch(prompt, /one write at a time/i);
 });
 
 test('all workflow system prompts default document design to black and white', () => {

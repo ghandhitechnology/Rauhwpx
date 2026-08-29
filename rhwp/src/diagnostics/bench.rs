@@ -26,6 +26,9 @@ struct Row {
     layout_ms: f64,
     render_ms: f64,
     serialize_ms: f64,
+    cached_page_trees: usize,
+    cached_layer_json_variants: usize,
+    cached_layer_json_kb: f64,
 }
 
 fn median(mut v: Vec<f64>) -> f64 {
@@ -147,6 +150,9 @@ fn bench_one(path: &str, iters: usize) -> Result<Row, String> {
     let mut ser_v = Vec::with_capacity(iters);
     let mut pages = 0u32;
     let mut out_kb = 0.0;
+    let mut cached_page_trees = 0usize;
+    let mut cached_layer_json_variants = 0usize;
+    let mut cached_layer_json_kb = 0.0;
 
     for _ in 0..iters {
         // parse: 바이트 → Document IR (격리)
@@ -167,6 +173,10 @@ fn bench_one(path: &str, iters: usize) -> Result<Row, String> {
                 .map_err(|e| format!("{e:?}"))?;
         }
         render_v.push(ms_since(t));
+        let cache_stats = core.render_cache_stats();
+        cached_page_trees = cache_stats.0;
+        cached_layer_json_variants = cache_stats.1;
+        cached_layer_json_kb = cache_stats.2 as f64 / 1024.0;
 
         // serialize: Document → HWPX 바이트 (studio "저장" 비용)
         let t = Instant::now();
@@ -188,6 +198,9 @@ fn bench_one(path: &str, iters: usize) -> Result<Row, String> {
         layout_ms,
         render_ms: median(render_v),
         serialize_ms: median(ser_v),
+        cached_page_trees,
+        cached_layer_json_variants,
+        cached_layer_json_kb,
     })
 }
 
@@ -230,6 +243,10 @@ fn print_table(rows: &[Row]) {
             r.serialize_ms,
             total
         );
+        println!(
+            "  렌더 캐시: page trees {}, layer JSON variants {}, layer JSON {:.1}KB",
+            r.cached_page_trees, r.cached_layer_json_variants, r.cached_layer_json_kb
+        );
     }
     if rows.len() > 1 {
         let sum_total: f64 = rows
@@ -262,13 +279,13 @@ fn write_tsv(path: &str, rows: &[Row]) -> std::io::Result<()> {
     let mut w = fs::File::create(path)?;
     writeln!(
         w,
-        "file\tsize_kb\tpages\tout_kb\tparse_ms\tlayout_ms\trender_ms\tserialize_ms\ttotal_ms"
+        "file\tsize_kb\tpages\tout_kb\tparse_ms\tlayout_ms\trender_ms\tserialize_ms\ttotal_ms\tcached_page_trees\tcached_layer_json_variants\tcached_layer_json_kb"
     )?;
     for r in rows {
         let total = r.parse_ms + r.layout_ms + r.render_ms + r.serialize_ms;
         writeln!(
             w,
-            "{}\t{:.1}\t{}\t{:.1}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}",
+            "{}\t{:.1}\t{}\t{:.1}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{}\t{}\t{:.1}",
             r.name,
             r.size_kb,
             r.pages,
@@ -277,7 +294,10 @@ fn write_tsv(path: &str, rows: &[Row]) -> std::io::Result<()> {
             r.layout_ms,
             r.render_ms,
             r.serialize_ms,
-            total
+            total,
+            r.cached_page_trees,
+            r.cached_layer_json_variants,
+            r.cached_layer_json_kb,
         )?;
     }
     Ok(())

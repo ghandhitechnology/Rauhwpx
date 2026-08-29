@@ -14,7 +14,7 @@ pub mod queries;
 pub mod table_calc;
 pub mod validation;
 
-use crate::model::document::Document;
+use crate::model::document::{Document, Section};
 use crate::model::event::DocumentEvent;
 use crate::model::paragraph::Paragraph;
 use crate::model::table::TableTransposeData;
@@ -28,7 +28,7 @@ use crate::renderer::style_resolver::ResolvedStyleSet;
 use crate::renderer::typeset::ResumableTablePaginationJob;
 use crate::renderer::DEFAULT_DPI;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 /// 기본 폰트 fallback 경로
@@ -114,6 +114,161 @@ pub(crate) struct RenderNormalizationState {
     pub(crate) overlay: Arc<RenderNormalizationOverlay>,
 }
 
+#[derive(Default)]
+pub(crate) struct DocumentEventLog {
+    events: Vec<DocumentEvent>,
+    section_revisions: Vec<u64>,
+    paragraph_sequence_revisions: Vec<u64>,
+    paragraph_revisions: Vec<Vec<u64>>,
+    next_revision: u64,
+}
+
+impl DocumentEventLog {
+    fn push(&mut self, event: DocumentEvent) {
+        let section_idx = event.section_index();
+        let paragraph_idx = event.paragraph_index();
+        let revision = self.next_revision();
+        Self::set_revision(&mut self.section_revisions, section_idx, revision);
+        if event.may_change_paragraph_sequence() {
+            Self::set_revision(
+                &mut self.paragraph_sequence_revisions,
+                section_idx,
+                revision,
+            );
+        } else {
+            if self.paragraph_revisions.len() <= section_idx {
+                self.paragraph_revisions
+                    .resize_with(section_idx + 1, Vec::new);
+            }
+            Self::set_revision(
+                &mut self.paragraph_revisions[section_idx],
+                paragraph_idx,
+                revision,
+            );
+        }
+        self.events.push(event);
+    }
+
+    pub(crate) fn clear(&mut self) {
+        // batch 이벤트 소비는 문서 상태를 바꾸지 않으므로 snapshot revision은 유지한다.
+        self.events.clear();
+    }
+
+    fn mark_section_changed(&mut self, section_idx: usize) {
+        let revision = self.next_revision();
+        Self::set_revision(&mut self.section_revisions, section_idx, revision);
+    }
+
+    /// 문단 IR이 바뀌었는데 이벤트를 따로 쌓지 않는 경로용.
+    /// 구역·문단 revision을 같이 올려서 스냅샷 복원이 현재 문단을 재사용하지 않게 한다.
+    fn mark_paragraph_changed(&mut self, section_idx: usize, paragraph_idx: usize) {
+        let revision = self.next_revision();
+        Self::set_revision(&mut self.section_revisions, section_idx, revision);
+        if self.paragraph_revisions.len() <= section_idx {
+            self.paragraph_revisions
+                .resize_with(section_idx + 1, Vec::new);
+        }
+        Self::set_revision(
+            &mut self.paragraph_revisions[section_idx],
+            paragraph_idx,
+            revision,
+        );
+    }
+
+    fn mark_all_sections_changed(&mut self, section_count: usize) {
+        for section_idx in 0..section_count {
+            let revision = self.next_revision();
+            Self::set_revision(&mut self.section_revisions, section_idx, revision);
+            Self::set_revision(
+                &mut self.paragraph_sequence_revisions,
+                section_idx,
+                revision,
+            );
+        }
+    }
+
+    fn next_revision(&mut self) -> u64 {
+        self.next_revision = self.next_revision.wrapping_add(1).max(1);
+        self.next_revision
+    }
+
+    fn set_revision(revisions: &mut Vec<u64>, index: usize, revision: u64) {
+        if revisions.len() <= index {
+            revisions.resize(index + 1, 0);
+        }
+        revisions[index] = revision;
+    }
+
+    fn section_revisions(&self, section_count: usize) -> Vec<u64> {
+        let mut revisions = self.section_revisions.clone();
+        revisions.resize(section_count, 0);
+        revisions.truncate(section_count);
+        revisions
+    }
+
+    fn paragraph_sequence_revision(&self, section_idx: usize) -> u64 {
+        self.paragraph_sequence_revisions
+            .get(section_idx)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn paragraph_revisions(&self, section_idx: usize, paragraph_count: usize) -> Vec<u64> {
+        let mut revisions = self
+            .paragraph_revisions
+            .get(section_idx)
+            .cloned()
+            .unwrap_or_default();
+        revisions.resize(paragraph_count, 0);
+        revisions.truncate(paragraph_count);
+        revisions
+    }
+
+    fn restore_snapshot_revisions(
+        &mut self,
+        section_revisions: &[u64],
+        paragraph_sequence_revisions: &[u64],
+        paragraph_revisions: &[Vec<u64>],
+    ) {
+        self.section_revisions.clear();
+        self.section_revisions.extend_from_slice(section_revisions);
+        self.paragraph_sequence_revisions.clear();
+        self.paragraph_sequence_revisions
+            .extend_from_slice(paragraph_sequence_revisions);
+        self.paragraph_revisions.clear();
+        self.paragraph_revisions
+            .extend_from_slice(paragraph_revisions);
+    }
+}
+
+impl std::ops::Deref for DocumentEventLog {
+    type Target = [DocumentEvent];
+
+    fn deref(&self) -> &Self::Target {
+        &self.events
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct SnapshotParagraph {
+    pub(crate) revision: u64,
+    pub(crate) paragraph: Arc<Paragraph>,
+}
+
+#[derive(Clone)]
+pub(crate) struct SnapshotSection {
+    pub(crate) revision: u64,
+    pub(crate) paragraph_sequence_revision: u64,
+    pub(crate) section_shell: Section,
+    pub(crate) paragraphs: Vec<SnapshotParagraph>,
+}
+
+#[derive(Clone)]
+pub(crate) struct DocumentSnapshot {
+    pub(crate) document_shell: Document,
+    pub(crate) sections: Vec<SnapshotSection>,
+}
+
 /// HWP 문서 핵심 도메인 모델
 ///
 /// 문서 데이터, 레이아웃 상태, 설정, 캐시를 포함한다.
@@ -177,6 +332,8 @@ pub struct DocumentCore {
     pub(crate) pending_pagination_job: Option<PendingPaginationJob>,
     /// 페이지별 렌더 트리 캐시 (지연 구축, 부분 무효화)
     pub(crate) page_tree_cache: RefCell<Vec<Option<PageRenderTree>>>,
+    /// 페이지 렌더 캐시 LRU 순서. 앞이 가장 오래된 페이지다.
+    pub(crate) page_tree_cache_order: RefCell<VecDeque<usize>>,
     /// [Task #2222] 페이지 레이어 트리 JSON 캐시 — (출력옵션 지문, 직렬화 결과).
     /// 이미지 base64 인라인으로 페이지당 1MB 급이라 재직렬화(실측 15ms/회)가
     /// 렌더 자체와 맞먹는다. 편집 무효화는 page_tree_cache 와 동일 지점에서.
@@ -184,12 +341,12 @@ pub struct DocumentCore {
     /// Batch 모드 플래그 — true이면 paginate() 스킵
     pub(crate) batch_mode: bool,
     /// 이벤트 로그 (Command 실행 시 누적)
-    pub(crate) event_log: Vec<DocumentEvent>,
+    pub(crate) event_log: DocumentEventLog,
     /// 글상자 오버플로우 연결 캐시 (섹션별, 지연 계산)
     pub(crate) overflow_links_cache:
         RefCell<HashMap<usize, Vec<queries::doc_tree_nav::OverflowLink>>>,
-    /// Undo/Redo용 Document 스냅샷 저장소 (ID → Document 클론)
-    pub(crate) snapshot_store: Vec<(u32, Document)>,
+    /// Undo/Redo용 Document 스냅샷 저장소 (ID → 구역 공유 불변 Document 상태)
+    pub(crate) snapshot_store: Vec<(u32, Arc<DocumentSnapshot>)>,
     /// 다음 스냅샷 ID
     pub(crate) next_snapshot_id: u32,
     /// 머리말/꼬리말 감추기: (global_page_index, is_header) 조합
@@ -369,9 +526,10 @@ impl DocumentCore {
             deferred_pagination_descriptor: None,
             pending_pagination_job: None,
             page_tree_cache: RefCell::new(Vec::new()),
+            page_tree_cache_order: RefCell::new(VecDeque::new()),
             layer_tree_json_cache: RefCell::new(Vec::new()),
             batch_mode: false,
-            event_log: Vec::new(),
+            event_log: DocumentEventLog::default(),
             overflow_links_cache: RefCell::new(HashMap::new()),
             snapshot_store: Vec::new(),
             next_snapshot_id: 0,

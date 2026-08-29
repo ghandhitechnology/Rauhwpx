@@ -1,5 +1,21 @@
 use super::*;
 
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn exact_font_file_resolves_by_sfnt_family_alias() {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/fonts/RHWPBitmapSvgGlyphSmoke.ttf");
+
+    let (resolved, face_index) = find_font_file(
+        "RHWP Bitmap SVG Glyph Smoke",
+        std::slice::from_ref(&fixture),
+    )
+    .expect("exact font file must resolve by its internal family name");
+
+    assert_eq!(resolved, fixture);
+    assert_eq!(face_index, 0);
+}
+
 #[test]
 fn test_svg_begin_end_page() {
     let mut renderer = SvgRenderer::new();

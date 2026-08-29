@@ -4,6 +4,11 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import {
+  readHwp16Input,
+  readHwpunitInput,
+} from '../src/ui/table-property-units.ts';
+
 const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
 
 function source(path: string): string {
@@ -32,4 +37,25 @@ test('배치 버튼 미선택 시 getSelectedWrap은 원래 textWrap을 보존�
     /idx >= 0 \? this\.wrapValues\[idx\] : 'Square'/,
     "무조건 'Square' 폴백은 Through 배치를 조용히 덮어쓴다",
   );
+});
+
+test('표 속성에서도 Tight·Through 배치를 Square로 덮어쓰지 않는다', () => {
+  const dialog = source('src/ui/table-cell-props-dialog.ts');
+  const start = dialog.indexOf('private getSelectedWrap');
+  assert.notEqual(start, -1, 'table getSelectedWrap not found');
+  const block = dialog.slice(start, dialog.indexOf('\n  private ', start + 1));
+
+  assert.match(
+    block,
+    /this\.tableProps\?\.textWrap \?\? 'Square'/,
+    '활성 버튼이 없으면 원래 표 textWrap을 보존해야 함',
+  );
+  assert.doesNotMatch(block, /idx >= 0 \? this\.wrapValues\[idx\] : 'Square'/);
+});
+
+test('0.1mm 표시값을 수정하지 않으면 표와 셀의 원본 HU를 보존한다', () => {
+  assert.equal(readHwpunitInput({ value: '0.4' }, 123), 123);
+  assert.equal(readHwp16Input({ value: '0.4' }, 123), 123);
+  assert.equal(readHwpunitInput({ value: '0.5' }, 123), 142);
+  assert.equal(readHwp16Input({ value: '0.5' }, 123), 142);
 });

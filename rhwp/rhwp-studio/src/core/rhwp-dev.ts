@@ -69,6 +69,12 @@ export function initRhwpDev(wasm: WasmBridge): void {
       console.log(`[rhwpDev] showAllIds: ${unique.length} unique paragraph IDs across pages ${startPage}~${endPage - 1}`);
     },
 
+    imageCacheStats() {
+      const stats = wasm.getWebCanvasImageCacheStats();
+      console.table(stats);
+      return stats;
+    },
+
     search(text: string, includeCells: boolean = false): SearchHit[] {
       const results = wasm.searchAllText(text, false, includeCells);
       if (results.length === 0) {

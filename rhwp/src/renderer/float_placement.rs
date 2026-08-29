@@ -1,7 +1,7 @@
 //! Flow reservation helpers for non-inline floating objects.
 
 use crate::model::control::Control;
-use crate::model::paragraph::Paragraph;
+use crate::model::paragraph::{LineSeg, Paragraph};
 use crate::model::shape::{
     CommonObjAttr, HorzAlign, HorzRelTo, TextFlow, TextWrap, VertAlign, VertRelTo,
 };
@@ -21,6 +21,30 @@ pub(crate) fn is_para_topbottom_float(common: &CommonObjAttr) -> bool {
     !common.treat_as_char
         && matches!(common.text_wrap, TextWrap::TopAndBottom)
         && matches!(common.vert_rel_to, VertRelTo::Para)
+}
+
+/// First-fragment top inset for a paragraph-relative wrap-around RowBreak table.
+///
+/// Hancom positions the visible table box after the object's positive paragraph offset and its
+/// outer top margin. Full-table placement has other float paths, but split tables bypass them and
+/// need this value in both pagination and paint layout so their page cut stays in sync.
+pub(crate) fn para_square_rowbreak_first_fragment_top_offset_px(table: &Table, dpi: f64) -> f64 {
+    let vertical_offset = signed_hwpunit(table.common.vertical_offset);
+    if table.common.treat_as_char
+        || !matches!(table.page_break, TablePageBreak::RowBreak)
+        || !matches!(table.common.text_wrap, TextWrap::Square)
+        || !matches!(table.common.vert_rel_to, VertRelTo::Para)
+        || !matches!(table.common.vert_align, VertAlign::Top | VertAlign::Inside)
+        || vertical_offset <= 0
+    {
+        return 0.0;
+    }
+
+    hwpunit_to_px(
+        vertical_offset.saturating_add(i32::from(table.outer_margin_top)),
+        dpi,
+    )
+    .max(0.0)
 }
 
 /// Stored host-line evidence for the narrow native-HWP RowBreak flow contract (#2439).
@@ -92,6 +116,176 @@ pub(crate) fn native_empty_host_rowbreak_line_advance_hu(
         return None;
     }
     Some(advance)
+}
+
+/// Stored page-reset evidence for the native-HWP single-cell RowBreak blank-band contract.
+///
+/// Some Hancom documents serialize a one-row table with a cell taller than the table object's
+/// declared height. When the following paragraph restarts at exactly
+/// `cell_height - object_height + outer_top + outer_bottom`, Hancom paints the declared-height
+/// portion at the bottom of the current page and preserves the residual as an empty continuation
+/// band on the next page. This deliberately strict predicate keeps that compatibility behavior
+/// away from ordinary RowBreak tables and from the global row-splitting tolerances.
+pub(crate) fn native_single_cell_rowbreak_saved_residual_split_hu(
+    native_hwp5_layout: bool,
+    para: &Paragraph,
+    table: &Table,
+    next_para: Option<&Paragraph>,
+) -> Option<(i32, i32)> {
+    let has_non_whitespace_text = |paragraph: &Paragraph| {
+        paragraph
+            .text
+            .chars()
+            .any(|ch| ch > '\u{001F}' && ch != '\u{FFFC}' && !ch.is_whitespace())
+    };
+    fn only_real_line(paragraph: &Paragraph) -> Option<&LineSeg> {
+        let mut lines = paragraph
+            .line_segs
+            .iter()
+            .filter(|seg| seg.tag & LineSeg::TAG_IMPLEMENTATION_PROPERTY == 0);
+        let line = lines.next()?;
+        lines.next().is_none().then_some(line)
+    }
+    fn first_real_line(paragraph: &Paragraph) -> Option<&LineSeg> {
+        paragraph
+            .line_segs
+            .iter()
+            .find(|seg| seg.tag & LineSeg::TAG_IMPLEMENTATION_PROPERTY == 0)
+    }
+
+    if !native_hwp5_layout
+        || para.controls.len() != 1
+        || !matches!(para.controls.first(), Some(Control::Table(_)))
+        || has_non_whitespace_text(para)
+        || table.common.treat_as_char
+        || !is_para_topbottom_float(&table.common)
+        || !matches!(table.common.vert_align, VertAlign::Top)
+        || signed_hwpunit(table.common.vertical_offset) != 0
+        || !matches!(table.page_break, TablePageBreak::RowBreak)
+        || table.row_count != 1
+        || table.col_count != 1
+        || table.cells.len() != 1
+        || table.outer_margin_top <= 0
+        || table.outer_margin_bottom <= 0
+    {
+        return None;
+    }
+
+    let cell = &table.cells[0];
+    if cell.row != 0
+        || cell.col != 0
+        || cell.row_span != 1
+        || cell.col_span != 1
+        || !matches!(
+            cell.vertical_align,
+            crate::model::table::VerticalAlign::Center
+        )
+        || cell.paragraphs.len() != 1
+        || !cell.paragraphs[0].controls.is_empty()
+        || !has_non_whitespace_text(&cell.paragraphs[0])
+        || only_real_line(&cell.paragraphs[0]).is_none()
+    {
+        return None;
+    }
+
+    let object_height = signed_hwpunit(table.common.height);
+    let cell_height = signed_hwpunit(cell.height);
+    let residual = cell_height.checked_sub(object_height)?;
+    if object_height <= 0 || residual <= 0 {
+        return None;
+    }
+
+    let host_vpos = only_real_line(para)?.vertical_pos;
+    let next = next_para?;
+    if !next.controls.is_empty() || !has_non_whitespace_text(next) {
+        return None;
+    }
+    let next_vpos = first_real_line(next)?.vertical_pos;
+    let saved_advance = residual
+        .saturating_add(i32::from(table.outer_margin_top))
+        .saturating_add(i32::from(table.outer_margin_bottom));
+    if next_vpos <= 0 || host_vpos <= next_vpos || (next_vpos - saved_advance).abs() > 1 {
+        return None;
+    }
+
+    Some((object_height, residual))
+}
+
+/// Per-fragment flow inset for a native-HWP CellBreak table whose leading body style carries a
+/// stable stored trailing line gap.
+///
+/// Hancom repeats the visible outer-top inset on every continuation and keeps the stored cell
+/// line gap clear at the fragment bottom.  The latter is a fragment boundary gap, not part of
+/// every row: adding it to each cell line would inflate large tables catastrophically.  Require a
+/// stable positive witness across the first body rows so ordinary/mixed CellBreak tables retain
+/// their existing layout. Later rows may legitimately switch paragraph styles; Hancom keeps the
+/// fragment boundary contract established by the leading body band. The returned pair is
+/// `(top, trailing)` and its sum is the larger of the stored line gap and the two visible outer
+/// margins.
+pub(crate) fn native_uniform_cellbreak_fragment_spacing_hu(
+    native_hwp5_layout: bool,
+    para: &Paragraph,
+    table: &Table,
+) -> Option<(i32, i32)> {
+    let has_non_whitespace_text = para
+        .text
+        .chars()
+        .any(|ch| ch > '\u{001F}' && ch != '\u{FFFC}' && !ch.is_whitespace());
+    if !native_hwp5_layout
+        || has_non_whitespace_text
+        || table.common.treat_as_char
+        || !is_para_topbottom_float(&table.common)
+        || !matches!(table.common.vert_align, VertAlign::Top | VertAlign::Inside)
+        || !matches!(table.page_break, TablePageBreak::CellBreak)
+        || !table.repeat_header
+        || signed_hwpunit(table.common.vertical_offset) <= 0
+        || table.outer_margin_top <= 0
+        || table.outer_margin_bottom < 0
+        || para.controls.len() != 1
+        || !matches!(para.controls.first(), Some(Control::Table(_)))
+    {
+        return None;
+    }
+
+    let header_rows = table.leading_header_rows();
+    let first_body_row = header_rows.len();
+    let row_count = table.row_count as usize;
+    if first_body_row == 0 || first_body_row >= row_count {
+        return None;
+    }
+
+    const LEADING_BODY_GAP_WITNESS_ROWS: usize = 8;
+    let witness_end = (first_body_row + LEADING_BODY_GAP_WITNESS_ROWS).min(row_count);
+    let mut row_gaps = vec![0i32; witness_end - first_body_row];
+    for cell in &table.cells {
+        let row = cell.row as usize;
+        if row < first_body_row || row >= witness_end || cell.row_span != 1 {
+            continue;
+        }
+        let gap = cell
+            .paragraphs
+            .last()
+            .and_then(|paragraph| {
+                paragraph.line_segs.iter().rev().find(|seg| {
+                    seg.tag & crate::model::paragraph::LineSeg::TAG_IMPLEMENTATION_PROPERTY == 0
+                })
+            })
+            .map(|seg| seg.line_spacing)
+            .unwrap_or(0);
+        if gap > 0 {
+            row_gaps[row - first_body_row] = row_gaps[row - first_body_row].max(gap);
+        }
+    }
+
+    let stored_gap = *row_gaps.first()?;
+    if stored_gap <= 0 || row_gaps.iter().any(|gap| *gap != stored_gap) {
+        return None;
+    }
+
+    let outer_top = i32::from(table.outer_margin_top);
+    let outer_bottom = i32::from(table.outer_margin_bottom).max(0);
+    let total = stored_gap.max(outer_top.saturating_add(outer_bottom));
+    Some((outer_top, total.saturating_sub(outer_top)))
 }
 
 /// [Task #1658 v3] 페이지 하단 고정(vert=쪽·valign=Bottom) 자리차지 개체 (결재/서명 틀).
@@ -496,7 +690,10 @@ pub(crate) fn ranges_overlap(a_start: f64, a_end: f64, b_start: f64, b_end: f64)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::control::Control;
+    use crate::model::paragraph::{LineSeg, Paragraph};
     use crate::model::shape::{HorzAlign, HorzRelTo, TextFlow, VertAlign};
+    use crate::model::table::{Cell, Table, TablePageBreak};
 
     fn base_common() -> CommonObjAttr {
         CommonObjAttr {
@@ -506,6 +703,199 @@ mod tests {
             horz_align: HorzAlign::Left,
             ..Default::default()
         }
+    }
+
+    fn uniform_cellbreak_fixture() -> (Paragraph, Table) {
+        let stored_para = |gap| Paragraph {
+            text: "row".to_string(),
+            line_segs: vec![LineSeg {
+                line_height: 1000,
+                line_spacing: gap,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut table = Table {
+            row_count: 3,
+            col_count: 1,
+            page_break: TablePageBreak::CellBreak,
+            repeat_header: true,
+            outer_margin_top: 141,
+            outer_margin_bottom: 141,
+            common: CommonObjAttr {
+                treat_as_char: false,
+                text_wrap: TextWrap::TopAndBottom,
+                vert_rel_to: VertRelTo::Para,
+                vert_align: VertAlign::Top,
+                vertical_offset: 140,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        table.cells = vec![
+            Cell {
+                row: 0,
+                col: 0,
+                row_span: 1,
+                col_span: 1,
+                is_header: true,
+                paragraphs: vec![stored_para(0)],
+                ..Default::default()
+            },
+            Cell {
+                row: 1,
+                col: 0,
+                row_span: 1,
+                col_span: 1,
+                paragraphs: vec![stored_para(600)],
+                ..Default::default()
+            },
+            Cell {
+                row: 2,
+                col: 0,
+                row_span: 1,
+                col_span: 1,
+                paragraphs: vec![stored_para(600)],
+                ..Default::default()
+            },
+        ];
+        let para = Paragraph {
+            controls: vec![Control::Table(Box::new(table.clone()))],
+            ..Default::default()
+        };
+        (para, table)
+    }
+
+    fn saved_residual_rowbreak_fixture() -> (Paragraph, Table, Paragraph) {
+        let stored_para = |text: &str, vertical_pos| Paragraph {
+            text: text.to_string(),
+            line_segs: vec![LineSeg {
+                vertical_pos,
+                line_height: 1000,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut table = Table {
+            row_count: 1,
+            col_count: 1,
+            page_break: TablePageBreak::RowBreak,
+            outer_margin_top: 141,
+            outer_margin_bottom: 141,
+            common: CommonObjAttr {
+                height: 8464,
+                treat_as_char: false,
+                text_wrap: TextWrap::TopAndBottom,
+                vert_rel_to: VertRelTo::Para,
+                vert_align: VertAlign::Top,
+                vertical_offset: 0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        table.cells = vec![Cell {
+            row: 0,
+            col: 0,
+            row_span: 1,
+            col_span: 1,
+            height: 11753,
+            vertical_align: crate::model::table::VerticalAlign::Center,
+            paragraphs: vec![stored_para("placeholder", 0)],
+            ..Default::default()
+        }];
+        let host = Paragraph {
+            controls: vec![Control::Table(Box::new(table.clone()))],
+            line_segs: vec![LineSeg {
+                vertical_pos: 64005,
+                line_height: 1000,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut next = stored_para("following text wrapping across stored lines", 3571);
+        next.line_segs.extend([
+            LineSeg {
+                vertical_pos: 5491,
+                line_height: 1000,
+                ..Default::default()
+            },
+            LineSeg {
+                vertical_pos: 7411,
+                line_height: 1000,
+                ..Default::default()
+            },
+        ]);
+        (host, table, next)
+    }
+
+    #[test]
+    fn native_single_cell_rowbreak_preserves_saved_residual_blank_band() {
+        let (host, table, next) = saved_residual_rowbreak_fixture();
+        assert_eq!(
+            native_single_cell_rowbreak_saved_residual_split_hu(true, &host, &table, Some(&next)),
+            Some((8464, 3289))
+        );
+    }
+
+    #[test]
+    fn native_single_cell_rowbreak_rejects_non_exact_saved_residual_contract() {
+        let (host, mut table, mut next) = saved_residual_rowbreak_fixture();
+        assert_eq!(
+            native_single_cell_rowbreak_saved_residual_split_hu(false, &host, &table, Some(&next)),
+            None
+        );
+
+        next.line_segs[0].vertical_pos += 2;
+        assert_eq!(
+            native_single_cell_rowbreak_saved_residual_split_hu(true, &host, &table, Some(&next)),
+            None
+        );
+
+        next.line_segs[0].vertical_pos -= 2;
+        table.common.vertical_offset = 1;
+        assert_eq!(
+            native_single_cell_rowbreak_saved_residual_split_hu(true, &host, &table, Some(&next)),
+            None
+        );
+    }
+
+    #[test]
+    fn native_uniform_cellbreak_repeats_outer_top_and_stored_fragment_gap() {
+        let (para, table) = uniform_cellbreak_fixture();
+        assert_eq!(
+            native_uniform_cellbreak_fragment_spacing_hu(true, &para, &table),
+            Some((141, 459)),
+            "600HU stored body-row gap contains the 141HU visible top inset"
+        );
+    }
+
+    #[test]
+    fn native_uniform_cellbreak_rejects_mixed_and_non_native_tables() {
+        let (para, mut table) = uniform_cellbreak_fixture();
+        assert_eq!(
+            native_uniform_cellbreak_fragment_spacing_hu(false, &para, &table),
+            None
+        );
+
+        table.cells[2].paragraphs[0].line_segs[0].line_spacing = 500;
+        let mixed_para = Paragraph {
+            controls: vec![Control::Table(Box::new(table.clone()))],
+            ..Default::default()
+        };
+        assert_eq!(
+            native_uniform_cellbreak_fragment_spacing_hu(true, &mixed_para, &table),
+            None
+        );
+
+        table.page_break = TablePageBreak::RowBreak;
+        let rowbreak_para = Paragraph {
+            controls: vec![Control::Table(Box::new(table.clone()))],
+            ..Default::default()
+        };
+        assert_eq!(
+            native_uniform_cellbreak_fragment_spacing_hu(true, &rowbreak_para, &table),
+            None
+        );
     }
 
     #[test]

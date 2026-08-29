@@ -1373,7 +1373,7 @@ impl DocumentCore {
             self.compute_render_normalized();
         }
         self.mark_section_pagination_dirty(section_idx);
-        self.invalidate_page_tree_cache_from(0);
+        self.invalidate_page_tree_cache_from_section(section_idx);
         if paginate_immediately {
             self.paginate_if_needed();
         }
@@ -1583,7 +1583,7 @@ impl DocumentCore {
             self.compute_render_normalized();
         }
         self.mark_section_pagination_dirty(section_idx);
-        self.invalidate_page_tree_cache_from(0);
+        self.invalidate_page_tree_cache_from_section(section_idx);
         if paginate_immediately {
             self.paginate_if_needed();
         }

@@ -5,7 +5,9 @@ import path from 'node:path';
 
 import { documentPathsFromArgv, launchRequest } from '../../../desktop/launch-routing.mjs';
 import { resolveGeneratedDocumentArtifact } from '../../../desktop/generated-document-artifact.mjs';
+import { deliverPlainTextPaste } from '../../../desktop/plain-text-paste.mjs';
 import { SessionManager } from '../../../desktop/session-manager.mjs';
+import { SerializedStateWriter } from '../../../desktop/serialized-state-writer.mjs';
 import { resolveStudioAsset, STUDIO_URL } from '../../../desktop/studio-protocol.mjs';
 
 const desktopMain = readFileSync(new URL('../../../desktop/main.mjs', import.meta.url), 'utf8');
@@ -16,6 +18,11 @@ function fakeWindow(id: number) {
     webContents: { id },
     isDestroyed: () => false,
   };
+}
+
+function associationExts(association: { ext?: string | string[] }): string[] {
+  if (!association.ext) return [];
+  return Array.isArray(association.ext) ? association.ext : [association.ext];
 }
 
 test('SessionManager gives each owned BrowserWindow an isolated UUID context', async () => {
@@ -72,10 +79,12 @@ test('launch routing accepts only supported document paths', () => {
     '/Applications/Rauhwpx',
     '--flag',
     'draft.HWPX',
+    'shared.rhwpx',
     'notes.txt',
     'legacy.hml',
   ], { cwd: workDir }), [
     path.join(workDir, 'draft.HWPX'),
+    path.join(workDir, 'shared.rhwpx'),
     path.join(workDir, 'legacy.hml'),
   ]);
   assert.deepEqual(launchRequest({ openFiles: ['/tmp/a.hwp'], source: 'open-file' }), {
@@ -89,10 +98,33 @@ test('launch routing accepts only supported document paths', () => {
   assert.match(desktopMain, /x: bounds\.x \+ 28, y: bounds\.y \+ 28/);
 });
 
+test('desktop owns Cmd/Ctrl+Shift+V in its native Edit menu', () => {
+  const sent: unknown[][] = [];
+  const window = {
+    isDestroyed: () => false,
+    webContents: {
+      isDestroyed: () => false,
+      send: (...args: unknown[]) => sent.push(args),
+    },
+  };
+  assert.equal(deliverPlainTextPaste(window, () => 'plain text'), true);
+  assert.deepEqual(sent, [['desktop:paste-plain-text', 'plain text']]);
+  assert.equal(deliverPlainTextPaste(window, () => ''), false);
+  assert.equal(deliverPlainTextPaste(null, () => 'ignored'), false);
+
+  assert.match(desktopMain, /id: 'edit-paste-without-formatting'/);
+  assert.match(desktopMain, /accelerator: 'CmdOrCtrl\+Shift\+V'/);
+  assert.match(desktopMain, /deliverPlainTextPaste\(/);
+  assert.match(desktopMain, /clipboard\.readText\(\)/);
+});
+
 test('desktop packages register as an HWPX editor with the operating system', () => {
   const associations = rootPackage.build.fileAssociations;
   assert.ok(associations.some((association: { ext: string | string[] }) =>
-    (Array.isArray(association.ext) ? association.ext : [association.ext]).includes('hwpx')));
+    associationExts(association).includes('hwpx')));
+  const hangulAssociation = associations.find((association: { name?: string }) =>
+    association.name === 'Hangul document');
+  assert.equal(associationExts(hangulAssociation ?? {}).includes('rhwpx'), false);
 
   const macInfo = rootPackage.build.mac.extendInfo;
   const hwpxType = macInfo.CFBundleDocumentTypes.find((type: {
@@ -105,6 +137,15 @@ test('desktop packages register as an HWPX editor with the operating system', ()
     UTTypeIdentifier?: string;
   }) => type.UTTypeIdentifier === 'com.hataewook.rauhwpx.hwpx-document');
   assert.deepEqual(exportedHwpxType?.UTTypeTagSpecification['public.filename-extension'], ['hwpx']);
+  const exportedHistoryType = macInfo.UTExportedTypeDeclarations.find((type: {
+    UTTypeIdentifier?: string;
+  }) => type.UTTypeIdentifier === 'com.hataewook.rauhwpx.history-bundle');
+  assert.deepEqual(exportedHistoryType?.UTTypeTagSpecification['public.filename-extension'], ['rhwpx']);
+  assert.ok(exportedHistoryType?.UTTypeConformsTo?.includes('com.apple.package'));
+  const historyDocumentType = macInfo.CFBundleDocumentTypes.find((type: {
+    LSItemContentTypes?: string[];
+  }) => type.LSItemContentTypes?.includes('com.hataewook.rauhwpx.history-bundle'));
+  assert.equal(historyDocumentType?.LSTypeIsPackage, true);
 
   // electron-builder only installs NSIS file associations for per-machine installs.
   assert.equal(rootPackage.build.nsis.perMachine, true);
@@ -156,6 +197,45 @@ test('desktop close and native-file IPC contracts stay sender-owned', () => {
   assert.doesNotMatch(preload, /\b(?:file)?path\s*:/i);
 });
 
+test('bookmark persistence serializes writes and close queues a latest-state flush', async () => {
+  const started: string[] = [];
+  const errors: string[] = [];
+  let releaseFirst: (() => void) | undefined;
+  const writer = new SerializedStateWriter({
+    write: async (snapshot: string) => {
+      started.push(snapshot);
+      if (snapshot === 'first') {
+        await new Promise<void>((resolve) => { releaseFirst = resolve; });
+      }
+      if (snapshot === 'failed') throw new Error('disk unavailable');
+    },
+    onError: (error: unknown) => {
+      errors.push(error instanceof Error ? error.message : String(error));
+    },
+  });
+
+  const first = writer.enqueue('first');
+  const second = writer.enqueue('second');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(started, ['first']);
+  releaseFirst?.();
+  await Promise.all([first, second]);
+  assert.deepEqual(started, ['first', 'second']);
+  await writer.enqueue('failed');
+  await writer.enqueue('latest');
+  assert.deepEqual(errors, ['disk unavailable']);
+  assert.deepEqual(started, ['first', 'second', 'failed', 'latest']);
+
+  assert.match(
+    desktopMain,
+    /desktop:remember-native-document'[\s\S]*?await persistNativeBookmarks\(\)/,
+  );
+  assert.match(
+    desktopMain,
+    /desktop:close-response'[\s\S]*?if \(!allowClose\)[\s\S]*?await persistNativeBookmarks\(\)[\s\S]*?session\.window\.close\(\)/,
+  );
+});
+
 test('generated artifact opening is bound to the sender hub and session', () => {
   const request = {
     fileName: '보고서(팀).hwpx',
@@ -198,7 +278,21 @@ test('one failed startup launch does not abort the remaining launches', () => {
 });
 
 test('desktop package registers supported document associations without bundling runtime data', () => {
-  assert.deepEqual(rootPackage.build.fileAssociations[0].ext, ['hwp', 'hwpx', 'hml']);
+  const hangulAssociation = rootPackage.build.fileAssociations.find(
+    (association: { name?: string }) => association.name === 'Hangul document',
+  );
+  const historyAssociation = rootPackage.build.fileAssociations.find(
+    (association: { ext?: string | string[] }) => associationExts(association).includes('rhwpx'),
+  );
+  assert.deepEqual(hangulAssociation?.ext, ['hwp', 'hwpx', 'hml']);
+  assert.deepEqual(historyAssociation?.ext, ['rhwpx']);
+  assert.equal(historyAssociation?.name, 'Rauhwpx history bundle');
+  assert.notEqual(historyAssociation?.name, 'Hangul document');
+  assert.equal(historyAssociation?.isPackage, true);
+  assert.match(desktopMain, /desktop:save-portable-history-file/);
+  assert.match(desktopMain, /desktop:native-file-write-portable-history/);
+  assert.match(desktopMain, /writePortableHistoryFolder\(/);
+  assert.match(desktopMain, /RauHWPX history bundle/);
   assert.ok(rootPackage.build.asarUnpack.includes('rhwp/rhwp-agent/**'));
   assert.ok(rootPackage.build.files.every((entry: string) => !/runtime|launch-work/.test(entry)));
 });

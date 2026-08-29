@@ -3,11 +3,19 @@ import type { PageInfo } from '@/core/types';
 /** 그리드 모드 전환 줌 임계값 */
 const GRID_ZOOM_THRESHOLD = 0.5;
 
+export interface PageWindow {
+  visible: number[];
+  prefetch: number[];
+}
+
 export class VirtualScroll {
   private pageOffsets: number[] = [];
   private pageHeights: number[] = [];
   private pageWidths: number[] = [];
   private pageLefts: number[] = [];
+  private rowFirstPages: number[] = [];
+  private rowOffsets: number[] = [];
+  private rowHeights: number[] = [];
   private maxPageWidth = 0;
   private totalHeight = 0;
   private totalWidth = 0;
@@ -23,7 +31,10 @@ export class VirtualScroll {
   setPageDimensions(pages: PageInfo[], zoom = 1.0, viewportWidth = 0): void {
     this.pageHeights = pages.map((p) => p.height * zoom);
     this.pageWidths = pages.map((p) => p.width * zoom);
-    this.maxPageWidth = Math.max(...this.pageWidths, 0);
+    this.maxPageWidth = 0;
+    for (const width of this.pageWidths) {
+      this.maxPageWidth = Math.max(this.maxPageWidth, width);
+    }
 
     // 그리드 모드 판정
     this.gridMode = zoom <= GRID_ZOOM_THRESHOLD && viewportWidth > 0 && pages.length > 1;
@@ -41,10 +52,16 @@ export class VirtualScroll {
     this.columns = 1;
     this.pageOffsets = [];
     this.pageLefts = [];
+    this.rowFirstPages = [];
+    this.rowOffsets = [];
+    this.rowHeights = [];
     let offset = this.pageGap;
     for (let i = 0; i < this.pageHeights.length; i++) {
       this.pageOffsets.push(offset);
       this.pageLefts.push(-1); // -1 = CSS 중앙 정렬 사용
+      this.rowFirstPages.push(i);
+      this.rowOffsets.push(offset);
+      this.rowHeights.push(this.pageHeights[i]);
       offset += this.pageHeights[i] + this.pageGap;
     }
     this.totalHeight = offset;
@@ -61,34 +78,31 @@ export class VirtualScroll {
 
     this.pageOffsets = [];
     this.pageLefts = [];
+    this.rowFirstPages = [];
+    this.rowOffsets = [];
+    this.rowHeights = [];
 
     // 그리드 전체 너비 = columns * pageWidth + (columns-1) * gap
     const gridWidth = this.columns * pw + (this.columns - 1) * gap;
     const marginLeft = Math.max(gap, (viewportWidth - gridWidth) / 2);
 
     let rowTop = gap;
-    for (let i = 0; i < this.pageHeights.length; i++) {
-      const col = i % this.columns;
-      if (col === 0 && i > 0) {
-        // 이전 행의 최대 높이만큼 이동
-        const rowStart = i - this.columns;
-        let maxH = 0;
-        for (let j = rowStart; j < i && j < this.pageHeights.length; j++) {
-          maxH = Math.max(maxH, this.pageHeights[j]);
-        }
-        rowTop += maxH + gap;
+    for (let rowStart = 0; rowStart < this.pageHeights.length; rowStart += this.columns) {
+      const rowEnd = Math.min(rowStart + this.columns, this.pageHeights.length);
+      let rowHeight = 0;
+      this.rowFirstPages.push(rowStart);
+      this.rowOffsets.push(rowTop);
+      for (let i = rowStart; i < rowEnd; i++) {
+        const col = i - rowStart;
+        rowHeight = Math.max(rowHeight, this.pageHeights[i]);
+        this.pageOffsets.push(rowTop);
+        this.pageLefts.push(marginLeft + col * (pw + gap));
       }
-      this.pageOffsets.push(rowTop);
-      this.pageLefts.push(marginLeft + col * (pw + gap));
+      this.rowHeights.push(rowHeight);
+      rowTop += rowHeight + gap;
     }
 
-    // 마지막 행 높이 추가
-    const lastRowStart = Math.floor((this.pageHeights.length - 1) / this.columns) * this.columns;
-    let lastRowMaxH = 0;
-    for (let j = lastRowStart; j < this.pageHeights.length; j++) {
-      lastRowMaxH = Math.max(lastRowMaxH, this.pageHeights[j]);
-    }
-    this.totalHeight = rowTop + lastRowMaxH + gap;
+    this.totalHeight = rowTop;
     this.totalWidth = Math.max(gridWidth + marginLeft * 2, viewportWidth);
   }
 
@@ -125,40 +139,85 @@ export class VirtualScroll {
 
   /** 뷰포트에 보이는 페이지 인덱스 목록을 반환한다 */
   getVisiblePages(scrollY: number, viewportHeight: number): number[] {
+    return this.getPageWindow(scrollY, viewportHeight).visible;
+  }
+
+  /** visible 페이지와 인접 prefetch 행을 한 번의 행 탐색으로 계산한다. */
+  getPageWindow(scrollY: number, viewportHeight: number): PageWindow {
     const vpTop = scrollY;
     const vpBottom = scrollY + viewportHeight;
     const visible: number[] = [];
+    let firstVisibleRow = -1;
+    let lastVisibleRow = -1;
 
-    for (let i = 0; i < this.pageOffsets.length; i++) {
-      const pageTop = this.pageOffsets[i];
-      const pageBottom = pageTop + this.pageHeights[i];
-
-      if (pageTop < vpBottom && pageBottom > vpTop) {
-        visible.push(i);
+    for (
+      let row = this.findFirstVisibleRow(vpTop);
+      row < this.rowOffsets.length && this.rowOffsets[row] < vpBottom;
+      row++
+    ) {
+      const rowFirst = this.rowFirstPages[row];
+      const rowEnd = this.rowFirstPages[row + 1] ?? this.pageCount;
+      let rowVisible = false;
+      for (let page = rowFirst; page < rowEnd; page++) {
+        const pageTop = this.pageOffsets[page];
+        if (pageTop < vpBottom && pageTop + this.pageHeights[page] > vpTop) {
+          visible.push(page);
+          rowVisible = true;
+        }
+      }
+      if (rowVisible) {
+        if (firstVisibleRow < 0) firstVisibleRow = row;
+        lastVisibleRow = row;
       }
     }
-    return visible;
+
+    if (firstVisibleRow < 0) return { visible, prefetch: [] };
+
+    const prefetch: number[] = [];
+    this.appendRowPages(prefetch, firstVisibleRow - 1);
+    prefetch.push(...visible);
+    this.appendRowPages(prefetch, lastVisibleRow + 1);
+    return { visible, prefetch };
   }
 
   /** 프리페치 대상 페이지 (visible 범위 ± 1행) */
   getPrefetchPages(scrollY: number, viewportHeight: number): number[] {
-    const visible = this.getVisiblePages(scrollY, viewportHeight);
-    if (visible.length === 0) return [];
+    return this.getPageWindow(scrollY, viewportHeight).prefetch;
+  }
 
-    const first = visible[0];
-    const last = visible[visible.length - 1];
-    const prefetch = new Set(visible);
-
-    // 이전/다음 행 추가
-    const cols = this.columns;
-    for (let c = 0; c < cols; c++) {
-      const prev = first - cols + c;
-      const next = last + 1 + c;
-      if (prev >= 0) prefetch.add(prev);
-      if (next < this.pageCount) prefetch.add(next);
+  private findFirstVisibleRow(vpTop: number): number {
+    let low = 0;
+    let high = this.rowOffsets.length;
+    while (low < high) {
+      const mid = low + Math.floor((high - low) / 2);
+      if (this.rowOffsets[mid] + this.rowHeights[mid] <= vpTop) {
+        low = mid + 1;
+      } else {
+        high = mid;
+      }
     }
+    return low;
+  }
 
-    return Array.from(prefetch).sort((a, b) => a - b);
+  private findRowAtY(docY: number): number {
+    let low = 0;
+    let high = this.rowOffsets.length;
+    while (low < high) {
+      const mid = low + Math.floor((high - low) / 2);
+      if (this.rowOffsets[mid] <= docY) {
+        low = mid + 1;
+      } else {
+        high = mid;
+      }
+    }
+    return Math.max(0, low - 1);
+  }
+
+  private appendRowPages(target: number[], row: number): void {
+    if (row < 0 || row >= this.rowFirstPages.length) return;
+    const first = this.rowFirstPages[row];
+    const end = this.rowFirstPages[row + 1] ?? this.pageCount;
+    for (let page = first; page < end; page++) target.push(page);
   }
 
   /** 특정 문서 Y 좌표가 속하는 페이지 인덱스를 반환한다 */
@@ -172,12 +231,9 @@ export class VirtualScroll {
    * "현재 쪽" 이 필요하면 [`getRowFirstPageAtY`] 를 쓸 것 — [#2560].
    */
   getPageAtY(docY: number): number {
-    for (let i = this.pageOffsets.length - 1; i >= 0; i--) {
-      if (docY >= this.pageOffsets[i]) {
-        return i;
-      }
-    }
-    return 0;
+    if (this.pageCount === 0) return 0;
+    const row = this.findRowAtY(docY);
+    return (this.rowFirstPages[row + 1] ?? this.pageCount) - 1;
   }
 
   /**
@@ -186,12 +242,8 @@ export class VirtualScroll {
    * 단일 컬럼 모드에서는 `getPageAtY` 와 동치다.
    */
   getRowFirstPageAtY(docY: number): number {
-    const rowLastIdx = this.getPageAtY(docY);
-    if (!this.gridMode) return rowLastIdx;
-    const rowOffset = this.pageOffsets[rowLastIdx];
-    let rowFirst = rowLastIdx;
-    while (rowFirst > 0 && this.pageOffsets[rowFirst - 1] === rowOffset) rowFirst--;
-    return rowFirst;
+    if (this.pageCount === 0) return 0;
+    return this.rowFirstPages[this.findRowAtY(docY)] ?? 0;
   }
 
   /** 한 행에 놓이는 쪽 수. 단일 컬럼 모드는 1. */
@@ -206,13 +258,10 @@ export class VirtualScroll {
    *              gap 영역(페이지 사이 빈 공간) click 은 가장 가까운 페이지로 fallback.
    */
   getPageAtPoint(docX: number, docY: number): number {
-    const rowLastIdx = this.getPageAtY(docY);
-    if (!this.gridMode) return rowLastIdx;
-
-    // 같은 row 의 페이지 범위 (rowLastIdx 부터 row 시작까지)
-    const rowOffset = this.pageOffsets[rowLastIdx];
-    let rowFirst = rowLastIdx;
-    while (rowFirst > 0 && this.pageOffsets[rowFirst - 1] === rowOffset) rowFirst--;
+    if (!this.gridMode) return this.getPageAtY(docY);
+    const row = this.findRowAtY(docY);
+    const rowFirst = this.rowFirstPages[row] ?? 0;
+    const rowLastIdx = (this.rowFirstPages[row + 1] ?? this.pageCount) - 1;
 
     // X 가 페이지 안에 속하는 첫 번째 페이지 반환
     for (let i = rowFirst; i <= rowLastIdx; i++) {

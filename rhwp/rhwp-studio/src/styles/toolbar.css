@@ -3,7 +3,7 @@
    ================================================================ */
 #icon-toolbar {
   display: flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   align-items: stretch;
   align-content: stretch;
   gap: 0;
@@ -13,17 +13,33 @@
   background: var(--ui-toolbar-bg-start);
   border-bottom: 1px solid var(--ui-border);
   flex-shrink: 0;
-  height: 60px;
+  height: auto;
   min-height: 60px;
   box-sizing: border-box;
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: thin;
+  overflow: visible;
 }
 
 /* 기본 도구 상자 완전 접기 (토글은 서식 바에 둠) */
 #icon-toolbar.collapsed {
   display: none;
+}
+
+#icon-toolbar > .tb-mode-group {
+  align-items: stretch;
+}
+
+.tb-mode-label {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+  color: var(--color-primary);
+  font-size: var(--font-size-sm);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.tb-context-danger:hover:not(:disabled) {
+  color: var(--color-danger, #c43b3b);
 }
 
 .tb-group {
@@ -61,9 +77,18 @@
   color: var(--color-text);
 }
 
-.tb-btn:hover {
+.tb-btn[hidden] {
+  display: none;
+}
+
+.tb-btn:hover:not(:disabled) {
   background: var(--ui-hover-strong);
   border-color: transparent;
+}
+
+.tb-btn:disabled {
+  cursor: default;
+  opacity: 0.42;
 }
 
 /* 누르면 실제로 들어간다 — 채움만 바꾸는 것보다 손끝에 맞는다 */

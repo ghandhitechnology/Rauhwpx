@@ -8,6 +8,7 @@ import { CommandHistory } from './history';
 import { DeleteSelectionCommand, ApplyCharFormatCommand, ApplyParaFormatCommand, SnapshotCommand, SetFormValueCommand, TextMutationEffectAccumulator, IMMEDIATE_TEXT_MUTATION_EFFECTS, applyCharFormatToTarget } from './command';
 import type { OperationDescriptor, ParaFormatTarget, RefreshPolicy, TextMutationEffects, EditCommand, EditContext, FormValueTarget } from './command';
 import { CapturedSnapshotCommand } from './captured-snapshot-command.ts';
+import type { CapturedSnapshotCallbacks } from './captured-snapshot-command.ts';
 import { VirtualScroll } from '@/view/virtual-scroll';
 import { ViewportManager } from '@/view/viewport-manager';
 import type {
@@ -20,6 +21,7 @@ import type {
   LayerNode,
   LayerTextRunOp,
   PageInfo,
+  DocumentInfo,
 } from '@/core/types';
 import type { CommandDispatcher } from '@/command/dispatcher';
 import type { EditorEditMode } from '@/command/types';
@@ -280,6 +282,7 @@ export class InputHandler {
   private pictureObjectRenderer: TableObjectRenderer | null = null;
   /** 마지막 rhwp-studio 내부 복사의 시스템 클립보드 marker token */
   private rhwpClipboardToken: string | null = null;
+  private pasteWithoutFormattingArmed = false;
   /** 누름틀 시작 경계에서 왼쪽/Home 이동으로 필드 밖에 머문 상태 */
   private fieldStartExitKey: string | null = null;
   /** 누름틀 끝 경계에서 오른쪽 이동으로 필드 밖에 머문 상태 */
@@ -402,6 +405,7 @@ export class InputHandler {
     startClientY: number;
     pageIndex: number;
     bbox: { x: number; y: number; w: number; h: number };
+    rotationAngle: number;
     /** 다중 선택 리사이즈 시 각 개체의 원래 크기/위치 */
     multiRefs?: { sec: number; ppi: number; ci: number; type: string; origWidth: number; origHeight: number; origHorzOffset: number; origVertOffset: number; bboxX: number; bboxY: number }[];
   } | null = null;
@@ -419,8 +423,10 @@ export class InputHandler {
     totalDeltaH: number;
     totalDeltaV: number;
     pageIndex: number;
+    bbox: { x: number; y: number; w: number; h: number };
+    rotationAngle: number;
     /** 다중 선택 이동 시 각 개체의 원래 offset 기록 */
-    multiRefs?: { sec: number; ppi: number; ci: number; type: string; origHorzOffset: number; origVertOffset: number }[];
+    multiRefs?: { sec: number; ppi: number; ci: number; type: string; origHorzOffset: number; origVertOffset: number; cellPath?: CellPathLike; headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number } }[];
   } | null = null;
 
   // 그림/글상자 회전 드래그 상태
@@ -432,6 +438,8 @@ export class InputHandler {
     centerY: number;
     startAngle: number;     // 드래그 시작 시 마우스→중심 각도 (rad)
     pageIndex: number;
+    bbox: { x: number; y: number; w: number; h: number };
+    finalAngle: number;
   } | null = null;
 
   // 직선 끝점 드래그 상태
@@ -502,6 +510,7 @@ export class InputHandler {
   private onClickBound: (e: MouseEvent) => void;
   private onDblClickBound: (e: MouseEvent) => void;
   private onKeyDownBound: (e: KeyboardEvent) => void;
+  private onKeyUpBound: (e: KeyboardEvent) => void;
   private onInputBound: (e?: Event) => void;
   private onCompositionStartBound: () => void;
   private onCompositionUpdateBound: (e: CompositionEvent) => void;
@@ -578,6 +587,7 @@ export class InputHandler {
     this.onClickBound = this.onClick.bind(this);
     this.onDblClickBound = this.onDblClick.bind(this);
     this.onKeyDownBound = this.onKeyDown.bind(this);
+    this.onKeyUpBound = this.onKeyUp.bind(this);
     this.onInputBound = this.onInput.bind(this);
     this.onCompositionStartBound = this.onCompositionStart.bind(this);
     this.onCompositionUpdateBound = this.onCompositionUpdate.bind(this);
@@ -585,6 +595,7 @@ export class InputHandler {
     this.onInputBlurBound = () => {
       if (this.isComposing) _text.onCompositionEnd.call(this);
       this.resetIosInputSession();
+      this.pasteWithoutFormattingArmed = false;
       // 블러 시점에는 브라우저가 조합을 스스로 끝내므로 value 정리가 안전하다.
       this.resetTextareaBuffer();
       this.flushDeferredPaginationIfNeeded('input-blur', false);
@@ -616,6 +627,7 @@ export class InputHandler {
     container.addEventListener('contextmenu', this.onContextMenuBound);
     container.addEventListener('mousemove', this.onMouseMoveBound);
     this.textarea.addEventListener('keydown', this.onKeyDownBound);
+    this.textarea.addEventListener('keyup', this.onKeyUpBound);
     this.textarea.addEventListener('input', this.onInputBound);
     this.textarea.addEventListener('compositionstart', this.onCompositionStartBound);
     this.textarea.addEventListener('compositionupdate', this.onCompositionUpdateBound);
@@ -1647,9 +1659,34 @@ export class InputHandler {
 
   /** [Task #919] 클릭 좌표 근처에 글상자가 있는지 확인 (글상자 바깥에서 외곽 근처 클릭) */
   findShapeByOuterClick(
-    pageX: number, pageY: number,
+    pageIdx: number, pageX: number, pageY: number,
     sec: number, paragraphIndex: number,
-  ): { sec: number; ppi: number; ci: number } | null {
+  ): { sec: number; ppi: number; ci: number; type: 'shape'; cellIdx?: number; cellParaIdx?: number; outerTableControlIdx?: number; cellPath?: CellPathLike; noteRef?: unknown; memoRef?: unknown; headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number } } | null {
+    try {
+      const layout = this.wasm.getPageControlLayout(pageIdx);
+      for (const item of layout.controls) {
+        if (item.type !== 'shape') continue;
+        if (item.secIdx === undefined || item.paraIdx === undefined || item.controlIdx === undefined) continue;
+        if (item.secIdx !== sec || Math.abs(item.paraIdx - paragraphIndex) > 2) continue;
+        if (!isPointNearBoxBorder(pageX, pageY, {
+          x: item.x, y: item.y, width: item.w, height: item.h,
+        })) continue;
+        return {
+          sec: item.secIdx,
+          ppi: item.paraIdx,
+          ci: item.controlIdx,
+          type: 'shape',
+          cellIdx: item.cellIdx,
+          cellParaIdx: item.cellParaIdx,
+          outerTableControlIdx: item.outerTableControlIdx,
+          cellPath: item.cellPath,
+          noteRef: item.noteRef,
+          memoRef: item.memoRef,
+          headerFooter: item.headerFooter,
+        };
+      }
+    } catch { /* 레이아웃 조회 실패 시 본문 전용 API로 보조 */ }
+
     // 현재 문단 및 인접 문단 (±2) 검사 — findTableByOuterClick 동일 패턴
     for (let offset = 0; offset <= 2; offset++) {
       const candidates = offset === 0
@@ -1660,7 +1697,7 @@ export class InputHandler {
         // Shape 컨트롤은 paragraph 의 어느 위치든 있을 수 있으므로 0..N 시도
         for (let ci = 0; ci < 10; ci++) {
           if (this.isShapeBorderClickByRef(pageX, pageY, sec, ppi, ci)) {
-            return { sec, ppi, ci };
+            return { sec, ppi, ci, type: 'shape' };
           }
         }
       }
@@ -1834,6 +1871,10 @@ export class InputHandler {
   /** 특수 키 처리 (Backspace, Enter, 화살표, Ctrl+Z/Y) */
   private onKeyDown(e: KeyboardEvent): void {
     _keyboard.onKeyDown.call(this, e);
+  }
+
+  private onKeyUp(e: KeyboardEvent): void {
+    _keyboard.onKeyUp.call(this, e);
   }
 
   /** Ctrl/Meta 단축키 처리 */
@@ -2743,7 +2784,11 @@ export class InputHandler {
    * Apply an autonomous headless mutation as one atomic, undoable history entry.
    * The exact before state is restored if the callback or after-snapshot capture fails.
    */
-  executeAppliedSnapshot<T>(operationType: string, operation: (wasm: WasmBridge) => T): T {
+  executeAppliedSnapshot<T>(
+    operationType: string,
+    operation: (wasm: WasmBridge) => T,
+    callbacks: CapturedSnapshotCallbacks = {},
+  ): T {
     if (this.readOnly) {
       throw new Error('This template preview is read-only');
     }
@@ -2788,6 +2833,7 @@ export class InputHandler {
       cursorAfter,
       beforeId,
       afterId,
+      callbacks,
     );
     beforeId = null;
     afterId = null;
@@ -2808,6 +2854,25 @@ export class InputHandler {
       console.warn('[InputHandler] committed autonomous edit refresh failed:', error);
     }
     return result;
+  }
+
+  /** 현재 문서의 파일 정체성을 유지하며 버전 payload를 한 번의 Undo 항목으로 적용한다. */
+  replaceContentFromBytes(
+    data: Uint8Array,
+    callbacks: CapturedSnapshotCallbacks = {},
+  ): DocumentInfo {
+    this.finalizeCompositionBeforeCursorMove();
+    this.flushDeferredPaginationIfNeeded('before-version-content-replace', false);
+    return this.executeAppliedSnapshot(
+      'version:replace_content',
+      (wasm) => {
+        const info = wasm.replaceContentFromBytes(data);
+        this.clearTableResizeRuntimeCache();
+        this.resetDerivedStateAfterHistoryJump();
+        return info;
+      },
+      callbacks,
+    );
   }
 
   /** 승인처럼 여러 임시 스냅샷이 필요한 외부 편집기의 저장소 여유를 확보한다. */
@@ -3266,13 +3331,17 @@ export class InputHandler {
       const caretRect = this.adjustExitedFieldEndCaretRect(rect);
       this.positionImeInput(caretRect, zoom);
 
-      this.caret.update(caretRect, zoom);
-      if (this.isComposing && this.compositionAnchor && this.compositionLength > 0) {
-        const startRect = this.compositionStartRect();
-        if (startRect) this.caret.showCompositionUnderline(startRect, caretRect, zoom);
-        else this.caret.hideComposition();
+      if (this.hasNonCollapsedTextSelection()) {
+        this.caret.hide();
       } else {
-        this.caret.hideComposition();
+        this.caret.update(caretRect, zoom);
+        if (this.isComposing && this.compositionAnchor && this.compositionLength > 0) {
+          const startRect = this.compositionStartRect();
+          if (startRect) this.caret.showCompositionUnderline(startRect, caretRect, zoom);
+          else this.caret.hideComposition();
+        } else {
+          this.caret.hideComposition();
+        }
       }
       if (!skipScroll) {
         this.scrollCaretIntoView(caretRect);
@@ -3426,7 +3495,11 @@ export class InputHandler {
   private updateCaretNoScroll(): void {
     const rect = this.cursor.getRect();
     if (rect) {
-      this.caret.update(rect, this.viewportManager.getZoom());
+      if (this.hasNonCollapsedTextSelection()) {
+        this.caret.hide();
+      } else {
+        this.caret.update(rect, this.viewportManager.getZoom());
+      }
     }
     this.updateSelection();
     this.emitCursorFormatState();
@@ -3445,7 +3518,11 @@ export class InputHandler {
     if (rect) {
       const zoom = this.viewportManager.getZoom();
       this.caret.hideComposition();
-      this.caret.updateLive(rect, zoom);
+      if (this.hasNonCollapsedTextSelection()) {
+        this.caret.hide();
+      } else {
+        this.caret.updateLive(rect, zoom);
+      }
       // [Task #661] 드래그 중 스크롤은 caret rect 가 아니라 포인터 edge 기준 경로에서만 처리한다.
       // 메인테이너 통합 정정: devel 의 updateLive (PR #664 깜박임 타이머 유지 본질) 보존 +
       // PR #718 의 scrollCaretIntoView 부재 본질 적용.
@@ -3675,7 +3752,7 @@ export class InputHandler {
   /** 그림/글상자 클릭 감지 — getPageControlLayout으로 개체 bbox 겹침 확인 */
   private findPictureAtClick(
     pageIdx: number, pageX: number, pageY: number,
-  ): { sec: number; ppi: number; ci: number; type: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole'; cellIdx?: number; cellParaIdx?: number; noteRef?: any; x1?: number; y1?: number; x2?: number; y2?: number } | null {
+  ): { sec: number; ppi: number; ci: number; type: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole'; cellIdx?: number; cellParaIdx?: number; outerTableControlIdx?: number; cellPath?: CellPathLike; noteRef?: any; memoRef?: any; headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number }; missing?: boolean; x1?: number; y1?: number; x2?: number; y2?: number } | null {
     return _picture.findPictureAtClick.call(this, pageIdx, pageX, pageY);
   }
 
@@ -3697,8 +3774,8 @@ export class InputHandler {
   }
 
   /** 개체를 타입에 따라 삭제한다 (그림/글상자 분기) */
-  private deleteObjectControl(ref: { sec: number; ppi: number; ci: number; type: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole' }): void {
-    _picture.deleteObjectControl.call(this, ref);
+  private deleteObjectControl(ref: { sec: number; ppi: number; ci: number; type: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole'; cellPath?: CellPathLike; noteRef?: unknown; memoRef?: unknown; headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number } }): boolean {
+    return _picture.deleteObjectControl.call(this, ref);
   }
 
   /** [Task #2230] 그림 미지정 placeholder 에 그림 지정 (파일 선택 → assignPictureImage) */
@@ -3746,6 +3823,14 @@ export class InputHandler {
     _picture.cleanupPictureResizeDrag.call(this);
   }
 
+  /** 문서 전환/해제 중에는 개체 프리뷰를 확정하지 않고 취소한다. */
+  private cancelPicturePreviewDrags(): void {
+    if (this.isPictureResizeDragging) _picture.cleanupPictureResizeDrag.call(this);
+    if (this.isPictureMoveDragging) _picture.cleanupPictureMoveDrag.call(this);
+    if (this.isPictureRotateDragging) _picture.cleanupPictureRotateDrag.call(this);
+    document.removeEventListener('mouseup', this.onMouseUpBound);
+  }
+
   // ─── 그림 이동 드래그 ──────────────────────────────
 
   /** 마우스 드래그로 그림 이동 — 드래그 중 갱신 */
@@ -3754,8 +3839,8 @@ export class InputHandler {
   }
 
   /** 마우스 드래그로 그림 이동 — 드래그 종료 */
-  private finishPictureMoveDrag(): void {
-    _picture.finishPictureMoveDrag.call(this);
+  private finishPictureMoveDrag(e: MouseEvent): void {
+    _picture.finishPictureMoveDrag.call(this, e);
   }
 
   /** 마우스 드래그로 그림 회전 — 드래그 업데이트 */
@@ -3859,6 +3944,7 @@ export class InputHandler {
 
   deactivate(): void {
     this.flushDeferredPaginationIfNeeded('before-deactivate', false);
+    this.cancelPicturePreviewDrags();
     this.active = false;
     this.cancelDeferredPaginationFlush();
     this.deferredPaginationRunner.cancel();
@@ -3876,6 +3962,7 @@ export class InputHandler {
       clearTimeout(this._iosInputTimer);
       this._iosInputTimer = null;
     }
+    this.pasteWithoutFormattingArmed = false;
     this._iosAnchor = null;
     this._iosBeforePageIndex = undefined;
     this._iosComposing = false;
@@ -3886,13 +3973,22 @@ export class InputHandler {
     this.clearPendingCharFormat();
     this.caret.hide();
     this.fieldMarker.hide();
+    this.cursor.exitPictureObjectSelection();
+    this.pictureObjectRenderer?.clear();
+    this.cursor.exitTableObjectSelection();
+    this.tableObjectRenderer?.clear();
+    this.cursor.exitCellSelectionMode();
+    this.cellSelectionRenderer?.clear();
     this.cursor.clearSelection();
     this.selectionRenderer.clear();
+    this.eventBus.emit('picture-object-selection-changed', false);
+    this.eventBus.emit('table-object-selection-changed', false);
     this.history.clear(this.wasm);
   }
 
   dispose(): void {
     this.flushDeferredPaginationIfNeeded('before-dispose', false);
+    this.cancelPicturePreviewDrags();
     if (this.isResizeDragging) {
       this.cleanupResizeDrag();
     }
@@ -3921,6 +4017,7 @@ export class InputHandler {
       clearTimeout(this._iosInputTimer);
       this._iosInputTimer = null;
     }
+    this.pasteWithoutFormattingArmed = false;
     this._iosAnchor = null;
     this._iosBeforePageIndex = undefined;
     this._iosComposing = false;
@@ -3935,6 +4032,7 @@ export class InputHandler {
     document.removeEventListener('mousemove', this.onMouseMoveBound);
     document.removeEventListener('mouseup', this.onMouseUpBound);
     this.textarea.removeEventListener('keydown', this.onKeyDownBound);
+    this.textarea.removeEventListener('keyup', this.onKeyUpBound);
     this.textarea.removeEventListener('input', this.onInputBound);
     this.textarea.removeEventListener('compositionstart', this.onCompositionStartBound);
     this.textarea.removeEventListener('compositionupdate', this.onCompositionUpdateBound);
@@ -3988,6 +4086,12 @@ export class InputHandler {
     }
     this.eventBus.emit('command-state-changed');
   }
+
+  /** 소유 워크플로가 현재 문서 변경을 차단하고 있는지 반환한다. */
+  isReadOnly(): boolean { return this.readOnly; }
+
+  /** 소유 워크플로가 스냅샷을 적용하는 동안 사용자 직접 편집이 중단되었는지 반환한다. */
+  isUserEditingLocked(): boolean { return this.userEditingLocked; }
 
   /** 활성 에이전트 턴에는 사용자 입력만 잠그고 에이전트 snapshot 경로는 유지한다. */
   setUserEditingLocked(locked: boolean): void {
@@ -4240,10 +4344,10 @@ export class InputHandler {
   isInPictureObjectSelection(): boolean { return this.cursor.isInPictureObjectSelection(); }
 
   /** 선택된 그림/글상자 참조 반환 ([Task #825] headerFooter 동반 시 머리말/꼬리말 picture marker) */
-  getSelectedPictureRef(): { sec: number; ppi: number; ci: number; type: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole'; cellIdx?: number; cellParaIdx?: number; outerTableControlIdx?: number; cellPath?: Array<{ controlIndex: number; cellIndex: number; cellParaIndex: number }>; noteRef?: any; headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number } } | null { return this.cursor.getSelectedPictureRef(); }
+  getSelectedPictureRef(): { sec: number; ppi: number; ci: number; type: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole'; cellIdx?: number; cellParaIdx?: number; outerTableControlIdx?: number; cellPath?: Array<{ controlIndex: number; cellIndex: number; cellParaIndex: number }>; noteRef?: any; memoRef?: any; headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number } } | null { return this.cursor.getSelectedPictureRef(); }
 
   /** 다중 선택된 개체 목록 */
-  getSelectedPictureRefs(): { sec: number; ppi: number; ci: number; type: string }[] { return this.cursor.getSelectedPictureRefs(); }
+  getSelectedPictureRefs(): { sec: number; ppi: number; ci: number; type: string; cellPath?: CellPathLike; noteRef?: unknown; memoRef?: unknown; headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number } }[] { return this.cursor.getSelectedPictureRefs(); }
 
   /** 다중 선택 상태인가? */
   isMultiPictureSelection(): boolean { return this.cursor.isMultiPictureSelection(); }
@@ -4875,16 +4979,28 @@ export class InputHandler {
   }
 
   /** Undo 가능한가? */
-  canUndo(): boolean { return this.history.canUndo(); }
+  canUndo(): boolean { return !this.readOnly && this.history.canUndo(); }
 
   /** Redo 가능한가? */
-  canRedo(): boolean { return this.history.canRedo(); }
+  canRedo(): boolean { return !this.readOnly && this.history.canRedo(); }
 
   /** Undo 실행 (커맨드 시스템용) */
-  performUndo(): void { this.handleUndo(); }
+  performUndo(ignoreReadOnly = false): void {
+    if (this.readOnly && !ignoreReadOnly) return;
+    this.handleUndo();
+  }
 
   /** Redo 실행 (커맨드 시스템용) */
-  performRedo(): void { this.handleRedo(); }
+  performRedo(ignoreReadOnly = false): void {
+    if (this.readOnly && !ignoreReadOnly) return;
+    this.handleRedo();
+  }
+
+  /** 시험적 워크플로를 되돌린 뒤 redo 상태를 영구 폐기한다. */
+  discardRedoHistory(): void { this.history.discardRedo(this.wasm); }
+
+  /** 보상 교체 결과는 유지하되 실패 상태로 되돌리는 undo는 막는다. */
+  discardLatestUndoHistory(): void { this.history.discardUndoTop(this.wasm); }
 
   /** 복사 (커맨드 시스템용 — 컨텍스트 메뉴/도구 상자에서 호출) */
   performCopy(): void {
@@ -4941,13 +5057,36 @@ export class InputHandler {
     return document.execCommand('paste');
   }
 
+  /** Electron 네이티브 Cmd/Ctrl+Shift+V 경로. */
+  performPlainTextPaste(text: string): boolean {
+    if (
+      !this.active
+      || this.readOnly
+      || this.userEditingLocked
+      || this.editMode === 'form'
+      || !text
+    ) return false;
+
+    if (this.cursor.isInPictureObjectSelection()) {
+      this.cursor.moveOutOfSelectedPicture();
+      this.pictureObjectRenderer?.clear();
+      this.eventBus.emit('picture-object-selection-changed', false);
+    }
+    if (this.cursor.isInTableObjectSelection()) {
+      this.cursor.moveOutOfSelectedTable();
+      this.eventBus.emit('table-object-selection-changed', false);
+    }
+    _keyboard.pastePlainText.call(this, text);
+    return true;
+  }
+
   /** 잘라내기 (커맨드 시스템용 — 컨텍스트 메뉴/도구 상자에서 호출) */
   performCut(): void {
     if (this.editMode === 'form') return;
     // 개체 선택 모드 → 복사 + 삭제
     if (this.cursor.isInPictureObjectSelection()) {
       const ref = this.cursor.getSelectedPictureRef();
-      if (ref) {
+      if (ref && _picture.canDeleteObjectControl(ref)) {
         // 클립보드에 복사
         this.performCopy();
         // 삭제
@@ -4992,7 +5131,7 @@ export class InputHandler {
     if (this.editMode === 'form') return;
     if (this.cursor.isInPictureObjectSelection()) {
       const ref = this.cursor.getSelectedPictureRef();
-      if (ref) {
+      if (ref && _picture.canDeleteObjectControl(ref)) {
         this.cursor.moveOutOfSelectedPicture();
         this.pictureObjectRenderer?.clear();
         this.eventBus.emit('picture-object-selection-changed', false);

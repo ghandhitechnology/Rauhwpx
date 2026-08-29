@@ -1,7 +1,7 @@
 {
   "name": "rauhwpx",
   "productName": "Rauhwpx",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "HWP/HWPX editor with a local Claude/Codex agent sidebar.",
   "author": "Hataewook",
   "private": true,
@@ -13,7 +13,8 @@
     "restart": "node rhwp/rhwp-agent/ctl.mjs restart",
     "status": "node rhwp/rhwp-agent/ctl.mjs status",
     "dev:desktop": "wait-on http://127.0.0.1:7700 && cross-env RHWP_DEV_URL=http://127.0.0.1:7700 electron .",
-    "build:studio": "npm --prefix rhwp/rhwp-studio ci && npm --prefix rhwp/rhwp-studio run build",
+    "build:wasm": "wasm-pack build rhwp --target web",
+    "build:studio": "npm run build:wasm && npm --prefix rhwp/rhwp-studio ci && npm --prefix rhwp/rhwp-studio run build",
     "build:agent": "npm --prefix rhwp/rhwp-agent ci --omit=dev",
     "desktop": "npm run build:studio && electron .",
     "dist:mac": "npm run build:studio && npm run build:agent && electron-builder --mac dmg zip --arm64 --publish never",
@@ -53,6 +54,15 @@
         "name": "Hangul document",
         "description": "Hangul word-processing document",
         "role": "Editor"
+      },
+      {
+        "ext": [
+          "rhwpx"
+        ],
+        "name": "Rauhwpx history bundle",
+        "description": "Rauhwpx history bundle",
+        "role": "Editor",
+        "isPackage": true
       }
     ],
     "directories": {
@@ -89,6 +99,18 @@
             "LSItemContentTypes": [
               "com.hataewook.rauhwpx.hwpx-document"
             ]
+          },
+          {
+            "CFBundleTypeExtensions": [
+              "rhwpx"
+            ],
+            "CFBundleTypeName": "RauHWPX history bundle",
+            "CFBundleTypeRole": "Editor",
+            "LSHandlerRank": "Default",
+            "LSTypeIsPackage": true,
+            "LSItemContentTypes": [
+              "com.hataewook.rauhwpx.history-bundle"
+            ]
           }
         ],
         "UTExportedTypeDeclarations": [
@@ -102,6 +124,19 @@
             "UTTypeTagSpecification": {
               "public.filename-extension": [
                 "hwpx"
+              ]
+            }
+          },
+          {
+            "UTTypeConformsTo": [
+              "com.apple.package",
+              "public.composite-content"
+            ],
+            "UTTypeDescription": "RauHWPX history bundle",
+            "UTTypeIdentifier": "com.hataewook.rauhwpx.history-bundle",
+            "UTTypeTagSpecification": {
+              "public.filename-extension": [
+                "rhwpx"
               ]
             }
           }

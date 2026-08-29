@@ -225,13 +225,11 @@ fn parse_master_page_start(e: &quick_xml::events::BytesStart, master_page: &mut 
             _ => {}
         }
     }
-    // 한컴 HWPX -> HWP5 저장본은 LAST_PAGE 바탕쪽을 확장 바탕쪽으로 저장하면서
-    // pageDuplicate="0"인 경우에도 overlap bit를 함께 세운다.
-    if is_last_page {
+    // 한컴 HWPX -> HWP5 저장본은 확장 바탕쪽(LAST_PAGE·OPTIONAL_PAGE)을 저장하면서
+    // pageDuplicate="0"인 경우에도 overlap bit를 함께 세운다. overlap bit 만으로는
+    // 겹치게 하기 의도를 알 수 없고, XML 의 pageDuplicate 를 봐야 한다.
+    if is_last_page || is_optional_page {
         master_page.replace_base = page_duplicate == Some(false);
-        master_page.overlap = true;
-    }
-    if is_optional_page {
         master_page.overlap = true;
     }
     master_page.ext_flags = u16::from(master_page.overlap)
@@ -2689,17 +2687,17 @@ fn parse_picture(
                         for attr in ce.attributes().flatten() {
                             match attr.key.as_ref() {
                                 b"x" => {
-                                    let v = parse_u32(&attr);
-                                    shape_attr.offset_x = v as i32;
+                                    let v = parse_i32_wrapping(&attr);
+                                    shape_attr.offset_x = v;
                                     if !has_pos {
-                                        common.horizontal_offset = v;
+                                        common.horizontal_offset = v as u32;
                                     }
                                 }
                                 b"y" => {
-                                    let v = parse_u32(&attr);
-                                    shape_attr.offset_y = v as i32;
+                                    let v = parse_i32_wrapping(&attr);
+                                    shape_attr.offset_y = v;
                                     if !has_pos {
-                                        common.vertical_offset = v;
+                                        common.vertical_offset = v as u32;
                                     }
                                 }
                                 _ => {}
@@ -3192,17 +3190,17 @@ fn parse_object_layout_child(
             for attr in ce.attributes().flatten() {
                 match attr.key.as_ref() {
                     b"x" => {
-                        let v = parse_u32(&attr);
-                        shape_attr.offset_x = v as i32;
+                        let v = parse_i32_wrapping(&attr);
+                        shape_attr.offset_x = v;
                         if !*has_pos {
-                            common.horizontal_offset = v;
+                            common.horizontal_offset = v as u32;
                         }
                     }
                     b"y" => {
-                        let v = parse_u32(&attr);
-                        shape_attr.offset_y = v as i32;
+                        let v = parse_i32_wrapping(&attr);
+                        shape_attr.offset_y = v;
                         if !*has_pos {
-                            common.vertical_offset = v;
+                            common.vertical_offset = v as u32;
                         }
                     }
                     _ => {}
@@ -7847,7 +7845,7 @@ mod tests {
         assert_eq!(optional_page.apply_to, HeaderFooterApply::Both);
         assert!(optional_page.is_extension);
         assert!(optional_page.overlap);
-        assert!(!optional_page.replace_base);
+        assert!(optional_page.replace_base);
         assert_eq!(optional_page.ext_flags, 0x0007);
     }
 
@@ -7897,10 +7895,25 @@ mod tests {
         assert_eq!(master_page.apply_to, HeaderFooterApply::Both);
         assert!(master_page.is_extension);
         assert!(master_page.overlap);
-        assert!(!master_page.replace_base);
+        assert!(master_page.replace_base);
         assert_eq!(master_page.ext_flags, 0x0007);
         assert_eq!(master_page.hwpx_page_number, Some(4));
         assert_eq!(master_page.raw_list_header.len(), 34);
+    }
+
+    #[test]
+    fn test_parse_master_page_optional_page_duplicate_keeps_stacking() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<masterPage xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph"
+            type="OPTIONAL_PAGE" pageNumber="4" pageDuplicate="1">
+  <hp:subList textWidth="1000" textHeight="2000" hasTextRef="0" hasNumRef="0"/>
+</masterPage>"#;
+
+        let master_page = parse_hwpx_master_page(xml).unwrap();
+        assert!(master_page.is_extension);
+        assert!(master_page.overlap);
+        assert!(!master_page.replace_base);
+        assert_eq!(master_page.ext_flags, 0x0007);
     }
 
     #[test]

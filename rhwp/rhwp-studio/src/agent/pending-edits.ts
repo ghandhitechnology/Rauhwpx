@@ -329,7 +329,9 @@ export class PendingEditManager {
       this.emitDocEvents('agent-pending-edit');
       this.syncOverlay();
       if (text.length > 0) {
-        this.deps.eventBus.emit('agent-text-inserted', { agent: op.agent, range: op.range, text });
+        this.deps.eventBus.emit('agent-text-inserted', {
+          agent: op.agent, range: op.range, text, oldText: deletedText,
+        });
       }
       this.emitChange({ type: 'ops-changed' });
       return { changeSetId: set.id, insertedRange: { ...ins.range }, deletedText };

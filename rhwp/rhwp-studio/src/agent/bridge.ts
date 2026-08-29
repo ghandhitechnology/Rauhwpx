@@ -23,7 +23,7 @@ import { PendingEditManager } from './pending-edits.ts';
 import { PendingOverlayRenderer } from './pending-overlay.ts';
 import { PendingRequestRegistry } from './pending-requests.ts';
 import { AgentTypewriterReveal } from './typewriter-reveal.ts';
-import { deriveAgentEditingLease } from './editing-lease.ts';
+import { deriveAgentEditingLease, planModeAllowsUserEditing } from './editing-lease.ts';
 import {
   setCursorModels as setCursorModelRegistry,
   setPiModels as setPiModelRegistry,
@@ -38,17 +38,22 @@ import {
 import type {
   AgentBridgeDeps,
   AgentBridgeOptions,
+  AgentInstructionsDraft,
+  AgentInstructionsStatus,
   AgentEditingLease,
   AgentName,
   AgentAuthMethod,
   AgentSetupAuthStart,
   AgentSetupStatus,
   AgentSetupStatusMap,
+  CheckpointTitleRequest,
+  CheckpointTitleResult,
   AgentPhase,
   AgentWorkflow,
   AgentWorkflowState,
   OpenRouterCredits,
   PermissionProfile,
+  ServiceTier,
   PiCatalogModel,
   PiModelConfig,
   PiStatus,
@@ -96,6 +101,7 @@ export interface AgentBridge {
   getEditingLease(): AgentEditingLease;
   onEditingLeaseChange(cb: (lease: AgentEditingLease) => void): () => void;
   getPermissionProfile(): PermissionProfile;
+  getServiceTier(): ServiceTier;
   getWorkflowState(): AgentWorkflowState;
   /** 다른 탭이 연결을 차지한 상태에서 현재 탭이 스튜디오 연결을 다시 가져온다. */
   takeOverConnection(): void;
@@ -134,6 +140,8 @@ export interface AgentBridge {
   stopChat(): void;
   /** gpt-5.6-luna 로 스레드 제목 생성 요청. */
   requestTitle(threadId: string, preview: string): string;
+  /** 커밋 메시지는 부수 정보다. 오프라인, 실패, 타임아웃이면 null. */
+  requestCheckpointTitle(input: CheckpointTitleRequest): Promise<CheckpointTitleResult | null>;
   sendUserMessage(text: string, skillName?: string, stagedReferenceIds?: string[]): Promise<string | null>;
   listTemplates(): Promise<TemplateCatalog>;
   addTemplate(file: File, name?: string): Promise<DocumentTemplate>;
@@ -154,6 +162,7 @@ export interface AgentBridge {
   approvePlan(planId: string): void;
   requestPlanChanges(planId: string, feedback?: string): void;
   setPermissionProfile(profile: PermissionProfile): void;
+  setServiceTier(tier: ServiceTier): void;
   listSkills(): void;
   readSkill(name: string): string;
   validateSkill(skill: { name: string; files: ProductSkillFile[] }): string;
@@ -162,6 +171,10 @@ export interface AgentBridge {
   deleteSkill(name: string): string;
   generateSkillDraft(input: { goal: string; triggerExamples?: string; nonTriggerExamples?: string; resourceNotes?: string; existingSkill?: string }): string;
   requestWritingStyleStatus(): string;
+  requestAgentInstructions(): Promise<AgentInstructionsStatus | null>;
+  saveAgentInstructions(content: string, expectedRevision: number): Promise<AgentInstructionsStatus | null>;
+  confirmAgentInstructionsDraft(draft: AgentInstructionsDraft): Promise<AgentInstructionsStatus | null>;
+  rejectAgentInstructionsDraft(draft: AgentInstructionsDraft): Promise<boolean>;
   requestWritingStyleCatalog(refresh?: boolean): Promise<WritingStyleCatalog | null>;
   calibrateWritingStyle(input: {
     language: WritingStyleLanguage;
@@ -256,6 +269,49 @@ function readDocumentTemplate(value: unknown): DocumentTemplate | null {
     revision: Number(item['revision']),
     createdAt: String(item['createdAt'] ?? ''),
     updatedAt: String(item['updatedAt'] ?? ''),
+  };
+}
+
+function readAgentInstructionsStatus(value: unknown): AgentInstructionsStatus | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const item = value as Record<string, unknown>;
+  const revision = Number(item['revision']);
+  const maxChars = Number(item['maxChars']);
+  if (item['fileName'] !== 'AGENTS.md' || item['scope'] !== 'rauhwpx-app'
+    || typeof item['content'] !== 'string'
+    || !Number.isSafeInteger(revision) || revision < 1
+    || !Number.isSafeInteger(maxChars) || maxChars < 1) return null;
+  return {
+    fileName: 'AGENTS.md',
+    scope: 'rauhwpx-app',
+    content: item['content'],
+    revision,
+    updatedAt: typeof item['updatedAt'] === 'string' ? item['updatedAt'] : null,
+    maxChars,
+  };
+}
+
+function readAgentInstructionsDraft(value: unknown): AgentInstructionsDraft | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const item = value as Record<string, unknown>;
+  const expectedRevision = Number(item['expectedRevision']);
+  if (typeof item['id'] !== 'string' || !item['id']
+    || typeof item['content'] !== 'string'
+    || !Number.isSafeInteger(expectedRevision) || expectedRevision < 1
+    || (item['reason'] !== null && typeof item['reason'] !== 'string')
+    || typeof item['requestedBy'] !== 'string'
+    || typeof item['createdAt'] !== 'string' || !Number.isFinite(Date.parse(item['createdAt']))
+    || typeof item['expiresAt'] !== 'string' || !Number.isFinite(Date.parse(item['expiresAt']))
+    || typeof item['confirmationToken'] !== 'string' || !item['confirmationToken']) return null;
+  return {
+    id: item['id'],
+    content: item['content'],
+    expectedRevision,
+    reason: item['reason'] as string | null,
+    requestedBy: item['requestedBy'],
+    createdAt: item['createdAt'],
+    expiresAt: item['expiresAt'],
+    confirmationToken: item['confirmationToken'],
   };
 }
 
@@ -762,6 +818,27 @@ function readPiCatalog(value: unknown): PiCatalogModel[] {
   return out;
 }
 
+function readCheckpointTitleResult(value: unknown): CheckpointTitleResult | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const src = value as Record<string, unknown>;
+  const provider = src['provider'];
+  const title = src['title'];
+  const revision = src['titleRevision'];
+  if (provider !== 'pi' && provider !== 'codex' && provider !== 'grok' && provider !== 'claude') return null;
+  if (typeof src['commitId'] !== 'string' || !src['commitId']) return null;
+  if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 0) return null;
+  if (typeof title !== 'string' || !title || title.trim() !== title
+    || /[\r\n\u0000-\u001f\u007f]/.test(title) || [...title].length > 72) return null;
+  if (typeof src['model'] !== 'string' || !src['model']) return null;
+  return {
+    commitId: src['commitId'],
+    titleRevision: revision,
+    title,
+    provider,
+    model: src['model'],
+  };
+}
+
 function isPiSetupState(value: unknown): value is 'preparing' | 'downloading' | 'installing' | 'configuring' | 'verifying' | 'done' {
   return value === 'preparing' || value === 'downloading' || value === 'installing'
     || value === 'configuring' || value === 'verifying' || value === 'done';
@@ -799,6 +876,7 @@ class AgentBridgeImpl implements AgentBridge {
   private selectedModel: string | null = null;
   private selectedEffort: string | null = null;
   private permissionProfile: PermissionProfile = 'safe';
+  private serviceTier: ServiceTier = 'standard';
   private workflow: AgentWorkflow = 'direct';
   private phase: AgentPhase = 'direct';
   private capabilityEpoch: number | null = null;
@@ -809,6 +887,12 @@ class AgentBridgeImpl implements AgentBridge {
   private activeToolRequests = 0;
   private editingLease: AgentEditingLease = { active: false, agent: 'codex' };
   private editingLeaseListeners = new Set<(lease: AgentEditingLease) => void>();
+  /** 구상 중 사용자 편집이 있었고, 저장 알림을 아직 보내지 않았다. */
+  private userEditedSincePlanningNotify = false;
+  private documentNotifyUnsubs: Array<() => void> = [];
+  /** /plan 전환이 허브(특히 Codex setExecutionMode) 왕복을 기다리는 동안. */
+  private workflowSwitchPending = false;
+  private workflowBeforeSwitch: { workflow: AgentWorkflow; phase: AgentPhase } | null = null;
   private turnHadError = false;
   private pendingTurnOpen = false;
   private pendingChatStart: {
@@ -816,6 +900,7 @@ class AgentBridgeImpl implements AgentBridge {
     model?: string;
     effort?: string;
     permissionProfile?: PermissionProfile;
+    serviceTier?: ServiceTier;
     workflow: AgentWorkflow;
     threadId: string;
     documentId: string | null;
@@ -879,6 +964,11 @@ class AgentBridgeImpl implements AgentBridge {
     });
 
     this.options = opts;
+    this.documentNotifyUnsubs.push(
+      deps.eventBus.on('document-changed', () => this.markUserDocumentEdit()),
+      deps.eventBus.on('document-mutated', () => this.markUserDocumentEdit()),
+      deps.eventBus.on('document-saved', () => this.notifyPlanningDocumentSaved()),
+    );
     window.addEventListener('focus', this.onResume);
     window.addEventListener('online', this.onResume);
     document.addEventListener('visibilitychange', this.onVisibility);
@@ -1051,6 +1141,7 @@ class AgentBridgeImpl implements AgentBridge {
           ...(pending.model ? { model: pending.model } : {}),
           ...(pending.effort ? { effort: pending.effort } : {}),
           ...(pending.permissionProfile ? { permissionProfile: pending.permissionProfile } : {}),
+          ...(pending.serviceTier ? { serviceTier: pending.serviceTier } : {}),
           ...(pending.force ? { force: true } : {}),
         });
       }
@@ -1147,9 +1238,11 @@ class AgentBridgeImpl implements AgentBridge {
 
   private resetWorkflowState(workflow: AgentWorkflow = 'direct') {
     this.workflow = workflow;
-    this.phase = workflow === 'plan' ? 'planning' : 'direct';
+    this.phase = workflow === 'plan' ? 'planning' : workflow === 'question' ? 'questioning' : 'direct';
     this.capabilityEpoch = null;
     this.latestPlan = null;
+    if (!planModeAllowsUserEditing(this.workflow, this.phase)) this.userEditedSincePlanningNotify = false;
+    this.syncEditingLease();
   }
 
   private syncWorkflowState(
@@ -1171,6 +1264,10 @@ class AgentBridgeImpl implements AgentBridge {
     } else if (!preservePlan) {
       this.latestPlan = null;
     }
+    if (!planModeAllowsUserEditing(this.workflow, this.phase)) {
+      this.userEditedSincePlanningNotify = false;
+    }
+    this.syncEditingLease();
   }
 
   private canStagePendingEdits() {
@@ -1184,11 +1281,61 @@ class AgentBridgeImpl implements AgentBridge {
     this.pendingTurnOpen = true;
   }
 
+  private finishWorkflowSwitch(): void {
+    this.workflowSwitchPending = false;
+    this.workflowBeforeSwitch = null;
+  }
+
+  private revertWorkflowSwitch(): void {
+    const previous = this.workflowBeforeSwitch;
+    this.finishWorkflowSwitch();
+    if (!previous) return;
+    this.workflow = previous.workflow;
+    this.phase = previous.phase;
+    this.syncEditingLease();
+  }
+
+  private beginWorkflowSwitch(workflow: AgentWorkflow): void {
+    const restartCompletedPlan = workflow === 'plan'
+      && this.workflow === 'plan'
+      && this.phase === 'implementing';
+    if (this.workflow === workflow && !restartCompletedPlan) return;
+    this.workflowBeforeSwitch = { workflow: this.workflow, phase: this.phase };
+    this.workflowSwitchPending = true;
+    this.resetWorkflowState(workflow);
+  }
+
+  private markUserDocumentEdit(): void {
+    if (planModeAllowsUserEditing(this.workflow, this.phase)) {
+      this.userEditedSincePlanningNotify = true;
+    }
+  }
+
+  private notifyPlanningDocumentSaved(): void {
+    if (!planModeAllowsUserEditing(this.workflow, this.phase)) return;
+    if (!this.userEditedSincePlanningNotify) return;
+    if (!this.activeAgent || this.state !== 'connected') return;
+    this.userEditedSincePlanningNotify = false;
+    const sent = this.sendJson({
+      v: AGENT_PROTOCOL_VERSION,
+      type: 'chat-document-saved',
+      revision: this.revision.revision,
+      ...(this.documentName ? { fileName: this.documentName } : {}),
+    });
+    if (!sent) {
+      this.userEditedSincePlanningNotify = true;
+      return;
+    }
+    this.emit({ type: 'planning-document-saved', revision: this.revision.revision });
+  }
+
   private syncEditingLease(): void {
     const next = deriveAgentEditingLease({
       turnRunning: this.turnRunning,
       activeToolRequests: this.activeToolRequests,
       agent: this.editingAgent,
+      workflow: this.workflow,
+      phase: this.phase,
     });
     if (next.active === this.editingLease.active && next.agent === this.editingLease.agent) return;
     this.editingLease = next;
@@ -1274,12 +1421,15 @@ class AgentBridgeImpl implements AgentBridge {
           if (typeof session.documentName === 'string' || session.documentName === null) this.documentName = session.documentName;
           this.turnRunning = session.status === 'running';
           this.permissionProfile = session.permissionProfile === 'unrestricted' ? 'unrestricted' : 'safe';
+          this.serviceTier = session.serviceTier === 'fast' ? 'fast' : 'standard';
           this.activeTemplateId = typeof session.activeTemplateId === 'string' ? session.activeTemplateId : null;
           this.activeTemplate = this.activeTemplateId
             ? this.templateCatalog.templates.find((template) => template.id === this.activeTemplateId) ?? null
             : null;
-          this.syncWorkflowState(session, 'direct', 'direct');
+          this.finishWorkflowSwitch();
+          this.syncWorkflowState(session, this.workflow, this.phase);
           this.pendingChatStart = null;
+          this.notifyPlanningDocumentSaved();
           this.emit({
             type: 'chat-started',
             agent: session.agent,
@@ -1290,6 +1440,7 @@ class AgentBridgeImpl implements AgentBridge {
             ...(typeof session.documentId === 'string' || session.documentId === null ? { documentId: session.documentId } : {}),
             ...(typeof session.documentName === 'string' || session.documentName === null ? { documentName: session.documentName } : {}),
             permissionProfile: this.permissionProfile,
+            serviceTier: this.serviceTier,
             ...this.workflowState(),
           });
           if (this.turnRunning) {
@@ -1317,10 +1468,16 @@ class AgentBridgeImpl implements AgentBridge {
               console.warn('[AgentBridge] reconnect endTurn 실패:', e);
             }
           }
-          this.resetWorkflowState();
+          if (this.workflow === 'plan' || this.workflow === 'question' || this.workflowSwitchPending) {
+            this.finishWorkflowSwitch();
+            this.syncEditingLease();
+          } else {
+            this.resetWorkflowState();
+          }
         }
         this.syncEditingLease();
         this.emit({ type: 'workflow-changed', ...this.workflowState() });
+        this.flushQueuedMessages();
         if (wasRunning && !this.turnRunning) {
           // 연결이 끊긴 사이에 끝난 턴 — 잃어버린 turn-end 를 합성해 UI 를 되돌린다.
           if (this.pendingTurnOpen) {
@@ -1348,10 +1505,14 @@ class AgentBridgeImpl implements AgentBridge {
         if (typeof msg.model === 'string') this.selectedModel = msg.model;
         if (typeof msg.effort === 'string') this.selectedEffort = msg.effort;
         if (msg.permissionProfile === 'safe' || msg.permissionProfile === 'unrestricted') this.permissionProfile = msg.permissionProfile;
+        if (msg.serviceTier === 'fast' || msg.serviceTier === 'standard') this.serviceTier = msg.serviceTier;
         if (typeof msg.threadId === 'string') this.threadId = msg.threadId;
         if (typeof msg.documentId === 'string' || msg.documentId === null) this.documentId = msg.documentId;
         if (typeof msg.documentName === 'string' || msg.documentName === null) this.documentName = msg.documentName;
-        this.syncWorkflowState(msg, 'direct', 'direct');
+        const fallbackWorkflow = this.workflow;
+        const fallbackPhase = this.phase;
+        this.finishWorkflowSwitch();
+        this.syncWorkflowState(msg, fallbackWorkflow, fallbackPhase);
         this.emit({
           type: 'chat-started',
           agent: isAgentName(msg.agent) ? msg.agent : this.selectedAgent,
@@ -1362,15 +1523,24 @@ class AgentBridgeImpl implements AgentBridge {
           ...(typeof msg.documentId === 'string' || msg.documentId === null ? { documentId: msg.documentId } : {}),
           ...(typeof msg.documentName === 'string' || msg.documentName === null ? { documentName: msg.documentName } : {}),
           permissionProfile: this.permissionProfile,
+          serviceTier: this.serviceTier,
           ...this.workflowState(),
         });
         this.flushQueuedMessages();
+        this.notifyPlanningDocumentSaved();
         break;
       }
       case 'chat-permission-changed': {
         if (msg.permissionProfile === 'safe' || msg.permissionProfile === 'unrestricted') {
           this.permissionProfile = msg.permissionProfile;
           this.emit({ type: 'permission-changed', permissionProfile: this.permissionProfile });
+        }
+        break;
+      }
+      case 'chat-service-tier-changed': {
+        if (msg.serviceTier === 'fast' || msg.serviceTier === 'standard') {
+          this.serviceTier = msg.serviceTier;
+          this.emit({ type: 'service-tier-changed', serviceTier: this.serviceTier });
         }
         break;
       }
@@ -1392,8 +1562,11 @@ class AgentBridgeImpl implements AgentBridge {
         break;
       }
       case 'workflow-changed': {
+        this.finishWorkflowSwitch();
         this.syncWorkflowState(msg, 'direct', 'planning');
         this.emit({ type: 'workflow-changed', ...this.workflowState() });
+        this.flushQueuedMessages();
+        this.notifyPlanningDocumentSaved();
         break;
       }
       case 'plan-ready': {
@@ -1442,6 +1615,47 @@ class AgentBridgeImpl implements AgentBridge {
           ...(changedTemplate && ['added', 'renamed', 'replaced', 'deleted'].includes(msg.change?.type)
             ? { change: { type: msg.change.type, template: changedTemplate } }
             : {}),
+        });
+        break;
+      }
+      case 'agent-instructions': {
+        const status = readAgentInstructionsStatus(msg.status);
+        if (!status) break;
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, status);
+        this.emit({
+          type: 'agent-instructions',
+          status,
+          changedBy: typeof msg.changedBy === 'string' ? msg.changedBy : 'system',
+        });
+        break;
+      }
+      case 'agent-instructions-draft': {
+        const draft = readAgentInstructionsDraft(msg.draft);
+        if (draft) this.emit({ type: 'agent-instructions-draft', draft });
+        break;
+      }
+      case 'agent-instructions-draft-cleared': {
+        const outcome = msg.outcome === 'confirmed'
+          || msg.outcome === 'rejected'
+          || msg.outcome === 'expired'
+          || msg.outcome === 'replaced'
+          || msg.outcome === 'stale'
+          ? msg.outcome
+          : null;
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, outcome === 'rejected');
+        if (typeof msg.draftId === 'string' && outcome) {
+          this.emit({ type: 'agent-instructions-draft-cleared', draftId: msg.draftId, outcome });
+        }
+        break;
+      }
+      case 'agent-instructions-error': {
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, null);
+        const status = readAgentInstructionsStatus(msg.status);
+        this.emit({
+          type: 'agent-instructions-error',
+          code: typeof msg.code === 'string' ? msg.code : 'INSTRUCTIONS_ERROR',
+          message: typeof msg.message === 'string' ? msg.message : 'AGENTS.md request failed',
+          ...(status ? { status } : {}),
         });
         break;
       }
@@ -1619,6 +1833,16 @@ class AgentBridgeImpl implements AgentBridge {
       case 'chat-error': {
         // 시작 실패 시 대기 중이던 메시지를 정리하지 않으면 sendUserMessage promise가
         // 영원히 미해결로 남아 컴포저가 잠기고, 다음 chat-started에 스테일 메시지가 흘러간다.
+        // 구상 전환과 무관한 오류(AGENT_BUSY 등)로 낙관적 잠금 해제를 되돌리면
+        // Codex 재시작 중에 문서가 다시 잠긴다.
+        const errorCode = typeof msg.code === 'string' ? msg.code : 'RPC_ERROR';
+        if (
+          errorCode === 'BACKEND_SWITCH_FAILED'
+          || errorCode === 'INVALID_WORKFLOW'
+          || errorCode === 'WORKFLOW_ERROR'
+        ) {
+          this.revertWorkflowSwitch();
+        }
         for (const message of this.queuedMessages) message.resolve(null);
         this.queuedMessages = [];
         this.pendingChatStart = null;
@@ -1636,6 +1860,12 @@ class AgentBridgeImpl implements AgentBridge {
           threadId: typeof msg.threadId === 'string' ? msg.threadId : '',
           title: typeof msg.title === 'string' ? msg.title : null,
         });
+        break;
+      }
+      case 'checkpoint-title-result': {
+        if (typeof msg.requestId === 'string') {
+          this.requests.settle(msg.requestId, readCheckpointTitleResult(msg.result));
+        }
         break;
       }
       case 'agent-event': {
@@ -1704,6 +1934,15 @@ class AgentBridgeImpl implements AgentBridge {
     const args = msg.args;
     const agent: AgentName = isAgentName(msg.agent) ? msg.agent : (this.activeAgent ?? 'claude');
     this.editingAgent = agent;
+    // 허브가 이미 구상 중이면 로컬 전환이 늦어도 도구 호출로 문서를 잠그지 않는다.
+    if (
+      isAgentWorkflow(msg.workflow)
+      && isAgentPhase(msg.phase)
+      && planModeAllowsUserEditing(msg.workflow, msg.phase)
+    ) {
+      this.workflow = msg.workflow;
+      this.phase = msg.phase;
+    }
     this.activeToolRequests += 1;
     this.syncEditingLease();
     void this.executor
@@ -1776,6 +2015,10 @@ class AgentBridgeImpl implements AgentBridge {
     return this.permissionProfile;
   }
 
+  getServiceTier(): ServiceTier {
+    return this.serviceTier;
+  }
+
   getWorkflowState() {
     return this.workflowState();
   }
@@ -1813,6 +2056,7 @@ class AgentBridgeImpl implements AgentBridge {
       ...(this.selectedModel ? { model: this.selectedModel } : {}),
       ...(this.selectedEffort ? { effort: this.selectedEffort } : {}),
       permissionProfile: this.permissionProfile,
+      serviceTier: this.serviceTier,
       ...(force ? { force: true } : {}),
     };
     this.pendingChatStart = {
@@ -1820,6 +2064,7 @@ class AgentBridgeImpl implements AgentBridge {
       model: this.selectedModel ?? undefined,
       effort: this.selectedEffort ?? undefined,
       permissionProfile: this.permissionProfile,
+      serviceTier: this.serviceTier,
       workflow,
       threadId,
       documentId,
@@ -1842,6 +2087,7 @@ class AgentBridgeImpl implements AgentBridge {
     // Full access is deliberately scoped to one live chat and never becomes
     // the default for a new or reopened thread.
     this.permissionProfile = 'safe';
+    this.serviceTier = 'standard';
     this.resetWorkflowState();
     if (this.state === 'connected') {
       this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-stop' });
@@ -1868,49 +2114,49 @@ class AgentBridgeImpl implements AgentBridge {
     return requestId;
   }
 
+  requestCheckpointTitle(input: CheckpointTitleRequest): Promise<CheckpointTitleResult | null> {
+    return this.request<CheckpointTitleResult>(
+      {
+        type: 'checkpoint-title-request',
+        commitId: input.commitId,
+        titleRevision: input.titleRevision,
+        appLanguage: input.appLanguage,
+        summary: input.summary,
+      },
+      'checkpoint-title',
+      45_000,
+    );
+  }
+
   sendUserMessage(text: string, skillName?: string, stagedReferenceIds: string[] = []): Promise<string | null> {
     const context = this.referenceContext();
     const messageId = stagedReferenceIds.length > 0 ? `message-${++this.requestSeq}` : undefined;
     return new Promise((resolve) => {
       const message = { text, skillName, context, messageId, stagedReferenceIds: [...stagedReferenceIds], resolve };
-      if (this.activeAgent === null) {
-        this.queuedMessages.push(message);
-        if (this.state === 'connected') {
-          this.sendJson({
-            v: AGENT_PROTOCOL_VERSION,
-            type: 'chat-start',
-            agent: this.selectedAgent,
-            workflow: this.workflow,
-            threadId: context.threadId,
-            documentId: context.documentId,
-            documentName: context.documentName ?? null,
-            history: this.chatHistory,
-            ...(this.selectedModel ? { model: this.selectedModel } : {}),
-            ...(this.selectedEffort ? { effort: this.selectedEffort } : {}),
-            permissionProfile: this.permissionProfile,
-          });
-        } else {
-          this.pendingChatStart = {
-            agent: this.selectedAgent,
-            model: this.selectedModel ?? undefined,
-            effort: this.selectedEffort ?? undefined,
-            permissionProfile: this.permissionProfile,
-            workflow: this.workflow,
-            threadId: context.threadId,
-            documentId: context.documentId,
-            documentName: context.documentName ?? null,
-            history: this.chatHistory,
-          };
-        }
-        return;
-      }
-      if (this.queuedMessages.length > 0) {
+      if (this.workflowSwitchPending || this.activeAgent === null || this.queuedMessages.length > 0) {
         this.queuedMessages.push(message);
         this.flushQueuedMessages();
         return;
       }
       this.dispatchUserMessage(message);
     });
+  }
+
+  private rememberPendingChatStart(): void {
+    if (this.pendingChatStart) return;
+    const context = this.referenceContext();
+    this.pendingChatStart = {
+      agent: this.selectedAgent,
+      model: this.selectedModel ?? undefined,
+      effort: this.selectedEffort ?? undefined,
+      permissionProfile: this.permissionProfile,
+      serviceTier: this.serviceTier,
+      workflow: this.workflow,
+      threadId: context.threadId,
+      documentId: context.documentId,
+      documentName: context.documentName ?? null,
+      history: this.chatHistory,
+    };
   }
 
   private dispatchUserMessage(message: (typeof this.queuedMessages)[number]): void {
@@ -1928,7 +2174,30 @@ class AgentBridgeImpl implements AgentBridge {
   }
 
   private flushQueuedMessages(): void {
-    if (this.state !== 'connected') return;
+    if (this.workflowSwitchPending) return;
+    if (this.queuedMessages.length === 0) return;
+    if (this.state !== 'connected') {
+      if (this.activeAgent === null) this.rememberPendingChatStart();
+      return;
+    }
+    if (this.activeAgent === null) {
+      const context = this.referenceContext();
+      this.sendJson({
+        v: AGENT_PROTOCOL_VERSION,
+        type: 'chat-start',
+        agent: this.selectedAgent,
+        workflow: this.workflow,
+        threadId: context.threadId,
+        documentId: context.documentId,
+        documentName: context.documentName ?? null,
+        history: this.chatHistory,
+        ...(this.selectedModel ? { model: this.selectedModel } : {}),
+        ...(this.selectedEffort ? { effort: this.selectedEffort } : {}),
+        permissionProfile: this.permissionProfile,
+        serviceTier: this.serviceTier,
+      });
+      return;
+    }
     const queued = this.queuedMessages;
     this.queuedMessages = [];
     for (const message of queued) this.dispatchUserMessage(message);
@@ -2190,6 +2459,9 @@ class AgentBridgeImpl implements AgentBridge {
   }
 
   setWorkflow(workflow: AgentWorkflow): void {
+    // Codex 등 허브 전환은 프로세스 재시작을 기다리므로, 구상 모드 잠금 해제는
+    // 로컬에서 즉시 적용한다. 메시지 전송은 workflow-changed 까지 미룬다.
+    this.beginWorkflowSwitch(workflow);
     this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-workflow-set', workflow });
   }
 
@@ -2208,6 +2480,12 @@ class AgentBridgeImpl implements AgentBridge {
 
   setPermissionProfile(profile: PermissionProfile): void {
     this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-permission-set', permissionProfile: profile });
+  }
+
+  setServiceTier(tier: ServiceTier): void {
+    this.serviceTier = tier === 'fast' ? 'fast' : 'standard';
+    if (this.activeAgent === null) return;
+    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-service-tier-set', serviceTier: this.serviceTier });
   }
 
   listSkills(): void {
@@ -2254,6 +2532,47 @@ class AgentBridgeImpl implements AgentBridge {
     const requestId = `writing-style-status-${++this.requestSeq}`;
     this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'writing-style-status-request', requestId });
     return requestId;
+  }
+
+  requestAgentInstructions(): Promise<AgentInstructionsStatus | null> {
+    return this.request<AgentInstructionsStatus>(
+      { type: 'agent-instructions-request' },
+      'agent-instructions',
+    );
+  }
+
+  saveAgentInstructions(
+    content: string,
+    expectedRevision: number,
+  ): Promise<AgentInstructionsStatus | null> {
+    return this.request<AgentInstructionsStatus>(
+      { type: 'agent-instructions-save', content, expectedRevision },
+      'agent-instructions-save',
+    );
+  }
+
+  confirmAgentInstructionsDraft(
+    draft: AgentInstructionsDraft,
+  ): Promise<AgentInstructionsStatus | null> {
+    return this.request<AgentInstructionsStatus>(
+      {
+        type: 'agent-instructions-draft-confirm',
+        draftId: draft.id,
+        confirmationToken: draft.confirmationToken,
+      },
+      'agent-instructions-confirm',
+    );
+  }
+
+  rejectAgentInstructionsDraft(draft: AgentInstructionsDraft): Promise<boolean> {
+    return this.request<boolean>(
+      {
+        type: 'agent-instructions-draft-reject',
+        draftId: draft.id,
+        confirmationToken: draft.confirmationToken,
+      },
+      'agent-instructions-reject',
+    ).then((result) => result === true);
   }
 
   requestWritingStyleCatalog(refresh = false): Promise<WritingStyleCatalog | null> {
@@ -2429,6 +2748,8 @@ class AgentBridgeImpl implements AgentBridge {
     this.listeners.clear();
     this.revealUnsub?.();
     this.revealUnsub = null;
+    for (const off of this.documentNotifyUnsubs) off();
+    this.documentNotifyUnsubs = [];
     this.reveal.dispose();
     this.pendingEdits.dispose();
     this.overlay.dispose();
