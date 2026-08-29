@@ -1566,9 +1566,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   workspaceTrailing.insertBefore(cloudUi.workspaceButton, environmentWrap);
 
   const applyHancomGitVisibility = (enabled: boolean): void => {
-    versionsBtn.hidden = !enabled;
     environmentWrap.hidden = !enabled;
-    if (!enabled && versionsPanelOpen) closeVersionsPage();
     if (!enabled && environmentPanelOpen) setEnvironmentPanelOpen(false);
   };
   applyHancomGitVisibility(userSettings.getUseHancomGit());

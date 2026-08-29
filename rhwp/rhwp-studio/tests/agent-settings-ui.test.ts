@@ -71,7 +71,7 @@ test('헤더에 설정(기어) 버튼이 있다', () => {
   assert.match(source, /settingsBtn\.setAttribute\('aria-label', '설정'\)/);
   assert.match(source, /settingsBtn\.setAttribute\('aria-controls', 'ag-settings-panel'\)/);
   assert.match(source, /settingsBtn\.appendChild\(createIcon\('gear'\)\)/);
-  assert.match(source, /headerActions\.append\(threadsBtn, versionsBtn, settingsBtn\)/);
+  assert.match(source, /headerActions\.append\(versionsBtn, settingsBtn, threadsBtn\)/);
   assert.match(icons, /gear: 'M/);
   assert.match(icons, /refresh: 'M/);
 });
