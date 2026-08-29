@@ -102,6 +102,12 @@ test('existing environment requires a pinned identity and exact pairing code', (
 
 test('setup issues turn backend failures into actionable Korean guidance', () => {
   assert.equal(mapCloudSetupIssue(new Error('Permission denied (publickey)')).title, 'SSH 인증에 실패했습니다');
+  assert.match(
+    mapCloudSetupIssue(new Error('Permission denied (publickey)')).guidance,
+    /OpenSSH 인증 에이전트 서비스/,
+  );
+  assert.equal(mapCloudSetupIssue(new Error('spawn ssh ENOENT')).title, '이 기기에 OpenSSH 클라이언트가 없습니다');
+  assert.match(mapCloudSetupIssue(new Error('spawn ssh ENOENT')).guidance, /선택 기능/);
   assert.equal(mapCloudSetupIssue(new Error('passwordless sudo is required')).title, '비밀번호 없는 sudo가 필요합니다');
   assert.equal(mapCloudSetupIssue(new Error('tailscale is not connected')).title, 'VPS의 Tailscale을 확인하세요');
   assert.match(mapCloudSetupIssue(new Error('No route to host'), 'https').guidance, /방화벽과 HTTPS/);

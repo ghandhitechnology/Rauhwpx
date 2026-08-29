@@ -64,6 +64,20 @@ export function normalizeCloudEndpoint(raw) {
   return url.toString().replace(/\/$/, '');
 }
 
+/**
+ * ssh는 -o 값을 설정 파일 문법으로 다시 토큰화하므로 공백이 든 경로(예: Windows의
+ * C:\Users\Foo Bar\...)는 값이 첫 공백에서 잘리고 나머지는 조용히 버려진다.
+ * 따옴표로 감싸야 전체 경로가 유지된다.
+ */
+export function sshOptionFilePath(name, value) {
+  const text = String(value ?? '');
+  if (/[\u0000\r\n]/.test(text)) throw new Error(`${name} path is invalid`);
+  const escaped = text.replace(/%/g, '%%');
+  return /[\s"]/.test(escaped)
+    ? `${name}="${escaped.replace(/"/g, '\\"')}"`
+    : `${name}=${escaped}`;
+}
+
 export function normalizeSshConfig(raw = {}) {
   const host = requiredString(raw.host, 'SSH host', 253);
   if (isIP(host) === 0 && !HOST_RE.test(host)) throw new Error('SSH host is invalid');

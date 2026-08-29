@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { recoverReplacedFile, replaceFile } from './fs-replace.mjs';
 
 export const CLOUD_HANDOFF_STATES = Object.freeze([
   'preparing',
@@ -74,16 +75,17 @@ function validateTakeoverReceipt(receipt) {
   return receipt;
 }
 
-async function atomicJsonWrite(filePath, value) {
+async function atomicJsonWrite(filePath, value, platform) {
   await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
   const temp = `${filePath}.tmp-${process.pid}-${randomUUID()}`;
   await fs.writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-  await fs.rename(temp, filePath);
+  await replaceFile(temp, filePath, platform);
 }
 
 export class CloudHandoffStore {
   #filePath;
   #payloadRoot;
+  #platform;
   #records = new Map();
   #takeoverReceipts = new Map();
   #loaded = false;
@@ -91,10 +93,11 @@ export class CloudHandoffStore {
   #writeChain = Promise.resolve();
   #persistTimer = null;
 
-  constructor({ filePath }) {
+  constructor({ filePath, platform = process.platform }) {
     if (!filePath) throw new Error('Cloud handoff store requires a file path');
     this.#filePath = filePath;
     this.#payloadRoot = path.join(path.dirname(filePath), 'pending-payloads');
+    this.#platform = platform;
   }
 
   load() {
@@ -108,6 +111,7 @@ export class CloudHandoffStore {
   }
 
   async #load() {
+    await recoverReplacedFile(this.#filePath, this.#platform);
     try {
       const parsed = JSON.parse(await fs.readFile(this.#filePath, 'utf8'));
       if (parsed?.version !== 1 || !Array.isArray(parsed.records)) throw new Error('Unsupported handoff store');
@@ -433,7 +437,7 @@ export class CloudHandoffStore {
       records: [...this.#records.values()],
       takeoverReceipts: [...this.#takeoverReceipts.values()],
     };
-    const operation = this.#writeChain.then(() => atomicJsonWrite(this.#filePath, snapshot));
+    const operation = this.#writeChain.then(() => atomicJsonWrite(this.#filePath, snapshot, this.#platform));
     this.#writeChain = operation.catch(() => {});
     return operation;
   }
@@ -463,7 +467,7 @@ export function cloudConflictPath(originalPath, now = new Date()) {
   return path.join(parsed.dir, `${parsed.name}.cloud-${stamp}${parsed.ext}`);
 }
 
-export async function writeVerifiedRecoveryFile({ filePath, bytes, expectedDigest }) {
+export async function writeVerifiedRecoveryFile({ filePath, bytes, expectedDigest, platform = process.platform }) {
   const payload = Buffer.from(bytes ?? []);
   if (!payload.length) throw new Error('Cloud result is empty');
   const actualDigest = sha256Hex(payload);
@@ -476,6 +480,6 @@ export async function writeVerifiedRecoveryFile({ filePath, bytes, expectedDiges
     await fs.rm(temp, { force: true });
     throw new Error('Cloud result could not be verified after writing');
   }
-  await fs.rename(temp, filePath);
+  await replaceFile(temp, filePath, platform);
   return { filePath, byteLength: payload.length, digest: actualDigest };
 }

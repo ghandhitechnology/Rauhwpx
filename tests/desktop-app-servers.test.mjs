@@ -206,7 +206,9 @@ test('the Railway provider creates a reachable sandbox and returns a pairing rec
   const { provider, transport } = railwayProvider(SPAWN_ROUTES, {
     probeHealth: async (endpoint) => {
       probes.push(endpoint);
-      if (probes.length === 1) throw new Error('fetch failed');
+      if (probes.length === 1) {
+        throw Object.assign(new Error('fetch failed'), { retryable: true });
+      }
       return { ok: true, serverPublicKey: SERVER_KEY };
     },
   });
@@ -496,7 +498,9 @@ test('a Railway sandbox that never becomes usable is removed instead of left beh
   assert.equal(journalClears, 1, 'confirmed cleanup clears the pending journal');
 
   const unhealthy = railwayProvider(SPAWN_ROUTES, {
-    probeHealth: async () => { throw new Error('fetch failed'); },
+    probeHealth: async () => {
+      throw Object.assign(new Error('fetch failed'), { retryable: true });
+    },
     healthTimeoutMs: 0,
   });
   await assert.rejects(unhealthy.provider.spawn({ onLine: () => {} }), { code: 'SANDBOX_UNHEALTHY' });
@@ -506,7 +510,10 @@ test('a Railway sandbox that never becomes usable is removed instead of left beh
     probeHealth: async () => ({ ok: true, serverPublicKey: 'ed25519:short' }),
     healthTimeoutMs: 0,
   });
-  await assert.rejects(wrongKey.provider.spawn({ onLine: () => {} }), { code: 'SANDBOX_UNHEALTHY' });
+  await assert.rejects(wrongKey.provider.spawn({ onLine: () => {} }), {
+    code: 'SANDBOX_HEALTH_INVALID',
+    retryable: false,
+  });
 
   const rejected = railwayProvider({
     RauhwpxServiceCreate: { status: 401, body: { errors: [{ message: 'Not Authorized' }] } },
@@ -523,6 +530,22 @@ test('a Railway sandbox that never becomes usable is removed instead of left beh
     reconcileAttempts: 2,
   });
   await assert.rejects(offline.spawn({ onLine: () => {} }), { code: 'PROVIDER_UNREACHABLE' });
+});
+
+test('Railway fails immediately on deterministic health errors and removes the service', async () => {
+  let probes = 0;
+  const { provider, transport } = railwayProvider(SPAWN_ROUTES, {
+    probeHealth: async () => {
+      probes += 1;
+      throw new Error('SSH host is required');
+    },
+    healthTimeoutMs: 60_000,
+    sleep: async () => { throw new Error('deterministic health failures must not sleep'); },
+  });
+
+  await assert.rejects(provider.spawn({ onLine: () => {} }), /SSH host is required/);
+  assert.equal(probes, 1);
+  assert.equal(transport.names().filter((name) => name === 'RauhwpxServiceDelete').length, 1);
 });
 
 test('Railway status maps deployments to lifecycles and teardown is idempotent', async () => {

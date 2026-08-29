@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { constants as fsConstants, promises as fs } from 'node:fs';
 import path from 'node:path';
 import { cloudConflictPath } from './cloud-handoff.mjs';
+import { replaceFile as replaceFileWindowsSafe } from './fs-replace.mjs';
 
 function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
@@ -48,21 +49,7 @@ async function replaceFile(targetPath, bytes, platform) {
     if (originalMode !== null) await fs.chmod(targetPath, originalMode);
     return;
   }
-  const backup = path.join(
-    path.dirname(targetPath),
-    `.${path.basename(targetPath)}.rauhwpx-cloud-backup-${randomUUID()}`,
-  );
-  let movedOriginal = false;
-  try {
-    await fs.rename(targetPath, backup);
-    movedOriginal = true;
-    await fs.rename(temp, targetPath);
-    await fs.rm(backup, { force: true });
-  } catch (error) {
-    await fs.rm(temp, { force: true }).catch(() => {});
-    if (movedOriginal) await fs.rename(backup, targetPath).catch(() => {});
-    throw error;
-  }
+  await replaceFileWindowsSafe(temp, targetPath, platform);
 }
 
 export async function applyCloudRecovery({

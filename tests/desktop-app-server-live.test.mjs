@@ -12,6 +12,7 @@ import test from 'node:test';
 import { CloudClient } from '../desktop/cloud-client.mjs';
 import { CloudCoordinator } from '../desktop/cloud-coordinator.mjs';
 import { createRailwayServerProvider } from '../desktop/cloud-railway.mjs';
+import { CloudApiTransport, SshTunnelManager } from '../desktop/cloud-ssh-tunnel.mjs';
 import { parseConfig } from '../cloud/src/config.mjs';
 import { createCloudRuntime } from '../cloud/src/runtime.mjs';
 
@@ -77,10 +78,14 @@ async function bootControlPlane(t, variables) {
   return { config, runtime, started, origin: `http://127.0.0.1:${port}`, port };
 }
 
-function liveHarness(t, { boot = true } = {}) {
+async function liveHarness(t, { boot = true, healthStatuses = [] } = {}) {
   const deployStatus = { value: 'SUCCESS' };
+  const pendingHealthStatuses = [...healthStatuses];
+  let healthRequests = 0;
   const calls = [];
   let plane = null;
+  const desktopDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-live-desktop-'));
+  t.after(() => fs.rm(desktopDirectory, { recursive: true, force: true }));
 
   const routes = {
     RauhwpxServiceCreate: async (variables) => {
@@ -108,11 +113,24 @@ function liveHarness(t, { boot = true } = {}) {
     const requested = new URL(typeof input === 'string' ? input : input.url);
     assert.equal(requested.hostname, SANDBOX_HOST, 'the desktop only talks to the sandbox domain');
     if (!plane) throw new TypeError('fetch failed');
+    if (requested.pathname === `${BASE_PATH}/v1/health`) {
+      healthRequests += 1;
+      const status = pendingHealthStatuses.shift();
+      if (status) return Promise.resolve(new Response('Application not found', { status }));
+    }
     return fetch(new URL(`${requested.pathname}${requested.search}`, plane.origin), options);
   };
 
   const vault = memoryVault();
-  const client = new CloudClient({ vault, fetchImpl: sandboxFetch });
+  const client = new CloudClient({
+    vault,
+    fetchImpl: sandboxFetch,
+    transport: new CloudApiTransport({
+      tunnelManager: new SshTunnelManager({
+        knownHostsPath: path.join(desktopDirectory, 'ssh-known-hosts'),
+      }),
+    }),
+  });
   const provider = createRailwayServerProvider({
     config: RAILWAY_CONFIG,
     fetchImpl: railwayFetch,
@@ -126,7 +144,7 @@ function liveHarness(t, { boot = true } = {}) {
     client,
     store: { load: async () => [], list: async () => [] },
     provisioner: {},
-    recoveryDir: path.join(os.tmpdir(), 'rauhwpx-live-recovery'),
+    recoveryDir: path.join(desktopDirectory, 'recovery'),
     appServers: [provider],
   });
   return {
@@ -135,14 +153,27 @@ function liveHarness(t, { boot = true } = {}) {
     provider,
     vault,
     deployStatus,
+    healthRequests: () => healthRequests,
     names: () => calls.map((call) => call.name),
     createVariables: () => calls.find((call) => call.name === 'RauhwpxServiceCreate')?.variables.input.variables,
     plane: () => plane,
   };
 }
 
+test('Railway onboarding waits through a transient route miss before health', async (t) => {
+  const live = await liveHarness(t, { healthStatuses: [404] });
+  await live.coordinator.start();
+
+  const ready = await live.coordinator.spawnAppServer({ deviceName: 'Rauhwpx integration' });
+
+  assert.equal(ready.server.lifecycle, 'ready');
+  assert.equal(live.healthRequests() >= 2, true);
+  assert.equal(live.names().includes('RauhwpxServiceDelete'), false);
+  await live.coordinator.teardownAppServer();
+});
+
 test('the app-provided path pairs against a real control plane and closes bootstrap for good', async (t) => {
-  const live = liveHarness(t);
+  const live = await liveHarness(t);
   await live.coordinator.start();
   assert.equal(await live.client.isPaired(), false);
 
@@ -198,7 +229,7 @@ test('the app-provided path pairs against a real control plane and closes bootst
 });
 
 test('a sandbox that never answers is deleted and leaves the desktop unconfigured', async (t) => {
-  const live = liveHarness(t, { boot: false });
+  const live = await liveHarness(t, { boot: false });
   await live.coordinator.start();
   await assert.rejects(live.coordinator.spawnAppServer(), { code: 'SANDBOX_UNHEALTHY' });
   assert.equal(live.names().at(-1), 'RauhwpxServiceDelete', 'the paid service is removed');
