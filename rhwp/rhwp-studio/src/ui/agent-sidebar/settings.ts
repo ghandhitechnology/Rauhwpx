@@ -2280,7 +2280,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   /**
    * Rau 계정 카드 — 로그인한 계정과 남은 체험 크레딧.
-   * 계정 이메일이 없으면(옛 로그인) 키 꼬리를 대신 보여 준다.
+   * 키 정보는 사용자에게 노출하지 않는다.
    */
   function renderRauAccount(): void {
     const agent = setupAgent;
@@ -2288,8 +2288,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     const connected = status?.setupComplete === true || status?.connected === true;
     setupAccountPane.hidden = agent !== 'rau' || !connected || setupReauth;
     if (setupAccountPane.hidden) return;
-    setupAccountEmail.textContent = status?.account
-      ?? (status?.keyTail ? `연결된 키 ****${status.keyTail}` : '연결된 계정');
+    setupAccountEmail.textContent = status?.account ?? '계정 이메일을 확인할 수 없습니다';
     const credits = usage?.rau ?? null;
     const percent = rauCreditPercent();
     const rows: HTMLElement[] = [];

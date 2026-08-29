@@ -570,7 +570,8 @@ test('Rau 는 목록 맨 앞이고 흰 테두리 · 로그인 전용 설정 · $
 test('Rau 설정 카드는 로그인된 계정과 체험 크레딧 잔량 막대를 함께 보여 준다', () => {
   assert.match(settings, /setupAccountTitle = el\('h3', 'ag-agent-setup-section-title', '로그인된 계정'\)/);
   assert.match(settings, /setupAccountEmail\.textContent = status\?\.account/);
-  assert.match(settings, /연결된 키 \*\*\*\*/);
+  assert.match(settings, /계정 이메일을 확인할 수 없습니다/);
+  assert.doesNotMatch(settings, /연결된 키 \*\*\*\*/);
   // 잔량 막대는 사용량 갱신마다 다시 그린다.
   assert.match(settings, /renderUsage\(\): void \{\s*\n\s*renderCliproxy\(\);\s*\n\s*renderRauUsage\(\);\s*\n\s*renderRauAccount\(\);/);
   assert.match(settingsCss, /\.ag-agent-setup-account \{[\s\S]*?border-radius: 12px/);
