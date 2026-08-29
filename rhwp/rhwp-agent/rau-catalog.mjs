@@ -1,11 +1,4 @@
-/** Rau 체험 키에 허용하는 OpenRouter 모델. 허브 카탈로그와 같은 네 줄이다. */
-export const RAU_MODEL_IDS = Object.freeze([
-  'z-ai/glm-5.3-flash',
-  'deepseek/deepseek-v4-flash-0731',
-  'qwen/qwen3.8-flash',
-  'upstage/solar-pro4',
-]);
-
+/** Rau가 OpenRouter에서 제공하는 고정 모델 목록. */
 export const RAU_LOCKED_MODELS = Object.freeze([
   {
     id: 'z-ai/glm-5.3-flash',
@@ -50,4 +43,3 @@ export const RAU_LOCKED_MODELS = Object.freeze([
 ]);
 
 export const RAU_DEFAULT_MODEL_ID = RAU_LOCKED_MODELS[0].id;
-export const RAU_CREDIT_LIMIT_USD = 5;

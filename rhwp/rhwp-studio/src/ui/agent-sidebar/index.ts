@@ -954,11 +954,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (rau) rau.hidden = !rauSetupComplete && selectedAgent !== 'rau';
   }
 
-  function rauCreditsEmpty(): boolean {
-    const credits = lastUsage?.rau;
-    return rauSetupComplete && credits != null && credits.balanceUsd <= 0 && !credits.error;
-  }
-
   syncProviderMenu();
 
   providerTrigger.addEventListener('click', (e) => {
@@ -3287,10 +3282,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       return;
     }
     if (planningPhase === 'switching' || chatStartPendingThreadId !== null || attachmentsSending || referenceLibrary.hasBlockingDrafts()) return;
-    if (selectedAgent === 'rau' && rauCreditsEmpty()) {
-      systemMessage('체험 크레딧이 다 됐어요. 다른 모델을 연결해 주세요.');
-      return;
-    }
     let text = input.value.trim();
     if ((!text && !activeComposerSkill && !referenceLibrary.hasDrafts()) || connState !== 'connected') return;
     if (referenceLibrary.hasImageDrafts() && !modelSupportsImages(selectedAgent, selectedModel)) {
@@ -4425,11 +4416,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       send.disabled = true;
       composerSkillClear.disabled = true;
       input.placeholder = `"${readOnlyDocLabel}" 문서의 채팅 — 읽기 전용`;
-    } else if (selectedAgent === 'rau' && rauCreditsEmpty()) {
-      input.disabled = connState !== 'connected';
-      send.disabled = true;
-      composerSkillClear.disabled = input.disabled;
-      input.placeholder = '체험 크레딧이 다 됐어요. 다른 모델을 연결해 주세요.';
     } else {
       const chatStarting = chatStartPendingThreadId !== null;
       input.disabled = connState !== 'connected' || attachmentsSending || chatStarting;

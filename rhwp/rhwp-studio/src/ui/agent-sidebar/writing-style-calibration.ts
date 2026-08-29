@@ -599,7 +599,7 @@ export function createWritingStyleCalibration(
     if (catalogProvider) {
       if (!catalogProvider.available) {
         const piReason = agent === 'pi' ? '설정의 Pi 연결에서 OpenRouter 키와 모델을 먼저 선택해 주세요.' : '';
-        const rauReason = agent === 'rau' ? '설정의 Rau 카드에서 체험 크레딧을 먼저 연결해 주세요.' : '';
+        const rauReason = agent === 'rau' ? '설정의 Rau 카드에서 OpenRouter를 먼저 연결해 주세요.' : '';
         return { available: false, pending: false, label: (agent === 'pi' || agent === 'rau') ? '설정 필요' : '사용 불가', reason: piReason || rauReason || catalogProvider.error || `${catalogProvider.name} 실행 환경을 찾지 못했습니다.` };
       }
       if (catalogProvider.models.length === 0) return { available: false, pending: false, label: '모델 없음', reason: `${catalogProvider.name}에서 사용할 수 있는 모델이 없습니다.` };

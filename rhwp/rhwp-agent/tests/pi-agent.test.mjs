@@ -270,15 +270,15 @@ test('formatPiExitError redacts key-shaped strings and falls back without stderr
   );
 });
 
-test('OpenRouter 402 blocks a Rau turn with the empty-credit copy', () => {
+test('OpenRouter 402 identifies the connected Rau account as the billing source', () => {
   assert.equal(isOpenRouterCreditError('OpenRouter 402 Payment Required'), true);
   assert.equal(
     formatOpenRouterCreditError('HTTP 402: insufficient credits', 'rau'),
-    'Rau 체험 크레딧이 다 됐어요. 다른 모델을 연결해 주세요.',
+    'Rau에 연결한 OpenRouter 크레딧이 부족합니다.',
   );
   assert.match(
     formatPiExitError('402 Payment Required: out of credits', 1, null, '', 'rau'),
-    /체험 크레딧이 다 됐어요/,
+    /OpenRouter 크레딧이 부족합니다/,
   );
 });
 

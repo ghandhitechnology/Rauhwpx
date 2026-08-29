@@ -311,8 +311,6 @@ export interface AgentSetupStatus {
   keyTail: string | null;
   authenticating: boolean;
   setupComplete: boolean;
-  /** Rau 체험 잔액이 0 일 때. 다른 프로바이더는 보내지 않는다. */
-  exhausted?: boolean;
   latestVersion: string | null;
   updateRequired: boolean;
   error: string | null;
@@ -404,7 +402,7 @@ export interface UsageSummary {
   cliproxy?: CliproxyStatus;
   /** pi(OpenRouter) 가 설정돼 있을 때만 온다. */
   openrouter?: OpenRouterCredits;
-  /** Rau 체험 키 잔액. */
+  /** Rau에 연결된 OpenRouter 계정의 잔액. */
   rau?: OpenRouterCredits;
 }
 
@@ -441,8 +439,6 @@ export interface PiStatus {
   models: PiModelConfig[];
   defaultModelId: string | null;
   setupComplete: boolean;
-  /** Rau 체험 잔액이 0 일 때 true — 목록에는 남고 전송만 막는다. */
-  exhausted?: boolean;
   latestVersion: string | null;
   updateRequired: boolean;
   error: string | null;

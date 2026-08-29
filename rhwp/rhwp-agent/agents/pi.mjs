@@ -49,7 +49,7 @@ export function isOpenRouterCreditError(text) {
 export function formatOpenRouterCreditError(text, agent = 'pi') {
   if (!isOpenRouterCreditError(text)) return null;
   return agent === 'rau'
-    ? 'Rau 체험 크레딧이 다 됐어요. 다른 모델을 연결해 주세요.'
+    ? 'Rau에 연결한 OpenRouter 크레딧이 부족합니다.'
     : 'OpenRouter 크레딧이 부족합니다.';
 }
 

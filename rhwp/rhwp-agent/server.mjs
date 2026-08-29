@@ -8,7 +8,7 @@ import spawn from 'cross-spawn';
 import { WebSocketServer } from 'ws';
 import { createClaudeSession, prepareClaudeHome } from './agents/claude.mjs';
 import { createCodexSession, prepareCodexHome } from './agents/codex.mjs';
-import { createPiSession, isOpenRouterCreditError } from './agents/pi.mjs';
+import { createPiSession } from './agents/pi.mjs';
 import { createGrokSession, prepareGrokHome } from './agents/grok.mjs';
 import { createCursorSession, prepareCursorHome } from './agents/cursor.mjs';
 import { generateChatTitle } from './agents/title.mjs';
@@ -41,7 +41,6 @@ import {
   RAU_LOCKED_MODELS,
   RAU_SECRET_ID,
 } from './pi-manager.mjs';
-import { createRauCreditsClient } from './rau-credits-client.mjs';
 import { createCliSetupManager } from './cli-setup-manager.mjs';
 import { createOpenRouter } from './openrouter.mjs';
 import { createIpcSecretStore } from './secret-store.mjs';
@@ -163,8 +162,6 @@ const rauManager = await createPiManager({
   lockedModels: RAU_LOCKED_MODELS,
   skipLegacyKey: true,
 }).init();
-const rauCredits = createRauCreditsClient();
-let rauLogin = null;
 const cliSetup = await createCliSetupManager({ secretStore }).init();
 // App-managed bins are available to auxiliary CLI calls as soon as installation completes.
 // 허브가 관리하는 API 키는 process.env 에 올리지 않는다 — npm lifecycle 스크립트,
@@ -193,7 +190,7 @@ let piStatus = await piManager.status();
 let rauStatus = await rauManager.status();
 /** OpenRouter 잔액. 키가 있을 때만 채워지고 사용량 리포트에 얹힌다. */
 let openRouterCredits = null;
-let rauCreditsBalance = null;
+let rauOpenRouterCredits = null;
 if (piStatus.installed || rauStatus.installed) {
   // 저장소가 갱신되면 확장/스킬도 따라와야 한다 — 실패해도 허브는 그대로 뜬다.
   await piManager.syncAssets().catch((error) => log(`pi asset sync failed: ${error?.message ?? error}`));
@@ -415,12 +412,6 @@ function openRouterStatus(agent) {
   return null;
 }
 
-function rauTrialEmpty() {
-  if (!rauStatus.setupComplete) return false;
-  const balance = Number(rauCreditsBalance?.balanceUsd);
-  return Number.isFinite(balance) && balance <= 0;
-}
-
 function unknownAgentError(agent) {
   return Object.assign(new Error(`unknown agent: ${String(agent)}`), { code: 'INVALID_REQUEST' });
 }
@@ -465,11 +456,7 @@ function piAgentSetupStatus() {
 }
 
 function rauAgentSetupStatus() {
-  const status = openRouterAgentSetupStatus('rau');
-  status.authenticating = Boolean(rauLogin);
-  if (status.authenticated) status.authMethod = 'oauth';
-  if (rauTrialEmpty()) status.exhausted = true;
-  return status;
+  return openRouterAgentSetupStatus('rau');
 }
 
 /** 모델 목록 조회가 상태 응답을 붙잡아 둘 수 있는 상한. */
@@ -752,7 +739,7 @@ function replyToStudio(record, sock, obj) {
 function usageSnapshot() {
   const usage = cliproxy.applyToSummary(usageStore.summary());
   if (openRouterCredits) usage.openrouter = openRouterCredits;
-  if (rauCreditsBalance) usage.rau = rauCreditsBalance;
+  if (rauOpenRouterCredits) usage.rau = rauOpenRouterCredits;
   return usage;
 }
 
@@ -778,13 +765,13 @@ async function refreshOpenRouterCredits(refresh = false) {
     }
   }
   if (!rauStatus.keyConfigured) {
-    rauCreditsBalance = null;
+    rauOpenRouterCredits = null;
     return;
   }
   try {
-    rauCreditsBalance = await rauManager.credits(refresh === true);
+    rauOpenRouterCredits = await rauManager.credits(refresh === true);
   } catch (error) {
-    rauCreditsBalance = emptyCreditsError(error);
+    rauOpenRouterCredits = emptyCreditsError(error);
   }
 }
 
@@ -1266,16 +1253,6 @@ function makeBackendEventHandler(record, generation) {
       });
       sendJson(record.studioSocket, { v: 1, type: 'usage-report', usage: usageSnapshot() });
       return;
-    }
-    if (evt.type === 'error' && activeSession.agent === 'rau' && isOpenRouterCreditError(evt.message)) {
-      rauCreditsBalance = {
-        balanceUsd: 0,
-        totalCreditsUsd: Number(rauCreditsBalance?.totalCreditsUsd) || 5,
-        totalUsageUsd: Number(rauCreditsBalance?.totalUsageUsd) || 5,
-        checkedAt: Date.now(),
-        error: null,
-      };
-      sendJson(record.studioSocket, { v: 1, type: 'usage-report', usage: usageSnapshot() });
     }
     if (evt.type === 'turn-start') record.missedTurnEnd = null;
     if (evt.type === 'turn-end') activeSession.status = 'idle';
@@ -1801,13 +1778,6 @@ async function handleStudioMessage(record, sock, msg) {
         });
         return;
       }
-      if (agent === 'rau' && rauTrialEmpty()) {
-        sendJson(sock, {
-          v: 1, type: 'chat-error', code: 'RAU_CREDITS_EMPTY',
-          message: 'Rau 체험 크레딧이 다 됐어요. 다른 모델을 연결해 주세요.',
-        });
-        return;
-      }
       try {
         const s = await startSession(
           record,
@@ -2308,55 +2278,16 @@ async function handleStudioMessage(record, sock, msg) {
       }
       let authUrl = null;
       let run;
-      if (agent === 'rau' && method === 'oauth') {
-        if (rauLogin?.abort) rauLogin.abort.abort();
-        const abort = new AbortController();
-        run = (async () => {
-          const session = await rauCredits.createDeviceSession();
-          rauLogin = { id: session.id, abort };
-          authUrl = session.loginUrl;
-          replyToStudio(record, sock, { v: 1, type: 'agent-setup-auth-started', requestId, agent, authUrl });
-          replyToStudio(record, sock, { v: 1, type: 'agent-setup-progress', agent, state: 'authorizing', authUrl });
-          const key = await rauCredits.redeem(session.id, { signal: abort.signal });
-          rauStatus = await rauManager.setApiKey(key);
-          if (!rauStatus.installed) {
-            rauStatus = await rauManager.install((entry) => replyToStudio(record, sock, {
-              v: 1,
-              type: 'agent-setup-progress',
-              agent,
-              state: entry.state,
-              ...(Number.isFinite(entry.percent) ? { percent: entry.percent } : {}),
-              ...(entry.detail ? { detail: entry.detail } : {}),
-              ...(entry.activity === true ? { activity: true } : {}),
-            }));
-            piStatus = await piManager.status();
-          }
-          await refreshOpenRouterCredits(true);
-        })();
-        void run
-          .then(agentSetupStatuses)
-          .then((statuses) => {
-            rauLogin = null;
-            replyToStudio(record, sock, { v: 1, type: 'agent-setup-status', statuses });
-            void providerHealth.check(true).then((providers) => replyToStudio(record, sock, { v: 1, type: 'provider-status', providers }));
-            replyToStudio(record, sock, { v: 1, type: 'usage-report', usage: usageSnapshot() });
-          })
-          .catch((e) => {
-            rauLogin = null;
-            if (e?.code === 'RAU_LOGIN_CANCELLED' || e?.code === 'AGENT_AUTH_CANCELLED') {
-              void agentSetupStatuses().then((statuses) => replyToStudio(record, sock, { v: 1, type: 'agent-setup-status', statuses }));
-              return;
-            }
-            sendAgentSetupError(record, sock, null, agent, e, 'AGENT_AUTH_FAILED');
-          });
-        return;
-      }
-      if (agent === 'pi' && method === 'oauth') {
-        const callbackUrl = `http://127.0.0.1:${hubPort}/oauth/openrouter/callback`;
-        authUrl = piManager.beginOAuth(callbackUrl).authUrl;
+      if (OPENROUTER_AGENTS.has(agent) && method === 'oauth') {
+        const callbackPath = agent === 'rau' ? '/oauth/openrouter/rau/callback' : '/oauth/openrouter/callback';
+        const callbackUrl = `http://127.0.0.1:${hubPort}${callbackPath}`;
+        authUrl = openRouterManager(agent).beginOAuth(callbackUrl).authUrl;
         run = Promise.resolve(null);
-      } else if (agent === 'pi') {
-        run = piManager.setApiKey(String(msg.key ?? '')).then((status) => { piStatus = status; });
+      } else if (OPENROUTER_AGENTS.has(agent)) {
+        run = openRouterManager(agent).setApiKey(String(msg.key ?? '')).then((status) => {
+          if (agent === 'rau') rauStatus = status;
+          else piStatus = status;
+        });
       } else {
         run = cliSetup.authenticate(agent, method, msg.key, (entry) => replyToStudio(record, sock, {
           v: 1,
@@ -2386,6 +2317,11 @@ async function handleStudioMessage(record, sock, msg) {
         .then((statuses) => {
           replyToStudio(record, sock, { v: 1, type: 'agent-setup-status', statuses });
           if (agent === 'pi') replyToStudio(record, sock, { v: 1, type: 'pi-status', status: piStatus });
+          if (OPENROUTER_AGENTS.has(agent)) {
+            void refreshOpenRouterCredits(true).then(() => {
+              replyToStudio(record, sock, { v: 1, type: 'usage-report', usage: usageSnapshot() });
+            });
+          }
           void providerHealth.check(true).then((providers) => replyToStudio(record, sock, { v: 1, type: 'provider-status', providers }));
         })
         .catch((e) => {
@@ -2410,11 +2346,8 @@ async function handleStudioMessage(record, sock, msg) {
     }
     case 'agent-setup-cancel': {
       const agent = msg.agent;
-      if (agent === 'rau') {
-        rauLogin?.abort.abort();
-        rauLogin = null;
-        void rauManager.cancelSetup();
-      } else if (agent === 'pi') void piManager.cancelSetup();
+      if (agent === 'rau') void rauManager.cancelSetup();
+      else if (agent === 'pi') void piManager.cancelSetup();
       else if (CLI_SETUP_AGENTS.includes(agent)) void cliSetup.cancel(agent);
       return;
     }
@@ -3325,7 +3258,10 @@ const httpServer = http.createServer((req, res) => {
         if (await handleTemplateHttp(req, res, url)) return;
       }
     }
-    if (req.method === 'GET' && url.pathname === '/oauth/openrouter/callback') {
+    const openRouterOauthAgent = url.pathname === '/oauth/openrouter/rau/callback'
+      ? 'rau'
+      : (url.pathname === '/oauth/openrouter/callback' ? 'pi' : null);
+    if (req.method === 'GET' && openRouterOauthAgent) {
       const code = url.searchParams.get('code');
       const state = url.searchParams.get('state');
       if (!code) {
@@ -3334,21 +3270,25 @@ const httpServer = http.createServer((req, res) => {
         return;
       }
       try {
-        piStatus = await piManager.completeOAuth(code, state);
+        const status = await openRouterManager(openRouterOauthAgent).completeOAuth(code, state);
+        if (openRouterOauthAgent === 'rau') rauStatus = status;
+        else piStatus = status;
         const statuses = await agentSetupStatuses();
         broadcastToStudios({ v: 1, type: 'agent-setup-status', statuses });
-        broadcastToStudios({ v: 1, type: 'pi-status', status: piStatus });
+        if (openRouterOauthAgent === 'pi') {
+          broadcastToStudios({ v: 1, type: 'pi-status', status: piStatus });
+        }
         void refreshOpenRouterCredits(true).then(() => {
           broadcastToStudios({ v: 1, type: 'usage-report', usage: usageSnapshot() });
         });
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-        res.end('<!doctype html><meta charset="utf-8"><title>Rauhwpx</title><style>body{font:16px system-ui;margin:48px;color:#202124}</style><h1>OpenRouter connected</h1><p>You can return to Rauhwpx and close this tab.</p>');
+        res.end(`<!doctype html><meta charset="utf-8"><title>Rauhwpx</title><style>body{font:16px system-ui;margin:48px;color:#202124}</style><h1>${openRouterOauthAgent === 'rau' ? 'Rau' : 'OpenRouter'} connected</h1><p>You can return to Rauhwpx and close this tab.</p>`);
       } catch (error) {
         broadcastToStudios({
           v: 1,
           type: 'agent-setup-error',
           requestId: null,
-          agent: 'pi',
+          agent: openRouterOauthAgent,
           code: error?.code ?? 'OPENROUTER_OAUTH_FAILED',
           message: String(error?.message ?? error),
         });
@@ -3617,7 +3557,7 @@ httpServer.listen(REQUESTED_PORT, '127.0.0.1', () => {
   hubPort = address.port;
   process.stdout.write(`RHWP_HUB_READY ${JSON.stringify({ port: hubPort, pid: process.pid, launchId: LAUNCH_ID })}\n`);
   log(`rhwp-agent hub listening on ws://127.0.0.1:${hubPort} (protocol v${PROTOCOL_VERSION})`);
-  log('claude/codex/pi/grok/cursor can be installed and authenticated from Studio settings');
+  log('claude/codex/rau/pi/grok/cursor can be installed and authenticated from Studio settings');
   scheduleHarnessUpdates(HARNESS_UPDATE_INITIAL_DELAY_MS);
 });
 

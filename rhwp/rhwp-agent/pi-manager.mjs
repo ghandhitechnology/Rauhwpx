@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { RAU_DEFAULT_MODEL_ID, RAU_LOCKED_MODELS } from '../rau-credits/catalog.mjs';
+import { RAU_DEFAULT_MODEL_ID, RAU_LOCKED_MODELS } from './rau-catalog.mjs';
 import { createOpenRouter } from './openrouter.mjs';
 import { fetchLatestPackage, replaceFileAtomically, updatePrefixAtomically } from './harness-update.mjs';
 import { bundledNpmLaunch } from './npm-runtime.mjs';
@@ -772,7 +772,7 @@ export function createPiManager({
       return this.setApiKey(body.key);
     },
 
-    /** 로컬 키만 지운다. 호스티드 $5 키는 서버에 남는다. */
+    /** 이 매니저가 보관하는 로컬 OpenRouter 키만 지운다. */
     async clearApiKey() {
       await load();
       if (secretStore?.available) {
