@@ -28,6 +28,7 @@ export interface PiExtensionConfig {
   token: string;
   sessionId: string;
   agentName: string;
+  agentRole: string;
   workflow: string;
   phase: string;
   capabilityEpoch: string | undefined;
@@ -100,6 +101,7 @@ export function readExtensionConfig(
     token: env.RHWP_AGENT_TOKEN ?? 'dev',
     sessionId: env.RHWP_SESSION_ID ?? 'dev',
     agentName: env.RHWP_AGENT_NAME ?? 'pi',
+    agentRole: env.RHWP_AGENT_ROLE ?? 'chat',
     workflow,
     phase,
     capabilityEpoch: env.RHWP_CAPABILITY_EPOCH,
@@ -124,7 +126,9 @@ export function hubSocketUrl(config: PiExtensionConfig): string {
     `token=${encodeURIComponent(config.token)}`,
     `sessionId=${encodeURIComponent(config.sessionId)}`,
     `agent=${encodeURIComponent(config.agentName)}`,
+    `role=${encodeURIComponent(config.agentRole)}`,
     `workflow=${encodeURIComponent(config.workflow)}`,
+    `phase=${encodeURIComponent(config.phase)}`,
   ];
   if (config.capabilityEpoch) {
     parts.push(`capabilityEpoch=${encodeURIComponent(config.capabilityEpoch)}`);

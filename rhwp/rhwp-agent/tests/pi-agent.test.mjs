@@ -6,6 +6,7 @@ import test from 'node:test';
 import {
   buildPiArgv,
   buildPiEnv,
+  createPiFleetMapper,
   createPiSession,
   formatOpenRouterCreditError,
   formatPiExitError,
@@ -346,17 +347,17 @@ test('argv omits thinking for non-reasoning models and never doubles the provide
   assert.equal(argv.includes('--thinking'), false);
 });
 
-test('pi gets its own sequential brief instead of claude fleet instructions', () => {
-  // 미지정 agentName 은 클로드 기본 브리프를 낳아 없는 doc-editor 스폰을
-  // 지시했다 — pi 는 스폰 도구가 없으므로 단독 실행 규율이 와야 한다.
+test('pi brief tells the model to use subagent_spawn for document regions', () => {
   for (const mode of [
     { workflow: 'direct', phase: 'implementing' },
     { workflow: 'plan', phase: 'implementing' },
   ]) {
     const argv = buildPiArgv({ ...baseOpts, ...mode }, 'sess-1');
     const brief = argv[argv.indexOf('--append-system-prompt') + 1];
-    assert.doesNotMatch(brief, /doc-editor|doc-researcher|Workflow tool|Sibling agents/, mode.phase);
-    assert.match(brief, /no subagent or delegation tools/, mode.phase);
+    assert.doesNotMatch(brief, /Workflow tool/, mode.phase);
+    assert.match(brief, /subagent_spawn/, mode.phase);
+    assert.match(brief, /role=doc-editor/, mode.phase);
+    assert.match(brief, /subagent_wait/, mode.phase);
     assert.match(brief, /ONE apply_edits call/, mode.phase);
   }
 });
@@ -400,6 +401,11 @@ test('the child env is built from scratch without ambient provider keys', () => 
   assert.equal(env.RHWP_AGENT_WORKFLOW, 'plan');
   assert.equal(env.RHWP_AGENT_PHASE, 'planning');
   assert.equal(env.RHWP_CAPABILITY_EPOCH, '4');
+  assert.equal(env.RHWP_PI_BIN, baseOpts.piBin);
+  assert.equal(env.RHWP_PI_MODEL, baseOpts.model);
+  assert.equal(env.RHWP_PI_EFFORT, 'high');
+  assert.equal(env.RHWP_PI_REASONING, '1');
+  assert.equal(env.RHWP_PI_SESSION_DIR, path.join('/pi', 'sessions'));
 
   assert.equal(buildPiEnv({ ...baseOpts }, sourceEnv).RHWP_TOOL_PROFILE, 'direct');
   assert.equal(
@@ -460,4 +466,75 @@ test('a mode switch waits for the running child to exit', async () => {
   assert.equal(spawns[1].options.env.RHWP_AGENT_PHASE, 'implementing');
   assert.equal(spawns[1].argv[spawns[1].argv.indexOf('--session-id') + 1], session.getSessionId());
   session.dispose();
+});
+
+test('subagent_spawn maps onto fleet task cards', () => {
+  const { session, events, spawns } = startSession();
+  session.sendUserMessage('나눠서 고쳐');
+  const { proc } = spawns[0];
+  proc.emitJson(
+    SESSION_LINE,
+    {
+      type: 'tool_execution_start',
+      toolCallId: 'call-spawn',
+      toolName: 'subagent_spawn',
+      args: { name: '2쪽 정리', prompt: '2쪽을 정리해', role: 'doc-editor' },
+    },
+    {
+      type: 'tool_execution_end',
+      toolCallId: 'call-spawn',
+      toolName: 'subagent_spawn',
+      isError: false,
+      result: { details: { id: 'sa-1' }, content: [{ type: 'text', text: 'Started sa-1' }] },
+    },
+    {
+      type: 'tool_execution_start',
+      toolCallId: 'call-wait',
+      toolName: 'subagent_wait',
+      args: { ids: ['sa-1'] },
+    },
+    {
+      type: 'tool_execution_end',
+      toolCallId: 'call-wait',
+      toolName: 'subagent_wait',
+      isError: false,
+      result: { content: [{ type: 'text', text: 'finished' }] },
+    },
+    { type: 'agent_settled' },
+  );
+  proc.exit(0);
+
+  assert.deepEqual(events.filter((event) => event.type.startsWith('task-')), [
+    {
+      type: 'task-start',
+      agent: 'pi',
+      taskId: 'call-spawn',
+      callId: 'call-spawn',
+      title: '2쪽 정리',
+      role: 'doc-editor',
+      taskKind: 'agent',
+    },
+    { type: 'task-progress', agent: 'pi', taskId: 'call-spawn', activity: 'waiting' },
+    { type: 'task-end', agent: 'pi', taskId: 'call-spawn', status: 'completed' },
+  ]);
+  session.dispose();
+});
+
+test('unwaited subagents are stopped when the turn ends', () => {
+  const events = [];
+  const mapper = createPiFleetMapper((event) => events.push(event));
+  mapper.onToolStart({
+    toolCallId: 'call-1',
+    toolName: 'subagent_spawn',
+    args: { name: '조사', role: 'doc-researcher' },
+  });
+  mapper.onToolEnd({
+    toolCallId: 'call-1',
+    toolName: 'subagent_spawn',
+    result: { details: { id: 'sa-1' } },
+  });
+  mapper.finalize('stopped');
+  assert.equal(events.at(-1).type, 'task-end');
+  assert.equal(events.at(-1).status, 'stopped');
+  assert.equal(events.at(-1).taskId, 'call-1');
 });

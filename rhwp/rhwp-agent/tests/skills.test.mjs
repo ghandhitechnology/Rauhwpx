@@ -114,7 +114,7 @@ test('promptContext appends provider tool notes only for a known activated agent
 
   const pi = await registry.promptContext('복사', 'starter', { agent: 'pi' });
   assert.match(pi, /<provider_tool_notes agent="pi">/);
-  assert.match(pi, /no collaboration or polling tools/);
+  assert.match(pi, /subagent_spawn\/subagent_wait/);
 
   // 미활성·미지정·미지 에이전트에는 주석이 붙지 않는다 — 기존 프롬프트 모양 유지.
   const noSkill = await registry.promptContext('복사', undefined, { agent: 'grok' });

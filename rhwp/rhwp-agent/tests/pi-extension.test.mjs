@@ -36,6 +36,7 @@ test('환경 기본값은 mcp-stdio 와 같은 계약을 따른다', () => {
   assert.equal(config.token, 'dev');
   assert.equal(config.sessionId, 'dev');
   assert.equal(config.agentName, 'pi');
+  assert.equal(config.agentRole, 'chat');
   assert.equal(config.workflow, 'direct');
   assert.equal(config.phase, 'implementing');
   assert.equal(config.toolProfile, 'direct');
@@ -75,12 +76,12 @@ test('허브 URL 은 토큰/프로필/에폭을 인코딩한다', () => {
   );
   assert.equal(
     hubSocketUrl(config),
-    'ws://127.0.0.1:5175/mcp?token=a%20b%26c&sessionId=window%20a&agent=pi&workflow=direct',
+    'ws://127.0.0.1:5175/mcp?token=a%20b%26c&sessionId=window%20a&agent=pi&role=chat&workflow=direct&phase=implementing',
   );
   const withEpoch = configFor({ RHWP_CAPABILITY_EPOCH: '7', RHWP_AGENT_WORKFLOW: 'plan', RHWP_SESSION_ID: 'window-b' });
   assert.equal(
     hubSocketUrl(withEpoch),
-    'ws://127.0.0.1:5175/mcp?token=dev&sessionId=window-b&agent=pi&workflow=plan&capabilityEpoch=7',
+    'ws://127.0.0.1:5175/mcp?token=dev&sessionId=window-b&agent=pi&role=chat&workflow=plan&phase=planning&capabilityEpoch=7',
   );
 });
 

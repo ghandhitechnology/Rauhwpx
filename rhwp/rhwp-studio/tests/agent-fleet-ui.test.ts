@@ -524,6 +524,9 @@ test('closePopup 은 팝업만 접고 알약은 남긴다', () => {
 test('편대 표기 규칙 — 스폰 도구, 모델 약칭, 시계', () => {
   assert.equal(isSpawnToolName('Agent'), true);
   assert.equal(isSpawnToolName('Workflow'), true);
+  assert.equal(isSpawnToolName('subagent_spawn'), true);
+  assert.equal(isSpawnToolName('spawn_agent'), true);
+  assert.equal(isSpawnToolName('spawn_subagent'), true);
   assert.equal(isSpawnToolName('read_document'), false);
   assert.equal(compactModelLabel('claude-opus-4-5-20260514'), 'opus-4-5');
   assert.equal(compactModelLabel('anthropic/claude-sonnet-4-5'), 'sonnet-4-5');
