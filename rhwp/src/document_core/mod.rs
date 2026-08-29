@@ -159,6 +159,22 @@ impl DocumentEventLog {
         Self::set_revision(&mut self.section_revisions, section_idx, revision);
     }
 
+    /// 문단 IR이 바뀌었는데 이벤트를 따로 쌓지 않는 경로용.
+    /// 구역·문단 revision을 같이 올려서 스냅샷 복원이 현재 문단을 재사용하지 않게 한다.
+    fn mark_paragraph_changed(&mut self, section_idx: usize, paragraph_idx: usize) {
+        let revision = self.next_revision();
+        Self::set_revision(&mut self.section_revisions, section_idx, revision);
+        if self.paragraph_revisions.len() <= section_idx {
+            self.paragraph_revisions
+                .resize_with(section_idx + 1, Vec::new);
+        }
+        Self::set_revision(
+            &mut self.paragraph_revisions[section_idx],
+            paragraph_idx,
+            revision,
+        );
+    }
+
     fn mark_all_sections_changed(&mut self, section_count: usize) {
         for section_idx in 0..section_count {
             let revision = self.next_revision();
