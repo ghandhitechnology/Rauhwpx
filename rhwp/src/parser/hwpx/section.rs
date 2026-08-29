@@ -7847,7 +7847,7 @@ mod tests {
         assert_eq!(optional_page.apply_to, HeaderFooterApply::Both);
         assert!(optional_page.is_extension);
         assert!(optional_page.overlap);
-        assert!(!optional_page.replace_base);
+        assert!(optional_page.replace_base);
         assert_eq!(optional_page.ext_flags, 0x0007);
     }
 
@@ -7897,10 +7897,25 @@ mod tests {
         assert_eq!(master_page.apply_to, HeaderFooterApply::Both);
         assert!(master_page.is_extension);
         assert!(master_page.overlap);
-        assert!(!master_page.replace_base);
+        assert!(master_page.replace_base);
         assert_eq!(master_page.ext_flags, 0x0007);
         assert_eq!(master_page.hwpx_page_number, Some(4));
         assert_eq!(master_page.raw_list_header.len(), 34);
+    }
+
+    #[test]
+    fn test_parse_master_page_optional_page_duplicate_keeps_stacking() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<masterPage xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph"
+            type="OPTIONAL_PAGE" pageNumber="4" pageDuplicate="1">
+  <hp:subList textWidth="1000" textHeight="2000" hasTextRef="0" hasNumRef="0"/>
+</masterPage>"#;
+
+        let master_page = parse_hwpx_master_page(xml).unwrap();
+        assert!(master_page.is_extension);
+        assert!(master_page.overlap);
+        assert!(!master_page.replace_base);
+        assert_eq!(master_page.ext_flags, 0x0007);
     }
 
     #[test]

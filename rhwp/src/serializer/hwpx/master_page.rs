@@ -152,4 +152,33 @@ mod tests {
             "text_direction 이 왕복에서 보존돼야 함"
         );
     }
+
+    #[test]
+    fn optional_page_page_duplicate_0_round_trips() {
+        let mp = MasterPage {
+            is_extension: true,
+            overlap: true,
+            replace_base: true,
+            ext_flags: 0x0007,
+            hwpx_page_number: Some(4),
+            ..Default::default()
+        };
+        let doc = Document::default();
+        let mut ctx = SerializeContext::collect_from_document(&doc);
+        let xml = render_master_page_xml(&mp, "masterpage8", &mut ctx).unwrap();
+        assert!(
+            xml.contains(r#"pageDuplicate="0""#),
+            "OPTIONAL_PAGE replace_base 는 pageDuplicate=0 으로 나가야 한다: {xml}"
+        );
+        assert!(xml.contains(r#"type="OPTIONAL_PAGE""#), "{xml}");
+
+        let parsed =
+            crate::parser::hwpx::section::parse_hwpx_master_page(&xml).expect("master page parse");
+        assert!(parsed.is_extension);
+        assert!(parsed.overlap);
+        assert!(
+            parsed.replace_base,
+            "왕복 후 replace_base 가 뒤집히면 임의 쪽 바탕쪽이 기본 바탕쪽 위에 덧그려진다"
+        );
+    }
 }
