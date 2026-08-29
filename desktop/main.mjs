@@ -309,7 +309,7 @@ let cloudTransport = null;
 let cloudBroadcastChain = Promise.resolve();
 const CLOUD_BROADCAST_COALESCE_MS = 100;
 let cloudBroadcastTimer = null;
-let cloudBroadcastPending = null;
+let cloudBroadcastPending = [];
 const pendingLaunches = [launchRequest({ argv: process.argv, source: 'initial' })];
 const runtimeDir = join(app.getPath('temp'), 'rauhwpx', 'runtime', launchId);
 const workDir = join(app.getPath('userData'), 'launch-work', launchId);
@@ -376,18 +376,17 @@ async function broadcastCloudEvent(payload) {
 }
 
 function queueCloudBroadcast(payload) {
-  // Bursts (upload progress, agent deltas) collapse into one trailing
-  // broadcast per window; every payload carries the full snapshot, so only
-  // the latest matters.
-  cloudBroadcastPending = payload;
+  // Build one snapshot per burst, but never collapse ordered agent deltas.
+  // The renderer reconciles them with the stable timeline at each boundary.
+  cloudBroadcastPending.push(payload);
   if (cloudBroadcastTimer) return;
   cloudBroadcastTimer = setTimeout(() => {
     cloudBroadcastTimer = null;
-    const latest = cloudBroadcastPending;
-    cloudBroadcastPending = null;
-    if (!latest) return;
+    const events = cloudBroadcastPending;
+    cloudBroadcastPending = [];
+    if (!events.length) return;
     cloudBroadcastChain = cloudBroadcastChain
-      .then(() => broadcastCloudEvent(latest))
+      .then(() => broadcastCloudEvent({ type: 'cloud-event-batch', events }))
       .catch((error) => console.warn('[rauhwpx] cloud event broadcast failed:', error));
   }, CLOUD_BROADCAST_COALESCE_MS);
   cloudBroadcastTimer.unref?.();
@@ -1197,6 +1196,12 @@ ipcMain.handle('cloud:download-result', async (event, payload) => {
     previewOpened: Boolean(preview),
     conflict,
   };
+});
+ipcMain.handle('cloud:download-checkpoint', async (event, payload) => {
+  sessionForEvent(event);
+  const sessionId = String(payload?.sessionId ?? '');
+  if (!/^[A-Za-z0-9_-]{8,128}$/.test(sessionId)) throw new Error('Invalid cloud session id');
+  return requireCloudCoordinator().downloadCheckpoint({ sessionId });
 });
 ipcMain.handle('cloud:resolve-result', async (event, payload = {}) => {
   const session = sessionForEvent(event);

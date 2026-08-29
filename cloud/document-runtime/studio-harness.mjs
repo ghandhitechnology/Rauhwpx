@@ -344,7 +344,7 @@ export async function uploadRequiredReferences({
     try {
       await withTimeout(
         page.evaluate(async (secret, input) => window.rauhwpxCloudRuntime.uploadReference(secret, input), bootstrap, {
-          url: resourceUrl(origin, bootstrap, `reference-${index}`),
+          url: resourceUrl(origin, bootstrap, reference.resourceId ?? `reference-${index}`),
           name: reference.name,
           mimeType: reference.mimeType,
           scopeId,
@@ -423,6 +423,7 @@ export async function createStudioHarness({
   const hubPort = await findPort();
   const resourceFiles = new Map([['document', document.filename]]);
   references.forEach((reference, index) => resourceFiles.set(`reference-${index}`, reference.filename));
+  let dynamicReferenceSequence = references.length;
   const { server: studioServer, origin } = await startStudioServer({ studioRoot, resources: resourceFiles, bootstrap });
   let hub = null;
   let browser = null;
@@ -431,7 +432,7 @@ export async function createStudioHarness({
   let started = false;
   try {
     const thread = timeline.thread;
-    const execution = manifest.executionConfig ?? {
+    let execution = manifest.executionConfig ?? {
       model: thread.model,
       effort: thread.effort,
       workflow: thread.workflow,
@@ -580,18 +581,80 @@ export async function createStudioHarness({
         );
         await uploadRequiredReferences({ page, bootstrap, origin, references, scopeId: thread.id, onEvent });
       },
-      async runTurn(prompt, { timeoutMs }) {
+      async runTurn(prompt, {
+        timeoutMs,
+        resume = null,
+        onSafeBoundary = null,
+        readControl = null,
+      }) {
         const sentAt = Date.now();
-        await withTimeout(
-          page.evaluate((secret, text) => window.rauhwpxCloudRuntime.sendUserMessage(secret, text), bootstrap, prompt),
-          30_000,
-          'TURN_SEND_TIMEOUT',
-          'Cloud Studio did not accept the user message',
-        );
+        if (resume?.action === 'approve') {
+          await withTimeout(
+            page.evaluate(
+              (secret, selectedPlanId) => window.rauhwpxCloudRuntime.approvePlan(secret, selectedPlanId),
+              bootstrap,
+              resume.planId,
+            ),
+            30_000,
+            'PLAN_APPROVAL_TIMEOUT',
+            'Cloud Studio plan approval timed out',
+          );
+        } else if (resume?.action === 'changes') {
+          await withTimeout(
+            page.evaluate(
+              (secret, selectedPlanId, feedback) => window.rauhwpxCloudRuntime.requestPlanChanges(
+                secret,
+                selectedPlanId,
+                feedback,
+              ),
+              bootstrap,
+              resume.planId,
+              resume.feedback,
+            ),
+            30_000,
+            'PLAN_FEEDBACK_TIMEOUT',
+            'Cloud Studio plan feedback timed out',
+          );
+        } else if (resume?.action === 'answer' || resume?.action === 'external-effect') {
+          const text = resume.action === 'answer'
+            ? `The user answered the pending question:\n\n${String(resume.feedback ?? '').trim()}`
+            : [
+                `The user explicitly approved the pending ${resume.kind === 'destructive-external' ? 'destructive external action' : 'external side effect'}.`,
+                'Continue only the action that was described in the approval request. Ask again before any materially different external action.',
+                String(resume.feedback ?? '').trim(),
+              ].filter(Boolean).join('\n\n');
+          await withTimeout(
+            page.evaluate((secret, content) => window.rauhwpxCloudRuntime.sendUserMessage(secret, content), bootstrap, text),
+            30_000,
+            'WAIT_RESUME_TIMEOUT',
+            'Cloud Studio did not resume after the user decision',
+          );
+        } else {
+          await withTimeout(
+            page.evaluate((secret, text) => window.rauhwpxCloudRuntime.sendUserMessage(secret, text), bootstrap, prompt),
+            30_000,
+            'TURN_SEND_TIMEOUT',
+            'Cloud Studio did not accept the user message',
+          );
+        }
         let sawStart = false;
         let planId = null;
+        let presentedPlan = null;
         let implementationStarted = execution.workflow !== 'plan';
-        let approvalRequested = false;
+        let interruptRequested = false;
+        const activeRootTools = new Set();
+        const interruptAtSafeBoundary = async () => {
+          if (interruptRequested || typeof readControl !== 'function' || activeRootTools.size > 0) return;
+          const control = await readControl();
+          if (control?.redirectRequested !== true) return;
+          interruptRequested = true;
+          await withTimeout(
+            page.evaluate((secret) => window.rauhwpxCloudRuntime.interrupt(secret), bootstrap),
+            30_000,
+            'TURN_INTERRUPT_TIMEOUT',
+            'Cloud Studio redirect interrupt timed out',
+          );
+        };
         while (Date.now() - sentAt < timeoutMs) {
           const entries = await withTimeout(
             page.evaluate(
@@ -608,6 +671,7 @@ export async function createStudioHarness({
             await onEvent(entry.event);
             if (entry.event?.type === 'plan-ready') {
               planId = String(entry.event.plan?.planId ?? entry.event.planId ?? '') || null;
+              presentedPlan = entry.event.plan ?? null;
             }
             if (entry.event?.type === 'implementation-started') implementationStarted = true;
             if (entry.event?.type === 'hub-error') {
@@ -615,33 +679,63 @@ export async function createStudioHarness({
             }
             const agentEvent = entry.event?.type === 'agent' ? entry.event.event : null;
             if (agentEvent?.type === 'turn-start') sawStart = true;
+            if (agentEvent?.type === 'tool-call' && !agentEvent.parentTaskId) {
+              activeRootTools.add(agentEvent.callId);
+            }
+            if (agentEvent?.type === 'tool-result' && !agentEvent.parentTaskId) {
+              activeRootTools.delete(agentEvent.callId);
+              if (agentEvent.ok === true && typeof onSafeBoundary === 'function') {
+                await onSafeBoundary(agentEvent);
+              }
+              await interruptAtSafeBoundary();
+            }
             if (agentEvent?.type === 'turn-end' && sawStart) {
               if (execution.workflow === 'plan' && !implementationStarted) {
                 if (!planId) throw runtimeError('PLAN_NOT_PRESENTED', 'Planning workflow ended without a structured implementation plan');
-                if (approvalRequested) throw runtimeError('PLAN_APPROVAL_FAILED', 'Planning workflow ended again before implementation started');
-                await withTimeout(
-                  page.evaluate(
-                    (secret, selectedPlanId) => window.rauhwpxCloudRuntime.approvePlan(secret, selectedPlanId),
-                    bootstrap,
-                    planId,
-                  ),
-                  30_000,
-                  'PLAN_APPROVAL_TIMEOUT',
-                  'Cloud Studio plan approval timed out',
-                );
-                approvalRequested = true;
-                sawStart = false;
-                continue;
+                return {
+                  ...agentEvent,
+                  wait: {
+                    kind: 'plan-approval',
+                    payload: { planId, plan: presentedPlan },
+                  },
+                };
               }
-              return agentEvent;
+              return { ...agentEvent, redirected: interruptRequested && agentEvent.stopReason === 'interrupted' };
             }
           }
+          await interruptAtSafeBoundary();
           if (hub.exitCode !== null || hub.signalCode) {
             throw runtimeError('AGENT_HUB_FAILED', `Rauhwpx agent hub exited during the turn: ${hubErrorTail.trim().slice(-2_000)}`);
           }
           await delay(200);
         }
         throw runtimeError('TURN_TIMEOUT', 'Cloud provider turn exceeded the session deadline');
+      },
+      async setWorkflow(workflow) {
+        if (workflow !== 'direct' && workflow !== 'plan') {
+          throw runtimeError('WORKFLOW_INVALID', 'Cloud conversation workflow is invalid');
+        }
+        if (execution.workflow === workflow) return;
+        await withTimeout(
+          page.evaluate((secret, selected) => window.rauhwpxCloudRuntime.setWorkflow(secret, selected), bootstrap, workflow),
+          30_000,
+          'WORKFLOW_SWITCH_TIMEOUT',
+          'Cloud Studio workflow switch timed out',
+        );
+        execution = { ...execution, workflow };
+      },
+      async addReferences(incoming) {
+        const additions = [];
+        for (const reference of incoming ?? []) {
+          const resourceId = `followup-${dynamicReferenceSequence++}`;
+          resourceFiles.set(resourceId, reference.filename);
+          additions.push({ ...reference, resourceId });
+        }
+        if (additions.length) {
+          await uploadRequiredReferences({
+            page, bootstrap, origin, references: additions, scopeId: thread.id, onEvent,
+          });
+        }
       },
       async exportDocument(format, destination) {
         const metadata = await withTimeout(

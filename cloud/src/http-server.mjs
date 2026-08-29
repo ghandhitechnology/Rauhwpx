@@ -1,4 +1,5 @@
 import { pipeline } from 'node:stream/promises';
+import { randomUUID } from 'node:crypto';
 import { URL } from 'node:url';
 import {
   CloudError,
@@ -97,6 +98,38 @@ function writeSse(response, event) {
   response.write(signedSseFrame(response[responseProof], event));
 }
 
+function applyBrowserCors(request, response, allowedOrigins = []) {
+  const origin = request.headers.origin;
+  if (!origin || !allowedOrigins.includes(origin)) return false;
+  response.setHeader('Access-Control-Allow-Origin', origin);
+  response.setHeader('Vary', 'Origin');
+  response.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
+  response.setHeader(
+    'Access-Control-Allow-Headers',
+    'Authorization, Content-Type, Last-Event-ID, X-Rauhwpx-Request-Nonce, X-Upload-Offset',
+  );
+  response.setHeader(
+    'Access-Control-Expose-Headers',
+    [
+      'Content-Length',
+      'Content-Disposition',
+      'X-Boundary-Operation',
+      'X-Boundary-Kind',
+      'X-Boundary-Revision',
+      'X-Boundary-Turn',
+      'X-Checkpoint-Revision',
+      'X-Checkpoint-Turn',
+      'X-Content-SHA256',
+      'X-Document-Name',
+      'X-Rauhwpx-Content-SHA256',
+      'X-Rauhwpx-Response-Signature',
+      'X-Rauhwpx-Server-Key',
+      'X-Rauhwpx-Stream-Protocol',
+    ].join(', '),
+  );
+  return true;
+}
+
 export function createCloudHttpHandler({
   auth,
   blobStore,
@@ -116,12 +149,21 @@ export function createCloudHttpHandler({
   return async function cloudHttpHandler(request, response) {
     const requestUrl = new URL(request.url ?? '/', `http://${request.headers.host || '127.0.0.1'}`);
     const pathname = normalizePath(requestUrl.pathname, config.basePath);
+    const browserCors = !workerOnly && pathname.startsWith('/v1')
+      ? applyBrowserCors(request, response, config.browserOrigins)
+      : false;
     if (pathname.startsWith('/v1')) {
       response.setHeader('X-Rauhwpx-Server-Key', identity.serverPublicKey);
       response.setHeader('X-Content-Type-Options', 'nosniff');
       response.setHeader('Referrer-Policy', 'no-referrer');
     }
     try {
+      if (request.method === 'OPTIONS' && pathname.startsWith('/v1')) {
+        if (!browserCors) throw new CloudError('ORIGIN_NOT_ALLOWED', 'Browser origin is not allowed', 403);
+        response.writeHead(204, { 'Content-Length': '0', 'Cache-Control': 'no-store' });
+        response.end();
+        return;
+      }
       if (!workerOnly && pathname.startsWith('/v1')) {
         const bootstrapHealth = request.method === 'GET' && pathname === '/v1/health';
         const nonce = parseProofNonce(request.headers['x-rauhwpx-request-nonce'], { required: !bootstrapHealth });
@@ -194,8 +236,26 @@ export function createCloudHttpHandler({
           json(response, 200, sessionStore.workerControl(sessionId));
           return;
         }
+        const workerWait = action.match(/^\/waits\/([^/]+)$/);
+        if (request.method === 'GET' && workerWait) {
+          json(response, 200, sessionStore.waitState(sessionId, decodeURIComponent(workerWait[1])));
+          return;
+        }
+        if (request.method === 'POST' && action === '/waits') {
+          const body = await readJson(request);
+          json(response, 201, sessionStore.createWait(sessionId, {
+            turnNumber: body.turnNumber,
+            kind: body.kind,
+            payload: body.payload ?? {},
+          }));
+          return;
+        }
         if (request.method === 'POST' && action === '/pause-ack') {
           json(response, 200, sessionStore.acknowledgePause(sessionId));
+          return;
+        }
+        if (request.method === 'POST' && action === '/sleep-ack') {
+          json(response, 200, sessionStore.acknowledgeSleep(sessionId));
           return;
         }
         if (request.method === 'POST' && action === '/takeover-ack') {
@@ -235,9 +295,7 @@ export function createCloudHttpHandler({
         }
         const workerBlob = action.match(/^\/blobs\/([a-f0-9]{64})$/);
         if (request.method === 'GET' && workerBlob) {
-          const manifest = sessionStore.workerManifest(sessionId);
-          const allowed = manifest.resources.some((resource) => resource.blobId === workerBlob[1])
-            || manifest.latestCheckpoint?.blobId === workerBlob[1];
+          const allowed = sessionStore.workerCanReadBlob(sessionId, workerBlob[1]);
           if (!allowed) throw new CloudError('BLOB_NOT_FOUND', 'Blob is not part of this session', 404);
           const { blob, stream } = blobStore.openReadStream(workerBlob[1]);
           response.writeHead(200, {
@@ -267,6 +325,7 @@ export function createCloudHttpHandler({
             operationId: body.operationId,
             turnNumber: body.turnNumber,
             revision: body.revision,
+            kind: body.kind,
             checkpoint: {
               blobId: body.checkpoint?.blobId,
               size: body.checkpoint?.size,
@@ -278,8 +337,21 @@ export function createCloudHttpHandler({
           }));
           return;
         }
+        if (request.method === 'POST' && action === '/turn-start') {
+          const body = await readJson(request);
+          json(response, 201, sessionStore.beginTurn(sessionId, {
+            turnNumber: body.turnNumber,
+            messageId: body.messageId ?? null,
+            mode: body.mode,
+          }));
+          return;
+        }
         if (request.method === 'POST' && action === '/turn-complete') {
-          json(response, 200, sessionStore.completeTurn(sessionId));
+          const body = await readJson(request);
+          json(response, 200, sessionStore.completeTurn(sessionId, {
+            outcome: body.outcome,
+            boundaryOperationId: body.boundaryOperationId ?? null,
+          }));
           return;
         }
         if (request.method === 'POST' && action === '/result') {
@@ -379,7 +451,8 @@ export function createCloudHttpHandler({
           return;
         }
         if (request.method === 'GET' && sessionRoute[2] === '/checkpoint') {
-          const checkpoint = sessionStore.latestStableCheckpoint(sessionId);
+          const operationId = requestUrl.searchParams.get('operationId');
+          const checkpoint = sessionStore.latestStableCheckpoint(sessionId, operationId || null);
           const { blob, stream } = blobStore.openReadStream(checkpoint.blobId);
           response.writeHead(200, {
             'Content-Type': 'application/octet-stream',
@@ -390,6 +463,7 @@ export function createCloudHttpHandler({
             'X-Checkpoint-Revision': String(checkpoint.revision),
             'X-Checkpoint-Turn': String(checkpoint.turnNumber),
             'X-Boundary-Operation': checkpoint.operationId,
+            'X-Boundary-Kind': checkpoint.kind,
             'Cache-Control': 'no-store',
             ...responseProofHeaders(response[responseProof], 200, blob.sha256),
           });
@@ -402,6 +476,8 @@ export function createCloudHttpHandler({
         }
         if (request.method === 'GET' && sessionRoute[2] === '/events') {
           sessionStore.getSessionRow(sessionId);
+          const presenceConnectionId = randomUUID();
+          sessionStore.openPresence(sessionId, device.id, presenceConnectionId);
           const after = positiveSequence(requestUrl.searchParams.get('after') ?? request.headers['last-event-id']);
           response.writeHead(200, {
             'Content-Type': 'text/event-stream; charset=utf-8',
@@ -435,8 +511,25 @@ export function createCloudHttpHandler({
           following = true;
           pending.sort((left, right) => left.seq - right.seq);
           for (const event of pending) deliver(event);
-          const keepalive = setInterval(() => response.write(': keepalive\n\n'), 15_000);
-          const close = () => { clearInterval(keepalive); unsubscribe(); };
+          const keepalive = setInterval(() => {
+            sessionStore.touchPresence(sessionId, device.id, presenceConnectionId);
+            response.write(': keepalive\n\n');
+          }, 15_000);
+          let closed = false;
+          const close = () => {
+            if (closed) return;
+            closed = true;
+            clearInterval(keepalive);
+            unsubscribe();
+            // A process/test shutdown may close SQLite before Node delivers
+            // the socket's final close notification. Presence is advisory;
+            // stale rows are expired by the idle sweep on the next startup.
+            try {
+              sessionStore.closePresence(sessionId, device.id, presenceConnectionId);
+            } catch (error) {
+              if (error?.code !== 'ERR_INVALID_STATE') throw error;
+            }
+          };
           request.once('close', close);
           response.once('close', close);
           return;

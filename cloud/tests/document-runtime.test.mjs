@@ -270,6 +270,310 @@ test('runSession performs provider turns, checkpoints edits, publishes a portabl
   assert.ok(readyClaim >= 0 && readyClaim < completedEvent, 'the atomic message gate must close before completion');
 });
 
+test('persistent runSession stays warm between turns and finishes only after End', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-document-runtime-persistent-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const documentPath = path.join(root, 'document.hwp');
+  const timelinePath = path.join(root, 'timeline.json');
+  await fs.writeFile(documentPath, 'ORIGINAL', { mode: 0o600 });
+  await fs.writeFile(timelinePath, JSON.stringify(portableTimeline()), { mode: 0o600 });
+  const prompts = [];
+  const addedReferences = [];
+  const turnModes = [];
+  const workflowChanges = [];
+  let finishClaims = 0;
+  let harnessCreates = 0;
+  const client = {
+    event: async () => {},
+    upload: async (filename) => {
+      const bytes = await fs.readFile(filename);
+      return { id: createHash('sha256').update(bytes).digest('hex'), size: bytes.length };
+    },
+    commitBoundary: async (boundary) => boundaryReceipt(boundary),
+    beginTurn: async (turn) => { turnModes.push(turn.mode); return turn; },
+    completeTurn: async () => ({ status: 'running' }),
+    control: async () => ({}),
+    finishClaim: async () => {
+      finishClaims += 1;
+      if (finishClaims === 1 || finishClaims === 3) return { ready: false, waiting: true, messages: [] };
+      if (finishClaims === 2) {
+        return { ready: false, workflow: 'plan', messages: [{
+          id: 'follow-up',
+          content: 'Apply the follow-up.',
+          attachments: [{
+            attachmentId: 'notes', version: 1, blobId: 'a'.repeat(64),
+            name: 'notes.txt', mimeType: 'text/plain', size: 12,
+          }],
+        }] };
+      }
+      return { ready: true, messages: [] };
+    },
+    download: async (_blobId, destination) => fs.writeFile(destination, 'FOLLOWUP REF', { mode: 0o600 }),
+  };
+  const result = await runSession({
+    workspace: root,
+    credentials: {},
+    client,
+    createHarness: async ({ onEvent }) => {
+      harnessCreates += 1;
+      return {
+        start: async () => {},
+        setWorkflow: async (workflow) => { workflowChanges.push(workflow); },
+        addReferences: async (references) => { addedReferences.push(...references); },
+        runTurn: async (prompt) => {
+          prompts.push(prompt);
+          await onEvent({ type: 'agent', event: { type: 'turn-start', agent: 'codex' } });
+          const end = { type: 'turn-end', agent: 'codex', stopReason: 'end_turn' };
+          await onEvent({ type: 'agent', event: end });
+          return end;
+        },
+        exportDocument: async (_format, destination) => {
+          const bytes = Buffer.from(`PERSISTENT-TURN-${prompts.length}`);
+          await fs.writeFile(destination, bytes, { mode: 0o600 });
+          return { size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
+        },
+        close: async () => {},
+      };
+    },
+    manifest: {
+      sessionId: 'persistent-runtime',
+      provider: 'codex',
+      persistent: true,
+      roomStatus: 'active',
+      goal: 'Start the room.',
+      resources: [
+        { kind: 'document', name: 'document.hwp', filename: documentPath },
+        { kind: 'timeline', name: 'timeline.json', filename: timelinePath },
+      ],
+      latestCheckpoint: null,
+      limits: { maxDurationSeconds: 900, maxTurns: 10, turnsUsed: 0 },
+    },
+  });
+  assert.equal(harnessCreates, 1);
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[1], /Apply the follow-up/);
+  assert.match(prompts[1], /notes\.txt/);
+  assert.equal(addedReferences[0].version, 1);
+  assert.deepEqual(turnModes, ['direct', 'plan']);
+  assert.equal(workflowChanges.at(-1), 'plan');
+  assert.equal(finishClaims, 4);
+  assert.equal(await fs.readFile(result.resultPath, 'utf8'), 'PERSISTENT-TURN-2');
+});
+
+test('persistent redirect seals an operation boundary before dispatching the replacement turn', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-document-runtime-redirect-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const documentPath = path.join(root, 'document.hwp');
+  const timelinePath = path.join(root, 'timeline.json');
+  await fs.writeFile(documentPath, 'ORIGINAL', { mode: 0o600 });
+  await fs.writeFile(timelinePath, JSON.stringify(portableTimeline()), { mode: 0o600 });
+  const boundaries = [];
+  const completedTurns = [];
+  const prompts = [];
+  let finishClaims = 0;
+  let activeTurn = 0;
+  const client = {
+    event: async () => {},
+    beginTurn: async (turn) => { activeTurn = turn.turnNumber; return turn; },
+    upload: async (filename) => {
+      const bytes = await fs.readFile(filename);
+      return { id: createHash('sha256').update(bytes).digest('hex'), size: bytes.length };
+    },
+    commitBoundary: async (boundary) => { boundaries.push(boundary); return boundaryReceipt(boundary); },
+    completeTurn: async (turn) => { completedTurns.push(turn); return { status: 'running' }; },
+    control: async () => ({ redirectRequested: activeTurn === 1 }),
+    finishClaim: async () => {
+      finishClaims += 1;
+      if (finishClaims === 1) return { ready: false, messages: [{ id: 'redirect-1', content: 'Use the shorter title.' }] };
+      return { ready: true, messages: [] };
+    },
+  };
+  const result = await runSession({
+    workspace: root,
+    credentials: {},
+    client,
+    createHarness: async ({ onEvent }) => ({
+      start: async () => {},
+      runTurn: async (prompt, options) => {
+        prompts.push(prompt);
+        await onEvent({ type: 'agent', event: { type: 'turn-start', agent: 'codex' } });
+        await onEvent({ type: 'agent', event: {
+          type: 'tool-result', agent: 'codex', callId: `tool-${activeTurn}`, ok: true, resultPreview: 'done',
+        } });
+        await options.onSafeBoundary();
+        if ((await options.readControl()).redirectRequested) {
+          const interrupted = { type: 'turn-end', agent: 'codex', stopReason: 'interrupted', redirected: true };
+          await onEvent({ type: 'agent', event: interrupted });
+          return interrupted;
+        }
+        const completed = { type: 'turn-end', agent: 'codex', stopReason: 'end_turn' };
+        await onEvent({ type: 'agent', event: completed });
+        return completed;
+      },
+      exportDocument: async (_format, destination) => {
+        const bytes = Buffer.from(`TURN-${activeTurn}`);
+        await fs.writeFile(destination, bytes, { mode: 0o600 });
+        return { sha256: createHash('sha256').update(bytes).digest('hex'), size: bytes.length };
+      },
+      close: async () => {},
+    }),
+    manifest: {
+      sessionId: 'persistent-redirect-runtime', provider: 'codex', persistent: true,
+      roomStatus: 'active', goal: 'Write the title.', executionConfig: { workflow: 'direct' },
+      resources: [
+        { kind: 'document', name: 'document.hwp', filename: documentPath },
+        { kind: 'timeline', name: 'timeline.json', filename: timelinePath },
+      ],
+      latestCheckpoint: null,
+      limits: { maxDurationSeconds: 900, maxTurns: 10, turnsUsed: 0 },
+    },
+  });
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[1], /Use the shorter title/);
+  assert.deepEqual(completedTurns.map((turn) => turn.outcome), ['redirected', 'completed']);
+  assert.deepEqual(boundaries.map((boundary) => boundary.kind), ['operation', 'turn', 'operation', 'turn']);
+  assert.ok(boundaries[0].revision < boundaries[1].revision);
+  assert.equal(await fs.readFile(result.resultPath, 'utf8'), 'TURN-2');
+});
+
+test('plan approval is a durable worker wait instead of an automatic approval', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-document-runtime-plan-wait-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const documentPath = path.join(root, 'document.hwp');
+  const timelinePath = path.join(root, 'timeline.json');
+  await fs.writeFile(documentPath, 'ORIGINAL', { mode: 0o600 });
+  await fs.writeFile(timelinePath, JSON.stringify(portableTimeline()), { mode: 0o600 });
+  const waits = [];
+  const resumes = [];
+  const client = {
+    event: async () => {},
+    beginTurn: async (turn) => turn,
+    createWait: async (wait) => { waits.push(wait); return { id: 'wait-plan-1', status: 'pending' }; },
+    wait: async () => ({ id: 'wait-plan-1', status: 'resolved', resolution: { action: 'approve' } }),
+    upload: async (filename) => {
+      const bytes = await fs.readFile(filename);
+      return { id: createHash('sha256').update(bytes).digest('hex'), size: bytes.length };
+    },
+    commitBoundary: async (boundary) => boundaryReceipt(boundary),
+    completeTurn: async () => ({ status: 'running' }),
+    control: async () => ({}),
+    finishClaim: async () => ({ ready: true, messages: [] }),
+  };
+  await runSession({
+    workspace: root,
+    credentials: {},
+    client,
+    createHarness: async () => ({
+      start: async () => {},
+      runTurn: async (_prompt, options) => {
+        if (!options.resume) {
+          return {
+            type: 'turn-end', agent: 'codex', stopReason: 'end_turn',
+            wait: { kind: 'plan-approval', payload: { planId: 'plan-cloud-1', plan: { summary: 'Safe plan' } } },
+          };
+        }
+        resumes.push(options.resume);
+        return { type: 'turn-end', agent: 'codex', stopReason: 'end_turn' };
+      },
+      exportDocument: async (_format, destination) => {
+        const bytes = Buffer.from('PLANNED-EDIT');
+        await fs.writeFile(destination, bytes, { mode: 0o600 });
+        return { sha256: createHash('sha256').update(bytes).digest('hex'), size: bytes.length };
+      },
+      close: async () => {},
+    }),
+    manifest: {
+      sessionId: 'persistent-plan-runtime', provider: 'codex', persistent: true,
+      roomStatus: 'active', goal: 'Plan the edit.', executionConfig: { workflow: 'plan' },
+      resources: [
+        { kind: 'document', name: 'document.hwp', filename: documentPath },
+        { kind: 'timeline', name: 'timeline.json', filename: timelinePath },
+      ],
+      latestCheckpoint: null,
+      limits: { maxDurationSeconds: 900, maxTurns: 10, turnsUsed: 0 },
+    },
+  });
+  assert.equal(waits.length, 1);
+  assert.equal(waits[0].kind, 'plan-approval');
+  assert.equal(waits[0].payload.planId, 'plan-cloud-1');
+  assert.deepEqual(resumes, [{ action: 'approve', planId: 'plan-cloud-1' }]);
+});
+
+test('question answers and external approvals resume through their durable wait paths', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-document-runtime-decision-waits-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const documentPath = path.join(root, 'document.hwp');
+  const timelinePath = path.join(root, 'timeline.json');
+  await fs.writeFile(documentPath, 'ORIGINAL', { mode: 0o600 });
+  await fs.writeFile(timelinePath, JSON.stringify(portableTimeline()), { mode: 0o600 });
+  const waits = [];
+  const resumes = [];
+  const client = {
+    event: async () => {},
+    beginTurn: async (turn) => turn,
+    createWait: async (wait) => {
+      waits.push(wait);
+      return { id: `wait-${waits.length}`, status: 'pending' };
+    },
+    wait: async (waitId) => waitId === 'wait-1'
+      ? { id: waitId, status: 'resolved', resolution: { action: 'answer', feedback: 'Use the fiscal-year date.' } }
+      : { id: waitId, status: 'resolved', resolution: { action: 'approve' } },
+    upload: async (filename) => {
+      const bytes = await fs.readFile(filename);
+      return { id: createHash('sha256').update(bytes).digest('hex'), size: bytes.length };
+    },
+    commitBoundary: async (boundary) => boundaryReceipt(boundary),
+    completeTurn: async () => ({ status: 'running' }),
+    control: async () => ({}),
+    finishClaim: async () => ({ ready: true, messages: [] }),
+  };
+  await runSession({
+    workspace: root,
+    credentials: {},
+    client,
+    createHarness: async () => ({
+      start: async () => {},
+      runTurn: async (_prompt, options) => {
+        if (!options.resume) {
+          return {
+            type: 'turn-end', agent: 'codex', stopReason: 'end_turn',
+            wait: { kind: 'question', payload: { prompt: 'Which reporting date?' } },
+          };
+        }
+        resumes.push(options.resume);
+        if (options.resume.action === 'answer') {
+          return {
+            type: 'turn-end', agent: 'codex', stopReason: 'end_turn',
+            wait: { kind: 'external-side-effect', payload: { prompt: 'Publish the approved report?' } },
+          };
+        }
+        return { type: 'turn-end', agent: 'codex', stopReason: 'end_turn' };
+      },
+      exportDocument: async (_format, destination) => {
+        const bytes = Buffer.from('DECISION-EDIT');
+        await fs.writeFile(destination, bytes, { mode: 0o600 });
+        return { sha256: createHash('sha256').update(bytes).digest('hex'), size: bytes.length };
+      },
+      close: async () => {},
+    }),
+    manifest: {
+      sessionId: 'persistent-decision-runtime', provider: 'codex', persistent: true,
+      roomStatus: 'active', goal: 'Finish the report.', executionConfig: { workflow: 'direct' },
+      resources: [
+        { kind: 'document', name: 'document.hwp', filename: documentPath },
+        { kind: 'timeline', name: 'timeline.json', filename: timelinePath },
+      ],
+      latestCheckpoint: null,
+      limits: { maxDurationSeconds: 900, maxTurns: 10, turnsUsed: 0 },
+    },
+  });
+  assert.deepEqual(waits.map(({ kind }) => kind), ['question', 'external-side-effect']);
+  assert.deepEqual(resumes, [
+    { action: 'answer', feedback: 'Use the fiscal-year date.' },
+    { action: 'external-effect', kind: 'external-side-effect', feedback: '' },
+  ]);
+});
+
 test('safe-boundary pause publishes a checkpoint and timeline, acknowledges pause, and returns no result', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-document-runtime-pause-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

@@ -46,7 +46,7 @@ test('database migrates with WAL, FULL sync, and foreign keys', async (t) => {
     journalMode: 'wal',
     synchronous: 2,
     foreignKeys: 1,
-    migrationVersion: 10,
+    migrationVersion: 11,
   });
 });
 
@@ -86,13 +86,16 @@ test('existing version-one state upgrades without losing resources or event sequ
 
   const upgraded = openDatabase(filename);
   t.after(() => upgraded.close());
-  assert.equal(databasePragmas(upgraded).migrationVersion, 10);
+  assert.equal(databasePragmas(upgraded).migrationVersion, 11);
   assert.equal(upgraded.prepare(`SELECT next_event_seq FROM sessions WHERE id = 'session'`).get().next_event_seq, 8);
   assert.equal(upgraded.prepare(`SELECT name FROM session_resources WHERE session_id = 'session'`).get().name, 'doc.hwp');
   assert.equal(upgraded.prepare(`SELECT COUNT(*) AS count FROM pragma_table_info('sessions') WHERE name IN ('execution_config_json', 'pause_requested_at', 'finishing_at')`).get().count, 3);
   assert.equal(upgraded.prepare(`SELECT COUNT(*) AS count FROM pragma_table_info('access_tokens') WHERE name = 'generation'`).get().count, 1);
   assert.equal(upgraded.prepare(`SELECT COUNT(*) AS count FROM pragma_table_info('refresh_tokens') WHERE name = 'activated_at'`).get().count, 1);
   assert.equal(upgraded.prepare(`SELECT generation FROM access_tokens WHERE family_id = 'family'`).get().generation, 2);
+  assert.equal(upgraded.prepare(`SELECT protocol_version, room_status, execution_phase FROM sessions WHERE id = 'session'`).get().protocol_version, 1);
+  assert.equal(upgraded.prepare(`SELECT COUNT(*) AS count FROM pragma_table_info('session_events') WHERE name IN ('event_id', 'turn_id', 'payload_blob_sha256')`).get().count, 3);
+  assert.equal(upgraded.prepare(`SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name IN ('session_turns', 'session_waits', 'session_attachment_versions', 'session_message_attachments', 'session_presence', 'session_runtime_leases')`).get().count, 6);
   assert.equal(upgraded.prepare(`SELECT COUNT(*) AS count FROM pragma_table_info('sessions') WHERE name IN ('takeover_requested_at', 'takeover_requested_by', 'frozen_checkpoint_operation_id')`).get().count, 3);
   assert.equal(upgraded.prepare(`SELECT COUNT(*) AS count FROM pragma_table_info('session_checkpoints') WHERE name IN ('timeline_blob_sha256', 'timeline_size')`).get().count, 2);
   assert.equal(upgraded.prepare(`SELECT blob_sha256 FROM session_checkpoints WHERE operation_id = 'migration-handoff:session'`).get().blob_sha256, 'a'.repeat(64));
@@ -667,4 +670,299 @@ test('atomic finish delivers pre-claim messages and rejects post-claim messages 
   assert.equal(sessions.database.prepare(`
     SELECT COUNT(*) AS count FROM session_messages WHERE session_id = ? AND status = 'queued'
   `).get(input.sessionId).count, 0);
+});
+
+test('persistent conversation waits for another turn until explicit End', async (t) => {
+  const { blobs, auth, sessions } = await fixture(t);
+  const origin = await pairedDevice(auth);
+  sessions.setProviderStatus('codex', { available: true, version: '1' });
+  const document = await upload(blobs, origin.device.id, Buffer.from('persistent document'));
+  const input = parseSessionCreate({
+    sessionId: 'session_persistent_room',
+    provider: 'codex',
+    goal: 'Start the persistent conversation',
+    persistent: true,
+    clientContext: { threadId: 'thread-persistent', documentId: 'document-persistent' },
+    originDocument: { blobId: document.id, name: 'document.hwpx', size: document.size },
+  });
+  const created = sessions.createSession(origin.device, input);
+  assert.equal(created.persistent, true);
+  assert.equal(created.roomStatus, 'active');
+  sessions.executeCommand(origin.device, input.sessionId, parseCommand({
+    commandId: 'activate_persistent_room', type: 'session.activate', payload: { expectedVersion: created.stateVersion },
+  }));
+  sessions.claimNextSession();
+
+  sessions.completeTurn(input.sessionId);
+  assert.deepEqual(sessions.claimFinish(input.sessionId), {
+    ready: false, waiting: true, workflow: 'direct', messages: [],
+  });
+  assert.equal(sessions.getSession(input.sessionId).status, 'running');
+  assert.equal(sessions.getSession(input.sessionId).executionPhase, 'idle');
+
+  sessions.executeCommand(origin.device, input.sessionId, parseCommand({
+    commandId: 'workflow_persistent_plan',
+    type: 'conversation.workflow',
+    payload: { expectedVersion: sessions.getSession(input.sessionId).stateVersion, workflow: 'plan' },
+  }));
+  assert.equal(sessions.getSession(input.sessionId).executionConfig.workflow, 'plan');
+
+  sessions.executeCommand(origin.device, input.sessionId, parseCommand({
+    commandId: 'message_persistent_second_turn',
+    type: 'message.queue',
+    payload: { messageId: 'persistent-message-2', content: 'Now update the footer.' },
+  }));
+  const next = sessions.claimFinish(input.sessionId);
+  assert.deepEqual(next.messages.map(({ id, content }) => ({ id, content })), [{
+    id: 'persistent-message-2', content: 'Now update the footer.',
+  }]);
+  assert.equal(next.workflow, 'plan');
+  assert.equal(sessions.getSession(input.sessionId).executionPhase, 'working');
+
+  sessions.completeTurn(input.sessionId);
+  assert.equal(sessions.claimFinish(input.sessionId).waiting, true);
+  const ending = sessions.executeCommand(origin.device, input.sessionId, parseCommand({
+    commandId: 'end_persistent_room',
+    type: 'session.end',
+    payload: { expectedVersion: sessions.getSession(input.sessionId).stateVersion },
+  }));
+  assert.equal(ending.session.roomStatus, 'ending');
+  assert.equal(ending.session.endRequested, true);
+  assert.deepEqual(sessions.claimFinish(input.sessionId), { ready: true, messages: [] });
+  assert.throws(() => sessions.executeCommand(origin.device, input.sessionId, parseCommand({
+    commandId: 'message_after_persistent_end',
+    type: 'message.queue',
+    payload: { content: 'Too late' },
+  })), { code: 'CONVERSATION_ENDING' });
+
+  const types = sessions.listEvents(input.sessionId, 0).map(({ type }) => type);
+  assert.ok(types.includes('conversation.waiting'));
+  assert.ok(types.includes('conversation.workflow_changed'));
+  assert.ok(types.includes('conversation.ending'));
+});
+
+test('persistent message claims bind one queued message to one crash-recoverable turn', async (t) => {
+  const { blobs, auth, sessions, database } = await fixture(t);
+  const origin = await pairedDevice(auth);
+  sessions.setProviderStatus('codex', { available: true, version: '1' });
+  const document = await upload(blobs, origin.device.id, Buffer.from('persistent queue document'));
+  const input = parseSessionCreate({
+    sessionId: 'session_persistent_message_crash', provider: 'codex', goal: 'Start the room', persistent: true,
+    clientContext: { threadId: 'thread-message-crash', documentId: 'document-message-crash' },
+    originDocument: { blobId: document.id, name: 'message-crash.hwpx', size: document.size },
+  });
+  const created = sessions.createSession(origin.device, input);
+  sessions.executeCommand(origin.device, input.sessionId, parseCommand({
+    commandId: 'activate_persistent_message_crash', type: 'session.activate',
+    payload: { expectedVersion: created.stateVersion },
+  }));
+  sessions.claimNextSession();
+  sessions.beginTurn(input.sessionId, { turnNumber: 1, mode: 'direct' });
+  sessions.completeTurn(input.sessionId);
+
+  for (const [messageId, content] of [['crash-message-1', 'First follow-up'], ['crash-message-2', 'Second follow-up']]) {
+    sessions.executeCommand(origin.device, input.sessionId, parseCommand({
+      commandId: `queue_${messageId}`, type: 'message.queue', payload: { messageId, content },
+    }));
+  }
+  const firstClaim = sessions.claimFinish(input.sessionId);
+  assert.deepEqual(firstClaim.messages.map(({ id }) => id), ['crash-message-1']);
+  sessions.beginTurn(input.sessionId, { turnNumber: 2, messageId: 'crash-message-1', mode: 'direct' });
+  sessions.completeTurn(input.sessionId);
+  assert.deepEqual(database.prepare(`
+    SELECT id, status FROM session_messages WHERE session_id = ? ORDER BY created_at, id
+  `).all(input.sessionId).map(({ id, status }) => ({ id, status })), [
+    { id: 'crash-message-1', status: 'consumed' },
+    { id: 'crash-message-2', status: 'queued' },
+  ]);
+
+  sessions.requeueInterruptedSession(input.sessionId, 'worker_crashed_between_turns');
+  sessions.claimNextSession();
+  const recoveredClaim = sessions.claimFinish(input.sessionId);
+  assert.deepEqual(recoveredClaim.messages.map(({ id, content }) => ({ id, content })), [
+    { id: 'crash-message-2', content: 'Second follow-up' },
+  ]);
+  const resumedTurn = sessions.beginTurn(input.sessionId, {
+    turnNumber: 3, messageId: 'crash-message-2', mode: 'direct',
+  });
+  const operationCheckpoint = await upload(blobs, origin.device.id, Buffer.from('operation checkpoint'));
+  const operationTimeline = await upload(blobs, origin.device.id, Buffer.from('{"turn":3,"kind":"operation"}'), {
+    name: 'timeline.json', kind: 'timeline',
+  });
+  await sessions.commitBoundary(input.sessionId, {
+    operationId: 'operation-message-crash', turnNumber: 3, revision: 1, kind: 'operation',
+    checkpoint: { blobId: operationCheckpoint.id, size: operationCheckpoint.size },
+    timeline: { blobId: operationTimeline.id, size: operationTimeline.size },
+  });
+  sessions.requeueInterruptedSession(input.sessionId, 'worker_crashed_after_operation');
+  assert.equal(database.prepare('SELECT status FROM session_turns WHERE id = ?').get(resumedTurn.id).status, 'queued');
+  assert.equal(database.prepare('SELECT status FROM session_messages WHERE id = ?').get('crash-message-2').status, 'queued');
+
+  sessions.claimNextSession();
+  assert.deepEqual(sessions.claimFinish(input.sessionId).messages.map(({ id }) => id), ['crash-message-2']);
+  const retriedTurn = sessions.beginTurn(input.sessionId, {
+    turnNumber: 3, messageId: 'crash-message-2', mode: 'direct',
+  });
+  assert.equal(retriedTurn.id, resumedTurn.id);
+  const turnCheckpoint = await upload(blobs, origin.device.id, Buffer.from('turn checkpoint'));
+  const turnTimeline = await upload(blobs, origin.device.id, Buffer.from('{"turn":3,"kind":"turn"}'), {
+    name: 'timeline.json', kind: 'timeline',
+  });
+  await sessions.commitBoundary(input.sessionId, {
+    operationId: 'turn-message-crash', turnNumber: 3, revision: 2, kind: 'turn',
+    checkpoint: { blobId: turnCheckpoint.id, size: turnCheckpoint.size },
+    timeline: { blobId: turnTimeline.id, size: turnTimeline.size },
+  });
+  sessions.requeueInterruptedSession(input.sessionId, 'worker_crashed_after_turn_boundary');
+  assert.equal(database.prepare('SELECT status FROM session_turns WHERE id = ?').get(resumedTurn.id).status, 'completed');
+  assert.equal(database.prepare('SELECT status FROM session_messages WHERE id = ?').get('crash-message-2').status, 'consumed');
+  assert.equal(sessions.getSession(input.sessionId).turnsUsed, 3);
+});
+
+test('persistent turns expose durable plan waits and reject stale resolutions', async (t) => {
+  const { blobs, auth, sessions, database } = await fixture(t);
+  const origin = await pairedDevice(auth);
+  const paired = await pairedDevice(auth, 'Paired laptop');
+  sessions.setProviderStatus('codex', { available: true, version: '1' });
+  const document = await upload(blobs, origin.device.id, Buffer.from('plan document'));
+  const input = parseSessionCreate({
+    sessionId: 'session_durable_plan_wait',
+    provider: 'codex',
+    goal: 'Plan and edit',
+    persistent: true,
+    clientContext: { threadId: 'thread-plan-wait', documentId: 'document-plan-wait' },
+    executionConfig: { model: 'gpt-5.6-sol', effort: 'high', workflow: 'plan', permissionProfile: 'unrestricted' },
+    originDocument: { blobId: document.id, name: 'plan.hwpx', size: document.size },
+  });
+  const created = sessions.createSession(origin.device, input);
+  sessions.executeCommand(origin.device, input.sessionId, parseCommand({
+    commandId: 'activate_durable_plan_wait', type: 'session.activate', payload: { expectedVersion: created.stateVersion },
+  }));
+  sessions.claimNextSession();
+  const turn = sessions.beginTurn(input.sessionId, { turnNumber: 1, mode: 'plan' });
+  const wait = sessions.createWait(input.sessionId, {
+    turnNumber: 1,
+    kind: 'plan-approval',
+    payload: { planId: 'plan-1', plan: { summary: 'Update the title safely.' } },
+  });
+  assert.equal(wait.status, 'pending');
+  assert.equal(sessions.getSession(input.sessionId).currentWait.id, wait.id);
+  assert.equal(sessions.getSession(input.sessionId).executionPhase, 'awaiting-plan-approval');
+
+  const resolved = sessions.executeCommand(paired.device, input.sessionId, parseCommand({
+    commandId: 'approve_durable_plan_wait',
+    type: 'wait.resolve',
+    payload: {
+      expectedVersion: sessions.getSession(input.sessionId).stateVersion,
+      waitId: wait.id,
+      action: 'approve',
+    },
+  }));
+  assert.equal(resolved.session.currentWait, null);
+  assert.deepEqual(sessions.waitState(input.sessionId, wait.id).resolution, { action: 'approve' });
+  assert.throws(() => sessions.executeCommand(origin.device, input.sessionId, parseCommand({
+    commandId: 'approve_stale_plan_wait',
+    type: 'wait.resolve',
+    payload: {
+      expectedVersion: sessions.getSession(input.sessionId).stateVersion,
+      waitId: wait.id,
+      action: 'approve',
+    },
+  })), { code: 'WAIT_NOT_PENDING' });
+  sessions.completeTurn(input.sessionId);
+  assert.equal(database.prepare('SELECT status FROM session_turns WHERE id = ?').get(turn.id).status, 'completed');
+  const types = sessions.listEvents(input.sessionId, 0).map(({ type }) => type);
+  assert.ok(types.includes('turn.started'));
+  assert.ok(types.includes('wait.created'));
+  assert.ok(types.includes('wait.resolved'));
+});
+
+test('follow-up attachment versions are immutable and delivered with their exact message', async (t) => {
+  const { blobs, auth, sessions, database } = await fixture(t);
+  const origin = await pairedDevice(auth);
+  sessions.setProviderStatus('codex', { available: true, version: '1' });
+  const document = await upload(blobs, origin.device.id, Buffer.from('attachment document'));
+  const first = await upload(blobs, origin.device.id, Buffer.from('attachment version one'), {
+    name: 'notes.txt', kind: 'reference', sessionId: 'session_attachment_versions',
+  });
+  const second = await upload(blobs, origin.device.id, Buffer.from('attachment version two'), {
+    name: 'notes.txt', kind: 'reference', sessionId: 'session_attachment_versions',
+  });
+  const input = parseSessionCreate({
+    sessionId: 'session_attachment_versions', provider: 'codex', goal: 'Use follow-up files', persistent: true,
+    clientContext: { threadId: 'thread-attachments', documentId: 'document-attachments' },
+    originDocument: { blobId: document.id, name: 'attachments.hwpx', size: document.size },
+  });
+  const created = sessions.createSession(origin.device, input);
+  sessions.executeCommand(origin.device, input.sessionId, parseCommand({
+    commandId: 'activate_attachment_versions', type: 'session.activate', payload: { expectedVersion: created.stateVersion },
+  }));
+  sessions.claimNextSession();
+  sessions.executeCommand(origin.device, input.sessionId, parseCommand({
+    commandId: 'queue_attachment_version_one', type: 'message.queue', payload: {
+      messageId: 'attachment-message-one', content: 'Read version one.', attachments: [{
+        attachmentId: 'logical-notes', blobId: first.id, size: first.size, name: 'notes.txt', mimeType: 'text/plain',
+      }],
+    },
+  }));
+  const firstDelivery = sessions.claimFinish(input.sessionId).messages[0];
+  assert.equal(firstDelivery.attachments[0].version, 1);
+  assert.equal(firstDelivery.attachments[0].blobId, first.id);
+  sessions.completeTurn(input.sessionId);
+  sessions.claimFinish(input.sessionId);
+  sessions.executeCommand(origin.device, input.sessionId, parseCommand({
+    commandId: 'queue_attachment_version_two', type: 'message.queue', payload: {
+      messageId: 'attachment-message-two', content: 'Now read version two.', attachments: [{
+        attachmentId: 'logical-notes', blobId: second.id, size: second.size, name: 'notes.txt', mimeType: 'text/plain',
+      }],
+    },
+  }));
+  const secondDelivery = sessions.claimFinish(input.sessionId).messages[0];
+  assert.equal(secondDelivery.attachments[0].version, 2);
+  assert.equal(secondDelivery.attachments[0].blobId, second.id);
+  const versions = database.prepare(`
+    SELECT version_number AS version, blob_sha256 AS blobId, supersedes_version_id AS supersedes
+    FROM session_attachment_versions WHERE session_id = ? ORDER BY version_number
+  `).all(input.sessionId);
+  assert.deepEqual(versions.map(({ version, blobId }) => ({ version, blobId })), [
+    { version: 1, blobId: first.id },
+    { version: 2, blobId: second.id },
+  ]);
+  assert.equal(typeof versions[1].supersedes, 'string');
+});
+
+test('an idle persistent room sleeps thirty minutes after the last presence and wakes on reconnect', async (t) => {
+  let clock = 1_800_000_000_000;
+  const { blobs, auth, sessions } = await fixture(t, { now: () => clock });
+  const origin = await pairedDevice(auth);
+  sessions.setProviderStatus('codex', { available: true, version: '1' });
+  const document = await upload(blobs, origin.device.id, Buffer.from('sleep document'));
+  const input = parseSessionCreate({
+    sessionId: 'session_presence_sleep', provider: 'codex', goal: 'Wait persistently', persistent: true,
+    clientContext: { threadId: 'thread-presence', documentId: 'document-presence' },
+    originDocument: { blobId: document.id, name: 'sleep.hwpx', size: document.size },
+  });
+  const created = sessions.createSession(origin.device, input);
+  sessions.executeCommand(origin.device, input.sessionId, parseCommand({
+    commandId: 'activate_presence_sleep', type: 'session.activate', payload: { expectedVersion: created.stateVersion },
+  }));
+  sessions.claimNextSession();
+  sessions.completeTurn(input.sessionId);
+  sessions.claimFinish(input.sessionId);
+  sessions.openPresence(input.sessionId, origin.device.id, 'connection-1');
+  clock += 60_000;
+  sessions.closePresence(input.sessionId, origin.device.id, 'connection-1');
+  clock += 29 * 60_000;
+  assert.deepEqual(sessions.requestIdleSleeps(), []);
+  clock += 60_001;
+  assert.deepEqual(sessions.requestIdleSleeps(), [input.sessionId]);
+  assert.equal(sessions.workerControl(input.sessionId).sleepRequested, true);
+  const sleeping = sessions.acknowledgeSleep(input.sessionId);
+  assert.equal(sleeping.status, 'suspended');
+  assert.equal(sleeping.suspendedReason.code, 'PRESENCE_SLEEP');
+  const waking = sessions.openPresence(input.sessionId, origin.device.id, 'connection-2');
+  assert.equal(waking.status, 'queued');
+  assert.equal(waking.presence.waking, true);
+  assert.ok(sessions.listEvents(input.sessionId, 0).some(({ type }) => type === 'runtime.sleeping'));
+  assert.ok(sessions.listEvents(input.sessionId, 0).some(({ type }) => type === 'conversation.waking'));
 });

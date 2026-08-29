@@ -769,6 +769,7 @@ export class CloudClient {
     documentBytes,
     timeline = [],
     resources = [],
+    persistent = false,
     limits,
     providerAuth = null,
     onProgress = () => {},
@@ -848,6 +849,7 @@ export class CloudClient {
       body: {
         sessionId,
         provider,
+        persistent,
         executionConfig,
         goal,
         clientContext: { threadId, documentId },
@@ -1107,8 +1109,10 @@ export class CloudClient {
   }
 
   async downloadCheckpoint(sessionId, options = {}) {
-    const response = await this.#rawRequest(`/v1/sessions/${encodeURIComponent(sessionId)}/checkpoint`, {
-      ...options,
+    const { operationId = null, ...requestOptions } = options;
+    const query = operationId ? `?operationId=${encodeURIComponent(operationId)}` : '';
+    const response = await this.#rawRequest(`/v1/sessions/${encodeURIComponent(sessionId)}/checkpoint${query}`, {
+      ...requestOptions,
       maxResponseBytes: MAX_RESULT_BYTES,
     });
     const declared = Number(response.headers.get('content-length'));
@@ -1135,6 +1139,7 @@ export class CloudClient {
       revision: Number(response.headers.get('x-checkpoint-revision')) || 0,
       turn: Number(response.headers.get('x-checkpoint-turn')) || 0,
       boundaryOperation: response.headers.get('x-boundary-operation') || '',
+      boundaryKind: response.headers.get('x-boundary-kind') || 'turn',
     };
   }
 

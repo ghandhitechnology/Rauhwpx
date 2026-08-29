@@ -94,6 +94,7 @@ import { exportCloudTimeline, importCloudTimeline, type PortableCloudTimelineV1 
 import { collectUsedCloudReferenceIds } from '../../cloud/references.ts';
 import type {
   CloudDocumentPayload,
+  CloudCheckpointPayload,
   CloudDownloadResult,
   CloudResultResolution,
   CloudSessionScope,
@@ -145,6 +146,7 @@ export interface AgentSidebarDeps {
   prepareCloudTransfer?: () => Promise<CloudDocumentPayload | null>;
   setCloudDocumentLease?: (cloudOwned: boolean, sessionId: string | null) => void;
   applyCloudResult?: (result: CloudDownloadResult, resolution: CloudResultResolution) => void | Promise<void>;
+  applyCloudCheckpoint?: (checkpoint: CloudCheckpointPayload) => void | Promise<void>;
   prepareCloudTakeover?: () => Promise<boolean>;
   applyCloudTakeover?: (takeover: CloudTakeoverPayload) => Promise<{
     documentId: string;
@@ -568,7 +570,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     versionController,
     openClassicVersionControl,
   } = deps;
-  const cloudController = deps.cloudController ?? createCloudController();
+  const cloudController = deps.cloudController ?? createCloudController(undefined, {
+    readReference: (reference) => bridge.downloadReference(reference),
+  });
 
   // 개인 기본값(설정 탭에서 저장) — 새 대화가 이 조합으로 열린다.
   let agentPrefs: AgentPrefs = loadAgentPrefs();
@@ -1548,6 +1552,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       queueMicrotask(() => updateComposer());
     },
     onTimeline: (timeline) => applyCloudTimeline(timeline),
+    onAgentEvent: (event) => handleAgentEvent(event),
+    onCheckpoint: (checkpoint) => deps.applyCloudCheckpoint?.(checkpoint),
     onResultResolved: (result, resolution) => {
       if (result.timeline) applyCloudTimeline(result.timeline);
       void deps.applyCloudResult?.(result, resolution);
@@ -3577,31 +3583,87 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     e.preventDefault();
     if (readOnlyDocLabel !== null || mergeResolverLocked) return;
     if (cloudUi.isCloudConversation()) {
-      if (!cloudUi.isRunning() || activeComposerSkill || referenceLibrary.hasDrafts()) return;
-      const cloudText = input.value.trim();
-      if (!cloudText) return;
-      const messageId = globalThis.crypto?.randomUUID?.()
-        ?? `cloud-message-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-      const userMessage = recordUserMessage(
-        cloudText,
-        [],
-        undefined,
-        undefined,
-        undefined,
-        'queued-cloud',
-        messageId,
-      );
-      const userBubble = renderUserMessage(userMessage);
-      appendConversation(userBubble);
-      input.value = '';
-      resizeComposerInput();
-      scrollConversationToMessage(userBubble, { smooth: true });
-      void cloudUi.queueMessage(cloudText, messageId).catch((error) => {
-        const message = error instanceof Error ? error.message : String(error);
-        userBubble.remove();
-        input.value = cloudText;
+      if (!cloudUi.isRunning() || activeComposerSkill || attachmentsSending || referenceLibrary.hasBlockingDrafts()) return;
+      let cloudText = input.value.trim();
+      const hasDrafts = referenceLibrary.hasDrafts();
+      if (!cloudText && !hasDrafts) return;
+      const workflowInvocation = cloudText.match(/^\/(plan|build)(?:\s+([\s\S]*))?$/i);
+      const cloudWorkflow = workflowInvocation?.[1]?.toLowerCase() === 'plan' ? 'plan'
+        : workflowInvocation ? 'direct' : null;
+      if (workflowInvocation) cloudText = (workflowInvocation[2] ?? '').trim();
+      if (!cloudText) {
+        if (!hasDrafts && cloudWorkflow) {
+          input.value = '';
+          void cloudUi.setWorkflow(cloudWorkflow).catch((error) => {
+            input.value = workflowInvocation?.[0] ?? '';
+            resizeComposerInput();
+            systemMessage(`클라우드 모드를 바꾸지 못했습니다: ${error instanceof Error ? error.message : String(error)}`);
+          });
+          return;
+        }
+        cloudText = referenceLibrary.allDraftsAreImages()
+          ? '첨부한 이미지를 확인해 주세요.'
+          : '첨부한 파일을 확인해 주세요.';
+      }
+      attachmentsSending = hasDrafts;
+      updateComposer();
+      void (async () => {
+        if (cloudWorkflow) await cloudUi.setWorkflow(cloudWorkflow);
+        const drafts = hasDrafts ? await referenceLibrary.takeReadyCloudDrafts() : [];
+        const messageId = globalThis.crypto?.randomUUID?.()
+          ?? `cloud-message-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+        const messageAttachments: ThreadAttachment[] = drafts.map((file) => ({
+          stageId: file.id,
+          fileId: file.id,
+          name: file.name,
+          mimeType: file.mimeType,
+          size: file.size,
+          status: 'processing',
+        }));
+        const userMessage = recordUserMessage(
+          cloudText,
+          messageAttachments,
+          undefined,
+          undefined,
+          undefined,
+          'queued-cloud',
+          messageId,
+        );
+        const userBubble = renderUserMessage(userMessage);
+        appendConversation(userBubble);
+        input.value = '';
         resizeComposerInput();
-        systemMessage(`메시지를 대기열에 넣지 못했습니다: ${message}`);
+        scrollConversationToMessage(userBubble, { smooth: true });
+        try {
+          await cloudUi.queueMessage(cloudText, messageId, drafts.map((file) => ({
+            id: file.id,
+            name: file.name,
+            mimeType: file.mimeType,
+            size: file.size,
+            bytes: file.bytes,
+          })));
+          for (const attachment of messageAttachments) attachment.status = 'ready';
+          persistCurrentThread();
+          renderMessagesFromThread(currentThread);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          userBubble.remove();
+          input.value = cloudText;
+          if (drafts.length) {
+            referenceLibrary.stageDraftFiles(drafts.map((file) => new File(
+              [new Uint8Array(file.bytes).buffer], file.name, { type: file.mimeType },
+            )));
+          }
+          resizeComposerInput();
+          systemMessage(`메시지를 대기열에 넣지 못했습니다: ${message}`);
+        } finally {
+          attachmentsSending = false;
+          updateComposer();
+        }
+      })().catch((error) => {
+        attachmentsSending = false;
+        updateComposer();
+        systemMessage(`첨부 파일을 준비하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`);
       });
       return;
     }

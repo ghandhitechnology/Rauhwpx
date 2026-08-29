@@ -1,5 +1,6 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { createStudioHarness } from './studio-harness.mjs';
 import { composeTurnPrompt, readTimeline, TimelineRecorder } from './timeline.mjs';
 
@@ -33,6 +34,11 @@ function referenceMimeType(name) {
   })[path.extname(String(name ?? '')).toLowerCase()] ?? 'application/octet-stream';
 }
 
+function safeAttachmentFilename(name, fallback) {
+  const base = path.basename(String(name ?? '')).replace(/[^\p{L}\p{N}._ -]/gu, '_').slice(0, 180);
+  return base && base !== '.' && base !== '..' ? base : fallback;
+}
+
 async function readJsonBounded(filename, maximum = MAX_TIMELINE_BYTES) {
   const stat = await fs.lstat(filename);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 2 || stat.size > maximum) {
@@ -62,20 +68,18 @@ function assertLocalResource(resource, kind) {
   return resource;
 }
 
-async function getQueuedMessages(client) {
-  const result = await client.messages();
-  return Array.isArray(result?.messages) ? result.messages : [];
-}
-
 async function uploadTimeline(client, timelinePath, recorder) {
   await writeJsonAtomic(timelinePath, recorder.export());
   return client.upload(timelinePath, { name: 'timeline.json', kind: 'timeline' });
 }
 
-async function stableCheckpoint({ client, harness, workspace, format, extension, turnNumber }) {
+async function stableCheckpoint({ client, harness, workspace, format, extension, turnNumber, revision, kind }) {
   const directory = path.join(workspace, 'checkpoints');
   await fs.mkdir(directory, { recursive: true, mode: 0o700 });
-  const checkpointPath = path.join(directory, `turn-${String(turnNumber).padStart(4, '0')}${extension}`);
+  const checkpointPath = path.join(
+    directory,
+    `${kind}-${String(turnNumber).padStart(4, '0')}-r${String(revision).padStart(6, '0')}${extension}`,
+  );
   const receipt = await harness.exportDocument(format, checkpointPath);
   const uploaded = await client.upload(checkpointPath, {
     name: path.basename(checkpointPath),
@@ -84,21 +88,24 @@ async function stableCheckpoint({ client, harness, workspace, format, extension,
   return { checkpointPath, receipt, uploaded };
 }
 
-async function commitStableBoundary({ client, checkpoint, timeline, turnNumber }) {
+async function commitStableBoundary({ client, checkpoint, timeline, turnNumber, revision, kind }) {
   if (typeof client.commitBoundary !== 'function') {
     throw runtimeError('BOUNDARY_PROTOCOL_UNAVAILABLE', 'Worker atomic boundary commit is unavailable');
   }
-  const operationId = `turn_${turnNumber}_${checkpoint.receipt.sha256.slice(0, 24)}`;
+  const operationId = kind === 'turn'
+    ? `turn_${turnNumber}_${checkpoint.receipt.sha256.slice(0, 24)}`
+    : `${kind}_${turnNumber}_${revision}_${checkpoint.receipt.sha256.slice(0, 24)}`;
   const boundary = await client.commitBoundary({
     operationId,
     turnNumber,
-    revision: turnNumber,
+    revision,
+    kind,
     checkpoint: { blobId: checkpoint.uploaded.id, size: checkpoint.uploaded.size },
     timeline: { blobId: timeline.id, size: timeline.size },
   });
   if (boundary?.operationId !== operationId
     || boundary?.turnNumber !== turnNumber
-    || boundary?.revision !== turnNumber
+    || boundary?.revision !== revision
     || boundary?.checkpoint?.blobId !== checkpoint.uploaded.id
     || boundary?.timeline?.blobId !== timeline.id) {
     throw runtimeError('BOUNDARY_COMMIT_INVALID', 'Worker atomic boundary receipt did not match its uploaded artifacts');
@@ -165,7 +172,12 @@ export async function runSession({
   const timelinePath = path.join(workspace, 'timeline.json');
   const deadline = Date.now() + Math.max(60_000, Number(manifest.limits?.maxDurationSeconds) * 1_000 || 8 * 60 * 60 * 1_000);
   const maxTurns = Math.max(1, Number(manifest.limits?.maxTurns) || 100);
-  let turnNumber = Math.max(0, Number(manifest.limits?.turnsUsed) || stableRecovery?.turnNumber || 0);
+  const recoveredCompletedTurn = stableRecovery?.kind === 'turn'
+    ? Number(stableRecovery.turnNumber) || 0
+    : 0;
+  let turnNumber = Math.max(0, Number(manifest.limits?.turnsUsed) || 0, recoveredCompletedTurn);
+  let revision = Math.max(0, Number(stableRecovery?.revision) || 0);
+  let activeWorkflow = manifest.executionConfig?.workflow === 'plan' ? 'plan' : 'direct';
   let latestCheckpoint = null;
   let harness;
   await client.event('runtime.started', {
@@ -201,46 +213,74 @@ export async function runSession({
       await client.pauseAck();
       return { paused: true, timelinePath };
     };
+    const acknowledgeSleep = async () => {
+      if (typeof client.sleepAck !== 'function') {
+        throw runtimeError('SLEEP_PROTOCOL_UNAVAILABLE', 'Worker sleep acknowledgement is unavailable');
+      }
+      await client.event('runtime.sleeping', { turnNumber });
+      const acknowledged = await client.sleepAck();
+      if (acknowledged?.status === 'running') return { sleepCancelled: true };
+      return { sleeping: true, timelinePath };
+    };
     const claimFinish = async () => {
       if (typeof client.finishClaim !== 'function') {
         throw runtimeError('FINISH_PROTOCOL_UNAVAILABLE', 'Worker atomic finish claim is unavailable');
       }
       const claim = await client.finishClaim();
+      if (claim?.workflow === 'direct' || claim?.workflow === 'plan') activeWorkflow = claim.workflow;
       if (claim?.takeoverRequested === true) {
         return { outcome: await acknowledgeTakeover(latestCheckpoint?.boundary?.operationId ?? stableRecovery?.operationId) };
       }
       if (claim?.pauseRequested === true) {
         return { outcome: await acknowledgePause() };
       }
+      if (claim?.sleepRequested === true) {
+        const sleep = await acknowledgeSleep();
+        if (sleep.sleepCancelled) return { ready: false, waiting: true, messages: [] };
+        return { outcome: sleep };
+      }
       if (claim?.ready === true) return { ready: true, messages: [] };
+      if (claim?.waiting === true) return { ready: false, waiting: true, messages: [] };
       if (!Array.isArray(claim?.messages) || claim.messages.length === 0) {
         throw runtimeError('FINISH_PROTOCOL_INVALID', 'Worker atomic finish claim returned no decision');
       }
       return { ready: false, messages: claim.messages };
     };
-    const publishStableRecovery = async () => {
-      if (!stableRecovery) {
-        throw runtimeError('STABLE_RECOVERY_UNAVAILABLE', 'Stable recovery artifacts are unavailable');
+    const awaitConversationInput = async (decision) => {
+      let current = decision;
+      while (current?.waiting === true && Date.now() < deadline) {
+        await delay(250);
+        current = await claimFinish();
       }
+      return current;
+    };
+    const publishRecovery = async (sourceFilename) => {
       if (path.resolve(timelineResource.filename) !== path.resolve(timelinePath)) {
         await fs.copyFile(timelineResource.filename, timelinePath);
       }
       await fs.chmod(timelinePath, 0o600);
       const name = resultName(origin.name, fileType.extension);
       const resultPath = path.join(workspace, name);
-      await fs.copyFile(stableRecovery.filename, resultPath);
+      await fs.copyFile(sourceFilename, resultPath);
       await fs.chmod(resultPath, 0o600);
       await client.event('runtime.completed', { turnNumber, resultName: name });
       return { timelinePath, resultPath, resultName: name };
     };
 
+    if (manifest.endRequested === true) {
+      const decision = await claimFinish();
+      if (decision.outcome) return decision.outcome;
+      if (!decision.ready) throw runtimeError('END_PROTOCOL_INVALID', 'Ended conversation did not open its result gate');
+      return await publishRecovery(stableRecovery?.filename ?? origin.filename);
+    }
+
     if (stableRecovery) {
       // Resolve the atomic message/control gate before starting Chromium. Most
       // pause/resume recoveries have no new work and can publish the exact
       // durable boundary without loading the document runtime at all.
-      const decision = await claimFinish();
+      const decision = await awaitConversationInput(await claimFinish());
       if (decision.outcome) return decision.outcome;
-      if (decision.ready) return await publishStableRecovery();
+      if (decision.ready) return await publishRecovery(stableRecovery.filename);
       if (turnNumber >= maxTurns) {
         throw runtimeError(
           'TURN_LIMIT_PENDING_MESSAGES',
@@ -273,6 +313,41 @@ export async function runSession({
       });
     }
     await harness.start({ history: recorder.history({ excludeTrailingUserText: stableRecovery ? null : initialGoal }) });
+    await harness.setWorkflow?.(activeWorkflow);
+
+    const materializeAttachments = async (message) => {
+      if (!Array.isArray(message.attachments) || message.attachments.length === 0) return [];
+      if (typeof client.download !== 'function' || typeof harness.addReferences !== 'function') {
+        throw runtimeError('ATTACHMENT_PROTOCOL_UNAVAILABLE', 'Worker follow-up attachment protocol is unavailable');
+      }
+      const messageDirectory = String(message.id ?? 'initial').replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 128) || 'message';
+      const directory = path.join(workspace, 'follow-up-attachments', messageDirectory);
+      await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+      const additions = [];
+      for (let index = 0; index < message.attachments.length; index += 1) {
+        const attachment = message.attachments[index];
+        if (!attachment || typeof attachment.blobId !== 'string' || !/^[a-f0-9]{64}$/.test(attachment.blobId)) {
+          throw runtimeError('ATTACHMENT_MANIFEST_INVALID', 'Queued attachment identity is invalid');
+        }
+        const name = safeAttachmentFilename(attachment.name, `attachment-${index + 1}.bin`);
+        const filename = path.join(directory, `${String(index).padStart(2, '0')}-${name}`);
+        await client.download(attachment.blobId, filename);
+        const stat = await fs.stat(filename);
+        if (!stat.isFile() || stat.size !== attachment.size) {
+          throw runtimeError('ATTACHMENT_CORRUPT', `Queued attachment failed verification: ${name}`);
+        }
+        additions.push({
+          name,
+          filename,
+          mimeType: attachment.mimeType || referenceMimeType(name),
+          attachmentId: attachment.attachmentId,
+          version: attachment.version,
+        });
+      }
+      await harness.addReferences(additions);
+      references.push(...additions);
+      return additions;
+    };
 
     while (!finishReady && turnNumber < maxTurns && Date.now() < deadline) {
       if (sessionDisplay && sessionDisplay.status === 'error') {
@@ -290,32 +365,110 @@ export async function runSession({
         if (turnNumber >= maxTurns || Date.now() >= deadline) break;
         const content = String(message.content ?? '').trim();
         if (!content) continue;
+        const nextTurnNumber = turnNumber + 1;
+        await harness.setWorkflow?.(activeWorkflow);
+        await materializeAttachments(message);
         recorder.acceptUserMessage(content, { messageId: message.id ?? null, initial: message.initial === true });
-        await client.event('turn.dispatched', { turnNumber: turnNumber + 1, messageId: message.id ?? null });
-        const outcome = await harness.runTurn(composeTurnPrompt(content, references), {
-          timeoutMs: Math.max(1_000, deadline - Date.now()),
-        });
-        if (outcome?.errorMessage || !['end_turn', 'completed', 'success'].includes(outcome?.stopReason)) {
+        if (manifest.persistent && typeof client.beginTurn === 'function') {
+          await client.beginTurn({
+            turnNumber: nextTurnNumber,
+            messageId: message.id ?? null,
+            mode: activeWorkflow,
+          });
+        }
+        await client.event('turn.dispatched', { turnNumber: nextTurnNumber, messageId: message.id ?? null });
+        const checkpointBoundary = async (kind) => {
+          revision += 1;
+          const checkpoint = await stableCheckpoint({
+            client,
+            harness,
+            workspace,
+            format: fileType.format,
+            extension: fileType.extension,
+            turnNumber: nextTurnNumber,
+            revision,
+            kind,
+          });
+          const timelineUpload = await uploadTimeline(client, timelinePath, recorder);
+          const boundary = await commitStableBoundary({
+            client,
+            checkpoint,
+            timeline: timelineUpload,
+            turnNumber: nextTurnNumber,
+            revision,
+            kind,
+          });
+          latestCheckpoint = { ...checkpoint, boundary };
+          return boundary;
+        };
+        const runProvider = (resume = null) => harness.runTurn(
+          resume ? '' : composeTurnPrompt(content, references),
+          {
+            timeoutMs: Math.max(1_000, deadline - Date.now()),
+            resume,
+            readControl: typeof client.control === 'function' ? () => client.control() : null,
+            onSafeBoundary: () => checkpointBoundary('operation'),
+          },
+        );
+        let outcome = await runProvider();
+        let endedDuringWait = false;
+        while (outcome?.wait) {
+          if (typeof client.createWait !== 'function' || typeof client.wait !== 'function') {
+            throw runtimeError('WAIT_PROTOCOL_UNAVAILABLE', 'Worker durable wait protocol is unavailable');
+          }
+          const wait = await client.createWait({
+            turnNumber: nextTurnNumber,
+            kind: outcome.wait.kind,
+            payload: outcome.wait.payload,
+          });
+          let waitState = wait;
+          while (waitState?.status === 'pending' && Date.now() < deadline) {
+            await delay(250);
+            waitState = await client.wait(wait.id);
+          }
+          if (Date.now() >= deadline) throw runtimeError('DURATION_LIMIT', 'Cloud session reached its duration limit');
+          const resolution = waitState?.resolution;
+          if (waitState?.status === 'cancelled' || resolution?.action === 'cancel') {
+            endedDuringWait = true;
+            outcome = { stopReason: 'interrupted', redirected: false };
+            break;
+          }
+          const waitKind = String(outcome.wait.kind ?? '');
+          const planId = String(outcome.wait.payload?.planId ?? '');
+          if (waitKind === 'plan-approval' && resolution?.action === 'approve') {
+            outcome = await runProvider({ action: 'approve', planId });
+          } else if (waitKind === 'plan-approval' && resolution?.action === 'changes') {
+            outcome = await runProvider({
+              action: 'changes',
+              planId,
+              feedback: String(resolution.feedback ?? '').trim() || 'Please revise the plan.',
+            });
+          } else if (waitKind === 'question' && resolution?.action === 'answer') {
+            const feedback = String(resolution.feedback ?? '').trim();
+            if (!feedback) throw runtimeError('WAIT_RESOLUTION_INVALID', 'Question wait requires a non-empty answer');
+            outcome = await runProvider({ action: 'answer', feedback });
+          } else if (['external-side-effect', 'destructive-external'].includes(waitKind)
+            && resolution?.action === 'approve') {
+            outcome = await runProvider({
+              action: 'external-effect',
+              kind: waitKind,
+              feedback: String(resolution.feedback ?? '').trim(),
+            });
+          } else {
+            throw runtimeError('WAIT_RESOLUTION_INVALID', 'Durable wait returned an unsupported resolution');
+          }
+        }
+        const redirected = outcome?.redirected === true;
+        if (outcome?.errorMessage
+          || (!endedDuringWait && !redirected && !['end_turn', 'completed', 'success'].includes(outcome?.stopReason))) {
           throw runtimeError('PROVIDER_TURN_FAILED', outcome?.errorMessage || `Provider stopped with ${outcome?.stopReason ?? 'unknown reason'}`);
         }
-        turnNumber += 1;
-        const checkpoint = await stableCheckpoint({
-          client,
-          harness,
-          workspace,
-          format: fileType.format,
-          extension: fileType.extension,
-          turnNumber,
+        turnNumber = nextTurnNumber;
+        const boundary = await checkpointBoundary('turn');
+        const completed = await client.completeTurn({
+          outcome: redirected ? 'redirected' : endedDuringWait ? 'stopped' : 'completed',
+          boundaryOperationId: boundary.operationId,
         });
-        const timelineUpload = await uploadTimeline(client, timelinePath, recorder);
-        const boundary = await commitStableBoundary({
-          client,
-          checkpoint,
-          timeline: timelineUpload,
-          turnNumber,
-        });
-        latestCheckpoint = { ...checkpoint, boundary };
-        const completed = await client.completeTurn();
         if (completed?.status === 'suspended') {
           return { suspended: true, timelinePath };
         }
@@ -327,9 +480,7 @@ export async function runSession({
           return await acknowledgePause();
         }
       }
-      messages = await getQueuedMessages(client);
-      if (messages.length) continue;
-      const decision = await claimFinish();
+      const decision = await awaitConversationInput(await claimFinish());
       if (decision.outcome) return decision.outcome;
       if (decision.ready) {
         finishReady = true;
@@ -343,7 +494,7 @@ export async function runSession({
       throw runtimeError('TURN_LIMIT', 'Cloud session reached its turn limit before producing a checkpoint');
     }
     if (!latestCheckpoint && stableRecovery) {
-      return await publishStableRecovery();
+      return await publishRecovery(stableRecovery.filename);
     }
     if (!latestCheckpoint) {
       const checkpointTurn = Math.max(1, turnNumber || stableRecovery?.turnNumber || 1);
@@ -354,6 +505,8 @@ export async function runSession({
         format: fileType.format,
         extension: fileType.extension,
         turnNumber: checkpointTurn,
+        revision: ++revision,
+        kind: 'turn',
       });
       const timelineUpload = await uploadTimeline(client, timelinePath, recorder);
       const boundary = await commitStableBoundary({
@@ -361,6 +514,8 @@ export async function runSession({
         checkpoint: latestCheckpoint,
         timeline: timelineUpload,
         turnNumber: checkpointTurn,
+        revision,
+        kind: 'turn',
       });
       latestCheckpoint = { ...latestCheckpoint, boundary };
     }

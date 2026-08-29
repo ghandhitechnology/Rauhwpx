@@ -158,6 +158,7 @@ export interface RhwpDesktopApi {
   cloudDismissSession?: (payload: { sessionId: string }) => Promise<unknown>;
   cloudCompleteTakeover?: (payload: { sessionId: string }) => Promise<unknown>;
   cloudDownloadResult?: (payload: { sessionId: string }) => Promise<unknown>;
+  cloudDownloadCheckpoint?: (payload: { sessionId: string; operationId?: string }) => Promise<unknown>;
   cloudResolveResult?: (payload: { sessionId: string; action: CloudResultAction }) => Promise<unknown>;
   onCloudEvent?: (callback: (event: unknown) => void) => (() => void) | void;
   onPastePlainText?: (callback: (text: string) => void) => void;

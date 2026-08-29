@@ -53,6 +53,7 @@ export class Scheduler {
       this.lastMaintenanceAt = this.now();
     }
     await this.sessionStore.expireRetainedSessions();
+    this.sessionStore.requestIdleSleeps?.();
     const liveIds = new Set(
       sandboxes.filter((sandbox) => sandbox.running !== false).map((sandbox) => sandbox.sandboxId),
     );

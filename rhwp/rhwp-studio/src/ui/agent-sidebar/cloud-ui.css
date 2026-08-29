@@ -157,6 +157,19 @@
   gap: 6px;
 }
 
+.ag-cloud-wait-feedback {
+  flex: 1 0 100%;
+  min-height: 64px;
+  resize: vertical;
+  padding: 8px 9px;
+  border: 1px solid var(--ag-border-strong);
+  border-radius: var(--ag-r-field);
+  background: var(--ag-bg-2);
+  color: var(--ag-text-primary);
+  font: inherit;
+  font-size: var(--font-size-sm, 11px);
+}
+
 .ag-cloud-action {
   height: 30px;
   padding: 0 10px;

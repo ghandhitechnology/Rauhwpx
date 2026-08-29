@@ -57,6 +57,22 @@ function startupProviders(value) {
   return [value];
 }
 
+function browserOrigins(value) {
+  if (value === undefined || value === '') return [];
+  const origins = [...new Set(String(value).split(',').map((entry) => entry.trim()).filter(Boolean))];
+  if (origins.length > 20 || origins.some((entry) => {
+    try {
+      const parsed = new URL(entry);
+      return parsed.origin !== entry || parsed.protocol !== 'https:';
+    } catch {
+      return true;
+    }
+  })) {
+    throw new CloudError('CONFIG_INVALID', 'RAUHWpx_BROWSER_ORIGINS must contain exact HTTPS origins');
+  }
+  return origins;
+}
+
 function contains(parent, child) {
   const relative = path.relative(parent, child);
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
@@ -106,6 +122,7 @@ export function parseConfig(environment = process.env) {
     providerAuthDirectory: path.join(dataDirectory, 'provider-auth'),
     providerCliDirectory: environment.RAUHWpx_PROVIDER_CLI_DIR || '/opt/rauhwpx-cloud/provider-cli',
     startupProviders: startupProviders(environment.RAUHWpx_SANDBOX_PROVIDER),
+    browserOrigins: browserOrigins(environment.RAUHWpx_BROWSER_ORIGINS),
     workerImage: environment.RAUHWpx_WORKER_IMAGE || 'ghcr.io/ghandhitechnology/rauhwpx-cloud-worker:stable',
     podmanConnection: environment.RAUHWpx_PODMAN_CONNECTION || null,
     releaseChannel: environment.RAUHWpx_CHANNEL === 'prerelease' ? 'prerelease' : 'stable',

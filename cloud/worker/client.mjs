@@ -104,11 +104,15 @@ export class WorkerClient {
   messages() { return this.json('GET', '/messages'); }
   control() { return this.json('GET', '/control'); }
   pauseAck() { return this.json('POST', '/pause-ack', {}); }
+  sleepAck() { return this.json('POST', '/sleep-ack', {}); }
   heartbeat() { return this.json('POST', '/heartbeat', {}); }
   event(type, payload) { return this.json('POST', '/events', { type, payload }); }
   checkpoint(checkpoint) { return this.json('POST', '/checkpoints', checkpoint); }
   commitBoundary(boundary) { return this.json('POST', '/boundary', boundary); }
-  completeTurn() { return this.json('POST', '/turn-complete', {}); }
+  beginTurn(turn) { return this.json('POST', '/turn-start', turn); }
+  completeTurn(turn = {}) { return this.json('POST', '/turn-complete', turn); }
+  createWait(wait) { return this.json('POST', '/waits', wait); }
+  wait(waitId) { return this.json('GET', `/waits/${encodeURIComponent(waitId)}`); }
   finishClaim() { return this.json('POST', '/finish-claim', {}); }
   takeoverAck() { return this.json('POST', '/takeover-ack', {}); }
   suspend(code, message) { return this.json('POST', '/suspend', { code, message }); }

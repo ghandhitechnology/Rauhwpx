@@ -78,6 +78,12 @@ export interface CloudSessionBase {
   documentName: string;
 }
 
+export interface CloudConversationWait {
+  id: string;
+  kind: 'plan-approval' | 'question' | 'external-side-effect' | 'destructive-external';
+  payload: Record<string, unknown>;
+}
+
 export type CloudSessionState =
   | { kind: 'idle' }
   | (CloudSessionBase & {
@@ -104,6 +110,9 @@ export type CloudSessionState =
       elapsedMs: number;
       timeLimitMs: number;
       currentActivity: string;
+      phase: 'working' | 'waiting' | 'redirecting' | 'awaiting-plan-approval'
+        | 'awaiting-question-answer' | 'awaiting-external-effect-approval';
+      wait: CloudConversationWait | null;
     })
   | (CloudSessionBase & {
       kind: 'pausing';
@@ -186,6 +195,17 @@ export interface CloudDocumentPayload {
   sha256: string;
 }
 
+export interface CloudCheckpointPayload extends CloudDocumentPayload {
+  sessionId: string;
+  kind: 'handoff' | 'operation' | 'turn';
+  originOnThisDevice?: boolean;
+  expectedOriginSha256?: string;
+  byteLength: number;
+  revision: number;
+  turn: number;
+  operationId: string;
+}
+
 export interface CloudTransferReference {
   id: string;
   name: string;
@@ -229,8 +249,20 @@ export type CloudCommand =
   | 'resume'
   | 'takeover'
   | 'cancel'
+  | 'end'
   | 'retry'
+  | 'resolve-wait'
+  | 'redirect'
+  | 'workflow'
   | 'queue-message';
+
+export interface CloudFollowupAttachment {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+  bytes: Uint8Array;
+}
 
 export interface CloudCommandRequest {
   sessionId: string;
@@ -238,6 +270,8 @@ export interface CloudCommandRequest {
   expectedVersion: number;
   message?: string;
   messageId?: string;
+  payload?: Record<string, unknown>;
+  attachments?: CloudFollowupAttachment[];
 }
 
 export interface CloudDownloadResult {
