@@ -1,6 +1,7 @@
 const DEFAULT_URL = 'https://rau-credits-production.up.railway.app';
 const POLL_INTERVAL_MS = 1_000;
 const POLL_TIMEOUT_MS = 10 * 60 * 1000;
+const REQUEST_TIMEOUT_MS = 15_000;
 const TRANSIENT_POLL_RETRIES = 5;
 const KEY_VALIDATION_RETRY_MS = [250, 500, 1_000, 2_000];
 
@@ -51,43 +52,71 @@ export function rauCreditsUrl(env = process.env) {
  * 로컬 허브가 호스티드 rau-credits 에 세션을 열고 키를 받는다.
  *
  * @param {{ baseUrl?: string, fetchImpl?: typeof fetch, now?: () => number,
- *           sleep?: (ms: number) => Promise<void> }} [deps]
+ *           sleep?: (ms: number) => Promise<void>, timeoutMs?: number }} [deps]
  */
 export function createRauCreditsClient({
   baseUrl = rauCreditsUrl(),
   fetchImpl = globalThis.fetch,
   now = Date.now,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  timeoutMs = REQUEST_TIMEOUT_MS,
 } = {}) {
   const origin = String(baseUrl).replace(/\/$/, '');
 
-  async function request(pathname, init) {
-    let response;
+  async function request(pathname, init = {}, { signal } = {}) {
+    if (signal?.aborted) throw abortError();
+    const controller = new AbortController();
+    let timedOut = false;
+    let rejectDeadline;
+    const deadline = new Promise((_, reject) => { rejectDeadline = reject; });
+    const onAbort = () => {
+      controller.abort();
+      rejectDeadline(abortError());
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+      rejectDeadline(creditsError('RAU_CREDITS_TIMEOUT', 'Rau 크레딧 서버 응답이 너무 느려요.'));
+    }, timeoutMs);
     try {
-      response = await fetchImpl(`${origin}${pathname}`, init);
-    } catch {
+      return await Promise.race([
+        (async () => {
+          const response = await fetchImpl(`${origin}${pathname}`, { ...init, signal: controller.signal });
+          const body = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            throw creditsError(
+              body?.error ?? body?.code ?? 'RAU_CREDITS_HTTP',
+              body?.message ?? body?.error ?? `Rau 크레딧 서버가 ${response.status} 을 돌려줬어요.`,
+            );
+          }
+          return body;
+        })(),
+        deadline,
+      ]);
+    } catch (error) {
+      if (signal?.aborted || error?.code === 'RAU_LOGIN_CANCELLED') throw abortError();
+      if (timedOut || error?.code === 'RAU_CREDITS_TIMEOUT') {
+        throw creditsError('RAU_CREDITS_TIMEOUT', 'Rau 크레딧 서버 응답이 너무 느려요.');
+      }
+      if (typeof error?.code === 'string' && error.code.startsWith('RAU_')) throw error;
       throw creditsError('RAU_CREDITS_UNREACHABLE', 'Rau 크레딧 서버에 닿지 못했어요.');
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
     }
-    const body = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      throw creditsError(
-        body?.error ?? body?.code ?? 'RAU_CREDITS_HTTP',
-        body?.message ?? body?.error ?? `Rau 크레딧 서버가 ${response.status} 을 돌려줬어요.`,
-      );
-    }
-    return body;
   }
 
   return {
     origin,
-    createDeviceSession() {
-      return request('/v1/device-sessions', { method: 'POST' });
+    createDeviceSession({ signal } = {}) {
+      return request('/v1/device-sessions', { method: 'POST' }, { signal });
     },
-    pollDeviceSession(id) {
-      return request(`/v1/device-sessions/${encodeURIComponent(id)}`);
+    pollDeviceSession(id, { signal } = {}) {
+      return request(`/v1/device-sessions/${encodeURIComponent(id)}`, {}, { signal });
     },
-    acknowledgeDeviceSession(id) {
-      return request(`/v1/device-sessions/${encodeURIComponent(id)}/acknowledge`, { method: 'POST' });
+    acknowledgeDeviceSession(id, { signal } = {}) {
+      return request(`/v1/device-sessions/${encodeURIComponent(id)}/acknowledge`, { method: 'POST' }, { signal });
     },
     /**
      * ready 가 될 때까지 폴링한다. 저장 확인 전까지 같은 키를 다시 받을 수 있다.
@@ -104,10 +133,11 @@ export function createRauCreditsClient({
         if (signal?.aborted) throw abortError();
         let next;
         try {
-          next = await this.pollDeviceSession(id);
+          next = await this.pollDeviceSession(id, { signal });
           transientFailures = 0;
         } catch (error) {
-          if (error?.code !== 'RAU_CREDITS_UNREACHABLE' || transientFailures >= TRANSIENT_POLL_RETRIES) {
+          if (!['RAU_CREDITS_UNREACHABLE', 'RAU_CREDITS_TIMEOUT'].includes(error?.code)
+            || transientFailures >= TRANSIENT_POLL_RETRIES) {
             throw error;
           }
           transientFailures += 1;

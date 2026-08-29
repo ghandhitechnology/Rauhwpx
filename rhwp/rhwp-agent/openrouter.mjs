@@ -145,10 +145,10 @@ export function createOpenRouter({
   let catalogCache = null;
   /** @type {Promise<CatalogModel[]> | null} */
   let catalogInFlight = null;
-  /** @type {{ credits: object, fetchedAt: number } | null} */
-  let creditsCache = null;
-  /** @type {Promise<object> | null} */
-  let creditsInFlight = null;
+  /** @type {Map<string, { credits: object, fetchedAt: number }>} */
+  const creditsCache = new Map();
+  /** @type {Map<string, Promise<object>>} */
+  const creditsInFlight = new Map();
 
   async function request(pathname, { method = 'GET', key = null, body, timeout = timeoutMs } = {}) {
     const controller = new AbortController();
@@ -310,10 +310,11 @@ export function createOpenRouter({
     async credits(key, refresh = false) {
       const trimmed = String(key ?? '').trim();
       if (!trimmed) throw openRouterError('OPENROUTER_KEY_MISSING', 'OpenRouter 키가 없어요');
-      if (!refresh && creditsCache && now() - creditsCache.fetchedAt < CREDITS_TTL_MS) {
-        return creditsCache.credits;
+      const cached = creditsCache.get(trimmed);
+      if (!refresh && cached && now() - cached.fetchedAt < CREDITS_TTL_MS) {
+        return cached.credits;
       }
-      if (!refresh && creditsInFlight) return creditsInFlight;
+      if (!refresh && creditsInFlight.has(trimmed)) return creditsInFlight.get(trimmed);
       const loading = (async () => {
         const keyResult = await request('/key', { key: trimmed });
         if (keyResult.status === 401 || keyResult.status === 403) {
@@ -322,7 +323,7 @@ export function createOpenRouter({
         if (!keyResult.ok) throw httpError(keyResult, '키 확인');
         const fromLimit = creditsFromKeyLimit(keyResult.parsed?.data ?? {}, now());
         if (fromLimit) {
-          creditsCache = { credits: fromLimit, fetchedAt: now() };
+          creditsCache.set(trimmed, { credits: fromLimit, fetchedAt: now() });
           return fromLimit;
         }
         const result = await request('/credits', { key: trimmed });
@@ -339,14 +340,14 @@ export function createOpenRouter({
           totalUsageUsd,
           checkedAt: now(),
         };
-        creditsCache = { credits, fetchedAt: now() };
+        creditsCache.set(trimmed, { credits, fetchedAt: now() });
         return credits;
       })();
-      creditsInFlight = loading;
+      creditsInFlight.set(trimmed, loading);
       try {
         return await loading;
       } finally {
-        if (creditsInFlight === loading) creditsInFlight = null;
+        if (creditsInFlight.get(trimmed) === loading) creditsInFlight.delete(trimmed);
       }
     },
 
@@ -379,7 +380,7 @@ export function createOpenRouter({
     /** 테스트/키 교체용 — 캐시를 비운다. */
     clearCache() {
       catalogCache = null;
-      creditsCache = null;
+      creditsCache.clear();
     },
   };
 }

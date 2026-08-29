@@ -794,7 +794,12 @@ export function createPiManager({
     async clearApiKey() {
       await load();
       if (secretStore?.available) {
-        try { await secretStore.delete(secretId); } catch { /* vault 가 없어도 메모리는 비운다 */ }
+        try {
+          await secretStore.delete(secretId);
+          secretStoreError = null;
+        } catch (error) {
+          secretStoreError = error?.message ?? 'OS 보안 저장소에서 키를 지우지 못했어요.';
+        }
       }
       apiKey = null;
       config.keyTail = null;

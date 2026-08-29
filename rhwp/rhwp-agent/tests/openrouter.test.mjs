@@ -281,6 +281,30 @@ test('credits reject a bad key with OPENROUTER_KEY_INVALID', async () => {
   });
 });
 
+test('credit cache and in-flight work are isolated by trimmed key', async () => {
+  let releaseFirst;
+  let hits = 0;
+  const client = createOpenRouter({
+    fetchImpl: async (_url, init) => {
+      hits += 1;
+      const key = init.headers.Authorization.replace('Bearer ', '');
+      if (key === 'sk-first') {
+        await new Promise((resolve) => { releaseFirst = resolve; });
+        return jsonResponse(200, { data: { limit: 5, usage: 4 } });
+      }
+      return jsonResponse(200, { data: { limit: 5, usage: 1 } });
+    },
+  });
+
+  const first = client.credits('sk-first');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal((await client.credits('  sk-second  ')).balanceUsd, 4);
+  releaseFirst();
+  assert.equal((await first).balanceUsd, 1);
+  assert.equal((await client.credits('sk-second')).balanceUsd, 4);
+  assert.equal(hits, 2);
+});
+
 test('chat posts a non-streaming completion and returns assistant text', async () => {
   let sent = null;
   const client = createOpenRouter({

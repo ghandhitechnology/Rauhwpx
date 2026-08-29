@@ -13,6 +13,7 @@ import {
 } from '../config.mjs';
 import { creditsRequestListener, createCreditsService } from '../service.mjs';
 import { createMemoryStore } from '../store.mjs';
+import { createRateLimiter } from '../rate-limit.mjs';
 
 function service(overrides = {}) {
   const minted = [];
@@ -38,6 +39,18 @@ test('encrypt round-trips the OpenRouter secret', () => {
   const packed = encryptSecret('session', 'sk-or-v1-secret');
   assert.notEqual(packed, 'sk-or-v1-secret');
   assert.equal(decryptSecret('session', packed), 'sk-or-v1-secret');
+});
+
+test('rate limiter refuses a new key when cleanup cannot free capacity', () => {
+  let clock = 1_000;
+  const limiter = createRateLimiter({ now: () => clock, maxKeys: 2 });
+  assert.equal(limiter.check('first', 5, 1_000), true);
+  assert.equal(limiter.check('second', 5, 1_000), true);
+  assert.equal(limiter.check('third', 5, 1_000), false);
+  assert.equal(limiter.check('first', 5, 1_000), true);
+
+  clock = 2_001;
+  assert.equal(limiter.check('third', 5, 1_000), true);
 });
 
 test('first login mints a $5 key, delivers it until acknowledged, and reuses it', async () => {

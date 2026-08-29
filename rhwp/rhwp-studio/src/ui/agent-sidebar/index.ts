@@ -3287,6 +3287,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       return;
     }
     if (planningPhase === 'switching' || chatStartPendingThreadId !== null || attachmentsSending || referenceLibrary.hasBlockingDrafts()) return;
+    if (selectedAgent === 'rau' && !rauSetupComplete) {
+      systemMessage('Rau 연결을 먼저 완료해 주세요.');
+      return;
+    }
     if (selectedAgent === 'rau' && rauCreditsEmpty()) {
       systemMessage('체험 크레딧이 다 됐어요. 다른 모델을 연결해 주세요.');
       return;
@@ -4425,6 +4429,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       send.disabled = true;
       composerSkillClear.disabled = true;
       input.placeholder = `"${readOnlyDocLabel}" 문서의 채팅 — 읽기 전용`;
+    } else if (selectedAgent === 'rau' && !rauSetupComplete) {
+      input.disabled = true;
+      send.disabled = true;
+      composerSkillClear.disabled = true;
+      input.placeholder = 'Rau 연결을 먼저 완료해 주세요.';
     } else if (selectedAgent === 'rau' && rauCreditsEmpty()) {
       input.disabled = connState !== 'connected';
       send.disabled = true;
@@ -5965,6 +5974,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (mergeResolverLocked) return { ok: false, reason: '병합 검토를 먼저 완료하거나 닫아 주세요' };
     if (readOnlyDocLabel !== null) return { ok: false, reason: '다른 문서의 채팅을 열람 중입니다' };
     if (connState !== 'connected') return { ok: false, reason: '에이전트 허브에 연결되어 있지 않습니다' };
+    if (selectedAgent === 'rau' && !rauSetupComplete) {
+      return { ok: false, reason: 'Rau 연결을 먼저 완료해 주세요' };
+    }
+    if (selectedAgent === 'rau' && rauCreditsEmpty()) {
+      return { ok: false, reason: '체험 크레딧이 다 됐어요. 다른 모델을 연결해 주세요.' };
+    }
     if (turnRunning) return { ok: false, reason: '에이전트가 응답 중입니다' };
     if (planningPhase === 'switching' || chatStartPendingThreadId !== null || attachmentsSending) {
       return { ok: false, reason: '잠시 후 다시 시도해 주세요' };

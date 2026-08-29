@@ -165,6 +165,12 @@ const rauManager = await createPiManager({
 }).init();
 const rauCredits = createRauCreditsClient();
 let rauLogin = null;
+let npmPrefixMutationQueue = Promise.resolve();
+function mutateSharedNpmPrefix(operation) {
+  const running = npmPrefixMutationQueue.then(operation, operation);
+  npmPrefixMutationQueue = running.catch(() => {});
+  return running;
+}
 const cliSetup = await createCliSetupManager({ secretStore }).init();
 // App-managed bins are available to auxiliary CLI calls as soon as installation completes.
 // 허브가 관리하는 API 키는 process.env 에 올리지 않는다 — npm lifecycle 스크립트,
@@ -556,7 +562,7 @@ async function runAutomaticHarnessUpdates() {
     cliSetupStatus.codex = await cliSetup.automaticUpdate('codex', { canActivate });
     cliSetupStatus.grok = await cliSetup.automaticUpdate('grok', { canActivate });
     cliSetupStatus.cursor = await cliSetup.automaticUpdate('cursor', { canActivate });
-    piStatus = await piManager.automaticUpdate({ canActivate });
+    piStatus = await mutateSharedNpmPrefix(() => piManager.automaticUpdate({ canActivate }));
     const statuses = await agentSetupStatuses();
     if (Object.values(statuses).some((status) => status.updateRequired)) {
       nextDelay = HARNESS_UPDATE_FAILURE_RETRY_MS;
@@ -907,17 +913,20 @@ function checkpointTitleDeps(record, health, signal) {
 }
 
 function auxDeps(record, requestedAgent, cliAgent) {
-  const agent = requestedAgent === 'pi' || requestedAgent === 'claude' || requestedAgent === 'codex'
+  const agent = requestedAgent === 'pi' || requestedAgent === 'rau'
+    || requestedAgent === 'claude' || requestedAgent === 'codex'
     ? requestedAgent
     : (record.agentSession?.agent ?? null);
+  const manager = agent === 'rau' ? rauManager : piManager;
+  const router = agent === 'rau' ? rauOpenRouter : openRouter;
   const health = providerHealth.cached();
   // 프로브 전이면 CLI 가 있다고 보고 기존 경로를 먼저 태운다.
   const cliAvailable = health ? health[cliAgent]?.available !== false : true;
   return {
     useOpenRouter: (agent === 'rau' && rauStatus.setupComplete)
       || (piStatus.setupComplete && (agent === 'pi' || !cliAvailable)),
-    piManager,
-    openRouter,
+    piManager: manager,
+    openRouter: router,
     workDir: record.workDir,
     cwd: record.workDir,
     isolatedHome: record.isolatedHome,
@@ -2279,12 +2288,12 @@ async function handleStudioMessage(record, sock, msg) {
         ...(Number.isFinite(entry.totalBytes) ? { totalBytes: entry.totalBytes } : {}),
       });
       const installing = agent === 'pi'
-        ? piManager.install(progress).then(async (status) => {
+        ? mutateSharedNpmPrefix(() => piManager.install(progress)).then(async (status) => {
           piStatus = status;
           rauStatus = await rauManager.status();
         })
         : agent === 'rau'
-          ? rauManager.install(progress).then(async (status) => {
+          ? mutateSharedNpmPrefix(() => rauManager.install(progress)).then(async (status) => {
             rauStatus = status;
             piStatus = await piManager.status();
           })
@@ -2311,9 +2320,11 @@ async function handleStudioMessage(record, sock, msg) {
       if (agent === 'rau' && method === 'oauth') {
         if (rauLogin?.abort) rauLogin.abort.abort();
         const abort = new AbortController();
+        const login = { id: null, abort };
+        rauLogin = login;
         run = (async () => {
-          const session = await rauCredits.createDeviceSession();
-          rauLogin = { id: session.id, abort };
+          const session = await rauCredits.createDeviceSession({ signal: abort.signal });
+          login.id = session.id;
           authUrl = session.loginUrl;
           replyToStudio(record, sock, { v: 1, type: 'agent-setup-auth-started', requestId, agent, authUrl });
           replyToStudio(record, sock, { v: 1, type: 'agent-setup-progress', agent, state: 'authorizing', authUrl });
@@ -2322,10 +2333,13 @@ async function handleStudioMessage(record, sock, msg) {
             signal: abort.signal,
             account: email,
           });
-          await rauCredits.acknowledgeDeviceSession(session.id)
-            .catch((error) => log(`Rau credit session acknowledgement failed: ${error?.message ?? error}`));
+          await rauCredits.acknowledgeDeviceSession(session.id, { signal: abort.signal })
+            .catch((error) => {
+              if (error?.code === 'RAU_LOGIN_CANCELLED') throw error;
+              log(`Rau credit session acknowledgement failed: ${error?.message ?? error}`);
+            });
           if (!rauStatus.installed) {
-            rauStatus = await rauManager.install((entry) => replyToStudio(record, sock, {
+            rauStatus = await mutateSharedNpmPrefix(() => rauManager.install((entry) => replyToStudio(record, sock, {
               v: 1,
               type: 'agent-setup-progress',
               agent,
@@ -2333,7 +2347,7 @@ async function handleStudioMessage(record, sock, msg) {
               ...(Number.isFinite(entry.percent) ? { percent: entry.percent } : {}),
               ...(entry.detail ? { detail: entry.detail } : {}),
               ...(entry.activity === true ? { activity: true } : {}),
-            }));
+            })));
             piStatus = await piManager.status();
           }
           await refreshOpenRouterCredits(true);
@@ -2341,13 +2355,13 @@ async function handleStudioMessage(record, sock, msg) {
         void run
           .then(agentSetupStatuses)
           .then((statuses) => {
-            rauLogin = null;
+            if (rauLogin === login) rauLogin = null;
             replyToStudio(record, sock, { v: 1, type: 'agent-setup-status', statuses });
             void providerHealth.check(true).then((providers) => replyToStudio(record, sock, { v: 1, type: 'provider-status', providers }));
             replyToStudio(record, sock, { v: 1, type: 'usage-report', usage: usageSnapshot() });
           })
           .catch((e) => {
-            rauLogin = null;
+            if (rauLogin === login) rauLogin = null;
             if (e?.code === 'RAU_LOGIN_CANCELLED' || e?.code === 'AGENT_AUTH_CANCELLED') {
               void agentSetupStatuses().then((statuses) => replyToStudio(record, sock, { v: 1, type: 'agent-setup-status', statuses }));
               return;
@@ -2471,7 +2485,7 @@ async function handleStudioMessage(record, sock, msg) {
     }
     case 'pi-install': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
-      void piManager.install((progress) => replyToStudio(record, sock, {
+      void mutateSharedNpmPrefix(() => piManager.install((progress) => replyToStudio(record, sock, {
         v: 1,
         type: 'pi-setup-progress',
         requestId,
@@ -2481,7 +2495,7 @@ async function handleStudioMessage(record, sock, msg) {
         ...(Number.isFinite(progress.receivedBytes) ? { receivedBytes: progress.receivedBytes } : {}),
         ...(Number.isFinite(progress.totalBytes) ? { totalBytes: progress.totalBytes } : {}),
         ...(progress.activity === true ? { activity: true } : {}),
-      }))
+      })))
         .then((status) => {
           piStatus = status;
           replyToStudio(record, sock, { v: 1, type: 'pi-status', requestId, status });
@@ -2627,8 +2641,8 @@ async function handleStudioMessage(record, sock, msg) {
             },
             {
               useOpenRouter: selection.agent === 'pi' || selection.agent === 'rau',
-              piManager,
-              openRouter,
+              piManager: selection.agent === 'rau' ? rauManager : piManager,
+              openRouter: selection.agent === 'rau' ? rauOpenRouter : openRouter,
               projectRoot: ROOT,
               workDir: record.workDir,
               isolatedHome: record.isolatedHome,

@@ -95,3 +95,45 @@ test('Rau key setup does not retry storage failures', async () => {
   );
   assert.equal(attempts, 1);
 });
+
+test('Rau credit requests time out while reading the response body', async () => {
+  const client = createRauCreditsClient({
+    timeoutMs: 10,
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => new Promise(() => {}),
+    }),
+  });
+  await assert.rejects(
+    () => client.createDeviceSession(),
+    { code: 'RAU_CREDITS_TIMEOUT' },
+  );
+});
+
+test('Rau cancellation reaches fetch and is never retried', async () => {
+  const abort = new AbortController();
+  let attempts = 0;
+  const client = createRauCreditsClient({
+    fetchImpl: async (_url, { signal }) => {
+      attempts += 1;
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+      });
+    },
+    sleep: async () => {},
+  });
+  const redeeming = client.redeem('device-1', { signal: abort.signal });
+  abort.abort();
+  await assert.rejects(redeeming, { code: 'RAU_LOGIN_CANCELLED' });
+  assert.equal(attempts, 1);
+
+  for (const request of [
+    () => client.createDeviceSession({ signal: abort.signal }),
+    () => client.pollDeviceSession('device-1', { signal: abort.signal }),
+    () => client.acknowledgeDeviceSession('device-1', { signal: abort.signal }),
+  ]) {
+    await assert.rejects(request, { code: 'RAU_LOGIN_CANCELLED' });
+  }
+  assert.equal(attempts, 1);
+});

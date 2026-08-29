@@ -669,3 +669,34 @@ test('Rau profile shares the Pi prefix but keeps a separate secret and locked ca
   await fs.rm(piRoot, { recursive: true, force: true });
   await fs.rm(rauRoot, { recursive: true, force: true });
 });
+
+test('clearing an API key reports vault deletion failure and clears memory', async () => {
+  const rootDir = await tmpRoot();
+  let stored = null;
+  let deleteFails = true;
+  const manager = createPiManager({
+    rootDir,
+    openRouter: fakeOpenRouter(),
+    secretStore: {
+      available: true,
+      get: async () => stored,
+      set: async (_id, value) => { stored = value; },
+      delete: async () => {
+        if (deleteFails) throw new Error('vault delete failed');
+        stored = null;
+      },
+    },
+  });
+  await manager.setApiKey('sk-or-v1-delete-me');
+
+  const status = await manager.clearApiKey();
+  assert.equal(manager.apiKey(), null);
+  assert.equal(status.keyConfigured, false);
+  assert.match(status.error, /vault delete failed/);
+
+  deleteFails = false;
+  const cleared = await manager.clearApiKey();
+  assert.equal(cleared.error, null);
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});

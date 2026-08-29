@@ -1367,6 +1367,17 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     renderDestinationState();
   }
 
+  function persistPrefs(nextPrefs: AgentPrefs): ReturnType<typeof trySaveAgentPrefs> {
+    const result = trySaveAgentPrefs(nextPrefs);
+    if (result.ok) {
+      prefs = result.value;
+      prefsBaseline = { ...result.value };
+      prefsDraft = { ...result.value };
+      applyDefaults(result.value);
+    }
+    return result;
+  }
+
   async function applyAiDraft(): Promise<boolean> {
     const nextPrefs = normalizeAgentPrefs(prefsDraft);
     if (instructionsDirty) {
@@ -1396,7 +1407,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       }
     }
     if (!samePrefs(nextPrefs, prefsBaseline)) {
-      const result = trySaveAgentPrefs(nextPrefs);
+      const result = persistPrefs(nextPrefs);
       if (!result.ok) {
         prefsDraft = nextPrefs;
         aiStatus.textContent = `AI 기본값을 저장하지 못했습니다 · ${result.error}`;
@@ -1404,10 +1415,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
         renderDestinationState();
         return false;
       }
-      prefs = result.value;
-      prefsBaseline = { ...result.value };
-      prefsDraft = { ...result.value };
-      applyDefaults(result.value);
     }
     aiStatus.textContent = 'AI 설정을 적용했습니다.';
     aiStatus.hidden = false;
@@ -2084,8 +2091,14 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     const statuses = await bridge.disconnectAgent('rau');
     if (disposed) return;
     setupBusy = false;
-    if (statuses) setupStatuses = statuses;
-    else if (!setupMessage) setupMessage = '이 기기 연결을 끊지 못했어요.';
+    if (statuses) {
+      setupStatuses = statuses;
+      if (prefs.defaultAgent === 'rau' && statuses.rau?.setupComplete !== true) {
+        const fallback = selectableAgents()[0] ?? 'claude';
+        stagePrefs({ defaultAgent: fallback, defaultModel: resolveModelForAgent(fallback, null) });
+        persistPrefs(prefsDraft);
+      }
+    } else if (!setupMessage) setupMessage = '이 기기 연결을 끊지 못했어요.';
     renderAgentSetup();
     renderProviders();
     renderUsage();
@@ -3050,10 +3063,12 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
             && rauOauthFlowInProgress
             && ev.statuses.rau?.setupComplete === true
             && setupOverlay.getAttribute('aria-hidden') === 'false';
+          const rauWasIncomplete = setupStatuses !== null
+            && setupStatuses.rau?.setupComplete !== true;
           setupStatuses = ev.statuses;
-          if (setupAgent === 'rau' && ev.statuses.rau?.setupComplete === true) {
+          if (rauWasIncomplete && ev.statuses.rau?.setupComplete === true) {
             stagePrefs({ defaultAgent: 'rau', defaultModel: 'z-ai/glm-5.3-flash' });
-            trySaveAgentPrefs({ defaultAgent: 'rau', defaultModel: 'z-ai/glm-5.3-flash' });
+            persistPrefs(prefsDraft);
           }
           // 로그인·설치가 아직 진행 중이면 주기 방송이 카드 상태(주소·코드)를 지우지 않는다.
           const inFlight = setupAgent !== null && setupBusy

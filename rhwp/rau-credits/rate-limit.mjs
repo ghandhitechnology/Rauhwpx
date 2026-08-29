@@ -12,6 +12,7 @@ export function createRateLimiter({ now = Date.now, maxKeys = 10_000 } = {}) {
       }
       const bucket = buckets.get(key);
       if (!bucket || bucket.windowStart <= cutoff) {
+        if (!bucket && buckets.size >= maxKeys) return false;
         buckets.set(key, { windowStart: stamp, count: 1 });
         return true;
       }

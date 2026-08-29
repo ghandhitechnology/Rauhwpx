@@ -341,7 +341,7 @@ test('AI 기본 설정은 Apply 전까지 초안이고 성공 후 사이드바�
   assert.match(settings, /applyDefaults\(result\.value\)/);
   assert.match(settings, /'새 대화부터 적용돼요\.'/);
   assert.match(settings, /nextPrefs\.defaultPermissionProfile === 'unrestricted'[\s\S]*window\.confirm\(UNRESTRICTED_DEFAULT_WARNING\)/);
-  assert.match(settings, /saveAgentInstructions\(\)[\s\S]*trySaveAgentPrefs\(nextPrefs\)/);
+  assert.match(settings, /saveAgentInstructions\(\)[\s\S]*persistPrefs\(nextPrefs\)/);
   assert.match(settings, /agentField\.select\.disabled = aiPrefsSaving/);
   assert.match(settings, /modelField\.select\.disabled = aiPrefsSaving/);
   assert.match(settings, /effortField\.select\.disabled = aiPrefsSaving/);
@@ -565,6 +565,11 @@ test('Rau 는 목록 맨 앞이고 흰 테두리 · 로그인 전용 설정 · $
   assert.match(source, /function rauCreditsEmpty\(\): boolean/);
   assert.match(source, /체험 크레딧이 다 됐어요\. 다른 모델을 연결해 주세요\./);
   assert.match(source, /case 'usage-report':\s*\n\s*lastUsage = e\.usage/);
+  assert.match(source, /selectedAgent === 'rau' && !rauSetupComplete/);
+  assert.ok(source.indexOf("return { ok: false, reason: 'Rau 연결을 먼저 완료해 주세요' }")
+    < source.indexOf('const userMessage = recordUserMessage(prompt'));
+  assert.ok(source.indexOf("return { ok: false, reason: '체험 크레딧이 다 됐어요. 다른 모델을 연결해 주세요.' }")
+    < source.indexOf('const userMessage = recordUserMessage(prompt'));
 });
 
 test('Rau 설정 카드는 로그인된 계정과 체험 크레딧 잔량 막대를 함께 보여 준다', () => {
@@ -610,6 +615,9 @@ test('Rau 로그아웃 뒤 설치된 런타임을 연결 상태로 오인하지 
   assert.match(settings, /if \(agent === 'rau' && !configured\) \{[\s\S]*row\.detail\.textContent = detected \? '로그인 필요'/);
   assert.match(settings, /const statuses = await bridge\.disconnectAgent\('rau'\)/);
   assert.match(settings, /if \(statuses\) setupStatuses = statuses;[\s\S]*renderAgentSetup\(\);/);
+  assert.match(settings, /prefs\.defaultAgent === 'rau'[\s\S]*const fallback = selectableAgents\(\)\[0\][\s\S]*persistPrefs\(prefsDraft\)/);
+  assert.match(settings, /const rauWasIncomplete = setupStatuses !== null[\s\S]*rauWasIncomplete && ev\.statuses\.rau\?\.setupComplete === true/);
+  assert.match(settings, /function persistPrefs[\s\S]*applyDefaults\(result\.value\)/);
 });
 
 test('설정 모달은 프로바이더별 설치 안내와 API 키 힌트를 갖는다', () => {
