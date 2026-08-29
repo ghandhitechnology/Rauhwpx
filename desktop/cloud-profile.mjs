@@ -71,9 +71,11 @@ export function normalizeCloudEndpoint(raw) {
  */
 export function sshOptionFilePath(name, value) {
   const text = String(value ?? '');
-  return /[\s"]/.test(text)
-    ? `${name}="${text.replace(/"/g, '\\"')}"`
-    : `${name}=${text}`;
+  if (/[\u0000\r\n]/.test(text)) throw new Error(`${name} path is invalid`);
+  const escaped = text.replace(/%/g, '%%');
+  return /[\s"]/.test(escaped)
+    ? `${name}="${escaped.replace(/"/g, '\\"')}"`
+    : `${name}=${escaped}`;
 }
 
 export function normalizeSshConfig(raw = {}) {

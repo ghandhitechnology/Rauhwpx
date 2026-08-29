@@ -359,6 +359,19 @@ test('ssh known-hosts paths with spaces stay intact inside the -o value', () => 
   assert.ok(tunnel.some((option) => option === 'UserKnownHostsFile="/Users/Foo Bar/Library/Application Support/Rauhwpx/cloud/ssh-known-hosts"'));
 });
 
+test('ssh known-hosts paths preserve literal percent tokens and reject control characters', () => {
+  const args = sshArguments(
+    { host: 'example.com', user: 'cloud-user', port: 22 },
+    '/state/100%h Cloud/known-hosts',
+    'true',
+  );
+  assert.ok(args.includes('UserKnownHostsFile="/state/100%%h Cloud/known-hosts"'));
+  assert.throws(
+    () => sshArguments({ host: 'example.com', user: 'cloud-user' }, '/state/bad\npath', 'true'),
+    /path is invalid/,
+  );
+});
+
 test('handoff store persists transitions and ignores replayed events', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-test-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
