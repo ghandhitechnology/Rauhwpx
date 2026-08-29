@@ -1280,7 +1280,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   });
 
   // pane 액션은 문서 맥락 주변의 고정된 헤더 위치를 유지한다.
-  headerActions.append(threadsBtn, versionsBtn, settingsBtn);
+  headerActions.append(versionsBtn, settingsBtn, threadsBtn);
 
   selectors.append(providerWrap, llmWrap, effortWrap);
   const modelSummary = el('div', 'ag-model-summary');
@@ -1552,8 +1552,17 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       showToast({ message, durationMs: 5000 });
     },
   });
-  headerActions.insertBefore(cloudUi.sidebarButton, settingsBtn);
+  headerActions.insertBefore(cloudUi.sidebarButton, versionsBtn);
   workspaceTrailing.insertBefore(cloudUi.workspaceButton, environmentWrap);
+
+  const applyHancomGitVisibility = (enabled: boolean): void => {
+    versionsBtn.hidden = !enabled;
+    environmentWrap.hidden = !enabled;
+    if (!enabled && versionsPanelOpen) closeVersionsPage();
+    if (!enabled && environmentPanelOpen) setEnvironmentPanelOpen(false);
+  };
+  applyHancomGitVisibility(userSettings.getUseHancomGit());
+  const unsubscribeHancomGitVisibility = userSettings.subscribeUseHancomGit(applyHancomGitVisibility);
 
   async function collectCloudReferences(): Promise<CloudTransferReference[]> {
     const usedIds = collectUsedCloudReferenceIds(currentThread);
@@ -6664,6 +6673,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       unsubChatStatus();
       unsubPending();
       unsubEditingLease();
+      unsubscribeHancomGitVisibility();
       contextUnsubs.forEach((unsub) => unsub());
       messagesMutationObserver?.disconnect();
       messagesResizeObserver?.disconnect();
