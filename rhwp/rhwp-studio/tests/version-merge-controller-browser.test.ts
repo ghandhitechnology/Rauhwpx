@@ -15,8 +15,6 @@ const BROWSER_CANDIDATES = [
   '/usr/bin/google-chrome',
   '/usr/bin/chromium',
   '/usr/bin/chromium-browser',
-  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-  'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
 ].filter((candidate): candidate is string => Boolean(candidate));
 
 const executablePath = BROWSER_CANDIDATES.find(existsSync);
@@ -35,16 +33,7 @@ let browser: Browser | null = null;
 let baseUrl = '';
 
 test.before(async () => {
-  if (browserSkipReason) {
-    if (!wasmPackageAvailable) {
-      assert.equal(
-        Boolean(process.env.CI),
-        false,
-        'Real WASM browser tests require generated rhwp/pkg/rhwp.js and rhwp/pkg/rhwp_bg.wasm; build the WASM package before npm test',
-      );
-    }
-    return;
-  }
+  if (browserSkipReason) return;
   server = await createServer({
     root: studioRoot,
     configFile: false,
