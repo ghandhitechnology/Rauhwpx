@@ -6,17 +6,27 @@ import type {
   CloudTransferReference,
   CloudTransferRequest,
 } from './types.ts';
+import { createBrowserDisplayManager } from './browser-display.ts';
+import type { CloudDisplayConnectionOptions } from './display-connection.ts';
+import {
+  base64Url,
+  boundedResponseBytes,
+  parseSse,
+  sha256,
+  utf8,
+  verifyResponseProof,
+  verifySseFrame,
+} from './browser-protocol.ts';
 
 const PROFILE_KEY = 'rauhwpx.cloud.browser.profile.v1';
 const TOKENS_KEY = 'rauhwpx.cloud.browser.tokens.v1';
 const MODE_KEY = 'rauhwpx.cloud.browser.mode.v1';
 const ORIGIN_SYNC_KEY_PREFIX = 'rauhwpx.cloud.browser.origin-sync.v1.';
 const ARCHIVE_DATABASE = 'rauhwpx-cloud-browser-archives';
-const RESPONSE_VERSION = 'RAUHWpx-response-v1';
-const SSE_VERSION = 'RAUHWpx-sse-event-v1';
 const SSE_PROTOCOL = 'rauhwpx-sse-v1';
 const MAX_DOCUMENT_BYTES = 64 * 1024 * 1024;
 const MAX_TIMELINE_BYTES = 100 * 1024 * 1024;
+const MAX_JSON_BYTES = 2 * 1024 * 1024;
 const COMMAND_TYPES: Record<CloudCommandRequest['command'], string> = {
   pause: 'session.pause',
   resume: 'session.resume',
@@ -57,7 +67,48 @@ type BrowserCloudOptions = {
   readReference?: (reference: Pick<CloudTransferReference, 'id' | 'scope' | 'scopeId'>) => Promise<Uint8Array>;
   fetchImpl?: typeof fetch;
   storage?: Storage;
+  display?: CloudDisplayConnectionOptions;
 };
+
+type BrowserCloudError = Error & { status?: number; code?: string; retryable?: boolean };
+type BrowserRefreshState = {
+  profile: BrowserProfile;
+  generation: number;
+  refreshToken: string;
+  promise: Promise<TokenBundle>;
+};
+
+function cloudError(message: string, code: string, retryable = false, status = 0): BrowserCloudError {
+  return Object.assign(new Error(message), { code, retryable, status });
+}
+
+function sameProfileIdentity(left: BrowserProfile | null, right: BrowserProfile | null): boolean {
+  return Boolean(left && right
+    && left.endpoint === right.endpoint
+    && left.serverPublicKey === right.serverPublicKey);
+}
+
+function abortableWait<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(signal.reason ?? new DOMException('The operation was aborted', 'AbortError'));
+  return new Promise((resolve, reject) => {
+    const abort = () => {
+      signal.removeEventListener('abort', abort);
+      reject(signal.reason ?? new DOMException('The operation was aborted', 'AbortError'));
+    };
+    signal.addEventListener('abort', abort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', abort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener('abort', abort);
+        reject(error);
+      },
+    );
+  });
+}
 
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value)
@@ -82,36 +133,6 @@ function randomId(prefix = ''): string {
   return prefix ? `${prefix}${id.replaceAll('-', '_')}` : id;
 }
 
-function base64Url(bytes: Uint8Array): string {
-  let binary = '';
-  for (let index = 0; index < bytes.length; index += 0x8000) {
-    binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
-  }
-  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
-}
-
-function fromBase64Url(value: string): Uint8Array {
-  const padded = value.replaceAll('-', '+').replaceAll('_', '/') + '='.repeat((4 - value.length % 4) % 4);
-  const binary = atob(padded);
-  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
-}
-
-async function sha256(bytes: Uint8Array): Promise<string> {
-  const copy = new Uint8Array(bytes.byteLength);
-  copy.set(bytes);
-  const digest = await globalThis.crypto.subtle.digest('SHA-256', copy.buffer);
-  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
-}
-
-function utf8(value: string): Uint8Array {
-  return new TextEncoder().encode(value);
-}
-
-function exactBuffer(bytes: Uint8Array): ArrayBuffer {
-  const copy = new Uint8Array(bytes.byteLength);
-  copy.set(bytes);
-  return copy.buffer;
-}
 
 function exactEndpoint(profile: CloudProfileDraft): string {
   const raw = profile.transport.kind === 'https'
@@ -295,7 +316,8 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
   const queuedMessages = new Map<string, { id: string; text: string; queuedAt: string; state: 'queued' | 'accepted' }>();
   const dismissed = new Set<string>();
   const archivedSessions = new Map<string, Record<string, unknown>>();
-  let refreshPromise: Promise<void> | null = null;
+  let profileGeneration = 0;
+  let refreshState: BrowserRefreshState | null = null;
 
   try {
     const rawProfile = storage.getItem(PROFILE_KEY);
@@ -354,49 +376,56 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
 
   const emit = (event: Record<string, unknown>) => eventListener?.({ ...event, snapshot: snapshot() });
 
-  const publicKey = async (serverPublicKey: string): Promise<CryptoKey> => {
-    const encoded = serverPublicKey.replace(/^ed25519:/, '');
-    return globalThis.crypto.subtle.importKey(
-      'spki', exactBuffer(fromBase64Url(encoded)), { name: 'Ed25519' }, false, ['verify'],
-    );
-  };
-
-  const verifyProof = async (
-    response: Response,
+  const ensureAccessToken = async (
     selectedProfile: BrowserProfile,
-    nonce: string,
-    method: string,
-    pathAndQuery: string,
-    digest: string,
-  ) => {
-    if (response.headers.get('x-rauhwpx-server-key') !== selectedProfile.serverPublicKey) {
-      throw new Error('Cloud 서버 신원이 페어링한 서버와 다릅니다.');
+    generation: number,
+    signal?: AbortSignal,
+  ): Promise<TokenBundle> => {
+    if (generation !== profileGeneration || !sameProfileIdentity(selectedProfile, profile)) {
+      throw cloudError('Cloud 프로필이 요청 인증 중 변경됐습니다.', 'PROFILE_CHANGED');
     }
-    if (response.headers.get('x-rauhwpx-content-sha256') !== digest) {
-      throw new Error('Cloud 응답 무결성 증명이 일치하지 않습니다.');
+    const expiry = typeof tokens?.accessExpiresAt === 'number'
+      ? tokens.accessExpiresAt : Date.parse(String(tokens?.accessExpiresAt ?? ''));
+    if (tokens?.accessToken && Number.isFinite(expiry) && expiry > Date.now() + 15_000) return tokens;
+    const capturedTokens = tokens ? { ...tokens } : null;
+    const refreshToken = capturedTokens?.refreshToken ?? '';
+    if (!refreshToken) throw cloudError('Cloud 페어링이 필요합니다.', 'PAIRING_REQUIRED');
+    let state = refreshState;
+    if (!state || state.generation !== generation
+      || state.refreshToken !== refreshToken
+      || !sameProfileIdentity(state.profile, selectedProfile)) {
+      const promise = (async (): Promise<TokenBundle> => {
+        const refreshed = await requestJson('/v1/token/refresh', {
+          method: 'POST',
+          auth: false,
+          body: { refreshToken },
+          selectedProfile,
+        });
+        const accessToken = String(refreshed.accessToken ?? '');
+        const nextRefreshToken = String(refreshed.refreshToken ?? '');
+        const nextExpiry = typeof refreshed.accessExpiresAt === 'number'
+          ? refreshed.accessExpiresAt : Date.parse(String(refreshed.accessExpiresAt ?? ''));
+        if (!accessToken || !nextRefreshToken || !Number.isFinite(nextExpiry)) {
+          throw cloudError('Cloud 토큰 응답이 잘못됐습니다.', 'TOKEN_RESPONSE_INVALID');
+        }
+        if (generation !== profileGeneration || !sameProfileIdentity(selectedProfile, profile)
+          || tokens?.refreshToken !== refreshToken) {
+          throw cloudError('Cloud 프로필이 토큰 갱신 중 변경됐습니다.', 'PROFILE_CHANGED');
+        }
+        const next = { ...capturedTokens, ...refreshed } as TokenBundle;
+        tokens = next;
+        storage.setItem(TOKENS_KEY, JSON.stringify(next));
+        return next;
+      })();
+      state = { profile: selectedProfile, generation, refreshToken, promise };
+      refreshState = state;
+      const clear = () => {
+        if (refreshState === state) refreshState = null;
+      };
+      promise.then(clear, clear);
+      void promise.catch(() => {});
     }
-    const signature = response.headers.get('x-rauhwpx-response-signature') ?? '';
-    const canonical = `${RESPONSE_VERSION}\n${nonce}\n${method}\n${pathAndQuery}\n${response.status}\n${digest}`;
-    const valid = await globalThis.crypto.subtle.verify(
-      { name: 'Ed25519' },
-      await publicKey(selectedProfile.serverPublicKey),
-      exactBuffer(fromBase64Url(signature)),
-      exactBuffer(utf8(canonical)),
-    );
-    if (!valid) throw new Error('Cloud 응답 서명이 잘못됐습니다.');
-  };
-
-  const refreshTokens = async (): Promise<void> => {
-    if (refreshPromise) return refreshPromise;
-    refreshPromise = (async () => {
-      if (!profile || !tokens?.refreshToken) throw new Error('Cloud 페어링이 필요합니다.');
-      const refreshed = await requestJson('/v1/token/refresh', {
-        method: 'POST', auth: false, body: { refreshToken: tokens.refreshToken }, selectedProfile: profile,
-      });
-      tokens = { ...tokens, ...refreshed } as TokenBundle;
-      storage.setItem(TOKENS_KEY, JSON.stringify(tokens));
-    })().finally(() => { refreshPromise = null; });
-    return refreshPromise;
+    return abortableWait(state.promise, signal);
   };
 
   const request = async (pathname: string, {
@@ -407,6 +436,7 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
     auth = true,
     selectedProfile = profile,
     stream = false,
+    maxBytes = MAX_JSON_BYTES,
     retried = false,
     signal,
   }: {
@@ -417,20 +447,20 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
     auth?: boolean;
     selectedProfile?: BrowserProfile | null;
     stream?: boolean;
+    maxBytes?: number;
     retried?: boolean;
     signal?: AbortSignal;
   } = {}) => {
     if (!selectedProfile) throw new Error('Cloud 서버를 먼저 연결해 주세요.');
-    if (auth) {
-      const expiry = typeof tokens?.accessExpiresAt === 'number'
-        ? tokens.accessExpiresAt : Date.parse(String(tokens?.accessExpiresAt ?? ''));
-      if (!tokens?.accessToken || !Number.isFinite(expiry) || expiry <= Date.now() + 15_000) await refreshTokens();
-    }
+    const generation = profileGeneration;
+    const authenticated = auth
+      ? await ensureAccessToken(selectedProfile, generation, signal)
+      : null;
     const url = new URL(`${selectedProfile.endpoint}${pathname}`);
     const nonce = base64Url(globalThis.crypto.getRandomValues(new Uint8Array(24)));
     const headers = new Headers(inputHeaders);
     headers.set('X-Rauhwpx-Request-Nonce', nonce);
-    if (auth && tokens?.accessToken) headers.set('Authorization', `Bearer ${tokens.accessToken}`);
+    if (authenticated) headers.set('Authorization', `Bearer ${authenticated.accessToken}`);
     let requestBody: BodyInit | undefined;
     if (rawBody) requestBody = rawBody as BodyInit;
     else if (body !== undefined) {
@@ -438,21 +468,18 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
       requestBody = JSON.stringify(body);
     }
     const response = await fetchImpl(url, { method, headers, body: requestBody, signal, cache: 'no-store' });
-    if (auth && response.status === 401 && !retried) {
-      await refreshTokens();
-      return request(pathname, {
-        method, body, rawBody, headers: inputHeaders, auth, selectedProfile, stream, retried: true, signal,
-      });
-    }
     const context = { nonce, method, pathAndQuery: `${url.pathname}${url.search}` };
-    if (stream) {
+    const eventStream = stream && response.ok
+      && response.headers.get('content-type')?.toLowerCase().startsWith('text/event-stream');
+    if (eventStream) {
       const digest = await sha256(utf8(SSE_PROTOCOL));
-      await verifyProof(response, selectedProfile, nonce, method, context.pathAndQuery, digest);
+      await verifyResponseProof(response, selectedProfile, context, digest);
       if (!response.ok) throw new Error(`Cloud 요청이 실패했습니다 (${response.status}).`);
       return { response, bytes: null, context };
     }
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    await verifyProof(response, selectedProfile, nonce, method, context.pathAndQuery, await sha256(bytes));
+    const responseLimit = stream ? Math.min(maxBytes, 2 * 1024 * 1024) : maxBytes;
+    const bytes = await boundedResponseBytes(response, responseLimit);
+    await verifyResponseProof(response, selectedProfile, context, await sha256(bytes));
     let parsed: unknown = {};
     if (bytes.byteLength) {
       try { parsed = JSON.parse(new TextDecoder().decode(bytes)); } catch { parsed = null; }
@@ -460,9 +487,29 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
     if (!response.ok) {
       const error = record(record(parsed)?.error);
       const failure = new Error(String(error?.message ?? `Cloud 요청이 실패했습니다 (${response.status}).`));
-      Object.assign(failure, { status: response.status, code: error?.code, details: error?.details });
+      Object.assign(failure, {
+        status: response.status,
+        code: error?.code,
+        details: error?.details,
+        retryable: typeof error?.retryable === 'boolean'
+          ? error.retryable
+          : response.status === 408 || response.status === 425 || response.status === 429 || response.status >= 500,
+      });
+      if (auth && response.status === 401 && !retried && authenticated) {
+        if (generation !== profileGeneration || !sameProfileIdentity(selectedProfile, profile)) {
+          throw cloudError('Cloud 프로필이 요청 인증 후 변경됐습니다.', 'PROFILE_CHANGED');
+        }
+        if (tokens?.accessToken === authenticated.accessToken) {
+          tokens = { ...tokens, accessExpiresAt: 0 };
+          await ensureAccessToken(selectedProfile, generation, signal);
+        }
+        return request(pathname, {
+          method, body, rawBody, headers: inputHeaders, auth, selectedProfile, stream, maxBytes, retried: true, signal,
+        });
+      }
       throw failure;
     }
+    if (stream) throw cloudError('Cloud 스트림 응답 형식이 잘못됐습니다.', 'SSE_PROOF_INVALID');
     return { response, bytes, parsed, context };
   };
 
@@ -528,7 +575,9 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
   };
 
   const downloadTimeline = async (sessionId: string) => {
-    const result = await request(`/v1/sessions/${encodeURIComponent(sessionId)}/timeline`);
+    const result = await request(`/v1/sessions/${encodeURIComponent(sessionId)}/timeline`, {
+      maxBytes: MAX_TIMELINE_BYTES,
+    });
     if (!result.bytes || result.bytes.byteLength > MAX_TIMELINE_BYTES) throw new Error('Cloud 타임라인이 잘못됐습니다.');
     const expected = result.response.headers.get('x-content-sha256');
     if (!expected || expected !== await sha256(result.bytes)) throw new Error('Cloud 타임라인 무결성 검증에 실패했습니다.');
@@ -537,7 +586,9 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
 
   const downloadCheckpoint = async (sessionId: string, operationId?: string) => {
     const query = operationId ? `?operationId=${encodeURIComponent(operationId)}` : '';
-    const result = await request(`/v1/sessions/${encodeURIComponent(sessionId)}/checkpoint${query}`);
+    const result = await request(`/v1/sessions/${encodeURIComponent(sessionId)}/checkpoint${query}`, {
+      maxBytes: MAX_DOCUMENT_BYTES,
+    });
     if (!result.bytes || !result.bytes.byteLength || result.bytes.byteLength > MAX_DOCUMENT_BYTES) {
       throw new Error('Cloud 체크포인트 크기가 잘못됐습니다.');
     }
@@ -582,7 +633,9 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
   };
 
   const archiveResult = async (sessionId: string) => {
-    const result = await request(`/v1/results/${encodeURIComponent(sessionId)}`);
+    const result = await request(`/v1/results/${encodeURIComponent(sessionId)}`, {
+      maxBytes: MAX_DOCUMENT_BYTES,
+    });
     if (!result.bytes?.byteLength) throw new Error('Cloud 결과가 비어 있습니다.');
     const digest = result.response.headers.get('x-content-sha256') ?? '';
     if (digest !== await sha256(result.bytes)) throw new Error('Cloud 결과 무결성 검증에 실패했습니다.');
@@ -610,29 +663,30 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
     return { archive, timeline: downloadedTimeline };
   };
 
-  const parseSse = (buffer: string) => {
-    const frames: Array<{ id: string; event: string; digest: string; signature: string; data: string }> = [];
-    let rest = buffer.replace(/\r\n/g, '\n');
-    let boundary = rest.indexOf('\n\n');
-    while (boundary !== -1) {
-      const raw = rest.slice(0, boundary);
-      rest = rest.slice(boundary + 2);
-      const fields = { id: '', event: 'message', digest: '', signature: '', data: [] as string[] };
-      for (const line of raw.split('\n')) {
-        if (!line || line.startsWith(':')) continue;
-        const separator = line.indexOf(':');
-        const key = separator < 0 ? line : line.slice(0, separator);
-        const value = separator < 0 ? '' : line.slice(separator + 1).replace(/^ /, '');
-        if (key === 'id') fields.id = value;
-        else if (key === 'event') fields.event = value;
-        else if (key === 'rauhwpx-sha256') fields.digest = value;
-        else if (key === 'rauhwpx-signature') fields.signature = value;
-        else if (key === 'data') fields.data.push(value);
-      }
-      if (fields.data.length) frames.push({ ...fields, data: fields.data.join('\n') });
-      boundary = rest.indexOf('\n\n');
-    }
-    return { frames, rest };
+  const displayManager = createBrowserDisplayManager({
+    request,
+    profile: () => profile,
+    verifySse: verifySseFrame,
+    sha256,
+    randomId,
+    options: options.display,
+  });
+
+  let profileChangeChain = Promise.resolve();
+  const changeProfile = <T>(operation: () => Promise<T>): Promise<T> => {
+    const change = profileChangeChain.then(async () => {
+      for (const watcher of watchers.values()) watcher.abort();
+      await displayManager.closeActive();
+      profileGeneration += 1;
+      return operation();
+    }, async () => {
+      for (const watcher of watchers.values()) watcher.abort();
+      await displayManager.closeActive();
+      profileGeneration += 1;
+      return operation();
+    });
+    profileChangeChain = change.then(() => {}, () => {});
+    return change;
   };
 
   const watch = (sessionId: string) => {
@@ -658,14 +712,7 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
             const parsed = parseSse(buffer);
             buffer = parsed.rest;
             for (const frame of parsed.frames) {
-              const sequence = Number(frame.id);
-              const digest = await sha256(utf8(frame.data));
-              const canonical = `${SSE_VERSION}\n${stream.context.nonce}\nGET\n${stream.context.pathAndQuery}\n200\n${sequence}\n${frame.event}\n${digest}`;
-              const valid = digest === frame.digest && await globalThis.crypto.subtle.verify(
-                { name: 'Ed25519' }, await publicKey(profile.serverPublicKey),
-                exactBuffer(fromBase64Url(frame.signature)), exactBuffer(utf8(canonical)),
-              );
-              if (!valid || !Number.isSafeInteger(sequence)) throw new Error('Cloud 스트림 서명이 잘못됐습니다.');
+              const sequence = await verifySseFrame(frame, stream.context, profile);
               if (sequence <= (eventSequences.get(sessionId) ?? 0)) continue;
               eventSequences.set(sessionId, sequence);
               const event = JSON.parse(frame.data) as Record<string, unknown>;
@@ -732,33 +779,37 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
     },
     async cloudSaveProfile(payload: { profile: CloudProfileDraft }) {
       const candidate = await health(payload.profile);
-      if (profile?.serverPublicKey !== candidate.serverPublicKey) {
-        tokens = null;
-        storage.removeItem(TOKENS_KEY);
-      }
-      profile = candidate;
-      storage.setItem(PROFILE_KEY, JSON.stringify(profile));
-      connection = tokens ? 'ready' : 'unknown';
-      return refresh();
+      return changeProfile(async () => {
+        if (profile?.serverPublicKey !== candidate.serverPublicKey) {
+          tokens = null;
+          storage.removeItem(TOKENS_KEY);
+        }
+        profile = candidate;
+        storage.setItem(PROFILE_KEY, JSON.stringify(profile));
+        connection = tokens ? 'ready' : 'unknown';
+        return refresh();
+      });
     },
     async cloudPair(payload: { code: string; profile?: CloudProfileDraft }) {
       const candidate = await health(payload.profile ?? profile!);
-      const paired = await requestJson('/v1/pairing/redeem', {
-        method: 'POST',
-        auth: false,
-        selectedProfile: candidate,
-        body: {
-          code: payload.code.trim().toUpperCase(),
-          deviceName: navigator.userAgent.includes('Mobile') ? 'Rauhwpx PWA mobile' : 'Rauhwpx PWA browser',
-          requestId: randomId('pair_'),
-        },
+      return changeProfile(async () => {
+        const paired = await requestJson('/v1/pairing/redeem', {
+          method: 'POST',
+          auth: false,
+          selectedProfile: candidate,
+          body: {
+            code: payload.code.trim().toUpperCase(),
+            deviceName: navigator.userAgent.includes('Mobile') ? 'Rauhwpx PWA mobile' : 'Rauhwpx PWA browser',
+            requestId: randomId('pair_'),
+          },
+        });
+        profile = candidate;
+        tokens = paired as TokenBundle;
+        storage.setItem(PROFILE_KEY, JSON.stringify(profile));
+        storage.setItem(TOKENS_KEY, JSON.stringify(tokens));
+        connection = 'ready';
+        return refresh();
       });
-      profile = candidate;
-      tokens = paired as TokenBundle;
-      storage.setItem(PROFILE_KEY, JSON.stringify(profile));
-      storage.setItem(TOKENS_KEY, JSON.stringify(tokens));
-      connection = 'ready';
-      return refresh();
     },
     async cloudSelectServerMode(payload: { mode: string }) {
       storage.setItem(MODE_KEY, payload.mode === 'app-hosted' ? 'app-hosted' : 'self-hosted');
@@ -889,6 +940,11 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
     async cloudDownloadCheckpoint(payload: { sessionId: string; operationId?: string }) {
       return downloadCheckpoint(payload.sessionId, payload.operationId);
     },
+    cloudOpenDisplay: async (payload: { sessionId: string }) => {
+      await profileChangeChain;
+      return displayManager.open(payload);
+    },
+    cloudCloseDisplay: (payload: { connectionId: string }) => displayManager.close(payload),
     async cloudDownloadResult(payload: { sessionId: string }) {
       const existing = await getArchive(archiveId(payload.sessionId, 'result'));
       const stored = existing ? { archive: existing, timeline: existing.timeline } : await archiveResult(payload.sessionId);
@@ -930,5 +986,6 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
         for (const watcher of watchers.values()) watcher.abort();
       };
     },
+    onCloudDisplayEvent: (callback: (event: unknown) => void) => displayManager.subscribe(callback),
   };
 }
