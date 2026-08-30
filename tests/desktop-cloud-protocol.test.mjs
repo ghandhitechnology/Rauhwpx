@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -215,6 +215,81 @@ test('backend SSE payload advances the durable desktop handoff', async (t) => {
   assert.equal(record.resultDigest, resultDigest);
   assert.equal(record.resultSize, 12);
   assert.equal(record.completedAt, completedAt);
+});
+
+test('each stable turn archives exact bytes and atomically advances an unchanged origin', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-turn-autosync-'));
+  const originPath = path.join(directory, 'source.hwpx');
+  const original = Buffer.from('original document');
+  const edited = Buffer.from('stable cloud turn one');
+  const editedDigest = createHash('sha256').update(edited).digest('hex');
+  await writeFile(originPath, original);
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const created = await store.create({
+    sessionId: 'desktop-autosync',
+    threadId: 'thread-autosync',
+    documentId: 'document-autosync',
+    originPath,
+    documentName: 'source.hwpx',
+    documentBytes: original,
+    timeline: null,
+    provider: 'codex',
+    limits: { maxTurns: 100 },
+  });
+  await store.transition(created.id, 'uploading');
+  await store.transition(created.id, 'committing');
+  await store.transition(created.id, 'running', { cloudSessionId: 'cloud-autosync', serverVersion: 2 });
+
+  let watcherReady;
+  const delivered = new Promise((resolve) => { watcherReady = resolve; });
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => null,
+      isPaired: async () => false,
+      downloadCheckpoint: async (_sessionId, { operationId }) => ({
+        bytes: edited,
+        sha256: editedDigest,
+        size: edited.length,
+        name: 'source.hwpx',
+        boundaryOperation: operationId,
+        revision: 3,
+        turn: 1,
+      }),
+      watchSession: async (_sessionId, _after, { signal, onEvent }) => {
+        await onEvent({
+          sequence: 6,
+          type: 'boundary.committed',
+          payload: {
+            kind: 'turn', operationId: 'turn_1_stable', turnNumber: 1, revision: 3, stateVersion: 3,
+          },
+        });
+        watcherReady();
+        await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+      },
+    },
+    store,
+    provisioner: {},
+    recoveryDir: path.join(directory, 'recovery'),
+  });
+  t.after(async () => {
+    await coordinator.stop();
+    await store.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
+  await coordinator.start();
+  await delivered;
+
+  let record;
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    record = await store.get(created.id);
+    if (record.lastSyncedBoundaryOperation === 'turn_1_stable') break;
+    await delay(10);
+  }
+  assert.equal(await readFile(originPath, 'utf8'), edited.toString());
+  assert.equal(record.documentDigest, editedDigest);
+  assert.equal(record.turnArchives.length, 1);
+  assert.equal(record.turnArchives[0].operationId, 'turn_1_stable');
+  assert.equal(await readFile(record.turnArchives[0].path, 'utf8'), edited.toString());
 });
 
 test('VPS restart can requeue a running durable handoff', async (t) => {

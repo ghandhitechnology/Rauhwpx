@@ -60,7 +60,7 @@ test('cloud transfer includes portable timeline, exact document bytes and refere
 
 test('cloud lease locks local editing and queued messages cross only at a remote boundary', () => {
   assert.match(sidebar, /isCloudConversation\(\)/);
-  assert.match(cloudUi, /async queueMessage\(text, messageId\)/);
+  assert.match(cloudUi, /async queueMessage\(text, messageId, attachments = \[\]\)/);
   assert.match(cloudUi, /command: 'queue-message'/);
   assert.match(main, /setCloudDocumentLease/);
   assert.match(main, /syncDocumentReadOnly/);

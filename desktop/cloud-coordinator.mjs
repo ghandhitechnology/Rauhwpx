@@ -11,6 +11,7 @@ import {
 } from './cloud-provider-auth.mjs';
 import { normalizeCloudProfile, normalizeTailscaleHttpsPort } from './cloud-profile.mjs';
 import { sha256Hex, writeVerifiedRecoveryFile } from './cloud-handoff.mjs';
+import { applyCloudRecovery } from './cloud-result.mjs';
 import { hasProviderAuth } from './provider-auth.mjs';
 
 /** 샌드박스를 철거하면 사라지는 작업 상태. 사용자가 먼저 정리해야 한다. */
@@ -204,7 +205,11 @@ const CLIENT_TO_SERVER_COMMAND = Object.freeze({
   resume: 'session.resume',
   takeover: 'session.takeover',
   cancel: 'session.cancel',
+  end: 'session.end',
   retry: 'session.resume',
+  'resolve-wait': 'wait.resolve',
+  redirect: 'turn.redirect',
+  workflow: 'conversation.workflow',
   'queue-message': 'message.queue',
 });
 
@@ -223,6 +228,7 @@ export class CloudCoordinator extends EventEmitter {
   #transferCancelPromises = new Map();
   #takeoverControllers = new Map();
   #takeoverPromises = new Map();
+  #endArchivePromises = new Map();
   #remoteSessions = new Map();
   #remoteWatchSequence = new Map();
   #timelinePending = new Map();
@@ -1131,6 +1137,7 @@ export class CloudCoordinator extends EventEmitter {
         threadId: record.threadId,
         documentId: record.originDocumentId,
         provider: payload?.agent,
+        persistent: true,
         executionConfig: record.executionConfig,
         goal,
         documentName: payload?.document?.fileName ?? payload?.documentName,
@@ -1242,13 +1249,39 @@ export class CloudCoordinator extends EventEmitter {
     }
   }
 
-  async command({ sessionId, command, expectedVersion, payload = {}, message, messageId }) {
-    const queuedMessageId = command === 'queue-message' && message
+  async command({ sessionId, command, expectedVersion, payload = {}, message, messageId, attachments = [] }) {
+    const queuedMessageId = (command === 'queue-message' || command === 'redirect') && message
       ? String(messageId ?? `message-${Date.now()}`)
       : null;
+    if (!Array.isArray(attachments) || attachments.length > 10
+      || (attachments.length > 0 && !['queue-message', 'redirect'].includes(command))) {
+      throw new Error('Cloud follow-up attachments are invalid');
+    }
+    const uploadedAttachments = [];
+    for (const attachment of attachments) {
+      const bytes = Buffer.from(attachment?.bytes ?? []);
+      if (!attachment?.id || !attachment?.name || !attachment?.mimeType
+        || bytes.length < 1 || bytes.length !== attachment.size || bytes.length > 128 * 1024 * 1024) {
+        throw new Error('Cloud follow-up attachment is invalid');
+      }
+      const uploaded = await this.#client.uploadBlob({
+        bytes,
+        name: attachment.name,
+        kind: 'reference',
+        sessionId,
+      });
+      uploadedAttachments.push({
+        attachmentId: attachment.id,
+        blobId: uploaded.blobId,
+        size: uploaded.size,
+        name: attachment.name,
+        mimeType: attachment.mimeType,
+      });
+    }
     const body = {
       ...payload,
       ...(queuedMessageId ? { content: message, messageId: queuedMessageId } : {}),
+      ...(uploadedAttachments.length ? { attachments: uploadedAttachments } : {}),
       ...(expectedVersion == null ? {} : { expectedVersion }),
     };
     const serverCommand = CLIENT_TO_SERVER_COMMAND[command];
@@ -1314,6 +1347,8 @@ export class CloudCoordinator extends EventEmitter {
           serverVersion: result.session.stateVersion ?? result.session.version ?? handoff.serverVersion,
           statusMessage: result.session.suspendedReason?.message ?? null,
           pauseRequested: result.session.pauseRequested === true,
+          executionPhase: result.session.executionPhase ?? handoff.executionPhase ?? null,
+          currentWait: result.session.currentWait ?? null,
           ...(typeof result.session.takeoverRequested === 'boolean'
             ? { takeoverRequested: result.session.takeoverRequested }
             : {}),
@@ -1427,6 +1462,21 @@ export class CloudCoordinator extends EventEmitter {
       }
       throw error;
     }
+  }
+
+  async downloadCheckpoint({ sessionId, operationId = null }) {
+    const checkpoint = await this.#client.downloadCheckpoint(sessionId, { operationId });
+    return {
+      sessionId,
+      fileName: checkpoint.name || 'cloud-checkpoint.hwpx',
+      bytes: new Uint8Array(checkpoint.bytes),
+      byteLength: checkpoint.size,
+      sha256: checkpoint.sha256,
+      revision: checkpoint.revision,
+      turn: checkpoint.turn,
+      operationId: checkpoint.boundaryOperation,
+      kind: checkpoint.boundaryKind,
+    };
   }
 
   async completeTakeover({ sessionId }) {
@@ -1555,6 +1605,15 @@ export class CloudCoordinator extends EventEmitter {
         const takeoverReady = event.type === 'session.takeover_ready'
           ? true
           : current.takeoverReady ?? false;
+        const currentWait = event.type === 'wait.created'
+          ? {
+              id: source.waitId,
+              kind: source.kind,
+              payload: source.payload ?? {},
+            }
+          : event.type === 'wait.resolved' || event.type === 'conversation.ending'
+            ? null
+            : source.currentWait ?? current.currentWait ?? null;
         const updated = await this.#store.applyEvent(handoffId, {
           sequence: event.sequence,
           state,
@@ -1573,6 +1632,8 @@ export class CloudCoordinator extends EventEmitter {
             takeoverRequested,
             takeoverReady,
             takeoverBoundary: source.boundary ?? current.takeoverBoundary,
+            executionPhase: source.executionPhase ?? current.executionPhase ?? null,
+            currentWait,
             queuedMessages,
           },
         });
@@ -1582,6 +1643,18 @@ export class CloudCoordinator extends EventEmitter {
           event,
           handoff: updated,
         });
+        if (event.type === 'boundary.committed' && source.kind === 'turn') {
+          try {
+            await this.#syncTurnBoundary(sessionId, handoffId, source);
+          } catch (error) {
+            this.#emit({
+              type: 'turn-autosync-error',
+              sessionId,
+              operationId: source.operationId,
+              error: error.message,
+            });
+          }
+        }
         // Apply and publish the durable state first. A slow timeline download
         // must never leave a completed session displayed as still running.
         if (event.type === 'timeline.updated') this.#timelinePending.set(sessionId, true);
@@ -1593,6 +1666,16 @@ export class CloudCoordinator extends EventEmitter {
           } catch (error) {
             this.#timelinePending.set(sessionId, true);
             this.#emit({ type: 'timeline-sync-error', sessionId, error: error.message });
+          }
+        }
+        if (state === 'completed') {
+          try {
+            const remote = await this.#client.session(sessionId);
+            if (remote.persistent === true && remote.endRequested === true) {
+              await this.#archiveEndedConversation(sessionId);
+            }
+          } catch (error) {
+            this.#emit({ type: 'conversation-archive-error', sessionId, error: error.message });
           }
         }
         if (['downloaded', 'cancelled', 'expired', 'failed'].includes(updated?.state)) controller.abort();
@@ -2102,6 +2185,106 @@ export class CloudCoordinator extends EventEmitter {
     return downloaded.timeline;
   }
 
+  async #syncTurnBoundary(sessionId, handoffId, boundary) {
+    if (typeof boundary?.operationId !== 'string' || !boundary.operationId
+      || !Number.isSafeInteger(boundary.turnNumber) || boundary.turnNumber < 1
+      || !Number.isSafeInteger(boundary.revision) || boundary.revision < 1) {
+      throw new Error('Cloud turn boundary is invalid');
+    }
+    const current = await this.#store.get(handoffId);
+    if (!current || current.lastSyncedBoundaryOperation === boundary.operationId) return current;
+    const checkpoint = await this.#client.downloadCheckpoint(sessionId, {
+      operationId: boundary.operationId,
+    });
+    if (checkpoint.boundaryOperation !== boundary.operationId
+      || checkpoint.turn !== boundary.turnNumber
+      || checkpoint.revision !== boundary.revision) {
+      throw new Error('Downloaded autosync checkpoint does not match its turn boundary');
+    }
+    const extension = path.extname(current.documentName || checkpoint.name || '') || '.hwpx';
+    const safeHandoffId = String(handoffId).replace(/[^A-Za-z0-9_-]/g, '_');
+    const archivePath = path.join(
+      this.#recoveryDir,
+      'turn-archives',
+      safeHandoffId,
+      `turn-${String(boundary.turnNumber).padStart(4, '0')}-r${String(boundary.revision).padStart(6, '0')}${extension}`,
+    );
+    await writeVerifiedRecoveryFile({
+      filePath: archivePath,
+      bytes: checkpoint.bytes,
+      expectedDigest: checkpoint.sha256,
+    });
+    let resolution = null;
+    if (current.originPath) {
+      resolution = await applyCloudRecovery({
+        recoveryPath: archivePath,
+        resultDigest: checkpoint.sha256,
+        originalPath: current.originPath,
+        originalDigest: current.documentDigest,
+        action: 'replace',
+        resolutionId: boundary.operationId,
+      });
+    }
+    const archives = Array.isArray(current.turnArchives) ? current.turnArchives : [];
+    const turnArchives = [
+      ...archives.filter((entry) => entry?.operationId !== boundary.operationId),
+      {
+        operationId: boundary.operationId,
+        turn: boundary.turnNumber,
+        revision: boundary.revision,
+        path: archivePath,
+        sha256: checkpoint.sha256,
+        size: checkpoint.size,
+        syncedAt: new Date().toISOString(),
+      },
+    ].sort((left, right) => left.turn - right.turn);
+    const patch = {
+      lastSyncedBoundaryOperation: boundary.operationId,
+      lastSyncedTurn: boundary.turnNumber,
+      lastSyncedRevision: boundary.revision,
+      turnArchives,
+      ...(resolution?.action === 'replace' ? {
+        documentDigest: checkpoint.sha256,
+        externalConflict: false,
+      } : {}),
+      ...(resolution?.conflict ? {
+        externalConflict: true,
+        resolvedPath: resolution.path,
+      } : {}),
+    };
+    const updated = await this.#store.patch(handoffId, patch);
+    this.#emit({
+      type: 'turn-autosynced',
+      sessionId,
+      operationId: boundary.operationId,
+      turn: boundary.turnNumber,
+      revision: boundary.revision,
+      archivePath,
+      originAction: resolution?.action ?? 'archive-only',
+      conflict: resolution?.conflict === true,
+      handoff: updated,
+    });
+    return updated;
+  }
+
+  async #archiveEndedConversation(sessionId) {
+    const existing = this.#endArchivePromises.get(sessionId);
+    if (existing) return existing;
+    const operation = this.downloadResult({ sessionId }).then((result) => {
+      this.#emit({
+        type: 'conversation-archived',
+        sessionId,
+        recoveryPath: result.recoveryPath,
+        sha256: result.sha256,
+      });
+      return result;
+    }).finally(() => {
+      if (this.#endArchivePromises.get(sessionId) === operation) this.#endArchivePromises.delete(sessionId);
+    });
+    this.#endArchivePromises.set(sessionId, operation);
+    return operation;
+  }
+
   async #syncRemoteTimeline(sessionId) {
     if (!sessionId) return null;
     const downloaded = await this.#client.downloadTimeline(sessionId);
@@ -2154,12 +2337,25 @@ export class CloudCoordinator extends EventEmitter {
           || Boolean(source.boundary ?? event.boundary)
           || cached.takeoverRequested
           || cached.takeoverReady;
-        const session = needsRefetch
+        let session = needsRefetch
           ? await this.#hydrateRemoteTakeover(
               await this.#client.session(sessionId),
               source.boundary ?? event.boundary ?? null,
             )
           : cached;
+        if (event.type === 'wait.created') {
+          session = {
+            ...session,
+            currentWait: {
+              id: source.waitId,
+              kind: source.kind,
+              payload: source.payload ?? {},
+            },
+            executionPhase: source.executionPhase ?? session.executionPhase,
+          };
+        } else if (event.type === 'wait.resolved' || event.type === 'conversation.ending') {
+          session = { ...session, currentWait: null, executionPhase: source.executionPhase ?? session.executionPhase };
+        }
         this.#remoteSessions.set(sessionId, session);
         this.#emit({
           type: 'remote-session-event',
@@ -2184,6 +2380,15 @@ export class CloudCoordinator extends EventEmitter {
         this.#watchers.delete(sessionId);
         this.#timelinePending.delete(sessionId);
       });
+  }
+
+  #publicExecutionPhase(value) {
+    if (value === 'idle' || value === 'waiting') return 'waiting';
+    if (value === 'redirecting'
+      || value === 'awaiting-plan-approval'
+      || value === 'awaiting-question-answer'
+      || value === 'awaiting-external-effect-approval') return value;
+    return 'working';
   }
 
   #publicRemoteSession(session) {
@@ -2221,6 +2426,8 @@ export class CloudCoordinator extends EventEmitter {
       elapsedMs: Math.max(0, Date.now() - Date.parse(asIso(session.startedAt, new Date().toISOString()))),
       timeLimitMs: (session.limits?.maxDurationSeconds ?? 28_800) * 1000,
       currentActivity: 'Cloud agent is working.',
+      phase: this.#publicExecutionPhase(session.executionPhase),
+      wait: session.currentWait ?? null,
     };
     if (state === 'suspended') return {
       ...base,
@@ -2297,6 +2504,8 @@ export class CloudCoordinator extends EventEmitter {
       elapsedMs: Math.max(0, Date.now() - Date.parse(asIso(record.startedAt, record.updatedAt))),
       timeLimitMs: (record.limits?.maxDurationMinutes ?? 480) * 60_000,
       currentActivity: record.statusMessage ?? 'Cloud agent is working.',
+      phase: this.#publicExecutionPhase(record.executionPhase),
+      wait: record.currentWait ?? null,
     };
     if (record.state === 'suspended') return {
       ...base,

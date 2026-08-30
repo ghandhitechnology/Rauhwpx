@@ -1,6 +1,7 @@
 import { WasmBridge } from '@/core/wasm-bridge';
 import { FALLBACK_DOCUMENT_FILE_NAME } from '@/core/document-names';
 import type { DocumentInfo } from '@/core/types';
+import { browserOriginSyncDigest, setBrowserOriginSyncDigest } from '@/cloud/browser-cloud';
 import { EventBus } from '@/core/event-bus';
 import { assertRemoteDocumentBytes } from '@/core/document-signature';
 import { RemoteDocumentUrlError, validateRemoteDocumentUrl } from '@/core/remote-document-url';
@@ -121,7 +122,12 @@ import {
 } from './versioning/index.ts';
 import type { AgentEditingLease } from './agent/types.ts';
 import type { EmbedRendererRuntimeRequestV1 } from '@/embed/rpc-router';
-import type { CloudDownloadResult, CloudResultResolution, CloudTakeoverPayload } from './cloud/types.ts';
+import type {
+  CloudCheckpointPayload,
+  CloudDownloadResult,
+  CloudResultResolution,
+  CloudTakeoverPayload,
+} from './cloud/types.ts';
 import {
   contextualEditingToolbarMode,
   contextualObjectCommandEnabled,
@@ -480,6 +486,27 @@ function installCloudDocumentRuntimeApi(agentBridge: AgentBridge): void {
       agentBridge.approvePlan(id);
       return { approved: true };
     },
+    requestPlanChanges(secret: unknown, planId: unknown, feedback: unknown) {
+      requireSecret(secret);
+      const id = String(planId ?? '');
+      const text = String(feedback ?? '').trim();
+      if (!id || id.length > 256 || !text || text.length > 64 * 1024) {
+        throw new Error('Cloud runtime plan feedback is invalid');
+      }
+      agentBridge.requestPlanChanges(id, text);
+      return { requested: true };
+    },
+    setWorkflow(secret: unknown, workflow: unknown) {
+      requireSecret(secret);
+      if (workflow !== 'direct' && workflow !== 'plan') throw new Error('Cloud runtime workflow is invalid');
+      agentBridge.setWorkflow(workflow);
+      return { workflow };
+    },
+    interrupt(secret: unknown) {
+      requireSecret(secret);
+      agentBridge.interrupt();
+      return { interrupted: true };
+    },
     drainEvents(secret: unknown, afterSequence: unknown) {
       requireSecret(secret);
       const after = Number.isSafeInteger(Number(afterSequence)) ? Number(afterSequence) : 0;
@@ -614,6 +641,70 @@ async function applyCloudTakeover(takeover: CloudTakeoverPayload): Promise<{
     durationMs: 4000,
   });
   return { documentId: activeDocumentId, fileName: takeover.document.fileName };
+}
+
+async function applyCloudCheckpoint(checkpoint: CloudCheckpointPayload): Promise<void> {
+  if (!activeDocumentId || wasm.pageCount === 0) return;
+  const currentDocumentId = activeDocumentId;
+  const currentHandle = wasm.currentFileHandle;
+  if (checkpoint.kind === 'turn' && checkpoint.originOnThisDevice && currentHandle) {
+    try {
+      const permission = await currentHandle.queryPermission?.({ mode: 'readwrite' });
+      if (permission === undefined || permission === 'granted') {
+        const currentBytes = new Uint8Array(await (await currentHandle.getFile()).arrayBuffer());
+        const currentDigest = await bytesToSha256(currentBytes);
+        const expectedDigest = browserOriginSyncDigest(checkpoint.sessionId)
+          ?? checkpoint.expectedOriginSha256
+          ?? null;
+        if (currentDigest === checkpoint.sha256) {
+          setBrowserOriginSyncDigest(checkpoint.sessionId, checkpoint.sha256);
+        } else if (expectedDigest && currentDigest === expectedDigest) {
+          const writable = await currentHandle.createWritable();
+          try {
+            const exactBytes = new Uint8Array(checkpoint.bytes.byteLength);
+            exactBytes.set(checkpoint.bytes);
+            await writable.write(new Blob([exactBytes.buffer]));
+            await writable.close();
+          } catch (error) {
+            await writable.abort?.(error).catch(() => undefined);
+            throw error;
+          }
+          const savedDigest = await bytesToSha256(new Uint8Array(await (await currentHandle.getFile()).arrayBuffer()));
+          if (savedDigest !== checkpoint.sha256) throw new Error('브라우저 원본 저장 검증에 실패했습니다.');
+          setBrowserOriginSyncDigest(checkpoint.sessionId, checkpoint.sha256);
+        } else {
+          showToast({
+            message: '원본이 다른 곳에서 변경되어 덮어쓰지 않았습니다. Cloud 버전은 로컬 보관함에 유지됩니다.',
+            durationMs: 5000,
+          });
+        }
+      } else {
+        showToast({
+          message: '브라우저 원본 쓰기 권한이 없어 Cloud 버전을 로컬 보관함에 저장했습니다.',
+          durationMs: 4500,
+        });
+      }
+    } catch (error) {
+      showToast({
+        message: `Cloud 원본 자동 저장에 실패했습니다: ${error instanceof Error ? error.message : String(error)}`,
+        durationMs: 5000,
+      });
+    }
+  }
+  inputHandler?.deactivate();
+  const info = wasm.loadDocument(checkpoint.bytes, checkpoint.fileName);
+  // A mirror refresh changes the in-memory cloud-owned bytes, not the local
+  // origin binding. The coordinator remains responsible for verified origin
+  // synchronization and conflict handling.
+  activeDocumentId = currentDocumentId;
+  wasm.currentFileHandle = currentHandle;
+  prepareCanvasRendererDocument();
+  await initializeDocument(
+    info,
+    `${checkpoint.fileName} — 클라우드 ${checkpoint.turn}턴 동기화`,
+    { suppressDialogs: true },
+  );
+  setCloudDocumentLease(true, checkpoint.sessionId);
 }
 
 /** 렌더러 초기화 후에 생성되는 에이전트 브리지 — 저장 가드가 대기 편집을 조회한다. */
@@ -1084,6 +1175,7 @@ async function initialize(): Promise<void> {
         prepareCloudTakeover: () => confirmSaveBeforeReplacingDocument(commandServices),
         setCloudDocumentLease,
         applyCloudResult,
+        applyCloudCheckpoint,
         applyCloudTakeover,
       });
       awaitPendingCloudTransferForClose = agentSidebar.awaitPendingCloudTransferForClose;

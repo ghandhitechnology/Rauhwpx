@@ -136,6 +136,11 @@ test('config gates the local runner and keeps the control socket outside the dat
   assert.equal(local.workerGid, 1001);
   assert.equal(local.workerControlSocket, '/run/rauhwpx/control.sock');
   assert.deepEqual(local.startupProviders, ['claude', 'codex', 'pi', 'grok', 'cursor']);
+  assert.deepEqual(local.browserOrigins, []);
+  assert.deepEqual(parseConfig({
+    ...base,
+    RAUHWpx_BROWSER_ORIGINS: 'https://studio.example.com, https://office.example.com',
+  }).browserOrigins, ['https://studio.example.com', 'https://office.example.com']);
   assert.deepEqual(parseConfig({ ...base, RAUHWpx_SANDBOX_PROVIDER: 'codex' }).startupProviders, ['codex']);
   // 데이터 디렉터리는 0700이라 워커 uid가 통과할 수 없다. 작업 디렉터리는 그 밖에 있어야 한다.
   assert.equal(local.workspaceRoot, '/var/lib/rauhwpx-workspaces');
@@ -157,6 +162,7 @@ test('config gates the local runner and keeps the control socket outside the dat
   assert.throws(() => parseConfig({ ...base, RAUHWpx_RUNNER: 'docker' }), { code: 'CONFIG_INVALID' });
   assert.throws(() => parseConfig({ ...base, RAUHWpx_BOOTSTRAP_TOKEN: 'short' }), { code: 'CONFIG_INVALID' });
   assert.throws(() => parseConfig({ ...base, RAUHWpx_SANDBOX_PROVIDER: 'unknown' }), { code: 'CONFIG_INVALID' });
+  assert.throws(() => parseConfig({ ...base, RAUHWpx_BROWSER_ORIGINS: 'http://studio.example.com' }), { code: 'CONFIG_INVALID' });
   assert.throws(
     () => parseConfig({ ...base, RAUHWpx_RUNNER: 'local', RAUHWpx_WORKER_UID: '0' }),
     { code: 'CONFIG_INVALID' },

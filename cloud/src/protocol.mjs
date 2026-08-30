@@ -1,4 +1,5 @@
 export const PROTOCOL_VERSION = 1;
+export const ROOM_PROTOCOL_VERSION = 2;
 export const PROVIDERS = Object.freeze(['claude', 'codex', 'pi', 'grok', 'cursor']);
 export const SESSION_STATES = Object.freeze([
   'staged',
@@ -16,6 +17,10 @@ export const COMMAND_TYPES = Object.freeze([
   'session.takeover',
   'session.pause',
   'session.resume',
+  'session.end',
+  'turn.redirect',
+  'wait.resolve',
+  'conversation.workflow',
   'message.queue',
 ]);
 
@@ -127,6 +132,7 @@ export function parseSessionCreate(value) {
   return {
     sessionId: optionalString(input.sessionId, 'sessionId', { min: 8, max: 128, pattern: /^[a-zA-Z0-9_-]+$/ }),
     provider,
+    persistent: input.persistent === true,
     goal: string(input.goal, 'goal', { min: 1, max: 64 * 1024 }),
     clientContext: clientContext ? {
       threadId: string(clientContext.threadId, 'clientContext.threadId', { min: 1, max: 256 }),
@@ -217,6 +223,14 @@ export function publicSession(row) {
     provider: row.provider,
     goal: row.goal,
     status: row.status,
+    persistent: row.protocol_version === ROOM_PROTOCOL_VERSION,
+    roomStatus: row.room_status ?? 'legacy',
+    executionPhase: row.execution_phase ?? 'idle',
+    currentTurnId: row.current_turn_id ?? null,
+    currentWaitId: row.current_wait_id ?? null,
+    endRequested: Boolean(row.end_requested_at),
+    redirectRequested: Boolean(row.redirect_requested_at),
+    sleepRequested: Boolean(row.sleep_requested_at),
     stateVersion: row.state_version,
     originDeviceId: row.origin_device_id,
     clientContext: row.client_thread_id

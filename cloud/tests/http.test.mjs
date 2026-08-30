@@ -64,14 +64,18 @@ async function assertResponseProof(response, identity, { nonce, method = 'GET', 
   return { bytes, digest, canonical };
 }
 
-async function fixture(t, { workerOnly = false, withProviderAuth = false, seedProvider } = {}) {
+async function fixture(t, {
+  workerOnly = false, withProviderAuth = false, seedProvider, browserOrigins = [],
+} = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-cloud-http-'));
   const database = openDatabase(path.join(root, 'cloud.sqlite3'));
   const blobStore = new BlobStore(database, { root: path.join(root, 'objects'), chunkBytes: 8 });
   const auth = new AuthService(database);
   const sessionStore = new SessionStore(database, blobStore);
   const identity = testIdentity();
-  const config = { basePath: '/rauhwpx-cloud', maxRunningSessions: 2, maxQueuedSessions: 20 };
+  const config = {
+    basePath: '/rauhwpx-cloud', maxRunningSessions: 2, maxQueuedSessions: 20, browserOrigins,
+  };
   const logger = { error() {} };
   const vault = withProviderAuth
     ? new SecretVault(database, { dataDirectory: root })
@@ -104,6 +108,28 @@ async function fixture(t, { workerOnly = false, withProviderAuth = false, seedPr
   });
   return { base, database, blobStore, auth, sessionStore, identity, root };
 }
+
+test('configured PWA origins receive narrow CORS headers and unlisted origins fail preflight', async (t) => {
+  const origin = 'https://studio.example.com';
+  const { base } = await fixture(t, { browserOrigins: [origin] });
+  const allowed = await fetch(`${base}/rauhwpx-cloud/v1/health`, {
+    method: 'OPTIONS',
+    headers: {
+      Origin: origin,
+      'Access-Control-Request-Method': 'GET',
+      'Access-Control-Request-Headers': 'x-rauhwpx-request-nonce',
+    },
+  });
+  assert.equal(allowed.status, 204);
+  assert.equal(allowed.headers.get('access-control-allow-origin'), origin);
+  assert.match(allowed.headers.get('access-control-expose-headers'), /X-Rauhwpx-Response-Signature/);
+  const denied = await fetch(`${base}/rauhwpx-cloud/v1/health`, {
+    method: 'OPTIONS',
+    headers: { Origin: 'https://evil.example.com', 'Access-Control-Request-Method': 'GET' },
+  });
+  assert.equal(denied.status, 403);
+  assert.equal(denied.headers.get('access-control-allow-origin'), null);
+});
 
 async function pairOverHttp(auth, base) {
   const pairing = auth.createPairingCode();
@@ -360,6 +386,7 @@ test('HTTP handoff, idempotent command, SSE replay, and verified result download
   assert.equal(checkpointDownload.headers.get('x-content-sha256'), checkpoint.sha256);
   assert.equal(checkpointDownload.headers.get('x-checkpoint-revision'), '7');
   assert.equal(checkpointDownload.headers.get('x-checkpoint-turn'), '1');
+  assert.equal(checkpointDownload.headers.get('x-boundary-kind'), 'turn');
   assert.equal(decodeURIComponent(checkpointDownload.headers.get('x-document-name')), 'source.checkpoint-r7.hwp');
   assert.equal(await checkpointDownload.text(), 'stable-checkpoint');
   const result = await uploadOverHttp(base, tokens.accessToken, Buffer.from('finished'), { name: 'result.hwpx', kind: 'result' });

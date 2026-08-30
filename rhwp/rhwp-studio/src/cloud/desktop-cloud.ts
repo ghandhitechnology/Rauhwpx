@@ -1,7 +1,10 @@
 import type { RhwpDesktopApi } from '../desktop-integration.ts';
+import { browserCloudSupported, createBrowserCloudApi } from './browser-cloud.ts';
 import { parseCloudTimeline } from './timeline.ts';
 import type {
   CloudCommandRequest,
+  CloudConversationWait,
+  CloudCheckpointPayload,
   CloudDownloadResult,
   CloudConnectionState,
   CloudProfileDraft,
@@ -43,6 +46,7 @@ export interface CloudDesktopApi {
   cloudDismissSession?: (payload: { sessionId: string }) => Promise<unknown>;
   cloudCompleteTakeover?: (payload: { sessionId: string }) => Promise<unknown>;
   cloudDownloadResult?: (payload: { sessionId: string }) => Promise<unknown>;
+  cloudDownloadCheckpoint?: (payload: { sessionId: string; operationId?: string }) => Promise<unknown>;
   cloudResolveResult?: (payload: { sessionId: string; action: CloudResultAction }) => Promise<unknown>;
   onCloudEvent?: (callback: (event: unknown) => void) => (() => void) | void;
 }
@@ -67,8 +71,10 @@ export interface CloudController {
   dismissSession(sessionId: string): Promise<CloudSnapshot>;
   completeTakeover(sessionId: string): Promise<CloudSnapshot>;
   downloadResult(sessionId: string): Promise<CloudDownloadResult>;
+  downloadCheckpoint(sessionId: string, operationId?: string): Promise<CloudCheckpointPayload>;
   resolveResult(sessionId: string, action: CloudResultAction): Promise<CloudResultResolution>;
   subscribe(listener: (snapshot: CloudSnapshot) => void): () => void;
+  subscribeEvents(listener: (event: unknown) => void): () => void;
   dispose(): void;
 }
 
@@ -265,6 +271,22 @@ function parseResultSummary(value: unknown) {
   };
 }
 
+function parseConversationWait(value: unknown) {
+  if (value === null || value === undefined) return null;
+  const wait = record(value);
+  const id = string(wait?.id).trim();
+  const kind = wait?.kind;
+  const payload = record(wait?.payload);
+  if (!wait || !id || !payload
+    || (kind !== 'plan-approval' && kind !== 'question'
+      && kind !== 'external-side-effect' && kind !== 'destructive-external')) return undefined;
+  return {
+    id,
+    kind: kind as CloudConversationWait['kind'],
+    payload,
+  };
+}
+
 function parseSession(value: unknown): CloudSessionState | null {
   const state = record(value);
   if (!state) return null;
@@ -301,8 +323,15 @@ function parseSession(value: unknown): CloudSessionState | null {
       const turnLimit = strictInteger(state.turnLimit);
       const elapsedMs = strictInteger(state.elapsedMs);
       const timeLimitMs = strictInteger(state.timeLimitMs);
+      const phase = state.phase === 'waiting' || state.phase === 'redirecting'
+        || state.phase === 'awaiting-plan-approval'
+        || state.phase === 'awaiting-question-answer'
+        || state.phase === 'awaiting-external-effect-approval'
+        ? state.phase
+        : 'working';
+      const wait = parseConversationWait(state.wait);
       if (!startedAt || turn === null || turnLimit === null || elapsedMs === null || timeLimitMs === null
-        || typeof state.currentActivity !== 'string') return null;
+        || typeof state.currentActivity !== 'string' || wait === undefined) return null;
       return {
         ...base,
         kind: state.kind,
@@ -312,6 +341,8 @@ function parseSession(value: unknown): CloudSessionState | null {
         elapsedMs,
         timeLimitMs,
         currentActivity: state.currentActivity,
+        phase,
+        wait,
       };
     }
     case 'pausing':
@@ -475,6 +506,34 @@ function parseDownloadResult(value: unknown): CloudDownloadResult | null {
   };
 }
 
+function parseCheckpoint(value: unknown): CloudCheckpointPayload | null {
+  const result = record(value);
+  if (!result || !(result.bytes instanceof Uint8Array)) return null;
+  const sessionId = string(result.sessionId).trim();
+  const fileName = string(result.fileName).trim();
+  const sha256 = string(result.sha256).trim();
+  const operationId = string(result.operationId).trim();
+  const kind = result.kind === 'handoff' || result.kind === 'operation' || result.kind === 'turn'
+    ? result.kind
+    : 'turn';
+  const originOnThisDevice = result.originOnThisDevice === true;
+  const expectedOriginCandidate = string(result.expectedOriginSha256).trim();
+  const expectedOriginSha256 = /^[a-f0-9]{64}$/.test(expectedOriginCandidate)
+    ? expectedOriginCandidate
+    : '';
+  const byteLength = strictInteger(result.byteLength);
+  const revision = strictInteger(result.revision);
+  const turn = strictInteger(result.turn);
+  if (!sessionId || !fileName || !sha256 || !operationId
+    || byteLength === null || revision === null || turn === null
+    || result.bytes.byteLength !== byteLength) return null;
+  return {
+    sessionId, kind, fileName, sha256, operationId, byteLength, revision, turn, bytes: result.bytes,
+    ...(originOnThisDevice ? { originOnThisDevice: true } : {}),
+    ...(expectedOriginSha256 ? { expectedOriginSha256 } : {}),
+  };
+}
+
 export function parseCloudResultResolution(value: unknown): CloudResultResolution | null {
   const result = record(value);
   if (!result) return null;
@@ -510,10 +569,13 @@ function unwrapSnapshot(value: unknown): CloudSnapshot | null {
 
 export function createCloudController(
   api: CloudAwareDesktopApi | undefined = (globalThis as { rhwpDesktop?: CloudAwareDesktopApi }).rhwpDesktop,
+  browser: { readReference?: (reference: Pick<CloudTransferReference, 'id' | 'scope' | 'scopeId'>) => Promise<Uint8Array> } = {},
 ): CloudController {
+  const resolvedApi = api ?? (browserCloudSupported() ? createBrowserCloudApi(browser) : undefined);
   let snapshot = unavailableSnapshot();
   let disposed = false;
   const listeners = new Set<(state: CloudSnapshot) => void>();
+  const eventListeners = new Set<(event: unknown) => void>();
 
   const publish = (next: CloudSnapshot): CloudSnapshot => {
     if (next.revision < snapshot.revision) return snapshot;
@@ -529,16 +591,22 @@ export function createCloudController(
   };
 
   const call = async (method: keyof CloudDesktopApi, payload?: unknown): Promise<CloudSnapshot> => {
-    const fn = api?.[method];
+    const fn = resolvedApi?.[method];
     if (typeof fn !== 'function') throw new Error('이 앱 빌드는 클라우드 에이전트를 지원하지 않습니다.');
     return accept(await (fn as (arg?: unknown) => Promise<unknown>)(payload));
   };
 
-  const unsubscribeHost = api?.onCloudEvent?.((event) => {
+  const unsubscribeHost = resolvedApi?.onCloudEvent?.((event) => {
     if (disposed) return;
     const next = unwrapSnapshot(event);
-    if (!next) return;
-    publish(next);
+    if (next) publish(next);
+    const envelope = record(event);
+    const events = envelope?.type === 'cloud-event-batch' && Array.isArray(envelope.events)
+      ? envelope.events
+      : [event];
+    for (const item of events) {
+      for (const listener of eventListeners) listener(item);
+    }
   });
 
   return {
@@ -558,7 +626,7 @@ export function createCloudController(
     transfer: (request) => call('cloudTransfer', request),
     setTransferIntent: (request) => call('cloudSetTransferIntent', request),
     async readReference(reference) {
-      const fn = api?.cloudReadReference;
+      const fn = resolvedApi?.cloudReadReference;
       if (typeof fn !== 'function') throw new Error('이 앱 빌드는 참고자료 전송을 지원하지 않습니다.');
       const raw = record(await fn(reference));
       if (!(raw?.bytes instanceof Uint8Array)) throw new Error(`${reference.id} 참고자료를 읽지 못했습니다.`);
@@ -568,14 +636,21 @@ export function createCloudController(
     dismissSession: (sessionId) => call('cloudDismissSession', { sessionId }),
     completeTakeover: (sessionId) => call('cloudCompleteTakeover', { sessionId }),
     async downloadResult(sessionId) {
-      const fn = api?.cloudDownloadResult;
+      const fn = resolvedApi?.cloudDownloadResult;
       if (typeof fn !== 'function') throw new Error('이 앱 빌드는 클라우드 결과 다운로드를 지원하지 않습니다.');
       const result = parseDownloadResult(await fn({ sessionId }));
       if (!result) throw new Error('다운로드한 클라우드 결과가 올바르지 않습니다.');
       return result;
     },
+    async downloadCheckpoint(sessionId, operationId) {
+      const fn = resolvedApi?.cloudDownloadCheckpoint;
+      if (typeof fn !== 'function') throw new Error('이 앱 빌드는 클라우드 문서 미러를 지원하지 않습니다.');
+      const result = parseCheckpoint(await fn({ sessionId, ...(operationId ? { operationId } : {}) }));
+      if (!result) throw new Error('다운로드한 클라우드 체크포인트가 올바르지 않습니다.');
+      return result;
+    },
     async resolveResult(sessionId, action) {
-      const fn = api?.cloudResolveResult;
+      const fn = resolvedApi?.cloudResolveResult;
       if (typeof fn !== 'function') throw new Error('이 앱 빌드는 클라우드 결과 반영을 지원하지 않습니다.');
       const resolution = parseCloudResultResolution(await fn({ sessionId, action }));
       if (!resolution) throw new Error('클라우드 결과 반영 정보가 올바르지 않습니다.');
@@ -587,9 +662,14 @@ export function createCloudController(
       listener(snapshot);
       return () => listeners.delete(listener);
     },
+    subscribeEvents(listener) {
+      eventListeners.add(listener);
+      return () => eventListeners.delete(listener);
+    },
     dispose() {
       disposed = true;
       listeners.clear();
+      eventListeners.clear();
       if (typeof unsubscribeHost === 'function') unsubscribeHost();
     },
   };

@@ -21,12 +21,32 @@ Access-controlled routes use opaque Bearer access tokens. Access tokens expire a
 - `GET /v1/sessions` and `GET /v1/sessions/:id` reconcile session state across paired devices.
 - `GET /v1/sessions/:id/events?after=N` replays ordered SSE events and then follows live events.
 - `GET /v1/sessions/:id/timeline` streams the latest portable timeline to any paired device.
-- `GET /v1/sessions/:id/checkpoint` streams the latest stable document checkpoint to any paired device with digest, name, revision, and turn headers.
+- `GET /v1/sessions/:id/checkpoint` streams the latest stable document checkpoint to any paired device with digest, name, revision, turn, and boundary-kind headers.
 - `GET /v1/sessions/:id/takeover` returns a pending takeover or the frozen checkpoint and timeline boundary receipt.
 - `GET /v1/results/:id` streams result bytes to the origin device only.
 - `POST /v1/results/:id/download-confirmed` records a verified origin download and purges sensitive server data. Retrying after purge is idempotent.
 
-Sessions are staged until `session.activate` commits the handoff. Supported commands are `session.pause`, `session.resume`, `session.takeover`, `session.cancel`, and `message.queue`. A running takeover stays pending until the worker atomically commits matching checkpoint and timeline blobs and acknowledges the boundary. The durable `session.takeover_ready` event and takeover endpoint identify both blobs, their shared operation, revision, and turn. Every event contains the authoritative `stateVersion` in its envelope and payload.
+Sessions are staged until `session.activate` commits the handoff. Persistent rooms also support `session.end`, `turn.redirect`, `wait.resolve`, `conversation.workflow`, and immutable attachment versions on `message.queue`. A running takeover stays pending until the worker atomically commits matching checkpoint and timeline blobs and acknowledges the boundary. The durable `session.takeover_ready` event and takeover endpoint identify both blobs, their shared operation, revision, and turn. Every event contains the authoritative `stateVersion` in its envelope and payload.
+
+## Browser PWA access
+
+The Studio PWA uses the same paired-device API over pinned HTTPS. Configure an
+exact allowlist before connecting it:
+
+```bash
+RAUHWpx_BROWSER_ORIGINS=https://studio.example.com,https://office.example.com
+```
+
+Only exact HTTPS origins are accepted; wildcards, paths, credentials, and HTTP
+origins fail service startup. The server grants only the Cloud methods and
+headers needed by the browser client. The PWA verifies every response and SSE
+frame with WebCrypto against the paired Ed25519 key, archives baseline and
+stable-turn bytes in IndexedDB, and keeps the cloud-owned document mirror
+read-only. When the origin file handle still has write permission, each stable
+turn replaces it only if its digest matches the last synchronized digest;
+otherwise the origin is left untouched and the Cloud version stays archived.
+A browser cannot install a VPS or import a desktop provider login; pair it to
+an existing HTTPS/Tailscale server whose provider is already ready.
 
 ## Provider management
 

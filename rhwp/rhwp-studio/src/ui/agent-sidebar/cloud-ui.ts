@@ -1,9 +1,13 @@
 import './cloud-ui.css';
 
 import type { PortableCloudTimelineV1 } from '../../cloud/timeline.ts';
+import type { AgentStreamEvent } from '../../agent/types.ts';
 import type { CloudController } from '../../cloud/desktop-cloud.ts';
+import { browserCloudSupported } from '../../cloud/browser-cloud.ts';
 import type {
   CloudDownloadResult,
+  CloudFollowupAttachment,
+  CloudCheckpointPayload,
   CloudResultAction,
   CloudResultResolution,
   CloudSessionScope,
@@ -39,10 +43,10 @@ function formatDuration(ms: number): string {
   return `${minutes}분`;
 }
 
-/** The desktop preload is the only source of live cloud snapshots. */
+/** Desktop IPC and the pinned HTTPS PWA transport are valid live sources. */
 function cloudCapable(): boolean {
   const desktop = (globalThis as { rhwpDesktop?: { cloudGetState?: unknown } }).rhwpDesktop;
-  return typeof desktop?.cloudGetState === 'function';
+  return typeof desktop?.cloudGetState === 'function' || browserCloudSupported();
 }
 
 function sessionIsActive(snapshot: CloudSnapshot): boolean {
@@ -86,6 +90,8 @@ export interface CloudAgentUiDeps {
   onCloseSettings(): void;
   onLeaseChange(cloudOwned: boolean, sessionId: string | null): void;
   onTimeline(timeline: PortableCloudTimelineV1): void;
+  onAgentEvent(event: AgentStreamEvent): void;
+  onCheckpoint(checkpoint: CloudCheckpointPayload): void | Promise<void>;
   onResultResolved(result: CloudDownloadResult, resolution: CloudResultResolution): void;
   onBeforeTakeover(): Promise<boolean>;
   onTakeover(takeover: CloudTakeoverPayload): Promise<void>;
@@ -103,7 +109,8 @@ export interface CloudAgentUi {
   isRunning(): boolean;
   setWaitingForLocalTurn(waiting: boolean): void;
   refreshScope(): void;
-  queueMessage(text: string, messageId: string): Promise<void>;
+  setWorkflow(workflow: 'direct' | 'plan'): Promise<void>;
+  queueMessage(text: string, messageId: string, attachments?: CloudFollowupAttachment[]): Promise<void>;
   openSettings(): void;
   dispose(): void;
 }
@@ -118,6 +125,10 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   let selectedSessionId: string | null = null;
   let panelTrigger: HTMLButtonElement | null = null;
   let setupActive = false;
+  const liveSequence = new Map<string, number>();
+  const mirroredOperations = new Map<string, string>();
+  const mirroredRevisions = new Map<string, number>();
+  const mirrorChains = new Map<string, Promise<void>>();
 
   const sidebarButton = el('button', 'ag-header-icon-btn ag-cloud-btn') as HTMLButtonElement;
   sidebarButton.type = 'button';
@@ -218,7 +229,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     return item;
   }
 
-  function command(command: 'pause' | 'resume' | 'takeover' | 'cancel' | 'retry'): void {
+  function command(command: 'pause' | 'resume' | 'takeover' | 'cancel' | 'end' | 'retry'): void {
     const session = snapshot.session;
     if (session.kind === 'idle') return;
     void operation(async () => {
@@ -232,6 +243,40 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
         await deps.onTakeover(next.takeover);
         await deps.controller.completeTakeover(session.sessionId);
       }
+    });
+  }
+
+  function resolveWait(waitId: string, actionName: string, feedback?: string): void {
+    const session = snapshot.session;
+    if (session.kind !== 'running' || session.wait?.id !== waitId) return;
+    void operation(async () => {
+      await deps.controller.command({
+        sessionId: session.sessionId,
+        command: 'resolve-wait',
+        expectedVersion: session.version,
+        payload: {
+          waitId,
+          action: actionName,
+          ...(feedback?.trim() ? { feedback: feedback.trim() } : {}),
+        },
+      });
+    });
+  }
+
+  function redirectTurn(text: string): void {
+    const session = snapshot.session;
+    const content = text.trim();
+    if (session.kind !== 'running' || session.phase !== 'working' || !content) return;
+    const messageId = globalThis.crypto?.randomUUID?.()
+      ?? `cloud-redirect-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    void operation(async () => {
+      await deps.controller.command({
+        sessionId: session.sessionId,
+        command: 'redirect',
+        expectedVersion: session.version,
+        message: content,
+        messageId,
+      });
     });
   }
 
@@ -337,12 +382,73 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
         panelActions.append(action('취소', () => command('cancel')));
         break;
       case 'running':
-        panelStatus.textContent = session.currentActivity || `${serverLabel(snapshot)}에서 작업 중입니다.`;
+        if (session.wait) {
+          const wait = session.wait;
+          const plan = wait.payload['plan'] && typeof wait.payload['plan'] === 'object'
+            ? wait.payload['plan'] as Record<string, unknown>
+            : null;
+          panelStatus.textContent = wait.kind === 'plan-approval'
+            ? '계획 승인을 기다리고 있습니다.'
+            : wait.kind === 'question'
+              ? '답변을 기다리고 있습니다.'
+              : '외부 작업 승인을 기다리고 있습니다.';
+          panelDetail.textContent = typeof plan?.['summary'] === 'string'
+            ? plan['summary']
+            : typeof wait.payload['prompt'] === 'string'
+              ? wait.payload['prompt']
+              : '결정 전까지 클라우드 대화는 안전하게 열린 상태로 유지됩니다.';
+          if (wait.kind === 'plan-approval' || wait.kind === 'question') {
+            const feedback = el('textarea', 'ag-cloud-wait-feedback') as HTMLTextAreaElement;
+            feedback.rows = 3;
+            feedback.maxLength = 64 * 1024;
+            feedback.placeholder = wait.kind === 'plan-approval' ? '계획에서 바꿀 점' : '에이전트에게 보낼 답변';
+            panelActions.appendChild(feedback);
+            if (wait.kind === 'plan-approval') {
+              panelActions.append(
+                action('계획 승인', () => resolveWait(wait.id, 'approve'), 'ag-primary'),
+                action('수정 요청', () => {
+                  if (feedback.value.trim()) resolveWait(wait.id, 'changes', feedback.value);
+                  else feedback.focus();
+                }),
+              );
+            } else {
+              panelActions.append(action('답변 보내기', () => {
+                if (feedback.value.trim()) resolveWait(wait.id, 'answer', feedback.value);
+                else feedback.focus();
+              }, 'ag-primary'));
+            }
+          } else {
+            panelActions.append(action('승인', () => resolveWait(wait.id, 'approve'), 'ag-primary'));
+          }
+          panelActions.append(
+            action('이번 작업 중단', () => resolveWait(wait.id, 'cancel')),
+            action('대화 끝내기', () => command('end'), 'ag-danger'),
+          );
+          break;
+        }
+        panelStatus.textContent = session.phase === 'waiting'
+          ? '다음 메시지를 기다리고 있습니다.'
+          : session.phase === 'redirecting'
+            ? '안전한 경계에서 방향을 바꾸는 중입니다.'
+            : session.currentActivity || `${serverLabel(snapshot)}에서 작업 중입니다.`;
         panelDetail.textContent = `${session.turn}/${session.turnLimit}턴 · ${formatDuration(session.elapsedMs)} / ${formatDuration(session.timeLimitMs)}`;
+        if (session.phase === 'working') {
+          const redirect = el('textarea', 'ag-cloud-wait-feedback') as HTMLTextAreaElement;
+          redirect.rows = 2;
+          redirect.maxLength = 64 * 1024;
+          redirect.placeholder = '현재 작업을 안전하게 멈추고 전달할 새 지시';
+          panelActions.append(
+            redirect,
+            action('안전하게 중단하고 전환', () => {
+              if (redirect.value.trim()) redirectTurn(redirect.value);
+              else redirect.focus();
+            }),
+          );
+        }
         panelActions.append(
           action('일시 중지', () => command('pause')),
           action('이 기기에서 이어받기', () => command('takeover')),
-          action('취소', () => command('cancel'), 'ag-danger'),
+          action('대화 끝내기', () => command('end'), 'ag-danger'),
         );
         break;
       case 'pausing':
@@ -354,6 +460,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
         panelDetail.textContent = session.reason;
         if (session.resumable) panelActions.append(action('다시 시작', () => command('resume'), 'ag-primary'));
         panelActions.append(action('이 기기에서 이어받기', () => command('takeover')));
+        panelActions.append(action('대화 끝내기', () => command('end'), 'ag-danger'));
         break;
       case 'taking-over':
         panelStatus.textContent = session.message;
@@ -439,6 +546,32 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
         deps.onTimeline(snapshot.timeline);
       }
     }
+    if (snapshot.session.kind === 'running' && snapshot.session.turn > 0
+      && !mirrorChains.has(snapshot.session.sessionId)
+      && !mirroredRevisions.has(snapshot.session.sessionId)) {
+      mirrorCheckpoint(snapshot.session.sessionId, 'reconnect');
+    }
+  }
+
+  function mirrorCheckpoint(sessionId: string, operationId: string): void {
+    if (operationId !== 'reconnect' && mirroredOperations.get(sessionId) === operationId) return;
+    mirroredOperations.set(sessionId, operationId);
+    const previous = mirrorChains.get(sessionId) ?? Promise.resolve();
+    const next = previous.then(async () => {
+      const checkpoint = await deps.controller.downloadCheckpoint(
+        sessionId,
+        operationId === 'reconnect' ? undefined : operationId,
+      );
+      const appliedRevision = mirroredRevisions.get(sessionId) ?? -1;
+      if (checkpoint.revision <= appliedRevision) return;
+      await deps.onCheckpoint(checkpoint);
+      mirroredRevisions.set(sessionId, checkpoint.revision);
+    }).catch((error) => {
+      deps.onError(error instanceof Error ? error.message : String(error));
+    }).finally(() => {
+      if (mirrorChains.get(sessionId) === next) mirrorChains.delete(sessionId);
+    });
+    mirrorChains.set(sessionId, next);
   }
 
   function openPanel(trigger: HTMLButtonElement): void {
@@ -491,6 +624,40 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     onboarding.sync(next);
     render();
   });
+  const unsubscribeEvents = deps.controller.subscribeEvents((raw) => {
+    const host = raw && typeof raw === 'object' && !Array.isArray(raw)
+      ? raw as Record<string, unknown>
+      : null;
+    const sessionId = typeof host?.sessionId === 'string' ? host.sessionId : '';
+    const selected = snapshot.session.kind === 'idle' ? '' : snapshot.session.sessionId;
+    if (!sessionId || sessionId !== selected) return;
+    const envelope = host?.event && typeof host.event === 'object' && !Array.isArray(host.event)
+      ? host.event as Record<string, unknown>
+      : null;
+    if (envelope?.type === 'boundary.committed') {
+      const payload = envelope.payload && typeof envelope.payload === 'object' && !Array.isArray(envelope.payload)
+        ? envelope.payload as Record<string, unknown>
+        : null;
+      const operationId = typeof payload?.operationId === 'string' ? payload.operationId : '';
+      if (!operationId) return;
+      mirrorCheckpoint(sessionId, operationId);
+      return;
+    }
+    if (envelope?.type !== 'agent.event') return;
+    const sequence = Number(envelope.seq ?? envelope.sequence);
+    if (Number.isSafeInteger(sequence)) {
+      const previous = liveSequence.get(sessionId) ?? 0;
+      if (sequence <= previous) return;
+      liveSequence.set(sessionId, sequence);
+    }
+    const payload = envelope.payload && typeof envelope.payload === 'object' && !Array.isArray(envelope.payload)
+      ? envelope.payload as Record<string, unknown>
+      : null;
+    const event = payload?.type === 'agent' && payload.event && typeof payload.event === 'object'
+      ? payload.event as AgentStreamEvent
+      : null;
+    if (event && typeof event.type === 'string') deps.onAgentEvent(event);
+  });
   onboarding.sync(snapshot);
   void deps.controller.refresh(selectedScope()).catch((error) => {
     render();
@@ -521,7 +688,18 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
         deps.onError(error instanceof Error ? error.message : String(error));
       });
     },
-    async queueMessage(text, messageId) {
+    async setWorkflow(workflow) {
+      const session = snapshot.session;
+      if (session.kind !== 'running') throw new Error('클라우드 에이전트가 실행 중이 아닙니다.');
+      snapshot = await deps.controller.command({
+        sessionId: session.sessionId,
+        command: 'workflow',
+        expectedVersion: session.version,
+        payload: { workflow },
+      });
+      render();
+    },
+    async queueMessage(text, messageId, attachments = []) {
       const session = snapshot.session;
       if (session.kind !== 'running') throw new Error('클라우드 에이전트가 실행 중이 아닙니다.');
       await deps.controller.command({
@@ -530,6 +708,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
         expectedVersion: session.version,
         message: text,
         messageId,
+        attachments,
       });
     },
     openSettings() {
@@ -539,6 +718,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     },
     dispose() {
       unsubscribe();
+      unsubscribeEvents();
       onboarding.dispose();
       deps.controller.dispose();
       closePanel();
