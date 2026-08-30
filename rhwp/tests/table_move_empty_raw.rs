@@ -78,7 +78,7 @@ fn move_table(doc: &mut HwpDocument, pos: TablePos, delta_h: i32, delta_v: i32) 
 }
 
 #[test]
-fn moving_empty_raw_hwp_table_does_not_grow_raw() {
+fn horizontal_move_leaves_empty_raw_on_tac_hwp_table() {
     let mut doc = load(EMPTY_RAW_HWP);
     let pos = first_table_pos(&doc);
     assert!(
@@ -86,7 +86,6 @@ fn moving_empty_raw_hwp_table_does_not_grow_raw() {
         "전제: {EMPTY_RAW_HWP} 표 raw 가 비어 있다"
     );
 
-    // 이 표본은 treat_as_char 라 세로 이동이 문단 교환을 탈 수 있다. 가로는 raw 만 본다.
     let pos = move_table(&mut doc, pos, 1000, 0);
     assert!(
         table_at(&doc, pos).raw_ctrl_data.is_empty(),

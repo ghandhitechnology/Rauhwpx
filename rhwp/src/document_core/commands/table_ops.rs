@@ -2007,8 +2007,6 @@ impl DocumentCore {
 
         let is_treat_as_char = (table.attr & 0x01) != 0;
 
-        // 현재 오프셋은 common. raw 는 길이가 허락할 때만 덧쓴다.
-
         // vertical_offset: CommonObjAttr::V_OFFSET (i32 LE)
         let mut new_v = if delta_v != 0 {
             let nv = (table.common.vertical_offset as i32).wrapping_add(delta_v);
