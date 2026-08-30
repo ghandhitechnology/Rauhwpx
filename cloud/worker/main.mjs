@@ -23,7 +23,7 @@ const heartbeat = setInterval(() => {
   client.heartbeat().then((lease) => {
     heartbeatFailures = 0;
     if (lease?.mustStop === true) {
-      console.error('[worker] managed Cloud lease ended; stopping');
+      console.error('[worker] Raucloud lease ended; stopping');
       process.exit(1);
     }
   }, () => {

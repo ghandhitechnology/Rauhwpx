@@ -95,9 +95,15 @@ export function normalizeSshConfig(raw = {}) {
 }
 
 const SANDBOX_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const LEGACY_RAUCLOUD_PROVIDER_ID = 'managed-cloud'; // raucloud-legacy: persisted profiles are upgraded on read.
+
+export function normalizeRaucloudProviderId(value) {
+  const providerId = requiredString(value, 'Sandbox provider', 32).toLowerCase();
+  return providerId === LEGACY_RAUCLOUD_PROVIDER_ID ? 'raucloud' : providerId;
+}
 
 export function normalizeSandbox(raw = {}) {
-  const providerId = requiredString(raw.providerId, 'Sandbox provider', 32).toLowerCase();
+  const providerId = normalizeRaucloudProviderId(raw.providerId);
   if (!/^[a-z][a-z0-9-]{1,31}$/.test(providerId)) throw new Error('Sandbox provider is invalid');
   const sandboxId = requiredString(raw.sandboxId, 'Sandbox id', 128);
   if (!SANDBOX_ID_RE.test(sandboxId)) throw new Error('Sandbox id is invalid');

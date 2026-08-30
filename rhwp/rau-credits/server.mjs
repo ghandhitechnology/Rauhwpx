@@ -45,7 +45,7 @@ export async function createCreditsHttpServer(options = {}) {
   const server = http.createServer(creditsRequestListener(service));
   const reconcileTimer = setInterval(() => {
     void service.reconcileCloudUsage().catch((error) => {
-      process.stderr.write(`[rau-credits] managed Cloud reconcile failed: ${error?.message ?? error}\n`);
+      process.stderr.write(`[rau-credits] Raucloud reconcile failed: ${error?.message ?? error}\n`);
     });
   }, 30_000);
   reconcileTimer.unref();

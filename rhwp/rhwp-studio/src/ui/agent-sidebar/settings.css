@@ -35,14 +35,14 @@
   gap: 8px;
 }
 
-/* Global account and managed Cloud allowance stay visible even when signed out. */
+/* Global account and Raucloud allowance stay visible even when signed out. */
 .ag-settings-account-card {
   display: grid;
   gap: 16px;
   padding: 18px;
   border: 1px solid var(--ag-border, #d9d9dc);
   border-radius: 14px;
-  background: color-mix(in srgb, var(--ag-surface, #fff) 96%, var(--ag-text, #17171a));
+  background: color-mix(in srgb, var(--ag-surface) 96%, var(--ag-text));
 }
 
 .ag-settings-account-head {
@@ -74,7 +74,7 @@
 .ag-settings-account-foot,
 .ag-settings-account-status {
   margin: 0;
-  color: var(--ag-muted, #73737a);
+  color: var(--ag-text-muted);
   font-size: 12px;
   line-height: 1.5;
 }

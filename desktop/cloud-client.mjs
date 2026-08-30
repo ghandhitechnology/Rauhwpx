@@ -1,6 +1,11 @@
 import { createHash, createPublicKey, randomBytes, randomUUID, verify } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { CLOUD_SERVER_MODES, normalizeCloudEndpoint, normalizeCloudProfile } from './cloud-profile.mjs';
+import {
+  CLOUD_SERVER_MODES,
+  normalizeCloudEndpoint,
+  normalizeCloudProfile,
+  normalizeRaucloudProviderId,
+} from './cloud-profile.mjs';
 import {
   MAX_DISPLAY_FRAME_BYTES,
   openCloudDisplay,
@@ -69,12 +74,17 @@ function boundedAttempts(value, fallback) {
 
 function normalizePendingAppSandbox(raw) {
   const record = typeof raw === 'string' ? JSON.parse(raw) : raw;
-  const providerId = String(record?.providerId ?? '');
   const sandbox = record?.sandbox;
+  let providerId = '';
+  let sandboxProviderId = '';
+  try {
+    providerId = normalizeRaucloudProviderId(record?.providerId);
+    sandboxProviderId = normalizeRaucloudProviderId(sandbox?.providerId);
+  } catch {}
   if (record?.version !== 1
     || !/^[a-z][a-z0-9-]{1,31}$/.test(providerId)
     || !sandbox || typeof sandbox !== 'object'
-    || sandbox.providerId !== providerId
+    || sandboxProviderId !== providerId
     || typeof sandbox.sandboxId !== 'string' || !sandbox.sandboxId.trim()) {
     throw new CloudHttpError('Pending app sandbox journal is invalid', {
       code: 'SANDBOX_JOURNAL_INVALID',
@@ -84,7 +94,7 @@ function normalizePendingAppSandbox(raw) {
   return {
     version: 1,
     providerId,
-    sandbox: { ...sandbox },
+    sandbox: { ...sandbox, providerId },
     createdAt: typeof record.createdAt === 'string' ? record.createdAt : new Date().toISOString(),
   };
 }

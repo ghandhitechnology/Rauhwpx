@@ -48,6 +48,25 @@ test('Rau redeem hands the logged-in account email to the key store', async () =
   assert.deepEqual(stored, [{ key: 'rau_v1_ready', account: 'andy@example.com' }]);
 });
 
+test('Rau redeem rejects an outdated ready response instead of polling until expiry', async () => {
+  let clock = 0;
+  const client = createRauCreditsClient({
+    baseUrl: 'https://credits.rau.test',
+    fetchImpl: async () => jsonResponse({
+      status: 'ready',
+      apiKey: 'sk-or-v1-legacy-provider-key',
+    }),
+    now: () => clock,
+    sleep: async (ms) => { clock += ms; },
+  });
+
+  await assert.rejects(
+    () => client.redeem('device-1'),
+    { code: 'RAU_LOGIN_SERVER_INCOMPATIBLE' },
+  );
+  assert.equal(clock, 0);
+});
+
 test('Rau credit acknowledgement is sent only after local setup can succeed', async () => {
   const calls = [];
   const client = createRauCreditsClient({
@@ -149,7 +168,7 @@ test('Rau account status stays local while logged out', async () => {
   const response = await client.account(null);
   assert.equal(calls, 0);
   assert.equal(response.signedIn, false);
-  assert.equal(response.managedCloud.state, 'logged-out');
+  assert.equal(response.raucloud.state, 'logged-out');
 });
 
 test('Rau credit requests time out while reading the response body', async () => {

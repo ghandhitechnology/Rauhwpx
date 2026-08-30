@@ -8,7 +8,7 @@ import { DisplayFrameStore } from './display-frame-store.mjs';
 import { createCloudHttpHandler } from './http-server.mjs';
 import { loadOrCreateServerIdentity } from './identity.mjs';
 import { LocalRunner } from './local-runner.mjs';
-import { managedLeaseFromConfig } from './managed-lease.mjs';
+import { raucloudLeaseFromConfig } from './raucloud-lease.mjs';
 import { PodmanRunner } from './podman-runner.mjs';
 import { applyProviderAuth, parseProviderAuth } from './provider-auth.mjs';
 import { ProviderManager } from './provider-manager.mjs';
@@ -81,7 +81,7 @@ export function createCloudRuntime(config, dependencies = {}) {
     },
   });
   const providerCli = dependencies.providerCli ?? new ProviderCliManager(config, providerManager, vault);
-  const managedLease = dependencies.managedLease ?? managedLeaseFromConfig(config);
+  const raucloudLease = dependencies.raucloudLease ?? raucloudLeaseFromConfig(config);
   const seedProvider = dependencies.seedProvider ?? ((input) => providerCli.seed(input.provider, input));
   const services = {
     auth,
@@ -93,7 +93,7 @@ export function createCloudRuntime(config, dependencies = {}) {
     logger,
     vault,
     seedProvider,
-    managedLease,
+    raucloudLease,
     applyProviderAuth: async (provider, raw) => {
       const imported = await applyProviderAuth(provider, parseProviderAuth(provider, raw), {
         vault,
@@ -168,8 +168,8 @@ export function createCloudRuntime(config, dependencies = {}) {
     },
     async stop() {
       await scheduler.stop();
-      await managedLease.release('CONTROL_PLANE_SHUTDOWN').catch((error) => {
-        logger.error('managed_cloud.release_failed', { code: error.code, message: error.message });
+      await raucloudLease.release('CONTROL_PLANE_SHUTDOWN').catch((error) => {
+        logger.error('raucloud.release_failed', { code: error.code, message: error.message });
       });
       // Kill every worker before the control socket disappears so detached
       // workers cannot survive a restart and double-execute their session.

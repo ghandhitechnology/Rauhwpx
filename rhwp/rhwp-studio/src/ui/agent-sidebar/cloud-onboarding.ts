@@ -59,8 +59,8 @@ function operationActive(state: CloudSetupState | null): boolean {
     || state?.kind === 'sandbox-tearing-down';
 }
 
-function managedCloudLock(snapshot: CloudSnapshot): string | null {
-  const gate = snapshot.account?.managedCloud;
+function raucloudLock(snapshot: CloudSnapshot): string | null {
+  const gate = snapshot.account?.raucloud;
   if (!gate || gate.kind === 'available') return null;
   switch (gate.kind) {
     case 'logged-out': return 'Rauhwpx 계정으로 로그인하면 사용할 수 있습니다.';
@@ -440,7 +440,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
   }
 
   function openSandboxStep(draft: CloudProfileDraft, intent: CloudSetupIntent): void {
-    const locked = managedCloudLock(snapshot);
+    const locked = raucloudLock(snapshot);
     if (locked) {
       liveStatus.textContent = locked;
       return;
@@ -449,7 +449,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     if (!provider || !provider.configured) {
       setState(
         { kind: 'sandbox-unavailable', draft, intent, provider },
-        '앱 제공 서버를 사용할 수 없습니다.',
+        'Raucloud를 사용할 수 없습니다.',
       );
       return;
     }
@@ -458,7 +458,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
 
   async function spawnSandbox(): Promise<void> {
     if (!state || (state.kind !== 'sandbox-intro' && state.kind !== 'sandbox-failed')) return;
-    const locked = managedCloudLock(snapshot);
+    const locked = raucloudLock(snapshot);
     if (locked) {
       liveStatus.textContent = locked;
       return;
@@ -466,7 +466,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     const { draft, intent } = state;
     const providerId = state.kind === 'sandbox-intro' ? state.provider.providerId : undefined;
     const operation = beginOperation();
-    setState({ kind: 'sandbox-provisioning', draft, intent }, '앱 제공 서버를 준비하고 있습니다.');
+    setState({ kind: 'sandbox-provisioning', draft, intent }, 'Raucloud를 준비하고 있습니다.');
     try {
       const next = await deps.controller.spawnSandbox(providerId);
       if (!operationIsCurrent(operation)) return;
@@ -478,12 +478,12 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
           intent,
           issue: mapSandboxIssue(new Error(next.server.message ?? 'App sandbox is not ready')),
           phase: 'spawn',
-        }, '앱 제공 서버를 준비하지 못했습니다.');
+        }, 'Raucloud를 준비하지 못했습니다.');
         return;
       }
       setState(
         { kind: 'sandbox-ready', intent, name: ready.name, sandbox: ready.sandbox },
-        '앱 제공 서버가 준비되었습니다.',
+        'Raucloud가 준비되었습니다.',
       );
     } catch (error) {
       if (!operationIsCurrent(operation)) return;
@@ -493,17 +493,17 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
         intent,
         issue: mapSandboxIssue(error),
         phase: 'spawn',
-      }, '앱 제공 서버를 준비하지 못했습니다.');
+      }, 'Raucloud를 준비하지 못했습니다.');
     }
   }
 
   async function teardownSandbox(): Promise<void> {
     if (!state || (state.kind !== 'sandbox-ready' && state.kind !== 'sandbox-failed')) return;
     const { intent } = state;
-    const name = state.kind === 'sandbox-ready' ? state.name : snapshotSandbox(snapshot)?.name ?? '앱 제공 서버';
+    const name = state.kind === 'sandbox-ready' ? state.name : snapshotSandbox(snapshot)?.name ?? 'Raucloud';
     const draft = state.kind === 'sandbox-failed' ? state.draft : defaultCloudProfileDraft(snapshotProfile(snapshot));
     const operation = beginOperation();
-    setState({ kind: 'sandbox-tearing-down', intent, name }, '앱 제공 서버를 종료하고 있습니다.');
+    setState({ kind: 'sandbox-tearing-down', intent, name }, 'Raucloud를 종료하고 있습니다.');
     try {
       const next = await deps.controller.teardownSandbox();
       if (!operationIsCurrent(operation)) return;
@@ -515,7 +515,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
           : settled,
         released
           ? '연결을 놓았습니다. 남은 서버는 공급자 콘솔에서 직접 삭제하세요.'
-          : '앱 제공 서버를 종료했습니다.',
+          : 'Raucloud를 종료했습니다.',
       );
     } catch (error) {
       if (!operationIsCurrent(operation)) return;
@@ -525,7 +525,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
         intent,
         issue: mapSandboxIssue(error),
         phase: 'teardown',
-      }, '앱 제공 서버를 종료하지 못했습니다.');
+      }, 'Raucloud를 종료하지 못했습니다.');
     }
   }
 
@@ -536,15 +536,15 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     const draft = state.kind === 'sandbox-failed' ? state.draft : defaultCloudProfileDraft(snapshotProfile(snapshot));
     const phase = state.kind === 'sandbox-failed' ? state.phase : 'spawn';
     const operation = beginOperation();
-    liveStatus.textContent = '앱 제공 서버 상태를 확인하고 있습니다.';
+    liveStatus.textContent = 'Raucloud 상태를 확인하고 있습니다.';
     try {
       const next = await deps.controller.sandboxStatus();
       if (!operationIsCurrent(operation)) return;
-      setState(createCloudSetupState(next, intent), '앱 제공 서버 상태를 확인했습니다.');
+      setState(createCloudSetupState(next, intent), 'Raucloud 상태를 확인했습니다.');
     } catch (error) {
       if (!operationIsCurrent(operation)) return;
       setState({ kind: 'sandbox-failed', draft, intent, issue: mapSandboxIssue(error), phase },
-        '앱 제공 서버 상태를 확인하지 못했습니다.');
+        'Raucloud 상태를 확인하지 못했습니다.');
     }
   }
 
@@ -592,7 +592,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     if (state.kind === 'choose') {
       const { draft, intent, mode } = state;
       const provider = appServerProvider(snapshot);
-      const appHostedLock = managedCloudLock(snapshot);
+      const appHostedLock = raucloudLock(snapshot);
       title.textContent = 'Cloud 서버 선택';
       body.append(description('에이전트가 앱을 닫아도 계속 작업할 서버를 고르세요. 나중에 바꿀 수 있습니다.'));
       if (state.notice) body.append(callout('cloud', '남은 서버를 확인하세요', state.notice));
@@ -602,7 +602,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       options.append(
         serverOption(
           'app-hosted',
-          '앱에서 제공하는 서버',
+          'Raucloud',
           'Rauhwpx가 샌드박스를 만들고 이 기기에 연결합니다.',
           mode === 'app-hosted',
           provider
@@ -631,8 +631,8 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       footer.append(cancel, primary);
     } else if (state.kind === 'sandbox-intro') {
       const { draft, intent, provider } = state;
-      const appHostedLock = managedCloudLock(snapshot);
-      title.textContent = '앱 제공 서버 사용';
+      const appHostedLock = raucloudLock(snapshot);
+      title.textContent = 'Raucloud 사용';
       body.append(
         description('Rauhwpx가 샌드박스를 만들고 이 기기에 연결합니다.'),
         callout('cloud', provider.displayName, '파일과 작업 상태를 샌드박스로 전송합니다. 서버를 종료하면 샌드박스도 삭제됩니다.'),
@@ -640,17 +640,17 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       back.addEventListener('click', () => setState({ kind: 'choose', draft, intent, mode: 'app-hosted' }));
       const primary = button('서버 만들기', 'primary');
       primary.disabled = Boolean(appHostedLock);
-      if (appHostedLock) body.append(callout('cloud', 'Managed Cloud를 사용할 수 없음', appHostedLock));
+      if (appHostedLock) body.append(callout('cloud', 'Raucloud를 사용할 수 없음', appHostedLock));
       primary.addEventListener('click', () => { void spawnSandbox(); });
       footer.append(back, cancel, primary);
     } else if (state.kind === 'sandbox-unavailable') {
       const { draft, intent, provider } = state;
-      title.textContent = '앱 제공 서버를 사용할 수 없습니다';
+      title.textContent = 'Raucloud를 사용할 수 없습니다';
       body.append(
-        description('이 빌드에는 앱 제공 서버 설정이 없습니다. 내 서버를 연결하면 지금 바로 사용할 수 있습니다.'),
+        description('이 빌드에는 Raucloud 설정이 없습니다. 내 서버를 연결하면 지금 바로 사용할 수 있습니다.'),
         callout(
           'cloud',
-          provider ? `${provider.displayName} 설정 필요` : '앱 제공 서버 없음',
+          provider ? `${provider.displayName} 설정 필요` : 'Raucloud 없음',
           provider?.missingConfig.length
             ? `운영자가 ${provider.missingConfig.join(', ')}을 설정해야 합니다.`
             : '앱을 업데이트하거나 내 서버를 사용하세요.',
@@ -661,7 +661,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       primary.addEventListener('click', () => setState({ kind: 'intro', draft, intent }));
       footer.append(back, cancel, primary);
     } else if (state.kind === 'sandbox-provisioning') {
-      title.textContent = '앱 제공 서버 준비 중';
+      title.textContent = 'Raucloud 준비 중';
       body.append(
         description('샌드박스를 만들고 이 기기를 연결하고 있습니다. 이 창을 숨겨도 작업은 계속됩니다.'),
         el('div', 'ag-cloud-setup-indeterminate'),
@@ -669,7 +669,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       );
       footer.append(cancel);
     } else if (state.kind === 'sandbox-tearing-down') {
-      title.textContent = '앱 제공 서버 종료 중';
+      title.textContent = 'Raucloud 종료 중';
       body.append(
         description(`${state.name}을 종료하고 저장된 연결 정보를 지우고 있습니다.`),
         el('div', 'ag-cloud-setup-indeterminate'),
@@ -679,8 +679,8 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       const { draft, intent, issue, phase } = state;
       const live = Boolean(snapshotSandbox(snapshot));
       title.textContent = phase === 'teardown'
-        ? '앱 제공 서버를 종료하지 못했습니다'
-        : '앱 제공 서버를 준비하지 못했습니다';
+        ? 'Raucloud를 종료하지 못했습니다'
+        : 'Raucloud를 준비하지 못했습니다';
       body.append(
         description(phase === 'teardown'
           ? '샌드박스가 아직 남아 있습니다. 문제를 해결한 뒤 다시 종료하세요.'
@@ -715,8 +715,8 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       }
     } else if (state.kind === 'sandbox-ready') {
       const { intent, name, sandbox } = state;
-      const appHostedLock = managedCloudLock(snapshot);
-      title.textContent = '앱 제공 서버가 준비되었습니다';
+      const appHostedLock = raucloudLock(snapshot);
+      title.textContent = 'Raucloud가 준비되었습니다';
       body.append(
         callout('check', name, sandbox.host || sandbox.sandboxId),
         description('이제 작업을 Cloud로 보내면 앱을 닫아도 앱 샌드박스에서 에이전트가 계속 작업합니다.'),
@@ -926,18 +926,18 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     }
     if (snapshot.profile.kind === 'unconfigured') {
       const provider = appServerProvider(snapshot);
-      const appHostedLock = managedCloudLock(snapshot);
+      const appHostedLock = raucloudLock(snapshot);
       settingsAction.textContent = '설정';
       if (snapshot.server.lifecycle === 'provisioning') {
         settingsStatus.textContent = '서버 준비 중';
-        settingsDetail.textContent = '앱 제공 서버를 만들고 있습니다.';
+        settingsDetail.textContent = 'Raucloud를 만들고 있습니다.';
         return;
       }
       settingsStatus.textContent = '설정되지 않음';
       settingsDetail.textContent = provider?.configured
         ? appHostedLock
           ? `${appHostedLock} 내 서버는 로그인 없이 연결할 수 있습니다.`
-          : '앱 제공 서버 또는 내 서버에서 에이전트를 계속 실행합니다.'
+          : 'Raucloud 또는 내 서버에서 에이전트를 계속 실행합니다.'
         : '내 VPS에서 에이전트를 계속 실행합니다.';
       return;
     }
@@ -953,17 +953,17 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       error: '서버에 문제가 있습니다',
     } as const;
     const lifecycle = snapshot.server.lifecycle;
-    const appHostedLock = snapshot.profile.mode === 'app-hosted' ? managedCloudLock(snapshot) : null;
+    const appHostedLock = snapshot.profile.mode === 'app-hosted' ? raucloudLock(snapshot) : null;
     const sandboxLabel = lifecycle === 'provisioning' || lifecycle === 'tearing-down' || lifecycle === 'error'
       ? lifecycleLabels[lifecycle]
       : null;
     settingsStatus.textContent = appHostedLock
-      ? 'Managed Cloud 사용 제한'
+      ? 'Raucloud 사용 제한'
       : snapshot.profile.mode === 'app-hosted' && sandboxLabel
         ? sandboxLabel
         : labels[snapshot.profile.connection];
     settingsDetail.textContent = snapshot.profile.mode === 'app-hosted'
-      ? appHostedLock ?? `앱 제공 서버 · ${snapshot.profile.name}${snapshot.profile.sandbox.host ? `, ${snapshot.profile.sandbox.host}` : ''}`
+      ? appHostedLock ?? `Raucloud · ${snapshot.profile.name}${snapshot.profile.sandbox.host ? `, ${snapshot.profile.sandbox.host}` : ''}`
       : `내 서버 · ${snapshot.profile.profile.name}, ${snapshot.profile.profile.host}`;
     settingsAction.textContent = '관리';
   }

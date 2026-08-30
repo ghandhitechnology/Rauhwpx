@@ -1377,7 +1377,7 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
       return snapshot();
     }),
     cloudProvision: () => readProfile(async () => { throw new Error('브라우저에서는 Cloud 서버를 설치할 수 없습니다. 기존 HTTPS 서버와 페어링해 주세요.'); }),
-    cloudSpawnSandbox: () => readProfile(async () => { throw new Error('브라우저 PWA에서는 앱 제공 서버를 만들 수 없습니다.'); }),
+    cloudSpawnSandbox: () => readProfile(async () => { throw new Error('브라우저 PWA에서는 Raucloud를 만들 수 없습니다.'); }),
     cloudSandboxStatus: () => readProfile(() => refresh()),
     cloudTeardownSandbox: () => readProfile(async () => ({ snapshot: snapshot(), removed: false, unmanaged: true })),
     cloudSetTransferIntent: () => readProfile(async () => snapshot()),

@@ -363,7 +363,7 @@ function cloudMock() {
           sandbox = {
             providerId: payload.providerId ?? 'railway',
             sandboxId: `sbx-${sandboxSeq}`,
-            displayName: `앱 제공 서버 ${sandboxSeq}`,
+            displayName: `Raucloud ${sandboxSeq}`,
             region: 'us-west2',
             host: `rauhwpx-${sandboxSeq}.up.railway.app`,
             createdAt: new Date(1_700_000_000_000).toISOString(),
@@ -379,7 +379,7 @@ function cloudMock() {
       sandbox = {
         providerId: payload.providerId ?? 'railway',
         sandboxId: `sbx-${sandboxSeq}`,
-        displayName: `앱 제공 서버 ${sandboxSeq}`,
+        displayName: `Raucloud ${sandboxSeq}`,
         region: 'us-west2',
         host: `rauhwpx-${sandboxSeq}.up.railway.app`,
         createdAt: new Date(1_700_000_000_000).toISOString(),
@@ -512,7 +512,7 @@ try {
 
   assert.deepEqual(await settingsCard(page), {
     status: '설정되지 않음',
-    detail: '앱 제공 서버 또는 내 서버에서 에이전트를 계속 실행합니다.',
+    detail: 'Raucloud 또는 내 서버에서 에이전트를 계속 실행합니다.',
     action: '설정',
   });
   await openChoice(page);
@@ -524,7 +524,7 @@ try {
       checked: node.getAttribute('aria-checked'),
     }))),
     [
-      { mode: 'app-hosted', heading: '앱에서 제공하는 서버', note: 'Railway 사용 가능', checked: 'true' },
+      { mode: 'app-hosted', heading: 'Raucloud', note: 'Railway 사용 가능', checked: 'true' },
       { mode: 'self-hosted', heading: '내 서버 사용', note: 'SSH와 비밀번호 없는 sudo가 필요합니다', checked: 'false' },
     ],
   );
@@ -771,7 +771,7 @@ try {
     'true',
   );
   await chooseMode(page, 'app-hosted');
-  await waitForTitle(page, '앱 제공 서버를 사용할 수 없습니다');
+  await waitForTitle(page, 'Raucloud를 사용할 수 없습니다');
   assert.match(await page.$eval('.ag-cloud-setup-callout strong', (node) => node.textContent), /Railway 설정 필요/);
   assert.match(await page.$eval('.ag-cloud-setup-callout p', (node) => node.textContent), /RAILWAY_TOKEN, RAILWAY_PROJECT_ID/);
   assert.equal(await page.evaluate(() => window.__cloudHarness.calls.some((call) => call.method === 'cloudSpawnSandbox')), false);
@@ -796,15 +796,15 @@ try {
     'true',
   );
   await clickButton(page, '계속');
-  await waitForTitle(page, '앱 제공 서버 사용');
+  await waitForTitle(page, 'Raucloud 사용');
   assert.match(await page.$eval('.ag-cloud-setup-callout strong', (node) => node.textContent), /Railway/);
   await clickButton(page, '뒤로');
   await waitForTitle(page, 'Cloud 서버 선택');
   await clickButton(page, '계속');
-  await waitForTitle(page, '앱 제공 서버 사용');
+  await waitForTitle(page, 'Raucloud 사용');
   await clickButton(page, '서버 만들기');
-  await waitForTitle(page, '앱 제공 서버 준비 중');
-  await waitForTitle(page, '앱 제공 서버를 준비하지 못했습니다');
+  await waitForTitle(page, 'Raucloud 준비 중');
+  await waitForTitle(page, 'Raucloud를 준비하지 못했습니다');
   assert.match(await page.$eval('.ag-cloud-setup-callout strong', (node) => node.textContent), /샌드박스를 시작하지 못했습니다/);
   assert.match(await page.$eval('.ag-cloud-setup-technical pre', (node) => node.textContent), /reports crashed/);
   assert.deepEqual(
@@ -818,18 +818,18 @@ try {
     ['취소', '내 서버 사용', '다시 시도'],
   );
   await clickButton(page, '다시 시도');
-  await waitForTitle(page, '앱 제공 서버 준비 중');
-  await waitForTitle(page, '앱 제공 서버가 준비되었습니다');
+  await waitForTitle(page, 'Raucloud 준비 중');
+  await waitForTitle(page, 'Raucloud가 준비되었습니다');
   assert.match(await page.$eval('.ag-cloud-setup-callout p', (node) => node.textContent), /rauhwpx-1\.up\.railway\.app/);
   assert.deepEqual(await settingsCard(page), {
     status: '연결됨',
-    detail: '앱 제공 서버 · 앱 제공 서버 1, rauhwpx-1.up.railway.app',
+    detail: 'Raucloud · Raucloud 1, rauhwpx-1.up.railway.app',
     action: '관리',
   });
   await clickStable(page, '.ag-cloud-setup-close');
   await page.waitForSelector('.ag-cloud-setup-overlay[hidden]');
   await manageCloud(page);
-  await waitForTitle(page, '앱 제공 서버가 준비되었습니다');
+  await waitForTitle(page, 'Raucloud가 준비되었습니다');
   console.log('  PASS retry provisions the sandbox and the stored choice skips the picker');
 
   await page.evaluate(() => {
@@ -837,7 +837,7 @@ try {
     window.__cloudHarness.clearCalls();
   });
   await clickButton(page, '서버 종료');
-  await waitForTitle(page, '앱 제공 서버를 종료하지 못했습니다');
+  await waitForTitle(page, 'Raucloud를 종료하지 못했습니다');
   assert.match(await page.$eval('.ag-cloud-setup-callout strong', (node) => node.textContent), /진행 중인 클라우드 작업이 있습니다/);
   assert.deepEqual(
     await page.evaluate(() => window.__cloudHarness.calls.filter((call) => call.method === 'cloudTeardownSandbox').map((call) => call.payload)),
@@ -848,17 +848,17 @@ try {
     ['취소', '상태 확인', '다시 종료', '서버 다시 선택'],
   );
   await clickButton(page, '상태 확인');
-  await waitForTitle(page, '앱 제공 서버가 준비되었습니다');
+  await waitForTitle(page, 'Raucloud가 준비되었습니다');
   assert.equal(await page.evaluate(() => window.__cloudHarness.calls.some((call) => call.method === 'cloudSandboxStatus')), true);
   console.log('  PASS a refused teardown keeps the sandbox and the status check restores the ready screen');
 
   await page.evaluate(() => window.__cloudHarness.clearCalls());
   await clickButton(page, '서버 종료');
-  await waitForTitle(page, '앱 제공 서버 종료 중');
+  await waitForTitle(page, 'Raucloud 종료 중');
   await waitForTitle(page, 'Cloud 서버 선택');
   assert.deepEqual(await settingsCard(page), {
     status: '설정되지 않음',
-    detail: '앱 제공 서버 또는 내 서버에서 에이전트를 계속 실행합니다.',
+    detail: 'Raucloud 또는 내 서버에서 에이전트를 계속 실행합니다.',
     action: '설정',
   });
   await clickButton(page, '취소');
@@ -872,9 +872,9 @@ try {
   });
   await openChoice(page);
   await chooseMode(page, 'app-hosted');
-  await waitForTitle(page, '앱 제공 서버 사용');
+  await waitForTitle(page, 'Raucloud 사용');
   await clickButton(page, '서버 만들기');
-  await waitForTitle(page, '앱 제공 서버를 준비하지 못했습니다');
+  await waitForTitle(page, 'Raucloud를 준비하지 못했습니다');
   assert.match(await page.$eval('.ag-cloud-setup-callout strong', (node) => node.textContent), /샌드박스 ID를 확인하지 못했습니다/);
   assert.deepEqual(
     await page.$$eval('.ag-cloud-setup-footer button', (nodes) => nodes.map((node) => node.textContent.trim())),
@@ -898,9 +898,9 @@ try {
   await page.waitForSelector('.ag-cloud-setup-overlay[hidden]');
   await clickStable(page, '#agent-sidebar .ag-cloud-btn');
   await page.waitForSelector('.ag-cloud-setup-overlay:not([hidden])');
-  await waitForTitle(page, '앱 제공 서버를 준비하지 못했습니다');
+  await waitForTitle(page, 'Raucloud를 준비하지 못했습니다');
   await clickButton(page, '서버 종료');
-  await waitForTitle(page, '앱 제공 서버 종료 중');
+  await waitForTitle(page, 'Raucloud 종료 중');
   await waitForTitle(page, 'Cloud 서버 선택');
   await clickButton(page, '취소');
   await page.waitForSelector('.ag-cloud-setup-overlay[hidden]');
@@ -910,10 +910,10 @@ try {
   await openChoice(page);
   await chooseMode(page, 'app-hosted');
   await clickButton(page, '서버 만들기');
-  await waitForTitle(page, '앱 제공 서버가 준비되었습니다');
+  await waitForTitle(page, 'Raucloud가 준비되었습니다');
   await page.evaluate(() => window.__cloudHarness.setSandboxUnmanaged('rauhwpx-4.up.railway.app'));
   await clickButton(page, '상태 확인');
-  await waitForTitle(page, '앱 제공 서버를 준비하지 못했습니다');
+  await waitForTitle(page, 'Raucloud를 준비하지 못했습니다');
   assert.match(
     await page.$eval('.ag-cloud-setup-callout strong', (node) => node.textContent),
     /이 앱이 관리할 수 없는 샌드박스입니다/,

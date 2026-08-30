@@ -24,7 +24,7 @@ export interface CloudProfileDraft {
 export type CloudServerMode = 'self-hosted' | 'app-hosted';
 export type CloudConnectionState = 'unknown' | 'testing' | 'ready' | 'error';
 
-/** Managed Cloud usage shared by every device on an account. Durations use milliseconds. */
+/** Raucloud usage shared by every device on an account. Durations use milliseconds. */
 export interface CloudQuotaSnapshot {
   dailyLimitMs: number;
   usedMs: number;
@@ -50,7 +50,7 @@ export interface CloudQuotaSnapshot {
 }
 
 /** Why the app-hosted Cloud path can or cannot start a new run. Self-hosted ignores this gate. */
-export type ManagedCloudGate =
+export type RaucloudGate =
   | { kind: 'available' }
   | { kind: 'logged-out' }
   | { kind: 'exhausted'; resetAt: string }
@@ -65,7 +65,7 @@ export interface AccountSnapshot {
     displayName?: string | null;
   } | null;
   quota: CloudQuotaSnapshot | null;
-  managedCloud: ManagedCloudGate;
+  raucloud: RaucloudGate;
   updatedAt: string;
 }
 
@@ -222,7 +222,7 @@ export interface CloudSnapshot {
   queuedMessages: CloudQueuedMessage[];
   timeline: PortableCloudTimelineV1 | null;
   updatedAt: string;
-  /** Present when the desktop is connected to the managed Cloud account broker. */
+  /** Present when the desktop is connected to the Raucloud account broker. */
   account?: AccountSnapshot | null;
   takeover?: CloudTakeoverPayload;
 }

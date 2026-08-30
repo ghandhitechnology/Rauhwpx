@@ -147,7 +147,7 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
   const accountCopy = el(
     'p',
     'rhwp-setup-account-copy',
-    '로그인하면 앱 제공 Cloud를 하루 60분까지 사용하고, 계정당 $5 모델 크레딧을 받을 수 있습니다. Rau 에이전트 설치 여부는 별도로 선택합니다.',
+    '로그인하면 Raucloud를 하루 60분까지 사용하고, 계정당 $5 모델 크레딧을 받을 수 있습니다. Rau 에이전트 설치 여부는 별도로 선택합니다.',
   );
   const accountState = el('p', 'rhwp-setup-account-state', '로그인하지 않아도 로컬 편집과 내 서버 Cloud를 사용할 수 있습니다.');
   accountState.setAttribute('role', 'status');

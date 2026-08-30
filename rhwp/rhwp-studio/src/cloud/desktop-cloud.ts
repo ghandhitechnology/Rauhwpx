@@ -248,26 +248,27 @@ function parseAccountSnapshot(value: unknown): AccountSnapshot | null {
   const raw = record(value);
   const updatedAt = strictIso(raw?.updatedAt);
   if (!raw || typeof raw.signedIn !== 'boolean' || !updatedAt) return null;
-  const gate = record(raw.managedCloud);
-  let managedCloud: AccountSnapshot['managedCloud'] | null = null;
-  if (gate?.kind === 'available' || gate?.kind === 'logged-out') managedCloud = { kind: gate.kind };
+  const legacyRaucloudGate = raw.managedCloud; // raucloud-legacy: tolerate an older desktop snapshot during rollout.
+  const gate = record(raw.raucloud ?? legacyRaucloudGate);
+  let raucloud: AccountSnapshot['raucloud'] | null = null;
+  if (gate?.kind === 'available' || gate?.kind === 'logged-out') raucloud = { kind: gate.kind };
   if (gate?.kind === 'exhausted' && strictIso(gate.resetAt)) {
-    managedCloud = { kind: 'exhausted', resetAt: strictIso(gate.resetAt)! };
+    raucloud = { kind: 'exhausted', resetAt: strictIso(gate.resetAt)! };
   }
   if (gate?.kind === 'active-elsewhere' && string(gate.runId).trim()) {
-    managedCloud = {
+    raucloud = {
       kind: 'active-elsewhere',
       runId: string(gate.runId).trim(),
       deviceName: typeof gate.deviceName === 'string' ? gate.deviceName : null,
     };
   }
   if (gate?.kind === 'unavailable' && string(gate.reason).trim()) {
-    managedCloud = { kind: 'unavailable', reason: string(gate.reason).trim() };
+    raucloud = { kind: 'unavailable', reason: string(gate.reason).trim() };
   }
-  if (!managedCloud) return null;
+  if (!raucloud) return null;
   if (!raw.signedIn) {
-    return raw.account === null && raw.quota === null && managedCloud.kind === 'logged-out'
-      ? { signedIn: false, account: null, quota: null, managedCloud, updatedAt }
+    return raw.account === null && raw.quota === null && raucloud.kind === 'logged-out'
+      ? { signedIn: false, account: null, quota: null, raucloud, updatedAt }
       : null;
   }
   const accountRaw = raw.account === null ? null : record(raw.account);
@@ -318,7 +319,7 @@ function parseAccountSnapshot(value: unknown): AccountSnapshot | null {
       graceEndsAt,
     };
   } else if (raw.quota !== null) return null;
-  return { signedIn: true, account, quota, managedCloud, updatedAt };
+  return { signedIn: true, account, quota, raucloud, updatedAt };
 }
 
 function parseSessionBase(state: Record<string, unknown>): CloudSessionBase | null {
@@ -681,7 +682,8 @@ export function createCloudController(
   api: CloudAwareDesktopApi | undefined = (globalThis as { rhwpDesktop?: CloudAwareDesktopApi }).rhwpDesktop,
   browser: { readReference?: (reference: Pick<CloudTransferReference, 'id' | 'scope' | 'scopeId'>) => Promise<Uint8Array> } = {},
 ): CloudController {
-  const resolvedApi = api ?? (browserCloudSupported() ? createBrowserCloudApi(browser) : undefined);
+  const resolvedApi: CloudDesktopApi | undefined = api
+    ?? (browserCloudSupported() ? createBrowserCloudApi(browser) : undefined);
   let snapshot = unavailableSnapshot();
   let disposed = false;
   const listeners = new Set<(state: CloudSnapshot) => void>();

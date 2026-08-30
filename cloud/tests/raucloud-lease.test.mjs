@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { parseConfig } from '../src/config.mjs';
-import { ManagedLeaseController } from '../src/managed-lease.mjs';
+import { RaucloudLeaseController } from '../src/raucloud-lease.mjs';
 
 const TOKEN = `mcw_${'a'.repeat(43)}`;
 
@@ -14,7 +14,7 @@ function controller(handler) {
   const calls = [];
   return {
     calls,
-    lease: new ManagedLeaseController({
+    lease: new RaucloudLeaseController({
       baseUrl: 'https://broker.example',
       runId: 'run-1',
       workerToken: TOKEN,
@@ -26,10 +26,10 @@ function controller(handler) {
   };
 }
 
-test('self-hosted runtimes leave managed lifecycle calls disabled', async () => {
+test('self-hosted runtimes leave Raucloud lifecycle calls disabled', async () => {
   let fetched = false;
-  const lease = new ManagedLeaseController({ fetchImpl: async () => { fetched = true; } });
-  assert.deepEqual(await lease.beforeTurnStart(), { managed: false });
+  const lease = new RaucloudLeaseController({ fetchImpl: async () => { fetched = true; } });
+  assert.deepEqual(await lease.beforeTurnStart(), { raucloud: false });
   assert.deepEqual(await lease.heartbeat(), { mustStop: false });
   assert.equal(fetched, false);
 });
@@ -70,7 +70,7 @@ test('grace blocks new input immediately while allowing the running turn until m
     quota: { remainingMs: 0, grace: { active: true, remainingMs: 60_000 } },
     mustStop: false,
   });
-  await assert.rejects(lease.assertCommandAllowed('message.queue'), { code: 'MANAGED_CLOUD_INPUT_BLOCKED' });
+  await assert.rejects(lease.assertCommandAllowed('message.queue'), { code: 'RAUCLOUD_INPUT_BLOCKED' });
   await lease.assertCommandAllowed('wait.resolve');
   assert.equal(lease.mustStop, false);
 });
@@ -82,13 +82,13 @@ test('three broker failures fail closed and tell the worker to stop', async () =
     throw new Error('offline');
   });
   await lease.beforeTurnStart();
-  await assert.rejects(lease.heartbeat(), { code: 'MANAGED_BROKER_UNREACHABLE' });
-  await assert.rejects(lease.heartbeat(), { code: 'MANAGED_BROKER_UNREACHABLE' });
+  await assert.rejects(lease.heartbeat(), { code: 'RAUCLOUD_BROKER_UNREACHABLE' });
+  await assert.rejects(lease.heartbeat(), { code: 'RAUCLOUD_BROKER_UNREACHABLE' });
   assert.deepEqual(await lease.heartbeat(), { mustStop: true, degraded: true });
-  await assert.rejects(lease.assertCommandAllowed('session.resume'), { code: 'MANAGED_CLOUD_INPUT_BLOCKED' });
+  await assert.rejects(lease.assertCommandAllowed('session.resume'), { code: 'RAUCLOUD_INPUT_BLOCKED' });
 });
 
-test('one managed runtime can meter two turns independently on the same lease', async () => {
+test('one Raucloud runtime can meter two turns independently on the same lease', async () => {
   let status = 'ready';
   let allocations = 0;
   const { lease, calls } = controller((url) => {
@@ -133,7 +133,7 @@ test('turn completion cannot reopen input after the normal allowance is exhauste
   await lease.beforeTurnStart();
   await lease.heartbeat();
   await lease.complete('boundary-1');
-  await assert.rejects(lease.beforeTurnStart(), { code: 'MANAGED_CLOUD_INPUT_BLOCKED' });
+  await assert.rejects(lease.beforeTurnStart(), { code: 'RAUCLOUD_INPUT_BLOCKED' });
 });
 
 test('warm workers discover and activate a newly assigned run', async () => {
@@ -152,15 +152,24 @@ test('warm workers discover and activate a newly assigned run', async () => {
   assert.ok(calls.some(({ url }) => url.pathname.endsWith('/runs/run-2/allocation')));
 });
 
-test('managed lease configuration is all-or-nothing and self-hosted remains empty', () => {
+test('Raucloud lease configuration is all-or-nothing and self-hosted remains empty', () => {
   const selfHosted = parseConfig({ RAUHWpx_RUNNER: 'podman' });
-  assert.equal(selfHosted.managedBrokerUrl, '');
-  assert.throws(() => parseConfig({ RAUHWpx_MANAGED_BROKER_URL: 'https://broker.example' }), { code: 'CONFIG_INVALID' });
-  const managed = parseConfig({
+  assert.equal(selfHosted.raucloudBrokerUrl, '');
+  assert.throws(() => parseConfig({ RAUHWpx_RAUCLOUD_BROKER_URL: 'https://broker.example' }), { code: 'CONFIG_INVALID' });
+  const raucloud = parseConfig({
     RAUHWpx_RUNNER: 'podman',
-    RAUHWpx_MANAGED_BROKER_URL: 'https://broker.example/',
-    RAUHWpx_MANAGED_RUN_ID: 'run-1',
-    RAUHWpx_MANAGED_WORKER_TOKEN: TOKEN,
+    RAUHWpx_RAUCLOUD_BROKER_URL: 'https://broker.example/',
+    RAUHWpx_RAUCLOUD_RUN_ID: 'run-1',
+    RAUHWpx_RAUCLOUD_WORKER_TOKEN: TOKEN,
   });
-  assert.equal(managed.managedBrokerUrl, 'https://broker.example');
+  assert.equal(raucloud.raucloudBrokerUrl, 'https://broker.example');
+
+  const legacy = parseConfig({
+    RAUHWpx_RUNNER: 'podman',
+    RAUHWpx_MANAGED_BROKER_URL: 'https://legacy-broker.example/', // raucloud-legacy: deployed worker fixture.
+    RAUHWpx_MANAGED_RUN_ID: 'run-legacy', // raucloud-legacy: deployed worker fixture.
+    RAUHWpx_MANAGED_WORKER_TOKEN: TOKEN, // raucloud-legacy: deployed worker fixture.
+  });
+  assert.equal(legacy.raucloudBrokerUrl, 'https://legacy-broker.example');
+  assert.equal(legacy.raucloudRunId, 'run-legacy');
 });

@@ -3,10 +3,10 @@ import { generateKeyPairSync } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import {
-  createManagedCloudBrokerClient,
-  createManagedCloudBrokerProvider,
-  MANAGED_CLOUD_ACCESS_SECRET,
-  MANAGED_CLOUD_PROVIDER_ID,
+  createRaucloudBrokerClient,
+  createRaucloudBrokerProvider,
+  RAUCLOUD_ACCESS_SECRET,
+  RAUCLOUD_PROVIDER_ID,
 } from '../desktop/cloud-broker.mjs';
 import { CloudCoordinator } from '../desktop/cloud-coordinator.mjs';
 
@@ -40,7 +40,7 @@ function broker(routes, overrides = {}) {
     if (!route) throw new Error(`unexpected request: ${key}`);
     return typeof route === 'function' ? route(calls.at(-1)) : route;
   };
-  const client = createManagedCloudBrokerClient({
+  const client = createRaucloudBrokerClient({
     baseUrl: 'https://broker.example.test',
     getAccessToken: overrides.getAccessToken ?? (async () => ACCESS_TOKEN),
     getDeviceIdentity: overrides.getDeviceIdentity ?? (async () => ({ id: 'device-desktop-123', name: 'Laptop' })),
@@ -51,23 +51,23 @@ function broker(routes, overrides = {}) {
   return { client, calls };
 }
 
-test('managed Cloud refuses requests without a signed-in Rau account', async () => {
+test('Raucloud refuses requests without a signed-in Rau account', async () => {
   let requested = false;
-  const client = createManagedCloudBrokerClient({
+  const client = createRaucloudBrokerClient({
     baseUrl: 'https://broker.example.test',
     getAccessToken: async () => null,
     getDeviceIdentity: async () => ({ id: 'device-desktop-123' }),
     fetchImpl: async () => { requested = true; return json({}); },
   });
   await assert.rejects(() => client.status(), (error) => {
-    assert.equal(error.code, 'MANAGED_CLOUD_AUTH_REQUIRED');
+    assert.equal(error.code, 'RAUCLOUD_AUTH_REQUIRED');
     assert.equal(error.retryable, false);
     return true;
   });
   assert.equal(requested, false, 'logged-out clients never contact the broker');
 });
 
-test('managed Cloud creates one broker run without Railway credentials or provider secrets', async () => {
+test('Raucloud creates one broker run without Railway credentials or provider secrets', async () => {
   const { client, calls } = broker({
     'POST /v1/cloud/runs': json({
       run: { id: 'run-1', status: 'ready', region: 'ap-northeast', reused: false },
@@ -75,7 +75,7 @@ test('managed Cloud creates one broker run without Railway credentials or provid
       quota: { remainingSeconds: 3_600, dailyLimitSeconds: 3_600 },
     }),
   });
-  const provider = createManagedCloudBrokerProvider({ client });
+  const provider = createRaucloudBrokerProvider({ client });
   const journals = [];
   const result = await provider.spawn({
     deviceName: 'Work laptop',
@@ -84,7 +84,7 @@ test('managed Cloud creates one broker run without Railway credentials or provid
     onSandboxCreated: async (sandbox) => journals.push(sandbox),
   });
 
-  assert.equal(provider.id, MANAGED_CLOUD_PROVIDER_ID);
+  assert.equal(provider.id, RAUCLOUD_PROVIDER_ID);
   assert.equal(result.sandbox.sandboxId, 'run-1');
   assert.deepEqual(result.receipt, RECEIPT);
   assert.equal(journals.length, 1);
@@ -100,7 +100,7 @@ test('managed Cloud creates one broker run without Railway credentials or provid
   assert.equal(JSON.stringify(calls[0]).toLowerCase().includes('railway'), false);
 });
 
-test('managed Cloud polls broker allocation status until a pairing receipt is ready', async () => {
+test('Raucloud polls broker allocation status until a pairing receipt is ready', async () => {
   const { client, calls } = broker({
     'POST /v1/cloud/runs': json({
       run: { id: 'run-allocating', status: 'allocating', createdAt: Date.parse('2026-08-30T12:00:00.000Z') },
@@ -113,7 +113,7 @@ test('managed Cloud polls broker allocation status until a pairing receipt is re
       gate: { state: 'ready', canStart: false },
     }),
   });
-  const provider = createManagedCloudBrokerProvider({ client, allocationAttempts: 2, allocationPollMs: 10 });
+  const provider = createRaucloudBrokerProvider({ client, allocationAttempts: 2, allocationPollMs: 10 });
   const journal = [];
   const result = await provider.spawn({ onSandboxCreated: async (sandbox) => journal.push({ ...sandbox }) });
   assert.equal(result.receipt.endpoint, RECEIPT.endpoint);
@@ -122,7 +122,7 @@ test('managed Cloud polls broker allocation status until a pairing receipt is re
   assert.deepEqual(calls.map((call) => call.key), ['POST /v1/cloud/runs', 'GET /v1/cloud/status']);
 });
 
-test('managed Cloud status preserves warm reuse, controller lease, and quota visuals', async () => {
+test('Raucloud status preserves warm reuse, controller lease, and quota visuals', async () => {
   const { client, calls } = broker({
     'GET /v1/cloud/status': json({
       run: {
@@ -137,19 +137,19 @@ test('managed Cloud status preserves warm reuse, controller lease, and quota vis
       quota: { remainingSeconds: 240, dailyLimitSeconds: 3_600, state: 'warning' },
     }),
   });
-  const provider = createManagedCloudBrokerProvider({ client });
+  const provider = createRaucloudBrokerProvider({ client });
   const status = await provider.status({ sandboxId: 'run-1' });
   assert.equal(status.lifecycle, 'ready');
   assert.equal(status.status, 'warm-idle');
-  assert.equal(status.managedCloud.reused, true);
-  assert.equal(status.managedCloud.readOnly, true);
-  assert.equal(status.managedCloud.takeoverRequired, true);
-  assert.equal(status.managedCloud.quota.remainingSeconds, 240);
+  assert.equal(status.raucloud.reused, true);
+  assert.equal(status.raucloud.readOnly, true);
+  assert.equal(status.raucloud.takeoverRequired, true);
+  assert.equal(status.raucloud.quota.remainingSeconds, 240);
   assert.equal(calls[0].url.searchParams.get('runId'), 'run-1');
   assert.equal(calls[0].url.searchParams.get('deviceId'), 'device-desktop-123');
 });
 
-test('managed Cloud account status normalizes backend quota and another-device ownership', async () => {
+test('Raucloud account status normalizes backend quota and another-device ownership', async () => {
   const { client } = broker({
     'GET /v1/cloud/status': json({
       account: { id: 'user-1', email: 'user@example.test', loggedIn: true, timezone: 'Asia/Seoul' },
@@ -165,15 +165,15 @@ test('managed Cloud account status normalizes backend quota and another-device o
         id: 'run-other', ownerDeviceId: 'device-other', createdAt: Date.parse('2026-08-30T12:00:00.000Z'),
       },
       worker: { id: 'worker-1', runId: 'run-other', ownerDeviceId: 'device-other', status: 'active' },
-      gate: { state: 'owned_elsewhere', canStart: false, reason: 'Managed Cloud is active on another device' },
+      gate: { state: 'owned_elsewhere', canStart: false, reason: 'Raucloud is active on another device' },
     }),
   });
-  const account = await createManagedCloudBrokerProvider({ client }).accountStatus();
+  const account = await createRaucloudBrokerProvider({ client }).accountStatus();
   assert.equal(account.signedIn, true);
   assert.equal(account.quota.dailyLimitMs, 3_600_000);
   assert.equal(account.quota.debtMs, 120_000);
   assert.equal(account.quota.activeRun.controllingThisDevice, false);
-  assert.deepEqual(account.managedCloud, {
+  assert.deepEqual(account.raucloud, {
     kind: 'active-elsewhere', runId: 'run-other', deviceName: null,
   });
 });
@@ -191,12 +191,12 @@ test('the controlling device stays available while its single run is active', as
       gate: { state: 'ready', canStart: false, reason: null },
     }),
   });
-  const account = await createManagedCloudBrokerProvider({ client }).accountStatus();
-  assert.deepEqual(account.managedCloud, { kind: 'available' });
+  const account = await createRaucloudBrokerProvider({ client }).accountStatus();
+  assert.deepEqual(account.raucloud, { kind: 'available' });
   assert.equal(account.quota.activeRun.controllingThisDevice, true);
 });
 
-test('managed Cloud exposes explicit checkpointed takeover and graceful logout stop', async () => {
+test('Raucloud exposes explicit checkpointed takeover and graceful logout stop', async () => {
   const { client, calls } = broker({
     'GET /v1/cloud/status': json({
       takeoverRun: { id: 'run-1', status: 'checkpointed', checkpointId: 'checkpoint-1' },
@@ -208,7 +208,7 @@ test('managed Cloud exposes explicit checkpointed takeover and graceful logout s
         : { id: 'run-1', status: 'stopped' },
     }),
   });
-  const provider = createManagedCloudBrokerProvider({ client });
+  const provider = createRaucloudBrokerProvider({ client });
 
   const takeover = await provider.takeover(null, { deviceName: 'New controller' });
   assert.deepEqual(takeover.receipt, RECEIPT);
@@ -237,7 +237,7 @@ test('managed Cloud exposes explicit checkpointed takeover and graceful logout s
   });
 });
 
-test('managed Cloud keeps broker conflict and quota failures stable for the UI', async () => {
+test('Raucloud keeps broker conflict and quota failures stable for the UI', async () => {
   const conflict = broker({
     'POST /v1/cloud/runs': json({
       error: 'CLOUD_TAKEOVER_REQUIRED', message: 'Another device controls this worker',
@@ -250,11 +250,12 @@ test('managed Cloud keeps broker conflict and quota failures stable for the UI',
     return true;
   });
 
+  const legacyQuotaCode = 'MANAGED_CLOUD_QUOTA_EXHAUSTED'; // raucloud-legacy: rolling broker response fixture.
   const quota = broker({
-    'POST /v1/cloud/runs': json({ error: { message: 'Daily Cloud allowance is used' } }, 429, { 'retry-after': '900' }),
+    'POST /v1/cloud/runs': json({ error: { code: legacyQuotaCode, message: 'Daily Cloud allowance is used' } }, 429, { 'retry-after': '900' }),
   });
   await assert.rejects(() => quota.client.createRun(), (error) => {
-    assert.equal(error.code, 'MANAGED_CLOUD_QUOTA_EXHAUSTED');
+    assert.equal(error.code, 'RAUCLOUD_QUOTA_EXHAUSTED');
     assert.equal(error.retryAfter, '900');
     assert.equal(error.retryable, true);
     return true;
@@ -263,14 +264,14 @@ test('managed Cloud keeps broker conflict and quota failures stable for the UI',
 
 test('the packaged desktop uses the Rau account token and not the direct Railway provider', async () => {
   const source = await readFile(new URL('../desktop/main.mjs', import.meta.url), 'utf8');
-  assert.match(source, /createManagedCloudBrokerProvider/);
-  assert.match(source, /getAccessToken:\s*\(\) => secretVault\.get\(MANAGED_CLOUD_ACCESS_SECRET\)/);
+  assert.match(source, /createRaucloudBrokerProvider/);
+  assert.match(source, /getAccessToken:\s*\(\) => secretVault\.get\(RAUCLOUD_ACCESS_SECRET\)/);
   assert.doesNotMatch(source, /createRailwayServerProvider/);
-  assert.equal(MANAGED_CLOUD_ACCESS_SECRET, 'rhwp.rau.openrouter-api-key');
+  assert.equal(RAUCLOUD_ACCESS_SECRET, 'rhwp.rau.openrouter-api-key');
 });
 
 test('coordinator snapshots expose a logged-out account gate before any Cloud profile exists', async () => {
-  const provider = createManagedCloudBrokerProvider({
+  const provider = createRaucloudBrokerProvider({
     baseUrl: 'https://broker.example.test',
     getAccessToken: async () => null,
     getDeviceIdentity: async () => ({ id: 'device-desktop-123' }),
@@ -295,7 +296,7 @@ test('coordinator snapshots expose a logged-out account gate before any Cloud pr
     signedIn: false,
     account: null,
     quota: null,
-    managedCloud: { kind: 'logged-out' },
+    raucloud: { kind: 'logged-out' },
     updatedAt: snapshot.account.updatedAt,
   });
   await coordinator.stop();
@@ -307,21 +308,21 @@ test('a newly signed-in device can take over without an existing local Cloud pro
   let takeoverSandbox = 'not-called';
   const receipt = { ...RECEIPT, serverPublicKey: TAKEOVER_SERVER_KEY };
   const provider = {
-    id: MANAGED_CLOUD_PROVIDER_ID,
-    displayName: 'Managed Cloud',
+    id: RAUCLOUD_PROVIDER_ID,
+    displayName: 'Raucloud',
     configuration: () => ({ configured: true, missing: [] }),
     spawn: async () => { throw new Error('not used'); },
     status: async () => ({ lifecycle: 'idle' }),
     teardown: async () => ({ removed: true }),
     accountStatus: async () => ({
       signedIn: true, account: { id: 'user-1' }, quota: null,
-      managedCloud: { kind: 'active-elsewhere', runId: 'run-1' }, updatedAt: new Date().toISOString(),
+      raucloud: { kind: 'active-elsewhere', runId: 'run-1' }, updatedAt: new Date().toISOString(),
     }),
     takeover: async (sandbox) => {
       takeoverSandbox = sandbox;
       return {
         sandbox: {
-          providerId: MANAGED_CLOUD_PROVIDER_ID, sandboxId: 'run-2', host: 'worker.example.test',
+          providerId: RAUCLOUD_PROVIDER_ID, sandboxId: 'run-2', host: 'worker.example.test',
           createdAt: new Date().toISOString(), projectId: '', environmentId: '', domainId: '', region: '',
         },
         receipt,

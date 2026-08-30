@@ -1,6 +1,6 @@
-# Managed Cloud broker
+# Raucloud broker
 
-The Rau credits service authenticates Managed Cloud requests and enforces account limits. Clients use their existing opaque `rau_v1_…` account token. The service stores Railway credentials, remote service IDs, worker tokens, quota records, and idempotency keys.
+The Rau credits service authenticates Raucloud requests and enforces account limits. Clients use their existing opaque `rau_v1_…` account token. The service stores Railway credentials, remote service IDs, worker tokens, quota records, and idempotency keys.
 
 ## Public API
 

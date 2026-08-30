@@ -753,9 +753,10 @@ function readRauAccount(value: unknown): RauAccountSnapshot {
     ? rawQuota['activeRun'] as Record<string, unknown>
     : null;
   const rawCold = (rawQuota?.['coldStarts'] ?? {}) as Record<string, unknown>;
-  const rawGate = (src['managedCloud'] ?? {}) as Record<string, unknown>;
+  const legacyRaucloudGate = src['managedCloud']; // raucloud-legacy: tolerate an older agent snapshot during rollout.
+  const rawGate = (src['raucloud'] ?? legacyRaucloudGate ?? {}) as Record<string, unknown>;
   const gateKind = rawGate['kind'];
-  const managedCloud: RauAccountSnapshot['managedCloud'] = gateKind === 'available'
+  const raucloud: RauAccountSnapshot['raucloud'] = gateKind === 'available'
     ? { kind: 'available' }
     : gateKind === 'exhausted'
       ? { kind: 'exhausted', resetAt: String(rawGate['resetAt'] ?? rawQuota?.['resetAt'] ?? '') }
@@ -766,7 +767,7 @@ function readRauAccount(value: unknown): RauAccountSnapshot {
             ...(typeof rawGate['deviceName'] === 'string' ? { deviceName: rawGate['deviceName'] } : {}),
           }
         : gateKind === 'unavailable'
-          ? { kind: 'unavailable', reason: String(rawGate['reason'] ?? 'Managed Cloud is unavailable.') }
+          ? { kind: 'unavailable', reason: String(rawGate['reason'] ?? 'Raucloud is unavailable.') }
           : { kind: 'logged-out' };
   const signedIn = src['signedIn'] === true && typeof rawAccount['id'] === 'string';
   return {
@@ -799,7 +800,7 @@ function readRauAccount(value: unknown): RauAccountSnapshot {
       },
       ...(typeof rawQuota['graceEndsAt'] === 'string' ? { graceEndsAt: rawQuota['graceEndsAt'] } : {}),
     } : null,
-    managedCloud,
+    raucloud,
     updatedAt: typeof src['updatedAt'] === 'string' ? src['updatedAt'] : new Date().toISOString(),
   };
 }

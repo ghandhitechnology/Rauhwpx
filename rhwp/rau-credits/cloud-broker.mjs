@@ -33,7 +33,7 @@ function validId(value, name) {
 
 function validateTimezone(value) {
   const timezone = String(value ?? '').trim();
-  if (!timezone) throw cloudError('CLOUD_TIMEZONE_REQUIRED', 'Choose a timezone before using managed Cloud');
+  if (!timezone) throw cloudError('CLOUD_TIMEZONE_REQUIRED', 'Choose a timezone before using Raucloud');
   try {
     new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(0);
   } catch {
@@ -95,17 +95,33 @@ function createWindow(at, timezone, debtMs = 0) {
   };
 }
 
-function ensureManagedState(state) {
-  state.managedCloud ??= {};
-  state.managedCloud.schemaVersion = 1;
-  state.managedCloud.accounts ??= {};
-  state.managedCloud.runs ??= {};
-  state.managedCloud.idempotency ??= {};
-  return state.managedCloud;
+const LEGACY_RAUCLOUD_STATE_KEY = 'managedCloud'; // raucloud-legacy: durable broker state is moved on first access.
+
+function ensureRaucloudState(state) {
+  const legacy = state[LEGACY_RAUCLOUD_STATE_KEY];
+  if (legacy && typeof legacy === 'object') {
+    if (!state.raucloud || typeof state.raucloud !== 'object') {
+      state.raucloud = legacy;
+    } else if (state.raucloud !== legacy) {
+      for (const collection of ['accounts', 'runs', 'idempotency']) {
+        state.raucloud[collection] = {
+          ...(legacy[collection] ?? {}),
+          ...(state.raucloud[collection] ?? {}),
+        };
+      }
+    }
+    delete state[LEGACY_RAUCLOUD_STATE_KEY];
+  }
+  state.raucloud ??= {};
+  state.raucloud.schemaVersion = 1;
+  state.raucloud.accounts ??= {};
+  state.raucloud.runs ??= {};
+  state.raucloud.idempotency ??= {};
+  return state.raucloud;
 }
 
 function ensureAccount(state, userId, at) {
-  const cloud = ensureManagedState(state);
+  const cloud = ensureRaucloudState(state);
   cloud.accounts[userId] ??= {
     id: userId,
     createdAt: at,
@@ -323,7 +339,7 @@ function takeoverRun(cloud, account) {
 }
 
 function reconcileAccount(state, account, at) {
-  const cloud = ensureManagedState(state);
+  const cloud = ensureRaucloudState(state);
   advanceQuota(account, at);
   const worker = account.worker;
   if (!worker) return;
@@ -383,16 +399,16 @@ function sanitizeReceipt(receipt) {
 }
 
 function confirmAllocationState(state, runId, at) {
-  const cloud = ensureManagedState(state);
+  const cloud = ensureRaucloudState(state);
   const run = cloud.runs[validId(runId, 'runId')];
-  if (!run) throw cloudError('CLOUD_RUN_NOT_FOUND', 'Managed Cloud run not found');
+  if (!run) throw cloudError('CLOUD_RUN_NOT_FOUND', 'Raucloud run not found');
   const account = ensureAccount(state, run.accountId, at);
   if (account.worker?.runId !== run.id || !['allocating', 'ready'].includes(run.status)) {
-    throw cloudError('CLOUD_RUN_STATE_INVALID', 'Managed Cloud run is not awaiting allocation');
+    throw cloudError('CLOUD_RUN_STATE_INVALID', 'Raucloud run is not awaiting allocation');
   }
   advanceQuota(account, at);
   if (normalRemaining(account) <= 0) {
-    throw cloudError('CLOUD_QUOTA_EXHAUSTED', 'The daily managed Cloud allowance is exhausted');
+    throw cloudError('CLOUD_QUOTA_EXHAUSTED', 'The daily Raucloud allowance is exhausted');
   }
   if (run.coldStart && !run.coldStartConfirmed) {
     account.coldStarts = account.coldStarts.filter((stamp) => stamp >= account.quota.window.startAt);
@@ -402,7 +418,7 @@ function confirmAllocationState(state, runId, at) {
       run.failureCode = 'COLD_START_LIMIT';
       run.completedAt = at;
       reserveTeardown(account, run, at);
-      throw cloudError('CLOUD_COLD_START_RATE_LIMITED', 'Too many managed Cloud cold starts');
+      throw cloudError('CLOUD_COLD_START_RATE_LIMITED', 'Too many Raucloud cold starts');
     }
     account.coldStarts.push(at);
     run.coldStartConfirmed = true;
@@ -433,10 +449,10 @@ function gateFor(cloud, account, deviceId = '') {
     return { state: 'grace_active', canStart: false, canTakeover: false, reason: 'The active turn is finishing in grace' };
   }
   if (run && run.ownerDeviceId !== deviceId) {
-    return { state: 'owned_elsewhere', canStart: false, canTakeover: run.status === 'checkpointed', reason: 'Managed Cloud is active on another device' };
+    return { state: 'owned_elsewhere', canStart: false, canTakeover: run.status === 'checkpointed', reason: 'Raucloud is active on another device' };
   }
   if (account.worker && account.worker.ownerDeviceId !== deviceId) {
-    return { state: 'owned_elsewhere', canStart: false, canTakeover: false, reason: 'Managed Cloud is reserved by another device' };
+    return { state: 'owned_elsewhere', canStart: false, canTakeover: false, reason: 'Raucloud is reserved by another device' };
   }
   if (!run && !account.worker && checkpoint && checkpoint.ownerDeviceId !== deviceId) {
     const artifactReady = Boolean(checkpoint.checkpointArtifact?.id && checkpoint.checkpointArtifact?.sha256);
@@ -450,7 +466,7 @@ function gateFor(cloud, account, deviceId = '') {
     };
   }
   if (normalRemaining(account) <= 0) {
-    return { state: 'quota_exhausted', canStart: false, canTakeover: false, reason: 'The daily managed Cloud allowance is exhausted' };
+    return { state: 'quota_exhausted', canStart: false, canTakeover: false, reason: 'The daily Raucloud allowance is exhausted' };
   }
   return { state: 'ready', canStart: !run, canTakeover: false, reason: null };
 }
@@ -466,10 +482,10 @@ function secretHash(value) {
 }
 
 /**
- * Durable, account-global managed Cloud policy. The supplied mutate function must
+ * Durable, account-global Raucloud policy. The supplied mutate function must
  * serialize state changes across all service instances sharing the store.
  */
-export function createManagedCloudBroker({
+export function createRaucloudBroker({
   store,
   mutate,
   authenticateAccessToken,
@@ -498,7 +514,7 @@ export function createManagedCloudBroker({
   }
 
   function envelope(state, account, user, deviceId = '', runOverride = undefined, coldStart = undefined) {
-    const cloud = ensureManagedState(state);
+    const cloud = ensureRaucloudState(state);
     const run = runOverride === undefined ? activeRun(cloud, account) : runOverride;
     const result = {
       account: publicAccount(account, user),
@@ -509,7 +525,7 @@ export function createManagedCloudBroker({
       gate: gateFor(cloud, account, deviceId),
     };
     if (provisionerRequired && !provisioner) {
-      result.gate = { state: 'unavailable', canStart: false, canTakeover: false, reason: 'Managed Cloud provisioning is unavailable' };
+      result.gate = { state: 'unavailable', canStart: false, canTakeover: false, reason: 'Raucloud provisioning is unavailable' };
     }
     if (runOverride !== undefined) result.run = publicRun(runOverride, deviceId);
     if (coldStart !== undefined) result.coldStart = Boolean(coldStart);
@@ -519,7 +535,7 @@ export function createManagedCloudBroker({
   async function accountContext(token) {
     const userId = await identity(token);
     const state = await store.load();
-    const cloud = ensureManagedState(state);
+    const cloud = ensureRaucloudState(state);
     const account = cloud.accounts[userId];
     return { state, cloud, account, userId, user: state.users?.[userId] };
   }
@@ -527,7 +543,7 @@ export function createManagedCloudBroker({
   async function cleanupPendingRemotes() {
     if (!provisioner) return;
     const snapshot = await store.load();
-    const cloud = ensureManagedState(snapshot);
+    const cloud = ensureRaucloudState(snapshot);
     const candidates = Object.values(cloud.runs).filter((run) => run?.remote && run.teardownRequestedAt);
     for (const run of candidates) {
       if (teardownClaims.has(run.id)) continue;
@@ -535,17 +551,17 @@ export function createManagedCloudBroker({
       try {
         await provisioner.teardown(structuredClone(run.remote));
         await mutate((state) => {
-          const current = ensureManagedState(state).runs[run.id];
+          const current = ensureRaucloudState(state).runs[run.id];
           if (!current) return;
           delete current.remote;
           delete current.teardownRequestedAt;
           current.remoteDeletedAt = now();
-          const account = ensureManagedState(state).accounts[current.accountId];
+          const account = ensureRaucloudState(state).accounts[current.accountId];
           if (account?.worker?.runId === current.id) account.worker = null;
         });
       } catch (error) {
         await mutate((state) => {
-          const current = ensureManagedState(state).runs[run.id];
+          const current = ensureRaucloudState(state).runs[run.id];
           if (current) current.teardownError = String(error?.message ?? error).slice(0, 500);
         });
       } finally {
@@ -554,15 +570,18 @@ export function createManagedCloudBroker({
     }
   }
 
-  async function cleanupManagedOrphans() {
-    if (typeof provisioner?.reconcileManaged !== 'function' || typeof provisioner?.serviceName !== 'function') {
+  async function cleanupRaucloudOrphans() {
+    if (typeof provisioner?.reconcileRaucloud !== 'function' || typeof provisioner?.serviceName !== 'function') {
       return { enabled: false, found: 0, removed: 0 };
     }
-    const cloud = ensureManagedState(await store.load());
+    const cloud = ensureRaucloudState(await store.load());
     const keepServiceNames = Object.values(cloud.runs)
       .filter((run) => ['allocating', 'ready', 'active', 'checkpointing'].includes(run?.status))
-      .map((run) => provisioner.serviceName({ accountId: run.accountId, runId: run.id }));
-    return provisioner.reconcileManaged({ keepServiceNames, limit: 100 });
+      .flatMap((run) => [
+        provisioner.serviceName({ accountId: run.accountId, runId: run.id }),
+        provisioner.legacyServiceName?.({ accountId: run.accountId, runId: run.id }),
+      ].filter(Boolean));
+    return provisioner.reconcileRaucloud({ keepServiceNames, limit: 100 });
   }
 
   async function provisionCreatedRun(userId, runId, deviceId, workerToken) {
@@ -576,9 +595,9 @@ export function createManagedCloudBroker({
         onRemoteCreated: async (candidate) => {
           const remote = sanitizeRemote(candidate);
           await mutate((state) => {
-            const cloud = ensureManagedState(state);
+            const cloud = ensureRaucloudState(state);
             const run = cloud.runs[runId];
-            if (!run) throw cloudError('CLOUD_RUN_NOT_FOUND', 'Managed Cloud run not found');
+            if (!run) throw cloudError('CLOUD_RUN_NOT_FOUND', 'Raucloud run not found');
             run.remote = remote;
             const account = ensureAccount(state, userId, now());
             if (account.worker?.runId === runId) account.worker.remote = remote;
@@ -589,7 +608,7 @@ export function createManagedCloudBroker({
       const receipt = sanitizeReceipt(spawned.receipt);
       await mutate((state) => {
         const at = now();
-        const cloud = ensureManagedState(state);
+        const cloud = ensureRaucloudState(state);
         const run = cloud.runs[runId];
         const account = ensureAccount(state, userId, at);
         if (!run || run.status !== 'allocating' || account.worker?.runId !== runId) {
@@ -597,7 +616,7 @@ export function createManagedCloudBroker({
             run.remote = remote;
             run.teardownRequestedAt = at;
           }
-          throw cloudError('CLOUD_RUN_STATE_INVALID', 'Managed Cloud allocation was cancelled');
+          throw cloudError('CLOUD_RUN_STATE_INVALID', 'Raucloud allocation was cancelled');
         }
         run.remote = remote;
         run.receipt = receipt;
@@ -609,18 +628,18 @@ export function createManagedCloudBroker({
       });
     } catch (error) {
       await mutate((state) => {
-        const run = ensureManagedState(state).runs[runId];
+        const run = ensureRaucloudState(state).runs[runId];
         if (!run) return;
         if (!['stopped', 'completed', 'failed'].includes(run.status)) {
           run.status = 'failed';
           run.failureCode = String(error?.code ?? 'CLOUD_PROVISION_FAILED').slice(0, 100);
           run.completedAt = now();
         }
-        const account = ensureManagedState(state).accounts[userId];
+        const account = ensureRaucloudState(state).accounts[userId];
         if (account) reserveTeardown(account, run, now());
       });
       await cleanupPendingRemotes();
-      throw cloudError('CLOUD_PROVISION_FAILED', 'Managed Cloud could not allocate a worker', { cause: error?.code ?? null });
+      throw cloudError('CLOUD_PROVISION_FAILED', 'Raucloud could not allocate a worker', { cause: error?.code ?? null });
     }
   }
 
@@ -672,17 +691,17 @@ export function createManagedCloudBroker({
     async createCloudRun(token, { deviceId, timezone = null, idempotencyKey: rawKey } = {}) {
       const ownerDeviceId = validId(deviceId, 'deviceId');
       const userId = await identity(token, ownerDeviceId);
-      if (provisionerRequired && !provisioner) throw cloudError('CLOUD_UNAVAILABLE', 'Managed Cloud provisioning is unavailable');
+      if (provisionerRequired && !provisioner) throw cloudError('CLOUD_UNAVAILABLE', 'Raucloud provisioning is unavailable');
       const requestKey = validId(rawKey, 'idempotencyKey');
       let shouldProvision = false;
       let provisionWorkerToken = null;
       const created = await mutate((state) => {
         const at = now();
-        const cloud = ensureManagedState(state);
+        const cloud = ensureRaucloudState(state);
         cleanupIdempotency(cloud, at);
         const account = ensureAccount(state, userId, at);
         if (!account.timezone && timezone) initializeTimezone(account, timezone, at);
-        if (!account.timezone) throw cloudError('CLOUD_TIMEZONE_REQUIRED', 'Choose a timezone before using managed Cloud');
+        if (!account.timezone) throw cloudError('CLOUD_TIMEZONE_REQUIRED', 'Choose a timezone before using Raucloud');
         reconcileAccount(state, account, at);
         const idem = idempotencyKey(userId, 'create', requestKey);
         const replay = cloud.idempotency[idem];
@@ -694,25 +713,25 @@ export function createManagedCloudBroker({
         if (current) {
           throw cloudError(
             current.ownerDeviceId === ownerDeviceId ? 'CLOUD_RUN_ALREADY_ACTIVE' : 'CLOUD_OWNED_ELSEWHERE',
-            current.ownerDeviceId === ownerDeviceId ? 'A managed Cloud run is already active' : 'Managed Cloud is active on another device',
+            current.ownerDeviceId === ownerDeviceId ? 'A Raucloud run is already active' : 'Raucloud is active on another device',
             { runId: current.id },
           );
         }
         if (account.worker && account.worker.ownerDeviceId !== ownerDeviceId) {
-          throw cloudError('CLOUD_OWNED_ELSEWHERE', 'Managed Cloud is reserved by another device');
+          throw cloudError('CLOUD_OWNED_ELSEWHERE', 'Raucloud is reserved by another device');
         }
         if (account.worker?.status === 'tearing_down') {
-          throw cloudError('CLOUD_TEARDOWN_PENDING', 'The previous managed Cloud worker is still being removed');
+          throw cloudError('CLOUD_TEARDOWN_PENDING', 'The previous Raucloud worker is still being removed');
         }
         if (normalRemaining(account) <= 0) {
-          throw cloudError('CLOUD_QUOTA_EXHAUSTED', 'The daily managed Cloud allowance is exhausted', { resetsAt: account.quota.window.endAt });
+          throw cloudError('CLOUD_QUOTA_EXHAUSTED', 'The daily Raucloud allowance is exhausted', { resetsAt: account.quota.window.endAt });
         }
         const coldStart = !account.worker;
         if (coldStart) {
           account.coldStarts = account.coldStarts.filter((stamp) => stamp >= account.quota.window.startAt);
           const counts = coldStartCounts(account, at);
           if (counts.recent >= CLOUD_COLD_START_WINDOW_LIMIT || counts.usedToday >= CLOUD_COLD_START_DAILY_LIMIT) {
-            throw cloudError('CLOUD_COLD_START_RATE_LIMITED', 'Too many managed Cloud cold starts', {
+            throw cloudError('CLOUD_COLD_START_RATE_LIMITED', 'Too many Raucloud cold starts', {
               retryAt: Math.min(
                 account.coldStarts.at(-CLOUD_COLD_START_WINDOW_LIMIT) + CLOUD_COLD_START_WINDOW_MS,
                 account.quota.window.endAt,
@@ -759,7 +778,7 @@ export function createManagedCloudBroker({
       if (!shouldProvision) return created;
       await provisionCreatedRun(userId, created.run.id, ownerDeviceId, provisionWorkerToken);
       return mutate((state) => {
-        const cloud = ensureManagedState(state);
+        const cloud = ensureRaucloudState(state);
         const account = ensureAccount(state, userId, now());
         return envelope(state, account, state.users?.[userId], ownerDeviceId, cloud.runs[created.run.id], true);
       });
@@ -768,7 +787,7 @@ export function createManagedCloudBroker({
     async takeoverCloudRun(token, sourceRunId, { deviceId, checkpointId, idempotencyKey: rawKey } = {}) {
       const ownerDeviceId = validId(deviceId, 'deviceId');
       const userId = await identity(token, ownerDeviceId);
-      if (provisionerRequired && !provisioner) throw cloudError('CLOUD_UNAVAILABLE', 'Managed Cloud provisioning is unavailable');
+      if (provisionerRequired && !provisioner) throw cloudError('CLOUD_UNAVAILABLE', 'Raucloud provisioning is unavailable');
       const sourceId = validId(sourceRunId, 'runId');
       const requestedCheckpoint = validId(checkpointId, 'checkpointId');
       const requestKey = validId(rawKey, 'idempotencyKey');
@@ -776,7 +795,7 @@ export function createManagedCloudBroker({
       let provisionWorkerToken = null;
       const created = await mutate((state) => {
         const at = now();
-        const cloud = ensureManagedState(state);
+        const cloud = ensureRaucloudState(state);
         cleanupIdempotency(cloud, at);
         const account = ensureAccount(state, userId, at);
         reconcileAccount(state, account, at);
@@ -786,7 +805,7 @@ export function createManagedCloudBroker({
           return envelope(state, account, state.users?.[userId], ownerDeviceId, cloud.runs[replay.runId], replay.coldStart);
         }
         const source = cloud.runs[sourceId];
-        if (!source || source.accountId !== userId) throw cloudError('CLOUD_RUN_NOT_FOUND', 'Managed Cloud run not found');
+        if (!source || source.accountId !== userId) throw cloudError('CLOUD_RUN_NOT_FOUND', 'Raucloud run not found');
         if (!['checkpointed', 'completed'].includes(source.status) || source.checkpointId !== requestedCheckpoint) {
           throw cloudError('CLOUD_TAKEOVER_NOT_READY', 'A matching completed checkpoint is required for takeover');
         }
@@ -797,15 +816,15 @@ export function createManagedCloudBroker({
           );
         }
         if (activeRun(cloud, account) || account.worker) {
-          throw cloudError('CLOUD_RUN_ALREADY_ACTIVE', 'Another managed Cloud worker is already allocated');
+          throw cloudError('CLOUD_RUN_ALREADY_ACTIVE', 'Another Raucloud worker is already allocated');
         }
         if (!account.timezone || normalRemaining(account) <= 0) {
-          throw cloudError('CLOUD_QUOTA_EXHAUSTED', 'The daily managed Cloud allowance is exhausted');
+          throw cloudError('CLOUD_QUOTA_EXHAUSTED', 'The daily Raucloud allowance is exhausted');
         }
         account.coldStarts = account.coldStarts.filter((stamp) => stamp >= account.quota.window.startAt);
         const counts = coldStartCounts(account, at);
         if (counts.recent >= CLOUD_COLD_START_WINDOW_LIMIT || counts.usedToday >= CLOUD_COLD_START_DAILY_LIMIT) {
-          throw cloudError('CLOUD_COLD_START_RATE_LIMITED', 'Too many managed Cloud cold starts');
+          throw cloudError('CLOUD_COLD_START_RATE_LIMITED', 'Too many Raucloud cold starts');
         }
         const runId = `run_${randomBytes(18).toString('base64url')}`;
         const workerToken = `mcw_${randomBytes(32).toString('base64url')}`;
@@ -843,7 +862,7 @@ export function createManagedCloudBroker({
       if (!shouldProvision) return created;
       await provisionCreatedRun(userId, created.run.id, ownerDeviceId, provisionWorkerToken);
       return mutate((state) => {
-        const cloud = ensureManagedState(state);
+        const cloud = ensureRaucloudState(state);
         const account = ensureAccount(state, userId, now());
         return envelope(state, account, state.users?.[userId], ownerDeviceId, cloud.runs[created.run.id], true);
       });
@@ -859,10 +878,10 @@ export function createManagedCloudBroker({
       const userId = await identity(token, ownerDeviceId);
       const result = await mutate((state) => {
         const at = now();
-        const cloud = ensureManagedState(state);
+        const cloud = ensureRaucloudState(state);
         const account = ensureAccount(state, userId, at);
         const run = cloud.runs[validId(runId, 'runId')];
-        if (!run || run.accountId !== userId) throw cloudError('CLOUD_RUN_NOT_FOUND', 'Managed Cloud run not found');
+        if (!run || run.accountId !== userId) throw cloudError('CLOUD_RUN_NOT_FOUND', 'Raucloud run not found');
         if (run.ownerDeviceId !== ownerDeviceId) throw cloudError('CLOUD_OWNED_ELSEWHERE', 'Only the controlling device can stop this run');
         if (run.status === 'active') {
           chargeRun(account, run, at);
@@ -891,7 +910,7 @@ export function createManagedCloudBroker({
       const userId = await identity(token, ownerDeviceId);
       const result = await mutate((state) => {
         const at = now();
-        const cloud = ensureManagedState(state);
+        const cloud = ensureRaucloudState(state);
         const account = ensureAccount(state, userId, at);
         reconcileAccount(state, account, at);
         const run = activeRun(cloud, account);
@@ -918,7 +937,7 @@ export function createManagedCloudBroker({
     async confirmCloudAllocation(secret, runId) {
       return mutate((state) => {
         const at = now();
-        const runRecord = ensureManagedState(state).runs[validId(runId, 'runId')];
+        const runRecord = ensureRaucloudState(state).runs[validId(runId, 'runId')];
         assertWorkerSecret(secret, runRecord);
         const { run, account } = confirmAllocationState(state, runId, at);
         return { run: publicRun(run), quota: publicQuota(account, run, at), mustStop: false };
@@ -928,13 +947,13 @@ export function createManagedCloudBroker({
     async heartbeatCloudRun(secret, runId) {
       const result = await mutate((state) => {
         const at = now();
-        const cloud = ensureManagedState(state);
+        const cloud = ensureRaucloudState(state);
         const run = cloud.runs[validId(runId, 'runId')];
         assertWorkerSecret(secret, run);
-        if (!run) throw cloudError('CLOUD_RUN_NOT_FOUND', 'Managed Cloud run not found');
+        if (!run) throw cloudError('CLOUD_RUN_NOT_FOUND', 'Raucloud run not found');
         const account = ensureAccount(state, run.accountId, at);
         if (account.worker?.runId !== run.id || run.status !== 'active') {
-          throw cloudError('CLOUD_RUN_STATE_INVALID', 'Managed Cloud run is not active');
+          throw cloudError('CLOUD_RUN_STATE_INVALID', 'Raucloud run is not active');
         }
         const charge = chargeRun(account, run, at);
         run.lastHeartbeatAt = at;
@@ -954,14 +973,14 @@ export function createManagedCloudBroker({
       const storedCheckpoint = validId(checkpointId, 'checkpointId');
       const result = await mutate((state) => {
         const at = now();
-        const cloud = ensureManagedState(state);
+        const cloud = ensureRaucloudState(state);
         const run = cloud.runs[validId(runId, 'runId')];
         assertWorkerSecret(secret, run);
-        if (!run) throw cloudError('CLOUD_RUN_NOT_FOUND', 'Managed Cloud run not found');
+        if (!run) throw cloudError('CLOUD_RUN_NOT_FOUND', 'Raucloud run not found');
         const account = ensureAccount(state, run.accountId, at);
         if (run.status === 'active') chargeRun(account, run, at);
         if (!['active', 'checkpointing'].includes(run.status)) {
-          throw cloudError('CLOUD_RUN_STATE_INVALID', 'Managed Cloud run cannot be checkpointed');
+          throw cloudError('CLOUD_RUN_STATE_INVALID', 'Raucloud run cannot be checkpointed');
         }
         run.status = 'checkpointed';
         run.checkpointId = storedCheckpoint;
@@ -977,12 +996,12 @@ export function createManagedCloudBroker({
     async completeCloudRun(secret, runId, { checkpointId = null } = {}) {
       const result = await mutate((state) => {
         const at = now();
-        const cloud = ensureManagedState(state);
+        const cloud = ensureRaucloudState(state);
         const run = cloud.runs[validId(runId, 'runId')];
         assertWorkerSecret(secret, run);
-        if (!run) throw cloudError('CLOUD_RUN_NOT_FOUND', 'Managed Cloud run not found');
+        if (!run) throw cloudError('CLOUD_RUN_NOT_FOUND', 'Raucloud run not found');
         const account = ensureAccount(state, run.accountId, at);
-        if (run.status !== 'active') throw cloudError('CLOUD_RUN_STATE_INVALID', 'Managed Cloud run is not active');
+        if (run.status !== 'active') throw cloudError('CLOUD_RUN_STATE_INVALID', 'Raucloud run is not active');
         const charge = chargeRun(account, run, at);
         run.lastTurnCompletedAt = at;
         if (checkpointId) run.checkpointId = validId(checkpointId, 'checkpointId');
@@ -1008,10 +1027,10 @@ export function createManagedCloudBroker({
     async releaseCloudRun(secret, runId, { failureCode = 'WORKER_RELEASED' } = {}) {
       const result = await mutate((state) => {
         const at = now();
-        const cloud = ensureManagedState(state);
+        const cloud = ensureRaucloudState(state);
         const run = cloud.runs[validId(runId, 'runId')];
         assertWorkerSecret(secret, run);
-        if (!run) throw cloudError('CLOUD_RUN_NOT_FOUND', 'Managed Cloud run not found');
+        if (!run) throw cloudError('CLOUD_RUN_NOT_FOUND', 'Raucloud run not found');
         const account = ensureAccount(state, run.accountId, at);
         if (run.status === 'active') chargeRun(account, run, at);
         if (!['completed', 'stopped', 'checkpointed', 'failed'].includes(run.status)) {
@@ -1030,7 +1049,7 @@ export function createManagedCloudBroker({
     async reconcileCloudUsage() {
       const result = await mutate((state) => {
         const at = now();
-        const cloud = ensureManagedState(state);
+        const cloud = ensureRaucloudState(state);
         let active = 0;
         let stopped = 0;
         for (const account of Object.values(cloud.accounts)) {
@@ -1054,7 +1073,7 @@ export function createManagedCloudBroker({
         return { active, stopped, at };
       });
       await cleanupPendingRemotes();
-      const orphans = await cleanupManagedOrphans();
+      const orphans = await cleanupRaucloudOrphans();
       return { ...result, orphans };
     },
 
@@ -1062,7 +1081,7 @@ export function createManagedCloudBroker({
     async getCloudLease(secret) {
       const hash = secretHash(secret);
       const state = await store.load();
-      const cloud = ensureManagedState(state);
+      const cloud = ensureRaucloudState(state);
       for (const account of Object.values(cloud.accounts)) {
         if (!account.worker?.workerTokenHash || !sameSecret(account.worker.workerTokenHash, hash)) continue;
         const run = cloud.runs[account.worker.runId];
@@ -1076,7 +1095,7 @@ export function createManagedCloudBroker({
           inputBlocked: Boolean(run.inputBlocked),
         };
       }
-      throw cloudError('CLOUD_WORKER_UNAUTHORIZED', 'No managed Cloud lease matches this worker token');
+      throw cloudError('CLOUD_WORKER_UNAUTHORIZED', 'No Raucloud lease matches this worker token');
     },
 
     async reconcileLegacyCloud() {

@@ -707,6 +707,18 @@ test('the client remembers the chosen server mode and verifies bootstrap receipt
   assert.equal((await client.loadPendingAppSandbox()).providerId, 'railway');
   await client.clearPendingAppSandbox();
   assert.equal(await client.loadPendingAppSandbox(), null);
+  const legacyProviderId = 'managed-cloud'; // raucloud-legacy: persisted journal fixture.
+  await vault.set('cloud.pending-app-sandbox', JSON.stringify({
+    version: 1,
+    providerId: legacyProviderId,
+    sandbox: { ...SANDBOX, providerId: legacyProviderId },
+    createdAt: '2026-08-24T00:00:00.000Z',
+  }));
+  assert.deepEqual(
+    (await client.loadPendingAppSandbox()).sandbox.providerId,
+    'raucloud',
+  );
+  await client.clearPendingAppSandbox();
   assert.equal(await client.saveServerMode('app-hosted'), 'app-hosted');
   assert.equal(await client.loadServerMode(), 'app-hosted');
   await assert.rejects(client.saveServerMode('fly'), /server mode/);

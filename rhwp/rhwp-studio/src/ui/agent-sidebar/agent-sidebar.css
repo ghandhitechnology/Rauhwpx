@@ -76,6 +76,8 @@ body.ag-sidebar-animating .ag-root {
   --ag-bg: var(--n-surface);
   --ag-bg-2: var(--n-surface-sunken);
   --ag-raised: var(--n-surface-raised);
+  --ag-surface: var(--ag-raised);
+  --ag-surface-subtle: var(--ag-bg-2);
   --ag-text: var(--n-text);
   --ag-text-secondary: var(--n-text-secondary);
   --ag-text-muted: var(--n-text-muted);

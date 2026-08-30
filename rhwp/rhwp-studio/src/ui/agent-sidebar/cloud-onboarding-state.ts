@@ -199,7 +199,7 @@ export function mapSandboxIssue(error: unknown): CloudSetupIssue {
   const normalized = detail.toLowerCase();
   if (/not configured|railway_token|railway_project_id|railway_environment_id/.test(normalized)) {
     return {
-      title: '앱 제공 서버가 아직 준비되지 않았습니다',
+      title: 'Raucloud가 아직 준비되지 않았습니다',
       guidance: '이 빌드에는 앱 서버 설정이 없습니다. 내 서버를 사용하거나 앱을 업데이트하세요.',
       detail,
     };
@@ -213,7 +213,7 @@ export function mapSandboxIssue(error: unknown): CloudSetupIssue {
   }
   if (/does not include app-provided|provider_unavailable|unknown app server provider/.test(normalized)) {
     return {
-      title: '이 빌드에는 앱 제공 서버가 없습니다',
+      title: '이 빌드에는 Raucloud가 없습니다',
       guidance: '내 서버를 연결해 사용하세요.',
       detail,
     };
@@ -221,7 +221,7 @@ export function mapSandboxIssue(error: unknown): CloudSetupIssue {
   if (/rejected the configured api token|unauthorized/.test(normalized)) {
     return {
       title: '앱 서버 자격 증명이 거부되었습니다',
-      guidance: '앱 제공 서버를 사용할 수 없습니다. 잠시 후 다시 시도하거나 내 서버를 사용하세요.',
+      guidance: 'Raucloud를 사용할 수 없습니다. 잠시 후 다시 시도하거나 내 서버를 사용하세요.',
       detail,
     };
   }
@@ -256,7 +256,7 @@ export function mapSandboxIssue(error: unknown): CloudSetupIssue {
   if (/shut down the app-provided sandbox|sandbox_still_active/.test(normalized)) {
     return {
       title: '앱 샌드박스를 먼저 종료하세요',
-      guidance: '앱 제공 서버를 종료한 뒤 내 서버를 연결하세요.',
+      guidance: 'Raucloud를 종료한 뒤 내 서버를 연결하세요.',
       detail,
     };
   }
@@ -268,7 +268,7 @@ export function mapSandboxIssue(error: unknown): CloudSetupIssue {
     };
   }
   return {
-    title: '앱 제공 서버를 준비하지 못했습니다',
+    title: 'Raucloud를 준비하지 못했습니다',
     guidance: '다시 시도하거나 내 서버를 사용하세요.',
     detail,
   };

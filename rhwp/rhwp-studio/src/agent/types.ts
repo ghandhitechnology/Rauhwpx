@@ -394,7 +394,7 @@ export interface RauAccountSnapshot {
     coldStarts: { usedToday: number; dailyLimit: number; recent: number; recentLimit: number };
     graceEndsAt?: string | null;
   } | null;
-  managedCloud:
+  raucloud:
     | { kind: 'available' }
     | { kind: 'logged-out' }
     | { kind: 'exhausted'; resetAt: string }

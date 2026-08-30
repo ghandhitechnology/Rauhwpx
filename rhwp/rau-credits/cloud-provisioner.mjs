@@ -3,33 +3,33 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 export const RAILWAY_API_URL = 'https://backboard.railway.com/graphql/v2';
 export const RAILWAY_DEFAULT_IMAGE = 'ghcr.io/ghandhitechnology/rauhwpx-cloud:1.1.0-edge.12';
-export const MANAGED_CLOUD_BASE_PATH = '/rauhwpx-cloud';
-export const MANAGED_CLOUD_PORT = 7740;
+export const RAUCLOUD_BASE_PATH = '/rauhwpx-cloud';
+export const RAUCLOUD_PORT = 7740;
 
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const DEPLOY_TIMEOUT_MS = 12 * 60 * 1000;
 const HEALTH_TIMEOUT_MS = 5 * 60 * 1000;
 
 const SERVICE_CREATE = `
-mutation ManagedCloudServiceCreate($input: ServiceCreateInput!) {
+mutation RaucloudServiceCreate($input: ServiceCreateInput!) {
   serviceCreate(input: $input) { id name }
 }`;
 const SERVICE_DOMAIN_CREATE = `
-mutation ManagedCloudDomainCreate($input: ServiceDomainCreateInput!) {
+mutation RaucloudDomainCreate($input: ServiceDomainCreateInput!) {
   serviceDomainCreate(input: $input) { id domain }
 }`;
 const LATEST_DEPLOYMENT = `
-query ManagedCloudLatestDeployment($projectId: String!, $environmentId: String!, $serviceId: String!) {
+query RaucloudLatestDeployment($projectId: String!, $environmentId: String!, $serviceId: String!) {
   deployments(first: 1, input: { projectId: $projectId, environmentId: $environmentId, serviceId: $serviceId }) {
     edges { node { id status } }
   }
 }`;
 const SERVICE_DELETE = `
-mutation ManagedCloudServiceDelete($id: String!, $environmentId: String) {
+mutation RaucloudServiceDelete($id: String!, $environmentId: String) {
   serviceDelete(id: $id, environmentId: $environmentId)
 }`;
 const PROJECT_SERVICES = `
-query ManagedCloudProjectServices($projectId: String!) {
+query RaucloudProjectServices($projectId: String!) {
   project(id: $projectId) { services { edges { node { id name createdAt } } } }
 }`;
 
@@ -82,8 +82,14 @@ function safeDomain(value) {
   return /^(?!-)[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(domain) ? domain : '';
 }
 
-function managedServiceName(accountId, runId) {
-  return `rauhwpx-managed-${createHashSuffix(accountId)}-${createHashSuffix(runId)}`;
+function raucloudServiceName(accountId, runId) {
+  return `rauhwpx-raucloud-${createHashSuffix(accountId)}-${createHashSuffix(runId)}`;
+}
+
+const LEGACY_RAUCLOUD_SERVICE_PREFIX = 'rauhwpx-managed-'; // raucloud-legacy: keep existing Railway workers reconcilable.
+
+function legacyRaucloudServiceName(accountId, runId) {
+  return `${LEGACY_RAUCLOUD_SERVICE_PREFIX}${createHashSuffix(accountId)}-${createHashSuffix(runId)}`;
 }
 
 /**
@@ -164,7 +170,7 @@ export function createRailwayCloudProvisioner({
       } catch {}
       await sleep(1_500);
     }
-    if (!publicKey) throw provisionerError('SANDBOX_UNHEALTHY', 'Managed Cloud worker did not answer its health check');
+    if (!publicKey) throw provisionerError('SANDBOX_UNHEALTHY', 'Raucloud worker did not answer its health check');
     const paired = await fetchImpl(`${endpoint}/v1/pairing/bootstrap`, {
       method: 'POST',
       headers: {
@@ -178,7 +184,7 @@ export function createRailwayCloudProvisioner({
     const pairingCode = clean(body.code, 64);
     if (!paired.ok || !/^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/.test(pairingCode)
       || clean(body.serverPublicKey, 512) !== publicKey) {
-      throw provisionerError('BOOTSTRAP_RECEIPT_INVALID', 'Managed Cloud worker returned an invalid pairing receipt');
+      throw provisionerError('BOOTSTRAP_RECEIPT_INVALID', 'Raucloud worker returned an invalid pairing receipt');
     }
     return { endpoint, serverPublicKey: publicKey, pairingCode };
   }
@@ -192,12 +198,16 @@ export function createRailwayCloudProvisioner({
     id: 'railway',
 
     serviceName({ accountId, runId }) {
-      return managedServiceName(accountId, runId);
+      return raucloudServiceName(accountId, runId);
+    },
+
+    legacyServiceName({ accountId, runId }) {
+      return legacyRaucloudServiceName(accountId, runId);
     },
 
     async provision({ runId, accountId, deviceId, workerToken, onRemoteCreated = async () => {} }) {
       const bootstrapToken = randomBytes(32).toString('base64url');
-      const serviceName = managedServiceName(accountId, runId);
+      const serviceName = raucloudServiceName(accountId, runId);
       const createInput = {
         projectId: config.projectId,
         environmentId: config.environmentId,
@@ -205,9 +215,9 @@ export function createRailwayCloudProvisioner({
         source: { image: config.image },
         variables: {
             RAUHWpx_HOST: '0.0.0.0',
-            RAUHWpx_PORT: String(MANAGED_CLOUD_PORT),
-            PORT: String(MANAGED_CLOUD_PORT),
-            RAUHWpx_BASE_PATH: MANAGED_CLOUD_BASE_PATH,
+            RAUHWpx_PORT: String(RAUCLOUD_PORT),
+            PORT: String(RAUCLOUD_PORT),
+            RAUHWpx_BASE_PATH: RAUCLOUD_BASE_PATH,
             RAUHWpx_BOOTSTRAP_TOKEN: bootstrapToken,
             RAUHWpx_CHANNEL: 'stable',
             RAUHWpx_MAX_RUNNING: '1',
@@ -220,9 +230,9 @@ export function createRailwayCloudProvisioner({
             RAUHWpx_DATA_DIR: '/var/lib/rauhwpx-cloud',
             RAUHWpx_SANDBOX_INSTALL_PROVIDER: '0',
             ...(config.brokerUrl ? {
-              RAUHWpx_MANAGED_BROKER_URL: config.brokerUrl,
-              RAUHWpx_MANAGED_RUN_ID: runId,
-              RAUHWpx_MANAGED_WORKER_TOKEN: workerToken,
+              RAUHWpx_RAUCLOUD_BROKER_URL: config.brokerUrl,
+              RAUHWpx_RAUCLOUD_RUN_ID: runId,
+              RAUHWpx_RAUCLOUD_WORKER_TOKEN: workerToken,
             } : {}),
         },
       };
@@ -255,7 +265,7 @@ export function createRailwayCloudProvisioner({
       try {
         await onRemoteCreated(remote);
         const domainData = await graphql(SERVICE_DOMAIN_CREATE, {
-          input: { environmentId: config.environmentId, serviceId, targetPort: MANAGED_CLOUD_PORT },
+          input: { environmentId: config.environmentId, serviceId, targetPort: RAUCLOUD_PORT },
         });
         const domain = safeDomain(domainData.serviceDomainCreate?.domain);
         if (!domain) throw provisionerError('PROVIDER_RESPONSE_INVALID', 'Railway did not return a usable domain');
@@ -263,7 +273,7 @@ export function createRailwayCloudProvisioner({
         remote.domain = domain;
         await onRemoteCreated(remote);
         await waitForDeployment(remote);
-        const endpoint = `https://${domain}${MANAGED_CLOUD_BASE_PATH}`;
+        const endpoint = `https://${domain}${RAUCLOUD_BASE_PATH}`;
         const receipt = await waitForReceipt(endpoint, bootstrapToken, `Rauhwpx ${clean(deviceId, 60)}`);
         return { remote, receipt };
       } catch (error) {
@@ -288,10 +298,13 @@ export function createRailwayCloudProvisioner({
       return { removed: true };
     },
 
-    async reconcileManaged({ keepServiceNames = [], limit = 100 } = {}) {
+    async reconcileRaucloud({ keepServiceNames = [], limit = 100 } = {}) {
       const keep = new Set(keepServiceNames.map((name) => clean(name, 160)).filter(Boolean));
       const orphans = (await projectServices())
-        .filter((service) => String(service.name ?? '').startsWith('rauhwpx-managed-'))
+        .filter((service) => {
+          const name = String(service.name ?? '');
+          return name.startsWith('rauhwpx-raucloud-') || name.startsWith(LEGACY_RAUCLOUD_SERVICE_PREFIX);
+        })
         .filter((service) => !keep.has(String(service.name ?? '')))
         .slice(0, Math.max(1, Math.min(100, Number(limit) || 100)));
       const failed = [];

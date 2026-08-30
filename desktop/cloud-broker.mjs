@@ -2,9 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { AppServerError } from './cloud-app-server.mjs';
 
-export const MANAGED_CLOUD_PROVIDER_ID = 'managed-cloud';
-export const MANAGED_CLOUD_ACCESS_SECRET = 'rhwp.rau.openrouter-api-key';
-export const MANAGED_CLOUD_DEFAULT_URL = 'https://rau-credits-production.up.railway.app';
+export const RAUCLOUD_PROVIDER_ID = 'raucloud';
+export const RAUCLOUD_ACCESS_SECRET = 'rhwp.rau.openrouter-api-key';
+export const RAUCLOUD_DEFAULT_URL = 'https://rau-credits-production.up.railway.app';
 
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -43,23 +43,23 @@ function trimmed(value, limit = 2048) {
 function brokerBaseUrl(value) {
   let url;
   try { url = new URL(trimmed(value, 4096)); } catch {
-    throw new Error('Managed Cloud broker URL is invalid');
+    throw new Error('Raucloud broker URL is invalid');
   }
   const localDevelopment = url.protocol === 'http:' && ['127.0.0.1', 'localhost', '::1'].includes(url.hostname);
   if (url.protocol !== 'https:' && !localDevelopment) {
-    throw new Error('Managed Cloud broker must use HTTPS');
+    throw new Error('Raucloud broker must use HTTPS');
   }
   if (url.username || url.password || url.search || url.hash) {
-    throw new Error('Managed Cloud broker URL must not contain credentials, a query, or a fragment');
+    throw new Error('Raucloud broker URL must not contain credentials, a query, or a fragment');
   }
   return url.toString().replace(/\/+$/, '');
 }
 
-export function managedCloudBrokerUrl(environment = process.env) {
+export function raucloudBrokerUrl(environment = process.env) {
   return brokerBaseUrl(
     environment.RAUHWpx_CLOUD_BROKER_URL
       || environment.RAU_CREDITS_URL
-      || MANAGED_CLOUD_DEFAULT_URL,
+      || RAUCLOUD_DEFAULT_URL,
   );
 }
 
@@ -110,7 +110,7 @@ function normalizedStatus(payload, fallback = 'idle') {
     lifecycle,
     status: rawStatus,
     message: trimmed(payload?.message ?? run.message, 1024) || null,
-    managedCloud: {
+    raucloud: {
       runId: runId(payload) || null,
       status: rawStatus,
       lifecycle,
@@ -134,7 +134,7 @@ function isoTime(value, fallback = null) {
 function accountSnapshotFrom(payload, { signedIn = true, reason = null } = {}) {
   const updatedAt = new Date().toISOString();
   if (!signedIn) {
-    return { signedIn: false, account: null, quota: null, managedCloud: { kind: 'logged-out' }, updatedAt };
+    return { signedIn: false, account: null, quota: null, raucloud: { kind: 'logged-out' }, updatedAt };
   }
   const account = payload?.account && typeof payload.account === 'object' ? payload.account : null;
   const rawQuota = payload?.quota && typeof payload.quota === 'object' ? payload.quota : null;
@@ -165,22 +165,22 @@ function accountSnapshotFrom(payload, { signedIn = true, reason = null } = {}) {
     },
     graceEndsAt: isoTime(activeRun?.graceDeadlineAt, null),
   } : null;
-  let managedCloud;
+  let raucloud;
   // `canStart: false` with a ready gate means this device already controls the
   // active run. It must stay interactive even though a second run is forbidden.
-  if (gate?.state === 'ready') managedCloud = { kind: 'available' };
+  if (gate?.state === 'ready') raucloud = { kind: 'available' };
   else if (gate?.state === 'quota_exhausted' || (quota && quota.remainingMs <= 0 && !activeRun)) {
-    managedCloud = { kind: 'exhausted', resetAt };
+    raucloud = { kind: 'exhausted', resetAt };
   } else if (gate?.state === 'owned_elsewhere') {
-    managedCloud = {
+    raucloud = {
       kind: 'active-elsewhere',
       runId: trimmed(activeRun?.id ?? activeRun?.runId ?? worker?.runId, 128),
       deviceName: trimmed(activeRun?.ownerDeviceName ?? activeRun?.deviceName, 120) || null,
     };
   } else {
-    managedCloud = {
+    raucloud = {
       kind: 'unavailable',
-      reason: trimmed(reason ?? gate?.reason, 512) || 'Managed Cloud is unavailable',
+      reason: trimmed(reason ?? gate?.reason, 512) || 'Raucloud is unavailable',
     };
   }
   return {
@@ -191,7 +191,7 @@ function accountSnapshotFrom(payload, { signedIn = true, reason = null } = {}) {
       displayName: trimmed(account.displayName, 160) || null,
     } : null,
     quota,
-    managedCloud,
+    raucloud,
     updatedAt,
   };
 }
@@ -200,25 +200,30 @@ function retryableStatus(status) {
   return status === 408 || status === 425 || status === 429 || status >= 500;
 }
 
+const LEGACY_RAUCLOUD_ERROR_PREFIX = 'MANAGED_CLOUD_'; // raucloud-legacy: normalize responses from an older broker.
+
 function stableErrorCode(status, payload) {
   const supplied = trimmed(
     typeof payload?.error === 'string' ? payload.error : payload?.error?.code ?? payload?.code,
     96,
   ).toUpperCase();
+  if (supplied.startsWith(LEGACY_RAUCLOUD_ERROR_PREFIX)) {
+    return `RAUCLOUD_${supplied.slice(LEGACY_RAUCLOUD_ERROR_PREFIX.length)}`;
+  }
   if (supplied) return supplied;
-  if (status === 401) return 'MANAGED_CLOUD_AUTH_REQUIRED';
-  if (status === 403) return 'MANAGED_CLOUD_FORBIDDEN';
-  if (status === 409) return 'MANAGED_CLOUD_TAKEOVER_REQUIRED';
-  if (status === 402 || status === 429) return 'MANAGED_CLOUD_QUOTA_EXHAUSTED';
-  if (status >= 500) return 'MANAGED_CLOUD_UNAVAILABLE';
-  return 'MANAGED_CLOUD_REQUEST_FAILED';
+  if (status === 401) return 'RAUCLOUD_AUTH_REQUIRED';
+  if (status === 403) return 'RAUCLOUD_FORBIDDEN';
+  if (status === 409) return 'RAUCLOUD_TAKEOVER_REQUIRED';
+  if (status === 402 || status === 429) return 'RAUCLOUD_QUOTA_EXHAUSTED';
+  if (status >= 500) return 'RAUCLOUD_UNAVAILABLE';
+  return 'RAUCLOUD_REQUEST_FAILED';
 }
 
 async function responsePayload(response, signal) {
   const declared = Number(response.headers?.get?.('content-length'));
   if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
-    throw new AppServerError('Managed Cloud response is too large', {
-      code: 'MANAGED_CLOUD_RESPONSE_INVALID', retryable: false,
+    throw new AppServerError('Raucloud response is too large', {
+      code: 'RAUCLOUD_RESPONSE_INVALID', retryable: false,
     });
   }
   if (!response.body) return {};
@@ -236,8 +241,8 @@ async function responsePayload(response, signal) {
       size += chunk.length;
       if (size > MAX_RESPONSE_BYTES) {
         await reader.cancel().catch(() => {});
-        throw new AppServerError('Managed Cloud response is too large', {
-          code: 'MANAGED_CLOUD_RESPONSE_INVALID', retryable: false,
+        throw new AppServerError('Raucloud response is too large', {
+          code: 'RAUCLOUD_RESPONSE_INVALID', retryable: false,
         });
       }
       chunks.push(chunk);
@@ -249,22 +254,22 @@ async function responsePayload(response, signal) {
   const text = Buffer.concat(chunks, size).toString('utf8');
   if (!text) return {};
   try { return JSON.parse(text); } catch {
-    throw new AppServerError('Managed Cloud returned invalid JSON', {
-      code: 'MANAGED_CLOUD_RESPONSE_INVALID', retryable: false,
+    throw new AppServerError('Raucloud returned invalid JSON', {
+      code: 'RAUCLOUD_RESPONSE_INVALID', retryable: false,
     });
   }
 }
 
-function publicError(error, fallback = 'Managed Cloud is unavailable') {
+function publicError(error, fallback = 'Raucloud is unavailable') {
   if (error instanceof AppServerError) return error;
   if (error?.name === 'AbortError') return error;
   return new AppServerError(fallback, {
-    code: 'MANAGED_CLOUD_UNAVAILABLE', retryable: true, cause: error,
+    code: 'RAUCLOUD_UNAVAILABLE', retryable: true, cause: error,
   });
 }
 
-export function createManagedCloudBrokerClient({
-  baseUrl = managedCloudBrokerUrl(),
+export function createRaucloudBrokerClient({
+  baseUrl = raucloudBrokerUrl(),
   getAccessToken,
   getDeviceIdentity,
   fetchImpl = globalThis.fetch,
@@ -272,15 +277,15 @@ export function createManagedCloudBrokerClient({
   sleep = (ms, options) => delay(ms, undefined, options),
 } = {}) {
   const normalizedBaseUrl = brokerBaseUrl(baseUrl);
-  if (typeof getAccessToken !== 'function') throw new Error('Managed Cloud broker requires account token access');
-  if (typeof getDeviceIdentity !== 'function') throw new Error('Managed Cloud broker requires a device identity');
-  if (typeof fetchImpl !== 'function') throw new Error('Managed Cloud broker requires fetch');
+  if (typeof getAccessToken !== 'function') throw new Error('Raucloud broker requires account token access');
+  if (typeof getDeviceIdentity !== 'function') throw new Error('Raucloud broker requires a device identity');
+  if (typeof fetchImpl !== 'function') throw new Error('Raucloud broker requires fetch');
 
   async function accountToken() {
     const token = trimmed(await getAccessToken(), 8192);
     if (!ACCESS_TOKEN_RE.test(token)) {
-      throw new AppServerError('Sign in to Rauhwpx to use managed Cloud', {
-        code: 'MANAGED_CLOUD_AUTH_REQUIRED', retryable: false,
+      throw new AppServerError('Sign in to Rauhwpx to use Raucloud', {
+        code: 'RAUCLOUD_AUTH_REQUIRED', retryable: false,
       });
     }
     return token;
@@ -295,7 +300,7 @@ export function createManagedCloudBrokerClient({
     signal?.addEventListener('abort', abort, { once: true });
     if (signal?.aborted) abort();
     const timer = setTimeout(
-      () => controller.abort(new DOMException('Managed Cloud request timed out', 'AbortError')),
+      () => controller.abort(new DOMException('Raucloud request timed out', 'AbortError')),
       Math.max(1, Number(requestTimeoutMs) || DEFAULT_TIMEOUT_MS),
     );
     try {
@@ -316,8 +321,8 @@ export function createManagedCloudBrokerClient({
       if (!response.ok) {
         const message = trimmed(payload?.error?.message ?? payload?.message, 1024)
           || (response.status === 401
-            ? 'Sign in to Rauhwpx to use managed Cloud'
-            : 'Managed Cloud could not complete the request');
+            ? 'Sign in to Rauhwpx to use Raucloud'
+            : 'Raucloud could not complete the request');
         const error = new AppServerError(message, {
           code: stableErrorCode(response.status, payload),
           retryable: retryableStatus(response.status),
@@ -331,8 +336,8 @@ export function createManagedCloudBrokerClient({
     } catch (error) {
       if (signal?.aborted) throw signal.reason ?? error;
       if (controller.signal.aborted) {
-        throw new AppServerError('Managed Cloud took too long to respond', {
-          code: 'MANAGED_CLOUD_TIMEOUT', retryable: true, cause: error,
+        throw new AppServerError('Raucloud took too long to respond', {
+          code: 'RAUCLOUD_TIMEOUT', retryable: true, cause: error,
         });
       }
       throw publicError(error);
@@ -346,8 +351,8 @@ export function createManagedCloudBrokerClient({
     const identity = await getDeviceIdentity();
     const id = trimmed(identity?.id ?? identity?.deviceId, 128);
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(id)) {
-      throw new AppServerError('Managed Cloud device identity is unavailable', {
-        code: 'MANAGED_CLOUD_DEVICE_INVALID', retryable: false,
+      throw new AppServerError('Raucloud device identity is unavailable', {
+        code: 'RAUCLOUD_DEVICE_INVALID', retryable: false,
       });
     }
     return { id, name: trimmed(deviceName || identity?.name, 120) || 'Rauhwpx desktop' };
@@ -377,7 +382,7 @@ export function createManagedCloudBrokerClient({
       deviceName, checkpointId, signal = null, idempotencyKey = randomUUID(),
     } = {}) {
       const safeId = encodeURIComponent(trimmed(id, 128));
-      if (!safeId) throw new AppServerError('Managed Cloud run id is invalid', { code: 'MANAGED_CLOUD_RUN_INVALID', retryable: false });
+      if (!safeId) throw new AppServerError('Raucloud run id is invalid', { code: 'RAUCLOUD_RUN_INVALID', retryable: false });
       const currentDevice = await device(deviceName);
       return request(`/v1/cloud/runs/${safeId}/takeover`, {
         method: 'POST', signal, idempotencyKey,
@@ -392,7 +397,7 @@ export function createManagedCloudBrokerClient({
       idempotencyKey = randomUUID(),
     } = {}) {
       const safeId = encodeURIComponent(trimmed(id, 128));
-      if (!safeId) throw new AppServerError('Managed Cloud run id is invalid', { code: 'MANAGED_CLOUD_RUN_INVALID', retryable: false });
+      if (!safeId) throw new AppServerError('Raucloud run id is invalid', { code: 'RAUCLOUD_RUN_INVALID', retryable: false });
       return request(`/v1/cloud/runs/${safeId}/stop`, {
         method: 'POST', signal, idempotencyKey,
         body: {
@@ -408,13 +413,13 @@ export function createManagedCloudBrokerClient({
   };
 }
 
-export function createManagedCloudBrokerProvider(options = {}) {
-  const client = options.client ?? createManagedCloudBrokerClient(options);
+export function createRaucloudBrokerProvider(options = {}) {
+  const client = options.client ?? createRaucloudBrokerClient(options);
   const allocationAttempts = Math.max(1, Math.min(240, Math.trunc(Number(options.allocationAttempts)) || 120));
   const allocationPollMs = Math.max(10, Math.min(10_000, Number(options.allocationPollMs) || 2_500));
   return {
-    id: MANAGED_CLOUD_PROVIDER_ID,
-    displayName: 'Rauhwpx Cloud',
+    id: RAUCLOUD_PROVIDER_ID,
+    displayName: 'Raucloud',
     configuration() {
       return { configured: true, missing: [], brokerUrl: client.baseUrl, accountRequired: true };
     },
@@ -425,14 +430,14 @@ export function createManagedCloudBrokerProvider(options = {}) {
       onLine('Checking account and daily Cloud allowance');
       let payload = await client.createRun({ deviceName, provider: selectedProvider, signal });
       const id = runId(payload);
-      if (!id) throw new AppServerError('Managed Cloud returned no run id', {
-        code: 'MANAGED_CLOUD_RESPONSE_INVALID', retryable: false,
+      if (!id) throw new AppServerError('Raucloud returned no run id', {
+        code: 'RAUCLOUD_RESPONSE_INVALID', retryable: false,
       });
       let receipt = receiptFrom(payload);
       let state = normalizedStatus(payload, 'provisioning');
       const createdAt = runEnvelope(payload).createdAt;
       const sandbox = {
-        providerId: MANAGED_CLOUD_PROVIDER_ID,
+        providerId: RAUCLOUD_PROVIDER_ID,
         sandboxId: id,
         projectId: '',
         environmentId: '',
@@ -445,29 +450,29 @@ export function createManagedCloudBrokerProvider(options = {}) {
       };
       await onSandboxCreated(sandbox);
       try {
-        onLine(state.managedCloud.reused ? 'Reconnecting to your warm Cloud worker' : 'Preparing your private Cloud worker');
+        onLine(state.raucloud.reused ? 'Reconnecting to your warm Cloud worker' : 'Preparing your private Cloud worker');
         for (let attempt = 0; !receipt && attempt < allocationAttempts; attempt += 1) {
           await client.sleep(allocationPollMs, { signal });
           payload = await client.status({ runId: id, signal });
           state = normalizedStatus(payload, 'provisioning');
           receipt = receiptFrom(payload);
           if (state.lifecycle === 'error' || ['failed', 'stopped', 'expired'].includes(state.status)) {
-            throw new AppServerError(state.message ?? 'Managed Cloud worker could not be prepared', {
-              code: 'MANAGED_CLOUD_ALLOCATION_FAILED', retryable: true,
+            throw new AppServerError(state.message ?? 'Raucloud worker could not be prepared', {
+              code: 'RAUCLOUD_ALLOCATION_FAILED', retryable: true,
             });
           }
           if (!receipt && attempt === 0) onLine('Allocating secure worker capacity');
         }
         if (!receipt) {
-          throw new AppServerError('Managed Cloud worker preparation timed out', {
-            code: 'MANAGED_CLOUD_ALLOCATION_TIMEOUT', retryable: true,
+          throw new AppServerError('Raucloud worker preparation timed out', {
+            code: 'RAUCLOUD_ALLOCATION_TIMEOUT', retryable: true,
           });
         }
         sandbox.host = new URL(receipt.endpoint).hostname;
         return {
           sandbox,
           receipt,
-          managedCloud: state.managedCloud,
+          raucloud: state.raucloud,
           account: accountSnapshotFrom(payload),
         };
       } catch (error) {
@@ -486,12 +491,12 @@ export function createManagedCloudBrokerProvider(options = {}) {
       try {
         return accountSnapshotFrom(await client.status({ signal }));
       } catch (error) {
-        if (error?.code === 'MANAGED_CLOUD_AUTH_REQUIRED' || error?.status === 401) {
+        if (error?.code === 'RAUCLOUD_AUTH_REQUIRED' || error?.status === 401) {
           return accountSnapshotFrom(null, { signedIn: false });
         }
         return accountSnapshotFrom(null, {
           signedIn: true,
-          reason: error?.message ?? 'Managed Cloud status could not be loaded',
+          reason: error?.message ?? 'Raucloud status could not be loaded',
         });
       }
     },
@@ -510,13 +515,13 @@ export function createManagedCloudBrokerProvider(options = {}) {
       });
       const receipt = receiptFrom(payload);
       if (!receipt) {
-        throw new AppServerError('Managed Cloud takeover returned no pairing receipt', {
-          code: 'MANAGED_CLOUD_RESPONSE_INVALID', retryable: false,
+        throw new AppServerError('Raucloud takeover returned no pairing receipt', {
+          code: 'RAUCLOUD_RESPONSE_INVALID', retryable: false,
         });
       }
       return {
         sandbox: {
-          providerId: MANAGED_CLOUD_PROVIDER_ID,
+          providerId: RAUCLOUD_PROVIDER_ID,
           sandboxId: runId(payload),
           projectId: '',
           environmentId: '',
@@ -526,7 +531,7 @@ export function createManagedCloudBrokerProvider(options = {}) {
           createdAt: new Date().toISOString(),
         },
         receipt,
-        managedCloud: normalizedStatus(payload).managedCloud,
+        raucloud: normalizedStatus(payload).raucloud,
         account: accountSnapshotFrom(payload),
       };
     },

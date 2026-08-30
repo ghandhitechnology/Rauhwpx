@@ -4,7 +4,7 @@ import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 import { decryptSecret, encryptSecret } from './crypto.mjs';
-import { createManagedCloudBroker } from './cloud-broker.mjs';
+import { createRaucloudBroker } from './cloud-broker.mjs';
 import { RAU_CREDIT_LIMIT_USD, RAU_MODEL_IDS } from './catalog.mjs';
 import {
   renderCodePage,
@@ -360,7 +360,7 @@ export function createCreditsService({
     return { grant, user, apiKey };
   }
 
-  const cloudBroker = createManagedCloudBroker({
+  const cloudBroker = createRaucloudBroker({
     store,
     mutate,
     now,

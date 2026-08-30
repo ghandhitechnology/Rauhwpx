@@ -232,7 +232,7 @@ function signedOutRauAccount() {
     signedIn: false,
     account: null,
     quota: null,
-    managedCloud: { state: 'logged-out' },
+    raucloud: { state: 'logged-out' },
     updatedAt: new Date().toISOString(),
   };
 }
@@ -255,9 +255,10 @@ async function rauAccountSnapshot() {
   const sourceQuota = cloud?.quota ?? response?.quota ?? null;
   const grace = sourceQuota?.grace ?? {};
   const sourceRun = cloud?.activeRun ?? sourceQuota?.activeRun ?? null;
-  const sourceGate = cloud?.gate ?? response?.managedCloud ?? null;
+  const legacyRaucloudGate = response?.managedCloud; // raucloud-legacy: tolerate an older account endpoint during rollout.
+  const sourceGate = cloud?.gate ?? response?.raucloud ?? legacyRaucloudGate ?? null;
   const gateState = String(sourceGate?.state ?? sourceGate?.kind ?? '').toLowerCase();
-  const managedCloud = gateState === 'ready'
+  const raucloud = gateState === 'ready'
     ? { kind: 'available' }
     : gateState === 'quota_exhausted'
       ? { kind: 'exhausted', resetAt: rauAccountTime(sourceQuota?.resetsAt) }
@@ -266,7 +267,7 @@ async function rauAccountSnapshot() {
         : gateState === 'grace_active'
           ? { kind: 'exhausted', resetAt: rauAccountTime(sourceQuota?.resetsAt) }
           : gateState === 'timezone_required'
-            ? { kind: 'unavailable', reason: 'Choose an account timezone to use managed Cloud.' }
+            ? { kind: 'unavailable', reason: 'Choose an account timezone to use Raucloud.' }
             : sourceGate?.kind
               ? sourceGate
               : { kind: account ? 'available' : 'logged-out' };
@@ -302,7 +303,7 @@ async function rauAccountSnapshot() {
       ...(account.displayName ? { displayName: String(account.displayName) } : {}),
     } : null,
     quota,
-    managedCloud,
+    raucloud,
     updatedAt: new Date().toISOString(),
   };
 }

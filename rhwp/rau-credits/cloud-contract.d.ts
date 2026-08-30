@@ -1,4 +1,4 @@
-export type ManagedCloudRunStatus =
+export type RaucloudRunStatus =
   | 'allocating'
   | 'ready'
   | 'active'
@@ -39,7 +39,7 @@ export interface CloudQuotaSnapshot {
   };
 }
 
-export interface ManagedCloudReceipt {
+export interface RaucloudReceipt {
   endpoint: string;
   serverPublicKey: string;
   pairingCode: string;
@@ -47,7 +47,7 @@ export interface ManagedCloudReceipt {
 
 export interface CloudRunSummary {
   id: string;
-  status: ManagedCloudRunStatus;
+  status: RaucloudRunStatus;
   ownerDeviceId: string;
   createdAt: number;
   allocatedAt: number | null;
@@ -56,10 +56,10 @@ export interface CloudRunSummary {
   inputBlocked: boolean;
   graceDeadlineAt: number | null;
   /** Present only when the requesting token is bound to ownerDeviceId. */
-  receipt: ManagedCloudReceipt | null;
+  receipt: RaucloudReceipt | null;
 }
 
-export interface ManagedCloudGate {
+export interface RaucloudGate {
   state: 'ready' | 'timezone_required' | 'quota_exhausted' | 'owned_elsewhere' | 'grace_active' | 'unavailable';
   canStart: boolean;
   canTakeover: boolean;
@@ -75,11 +75,11 @@ export interface CloudStatusEnvelope {
     ownerDeviceId: string;
     runId: string;
     warmUntil: number | null;
-    receipt: ManagedCloudReceipt | null;
+    receipt: RaucloudReceipt | null;
   };
   activeRun: CloudRunSummary | null;
   takeoverRun: CloudRunSummary | null;
-  gate: ManagedCloudGate;
+  gate: RaucloudGate;
 }
 
 export interface CloudRunEnvelope extends CloudStatusEnvelope {

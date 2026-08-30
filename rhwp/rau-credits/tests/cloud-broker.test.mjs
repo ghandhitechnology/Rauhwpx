@@ -114,7 +114,22 @@ test('different WorkOS identities for one verified email share one Cloud account
     () => service.createCloudRun(tokenB, { deviceId: 'device-b', timezone: 'UTC', idempotencyKey: 'canonical-b' }),
     { code: 'CLOUD_OWNED_ELSEWHERE' },
   );
-  assert.equal(Object.keys((await store.load()).managedCloud.accounts).length, 1);
+  assert.equal(Object.keys((await store.load()).raucloud.accounts).length, 1);
+});
+
+test('retired broker state migrates to Raucloud without losing account data', async () => {
+  const f = await fixture();
+  await f.service.setAccountTimezone(f.token, 'UTC');
+  const state = await f.store.load();
+  const legacyStateKey = 'managedCloud'; // raucloud-legacy: durable state fixture.
+  state[legacyStateKey] = state.raucloud;
+  delete state.raucloud;
+  await f.store.save(state);
+
+  await f.service.reconcileCloudUsage();
+  const migrated = await f.store.load();
+  assert.equal(migrated[legacyStateKey], undefined);
+  assert.equal(migrated.raucloud.accounts.user_cloud.timezone, 'UTC');
 });
 
 test('shared transactional store preserves the one-worker invariant across service instances', async () => {
@@ -349,8 +364,8 @@ test('injected provisioner returns a receipt, receives only a scoped worker toke
   let scopedToken = '';
   let reconciledKeepNames = null;
   const provisioner = {
-    serviceName: ({ runId }) => `rauhwpx-managed-test-${runId}`,
-    async reconcileManaged({ keepServiceNames }) {
+    serviceName: ({ runId }) => `rauhwpx-raucloud-test-${runId}`,
+    async reconcileRaucloud({ keepServiceNames }) {
       reconciledKeepNames = keepServiceNames;
       return { found: 0, removed: 0, failed: [] };
     },
@@ -410,7 +425,7 @@ test('injected provisioner returns a receipt, receives only a scoped worker toke
   );
   await f.service.reconcileCloudUsage();
   assert.equal(teardownAttempts, 2);
-  assert.deepEqual(reconciledKeepNames, [], 'terminal runs are not protected from managed orphan cleanup');
+  assert.deepEqual(reconciledKeepNames, [], 'terminal runs are not protected from Raucloud orphan cleanup');
   const state = await f.service.inspectCloudState(f.token);
   assert.equal(state.runs[lease.runId].remote, undefined);
 });
@@ -440,10 +455,13 @@ test('provision failure after a remote id is persisted tears the orphan down', a
   assert.equal(state.account.worker, null);
 });
 
-test('Railway reconciliation deletes delayed managed creates that have no durable run', async () => {
+test('Railway reconciliation deletes delayed Raucloud creates that have no durable run', async () => {
+  const legacyPrefix = 'rauhwpx-managed-'; // raucloud-legacy: existing Railway service fixture.
   let services = [
-    { id: 'svc-keep', name: 'rauhwpx-managed-keep' },
-    { id: 'svc-orphan', name: 'rauhwpx-managed-orphan' },
+    { id: 'svc-keep', name: 'rauhwpx-raucloud-keep' },
+    { id: 'svc-orphan', name: 'rauhwpx-raucloud-orphan' },
+    { id: 'svc-legacy-keep', name: `${legacyPrefix}keep` },
+    { id: 'svc-legacy-orphan', name: `${legacyPrefix}orphan` },
     { id: 'svc-user', name: 'unrelated-service' },
   ];
   const provisioner = createRailwayCloudProvisioner({
@@ -453,19 +471,21 @@ test('Railway reconciliation deletes delayed managed creates that have no durabl
     },
     fetchImpl: async (_url, options) => {
       const { query, variables } = JSON.parse(options.body);
-      if (query.includes('ManagedCloudProjectServices')) {
+      if (query.includes('RaucloudProjectServices')) {
         return Response.json({ data: { project: { services: { edges: services.map((node) => ({ node })) } } } });
       }
-      if (query.includes('ManagedCloudServiceDelete')) {
+      if (query.includes('RaucloudServiceDelete')) {
         services = services.filter((service) => service.id !== variables.id);
         return Response.json({ data: { serviceDelete: true } });
       }
       throw new Error('unexpected Railway operation');
     },
   });
-  const result = await provisioner.reconcileManaged({ keepServiceNames: ['rauhwpx-managed-keep'] });
-  assert.equal(result.removed, 1);
-  assert.deepEqual(services.map(({ id }) => id), ['svc-keep', 'svc-user']);
+  const result = await provisioner.reconcileRaucloud({
+    keepServiceNames: ['rauhwpx-raucloud-keep', `${legacyPrefix}keep`],
+  });
+  assert.equal(result.removed, 2);
+  assert.deepEqual(services.map(({ id }) => id), ['svc-keep', 'svc-legacy-keep', 'svc-user']);
 });
 
 test('HTTP account, status, run, and internal endpoints use stable envelopes and separate auth', async () => {

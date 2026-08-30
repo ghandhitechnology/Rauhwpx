@@ -269,7 +269,7 @@ export class CloudCoordinator extends EventEmitter {
   #appServers;
   #sandboxLifecycle = 'idle';
   #sandboxMessage = null;
-  #managedCloudStatus = null;
+  #raucloudStatus = null;
   #accountSnapshot = null;
   #accountStatusPromise = null;
   #accountStatusAt = 0;
@@ -342,7 +342,7 @@ export class CloudCoordinator extends EventEmitter {
         signedIn: true,
         account: null,
         quota: null,
-        managedCloud: { kind: 'unavailable', reason: error?.message ?? 'Managed Cloud status is unavailable' },
+        raucloud: { kind: 'unavailable', reason: error?.message ?? 'Raucloud status is unavailable' },
         updatedAt,
       };
       this.#accountStatusAt = Date.now();
@@ -772,7 +772,7 @@ export class CloudCoordinator extends EventEmitter {
         providers: this.#appServers.list(),
         lifecycle: this.#sandboxLifecycle,
         message: this.#sandboxMessage,
-        ...(this.#managedCloudStatus ? { managedCloud: this.#managedCloudStatus } : {}),
+        ...(this.#raucloudStatus ? { raucloud: this.#raucloudStatus } : {}),
       },
       lease: scopedLeaseRecord
         ? { owner: 'cloud', sessionId: scopedLeaseRecord.cloudSessionId ?? scopedLeaseRecord.id, acquiredAt: scopedLeaseRecord.createdAt }
@@ -1223,7 +1223,7 @@ export class CloudCoordinator extends EventEmitter {
           await this.#client.clearPendingAppSandbox?.();
         },
       });
-      this.#managedCloudStatus = spawned.managedCloud ?? null;
+      this.#raucloudStatus = spawned.raucloud ?? null;
       if (spawned.account) {
         this.#accountSnapshot = spawned.account;
         this.#accountStatusAt = Date.now();
@@ -1323,7 +1323,7 @@ export class CloudCoordinator extends EventEmitter {
     }
     try {
       const status = await provider.status(profile.sandbox);
-      this.#managedCloudStatus = status.managedCloud ?? null;
+      this.#raucloudStatus = status.raucloud ?? null;
       if (status.account) {
         this.#accountSnapshot = status.account;
         this.#accountStatusAt = Date.now();
@@ -1384,7 +1384,7 @@ export class CloudCoordinator extends EventEmitter {
     try {
       const result = await provider.teardown(profile.sandbox);
       await this.#changeProfile(() => this.#client.forgetProfile());
-      this.#managedCloudStatus = null;
+      this.#raucloudStatus = null;
       if (result.account) {
         this.#accountSnapshot = result.account;
         this.#accountStatusAt = Date.now();
@@ -1411,7 +1411,7 @@ export class CloudCoordinator extends EventEmitter {
       : this.#managedAccountProvider();
     if (!provider || typeof provider.takeover !== 'function') {
       throw new AppServerError('This legacy app sandbox does not support account takeover.', {
-        code: 'MANAGED_CLOUD_TAKEOVER_UNAVAILABLE', retryable: false,
+        code: 'RAUCLOUD_TAKEOVER_UNAVAILABLE', retryable: false,
       });
     }
     this.#setSandboxLifecycle('provisioning', 'Waiting for the other device to save a checkpoint.');
@@ -1437,7 +1437,7 @@ export class CloudCoordinator extends EventEmitter {
       });
       const health = await this.#client.health(updated);
       if (health.ok !== true || health.serverPublicKey !== updated.serverPublicKey) {
-        throw new AppServerError('Managed Cloud takeover failed identity verification', {
+        throw new AppServerError('Raucloud takeover failed identity verification', {
           code: 'SANDBOX_IDENTITY_MISMATCH', retryable: false,
         });
       }
@@ -1445,7 +1445,7 @@ export class CloudCoordinator extends EventEmitter {
         tokens: pairing.credentials,
         device: pairing.credentials.device,
       }));
-      this.#managedCloudStatus = taken.managedCloud ?? null;
+      this.#raucloudStatus = taken.raucloud ?? null;
       if (taken.account) {
         this.#accountSnapshot = taken.account;
         this.#accountStatusAt = Date.now();
@@ -1461,11 +1461,11 @@ export class CloudCoordinator extends EventEmitter {
     }
   }
 
-  logoutManagedCloud(options = {}) {
-    return this.#withProfileWriter(() => this.#logoutManagedCloud(options));
+  logoutRaucloud(options = {}) {
+    return this.#withProfileWriter(() => this.#logoutRaucloud(options));
   }
 
-  async #logoutManagedCloud() {
+  async #logoutRaucloud() {
     const profile = await this.#client.loadProfile().catch(() => null);
     // Signing out of app-hosted Cloud does not change self-hosted VPS profiles.
     if (profile?.mode !== 'app-hosted') return this.snapshot();
@@ -1480,12 +1480,12 @@ export class CloudCoordinator extends EventEmitter {
     try {
       const status = await provider.logout(profile.sandbox);
       await this.#changeProfile(() => this.#client.forgetProfile());
-      this.#managedCloudStatus = null;
+      this.#raucloudStatus = null;
       this.#accountSnapshot = {
         signedIn: false,
         account: null,
         quota: null,
-        managedCloud: { kind: 'logged-out' },
+        raucloud: { kind: 'logged-out' },
         updatedAt: new Date().toISOString(),
       };
       this.#accountStatusAt = Date.now();

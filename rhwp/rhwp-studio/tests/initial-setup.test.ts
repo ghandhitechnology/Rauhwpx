@@ -185,3 +185,12 @@ test('사이드바가 첫 실행 마법사를 설정 모달·보정 창에 붙�
   assert.doesNotMatch(css, /transition: all/);
   assert.doesNotMatch(css, /\d+ms ease(?:;|,)/);
 });
+
+test('첫 실행 프로바이더 카드는 1280×800 화면에 두 줄로 들어간다', () => {
+  const css = readSource('../src/ui/initial-setup/initial-setup.css');
+
+  assert.match(css, /\.rhwp-setup-card \{[\s\S]*?grid-template-columns:\s*40px minmax\(0, 1fr\)/);
+  assert.match(css, /\.rhwp-setup-card \{[\s\S]*?min-height:\s*196px/);
+  assert.match(css, /\.rhwp-setup-card-models \{[\s\S]*?grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.doesNotMatch(css, /min-height:\s*(?:318|380)px/);
+});

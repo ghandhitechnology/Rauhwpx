@@ -1,7 +1,7 @@
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const BLOCKED_COMMANDS = new Set(['message.queue', 'session.resume', 'turn.redirect', 'session.takeover']);
 
-function managedError(code, message, cause, status = 503) {
+function raucloudError(code, message, cause, status = 503) {
   const error = new Error(message, cause ? { cause } : undefined);
   error.code = code;
   error.status = status;
@@ -10,13 +10,13 @@ function managedError(code, message, cause, status = 503) {
 
 async function jsonBody(response) {
   const bytes = Buffer.from(await response.arrayBuffer());
-  if (bytes.length > MAX_RESPONSE_BYTES) throw managedError('MANAGED_BROKER_INVALID', 'Managed broker response is too large');
+  if (bytes.length > MAX_RESPONSE_BYTES) throw raucloudError('RAUCLOUD_BROKER_INVALID', 'Raucloud broker response is too large');
   try { return bytes.length ? JSON.parse(bytes.toString('utf8')) : {}; } catch (error) {
-    throw managedError('MANAGED_BROKER_INVALID', 'Managed broker returned invalid JSON', error);
+    throw raucloudError('RAUCLOUD_BROKER_INVALID', 'Raucloud broker returned invalid JSON', error);
   }
 }
 
-export class ManagedLeaseController {
+export class RaucloudLeaseController {
   constructor({ baseUrl = '', runId = '', workerToken = '', fetchImpl = globalThis.fetch } = {}) {
     this.baseUrl = String(baseUrl).replace(/\/+$/, '');
     this.runId = String(runId);
@@ -44,13 +44,13 @@ export class ManagedLeaseController {
         signal: AbortSignal.timeout(30_000),
       });
     } catch (error) {
-      throw managedError('MANAGED_BROKER_UNREACHABLE', 'Managed broker is unreachable', error);
+      throw raucloudError('RAUCLOUD_BROKER_UNREACHABLE', 'Raucloud broker is unreachable', error);
     }
     const payload = await jsonBody(response);
     if (!response.ok) {
-      throw managedError(
-        typeof payload.error === 'string' ? payload.error : payload.error?.code ?? 'MANAGED_BROKER_REJECTED',
-        payload.message ?? payload.error?.message ?? 'Managed broker rejected the worker',
+      throw raucloudError(
+        typeof payload.error === 'string' ? payload.error : payload.error?.code ?? 'RAUCLOUD_BROKER_REJECTED',
+        payload.message ?? payload.error?.message ?? 'Raucloud broker rejected the worker',
         undefined,
         response.status,
       );
@@ -96,10 +96,10 @@ export class ManagedLeaseController {
   }
 
   async discover() {
-    if (!this.enabled) return { managed: false };
+    if (!this.enabled) return { raucloud: false };
     const payload = await this.#fetch('/v1/internal/cloud/lease');
     const nextRunId = String(payload.runId ?? payload.run?.id ?? '').trim();
-    if (!nextRunId) throw managedError('MANAGED_BROKER_INVALID', 'Managed broker did not identify the current lease');
+    if (!nextRunId) throw raucloudError('RAUCLOUD_BROKER_INVALID', 'Raucloud broker did not identify the current lease');
     if (nextRunId !== this.runId) {
       this.runId = nextRunId;
       this.terminal = false;
@@ -122,15 +122,15 @@ export class ManagedLeaseController {
     if (!this.enabled || !BLOCKED_COMMANDS.has(type)) return;
     await this.discover();
     if (this.inputBlocked) {
-      throw managedError('MANAGED_CLOUD_INPUT_BLOCKED', 'Managed Cloud is finishing the current turn; new input is blocked', undefined, 409);
+      throw raucloudError('RAUCLOUD_INPUT_BLOCKED', 'Raucloud is finishing the current turn; new input is blocked', undefined, 409);
     }
   }
 
   async beforeTurnStart() {
-    if (!this.enabled) return Promise.resolve({ managed: false });
+    if (!this.enabled) return Promise.resolve({ raucloud: false });
     await this.discover();
     if (this.terminal || this.inputBlocked) {
-      throw managedError('MANAGED_CLOUD_INPUT_BLOCKED', 'Managed Cloud cannot start another turn', undefined, 409);
+      throw raucloudError('RAUCLOUD_INPUT_BLOCKED', 'Raucloud cannot start another turn', undefined, 409);
     }
     if (!this.allocation) {
       this.allocation = this.#request('allocation').then((payload) => {
@@ -170,14 +170,14 @@ export class ManagedLeaseController {
   }
 
   async checkpoint(checkpointId = this.latestCheckpointId) {
-    if (!this.enabled || !this.active || this.terminal || !checkpointId) return { managed: this.enabled, skipped: true };
+    if (!this.enabled || !this.active || this.terminal || !checkpointId) return { raucloud: this.enabled, skipped: true };
     const payload = await this.#request('checkpoint', { checkpointId });
     this.#finish();
     return payload;
   }
 
   async complete(checkpointId = this.latestCheckpointId) {
-    if (!this.enabled || !this.active || this.terminal) return { managed: this.enabled, skipped: true };
+    if (!this.enabled || !this.active || this.terminal) return { raucloud: this.enabled, skipped: true };
     const payload = await this.#request('complete', { ...(checkpointId ? { checkpointId } : {}) });
     const reusable = ['ready', 'warm'].includes(payload.run?.status) || payload.worker?.status === 'warm';
     if (reusable && !this.inputBlocked && payload.mustStop !== true && payload.run?.inputBlocked !== true) {
@@ -195,24 +195,24 @@ export class ManagedLeaseController {
   }
 
   async release(failureCode = 'WORKER_RELEASED') {
-    if (!this.enabled) return { managed: false, skipped: true };
+    if (!this.enabled) return { raucloud: false, skipped: true };
     if (this.terminal || !this.active) {
       try { await this.discover(); } catch {
-        return { managed: true, skipped: true };
+        return { raucloud: true, skipped: true };
       }
     }
-    if (this.terminal) return { managed: true, skipped: true };
+    if (this.terminal) return { raucloud: true, skipped: true };
     const payload = await this.#request('release', { failureCode });
     this.#finish();
     return payload;
   }
 }
 
-export function managedLeaseFromConfig(config, options = {}) {
-  return new ManagedLeaseController({
-    baseUrl: config.managedBrokerUrl,
-    runId: config.managedRunId,
-    workerToken: config.managedWorkerToken,
+export function raucloudLeaseFromConfig(config, options = {}) {
+  return new RaucloudLeaseController({
+    baseUrl: config.raucloudBrokerUrl,
+    runId: config.raucloudRunId,
+    workerToken: config.raucloudWorkerToken,
     ...options,
   });
 }

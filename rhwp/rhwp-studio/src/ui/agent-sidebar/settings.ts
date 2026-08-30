@@ -524,7 +524,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   accountHead.append(accountIdentity, accountActions);
   const cloudQuota = el('div', 'ag-settings-cloud-quota');
   const quotaHead = el('div', 'ag-settings-meter-head');
-  const quotaLabel = el('span', 'ag-settings-meter-label', 'Managed Cloud 오늘 사용량');
+  const quotaLabel = el('span', 'ag-settings-meter-label', 'Raucloud 오늘 사용량');
   const quotaValue = el('span', 'ag-settings-meter-value', '로그인하면 하루 60분');
   quotaHead.append(quotaLabel, quotaValue);
   const quotaTrack = el('div', 'ag-settings-meter-track');
@@ -1786,8 +1786,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       quotaFill.style.width = '0%';
       quotaTrack.setAttribute('aria-valuenow', '0');
       quotaFoot.textContent = signedIn
-        ? 'Managed Cloud 사용량을 불러오고 있습니다.'
-        : '로그인하면 Managed Cloud 하루 60분과 계정당 $5 모델 크레딧을 사용할 수 있습니다.';
+        ? 'Raucloud 사용량을 불러오고 있습니다.'
+        : '로그인하면 Raucloud 하루 60분과 계정당 $5 모델 크레딧을 사용할 수 있습니다.';
     } else {
       const usedPercent = quota.dailyLimitMs > 0
         ? Math.min(100, Math.max(0, quota.usedMs / quota.dailyLimitMs * 100))

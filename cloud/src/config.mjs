@@ -78,19 +78,31 @@ function contains(parent, child) {
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
-function managedLease(environment) {
-  const brokerUrl = String(environment.RAUHWpx_MANAGED_BROKER_URL ?? '').trim().replace(/\/+$/, '');
-  const runId = String(environment.RAUHWpx_MANAGED_RUN_ID ?? '').trim();
-  const workerToken = String(environment.RAUHWpx_MANAGED_WORKER_TOKEN ?? '').trim();
-  if (!brokerUrl && !runId && !workerToken) return { managedBrokerUrl: '', managedRunId: '', managedWorkerToken: '' };
+function raucloudLease(environment) {
+  const brokerUrl = String(
+    environment.RAUHWpx_RAUCLOUD_BROKER_URL
+      ?? environment.RAUHWpx_MANAGED_BROKER_URL // raucloud-legacy: deployed workers migrate at this boundary.
+      ?? '',
+  ).trim().replace(/\/+$/, '');
+  const runId = String(
+    environment.RAUHWpx_RAUCLOUD_RUN_ID
+      ?? environment.RAUHWpx_MANAGED_RUN_ID // raucloud-legacy: deployed workers migrate at this boundary.
+      ?? '',
+  ).trim();
+  const workerToken = String(
+    environment.RAUHWpx_RAUCLOUD_WORKER_TOKEN
+      ?? environment.RAUHWpx_MANAGED_WORKER_TOKEN // raucloud-legacy: deployed workers migrate at this boundary.
+      ?? '',
+  ).trim();
+  if (!brokerUrl && !runId && !workerToken) return { raucloudBrokerUrl: '', raucloudRunId: '', raucloudWorkerToken: '' };
   let parsed;
   try { parsed = new URL(brokerUrl); } catch {}
   if (parsed?.protocol !== 'https:'
     || !/^[A-Za-z0-9._:-]{1,160}$/.test(runId)
     || !/^mcw_[A-Za-z0-9_-]{32,256}$/.test(workerToken)) {
-    throw new CloudError('CONFIG_INVALID', 'Managed Cloud broker identity is invalid');
+    throw new CloudError('CONFIG_INVALID', 'Raucloud broker identity is invalid');
   }
-  return { managedBrokerUrl: brokerUrl, managedRunId: runId, managedWorkerToken: workerToken };
+  return { raucloudBrokerUrl: brokerUrl, raucloudRunId: runId, raucloudWorkerToken: workerToken };
 }
 
 export function parseConfig(environment = process.env) {
@@ -124,7 +136,7 @@ export function parseConfig(environment = process.env) {
     DEFAULT_LIMITS.maxRunningSessions,
     { min: 1, max: 8 },
   );
-  const managed = managedLease(environment);
+  const raucloud = raucloudLease(environment);
   return {
     platform,
     host: environment.RAUHWpx_HOST || '127.0.0.1',
@@ -148,7 +160,7 @@ export function parseConfig(environment = process.env) {
     workerImage: environment.RAUHWpx_WORKER_IMAGE || 'ghcr.io/ghandhitechnology/rauhwpx-cloud-worker:stable',
     podmanConnection: environment.RAUHWpx_PODMAN_CONNECTION || null,
     releaseChannel: environment.RAUHWpx_CHANNEL === 'prerelease' ? 'prerelease' : 'stable',
-    ...managed,
+    ...raucloud,
     maxRunningSessions: runner === 'local' ? 1 : configuredMaxRunningSessions,
     maxQueuedSessions: positiveInteger(
       environment.RAUHWpx_MAX_QUEUED,

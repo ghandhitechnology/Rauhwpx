@@ -176,7 +176,7 @@ export function createCloudHttpHandler({
   vault,
   applyProviderAuth = null,
   seedProvider,
-  managedLease = null,
+  raucloudLease = null,
 }, { workerOnly = false } = {}) {
   const authenticate = (request) => auth.authenticate(bearer(request));
   const authenticateWorker = (request, sessionId, options) => (
@@ -250,7 +250,7 @@ export function createCloudHttpHandler({
         const authenticatedWorkerId = workerIdentity(session);
         if (request.method === 'POST' && action === '/heartbeat') {
           const ok = sessionStore.heartbeat(sessionId);
-          const lease = await managedLease?.heartbeat?.();
+          const lease = await raucloudLease?.heartbeat?.();
           json(response, 200, { ok, ...(lease?.mustStop === undefined ? {} : { mustStop: lease.mustStop }) });
           return;
         }
@@ -356,19 +356,19 @@ export function createCloudHttpHandler({
         }
         if (request.method === 'POST' && action === '/pause-ack') {
           const result = sessionStore.acknowledgePause(sessionId);
-          await managedLease?.checkpoint?.();
+          await raucloudLease?.checkpoint?.();
           json(response, 200, result);
           return;
         }
         if (request.method === 'POST' && action === '/sleep-ack') {
           const result = sessionStore.acknowledgeSleep(sessionId);
-          await managedLease?.checkpoint?.();
+          await raucloudLease?.checkpoint?.();
           json(response, 200, result);
           return;
         }
         if (request.method === 'POST' && action === '/takeover-ack') {
           const result = sessionStore.acknowledgeTakeover(sessionId);
-          await managedLease?.checkpoint?.();
+          await raucloudLease?.checkpoint?.();
           json(response, 200, result);
           return;
         }
@@ -445,13 +445,13 @@ export function createCloudHttpHandler({
               size: body.timeline?.size,
             },
           });
-          managedLease?.rememberCheckpoint?.(body.operationId);
+          raucloudLease?.rememberCheckpoint?.(body.operationId);
           json(response, 201, result);
           return;
         }
         if (request.method === 'POST' && action === '/turn-start') {
           const body = await readJson(request);
-          await managedLease?.beforeTurnStart?.();
+          await raucloudLease?.beforeTurnStart?.();
           json(response, 201, sessionStore.beginTurn(sessionId, {
             turnNumber: body.turnNumber,
             messageId: body.messageId ?? null,
@@ -465,7 +465,7 @@ export function createCloudHttpHandler({
             outcome: body.outcome,
             boundaryOperationId: body.boundaryOperationId ?? null,
           });
-          await managedLease?.complete?.(body.boundaryOperationId ?? null);
+          await raucloudLease?.complete?.(body.boundaryOperationId ?? null);
           json(response, 200, result);
           return;
         }
@@ -486,7 +486,7 @@ export function createCloudHttpHandler({
             code: failureCode,
             message: String(body.message || 'Worker suspended').slice(0, 1024),
           });
-          await managedLease?.release?.(failureCode);
+          await raucloudLease?.release?.(failureCode);
           json(response, 200, result);
           return;
         }
@@ -717,7 +717,7 @@ export function createCloudHttpHandler({
         }
         if (request.method === 'POST' && sessionRoute[2] === '/commands') {
           const command = parseCommand(await readJson(request));
-          await managedLease?.assertCommandAllowed?.(command.type);
+          await raucloudLease?.assertCommandAllowed?.(command.type);
           json(response, 200, sessionStore.executeCommand(device, sessionId, command));
           return;
         }

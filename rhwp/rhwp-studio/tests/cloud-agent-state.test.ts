@@ -81,13 +81,13 @@ test('cloud state parser preserves broker account quota and logged-out gates', (
         coldStarts: { usedToday: 1, dailyLimit: 12, recent: 1, recentLimit: 3 },
         graceEndsAt: null,
       },
-      managedCloud: { kind: 'available' },
+      raucloud: { kind: 'available' },
       updatedAt: now,
     },
   });
   assert.equal(signedIn?.account?.account?.email, 'user@example.test');
   assert.equal(signedIn?.account?.quota?.remainingMs, 3_000_000);
-  assert.deepEqual(signedIn?.account?.managedCloud, { kind: 'available' });
+  assert.deepEqual(signedIn?.account?.raucloud, { kind: 'available' });
 
   const loggedOut = parseCloudSnapshot({
     ...state(9),
@@ -95,14 +95,26 @@ test('cloud state parser preserves broker account quota and logged-out gates', (
       signedIn: false,
       account: null,
       quota: null,
-      managedCloud: { kind: 'logged-out' },
+      raucloud: { kind: 'logged-out' },
       updatedAt: now,
     },
   });
-  assert.deepEqual(loggedOut?.account?.managedCloud, { kind: 'logged-out' });
-  assert.equal(parseCloudSnapshot({
+  assert.deepEqual(loggedOut?.account?.raucloud, { kind: 'logged-out' });
+  const legacyGateKey = 'managedCloud'; // raucloud-legacy: rolling desktop snapshot fixture.
+  const legacySnapshot = parseCloudSnapshot({
     ...state(10),
-    account: { signedIn: false, account: null, quota: null, managedCloud: { kind: 'available' }, updatedAt: now },
+    account: {
+      signedIn: false,
+      account: null,
+      quota: null,
+      [legacyGateKey]: { kind: 'logged-out' },
+      updatedAt: now,
+    },
+  });
+  assert.deepEqual(legacySnapshot?.account?.raucloud, { kind: 'logged-out' });
+  assert.equal(parseCloudSnapshot({
+    ...state(11),
+    account: { signedIn: false, account: null, quota: null, raucloud: { kind: 'available' }, updatedAt: now },
   }), null);
 });
 

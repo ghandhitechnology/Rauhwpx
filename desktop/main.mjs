@@ -57,8 +57,8 @@ import {
 import { createSecretVault, handleSecretRequest } from './secret-vault.mjs';
 import { CloudClient } from './cloud-client.mjs';
 import {
-  createManagedCloudBrokerProvider,
-  MANAGED_CLOUD_ACCESS_SECRET,
+  createRaucloudBrokerProvider,
+  RAUCLOUD_ACCESS_SECRET,
 } from './cloud-broker.mjs';
 import { CloudCoordinator } from './cloud-coordinator.mjs';
 import { CloudDisplayRegistry } from './cloud-display-registry.mjs';
@@ -434,13 +434,13 @@ function requireCloudCoordinator() {
   return cloudCoordinator;
 }
 
-const MANAGED_CLOUD_DEVICE_SECRET = 'cloud.managed-device-id';
+const RAUCLOUD_DEVICE_SECRET = 'cloud.managed-device-id';
 
-async function managedCloudDeviceIdentity() {
-  let id = String(await secretVault.get(MANAGED_CLOUD_DEVICE_SECRET).catch(() => '') ?? '').trim();
+async function raucloudDeviceIdentity() {
+  let id = String(await secretVault.get(RAUCLOUD_DEVICE_SECRET).catch(() => '') ?? '').trim();
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(id)) {
     id = randomUUID();
-    await secretVault.set(MANAGED_CLOUD_DEVICE_SECRET, id);
+    await secretVault.set(RAUCLOUD_DEVICE_SECRET, id);
   }
   return { id, name: app.getName() };
 }
@@ -1141,7 +1141,7 @@ ipcMain.handle('cloud:takeover-sandbox', async (event) => {
 });
 ipcMain.handle('cloud:account-logout', async (event) => {
   const session = sessionForEvent(event);
-  return scopedCloudSnapshot(session, await requireCloudCoordinator().logoutManagedCloud());
+  return scopedCloudSnapshot(session, await requireCloudCoordinator().logoutRaucloud());
 });
 ipcMain.handle('cloud:transfer-intent', async (event, payload = {}) => {
   const session = sessionForEvent(event);
@@ -1467,10 +1467,10 @@ if (!hasSingleInstanceLock) {
         knownHostsPath,
       }),
       recoveryDir: join(app.getPath('userData'), 'cloud', 'recovery'),
-      appServers: [createManagedCloudBrokerProvider({
+      appServers: [createRaucloudBrokerProvider({
         fetchImpl: (...args) => net.fetch(...args),
-        getAccessToken: () => secretVault.get(MANAGED_CLOUD_ACCESS_SECRET),
-        getDeviceIdentity: managedCloudDeviceIdentity,
+        getAccessToken: () => secretVault.get(RAUCLOUD_ACCESS_SECRET),
+        getDeviceIdentity: raucloudDeviceIdentity,
       })],
       collectProviderAuth: (provider) => collectProviderAuth(provider, {
         vault: secretVault,

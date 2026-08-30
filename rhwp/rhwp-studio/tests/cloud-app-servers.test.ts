@@ -333,11 +333,11 @@ test('sandbox screens follow the snapshot without losing an in-flight teardown',
 test('app server failures read as something the user can act on', () => {
   assert.equal(
     mapSandboxIssue(new Error('App-provided servers are not configured on this build: RAUHWpx_RAILWAY_TOKEN')).title,
-    '앱 제공 서버가 아직 준비되지 않았습니다',
+    'Raucloud가 아직 준비되지 않았습니다',
   );
   assert.equal(
     mapSandboxIssue(new Error('This build does not include app-provided servers')).title,
-    '이 빌드에는 앱 제공 서버가 없습니다',
+    '이 빌드에는 Raucloud가 없습니다',
   );
   assert.equal(mapSandboxIssue(new Error('Railway rejected the configured API token')).title, '앱 서버 자격 증명이 거부되었습니다');
   assert.equal(mapSandboxIssue(new Error('Railway API is unreachable: fetch failed')).title, '앱 서버에 연결할 수 없습니다');
@@ -348,7 +348,7 @@ test('app server failures read as something the user can act on', () => {
     '진행 중인 클라우드 작업이 있습니다',
   );
   assert.equal(mapSandboxIssue(new Error('App sandbox failed identity verification')).title, '샌드박스 ID를 확인하지 못했습니다');
-  assert.equal(mapSandboxIssue(new Error('something else')).title, '앱 제공 서버를 준비하지 못했습니다');
+  assert.equal(mapSandboxIssue(new Error('something else')).title, 'Raucloud를 준비하지 못했습니다');
 
   // 이 빌드가 다룰 수 없는 샌드박스는 종료로 연결을 놓고 콘솔에서 직접 지워야 한다.
   const unmanaged = mapSandboxIssue(new Error(
@@ -366,7 +366,7 @@ test('app server failures read as something the user can act on', () => {
 
 test('the dialog offers both servers and only restorable sandbox actions', () => {
   assert.match(onboarding, /Cloud 서버 선택/);
-  assert.match(onboarding, /앱에서 제공하는 서버/);
+  assert.match(onboarding, /Raucloud/);
   assert.match(onboarding, /내 서버 사용/);
   assert.match(onboarding, /role', 'radiogroup'/);
   assert.match(onboarding, /dataset\.serverMode = mode/);
@@ -379,12 +379,12 @@ test('the dialog offers both servers and only restorable sandbox actions', () =>
   assert.match(onboarding, /남은 서버는 공급자 콘솔에서 직접 삭제하세요/);
   // 놓고 온 유료 서버는 화면에 보여야 한다. 스크린 리더 전용 안내로는 부족하다.
   assert.match(onboarding, /state\.notice.*callout\('cloud', '남은 서버를 확인하세요', state\.notice\)/);
-  assert.match(onboarding, /'앱 제공 서버를 종료하지 못했습니다'\n\s*: '앱 제공 서버를 준비하지 못했습니다'/);
+  assert.match(onboarding, /'Raucloud를 종료하지 못했습니다'\n\s*: 'Raucloud를 준비하지 못했습니다'/);
   assert.match(onboarding, /운영자가 \$\{provider\.missingConfig\.join\(', '\)\}/);
   assert.match(onboarding, /state\.kind !== 'sandbox-intro' && state\.kind !== 'sandbox-failed'/);
   assert.match(onboarding, /kind: 'sandbox-provisioning'/);
-  assert.match(onboarding, /앱 제공 서버를 종료하고 있습니다/);
-  assert.match(onboarding, /앱 제공 서버 · /);
+  assert.match(onboarding, /Raucloud를 종료하고 있습니다/);
+  assert.match(onboarding, /Raucloud · /);
   assert.match(onboardingCss, /\.ag-cloud-setup-option\.ag-selected/);
   assert.match(cloudUi, /appHosted/);
   assert.match(preload, /cloudSelectServerMode: \(payload\) => ipcRenderer\.invoke\('cloud:select-server-mode', payload\)/);
@@ -395,7 +395,7 @@ test('the dialog offers both servers and only restorable sandbox actions', () =>
   for (const channel of ['cloud:select-server-mode', 'cloud:spawn-sandbox', 'cloud:sandbox-status', 'cloud:teardown-sandbox', 'cloud:takeover-sandbox']) {
     assert.match(desktopMain, new RegExp(`ipcMain\\.handle\\('${channel}'`));
   }
-  assert.match(desktopMain, /createManagedCloudBrokerProvider\(\{/);
-  assert.match(desktopMain, /getAccessToken: \(\) => secretVault\.get\(MANAGED_CLOUD_ACCESS_SECRET\)/);
+  assert.match(desktopMain, /createRaucloudBrokerProvider\(\{/);
+  assert.match(desktopMain, /getAccessToken: \(\) => secretVault\.get\(RAUCLOUD_ACCESS_SECRET\)/);
   assert.doesNotMatch(desktopMain, /createRailwayServerProvider\(\{/);
 });

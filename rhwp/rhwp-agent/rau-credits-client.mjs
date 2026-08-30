@@ -135,7 +135,7 @@ export function createRauCreditsClient({
         signedIn: false,
         account: null,
         quota: null,
-        managedCloud: { state: 'logged-out' },
+        raucloud: { state: 'logged-out' },
         updatedAt: new Date(now()).toISOString(),
       });
       return request('/v1/account', {
@@ -179,8 +179,14 @@ export function createRauCreditsClient({
           await sleep(POLL_INTERVAL_MS);
           continue;
         }
-        if (next.status === 'ready' && typeof next.accessToken === 'string' && next.accessToken) {
-          return { key: next.accessToken, email: typeof next.email === 'string' ? next.email : null };
+        if (next.status === 'ready') {
+          if (typeof next.accessToken === 'string' && next.accessToken) {
+            return { key: next.accessToken, email: typeof next.email === 'string' ? next.email : null };
+          }
+          throw creditsError(
+            'RAU_LOGIN_SERVER_INCOMPATIBLE',
+            'Rau 로그인 서버 업데이트가 필요해요. 잠시 후 다시 시도해 주세요.',
+          );
         }
         if (next.status === 'redeemed') {
           throw creditsError('RAU_LOGIN_REDEEMED', '이 로그인 세션은 이미 사용됐어요. 다시 연결해 주세요.');

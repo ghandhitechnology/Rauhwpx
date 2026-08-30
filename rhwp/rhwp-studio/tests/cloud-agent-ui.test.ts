@@ -47,11 +47,11 @@ test('cloud action is available in sidebar and fullscreen headers', () => {
   assert.match(cloudCss, /\.ag-cloud-btn\[hidden\],[\s\S]*\.ag-workspace-cloud-btn\[hidden\][\s\S]*display:\s*none/);
 });
 
-test('managed Cloud stays visible but locks account-scoped starts without locking self-hosted', () => {
-  assert.match(cloudUi, /function managedCloudLock\(snapshot: CloudSnapshot\)/);
+test('Raucloud stays visible but locks account-scoped starts without locking self-hosted', () => {
+  assert.match(cloudUi, /function raucloudLock\(snapshot: CloudSnapshot\)/);
   assert.match(cloudUi, /snapshot\.profile\.mode !== 'app-hosted'\) return null/);
   assert.match(cloudUi, /sidebarButton\.hidden = !snapshot\.available/);
-  assert.match(cloudUi, /Managed Cloud를 사용하려면 로그인해야 합니다/);
+  assert.match(cloudUi, /Raucloud를 사용하려면 로그인해야 합니다/);
   assert.match(onboarding, /option\.disabled = disabled/);
   assert.match(onboarding, /primary\.disabled = mode === 'app-hosted' && Boolean\(appHostedLock\)/);
   assert.match(onboarding, /'내 서버 사용'/);

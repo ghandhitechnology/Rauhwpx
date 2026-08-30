@@ -46,6 +46,17 @@ test('desktop IPC cannot merge an operation response into another profile epoch'
 const SERVER_IDENTITY = generateKeyPairSync('ed25519');
 const SERVER_KEY = `ed25519:${SERVER_IDENTITY.publicKey.export({ type: 'spki', format: 'der' }).toString('base64url')}`;
 
+test('saved Raucloud profiles migrate their retired provider id on read', () => {
+  const legacyProviderId = 'managed-cloud'; // raucloud-legacy: persisted profile fixture.
+  const profile = normalizeCloudProfile({
+    mode: 'app-hosted',
+    endpoint: 'https://raucloud.example/rauhwpx-cloud',
+    serverPublicKey: SERVER_KEY,
+    sandbox: { providerId: legacyProviderId, sandboxId: 'run-1' },
+  });
+  assert.equal(profile.sandbox.providerId, 'raucloud');
+});
+
 function signedFetch(handler, identity = SERVER_IDENTITY) {
   const serverKey = `ed25519:${identity.publicKey.export({ type: 'spki', format: 'der' }).toString('base64url')}`;
   return async (url, options = {}) => {

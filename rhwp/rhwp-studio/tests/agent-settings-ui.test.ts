@@ -590,9 +590,9 @@ test('Rau 설정 카드는 로그인된 계정과 체험 크레딧 잔량 막대
   assert.match(settingsCss, /\.ag-agent-setup-account-meter \.ag-settings-meter-track \{[\s\S]*?height: 8px/);
 });
 
-test('전역 계정 카드는 Managed Cloud 한도와 로그아웃 순서를 보여 준다', () => {
+test('전역 계정 카드는 Raucloud 한도와 로그아웃 순서를 보여 준다', () => {
   assert.match(settings, /createSection\('Rauhwpx 계정'\)/);
-  assert.match(settings, /Managed Cloud 오늘 사용량/);
+  assert.match(settings, /Raucloud 오늘 사용량/);
   assert.match(settings, /quota\.remainingMs < 15 \* 60_000/);
   assert.match(settings, /quota\.remainingMs < 5 \* 60_000/);
   assert.match(settings, /오늘 시작 \$\{quota\.coldStarts\.usedToday\}\/\$\{quota\.coldStarts\.dailyLimit\}/);
@@ -603,6 +603,11 @@ test('전역 계정 카드는 Managed Cloud 한도와 로그아웃 순서를 보
   assert.ok(logout.indexOf('await cloudLogout()') < logout.indexOf('accountBridge.logoutRauAccount()'));
   assert.match(settingsCss, /\.ag-settings-account-card\[data-state='subtle'\]/);
   assert.match(settingsCss, /\.ag-settings-account-card\[data-state='warning'\]/);
+  assert.match(css, /--ag-surface:\s*var\(--ag-raised\)/);
+  assert.match(css, /--ag-surface-subtle:\s*var\(--ag-bg-2\)/);
+  assert.doesNotMatch(settingsCss, /\.ag-settings-account-card \{[\s\S]*?--ag-surface,\s*#fff/);
+  assert.match(settingsCss, /\.ag-settings-account-detail,[\s\S]*?color:\s*var\(--ag-text-muted\)/);
+  assert.doesNotMatch(settingsCss, /\.ag-settings-account-detail,[\s\S]*?--ag-muted/);
 });
 
 test('Rau 재설정은 압축 동작만 두고 OAuth 완료를 잠깐 알린다', () => {
