@@ -42,7 +42,7 @@ npm run build
 2. 개발자 모드
 3. "압축 해제된 확장 프로그램을 로드합니다"에서 `rhwp-chrome/dist/` 선택
 
-변경 기록은 GitHub Releases를 보세요.
+이전 확장 버전 기록은 이 파일의 git 역사와 [edwardkim/rhwp](https://github.com/edwardkim/rhwp) 이슈에 있습니다.
 
 ## 라이선스
 

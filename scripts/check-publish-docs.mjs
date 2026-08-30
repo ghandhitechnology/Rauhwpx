@@ -25,7 +25,7 @@ const PUBLISH_DOCS = [
 
 const LINK_RE = /\[(?:[^\]]*)\]\(([^)]+)\)/g;
 const TOOL_NAME_RE = /^\s+name: '([a-z0-9_]+)',$/gm;
-const HARDCODED_TOOL_COUNT_RE = /\b(\d+)\s+MCP tools\b/i;
+const HARDCODED_TOOL_COUNT_RE = /\b(\d+)\s+MCP tools\b|도구는 정확히 (\d+)개|(\d+)\s*개\s*(?:MCP\s*)?도구/gi;
 
 function read(rel) {
   return readFileSync(path.join(ROOT, rel), 'utf8');
@@ -85,13 +85,14 @@ for (const rel of PUBLISH_DOCS) {
   if (!existsSync(abs)) continue;
   const markdown = read(rel);
   check(`${rel} has no stale MCP tool count`, () => {
-    const hit = markdown.match(HARDCODED_TOOL_COUNT_RE);
-    if (!hit) return;
-    assert.equal(
-      Number(hit[1]),
-      toolCount,
-      `${rel} says ${hit[1]} MCP tools, tools.mjs has ${toolCount}`,
-    );
+    for (const hit of markdown.matchAll(HARDCODED_TOOL_COUNT_RE)) {
+      const claimed = Number(hit[1] || hit[2] || hit[3]);
+      assert.equal(
+        claimed,
+        toolCount,
+        `${rel} says ${claimed} tools, tools.mjs has ${toolCount}`,
+      );
+    }
   });
   check(`${rel} relative links resolve`, () => {
     const dir = path.dirname(abs);

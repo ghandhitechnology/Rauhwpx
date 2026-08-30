@@ -47,7 +47,7 @@ Chrome 확장과의 차이:
 - `background.js`는 `browser.*`를 씁니다.
 - 다운로드 가로채기는 `onCreated`를 씁니다.
 
-변경 기록은 GitHub Releases를 보세요.
+이전 확장 버전 기록은 이 파일의 git 역사와 [edwardkim/rhwp](https://github.com/edwardkim/rhwp) 이슈에 있습니다.
 
 ## 라이선스
 
