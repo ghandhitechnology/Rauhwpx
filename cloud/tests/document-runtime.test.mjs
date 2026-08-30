@@ -6,7 +6,10 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { runSession } from '../document-runtime/run.mjs';
+import { createSessionDisplayMode } from '../document-runtime/session-display.mjs';
 import {
+  chromiumLaunchOptions,
+  launchChromium,
   safeHubBaseEnvironment,
   seedCursorRuntime,
   uploadRequiredReferences,
@@ -124,6 +127,108 @@ test('agent hub environment cannot inherit worker control-plane credentials', ()
   assert.equal(filtered.RAUHWpx_CONTROL_SOCKET, undefined);
 });
 
+test('Chromium uses the live Xvfb display and geometry, with a headless no-display fallback', () => {
+  const headed = chromiumLaunchOptions({
+    chromiumPath: '/usr/bin/chromium',
+    displayEnv: {
+      DISPLAY: ':77',
+      XAUTHORITY: '/workspace/home/.Xauthority',
+      RAUHWpx_SESSION_DISPLAY: 'ready',
+    },
+    displayGeometry: { width: 1440, height: 900 },
+    environment: {
+      LANG: 'C.UTF-8',
+      RAUHWpx_WORKER_TOKEN: 'worker-secret',
+      RAUHWpx_CONTROL_SOCKET: '/run/rauhwpx/control.sock',
+      CONTROL_PLANE_SECRET: 'secret',
+    },
+    pipe: true,
+  });
+  assert.equal(headed.headless, false);
+  assert.equal(headed.pipe, true);
+  assert.equal(headed.env.LANG, 'C.UTF-8');
+  assert.equal(headed.env.DISPLAY, ':77');
+  assert.equal(headed.env.XAUTHORITY, '/workspace/home/.Xauthority');
+  assert.equal(headed.env.RAUHWpx_WORKER_TOKEN, undefined);
+  assert.equal(headed.env.RAUHWpx_CONTROL_SOCKET, undefined);
+  assert.equal(headed.env.CONTROL_PLANE_SECRET, undefined);
+  assert.deepEqual(headed.defaultViewport, { width: 1440, height: 900, deviceScaleFactor: 1 });
+  for (const argument of [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--ozone-platform=x11',
+    '--window-position=0,0',
+    '--window-size=1440,900',
+  ]) assert.ok(headed.args.includes(argument), argument);
+
+  const fallback = chromiumLaunchOptions({
+    chromiumPath: '/usr/bin/chromium',
+    displayEnv: {
+      DISPLAY: ':99',
+      XAUTHORITY: '/stale/authority',
+      RAUHWpx_SESSION_DISPLAY: 'error',
+    },
+    displayGeometry: { width: 1024, height: 768 },
+    environment: {
+      DISPLAY: ':99',
+      XAUTHORITY: '/inherited/authority',
+      RAUHWpx_WORKER_TOKEN: 'worker-secret',
+      RAUHWpx_CONTROL_SOCKET: '/run/rauhwpx/control.sock',
+    },
+    pipe: false,
+  });
+  assert.equal(fallback.headless, true);
+  assert.deepEqual(fallback.env, {});
+  assert.deepEqual(fallback.defaultViewport, { width: 1024, height: 768, deviceScaleFactor: 1 });
+  assert.ok(!fallback.args.some((argument) => argument.startsWith('--ozone-platform=')));
+  assert.ok(!fallback.args.some((argument) => argument.startsWith('--window-size=')));
+});
+
+test('Chromium transport retry stays headed for an active display session', async () => {
+  const attempts = [];
+  const browser = {};
+  const result = await launchChromium({
+    launch: async (options) => {
+      attempts.push(options);
+      if (attempts.length === 1) throw new Error('pipe transport failed');
+      return browser;
+    },
+  }, {
+    chromiumPath: '/usr/bin/chromium',
+    displayEnv: {
+      DISPLAY: ':78',
+      XAUTHORITY: '/workspace/home/.Xauthority',
+      RAUHWpx_SESSION_DISPLAY: 'ready',
+    },
+    displayGeometry: { width: 1280, height: 800 },
+  });
+  assert.equal(result, browser);
+  assert.deepEqual(attempts.map(({ headless, pipe }) => ({ headless, pipe })), [
+    { headless: false, pipe: true },
+    { headless: false, pipe: false },
+  ]);
+  assert.ok(attempts.every(({ env }) => env.DISPLAY === ':78'));
+});
+
+test('Session display mode is fixed before harness launch', () => {
+  let status = 'error';
+  const display = {
+    get status() { return status; },
+    get environment() {
+      return status === 'ready'
+        ? { DISPLAY: ':79', XAUTHORITY: '/workspace/home/.Xauthority', RAUHWpx_SESSION_DISPLAY: 'ready' }
+        : null;
+    },
+    snapshot: () => ({ status, display: status === 'ready' ? ':79' : null, width: 1280, height: 800 }),
+  };
+  const mode = createSessionDisplayMode(display);
+  status = 'ready';
+  assert.equal(mode.kind, 'headless');
+  assert.equal(mode.environment, null);
+  assert.deepEqual(mode.geometry, { width: 1280, height: 800 });
+});
+
 test('required reference indexing fails closed after publishing a bounded diagnostic', async () => {
   const events = [];
   await assert.rejects(uploadRequiredReferences({
@@ -213,34 +318,45 @@ test('runSession performs provider turns, checkpoints edits, publishes a portabl
   };
   const prompts = [];
   let closeCalls = 0;
-  const createHarness = async ({ onEvent }) => ({
-    start: async ({ history }) => { calls.push(['start', history.length]); },
-    runTurn: async (prompt) => {
-      prompts.push(prompt);
-      await onEvent({ type: 'agent', event: { type: 'turn-start', agent: 'codex' } });
-      await onEvent({ type: 'agent', event: {
-        type: 'tool-call', agent: 'codex', callId: `call-${prompts.length}`, tool: 'replace_range', argsJson: '{}',
-      } });
-      await onEvent({ type: 'agent', event: {
-        type: 'tool-result', agent: 'codex', callId: `call-${prompts.length}`, ok: true, resultPreview: '{"revision":2}',
-      } });
-      await onEvent({ type: 'agent', event: { type: 'text-delta', agent: 'codex', text: `turn ${prompts.length} done` } });
-      const end = { type: 'turn-end', agent: 'codex', stopReason: 'end_turn' };
-      await onEvent({ type: 'agent', event: end });
-      return end;
-    },
-    exportDocument: async (_format, destination) => {
-      const bytes = Buffer.from(`EDITED-DOCUMENT-TURN-${prompts.length}`);
-      await fs.writeFile(destination, bytes, { mode: 0o600 });
-      return { size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
-    },
-    close: async () => { closeCalls += 1; },
+  let harnessGeometry = null;
+  let studioReady = 0;
+  const createHarness = async ({ onEvent, displayGeometry }) => {
+    harnessGeometry = displayGeometry;
+    return {
+      start: async ({ history }) => { calls.push(['start', history.length]); },
+      runTurn: async (prompt) => {
+        prompts.push(prompt);
+        await onEvent({ type: 'agent', event: { type: 'turn-start', agent: 'codex' } });
+        await onEvent({ type: 'agent', event: {
+          type: 'tool-call', agent: 'codex', callId: `call-${prompts.length}`, tool: 'replace_range', argsJson: '{}',
+        } });
+        await onEvent({ type: 'agent', event: {
+          type: 'tool-result', agent: 'codex', callId: `call-${prompts.length}`, ok: true, resultPreview: '{"revision":2}',
+        } });
+        await onEvent({ type: 'agent', event: { type: 'text-delta', agent: 'codex', text: `turn ${prompts.length} done` } });
+        const end = { type: 'turn-end', agent: 'codex', stopReason: 'end_turn' };
+        await onEvent({ type: 'agent', event: end });
+        return end;
+      },
+      exportDocument: async (_format, destination) => {
+        const bytes = Buffer.from(`EDITED-DOCUMENT-TURN-${prompts.length}`);
+        await fs.writeFile(destination, bytes, { mode: 0o600 });
+        return { size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
+      },
+      close: async () => { closeCalls += 1; },
+    };
+  };
+  const displayMode = createSessionDisplayMode({
+    environment: null,
+    snapshot: () => ({ status: 'error', width: 1440, height: 900 }),
   });
   const outcome = await runSession({
     workspace: root,
     credentials: {},
     client,
     createHarness,
+    displayMode,
+    onStudioReady: () => { studioReady += 1; },
     manifest: {
       sessionId: 'session-document-runtime',
       provider: 'codex',
@@ -255,6 +371,8 @@ test('runSession performs provider turns, checkpoints edits, publishes a portabl
     },
   });
   assert.equal(closeCalls, 1);
+  assert.equal(studioReady, 1);
+  assert.equal(harnessGeometry, displayMode.geometry);
   assert.equal(prompts.length, 2);
   assert.match(prompts[0], /reference-policy\.txt/);
   assert.match(prompts[1], /Also update the footer/);
@@ -268,6 +386,143 @@ test('runSession performs provider turns, checkpoints edits, publishes a portabl
   const readyClaim = calls.map(([type]) => type).lastIndexOf('finish-claim');
   const completedEvent = calls.findIndex(([type, eventType]) => type === 'event' && eventType === 'runtime.completed');
   assert.ok(readyClaim >= 0 && readyClaim < completedEvent, 'the atomic message gate must close before completion');
+});
+
+test('runSession does not publish readiness on Studio startup failure and cleans the harness', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-document-runtime-startup-failure-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const documentPath = path.join(root, 'document.hwp');
+  const timelinePath = path.join(root, 'timeline.json');
+  await fs.writeFile(documentPath, 'ORIGINAL', { mode: 0o600 });
+  await fs.writeFile(timelinePath, JSON.stringify(portableTimeline()), { mode: 0o600 });
+  let ready = 0;
+  let closed = 0;
+  await assert.rejects(runSession({
+    workspace: root,
+    credentials: {},
+    client: { event: async () => {} },
+    onStudioReady: () => { ready += 1; },
+    createHarness: async () => ({
+      start: async () => { throw Object.assign(new Error('Studio startup failed'), { code: 'STUDIO_START_TIMEOUT' }); },
+      close: async () => { closed += 1; },
+    }),
+    manifest: {
+      sessionId: 'startup-failure', provider: 'codex', goal: 'Edit', latestCheckpoint: null,
+      resources: [
+        { kind: 'document', name: 'document.hwp', filename: documentPath },
+        { kind: 'timeline', name: 'timeline.json', filename: timelinePath },
+      ],
+      limits: { maxDurationSeconds: 900, maxTurns: 1, turnsUsed: 0 },
+    },
+  }), { code: 'STUDIO_START_TIMEOUT' });
+  assert.equal(ready, 0);
+  assert.equal(closed, 1);
+});
+
+test('runSession treats a Chromium exit as a runtime failure and cleans the harness', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-document-runtime-browser-exit-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const documentPath = path.join(root, 'document.hwp');
+  const timelinePath = path.join(root, 'timeline.json');
+  await fs.writeFile(documentPath, 'ORIGINAL', { mode: 0o600 });
+  await fs.writeFile(timelinePath, JSON.stringify(portableTimeline()), { mode: 0o600 });
+  let ready = 0;
+  let closed = 0;
+  await assert.rejects(runSession({
+    workspace: root,
+    credentials: {},
+    client: { event: async () => {} },
+    onStudioReady: () => { ready += 1; },
+    createHarness: async () => ({
+      start: async () => {},
+      assertHealthy: () => { throw Object.assign(new Error('Headed browser exited'), { code: 'BROWSER_EXITED' }); },
+      close: async () => { closed += 1; },
+    }),
+    manifest: {
+      sessionId: 'browser-exit', provider: 'codex', goal: 'Edit', latestCheckpoint: null,
+      resources: [
+        { kind: 'document', name: 'document.hwp', filename: documentPath },
+        { kind: 'timeline', name: 'timeline.json', filename: timelinePath },
+      ],
+      limits: { maxDurationSeconds: 900, maxTurns: 1, turnsUsed: 0 },
+    },
+  }), { code: 'BROWSER_EXITED' });
+  assert.equal(ready, 0);
+  assert.equal(closed, 1);
+});
+
+test('runSession detects display loss while client.wait is blocked and cleans up promptly', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-document-runtime-wait-display-loss-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const documentPath = path.join(root, 'document.hwp');
+  const timelinePath = path.join(root, 'timeline.json');
+  await fs.writeFile(documentPath, 'ORIGINAL', { mode: 0o600 });
+  await fs.writeFile(timelinePath, JSON.stringify(portableTimeline()), { mode: 0o600 });
+
+  let displayStatus = 'ready';
+  let restarts = 0;
+  const displayEnvironment = {
+    DISPLAY: ':80', XAUTHORITY: '/workspace/home/.Xauthority', RAUHWpx_SESSION_DISPLAY: 'ready',
+  };
+  const sessionDisplay = {
+    get status() { return displayStatus; },
+    get environment() { return displayStatus === 'ready' ? displayEnvironment : null; },
+    snapshot: () => ({ status: displayStatus, display: ':80', width: 1280, height: 800 }),
+    restart: async () => { restarts += 1; },
+  };
+  const displayMode = createSessionDisplayMode(sessionDisplay);
+  let waitStartedResolve;
+  const waitStarted = new Promise((resolve) => { waitStartedResolve = resolve; });
+  let closed = 0;
+  let unavailable = 0;
+  const client = {
+    event: async () => {},
+    createWait: async () => ({ id: 'wait-blocked', status: 'pending' }),
+    wait: async (_waitId, { signal } = {}) => {
+      waitStartedResolve();
+      return new Promise((_resolve, reject) => signal?.addEventListener(
+        'abort',
+        () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })),
+        { once: true },
+      ));
+    },
+  };
+  const startedAt = Date.now();
+  const running = runSession({
+    workspace: root,
+    credentials: {},
+    client,
+    sessionDisplay,
+    displayMode,
+    onStudioUnavailable: async () => { unavailable += 1; },
+    createHarness: async ({ displayEnv }) => {
+      assert.equal(displayEnv.DISPLAY, ':80');
+      return {
+        start: async () => {},
+        assertHealthy: async () => {},
+        runTurn: async () => ({
+          type: 'turn-end', agent: 'codex', stopReason: 'end_turn',
+          wait: { kind: 'question', payload: { prompt: 'Which date?' } },
+        }),
+        close: async () => { closed += 1; },
+      };
+    },
+    manifest: {
+      sessionId: 'wait-display-loss', provider: 'codex', goal: 'Edit', latestCheckpoint: null,
+      resources: [
+        { kind: 'document', name: 'document.hwp', filename: documentPath },
+        { kind: 'timeline', name: 'timeline.json', filename: timelinePath },
+      ],
+      limits: { maxDurationSeconds: 900, maxTurns: 1, turnsUsed: 0 },
+    },
+  });
+  await waitStarted;
+  displayStatus = 'error';
+  await assert.rejects(running, { code: 'DISPLAY_LOST' });
+  assert.ok(Date.now() - startedAt < 1_000, 'display loss must interrupt a blocked durable wait within one second');
+  assert.equal(unavailable, 1);
+  assert.equal(restarts, 0);
+  assert.equal(closed, 1);
 });
 
 test('persistent runSession stays warm between turns and finishes only after End', async (t) => {

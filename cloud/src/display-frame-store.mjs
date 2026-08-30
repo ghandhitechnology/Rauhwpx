@@ -29,12 +29,48 @@ function dimension(value, label, maximum) {
   return value;
 }
 
-function jpeg(bytes) {
-  return bytes.length >= 4
-    && bytes[0] === 0xff
-    && bytes[1] === 0xd8
-    && bytes[bytes.length - 2] === 0xff
-    && bytes[bytes.length - 1] === 0xd9;
+function jpegDimensions(bytes, maximum) {
+  if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8
+    || bytes[bytes.length - 2] !== 0xff || bytes[bytes.length - 1] !== 0xd9) {
+    throw displayError('DISPLAY_FRAME_INVALID', 'Display frame must be a complete JPEG image');
+  }
+  let offset = 2;
+  while (offset < bytes.length - 2) {
+    if (bytes[offset] !== 0xff) {
+      throw displayError('DISPLAY_FRAME_INVALID', 'Display JPEG marker structure is invalid');
+    }
+    while (offset < bytes.length && bytes[offset] === 0xff) offset += 1;
+    if (offset >= bytes.length) {
+      throw displayError('DISPLAY_FRAME_INVALID', 'Display JPEG marker is truncated');
+    }
+    const marker = bytes[offset];
+    offset += 1;
+    if (marker === 0x00 || marker === 0xd8) {
+      throw displayError('DISPLAY_FRAME_INVALID', 'Display JPEG marker structure is invalid');
+    }
+    if (marker === 0xd9 || marker === 0xda) break;
+    if (marker === 0x01 || marker >= 0xd0 && marker <= 0xd7) continue;
+    if (offset + 2 > bytes.length) {
+      throw displayError('DISPLAY_FRAME_INVALID', 'Display JPEG segment length is truncated');
+    }
+    const length = bytes.readUInt16BE(offset);
+    if (length < 2 || offset + length > bytes.length) {
+      throw displayError('DISPLAY_FRAME_INVALID', 'Display JPEG segment is truncated');
+    }
+    const sof = marker >= 0xc0 && marker <= 0xcf
+      && ![0xc4, 0xc8, 0xcc].includes(marker);
+    if (sof) {
+      if (length < 8) throw displayError('DISPLAY_FRAME_INVALID', 'Display JPEG SOF segment is invalid');
+      const height = bytes.readUInt16BE(offset + 3);
+      const width = bytes.readUInt16BE(offset + 5);
+      if (width < 1 || height < 1 || width > maximum || height > maximum) {
+        throw displayError('DISPLAY_DIMENSIONS_INVALID', 'JPEG dimensions are outside the supported display bounds');
+      }
+      return { width, height };
+    }
+    offset += length;
+  }
+  throw displayError('DISPLAY_FRAME_INVALID', 'Display JPEG does not contain image dimensions');
 }
 
 export class DisplayFrameStore {
@@ -112,7 +148,13 @@ export class DisplayFrameStore {
     if (frameBytes.length < 1 || frameBytes.length > this.maxFrameBytes) {
       throw displayError('DISPLAY_FRAME_TOO_LARGE', 'JPEG frame exceeds 512 KiB', 413);
     }
-    if (!jpeg(frameBytes)) throw displayError('DISPLAY_FRAME_INVALID', 'Display frame must be a complete JPEG image');
+    const encoded = jpegDimensions(frameBytes, this.maxDimension);
+    if (encoded.width !== stream.width || encoded.height !== stream.height) {
+      throw displayError(
+        'DISPLAY_FRAME_DIMENSIONS_MISMATCH',
+        'JPEG dimensions do not match the authenticated display stream',
+      );
+    }
     const captured = new Date(capturedAt);
     if (!capturedAt || Number.isNaN(captured.valueOf()) || captured.toISOString() !== capturedAt) {
       throw displayError('DISPLAY_CAPTURE_TIME_INVALID', 'Frame capture time must be an ISO timestamp');

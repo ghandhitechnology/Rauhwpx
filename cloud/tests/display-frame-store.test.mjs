@@ -6,8 +6,23 @@ import {
   MAX_DISPLAY_FRAME_BYTES,
 } from '../src/display-frame-store.mjs';
 
-function jpeg(content) {
-  return Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.from(content), Buffer.from([0xff, 0xd9])]);
+function jpeg(content, { width = 1280, height = 800 } = {}) {
+  const comment = Buffer.from(content);
+  const commentLength = Buffer.alloc(2);
+  commentLength.writeUInt16BE(comment.length + 2);
+  const sof = Buffer.from([
+    0xff, 0xc0, 0x00, 0x0b, 0x08,
+    height >> 8, height & 0xff,
+    width >> 8, width & 0xff,
+    0x01, 0x01, 0x11, 0x00,
+  ]);
+  return Buffer.concat([
+    Buffer.from([0xff, 0xd8, 0xff, 0xfe]),
+    commentLength,
+    comment,
+    sof,
+    Buffer.from([0xff, 0xd9]),
+  ]);
 }
 
 function publish(store, stream, workerId, sequence, content, capturedAt = `2026-08-30T00:00:0${sequence}.000Z`) {
@@ -53,6 +68,40 @@ test('DisplayFrameStore bounds sessions, viewers, dimensions, and retained JPEG 
   const downloaded = store.getFrame('session-a', stream.streamId, 3);
   downloaded.bytes.fill(0);
   assert.deepEqual(store.getFrame('session-a', stream.streamId, 3).bytes, jpeg('three'));
+});
+
+test('DisplayFrameStore rejects malformed and dimension-confused JPEG frames before retention', () => {
+  const store = new DisplayFrameStore();
+  const stream = store.openStream({
+    sessionId: 'session-jpeg', workerId: 'worker-jpeg', width: 1280, height: 800,
+  });
+  const publishBytes = (bytes) => store.publishFrame({
+    sessionId: stream.sessionId,
+    workerId: 'worker-jpeg',
+    streamId: stream.streamId,
+    sequence: 1,
+    capturedAt: '2026-08-30T00:00:01.000Z',
+    bytes,
+  });
+  assert.throws(() => publishBytes(jpeg('mismatch', { width: 640, height: 480 })), {
+    code: 'DISPLAY_FRAME_DIMENSIONS_MISMATCH',
+  });
+  assert.throws(() => publishBytes(jpeg('huge', { width: 5000, height: 800 })), {
+    code: 'DISPLAY_DIMENSIONS_INVALID',
+  });
+  assert.throws(() => publishBytes(jpeg('zero', { width: 0, height: 800 })), {
+    code: 'DISPLAY_DIMENSIONS_INVALID',
+  });
+  assert.throws(() => publishBytes(Buffer.from([
+    0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x01, 0x02, 0xff, 0xd9,
+  ])), { code: 'DISPLAY_FRAME_INVALID' });
+  assert.throws(() => publishBytes(Buffer.from([
+    0xff, 0xd8, 0xff, 0xfe, 0x00, 0x04, 0x01, 0x02, 0xff, 0xd9,
+  ])), { code: 'DISPLAY_FRAME_INVALID' });
+  assert.throws(() => publishBytes(Buffer.from([
+    0xff, 0xd8, 0x01, 0x02, 0xff, 0xd9,
+  ])), { code: 'DISPLAY_FRAME_INVALID' });
+  assert.equal(store.snapshot().streams[0].frames, 0);
 });
 
 test('replacement worker identity fences the prior stream and stale publishers', async () => {

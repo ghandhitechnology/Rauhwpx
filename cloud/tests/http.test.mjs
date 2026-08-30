@@ -51,6 +51,24 @@ function publicFetch(url, options = {}) {
   return fetch(url, { ...fetchOptions, headers });
 }
 
+function jpeg(width, height, content = '') {
+  const comment = Buffer.from(content);
+  const commentLength = Buffer.alloc(2);
+  commentLength.writeUInt16BE(comment.length + 2);
+  return Buffer.concat([
+    Buffer.from([0xff, 0xd8, 0xff, 0xfe]),
+    commentLength,
+    comment,
+    Buffer.from([
+      0xff, 0xc0, 0x00, 0x0b, 0x08,
+      height >> 8, height & 0xff,
+      width >> 8, width & 0xff,
+      0x01, 0x01, 0x11, 0x00,
+      0xff, 0xd9,
+    ]),
+  ]);
+}
+
 async function assertResponseProof(response, identity, { nonce, method = 'GET', pathAndQuery }) {
   const bytes = Buffer.from(await response.clone().arrayBuffer());
   const digest = createHash('sha256').update(bytes).digest('hex');
@@ -693,11 +711,7 @@ test('an authenticated worker frame reaches paired devices with signed transient
   assert.equal(database.prepare(`SELECT COUNT(*) AS count FROM session_presence WHERE session_id = ?`).get(created.id).count, 0);
   assert.equal((await demand).interested, true);
 
-  const frameBytes = Buffer.concat([
-    Buffer.from([0xff, 0xd8]),
-    Buffer.from('paired-device-jpeg'),
-    Buffer.from([0xff, 0xd9]),
-  ]);
+  const frameBytes = jpeg(1280, 800, 'paired-device-jpeg');
   const metadata = await worker.publishFrame(capability.streamId, {
     sequence: 1,
     capturedAt: '2026-08-30T12:00:00.000Z',

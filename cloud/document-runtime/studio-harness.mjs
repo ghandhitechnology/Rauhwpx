@@ -6,6 +6,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
+import { childProcessEnvironment, normalizeDisplayGeometry } from './session-display.mjs';
 
 const MAX_EXPORT_BYTES = 64 * 1024 * 1024;
 const EXPORT_CHUNK_BYTES = 1024 * 1024;
@@ -376,17 +377,51 @@ const CHROMIUM_ARGS = Object.freeze([
   '--no-first-run',
 ]);
 
-async function launchChromium(puppeteer, chromiumPath) {
+function liveDisplayEnvironment(displayEnv) {
+  return displayEnv?.RAUHWpx_SESSION_DISPLAY === 'ready'
+    && typeof displayEnv.DISPLAY === 'string'
+    && displayEnv.DISPLAY
+    && typeof displayEnv.XAUTHORITY === 'string'
+    && displayEnv.XAUTHORITY;
+}
+
+export function chromiumLaunchOptions({
+  chromiumPath,
+  displayEnv = null,
+  displayGeometry = null,
+  environment = process.env,
+  pipe = true,
+}) {
+  const { width, height } = normalizeDisplayGeometry(displayGeometry);
+  const headed = Boolean(liveDisplayEnvironment(displayEnv));
+  const env = childProcessEnvironment(environment, headed ? {
+    DISPLAY: String(displayEnv.DISPLAY),
+    XAUTHORITY: String(displayEnv.XAUTHORITY),
+  } : {});
+  return {
+    executablePath: chromiumPath,
+    headless: !headed,
+    pipe,
+    dumpio: process.env.RAUHWpx_CHROMIUM_DUMPIO === '1',
+    defaultViewport: { width, height, deviceScaleFactor: 1 },
+    env,
+    args: headed
+      ? [
+        ...CHROMIUM_ARGS,
+        '--ozone-platform=x11',
+        '--window-position=0,0',
+        `--window-size=${width},${height}`,
+        '--kiosk',
+      ]
+      : [...CHROMIUM_ARGS],
+  };
+}
+
+export async function launchChromium(puppeteer, options) {
   const failures = [];
   for (const pipe of [true, false]) {
     try {
-      return await puppeteer.launch({
-        executablePath: chromiumPath,
-        headless: true,
-        pipe,
-        dumpio: process.env.RAUHWpx_CHROMIUM_DUMPIO === '1',
-        args: [...CHROMIUM_ARGS],
-      });
+      return await puppeteer.launch(chromiumLaunchOptions({ ...options, pipe }));
     } catch (error) {
       failures.push(`${pipe ? 'pipe' : 'port'}: ${error?.message ?? error}`);
       if (/ENOENT|Browser was not found|Could not find Chrome/i.test(String(error?.message ?? error))) break;
@@ -407,6 +442,7 @@ export async function createStudioHarness({
   references,
   timeline,
   displayEnv = null,
+  displayGeometry = null,
   onEvent = async () => {},
   studioRoot = process.env.RAUHWpx_STUDIO_DIST || '/app/studio',
   agentRoot = process.env.RAUHWpx_AGENT_ROOT || '/app/rhwp-agent',
@@ -488,7 +524,27 @@ export async function createStudioHarness({
     hub.stdout?.resume();
     await waitForHub(hubPort, hubToken, hub);
 
-    browser = await launchChromium(puppeteer, chromiumPath);
+    const headed = Boolean(liveDisplayEnvironment(displayEnv));
+    browser = await launchChromium(puppeteer, { chromiumPath, displayEnv, displayGeometry });
+    let browserFailure = null;
+    let closing = false;
+    browser.once('disconnected', () => {
+      if (!closing) {
+        browserFailure = runtimeError(
+          'BROWSER_EXITED',
+          headed ? 'Headed Cloud Studio browser exited from its session display' : 'Cloud Studio browser exited',
+        );
+      }
+    });
+    const assertBrowserHealthy = () => {
+      if (browserFailure) throw browserFailure;
+      if (browser?.connected === false) {
+        throw runtimeError(
+          'BROWSER_EXITED',
+          headed ? 'Headed Cloud Studio browser exited from its session display' : 'Cloud Studio browser exited',
+        );
+      }
+    };
     page = await browser.newPage();
     let pageErrorTail = '';
     const appendPageError = (message) => {
@@ -553,8 +609,10 @@ export async function createStudioHarness({
       'DOCUMENT_LOAD_TIMEOUT',
       'Cloud Studio document load timed out',
     );
+    assertBrowserHealthy();
     return {
       async start({ history }) {
+        assertBrowserHealthy();
         if (started) return;
         started = true;
         await withTimeout(
@@ -580,6 +638,10 @@ export async function createStudioHarness({
           manifest.provider,
         );
         await uploadRequiredReferences({ page, bootstrap, origin, references, scopeId: thread.id, onEvent });
+        assertBrowserHealthy();
+      },
+      assertHealthy() {
+        assertBrowserHealthy();
       },
       async runTurn(prompt, {
         timeoutMs,
@@ -587,6 +649,7 @@ export async function createStudioHarness({
         onSafeBoundary = null,
         readControl = null,
       }) {
+        assertBrowserHealthy();
         const sentAt = Date.now();
         if (resume?.action === 'approve') {
           await withTimeout(
@@ -712,6 +775,7 @@ export async function createStudioHarness({
         throw runtimeError('TURN_TIMEOUT', 'Cloud provider turn exceeded the session deadline');
       },
       async setWorkflow(workflow) {
+        assertBrowserHealthy();
         if (workflow !== 'direct' && workflow !== 'plan') {
           throw runtimeError('WORKFLOW_INVALID', 'Cloud conversation workflow is invalid');
         }
@@ -725,6 +789,7 @@ export async function createStudioHarness({
         execution = { ...execution, workflow };
       },
       async addReferences(incoming) {
+        assertBrowserHealthy();
         const additions = [];
         for (const reference of incoming ?? []) {
           const resourceId = `followup-${dynamicReferenceSequence++}`;
@@ -738,6 +803,7 @@ export async function createStudioHarness({
         }
       },
       async exportDocument(format, destination) {
+        assertBrowserHealthy();
         const metadata = await withTimeout(
           page.evaluate(
             (secret, selectedFormat) => window.rauhwpxCloudRuntime.prepareExport(secret, selectedFormat),
@@ -784,6 +850,7 @@ export async function createStudioHarness({
         return { ...metadata, sha256 };
       },
       async close() {
+        closing = true;
         await page?.evaluate((secret) => window.rauhwpxCloudRuntime.stop(secret), bootstrap).catch(() => {});
         await browser?.close().catch(() => {});
         browser = null;
