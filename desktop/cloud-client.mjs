@@ -1,6 +1,14 @@
 import { createHash, createPublicKey, randomBytes, randomUUID, verify } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { CLOUD_SERVER_MODES, normalizeCloudEndpoint, normalizeCloudProfile } from './cloud-profile.mjs';
+import {
+  MAX_DISPLAY_FRAME_BYTES,
+  openCloudDisplay,
+  parseDisplayCapability,
+  parseDisplayFrameEnvelope,
+  parseDisplayInterest,
+  unavailableDisplay,
+} from './cloud-display.mjs';
 
 const PROFILE_SECRET = 'cloud.profile';
 const REFRESH_SECRET = 'cloud.refresh';
@@ -117,6 +125,37 @@ function normalizeTransportError(error) {
 
 function abortReason(signal, fallback) {
   return signal?.reason ?? fallback ?? new DOMException('The operation was aborted', 'AbortError');
+}
+
+function abortableWait(promise, signal) {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(abortReason(signal));
+  return new Promise((resolve, reject) => {
+    const abort = () => {
+      signal.removeEventListener('abort', abort);
+      reject(abortReason(signal));
+    };
+    signal.addEventListener('abort', abort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', abort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener('abort', abort);
+        reject(error);
+      },
+    );
+  });
+}
+
+function sameProfileIdentity(left, right) {
+  return Boolean(
+    left
+    && right
+    && left.endpoint === right.endpoint
+    && left.serverPublicKey === right.serverPublicKey,
+  );
 }
 
 async function retryDelay(attempt, { baseMs = DEFAULT_RETRY_BASE_MS, signal } = {}) {
@@ -377,6 +416,8 @@ export class CloudClient {
   #refreshPromise = null;
   #profileGeneration = 0;
   #credentialChain = Promise.resolve();
+  #identityChain = Promise.resolve();
+  #displayConnections = new Set();
 
   constructor({ vault, fetchImpl = globalThis.fetch, transport = null } = {}) {
     if (!vault) throw new Error('CloudClient requires a secret vault');
@@ -415,7 +456,7 @@ export class CloudClient {
     if (tokens && !validTokenBundle(tokens)) {
       throw new CloudHttpError('Cloud pairing response is invalid');
     }
-    return this.#withCredentialLock(async () => {
+    return this.#withIdentityChange(() => this.#withCredentialLock(async () => {
       this.#profileGeneration += 1;
       try {
         const previous = {
@@ -468,11 +509,11 @@ export class CloudClient {
       } finally {
         this.#profileGeneration += 1;
       }
-    });
+    }));
   }
 
   async disconnect() {
-    return this.#withCredentialLock(async () => {
+    return this.#withIdentityChange(() => this.#withCredentialLock(async () => {
       this.#profileGeneration += 1;
       try {
         this.#accessToken = '';
@@ -484,7 +525,7 @@ export class CloudClient {
       } finally {
         this.#profileGeneration += 1;
       }
-    });
+    }));
   }
 
   async isPaired() {
@@ -576,7 +617,7 @@ export class CloudClient {
 
   /** 샌드박스를 철거할 때 프로필과 자격 증명을 함께 지운다. */
   async forgetProfile() {
-    return this.#withCredentialLock(async () => {
+    return this.#withIdentityChange(() => this.#withCredentialLock(async () => {
       this.#profileGeneration += 1;
       try {
         this.#profile = null;
@@ -591,7 +632,7 @@ export class CloudClient {
       } finally {
         this.#profileGeneration += 1;
       }
-    });
+    }));
   }
 
   /** 핀 없는 엔드포인트의 health를 읽어 샌드박스가 살아났는지 확인한다. */
@@ -1061,6 +1102,183 @@ export class CloudClient {
     return this.#request(`/v1/sessions/${encodeURIComponent(sessionId)}`, options);
   }
 
+  async displayCapability(sessionId, options = {}) {
+    try {
+      const capability = await this.#request(`/v1/sessions/${encodeURIComponent(sessionId)}/display`, {
+        ...options,
+        retryAttempts: options.retryAttempts ?? 1,
+      });
+      return parseDisplayCapability(capability, sessionId);
+    } catch (error) {
+      if ((error?.status === 404 && error?.code === 'NOT_FOUND')
+        || (error?.status === 501 && error?.code === 'DISPLAY_UNSUPPORTED')) {
+        return unavailableDisplay(
+          sessionId,
+          'server-unsupported',
+          'This Cloud server does not support live display frames',
+          false,
+        );
+      }
+      throw error;
+    }
+  }
+
+  async setDisplayInterest(sessionId, streamId, viewerId, active, options = {}) {
+    const result = await this.#request(`/v1/sessions/${encodeURIComponent(sessionId)}/display/interest`, {
+      method: 'POST',
+      body: { streamId, viewerId, active },
+      signal: options.signal,
+      timeoutMs: options.timeoutMs,
+      retryAttempts: options.retryAttempts ?? 1,
+      retryBaseMs: options.retryBaseMs,
+    });
+    return parseDisplayInterest(result, { streamId, active });
+  }
+
+  async readDisplayFrames(sessionId, capability, after = 0, {
+    signal,
+    onMetadata = () => {},
+    nonStreamTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+  } = {}) {
+    if (capability?.kind !== 'available' || capability.sessionId !== sessionId) {
+      throw new CloudHttpError('Cloud display capability is invalid', {
+        code: 'DISPLAY_CAPABILITY_INVALID', retryable: false,
+      });
+    }
+    const pathname = `/v1/sessions/${encodeURIComponent(sessionId)}/display/frames`
+      + `?streamId=${encodeURIComponent(capability.streamId)}&after=${encodeURIComponent(after)}`;
+    const response = await this.#rawRequest(pathname, {
+      headers: { accept: 'text/event-stream' },
+      signal,
+      timeoutMs: 0,
+      retryAttempts: 1,
+      stream: true,
+      maxResponseBytes: MAX_JSON_BYTES,
+      nonStreamTimeoutMs,
+    });
+    const profile = await this.#requiredProfile();
+    const proofContext = response[RESPONSE_PROOF_CONTEXT];
+    if (!proofContext
+      || !response.headers.get('content-type')?.toLowerCase().startsWith('text/event-stream')
+      || response.headers.get('x-rauhwpx-stream-protocol') !== SSE_STREAM_PROTOCOL
+      || response.headers.get('x-rauhwpx-content-sha256') !== SSE_STREAM_DIGEST) {
+      throw new CloudHttpError('Cloud display stream identity proof is invalid', {
+        code: 'SSE_PROOF_INVALID', retryable: false,
+      });
+    }
+    if (!response.body) throw new CloudHttpError('Cloud display stream is unavailable', {
+      code: 'DISPLAY_STREAM_UNAVAILABLE', retryable: true,
+    });
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let lastSequence = after;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        if (buffer.length > MAX_JSON_BYTES) {
+          throw new CloudHttpError('Cloud display event frame is too large', {
+            code: 'SSE_PAYLOAD_INVALID', retryable: false,
+          });
+        }
+        const parsed = sseFrames(buffer);
+        buffer = parsed.rest;
+        for (const frame of parsed.frames) {
+          const verifiedSequence = verifySseFrame(profile, frame, proofContext);
+          let data;
+          try { data = JSON.parse(frame.data); } catch {
+            throw new CloudHttpError('Cloud display event payload is invalid JSON', {
+              code: 'SSE_PAYLOAD_INVALID', retryable: false,
+            });
+          }
+          const metadata = parseDisplayFrameEnvelope(data, capability, verifiedSequence, frame.event);
+          if (verifiedSequence <= lastSequence) continue;
+          lastSequence = verifiedSequence;
+          await onMetadata(metadata);
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    return lastSequence;
+  }
+
+  async downloadDisplayFrame(metadata, options = {}) {
+    const sessionId = String(metadata?.sessionId ?? '');
+    const streamId = String(metadata?.streamId ?? '');
+    const sequence = Number(metadata?.sequence);
+    const expectedPath = `/v1/sessions/${encodeURIComponent(sessionId)}/display/frames/`
+      + `${encodeURIComponent(streamId)}/${sequence}`;
+    if (!sessionId || !streamId || !Number.isSafeInteger(sequence) || sequence < 1
+      || metadata.framePath !== expectedPath || metadata.mimeType !== 'image/jpeg'
+      || !Number.isSafeInteger(metadata.byteLength) || metadata.byteLength < 1
+      || metadata.byteLength > MAX_DISPLAY_FRAME_BYTES || !/^[a-f0-9]{64}$/.test(metadata.sha256)) {
+      throw new CloudHttpError('Cloud display frame metadata is invalid', {
+        code: 'DISPLAY_FRAME_METADATA_INVALID', retryable: false,
+      });
+    }
+    const response = await this.#rawRequest(metadata.framePath, {
+      signal: options.signal,
+      timeoutMs: options.timeoutMs,
+      retryAttempts: 1,
+      maxResponseBytes: MAX_DISPLAY_FRAME_BYTES,
+    });
+    const mimeType = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase();
+    const declared = Number(response.headers.get('content-length'));
+    const contentDigest = response.headers.get('x-content-sha256') ?? '';
+    const bytes = Buffer.from(await response.arrayBuffer());
+    const actualDigest = digest(bytes);
+    if (mimeType !== 'image/jpeg' || !Number.isSafeInteger(declared) || declared !== metadata.byteLength
+      || bytes.length !== metadata.byteLength || contentDigest !== metadata.sha256
+      || actualDigest !== metadata.sha256) {
+      throw new CloudHttpError('Cloud display frame failed integrity verification', {
+        code: 'DISPLAY_FRAME_INTEGRITY_FAILED', retryable: false,
+      });
+    }
+    return {
+      kind: 'frame',
+      ...metadata,
+      bytes: new Uint8Array(bytes),
+    };
+  }
+
+  async openDisplay(sessionId, listener, options = {}) {
+    await abortableWait(this.#identityChain, options.signal);
+    const controller = new AbortController();
+    const relayAbort = () => controller.abort(options.signal?.reason);
+    options.signal?.addEventListener('abort', relayAbort, { once: true });
+    if (options.signal?.aborted) relayAbort();
+    const entry = {
+      controller,
+      connection: null,
+      opening: null,
+      closePromise: null,
+      removeAbort: () => options.signal?.removeEventListener('abort', relayAbort),
+    };
+    this.#displayConnections.add(entry);
+    entry.opening = openCloudDisplay(this, sessionId, listener, {
+      ...options,
+      signal: controller.signal,
+    });
+    try {
+      const connection = await entry.opening;
+      entry.connection = connection;
+      if (controller.signal.aborted) {
+        await this.#closeDisplayEntry(entry);
+        throw abortReason(controller.signal);
+      }
+      return {
+        get capability() { return connection.capability; },
+        close: () => this.#closeDisplayEntry(entry),
+      };
+    } catch (error) {
+      await this.#closeDisplayEntry(entry);
+      throw error;
+    }
+  }
+
   async sessions(options = {}) {
     const result = await this.#request('/v1/sessions', options);
     return Array.isArray(result.sessions) ? result.sessions : [];
@@ -1287,18 +1505,64 @@ export class CloudClient {
     return run;
   }
 
+  #withIdentityChange(operation) {
+    const run = this.#identityChain.then(async () => {
+      await this.#closeDisplays();
+      return operation();
+    }, async () => {
+      await this.#closeDisplays();
+      return operation();
+    });
+    this.#identityChain = run.catch(() => {});
+    return run;
+  }
+
+  async #closeDisplays() {
+    const entries = [...this.#displayConnections];
+    for (const entry of entries) entry.controller.abort();
+    await Promise.allSettled(entries.map((entry) => this.#closeDisplayEntry(entry)));
+  }
+
+  #closeDisplayEntry(entry) {
+    if (entry.closePromise) return entry.closePromise;
+    entry.closePromise = (async () => {
+      entry.controller.abort();
+      const connection = entry.connection ?? await entry.opening?.catch(() => null);
+      await connection?.close();
+      entry.removeAbort();
+      this.#displayConnections.delete(entry);
+    })();
+    return entry.closePromise;
+  }
+
   async #acceptTokens(tokens) {
     this.#accessToken = tokens.accessToken;
     this.#accessExpiresAt = Number(tokens.accessExpiresAt) || Date.parse(tokens.accessExpiresAt) || Date.now() + 14 * 60_000;
     await this.#vault.set(REFRESH_SECRET, tokens.refreshToken);
   }
 
-  async #ensureAccessToken() {
-    if (this.#accessToken && this.#accessExpiresAt - Date.now() > 30_000) return this.#accessToken;
-    if (!this.#refreshPromise) {
-      const profileGeneration = this.#profileGeneration;
-      this.#refreshPromise = (async () => {
+  async #ensureAccessToken(profile, { signal } = {}) {
+    if (!sameProfileIdentity(profile, this.#profile)) {
+      throw new CloudHttpError('Cloud profile changed before request authentication', {
+        code: 'PROFILE_CHANGED',
+        retryable: false,
+      });
+    }
+    if (this.#accessToken && this.#accessExpiresAt - Date.now() > 30_000) {
+      return { token: this.#accessToken, generation: this.#profileGeneration };
+    }
+    const generation = this.#profileGeneration;
+    let state = this.#refreshPromise;
+    if (!state || state.generation !== generation || !sameProfileIdentity(state.profile, profile)) {
+      state = {
+        generation,
+        profile,
+        refreshToken: null,
+        promise: null,
+      };
+      state.promise = (async () => {
         const refreshToken = await this.#vault.get(REFRESH_SECRET);
+        state.refreshToken = refreshToken;
         if (!refreshToken) throw new CloudHttpError('This device must be paired with the VPS', {
           status: 401,
           code: 'PAIRING_REQUIRED',
@@ -1308,23 +1572,34 @@ export class CloudClient {
           method: 'POST',
           auth: false,
           body: { refreshToken },
+          profile,
           retryAuth: false,
           retryAttempts: SAFE_REQUEST_ATTEMPTS,
           timeoutMs: 10_000,
         });
         if (!validTokenBundle(tokens)) throw new CloudHttpError('Cloud token response is invalid');
         return this.#withCredentialLock(async () => {
-          if (profileGeneration !== this.#profileGeneration) {
+          const storedRefreshToken = await this.#vault.get(REFRESH_SECRET);
+          if (generation !== this.#profileGeneration
+            || !sameProfileIdentity(profile, this.#profile)
+            || storedRefreshToken !== refreshToken) {
             throw new CloudHttpError('Cloud profile changed during token refresh', {
               code: 'PROFILE_CHANGED',
+              retryable: false,
             });
           }
           await this.#acceptTokens(tokens);
-          return this.#accessToken;
+          return { token: this.#accessToken, generation };
         });
-      })().finally(() => { this.#refreshPromise = null; });
+      })();
+      this.#refreshPromise = state;
+      const clear = () => {
+        if (this.#refreshPromise === state) this.#refreshPromise = null;
+      };
+      state.promise.then(clear, clear);
+      void state.promise.catch(() => {});
     }
-    return this.#refreshPromise;
+    return abortableWait(state.promise, signal);
   }
 
   async #request(pathname, options = {}) {
@@ -1365,7 +1640,10 @@ export class CloudClient {
     const auth = options.auth !== false;
     const headers = { ...(options.headers ?? {}) };
     const method = String(options.method ?? 'GET').toUpperCase();
-    if (auth) headers.authorization = `Bearer ${await this.#ensureAccessToken()}`;
+    const authContext = auth
+      ? await this.#ensureAccessToken(profile, { signal: options.signal })
+      : null;
+    if (authContext) headers.authorization = `Bearer ${authContext.token}`;
     let body = options.rawBody;
     if (body == null && options.body != null) {
       headers['content-type'] = 'application/json';
@@ -1413,7 +1691,7 @@ export class CloudClient {
         cache: 'no-store',
       });
       const expectedDigest = proofContext ? verifyResponseProof(profile, response, proofContext) : null;
-      const isEventStream = options.stream === true
+      const isEventStream = options.stream === true && response.ok
         && response.headers.get('content-type')?.toLowerCase().startsWith('text/event-stream');
       if (!isEventStream) {
         const bytes = await boundedResponseBytes(response, options.maxResponseBytes, {
@@ -1448,10 +1726,21 @@ export class CloudClient {
       lease.release();
     }
     if (response.status === 401 && auth && options.retryAuth !== false) {
-      this.#accessToken = '';
-      this.#accessExpiresAt = 0;
-      await this.#ensureAccessToken();
-      return this.#rawRequestOnce(pathname, { ...options, retryAuth: false });
+      await this.#withCredentialLock(async () => {
+        if (authContext.generation !== this.#profileGeneration
+          || !sameProfileIdentity(profile, this.#profile)) {
+          throw new CloudHttpError('Cloud profile changed after request authentication', {
+            code: 'PROFILE_CHANGED',
+            retryable: false,
+          });
+        }
+        if (this.#accessToken === authContext.token) {
+          this.#accessToken = '';
+          this.#accessExpiresAt = 0;
+        }
+      });
+      await this.#ensureAccessToken(profile, { signal: options.signal });
+      return this.#rawRequestOnce(pathname, { ...options, profile, retryAuth: false });
     }
     if (!response.ok) {
       const payload = await responseJson(response).catch(() => ({}));

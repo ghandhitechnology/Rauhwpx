@@ -898,6 +898,10 @@ test('a refresh from the old VPS cannot overwrite an activated candidate profile
   });
 
   const oldRequest = client.profile();
+  const oldRequestResult = oldRequest.then(
+    () => null,
+    (error) => error,
+  );
   await refreshStarted;
   await client.activateProfile(candidateProfile, {
     tokens: {
@@ -909,10 +913,130 @@ test('a refresh from the old VPS cannot overwrite an activated candidate profile
   });
   releaseRefresh();
 
-  await assert.rejects(oldRequest, (error) => error.code === 'PROFILE_CHANGED');
+  assert.equal((await oldRequestResult)?.code, 'PROFILE_CHANGED');
   assert.equal((await client.loadProfile()).endpoint, candidateProfile.endpoint);
   assert.equal(vault.values.get('cloud.refresh'), 'candidate-refresh');
   assert.equal(vault.values.get('cloud.device'), JSON.stringify({ id: 'candidate-device' }));
+});
+
+test('a delayed refresh snapshot sends the old token only to the old profile', async () => {
+  const oldProfile = normalizeCloudProfile({
+    endpoint: 'https://snapshot-old.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'snapshot-old.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const candidateProfile = normalizeCloudProfile({
+    endpoint: 'https://snapshot-new.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'snapshot-new.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const baseVault = memoryVault({
+    'cloud.profile': JSON.stringify(oldProfile),
+    'cloud.refresh': 'snapshot-old-refresh',
+  });
+  const refreshRead = Promise.withResolvers();
+  const releaseRead = Promise.withResolvers();
+  const refreshResponse = Promise.withResolvers();
+  const observed = [];
+  let delayed = false;
+  const vault = {
+    ...baseVault,
+    get: async (key) => {
+      const value = await baseVault.get(key);
+      if (key === 'cloud.refresh' && !delayed) {
+        delayed = true;
+        refreshRead.resolve();
+        await releaseRead.promise;
+      }
+      return value;
+    },
+  };
+  const client = new CloudClient({
+    vault,
+    fetchImpl: signedFetch(async (url, options) => {
+      if (url.endsWith('/v1/token/refresh')) {
+        observed.push({ url, token: JSON.parse(options.body).refreshToken });
+        await refreshResponse.promise;
+        return jsonResponse({
+          accessToken: 'snapshot-stale-access',
+          accessExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+          refreshToken: 'snapshot-stale-refresh',
+        });
+      }
+      return jsonResponse({ ok: true, serverPublicKey: SERVER_KEY });
+    }),
+  });
+  const oldRequest = client.profile();
+  const oldRequestResult = oldRequest.then(
+    () => null,
+    (error) => error,
+  );
+  await refreshRead.promise;
+  const activation = client.activateProfile(candidateProfile, {
+    tokens: {
+      accessToken: 'snapshot-new-access',
+      accessExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+      refreshToken: 'snapshot-new-refresh',
+    },
+  });
+  await activation;
+  releaseRead.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  refreshResponse.resolve();
+  assert.equal((await oldRequestResult)?.code, 'PROFILE_CHANGED');
+  assert.deepEqual(observed, [{
+    url: `${oldProfile.endpoint}/v1/token/refresh`,
+    token: 'snapshot-old-refresh',
+  }]);
+  assert.equal(baseVault.values.get('cloud.refresh'), 'snapshot-new-refresh');
+});
+
+test('one aborted refresh waiter does not cancel another waiter', async () => {
+  const profile = normalizeCloudProfile({
+    endpoint: 'https://shared-refresh.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'shared-refresh.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const vault = memoryVault({
+    'cloud.profile': JSON.stringify(profile),
+    'cloud.refresh': 'shared-refresh-token',
+  });
+  const refreshStarted = Promise.withResolvers();
+  const releaseRefresh = Promise.withResolvers();
+  let refreshCalls = 0;
+  const client = new CloudClient({
+    vault,
+    fetchImpl: signedFetch(async (url) => {
+      if (url.endsWith('/v1/token/refresh')) {
+        refreshCalls += 1;
+        refreshStarted.resolve();
+        await releaseRefresh.promise;
+        return jsonResponse({
+          accessToken: 'shared-access',
+          accessExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+          refreshToken: 'shared-refresh-next',
+        });
+      }
+      return jsonResponse({ device: { id: 'shared-device' } });
+    }),
+  });
+  const controller = new AbortController();
+  const first = client.profile({ signal: controller.signal });
+  const second = client.profile();
+  await refreshStarted.promise;
+  controller.abort();
+  const firstAborted = await Promise.race([
+    first.then(
+      () => false,
+      (error) => error?.name === 'AbortError',
+    ),
+    new Promise((resolve) => setTimeout(() => resolve(false), 30)),
+  ]);
+  releaseRefresh.resolve();
+  assert.deepEqual(await second, { device: { id: 'shared-device' } });
+  await first.catch(() => {});
+  assert.equal(firstAborted, true);
+  assert.equal(refreshCalls, 1);
 });
 
 test('a refresh started during candidate vault writes is invalidated before acceptance', async () => {

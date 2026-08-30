@@ -1,5 +1,10 @@
 import type { RhwpDesktopApi } from '../desktop-integration.ts';
 import { browserCloudSupported, createBrowserCloudApi } from './browser-cloud.ts';
+import {
+  clientUnsupportedDisplay,
+  parseCloudDisplayCapability,
+  parseCloudDisplayEvent,
+} from './display.ts';
 import { parseCloudTimeline } from './timeline.ts';
 import { LOCAL_SESSION_PROVIDERS } from './types.ts';
 import type {
@@ -8,6 +13,9 @@ import type {
   CloudCheckpointPayload,
   CloudDownloadResult,
   CloudConnectionState,
+  CloudDisplayCapability,
+  CloudDisplayConnection,
+  CloudDisplayEvent,
   CloudProfileDraft,
   CloudProfileState,
   CloudSandboxSummary,
@@ -48,8 +56,11 @@ export interface CloudDesktopApi {
   cloudCompleteTakeover?: (payload: { sessionId: string }) => Promise<unknown>;
   cloudDownloadResult?: (payload: { sessionId: string }) => Promise<unknown>;
   cloudDownloadCheckpoint?: (payload: { sessionId: string; operationId?: string }) => Promise<unknown>;
+  cloudOpenDisplay?: (payload: { sessionId: string }) => Promise<unknown>;
+  cloudCloseDisplay?: (payload: { connectionId: string }) => Promise<unknown>;
   cloudResolveResult?: (payload: { sessionId: string; action: CloudResultAction }) => Promise<unknown>;
   onCloudEvent?: (callback: (event: unknown) => void) => (() => void) | void;
+  onCloudDisplayEvent?: (callback: (event: unknown) => void) => (() => void) | void;
 }
 
 export type CloudAwareDesktopApi = RhwpDesktopApi & CloudDesktopApi;
@@ -73,6 +84,7 @@ export interface CloudController {
   completeTakeover(sessionId: string): Promise<CloudSnapshot>;
   downloadResult(sessionId: string): Promise<CloudDownloadResult>;
   downloadCheckpoint(sessionId: string, operationId?: string): Promise<CloudCheckpointPayload>;
+  openDisplay(sessionId: string, listener: (event: CloudDisplayEvent) => void): Promise<CloudDisplayConnection>;
   resolveResult(sessionId: string, action: CloudResultAction): Promise<CloudResultResolution>;
   subscribe(listener: (snapshot: CloudSnapshot) => void): () => void;
   subscribeEvents(listener: (event: unknown) => void): () => void;
@@ -597,6 +609,16 @@ export function createCloudController(
   let disposed = false;
   const listeners = new Set<(state: CloudSnapshot) => void>();
   const eventListeners = new Set<(event: unknown) => void>();
+  type ActiveDisplay = {
+    connectionId: string;
+    capability: CloudDisplayCapability;
+    listener: (event: CloudDisplayEvent) => void;
+    closePromise: Promise<void> | null;
+  };
+  let displayGeneration = 0;
+  let activeDisplay: ActiveDisplay | null = null;
+  let openingDisplays = 0;
+  const pendingDisplayEvents = new Map<string, unknown[]>();
 
   const publish = (next: CloudSnapshot): CloudSnapshot => {
     if (next.revision < snapshot.revision) return snapshot;
@@ -628,6 +650,55 @@ export function createCloudController(
     for (const item of events) {
       for (const listener of eventListeners) listener(item);
     }
+  });
+
+  const closeDisplay = (entry: ActiveDisplay): Promise<void> => {
+    if (entry.closePromise) return entry.closePromise;
+    if (activeDisplay === entry) activeDisplay = null;
+    pendingDisplayEvents.delete(entry.connectionId);
+    entry.closePromise = Promise.resolve(resolvedApi?.cloudCloseDisplay?.({
+      connectionId: entry.connectionId,
+    })).then(() => {});
+    return entry.closePromise;
+  };
+
+  const acceptDisplayHostEvent = (value: unknown): CloudDisplayEvent | null => {
+    if (disposed) return null;
+    const envelope = record(value);
+    if (!envelope || typeof envelope.connectionId !== 'string' || !envelope.connectionId) return null;
+    const connectionId = envelope.connectionId;
+    if (!activeDisplay || connectionId !== activeDisplay.connectionId) {
+      if (openingDisplays > 0) {
+        const queued = pendingDisplayEvents.get(connectionId) ?? [];
+        queued.push(value);
+        pendingDisplayEvents.set(connectionId, queued.slice(-8));
+        while (pendingDisplayEvents.size > 4) {
+          const oldest = pendingDisplayEvents.keys().next().value;
+          if (oldest === undefined) break;
+          pendingDisplayEvents.delete(oldest);
+        }
+      }
+      return null;
+    }
+    const expectedStream = activeDisplay.capability.kind === 'available'
+      ? activeDisplay.capability.streamId
+      : undefined;
+    const event = parseCloudDisplayEvent(envelope.event, {
+      sessionId: activeDisplay.capability.sessionId,
+      streamId: record(envelope.event)?.state === 'connected' ? undefined : expectedStream,
+    });
+    if (!event) return null;
+    if (event.kind === 'connection' && event.state === 'connected') {
+      activeDisplay.capability = event.capability;
+    } else if (event.kind === 'unavailable') {
+      activeDisplay.capability = event;
+    }
+    try { activeDisplay.listener(event); } catch { /* Display listeners are isolated. */ }
+    return event;
+  };
+
+  const unsubscribeDisplayHost = resolvedApi?.onCloudDisplayEvent?.((value) => {
+    acceptDisplayHostEvent(value);
   });
 
   return {
@@ -674,6 +745,62 @@ export function createCloudController(
       if (!result) throw new Error('다운로드한 클라우드 체크포인트가 올바르지 않습니다.');
       return result;
     },
+    async openDisplay(sessionId, listener) {
+      const generation = ++displayGeneration;
+      const previous = activeDisplay;
+      activeDisplay = null;
+      if (previous) await closeDisplay(previous);
+      if (disposed || generation !== displayGeneration) {
+        throw new DOMException('Cloud display connection was replaced', 'AbortError');
+      }
+      if (typeof resolvedApi?.cloudOpenDisplay !== 'function'
+        || typeof resolvedApi?.cloudCloseDisplay !== 'function'
+        || typeof resolvedApi?.onCloudDisplayEvent !== 'function') {
+        const capability = clientUnsupportedDisplay(sessionId);
+        try { listener(capability); } catch { /* Display listeners are isolated. */ }
+        return { capability, async close() {} };
+      }
+      openingDisplays += 1;
+      let opened: Record<string, unknown> | null;
+      try {
+        opened = record(await resolvedApi.cloudOpenDisplay({ sessionId }));
+      } finally {
+        openingDisplays -= 1;
+      }
+      const connectionId = typeof opened?.connectionId === 'string' && opened.connectionId
+        ? opened.connectionId
+        : null;
+      const capability = parseCloudDisplayCapability(opened?.capability);
+      if (!connectionId || !capability || capability.sessionId !== sessionId) {
+        if (connectionId) pendingDisplayEvents.delete(connectionId);
+        if (connectionId) await resolvedApi.cloudCloseDisplay({ connectionId }).catch(() => {});
+        throw new Error('클라우드 디스플레이 연결 정보가 올바르지 않습니다.');
+      }
+      if (disposed || generation !== displayGeneration) {
+        pendingDisplayEvents.delete(connectionId);
+        await resolvedApi.cloudCloseDisplay({ connectionId }).catch(() => {});
+        throw new DOMException('Cloud display connection was replaced', 'AbortError');
+      }
+      const entry: ActiveDisplay = {
+        connectionId,
+        capability,
+        listener,
+        closePromise: null,
+      };
+      activeDisplay = entry;
+      const pending = pendingDisplayEvents.get(connectionId) ?? [];
+      pendingDisplayEvents.delete(connectionId);
+      const replayedUnavailable = pending
+        .map((value) => acceptDisplayHostEvent(value))
+        .some((event) => event?.kind === 'unavailable');
+      if (capability.kind === 'unavailable' && !replayedUnavailable) {
+        try { listener(capability); } catch { /* Display listeners are isolated. */ }
+      }
+      return {
+        get capability() { return entry.capability; },
+        close: () => closeDisplay(entry),
+      };
+    },
     async resolveResult(sessionId, action) {
       const fn = resolvedApi?.cloudResolveResult;
       if (typeof fn !== 'function') throw new Error('이 앱 빌드는 클라우드 결과 반영을 지원하지 않습니다.');
@@ -693,9 +820,13 @@ export function createCloudController(
     },
     dispose() {
       disposed = true;
+      displayGeneration += 1;
+      if (activeDisplay) void closeDisplay(activeDisplay);
       listeners.clear();
       eventListeners.clear();
+      pendingDisplayEvents.clear();
       if (typeof unsubscribeHost === 'function') unsubscribeHost();
+      if (typeof unsubscribeDisplayHost === 'function') unsubscribeDisplayHost();
     },
   };
 }
