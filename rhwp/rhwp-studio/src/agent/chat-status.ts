@@ -189,7 +189,7 @@ export function markChatFinished(threadId: string): void {
   mutate((map) => map.set(threadId, { status: 'finished', updatedAt: Date.now() }));
 }
 
-/** 사용자 응답 대기(계획 승인) — 빨간 점. 승인/수정 요청이 있어야 걷힌다. */
+/** 사용자 응답 대기(계획 승인 또는 질문) — 빨간 점. 응답이 있어야 걷힌다. */
 export function markChatNeedsInput(threadId: string): void {
   ownedWorking.delete(threadId);
   syncHeartbeat();

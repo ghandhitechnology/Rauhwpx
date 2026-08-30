@@ -84,7 +84,7 @@ function expectNoMessage(socket, predicate, windowMs) {
 }
 
 function sendFrame(socket, frame) {
-  socket.send(JSON.stringify({ v: 3, ...frame }));
+  socket.send(JSON.stringify({ v: 4, ...frame }));
 }
 
 async function closeSocket(socket) {

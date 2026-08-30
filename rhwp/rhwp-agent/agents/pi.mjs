@@ -140,7 +140,7 @@ export function buildPiEnv(opts, sourceEnv = process.env) {
     PI_OFFLINE: '1',
     RHWP_WS_URL: `ws://127.0.0.1:${opts.hubPort}/mcp`,
     RHWP_AGENT_TOKEN: String(opts.token ?? ''),
-    RHWP_AGENT_NAME: 'pi',
+    RHWP_AGENT_NAME: opts.agentName === 'rau' ? 'rau' : 'pi',
     RHWP_HUB_HTTP: `http://127.0.0.1:${opts.hubPort}`,
     RHWP_ROOT_DIR: String(opts.rootDir ?? ''),
     RHWP_PERMISSION_PROFILE: opts.permissionProfile ?? 'safe',

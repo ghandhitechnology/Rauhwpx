@@ -1,6 +1,7 @@
 // MCP 도구 정의 — mcp-stdio.mjs(등록)와 tests/(계약 검증)가 함께 쓰는 순수 데이터 모듈.
 // 프로세스/네트워크 부수효과가 없어야 하므로 여기에는 스키마·설명·검증 함수만 둔다.
-import { z } from 'zod';
+import { z } from 'zod/v3';
+import { MCP_USER_QUESTION_SHAPE } from './user-question.mjs';
 
 export const REVISION_NOTE = 'Returns the current document revision. Always use the revision from your most recent tool call as expectedRevision in write tools.';
 const WRITE_NOTE_REVISION = 'Requires expectedRevision (the revision returned by your most recent tool call). Fails with REVISION_MISMATCH if the document changed — the error message carries the current revision and how to recover. Core text writes from sibling agents editing disjoint paragraph ranges are rebased automatically (the response then carries rebasedParaShift), so a mismatch signals a real conflict.';
@@ -145,6 +146,7 @@ export const TOOL_CATEGORIES = Object.freeze([
   'template-read',
   'download-write',
   'artifact-write',
+  'user-interaction',
   'planning-control',
   'background-control',
   'background-worker',
@@ -158,7 +160,7 @@ export const TOOL_CATEGORIES = Object.freeze([
  * destructive 로 표시하지 않는다. 그렇게 표시하면 Codex 안전 모드
  * (`workspace-write` + `approval_policy=never`)가 문서 편집 도구를 거절한다.
  *
- * @param {'instruction-read'|'instruction-write'|'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'artifact-write'|'planning-control'|'background-control'|'background-worker'|'browser'} category
+ * @param {'instruction-read'|'instruction-write'|'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'artifact-write'|'user-interaction'|'planning-control'|'background-control'|'background-worker'|'browser'} category
  */
 export function toolAnnotations(category) {
   return {
@@ -903,6 +905,11 @@ const BASE_TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'ask_user_question',
+    description: 'Ask the user 1-4 focused questions as first-class multiple-choice cards and wait for one atomic response. Each question must have 2-4 concise options. Set multiSelect only when more than one option may be selected. Custom “Other” answers are enabled by default. Use this only from the root conversation when the answer materially affects the work; subagents and background workers must report their uncertainty to the root agent instead.',
+    shape: MCP_USER_QUESTION_SHAPE,
+  },
+  {
     name: 'present_implementation_plan',
     description: 'Present a complete implementation plan for user review. Call only after the user asked for a plan. Do not say the plan is ready before this tool returns. The hub assigns planId, stores the plan, emits plan-ready, and moves to awaiting-approval.',
     shape: IMPLEMENTATION_PLAN_SHAPE,
@@ -1042,7 +1049,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
 ];
 
-/** @type {Readonly<Record<string, 'instruction-read'|'instruction-write'|'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'artifact-write'|'planning-control'|'background-control'|'background-worker'|'browser'>>} */
+/** @type {Readonly<Record<string, 'instruction-read'|'instruction-write'|'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'artifact-write'|'user-interaction'|'planning-control'|'background-control'|'background-worker'|'browser'>>} */
 export const TOOL_CLASSIFICATIONS = Object.freeze({
   read_agent_instructions: 'instruction-read',
   update_agent_instructions: 'instruction-write',
@@ -1106,6 +1113,7 @@ export const TOOL_CLASSIFICATIONS = Object.freeze({
   list_bookmarks: 'document-read',
   set_bookmark: 'document-write',
   verify_changes: 'document-read',
+  ask_user_question: 'user-interaction',
   present_implementation_plan: 'planning-control',
   download_file: 'download-write',
   publish_artifact: 'artifact-write',
@@ -1128,11 +1136,11 @@ export const TOOL_DEFINITIONS = Object.freeze(BASE_TOOL_DEFINITIONS.map((definit
 }));
 
 export const TOOL_PROFILES = Object.freeze({
-  direct: Object.freeze(['instruction-read', 'instruction-write', 'document-read', 'document-write', 'reference-read', 'template-read', 'artifact-write', 'background-control']),
-  planning: Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'planning-control', 'browser']),
-  question: Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'browser']),
+  direct: Object.freeze(['instruction-read', 'instruction-write', 'document-read', 'document-write', 'reference-read', 'template-read', 'artifact-write', 'user-interaction', 'background-control']),
+  planning: Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'user-interaction', 'planning-control', 'browser']),
+  question: Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'user-interaction', 'browser']),
   'awaiting-approval': Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'browser']),
-  implementing: Object.freeze(['instruction-read', 'instruction-write', 'document-read', 'document-write', 'reference-read', 'template-read', 'download-write', 'artifact-write', 'browser', 'background-control']),
+  implementing: Object.freeze(['instruction-read', 'instruction-write', 'document-read', 'document-write', 'reference-read', 'template-read', 'download-write', 'artifact-write', 'user-interaction', 'browser', 'background-control']),
   'copy-layout-worker': Object.freeze([
     'read_product_skill',
     'get_document_info',

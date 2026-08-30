@@ -4,7 +4,17 @@ import {
   withTimeout,
 } from '../core/idb-open.ts';
 import { isAgentWorkflow, isStructuredPlan } from './types.ts';
-import type { AgentName, AgentWorkflow, ProductSkillIcon, ServiceTier, StructuredPlan } from './types.ts';
+import type {
+  AgentName,
+  AgentWorkflow,
+  ProductSkillIcon,
+  ServiceTier,
+  StructuredPlan,
+  UserQuestion,
+  UserQuestionAnswer,
+  UserQuestionInteraction,
+  UserQuestionOutcome,
+} from './types.ts';
 
 const STORAGE_KEY = 'rhwp-agent-threads';
 const NOTIFY_KEY = 'rhwp-agent-threads-notify';
@@ -28,7 +38,28 @@ interface ThreadMessageBase {
   selection?: { label: string; excerpt: string };
 }
 
+export interface PendingUserQuestionDraftSnapshot {
+  interaction: UserQuestionInteraction;
+  selectedOptionIdsByQuestionId: Record<string, string[]>;
+  otherTextByQuestionId: Record<string, string>;
+  activeQuestionIndex: number;
+  updatedAt: number;
+}
+
+export interface UserQuestionHistoryMessage extends ThreadMessageBase {
+  readonly role: 'assistant';
+  readonly kind: 'user-question';
+  readonly interaction: UserQuestionInteraction;
+  readonly outcome: UserQuestionOutcome;
+}
+
+export interface ThreadProviderHistoryEntry {
+  role: 'user' | 'assistant';
+  text: string;
+}
+
 export type ThreadMessage =
+  | UserQuestionHistoryMessage
   | (ThreadMessageBase & {
       role: 'assistant';
       kind: 'plan';
@@ -79,6 +110,8 @@ export interface ChatThread {
   latestPlan?: StructuredPlan;
   /** Plan snapshots referenced by clickable chat presentations. */
   plans?: StructuredPlan[];
+  /** Draft state only. Provider authority remains in the live hub session. */
+  pendingUserQuestion?: PendingUserQuestionDraftSnapshot;
   messages: ThreadMessage[];
 }
 
@@ -126,13 +159,14 @@ export function explorerGroupIsCurrent(
   return groups.filter((item) => normalizedDocumentName(item.docKey) === activeName).length === 1;
 }
 
-type StoredChatThread = Omit<ChatThread, 'workflow' | 'latestPlan' | 'plans' | 'docKey' | 'documentId' | 'activeTemplateId'> & {
+type StoredChatThread = Omit<ChatThread, 'workflow' | 'latestPlan' | 'plans' | 'docKey' | 'documentId' | 'activeTemplateId' | 'pendingUserQuestion'> & {
   workflow?: unknown;
   latestPlan?: unknown;
   plans?: unknown;
   docKey?: unknown;
   documentId?: unknown;
   activeTemplateId?: unknown;
+  pendingUserQuestion?: unknown;
 };
 
 type ThreadPersistenceChange =
@@ -208,6 +242,173 @@ function isStoredChatThread(v: unknown): v is StoredChatThread {
   );
 }
 
+function isAgentName(value: unknown): value is AgentName {
+  return value === 'claude' || value === 'codex' || value === 'pi'
+    || value === 'grok' || value === 'cursor' || value === 'rau';
+}
+
+function nonEmptyString(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  return normalized || null;
+}
+
+function normalizeUserQuestion(value: unknown, questionIndex: number): UserQuestion | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Record<string, unknown>;
+  const id = nonEmptyString(raw.id);
+  const question = nonEmptyString(raw.question);
+  if (!id || !question || !Array.isArray(raw.options)) return null;
+  const optionIds = new Set<string>();
+  const options = raw.options.flatMap((value): UserQuestion['options'] => {
+    if (!value || typeof value !== 'object') return [];
+    const option = value as Record<string, unknown>;
+    const label = nonEmptyString(option.label);
+    const optionId = nonEmptyString(option.id) ?? label;
+    if (!optionId || !label || optionIds.has(optionId)) return [];
+    optionIds.add(optionId);
+    return [{
+      id: optionId,
+      label,
+      description: typeof option.description === 'string' ? option.description : '',
+    }];
+  });
+  if (options.length === 0) return null;
+  return {
+    id,
+    header: nonEmptyString(raw.header) ?? `Question ${questionIndex + 1}`,
+    question,
+    mode: raw.mode === 'multiple' || raw.multiSelect === true ? 'multiple' : 'single',
+    options,
+    allowOther: raw.allowOther !== false,
+  };
+}
+
+function normalizeUserQuestionInteraction(value: unknown): UserQuestionInteraction | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Record<string, unknown>;
+  const interactionId = nonEmptyString(raw.interactionId);
+  const providerRequestId = nonEmptyString(raw.providerRequestId);
+  const threadId = nonEmptyString(raw.threadId);
+  const turnId = nonEmptyString(raw.turnId);
+  const createdAt = nonEmptyString(raw.createdAt);
+  const updatedAt = nonEmptyString(raw.updatedAt) ?? createdAt;
+  if (!interactionId || !providerRequestId || !threadId || !turnId || !createdAt || !updatedAt
+    || !isAgentName(raw.agent) || (raw.source !== 'native' && raw.source !== 'mcp')
+    || !Array.isArray(raw.questions)) return null;
+  const questionIds = new Set<string>();
+  const questions = raw.questions.flatMap((question, index): UserQuestion[] => {
+    const normalized = normalizeUserQuestion(question, index);
+    if (!normalized || questionIds.has(normalized.id)) return [];
+    questionIds.add(normalized.id);
+    return [normalized];
+  });
+  if (questions.length === 0) return null;
+  return {
+    interactionId,
+    providerRequestId,
+    threadId,
+    turnId,
+    agent: raw.agent,
+    source: raw.source,
+    createdAt,
+    updatedAt,
+    questions,
+  };
+}
+
+function normalizeSelectedOptionIds(question: UserQuestion, value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const selected = new Set(value.filter((id): id is string => typeof id === 'string'));
+  const normalized = question.options.filter((option) => selected.has(option.id)).map((option) => option.id);
+  return question.mode === 'multiple' ? normalized : normalized.slice(0, 1);
+}
+
+function normalizeUserQuestionAnswer(
+  question: UserQuestion,
+  value: unknown,
+): UserQuestionAnswer | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Record<string, unknown>;
+  const selectedOptionIds = normalizeSelectedOptionIds(question, raw.selectedOptionIds);
+  const otherText = question.allowOther && typeof raw.otherText === 'string'
+    ? raw.otherText
+    : '';
+  if (selectedOptionIds.length === 0 && !otherText.trim()) return null;
+  return {
+    selectedOptionIds,
+    ...(otherText.trim() ? { otherText } : {}),
+  };
+}
+
+function normalizeUserQuestionOutcome(
+  value: unknown,
+  interaction: UserQuestionInteraction,
+): UserQuestionOutcome | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Record<string, unknown>;
+  if (raw.status === 'cancelled' && raw.reason === 'user-stop') {
+    return { status: 'cancelled', reason: 'user-stop' };
+  }
+  if (raw.status === 'expired'
+    && (raw.reason === 'provider-disconnected' || raw.reason === 'hub-restarted'
+      || raw.reason === 'request-invalidated')) {
+    return { status: 'expired', reason: raw.reason };
+  }
+  if (raw.status !== 'answered' || !raw.answers || typeof raw.answers !== 'object') return null;
+  const rawAnswers = raw.answers as Record<string, unknown>;
+  const answers: Record<string, UserQuestionAnswer> = {};
+  for (const question of interaction.questions) {
+    const answer = normalizeUserQuestionAnswer(question, rawAnswers[question.id]);
+    if (!answer) return null;
+    answers[question.id] = answer;
+  }
+  return { status: 'answered', answers };
+}
+
+function normalizePendingUserQuestionDraft(
+  value: unknown,
+  expectedThreadId: string,
+  expectedAgent: AgentName,
+): PendingUserQuestionDraftSnapshot | null {
+  if (!value || typeof value !== 'object') return null;
+  const raw = value as Record<string, unknown>;
+  const interaction = normalizeUserQuestionInteraction(raw.interaction);
+  if (!interaction || interaction.threadId !== expectedThreadId || interaction.agent !== expectedAgent) {
+    return null;
+  }
+  const rawSelections = raw.selectedOptionIdsByQuestionId;
+  const rawOtherText = raw.otherTextByQuestionId;
+  const selectionRecord = rawSelections && typeof rawSelections === 'object'
+    ? rawSelections as Record<string, unknown>
+    : {};
+  const otherTextRecord = rawOtherText && typeof rawOtherText === 'object'
+    ? rawOtherText as Record<string, unknown>
+    : {};
+  const selectedOptionIdsByQuestionId: Record<string, string[]> = {};
+  const otherTextByQuestionId: Record<string, string> = {};
+  for (const question of interaction.questions) {
+    const selected = normalizeSelectedOptionIds(question, selectionRecord[question.id]);
+    if (selected.length > 0) selectedOptionIdsByQuestionId[question.id] = selected;
+    if (question.allowOther && typeof otherTextRecord[question.id] === 'string') {
+      otherTextByQuestionId[question.id] = otherTextRecord[question.id] as string;
+    }
+  }
+  const requestedIndex = Number.isInteger(raw.activeQuestionIndex)
+    ? Number(raw.activeQuestionIndex)
+    : 0;
+  return {
+    interaction,
+    selectedOptionIdsByQuestionId,
+    otherTextByQuestionId,
+    activeQuestionIndex: Math.max(0, Math.min(requestedIndex, interaction.questions.length - 1)),
+    updatedAt: typeof raw.updatedAt === 'number' && Number.isFinite(raw.updatedAt)
+      && raw.updatedAt >= 0
+      ? raw.updatedAt
+      : Date.now(),
+  };
+}
+
 function normalizeStoredThread(thread: StoredChatThread): ChatThread {
   const latestPlan = isStructuredPlan(thread.latestPlan) ? thread.latestPlan : undefined;
   const plans = Array.isArray(thread.plans) ? thread.plans.filter(isStructuredPlan) : [];
@@ -218,70 +419,93 @@ function normalizeStoredThread(thread: StoredChatThread): ChatThread {
     docKey: storedDocKey,
     documentId: storedDocumentId,
     activeTemplateId: storedActiveTemplateId,
+    pendingUserQuestion: storedPendingUserQuestion,
     ...rest
   } = thread;
-  return {
-    ...rest,
-    messages: rest.messages.flatMap((raw): ThreadMessage[] => {
-      if (!raw || typeof raw !== 'object') return [];
-      const message = raw as unknown as Record<string, unknown>;
-      if ((message.role !== 'user' && message.role !== 'assistant' && message.role !== 'system')
-        || typeof message.text !== 'string') return [];
-      const attachments = Array.isArray(message.attachments)
-        ? message.attachments.flatMap((item): ThreadAttachment[] => {
-          if (!item || typeof item !== 'object') return [];
-          const attachment = item as Record<string, unknown>;
-          if (typeof attachment.stageId !== 'string' || typeof attachment.name !== 'string'
-            || typeof attachment.mimeType !== 'string' || !Number.isFinite(Number(attachment.size))
-            || (attachment.status !== 'processing' && attachment.status !== 'ready'
-              && attachment.status !== 'error' && attachment.status !== 'deleted')) return [];
-          return [{
-            stageId: attachment.stageId,
-            ...(typeof attachment.fileId === 'string' ? { fileId: attachment.fileId } : {}),
-            name: attachment.name,
-            mimeType: attachment.mimeType,
-            size: Math.max(0, Number(attachment.size)),
-            status: attachment.status,
-            ...(typeof attachment.error === 'string' ? { error: attachment.error } : {}),
-          }];
-        })
-        : undefined;
-      const agent: AgentName | undefined = message.agent === 'claude' || message.agent === 'codex'
-        || message.agent === 'pi' || message.agent === 'grok' || message.agent === 'cursor'
-        || message.agent === 'rau'
-        ? message.agent
-        : undefined;
-      const skillIcon: ProductSkillIcon | undefined = message.skillIcon === 'pencil'
-        || message.skillIcon === 'bot' || message.skillIcon === 'system'
-        ? message.skillIcon
-        : undefined;
-      const metadata = {
-        ...(agent ? { agent } : {}),
-        ...(typeof message.skillName === 'string' && /^[a-z0-9-]+$/.test(message.skillName)
-          ? { skillName: message.skillName }
-          : {}),
-        ...(skillIcon ? { skillIcon } : {}),
-        ...(typeof message.messageId === 'string' ? { messageId: message.messageId } : {}),
-        ...(attachments?.length ? { attachments } : {}),
-      };
-      if (message.kind === 'plan') {
-        if (message.role !== 'assistant' || typeof message.planId !== 'string' || !message.planId) return [];
+  const messages = rest.messages.flatMap((raw): ThreadMessage[] => {
+    if (!raw || typeof raw !== 'object') return [];
+    const message = raw as unknown as Record<string, unknown>;
+    if ((message.role !== 'user' && message.role !== 'assistant' && message.role !== 'system')
+      || typeof message.text !== 'string') return [];
+    const attachments = Array.isArray(message.attachments)
+      ? message.attachments.flatMap((item): ThreadAttachment[] => {
+        if (!item || typeof item !== 'object') return [];
+        const attachment = item as Record<string, unknown>;
+        if (typeof attachment.stageId !== 'string' || typeof attachment.name !== 'string'
+          || typeof attachment.mimeType !== 'string' || !Number.isFinite(Number(attachment.size))
+          || (attachment.status !== 'processing' && attachment.status !== 'ready'
+            && attachment.status !== 'error' && attachment.status !== 'deleted')) return [];
         return [{
-          role: 'assistant',
-          text: message.text,
-          kind: 'plan',
-          planId: message.planId,
-          ...(message.planState === 'executed' ? { planState: 'executed' as const } : {}),
-          ...metadata,
+          stageId: attachment.stageId,
+          ...(typeof attachment.fileId === 'string' ? { fileId: attachment.fileId } : {}),
+          name: attachment.name,
+          mimeType: attachment.mimeType,
+          size: Math.max(0, Number(attachment.size)),
+          status: attachment.status,
+          ...(typeof attachment.error === 'string' ? { error: attachment.error } : {}),
         }];
-      }
+      })
+      : undefined;
+    const agent: AgentName | undefined = isAgentName(message.agent) ? message.agent : undefined;
+    const skillIcon: ProductSkillIcon | undefined = message.skillIcon === 'pencil'
+      || message.skillIcon === 'bot' || message.skillIcon === 'system'
+      ? message.skillIcon
+      : undefined;
+    const metadata = {
+      ...(agent ? { agent } : {}),
+      ...(typeof message.skillName === 'string' && /^[a-z0-9-]+$/.test(message.skillName)
+        ? { skillName: message.skillName }
+        : {}),
+      ...(skillIcon ? { skillIcon } : {}),
+      ...(typeof message.messageId === 'string' ? { messageId: message.messageId } : {}),
+      ...(attachments?.length ? { attachments } : {}),
+    };
+    if (message.kind === 'user-question') {
+      if (message.role !== 'assistant') return [];
+      const interaction = normalizeUserQuestionInteraction(message.interaction);
+      if (!interaction || interaction.threadId !== thread.id) return [];
+      const outcome = normalizeUserQuestionOutcome(message.outcome, interaction);
+      if (!outcome) return [];
       return [{
-        role: message.role,
+        role: 'assistant',
         text: message.text,
-        ...(message.kind === 'progress' ? { kind: 'progress' as const } : {}),
+        kind: 'user-question',
+        interaction,
+        outcome,
+        ...metadata,
+        agent: interaction.agent,
+      }];
+    }
+    if (message.kind === 'plan') {
+      if (message.role !== 'assistant' || typeof message.planId !== 'string' || !message.planId) return [];
+      return [{
+        role: 'assistant',
+        text: message.text,
+        kind: 'plan',
+        planId: message.planId,
+        ...(message.planState === 'executed' ? { planState: 'executed' as const } : {}),
         ...metadata,
       }];
-    }),
+    }
+    return [{
+      role: message.role,
+      text: message.text,
+      ...(message.kind === 'progress' ? { kind: 'progress' as const } : {}),
+      ...metadata,
+    }];
+  });
+  const pendingUserQuestion = normalizePendingUserQuestionDraft(
+    storedPendingUserQuestion,
+    thread.id,
+    thread.agent,
+  );
+  const pendingAlreadyArchived = pendingUserQuestion
+    ? messages.some((message) => message.kind === 'user-question'
+      && message.interaction.interactionId === pendingUserQuestion.interaction.interactionId)
+    : false;
+  return {
+    ...rest,
+    messages,
     workflow: isAgentWorkflow(thread.workflow) ? thread.workflow : 'direct',
     serviceTier: thread.serviceTier === 'fast' ? 'fast' : 'standard',
     docKey: typeof storedDocKey === 'string' && storedDocKey ? storedDocKey : null,
@@ -289,6 +513,7 @@ function normalizeStoredThread(thread: StoredChatThread): ChatThread {
     activeTemplateId: typeof storedActiveTemplateId === 'string' && storedActiveTemplateId ? storedActiveTemplateId : null,
     ...(latestPlan ? { latestPlan } : {}),
     ...(plans.length ? { plans } : {}),
+    ...(pendingUserQuestion && !pendingAlreadyArchived ? { pendingUserQuestion } : {}),
   };
 }
 
@@ -542,6 +767,157 @@ export function fallbackTitle(messages: ThreadMessage[]): string {
     .join(' ')
     .replace(/\s+/g, ' ');
   return text.length > 36 ? `${text.slice(0, 36)}…` : text;
+}
+
+export function createPendingUserQuestionDraftSnapshot(
+  interaction: UserQuestionInteraction,
+  updatedAt = Date.now(),
+): PendingUserQuestionDraftSnapshot {
+  return {
+    interaction: structuredClone(interaction),
+    selectedOptionIdsByQuestionId: {},
+    otherTextByQuestionId: {},
+    activeQuestionIndex: 0,
+    updatedAt,
+  };
+}
+
+export function pendingUserQuestionMatchesInteraction(
+  pending: PendingUserQuestionDraftSnapshot,
+  interaction: UserQuestionInteraction,
+): boolean {
+  return pending.interaction.interactionId === interaction.interactionId
+    && pending.interaction.providerRequestId === interaction.providerRequestId
+    && pending.interaction.threadId === interaction.threadId
+    && pending.interaction.turnId === interaction.turnId
+    && pending.interaction.agent === interaction.agent
+    && pending.interaction.source === interaction.source;
+}
+
+function userQuestionHistoryText(
+  interaction: UserQuestionInteraction,
+  outcome: UserQuestionOutcome,
+): string {
+  const status = outcome.status === 'answered'
+    ? '답변 완료'
+    : outcome.status === 'cancelled'
+      ? '사용자 중단'
+      : '요청 만료';
+  return `${interaction.questions.map((question) => question.question).join('\n')}\n${status}`;
+}
+
+export function createUserQuestionHistoryMessage(
+  interaction: UserQuestionInteraction,
+  outcome: UserQuestionOutcome,
+): UserQuestionHistoryMessage {
+  const interactionSnapshot = structuredClone(interaction);
+  const outcomeSnapshot = structuredClone(outcome);
+  return {
+    role: 'assistant',
+    kind: 'user-question',
+    text: userQuestionHistoryText(interactionSnapshot, outcomeSnapshot),
+    agent: interactionSnapshot.agent,
+    interaction: interactionSnapshot,
+    outcome: outcomeSnapshot,
+  };
+}
+
+export function archivePendingUserQuestion(
+  thread: ChatThread,
+  interactionId: string,
+  outcome: UserQuestionOutcome,
+): UserQuestionHistoryMessage | null {
+  const pending = thread.pendingUserQuestion;
+  if (!pending || pending.interaction.interactionId !== interactionId) return null;
+  const message = createUserQuestionHistoryMessage(pending.interaction, outcome);
+  thread.messages.push(message);
+  delete thread.pendingUserQuestion;
+  return message;
+}
+
+export function expirePendingUserQuestion(
+  thread: ChatThread,
+  reason: Extract<UserQuestionOutcome, { status: 'expired' }>['reason'],
+  interactionId = thread.pendingUserQuestion?.interaction.interactionId,
+): UserQuestionHistoryMessage | null {
+  if (!interactionId) return null;
+  return archivePendingUserQuestion(thread, interactionId, { status: 'expired', reason });
+}
+
+export function clearPendingUserQuestion(
+  thread: ChatThread,
+  interactionId: string,
+): PendingUserQuestionDraftSnapshot | null {
+  const pending = thread.pendingUserQuestion;
+  if (!pending || pending.interaction.interactionId !== interactionId) return null;
+  delete thread.pendingUserQuestion;
+  return pending;
+}
+
+function serializeUserQuestionHistoryMessage(
+  message: UserQuestionHistoryMessage,
+): ThreadProviderHistoryEntry[] {
+  const request = {
+    questions: message.interaction.questions.map((question) => ({
+      id: question.id,
+      header: question.header,
+      question: question.question,
+      mode: question.mode,
+      options: question.options.map((option) => ({
+        id: option.id,
+        label: option.label,
+        description: option.description,
+      })),
+      allowOther: question.allowOther,
+    })),
+  };
+  const response = message.outcome.status === 'answered'
+    ? {
+        status: 'answered' as const,
+        answers: message.interaction.questions.map((question) => {
+          const answer = message.outcome.status === 'answered'
+            ? message.outcome.answers[question.id]
+            : undefined;
+          const selected = new Set(answer?.selectedOptionIds ?? []);
+          return {
+            questionId: question.id,
+            selectedOptions: question.options
+              .filter((option) => selected.has(option.id))
+              .map((option) => ({ id: option.id, label: option.label })),
+            ...(answer?.otherText ? { otherText: answer.otherText } : {}),
+          };
+        }),
+      }
+    : { status: message.outcome.status, reason: message.outcome.reason };
+  return [
+    {
+      role: 'assistant',
+      text: `<user_question_request>\n${JSON.stringify(request)}\n</user_question_request>`,
+    },
+    {
+      role: 'user',
+      text: `<user_question_response>\n${JSON.stringify(response)}\n</user_question_response>`,
+    },
+  ];
+}
+
+export function serializeThreadMessagesForProviderHistory(
+  messages: readonly ThreadMessage[],
+): ThreadProviderHistoryEntry[] {
+  return messages.flatMap((message): ThreadProviderHistoryEntry[] => {
+    if (message.kind === 'user-question') {
+      return serializeUserQuestionHistoryMessage(message);
+    }
+    if ((message.role !== 'user' && message.role !== 'assistant')
+      || message.kind === 'progress'
+      || (!message.text.trim() && !(message.role === 'user' && message.skillName))) return [];
+    return [{
+      role: message.role,
+      text: message.role === 'user' && message.skillName
+        ? `/${message.skillName}${message.text.trim() ? ` ${message.text}` : ''}`
+        : message.text,
+    }];
+  });
 }
 
 export function createEmptyThread(draft: ThreadDraft): ChatThread {

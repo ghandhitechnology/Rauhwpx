@@ -26,7 +26,14 @@ import { calibrateWritingStyle } from './style-calibrator.mjs';
 import { buildWritingStyleCatalog, resolveWritingStyleSelection } from './writing-style-catalog.mjs';
 import { filterToolDefinitions, TOOL_DEFINITIONS } from './tools.mjs';
 import { replayMissedTurnEnd } from './turn-outcome-replay.mjs';
-import { PlanningState, authorizeToolCall, buildApprovedPlanPrompt, buildPlanningDocumentSavedPrompt, workflowError } from './planning-state.mjs';
+import {
+  PlanningState,
+  authorizeToolCall,
+  buildApprovedPlanPrompt,
+  buildPlanningDocumentSavedPrompt,
+  isExplicitImplementationApproval,
+  workflowError,
+} from './planning-state.mjs';
 import { DownloadManager } from './download-manager.mjs';
 import { DocumentSnapshotManager } from './document-snapshot-manager.mjs';
 import { ArtifactStore } from './artifact-store.mjs';
@@ -50,6 +57,16 @@ import { resolveHwpExtractor } from './reference-extractor.mjs';
 import { ReferenceStore } from './reference-store.mjs';
 import { createReferenceHttpHandler, isAllowedStudioOrigin } from './reference-http.mjs';
 import {
+  createUserQuestionInteraction,
+  isAskUserQuestionTool,
+  normalizeMcpUserQuestionRequest,
+  normalizeProviderUserQuestionRequest,
+  sameUserQuestionRequest,
+  userQuestionAnswersForMcp,
+  userQuestionArgsFromToolInput,
+  validateUserQuestionAnswers,
+} from './user-question.mjs';
+import {
   activeDocumentIdentity,
   addActiveDocumentContext,
   assertMessageScope,
@@ -68,7 +85,7 @@ import {
   taskProgressForJob,
 } from './template-perfection.mjs';
 import { copyLayoutShellAllowPrefixes } from './copy-layout-shell.mjs';
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import { terminateProcessTree } from './process-tree.mjs';
 import {
   authenticateHubSession,
@@ -82,7 +99,7 @@ import {
 const REQUESTED_PORT = Number(process.env.RHWP_AGENT_PORT ?? 5175);
 const PRODUCTION = process.env.NODE_ENV === 'production' || process.env.RHWP_AGENT_MODE === 'production';
 const { token: TOKEN, development: DEVELOPMENT_AUTH, launchId: LAUNCH_ID } = resolveHubIdentity();
-const PROTOCOL_VERSION = 3;
+const PROTOCOL_VERSION = 4;
 const HUB_NAME = 'rhwp-agent';
 const STARTED_AT = Date.now();
 // The bundle is discovery-only. Every per-window cwd, home, download, and
@@ -104,6 +121,9 @@ const STUDIO_TOOL_TIMEOUT_MS = 30_000;
 // 스튜디오가 끊긴 뒤 다시 붙기를 기다려 주는 시간 — 브리지의 첫 재접속 백오프(250·500ms)보다
 // 넉넉하되, 탭이 아주 닫힌 경우 30초 타임아웃까지 끌지 않을 만큼 짧게 잡는다.
 const STUDIO_REATTACH_GRACE_MS = Number(process.env.RHWP_STUDIO_REATTACH_GRACE_MS ?? 5_000);
+// 프로바이더 이벤트와 별도 MCP 소켓의 도구 호출 순서가 뒤집힐 수 있어
+// 정확한 루트 범위 티켓이 도착할 짧은 여유를 둔다.
+const USER_QUESTION_SCOPE_WAIT_MS = 2_000;
 const HARNESS_UPDATE_INITIAL_DELAY_MS = 8_000;
 const HARNESS_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const HARNESS_UPDATE_BUSY_RETRY_MS = 5 * 60 * 1000;
@@ -259,6 +279,10 @@ const sessions = new HubSessionRegistry({
       pendingReferenceMessage: null,
       nextCapabilityEpoch: 1,
       pendingCalls: new Map(),
+      pendingUserQuestion: null,
+      suppressedUserQuestionCallIds: new Set(),
+      pendingUserQuestionScopes: [],
+      userQuestionResponseReceipts: new Map(),
       nextHubId: 1,
       sessionGeneration: 0,
       missedTurnEnd: null,
@@ -710,6 +734,211 @@ function sendJson(sock, obj) {
   }
 }
 
+function pendingUserQuestionSnapshot(record) {
+  return record.pendingUserQuestion
+    ? structuredClone(record.pendingUserQuestion.interaction)
+    : null;
+}
+
+function userQuestionOutcomeForTurnEnd(event) {
+  if (event.stopReason === 'interrupted') return { status: 'cancelled', reason: 'user-stop' };
+  if (event.stopReason === 'failed' || event.stopReason === 'exited' || event.errorMessage) {
+    return { status: 'expired', reason: 'provider-disconnected' };
+  }
+  return { status: 'expired', reason: 'request-invalidated' };
+}
+
+function settleUserQuestion(record, outcome) {
+  const pending = record.pendingUserQuestion;
+  if (!pending) return false;
+  record.pendingUserQuestion = null;
+  if (pending.signal && pending.onAbort) {
+    pending.signal.removeEventListener('abort', pending.onAbort);
+  }
+  sendJson(record.studioSocket, {
+    v: 1,
+    type: 'user-question-resolved',
+    interactionId: pending.interaction.interactionId,
+    outcome,
+  });
+  pending.resolve(structuredClone(outcome));
+  return true;
+}
+
+function beginAgentTurn(record, activeSession) {
+  if (record.pendingUserQuestion) {
+    settleUserQuestion(record, { status: 'expired', reason: 'request-invalidated' });
+  }
+  record.userQuestionResponseReceipts.clear();
+  activeSession.turnId = crypto.randomUUID();
+  activeSession.status = 'running';
+}
+
+function settleAgentTurn(record, activeSession, event) {
+  settleUserQuestion(record, userQuestionOutcomeForTurnEnd(event));
+  activeSession.status = 'idle';
+  activeSession.turnId = null;
+}
+
+function requestUserQuestion(record, request, {
+  source,
+  generation,
+  signal,
+  mcpSocket = null,
+} = {}) {
+  const normalizedRequest = normalizeProviderUserQuestionRequest(request);
+  const activeSession = record.agentSession;
+  if (!activeSession || activeSession.generation !== generation) {
+    throw workflowError('REQUEST_INVALIDATED', 'The agent session changed before the question could be presented');
+  }
+  if (normalizedRequest.parentTaskId) {
+    throw workflowError('ROOT_INTERACTION_REQUIRED', 'Only the root conversation may ask the user questions');
+  }
+  if (activeSession.status !== 'running' || !activeSession.turnId) {
+    throw workflowError('NO_ACTIVE_TURN', 'User questions require an active root turn');
+  }
+  const current = record.pendingUserQuestion;
+  if (current) {
+    if (current.source === source && sameUserQuestionRequest(current.request, normalizedRequest)) {
+      return current.promise;
+    }
+    throw workflowError('INTERACTION_ALREADY_PENDING', 'Another user question is already waiting for an answer');
+  }
+  if (signal?.aborted) {
+    return Promise.resolve({ status: 'expired', reason: 'provider-disconnected' });
+  }
+  if (!record.studioSocket || record.studioSocket.readyState !== record.studioSocket.OPEN) {
+    throw workflowError('NO_STUDIO', 'Studio is not connected to present the user question');
+  }
+  const interaction = createUserQuestionInteraction({
+    request: normalizedRequest,
+    agent: activeSession.agent,
+    source,
+    threadId: activeSession.threadId,
+    turnId: activeSession.turnId,
+  });
+  let resolveInteraction;
+  const promise = new Promise((resolve) => { resolveInteraction = resolve; });
+  const onAbort = () => {
+    if (record.pendingUserQuestion?.interaction.interactionId !== interaction.interactionId) return;
+    settleUserQuestion(record, { status: 'expired', reason: 'provider-disconnected' });
+  };
+  record.pendingUserQuestion = {
+    interaction,
+    request: normalizedRequest,
+    source,
+    generation,
+    mcpSocket,
+    signal: signal ?? null,
+    onAbort: signal ? onAbort : null,
+    promise,
+    resolve: resolveInteraction,
+  };
+  signal?.addEventListener('abort', onAbort, { once: true });
+  const delivered = sendJson(record.studioSocket, {
+    v: 1,
+    type: 'user-question-requested',
+    interaction: structuredClone(interaction),
+  });
+  if (!delivered) {
+    settleUserQuestion(record, { status: 'expired', reason: 'provider-disconnected' });
+    throw workflowError('NO_STUDIO', 'Studio disconnected before the user question could be presented');
+  }
+  return promise;
+}
+
+function matchingUserQuestionScopes(record, agent, questions) {
+  const expectedQuestions = JSON.stringify(questions);
+  return record.pendingUserQuestionScopes
+    .map((scope, index) => ({ scope, index }))
+    .filter(({ scope }) => (
+      scope.agent === agent
+      && scope.questions
+      && JSON.stringify(scope.questions) === expectedQuestions
+    ));
+}
+
+async function waitForUserQuestionScopes(record, agent, questions, generation) {
+  const deadline = Date.now() + USER_QUESTION_SCOPE_WAIT_MS;
+  let matches = matchingUserQuestionScopes(record, agent, questions);
+  while (matches.length === 0
+    && record.agentSession?.generation === generation
+    && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, Math.min(20, deadline - Date.now())));
+    matches = matchingUserQuestionScopes(record, agent, questions);
+  }
+  return matches;
+}
+
+function userQuestionAnswerFrame({ interactionId, responseId, ok, code, message }) {
+  return {
+    v: 1,
+    type: 'user-question-answer-result',
+    interactionId,
+    responseId,
+    ok,
+    ...(code ? { code } : {}),
+    ...(message ? { message } : {}),
+  };
+}
+
+function answerUserQuestion(record, sock, msg) {
+  const interactionId = typeof msg.interactionId === 'string' ? msg.interactionId : '';
+  const responseId = typeof msg.responseId === 'string' ? msg.responseId : '';
+  if (!interactionId || !responseId || interactionId.length > 256 || responseId.length > 256) {
+    sendJson(sock, userQuestionAnswerFrame({
+      interactionId,
+      responseId,
+      ok: false,
+      code: 'INVALID_USER_QUESTION_ANSWER',
+      message: 'interactionId and responseId are required and must be at most 256 characters',
+    }));
+    return;
+  }
+  const receipt = record.userQuestionResponseReceipts.get(responseId);
+  if (receipt) {
+    if (receipt.interactionId === interactionId) sendJson(sock, receipt.frame);
+    else sendJson(sock, userQuestionAnswerFrame({
+      interactionId,
+      responseId,
+      ok: false,
+      code: 'RESPONSE_ID_REUSED',
+      message: 'responseId was already used for another interaction in this turn',
+    }));
+    return;
+  }
+  const pending = record.pendingUserQuestion;
+  let frame;
+  try {
+    if (!pending || pending.interaction.interactionId !== interactionId) {
+      throw workflowError('USER_QUESTION_NOT_FOUND', 'The question is no longer waiting for an answer');
+    }
+    const activeSession = record.agentSession;
+    if (!activeSession
+      || activeSession.generation !== pending.generation
+      || activeSession.threadId !== pending.interaction.threadId
+      || activeSession.turnId !== pending.interaction.turnId) {
+      throw workflowError('REQUEST_INVALIDATED', 'The question no longer belongs to the active root turn');
+    }
+    const answers = validateUserQuestionAnswers(pending.interaction, msg.answers);
+    frame = userQuestionAnswerFrame({ interactionId, responseId, ok: true });
+    record.userQuestionResponseReceipts.set(responseId, { interactionId, frame });
+    sendJson(sock, frame);
+    settleUserQuestion(record, { status: 'answered', answers });
+    return;
+  } catch (error) {
+    frame = userQuestionAnswerFrame({
+      interactionId,
+      responseId,
+      ok: false,
+      code: error?.code ?? 'INVALID_USER_QUESTION_ANSWER',
+      message: String(error?.message ?? error),
+    });
+  }
+  record.userQuestionResponseReceipts.set(responseId, { interactionId, frame });
+  sendJson(sock, frame);
+}
+
 function broadcastTemplateCatalog(change = null) {
   const catalog = { v: 1, type: 'templates-catalog', ...templateStore.list(), ...(change ? { change } : {}) };
   for (const record of sessions.values()) {
@@ -951,6 +1180,7 @@ function sessionInfo(record) {
       documentName: activeSession.documentName,
       status: activeSession.status,
       activeTemplateId: activeSession.activeTemplateId,
+      pendingUserQuestion: pendingUserQuestionSnapshot(record),
       ...activeSession.planning.snapshot(),
     }
     : null;
@@ -1004,13 +1234,15 @@ function drainTemplateCompletion(record) {
   );
   if (index < 0) return;
   const [entry] = record.pendingTemplateCompletions.splice(index, 1);
-  activeSession.status = 'running';
+  beginAgentTurn(record, activeSession);
   try {
     activeSession.backend.sendUserMessage(addAgentInstructionsContext(
       buildCopyLayoutCompletionPrompt(entry.result),
     ));
   } catch (error) {
     activeSession.status = 'idle';
+    activeSession.turnId = null;
+    record.userQuestionResponseReceipts.clear();
     record.pendingTemplateCompletions.splice(index, 0, entry);
     log(`copy-layout completion dispatch failed: ${error?.message ?? error}`);
   }
@@ -1268,6 +1500,40 @@ function makeBackendEventHandler(record, generation) {
   return (evt) => {
     const activeSession = record.agentSession;
     if (!activeSession || activeSession.generation !== generation) return;
+    // The fallback question tool is a first-class blocking interaction. Keep
+    // its provider bookkeeping out of the generic tool activity transcript;
+    // the dedicated requested/resolved lifecycle is the only Studio surface.
+    if (evt.type === 'tool-call' && isAskUserQuestionTool(evt.tool)) {
+      if (evt.callId) record.suppressedUserQuestionCallIds.add(evt.callId);
+      let questions = null;
+      try {
+        const args = userQuestionArgsFromToolInput(JSON.parse(evt.argsJson ?? '{}'));
+        questions = normalizeMcpUserQuestionRequest(args, 'scope-ticket').questions;
+      } catch {
+        // The MCP boundary will return the detailed schema error. Keep this
+        // ticket unusable so malformed or uncorrelated callers fail closed.
+      }
+      const duplicateScope = record.pendingUserQuestionScopes.findIndex((scope) => (
+        scope.agent === evt.agent && scope.callId === evt.callId
+      ));
+      if (duplicateScope >= 0) record.pendingUserQuestionScopes.splice(duplicateScope, 1);
+      record.pendingUserQuestionScopes.push({
+        agent: evt.agent,
+        callId: evt.callId,
+        parentTaskId: evt.parentTaskId ?? null,
+        questions,
+      });
+      if (record.pendingUserQuestionScopes.length > 8) {
+        record.pendingUserQuestionScopes.splice(0, record.pendingUserQuestionScopes.length - 8);
+      }
+      return;
+    }
+    if (evt.type === 'tool-result' && record.suppressedUserQuestionCallIds.has(evt.callId)) {
+      record.suppressedUserQuestionCallIds.delete(evt.callId);
+      const scopeIndex = record.pendingUserQuestionScopes.findIndex((scope) => scope.callId === evt.callId);
+      if (scopeIndex >= 0) record.pendingUserQuestionScopes.splice(scopeIndex, 1);
+      return;
+    }
     if (evt.type === 'session-info' && evt.sessionId) activeSession.sessionId = evt.sessionId;
     if (evt.type === 'usage') {
       usageStore.record({
@@ -1287,9 +1553,14 @@ function makeBackendEventHandler(record, generation) {
       sendJson(record.studioSocket, { v: 1, type: 'usage-report', usage: usageSnapshot() });
     }
     if (evt.type === 'turn-start') record.missedTurnEnd = null;
-    if (evt.type === 'turn-end') activeSession.status = 'idle';
+    if (evt.type === 'turn-end') settleAgentTurn(record, activeSession, evt);
     const delivered = sendJson(record.studioSocket, { v: 1, type: 'agent-event', event: evt });
     if (evt.type === 'turn-end' && !delivered) record.missedTurnEnd = evt;
+    if (evt.type === 'turn-end') {
+      record.userQuestionResponseReceipts.clear();
+      record.suppressedUserQuestionCallIds.clear();
+      record.pendingUserQuestionScopes.length = 0;
+    }
     if (evt.type === 'turn-end') drainTemplateCompletion(record);
     if (evt.type === 'turn-end') drainPlanningDocumentSaved(record);
   };
@@ -1302,6 +1573,11 @@ function disposeSession(record) {
   if (!activeSession) return Promise.resolve();
   const wasRunning = activeSession.status === 'running';
   const agent = activeSession.agent;
+  settleUserQuestion(record, { status: 'expired', reason: 'request-invalidated' });
+  record.userQuestionResponseReceipts.clear();
+  record.suppressedUserQuestionCallIds.clear();
+  record.pendingUserQuestionScopes.length = 0;
+  activeSession.turnId = null;
   let backendExit = Promise.resolve();
   try {
     backendExit = Promise.resolve(activeSession.backend.dispose());
@@ -1326,7 +1602,9 @@ function resolvePermissionProfile(value) {
 }
 
 function resolveWorkflow(value) {
-  return value === 'plan' || value === 'question' ? value : 'direct';
+  if (value === undefined || value === null) return 'direct';
+  if (value === 'direct' || value === 'plan' || value === 'question') return value;
+  throw workflowError('INVALID_WORKFLOW', `Unknown workflow: ${String(value)}`);
 }
 
 const CHAT_HISTORY_MAX_MESSAGES = 40;
@@ -1412,7 +1690,18 @@ function dispatchUserMessage(record, sock, msg, activeSession, messageAttachment
       sendJson(sock, { v: 1, type: 'chat-error', code: 'PLAN_NOT_FOUND', message: 'The latest plan is unavailable; return to planning and present it again.' });
       return;
     }
-    void requestImplementationPlanChanges(record, sock, { planId, feedback: msg.text })
+    const hasAttachments = messageAttachments.length > 0
+      || (Array.isArray(msg.stagedReferenceIds) && msg.stagedReferenceIds.length > 0);
+    if (!hasAttachments && isExplicitImplementationApproval(msg.text)) {
+      void enqueueWorkflowTransition(record, activeSession, () => approveImplementationPlan(record, sock, { planId }))
+        .catch((error) => sendChatError(sock, error));
+      return;
+    }
+    void enqueueWorkflowTransition(
+      record,
+      activeSession,
+      () => requestImplementationPlanChanges(record, sock, { planId, feedback: msg.text }),
+    )
       .catch((error) => sendChatError(sock, error));
     return;
   }
@@ -1420,7 +1709,7 @@ function dispatchUserMessage(record, sock, msg, activeSession, messageAttachment
     sendJson(sock, { v: 1, type: 'chat-error', code: 'WORKFLOW_SWITCHING', message: 'The provider is switching into implementation mode.' });
     return;
   }
-  activeSession.status = 'running';
+  beginAgentTurn(record, activeSession);
   void skillRegistry.promptContext(msg.text, typeof msg.skillName === 'string' ? msg.skillName : undefined, {
     phase: activeSession.planning.snapshot().phase,
     agent: activeSession.agent,
@@ -1440,7 +1729,11 @@ function dispatchUserMessage(record, sock, msg, activeSession, messageAttachment
       )));
     })
     .catch((e) => {
-      if (record.agentSession === activeSession) activeSession.status = 'idle';
+      if (record.agentSession === activeSession) {
+        activeSession.status = 'idle';
+        activeSession.turnId = null;
+        record.userQuestionResponseReceipts.clear();
+      }
       sendJson(sock, { v: 1, type: 'chat-error', code: e?.code ?? 'AGENT_SPAWN_FAILED', message: String(e?.message ?? e) });
     });
 }
@@ -1552,6 +1845,12 @@ async function startSession(
     cursorBin: cliSetupStatus.cursor?.installed ? cliSetup.binPath('cursor') : 'cursor-agent',
     providerEnv: CLI_SETUP_AGENTS.includes(agent) ? cliSetup.envFor(agent) : {},
     onEvent: makeBackendEventHandler(record, generation),
+    requestUserInput: (request, signal) => requestUserQuestion(record, request, {
+      source: 'native',
+      generation,
+      signal,
+    }),
+    agentRole: 'chat',
     workflow,
     phase: workflow === 'direct' ? 'implementing' : planning.phase,
     capabilityEpoch: planning.capabilityEpoch,
@@ -1576,6 +1875,7 @@ async function startSession(
     backend,
     generation,
     status: 'idle',
+    turnId: null,
     sessionId: backend.getSessionId(),
     threadId,
     documentId,
@@ -1587,7 +1887,12 @@ async function startSession(
     bootstrapHistory: normalizeChatHistory(requestedHistory),
     planning,
     workflowTransition: Promise.resolve(),
+    pendingTransitions: 0,
   };
+  if (workflow === 'plan') {
+    requireWorkflowSwitchBackend(record.agentSession);
+    await record.agentSession.backend.setExecutionMode(providerModeRequest(record.agentSession, 'planning'));
+  }
   queueMicrotask(() => drainTemplateCompletion(record));
   queueMicrotask(() => drainPlanningDocumentSaved(record));
   return record.agentSession;
@@ -1630,6 +1935,32 @@ function requireWorkflowSwitchBackend(activeSession) {
   }
 }
 
+function enqueueWorkflowTransition(record, transitionOwner, transitionFn) {
+  transitionOwner.pendingTransitions += 1;
+  const transition = transitionOwner.workflowTransition.then(() => {
+    if (record.agentSession !== transitionOwner) return undefined;
+    return transitionFn();
+  });
+  const trackedTransition = transition.finally(() => {
+    transitionOwner.pendingTransitions = Math.max(0, transitionOwner.pendingTransitions - 1);
+  });
+  transitionOwner.workflowTransition = trackedTransition.catch(() => undefined);
+  return trackedTransition;
+}
+
+async function setChatPermission(record, sock, msg) {
+  const activeSession = record.agentSession;
+  if (!activeSession) throw workflowError('AGENT_NOT_STARTED', 'Start a chat before changing permissions.');
+  if (activeSession.status === 'running') {
+    throw workflowError('AGENT_BUSY', 'Permissions can only change between turns.');
+  }
+  const profile = resolvePermissionProfile(msg.permissionProfile);
+  await Promise.resolve(activeSession.backend.setPermissionProfile(profile));
+  if (record.agentSession !== activeSession) return;
+  activeSession.permissionProfile = profile;
+  sendJson(sock, { v: 1, type: 'chat-permission-changed', permissionProfile: profile });
+}
+
 async function approveImplementationPlan(record, sock, msg) {
   const activeSession = record.agentSession;
   if (!activeSession) throw workflowError('AGENT_NOT_STARTED', 'Start a chat before approving a plan');
@@ -1649,7 +1980,7 @@ async function approveImplementationPlan(record, sock, msg) {
       planId: transition.approvedPlan.planId,
       ...activeSession.planning.snapshot(),
     });
-    activeSession.status = 'running';
+    beginAgentTurn(record, activeSession);
     const approvedPrompt = buildApprovedPlanPrompt(transition.approvedPlan);
     activeSession.backend.sendUserMessage(addAgentInstructionsContext(addTemplateContext(
       record,
@@ -1664,6 +1995,8 @@ async function approveImplementationPlan(record, sock, msg) {
     if (record.agentSession === activeSession && activeSession.planning.phase === 'switching') {
       activeSession.planning.failSwitch(transition.approvedPlan.planId);
       activeSession.status = 'idle';
+      activeSession.turnId = null;
+      record.userQuestionResponseReceipts.clear();
       emitWorkflowState(record, { reason: 'provider-switch-failed' });
     }
     sendChatError(sock, error, 'BACKEND_SWITCH_FAILED');
@@ -1674,23 +2007,24 @@ async function requestImplementationPlanChanges(record, sock, msg) {
   const activeSession = record.agentSession;
   if (!activeSession) throw workflowError('AGENT_NOT_STARTED', 'Start a chat before requesting plan changes');
   requireWorkflowSwitchBackend(activeSession);
+  const planId = String(msg.planId ?? '');
   activeSession.planning.requestChanges({
-    planId: String(msg.planId ?? ''),
+    planId,
     sessionStatus: msg.sessionStatusOverride ?? activeSession.status,
-  });
-  sendJson(sock, {
-    v: 1,
-    type: 'plan-invalidated',
-    planId: String(msg.planId ?? ''),
-    reason: typeof msg.reason === 'string' && msg.reason
-      ? msg.reason
-      : (typeof msg.feedback === 'string' ? msg.feedback : 'changes-requested'),
-    ...activeSession.planning.snapshot(),
-    latestPlan: null,
   });
   try {
     await activeSession.backend.setExecutionMode(providerModeRequest(activeSession, 'planning'));
     if (record.agentSession !== activeSession) return;
+    sendJson(sock, {
+      v: 1,
+      type: 'plan-invalidated',
+      planId,
+      reason: typeof msg.reason === 'string' && msg.reason
+        ? msg.reason
+        : (typeof msg.feedback === 'string' ? msg.feedback : 'changes-requested'),
+      ...activeSession.planning.snapshot(),
+      latestPlan: null,
+    });
     const promptOverride = typeof msg.promptOverride === 'string' ? msg.promptOverride.trim() : '';
     if (promptOverride) {
       activeSession.status = 'running';
@@ -1702,7 +2036,7 @@ async function requestImplementationPlanChanges(record, sock, msg) {
       return;
     }
     if (typeof msg.feedback === 'string' && msg.feedback.trim()) {
-      activeSession.status = 'running';
+      beginAgentTurn(record, activeSession);
       const revisionPrompt = [
         'The user requested changes, so the previous implementation plan is no longer authoritative.',
         'Return to discovery: inspect the affected current state and evaluate the feedback. If it is ambiguous or changes an assumption, discuss it with the user and ask one focused question in normal chat instead of immediately presenting a replacement. If it is already concrete, do not invent a question; follow the planning checkpoint and presentation rules before presenting a complete replacement.',
@@ -1715,7 +2049,13 @@ async function requestImplementationPlanChanges(record, sock, msg) {
       )));
     }
   } catch (error) {
-    if (record.agentSession === activeSession) activeSession.status = 'idle';
+    if (record.agentSession === activeSession) {
+      activeSession.planning.failRequestChanges(planId);
+      activeSession.status = 'idle';
+      activeSession.turnId = null;
+      record.userQuestionResponseReceipts.clear();
+      emitWorkflowState(record, { reason: 'provider-switch-failed' });
+    }
     sendChatError(sock, error, 'BACKEND_SWITCH_FAILED');
   }
 }
@@ -1730,7 +2070,7 @@ async function setChatWorkflow(record, sock, msg) {
       v: 1,
       type: 'workflow-changed',
       workflow: msg.workflow,
-      phase: msg.workflow === 'plan' ? 'planning' : 'direct',
+      phase: msg.workflow === 'plan' ? 'planning' : msg.workflow === 'question' ? 'questioning' : 'direct',
       capabilityEpoch: null,
       latestPlan: null,
     });
@@ -1932,6 +2272,10 @@ async function handleStudioMessage(record, sock, msg) {
         sendJson(sock, { v: 1, type: 'chat-error', code: 'AGENT_NOT_STARTED', message: 'No agent session; send chat-start first.' });
         return;
       }
+      if (record.agentSession.pendingTransitions > 0) {
+        sendJson(sock, { v: 1, type: 'chat-error', code: 'WORKFLOW_SWITCHING', message: 'The provider is applying a workflow or permission change.' });
+        return;
+      }
       try {
         assertMessageScope(record.agentSession, msg);
       } catch (error) {
@@ -2109,22 +2453,18 @@ async function handleStudioMessage(record, sock, msg) {
       return;
     }
     case 'chat-permission-set': {
-      if (!record.agentSession) {
+      const transitionOwner = record.agentSession;
+      if (!transitionOwner) {
         sendJson(sock, { v: 1, type: 'chat-error', code: 'AGENT_NOT_STARTED', message: 'Start a chat before changing permissions.' });
         return;
       }
-      if (record.agentSession.status === 'running') {
-        sendJson(sock, { v: 1, type: 'chat-error', code: 'AGENT_BUSY', message: 'Permissions can only change between turns.' });
-        return;
-      }
-      const profile = resolvePermissionProfile(msg.permissionProfile);
-      try {
-        record.agentSession.backend.setPermissionProfile(profile);
-        record.agentSession.permissionProfile = profile;
-        sendJson(sock, { v: 1, type: 'chat-permission-changed', permissionProfile: profile });
-      } catch (e) {
-        sendJson(sock, { v: 1, type: 'chat-error', code: 'PERMISSION_CHANGE_FAILED', message: String(e?.message ?? e) });
-      }
+      void enqueueWorkflowTransition(record, transitionOwner, () => setChatPermission(record, sock, msg))
+        .catch((e) => sendJson(sock, {
+          v: 1,
+          type: 'chat-error',
+          code: e?.code === 'AGENT_BUSY' ? 'AGENT_BUSY' : 'PERMISSION_CHANGE_FAILED',
+          message: String(e?.message ?? e),
+        }));
       return;
     }
     case 'chat-service-tier-set': {
@@ -2156,11 +2496,7 @@ async function handleStudioMessage(record, sock, msg) {
         }
         return;
       }
-      const transition = transitionOwner.workflowTransition.then(() => {
-        if (record.agentSession !== transitionOwner) return undefined;
-        return setChatWorkflow(record, sock, msg);
-      });
-      transitionOwner.workflowTransition = transition.catch(() => undefined);
+      const transition = enqueueWorkflowTransition(record, transitionOwner, () => setChatWorkflow(record, sock, msg));
       // studioMessageQueue 가 이 전환을 기다리지 않으면 Codex 재시작 중에
       // chat-user-message 가 바로 실행 모드 턴으로 들어가 문서를 잠근다.
       try {
@@ -2173,13 +2509,25 @@ async function handleStudioMessage(record, sock, msg) {
     case 'chat-plan-approve':
     case 'implementation-plan-approve':
     case 'plan-approve': {
-      void approveImplementationPlan(record, sock, msg).catch((error) => sendChatError(sock, error));
+      const transitionOwner = record.agentSession;
+      if (!transitionOwner) {
+        void approveImplementationPlan(record, sock, msg).catch((error) => sendChatError(sock, error));
+        return;
+      }
+      void enqueueWorkflowTransition(record, transitionOwner, () => approveImplementationPlan(record, sock, msg))
+        .catch((error) => sendChatError(sock, error));
       return;
     }
     case 'chat-plan-request-changes':
     case 'implementation-plan-request-changes':
     case 'plan-request-changes': {
-      void requestImplementationPlanChanges(record, sock, msg).catch((error) => sendChatError(sock, error));
+      const transitionOwner = record.agentSession;
+      if (!transitionOwner) {
+        void requestImplementationPlanChanges(record, sock, msg).catch((error) => sendChatError(sock, error));
+        return;
+      }
+      void enqueueWorkflowTransition(record, transitionOwner, () => requestImplementationPlanChanges(record, sock, msg))
+        .catch((error) => sendChatError(sock, error));
       return;
     }
     case 'chat-document-saved': {
@@ -2703,18 +3051,26 @@ async function handleStudioMessage(record, sock, msg) {
     }
     case 'chat-interrupt': {
       if (record.agentSession) {
+        settleUserQuestion(record, { status: 'cancelled', reason: 'user-stop' });
         try {
           record.agentSession.backend.interrupt();
         } catch (e) {
           log(`interrupt error: ${e?.message ?? e}`);
         }
         record.agentSession.status = 'idle';
+        record.agentSession.turnId = null;
+        record.userQuestionResponseReceipts.clear();
       }
       return;
     }
     case 'chat-stop': {
+      settleUserQuestion(record, { status: 'cancelled', reason: 'user-stop' });
       cancelCheckpointTitleJobs(record);
       await disposeSession(record);
+      return;
+    }
+    case 'user-question-answer': {
+      answerUserQuestion(record, sock, msg);
       return;
     }
     case 'tool-response': {
@@ -2821,6 +3177,69 @@ function handleMcpMessage(record, sock, msg) {
         void skillRegistry.readResource(String(args.name ?? ''), String(args.resourcePath ?? 'SKILL.md'))
           .then(sendResult)
           .catch((error) => sendError(error, 'SKILLS_ERROR'));
+        return;
+      }
+      if (tool === 'ask_user_question') {
+        if (workerJob || sock.agentRole !== 'chat' || msg.parentTaskId) {
+          sendError(workflowError(
+            'ROOT_INTERACTION_REQUIRED',
+            'Only the root conversation may ask the user questions',
+          ));
+          return;
+        }
+        let request;
+        try {
+          request = normalizeMcpUserQuestionRequest(args, `mcp:${String(clientId)}`);
+        } catch (error) {
+          if (error?.name === 'ZodError') error.code = 'INVALID_ARGS';
+          sendError(error, 'INVALID_ARGS');
+          return;
+        }
+        const generation = record.agentSession.generation;
+        void (async () => {
+          // Pi/Rau에는 위임 에이전트 질문 경로가 없어 MCP 프로세스 자체가 루트다.
+          // 다른 레거시 전송은 별도 프로바이더 스트림의 정확한 일회용 범위 티켓을
+          // 기다린 뒤 소비해, 상속된 환경 변수만으로 루트를 사칭하지 못하게 한다.
+          if (!OPENROUTER_AGENTS.has(sock.agentLabel)) {
+            const matchingScopes = await waitForUserQuestionScopes(
+              record,
+              sock.agentLabel,
+              request.questions,
+              generation,
+            );
+            if (matchingScopes.length !== 1) {
+              throw workflowError(
+                'CALLER_SCOPE_UNKNOWN',
+                'The provider did not unambiguously establish that this question came from the root conversation',
+              );
+            }
+            const scopeIndex = matchingScopes[0].index;
+            const [scope] = record.pendingUserQuestionScopes.splice(scopeIndex, 1);
+            if (scope.parentTaskId) {
+              throw workflowError(
+                'ROOT_INTERACTION_REQUIRED',
+                'Only the root conversation may ask the user questions',
+              );
+            }
+          }
+          const outcome = await requestUserQuestion(record, request, {
+            source: 'mcp',
+            generation,
+            mcpSocket: sock,
+          });
+          if (outcome.status === 'answered') {
+            sendResult({
+              status: 'answered',
+              answers: userQuestionAnswersForMcp(request, outcome.answers),
+            });
+            return;
+          }
+          const code = outcome.status === 'cancelled'
+            ? 'USER_QUESTION_CANCELLED'
+            : 'USER_QUESTION_EXPIRED';
+          sendError(workflowError(code, `User question ${outcome.status}: ${outcome.reason}`));
+        })()
+          .catch((error) => sendError(error, 'USER_QUESTION_FAILED'));
         return;
       }
       if (tool === 'delegate_copy_layout') {
@@ -3562,6 +3981,15 @@ httpServer.on('upgrade', (req, socket, head) => {
           ...activeSession.planning.snapshot(),
         });
       }
+      const pendingUserQuestion = pendingUserQuestionSnapshot(record);
+      if (pendingUserQuestion) {
+        sendJson(ws, {
+          v: 1,
+          type: 'user-question-requested',
+          interaction: pendingUserQuestion,
+          replayed: true,
+        });
+      }
       void skillRegistry.list().then((catalog) => sendJson(ws, { v: 1, type: 'skills-catalog', ...catalog }));
       void writingStyleStore.status()
         .then((status) => sendJson(ws, { v: 1, type: 'writing-style-status', status }))
@@ -3622,6 +4050,9 @@ httpServer.on('upgrade', (req, socket, head) => {
     attachSocket(record, ws, 'mcp');
     ws.on('close', () => {
       record.mcpSockets.delete(ws);
+      if (record.pendingUserQuestion?.mcpSocket === ws) {
+        settleUserQuestion(record, { status: 'expired', reason: 'provider-disconnected' });
+      }
       for (const [hubId, entry] of record.pendingCalls) {
         if (entry.mcpSocket === ws) {
           clearTimeout(entry.timer);
@@ -3658,6 +4089,7 @@ async function disposeRecord(record, reason) {
   }
   record.pendingInstructionDraft = null;
   clearStudioReattachGrace(record);
+  settleUserQuestion(record, { status: 'expired', reason: 'hub-restarted' });
   failAllPendingCalls(record, 'Hub session is shutting down');
   const backendExit = disposeSession(record);
   const templateBackendExits = [];

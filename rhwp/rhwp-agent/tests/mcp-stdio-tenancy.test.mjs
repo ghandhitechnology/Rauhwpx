@@ -1,11 +1,17 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { WebSocketServer } from 'ws';
 import { issueScopedHubToken } from '../hub-session-registry.mjs';
 
-test('mcp stdio recovers its scoped session and sends protocol v3 query identity', { timeout: 15_000 }, async (t) => {
+test('MCP user questions have no ordinary 180 second timeout', () => {
+  const source = readFileSync(new URL('../mcp-stdio.mjs', import.meta.url), 'utf8');
+  assert.match(source, /tool === 'ask_user_question'\s*\? null\s*:\s*setTimeout/);
+});
+
+test('mcp stdio recovers its scoped session and sends protocol v4 query identity', { timeout: 15_000 }, async (t) => {
   const wss = new WebSocketServer({ host: '127.0.0.1', port: 0 });
   await once(wss, 'listening');
   const address = wss.address();

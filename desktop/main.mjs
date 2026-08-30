@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
 import { readFile, rm, writeFile } from 'node:fs/promises';
-import { basename, dirname, extname, join, sep } from 'node:path';
+import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   app,
@@ -23,6 +23,7 @@ import {
   isHubHealthy,
   issueHubSessionToken,
   nextHubRestartDelay,
+  packagedRhwpBinary,
   requestHubShutdown,
   resolveHubLaunch,
   spawnHubProcess,
@@ -49,6 +50,7 @@ import {
   STUDIO_URL,
   installStudioProtocol,
   registerStudioScheme,
+  resolveDevelopmentUrl,
 } from './studio-protocol.mjs';
 import { createSecretVault, handleSecretRequest } from './secret-vault.mjs';
 import { deliverPlainTextPaste } from './plain-text-paste.mjs';
@@ -57,7 +59,10 @@ const { autoUpdater } = electronUpdater;
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const RELEASES_URL = 'https://github.com/ghandhitechnology/Rauhwpx/releases/latest';
 const PRELOAD_PATH = join(__dirname, 'preload.cjs');
-const devUrl = process.env.RHWP_DEV_URL || '';
+const devUrl = resolveDevelopmentUrl({
+  packaged: app.isPackaged,
+  rawUrl: process.env.RHWP_DEV_URL,
+});
 const launchId = randomUUID();
 const hubToken = createHubToken();
 const devOrigin = devUrl ? new URL(devUrl).origin : null;
@@ -79,6 +84,12 @@ function sessionForEvent(event) {
 }
 
 app.setName('Rauhwpx');
+if (!app.isPackaged) {
+  const developmentUserData = process.env.RHWP_DESKTOP_USER_DATA
+    ? resolve(process.env.RHWP_DESKTOP_USER_DATA)
+    : join(__dirname, '..', '.run', 'desktop-user-data');
+  app.setPath('userData', developmentUserData);
+}
 registerStudioScheme(protocol);
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
@@ -179,6 +190,10 @@ class AgentHubOwner {
     }
 
     const server = agentScript();
+    const rhwpBinary = packagedRhwpBinary({
+      packaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+    });
     const launch = resolveHubLaunch({
       packaged: app.isPackaged,
       execPath: process.execPath,
@@ -192,6 +207,7 @@ class AgentHubOwner {
         RHWP_AGENT_PORT: '0',
         RHWP_AGENT_TOKEN: hubToken,
         RHWP_AGENT_MODE: 'production',
+        ...(rhwpBinary ? { RHWP_BIN: rhwpBinary } : {}),
         RHWP_LAUNCH_ID: launchId,
         RHWP_OWNER_PID: String(process.pid),
         RHWP_RUNTIME_DIR: this.runtimeDir,
