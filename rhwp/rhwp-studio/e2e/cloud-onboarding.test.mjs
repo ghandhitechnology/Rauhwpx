@@ -270,6 +270,7 @@ function cloudMock() {
   };
   const snapshot = () => ({
     revision: ++revision,
+    profileEpoch: 0,
     available: true,
     profile: profileState(),
     server: {

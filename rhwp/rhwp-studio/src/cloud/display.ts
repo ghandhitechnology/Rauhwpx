@@ -156,6 +156,13 @@ export function parseCloudDisplayFrameEnvelope(
   return metadata?.sequence === verifiedSequence ? metadata : null;
 }
 
+export function decodedCloudDisplayFrameMatches(
+  frame: Pick<CloudDisplayFrameMetadata, 'width' | 'height'>,
+  decoded: { width: number; height: number },
+): boolean {
+  return dimension(decoded.width) === frame.width && dimension(decoded.height) === frame.height;
+}
+
 function parseConnectionState(value: Record<string, unknown>): CloudDisplayConnectionState | null {
   const sessionId = identifier(value.sessionId);
   if (!sessionId || value.kind !== 'connection') return null;
