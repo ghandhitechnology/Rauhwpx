@@ -274,7 +274,10 @@ test('a timed-out CLI attempt terminates its owned process tree', async () => {
   assert.equal(spawned.options.env.HOME, '/isolated/home');
   assert.equal(spawned.options.env.RHWP_SESSION_ID, 'session-1');
   assert.match(spawned.proc.stdin.value, /"items"/);
-  await assert.rejects(() => fs.access(spawned.options.cwd), { code: 'ENOENT' });
+  await assert.rejects(
+    fs.access(spawned.options.cwd),
+    { code: 'ENOENT' },
+  );
 });
 
 test('external cancellation terminates an active CLI attempt', async () => {
