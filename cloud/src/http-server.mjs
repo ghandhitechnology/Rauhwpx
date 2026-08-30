@@ -17,6 +17,10 @@ import {
 import { SERVICE_VERSION } from './version.mjs';
 import { parseProviderCredentialBody } from './provider-credentials.mjs';
 import {
+  MAX_DISPLAY_DIMENSION,
+  MAX_DISPLAY_FRAME_BYTES,
+} from './display-frame-store.mjs';
+import {
   SSE_STREAM_DIGEST,
   SSE_STREAM_PROTOCOL,
   createResponseProof,
@@ -94,8 +98,38 @@ function positiveSequence(value, label = 'after') {
   return parsed;
 }
 
+function displayDimension(value, label) {
+  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_DISPLAY_DIMENSION) {
+    throw new CloudError('DISPLAY_DIMENSIONS_INVALID', `${label} is outside the supported display bounds`);
+  }
+  return value;
+}
+
+function displayCaptureTime(value) {
+  const capturedAt = typeof value === 'string' ? value : '';
+  const captured = new Date(capturedAt);
+  if (!capturedAt || Number.isNaN(captured.valueOf()) || captured.toISOString() !== capturedAt) {
+    throw new CloudError('DISPLAY_CAPTURE_TIME_INVALID', 'Frame capture time must be an ISO timestamp');
+  }
+  return capturedAt;
+}
+
 function writeSse(response, event) {
   response.write(signedSseFrame(response[responseProof], event));
+}
+
+function workerIdentity(session) {
+  return session.worker_token_hash ? Buffer.from(session.worker_token_hash).toString('hex') : null;
+}
+
+function unavailableDisplay(session, reason, message, retryable) {
+  return {
+    kind: 'unavailable',
+    sessionId: session?.id ?? null,
+    reason,
+    message,
+    retryable,
+  };
 }
 
 function applyBrowserCors(request, response, allowedOrigins = []) {
@@ -133,6 +167,7 @@ function applyBrowserCors(request, response, allowedOrigins = []) {
 export function createCloudHttpHandler({
   auth,
   blobStore,
+  displayFrameStore = null,
   sessionStore,
   identity,
   config,
@@ -210,8 +245,73 @@ export function createCloudHttpHandler({
         const session = authenticateWorker(request, sessionId, {
           allowCompletedResultRetry: request.method === 'POST' && action === '/result',
         });
+        const authenticatedWorkerId = workerIdentity(session);
         if (request.method === 'POST' && action === '/heartbeat') {
           json(response, 200, { ok: sessionStore.heartbeat(sessionId) });
+          return;
+        }
+        if (request.method === 'POST' && action === '/display/streams') {
+          if (!displayFrameStore) throw new CloudError('DISPLAY_UNSUPPORTED', 'Display frames are not supported', 501);
+          const body = await readJson(request);
+          const width = displayDimension(body.width, 'width');
+          const height = displayDimension(body.height, 'height');
+          const currentWorkerId = workerIdentity(authenticateWorker(request, sessionId));
+          json(response, 201, displayFrameStore.openStream({
+            sessionId,
+            workerId: currentWorkerId,
+            width,
+            height,
+          }));
+          return;
+        }
+        const workerDemand = action.match(/^\/display\/streams\/([^/]+)\/demand$/);
+        if (request.method === 'GET' && workerDemand) {
+          if (!displayFrameStore) throw new CloudError('DISPLAY_UNSUPPORTED', 'Display frames are not supported', 501);
+          const streamId = decodeURIComponent(workerDemand[1]);
+          const after = positiveSequence(requestUrl.searchParams.get('after'), 'after');
+          const controller = new AbortController();
+          response.once('close', () => controller.abort());
+          const demand = await displayFrameStore.waitForDemand(
+            sessionId,
+            authenticatedWorkerId,
+            streamId,
+            after,
+            { signal: controller.signal },
+          );
+          if (demand && !response.destroyed) json(response, 200, demand);
+          return;
+        }
+        const workerFrame = action.match(/^\/display\/streams\/([^/]+)\/frames\/(\d+)$/);
+        if (request.method === 'POST' && workerFrame) {
+          if (!displayFrameStore) throw new CloudError('DISPLAY_UNSUPPORTED', 'Display frames are not supported', 501);
+          if (!String(request.headers['content-type'] ?? '').toLowerCase().startsWith('image/jpeg')) {
+            throw new CloudError('DISPLAY_FRAME_INVALID', 'Display frame content type must be image/jpeg', 415);
+          }
+          const sequence = Number(workerFrame[2]);
+          if (!Number.isSafeInteger(sequence) || sequence < 1) {
+            throw new CloudError('DISPLAY_SEQUENCE_INVALID', 'Frame sequence must be a positive integer');
+          }
+          const bytes = await readBytes(request, MAX_DISPLAY_FRAME_BYTES);
+          const capturedAt = displayCaptureTime(request.headers['x-rauhwpx-frame-captured-at']);
+          const currentWorkerId = workerIdentity(authenticateWorker(request, sessionId));
+          json(response, 201, displayFrameStore.publishFrame({
+            sessionId,
+            workerId: currentWorkerId,
+            streamId: decodeURIComponent(workerFrame[1]),
+            sequence,
+            capturedAt,
+            bytes,
+          }));
+          return;
+        }
+        const workerDisplayStream = action.match(/^\/display\/streams\/([^/]+)$/);
+        if (request.method === 'DELETE' && workerDisplayStream) {
+          if (!displayFrameStore) throw new CloudError('DISPLAY_UNSUPPORTED', 'Display frames are not supported', 501);
+          json(response, 200, displayFrameStore.closeStream(
+            sessionId,
+            authenticatedWorkerId,
+            decodeURIComponent(workerDisplayStream[1]),
+          ));
           return;
         }
         if (request.method === 'POST' && action === '/events') {
@@ -411,6 +511,150 @@ export function createCloudHttpHandler({
       }
       if (request.method === 'POST' && pathname === '/v1/sessions') {
         json(response, 201, sessionStore.createSession(device, parseSessionCreate(await readJson(request))));
+        return;
+      }
+      const displayCapabilityRoute = pathname.match(/^\/v1\/sessions\/([^/]+)\/display$/);
+      if (request.method === 'GET' && displayCapabilityRoute) {
+        const sessionId = decodeURIComponent(displayCapabilityRoute[1]);
+        const session = sessionStore.getSessionRow(sessionId);
+        const capability = displayFrameStore?.capability(sessionId);
+        if (capability) {
+          json(response, 200, capability);
+          return;
+        }
+        if (!displayFrameStore) {
+          json(response, 200, unavailableDisplay(
+            session,
+            'server-unsupported',
+            'This Cloud server does not support live display frames',
+            false,
+          ));
+          return;
+        }
+        const retryable = ['staged', 'queued', 'running', 'suspended'].includes(session.status);
+        json(response, 200, unavailableDisplay(
+          session,
+          session.status === 'running' ? 'stream-unavailable' : 'session-not-running',
+          session.status === 'running'
+            ? 'The worker display stream is not available yet'
+            : 'The cloud session does not have an active display',
+          retryable,
+        ));
+        return;
+      }
+      const displayFrameRoute = pathname.match(/^\/v1\/sessions\/([^/]+)\/display\/frames\/([^/]+)\/(\d+)$/);
+      if (request.method === 'GET' && displayFrameRoute) {
+        if (!displayFrameStore) throw new CloudError('DISPLAY_UNSUPPORTED', 'Display frames are not supported', 501);
+        const sessionId = decodeURIComponent(displayFrameRoute[1]);
+        sessionStore.getSessionRow(sessionId);
+        const sequence = Number(displayFrameRoute[3]);
+        if (!Number.isSafeInteger(sequence) || sequence < 1) {
+          throw new CloudError('DISPLAY_SEQUENCE_INVALID', 'Frame sequence must be a positive integer');
+        }
+        const frame = displayFrameStore.getFrame(
+          sessionId,
+          decodeURIComponent(displayFrameRoute[2]),
+          sequence,
+        );
+        response.writeHead(200, {
+          'Content-Type': 'image/jpeg',
+          'Content-Length': frame.bytes.length,
+          'X-Content-SHA256': frame.metadata.sha256,
+          'Cache-Control': 'no-store',
+          ...responseProofHeaders(response[responseProof], 200, frame.metadata.sha256),
+        });
+        response.end(frame.bytes);
+        return;
+      }
+      const displayInterestRoute = pathname.match(/^\/v1\/sessions\/([^/]+)\/display\/interest$/);
+      if (request.method === 'POST' && displayInterestRoute) {
+        if (!displayFrameStore) throw new CloudError('DISPLAY_UNSUPPORTED', 'Display frames are not supported', 501);
+        const sessionId = decodeURIComponent(displayInterestRoute[1]);
+        sessionStore.getSessionRow(sessionId);
+        const body = await readJson(request);
+        if (typeof body.streamId !== 'string' || body.streamId.length < 1 || body.streamId.length > 256
+          || typeof body.active !== 'boolean') {
+          throw new CloudError('INVALID_REQUEST', 'Display interest requires streamId and active');
+        }
+        json(response, 200, displayFrameStore.setInterest(
+          sessionId,
+          body.streamId,
+          device.id,
+          body.active,
+        ));
+        return;
+      }
+      const displayWatchRoute = pathname.match(/^\/v1\/sessions\/([^/]+)\/display\/frames$/);
+      if (request.method === 'GET' && displayWatchRoute) {
+        if (!displayFrameStore) throw new CloudError('DISPLAY_UNSUPPORTED', 'Display frames are not supported', 501);
+        const sessionId = decodeURIComponent(displayWatchRoute[1]);
+        sessionStore.getSessionRow(sessionId);
+        const streamId = requestUrl.searchParams.get('streamId');
+        if (!streamId) throw new CloudError('INVALID_REQUEST', 'streamId is required');
+        if (displayFrameStore.capability(sessionId)?.streamId !== streamId) {
+          throw new CloudError('DISPLAY_STREAM_NOT_FOUND', 'Display stream was not found', 404);
+        }
+        let cursor = positiveSequence(requestUrl.searchParams.get('after') ?? request.headers['last-event-id']);
+        let headersReady = false;
+        let blocked = false;
+        let pending = null;
+        let closed = false;
+        let unsubscribe = () => {};
+        const deliver = (metadata) => {
+          if (!metadata) {
+            if (headersReady) response.end();
+            else closed = true;
+            return;
+          }
+          if (metadata.sequence <= cursor) return;
+          if (!headersReady || blocked) {
+            pending = metadata;
+            return;
+          }
+          const event = {
+            sessionId,
+            seq: metadata.sequence,
+            type: 'display.frame',
+            payload: metadata,
+            createdAt: Date.parse(metadata.capturedAt),
+          };
+          blocked = !response.write(signedSseFrame(response[responseProof], event));
+          cursor = metadata.sequence;
+        };
+        unsubscribe = displayFrameStore.subscribe(sessionId, streamId, deliver);
+        response.writeHead(200, {
+          'Content-Type': 'text/event-stream; charset=utf-8',
+          'Cache-Control': 'no-store, no-transform',
+          Connection: 'keep-alive',
+          'X-Accel-Buffering': 'no',
+          'X-Rauhwpx-Stream-Protocol': SSE_STREAM_PROTOCOL,
+          ...responseProofHeaders(response[responseProof], 200, SSE_STREAM_DIGEST),
+        });
+        headersReady = true;
+        if (closed) {
+          response.end();
+          unsubscribe();
+          return;
+        }
+        const replay = pending;
+        pending = null;
+        if (replay) deliver(replay);
+        response.on('drain', () => {
+          blocked = false;
+          const latest = pending;
+          pending = null;
+          if (latest) deliver(latest);
+        });
+        const keepalive = setInterval(() => response.write(': keepalive\n\n'), 15_000);
+        keepalive.unref?.();
+        const close = () => {
+          if (closed) return;
+          closed = true;
+          clearInterval(keepalive);
+          unsubscribe();
+        };
+        request.once('close', close);
+        response.once('close', close);
         return;
       }
       const providerAuthRoute = pathname.match(/^\/v1\/providers\/([^/]+)\/auth$/);

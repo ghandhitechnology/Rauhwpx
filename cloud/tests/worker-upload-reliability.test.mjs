@@ -7,6 +7,56 @@ import test from 'node:test';
 
 import { WorkerClient } from '../worker/client.mjs';
 
+test('worker frame control supports the Unix socket transport', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-worker-frame-socket-'));
+  const socketPath = path.join(root, 'control.sock');
+  const requests = [];
+  const server = http.createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const bytes = Buffer.concat(chunks);
+    requests.push({ method: request.method, url: request.url, headers: request.headers, bytes });
+    response.setHeader('content-type', 'application/json');
+    if (request.url.endsWith('/display/streams') && request.method === 'POST') {
+      response.writeHead(201).end(JSON.stringify({ streamId: 'stream-socket' }));
+    } else if (request.url.includes('/demand')) {
+      response.end(JSON.stringify({ streamId: 'stream-socket', version: 1, interested: false, closed: false }));
+    } else if (request.url.includes('/frames/1')) {
+      response.writeHead(201).end(JSON.stringify({ streamId: 'stream-socket', sequence: 1 }));
+    } else if (request.method === 'DELETE') {
+      response.end(JSON.stringify({ streamId: 'stream-socket', closed: true }));
+    } else {
+      response.writeHead(404).end(JSON.stringify({ error: { code: 'NOT_FOUND' } }));
+    }
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  const client = new WorkerClient({
+    socketPath,
+    token: 'worker-token',
+    sessionId: 'session-socket',
+  });
+  const opened = await client.openFrameStream({ width: 1280, height: 800 });
+  await client.frameDemand(opened.streamId);
+  const frame = Buffer.from([0xff, 0xd8, 0x61, 0xff, 0xd9]);
+  await client.publishFrame(opened.streamId, {
+    sequence: 1,
+    capturedAt: '2026-08-30T00:00:00.000Z',
+    bytes: frame,
+  });
+  await client.closeFrameStream(opened.streamId);
+  assert.deepEqual(requests.map(({ method }) => method), ['POST', 'GET', 'POST', 'DELETE']);
+  assert.deepEqual(JSON.parse(requests[0].bytes), { width: 1280, height: 800 });
+  assert.match(requests[1].url, /\/display\/streams\/stream-socket\/demand\?after=0$/);
+  assert.deepEqual(requests[2].bytes, frame);
+  assert.equal(requests[2].headers['content-type'], 'image/jpeg');
+  assert.equal(requests[2].headers['x-rauhwpx-frame-captured-at'], '2026-08-30T00:00:00.000Z');
+});
+
 test('worker upload resumes from the committed offset after a chunk response is lost', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-worker-upload-'));
   const filename = path.join(root, 'result.hwpx');
