@@ -4,7 +4,7 @@ export const CLOUD_DAILY_LIMIT_MS = 60 * 60 * 1000;
 export const CLOUD_GRACE_LIMIT_MS = 30 * 60 * 1000;
 export const CLOUD_WARM_IDLE_MS = 5 * 60 * 1000;
 export const CLOUD_HEARTBEAT_LEASE_MS = 90 * 1000;
-export const CLOUD_ALLOCATION_LEASE_MS = 15 * 60 * 1000;
+export const CLOUD_ALLOCATION_LEASE_MS = 30 * 60 * 1000;
 export const CLOUD_TIMEZONE_CHANGE_MS = 30 * 24 * 60 * 60 * 1000;
 export const CLOUD_COLD_START_WINDOW_MS = 15 * 60 * 1000;
 export const CLOUD_COLD_START_WINDOW_LIMIT = 3;
@@ -311,6 +311,10 @@ function publicRun(run, viewerDeviceId = null) {
     graceDeadlineAt: run.logoutRequestedAt != null
       ? run.logoutRequestedAt + CLOUD_GRACE_LIMIT_MS
       : (run.graceStartedAt == null ? null : run.graceStartedAt + CLOUD_GRACE_LIMIT_MS),
+    failureCode: run.failureCode ?? null,
+    message: run.status === 'failed'
+      ? run.failureMessage ?? 'Raucloud worker preparation failed'
+      : null,
     receipt: run.receipt && viewerDeviceId === run.ownerDeviceId ? { ...run.receipt } : null,
   };
 }
@@ -351,6 +355,7 @@ function reconcileAccount(state, account, at) {
   if (worker.status === 'allocating' && at - Number(run.createdAt ?? at) >= CLOUD_ALLOCATION_LEASE_MS) {
     run.status = 'failed';
     run.failureCode = 'ALLOCATION_LEASE_EXPIRED';
+    run.failureMessage = 'Raucloud worker preparation timed out';
     run.completedAt = at;
     reserveTeardown(account, run, at);
     return;
@@ -501,6 +506,7 @@ export function createRaucloudBroker({
     throw new Error('provisioner must implement provision and teardown');
   }
   const teardownClaims = new Set();
+  const provisioningRuns = new Map();
 
   async function identity(token, deviceId = null) {
     return authenticateAccessToken(token, deviceId);
@@ -633,6 +639,7 @@ export function createRaucloudBroker({
         if (!['stopped', 'completed', 'failed'].includes(run.status)) {
           run.status = 'failed';
           run.failureCode = String(error?.code ?? 'CLOUD_PROVISION_FAILED').slice(0, 100);
+          run.failureMessage = 'Raucloud could not allocate a worker';
           run.completedAt = now();
         }
         const account = ensureRaucloudState(state).accounts[userId];
@@ -641,6 +648,16 @@ export function createRaucloudBroker({
       await cleanupPendingRemotes();
       throw cloudError('CLOUD_PROVISION_FAILED', 'Raucloud could not allocate a worker', { cause: error?.code ?? null });
     }
+  }
+
+  function provisionCreatedRunInBackground(userId, runId, deviceId, workerToken) {
+    if (provisioningRuns.has(runId)) return;
+    const operation = provisionCreatedRun(userId, runId, deviceId, workerToken)
+      .catch(() => {})
+      .finally(() => {
+        if (provisioningRuns.get(runId) === operation) provisioningRuns.delete(runId);
+      });
+    provisioningRuns.set(runId, operation);
   }
 
   return {
@@ -674,15 +691,21 @@ export function createRaucloudBroker({
       });
     },
 
-    async getCloudStatus(token, { deviceId = '', timezone = null } = {}) {
+    async getCloudStatus(token, { deviceId = '', timezone = null, runId = null } = {}) {
       const viewerDeviceId = String(deviceId ?? '');
       const userId = await identity(token, viewerDeviceId || null);
+      const requestedRunId = runId == null || runId === '' ? null : validId(runId, 'runId');
       const result = await mutate((state) => {
         const at = now();
+        const cloud = ensureRaucloudState(state);
         const account = ensureAccount(state, userId, at);
         if (!account.timezone && timezone) initializeTimezone(account, timezone, at);
         reconcileAccount(state, account, at);
-        return envelope(state, account, state.users?.[userId], viewerDeviceId);
+        const requestedRun = requestedRunId ? cloud.runs[requestedRunId] : undefined;
+        if (requestedRunId && (!requestedRun || requestedRun.accountId !== userId)) {
+          throw cloudError('CLOUD_RUN_NOT_FOUND', 'Raucloud run not found');
+        }
+        return envelope(state, account, state.users?.[userId], viewerDeviceId, requestedRun);
       });
       await cleanupPendingRemotes();
       return result;
@@ -776,12 +799,8 @@ export function createRaucloudBroker({
         return envelope(state, account, state.users?.[userId], ownerDeviceId, run, coldStart);
       });
       if (!shouldProvision) return created;
-      await provisionCreatedRun(userId, created.run.id, ownerDeviceId, provisionWorkerToken);
-      return mutate((state) => {
-        const cloud = ensureRaucloudState(state);
-        const account = ensureAccount(state, userId, now());
-        return envelope(state, account, state.users?.[userId], ownerDeviceId, cloud.runs[created.run.id], true);
-      });
+      provisionCreatedRunInBackground(userId, created.run.id, ownerDeviceId, provisionWorkerToken);
+      return created;
     },
 
     async takeoverCloudRun(token, sourceRunId, { deviceId, checkpointId, idempotencyKey: rawKey } = {}) {
@@ -860,12 +879,8 @@ export function createRaucloudBroker({
         return envelope(state, account, state.users?.[userId], ownerDeviceId, run, true);
       });
       if (!shouldProvision) return created;
-      await provisionCreatedRun(userId, created.run.id, ownerDeviceId, provisionWorkerToken);
-      return mutate((state) => {
-        const cloud = ensureRaucloudState(state);
-        const account = ensureAccount(state, userId, now());
-        return envelope(state, account, state.users?.[userId], ownerDeviceId, cloud.runs[created.run.id], true);
-      });
+      provisionCreatedRunInBackground(userId, created.run.id, ownerDeviceId, provisionWorkerToken);
+      return created;
     },
 
     async stopCloudRun(token, runId, {

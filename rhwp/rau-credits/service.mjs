@@ -721,6 +721,7 @@ export function creditsRequestListener(service) {
         send(200, await service.getCloudStatus(bearerToken(req), {
           deviceId: url.searchParams.get('deviceId') ?? '',
           timezone: url.searchParams.get('timezone'),
+          runId: url.searchParams.get('runId'),
         }));
         return;
       }

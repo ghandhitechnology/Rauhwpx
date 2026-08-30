@@ -6,8 +6,8 @@ The Rau credits service authenticates Raucloud requests and enforces account lim
 
 - `GET /v1/account` returns `{ account }`.
 - `PATCH /v1/account/timezone` with `{ "timezone": "Asia/Seoul" }` initializes or schedules the account timezone.
-- `GET /v1/cloud/status?deviceId=…&timezone=…` returns `CloudStatusEnvelope`. Omit `deviceId` when Settings only needs account data. Supplying it binds the access token to that device.
-- `POST /v1/cloud/runs` with `{ deviceId, timezone?, idempotencyKey }` returns `CloudRunEnvelope`.
+- `GET /v1/cloud/status?deviceId=…&timezone=…&runId=…` returns `CloudStatusEnvelope`. Omit `deviceId` when Settings only needs account data. Supplying it binds the access token to that device. Supplying `runId` includes that run even after it fails.
+- `POST /v1/cloud/runs` with `{ deviceId, timezone?, idempotencyKey }` durably reserves the run and returns an `allocating` `CloudRunEnvelope` immediately. Provisioning continues in the service process, and clients poll status by run ID.
 - `POST /v1/cloud/runs/:id/takeover` rejects the request unless the completed checkpoint has an encrypted artifact owned by the broker. This change does not add artifact storage, so cross-worker takeover is unavailable.
 - `POST /v1/cloud/runs/:id/stop` with `{ deviceId, reason?, finishCurrentTurn?, checkpoint? }` either stops the run now or blocks new input until the current turn ends.
 
@@ -31,6 +31,7 @@ Only the broker reconciler uses `CLOUD_WORKER_SECRET`. Do not add it to a user w
 - A turn that reaches zero may run for 30 more minutes to finish its current response. That extra time is deducted from the next quota window. Midnight does not extend the 30-minute deadline.
 - Three confirmed cold starts per rolling 15 minutes and 12 per account-local window. Idempotent retries and warm reuse do not count.
 - Ready and warm workers expire after five unbilled minutes. If deletion fails, the account remains in `tearing_down`. New allocation stays blocked until a reconciler confirms deletion.
+- An allocating worker may take up to 30 minutes before the broker expires its reservation. This covers Railway deployment and worker-health deadlines without holding the public create request open.
 - An account may change its timezone once every 30 days. The change takes effect at the current quota window's end, so changing timezone cannot trigger an early reset.
 - The service stores checkpoint IDs, not checkpoint files. Cross-worker takeover and 30-day retention require encrypted artifact storage, restore verification before teardown, and expired-file deletion.
 

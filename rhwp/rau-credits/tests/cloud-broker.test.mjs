@@ -3,6 +3,7 @@ import http from 'node:http';
 import test from 'node:test';
 
 import {
+  CLOUD_ALLOCATION_LEASE_MS,
   CLOUD_DAILY_LIMIT_MS,
   CLOUD_GRACE_LIMIT_MS,
   CLOUD_TIMEZONE_CHANGE_MS,
@@ -13,6 +14,17 @@ import { createMemoryStore } from '../store.mjs';
 
 const WORKER_SECRET = 'trusted-broker-reconciler-secret';
 const MINUTE = 60 * 1000;
+
+async function eventually(read, predicate, timeoutMs = 1_000) {
+  const deadline = Date.now() + timeoutMs;
+  let value;
+  do {
+    value = await read();
+    if (predicate(value)) return value;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  } while (Date.now() < deadline);
+  assert.fail(`condition did not become true; last value: ${JSON.stringify(value)}`);
+}
 
 async function fixture({ start = Date.UTC(2026, 0, 1, 10), provisioner = null } = {}) {
   let clock = start;
@@ -281,7 +293,7 @@ test('an abandoned allocation lease expires and releases its account reservation
   const run = await f.service.createCloudRun(f.token, {
     deviceId: 'device-a', timezone: 'UTC', idempotencyKey: 'abandoned-allocation',
   });
-  f.advance(15 * MINUTE);
+  f.advance(CLOUD_ALLOCATION_LEASE_MS);
   await f.service.reconcileCloudUsage();
   const state = await f.service.inspectCloudState(f.token);
   assert.equal(state.runs[run.run.id].status, 'failed');
@@ -358,6 +370,44 @@ test('production mode fails closed when the trusted provisioner is absent', asyn
   );
 });
 
+test('run creation returns while slow provisioning continues and status tracks that run', async () => {
+  let releaseProvision;
+  const provisionGate = new Promise((resolve) => { releaseProvision = resolve; });
+  const provisioner = {
+    async provision(input) {
+      const remote = { providerId: 'railway', serviceId: 'svc-slow', projectId: 'project', environmentId: 'environment' };
+      await input.onRemoteCreated(remote);
+      await provisionGate;
+      return {
+        remote,
+        receipt: {
+          endpoint: 'https://slow-worker.example/rauhwpx-cloud',
+          serverPublicKey: `ed25519:${'A'.repeat(59)}`,
+          pairingCode: 'ABCD-EFGH-JKLM',
+        },
+      };
+    },
+    async teardown() { return { removed: true }; },
+  };
+  const f = await fixture({ provisioner });
+  const created = await f.service.createCloudRun(f.token, {
+    deviceId: 'device-a', timezone: 'UTC', idempotencyKey: 'slow-provision',
+  });
+
+  assert.equal(created.run.status, 'allocating');
+  const allocating = await f.service.getCloudStatus(f.token, {
+    deviceId: 'device-a', runId: created.run.id,
+  });
+  assert.equal(allocating.run.status, 'allocating');
+
+  releaseProvision();
+  const ready = await eventually(
+    () => f.service.getCloudStatus(f.token, { deviceId: 'device-a', runId: created.run.id }),
+    (status) => status.run?.status === 'ready',
+  );
+  assert.equal(ready.run.receipt.pairingCode, 'ABCD-EFGH-JKLM');
+});
+
 test('injected provisioner returns a receipt, receives only a scoped worker token, and teardown is retried', async () => {
   const calls = [];
   let teardownAttempts = 0;
@@ -395,9 +445,13 @@ test('injected provisioner returns a receipt, receives only a scoped worker toke
   const created = await f.service.createCloudRun(f.token, {
     deviceId: 'device-a', timezone: 'UTC', idempotencyKey: 'provision-1',
   });
-  assert.equal(created.run.status, 'ready');
-  assert.equal(created.run.receipt.pairingCode, 'ABCD-EFGH-JKLM');
-  assert.doesNotMatch(JSON.stringify(created), new RegExp(scopedToken));
+  assert.equal(created.run.status, 'allocating');
+  const ready = await eventually(
+    () => f.service.getCloudStatus(f.token, { deviceId: 'device-a', runId: created.run.id }),
+    (status) => status.run?.status === 'ready',
+  );
+  assert.equal(ready.run.receipt.pairingCode, 'ABCD-EFGH-JKLM');
+  assert.doesNotMatch(JSON.stringify(ready), new RegExp(scopedToken));
   assert.equal(calls.length, 1);
   const nonOwner = await f.service.getCloudStatus(f.secondToken, { deviceId: 'device-b' });
   assert.equal(nonOwner.activeRun.receipt, null, 'a pairing code is never visible to another device');
@@ -441,12 +495,16 @@ test('provision failure after a remote id is persisted tears the orphan down', a
     async teardown(remote) { removed.push(remote.serviceId); return { removed: true }; },
   };
   const f = await fixture({ provisioner });
-  await assert.rejects(
-    () => f.service.createCloudRun(f.token, {
-      deviceId: 'device-a', timezone: 'UTC', idempotencyKey: 'orphan-provision',
-    }),
-    { code: 'CLOUD_PROVISION_FAILED' },
+  const created = await f.service.createCloudRun(f.token, {
+    deviceId: 'device-a', timezone: 'UTC', idempotencyKey: 'orphan-provision',
+  });
+  assert.equal(created.run.status, 'allocating');
+  const failed = await eventually(
+    () => f.service.getCloudStatus(f.token, { deviceId: 'device-a', runId: created.run.id }),
+    (status) => status.run?.status === 'failed',
   );
+  assert.equal(failed.run.failureCode, 'PROVIDER_REJECTED');
+  assert.equal(failed.run.message, 'Raucloud could not allocate a worker');
   assert.deepEqual(removed, ['svc-orphan']);
   const state = await f.service.inspectCloudState(f.token);
   const run = Object.values(state.runs)[0];
@@ -506,6 +564,10 @@ test('HTTP account, status, run, and internal endpoints use stable envelopes and
       method: 'POST', body: JSON.stringify({ deviceId: 'device-http', idempotencyKey: 'http-1' }),
     }).then((response) => response.json());
     assert.equal(created.run.status, 'allocating');
+    const requestedRun = await request(`/v1/cloud/status?deviceId=device-http&runId=${created.run.id}`)
+      .then((response) => response.json());
+    assert.equal(requestedRun.run.id, created.run.id);
+    assert.equal(requestedRun.run.status, 'allocating');
     const denied = await request(`/v1/internal/cloud/runs/${created.run.id}/allocation`, {
       method: 'POST', body: '{}',
     });

@@ -239,11 +239,12 @@ function cloudMock() {
   let spawnFailures = 0;
   let spawnError = 'Railway deployment reports crashed';
   let spawnLeavesSandbox = false;
+  let spawnDelayMs = 80;
   let teardownError = null;
   let sandboxUnmanaged = false;
   let sandboxSeq = 0;
 
-  const wait = () => new Promise((resolve) => setTimeout(resolve, 80));
+  const wait = () => new Promise((resolve) => setTimeout(resolve, spawnDelayMs));
   const profileState = () => {
     if (sandbox) {
       return {
@@ -320,6 +321,9 @@ function cloudMock() {
       spawnFailures = count;
       spawnLeavesSandbox = leavesSandbox;
       if (message) spawnError = message;
+    },
+    setSpawnDelay(milliseconds) {
+      spawnDelayMs = milliseconds;
     },
     setTeardownError(message) {
       teardownError = message;
@@ -817,9 +821,34 @@ try {
     await page.$$eval('.ag-cloud-setup-footer button', (nodes) => nodes.map((node) => node.textContent.trim())),
     ['취소', '내 서버 사용', '다시 시도'],
   );
+  await page.evaluate(() => window.__cloudHarness.setSpawnDelay(1_500));
   await clickButton(page, '다시 시도');
   await waitForTitle(page, 'Raucloud 준비 중');
+  assert.match(await page.$eval('.ag-cloud-setup-wait', (node) => node.textContent), /최대 30분/);
+  assert.deepEqual(
+    await page.$$eval('.ag-cloud-setup-footer button', (nodes) => nodes.map((node) => ({
+      label: node.textContent.trim(), disabled: node.disabled,
+    }))),
+    [{ label: '숨기기', disabled: false }, { label: '준비 중...', disabled: true }],
+  );
+  const callsBeforeReopen = await page.evaluate(() => ({
+    refresh: window.__cloudHarness.calls.filter((call) => call.method === 'cloudGetState').length,
+    spawn: window.__cloudHarness.calls.filter((call) => call.method === 'cloudSpawnSandbox').length,
+  }));
+  await clickButton(page, '숨기기');
+  await page.waitForSelector('.ag-cloud-setup-overlay[hidden]');
+  assert.deepEqual(await page.$eval('#agent-sidebar .ag-cloud-btn', (node) => ({
+    label: node.querySelector('.ag-cloud-btn-label')?.textContent?.trim(),
+    state: node.dataset.state,
+  })), { label: '준비 중', state: 'setup' });
+  await clickStable(page, '#agent-sidebar .ag-cloud-btn');
+  await waitForTitle(page, 'Raucloud 준비 중');
+  assert.deepEqual(await page.evaluate(() => ({
+    refresh: window.__cloudHarness.calls.filter((call) => call.method === 'cloudGetState').length,
+    spawn: window.__cloudHarness.calls.filter((call) => call.method === 'cloudSpawnSandbox').length,
+  })), callsBeforeReopen, '진행 보기는 새로고침이나 두 번째 생성을 시작하지 않아야 합니다.');
   await waitForTitle(page, 'Raucloud가 준비되었습니다');
+  await page.evaluate(() => window.__cloudHarness.setSpawnDelay(80));
   assert.match(await page.$eval('.ag-cloud-setup-callout p', (node) => node.textContent), /rauhwpx-1\.up\.railway\.app/);
   assert.deepEqual(await settingsCard(page), {
     status: '연결됨',

@@ -28,6 +28,14 @@ export interface CloudSetupIssue {
 
 /** 실패한 단계가 남은 자원을 결정한다. 생성 실패는 남긴 것이 없고, 종료 실패는 유료 샌드박스를 남긴다. */
 export type SandboxFailurePhase = 'spawn' | 'teardown';
+export const RAUCLOUD_SETUP_WAIT_MINUTES = 30;
+
+export function raucloudSetupElapsed(startedAt: number, now = Date.now()): string {
+  const totalSeconds = Math.max(0, Math.floor((now - startedAt) / 1_000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0 ? `${minutes}분 ${seconds}초` : `${seconds}초`;
+}
 
 export type CloudSetupState =
   | {
@@ -50,7 +58,12 @@ export type CloudSetupState =
       intent: CloudSetupIntent;
       provider: CloudAppServerProvider | null;
     }
-  | { kind: 'sandbox-provisioning'; draft: CloudProfileDraft; intent: CloudSetupIntent }
+  | {
+      kind: 'sandbox-provisioning';
+      draft: CloudProfileDraft;
+      intent: CloudSetupIntent;
+      startedAt: number;
+    }
   | {
       kind: 'sandbox-failed';
       draft: CloudProfileDraft;
@@ -373,7 +386,7 @@ function entryState(snapshot: CloudSnapshot, intent: CloudSetupIntent, fallback?
     const { lifecycle, message } = snapshot.server;
     if (lifecycle === 'tearing-down') return { kind: 'sandbox-tearing-down', intent, name: sandbox.name };
     if (lifecycle === 'provisioning') {
-      return { kind: 'sandbox-provisioning', draft: defaultCloudProfileDraft(fallback), intent };
+      return { kind: 'sandbox-provisioning', draft: defaultCloudProfileDraft(fallback), intent, startedAt: Date.now() };
     }
     if (connected && lifecycle !== 'error') {
       return { kind: 'sandbox-ready', intent, name: sandbox.name, sandbox: sandbox.sandbox };
@@ -390,7 +403,7 @@ function entryState(snapshot: CloudSnapshot, intent: CloudSetupIntent, fallback?
   const profile = snapshotProfile(snapshot);
   if (profile) return connected ? { kind: 'connected', profile, intent } : { kind: 'intro', draft: profile, intent };
   if (snapshot.server.lifecycle === 'provisioning') {
-    return { kind: 'sandbox-provisioning', draft: defaultCloudProfileDraft(fallback), intent };
+    return { kind: 'sandbox-provisioning', draft: defaultCloudProfileDraft(fallback), intent, startedAt: Date.now() };
   }
   return chooseState(snapshot, intent, defaultCloudProfileDraft(fallback));
 }
@@ -413,6 +426,10 @@ export function reconcileCloudSetupState(state: CloudSetupState, snapshot: Cloud
         : { kind: 'sandbox-ready', intent: state.intent, name: sandbox.name, sandbox: sandbox.sandbox };
     }
     return entryState(snapshot, state.intent, snapshotProfile(snapshot));
+  }
+  if (state.kind === 'sandbox-provisioning') {
+    if (snapshot.server.lifecycle === 'provisioning') return state;
+    return entryState(snapshot, state.intent, state.draft);
   }
   if (state.kind !== 'connected') return state;
   if (sandboxReady && sandbox) {

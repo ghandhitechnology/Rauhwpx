@@ -8,6 +8,10 @@ export const RAUCLOUD_DEFAULT_URL = 'https://rau-credits-production.up.railway.a
 
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 30_000;
+// Older brokers kept create requests open. Stay below Railway's five-minute
+// silent-request limit while allowing those builds more time during rollout.
+const SETUP_REQUEST_TIMEOUT_MS = 4 * 60_000 + 30_000;
+export const RAUCLOUD_SETUP_TIMEOUT_MS = 30 * 60_000;
 const ACCESS_TOKEN_RE = /^rau_v1_[A-Za-z0-9_-]{8,4096}$/;
 
 const LIFECYCLE = Object.freeze({
@@ -274,6 +278,7 @@ export function createRaucloudBrokerClient({
   getDeviceIdentity,
   fetchImpl = globalThis.fetch,
   requestTimeoutMs = DEFAULT_TIMEOUT_MS,
+  setupRequestTimeoutMs = SETUP_REQUEST_TIMEOUT_MS,
   sleep = (ms, options) => delay(ms, undefined, options),
 } = {}) {
   const normalizedBaseUrl = brokerBaseUrl(baseUrl);
@@ -293,6 +298,7 @@ export function createRaucloudBrokerClient({
 
   async function request(pathname, {
     method = 'GET', body = null, query = null, signal = null, idempotencyKey = null,
+    timeoutMs = requestTimeoutMs,
   } = {}) {
     const token = await accountToken();
     const controller = new AbortController();
@@ -301,7 +307,7 @@ export function createRaucloudBrokerClient({
     if (signal?.aborted) abort();
     const timer = setTimeout(
       () => controller.abort(new DOMException('Raucloud request timed out', 'AbortError')),
-      Math.max(1, Number(requestTimeoutMs) || DEFAULT_TIMEOUT_MS),
+      Math.max(1, Number(timeoutMs) || DEFAULT_TIMEOUT_MS),
     );
     try {
       const headers = {
@@ -370,7 +376,7 @@ export function createRaucloudBrokerClient({
     async createRun({ deviceName, provider = 'codex', signal = null, idempotencyKey = randomUUID() } = {}) {
       const currentDevice = await device(deviceName);
       return request('/v1/cloud/runs', {
-        method: 'POST', signal, idempotencyKey,
+        method: 'POST', signal, idempotencyKey, timeoutMs: setupRequestTimeoutMs,
         body: {
           deviceId: currentDevice.id,
           deviceName: currentDevice.name,
@@ -385,7 +391,7 @@ export function createRaucloudBrokerClient({
       if (!safeId) throw new AppServerError('Raucloud run id is invalid', { code: 'RAUCLOUD_RUN_INVALID', retryable: false });
       const currentDevice = await device(deviceName);
       return request(`/v1/cloud/runs/${safeId}/takeover`, {
-        method: 'POST', signal, idempotencyKey,
+        method: 'POST', signal, idempotencyKey, timeoutMs: setupRequestTimeoutMs,
         body: {
           deviceId: currentDevice.id,
           checkpointId: trimmed(checkpointId, 160),
@@ -415,8 +421,12 @@ export function createRaucloudBrokerClient({
 
 export function createRaucloudBrokerProvider(options = {}) {
   const client = options.client ?? createRaucloudBrokerClient(options);
-  const allocationAttempts = Math.max(1, Math.min(240, Math.trunc(Number(options.allocationAttempts)) || 120));
   const allocationPollMs = Math.max(10, Math.min(10_000, Number(options.allocationPollMs) || 2_500));
+  const defaultAllocationAttempts = Math.ceil(RAUCLOUD_SETUP_TIMEOUT_MS / allocationPollMs);
+  const allocationAttempts = Math.max(
+    1,
+    Math.min(180_000, Math.trunc(Number(options.allocationAttempts)) || defaultAllocationAttempts),
+  );
   return {
     id: RAUCLOUD_PROVIDER_ID,
     displayName: 'Raucloud',

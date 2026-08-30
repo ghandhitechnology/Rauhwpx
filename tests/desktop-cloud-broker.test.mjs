@@ -7,6 +7,7 @@ import {
   createRaucloudBrokerProvider,
   RAUCLOUD_ACCESS_SECRET,
   RAUCLOUD_PROVIDER_ID,
+  RAUCLOUD_SETUP_TIMEOUT_MS,
 } from '../desktop/cloud-broker.mjs';
 import { CloudCoordinator } from '../desktop/cloud-coordinator.mjs';
 
@@ -46,6 +47,7 @@ function broker(routes, overrides = {}) {
     getDeviceIdentity: overrides.getDeviceIdentity ?? (async () => ({ id: 'device-desktop-123', name: 'Laptop' })),
     fetchImpl,
     requestTimeoutMs: overrides.requestTimeoutMs ?? 1_000,
+    setupRequestTimeoutMs: overrides.setupRequestTimeoutMs ?? overrides.requestTimeoutMs ?? 1_000,
     sleep: async () => {},
   });
   return { client, calls };
@@ -120,6 +122,54 @@ test('Raucloud polls broker allocation status until a pairing receipt is ready',
   assert.equal(journal[0].sandboxId, 'run-allocating', 'the billable run id is journaled before polling');
   assert.equal(journal[0].host, '');
   assert.deepEqual(calls.map((call) => call.key), ['POST /v1/cloud/runs', 'GET /v1/cloud/status']);
+});
+
+test('Raucloud allows the full 30-minute setup window when allocation needs many polls', async () => {
+  let statusCalls = 0;
+  const client = {
+    baseUrl: 'https://broker.example.test',
+    sleep: async () => {},
+    createRun: async () => ({
+      run: { id: 'run-slow', status: 'allocating', createdAt: Date.parse('2026-08-30T12:00:00.000Z') },
+    }),
+    status: async () => {
+      statusCalls += 1;
+      return statusCalls >= 121
+        ? { run: { id: 'run-slow', status: 'ready', receipt: RECEIPT } }
+        : { run: { id: 'run-slow', status: 'allocating' } };
+    },
+    stopRun: async () => ({}),
+  };
+  const provider = createRaucloudBrokerProvider({ client });
+  const result = await provider.spawn();
+
+  assert.equal(RAUCLOUD_SETUP_TIMEOUT_MS, 30 * 60_000);
+  assert.equal(statusCalls, 121, 'the previous five-minute/120-poll ceiling would stop too early');
+  assert.equal(result.receipt.pairingCode, RECEIPT.pairingCode);
+});
+
+test('create requests use a looser compatibility timeout than ordinary status requests', async () => {
+  const fetchImpl = (_url, options = {}) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => resolve(json({ run: { id: 'run-delayed', status: 'allocating' } })), 30);
+    options.signal?.addEventListener('abort', () => {
+      clearTimeout(timer);
+      reject(options.signal.reason);
+    }, { once: true });
+  });
+  const client = createRaucloudBrokerClient({
+    baseUrl: 'https://broker.example.test',
+    getAccessToken: async () => ACCESS_TOKEN,
+    getDeviceIdentity: async () => ({ id: 'device-desktop-123', name: 'Laptop' }),
+    fetchImpl,
+    requestTimeoutMs: 10,
+    setupRequestTimeoutMs: 100,
+  });
+
+  assert.equal((await client.createRun()).run.id, 'run-delayed');
+  await assert.rejects(() => client.status(), (error) => {
+    assert.equal(error.code, 'RAUCLOUD_TIMEOUT');
+    return true;
+  });
 });
 
 test('Raucloud status preserves warm reuse, controller lease, and quota visuals', async () => {

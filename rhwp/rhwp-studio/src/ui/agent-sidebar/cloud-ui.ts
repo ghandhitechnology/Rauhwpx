@@ -214,14 +214,16 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   sidebarButton.setAttribute('aria-controls', 'ag-cloud-panel');
   sidebarButton.setAttribute('aria-expanded', 'false');
   sidebarButton.title = '클라우드로 계속';
-  sidebarButton.append(createIcon('cloud'), el('span', 'ag-cloud-btn-label', 'Cloud'));
+  const sidebarButtonLabel = el('span', 'ag-cloud-btn-label', 'Cloud');
+  sidebarButton.append(createIcon('cloud'), sidebarButtonLabel);
 
   const workspaceButton = el('button', 'ag-workspace-cloud-btn') as HTMLButtonElement;
   workspaceButton.type = 'button';
   workspaceButton.setAttribute('aria-label', '클라우드로 계속');
   workspaceButton.setAttribute('aria-controls', 'ag-cloud-panel');
   workspaceButton.setAttribute('aria-expanded', 'false');
-  workspaceButton.append(createIcon('cloud'), el('span', 'ag-workspace-cloud-label', 'Cloud'));
+  const workspaceButtonLabel = el('span', 'ag-workspace-cloud-label', 'Cloud');
+  workspaceButton.append(createIcon('cloud'), workspaceButtonLabel);
 
   const statusPanel = el('section', 'ag-cloud-panel');
   statusPanel.id = 'ag-cloud-panel';
@@ -822,6 +824,8 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     const running = snapshot.session.kind === 'running';
     sidebarButton.dataset.state = setupActive ? 'setup' : localTurnPending ? 'waiting' : snapshot.session.kind;
     workspaceButton.dataset.state = setupActive ? 'setup' : localTurnPending ? 'waiting' : snapshot.session.kind;
+    sidebarButtonLabel.textContent = setupActive ? '준비 중' : 'Cloud';
+    workspaceButtonLabel.textContent = setupActive ? '준비 중' : 'Cloud';
     const lock = raucloudLock(snapshot);
     const label = setupActive
       ? 'Cloud 환경 설정 중'
@@ -891,6 +895,10 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
 
   function activate(event: MouseEvent): void {
     const trigger = event.currentTarget as HTMLButtonElement;
+    if (setupActive) {
+      onboarding.open('transfer', trigger);
+      return;
+    }
     void deps.controller.refresh(selectedScope()).then(() => {
       if (snapshot.session.kind === 'idle' && !localTurnPending) {
         if (snapshot.profile.kind === 'configured' && snapshot.profile.connection === 'ready') deps.onRequestTransfer();

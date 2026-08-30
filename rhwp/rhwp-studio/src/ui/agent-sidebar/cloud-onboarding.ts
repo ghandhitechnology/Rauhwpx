@@ -8,7 +8,9 @@ import {
   defaultCloudProfileDraft,
   mapCloudSetupIssue,
   mapSandboxIssue,
+  RAUCLOUD_SETUP_WAIT_MINUTES,
   reconcileCloudSetupState,
+  raucloudSetupElapsed,
   snapshotProfile,
   snapshotSandbox,
   validateCloudProfileDraft,
@@ -89,6 +91,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
   let cachedKeyPath = '';
   let cachedHttpsEndpoint = '';
   let mutationLocked = false;
+  let setupProgressTimer: ReturnType<typeof setInterval> | null = null;
 
   const overlay = el('div', 'ag-cloud-setup-overlay');
   overlay.hidden = true;
@@ -145,6 +148,30 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     deps.onSetupStateChange(operationActive(next));
     if (announcement) liveStatus.textContent = announcement;
     renderDialog();
+    syncSetupProgressTimer();
+  }
+
+  function setupProgressText(startedAt: number): string {
+    return `준비 작업이 계속 실행 중입니다. ${raucloudSetupElapsed(startedAt)} 경과. 초기 설정은 최대 ${RAUCLOUD_SETUP_WAIT_MINUTES}분 걸릴 수 있습니다.`;
+  }
+
+  function updateSetupProgress(): void {
+    if (state?.kind !== 'sandbox-provisioning') return;
+    const message = setupProgressText(state.startedAt);
+    liveStatus.textContent = message;
+    const wait = body.querySelector<HTMLElement>('.ag-cloud-setup-wait');
+    if (wait) wait.textContent = message;
+    renderSettings();
+  }
+
+  function syncSetupProgressTimer(): void {
+    if (state?.kind === 'sandbox-provisioning') {
+      updateSetupProgress();
+      setupProgressTimer ??= setInterval(updateSetupProgress, 1_000);
+      return;
+    }
+    if (setupProgressTimer) clearInterval(setupProgressTimer);
+    setupProgressTimer = null;
   }
 
   function beginOperation(): number {
@@ -466,7 +493,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     const { draft, intent } = state;
     const providerId = state.kind === 'sandbox-intro' ? state.provider.providerId : undefined;
     const operation = beginOperation();
-    setState({ kind: 'sandbox-provisioning', draft, intent }, 'Raucloud를 준비하고 있습니다.');
+    setState({ kind: 'sandbox-provisioning', draft, intent, startedAt: Date.now() }, 'Raucloud를 준비하고 있습니다.');
     try {
       const next = await deps.controller.spawnSandbox(providerId);
       if (!operationIsCurrent(operation)) return;
@@ -663,11 +690,13 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     } else if (state.kind === 'sandbox-provisioning') {
       title.textContent = 'Raucloud 준비 중';
       body.append(
-        description('샌드박스를 만들고 이 기기를 연결하고 있습니다. 이 창을 숨겨도 작업은 계속됩니다.'),
+        description('샌드박스를 만들고 이 기기를 연결하고 있습니다. 서버 생성과 첫 시작에는 몇 분이 걸릴 수 있습니다.'),
         el('div', 'ag-cloud-setup-indeterminate'),
-        el('p', 'ag-cloud-setup-wait', '보통 1분 안에 끝납니다.'),
+        el('p', 'ag-cloud-setup-wait', setupProgressText(state.startedAt)),
       );
-      footer.append(cancel);
+      const working = button('준비 중...', 'primary');
+      working.disabled = true;
+      footer.append(cancel, working);
     } else if (state.kind === 'sandbox-tearing-down') {
       title.textContent = 'Raucloud 종료 중';
       body.append(
@@ -930,7 +959,10 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       settingsAction.textContent = '설정';
       if (snapshot.server.lifecycle === 'provisioning') {
         settingsStatus.textContent = '서버 준비 중';
-        settingsDetail.textContent = 'Raucloud를 만들고 있습니다.';
+        settingsDetail.textContent = state?.kind === 'sandbox-provisioning'
+          ? `${raucloudSetupElapsed(state.startedAt)}째 Raucloud를 만들고 있습니다.`
+          : 'Raucloud를 만들고 있습니다.';
+        settingsAction.textContent = '진행 보기';
         return;
       }
       settingsStatus.textContent = '설정되지 않음';
@@ -977,12 +1009,14 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       state = createCloudSetupState(snapshot, intent);
       resetConditionalDrafts(hasDraft(state) ? state.draft : currentDraft());
     }
+    deps.onSetupStateChange(operationActive(state));
     preserveOnOpen = false;
     visible = true;
     overlay.hidden = false;
     setModalIsolation(true);
     liveStatus.textContent = '';
     renderDialog();
+    syncSetupProgressTimer();
   }
 
   dialog.addEventListener('keydown', (event) => {
@@ -1026,9 +1060,13 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     open,
     sync(next) {
       snapshot = next;
-      renderSettings();
       const previous = state;
+      const wasActive = operationActive(state);
       if (state) state = reconcileCloudSetupState(state, next);
+      const active = operationActive(state);
+      if (active !== wasActive) deps.onSetupStateChange(active);
+      syncSetupProgressTimer();
+      renderSettings();
       if (visible && state !== previous) renderDialog();
     },
     setMutationLocked(locked) {
@@ -1039,6 +1077,8 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     dispose() {
       disposed = true;
       operationEpoch += 1;
+      if (setupProgressTimer) clearInterval(setupProgressTimer);
+      setupProgressTimer = null;
       deps.onSetupStateChange(false);
       close(false);
       setModalIsolation(false);

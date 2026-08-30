@@ -9,7 +9,9 @@ import {
   createCloudSetupState,
   mapCloudSetupIssue,
   mapSandboxIssue,
+  RAUCLOUD_SETUP_WAIT_MINUTES,
   reconcileCloudSetupState,
+  raucloudSetupElapsed,
   snapshotProfile,
   snapshotSandbox,
 } from '../src/ui/agent-sidebar/cloud-onboarding-state.ts';
@@ -297,6 +299,13 @@ test('a configured server skips the choice and lands on its own screen', () => {
   assert.equal(failed.kind === 'sandbox-failed' ? failed.issue.title : null, '샌드박스를 시작하지 못했습니다');
 });
 
+test('Raucloud setup exposes a readable 30-minute progress window', () => {
+  const startedAt = Date.UTC(2026, 7, 31, 12, 0, 0);
+  assert.equal(RAUCLOUD_SETUP_WAIT_MINUTES, 30);
+  assert.equal(raucloudSetupElapsed(startedAt, startedAt), '0초');
+  assert.equal(raucloudSetupElapsed(startedAt, startedAt + 61_000), '1분 1초');
+});
+
 test('sandbox screens follow the snapshot without losing an in-flight teardown', () => {
   const ready = createCloudSetupState(appHosted('ready'), 'manage');
   assert.equal(reconcileCloudSetupState(ready, appHosted('ready')), ready, 'a steady sandbox does not rerender');
@@ -328,6 +337,11 @@ test('sandbox screens follow the snapshot without losing an in-flight teardown',
   const connected = { kind: 'connected' as const, profile: userProfile, intent: 'manage' as const };
   assert.equal(reconcileCloudSetupState(connected, appHosted('ready')).kind, 'sandbox-ready');
   assert.equal(reconcileCloudSetupState(ready, appHosted('error')).kind, 'sandbox-failed');
+
+  const provisioning = createCloudSetupState(appHosted('provisioning'), 'manage');
+  assert.equal(reconcileCloudSetupState(provisioning, appHosted('provisioning')), provisioning);
+  assert.equal(reconcileCloudSetupState(provisioning, appHosted('ready')).kind, 'sandbox-ready');
+  assert.equal(reconcileCloudSetupState(provisioning, appHosted('error')).kind, 'sandbox-failed');
 });
 
 test('app server failures read as something the user can act on', () => {
@@ -383,10 +397,14 @@ test('the dialog offers both servers and only restorable sandbox actions', () =>
   assert.match(onboarding, /운영자가 \$\{provider\.missingConfig\.join\(', '\)\}/);
   assert.match(onboarding, /state\.kind !== 'sandbox-intro' && state\.kind !== 'sandbox-failed'/);
   assert.match(onboarding, /kind: 'sandbox-provisioning'/);
+  assert.match(onboarding, /최대 \$\{RAUCLOUD_SETUP_WAIT_MINUTES\}분/);
+  assert.match(onboarding, /진행 보기/);
   assert.match(onboarding, /Raucloud를 종료하고 있습니다/);
   assert.match(onboarding, /Raucloud · /);
   assert.match(onboardingCss, /\.ag-cloud-setup-option\.ag-selected/);
   assert.match(cloudUi, /appHosted/);
+  assert.match(cloudUi, /setupActive \? '준비 중' : 'Cloud'/);
+  assert.match(cloudUi, /if \(setupActive\) \{\n\s+onboarding\.open\('transfer', trigger\)/);
   assert.match(preload, /cloudSelectServerMode: \(payload\) => ipcRenderer\.invoke\('cloud:select-server-mode', payload\)/);
   assert.match(preload, /cloudSpawnSandbox: \(payload\) => ipcRenderer\.invoke\('cloud:spawn-sandbox', payload\)/);
   assert.match(preload, /cloudSandboxStatus: \(\) => ipcRenderer\.invoke\('cloud:sandbox-status'\)/);

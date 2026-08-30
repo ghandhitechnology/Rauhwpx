@@ -55,6 +55,8 @@ export interface CloudRunSummary {
   checkpointId: string | null;
   inputBlocked: boolean;
   graceDeadlineAt: number | null;
+  failureCode: string | null;
+  message: string | null;
   /** Present only when the requesting token is bound to ownerDeviceId. */
   receipt: RaucloudReceipt | null;
 }
@@ -79,6 +81,8 @@ export interface CloudStatusEnvelope {
   };
   activeRun: CloudRunSummary | null;
   takeoverRun: CloudRunSummary | null;
+  /** Present when GET /v1/cloud/status includes a runId query. */
+  run?: CloudRunSummary;
   gate: RaucloudGate;
 }
 
