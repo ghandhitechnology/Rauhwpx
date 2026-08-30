@@ -65,6 +65,8 @@ import {
   type DocumentThreadGroup,
   type ThreadMessage,
   type ThreadAttachment,
+  type ThreadTaskRecord,
+  type ThreadToolRecord,
 } from '../../agent/threads.ts';
 import {
   clearChatStatus,
@@ -87,6 +89,19 @@ import { createWritingStyleCalibration } from './writing-style-calibration.ts';
 import { maybeStartInitialSetup, type InitialSetupUi } from '../initial-setup/initial-setup.ts';
 import { summarizePendingDiffs } from './pending-diff-summary.ts';
 import { createReferenceLibrary } from './reference-library.ts';
+import { createCloudController, type CloudController } from '../../cloud/desktop-cloud.ts';
+import { exportCloudTimeline, importCloudTimeline, type PortableCloudTimelineV1 } from '../../cloud/timeline.ts';
+import { collectUsedCloudReferenceIds } from '../../cloud/references.ts';
+import type {
+  CloudDocumentPayload,
+  CloudCheckpointPayload,
+  CloudDownloadResult,
+  CloudResultResolution,
+  CloudSessionScope,
+  CloudTakeoverPayload,
+  CloudTransferReference,
+} from '../../cloud/types.ts';
+import { createCloudAgentUi } from './cloud-ui.ts';
 import {
   createVersionManagerPage,
   type VersionManagerController,
@@ -127,6 +142,16 @@ export interface AgentSidebarDeps {
     documentId: string | null;
     fileName: string | null;
   }) => void;
+  cloudController?: CloudController;
+  prepareCloudTransfer?: () => Promise<CloudDocumentPayload | null>;
+  setCloudDocumentLease?: (cloudOwned: boolean, sessionId: string | null) => void;
+  applyCloudResult?: (result: CloudDownloadResult, resolution: CloudResultResolution) => void | Promise<void>;
+  applyCloudCheckpoint?: (checkpoint: CloudCheckpointPayload) => void | Promise<void>;
+  prepareCloudTakeover?: () => Promise<boolean>;
+  applyCloudTakeover?: (takeover: CloudTakeoverPayload) => Promise<{
+    documentId: string;
+    fileName: string;
+  } | null>;
   /** 현재 문서의 로컬 커밋과 브랜치를 관리한다. */
   versionController?: VersionManagerController;
   /** 기존 RHWP 문서 이력 대화상자를 연다. */
@@ -154,6 +179,14 @@ interface ToolRowState {
   elapsed: HTMLElement;
   startedAt: number;
   activity: TurnActivityState;
+}
+
+type ThreadActivityMessage = Extract<ThreadMessage, { kind: 'activity' }>;
+type ThreadTasksMessage = Extract<ThreadMessage, { kind: 'tasks' }>;
+
+interface ActivityTranscriptState {
+  message: ThreadActivityMessage;
+  acceptingTools: boolean;
 }
 
 const SIDEBAR_WIDTH_KEY = 'rhwp-agent-sidebar-width-v3';
@@ -525,6 +558,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   root: HTMLElement;
   openVersions(): void;
   sendInlinePrompt(submission: InlinePromptSubmission): InlinePromptSendResult;
+  awaitPendingCloudTransferForClose(): Promise<void>;
   dispose(): void;
 } {
   const {
@@ -536,6 +570,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     versionController,
     openClassicVersionControl,
   } = deps;
+  const cloudController = deps.cloudController ?? createCloudController(undefined, {
+    readReference: (reference) => bridge.downloadReference(reference),
+  });
 
   // 개인 기본값(설정 탭에서 저장) — 새 대화가 이 조합으로 열린다.
   let agentPrefs: AgentPrefs = loadAgentPrefs();
@@ -553,6 +590,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   /** 지금 노란 불이 붙어 있는 스레드 — 턴이 끝나면 초록 점으로 넘긴다. */
   let runStatusThreadId: string | null = null;
   let workflowTransitionPending = false;
+  let cloudTransferPending = false;
+  let cloudTransferIntent: CloudSessionScope | null = null;
+  let cloudTransferIntentPromise: Promise<void> | null = null;
+  let cloudTransferCloseWaiter: {
+    promise: Promise<void>;
+    resolve(): void;
+    reject(error: unknown): void;
+  } | null = null;
   /** chat-started 후 입력기를 여는 건 마지막으로 요청한 스레드뿐이다. */
   let chatStartPendingThreadId: string | null = null;
   /** 계획 모드로 들어갈 때 안전 권한이면 전환 완료 후 전체 접근을 기본 적용한다. */
@@ -563,6 +608,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   let turnActivity: TurnActivityState | null = null;
   let turnToolCount = 0;
   let turnFailedToolCount = 0;
+  let activityTranscript: ActivityTranscriptState | null = null;
+  const activityTranscripts = new Map<string, ActivityTranscriptState>();
+  const transcriptTools = new Map<string, { tool: ThreadToolRecord; activity: ActivityTranscriptState; startedAt: number }>();
+  let tasksTranscript: ThreadTasksMessage | null = null;
+  const transcriptTasks = new Map<string, ThreadTaskRecord>();
+  const taskToolRecords = new Map<string, { tool: ThreadToolRecord; task: ThreadTaskRecord; startedAt: number }>();
+  const taskTextBuffers = new Map<string, string>();
   let turnPresentedPlan = false;
   let planCardPending = false;
   let followConversation = true;
@@ -690,8 +742,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     bridge.setServiceTier(selectedServiceTier);
     if (force) chatStartPendingThreadId = currentThread.id;
     const history = currentThread.messages.flatMap((message) => (
-      (message.role === 'user' || message.role === 'assistant')
-        && message.kind !== 'progress'
+      (message.role === 'user' || (message.role === 'assistant' && message.kind === undefined))
         && (message.text.trim() || (message.role === 'user' && message.skillName))
         ? [{
             role: message.role,
@@ -1243,7 +1294,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   });
 
   // pane 액션은 문서 맥락 주변의 고정된 헤더 위치를 유지한다.
-  headerActions.append(threadsBtn, versionsBtn, settingsBtn);
+  headerActions.append(versionsBtn, settingsBtn, threadsBtn);
 
   selectors.append(providerWrap, llmWrap, effortWrap);
   const modelSummary = el('div', 'ag-model-summary');
@@ -1316,6 +1367,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       }
       referenceLibrary.contextChanged();
       rebuildThreadsList();
+      cloudUi.refreshScope();
       return;
     }
     currentDocKey = nextKey;
@@ -1488,6 +1540,249 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   workspaceSettingsBtn.appendChild(createIcon('gear'));
   workspaceTrailing.append(workspaceAgentContext, environmentWrap, workspaceSettingsBtn, workspaceExitBtn);
   workspaceBar.append(workspaceLeading, workspaceTitle, workspaceTrailing);
+
+  const cloudUi = createCloudAgentUi({
+    controller: cloudController,
+    onRequestTransfer: () => requestCloudTransfer(),
+    onCancelPendingTransfer: () => cancelPendingCloudTransfer(),
+    getScope: () => ({ threadId: currentThread.id, documentId: currentThread.documentId }),
+    onCloseSettings: () => setSettingsPanelOpen(false),
+    onLeaseChange: (cloudOwned, sessionId) => {
+      deps.setCloudDocumentLease?.(cloudOwned, sessionId);
+      queueMicrotask(() => updateComposer());
+    },
+    onTimeline: (timeline) => applyCloudTimeline(timeline),
+    onAgentEvent: (event) => handleAgentEvent(event),
+    onCheckpoint: (checkpoint) => deps.applyCloudCheckpoint?.(checkpoint),
+    onResultResolved: (result, resolution) => {
+      if (result.timeline) applyCloudTimeline(result.timeline);
+      void deps.applyCloudResult?.(result, resolution);
+    },
+    onBeforeTakeover: () => deps.prepareCloudTakeover?.() ?? Promise.resolve(true),
+    onTakeover: async (takeover) => {
+      const binding = await deps.applyCloudTakeover?.(takeover) ?? null;
+      applyCloudTimeline(takeover.timeline, binding);
+    },
+    onError: (message) => {
+      systemMessage(message);
+      showToast({ message, durationMs: 5000 });
+    },
+  });
+  headerActions.insertBefore(cloudUi.sidebarButton, versionsBtn);
+  workspaceTrailing.insertBefore(cloudUi.workspaceButton, environmentWrap);
+
+  const applyHancomGitVisibility = (enabled: boolean): void => {
+    versionsBtn.hidden = !enabled;
+    environmentWrap.hidden = !enabled;
+    if (!enabled && versionsPanelOpen) closeVersionsPage();
+    if (!enabled && environmentPanelOpen) setEnvironmentPanelOpen(false);
+  };
+  applyHancomGitVisibility(userSettings.getUseHancomGit());
+  const unsubscribeHancomGitVisibility = userSettings.subscribeUseHancomGit(applyHancomGitVisibility);
+
+  async function collectCloudReferences(): Promise<CloudTransferReference[]> {
+    const usedIds = collectUsedCloudReferenceIds(currentThread);
+    if (usedIds.length === 0) return [];
+    if (connState !== 'connected') {
+      throw new Error('참고자료를 확인하려면 로컬 에이전트 연결이 필요합니다. 연결한 뒤 다시 시도하세요.');
+    }
+    const targets = [
+      { scope: 'chat' as const, scopeId: currentThread.id },
+      ...(currentThread.documentId
+        ? [{ scope: 'document' as const, scopeId: currentThread.documentId }]
+        : []),
+      { scope: 'global' as const, scopeId: 'global' },
+    ];
+    const catalogs = await Promise.all(targets.map(async (target) => {
+      try {
+        return { target, files: await bridge.listReferences(target.scope, target.scopeId) };
+      } catch (error) {
+        const label = target.scope === 'chat' ? '현재 채팅' : target.scope === 'document' ? '현재 문서' : '전역';
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(`${label} 참고자료 목록을 확인하지 못해 전송을 중단했습니다: ${detail}`);
+      }
+    }));
+    const catalogById = new Map<string, (typeof catalogs)[number]['files'][number]>();
+    for (const item of catalogs) {
+      for (const file of item.files) if (!catalogById.has(file.id)) catalogById.set(file.id, file);
+    }
+    const references: CloudTransferReference[] = [];
+    for (const id of usedIds) {
+      const file = catalogById.get(id);
+      if (!file) throw new Error(`${id} 참고자료를 찾지 못해 전송을 중단했습니다.`);
+      if (file.status !== 'ready') {
+        throw new Error(`${file.name} 참고자료가 준비되지 않아 전송을 중단했습니다.`);
+      }
+      const descriptor = {
+        id: file.id,
+        name: file.name,
+        mimeType: file.mimeType,
+        size: file.size,
+        scope: file.scope,
+        scopeId: file.scopeId,
+      };
+      const bytes = await cloudController.readReference(descriptor);
+      if (bytes.byteLength !== file.size) {
+        throw new Error(`${file.name} 참고자료 크기가 달라 전송을 중단했습니다.`);
+      }
+      references.push({ ...descriptor, bytes });
+    }
+    return references;
+  }
+
+  function applyCloudTimeline(
+    timeline: PortableCloudTimelineV1,
+    binding: { documentId: string; fileName: string } | null = null,
+  ): void {
+    const local = binding
+      ? {
+          id: getThread(timeline.thread.id)?.id ?? timeline.thread.id,
+          docKey: binding.fileName,
+          documentId: binding.documentId,
+        }
+      : timeline.thread.id === currentThread.id
+        ? currentThread
+        : getThread(timeline.thread.id)
+          ?? (timeline.thread.documentId === currentThread.documentId ? currentThread : null);
+    if (!local) return;
+    const imported = importCloudTimeline(timeline, local);
+    if (!imported) return;
+    upsertThread(imported);
+    if (!binding && imported.id !== currentThread.id) return;
+    currentThread = imported;
+    applyThreadMeta(currentThread);
+    renderMessagesFromThread(currentThread);
+    updateComposer();
+  }
+
+  async function transferCurrentSession(): Promise<void> {
+    const document = await deps.prepareCloudTransfer?.();
+    if (!document) throw new Error('문서 저장이 완료되지 않아 클라우드 전송을 시작하지 않았습니다.');
+    flushAssistantBuffer();
+    persistCurrentThread();
+    const references = await collectCloudReferences();
+    await cloudController.transfer({
+      threadId: currentThread.id,
+      documentId: currentThread.documentId,
+      documentName: document.fileName,
+      agent: selectedAgent,
+      model: selectedModel,
+      effort: selectedEffort,
+      workflow: chatWorkflow,
+      permissionProfile: 'unrestricted',
+      timeline: exportCloudTimeline(currentThread),
+      document,
+      references,
+      limits: {
+        maxDurationMs: 8 * 60 * 60 * 1000,
+        maxTurns: 100,
+      },
+    });
+    bridge.stopChat();
+    updateComposer();
+  }
+
+  function ensureCloudTransferIntent(): Promise<void> {
+    if (cloudTransferIntentPromise) return cloudTransferIntentPromise;
+    const intent = { threadId: currentThread.id, documentId: currentThread.documentId };
+    cloudTransferIntent = intent;
+    cloudTransferIntentPromise = cloudController.setTransferIntent({ ...intent, pending: true }).then(() => {});
+    return cloudTransferIntentPromise;
+  }
+
+  async function clearCloudTransferIntent(): Promise<void> {
+    const intent = cloudTransferIntent;
+    cloudTransferIntent = null;
+    cloudTransferIntentPromise = null;
+    if (intent) await cloudController.setTransferIntent({ ...intent, pending: false });
+  }
+
+  function failPendingCloudTransfer(error: unknown): void {
+    const waiter = cloudTransferCloseWaiter;
+    cloudTransferPending = false;
+    cloudUi.setWaitingForLocalTurn(false);
+    waiter?.reject(error);
+    if (cloudTransferCloseWaiter === waiter) cloudTransferCloseWaiter = null;
+    const message = error instanceof Error ? error.message : String(error);
+    systemMessage(`클라우드 전송 실패: ${message}`);
+    showToast({ message: `클라우드 전송 실패: ${message}`, durationMs: 5000 });
+  }
+
+  function cancelPendingCloudTransfer(): void {
+    if (!cloudTransferPending) return;
+    cloudTransferPending = false;
+    cloudUi.setWaitingForLocalTurn(false);
+    const cancellation = new Error('클라우드 전송 예약을 취소했습니다.');
+    void clearCloudTransferIntent().then(
+      () => failPendingCloudTransfer(cancellation),
+      (error) => failPendingCloudTransfer(error),
+    );
+  }
+
+  function ensureCloudTransferCloseWaiter() {
+    if (cloudTransferCloseWaiter) return cloudTransferCloseWaiter;
+    let resolve!: () => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<void>((onResolve, onReject) => {
+      resolve = onResolve;
+      reject = onReject;
+    });
+    // A click may fail without a close request awaiting it. Keep that rejection handled;
+    // callers of awaitPendingCloudTransferForClose still receive the original promise.
+    void promise.catch(() => {});
+    cloudTransferCloseWaiter = { promise, resolve, reject };
+    return cloudTransferCloseWaiter;
+  }
+
+  function startCloudTransfer(): void {
+    cloudTransferPending = false;
+    cloudUi.setWaitingForLocalTurn(false);
+    const waiter = ensureCloudTransferCloseWaiter();
+    void (async () => {
+      let failure: unknown = null;
+      try {
+        await ensureCloudTransferIntent();
+        await transferCurrentSession();
+      } catch (error) {
+        failure = error;
+      }
+      try {
+        await clearCloudTransferIntent();
+      } catch (error) {
+        failure ??= error;
+      }
+      if (failure) throw failure;
+    })().then(
+      () => waiter.resolve(),
+      (error) => failPendingCloudTransfer(error),
+    ).finally(() => {
+      if (cloudTransferCloseWaiter === waiter) cloudTransferCloseWaiter = null;
+    });
+  }
+
+  function requestCloudTransfer(): void {
+    if (!deps.prepareCloudTransfer) {
+      systemMessage('이 데스크톱 빌드는 문서를 클라우드로 전송할 수 없습니다.');
+      return;
+    }
+    if (!currentDocumentId || !getDocumentContext?.().documentName) {
+      systemMessage('먼저 클라우드에서 작업할 문서를 여세요.');
+      return;
+    }
+    if (turnRunning) {
+      cloudTransferPending = true;
+      ensureCloudTransferCloseWaiter();
+      cloudUi.setWaitingForLocalTurn(true);
+      void ensureCloudTransferIntent().catch((error) => {
+        void clearCloudTransferIntent().then(
+          () => failPendingCloudTransfer(error),
+          (clearError) => failPendingCloudTransfer(clearError),
+        );
+      });
+      return;
+    }
+    startCloudTransfer();
+  }
 
   function refreshEnvironmentFilenameMarquee(): void {
     if (!fullscreen || !environmentPanelOpen) return;
@@ -1717,6 +2012,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   templateChipClear.appendChild(createIcon('close'));
   templateChip.append(el('span', 'ag-template-chip-label', '템플릿'), templateChipName, templateChipClear);
   composer.append(composerOverlay, slashMenu, templateChip, composerField, composerMeta, configPanel);
+  composer.insertBefore(cloudUi.queueStrip, composerField);
   // 편대 도크는 입력기 위에 뜨는 오버레이라서 입력기의 자식으로 붙는다 —
   // 사이드바·전체 화면 어디로 옮겨져도 입력기를 따라간다.
   composer.appendChild(fleetView.root);
@@ -1959,6 +2255,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   const canStageComposerAttachments = (): boolean =>
     connState === 'connected'
     && readOnlyDocLabel === null
+    && !cloudUi.isCloudConversation()
     && chatStartPendingThreadId === null
     && !attachmentsSending
     && !referenceLibrary.isOpen();
@@ -2078,6 +2375,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     applyDefaults: (prefs) => applyAgentPrefs(prefs),
     openCalibration: () => writingStyleCalibration.open(),
     reconnectSession: () => restartAgentSession(),
+    cloudSettings: cloudUi.settingsElement,
+    refreshCloudSettings: () => cloudUi.openSettings(),
   });
   const settingsPage = settingsPanel.element;
   initialSetup = maybeStartInitialSetup({
@@ -2129,6 +2428,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     railResize,
     reviewResize,
   );
+  stage.appendChild(cloudUi.statusPanel);
 
   function applyRailWidth(width: number, opts?: { persist?: boolean }): void {
     railWidth = clampRailWidth(width);
@@ -3282,6 +3582,91 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   composer.addEventListener('submit', (e) => {
     e.preventDefault();
     if (readOnlyDocLabel !== null || mergeResolverLocked) return;
+    if (cloudUi.isCloudConversation()) {
+      if (!cloudUi.isRunning() || activeComposerSkill || attachmentsSending || referenceLibrary.hasBlockingDrafts()) return;
+      let cloudText = input.value.trim();
+      const hasDrafts = referenceLibrary.hasDrafts();
+      if (!cloudText && !hasDrafts) return;
+      const workflowInvocation = cloudText.match(/^\/(plan|build)(?:\s+([\s\S]*))?$/i);
+      const cloudWorkflow = workflowInvocation?.[1]?.toLowerCase() === 'plan' ? 'plan'
+        : workflowInvocation ? 'direct' : null;
+      if (workflowInvocation) cloudText = (workflowInvocation[2] ?? '').trim();
+      if (!cloudText) {
+        if (!hasDrafts && cloudWorkflow) {
+          input.value = '';
+          void cloudUi.setWorkflow(cloudWorkflow).catch((error) => {
+            input.value = workflowInvocation?.[0] ?? '';
+            resizeComposerInput();
+            systemMessage(`클라우드 모드를 바꾸지 못했습니다: ${error instanceof Error ? error.message : String(error)}`);
+          });
+          return;
+        }
+        cloudText = referenceLibrary.allDraftsAreImages()
+          ? '첨부한 이미지를 확인해 주세요.'
+          : '첨부한 파일을 확인해 주세요.';
+      }
+      attachmentsSending = hasDrafts;
+      updateComposer();
+      void (async () => {
+        if (cloudWorkflow) await cloudUi.setWorkflow(cloudWorkflow);
+        const drafts = hasDrafts ? await referenceLibrary.takeReadyCloudDrafts() : [];
+        const messageId = globalThis.crypto?.randomUUID?.()
+          ?? `cloud-message-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+        const messageAttachments: ThreadAttachment[] = drafts.map((file) => ({
+          stageId: file.id,
+          fileId: file.id,
+          name: file.name,
+          mimeType: file.mimeType,
+          size: file.size,
+          status: 'processing',
+        }));
+        const userMessage = recordUserMessage(
+          cloudText,
+          messageAttachments,
+          undefined,
+          undefined,
+          undefined,
+          'queued-cloud',
+          messageId,
+        );
+        const userBubble = renderUserMessage(userMessage);
+        appendConversation(userBubble);
+        input.value = '';
+        resizeComposerInput();
+        scrollConversationToMessage(userBubble, { smooth: true });
+        try {
+          await cloudUi.queueMessage(cloudText, messageId, drafts.map((file) => ({
+            id: file.id,
+            name: file.name,
+            mimeType: file.mimeType,
+            size: file.size,
+            bytes: file.bytes,
+          })));
+          for (const attachment of messageAttachments) attachment.status = 'ready';
+          persistCurrentThread();
+          renderMessagesFromThread(currentThread);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          userBubble.remove();
+          input.value = cloudText;
+          if (drafts.length) {
+            referenceLibrary.stageDraftFiles(drafts.map((file) => new File(
+              [new Uint8Array(file.bytes).buffer], file.name, { type: file.mimeType },
+            )));
+          }
+          resizeComposerInput();
+          systemMessage(`메시지를 대기열에 넣지 못했습니다: ${message}`);
+        } finally {
+          attachmentsSending = false;
+          updateComposer();
+        }
+      })().catch((error) => {
+        attachmentsSending = false;
+        updateComposer();
+        systemMessage(`첨부 파일을 준비하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`);
+      });
+      return;
+    }
     if (turnRunning) {
       bridge.interrupt();
       return;
@@ -3512,6 +3897,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     selection?: { label: string; excerpt: string },
     skillName?: string,
     skillIcon?: ProductSkillIcon,
+    delivery?: 'queued-cloud' | 'accepted-cloud',
+    messageId?: string,
   ): ThreadMessage {
     const message: ThreadMessage = {
       role: 'user',
@@ -3521,6 +3908,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       ...(skillName && skillIcon ? { skillIcon } : {}),
       ...(attachments.length ? { attachments } : {}),
       ...(selection ? { selection } : {}),
+      ...(delivery ? { delivery } : {}),
+      ...(messageId ? { messageId } : {}),
     };
     currentThread.messages.push(message);
     currentThread.updatedAt = Date.now();
@@ -3583,6 +3972,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       bubble.appendChild(quote);
     }
     if (message.text) bubble.appendChild(el('div', 'ag-msg-user-text', message.text));
+    if (message.delivery) {
+      bubble.appendChild(el(
+        'span',
+        `ag-msg-delivery ag-${message.delivery}`,
+        message.delivery === 'accepted-cloud' ? '클라우드에 전달됨' : '다음 턴에 전달',
+      ));
+    }
     if (message.attachments?.length) {
       const row = el('div', 'ag-msg-attachments');
       for (const attachment of message.attachments) {
@@ -3726,6 +4122,102 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     bridge.requestTitle(currentThread.id, preview);
   }
 
+  function renderStoredTool(tool: ThreadToolRecord, agent: AgentName): HTMLElement {
+    const row = el('div', `ag-tool-row ag-${agent}`);
+    const head = el('button', 'ag-tool-head');
+    head.type = 'button';
+    head.setAttribute('aria-expanded', 'false');
+    const status = el('span', `ag-tool-status ${tool.status === 'completed' ? 'ag-ok' : 'ag-err'}`);
+    status.appendChild(createIcon(tool.status === 'completed' ? 'check' : 'close'));
+    const name = el('span', 'ag-tool-name', tool.tool);
+    const summary = el('span', 'ag-tool-summary', truncate(tool.argsJson, 60));
+    const elapsed = el('span', 'ag-tool-elapsed', tool.elapsedMs === null ? '' : `${tool.elapsedMs}ms`);
+    head.append(status, name, summary, elapsed, createChevron('ag-tool-chevron'));
+    const body = el('div', 'ag-tool-body');
+    body.hidden = true;
+    body.append(
+      el('pre', 'ag-tool-args', prettyJson(tool.argsJson)),
+      el('pre', 'ag-tool-result', tool.resultPreview),
+    );
+    head.addEventListener('click', () => {
+      body.hidden = !body.hidden;
+      row.classList.toggle('ag-tool-open', !body.hidden);
+      head.setAttribute('aria-expanded', body.hidden ? 'false' : 'true');
+    });
+    row.append(head, body);
+    return row;
+  }
+
+  function renderStoredActivity(message: ThreadActivityMessage, agent: AgentName): HTMLElement {
+    const step = el('div', 'ag-progress-step ag-progress-step-tools-only');
+    const activity = el('div', `ag-activity ag-${agent} ag-activity-collapsed ag-activity-${message.status}`);
+    const toggle = el('button', 'ag-activity-toggle');
+    toggle.type = 'button';
+    toggle.setAttribute('aria-expanded', 'false');
+    const failures = message.tools.filter((tool) => tool.status === 'failed').length;
+    toggle.append(
+      el('span', 'ag-activity-label', failures > 0
+        ? `도구 호출 · ${failures}개 오류`
+        : `도구 호출 · ${message.tools.length}개 완료`),
+      createChevron('ag-activity-chevron'),
+    );
+    const collapse = el('div', 'ag-activity-collapse');
+    const content = el('div', 'ag-activity-content');
+    content.tabIndex = -1;
+    for (const tool of message.tools) content.appendChild(renderStoredTool(tool, agent));
+    collapse.appendChild(content);
+    activity.append(toggle, collapse);
+    toggle.addEventListener('click', () => {
+      const collapsed = activity.classList.toggle('ag-activity-collapsed');
+      toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+      content.tabIndex = collapsed ? -1 : 0;
+    });
+    step.appendChild(activity);
+    return step;
+  }
+
+  function renderStoredTasks(message: ThreadTasksMessage, agent: AgentName): HTMLElement {
+    const group = el('section', `ag-restored-task-group ag-${agent}`);
+    const heading = el('button', 'ag-restored-task-heading');
+    heading.type = 'button';
+    heading.setAttribute('aria-expanded', 'false');
+    const failed = message.tasks.filter((task) => task.status === 'failed').length;
+    heading.append(
+      createIcon(failed > 0 ? 'close' : 'check'),
+      el('span', '', failed > 0
+        ? `서브에이전트와 워크플로 · ${failed}개 오류`
+        : `서브에이전트와 워크플로 · ${message.tasks.length}개`),
+      createChevron('ag-restored-task-chevron'),
+    );
+    const body = el('div', 'ag-restored-task-body');
+    body.hidden = true;
+    for (const task of message.tasks) {
+      const item = el('article', `ag-restored-task ag-${task.status}`);
+      const title = task.workflowName || task.title;
+      const meta = [
+        task.status === 'completed' ? '완료' : task.status === 'failed' ? '실패' : '중단됨',
+        task.totalTokens === null ? '' : `${task.totalTokens.toLocaleString()} tokens`,
+      ].filter(Boolean).join(' · ');
+      item.append(
+        el('strong', 'ag-restored-task-title', title),
+        el('span', 'ag-restored-task-meta', meta),
+        el('p', 'ag-restored-task-summary', task.summary || task.activity || '기록된 요약 없음'),
+      );
+      if (task.tools.length > 0) {
+        const tools = el('div', 'ag-restored-task-tools');
+        for (const tool of task.tools) tools.appendChild(renderStoredTool(tool, agent));
+        item.appendChild(tools);
+      }
+      body.appendChild(item);
+    }
+    heading.addEventListener('click', () => {
+      body.hidden = !body.hidden;
+      heading.setAttribute('aria-expanded', body.hidden ? 'false' : 'true');
+    });
+    group.append(heading, body);
+    return group;
+  }
+
   function renderMessagesFromThread(thread: ChatThread): void {
     cancelPendingAssistantRender();
     resetConversation();
@@ -3734,6 +4226,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     followConversation = true;
     assistantBuffer = '';
     toolRows.clear();
+    activityTranscript = null;
+    activityTranscripts.clear();
+    transcriptTools.clear();
+    tasksTranscript = null;
+    transcriptTasks.clear();
+    taskToolRecords.clear();
+    taskTextBuffers.clear();
     for (const msg of thread.messages) {
       if (msg.role === 'user') {
         appendConversation(renderUserMessage(msg));
@@ -3747,6 +4246,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
           appendConversation(step);
         } else if (msg.kind === 'plan') {
           appendConversation(renderPlanMessage(msg));
+        } else if (msg.kind === 'activity') {
+          appendConversation(renderStoredActivity(msg, agent));
+        } else if (msg.kind === 'tasks') {
+          appendConversation(renderStoredTasks(msg, agent));
         } else {
           const bubble = el('div', `ag-msg ag-msg-assistant ag-${agent}`);
           renderAssistantMessage(bubble, msg.text);
@@ -4203,6 +4706,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   }
 
   function startNewChat(opts?: { silent?: boolean }): void {
+    if (cloudUi.isCloudConversation()) {
+      systemMessage('클라우드 작업을 이어받거나 결과를 정리한 뒤 새 채팅을 시작하세요.');
+      return;
+    }
     setComposerSkill(null);
     if (turnRunning) bridge.interrupt();
     flushAssistantBuffer();
@@ -4228,6 +4735,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       threadWorkflows.delete(previousThreadId);
     }
     currentThread = nextThread;
+    cloudUi.refreshScope();
     selectTemplate(null);
     referenceLibrary.contextChanged();
     bridge.stopChat();
@@ -4243,6 +4751,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (getChatStatus(id) === 'finished') clearChatStatus(id);
     if (id === currentThread.id) {
       setThreadsPanelOpen(false);
+      return;
+    }
+    if (cloudUi.isCloudConversation()) {
+      systemMessage('클라우드 작업을 이어받거나 결과를 정리한 뒤 다른 채팅을 여세요.');
       return;
     }
     if (turnRunning) bridge.interrupt();
@@ -4261,6 +4773,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       messages: loaded.messages.map((m) => ({ ...m })),
       titleRequested: Boolean(loaded.titleRequested),
     };
+    cloudUi.refreshScope();
     referenceLibrary.contextChanged();
     bridge.stopChat();
     applyThreadMeta(currentThread);
@@ -4419,6 +4932,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   function updateComposer(): void {
     // 다른 문서의 채팅 열람 중에는 연결/작업 상태와 무관하게 잠긴다.
+    const cloudConversation = cloudUi.isCloudConversation();
     if (mergeResolverLocked) {
       input.disabled = true;
       send.disabled = true;
@@ -4429,6 +4943,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       send.disabled = true;
       composerSkillClear.disabled = true;
       input.placeholder = `"${readOnlyDocLabel}" 문서의 채팅 — 읽기 전용`;
+    } else if (cloudConversation) {
+      const acceptsQueuedMessage = cloudUi.isRunning();
+      input.disabled = !acceptsQueuedMessage;
+      send.disabled = !acceptsQueuedMessage;
+      composerSkillClear.disabled = true;
+      input.placeholder = acceptsQueuedMessage
+        ? '다음 클라우드 턴에 전달할 메시지'
+        : '클라우드 상태에서 이어받거나 결과를 확인하세요';
     } else if (selectedAgent === 'rau' && !rauSetupComplete) {
       input.disabled = true;
       send.disabled = true;
@@ -4465,7 +4987,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     send.classList.toggle('ag-stop', turnRunning);
     // 실행 중에는 Enter 가 전송이 아니므로 힌트를 숨긴다.
     sendHint.hidden = turnRunning || attachmentsSending || chatStartPendingThreadId !== null
-      || referenceLibrary.hasBlockingDrafts() || connState !== 'connected' || readOnlyDocLabel !== null;
+      || referenceLibrary.hasBlockingDrafts()
+      || (!cloudUi.isRunning() && connState !== 'connected')
+      || readOnlyDocLabel !== null
+      || (cloudConversation && !cloudUi.isRunning());
     // 실행 중이거나 작업 방식/계획→실행 전환 중에는 모드·모델·권한을 잠근다.
     const controlsLocked = isControlLocked();
     providerTrigger.disabled = controlsLocked;
@@ -4600,6 +5125,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   }
 
   function systemMessage(text: string): void {
+    currentThread.messages.push({ role: 'system', text, agent: selectedAgent });
+    persistCurrentThread();
     withAutoScroll(() => appendConversation(el('div', 'ag-msg ag-msg-system', text)));
   }
 
@@ -4693,11 +5220,218 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     activity.root.classList.remove('ag-activity-running');
   }
 
+  function transcriptId(prefix: string): string {
+    return globalThis.crypto?.randomUUID?.()
+      ?? `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  }
+
+  function ensureActivityTranscript(agent: AgentName): ActivityTranscriptState {
+    if (activityTranscript) return activityTranscript;
+    const message: ThreadActivityMessage = {
+      role: 'assistant',
+      kind: 'activity',
+      activityId: transcriptId('activity'),
+      text: '도구 호출',
+      agent,
+      status: 'running',
+      startedAt: Date.now(),
+      completedAt: null,
+      tools: [],
+    };
+    const state = { message, acceptingTools: true };
+    currentThread.messages.push(message);
+    activityTranscript = state;
+    activityTranscripts.set(message.activityId, state);
+    persistCurrentThread();
+    return state;
+  }
+
+  function settleActivityTranscript(state: ActivityTranscriptState): void {
+    if (state.acceptingTools || state.message.tools.some((tool) => tool.status === 'running')) return;
+    state.message.completedAt = Date.now();
+    state.message.status = state.message.tools.some((tool) => tool.status === 'failed')
+      ? 'failed'
+      : state.message.tools.some((tool) => tool.status === 'stopped')
+        ? 'stopped'
+        : 'completed';
+    persistCurrentThread();
+  }
+
+  function closeActivityTranscript(): void {
+    const state = activityTranscript;
+    if (!state) return;
+    state.acceptingTools = false;
+    activityTranscript = null;
+    settleActivityTranscript(state);
+  }
+
+  function recordActivityToolCall(event: Extract<AgentStreamEvent, { type: 'tool-call' }>): void {
+    const state = ensureActivityTranscript(event.agent);
+    const tool: ThreadToolRecord = {
+      callId: event.callId,
+      tool: event.tool,
+      argsJson: event.argsJson,
+      status: 'running',
+      resultPreview: '',
+      elapsedMs: null,
+    };
+    state.message.tools.push(tool);
+    transcriptTools.set(event.callId, { tool, activity: state, startedAt: Date.now() });
+    persistCurrentThread();
+  }
+
+  function recordActivityToolResult(event: Extract<AgentStreamEvent, { type: 'tool-result' }>): void {
+    const entry = transcriptTools.get(event.callId);
+    if (!entry) return;
+    transcriptTools.delete(event.callId);
+    entry.tool.status = event.ok ? 'completed' : 'failed';
+    entry.tool.resultPreview = event.resultPreview;
+    entry.tool.elapsedMs = Math.max(0, Date.now() - entry.startedAt);
+    settleActivityTranscript(entry.activity);
+    persistCurrentThread();
+  }
+
+  function sweepActivityTranscripts(): void {
+    const touched = new Set<ActivityTranscriptState>();
+    for (const [, entry] of transcriptTools) {
+      entry.tool.status = 'stopped';
+      entry.tool.resultPreview ||= '(결과 없이 종료됨)';
+      entry.tool.elapsedMs = Math.max(0, Date.now() - entry.startedAt);
+      touched.add(entry.activity);
+    }
+    transcriptTools.clear();
+    for (const state of activityTranscripts.values()) state.acceptingTools = false;
+    closeActivityTranscript();
+    for (const state of touched) settleActivityTranscript(state);
+    activityTranscripts.clear();
+  }
+
+  function ensureTasksTranscript(agent: AgentName): ThreadTasksMessage {
+    if (tasksTranscript) return tasksTranscript;
+    tasksTranscript = {
+      role: 'assistant',
+      kind: 'tasks',
+      taskGroupId: transcriptId('tasks'),
+      text: '서브에이전트와 워크플로',
+      agent,
+      status: 'running',
+      tasks: [],
+    };
+    currentThread.messages.push(tasksTranscript);
+    persistCurrentThread();
+    return tasksTranscript;
+  }
+
+  function recordTaskStart(event: Extract<AgentStreamEvent, { type: 'task-start' }>): void {
+    const group = ensureTasksTranscript(event.agent);
+    const task: ThreadTaskRecord = {
+      taskId: event.taskId,
+      taskKind: event.taskKind,
+      title: event.title,
+      role: event.role ?? '',
+      workflowName: event.workflowName ?? '',
+      status: 'running',
+      activity: '',
+      summary: '',
+      totalTokens: null,
+      toolUses: null,
+      durationMs: null,
+      tools: [],
+    };
+    group.tasks.push(task);
+    transcriptTasks.set(event.taskId, task);
+    persistCurrentThread();
+  }
+
+  function recordTaskProgress(event: Extract<AgentStreamEvent, { type: 'task-progress' }>): void {
+    const task = transcriptTasks.get(event.taskId);
+    if (!task) return;
+    if (event.lastTool) task.activity = `▸ ${event.lastTool}`;
+    else if (event.activity) task.activity = event.activity;
+    if (event.usage?.totalTokens !== undefined) task.totalTokens = event.usage.totalTokens;
+    if (event.usage?.toolUses !== undefined) task.toolUses = event.usage.toolUses;
+    if (event.usage?.durationMs !== undefined) task.durationMs = event.usage.durationMs;
+    persistCurrentThread();
+  }
+
+  function recordTaskText(taskId: string, text: string): void {
+    const task = transcriptTasks.get(taskId);
+    if (!task) return;
+    const buffer = `${taskTextBuffers.get(taskId) ?? ''}${text}`;
+    taskTextBuffers.set(taskId, buffer.slice(-1000));
+    task.activity = truncate(buffer, 140);
+  }
+
+  function recordTaskToolCall(event: Extract<AgentStreamEvent, { type: 'tool-call' }>): void {
+    if (!event.parentTaskId) return;
+    const task = transcriptTasks.get(event.parentTaskId);
+    if (!task) return;
+    const tool: ThreadToolRecord = {
+      callId: event.callId,
+      tool: event.tool,
+      argsJson: event.argsJson,
+      status: 'running',
+      resultPreview: '',
+      elapsedMs: null,
+    };
+    task.tools.push(tool);
+    taskToolRecords.set(event.callId, { tool, task, startedAt: Date.now() });
+    persistCurrentThread();
+  }
+
+  function recordTaskToolResult(event: Extract<AgentStreamEvent, { type: 'tool-result' }>): void {
+    const entry = taskToolRecords.get(event.callId);
+    if (!entry) return;
+    taskToolRecords.delete(event.callId);
+    entry.tool.status = event.ok ? 'completed' : 'failed';
+    entry.tool.resultPreview = event.resultPreview;
+    entry.tool.elapsedMs = Math.max(0, Date.now() - entry.startedAt);
+    persistCurrentThread();
+  }
+
+  function recordTaskEnd(event: Extract<AgentStreamEvent, { type: 'task-end' }>): void {
+    const task = transcriptTasks.get(event.taskId);
+    if (!task) return;
+    task.status = event.status;
+    if (event.summary) {
+      task.summary = event.summary;
+      task.activity = event.summary;
+    }
+    if (event.usage?.totalTokens !== undefined) task.totalTokens = event.usage.totalTokens;
+    if (event.usage?.toolUses !== undefined) task.toolUses = event.usage.toolUses;
+    if (event.usage?.durationMs !== undefined) task.durationMs = event.usage.durationMs;
+    persistCurrentThread();
+  }
+
+  function sweepTasksTranscript(): void {
+    if (!tasksTranscript) return;
+    for (const task of tasksTranscript.tasks) {
+      if (task.status === 'running') task.status = 'stopped';
+      for (const tool of task.tools) {
+        if (tool.status === 'running') {
+          tool.status = 'stopped';
+          tool.resultPreview ||= '(결과 없이 종료됨)';
+        }
+      }
+    }
+    tasksTranscript.status = tasksTranscript.tasks.some((task) => task.status === 'failed')
+      ? 'failed'
+      : tasksTranscript.tasks.some((task) => task.status === 'stopped')
+        ? 'stopped'
+        : 'completed';
+    tasksTranscript = null;
+    transcriptTasks.clear();
+    taskToolRecords.clear();
+    taskTextBuffers.clear();
+    persistCurrentThread();
+  }
+
   function closeCurrentActivityGroup() {
     const activity = turnActivity;
     if (!activity) return;
     activity.acceptingTools = false;
     turnActivity = null;
+    closeActivityTranscript();
     settleActivity(activity);
   }
 
@@ -4909,6 +5643,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       case 'turn-start':
         // 이전 턴이 비정상 종료돼 남긴 실행 상태를 먼저 닫는다.
         sweepUnresolvedToolRows();
+        sweepActivityTranscripts();
+        sweepTasksTranscript();
         completeTurnActivity();
         setTurnRunning(true);
         runStatusThreadId = currentThread.id;
@@ -4931,6 +5667,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         break;
       case 'text-delta': {
         // 서브에이전트가 낸 텍스트는 그 행의 근황일 뿐, 루트 답변 버퍼에 섞이지 않는다.
+        if (event.parentTaskId) recordTaskText(event.parentTaskId, event.text);
         if (event.parentTaskId && fleetView.routeTextDelta(event)) break;
         if (!streamBubble && turnActivity) closeCurrentActivityGroup();
         const bubble = streamBubble ?? openAssistantBubble(event.agent);
@@ -4945,6 +5682,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       }
       case 'tool-call': {
         // 서브에이전트의 도구는 그 행의 드릴인으로 들어간다. 모르는 task 면 루트로 떨어진다.
+        if (event.parentTaskId) recordTaskToolCall(event);
         if (event.parentTaskId && fleetView.routeToolCall(event)) break;
         // 스폰 자체는 편대 카드가 나타내므로 도구 행을 따로 그리지 않는다.
         if (!event.parentTaskId && isSpawnToolName(event.tool)) {
@@ -4959,6 +5697,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         // 도구 전 설명은 최종 답변과 구분된 진행 이정표로 보관한다.
         flushAssistantBuffer({ kind: 'progress' });
         const milestone = compactStreamIntoActivity(event.agent);
+        recordActivityToolCall(event);
         addToolRow(event, milestone);
         updateTurnPending(event.agent);
         break;
@@ -4968,18 +5707,23 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
           if (!event.ok) turnFailedToolCount += 1;
           break;
         }
+        if (event.parentTaskId) recordTaskToolResult(event);
         if (event.parentTaskId && fleetView.routeToolResult(event)) break;
+        recordActivityToolResult(event);
         resolveToolRow(event);
         break;
       case 'task-start':
         fleetView.taskStart(event);
+        recordTaskStart(event);
         updateTurnPending(event.agent);
         break;
       case 'task-progress':
         fleetView.taskProgress(event);
+        recordTaskProgress(event);
         break;
       case 'task-end':
         fleetView.taskEnd(event);
+        recordTaskEnd(event);
         break;
       case 'session-info':
         if (event.mcpStatus !== undefined && event.mcpStatus !== 'connected') {
@@ -5003,9 +5747,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         }
         flushAssistantBuffer();
         sweepUnresolvedToolRows();
+        sweepActivityTranscripts();
         // 편대는 턴이 정착한 뒤 도착하지만, 남은 행은 여기서 중단됨으로 확정한다.
         suppressedSpawnCalls.clear();
         fleetView.sweep();
+        sweepTasksTranscript();
         if (event.errorMessage) systemMessage(event.errorMessage);
         const completed =
           event.stopReason !== 'interrupted'
@@ -5023,6 +5769,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         }
         completeTurnActivity();
         streamBubble = null;
+        if (cloudTransferPending) requestCloudTransfer();
         break;
       }
       case 'error':
@@ -5291,10 +6038,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         flushPendingAssistantRender();
         flushAssistantBuffer();
         sweepUnresolvedToolRows();
+        sweepActivityTranscripts();
         suppressedSpawnCalls.clear();
         fleetView.sweep();
+        sweepTasksTranscript();
         completeTurnActivity();
         streamBubble = null;
+        if (cloudTransferPending) requestCloudTransfer();
         break;
       case 'title-result': {
         if (e.threadId !== currentThread.id && !getThread(e.threadId)) break;
@@ -5394,7 +6144,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   /** 실행 중이거나 첨부를 커밋하거나 전환 중에는 모드·모델·권한을 바꿀 수 없다. */
   function isControlLocked(): boolean {
-    if (mergeResolverLocked) return true;
+    if (mergeResolverLocked || cloudUi.isCloudConversation()) return true;
     return turnRunning || attachmentsSending || chatStartPendingThreadId !== null
       || workflowTransitionPending || planningPhase === 'switching';
   }
@@ -5976,6 +6726,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (!prompt) return { ok: false, reason: '지시를 입력해 주세요' };
     if (mergeResolverLocked) return { ok: false, reason: '병합 검토를 먼저 완료하거나 닫아 주세요' };
     if (readOnlyDocLabel !== null) return { ok: false, reason: '다른 문서의 채팅을 열람 중입니다' };
+    if (cloudUi.isCloudConversation()) return { ok: false, reason: '클라우드 작업 중에는 사이드바에서 메시지를 대기열에 넣으세요' };
     if (connState !== 'connected') return { ok: false, reason: '에이전트 허브에 연결되어 있지 않습니다' };
     if (selectedAgent === 'rau' && !rauSetupComplete) {
       return { ok: false, reason: 'Rau 연결을 먼저 완료해 주세요' };
@@ -6017,12 +6768,18 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       openConfiguredVersionControl();
     },
     sendInlinePrompt,
+    awaitPendingCloudTransferForClose() {
+      return cloudTransferCloseWaiter?.promise ?? Promise.resolve();
+    },
     dispose(): void {
+      cloudTransferCloseWaiter?.reject(new Error('클라우드 전송을 기다리는 동안 사이드바가 닫혔습니다.'));
+      cloudTransferCloseWaiter = null;
       unsubBridge();
       unsubThreads();
       unsubChatStatus();
       unsubPending();
       unsubEditingLease();
+      unsubscribeHancomGitVisibility();
       contextUnsubs.forEach((unsub) => unsub());
       messagesMutationObserver?.disconnect();
       messagesResizeObserver?.disconnect();

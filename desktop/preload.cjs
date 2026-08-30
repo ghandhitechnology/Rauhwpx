@@ -76,6 +76,29 @@ contextBridge.exposeInMainWorld('rhwpDesktop', {
   commitDocument: (reservationId) => ipcRenderer.invoke('desktop:document-commit', reservationId),
   cancelDocument: (reservationId) => ipcRenderer.invoke('desktop:document-cancel', reservationId),
   releaseDocument: () => ipcRenderer.invoke('desktop:document-release'),
+  cloudGetState: (payload) => ipcRenderer.invoke('cloud:get-state', payload),
+  cloudSaveProfile: (payload) => ipcRenderer.invoke('cloud:save-profile', payload),
+  cloudTestProfile: (payload) => ipcRenderer.invoke('cloud:test-profile', payload),
+  cloudProvision: (payload) => ipcRenderer.invoke('cloud:provision', payload),
+  cloudPair: (payload) => ipcRenderer.invoke('cloud:pair', payload),
+  cloudSelectServerMode: (payload) => ipcRenderer.invoke('cloud:select-server-mode', payload),
+  cloudSpawnSandbox: (payload) => ipcRenderer.invoke('cloud:spawn-sandbox', payload),
+  cloudSandboxStatus: () => ipcRenderer.invoke('cloud:sandbox-status'),
+  cloudTeardownSandbox: (payload) => ipcRenderer.invoke('cloud:teardown-sandbox', payload),
+  cloudTransfer: (payload) => ipcRenderer.invoke('cloud:transfer', payload),
+  cloudSetTransferIntent: (payload) => ipcRenderer.invoke('cloud:transfer-intent', payload),
+  cloudReadReference: (payload) => ipcRenderer.invoke('cloud:read-reference', payload),
+  cloudCommand: (payload) => ipcRenderer.invoke('cloud:command', payload),
+  cloudDismissSession: (payload) => ipcRenderer.invoke('cloud:dismiss-session', payload),
+  cloudCompleteTakeover: (payload) => ipcRenderer.invoke('cloud:complete-takeover', payload),
+  cloudDownloadResult: (payload) => ipcRenderer.invoke('cloud:download-result', payload),
+  cloudDownloadCheckpoint: (payload) => ipcRenderer.invoke('cloud:download-checkpoint', payload),
+  cloudResolveResult: (payload) => ipcRenderer.invoke('cloud:resolve-result', payload),
+  onCloudEvent: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('cloud:event', listener);
+    return () => ipcRenderer.removeListener('cloud:event', listener);
+  },
   ensureAgentHub: () => ipcRenderer.invoke('agent-hub:ensure'),
   respondToCloseRequest: (requestId, allowClose) => (
     ipcRenderer.invoke('desktop:close-response', requestId, allowClose)

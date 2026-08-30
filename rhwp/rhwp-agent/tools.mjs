@@ -16,6 +16,7 @@ const WRITE_NOTE_FOR_BATCH = `${WRITE_NOTE_REVISION} ${WRITE_NOTE_STAGING}`;
  */
 export const BATCHABLE_EDIT_TOOL_NAMES = Object.freeze([
   'insert_text',
+  'insert_paragraph_after',
   'delete_range',
   'replace_range',
   'apply_char_format',
@@ -149,6 +150,7 @@ export const TOOL_CATEGORIES = Object.freeze([
   'background-control',
   'background-worker',
   'browser',
+  'environment',
 ]);
 
 /**
@@ -158,11 +160,11 @@ export const TOOL_CATEGORIES = Object.freeze([
  * destructive 로 표시하지 않는다. 그렇게 표시하면 Codex 안전 모드
  * (`workspace-write` + `approval_policy=never`)가 문서 편집 도구를 거절한다.
  *
- * @param {'instruction-read'|'instruction-write'|'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'artifact-write'|'planning-control'|'background-control'|'background-worker'|'browser'} category
+ * @param {'instruction-read'|'instruction-write'|'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'artifact-write'|'planning-control'|'background-control'|'background-worker'|'browser'|'environment'} category
  */
 export function toolAnnotations(category) {
   return {
-    readOnlyHint: category === 'instruction-read' || category === 'document-read' || category === 'reference-read' || category === 'template-read',
+    readOnlyHint: category === 'instruction-read' || category === 'document-read' || category === 'reference-read' || category === 'template-read' || category === 'environment',
     destructiveHint: category === 'download-write',
     openWorldHint: category === 'browser' || category === 'download-write',
   };
@@ -463,6 +465,16 @@ const BASE_TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'insert_paragraph_after',
+    description: `Insert exactly one brand-new body paragraph immediately after afterParaIdx and fill it with text. Existing text and inline controls (tables, pictures, equations, notes) remain anchored to the source paragraph, so use this instead of a leading "\\n" when the neighboring paragraph is empty or contains controls. text must be a single non-empty line. ${WRITE_NOTE}`,
+    shape: {
+      expectedRevision: z.number().int(),
+      sectionIdx: z.number().int().min(0),
+      afterParaIdx: z.number().int().min(0),
+      text: z.string().min(1).max(10000).regex(/^[^\r\n]+$/, 'text must be one line'),
+    },
+  },
+  {
     name: 'template_apply_section_layout',
     description: `Transfer section-level layout from the active template into existing sections of the open document. The body content remains in place. Referenced layout resources are remapped into the target document. Unsupported features are returned as warnings/skippedFeatures. ${WRITE_NOTE}`,
     shape: {
@@ -706,7 +718,7 @@ const BASE_TOOL_DEFINITIONS = [
     // insert_image 만 특별 — 파일은 mcp-stdio 프로세스가 읽어 base64 로 허브에 전달하므로
     // mcp-stdio.mjs 가 이 정의의 description/shape 로 커스텀 핸들러를 등록한다.
     name: 'insert_image',
-    description: `Insert an image into the document at (sectionIdx, paraIdx, charOffset), inline with the text. Preferred input is imagePath — an absolute local file path; this MCP server reads the file, detects its pixel size, and streams the bytes itself (the model never emits image data). png/jpg/gif/bmp, max 5MB. Default size is the natural pixel size at 96dpi, shrunk to the page body width only if wider; pass widthMm/heightMm to force a size (giving just one scales proportionally). ${UNIT_NOTE} ${WRITE_NOTE} ${OFFSET_CAVEAT}`,
+    description: `Insert an image into the document at (sectionIdx, paraIdx, charOffset), inline with the text. Preferred input is imagePath — an absolute local file path; this MCP server reads the file, detects its pixel size, and streams the bytes itself (the model never emits image data). png/jpg/gif/bmp, max 5MB. Default size is the natural pixel size at 96dpi, shrunk to the page body width only if wider; pass widthMm/heightMm to force a size (giving just one scales proportionally). Paths returned by environment_screenshot are already under the allowed image roots. ${UNIT_NOTE} ${WRITE_NOTE} ${OFFSET_CAVEAT}`,
     shape: {
       expectedRevision: z.number().int(),
       sectionIdx: z.number().int().min(0),
@@ -719,6 +731,11 @@ const BASE_TOOL_DEFINITIONS = [
       heightMm: z.number().positive().max(500).optional(),
       description: z.string().max(500).optional().describe('Alt text / 그림 설명'),
     },
+  },
+  {
+    name: 'environment_screenshot',
+    description: 'Capture the cloud session virtual desktop (Xvfb) to a PNG under the session work directory and return its absolute imagePath plus an image content block. The path is inside RHWP_IMAGE_ROOTS so insert_image can place it in the open document. Fails with ENVIRONMENT_DISPLAY_UNAVAILABLE when the session has no ready DISPLAY. Prefer this over render_page when the result should show the agent screen rather than a document page.',
+    shape: {},
   },
   {
     name: 'insert_equation',
@@ -1042,7 +1059,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
 ];
 
-/** @type {Readonly<Record<string, 'instruction-read'|'instruction-write'|'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'artifact-write'|'planning-control'|'background-control'|'background-worker'|'browser'>>} */
+/** @type {Readonly<Record<string, 'instruction-read'|'instruction-write'|'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'artifact-write'|'planning-control'|'background-control'|'background-worker'|'browser'|'environment'>>} */
 export const TOOL_CLASSIFICATIONS = Object.freeze({
   read_agent_instructions: 'instruction-read',
   update_agent_instructions: 'instruction-write',
@@ -1076,6 +1093,7 @@ export const TOOL_CLASSIFICATIONS = Object.freeze({
   prepare_engine_edit_session: 'document-write',
   apply_edits: 'document-write',
   insert_text: 'document-write',
+  insert_paragraph_after: 'document-write',
   template_apply_section_layout: 'document-write',
   template_apply_paragraph_format: 'document-write',
   template_insert_block: 'document-write',
@@ -1091,6 +1109,7 @@ export const TOOL_CLASSIFICATIONS = Object.freeze({
   list_numberings: 'document-read',
   apply_style: 'document-write',
   insert_image: 'document-write',
+  environment_screenshot: 'environment',
   insert_equation: 'document-write',
   preview_equation: 'document-read',
   insert_chart: 'document-write',
@@ -1128,11 +1147,11 @@ export const TOOL_DEFINITIONS = Object.freeze(BASE_TOOL_DEFINITIONS.map((definit
 }));
 
 export const TOOL_PROFILES = Object.freeze({
-  direct: Object.freeze(['instruction-read', 'instruction-write', 'document-read', 'document-write', 'reference-read', 'template-read', 'artifact-write', 'background-control']),
-  planning: Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'planning-control', 'browser']),
-  question: Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'browser']),
-  'awaiting-approval': Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'browser']),
-  implementing: Object.freeze(['instruction-read', 'instruction-write', 'document-read', 'document-write', 'reference-read', 'template-read', 'download-write', 'artifact-write', 'browser', 'background-control']),
+  direct: Object.freeze(['instruction-read', 'instruction-write', 'document-read', 'document-write', 'reference-read', 'template-read', 'artifact-write', 'background-control', 'environment']),
+  planning: Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'planning-control', 'browser', 'environment']),
+  question: Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'browser', 'environment']),
+  'awaiting-approval': Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'browser', 'environment']),
+  implementing: Object.freeze(['instruction-read', 'instruction-write', 'document-read', 'document-write', 'reference-read', 'template-read', 'download-write', 'artifact-write', 'browser', 'background-control', 'environment']),
   'copy-layout-worker': Object.freeze([
     'read_product_skill',
     'get_document_info',

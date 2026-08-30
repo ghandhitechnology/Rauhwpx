@@ -1,6 +1,7 @@
 import { WasmBridge } from '@/core/wasm-bridge';
 import { FALLBACK_DOCUMENT_FILE_NAME } from '@/core/document-names';
 import type { DocumentInfo } from '@/core/types';
+import { browserOriginSyncDigest, setBrowserOriginSyncDigest } from '@/cloud/browser-cloud';
 import { EventBus } from '@/core/event-bus';
 import { assertRemoteDocumentBytes } from '@/core/document-signature';
 import { RemoteDocumentUrlError, validateRemoteDocumentUrl } from '@/core/remote-document-url';
@@ -14,7 +15,13 @@ import { loadExtensionViewerSettings, type ExtensionViewerSettings } from '@/cor
 import { CommandRegistry } from '@/command/registry';
 import { CommandDispatcher } from '@/command/dispatcher';
 import type { EditorContext, CommandServices, EditorEditMode } from '@/command/types';
-import { confirmSaveBeforeReplacingDocument, fileCommands, runLibraryMove } from '@/command/commands/file';
+import {
+  confirmSaveBeforeReplacingDocument,
+  fileCommands,
+  runLibraryMove,
+  saveCurrentDocument,
+} from '@/command/commands/file';
+import { exportDocumentForFormat } from '@/command/save-document-format';
 import { editCommands, openClassicDocumentHistory } from '@/command/commands/edit';
 import {
   setBasicToolboxExpanded,
@@ -99,7 +106,8 @@ import {
   rememberNativeDocument,
   reserveDesktopDocument,
 } from '@/desktop-integration';
-import { initAgentBridge, type AgentBridge } from './agent/bridge.ts';
+import { initAgentBridge, type AgentBridge, type ChatHistoryEntry } from './agent/bridge.ts';
+import type { AgentName } from './agent/types.ts';
 import { initAgentSidebar } from './ui/agent-sidebar/index.ts';
 import { showEditingSettingsFallback } from './ui/agent-sidebar/settings-editing-fallback.ts';
 import { AGENT_LABEL } from './ui/agent-sidebar/providers.ts';
@@ -114,6 +122,12 @@ import {
 } from './versioning/index.ts';
 import type { AgentEditingLease } from './agent/types.ts';
 import type { EmbedRendererRuntimeRequestV1 } from '@/embed/rpc-router';
+import type {
+  CloudCheckpointPayload,
+  CloudDownloadResult,
+  CloudResultResolution,
+  CloudTakeoverPayload,
+} from './cloud/types.ts';
 import {
   contextualEditingToolbarMode,
   contextualObjectCommandEnabled,
@@ -195,6 +209,8 @@ let rendererSession: RendererSession | null = null;
 let editMode: EditorEditMode = 'normal';
 let documentReadOnly = new URLSearchParams(window.location.search).get('templatePreview') === '1';
 let agentEditingLease: AgentEditingLease = { active: false, agent: 'codex' };
+let previewDocumentReadOnly = documentReadOnly;
+let cloudDocumentLeaseSessionId: string | null = null;
 let rendererRuntimeRequest: EmbedRendererRuntimeRequestV1 | null = null;
 let renderBackendFallbackReason: RenderBackendFallbackReason | null = null;
 let rendererInitializationError: string | null = null;
@@ -274,10 +290,21 @@ function setEditMode(mode: EditorEditMode): void {
 }
 
 function setDocumentReadOnly(readOnly: boolean): void {
-  documentReadOnly = readOnly;
-  document.documentElement.dataset.documentReadOnly = readOnly ? 'true' : 'false';
-  inputHandler?.setReadOnly(readOnly);
-  toolbar?.setEnabled(wasm.pageCount > 0 && !readOnly && !agentEditingLease.active);
+  previewDocumentReadOnly = readOnly;
+  syncDocumentReadOnly();
+}
+
+function setCloudDocumentLease(cloudOwned: boolean, sessionId: string | null): void {
+  cloudDocumentLeaseSessionId = cloudOwned ? sessionId : null;
+  document.documentElement.dataset.cloudLease = cloudOwned ? 'cloud' : 'local';
+  syncDocumentReadOnly();
+}
+
+function syncDocumentReadOnly(): void {
+  documentReadOnly = previewDocumentReadOnly || cloudDocumentLeaseSessionId !== null;
+  document.documentElement.dataset.documentReadOnly = documentReadOnly ? 'true' : 'false';
+  inputHandler?.setReadOnly(documentReadOnly);
+  toolbar?.setEnabled(wasm.pageCount > 0 && !documentReadOnly && !agentEditingLease.active);
   eventBus.emit('command-state-changed');
 }
 
@@ -298,8 +325,391 @@ function setAgentEditingLease(lease: AgentEditingLease): void {
   eventBus.emit('command-state-changed');
 }
 
+function bytesToSha256(bytes: Uint8Array): Promise<string> {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  return crypto.subtle.digest('SHA-256', copy.buffer).then((digest) =>
+    [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join(''));
+}
+
+async function prepareCloudTransferDocument() {
+  if (!wasm.hasLoadedDocument()) return null;
+  if (documentState.isDirty() || wasm.isNewDocument) {
+    const saved = await saveCurrentDocument(commandServices);
+    if (saved !== 'saved') return null;
+  }
+  const sourceFormat = wasm.getSourceFormat();
+  if (sourceFormat !== 'hwp' && sourceFormat !== 'hwpx' && sourceFormat !== 'hml') {
+    throw new Error(`클라우드에서 지원하지 않는 문서 형식입니다: ${sourceFormat}`);
+  }
+  const format = sourceFormat;
+  const bytes = exportDocumentForFormat(wasm, format);
+  return {
+    bytes,
+    fileName: wasm.fileName,
+    sha256: await bytesToSha256(bytes),
+  };
+}
+
+/**
+ * Worker-only browser control surface for the cloud document runtime.
+ *
+ * The dedicated worker build must enable this at compile time. It then still
+ * requires loopback origin, an explicit query flag, and a per-session 256-bit
+ * bootstrap secret. Normal web and desktop builds therefore expose nothing.
+ */
+function installCloudDocumentRuntimeApi(agentBridge: AgentBridge): void {
+  const cloudBuild = (import.meta as ImportMeta & { env?: Record<string, string | undefined> })
+    .env?.['VITE_RHWP_CLOUD_RUNTIME'] === '1';
+  const loopback = window.location.hostname === '127.0.0.1'
+    || window.location.hostname === 'localhost'
+    || window.location.hostname === '[::1]'
+    || window.location.hostname === '::1';
+  const params = new URLSearchParams(window.location.search);
+  const bootstrap = params.get('bootstrap') ?? '';
+  if (!cloudBuild || !loopback || params.get('cloudRuntime') !== '1' || bootstrap.length < 43) return;
+
+  let eventSequence = 0;
+  let exportedBytes: Uint8Array | null = null;
+  let exportedFormat: 'hwp' | 'hwpx' | 'hml' | null = null;
+  const events: Array<{ seq: number; event: unknown }> = [];
+  const requireSecret = (candidate: unknown): void => {
+    if (typeof candidate !== 'string' || candidate !== bootstrap) {
+      throw new Error('Cloud runtime bootstrap authentication failed');
+    }
+  };
+  const runtimeUrl = (raw: unknown): URL => {
+    const url = new URL(String(raw ?? ''), window.location.origin);
+    if (url.origin !== window.location.origin
+      || !url.pathname.startsWith('/_runtime/resource/')
+      || url.searchParams.get('bootstrap') !== bootstrap) {
+      throw new Error('Cloud runtime resource URL is outside the authenticated loopback origin');
+    }
+    return url;
+  };
+  const fetchRuntimeFile = async (raw: unknown, name: unknown, mimeType: unknown): Promise<File> => {
+    const response = await fetch(runtimeUrl(raw), { cache: 'no-store', credentials: 'omit' });
+    if (!response.ok) throw new Error(`Cloud runtime resource fetch failed (${response.status})`);
+    return new File([await response.blob()], String(name ?? 'resource.bin').slice(0, 255), {
+      type: typeof mimeType === 'string' && mimeType ? mimeType : 'application/octet-stream',
+    });
+  };
+
+  agentBridge.onEvent((event) => {
+    events.push({ seq: ++eventSequence, event: structuredClone(event) });
+    if (events.length > 2_000) events.splice(0, events.length - 2_000);
+  });
+
+  const api = Object.freeze({
+    status(secret: unknown) {
+      requireSecret(secret);
+      return {
+        connection: agentBridge.getConnectionState(),
+        activeAgent: agentBridge.getActiveAgent(),
+        turnRunning: agentBridge.isTurnRunning(),
+        documentLoaded: wasm.hasLoadedDocument(),
+        latestEventSeq: eventSequence,
+      };
+    },
+    async loadDocument(secret: unknown, input: { url?: unknown; name?: unknown; mimeType?: unknown }) {
+      requireSecret(secret);
+      const file = await fetchRuntimeFile(input?.url, input?.name, input?.mimeType);
+      if (!/\.(?:hwp|hwpx|hml)$/i.test(file.name)) throw new Error('Cloud runtime document format is unsupported');
+      if (!(await loadFile(file, { skipUnsavedGuard: true, suppressDialogs: true }))) {
+        throw new Error('Cloud runtime could not load the document');
+      }
+      return {
+        fileName: wasm.fileName,
+        sourceFormat: wasm.getSourceFormat(),
+        pageCount: wasm.pageCount,
+        sectionCount: wasm.getSectionCount(),
+        digest: wasm.documentDigest,
+      };
+    },
+    async uploadReference(secret: unknown, input: {
+      url?: unknown;
+      name?: unknown;
+      mimeType?: unknown;
+      scopeId?: unknown;
+    }) {
+      requireSecret(secret);
+      const scopeId = String(input?.scopeId ?? '');
+      if (!scopeId || scopeId.length > 256) throw new Error('Cloud runtime reference scope is invalid');
+      const file = await fetchRuntimeFile(input?.url, input?.name, input?.mimeType);
+      return agentBridge.uploadReference('chat', scopeId, file);
+    },
+    startChat(secret: unknown, input: {
+      agent?: AgentName;
+      model?: unknown;
+      effort?: unknown;
+      workflow?: unknown;
+      permissionProfile?: unknown;
+      threadId?: unknown;
+      documentId?: unknown;
+      documentName?: unknown;
+      history?: ChatHistoryEntry[];
+    }) {
+      requireSecret(secret);
+      const agent = input?.agent;
+      if (agent !== 'claude' && agent !== 'codex' && agent !== 'pi'
+        && agent !== 'grok' && agent !== 'cursor') throw new Error('Cloud runtime provider is unsupported');
+      const threadId = String(input?.threadId ?? '');
+      if (!threadId || threadId.length > 256) throw new Error('Cloud runtime thread id is invalid');
+      const workflow = input?.workflow === 'plan' ? 'plan' : 'direct';
+      if (input?.permissionProfile !== 'unrestricted') {
+        throw new Error('Cloud runtime requires the unrestricted permission profile');
+      }
+      agentBridge.startChat(
+        agent,
+        String(input?.model ?? ''),
+        String(input?.effort ?? ''),
+        true,
+        'unrestricted',
+        workflow,
+        threadId,
+        typeof input?.documentId === 'string' && input.documentId ? input.documentId : null,
+        typeof input?.documentName === 'string' && input.documentName ? input.documentName : wasm.fileName,
+        Array.isArray(input?.history) ? input.history : [],
+      );
+      return { started: true };
+    },
+    async sendUserMessage(secret: unknown, text: unknown) {
+      requireSecret(secret);
+      const prompt = String(text ?? '').trim();
+      if (!prompt || prompt.length > 64 * 1024) throw new Error('Cloud runtime prompt is invalid');
+      return { messageId: await agentBridge.sendUserMessage(prompt) };
+    },
+    approvePlan(secret: unknown, planId: unknown) {
+      requireSecret(secret);
+      const id = String(planId ?? '');
+      if (!id || id.length > 256) throw new Error('Cloud runtime plan id is invalid');
+      agentBridge.approvePlan(id);
+      return { approved: true };
+    },
+    requestPlanChanges(secret: unknown, planId: unknown, feedback: unknown) {
+      requireSecret(secret);
+      const id = String(planId ?? '');
+      const text = String(feedback ?? '').trim();
+      if (!id || id.length > 256 || !text || text.length > 64 * 1024) {
+        throw new Error('Cloud runtime plan feedback is invalid');
+      }
+      agentBridge.requestPlanChanges(id, text);
+      return { requested: true };
+    },
+    setWorkflow(secret: unknown, workflow: unknown) {
+      requireSecret(secret);
+      if (workflow !== 'direct' && workflow !== 'plan') throw new Error('Cloud runtime workflow is invalid');
+      agentBridge.setWorkflow(workflow);
+      return { workflow };
+    },
+    interrupt(secret: unknown) {
+      requireSecret(secret);
+      agentBridge.interrupt();
+      return { interrupted: true };
+    },
+    drainEvents(secret: unknown, afterSequence: unknown) {
+      requireSecret(secret);
+      const after = Number.isSafeInteger(Number(afterSequence)) ? Number(afterSequence) : 0;
+      return events.filter((entry) => entry.seq > after).slice(0, 250);
+    },
+    async prepareExport(secret: unknown, format: unknown) {
+      requireSecret(secret);
+      if (format !== 'hwp' && format !== 'hwpx' && format !== 'hml') {
+        throw new Error('Cloud runtime export format is unsupported');
+      }
+      exportedFormat = format;
+      exportedBytes = exportDocumentForFormat(wasm, format);
+      return {
+        format,
+        size: exportedBytes.byteLength,
+        fileName: wasm.fileName,
+        sha256: await bytesToSha256(exportedBytes),
+      };
+    },
+    readExportChunk(secret: unknown, offset: unknown, length: unknown) {
+      requireSecret(secret);
+      if (!exportedBytes || !exportedFormat) throw new Error('Cloud runtime export is not prepared');
+      const start = Number(offset);
+      const size = Number(length);
+      if (!Number.isSafeInteger(start) || start < 0 || start > exportedBytes.byteLength
+        || !Number.isSafeInteger(size) || size < 1 || size > 1024 * 1024) {
+        throw new Error('Cloud runtime export chunk is invalid');
+      }
+      const chunk = exportedBytes.subarray(start, Math.min(exportedBytes.byteLength, start + size));
+      let binary = '';
+      for (let index = 0; index < chunk.length; index += 0x8000) {
+        binary += String.fromCharCode(...chunk.subarray(index, index + 0x8000));
+      }
+      return { offset: start, size: chunk.length, dataBase64: btoa(binary) };
+    },
+    stop(secret: unknown) {
+      requireSecret(secret);
+      agentBridge.stopChat();
+      exportedBytes = null;
+      exportedFormat = null;
+      return { stopped: true };
+    },
+  });
+  Object.defineProperty(window, 'rauhwpxCloudRuntime', {
+    value: api,
+    enumerable: false,
+    configurable: false,
+    writable: false,
+  });
+}
+
+function applyCloudResult(result: CloudDownloadResult, resolution: CloudResultResolution): Promise<void> {
+  if (resolution.action !== 'replace') {
+    if (resolution.action === 'keep-both') {
+      const copy = resolution.preservedCopyName ?? result.preservedCopyName ?? resolution.path ?? result.fileName;
+      const reason = resolution.conflict === 'external-change' ? '원본 변경을 감지해 ' : '';
+      showToast({ message: `${reason}두 파일을 모두 보관했습니다: 원본, ${copy}`, durationMs: 4500 });
+      return Promise.resolve();
+    }
+    showToast({ message: '클라우드 결과를 버렸습니다.', durationMs: 3000 });
+    return Promise.resolve();
+  }
+  const requestId = `cloud-result-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  const opened = new Promise<void>((resolve, reject) => {
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    const off = eventBus.on('open-document-bytes:done', (payload) => {
+      const outcome = payload as { requestId?: string; ok: boolean; error?: string };
+      if (outcome.requestId !== requestId) return;
+      off();
+      if (timeout) clearTimeout(timeout);
+      if (outcome.ok) resolve();
+      else reject(new Error(outcome.error || '클라우드 결과 열기가 취소되었습니다.'));
+    });
+    timeout = setTimeout(() => {
+      off();
+      reject(new Error('클라우드 결과 열기 시간이 초과되었습니다.'));
+    }, 90_000);
+  });
+  eventBus.emit('open-document-bytes', {
+    bytes: resolution.bytes ?? result.bytes,
+    fileName: result.fileName,
+    fileHandle: null,
+    requestId,
+    skipUnsavedGuard: true,
+  });
+  return opened.then(
+    () => {
+      showToast({ message: `${result.fileName}에 클라우드 결과를 반영했습니다.`, durationMs: 3500 });
+    },
+    (error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      showToast({ message: `클라우드 결과를 열지 못했습니다: ${message}`, durationMs: 4500 });
+    },
+  );
+}
+
+async function applyCloudTakeover(takeover: CloudTakeoverPayload): Promise<{
+  documentId: string;
+  fileName: string;
+} | null> {
+  if (!takeover.document) {
+    showToast({ message: '클라우드 작업을 중단하고 이 기기로 편집 권한을 가져왔습니다.', durationMs: 3500 });
+    return null;
+  }
+  const requestId = `cloud-takeover-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  const opened = new Promise<void>((resolve, reject) => {
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    const off = eventBus.on('open-document-bytes:done', (payload) => {
+      const result = payload as { requestId?: string; ok: boolean; error?: string };
+      if (result.requestId !== requestId) return;
+      off();
+      if (timeout) clearTimeout(timeout);
+      if (result.ok) resolve();
+      else reject(new Error(result.error || '클라우드 체크포인트 열기가 취소되었습니다.'));
+    });
+    timeout = setTimeout(() => {
+      off();
+      reject(new Error('클라우드 체크포인트 열기 시간이 초과되었습니다.'));
+    }, 90_000);
+  });
+  eventBus.emit('open-document-bytes', {
+    bytes: takeover.document.bytes,
+    fileName: takeover.document.fileName,
+    fileHandle: null,
+    requestId,
+    skipUnsavedGuard: true,
+  });
+  await opened;
+  if (!activeDocumentId) throw new Error('클라우드 체크포인트에 로컬 문서 ID를 할당하지 못했습니다.');
+  showToast({
+    message: `${takeover.document.fileName}의 최신 클라우드 체크포인트를 열었습니다.`,
+    durationMs: 4000,
+  });
+  return { documentId: activeDocumentId, fileName: takeover.document.fileName };
+}
+
+async function applyCloudCheckpoint(checkpoint: CloudCheckpointPayload): Promise<void> {
+  if (!activeDocumentId || wasm.pageCount === 0) return;
+  const currentDocumentId = activeDocumentId;
+  const currentHandle = wasm.currentFileHandle;
+  if (checkpoint.kind === 'turn' && checkpoint.originOnThisDevice && currentHandle) {
+    try {
+      const permission = await currentHandle.queryPermission?.({ mode: 'readwrite' });
+      if (permission === undefined || permission === 'granted') {
+        const currentBytes = new Uint8Array(await (await currentHandle.getFile()).arrayBuffer());
+        const currentDigest = await bytesToSha256(currentBytes);
+        const expectedDigest = browserOriginSyncDigest(checkpoint.sessionId)
+          ?? checkpoint.expectedOriginSha256
+          ?? null;
+        if (currentDigest === checkpoint.sha256) {
+          setBrowserOriginSyncDigest(checkpoint.sessionId, checkpoint.sha256);
+        } else if (expectedDigest && currentDigest === expectedDigest) {
+          const writable = await currentHandle.createWritable();
+          try {
+            const exactBytes = new Uint8Array(checkpoint.bytes.byteLength);
+            exactBytes.set(checkpoint.bytes);
+            await writable.write(new Blob([exactBytes.buffer]));
+            await writable.close();
+          } catch (error) {
+            await writable.abort?.(error).catch(() => undefined);
+            throw error;
+          }
+          const savedDigest = await bytesToSha256(new Uint8Array(await (await currentHandle.getFile()).arrayBuffer()));
+          if (savedDigest !== checkpoint.sha256) throw new Error('브라우저 원본 저장 검증에 실패했습니다.');
+          setBrowserOriginSyncDigest(checkpoint.sessionId, checkpoint.sha256);
+        } else {
+          showToast({
+            message: '원본이 다른 곳에서 변경되어 덮어쓰지 않았습니다. Cloud 버전은 로컬 보관함에 유지됩니다.',
+            durationMs: 5000,
+          });
+        }
+      } else {
+        showToast({
+          message: '브라우저 원본 쓰기 권한이 없어 Cloud 버전을 로컬 보관함에 저장했습니다.',
+          durationMs: 4500,
+        });
+      }
+    } catch (error) {
+      showToast({
+        message: `Cloud 원본 자동 저장에 실패했습니다: ${error instanceof Error ? error.message : String(error)}`,
+        durationMs: 5000,
+      });
+    }
+  }
+  inputHandler?.deactivate();
+  const info = wasm.loadDocument(checkpoint.bytes, checkpoint.fileName);
+  // A mirror refresh changes the in-memory cloud-owned bytes, not the local
+  // origin binding. The coordinator remains responsible for verified origin
+  // synchronization and conflict handling.
+  activeDocumentId = currentDocumentId;
+  wasm.currentFileHandle = currentHandle;
+  prepareCanvasRendererDocument();
+  await initializeDocument(
+    info,
+    `${checkpoint.fileName} — 클라우드 ${checkpoint.turn}턴 동기화`,
+    { suppressDialogs: true },
+  );
+  setCloudDocumentLease(true, checkpoint.sessionId);
+}
+
 /** 렌더러 초기화 후에 생성되는 에이전트 브리지 — 저장 가드가 대기 편집을 조회한다. */
 let agentBridgeRef: AgentBridge | null = null;
+let awaitPendingCloudTransferForClose: () => Promise<void> = () => Promise.resolve();
 let versionControllerRef: DocumentVersionController | null = null;
 let agentSidebarReady = false;
 
@@ -344,6 +754,11 @@ const commandServices: CommandServices = {
 };
 
 installDesktopCloseHandling(async () => {
+  try {
+    await awaitPendingCloudTransferForClose();
+  } catch {
+    return false;
+  }
   const allowClose = await canReplaceCurrentDocument();
   if (allowClose) documentState.permitNextUnload();
   return allowClose;
@@ -724,6 +1139,7 @@ async function initialize(): Promise<void> {
       });
       agentBridgeRef = agentBridge;
       agentBridge.onEditingLeaseChange(setAgentEditingLease);
+      installCloudDocumentRuntimeApi(agentBridge);
       const versionController = new DocumentVersionController({
         wasm,
         eventBus,
@@ -755,7 +1171,14 @@ async function initialize(): Promise<void> {
         moveToLibraryDocument: (target) => {
           void runLibraryMove(commandServices, target, () => activeDocumentId);
         },
+        prepareCloudTransfer: prepareCloudTransferDocument,
+        prepareCloudTakeover: () => confirmSaveBeforeReplacingDocument(commandServices),
+        setCloudDocumentLease,
+        applyCloudResult,
+        applyCloudCheckpoint,
+        applyCloudTakeover,
       });
+      awaitPendingCloudTransferForClose = agentSidebar.awaitPendingCloudTransferForClose;
       agentSidebarReady = true;
       initInlinePrompt({
         wasm,
@@ -1357,7 +1780,11 @@ async function promptLocalFontsIfNeeded(docInfo: DocumentInfo, displayName: stri
 
 async function loadFile(
   file: File,
-  options: { skipUnsavedGuard?: boolean; fileHandle?: FileSystemFileHandleLike | null } = {},
+  options: {
+    skipUnsavedGuard?: boolean;
+    fileHandle?: FileSystemFileHandleLike | null;
+    suppressDialogs?: boolean;
+  } = {},
 ): Promise<boolean> {
   try {
     if (!await canReplaceCurrentDocument(options.skipUnsavedGuard)) return false;
@@ -1365,7 +1792,10 @@ async function loadFile(
     await updateLoadProgress(0, '파일 읽는 중...');
     const data = new Uint8Array(await file.arrayBuffer());
     await updateLoadProgress(15, '파일 읽기 완료');
-    await loadBytes(data, file.name, options.fileHandle ?? null, startTime, { dataReadProgressShown: true });
+    await loadBytes(data, file.name, options.fileHandle ?? null, startTime, {
+      dataReadProgressShown: true,
+      suppressDialogs: options.suppressDialogs,
+    });
     return true;
   } catch (error) {
     await options.fileHandle?.releaseUnusedSaveTarget?.().catch(() => {});

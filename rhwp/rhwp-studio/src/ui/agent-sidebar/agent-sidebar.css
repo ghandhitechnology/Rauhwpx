@@ -413,7 +413,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
 }
 
 .ag-header-icon-btn {
@@ -432,6 +432,10 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 
 .ag-header-icon-btn[hidden] {
+  display: none;
+}
+
+.ag-environment-wrap[hidden] {
   display: none;
 }
 
@@ -5259,12 +5263,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 }
 
 .ag-workspace-agent-context {
-  overflow: hidden;
-  max-width: 190px;
-  color: var(--ag-text-muted);
-  font-size: 10px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: none;
 }
 
 .ag-workspace-exit-btn {

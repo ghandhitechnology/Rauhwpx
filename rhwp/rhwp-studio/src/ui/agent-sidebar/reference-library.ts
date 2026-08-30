@@ -80,6 +80,7 @@ export interface ReferenceLibraryUi {
   hasDrafts(): boolean;
   hasBlockingDrafts(): boolean;
   takeReadyDrafts(): StagedReference[];
+  takeReadyCloudDrafts(): Promise<Array<StagedReference & { bytes: Uint8Array }>>;
   discardDrafts(): void;
   stageDraftFiles(files: File[]): void;
   hasImageDrafts(): boolean;
@@ -641,6 +642,21 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     return batch.map((chip) => chip.staged!);
   }
 
+  async function takeReadyCloudDrafts(): Promise<Array<StagedReference & { bytes: Uint8Array }>> {
+    if (draftUploads.some((chip) => chip.uploadState !== 'ready' || !chip.staged)) return [];
+    const batch = [...draftUploads];
+    const bytes = await Promise.all(batch.map(async (chip) => new Uint8Array(await chip.file.arrayBuffer())));
+    draftUploads.splice(0, batch.length);
+    for (const chip of batch) {
+      releaseChip(chip);
+      if (chip.staged && chip.target) {
+        void bridge.discardStagedReference(chip.target.scopeId, chip.staged.id).catch(() => undefined);
+      }
+    }
+    options.onDraftStateChange?.();
+    return batch.map((chip, index) => ({ ...chip.staged!, bytes: bytes[index] }));
+  }
+
   async function openFile(fileId: string): Promise<void> {
     setOpen(true, 'chat');
     await refreshActiveScope();
@@ -770,6 +786,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     hasDrafts: () => draftUploads.length > 0,
     hasBlockingDrafts: () => draftUploads.some((chip) => chip.uploadState !== 'ready'),
     takeReadyDrafts,
+    takeReadyCloudDrafts,
     discardDrafts,
     stageDraftFiles: stageFiles,
     hasImageDrafts: () => draftUploads.some((chip) => isImageFile(chip.file)),

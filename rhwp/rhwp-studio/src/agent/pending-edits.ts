@@ -206,6 +206,62 @@ export class PendingEditManager {
   }
 
   /**
+   * Insert a real paragraph boundary after a body paragraph without splitting
+   * the source paragraph. This is distinct from inserting a leading newline:
+   * split-at-zero correctly moves inline controls to the following paragraph,
+   * while this operation must leave those controls anchored in place.
+   */
+  insertParagraphAfter(
+    agent: AgentName,
+    sectionIdx: number,
+    afterParaIdx: number,
+    text: string,
+  ): { changeSetId: string; insertedRange: DocRange } {
+    if (!text || /[\r\n]/.test(text)) {
+      throw new AgentToolError('INVALID_ARGS', 'text must be one non-empty line');
+    }
+    const anchorLen = this.containerParaLen(sectionIdx, afterParaIdx);
+    const insertedParaIdx = afterParaIdx + 1;
+    const wasm = this.deps.wasm;
+    this.parseOk(wasm.insertParagraph(sectionIdx, insertedParaIdx), 'insertParagraph');
+    try {
+      this.parseOk(wasm.insertText(sectionIdx, insertedParaIdx, 0, text), 'insertText');
+    } catch (error) {
+      try { this.parseOk(wasm.deleteParagraph(sectionIdx, insertedParaIdx), 'deleteParagraph'); } catch {}
+      throw error;
+    }
+
+    const insertedRange: DocRange = {
+      sectionIdx,
+      startParaIdx: afterParaIdx,
+      startCharOffset: anchorLen,
+      endParaIdx: insertedParaIdx,
+      endCharOffset: scalarLen(text),
+    };
+    const opText = `\n${text}`;
+    const set = this.ensureOpenSet(agent);
+    const op: PendingOp = {
+      kind: 'insert', id: this.nextId('op'), agent: set.agent,
+      range: insertedRange, text: opText,
+    };
+    this.pushOp(set, op);
+    this.shiftAllAfterInsert(sectionIdx, {
+      paraIdx: afterParaIdx,
+      charOffset: anchorLen,
+      addedParas: 1,
+      endParaIdx: insertedParaIdx,
+      endCharOffset: scalarLen(text),
+      textLen: scalarLen(opText),
+    }, op);
+    this.reconcilePreviewLayout();
+    this.emitDocEvents('agent-pending-edit');
+    this.syncOverlay();
+    this.deps.eventBus.emit('agent-text-inserted', { agent: op.agent, range: op.range, text: opText });
+    this.emitChange({ type: 'ops-changed' });
+    return { changeSetId: set.id, insertedRange: { ...insertedRange } };
+  }
+
+  /**
    * [legacy] 마크 전용 삭제 — 도구 경로는 더 이상 쓰지 않는다(delete_range 는
    * replaceText(range, '') 로 즉시 적용된다). 마크가 원문을 레이아웃에 남겨
    * 편집이 많은 턴에서 미리보기 쪽나눔이 최종본과 크게 어긋났기 때문이다.
