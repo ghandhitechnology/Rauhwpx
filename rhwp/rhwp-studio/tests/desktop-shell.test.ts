@@ -35,8 +35,8 @@ test('SessionManager gives each owned BrowserWindow an isolated UUID context', a
   });
   const first = fakeWindow(10);
   const second = fakeWindow(11);
-  const firstSession = manager.addWindow(first, { openFiles: ['/tmp/a.hwpx'], source: 'initial' });
-  manager.addWindow(second, { source: 'second-instance' });
+  const firstSession = manager.addWindow(first);
+  manager.addWindow(second);
 
   assert.equal(manager.sessionById('session-a'), firstSession);
   assert.deepEqual(await manager.contextForSender(first.webContents), {

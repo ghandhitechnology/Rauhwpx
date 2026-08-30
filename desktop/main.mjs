@@ -513,7 +513,7 @@ async function createWindow(launch = launchRequest(), { generatedDocument = null
       sandbox: true,
     },
   });
-  const session = sessions.addWindow(window, { source: launch.source, openFiles: [] });
+  const session = sessions.addWindow(window);
   session.generatedDocument = generatedDocument
     ? { launchDocumentId: randomUUID(), ...generatedDocument }
     : null;
