@@ -411,7 +411,10 @@ async function runPreparedCli(workspace, prompt, timeoutMs, deps) {
 
 async function disposeCliWorkspace(workspace) {
   if (!workspace?.tempRoot) return;
-  await fs.rm(workspace.tempRoot, { recursive: true, force: true }).catch(() => {});
+  workspace.disposePromise ??= fs
+    .rm(workspace.tempRoot, { recursive: true, force: true })
+    .catch(() => {});
+  await workspace.disposePromise;
 }
 
 async function runProvider(provider, model, prompt, timeoutMs, deps) {
@@ -498,21 +501,22 @@ async function runTimedProvider(provider, model, prompt, timeoutMs, overallDeadl
     return null;
   }
   if (!workspace) return null;
-  if (deps.signal?.aborted) {
+  try {
+    if (deps.signal?.aborted) return null;
+    const remaining = overallDeadline - Date.now();
+    if (remaining <= 0) return null;
+    const runTimeoutMs = Math.max(1, Math.min(timeoutMs, remaining));
+    return await boundedAttempt(
+      (signal) => runPreparedCli(workspace, prompt, runTimeoutMs, { ...deps, signal }),
+      runTimeoutMs,
+      deps.signal,
+    );
+  } finally {
+    // Short provider timeouts leave only a few milliseconds of cleanup grace.
+    // Await the same in-flight rm so generateCheckpointTitle cannot return
+    // while the CLI temp workspace still exists.
     await disposeCliWorkspace(workspace);
-    return null;
   }
-  const remaining = overallDeadline - Date.now();
-  if (remaining <= 0) {
-    await disposeCliWorkspace(workspace);
-    return null;
-  }
-  const runTimeoutMs = Math.max(1, Math.min(timeoutMs, remaining));
-  return boundedAttempt(
-    (signal) => runPreparedCli(workspace, prompt, runTimeoutMs, { ...deps, signal }),
-    runTimeoutMs,
-    deps.signal,
-  );
 }
 
 /** Generate opportunistically. Every unavailable, invalid, failed, or timed-out route falls through. */
