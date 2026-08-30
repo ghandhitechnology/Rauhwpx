@@ -12,6 +12,40 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const AGENT_DIR = join(HERE, '..');
 const REPO_ROOT = join(AGENT_DIR, '..', '..');
 const SCRIPT = join(AGENT_DIR, 'server.mjs');
+const WINDOWS_LOCK_CODES = new Set(['EPERM', 'EBUSY', 'ENOTEMPTY', 'EACCES']);
+const CLEANUP_RETRY_DELAYS_MS = [80, 160, 320, 640, 1_000, 1_500];
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Temp-dir cleanup can race Defender / process teardown on win32.
+ * Retry lock errors and keep the original code so CI does not see the
+ * Korean installer HARNESS_FILES_LOCKED message from retryLockedOperation.
+ */
+async function retryWindowsCleanup(operation, {
+  platform = process.platform,
+  delays = CLEANUP_RETRY_DELAYS_MS,
+} = {}) {
+  let lastError;
+  for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (platform !== 'win32' || !WINDOWS_LOCK_CODES.has(error?.code) || attempt === delays.length) {
+        throw error;
+      }
+      await delay(delays[attempt]);
+    }
+  }
+  throw lastError;
+}
+
+function removeRunDir(runDir) {
+  return retryWindowsCleanup(() => rm(runDir, { recursive: true, force: true }));
+}
 
 test('parseCtlArgs defaults to start and accepts --json', () => {
   assert.deepEqual(parseCtlArgs([]), { command: 'start', json: false });
@@ -52,7 +86,10 @@ test('ctl replaces an authenticated detached hub from an older protocol', { time
     if (req.url === '/healthz') {
       res.end(JSON.stringify({
         ok: true,
-        pid: process.pid,
+        // A dead pid: stopHubByPort waits for this process to exit after
+        // /healthz drops. Using the test-runner pid would stall the full
+        // stop timeout.
+        pid: 2_147_483_647,
         launchId: 'legacy-hub',
         protocol: EXPECTED_HUB_PROTOCOL - 1,
       }));
@@ -94,7 +131,7 @@ test('ctl replaces an authenticated detached hub from an older protocol', { time
   } finally {
     await stopHubByPort(port, { pidPath: join(runDir, 'rhwp-agent.pid') });
     await new Promise((resolve) => legacy.close(resolve)).catch(() => {});
-    await rm(runDir, { recursive: true, force: true });
+    await removeRunDir(runDir);
   }
 });
 
@@ -134,8 +171,25 @@ test('ctl start/stop roundtrip without holding the terminal', { timeout: 30_000 
     assert.equal(await isHubHealthy(port), false);
   } finally {
     await stopHubByPort(port, { pidPath: join(runDir, 'rhwp-agent.pid') });
-    await rm(runDir, { recursive: true, force: true });
+    await removeRunDir(runDir);
   }
+});
+
+test('Windows temp cleanup retries lock errors without remapping the code', async () => {
+  let attempts = 0;
+  await retryWindowsCleanup(async () => {
+    attempts += 1;
+    if (attempts < 3) throw Object.assign(new Error('busy'), { code: 'EPERM' });
+  }, { platform: 'win32', delays: [0, 0] });
+  assert.equal(attempts, 3);
+
+  await assert.rejects(
+    () => retryWindowsCleanup(
+      async () => { throw Object.assign(new Error('busy'), { code: 'EBUSY' }); },
+      { platform: 'win32', delays: [0] },
+    ),
+    (error) => error.code === 'EBUSY' && error.message === 'busy',
+  );
 });
 
 function freePort() {

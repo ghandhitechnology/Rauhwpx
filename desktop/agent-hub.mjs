@@ -666,6 +666,7 @@ export async function stopHubByPort(port, {
   token = process.env.RHWP_AGENT_TOKEN ?? process.env.RHWP_AGENT_DEV_TOKEN ?? 'dev',
   wait = sleep,
   now = Date.now,
+  processAlive = isProcessAlive,
 } = {}) {
   const body = await readHubHealth(port, { fetchImpl, token });
   const pid = hubPidFromHealth(body);
@@ -690,13 +691,19 @@ export async function stopHubByPort(port, {
 
   const deadline = now() + timeoutMs;
   let ready = true;
+  let processExited = false;
   while (now() < deadline) {
     ready = await isHubHealthy(port, { fetchImpl, token, expectedPid: pid, expectedLaunchId: body.launchId });
-    if (!ready) break;
+    // /shutdown closes the HTTP server before the hub finishes deleting
+    // owned work/runtime dirs and process.exit. Returning on health-down
+    // alone races Windows callers that immediately rm the runDir.
+    processExited = !ready && !processAlive(pid);
+    if (processExited) break;
     await wait(50);
   }
-  if (pidPath) removePidFile(pidPath);
-  return { stopped: !ready, ready, pid };
+  const stopped = !ready && processExited;
+  if (stopped && pidPath) removePidFile(pidPath);
+  return { stopped, ready, pid };
 }
 
 export async function startDetachedHub({

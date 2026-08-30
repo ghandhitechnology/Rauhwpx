@@ -22,6 +22,7 @@ import {
   removePidFile,
   requestHubShutdown,
   resolveHubLaunch,
+  stopHubByPort,
   stopHubChild,
   waitForHub,
   waitForHubChildExit,
@@ -385,6 +386,64 @@ test('isProcessAlive reports this process and rejects nonsense', () => {
   assert.equal(isProcessAlive(process.pid), true);
   assert.equal(isProcessAlive(0), false);
   assert.equal(isProcessAlive(-1), false);
+});
+
+test('stopHubByPort waits for the process to exit after health drops', async () => {
+  let healthReads = 0;
+  let aliveChecks = 0;
+  let clock = 0;
+  const fetchImpl = async (_url: string, init?: { method?: string }) => {
+    if (init?.method === 'POST') return jsonResponse({ status: 'shutting-down' });
+    healthReads += 1;
+    if (healthReads === 1) {
+      return jsonResponse({ ok: true, pid: 4242, launchId: 'launch-a' });
+    }
+    return { ok: false, json: async () => null };
+  };
+
+  const stopped = await stopHubByPort(5175, {
+    fetchImpl,
+    timeoutMs: 500,
+    wait: async (ms) => { clock += ms; },
+    now: () => clock,
+    processAlive: () => {
+      aliveChecks += 1;
+      return aliveChecks < 3;
+    },
+  });
+
+  assert.equal(stopped.stopped, true);
+  assert.equal(stopped.pid, 4242);
+  assert.equal(aliveChecks, 3);
+  assert.ok(clock >= 100);
+});
+
+test('stopHubByPort reports a timeout and retains the pid file while the process is alive', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rhwp-stop-timeout-'));
+  const pidPath = join(dir, 'rhwp-agent.pid');
+  let healthReads = 0;
+  let clock = 0;
+  writePidFile(pidPath, 4242);
+  try {
+    const result = await stopHubByPort(5175, {
+      pidPath,
+      fetchImpl: async (_url: string, init?: { method?: string }) => {
+        if (init?.method === 'POST') return jsonResponse({ status: 'shutting-down' });
+        healthReads += 1;
+        if (healthReads === 1) return jsonResponse({ ok: true, pid: 4242, launchId: 'launch-a' });
+        return { ok: false, json: async () => null };
+      },
+      timeoutMs: 100,
+      wait: async (ms) => { clock += ms; },
+      now: () => clock,
+      processAlive: () => true,
+    });
+
+    assert.deepEqual(result, { stopped: false, ready: false, pid: 4242 });
+    assert.equal(readPidFile(pidPath), 4242);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('master lifecycle helpers bind method, launch, and session identity', async () => {
