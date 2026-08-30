@@ -315,7 +315,7 @@ test('startup removes only orphaned UUID launch directories', async () => {
     },
   });
   assert.deepEqual(result, [stale]);
-  assert.deepEqual(removed, [`/launch-work/${stale}`]);
+  assert.deepEqual(removed, [path.join('/launch-work', stale)]);
   assert.match(desktopMain, /removeStaleLaunchDirectories\(runtimeRoot, launchId\)/);
   assert.match(desktopMain, /removeStaleLaunchDirectories\(workRoot, launchId\)/);
 });
