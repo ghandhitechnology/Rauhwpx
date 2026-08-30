@@ -6,8 +6,8 @@ import { AGENT_PROTOCOL_VERSION, isStructuredPlan } from '../src/agent/types.ts'
 
 const bridgeSource = readFileSync(new URL('../src/agent/bridge.ts', import.meta.url), 'utf8');
 
-test('planning protocol uses v3 and validates the complete structured plan', () => {
-  assert.equal(AGENT_PROTOCOL_VERSION, 3);
+test('planning and user-input protocol uses v4 and validates the complete structured plan', () => {
+  assert.equal(AGENT_PROTOCOL_VERSION, 4);
   const plan = {
     planId: 'plan-1',
     title: '정리 계획',
@@ -58,8 +58,43 @@ test('bridge reconnect keeps explicit workflow and re-synchronizes server author
   assert.match(bridgeSource, /this\.workflow === 'direct' \|\| this\.phase === 'implementing'/);
 });
 
+test('a failed replacement cannot dispatch into the disposed previous session', () => {
+  assert.match(
+    bridgeSource,
+    /case 'chat-error': \{[\s\S]*const chatStartFailed = this\.pendingChatStart !== null;[\s\S]*if \(chatStartFailed\) \{[\s\S]*this\.activeAgent = null;[\s\S]*this\.turnRunning = false;/,
+  );
+  assert.match(
+    bridgeSource,
+    /if \(this\.pendingTurnOpen\) \{[\s\S]*this\.endPendingTurn\(\);[\s\S]*this\.activeAgent = null;/,
+  );
+  assert.match(
+    bridgeSource,
+    /this\.rememberPendingChatStart\(\);[\s\S]*const pending = this\.pendingChatStart;[\s\S]*agent: pending\.agent,[\s\S]*workflow: pending\.workflow/,
+  );
+});
+
+test('connected first message records pendingChatStart so reconnect can retry the start', () => {
+  const sendUserOffset = bridgeSource.indexOf('\n  sendUserMessage(');
+  const sendUserSource = bridgeSource.slice(
+    sendUserOffset,
+    bridgeSource.indexOf('\n  private dispatchUserMessage(', sendUserOffset),
+  );
+  assert.match(sendUserSource, /this\.rememberPendingChatStart\(\);/);
+  assert.match(sendUserSource, /this\.pendingChatStart = \{/);
+  assert.match(sendUserSource, /if \(pending && this\.state === 'connected' && !this\.workflowSwitchPending\) \{[\s\S]*type: 'chat-start'/);
+  assert.doesNotMatch(sendUserSource, /\} else \{\s*this\.pendingChatStart = \{/);
+});
+
 test('new chat defaults direct while an explicit plan start is carried on the wire', () => {
   assert.match(bridgeSource, /workflow: AgentWorkflow = 'direct'/);
   assert.match(bridgeSource, /type: 'chat-start' as const,[\s\S]*?workflow,/);
+  const startChatOffset = bridgeSource.indexOf('\n  startChat(\n');
+  const startChatSource = bridgeSource.slice(
+    startChatOffset,
+    bridgeSource.indexOf('  stopChat(): void', startChatOffset),
+  );
+  assert.doesNotMatch(startChatSource, /this\.resetWorkflowState\(workflow\)/);
+  assert.doesNotMatch(startChatSource, /this\.permissionProfile = permissionProfile/);
+  assert.match(startChatSource, /permissionProfile,\s*\n\s*serviceTier: this\.serviceTier,\s*\n\s*workflow,/);
   assert.match(bridgeSource, /this\.resetWorkflowState\(\);[\s\S]*?type: 'chat-stop'/);
 });

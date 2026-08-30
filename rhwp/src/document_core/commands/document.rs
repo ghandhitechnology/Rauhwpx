@@ -17,6 +17,7 @@ use crate::renderer::layout::LayoutEngine;
 use crate::renderer::page_layout::PageLayoutInfo;
 use crate::renderer::style_resolver::{resolve_styles, ResolvedStyleSet};
 use crate::renderer::{px_to_hwpunit, DEFAULT_DPI};
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
@@ -74,6 +75,23 @@ fn hwp_structure_counts(document: &Document) -> (HwpStructureCounts, Vec<String>
         }
     }
     (counts, losses)
+}
+
+fn document_for_hwp_export(
+    document: &Document,
+    source_format: crate::parser::FileFormat,
+) -> Cow<'_, Document> {
+    if !matches!(
+        source_format,
+        crate::parser::FileFormat::Hwpx | crate::parser::FileFormat::Hwp3
+    ) {
+        return Cow::Borrowed(document);
+    }
+
+    use crate::document_core::converters::hwpx_to_hwp::convert_if_hwpx_source;
+    let mut export_document = document.clone();
+    let _report = convert_if_hwpx_source(&mut export_document, source_format);
+    Cow::Owned(export_document)
 }
 
 fn export_is_recovered(
@@ -1626,13 +1644,11 @@ impl DocumentCore {
     /// HWP 출처는 어댑터가 no-op 이므로 `export_hwp_native` 와 동일 결과.
     /// 사용자 시나리오: HWPX 로 연 문서를 편집 후 HWP 로 저장하는 모든 경로의 단일 진입점.
     ///
-    /// 어댑터는 저장용 clone에만 적용한다. 라이브 IR을 변경하면 첫 저장 후
+    /// 어댑터는 HWPX/HWP3 저장용 clone에만 적용한다. 라이브 IR을 변경하면 첫 저장 후
     /// 렌더/편집 시멘틱이 HWPX에서 HWP5로 바뀌고, 다음 저장이 다른 결과를 내는
     /// 파괴적 부작용이 생긴다.
     pub fn export_hwp_with_adapter(&self) -> Result<Vec<u8>, HwpError> {
-        use crate::document_core::converters::hwpx_to_hwp::convert_if_hwpx_source;
-        let mut export_document = self.document.clone();
-        let _report = convert_if_hwpx_source(&mut export_document, self.source_format);
+        let export_document = document_for_hwp_export(&self.document, self.source_format);
         serialize_validated_hwp(&export_document)
     }
 
@@ -1657,9 +1673,7 @@ impl DocumentCore {
     /// 큰 문서 수백 ms 가능.
     pub fn serialize_hwp_with_verify(&mut self) -> Result<HwpExportVerification, HwpError> {
         let page_count_before = self.page_count();
-        use crate::document_core::converters::hwpx_to_hwp::convert_if_hwpx_source;
-        let mut export_document = self.document.clone();
-        let _report = convert_if_hwpx_source(&mut export_document, self.source_format);
+        let export_document = document_for_hwp_export(&self.document, self.source_format);
         let (structure_before, mut serialization_losses) = hwp_structure_counts(&export_document);
         let bytes = serialize_validated_hwp(&export_document)?;
         let bytes_len = bytes.len();

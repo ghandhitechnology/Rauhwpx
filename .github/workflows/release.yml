@@ -61,15 +61,8 @@ jobs:
       - name: Install wasm-pack
         run: cargo install wasm-pack --version 0.15.0 --locked
 
-      - name: Build WASM engine
-        working-directory: rhwp
-        run: wasm-pack build --target web
-
-      - name: Install studio and desktop dependencies
-        run: |
-          npm ci
-          npm --prefix rhwp/rhwp-studio ci
-          npm --prefix rhwp/rhwp-agent ci --omit=dev
+      - name: Install desktop dependencies
+        run: npm ci
 
       - name: Download bundled VPS runtimes
         uses: actions/download-artifact@v4
@@ -104,6 +97,9 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
         run: npm run dist:mac
+
+      - name: Verify packaged runtime files
+        run: npm run verify:package
 
       - name: Verify Developer ID signature and notarization
         env:
@@ -165,17 +161,9 @@ jobs:
       - name: Install wasm-pack
         run: cargo install wasm-pack --version 0.15.0 --locked
 
-      - name: Build WASM engine
-        working-directory: rhwp
+      - name: Install desktop dependencies
         shell: bash
-        run: wasm-pack build --target web
-
-      - name: Install studio and desktop dependencies
-        shell: bash
-        run: |
-          npm ci
-          npm --prefix rhwp/rhwp-studio ci
-          npm --prefix rhwp/rhwp-agent ci --omit=dev
+        run: npm ci
 
       - name: Download bundled VPS runtimes
         uses: actions/download-artifact@v4
@@ -187,6 +175,10 @@ jobs:
       - name: Build Windows installer
         shell: bash
         run: npm run dist:win
+
+      - name: Verify packaged runtime files
+        shell: bash
+        run: npm run verify:package
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4

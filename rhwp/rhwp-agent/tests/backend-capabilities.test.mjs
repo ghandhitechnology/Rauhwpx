@@ -14,15 +14,22 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { createClaudeSession, buildClaudeArgv, prepareClaudeHome } from '../agents/claude.mjs';
+import {
+  buildClaudeArgv,
+  buildClaudeSdkOptions,
+  createClaudeSession,
+  prepareClaudeHome,
+} from '../agents/claude.mjs';
 import { createCodexSession, buildCodexArgv, prepareCodexHome } from '../agents/codex.mjs';
 import {
   mcpCapabilityEnv,
   mcpRuntimeFor,
   parallelWorkBriefFor,
+  providerInteractionMode,
   providerToolNoteFor,
   RHWP_SUBAGENTS,
   systemBriefFor,
+  validateExecutionMode,
 } from '../agents/backend.mjs';
 
 const testHome = mkdtempSync(path.join(os.tmpdir(), 'rhwp-backend-test-'));
@@ -150,13 +157,49 @@ test('image roots cannot smuggle extra allowlisted paths through the platform de
   );
 });
 
+test('execution mode validation rejects impossible direct workflow phases', () => {
+  for (const phase of ['planning', 'awaiting-approval', 'switching']) {
+    assert.throws(
+      () => validateExecutionMode({ workflow: 'direct', phase, capabilityEpoch: 1 }),
+      new RegExp(`Invalid execution mode: direct/${phase}`),
+    );
+  }
+  assert.doesNotThrow(() => validateExecutionMode({
+    workflow: 'direct', phase: 'implementing', capabilityEpoch: 1,
+  }));
+  assert.doesNotThrow(() => validateExecutionMode({
+    workflow: 'question', phase: 'questioning', capabilityEpoch: 1,
+  }));
+  assert.throws(
+    () => validateExecutionMode({ workflow: 'question', phase: 'planning', capabilityEpoch: 1 }),
+    /Invalid execution mode: question\/planning/,
+  );
+});
+
+test('provider interaction modes fail closed on explicit invalid state', () => {
+  assert.equal(providerInteractionMode({}), 'default');
+  assert.equal(providerInteractionMode({ workflow: 'question', phase: 'questioning' }), 'plan');
+  assert.throws(
+    () => providerInteractionMode({ workflow: 'unknown', phase: 'planning' }),
+    /Unknown workflow: unknown/,
+  );
+  assert.throws(
+    () => providerInteractionMode({ workflow: 'plan', phase: 'unknown' }),
+    /Unknown execution phase: unknown/,
+  );
+  assert.throws(
+    () => providerInteractionMode({ workflow: 'direct', phase: 'planning' }),
+    /Invalid execution mode: direct\/planning/,
+  );
+});
+
 const matrix = [
-  { name: 'direct safe', workflow: 'direct', phase: 'implementing', permissionProfile: 'safe', claudeWrite: true, claudeBypass: false, codexSandbox: 'workspace-write', planCapabilities: false },
-  { name: 'direct full', workflow: 'direct', phase: 'implementing', permissionProfile: 'unrestricted', claudeWrite: true, claudeBypass: true, codexSandbox: 'danger-full-access', planCapabilities: false },
-  { name: 'planning safe', workflow: 'plan', phase: 'planning', permissionProfile: 'safe', claudeWrite: false, claudeBypass: false, codexSandbox: 'read-only', planCapabilities: true },
-  { name: 'planning full', workflow: 'plan', phase: 'planning', permissionProfile: 'unrestricted', claudeWrite: false, claudeBypass: false, codexSandbox: 'read-only', planCapabilities: true },
-  { name: 'implementing safe', workflow: 'plan', phase: 'implementing', permissionProfile: 'safe', claudeWrite: true, claudeBypass: false, codexSandbox: 'workspace-write', planCapabilities: true },
-  { name: 'implementing full', workflow: 'plan', phase: 'implementing', permissionProfile: 'unrestricted', claudeWrite: true, claudeBypass: true, codexSandbox: 'danger-full-access', planCapabilities: true },
+  { name: 'direct safe', workflow: 'direct', phase: 'implementing', permissionProfile: 'safe', interactionMode: 'default', claudeMode: 'dontAsk', claudeWrite: true, claudeBypass: false, codexSandbox: 'workspace-write', planCapabilities: false },
+  { name: 'direct full', workflow: 'direct', phase: 'implementing', permissionProfile: 'unrestricted', interactionMode: 'default', claudeMode: 'bypassPermissions', claudeWrite: true, claudeBypass: true, codexSandbox: 'danger-full-access', planCapabilities: false },
+  { name: 'planning safe', workflow: 'plan', phase: 'planning', permissionProfile: 'safe', interactionMode: 'plan', claudeMode: 'plan', claudeWrite: false, claudeBypass: false, codexSandbox: 'read-only', planCapabilities: true },
+  { name: 'planning full', workflow: 'plan', phase: 'planning', permissionProfile: 'unrestricted', interactionMode: 'plan', claudeMode: 'plan', claudeWrite: false, claudeBypass: false, codexSandbox: 'read-only', planCapabilities: true },
+  { name: 'implementing safe', workflow: 'plan', phase: 'implementing', permissionProfile: 'safe', interactionMode: 'build', claudeMode: 'dontAsk', claudeWrite: true, claudeBypass: false, codexSandbox: 'workspace-write', planCapabilities: true },
+  { name: 'implementing full', workflow: 'plan', phase: 'implementing', permissionProfile: 'unrestricted', interactionMode: 'build', claudeMode: 'bypassPermissions', claudeWrite: true, claudeBypass: true, codexSandbox: 'danger-full-access', planCapabilities: true },
 ];
 
 for (const entry of matrix) {
@@ -167,6 +210,8 @@ for (const entry of matrix) {
     const claudeSettings = JSON.parse(argValue(claude, '--settings'));
     const claudeMcp = JSON.parse(argValue(claude, '--mcp-config')).mcpServers.rhwp;
 
+    assert.equal(providerInteractionMode(opts), entry.interactionMode);
+    assert.equal(argValue(claude, '--permission-mode'), entry.claudeMode);
     assert.equal(claudeTools.includes('Write'), entry.claudeWrite);
     assert.equal(claudeTools.includes('Edit'), entry.claudeWrite);
     assert.ok(claudeTools.includes('Read'));
@@ -227,9 +272,55 @@ test('awaiting approval and switching remain read-only regardless of full profil
     const opts = { ...baseOpts, workflow: 'plan', phase, capabilityEpoch: 9, permissionProfile: 'unrestricted' };
     const claude = buildClaudeArgv(opts, sessionId, false);
     assert.equal(argValue(claude, '--tools').split(',').includes('Write'), false);
-    assert.ok(claude.includes('dontAsk'));
+    assert.equal(argValue(claude, '--permission-mode'), 'plan');
+    assert.equal(providerInteractionMode(opts), 'plan');
     assert.ok(buildCodexArgv(opts, null).includes('sandbox_mode="read-only"'));
   }
+});
+
+test('question workflow uses native Plan capabilities without write tools', () => {
+  const opts = {
+    ...baseOpts,
+    workflow: 'question',
+    phase: 'questioning',
+    capabilityEpoch: 3,
+    permissionProfile: 'unrestricted',
+  };
+  assert.equal(providerInteractionMode(opts), 'plan');
+  const claude = buildClaudeArgv(opts, sessionId, false);
+  assert.equal(argValue(claude, '--permission-mode'), 'plan');
+  assert.equal(argValue(claude, '--tools').split(',').includes('Write'), false);
+  assert.equal(argValue(claude, '--tools').split(',').includes('Edit'), false);
+  const codex = buildCodexArgv(opts, null);
+  assert.ok(codex.includes('sandbox_mode="read-only"'));
+  assert.ok(codex.includes('web_search="live"'));
+});
+
+test('Claude SDK projects plan and build intent independently from access', () => {
+  const requestUserInput = async () => ({ status: 'cancelled', reason: 'user-stop' });
+  const plan = buildClaudeSdkOptions({
+    ...baseOpts,
+    workflow: 'plan',
+    phase: 'awaiting-approval',
+    permissionProfile: 'unrestricted',
+    requestUserInput,
+    agentRole: 'chat',
+  }, sessionId, false, new AbortController());
+  assert.equal(plan.permissionMode, 'plan');
+  assert.equal(plan.allowDangerouslySkipPermissions, undefined);
+  assert.equal(plan.tools.includes('Write'), false);
+
+  const build = buildClaudeSdkOptions({
+    ...baseOpts,
+    workflow: 'plan',
+    phase: 'implementing',
+    permissionProfile: 'unrestricted',
+    requestUserInput,
+    agentRole: 'chat',
+  }, sessionId, false, new AbortController());
+  assert.equal(build.permissionMode, 'bypassPermissions');
+  assert.equal(build.allowDangerouslySkipPermissions, true);
+  assert.equal(build.tools.includes('Write'), true);
 });
 
 test('phase prompts separate planning from approved implementation', () => {
@@ -243,6 +334,7 @@ test('phase prompts separate planning from approved implementation', () => {
   assert.match(planning, /The user can keep editing the live document during planning/);
   assert.match(planning, /live-document notification/);
   assert.match(planning, /not a request to implement or draft a plan/);
+  assert.match(planning, /native question interaction or ask_user_question/);
   assert.match(planning, /only when the user explicitly asks you to write, draft, or present a plan/);
   assert.match(planning, /Do not tell the user the plan is ready until that tool returns success/);
   assert.match(planning, /read-only workspace, web, subagent, and rhwp MCP capabilities available/);
@@ -256,6 +348,7 @@ test('phase prompts separate planning from approved implementation', () => {
   assert.match(question, /Do not plan an implementation/);
   assert.match(question, /do not call present_implementation_plan/);
   assert.match(question, /The user can keep editing the live document/);
+  assert.match(question, /native question interaction or ask_user_question/);
   assert.doesNotMatch(question, /present-plan product skill/);
   assert.match(planning, /search_reference_files/);
   assert.match(planning, /untrusted reference data/);

@@ -1,6 +1,6 @@
 // pi 확장이 읽어 갈 도구 정의를 만든다 — zod 스키마를 그대로 JSON Schema 로 바꾼다.
 // pi 는 MCP 서버가 아니라 확장으로 도구를 등록하므로, 스키마를 HTTP 로 넘겨준다.
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 
 import { filterToolDefinitions } from '../tools.mjs';
@@ -19,7 +19,7 @@ import { filterToolDefinitions } from '../tools.mjs';
  *   pi 는 스키마를 프로바이더에 그대로 넘기므로 $ref/definitions 가 남으면 못 쓴다.
  * - `$schema` 키는 떼어낸다 — OpenAI 호환 엔드포인트가 싫어한다.
  *
- * @param {Record<string, import('zod').ZodTypeAny>} shape
+ * @param {Record<string, import('zod/v3').ZodTypeAny>} shape
  */
 export function shapeToJsonSchema(shape) {
   const schema = zodToJsonSchema(z.object(shape ?? {}), {

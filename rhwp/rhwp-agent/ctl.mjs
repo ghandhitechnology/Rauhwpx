@@ -23,7 +23,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_AGENT_DIR = HERE;
 const DEFAULT_REPO_ROOT = resolve(HERE, '..', '..');
 const DEFAULT_SCRIPT = resolve(HERE, 'server.mjs');
-export const EXPECTED_HUB_PROTOCOL = 3;
+export const EXPECTED_HUB_PROTOCOL = 4;
 
 export const CTL_COMMANDS = ['start', 'stop', 'restart', 'status'];
 

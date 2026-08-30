@@ -21,14 +21,15 @@ export class SessionManager {
 
   addWindow(window, launch = {}) {
     const sessionId = this.#createId();
-    const senderId = window?.webContents?.id;
+    const sender = window?.webContents;
+    const senderId = sender?.id;
     if (!Number.isInteger(senderId)) throw new Error('Session window requires an owned webContents');
     if (this.#senderSessions.has(senderId)) throw new Error(`webContents ${senderId} already owns a session`);
 
     const session = {
       sessionId,
       window,
-      sender: window.webContents,
+      sender,
       senderId,
       launch: {
         openFiles: [...(launch.openFiles ?? [])],
@@ -36,24 +37,22 @@ export class SessionManager {
       },
     };
     this.#sessions.set(sessionId, session);
-    this.#senderSessions.set(senderId, sessionId);
-    this.#windowSessions.set(window, sessionId);
+    this.#senderSessions.set(senderId, session);
+    this.#windowSessions.set(window, session);
     return session;
   }
 
   removeWindow(window) {
-    const sessionId = window && this.#windowSessions.get(window);
-    const session = sessionId ? this.#sessions.get(sessionId) : null;
+    const session = window && this.#windowSessions.get(window);
     if (!session || session.window !== window) return false;
     this.#windowSessions.delete(window);
     this.#senderSessions.delete(session.senderId);
-    this.#sessions.delete(sessionId);
+    this.#sessions.delete(session.sessionId);
     return true;
   }
 
   sessionForSender(sender) {
-    const sessionId = this.#senderSessions.get(sender?.id);
-    const session = sessionId ? this.#sessions.get(sessionId) : null;
+    const session = this.#senderSessions.get(sender?.id);
     if (!session || session.sender !== sender || session.window.isDestroyed?.() || sender.isDestroyed?.()) {
       throw new Error('IPC sender does not own a desktop session');
     }
@@ -69,10 +68,6 @@ export class SessionManager {
       hubUrl: hub.hubUrl,
       hubToken: this.#getSessionToken(session.sessionId, hub.hubToken),
     });
-  }
-
-  windowForSender(sender) {
-    return this.sessionForSender(sender).window;
   }
 
   sessionById(sessionId) {

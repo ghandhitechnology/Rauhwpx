@@ -88,6 +88,9 @@ import type {
   TemplateCatalog,
   AgentStreamEvent,
   SidebarEvent,
+  UserQuestionAnswer,
+  UserQuestionInteraction,
+  UserQuestionOutcome,
 } from './types.ts';
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
@@ -107,6 +110,7 @@ export interface AgentBridge {
   getConnectionState(): 'connecting' | 'connected' | 'disconnected' | 'replaced';
   getActiveAgent(): AgentName | null;
   isTurnRunning(): boolean;
+  getPendingUserQuestion(): UserQuestionInteraction | null;
   getEditingLease(): AgentEditingLease;
   onEditingLeaseChange(cb: (lease: AgentEditingLease) => void): () => void;
   getPermissionProfile(): PermissionProfile;
@@ -174,8 +178,8 @@ export interface AgentBridge {
   searchReferences(query: string, scope: ReferenceScope, scopeId: string, limit?: number): Promise<ReferenceSearchHit[]>;
   deleteReference(file: Pick<ReferenceFile, 'id' | 'scope' | 'scopeId'>): Promise<void>;
   setWorkflow(workflow: AgentWorkflow): void;
-  approvePlan(planId: string): void;
-  requestPlanChanges(planId: string, feedback?: string): void;
+  approvePlan(planId: string): boolean;
+  requestPlanChanges(planId: string, feedback?: string): boolean;
   setPermissionProfile(profile: PermissionProfile): void;
   setServiceTier(tier: ServiceTier): void;
   listSkills(): void;
@@ -199,6 +203,8 @@ export interface AgentBridge {
     append: boolean;
   }): string;
   setWritingStyleInstruction(instruction: string): string;
+  /** 현재 막힌 프로바이더 요청에 답한다. 재연결 재시도에도 같은 응답 ID를 쓴다. */
+  answerUserQuestion(interactionId: string, answers: Record<string, UserQuestionAnswer>): string;
   interrupt(): void;
   onEvent(cb: (e: SidebarEvent) => void): () => void;
   dispose(): void;
@@ -215,6 +221,9 @@ const CONNECT_TIMEOUT_MS = 4000;
 
 /** 요청/응답 대기 상한 — 넘기면 null 로 안착한다(던지지 않는다). */
 const REQUEST_TIMEOUT_MS = 10_000;
+
+/** 페이지 새로고침 뒤에도 같은 허브 세션의 질문 취소를 이어 가는 탭별 저장 키. */
+const QUESTION_CANCELLATION_STORAGE_PREFIX = 'rhwp-agent-question-cancellation:';
 
 /** 재연결 사이에 붙잡아 둘 tool-response 개수와 보관 기한(허브의 도구 타임아웃과 맞춘다). */
 const TOOL_RESPONSE_BUFFER_LIMIT = 32;
@@ -263,6 +272,118 @@ const STUDIO_INSTANCE_ID = globalThis.crypto?.randomUUID?.()
 
 function isAgentName(v: unknown): v is AgentName {
   return v === 'claude' || v === 'codex' || v === 'pi' || v === 'grok' || v === 'cursor' || v === 'rau';
+}
+
+function isBoundedText(value: unknown, max: number): value is string {
+  return typeof value === 'string' && value.trim().length > 0 && value.length <= max;
+}
+
+function readUserQuestionInteraction(value: unknown): UserQuestionInteraction | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const input = value as Record<string, unknown>;
+  if (!isBoundedText(input['interactionId'], 256)
+    || !isBoundedText(input['providerRequestId'], 256)
+    || !isBoundedText(input['threadId'], 256)
+    || !isBoundedText(input['turnId'], 256)
+    || !isAgentName(input['agent'])
+    || (input['source'] !== 'native' && input['source'] !== 'mcp')
+    || typeof input['createdAt'] !== 'string'
+    || typeof input['updatedAt'] !== 'string'
+    || !Array.isArray(input['questions'])
+    || input['questions'].length < 1
+    || input['questions'].length > 4) return null;
+  const questions = input['questions'].flatMap((raw): UserQuestionInteraction['questions'] => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
+    const question = raw as Record<string, unknown>;
+    if (!isBoundedText(question['id'], 128)
+      || !isBoundedText(question['header'], 12)
+      || !isBoundedText(question['question'], 500)
+      || (question['mode'] !== 'single' && question['mode'] !== 'multiple')
+      || typeof question['allowOther'] !== 'boolean'
+      || !Array.isArray(question['options'])
+      || question['options'].length < 2
+      || question['options'].length > 4) return [];
+    const options = question['options'].flatMap((rawOption) => {
+      if (!rawOption || typeof rawOption !== 'object' || Array.isArray(rawOption)) return [];
+      const option = rawOption as Record<string, unknown>;
+      return isBoundedText(option['id'], 128)
+        && isBoundedText(option['label'], 80)
+        && isBoundedText(option['description'], 240)
+        ? [{ id: option['id'], label: option['label'], description: option['description'] }]
+        : [];
+    });
+    if (options.length !== question['options'].length) return [];
+    if (new Set(options.map((option) => option.id)).size !== options.length) return [];
+    if (new Set(options.map((option) => option.label.toLocaleLowerCase())).size !== options.length) return [];
+    return [{
+      id: question['id'],
+      header: question['header'],
+      question: question['question'],
+      mode: question['mode'],
+      options,
+      allowOther: question['allowOther'],
+    }];
+  });
+  if (questions.length !== input['questions'].length) return null;
+  if (new Set(questions.map((question) => question.id)).size !== questions.length) return null;
+  return {
+    interactionId: input['interactionId'],
+    providerRequestId: input['providerRequestId'],
+    threadId: input['threadId'],
+    turnId: input['turnId'],
+    agent: input['agent'],
+    source: input['source'],
+    createdAt: input['createdAt'],
+    updatedAt: input['updatedAt'],
+    questions,
+  };
+}
+
+function readUserQuestionOutcome(
+  value: unknown,
+  interaction: UserQuestionInteraction | null = null,
+): UserQuestionOutcome | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const outcome = value as Record<string, unknown>;
+  if (outcome['status'] === 'cancelled' && outcome['reason'] === 'user-stop') {
+    return { status: 'cancelled', reason: 'user-stop' };
+  }
+  if (outcome['status'] === 'expired'
+    && (outcome['reason'] === 'provider-disconnected'
+      || outcome['reason'] === 'hub-restarted'
+      || outcome['reason'] === 'request-invalidated')) {
+    return { status: 'expired', reason: outcome['reason'] };
+  }
+  if (outcome['status'] !== 'answered' || !outcome['answers'] || typeof outcome['answers'] !== 'object') return null;
+  const answers: Record<string, UserQuestionAnswer> = {};
+  for (const [questionId, raw] of Object.entries(outcome['answers'] as Record<string, unknown>)) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    const answer = raw as Record<string, unknown>;
+    if (!Array.isArray(answer['selectedOptionIds']) || answer['selectedOptionIds'].some((id) => typeof id !== 'string')) return null;
+    if (new Set(answer['selectedOptionIds']).size !== answer['selectedOptionIds'].length) return null;
+    if (answer['otherText'] !== undefined
+      && (typeof answer['otherText'] !== 'string' || answer['otherText'].length > 2_000)) return null;
+    answers[questionId] = {
+      selectedOptionIds: [...answer['selectedOptionIds']] as string[],
+      ...(typeof answer['otherText'] === 'string' ? { otherText: answer['otherText'] } : {}),
+    };
+  }
+  if (interaction) {
+    const questionIds = new Set(interaction.questions.map((question) => question.id));
+    if (Object.keys(answers).length !== questionIds.size
+      || Object.keys(answers).some((questionId) => !questionIds.has(questionId))) return null;
+    for (const question of interaction.questions) {
+      const answer = answers[question.id];
+      if (!answer) return null;
+      const optionIds = new Set(question.options.map((option) => option.id));
+      if (answer.selectedOptionIds.some((optionId) => !optionIds.has(optionId))) return null;
+      const otherText = answer.otherText?.trim() ?? '';
+      if (otherText && !question.allowOther) return null;
+      const count = answer.selectedOptionIds.length + (otherText ? 1 : 0);
+      if (count === 0 || (question.mode === 'single' && count !== 1)) return null;
+    }
+  }
+  return { status: 'answered', answers };
 }
 
 function readDocumentTemplate(value: unknown): DocumentTemplate | null {
@@ -953,6 +1074,16 @@ class AgentBridgeImpl implements AgentBridge {
   private requests = new PendingRequestRegistry();
   /** 끊긴 사이에 완료된 도구 결과 — 재연결 직후 다시 보낸다. */
   private toolResponses = new ToolResponseBuffer();
+  /** 사용자 답변은 로컬에서 만료시키지 않고, 재연결 뒤에도 같은 응답 ID로 다시 보낸다. */
+  private pendingQuestionAnswer: { interactionId: string; responseId: string; frame: unknown } | null = null;
+  /** 질문 취소는 허브가 해소를 확인할 때까지 같은 상호작용 ID로 다시 보낸다. */
+  private pendingQuestionCancellation: {
+    interactionId: string;
+    frame: { v: number; type: 'chat-interrupt' | 'chat-stop' };
+  } | null = null;
+  private pendingUserQuestionId: string | null = null;
+  private pendingUserQuestion: UserQuestionInteraction | null = null;
+  private pendingInterrupt = false;
   private disposed = false;
 
   private listeners = new Set<(e: SidebarEvent) => void>();
@@ -1092,7 +1223,76 @@ class AgentBridgeImpl implements AgentBridge {
     this.url = websocketHubUrl(context.hubUrl);
     this.httpBaseUrl = httpHubUrl(context.hubUrl);
     this.token = context.hubToken;
-    this.sessionId = context.sessionId;
+    if (this.sessionId !== context.sessionId) {
+      this.sessionId = context.sessionId;
+      this.restorePendingQuestionCancellation();
+    }
+  }
+
+  private questionCancellationStorageKey(): string | null {
+    return this.sessionId
+      ? `${QUESTION_CANCELLATION_STORAGE_PREFIX}${encodeURIComponent(this.sessionId)}`
+      : null;
+  }
+
+  private persistPendingQuestionCancellation(): void {
+    const key = this.questionCancellationStorageKey();
+    if (!key || !this.pendingQuestionCancellation) return;
+    try {
+      sessionStorage.setItem(key, JSON.stringify({
+        interactionId: this.pendingQuestionCancellation.interactionId,
+        type: this.pendingQuestionCancellation.frame.type,
+      }));
+    } catch (e) {
+      console.warn('[AgentBridge] 질문 취소 상태 저장 실패:', e);
+    }
+  }
+
+  private restorePendingQuestionCancellation(): void {
+    const key = this.questionCancellationStorageKey();
+    this.pendingQuestionCancellation = null;
+    if (!key) return;
+    try {
+      const raw = sessionStorage.getItem(key);
+      if (!raw) return;
+      const value: unknown = JSON.parse(raw);
+      if (!value || typeof value !== 'object') throw new Error('invalid cancellation state');
+      const interactionId = Reflect.get(value, 'interactionId');
+      const type = Reflect.get(value, 'type');
+      if (typeof interactionId !== 'string' || !interactionId
+        || (type !== 'chat-interrupt' && type !== 'chat-stop')) {
+        throw new Error('invalid cancellation state');
+      }
+      this.pendingQuestionCancellation = {
+        interactionId,
+        frame: { v: AGENT_PROTOCOL_VERSION, type },
+      };
+    } catch (e) {
+      try { sessionStorage.removeItem(key); } catch { /* 저장소 접근 불가 */ }
+      console.warn('[AgentBridge] 질문 취소 상태 복원 실패:', e);
+    }
+  }
+
+  private setPendingQuestionCancellation(
+    interactionId: string,
+    type: 'chat-interrupt' | 'chat-stop',
+  ): void {
+    this.pendingQuestionCancellation = {
+      interactionId,
+      frame: { v: AGENT_PROTOCOL_VERSION, type },
+    };
+    this.persistPendingQuestionCancellation();
+  }
+
+  private clearPendingQuestionCancellation(): void {
+    this.pendingQuestionCancellation = null;
+    const key = this.questionCancellationStorageKey();
+    if (!key) return;
+    try {
+      sessionStorage.removeItem(key);
+    } catch (e) {
+      console.warn('[AgentBridge] 질문 취소 상태 삭제 실패:', e);
+    }
   }
 
   /** 끊겼거나 다른 탭에 밀려난 뒤 창이 다시 살아나면 즉시 붙는다. */
@@ -1211,6 +1411,13 @@ class AgentBridgeImpl implements AgentBridge {
       // 끊긴 사이에 끝난 도구 결과를 먼저 흘려보낸다 — 허브의 인플라이트 호출이
       // 30초 타임아웃까지 가지 않고 이 응답으로 마무리된다.
       this.flushToolResponses();
+      this.flushPendingQuestionCancellation();
+      if (!this.pendingQuestionCancellation
+        && this.pendingInterrupt
+        && this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-interrupt' })) {
+        this.pendingInterrupt = false;
+      }
+      this.flushPendingQuestionAnswer();
       if (this.pendingChatStart !== null) {
         const pending = this.pendingChatStart;
         this.sendJson({
@@ -1420,8 +1627,11 @@ class AgentBridgeImpl implements AgentBridge {
       agent: this.editingAgent,
       workflow: this.workflow,
       phase: this.phase,
+      waitingForUser: this.pendingUserQuestionId !== null,
     });
-    if (next.active === this.editingLease.active && next.agent === this.editingLease.agent) return;
+    if (next.active === this.editingLease.active
+      && next.agent === this.editingLease.agent
+      && next.waitingForUser === this.editingLease.waitingForUser) return;
     this.editingLease = next;
     for (const listener of this.editingLeaseListeners) {
       try { listener({ ...next }); } catch (error) {
@@ -1510,6 +1720,30 @@ class AgentBridgeImpl implements AgentBridge {
           this.activeTemplate = this.activeTemplateId
             ? this.templateCatalog.templates.find((template) => template.id === this.activeTemplateId) ?? null
             : null;
+          const previousQuestion = this.pendingUserQuestion;
+          let pendingQuestion = readUserQuestionInteraction(session.pendingUserQuestion);
+          if (this.pendingQuestionCancellation) {
+            if (pendingQuestion?.interactionId === this.pendingQuestionCancellation.interactionId) {
+              // 허브가 아직 취소를 처리하지 않았다. 질문은 다시 표시하지 않고 취소를 재전송한다.
+              this.flushPendingQuestionCancellation();
+              pendingQuestion = null;
+            } else {
+              // 허브 스냅샷에 대상 질문이 없거나 새 질문으로 바뀌었으면 취소가 확정된 것이다.
+              this.clearPendingQuestionCancellation();
+            }
+          }
+          if (previousQuestion && previousQuestion.interactionId !== pendingQuestion?.interactionId) {
+            if (this.pendingQuestionAnswer?.interactionId === previousQuestion.interactionId) {
+              this.pendingQuestionAnswer = null;
+            }
+            this.emit({
+              type: 'user-question-resolved',
+              interactionId: previousQuestion.interactionId,
+              outcome: { status: 'expired', reason: 'request-invalidated' },
+            });
+          }
+          this.pendingUserQuestion = pendingQuestion;
+          this.pendingUserQuestionId = pendingQuestion?.interactionId ?? null;
           this.finishWorkflowSwitch();
           this.syncWorkflowState(session, this.workflow, this.phase);
           this.pendingChatStart = null;
@@ -1527,6 +1761,10 @@ class AgentBridgeImpl implements AgentBridge {
             serviceTier: this.serviceTier,
             ...this.workflowState(),
           });
+          if (pendingQuestion) {
+            this.syncEditingLease();
+            this.emit({ type: 'user-question-requested', interaction: pendingQuestion, replayed: true });
+          }
           if (this.turnRunning) {
             try {
               this.beginPendingTurn(session.agent);
@@ -1542,6 +1780,18 @@ class AgentBridgeImpl implements AgentBridge {
           }
         } else {
           this.activeAgent = null;
+          const droppedQuestion = this.pendingUserQuestion;
+          this.pendingUserQuestion = null;
+          this.pendingUserQuestionId = null;
+          this.pendingQuestionAnswer = null;
+          this.clearPendingQuestionCancellation();
+          if (droppedQuestion) {
+            this.emit({
+              type: 'user-question-resolved',
+              interactionId: droppedQuestion.interactionId,
+              outcome: { status: 'expired', reason: 'hub-restarted' },
+            });
+          }
           this.activeTemplateId = null;
           this.activeTemplate = null;
           this.turnRunning = false;
@@ -1577,11 +1827,64 @@ class AgentBridgeImpl implements AgentBridge {
         }
         break;
       }
+      case 'user-question-requested': {
+        const interaction = readUserQuestionInteraction(msg.interaction);
+        if (!interaction || (this.threadId && interaction.threadId !== this.threadId)) break;
+        if (this.pendingQuestionCancellation?.interactionId === interaction.interactionId) {
+          // 취소 프레임과 엇갈려 도착한 재생 요청은 UI에 되살리지 않는다.
+          this.flushPendingQuestionCancellation();
+          break;
+        }
+        if (this.pendingQuestionCancellation) this.clearPendingQuestionCancellation();
+        this.pendingUserQuestionId = interaction.interactionId;
+        this.pendingUserQuestion = interaction;
+        this.syncEditingLease();
+        this.emit({
+          type: 'user-question-requested',
+          interaction,
+          ...(msg.replayed === true ? { replayed: true } : {}),
+        });
+        break;
+      }
+      case 'user-question-resolved': {
+        const interactionId = typeof msg.interactionId === 'string' ? msg.interactionId : '';
+        const outcome = readUserQuestionOutcome(
+          msg.outcome,
+          this.pendingUserQuestion?.interactionId === interactionId ? this.pendingUserQuestion : null,
+        );
+        if (!interactionId || !outcome) break;
+        if (this.pendingQuestionAnswer?.interactionId === interactionId) this.pendingQuestionAnswer = null;
+        if (this.pendingQuestionCancellation?.interactionId === interactionId) {
+          this.clearPendingQuestionCancellation();
+        }
+        if (this.pendingUserQuestionId === interactionId) this.pendingUserQuestionId = null;
+        if (this.pendingUserQuestion?.interactionId === interactionId) this.pendingUserQuestion = null;
+        this.syncEditingLease();
+        this.emit({ type: 'user-question-resolved', interactionId, outcome });
+        break;
+      }
+      case 'user-question-answer-result': {
+        const interactionId = typeof msg.interactionId === 'string' ? msg.interactionId : '';
+        const responseId = typeof msg.responseId === 'string' ? msg.responseId : '';
+        if (!interactionId || !responseId) break;
+        if (this.pendingQuestionAnswer?.responseId === responseId) this.pendingQuestionAnswer = null;
+        this.emit({
+          type: 'user-question-answer-result',
+          interactionId,
+          responseId,
+          ok: msg.ok === true,
+          ...(typeof msg.code === 'string' ? { code: msg.code } : {}),
+          ...(typeof msg.message === 'string' ? { message: msg.message } : {}),
+        });
+        break;
+      }
       case 'chat-started': {
         // 스레드를 빠르게 오가면 이전 chat-start 응답이 뒤늦게 도착할 수 있다.
         // 마지막 startChat 이 고른 정체성을 절대 덮어쓰지 않는다.
         if (typeof msg.threadId === 'string' && this.threadId && msg.threadId !== this.threadId) break;
+        const replacedSession = this.pendingChatStart !== null;
         this.pendingChatStart = null;
+        if (replacedSession) this.clearPendingQuestionCancellation();
         if (isAgentName(msg.agent)) {
           this.activeAgent = msg.agent;
           this.editingAgent = msg.agent;
@@ -1937,6 +2240,7 @@ class AgentBridgeImpl implements AgentBridge {
         break;
       }
       case 'chat-error': {
+        const chatStartFailed = this.pendingChatStart !== null;
         // 시작 실패 시 대기 중이던 메시지를 정리하지 않으면 sendUserMessage promise가
         // 영원히 미해결로 남아 컴포저가 잠기고, 다음 chat-started에 스테일 메시지가 흘러간다.
         // 구상 전환과 무관한 오류(AGENT_BUSY 등)로 낙관적 잠금 해제를 되돌리면
@@ -1951,7 +2255,34 @@ class AgentBridgeImpl implements AgentBridge {
         }
         for (const message of this.queuedMessages) message.resolve(null);
         this.queuedMessages = [];
-        this.pendingChatStart = null;
+        if (chatStartFailed) {
+          // 허브는 교체 프로바이더를 시작하기 전에 이전 세션을 폐기한다. 요청한 시작값은
+          // 재시도 설정으로 남기되 다음 메시지가 사라진 이전 에이전트로 향하지 않게 한다.
+          if (this.pendingTurnOpen) {
+            try {
+              this.endPendingTurn();
+            } catch (e) {
+              console.warn('[AgentBridge] chat-error endTurn 실패:', e);
+            }
+          }
+          const droppedQuestion = this.pendingUserQuestion;
+          this.pendingUserQuestion = null;
+          this.pendingUserQuestionId = null;
+          this.pendingQuestionAnswer = null;
+          this.clearPendingQuestionCancellation();
+          if (droppedQuestion) {
+            this.emit({
+              type: 'user-question-resolved',
+              interactionId: droppedQuestion.interactionId,
+              outcome: { status: 'expired', reason: 'request-invalidated' },
+            });
+          }
+          this.activeAgent = null;
+          this.turnRunning = false;
+          this.syncEditingLease();
+        } else {
+          this.pendingChatStart = null;
+        }
         this.emit({
           type: 'hub-error',
           code: typeof msg.code === 'string' ? msg.code : 'RPC_ERROR',
@@ -2093,6 +2424,14 @@ class AgentBridgeImpl implements AgentBridge {
     }
   }
 
+  private flushPendingQuestionAnswer(): void {
+    if (this.pendingQuestionAnswer) this.sendJson(this.pendingQuestionAnswer.frame);
+  }
+
+  private flushPendingQuestionCancellation(): void {
+    if (this.pendingQuestionCancellation) this.sendJson(this.pendingQuestionCancellation.frame);
+  }
+
   // ─── outgoing API ─────────────────────────────────────────
 
   getConnectionState(): ConnectionState {
@@ -2105,6 +2444,10 @@ class AgentBridgeImpl implements AgentBridge {
 
   isTurnRunning(): boolean {
     return this.turnRunning;
+  }
+
+  getPendingUserQuestion(): UserQuestionInteraction | null {
+    return this.pendingUserQuestion ? structuredClone(this.pendingUserQuestion) : null;
   }
 
   getEditingLease(): AgentEditingLease {
@@ -2144,12 +2487,12 @@ class AgentBridgeImpl implements AgentBridge {
     this.selectedAgent = agent;
     if (model) this.selectedModel = model;
     if (effort) this.selectedEffort = effort;
-    this.permissionProfile = permissionProfile;
     this.threadId = threadId;
     this.documentId = documentId;
     this.documentName = documentName;
     this.chatHistory = history.map((entry) => ({ ...entry }));
-    this.resetWorkflowState(workflow);
+    // 워크플로와 권한은 서버 상태가 기준이다. 요청값은 chat-started가 확인할 때까지
+    // 시작 대기에만 두어, 프로바이더 시작 실패 뒤 가상의 모드가 남지 않게 한다.
     const payload = {
       v: AGENT_PROTOCOL_VERSION,
       type: 'chat-start' as const,
@@ -2161,7 +2504,7 @@ class AgentBridgeImpl implements AgentBridge {
       history: this.chatHistory,
       ...(this.selectedModel ? { model: this.selectedModel } : {}),
       ...(this.selectedEffort ? { effort: this.selectedEffort } : {}),
-      permissionProfile: this.permissionProfile,
+      permissionProfile,
       serviceTier: this.serviceTier,
       ...(force ? { force: true } : {}),
     };
@@ -2169,7 +2512,7 @@ class AgentBridgeImpl implements AgentBridge {
       agent,
       model: this.selectedModel ?? undefined,
       effort: this.selectedEffort ?? undefined,
-      permissionProfile: this.permissionProfile,
+      permissionProfile,
       serviceTier: this.serviceTier,
       workflow,
       threadId,
@@ -2188,16 +2531,28 @@ class AgentBridgeImpl implements AgentBridge {
     this.pendingChatStart = null;
     this.chatHistory = [];
     this.activeAgent = null;
+    const pendingQuestion = this.pendingUserQuestion;
+    if (pendingQuestion) {
+      this.setPendingQuestionCancellation(pendingQuestion.interactionId, 'chat-stop');
+      this.pendingQuestionAnswer = null;
+      this.pendingUserQuestion = null;
+      this.pendingUserQuestionId = null;
+      this.emit({
+        type: 'user-question-resolved',
+        interactionId: pendingQuestion.interactionId,
+        outcome: { status: 'cancelled', reason: 'user-stop' },
+      });
+    }
     if (!waitForAuthoritativeTurnEnd) this.turnRunning = false;
     this.syncEditingLease();
-    // Full access is deliberately scoped to one live chat and never becomes
-    // the default for a new or reopened thread.
+    // 전체 접근은 현재 채팅 하나에만 적용하고 새 스레드나 다시 연 스레드의 기본값으로 삼지 않는다.
     this.permissionProfile = 'safe';
     this.serviceTier = 'standard';
     this.resetWorkflowState();
     if (this.state === 'connected') {
       this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-stop' });
     }
+    this.pendingInterrupt = false;
     this.emit({ type: 'chat-stopped' });
   }
 
@@ -2241,7 +2596,30 @@ class AgentBridgeImpl implements AgentBridge {
       const message = { text, skillName, context, messageId, stagedReferenceIds: [...stagedReferenceIds], resolve };
       if (this.workflowSwitchPending || this.activeAgent === null || this.queuedMessages.length > 0) {
         this.queuedMessages.push(message);
-        this.flushQueuedMessages();
+        if (this.activeAgent === null) {
+          // 연결 중에도 시작 대기를 남겨 재접속이 첫 메시지를 다시 보낼 수 있게 한다.
+          this.rememberPendingChatStart();
+          const pending = this.pendingChatStart;
+          if (pending && this.state === 'connected' && !this.workflowSwitchPending) {
+            this.sendJson({
+              v: AGENT_PROTOCOL_VERSION,
+              type: 'chat-start',
+              agent: pending.agent,
+              workflow: pending.workflow,
+              threadId: pending.threadId,
+              documentId: pending.documentId,
+              documentName: pending.documentName,
+              history: pending.history,
+              ...(pending.model ? { model: pending.model } : {}),
+              ...(pending.effort ? { effort: pending.effort } : {}),
+              permissionProfile: pending.permissionProfile ?? this.permissionProfile,
+              serviceTier: pending.serviceTier ?? this.serviceTier,
+              ...(pending.force ? { force: true } : {}),
+            });
+          }
+        } else {
+          this.flushQueuedMessages();
+        }
         return;
       }
       this.dispatchUserMessage(message);
@@ -2287,20 +2665,23 @@ class AgentBridgeImpl implements AgentBridge {
       return;
     }
     if (this.activeAgent === null) {
-      const context = this.referenceContext();
+      this.rememberPendingChatStart();
+      const pending = this.pendingChatStart;
+      if (!pending) return;
       this.sendJson({
         v: AGENT_PROTOCOL_VERSION,
         type: 'chat-start',
-        agent: this.selectedAgent,
-        workflow: this.workflow,
-        threadId: context.threadId,
-        documentId: context.documentId,
-        documentName: context.documentName ?? null,
-        history: this.chatHistory,
-        ...(this.selectedModel ? { model: this.selectedModel } : {}),
-        ...(this.selectedEffort ? { effort: this.selectedEffort } : {}),
-        permissionProfile: this.permissionProfile,
-        serviceTier: this.serviceTier,
+        agent: pending.agent,
+        workflow: pending.workflow,
+        threadId: pending.threadId,
+        documentId: pending.documentId,
+        documentName: pending.documentName,
+        history: pending.history,
+        ...(pending.model ? { model: pending.model } : {}),
+        ...(pending.effort ? { effort: pending.effort } : {}),
+        permissionProfile: pending.permissionProfile ?? this.permissionProfile,
+        serviceTier: pending.serviceTier ?? this.serviceTier,
+        ...(pending.force ? { force: true } : {}),
       });
       return;
     }
@@ -2585,12 +2966,12 @@ class AgentBridgeImpl implements AgentBridge {
     this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-workflow-set', workflow });
   }
 
-  approvePlan(planId: string): void {
-    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-plan-approve', planId });
+  approvePlan(planId: string): boolean {
+    return this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-plan-approve', planId });
   }
 
-  requestPlanChanges(planId: string, feedback?: string): void {
-    this.sendJson({
+  requestPlanChanges(planId: string, feedback?: string): boolean {
+    return this.sendJson({
       v: AGENT_PROTOCOL_VERSION,
       type: 'chat-plan-request-changes',
       planId,
@@ -2725,8 +3106,41 @@ class AgentBridgeImpl implements AgentBridge {
     return requestId;
   }
 
+  answerUserQuestion(interactionId: string, answers: Record<string, UserQuestionAnswer>): string {
+    const responseId = globalThis.crypto?.randomUUID?.()
+      ?? `question-${Date.now().toString(36)}-${++this.requestSeq}`;
+    const frame = {
+      v: AGENT_PROTOCOL_VERSION,
+      type: 'user-question-answer',
+      interactionId,
+      responseId,
+      answers,
+    };
+    this.pendingQuestionAnswer = { interactionId, responseId, frame };
+    this.sendJson(frame);
+    return responseId;
+  }
+
   interrupt(): void {
-    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-interrupt' });
+    const pendingQuestion = this.pendingUserQuestion;
+    if (pendingQuestion) {
+      this.setPendingQuestionCancellation(pendingQuestion.interactionId, 'chat-interrupt');
+      this.pendingQuestionAnswer = null;
+      this.pendingUserQuestion = null;
+      this.pendingUserQuestionId = null;
+      this.syncEditingLease();
+      this.emit({
+        type: 'user-question-resolved',
+        interactionId: pendingQuestion.interactionId,
+        outcome: { status: 'cancelled', reason: 'user-stop' },
+      });
+    }
+    if (this.pendingQuestionCancellation) {
+      this.pendingInterrupt = false;
+      this.flushPendingQuestionCancellation();
+    } else {
+      this.pendingInterrupt = !this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'chat-interrupt' });
+    }
   }
 
   /**
@@ -2880,6 +3294,11 @@ class AgentBridgeImpl implements AgentBridge {
     this.clearReconnectTimer();
     this.requests.cancelAll();
     this.toolResponses.clear();
+    this.pendingQuestionAnswer = null;
+    this.persistPendingQuestionCancellation();
+    this.pendingUserQuestionId = null;
+    this.pendingUserQuestion = null;
+    this.pendingInterrupt = false;
     this.abortSocket();
     this.listeners.clear();
     this.revealUnsub?.();

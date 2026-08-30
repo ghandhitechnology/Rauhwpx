@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, dirname, extname, join, sep } from 'node:path';
+import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   app,
@@ -15,6 +15,7 @@ import {
   net,
   protocol,
   safeStorage,
+  session as electronSession,
   shell,
 } from 'electron';
 import electronUpdater from 'electron-updater';
@@ -24,6 +25,7 @@ import {
   isHubHealthy,
   issueHubSessionToken,
   nextHubRestartDelay,
+  packagedRhwpBinary,
   requestHubShutdown,
   resolveHubLaunch,
   spawnHubProcess,
@@ -50,6 +52,7 @@ import {
   STUDIO_URL,
   installStudioProtocol,
   registerStudioScheme,
+  resolveDevelopmentUrl,
 } from './studio-protocol.mjs';
 import { createSecretVault, handleSecretRequest } from './secret-vault.mjs';
 import { CloudClient } from './cloud-client.mjs';
@@ -68,18 +71,29 @@ import { collectProviderAuth } from './provider-auth.mjs';
 import { applyCloudRecovery } from './cloud-result.mjs';
 import { isNewerStableVersion, selectDebAsset } from './update-policy.mjs';
 import { deliverPlainTextPaste } from './plain-text-paste.mjs';
+import {
+  prepareDevelopmentCaches,
+  removeStaleLaunchDirectories,
+} from './runtime-cleanup.mjs';
 
 const { autoUpdater } = electronUpdater;
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const RELEASES_URL = 'https://github.com/ghandhitechnology/Rauhwpx/releases/latest';
 const RELEASES_API_URL = 'https://api.github.com/repos/ghandhitechnology/Rauhwpx/releases/latest';
 const PRELOAD_PATH = join(__dirname, 'preload.cjs');
-const devUrl = process.env.RHWP_DEV_URL || '';
+const devUrl = resolveDevelopmentUrl({
+  packaged: app.isPackaged,
+  rawUrl: process.env.RHWP_DEV_URL,
+});
 const launchId = randomUUID();
 const hubToken = createHubToken();
 const devOrigin = devUrl ? new URL(devUrl).origin : null;
 
 const CLOUD_CLOSE_WAIT_MS = 120_000;
+// Vite gives every hot update a new timestamped URL. Reusing Electron's
+// persistent HTTP cache across dev runs otherwise leaves one JS/WASM entry per
+// edit and per worktree in the production profile.
+if (devUrl) app.commandLine.appendSwitch('disable-http-cache');
 
 function isTrustedRendererUrl(rawUrl) {
   try {
@@ -98,6 +112,12 @@ function sessionForEvent(event) {
 }
 
 app.setName('Rauhwpx');
+if (!app.isPackaged) {
+  const developmentUserData = process.env.RHWP_DESKTOP_USER_DATA
+    ? resolve(process.env.RHWP_DESKTOP_USER_DATA)
+    : join(__dirname, '..', '.run', 'desktop-user-data');
+  app.setPath('userData', developmentUserData);
+}
 registerStudioScheme(protocol);
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
@@ -210,6 +230,10 @@ class AgentHubOwner {
 
     const server = agentScript();
     const rhwpExecutable = nativeRhwpExecutable();
+    const rhwpBinary = packagedRhwpBinary({
+      packaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+    });
     const launch = resolveHubLaunch({
       packaged: app.isPackaged,
       execPath: process.execPath,
@@ -223,6 +247,7 @@ class AgentHubOwner {
         RHWP_AGENT_PORT: '0',
         RHWP_AGENT_TOKEN: hubToken,
         RHWP_AGENT_MODE: 'production',
+        ...(rhwpBinary ? { RHWP_BIN: rhwpBinary } : {}),
         RHWP_LAUNCH_ID: launchId,
         RHWP_OWNER_PID: String(process.pid),
         RHWP_RUNTIME_DIR: this.runtimeDir,
@@ -323,8 +348,10 @@ const CLOUD_BROADCAST_COALESCE_MS = 100;
 let cloudBroadcastTimer = null;
 let cloudBroadcastPending = [];
 const pendingLaunches = [launchRequest({ argv: process.argv, source: 'initial' })];
-const runtimeDir = join(app.getPath('temp'), 'rauhwpx', 'runtime', launchId);
-const workDir = join(app.getPath('userData'), 'launch-work', launchId);
+const runtimeRoot = join(app.getPath('temp'), 'rauhwpx', 'runtime');
+const workRoot = join(app.getPath('userData'), 'launch-work');
+const runtimeDir = join(runtimeRoot, launchId);
+const workDir = join(workRoot, launchId);
 const hubOwner = new AgentHubOwner({ runtimeDir, workDir });
 const sessions = new SessionManager({
   launchId,
@@ -429,6 +456,14 @@ async function loadNativeBookmarks() {
 
 function persistNativeBookmarks() {
   return nativeBookmarkWriter.enqueue(JSON.stringify(nativeFiles.dumpBookmarks()));
+}
+
+async function bestEffortStartupCleanup(label, cleanup) {
+  try {
+    await cleanup;
+  } catch (error) {
+    console.warn(`[rauhwpx] ${label} cleanup failed:`, error);
+  }
 }
 
 let updateDownloadReady = false;
@@ -1390,6 +1425,23 @@ if (!hasSingleInstanceLock) {
   });
 
   app.whenReady().then(async () => {
+    await Promise.all([
+      bestEffortStartupCleanup(
+        'stale runtime',
+        removeStaleLaunchDirectories(runtimeRoot, launchId),
+      ),
+      bestEffortStartupCleanup(
+        'stale launch workspace',
+        removeStaleLaunchDirectories(workRoot, launchId),
+      ),
+      ...(devUrl ? [bestEffortStartupCleanup(
+        'development browser cache',
+        prepareDevelopmentCaches(
+          electronSession.defaultSession,
+          join(runtimeDir, 'code-cache'),
+        ),
+      )] : []),
+    ]);
     secretVault = createSecretVault({
       filePath: join(app.getPath('userData'), 'secrets.json'),
       safeStorage,

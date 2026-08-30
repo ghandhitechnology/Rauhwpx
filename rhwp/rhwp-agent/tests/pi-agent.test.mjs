@@ -181,6 +181,8 @@ test('rau harness events carry the rau agent name', () => {
   session.sendUserMessage('probe the document');
   const { proc } = spawns[0];
 
+  assert.equal(spawns[0].options.env.RHWP_AGENT_NAME, 'rau');
+
   proc.emitJson(
     SESSION_LINE,
     { type: 'agent_start' },

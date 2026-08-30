@@ -8,6 +8,10 @@ import { resolveGeneratedDocumentArtifact } from '../../../desktop/generated-doc
 import { deliverPlainTextPaste } from '../../../desktop/plain-text-paste.mjs';
 import { SessionManager } from '../../../desktop/session-manager.mjs';
 import { SerializedStateWriter } from '../../../desktop/serialized-state-writer.mjs';
+import {
+  prepareDevelopmentCaches,
+  removeStaleLaunchDirectories,
+} from '../../../desktop/runtime-cleanup.mjs';
 import { resolveStudioAsset, STUDIO_URL } from '../../../desktop/studio-protocol.mjs';
 
 const desktopMain = readFileSync(new URL('../../../desktop/main.mjs', import.meta.url), 'utf8');
@@ -26,7 +30,7 @@ function associationExts(association: { ext?: string | string[] }): string[] {
 }
 
 test('SessionManager gives each owned BrowserWindow an isolated UUID context', async () => {
-  const ids = ['session-a', 'session-b'];
+  const ids = ['session-a', 'session-b', 'session-c'];
   const manager = new SessionManager({
     launchId: 'launch-1',
     createId: () => ids.shift(),
@@ -35,9 +39,10 @@ test('SessionManager gives each owned BrowserWindow an isolated UUID context', a
   });
   const first = fakeWindow(10);
   const second = fakeWindow(11);
-  manager.addWindow(first, { openFiles: ['/tmp/a.hwpx'], source: 'initial' });
-  manager.addWindow(second, { source: 'second-instance' });
+  const firstSession = manager.addWindow(first);
+  manager.addWindow(second);
 
+  assert.equal(manager.sessionById('session-a'), firstSession);
   assert.deepEqual(await manager.contextForSender(first.webContents), {
     launchId: 'launch-1',
     sessionId: 'session-a',
@@ -47,6 +52,7 @@ test('SessionManager gives each owned BrowserWindow an isolated UUID context', a
   assert.equal((await manager.contextForSender(second.webContents)).sessionId, 'session-b');
   assert.throws(() => manager.sessionForSender({ id: 10 }), /does not own/);
   assert.throws(() => manager.sessionForSender({ id: 99 }), /does not own/);
+  assert.throws(() => manager.addWindow(fakeWindow(10)), /already owns a session/);
 });
 
 test('SessionManager removal remains safe after webContents destruction', () => {
@@ -278,6 +284,43 @@ test('window close never deadlocks on a dead renderer', () => {
 test('one failed startup launch does not abort the remaining launches', () => {
   assert.match(desktopMain, /await openLaunch\(request\)\.catch\(/);
   assert.match(desktopMain, /failedLaunches > 0 && sessions\.windows\(\)\.length === 0/);
+});
+
+test('desktop dev cache is disabled and cleared before loading the Studio', async () => {
+  const calls: string[] = [];
+  await prepareDevelopmentCaches({
+    clearCache: async () => { calls.push('http'); },
+    clearCodeCaches: async (options: unknown) => {
+      assert.deepEqual(options, {});
+      calls.push('code');
+    },
+    setCodeCachePath: (path: string) => { calls.push(`path:${path}`); },
+  }, '/runtime/active/code-cache');
+  assert.deepEqual(calls, ['http', 'code', 'path:/runtime/active/code-cache']);
+  assert.match(desktopMain, /if \(devUrl\) app\.commandLine\.appendSwitch\('disable-http-cache'\)/);
+  assert.match(desktopMain, /'development browser cache',[\s\S]*prepareDevelopmentCaches\([\s\S]*electronSession\.defaultSession,[\s\S]*join\(runtimeDir, 'code-cache'\)/);
+});
+
+test('startup removes only orphaned UUID launch directories', async () => {
+  const active = '2257ce8b-6e52-4fec-889e-c6ba489226f8';
+  const stale = '2848f76b-9d57-4d81-8410-4023c59cb403';
+  const removed: string[] = [];
+  const result = await removeStaleLaunchDirectories('/launch-work', active, {
+    readdirImpl: async () => [
+      { name: active, isDirectory: () => true },
+      { name: stale, isDirectory: () => true },
+      { name: 'keep-me', isDirectory: () => true },
+      { name: 'f98c7e94-d89a-4d9c-b549-41bf4b230468', isDirectory: () => false },
+    ],
+    rmImpl: async (path: string, options: unknown) => {
+      assert.deepEqual(options, { recursive: true, force: true });
+      removed.push(path);
+    },
+  });
+  assert.deepEqual(result, [stale]);
+  assert.deepEqual(removed, [path.join('/launch-work', stale)]);
+  assert.match(desktopMain, /removeStaleLaunchDirectories\(runtimeRoot, launchId\)/);
+  assert.match(desktopMain, /removeStaleLaunchDirectories\(workRoot, launchId\)/);
 });
 
 test('desktop package registers supported document associations without bundling runtime data', () => {

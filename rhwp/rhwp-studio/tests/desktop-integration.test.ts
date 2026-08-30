@@ -25,6 +25,7 @@ import {
   saveDesktopPortableHistoryFile,
   writeDesktopPortableHistoryFile,
   suppressDesktopServiceWorker,
+  stableBrowserSessionId,
   type NativeFileHandleDescriptor,
 } from '../src/desktop-integration.ts';
 
@@ -80,6 +81,20 @@ test('dev ensure path asks Vite to start a missing hub', async () => {
   });
   assert.equal(ready, true);
   assert.equal(calls, 1);
+});
+
+test('browser hub identity is stable across reloads but scoped to its tab storage', () => {
+  const values = new Map<string, string>();
+  const storage = {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => { values.set(key, value); },
+  };
+  const first = stableBrowserSessionId(storage);
+  const reloaded = stableBrowserSessionId(storage);
+  const otherTab = stableBrowserSessionId({ getItem: () => null, setItem: () => {} });
+  assert.equal(reloaded, first);
+  assert.notEqual(otherTab, first);
+  assert.match(first, /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/);
 });
 
 test('published artifact links open through a fresh editor window on desktop', async () => {

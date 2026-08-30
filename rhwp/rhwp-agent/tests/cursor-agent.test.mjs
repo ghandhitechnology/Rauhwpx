@@ -26,6 +26,11 @@ const baseOpts = {
   onEvent() {},
 };
 
+function argValue(argv, flag) {
+  const index = argv.indexOf(flag);
+  return index === -1 ? undefined : argv[index + 1];
+}
+
 class FakeStream extends EventEmitter {}
 
 class FakeProcess extends EventEmitter {
@@ -76,6 +81,7 @@ function startSession(t, extra = {}) {
   const spawns = [];
   const opts = {
     ...baseOpts,
+    agentRole: 'root',
     isolatedHome: path.join(root, 'home'),
     cursorSourceDir: path.join(root, 'source', '.cursor'),
     ...extra,
@@ -136,6 +142,13 @@ test('argv carries an explicit model, the resume chat id and --force only when u
     null, 'p',
   );
   assert.equal(planning.includes('--force'), false);
+  assert.equal(argValue(planning, '--mode'), 'plan');
+
+  const build = buildCursorArgv(
+    { ...baseOpts, permissionProfile: 'safe', workflow: 'plan', phase: 'implementing' },
+    null, 'p',
+  );
+  assert.equal(build.includes('--mode'), false);
 });
 
 test('cli-config merges the source file and overwrites permissions per profile', () => {
@@ -473,6 +486,284 @@ test('formatCursorExitError falls back to a plain message without stderr', () =>
     formatCursorExitError('', null, 'SIGKILL', 'tok'),
     'Cursor 실행이 중단되었습니다 (signal SIGKILL). Cursor가 오류 설명을 제공하지 않았습니다.',
   );
+});
+
+test('native ACP MCP question calls emit the canonical root-scope ticket', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-cursor-acp-question-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const events = [];
+  let onSessionUpdate;
+  const native = createCursorSession({
+    ...baseOpts,
+    agentRole: 'root',
+    isolatedHome: path.join(root, 'home'),
+    requestUserInput: async () => ({ status: 'cancelled' }),
+    onEvent: (event) => events.push(event),
+  }, {
+    createAcpSession(input) {
+      onSessionUpdate = input.onSessionUpdate;
+      return {
+        async configure() {
+          input.onSessionStarted({ sessionId: 'cursor-acp-question', setupResponse: {} });
+        },
+        async prompt() {
+          onSessionUpdate({
+            sessionUpdate: 'tool_call',
+            toolCallId: 'q-1',
+            kind: 'mcp',
+            title: 'Ask the user',
+          });
+          onSessionUpdate({
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'q-1',
+            name: 'mcp__rhwp__ask_user_question',
+            rawInput: {
+              name: 'mcp__rhwp__ask_user_question',
+              args: {
+                questions: [{
+                  id: 'format',
+                  header: 'Format',
+                  question: 'Which format should I use?',
+                  options: [
+                    { label: 'Brief', description: 'Keep it compact.' },
+                    { label: 'Detailed', description: 'Include supporting detail.' },
+                  ],
+                }],
+              },
+              toolName: 'ask_user_question',
+            },
+          });
+          return { stopReason: 'end_turn' };
+        },
+        getSessionId: () => 'cursor-acp-question',
+        hasSeenPromptUpdate: () => true,
+        restart: async () => {},
+        cancel: async () => {},
+        dispose: async () => {},
+      };
+    },
+  });
+  t.after(() => native.dispose());
+
+  native.sendUserMessage('ask first');
+  await new Promise((resolve) => setImmediate(resolve));
+  const calls = events.filter((event) => event.type === 'tool-call');
+  assert.deepEqual(calls.map((event) => event.tool), ['ask_user_question']);
+  assert.deepEqual(JSON.parse(calls[0].argsJson).questions[0].id, 'format');
+});
+
+test('native ACP keeps one Cursor session across turns and streams through unified events', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-cursor-native-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  let createCount = 0;
+  let config;
+  const configureCalls = [];
+  let restarts = 0;
+  const prompts = [];
+  const events = [];
+  const native = createCursorSession({
+    ...baseOpts,
+    agentRole: 'root',
+    isolatedHome: path.join(root, 'home'),
+    requestUserInput: async () => ({ status: 'cancelled' }),
+    onEvent: (event) => events.push(event),
+  }, {
+    createAcpSession(input) {
+      createCount += 1;
+      config = input;
+      let started = false;
+      return {
+        async configure(options) {
+          configureCalls.push(options);
+          if (!started) {
+            started = true;
+            input.onSessionStarted({ sessionId: 'cursor-acp-1', setupResponse: {} });
+          }
+        },
+        async prompt(text) {
+          prompts.push(text);
+          input.onSessionUpdate({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'ok' } });
+          return { stopReason: 'end_turn' };
+        },
+        getSessionId: () => 'cursor-acp-1',
+        hasSeenPromptUpdate: () => true,
+        restart: async () => {
+          await new Promise((resolve) => setImmediate(resolve));
+          restarts += 1;
+        },
+        cancel: async () => {}, dispose: async () => {},
+      };
+    },
+  });
+  t.after(() => native.dispose());
+
+  native.sendUserMessage('one');
+  await new Promise((resolve) => setImmediate(resolve));
+  native.sendUserMessage('two');
+  await new Promise((resolve) => setImmediate(resolve));
+  const permissionChange = native.setPermissionProfile('unrestricted');
+  assert.equal(restarts, 0);
+  await permissionChange;
+  assert.equal(restarts, 1, 'permission ACK waits for the native restart');
+  await native.setExecutionMode({ workflow: 'plan', phase: 'planning', capabilityEpoch: 2 });
+  assert.deepEqual(configureCalls.at(-1).modeAliases, ['plan', 'architect'], 'Plan ACK waits for ACP mode selection');
+  native.sendUserMessage('three');
+  await new Promise((resolve) => setImmediate(resolve));
+  await native.setExecutionMode({ workflow: 'plan', phase: 'implementing', capabilityEpoch: 3 });
+  native.sendUserMessage('four');
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(createCount, 1);
+  assert.equal(config.args[0], 'acp');
+  assert.equal(config.requestHandlers[0].method, 'cursor/ask_question');
+  assert.match(prompts[0], /one/);
+  assert.equal(prompts[1], 'two');
+  assert.match(prompts[2], /three/);
+  assert.match(prompts[3], /four/);
+  assert.deepEqual(configureCalls.map((call) => call.modeAliases), [
+    ['agent', 'code', 'default'],
+    ['agent', 'code', 'default'],
+    ['plan', 'architect'],
+    ['plan', 'architect'],
+    ['agent', 'code', 'default'],
+  ]);
+  assert.deepEqual(events.filter((event) => event.type === 'text-delta').map((event) => event.text), ['ok', 'ok', 'ok', 'ok']);
+  assert.equal(events.filter((event) => event.type === 'session-info').length, 1);
+  assert.equal(events.filter((event) => event.type === 'turn-end').length, 4);
+  assert.equal(restarts, 3);
+});
+
+test('Cursor rejects Plan before ACK when ACP cannot prove the mode', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-cursor-plan-readiness-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const opts = {
+    ...baseOpts,
+    workflow: 'direct',
+    phase: 'implementing',
+    capabilityEpoch: 1,
+    agentRole: 'root',
+    isolatedHome: path.join(root, 'home'),
+    requestUserInput: async () => ({ status: 'cancelled' }),
+  };
+  let disposed = 0;
+  const session = createCursorSession(opts, {
+    createAcpSession() {
+      return {
+        configure: async () => { throw new Error('Cursor ACP does not advertise required mode (plan, architect)'); },
+        getSessionId: () => 'cursor-unproved-plan',
+        dispose: async () => { disposed += 1; },
+      };
+    },
+  });
+  t.after(() => session.dispose());
+
+  await assert.rejects(
+    session.setExecutionMode({ workflow: 'plan', phase: 'planning', capabilityEpoch: 2 }),
+    /does not advertise required mode/,
+  );
+  assert.deepEqual([opts.workflow, opts.phase, opts.capabilityEpoch], ['direct', 'implementing', 1]);
+  assert.equal(disposed, 1);
+});
+
+test('Cursor ACP startup failure falls back before any native provider event', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-cursor-fallback-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const events = [];
+  const fallbackSpawns = [];
+  const fallback = createCursorSession({
+    ...baseOpts,
+    agentRole: 'root',
+    isolatedHome: path.join(root, 'home'),
+    requestUserInput: async () => ({ status: 'cancelled' }),
+    onEvent: (event) => events.push(event),
+  }, {
+    createAcpSession() {
+      return {
+        configure: async () => { throw new Error('Authentication required'); },
+        hasSeenPromptUpdate: () => false,
+        dispose: async () => {},
+      };
+    },
+    spawnProcess(command, argv, options) {
+      const proc = new FakeProcess();
+      fallbackSpawns.push({ command, argv, options, proc });
+      return proc;
+    },
+  });
+  t.after(() => fallback.dispose());
+
+  fallback.sendUserMessage('fallback');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fallbackSpawns.length, 1);
+  assert.deepEqual(types(events), ['turn-start']);
+  fallbackSpawns[0].proc.emitJson(INIT_LINE, { type: 'result', subtype: 'success', result: 'ok' });
+  assert.equal(events.filter((event) => event.type === 'session-info').length, 1);
+});
+
+test('Cursor rolls provider state back when an acknowledged restart fails', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-cursor-restart-rollback-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const opts = {
+    ...baseOpts,
+    workflow: 'direct',
+    phase: 'implementing',
+    capabilityEpoch: 1,
+    agentRole: 'root',
+    isolatedHome: path.join(root, 'home'),
+    requestUserInput: async () => ({ status: 'cancelled' }),
+  };
+  const session = createCursorSession(opts, {
+    createAcpSession() {
+      return {
+        configure: async () => {},
+        prompt: async () => ({ stopReason: 'end_turn' }),
+        getSessionId: () => 'cursor-rollback',
+        restart: async () => { throw new Error('restart rejected'); },
+        dispose: async () => {},
+      };
+    },
+  });
+  t.after(() => session.dispose());
+  session.sendUserMessage('start native');
+  await new Promise((resolve) => setImmediate(resolve));
+
+  await assert.rejects(session.setPermissionProfile('unrestricted'), /restart rejected/);
+  assert.equal(opts.permissionProfile, 'safe');
+  await assert.rejects(
+    session.setExecutionMode({ workflow: 'plan', phase: 'planning', capabilityEpoch: 2 }),
+    /restart rejected/,
+  );
+  assert.deepEqual([opts.workflow, opts.phase, opts.capabilityEpoch], ['direct', 'implementing', 1]);
+});
+
+test('Cursor never switches transports after the native prompt starts', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-cursor-atomic-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const events = [];
+  let legacySpawns = 0;
+  const session = createCursorSession({
+    ...baseOpts,
+    agentRole: 'root',
+    isolatedHome: path.join(root, 'home'),
+    requestUserInput: async () => ({ status: 'cancelled' }),
+    onEvent: (event) => events.push(event),
+  }, {
+    createAcpSession() {
+      return {
+        configure: async () => {},
+        getSessionId: () => 'cursor-native-atomic',
+        prompt: async () => { throw new Error('native question failed'); },
+        dispose: async () => {},
+      };
+    },
+    spawnProcess() { legacySpawns += 1; return new FakeProcess(); },
+  });
+  t.after(() => session.dispose());
+
+  session.sendUserMessage('one transport only');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(legacySpawns, 0);
+  assert.equal(events.filter((event) => event.type === 'turn-end').at(-1)?.stopReason, 'failed');
 });
 
 test('interrupt kills the child and closes the turn once', (t) => {
