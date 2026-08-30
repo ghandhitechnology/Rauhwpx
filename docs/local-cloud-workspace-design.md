@@ -11,8 +11,8 @@ Studio has one long-lived editor, one local agent bridge, and one mounted conver
 ```ts
 const workspace = createWorkspaceController({
   localRoot: document.getElementById('editor-area')!,
-  cloudRoot: createCloudWorkspace(),
-  cloud: cloudClient.display,
+  cloudWorkspace: createCloudWorkspace({ display: cloudController }),
+  cloud: cloudController,
 });
 
 initAgentSidebar({
@@ -32,7 +32,7 @@ const target = workspace.composerTarget();
 if (target.kind === 'local-ready') {
   sendLocalMessage(text);
 } else if (target.kind === 'cloud-ready') {
-  await cloudUi.queueMessage(text, messageId, attachments);
+  await cloudUi.queueMessage(text, messageId, attachments, target);
 } else {
   showComposerUnavailable(target.message);
 }
@@ -48,10 +48,21 @@ type WorkspaceMode = 'local' | 'cloud';
 type ComposerTarget =
   | { kind: 'local-ready' }
   | { kind: 'local-blocked'; reason: 'cloud-lease'; message: string }
-  | { kind: 'cloud-ready'; sessionId: string; expectedVersion: number }
+  | {
+      kind: 'cloud-ready';
+      sessionId: string;
+      threadId: string;
+      documentId: string | null;
+      expectedVersion: number;
+    }
   | {
       kind: 'cloud-blocked';
-      reason: 'no-session' | 'not-accepting-messages';
+      reason: 'no-session' | 'not-accepting-messages' | 'timeline-unavailable';
+      message: string;
+    }
+  | {
+      kind: 'workspace-blocked';
+      reason: 'session-selection' | 'cloud-transfer' | 'cloud-message' | 'authority-transition';
       message: string;
     };
 
@@ -104,7 +115,7 @@ interface CloudDisplayFrame {
 }
 ```
 
-The worker runs one demand-driven `ffmpeg x11grab` publisher beside `SessionDisplay`. The worker sends JPEG frames through its existing session-token control path. The control plane keeps the newest two frames in memory. Public clients receive signed frame metadata and fetch signed image bytes with their normal access token.
+The worker runs Studio in headed Chromium on its private Xvfb display and starts one demand-driven `ffmpeg x11grab` publisher after Studio is ready. Chromium, Xvfb, the window manager, and ffmpeg receive allowlisted environments without worker control credentials. The worker sends JPEG frames through its existing session-token control path. The control plane parses encoded JPEG dimensions, requires them to match the authenticated stream, and keeps the newest two frames in memory. Public clients receive signed frame metadata, verify decoded dimensions, and fetch signed image bytes with their normal access token.
 
 Frame streams bind to the worker identity accepted by `SessionStore.authenticateWorker()`. A replacement worker gets a new token and stream. Old publishers fail authentication. No display generation is inferred from the runtime lease row because that row currently resets after recovery.
 
@@ -112,7 +123,7 @@ Capture runs at 2 fps only while Cloud mode has an authenticated visible viewer.
 
 ### Checkpoint ownership
 
-Ordinary cloud checkpoints keep their existing digest verification, archive, and origin-sync work. They stop calling `wasm.loadDocument()` on the primary editor. The cloud frame is the live cloud view.
+Ordinary cloud checkpoints keep their existing digest verification and archive work. Origin sync additionally requires the checkpoint's immutable document ID to match the active editor document. They stop calling `wasm.loadDocument()` on the primary editor. Failed turn-boundary mirroring remains pending and retries idempotently. The cloud frame is the live cloud view.
 
 Only these authority transitions replace primary editor bytes:
 
@@ -124,7 +135,7 @@ This keeps local scroll, selection, undo, file-handle identity, and local agent 
 
 ### Conversation ownership
 
-One `ChatThread`, transcript, and composer remain shared. Cloud and local agents do not write it concurrently. During a cloud lease, Local mode shows retained local state and a blocked composer. Cloud mode queues messages into the durable room. `AgentBridge` stays connected but cannot start another turn until takeover or end imports the stable cloud timeline.
+One mounted transcript and composer remain shared. Cloud and local agents do not write them concurrently. During a cloud lease, Local mode shows retained local state and a blocked composer. Cloud mode binds the selected session, timeline, thread, document, and expected version before it queues messages into the durable room. Selection, transfer, message submission, takeover, and result replacement hold explicit workspace locks across asynchronous boundaries. `AgentBridge` stays connected but cannot start another turn until takeover or result application imports the stable cloud timeline.
 
 This preserves the current whole-thread timeline contract. Source-aware concurrent local and cloud turns require event envelopes with immutable source, thread, session, and turn identity, plus message-level reconciliation. That work stays outside this change.
 
@@ -147,11 +158,14 @@ This preserves the current whole-thread timeline contract. Source-aware concurre
 ## Boundaries and recovery
 
 - Frame state is transient. Conversation and document state remain durable through the existing room, timeline, and checkpoint stores.
+- Checkpoint boundary events follow their document session even while another Cloud transcript is selected; transcript filtering applies only to live agent events.
+- Finite desktop operations stay pinned to one saved server identity. Profile changes drain admitted work, close streams, and park durable recovery records until their recorded destination is active again.
+- Browser credentials use one validated authoritative profile-and-token record. Web Locks serialize cross-tab commits, storage events advance the profile epoch and close stale streams, and legacy split-key migration never attaches an unscoped bearer token to a server profile.
 - The frame store retains two frames per stream and never writes frames to SQLite or BlobStore.
 - Every frame is JPEG, at most 512 KiB, and bound to an authenticated worker stream. The server computes its digest.
 - Worker upload, server storage, and client decode are all latest-wins with one pending item.
 - Suspend, completion, requeue, worker loss, lease replacement, and runtime shutdown close publishers, subscribers, frame buffers, and demand.
-- A display failure never stops document tools or cloud chat.
+- A display startup failure uses the no-preview headless runtime. A display or headed-browser loss after startup fails the worker into the existing recovery path instead of publishing a false live preview.
 - The preview is view-only. Pointer and keyboard input need a separate audited capability and are outside `rauhwpx-frame-v1`.
 - The transcript and stable checkpoint mirror remain the accessible representation. Preview status uses an ARIA live region and never captures keyboard focus.
 - Desktop self-hosted, app-hosted, and browser clients return the same typed unavailable reasons. Missing methods on older builds map to `client-unsupported`.
@@ -186,8 +200,17 @@ RFB, noVNC, public WebSocket upgrades, remote input, reusable viewer secrets, an
 - Local composer is blocked while cloud owns the document.
 - Hidden preview demand does not keep the worker awake.
 - Cloud checkpoints no longer replace the local editor before takeover or explicit result application.
+- Profile changes are writer-priority barriers, and each epoch names one committed server identity.
+- Takeover completion receipts bind the pinned destination, session, and applied operation.
 - Both worker images receive the same pinned capture dependency and image-level checks.
 
-## Next implementation step
+## Verification, 2026-08-30
 
-Build the backend vertical slice first. Prove one authenticated worker frame reaches a paired client, stale workers cannot publish, buffers stay bounded, and display failure leaves document work running.
+- 1,822 Studio tests passed.
+- 343 cloud and desktop tests passed with three platform skips.
+- The Studio production build, worker-only build, and cloud syntax checks passed.
+- The Chromium Local/Cloud workspace E2E passed with mounted editor identity, hidden-root inertness, display cleanup, lease ownership, and composer routing intact.
+- Chromium verified mounted editor, ruler, input, status bar, transcript, composer, draft, and scroll identity across Local and Cloud changes.
+- The Linux proof built the worker-only Studio runtime, loaded a real HWPX document, started its cloud chat, captured the headed window through Xvfb and ffmpeg, and validated the 1280 x 800 JPEG.
+- A Linux process proof verified that LocalRunner removes and reaps a detached same-UID descendant before workspace cleanup.
+- The final sandbox image booted with `tini` 0.19.0 as PID 1 and returned a healthy protocol-v1 response.

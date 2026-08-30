@@ -130,11 +130,14 @@ test('config gates the local runner and keeps the control socket outside the dat
     RAUHWpx_RUNNER: 'local',
     RAUHWpx_WORKER_UID: '1001',
     RAUHWpx_WORKER_CONTROL_DIR: '/run/rauhwpx',
+    RAUHWpx_MAX_RUNNING: '8',
   });
   assert.equal(local.runner, 'local');
   assert.equal(local.workerUid, 1001);
   assert.equal(local.workerGid, 1001);
   assert.equal(local.workerControlSocket, '/run/rauhwpx/control.sock');
+  assert.equal(local.maxRunningSessions, 1);
+  assert.equal(parseConfig({ ...base, RAUHWpx_MAX_RUNNING: '8' }).maxRunningSessions, 8);
   assert.deepEqual(local.startupProviders, ['claude', 'codex', 'pi', 'grok', 'cursor']);
   assert.deepEqual(local.browserOrigins, []);
   assert.deepEqual(parseConfig({
@@ -207,6 +210,7 @@ test('local runner isolates each session workspace and cleans it up on stop', as
       return child;
     },
   });
+  assert.equal(runner.maxRunningSessions, 1);
 
   const first = await runner.start({ id: 'session-one', provider: 'codex' }, {
     workerToken: 'ra_wt_first',
@@ -392,12 +396,13 @@ test('the app sandbox image runs the control plane with the local runner and a b
   assert.match(containerfile, /COPY worker \/app\/worker/);
   assert.match(containerfile, /COPY document-runtime \/app\/document-runtime/);
   assert.match(containerfile, /useradd --system --uid 1001/);
-  assert.match(containerfile, /ENTRYPOINT \["\/app\/install\/sandbox-entrypoint\.sh"\]/);
+  assert.match(containerfile, /ENTRYPOINT \["\/usr\/bin\/tini", "--", "\/app\/install\/sandbox-entrypoint\.sh"\]/);
   assert.match(containerfile, /\bxvfb\b/);
   assert.match(containerfile, /\bxauth\b/);
   assert.match(containerfile, /\bx11-utils\b/);
   assert.match(containerfile, /\bx11-apps\b/);
   assert.match(containerfile, /matchbox-window-manager/);
+  assert.match(containerfile, /tini="\$TINI_VERSION"/);
   assert.match(containerfile, /ffmpeg="\$FFMPEG_VERSION"/);
   assert.match(containerfile, /ffmpeg -hide_banner -devices 2>&1 \| grep -q 'x11grab'/);
   assert.doesNotMatch(containerfile, /^USER /m);

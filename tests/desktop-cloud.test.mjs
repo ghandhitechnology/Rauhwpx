@@ -17,6 +17,31 @@ import { normalizeCloudProfile, normalizeTailscaleHttpsPort } from '../desktop/c
 import { CloudProvisioner, sshArguments, __test as provisionerTest } from '../desktop/cloud-provisioner.mjs';
 import { SshTunnelManager, __test as tunnelTest } from '../desktop/cloud-ssh-tunnel.mjs';
 import { applyCloudRecovery } from '../desktop/cloud-result.mjs';
+import { mergeCloudOperationSnapshot } from '../desktop/cloud-snapshot.mjs';
+
+test('desktop IPC cannot merge an operation response into another profile epoch', () => {
+  const profileA = { kind: 'configured', profile: { serverPublicKey: 'server-a' } };
+  const profileB = { kind: 'configured', profile: { serverPublicKey: 'server-b' } };
+  assert.deepEqual(
+    mergeCloudOperationSnapshot(
+      { profileEpoch: 4, profile: profileA, commandResult: { ok: true } },
+      { profileEpoch: 4, profile: profileA, session: { kind: 'idle' } },
+    ),
+    {
+      profileEpoch: 4,
+      profile: profileA,
+      commandResult: { ok: true },
+      session: { kind: 'idle' },
+    },
+  );
+  assert.throws(
+    () => mergeCloudOperationSnapshot(
+      { profileEpoch: 4, profile: profileA, commandResult: { ok: true } },
+      { profileEpoch: 5, profile: profileB, session: { kind: 'idle' } },
+    ),
+    { code: 'PROFILE_CHANGED' },
+  );
+});
 
 const SERVER_IDENTITY = generateKeyPairSync('ed25519');
 const SERVER_KEY = `ed25519:${SERVER_IDENTITY.publicKey.export({ type: 'spki', format: 'der' }).toString('base64url')}`;
@@ -403,6 +428,96 @@ test('handoff store persists transitions and ignores replayed events', async (t)
   assert.equal(record.originDocumentId, 'document-1');
 });
 
+test('takeover receipts are scoped to normalized server identity and survive reload', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-takeover-receipts-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const filePath = path.join(directory, 'handoffs.json');
+  const store = new CloudHandoffStore({ filePath });
+  const destinationA = {
+    endpoint: 'https://receipt-a.example.ts.net/rauhwpx-cloud/',
+    serverPublicKey: SERVER_KEY,
+  };
+  const destinationB = {
+    endpoint: 'https://receipt-b.example.ts.net/rauhwpx-cloud',
+    serverPublicKey: SERVER_KEY,
+  };
+  const sessionId = 'shared-takeover-session';
+  const operationId = 'shared-takeover-operation';
+
+  await store.consumeTakeoverBoundary(destinationA, sessionId, operationId);
+  assert.equal(await store.hasConsumedTakeoverBoundary(destinationA, sessionId, operationId), true);
+  assert.equal(await store.hasConsumedTakeoverBoundary(destinationB, sessionId, operationId), false);
+  await store.consumeTakeoverBoundary(destinationB, sessionId, operationId);
+
+  const persisted = JSON.parse(await readFile(filePath, 'utf8'));
+  assert.deepEqual(
+    persisted.takeoverReceipts.map((receipt) => receipt.destination.endpoint).sort(),
+    [destinationA.endpoint.replace(/\/$/, ''), destinationB.endpoint].sort(),
+  );
+  persisted.takeoverReceipts.push({
+    sessionId,
+    operationId: 'legacy-unscoped-operation',
+    consumedAt: new Date().toISOString(),
+  });
+  await writeFile(filePath, `${JSON.stringify(persisted)}\n`);
+
+  const reloaded = new CloudHandoffStore({ filePath });
+  assert.equal(await reloaded.hasConsumedTakeoverBoundary(destinationA, sessionId, operationId), true);
+  assert.equal(await reloaded.hasConsumedTakeoverBoundary(destinationB, sessionId, operationId), true);
+  assert.equal(
+    await reloaded.hasConsumedTakeoverBoundary(destinationA, sessionId, 'legacy-unscoped-operation'),
+    false,
+  );
+  const migrated = JSON.parse(await readFile(filePath, 'utf8'));
+  assert.equal(migrated.takeoverReceipts.length, 2);
+  assert.ok(migrated.takeoverReceipts.every((receipt) => receipt.destination?.serverPublicKey === SERVER_KEY));
+});
+
+test('a failed takeover receipt write cannot leak through a concurrent mutation', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-takeover-receipt-failure-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const filePath = path.join(directory, 'handoffs.json');
+  const destination = {
+    endpoint: 'https://receipt-failure.example.ts.net/rauhwpx-cloud',
+    serverPublicKey: SERVER_KEY,
+  };
+  const operationId = 'failed-receipt-operation';
+  const receiptWriteStarted = Promise.withResolvers();
+  const releaseReceiptWrite = Promise.withResolvers();
+  const atomicWrite = async (target, value) => {
+    if (value.takeoverReceipts.some((receipt) => receipt.operationId === operationId)) {
+      receiptWriteStarted.resolve();
+      await releaseReceiptWrite.promise;
+      throw new Error('forced receipt write failure');
+    }
+    await writeFile(target, `${JSON.stringify(value)}\n`);
+  };
+  const store = new CloudHandoffStore({ filePath, atomicWrite });
+  const created = await store.create({
+    sessionId: 'receipt-failure-session', documentId: 'receipt-failure-document',
+    documentName: 'receipt-failure.hwpx', documentBytes: Buffer.from('document'),
+    provider: 'codex', limits: { maxTurns: 10 },
+  });
+
+  const receiptWrite = store.consumeTakeoverBoundary(destination, 'cloud-receipt-failure', operationId);
+  await receiptWriteStarted.promise;
+  assert.equal(
+    await store.hasConsumedTakeoverBoundary(destination, 'cloud-receipt-failure', operationId),
+    false,
+  );
+  const concurrentPatch = store.patch(created.id, { statusMessage: 'concurrent mutation' });
+  releaseReceiptWrite.resolve();
+  await assert.rejects(receiptWrite, /forced receipt write failure/);
+  await concurrentPatch;
+
+  const reloaded = new CloudHandoffStore({ filePath });
+  assert.equal(
+    await reloaded.hasConsumedTakeoverBoundary(destination, 'cloud-receipt-failure', operationId),
+    false,
+  );
+  assert.equal((await reloaded.get(created.id)).statusMessage, 'concurrent mutation');
+});
+
 test('snapshot selection does not let an updated stale failure hide newer live work', async () => {
   const base = {
     version: 1,
@@ -448,6 +563,140 @@ test('snapshot selection does not let an updated stale failure hide newer live w
   assert.equal(snapshot.session.kind, 'suspended');
   assert.equal(snapshot.session.sessionId, 'cloud-live');
   assert.equal(snapshot.lease.owner, 'cloud');
+});
+
+test('desktop selected session never changes the lease for the scoped document', async () => {
+  const base = {
+    version: 1,
+    revision: 1,
+    threadId: 'thread-a',
+    documentName: 'scope.hwpx',
+    documentDigest: 'a'.repeat(64),
+    documentSize: 1,
+    limits: {},
+    createdAt: '2026-08-30T00:00:00.000Z',
+    updatedAt: '2026-08-30T00:00:00.000Z',
+    error: null,
+  };
+  const records = [
+    {
+      ...base,
+      id: 'handoff-a',
+      cloudSessionId: 'cloud-a',
+      originSessionId: 'desktop-window',
+      originDocumentId: 'document-a',
+      state: 'running',
+    },
+    {
+      ...base,
+      id: 'handoff-b',
+      cloudSessionId: 'cloud-b',
+      originSessionId: 'desktop-window',
+      originDocumentId: 'document-b',
+      threadId: 'thread-b',
+      state: 'suspended',
+    },
+  ];
+  const coordinator = new CloudCoordinator({
+    client: { loadProfile: async () => null, isPaired: async () => false },
+    store: { list: async () => records },
+    provisioner: {},
+  });
+
+  let snapshot = await coordinator.snapshot({
+    originSessionId: 'desktop-window',
+    documentId: 'document-a',
+    selectedSessionId: 'cloud-b',
+  });
+  assert.equal(snapshot.session.sessionId, 'cloud-b');
+  assert.deepEqual(snapshot.lease, {
+    owner: 'cloud',
+    sessionId: 'cloud-a',
+    acquiredAt: base.createdAt,
+  });
+
+  records[1].state = 'failed';
+  records[1].error = 'terminal';
+  snapshot = await coordinator.snapshot({
+    originSessionId: 'desktop-window',
+    documentId: 'document-a',
+    selectedSessionId: 'cloud-b',
+  });
+  assert.equal(snapshot.session.kind, 'failed');
+  assert.equal(snapshot.lease.sessionId, 'cloud-a');
+});
+
+test('desktop cancelled takeover-ready sessions retain the document lease until completion', async () => {
+  const record = {
+    id: 'handoff-takeover',
+    version: 1,
+    revision: 1,
+    cloudSessionId: 'cloud-takeover',
+    originSessionId: 'desktop-window',
+    originDocumentId: 'document-takeover',
+    threadId: 'thread-takeover',
+    documentName: 'takeover.hwpx',
+    documentDigest: 'a'.repeat(64),
+    documentSize: 1,
+    state: 'cancelled',
+    takeoverReady: true,
+    limits: {},
+    createdAt: '2026-08-30T00:00:00.000Z',
+    updatedAt: '2026-08-30T00:00:00.000Z',
+    error: null,
+  };
+  const coordinator = new CloudCoordinator({
+    client: { loadProfile: async () => null, isPaired: async () => false },
+    store: { list: async () => [record] },
+    provisioner: {},
+  });
+
+  let snapshot = await coordinator.snapshot({
+    originSessionId: 'desktop-window',
+    documentId: 'document-takeover',
+  });
+  assert.equal(snapshot.session.kind, 'taking-over');
+  assert.equal(snapshot.lease.owner, 'cloud');
+
+  snapshot = await coordinator.snapshot({ selectedSessionId: 'cloud-takeover' });
+  assert.equal(snapshot.lease.owner, 'cloud');
+
+  record.takeoverReady = false;
+  snapshot = await coordinator.snapshot({
+    originSessionId: 'desktop-window',
+    documentId: 'document-takeover',
+  });
+  assert.equal(snapshot.lease.owner, 'local');
+});
+
+test('desktop checkpoints carry the immutable handoff document identity', async () => {
+  const coordinator = new CloudCoordinator({
+    client: {
+      downloadCheckpoint: async () => ({
+        name: 'document.hwpx',
+        bytes: Buffer.from('checkpoint'),
+        size: 10,
+        sha256: 'b'.repeat(64),
+        revision: 3,
+        turn: 2,
+        boundaryOperation: 'operation-a',
+        boundaryKind: 'turn',
+      }),
+    },
+    store: {
+      list: async () => [{
+        id: 'handoff-a',
+        cloudSessionId: 'cloud-a',
+        originDocumentId: 'document-a',
+        documentDigest: 'a'.repeat(64),
+      }],
+    },
+    provisioner: {},
+  });
+  const checkpoint = await coordinator.downloadCheckpoint({ sessionId: 'cloud-a' });
+  assert.equal(checkpoint.documentId, 'document-a');
+  assert.equal(checkpoint.originOnThisDevice, true);
+  assert.equal(checkpoint.expectedOriginSha256, 'a'.repeat(64));
 });
 
 test('loading legacy terminal handoffs removes their staged payloads', async (t) => {
@@ -1911,9 +2160,17 @@ test('concurrent requests cannot stage duplicate document transfers', async (t) 
     (error) => error.code === 'TRANSFER_ALREADY_ACTIVE',
   );
   assert.equal((await store.list()).length, 1);
+  const otherDocument = coordinator.transfer({
+    ...payload,
+    threadId: 'thread-other-document',
+    documentId: 'document-other',
+  }, { originSessionId: 'desktop-duplicate' });
+  while ((await store.list()).length < 2) await new Promise((resolve) => setImmediate(resolve));
   const stopped = assert.rejects(first, /stopped/);
+  const otherStopped = assert.rejects(otherDocument, /stopped/);
   await coordinator.stop();
   await stopped;
+  await otherStopped;
 });
 
 test('missing cloud configuration fails once instead of entering transfer recovery', async (t) => {

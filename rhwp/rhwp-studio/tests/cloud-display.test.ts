@@ -378,3 +378,24 @@ test('CloudController replays a verified frame that arrives during the open hand
   await connection.close();
   controller.dispose();
 });
+
+test('CloudController disposal closes owned resources exactly once', async () => {
+  let cloudUnsubscribes = 0;
+  let displayUnsubscribes = 0;
+  let closes = 0;
+  const controller = createCloudController({
+    cloudOpenDisplay: async () => ({ connectionId: 'connection-owned', capability: capability() }),
+    cloudCloseDisplay: async () => { closes += 1; },
+    onCloudEvent: () => () => { cloudUnsubscribes += 1; },
+    onCloudDisplayEvent: () => () => { displayUnsubscribes += 1; },
+  } as never);
+  await controller.openDisplay(sessionId, () => {});
+  controller.dispose();
+  controller.dispose();
+  await Promise.resolve();
+  assert.deepEqual({ cloudUnsubscribes, displayUnsubscribes, closes }, {
+    cloudUnsubscribes: 1,
+    displayUnsubscribes: 1,
+    closes: 1,
+  });
+});

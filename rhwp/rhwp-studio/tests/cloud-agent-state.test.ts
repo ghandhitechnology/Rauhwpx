@@ -8,6 +8,7 @@ const now = '2026-08-23T10:00:00.000Z';
 function state(revision: number, session: Record<string, unknown> = { kind: 'idle' }) {
   return {
     revision,
+    profileEpoch: 1,
     available: true,
     profile: {
       kind: 'configured',
@@ -93,10 +94,40 @@ test('cloud state parser rejects missing, malformed and partially valid snapshot
   assert.equal(parseCloudSnapshot({}), null);
   assert.equal(parseCloudSnapshot({ ...state(1), available: 'yes' }), null);
   assert.equal(parseCloudSnapshot({ ...state(1), revision: '1' }), null);
+  assert.equal(parseCloudSnapshot({ ...state(1), profileEpoch: '1' }), null);
+  const { profileEpoch: _profileEpoch, ...stateWithoutEpoch } = state(1);
+  assert.equal(parseCloudSnapshot(stateWithoutEpoch), null);
   assert.equal(parseCloudSnapshot({ ...state(1), queuedMessages: [{ id: 'q', text: 'hello' }] }), null);
   assert.equal(parseCloudSnapshot(state(1, { ...running(), elapsedMs: -1 })), null);
   assert.equal(parseCloudSnapshot({ ...state(1), timeline: { schema: 'unknown' } }), null);
   assert.equal(parseCloudSnapshot({ ...state(1, running()), sessions: [running(), running()] }), null);
+});
+
+test('cloud state parser requires the frozen takeover operation receipt', () => {
+  const timeline = {
+    schema: 'rauhwpx.cloud.timeline',
+    version: 1,
+    exportedAt: now,
+    thread: {
+      id: 'thread-1',
+      title: 'Takeover',
+      titleRequested: true,
+      createdAt: Date.parse(now),
+      updatedAt: Date.parse(now),
+      agent: 'codex',
+      model: 'gpt-5.6',
+      effort: 'high',
+      workflow: 'direct',
+      docKey: 'cloud.hwpx',
+      documentId: 'doc-1',
+      activeTemplateId: null,
+      messages: [],
+    },
+  };
+  const takeover = { operationId: 'operation-a', document: null, timeline };
+  assert.equal(parseCloudSnapshot({ ...state(2), takeover })?.takeover?.operationId, 'operation-a');
+  const { operationId: _operationId, ...unkeyed } = takeover;
+  assert.equal(parseCloudSnapshot({ ...state(2), takeover: unkeyed }), null);
 });
 
 test('controller accepts scoped cross-device events and selects any VPS session', async () => {
@@ -160,6 +191,10 @@ test('controller ignores stale events and uses explicit desktop payloads', async
       calls.push(['command', payload]);
       return { snapshot: state(3, running(3)) };
     },
+    cloudCompleteTakeover: async (payload) => {
+      calls.push(['complete-takeover', payload]);
+      return { snapshot: state(3, running(3)) };
+    },
     cloudReadReference: async (payload) => {
       calls.push(['reference', payload]);
       return { bytes: new Uint8Array([1, 2, 3]) };
@@ -193,6 +228,7 @@ test('controller ignores stale events and uses explicit desktop payloads', async
     message: '다음 경계에서 확인해줘',
     messageId: 'message-1',
   });
+  await controller.completeTakeover('session-1', 'operation-a');
   const bytes = await controller.readReference({ id: 'ref-1', scope: 'document', scopeId: 'doc-1' });
   const resolution = await controller.resolveResult('session-1', 'replace');
 
@@ -210,8 +246,63 @@ test('controller ignores stale events and uses explicit desktop payloads', async
       message: '다음 경계에서 확인해줘',
       messageId: 'message-1',
     }],
+    ['complete-takeover', { sessionId: 'session-1', operationId: 'operation-a' }],
     ['reference', { id: 'ref-1', scope: 'document', scopeId: 'doc-1' }],
     ['resolve', { sessionId: 'session-1', action: 'replace' }],
+  ]);
+  controller.dispose();
+});
+
+test('controller profile epochs fence late snapshots and checkpoint downloads', async () => {
+  let emit: ((event: unknown) => void) | undefined;
+  const staleSnapshot = Promise.withResolvers<unknown>();
+  const staleCheckpoint = Promise.withResolvers<unknown>();
+  const controller = createCloudController({
+    cloudGetState: () => staleSnapshot.promise,
+    cloudDownloadCheckpoint: () => staleCheckpoint.promise,
+    onCloudEvent: (listener) => {
+      emit = listener;
+      return () => { emit = undefined; };
+    },
+  });
+  const refresh = controller.refresh({ threadId: 'thread-a', documentId: 'document-a' });
+  emit?.({ snapshot: { ...state(2), profileEpoch: 2 } });
+  staleSnapshot.resolve({ snapshot: { ...state(3), profileEpoch: 1 } });
+  await assert.rejects(refresh, { code: 'PROFILE_CHANGED' });
+  assert.equal(controller.getSnapshot().profileEpoch, 2);
+
+  const download = controller.downloadCheckpoint('session-a', 'operation-a');
+  emit?.({ snapshot: { ...state(3), profileEpoch: 3 } });
+  staleCheckpoint.resolve({
+    sessionId: 'session-a', documentId: 'document-a', kind: 'turn', fileName: 'document.hwpx',
+    bytes: new Uint8Array([1]), byteLength: 1, sha256: 'a'.repeat(64), revision: 1, turn: 1,
+    operationId: 'operation-a',
+  });
+  await assert.rejects(download, { code: 'PROFILE_CHANGED' });
+  assert.equal(controller.getSnapshot().profileEpoch, 3);
+  controller.dispose();
+});
+
+test('controller dispatches only current-profile events from desktop batches', () => {
+  let emit: ((event: unknown) => void) | undefined;
+  const controller = createCloudController({
+    onCloudEvent: (listener) => {
+      emit = listener;
+      return () => { emit = undefined; };
+    },
+  });
+  const events: unknown[] = [];
+  controller.subscribeEvents((event) => events.push(event));
+  emit?.({
+    type: 'cloud-event-batch',
+    snapshot: { ...state(2), profileEpoch: 2 },
+    events: [
+      { type: 'session-event', profileEpoch: 1, sessionId: 'session-a' },
+      { type: 'session-event', profileEpoch: 2, sessionId: 'session-b' },
+    ],
+  });
+  assert.deepEqual(events, [
+    { type: 'session-event', profileEpoch: 2, sessionId: 'session-b' },
   ]);
   controller.dispose();
 });

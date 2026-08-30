@@ -14,8 +14,19 @@ class MemoryStorage implements Storage {
   setItem(key: string, value: string) { this.#values.set(key, value); }
 }
 
+class MemoryStorageEvents {
+  #listeners = new Set<(event: { key: string; storageArea: Storage }) => void>();
+  addEventListener(_type: 'storage', listener: (event: { key?: string | null; storageArea?: Storage | null }) => void) {
+    this.#listeners.add(listener as (event: { key: string; storageArea: Storage }) => void);
+  }
+  emit(storageArea: Storage, key: string) {
+    for (const listener of this.#listeners) listener({ key, storageArea });
+  }
+}
+
 const sessionId = 'session_browser_display_01';
 const streamId = 'stream-browser-display-01';
+const credentialsKey = 'rauhwpx.cloud.browser.credentials.v2';
 
 function digest(bytes: Uint8Array): string {
   return createHash('sha256').update(bytes).digest('hex');
@@ -42,6 +53,7 @@ function displayFixture({
   blockRefresh = false,
   oversizedCapability = false,
   oversizedInterest = false,
+  failSecondHealth = false,
 } = {}) {
   const identity = generateKeyPairSync('ed25519');
   const serverPublicKey = `ed25519:${identity.publicKey.export({ type: 'spki', format: 'der' }).toString('base64url')}`;
@@ -58,6 +70,7 @@ function displayFixture({
   const refreshStarted = Promise.withResolvers<void>();
   const releaseRefresh = Promise.withResolvers<void>();
   let refreshCalls = 0;
+  let healthCalls = 0;
 
   const signed = (
     request: Request,
@@ -90,6 +103,12 @@ function displayFixture({
     const request = new Request(input, init);
     const url = new URL(request.url);
     if (url.pathname.endsWith('/v1/health')) {
+      healthCalls += 1;
+      if (failSecondHealth && healthCalls === 2) {
+        return new Response(JSON.stringify({ ok: true, protocolVersion: 0 }), {
+          headers: { 'content-type': 'application/json' },
+        });
+      }
       return new Response(JSON.stringify({
         ok: true, version: '1.1.0', protocolVersion: 1, serverPublicKey, serverId: 'display-browser',
       }), { headers: { 'content-type': 'application/json', 'x-rauhwpx-server-key': serverPublicKey } });
@@ -355,20 +374,22 @@ test('browser display replacement awaits blocked capability cleanup', async () =
 test('browser display aborts one refresh waiter without cancelling the shared refresh', async () => {
   const fixture = displayFixture({ blockRefresh: true });
   const storage = new MemoryStorage();
-  storage.setItem('rauhwpx.cloud.browser.profile.v1', JSON.stringify({
-    name: 'Browser display VPS',
-    host: 'cloud.example.test',
-    sshUser: 'ubuntu',
-    sshPort: 22,
-    auth: { kind: 'ssh-agent' },
-    transport: { kind: 'https', endpoint: fixture.endpoint },
-    endpoint: fixture.endpoint,
-    serverPublicKey: fixture.serverPublicKey,
-  }));
-  storage.setItem('rauhwpx.cloud.browser.tokens.v1', JSON.stringify({
-    accessToken: 'browser-display-expired-access',
-    refreshToken: 'browser-display-refresh',
-    accessExpiresAt: Date.now() - 1,
+  storage.setItem(credentialsKey, JSON.stringify({
+    profile: {
+      name: 'Browser display VPS',
+      host: 'cloud.example.test',
+      sshUser: 'ubuntu',
+      sshPort: 22,
+      auth: { kind: 'ssh-agent' },
+      transport: { kind: 'https', endpoint: fixture.endpoint },
+      endpoint: fixture.endpoint,
+      serverPublicKey: fixture.serverPublicKey,
+    },
+    tokens: {
+      accessToken: 'browser-display-expired-access',
+      refreshToken: 'browser-display-refresh',
+      accessExpiresAt: Date.now() - 1,
+    },
   }));
   const api = createBrowserCloudApi({
     fetchImpl: fixture.fetchImpl,
@@ -420,6 +441,7 @@ test('browser profile activation closes and awaits the active display', async ()
   const api = await pairedApi(fixture);
   const opened = await api.cloudOpenDisplay({ sessionId });
   await waitFor(() => fixture.interests.some(({ active }) => active), 'active browser interest');
+  await waitFor(() => fixture.streamCalls() > 0, 'active browser display stream');
   let released = false;
   try {
     await api.cloudSaveProfile({
@@ -438,4 +460,71 @@ test('browser profile activation closes and awaits the active display', async ()
     await api.cloudCloseDisplay({ connectionId: opened.connectionId });
   }
   assert.equal(released, true);
+});
+
+test('failed browser profile activation closes stale display work and allows reopening', async () => {
+  const fixture = displayFixture({ failSecondHealth: true });
+  const api = await pairedApi(fixture);
+  const opened = await api.cloudOpenDisplay({ sessionId });
+  await waitFor(() => fixture.interests.some(({ active }) => active), 'active browser interest');
+
+  await assert.rejects(api.cloudSaveProfile({
+    profile: {
+      name: 'Invalid browser VPS',
+      host: 'cloud.example.test',
+      sshUser: 'ubuntu',
+      sshPort: 22,
+      auth: { kind: 'ssh-agent' },
+      transport: { kind: 'https', endpoint: fixture.endpoint },
+      serverPublicKey: fixture.serverPublicKey,
+    },
+  }), /지원하는 Rauhwpx Cloud 서버가 아닙니다/);
+  let reopened: Awaited<ReturnType<typeof api.cloudOpenDisplay>> | null = null;
+  try {
+    assert.equal(fixture.interests.at(-1)?.active, false);
+    reopened = await api.cloudOpenDisplay({ sessionId });
+    assert.notEqual(reopened.connectionId, opened.connectionId);
+  } finally {
+    if (reopened) await api.cloudCloseDisplay({ connectionId: reopened.connectionId });
+    else await api.cloudCloseDisplay({ connectionId: opened.connectionId });
+  }
+});
+
+test('browser storage authority changes close an active display from the stale tab', async () => {
+  const fixture = displayFixture();
+  const storage = new MemoryStorage();
+  const storageEvents = new MemoryStorageEvents();
+  const api = createBrowserCloudApi({
+    fetchImpl: fixture.fetchImpl,
+    storage,
+    storageEvents,
+    display: { retryBaseMs: 1, retryMaxMs: 2 },
+  });
+  assert.ok(api);
+  await api.cloudPair({
+    code: 'ABCD-EFGH-IJKL',
+    profile: {
+      name: 'Browser display VPS',
+      host: 'cloud.example.test',
+      sshUser: 'ubuntu',
+      sshPort: 22,
+      auth: { kind: 'ssh-agent' },
+      transport: { kind: 'https', endpoint: fixture.endpoint },
+      serverPublicKey: fixture.serverPublicKey,
+    },
+  });
+  const opened = await api.cloudOpenDisplay({ sessionId });
+  await waitFor(() => fixture.interests.some(({ active }) => active), 'active browser interest');
+  await waitFor(() => fixture.streamCalls() > 0, 'active browser display stream');
+  const credentials = JSON.parse(storage.getItem(credentialsKey)!);
+  storage.setItem(credentialsKey, JSON.stringify({
+    ...credentials,
+    tokens: { ...credentials.tokens, accessToken: 'other-tab-access' },
+  }));
+  storageEvents.emit(storage, credentialsKey);
+  await api.cloudGetState({ threadId: '', documentId: null });
+
+  assert.equal(fixture.interests.at(-1)?.active, false);
+  assert.equal(fixture.streamAborted(), true);
+  await api.cloudCloseDisplay({ connectionId: opened.connectionId });
 });

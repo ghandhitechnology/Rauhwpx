@@ -129,6 +129,10 @@ import type {
   CloudTakeoverPayload,
 } from './cloud/types.ts';
 import {
+  checkpointMatchesActiveDocument,
+  persistCheckpointToBrowserOrigin,
+} from './cloud/checkpoint-origin.ts';
+import {
   contextualEditingToolbarMode,
   contextualObjectCommandEnabled,
   type ContextualEditingToolbarMode,
@@ -146,6 +150,7 @@ const eventBus = new EventBus();
 const documentState = new DocumentDirtyState(eventBus);
 documentState.installBeforeUnload(window);
 const rendererSessionContextPromise = getRendererSessionContext();
+let disposeAgentSidebar = (): void => {};
 const autosaveManager = new AutosaveManager({
   exportBytes: () => wasm.exportHwp(),
   schedule: autosaveScheduleFromUserSettings(),
@@ -158,7 +163,10 @@ void rendererSessionContextPromise.then((context) => {
 });
 autosaveManager.connect(eventBus);
 window.addEventListener('pagehide', (event) => {
-  if (!event.persisted) autosaveManager.dispose();
+  if (!event.persisted) {
+    disposeAgentSidebar();
+    autosaveManager.dispose();
+  }
 });
 initThemeSync((effective, mode) => {
   eventBus.emit('theme-changed', { mode, effective });
@@ -211,6 +219,7 @@ let documentReadOnly = new URLSearchParams(window.location.search).get('template
 let agentEditingLease: AgentEditingLease = { active: false, agent: 'codex' };
 let previewDocumentReadOnly = documentReadOnly;
 let cloudDocumentLeaseSessionId: string | null = null;
+let cloudAuthorityTransitionCount = 0;
 let rendererRuntimeRequest: EmbedRendererRuntimeRequestV1 | null = null;
 let renderBackendFallbackReason: RenderBackendFallbackReason | null = null;
 let rendererInitializationError: string | null = null;
@@ -300,8 +309,26 @@ function setCloudDocumentLease(cloudOwned: boolean, sessionId: string | null): v
   syncDocumentReadOnly();
 }
 
+function beginCloudAuthorityTransition(): { release(): void } {
+  cloudAuthorityTransitionCount += 1;
+  document.documentElement.dataset.cloudAuthorityTransition = 'true';
+  syncDocumentReadOnly();
+  let released = false;
+  return {
+    release() {
+      if (released) return;
+      released = true;
+      cloudAuthorityTransitionCount = Math.max(0, cloudAuthorityTransitionCount - 1);
+      document.documentElement.dataset.cloudAuthorityTransition = cloudAuthorityTransitionCount > 0 ? 'true' : 'false';
+      syncDocumentReadOnly();
+    },
+  };
+}
+
 function syncDocumentReadOnly(): void {
-  documentReadOnly = previewDocumentReadOnly || cloudDocumentLeaseSessionId !== null;
+  documentReadOnly = previewDocumentReadOnly
+    || cloudDocumentLeaseSessionId !== null
+    || cloudAuthorityTransitionCount > 0;
   document.documentElement.dataset.documentReadOnly = documentReadOnly ? 'true' : 'false';
   inputHandler?.setReadOnly(documentReadOnly);
   toolbar?.setEnabled(wasm.pageCount > 0 && !documentReadOnly && !agentEditingLease.active);
@@ -558,16 +585,19 @@ function installCloudDocumentRuntimeApi(agentBridge: AgentBridge): void {
   });
 }
 
-function applyCloudResult(result: CloudDownloadResult, resolution: CloudResultResolution): Promise<void> {
+async function applyCloudResult(result: CloudDownloadResult, resolution: CloudResultResolution): Promise<{
+  documentId: string;
+  fileName: string;
+} | null> {
   if (resolution.action !== 'replace') {
     if (resolution.action === 'keep-both') {
       const copy = resolution.preservedCopyName ?? result.preservedCopyName ?? resolution.path ?? result.fileName;
       const reason = resolution.conflict === 'external-change' ? '원본 변경을 감지해 ' : '';
       showToast({ message: `${reason}두 파일을 모두 보관했습니다: 원본, ${copy}`, durationMs: 4500 });
-      return Promise.resolve();
+      return null;
     }
     showToast({ message: '클라우드 결과를 버렸습니다.', durationMs: 3000 });
-    return Promise.resolve();
+    return null;
   }
   const requestId = `cloud-result-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
   const opened = new Promise<void>((resolve, reject) => {
@@ -592,15 +622,16 @@ function applyCloudResult(result: CloudDownloadResult, resolution: CloudResultRe
     requestId,
     skipUnsavedGuard: true,
   });
-  return opened.then(
-    () => {
-      showToast({ message: `${result.fileName}에 클라우드 결과를 반영했습니다.`, durationMs: 3500 });
-    },
-    (error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      showToast({ message: `클라우드 결과를 열지 못했습니다: ${message}`, durationMs: 4500 });
-    },
-  );
+  try {
+    await opened;
+    if (!activeDocumentId) throw new Error('Cloud 결과에 로컬 문서 ID를 할당하지 못했습니다.');
+    showToast({ message: `${result.fileName}에 클라우드 결과를 반영했습니다.`, durationMs: 3500 });
+    return { documentId: activeDocumentId, fileName: result.fileName };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    showToast({ message: `클라우드 결과를 열지 못했습니다: ${message}`, durationMs: 4500 });
+    throw error;
+  }
 }
 
 async function applyCloudTakeover(takeover: CloudTakeoverPayload): Promise<{
@@ -643,42 +674,28 @@ async function applyCloudTakeover(takeover: CloudTakeoverPayload): Promise<{
   return { documentId: activeDocumentId, fileName: takeover.document.fileName };
 }
 
-async function applyCloudCheckpoint(checkpoint: CloudCheckpointPayload): Promise<void> {
+async function persistCloudCheckpoint(checkpoint: CloudCheckpointPayload): Promise<void> {
   if (!activeDocumentId || wasm.pageCount === 0) return;
-  const currentDocumentId = activeDocumentId;
   const currentHandle = wasm.currentFileHandle;
-  if (checkpoint.kind === 'turn' && checkpoint.originOnThisDevice && currentHandle) {
+  if (checkpoint.kind === 'turn' && checkpointMatchesActiveDocument(checkpoint, activeDocumentId)) {
     try {
-      const permission = await currentHandle.queryPermission?.({ mode: 'readwrite' });
-      if (permission === undefined || permission === 'granted') {
-        const currentBytes = new Uint8Array(await (await currentHandle.getFile()).arrayBuffer());
-        const currentDigest = await bytesToSha256(currentBytes);
-        const expectedDigest = browserOriginSyncDigest(checkpoint.sessionId)
+      const outcome = await persistCheckpointToBrowserOrigin({
+        handle: currentHandle,
+        bytes: checkpoint.bytes,
+        sha256: checkpoint.sha256,
+        expectedSha256: browserOriginSyncDigest(checkpoint.sessionId)
           ?? checkpoint.expectedOriginSha256
-          ?? null;
-        if (currentDigest === checkpoint.sha256) {
-          setBrowserOriginSyncDigest(checkpoint.sessionId, checkpoint.sha256);
-        } else if (expectedDigest && currentDigest === expectedDigest) {
-          const writable = await currentHandle.createWritable();
-          try {
-            const exactBytes = new Uint8Array(checkpoint.bytes.byteLength);
-            exactBytes.set(checkpoint.bytes);
-            await writable.write(new Blob([exactBytes.buffer]));
-            await writable.close();
-          } catch (error) {
-            await writable.abort?.(error).catch(() => undefined);
-            throw error;
-          }
-          const savedDigest = await bytesToSha256(new Uint8Array(await (await currentHandle.getFile()).arrayBuffer()));
-          if (savedDigest !== checkpoint.sha256) throw new Error('브라우저 원본 저장 검증에 실패했습니다.');
-          setBrowserOriginSyncDigest(checkpoint.sessionId, checkpoint.sha256);
-        } else {
-          showToast({
-            message: '원본이 다른 곳에서 변경되어 덮어쓰지 않았습니다. Cloud 버전은 로컬 보관함에 유지됩니다.',
-            durationMs: 5000,
-          });
-        }
-      } else {
+          ?? null,
+        digest: bytesToSha256,
+      });
+      if (outcome === 'unchanged' || outcome === 'written') {
+        setBrowserOriginSyncDigest(checkpoint.sessionId, checkpoint.sha256);
+      } else if (outcome === 'conflict') {
+        showToast({
+          message: '원본이 다른 곳에서 변경되어 덮어쓰지 않았습니다. Cloud 버전은 로컬 보관함에 유지됩니다.',
+          durationMs: 5000,
+        });
+      } else if (outcome === 'permission-denied') {
         showToast({
           message: '브라우저 원본 쓰기 권한이 없어 Cloud 버전을 로컬 보관함에 저장했습니다.',
           durationMs: 4500,
@@ -689,22 +706,9 @@ async function applyCloudCheckpoint(checkpoint: CloudCheckpointPayload): Promise
         message: `Cloud 원본 자동 저장에 실패했습니다: ${error instanceof Error ? error.message : String(error)}`,
         durationMs: 5000,
       });
+      throw error;
     }
   }
-  inputHandler?.deactivate();
-  const info = wasm.loadDocument(checkpoint.bytes, checkpoint.fileName);
-  // A mirror refresh changes the in-memory cloud-owned bytes, not the local
-  // origin binding. The coordinator remains responsible for verified origin
-  // synchronization and conflict handling.
-  activeDocumentId = currentDocumentId;
-  wasm.currentFileHandle = currentHandle;
-  prepareCanvasRendererDocument();
-  await initializeDocument(
-    info,
-    `${checkpoint.fileName} — 클라우드 ${checkpoint.turn}턴 동기화`,
-    { suppressDialogs: true },
-  );
-  setCloudDocumentLease(true, checkpoint.sessionId);
 }
 
 /** 렌더러 초기화 후에 생성되는 에이전트 브리지 — 저장 가드가 대기 편집을 조회한다. */
@@ -1172,12 +1176,17 @@ async function initialize(): Promise<void> {
           void runLibraryMove(commandServices, target, () => activeDocumentId);
         },
         prepareCloudTransfer: prepareCloudTransferDocument,
+        beginCloudAuthorityTransition,
         prepareCloudTakeover: () => confirmSaveBeforeReplacingDocument(commandServices),
         setCloudDocumentLease,
         applyCloudResult,
-        applyCloudCheckpoint,
+        persistCloudCheckpoint,
         applyCloudTakeover,
       });
+      disposeAgentSidebar = () => {
+        agentSidebar.dispose();
+        disposeAgentSidebar = () => {};
+      };
       awaitPendingCloudTransferForClose = agentSidebar.awaitPendingCloudTransferForClose;
       agentSidebarReady = true;
       initInlinePrompt({

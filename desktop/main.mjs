@@ -59,6 +59,7 @@ import { CloudHandoffStore } from './cloud-handoff.mjs';
 import { collectProviderAuth as collectImportedProviderAuth } from './cloud-provider-auth.mjs';
 import { CloudProvisioner } from './cloud-provisioner.mjs';
 import { createRailwayServerProvider } from './cloud-railway.mjs';
+import { mergeCloudOperationSnapshot } from './cloud-snapshot.mjs';
 import { CloudApiTransport, SshTunnelManager } from './cloud-ssh-tunnel.mjs';
 import { collectProviderAuth } from './provider-auth.mjs';
 import { applyCloudRecovery } from './cloud-result.mjs';
@@ -367,9 +368,7 @@ async function scopedCloudSnapshot(session, operation = null, { refresh = false 
   const scoped = refresh
     ? await requireCloudCoordinator().refresh(options)
     : await requireCloudCoordinator().snapshot(options);
-  const snapshot = operation
-    ? { ...operation, ...scoped, profile: operation.profile ?? scoped.profile }
-    : scoped;
+  const snapshot = mergeCloudOperationSnapshot(operation, scoped);
   return applyCloudSnapshot(session, snapshot);
 }
 
@@ -1188,35 +1187,42 @@ ipcMain.handle('cloud:complete-takeover', async (event, payload) => {
 });
 ipcMain.handle('cloud:download-result', async (event, payload) => {
   const session = sessionForEvent(event);
-  const result = await requireCloudCoordinator().downloadResult(payload);
-  const handoff = await requireCloudCoordinator().handoffForSession(payload?.sessionId);
-  let conflict = 'none';
-  if (handoff?.originPath && handoff.documentDigest) {
-    try {
-      const current = await readFile(handoff.originPath);
-      if (createHash('sha256').update(current).digest('hex') !== handoff.documentDigest) {
+  const coordinator = requireCloudCoordinator();
+  return coordinator.withActiveHandoff(payload.sessionId, async () => {
+    const result = await coordinator.downloadResult(payload);
+    const handoff = await coordinator.handoffForSession(payload?.sessionId);
+    let conflict = 'none';
+    if (handoff?.originPath && handoff.documentDigest) {
+      try {
+        const current = await readFile(handoff.originPath);
+        if (createHash('sha256').update(current).digest('hex') !== handoff.documentDigest) {
+          conflict = 'external-change';
+        }
+      } catch {
         conflict = 'external-change';
       }
-    } catch {
-      conflict = 'external-change';
     }
-  }
-  const preview = await createWindow(
-    launchRequest({ source: 'cloud-result-preview' }),
-    { generatedDocument: { fileName: result.fileName, bytes: result.bytes, readOnly: true } },
-  );
-  return {
-    ...result,
-    snapshot: await scopedCloudSnapshot(session, result.snapshot),
-    previewOpened: Boolean(preview),
-    conflict,
-  };
+    const preview = await createWindow(
+      launchRequest({ source: 'cloud-result-preview' }),
+      { generatedDocument: { fileName: result.fileName, bytes: result.bytes, readOnly: true } },
+    );
+    return {
+      ...result,
+      snapshot: await scopedCloudSnapshot(session, result.snapshot),
+      previewOpened: Boolean(preview),
+      conflict,
+    };
+  });
 });
 ipcMain.handle('cloud:download-checkpoint', async (event, payload) => {
   sessionForEvent(event);
   const sessionId = String(payload?.sessionId ?? '');
   if (!/^[A-Za-z0-9_-]{8,128}$/.test(sessionId)) throw new Error('Invalid cloud session id');
-  return requireCloudCoordinator().downloadCheckpoint({ sessionId });
+  const operationId = payload?.operationId == null ? null : String(payload.operationId);
+  if (operationId !== null && !/^[A-Za-z0-9._:-]{1,160}$/.test(operationId)) {
+    throw new Error('Invalid cloud checkpoint operation id');
+  }
+  return requireCloudCoordinator().downloadCheckpoint({ sessionId, operationId });
 });
 ipcMain.handle('cloud:display-open', async (event, payload = {}) => {
   sessionForEvent(event);
@@ -1236,45 +1242,46 @@ ipcMain.handle('cloud:display-close', async (event, payload = {}) => {
 ipcMain.handle('cloud:resolve-result', async (event, payload = {}) => {
   const session = sessionForEvent(event);
   const coordinator = requireCloudCoordinator();
-  const handoff = await coordinator.handoffForSession(payload.sessionId);
-  if (!handoff?.recoveryPath || !handoff.resultDigest) throw new Error('Verified cloud recovery is unavailable');
-  const action = String(payload.action ?? '');
-  if (action === 'replace') {
-    const lease = documentLeases.leaseForSession(session.sessionId);
-    if (
-      !lease
-      || lease.identity.documentId !== handoff.originDocumentId
-      || lease.canonicalPath !== handoff.originPath
-    ) {
-      throw new Error('Open the origin document on its origin device before replacing it');
+  return coordinator.withActiveHandoff(payload.sessionId, async (handoff) => {
+    if (!handoff?.recoveryPath || !handoff.resultDigest) throw new Error('Verified cloud recovery is unavailable');
+    const action = String(payload.action ?? '');
+    if (action === 'replace') {
+      const lease = documentLeases.leaseForSession(session.sessionId);
+      if (
+        !lease
+        || lease.identity.documentId !== handoff.originDocumentId
+        || lease.canonicalPath !== handoff.originPath
+      ) {
+        throw new Error('Open the origin document on its origin device before replacing it');
+      }
     }
-  }
-  if (action === 'replace' || action === 'keep-both') {
-    const recoveryBytes = await readFile(handoff.recoveryPath);
-    validateNativeDocumentBytes(handoff.originPath || handoff.recoveryPath, recoveryBytes);
-  }
-  const resolution = await applyCloudRecovery({
-    recoveryPath: handoff.recoveryPath,
-    resultDigest: handoff.resultDigest,
-    originalPath: handoff.originPath,
-    originalDigest: handoff.documentDigest,
-    action,
-    resolutionId: handoff.id,
+    if (action === 'replace' || action === 'keep-both') {
+      const recoveryBytes = await readFile(handoff.recoveryPath);
+      validateNativeDocumentBytes(handoff.originPath || handoff.recoveryPath, recoveryBytes);
+    }
+    const resolution = await applyCloudRecovery({
+      recoveryPath: handoff.recoveryPath,
+      resultDigest: handoff.resultDigest,
+      originalPath: handoff.originPath,
+      originalDigest: handoff.documentDigest,
+      action,
+      resolutionId: handoff.id,
+    });
+    for (const candidate of sessions.windows()) {
+      const candidateSession = sessions.sessionForSender(candidate.webContents);
+      const lease = documentLeases.leaseForSession(candidateSession.sessionId);
+      if (lease?.identity.documentId === handoff.originDocumentId) candidateSession.cloudLocked = false;
+    }
+    const snapshot = await scopedCloudSnapshot(session, await coordinator.recordResolution(handoff.id, resolution));
+    return {
+      ...resolution,
+      conflict: resolution.conflict ? 'external-change' : 'none',
+      preservedCopyName: resolution.action === 'keep-both' && resolution.path
+        ? basename(resolution.path)
+        : null,
+      snapshot,
+    };
   });
-  for (const candidate of sessions.windows()) {
-    const candidateSession = sessions.sessionForSender(candidate.webContents);
-    const lease = documentLeases.leaseForSession(candidateSession.sessionId);
-    if (lease?.identity.documentId === handoff.originDocumentId) candidateSession.cloudLocked = false;
-  }
-  const snapshot = await scopedCloudSnapshot(session, await coordinator.recordResolution(handoff.id, resolution));
-  return {
-    ...resolution,
-    conflict: resolution.conflict ? 'external-change' : 'none',
-    preservedCopyName: resolution.action === 'keep-both' && resolution.path
-      ? basename(resolution.path)
-      : null,
-    snapshot,
-  };
 });
 ipcMain.handle('window:is-fullscreen', (event) => sessionForEvent(event).window.isFullScreen());
 ipcMain.handle('desktop:close-response', async (event, requestId, allowClose) => {

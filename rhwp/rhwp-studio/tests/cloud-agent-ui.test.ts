@@ -48,7 +48,7 @@ test('cloud action is available in sidebar and fullscreen headers', () => {
 });
 
 test('cloud transfer includes portable timeline, exact document bytes and reference bytes', () => {
-  assert.match(sidebar, /timeline: exportCloudTimeline\(currentThread\)/);
+  assert.match(sidebar, /timeline: exportCloudTimeline\(transferThread\)/);
   assert.match(sidebar, /const bytes = await cloudController\.readReference\(descriptor\)/);
   assert.match(sidebar, /references\.push\(\{ \.\.\.descriptor, bytes \}\)/);
   assert.match(sidebar, /permissionProfile: 'unrestricted'/);
@@ -60,18 +60,43 @@ test('cloud transfer includes portable timeline, exact document bytes and refere
 
 test('cloud lease locks local editing and queued messages cross only at a remote boundary', () => {
   assert.match(sidebar, /isCloudConversation\(\)/);
-  assert.match(cloudUi, /async queueMessage\(text, messageId, attachments = \[\]\)/);
+  assert.match(cloudUi, /async queueMessage\(text, messageId, attachments = \[\], target\)/);
   assert.match(cloudUi, /command: 'queue-message'/);
+  assert.match(cloudUi, /expectedVersion: target\.expectedVersion/);
   assert.match(main, /setCloudDocumentLease/);
   assert.match(main, /syncDocumentReadOnly/);
-  assert.match(main, /documentReadOnly = previewDocumentReadOnly \|\| cloudDocumentLeaseSessionId !== null/);
+  assert.match(main, /cloudAuthorityTransitionCount > 0/);
   assert.match(main, /inputHandler\?\.setReadOnly\(documentReadOnly\)/);
   assert.match(main, /inputHandler\?\.setUserEditingLocked\(lease\.active\)/);
   assert.doesNotMatch(
     main.match(/function syncDocumentReadOnly\(\): void \{[\s\S]*?\n\}/)?.[0] ?? '',
     /planModeAllowsUserEditing/,
   );
-  assert.match(cloudUi, /completeTakeover\(session\.sessionId\)/);
+  assert.match(cloudUi, /completeTakeover\(sessionId, payload\.operationId\)/);
+  assert.match(cloudUi, /runTakeoverAuthorityTransition/);
+  assert.match(cloudUi, /context: authorityContext/);
+  assert.match(sidebar, /runCloudMessageSubmission/);
+  assert.match(sidebar, /acquire: \(\) => workspace\.lock\('cloud-message'\)/);
+  assert.match(sidebar, /isCurrent: \(target\) => cloudUi\.matchesTarget\(target\)/);
+});
+
+test('cloud lease scope stays bound to the primary editor context', () => {
+  assert.match(sidebar, /const editorCloudScope = createCloudEditorScope/);
+  assert.match(sidebar, /getScope: \(\) => editorCloudScope\.current\(\)/);
+  assert.doesNotMatch(sidebar, /getScope: \(\) => \(\{ threadId: currentThread\.id/);
+  assert.match(sidebar, /editorCloudScope\.bind\(\{ threadId: currentThread\.id, documentId: binding\.documentId \}\);[\s\S]*refreshLeaseScope\(\)/);
+});
+
+test('active Local turns keep the Local transcript mounted until authoritative turn-end', () => {
+  const openCloud = sidebar.match(/function openCloudWorkspace\(\): void \{[\s\S]*?\n  \}/)?.[0] ?? '';
+  const guard = openCloud.indexOf('canSelectCloudWorkspace(workspace.mode(), bridge.isTurnRunning())');
+  assert.ok(guard >= 0);
+  assert.ok(guard < openCloud.indexOf('flushAssistantBuffer()'));
+  assert.ok(guard < openCloud.indexOf('bridge.stopChat()'));
+  assert.ok(guard < openCloud.indexOf("workspace.select('cloud')"));
+  assert.match(sidebar, /cloudModeButton\.disabled = transitionLocked \|\| localTurnBlocksCloud/);
+  assert.match(sidebar, /cloudModeButton\.setAttribute\(\s*'aria-label',[\s\S]*로컬 응답이 끝난 후 전환 가능/);
+  assert.match(sidebar, /function setTurnRunning[\s\S]*syncWorkspaceModeAvailability\(\);/);
 });
 
 test('desktop close waits for a requested handoff through the local turn boundary', () => {
@@ -105,6 +130,15 @@ test('result preview requires explicit resolution and external conflicts cannot 
   assert.match(main, /open-document-bytes:done/);
   assert.match(desktop, /cloudResolveResult/);
   assert.match(desktop, /cloudReadReference/);
+  assert.match(cloudUi, /pendingResultReplace/);
+  assert.match(cloudUi, /syncAuthorityMutationLock/);
+});
+
+test('delayed selected timelines can establish a missing cloud binding', () => {
+  assert.match(cloudUi, /if \(deps\.isCloudMode\(\) && snapshot\.timeline\)/);
+  assert.doesNotMatch(cloudUi, /snapshot\.timeline && mountedBinding/);
+  assert.match(cloudUi, /mountedBinding = binding;[\s\S]*deps\.onCloudBinding\(binding\)/);
+  assert.match(cloudUi, /if \(pendingSessionSelections > 0 && !profileChanged\) return;[\s\S]*snapshot = next/);
 });
 
 test('agents can append a paragraph without moving controls from an empty anchor paragraph', () => {

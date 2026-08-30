@@ -12,6 +12,51 @@ export const DISPLAY_START_TIMEOUT_MS = 8_000;
 export const DISPLAY_READY_POLL_MS = 50;
 
 const DISPLAY_STATUSES = new Set(['starting', 'ready', 'stopped', 'error']);
+const CHILD_ENVIRONMENT_NAMES = Object.freeze([
+  'HOME', 'USERPROFILE', 'USER', 'LOGNAME', 'PATH', 'TMPDIR', 'TEMP', 'TMP',
+  'LANG', 'LANGUAGE', 'LC_ALL', 'LC_CTYPE', 'TZ',
+  'XDG_CONFIG_HOME', 'XDG_CACHE_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_RUNTIME_DIR',
+  'FONTCONFIG_FILE', 'FONTCONFIG_PATH', 'LD_LIBRARY_PATH', 'SSL_CERT_DIR', 'SSL_CERT_FILE',
+]);
+const DEFAULT_X11_UNIX_DIR = '/tmp/.X11-unix';
+const DEFAULT_X11_LOCK_DIR = '/tmp';
+const claimedDisplays = new Set();
+
+export function childProcessEnvironment(environment = process.env, additions = {}) {
+  const result = {};
+  for (const name of CHILD_ENVIRONMENT_NAMES) {
+    const value = environment?.[name];
+    if (typeof value === 'string' && value) result[name] = value;
+  }
+  for (const [name, value] of Object.entries(additions ?? {})) {
+    if (typeof value === 'string' && value) result[name] = value;
+  }
+  return result;
+}
+
+export function normalizeDisplayGeometry(geometry = {}) {
+  return {
+    width: Math.max(640, Math.floor(Number(geometry?.width) || DEFAULT_DISPLAY_WIDTH)),
+    height: Math.max(480, Math.floor(Number(geometry?.height) || DEFAULT_DISPLAY_HEIGHT)),
+  };
+}
+
+export function createSessionDisplayMode(sessionDisplay, snapshot = sessionDisplay?.snapshot?.()) {
+  const geometry = Object.freeze(normalizeDisplayGeometry(snapshot));
+  const environment = sessionDisplay?.environment;
+  const headed = snapshot?.status === 'ready'
+    && environment?.RAUHWpx_SESSION_DISPLAY === 'ready'
+    && typeof environment.DISPLAY === 'string'
+    && environment.DISPLAY
+    && typeof environment.XAUTHORITY === 'string'
+    && environment.XAUTHORITY;
+  return Object.freeze({
+    kind: headed ? 'headed' : 'headless',
+    geometry,
+    display: headed ? String(environment.DISPLAY) : null,
+    environment: headed ? Object.freeze({ ...environment }) : null,
+  });
+}
 
 function displayError(code, message, cause) {
   return Object.assign(new Error(message, cause ? { cause } : undefined), { code });
@@ -29,11 +74,9 @@ function displayNumberOf(display) {
   return Number(normalizeDisplay(display).slice(1));
 }
 
-function x11SocketPath(display) {
-  return path.join(X11_UNIX_DIR, `X${displayNumberOf(display)}`);
+function x11SocketPath(display, x11Directory = DEFAULT_X11_UNIX_DIR) {
+  return path.join(x11Directory, `X${displayNumberOf(display)}`);
 }
-
-const X11_UNIX_DIR = process.env.RAUHWpx_X11_UNIX_DIR || '/tmp/.X11-unix';
 
 async function pathExists(target) {
   try {
@@ -44,9 +87,12 @@ async function pathExists(target) {
   }
 }
 
-async function isDisplayFree(display) {
-  if (await pathExists(x11SocketPath(display))) return false;
-  if (await pathExists(`/tmp/.X${displayNumberOf(display)}-lock`)) return false;
+async function isDisplayFree(display, {
+  x11Directory = DEFAULT_X11_UNIX_DIR,
+  lockDirectory = DEFAULT_X11_LOCK_DIR,
+} = {}) {
+  if (await pathExists(x11SocketPath(display, x11Directory))) return false;
+  if (await pathExists(path.join(lockDirectory, `.X${displayNumberOf(display)}-lock`))) return false;
   return true;
 }
 
@@ -54,24 +100,42 @@ async function isDisplayFree(display) {
  * Pick a free display number starting at base. Prefer :10 as the plan default.
  * @param {number} [base=10]
  */
-export async function allocateDisplay(base = 10, { maxAttempts = 80 } = {}) {
-  const start = Math.max(1, Number(base) || 10);
+export async function allocateDisplay(base = 10, {
+  maxAttempts = 80,
+  x11Directory = DEFAULT_X11_UNIX_DIR,
+  lockDirectory = DEFAULT_X11_LOCK_DIR,
+} = {}) {
+  const start = Math.max(1, Math.floor(Number(base) || 10));
   for (let offset = 0; offset < maxAttempts; offset += 1) {
-    const display = `:${start + offset}`;
-    if (await isDisplayFree(display)) return display;
+    const displayNumber = start + offset;
+    const display = `:${displayNumber}`;
+    const paths = { x11Directory, lockDirectory };
+    if (!await isDisplayFree(display, paths)) continue;
+    if (claimedDisplays.has(displayNumber)) continue;
+    claimedDisplays.add(displayNumber);
+    let released = false;
+    return Object.freeze({
+      display,
+      async release() {
+        if (released) return;
+        released = true;
+        claimedDisplays.delete(displayNumber);
+      },
+    });
   }
   throw displayError('DISPLAY_EXHAUSTED', `No free X display in :${start}..:${start + maxAttempts - 1}`);
 }
 
-async function writeAuthority(authFile, display) {
+async function writeAuthority(authFile, display, environment = process.env) {
   const cookie = randomBytes(16).toString('hex');
   await fs.writeFile(authFile, '', { mode: 0o600 });
-  await runCommand('xauth', ['-f', authFile, 'add', `${os.hostname()}/unix${display}`, '.', cookie]);
-  await runCommand('xauth', ['-f', authFile, 'add', display, '.', cookie]);
+  const env = childProcessEnvironment(environment);
+  await runCommand('xauth', ['-f', authFile, 'add', `${os.hostname()}/unix${display}`, '.', cookie], { env });
+  await runCommand('xauth', ['-f', authFile, 'add', display, '.', cookie], { env });
   return cookie;
 }
 
-function runCommand(command, args, { env = process.env, timeoutMs = 5_000 } = {}) {
+function runCommand(command, args, { env = childProcessEnvironment(process.env), timeoutMs = 5_000 } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
@@ -100,35 +164,52 @@ function runCommand(command, args, { env = process.env, timeoutMs = 5_000 } = {}
   });
 }
 
-function waitForUnixSocket(socketPath, timeoutMs) {
+function waitForUnixSocket(socketPath, timeoutMs, signal) {
   const started = Date.now();
   return new Promise((resolve, reject) => {
+    let socket = null;
+    let timer = null;
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+      socket?.destroy();
+      if (error) reject(error);
+      else resolve();
+    };
+    const abort = () => finish(displayError('DISPLAY_START_CANCELLED', 'X display startup was cancelled'));
     const attempt = () => {
-      const socket = createConnection(socketPath);
+      if (signal?.aborted) {
+        abort();
+        return;
+      }
+      socket = createConnection(socketPath);
       socket.once('connect', () => {
         socket.end();
-        resolve();
+        finish();
       });
       socket.once('error', () => {
         socket.destroy();
         if (Date.now() - started >= timeoutMs) {
-          reject(displayError('DISPLAY_SOCKET_TIMEOUT', `X socket did not appear: ${socketPath}`));
+          finish(displayError('DISPLAY_SOCKET_TIMEOUT', `X socket did not appear: ${socketPath}`));
           return;
         }
         // Keep the timer referenced so start() cannot outlive the event loop.
-        setTimeout(attempt, DISPLAY_READY_POLL_MS);
+        timer = setTimeout(attempt, DISPLAY_READY_POLL_MS);
       });
     };
+    signal?.addEventListener('abort', abort, { once: true });
     attempt();
   });
 }
 
-async function probeDisplay(display, authFile, timeoutMs = 2_000) {
-  const env = {
-    ...process.env,
+async function probeDisplay(display, authFile, timeoutMs = 2_000, environment = process.env) {
+  const env = childProcessEnvironment(environment, {
     DISPLAY: display,
     XAUTHORITY: authFile,
-  };
+  });
   try {
     await runCommand('xdpyinfo', ['-display', display], { env, timeoutMs });
   } catch (error) {
@@ -141,9 +222,9 @@ async function probeDisplay(display, authFile, timeoutMs = 2_000) {
  * One cloud session owns one virtual desktop. Status is a state machine, not flags.
  *
  *   starting → ready → stopped
- *                 ↘ error → starting   (one automatic restart)
+ *                 ↘ error → starting   (one restart until the caller locks mode)
  *
- * Display death must not kill document tools. Callers treat start failures as soft.
+ * Callers disable restarts after binding a browser to the initial display mode.
  */
 export class SessionDisplay {
   /**
@@ -171,13 +252,21 @@ export class SessionDisplay {
     xvfbBin = 'Xvfb',
     windowManagerBin = 'matchbox-window-manager',
     startTimeoutMs = DISPLAY_START_TIMEOUT_MS,
+    maxDisplayAttempts = 80,
+    x11Directory = process.env.RAUHWpx_X11_UNIX_DIR || DEFAULT_X11_UNIX_DIR,
+    lockDirectory = DEFAULT_X11_LOCK_DIR,
+    environment = process.env,
+    prepareAuthority = writeAuthority,
+    waitForSocket = waitForUnixSocket,
+    probe = probeDisplay,
   } = {}) {
     if (typeof workspace !== 'string' || !workspace.trim()) {
       throw displayError('WORKSPACE_REQUIRED', 'SessionDisplay requires a workspace directory');
     }
     this.workspace = workspace;
-    this.width = Math.max(640, Number(width) || DEFAULT_DISPLAY_WIDTH);
-    this.height = Math.max(480, Number(height) || DEFAULT_DISPLAY_HEIGHT);
+    const geometry = normalizeDisplayGeometry({ width, height });
+    this.width = geometry.width;
+    this.height = geometry.height;
     this.preferredDisplay = display ? normalizeDisplay(display) : null;
     this.baseDisplay = baseDisplay;
     this.spawnProcess = spawnProcess;
@@ -186,6 +275,13 @@ export class SessionDisplay {
     this.xvfbBin = xvfbBin;
     this.windowManagerBin = windowManagerBin;
     this.startTimeoutMs = startTimeoutMs;
+    this.maxDisplayAttempts = Math.max(1, Number(maxDisplayAttempts) || 1);
+    this.x11Directory = x11Directory;
+    this.lockDirectory = lockDirectory;
+    this.environmentSource = environment;
+    this.prepareAuthority = prepareAuthority;
+    this.waitForSocket = waitForSocket;
+    this.probe = probe;
 
     this.status = 'stopped';
     this.display = null;
@@ -199,6 +295,8 @@ export class SessionDisplay {
     this._stopping = false;
     this._stderrTail = '';
     this._exitPromise = Promise.resolve();
+    this._spawnErrorPromise = new Promise(() => {});
+    this._displayClaim = null;
     this.lastError = null;
   }
 
@@ -257,20 +355,79 @@ export class SessionDisplay {
     try {
       await fs.mkdir(path.dirname(this.authFile), { recursive: true, mode: 0o700 });
       await fs.mkdir(this.screenshotDir, { recursive: true, mode: 0o700 });
-      this.display = this.preferredDisplay ?? await allocateDisplay(this.baseDisplay);
-      await writeAuthority(this.authFile, this.display);
-      await this._spawnXvfb();
-      await waitForUnixSocket(x11SocketPath(this.display), this.startTimeoutMs);
-      await probeDisplay(this.display, this.authFile, Math.min(2_000, this.startTimeoutMs));
-      if (this.startWindowManager) await this._spawnWindowManager();
-      this.status = 'ready';
-      this.emit('environment.display_ready');
-      return this.snapshot();
+      let nextDisplay = this.preferredDisplay
+        ? displayNumberOf(this.preferredDisplay)
+        : Math.max(1, Math.floor(Number(this.baseDisplay) || 10));
+      let attemptsRemaining = this.preferredDisplay ? 1 : this.maxDisplayAttempts;
+      while (attemptsRemaining > 0) {
+        this._displayClaim = await allocateDisplay(nextDisplay, {
+          maxAttempts: attemptsRemaining,
+          x11Directory: this.x11Directory,
+          lockDirectory: this.lockDirectory,
+        });
+        this.display = this._displayClaim.display;
+        const consumed = displayNumberOf(this.display) - nextDisplay + 1;
+        attemptsRemaining -= consumed;
+        nextDisplay = displayNumberOf(this.display) + 1;
+        try {
+          await this.prepareAuthority(this.authFile, this.display, this.environmentSource);
+          await this._spawnXvfb();
+          const startupController = new AbortController();
+          const startup = await Promise.race([
+            this.waitForSocket(
+              x11SocketPath(this.display, this.x11Directory),
+              this.startTimeoutMs,
+              startupController.signal,
+            ).then(
+              () => ({ kind: 'socket' }),
+              (error) => ({ kind: 'socket-error', error }),
+            ),
+            this._exitPromise.then((exit) => ({ kind: 'exit', ...exit })),
+            this._spawnErrorPromise.then((error) => ({ kind: 'error', error })),
+          ]);
+          startupController.abort();
+          if (startup.kind === 'socket-error') throw startup.error;
+          if (startup.kind !== 'socket') {
+            const message = startup.kind === 'error'
+              ? String(startup.error?.message ?? startup.error)
+              : `Xvfb exited ${startup.signal ? `from ${startup.signal}` : `with ${startup.code}`}`;
+            const collision = /server is already active|already in use|cannot establish any listening sockets|address already in use/i
+              .test(`${message}\n${this._stderrTail}`);
+            throw displayError(collision ? 'DISPLAY_COLLISION' : 'DISPLAY_START_FAILED', message, startup.error);
+          }
+          await this.probe(this.display, this.authFile, Math.min(2_000, this.startTimeoutMs), this.environmentSource);
+          if (!this._child || this._child.exitCode != null || this._child.signalCode != null) {
+            const collision = /server is already active|already in use|cannot establish any listening sockets|address already in use/i
+              .test(this._stderrTail);
+            throw displayError(
+              collision ? 'DISPLAY_COLLISION' : 'DISPLAY_START_FAILED',
+              `Xvfb exited before display ${this.display} became ready`,
+            );
+          }
+          if (this.startWindowManager) await this._spawnWindowManager();
+          this.status = 'ready';
+          this.emit('environment.display_ready');
+          return this.snapshot();
+        } catch (error) {
+          await this._killChildren();
+          await this._releaseDisplayClaim();
+          const collision = error?.code === 'DISPLAY_COLLISION'
+            || /server is already active|already in use|cannot establish any listening sockets|address already in use/i
+              .test(`${error?.message ?? error}\n${this._stderrTail}`);
+          if (!this.preferredDisplay && collision && attemptsRemaining > 0) continue;
+          if (collision && error?.code !== 'DISPLAY_COLLISION') {
+            throw displayError('DISPLAY_COLLISION', String(error?.message ?? error), error);
+          }
+          throw error;
+        }
+      }
+      throw displayError('DISPLAY_EXHAUSTED', 'No free X display remained after startup collisions');
     } catch (error) {
       this.lastError = String(error?.message ?? error).slice(0, 1_000);
       this.status = 'error';
       this.emit('environment.display_failed', { message: this.lastError, code: error?.code ?? null });
       await this._killChildren();
+      await this._releaseDisplayClaim();
       return this.snapshot();
     }
   }
@@ -279,9 +436,15 @@ export class SessionDisplay {
     this._stopping = true;
     this._restartBudget = 0;
     await this._killChildren();
+    await this._releaseDisplayClaim();
     this.pid = null;
     this.status = 'stopped';
     this.emit('environment.display_stopped');
+    return this.snapshot();
+  }
+
+  disableRestarts() {
+    this._restartBudget = 0;
     return this.snapshot();
   }
 
@@ -299,6 +462,7 @@ export class SessionDisplay {
     }
     this._restartBudget -= 1;
     await this._killChildren();
+    await this._releaseDisplayClaim();
     this.status = 'error';
     const started = await this.start();
     if (started.status === 'ready') {
@@ -321,16 +485,16 @@ export class SessionDisplay {
       { mode: 0o600 },
     ).catch(() => {});
     const child = this.spawnProcess(this.xvfbBin, args, {
-      env: {
-        ...process.env,
+      env: childProcessEnvironment(this.environmentSource, {
         DISPLAY: this.display,
         XAUTHORITY: this.authFile,
-      },
+      }),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     this._child = child;
     this.pid = child.pid ?? null;
     this._stderrTail = '';
+    this._spawnErrorPromise = new Promise((resolve) => child.once('error', resolve));
     child.stdout?.resume();
     child.stderr?.on('data', (chunk) => {
       const text = String(chunk);
@@ -351,7 +515,7 @@ export class SessionDisplay {
             message: this.lastError,
             stderrTail: this._stderrTail.slice(-500),
           });
-          void this.restart({ reason: 'xvfb-exit' });
+          if (this._restartBudget > 0) void this.restart({ reason: 'xvfb-exit' });
         }
       });
     });
@@ -364,11 +528,10 @@ export class SessionDisplay {
   async _spawnWindowManager() {
     try {
       const wm = this.spawnProcess(this.windowManagerBin, ['-use_titlebar', 'no'], {
-        env: {
-          ...process.env,
+        env: childProcessEnvironment(this.environmentSource, {
           DISPLAY: this.display,
           XAUTHORITY: this.authFile,
-        },
+        }),
         stdio: ['ignore', 'ignore', 'pipe'],
       });
       this._wm = wm;
@@ -427,6 +590,13 @@ export class SessionDisplay {
         }
       }
     }
+  }
+
+  async _releaseDisplayClaim() {
+    const claim = this._displayClaim;
+    if (!claim) return;
+    await claim.release();
+    if (this._displayClaim === claim) this._displayClaim = null;
   }
 }
 

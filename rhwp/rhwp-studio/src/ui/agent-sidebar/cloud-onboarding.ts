@@ -31,6 +31,7 @@ export interface CloudOnboarding {
   settingsElement: HTMLElement;
   open(intent: CloudSetupIntent, trigger: HTMLElement): void;
   sync(snapshot: CloudSnapshot): void;
+  setMutationLocked(locked: boolean): void;
   dispose(): void;
 }
 
@@ -76,6 +77,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
   let requestedFocusField: CloudProfileField | 'auth' | 'transport' | null = null;
   let cachedKeyPath = '';
   let cachedHttpsEndpoint = '';
+  let mutationLocked = false;
 
   const overlay = el('div', 'ag-cloud-setup-overlay');
   overlay.hidden = true;
@@ -876,7 +878,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
   }
 
   function renderSettings(): void {
-    settingsAction.disabled = !snapshot.available;
+    settingsAction.disabled = !snapshot.available || mutationLocked;
     if (!snapshot.available) {
       settingsStatus.textContent = '이 빌드에서는 사용할 수 없습니다';
       settingsDetail.textContent = 'Cloud 지원 데스크톱 앱이 필요합니다.';
@@ -922,6 +924,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
   }
 
   function open(intent: CloudSetupIntent, nextTrigger: HTMLElement): void {
+    if (mutationLocked) return;
     trigger = nextTrigger;
     const preservedFailure = preserveOnOpen
       && (state?.kind === 'install-failed' || state?.kind === 'sandbox-failed');
@@ -982,6 +985,11 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       const previous = state;
       if (state) state = reconcileCloudSetupState(state, next);
       if (visible && state !== previous) renderDialog();
+    },
+    setMutationLocked(locked) {
+      mutationLocked = locked;
+      if (locked) close(false);
+      renderSettings();
     },
     dispose() {
       disposed = true;

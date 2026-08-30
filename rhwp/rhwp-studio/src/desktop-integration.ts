@@ -157,7 +157,7 @@ export interface RhwpDesktopApi {
   cloudReadReference?: (payload: Pick<CloudTransferReference, 'id' | 'scope' | 'scopeId'>) => Promise<unknown>;
   cloudCommand?: (payload: CloudCommandRequest) => Promise<unknown>;
   cloudDismissSession?: (payload: { sessionId: string }) => Promise<unknown>;
-  cloudCompleteTakeover?: (payload: { sessionId: string }) => Promise<unknown>;
+  cloudCompleteTakeover?: (payload: { sessionId: string; operationId: string }) => Promise<unknown>;
   cloudDownloadResult?: (payload: { sessionId: string }) => Promise<unknown>;
   cloudDownloadCheckpoint?: (payload: { sessionId: string; operationId?: string }) => Promise<unknown>;
   cloudOpenDisplay?: (payload: { sessionId: string }) => Promise<unknown>;

@@ -1,6 +1,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { createSessionDisplayMode } from './session-display.mjs';
 import { createStudioHarness } from './studio-harness.mjs';
 import { composeTurnPrompt, readTimeline, TimelineRecorder } from './timeline.mjs';
 
@@ -133,7 +134,8 @@ function resultName(documentName, extension) {
 }
 
 /**
- * Execute a real Rauhwpx Studio session in headless Chromium. Provider CLIs
+ * Execute a real Rauhwpx Studio session in Chromium. Production Xvfb sessions
+ * run headed so the live viewer sees the same Studio surface. Provider CLIs
  * reach exactly the same rhwp-agent hub, MCP definitions, Studio bridge, tool
  * executor and WASM document engine as the desktop app.
  */
@@ -144,6 +146,9 @@ export async function runSession({
   client,
   createHarness = createStudioHarness,
   sessionDisplay = null,
+  displayMode = createSessionDisplayMode(sessionDisplay),
+  onStudioReady = () => {},
+  onStudioUnavailable = () => {},
 }) {
   if (!manifest || typeof manifest !== 'object' || !manifest.sessionId || !manifest.provider) {
     throw runtimeError('MANIFEST_INVALID', 'Cloud worker manifest identity is incomplete');
@@ -180,6 +185,13 @@ export async function runSession({
   let activeWorkflow = manifest.executionConfig?.workflow === 'plan' ? 'plan' : 'direct';
   let latestCheckpoint = null;
   let harness;
+  let studioUnavailable = false;
+  const clearStudioReadiness = async () => {
+    if (studioUnavailable) return;
+    studioUnavailable = true;
+    try { await onStudioUnavailable(); } catch { /* Worker teardown remains authoritative. */ }
+  };
+  let assertRuntimeHealthy = async () => {};
   await client.event('runtime.started', {
     provider: manifest.provider,
     recovered: Boolean(stableRecovery),
@@ -187,6 +199,53 @@ export async function runSession({
     turnNumber,
   });
   try {
+    assertRuntimeHealthy = async () => {
+      if (displayMode.kind === 'headed') {
+        const snapshot = sessionDisplay?.snapshot?.();
+        const currentDisplay = snapshot?.display ?? sessionDisplay?.display ?? sessionDisplay?.environment?.DISPLAY;
+        if (snapshot?.status !== 'ready' || currentDisplay !== displayMode.display) {
+          await clearStudioReadiness();
+          throw runtimeError(
+            'DISPLAY_LOST',
+            `Cloud Studio session display ${displayMode.display} is no longer available`,
+          );
+        }
+      }
+      try {
+        await harness?.assertHealthy?.();
+      } catch (error) {
+        await clearStudioReadiness();
+        throw error;
+      }
+    };
+    const waitForHealthyOperation = async (operation) => {
+      await assertRuntimeHealthy();
+      const controller = new AbortController();
+      const settled = Promise.resolve()
+        .then(() => operation(controller.signal))
+        .then(
+          (value) => ({ value, error: null }),
+          (error) => ({ value: null, error }),
+        );
+      try {
+        while (true) {
+          let timer;
+          const outcome = await Promise.race([
+            settled,
+            new Promise((resolve) => { timer = setTimeout(() => resolve(null), 250); }),
+          ]);
+          clearTimeout(timer);
+          if (outcome) {
+            if (outcome.error) throw outcome.error;
+            return outcome.value;
+          }
+          await assertRuntimeHealthy();
+          if (Date.now() >= deadline) throw runtimeError('DURATION_LIMIT', 'Cloud session reached its duration limit');
+        }
+      } finally {
+        controller.abort();
+      }
+    };
     const initialGoal = String(manifest.goal ?? '').trim();
     let messages = [];
     let finishReady = false;
@@ -226,7 +285,7 @@ export async function runSession({
       if (typeof client.finishClaim !== 'function') {
         throw runtimeError('FINISH_PROTOCOL_UNAVAILABLE', 'Worker atomic finish claim is unavailable');
       }
-      const claim = await client.finishClaim();
+      const claim = await waitForHealthyOperation((signal) => client.finishClaim({ signal }));
       if (claim?.workflow === 'direct' || claim?.workflow === 'plan') activeWorkflow = claim.workflow;
       if (claim?.takeoverRequested === true) {
         return { outcome: await acknowledgeTakeover(latestCheckpoint?.boundary?.operationId ?? stableRecovery?.operationId) };
@@ -249,6 +308,7 @@ export async function runSession({
     const awaitConversationInput = async (decision) => {
       let current = decision;
       while (current?.waiting === true && Date.now() < deadline) {
+        await assertRuntimeHealthy();
         await delay(250);
         current = await claimFinish();
       }
@@ -292,6 +352,7 @@ export async function runSession({
       messages = [{ id: null, content: initialGoal, initial: true }];
     }
 
+    await assertRuntimeHealthy();
     harness = await createHarness({
       manifest,
       workspace,
@@ -299,7 +360,8 @@ export async function runSession({
       document,
       references,
       timeline,
-      displayEnv: sessionDisplay?.environment ?? null,
+      displayEnv: displayMode.environment,
+      displayGeometry: displayMode.geometry,
       onEvent: async (event) => {
         if (event?.type?.startsWith?.('environment.')) recorder.recordEnvironmentEvent(event);
         recorder.consume(event);
@@ -313,6 +375,8 @@ export async function runSession({
       });
     }
     await harness.start({ history: recorder.history({ excludeTrailingUserText: stableRecovery ? null : initialGoal }) });
+    await assertRuntimeHealthy();
+    await onStudioReady();
     await harness.setWorkflow?.(activeWorkflow);
 
     const materializeAttachments = async (message) => {
@@ -350,17 +414,7 @@ export async function runSession({
     };
 
     while (!finishReady && turnNumber < maxTurns && Date.now() < deadline) {
-      if (sessionDisplay && sessionDisplay.status === 'error') {
-        const restarted = await sessionDisplay.restart({ reason: 'health-loop' });
-        recorder.recordEnvironmentEvent({
-          type: restarted.status === 'ready' ? 'environment.display_restarted' : 'environment.display_failed',
-          ...restarted,
-        });
-        await forwardEvent(client, {
-          type: restarted.status === 'ready' ? 'environment.display_restarted' : 'environment.display_failed',
-          ...restarted,
-        });
-      }
+      await assertRuntimeHealthy();
       for (const message of messages) {
         if (turnNumber >= maxTurns || Date.now() >= deadline) break;
         const content = String(message.content ?? '').trim();
@@ -416,15 +470,16 @@ export async function runSession({
           if (typeof client.createWait !== 'function' || typeof client.wait !== 'function') {
             throw runtimeError('WAIT_PROTOCOL_UNAVAILABLE', 'Worker durable wait protocol is unavailable');
           }
-          const wait = await client.createWait({
+          const wait = await waitForHealthyOperation((signal) => client.createWait({
             turnNumber: nextTurnNumber,
             kind: outcome.wait.kind,
             payload: outcome.wait.payload,
-          });
+          }, { signal }));
           let waitState = wait;
           while (waitState?.status === 'pending' && Date.now() < deadline) {
+            await assertRuntimeHealthy();
             await delay(250);
-            waitState = await client.wait(wait.id);
+            waitState = await waitForHealthyOperation((signal) => client.wait(wait.id, { signal }));
           }
           if (Date.now() >= deadline) throw runtimeError('DURATION_LIMIT', 'Cloud session reached its duration limit');
           const resolution = waitState?.resolution;
@@ -489,6 +544,7 @@ export async function runSession({
       messages = decision.messages;
     }
 
+    await assertRuntimeHealthy();
     if (Date.now() >= deadline) throw runtimeError('DURATION_LIMIT', 'Cloud session reached its duration limit');
     if (turnNumber >= maxTurns && !latestCheckpoint && !stableRecovery) {
       throw runtimeError('TURN_LIMIT', 'Cloud session reached its turn limit before producing a checkpoint');
@@ -525,7 +581,11 @@ export async function runSession({
     await fs.chmod(resultPath, 0o600);
     await client.event('runtime.completed', { turnNumber, resultName: name });
     return { timelinePath, resultPath, resultName: name };
+  } catch (error) {
+    await assertRuntimeHealthy();
+    throw error;
   } finally {
+    await clearStudioReadiness();
     await harness?.close().catch(() => {});
   }
 }

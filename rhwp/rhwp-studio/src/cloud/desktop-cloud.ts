@@ -52,7 +52,7 @@ export interface CloudDesktopApi {
   cloudReadReference?: (payload: Pick<CloudTransferReference, 'id' | 'scope' | 'scopeId'>) => Promise<unknown>;
   cloudCommand?: (payload: CloudCommandRequest) => Promise<unknown>;
   cloudDismissSession?: (payload: { sessionId: string }) => Promise<unknown>;
-  cloudCompleteTakeover?: (payload: { sessionId: string }) => Promise<unknown>;
+  cloudCompleteTakeover?: (payload: { sessionId: string; operationId: string }) => Promise<unknown>;
   cloudDownloadResult?: (payload: { sessionId: string }) => Promise<unknown>;
   cloudDownloadCheckpoint?: (payload: { sessionId: string; operationId?: string }) => Promise<unknown>;
   cloudOpenDisplay?: (payload: { sessionId: string }) => Promise<unknown>;
@@ -80,7 +80,7 @@ export interface CloudController {
   readReference(reference: Pick<CloudTransferReference, 'id' | 'scope' | 'scopeId'>): Promise<Uint8Array>;
   command(request: CloudCommandRequest): Promise<CloudSnapshot>;
   dismissSession(sessionId: string): Promise<CloudSnapshot>;
-  completeTakeover(sessionId: string): Promise<CloudSnapshot>;
+  completeTakeover(sessionId: string, operationId: string): Promise<CloudSnapshot>;
   downloadResult(sessionId: string): Promise<CloudDownloadResult>;
   downloadCheckpoint(sessionId: string, operationId?: string): Promise<CloudCheckpointPayload>;
   openDisplay(sessionId: string, listener: (event: CloudDisplayEvent) => void): Promise<CloudDisplayConnection>;
@@ -390,9 +390,10 @@ function parseSession(value: unknown): CloudSessionState | null {
 function parseTakeover(value: unknown): CloudTakeoverPayload | null {
   const raw = record(value);
   if (!raw) return null;
+  const operationId = string(raw.operationId).trim();
   const timeline = parseCloudTimeline(raw.timeline);
-  if (!timeline) return null;
-  if (raw.document === null) return { document: null, timeline };
+  if (!operationId || !timeline) return null;
+  if (raw.document === null) return { operationId, document: null, timeline };
   const document = record(raw.document);
   if (!document || !(document.bytes instanceof Uint8Array)) return null;
   const fileName = string(document.fileName).trim();
@@ -404,6 +405,7 @@ function parseTakeover(value: unknown): CloudTakeoverPayload | null {
   if (!fileName || !sha256 || !recoveryPath || byteLength === null || revision === null || turn === null
     || document.bytes.byteLength !== byteLength) return null;
   return {
+    operationId,
     document: { bytes: document.bytes, fileName, sha256, byteLength, recoveryPath, revision, turn },
     timeline,
   };
@@ -416,8 +418,10 @@ export function parseCloudSnapshot(value: unknown): CloudSnapshot | null {
   const session = parseSession(raw.session);
   const leaseRaw = record(raw.lease);
   const revision = strictInteger(raw.revision);
+  const profileEpoch = strictInteger(raw.profileEpoch);
   const updatedAt = strictIso(raw.updatedAt);
-  if (revision === null || typeof raw.available !== 'boolean' || !profile || !session || !leaseRaw || !updatedAt) return null;
+  if (revision === null || profileEpoch === null || typeof raw.available !== 'boolean'
+    || !profile || !session || !leaseRaw || !updatedAt) return null;
   const lease = leaseRaw.owner === 'cloud' && string(leaseRaw.sessionId).trim() && strictIso(leaseRaw.acquiredAt)
     ? {
         owner: 'cloud' as const,
@@ -461,6 +465,7 @@ export function parseCloudSnapshot(value: unknown): CloudSnapshot | null {
     : undefined;
   return {
     revision,
+    profileEpoch,
     available: raw.available,
     profile,
     server,
@@ -478,6 +483,7 @@ export function parseCloudSnapshot(value: unknown): CloudSnapshot | null {
 function unavailableSnapshot(): CloudSnapshot {
   return {
     revision: 0,
+    profileEpoch: 0,
     available: false,
     profile: { kind: 'unconfigured' },
     server: {
@@ -518,7 +524,7 @@ function parseDownloadResult(value: unknown): CloudDownloadResult | null {
   };
 }
 
-function parseCheckpoint(value: unknown): CloudCheckpointPayload | null {
+export function parseCloudCheckpoint(value: unknown): CloudCheckpointPayload | null {
   const result = record(value);
   if (!result || !(result.bytes instanceof Uint8Array)) return null;
   const sessionId = string(result.sessionId).trim();
@@ -527,7 +533,14 @@ function parseCheckpoint(value: unknown): CloudCheckpointPayload | null {
   const operationId = string(result.operationId).trim();
   const kind = result.kind === 'handoff' || result.kind === 'operation' || result.kind === 'turn'
     ? result.kind
-    : 'turn';
+    : null;
+  const documentId = result.documentId === null
+    ? null
+    : typeof result.documentId === 'string'
+      && result.documentId.trim()
+      && result.documentId === result.documentId.trim()
+      ? result.documentId
+      : undefined;
   const originOnThisDevice = result.originOnThisDevice === true;
   const expectedOriginCandidate = string(result.expectedOriginSha256).trim();
   const expectedOriginSha256 = /^[a-f0-9]{64}$/.test(expectedOriginCandidate)
@@ -536,11 +549,11 @@ function parseCheckpoint(value: unknown): CloudCheckpointPayload | null {
   const byteLength = strictInteger(result.byteLength);
   const revision = strictInteger(result.revision);
   const turn = strictInteger(result.turn);
-  if (!sessionId || !fileName || !sha256 || !operationId
+  if (!sessionId || !fileName || !sha256 || !operationId || !kind || documentId === undefined
     || byteLength === null || revision === null || turn === null
     || result.bytes.byteLength !== byteLength) return null;
   return {
-    sessionId, kind, fileName, sha256, operationId, byteLength, revision, turn, bytes: result.bytes,
+    sessionId, documentId, kind, fileName, sha256, operationId, byteLength, revision, turn, bytes: result.bytes,
     ...(originOnThisDevice ? { originOnThisDevice: true } : {}),
     ...(expectedOriginSha256 ? { expectedOriginSha256 } : {}),
   };
@@ -600,7 +613,13 @@ export function createCloudController(
   const pendingDisplayEvents = new Map<string, unknown[]>();
 
   const publish = (next: CloudSnapshot): CloudSnapshot => {
-    if (next.revision < snapshot.revision) return snapshot;
+    if (next.profileEpoch < snapshot.profileEpoch) return snapshot;
+    if (next.profileEpoch === snapshot.profileEpoch && next.revision < snapshot.revision) return snapshot;
+    if (next.profileEpoch > snapshot.profileEpoch) {
+      displayGeneration += 1;
+      if (activeDisplay) void closeDisplay(activeDisplay);
+      pendingDisplayEvents.clear();
+    }
     snapshot = next;
     if (!disposed) for (const listener of listeners) listener(snapshot);
     return snapshot;
@@ -609,6 +628,9 @@ export function createCloudController(
   const accept = (value: unknown): CloudSnapshot => {
     const parsed = unwrapSnapshot(value);
     if (!parsed) throw new Error('클라우드 서비스가 올바르지 않은 상태를 반환했습니다.');
+    if (parsed.profileEpoch < snapshot.profileEpoch) {
+      throw Object.assign(new Error('Cloud 프로필이 작업 중 변경됐습니다.'), { code: 'PROFILE_CHANGED' });
+    }
     return publish(parsed);
   };
 
@@ -621,12 +643,15 @@ export function createCloudController(
   const unsubscribeHost = resolvedApi?.onCloudEvent?.((event) => {
     if (disposed) return;
     const next = unwrapSnapshot(event);
+    if (next && next.profileEpoch < snapshot.profileEpoch) return;
     if (next) publish(next);
     const envelope = record(event);
-    const events = envelope?.type === 'cloud-event-batch' && Array.isArray(envelope.events)
-      ? envelope.events
-      : [event];
+    const eventEpoch = strictInteger(envelope?.profileEpoch);
+    if (eventEpoch !== null && eventEpoch !== snapshot.profileEpoch) return;
+    const batched = envelope?.type === 'cloud-event-batch' && Array.isArray(envelope.events);
+    const events: unknown[] = batched ? envelope.events as unknown[] : [event];
     for (const item of events) {
+      if (batched && strictInteger(record(item)?.profileEpoch) !== snapshot.profileEpoch) continue;
       for (const listener of eventListeners) listener(item);
     }
   });
@@ -697,35 +722,48 @@ export function createCloudController(
     transfer: (request) => call('cloudTransfer', request),
     setTransferIntent: (request) => call('cloudSetTransferIntent', request),
     async readReference(reference) {
+      const profileEpoch = snapshot.profileEpoch;
       const fn = resolvedApi?.cloudReadReference;
       if (typeof fn !== 'function') throw new Error('이 앱 빌드는 참고자료 전송을 지원하지 않습니다.');
       const raw = record(await fn(reference));
+      if (profileEpoch !== snapshot.profileEpoch) {
+        throw Object.assign(new Error('Cloud 프로필이 작업 중 변경됐습니다.'), { code: 'PROFILE_CHANGED' });
+      }
       if (!(raw?.bytes instanceof Uint8Array)) throw new Error(`${reference.id} 참고자료를 읽지 못했습니다.`);
       return raw.bytes;
     },
     command: (request) => call('cloudCommand', request),
     dismissSession: (sessionId) => call('cloudDismissSession', { sessionId }),
-    completeTakeover: (sessionId) => call('cloudCompleteTakeover', { sessionId }),
+    completeTakeover: (sessionId, operationId) => call('cloudCompleteTakeover', { sessionId, operationId }),
     async downloadResult(sessionId) {
+      const profileEpoch = snapshot.profileEpoch;
       const fn = resolvedApi?.cloudDownloadResult;
       if (typeof fn !== 'function') throw new Error('이 앱 빌드는 클라우드 결과 다운로드를 지원하지 않습니다.');
       const result = parseDownloadResult(await fn({ sessionId }));
+      if (profileEpoch !== snapshot.profileEpoch) {
+        throw Object.assign(new Error('Cloud 프로필이 작업 중 변경됐습니다.'), { code: 'PROFILE_CHANGED' });
+      }
       if (!result) throw new Error('다운로드한 클라우드 결과가 올바르지 않습니다.');
       return result;
     },
     async downloadCheckpoint(sessionId, operationId) {
+      const profileEpoch = snapshot.profileEpoch;
       const fn = resolvedApi?.cloudDownloadCheckpoint;
       if (typeof fn !== 'function') throw new Error('이 앱 빌드는 클라우드 문서 미러를 지원하지 않습니다.');
-      const result = parseCheckpoint(await fn({ sessionId, ...(operationId ? { operationId } : {}) }));
+      const result = parseCloudCheckpoint(await fn({ sessionId, ...(operationId ? { operationId } : {}) }));
+      if (profileEpoch !== snapshot.profileEpoch) {
+        throw Object.assign(new Error('Cloud 프로필이 작업 중 변경됐습니다.'), { code: 'PROFILE_CHANGED' });
+      }
       if (!result) throw new Error('다운로드한 클라우드 체크포인트가 올바르지 않습니다.');
       return result;
     },
     async openDisplay(sessionId, listener) {
       const generation = ++displayGeneration;
+      const profileEpoch = snapshot.profileEpoch;
       const previous = activeDisplay;
       activeDisplay = null;
       if (previous) await closeDisplay(previous);
-      if (disposed || generation !== displayGeneration) {
+      if (disposed || generation !== displayGeneration || profileEpoch !== snapshot.profileEpoch) {
         throw new DOMException('Cloud display connection was replaced', 'AbortError');
       }
       if (typeof resolvedApi?.cloudOpenDisplay !== 'function'
@@ -751,7 +789,7 @@ export function createCloudController(
         if (connectionId) await resolvedApi.cloudCloseDisplay({ connectionId }).catch(() => {});
         throw new Error('클라우드 디스플레이 연결 정보가 올바르지 않습니다.');
       }
-      if (disposed || generation !== displayGeneration) {
+      if (disposed || generation !== displayGeneration || profileEpoch !== snapshot.profileEpoch) {
         pendingDisplayEvents.delete(connectionId);
         await resolvedApi.cloudCloseDisplay({ connectionId }).catch(() => {});
         throw new DOMException('Cloud display connection was replaced', 'AbortError');
@@ -777,10 +815,14 @@ export function createCloudController(
       };
     },
     async resolveResult(sessionId, action) {
+      const profileEpoch = snapshot.profileEpoch;
       const fn = resolvedApi?.cloudResolveResult;
       if (typeof fn !== 'function') throw new Error('이 앱 빌드는 클라우드 결과 반영을 지원하지 않습니다.');
       const resolution = parseCloudResultResolution(await fn({ sessionId, action }));
       if (!resolution) throw new Error('클라우드 결과 반영 정보가 올바르지 않습니다.');
+      if (profileEpoch !== snapshot.profileEpoch || resolution.snapshot.profileEpoch !== profileEpoch) {
+        throw Object.assign(new Error('Cloud 프로필이 작업 중 변경됐습니다.'), { code: 'PROFILE_CHANGED' });
+      }
       publish(resolution.snapshot);
       return resolution;
     },
@@ -794,6 +836,7 @@ export function createCloudController(
       return () => eventListeners.delete(listener);
     },
     dispose() {
+      if (disposed) return;
       disposed = true;
       displayGeneration += 1;
       if (activeDisplay) void closeDisplay(activeDisplay);

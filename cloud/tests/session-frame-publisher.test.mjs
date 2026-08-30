@@ -22,7 +22,9 @@ function fakeChild() {
   child.stderr.resume = () => {};
   child.exitCode = null;
   child.signalCode = null;
+  child.signals = [];
   child.kill = (signal) => {
+    child.signals.push(signal);
     queueMicrotask(() => {
       child.signalCode = signal;
       child.emit('exit', null, signal);
@@ -80,8 +82,18 @@ function fakeClient(initialDemands = []) {
 }
 
 const sessionDisplay = {
-  environment: { DISPLAY: ':77', XAUTHORITY: '/workspace/home/.Xauthority' },
+  status: 'ready',
+  display: ':77',
+  environment: {
+    DISPLAY: ':77', XAUTHORITY: '/workspace/home/.Xauthority', RAUHWpx_SESSION_DISPLAY: 'ready',
+  },
+  snapshot: () => ({ status: 'ready', width: 1280, height: 800 }),
 };
+
+async function startReady(publisher) {
+  await publisher.start();
+  publisher.markReady();
+}
 
 test('SessionFramePublisher starts and stops ffmpeg from demand', async () => {
   const client = fakeClient([{ version: 1, interested: true, closed: false }]);
@@ -89,20 +101,32 @@ test('SessionFramePublisher starts and stops ffmpeg from demand', async () => {
   const publisher = new SessionFramePublisher({
     client,
     sessionDisplay,
+    environment: {
+      PATH: '/usr/bin:/bin',
+      RAUHWpx_WORKER_TOKEN: 'worker-secret',
+      RAUHWpx_CONTROL_SOCKET: '/run/rauhwpx/control.sock',
+      CONTROL_PLANE_SECRET: 'secret',
+    },
     spawnProcess(command, args, options) {
       assert.equal(command, 'ffmpeg');
       assert.deepEqual(args.slice(args.indexOf('-framerate'), args.indexOf('-framerate') + 2), ['-framerate', '2']);
       assert.ok(args.includes('1280x800'));
       assert.equal(options.env.DISPLAY, ':77');
+      assert.equal(options.env.PATH, '/usr/bin:/bin');
+      assert.equal(options.env.RAUHWpx_WORKER_TOKEN, undefined);
+      assert.equal(options.env.RAUHWpx_CONTROL_SOCKET, undefined);
+      assert.equal(options.env.CONTROL_PLANE_SECRET, undefined);
+      assert.equal(options.detached, false);
       const child = fakeChild();
       children.push(child);
       return child;
     },
   });
-  await publisher.start();
+  await startReady(publisher);
   await waitFor(() => children.length === 1 && client.waiting.length === 1, 'capture start');
   client.waiting.shift().resolve({ version: 2, interested: false, closed: false });
   await waitFor(() => children[0].signalCode === 'SIGTERM', 'capture stop');
+  assert.deepEqual(children[0].signals, ['SIGTERM']);
   await publisher.stop();
   assert.equal(client.closeCalls, 1);
 });
@@ -111,7 +135,7 @@ test('SessionFramePublisher suppresses duplicate JPEGs', async () => {
   const client = fakeClient([{ version: 1, interested: true, closed: false }]);
   const child = fakeChild();
   const publisher = new SessionFramePublisher({ client, sessionDisplay, spawnProcess: () => child, now: () => 1_800_000_000_000 });
-  await publisher.start();
+  await startReady(publisher);
   child.stdout.emit('data', Buffer.concat([jpeg('same'), jpeg('same'), jpeg('changed')]));
   await waitFor(() => client.published.length === 2, 'deduplicated uploads');
   assert.deepEqual(client.published.map(({ sequence }) => sequence), [1, 2]);
@@ -129,7 +153,7 @@ test('SessionFramePublisher keeps one upload in flight and only the newest pendi
     return completion.promise;
   };
   const publisher = new SessionFramePublisher({ client, sessionDisplay, spawnProcess: () => child });
-  await publisher.start();
+  await startReady(publisher);
   child.stdout.emit('data', Buffer.concat([jpeg('first'), jpeg('second'), jpeg('newest')]));
   await waitFor(() => uploads.length === 1, 'first in-flight upload');
   uploads[0].completion.resolve({ sequence: 1 });
@@ -147,7 +171,7 @@ test('SessionFramePublisher fails soft for spawn errors and oversized frames', a
     sessionDisplay,
     spawnProcess: () => { throw Object.assign(new Error('spawn ffmpeg ENOENT'), { code: 'ENOENT' }); },
   });
-  await spawnPublisher.start();
+  await startReady(spawnPublisher);
   await waitFor(() => /ENOENT/.test(spawnPublisher.snapshot().lastError ?? ''), 'soft spawn failure');
   await spawnPublisher.stop();
 
@@ -159,7 +183,7 @@ test('SessionFramePublisher fails soft for spawn errors and oversized frames', a
     spawnProcess: () => child,
     maxFrameBytes: 12,
   });
-  await framePublisher.start();
+  await startReady(framePublisher);
   child.stdout.emit('data', Buffer.concat([jpeg('far-too-large'), jpeg('ok')]));
   await waitFor(() => frameClient.published.length === 1, 'valid frame after oversized frame');
   assert.deepEqual(frameClient.published[0].bytes, jpeg('ok'));
@@ -186,7 +210,7 @@ test('SessionFramePublisher retries a lost open response and reconciles the stre
     retryMaxMs: 4,
   });
   t.after(() => publisher.stop());
-  await publisher.start();
+  await startReady(publisher);
   await waitFor(() => openCalls === 2 && publisher.snapshot().capturing, 'open retry');
   assert.equal(publisher.snapshot().streamId, 'stream-after-lost-response');
   await publisher.stop();
@@ -209,7 +233,7 @@ test('SessionFramePublisher retries one static frame with the same sequence befo
     retryMaxMs: 4,
   });
   t.after(() => publisher.stop());
-  await publisher.start();
+  await startReady(publisher);
   child.stdout.emit('data', jpeg('static'));
   await waitFor(() => attempts.length === 2, 'static frame retry');
   assert.deepEqual(attempts.map(({ sequence }) => sequence), [1, 1]);
@@ -238,7 +262,7 @@ test('SessionFramePublisher retains a failed current frame and only the newest p
     retryMaxMs: 4,
   });
   t.after(() => publisher.stop());
-  await publisher.start();
+  await startReady(publisher);
   child.stdout.emit('data', jpeg('static-current'));
   await waitFor(() => attempts.length === 1, 'current upload');
   child.stdout.emit('data', Buffer.concat([jpeg('older-pending'), jpeg('newest-pending')]));
@@ -271,7 +295,7 @@ test('SessionFramePublisher stops retrying when worker authorization is replaced
     retryMaxMs: 4,
   });
   t.after(() => publisher.stop());
-  await publisher.start();
+  await startReady(publisher);
   await waitFor(() => publisher.snapshot().status === 'error', 'authorization stop');
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(openCalls, 1);
@@ -325,7 +349,7 @@ test('SessionFramePublisher reopens after control-plane frame state is lost', as
     retryMaxMs: 4,
   });
   t.after(() => publisher.stop());
-  await publisher.start();
+  await startReady(publisher);
   await waitFor(() => children.length === 1, 'first capture process');
   children[0].stdout.emit('data', jpeg('same-static-screen'));
   await waitFor(() => published.length === 1, 'first stream frame');
@@ -351,8 +375,8 @@ test('SessionFramePublisher reports real asynchronous spawn and nonzero exit fai
     ffmpegBin: `/definitely-missing-ffmpeg-${process.pid}`,
   });
   t.after(() => missing.stop());
-  await missing.start();
-  await waitFor(() => missing.snapshot().status === 'error', 'real missing executable failure');
+  await startReady(missing);
+  await waitFor(() => /ENOENT/.test(missing.snapshot().lastError ?? ''), 'real missing executable failure');
   assert.match(missing.snapshot().lastError, /ENOENT/);
   assert.equal(missing.snapshot().capturing, false);
   await missing.stop();
@@ -364,10 +388,271 @@ test('SessionFramePublisher reports real asynchronous spawn and nonzero exit fai
     ffmpegBin: process.execPath,
   });
   t.after(() => nonzero.stop());
-  await nonzero.start();
-  await waitFor(() => nonzero.snapshot().status === 'error', 'real nonzero process exit');
+  await startReady(nonzero);
+  await waitFor(() => /exited/.test(nonzero.snapshot().lastError ?? ''), 'real nonzero process exit');
   assert.match(nonzero.snapshot().lastError, /exited/);
   assert.ok(nonzero.snapshot().lastError.length <= 5_000);
   assert.equal(nonzero.snapshot().capturing, false);
   await nonzero.stop();
+});
+
+test('SessionFramePublisher waits for Studio readiness and cannot restart after teardown', async () => {
+  const client = fakeClient([{ version: 1, interested: true, closed: false }]);
+  const children = [];
+  const publisher = new SessionFramePublisher({
+    client,
+    sessionDisplay,
+    spawnProcess: () => {
+      const child = fakeChild();
+      children.push(child);
+      return child;
+    },
+  });
+  await publisher.start();
+  await waitFor(() => client.waiting.length === 1, 'early viewer demand');
+  assert.equal(children.length, 0);
+  assert.equal(client.published.length, 0);
+
+  publisher.markReady();
+  await waitFor(() => children.length === 1, 'capture after Studio readiness');
+  await publisher.stop();
+  publisher.markReady();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(children.length, 1);
+  assert.equal(publisher.snapshot().ready, false);
+});
+
+test('SessionFramePublisher uses SessionDisplay snapshot dimensions for stream and ffmpeg', async () => {
+  const client = fakeClient([{ version: 1, interested: true, closed: false }]);
+  let opened;
+  client.openFrameStream = async ({ width, height }) => {
+    opened = { width, height };
+    return { streamId: 'stream-sized', width, height };
+  };
+  let videoSize;
+  const publisher = new SessionFramePublisher({
+    client,
+    sessionDisplay: {
+      status: 'ready',
+      display: ':77',
+      environment: sessionDisplay.environment,
+      snapshot: () => ({ status: 'ready', display: ':77', width: 1366, height: 768 }),
+    },
+    spawnProcess: (_command, args) => {
+      videoSize = args[args.indexOf('-video_size') + 1];
+      return fakeChild();
+    },
+  });
+  await startReady(publisher);
+  await waitFor(() => publisher.snapshot().capturing, 'dimension capture');
+  assert.deepEqual(opened, { width: 1366, height: 768 });
+  assert.equal(videoSize, '1366x768');
+  await publisher.stop();
+});
+
+test('SessionFramePublisher exposes no capability after a fixed headless fallback', async () => {
+  const client = fakeClient();
+  let opens = 0;
+  client.openFrameStream = async () => { opens += 1; throw new Error('must not open'); };
+  const publisher = new SessionFramePublisher({
+    client,
+    sessionDisplay: {
+      status: 'error',
+      environment: null,
+      snapshot: () => ({ status: 'error', width: 1280, height: 800 }),
+    },
+  });
+  assert.equal((await publisher.start()).status, 'unavailable');
+  publisher.markReady();
+  assert.equal(publisher.snapshot().ready, false);
+  assert.equal(publisher.snapshot().streamId, null);
+  assert.equal(opens, 0);
+  await publisher.stop();
+});
+
+test('SessionFramePublisher retries asynchronous ffmpeg errors without new demand', async () => {
+  const client = fakeClient([{ version: 1, interested: true, closed: false }]);
+  const children = [];
+  const publisher = new SessionFramePublisher({
+    client,
+    sessionDisplay,
+    retryBaseMs: 5,
+    retryMaxMs: 10,
+    spawnProcess: () => {
+      const child = fakeChild();
+      children.push(child);
+      return child;
+    },
+  });
+  await startReady(publisher);
+  await waitFor(() => children.length === 1, 'initial ffmpeg');
+  children[0].emit('error', Object.assign(new Error('ffmpeg pipe failed'), { code: 'EPIPE' }));
+  await waitFor(() => children.length === 2, 'ffmpeg error retry');
+  assert.equal(client.waiting.length, 1, 'retry must not require another demand response');
+  await publisher.stop();
+});
+
+test('SessionFramePublisher retries nonzero ffmpeg exits without new demand', async () => {
+  const client = fakeClient([{ version: 1, interested: true, closed: false }]);
+  const children = [];
+  const publisher = new SessionFramePublisher({
+    client,
+    sessionDisplay,
+    retryBaseMs: 5,
+    retryMaxMs: 10,
+    spawnProcess: () => {
+      const child = fakeChild();
+      children.push(child);
+      return child;
+    },
+  });
+  await startReady(publisher);
+  await waitFor(() => children.length === 1, 'initial ffmpeg');
+  children[0].exitCode = 1;
+  children[0].emit('close', 1, null);
+  await waitFor(() => children.length === 2, 'ffmpeg exit retry');
+  assert.equal(client.waiting.length, 1, 'retry must not require another demand response');
+  await publisher.stop();
+});
+
+test('SessionFramePublisher cancels ffmpeg retries on demand loss, readiness loss, and stop', async () => {
+  for (const cancellation of ['demand', 'readiness', 'stop']) {
+    const client = fakeClient([{ version: 1, interested: true, closed: false }]);
+    const children = [];
+    const publisher = new SessionFramePublisher({
+      client,
+      sessionDisplay,
+      retryBaseMs: 50,
+      retryMaxMs: 50,
+      spawnProcess: () => {
+        const child = fakeChild();
+        children.push(child);
+        return child;
+      },
+    });
+    await startReady(publisher);
+    await waitFor(() => children.length === 1 && client.waiting.length === 1, `${cancellation} initial capture`);
+    children[0].emit('error', new Error('capture failed'));
+    if (cancellation === 'demand') {
+      client.waiting.shift().resolve({ version: 2, interested: false, closed: false });
+      await waitFor(() => publisher.snapshot().interested === false, 'demand loss');
+    } else if (cancellation === 'readiness') {
+      await publisher.markUnavailable();
+      assert.equal(publisher.snapshot().ready, false);
+    } else {
+      await publisher.stop();
+    }
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(children.length, 1, `${cancellation} must cancel capture retry`);
+    await publisher.stop();
+  }
+});
+
+test('SessionFramePublisher fences a blocked upload on readiness loss and republishes only a fresh frame', async () => {
+  const client = fakeClient([{ version: 1, interested: true, closed: false }]);
+  const uploads = [];
+  const children = [];
+  client.publishFrame = (streamId, frame) => {
+    const completion = deferred();
+    uploads.push({ streamId, frame, completion });
+    return completion.promise;
+  };
+  const publisher = new SessionFramePublisher({
+    client,
+    sessionDisplay,
+    spawnProcess: () => {
+      const child = fakeChild();
+      children.push(child);
+      return child;
+    },
+  });
+  await startReady(publisher);
+  await waitFor(() => children.length === 1, 'initial capture');
+  const pixels = jpeg('same-pixels');
+  children[0].stdout.emit('data', pixels);
+  await waitFor(() => uploads.length === 1, 'blocked upload');
+
+  await publisher.markUnavailable();
+  assert.equal(uploads[0].frame.signal.aborted, true);
+  children[0].stdout.emit('data', jpeg('stale-child'));
+  publisher.markReady();
+  await waitFor(() => children.length === 2, 'fresh capture after readiness');
+  children[1].stdout.emit('data', pixels);
+  assert.equal(uploads.length, 1, 'the old upload remains the sole in-flight publication');
+
+  uploads[0].completion.resolve({ sequence: 1 });
+  await waitFor(() => uploads.length === 2, 'fresh frame publication');
+  assert.deepEqual(uploads.map(({ frame }) => frame.sequence), [1, 2]);
+  assert.deepEqual(uploads.map(({ frame }) => frame.bytes), [pixels, pixels]);
+  uploads[1].completion.resolve({ sequence: 2 });
+  await waitFor(() => publisher.snapshot().uploading === false, 'fresh upload completion');
+  await publisher.stop();
+});
+
+test('SessionFramePublisher drops a late upload failure after demand loss', async () => {
+  const client = fakeClient([{ version: 1, interested: true, closed: false }]);
+  const uploads = [];
+  const children = [];
+  client.publishFrame = (streamId, frame) => {
+    const completion = deferred();
+    uploads.push({ streamId, frame, completion });
+    return completion.promise;
+  };
+  const publisher = new SessionFramePublisher({
+    client,
+    sessionDisplay,
+    retryBaseMs: 5,
+    retryMaxMs: 5,
+    spawnProcess: () => {
+      const child = fakeChild();
+      children.push(child);
+      return child;
+    },
+  });
+  await startReady(publisher);
+  await waitFor(() => children.length === 1 && client.waiting.length === 1, 'initial demand');
+  const pixels = jpeg('demand-frame');
+  children[0].stdout.emit('data', pixels);
+  await waitFor(() => uploads.length === 1, 'blocked demand upload');
+
+  client.waiting.shift().resolve({ version: 2, interested: false, closed: false });
+  await waitFor(() => uploads[0].frame.signal.aborted, 'upload abort on demand loss');
+  uploads[0].completion.reject(Object.assign(new Error('late EPIPE'), { code: 'EPIPE' }));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(uploads.length, 1, 'a late failure may not retry stale publication');
+
+  await waitFor(() => client.waiting.length === 1, 'renewed demand waiter');
+  client.waiting.shift().resolve({ version: 3, interested: true, closed: false });
+  await waitFor(() => children.length === 2, 'capture after demand returns');
+  children[1].stdout.emit('data', pixels);
+  await waitFor(() => uploads.length === 2, 'fresh upload after demand returns');
+  assert.equal(uploads[1].frame.sequence, 2);
+  uploads[1].completion.resolve({ sequence: 2 });
+  await publisher.stop();
+});
+
+test('SessionFramePublisher cancels publication backoff when demand disappears', async () => {
+  const client = fakeClient([{ version: 1, interested: true, closed: false }]);
+  const child = fakeChild();
+  let attempts = 0;
+  client.publishFrame = async () => {
+    attempts += 1;
+    throw Object.assign(new Error('temporary upload failure'), { code: 'EPIPE' });
+  };
+  const publisher = new SessionFramePublisher({
+    client,
+    sessionDisplay,
+    retryBaseMs: 50,
+    retryMaxMs: 50,
+    spawnProcess: () => child,
+  });
+  await startReady(publisher);
+  await waitFor(() => client.waiting.length === 1, 'demand waiter');
+  child.stdout.emit('data', jpeg('retry-frame'));
+  await waitFor(() => attempts === 1, 'first upload attempt');
+  client.waiting.shift().resolve({ version: 2, interested: false, closed: false });
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(attempts, 1);
+  assert.equal(publisher.snapshot().pending, false);
+  await publisher.stop();
 });

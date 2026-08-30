@@ -32,6 +32,9 @@ function close(server) {
 }
 
 export function createCloudRuntime(config, dependencies = {}) {
+  if (config.runner === 'local' && config.maxRunningSessions !== 1) {
+    config = { ...config, maxRunningSessions: 1 };
+  }
   mkdirSync(config.dataDirectory, { recursive: true, mode: 0o700 });
   mkdirSync(config.workerControlDirectory, { recursive: true, mode: 0o700 });
   if (config.runner === 'local') mkdirSync(config.workspaceRoot, { recursive: true, mode: 0o711 });

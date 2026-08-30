@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { createSessionDisplay } from '../document-runtime/session-display.mjs';
+import { createSessionDisplay, createSessionDisplayMode } from '../document-runtime/session-display.mjs';
 import { createSessionFramePublisher } from '../document-runtime/session-frame-publisher.mjs';
 import { WorkerClient } from './client.mjs';
 
@@ -65,14 +65,17 @@ try {
       client.event(event.type, event).catch(() => {});
     },
   });
-  await sessionDisplay.start();
+  const displaySnapshot = await sessionDisplay.start();
+  const displayMode = createSessionDisplayMode(sessionDisplay, displaySnapshot);
+  sessionDisplay.disableRestarts();
   const sessionFramePublisher = createSessionFramePublisher({
     client,
     sessionDisplay,
+    displayMode,
     onEvent: (event) => client.event(event.type, event).catch(() => {}),
   });
-  await sessionFramePublisher.start();
   try {
+    await sessionFramePublisher.start();
     const runtimePath = process.env.RAUHWpx_DOCUMENT_RUNTIME || '/app/document-runtime/run.mjs';
     const runtime = await import(pathToFileURL(runtimePath).href);
     if (typeof runtime.runSession !== 'function') throw new Error('Document runtime must export runSession');
@@ -82,6 +85,9 @@ try {
       credentials,
       client,
       sessionDisplay,
+      displayMode,
+      onStudioReady: () => sessionFramePublisher.markReady(),
+      onStudioUnavailable: () => sessionFramePublisher.markUnavailable(),
     });
     if (outcome?.paused !== true && outcome?.suspended !== true && outcome?.takenOver !== true) {
       if (!outcome?.timelinePath) throw new Error('Document runtime did not return timelinePath');

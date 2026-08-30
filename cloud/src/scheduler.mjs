@@ -20,7 +20,10 @@ export class Scheduler {
     this.runner = runner;
     this.logger = logger;
     this.intervalMs = intervalMs;
-    this.maxRunningSessions = maxRunningSessions;
+    const runnerLimit = Number.isSafeInteger(runner?.maxRunningSessions) && runner.maxRunningSessions > 0
+      ? runner.maxRunningSessions
+      : maxRunningSessions;
+    this.maxRunningSessions = Math.min(maxRunningSessions, runnerLimit);
     this.now = now;
     this.controlEndpoint = controlEndpoint ?? (controlSocket ? { socketPath: controlSocket } : null);
     this.dataDirectory = dataDirectory;

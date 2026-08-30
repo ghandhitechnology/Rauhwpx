@@ -117,9 +117,9 @@ export class WorkerClient {
   commitBoundary(boundary) { return this.json('POST', '/boundary', boundary); }
   beginTurn(turn) { return this.json('POST', '/turn-start', turn); }
   completeTurn(turn = {}) { return this.json('POST', '/turn-complete', turn); }
-  createWait(wait) { return this.json('POST', '/waits', wait); }
-  wait(waitId) { return this.json('GET', `/waits/${encodeURIComponent(waitId)}`); }
-  finishClaim() { return this.json('POST', '/finish-claim', {}); }
+  createWait(wait, options = {}) { return this.json('POST', '/waits', wait, options); }
+  wait(waitId, options = {}) { return this.json('GET', `/waits/${encodeURIComponent(waitId)}`, undefined, options); }
+  finishClaim(options = {}) { return this.json('POST', '/finish-claim', {}, options); }
   takeoverAck() { return this.json('POST', '/takeover-ack', {}); }
   suspend(code, message) { return this.json('POST', '/suspend', { code, message }); }
 

@@ -58,8 +58,36 @@ function validateRecord(record) {
   return record;
 }
 
-function takeoverReceiptKey(sessionId, operationId) {
-  return JSON.stringify([sessionId, operationId]);
+function normalizeTakeoverDestination(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Cloud takeover destination is invalid');
+  }
+  const serverPublicKey = typeof value.serverPublicKey === 'string'
+    ? value.serverPublicKey.trim()
+    : '';
+  if (!serverPublicKey || serverPublicKey.length > 4096 || serverPublicKey.includes('\0')) {
+    throw new Error('Cloud takeover destination identity is invalid');
+  }
+  let url;
+  try {
+    url = new URL(String(value.endpoint ?? '').trim());
+  } catch {
+    throw new Error('Cloud takeover destination endpoint is invalid');
+  }
+  if (!['http:', 'https:'].includes(url.protocol)
+    || url.username || url.password || url.search || url.hash) {
+    throw new Error('Cloud takeover destination endpoint is invalid');
+  }
+  url.pathname = url.pathname.replace(/\/+$/, '') || '/';
+  const endpoint = url.toString().replace(/\/$/, '');
+  if (!endpoint || endpoint.length > 2048 || endpoint.includes('\0')) {
+    throw new Error('Cloud takeover destination endpoint is invalid');
+  }
+  return { endpoint, serverPublicKey };
+}
+
+function takeoverReceiptKey(destination, sessionId, operationId) {
+  return JSON.stringify({ destination, sessionId, operationId });
 }
 
 function validateTakeoverReceipt(receipt) {
@@ -72,7 +100,10 @@ function validateTakeoverReceipt(receipt) {
   if (typeof receipt.consumedAt !== 'string' || !Number.isFinite(Date.parse(receipt.consumedAt))) {
     throw new Error('Cloud takeover consumption time is invalid');
   }
-  return receipt;
+  return {
+    ...receipt,
+    destination: normalizeTakeoverDestination(receipt.destination),
+  };
 }
 
 async function atomicJsonWrite(filePath, value, platform) {
@@ -86,6 +117,7 @@ export class CloudHandoffStore {
   #filePath;
   #payloadRoot;
   #platform;
+  #atomicWrite;
   #records = new Map();
   #takeoverReceipts = new Map();
   #loaded = false;
@@ -93,11 +125,13 @@ export class CloudHandoffStore {
   #writeChain = Promise.resolve();
   #persistTimer = null;
 
-  constructor({ filePath, platform = process.platform }) {
+  constructor({ filePath, platform = process.platform, atomicWrite = atomicJsonWrite }) {
     if (!filePath) throw new Error('Cloud handoff store requires a file path');
+    if (typeof atomicWrite !== 'function') throw new Error('Cloud handoff store requires an atomic writer');
     this.#filePath = filePath;
     this.#payloadRoot = path.join(path.dirname(filePath), 'pending-payloads');
     this.#platform = platform;
+    this.#atomicWrite = atomicWrite;
   }
 
   load() {
@@ -144,13 +178,19 @@ export class CloudHandoffStore {
         } catch {}
       }
       for (const receipt of parsed.takeoverReceipts ?? []) {
+        if (!receipt?.destination) {
+          migrated = true;
+          continue;
+        }
         try {
           const validated = validateTakeoverReceipt(receipt);
           this.#takeoverReceipts.set(
-            takeoverReceiptKey(validated.sessionId, validated.operationId),
+            takeoverReceiptKey(validated.destination, validated.sessionId, validated.operationId),
             Object.freeze({ ...validated }),
           );
-        } catch {}
+        } catch {
+          migrated = true;
+        }
       }
       if (migrated) await this.#persist().catch(() => {});
       const activePayloadIds = new Set(
@@ -355,30 +395,41 @@ export class CloudHandoffStore {
     return this.remove(id);
   }
 
-  async consumeTakeoverBoundary(sessionId, operationId) {
+  async consumeTakeoverBoundary(destination, sessionId, operationId) {
     await this.load();
     const receipt = Object.freeze(validateTakeoverReceipt({
+      destination,
       sessionId,
       operationId,
       consumedAt: new Date().toISOString(),
     }));
-    const key = takeoverReceiptKey(sessionId, operationId);
-    const previous = this.#takeoverReceipts.get(key);
-    if (previous) return previous;
-    this.#takeoverReceipts.set(key, receipt);
-    try {
-      await this.#persist();
-    } catch (error) {
-      if (this.#takeoverReceipts.get(key) === receipt) this.#takeoverReceipts.delete(key);
-      throw error;
-    }
-    return receipt;
+    const key = takeoverReceiptKey(receipt.destination, sessionId, operationId);
+    return this.#enqueueWrite(async () => {
+      const previous = this.#takeoverReceipts.get(key);
+      if (previous) return previous;
+      await this.#atomicWrite(this.#filePath, {
+        version: 1,
+        records: [...this.#records.values()],
+        takeoverReceipts: [...this.#takeoverReceipts.values(), receipt],
+      }, this.#platform);
+      this.#takeoverReceipts.set(key, receipt);
+      return receipt;
+    });
   }
 
-  async hasConsumedTakeoverBoundary(sessionId, operationId) {
+  async hasConsumedTakeoverBoundary(destination, sessionId, operationId) {
     await this.load();
-    validateTakeoverReceipt({ sessionId, operationId, consumedAt: new Date().toISOString() });
-    return this.#takeoverReceipts.has(takeoverReceiptKey(sessionId, operationId));
+    const receipt = validateTakeoverReceipt({
+      destination,
+      sessionId,
+      operationId,
+      consumedAt: new Date().toISOString(),
+    });
+    return this.#takeoverReceipts.has(takeoverReceiptKey(
+      receipt.destination,
+      sessionId,
+      operationId,
+    ));
   }
 
   async readPayload(id) {
@@ -431,13 +482,36 @@ export class CloudHandoffStore {
     return next;
   }
 
+  async patchTakeoverBoundary(id, operationId, patch = {}) {
+    await this.load();
+    const current = this.#records.get(id);
+    if (!current) throw new Error('Cloud handoff does not exist');
+    if (current.takeoverBoundary?.operationId !== operationId) return current;
+    const next = Object.freeze({
+      ...current,
+      ...safeRecord(patch),
+      id: current.id,
+      version: current.version,
+      state: current.state,
+      revision: current.revision + 1,
+      updatedAt: new Date().toISOString(),
+    });
+    validateRecord(next);
+    this.#records.set(id, next);
+    await this.#persist();
+    return next;
+  }
+
   #persist() {
-    const snapshot = {
+    return this.#enqueueWrite(() => this.#atomicWrite(this.#filePath, {
       version: 1,
       records: [...this.#records.values()],
       takeoverReceipts: [...this.#takeoverReceipts.values()],
-    };
-    const operation = this.#writeChain.then(() => atomicJsonWrite(this.#filePath, snapshot, this.#platform));
+    }, this.#platform));
+  }
+
+  #enqueueWrite(write) {
+    const operation = this.#writeChain.then(write);
     this.#writeChain = operation.catch(() => {});
     return operation;
   }

@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
+import { childProcessEnvironment, createSessionDisplayMode } from './session-display.mjs';
 
 const JPEG_START = Buffer.from([0xff, 0xd8]);
 const JPEG_END = Buffer.from([0xff, 0xd9]);
@@ -35,8 +36,7 @@ export class SessionFramePublisher {
   constructor({
     client,
     sessionDisplay,
-    width = 1280,
-    height = 800,
+    displayMode = createSessionDisplayMode(sessionDisplay),
     ffmpegBin = 'ffmpeg',
     spawnProcess = spawn,
     now = Date.now,
@@ -44,12 +44,14 @@ export class SessionFramePublisher {
     maxFrameBytes = MAX_DISPLAY_FRAME_BYTES,
     retryBaseMs = 100,
     retryMaxMs = 2_000,
+    environment = process.env,
   } = {}) {
     if (!client) throw new Error('SessionFramePublisher requires a worker client');
     this.client = client;
     this.sessionDisplay = sessionDisplay;
-    this.width = width;
-    this.height = height;
+    this.displayMode = displayMode;
+    this.width = displayMode.geometry.width;
+    this.height = displayMode.geometry.height;
     this.ffmpegBin = ffmpegBin;
     this.spawnProcess = spawnProcess;
     this.now = now;
@@ -57,6 +59,7 @@ export class SessionFramePublisher {
     this.maxFrameBytes = Math.min(MAX_DISPLAY_FRAME_BYTES, maxFrameBytes);
     this.retryBaseMs = Math.max(1, retryBaseMs);
     this.retryMaxMs = Math.max(this.retryBaseMs, retryMaxMs);
+    this.environment = environment;
     this.status = 'stopped';
     this.streamId = null;
     this.sequence = 0;
@@ -77,6 +80,11 @@ export class SessionFramePublisher {
     this.terminal = false;
     this.reportedError = null;
     this.expectedExits = new WeakSet();
+    this.ready = false;
+    this.interested = false;
+    this.captureRetry = null;
+    this.captureFailures = 0;
+    this.generation = 0;
   }
 
   snapshot() {
@@ -87,6 +95,9 @@ export class SessionFramePublisher {
       capturing: Boolean(this.child),
       uploading: Boolean(this.uploading),
       pending: Boolean(this.pending),
+      ready: this.ready,
+      interested: this.interested,
+      retrying: Boolean(this.captureRetry),
       lastError: this.lastError,
     };
   }
@@ -104,15 +115,17 @@ export class SessionFramePublisher {
     this.current = null;
     this.pending = null;
     this.reportedError = null;
-    const environment = this.sessionDisplay?.environment;
-    if (!environment?.DISPLAY) {
+    this.ready = false;
+    this.interested = false;
+    this.#invalidatePublication();
+    if (this.displayMode.kind !== 'headed' || !this.#displayAvailable()) {
       this.status = 'unavailable';
       this.lastError = 'Session display is unavailable';
       return this.snapshot();
     }
     this.status = 'connecting';
     this.controller = new AbortController();
-    this.loop = this.#run(environment).finally(() => { this.loop = null; });
+    this.loop = this.#run().finally(() => { this.loop = null; });
     await Promise.resolve();
     return this.snapshot();
   }
@@ -125,10 +138,11 @@ export class SessionFramePublisher {
 
   async #stop() {
     this.stopping = true;
+    this.ready = false;
+    this.interested = false;
+    this.#invalidatePublication();
     this.controller?.abort();
     this.demandController?.abort();
-    this.uploadController?.abort();
-    this.pending = null;
     await this.#stopCapture();
     await this.uploading?.catch(() => {});
     await this.loop?.catch(() => {});
@@ -140,7 +154,24 @@ export class SessionFramePublisher {
     return this.snapshot();
   }
 
-  async #run(environment) {
+  markReady() {
+    if (this.stopping || this.terminal || !this.loop || !this.#displayAvailable()) {
+      return this.snapshot();
+    }
+    this.ready = true;
+    if (this.interested) this.#startCapture();
+    return this.snapshot();
+  }
+
+  async markUnavailable() {
+    this.ready = false;
+    this.#invalidatePublication();
+    await this.#stopCapture();
+    if (!this.stopping && !this.terminal) this.status = 'unavailable';
+    return this.snapshot();
+  }
+
+  async #run() {
     let failures = 0;
     while (!this.stopping && !this.terminal) {
       if (!this.streamId) {
@@ -158,6 +189,7 @@ export class SessionFramePublisher {
           if (this.pending) this.pending.sequence = null;
           this.status = 'waiting';
           failures = 0;
+          this.captureFailures = 0;
           this.#pump();
         } catch (error) {
           if (this.stopping || aborted(error)) break;
@@ -186,8 +218,12 @@ export class SessionFramePublisher {
         }
         failures = 0;
         this.demandVersion = demand.version;
-        if (demand.interested) this.#startCapture(environment);
-        else await this.#stopCapture();
+        this.interested = demand.interested === true;
+        if (this.interested && this.ready) this.#startCapture();
+        else if (!this.interested) {
+          this.#invalidatePublication();
+          await this.#stopCapture();
+        }
       } catch (error) {
         this.demandController = null;
         if (this.stopping || this.terminal) break;
@@ -210,14 +246,13 @@ export class SessionFramePublisher {
 
   async #loseStream(expectedStreamId) {
     if (expectedStreamId && this.streamId !== expectedStreamId) return;
+    this.#invalidatePublication();
     this.streamId = null;
     this.sequence = 0;
     this.demandVersion = 0;
     this.lastPublishedDigest = null;
-    if (this.current) this.current.sequence = null;
-    if (this.pending) this.pending.sequence = null;
+    this.interested = false;
     this.demandController?.abort();
-    this.uploadController?.abort();
     this.status = 'connecting';
     await this.#stopCapture();
   }
@@ -226,8 +261,8 @@ export class SessionFramePublisher {
     this.#fail(error);
     this.terminal = true;
     this.status = 'error';
+    this.#invalidatePublication();
     this.demandController?.abort();
-    this.uploadController?.abort();
   }
 
   async #backoff(failures, signal) {
@@ -235,8 +270,17 @@ export class SessionFramePublisher {
     try { await delay(timeout, undefined, { signal, ref: false }); } catch { /* Stop or stream reset. */ }
   }
 
-  #startCapture(environment) {
+  #startCapture() {
     if (this.stopping || this.terminal || this.child) return;
+    const environment = this.displayMode.environment;
+    if (!this.#captureEligible(this.streamId)) {
+      if (!this.#displayAvailable()) {
+        this.ready = false;
+        this.status = 'unavailable';
+      }
+      return;
+    }
+    const streamId = this.streamId;
     const args = [
       '-nostdin',
       '-hide_banner',
@@ -254,11 +298,12 @@ export class SessionFramePublisher {
     let child;
     try {
       child = this.spawnProcess(this.ffmpegBin, args, {
-        env: { ...process.env, ...environment },
+        env: childProcessEnvironment(this.environment, environment),
+        detached: false,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch (error) {
-      this.#captureFailed(error);
+      this.#captureFailed(error, streamId);
       return;
     }
     this.child = child;
@@ -267,7 +312,10 @@ export class SessionFramePublisher {
     let stderrTail = '';
     let settled = false;
     child.stdout?.on('data', (chunk) => {
-      if (this.child === child) this.#consume(chunk);
+      if (this.child === child) {
+        this.captureFailures = 0;
+        this.#consume(chunk);
+      }
     });
     child.stderr?.on('data', (chunk) => {
       stderrTail = `${stderrTail}${String(chunk)}`.slice(-STDERR_TAIL_BYTES);
@@ -278,12 +326,12 @@ export class SessionFramePublisher {
       if (this.child === child) this.child = null;
       if (this.expectedExits.has(child) || this.stopping) return;
       if (error) {
-        this.#captureFailed(error);
+        this.#captureFailed(error, streamId);
       } else if (code !== 0 || signal) {
         const detail = stderrTail.trim();
         this.#captureFailed(new Error(
           `${this.ffmpegBin} exited ${signal ? `from ${signal}` : `with ${code}`}${detail ? `: ${detail}` : ''}`,
-        ));
+        ), streamId);
       } else if (!this.terminal) {
         this.status = 'waiting';
       }
@@ -292,12 +340,23 @@ export class SessionFramePublisher {
     child.once('close', (code, signal) => finish(null, code, signal));
   }
 
-  #captureFailed(error) {
+  #captureFailed(error, streamId) {
     this.#fail(error);
-    if (!this.stopping && !this.terminal) this.status = 'error';
+    if (this.#captureEligible(streamId)) {
+      this.#scheduleCaptureRetry(streamId);
+    } else if (!this.stopping && !this.terminal) {
+      if (!this.#displayAvailable()) {
+        this.ready = false;
+        this.#cancelCaptureRetry();
+        this.status = 'unavailable';
+      } else {
+        this.status = 'error';
+      }
+    }
   }
 
   async #stopCapture() {
+    this.#cancelCaptureRetry();
     const child = this.child;
     this.child = null;
     this.captureBuffer = Buffer.alloc(0);
@@ -313,6 +372,60 @@ export class SessionFramePublisher {
       try { child.kill('SIGKILL'); } catch { /* Process already exited. */ }
     }
     if (!this.stopping && !this.terminal && this.streamId) this.status = 'waiting';
+  }
+
+  #displayAvailable() {
+    if (this.displayMode.kind !== 'headed') return false;
+    const snapshot = this.sessionDisplay?.snapshot?.();
+    const environment = this.sessionDisplay?.environment;
+    const currentDisplay = snapshot?.display ?? this.sessionDisplay?.display ?? environment?.DISPLAY;
+    return snapshot?.status === 'ready'
+      && currentDisplay === this.displayMode.display
+      && environment?.DISPLAY === this.displayMode.display;
+  }
+
+  #captureEligible(streamId) {
+    return !this.stopping
+      && !this.terminal
+      && this.ready
+      && this.interested
+      && Boolean(streamId)
+      && this.streamId === streamId
+      && this.#displayAvailable();
+  }
+
+  #scheduleCaptureRetry(streamId) {
+    if (!this.#captureEligible(streamId)) return;
+    this.#cancelCaptureRetry({ resetFailures: false });
+    const controller = new AbortController();
+    const failures = ++this.captureFailures;
+    const timeout = Math.min(this.retryMaxMs, this.retryBaseMs * (2 ** Math.min(failures - 1, 8)));
+    const retry = { controller, streamId, promise: null };
+    this.status = 'retrying';
+    retry.promise = delay(timeout, undefined, { signal: controller.signal, ref: false })
+      .then(() => {
+        if (this.captureRetry !== retry) return;
+        this.captureRetry = null;
+        if (!this.#captureEligible(streamId)) {
+          if (!this.#displayAvailable()) {
+            this.ready = false;
+            this.status = 'unavailable';
+          }
+          return;
+        }
+        this.#startCapture();
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (this.captureRetry === retry) this.captureRetry = null;
+      });
+    this.captureRetry = retry;
+  }
+
+  #cancelCaptureRetry({ resetFailures = true } = {}) {
+    this.captureRetry?.controller.abort();
+    this.captureRetry = null;
+    if (resetFailures) this.captureFailures = 0;
   }
 
   #consume(chunk) {
@@ -341,6 +454,9 @@ export class SessionFramePublisher {
   }
 
   #queueFrame(bytes) {
+    const streamId = this.streamId;
+    const generation = this.generation;
+    if (!this.#publicationEligible(generation, streamId)) return;
     const digest = createHash('sha256').update(bytes).digest('hex');
     if (digest === this.current?.digest || digest === this.pending?.digest
       || (!this.current && digest === this.lastPublishedDigest)) return;
@@ -349,6 +465,8 @@ export class SessionFramePublisher {
       digest,
       capturedAt: new Date(this.now()).toISOString(),
       sequence: null,
+      generation,
+      streamId,
     };
     if (this.current) this.pending = frame;
     else this.current = frame;
@@ -356,12 +474,13 @@ export class SessionFramePublisher {
   }
 
   #pump() {
-    if (this.uploading || !this.current || !this.streamId || this.stopping || this.terminal) return;
+    if (this.uploading || !this.current) return;
     const frame = this.current;
-    const streamId = this.streamId;
+    const { generation, streamId } = frame;
+    if (!this.#publicationEligible(generation, streamId)) return;
     if (frame.sequence === null) frame.sequence = ++this.sequence;
     this.uploadController = new AbortController();
-    const upload = this.#publish(frame, streamId, this.uploadController.signal)
+    const upload = this.#publish(frame, streamId, generation, this.uploadController.signal)
       .finally(() => {
         if (this.uploading !== upload) return;
         this.uploading = null;
@@ -371,24 +490,24 @@ export class SessionFramePublisher {
     this.uploading = upload;
   }
 
-  async #publish(frame, streamId, signal) {
+  async #publish(frame, streamId, generation, signal) {
     let failures = 0;
-    while (!this.stopping && !this.terminal && this.current === frame && this.streamId === streamId) {
+    while (this.current === frame && this.#publicationEligible(generation, streamId) && !signal.aborted) {
       try {
+        if (!this.#publicationEligible(generation, streamId) || signal.aborted) return;
         await this.client.publishFrame(streamId, {
           sequence: frame.sequence,
           capturedAt: frame.capturedAt,
           bytes: frame.bytes,
           signal,
         });
-        if (this.current !== frame || this.streamId !== streamId) return;
+        if (this.current !== frame || !this.#publicationEligible(generation, streamId) || signal.aborted) return;
         this.lastPublishedDigest = frame.digest;
         this.current = this.pending;
         this.pending = null;
         return;
       } catch (error) {
-        if (this.stopping || this.terminal) return;
-        if (aborted(error) && this.streamId !== streamId) return;
+        if (!this.#publicationEligible(generation, streamId) || signal.aborted || aborted(error)) return;
         if (streamMissing(error)) {
           await this.#loseStream(streamId);
           return;
@@ -401,6 +520,21 @@ export class SessionFramePublisher {
         await this.#backoff(failures += 1, signal);
       }
     }
+  }
+
+  #publicationEligible(generation, streamId) {
+    return generation === this.generation
+      && this.#captureEligible(streamId);
+  }
+
+  #invalidatePublication() {
+    this.generation += 1;
+    this.uploadController?.abort();
+    this.current = null;
+    this.pending = null;
+    this.captureBuffer = Buffer.alloc(0);
+    this.lastPublishedDigest = null;
+    this.#cancelCaptureRetry();
   }
 
   #fail(error) {

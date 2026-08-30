@@ -14,7 +14,7 @@ function sourceBetween(startMarker: string, endMarker: string): string {
 test('cloud runtime document loads bypass guards and dialogs without changing ordinary loads', () => {
   const cloudRuntime = sourceBetween(
     'function installCloudDocumentRuntimeApi',
-    '\nfunction applyCloudResult',
+    '\nasync function applyCloudResult',
   );
   const loadFile = sourceBetween('async function loadFile(', '\nfunction prepareCanvasRendererDocument');
   const fileInput = sourceBetween('function setupFileInput()', '\nfunction setupZoomControls');
