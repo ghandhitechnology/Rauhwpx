@@ -8,6 +8,7 @@ import {
   createWorkspaceController,
   deriveComposerTarget,
   disposeCloudDependencies,
+  shouldShowCloudWorkspaceSwitch,
   type CloudWorkspace,
 } from '../src/cloud/workspace.ts';
 import type { CloudSessionState, CloudSnapshot } from '../src/cloud/types.ts';
@@ -148,6 +149,50 @@ function snapshot(session: CloudSessionState, cloudLease = false): CloudSnapshot
     updatedAt: '2026-08-30T00:00:00.000Z',
   };
 }
+
+test('cloud workspace switch stays hidden for logged-out documents without a cloud session', () => {
+  const scope = { threadId: baseSession.threadId, documentId: baseSession.documentId };
+  const loggedOut = {
+    signedIn: false,
+    account: null,
+    quota: null,
+    raucloud: { kind: 'logged-out' as const },
+    updatedAt: '2026-08-30T00:00:00.000Z',
+  };
+  const empty = { ...snapshot({ kind: 'idle' }), account: loggedOut };
+  assert.equal(shouldShowCloudWorkspaceSwitch(empty, scope), false);
+
+  const currentDocument = { ...snapshot(sessions[4]!), account: loggedOut };
+  assert.equal(shouldShowCloudWorkspaceSwitch(currentDocument, scope), true);
+
+  const otherDocumentSession = {
+    ...sessions[4]!,
+    documentId: 'document-other-01',
+    threadId: 'thread-other-01',
+  };
+  const otherDocument = {
+    ...snapshot(otherDocumentSession),
+    account: loggedOut,
+  };
+  assert.equal(shouldShowCloudWorkspaceSwitch(otherDocument, scope), false);
+});
+
+test('cloud workspace switch appears for signed-in users and stays hidden until account status is known', () => {
+  const scope = { threadId: baseSession.threadId, documentId: baseSession.documentId };
+  const signedIn = {
+    ...snapshot({ kind: 'idle' }),
+    account: {
+      signedIn: true,
+      account: { id: 'user-1', email: 'user@example.test' },
+      quota: null,
+      raucloud: { kind: 'available' as const },
+      updatedAt: '2026-08-30T00:00:00.000Z',
+    },
+  };
+  assert.equal(shouldShowCloudWorkspaceSwitch(signedIn, scope), true);
+  assert.equal(shouldShowCloudWorkspaceSwitch(snapshot({ kind: 'idle' }), scope), false);
+  assert.equal(shouldShowCloudWorkspaceSwitch({ ...signedIn, available: false }, scope), false);
+});
 
 test('every workspace mode derives its composer target from the lease and selected session', () => {
   for (const session of sessions) {

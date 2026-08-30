@@ -1698,6 +1698,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     onRequestTransfer: () => requestCloudTransfer(),
     onCancelPendingTransfer: () => cancelPendingCloudTransfer(),
     getScope: () => editorCloudScope.current(),
+    onWorkspaceSwitchVisibilityChange: (visible) => {
+      workspaceModeSwitch.hidden = !visible;
+    },
     onCloseSettings: () => setSettingsPanelOpen(false),
     isCloudMode: () => workspace.mode() === 'cloud',
     onWorkspaceLock: (reason) => beginAuthorityTransition(reason),
