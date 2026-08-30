@@ -14,6 +14,7 @@ import {
   net,
   protocol,
   safeStorage,
+  session as electronSession,
   shell,
 } from 'electron';
 import electronUpdater from 'electron-updater';
@@ -54,6 +55,10 @@ import {
 } from './studio-protocol.mjs';
 import { createSecretVault, handleSecretRequest } from './secret-vault.mjs';
 import { deliverPlainTextPaste } from './plain-text-paste.mjs';
+import {
+  prepareDevelopmentCaches,
+  removeStaleLaunchDirectories,
+} from './runtime-cleanup.mjs';
 
 const { autoUpdater } = electronUpdater;
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
@@ -66,6 +71,11 @@ const devUrl = resolveDevelopmentUrl({
 const launchId = randomUUID();
 const hubToken = createHubToken();
 const devOrigin = devUrl ? new URL(devUrl).origin : null;
+
+// Vite gives every hot update a new timestamped URL. Reusing Electron's
+// persistent HTTP cache across dev runs otherwise leaves one JS/WASM entry per
+// edit and per worktree in the production profile.
+if (devUrl) app.commandLine.appendSwitch('disable-http-cache');
 
 function isTrustedRendererUrl(rawUrl) {
   try {
@@ -294,8 +304,10 @@ let quitRequested = false;
 let desktopReady = false;
 let secretVault = null;
 const pendingLaunches = [launchRequest({ argv: process.argv, source: 'initial' })];
-const runtimeDir = join(app.getPath('temp'), 'rauhwpx', 'runtime', launchId);
-const workDir = join(app.getPath('userData'), 'launch-work', launchId);
+const runtimeRoot = join(app.getPath('temp'), 'rauhwpx', 'runtime');
+const workRoot = join(app.getPath('userData'), 'launch-work');
+const runtimeDir = join(runtimeRoot, launchId);
+const workDir = join(workRoot, launchId);
 const hubOwner = new AgentHubOwner({ runtimeDir, workDir });
 const sessions = new SessionManager({
   launchId,
@@ -321,6 +333,14 @@ async function loadNativeBookmarks() {
 
 function persistNativeBookmarks() {
   return nativeBookmarkWriter.enqueue(JSON.stringify(nativeFiles.dumpBookmarks()));
+}
+
+async function bestEffortStartupCleanup(label, cleanup) {
+  try {
+    await cleanup;
+  } catch (error) {
+    console.warn(`[rauhwpx] ${label} cleanup failed:`, error);
+  }
 }
 
 let updateDownloadReady = false;
@@ -920,6 +940,23 @@ if (!hasSingleInstanceLock) {
   });
 
   app.whenReady().then(async () => {
+    await Promise.all([
+      bestEffortStartupCleanup(
+        'stale runtime',
+        removeStaleLaunchDirectories(runtimeRoot, launchId),
+      ),
+      bestEffortStartupCleanup(
+        'stale launch workspace',
+        removeStaleLaunchDirectories(workRoot, launchId),
+      ),
+      ...(devUrl ? [bestEffortStartupCleanup(
+        'development browser cache',
+        prepareDevelopmentCaches(
+          electronSession.defaultSession,
+          join(runtimeDir, 'code-cache'),
+        ),
+      )] : []),
+    ]);
     secretVault = createSecretVault({
       filePath: join(app.getPath('userData'), 'secrets.json'),
       safeStorage,
