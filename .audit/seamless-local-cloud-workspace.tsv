@@ -1,3 +1,4 @@
 ts	phase	decision	why	evidence	result
 2026-08-30T02:11:25Z	ground	traced the product contract and existing branch history before changing code	the feature crosses local chat, cloud chat, preview, and document ownership	PRODUCT.md, DESIGN.md, git branch history	research in progress
 2026-08-30T02:15:11Z	research	chose the persistent cloud conversation branch and the existing Xvfb display as the base	both are complete, tested foundations and the missing piece is the authenticated Studio viewer	docs/local-cloud-workspace-survey.md	research direction locked
+2026-08-30T02:16:11Z	foundation	merged the persistent cloud conversation branch without conflicts	reuse its durable room, lease, checkpoint, and client recovery contracts	commit 72c471c2; cloud check; 50 focused tests	baseline green
