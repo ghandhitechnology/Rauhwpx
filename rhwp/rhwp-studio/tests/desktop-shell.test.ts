@@ -26,7 +26,7 @@ function associationExts(association: { ext?: string | string[] }): string[] {
 }
 
 test('SessionManager gives each owned BrowserWindow an isolated UUID context', async () => {
-  const ids = ['session-a', 'session-b'];
+  const ids = ['session-a', 'session-b', 'session-c'];
   const manager = new SessionManager({
     launchId: 'launch-1',
     createId: () => ids.shift(),
@@ -35,9 +35,10 @@ test('SessionManager gives each owned BrowserWindow an isolated UUID context', a
   });
   const first = fakeWindow(10);
   const second = fakeWindow(11);
-  manager.addWindow(first, { openFiles: ['/tmp/a.hwpx'], source: 'initial' });
+  const firstSession = manager.addWindow(first, { openFiles: ['/tmp/a.hwpx'], source: 'initial' });
   manager.addWindow(second, { source: 'second-instance' });
 
+  assert.equal(manager.sessionById('session-a'), firstSession);
   assert.deepEqual(await manager.contextForSender(first.webContents), {
     launchId: 'launch-1',
     sessionId: 'session-a',
@@ -47,6 +48,7 @@ test('SessionManager gives each owned BrowserWindow an isolated UUID context', a
   assert.equal((await manager.contextForSender(second.webContents)).sessionId, 'session-b');
   assert.throws(() => manager.sessionForSender({ id: 10 }), /does not own/);
   assert.throws(() => manager.sessionForSender({ id: 99 }), /does not own/);
+  assert.throws(() => manager.addWindow(fakeWindow(10)), /already owns a session/);
 });
 
 test('SessionManager removal remains safe after webContents destruction', () => {
