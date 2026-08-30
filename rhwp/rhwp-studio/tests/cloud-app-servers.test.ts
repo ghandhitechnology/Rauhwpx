@@ -368,7 +368,9 @@ test('the dialog offers both servers and every sandbox action', () => {
   assert.match(onboarding, /dataset\.serverMode = mode/);
   assert.match(onboarding, /controller\.selectServerMode\(mode\)/);
   assert.match(onboarding, /controller\.spawnSandbox\(providerId\)/);
-  assert.match(onboarding, /controller\.teardownSandbox\(\)/);
+  assert.match(onboarding, /controller\.teardownSandbox\(options\)/);
+  assert.match(onboarding, /작업을 버리고 종료/);
+  assert.match(onboarding, /teardownSandbox\(\{ force: true \}\)/);
   assert.match(onboarding, /controller\.sandboxStatus\(\)/);
   assert.match(onboarding, /남은 서버는 공급자 콘솔에서 직접 삭제하세요/);
   // 놓고 온 유료 서버는 화면에 보여야 한다. 스크린 리더 전용 안내로는 부족하다.

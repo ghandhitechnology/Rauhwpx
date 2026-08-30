@@ -845,14 +845,20 @@ try {
   );
   assert.deepEqual(
     await page.$$eval('.ag-cloud-setup-footer button', (nodes) => nodes.map((node) => node.textContent.trim())),
-    ['취소', '상태 확인', '다시 종료', '서버 다시 선택'],
+    ['취소', '다시 종료', '작업을 버리고 종료', '서버 다시 선택'],
   );
-  await clickButton(page, '상태 확인');
-  await waitForTitle(page, '앱 제공 서버가 준비되었습니다');
-  assert.equal(await page.evaluate(() => window.__cloudHarness.calls.some((call) => call.method === 'cloudSandboxStatus')), true);
-  console.log('  PASS a refused teardown keeps the sandbox and the status check restores the ready screen');
+  await clickButton(page, '작업을 버리고 종료');
+  await waitForTitle(page, 'Cloud 서버 선택');
+  assert.deepEqual(
+    await page.evaluate(() => window.__cloudHarness.calls.filter((call) => call.method === 'cloudTeardownSandbox').map((call) => call.payload)),
+    [{ force: false }, { force: true }],
+  );
+  console.log('  PASS a refused teardown offers a forced cleanup path');
 
   await page.evaluate(() => window.__cloudHarness.clearCalls());
+  await clickButton(page, '계속');
+  await clickButton(page, '서버 만들기');
+  await waitForTitle(page, '앱 제공 서버가 준비되었습니다');
   await clickButton(page, '서버 종료');
   await waitForTitle(page, '앱 제공 서버 종료 중');
   await waitForTitle(page, 'Cloud 서버 선택');

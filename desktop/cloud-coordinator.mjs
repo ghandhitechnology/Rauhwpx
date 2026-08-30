@@ -964,16 +964,14 @@ export class CloudCoordinator extends EventEmitter {
       this.#setSandboxLifecycle('idle');
       return this.snapshot({ extra: { sandbox: { ok: true, removed: false } } });
     }
-    if (!force) {
-      const live = (await this.#store.list()).filter((record) => (
-        !record.resolvedAt && LIVE_HANDOFF_STATES.includes(record.state)
-      ));
-      if (live.length) {
-        throw new AppServerError(
-          'Finish or cancel the cloud work on this sandbox before shutting it down.',
-          { code: 'SANDBOX_HAS_WORK', retryable: false },
-        );
-      }
+    const live = (await this.#store.list()).filter((record) => (
+      !record.resolvedAt && LIVE_HANDOFF_STATES.includes(record.state)
+    ));
+    if (!force && live.length) {
+      throw new AppServerError(
+        'Finish or cancel the cloud work on this sandbox before shutting it down.',
+        { code: 'SANDBOX_HAS_WORK', retryable: false },
+      );
     }
     const provider = this.#sandboxProvider(profile.sandbox);
     if (!provider) {
@@ -986,6 +984,7 @@ export class CloudCoordinator extends EventEmitter {
     this.#emit({ type: 'sandbox-teardown-started', providerId: provider.id });
     try {
       const result = await provider.teardown(profile.sandbox);
+      if (force) await this.#finishAbandonedSandboxWork(live);
       await this.#client.forgetProfile();
       this.#setSandboxLifecycle('idle');
       const snapshot = await this.snapshot({ extra: { sandbox: { ok: true, removed: result.removed === true } } });
@@ -995,6 +994,32 @@ export class CloudCoordinator extends EventEmitter {
       this.#setSandboxLifecycle('error', error.message);
       this.#emit({ type: 'sandbox-teardown-failed', providerId: provider.id, error: error.message });
       throw error;
+    }
+  }
+
+  async #finishAbandonedSandboxWork(records) {
+    const reason = 'The app sandbox was shut down before this cloud work finished.';
+    for (const record of records) {
+      this.#transferControllers.get(record.id)?.abort(new Error(reason));
+    }
+    for (const record of records) {
+      await this.#transferPromises.get(record.id)?.catch(() => {});
+      const current = await this.#store.get(record.id);
+      if (!current || current.resolvedAt || !LIVE_HANDOFF_STATES.includes(current.state)) continue;
+      const recoveryTimer = this.#recoveryTimers.get(current.id);
+      if (recoveryTimer) clearTimeout(recoveryTimer);
+      this.#recoveryTimers.delete(current.id);
+      const resultTimer = this.#resultRecoveryTimers.get(current.id);
+      if (resultTimer) clearTimeout(resultTimer);
+      this.#resultRecoveryTimers.delete(current.id);
+      const terminalState = current.state === 'completed' ? 'expired' : 'cancelled';
+      const terminal = await this.#store.transition(current.id, terminalState, {
+        cancelRequested: false,
+        error: reason,
+      });
+      await this.#store.clearPayload(current.id).catch(() => {});
+      if (terminal.cloudSessionId) this.#remoteSessions.delete(terminal.cloudSessionId);
+      this.#transferRemoteSessions.delete(current.id);
     }
   }
 
