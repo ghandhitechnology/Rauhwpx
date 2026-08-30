@@ -49,6 +49,7 @@ const userProfile = {
 function snapshot(overrides: Partial<CloudSnapshot> = {}): CloudSnapshot {
   return {
     revision: 1,
+    profileEpoch: 1,
     available: true,
     profile: { kind: 'unconfigured' },
     server: { mode: null, preferredMode: null, providers: [], lifecycle: 'idle', message: null },
@@ -87,6 +88,7 @@ function appHosted(lifecycle: CloudSnapshot['server']['lifecycle'], connection: 
 test('the parser keeps app sandboxes, user hosts, and legacy snapshots apart', () => {
   const appSnapshot = parseCloudSnapshot({
     revision: 4,
+    profileEpoch: 2,
     available: true,
     profile: {
       kind: 'configured',
@@ -118,6 +120,7 @@ test('the parser keeps app sandboxes, user hosts, and legacy snapshots apart', (
 
   const legacy = parseCloudSnapshot({
     revision: 1,
+    profileEpoch: 1,
     available: true,
     profile: {
       kind: 'configured',
@@ -144,6 +147,7 @@ test('the parser keeps app sandboxes, user hosts, and legacy snapshots apart', (
 
   const base = {
     revision: 1,
+    profileEpoch: 1,
     available: true,
     profile: { kind: 'unconfigured' },
     lease: { owner: 'local' },

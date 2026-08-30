@@ -12,6 +12,19 @@ import { CloudHandoffStore } from '../desktop/cloud-handoff.mjs';
 import { normalizeCloudProfile } from '../desktop/cloud-profile.mjs';
 import { collectProviderAuth } from '../desktop/provider-auth.mjs';
 
+test('desktop checkpoint IPC preserves the immutable boundary operation id', async () => {
+  const source = await readFile(new URL('../desktop/main.mjs', import.meta.url), 'utf8');
+  assert.match(source, /cloud:download-checkpoint[\s\S]*?\^\[A-Za-z0-9\._:-\]\{1,160\}\$[\s\S]*?downloadCheckpoint\(\{ sessionId, operationId \}\)/);
+});
+
+test('desktop result resolution holds one coordinator profile lease', async () => {
+  const source = await readFile(new URL('../desktop/main.mjs', import.meta.url), 'utf8');
+  assert.match(
+    source,
+    /cloud:resolve-result[\s\S]*?coordinator\.withActiveHandoff\(payload\.sessionId, async \(handoff\) => \{[\s\S]*?applyCloudRecovery\([\s\S]*?scopedCloudSnapshot\([\s\S]*?coordinator\.recordResolution\(/,
+  );
+});
+
 const SERVER_IDENTITY = generateKeyPairSync('ed25519');
 const SERVER_KEY = `ed25519:${SERVER_IDENTITY.publicKey.export({ type: 'spki', format: 'der' }).toString('base64url')}`;
 
@@ -292,6 +305,108 @@ test('each stable turn archives exact bytes and atomically advances an unchanged
   assert.equal(await readFile(record.turnArchives[0].path, 'utf8'), edited.toString());
 });
 
+test('a persisted turn-boundary receipt retries after restart without duplicating origin sync', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-turn-receipt-'));
+  const storePath = path.join(directory, 'handoffs.json');
+  const originPath = path.join(directory, 'source.hwpx');
+  const original = Buffer.from('original document');
+  const edited = Buffer.from('stable retry document');
+  const editedDigest = createHash('sha256').update(edited).digest('hex');
+  await writeFile(originPath, original);
+  const firstStore = new CloudHandoffStore({ filePath: storePath });
+  const created = await firstStore.create({
+    sessionId: 'desktop-retry',
+    threadId: 'thread-retry',
+    documentId: 'document-retry',
+    originPath,
+    documentName: 'source.hwpx',
+    documentBytes: original,
+    timeline: null,
+    provider: 'codex',
+    limits: { maxTurns: 100 },
+  });
+  await firstStore.transition(created.id, 'uploading');
+  await firstStore.transition(created.id, 'committing');
+  await firstStore.transition(created.id, 'running', { cloudSessionId: 'cloud-retry', serverVersion: 2 });
+  const boundary = {
+    kind: 'turn', operationId: 'turn_retry_stable', turnNumber: 1, revision: 3, stateVersion: 3,
+  };
+  const firstFailure = Promise.withResolvers();
+  const first = new CloudCoordinator({
+    client: {
+      loadProfile: async () => null,
+      isPaired: async () => false,
+      downloadCheckpoint: async () => { throw new Error('temporary download failure'); },
+      watchSession: async (_sessionId, _after, { onReconnect, onEvent }) => {
+        await onReconnect();
+        await onEvent({ sequence: 6, type: 'boundary.committed', payload: boundary }).catch(() => {
+          firstFailure.resolve();
+        });
+      },
+    },
+    store: firstStore,
+    provisioner: {},
+    recoveryDir: path.join(directory, 'recovery'),
+  });
+  await first.start();
+  await firstFailure.promise;
+  let record = await firstStore.get(created.id);
+  assert.deepEqual(record.pendingTurnBoundary, {
+    operationId: boundary.operationId,
+    turnNumber: 1,
+    revision: 3,
+  });
+  assert.equal(record.lastEventSequence, 6);
+  const crashReload = new CloudHandoffStore({ filePath: storePath });
+  assert.deepEqual((await crashReload.get(created.id)).pendingTurnBoundary, record.pendingTurnBoundary);
+  await first.stop();
+  await firstStore.flush();
+
+  let successfulDownloads = 0;
+  const restarted = Promise.withResolvers();
+  const secondStore = new CloudHandoffStore({ filePath: storePath });
+  const second = new CloudCoordinator({
+    client: {
+      loadProfile: async () => null,
+      isPaired: async () => false,
+      downloadCheckpoint: async (_sessionId, { operationId }) => {
+        successfulDownloads += 1;
+        return {
+          bytes: edited,
+          sha256: editedDigest,
+          size: edited.length,
+          name: 'source.hwpx',
+          boundaryOperation: operationId,
+          revision: 3,
+          turn: 1,
+        };
+      },
+      watchSession: async (_sessionId, _after, { signal, onReconnect }) => {
+        await onReconnect();
+        restarted.resolve();
+        await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+      },
+    },
+    store: secondStore,
+    provisioner: {},
+    recoveryDir: path.join(directory, 'recovery'),
+  });
+  t.after(async () => {
+    await second.stop();
+    await secondStore.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
+  await second.start();
+  await restarted.promise;
+  record = await secondStore.get(created.id);
+  assert.equal(record.pendingTurnBoundary, null);
+  assert.equal(record.lastSyncedBoundaryOperation, boundary.operationId);
+  assert.equal(record.turnArchives.length, 1);
+  assert.equal(await readFile(originPath, 'utf8'), edited.toString());
+  assert.equal(await readFile(record.turnArchives[0].path, 'utf8'), edited.toString());
+  assert.equal(successfulDownloads, 1);
+});
+
 test('VPS restart can requeue a running durable handoff', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-requeue-'));
   t.after(async () => {
@@ -442,6 +557,48 @@ test('queued message remains accepted when SSE wins the command response race', 
   assert.equal(record.queuedMessages[0].state, 'accepted');
 });
 
+test('rejected queue command removes exactly its staged durable message', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-message-rejected-'));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const created = await store.create({
+    sessionId: 'desktop-rejected', threadId: 'thread-rejected', documentId: 'document-rejected',
+    documentName: 'source.hwpx', documentBytes: Buffer.from('document'), timeline: null,
+    provider: 'codex', limits: { maxTurns: 100 },
+  });
+  await store.transition(created.id, 'uploading');
+  await store.transition(created.id, 'committing');
+  await store.transition(created.id, 'running', { cloudSessionId: 'cloud-rejected', serverVersion: 2 });
+  await store.patch(created.id, {
+    queuedMessages: [{
+      id: 'message-existing',
+      text: 'existing',
+      queuedAt: '2026-08-30T00:00:00.000Z',
+      state: 'accepted',
+    }],
+  });
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => null,
+      isPaired: async () => false,
+      command: async () => { throw new Error('queue rejected'); },
+    },
+    store,
+    provisioner: {},
+  });
+  t.after(async () => {
+    await coordinator.stop();
+    await store.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  await assert.rejects(coordinator.command({
+    sessionId: 'cloud-rejected', command: 'queue-message', expectedVersion: 2,
+    message: 'new message', messageId: 'message-rejected',
+  }), /queue rejected/);
+  const record = await store.get(created.id);
+  assert.deepEqual(record.queuedMessages.map((message) => message.id), ['message-existing']);
+});
+
 test('activation receipt skips historical staged events before watching live updates', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-activation-replay-'));
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
@@ -576,12 +733,12 @@ test('verified result confirmation resumes after a crash boundary without redown
   assert.equal(interrupted.resultDigest, createDigest(resultBytes));
   assert.deepEqual(await readFile(interrupted.recoveryPath), resultBytes);
   assert.deepEqual(await readFile(interrupted.timelineRecoveryPath), timelineBytes);
-  await first.stop();
 
   const repeatedDownload = await first.downloadResult({ sessionId: 'cloud-1' });
   assert.deepEqual(Buffer.from(repeatedDownload.bytes), resultBytes);
   assert.equal(downloads, 1, 'the verified result is never downloaded again');
   assert.equal(remoteReads, 1, 'a second click does not contact a server that may already have purged the result');
+  await first.stop();
 
   const reloaded = new CloudHandoffStore({ filePath: storePath });
   const resumed = new CloudCoordinator({
@@ -669,7 +826,13 @@ test('cancelling during activation aborts the transfer and remotely cancels exac
 
 test('persisted transfer cancellation is remotely finalized after an app restart', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-cancel-restart-'));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  let resumed = null;
+  let reloaded = null;
+  t.after(async () => {
+    await resumed?.stop();
+    await reloaded?.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
   const storePath = path.join(directory, 'handoffs.json');
   const store = new CloudHandoffStore({ filePath: storePath });
   const created = await store.create({
@@ -686,8 +849,8 @@ test('persisted transfer cancellation is remotely finalized after an app restart
 
   let remoteStatus = 'queued';
   let remoteCancels = 0;
-  const reloaded = new CloudHandoffStore({ filePath: storePath });
-  const resumed = new CloudCoordinator({
+  reloaded = new CloudHandoffStore({ filePath: storePath });
+  resumed = new CloudCoordinator({
     client: {
       loadProfile: async () => null,
       isPaired: async () => false,
@@ -706,7 +869,6 @@ test('persisted transfer cancellation is remotely finalized after an app restart
     provisioner: {},
     recoveryDir: path.join(directory, 'recovery'),
   });
-  t.after(() => resumed.stop());
   await resumed.start();
 
   let recovered;
@@ -794,6 +956,721 @@ test('takeover waits for and verifies the frozen checkpoint and timeline boundar
   assert.deepEqual(Buffer.from(snapshot.takeover.document.bytes), Buffer.from('stable-hwp'));
 });
 
+test('desktop takeover retries frozen artifact downloads without repeating server mutation', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-takeover-retry-'));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const operationId = 'turn_takeover_retry';
+  const checkpointBytes = Buffer.from('retry-checkpoint');
+  const timelineBytes = Buffer.from('retry-timeline');
+  const boundary = {
+    operationId,
+    revision: 5,
+    turnNumber: 2,
+    checkpoint: { blobId: createDigest(checkpointBytes), size: checkpointBytes.length },
+    timeline: { blobId: createDigest(timelineBytes), size: timelineBytes.length },
+  };
+  const receipt = { status: 'ready', boundary };
+  const session = {
+    id: 'cloud-takeover-retry', status: 'cancelled', stateVersion: 4, takeoverReady: true,
+    clientContext: { documentId: 'document-retry', threadId: 'thread-retry' },
+    originDocument: { name: 'retry.hwpx' },
+  };
+  let takeoverCommands = 0;
+  let takeoverReads = 0;
+  let checkpointDownloads = 0;
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => null,
+      takeoverState: async () => {
+        takeoverReads += 1;
+        if (takeoverReads === 1) {
+          throw Object.assign(new Error('No takeover'), { status: 404, code: 'TAKEOVER_NOT_REQUESTED' });
+        }
+        return receipt;
+      },
+      command: async () => {
+        takeoverCommands += 1;
+        return { takeover: receipt, session };
+      },
+      session: async () => session,
+      downloadTimeline: async () => ({
+        bytes: timelineBytes,
+        timeline: { schema: 'rauhwpx.cloud.timeline', version: 1, thread: { id: 'thread-retry' } },
+        sha256: createDigest(timelineBytes),
+        size: timelineBytes.length,
+        boundaryOperation: operationId,
+        boundaryRevision: 5,
+        boundaryTurn: 2,
+      }),
+      downloadCheckpoint: async (_sessionId, options) => {
+        checkpointDownloads += 1;
+        assert.equal(options.operationId, operationId);
+        if (checkpointDownloads === 1) throw new Error('checkpoint temporarily unavailable');
+        return {
+          bytes: checkpointBytes,
+          sha256: createDigest(checkpointBytes),
+          size: checkpointBytes.length,
+          name: 'retry.hwpx',
+          boundaryOperation: operationId,
+          revision: 5,
+          turn: 2,
+        };
+      },
+    },
+    store,
+    provisioner: {},
+    recoveryDir: path.join(directory, 'recovery'),
+  });
+  t.after(async () => {
+    await coordinator.stop();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  const command = {
+    sessionId: session.id,
+    command: 'takeover',
+    expectedVersion: 4,
+  };
+  await assert.rejects(coordinator.command(command), /checkpoint temporarily unavailable/);
+  const snapshot = await coordinator.command(command);
+  assert.equal(takeoverCommands, 1);
+  assert.equal(checkpointDownloads, 2);
+  assert.deepEqual(Buffer.from(snapshot.takeover.document.bytes), checkpointBytes);
+});
+
+test('stopped profile operations reject before initial or writer-queued work can run', async () => {
+  const profileA = normalizeCloudProfile({
+    endpoint: 'https://stopped-a.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'stopped-a.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const profileB = normalizeCloudProfile({
+    endpoint: 'https://stopped-b.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'stopped-b.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  let activeProfile = profileA;
+  let sessionReads = 0;
+  let storeReads = 0;
+  const releaseSessions = Promise.withResolvers();
+  const saveStarted = Promise.withResolvers();
+  const releaseSave = Promise.withResolvers();
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => activeProfile,
+      isPaired: async () => true,
+      sessions: async () => {
+        sessionReads += 1;
+        await releaseSessions.promise;
+        return [];
+      },
+      deviceId: async () => 'device-stopped',
+      saveProfile: async (profile) => {
+        saveStarted.resolve();
+        await releaseSave.promise;
+        activeProfile = profile;
+      },
+      saveServerMode: async () => 'self-hosted',
+    },
+    store: {
+      list: async () => { storeReads += 1; return []; },
+      flush: async () => {},
+    },
+    provisioner: {},
+  });
+
+  const switching = coordinator.saveProfile({
+    profile: {
+      name: 'Server B', host: 'stopped-b.example.ts.net', sshUser: 'cloud', sshPort: 22,
+      auth: { kind: 'ssh-agent' }, transport: { kind: 'https', endpoint: profileB.endpoint },
+      serverPublicKey: SERVER_KEY,
+    },
+  });
+  await saveStarted.promise;
+  const queued = coordinator.refresh().then(
+    () => null,
+    (error) => error,
+  );
+  const stopping = coordinator.stop();
+  releaseSave.resolve();
+  await stopping;
+  const queuedSessionReads = sessionReads;
+  releaseSessions.resolve();
+  assert.equal((await queued)?.code, 'COORDINATOR_STOPPED');
+  assert.equal(queuedSessionReads, 0);
+  await switching;
+
+  storeReads = 0;
+  await assert.rejects(coordinator.refresh(), { code: 'COORDINATOR_STOPPED' });
+  assert.equal(storeReads, 0);
+  assert.equal(sessionReads, 0);
+});
+
+test('buffered watcher callbacks reject without store mutations after stop', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-watcher-stop-'));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const created = await store.create({
+    sessionId: 'desktop-watcher-stop', threadId: 'thread-watcher-stop', documentId: 'document-watcher-stop',
+    documentName: 'watcher-stop.hwpx', documentBytes: Buffer.from('document'), timeline: null,
+    provider: 'codex', limits: { maxTurns: 100 },
+  });
+  await store.transition(created.id, 'uploading');
+  await store.transition(created.id, 'committing');
+  await store.transition(created.id, 'running', { cloudSessionId: 'cloud-watcher-stop', serverVersion: 2 });
+  let watcherCallback;
+  const watcherReady = Promise.withResolvers();
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => null,
+      isPaired: async () => false,
+      watchSession: async (_sessionId, _after, { signal, onEvent }) => {
+        watcherCallback = onEvent;
+        watcherReady.resolve();
+        if (!signal.aborted) await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+      },
+    },
+    store,
+    provisioner: {},
+    recoveryDir: path.join(directory, 'recovery'),
+  });
+  t.after(async () => {
+    await coordinator.stop();
+    await store.flush();
+    await delay(5);
+    await rm(directory, { recursive: true, force: true });
+  });
+  await coordinator.start();
+  await watcherReady.promise;
+  await coordinator.stop();
+
+  const before = await store.get(created.id);
+  await assert.rejects(watcherCallback({
+    sequence: 3,
+    type: 'session.suspended',
+    payload: { status: 'suspended', stateVersion: 3 },
+  }), { code: 'COORDINATOR_STOPPED' });
+  const after = await store.get(created.id);
+  assert.equal(after.revision, before.revision);
+  assert.equal(after.state, 'running');
+});
+
+test('a recovery callback already queued by the timer cannot outlive stop', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-recovery-stop-'));
+  const profile = normalizeCloudProfile({
+    endpoint: 'https://recovery-stop.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'recovery-stop.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const created = await store.create({
+    sessionId: 'desktop-recovery-stop', threadId: 'thread-recovery-stop', documentId: 'document-recovery-stop',
+    documentName: 'recovery-stop.hwpx', documentBytes: Buffer.from('document'), timeline: null,
+    provider: 'codex', limits: { maxTurns: 100 },
+    destination: {
+      endpoint: profile.endpoint,
+      serverPublicKey: profile.serverPublicKey,
+      mode: profile.mode,
+      sandboxId: null,
+      sandboxProvider: null,
+      protocolVersion: 1,
+    },
+  });
+  await store.transition(created.id, 'uploading');
+  let readinessCalls = 0;
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => profile,
+      isPaired: async () => true,
+      assertTransferReady: async () => {
+        readinessCalls += 1;
+        return { profile, health: { protocolVersion: 1, version: '1.0.0' } };
+      },
+      transfer: async ({ sessionId, onProgress, onSessionCreated, onSessionActivated }) => {
+        await onProgress({ phase: 'committing', loaded: 1, total: 1 });
+        await onSessionCreated({ sessionId, stateVersion: 1 });
+        await onSessionActivated({ sessionId, stateVersion: 2, eventSeq: 2 });
+        return { id: sessionId, status: 'queued', stateVersion: 2 };
+      },
+      watchSession: async () => {},
+    },
+    store,
+    provisioner: {},
+    recoveryDir: path.join(directory, 'recovery'),
+  });
+  t.after(async () => {
+    await coordinator.stop();
+    await store.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  const scheduled = [];
+  const originalSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = (callback, timeout, ...args) => {
+    if (timeout === 0) {
+      const timer = {
+        run: () => callback(...args),
+        unref() {},
+        [Symbol.toPrimitive]: () => -1,
+      };
+      scheduled.push(timer);
+      return timer;
+    }
+    return originalSetTimeout(callback, timeout, ...args);
+  };
+  try {
+    await coordinator.start();
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+  assert.equal(scheduled.length, 1);
+  await coordinator.stop();
+  let postStopEvents = 0;
+  coordinator.on('event', (event) => {
+    if (event.type === 'session-recovery-error' || event.type === 'session-transfer-recovered') {
+      postStopEvents += 1;
+    }
+  });
+  scheduled[0].run();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(readinessCalls, 0);
+  assert.equal(postStopEvents, 0);
+  assert.equal((await store.get(created.id)).state, 'uploading');
+});
+
+test('takeover completion retains server A until its boundary is consumed', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-takeover-profile-race-'));
+  const profileA = normalizeCloudProfile({
+    endpoint: 'https://takeover-a.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'takeover-a.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const profileB = normalizeCloudProfile({
+    endpoint: 'https://takeover-b.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'takeover-b.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  let activeProfile = profileA;
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const consumeStarted = Promise.withResolvers();
+  const releaseConsume = Promise.withResolvers();
+  const originalConsume = store.consumeTakeoverBoundary.bind(store);
+  const order = [];
+  store.consumeTakeoverBoundary = async (...args) => {
+    consumeStarted.resolve();
+    await releaseConsume.promise;
+    const result = await originalConsume(...args);
+    order.push('consume:A');
+    return result;
+  };
+  const remoteA = {
+    id: 'cloud-takeover-profile', status: 'cancelled', stateVersion: 4,
+    takeoverReady: true,
+    takeoverBoundary: { operationId: 'turn_takeover_profile' },
+    clientContext: { documentId: 'document-a', threadId: 'thread-a' },
+    originDocument: { name: 'document-a.hwpx' },
+  };
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => activeProfile,
+      isPaired: async () => true,
+      sessions: async () => activeProfile.endpoint === profileA.endpoint ? [remoteA] : [],
+      deviceId: async () => 'takeover-device',
+      watchSession: async (_sessionId, _after, { signal }) => {
+        if (!signal.aborted) await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+      },
+      saveProfile: async (profile) => {
+        order.push('save:B');
+        activeProfile = profile;
+      },
+      saveServerMode: async () => 'self-hosted',
+    },
+    store,
+    provisioner: {},
+    recoveryDir: path.join(directory, 'recovery'),
+  });
+  t.after(async () => {
+    await coordinator.stop();
+    await store.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
+  await coordinator.refresh({ selectedSessionId: remoteA.id });
+
+  const completing = coordinator.completeTakeover({ sessionId: remoteA.id });
+  await consumeStarted.promise;
+  const switching = coordinator.saveProfile({
+    profile: {
+      name: 'Server B', host: 'takeover-b.example.ts.net', sshUser: 'cloud', sshPort: 22,
+      auth: { kind: 'ssh-agent' }, transport: { kind: 'https', endpoint: profileB.endpoint },
+      serverPublicKey: SERVER_KEY,
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(activeProfile.endpoint, profileA.endpoint);
+  releaseConsume.resolve();
+  const completedA = await completing;
+  const switchedB = await switching;
+  assert.equal(completedA.profileEpoch, 0);
+  assert.equal(completedA.session.documentId, 'document-a');
+  assert.equal(switchedB.profileEpoch, 1);
+  assert.equal(switchedB.session.kind, 'idle');
+  assert.deepEqual(order, ['consume:A', 'save:B']);
+});
+
+test('an active-handoff lease spans irreversible local work and the final snapshot', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-resolution-lease-'));
+  const profileA = normalizeCloudProfile({
+    endpoint: 'https://resolution-a.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'resolution-a.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const profileB = normalizeCloudProfile({
+    endpoint: 'https://resolution-b.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'resolution-b.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  let activeProfile = profileA;
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const created = await store.create({
+    sessionId: 'desktop-resolution', threadId: 'thread-resolution', documentId: 'document-resolution',
+    documentName: 'resolution.hwpx', documentBytes: Buffer.from('document'), timeline: null,
+    provider: 'codex', limits: { maxTurns: 100 },
+    destination: {
+      endpoint: profileA.endpoint,
+      serverPublicKey: profileA.serverPublicKey,
+      mode: profileA.mode,
+      sandboxId: null,
+      sandboxProvider: null,
+    },
+  });
+  await store.transition(created.id, 'uploading');
+  await store.transition(created.id, 'committing');
+  await store.transition(created.id, 'running', { cloudSessionId: 'cloud-resolution', serverVersion: 2 });
+  await store.transition(created.id, 'completed');
+  const localMutationStarted = Promise.withResolvers();
+  const releaseLocalMutation = Promise.withResolvers();
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => activeProfile,
+      isPaired: async () => true,
+      saveProfile: async (profile) => { activeProfile = profile; },
+      saveServerMode: async () => 'self-hosted',
+    },
+    store,
+    provisioner: {},
+    recoveryDir: path.join(directory, 'recovery'),
+  });
+  t.after(async () => {
+    await coordinator.stop();
+    await store.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  const resolving = coordinator.withActiveHandoff('cloud-resolution', async (handoff) => {
+    assert.equal(handoff.id, created.id);
+    localMutationStarted.resolve();
+    await releaseLocalMutation.promise;
+    return coordinator.snapshot({ selectedSessionId: handoff.cloudSessionId });
+  });
+  await localMutationStarted.promise;
+  const switching = coordinator.saveProfile({
+    profile: {
+      name: 'Server B', host: 'resolution-b.example.ts.net', sshUser: 'cloud', sshPort: 22,
+      auth: { kind: 'ssh-agent' }, transport: { kind: 'https', endpoint: profileB.endpoint },
+      serverPublicKey: SERVER_KEY,
+    },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(activeProfile.endpoint, profileA.endpoint);
+  releaseLocalMutation.resolve();
+  const resolvedA = await resolving;
+  await switching;
+  assert.equal(resolvedA.profileEpoch, 0);
+  assert.equal(resolvedA.session.documentId, 'document-resolution');
+  assert.equal(activeProfile.endpoint, profileB.endpoint);
+});
+
+test('an admitted server A refresh completes before a queued profile change', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-profile-epoch-'));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const profileA = normalizeCloudProfile({
+    endpoint: 'https://server-a.tailnet.ts.net/rauhwpx-cloud',
+    ssh: { host: 'server-a.tailnet.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const profileB = normalizeCloudProfile({
+    endpoint: 'https://server-b.tailnet.ts.net/rauhwpx-cloud',
+    ssh: { host: 'server-b.tailnet.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const archivedA = await store.create({
+    sessionId: 'desktop-a',
+    threadId: 'thread-document-a',
+    documentId: 'document-a',
+    documentName: 'document-a.hwpx',
+    documentBytes: Buffer.from('document-a'),
+    timeline: { schema: 'rauhwpx.cloud.timeline', version: 1, thread: { id: 'thread-document-a' } },
+    provider: 'codex',
+    limits: { maxTurns: 10 },
+    destination: {
+      endpoint: profileA.endpoint,
+      serverPublicKey: profileA.serverPublicKey,
+      mode: profileA.mode,
+      sandboxId: null,
+      sandboxProvider: null,
+    },
+  });
+  await store.transition(archivedA.id, 'uploading');
+  await store.transition(archivedA.id, 'committing');
+  await store.transition(archivedA.id, 'queued', { cloudSessionId: 'shared-session', serverVersion: 2 });
+  const remote = (documentId) => ({
+    id: 'shared-session', status: 'suspended', stateVersion: 3,
+    clientContext: { documentId, threadId: `thread-${documentId}` },
+    originDocument: { name: `${documentId}.hwpx` },
+    suspendedReason: { message: 'Waiting' },
+  });
+  let activeProfile = profileA;
+  const serverARefresh = Promise.withResolvers();
+  let delayServerA = false;
+  const watcherSignals = [];
+  const watcherCallbacks = [];
+  let staleCallbackActive = false;
+  let staleCallbackRequests = 0;
+  const timeline = { schema: 'rauhwpx.cloud.timeline', version: 1, thread: { id: 'thread-document-a' } };
+  const timelineBytes = Buffer.from(JSON.stringify(timeline));
+  const client = {
+    loadProfile: async () => activeProfile,
+    isPaired: async () => true,
+    sessions: async () => {
+      if (activeProfile.endpoint === profileA.endpoint && delayServerA) return serverARefresh.promise;
+      return [remote(activeProfile.endpoint === profileA.endpoint ? 'document-a' : 'document-b')];
+    },
+    deviceId: async () => 'device-1',
+    downloadTimeline: async () => {
+      if (staleCallbackActive) staleCallbackRequests += 1;
+      return { bytes: timelineBytes, timeline, sha256: createDigest(timelineBytes), size: timelineBytes.length };
+    },
+    session: async () => {
+      if (staleCallbackActive) staleCallbackRequests += 1;
+      return { id: 'shared-session', status: 'completed' };
+    },
+    watchSession: async (_sessionId, _after, { signal, onEvent }) => {
+      watcherSignals.push(signal);
+      watcherCallbacks.push(onEvent);
+      await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+    },
+    saveProfile: async (profile) => { activeProfile = profile; },
+    saveServerMode: async () => 'self-hosted',
+    redeemPairingCode: async () => ({ credentials: { device: { id: 'device-2' } } }),
+    health: async () => ({ ok: true, serverPublicKey: activeProfile.serverPublicKey }),
+    activateProfile: async (profile) => { activeProfile = profile; },
+  };
+  const coordinator = new CloudCoordinator({
+    client,
+    store,
+    provisioner: {},
+    recoveryDir: path.join(directory, 'recovery'),
+  });
+  t.after(async () => {
+    await coordinator.stop();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  const initialA = await coordinator.refresh({ selectedSessionId: 'shared-session' });
+  assert.equal(initialA.session.documentId, 'document-a');
+  assert.equal(initialA.profileEpoch, 0);
+  delayServerA = true;
+  const staleA = coordinator.refresh({ selectedSessionId: 'shared-session' });
+  await Promise.resolve();
+  let switchSettled = false;
+  const switching = coordinator.saveProfile({
+    profile: {
+      name: 'Server B', host: 'server-b.tailnet.ts.net', sshUser: 'cloud', sshPort: 22,
+      auth: { kind: 'ssh-agent' }, transport: { kind: 'https', endpoint: profileB.endpoint },
+      serverPublicKey: SERVER_KEY,
+    },
+  }).then((snapshot) => {
+    switchSettled = true;
+    return snapshot;
+  });
+  await Promise.resolve();
+  assert.equal(switchSettled, false);
+  assert.equal(activeProfile.endpoint, profileA.endpoint);
+  serverARefresh.resolve([remote('document-a')]);
+  const completedA = await staleA;
+  assert.equal(completedA.profileEpoch, 0);
+  assert.equal(completedA.session.documentId, 'document-a');
+  const switched = await switching;
+  assert.equal(switched.profileEpoch, 1);
+  staleCallbackActive = true;
+  let staleCallback;
+  assert.doesNotThrow(() => {
+    staleCallback = watcherCallbacks[0]({
+      type: 'session.completed', sequence: 4, payload: { status: 'completed' },
+    });
+  });
+  await assert.rejects(staleCallback, { code: 'PROFILE_CHANGED' });
+  staleCallbackActive = false;
+  assert.equal(staleCallbackRequests, 0);
+
+  let snapshot = await coordinator.refresh({ selectedSessionId: 'shared-session' });
+  assert.equal(snapshot.profileEpoch, 1);
+  assert.equal(snapshot.session.documentId, 'document-b');
+  assert.deepEqual(snapshot.sessions.map((session) => session.documentId), ['document-b']);
+  assert.equal(snapshot.lease.sessionId, 'shared-session');
+
+  const beforeRepair = snapshot.profileEpoch;
+  snapshot = await coordinator.pair({ code: 'ABCD-EFGH-IJKL' });
+  assert.equal(snapshot.profileEpoch, beforeRepair + 1);
+  assert.equal(snapshot.session.kind, 'idle');
+  assert.ok(watcherSignals.every((signal) => signal.aborted));
+  delayServerA = false;
+});
+
+test('a multi-request command keeps server A until its queued profile change runs', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-profile-reader-first-'));
+  const profileA = normalizeCloudProfile({
+    endpoint: 'https://reader-a.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'reader-a.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const profileB = normalizeCloudProfile({
+    endpoint: 'https://reader-b.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'reader-b.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  let activeProfile = profileA;
+  const uploadStarted = Promise.withResolvers();
+  const releaseUpload = Promise.withResolvers();
+  const requestTargets = [];
+  let profileSaved = false;
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => activeProfile,
+      isPaired: async () => true,
+      uploadBlob: async () => {
+        requestTargets.push(activeProfile.endpoint);
+        uploadStarted.resolve();
+        await releaseUpload.promise;
+        return { blobId: 'blob-1', sha256: 'a'.repeat(64), size: 3 };
+      },
+      command: async (sessionId) => {
+        requestTargets.push(activeProfile.endpoint);
+        return { session: { id: sessionId, status: 'running', stateVersion: 2 } };
+      },
+      saveProfile: async (profile) => {
+        profileSaved = true;
+        activeProfile = profile;
+      },
+      saveServerMode: async () => 'self-hosted',
+    },
+    store: new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') }),
+    provisioner: {},
+    recoveryDir: path.join(directory, 'recovery'),
+  });
+  t.after(async () => {
+    await coordinator.stop();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  const command = coordinator.command({
+    sessionId: 'shared-command',
+    command: 'queue-message',
+    expectedVersion: 1,
+    message: 'Continue',
+    messageId: 'message-reader-first',
+    attachments: [{
+      id: 'attachment-1', name: 'note.txt', mimeType: 'text/plain', size: 3,
+      bytes: new Uint8Array(Buffer.from('one')),
+    }],
+  });
+  await uploadStarted.promise;
+  const switching = coordinator.saveProfile({
+    profile: {
+      name: 'Server B', host: 'reader-b.example.ts.net', sshUser: 'cloud', sshPort: 22,
+      auth: { kind: 'ssh-agent' }, transport: { kind: 'https', endpoint: profileB.endpoint },
+      serverPublicKey: SERVER_KEY,
+    },
+  });
+  await Promise.resolve();
+  assert.equal(profileSaved, false);
+  releaseUpload.resolve();
+  await command;
+  await switching;
+  assert.deepEqual(requestTargets, [profileA.endpoint, profileA.endpoint]);
+  assert.equal(activeProfile.endpoint, profileB.endpoint);
+});
+
+test('a queued command waits for an admitted profile writer and starts on server B', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-profile-writer-first-'));
+  const profileA = normalizeCloudProfile({
+    endpoint: 'https://writer-a.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'writer-a.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const profileB = normalizeCloudProfile({
+    endpoint: 'https://writer-b.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'writer-b.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  let activeProfile = profileA;
+  const saveStarted = Promise.withResolvers();
+  const releaseSave = Promise.withResolvers();
+  const requestTargets = [];
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => activeProfile,
+      isPaired: async () => true,
+      saveProfile: async (profile) => {
+        saveStarted.resolve();
+        await releaseSave.promise;
+        activeProfile = profile;
+      },
+      saveServerMode: async () => 'self-hosted',
+      uploadBlob: async () => {
+        requestTargets.push(activeProfile.endpoint);
+        return { blobId: 'blob-1', sha256: 'a'.repeat(64), size: 3 };
+      },
+      command: async (sessionId) => {
+        requestTargets.push(activeProfile.endpoint);
+        return { session: { id: sessionId, status: 'running', stateVersion: 2 } };
+      },
+    },
+    store: new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') }),
+    provisioner: {},
+    recoveryDir: path.join(directory, 'recovery'),
+  });
+  t.after(async () => {
+    await coordinator.stop();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  const switching = coordinator.saveProfile({
+    profile: {
+      name: 'Server B', host: 'writer-b.example.ts.net', sshUser: 'cloud', sshPort: 22,
+      auth: { kind: 'ssh-agent' }, transport: { kind: 'https', endpoint: profileB.endpoint },
+      serverPublicKey: SERVER_KEY,
+    },
+  });
+  await saveStarted.promise;
+  const command = coordinator.command({
+    sessionId: 'shared-command',
+    command: 'queue-message',
+    expectedVersion: 1,
+    message: 'Continue',
+    messageId: 'message-writer-first',
+    attachments: [{
+      id: 'attachment-1', name: 'note.txt', mimeType: 'text/plain', size: 3,
+      bytes: new Uint8Array(Buffer.from('two')),
+    }],
+  });
+  await Promise.resolve();
+  assert.deepEqual(requestTargets, []);
+  releaseSave.resolve();
+  await switching;
+  await command;
+  assert.deepEqual(requestTargets, [profileB.endpoint, profileB.endpoint]);
+});
+
 test('cross-device takeover consumption survives refresh and app restart for only the consumed boundary', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-takeover-consumed-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -866,6 +1743,251 @@ test('cross-device takeover completion fails closed without a frozen operation r
     coordinator.completeTakeover({ sessionId: 'cloud-remote-2' }),
     /without its frozen boundary receipt/,
   );
+});
+
+test('result download resolves duplicate session ids through the active server destination', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-result-profile-'));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const profileA = normalizeCloudProfile({
+    endpoint: 'https://profile-a.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'profile-a.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const profileB = normalizeCloudProfile({
+    endpoint: 'https://profile-b.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'profile-b.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const destination = (profile) => ({
+    endpoint: profile.endpoint,
+    serverPublicKey: profile.serverPublicKey,
+    mode: profile.mode,
+  });
+  const createCompleted = async (profile, documentId) => {
+    const record = await store.create({
+      sessionId: `desktop-${documentId}`,
+      threadId: `thread-${documentId}`,
+      documentId,
+      documentName: `${documentId}.hwpx`,
+      documentBytes: Buffer.from(documentId),
+      timeline: null,
+      provider: 'codex',
+      limits: { maxTurns: 100 },
+      destination: destination(profile),
+    });
+    await store.transition(record.id, 'uploading');
+    await store.transition(record.id, 'committing');
+    await store.transition(record.id, 'running', { cloudSessionId: 'shared-result-session', serverVersion: 2 });
+    return store.transition(record.id, 'completed');
+  };
+  const recordB = await createCompleted(profileB, 'document-b');
+  await delay(2);
+  const recordA = await createCompleted(profileA, 'document-a');
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => profileB,
+      isPaired: async () => true,
+      session: async () => ({ id: 'shared-result-session', result: { id: 'shared-result' } }),
+      downloadTimeline: async () => { throw new Error('profile-b-result-failure'); },
+    },
+    store,
+    provisioner: {},
+    recoveryDir: path.join(directory, 'recovery'),
+  });
+  t.after(async () => {
+    await coordinator.stop();
+    await store.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  await assert.rejects(
+    coordinator.downloadResult({ sessionId: 'shared-result-session' }),
+    /profile-b-result-failure/,
+  );
+  assert.equal((await store.get(recordA.id)).revision, recordA.revision);
+  assert.ok((await store.get(recordB.id)).revision > recordB.revision);
+});
+
+test('server A transfer recovery stays off server B and resumes when A is restored', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-transfer-profile-recovery-'));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const profileA = normalizeCloudProfile({
+    endpoint: 'https://transfer-a.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'transfer-a.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const profileB = normalizeCloudProfile({
+    endpoint: 'https://transfer-b.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'transfer-b.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const created = await store.create({
+    sessionId: 'desktop-transfer-recovery',
+    threadId: 'thread-transfer-recovery',
+    documentId: 'document-transfer-recovery',
+    documentName: 'transfer-recovery.hwpx',
+    documentBytes: Buffer.from('transfer-recovery'),
+    timeline: null,
+    provider: 'codex',
+    limits: { maxTurns: 100 },
+    destination: {
+      endpoint: profileA.endpoint,
+      serverPublicKey: profileA.serverPublicKey,
+      mode: profileA.mode,
+      sandboxId: null,
+      sandboxProvider: null,
+      protocolVersion: 1,
+    },
+  });
+  await store.transition(created.id, 'uploading');
+  let activeProfile = profileB;
+  const requestTargets = [];
+  const recovered = Promise.withResolvers();
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => activeProfile,
+      isPaired: async () => true,
+      saveProfile: async (profile) => { activeProfile = profile; },
+      saveServerMode: async () => 'self-hosted',
+      assertTransferReady: async () => {
+        requestTargets.push(['ready', activeProfile.endpoint]);
+        return {
+          profile: activeProfile,
+          health: { ok: true, protocolVersion: 1, version: '1.0.0', serverPublicKey: activeProfile.serverPublicKey },
+        };
+      },
+      transfer: async ({ sessionId, onProgress, onSessionCreated, onSessionActivated }) => {
+        requestTargets.push(['transfer', activeProfile.endpoint]);
+        await onProgress({ phase: 'committing', loaded: 1, total: 1 });
+        await onSessionCreated({ sessionId, stateVersion: 1 });
+        await onSessionActivated({ sessionId, stateVersion: 2, eventSeq: 2 });
+        recovered.resolve();
+        return { id: sessionId, status: 'queued', stateVersion: 2 };
+      },
+      watchSession: async (_sessionId, _after, { signal }) => {
+        if (!signal.aborted) await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+      },
+    },
+    store,
+    provisioner: {},
+    recoveryDir: path.join(directory, 'recovery'),
+  });
+  t.after(async () => {
+    await coordinator.stop();
+    await store.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  await coordinator.start();
+  assert.deepEqual(requestTargets, []);
+  await coordinator.saveProfile({
+    profile: {
+      name: 'Server A', host: 'transfer-a.example.ts.net', sshUser: 'cloud', sshPort: 22,
+      auth: { kind: 'ssh-agent' }, transport: { kind: 'https', endpoint: profileA.endpoint },
+      serverPublicKey: SERVER_KEY,
+    },
+  });
+  await recovered.promise;
+  let record;
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    record = await store.get(created.id);
+    if (record.state === 'queued') break;
+    await delay(5);
+  }
+  assert.equal(record.state, 'queued');
+  assert.deepEqual(requestTargets, [
+    ['ready', profileA.endpoint],
+    ['transfer', profileA.endpoint],
+  ]);
+});
+
+test('server A result confirmation stays off server B and resumes when A is restored', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-result-profile-recovery-'));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const profileA = normalizeCloudProfile({
+    endpoint: 'https://result-a.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'result-a.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const profileB = normalizeCloudProfile({
+    endpoint: 'https://result-b.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'result-b.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const created = await store.create({
+    sessionId: 'desktop-result-recovery',
+    threadId: 'thread-result-recovery',
+    documentId: 'document-result-recovery',
+    documentName: 'result-recovery.hwpx',
+    documentBytes: Buffer.from('original'),
+    timeline: null,
+    provider: 'codex',
+    limits: { maxTurns: 100 },
+    destination: {
+      endpoint: profileA.endpoint,
+      serverPublicKey: profileA.serverPublicKey,
+      mode: profileA.mode,
+      sandboxId: null,
+      sandboxProvider: null,
+    },
+  });
+  await store.transition(created.id, 'uploading');
+  await store.transition(created.id, 'committing');
+  await store.transition(created.id, 'running', { cloudSessionId: 'cloud-result-recovery', serverVersion: 2 });
+  await store.transition(created.id, 'completed', { resultId: 'result-recovery' });
+  await store.transition(created.id, 'downloading');
+  const resultBytes = Buffer.from('verified-result');
+  const recoveryPath = path.join(directory, 'verified-result.hwpx');
+  await writeFile(recoveryPath, resultBytes);
+  await store.patch(created.id, {
+    recoveryPath,
+    resultDigest: createDigest(resultBytes),
+    resultSize: resultBytes.length,
+    resultName: 'result-recovery.hwpx',
+  });
+  let activeProfile = profileB;
+  const confirmationTargets = [];
+  const confirmed = Promise.withResolvers();
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => activeProfile,
+      isPaired: async () => true,
+      saveProfile: async (profile) => { activeProfile = profile; },
+      saveServerMode: async () => 'self-hosted',
+      confirmResultDownloaded: async () => {
+        confirmationTargets.push(activeProfile.endpoint);
+        confirmed.resolve();
+        return { status: 'purged' };
+      },
+    },
+    store,
+    provisioner: {},
+    recoveryDir: path.join(directory, 'recovery'),
+  });
+  t.after(async () => {
+    await coordinator.stop();
+    await store.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  await coordinator.start();
+  assert.deepEqual(confirmationTargets, []);
+  await coordinator.saveProfile({
+    profile: {
+      name: 'Server A', host: 'result-a.example.ts.net', sshUser: 'cloud', sshPort: 22,
+      auth: { kind: 'ssh-agent' }, transport: { kind: 'https', endpoint: profileA.endpoint },
+      serverPublicKey: SERVER_KEY,
+    },
+  });
+  await confirmed.promise;
+  let record;
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    record = await store.get(created.id);
+    if (record.state === 'downloaded') break;
+    await delay(5);
+  }
+  assert.equal(record.state, 'downloaded');
+  assert.deepEqual(confirmationTargets, [profileA.endpoint]);
 });
 
 test('verified result confirmation retries online without another app restart', async (t) => {

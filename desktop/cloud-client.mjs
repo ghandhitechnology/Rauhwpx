@@ -1429,11 +1429,18 @@ export class CloudClient {
     return lastSequence;
   }
 
-  async watchSession(sessionId, after = 0, { signal, onEvent = () => {}, retryBaseMs = 500 } = {}) {
+  async watchSession(sessionId, after = 0, {
+    signal,
+    onEvent = () => {},
+    onReconnect = () => {},
+    retryBaseMs = 500,
+  } = {}) {
     let sequence = after;
     let failures = 0;
     while (!signal?.aborted) {
       try {
+        await onReconnect();
+        if (signal?.aborted) break;
         sequence = await this.readEvents(sessionId, sequence, { signal, onEvent });
         failures = 0;
       } catch (error) {

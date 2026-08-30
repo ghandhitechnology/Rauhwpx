@@ -83,6 +83,16 @@ function sameDestination(left, right) {
     .every((field) => (left[field] ?? null) === (right[field] ?? null));
 }
 
+function destinationMatchesProfile(destination, profile) {
+  if (!profile) return !destination;
+  if (!destination) return false;
+  return destination.endpoint === profile.endpoint
+    && (destination.serverPublicKey ?? null) === (profile.serverPublicKey ?? null)
+    && (destination.mode ?? null) === (profile.mode ?? null)
+    && (destination.sandboxId ?? null) === (profile.sandbox?.sandboxId ?? null)
+    && (destination.sandboxProvider ?? null) === (profile.sandbox?.providerId ?? null);
+}
+
 function transferError(message, code) {
   return Object.assign(new Error(message), { code, retryable: false });
 }
@@ -235,7 +245,12 @@ export class CloudCoordinator extends EventEmitter {
   #timelinePending = new Map();
   #transferAdmissionChain = Promise.resolve();
   #snapshotChain = Promise.resolve();
+  #profileChangeChain = Promise.resolve();
+  #pendingProfileChanges = 0;
+  #profileOperations = new Set();
+  #profileOperationWaiters = new Set();
   #revision = 0;
+  #profileEpoch = 0;
   #appServers;
   #sandboxLifecycle = 'idle';
   #sandboxMessage = null;
@@ -304,7 +319,7 @@ export class CloudCoordinator extends EventEmitter {
         }
       }
     }
-    const records = await this.#store.load();
+    const records = (await this.#store.load()).filter((record) => destinationMatchesProfile(record.destination, profile));
     for (const record of records) {
       if (record.resolvedAt && record.recoveryCleanupPath) {
         await this.#cleanupResolvedRecovery(record);
@@ -323,7 +338,10 @@ export class CloudCoordinator extends EventEmitter {
         this.#scheduleResultRecovery(record.id, 0);
         continue;
       }
-      if (record.cloudSessionId && ['queued', 'running', 'suspended', 'completed'].includes(record.state)) {
+      if (record.cloudSessionId && (
+        ['queued', 'running', 'suspended', 'completed'].includes(record.state)
+        || record.pendingTurnBoundary
+      )) {
         this.#watch(record.id, record.cloudSessionId, record.lastEventSequence);
       }
     }
@@ -336,7 +354,10 @@ export class CloudCoordinator extends EventEmitter {
       ...this.#transferOperations,
       ...this.#transferPromises.values(),
       ...this.#takeoverPromises.values(),
+      ...this.#profileOperations,
+      ...this.#profileOperationWaiters,
       this.#transferAdmissionChain,
+      this.#profileChangeChain,
       this.#spawnPromise,
       this.#teardownPromise,
       this.#provisionPromise,
@@ -360,7 +381,94 @@ export class CloudCoordinator extends EventEmitter {
     await this.#store.flush?.();
   }
 
-  async openDisplay(sessionId, listener, options = {}) {
+  #assertProfileEpoch(epoch) {
+    if (epoch !== this.#profileEpoch) {
+      throw Object.assign(new Error('Cloud profile changed during the operation'), { code: 'PROFILE_CHANGED' });
+    }
+  }
+
+  #withProfileOperation(operation, { expectedEpoch = null } = {}) {
+    if (this.#stopped) {
+      return Promise.reject(transferError('Cloud coordinator is stopped', 'COORDINATOR_STOPPED'));
+    }
+    if (this.#pendingProfileChanges > 0) {
+      const barrier = this.#profileChangeChain;
+      const waiting = barrier.then(() => {
+        if (this.#stopped) {
+          throw transferError('Cloud coordinator is stopped', 'COORDINATOR_STOPPED');
+        }
+        return this.#withProfileOperation(operation, { expectedEpoch });
+      });
+      let tracked;
+      tracked = waiting.finally(() => this.#profileOperationWaiters.delete(tracked));
+      this.#profileOperationWaiters.add(tracked);
+      return tracked;
+    }
+    const profileEpoch = this.#profileEpoch;
+    if (expectedEpoch !== null && expectedEpoch !== profileEpoch) {
+      return Promise.reject(Object.assign(
+        new Error('Cloud profile changed during the operation'),
+        { code: 'PROFILE_CHANGED' },
+      ));
+    }
+    const completion = Promise.withResolvers();
+    this.#profileOperations.add(completion.promise);
+    let result;
+    try {
+      result = Promise.resolve(operation(profileEpoch));
+    } catch (error) {
+      result = Promise.reject(error);
+    }
+    return result.finally(() => {
+      this.#profileOperations.delete(completion.promise);
+      completion.resolve();
+    });
+  }
+
+  async #closeProfileStreams() {
+    for (const controller of this.#watchers.values()) controller.abort();
+    this.#watchers.clear();
+    for (const controller of this.#takeoverControllers.values()) {
+      controller.abort(Object.assign(new Error('Cloud profile changed'), { code: 'PROFILE_CHANGED' }));
+    }
+    this.#takeoverControllers.clear();
+    this.#takeoverPromises.clear();
+    await Promise.allSettled([...this.#displayConnections].map((connection) => connection.close()));
+  }
+
+  #changeProfile(operation) {
+    this.#pendingProfileChanges += 1;
+    const change = this.#profileChangeChain.then(async () => {
+      await this.#closeProfileStreams();
+      await Promise.allSettled([...this.#profileOperations]);
+      await this.#closeProfileStreams();
+      this.#profileEpoch += 1;
+      this.#remoteSessions.clear();
+      this.#remoteWatchSequence.clear();
+      this.#timelinePending.clear();
+      try {
+        return await operation();
+      } finally {
+        await this.#resumeRecoveriesForCurrentProfile().catch((error) => {
+          this.#emit({ type: 'profile-recovery-resume-failed', error: error.message });
+        });
+        this.#emit({ type: 'profile-context-changed' });
+      }
+    });
+    const settled = change.finally(() => {
+      this.#pendingProfileChanges -= 1;
+    });
+    this.#profileChangeChain = settled.then(() => {}, () => {});
+    return settled;
+  }
+
+  openDisplay(sessionId, listener, options = {}) {
+    return this.#withProfileOperation((profileEpoch) => (
+      this.#openDisplay(sessionId, listener, options, profileEpoch)
+    ));
+  }
+
+  async #openDisplay(sessionId, listener, options, profileEpoch) {
     if (this.#stopped) throw transferError('Cloud coordinator is stopped', 'COORDINATOR_STOPPED');
     if (typeof this.#client.openDisplay !== 'function') {
       const capability = {
@@ -374,6 +482,12 @@ export class CloudCoordinator extends EventEmitter {
       return { capability, async close() {} };
     }
     const connection = await this.#client.openDisplay(sessionId, listener, options);
+    try {
+      this.#assertProfileEpoch(profileEpoch);
+    } catch (error) {
+      await connection.close().catch(() => {});
+      throw error;
+    }
     let closed = false;
     const tracked = {
       get capability() { return connection.capability; },
@@ -403,32 +517,61 @@ export class CloudCoordinator extends EventEmitter {
     profileMessage = null,
     extra = {},
   } = {}) {
+    const profileEpoch = this.#profileEpoch;
     const profile = await this.#client.loadProfile().catch(() => null);
     const paired = profile ? await this.#client.isPaired().catch(() => false) : false;
     const records = await this.#store.list();
-    const visibleRecords = records.filter((record) => !record.resolvedAt);
+    this.#assertProfileEpoch(profileEpoch);
+    const visibleRecords = records.filter((record) => (
+      !record.resolvedAt && destinationMatchesProfile(record.destination, profile)
+    ));
     const byCreation = (left, right) => String(right.createdAt ?? '').localeCompare(String(left.createdAt ?? ''));
     const scoped = Boolean(originSessionId || documentId);
     const scopedRecords = visibleRecords.filter((record) => (
-      (originSessionId && record.originSessionId === originSessionId)
-      || (documentId && record.originDocumentId === documentId)
+      documentId
+        ? record.originDocumentId === documentId
+        : Boolean(originSessionId && record.originSessionId === originSessionId)
     )).sort(byCreation);
-    const localMatch = scopedRecords.find((record) => LIVE_HANDOFF_STATES.includes(record.state))
+    const scopedLeaseRecord = scopedRecords.find((record) => (
+      LIVE_HANDOFF_STATES.includes(record.state) || record.takeoverReady === true
+    )) ?? null;
+    const localMatch = scopedLeaseRecord
       ?? scopedRecords[0]
       ?? null;
-    const selected = visibleRecords.find((record) => record.cloudSessionId === selectedSessionId)
-      ?? localMatch
-      ?? (!scoped ? visibleRecords.filter((record) => LIVE_HANDOFF_STATES.includes(record.state)).sort(byCreation)[0] : null)
-      ?? (!scoped ? [...visibleRecords].sort(byCreation)[0] : null)
+    const requestedRecord = visibleRecords.find((record) => (
+      record.cloudSessionId === selectedSessionId || record.id === selectedSessionId
+    )) ?? null;
+    const requestedRemote = this.#remoteSessions.get(selectedSessionId) ?? null;
+    const selected = requestedRecord
+      ?? (!requestedRemote ? localMatch : null)
+      ?? (!selectedSessionId && !scoped
+        ? visibleRecords.filter((record) => LIVE_HANDOFF_STATES.includes(record.state)).sort(byCreation)[0]
+        : null)
+      ?? (!selectedSessionId && !scoped ? [...visibleRecords].sort(byCreation)[0] : null)
       ?? null;
     const remoteMatch = [...this.#remoteSessions.values()].find((session) => (
       documentId && session.clientContext?.documentId === documentId
     ));
-    const remote = this.#remoteSessions.get(selectedSessionId)
+    const remote = requestedRemote
       ?? remoteMatch
       ?? (!selected ? [...this.#remoteSessions.values()].find((session) => !['purged', 'cancelled', 'failed'].includes(session.status)) : null)
       ?? (!selected ? [...this.#remoteSessions.values()][0] : null)
       ?? null;
+    const remoteOwnsLease = (session) => session && (
+      session.takeoverReady === true
+      || !['completed', 'failed', 'cancelled', 'purged', 'expired'].includes(cloudState(session.status))
+    );
+    const scopedLeaseRemote = [...this.#remoteSessions.values()].find((session) => (
+      documentId && session.clientContext?.documentId === documentId && remoteOwnsLease(session)
+    )) ?? null;
+    const unscopedLeaseRecord = !scoped && selected && (
+      LIVE_HANDOFF_STATES.includes(selected.state) || selected.takeoverReady === true
+    )
+      ? selected
+      : null;
+    const unscopedLeaseRemote = !scoped && !unscopedLeaseRecord && remoteOwnsLease(remote)
+      ? remote
+      : null;
     const now = new Date().toISOString();
     const publicSessionsById = new Map();
     for (const session of this.#remoteSessions.values()) {
@@ -477,6 +620,7 @@ export class CloudCoordinator extends EventEmitter {
           };
     return {
       revision: ++this.#revision,
+      profileEpoch,
       available: true,
       profile: profileState,
       server: {
@@ -486,9 +630,23 @@ export class CloudCoordinator extends EventEmitter {
         lifecycle: this.#sandboxLifecycle,
         message: this.#sandboxMessage,
       },
-      lease: selected && !selected.resolvedAt && (selected === localMatch || !scoped) && !['failed', 'cancelled', 'expired'].includes(selected.state)
-        ? { owner: 'cloud', sessionId: selected.cloudSessionId ?? selected.id, acquiredAt: selected.createdAt }
-        : { owner: 'local' },
+      lease: scopedLeaseRecord
+        ? { owner: 'cloud', sessionId: scopedLeaseRecord.cloudSessionId ?? scopedLeaseRecord.id, acquiredAt: scopedLeaseRecord.createdAt }
+        : scopedLeaseRemote
+          ? {
+              owner: 'cloud',
+              sessionId: scopedLeaseRemote.id ?? scopedLeaseRemote.sessionId,
+              acquiredAt: asIso(scopedLeaseRemote.startedAt, now),
+            }
+          : unscopedLeaseRecord
+            ? { owner: 'cloud', sessionId: unscopedLeaseRecord.cloudSessionId ?? unscopedLeaseRecord.id, acquiredAt: unscopedLeaseRecord.createdAt }
+            : unscopedLeaseRemote
+              ? {
+                  owner: 'cloud',
+                  sessionId: unscopedLeaseRemote.id ?? unscopedLeaseRemote.sessionId,
+                  acquiredAt: asIso(unscopedLeaseRemote.startedAt, now),
+                }
+              : { owner: 'local' },
       session: selected ? this.#publicSession(selected) : this.#publicRemoteSession(remote),
       sessions: [...publicSessionsById.values()],
       queuedMessages: selected?.queuedMessages ?? [],
@@ -498,33 +656,49 @@ export class CloudCoordinator extends EventEmitter {
     };
   }
 
-  async refresh(options = {}) {
+  refresh(options = {}) {
+    return this.#withProfileOperation((profileEpoch) => this.#refresh(options, profileEpoch));
+  }
+
+  async #refresh(options, profileEpoch) {
     const profile = await this.#client.loadProfile().catch(() => null);
+    this.#assertProfileEpoch(profileEpoch);
     if (profile && await this.#client.isPaired().catch(() => false)) {
       try {
         const sessions = await this.#client.sessions();
+        this.#assertProfileEpoch(profileEpoch);
         const deviceId = await this.#client.deviceId();
         const hydratedSessions = await Promise.all(sessions.map(async (session) => this.#hydrateRemoteTakeover({
           ...session,
           originOnThisDevice: Boolean(deviceId && session.originDeviceId === deviceId),
-        })));
+        }, null, profileEpoch)));
+        this.#assertProfileEpoch(profileEpoch);
         this.#remoteSessions = new Map(hydratedSessions.map((session) => [
           session.id ?? session.sessionId,
           session,
         ]));
-        const localIds = new Set((await this.#store.list()).map((record) => record.cloudSessionId).filter(Boolean));
+        const localRecords = (await this.#store.list()).filter((record) => (
+          destinationMatchesProfile(record.destination, profile)
+        ));
+        this.#assertProfileEpoch(profileEpoch);
+        const localBySession = new Map(localRecords
+          .filter((record) => record.cloudSessionId)
+          .map((record) => [record.cloudSessionId, record]));
         for (const session of sessions) {
           const sessionId = session.id ?? session.sessionId;
-          if (sessionId && !localIds.has(sessionId) && ['staged', 'queued', 'running', 'suspended', 'completed'].includes(session.status)) {
-            this.#watchRemote(sessionId);
+          const local = localBySession.get(sessionId);
+          if (sessionId && ['staged', 'queued', 'running', 'suspended', 'completed'].includes(session.status)) {
+            if (local) this.#watch(local.id, sessionId, local.lastEventSequence, profileEpoch);
+            else this.#watchRemote(sessionId, profileEpoch);
           }
         }
         const remote = this.#remoteSessions.get(options.selectedSessionId)
           ?? [...this.#remoteSessions.values()].find((session) => (
             options.documentId && session.clientContext?.documentId === options.documentId
           ));
-        if (remote) await this.#syncRemoteTimeline(remote.id ?? remote.sessionId).catch(() => {});
+        if (remote) await this.#syncRemoteTimeline(remote.id ?? remote.sessionId, profileEpoch).catch(() => {});
       } catch (error) {
+        if (error?.code === 'PROFILE_CHANGED') throw error;
         return this.snapshot({ ...options, profileConnection: 'error', profileMessage: error.message });
       }
     }
@@ -582,7 +756,7 @@ export class CloudCoordinator extends EventEmitter {
     const current = await this.#client.loadProfile().catch(() => null);
     const profile = uiProfileToStored(input, current);
     this.#assertNotReplacingSandbox(current, profile);
-    await this.#client.saveProfile(profile);
+    await this.#changeProfile(() => this.#client.saveProfile(profile));
     await this.#adoptSelfHostedMode();
     return this.snapshot();
   }
@@ -661,10 +835,10 @@ export class CloudCoordinator extends EventEmitter {
         throw new Error('VPS installer did not return the initial pairing code');
       }
     }
-    await this.#client.activateProfile(updated, credentials ? {
+    await this.#changeProfile(() => this.#client.activateProfile(updated, credentials ? {
       tokens: credentials,
       device: credentials.device,
-    } : { preserveCredentials });
+    } : { preserveCredentials }));
     await this.#adoptSelfHostedMode();
     const snapshot = await this.snapshot({ extra: { provision: { ok: true, receipt, health } } });
     this.#emit({ type: 'provision-completed', snapshot });
@@ -914,10 +1088,10 @@ export class CloudCoordinator extends EventEmitter {
           retryable: false,
         });
       }
-      await this.#client.activateProfile(profile, {
+      await this.#changeProfile(() => this.#client.activateProfile(profile, {
         tokens: pairing.credentials,
         device: pairing.credentials.device,
-      });
+      }));
       await this.#client.clearPendingAppSandbox?.().catch((error) => {
         this.#emit({ type: 'sandbox-journal-clear-failed', error: error.message });
       });
@@ -1021,7 +1195,7 @@ export class CloudCoordinator extends EventEmitter {
     }
     const provider = this.#sandboxProvider(profile.sandbox);
     if (!provider) {
-      await this.#client.forgetProfile();
+      await this.#changeProfile(() => this.#client.forgetProfile());
       this.#setSandboxLifecycle('idle');
       this.#emit({ type: 'sandbox-abandoned', providerId: profile.sandbox.providerId, sandboxId: profile.sandbox.sandboxId });
       return this.snapshot({ extra: { sandbox: { ok: true, removed: false, unmanaged: true } } });
@@ -1031,7 +1205,7 @@ export class CloudCoordinator extends EventEmitter {
     try {
       const result = await provider.teardown(profile.sandbox);
       if (force) await this.#finishAbandonedSandboxWork(live);
-      await this.#client.forgetProfile();
+      await this.#changeProfile(() => this.#client.forgetProfile());
       this.#setSandboxLifecycle('idle');
       const snapshot = await this.snapshot({ extra: { sandbox: { ok: true, removed: result.removed === true } } });
       this.#emit({ type: 'sandbox-torn-down', providerId: provider.id, snapshot });
@@ -1084,10 +1258,10 @@ export class CloudCoordinator extends EventEmitter {
     if (health.ok !== true || health.serverPublicKey !== profile.serverPublicKey) {
       throw new Error('Paired cloud service failed identity verification');
     }
-    await this.#client.activateProfile(profile, {
+    await this.#changeProfile(() => this.#client.activateProfile(profile, {
       tokens: pairing.credentials,
       device: pairing.credentials.device,
-    });
+    }));
     if (profile.mode === 'self-hosted') await this.#adoptSelfHostedMode();
     else this.#setSandboxLifecycle('ready');
     const snapshot = await this.snapshot();
@@ -1110,8 +1284,9 @@ export class CloudCoordinator extends EventEmitter {
         throw transferError('Cloud sandbox is shutting down', 'SANDBOX_TEARDOWN_IN_PROGRESS');
       }
       const duplicate = (await this.#store.list({ activeOnly: true })).find((record) => (
-        (input.sessionId && record.originSessionId === input.sessionId)
-        || (input.documentId && record.originDocumentId === input.documentId)
+        input.documentId
+          ? record.originDocumentId === input.documentId
+          : Boolean(input.sessionId && record.originSessionId === input.sessionId)
       ));
       if (duplicate) {
         throw transferError('This document already has an active cloud transfer', 'TRANSFER_ALREADY_ACTIVE');
@@ -1129,12 +1304,14 @@ export class CloudCoordinator extends EventEmitter {
     if (this.#stopped) {
       return Promise.reject(transferError('Cloud coordinator is stopped', 'COORDINATOR_STOPPED'));
     }
-    const operation = this.#transfer(payload, options);
+    const operation = this.#withProfileOperation((profileEpoch) => (
+      this.#transfer(payload, options, profileEpoch)
+    ));
     this.#transferOperations.add(operation);
     return operation.finally(() => this.#transferOperations.delete(operation));
   }
 
-  async #transfer(payload, { originSessionId, originPath = null } = {}) {
+  async #transfer(payload, { originSessionId, originPath = null } = {}, profileEpoch) {
     const bytes = Buffer.from(payload?.document?.bytes ?? []);
     const goal = goalFromTransfer(payload);
     const record = await this.#admitTransfer({
@@ -1232,7 +1409,7 @@ export class CloudCoordinator extends EventEmitter {
       await this.#store.clearPayload(record.id).catch((error) => {
         this.#emit({ type: 'payload-cleanup-failed', handoffId: record.id, error: error.message });
       });
-      this.#watch(updated.id, updated.cloudSessionId, updated.lastEventSequence);
+      this.#watch(updated.id, updated.cloudSessionId, updated.lastEventSequence, profileEpoch);
       const snapshot = await this.snapshot({ selectedSessionId: updated.cloudSessionId });
       this.#emit({ type: 'session-transferred', snapshot, handoff: updated });
       return snapshot;
@@ -1289,7 +1466,11 @@ export class CloudCoordinator extends EventEmitter {
     }
   }
 
-  async command({ sessionId, command, expectedVersion, payload = {}, message, messageId, attachments = [] }) {
+  command(input) {
+    return this.#withProfileOperation((profileEpoch) => this.#command(input, profileEpoch));
+  }
+
+  async #command({ sessionId, command, expectedVersion, payload = {}, message, messageId, attachments = [] }, profileEpoch) {
     const queuedMessageId = (command === 'queue-message' || command === 'redirect') && message
       ? String(messageId ?? `message-${Date.now()}`)
       : null;
@@ -1310,6 +1491,7 @@ export class CloudCoordinator extends EventEmitter {
         kind: 'reference',
         sessionId,
       });
+      this.#assertProfileEpoch(profileEpoch);
       uploadedAttachments.push({
         attachmentId: attachment.id,
         blobId: uploaded.blobId,
@@ -1326,7 +1508,7 @@ export class CloudCoordinator extends EventEmitter {
     };
     const serverCommand = CLIENT_TO_SERVER_COMMAND[command];
     if (!serverCommand) throw new Error('Unsupported cloud command');
-    const localHandoff = await this.handoffForSession(sessionId);
+    const localHandoff = await this.#handoffForSession(sessionId, profileEpoch);
     if (command === 'cancel' && localHandoff
       && ['preparing', 'uploading', 'committing'].includes(localHandoff.state)) {
       await this.#store.patch(localHandoff.id, { cancelRequested: true, error: null });
@@ -1359,15 +1541,16 @@ export class CloudCoordinator extends EventEmitter {
     let result;
     try {
       if (command === 'takeover') {
-        ({ result, takeover } = await this.#requestTakeover(sessionId, body, localHandoff));
+        ({ result, takeover } = await this.#requestTakeover(sessionId, body, localHandoff, profileEpoch));
       } else {
         const commandId = queuedMessageId
           ? `message_${sha256Hex(Buffer.from(`${sessionId}\0${queuedMessageId}`))}`
           : undefined;
         result = await this.#client.command(sessionId, serverCommand, body, commandId);
       }
+      this.#assertProfileEpoch(profileEpoch);
     } catch (error) {
-      if (localHandoff && queuedMessageId && Number(error?.status) >= 400 && Number(error?.status) < 500) {
+      if (localHandoff && queuedMessageId) {
         const latest = await this.#store.get(localHandoff.id);
         await this.#store.patch(localHandoff.id, {
           queuedMessages: (latest.queuedMessages ?? []).filter((entry) => entry.id !== queuedMessageId),
@@ -1414,8 +1597,13 @@ export class CloudCoordinator extends EventEmitter {
     return snapshot;
   }
 
-  async downloadResult({ sessionId }) {
-    const handoff = (await this.#store.list()).find((entry) => entry.cloudSessionId === sessionId);
+  downloadResult(input) {
+    return this.#withProfileOperation((profileEpoch) => this.#downloadResult(input, profileEpoch));
+  }
+
+  async #downloadResult({ sessionId }, profileEpoch) {
+    const handoff = await this.#handoffForSession(sessionId, profileEpoch);
+    this.#assertProfileEpoch(profileEpoch);
     if (!handoff) throw new Error('Cloud handoff does not exist on this device');
     // A lost confirmation response intentionally leaves the handoff in
     // `downloading` while background confirmation recovery runs. The result
@@ -1426,12 +1614,15 @@ export class CloudCoordinator extends EventEmitter {
       return this.#readDownloadedResult(handoff);
     }
     const session = await this.#client.session(sessionId);
+    this.#assertProfileEpoch(profileEpoch);
     const resultId = session.result?.id ?? session.resultId ?? session.id;
     if (!resultId) throw new Error('Cloud session does not have a completed result');
     await this.#store.transition(handoff.id, 'downloading');
     try {
       const timelineResult = await this.#client.downloadTimeline(sessionId);
+      this.#assertProfileEpoch(profileEpoch);
       const result = await this.#client.downloadResult(resultId);
+      this.#assertProfileEpoch(profileEpoch);
       const fileName = result.name || handoff.documentName;
       const recoveryPath = path.join(this.#recoveryDir, handoff.id, path.basename(fileName));
       const timelineRecoveryPath = path.join(this.#recoveryDir, handoff.id, 'timeline.json');
@@ -1504,10 +1695,19 @@ export class CloudCoordinator extends EventEmitter {
     }
   }
 
-  async downloadCheckpoint({ sessionId, operationId = null }) {
-    const checkpoint = await this.#client.downloadCheckpoint(sessionId, { operationId });
+  downloadCheckpoint(input) {
+    return this.#withProfileOperation((profileEpoch) => this.#downloadCheckpoint(input, profileEpoch));
+  }
+
+  async #downloadCheckpoint({ sessionId, operationId = null }, profileEpoch) {
+    const [checkpoint, handoff] = await Promise.all([
+      this.#client.downloadCheckpoint(sessionId, { operationId }),
+      this.#handoffForSession(sessionId, profileEpoch),
+    ]);
+    this.#assertProfileEpoch(profileEpoch);
     return {
       sessionId,
+      documentId: handoff?.originDocumentId ?? null,
       fileName: checkpoint.name || 'cloud-checkpoint.hwpx',
       bytes: new Uint8Array(checkpoint.bytes),
       byteLength: checkpoint.size,
@@ -1516,25 +1716,38 @@ export class CloudCoordinator extends EventEmitter {
       turn: checkpoint.turn,
       operationId: checkpoint.boundaryOperation,
       kind: checkpoint.boundaryKind,
+      ...(handoff ? {
+        originOnThisDevice: true,
+        expectedOriginSha256: handoff.documentDigest,
+      } : {}),
     };
   }
 
-  async completeTakeover({ sessionId }) {
-    const handoff = await this.handoffForSession(sessionId);
+  completeTakeover(input) {
+    return this.#withProfileOperation((profileEpoch) => this.#completeTakeover(input, profileEpoch));
+  }
+
+  async #completeTakeover({ sessionId }, profileEpoch) {
+    const handoff = await this.#handoffForSession(sessionId, profileEpoch);
+    this.#assertProfileEpoch(profileEpoch);
+    const remote = this.#remoteSessions.get(sessionId);
     if (handoff) {
+      this.#assertProfileEpoch(profileEpoch);
       await this.#store.patch(handoff.id, {
         takeoverRequested: false,
         takeoverReady: false,
         takeoverAppliedAt: new Date().toISOString(),
       });
+      this.#assertProfileEpoch(profileEpoch);
     }
-    const remote = this.#remoteSessions.get(sessionId);
     if (!handoff) {
       const operationId = remote?.takeoverBoundary?.operationId;
       if (typeof operationId !== 'string' || !operationId) {
         throw new Error('Cannot complete a remote takeover without its frozen boundary receipt');
       }
+      this.#assertProfileEpoch(profileEpoch);
       await this.#store.consumeTakeoverBoundary(sessionId, operationId);
+      this.#assertProfileEpoch(profileEpoch);
     }
     if (remote) this.#remoteSessions.set(sessionId, {
       ...remote,
@@ -1542,12 +1755,33 @@ export class CloudCoordinator extends EventEmitter {
       takeoverReady: false,
     });
     const snapshot = await this.snapshot({ selectedSessionId: sessionId });
+    this.#assertProfileEpoch(profileEpoch);
     this.#emit({ type: 'takeover-completed-locally', sessionId, snapshot });
     return snapshot;
   }
 
   async handoffForSession(sessionId) {
-    return (await this.#store.list()).find((entry) => entry.cloudSessionId === sessionId || entry.id === sessionId) ?? null;
+    return this.#handoffForSession(sessionId, this.#profileEpoch);
+  }
+
+  async #handoffForSession(sessionId, profileEpoch) {
+    const [profile, records] = await Promise.all([
+      this.#client.loadProfile?.().catch(() => null) ?? null,
+      this.#store.list(),
+    ]);
+    this.#assertProfileEpoch(profileEpoch);
+    return records.find((entry) => (
+      destinationMatchesProfile(entry.destination, profile)
+      && (entry.cloudSessionId === sessionId || entry.id === sessionId)
+    )) ?? null;
+  }
+
+  withActiveHandoff(sessionId, operation) {
+    return this.#withProfileOperation(async (profileEpoch) => {
+      const handoff = await this.#handoffForSession(sessionId, profileEpoch);
+      this.#assertProfileEpoch(profileEpoch);
+      return operation(handoff);
+    });
   }
 
   async dismissSession({ sessionId }) {
@@ -1613,15 +1847,52 @@ export class CloudCoordinator extends EventEmitter {
     }
   }
 
-  #watch(handoffId, sessionId, after) {
-    if (this.#stopped || !sessionId || this.#watchers.has(sessionId)) return;
+  async #resumeRecoveriesForCurrentProfile() {
+    if (this.#stopped) return;
+    const profile = await this.#client.loadProfile().catch(() => null);
+    const records = await this.#store.list();
+    for (const record of records) {
+      if (!destinationMatchesProfile(record.destination, profile)) continue;
+      if (['preparing', 'uploading', 'committing'].includes(record.state) && record.documentStagingPath) {
+        const timer = this.#recoveryTimers.get(record.id);
+        if (timer) clearTimeout(timer);
+        this.#recoveryTimers.delete(record.id);
+        this.#scheduleTransferRecovery(record.id, Number(record.recoveryAttempt ?? 0));
+      } else if (record.state === 'downloading' && record.recoveryPath && record.resultDigest) {
+        const timer = this.#resultRecoveryTimers.get(record.id);
+        if (timer) clearTimeout(timer);
+        this.#resultRecoveryTimers.delete(record.id);
+        this.#scheduleResultRecovery(record.id, Number(record.confirmationAttempt ?? 0));
+      }
+    }
+  }
+
+  #watch(handoffId, sessionId, after, profileEpoch = this.#profileEpoch) {
+    const watcherKey = `${profileEpoch}:${sessionId}`;
+    if (this.#stopped || !sessionId || profileEpoch !== this.#profileEpoch || this.#watchers.has(watcherKey)) return;
     const controller = new AbortController();
-    this.#watchers.set(sessionId, controller);
+    this.#watchers.set(watcherKey, controller);
     void this.#client.watchSession(sessionId, after, {
       signal: controller.signal,
-      onEvent: async (event) => {
+      onReconnect: () => this.#withProfileOperation(async () => {
+        this.#assertProfileEpoch(profileEpoch);
+        try {
+          await this.#retryPendingTurnBoundary(sessionId, handoffId);
+        } catch (error) {
+          this.#emit({
+            type: 'turn-autosync-error',
+            sessionId,
+            operationId: (await this.#store.get(handoffId))?.pendingTurnBoundary?.operationId,
+            error: error.message,
+          });
+          throw error;
+        }
+      }, { expectedEpoch: profileEpoch }),
+      onEvent: (event) => this.#withProfileOperation(async () => {
+        this.#assertProfileEpoch(profileEpoch);
         const source = event.session ?? event.payload?.session ?? event.payload ?? event;
-        const current = await this.#store.get(handoffId);
+        let current = await this.#store.get(handoffId);
+        this.#assertProfileEpoch(profileEpoch);
         if (!current) return;
         const serverState = String(source.state ?? source.status ?? '').toLowerCase();
         const state = serverState === 'purged'
@@ -1654,6 +1925,22 @@ export class CloudCoordinator extends EventEmitter {
           : event.type === 'wait.resolved' || event.type === 'conversation.ending'
             ? null
             : source.currentWait ?? current.currentWait ?? null;
+        let pendingTurnBoundary = current.pendingTurnBoundary ?? null;
+        if (event.type === 'boundary.committed' && source.kind === 'turn') {
+          if (typeof source.operationId !== 'string' || !source.operationId
+            || !Number.isSafeInteger(source.turnNumber) || source.turnNumber < 1
+            || !Number.isSafeInteger(source.revision) || source.revision < 1) {
+            throw new Error('Cloud turn boundary is invalid');
+          }
+          pendingTurnBoundary = {
+            operationId: source.operationId,
+            turnNumber: source.turnNumber,
+            revision: source.revision,
+          };
+          if (Number.isSafeInteger(event.sequence) && event.sequence > current.lastEventSequence) {
+            current = await this.#store.patch(handoffId, { pendingTurnBoundary });
+          }
+        }
         const updated = await this.#store.applyEvent(handoffId, {
           sequence: event.sequence,
           state,
@@ -1675,24 +1962,27 @@ export class CloudCoordinator extends EventEmitter {
             executionPhase: source.executionPhase ?? current.executionPhase ?? null,
             currentWait,
             queuedMessages,
+            pendingTurnBoundary,
           },
         });
+        this.#assertProfileEpoch(profileEpoch);
         this.#emit({
           type: 'session-event',
           sessionId,
           event,
           handoff: updated,
         });
-        if (event.type === 'boundary.committed' && source.kind === 'turn') {
+        if (updated?.pendingTurnBoundary) {
           try {
-            await this.#syncTurnBoundary(sessionId, handoffId, source);
+            await this.#retryPendingTurnBoundary(sessionId, handoffId);
           } catch (error) {
             this.#emit({
               type: 'turn-autosync-error',
               sessionId,
-              operationId: source.operationId,
+              operationId: updated.pendingTurnBoundary.operationId,
               error: error.message,
             });
+            throw error;
           }
         }
         // Apply and publish the durable state first. A slow timeline download
@@ -1711,19 +2001,24 @@ export class CloudCoordinator extends EventEmitter {
         if (state === 'completed') {
           try {
             const remote = await this.#client.session(sessionId);
+            this.#assertProfileEpoch(profileEpoch);
             if (remote.persistent === true && remote.endRequested === true) {
-              await this.#archiveEndedConversation(sessionId);
+              await this.#archiveEndedConversation(sessionId, profileEpoch);
             }
           } catch (error) {
             this.#emit({ type: 'conversation-archive-error', sessionId, error: error.message });
           }
         }
         if (['downloaded', 'cancelled', 'expired', 'failed'].includes(updated?.state)) controller.abort();
-      },
-    }).catch((error) => this.#emit({ type: 'session-stream-error', sessionId, error: error.message }))
+      }, { expectedEpoch: profileEpoch }),
+    }).catch((error) => {
+      if (error?.code !== 'PROFILE_CHANGED' && !controller.signal.aborted) {
+        this.#emit({ type: 'session-stream-error', sessionId, error: error.message });
+      }
+    })
       .finally(() => {
-        this.#watchers.delete(sessionId);
-        this.#timelinePending.delete(sessionId);
+        if (this.#watchers.get(watcherKey) === controller) this.#watchers.delete(watcherKey);
+        if (profileEpoch === this.#profileEpoch) this.#timelinePending.delete(sessionId);
       });
   }
 
@@ -1968,14 +2263,28 @@ export class CloudCoordinator extends EventEmitter {
     }
   }
 
-  #scheduleTransferRecovery(handoffId, attempt) {
+  async #runTransferRecovery(handoffId, attempt) {
+    const outcome = await this.#withProfileOperation(async () => {
+      const record = await this.#store.get(handoffId);
+      if (!record || !['preparing', 'uploading', 'committing'].includes(record.state)
+        || !record.documentStagingPath) return 'done';
+      const profile = await this.#client.loadProfile().catch(() => null);
+      if (!destinationMatchesProfile(record.destination, profile)) return 'parked';
+      await this.#recoverIncompleteTransfer(record);
+      return 'ran';
+    });
+    if (outcome === 'parked') this.#scheduleTransferRecovery(handoffId, attempt, true);
+  }
+
+  #scheduleTransferRecovery(handoffId, attempt, parked = false) {
     if (this.#stopped || this.#recoveryTimers.has(handoffId)) return;
-    const delay = attempt === 0 ? 0 : Math.min(30_000, 1_000 * (2 ** Math.min(attempt - 1, 5)));
+    const delay = parked
+      ? 30_000
+      : attempt === 0 ? 0 : Math.min(30_000, 1_000 * (2 ** Math.min(attempt - 1, 5)));
     const timer = setTimeout(() => {
+      if (this.#stopped) return;
       this.#recoveryTimers.delete(handoffId);
-      void this.#store.get(handoffId).then((record) => (
-        record ? this.#recoverIncompleteTransfer(record) : null
-      )).catch((error) => {
+      void this.#runTransferRecovery(handoffId, attempt).catch((error) => {
         this.#emit({ type: 'session-recovery-error', handoffId, error: error.message });
         this.#scheduleTransferRecovery(handoffId, attempt + 1);
       });
@@ -2023,14 +2332,27 @@ export class CloudCoordinator extends EventEmitter {
     }
   }
 
-  #scheduleResultRecovery(handoffId, attempt) {
+  async #runResultRecovery(handoffId, attempt) {
+    const outcome = await this.#withProfileOperation(async () => {
+      const record = await this.#store.get(handoffId);
+      if (record?.state !== 'downloading' || !record.recoveryPath || !record.resultDigest) return 'done';
+      const profile = await this.#client.loadProfile().catch(() => null);
+      if (!destinationMatchesProfile(record.destination, profile)) return 'parked';
+      await this.#recoverDownloadedResult(record);
+      return 'ran';
+    });
+    if (outcome === 'parked') this.#scheduleResultRecovery(handoffId, attempt, true);
+  }
+
+  #scheduleResultRecovery(handoffId, attempt, parked = false) {
     if (this.#stopped || this.#resultRecoveryTimers.has(handoffId)) return;
-    const delay = attempt === 0 ? 0 : Math.min(30_000, 1_000 * (2 ** Math.min(attempt - 1, 5)));
+    const delay = parked
+      ? 30_000
+      : attempt === 0 ? 0 : Math.min(30_000, 1_000 * (2 ** Math.min(attempt - 1, 5)));
     const timer = setTimeout(() => {
+      if (this.#stopped) return;
       this.#resultRecoveryTimers.delete(handoffId);
-      void this.#store.get(handoffId).then((record) => (
-        record?.state === 'downloading' ? this.#recoverDownloadedResult(record) : null
-      )).catch((error) => {
+      void this.#runResultRecovery(handoffId, attempt).catch((error) => {
         this.#emit({ type: 'result-confirmation-error', handoffId, error: error.message });
         this.#scheduleResultRecovery(handoffId, attempt + 1);
       });
@@ -2067,18 +2389,21 @@ export class CloudCoordinator extends EventEmitter {
     };
   }
 
-  async #requestTakeover(sessionId, body, handoff) {
+  async #requestTakeover(sessionId, body, handoff, profileEpoch = this.#profileEpoch) {
     let receipt = null;
     try {
       receipt = await this.#client.takeoverState(sessionId);
+      this.#assertProfileEpoch(profileEpoch);
     } catch (error) {
       if (error?.status !== 404 && error?.code !== 'TAKEOVER_NOT_REQUESTED') throw error;
     }
     let result;
     if (receipt) {
       result = { takeover: receipt, session: await this.#client.session(sessionId) };
+      this.#assertProfileEpoch(profileEpoch);
     } else {
       result = await this.#client.command(sessionId, 'session.takeover', body);
+      this.#assertProfileEpoch(profileEpoch);
       receipt = result.takeover;
     }
     if (!receipt || !['pending', 'ready'].includes(receipt.status)) {
@@ -2099,16 +2424,17 @@ export class CloudCoordinator extends EventEmitter {
         sessionId,
         snapshot: await this.snapshot({ selectedSessionId: sessionId }),
       });
-      receipt = await this.#waitForTakeoverReady(sessionId, receipt);
+      receipt = await this.#waitForTakeoverReady(sessionId, receipt, profileEpoch);
       result = { ...result, takeover: receipt, session: await this.#client.session(sessionId) };
+      this.#assertProfileEpoch(profileEpoch);
     }
-    const takeover = await this.#prepareTakeover(sessionId, handoff, receipt.boundary);
     if (handoff) {
       await this.#store.patch(handoff.id, {
         takeoverRequested: false,
         takeoverReady: true,
         takeoverBoundary: receipt.boundary,
       });
+      this.#assertProfileEpoch(profileEpoch);
     } else if (result.session) {
       this.#remoteSessions.set(sessionId, {
         ...result.session,
@@ -2117,6 +2443,7 @@ export class CloudCoordinator extends EventEmitter {
         takeoverBoundary: receipt.boundary,
       });
     }
+    const takeover = await this.#prepareTakeover(sessionId, handoff, receipt.boundary, profileEpoch);
     return {
       result: {
         ...result,
@@ -2134,10 +2461,13 @@ export class CloudCoordinator extends EventEmitter {
     };
   }
 
-  async #waitForTakeoverReady(sessionId, initialReceipt) {
+  async #waitForTakeoverReady(sessionId, initialReceipt, profileEpoch = this.#profileEpoch) {
     if (initialReceipt?.status === 'ready') return initialReceipt;
     const existing = this.#takeoverPromises.get(sessionId);
     if (existing) return existing;
+    if (this.#pendingProfileChanges > 0) {
+      throw Object.assign(new Error('Cloud profile changed during the operation'), { code: 'PROFILE_CHANGED' });
+    }
     const controller = new AbortController();
     this.#takeoverControllers.set(sessionId, controller);
     const operation = (async () => {
@@ -2146,6 +2476,7 @@ export class CloudCoordinator extends EventEmitter {
         const waitMs = Math.min(10_000, 500 * (2 ** Math.min(attempt, 5)));
         await delay(waitMs, undefined, { signal: controller.signal });
         const receipt = await this.#client.takeoverState(sessionId);
+        this.#assertProfileEpoch(profileEpoch);
         if (receipt?.status === 'ready') return receipt;
         if (receipt?.status !== 'pending') throw new Error('VPS returned an invalid takeover state');
         attempt += 1;
@@ -2161,14 +2492,16 @@ export class CloudCoordinator extends EventEmitter {
     }
   }
 
-  async #prepareTakeover(sessionId, handoff, boundary) {
+  async #prepareTakeover(sessionId, handoff, boundary, profileEpoch = this.#profileEpoch) {
     if (!boundary || typeof boundary.operationId !== 'string'
       || !Number.isSafeInteger(boundary.revision) || !Number.isSafeInteger(boundary.turnNumber)
       || !boundary.checkpoint || !boundary.timeline) {
       throw new Error('VPS takeover boundary receipt is invalid');
     }
     const timeline = await this.#client.downloadTimeline(sessionId);
-    const checkpoint = await this.#client.downloadCheckpoint(sessionId);
+    this.#assertProfileEpoch(profileEpoch);
+    const checkpoint = await this.#client.downloadCheckpoint(sessionId, { operationId: boundary.operationId });
+    this.#assertProfileEpoch(profileEpoch);
     if (checkpoint.sha256 !== boundary.checkpoint.blobId
       || checkpoint.size !== boundary.checkpoint.size
       || checkpoint.boundaryOperation !== boundary.operationId
@@ -2282,6 +2615,7 @@ export class CloudCoordinator extends EventEmitter {
       lastSyncedBoundaryOperation: boundary.operationId,
       lastSyncedTurn: boundary.turnNumber,
       lastSyncedRevision: boundary.revision,
+      pendingTurnBoundary: null,
       turnArchives,
       ...(resolution?.action === 'replace' ? {
         documentDigest: checkpoint.sha256,
@@ -2307,10 +2641,20 @@ export class CloudCoordinator extends EventEmitter {
     return updated;
   }
 
-  async #archiveEndedConversation(sessionId) {
+  async #retryPendingTurnBoundary(sessionId, handoffId) {
+    const current = await this.#store.get(handoffId);
+    const pending = current?.pendingTurnBoundary;
+    if (!pending) return current;
+    if (current.lastSyncedBoundaryOperation === pending.operationId) {
+      return this.#store.patch(handoffId, { pendingTurnBoundary: null });
+    }
+    return this.#syncTurnBoundary(sessionId, handoffId, pending);
+  }
+
+  async #archiveEndedConversation(sessionId, profileEpoch) {
     const existing = this.#endArchivePromises.get(sessionId);
     if (existing) return existing;
-    const operation = this.downloadResult({ sessionId }).then((result) => {
+    const operation = this.#downloadResult({ sessionId }, profileEpoch).then((result) => {
       this.#emit({
         type: 'conversation-archived',
         sessionId,
@@ -2325,30 +2669,38 @@ export class CloudCoordinator extends EventEmitter {
     return operation;
   }
 
-  async #syncRemoteTimeline(sessionId) {
+  async #syncRemoteTimeline(sessionId, profileEpoch = this.#profileEpoch) {
     if (!sessionId) return null;
     const downloaded = await this.#client.downloadTimeline(sessionId);
+    this.#assertProfileEpoch(profileEpoch);
     const session = this.#remoteSessions.get(sessionId);
     if (session) this.#remoteSessions.set(sessionId, { ...session, timeline: downloaded.timeline });
     return downloaded.timeline;
   }
 
   #emit(event) {
-    this.emit('event', { version: 1, at: new Date().toISOString(), ...event });
+    this.emit('event', {
+      version: 1,
+      profileEpoch: this.#profileEpoch,
+      at: new Date().toISOString(),
+      ...event,
+    });
   }
 
-  async #hydrateRemoteTakeover(session, boundaryHint = null) {
+  async #hydrateRemoteTakeover(session, boundaryHint = null, profileEpoch = this.#profileEpoch) {
     if (!session?.takeoverReady) return session;
     const sessionId = session.id ?? session.sessionId;
     let boundary = session.takeoverBoundary ?? boundaryHint;
     if (!boundary?.operationId && sessionId) {
       try {
         const receipt = await this.#client.takeoverState(sessionId);
+        this.#assertProfileEpoch(profileEpoch);
         if (receipt?.status === 'ready') boundary = receipt.boundary;
       } catch {}
     }
     if (typeof boundary?.operationId !== 'string' || !boundary.operationId) return session;
     const consumed = await this.#store.hasConsumedTakeoverBoundary(sessionId, boundary.operationId);
+    this.#assertProfileEpoch(profileEpoch);
     return {
       ...session,
       takeoverRequested: consumed ? false : session.takeoverRequested,
@@ -2357,16 +2709,18 @@ export class CloudCoordinator extends EventEmitter {
     };
   }
 
-  #watchRemote(sessionId) {
-    if (!sessionId || this.#watchers.has(sessionId)) return;
+  #watchRemote(sessionId, profileEpoch = this.#profileEpoch) {
+    const watcherKey = `${profileEpoch}:${sessionId}`;
+    if (!sessionId || profileEpoch !== this.#profileEpoch || this.#watchers.has(watcherKey)) return;
     const controller = new AbortController();
-    this.#watchers.set(sessionId, controller);
+    this.#watchers.set(watcherKey, controller);
     // Resume from the last seen sequence instead of replaying the full history
     // every time a window refreshes.
     const after = this.#remoteWatchSequence.get(sessionId) ?? 0;
     void this.#client.watchSession(sessionId, after, {
       signal: controller.signal,
-      onEvent: async (event) => {
+      onEvent: (event) => this.#withProfileOperation(async () => {
+        this.#assertProfileEpoch(profileEpoch);
         this.#remoteWatchSequence.set(sessionId, event.sequence);
         const source = event.session ?? event.payload?.session ?? event.payload ?? event;
         // Agent activity deltas carry no session state; refetching the full
@@ -2381,6 +2735,7 @@ export class CloudCoordinator extends EventEmitter {
           ? await this.#hydrateRemoteTakeover(
               await this.#client.session(sessionId),
               source.boundary ?? event.boundary ?? null,
+              profileEpoch,
             )
           : cached;
         if (event.type === 'wait.created') {
@@ -2397,6 +2752,7 @@ export class CloudCoordinator extends EventEmitter {
           session = { ...session, currentWait: null, executionPhase: source.executionPhase ?? session.executionPhase };
         }
         this.#remoteSessions.set(sessionId, session);
+        this.#assertProfileEpoch(profileEpoch);
         this.#emit({
           type: 'remote-session-event',
           sessionId,
@@ -2406,7 +2762,7 @@ export class CloudCoordinator extends EventEmitter {
         const owesTimelineSync = event.type === 'timeline.updated' || this.#timelinePending.get(sessionId) !== false;
         if ((event.type === 'timeline.updated' || session.status === 'completed') && owesTimelineSync) {
           try {
-            await this.#syncRemoteTimeline(sessionId);
+            await this.#syncRemoteTimeline(sessionId, profileEpoch);
             this.#timelinePending.set(sessionId, false);
           } catch (error) {
             this.#timelinePending.set(sessionId, true);
@@ -2414,11 +2770,15 @@ export class CloudCoordinator extends EventEmitter {
           }
         }
         if (['purged', 'cancelled', 'failed'].includes(session.status)) controller.abort();
-      },
-    }).catch((error) => this.#emit({ type: 'remote-session-stream-error', sessionId, error: error.message }))
+      }, { expectedEpoch: profileEpoch }),
+    }).catch((error) => {
+      if (error?.code !== 'PROFILE_CHANGED' && !controller.signal.aborted) {
+        this.#emit({ type: 'remote-session-stream-error', sessionId, error: error.message });
+      }
+    })
       .finally(() => {
-        this.#watchers.delete(sessionId);
-        this.#timelinePending.delete(sessionId);
+        if (this.#watchers.get(watcherKey) === controller) this.#watchers.delete(watcherKey);
+        if (profileEpoch === this.#profileEpoch) this.#timelinePending.delete(sessionId);
       });
   }
 

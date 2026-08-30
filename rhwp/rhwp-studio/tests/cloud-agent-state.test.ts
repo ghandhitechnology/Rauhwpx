@@ -8,6 +8,7 @@ const now = '2026-08-23T10:00:00.000Z';
 function state(revision: number, session: Record<string, unknown> = { kind: 'idle' }) {
   return {
     revision,
+    profileEpoch: 1,
     available: true,
     profile: {
       kind: 'configured',
@@ -93,6 +94,9 @@ test('cloud state parser rejects missing, malformed and partially valid snapshot
   assert.equal(parseCloudSnapshot({}), null);
   assert.equal(parseCloudSnapshot({ ...state(1), available: 'yes' }), null);
   assert.equal(parseCloudSnapshot({ ...state(1), revision: '1' }), null);
+  assert.equal(parseCloudSnapshot({ ...state(1), profileEpoch: '1' }), null);
+  const { profileEpoch: _profileEpoch, ...stateWithoutEpoch } = state(1);
+  assert.equal(parseCloudSnapshot(stateWithoutEpoch), null);
   assert.equal(parseCloudSnapshot({ ...state(1), queuedMessages: [{ id: 'q', text: 'hello' }] }), null);
   assert.equal(parseCloudSnapshot(state(1, { ...running(), elapsedMs: -1 })), null);
   assert.equal(parseCloudSnapshot({ ...state(1), timeline: { schema: 'unknown' } }), null);
@@ -212,6 +216,60 @@ test('controller ignores stale events and uses explicit desktop payloads', async
     }],
     ['reference', { id: 'ref-1', scope: 'document', scopeId: 'doc-1' }],
     ['resolve', { sessionId: 'session-1', action: 'replace' }],
+  ]);
+  controller.dispose();
+});
+
+test('controller profile epochs fence late snapshots and checkpoint downloads', async () => {
+  let emit: ((event: unknown) => void) | undefined;
+  const staleSnapshot = Promise.withResolvers<unknown>();
+  const staleCheckpoint = Promise.withResolvers<unknown>();
+  const controller = createCloudController({
+    cloudGetState: () => staleSnapshot.promise,
+    cloudDownloadCheckpoint: () => staleCheckpoint.promise,
+    onCloudEvent: (listener) => {
+      emit = listener;
+      return () => { emit = undefined; };
+    },
+  });
+  const refresh = controller.refresh({ threadId: 'thread-a', documentId: 'document-a' });
+  emit?.({ snapshot: { ...state(2), profileEpoch: 2 } });
+  staleSnapshot.resolve({ snapshot: { ...state(3), profileEpoch: 1 } });
+  await assert.rejects(refresh, { code: 'PROFILE_CHANGED' });
+  assert.equal(controller.getSnapshot().profileEpoch, 2);
+
+  const download = controller.downloadCheckpoint('session-a', 'operation-a');
+  emit?.({ snapshot: { ...state(3), profileEpoch: 3 } });
+  staleCheckpoint.resolve({
+    sessionId: 'session-a', documentId: 'document-a', kind: 'turn', fileName: 'document.hwpx',
+    bytes: new Uint8Array([1]), byteLength: 1, sha256: 'a'.repeat(64), revision: 1, turn: 1,
+    operationId: 'operation-a',
+  });
+  await assert.rejects(download, { code: 'PROFILE_CHANGED' });
+  assert.equal(controller.getSnapshot().profileEpoch, 3);
+  controller.dispose();
+});
+
+test('controller dispatches only current-profile events from desktop batches', () => {
+  let emit: ((event: unknown) => void) | undefined;
+  const controller = createCloudController({
+    onCloudEvent: (listener) => {
+      emit = listener;
+      return () => { emit = undefined; };
+    },
+  });
+  const events: unknown[] = [];
+  controller.subscribeEvents((event) => events.push(event));
+  emit?.({
+    type: 'cloud-event-batch',
+    snapshot: { ...state(2), profileEpoch: 2 },
+    events: [
+      { type: 'session-event', profileEpoch: 1, sessionId: 'session-a' },
+      { type: 'session-event', profileEpoch: 2, sessionId: 'session-b' },
+    ],
+  });
+  assert.deepEqual(events, [
+    { type: 'session-event', profileEpoch: 2, sessionId: 'session-b' },
   ]);
   controller.dispose();
 });
