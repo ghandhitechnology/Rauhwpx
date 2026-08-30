@@ -2,7 +2,7 @@
 
 VSCode에서 HWP/HWPX 문서를 바로 열어볼 수 있는 확장 프로그램입니다.
 
-[rhwp](https://github.com/edwardkim/rhwp) 프로젝트의 WebAssembly 렌더링 엔진을 기반으로, 한컴오피스 한글 문서를 별도 프로그램 없이 VSCode 안에서 확인할 수 있습니다.
+[Rauhwpx](https://github.com/ghandhitechnology/Rauhwpx) 포크의 WebAssembly 엔진으로 한컴오피스 한글 문서를 VS Code 안에서 엽니다. 마켓플레이스 등록명은 여전히 rhwp입니다.
 
 ## 기능
 

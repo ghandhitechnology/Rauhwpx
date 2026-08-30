@@ -6,7 +6,7 @@ Most engine and editor code lives under `rhwp/`; the Electron shell and reposito
 
 ## What this is
 
-**Rauhwpx** is a viewer/editor for the Korean HWP/HWPX document formats, written in Rust and compiled to WebAssembly, plus a web editor (`rhwp-studio`) with an AI agent sidebar (`rhwp-agent`) that lets Claude, Codex, Pi, Grok, Cursor, and OpenCode read and edit the open document via MCP tools.
+**Rauhwpx** is a viewer/editor for the Korean HWP/HWPX document formats, written in Rust and compiled to WebAssembly, plus a web editor (`rhwp-studio`) with an AI agent sidebar (`rhwp-agent`) that lets Claude, Codex, Pi, Grok, Cursor, and OpenCode read and edit the open document via MCP tools. The live tool list is `rhwp-agent/tools.mjs`. Do not hardcode the tool count in prose.
 
 ## Commands
 

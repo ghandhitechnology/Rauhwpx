@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  Rauhwpx is a fork of Edward Kim's <a href="https://github.com/edwardkim/rhwp">edwardkim/rhwp</a>.
+  A fork of Edward Kim's <a href="https://github.com/edwardkim/rhwp">edwardkim/rhwp</a>.
 </p>
 
 <p align="center">
@@ -35,13 +35,15 @@ Document editing runs on your machine. AI requests send prompts and any document
 - Save the document and its complete revision graph as one cross-platform `.rhwpx` archive. Older folder bundles remain available through the separate legacy import command.
 - Export to SVG, PNG, PDF, text, Markdown, table dumps, plus HWPX/HML conversion from the CLI.
 
-## Agent sidebar
+## Agent
 
-- MCP tools read document structure and apply edits, including batches of up to 32 semantic edits, document snapshots and downloadable generated artifacts. The engine capability catalog lists the operations available to the agent.
-- Staged edits appear in the document. Safe mode holds successful edits for review; Full access commits them as one undo step. Failed turns roll staged edits back.
-- Safe mode limits file and shell access to the project. Full access permits broader access.
-- In planning mode, the agent can research with web, subagents and Browserbase while the document stays read-only, then presents a plan that only executes on your approval.
-- Document reads return a revision; writes require the expected revision. Stale writes fail loudly instead of corrupting the document.
+Claude, Codex, Pi, Grok, Cursor, and OpenCode can each drive the open document. Semantic reads and writes cover common work. `apply_edits` applies up to 32 changes in one atomic call. Registry-generated engine batches cover classified mutations.
+
+Staged edits appear in the document. **안전** holds successful edits for review. **전체 접근** commits them as one undo step. A failed turn restores the prior snapshot. In plan mode the document stays read-only until you approve.
+
+Every read returns a `revision`. Every write requires it. Stale writes fail instead of corrupting the document.
+
+The live tool list lives in `rhwp/rhwp-agent/tools.mjs`. `rhwp/rhwp-agent/tests/tools.test.mjs` pins the count.
 
 ## Install
 
@@ -49,15 +51,9 @@ Download a build from [Releases](https://github.com/ghandhitechnology/Rauhwpx/re
 
 Windows installs per user by default. The installer detects an older all-users installation and requests elevation to upgrade it instead of creating a second copy.
 
-Saving over an existing desktop file uses a crash-safe compare-and-swap and
-requires hard-link support on that volume. FAT/exFAT, some SMB shares, and some
-cloud-synced volumes may reject the save without changing the original; use a
-local APFS or NTFS volume, or Save As to a supported destination. On Windows,
-preserving the original file's access rules also requires the built-in
-System32 Windows PowerShell. If both publication and rollback fail, Rauhwpx
-keeps an openable recovery copy and reports its exact path.
+Saving over an existing desktop file uses a crash-safe compare-and-swap and requires hard-link support on that volume. FAT/exFAT, some SMB shares, and some cloud-synced volumes may reject the save without changing the original; use a local APFS or NTFS volume, or Save As to a supported destination. On Windows, preserving the original file's access rules also requires the built-in System32 Windows PowerShell. If both publication and rollback fail, Rauhwpx keeps an openable recovery copy and reports its exact path.
 
-Testers can download the current pre-release from the [nightly tag](https://github.com/ghandhitechnology/Rauhwpx/releases/tag/nightly).
+Testers can use the [nightly](https://github.com/ghandhitechnology/Rauhwpx/releases/tag/nightly) pre-release.
 
 Connect a provider from **Settings → Connection**. Claude, Codex, Pi, Grok, Cursor, and OpenCode can be installed there, and the app offers each provider's supported sign-in method. OpenCode can also reuse credentials created by `opencode auth login`.
 
@@ -87,13 +83,13 @@ in headless Chrome and saves sidebar screenshots. See the
 
 | Path | What |
 | --- | --- |
-| `rhwp/src/` | Rust engine. parser, model, document_core, renderer, serializer, wasm_api |
-| `rhwp/rhwp-studio/` | Web editor (TypeScript, no framework) and the agent sidebar |
-| `rhwp/rhwp-agent/` | Local WS hub bridging the agent CLIs to the open tab |
-| `desktop/` | Electron shell. multi-window, per-window agent sessions |
-| `rhwp/rhwp-{chrome,firefox,safari,vscode}/` | Browser and VS Code viewer extensions |
+| `rhwp/src/` | Rust engine |
+| `rhwp/rhwp-studio/` | Web editor and agent sidebar |
+| `rhwp/rhwp-agent/` | Local WS hub |
+| `desktop/` | Electron shell |
+| `rhwp/rhwp-{chrome,firefox,safari,vscode}/` | Viewer extensions |
 | `rhwp/npm/editor/` | Embeddable editor package |
 
 ## License
 
-[MIT](rhwp/LICENSE). Independent project. 한글, 한컴, HWP and HWPX are Hancom trademarks, and this is not affiliated with or endorsed by Hancom.
+[MIT](rhwp/LICENSE). 한글, 한컴, HWP, and HWPX are Hancom trademarks. This project is not affiliated with Hancom.
