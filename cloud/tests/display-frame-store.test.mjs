@@ -30,9 +30,9 @@ test('DisplayFrameStore bounds sessions, viewers, dimensions, and retained JPEG 
   assert.throws(() => store.openStream({
     sessionId: 'session-b', workerId: 'worker-b', width: 1280, height: 800,
   }), { code: 'DISPLAY_SESSION_LIMIT' });
-  store.setInterest('session-a', stream.streamId, 'viewer-a', true);
+  store.setInterest('session-a', stream.streamId, 'device-a', 'viewer-a', true);
   assert.throws(
-    () => store.setInterest('session-a', stream.streamId, 'viewer-b', true),
+    () => store.setInterest('session-a', stream.streamId, 'device-a', 'viewer-b', true),
     { code: 'DISPLAY_VIEWER_LIMIT' },
   );
   const oversized = Buffer.alloc(MAX_DISPLAY_FRAME_BYTES + 1, 0x61);
@@ -93,7 +93,7 @@ test('viewer interest expires independently and demand stops after the grace per
   assert.deepEqual(await store.waitForDemand('session-a', 'worker-a', stream.streamId, 0), {
     streamId: stream.streamId, version: 1, interested: false, maxFps: 0, closed: false,
   });
-  store.setInterest('session-a', stream.streamId, 'viewer-a', true);
+  store.setInterest('session-a', stream.streamId, 'device-a', 'viewer-a', true);
   assert.equal((await store.waitForDemand('session-a', 'worker-a', stream.streamId, 1)).interested, true);
   clock += 11;
   store.capability('session-a');
@@ -103,6 +103,28 @@ test('viewer interest expires independently and demand stops after the grace per
   assert.deepEqual(stopped, {
     streamId: stream.streamId, version: 3, interested: false, maxFps: 0, closed: false,
   });
+});
+
+test('legacy and explicit viewer interest is isolated by authenticated device', async () => {
+  const store = new DisplayFrameStore({ interestGraceMs: 0 });
+  const stream = store.openStream({ sessionId: 'session-a', workerId: 'worker-a', width: 1280, height: 800 });
+  store.setInterest('session-a', stream.streamId, 'device-a', '$legacy', true);
+  assert.equal((await store.waitForDemand('session-a', 'worker-a', stream.streamId, 1)).interested, true);
+  store.setInterest('session-a', stream.streamId, 'device-b', '$legacy', false);
+  assert.equal(store.snapshot().streams[0].viewers, 1);
+  store.setInterest('session-a', stream.streamId, 'device-a', '$legacy', false);
+  assert.equal((await store.waitForDemand('session-a', 'worker-a', stream.streamId, 2)).interested, false);
+  store.setInterest('session-a', stream.streamId, 'device-a', 'viewer-first', true);
+  store.setInterest('session-a', stream.streamId, 'device-a', 'viewer-second', true);
+  assert.equal(store.snapshot().streams[0].viewers, 2);
+  store.setInterest('session-a', stream.streamId, 'device-b', 'viewer-first', false);
+  store.setInterest('session-a', stream.streamId, 'device-b', 'viewer-second', false);
+  assert.equal(store.snapshot().streams[0].viewers, 2);
+  store.setInterest('session-a', stream.streamId, 'device-a', 'viewer-first', false);
+  assert.equal(store.snapshot().streams[0].viewers, 1);
+  assert.equal((await store.waitForDemand('session-a', 'worker-a', stream.streamId, 0)).interested, true);
+  store.setInterest('session-a', stream.streamId, 'device-a', 'viewer-second', false);
+  assert.equal((await store.waitForDemand('session-a', 'worker-a', stream.streamId, 4)).interested, false);
 });
 
 test('metadata subscriptions replay only the latest frame and cleanup is idempotent', async () => {

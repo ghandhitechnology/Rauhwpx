@@ -32,6 +32,7 @@ import {
 
 const MAX_JSON_BYTES = 1024 * 1024;
 const MAX_EVENT_PAYLOAD_BYTES = 64 * 1024;
+const LEGACY_DISPLAY_VIEWER_ID = '$legacy';
 const responseProof = Symbol('rauhwpxResponseProof');
 
 function bearer(request) {
@@ -572,14 +573,18 @@ export function createCloudHttpHandler({
         const sessionId = decodeURIComponent(displayInterestRoute[1]);
         sessionStore.getSessionRow(sessionId);
         const body = await readJson(request);
+        const viewerId = body.viewerId === undefined ? LEGACY_DISPLAY_VIEWER_ID : body.viewerId;
         if (typeof body.streamId !== 'string' || body.streamId.length < 1 || body.streamId.length > 256
+          || (body.viewerId !== undefined
+            && (typeof body.viewerId !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(body.viewerId)))
           || typeof body.active !== 'boolean') {
-          throw new CloudError('INVALID_REQUEST', 'Display interest requires streamId and active');
+          throw new CloudError('INVALID_REQUEST', 'Display interest requires streamId and active with an optional valid viewerId');
         }
         json(response, 200, displayFrameStore.setInterest(
           sessionId,
           body.streamId,
           device.id,
+          viewerId,
           body.active,
         ));
         return;

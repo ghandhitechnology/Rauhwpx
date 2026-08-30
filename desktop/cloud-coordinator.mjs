@@ -229,6 +229,7 @@ export class CloudCoordinator extends EventEmitter {
   #takeoverControllers = new Map();
   #takeoverPromises = new Map();
   #endArchivePromises = new Map();
+  #displayConnections = new Set();
   #remoteSessions = new Map();
   #remoteWatchSequence = new Map();
   #timelinePending = new Map();
@@ -350,12 +351,42 @@ export class CloudCoordinator extends EventEmitter {
     this.#transferControllers.clear();
     for (const controller of this.#takeoverControllers.values()) controller.abort();
     this.#takeoverControllers.clear();
+    for (const connection of this.#displayConnections) pending.push(connection.close());
     // An in-flight spawn can hold a billable provider sandbox for minutes;
     // aborting lets its cleanup path run instead of orphaning the service.
     this.#spawnController?.abort(new Error('Cloud coordinator stopped'));
     this.#spawnController = null;
     await Promise.allSettled(pending);
     await this.#store.flush?.();
+  }
+
+  async openDisplay(sessionId, listener, options = {}) {
+    if (this.#stopped) throw transferError('Cloud coordinator is stopped', 'COORDINATOR_STOPPED');
+    if (typeof this.#client.openDisplay !== 'function') {
+      const capability = {
+        kind: 'unavailable',
+        sessionId,
+        reason: 'client-unsupported',
+        message: 'This app build does not support live display frames',
+        retryable: false,
+      };
+      try { listener?.(capability); } catch { /* Display listeners are isolated. */ }
+      return { capability, async close() {} };
+    }
+    const connection = await this.#client.openDisplay(sessionId, listener, options);
+    let closed = false;
+    const tracked = {
+      get capability() { return connection.capability; },
+      close: async () => {
+        if (closed) return;
+        closed = true;
+        this.#displayConnections.delete(tracked);
+        await connection.close();
+      },
+    };
+    this.#displayConnections.add(tracked);
+    if (this.#stopped) await tracked.close();
+    return tracked;
   }
 
   snapshot(options = {}) {

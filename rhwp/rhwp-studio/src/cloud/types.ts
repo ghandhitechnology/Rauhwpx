@@ -240,6 +240,98 @@ export interface CloudSessionScope {
   selectedSessionId?: string | null;
 }
 
+export type CloudDisplayUnavailableReason =
+  | 'server-unsupported'
+  | 'session-not-running'
+  | 'stream-unavailable'
+  | 'client-unsupported';
+
+export interface CloudDisplayAvailableCapability {
+  kind: 'available';
+  protocol: 'rauhwpx-frame-v1';
+  sessionId: string;
+  streamId: string;
+  width: number;
+  height: number;
+  maxFrameBytes: 524288;
+  maxFps: 2;
+}
+
+export interface CloudDisplayUnavailableCapability {
+  kind: 'unavailable';
+  sessionId: string;
+  reason: CloudDisplayUnavailableReason;
+  message: string;
+  retryable: boolean;
+}
+
+export type CloudDisplayCapability =
+  | CloudDisplayAvailableCapability
+  | CloudDisplayUnavailableCapability;
+
+export interface CloudDisplayFrameMetadata {
+  sessionId: string;
+  streamId: string;
+  sequence: number;
+  capturedAt: string;
+  width: number;
+  height: number;
+  mimeType: 'image/jpeg';
+  byteLength: number;
+  sha256: string;
+  framePath: string;
+}
+
+export interface CloudDisplayFrame extends CloudDisplayFrameMetadata {
+  kind: 'frame';
+  bytes: Uint8Array;
+}
+
+export type CloudDisplayConnectionState =
+  | {
+      kind: 'connection';
+      state: 'connecting';
+      sessionId: string;
+      streamId: null;
+      retryable: true;
+    }
+  | {
+      kind: 'connection';
+      state: 'connected';
+      sessionId: string;
+      streamId: string;
+      retryable: true;
+      capability: CloudDisplayAvailableCapability;
+    }
+  | {
+      kind: 'connection';
+      state: 'reconnecting';
+      sessionId: string;
+      streamId: string | null;
+      retryable: true;
+      attempt: number;
+      message: string;
+    }
+  | {
+      kind: 'connection';
+      state: 'failed';
+      sessionId: string;
+      streamId: string | null;
+      retryable: false;
+      code: string;
+      message: string;
+    };
+
+export type CloudDisplayEvent =
+  | CloudDisplayFrame
+  | CloudDisplayUnavailableCapability
+  | CloudDisplayConnectionState;
+
+export interface CloudDisplayConnection {
+  readonly capability: CloudDisplayCapability;
+  close(): Promise<void>;
+}
+
 export interface CloudTransferIntentRequest extends CloudSessionScope {
   pending: boolean;
 }

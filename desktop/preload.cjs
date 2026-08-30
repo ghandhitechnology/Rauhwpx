@@ -93,11 +93,18 @@ contextBridge.exposeInMainWorld('rhwpDesktop', {
   cloudCompleteTakeover: (payload) => ipcRenderer.invoke('cloud:complete-takeover', payload),
   cloudDownloadResult: (payload) => ipcRenderer.invoke('cloud:download-result', payload),
   cloudDownloadCheckpoint: (payload) => ipcRenderer.invoke('cloud:download-checkpoint', payload),
+  cloudOpenDisplay: (payload) => ipcRenderer.invoke('cloud:display-open', payload),
+  cloudCloseDisplay: (payload) => ipcRenderer.invoke('cloud:display-close', payload),
   cloudResolveResult: (payload) => ipcRenderer.invoke('cloud:resolve-result', payload),
   onCloudEvent: (callback) => {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on('cloud:event', listener);
     return () => ipcRenderer.removeListener('cloud:event', listener);
+  },
+  onCloudDisplayEvent: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('cloud:display-event', listener);
+    return () => ipcRenderer.removeListener('cloud:display-event', listener);
   },
   ensureAgentHub: () => ipcRenderer.invoke('agent-hub:ensure'),
   respondToCloseRequest: (requestId, allowClose) => (

@@ -678,20 +678,86 @@ test('an authenticated worker frame reaches paired devices with signed transient
   const durableEventCount = database.prepare(
     'SELECT COUNT(*) AS count FROM session_events WHERE session_id = ?',
   ).get(created.id).count;
+  displayFrameStore.interestGraceMs = 0;
   const demand = worker.frameDemand(capability.streamId, { after: 1 });
   for (let attempt = 0; attempt < 100 && displayFrameStore.snapshot().streams[0].waiters === 0; attempt += 1) {
     await new Promise((resolve) => setImmediate(resolve));
   }
   assert.equal(displayFrameStore.snapshot().streams[0].waiters, 1);
-  const interest = await publicFetch(`${base}/v1/sessions/${created.id}/display/interest`, {
+  const invalidInterest = await publicFetch(`${base}/v1/sessions/${created.id}/display/interest`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${second.accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ streamId: capability.streamId, viewerId: 'short', active: true }),
+  });
+  assert.equal(invalidInterest.status, 400);
+  const legacyInterest = await publicFetch(`${base}/v1/sessions/${created.id}/display/interest`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${second.accessToken}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ streamId: capability.streamId, active: true }),
   });
-  assert.equal(interest.status, 200);
-  assert.equal((await interest.json()).maxFps, 2);
-  assert.equal(database.prepare(`SELECT COUNT(*) AS count FROM session_presence WHERE session_id = ?`).get(created.id).count, 0);
+  assert.equal(legacyInterest.status, 200);
+  assert.equal((await legacyInterest.json()).maxFps, 2);
   assert.equal((await demand).interested, true);
+  const crossDeviceLegacyRelease = await publicFetch(`${base}/v1/sessions/${created.id}/display/interest`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${origin.accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ streamId: capability.streamId, active: false }),
+  });
+  assert.equal(crossDeviceLegacyRelease.status, 200);
+  assert.equal(displayFrameStore.snapshot().streams[0].viewers, 1);
+  const legacyDemandStopped = worker.frameDemand(capability.streamId, { after: 2 });
+  const legacyRelease = await publicFetch(`${base}/v1/sessions/${created.id}/display/interest`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${second.accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ streamId: capability.streamId, active: false }),
+  });
+  assert.equal(legacyRelease.status, 200);
+  assert.equal((await legacyDemandStopped).interested, false);
+  const explicitDemand = worker.frameDemand(capability.streamId, { after: 3 });
+  const firstInterest = await publicFetch(`${base}/v1/sessions/${created.id}/display/interest`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${second.accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ streamId: capability.streamId, viewerId: 'viewer-window-a', active: true }),
+  });
+  assert.equal(firstInterest.status, 200);
+  assert.equal((await explicitDemand).interested, true);
+  assert.equal(database.prepare(`SELECT COUNT(*) AS count FROM session_presence WHERE session_id = ?`).get(created.id).count, 0);
+  const secondInterest = await publicFetch(`${base}/v1/sessions/${created.id}/display/interest`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${second.accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ streamId: capability.streamId, viewerId: 'viewer-window-b', active: true }),
+  });
+  assert.equal(secondInterest.status, 200);
+  assert.equal(displayFrameStore.snapshot().streams[0].viewers, 2);
+  const crossDeviceExplicitRelease = await publicFetch(`${base}/v1/sessions/${created.id}/display/interest`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${origin.accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ streamId: capability.streamId, viewerId: 'viewer-window-a', active: false }),
+  });
+  assert.equal(crossDeviceExplicitRelease.status, 200);
+  const crossDeviceSecondExplicitRelease = await publicFetch(`${base}/v1/sessions/${created.id}/display/interest`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${origin.accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ streamId: capability.streamId, viewerId: 'viewer-window-b', active: false }),
+  });
+  assert.equal(crossDeviceSecondExplicitRelease.status, 200);
+  assert.equal(displayFrameStore.snapshot().streams[0].viewers, 2);
+  const firstRelease = await publicFetch(`${base}/v1/sessions/${created.id}/display/interest`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${second.accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ streamId: capability.streamId, viewerId: 'viewer-window-a', active: false }),
+  });
+  assert.equal(firstRelease.status, 200);
+  assert.equal(displayFrameStore.snapshot().streams[0].viewers, 1);
+  assert.equal((await worker.frameDemand(capability.streamId, { after: 0 })).interested, true);
+  const finalDemand = worker.frameDemand(capability.streamId, { after: 4 });
+  const secondRelease = await publicFetch(`${base}/v1/sessions/${created.id}/display/interest`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${second.accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ streamId: capability.streamId, viewerId: 'viewer-window-b', active: false }),
+  });
+  assert.equal(secondRelease.status, 200);
+  assert.equal((await finalDemand).interested, false);
 
   const frameBytes = Buffer.concat([
     Buffer.from([0xff, 0xd8]),

@@ -54,6 +54,7 @@ import {
 import { createSecretVault, handleSecretRequest } from './secret-vault.mjs';
 import { CloudClient } from './cloud-client.mjs';
 import { CloudCoordinator } from './cloud-coordinator.mjs';
+import { CloudDisplayRegistry } from './cloud-display-registry.mjs';
 import { CloudHandoffStore } from './cloud-handoff.mjs';
 import { collectProviderAuth as collectImportedProviderAuth } from './cloud-provider-auth.mjs';
 import { CloudProvisioner } from './cloud-provisioner.mjs';
@@ -306,6 +307,13 @@ let desktopReady = false;
 let secretVault = null;
 let cloudCoordinator = null;
 let cloudTransport = null;
+const cloudDisplayConnections = new CloudDisplayRegistry({
+  openDisplay: (sessionId, listener, options) => requireCloudCoordinator().openDisplay(
+    sessionId,
+    listener,
+    options,
+  ),
+});
 let cloudBroadcastChain = Promise.resolve();
 const CLOUD_BROADCAST_COALESCE_MS = 100;
 let cloudBroadcastTimer = null;
@@ -661,6 +669,10 @@ async function createWindow(launch = launchRequest(), { generatedDocument = null
       sandbox: true,
     },
   });
+  const displayOwnerId = window.webContents.id;
+  const closeDisplayConnection = () => {
+    void cloudDisplayConnections.close(displayOwnerId);
+  };
   const session = sessions.addWindow(window, { source: launch.source, openFiles: [] });
   session.generatedDocument = generatedDocument
     ? { launchDocumentId: randomUUID(), ...generatedDocument }
@@ -687,6 +699,7 @@ async function createWindow(launch = launchRequest(), { generatedDocument = null
     });
   });
   window.on('closed', () => {
+    closeDisplayConnection();
     documentLeases.releaseSession(session.sessionId);
     nativeFiles.releaseSession(session.sessionId);
     sessions.removeWindow(window);
@@ -730,10 +743,12 @@ async function createWindow(launch = launchRequest(), { generatedDocument = null
   });
   window.webContents.on('render-process-gone', (_event, details) => {
     console.warn('[rauhwpx] renderer process gone:', details?.reason);
+    closeDisplayConnection();
     // An unanswered close prompt died with the renderer; clear it so the
     // window can close (the close handler skips the prompt for dead renderers).
     session.pendingCloseRequestId = null;
   });
+  window.webContents.once('destroyed', closeDisplayConnection);
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:/i.test(url)) void shell.openExternal(url);
     return { action: 'deny' };
@@ -1203,6 +1218,21 @@ ipcMain.handle('cloud:download-checkpoint', async (event, payload) => {
   if (!/^[A-Za-z0-9_-]{8,128}$/.test(sessionId)) throw new Error('Invalid cloud session id');
   return requireCloudCoordinator().downloadCheckpoint({ sessionId });
 });
+ipcMain.handle('cloud:display-open', async (event, payload = {}) => {
+  sessionForEvent(event);
+  const sessionId = String(payload?.sessionId ?? '');
+  if (!/^[A-Za-z0-9_-]{8,128}$/.test(sessionId)) throw new Error('Invalid cloud session id');
+  const sender = event.sender;
+  return cloudDisplayConnections.open(sender.id, sessionId, (displayEvent, connectionId) => {
+    if (!sender.isDestroyed()) sender.send('cloud:display-event', { connectionId, event: displayEvent });
+  });
+});
+ipcMain.handle('cloud:display-close', async (event, payload = {}) => {
+  sessionForEvent(event);
+  const connectionId = typeof payload?.connectionId === 'string' ? payload.connectionId : '';
+  if (!connectionId) return false;
+  return cloudDisplayConnections.close(event.sender.id, connectionId);
+});
 ipcMain.handle('cloud:resolve-result', async (event, payload = {}) => {
   const session = sessionForEvent(event);
   const coordinator = requireCloudCoordinator();
@@ -1422,10 +1452,10 @@ if (!hasSingleInstanceLock) {
     teardownStarted = true;
     quitting = true;
     void Promise.allSettled([
+      cloudDisplayConnections.closeAll(),
       cloudCoordinator?.stop(),
-      cloudTransport?.stop(),
       hubOwner.teardown(),
-    ]).finally(() => {
+    ]).then(() => cloudTransport?.stop()).finally(() => {
       teardownFinished = true;
       app.exit(0);
     });

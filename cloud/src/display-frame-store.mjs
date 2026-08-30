@@ -172,20 +172,22 @@ export class DisplayFrameStore {
     };
   }
 
-  setInterest(sessionId, streamId, viewerId, active) {
+  setInterest(sessionId, streamId, deviceId, viewerId, active) {
+    identifier(deviceId, 'deviceId');
     identifier(viewerId, 'viewerId');
     const stream = this.#stream(sessionId, streamId);
     this.#sweep(stream);
+    const viewerKey = JSON.stringify([deviceId, viewerId]);
     let expiresAt = null;
     if (active) {
-      if (!stream.viewers.has(viewerId) && stream.viewers.size >= this.maxViewersPerStream) {
+      if (!stream.viewers.has(viewerKey) && stream.viewers.size >= this.maxViewersPerStream) {
         throw displayError('DISPLAY_VIEWER_LIMIT', 'Too many display viewers are active', 429);
       }
       expiresAt = this.now() + this.interestTtlMs;
-      stream.viewers.set(viewerId, expiresAt);
+      stream.viewers.set(viewerKey, expiresAt);
       stream.graceUntil = 0;
     } else {
-      stream.viewers.delete(viewerId);
+      stream.viewers.delete(viewerKey);
     }
     this.#recomputeDemand(stream);
     return {
