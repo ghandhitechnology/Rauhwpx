@@ -1135,6 +1135,25 @@ export class CloudClient {
     return parseDisplayInterest(result, { streamId, active });
   }
 
+  async sendDisplayInput(sessionId, streamId, viewerId, sequence, event, options = {}) {
+    const result = await this.#request(`/v1/sessions/${encodeURIComponent(sessionId)}/display/input`, {
+      method: 'POST',
+      body: { streamId, viewerId, sequence, event },
+      signal: options.signal,
+      timeoutMs: options.timeoutMs,
+      retryAttempts: options.retryAttempts ?? 1,
+      retryBaseMs: options.retryBaseMs,
+    });
+    const acceptedAt = typeof result?.acceptedAt === 'string' ? new Date(result.acceptedAt) : null;
+    if (result?.streamId !== streamId || result?.viewerId !== viewerId || result?.sequence !== sequence
+      || result?.accepted !== true || !acceptedAt || Number.isNaN(acceptedAt.valueOf())
+      || acceptedAt.toISOString() !== result.acceptedAt) {
+      throw new CloudHttpError('Cloud display input response is invalid', {
+        code: 'DISPLAY_INPUT_INVALID', retryable: false,
+      });
+    }
+  }
+
   async readDisplayFrames(sessionId, capability, after = 0, {
     signal,
     onMetadata = () => {},

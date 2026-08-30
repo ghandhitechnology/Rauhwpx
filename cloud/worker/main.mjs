@@ -86,8 +86,14 @@ try {
       client,
       sessionDisplay,
       displayMode,
-      onStudioReady: () => sessionFramePublisher.markReady(),
-      onStudioUnavailable: () => sessionFramePublisher.markUnavailable(),
+      onStudioReady: (harness) => {
+        sessionFramePublisher.setInputHandler((input) => harness.interact(input));
+        sessionFramePublisher.markReady();
+      },
+      onStudioUnavailable: () => {
+        sessionFramePublisher.setInputHandler(null);
+        return sessionFramePublisher.markUnavailable();
+      },
     });
     if (outcome?.paused !== true && outcome?.suspended !== true && outcome?.takenOver !== true) {
       if (!outcome?.timelinePath) throw new Error('Document runtime did not return timelinePath');

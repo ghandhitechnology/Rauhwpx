@@ -25,7 +25,8 @@ class TestElement {
   style: Record<string, string> = {};
   children: TestElement[] = [];
   attributes = new Map<string, string>();
-  listeners = new Map<string, Array<() => void>>();
+  listeners = new Map<string, Array<(event?: unknown) => void>>();
+  bounds = { left: 0, top: 0, width: 1280, height: 800 };
 
   setAttribute(name: string, value: string): void {
     this.attributes.set(name, value);
@@ -49,7 +50,7 @@ class TestElement {
     return node;
   }
 
-  addEventListener(name: string, listener: () => void): void {
+  addEventListener(name: string, listener: (event?: unknown) => void): void {
     const listeners = this.listeners.get(name) ?? [];
     listeners.push(listener);
     this.listeners.set(name, listeners);
@@ -58,6 +59,15 @@ class TestElement {
   click(): void {
     for (const listener of this.listeners.get('click') ?? []) listener();
   }
+
+  dispatch(name: string, event: unknown): void {
+    for (const listener of this.listeners.get(name) ?? []) listener(event);
+  }
+
+  getBoundingClientRect() { return this.bounds; }
+  focus() {}
+  setPointerCapture() {}
+  releasePointerCapture() {}
 }
 
 class TestDocument {
@@ -149,8 +159,11 @@ function connection(sessionId: string, closed: string[]): CloudDisplayConnection
       width: 1280,
       height: 800,
       maxFrameBytes: 524288,
-      maxFps: 2,
+      maxFps: 12,
+      inputProtocol: 'rauhwpx-input-v1',
+      maxInputEventsPerSecond: 60,
     },
+    async sendInput() {},
     async close() { closed.push(sessionId); },
   };
 }
@@ -207,6 +220,56 @@ test('cloud workspace opens only while visible, replaces sessions, and suppresse
     message: 'late',
   });
   assert.equal(workspace.getState().kind, 'live');
+});
+
+test('cloud workspace maps pointer, wheel, shortcuts, and text into ordered remote input', async () => {
+  const doc = new TestDocument();
+  const inputs: unknown[] = [];
+  const workspace = createCloudWorkspace({
+    display: {
+      async openDisplay(sessionId: string) {
+        const opened = connection(sessionId, []);
+        opened.sendInput = async (event) => { inputs.push(event); };
+        return opened;
+      },
+    } as Pick<CloudController, 'openDisplay'>,
+    doc: doc as unknown as Document,
+    objectUrls: { create: () => 'blob:input', revoke: () => {} },
+    decodeFrame: async () => ({ width: 1280, height: 800 }),
+  });
+  const root = workspace.root as unknown as TestElement;
+  const canvas = find(root, (node) => node.className === 'cloud-workspace-canvas');
+  const sink = find(root, (node) => node.className === 'cloud-workspace-input');
+  canvas.bounds = { left: 100, top: 50, width: 640, height: 400 };
+  workspace.setContext({ visible: true, session: running() });
+  await flushMicrotasks();
+  const pointer = (extra: Record<string, unknown> = {}) => ({
+    clientX: 420, clientY: 250, button: 0, pointerId: 1,
+    preventDefault() {},
+    ...extra,
+  });
+  canvas.dispatch('pointerdown', pointer());
+  canvas.dispatch('pointerup', pointer());
+  canvas.dispatch('wheel', pointer({ deltaX: 3.4, deltaY: -8.6 }));
+  sink.dispatch('keydown', {
+    key: 'Control', ctrlKey: true, metaKey: false, altKey: false,
+    isComposing: false, repeat: false, preventDefault() {},
+  });
+  sink.dispatch('keyup', { key: 'Control', preventDefault() {} });
+  Object.assign(sink, { value: 'ㅎ' });
+  sink.dispatch('input', { isComposing: true });
+  Object.assign(sink, { value: '한글' });
+  sink.dispatch('input', { isComposing: false });
+  await flushMicrotasks();
+  assert.deepEqual(inputs, [
+    { kind: 'pointer', action: 'down', x: 640, y: 400, button: 'left' },
+    { kind: 'pointer', action: 'up', x: 640, y: 400, button: 'left' },
+    { kind: 'wheel', x: 640, y: 400, deltaX: 3, deltaY: -9 },
+    { kind: 'key', action: 'down', key: 'Control' },
+    { kind: 'key', action: 'up', key: 'Control' },
+    { kind: 'text', text: '한글' },
+  ]);
+  workspace.dispose();
 });
 
 test('cloud workspace retains its committed frame while hidden and revokes it on session change', async () => {

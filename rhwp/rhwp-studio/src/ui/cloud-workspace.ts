@@ -4,6 +4,7 @@ import type { CloudWorkspace, CloudDisplayState } from '../cloud/workspace.ts';
 import type {
   CloudDisplayEvent,
   CloudDisplayFrame,
+  CloudDisplayInputEvent,
   CloudSessionState,
 } from '../cloud/types.ts';
 
@@ -99,11 +100,19 @@ export function createCloudWorkspace({
   viewport.className = 'cloud-workspace-viewport';
   const canvas = doc.createElement('div');
   canvas.className = 'cloud-workspace-canvas';
+  canvas.setAttribute('role', 'application');
+  canvas.setAttribute('aria-label', 'Cloud 문서 원격 제어 화면');
   const image = doc.createElement('img');
   image.className = 'cloud-workspace-image';
   image.alt = 'Cloud 문서 화면 미리보기';
   image.draggable = false;
-  canvas.appendChild(image);
+  const inputSink = doc.createElement('textarea');
+  inputSink.className = 'cloud-workspace-input';
+  inputSink.setAttribute('aria-label', 'Cloud 문서 키보드 입력');
+  inputSink.autocapitalize = 'off';
+  inputSink.autocomplete = 'off';
+  inputSink.spellcheck = false;
+  canvas.append(image, inputSink);
   viewport.appendChild(canvas);
   root.append(toolbar, viewport);
 
@@ -138,6 +147,11 @@ export function createCloudWorkspace({
   let pendingDecode: DecodeCandidate | null = null;
   let disposed = false;
   let zoom = 1;
+  let controlling = false;
+  let pendingMove: Extract<CloudDisplayInputEvent, { kind: 'pointer'; action: 'move' }> | null = null;
+  let moveSending = false;
+  const pressedKeys = new Set<string>();
+  const pressedPointers = new Map<number, 'left' | 'middle' | 'right' | 'back' | 'forward'>();
   const listeners = new Set<(value: CloudDisplayState) => void>();
 
   const renderZoom = (): void => {
@@ -156,6 +170,91 @@ export function createCloudWorkspace({
     root.dataset.displayState = next.kind;
     status.textContent = text;
     for (const listener of listeners) listener(next);
+  };
+
+  const reportInputError = (error: unknown): void => {
+    const code = typeof error === 'object' && error && 'code' in error ? String(error.code) : '';
+    if (code === 'DISPLAY_STREAM_REPLACED' || code === 'DISPLAY_INPUT_UNAVAILABLE'
+      || error instanceof DOMException && error.name === 'AbortError') return;
+    controlling = false;
+    root.dataset.cloudControl = code === 'DISPLAY_CONTROL_CONFLICT' ? 'conflict' : 'error';
+    status.textContent = code === 'DISPLAY_CONTROL_CONFLICT'
+      ? '다른 창에서 이 Cloud 화면을 제어하고 있습니다.'
+      : 'Cloud 입력을 전달하지 못했습니다. 다시 클릭해 주세요.';
+  };
+
+  const sendInput = (event: CloudDisplayInputEvent): Promise<void> => {
+    const target = connection;
+    if (!target || target.capability.kind !== 'available' || currentSessionId !== contextSessionId) {
+      return Promise.reject(Object.assign(new Error('Cloud display input is unavailable'), {
+        code: 'DISPLAY_INPUT_UNAVAILABLE',
+      }));
+    }
+    return target.sendInput(event).then(() => {
+      if (!controlling) {
+        controlling = true;
+        root.dataset.cloudControl = 'active';
+        status.textContent = 'Cloud 화면 연결됨 · 원격 제어 중';
+      }
+    }, (error) => {
+      reportInputError(error);
+      throw error;
+    });
+  };
+
+  const flushMove = (): void => {
+    if (moveSending || !pendingMove) return;
+    const event = pendingMove;
+    pendingMove = null;
+    moveSending = true;
+    void sendInput(event).catch(() => {}).finally(() => {
+      moveSending = false;
+      flushMove();
+    });
+  };
+
+  const sendText = (text: string): void => {
+    const encoder = new TextEncoder();
+    let chunk = '';
+    let chunkBytes = 0;
+    const flush = (): void => {
+      if (chunk) void sendInput({ kind: 'text', text: chunk }).catch(() => {});
+      chunk = '';
+      chunkBytes = 0;
+    };
+    for (const character of text) {
+      const bytes = encoder.encode(character).byteLength;
+      if (chunkBytes + bytes > 4 * 1024) flush();
+      chunk += character;
+      chunkBytes += bytes;
+    }
+    flush();
+  };
+
+  const displayPoint = (event: PointerEvent | WheelEvent): { x: number; y: number } | null => {
+    const capability = connection?.capability;
+    if (!capability || capability.kind !== 'available') return null;
+    const bounds = canvas.getBoundingClientRect();
+    if (bounds.width <= 0 || bounds.height <= 0) return null;
+    return {
+      x: Math.max(0, Math.min(capability.width - 1, Math.floor(
+        (event.clientX - bounds.left) * capability.width / bounds.width,
+      ))),
+      y: Math.max(0, Math.min(capability.height - 1, Math.floor(
+        (event.clientY - bounds.top) * capability.height / bounds.height,
+      ))),
+    };
+  };
+
+  const pointerButton = (button: number): 'left' | 'middle' | 'right' | 'back' | 'forward' | null => {
+    switch (button) {
+      case 0: return 'left';
+      case 1: return 'middle';
+      case 2: return 'right';
+      case 3: return 'back';
+      case 4: return 'forward';
+      default: return null;
+    }
   };
 
   const retainedFrame = (sessionId: string): CloudDisplayFrame | null =>
@@ -183,6 +282,11 @@ export function createCloudWorkspace({
     const active = connection;
     connection = null;
     currentSessionId = null;
+    controlling = false;
+    root.dataset.cloudControl = 'inactive';
+    pendingMove = null;
+    pressedKeys.clear();
+    pressedPointers.clear();
     if (active) void active.close().catch(() => {});
   };
 
@@ -247,7 +351,10 @@ export function createCloudWorkspace({
     lastFrame = candidate.frame;
     image.src = candidate.url;
     renderZoom();
-    publish({ kind: 'live', sessionId: candidate.sessionId, frame: candidate.frame }, 'Cloud 화면 연결됨');
+    publish(
+      { kind: 'live', sessionId: candidate.sessionId, frame: candidate.frame },
+      controlling ? 'Cloud 화면 연결됨 · 원격 제어 중' : 'Cloud 화면 연결됨 · 클릭하여 제어',
+    );
     if (previousUrl) objectUrls.revoke(previousUrl);
   };
 
@@ -353,6 +460,80 @@ export function createCloudWorkspace({
     setZoom(1);
     viewport.scrollLeft = 0;
     viewport.scrollTop = 0;
+  });
+
+  canvas.addEventListener('pointermove', (event) => {
+    const point = displayPoint(event);
+    if (!point) return;
+    pendingMove = { kind: 'pointer', action: 'move', ...point };
+    flushMove();
+  });
+  canvas.addEventListener('pointerdown', (event) => {
+    const point = displayPoint(event);
+    const button = pointerButton(event.button);
+    if (!point || !button) return;
+    event.preventDefault();
+    inputSink.focus({ preventScroll: true });
+    canvas.setPointerCapture?.(event.pointerId);
+    pressedPointers.set(event.pointerId, button);
+    pendingMove = null;
+    void sendInput({ kind: 'pointer', action: 'down', ...point, button }).catch(() => {});
+  });
+  canvas.addEventListener('pointerup', (event) => {
+    const point = displayPoint(event);
+    const button = pressedPointers.get(event.pointerId) ?? pointerButton(event.button);
+    if (!point || !button) return;
+    event.preventDefault();
+    void sendInput({ kind: 'pointer', action: 'up', ...point, button }).catch(() => {});
+    pressedPointers.delete(event.pointerId);
+    canvas.releasePointerCapture?.(event.pointerId);
+  });
+  canvas.addEventListener('pointercancel', (event) => {
+    const point = displayPoint(event);
+    const button = pressedPointers.get(event.pointerId);
+    if (!point || !button) return;
+    pressedPointers.delete(event.pointerId);
+    void sendInput({ kind: 'pointer', action: 'up', ...point, button }).catch(() => {});
+  });
+  canvas.addEventListener('contextmenu', (event) => event.preventDefault());
+  canvas.addEventListener('wheel', (event) => {
+    const point = displayPoint(event);
+    if (!point) return;
+    event.preventDefault();
+    const deltaX = Math.max(-32_768, Math.min(32_768, Math.round(event.deltaX)));
+    const deltaY = Math.max(-32_768, Math.min(32_768, Math.round(event.deltaY)));
+    void sendInput({ kind: 'wheel', ...point, deltaX, deltaY }).catch(() => {});
+  }, { passive: false });
+  inputSink.addEventListener('keydown', (event) => {
+    if (event.isComposing || event.key === 'Dead' || event.key === 'Process') return;
+    const localText = event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey
+      && !event.isComposing;
+    if (localText) return;
+    event.preventDefault();
+    pressedKeys.add(event.key);
+    void sendInput({ kind: 'key', action: 'down', key: event.key }).catch(() => {});
+  });
+  inputSink.addEventListener('keyup', (event) => {
+    if (!pressedKeys.delete(event.key)) return;
+    event.preventDefault();
+    void sendInput({ kind: 'key', action: 'up', key: event.key }).catch(() => {});
+  });
+  inputSink.addEventListener('input', (event) => {
+    if (event.isComposing) return;
+    const text = inputSink.value;
+    inputSink.value = '';
+    if (text) sendText(text);
+  });
+  inputSink.addEventListener('paste', (event) => {
+    const text = event.clipboardData?.getData('text/plain') ?? '';
+    if (!text) return;
+    event.preventDefault();
+    inputSink.value = '';
+    sendText(text);
+  });
+  inputSink.addEventListener('blur', () => {
+    for (const key of pressedKeys) void sendInput({ kind: 'key', action: 'up', key }).catch(() => {});
+    pressedKeys.clear();
   });
   renderZoom();
 

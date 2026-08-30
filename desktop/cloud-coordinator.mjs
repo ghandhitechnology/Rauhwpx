@@ -553,7 +553,13 @@ export class CloudCoordinator extends EventEmitter {
         retryable: false,
       };
       try { listener?.(capability); } catch { /* Display listeners are isolated. */ }
-      return { capability, async close() {} };
+      return {
+        capability,
+        async sendInput() {
+          throw transferError('Cloud display input is unavailable', 'DISPLAY_INPUT_UNAVAILABLE');
+        },
+        async close() {},
+      };
     }
     const connection = await this.#client.openDisplay(sessionId, listener, options);
     try {
@@ -565,6 +571,15 @@ export class CloudCoordinator extends EventEmitter {
     let closed = false;
     const tracked = {
       get capability() { return connection.capability; },
+      sendInput: (event) => this.#withProfileOperation(async () => {
+        if (closed) throw transferError('Cloud display connection is closed', 'DISPLAY_INPUT_UNAVAILABLE');
+        this.#assertProfileEpoch(profileEpoch);
+        if (typeof connection.sendInput !== 'function') {
+          throw transferError('Cloud display input is unavailable', 'DISPLAY_INPUT_UNAVAILABLE');
+        }
+        await connection.sendInput(event);
+        this.#assertProfileEpoch(profileEpoch);
+      }, { expectedEpoch: profileEpoch }),
       close: async () => {
         if (closed) return;
         closed = true;

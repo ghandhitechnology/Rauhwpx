@@ -15,6 +15,7 @@ import type {
   CloudDisplayCapability,
   CloudDisplayConnection,
   CloudDisplayEvent,
+  CloudDisplayInputEvent,
   CloudProfileDraft,
   CloudProfileState,
   CloudSandboxSummary,
@@ -57,6 +58,7 @@ export interface CloudDesktopApi {
   cloudDownloadCheckpoint?: (payload: { sessionId: string; operationId?: string }) => Promise<unknown>;
   cloudOpenDisplay?: (payload: { sessionId: string }) => Promise<unknown>;
   cloudCloseDisplay?: (payload: { connectionId: string }) => Promise<unknown>;
+  cloudDisplayInput?: (payload: { connectionId: string; event: CloudDisplayInputEvent }) => Promise<unknown>;
   cloudResolveResult?: (payload: { sessionId: string; action: CloudResultAction }) => Promise<unknown>;
   onCloudEvent?: (callback: (event: unknown) => void) => (() => void) | void;
   onCloudDisplayEvent?: (callback: (event: unknown) => void) => (() => void) | void;
@@ -768,10 +770,17 @@ export function createCloudController(
       }
       if (typeof resolvedApi?.cloudOpenDisplay !== 'function'
         || typeof resolvedApi?.cloudCloseDisplay !== 'function'
+        || typeof resolvedApi?.cloudDisplayInput !== 'function'
         || typeof resolvedApi?.onCloudDisplayEvent !== 'function') {
         const capability = clientUnsupportedDisplay(sessionId);
         try { listener(capability); } catch { /* Display listeners are isolated. */ }
-        return { capability, async close() {} };
+        return {
+          capability,
+          async sendInput() {
+            throw Object.assign(new Error('Cloud display input is unavailable'), { code: 'DISPLAY_INPUT_UNAVAILABLE' });
+          },
+          async close() {},
+        };
       }
       openingDisplays += 1;
       let opened: Record<string, unknown> | null;
@@ -811,6 +820,17 @@ export function createCloudController(
       }
       return {
         get capability() { return entry.capability; },
+        async sendInput(event: CloudDisplayInputEvent) {
+          if (disposed || generation !== displayGeneration || activeDisplay !== entry
+            || profileEpoch !== snapshot.profileEpoch) {
+            throw Object.assign(new Error('Cloud display connection was replaced'), { code: 'DISPLAY_STREAM_REPLACED' });
+          }
+          await resolvedApi.cloudDisplayInput!({ connectionId, event });
+          if (disposed || generation !== displayGeneration || activeDisplay !== entry
+            || profileEpoch !== snapshot.profileEpoch) {
+            throw Object.assign(new Error('Cloud display connection was replaced'), { code: 'DISPLAY_STREAM_REPLACED' });
+          }
+        },
         close: () => closeDisplay(entry),
       };
     },

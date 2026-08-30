@@ -89,6 +89,13 @@
   margin: auto;
   background: var(--ui-surface);
   box-shadow: var(--shadow-paper);
+  cursor: default;
+  touch-action: none;
+}
+
+.cloud-workspace-canvas:focus-within {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
 }
 
 .cloud-workspace-image {
@@ -98,6 +105,19 @@
   object-fit: fill;
   pointer-events: none;
   user-select: none;
+}
+
+.cloud-workspace-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  inset: 0 auto auto 0;
+  overflow: hidden;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  pointer-events: none;
+  resize: none;
 }
 
 body.ag-sidebar-open #cloud-workspace {

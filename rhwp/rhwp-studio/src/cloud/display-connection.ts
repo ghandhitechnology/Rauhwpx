@@ -5,6 +5,7 @@ import type {
   CloudDisplayEvent,
   CloudDisplayFrame,
   CloudDisplayFrameMetadata,
+  CloudDisplayInputEvent,
 } from './types.ts';
 
 export interface CloudDisplayTransport {
@@ -23,6 +24,14 @@ export interface CloudDisplayTransport {
     options: { signal: AbortSignal; onMetadata: (metadata: CloudDisplayFrameMetadata) => void },
   ): Promise<number>;
   frame(metadata: CloudDisplayFrameMetadata, options: { signal: AbortSignal }): Promise<CloudDisplayFrame>;
+  input(
+    sessionId: string,
+    streamId: string,
+    viewerId: string,
+    sequence: number,
+    event: CloudDisplayInputEvent,
+    options: { signal: AbortSignal },
+  ): Promise<void>;
 }
 
 export interface CloudDisplayConnectionOptions {
@@ -130,6 +139,8 @@ class VerifiedDisplayConnection implements CloudDisplayConnection {
   #pending: CloudDisplayFrameMetadata | null = null;
   #downloading: Promise<void> | null = null;
   #lastSequence = 0;
+  #inputSequence = 0;
+  #inputChain: Promise<void> = Promise.resolve();
 
   constructor(
     transport: CloudDisplayTransport,
@@ -182,13 +193,40 @@ class VerifiedDisplayConnection implements CloudDisplayConnection {
     return this.#closePromise;
   }
 
+  sendInput(event: CloudDisplayInputEvent): Promise<void> {
+    const capability = this.#capability;
+    if (this.#closed || capability?.kind !== 'available') {
+      return Promise.reject(Object.assign(new Error('Cloud display input is unavailable'), {
+        code: 'DISPLAY_INPUT_UNAVAILABLE',
+      }));
+    }
+    const streamId = capability.streamId;
+    const sequence = ++this.#inputSequence;
+    const operation = this.#inputChain.then(async () => {
+      if (this.#closed || this.#controller.signal.aborted) throw this.#controller.signal.reason;
+      if (this.#capability?.kind !== 'available' || this.#capability.streamId !== streamId) {
+        throw Object.assign(new Error('Cloud display stream was replaced'), { code: 'DISPLAY_STREAM_REPLACED' });
+      }
+      await this.#transport.input(
+        this.#sessionId,
+        streamId,
+        this.#viewerId,
+        sequence,
+        event,
+        { signal: this.#controller.signal },
+      );
+    });
+    this.#inputChain = operation.catch(() => {});
+    return operation;
+  }
+
   async #close(): Promise<void> {
     this.#closed = true;
     this.#removeExternalAbort();
     this.#controller.abort();
     this.#phase?.controller.abort();
     this.#pending = null;
-    await Promise.allSettled([this.#loop, this.#downloading].filter(Boolean) as Promise<void>[]);
+    await Promise.allSettled([this.#loop, this.#downloading, this.#inputChain].filter(Boolean) as Promise<void>[]);
     await this.#releaseInterest();
   }
 

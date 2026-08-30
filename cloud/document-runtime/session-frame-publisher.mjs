@@ -5,7 +5,7 @@ import { childProcessEnvironment, createSessionDisplayMode } from './session-dis
 
 const JPEG_START = Buffer.from([0xff, 0xd8]);
 const JPEG_END = Buffer.from([0xff, 0xd9]);
-const MAX_DISPLAY_FPS = 2;
+const MAX_DISPLAY_FPS = 12;
 const MAX_DISPLAY_FRAME_BYTES = 512 * 1024;
 const STDERR_TAIL_BYTES = 4 * 1024;
 
@@ -85,6 +85,7 @@ export class SessionFramePublisher {
     this.captureRetry = null;
     this.captureFailures = 0;
     this.generation = 0;
+    this.inputHandler = null;
   }
 
   snapshot() {
@@ -163,6 +164,14 @@ export class SessionFramePublisher {
     return this.snapshot();
   }
 
+  setInputHandler(handler) {
+    if (handler !== null && typeof handler !== 'function') {
+      throw new Error('Display input handler must be a function');
+    }
+    this.inputHandler = handler;
+    return this.snapshot();
+  }
+
   async markUnavailable() {
     this.ready = false;
     this.#invalidatePublication();
@@ -217,6 +226,20 @@ export class SessionFramePublisher {
           continue;
         }
         failures = 0;
+        const inputEvents = Array.isArray(demand.inputEvents) ? demand.inputEvents : [];
+        if (inputEvents.length > 0) {
+          if (!this.inputHandler) {
+            await this.#backoff(1, this.controller.signal);
+            continue;
+          }
+          for (const input of inputEvents) {
+            try {
+              await this.inputHandler(input.event);
+            } catch (error) {
+              this.onEvent({ type: 'display-input-failed', error: String(error?.message ?? error) });
+            }
+          }
+        }
         this.demandVersion = demand.version;
         this.interested = demand.interested === true;
         if (this.interested && this.ready) this.#startCapture();

@@ -589,6 +589,27 @@ export function createCloudHttpHandler({
         ));
         return;
       }
+      const displayInputRoute = pathname.match(/^\/v1\/sessions\/([^/]+)\/display\/input$/);
+      if (request.method === 'POST' && displayInputRoute) {
+        if (!displayFrameStore) throw new CloudError('DISPLAY_UNSUPPORTED', 'Display input is not supported', 501);
+        const sessionId = decodeURIComponent(displayInputRoute[1]);
+        sessionStore.getSessionRow(sessionId);
+        const body = await readJson(request);
+        if (typeof body.streamId !== 'string' || body.streamId.length < 1 || body.streamId.length > 256
+          || typeof body.viewerId !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(body.viewerId)
+          || !Number.isSafeInteger(body.sequence) || body.sequence < 1) {
+          throw new CloudError('INVALID_REQUEST', 'Display input requires a valid stream, viewer, and sequence');
+        }
+        json(response, 202, displayFrameStore.sendInput(
+          sessionId,
+          body.streamId,
+          device.id,
+          body.viewerId,
+          body.sequence,
+          body.event,
+        ));
+        return;
+      }
       const displayWatchRoute = pathname.match(/^\/v1\/sessions\/([^/]+)\/display\/frames$/);
       if (request.method === 'GET' && displayWatchRoute) {
         if (!displayFrameStore) throw new CloudError('DISPLAY_UNSUPPORTED', 'Display frames are not supported', 501);

@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import { CloudClient } from '../desktop/cloud-client.mjs';
+import { CloudCoordinator } from '../desktop/cloud-coordinator.mjs';
 import {
   MAX_DISPLAY_FRAME_BYTES,
   openCloudDisplay,
@@ -93,7 +94,9 @@ function capability(streamId = STREAM_ID) {
     width: 1280,
     height: 800,
     maxFrameBytes: MAX_DISPLAY_FRAME_BYTES,
-    maxFps: 2,
+    maxFps: 12,
+    inputProtocol: 'rauhwpx-input-v1',
+    maxInputEventsPerSecond: 60,
   };
 }
 
@@ -167,8 +170,20 @@ test('desktop display client verifies signed capability, interest, metadata SSE,
         streamId: STREAM_ID,
         interested: true,
         expiresAt: '2026-08-30T00:00:20.000Z',
-        maxFps: 2,
+        maxFps: 12,
+        inputProtocol: 'rauhwpx-input-v1',
+        maxInputEventsPerSecond: 60,
       });
+    }
+    if (url.endsWith(`/v1/sessions/${SESSION_ID}/display/input`)) {
+      const body = JSON.parse(options.body);
+      return signedJson(url, options, {
+        streamId: body.streamId,
+        viewerId: body.viewerId,
+        sequence: body.sequence,
+        accepted: true,
+        acceptedAt: '2026-08-30T00:00:02.000Z',
+      }, { status: 202 });
     }
     if (url.includes(`/v1/sessions/${SESSION_ID}/display/frames?`)) {
       return signedSse(url, options, {
@@ -196,6 +211,20 @@ test('desktop display client verifies signed capability, interest, metadata SSE,
   assert.equal((await client.setDisplayInterest(SESSION_ID, STREAM_ID, 'viewer-desktop-01', true)).interested, true);
   const interestBody = JSON.parse(calls.find(({ url }) => url.endsWith('/display/interest')).options.body);
   assert.equal(interestBody.viewerId, 'viewer-desktop-01');
+  await client.sendDisplayInput(
+    SESSION_ID,
+    STREAM_ID,
+    'viewer-desktop-01',
+    1,
+    { kind: 'text', text: '안녕하세요' },
+  );
+  const inputBody = JSON.parse(calls.find(({ url }) => url.endsWith('/display/input')).options.body);
+  assert.deepEqual(inputBody, {
+    streamId: STREAM_ID,
+    viewerId: 'viewer-desktop-01',
+    sequence: 1,
+    event: { kind: 'text', text: '안녕하세요' },
+  });
   const received = [];
   assert.equal(await client.readDisplayFrames(SESSION_ID, available, 0, {
     onMetadata: (value) => received.push(value),
@@ -753,6 +782,56 @@ test('display registry scopes replacement and cleanup to each window owner', asy
   await registry.closeAll();
   assert.deepEqual(new Set(opened), new Set(['session_window_1', 'session_window_2', 'session_window_3']));
   assert.ok(closed.includes('session_window_2'));
+});
+
+test('display registry forwards input only through the sender-owned live connection', async () => {
+  const inputs = [];
+  const registry = new CloudDisplayRegistry({
+    openDisplay: async () => ({
+      capability: capability(),
+      async sendInput(event) { inputs.push(event); },
+      async close() {},
+    }),
+  });
+  const opened = await registry.open(101, SESSION_ID, () => {});
+  await assert.rejects(
+    registry.sendInput(202, opened.connectionId, { kind: 'text', text: 'blocked' }),
+    (error) => error?.name === 'AbortError',
+  );
+  await registry.sendInput(101, opened.connectionId, { kind: 'text', text: 'accepted' });
+  assert.deepEqual(inputs, [{ kind: 'text', text: 'accepted' }]);
+  await registry.closeAll();
+});
+
+test('desktop coordinator retains a profile operation lease through remote input', async () => {
+  const inputStarted = Promise.withResolvers();
+  const releaseInput = Promise.withResolvers();
+  let closed = false;
+  const coordinator = new CloudCoordinator({
+    client: {
+      openDisplay: async () => ({
+        capability: capability(),
+        async sendInput() {
+          inputStarted.resolve();
+          await releaseInput.promise;
+        },
+        async close() { closed = true; },
+      }),
+    },
+    store: { flush: async () => {} },
+    provisioner: {},
+  });
+  const connection = await coordinator.openDisplay(SESSION_ID, () => {});
+  const input = connection.sendInput({ kind: 'text', text: 'leased' });
+  await inputStarted.promise;
+  let stopped = false;
+  const stopping = coordinator.stop().then(() => { stopped = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(stopped, false);
+  assert.equal(closed, true);
+  releaseInput.resolve();
+  await Promise.all([input, stopping]);
+  assert.equal(stopped, true);
 });
 
 test('display registry waits for prior cleanup before a concurrent replacement opens', async () => {

@@ -111,7 +111,7 @@ test('replacement worker identity fences the prior stream and stale publishers',
   const second = store.openStream({ sessionId: 'session-a', workerId: 'worker-two', width: 1280, height: 800 });
   assert.notEqual(second.streamId, first.streamId);
   assert.deepEqual(await waiter, {
-    streamId: first.streamId, version: 2, interested: false, maxFps: 0, closed: true,
+    streamId: first.streamId, version: 2, interested: false, maxFps: 0, inputEvents: [], closed: true,
   });
   assert.throws(
     () => publish(store, first, 'worker-one', 1, 'stale'),
@@ -140,7 +140,7 @@ test('viewer interest expires independently and demand stops after the grace per
   const store = new DisplayFrameStore({ now: () => clock, interestTtlMs: 10, interestGraceMs: 5 });
   const stream = store.openStream({ sessionId: 'session-a', workerId: 'worker-a', width: 1280, height: 800 });
   assert.deepEqual(await store.waitForDemand('session-a', 'worker-a', stream.streamId, 0), {
-    streamId: stream.streamId, version: 1, interested: false, maxFps: 0, closed: false,
+    streamId: stream.streamId, version: 1, interested: false, maxFps: 0, inputEvents: [], closed: false,
   });
   store.setInterest('session-a', stream.streamId, 'device-a', 'viewer-a', true);
   assert.equal((await store.waitForDemand('session-a', 'worker-a', stream.streamId, 1)).interested, true);
@@ -150,7 +150,7 @@ test('viewer interest expires independently and demand stops after the grace per
   clock += 6;
   const stopped = await store.waitForDemand('session-a', 'worker-a', stream.streamId, 2);
   assert.deepEqual(stopped, {
-    streamId: stream.streamId, version: 3, interested: false, maxFps: 0, closed: false,
+    streamId: stream.streamId, version: 3, interested: false, maxFps: 0, inputEvents: [], closed: false,
   });
 });
 
@@ -174,6 +174,81 @@ test('legacy and explicit viewer interest is isolated by authenticated device', 
   assert.equal((await store.waitForDemand('session-a', 'worker-a', stream.streamId, 0)).interested, true);
   store.setInterest('session-a', stream.streamId, 'device-a', 'viewer-second', false);
   assert.equal((await store.waitForDemand('session-a', 'worker-a', stream.streamId, 4)).interested, false);
+});
+
+test('display input is ordered, idempotent, controller-fenced, and reset on lease release', async () => {
+  const store = new DisplayFrameStore({ interestGraceMs: 0 });
+  const stream = store.openStream({
+    sessionId: 'session-input', workerId: 'worker-input', width: 1280, height: 800,
+  });
+  store.setInterest(stream.sessionId, stream.streamId, 'device-a', 'viewer-window-a', true);
+  store.setInterest(stream.sessionId, stream.streamId, 'device-b', 'viewer-window-b', true);
+  const first = store.sendInput(
+    stream.sessionId,
+    stream.streamId,
+    'device-a',
+    'viewer-window-a',
+    1,
+    { kind: 'pointer', action: 'down', x: 640, y: 400, button: 'left' },
+  );
+  assert.strictEqual(store.sendInput(
+    stream.sessionId,
+    stream.streamId,
+    'device-a',
+    'viewer-window-a',
+    1,
+    { kind: 'pointer', action: 'down', x: 640, y: 400, button: 'left' },
+  ), first);
+  assert.throws(() => store.sendInput(
+    stream.sessionId,
+    stream.streamId,
+    'device-a',
+    'viewer-window-a',
+    1,
+    { kind: 'pointer', action: 'up', x: 640, y: 400, button: 'left' },
+  ), { code: 'DISPLAY_INPUT_SEQUENCE_CONFLICT' });
+  assert.throws(() => store.sendInput(
+    stream.sessionId,
+    stream.streamId,
+    'device-b',
+    'viewer-window-b',
+    1,
+    { kind: 'text', text: 'blocked' },
+  ), { code: 'DISPLAY_CONTROL_CONFLICT' });
+
+  const delivered = await store.waitForDemand(stream.sessionId, 'worker-input', stream.streamId, 2);
+  assert.deepEqual(delivered.inputEvents, [{
+    version: 3,
+    sequence: 1,
+    event: { kind: 'pointer', action: 'down', x: 640, y: 400, button: 'left' },
+  }]);
+  store.setInterest(stream.sessionId, stream.streamId, 'device-a', 'viewer-window-a', false);
+  const released = await store.waitForDemand(stream.sessionId, 'worker-input', stream.streamId, 3);
+  assert.deepEqual(released.inputEvents, [{ version: 4, sequence: 0, event: { kind: 'reset' } }]);
+  assert.equal(store.sendInput(
+    stream.sessionId,
+    stream.streamId,
+    'device-b',
+    'viewer-window-b',
+    1,
+    { kind: 'text', text: 'new controller' },
+  ).accepted, true);
+  assert.throws(() => store.sendInput(
+    stream.sessionId,
+    stream.streamId,
+    'device-a',
+    'viewer-window-a',
+    2,
+    { kind: 'text', text: 'expired' },
+  ), { code: 'DISPLAY_INTEREST_REQUIRED' });
+  assert.throws(() => store.sendInput(
+    stream.sessionId,
+    stream.streamId,
+    'device-b',
+    'viewer-window-b',
+    2,
+    { kind: 'pointer', action: 'move', x: 1280, y: 0 },
+  ), { code: 'DISPLAY_INPUT_INVALID' });
 });
 
 test('metadata subscriptions replay only the latest frame and cleanup is idempotent', async () => {

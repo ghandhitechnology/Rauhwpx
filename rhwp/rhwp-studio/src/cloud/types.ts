@@ -257,7 +257,9 @@ export interface CloudDisplayAvailableCapability {
   width: number;
   height: number;
   maxFrameBytes: 524288;
-  maxFps: 2;
+  maxFps: 12;
+  inputProtocol: 'rauhwpx-input-v1';
+  maxInputEventsPerSecond: 60;
 }
 
 export interface CloudDisplayUnavailableCapability {
@@ -330,8 +332,16 @@ export type CloudDisplayEvent =
   | CloudDisplayUnavailableCapability
   | CloudDisplayConnectionState;
 
+export type CloudDisplayInputEvent =
+  | { kind: 'pointer'; action: 'move'; x: number; y: number }
+  | { kind: 'pointer'; action: 'down' | 'up'; x: number; y: number; button: 'left' | 'middle' | 'right' | 'back' | 'forward' }
+  | { kind: 'wheel'; x: number; y: number; deltaX: number; deltaY: number }
+  | { kind: 'key'; action: 'down' | 'up'; key: string }
+  | { kind: 'text'; text: string };
+
 export interface CloudDisplayConnection {
   readonly capability: CloudDisplayCapability;
+  sendInput(event: CloudDisplayInputEvent): Promise<void>;
   close(): Promise<void>;
 }
 

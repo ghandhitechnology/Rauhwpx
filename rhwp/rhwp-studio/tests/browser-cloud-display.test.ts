@@ -61,6 +61,7 @@ function displayFixture({
   const frameBytes = Buffer.from([0xff, 0xd8, 1, 0xff, 0xd9]);
   const frameDigest = digest(frameBytes);
   const interests: Array<{ streamId: string; viewerId: string; active: boolean }> = [];
+  const inputs: Array<{ streamId: string; viewerId: string; sequence: number; event: unknown }> = [];
   let streamCalls = 0;
   let capabilityCalls = 0;
   let streamAborted = false;
@@ -149,7 +150,9 @@ function displayFixture({
         streamId: streamMissingOnce && capabilityCalls > 1 ? `${streamId}-replacement` : streamId,
         width: 1280, height: 800,
         maxFrameBytes: oversizedCapability ? 524287 : 524288,
-        maxFps: 2,
+        maxFps: 12,
+        inputProtocol: 'rauhwpx-input-v1',
+        maxInputEventsPerSecond: 60,
         ...(oversizedCapability ? { padding: 'x'.repeat(2 * 1024 * 1024) } : {}),
       });
     }
@@ -160,9 +163,20 @@ function displayFixture({
         streamId: body.streamId,
         interested: body.active,
         expiresAt: body.active ? '2026-08-30T00:00:20.000Z' : null,
-        maxFps: body.active ? 2 : 0,
+        maxFps: body.active ? 12 : 0,
         ...(oversizedInterest ? { padding: 'x'.repeat(2 * 1024 * 1024) } : {}),
       });
+    }
+    if (url.pathname.endsWith(`/v1/sessions/${sessionId}/display/input`)) {
+      const body = await request.json() as typeof inputs[number];
+      inputs.push(body);
+      return json(request, {
+        streamId: body.streamId,
+        viewerId: body.viewerId,
+        sequence: body.sequence,
+        accepted: true,
+        acceptedAt: '2026-08-30T00:00:02.000Z',
+      }, 202);
     }
     if (url.pathname.endsWith(`/v1/sessions/${sessionId}/display/frames`) && url.search) {
       streamCalls += 1;
@@ -237,6 +251,7 @@ function displayFixture({
     fetchImpl,
     serverPublicKey,
     interests,
+    inputs,
     streamCalls: () => streamCalls,
     streamAborted: () => streamAborted,
     firstCapabilityStarted: firstCapabilityStarted.promise,
@@ -285,6 +300,14 @@ test('browser display verifies capability-to-frame and releases only its own int
   assert.equal(frameEnvelope.event.sessionId, sessionId);
   assert.equal(frameEnvelope.event.streamId, streamId);
   assert.equal(frameEnvelope.event.sequence, 1);
+  await api.cloudDisplayInput({
+    connectionId: opened.connectionId,
+    event: { kind: 'pointer', action: 'down', x: 640, y: 400, button: 'left' },
+  });
+  assert.deepEqual(fixture.inputs.map(({ sequence, event }) => ({ sequence, event })), [{
+    sequence: 1,
+    event: { kind: 'pointer', action: 'down', x: 640, y: 400, button: 'left' },
+  }]);
   await api.cloudCloseDisplay({ connectionId: opened.connectionId });
   assert.deepEqual(fixture.interests.map(({ active }) => active), [true, false]);
   assert.equal(new Set(fixture.interests.map(({ viewerId }) => viewerId)).size, 1);

@@ -15,6 +15,7 @@ import { FALLBACK_DOCUMENT_FILE_NAME } from './core/document-names.ts';
 import type {
   CloudCommandRequest,
   CloudDisplayEvent,
+  CloudDisplayInputEvent,
   CloudProfileDraft,
   CloudResultAction,
   CloudServerMode,
@@ -162,6 +163,7 @@ export interface RhwpDesktopApi {
   cloudDownloadCheckpoint?: (payload: { sessionId: string; operationId?: string }) => Promise<unknown>;
   cloudOpenDisplay?: (payload: { sessionId: string }) => Promise<unknown>;
   cloudCloseDisplay?: (payload: { connectionId: string }) => Promise<unknown>;
+  cloudDisplayInput?: (payload: { connectionId: string; event: CloudDisplayInputEvent }) => Promise<unknown>;
   cloudResolveResult?: (payload: { sessionId: string; action: CloudResultAction }) => Promise<unknown>;
   onCloudEvent?: (callback: (event: unknown) => void) => (() => void) | void;
   onCloudDisplayEvent?: (callback: (event: {

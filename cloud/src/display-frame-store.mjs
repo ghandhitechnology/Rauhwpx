@@ -3,13 +3,17 @@ import { createHash, randomUUID } from 'node:crypto';
 import { CloudError } from './protocol.mjs';
 
 export const DISPLAY_FRAME_PROTOCOL = 'rauhwpx-frame-v1';
+export const DISPLAY_INPUT_PROTOCOL = 'rauhwpx-input-v1';
 export const MAX_DISPLAY_FRAME_BYTES = 512 * 1024;
-export const MAX_DISPLAY_FPS = 2;
+export const MAX_DISPLAY_FPS = 12;
+export const MAX_DISPLAY_INPUT_EVENTS_PER_SECOND = 60;
 export const MAX_DISPLAY_DIMENSION = 4096;
 
 const DEFAULT_INTEREST_TTL_MS = 20_000;
 const DEFAULT_INTEREST_GRACE_MS = 3_000;
 const DEFAULT_DEMAND_WAIT_MS = 20_000;
+const MAX_QUEUED_INPUT_EVENTS = 256;
+const MAX_INPUT_TEXT_BYTES = 4 * 1024;
 
 function displayError(code, message, status = 400) {
   return new CloudError(code, message, status);
@@ -27,6 +31,72 @@ function dimension(value, label, maximum) {
     throw displayError('DISPLAY_DIMENSIONS_INVALID', `${label} is outside the supported display bounds`);
   }
   return value;
+}
+
+function exactKeys(value, keys) {
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+function coordinate(value, label, maximum) {
+  if (!Number.isSafeInteger(value) || value < 0 || value >= maximum) {
+    throw displayError('DISPLAY_INPUT_INVALID', `${label} is outside the active display`);
+  }
+  return value;
+}
+
+function displayInput(value, stream) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw displayError('DISPLAY_INPUT_INVALID', 'Display input event is invalid');
+  }
+  if (value.kind === 'pointer') {
+    if (!['move', 'down', 'up'].includes(value.action)) {
+      throw displayError('DISPLAY_INPUT_INVALID', 'Pointer action is invalid');
+    }
+    const x = coordinate(value.x, 'Pointer x', stream.width);
+    const y = coordinate(value.y, 'Pointer y', stream.height);
+    if (value.action === 'move') {
+      if (!exactKeys(value, ['kind', 'action', 'x', 'y'])) {
+        throw displayError('DISPLAY_INPUT_INVALID', 'Pointer move fields are invalid');
+      }
+      return Object.freeze({ kind: 'pointer', action: 'move', x, y });
+    }
+    if (!exactKeys(value, ['kind', 'action', 'x', 'y', 'button'])
+      || !['left', 'middle', 'right', 'back', 'forward'].includes(value.button)) {
+      throw displayError('DISPLAY_INPUT_INVALID', 'Pointer button fields are invalid');
+    }
+    return Object.freeze({ kind: 'pointer', action: value.action, x, y, button: value.button });
+  }
+  if (value.kind === 'wheel') {
+    if (!exactKeys(value, ['kind', 'x', 'y', 'deltaX', 'deltaY'])
+      || !Number.isSafeInteger(value.deltaX) || Math.abs(value.deltaX) > 32_768
+      || !Number.isSafeInteger(value.deltaY) || Math.abs(value.deltaY) > 32_768) {
+      throw displayError('DISPLAY_INPUT_INVALID', 'Wheel fields are invalid');
+    }
+    return Object.freeze({
+      kind: 'wheel',
+      x: coordinate(value.x, 'Wheel x', stream.width),
+      y: coordinate(value.y, 'Wheel y', stream.height),
+      deltaX: value.deltaX,
+      deltaY: value.deltaY,
+    });
+  }
+  if (value.kind === 'key') {
+    if (!exactKeys(value, ['kind', 'action', 'key']) || !['down', 'up'].includes(value.action)
+      || typeof value.key !== 'string' || !/^[^\u0000-\u001f\u007f]{1,64}$/u.test(value.key)) {
+      throw displayError('DISPLAY_INPUT_INVALID', 'Keyboard fields are invalid');
+    }
+    return Object.freeze({ kind: 'key', action: value.action, key: value.key });
+  }
+  if (value.kind === 'text') {
+    if (!exactKeys(value, ['kind', 'text']) || typeof value.text !== 'string' || !value.text
+      || Buffer.byteLength(value.text) > MAX_INPUT_TEXT_BYTES) {
+      throw displayError('DISPLAY_INPUT_INVALID', 'Text input is invalid');
+    }
+    return Object.freeze({ kind: 'text', text: value.text });
+  }
+  throw displayError('DISPLAY_INPUT_INVALID', 'Display input kind is invalid');
 }
 
 function jpegDimensions(bytes, maximum) {
@@ -120,6 +190,8 @@ export class DisplayFrameStore {
       frames: [],
       latestSequence: 0,
       viewers: new Map(),
+      controllerKey: null,
+      inputEvents: [],
       subscribers: new Set(),
       waiters: new Set(),
       demandVersion: 1,
@@ -226,10 +298,16 @@ export class DisplayFrameStore {
         throw displayError('DISPLAY_VIEWER_LIMIT', 'Too many display viewers are active', 429);
       }
       expiresAt = this.now() + this.interestTtlMs;
-      stream.viewers.set(viewerKey, expiresAt);
+      const current = stream.viewers.get(viewerKey);
+      stream.viewers.set(viewerKey, {
+        expiresAt,
+        lastInput: current?.lastInput ?? null,
+        inputTimes: current?.inputTimes ?? [],
+      });
       stream.graceUntil = 0;
     } else {
       stream.viewers.delete(viewerKey);
+      this.#releaseController(stream, viewerKey);
     }
     this.#recomputeDemand(stream);
     return {
@@ -238,6 +316,57 @@ export class DisplayFrameStore {
       expiresAt: expiresAt === null ? null : new Date(expiresAt).toISOString(),
       maxFps: active ? MAX_DISPLAY_FPS : 0,
     };
+  }
+
+  sendInput(sessionId, streamId, deviceId, viewerId, sequence, value) {
+    identifier(deviceId, 'deviceId');
+    identifier(viewerId, 'viewerId');
+    if (!Number.isSafeInteger(sequence) || sequence < 1) {
+      throw displayError('DISPLAY_INPUT_SEQUENCE_INVALID', 'Input sequence must be a positive integer');
+    }
+    const stream = this.#stream(sessionId, streamId);
+    this.#sweep(stream);
+    const viewerKey = JSON.stringify([deviceId, viewerId]);
+    const viewer = stream.viewers.get(viewerKey);
+    if (!viewer || viewer.expiresAt <= this.now()) {
+      throw displayError('DISPLAY_INTEREST_REQUIRED', 'Active display interest is required for input', 409);
+    }
+    if (stream.controllerKey && stream.controllerKey !== viewerKey) {
+      throw displayError('DISPLAY_CONTROL_CONFLICT', 'Another viewer controls this display', 409);
+    }
+    const event = displayInput(value, stream);
+    const digest = createHash('sha256').update(JSON.stringify(event)).digest('hex');
+    if (viewer.lastInput?.sequence === sequence) {
+      if (viewer.lastInput.digest !== digest) {
+        throw displayError('DISPLAY_INPUT_SEQUENCE_CONFLICT', 'Input sequence was reused with different content', 409);
+      }
+      return viewer.lastInput.receipt;
+    }
+    if (viewer.lastInput && sequence < viewer.lastInput.sequence) {
+      throw displayError('DISPLAY_INPUT_SEQUENCE_STALE', 'Input sequence is older than the viewer cursor', 409);
+    }
+    const now = this.now();
+    viewer.inputTimes = viewer.inputTimes.filter((timestamp) => timestamp > now - 1_000);
+    if (viewer.inputTimes.length >= MAX_DISPLAY_INPUT_EVENTS_PER_SECOND) {
+      throw displayError('DISPLAY_INPUT_RATE_LIMIT', 'Display input rate is too high', 429);
+    }
+    if (stream.inputEvents.length >= MAX_QUEUED_INPUT_EVENTS) {
+      const lossy = stream.inputEvents.findIndex((candidate) => (
+        candidate.event.kind === 'pointer' && candidate.event.action === 'move'
+      ));
+      if (lossy < 0) throw displayError('DISPLAY_INPUT_QUEUE_FULL', 'Display input queue is full', 429);
+      stream.inputEvents.splice(lossy, 1);
+    }
+    stream.controllerKey = viewerKey;
+    viewer.inputTimes.push(now);
+    stream.demandVersion += 1;
+    const acceptedAt = new Date(now).toISOString();
+    const queued = Object.freeze({ version: stream.demandVersion, sequence, event });
+    stream.inputEvents.push(queued);
+    const receipt = Object.freeze({ streamId, viewerId, sequence, accepted: true, acceptedAt });
+    viewer.lastInput = { sequence, digest, receipt };
+    this.#notifyDemand(stream);
+    return receipt;
   }
 
   waitForDemand(sessionId, workerId, streamId, after = 0, {
@@ -249,12 +378,14 @@ export class DisplayFrameStore {
     if (!Number.isSafeInteger(after) || after < 0) {
       throw displayError('INVALID_REQUEST', 'Demand cursor must be a non-negative integer');
     }
-    if (stream.demandVersion > after) return Promise.resolve(this.#demand(stream));
+    stream.inputEvents = stream.inputEvents.filter((event) => event.version > after);
+    if (stream.demandVersion > after) return Promise.resolve(this.#demand(stream, false, after));
     if (stream.waiters.size >= 4) {
       throw displayError('DISPLAY_DEMAND_LIMIT', 'Too many display demand requests are pending', 429);
     }
     return new Promise((resolve) => {
       const waiter = {
+        after,
         resolve: (value) => {
           clearTimeout(waiter.timer);
           signal?.removeEventListener('abort', waiter.abort);
@@ -268,7 +399,10 @@ export class DisplayFrameStore {
         resolve(null);
         return;
       }
-      waiter.timer = setTimeout(() => waiter.resolve(this.#demand(stream)), Math.max(1, Math.min(30_000, timeoutMs)));
+      waiter.timer = setTimeout(
+        () => waiter.resolve(this.#demand(stream, false, after)),
+        Math.max(1, Math.min(30_000, timeoutMs)),
+      );
       waiter.timer.unref?.();
       stream.waiters.add(waiter);
       signal?.addEventListener('abort', waiter.abort, { once: true });
@@ -318,6 +452,8 @@ export class DisplayFrameStore {
       height: stream.height,
       maxFrameBytes: this.maxFrameBytes,
       maxFps: MAX_DISPLAY_FPS,
+      inputProtocol: DISPLAY_INPUT_PROTOCOL,
+      maxInputEventsPerSecond: MAX_DISPLAY_INPUT_EVENTS_PER_SECOND,
     });
   }
 
@@ -337,20 +473,26 @@ export class DisplayFrameStore {
     return stream;
   }
 
-  #demand(stream, closed = false) {
+  #demand(stream, closed = false, after = 0) {
     return Object.freeze({
       streamId: stream.streamId,
       version: stream.demandVersion,
       interested: closed ? false : stream.interested,
       maxFps: closed || !stream.interested ? 0 : MAX_DISPLAY_FPS,
+      inputEvents: closed
+        ? []
+        : stream.inputEvents.filter((event) => event.version > after),
       closed,
     });
   }
 
   #sweep(stream) {
     const now = this.now();
-    for (const [viewerId, expiresAt] of stream.viewers) {
-      if (expiresAt <= now) stream.viewers.delete(viewerId);
+    for (const [viewerId, viewer] of stream.viewers) {
+      if (viewer.expiresAt <= now) {
+        stream.viewers.delete(viewerId);
+        this.#releaseController(stream, viewerId);
+      }
     }
     this.#recomputeDemand(stream);
   }
@@ -374,14 +516,37 @@ export class DisplayFrameStore {
     if (stream.interested === interested) return;
     stream.interested = interested;
     stream.demandVersion += 1;
-    const demand = this.#demand(stream);
-    for (const waiter of [...stream.waiters]) waiter.resolve(demand);
+    this.#notifyDemand(stream);
+  }
+
+  #notifyDemand(stream) {
+    for (const waiter of [...stream.waiters]) {
+      waiter.resolve(this.#demand(stream, false, waiter.after));
+    }
+  }
+
+  #releaseController(stream, viewerKey) {
+    if (stream.controllerKey !== viewerKey) return;
+    stream.controllerKey = null;
+    if (stream.inputEvents.length >= MAX_QUEUED_INPUT_EVENTS) {
+      const lossy = stream.inputEvents.findIndex((candidate) => (
+        candidate.event.kind === 'pointer' && candidate.event.action === 'move'
+      ));
+      stream.inputEvents.splice(lossy < 0 ? 0 : lossy, 1);
+    }
+    stream.demandVersion += 1;
+    stream.inputEvents.push(Object.freeze({
+      version: stream.demandVersion,
+      sequence: 0,
+      event: Object.freeze({ kind: 'reset' }),
+    }));
+    this.#notifyDemand(stream);
   }
 
   #scheduleExpiry(stream) {
     clearTimeout(stream.expiryTimer);
     stream.expiryTimer = null;
-    const deadlines = [...stream.viewers.values()];
+    const deadlines = [...stream.viewers.values()].map((viewer) => viewer.expiresAt);
     if (stream.viewers.size === 0 && stream.interested && stream.graceUntil) deadlines.push(stream.graceUntil);
     if (!deadlines.length) return;
     const delay = Math.max(1, Math.min(...deadlines) - this.now());
@@ -399,9 +564,10 @@ export class DisplayFrameStore {
     clearTimeout(stream.expiryTimer);
     stream.frames.length = 0;
     stream.viewers.clear();
+    stream.controllerKey = null;
+    stream.inputEvents.length = 0;
     stream.demandVersion += 1;
-    const closed = this.#demand(stream, true);
-    for (const waiter of [...stream.waiters]) waiter.resolve(closed);
+    for (const waiter of [...stream.waiters]) waiter.resolve(this.#demand(stream, true, waiter.after));
     for (const listener of stream.subscribers) {
       try { listener(null); } catch { /* Subscribers are lossy. */ }
     }
