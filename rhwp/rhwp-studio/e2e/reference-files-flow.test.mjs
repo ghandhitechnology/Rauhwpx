@@ -149,7 +149,7 @@ try {
     {
       BROWSER: 'none',
       VITE_RHWP_AGENT_URL: `ws://127.0.0.1:${hubPort}`,
-      VITE_RHWP_AGENT_TOKEN: hubToken,
+      RHWP_AGENT_TOKEN: hubToken,
     },
     path.join(logRoot, 'reference-files-e2e-vite.log'),
   );

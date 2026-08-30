@@ -49,8 +49,49 @@ export function detectReferenceImageMime(bytes) {
   return null;
 }
 
+async function boundedImageSource(bytes, filePath, name) {
+  if (bytes !== undefined && bytes !== null) {
+    const source = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
+    if (source.length > MAX_IMAGE_REFERENCE_BYTES) {
+      const error = new Error(`${name} exceeds the 20 MB image limit`);
+      error.code = 'REFERENCE_FILE_TOO_LARGE';
+      throw error;
+    }
+    return source;
+  }
+  const handle = await fs.open(filePath, 'r');
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.size > MAX_IMAGE_REFERENCE_BYTES) {
+      const error = new Error(`${name} exceeds the 20 MB image limit`);
+      error.code = 'REFERENCE_FILE_TOO_LARGE';
+      throw error;
+    }
+    const source = Buffer.allocUnsafe(stat.size);
+    let offset = 0;
+    while (offset < source.length) {
+      const { bytesRead } = await handle.read(source, offset, source.length - offset, offset);
+      if (bytesRead === 0) {
+        const error = new Error(`${name} changed while it was read`);
+        error.code = 'REFERENCE_TYPE_MISMATCH';
+        throw error;
+      }
+      offset += bytesRead;
+    }
+    const extra = Buffer.allocUnsafe(1);
+    if ((await handle.read(extra, 0, 1, source.length)).bytesRead !== 0) {
+      const error = new Error(`${name} changed while it was read`);
+      error.code = 'REFERENCE_TYPE_MISMATCH';
+      throw error;
+    }
+    return source;
+  } finally {
+    await handle.close();
+  }
+}
+
 export async function inspectReferenceImage({ bytes, filePath, name, mimeType }) {
-  const source = bytes ? Buffer.from(bytes) : await fs.readFile(filePath);
+  const source = await boundedImageSource(bytes, filePath, name);
   if (source.length === 0) {
     const error = new Error(`${name} is empty`);
     error.code = 'REFERENCE_FILE_EMPTY';

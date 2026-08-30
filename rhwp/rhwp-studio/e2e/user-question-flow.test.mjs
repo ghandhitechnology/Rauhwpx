@@ -13,7 +13,7 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
-import { issueScopedHubToken } from '../../rhwp-agent/hub-session-registry.mjs';
+import { registerHubSession } from '../../../desktop/agent-hub.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const studioRoot = path.resolve(__dirname, '..');
@@ -124,7 +124,7 @@ function connectQuestionProvider(hubPort, token, sessionId) {
     for (const [id, pending] of inflight) {
       clearTimeout(pending.timer);
       pending.resolve({
-        v: 4, type: 'tool-result', id, ok: false,
+        v: 5, type: 'tool-result', id, ok: false,
         error: { code: 'SOCKET_CLOSED', message: 'mock provider socket closed' },
       });
     }
@@ -145,7 +145,7 @@ function connectQuestionProvider(hubPort, token, sessionId) {
           reject(new Error(`blocked provider call timed out: ${tool}`));
         }, 90_000);
         inflight.set(id, { resolve, timer });
-        ws.send(JSON.stringify({ v: 4, type: 'tool-call', id, tool, args, ...context }));
+        ws.send(JSON.stringify({ v: 5, type: 'tool-call', id, tool, args, ...context }));
       });
     },
   };
@@ -207,7 +207,7 @@ try {
     {
       BROWSER: 'none',
       VITE_RHWP_AGENT_URL: `ws://127.0.0.1:${hubPort}`,
-      VITE_RHWP_AGENT_TOKEN: HUB_TOKEN,
+      RHWP_AGENT_TOKEN: HUB_TOKEN,
     },
     path.join(targetDir, 'vite.log'),
   );
@@ -245,7 +245,10 @@ try {
     const health = await (await fetch(`http://127.0.0.1:${hubPort}/healthz?token=${HUB_TOKEN}`)).json();
     const sessionId = health.sessions?.[0]?.sessionId;
     assert(Boolean(sessionId), 'Studio session registered with the hub');
-    provider = connectQuestionProvider(hubPort, issueScopedHubToken(HUB_TOKEN, sessionId), sessionId);
+    const capabilities = await registerHubSession({
+      port: hubPort, token: HUB_TOKEN, launchId: health.launchId, sessionId,
+    });
+    provider = connectQuestionProvider(hubPort, capabilities.mcp, sessionId);
     await provider.opened;
 
     const providerResult = provider.call('ask_user_question', {

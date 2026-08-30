@@ -8,10 +8,22 @@ import { createInterface } from 'node:readline';
 import test from 'node:test';
 import WebSocket from 'ws';
 
-import { issueScopedHubToken } from '../hub-session-registry.mjs';
+import { registerHubSession } from '../../../desktop/agent-hub.mjs';
 
 const TOKEN = 'hub-tenancy-test-token';
 const LAUNCH_ID = 'hub-tenancy-test-launch';
+const serverSource = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
+
+test('hub bounds Studio-bound calls retained across provider sockets', () => {
+  assert.match(serverSource, /const MAX_PENDING_STUDIO_TOOL_CALLS = 64/);
+  assert.match(serverSource, /record\.pendingCalls\.size >= MAX_PENDING_STUDIO_TOOL_CALLS/);
+  assert.match(serverSource, /TOO_MANY_INFLIGHT_CALLS/);
+  assert.match(serverSource, /Number\.isSafeInteger\(clientId\)/);
+  assert.match(serverSource, /INVALID_CALL_ID/);
+  assert.match(serverSource, /const MAX_STUDIO_QUEUED_FRAME_BYTES = 96 \* 1024 \* 1024/);
+  assert.match(serverSource, /queuedStudioBytes \+ frameBytes > MAX_STUDIO_QUEUED_FRAME_BYTES/);
+  assert.match(serverSource, /\.finally\(releaseStudioBudget\)/);
+});
 
 function waitForLine(stream, predicate, timeoutMs = 20_000) {
   return new Promise((resolve, reject) => {
@@ -74,7 +86,7 @@ function waitForMessage(socket, predicate, timeoutMs = 10_000) {
 }
 
 function sendFrame(socket, frame) {
-  socket.send(JSON.stringify({ v: 4, ...frame }));
+  socket.send(JSON.stringify({ v: 5, ...frame }));
 }
 
 async function closeSocket(socket) {
@@ -128,8 +140,14 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
   assert.equal(Number.isInteger(ready.port) && ready.port > 0, true);
 
   const wsBase = `ws://127.0.0.1:${ready.port}`;
-  const alphaToken = issueScopedHubToken(TOKEN, 'alpha');
-  const betaToken = issueScopedHubToken(TOKEN, 'beta');
+  const alphaCapabilities = await registerHubSession({
+    port: ready.port, token: TOKEN, launchId: LAUNCH_ID, sessionId: 'alpha',
+  });
+  const betaCapabilities = await registerHubSession({
+    port: ready.port, token: TOKEN, launchId: LAUNCH_ID, sessionId: 'beta',
+  });
+  const alphaToken = alphaCapabilities.studio;
+  const betaToken = betaCapabilities.studio;
   const httpBase = `http://127.0.0.1:${ready.port}`;
   const studioOrigin = 'rauhwpx://app';
   assert.equal(
@@ -188,7 +206,7 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
   const templateUpload = await fetch(`${httpBase}/templates?sessionId=alpha`, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${alphaToken}`,
+      Authorization: `Bearer ${alphaCapabilities.template}`,
       Origin: studioOrigin,
       'Content-Type': 'application/x-hwp',
       'X-File-Name': 'shared.hwp',
@@ -207,7 +225,7 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
   assert.equal((await alphaCatalogAdded).change.template.id, uploadedTemplate.id);
   assert.equal((await betaCatalogAdded).change.template.id, uploadedTemplate.id);
   const crossSessionTemplateRequest = await fetch(`${httpBase}/templates?sessionId=alpha`, {
-    headers: { Authorization: `Bearer ${betaToken}`, Origin: studioOrigin },
+    headers: { Authorization: `Bearer ${betaCapabilities.template}`, Origin: studioOrigin },
   });
   assert.equal(crossSessionTemplateRequest.status, 401);
 
@@ -218,13 +236,34 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
   const [alphaSession, betaSession] = await Promise.all([alphaStarted, betaStarted]);
   assert.equal(alphaSession.status, undefined);
   assert.equal(betaSession.status, undefined);
+  const [alphaProviderCapabilities, betaProviderCapabilities] = await Promise.all([
+    registerHubSession({
+      port: ready.port, token: TOKEN, launchId: LAUNCH_ID, sessionId: 'alpha',
+    }),
+    registerHubSession({
+      port: ready.port, token: TOKEN, launchId: LAUNCH_ID, sessionId: 'beta',
+    }),
+  ]);
+
+  assert.equal(
+    await rejectedUpgrade(
+      `${wsBase}/mcp?token=${alphaProviderCapabilities.mcp}&sessionId=alpha&agent=pi&role=chat`,
+    ),
+    401,
+  );
+  assert.equal(
+    await rejectedUpgrade(
+      `${wsBase}/mcp?token=${alphaProviderCapabilities.mcp}&sessionId=alpha&agent=claude&role=subagent`,
+    ),
+    401,
+  );
 
   const alphaTemplateChanged = waitForMessage(alpha, (msg) => msg.type === 'chat-template-changed');
   sendFrame(alpha, { type: 'chat-template-set', templateId: uploadedTemplate.id });
   assert.equal((await alphaTemplateChanged).template.id, uploadedTemplate.id);
 
-  const { socket: alphaMcp } = await openSocket(`${wsBase}/mcp?token=${alphaToken}&sessionId=alpha&agent=claude`);
-  const { socket: betaMcp } = await openSocket(`${wsBase}/mcp?token=${betaToken}&sessionId=beta&agent=claude`);
+  const { socket: alphaMcp } = await openSocket(`${wsBase}/mcp?token=${alphaProviderCapabilities.mcp}&sessionId=alpha&agent=claude`);
+  const { socket: betaMcp } = await openSocket(`${wsBase}/mcp?token=${betaProviderCapabilities.mcp}&sessionId=beta&agent=claude`);
   const instructionsToolRead = waitForMessage(alphaMcp, (msg) => msg.type === 'tool-result' && msg.id === 4);
   sendFrame(alphaMcp, {
     type: 'tool-call', id: 4, tool: 'read_agent_instructions', args: {},
@@ -330,7 +369,7 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
   assert.deepEqual((await betaResult).result, { owner: 'beta' });
 
   // Browser documents have no native source path. Studio exports the live bytes,
-  // the hub materializes them in alpha's isolated workspace, and the generated
+  // the hub materializes them in alpha's provider-read-only private storage, and the generated
   // result can be published as an authenticated download without leaking to beta.
   const snapshotBytes = readFileSync(new URL('../../saved/blank2010.hwp', import.meta.url));
   const snapshotRequest = waitForMessage(alpha, (msg) => (
@@ -353,6 +392,8 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
   assert.equal(materialized.documentId, 'doc-alpha');
   assert.equal(materialized.dirty, true);
   assert.equal(existsSync(materialized.path), true);
+  assert.ok(materialized.path.includes(`${path.sep}hub-storage${path.sep}`));
+  assert.equal(materialized.path.includes(`${path.sep}work${path.sep}`), false);
 
   const publishResult = waitForMessage(alphaMcp, (msg) => msg.type === 'tool-result' && msg.id === 10);
   sendFrame(alphaMcp, {
@@ -375,7 +416,7 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
   const crossSessionArtifactUrl = new URL(published.downloadUrl);
   crossSessionArtifactUrl.searchParams.set('sessionId', 'beta');
   crossSessionArtifactUrl.searchParams.set('token', betaToken);
-  assert.equal((await fetch(crossSessionArtifactUrl)).status, 404);
+  assert.equal((await fetch(crossSessionArtifactUrl)).status, 401);
 
   const alphaTemplateCleared = waitForMessage(alpha, (msg) => msg.type === 'chat-template-changed' && msg.reason === 'deleted');
   const betaTemplateCleared = waitForMessage(beta, (msg) => msg.type === 'chat-template-changed' && msg.reason === 'deleted');
@@ -383,7 +424,7 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
   const betaCatalogDeleted = waitForMessage(beta, (msg) => msg.type === 'templates-catalog' && msg.change?.type === 'deleted');
   const templateDelete = await fetch(`${httpBase}/templates/${uploadedTemplate.id}?sessionId=alpha`, {
     method: 'DELETE',
-    headers: { Authorization: `Bearer ${alphaToken}`, Origin: studioOrigin },
+    headers: { Authorization: `Bearer ${alphaCapabilities.template}`, Origin: studioOrigin },
   });
   assert.equal(templateDelete.status, 200);
   await Promise.all([alphaTemplateCleared, betaTemplateCleared, alphaCatalogDeleted, betaCatalogDeleted]);
@@ -392,7 +433,7 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
   assert.equal(recordDirectories.length, 2);
   assert.equal(recordDirectories.every((directory) => {
     const entries = readdirSync(path.join(workRoot, 'sessions', directory));
-    return entries.includes('home') && entries.includes('work');
+    return entries.includes('home') && entries.includes('work') && entries.includes('hub-storage');
   }), true);
   const alphaClosed = Promise.all([once(alpha, 'close'), once(alphaMcp, 'close')]);
   const deleted = await fetch(`${httpBase}/sessions/alpha`, {
@@ -403,7 +444,7 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
   await alphaClosed;
   assert.equal(beta.readyState, WebSocket.OPEN);
   assert.equal(betaMcp.readyState, WebSocket.OPEN);
-  assert.equal(readdirSync(path.join(workRoot, 'sessions')).length, 1);
+  assert.equal(readdirSync(path.join(workRoot, 'sessions')).length, 1, stderr);
 
   const betaRequestAfterClose = waitForMessage(beta, (msg) => msg.type === 'tool-request');
   const betaResultAfterClose = waitForMessage(betaMcp, (msg) => msg.type === 'tool-result' && msg.id === 8);
@@ -439,6 +480,7 @@ test('owner watchdog disposes the hub when its desktop owner exits', { timeout: 
       RHWP_AGENT_TOKEN: TOKEN,
       RHWP_LAUNCH_ID: `${LAUNCH_ID}-owner`,
       RHWP_OWNER_PID: String(owner.pid),
+      RHWP_ORPHAN_IDLE_SHUTDOWN_MS: '250',
       RHWP_WORK_DIR: workRoot,
       RHWP_AGENT_INSTRUCTIONS_DIR: path.join(workRoot, 'agent-instructions'),
       RHWP_OWN_WORK_DIR: '1',
@@ -456,6 +498,58 @@ test('owner watchdog disposes the hub when its desktop owner exits', { timeout: 
   owner.kill('SIGTERM');
   await waitForExit(owner);
   const [code, signal] = await waitForExit(hub);
+  assert.equal(code, 0);
+  assert.equal(signal, null);
+  assert.equal(existsSync(workRoot), false);
+});
+
+test('owner watchdog has an absolute deadline even while an orphan socket stays connected', { timeout: 20_000 }, async (t) => {
+  const workRoot = mkdtempSync(path.join(os.tmpdir(), 'rhwp-hub-orphan-deadline-'));
+  const owner = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  const hub = spawn(process.execPath, ['server.mjs'], {
+    cwd: new URL('..', import.meta.url),
+    env: {
+      ...process.env,
+      NODE_ENV: 'production',
+      RHWP_AGENT_PORT: '0',
+      RHWP_AGENT_TOKEN: TOKEN,
+      RHWP_LAUNCH_ID: `${LAUNCH_ID}-orphan-deadline`,
+      RHWP_OWNER_PID: String(owner.pid),
+      RHWP_ORPHAN_IDLE_SHUTDOWN_MS: '200',
+      RHWP_ORPHAN_HARD_SHUTDOWN_MS: '700',
+      RHWP_WORK_DIR: workRoot,
+      RHWP_AGENT_INSTRUCTIONS_DIR: path.join(workRoot, 'agent-instructions'),
+      RHWP_OWN_WORK_DIR: '1',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let socket = null;
+  t.after(async () => {
+    await closeSocket(socket).catch(() => {});
+    if (owner.exitCode === null) owner.kill('SIGTERM');
+    if (hub.exitCode === null) hub.kill('SIGTERM');
+    if (hub.exitCode === null) await waitForExit(hub).catch(() => {});
+    rmSync(workRoot, { recursive: true, force: true });
+  });
+
+  const readyLine = await waitForLine(hub.stdout, (line) => line.startsWith('RHWP_HUB_READY '));
+  const ready = JSON.parse(readyLine.slice('RHWP_HUB_READY '.length));
+  const capabilities = await registerHubSession({
+    port: ready.port,
+    token: TOKEN,
+    launchId: `${LAUNCH_ID}-orphan-deadline`,
+    sessionId: 'orphan-deadline',
+  });
+  const opened = await openSocket(
+    `ws://127.0.0.1:${ready.port}/studio?token=${capabilities.studio}&sessionId=orphan-deadline`,
+    { origin: 'rauhwpx://app' },
+  );
+  socket = opened.socket;
+  await opened.firstMessage;
+
+  owner.kill('SIGTERM');
+  await waitForExit(owner);
+  const [code, signal] = await waitForExit(hub, 5_000);
   assert.equal(code, 0);
   assert.equal(signal, null);
   assert.equal(existsSync(workRoot), false);

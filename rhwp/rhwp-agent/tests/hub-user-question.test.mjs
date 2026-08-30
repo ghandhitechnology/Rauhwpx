@@ -9,6 +9,7 @@ import test from 'node:test';
 import WebSocket from 'ws';
 
 const TOKEN = 'hub-user-question-test-token';
+const LAUNCH_ID = 'hub-user-question-test-launch';
 
 function waitForLine(stream, predicate, timeoutMs = 20_000) {
   return new Promise((resolve, reject) => {
@@ -26,7 +27,25 @@ function waitForLine(stream, predicate, timeoutMs = 20_000) {
   });
 }
 
+async function registerSession(port, sessionId) {
+  const registration = await fetch(
+    `http://127.0.0.1:${port}/sessions/${encodeURIComponent(sessionId)}`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        'X-Rhwp-Launch-Id': LAUNCH_ID,
+      },
+    },
+  );
+  assert.equal(registration.status, 200);
+  return registration.json();
+}
+
 async function openClient(url) {
+  const parsedUrl = new URL(url);
+  const sessionId = parsedUrl.searchParams.get('sessionId');
+  if (sessionId) await registerSession(parsedUrl.port, sessionId);
   const socket = new WebSocket(url);
   const buffered = [];
   const waiters = [];
@@ -63,8 +82,20 @@ async function openClient(url) {
   };
 }
 
+function rejectedUpgrade(url) {
+  return new Promise((resolve, reject) => {
+    const socket = new WebSocket(url);
+    socket.once('unexpected-response', (_request, response) => {
+      response.resume();
+      resolve(response.statusCode);
+    });
+    socket.once('open', () => reject(new Error('WebSocket upgrade unexpectedly succeeded')));
+    socket.once('error', () => {});
+  });
+}
+
 function sendFrame(client, frame) {
-  client.socket.send(JSON.stringify({ v: 4, ...frame }));
+  client.socket.send(JSON.stringify({ v: 5, ...frame }));
 }
 
 async function closeClient(client) {
@@ -74,8 +105,43 @@ async function closeClient(client) {
   await closed;
 }
 
-async function startHub(t, { fakeCursor = false, cursorQuestionDelayMs = 0 } = {}) {
+function prepareFakePi(root) {
+  const packageDir = path.join(root, 'prefix', 'node_modules', '@earendil-works', 'pi-coding-agent');
+  const binDir = path.join(root, 'prefix', 'node_modules', '.bin');
+  mkdirSync(packageDir, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  writeFileSync(path.join(packageDir, 'package.json'), JSON.stringify({ version: '0.0.0-test' }));
+  writeFileSync(path.join(root, 'config.json'), JSON.stringify({
+    version: 1,
+    installedVersion: '0.0.0-test',
+    models: [{
+      id: 'mock-model', name: 'Mock model', reasoning: false, supportsImages: false,
+      efforts: [], defaultEffort: null, contextLength: 8_192,
+      pricing: { prompt: 0, completion: 0 },
+    }],
+    defaultModelId: 'mock-model',
+  }));
+  const agentDir = path.join(root, 'agent');
+  mkdirSync(agentDir, { recursive: true });
+  writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify({
+    providers: { openrouter: { apiKey: 'test-placeholder-key' } },
+  }));
+  const fake = path.join(binDir, process.platform === 'win32' ? 'pi.cmd' : 'pi');
+  if (process.platform === 'win32') {
+    writeFileSync(fake, '@echo off\r\nnode -e "setInterval(() =^> {}, 1000)"\r\n');
+  } else {
+    writeFileSync(
+      fake,
+      `#!/bin/sh\nexec "${process.execPath}" -e 'setInterval(() => {}, 1000)'\n`,
+      { mode: 0o755 },
+    );
+  }
+}
+
+async function startHub(t, { fakeCursor = false, fakePi = false, cursorQuestionDelayMs = 0 } = {}) {
   const workRoot = mkdtempSync(path.join(os.tmpdir(), 'rhwp-hub-user-question-'));
+  const piRoot = path.join(workRoot, 'pi');
+  if (fakePi) prepareFakePi(piRoot);
   let testPath = process.env.PATH;
   if (fakeCursor) {
     const binDir = path.join(workRoot, 'bin');
@@ -115,9 +181,10 @@ async function startHub(t, { fakeCursor = false, cursorQuestionDelayMs = 0 } = {
       NODE_ENV: 'test',
       RHWP_AGENT_PORT: '0',
       RHWP_AGENT_TOKEN: TOKEN,
-      RHWP_LAUNCH_ID: 'hub-user-question-test-launch',
+      RHWP_LAUNCH_ID: LAUNCH_ID,
       RHWP_WORK_DIR: workRoot,
       RHWP_TEMPLATES_DIR: path.join(workRoot, 'templates'),
+      ...(fakePi ? { RHWP_PI_DIR: piRoot } : {}),
       PATH: testPath,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -271,13 +338,13 @@ test('a correlated root provider event authorizes MCP even when its socket call 
 });
 
 test('direct MCP questions survive Studio reload and settle atomically', { timeout: 40_000 }, async (t) => {
-  const { port, stderr } = await startHub(t);
+  const { port, stderr } = await startHub(t, { fakePi: true });
   const studioUrl = `ws://127.0.0.1:${port}/studio?token=${TOKEN}&sessionId=question-session`;
   const studio = await openClient(`${studioUrl}&instance=page-1`);
   await studio.next((frame) => frame.type === 'welcome');
-  await startRunningChat(studio);
+  await startRunningChat(studio, 'pi');
 
-  const mcp = await openClient(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=question-session&agent=rau&role=chat`);
+  const mcp = await openClient(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=question-session&agent=pi&role=chat`);
   t.after(() => closeClient(mcp));
   sendFrame(mcp, {
     type: 'tool-call', id: 17, tool: 'ask_user_question', args: questionArgs(), workflow: 'direct',
@@ -338,7 +405,7 @@ test('direct MCP questions survive Studio reload and settle atomically', { timeo
     answers: { format: { selectedOptionIds: ['option-2'] } },
   });
   assert.deepEqual(toolResult, {
-    v: 4,
+    v: 5,
     type: 'tool-result',
     id: 17,
     ok: true,
@@ -354,21 +421,27 @@ test('direct MCP questions survive Studio reload and settle atomically', { timeo
   assert.doesNotMatch(stderr(), /response-valid|option-2/);
 });
 
-test('root-scope violations fail and MCP disconnect expires the active question', { timeout: 40_000 }, async (t) => {
-  const { port } = await startHub(t, { fakeCursor: true });
+test('URL agent and role spoofing cannot bypass root question correlation', { timeout: 40_000 }, async (t) => {
+  const { port } = await startHub(t);
   const studio = await openClient(`ws://127.0.0.1:${port}/studio?token=${TOKEN}&sessionId=question-loss&instance=page-1`);
   t.after(() => closeClient(studio));
   await studio.next((frame) => frame.type === 'welcome');
-  await startRunningChat(studio, 'cursor');
+  await startRunningChat(studio, 'claude');
 
-  const subagent = await openClient(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=question-loss&agent=claude&role=subagent`);
+  const subagent = await openClient(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=question-loss&agent=claude&role=chat`);
   sendFrame(subagent, {
-    type: 'tool-call', id: 20, tool: 'ask_user_question', args: questionArgs(), workflow: 'direct',
+    type: 'tool-call', id: 20, tool: 'ask_user_question', args: questionArgs(),
+    workflow: 'direct', parentTaskId: 'child-task',
   });
   const rejected = await subagent.next((frame) => frame.type === 'tool-result' && frame.id === 20);
   assert.equal(rejected.ok, false);
   assert.equal(rejected.error.code, 'ROOT_INTERACTION_REQUIRED');
   await closeClient(subagent);
+
+  assert.equal(
+    await rejectedUpgrade(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=question-loss&agent=pi&role=chat`),
+    401,
+  );
 
   const unknownRoot = await openClient(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=question-loss&agent=claude&role=chat`);
   sendFrame(unknownRoot, {
@@ -378,8 +451,17 @@ test('root-scope violations fail and MCP disconnect expires the active question'
   assert.equal(unknown.ok, false);
   assert.equal(unknown.error.code, 'CALLER_SCOPE_UNKNOWN');
   await closeClient(unknownRoot);
+});
 
-  const mcp = await openClient(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=question-loss&agent=pi&role=chat`);
+test('a legitimate Pi root question expires on disconnect or a missing Studio', { timeout: 40_000 }, async (t) => {
+  const { port } = await startHub(t, { fakePi: true });
+  const sessionId = 'question-pi-disconnect';
+  const studio = await openClient(`ws://127.0.0.1:${port}/studio?token=${TOKEN}&sessionId=${sessionId}&instance=page-1`);
+  await studio.next((frame) => frame.type === 'welcome');
+  await startRunningChat(studio, 'pi');
+  const registration = await registerSession(port, sessionId);
+
+  const mcp = await openClient(`ws://127.0.0.1:${port}/mcp?token=${registration.capabilities.mcp}&sessionId=${sessionId}&agent=pi&role=chat`);
   sendFrame(mcp, {
     type: 'tool-call', id: 22, tool: 'ask_user_question', args: questionArgs(), workflow: 'direct',
   });
@@ -392,7 +474,7 @@ test('root-scope violations fail and MCP disconnect expires the active question'
   assert.deepEqual(resolved.outcome, { status: 'expired', reason: 'provider-disconnected' });
 
   await closeClient(studio);
-  const disconnected = await openClient(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=question-loss&agent=pi&role=chat`);
+  const disconnected = await openClient(`ws://127.0.0.1:${port}/mcp?token=${registration.capabilities.mcp}&sessionId=${sessionId}&agent=pi&role=chat`);
   t.after(() => closeClient(disconnected));
   sendFrame(disconnected, {
     type: 'tool-call', id: 23, tool: 'ask_user_question', args: questionArgs(), workflow: 'direct',
@@ -404,12 +486,12 @@ test('root-scope violations fail and MCP disconnect expires the active question'
 
 for (const stopType of ['chat-interrupt', 'chat-stop']) {
   test(`${stopType} cancels an active question`, { timeout: 40_000 }, async (t) => {
-    const { port } = await startHub(t);
+    const { port } = await startHub(t, { fakePi: true });
     const sessionId = `question-${stopType}`;
     const studio = await openClient(`ws://127.0.0.1:${port}/studio?token=${TOKEN}&sessionId=${sessionId}&instance=page-1`);
     t.after(() => closeClient(studio));
     await studio.next((frame) => frame.type === 'welcome');
-    await startRunningChat(studio);
+    await startRunningChat(studio, 'pi');
 
     const mcp = await openClient(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=${sessionId}&agent=pi&role=chat`);
     t.after(() => closeClient(mcp));
@@ -431,11 +513,11 @@ for (const stopType of ['chat-interrupt', 'chat-stop']) {
 }
 
 test('hub shutdown expires an active question before closing transports', { timeout: 40_000 }, async (t) => {
-  const { port } = await startHub(t);
+  const { port } = await startHub(t, { fakePi: true });
   const sessionId = 'question-hub-shutdown';
   const studio = await openClient(`ws://127.0.0.1:${port}/studio?token=${TOKEN}&sessionId=${sessionId}&instance=page-1`);
   await studio.next((frame) => frame.type === 'welcome');
-  await startRunningChat(studio);
+  await startRunningChat(studio, 'pi');
 
   const mcp = await openClient(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=${sessionId}&agent=pi&role=chat`);
   sendFrame(mcp, {

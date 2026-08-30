@@ -35,6 +35,13 @@ import {
   isAgentWorkflow,
   isStructuredPlan,
 } from './types.ts';
+import {
+  ERROR_RESPONSE_MAX_BYTES,
+  STRUCTURED_RESPONSE_MAX_BYTES,
+  TEMPLATE_DOCUMENT_MAX_BYTES,
+  cancelResponseBody,
+  readResponseBytesWithLimit,
+} from '../core/document-input-limits.ts';
 import type {
   AgentBridgeDeps,
   AgentBridgeOptions,
@@ -117,8 +124,8 @@ export interface AgentBridge {
   installAgent(agent: AgentName): Promise<AgentSetupStatusMap | null>;
   authenticateAgent(agent: AgentName, method: AgentAuthMethod, key?: string): Promise<AgentSetupAuthStart | null>;
   /** 브라우저 로그인 뒤 받은 인증 코드를 진행 중인 CLI 로그인에 전달한다. */
-  submitAgentAuthCode(agent: AgentName, code: string): void;
-  cancelAgentSetup(agent: AgentName): void;
+  submitAgentAuthCode(agent: AgentName, authRunId: string, code: string): void;
+  cancelAgentSetup(agent: AgentName, authRunId: string): void;
   /** 이 기기의 Rau 키만 지운다. 호스티드 $5 키는 서버에 남는다. */
   disconnectAgent(agent: AgentName): Promise<AgentSetupStatusMap | null>;
   /** 누적 사용량 요약. 응답이 없으면 null. */
@@ -707,7 +714,14 @@ function readAgentSetupStatus(value: unknown, agent: AgentName): AgentSetupStatu
     authenticated: src['authenticated'] === true,
     authMethod,
     keyTail: typeof src['keyTail'] === 'string' ? src['keyTail'] : null,
+    account: typeof src['account'] === 'string' ? src['account'] : null,
     authenticating: src['authenticating'] === true,
+    authOwnedByThisSession: src['authOwnedByThisSession'] === true,
+    ...(typeof src['authRunId'] === 'string' ? { authRunId: src['authRunId'] } : {}),
+    ...(typeof src['authPhase'] === 'string' ? { authPhase: src['authPhase'] } : {}),
+    ...(typeof src['authUrl'] === 'string' ? { authUrl: src['authUrl'] } : {}),
+    ...(typeof src['pairingCode'] === 'string' ? { pairingCode: src['pairingCode'] } : {}),
+    ...(typeof src['expiresAt'] === 'string' ? { authExpiresAt: src['expiresAt'] } : {}),
     setupComplete: src['setupComplete'] === true,
     ...(src['exhausted'] === true ? { exhausted: true } : {}),
     latestVersion: typeof src['latestVersion'] === 'string' ? src['latestVersion'] : null,
@@ -986,6 +1000,8 @@ class AgentBridgeImpl implements AgentBridge {
 
   private url = '';
   private token = '';
+  private referenceToken = '';
+  private templateToken = '';
   private sessionId = '';
   private httpBaseUrl = '';
   private readonly options?: AgentBridgeOptions;
@@ -1127,6 +1143,8 @@ class AgentBridgeImpl implements AgentBridge {
     const context = await resolveRendererSessionContext(undefined, {
       hubUrl: this.options?.url,
       hubToken: this.options?.token,
+      referenceToken: this.options?.referenceToken,
+      templateToken: this.options?.templateToken,
       launchId: this.options?.launchId,
       sessionId: this.options?.sessionId,
     });
@@ -1149,6 +1167,8 @@ class AgentBridgeImpl implements AgentBridge {
     this.url = websocketHubUrl(context.hubUrl);
     this.httpBaseUrl = httpHubUrl(context.hubUrl);
     this.token = context.hubToken;
+    this.referenceToken = context.referenceToken;
+    this.templateToken = context.templateToken;
     if (this.sessionId !== context.sessionId) {
       this.sessionId = context.sessionId;
       this.restorePendingQuestionCancellation();
@@ -2043,7 +2063,10 @@ class AgentBridgeImpl implements AgentBridge {
         if (typeof msg.requestId === 'string') {
           this.requests.settle(msg.requestId, agent ? {
             agent,
+            authRunId: typeof msg.authRunId === 'string' ? msg.authRunId : '',
             authUrl: typeof msg.authUrl === 'string' ? msg.authUrl : null,
+            pairingCode: typeof msg.pairingCode === 'string' ? msg.pairingCode : null,
+            expiresAt: typeof msg.expiresAt === 'string' ? msg.expiresAt : null,
           } satisfies AgentSetupAuthStart : null);
         }
         break;
@@ -2057,6 +2080,7 @@ class AgentBridgeImpl implements AgentBridge {
         this.emit({
           type: 'agent-setup-progress',
           agent: msg.agent,
+          ...(typeof msg.authRunId === 'string' ? { authRunId: msg.authRunId } : {}),
           state,
           ...(typeof msg.phase === 'string' ? { phase: msg.phase } : {}),
           ...(typeof msg.percent === 'number' && Number.isFinite(msg.percent)
@@ -2065,6 +2089,8 @@ class AgentBridgeImpl implements AgentBridge {
           ...(typeof msg.detail === 'string' ? { detail: msg.detail } : {}),
           ...(typeof msg.authUrl === 'string' ? { authUrl: msg.authUrl } : {}),
           ...(typeof msg.userCode === 'string' ? { userCode: msg.userCode } : {}),
+          ...(typeof msg.pairingCode === 'string' ? { pairingCode: msg.pairingCode } : {}),
+          ...(typeof msg.expiresAt === 'string' ? { expiresAt: msg.expiresAt } : {}),
           ...(msg.activity === true ? { activity: true } : {}),
           ...(typeof msg.receivedBytes === 'number' ? { receivedBytes: msg.receivedBytes } : {}),
           ...(typeof msg.totalBytes === 'number' ? { totalBytes: msg.totalBytes } : {}),
@@ -2076,6 +2102,7 @@ class AgentBridgeImpl implements AgentBridge {
         this.emit({
           type: 'agent-setup-error',
           agent: isAgentName(msg.agent) ? msg.agent : null,
+          ...(typeof msg.authRunId === 'string' ? { authRunId: msg.authRunId } : {}),
           code: typeof msg.code === 'string' ? msg.code : 'AGENT_SETUP_FAILED',
           message: typeof msg.message === 'string' ? msg.message : 'Agent setup failed',
         });
@@ -2614,10 +2641,14 @@ class AgentBridgeImpl implements AgentBridge {
   private async referenceFetch(pathname: string, init?: RequestInit): Promise<unknown> {
     let response: Response;
     try {
+      const requestUrl = new URL(pathname, `${this.httpBaseUrl}/`);
+      const capability = requestUrl.pathname === '/templates' || requestUrl.pathname.startsWith('/templates/')
+        ? this.templateToken
+        : this.referenceToken;
       response = await fetch(pathname, {
         ...init,
         headers: {
-          Authorization: `Bearer ${this.token}`,
+          Authorization: `Bearer ${capability}`,
           ...init?.headers,
         },
       });
@@ -2625,16 +2656,21 @@ class AgentBridgeImpl implements AgentBridge {
       throw new Error(`참고자료 서버에 연결하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`);
     }
     const contentType = response.headers.get('content-type') ?? '';
+    const responseBytes = await readResponseBytesWithLimit(
+      response,
+      response.ok ? STRUCTURED_RESPONSE_MAX_BYTES : ERROR_RESPONSE_MAX_BYTES,
+      response.ok ? '참고자료 응답' : '참고자료 오류 응답',
+    );
+    const responseText = new TextDecoder().decode(responseBytes);
     let payload: unknown = null;
     if (contentType.includes('application/json')) {
       try {
-        payload = await response.json();
+        payload = responseText.trim() ? JSON.parse(responseText) : null;
       } catch {
         payload = null;
       }
     } else {
-      const text = await response.text();
-      payload = text ? { message: text } : null;
+      payload = responseText ? { message: responseText } : null;
     }
     if (!response.ok) {
       const body = payload && typeof payload === 'object' ? payload as any : null;
@@ -2729,18 +2765,23 @@ class AgentBridgeImpl implements AgentBridge {
 
   private async downloadTemplateBytes(template: DocumentTemplate): Promise<Uint8Array> {
     const response = await fetch(this.referenceUrl(`/templates/${encodeURIComponent(template.id)}/content`), {
-      headers: { Authorization: `Bearer ${this.token}` },
+      headers: { Authorization: `Bearer ${this.templateToken}` },
     });
-    if (!response.ok) throw new AgentToolError('TEMPLATE_UNAVAILABLE', `Template ${template.name} is unavailable.`);
+    if (!response.ok) {
+      await cancelResponseBody(response, `HTTP ${response.status}`);
+      throw new AgentToolError('TEMPLATE_UNAVAILABLE', `Template ${template.name} is unavailable.`);
+    }
     const revisionHeader = response.headers.get('x-template-revision');
     const revision = revisionHeader === null ? Number.NaN : Number(revisionHeader);
     if (!Number.isSafeInteger(revision)) {
+      await cancelResponseBody(response, 'invalid-template-revision');
       throw new AgentToolError('TEMPLATE_UNAVAILABLE', `Template ${template.name} did not return a readable revision.`);
     }
     if (revision !== template.revision) {
+      await cancelResponseBody(response, 'template-revision-mismatch');
       throw new AgentToolError('TEMPLATE_REVISION_MISMATCH', `Template revision ${revision} does not match ${template.revision}; inspect it again.`);
     }
-    return new Uint8Array(await response.arrayBuffer());
+    return readResponseBytesWithLimit(response, TEMPLATE_DOCUMENT_MAX_BYTES, '템플릿');
   }
 
   async uploadReference(scope: ReferenceScope, scopeId: string, file: File): Promise<ReferenceFile> {
@@ -3073,12 +3114,12 @@ class AgentBridgeImpl implements AgentBridge {
     );
   }
 
-  submitAgentAuthCode(agent: AgentName, code: string): void {
-    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'agent-setup-auth-code', agent, code });
+  submitAgentAuthCode(agent: AgentName, authRunId: string, code: string): void {
+    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'agent-setup-auth-code', agent, authRunId, code });
   }
 
-  cancelAgentSetup(agent: AgentName): void {
-    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'agent-setup-cancel', agent });
+  cancelAgentSetup(agent: AgentName, authRunId: string): void {
+    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'agent-setup-cancel', agent, authRunId });
   }
 
   disconnectAgent(agent: AgentName): Promise<AgentSetupStatusMap | null> {

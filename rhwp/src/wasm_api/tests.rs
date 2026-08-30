@@ -2189,6 +2189,7 @@ fn deferred_cell_replace_applies_ime_atomically() {
     }
 
     let mut doc = create_doc_with_table();
+    doc.begin_batch_native().expect("begin event capture");
     doc.insert_text_in_cell_native_deferred_pagination(0, 0, 0, 0, 0, 2, "ㅎ")
         .expect("seed composition");
     doc.build_page_render_tree(0).expect("warm page tree");
@@ -2291,6 +2292,11 @@ fn deferred_cell_replace_preserves_clickhere_range_and_offsets() {
     legacy
         .insert_click_here_field_at_in_cell(0, 0, 0, 0, 0, 2, false, "안내", "메모", "이름", true)
         .expect("insert legacy empty ClickHere");
+    doc.begin_batch_native()
+        .expect("begin atomic event capture");
+    legacy
+        .begin_batch_native()
+        .expect("begin legacy event capture");
     doc.insert_text_in_cell_native_deferred_pagination(0, 0, 0, 0, 0, 2, "ㅎ")
         .expect("seed field composition");
     legacy
@@ -2733,6 +2739,7 @@ fn test_delete_text_in_cell() {
 #[test]
 fn test_table_transpose_clipboard_native_api() {
     let mut doc = create_doc_with_table();
+    doc.begin_batch_native().expect("begin event capture");
     assert!(!doc.has_table_transpose_clipboard_native());
 
     let copy = doc
@@ -21663,20 +21670,14 @@ fn create_editable_doc() -> HwpDocument {
 }
 
 #[test]
-fn test_single_command_emits_event() {
+fn test_single_command_updates_document_without_retaining_event_payload() {
     let mut doc = create_editable_doc();
     assert!(doc.event_log.is_empty());
 
     let result = doc.insert_text_native(0, 0, 0, "Hello");
     assert!(result.is_ok(), "insert_text_native failed: {:?}", result);
-    assert_eq!(doc.event_log.len(), 1);
-
-    let json = doc.event_log[0].to_json();
-    assert!(json.contains("\"type\":\"TextInserted\""));
-    assert!(json.contains("\"section\":0"));
-    assert!(json.contains("\"para\":0"));
-    assert!(json.contains("\"offset\":0"));
-    assert!(json.contains("\"len\":5"));
+    assert!(doc.event_log.is_empty());
+    assert_eq!(doc.get_text_range_native(0, 0, 0, 5).unwrap(), "Hello");
 }
 
 #[test]
@@ -21751,6 +21752,7 @@ fn test_batch_multiple_edit_types() {
 #[test]
 fn test_serialize_event_log_format() {
     let mut doc = create_editable_doc();
+    doc.begin_batch_native().unwrap();
     let r = doc.insert_text_native(0, 0, 0, "A");
     assert!(r.is_ok(), "insert failed: {:?}", r);
 

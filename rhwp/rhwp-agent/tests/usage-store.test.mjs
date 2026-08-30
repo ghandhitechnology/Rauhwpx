@@ -283,3 +283,50 @@ test('record ignores unknown agents and normalizes missing fields', async () => 
   await store.flush();
   await fs.rm(rootDir, { recursive: true, force: true });
 });
+
+test('startup reads only a bounded log tail and rewrites the retained events', async () => {
+  const rootDir = await tmpRoot();
+  const time = clock();
+  const writer = await createUsageStore({ rootDir, now: time.now }).init();
+  for (let index = 0; index < 10; index += 1) {
+    writer.record({ agent: 'codex', model: `m${index}`, inputTokens: 1 });
+    time.advance(1);
+  }
+  await writer.flush();
+  const logPath = path.join(rootDir, 'events.jsonl');
+  const lines = (await fs.readFile(logPath, 'utf8')).trim().split('\n');
+  const tailBytes = Buffer.byteLength(`${lines.slice(-3).join('\n')}\n`) + 8;
+
+  const reopened = await createUsageStore({
+    rootDir,
+    now: time.now,
+    maxLogBytes: tailBytes,
+  }).init();
+  assert.ok(reopened.summary().providers.codex.week.turns <= 3);
+  assert.ok((await fs.readFile(logPath, 'utf8')).trim().split('\n').length <= 3);
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('long-running recording compacts by count and age without a restart', async () => {
+  const rootDir = await tmpRoot();
+  const time = clock();
+  const store = await createUsageStore({
+    rootDir,
+    now: time.now,
+    maxEvents: 3,
+    retentionMs: 1_000,
+    pruneIntervalMs: 0,
+  }).init();
+  for (let index = 0; index < 5; index += 1) {
+    store.record({ agent: 'claude', model: `m${index}`, inputTokens: 1 });
+    time.advance(1);
+  }
+  assert.equal(store.summary().providers.claude.week.turns, 3);
+
+  time.advance(2_000);
+  store.record({ agent: 'claude', model: 'fresh', inputTokens: 1 });
+  assert.equal(store.summary().providers.claude.week.turns, 1);
+  await store.flush();
+  assert.equal((await fs.readFile(path.join(rootDir, 'events.jsonl'), 'utf8')).trim().split('\n').length, 1);
+  await fs.rm(rootDir, { recursive: true, force: true });
+});

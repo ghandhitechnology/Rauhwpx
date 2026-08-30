@@ -4055,7 +4055,7 @@ fn resource_from_value(v: &Value, default_id: u16) -> Result<Option<BinDataConte
         .map_err(|e| format!("invalid image bytesBase64: {e}"))?;
     Ok(Some(BinDataContent {
         id,
-        data: BinDataBytes::Loaded(bytes),
+        data: BinDataBytes::from(bytes),
         extension,
     }))
 }
@@ -6711,7 +6711,7 @@ mod tests {
 
         let resource = |bytes: &[u8]| BinDataContent {
             id: 1,
-            data: BinDataBytes::Loaded(bytes.to_vec()),
+            data: BinDataBytes::from(bytes.to_vec()),
             extension: "png".into(),
         };
         let (br, cr, ir) = (
@@ -6762,7 +6762,7 @@ mod tests {
         let mut c = b.clone();
         c.bin_data_content.push(BinDataContent {
             id: 1,
-            data: BinDataBytes::Loaded(b"current".to_vec()),
+            data: BinDataBytes::from(b"current".to_vec()),
             extension: "png".into(),
         });
         c.sections[0].paragraphs[0]
@@ -6777,7 +6777,7 @@ mod tests {
         let mut i = b.clone();
         i.bin_data_content.push(BinDataContent {
             id: 1,
-            data: BinDataBytes::Loaded(b"incoming".to_vec()),
+            data: BinDataBytes::from(b"incoming".to_vec()),
             extension: "png".into(),
         });
         i.sections[0].paragraphs[0]

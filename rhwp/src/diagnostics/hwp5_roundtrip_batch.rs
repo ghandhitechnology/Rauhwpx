@@ -36,7 +36,7 @@ use crate::serializer::serialize_document;
 /// 배치 중 단일 파일 패닉이 전체를 중단시키지 않도록 `catch_unwind` 로 격리.
 fn page_count_of(bytes: &[u8]) -> Option<u32> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        DocumentCore::from_bytes(bytes)
+        DocumentCore::from_local_file_bytes(bytes)
             .ok()
             .map(|dc| dc.page_count())
     }))
@@ -264,7 +264,7 @@ fn roundtrip_one(path: &Path, rel_path: &str, rt_path: &Path) -> RoundtripRow {
         row
     };
 
-    let bytes = match fs::read(path) {
+    let bytes = match crate::parser::limits::read_local_file_once(path) {
         Ok(b) => b,
         Err(e) => {
             row.error = format!("읽기 실패: {e}");
@@ -285,7 +285,7 @@ fn roundtrip_one(path: &Path, rel_path: &str, rt_path: &Path) -> RoundtripRow {
         return finish(row, started);
     }
 
-    let doc1 = match parse_document(&bytes) {
+    let doc1 = match crate::parser::parse_document_from_local_file(&bytes) {
         Ok(d) => d,
         Err(e) => {
             row.error = format!("파싱 실패: {e}");

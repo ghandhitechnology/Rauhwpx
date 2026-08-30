@@ -4,6 +4,7 @@
 //! 문서 정보, 요약, 문단, 스타일 등을 종합적으로 처리하는 진입점 역할을 한다.
 use crate::model::document::Document;
 use crate::model::paragraph::LineSeg;
+use crate::parser::limits::{MAX_CONTAINER_BYTES, MAX_STRUCTURAL_BYTES};
 use snafu::Snafu;
 use std::io::{self, Cursor, Read};
 
@@ -31,6 +32,8 @@ pub enum Hwp3Error {
     IoError { source: io::Error },
     #[snafu(display("파싱 오류가 발생했습니다: {}", message))]
     ParseError { message: String },
+    #[snafu(display("{} exceeds the {} byte resource limit", context, limit))]
+    ResourceLimitExceeded { context: &'static str, limit: usize },
     #[snafu(display("특수 문자 파싱 오류가 발생했습니다: {:?}", source))]
     SpecialCharError {
         source: special_char::Hwp3SpecialCharError,
@@ -55,11 +58,28 @@ impl From<special_char::Hwp3SpecialCharError> for Hwp3Error {
 /// 로 간주하여 graceful Err 반환.
 pub(crate) const HWP3_MAX_RECORD_SIZE: usize = 256 * 1024 * 1024;
 
-/// length 가 cap 안에 있는지 검증 후 zero-filled `Vec<u8>` 할당.
-/// length > cap 일 때 `vec![]` panic 대신 `InvalidData` Err 반환 (#877).
-pub(crate) fn alloc_record_buf(length: usize) -> Result<Vec<u8>, io::Error> {
+/// Read an attacker-sized record without zero-filling the declared length up
+/// front. Truncated records therefore allocate only the bytes that exist.
+pub(crate) fn read_record_buf<R: Read>(
+    reader: &mut R,
+    length: usize,
+) -> Result<Vec<u8>, io::Error> {
     check_record_count(length)?;
-    Ok(vec![0u8; length])
+    let mut bytes = Vec::with_capacity(length.min(1024 * 1024));
+    reader
+        .by_ref()
+        .take(length as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() != length {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            format!(
+                "HWP3 record declared {length} bytes but only {} remain",
+                bytes.len()
+            ),
+        ));
+    }
+    Ok(bytes)
 }
 
 /// 외부 입력 count (예: `point_count: u32`) 를 `Vec::with_capacity` 인자로 쓰기 전 검증.
@@ -75,6 +95,16 @@ pub(crate) fn check_record_count(count: usize) -> Result<(), io::Error> {
         ));
     }
     Ok(())
+}
+
+/// Validate a count before iterating or reserving records whose encoded form
+/// consumes `bytes_per_item`. This keeps a tiny hostile input from triggering
+/// a huge `Vec::with_capacity` based only on its count field.
+pub(crate) fn check_record_items(count: usize, bytes_per_item: usize) -> Result<(), io::Error> {
+    let bytes = count
+        .checked_mul(bytes_per_item)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "HWP3 record size overflow"))?;
+    check_record_count(bytes)
 }
 
 // HWP3 spec (한글문서파일구조3.0.md:248) doc_info offset 122 "빈줄감춤"(0 이외=on).
@@ -760,13 +790,10 @@ fn parse_hwp3_object_dispatch(
         let caption_pos = (&info_buf[70..72]).read_u16::<LittleEndian>().unwrap_or(0);
 
         let mut cells = Vec::new();
-        let mut cell_buf = match alloc_record_buf(27 * (cell_count as usize)) {
-            Ok(b) => b,
+        let cell_buf = match read_record_buf(body_cursor, 27 * (cell_count as usize)) {
+            Ok(bytes) => bytes,
             Err(_) => return Ok(Some(true)),
         };
-        if let Err(_) = body_cursor.read_exact(&mut cell_buf) {
-            return Ok(Some(true));
-        }
 
         let mut xs_raw = Vec::new();
         let mut ys_raw = Vec::new();
@@ -1098,13 +1125,10 @@ fn parse_hwp3_object_dispatch(
         let n_ext = n_ext_from_buf;
 
         // [Task #877] garbage length 로 인한 거대 alloc → WASM panic 방지.
-        let mut ext_buf = match alloc_record_buf(n_ext as usize) {
-            Ok(b) => b,
+        let ext_buf = match read_record_buf(body_cursor, n_ext as usize) {
+            Ok(bytes) => bytes,
             Err(_) => return Ok(Some(true)),
         };
-        if let Err(_) = body_cursor.read_exact(&mut ext_buf) {
-            return Ok(Some(true));
-        }
 
         let pic_type = info_buf[74];
         if pic_type == 0 || pic_type == 1 || pic_type == 2 {
@@ -1362,13 +1386,10 @@ fn parse_hwp3_object_dispatch(
         // header_val1 = n (필드 코드 세부 정보 길이).
         // 현재 8 byte (ch + dword + ch close) 소비 완료, 추가 n bytes 소비.
         if header_val1 > 0 {
-            let mut field_data = match alloc_record_buf(header_val1 as usize) {
-                Ok(b) => b,
+            let field_data = match read_record_buf(body_cursor, header_val1 as usize) {
+                Ok(bytes) => bytes,
                 Err(_) => return Ok(Some(true)),
             };
-            if let Err(_) = body_cursor.read_exact(&mut field_data) {
-                return Ok(Some(true));
-            }
             // [Task #877 후속] field_data 는 파싱만 되고 IR로 배선되지 않아 소실됐다.
             // 책갈피(ch==6)와 동일하게 원본 바이트를 command 에 실어 Field control로 배선.
             let mut field = crate::model::control::Field::default();
@@ -3029,6 +3050,12 @@ pub(crate) fn parse_paragraph_list(
 
 /// HWP 3.0 포맷 바이너리를 파싱하여 내부 Document 모델로 변환한다.
 pub fn parse_hwp3(data: &[u8]) -> Result<Document, Hwp3Error> {
+    if data.len() as u64 > MAX_CONTAINER_BYTES {
+        return Err(Hwp3Error::ResourceLimitExceeded {
+            context: "HWP 3.0 input",
+            limit: MAX_CONTAINER_BYTES as usize,
+        });
+    }
     if data.len() < 30 {
         return Err(Hwp3Error::FileTooSmall);
     }
@@ -3083,30 +3110,67 @@ pub fn parse_hwp3(data: &[u8]) -> Result<Document, Hwp3Error> {
 
     // 3. 정보 블록 파싱 (`doc_info.info_block_length` 만큼)
     let mut info_blocks = Vec::new();
-    let current_pos = cursor.position();
-    let info_block_end = current_pos + doc_info.info_block_length as u64;
-    while cursor.position() < info_block_end {
+    let info_block_start =
+        usize::try_from(cursor.position()).map_err(|_| Hwp3Error::ParseError {
+            message: "HWP 3.0 info-block offset does not fit in memory".to_string(),
+        })?;
+    let info_block_end = info_block_start
+        .checked_add(doc_info.info_block_length as usize)
+        .filter(|end| *end <= data.len() - 30)
+        .ok_or_else(|| Hwp3Error::ParseError {
+            message: "HWP 3.0 info block extends beyond the input".to_string(),
+        })?;
+    let mut info_cursor = Cursor::new(&data[30 + info_block_start..30 + info_block_end]);
+    while (info_cursor.position() as usize) < info_cursor.get_ref().len() {
         use crate::parser::hwp3::records::Hwp3InfoBlock;
-        if let Ok(block) = Hwp3InfoBlock::read(&mut cursor) {
+        let previous_position = info_cursor.position();
+        if let Ok(block) = Hwp3InfoBlock::read(&mut info_cursor) {
             info_blocks.push(block);
         } else {
             break;
         }
+        if info_cursor.position() <= previous_position {
+            return Err(Hwp3Error::ParseError {
+                message: "HWP 3.0 info-block parser made no progress".to_string(),
+            });
+        }
     }
-    cursor.set_position(info_block_end);
 
     // 4. 본문 텍스트 압축 해제 (`doc_info.compressed` 확인 후 `flate2` 사용)
-    let remaining_data = &data[(30 + current_pos as usize + doc_info.info_block_length as usize)..];
+    let body_start = 30usize
+        .checked_add(info_block_end)
+        .ok_or_else(|| Hwp3Error::ParseError {
+            message: "HWP 3.0 body offset overflow".to_string(),
+        })?;
+    let remaining_data = data
+        .get(body_start..)
+        .ok_or_else(|| Hwp3Error::ParseError {
+            message: "HWP 3.0 body offset extends beyond the input".to_string(),
+        })?;
 
     let mut decompressed_data = Vec::new();
     let body_data = if doc_info.compressed != 0 {
         use flate2::read::DeflateDecoder;
         let mut decoder = DeflateDecoder::new(remaining_data);
         decoder
+            .by_ref()
+            .take((MAX_STRUCTURAL_BYTES as u64).saturating_add(1))
             .read_to_end(&mut decompressed_data)
             .map_err(|e| Hwp3Error::IoError { source: e })?;
+        if decompressed_data.len() > MAX_STRUCTURAL_BYTES {
+            return Err(Hwp3Error::ResourceLimitExceeded {
+                context: "expanded HWP 3.0 body",
+                limit: MAX_STRUCTURAL_BYTES,
+            });
+        }
         &decompressed_data[..]
     } else {
+        if remaining_data.len() > MAX_STRUCTURAL_BYTES {
+            return Err(Hwp3Error::ResourceLimitExceeded {
+                context: "HWP 3.0 body",
+                limit: MAX_STRUCTURAL_BYTES,
+            });
+        }
         remaining_data
     };
 
@@ -4220,6 +4284,22 @@ mod tests {
     use std::io::Read;
 
     #[test]
+    fn truncated_info_block_is_rejected_instead_of_panicking_on_a_slice() {
+        const DOC_INFO_BYTES: usize = 128;
+        const DOC_SUMMARY_BYTES: usize = 1008;
+        let mut bytes = vec![0u8; 30 + DOC_INFO_BYTES + DOC_SUMMARY_BYTES];
+        bytes[..23].copy_from_slice(b"HWP Document File V3.00");
+        let info_length_offset = 30 + DOC_INFO_BYTES - 2;
+        bytes[info_length_offset..info_length_offset + 2].copy_from_slice(&1u16.to_le_bytes());
+
+        assert!(matches!(
+            parse_hwp3(&bytes),
+            Err(Hwp3Error::ParseError { message })
+                if message.contains("info block extends beyond")
+        ));
+    }
+
+    #[test]
     fn test_convert_para_shape_wires_border_connection_into_attr1_bit28() {
         // [#2976] border_connection() 접근자는 있었으나 attr1 bit 28로 배선되지
         // 않아 항상 소실되던 결함의 회귀 테스트.
@@ -4353,10 +4433,10 @@ mod tests {
     }
 
     #[test]
-    fn test_alloc_record_buf_overflow_returns_err() {
+    fn test_read_record_buf_overflow_returns_err() {
         // [Task #877] garbage length 입력 시 panic 대신 graceful Err 반환.
         // 32-bit WASM 의 RawVec capacity overflow panic 방지 검증.
-        let r = alloc_record_buf(HWP3_MAX_RECORD_SIZE + 1);
+        let r = read_record_buf(&mut Cursor::new([]), HWP3_MAX_RECORD_SIZE + 1);
         assert!(r.is_err());
         let e = r.unwrap_err();
         assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
@@ -4366,16 +4446,16 @@ mod tests {
             "msg was: {msg:?}"
         );
 
-        let r2 = alloc_record_buf(0xDC000000); // sample16 실측 garbage 값 (~3.69 GB)
+        let r2 = read_record_buf(&mut Cursor::new([]), 0xDC000000); // sample16 실측 garbage 값 (~3.69 GB)
         assert!(r2.is_err());
     }
 
     #[test]
-    fn test_alloc_record_buf_within_cap_ok() {
-        // 정상 범위 길이는 그대로 vec 생성.
-        let r = alloc_record_buf(1024);
-        assert!(r.is_ok());
-        assert_eq!(r.unwrap().len(), 1024);
+    fn test_read_record_buf_rejects_truncation_without_declared_size_allocation() {
+        let mut reader = Cursor::new([1, 2, 3]);
+        let error = read_record_buf(&mut reader, 2 * 1024 * 1024).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+        assert!(error.to_string().contains("only 3 remain"));
     }
 
     #[test]
@@ -4384,6 +4464,13 @@ mod tests {
         assert!(check_record_count(HWP3_MAX_RECORD_SIZE + 1).is_err());
         assert!(check_record_count(0xFFFFFFFF).is_err());
         assert!(check_record_count(1024).is_ok());
+    }
+
+    #[test]
+    fn test_record_item_count_uses_checked_encoded_size() {
+        assert!(check_record_items(HWP3_MAX_RECORD_SIZE / 8, 8).is_ok());
+        assert!(check_record_items(HWP3_MAX_RECORD_SIZE / 8 + 1, 8).is_err());
+        assert!(check_record_items(usize::MAX, 8).is_err());
     }
 
     #[test]

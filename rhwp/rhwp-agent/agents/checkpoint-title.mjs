@@ -9,6 +9,7 @@ import { z } from 'zod';
 import {
   isolatedProcessEnv,
   processTreeSpawnOptions,
+  terminateAndWaitForProcessTreeExit,
   terminateProcessTree,
 } from '../process-tree.mjs';
 
@@ -263,13 +264,15 @@ function runCli(spec, prompt, timeoutMs, {
   spawnProcess = spawn,
   terminateProcess = terminateProcessTree,
 } = {}) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let settled = false;
     let stdout = '';
     let outputExceeded = false;
     let child;
     let timer = null;
     let stopping = false;
+    let cleanupPromise = null;
+    let abort = () => {};
 
     const finish = (value) => {
       if (settled) return;
@@ -278,12 +281,38 @@ function runCli(spec, prompt, timeoutMs, {
       signal?.removeEventListener?.('abort', abort);
       resolve(value);
     };
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener?.('abort', abort);
+      reject(error);
+    };
+    const finishAfterCleanup = (value) => {
+      if (!child) {
+        finish(value);
+        return;
+      }
+      if (!cleanupPromise) {
+        cleanupPromise = terminateAndWaitForProcessTreeExit(child, { terminateProcess })
+          .catch(() => false);
+      }
+      void cleanupPromise.then((cleaned) => {
+        if (!cleaned) {
+          const error = new Error('Checkpoint-title process-tree cleanup could not be confirmed');
+          error.processCleanupUncertain = true;
+          fail(error);
+          return;
+        }
+        finish(value);
+      });
+    };
     const stop = () => {
       if (!child || stopping) return;
       stopping = true;
-      terminateProcess(child);
+      finishAfterCleanup(null);
     };
-    const abort = () => {
+    abort = () => {
       stop();
     };
 
@@ -312,13 +341,16 @@ function runCli(spec, prompt, timeoutMs, {
     child.stdout?.on?.('error', () => {});
     child.stderr?.on?.('data', () => {});
     child.stderr?.on?.('error', () => {});
-    child.on?.('error', () => finish(null));
+    child.on?.('error', () => {
+      if (child.pid) stop();
+      else finish(null);
+    });
     child.on?.('close', (code) => {
       if (stopping || outputExceeded || code !== 0) {
-        finish(null);
+        finishAfterCleanup(null);
         return;
       }
-      finish(extractCheckpointTitleText(stdout));
+      finishAfterCleanup(extractCheckpointTitleText(stdout));
     });
 
     timer = setTimeout(abort, timeoutMs);
@@ -396,6 +428,7 @@ async function prepareCliWorkspaceBounded(provider, prompt, timeoutMs, deps) {
 }
 
 async function runPreparedCli(workspace, prompt, timeoutMs, deps) {
+  let cleanupUncertain = false;
   try {
     return await runCli(workspace.spec, prompt, timeoutMs, {
       cwd: workspace.tempRoot,
@@ -404,8 +437,11 @@ async function runPreparedCli(workspace, prompt, timeoutMs, deps) {
       terminateProcess: deps.terminateProcess,
       env: workspace.env,
     });
+  } catch (error) {
+    cleanupUncertain = error?.processCleanupUncertain === true;
+    throw error;
   } finally {
-    await disposeCliWorkspace(workspace);
+    if (!cleanupUncertain) await disposeCliWorkspace(workspace);
   }
 }
 
@@ -501,21 +537,20 @@ async function runTimedProvider(provider, model, prompt, timeoutMs, overallDeadl
     return null;
   }
   if (!workspace) return null;
-  try {
-    if (deps.signal?.aborted) return null;
-    const remaining = overallDeadline - Date.now();
-    if (remaining <= 0) return null;
-    const runTimeoutMs = Math.max(1, Math.min(timeoutMs, remaining));
-    return await boundedAttempt(
-      (signal) => runPreparedCli(workspace, prompt, runTimeoutMs, { ...deps, signal }),
-      runTimeoutMs,
-      deps.signal,
-    );
-  } finally {
-    // Short provider timeouts leave only a few milliseconds of cleanup grace.
-    // Await the same in-flight rm so generateCheckpointTitle cannot return
-    // while the CLI temp workspace still exists.
+  if (deps.signal?.aborted) {
     await disposeCliWorkspace(workspace);
+    return null;
+  }
+  const remaining = overallDeadline - Date.now();
+  if (remaining <= 0) {
+    await disposeCliWorkspace(workspace);
+    return null;
+  }
+  const runTimeoutMs = Math.max(1, Math.min(timeoutMs, remaining));
+  try {
+    return await runPreparedCli(workspace, prompt, runTimeoutMs, deps);
+  } catch {
+    return null;
   }
 }
 

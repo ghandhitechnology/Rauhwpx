@@ -1193,7 +1193,7 @@ pub fn run(args: &[String]) {
     };
 
     let t_start = Instant::now();
-    let bytes = match std::fs::read(&path) {
+    let bytes = match crate::parser::limits::read_local_file_once(&path) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("오류: 파일 읽기 실패 - {e}");
@@ -1209,7 +1209,9 @@ pub fn run(args: &[String]) {
     let prev_hook = panic::take_hook();
     panic::set_hook(Box::new(|_| {}));
 
-    let parsed = panic::catch_unwind(AssertUnwindSafe(|| HwpDocument::from_bytes(&bytes)));
+    let parsed = panic::catch_unwind(AssertUnwindSafe(|| {
+        HwpDocument::from_local_file_bytes(&bytes)
+    }));
     let mut doc = match parsed {
         Ok(Ok(d)) => d,
         Ok(Err(e)) => {
@@ -1256,9 +1258,9 @@ pub fn run(args: &[String]) {
     macro_rules! reload_on_panic {
         ($res:expr) => {
             if $res.is_err() {
-                if let Ok(Ok(fresh)) =
-                    panic::catch_unwind(AssertUnwindSafe(|| HwpDocument::from_bytes(&bytes)))
-                {
+                if let Ok(Ok(fresh)) = panic::catch_unwind(AssertUnwindSafe(|| {
+                    HwpDocument::from_local_file_bytes(&bytes)
+                })) {
                     doc = fresh;
                     snapshot_valid = false;
                 } else {

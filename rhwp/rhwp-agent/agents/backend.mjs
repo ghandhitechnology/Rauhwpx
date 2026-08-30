@@ -1,5 +1,28 @@
 import path from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import { terminateProcessTree, waitForProcessTreeExit } from '../process-tree.mjs';
+
+const ANSI_ESCAPE = /\x1B\[[0-?]*[ -/]*[@-~]/g;
+const SECRET_ASSIGNMENT = /((?:["']?(?:access[_-]?token|refresh[_-]?token|api[_-]?key|authorization|cookie|password|secret|token|oauth[_-]?code|authorization[_-]?code|user[_-]?code|code[_-]?verifier|state)["']?)\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;}]+)/gi;
+const AUTH_HEADER = /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/gi;
+const KEY_SHAPED_SECRET = /\b(?:sk|pk)-[A-Za-z0-9_-]{12,}/g;
+const URL_USERINFO = /(https?:\/\/)[^/\s:@]+:[^@\s/]+@/gi;
+const URL_SECRET_PARAM = /([?&#](?:access[_-]?token|refresh[_-]?token|id[_-]?token|api[_-]?key|client[_-]?secret|oauth[_-]?code|authorization[_-]?code|user[_-]?code|code|state|token)=)[^&#\s]+/gi;
+
+/** Remove credentials from bounded diagnostics before they reach logs or UI. */
+export function redactDiagnosticText(value, secrets = []) {
+  let text = String(value ?? '').replace(ANSI_ESCAPE, '');
+  for (const candidate of secrets) {
+    const secret = typeof candidate === 'string' ? candidate : '';
+    if (secret.length >= 4) text = text.split(secret).join('[redacted]');
+  }
+  return text
+    .replace(URL_USERINFO, '$1[redacted]@')
+    .replace(URL_SECRET_PARAM, '$1[redacted]')
+    .replace(AUTH_HEADER, '$1 [redacted]')
+    .replace(KEY_SHAPED_SECRET, '[redacted]')
+    .replace(SECRET_ASSIGNMENT, '$1[redacted]');
+}
 
 /**
  * Shared helpers for agent CLI backends.
@@ -52,6 +75,7 @@ import { terminateProcessTree, waitForProcessTreeExit } from '../process-tree.mj
  * @typedef {Object} BackendOptions
  * @property {string} rootDir
  * @property {string} [workDir]
+ * @property {string[]} [readOnlyRoots] Hub-owned roots providers may read but must never write.
  * @property {string} mcpScriptPath
  * @property {string} [mcpRuntimeCommand]
  * @property {string[]} [mcpRuntimeArgs]
@@ -83,10 +107,6 @@ import { terminateProcessTree, waitForProcessTreeExit } from '../process-tree.mj
  * @property {'standard'|'fast'} [serviceTier]
  * @property {string} [toolProfile]
  * @property {string} [agentRole]
- * @property {string[]} [shellAllowPrefixes] 백그라운드 작업자 헬퍼 실행용 스코프 셸
- *   접두사 (grok 만 소비). 각 항목은 `python3 /abs/copy_layout.py` 처럼
- *   인터프리터+절대 스크립트 경로여야 한다. 맨 인터프리터 이름만 넘기면 무시되고
- *   전면 Bash deny 가 유지된다.
  * @property {string} [systemPromptOverride]
  * @property {(request: ProviderUserQuestionRequest, signal: AbortSignal) => Promise<UserQuestionOutcome>} [requestUserInput]
  * @property {(evt: UnifiedAgentEvent) => void} onEvent
@@ -119,31 +139,88 @@ import { terminateProcessTree, waitForProcessTreeExit } from '../process-tree.mj
  * newlines and invokes onLine with each JSON-parsed line. Parse failures are
  * logged to stderr and skipped.
  * @param {(obj: any) => void} onLine
- * @returns {(chunk: Buffer | string) => void}
+ * @param {{maxLineBytes?: number, onOverflow?: (() => void) | null}} [options]
+ * @returns {((chunk: Buffer | string) => void) & {end: () => void}}
  */
-export function createLineReader(onLine) {
+export function createLineReader(onLine, { maxLineBytes = 8 * 1024 * 1024, onOverflow = null } = {}) {
+  let decoder = new StringDecoder('utf8');
   let buffer = '';
-  return (chunk) => {
-    buffer += chunk.toString();
-    let idx;
-    while ((idx = buffer.indexOf('\n')) !== -1) {
-      const line = buffer.slice(0, idx).trim();
-      buffer = buffer.slice(idx + 1);
-      if (!line) continue;
-      let obj;
-      try {
-        obj = JSON.parse(line);
-      } catch (e) {
-        process.stderr.write(`[backend] skipping unparseable line: ${line.slice(0, 200)}\n`);
-        continue;
-      }
-      try {
-        onLine(obj);
-      } catch (e) {
-        process.stderr.write(`[backend] onLine handler error: ${e?.stack ?? e}\n`);
-      }
+  let bufferBytes = 0;
+  let discarding = false;
+  let ended = false;
+
+  const resetLine = () => {
+    decoder = new StringDecoder('utf8');
+    buffer = '';
+    bufferBytes = 0;
+  };
+  const overflow = () => {
+    resetLine();
+    onOverflow?.();
+    process.stderr.write(`[backend] discarding provider frame larger than ${maxLineBytes} bytes\n`);
+  };
+  const emitLine = (rawLine) => {
+    const line = rawLine.trim();
+    if (!line) return;
+    let obj;
+    try {
+      obj = JSON.parse(line);
+    } catch (e) {
+      process.stderr.write('[backend] skipping an unparseable provider frame\n');
+      return;
+    }
+    try {
+      onLine(obj);
+    } catch (e) {
+      process.stderr.write(`[backend] provider frame handler error: ${redactDiagnosticText(e?.stack ?? e)}\n`);
     }
   };
+  const read = (chunk) => {
+    if (ended) return;
+    const incoming = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8');
+    let offset = 0;
+    while (offset < incoming.length) {
+      const newline = incoming.indexOf(0x0a, offset);
+      const end = newline < 0 ? incoming.length : newline;
+      if (discarding) {
+        if (newline < 0) return;
+        discarding = false;
+        resetLine();
+        offset = newline + 1;
+        continue;
+      }
+
+      const segment = incoming.subarray(offset, end);
+      bufferBytes += segment.length;
+      if (bufferBytes > maxLineBytes) {
+        overflow();
+        if (newline < 0) {
+          discarding = true;
+          return;
+        }
+        offset = newline + 1;
+        continue;
+      }
+      buffer += decoder.write(segment);
+      if (newline < 0) return;
+      buffer += decoder.end();
+      emitLine(buffer);
+      resetLine();
+      offset = newline + 1;
+    }
+  };
+  read.end = () => {
+    if (ended) return;
+    ended = true;
+    if (discarding) {
+      resetLine();
+      return;
+    }
+    buffer += decoder.end();
+    emitLine(buffer);
+    resetLine();
+  };
+  return read;
 }
 
 function usageCount(...candidates) {
@@ -470,10 +547,21 @@ export function systemBriefFor(opts = {}, agentName = 'claude') {
   return `${SHARED_SYSTEM_BRIEF}\n\n${INSTRUCTION_PLANNING_BRIEF}\n\n${PLANNING_SYSTEM_BRIEF}`;
 }
 
+export function providerReadOnlyRoots(opts = {}) {
+  const values = Array.isArray(opts.readOnlyRoots) ? opts.readOnlyRoots : [];
+  const roots = values
+    .map((root) => String(root ?? '').trim())
+    .filter(Boolean);
+  if (roots.some((root) => root.includes(path.delimiter))) {
+    throw new Error('read-only root cannot contain the platform path delimiter');
+  }
+  return [...new Set(roots)];
+}
+
 export function mcpCapabilityEnv(opts = {}) {
   const { workflow, phase, capabilityEpoch } = normalizeExecutionMode(opts);
   // insert_image 가 읽을 수 있는 로컬 루트 — 세션 작업 공간(다운로드 포함)으로 제한.
-  const rootValues = [opts.rootDir, opts.workDir]
+  const rootValues = [opts.rootDir, opts.workDir, ...providerReadOnlyRoots(opts)]
     .map((root) => String(root ?? '').trim())
     .filter(Boolean);
   if (rootValues.some((root) => root.includes(path.delimiter))) {
@@ -530,10 +618,12 @@ export function createTurnProcessLifecycle({
   let turnCompleted = false;
   let disposed = false;
   let stderrTail = '';
-  /** @type {Promise<void>} */
-  let childExitPromise = Promise.resolve();
-  /** @type {(() => void) | null} */
-  let resolveChildExit = null;
+  /** @type {Promise<boolean>} */
+  let childExitPromise = Promise.resolve(true);
+  /** @type {() => Promise<boolean>} */
+  let stopChild = () => Promise.resolve(true);
+  const pendingTreeCleanups = new Set();
+  let uncertainTreeCleanup = false;
 
   /** @param {UnifiedAgentEvent} evt */
   function endTurn(evt) {
@@ -543,9 +633,7 @@ export function createTurnProcessLifecycle({
   }
 
   function killChild() {
-    const proc = child;
-    if (!proc || proc.exitCode !== null || proc.signalCode !== null) return;
-    terminateProcess(proc);
+    return stopChild();
   }
 
   return {
@@ -565,19 +653,26 @@ export function createTurnProcessLifecycle({
     },
     /** 스폰 전 준비나 spawn 자체가 실패한 턴을 닫는다. */
     failStart(error) {
-      onEvent({ type: 'error', agent, message: `failed to start ${processLabel}: ${error?.message ?? error}` });
+      const safeError = redactDiagnosticText(error?.message ?? error);
+      onEvent({ type: 'error', agent, message: `failed to start ${processLabel}: ${safeError}` });
       endTurn({ type: 'turn-end', agent, stopReason: 'exited' });
     },
     /**
      * 스폰한 자식을 이번 턴의 소유 프로세스로 붙인다. stdout 은 NDJSON 으로 파싱해
-     * onStdoutLine 에 넘기고, stderr 는 꼬리에 모으면서 그대로 중계한다.
+     * onStdoutLine 에 넘기고, stderr 는 실패 설명용 bounded tail 로만 보관한다.
+     * 공급자 stderr 를 서버 로그로 복제하면 공급자가 반사한 토큰/키가 유출될 수 있다.
      *
      * @param {import('node:child_process').ChildProcess & { stdout: NodeJS.ReadableStream, stderr: NodeJS.ReadableStream }} proc stdio 가 파이프로 열린 자식
      * @param {(obj: any) => void} onStdoutLine
      */
     attachChild(proc, onStdoutLine) {
+      // Callers can begin the next turn in the same tick as an exit/interrupt.
+      // Capture the old tree cleanup before replacing the active child slot.
+      if (child && child !== proc) void stopChild();
       child = proc;
-      childExitPromise = new Promise((resolve) => { resolveChildExit = resolve; });
+      /** @type {(cleaned: boolean) => void} */
+      let resolveOwnership = () => {};
+      childExitPromise = new Promise((resolve) => { resolveOwnership = resolve; });
       // 죽어가는 이전 턴의 자식이 버퍼에 남은 출력을 뒤늦게 흘려도 다음 턴의
       // 이벤트로 새면 안 된다 — 소유 프로세스가 바뀌면 그 뒤 출력은 전부 버린다.
       const readStdout = createLineReader(onStdoutLine);
@@ -589,15 +684,13 @@ export function createTurnProcessLifecycle({
         if (proc !== child || disposed) return;
         const chunkText = chunk.toString();
         stderrTail = (stderrTail + chunkText).slice(-stderrTailLimit);
-        for (const line of chunkText.split('\n')) {
-          if (line.trim()) process.stderr.write(`[${agent}] ${line}\n`);
-        }
       });
       proc.on('error', (err) => {
         if (proc !== child) return;
-        process.stderr.write(`[${agent}] spawn error: ${err?.message ?? err}\n`);
+        const safeError = redactDiagnosticText(err?.message ?? err);
+        process.stderr.write(`[${agent}] spawn error: ${safeError}\n`);
         if (turnOpen) {
-          onEvent({ type: 'error', agent, message: `${processLabel} process error: ${err?.message ?? err}` });
+          onEvent({ type: 'error', agent, message: `${processLabel} process error: ${safeError}` });
           endTurn({ type: 'turn-end', agent, stopReason: 'exited' });
         }
       });
@@ -608,16 +701,68 @@ export function createTurnProcessLifecycle({
       let exitInfo = null;
       /** @type {ReturnType<typeof setTimeout> | null} */
       let closeGraceTimer = null;
+      let exitSettled = false;
+      let cleanupSettled = false;
+      let cleanupResult = false;
+      /** @type {Promise<boolean> | null} */
+      let cleanupPromise = null;
+      const finishOwnership = () => {
+        if (!exitSettled || !cleanupSettled) return;
+        if (cleanupResult && proc === child) child = null;
+        resolveOwnership(cleanupResult);
+        resolveOwnership = () => {};
+      };
+      const beginTreeCleanup = () => {
+        if (cleanupPromise) return cleanupPromise;
+        /** @type {(cleaned: boolean) => void} */
+        let resolveCleanup = () => {};
+        cleanupPromise = new Promise((resolve) => { resolveCleanup = resolve; });
+        pendingTreeCleanups.add(cleanupPromise);
+        void cleanupPromise.then((cleaned) => {
+          pendingTreeCleanups.delete(cleanupPromise);
+          if (!cleaned) uncertainTreeCleanup = true;
+        });
+        let termination;
+        let exited;
+        try {
+          termination = Promise.resolve(terminateProcess(proc));
+        } catch {
+          termination = Promise.resolve(false);
+        }
+        try {
+          exited = Promise.resolve(waitForExit(proc));
+        } catch {
+          exited = Promise.resolve(false);
+        }
+        void Promise.all([termination, exited]).then(
+          ([terminationResult, exitResult]) => terminationResult !== false && exitResult !== false,
+          () => false,
+        ).then((cleaned) => {
+          cleanupSettled = true;
+          cleanupResult = cleaned;
+          // A bounded cleanup can finish without Node delivering an exit event.
+          // Settle disposed/failed ownership so callers receive `false` rather
+          // than waiting forever, while preserving the child identity.
+          if (!exitInfo && !exitSettled) settleExit(proc.exitCode ?? null, proc.signalCode ?? null);
+          finishOwnership();
+          resolveCleanup(cleaned);
+        });
+        return cleanupPromise;
+      };
+      stopChild = () => (proc === child ? beginTreeCleanup() : Promise.resolve(true));
       /**
        * @param {number|null} code
        * @param {NodeJS.Signals|null} signal
        */
       const settleExit = (code, signal) => {
         if (proc !== child) return;
+        if (exitSettled) return;
+        exitSettled = true;
         if (closeGraceTimer) {
           clearTimeout(closeGraceTimer);
           closeGraceTimer = null;
         }
+        readStdout.end();
         if (turnOpen && !disposed) {
           if (!turnCompleted && code !== 0) {
             // result 없이 비정상 종료 — 스트림이 잘렸거나 stderr 로만 끝난 실행이다.
@@ -625,16 +770,15 @@ export function createTurnProcessLifecycle({
           }
           endTurn({ type: 'turn-end', agent, stopReason: turnCompleted ? 'completed' : 'exited' });
         }
-        child = null;
-        resolveChildExit?.();
-        resolveChildExit = null;
+        void beginTreeCleanup();
+        finishOwnership();
       };
       proc.on('exit', (code, signal) => {
         if (proc !== child) return;
         exitInfo = { code, signal };
-        // 프로세스는 이미 죽었으므로 모드 전환 대기는 여기서 풀어 준다.
-        resolveChildExit?.();
-        resolveChildExit = null;
+        // The leader can exit while descendants retain stdout or keep running.
+        // Start bounded group/tree cleanup now and retain `proc` until it ends.
+        void beginTreeCleanup();
         // 자손이 파이프를 붙들어 'close' 가 오지 않는 경우를 위한 상한이다.
         closeGraceTimer = setTimeout(() => {
           closeGraceTimer = null;
@@ -658,9 +802,9 @@ export function createTurnProcessLifecycle({
       turnOpen = false;
       // 죽어가는 자식의 stdout 을 아예 파싱하지 않는다.
       try { child?.stdout?.removeAllListeners('data'); } catch {}
-      const exited = waitForExit(child);
-      killChild();
-      return exited;
+      const currentCleanup = killChild();
+      return Promise.all([currentCleanup, ...pendingTreeCleanups])
+        .then((results) => !uncertainTreeCleanup && results.every((result) => result !== false));
     },
   };
 }

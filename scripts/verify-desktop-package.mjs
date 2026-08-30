@@ -13,7 +13,14 @@ const archive = join(resourcesDir, 'app.asar');
 const required = [
   archive,
   join(unpackedAgent, 'server.mjs'),
+  join(unpackedAgent, 'copy-layout-runner.mjs'),
+  join(unpackedAgent, 'skills', 'copy-layout', 'scripts', 'copy_layout.py'),
+  join(unpackedAgent, 'browserbase-sidecar.mjs'),
+  join(unpackedAgent, 'browserbase-sidecar-runtime.mjs'),
+  join(unpackedAgent, 'browserbase-result.mjs'),
   join(unpackedAgent, 'package.json'),
+  join(unpackedAgent, 'node_modules', '@browserbasehq', 'stagehand', 'package.json'),
+  join(unpackedAgent, 'node_modules', '@browserbasehq', 'stagehand', 'dist', 'assets', 'stagehand-extension.zip'),
   join(unpackedAgent, 'node_modules', 'ws', 'package.json'),
   extractor,
 ];

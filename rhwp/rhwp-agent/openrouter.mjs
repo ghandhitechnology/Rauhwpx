@@ -1,5 +1,8 @@
 import { promises as fs } from 'node:fs';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
+
+import { readResponseTextBounded } from './response-bounds.mjs';
 
 const API_BASE = 'https://openrouter.ai/api/v1';
 /** 카탈로그는 1시간, 잔액은 5분 캐시한다 — 목록은 잘 안 바뀌고 잔액은 자주 본다. */
@@ -8,6 +11,41 @@ const CREDITS_TTL_MS = 5 * 60 * 1000;
 const REQUEST_TIMEOUT_MS = 20_000;
 const CHAT_TIMEOUT_MS = 60_000;
 const CATALOG_CACHE_FILE = 'models-cache.json';
+const SMALL_RESPONSE_LIMIT_BYTES = 64 * 1024;
+const LARGE_RESPONSE_LIMIT_BYTES = 8 * 1024 * 1024;
+const CATALOG_CACHE_LIMIT_BYTES = LARGE_RESPONSE_LIMIT_BYTES;
+const MAX_CREDIT_KEYS = 8;
+
+function creditKeyId(key) {
+  // Do not retain API keys as long-lived Map keys. The digest is only an
+  // in-process cache identity; authentication still uses the original key.
+  return createHash('sha256').update(key, 'utf8').digest('base64url');
+}
+
+async function readUtf8FileBounded(filePath, maxBytes) {
+  let handle;
+  try {
+    handle = await fs.open(filePath, 'r');
+    const info = await handle.stat();
+    if (!info.isFile() || !Number.isSafeInteger(info.size) || info.size < 1 || info.size > maxBytes) {
+      throw new Error('OpenRouter catalog cache is empty, oversized, or not a regular file');
+    }
+    const bytes = Buffer.allocUnsafe(info.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset);
+      if (bytesRead === 0) throw new Error('OpenRouter catalog cache changed while it was read');
+      offset += bytesRead;
+    }
+    const extra = Buffer.allocUnsafe(1);
+    if ((await handle.read(extra, 0, 1, offset)).bytesRead !== 0) {
+      throw new Error('OpenRouter catalog cache changed while it was read');
+    }
+    return bytes.toString('utf8');
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
 
 /**
  * @typedef {Object} CatalogModel
@@ -173,7 +211,14 @@ export function createOpenRouter({
         });
         // Keep the same deadline while consuming the body. A server can send
         // headers promptly and then stall forever mid-response.
-        const text = await response.text();
+        const maxBytes = pathname === '/models' || pathname === '/chat/completions'
+          ? LARGE_RESPONSE_LIMIT_BYTES
+          : SMALL_RESPONSE_LIMIT_BYTES;
+        const text = await readResponseTextBounded(response, {
+          maxBytes,
+          label: `OpenRouter ${pathname} response`,
+          abortController: controller,
+        });
         let parsed = null;
         if (text.trim()) {
           try { parsed = JSON.parse(text); }
@@ -184,6 +229,10 @@ export function createOpenRouter({
         if (error?.name === 'AbortError') {
           throw openRouterError('OPENROUTER_TIMEOUT', 'OpenRouter 응답이 너무 느려요');
         }
+        if (error?.code === 'RESPONSE_BODY_TOO_LARGE') {
+          throw openRouterError('OPENROUTER_RESPONSE_TOO_LARGE', 'OpenRouter 응답이 너무 커요');
+        }
+        if (error?.code?.startsWith?.('OPENROUTER_')) throw error;
         throw openRouterError('OPENROUTER_UNREACHABLE', 'OpenRouter에 닿지 못했어요. 네트워크를 확인하세요');
       }
     })();
@@ -207,7 +256,7 @@ export function createOpenRouter({
   async function readDiskCache() {
     if (!cachePath) return null;
     try {
-      const raw = JSON.parse(await fs.readFile(cachePath, 'utf8'));
+      const raw = JSON.parse(await readUtf8FileBounded(cachePath, CATALOG_CACHE_LIMIT_BYTES));
       const fetchedAt = Number(raw?.fetchedAt);
       if (!Array.isArray(raw?.models) || !Number.isFinite(fetchedAt)) return null;
       return { models: raw.models, fetchedAt };
@@ -218,13 +267,19 @@ export function createOpenRouter({
 
   async function writeDiskCache(entry) {
     if (!cachePath) return;
+    let temp = null;
     try {
       await fs.mkdir(path.dirname(cachePath), { recursive: true });
-      const temp = `${cachePath}.tmp-${process.pid}-${now()}`;
-      await fs.writeFile(temp, `${JSON.stringify(entry)}\n`, { encoding: 'utf8', mode: 0o600 });
+      temp = `${cachePath}.tmp-${process.pid}-${now()}`;
+      const serialized = `${JSON.stringify(entry)}\n`;
+      if (Buffer.byteLength(serialized, 'utf8') > CATALOG_CACHE_LIMIT_BYTES) return;
+      await fs.writeFile(temp, serialized, { encoding: 'utf8', mode: 0o600 });
       await fs.rename(temp, cachePath);
+      temp = null;
     } catch {
       // 캐시 저장 실패는 무시한다 — 다음 요청에서 다시 받아오면 된다.
+    } finally {
+      if (temp) await fs.rm(temp, { force: true }).catch(() => {});
     }
   }
 
@@ -310,11 +365,21 @@ export function createOpenRouter({
     async credits(key, refresh = false) {
       const trimmed = String(key ?? '').trim();
       if (!trimmed) throw openRouterError('OPENROUTER_KEY_MISSING', 'OpenRouter 키가 없어요');
-      const cached = creditsCache.get(trimmed);
+      const keyId = creditKeyId(trimmed);
+      for (const [cachedKey, entry] of creditsCache) {
+        if (now() - entry.fetchedAt >= CREDITS_TTL_MS) creditsCache.delete(cachedKey);
+      }
+      const cached = creditsCache.get(keyId);
       if (!refresh && cached && now() - cached.fetchedAt < CREDITS_TTL_MS) {
+        // Refresh insertion order so the bounded cache behaves as an LRU.
+        creditsCache.delete(keyId);
+        creditsCache.set(keyId, cached);
         return cached.credits;
       }
-      if (!refresh && creditsInFlight.has(trimmed)) return creditsInFlight.get(trimmed);
+      if (creditsInFlight.has(keyId)) return creditsInFlight.get(keyId);
+      if (creditsInFlight.size >= MAX_CREDIT_KEYS) {
+        throw openRouterError('OPENROUTER_BUSY', 'OpenRouter 잔액 조회가 너무 많이 진행 중이에요');
+      }
       const loading = (async () => {
         const keyResult = await request('/key', { key: trimmed });
         if (keyResult.status === 401 || keyResult.status === 403) {
@@ -323,7 +388,9 @@ export function createOpenRouter({
         if (!keyResult.ok) throw httpError(keyResult, '키 확인');
         const fromLimit = creditsFromKeyLimit(keyResult.parsed?.data ?? {}, now());
         if (fromLimit) {
-          creditsCache.set(trimmed, { credits: fromLimit, fetchedAt: now() });
+          creditsCache.delete(keyId);
+          creditsCache.set(keyId, { credits: fromLimit, fetchedAt: now() });
+          while (creditsCache.size > MAX_CREDIT_KEYS) creditsCache.delete(creditsCache.keys().next().value);
           return fromLimit;
         }
         const result = await request('/credits', { key: trimmed });
@@ -340,14 +407,16 @@ export function createOpenRouter({
           totalUsageUsd,
           checkedAt: now(),
         };
-        creditsCache.set(trimmed, { credits, fetchedAt: now() });
+        creditsCache.delete(keyId);
+        creditsCache.set(keyId, { credits, fetchedAt: now() });
+        while (creditsCache.size > MAX_CREDIT_KEYS) creditsCache.delete(creditsCache.keys().next().value);
         return credits;
       })();
-      creditsInFlight.set(trimmed, loading);
+      creditsInFlight.set(keyId, loading);
       try {
         return await loading;
       } finally {
-        if (creditsInFlight.get(trimmed) === loading) creditsInFlight.delete(trimmed);
+        if (creditsInFlight.get(keyId) === loading) creditsInFlight.delete(keyId);
       }
     },
 

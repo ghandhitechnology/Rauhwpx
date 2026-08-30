@@ -1,17 +1,14 @@
 // cross-spawn: Windows에서 npm .cmd 심을 인자 이스케이프 손상 없이 실행한다.
 import spawn from 'cross-spawn';
 import crypto from 'node:crypto';
-import {
-  copyFileSync,
-  lstatSync,
-  mkdirSync,
-  readlinkSync,
-  symlinkSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import {
+  credentialMirrorHasPendingCopybackSync,
+  flushCredentialMirrorSync,
+  prepareCredentialMirrorSync,
+} from '../credential-mirror.mjs';
 import {
   createTurnProcessLifecycle,
   isPlanningRestricted,
@@ -20,7 +17,9 @@ import {
   normalizeExecutionMode,
   normalizeTaskUsage,
   normalizeUsageTokens,
+  providerReadOnlyRoots,
   providerInteractionMode,
+  redactDiagnosticText,
   RHWP_SUBAGENTS,
   systemBriefFor,
   truncate,
@@ -60,39 +59,46 @@ const MCP_MAX_OUTPUT_BYTES = 1_000_000;
  * @param {string} grokHome
  * @param {string} [authPath]
  */
-export function prepareGrokHome(grokHome, authPath, {
-  copyFile = copyFileSync,
-  platform = process.platform,
-  symlink = symlinkSync,
-} = {}) {
-  mkdirSync(grokHome, { recursive: true });
-  if (!authPath) return;
+const grokMirrorsByHome = new Map();
 
-  let authStat;
-  try {
-    authStat = lstatSync(authPath);
-  } catch (error) {
-    if (error?.code === 'ENOENT') return;
-    throw error;
+export function prepareGrokHome(grokHome, authPath, deps = {}) {
+  const key = path.resolve(grokHome);
+  const previous = grokMirrorsByHome.get(key);
+  if (previous) {
+    const result = flushCredentialMirrorSync(previous, { platform: deps.platform ?? process.platform });
+    if (result.pending) throw Object.assign(new Error(result.errorMessage), { code: result.errorCode });
+    if (!result.conflict) rmSync(previous.target, { force: true });
+    grokMirrorsByHome.delete(key);
   }
-  if (!authStat.isFile() || authStat.isSymbolicLink()) return;
+  mkdirSync(grokHome, { recursive: true, mode: 0o700 });
+  const mirror = prepareCredentialMirrorSync(authPath, path.join(grokHome, 'auth.json'), {
+    platform: deps.platform ?? process.platform,
+    ...(deps.symlink ? { symlink: deps.symlink } : {}),
+  });
+  if (mirror?.mode === 'copy') grokMirrorsByHome.set(key, mirror);
+  return mirror;
+}
 
-  const target = path.join(grokHome, 'auth.json');
+export function flushGrokCredentialMirror(grokHome) {
+  const key = path.resolve(String(grokHome));
+  const mirror = grokMirrorsByHome.get(key);
+  if (!mirror) return true;
   try {
-    const targetStat = lstatSync(target);
-    if (!targetStat.isSymbolicLink()) return;
-    const existingTarget = path.resolve(grokHome, readlinkSync(target));
-    if (existingTarget === path.resolve(authPath)) return;
-    unlinkSync(target);
+    const result = flushCredentialMirrorSync(mirror);
+    if (result.pending) {
+      process.stderr.write(`[grok] credential refresh copyback pending: ${result.errorMessage}\n`);
+      return false;
+    }
+    grokMirrorsByHome.delete(key);
+    if (result.conflict) {
+      process.stderr.write(`[grok] credential refresh copyback conflicted: ${mirror.source}\n`);
+    }
   } catch (error) {
-    if (error?.code !== 'ENOENT') throw error;
+    process.stderr.write(`[grok] credential refresh copyback failed: ${error?.message ?? error}\n`);
+    if (credentialMirrorHasPendingCopybackSync(mirror)) return false;
+    grokMirrorsByHome.delete(key);
   }
-  try {
-    symlink(authPath, target);
-  } catch (error) {
-    if (platform !== 'win32' || error?.code !== 'EPERM') throw error;
-    copyFile(authPath, target);
-  }
+  return true;
 }
 
 /** TOML 기본 문자열 — 이 값 범위에서는 JSON 문자열 이스케이프가 그대로 유효하다. */
@@ -148,33 +154,6 @@ export function buildGrokConfigToml(opts) {
 }
 
 /**
- * 스코프 셸 접두사는 인터프리터 + 절대 스크립트 경로여야 한다.
- * `python3` / `python` 같은 맨 이름만 오면 `python3 -c` 가 열려 무시한다.
- *
- * @param {unknown} prefixes
- * @returns {string[]}
- */
-export function pinnedShellAllowPrefixes(prefixes) {
-  return (Array.isArray(prefixes) ? prefixes : [])
-    .map((prefix) => String(prefix).trim())
-    .filter((prefix) => {
-      if (!prefix) return false;
-      const tokens = prefix.replaceAll('"', '').split(/\s+/).filter(Boolean);
-      return tokens.length >= 2 && path.isAbsolute(tokens[1]);
-    });
-}
-
-/**
- * grok Bash 규칙. 접두사 자체와 그 뒤 공백+인자만 허용한다.
- *
- * @param {string[]} prefixes
- * @returns {string[]}
- */
-export function scopedBashAllowRules(prefixes) {
-  return prefixes.flatMap((prefix) => [`Bash(${prefix})`, `Bash(${prefix} *)`]);
-}
-
-/**
  * grok 헤드리스 인자를 만든다. 프롬프트는 --prompt-file 로 전달한다 —
  * '-' 로 시작하는 메시지의 플래그 오파싱과 ARG_MAX 초과를 함께 막는다.
  *
@@ -188,22 +167,15 @@ export function buildGrokArgv(opts, sessionId, resume, promptFilePath) {
   const planningRestricted = isPlanningRestricted(opts);
   const interactionMode = providerInteractionMode(opts);
   const rootGlob = `${String(opts.rootDir ?? '').replace(/\\/g, '/')}/**`;
-  // 백그라운드 작업자(복사 레이아웃 등)가 헬퍼 스크립트를 실행할 수 있게 풀어 주는
-  // 스코프 셸 접두사. grok 규칙은 glob 이고 deny 가 allow 보다 우선하므로(~/.grok
-  // README "Permission Rules"), 전면 --deny Bash 를 유지한 채로는 스코프 허용이
-  // 죽는다 — 이 모드에서는 Bash deny 를 빼고 dontAsk 의 allowlist 폐쇄성(허용
-  // 목록 밖은 무프롬프트 거부)으로 경계를 유지한다. 접두사는 `python3 /abs/helper.py`
-  // 처럼 인터프리터+절대 경로여야 한다. `python3*` 는 `python3 -c` 와 임의 스크립트까지
-  // 열리므로 버린다. 규칙은 `Bash(prefix)` 와 `Bash(prefix *)` 로만 연다 — 끝에 * 를
-  // 붙이면 helper.pyevil 같은 이웃 경로도 맞는다. 대화형 안전 채팅에는 이 옵션이
-  // 없으므로 기존 전면 deny 가 그대로 간다.
-  const shellAllowPrefixes = pinnedShellAllowPrefixes(opts.shellAllowPrefixes);
-  const scopedShell = shellAllowPrefixes.length > 0 && !planningRestricted;
+  const readOnlyRootGlobs = providerReadOnlyRoots(opts)
+    .map((root) => `${root.replace(/\\/g, '/')}/**`);
   const allowRules = [
     `Read(${rootGlob})`,
-    ...(planningRestricted ? [] : [`Edit(${rootGlob})`]),
-    'Grep', 'WebFetch', 'WebSearch', 'MCPTool(rhwp__*)',
-    ...(scopedShell ? scopedBashAllowRules(shellAllowPrefixes) : []),
+    ...readOnlyRootGlobs.map((root) => `Read(${root})`),
+    ...(planningRestricted || opts.toolProfile === 'copy-layout-worker' ? [] : [`Edit(${rootGlob})`]),
+    'Grep',
+    ...(opts.toolProfile === 'copy-layout-worker' ? [] : ['WebFetch', 'WebSearch']),
+    'MCPTool(rhwp__*)',
   ];
   // --sandbox 는 붙이지 않는다: grok 1.0.5 의 macOS seatbelt 샌드박스는 프로필을
   // 적용한 직후 기동 전에 멈춰(무한 대기, 출력 없음) 턴이 영원히 끝나지 않는다.
@@ -218,10 +190,8 @@ export function buildGrokArgv(opts, sessionId, resume, promptFilePath) {
   // grok 의 search_replace 와 write 를 모두 차단하고("deny rule on edit" 라이브
   // 확인), --deny Write 는 명시적 이중 안전장치로 함께 붙인다.
   const denyRules = [
-    // 스코프 셸 모드에서는 Bash deny 가 허용 접두사를 이기므로 빼고, 대신
-    // 고정 헬퍼 접두사 밖의 모든 셸을 dontAsk 가 거부하게 둔다.
-    ...(scopedShell ? [] : ['Bash']),
-    ...(planningRestricted ? ['Edit', 'Write'] : []),
+    'Bash',
+    ...(planningRestricted || opts.toolProfile === 'copy-layout-worker' ? ['Edit', 'Write'] : []),
   ];
   const alwaysApprove = unrestricted && !planningRestricted;
   const permission = alwaysApprove
@@ -282,8 +252,7 @@ export function buildGrokEnv(opts, sourceEnv = opts.providerEnv ?? process.env) 
  * @param {string} token
  */
 export function formatGrokExitError(stderrText, code, signal, token) {
-  let clean = String(stderrText ?? '').replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
-  if (token) clean = clean.split(token).join('[redacted]');
+  const clean = redactDiagnosticText(stderrText, [token]);
   const detail = clean
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -1357,7 +1326,9 @@ export function createGrokSession(opts, {
       const previousNativeSession = nativeSession;
       const previousSessionId = sessionId;
       lifecycle.killChild();
-      await lifecycle.waitForChildExit();
+      if (await lifecycle.waitForChildExit() === false) {
+        throw new Error('Grok process tree could not be stopped for the mode change');
+      }
       opts.workflow = mode.workflow;
       opts.phase = mode.phase;
       opts.capabilityEpoch = mode.capabilityEpoch;
@@ -1397,8 +1368,12 @@ export function createGrokSession(opts, {
       clearConfirmTimer();
       stopTail();
       nativeTurnToken += 1;
-      const [, legacy] = await Promise.allSettled([nativeSession?.dispose(), lifecycle.dispose()]);
-      return legacy.status === 'fulfilled' ? legacy.value : false;
+      const [native, legacy] = await Promise.allSettled([nativeSession?.dispose(), lifecycle.dispose()]);
+      const cleaned = native.status === 'fulfilled' && native.value !== false
+        && legacy.status === 'fulfilled' && legacy.value !== false;
+      const grokHomeToFlush = turnGrokHome || opts.grokHome;
+      if (cleaned && grokHomeToFlush) flushGrokCredentialMirror(grokHomeToFlush);
+      return cleaned;
     },
   };
 }

@@ -9,6 +9,8 @@ import {
   isPlanningRestricted,
   mcpCapabilityEnv,
   normalizeExecutionMode,
+  providerReadOnlyRoots,
+  redactDiagnosticText,
   systemBriefFor,
   truncate,
   validateExecutionMode,
@@ -24,6 +26,8 @@ const STDERR_TAIL_LIMIT = 16_000;
 const PROMPT_ARG_LIMIT = 700_000;
 /** 계획 단계에서 막는 pi 내장 도구. 확장 도구(rhwp)는 그대로 남는다. */
 const PLANNING_EXCLUDED_TOOLS = 'bash,edit,write';
+const SAFE_EXCLUDED_TOOLS = 'bash';
+const SAFE_WORKER_EXCLUDED_TOOLS = 'bash,edit,write';
 
 /**
  * 자식에게 넘겨줄 환경변수 화이트리스트. 여기 없는 값은 전달하지 않는다 —
@@ -39,7 +43,6 @@ const ENV_PASSTHROUGH = [
 /** 화이트리스트에 실수로 자격증명이 섞여도 걸러낸다. */
 const CREDENTIAL_NAME = /(API_KEY|AUTH_TOKEN|OAUTH_TOKEN|SECRET|ACCESS_KEY|BEARER)/i;
 /** 오류 문자열에서 API 키처럼 보이는 토큰을 지운다. */
-const SECRET_LIKE = /\b(?:sk|pk)-[A-Za-z0-9_-]{12,}/g;
 const CREDIT_ERROR = /(?:\b402\b|payment required|insufficient (?:credits|quota)|credit(?:s)? (?:exhausted|depleted|exceeded)|out of credits)/i;
 
 export function isOpenRouterCreditError(text) {
@@ -108,8 +111,12 @@ export function buildPiArgv(opts, sessionId) {
     // 워크스페이스의 CLAUDE.md/AGENTS.md 를 끌어오지 않는다.
     '--no-context-files',
   );
-  // 계획 단계에서는 내장 쓰기/셸 도구를 아예 빼고, 구현 단계에서는 전부 살린다.
+  // Safe Pi/Rau has no OS write sandbox. Never expose its general shell: even
+  // a hub-private sibling path is writable by the same OS user. Background
+  // copy-layout work uses the structured hub runner instead.
   if (isPlanningRestricted(opts)) argv.push('--exclude-tools', PLANNING_EXCLUDED_TOOLS);
+  else if (opts.toolProfile === 'copy-layout-worker') argv.push('--exclude-tools', SAFE_WORKER_EXCLUDED_TOOLS);
+  else if (opts.permissionProfile !== 'unrestricted') argv.push('--exclude-tools', SAFE_EXCLUDED_TOOLS);
   return argv;
 }
 
@@ -132,6 +139,7 @@ export function buildPiEnv(opts, sourceEnv = process.env) {
     env.USERPROFILE = String(opts.isolatedHome);
   }
   const piRoot = opts.piRoot ?? '';
+  const readOnlyRoots = providerReadOnlyRoots(opts);
   return {
     ...env,
     PI_CODING_AGENT_DIR: path.join(piRoot, 'agent'),
@@ -143,6 +151,7 @@ export function buildPiEnv(opts, sourceEnv = process.env) {
     RHWP_AGENT_NAME: opts.agentName === 'rau' ? 'rau' : 'pi',
     RHWP_HUB_HTTP: `http://127.0.0.1:${opts.hubPort}`,
     RHWP_ROOT_DIR: String(opts.rootDir ?? ''),
+    ...(readOnlyRoots.length > 0 ? { RHWP_READONLY_ROOTS: readOnlyRoots.join(path.delimiter) } : {}),
     RHWP_PERMISSION_PROFILE: opts.permissionProfile ?? 'safe',
     RHWP_TOOL_PROFILE: toolProfileFor(opts),
     ...mcpCapabilityEnv(opts),
@@ -161,9 +170,7 @@ export function buildPiEnv(opts, sourceEnv = process.env) {
 export function formatPiExitError(stderrText, code, signal, token, agent = 'pi') {
   const credit = formatOpenRouterCreditError(stderrText, agent);
   if (credit) return credit;
-  let clean = String(stderrText ?? '').replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
-  if (token) clean = clean.split(token).join('[redacted]');
-  clean = clean.replace(SECRET_LIKE, '[redacted]');
+  const clean = redactDiagnosticText(stderrText, [token]);
   const detail = clean
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -210,6 +217,7 @@ function normalizePiUsage(raw) {
 export function createPiSession(opts, {
   spawnProcess = spawn,
   terminateProcess = terminateProcessTree,
+  waitForExit = waitForProcessTreeExit,
 } = {}) {
   const onEvent = opts.onEvent;
 
@@ -226,8 +234,9 @@ export function createPiSession(opts, {
   let turnFailureMessage = null;
   let disposed = false;
   let stderrTail = '';
-  let childExitPromise = Promise.resolve();
+  let childExitPromise = Promise.resolve(true);
   let resolveChildExit = null;
+  let stopChild = () => Promise.resolve(true);
 
   function endTurn(evt) {
     if (!turnOpen) return;
@@ -314,9 +323,7 @@ export function createPiSession(opts, {
   }
 
   function killChild() {
-    const proc = child;
-    if (!proc || proc.exitCode !== null || proc.signalCode !== null) return;
-    terminateProcess(proc);
+    return stopChild();
   }
 
   return {
@@ -326,6 +333,7 @@ export function createPiSession(opts, {
     },
     sendUserMessage(text) {
       if (disposed) return;
+      if (child) throw new Error('Pi process tree cleanup is still pending');
       turnOpen = true;
       turnCompleted = false;
       turnFailureMessage = null;
@@ -361,19 +369,46 @@ export function createPiSession(opts, {
       }
       child = proc;
       childExitPromise = new Promise((resolve) => { resolveChildExit = resolve; });
-      proc.stdout.on('data', createLineReader(makeHandler()));
+      const readStdout = createLineReader(makeHandler());
+      proc.stdout.on('data', readStdout);
+      let outputEnded = false;
+      const endOutput = () => {
+        if (outputEnded) return;
+        outputEnded = true;
+        readStdout.end();
+      };
+      let cleanupPromise = null;
+      stopChild = () => {
+        if (proc !== child) return Promise.resolve(true);
+        if (cleanupPromise) return cleanupPromise;
+        let resolveCleanup = () => {};
+        cleanupPromise = new Promise((resolve) => { resolveCleanup = resolve; });
+        let termination;
+        let exited;
+        try { termination = Promise.resolve(terminateProcess(proc)); } catch { termination = Promise.resolve(false); }
+        try { exited = Promise.resolve(waitForExit(proc)); } catch { exited = Promise.resolve(false); }
+        void Promise.all([termination, exited]).then(
+          ([terminationResult, exitResult]) => terminationResult !== false && exitResult !== false,
+          () => false,
+        ).then((cleaned) => {
+          endOutput();
+          if (cleaned && proc === child) child = null;
+          resolveChildExit?.(cleaned);
+          resolveChildExit = null;
+          resolveCleanup(cleaned);
+        });
+        return cleanupPromise;
+      };
       proc.stderr.on('data', (chunk) => {
         const chunkText = chunk.toString();
         stderrTail = (stderrTail + chunkText).slice(-STDERR_TAIL_LIMIT);
-        for (const line of chunkText.split('\n')) {
-          if (line.trim()) process.stderr.write(`[pi] ${line}\n`);
-        }
       });
       proc.on('error', (err) => {
         if (proc !== child) return;
-        process.stderr.write(`[pi] spawn error: ${err?.message ?? err}\n`);
+        const safeError = redactDiagnosticText(err?.message ?? err, [opts.token]);
+        process.stderr.write(`[pi] spawn error: ${safeError}\n`);
         if (turnOpen) {
-          onEvent({ type: 'error', agent, message: `pi process error: ${err?.message ?? err}` });
+          onEvent({ type: 'error', agent, message: `pi process error: ${safeError}` });
           endTurn({ type: 'turn-end', agent, stopReason: 'exited' });
         }
       });
@@ -393,15 +428,14 @@ export function createPiSession(opts, {
             endTurn({ type: 'turn-end', agent, stopReason: turnCompleted ? 'completed' : 'exited' });
           }
         }
-        child = null;
-        resolveChildExit?.();
-        resolveChildExit = null;
+        // Leader exit is not process-tree exit. Keep its identity until the
+        // bounded group/task-tree cleanup settles.
+        void stopChild();
       });
       proc.on('close', () => {
         if (proc !== child) return;
-        child = null;
-        resolveChildExit?.();
-        resolveChildExit = null;
+        endOutput();
+        void stopChild();
       });
     },
     setPermissionProfile(profile) {
@@ -412,8 +446,10 @@ export function createPiSession(opts, {
     async setExecutionMode(mode) {
       if (turnOpen) throw new Error('Execution mode can only change between turns');
       validateExecutionMode(mode);
-      if (child && child.exitCode === null && child.signalCode === null) killChild();
-      await childExitPromise;
+      if (child) killChild();
+      if (await childExitPromise === false) {
+        throw new Error('Pi process tree could not be stopped for the mode change');
+      }
       opts.workflow = mode.workflow;
       opts.phase = mode.phase;
       opts.capabilityEpoch = mode.capabilityEpoch;
@@ -427,9 +463,7 @@ export function createPiSession(opts, {
       turnOpen = false;
       // 죽어가는 자식의 stdout 을 아예 파싱하지 않는다.
       try { child?.stdout?.removeAllListeners('data'); } catch {}
-      const exited = waitForProcessTreeExit(child);
-      killChild();
-      return exited;
+      return killChild();
     },
   };
 }

@@ -8,8 +8,8 @@ const bridge = readFileSync(new URL('../src/agent/bridge.ts', import.meta.url), 
 const css = readFileSync(new URL('../src/ui/agent-sidebar/agent-sidebar.css', import.meta.url), 'utf8');
 const types = readFileSync(new URL('../src/agent/types.ts', import.meta.url), 'utf8');
 
-test('question interaction uses strict protocol v4 and a reconnect-idempotent answer frame', () => {
-  assert.match(types, /AGENT_PROTOCOL_VERSION = 4/);
+test('question interaction uses strict protocol v5 and a reconnect-idempotent answer frame', () => {
+  assert.match(types, /AGENT_PROTOCOL_VERSION = 5/);
   assert.match(bridge, /answerUserQuestion\(interactionId: string, answers: Record<string, UserQuestionAnswer>\)/);
   assert.match(bridge, /type: 'user-question-answer'/);
   assert.match(bridge, /interactionId,\s*responseId,\s*answers/);

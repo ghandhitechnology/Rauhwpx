@@ -7,6 +7,7 @@ import { computeArrowResize, MIN_SIZE_HWP, type ArrowKey } from './picture-resiz
 import { computeRotationRecord } from './object-drag-record';
 import type { CellPathLike } from '@/core/types';
 import { objectAddressScope } from '@/core/object-address';
+import { INSERTED_IMAGE_MAX_BYTES, readBlobBytesWithLimit } from '@/core/document-input-limits';
 import { showToast } from '@/ui/toast';
 
 type PictureObjectRef = {
@@ -159,7 +160,7 @@ export function promptAssignPictureImage(this: any, ref: PictureObjectRef): void
     if (!file) return;
     let objectUrl = '';
     try {
-      const data = new Uint8Array(await file.arrayBuffer());
+      const data = await readBlobBytesWithLimit(file, INSERTED_IMAGE_MAX_BYTES, '그림');
       const ext = file.name.split('.').pop()?.toLowerCase() || 'png';
       const img = new Image();
       objectUrl = URL.createObjectURL(file);

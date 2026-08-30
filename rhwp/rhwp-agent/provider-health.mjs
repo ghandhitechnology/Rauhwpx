@@ -1,6 +1,12 @@
 // cross-spawn is required for app-managed .cmd shims on Windows.
 import spawn from 'cross-spawn';
 
+import {
+  processTreeSpawnOptions,
+  terminateAndWaitForProcessTreeExit,
+  terminateProcessTree,
+} from './process-tree.mjs';
+
 /** CLI 가 살아 있는지 확인하는 프로브 — `<cli> --version` 한 줄이면 충분하다. */
 const PROBE_COMMANDS = /** @type {const} */ ({
   claude: 'claude',
@@ -12,6 +18,8 @@ const CLI_AGENTS = /** @type {const} */ (Object.keys(PROBE_COMMANDS));
 const PROBE_TIMEOUT_MS = 5_000;
 const CACHE_TTL_MS = 60_000;
 const STDERR_TAIL_LIMIT = 2_000;
+export const PROBE_STDOUT_LIMIT_BYTES = 64 * 1024;
+export const PROBE_STDERR_LIMIT_BYTES = 16 * 1024;
 
 /** pi 는 PATH 가 아니라 우리가 설치한 경로에 있다 — 미설치면 프로브 자체를 걸지 않는다. */
 const PI_NOT_INSTALLED = '설치되지 않았어요';
@@ -65,6 +73,7 @@ export function createProviderHealth({
   piBin = () => null,
   cliBin = (agent) => PROBE_COMMANDS[agent],
   probeEnv = () => undefined,
+  platform = process.platform,
 } = {}) {
   /** @type {{ result: { claude: ProviderHealth, codex: ProviderHealth, grok: ProviderHealth, cursor: ProviderHealth, pi: ProviderHealth }, checkedAt: number } | null} */
   let cache = null;
@@ -81,6 +90,9 @@ export function createProviderHealth({
       let settled = false;
       let stdoutText = '';
       let stderrText = '';
+      let stdoutBytes = 0;
+      let stderrBytes = 0;
+      let forcedHealth = null;
       /** @type {NodeJS.Timeout | null} */
       let timer = null;
 
@@ -91,10 +103,21 @@ export function createProviderHealth({
         resolve({ ...health, checkedAt: now() });
       };
 
+      const stopWith = (health) => {
+        if (settled || forcedHealth) return;
+        forcedHealth = health;
+        void terminateAndWaitForProcessTreeExit(proc, {
+          timeoutMs: Math.min(4_000, Math.max(1_500, timeoutMs)),
+          terminateProcess: terminateProcessTree,
+          terminateOptions: { platform, spawnProcess, graceMs: 1_000 },
+        }).finally(() => done(health));
+      };
+
       let proc;
       try {
         proc = spawnProcess(command, ['--version'], {
           stdio: ['ignore', 'pipe', 'pipe'],
+          ...processTreeSpawnOptions(platform),
           ...(env ? { env } : {}),
         });
       } catch (error) {
@@ -107,19 +130,45 @@ export function createProviderHealth({
       }
 
       timer = setTimeout(() => {
-        try { proc.kill('SIGKILL'); } catch {}
-        done({
+        stopWith({
           available: false,
           version: null,
           error: `${command} --version 이 ${Math.round(timeoutMs / 100) / 10}초 안에 응답하지 않았습니다.`,
         });
       }, timeoutMs);
 
-      proc.stdout?.on?.('data', (chunk) => { stdoutText += chunk.toString(); });
-      proc.stderr?.on?.('data', (chunk) => { stderrText += chunk.toString(); });
+      proc.stdout?.on?.('data', (chunk) => {
+        if (settled || forcedHealth) return;
+        const size = Buffer.isBuffer(chunk) ? chunk.byteLength : Buffer.byteLength(String(chunk));
+        stdoutBytes += size;
+        if (stdoutBytes > PROBE_STDOUT_LIMIT_BYTES) {
+          stopWith({
+            available: false,
+            version: null,
+            error: `${command} --version stdout 이 64 KiB 안전 한도를 넘었습니다.`,
+          });
+          return;
+        }
+        stdoutText += chunk.toString();
+      });
+      proc.stderr?.on?.('data', (chunk) => {
+        if (settled || forcedHealth) return;
+        const size = Buffer.isBuffer(chunk) ? chunk.byteLength : Buffer.byteLength(String(chunk));
+        stderrBytes += size;
+        if (stderrBytes > PROBE_STDERR_LIMIT_BYTES) {
+          stopWith({
+            available: false,
+            version: null,
+            error: `${command} --version stderr 이 16 KiB 안전 한도를 넘었습니다.`,
+          });
+          return;
+        }
+        stderrText += chunk.toString();
+      });
       proc.stdout?.on?.('error', () => {});
       proc.stderr?.on?.('error', () => {});
       proc.on('error', (error) => {
+        if (forcedHealth) return;
         if (error?.code === 'ENOENT') {
           done({
             available: false,
@@ -135,6 +184,7 @@ export function createProviderHealth({
         });
       });
       const finish = (code, signal) => {
+        if (forcedHealth) return;
         if (code === 0) {
           done({ available: true, version: firstLine(stdoutText), error: null });
           return;

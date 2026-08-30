@@ -99,7 +99,7 @@ fn load_bounded_embedded_font_bytes(
     font_ids: &[u16],
     per_font_limit: usize,
     page_limit: usize,
-) -> std::collections::HashMap<u16, Vec<u8>> {
+) -> std::collections::HashMap<u16, std::sync::Arc<[u8]>> {
     let mut bytes_by_id = std::collections::HashMap::new();
     let mut attempted_ids = std::collections::HashSet::new();
     let mut loaded_bytes = 0usize;
@@ -116,7 +116,7 @@ fn load_bounded_embedded_font_bytes(
         let Some(bytes) = contents
             .iter()
             .find(|content| content.id == font_id)
-            .and_then(|content| content.data.load_limited(load_limit))
+            .and_then(|content| content.data.load_limited_shared(load_limit))
             .filter(|bytes| !bytes.is_empty())
         else {
             continue;
@@ -785,7 +785,7 @@ impl DocumentCore {
                             language_index,
                             family,
                             alternate_family,
-                            bytes: font_bytes_by_id.get(&bin_data_id)?.as_slice(),
+                            bytes: font_bytes_by_id.get(&bin_data_id)?.as_ref(),
                             face_index,
                         })
                     },
@@ -1041,7 +1041,7 @@ impl DocumentCore {
         let mut map = std::collections::HashMap::new();
         for (name, id) in name_id {
             if let Some(bytes) = bytes_by_id.get(&id) {
-                map.entry(name).or_insert_with(|| bytes.clone());
+                map.entry(name).or_insert_with(|| bytes.as_ref().to_vec());
             }
         }
         map
@@ -1573,15 +1573,15 @@ impl DocumentCore {
                     if detected == "image/x-pcx" {
                         match crate::renderer::svg::pcx_bytes_to_png_bytes(data) {
                             Some(png) => ("image/png", std::borrow::Cow::Owned(png)),
-                            None => (detected, std::borrow::Cow::Borrowed(data.as_slice())),
+                            None => (detected, std::borrow::Cow::Borrowed(data.as_ref())),
                         }
                     } else if detected == "image/bmp" {
                         match crate::renderer::svg::bmp_bytes_to_png_bytes(data) {
                             Some(png) => ("image/png", std::borrow::Cow::Owned(png)),
-                            None => (detected, std::borrow::Cow::Borrowed(data.as_slice())),
+                            None => (detected, std::borrow::Cow::Borrowed(data.as_ref())),
                         }
                     } else {
-                        (detected, std::borrow::Cow::Borrowed(data.as_slice()))
+                        (detected, std::borrow::Cow::Borrowed(data.as_ref()))
                     };
                 mime = final_mime;
                 base64_data = base64::engine::general_purpose::STANDARD.encode(&*final_data);
@@ -6601,10 +6601,10 @@ mod tests {
         let loaded = load_bounded_embedded_font_bytes(&contents, &[1, 2, 3, 1], 4, 6);
 
         assert_eq!(loaded.len(), 2);
-        assert_eq!(loaded.get(&1).map(Vec::len), Some(4));
+        assert_eq!(loaded.get(&1).map(|bytes| bytes.len()), Some(4));
         assert!(!loaded.contains_key(&2));
-        assert_eq!(loaded.get(&3).map(Vec::len), Some(2));
-        assert_eq!(loaded.values().map(Vec::len).sum::<usize>(), 6);
+        assert_eq!(loaded.get(&3).map(|bytes| bytes.len()), Some(2));
+        assert_eq!(loaded.values().map(|bytes| bytes.len()).sum::<usize>(), 6);
     }
 
     #[test]
@@ -6633,10 +6633,7 @@ mod tests {
         });
         let contents = vec![BinDataContent {
             id: 1,
-            data: BinDataBytes::Lazy {
-                resolver: resolver.clone(),
-                key: "compressed-oversized-font".to_string(),
-            },
+            data: BinDataBytes::lazy(resolver.clone(), "compressed-oversized-font".to_string()),
             extension: "ttf".to_string(),
         }];
 
@@ -6765,10 +6762,10 @@ mod tests {
         });
         document.bin_data_content.push(BinDataContent {
             id: 2,
-            data: BinDataBytes::Lazy {
-                resolver: std::sync::Arc::new(UnexpectedFontResolver),
-                key: "font-unused".to_string(),
-            },
+            data: BinDataBytes::lazy(
+                std::sync::Arc::new(UnexpectedFontResolver),
+                "font-unused".to_string(),
+            ),
             extension: "ttf".to_string(),
         });
         document.sections.push(Section {

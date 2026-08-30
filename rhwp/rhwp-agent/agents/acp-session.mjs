@@ -1,5 +1,5 @@
 import spawn from 'cross-spawn';
-import { Readable, Writable } from 'node:stream';
+import { Readable, Transform, Writable } from 'node:stream';
 import {
   PROTOCOL_VERSION,
   client,
@@ -8,10 +8,38 @@ import {
 } from '@agentclientprotocol/sdk';
 import {
   processTreeSpawnOptions,
+  terminateAndWaitForProcessTreeExit,
   terminateProcessTree,
 } from '../process-tree.mjs';
 
 const PASSTHROUGH = { parse: (value) => value };
+const MAX_PROVIDER_FRAME_BYTES = 8 * 1024 * 1024;
+
+export function createBoundedNdjsonTransform(maxFrameBytes = MAX_PROVIDER_FRAME_BYTES) {
+  let pendingBytes = 0;
+  return new Transform({
+    transform(chunk, _encoding, callback) {
+      const bytes = Buffer.from(chunk);
+      let segmentStart = 0;
+      for (let index = 0; index < bytes.length; index += 1) {
+        if (bytes[index] !== 0x0a) continue;
+        pendingBytes += index - segmentStart;
+        if (pendingBytes > maxFrameBytes) {
+          callback(new Error(`ACP provider frame exceeded ${maxFrameBytes} bytes`));
+          return;
+        }
+        pendingBytes = 0;
+        segmentStart = index + 1;
+      }
+      pendingBytes += bytes.length - segmentStart;
+      if (pendingBytes > maxFrameBytes) {
+        callback(new Error(`ACP provider frame exceeded ${maxFrameBytes} bytes`));
+        return;
+      }
+      callback(null, bytes);
+    },
+  });
+}
 
 /** @typedef {{ method: string, handler: (context: any) => any }} AcpHandler */
 /**
@@ -178,6 +206,8 @@ export function createPersistentAcpSession({
   /** @type {string|null} */
   let selectedModel = null;
   let disposed = false;
+  /** @type {{ child: any, completion: Promise<boolean> } | null} */
+  let pendingProcessCleanup = null;
 
   const app = client({ name: clientName });
   app.onRequest(methods.client.session.requestPermission, (ctx) => (
@@ -230,7 +260,20 @@ export function createPersistentAcpSession({
     initializeResponse = null;
     setupResponse = null;
     startPromise = null;
-    proc = null;
+  }
+
+  function beginProcessCleanup(child) {
+    const current = pendingProcessCleanup;
+    if (current && current.child === child) return current.completion;
+    const completion = terminateAndWaitForProcessTreeExit(child, { terminateProcess })
+      .catch(() => false)
+      .then((cleaned) => {
+        if (cleaned && proc === child) proc = null;
+        if (cleaned && pendingProcessCleanup?.child === child) pendingProcessCleanup = null;
+        return cleaned;
+      });
+    pendingProcessCleanup = { child, completion };
+    return completion;
   }
 
   async function closeProcess() {
@@ -239,16 +282,13 @@ export function createPersistentAcpSession({
     promptController?.abort(new Error(`${clientName} ACP connection closed`));
     clearConnection();
     try { oldConnection?.close(); } catch {}
-    if (!oldProc) return;
-    try {
-      if (oldProc.exitCode === null && oldProc.signalCode === null) {
-        await terminateProcess(oldProc);
-      }
-    } catch {}
+    if (!oldProc) return true;
+    return beginProcessCleanup(oldProc);
   }
 
   async function startOnce() {
     if (disposed) throw new Error(`${clientName} ACP session is disposed`);
+    if (proc) throw new Error(`${clientName} ACP process-tree cleanup is still pending`);
     const child = spawnProcess(command, args, {
       ...processTreeSpawnOptions(),
       cwd,
@@ -262,9 +302,15 @@ export function createPersistentAcpSession({
       if (stderr.length > 16_384) stderr = stderr.slice(-16_384);
       onStderr(String(chunk));
     });
+    const boundedStdout = createBoundedNdjsonTransform();
+    boundedStdout.once('error', (error) => {
+      onStderr(`${error.message}\n`);
+      void beginProcessCleanup(child);
+    });
+    child.stdout.pipe(boundedStdout);
     const stream = ndJsonStream(
       /** @type {any} */ (Writable.toWeb(child.stdin)),
-      /** @type {any} */ (Readable.toWeb(child.stdout)),
+      /** @type {any} */ (Readable.toWeb(boundedStdout)),
     );
     const connected = app.connect(stream);
     connection = connected;
@@ -408,12 +454,14 @@ export function createPersistentAcpSession({
 
   async function restart() {
     if (promptActive) throw new Error('ACP transport can only restart between turns');
-    await closeProcess();
+    if (!await closeProcess()) {
+      throw new Error(`${clientName} ACP process-tree cleanup could not be confirmed`);
+    }
   }
 
   async function dispose() {
     disposed = true;
-    await closeProcess();
+    return closeProcess();
   }
 
   return {

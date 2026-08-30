@@ -437,3 +437,40 @@ test('oversized CLI output keeps its workspace until the child closes', async ()
   assert.equal(await pending, null);
   await assert.rejects(() => fs.access(cwd), { code: 'ENOENT' });
 });
+
+test('checkpoint workspace stays live until held-pipe tree cleanup is proven', async () => {
+  let proc;
+  let cwd;
+  let releaseCleanup;
+  const cleanup = new Promise((resolve) => { releaseCleanup = resolve; });
+  const pending = generateCheckpointTitle(request(), {
+    readiness: readiness({
+      pi: { ready: false, model: '' },
+      grok: { ready: false, model: '' },
+      claude: { ready: false, model: '' },
+    }),
+    providerTimeoutMs: 500,
+    overallTimeoutMs: 1_000,
+    spawnProcess(command, argv, options) {
+      cwd = options.cwd;
+      proc = new HungProcess();
+      queueMicrotask(() => proc.stdout.emit('data', 'x'.repeat(2 * 1024 * 1024)));
+      return proc;
+    },
+    terminateProcess(child) {
+      child.signalCode = 'SIGTERM';
+      child.emit('exit', null, 'SIGTERM');
+      return cleanup;
+    },
+  });
+  let settled = false;
+  void pending.finally(() => { settled = true; });
+
+  while (!proc) await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  await fs.access(cwd);
+  releaseCleanup(true);
+  assert.equal(await pending, null);
+  await assert.rejects(() => fs.access(cwd), { code: 'ENOENT' });
+});

@@ -28,6 +28,10 @@ const safariBackground = fs.readFileSync(
   new URL('rhwp-safari/src/background.js', repositoryRoot),
   'utf8',
 );
+const safariFetchSecurity = fs.readFileSync(
+  new URL('rhwp-safari/src/fetch-security.js', repositoryRoot),
+  'utf8',
+);
 const privateNetworkModule = fs.readFileSync(
   new URL('rhwp-shared/sw/private-network.js', repositoryRoot),
   'utf8',
@@ -104,11 +108,16 @@ test('HTML, JSON, 빈 Version HWPML은 HML로 허용하지 않는다', () => {
   }
 });
 
-test('Safari가 공용 보안 판별기를 background보다 먼저 적재하고 dist로 복사한다', () => {
-  assert.deepEqual(safariManifest.background.scripts, ['file-signature.js', 'private-network.js', 'background.js']);
-  assert.match(safariBuildScript, /cp "\$ROOT\/rhwp-shared\/security\/file-signature\.js" "\$DIST\/file-signature\.js"/);
+test('Safari가 bounded fetch guards를 먼저 적재하고 원격 프록시는 fail closed한다', () => {
+  assert.deepEqual(safariManifest.background.scripts, [
+    'private-network.js',
+    'fetch-security.js',
+    'background.js',
+  ]);
   assert.match(safariBuildScript, /sed 's\/\^export \/\/' "\$ROOT\/rhwp-shared\/sw\/private-network\.js" > "\$DIST\/private-network\.js"/);
-  assert.match(safariBackground, /verifyDocumentSignature\(buf\)/);
+  assert.match(safariBuildScript, /cp "\$SRC\/fetch-security\.js" "\$DIST\/fetch-security\.js"/);
+  assert.doesNotMatch(safariBackground, /verifyDocumentSignature/);
+  assert.match(safariBackground, /REMOTE_PROXY_UNAVAILABLE/);
   assert.match(safariBackground, /isBlockedHost\(parsed\.hostname/);
 
   const listeners = {};
@@ -128,8 +137,8 @@ test('Safari가 공용 보안 판별기를 background보다 먼저 적재하고 
     },
   };
   vm.createContext(safariContext);
-  vm.runInContext(source, safariContext, { filename: 'file-signature.js' });
   vm.runInContext(safariPrivateNetwork, safariContext, { filename: 'private-network.js' });
+  vm.runInContext(safariFetchSecurity, safariContext, { filename: 'fetch-security.js' });
   vm.runInContext(safariBackground, safariContext, { filename: 'background.js' });
 
   assert.equal(typeof listeners.message, 'function');

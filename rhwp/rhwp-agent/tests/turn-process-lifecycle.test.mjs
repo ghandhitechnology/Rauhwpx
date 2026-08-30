@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import test from 'node:test';
 
-import { createTurnProcessLifecycle } from '../agents/backend.mjs';
+import {
+  createLineReader,
+  createTurnProcessLifecycle,
+  redactDiagnosticText,
+} from '../agents/backend.mjs';
 
 class FakeStream extends EventEmitter {}
 
@@ -13,6 +17,50 @@ class FakeProcess extends EventEmitter {
   signalCode = null;
 }
 
+test('provider diagnostics redact explicit and key-shaped credentials', () => {
+  const diagnostic = redactDiagnosticText(
+    'token=session-secret Authorization: Bearer abcdefghijkl '
+      + 'api_key="provider-secret" sk-or-v1-0123456789abcdef '
+      + 'sk-ant-api03-abcdefghijklmnop '
+      + 'https://user:password@example.com/oauth?code=oauth-code-123&state=state-secret '
+      + 'oauth_code=assignment-secret C:\\Users\\tester\\.claude\\logs',
+    ['session-secret'],
+  );
+  assert.doesNotMatch(
+    diagnostic,
+    /session-secret|abcdefghijkl|provider-secret|0123456789abcdef|password|oauth-code-123|state-secret|assignment-secret/,
+  );
+  assert.match(diagnostic, /\[redacted\]/);
+  assert.ok(diagnostic.includes('C:\\Users\\tester\\.claude\\logs'));
+});
+
+test('provider NDJSON line buffering discards oversized frames and recovers at the next newline', () => {
+  const frames = [];
+  let overflows = 0;
+  const read = createLineReader((frame) => frames.push(frame), {
+    maxLineBytes: 16,
+    onOverflow: () => { overflows += 1; },
+  });
+  read('{"oversized":"xxxxxxxxxxxxxxxxxxxxxxxx');
+  read('\n{"ok":true}\n');
+  assert.equal(overflows, 1);
+  assert.deepEqual(frames, [{ ok: true }]);
+});
+
+test('provider NDJSON preserves UTF-8 code points split across chunks', () => {
+  const frames = [];
+  const read = createLineReader((frame) => frames.push(frame));
+  const encoded = Buffer.from('{"text":"한글🙂"}\n{"tail":"끝"}', 'utf8');
+  const koreanSplit = encoded.indexOf(Buffer.from('한', 'utf8')) + 1;
+  const emojiSplit = encoded.indexOf(Buffer.from('🙂', 'utf8')) + 2;
+  read(encoded.subarray(0, koreanSplit));
+  read(encoded.subarray(koreanSplit, emojiSplit));
+  read(encoded.subarray(emojiSplit));
+  read.end();
+
+  assert.deepEqual(frames, [{ text: '한글🙂' }, { tail: '끝' }]);
+});
+
 /** graceMs 를 짧게 준 수명주기와 이벤트 배열을 함께 돌려준다. */
 function makeLifecycle(extra = {}) {
   const events = [];
@@ -21,6 +69,7 @@ function makeLifecycle(extra = {}) {
     onEvent: (event) => events.push(event),
     formatExitError: (stderrText, code, signal) => `중단 (${signal ?? code}): ${stderrText.trim()}`,
     terminateProcess: () => {},
+    waitForExit: async () => true,
     graceMs: 5,
     ...extra,
   });
@@ -46,6 +95,45 @@ test("an 'exit' without a following 'close' settles the turn after the grace win
   assert.equal(events[1].message, '중단 (3): boom');
   assert.deepEqual(events[2], { type: 'turn-end', agent: 'grok', stopReason: 'exited' });
   assert.equal(lifecycle.isTurnOpen(), false);
+});
+
+test('leader exit retains tree identity through held stdout and delayed disposal', async () => {
+  let finishTermination;
+  let finishTreeWait;
+  let terminationCalls = 0;
+  const termination = new Promise((resolve) => { finishTermination = resolve; });
+  const treeWait = new Promise((resolve) => { finishTreeWait = resolve; });
+  const { lifecycle, events } = makeLifecycle({
+    terminateProcess: () => {
+      terminationCalls += 1;
+      return termination;
+    },
+    waitForExit: () => treeWait,
+  });
+  const proc = new FakeProcess();
+  lifecycle.beginTurn();
+  lifecycle.attachChild(proc, () => {});
+  lifecycle.markTurnCompleted();
+  proc.exitCode = 0;
+  proc.emit('exit', 0, null);
+
+  // A descendant still owns stdout, so no `close` arrives. The turn can settle
+  // after its parsing grace, but disposal must reuse the in-flight tree proof.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(events.at(-1), { type: 'turn-end', agent: 'grok', stopReason: 'completed' });
+  let disposalSettled = false;
+  const disposed = lifecycle.dispose().then((value) => {
+    disposalSettled = true;
+    return value;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(disposalSettled, false);
+  assert.equal(terminationCalls, 1);
+
+  finishTermination(true);
+  finishTreeWait(false);
+  assert.equal(await disposed, false);
+  assert.equal(await lifecycle.dispose(), false);
 });
 
 test('a stale child that dies after a respawn cannot close the new turn', async () => {

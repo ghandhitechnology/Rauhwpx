@@ -218,6 +218,31 @@ test('connect fails closed on a bad management key and does not persist it', asy
   await fs.rm(rootDir, { recursive: true, force: true });
 });
 
+test('init rejects an oversized persistent config before parsing its management key', async (t) => {
+  const rootDir = await tmpRoot();
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  await fs.writeFile(path.join(rootDir, 'cliproxy.json'), Buffer.alloc(64 * 1024 + 1, 0x20));
+
+  await assert.rejects(createCliproxyClient({ rootDir, env: {} }).init(), {
+    code: 'BOUNDED_FILE_TOO_LARGE',
+  });
+});
+
+test('management responses above 8 MiB fail without being parsed or persisted', async () => {
+  const rootDir = await tmpRoot();
+  const client = await createCliproxyClient({
+    rootDir,
+    env: {},
+    fetchImpl: async () => new Response(Buffer.alloc(8 * 1024 * 1024 + 1), { status: 200 }),
+  }).init();
+  await assert.rejects(
+    client.connect({ url: DEFAULT_CLIPROXY_URL, key: 'secret' }),
+    (error) => error.code === 'CLIPROXY_RESPONSE_TOO_LARGE',
+  );
+  await assert.rejects(fs.readFile(path.join(rootDir, 'cliproxy.json')));
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
 test('refresh uses the saved config and caches a successful quota for a minute', async () => {
   const rootDir = await tmpRoot();
   let hits = 0;

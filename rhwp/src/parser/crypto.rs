@@ -10,9 +10,10 @@
 //!
 //! 참조: /home/edward/vsworks/shwp/hwp_semantic/crypto.py
 
-use super::cfb_reader::decompress_stream;
+use super::cfb_reader::decompress_stream_limited;
 use super::record::Record;
 use super::tags;
+use crate::parser::limits::MAX_STRUCTURAL_BYTES;
 
 /// 배포용 문서 복호화 에러
 #[derive(Debug)]
@@ -328,6 +329,17 @@ pub fn decrypt_viewtext_section(
     section_data: &[u8],
     compressed: bool,
 ) -> Result<Vec<u8>, CryptoError> {
+    decrypt_viewtext_section_limited(section_data, compressed, MAX_STRUCTURAL_BYTES)
+}
+
+/// Decrypt a ViewText section without allocating beyond the caller's remaining
+/// aggregate structural budget.
+pub fn decrypt_viewtext_section_limited(
+    section_data: &[u8],
+    compressed: bool,
+    max_bytes: usize,
+) -> Result<Vec<u8>, CryptoError> {
+    let max_bytes = max_bytes.min(MAX_STRUCTURAL_BYTES);
     // 첫 번째 레코드만 파싱 (DISTRIBUTE_DOC_DATA)
     // 주의: Record::read_all을 사용하면 안 됨!
     // ViewText 섹션은 [DISTRIBUTE_DOC_DATA 레코드] + [AES 암호문] 구조이므로
@@ -363,12 +375,26 @@ pub fn decrypt_viewtext_section(
 
     let encrypted_body = &section_data[encrypted_start..];
 
+    // ECB emits a complete 16-byte block for a partial final block. Check that
+    // rounded size before `Vec::with_capacity` in `decrypt_aes_ecb`.
+    let decrypted_len = encrypted_body
+        .len()
+        .checked_add(15)
+        .map(|len| len / 16 * 16)
+        .ok_or_else(|| CryptoError::DecryptionFailed("복호화 결과 크기 오버플로".to_string()))?;
+    if decrypted_len > max_bytes {
+        return Err(CryptoError::DecryptionFailed(format!(
+            "복호화 결과가 {max_bytes}바이트 상한을 초과함"
+        )));
+    }
+
     // AES-128 ECB 복호화
     let decrypted_body = decrypt_aes_ecb(encrypted_body, &aes_key);
 
     // 압축 해제
     if compressed {
-        decompress_stream(&decrypted_body).map_err(|e| CryptoError::DecompressError(e.to_string()))
+        decompress_stream_limited(&decrypted_body, max_bytes)
+            .map_err(|e| CryptoError::DecompressError(e.to_string()))
     } else {
         Ok(decrypted_body)
     }

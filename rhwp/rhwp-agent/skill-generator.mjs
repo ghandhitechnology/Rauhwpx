@@ -7,6 +7,7 @@ import { openRouterReady } from './agents/title.mjs';
 import {
   isolatedProcessEnv,
   processTreeSpawnOptions,
+  terminateAndWaitForProcessTreeExit,
   terminateProcessTree,
 } from './process-tree.mjs';
 
@@ -25,6 +26,8 @@ const SCHEMA = {
     },
   },
 };
+const MAX_STRUCTURED_STDOUT_BYTES = 8 * 1024 * 1024;
+const MAX_STRUCTURED_STDERR_BYTES = 64 * 1024;
 
 function promptFor(input) {
   return `Create a concise, portable agent skill for rhwp. Return JSON matching the supplied schema. The files array must include SKILL.md. SKILL.md frontmatter must contain name and description; the product UI adds its optional icon selection. Use lowercase hyphen-case. Write imperative instructions. Put detailed reusable material in references/, and deterministic code only when scripts are genuinely needed. Do not create README or changelog files.\n\nGoal: ${input.goal}\nShould trigger: ${input.triggerExamples || '(infer from goal)'}\nShould not trigger: ${input.nonTriggerExamples || '(none supplied)'}\nResource guidance: ${input.resourceNotes || 'instruction-only unless a resource is clearly necessary'}${input.existingSkill ? `\n\nImprove this existing skill:\n${input.existingSkill}` : ''}`;
@@ -42,17 +45,64 @@ function run(command, args, stdin, timeoutMs = 90_000, spawnOptions = {}, deps =
     });
     let stdout = '';
     let stderr = '';
-    const timer = setTimeout(() => {
-      terminateProcess(child);
-      reject(new Error('Skill generation timed out'));
-    }, timeoutMs);
-    child.stdout.on('data', (chunk) => { stdout += chunk; });
-    child.stderr.on('data', (chunk) => { stderr = (stderr + chunk).slice(-8000); });
-    child.on('error', (error) => { clearTimeout(timer); reject(error); });
-    child.on('exit', (code) => {
+    let stdoutBytes = 0;
+    let settled = false;
+    let forcedError = null;
+    let cleanupPromise = null;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
-      if (code === 0) resolve(stdout);
-      else reject(new Error(stderr.trim() || `${command} exited with code ${code}`));
+      if (error) reject(error);
+      else resolve(value);
+    };
+    const cleanup = () => {
+      if (cleanupPromise) return cleanupPromise;
+      cleanupPromise = terminateAndWaitForProcessTreeExit(child, { terminateProcess })
+        .catch(() => false);
+      return cleanupPromise;
+    };
+    const finishAfterCleanup = (error, value) => {
+      void cleanup().then((cleaned) => {
+        if (!cleaned) {
+          const cleanupError = error ?? new Error('Skill generator process-tree cleanup could not be confirmed');
+          cleanupError.processCleanupUncertain = true;
+          finish(cleanupError);
+          return;
+        }
+        finish(error, value);
+      });
+    };
+    const forceFailure = (error) => {
+      if (settled || forcedError) return;
+      forcedError = error;
+      clearTimeout(timer);
+      finishAfterCleanup(error);
+    };
+    const timer = setTimeout(() => {
+      forceFailure(new Error('Skill generation timed out'));
+    }, timeoutMs);
+    timer.unref?.();
+    child.stdout.on('data', (chunk) => {
+      stdoutBytes += chunk.length;
+      if (stdoutBytes > MAX_STRUCTURED_STDOUT_BYTES) {
+        forceFailure(new Error('Skill generation output exceeded the 8 MiB safety limit'));
+        return;
+      }
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr = (stderr + chunk).slice(-MAX_STRUCTURED_STDERR_BYTES);
+    });
+    child.on('error', (error) => {
+      if (forcedError) return;
+      if (child.pid) finishAfterCleanup(error);
+      else finish(error);
+    });
+    child.on('exit', (code) => {
+      if (forcedError) return;
+      if (code === 0) finishAfterCleanup(null, stdout);
+      else finishAfterCleanup(new Error(stderr.trim() || `${command} exited with code ${code}`));
     });
     child.stdin.end(stdin);
   });
@@ -168,6 +218,7 @@ export async function generateSkillDraft(input, deps = {}) {
   }
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-skill-schema-'));
   const schemaPath = path.join(temp, 'schema.json');
+  let cleanupUncertain = false;
   try {
     await fs.writeFile(schemaPath, JSON.stringify(SCHEMA), 'utf8');
     const output = await run('codex', [
@@ -179,7 +230,10 @@ export async function generateSkillDraft(input, deps = {}) {
       ...(input.model ? ['--model', input.model] : []), '-'
     ], prompt, 90_000, { cwd: temp }, deps);
     return extractCodex(output);
+  } catch (error) {
+    cleanupUncertain = error?.processCleanupUncertain === true;
+    throw error;
   } finally {
-    await fs.rm(temp, { recursive: true, force: true });
+    if (!cleanupUncertain) await fs.rm(temp, { recursive: true, force: true });
   }
 }

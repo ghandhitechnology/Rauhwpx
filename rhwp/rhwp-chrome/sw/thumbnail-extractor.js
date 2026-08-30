@@ -3,10 +3,16 @@
 // CFB(OLE2 Compound File) 컨테이너에서 /PrvImage 스트림만 추출한다.
 // 전체 HWP 파싱 없이 썸네일만 빠르게 얻을 수 있다.
 
-import { fetchDocumentWithPolicy, validateDocumentFetchUrl } from './fetch-security.js';
+import {
+  REMOTE_THUMBNAIL_MAX_BYTES,
+  cancelResponseBody,
+  fetchDocumentWithPolicy,
+  readResponseBytesWithLimit,
+  validateDocumentFetchUrl,
+} from './fetch-security.js';
+import { BoundedThumbnailCache } from './thumbnail-cache.js';
 
-const THUMBNAIL_CACHE = new Map();
-const CACHE_MAX_SIZE = 100;
+const THUMBNAIL_CACHE = new BoundedThumbnailCache();
 // 압축 해제 출력 상한 — PrvImage 이미지(수 MB 수준)를 넘는 출력은 폭탄으로 간주한다.
 const MAX_DECOMPRESSED_BYTES = 10 * 1024 * 1024;
 
@@ -21,31 +27,28 @@ export async function extractThumbnailFromUrl(url, options = {}) {
   const safeUrl = validateDocumentFetchUrl(url, { requireDocumentPath }).href;
 
   // 캐시 확인
-  if (THUMBNAIL_CACHE.has(safeUrl)) {
-    return THUMBNAIL_CACHE.get(safeUrl);
-  }
+  const cached = THUMBNAIL_CACHE.get(safeUrl);
+  if (cached !== undefined) return cached;
 
   try {
     const response = await fetchDocumentWithPolicy(safeUrl, { requireDocumentPath });
-    if (!response.ok) return null;
-    const buffer = await response.arrayBuffer();
-    const data = new Uint8Array(buffer);
+    if (!response.ok) {
+      await cancelResponseBody(response, 'http-error');
+      THUMBNAIL_CACHE.set(safeUrl, null);
+      return null;
+    }
+    const data = await readResponseBytesWithLimit(response, REMOTE_THUMBNAIL_MAX_BYTES);
 
     // HWP(CFB) 또는 HWPX(ZIP) 감지
     const isZip = data.length >= 4 && data[0] === 0x50 && data[1] === 0x4B;
     const result = isZip
       ? await extractPrvImageFromZipAsync(data)
       : extractPrvImage(data);
-    if (result) {
-      // 캐시 저장 (LRU)
-      if (THUMBNAIL_CACHE.size >= CACHE_MAX_SIZE) {
-        const firstKey = THUMBNAIL_CACHE.keys().next().value;
-        THUMBNAIL_CACHE.delete(firstKey);
-      }
-      THUMBNAIL_CACHE.set(safeUrl, result);
-    }
+    // 성공과 실패 모두 같은 LRU/count/byte 한도 안에서 보관한다.
+    THUMBNAIL_CACHE.set(safeUrl, result);
     return result;
   } catch {
+    THUMBNAIL_CACHE.set(safeUrl, null);
     return null;
   }
 }

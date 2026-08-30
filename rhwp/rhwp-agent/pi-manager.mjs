@@ -9,10 +9,11 @@ import { RAU_DEFAULT_MODEL_ID, RAU_LOCKED_MODELS } from '../rau-credits/catalog.
 import { createOpenRouter } from './openrouter.mjs';
 import { fetchLatestPackage, replaceFileAtomically, updatePrefixAtomically } from './harness-update.mjs';
 import { bundledNpmLaunch } from './npm-runtime.mjs';
+import { cancelResponseBody, readResponseJsonBounded } from './response-bounds.mjs';
 import {
   processTreeSpawnOptions,
+  terminateAndWaitForProcessTreeExit,
   terminateProcessTree,
-  waitForProcessTreeExit,
 } from './process-tree.mjs';
 import { setupFailureMessage, shouldUseNpmNetworkPath } from './setup-errors.mjs';
 
@@ -40,6 +41,10 @@ const DEFAULT_MAX_TOKENS = 8_192;
 const STDERR_TAIL_LIMIT = 1_200;
 const INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
 const REGISTRY_TIMEOUT_MS = 10_000;
+const OAUTH_EXCHANGE_TIMEOUT_MS = 20_000;
+const OAUTH_RESPONSE_LIMIT_BYTES = 64 * 1024;
+export const PI_TARBALL_MAX_BYTES = 256 * 1024 * 1024;
+const INSTALL_STDERR_LIMIT_BYTES = 64 * 1024;
 /** 진행 이벤트는 이 간격으로만 내보낸다 — 청크마다 WS 를 두드리지 않는다. */
 const PROGRESS_INTERVAL_MS = 150;
 export const PI_SECRET_ID = 'rhwp.pi.openrouter-api-key';
@@ -96,6 +101,22 @@ function piError(code, message) {
   return error;
 }
 
+function throwIfAuthCancelled(signal) {
+  if (signal?.aborted) {
+    throw piError('AGENT_AUTH_CANCELLED', '로그인을 취소했어요.');
+  }
+}
+
+function authRollbackError(original, rollback) {
+  const error = new AggregateError(
+    [original, rollback],
+    'Authentication failed and its credential rollback also failed.',
+    { cause: original },
+  );
+  error.code = 'AGENT_AUTH_ROLLBACK_FAILED';
+  return error;
+}
+
 function stderrTail(text) {
   return String(text ?? '')
     .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
@@ -105,6 +126,14 @@ function stderrTail(text) {
     .slice(-4)
     .join(' / ')
     .slice(-STDERR_TAIL_LIMIT);
+}
+
+function appendUtf8Tail(current, chunk, maxBytes) {
+  const combined = Buffer.concat([Buffer.from(current, 'utf8'), Buffer.from(chunk)]);
+  if (combined.byteLength <= maxBytes) return combined.toString('utf8');
+  let start = combined.byteLength - maxBytes;
+  while (start < combined.byteLength && (combined[start] & 0xc0) === 0x80) start += 1;
+  return combined.subarray(start).toString('utf8');
 }
 
 /** 토큰 1개당 USD → 100만 토큰당 USD. 부동소수 찌꺼기는 6자리에서 자른다. */
@@ -120,6 +149,21 @@ function keyTailOf(key) {
 /** 저장된 로그인 계정 — 이메일 형식이 아니면 버린다. */
 function storedAccount(raw) {
   return typeof raw === 'string' && raw.includes('@') ? raw.trim() : null;
+}
+
+async function boundedJsonResponse(response, limit = OAUTH_RESPONSE_LIMIT_BYTES) {
+  try {
+    return await readResponseJsonBounded(response, {
+      maxBytes: limit,
+      label: 'OpenRouter OAuth response',
+    }) ?? {};
+  } catch (error) {
+    if (error?.code === 'RESPONSE_BODY_TOO_LARGE') {
+      throw piError('OPENROUTER_OAUTH_RESPONSE_TOO_LARGE', 'OpenRouter 로그인 응답이 너무 커요');
+    }
+    if (error instanceof SyntaxError) return {};
+    throw error;
+  }
 }
 
 /** reasoning 모델에만 붙는다 — pi 의 thinking 레벨을 OpenRouter effort 로 매핑한다. */
@@ -163,7 +207,8 @@ export function defaultRauRoot(env = process.env, platform = process.platform, h
  *           now?: () => number, openRouter?: ReturnType<typeof createOpenRouter>,
  *           npmCommand?: string, nodeCommand?: string, packageSpec?: string, platform?: string,
  *           baseEnv?: NodeJS.ProcessEnv, secretStore?: object, secretId?: string,
- *           lockedModels?: readonly object[] | null, skipLegacyKey?: boolean }} [deps]
+ *           lockedModels?: readonly object[] | null, skipLegacyKey?: boolean,
+ *           tarballMaxBytes?: number }} [deps]
  */
 export function createPiManager({
   rootDir = defaultPiRoot(),
@@ -181,7 +226,11 @@ export function createPiManager({
   secretId = OPENROUTER_SECRET_ID,
   lockedModels = null,
   skipLegacyKey = false,
+  tarballMaxBytes = PI_TARBALL_MAX_BYTES,
 } = {}) {
+  const tarballLimitBytes = Number.isSafeInteger(tarballMaxBytes) && tarballMaxBytes > 0
+    ? Math.min(tarballMaxBytes, PI_TARBALL_MAX_BYTES)
+    : PI_TARBALL_MAX_BYTES;
   const prefixDir = prefixDirOverride ?? path.join(rootDir, 'prefix');
   const locked = Array.isArray(lockedModels) && lockedModels.length > 0
     ? lockedModels.map((model) => ({ ...model, pricing: { ...model.pricing } }))
@@ -223,6 +272,7 @@ export function createPiManager({
   /** @type {Promise<PiStatus> | null} */
   let installInFlight = null;
   let installProcess = null;
+  const installCleanupPromises = new WeakMap();
   /** @type {Set<(progress: { state: string, detail?: string }) => void>} */
   const installListeners = new Set();
   /** 설정 파일 쓰기는 직렬화한다 — 키/모델 갱신이 겹쳐도 순서가 흐트러지지 않도록. */
@@ -377,8 +427,10 @@ export function createPiManager({
         },
       })),
     };
-    // vault 가 없을 때만 키를 파일에 남긴다 — vault 이관이 끝나면 다음 쓰기가 지운다.
-    if (apiKey && !secretStore?.available) provider.apiKey = apiKey;
+    // Vault가 없거나 현재 열리지 않으면 legacy 키를 보존한다. transport가
+    // available이라고 광고하는 것만으로 유일한 사용 가능 복사본을 지우면 안 된다.
+    // 검증된 vault 읽기/쓰기가 성공해 secretStoreError가 사라진 뒤에만 scrub한다.
+    if (apiKey && (!secretStore?.available || secretStoreError)) provider.apiKey = apiKey;
     const payload = { providers: { openrouter: provider } };
     await writeAtomic(modelsPath, `${JSON.stringify(payload, null, 2)}\n`);
   }
@@ -404,10 +456,37 @@ export function createPiManager({
     if (!dist.integrity?.startsWith('sha512-')) {
       throw piError('PI_INSTALL_FAILED', 'pi 패키지 무결성 정보가 없어 설치할 수 없어요');
     }
-    const response = await fetchImpl(dist.tarball, { signal: AbortSignal.timeout(INSTALL_TIMEOUT_MS) });
-    if (!response.ok || !response.body) throw new Error(`tarball HTTP ${response.status}`);
+    const controller = new AbortController();
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, INSTALL_TIMEOUT_MS);
+    let response;
+    try {
+      response = await fetchImpl(dist.tarball, { signal: controller.signal });
+    } catch (error) {
+      clearTimeout(timeout);
+      if (timedOut || error?.name === 'AbortError') {
+        throw piError('PI_INSTALL_FAILED', 'pi 패키지 다운로드가 제한 시간 안에 끝나지 않았어요');
+      }
+      throw error;
+    }
+    if (!response.ok || !response.body) {
+      clearTimeout(timeout);
+      const error = new Error(`tarball HTTP ${response.status}`);
+      await cancelResponseBody(response, error);
+      throw error;
+    }
     const declared = Number(response.headers?.get?.('content-length'));
-    const totalBytes = Number.isFinite(declared) && declared > 0 ? declared : null;
+    const totalBytes = Number.isSafeInteger(declared) && declared > 0 ? declared : null;
+    if (totalBytes !== null && totalBytes > tarballLimitBytes) {
+      const error = piError('PI_INSTALL_FAILED', 'pi 패키지가 256 MiB 다운로드 한도를 초과해요');
+      controller.abort(error);
+      try { await response.body.cancel?.(error); } catch {}
+      clearTimeout(timeout);
+      throw error;
+    }
     const cacheDir = path.join(rootDir, 'cache');
     await fs.mkdir(cacheDir, { recursive: true });
     const filePath = path.join(cacheDir, 'pi-package.tgz');
@@ -415,10 +494,17 @@ export function createPiManager({
     let receivedBytes = 0;
     let lastEmit = 0;
     const handle = await fs.open(filePath, 'w', 0o600);
+    let reader = null;
     try {
-      for await (const rawChunk of response.body) {
+      const consume = async (rawChunk) => {
         const chunk = Buffer.from(rawChunk);
         receivedBytes += chunk.length;
+        if (receivedBytes > tarballLimitBytes) {
+          const error = piError('PI_INSTALL_FAILED', 'pi 패키지가 256 MiB 다운로드 한도를 초과해요');
+          controller.abort(error);
+          try { await reader?.cancel?.(error); } catch {}
+          throw error;
+        }
         hash.update(chunk);
         await handle.write(chunk);
         const ts = now();
@@ -436,8 +522,29 @@ export function createPiManager({
             ...(Number.isFinite(percent) ? { percent } : {}),
           });
         }
+      };
+      if (response.body.getReader) {
+        reader = response.body.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          await consume(value);
+        }
+      } else {
+        for await (const rawChunk of response.body) await consume(rawChunk);
       }
+    } catch (error) {
+      controller.abort(error);
+      try { await response.body.cancel?.(error); } catch {}
+      await handle.close().catch(() => {});
+      await fs.unlink(filePath).catch(() => {});
+      if (timedOut || error?.name === 'AbortError') {
+        throw piError('PI_INSTALL_FAILED', 'pi 패키지 다운로드가 제한 시간 안에 끝나지 않았어요');
+      }
+      throw error;
     } finally {
+      clearTimeout(timeout);
+      reader?.releaseLock?.();
       await handle.close().catch(() => {});
     }
     if (`sha512-${hash.digest('base64')}` !== dist.integrity) {
@@ -465,14 +572,15 @@ export function createPiManager({
       let stderrText = '';
       let lastActivity = 0;
       let activityPercent = INSTALL_PROGRESS.installStart;
+      let forcedError = null;
       /** @type {NodeJS.Timeout | null} */
       let timer = null;
 
-      const done = (error) => {
+      const done = (error, { retainProcess = false } = {}) => {
         if (settled) return;
         settled = true;
         if (timer) clearTimeout(timer);
-        if (installProcess === proc) installProcess = null;
+        if (!retainProcess && installProcess === proc) installProcess = null;
         if (error) reject(error);
         else resolve();
       };
@@ -489,13 +597,38 @@ export function createPiManager({
       }
       installProcess = proc;
 
-      timer = setTimeout(() => {
-        terminateProcessTree(proc, { platform, spawnProcess });
-        void waitForProcessTreeExit(proc).finally(() => {
-          done(piError('PI_INSTALL_FAILED', 'npm install 이 10분 안에 끝나지 않았어요'));
+      const cleanupProcess = () => {
+        const current = installCleanupPromises.get(proc);
+        if (current) return current;
+        const cleanup = terminateAndWaitForProcessTreeExit(proc, {
+          terminateProcess: terminateProcessTree,
+          terminateOptions: { platform, spawnProcess },
+        }).catch(() => false);
+        installCleanupPromises.set(proc, cleanup);
+        return cleanup;
+      };
+      const cleanupError = () => {
+        const error = piError(
+          'PI_INSTALL_CLEANUP_UNCERTAIN',
+          'npm install 프로세스의 종료를 확인하지 못했어요. 앱을 다시 시작한 뒤 상태를 확인해 주세요.',
+        );
+        error.processCleanupUncertain = true;
+        return error;
+      };
+      const finishAfterCleanup = (error) => {
+        void cleanupProcess().then((cleaned) => {
+          if (!cleaned) {
+            done(cleanupError(), { retainProcess: true });
+            return;
+          }
+          done(error);
         });
+      };
+
+      timer = setTimeout(() => {
+        forcedError = piError('PI_INSTALL_FAILED', 'npm install 이 10분 안에 끝나지 않았어요');
+        finishAfterCleanup(forcedError);
       }, INSTALL_TIMEOUT_MS);
-      if (timer?.unref) timer.unref();
 
       // npm 출력이 나올 때마다 "일이 진행 중" 신호를 흘린다 — 멈추면 UI 막대도 멈춘다.
       const noteActivity = () => {
@@ -509,24 +642,31 @@ export function createPiManager({
       proc.stdout?.on?.('error', () => {});
       proc.stderr?.on?.('data', (chunk) => {
         noteActivity();
-        stderrText += chunk.toString();
+        stderrText = appendUtf8Tail(stderrText, chunk, INSTALL_STDERR_LIMIT_BYTES);
       });
       proc.stderr?.on?.('error', () => {});
       proc.on('error', (error) => {
+        if (forcedError) return;
         const hint = setupFailureMessage(error, '', '번들된 npm 런타임을 시작하지 못했어요.');
-        done(piError('PI_INSTALL_FAILED', hint));
+        const failure = piError('PI_INSTALL_FAILED', hint);
+        if (installCleanupPromises.has(proc)) finishAfterCleanup(failure);
+        else done(failure);
       });
       const finish = (code, signal) => {
+        if (forcedError) return;
+        let error = null;
         if (code === 0) {
-          done(null);
-          return;
+          error = null;
+        } else {
+          const exit = signal ? `signal ${signal}` : `code ${code ?? 'unknown'}`;
+          const detail = stderrTail(stderrText);
+          error = piError(
+            'PI_INSTALL_FAILED',
+            setupFailureMessage(null, detail, `pi 설치가 실패했어요 (${exit})`),
+          );
         }
-        const exit = signal ? `signal ${signal}` : `code ${code ?? 'unknown'}`;
-        const detail = stderrTail(stderrText);
-        done(piError(
-          'PI_INSTALL_FAILED',
-          setupFailureMessage(null, detail, `pi 설치가 실패했어요 (${exit})`),
-        ));
+        if (installCleanupPromises.has(proc)) finishAfterCleanup(error);
+        else done(error);
       };
       proc.on('close', finish);
       // 일부 스텁/플랫폼은 close 없이 exit 만 낸다 — 한 틱 늦춰 마감한다.
@@ -614,6 +754,12 @@ export function createPiManager({
           if (typeof onProgress === 'function') installListeners.delete(onProgress);
         }
       }
+      if (installProcess) {
+        throw piError(
+          'PI_INSTALL_CLEANUP_PENDING',
+          '이전 npm install 프로세스의 종료를 확인하지 못했어요. 앱을 다시 시작한 뒤 재시도해 주세요.',
+        );
+      }
       installing = true;
       lastError = null;
       // await 없이 곧바로 in-flight 를 세워야 동시에 들어온 호출이 하나로 합쳐진다.
@@ -680,6 +826,7 @@ export function createPiManager({
       if (!updateRequired) return currentStatus();
 
       let tarballPath = null;
+      let cleanupUncertain = false;
       try {
         tarballPath = await downloadTarball(dist, () => {});
         await updatePrefixAtomically({
@@ -698,11 +845,12 @@ export function createPiManager({
         config.installedVersion = installedVersion;
         updateRequired = installedVersion !== latestVersion;
         await serialized(() => persistConfig());
-      } catch {
+      } catch (error) {
+        cleanupUncertain = error?.processCleanupUncertain === true;
         installedVersion = await readInstalledVersion();
         updateRequired = installedVersion !== latestVersion;
       } finally {
-        if (tarballPath) await fs.unlink(tarballPath).catch(() => {});
+        if (tarballPath && !cleanupUncertain) await fs.unlink(tarballPath).catch(() => {});
       }
       return currentStatus();
     },
@@ -718,31 +866,83 @@ export function createPiManager({
      * OpenRouter 키를 확인하고 OS-backed vault에 저장한다.
      *
      * @param {string} key
-     * @param {{ account?: string|null }} [opts] 로그인한 계정 이메일 (Rau 체험 로그인).
+     * @param {{ account?: string|null, signal?: AbortSignal, onCommitted?: () => void }} [opts]
+     * 로그인한 계정 이메일과 취소 신호 (Rau 체험 로그인).
      */
-    async setApiKey(key, { account = null } = {}) {
+    async setApiKey(key, { account = null, signal, onCommitted } = {}) {
       await load();
+      throwIfAuthCancelled(signal);
       const trimmed = String(key ?? '').trim();
       if (!trimmed) throw piError('OPENROUTER_KEY_INVALID', 'OpenRouter 키를 입력하세요');
       const check = await client.validateKey(trimmed);
+      throwIfAuthCancelled(signal);
       if (!check.valid) throw piError('OPENROUTER_KEY_INVALID', 'OpenRouter 키가 거절됐어요');
-      // 보안 저장소가 없으면 models.json(0600)에 보관한다 — load() 가 읽고, vault 가
-      // 생기면 기존 이관 경로가 vault 로 옮긴 뒤 파일에서 지운다.
-      if (secretStore?.available) await secretStore.set(secretId, trimmed);
-      apiKey = trimmed;
-      secretStoreError = null;
-      config.keyTail = keyTailOf(trimmed);
-      // 계정이 함께 오면 갱신한다. 없으면(API 키 직접 입력) 이전 값을 지운다.
-      config.account = storedAccount(account);
-      if (locked && config.models.length === 0) {
-        config.models = locked.map((model) => normalizeStoredModel(model)).filter(Boolean);
-        config.defaultModelId = config.models.find((model) => model.id === RAU_DEFAULT_MODEL_ID)?.id
-          ?? config.models[0]?.id ?? null;
-      }
-      config.setupComplete = config.models.length > 0;
       await serialized(async () => {
-        await writeModelsJson();
-        await persistConfig();
+        // Validation runs outside the write queue. Snapshot only after entering it so a
+        // cancelled rollback can never overwrite a newer queued settings change.
+        const previous = {
+          apiKey,
+          config: structuredClone(config),
+          secretStoreError,
+        };
+        let commitStarted = false;
+        try {
+          throwIfAuthCancelled(signal);
+          // 보안 저장소가 없으면 models.json(0600)에 보관한다. load() 가 읽고, vault 가
+          // 생기면 기존 이관 경로가 vault 로 옮긴 뒤 파일에서 지운다.
+          if (secretStore?.available) {
+            throwIfAuthCancelled(signal);
+            commitStarted = true;
+            await secretStore.set(secretId, trimmed);
+            throwIfAuthCancelled(signal);
+          }
+          throwIfAuthCancelled(signal);
+          commitStarted = true;
+          apiKey = trimmed;
+          secretStoreError = null;
+          config.keyTail = keyTailOf(trimmed);
+          // 계정이 함께 오면 갱신한다. 없으면(API 키 직접 입력) 이전 값을 지운다.
+          config.account = storedAccount(account);
+          if (locked && config.models.length === 0) {
+            config.models = locked.map((model) => normalizeStoredModel(model)).filter(Boolean);
+            config.defaultModelId = config.models.find((model) => model.id === RAU_DEFAULT_MODEL_ID)?.id
+              ?? config.models[0]?.id ?? null;
+          }
+          config.setupComplete = config.models.length > 0;
+          throwIfAuthCancelled(signal);
+          await writeModelsJson();
+          throwIfAuthCancelled(signal);
+          await persistConfig();
+          throwIfAuthCancelled(signal);
+          onCommitted?.();
+        } catch (error) {
+          if (!commitStarted) throw error;
+          // Any failure can land after an async vault/file write has taken effect. Restore
+          // the exact pre-run state before releasing the write queue; the transaction is
+          // not committed until onCommitted returns.
+          const rollbackErrors = [];
+          apiKey = previous.apiKey;
+          config = structuredClone(previous.config);
+          secretStoreError = previous.secretStoreError;
+          try {
+            if (secretStore?.available) {
+              if (previous.apiKey) await secretStore.set(secretId, previous.apiKey);
+              else await secretStore.delete(secretId);
+            }
+          } catch (rollbackError) {
+            rollbackErrors.push(rollbackError);
+          }
+          try { await writeModelsJson(); } catch (rollbackError) { rollbackErrors.push(rollbackError); }
+          try { await persistConfig(); } catch (rollbackError) { rollbackErrors.push(rollbackError); }
+          try { client.clearCache(); } catch (rollbackError) { rollbackErrors.push(rollbackError); }
+          if (rollbackErrors.length > 0) {
+            throw authRollbackError(
+              error,
+              new AggregateError(rollbackErrors, 'One or more credential rollback steps failed.'),
+            );
+          }
+          throw error;
+        }
       });
       client.clearCache();
       return currentStatus();
@@ -764,30 +964,84 @@ export function createPiManager({
       return { authUrl: url.toString(), state };
     },
 
-    /** 브라우저 콜백의 일회용 코드를 OpenRouter API 키로 바꾸고 기존 키 저장 경로를 탄다. */
-    async completeOAuth(code, state) {
+    /**
+     * 브라우저 콜백의 일회용 코드를 OpenRouter API 키로 바꾸고 기존 키 저장 경로를 탄다.
+     * @param {string} code
+     * @param {string} state
+     * @param {{ signal?: AbortSignal, onCommitted?: () => void }} [options]
+     */
+    async completeOAuth(code, state, { signal, onCommitted } = {}) {
+      throwIfAuthCancelled(signal);
       const flow = oauthFlow;
-      oauthFlow = null;
       if (!flow || now() - flow.createdAt > 10 * 60 * 1000) {
+        if (oauthFlow === flow) oauthFlow = null;
         throw piError('OPENROUTER_OAUTH_EXPIRED', 'OpenRouter 로그인 요청이 만료됐어요');
       }
       if (state !== flow.state) {
         throw piError('OPENROUTER_OAUTH_INVALID', 'OpenRouter 로그인 응답을 확인하지 못했어요');
       }
-      const response = await fetchImpl('https://openrouter.ai/api/v1/auth/keys', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          code: String(code ?? ''),
-          code_verifier: flow.verifier,
-          code_challenge_method: 'S256',
-        }),
-      });
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok || typeof body?.key !== 'string' || !body.key) {
-        throw piError('OPENROUTER_OAUTH_FAILED', 'OpenRouter 로그인을 완료하지 못했어요');
+      if (flow.completing) {
+        throw piError('OPENROUTER_OAUTH_BUSY', 'OpenRouter 로그인을 이미 완료하고 있어요');
       }
-      return this.setApiKey(body.key);
+      flow.completing = true;
+      const controller = new AbortController();
+      const exchangeSignal = signal
+        ? AbortSignal.any([signal, controller.signal])
+        : controller.signal;
+      let rejectTimeout;
+      const timeout = new Promise((_, reject) => { rejectTimeout = reject; });
+      let rejectCancellation;
+      const cancellation = new Promise((_, reject) => { rejectCancellation = reject; });
+      const onAbort = () => {
+        controller.abort();
+        rejectCancellation(piError('AGENT_AUTH_CANCELLED', '로그인을 취소했어요.'));
+      };
+      signal?.addEventListener('abort', onAbort, { once: true });
+      const timer = setTimeout(() => {
+        controller.abort();
+        rejectTimeout(piError('OPENROUTER_OAUTH_TIMEOUT', 'OpenRouter 로그인 응답이 너무 느려요'));
+      }, OAUTH_EXCHANGE_TIMEOUT_MS);
+      try {
+        const operation = (async () => {
+          const response = await fetchImpl('https://openrouter.ai/api/v1/auth/keys', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              code: String(code ?? ''),
+              code_verifier: flow.verifier,
+              code_challenge_method: 'S256',
+            }),
+            signal: exchangeSignal,
+          });
+          const body = await boundedJsonResponse(response);
+          throwIfAuthCancelled(signal);
+          if (!response.ok || typeof body?.key !== 'string' || !body.key) {
+            throw piError('OPENROUTER_OAUTH_FAILED', 'OpenRouter 로그인을 완료하지 못했어요');
+          }
+          throwIfAuthCancelled(signal);
+          const status = await this.setApiKey(body.key, { signal, onCommitted });
+          // onCommitted synchronously removes the exact auth run. If it did not,
+          // the same signal still fences this late exchange from reporting success.
+          throwIfAuthCancelled(signal);
+          return status;
+        })();
+        const status = await Promise.race([operation, timeout, cancellation]);
+        if (oauthFlow === flow) oauthFlow = null;
+        return status;
+      } catch (error) {
+        if (signal?.aborted) {
+          if (oauthFlow === flow) oauthFlow = null;
+          throw piError('AGENT_AUTH_CANCELLED', '로그인을 취소했어요.');
+        }
+        if (error?.name === 'AbortError') {
+          throw piError('OPENROUTER_OAUTH_TIMEOUT', 'OpenRouter 로그인 응답이 너무 느려요');
+        }
+        throw error;
+      } finally {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', onAbort);
+        if (oauthFlow === flow) flow.completing = false;
+      }
     },
 
     /** 로컬 키만 지운다. 호스티드 $5 키는 서버에 남는다. */
@@ -799,6 +1053,7 @@ export function createPiManager({
           secretStoreError = null;
         } catch (error) {
           secretStoreError = error?.message ?? 'OS 보안 저장소에서 키를 지우지 못했어요.';
+          throw piError('SECRET_DELETE_FAILED', secretStoreError);
         }
       }
       apiKey = null;
@@ -817,9 +1072,15 @@ export function createPiManager({
       oauthFlow = null;
       const proc = installProcess;
       if (!proc) return false;
-      terminateProcessTree(proc, { platform, spawnProcess });
-      await waitForProcessTreeExit(proc);
-      return true;
+      let cleanup = installCleanupPromises.get(proc);
+      if (!cleanup) {
+        cleanup = terminateAndWaitForProcessTreeExit(proc, {
+          terminateProcess: terminateProcessTree,
+          terminateOptions: { platform, spawnProcess },
+        }).catch(() => false);
+        installCleanupPromises.set(proc, cleanup);
+      }
+      return cleanup;
     },
 
     /**

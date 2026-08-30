@@ -5,6 +5,9 @@
   "description": "HWP/HWPX editor with a local Claude/Codex agent sidebar.",
   "author": "Hataewook",
   "private": true,
+  "engines": {
+    "node": ">=22.18.0"
+  },
   "main": "desktop/main.mjs",
   "scripts": {
     "start": "node rhwp/rhwp-agent/ctl.mjs start",
@@ -77,10 +80,9 @@
         "ext": [
           "rhwpx"
         ],
-        "name": "Rauhwpx history bundle",
-        "description": "Rauhwpx history bundle",
-        "role": "Editor",
-        "isPackage": true
+        "name": "Rauhwpx history archive",
+        "description": "Rauhwpx history archive",
+        "role": "Editor"
       }
     ],
     "directories": {
@@ -122,10 +124,9 @@
             "CFBundleTypeExtensions": [
               "rhwpx"
             ],
-            "CFBundleTypeName": "RauHWPX history bundle",
+            "CFBundleTypeName": "RauHWPX history archive",
             "CFBundleTypeRole": "Editor",
             "LSHandlerRank": "Default",
-            "LSTypeIsPackage": true,
             "LSItemContentTypes": [
               "com.hataewook.rauhwpx.history-bundle"
             ]
@@ -147,10 +148,10 @@
           },
           {
             "UTTypeConformsTo": [
-              "com.apple.package",
-              "public.composite-content"
+              "public.content",
+              "public.data"
             ],
-            "UTTypeDescription": "RauHWPX history bundle",
+            "UTTypeDescription": "RauHWPX history archive",
             "UTTypeIdentifier": "com.hataewook.rauhwpx.history-bundle",
             "UTTypeTagSpecification": {
               "public.filename-extension": [
@@ -178,7 +179,10 @@
     },
     "nsis": {
       "oneClick": false,
-      "perMachine": true,
+      "perMachine": false,
+      "selectPerMachineByDefault": false,
+      "allowElevation": true,
+      "packElevateHelper": true,
       "allowToChangeInstallationDirectory": true
     },
     "dmg": {

@@ -31,14 +31,14 @@ pub fn run(args: &[String]) {
         eprintln!("사용: rhwp core-pages <파일>");
         return;
     };
-    let data = match std::fs::read(path) {
+    let data = match crate::parser::limits::read_local_file_once(path) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("읽기 실패: {e}");
             return;
         }
     };
-    let core = match DocumentCore::from_bytes(&data) {
+    let core = match DocumentCore::from_local_file_bytes(&data) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("파싱 실패: {e:?}");

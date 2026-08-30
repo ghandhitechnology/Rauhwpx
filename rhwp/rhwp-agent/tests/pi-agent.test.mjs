@@ -59,11 +59,12 @@ class FakeProcess extends EventEmitter {
 }
 
 /** 세션을 만들고 스폰 기록/이벤트 배열을 함께 돌려준다. */
-function startSession(extra = {}) {
+function startSession(extra = {}, dependencies = {}) {
   const events = [];
   const spawns = [];
   const opts = { ...baseOpts, ...extra, onEvent: (event) => events.push(event) };
   const session = createPiSession(opts, {
+    ...dependencies,
     spawnProcess(command, argv, options) {
       const proc = new FakeProcess();
       spawns.push({ command, argv, options, proc });
@@ -336,7 +337,7 @@ test('argv carries the model, thinking level, session and system brief', () => {
   assert.equal(argv[argv.indexOf('--session-id') + 1], 'sess-1');
   assert.match(argv[argv.indexOf('--append-system-prompt') + 1], /rhwp MCP tools/);
   assert.ok(argv.includes('--no-context-files'));
-  assert.equal(argv.includes('--exclude-tools'), false);
+  assert.equal(argv[argv.indexOf('--exclude-tools') + 1], 'bash');
 });
 
 test('argv omits thinking for non-reasoning models and never doubles the provider prefix', () => {
@@ -370,8 +371,16 @@ test('planning phases exclude the built-in write and shell tools', () => {
     assert.match(argv[argv.indexOf('--append-system-prompt') + 1], /planning mode|implementation mode/);
   }
   const implementing = buildPiArgv({ ...baseOpts, workflow: 'plan', phase: 'implementing' }, 'x');
-  assert.equal(implementing.includes('--exclude-tools'), false);
+  assert.equal(implementing[implementing.indexOf('--exclude-tools') + 1], 'bash');
   assert.match(implementing[implementing.indexOf('--append-system-prompt') + 1], /implementation mode/);
+
+  const unrestricted = buildPiArgv({
+    ...baseOpts,
+    workflow: 'plan',
+    phase: 'implementing',
+    permissionProfile: 'unrestricted',
+  }, 'x');
+  assert.equal(unrestricted.includes('--exclude-tools'), false);
 });
 
 test('the child env is built from scratch without ambient provider keys', () => {
@@ -458,8 +467,40 @@ test('a mode switch waits for the running child to exit', async () => {
 
   session.sendUserMessage('approved kickoff');
   assert.equal(spawns.length, 2);
-  assert.equal(spawns[1].argv.includes('--exclude-tools'), false);
+  assert.equal(spawns[1].argv[spawns[1].argv.indexOf('--exclude-tools') + 1], 'bash');
   assert.equal(spawns[1].options.env.RHWP_AGENT_PHASE, 'implementing');
   assert.equal(spawns[1].argv[spawns[1].argv.indexOf('--session-id') + 1], session.getSessionId());
   session.dispose();
+});
+
+test('natural Pi leader exit retains tree cleanup result for delayed disposal', async () => {
+  let finishTermination;
+  let finishTreeWait;
+  let terminationCalls = 0;
+  const termination = new Promise((resolve) => { finishTermination = resolve; });
+  const treeWait = new Promise((resolve) => { finishTreeWait = resolve; });
+  const { session, spawns } = startSession({}, {
+    terminateProcess() {
+      terminationCalls += 1;
+      return termination;
+    },
+    waitForExit: () => treeWait,
+  });
+  session.sendUserMessage('finish while a descendant owns stdout');
+  const { proc } = spawns[0];
+  proc.emitJson({ type: 'agent_settled' });
+  proc.exit(0);
+
+  let settled = false;
+  const disposed = session.dispose().then((value) => {
+    settled = true;
+    return value;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  assert.equal(terminationCalls, 1);
+  finishTermination(true);
+  finishTreeWait(false);
+  assert.equal(await disposed, false);
+  assert.equal(await session.dispose(), false);
 });

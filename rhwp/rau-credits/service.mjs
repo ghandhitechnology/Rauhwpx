@@ -1,20 +1,29 @@
 import { readFile } from 'node:fs/promises';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 import { decryptSecret, encryptSecret } from './crypto.mjs';
 import { RAU_CREDIT_LIMIT_USD } from './catalog.mjs';
 import {
   renderCodePage,
+  renderConfirmPage,
   renderDonePage,
   renderFailPage,
   renderLoginPage,
+  renderReadyPage,
 } from './pages.mjs';
 import { createRateLimiter } from './rate-limit.mjs';
 import { createMemoryStore } from './store.mjs';
 
 const SESSION_TTL_MS = 10 * 60 * 1000;
+const AUTHORIZATION_TTL_MS = 2 * 60 * 1000;
 const MAX_BODY_BYTES = 16 * 1024;
+const MAX_JSON_BODY_BYTES = 64 * 1024;
+const MAX_UPSTREAM_BODY_BYTES = 64 * 1024;
+const UPSTREAM_TIMEOUT_MS = 15_000;
+const MAX_MANUAL_ATTEMPTS = 5;
+const MAX_KEY_RECONCILE_PAGES = 10;
+const MANUAL_CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 const WORKOS_AUTHORIZE = 'https://api.workos.com/user_management/authorize';
 const WORKOS_AUTHENTICATE = 'https://api.workos.com/user_management/authenticate';
 const WORKOS_MAGIC_AUTH = 'https://api.workos.com/user_management/magic_auth';
@@ -26,6 +35,131 @@ function creditsError(code, message) {
   const error = new Error(message);
   error.code = code;
   return error;
+}
+
+function digest(value) {
+  return createHash('sha256').update(String(value), 'utf8').digest('base64url');
+}
+
+function sameDigest(left, right) {
+  const a = Buffer.from(String(left ?? ''), 'utf8');
+  const b = Buffer.from(String(right ?? ''), 'utf8');
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+function randomManualCode() {
+  const bytes = randomBytes(12);
+  let code = '';
+  for (const byte of bytes) code += MANUAL_CODE_ALPHABET[byte & 31];
+  return code;
+}
+
+function displayCode(code) {
+  return String(code).match(/.{1,4}/g)?.join('-') ?? String(code);
+}
+
+function normalizeManualCode(code) {
+  return String(code ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+async function readBoundedUpstreamJson(response) {
+  const declared = Number(response?.headers?.get?.('content-length'));
+  if (Number.isFinite(declared) && declared > MAX_UPSTREAM_BODY_BYTES) {
+    try { await response?.body?.cancel?.(); } catch {}
+    throw creditsError('UPSTREAM_RESPONSE_TOO_LARGE', '인증 서버 응답이 너무 커요');
+  }
+  let text = '';
+  if (response?.body?.getReader) {
+    const reader = response.body.getReader();
+    const chunks = [];
+    let total = 0;
+    let complete = false;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          complete = true;
+          break;
+        }
+        total += value.byteLength;
+        if (total > MAX_UPSTREAM_BODY_BYTES) {
+          await reader.cancel().catch(() => {});
+          throw creditsError('UPSTREAM_RESPONSE_TOO_LARGE', '인증 서버 응답이 너무 커요');
+        }
+        chunks.push(value);
+      }
+    } catch (error) {
+      if (!complete) await reader.cancel(error).catch(() => {});
+      throw error;
+    } finally {
+      reader.releaseLock?.();
+    }
+    text = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)), total).toString('utf8');
+  } else if (typeof response?.text === 'function') {
+    text = await response.text();
+  } else if (typeof response?.json === 'function') {
+    text = JSON.stringify(await response.json());
+  }
+  if (Buffer.byteLength(text, 'utf8') > MAX_UPSTREAM_BODY_BYTES) {
+    throw creditsError('UPSTREAM_RESPONSE_TOO_LARGE', '인증 서버 응답이 너무 커요');
+  }
+  try { return text.trim() ? JSON.parse(text) : {}; }
+  catch { return {}; }
+}
+
+function validPkceChallenge(value) {
+  const challenge = String(value ?? '');
+  if (!/^[A-Za-z0-9_-]{43}$/.test(challenge)) return false;
+  try {
+    return Buffer.from(challenge, 'base64url').length === 32;
+  } catch {
+    return false;
+  }
+}
+
+function validatedLoopbackUri(value) {
+  if (!value) return null;
+  let url;
+  try {
+    url = new URL(String(value));
+  } catch {
+    throw creditsError('REDIRECT_URI_INVALID', '돌아갈 Rauhwpx 주소가 올바르지 않아요');
+  }
+  if (url.protocol !== 'http:'
+    || url.hostname !== '127.0.0.1'
+    || !url.port
+    || Number(url.port) < 1
+    || Number(url.port) > 65_535
+    || url.pathname !== '/oauth/rau/callback'
+    || url.username
+    || url.password
+    || url.search
+    || url.hash) {
+    throw creditsError('REDIRECT_URI_INVALID', '돌아갈 Rauhwpx 주소가 올바르지 않아요');
+  }
+  return url.toString();
+}
+
+function authorizationProof(session, input, now) {
+  const verifier = String(input?.codeVerifier ?? '');
+  if (verifier.length < 43 || verifier.length > 128
+    || !sameDigest(digest(verifier), session.codeChallenge)) {
+    throw creditsError('DEVICE_PROOF_INVALID', '로그인 증명을 확인할 수 없어요');
+  }
+  if (session.authorizationExpiresAt < now()) {
+    throw creditsError('DEVICE_PROOF_EXPIRED', '로그인 증명이 만료됐어요');
+  }
+  const proof = input?.proof;
+  if (proof?.kind === 'loopback' && sameDigest(digest(proof.code), session.authorizationCodeDigest)) {
+    return 'loopback';
+  }
+  if (proof?.kind === 'manual' && sameDigest(
+    digest(normalizeManualCode(proof.code)),
+    session.manualCodeDigest,
+  )) {
+    return 'manual';
+  }
+  throw creditsError('DEVICE_PROOF_INVALID', '로그인 증명을 확인할 수 없어요');
 }
 
 /** WorkOS 가 돌려준 계정 이메일. 없으면 null — 데스크톱은 키 꼬리로 대체한다. */
@@ -50,7 +184,9 @@ function loginEmail(body) {
  *   authenticateMagic?: (email: string, code: string) => Promise<{ id: string, email?: string|null }>,
  *   sendMagicAuth?: (email: string) => Promise<void>,
  *   createOpenRouterKey?: (input: { name: string }) => Promise<{ key: string, id?: string }>,
+ *   reconcileOpenRouterKey?: (input: { intentId: string, name: string, createdAt: number }) => Promise<boolean>,
  *   maxLiveSessions?: number,
+ *   minDeviceProtocol?: number,
  * }} deps
  */
 export function createCreditsService({
@@ -66,7 +202,9 @@ export function createCreditsService({
   authenticateMagic = null,
   sendMagicAuth = null,
   createOpenRouterKey = null,
+  reconcileOpenRouterKey = null,
   maxLiveSessions = 2000,
+  minDeviceProtocol = 1,
 } = {}) {
   if (!origin) throw new Error('origin is required');
   if (!sessionSecret) throw new Error('sessionSecret is required');
@@ -74,15 +212,44 @@ export function createCreditsService({
   const redirectUri = `${origin.replace(/\/$/, '')}/callback`;
   let mutationChain = Promise.resolve();
 
+  async function upstreamJson(url, init) {
+    const controller = new AbortController();
+    let rejectDeadline;
+    const deadline = new Promise((_, reject) => { rejectDeadline = reject; });
+    const timer = setTimeout(() => {
+      controller.abort();
+      rejectDeadline(creditsError('UPSTREAM_TIMEOUT', '인증 서버 응답이 너무 느려요'));
+    }, UPSTREAM_TIMEOUT_MS);
+    timer.unref?.();
+    try {
+      const operation = (async () => {
+        const response = await fetchImpl(url, { ...init, signal: controller.signal });
+        return { response, body: await readBoundedUpstreamJson(response) };
+      })();
+      return await Promise.race([operation, deadline]);
+    } catch (error) {
+      if (error?.name === 'AbortError') {
+        throw creditsError('UPSTREAM_TIMEOUT', '인증 서버 응답이 너무 느려요');
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  function serializeMutation(task) {
+    const running = mutationChain.then(task);
+    mutationChain = running.then(() => undefined, () => undefined);
+    return running;
+  }
+
   function mutate(task) {
-    const running = mutationChain.then(async () => {
+    return serializeMutation(async () => {
       const state = await store.load();
       const result = await task(state);
       await store.save(state);
       return result;
     });
-    mutationChain = running.then(() => undefined, () => undefined);
-    return running;
   }
 
   function pruneSessions(state) {
@@ -95,13 +262,15 @@ export function createCreditsService({
   function liveSessionCount(state) {
     let count = 0;
     for (const session of Object.values(state.sessions)) {
-      if (session.status === 'pending' || session.status === 'ready') count += 1;
+      if (session.status === 'pending'
+        || session.status === 'authenticated'
+        || session.status === 'ready') count += 1;
     }
     return count;
   }
 
   async function defaultAuthenticate(code) {
-    const response = await fetchImpl(WORKOS_AUTHENTICATE, {
+    const { response, body } = await upstreamJson(WORKOS_AUTHENTICATE, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -111,7 +280,6 @@ export function createCreditsService({
         code,
       }),
     });
-    const body = await response.json().catch(() => ({}));
     const id = body?.user?.id;
     if (!response.ok || typeof id !== 'string' || !id) {
       throw creditsError('WORKOS_AUTH_FAILED', '로그인을 완료하지 못했어요');
@@ -120,7 +288,7 @@ export function createCreditsService({
   }
 
   async function defaultAuthenticateMagic(email, code) {
-    const response = await fetchImpl(WORKOS_AUTHENTICATE, {
+    const { response, body } = await upstreamJson(WORKOS_AUTHENTICATE, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -131,7 +299,6 @@ export function createCreditsService({
         code,
       }),
     });
-    const body = await response.json().catch(() => ({}));
     const id = body?.user?.id;
     if (!response.ok || typeof id !== 'string' || !id) {
       throw creditsError('WORKOS_AUTH_FAILED', '코드를 확인하지 못했어요');
@@ -140,7 +307,7 @@ export function createCreditsService({
   }
 
   async function defaultSendMagic(email) {
-    const response = await fetchImpl(WORKOS_MAGIC_AUTH, {
+    const { response } = await upstreamJson(WORKOS_MAGIC_AUTH, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${workosApiKey}`,
@@ -154,7 +321,7 @@ export function createCreditsService({
   }
 
   async function defaultCreateKey({ name }) {
-    const response = await fetchImpl(OPENROUTER_KEYS, {
+    const { response, body } = await upstreamJson(OPENROUTER_KEYS, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${openRouterProvisioningKey}`,
@@ -166,7 +333,6 @@ export function createCreditsService({
         limit_reset: null,
       }),
     });
-    const body = await response.json().catch(() => ({}));
     const key = body?.key ?? body?.data?.key;
     const id = body?.data?.hash ?? body?.data?.id ?? body?.id ?? null;
     if (!response.ok || typeof key !== 'string' || !key) {
@@ -175,10 +341,55 @@ export function createCreditsService({
     return { key, id: typeof id === 'string' ? id : null };
   }
 
+  async function defaultReconcileKey({ name }) {
+    let removed = false;
+    for (let page = 0; page < MAX_KEY_RECONCILE_PAGES; page += 1) {
+      const offset = page * 100;
+      const url = new URL(OPENROUTER_KEYS);
+      url.searchParams.set('include_disabled', 'true');
+      url.searchParams.set('offset', String(offset));
+      const { response, body } = await upstreamJson(url, {
+        headers: { Authorization: `Bearer ${openRouterProvisioningKey}` },
+      });
+      if (!response.ok || !Array.isArray(body?.data)) {
+        throw creditsError(
+          'OPENROUTER_RECONCILE_FAILED',
+          '중단된 체험 키 발급을 확인하지 못했어요. 새 키를 만들지 않았습니다',
+        );
+      }
+      for (const candidate of body.data) {
+        if (candidate?.name !== name || typeof candidate?.hash !== 'string' || !candidate.hash) {
+          continue;
+        }
+        const deletion = await upstreamJson(`${OPENROUTER_KEYS}/${encodeURIComponent(candidate.hash)}`, {
+          method: 'DELETE',
+          headers: {
+            Authorization: `Bearer ${openRouterProvisioningKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: '{}',
+        });
+        if (!deletion.response.ok && deletion.response.status !== 404) {
+          throw creditsError(
+            'OPENROUTER_RECONCILE_FAILED',
+            '중단된 체험 키를 안전하게 정리하지 못했어요. 새 키를 만들지 않았습니다',
+          );
+        }
+        removed = true;
+      }
+      if (body.data.length < 100) return removed;
+    }
+    throw creditsError(
+      'OPENROUTER_RECONCILE_FAILED',
+      '중단된 체험 키 검색 범위를 초과했어요. 새 키를 만들지 않았습니다',
+    );
+  }
+
   const resolveUser = authenticateWorkos ?? defaultAuthenticate;
   const resolveMagicUser = authenticateMagic ?? defaultAuthenticateMagic;
   const sendMagic = sendMagicAuth ?? defaultSendMagic;
   const mintKey = createOpenRouterKey ?? defaultCreateKey;
+  const reconcileKey = reconcileOpenRouterKey ?? defaultReconcileKey;
 
   /**
    * 계정당 키 하나. WorkOS 사용자 id 와 검증된 이메일을 둘 다 인덱스로 걸어,
@@ -188,17 +399,28 @@ export function createCreditsService({
     const normalizedEmail = typeof email === 'string' && email.includes('@')
       ? email.trim().toLowerCase()
       : null;
-    return mutate(async (state) => {
+    return serializeMutation(async () => {
+      const state = await store.load();
+      state.users ??= {};
+      state.sessions ??= {};
       const byEmail = normalizedEmail ? state.emailIndex?.[normalizedEmail] : null;
       const existingId = state.users[workosUserId] ? workosUserId : byEmail;
       const existing = existingId ? state.users[existingId] : null;
+      if (byEmail && !existing) {
+        throw creditsError(
+          'TRIAL_KEY_UNREADABLE',
+          '기존 체험 키 연결 정보가 손상됐어요. 새 키를 만들지 않았습니다',
+        );
+      }
       let existingKey = null;
       if (existing?.keyCiphertext) {
         try {
           existingKey = decryptSecret(sessionSecret, existing.keyCiphertext);
         } catch {
-          // SESSION_SECRET 회전 등으로 복호화가 깨진 레코드는 없는 것으로 본다 — 재발급으로 잠금을 푼다.
-          existingKey = null;
+          throw creditsError(
+            'TRIAL_KEY_UNREADABLE',
+            '기존 체험 키를 읽을 수 없어요. 새 키를 만들기 전에 지원팀에서 기존 키를 해지해야 합니다',
+          );
         }
       }
       if (existingKey) {
@@ -209,18 +431,92 @@ export function createCreditsService({
           state.emailIndex ??= {};
           state.emailIndex[normalizedEmail] = workosUserId;
         }
+        await store.save(state);
         return existingKey;
       }
-      const minted = await mintKey({ name: `rau-${workosUserId.slice(0, 12)}` });
-      state.users[workosUserId] = {
+
+      if (existing && !existing.provisioning) {
+        throw creditsError(
+          'TRIAL_KEY_UNREADABLE',
+          '기존 체험 키 정보가 불완전해요. 새 키를 만들지 않았습니다',
+        );
+      }
+      const ownerId = existingId ?? workosUserId;
+      let intent = null;
+      if (existing?.provisioning) {
+        const pending = existing.provisioning;
+        if (typeof pending.id !== 'string' || typeof pending.name !== 'string'
+          || !Number.isFinite(pending.createdAt)
+          || (pending.phase !== undefined
+            && pending.phase !== 'prepared'
+            && pending.phase !== 'submitting')) {
+          throw creditsError(
+            'TRIAL_KEY_UNREADABLE',
+            '중단된 체험 키 발급 정보가 손상됐어요. 새 키를 만들지 않았습니다',
+          );
+        }
+        if (pending.phase === 'prepared') {
+          // The external call always follows a durable `submitting` save, so a
+          // prepared intent is proof that no request was sent yet.
+          intent = pending;
+        } else {
+          // Missing phase is the compatibility form of an older uncertain
+          // intent. OpenRouter returns plaintext only once and list results may
+          // lag creation, so absence can never authorize another paid POST.
+          const removed = await reconcileKey({
+            intentId: pending.id,
+            name: pending.name,
+            createdAt: pending.createdAt,
+          });
+          if (removed !== true) {
+            throw creditsError(
+              'OPENROUTER_RECONCILE_PENDING',
+              '중단된 체험 키가 아직 확인되지 않아 새 키를 만들지 않았습니다. 잠시 후 다시 시도해 주세요',
+            );
+          }
+        }
+      }
+
+      if (!intent) {
+        const intentId = randomBytes(12).toString('base64url');
+        intent = {
+          id: intentId,
+          name: `rau-${ownerId.slice(0, 12)}-${intentId}`,
+          createdAt: now(),
+          phase: 'prepared',
+        };
+        state.users[ownerId] = { provisioning: intent };
+        if (normalizedEmail) {
+          state.emailIndex ??= {};
+          state.emailIndex[normalizedEmail] = ownerId;
+        }
+        // Persist a no-side-effect state first. A crash here can safely resume
+        // the same intent without querying or minting a replacement.
+        await store.save(state);
+      }
+
+      intent = { ...intent, phase: 'submitting', submittedAt: now() };
+      state.users[ownerId] = { provisioning: intent };
+      // This phase must be durable before the paid external mutation. Any
+      // crash after it is uncertain and must reconcile positively or fail.
+      await store.save(state);
+
+      const minted = await mintKey({ name: intent.name });
+      if (typeof minted?.key !== 'string' || !minted.key) {
+        throw creditsError('OPENROUTER_PROVISION_FAILED', '체험 키를 만들지 못했어요');
+      }
+      const record = {
         keyCiphertext: encryptSecret(sessionSecret, minted.key),
-        openrouterKeyId: minted.id,
+        openrouterKeyId: typeof minted.id === 'string' ? minted.id : null,
         createdAt: now(),
       };
+      state.users[ownerId] = record;
+      if (ownerId !== workosUserId) state.users[workosUserId] = { ...record };
       if (normalizedEmail) {
         state.emailIndex ??= {};
         state.emailIndex[normalizedEmail] = workosUserId;
       }
+      await store.save(state);
       return minted.key;
     });
   }
@@ -251,10 +547,54 @@ export function createCreditsService({
     return { deviceId, workosUserId: userId, email: accountEmail };
   }
 
+  function assertLiveV2Session(session) {
+    if (!session || session.protocol !== 2) {
+      throw creditsError('DEVICE_SESSION_INVALID', '로그인 세션이 없거나 만료됐어요');
+    }
+    if (now() - session.createdAt > SESSION_TTL_MS) {
+      throw creditsError('DEVICE_SESSION_EXPIRED', '로그인 세션이 만료됐어요');
+    }
+    return session;
+  }
+
+  async function markV2Authenticated(deviceId, userId, email = null) {
+    const confirmationToken = randomBytes(24).toString('base64url');
+    const accountEmail = typeof email === 'string' && email.includes('@') ? email.trim() : null;
+    const result = await mutate((state) => {
+      const session = assertLiveV2Session(state.sessions[deviceId]);
+      if (session.status !== 'pending') {
+        throw creditsError('DEVICE_SESSION_INVALID', '이미 처리된 로그인 세션이에요');
+      }
+      session.status = 'authenticated';
+      session.workosUserId = userId;
+      session.email = accountEmail;
+      session.confirmationTokenDigest = digest(confirmationToken);
+      delete session.oauthStateDigest;
+      return { deviceId, pairingCode: session.pairingCode };
+    });
+    return { ...result, confirmationToken };
+  }
+
+  async function findV2SessionByOauthState(oauthState) {
+    const wanted = digest(String(oauthState ?? ''));
+    const state = await store.load();
+    for (const [deviceId, session] of Object.entries(state.sessions)) {
+      if (session?.protocol === 2
+        && session.status === 'pending'
+        && sameDigest(session.oauthStateDigest, wanted)) {
+        assertLiveV2Session(session);
+        return deviceId;
+      }
+    }
+    throw creditsError('OAUTH_STATE_INVALID', '로그인 요청을 확인할 수 없어요');
+  }
+
   return {
     origin,
     redirectUri,
     sessionTtlMs: SESSION_TTL_MS,
+    authorizationTtlMs: AUTHORIZATION_TTL_MS,
+    minDeviceProtocol: Number(minDeviceProtocol) >= 2 ? 2 : 1,
 
     loginUrl(deviceId) {
       return `${origin.replace(/\/$/, '')}/login?device=${encodeURIComponent(deviceId)}`;
@@ -285,6 +625,22 @@ export function createCreditsService({
       return id;
     },
 
+    async deviceLoginContext(deviceId) {
+      const id = String(deviceId ?? '');
+      const session = (await store.load()).sessions[id];
+      if (!session || session.status !== 'pending') {
+        throw creditsError('DEVICE_SESSION_INVALID', '로그인 세션이 없거나 만료됐어요');
+      }
+      if (now() - session.createdAt > SESSION_TTL_MS) {
+        throw creditsError('DEVICE_SESSION_EXPIRED', '로그인 세션이 만료됐어요');
+      }
+      return {
+        id,
+        protocol: session.protocol === 2 ? 2 : 1,
+        pairingCode: session.protocol === 2 ? session.pairingCode : null,
+      };
+    },
+
     async createDeviceSession() {
       const id = randomBytes(24).toString('base64url');
       await mutate((state) => {
@@ -295,6 +651,180 @@ export function createCreditsService({
         state.sessions[id] = { status: 'pending', createdAt: now() };
       });
       return { id, loginUrl: this.loginUrl(id) };
+    },
+
+    async createDeviceSessionV2(input = {}) {
+      if (input.codeChallengeMethod !== 'S256' || !validPkceChallenge(input.codeChallenge)) {
+        throw creditsError('PKCE_CHALLENGE_INVALID', '로그인 보안 정보를 확인할 수 없어요');
+      }
+      const requestedMode = String(input.returnMode ?? 'hybrid');
+      if (!['hybrid', 'loopback', 'manual'].includes(requestedMode)) {
+        throw creditsError('RETURN_MODE_INVALID', '지원하지 않는 로그인 반환 방식이에요');
+      }
+      const loopbackUri = validatedLoopbackUri(input.redirectUri);
+      if (requestedMode === 'loopback' && !loopbackUri) {
+        throw creditsError('REDIRECT_URI_INVALID', 'loopback 로그인에는 돌아갈 주소가 필요해요');
+      }
+      const callbackState = loopbackUri ? String(input.callbackState ?? '') : null;
+      if (loopbackUri && !/^[A-Za-z0-9_-]{32,128}$/.test(callbackState)) {
+        throw creditsError('CALLBACK_STATE_INVALID', '돌아갈 Rauhwpx 상태값이 올바르지 않아요');
+      }
+      const id = randomBytes(24).toString('base64url');
+      const pairingRaw = randomManualCode().slice(0, 6);
+      const pairingCode = `${pairingRaw.slice(0, 3)}-${pairingRaw.slice(3)}`;
+      const returnMode = loopbackUri ? requestedMode : 'manual';
+      await mutate((state) => {
+        pruneSessions(state);
+        if (liveSessionCount(state) >= maxLiveSessions) {
+          throw creditsError('RATE_LIMITED', '로그인 요청이 너무 많아요. 잠시 후 다시 시도해 주세요');
+        }
+        state.sessions[id] = {
+          protocol: 2,
+          status: 'pending',
+          createdAt: now(),
+          codeChallenge: String(input.codeChallenge),
+          returnMode,
+          redirectUri: loopbackUri,
+          callbackState,
+          pairingCode,
+          clientVersion: String(input.clientVersion ?? '').slice(0, 64),
+        };
+      });
+      return {
+        id,
+        loginUrl: this.loginUrl(id),
+        pairingCode,
+        expiresAt: new Date(now() + SESSION_TTL_MS).toISOString(),
+      };
+    },
+
+    async authorizationUrlV2(deviceId, provider = 'GoogleOAuth') {
+      const chosen = WORKOS_PROVIDERS.has(provider) ? provider : 'GoogleOAuth';
+      const oauthState = randomBytes(24).toString('base64url');
+      await mutate((state) => {
+        const session = assertLiveV2Session(state.sessions[String(deviceId ?? '')]);
+        if (session.status !== 'pending') {
+          throw creditsError('DEVICE_SESSION_INVALID', '이미 처리된 로그인 세션이에요');
+        }
+        session.oauthStateDigest = digest(oauthState);
+      });
+      const url = new URL(WORKOS_AUTHORIZE);
+      url.searchParams.set('client_id', workosClientId);
+      url.searchParams.set('redirect_uri', redirectUri);
+      url.searchParams.set('response_type', 'code');
+      url.searchParams.set('provider', chosen);
+      url.searchParams.set('prompt', 'select_account');
+      url.searchParams.set('state', oauthState);
+      return url.toString();
+    },
+
+    async completeLoginV2(code, oauthState) {
+      const deviceId = await findV2SessionByOauthState(oauthState);
+      const user = await resolveUser(String(code ?? ''));
+      return markV2Authenticated(deviceId, user.id, user.email ?? null);
+    },
+
+    async completeMagicLoginV2(deviceId, email, code) {
+      const submitted = String(email ?? '').trim();
+      const user = await resolveMagicUser(submitted, String(code ?? '').trim());
+      return markV2Authenticated(String(deviceId ?? ''), user.id, user.email ?? submitted);
+    },
+
+    async confirmDeviceSessionV2(deviceId, confirmationToken) {
+      const id = String(deviceId ?? '');
+      const snapshot = assertLiveV2Session((await store.load()).sessions[id]);
+      if (snapshot.status !== 'authenticated'
+        || !sameDigest(digest(confirmationToken), snapshot.confirmationTokenDigest)) {
+        throw creditsError('CONFIRMATION_INVALID', '로그인 확인 요청이 만료됐거나 올바르지 않아요');
+      }
+      const apiKey = await keyForUser(snapshot.workosUserId, snapshot.email);
+      const authorizationCode = randomBytes(32).toString('base64url');
+      const manualCode = randomManualCode();
+      const result = await mutate((state) => {
+        const session = assertLiveV2Session(state.sessions[id]);
+        if (session.status !== 'authenticated'
+          || !sameDigest(digest(confirmationToken), session.confirmationTokenDigest)) {
+          throw creditsError('CONFIRMATION_INVALID', '로그인 확인 요청이 만료됐거나 올바르지 않아요');
+        }
+        session.status = 'ready';
+        session.apiKeyCiphertext = encryptSecret(sessionSecret, apiKey);
+        session.authorizationCodeDigest = digest(authorizationCode);
+        session.manualCodeDigest = digest(manualCode);
+        session.authorizationExpiresAt = now() + AUTHORIZATION_TTL_MS;
+        session.manualAttempts = 0;
+        delete session.confirmationTokenDigest;
+        return {
+          pairingCode: session.pairingCode,
+          redirectUri: session.redirectUri,
+          callbackState: session.callbackState,
+          returnMode: session.returnMode,
+        };
+      });
+      return {
+        ...result,
+        authorizationCode,
+        manualCode: displayCode(manualCode),
+        expiresAt: new Date(now() + AUTHORIZATION_TTL_MS).toISOString(),
+      };
+    },
+
+    async redeemDeviceSessionV2(deviceId, input = {}) {
+      const result = await mutate((state) => {
+        const session = assertLiveV2Session(state.sessions[String(deviceId ?? '')]);
+        if (session.status === 'redeemed') return { status: 'redeemed' };
+        if (session.status !== 'ready') return { status: session.status };
+        if (session.manualAttempts >= MAX_MANUAL_ATTEMPTS) {
+          throw creditsError('DEVICE_PROOF_LOCKED', '반환 코드를 너무 많이 틀렸어요. 로그인을 다시 시작해 주세요');
+        }
+        try {
+          authorizationProof(session, input, now);
+        } catch (error) {
+          if (input?.proof?.kind === 'manual' && error?.code === 'DEVICE_PROOF_INVALID') {
+            session.manualAttempts += 1;
+            if (session.manualAttempts >= MAX_MANUAL_ATTEMPTS) {
+              return {
+                proofError: {
+                  code: 'DEVICE_PROOF_LOCKED',
+                  message: '반환 코드를 너무 많이 틀렸어요. 로그인을 다시 시작해 주세요',
+                },
+              };
+            }
+          }
+          return { proofError: { code: error.code, message: error.message } };
+        }
+        let apiKey;
+        try {
+          apiKey = decryptSecret(sessionSecret, session.apiKeyCiphertext);
+        } catch {
+          throw creditsError('TRIAL_KEY_UNREADABLE', '체험 키를 읽을 수 없어요');
+        }
+        return {
+          status: 'ready',
+          apiKey,
+          ...(session.email ? { email: session.email } : {}),
+        };
+      });
+      if (result?.proofError) {
+        throw creditsError(result.proofError.code, result.proofError.message);
+      }
+      return result;
+    },
+
+    async acknowledgeDeviceSessionV2(deviceId, input = {}) {
+      return mutate((state) => {
+        const session = assertLiveV2Session(state.sessions[String(deviceId ?? '')]);
+        if (session.status === 'redeemed') return { status: 'redeemed' };
+        if (session.status !== 'ready') {
+          throw creditsError('DEVICE_SESSION_INVALID', '완료되지 않은 로그인 세션이에요');
+        }
+        authorizationProof(session, input, now);
+        session.status = 'redeemed';
+        session.redeemedAt = now();
+        delete session.apiKeyCiphertext;
+        delete session.authorizationCodeDigest;
+        delete session.manualCodeDigest;
+        return { status: 'redeemed' };
+      });
     },
 
     async sendMagicCode(email) {
@@ -369,6 +899,28 @@ async function readForm(req) {
   return new URLSearchParams(Buffer.concat(chunks).toString('utf8'));
 }
 
+async function readJson(req) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > MAX_JSON_BODY_BYTES) {
+      throw creditsError('BODY_TOO_LARGE', '요청 본문이 너무 커요');
+    }
+    chunks.push(chunk);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+  } catch {
+    throw creditsError('JSON_INVALID', '요청 본문을 읽을 수 없어요');
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw creditsError('JSON_INVALID', '요청 본문을 읽을 수 없어요');
+  }
+  return parsed;
+}
+
 /** Railway 엣지가 덧붙이는 마지막 XFF 홉이 실제 접속 주소다. 첫 홉은 클라이언트가 위조할 수 있다. */
 function clientIp(req) {
   const forwarded = req.headers['x-forwarded-for'];
@@ -381,9 +933,26 @@ function clientIp(req) {
 
 function htmlErrorStatus(error) {
   if (error?.code === 'DEVICE_SESSION_INVALID' || error?.code === 'DEVICE_SESSION_EXPIRED') return 400;
-  if (error?.code === 'RATE_LIMITED') return 429;
+  if (error?.code === 'RATE_LIMITED' || error?.code === 'DEVICE_PROOF_LOCKED') return 429;
   if (error?.code === 'BODY_TOO_LARGE') return 413;
+  if (error?.code === 'ERR_INVALID_URL' || error?.code === 'REQUEST_TARGET_INVALID') return 400;
+  if (error?.code === 'TRIAL_KEY_UNREADABLE') return 409;
+  if (error?.code?.endsWith('_INVALID') || error?.code === 'DEVICE_PROOF_EXPIRED') return 400;
   return 500;
+}
+
+function responseSecurityHeaders(isHtml) {
+  const common = {
+    'Cache-Control': 'no-store',
+    'Referrer-Policy': 'no-referrer',
+    'X-Content-Type-Options': 'nosniff',
+  };
+  if (!isHtml) return common;
+  return {
+    ...common,
+    'Content-Security-Policy': "default-src 'none'; img-src 'self' http://127.0.0.1:*; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+    'X-Frame-Options': 'DENY',
+  };
 }
 
 export function creditsRequestListener(service) {
@@ -391,13 +960,14 @@ export function creditsRequestListener(service) {
   const MINUTE = 60 * 1000;
   const TEN_MINUTES = 10 * MINUTE;
   return async (req, res) => {
-    const host = req.headers.host ?? '127.0.0.1';
-    const url = new URL(req.url ?? '/', `http://${host}`);
+    let url = null;
     const ip = clientIp(req);
     const send = (status, body, headers = {}) => {
       const payload = typeof body === 'string' ? body : JSON.stringify(body);
+      const isHtml = typeof body === 'string';
       res.writeHead(status, {
-        'Content-Type': typeof body === 'string' ? 'text/html; charset=utf-8' : 'application/json',
+        'Content-Type': isHtml ? 'text/html; charset=utf-8' : 'application/json; charset=utf-8',
+        ...responseSecurityHeaders(isHtml),
         ...headers,
       });
       res.end(payload);
@@ -413,6 +983,17 @@ export function creditsRequestListener(service) {
       device,
     );
     try {
+      const host = req.headers.host;
+      if (typeof host === 'string' && host) {
+        // Validate the untrusted Host only for request hygiene; routing always
+        // uses a fixed loopback base so Host can never control URL parsing.
+        new URL(`http://${host}`);
+      }
+      const requestTarget = typeof req.url === 'string' ? req.url : '/';
+      if (!requestTarget.startsWith('/') || requestTarget.startsWith('//')) {
+        throw creditsError('REQUEST_TARGET_INVALID', '요청 주소가 올바르지 않아요');
+      }
+      url = new URL(requestTarget, 'http://127.0.0.1');
       if (req.method === 'GET' && (url.pathname === '/rau.png' || url.pathname === '/favicon.ico')) {
         const icon = await readFile(RAU_ICON_PATH);
         res.writeHead(200, {
@@ -424,6 +1005,13 @@ export function creditsRequestListener(service) {
       }
       if (req.method === 'GET' && url.pathname === '/healthz') {
         send(200, { ok: true });
+        return;
+      }
+      if (url.pathname.startsWith('/v1/') && service.minDeviceProtocol >= 2) {
+        send(426, {
+          error: 'RAU_CLIENT_UPDATE_REQUIRED',
+          message: 'Rau 로그인을 계속하려면 Rauhwpx를 업데이트해 주세요',
+        });
         return;
       }
       if (req.method === 'POST' && url.pathname === '/v1/device-sessions') {
@@ -452,6 +1040,38 @@ export function creditsRequestListener(service) {
         send(200, await service.acknowledgeDeviceSession(decodeURIComponent(acknowledge[1])));
         return;
       }
+      if (req.method === 'POST' && url.pathname === '/v2/device-sessions') {
+        if (!limiter.check(`create-v2:${ip}`, 10, TEN_MINUTES)) {
+          send(429, { error: 'RATE_LIMITED', message: '로그인 요청이 너무 많아요. 잠시 후 다시 시도해 주세요' });
+          return;
+        }
+        send(201, await service.createDeviceSessionV2(await readJson(req)));
+        return;
+      }
+      const redeemV2 = url.pathname.match(/^\/v2\/device-sessions\/([^/]+)\/redeem$/);
+      if (req.method === 'POST' && redeemV2) {
+        if (!limiter.check(`redeem-v2:${ip}`, 30, MINUTE)) {
+          send(429, { error: 'RATE_LIMITED', message: '요청이 너무 많아요. 잠시 후 다시 시도해 주세요' });
+          return;
+        }
+        send(200, await service.redeemDeviceSessionV2(
+          decodeURIComponent(redeemV2[1]),
+          await readJson(req),
+        ));
+        return;
+      }
+      const acknowledgeV2 = url.pathname.match(/^\/v2\/device-sessions\/([^/]+)\/acknowledge$/);
+      if (req.method === 'POST' && acknowledgeV2) {
+        if (!limiter.check(`ack-v2:${ip}`, 30, MINUTE)) {
+          send(429, { error: 'RATE_LIMITED', message: '요청이 너무 많아요. 잠시 후 다시 시도해 주세요' });
+          return;
+        }
+        send(200, await service.acknowledgeDeviceSessionV2(
+          decodeURIComponent(acknowledgeV2[1]),
+          await readJson(req),
+        ));
+        return;
+      }
       if (req.method === 'GET' && url.pathname === '/login') {
         const device = url.searchParams.get('device');
         if (!device) {
@@ -462,8 +1082,12 @@ export function creditsRequestListener(service) {
           throttled(device);
           return;
         }
-        await service.assertPendingDevice(device);
-        send(200, renderLoginPage({ device, notice: url.searchParams.get('notice') ?? '' }));
+        const context = await service.deviceLoginContext(device);
+        send(200, renderLoginPage({
+          device,
+          pairingCode: context.pairingCode,
+          notice: url.searchParams.get('notice') ?? '',
+        }));
         return;
       }
       if (req.method === 'GET' && url.pathname === '/continue') {
@@ -473,8 +1097,11 @@ export function creditsRequestListener(service) {
           throttled(device);
           return;
         }
-        await service.assertPendingDevice(device);
-        send(302, '', { Location: service.authorizationUrl(device, provider) });
+        const context = await service.deviceLoginContext(device);
+        const location = context.protocol === 2
+          ? await service.authorizationUrlV2(device, provider)
+          : service.authorizationUrl(device, provider);
+        send(302, '', { Location: location });
         return;
       }
       if (req.method === 'POST' && url.pathname === '/login/magic') {
@@ -484,7 +1111,7 @@ export function creditsRequestListener(service) {
           throttled(device);
           return;
         }
-        await service.assertPendingDevice(device);
+        const context = await service.deviceLoginContext(device);
         const email = String(form.get('email') ?? '').trim();
         if (!limiter.check(`magic-email:${email.toLowerCase()}`, 3, TEN_MINUTES)) {
           throttled(device);
@@ -492,11 +1119,16 @@ export function creditsRequestListener(service) {
         }
         try {
           const sent = await service.sendMagicCode(email);
-          send(200, renderCodePage({ device, email: sent }));
+          send(200, renderCodePage({
+            device,
+            email: sent,
+            pairingCode: context.pairingCode,
+          }));
         } catch (error) {
           send(400, renderLoginPage({
             device,
             email: form.get('email') ?? '',
+            pairingCode: context.pairingCode,
             notice: error?.message ?? '코드를 보내지 못했어요',
           }));
         }
@@ -511,8 +1143,14 @@ export function creditsRequestListener(service) {
           return;
         }
         try {
-          await service.completeMagicLogin(device, email, form.get('code'));
-          send(200, renderDonePage());
+          const context = await service.deviceLoginContext(device);
+          if (context.protocol === 2) {
+            const completed = await service.completeMagicLoginV2(device, email, form.get('code'));
+            send(200, renderConfirmPage(completed));
+          } else {
+            await service.completeMagicLogin(device, email, form.get('code'));
+            send(200, renderDonePage());
+          }
         } catch (error) {
           if (error?.code === 'DEVICE_SESSION_INVALID' || error?.code === 'DEVICE_SESSION_EXPIRED') {
             fail(error, device);
@@ -521,6 +1159,7 @@ export function creditsRequestListener(service) {
           send(400, renderCodePage({
             device,
             email,
+            pairingCode: null,
             notice: error?.message ?? '코드를 확인하지 못했어요',
           }));
         }
@@ -532,23 +1171,51 @@ export function creditsRequestListener(service) {
           return;
         }
         try {
-          await service.completeLogin(url.searchParams.get('code'), url.searchParams.get('state'));
-          send(200, renderDonePage());
+          try {
+            if (typeof service.completeLoginV2 !== 'function') {
+              throw creditsError('OAUTH_STATE_INVALID', 'v1 callback');
+            }
+            const completed = await service.completeLoginV2(
+              url.searchParams.get('code'),
+              url.searchParams.get('state'),
+            );
+            send(200, renderConfirmPage(completed));
+          } catch (error) {
+            if (error?.code !== 'OAUTH_STATE_INVALID') throw error;
+            await service.completeLogin(url.searchParams.get('code'), url.searchParams.get('state'));
+            send(200, renderDonePage());
+          }
         } catch (error) {
           fail(error, url.searchParams.get('state') ?? '');
         }
         return;
       }
+      const confirmV2 = url.pathname.match(/^\/v2\/device-sessions\/([^/]+)\/confirm$/);
+      if (req.method === 'POST' && confirmV2) {
+        if (!limiter.check(`confirm-v2:${ip}`, 10, TEN_MINUTES)) {
+          throttled(decodeURIComponent(confirmV2[1]));
+          return;
+        }
+        const form = await readForm(req);
+        const ready = await service.confirmDeviceSessionV2(
+          decodeURIComponent(confirmV2[1]),
+          form.get('confirmationToken'),
+        );
+        send(200, renderReadyPage(ready));
+        return;
+      }
       send(404, { error: 'not found' });
     } catch (error) {
-      if (url.pathname.startsWith('/v1') || url.pathname === '/healthz') {
+      const pathname = url?.pathname ?? '';
+      if (pathname.startsWith('/v1') || pathname.startsWith('/v2') || pathname === '/healthz'
+        || error?.code === 'REQUEST_TARGET_INVALID' || error instanceof TypeError) {
         send(htmlErrorStatus(error), {
           error: error?.code ?? 'RAU_CREDITS_FAILED',
           message: error?.message ?? String(error),
         });
         return;
       }
-      fail(error, url.searchParams.get('device') ?? url.searchParams.get('state') ?? '');
+      fail(error, url?.searchParams.get('device') ?? url?.searchParams.get('state') ?? '');
     }
   };
 }

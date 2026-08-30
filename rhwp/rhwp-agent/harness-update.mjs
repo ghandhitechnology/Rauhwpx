@@ -1,8 +1,11 @@
 import { promises as fs } from 'node:fs';
 
+import { cancelResponseBody, readResponseJsonBounded } from './response-bounds.mjs';
+
 const REGISTRY_BASE = 'https://registry.npmjs.org';
 const LOCK_CODES = new Set(['EPERM', 'EBUSY', 'ENOTEMPTY', 'EACCES']);
 const RETRY_DELAYS_MS = [80, 160, 320, 640, 1_000, 1_500];
+const REGISTRY_METADATA_LIMIT_BYTES = 64 * 1024;
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -63,8 +66,14 @@ export async function fetchLatestPackage(fetchImpl, packageName, timeoutMs = 10_
   const response = await fetchImpl(`${REGISTRY_BASE}/${encoded}/latest`, {
     signal: AbortSignal.timeout(timeoutMs),
   });
-  if (!response.ok) throw new Error(`registry HTTP ${response.status}`);
-  const metadata = await response.json();
+  if (!response.ok) {
+    await cancelResponseBody(response, new Error(`registry HTTP ${response.status}`));
+    throw new Error(`registry HTTP ${response.status}`);
+  }
+  const metadata = await readResponseJsonBounded(response, {
+    maxBytes: REGISTRY_METADATA_LIMIT_BYTES,
+    label: `${packageName} registry metadata`,
+  });
   // 버전은 npm argv 에 보간된다 — semver 형태가 아니면 설치 플래그 주입으로 이어질 수
   // 있으니 비정형 메타데이터는 업데이트 실패로 간주한다.
   if (!isSafeSemverVersion(metadata?.version)) {
@@ -90,6 +99,7 @@ export async function updatePrefixAtomically({
   const stagingDir = `${prefixDir}.update-${label}-${suffix}`;
   const previousDir = `${prefixDir}.previous`;
   let activeMoved = false;
+  let cleanupUncertain = false;
 
   try {
     try {
@@ -122,10 +132,15 @@ export async function updatePrefixAtomically({
       }
       throw error;
     }
+  } catch (error) {
+    cleanupUncertain = error?.processCleanupUncertain === true;
+    throw error;
   } finally {
-    await retryLockedOperation(
-      () => fs.rm(stagingDir, { recursive: true, force: true }),
-      { platform },
-    ).catch(() => {});
+    if (!cleanupUncertain) {
+      await retryLockedOperation(
+        () => fs.rm(stagingDir, { recursive: true, force: true }),
+        { platform },
+      ).catch(() => {});
+    }
   }
 }

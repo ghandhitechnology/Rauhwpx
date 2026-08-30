@@ -3,6 +3,7 @@ import { formatDiffLocationCombined } from '@/compare/diff-location-label';
 import { compareDocuments } from '@/compare/diff-engine';
 import type { CompareSessionStore } from '@/compare/session';
 import type { CompareOptions, DiffItem, DiffKind } from '@/compare/types';
+import { UNTRUSTED_DOCUMENT_MAX_BYTES, readBlobBytesWithLimit } from '@/core/document-input-limits';
 import { CompareResultWindow } from './compare-result-window';
 
 const DEFAULT_KINDS: DiffKind[] = ['text', 'table', 'shape', 'image', 'chart'];
@@ -208,14 +209,18 @@ export class CompareDialog {
       this.resultMetaEl.textContent = 'HWP/HWPX 파일만 선택할 수 있습니다.';
       return;
     }
-    const bytes = new Uint8Array(await selected.arrayBuffer());
-    const picked: CompareFile = { bytes, fileName: selected.name };
-    if (side === 'left') {
-      this.leftFile = picked;
-      this.leftFileNameEl.textContent = selected.name;
-    } else {
-      this.rightFile = picked;
-      this.rightFileNameEl.textContent = selected.name;
+    try {
+      const bytes = await readBlobBytesWithLimit(selected, UNTRUSTED_DOCUMENT_MAX_BYTES, '비교 문서');
+      const picked: CompareFile = { bytes, fileName: selected.name };
+      if (side === 'left') {
+        this.leftFile = picked;
+        this.leftFileNameEl.textContent = selected.name;
+      } else {
+        this.rightFile = picked;
+        this.rightFileNameEl.textContent = selected.name;
+      }
+    } catch (error) {
+      this.resultMetaEl.textContent = error instanceof Error ? error.message : String(error);
     }
   }
 
@@ -561,4 +566,3 @@ export class CompareDialog {
     return '메타';
   }
 }
-

@@ -79,6 +79,7 @@ import {
 import { parseStaticSvgPathLayers, type StaticSvgPathLayer } from './static-svg-path-layers';
 import { loadLocalFontBytesFor, localFontFaceKey, resolveLocalFont, type LocalFontRecord } from '@/core/local-fonts';
 import type { CanvasKitBundledFontSource } from '@/core/font-loader';
+import { cancelResponseBody } from '@/core/document-input-limits';
 import { readBoundedResponseArrayBuffer } from './canvaskit/bounded-response';
 
 type CanvasKitApi = CanvasKit;
@@ -256,6 +257,8 @@ export class CanvasKitLayerRenderer {
         if (defaultFontManager && defaultFontManager.countFamilies() > 0) {
           defaultFontFamily = defaultFontManager.getFamilyName(0);
         }
+      } else {
+        await cancelResponseBody(response, `HTTP ${response.status}`);
       }
     } catch (error) {
       console.warn('[CanvasKitLayerRenderer] 기본 CJK 폰트 로딩 실패:', error);
@@ -271,6 +274,8 @@ export class CanvasKitLayerRenderer {
         });
         symbolFallbackTypeface = canvasKit.Typeface.MakeFreeTypeFaceFromData(bytes)
           ?? canvasKit.Typeface.MakeTypefaceFromData(bytes);
+      } else {
+        await cancelResponseBody(response, `HTTP ${response.status}`);
       }
     } catch (error) {
       console.warn('[CanvasKitLayerRenderer] 기호 폴백 폰트 로딩 실패:', error);
@@ -301,6 +306,8 @@ export class CanvasKitLayerRenderer {
           oldHangulNativeTypeface = null;
           oldHangulFontManager = null;
         }
+      } else {
+        await cancelResponseBody(response, `HTTP ${response.status}`);
       }
     } catch (error) {
       oldHangulNativeTypeface?.delete?.();
@@ -358,6 +365,7 @@ export class CanvasKitLayerRenderer {
           }
           const response = await fetch(source.url, { signal: request.signal });
           if (!response.ok) {
+            await cancelResponseBody(response, `HTTP ${response.status}`);
             throw new Error(`HTTP ${response.status}`);
           }
           const bytes = await readBoundedResponseArrayBuffer(response, {

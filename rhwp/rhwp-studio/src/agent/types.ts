@@ -4,7 +4,7 @@
  * Normative shapes shared by the studio bridge (bridge.ts / tool-executor.ts /
  * revision.ts), the pending-edit manager (pending-edits.ts / pending-overlay.ts)
  * and the sidebar UI (ui/agent-sidebar/). Wire shapes mirror the rhwp-agent hub
- * protocol v4.
+ * protocol v5.
  */
 import type { WasmBridge } from '../core/wasm-bridge.ts';
 import type { EventBus } from '../core/event-bus.ts';
@@ -12,7 +12,7 @@ import type { InputHandler } from '../engine/input-handler.ts';
 import type { CanvasView } from '../view/canvas-view.ts';
 import type { DocumentDirtyState } from '../core/document-dirty-state.ts';
 
-export const AGENT_PROTOCOL_VERSION = 4;
+export const AGENT_PROTOCOL_VERSION = 5;
 
 export type AgentName = 'claude' | 'codex' | 'pi' | 'grok' | 'cursor' | 'rau';
 
@@ -352,6 +352,14 @@ export interface AgentSetupStatus {
   /** 로그인한 계정 이메일 — Rau 체험 로그인이 알려 준다. */
   account?: string | null;
   authenticating: boolean;
+  /** Whether this Studio session owns the provider's current authentication run. */
+  authOwnedByThisSession?: boolean;
+  /** Present only for the owning Studio session. */
+  authRunId?: string;
+  authPhase?: string;
+  authUrl?: string;
+  pairingCode?: string;
+  authExpiresAt?: string;
   setupComplete: boolean;
   /** Rau 체험 잔액이 0 일 때. 다른 프로바이더는 보내지 않는다. */
   exhausted?: boolean;
@@ -369,7 +377,10 @@ export type AgentSetupStatusMap = Record<AgentName, AgentSetupStatus>;
 
 export interface AgentSetupAuthStart {
   agent: AgentName;
+  authRunId: string;
   authUrl: string | null;
+  pairingCode?: string | null;
+  expiresAt?: string | null;
 }
 
 /** 요금제 — 한도 계산의 기준이 되므로 프로바이더별로 값이 다르다. */
@@ -704,6 +715,7 @@ export type SidebarEvent =
   | {
       type: 'agent-setup-progress';
       agent: AgentName;
+      authRunId?: string;
       state: 'installing' | 'authorizing' | 'done';
       phase?: 'preparing' | 'resolving' | 'downloading' | 'installing' | 'configuring' | 'verifying' | 'done';
       percent?: number;
@@ -711,11 +723,14 @@ export type SidebarEvent =
       authUrl?: string;
       /** 기기 인증 코드 — 브라우저에서 확인시켜야 하는 CLI(codex · grok)에만 온다. */
       userCode?: string;
+      /** Short code that identifies the hosted Rau login session. */
+      pairingCode?: string;
+      expiresAt?: string;
       activity?: boolean;
       receivedBytes?: number;
       totalBytes?: number;
     }
-  | { type: 'agent-setup-error'; agent: AgentName | null; code: string; message: string }
+  | { type: 'agent-setup-error'; agent: AgentName | null; authRunId?: string; code: string; message: string }
   | { type: 'usage-report'; usage: UsageSummary }
   | { type: 'pi-status'; status: PiStatus }
   | {
@@ -756,6 +771,8 @@ export interface AgentBridgeOptions {
   /** Browser/dev override. Electron always uses the preload session context. */
   url?: string;
   token?: string;
+  referenceToken?: string;
+  templateToken?: string;
   launchId?: string;
   sessionId?: string;
 }

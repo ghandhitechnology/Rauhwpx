@@ -5,6 +5,13 @@
 
 'use strict';
 
+const {
+  cancelResponseBody,
+  REMOTE_THUMBNAIL_MAX_BYTES,
+  readResponseBytesWithLimit,
+  resolveDocumentMaxBytes,
+} = globalThis.RHWPFetchSecurity;
+
 // ─── 보안: URL 검증 ───
 
 const DEFAULT_ALLOWED_DOMAINS = ['.go.kr', '.ac.kr', '.mil.kr', '.korea.kr'];
@@ -207,74 +214,15 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return;
       }
 
-      // URL 검증 (C-01)
-      const urlResult = validateUrl(message.url);
-      if (!urlResult.valid) {
-        logSecurity('fetch-blocked', message.url, urlResult.reason);
-        sendResponse({ error: urlResult.reason });
-        return;
-      }
-
-      // fetch 실행 (리다이렉트 수동 처리, 쿠키 미전송)
-      (async () => {
-        try {
-          const settings = await browser.storage.local.get({ allowHttp: true, maxFileSize: 20, devMode: false });
-
-          // 내부 IP 이중 체크 (devMode 시 허용)
-          if (urlResult.isPrivate && !settings.devMode) {
-            logSecurity('fetch-blocked', message.url, '내부 IP');
-            sendResponse({ error: '내부 네트워크 접근 차단' });
-            return;
-          }
-          const maxSize = (settings.maxFileSize || 20) * 1024 * 1024;
-
-          // HTTP 처리
-          let fetchUrl = message.url;
-          if (urlResult.parsed.protocol === 'http:' && !settings.allowHttp) {
-            sendResponse({ error: 'HTTP 차단 (설정에서 비허용)' });
-            return;
-          }
-
-          // Safari 는 manual redirect 응답을 opaqueredirect 로 숨겨 Location 을
-          // 노출하지 않는다. 중간 hop 을 검증할 수 없으므로 리다이렉트는 차단한다.
-          const res = await fetch(fetchUrl, {
-            credentials: 'omit',
-            redirect: 'error',
-          });
-
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-          // Content-Type 검증
-          const ct = (res.headers.get('content-type') || '').toLowerCase();
-          if (ct.includes('text/html') || ct.includes('application/json') || ct.includes('text/javascript')) {
-            logSecurity('fetch-blocked', fetchUrl, `차단된 Content-Type: ${ct}`);
-            sendResponse({ error: `예상치 않은 응답 유형: ${ct}` });
-            return;
-          }
-
-          const buf = await res.arrayBuffer();
-
-          // 크기 제한
-          if (buf.byteLength > maxSize) {
-            sendResponse({ error: `파일 크기 초과 (${Math.round(buf.byteLength / 1024 / 1024)}MB > ${settings.maxFileSize}MB)` });
-            return;
-          }
-
-          // 문서 형식 검증
-          const signature = verifyDocumentSignature(buf);
-          if (!signature.isDocument) {
-            logSecurity('signature-blocked', fetchUrl, '지원하지 않는 한글 문서 형식');
-            sendResponse({ error: '지원하지 않는 한글 문서 형식입니다' });
-            return;
-          }
-
-          // ArrayBuffer 직접 전달 (N-04 메모리 폭발 방지)
-          sendResponse({ data: buf });
-        } catch (err) {
-          sendResponse({ error: err.message });
-        }
-      })();
-      return true; // 비동기 응답
+      // Hostname checks cannot stop DNS rebinding, and Safari exposes no way to
+      // pin a verified address across redirects while retaining TLS Host/SNI.
+      // A future native/server transport must enforce that invariant.
+      sendResponse({
+        error: 'Privileged remote fetch is disabled; a server/native fetcher with DNS pinning is required.',
+        code: 'REMOTE_PROXY_UNAVAILABLE',
+        requirement: 'SERVER_FETCH_REQUIRED',
+      });
+      return;
     }
 
     case 'extract-thumbnail': {
@@ -282,10 +230,12 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ error: 'Unauthorized' });
         return;
       }
-      extractThumbnailFromUrl(message.url)
-        .then(result => sendResponse(result || { error: 'PrvImage not found' }))
-        .catch(err => sendResponse({ error: err.message }));
-      return true;
+      sendResponse({
+        error: 'Privileged remote fetch is disabled; a server/native fetcher with DNS pinning is required.',
+        code: 'REMOTE_PROXY_UNAVAILABLE',
+        requirement: 'SERVER_FETCH_REQUIRED',
+      });
+      return;
     }
 
     case 'get-settings': {
@@ -309,32 +259,82 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // ─── HWP 썸네일 추출 (Task #88, Chrome #86 포팅) ───
 
-const THUMBNAIL_CACHE = new Map();
-const CACHE_MAX_SIZE = 100;
+const THUMBNAIL_CACHE_MAX_ENTRIES = 32;
+const THUMBNAIL_CACHE_MAX_ESTIMATED_BYTES = 32 * 1024 * 1024;
+
+class BoundedThumbnailCache {
+  constructor() {
+    this.entries = new Map();
+    this.estimatedBytes = 0;
+  }
+
+  get(url) {
+    const entry = this.entries.get(url);
+    if (!entry) return undefined;
+    this.entries.delete(url);
+    this.entries.set(url, entry);
+    return entry.value;
+  }
+
+  set(url, value) {
+    const existing = this.entries.get(url);
+    if (existing) {
+      this.entries.delete(url);
+      this.estimatedBytes -= existing.estimatedBytes;
+    }
+    const entryBytes = (url.length * 2) + (typeof value?.dataUri === 'string'
+      ? value.dataUri.length * 2
+      : 0) + 256;
+    if (!Number.isSafeInteger(entryBytes) || entryBytes > THUMBNAIL_CACHE_MAX_ESTIMATED_BYTES) {
+      return false;
+    }
+    while (
+      this.entries.size >= THUMBNAIL_CACHE_MAX_ENTRIES
+      || this.estimatedBytes + entryBytes > THUMBNAIL_CACHE_MAX_ESTIMATED_BYTES
+    ) {
+      const oldestUrl = this.entries.keys().next().value;
+      if (oldestUrl === undefined) break;
+      const oldest = this.entries.get(oldestUrl);
+      this.entries.delete(oldestUrl);
+      this.estimatedBytes -= oldest.estimatedBytes;
+    }
+    this.entries.set(url, { value, estimatedBytes: entryBytes });
+    this.estimatedBytes += entryBytes;
+    return true;
+  }
+}
+
+const THUMBNAIL_CACHE = new BoundedThumbnailCache();
 
 async function extractThumbnailFromUrl(url) {
-  if (THUMBNAIL_CACHE.has(url)) return THUMBNAIL_CACHE.get(url);
+  const urlResult = validateUrl(url);
+  if (!urlResult.valid) return null;
+  const safeUrl = urlResult.parsed.href;
+  const cached = THUMBNAIL_CACHE.get(safeUrl);
+  if (cached !== undefined) return cached;
   try {
     const settings = await browser.storage.local.get({ devMode: false });
-    const urlResult = validateUrl(url);
-    if (!urlResult.valid) return null;
-    if (urlResult.isPrivate && !settings.devMode) return null;
+    if (urlResult.isPrivate && !settings.devMode) {
+      THUMBNAIL_CACHE.set(safeUrl, null);
+      return null;
+    }
 
-    const response = await fetch(url, { credentials: 'omit' });
-    if (!response.ok) return null;
-    const buffer = await response.arrayBuffer();
-    const data = new Uint8Array(buffer);
+    const response = await fetch(safeUrl, { credentials: 'omit' });
+    if (!response.ok) {
+      await cancelResponseBody(response, 'http-error');
+      THUMBNAIL_CACHE.set(safeUrl, null);
+      return null;
+    }
+    const data = await readResponseBytesWithLimit(response, REMOTE_THUMBNAIL_MAX_BYTES);
 
     const isZip = data.length >= 4 && data[0] === 0x50 && data[1] === 0x4B;
     const result = isZip ? await extractPrvImageFromZip(data) : extractPrvImageFromCFB(data);
-    if (result) {
-      if (THUMBNAIL_CACHE.size >= CACHE_MAX_SIZE) {
-        THUMBNAIL_CACHE.delete(THUMBNAIL_CACHE.keys().next().value);
-      }
-      THUMBNAIL_CACHE.set(url, result);
-    }
+    THUMBNAIL_CACHE.set(safeUrl, result);
     return result;
-  } catch { return null; }
+  } catch {
+    THUMBNAIL_CACHE.set(safeUrl, null);
+    return null;
+  }
 }
 
 function extractPrvImageFromCFB(data) {

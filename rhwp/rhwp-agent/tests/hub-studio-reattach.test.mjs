@@ -11,6 +11,7 @@ import path from 'node:path';
 import { createInterface } from 'node:readline';
 import test from 'node:test';
 import WebSocket from 'ws';
+import { registerHubSession } from '../../../desktop/agent-hub.mjs';
 
 const TOKEN = 'hub-reattach-test-token';
 const LAUNCH_ID = 'hub-reattach-test-launch';
@@ -84,7 +85,7 @@ function expectNoMessage(socket, predicate, windowMs) {
 }
 
 function sendFrame(socket, frame) {
-  socket.send(JSON.stringify({ v: 4, ...frame }));
+  socket.send(JSON.stringify({ v: 5, ...frame }));
 }
 
 async function closeSocket(socket) {
@@ -124,8 +125,14 @@ async function startHub(t) {
 
 /** 스튜디오·MCP 소켓을 붙이고 세션을 띄운 뒤 사용할 준비를 마친다. */
 async function connectStudio(port, { sessionId, instance }) {
+  const capabilities = await registerHubSession({
+    port,
+    token: TOKEN,
+    launchId: LAUNCH_ID,
+    sessionId,
+  });
   const query = instance === null ? '' : `&instance=${encodeURIComponent(instance)}`;
-  return openSocket(`ws://127.0.0.1:${port}/studio?token=${TOKEN}&sessionId=${sessionId}${query}`);
+  return openSocket(`ws://127.0.0.1:${port}/studio?token=${capabilities.studio}&sessionId=${sessionId}${query}`);
 }
 
 test('same-instance reattach keeps in-flight tool calls alive', { timeout: 40_000 }, async (t) => {

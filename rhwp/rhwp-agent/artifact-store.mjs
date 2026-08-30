@@ -1,15 +1,23 @@
 import crypto from 'node:crypto';
+import { constants as fsConstants } from 'node:fs';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
-import { inflateRawSync } from 'node:zlib';
+import { crc32, inflateRaw } from 'node:zlib';
+import { promisify } from 'node:util';
 
 import { sanitizeFilename } from './download-manager.mjs';
 
 const DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
 const MAX_ARTIFACTS = 20;
 const MAX_SNAPSHOTTED_BYTES = 128 * 1024 * 1024;
+const MAX_PENDING_INSPECTIONS = 20;
 const MAX_HWPX_EXPANDED_BYTES = 256 * 1024 * 1024;
+const MAX_HWPX_ENTRIES = 4096;
+const MAX_HWPX_ENTRY_BYTES = 64 * 1024 * 1024;
+const MAX_HWPX_CONTENT_HPF_BYTES = 8 * 1024 * 1024;
 const HWPX_MIMETYPE = 'application/hwp+zip';
+const HWPX_MIMETYPE_BYTES = Buffer.byteLength(HWPX_MIMETYPE);
+const inflateRawAsync = promisify(inflateRaw);
 const HWPX_REQUIRED_ENTRIES = Object.freeze([
   'mimetype',
   'version.xml',
@@ -98,15 +106,22 @@ function validateHwpCfb(bytes) {
   }
 }
 
-function crc32(bytes) {
-  let crc = 0xffffffff;
-  for (const byte of bytes) {
-    crc ^= byte;
-    for (let bit = 0; bit < 8; bit += 1) {
-      crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
-    }
+async function readExactFile(fileHandle, expectedSize, maxBytes) {
+  if (!Number.isSafeInteger(expectedSize) || expectedSize < 1 || expectedSize > maxBytes) {
+    throw artifactError('ARTIFACT_TOO_LARGE', `Generated artifact exceeds the ${maxBytes}-byte limit`);
   }
-  return (crc ^ 0xffffffff) >>> 0;
+  const bytes = Buffer.allocUnsafe(expectedSize);
+  let offset = 0;
+  while (offset < expectedSize) {
+    const { bytesRead } = await fileHandle.read(bytes, offset, expectedSize - offset, offset);
+    if (bytesRead === 0) throw artifactError('ARTIFACT_CHANGED', 'Generated artifact changed while it was being published');
+    offset += bytesRead;
+  }
+  const extra = Buffer.allocUnsafe(1);
+  if ((await fileHandle.read(extra, 0, 1, expectedSize)).bytesRead !== 0) {
+    throw artifactError('ARTIFACT_CHANGED', 'Generated artifact changed while it was being published');
+  }
+  return bytes;
 }
 
 function findZipEnd(bytes) {
@@ -129,9 +144,26 @@ function safeZipEntryName(name) {
     && !name.split('/').includes('..');
 }
 
+function bufferView(input) {
+  if (Buffer.isBuffer(input)) return input;
+  if (input instanceof Uint8Array) {
+    return Buffer.from(input.buffer, input.byteOffset, input.byteLength);
+  }
+  return Buffer.from(input);
+}
+
+function maxExpandedBytesForEntry(name) {
+  return name === 'Contents/content.hpf'
+    ? MAX_HWPX_CONTENT_HPF_BYTES
+    : MAX_HWPX_ENTRY_BYTES;
+}
+
 /** Parse and checksum every ZIP member instead of accepting a four-byte PK signature. */
-export function validateHwpxPackage(input) {
-  const bytes = Buffer.isBuffer(input) ? input : Buffer.from(input);
+export async function validateHwpxPackage(input) {
+  const bytes = bufferView(input);
+  if (bytes.length > DEFAULT_MAX_BYTES) {
+    throw artifactError('ARTIFACT_TOO_LARGE', `Generated artifact exceeds the ${DEFAULT_MAX_BYTES}-byte limit`);
+  }
   const endOffset = findZipEnd(bytes);
   const diskNumber = bytes.readUInt16LE(endOffset + 4);
   const directoryDisk = bytes.readUInt16LE(endOffset + 6);
@@ -141,6 +173,12 @@ export function validateHwpxPackage(input) {
   const directoryOffset = bytes.readUInt32LE(endOffset + 16);
   if (diskNumber !== 0 || directoryDisk !== 0 || totalEntries === 0 || diskEntries !== totalEntries) {
     throw artifactError('ARTIFACT_HWPX_INVALID', 'HWPX must be a complete single-disk ZIP package');
+  }
+  if (totalEntries > MAX_HWPX_ENTRIES) {
+    throw artifactError(
+      'ARTIFACT_HWPX_INVALID',
+      `HWPX contains more than ${MAX_HWPX_ENTRIES} entries`,
+    );
   }
   if (totalEntries === 0xffff || directorySize === 0xffffffff || directoryOffset === 0xffffffff) {
     throw artifactError('ARTIFACT_HWPX_INVALID', 'ZIP64 HWPX packages are not supported for chat artifacts');
@@ -184,23 +222,26 @@ export function validateHwpxPackage(input) {
     if (localName !== name || dataOffset + compressedSize > directoryOffset) {
       throw artifactError('ARTIFACT_HWPX_INVALID', `HWPX entry is truncated or mismatched: ${name}`);
     }
+    const maxEntryBytes = maxExpandedBytesForEntry(name);
+    if (uncompressedSize > maxEntryBytes) {
+      throw artifactError(
+        'ARTIFACT_HWPX_INVALID',
+        `HWPX entry expands beyond the ${maxEntryBytes}-byte member limit: ${name}`,
+      );
+    }
     expandedBytes += uncompressedSize;
     if (expandedBytes > MAX_HWPX_EXPANDED_BYTES) {
       throw artifactError('ARTIFACT_HWPX_INVALID', 'HWPX expands beyond the 256 MiB safety limit');
     }
-    const compressed = bytes.subarray(dataOffset, dataOffset + compressedSize);
-    let content;
-    try {
-      content = method === 0
-        ? Buffer.from(compressed)
-        : inflateRawSync(compressed, { maxOutputLength: Math.max(1, uncompressedSize) });
-    } catch {
-      throw artifactError('ARTIFACT_HWPX_INVALID', `HWPX entry cannot be decompressed: ${name}`);
-    }
-    if (content.length !== uncompressedSize || crc32(content) !== expectedCrc) {
-      throw artifactError('ARTIFACT_HWPX_INVALID', `HWPX entry checksum or size is invalid: ${name}`);
-    }
-    entries.set(name, { content, method, localOffset });
+    entries.set(name, {
+      method,
+      localOffset,
+      dataOffset,
+      compressedSize,
+      uncompressedSize,
+      expectedCrc,
+      content: null,
+    });
     localRanges.push([localOffset, dataOffset + compressedSize, name]);
     cursor = nextCursor;
   }
@@ -220,7 +261,7 @@ export function validateHwpxPackage(input) {
     }
   }
   const first = entries.get('mimetype');
-  if (first.localOffset !== 0 || first.method !== 0 || first.content.toString('utf8') !== HWPX_MIMETYPE) {
+  if (first.localOffset !== 0 || first.method !== 0 || first.uncompressedSize !== HWPX_MIMETYPE_BYTES) {
     throw artifactError(
       'ARTIFACT_HWPX_INVALID',
       `HWPX mimetype must be the first uncompressed entry and equal ${HWPX_MIMETYPE}`,
@@ -232,6 +273,35 @@ export function validateHwpxPackage(input) {
     .sort((a, b) => a - b);
   if (sections.some((section, index) => section !== index)) {
     throw artifactError('ARTIFACT_HWPX_INVALID', 'HWPX section entries must be consecutively numbered from section0.xml');
+  }
+
+  // Inflate one member at a time on libuv's worker pool. Keep only the two
+  // bounded members needed below; all other expanded buffers can be released
+  // before the next member is processed. Node's native crc32 avoids a
+  // JavaScript loop over as much as 256 MiB of expanded content.
+  for (const [name, entry] of entries) {
+    const compressed = bytes.subarray(entry.dataOffset, entry.dataOffset + entry.compressedSize);
+    let content;
+    try {
+      content = entry.method === 0
+        ? compressed
+        : await inflateRawAsync(compressed, {
+          maxOutputLength: Math.max(1, entry.uncompressedSize),
+        });
+    } catch {
+      throw artifactError('ARTIFACT_HWPX_INVALID', `HWPX entry cannot be decompressed: ${name}`);
+    }
+    if (content.length !== entry.uncompressedSize || crc32(content) !== entry.expectedCrc) {
+      throw artifactError('ARTIFACT_HWPX_INVALID', `HWPX entry checksum or size is invalid: ${name}`);
+    }
+    if (name === 'mimetype' || name === 'Contents/content.hpf') entry.content = content;
+  }
+
+  if (first.content.toString('utf8') !== HWPX_MIMETYPE) {
+    throw artifactError(
+      'ARTIFACT_HWPX_INVALID',
+      `HWPX mimetype must be the first uncompressed entry and equal ${HWPX_MIMETYPE}`,
+    );
   }
 
   const manifest = entries.get('Contents/content.hpf').content.toString('utf8');
@@ -252,16 +322,50 @@ export function validateHwpxPackage(input) {
 }
 
 export class ArtifactStore {
-  constructor({ rootDir, maxBytes = DEFAULT_MAX_BYTES, createId = () => crypto.randomBytes(24).toString('base64url') } = {}) {
+  constructor({
+    rootDir,
+    trustedReadRoots = [],
+    maxBytes = DEFAULT_MAX_BYTES,
+    createId = () => crypto.randomBytes(24).toString('base64url'),
+    readExactFileImpl = readExactFile,
+  } = {}) {
     if (!rootDir) throw new Error('ArtifactStore requires rootDir');
     this.rootDir = path.resolve(rootDir);
+    this.trustedReadRoots = [...new Set(
+      (Array.isArray(trustedReadRoots) ? trustedReadRoots : [])
+        .map((root) => path.resolve(String(root))),
+    )].filter((root) => root !== this.rootDir);
     this.maxBytes = maxBytes;
     this.createId = createId;
+    this.readExactFile = readExactFileImpl;
     this.records = new Map();
     this.snapshottedBytes = 0;
+    this.inspectionActive = false;
+    this.inspectionWaiters = [];
   }
 
-  async inspectFile(filePath, requestedName) {
+  async runWithInspectionMemory(task) {
+    if (this.inspectionActive) {
+      if (this.inspectionWaiters.length >= MAX_PENDING_INSPECTIONS) {
+        throw artifactError(
+          'ARTIFACT_BUSY',
+          'Too many generated artifacts are already waiting to be inspected',
+        );
+      }
+      await new Promise((resolve) => this.inspectionWaiters.push(resolve));
+    } else {
+      this.inspectionActive = true;
+    }
+    try {
+      return await task();
+    } finally {
+      const next = this.inspectionWaiters.shift();
+      if (next) next();
+      else this.inspectionActive = false;
+    }
+  }
+
+  async inspectFileUnchecked(filePath, requestedName) {
     if (typeof filePath !== 'string' || !path.isAbsolute(filePath)) {
       throw artifactError('ARTIFACT_PATH_INVALID', 'Published artifact path must be absolute');
     }
@@ -280,55 +384,86 @@ export class ArtifactStore {
     const canonical = await fs.realpath(resolved);
     // macOS commonly canonicalizes /var to /private/var. Compare canonical paths
     // on both sides so that alias does not look like a workspace escape.
-    const canonicalRoot = await fs.realpath(this.rootDir);
-    if (!isInside(canonicalRoot, canonical)) {
+    const canonicalRoots = await Promise.all(
+      [this.rootDir, ...this.trustedReadRoots].map((root) => fs.realpath(root).catch((error) => {
+        if (error?.code === 'ENOENT') return null;
+        throw error;
+      })),
+    );
+    if (!canonicalRoots.some((root) => root && isInside(root, canonical))) {
       throw artifactError('ARTIFACT_PATH_OUTSIDE_WORKSPACE', 'Generated artifact resolves outside this chat workspace');
     }
     const requested = sanitizeFilename(requestedName ?? path.basename(canonical), path.basename(canonical));
     const canonicalFormat = formatFor(canonical);
     const requestedStem = path.basename(requested, path.extname(requested)) || 'document';
     const fileName = `${requestedStem}${canonicalFormat.extension}`;
-    const bytes = await fs.readFile(canonical);
-    if (bytes.length !== stat.size) {
-      throw artifactError('ARTIFACT_CHANGED', 'Generated artifact changed while it was being published');
+    const fileHandle = await fs.open(canonical, fsConstants.O_RDONLY);
+    let bytes;
+    try {
+      const openedStat = await fileHandle.stat();
+      if (!openedStat.isFile() || openedStat.size !== stat.size
+        || (stat.ino && openedStat.ino && stat.ino !== openedStat.ino)
+        || (stat.dev && openedStat.dev && stat.dev !== openedStat.dev)) {
+        throw artifactError('ARTIFACT_CHANGED', 'Generated artifact changed while it was being published');
+      }
+      bytes = await this.readExactFile(fileHandle, openedStat.size, this.maxBytes);
+    } finally {
+      await fileHandle.close();
     }
     validateSignature(bytes, canonicalFormat.signature, canonicalFormat.extension);
     if (canonicalFormat.extension === '.hwp') validateHwpCfb(bytes);
-    else if (canonicalFormat.extension === '.hwpx') validateHwpxPackage(bytes);
+    else if (canonicalFormat.extension === '.hwpx') await validateHwpxPackage(bytes);
     return { canonical, bytes, fileName, mime: canonicalFormat.mime };
   }
 
+  async inspectFile(filePath, requestedName) {
+    // A HWPX inspection can hold the compressed source and one expanded ZIP
+    // member at once. Serialize inspections before either allocation so a
+    // burst of publish_artifact calls has a fixed per-chat memory ceiling.
+    return this.runWithInspectionMemory(
+      () => this.inspectFileUnchecked(filePath, requestedName),
+    );
+  }
+
   async publish({ filePath, fileName }) {
-    const inspected = await this.inspectFile(filePath, fileName);
-    const artifactId = String(this.createId());
-    if (!/^[A-Za-z0-9_-]{16,128}$/.test(artifactId)) {
-      throw artifactError('ARTIFACT_ID_INVALID', 'Artifact id generator returned an invalid id');
-    }
-    if (this.records.has(artifactId)) {
-      throw artifactError('ARTIFACT_ID_INVALID', 'Artifact id generator returned a duplicate id');
-    }
-    const snapshot = Buffer.from(inspected.bytes);
-    this.records.set(artifactId, {
-      fileName: inspected.fileName,
-      mime: inspected.mime,
-      size: snapshot.length,
-      checksum: `sha256:${crypto.createHash('sha256').update(snapshot).digest('hex')}`,
-      bytes: snapshot,
+    return this.runWithInspectionMemory(async () => {
+      const inspected = await this.inspectFileUnchecked(filePath, fileName);
+      const artifactId = String(this.createId());
+      if (!/^[A-Za-z0-9_-]{16,128}$/.test(artifactId)) {
+        throw artifactError('ARTIFACT_ID_INVALID', 'Artifact id generator returned an invalid id');
+      }
+      if (this.records.has(artifactId)) {
+        throw artifactError('ARTIFACT_ID_INVALID', 'Artifact id generator returned a duplicate id');
+      }
+      // readExactFile created this buffer for the store. Keeping that owned
+      // snapshot avoids a second allocation as large as the artifact while
+      // remaining independent from later workspace-file writes.
+      const snapshot = inspected.bytes;
+      this.records.set(artifactId, Object.freeze({
+        fileName: inspected.fileName,
+        mime: inspected.mime,
+        size: snapshot.length,
+        checksum: `sha256:${crypto.createHash('sha256').update(snapshot).digest('hex')}`,
+        bytes: snapshot,
+      }));
+      this.snapshottedBytes += snapshot.length;
+      while (this.records.size > MAX_ARTIFACTS || this.snapshottedBytes > MAX_SNAPSHOTTED_BYTES) {
+        const oldestId = this.records.keys().next().value;
+        const oldest = this.records.get(oldestId);
+        this.snapshottedBytes -= oldest?.size ?? 0;
+        this.records.delete(oldestId);
+      }
+      const { bytes: _bytes, ...published } = this.records.get(artifactId);
+      return { artifactId, ...published };
     });
-    this.snapshottedBytes += snapshot.length;
-    while (this.records.size > MAX_ARTIFACTS || this.snapshottedBytes > MAX_SNAPSHOTTED_BYTES) {
-      const oldestId = this.records.keys().next().value;
-      const oldest = this.records.get(oldestId);
-      this.snapshottedBytes -= oldest?.size ?? 0;
-      this.records.delete(oldestId);
-    }
-    const { bytes: _bytes, ...published } = this.records.get(artifactId);
-    return { artifactId, ...published };
   }
 
   async read(artifactId) {
     const record = this.records.get(String(artifactId ?? ''));
     if (!record) throw artifactError('ARTIFACT_NOT_FOUND', 'Generated artifact is unavailable or expired');
-    return { ...record, bytes: Buffer.from(record.bytes) };
+    // Callers borrow the store-owned snapshot and pass it directly to the HTTP
+    // or template sink. They must not mutate it. Copying here doubled peak
+    // memory for every 64 MiB download without adding source-file isolation.
+    return record;
   }
 }

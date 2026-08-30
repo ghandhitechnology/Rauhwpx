@@ -79,10 +79,28 @@ test('WasmBridge load and replacement populate external images with a document g
   assert.match(replacement, /const generation = \+\+this\.documentGeneration/);
   assert.match(replacement, /populateExternalImagesFromDevServer\(doc, generation\)/);
   assert.match(population, /this\.doc !== doc \|\| this\.documentGeneration !== generation/);
-  assert.match(population, /const buf = await res\.arrayBuffer\(\);[\s\S]*?this\.doc !== doc/);
+  assert.match(
+    population,
+    /readResponseBytesWithLimit\([\s\S]*?INSERTED_IMAGE_MAX_BYTES[\s\S]*?this\.doc !== doc/,
+  );
+  assert.doesNotMatch(population, /res\.arrayBuffer\(\)/);
   assert.match(population, /doc\.injectExternalImage\(/);
   assert.doesNotMatch(population, /this\.doc\.injectExternalImage\(/);
   assert.match(bridge, /restoreSnapshot\(id: number\): void \{[\s\S]*?const generation = \+\+this\.documentGeneration;[\s\S]*?populateExternalImagesFromDevServer\(doc, generation\)/);
+});
+
+test('WasmBridge exposes a separate trusted-local constructor path', () => {
+  const bridge = source('src/core/wasm-bridge.ts');
+  assert.match(
+    bridge,
+    /loadTrustedLocalFileOnce\(data: Uint8Array, fileName\?: string\): DocumentInfo \{[\s\S]*?fromTrustedLocalFileBytes\(bytes\)/,
+  );
+
+  const main = source('src/main.ts');
+  assert.match(
+    main,
+    /consumeExactLocalFileRead\(data, fileHandle\)[\s\S]*?loadTrustedLocalFileOnce\(data, fileName\)/,
+  );
 });
 
 test('raw replacement stays outside the generic agent mutation catalog', () => {

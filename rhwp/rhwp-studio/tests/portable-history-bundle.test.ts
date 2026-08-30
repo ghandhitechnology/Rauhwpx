@@ -3,12 +3,16 @@ import test from 'node:test';
 
 import type { CompareDocumentSnapshot } from '../src/compare/types.ts';
 import {
+  createPortableHistoryArchive,
   createPortableHistoryBundle,
-  createPortableHistoryFolder,
   openPortableHistoryBundle,
-  PORTABLE_HISTORY_FOLDER_HISTORY_NAME,
+  PORTABLE_HISTORY_MAX_BYTES,
+  PORTABLE_HISTORY_MAX_COMPARE_SNAPSHOT_BYTES,
+  PORTABLE_HISTORY_MAX_OBJECTS,
+  PORTABLE_HISTORY_MAX_REPOSITORY_RECORDS,
   PortableHistoryError,
 } from '../src/versioning/portable-bundle.ts';
+import { UNTRUSTED_DOCUMENT_MAX_BYTES } from '../src/core/document-input-limits.ts';
 import { fingerprintBytes, hashBytes } from '../src/versioning/hash.ts';
 import { VersionGraphStore } from '../src/versioning/store.ts';
 import {
@@ -145,6 +149,12 @@ test('portable history round trip restores commits, refs, shelves, manifests, dr
   assert.deepEqual(opened.currentDocumentBytes, fixture.snapshot.blobs.find(
     (blob) => blob.id === fixture.head.blobId,
   )?.bytes);
+  const openedCurrentBlob = opened.snapshot.blobs.find((blob) => blob.id === fixture.head.blobId);
+  assert.equal(opened.currentDocumentBytes, openedCurrentBlob?.bytes);
+  assert.equal(opened.currentDocumentBytes.buffer, bytes.buffer);
+  for (const blob of opened.snapshot.blobs) {
+    assert.equal(blob.bytes.buffer, bytes.buffer, 'blob payloads must remain archive views until import');
+  }
   assert.equal(opened.snapshot.commits.length, 2);
   assert.equal(opened.snapshot.refs.filter((ref) => ref.kind === 'branch').length, 2);
   assert.equal(opened.snapshot.refs.filter((ref) => ref.kind === 'tag').length, 1);
@@ -153,7 +163,7 @@ test('portable history round trip restores commits, refs, shelves, manifests, dr
   assert.equal(opened.snapshot.mergeDrafts[0]?.id, fixture.draft.id);
   assert.ok(opened.snapshot.blobs.some((blob) => blob.id === fixture.assetId));
 
-  const folder = createPortableHistoryFolder({
+  const archive = createPortableHistoryArchive({
     documentFileName: 'report.hwpx',
     sourceFormat: 'hwpx',
     activeBranch: branchName('review'),
@@ -161,15 +171,10 @@ test('portable history round trip restores commits, refs, shelves, manifests, dr
     snapshot: fixture.snapshot,
     createdAt: 123,
   });
-  assert.equal(folder.folderName, 'report.rhwpx');
-  assert.deepEqual(folder.files.map((file) => file.name), [
-    PORTABLE_HISTORY_FOLDER_HISTORY_NAME,
-    'report.hwpx',
-  ]);
-  assert.deepEqual(folder.files[0]?.bytes, bytes);
-  assert.deepEqual(folder.files[1]?.bytes, opened.currentDocumentBytes);
+  assert.equal(archive.fileName, 'report.rhwpx');
+  assert.deepEqual(archive.bytes, bytes);
 
-  const renamed = createPortableHistoryFolder({
+  const renamed = createPortableHistoryArchive({
     documentFileName: 'report.rhwpx',
     sourceFormat: 'hwpx',
     activeBranch: branchName('review'),
@@ -177,11 +182,8 @@ test('portable history round trip restores commits, refs, shelves, manifests, dr
     snapshot: fixture.snapshot,
     createdAt: 123,
   });
-  assert.equal(renamed.folderName, 'report.rhwpx');
-  assert.deepEqual(renamed.files.map((file) => file.name), [
-    PORTABLE_HISTORY_FOLDER_HISTORY_NAME,
-    'report.hwpx',
-  ]);
+  assert.equal(renamed.fileName, 'report.rhwpx');
+  assert.deepEqual(renamed.bytes, bytes);
 
   const destination = new VersionGraphStore({ indexedDB: null });
   const imported = await destination.importRepositorySnapshot(opened.snapshot);
@@ -202,6 +204,119 @@ test('portable history round trip restores commits, refs, shelves, manifests, dr
   );
   assert.equal(await destination.getRepository(imported.repository.id), null);
   assert.equal(await destination.getBlob(fixture.assetId), null);
+});
+
+test('portable histories use the bounded untrusted-document memory envelope', () => {
+  assert.equal(PORTABLE_HISTORY_MAX_BYTES, 128 * 1024 * 1024);
+  assert.equal(PORTABLE_HISTORY_MAX_BYTES, UNTRUSTED_DOCUMENT_MAX_BYTES);
+});
+
+test('portable history rejects an excessive object table before hashing or copying payloads', async () => {
+  const fixture = await historyFixture();
+  const repeated = fixture.snapshot.blobs[0]!;
+  const oversizedSnapshot = {
+    ...fixture.snapshot,
+    blobs: Array.from({ length: PORTABLE_HISTORY_MAX_OBJECTS + 1 }, () => repeated),
+    compareSnapshots: [],
+  };
+
+  assert.throws(
+    () => createPortableHistoryBundle({
+      documentFileName: 'report.hwpx',
+      sourceFormat: 'hwpx',
+      activeBranch: branchName('review'),
+      currentBlobId: fixture.head.blobId,
+      snapshot: oversizedSnapshot,
+    }),
+    /too many objects/,
+  );
+});
+
+test('portable history rejects oversized repository arrays before cloning or sorting them', async () => {
+  const fixture = await historyFixture();
+  const bundle = createPortableHistoryBundle({
+    documentFileName: 'report.hwpx',
+    sourceFormat: 'hwpx',
+    activeBranch: branchName('review'),
+    currentBlobId: fixture.head.blobId,
+    snapshot: fixture.snapshot,
+  });
+  const magicLength = new TextEncoder().encode('RAUHWPX-HISTORY\0').byteLength;
+  const oldManifestLength = new DataView(bundle.buffer, bundle.byteOffset, bundle.byteLength)
+    .getUint32(magicLength, true);
+  const oldPayloadOffset = magicLength + 4 + oldManifestLength;
+  const manifest = JSON.parse(new TextDecoder().decode(
+    bundle.subarray(magicLength + 4, oldPayloadOffset),
+  ));
+  manifest.repository.commits = Array.from(
+    { length: PORTABLE_HISTORY_MAX_REPOSITORY_RECORDS + 1 },
+    () => null,
+  );
+  const encodedManifest = new TextEncoder().encode(JSON.stringify(manifest));
+  const hostile = new Uint8Array(magicLength + 4 + encodedManifest.byteLength + bundle.byteLength - oldPayloadOffset);
+  hostile.set(bundle.subarray(0, magicLength), 0);
+  new DataView(hostile.buffer).setUint32(magicLength, encodedManifest.byteLength, true);
+  hostile.set(encodedManifest, magicLength + 4);
+  hostile.set(bundle.subarray(oldPayloadOffset), magicLength + 4 + encodedManifest.byteLength);
+
+  assert.throws(
+    () => openPortableHistoryBundle(hostile),
+    /too many repository records/,
+  );
+});
+
+test('portable history rejects oversized comparison snapshots before serializing them', async () => {
+  const fixture = await historyFixture();
+  const oversizedSnapshot = {
+    ...fixture.snapshot,
+    compareSnapshots: fixture.snapshot.compareSnapshots.map((stored, index) => (
+      index === 0
+        ? { ...stored, byteLength: PORTABLE_HISTORY_MAX_COMPARE_SNAPSHOT_BYTES + 1 }
+        : stored
+    )),
+  };
+
+  assert.throws(
+    () => createPortableHistoryBundle({
+      documentFileName: 'report.hwpx',
+      sourceFormat: 'hwpx',
+      activeBranch: branchName('review'),
+      currentBlobId: fixture.head.blobId,
+      snapshot: oversizedSnapshot,
+    }),
+    /16 MiB limit/,
+  );
+
+  const bundle = createPortableHistoryBundle({
+    documentFileName: 'report.hwpx',
+    sourceFormat: 'hwpx',
+    activeBranch: branchName('review'),
+    currentBlobId: fixture.head.blobId,
+    snapshot: fixture.snapshot,
+  });
+  const magicLength = new TextEncoder().encode('RAUHWPX-HISTORY\0').byteLength;
+  const oldManifestLength = new DataView(bundle.buffer, bundle.byteOffset, bundle.byteLength)
+    .getUint32(magicLength, true);
+  const oldPayloadOffset = magicLength + 4 + oldManifestLength;
+  const manifest = JSON.parse(new TextDecoder().decode(
+    bundle.subarray(magicLength + 4, oldPayloadOffset),
+  ));
+  const descriptor = manifest.objects.find((object: { kind?: string }) => object.kind === 'compare-snapshot');
+  if (!descriptor) throw new Error('fixture comparison snapshot descriptor is missing');
+  descriptor.byteLength = PORTABLE_HISTORY_MAX_COMPARE_SNAPSHOT_BYTES + 1;
+  const encodedManifest = new TextEncoder().encode(JSON.stringify(manifest));
+  const oldPayload = bundle.subarray(oldPayloadOffset);
+  const hostilePayloadLength = Math.max(
+    oldPayload.byteLength,
+    descriptor.offset + descriptor.byteLength,
+  );
+  const hostile = new Uint8Array(magicLength + 4 + encodedManifest.byteLength + hostilePayloadLength);
+  hostile.set(bundle.subarray(0, magicLength), 0);
+  new DataView(hostile.buffer).setUint32(magicLength, encodedManifest.byteLength, true);
+  hostile.set(encodedManifest, magicLength + 4);
+  hostile.set(oldPayload, magicLength + 4 + encodedManifest.byteLength);
+
+  assert.throws(() => openPortableHistoryBundle(hostile), /16 MiB limit/);
 });
 
 test('portable history detects payload tampering and truncation before import', async () => {

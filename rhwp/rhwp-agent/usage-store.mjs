@@ -12,6 +12,10 @@ const RETENTION_MS = 8 * 24 * 60 * 60 * 1000;
 const SESSION_WINDOW_MS = 5 * 60 * 60 * 1000;
 const DAY_WINDOW_MS = 24 * 60 * 60 * 1000;
 const WEEK_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+export const MAX_USAGE_LOG_BYTES = 32 * 1024 * 1024;
+export const MAX_USAGE_EVENTS = 50_000;
+const MAX_PLANS_BYTES = 64 * 1024;
+const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 
 /** 요금제별 토큰 예산 — 공식 수치가 공개되지 않아 모두 추정치다. */
 export const CLAUDE_PLANS = {
@@ -147,12 +151,72 @@ function parseEventLine(line) {
   return event;
 }
 
+async function readSmallFile(file, maxBytes) {
+  const handle = await fs.open(file, 'r');
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.size > maxBytes) {
+      const error = new Error(`${path.basename(file)} exceeds its ${maxBytes}-byte read limit`);
+      error.code = 'USAGE_FILE_TOO_LARGE';
+      throw error;
+    }
+    const bytes = Buffer.allocUnsafe(stat.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    return bytes.subarray(0, offset).toString('utf8');
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readEventTail(file, maxBytes) {
+  const handle = await fs.open(file, 'r');
+  try {
+    const stat = await handle.stat();
+    const length = Math.min(stat.size, maxBytes);
+    const start = stat.size - length;
+    const bytes = Buffer.allocUnsafe(length);
+    let offset = 0;
+    while (offset < length) {
+      const { bytesRead } = await handle.read(bytes, offset, length - offset, start + offset);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    let body = bytes.subarray(0, offset);
+    if (start > 0) {
+      const newline = body.indexOf(0x0a);
+      body = newline === -1 ? Buffer.alloc(0) : body.subarray(newline + 1);
+    }
+    return { text: body.toString('utf8'), truncated: start > 0 };
+  } finally {
+    await handle.close();
+  }
+}
+
 /**
  * 프로바이더 토큰 사용량을 append-only JSONL 로 남기고 롤링 윈도우로 집계한다.
  *
- * @param {{ rootDir?: string, now?: () => number }} [opts]
+ * @param {{ rootDir?: string, now?: () => number, maxEvents?: number,
+ *           retentionMs?: number, pruneIntervalMs?: number, maxLogBytes?: number }} [opts]
  */
-export function createUsageStore({ rootDir = defaultUsageRoot(), now = Date.now } = {}) {
+export function createUsageStore({
+  rootDir = defaultUsageRoot(),
+  now = Date.now,
+  maxEvents = MAX_USAGE_EVENTS,
+  retentionMs = RETENTION_MS,
+  pruneIntervalMs = PRUNE_INTERVAL_MS,
+  maxLogBytes = MAX_USAGE_LOG_BYTES,
+} = {}) {
+  maxEvents = Number.isSafeInteger(maxEvents) && maxEvents > 0
+    ? Math.min(maxEvents, MAX_USAGE_EVENTS)
+    : MAX_USAGE_EVENTS;
+  maxLogBytes = Number.isSafeInteger(maxLogBytes) && maxLogBytes > 0
+    ? Math.min(maxLogBytes, MAX_USAGE_LOG_BYTES)
+    : MAX_USAGE_LOG_BYTES;
   const eventsPath = path.join(rootDir, EVENTS_FILE);
   const plansPath = path.join(rootDir, PLANS_FILE);
   /** @type {Array<{ ts: number, agent: 'claude'|'codex'|'pi'|'grok'|'cursor'|'rau', model: string, inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheCreationTokens: number, costUsd: number, weightedTokens: number }>} */
@@ -160,6 +224,7 @@ export function createUsageStore({ rootDir = defaultUsageRoot(), now = Date.now 
   let plans = { ...DEFAULT_PLANS };
   /** 파일 쓰기는 직렬화한다 — 같은 줄에 두 이벤트가 섞이지 않도록. */
   let writeChain = Promise.resolve();
+  let lastPrunedAt = now();
 
   async function writeAtomic(file, text) {
     const temp = `${file}.tmp-${process.pid}-${now()}`;
@@ -171,8 +236,14 @@ export function createUsageStore({ rootDir = defaultUsageRoot(), now = Date.now 
     return `${JSON.stringify(event)}\n`;
   }
 
-  async function rewriteEvents() {
-    await writeAtomic(eventsPath, events.map(serialize).join(''));
+  async function rewriteEvents(snapshot = events) {
+    await writeAtomic(eventsPath, snapshot.map(serialize).join(''));
+  }
+
+  function pruneEvents(current) {
+    const retained = events.filter((event) => current - event.ts <= retentionMs);
+    events = retained.length > maxEvents ? retained.slice(-maxEvents) : retained;
+    lastPrunedAt = current;
   }
 
   function validPlan(agent, plan) {
@@ -226,7 +297,7 @@ export function createUsageStore({ rootDir = defaultUsageRoot(), now = Date.now 
     async init() {
       await fs.mkdir(rootDir, { recursive: true });
       try {
-        const raw = JSON.parse(await fs.readFile(plansPath, 'utf8'));
+        const raw = JSON.parse(await readSmallFile(plansPath, MAX_PLANS_BYTES));
         for (const agent of AGENTS) {
           if (validPlan(agent, raw?.[agent])) plans[agent] = raw[agent];
         }
@@ -234,20 +305,27 @@ export function createUsageStore({ rootDir = defaultUsageRoot(), now = Date.now 
         // 요금제 파일이 없거나 깨졌으면 기본값으로 시작한다.
       }
       try {
-        const text = await fs.readFile(eventsPath, 'utf8');
+        const loaded = await readEventTail(eventsPath, maxLogBytes);
+        const text = loaded.text;
         const parsed = [];
-        let dropped = 0;
+        let dropped = loaded.truncated ? 1 : 0;
         for (const line of text.split('\n')) {
           if (!line.trim()) continue;
           const event = parseEventLine(line);
-          if (!event || now() - event.ts > RETENTION_MS) {
+          if (!event || now() - event.ts > retentionMs) {
             dropped += 1;
             continue;
           }
           parsed.push(event);
         }
         parsed.sort((a, b) => a.ts - b.ts);
-        events = parsed;
+        if (parsed.length > maxEvents) {
+          dropped += parsed.length - maxEvents;
+          events = parsed.slice(-maxEvents);
+        } else {
+          events = parsed;
+        }
+        lastPrunedAt = now();
         if (dropped > 0) await rewriteEvents();
       } catch (error) {
         if (error?.code !== 'ENOENT') throw error;
@@ -279,8 +357,17 @@ export function createUsageStore({ rootDir = defaultUsageRoot(), now = Date.now 
       };
       event.weightedTokens = weightedTokensOf(event);
       events.push(event);
+      const shouldPrune = events.length > maxEvents || event.ts - lastPrunedAt >= pruneIntervalMs;
+      let persist;
+      if (shouldPrune) {
+        pruneEvents(event.ts);
+        const snapshot = [...events];
+        persist = () => rewriteEvents(snapshot);
+      } else {
+        persist = () => fs.appendFile(eventsPath, serialize(event), { encoding: 'utf8', mode: 0o600 });
+      }
       writeChain = writeChain
-        .then(() => fs.appendFile(eventsPath, serialize(event), { encoding: 'utf8', mode: 0o600 }))
+        .then(persist)
         .catch((error) => {
           process.stderr.write(`[usage-store] append 실패: ${error?.message ?? error}\n`);
         });

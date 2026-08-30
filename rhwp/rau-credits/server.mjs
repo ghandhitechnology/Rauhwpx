@@ -27,9 +27,32 @@ export function createCreditsHttpServer(options = {}) {
     fetchImpl: options.fetchImpl,
     now: options.now,
     authenticateWorkos: options.authenticateWorkos,
+    authenticateMagic: options.authenticateMagic,
+    sendMagicAuth: options.sendMagicAuth,
     createOpenRouterKey: options.createOpenRouterKey,
+    minDeviceProtocol: options.minDeviceProtocol
+      ?? Number(process.env.RAU_MIN_DEVICE_PROTOCOL ?? 1),
   });
-  const server = http.createServer(creditsRequestListener(service));
+  const listener = creditsRequestListener(service);
+  const server = http.createServer((req, res) => {
+    void Promise.resolve(listener(req, res)).catch(() => {
+      if (!res.headersSent) {
+        res.writeHead(500, {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'X-Content-Type-Options': 'nosniff',
+        });
+      }
+      if (!res.writableEnded) res.end(JSON.stringify({ error: 'RAU_CREDITS_FAILED' }));
+    });
+  });
+  server.on('clientError', (_error, socket) => {
+    if (socket.writable) {
+      socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+    } else {
+      socket.destroy();
+    }
+  });
   return { server, service, origin, dbPath };
 }
 

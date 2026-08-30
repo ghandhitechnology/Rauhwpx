@@ -1,11 +1,16 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
+import { readUtf8FileBounded } from './bounded-file.mjs';
+import { readResponseTextBounded } from './response-bounds.mjs';
+
 export const CLIPROXY_FILE = 'cliproxy.json';
 export const DEFAULT_CLIPROXY_URL = 'http://127.0.0.1:8317';
 
 const FETCH_TIMEOUT_MS = 8_000;
 const QUOTA_CACHE_MS = 60_000;
+const RESPONSE_LIMIT_BYTES = 8 * 1024 * 1024;
+const CONFIG_FILE_MAX_BYTES = 64 * 1024;
 const CLAUDE_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
 const CODEX_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage';
 
@@ -346,7 +351,11 @@ export function createCliproxyClient({
         signal: controller.signal,
         redirect: 'error',
       });
-      const text = await response.text();
+      const text = await readResponseTextBounded(response, {
+        maxBytes: RESPONSE_LIMIT_BYTES,
+        label: 'CLIProxyAPI response',
+        abortController: controller,
+      });
       let parsed = null;
       if (text.trim()) {
         try {
@@ -362,6 +371,12 @@ export function createCliproxyClient({
         timeout.code = 'CLIPROXY_TIMEOUT';
         throw timeout;
       }
+      if (error?.code === 'RESPONSE_BODY_TOO_LARGE') {
+        const tooLarge = new Error('CLIProxyAPI 응답이 너무 커요');
+        tooLarge.code = 'CLIPROXY_RESPONSE_TOO_LARGE';
+        throw tooLarge;
+      }
+      if (error?.code?.startsWith?.('CLIPROXY_')) throw error;
       const failed = new Error('CLIProxyAPI에 닿지 못해요. 주소와 실행 상태를 확인하세요');
       failed.code = 'CLIPROXY_UNREACHABLE';
       throw failed;
@@ -504,7 +519,10 @@ export function createCliproxyClient({
     async init() {
       await fs.mkdir(rootDir, { recursive: true });
       try {
-        config = readConfigObject(JSON.parse(await fs.readFile(configPath, 'utf8')));
+        config = readConfigObject(JSON.parse(await readUtf8FileBounded(configPath, {
+          maxBytes: CONFIG_FILE_MAX_BYTES,
+          label: 'CLIProxy config',
+        })));
       } catch (error) {
         if (error?.code !== 'ENOENT') throw error;
         config = null;

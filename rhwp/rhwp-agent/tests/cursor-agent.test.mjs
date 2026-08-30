@@ -10,6 +10,7 @@ import {
   buildCursorCliConfig,
   buildCursorMcpConfig,
   createCursorSession,
+  flushCursorCredentialMirrors,
   formatCursorExitError,
   prepareCursorHome,
 } from '../agents/cursor.mjs';
@@ -173,6 +174,23 @@ test('cli-config merges the source file and overwrites permissions per profile',
   assert.deepEqual(planning.permissions.deny, ['Write(**)']);
   assert.equal(planning.sandbox.mode, 'enabled');
 
+  const worker = buildCursorCliConfig({
+    ...baseOpts,
+    toolProfile: 'copy-layout-worker',
+    readOnlyRoots: ['/private/snapshot', '/private/generated'],
+  }, source);
+  assert.deepEqual(worker.permissions, {
+    allow: [
+      'Read(/tmp/rhwp/**)',
+      'Read(/private/snapshot/**)',
+      'Read(/private/generated/**)',
+      'Mcp(rhwp:*)',
+    ],
+    deny: ['Write(**)'],
+  });
+  assert.equal(worker.permissions.allow.includes('Read(**)'), false);
+  assert.equal(worker.sandbox.mode, 'enabled');
+
   const unrestricted = buildCursorCliConfig({ ...baseOpts, permissionProfile: 'unrestricted' }, source);
   assert.equal(unrestricted.approvalMode, 'unrestricted');
   assert.deepEqual(unrestricted.permissions, { allow: [], deny: [] });
@@ -210,6 +228,87 @@ test('the session cursor home is seeded with links and authored config files', (
   const bare = path.join(root, 'bare', '.cursor');
   prepareCursorHome(bare, path.join(root, 'missing'), { mcpConfig: buildCursorMcpConfig(opts) });
   assert.equal(existsSync(path.join(bare, 'mcp.json')), true);
+});
+
+test('Windows Cursor copy fallback journals refreshed credentials for copyback', (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-cursor-copyback-test-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const sourceCursorDir = path.join(root, 'source', '.cursor');
+  const sessionCursorDir = path.join(root, 'isolated', '.cursor');
+  const source = path.join(sourceCursorDir, 'auth-token.json');
+  const target = path.join(sessionCursorDir, 'auth-token.json');
+  mkdirSync(sourceCursorDir, { recursive: true });
+  writeFileSync(source, '{"token":"shared"}');
+
+  const windowsDeps = {
+    platform: 'win32',
+    symlink() {
+      const error = new Error('symlinks require elevation');
+      error.code = 'EPERM';
+      throw error;
+    },
+  };
+  prepareCursorHome(sessionCursorDir, sourceCursorDir, {}, windowsDeps);
+  assert.equal(readFileSync(target, 'utf8'), '{"token":"shared"}');
+  writeFileSync(target, '{"token":"first-refresh"}');
+  prepareCursorHome(sessionCursorDir, sourceCursorDir, {}, windowsDeps);
+  assert.equal(readFileSync(source, 'utf8'), '{"token":"first-refresh"}');
+  writeFileSync(target, '{"token":"refreshed"}');
+  flushCursorCredentialMirrors(sessionCursorDir);
+  assert.equal(readFileSync(source, 'utf8'), '{"token":"refreshed"}');
+});
+
+test('uncertain Cursor descendant cleanup defers credential copyback', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-cursor-uncertain-cleanup-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const sourceCursorDir = path.join(root, 'source', '.cursor');
+  const isolatedHome = path.join(root, 'isolated');
+  const sessionCursorDir = path.join(isolatedHome, '.cursor');
+  mkdirSync(sourceCursorDir, { recursive: true });
+
+  const session = createCursorSession({
+    ...baseOpts,
+    agentRole: 'root',
+    isolatedHome,
+    cursorSourceDir: sourceCursorDir,
+    requestUserInput: async () => ({ status: 'cancelled' }),
+  }, {
+    createAcpSession(input) {
+      return {
+        async configure() {
+          input.onSessionStarted({ sessionId: 'cursor-uncertain-cleanup', setupResponse: {} });
+        },
+        async prompt() { return new Promise(() => {}); },
+        getSessionId: () => 'cursor-uncertain-cleanup',
+        hasSeenPromptUpdate: () => true,
+        restart: async () => {},
+        cancel: async () => {},
+        dispose: async () => false,
+      };
+    },
+  });
+  session.sendUserMessage('keep the provider alive');
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const source = path.join(sourceCursorDir, 'auth-token.json');
+  const target = path.join(sessionCursorDir, 'auth-token.json');
+  writeFileSync(source, '{"token":"shared"}');
+  prepareCursorHome(sessionCursorDir, sourceCursorDir, {}, {
+    platform: 'win32',
+    symlink() {
+      const error = new Error('symlinks require elevation');
+      error.code = 'EPERM';
+      throw error;
+    },
+  });
+  writeFileSync(target, '{"token":"provider-refresh"}');
+
+  assert.equal(await session.dispose(), false);
+  assert.equal(readFileSync(source, 'utf8'), '{"token":"shared"}');
+  assert.equal(readFileSync(target, 'utf8'), '{"token":"provider-refresh"}');
+
+  assert.equal(flushCursorCredentialMirrors(sessionCursorDir), true);
+  assert.equal(readFileSync(source, 'utf8'), '{"token":"provider-refresh"}');
 });
 
 test('a turn maps init, partial deltas, mcp tool calls and the result line', (t) => {
@@ -459,6 +558,20 @@ test('the spawn env keeps HOME on the isolated home and authors the session curs
   const cli = JSON.parse(readFileSync(path.join(sessionCursorDir, 'cli-config.json'), 'utf8'));
   assert.equal(cli.someToken, 'persisted', '영속 홈의 설정 필드를 보존한다');
   assert.equal(existsSync(path.join(sessionCursorDir, 'mcp.json')), true);
+  session.dispose();
+});
+
+test('an oversized persistent Cursor config is ignored before spawning', (t) => {
+  const { session, opts, root } = startSession(t);
+  mkdirSync(opts.cursorSourceDir, { recursive: true });
+  writeFileSync(
+    path.join(opts.cursorSourceDir, 'cli-config.json'),
+    JSON.stringify({ someToken: 'x'.repeat(1024 * 1024) }),
+  );
+
+  session.sendUserMessage('go');
+  const cli = JSON.parse(readFileSync(path.join(root, 'home', '.cursor', 'cli-config.json'), 'utf8'));
+  assert.equal(cli.someToken, undefined);
   session.dispose();
 });
 

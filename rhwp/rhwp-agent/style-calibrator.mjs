@@ -7,6 +7,7 @@ import { openRouterReady } from './agents/title.mjs';
 import {
   isolatedProcessEnv,
   processTreeSpawnOptions,
+  terminateAndWaitForProcessTreeExit,
   terminateProcessTree,
 } from './process-tree.mjs';
 import { extractReferenceText, markupToText, SUPPORTED_REFERENCE_EXTENSIONS } from './reference-extractor.mjs';
@@ -264,6 +265,7 @@ function runCli(command, args, stdin, cwd, timeoutMs, unavailableCode, deps = {}
     let inputError = null;
     let processError = null;
     let stopping = false;
+    let cleanupPromise = null;
     const finish = (error, value) => {
       if (settled) return;
       settled = true;
@@ -271,10 +273,49 @@ function runCli(command, args, stdin, cwd, timeoutMs, unavailableCode, deps = {}
       if (error) reject(error);
       else resolve(value);
     };
+    const cleanup = () => {
+      if (cleanupPromise) return cleanupPromise;
+      cleanupPromise = terminateAndWaitForProcessTreeExit(child, {
+        timeoutMs: 7_000,
+        terminateProcess,
+        terminateOptions: { graceMs: 5_000 },
+      }).catch(() => false);
+      return cleanupPromise;
+    };
+    const resultAfterCleanup = (code, signal) => {
+      void cleanup().then((cleaned) => {
+        if (!cleaned) {
+          const error = new StyleCalibrationError(
+            'PROCESS_CLEANUP_UNCERTAIN',
+            'The selected model process tree did not stop within the cleanup deadline.',
+          );
+          error.processCleanupUncertain = true;
+          finish(error);
+        } else if (timedOut) {
+          finish(new StyleCalibrationError(
+            'TIMEOUT',
+            `The selected model did not finish within ${Math.round(timeoutMs / 60_000)} minutes. The calibration was stopped safely; you can retry with fewer or smaller files.`,
+          ));
+        } else if (outputExceeded) {
+          finish(new StyleCalibrationError('OUTPUT_TOO_LARGE', 'The selected model produced too much output to use safely. Please retry.'));
+        } else if (inputError) {
+          finish(new StyleCalibrationError('ANALYSIS_FAILED', `Could not send samples to ${command}: ${inputError}`));
+        } else if (processError) {
+          finish(new StyleCalibrationError(unavailableCode, processError));
+        } else if (code === 0) finish(null, stdout);
+        else {
+          const message = stderr.trim() || `${command} exited with ${signal ? `signal ${signal}` : `code ${code}`}`;
+          const errorCode = /authenticate|oauth|login|not logged in/i.test(message)
+            ? unavailableCode
+            : 'ANALYSIS_FAILED';
+          finish(new StyleCalibrationError(errorCode, message));
+        }
+      });
+    };
     const stop = () => {
       if (stopping) return;
       stopping = true;
-      terminateProcess(child, { graceMs: 5_000 });
+      resultAfterCleanup(null, null);
     };
     const timer = setTimeout(() => {
       timedOut = true;
@@ -298,27 +339,7 @@ function runCli(command, args, stdin, cwd, timeoutMs, unavailableCode, deps = {}
       if (child.pid) stop();
       else finish(new StyleCalibrationError(unavailableCode, processError));
     });
-    child.once('close', (code, signal) => {
-      if (timedOut) {
-        finish(new StyleCalibrationError(
-          'TIMEOUT',
-          `The selected model did not finish within ${Math.round(timeoutMs / 60_000)} minutes. The calibration was stopped safely; you can retry with fewer or smaller files.`,
-        ));
-      } else if (outputExceeded) {
-        finish(new StyleCalibrationError('OUTPUT_TOO_LARGE', 'The selected model produced too much output to use safely. Please retry.'));
-      } else if (inputError) {
-        finish(new StyleCalibrationError('ANALYSIS_FAILED', `Could not send samples to ${command}: ${inputError}`));
-      } else if (processError) {
-        finish(new StyleCalibrationError(unavailableCode, processError));
-      } else if (code === 0) finish(null, stdout);
-      else {
-        const message = stderr.trim() || `${command} exited with ${signal ? `signal ${signal}` : `code ${code}`}`;
-        const errorCode = /authenticate|oauth|login|not logged in/i.test(message)
-          ? unavailableCode
-          : 'ANALYSIS_FAILED';
-        finish(new StyleCalibrationError(errorCode, message));
-      }
-    });
+    child.once('close', (code, signal) => resultAfterCleanup(code, signal));
     child.stdin.on('error', (error) => {
       if (!timedOut) {
         inputError = String(error?.message ?? error);
@@ -326,7 +347,10 @@ function runCli(command, args, stdin, cwd, timeoutMs, unavailableCode, deps = {}
       }
     });
     try { child.stdin.end(stdin); }
-    catch (error) { finish(new StyleCalibrationError('ANALYSIS_FAILED', String(error?.message ?? error))); }
+    catch (error) {
+      inputError = String(error?.message ?? error);
+      stop();
+    }
   });
 }
 
@@ -746,6 +770,7 @@ export async function calibrateWritingStyle(input, { run = runCodex, ...deps } =
   };
   const checked = validateCalibrationInput(input);
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-style-calibration-'));
+  let cleanupUncertain = false;
   try {
     emit({
       state: 'preparing', phase: 'preparing', activity: 'validating-samples',
@@ -904,8 +929,11 @@ export async function calibrateWritingStyle(input, { run = runCodex, ...deps } =
         unsupportedFiles,
       },
     };
+  } catch (error) {
+    cleanupUncertain = error?.processCleanupUncertain === true;
+    throw error;
   } finally {
     // Cleanup failures must not replace a useful provider/validation error.
-    await fs.rm(temp, { recursive: true, force: true }).catch(() => {});
+    if (!cleanupUncertain) await fs.rm(temp, { recursive: true, force: true }).catch(() => {});
   }
 }

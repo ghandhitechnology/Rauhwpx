@@ -104,10 +104,12 @@ Paths are relative to the repository root.
 10. **Per-provider capability tuning** — each backend carries briefs and
    permissions shaped to its own CLI traits. Grok runs subagent fleets only in
    Full access (its `dontAsk` mode auto-cancels headless spawns), so Safe-mode
-   grok works sequentially with a blanket shell deny; autonomous background
-   workers (copy-layout) get a scoped exception pinned to that job's
-   `copy_layout.py` path (`python3`/`python` plus the absolute helper, not a
-   blanket `python3*` allow). Cursor subagents replay their transcripts when each finishes,
+   grok works sequentially with a blanket shell deny. Autonomous copy-layout
+   workers have no native shell, write, web, or subagent surface and see only
+   their job-local read roots. They invoke `copy_layout.py` through the
+   worker-only `run_copy_layout_helper` schema; the hub fixes the interpreter,
+   script, immutable snapshot, private output paths, timeout, and `shell:false`
+   process policy. Cursor subagents replay their transcripts when each finishes,
    so its brief asks for tightly bounded child objectives. Pi has no delegation
    tools at all: its brief mandates sequential solo work with batched
    `apply_edits` calls instead of fleets. Activated product skills are appended
@@ -280,8 +282,9 @@ check that file rather than this summary when the exact surface matters.
   document + active chat)
 - Read: `get_structure` (entry point; includes tables), `get_text_range`,
   `get_selection`, `get_fields`, `get_document_info` (includes `fontsUsed`),
-  `materialize_document_snapshot` (writes the exact live HWP/HWPX into the
-  isolated chat workspace when no native source path exists or the document is dirty),
+  `materialize_document_snapshot` (writes the exact live HWP/HWPX into
+  hub-owned, provider-read-only input storage when no native source path exists
+  or the document is dirty),
   `find_text` (searches cells too), `render_page` (SVG markup or PNG image),
   `get_outline` (heading tree), `list_styles`,
   `list_numberings` (numbering/bullet definition ids),
@@ -319,13 +322,14 @@ check that file rather than this summary when the exact surface matters.
   template into the live document)
 - Planning control: `present_implementation_plan`
 - Hub download: `download_file`
-- Generated-file delivery: `publish_artifact` (workspace-confined HWP/HWPX →
-  authenticated local download URL)
+- Generated-file delivery: `publish_artifact` (workspace output or a trusted
+  hub-owned snapshot/download input → authenticated local download URL)
 - Hub Browserbase proxy: `browserbase_start`, `browserbase_end`,
   `browserbase_navigate`, `browserbase_act`, `browserbase_observe`,
   `browserbase_extract`
 - Background copy-layout: `delegate_copy_layout`, `update_copy_layout_job`,
-  `complete_copy_layout_job`, `register_copy_layout_template`
+  `run_copy_layout_helper`, `complete_copy_layout_job`,
+  `register_copy_layout_template`
 
 Every definition has one explicit category: `instruction-read`, `instruction-write`,
 `document-read`, `document-write`, `reference-read`, `template-read`, `download-write`,
@@ -336,33 +340,51 @@ implementing phase). Document writes are rejected by the hub during planning
 and awaiting approval.
 
 `download_file` accepts a URL and an optional filename hint. Files are stored
-under `.rhwp-agent/downloads/<chat-id>/`; the hub sanitizes the leaf name,
+under a hub-private, provider-read-only `.rhwp-agent/downloads/<chat-id>/` tree
+outside the provider-writable workspace; the hub sanitizes the leaf name,
 allocates it without overwriting an existing file, and never accepts a target
 directory from the model. Responses include absolute path, MIME type, size,
 source/final URL, and SHA-256 checksum. Downloads use a total timeout, bounded
 redirects, byte and free-space safety checks, and DNS-pinned public-address
 requests that reject local/private/reserved targets on every hop, with no
-product-level file-count cap.
+more than 100 MiB per file, 20 files per chat, or 512 MiB per chat.
+
+`materialize_document_snapshot` uses a separate hub-private, provider-read-only
+tree with limits of 64 MiB per snapshot, 20 snapshots per chat, and 128 MiB per
+chat. Both managers reject configurations whose storage overlaps the
+provider-writable workspace, so swapping a workspace directory for a symlink or
+Windows junction cannot redirect a hub write.
 
 `publish_artifact` accepts only regular HWP/HWPX files whose canonical path is
-inside the current chat workspace. It rejects links, format mismatches,
+inside the current chat workspace or one of the exact hub-owned snapshot and
+download roots. Adjacent hub-private paths remain rejected. It rejects links, format mismatches,
 malformed/non-conforming HWPX packages, and files over 64 MiB. Publication
 captures immutable bytes so later workspace edits cannot corrupt a download,
 then returns a session-authenticated localhost URL. Studio renders that URL as
 separate Open-in-new-window and Download actions.
-The copy-layout skill uses this with `materialize_document_snapshot`, so browser
-documents no longer need an OS path and snapshot-backed results remain directly
-downloadable from chat.
+Each chat retains at most 20 immutable artifacts and 128 MiB of artifact bytes;
+the oldest artifacts are evicted when either bound is exceeded.
+The copy-layout skill uses a job-scoped snapshot root and job-scoped generated
+root, verifies one immutable checksum through inspection and generation, and
+lets its worker publish only an exact helper-returned candidate. After
+ArtifactStore snapshots those bytes, the hub removes the candidate and source
+snapshot; failed cleanup blocks another job until the hub restarts. Browser
+documents therefore need no OS path without letting a worker publish the
+unsanitized source.
 
-Browserbase tools proxy the official pinned `@browserbasehq/mcp` stdio
-sidecar. It starts lazily, verifies that all six upstream tools are ready,
+Browserbase tools proxy an in-repo stdio sidecar backed by the pinned
+`@browserbasehq/stagehand` 4 SDK. It starts lazily, verifies that all six tools are ready,
 serializes actions against the shared session, keeps that session across
 provider process restarts, and closes it on chat stop or hub shutdown. Text
 results are truncated at 50KB to protect the model context. A timed-out action poisons
 and closes the sidecar because the remote effect may already have happened; the model
 must start fresh and observe before retrying. Missing credentials return
 `BROWSERBASE_NOT_CONFIGURED` with the exact variables to set. Browser actions
-do not require per-action confirmation.
+do not require per-action confirmation. Development requires Node 22.18 or newer;
+packaged apps run the sidecar through the bundled Electron Node runtime.
+Run `npm run test:browserbase:live` with all three credentials before a release.
+It creates three fresh sessions and exercises navigation, action, observation,
+instructed extraction, and snapshot extraction against an HTTPS smoke page.
 
 Verify workflow: the system brief and tool descriptions instruct the model to
 call `verify_changes` after a batch of edits and before ending its turn — it

@@ -9,15 +9,12 @@ contextBridge.exposeInMainWorld('rhwpDesktop', {
     payload,
   ),
   pickNativeOpenFile: (options) => ipcRenderer.invoke('desktop:pick-native-open-file', options),
+  pickLegacyHistoryFolder: () => ipcRenderer.invoke('desktop:pick-legacy-history-folder'),
   claimNativeDroppedFile: (file) => {
     const path = webUtils.getPathForFile(file);
     return path ? ipcRenderer.invoke('desktop:claim-native-dropped-file', path) : null;
   },
   pickNativeSaveFile: (options) => ipcRenderer.invoke('desktop:pick-native-save-file', options),
-  savePortableHistoryFile: (payload) => ipcRenderer.invoke(
-    'desktop:save-portable-history-file',
-    payload,
-  ),
   releaseNativeFile: (handleId) => ipcRenderer.invoke('desktop:release-native-file', handleId),
   readNativeFile: (handleId) => ipcRenderer.invoke('desktop:native-file-read', handleId),
   getNativeFileSourcePath: (handleId) => ipcRenderer.invoke(
@@ -33,12 +30,6 @@ contextBridge.exposeInMainWorld('rhwpDesktop', {
     'desktop:native-file-write',
     handleId,
     bytes,
-    identity,
-  ),
-  writePortableHistoryFile: (handleId, files, identity) => ipcRenderer.invoke(
-    'desktop:native-file-write-portable-history',
-    handleId,
-    files,
     identity,
   ),
   isSameNativeFile: (firstHandleId, secondHandleId) => ipcRenderer.invoke(

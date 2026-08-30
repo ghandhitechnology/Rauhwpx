@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
@@ -6,6 +7,8 @@ import path from 'node:path';
 import test from 'node:test';
 
 import {
+  CODEX_RPC_LINE_LIMIT_BYTES,
+  CodexJsonRpcConnection,
   buildCodexAppServerArgv,
 } from '../agents/codex-app-server.mjs';
 import { createCodexSession } from '../agents/codex.mjs';
@@ -180,6 +183,98 @@ async function settle(rounds = 12) {
     await new Promise((resolve) => setImmediate(resolve));
   }
 }
+
+test('JSON-RPC line overflow closes the connection before parsing', async () => {
+  const process = new FakeProcess();
+  let closed;
+  const connection = new CodexJsonRpcConnection(process, {
+    onFrame() { throw new Error('oversized frame must not be parsed'); },
+    onClosed(error) { closed = error; },
+  });
+
+  process.stdout.emit('data', Buffer.alloc(CODEX_RPC_LINE_LIMIT_BYTES + 1, 0x78));
+  await settle(2);
+  assert.equal(connection.closed, true);
+  assert.equal(process.signalCode, 'SIGTERM');
+  assert.match(closed.message, /larger than 8 MiB/);
+});
+
+test('JSON-RPC overflow does not reject requests before tree cleanup completes', async () => {
+  const process = new FakeProcess();
+  let releaseCleanup;
+  const cleanup = new Promise((resolve) => { releaseCleanup = resolve; });
+  let closed = false;
+  const connection = new CodexJsonRpcConnection(process, {
+    onFrame() {},
+    onClosed() { closed = true; },
+    terminateProcess(child) {
+      child.signalCode = 'SIGTERM';
+      child.emit('exit', null, 'SIGTERM');
+      return cleanup;
+    },
+  });
+  const request = connection.request('pending', {});
+  let rejected = false;
+  void request.catch(() => { rejected = true; });
+
+  process.stdout.emit('data', Buffer.alloc(CODEX_RPC_LINE_LIMIT_BYTES + 1, 0x78));
+  await settle(2);
+  assert.equal(connection.closed, true);
+  assert.equal(closed, false);
+  assert.equal(rejected, false);
+
+  releaseCleanup(true);
+  await assert.rejects(request, /larger than 8 MiB/);
+  assert.equal(closed, true);
+});
+
+test('JSON-RPC request deadlines remain referenced and leave no stale pending entry', async () => {
+  const process = new FakeProcess();
+  const connection = new CodexJsonRpcConnection(process, {
+    onFrame() {},
+    onClosed() {},
+  });
+  const request = connection.request('never/replies', {}, {
+    timeoutMs: 5,
+    label: 'fixture request',
+  });
+  const pending = [...connection.pending.values()][0];
+  assert.equal(pending.timer.hasRef(), true);
+  await assert.rejects(
+    request,
+    /fixture request timed out/,
+  );
+  assert.equal(connection.pending.size, 0);
+  connection.close();
+});
+
+test('a JSON-RPC request deadline settles when it is the idle process\'s only active handle', () => {
+  const serverUrl = new URL('../agents/codex-app-server.mjs', import.meta.url).href;
+  const script = `
+    const { EventEmitter } = await import('node:events');
+    const { CodexJsonRpcConnection } = await import(${JSON.stringify(serverUrl)});
+    const proc = new EventEmitter();
+    proc.stdout = new EventEmitter();
+    proc.stdin = { write() {} };
+    const connection = new CodexJsonRpcConnection(proc, {
+      onFrame() {},
+      onClosed() {},
+    });
+    try {
+      await connection.request('never/replies', {}, { timeoutMs: 5, label: 'idle request' });
+    } catch (error) {
+      process.stdout.write(String(error?.message));
+    }
+  `;
+  const child = spawnSync(process.execPath, ['--input-type=module', '--eval', script], {
+    encoding: 'utf8',
+    timeout: 5_000,
+  });
+
+  assert.equal(child.error, undefined);
+  assert.equal(child.status, 0, child.stderr);
+  assert.equal(child.stdout, 'idle request timed out');
+});
 
 test('app-server argv carries the isolated MCP capability profile', () => {
   const argv = buildCodexAppServerArgv({

@@ -10,12 +10,10 @@ import {
   buildGrokConfigToml,
   buildGrokEnv,
   createGrokSession,
+  flushGrokCredentialMirror,
   formatGrokExitError,
-  pinnedShellAllowPrefixes,
   prepareGrokHome,
-  scopedBashAllowRules,
 } from '../agents/grok.mjs';
-import { copyLayoutShellAllowPrefixes } from '../copy-layout-shell.mjs';
 
 const baseOpts = {
   rootDir: '/tmp/rhwp',
@@ -147,55 +145,16 @@ test('argv carries the prompt file, session, model, effort and safe allow rules'
   assert.equal(argValue(argv, '--agents'), undefined, 'dontAsk 에서는 --agents 를 싣지 않는다');
 });
 
-test('scoped shell prefixes swap the blanket Bash deny for allowlist closure in workers', () => {
-  // 복사 레이아웃 워커는 python3 헬퍼 실행이 필요하다. grok 규칙은 deny 가
-  // allow 보다 우선하므로 --deny Bash 를 남겨 두면 스코프 허용이 죽는다 —
-  // 이 모드에서는 deny 를 빼고 dontAsk 의 allowlist 폐쇄성(허용 접두사와 내장
-  // 읽기 전용 목록 밖은 무프롬프트 거부)으로 경계를 유지한다. 접두사는
-  // 잡 헬퍼 절대 경로까지 고정한다 — python3* 는 인라인 코드와 임의 스크립트를 연다.
-  const helperPath = path.resolve('/private/job/copy_layout.py');
-  const prefixes = copyLayoutShellAllowPrefixes(helperPath);
+test('safe workers cannot reopen Bash with a command-prefix option', () => {
   const argv = buildGrokArgv(
-    { ...baseOpts, shellAllowPrefixes: prefixes },
-    's', false, '/g/p',
-  );
-  assert.equal(argValue(argv, '--permission-mode'), 'dontAsk');
-  const allows = argv.flatMap((value, index) => (value === '--allow' ? [argv[index + 1]] : []));
-  assert.deepEqual(allows, [
-    'Read(/tmp/rhwp/**)', 'Edit(/tmp/rhwp/**)',
-    'Grep', 'WebFetch', 'WebSearch', 'MCPTool(rhwp__*)',
-    ...scopedBashAllowRules(prefixes),
-  ]);
-  assert.equal(allows.includes('Bash(python3*)'), false);
-  assert.equal(allows.includes('Bash(python*)'), false);
-  assert.ok(allows.includes(`Bash(python3 ${helperPath})`));
-  assert.ok(allows.includes(`Bash(python3 ${helperPath} *)`));
-  const denies = argv.flatMap((value, index) => (value === '--deny' ? [argv[index + 1]] : []));
-  assert.deepEqual(denies, [], '전면 Bash deny 는 스코프 허용을 이기므로 함께 빠진다');
-  assert.ok(argv.includes('--no-subagents'), '워커도 안전 프로필 — 서브에이전트는 계속 꺼져 있다');
-});
-
-test('bare interpreter prefixes stay closed instead of opening python3*', () => {
-  const argv = buildGrokArgv(
-    { ...baseOpts, shellAllowPrefixes: ['python3', 'python'] },
+    { ...baseOpts, toolProfile: 'copy-layout-worker', shellAllowPrefixes: ['python3 /tmp/copy_layout.py; touch /tmp/pwned'] },
     's', false, '/g/p',
   );
   const allows = argv.flatMap((value, index) => (value === '--allow' ? [argv[index + 1]] : []));
   assert.equal(allows.some((rule) => rule.startsWith('Bash(')), false);
   const denies = argv.flatMap((value, index) => (value === '--deny' ? [argv[index + 1]] : []));
-  assert.deepEqual(denies, ['Bash'], '고정 경로가 없으면 전면 Bash deny 를 유지한다');
-  assert.deepEqual(pinnedShellAllowPrefixes(['python3', 'python', '']), []);
-});
-
-test('scoped shell prefixes stay inert during planning restriction', () => {
-  const argv = buildGrokArgv(
-    { ...baseOpts, shellAllowPrefixes: copyLayoutShellAllowPrefixes(path.resolve('/private/job/copy_layout.py')), workflow: 'plan', phase: 'planning' },
-    's', false, '/g/p',
-  );
-  const allows = argv.flatMap((value, index) => (value === '--allow' ? [argv[index + 1]] : []));
-  assert.equal(allows.some((rule) => rule.startsWith('Bash(')), false);
-  const denies = argv.flatMap((value, index) => (value === '--deny' ? [argv[index + 1]] : []));
-  assert.deepEqual(denies, ['Bash', 'Edit', 'Write'], '계획 단계는 기존 전면 deny 를 유지한다');
+  assert.deepEqual(denies, ['Bash', 'Edit', 'Write']);
+  assert.ok(argv.includes('--no-subagents'));
 });
 
 test('unrestricted argv always-approves without a sandbox flag and enables subagents', () => {
@@ -775,13 +734,20 @@ test('prepareGrokHome links the shared auth file and skips symlinked sources', (
 
   // 윈도우에서 심볼릭 링크가 거부되면 복사로 대체한다.
   const copyHome = path.join(root, 'copy', '.grok');
-  prepareGrokHome(copyHome, authPath, {
+  const windowsDeps = {
     platform: 'win32',
     symlink() {
       const error = new Error('symlinks require elevation');
       error.code = 'EPERM';
       throw error;
     },
-  });
+  };
+  prepareGrokHome(copyHome, authPath, windowsDeps);
   assert.equal(readFileSync(path.join(copyHome, 'auth.json'), 'utf8'), '{"token":"shared"}');
+  writeFileSync(path.join(copyHome, 'auth.json'), '{"token":"first-refresh"}');
+  prepareGrokHome(copyHome, authPath, windowsDeps);
+  assert.equal(readFileSync(authPath, 'utf8'), '{"token":"first-refresh"}');
+  writeFileSync(path.join(copyHome, 'auth.json'), '{"token":"refreshed"}');
+  flushGrokCredentialMirror(copyHome);
+  assert.equal(readFileSync(authPath, 'utf8'), '{"token":"refreshed"}');
 });

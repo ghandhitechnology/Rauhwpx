@@ -1,8 +1,13 @@
 // cross-spawn: Windows에서 npm .cmd 심을 인자 이스케이프 손상 없이 실행한다.
 import spawn from 'cross-spawn';
-import { copyFileSync, lstatSync, mkdirSync, readlinkSync, symlinkSync, unlinkSync } from 'node:fs';
+import { mkdirSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import {
+  credentialMirrorHasPendingCopybackSync,
+  flushCredentialMirrorSync,
+  prepareCredentialMirrorSync,
+} from '../credential-mirror.mjs';
 import {
   createLineReader,
   isPlanningRestricted,
@@ -10,6 +15,7 @@ import {
   mcpRuntimeFor,
   normalizeExecutionMode,
   normalizeUsageTokens,
+  redactDiagnosticText,
   systemBriefFor,
   truncate,
   validateExecutionMode,
@@ -42,39 +48,59 @@ const DEFAULT_CODEX_MODEL = 'gpt-5.6-sol';
  * @param {string} codexHome
  * @param {string} [authPath]
  */
-export function prepareCodexHome(codexHome, authPath, {
-  copyFile = copyFileSync,
-  platform = process.platform,
-  symlink = symlinkSync,
-} = {}) {
-  mkdirSync(codexHome, { recursive: true });
-  if (!authPath) return;
+const codexMirrorsByHome = new Map();
 
-  let authStat;
-  try {
-    authStat = lstatSync(authPath);
-  } catch (error) {
-    if (error?.code === 'ENOENT') return;
-    throw error;
+export function prepareCodexHome(codexHome, authPath, deps = {}) {
+  const key = path.resolve(codexHome);
+  const previous = codexMirrorsByHome.get(key);
+  if (previous) {
+    const result = flushCredentialMirrorSync(previous, { platform: deps.platform ?? process.platform });
+    if (result.pending) throw Object.assign(new Error(result.errorMessage), { code: result.errorCode });
+    if (!result.conflict) rmSync(previous.target, { force: true });
+    codexMirrorsByHome.delete(key);
   }
-  if (!authStat.isFile() || authStat.isSymbolicLink()) return;
+  mkdirSync(codexHome, { recursive: true, mode: 0o700 });
+  const mirror = prepareCredentialMirrorSync(authPath, path.join(codexHome, 'auth.json'), {
+    platform: deps.platform ?? process.platform,
+    ...(deps.symlink ? { symlink: deps.symlink } : {}),
+  });
+  if (mirror?.mode === 'copy') codexMirrorsByHome.set(key, mirror);
+  return mirror;
+}
 
-  const target = path.join(codexHome, 'auth.json');
+export function flushCodexCredentialMirror(codexHome) {
+  const key = path.resolve(String(codexHome));
+  const mirror = codexMirrorsByHome.get(key);
+  if (!mirror) return true;
   try {
-    const targetStat = lstatSync(target);
-    if (!targetStat.isSymbolicLink()) return;
-    const existingTarget = path.resolve(codexHome, readlinkSync(target));
-    if (existingTarget === path.resolve(authPath)) return;
-    unlinkSync(target);
+    const result = flushCredentialMirrorSync(mirror);
+    if (result.pending) {
+      process.stderr.write(`[codex] credential refresh copyback pending: ${result.errorMessage}\n`);
+      return false;
+    }
+    codexMirrorsByHome.delete(key);
+    if (result.conflict) {
+      process.stderr.write(`[codex] credential refresh copyback conflicted: ${mirror.source}\n`);
+    }
   } catch (error) {
-    if (error?.code !== 'ENOENT') throw error;
+    process.stderr.write(`[codex] credential refresh copyback failed: ${error?.message ?? error}\n`);
+    if (credentialMirrorHasPendingCopybackSync(mirror)) return false;
+    codexMirrorsByHome.delete(key);
   }
-  try {
-    symlink(authPath, target);
-  } catch (error) {
-    if (platform !== 'win32' || error?.code !== 'EPERM') throw error;
-    copyFile(authPath, target);
-  }
+  return true;
+}
+
+function withCredentialCopyback(session, codexHome) {
+  const dispose = session.dispose.bind(session);
+  let disposed = false;
+  session.dispose = async () => {
+    const cleaned = await dispose();
+    if (cleaned !== false && !disposed) {
+      disposed = flushCodexCredentialMirror(codexHome);
+    }
+    return cleaned;
+  };
+  return session;
 }
 
 /**
@@ -109,7 +135,7 @@ export function buildCodexArgv(opts, threadId) {
     // resume 하위 명령이 모두 이해하는 설정 키만 사용한다.
     '-c', 'mcp_servers.rhwp.default_tools_approval_mode="auto"',
     '-c', 'approval_policy="never"',
-    '-c', `sandbox_mode="${planningRestricted ? 'read-only' : (unrestricted ? 'danger-full-access' : 'workspace-write')}"`,
+    '-c', `sandbox_mode="${planningRestricted || opts.toolProfile === 'copy-layout-worker' ? 'read-only' : (unrestricted ? 'danger-full-access' : 'workspace-write')}"`,
     ...(opts.workflow === 'plan' || opts.workflow === 'question' ? ['-c', 'web_search="live"'] : []),
     ...(opts.effort
       ? ['-c', `model_reasoning_effort=${JSON.stringify(opts.effort)}`]
@@ -125,7 +151,13 @@ export function buildCodexArgv(opts, threadId) {
     // 네이티브 서브에이전트는 항상 켠다. `--disable multi_agent` 는 0.147.0 에서
     // 실제로 스폰을 막지 못하므로(프로브 확인) 토글할 이유가 없고, 명시적으로 켜 두면
     // exec 와 exec resume 이 같은 능력으로 돈다.
-    '--enable', 'multi_agent',
+    ...(opts.toolProfile === 'copy-layout-worker'
+      ? [
+        '--disable', 'multi_agent', '--disable', 'shell_tool', '--disable', 'unified_exec',
+        '--disable', 'code_mode_host', '--disable', 'standalone_web_search',
+        '--disable', 'view_image', '--disable', 'shell_snapshot',
+      ]
+      : ['--enable', 'multi_agent']),
     '--disable', 'plugins',
     '--disable', 'skill_search',
     '-m', opts.model ?? DEFAULT_CODEX_MODEL, ...cfg,
@@ -145,8 +177,7 @@ export function buildCodexArgv(opts, threadId) {
  * @param {string} token
  */
 export function formatCodexExitError(stderrText, code, signal, token) {
-  let clean = stderrText.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
-  if (token) clean = clean.split(token).join('[redacted]');
+  const clean = redactDiagnosticText(stderrText, [token]);
   const detail = clean
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -166,6 +197,7 @@ export function formatCodexExitError(stderrText, code, signal, token) {
 export function createLegacyCodexSession(opts, {
   spawnProcess = spawn,
   terminateProcess = terminateProcessTree,
+  waitForExit = waitForProcessTreeExit,
   createRolloutWatcher = createCodexRolloutWatcher,
   initialThreadId = null,
 } = {}) {
@@ -181,8 +213,10 @@ export function createLegacyCodexSession(opts, {
   let disposed = false;
   let loggedToolCallSample = false;
   let stderrTail = '';
-  let childExitPromise = Promise.resolve();
-  let resolveChildExit = null;
+  let childExitPromise = Promise.resolve(true);
+  let stopChild = () => Promise.resolve(true);
+  const pendingTreeCleanups = new Set();
+  let uncertainTreeCleanup = false;
   /**
    * 이번 턴의 롤아웃 워처. codex --json 에는 자식 에이전트 활동이 한 줄도 오지
    * 않으므로 fleet 카드의 유일한 소스다.
@@ -240,7 +274,7 @@ export function createLegacyCodexSession(opts, {
           const toolName = String(item.tool ?? item.name ?? 'mcp_tool').replace(/^mcp__rhwp__/, '');
           if (!loggedToolCallSample && toolName !== 'ask_user_question') {
             loggedToolCallSample = true;
-            process.stderr.write(`[codex] first mcp_tool_call item: ${JSON.stringify(item).slice(0, 1000)}\n`);
+            process.stderr.write(`[codex] first mcp_tool_call observed: ${toolName}\n`);
           }
           if (type === 'item.started') {
             onEvent({
@@ -363,9 +397,7 @@ export function createLegacyCodexSession(opts, {
   }
 
   function killChild() {
-    const proc = child;
-    if (!proc || proc.exitCode !== null || proc.signalCode !== null) return;
-    terminateProcess(proc);
+    return stopChild();
   }
 
   return {
@@ -379,6 +411,9 @@ export function createLegacyCodexSession(opts, {
       // 카드를 닫는 task-end 가 지난 턴 안에서 끝난다 (정상 흐름에서는 exit 에서
       // 이미 정리됐고, 여기 걸리는 건 exit 이 오지 않은 예외 경로다).
       finalizeRolloutWatcher();
+      // A same-tick next turn must not discard the previous tree identity.
+      // Capture its bounded cleanup before replacing the active child slot.
+      if (child) void stopChild();
       turnOpen = true;
       turnCompleted = false;
       turnFailureMessage = null;
@@ -418,27 +453,60 @@ export function createLegacyCodexSession(opts, {
         return;
       }
       child = proc;
-      childExitPromise = new Promise((resolve) => { resolveChildExit = resolve; });
+      let resolveOwnership = () => {};
+      childExitPromise = new Promise((resolve) => { resolveOwnership = resolve; });
+      let cleanupPromise = null;
+      let outputEnded = false;
+      const readStdout = createLineReader(makeHandler());
+      const endOutput = () => {
+        if (outputEnded) return;
+        outputEnded = true;
+        readStdout.end();
+      };
+      stopChild = () => {
+        if (proc !== child) return Promise.resolve(true);
+        if (cleanupPromise) return cleanupPromise;
+        let resolveCleanup = () => {};
+        cleanupPromise = new Promise((resolve) => { resolveCleanup = resolve; });
+        pendingTreeCleanups.add(cleanupPromise);
+        void cleanupPromise.then((cleaned) => {
+          pendingTreeCleanups.delete(cleanupPromise);
+          if (!cleaned) uncertainTreeCleanup = true;
+        });
+        let termination;
+        let exited;
+        try { termination = Promise.resolve(terminateProcess(proc)); } catch { termination = Promise.resolve(false); }
+        try { exited = Promise.resolve(waitForExit(proc)); } catch { exited = Promise.resolve(false); }
+        void Promise.all([termination, exited]).then(
+          ([terminationResult, exitResult]) => terminationResult !== false && exitResult !== false,
+          () => false,
+        ).then((cleaned) => {
+          endOutput();
+          if (cleaned && proc === child) child = null;
+          resolveOwnership(cleaned);
+          resolveOwnership = () => {};
+          resolveCleanup(cleaned);
+        });
+        return cleanupPromise;
+      };
       proc.stdin.on('error', (err) => {
         process.stderr.write(`[codex] stdin write error: ${err?.message ?? err}\n`);
       });
       proc.stdin.end(prompt);
-      proc.stdout.on('data', createLineReader(makeHandler()));
+      proc.stdout.on('data', readStdout);
       proc.stderr.on('data', (chunk) => {
         const text = chunk.toString();
         stderrTail = (stderrTail + text).slice(-STDERR_TAIL_LIMIT);
-        for (const line of text.split('\n')) {
-          if (line.trim()) process.stderr.write(`[codex] ${line}\n`);
-        }
       });
       proc.on('error', (err) => {
         if (proc !== child) return;
-        process.stderr.write(`[codex] spawn error: ${err?.message ?? err}\n`);
+        const safeError = redactDiagnosticText(err?.message ?? err, [opts.token]);
+        process.stderr.write(`[codex] spawn error: ${safeError}\n`);
         // exit 경로와 똑같이 워처부터 정리한다 — 여기서 turn-end 가 나가면
         // 열린 카드가 그대로 매달린 채 턴이 닫힌다.
         finalizeRolloutWatcher();
         if (turnOpen) {
-          onEvent({ type: 'error', agent: 'codex', message: `codex process error: ${err?.message ?? err}` });
+          onEvent({ type: 'error', agent: 'codex', message: `codex process error: ${safeError}` });
           endTurn({ type: 'turn-end', agent: 'codex', stopReason: 'exited' });
         }
       });
@@ -462,15 +530,14 @@ export function createLegacyCodexSession(opts, {
             endTurn({ type: 'turn-end', agent: 'codex', stopReason: turnCompleted ? 'completed' : 'exited' });
           }
         }
-        child = null;
-        resolveChildExit?.();
-        resolveChildExit = null;
+        // Preserve the exited leader until its process group/task tree has
+        // completed bounded cleanup.
+        void stopChild();
       });
       proc.on('close', () => {
         if (proc !== child) return;
-        child = null;
-        resolveChildExit?.();
-        resolveChildExit = null;
+        endOutput();
+        void stopChild();
       });
     },
     setPermissionProfile(profile) {
@@ -486,8 +553,11 @@ export function createLegacyCodexSession(opts, {
     async setExecutionMode(mode) {
       if (turnOpen) throw new Error('Execution mode can only change between turns');
       validateExecutionMode(mode);
-      if (child && child.exitCode === null && child.signalCode === null) killChild();
-      await childExitPromise;
+      if (child) killChild();
+      const cleanupResults = await Promise.all([childExitPromise, ...pendingTreeCleanups]);
+      if (uncertainTreeCleanup || cleanupResults.some((cleaned) => cleaned === false)) {
+        throw new Error('Codex process tree could not be stopped for the mode change');
+      }
       opts.workflow = mode.workflow;
       opts.phase = mode.phase;
       opts.capabilityEpoch = mode.capabilityEpoch;
@@ -504,9 +574,9 @@ export function createLegacyCodexSession(opts, {
       try { child?.stdout?.removeAllListeners('data'); } catch {}
       rolloutWatcher?.stop();
       rolloutWatcher = null;
-      const exited = waitForProcessTreeExit(child);
-      killChild();
-      return exited;
+      const currentCleanup = killChild();
+      return Promise.all([currentCleanup, ...pendingTreeCleanups])
+        .then((results) => !uncertainTreeCleanup && results.every((result) => result !== false));
     },
   };
 }
@@ -523,11 +593,12 @@ export function createLegacyCodexSession(opts, {
  * @returns {import('./backend.mjs').AgentSession}
  */
 export function createCodexSession(opts, dependencies = {}) {
+  const codexHome = opts.codexHome ?? process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex');
   if (typeof opts.requestUserInput !== 'function'
     || !isRootUserInputContext({ agentRole: opts.agentRole })) {
-    return createLegacyCodexSession(opts, dependencies);
+    return withCredentialCopyback(createLegacyCodexSession(opts, dependencies), codexHome);
   }
-  return createCodexAppServerSession(opts, {
+  return withCredentialCopyback(createCodexAppServerSession(opts, {
     ...dependencies,
     prepareHome: dependencies.prepareHome ?? prepareCodexHome,
     createRolloutWatcher: dependencies.createRolloutWatcher ?? createCodexRolloutWatcher,
@@ -535,5 +606,5 @@ export function createCodexSession(opts, dependencies = {}) {
       ...dependencies,
       initialThreadId: threadId,
     }),
-  });
+  }), codexHome);
 }

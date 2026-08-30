@@ -2554,7 +2554,8 @@ impl LayoutEngine {
                             }
                             let img_y = (y + baseline - pic_h).max(y);
                             let bin_data_id = pic.image_attr.bin_data_id;
-                            let image_data = find_bin_data(bdc, bin_data_id).map(|c| c.data.load());
+                            let image_data =
+                                find_bin_data(bdc, bin_data_id).map(|c| c.data.load_shared());
                             let crop = {
                                 let c = &pic.crop;
                                 if c.right > c.left
@@ -5385,7 +5386,7 @@ impl LayoutEngine {
                                 let img_y = base_img_y + sibling_reserved_px;
                                 let bin_data_id = pic.image_attr.bin_data_id;
                                 let image_data =
-                                    find_bin_data(bdc, bin_data_id).map(|c| c.data.load());
+                                    find_bin_data(bdc, bin_data_id).map(|c| c.data.load_shared());
                                 let crop = {
                                     let c = &pic.crop;
                                     if c.right > c.left
@@ -6536,7 +6537,8 @@ impl LayoutEngine {
                             };
                             let img_y = base_img_y + sibling_reserved_px;
                             let bin_data_id = pic.image_attr.bin_data_id;
-                            let image_data = find_bin_data(bdc, bin_data_id).map(|c| c.data.load());
+                            let image_data =
+                                find_bin_data(bdc, bin_data_id).map(|c| c.data.load_shared());
                             let crop = {
                                 let c = &pic.crop;
                                 if c.right > c.left
@@ -6941,7 +6943,7 @@ fn make_picture_image_node(
     crop: Option<(i32, i32, i32, i32)>,
     original_size_hu: Option<(u32, u32)>,
     bin_data_id: u16,
-    image_data: Option<Vec<u8>>,
+    image_data: Option<std::sync::Arc<[u8]>>,
     bbox: BoundingBox,
 ) -> RenderNode {
     let (cei, cpi, otci) = cell_ctx
@@ -6969,7 +6971,7 @@ fn make_picture_image_node(
             text_wrap: Some(pic.common.text_wrap),
             transform: extract_shape_transform(&pic.shape_attr),
             external_path: pic.image_attr.external_path.clone(),
-            ..ImageNode::new(bin_data_id, image_data)
+            ..ImageNode::new_shared(bin_data_id, image_data)
         }),
         bbox,
     )

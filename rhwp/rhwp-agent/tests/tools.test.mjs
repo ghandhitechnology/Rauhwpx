@@ -17,8 +17,8 @@ import {
 
 const byName = new Map(TOOL_DEFINITIONS.map((d) => [d.name, d]));
 
-test('도구는 정확히 76개, 이름 중복 없음', () => {
-  assert.equal(TOOL_DEFINITIONS.length, 76);
+test('도구는 정확히 77개, 이름 중복 없음', () => {
+  assert.equal(TOOL_DEFINITIONS.length, 77);
   assert.equal(byName.size, TOOL_DEFINITIONS.length, 'duplicate tool names');
 });
 
@@ -98,7 +98,7 @@ test('도구 프로필은 direct 호환성과 planning/implementing 가시성을
   assert.ok(!question.has('insert_text'));
 
   const implementing = new Set(filterToolDefinitions('implementing').map((definition) => definition.name));
-  assert.equal(implementing.size, TOOL_DEFINITIONS.length - 3);
+  assert.equal(implementing.size, TOOL_DEFINITIONS.length - 4);
   assert.ok(implementing.has('insert_text'));
   assert.ok(implementing.has('download_file'));
   assert.ok(implementing.has('browserbase_act'));
@@ -112,9 +112,9 @@ test('도구 프로필은 direct 호환성과 planning/implementing 가시성을
     'read_product_skill',
     'get_document_info',
     'materialize_document_snapshot',
-    'render_page',
     'publish_artifact',
     'update_copy_layout_job',
+    'run_copy_layout_helper',
     'complete_copy_layout_job',
   ]);
 });
@@ -260,7 +260,32 @@ test('copy-layout completion schema makes privacy and readability hard gates', (
   assert.throws(() => definition.validate({
     ...valid,
     outcome: 'failed',
-  }), /must not publish/);
+  }), /must not publish.*assert verification claims/);
+  const failed = {
+    jobId: valid.jobId,
+    outcome: 'failed',
+    sourceDocumentId: valid.sourceDocumentId,
+    sourceDigest: valid.sourceDigest,
+    summary: '도우미 검증에 실패했습니다.',
+    warnings: ['후보를 게시하지 않았습니다.'],
+  };
+  assert.doesNotThrow(() => definition.validate(failed));
+  assert.throws(() => definition.validate({
+    ...failed,
+    counts: valid.counts,
+  }), /must not publish.*assert verification claims/);
+});
+
+test('copy-layout runner schema exposes actions and data, never commands or paths', () => {
+  const definition = byName.get('run_copy_layout_helper');
+  assert.equal(definition.category, 'background-worker');
+  assert.deepEqual(Object.keys(definition.shape).sort(), [
+    'action', 'iteration', 'jobId', 'keepMedia', 'textPlan',
+  ]);
+  assert.equal('command' in definition.shape, false);
+  assert.equal('sourcePath' in definition.shape, false);
+  assert.equal('outputPath' in definition.shape, false);
+  assert.equal('helperPath' in definition.shape, false);
 });
 
 test('cell 파라미터를 받는 모든 도구에 조립 방법 안내가 있다', () => {

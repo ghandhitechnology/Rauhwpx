@@ -8,7 +8,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { createHmac, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import {
   closeSync,
   existsSync,
@@ -27,6 +27,48 @@ export const DEFAULT_READY_TIMEOUT_MS = 15000;
 export const DEFAULT_POLL_INTERVAL_MS = 150;
 export const HUB_RESTART_DELAYS_MS = [500, 1000, 2000, 5000];
 export const HUB_READY_PREFIX = 'RHWP_HUB_READY ';
+const MAX_HUB_READY_LINE_BUFFER_CHARS = 64 * 1024;
+const MAX_HUB_HTTP_RESPONSE_BYTES = 64 * 1024;
+
+async function cancelHubResponse(response) {
+  try {
+    if (typeof response?.body?.cancel === 'function') await response.body.cancel();
+    else response?.body?.destroy?.();
+  } catch {}
+}
+
+async function readHubJson(response) {
+  const declared = Number(response?.headers?.get?.('content-length'));
+  if (Number.isFinite(declared) && declared > MAX_HUB_HTTP_RESPONSE_BYTES) {
+    await response?.body?.cancel?.().catch(() => {});
+    throw new Error('Agent hub response exceeded 64 KiB');
+  }
+  if (!response?.body?.getReader) return response.json();
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_HUB_HTTP_RESPONSE_BYTES) {
+        await reader.cancel().catch(() => {});
+        throw new Error('Agent hub response exceeded 64 KiB');
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock?.();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return JSON.parse(new TextDecoder().decode(bytes));
+}
 
 export function createHubToken(bytes = 32) {
   return randomBytes(bytes).toString('base64url');
@@ -43,18 +85,6 @@ export function packagedRhwpBinary({
   const binary = platformPath.join(resourcesPath, 'bin', platform === 'win32' ? 'rhwp.exe' : 'rhwp');
   if (!exists(binary)) throw new Error(`Packaged document extractor is missing: ${binary}`);
   return binary;
-}
-
-export function issueHubSessionToken(masterToken, sessionId) {
-  const normalizedSessionId = String(sessionId);
-  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(normalizedSessionId)) {
-    throw new Error('Invalid hub session ID');
-  }
-  const encodedSessionId = Buffer.from(normalizedSessionId, 'utf8').toString('base64url');
-  const signature = createHmac('sha256', String(masterToken))
-    .update(`rhwp1.${encodedSessionId}`)
-    .digest('base64url');
-  return `rhwp1.${encodedSessionId}.${signature}`;
 }
 
 export function hubHealthUrl(port) {
@@ -84,7 +114,7 @@ async function requestHubOwnerRoute(url, {
       headers: hubOwnerHeaders(token, launchId),
       signal: ac.signal,
     });
-    const body = await response.json().catch(() => null);
+    const body = await readHubJson(response).catch(() => null);
     if (!response.ok) {
       const error = new Error(body?.error?.message || `Agent hub request failed (${response.status})`);
       error.status = response.status;
@@ -103,6 +133,32 @@ export function closeHubSession({ port, token, launchId, sessionId, ...options }
     method: 'DELETE',
     token,
     launchId,
+  });
+}
+
+export async function registerHubSession({ port, token, launchId, sessionId, ...options }) {
+  const normalizedSessionId = String(sessionId);
+  const encodedSessionId = encodeURIComponent(normalizedSessionId);
+  const body = await requestHubOwnerRoute(`http://127.0.0.1:${port}/sessions/${encodedSessionId}`, {
+    ...options,
+    method: 'POST',
+    token,
+    launchId,
+  });
+  const capabilities = body?.capabilities;
+  if (
+    body?.status !== 'registered'
+    || body?.sessionId !== normalizedSessionId
+    || typeof capabilities?.studio !== 'string'
+    || typeof capabilities?.mcp !== 'string'
+    || typeof capabilities?.reference !== 'string'
+    || typeof capabilities?.template !== 'string'
+  ) throw new Error('Agent hub returned an invalid session registration');
+  return Object.freeze({
+    studio: capabilities.studio,
+    mcp: capabilities.mcp,
+    reference: capabilities.reference,
+    template: capabilities.template,
   });
 }
 
@@ -135,8 +191,11 @@ export async function readHubHealth(port, {
   };
   try {
     const response = await fetchImpl(hubHealthUrl(port), { signal: ac.signal, headers });
-    if (!response.ok) return null;
-    const body = await response.json();
+    if (!response.ok) {
+      await cancelHubResponse(response);
+      return null;
+    }
+    const body = await readHubJson(response);
     return body && typeof body === 'object' ? body : null;
   } catch {
     return null;
@@ -337,6 +396,16 @@ export function resolveHubLaunch({
     PATH: pathEnv,
     RHWP_AGENT_PORT: String(env.RHWP_AGENT_PORT ?? DEFAULT_HUB_PORT),
   });
+
+  if (packaged && execPath) {
+    return {
+      command: execPath,
+      args: [scriptPath],
+      cwd,
+      env: sanitizeHubEnv(baseEnv, { electronAsNode: true }),
+      via: 'electron-as-node',
+    };
+  }
 
   if (node) {
     return { command: node, args: [scriptPath], cwd, env: baseEnv, via: 'node' };
@@ -559,6 +628,9 @@ export function waitForHubReadyLine(child, {
     const consumeLines = () => {
       const lines = buffer.split(/\r?\n/);
       buffer = lines.pop() ?? '';
+      if (buffer.length > MAX_HUB_READY_LINE_BUFFER_CHARS) {
+        buffer = buffer.slice(-MAX_HUB_READY_LINE_BUFFER_CHARS);
+      }
       for (const line of lines) {
         const ready = parseHubReadyLine(line, launchId);
         if (!ready) continue;
@@ -600,55 +672,135 @@ export function waitForHubChildExit(child, { timeoutMs = 5000 } = {}) {
     };
     const onExit = () => finish(true);
     const timer = setTimeout(() => finish(false), timeoutMs);
-    timer.unref?.();
+    // Cleanup callers await this deadline before deciding whether session
+    // roots are safe to remove. Keep it referenced so a quiet shutdown cannot
+    // exit early and silently skip the liveness proof.
     child.once('exit', onExit);
   });
 }
 
-export function stopHubChild(child, {
-  timeoutMs = 2000,
-  platform = process.platform,
-  killProcess = process.kill,
-  spawnProcess = spawn,
-} = {}) {
-  if (!child || child.exitCode != null || child.signalCode != null) return Promise.resolve();
+function waitForHelperCompletion(child, { timeoutMs }) {
+  if (!child) return Promise.resolve(false);
+  if (child.exitCode != null) return Promise.resolve(child.exitCode === 0);
+  if (child.signalCode != null) return Promise.resolve(false);
   return new Promise((resolve) => {
     let settled = false;
-    const pid = Number.isSafeInteger(child.pid) && child.pid > 0 ? child.pid : null;
-    const finish = () => {
+    const finish = (completed) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve();
+      child.off?.('close', onClose);
+      child.off?.('error', onError);
+      resolve(completed);
     };
-    const signalTree = (force) => {
-      if (settled || child.exitCode != null || child.signalCode != null) return;
-      if (platform === 'win32' && pid !== null) {
-        try {
-          const killer = spawnProcess('taskkill', ['/PID', String(pid), '/T', ...(force ? ['/F'] : [])], {
-            detached: false,
-            shell: false,
-            stdio: 'ignore',
-            windowsHide: true,
-          });
-          killer.once?.('error', () => {});
-        } catch {}
-        return;
-      }
-      if (pid !== null && child.rhwpProcessGroup) {
-        try { killProcess(-pid, force ? 'SIGKILL' : 'SIGTERM'); } catch {}
-        return;
-      }
-      try { child.kill(force ? 'SIGKILL' : 'SIGTERM'); } catch {}
-    };
-    const timer = setTimeout(() => {
-      signalTree(true);
-      finish();
-    }, timeoutMs);
-    timer.unref?.();
-    child.once('exit', finish);
-    signalTree(false);
+    const onClose = (code) => finish(code === 0);
+    const onError = () => finish(false);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    // taskkill completion is part of the Windows tree-death proof; do not let
+    // the process disappear merely because no unrelated event-loop handle is
+    // still referenced.
+    child.once?.('close', onClose);
+    child.once?.('error', onError);
   });
+}
+
+async function runWindowsTaskkill(pid, force, { spawnProcess, timeoutMs }) {
+  let killer;
+  try {
+    killer = spawnProcess('taskkill', ['/PID', String(pid), '/T', ...(force ? ['/F'] : [])], {
+      detached: false,
+      shell: false,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+  } catch {
+    return false;
+  }
+  return waitForHelperCompletion(killer, { timeoutMs });
+}
+
+function posixProcessGroupAlive(pid, killProcess) {
+  try {
+    killProcess(-pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== 'ESRCH';
+  }
+}
+
+async function waitForTreeExit(isAlive, {
+  timeoutMs,
+  wait = sleep,
+  now = Date.now,
+} = {}) {
+  const deadline = now() + timeoutMs;
+  while (now() < deadline) {
+    if (!isAlive()) return true;
+    await wait(Math.min(25, Math.max(1, deadline - now())));
+  }
+  return !isAlive();
+}
+
+export async function stopHubChild(child, {
+  timeoutMs = 2000,
+  finalGraceMs = 2000,
+  platform = process.platform,
+  killProcess = process.kill,
+  spawnProcess = spawn,
+  treeAlive,
+  wait = sleep,
+  now = Date.now,
+} = {}) {
+  if (!child) return true;
+  const pid = Number.isSafeInteger(child.pid) && child.pid > 0 ? child.pid : null;
+
+  if (platform === 'win32' && pid !== null) {
+    const [gracefulTaskkill, gracefulExit] = await Promise.all([
+      runWindowsTaskkill(pid, false, { spawnProcess, timeoutMs }),
+      waitForHubChildExit(child, { timeoutMs }),
+    ]);
+    if (gracefulTaskkill && gracefulExit) return true;
+
+    const [forcedTaskkill, forcedExit] = await Promise.all([
+      runWindowsTaskkill(pid, true, { spawnProcess, timeoutMs: finalGraceMs }),
+      gracefulExit ? Promise.resolve(true) : waitForHubChildExit(child, { timeoutMs: finalGraceMs }),
+    ]);
+    return forcedTaskkill && forcedExit;
+  }
+
+  const ownsProcessGroup = pid !== null && child.rhwpProcessGroup === true;
+  const groupAlive = ownsProcessGroup
+    ? (treeAlive ?? (() => posixProcessGroupAlive(pid, killProcess)))
+    : null;
+  const signalTree = (force) => {
+    if (ownsProcessGroup) {
+      try { killProcess(-pid, force ? 'SIGKILL' : 'SIGTERM'); } catch {}
+      return;
+    }
+    if (child.exitCode != null || child.signalCode != null) return;
+    try { child.kill(force ? 'SIGKILL' : 'SIGTERM'); } catch {}
+  };
+
+  signalTree(false);
+  const [gracefulExit, gracefulTreeExit] = await Promise.all([
+    waitForHubChildExit(child, { timeoutMs }),
+    groupAlive
+      ? waitForTreeExit(groupAlive, { timeoutMs, wait, now })
+      : Promise.resolve(true),
+  ]);
+  if (gracefulExit && gracefulTreeExit) return true;
+
+  // A detached group can outlive its leader. Force the group even when the
+  // child has already emitted exit, then wait once more before cleanup callers
+  // are allowed to remove its working directories.
+  signalTree(true);
+  const [forcedExit, forcedTreeExit] = await Promise.all([
+    gracefulExit ? Promise.resolve(true) : waitForHubChildExit(child, { timeoutMs: finalGraceMs }),
+    groupAlive
+      ? waitForTreeExit(groupAlive, { timeoutMs: finalGraceMs, wait, now })
+      : Promise.resolve(true),
+  ]);
+  return forcedExit && forcedTreeExit;
 }
 
 export async function resolveHubPid(port, {
@@ -821,8 +973,8 @@ export async function startDetachedHub({
     }),
   });
   if (!ready) {
-    await stopHubChild(child, { platform, timeoutMs: DEFAULT_STOP_TIMEOUT_MS });
-    removePidFile(paths.pid);
+    const stopped = await stopHubChild(child, { platform, timeoutMs: DEFAULT_STOP_TIMEOUT_MS });
+    if (stopped) removePidFile(paths.pid);
     log.warn?.('[rauhwpx] detached agent hub did not become ready');
     return { started: true, ready: false, pid: child.pid, log: paths.log };
   }

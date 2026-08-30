@@ -4,33 +4,60 @@
 // - 향후: 호버 미리보기, 파일 캐싱 등
 
 import { openViewer } from './viewer-launcher.js';
-import { extractThumbnailFromUrl } from './thumbnail-extractor.js';
 import {
-  fetchDocumentWithPolicy,
   isTrustedExtensionPageSender,
   isWebPageSender,
   validateDocumentFetchUrl
 } from './fetch-security.js';
+
+function remoteProxyUnavailable() {
+  return {
+    error: 'Privileged remote fetch is disabled; a server/native fetcher with DNS pinning is required.',
+    code: 'REMOTE_PROXY_UNAVAILABLE',
+    requirement: 'SERVER_FETCH_REQUIRED'
+  };
+}
 
 /**
  * 메시지 라우터를 설정한다.
  */
 export function setupMessageRouter() {
   browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    const handler = messageHandlers[message.type];
-    if (handler) {
-      const result = handler(message, sender);
-      // async 핸들러 지원
-      if (result instanceof Promise) {
-        result.then(sendResponse).catch(err => sendResponse({ error: err.message }));
-        return true; // 비동기 sendResponse 사용 신호
-      }
-      sendResponse(result);
-    }
+    return dispatchRuntimeMessage(message, sender, sendResponse);
   });
 }
 
-const messageHandlers = {
+function safeErrorMessage(error) {
+  return error instanceof Error && error.message ? error.message : 'Message handler failed';
+}
+
+export function dispatchRuntimeMessage(message, sender, sendResponse) {
+  if (!message || typeof message !== 'object' || typeof message.type !== 'string') {
+    return false;
+  }
+
+  const handler = messageHandlers[message.type];
+  if (typeof handler !== 'function') {
+    return false;
+  }
+
+  try {
+    const result = handler(message, sender);
+    if (result && typeof result.then === 'function') {
+      Promise.resolve(result).then(sendResponse, (error) => {
+        sendResponse({ error: safeErrorMessage(error) });
+      });
+      return true;
+    }
+    sendResponse(result);
+    return false;
+  } catch (error) {
+    sendResponse({ error: safeErrorMessage(error) });
+    return false;
+  }
+}
+
+export const messageHandlers = {
   /**
    * Content Script → Service Worker: HWP 파일 열기 요청
    * 웹 페이지발 요청은 fetch 정책과 동일한 URL 검증을 통과해야 한다.
@@ -48,25 +75,31 @@ const messageHandlers = {
     return { ok: true };
   },
 
-  /**
-   * 뷰어 탭 → Service Worker: CORS 우회 파일 fetch
-   * Service Worker의 fetch는 host_permissions에 의해 CORS 제한 없음
+  /*
+   * Never proxy http(s) from an extension origin. Hostname validation cannot
+   * stop DNS rebinding, and browser fetch offers no way to pin the verified IP
+   * through every redirect while preserving Host/SNI. A future native/server
+   * transport must provide that invariant before this route can be enabled.
    */
-  'fetch-file': async (message, sender) => {
-    try {
-      if (!isTrustedExtensionPageSender(sender, browser)) {
-        return { error: 'Unauthorized sender' };
-      }
-      const response = await fetchDocumentWithPolicy(message.url);
-      if (!response.ok) {
-        return { error: `HTTP ${response.status}: ${response.statusText}` };
-      }
-      const buffer = await response.arrayBuffer();
-      // ArrayBuffer는 structured clone으로 전달
-      return { data: Array.from(new Uint8Array(buffer)) };
-    } catch (err) {
-      return { error: err.message };
+  'fetch-file-start': (_message, sender) => {
+    if (!isTrustedExtensionPageSender(sender, browser)) {
+      return { error: 'Unauthorized sender' };
     }
+    return remoteProxyUnavailable();
+  },
+
+  'fetch-file-chunk': (_message, sender) => {
+    if (!isTrustedExtensionPageSender(sender, browser)) {
+      return { error: 'Unauthorized sender' };
+    }
+    return remoteProxyUnavailable();
+  },
+
+  'fetch-file-close': (_message, sender) => {
+    if (!isTrustedExtensionPageSender(sender, browser)) {
+      return { error: 'Unauthorized sender' };
+    }
+    return remoteProxyUnavailable();
   },
 
   /**
@@ -78,10 +111,7 @@ const messageHandlers = {
       if (!isWebPageSender(sender)) {
         return { error: 'Unauthorized sender' };
       }
-      const result = await extractThumbnailFromUrl(message.url, {
-        allowDownloadUrl: message.allowDownloadUrl === true
-      });
-      return result || { error: 'PrvImage not found' };
+      return remoteProxyUnavailable();
     } catch (err) {
       return { error: err.message };
     }

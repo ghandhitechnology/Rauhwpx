@@ -3335,7 +3335,7 @@ impl LayoutEngine {
                         bs.image_fill.as_ref().and_then(|img_fill| {
                             find_bin_data(bin_data_content, img_fill.bin_data_id).map(|c| {
                                 PageBackgroundImage {
-                                    data: c.data.load(),
+                                    data: c.data.load_shared(),
                                     fill_mode: img_fill.fill_mode,
                                     brightness: img_fill.brightness,
                                     contrast: img_fill.contrast,
@@ -8954,8 +8954,8 @@ impl LayoutEngine {
 
                         if !already_registered && !host_para_laid_out {
                             let bin_data_id = pic.image_attr.bin_data_id;
-                            let image_data =
-                                find_bin_data(bin_data_content, bin_data_id).map(|c| c.data.load());
+                            let image_data = find_bin_data(bin_data_content, bin_data_id)
+                                .map(|c| c.data.load_shared());
                             let crop = {
                                 let c = &pic.crop;
                                 if c.right > c.left && c.bottom > c.top {
@@ -8984,7 +8984,7 @@ impl LayoutEngine {
                                     // 경로(skia/canvaskit)는 별도로 image.text_wrap 을 set 하므로 무관.
                                     text_wrap: Some(pic.common.text_wrap),
                                     external_path: pic.image_attr.external_path.clone(),
-                                    ..ImageNode::new(bin_data_id, image_data)
+                                    ..ImageNode::new_shared(bin_data_id, image_data)
                                 }),
                                 BoundingBox::new(pic_x, pic_y, pic_w, pic_h),
                             );

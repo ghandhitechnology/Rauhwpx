@@ -15,11 +15,11 @@ import {
   hubRunPaths,
   isHubHealthy,
   isProcessAlive,
-  issueHubSessionToken,
   nextHubRestartDelay,
   parseHubReadyLine,
   readPidFile,
   removePidFile,
+  registerHubSession,
   requestHubShutdown,
   resolveHubLaunch,
   stopHubByPort,
@@ -29,9 +29,9 @@ import {
   waitForHubReadyLine,
   writePidFile,
 } from '../../../desktop/agent-hub.mjs';
-import { issueScopedHubToken } from '../../rhwp-agent/hub-session-registry.mjs';
 
 const desktopMain = readFileSync(new URL('../../../desktop/main.mjs', import.meta.url), 'utf8');
+const agentHubSource = readFileSync(new URL('../../../desktop/agent-hub.mjs', import.meta.url), 'utf8');
 const preload = readFileSync(new URL('../../../desktop/preload.cjs', import.meta.url), 'utf8');
 const viteConfig = readFileSync(new URL('../vite.config.ts', import.meta.url), 'utf8');
 const viteHubPlugin = readFileSync(new URL('../vite-plugin-agent-hub.mjs', import.meta.url), 'utf8');
@@ -44,11 +44,34 @@ function jsonResponse(body: unknown, ok = true) {
   };
 }
 
-test('desktop renderer credentials exactly match the hub session scope', () => {
-  assert.equal(
-    issueHubSessionToken('master-secret', 'window-a'),
-    issueScopedHubToken('master-secret', 'window-a'),
-  );
+test('desktop registers a session through the owner route and receives scoped capabilities', async () => {
+  let request: { url?: string; init?: any } = {};
+  const capabilities = await registerHubSession({
+    port: 6123,
+    token: 'master-secret',
+    launchId: 'launch-a',
+    sessionId: 'window-a',
+    fetchImpl: async (url: string, init: any) => {
+      request = { url, init };
+      return jsonResponse({
+        status: 'registered',
+        sessionId: 'window-a',
+        capabilities: {
+          studio: 'studio-cap', mcp: 'mcp-cap', reference: 'reference-cap', template: 'template-cap',
+        },
+      });
+    },
+  });
+  assert.deepEqual(capabilities, {
+    studio: 'studio-cap',
+    mcp: 'mcp-cap',
+    reference: 'reference-cap',
+    template: 'template-cap',
+  });
+  assert.equal(request.url, 'http://127.0.0.1:6123/sessions/window-a');
+  assert.equal(request.init.method, 'POST');
+  assert.equal(request.init.headers.authorization, 'Bearer master-secret');
+  assert.equal(request.init.headers['x-rhwp-launch-id'], 'launch-a');
 });
 
 test('healthz URL is loopback-only', () => {
@@ -65,6 +88,34 @@ test('isHubHealthy requires ok:true JSON', async () => {
   assert.equal(await isHubHealthy(5175, {
     fetchImpl: async () => { throw new Error('ECONNREFUSED'); },
   }), false);
+});
+
+test('health probes cancel unread non-ok bodies before retrying', async () => {
+  let cancelled = false;
+  const response = new Response(new ReadableStream<Uint8Array>({
+    cancel() { cancelled = true; },
+  }), { status: 503 });
+
+  assert.equal(await isHubHealthy(5175, { fetchImpl: async () => response }), false);
+  assert.equal(cancelled, true);
+});
+
+test('hub lifecycle responses are bounded while streaming from an unexpected loopback process', async () => {
+  const oversized = () => new Response(new Uint8Array((64 * 1024) + 1), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+  assert.equal(await isHubHealthy(5175, { fetchImpl: async () => oversized() }), false);
+  await assert.rejects(
+    registerHubSession({
+      port: 5175,
+      token: 'token',
+      launchId: 'launch',
+      sessionId: 'session',
+      fetchImpl: async () => oversized(),
+    }),
+    /invalid session registration/,
+  );
 });
 
 test('ensureAgentHub skips spawn when the hub is already healthy', async () => {
@@ -212,7 +263,7 @@ test('unpackaged launch uses node server.mjs (same as npm start)', () => {
   assert.match(launch?.env.PATH ?? '', /\/opt\/homebrew\/bin/);
 });
 
-test('packaged launch prefers system node over npm', () => {
+test('packaged launch always uses the bundled Electron Node runtime', () => {
   const files = new Set([
     '/app/rhwp-agent/server.mjs',
     '/opt/homebrew/bin',
@@ -229,9 +280,10 @@ test('packaged launch prefers system node over npm', () => {
     exists: (path) => files.has(path),
     platform: 'darwin',
   });
-  assert.equal(launch?.via, 'node');
-  assert.equal(launch?.command, '/opt/homebrew/bin/node');
+  assert.equal(launch?.via, 'electron-as-node');
+  assert.equal(launch?.command, '/app/Rauhwpx');
   assert.deepEqual(launch?.args, ['/app/rhwp-agent/server.mjs']);
+  assert.equal(launch?.env.ELECTRON_RUN_AS_NODE, '1');
 });
 
 test('launch falls back to Electron-as-Node when npm and node are missing', () => {
@@ -250,6 +302,24 @@ test('launch falls back to Electron-as-Node when npm and node are missing', () =
   assert.equal(launch?.env.ELECTRON_RUN_AS_NODE, '1');
 });
 
+test('packaged Windows launch also keeps the sidecar on the bundled Node runtime', () => {
+  const scriptPath = 'C:\\Program Files\\Rauhwpx\\resources\\app.asar.unpacked\\rhwp\\rhwp-agent\\server.mjs';
+  const launch = resolveHubLaunch({
+    packaged: true,
+    execPath: 'C:\\Program Files\\Rauhwpx\\Rauhwpx.exe',
+    scriptPath,
+    agentDir: 'C:\\Program Files\\Rauhwpx\\resources\\app.asar.unpacked\\rhwp\\rhwp-agent',
+    home: 'C:\\Users\\dev',
+    env: { PATH: 'C:\\Windows\\System32' },
+    exists: (path) => path === scriptPath,
+    platform: 'win32',
+  });
+  assert.equal(launch?.via, 'electron-as-node');
+  assert.equal(launch?.command, 'C:\\Program Files\\Rauhwpx\\Rauhwpx.exe');
+  assert.deepEqual(launch?.args, [scriptPath]);
+  assert.equal(launch?.env.ELECTRON_RUN_AS_NODE, '1');
+});
+
 test('desktop shell owns one ephemeral authenticated hub and exposes session IPC', () => {
   assert.match(desktopMain, /app\.requestSingleInstanceLock\(\)/);
   assert.match(desktopMain, /if \(!app\.isPackaged\)[\s\S]*app\.setPath\('userData', developmentUserData\)/);
@@ -262,6 +332,7 @@ test('desktop shell owns one ephemeral authenticated hub and exposes session IPC
   assert.match(desktopMain, /RHWP_AGENT_TOKEN: hubToken/);
   assert.match(desktopMain, /RHWP_LAUNCH_ID: launchId/);
   assert.match(desktopMain, /RHWP_OWNER_PID: String\(process\.pid\)/);
+  assert.match(desktopMain, /RHWP_OWNER_IPC: '1'/);
   assert.match(desktopMain, /RHWP_RUNTIME_DIR: this\.runtimeDir/);
   assert.match(desktopMain, /RHWP_WORK_DIR: this\.workDir/);
   assert.match(desktopMain, /expectedPid: child\.pid/);
@@ -272,6 +343,10 @@ test('desktop shell owns one ephemeral authenticated hub and exposes session IPC
   assert.match(desktopMain, /sandbox: true/);
   assert.match(desktopMain, /contextIsolation: true/);
   assert.match(desktopMain, /stopHubChild\(/);
+  assert.match(desktopMain, /hasPendingLaunchCleanupSync\(this\.workDir\)/);
+  assert.match(desktopMain, /retainLaunchRootForProcessCleanupSync\(this\.workDir, \{ launchId \}\)/);
+  assert.match(desktopMain, /if \(this\.#stoppingChild !== child\) this\.scheduleRestart\(\)/);
+  assert.doesNotMatch(desktopMain, /onExit: \(code, signal\) => \{[\s\S]{0,300}this\.#child = null/);
   assert.match(preload, /getSessionContext: \(\) => ipcRenderer\.invoke\('desktop:get-session-context'\)/);
   assert.match(preload, /ensureAgentHub: \(\) => ipcRenderer\.invoke\('agent-hub:ensure'\)/);
 });
@@ -301,6 +376,23 @@ test('ready-line waiter accepts output emitted before it attaches', async () => 
   child.rhwpStdoutHistory = `startup log\n${HUB_READY_PREFIX}${JSON.stringify(ready)}\n`;
 
   assert.deepEqual(await waitForHubReadyLine(child, { launchId: ready.launchId }), ready);
+});
+
+test('ready-line waiter bounds an unterminated stdout line while waiting', async () => {
+  const ready = { launchId: 'launch-bounded', pid: 56, port: 32125 };
+  const child = new EventEmitter() as EventEmitter & {
+    stdout: EventEmitter;
+    exitCode: number | null;
+    signalCode: string | null;
+  };
+  child.stdout = new EventEmitter();
+  child.exitCode = null;
+  child.signalCode = null;
+  const pending = waitForHubReadyLine(child, { launchId: ready.launchId, timeoutMs: 500 });
+  child.stdout.emit('data', 'x'.repeat(256 * 1024));
+  child.stdout.emit('data', `\n${HUB_READY_PREFIX}${JSON.stringify(ready)}\n`);
+  assert.deepEqual(await pending, ready);
+  assert.match(agentHubSource, /buffer = buffer\.slice\(-MAX_HUB_READY_LINE_BUFFER_CHARS\)/);
 });
 
 test('ready-line waiter rejects a child that already exited', async () => {
@@ -350,9 +442,15 @@ test('studio development and desktop builds include the agent hub', () => {
   assert.match(viteHubPlugin, /\/__rhwp\/ensure-agent-hub/);
   assert.match(viteHubPlugin, /RHWP_AGENT_PORT: String\(requestedPort\)/);
   assert.match(viteHubPlugin, /RHWP_AGENT_TOKEN: token/);
+  assert.match(viteHubPlugin, /RHWP_OWNER_IPC: '1'/);
+  assert.match(viteHubPlugin, /stdio: \['ignore', 'pipe', 'pipe', 'ipc'\]/);
   assert.match(viteHubPlugin, /RHWP_WORK_DIR:/);
   assert.match(viteHubPlugin, /waitForHubReadyLine\(spawned, \{ launchId \}\)/);
   assert.match(viteHubPlugin, /stopHubChild\(/);
+  assert.match(viteHubPlugin, /hasPendingLaunchCleanupSync\(join\(candidate, 'work'\)\)/);
+  assert.match(viteHubPlugin, /retainLaunchRootForProcessCleanupSync\(join\(currentWorkRoot, 'work'\), \{ launchId \}\)/);
+  assert.match(viteHubPlugin, /onExit\(code, signal\)[\s\S]{0,300}Keep the exited leader/);
+  assert.doesNotMatch(viteHubPlugin, /onExit\(code, signal\) \{[\s\S]{0,300}(?:child = null|removeOwnedWorkRoot)/);
   assert.match(rootPackage, /"start": "node rhwp\/rhwp-agent\/ctl.mjs start"/);
   assert.match(rootPackage, /"start:fg": "node rhwp\/rhwp-agent\/server.mjs"/);
   assert.match(rootPackage, /"stop": "node rhwp\/rhwp-agent\/ctl.mjs stop"/);
@@ -388,34 +486,38 @@ test('isProcessAlive reports this process and rejects nonsense', () => {
   assert.equal(isProcessAlive(-1), false);
 });
 
-test('stopHubByPort waits for the process to exit after health drops', async () => {
+test('stopHubByPort waits for health-down and process exit before removing its pid file', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rhwp-stop-complete-'));
+  const pidPath = join(dir, 'rhwp-agent.pid');
   let healthReads = 0;
-  let aliveChecks = 0;
+  let processReads = 0;
   let clock = 0;
-  const fetchImpl = async (_url: string, init?: { method?: string }) => {
-    if (init?.method === 'POST') return jsonResponse({ status: 'shutting-down' });
-    healthReads += 1;
-    if (healthReads === 1) {
-      return jsonResponse({ ok: true, pid: 4242, launchId: 'launch-a' });
-    }
-    return { ok: false, json: async () => null };
-  };
+  writePidFile(pidPath, 4242);
+  try {
+    const result = await stopHubByPort(5175, {
+      pidPath,
+      fetchImpl: async (_url: string, init?: { method?: string }) => {
+        if (init?.method === 'POST') return jsonResponse({ status: 'shutting-down' });
+        healthReads += 1;
+        if (healthReads === 1) return jsonResponse({ ok: true, pid: 4242, launchId: 'launch-a' });
+        return { ok: false, json: async () => null };
+      },
+      timeoutMs: 200,
+      wait: async (ms) => { clock += ms; },
+      now: () => clock,
+      processAlive: () => {
+        processReads += 1;
+        return processReads < 3;
+      },
+    });
 
-  const stopped = await stopHubByPort(5175, {
-    fetchImpl,
-    timeoutMs: 500,
-    wait: async (ms) => { clock += ms; },
-    now: () => clock,
-    processAlive: () => {
-      aliveChecks += 1;
-      return aliveChecks < 3;
-    },
-  });
-
-  assert.equal(stopped.stopped, true);
-  assert.equal(stopped.pid, 4242);
-  assert.equal(aliveChecks, 3);
-  assert.ok(clock >= 100);
+    assert.deepEqual(result, { stopped: true, ready: false, pid: 4242 });
+    assert.equal(readPidFile(pidPath), null);
+    assert.equal(processReads, 3);
+    assert.ok(clock >= 100);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('stopHubByPort reports a timeout and retains the pid file while the process is alive', async () => {
@@ -497,12 +599,151 @@ test('stopHubChild terminates the owned POSIX group and clears escalation on exi
       });
       return true;
     },
+    treeAlive: () => false,
   });
-  await stopped;
+  assert.equal(await stopped, true);
   await new Promise((resolve) => setTimeout(resolve, 60));
   assert.deepEqual(signals, [[-4321, 'SIGTERM']]);
 });
 
+test('stopHubChild force-kills a surviving POSIX group after its leader exits', async () => {
+  const signals: Array<[number, string]> = [];
+  let groupAlive = true;
+  const child = Object.assign(new EventEmitter(), {
+    pid: 4322,
+    exitCode: null as number | null,
+    signalCode: null,
+    rhwpProcessGroup: true,
+  });
+  const stopped = stopHubChild(child, {
+    timeoutMs: 20,
+    finalGraceMs: 20,
+    platform: 'linux',
+    treeAlive: () => groupAlive,
+    killProcess: (pid, signal) => {
+      signals.push([pid, signal]);
+      if (signal === 'SIGTERM') queueMicrotask(() => {
+        child.exitCode = 0;
+        child.emit('exit', 0, null);
+      });
+      if (signal === 'SIGKILL') groupAlive = false;
+      return true;
+    },
+  });
+
+  assert.equal(await stopped, true);
+  assert.deepEqual(signals, [[-4322, 'SIGTERM'], [-4322, 'SIGKILL']]);
+});
+
+test('leader crash retains POSIX group identity through restart cleanup', async () => {
+  const signals: Array<[number, string]> = [];
+  let groupAlive = true;
+  const child = Object.assign(new EventEmitter(), {
+    pid: 4323,
+    exitCode: 1,
+    signalCode: null,
+    rhwpProcessGroup: true,
+  });
+  const stopped = stopHubChild(child, {
+    timeoutMs: 10,
+    finalGraceMs: 10,
+    platform: 'linux',
+    treeAlive: () => groupAlive,
+    killProcess: (pid, signal) => {
+      signals.push([pid, signal]);
+      if (signal === 'SIGKILL') groupAlive = false;
+      return true;
+    },
+  });
+
+  assert.equal(await stopped, true);
+  assert.deepEqual(signals, [[-4323, 'SIGTERM'], [-4323, 'SIGKILL']]);
+});
+
+test('stopHubChild waits for taskkill completion as well as Windows child exit', async () => {
+  const child = Object.assign(new EventEmitter(), {
+    pid: 5432,
+    exitCode: null as number | null,
+    signalCode: null,
+  });
+  const killer = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null });
+  let settled = false;
+  const stopped = stopHubChild(child, {
+    timeoutMs: 100,
+    finalGraceMs: 50,
+    platform: 'win32',
+    spawnProcess: () => killer,
+  }).then((value) => {
+    settled = true;
+    return value;
+  });
+  child.exitCode = 0;
+  child.emit('exit', 0, null);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  killer.exitCode = 0;
+  killer.emit('close', 0, null);
+  assert.equal(await stopped, true);
+});
+
+test('stopHubChild reports a surviving Windows child after bounded force cleanup', async () => {
+  const child = Object.assign(new EventEmitter(), {
+    pid: 5433,
+    exitCode: null,
+    signalCode: null,
+  });
+  const calls: string[][] = [];
+  const stopped = await stopHubChild(child, {
+    timeoutMs: 10,
+    finalGraceMs: 10,
+    platform: 'win32',
+    spawnProcess: (_command, args) => {
+      calls.push(args);
+      const killer = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null });
+      queueMicrotask(() => {
+        killer.exitCode = 0;
+        killer.emit('close', 0, null);
+      });
+      return killer;
+    },
+  });
+
+  assert.equal(stopped, false);
+  assert.deepEqual(calls, [
+    ['/PID', '5433', '/T'],
+    ['/PID', '5433', '/T', '/F'],
+  ]);
+});
+
+test('exited Windows leader fails closed when task-tree death cannot be proved', async () => {
+  const child = Object.assign(new EventEmitter(), {
+    pid: 5434,
+    exitCode: 1,
+    signalCode: null,
+  });
+  const calls: string[][] = [];
+  const stopped = await stopHubChild(child, {
+    timeoutMs: 10,
+    finalGraceMs: 10,
+    platform: 'win32',
+    spawnProcess: (_command, args) => {
+      calls.push(args);
+      const killer = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null });
+      queueMicrotask(() => {
+        killer.exitCode = 128;
+        killer.emit('close', 128, null);
+      });
+      return killer;
+    },
+  });
+
+  assert.equal(stopped, false);
+  assert.deepEqual(calls, [
+    ['/PID', '5434', '/T'],
+    ['/PID', '5434', '/T', '/F'],
+  ]);
+});
+
 test('stopHubChild is a no-op without a child', async () => {
-  await stopHubChild(null);
+  assert.equal(await stopHubChild(null), true);
 });

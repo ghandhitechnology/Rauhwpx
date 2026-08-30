@@ -29,7 +29,8 @@ test('bridge sends stable chat scope and uses authenticated streaming HTTP endpo
   assert.match(source, /context: ReferenceScopeContext/);
   assert.match(source, /threadId: message\.context\.threadId/);
   assert.match(source, /documentId: message\.context\.documentId/);
-  assert.match(source, /Authorization: `Bearer \$\{this\.token\}`/);
+  assert.match(source, /Authorization: `Bearer \$\{capability\}`/);
+  assert.match(source, /requestUrl\.pathname === '\/templates' \|\| requestUrl\.pathname\.startsWith\('\/templates\/'\)[\s\S]*?this\.templateToken[\s\S]*?this\.referenceToken/);
   assert.match(source, /this\.referenceUrl\('\/reference-files', \{ scope, scopeId \}\)/);
   assert.match(source, /this\.referenceUrl\('\/reference-staging', \{ scopeId \}\)/);
   assert.match(source, /'X-File-Name': encodeURIComponent\(file\.name\)/);

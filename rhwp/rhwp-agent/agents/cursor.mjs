@@ -1,17 +1,23 @@
 // cross-spawn: Windows에서 npm .cmd 심을 인자 이스케이프 손상 없이 실행한다.
 import spawn from 'cross-spawn';
 import {
-  copyFileSync,
   lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   readlinkSync,
+  rmSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
+import { readUtf8FileBoundedSync } from '../bounded-file.mjs';
+import {
+  credentialMirrorHasPendingCopybackSync,
+  flushCredentialMirrorSync,
+  prepareCredentialMirrorSync,
+} from '../credential-mirror.mjs';
 import {
   createTurnProcessLifecycle,
   isPlanningRestricted,
@@ -21,6 +27,7 @@ import {
   normalizeTaskUsage,
   normalizeUsageTokens,
   providerInteractionMode,
+  redactDiagnosticText,
   systemBriefFor,
   truncate,
   validateExecutionMode,
@@ -48,12 +55,15 @@ export {
 
 /** 세션 디렉터리에 새로 저작하는 파일 — 영속 홈에서 링크로 끌어오지 않는다. */
 const AUTHORED_FILES = new Set(['mcp.json', 'cli-config.json']);
+const CURSOR_COPY_FALLBACK_CODES = new Set(['EPERM', 'EACCES', 'ENOTSUP']);
+const cursorMirrorsByHome = new Map();
 /**
  * 프롬프트 바이트 상한. cursor-agent 는 프롬프트를 positional 인자로 받는데,
  * 470 KB 부근부터 stdout/stderr 없이 코드 0 으로 죽고 1 MB 대에서는 spawn 이
  * E2BIG 으로 실패한다(리눅스는 인자당 128 KiB 라 한계가 더 낮다).
  */
 const PROMPT_BYTE_LIMIT = 600_000;
+const CURSOR_CLI_CONFIG_MAX_BYTES = 1024 * 1024;
 /** 재생으로 판정할 최소 길이 — 이보다 짧은 조각은 정상적으로 반복될 수 있다. */
 const REPLAY_MIN_LENGTH = 24;
 /**
@@ -99,11 +109,19 @@ export function prepareCursorHome(sessionCursorDir, sourceCursorDir, {
   mcpConfig = null,
   cliConfig = null,
 } = {}, {
-  copyFile = copyFileSync,
   platform = process.platform,
   symlink = symlinkSync,
 } = {}) {
+  const key = path.resolve(sessionCursorDir);
+  const previous = cursorMirrorsByHome.get(key) ?? [];
+  for (const mirror of previous) {
+    const result = flushCredentialMirrorSync(mirror, { platform });
+    if (result.pending) throw Object.assign(new Error(result.errorMessage), { code: result.errorCode });
+    if (!result.conflict) rmSync(mirror.target, { force: true });
+  }
+  cursorMirrorsByHome.delete(key);
   mkdirSync(sessionCursorDir, { recursive: true, mode: 0o700 });
+  const mirrors = [];
   // 원본이 없으면 목록이 비어 아래 루프를 돌지 않는다.
   const sourceDir = sourceCursorDir ? String(sourceCursorDir) : '';
   let entries = [];
@@ -118,6 +136,29 @@ export function prepareCursorHome(sessionCursorDir, sourceCursorDir, {
     if (AUTHORED_FILES.has(name)) continue;
     const source = path.join(sourceDir, name);
     const target = path.join(sessionCursorDir, name);
+    let sourceStat;
+    try {
+      sourceStat = lstatSync(source);
+    } catch (error) {
+      if (error?.code === 'ENOENT') continue;
+      throw error;
+    }
+
+    if (sourceStat.isFile() && !sourceStat.isSymbolicLink()) {
+      try {
+        const targetStat = lstatSync(target);
+        if (targetStat.isSymbolicLink()) {
+          const existingTarget = path.resolve(sessionCursorDir, readlinkSync(target));
+          if (existingTarget !== path.resolve(source)) unlinkSync(target);
+        }
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error;
+      }
+      const mirror = prepareCredentialMirrorSync(source, target, { platform, symlink });
+      if (mirror?.mode === 'copy') mirrors.push(mirror);
+      continue;
+    }
+
     try {
       const targetStat = lstatSync(target);
       if (!targetStat.isSymbolicLink()) continue;
@@ -130,10 +171,7 @@ export function prepareCursorHome(sessionCursorDir, sourceCursorDir, {
     try {
       symlink(source, target);
     } catch (error) {
-      if (platform !== 'win32' || error?.code !== 'EPERM') throw error;
-      try {
-        if (lstatSync(source).isFile()) copyFile(source, target);
-      } catch {}
+      if (platform !== 'win32' || !CURSOR_COPY_FALLBACK_CODES.has(error?.code)) throw error;
     }
   }
   if (mcpConfig) {
@@ -142,6 +180,31 @@ export function prepareCursorHome(sessionCursorDir, sourceCursorDir, {
   if (cliConfig) {
     writeFileSync(path.join(sessionCursorDir, 'cli-config.json'), `${JSON.stringify(cliConfig, null, 2)}\n`, 'utf8');
   }
+  if (mirrors.length > 0) cursorMirrorsByHome.set(key, mirrors);
+  return mirrors;
+}
+
+export function flushCursorCredentialMirrors(sessionCursorDir) {
+  const key = path.resolve(sessionCursorDir);
+  const mirrors = cursorMirrorsByHome.get(key) ?? [];
+  const pending = [];
+  for (const mirror of mirrors) {
+    try {
+      const result = flushCredentialMirrorSync(mirror);
+      if (result.pending) {
+        pending.push(mirror);
+        process.stderr.write(`[cursor] credential refresh copyback pending: ${result.errorMessage}\n`);
+      } else if (result.conflict) {
+        process.stderr.write(`[cursor] credential refresh copyback conflicted: ${mirror.source}\n`);
+      }
+    } catch (error) {
+      if (credentialMirrorHasPendingCopybackSync(mirror)) pending.push(mirror);
+      process.stderr.write(`[cursor] credential refresh copyback failed: ${error?.message ?? error}\n`);
+    }
+  }
+  if (pending.length > 0) cursorMirrorsByHome.set(key, pending);
+  else cursorMirrorsByHome.delete(key);
+  return pending.length === 0;
 }
 
 /**
@@ -183,6 +246,11 @@ export function buildCursorCliConfig(opts, sourceCliConfig = null) {
   const planningRestricted = isPlanningRestricted(opts);
   const unrestricted = opts.permissionProfile === 'unrestricted' && !planningRestricted;
   const rootGlob = `${String(opts.rootDir ?? '').replace(/\\/g, '/')}/**`;
+  const copyLayoutReadRules = opts.toolProfile === 'copy-layout-worker'
+    ? [...new Set([opts.rootDir, ...(opts.readOnlyRoots ?? [])]
+      .filter((root) => typeof root === 'string' && root)
+      .map((root) => `Read(${root.replace(/\\/g, '/')}/**)`))]
+    : null;
   if (unrestricted) {
     base.approvalMode = 'unrestricted';
     base.permissions = { allow: [], deny: [] };
@@ -192,13 +260,12 @@ export function buildCursorCliConfig(opts, sourceCliConfig = null) {
   base.approvalMode = 'allowlist';
   base.permissions = {
     allow: [
-      'Read(**)',
-      ...(planningRestricted ? [] : [`Write(${rootGlob})`]),
-      'Shell(*)',
-      'WebFetch(*)',
+      ...(copyLayoutReadRules ?? ['Read(**)']),
+      ...(planningRestricted || opts.toolProfile === 'copy-layout-worker' ? [] : [`Write(${rootGlob})`]),
+      ...(opts.toolProfile === 'copy-layout-worker' ? [] : ['Shell(*)', 'WebFetch(*)']),
       'Mcp(rhwp:*)',
     ],
-    deny: planningRestricted ? ['Write(**)'] : [],
+    deny: planningRestricted || opts.toolProfile === 'copy-layout-worker' ? ['Write(**)'] : [],
   };
   base.sandbox = { ...baseSandbox, mode: 'enabled' };
   return base;
@@ -242,8 +309,7 @@ export function buildCursorArgv(opts, chatId, prompt) {
  * @param {string} token
  */
 export function formatCursorExitError(stderrText, code, signal, token) {
-  let clean = String(stderrText ?? '').replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
-  if (token) clean = clean.split(token).join('[redacted]');
+  const clean = redactDiagnosticText(stderrText, [token]);
   const detail = clean
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -920,7 +986,14 @@ export function createCursorSession(opts, {
     let sourceCliConfig = null;
     if (opts.cursorSourceDir) {
       try {
-        sourceCliConfig = JSON.parse(readFileSync(path.join(String(opts.cursorSourceDir), 'cli-config.json'), 'utf8'));
+        sourceCliConfig = JSON.parse(readUtf8FileBoundedSync(
+          path.join(String(opts.cursorSourceDir), 'cli-config.json'),
+          {
+            maxBytes: CURSOR_CLI_CONFIG_MAX_BYTES,
+            label: 'Cursor CLI config',
+            platform: process.platform,
+          },
+        ));
       } catch {}
     }
     prepareCursorHome(sessionCursorDir, opts.cursorSourceDir, {
@@ -1084,7 +1157,9 @@ export function createCursorSession(opts, {
       const previousNativeSession = nativeSession;
       const previousChatId = chatId;
       lifecycle.killChild();
-      await lifecycle.waitForChildExit();
+      if (await lifecycle.waitForChildExit() === false) {
+        throw new Error('Cursor process tree could not be stopped for the mode change');
+      }
       opts.workflow = mode.workflow;
       opts.phase = mode.phase;
       opts.capabilityEpoch = mode.capabilityEpoch;
@@ -1128,8 +1203,13 @@ export function createCursorSession(opts, {
       clearSettleTimer();
       clearExitSweepTimer();
       nativeTurnToken += 1;
-      const [, legacy] = await Promise.allSettled([nativeSession?.dispose(), lifecycle.dispose()]);
-      return legacy.status === 'fulfilled' ? legacy.value : false;
+      const [native, legacy] = await Promise.allSettled([nativeSession?.dispose(), lifecycle.dispose()]);
+      const cleaned = native.status === 'fulfilled' && native.value !== false
+        && legacy.status === 'fulfilled' && legacy.value !== false;
+      if (cleaned && opts.isolatedHome) {
+        flushCursorCredentialMirrors(path.join(String(opts.isolatedHome), '.cursor'));
+      }
+      return cleaned;
     },
   };
 }

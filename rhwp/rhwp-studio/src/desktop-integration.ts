@@ -12,6 +12,13 @@ import type {
   SaveFilePickerOptionsLike,
 } from './command/file-system-access.ts';
 import { FALLBACK_DOCUMENT_FILE_NAME } from './core/document-names.ts';
+import {
+  EXACT_LOCAL_DOCUMENT_MAX_BYTES,
+  MIB,
+  PORTABLE_HISTORY_MAX_BYTES,
+  cancelResponseBody,
+  readBlobBytesWithLimit,
+} from './core/document-input-limits.ts';
 
 export const DEV_AGENT_HUB_ENSURE_PATH = '/__rhwp/ensure-agent-hub';
 
@@ -20,6 +27,8 @@ export interface RendererSessionContext {
   sessionId: string;
   hubUrl: string;
   hubToken: string;
+  referenceToken: string;
+  templateToken: string;
 }
 
 export interface NativeFileHandleDescriptor {
@@ -28,6 +37,7 @@ export interface NativeFileHandleDescriptor {
   name: string;
   saveTargetCreated?: boolean;
   verifiedDocumentId?: string;
+  legacyPortableHistoryFolder?: true;
 }
 
 export interface DocumentOwnershipIdentity {
@@ -60,17 +70,14 @@ export interface RhwpDesktopApi {
     suggestedName?: string;
     documentId?: string;
   }) => Promise<NativeFileHandleDescriptor | { owned: true } | null>;
+  pickLegacyHistoryFolder?: () => Promise<NativeFileHandleDescriptor | { owned: true } | null>;
   claimNativeDroppedFile?: (
     file: File,
   ) => Promise<NativeFileHandleDescriptor | { owned: true } | null> | null;
   pickNativeSaveFile?: (options: {
     suggestedName: string;
-    extension: 'hwp' | 'hwpx' | 'hml';
+    extension: 'hwp' | 'hwpx' | 'hml' | 'rhwpx';
   }) => Promise<NativeFileHandleDescriptor | { owned: true } | null>;
-  savePortableHistoryFile?: (payload: {
-    suggestedName: string;
-    files: ReadonlyArray<{ name: string; bytes: Uint8Array }>;
-  }) => Promise<{ fileName: string; byteLength: number } | null>;
   releaseNativeFile?: (handleId: string) => Promise<void>;
   readNativeFile?: (handleId: string) => Promise<NativeFileReadResult>;
   getNativeFileSourcePath?: (handleId: string) => Promise<string | null>;
@@ -81,11 +88,6 @@ export interface RhwpDesktopApi {
   writeNativeFile?: (
     handleId: string,
     bytes: Uint8Array,
-    identity: DocumentOwnershipIdentity,
-  ) => Promise<{ name: string; byteLength: number }>;
-  writePortableHistoryFile?: (
-    handleId: string,
-    files: ReadonlyArray<{ name: string; bytes: Uint8Array }>,
     identity: DocumentOwnershipIdentity,
   ) => Promise<{ name: string; byteLength: number }>;
   isSameNativeFile?: (firstHandleId: string, secondHandleId: string) => Promise<boolean>;
@@ -209,12 +211,16 @@ export async function openPublishedDocumentInNewWindow(
 
 let inflight: Promise<boolean> | null = null;
 let sessionContextInflight: Promise<RendererSessionContext | null> | null = null;
-let devHubContext: Pick<RendererSessionContext, 'launchId' | 'hubUrl' | 'hubToken'> | null = null;
+let devHubContext: Pick<
+  RendererSessionContext,
+  'launchId' | 'hubUrl' | 'hubToken' | 'referenceToken' | 'templateToken'
+> | null = null;
 const nativeHandleMetadata = new WeakMap<FileSystemFileHandleLike, {
   api: RhwpDesktopApi;
   handleId: string;
   identity: DocumentOwnershipIdentity | null;
   readonly verifiedDocumentId: string | null;
+  readonly legacyPortableHistoryFolder: boolean;
 }>();
 const browserLaunchId = createSessionId('launch');
 const BROWSER_SESSION_ID_KEY = 'rhwp-renderer-session-id-v1';
@@ -243,7 +249,7 @@ function createSessionId(prefix: string): string {
 function validSessionContext(value: unknown): value is RendererSessionContext {
   if (!value || typeof value !== 'object') return false;
   const context = value as Record<string, unknown>;
-  return ['launchId', 'sessionId', 'hubUrl', 'hubToken']
+  return ['launchId', 'sessionId', 'hubUrl', 'hubToken', 'referenceToken', 'templateToken']
     .every((key) => typeof context[key] === 'string' && context[key].length > 0);
 }
 
@@ -269,18 +275,25 @@ export async function requestDevAgentHub(
   try {
     const path = `${DEV_AGENT_HUB_ENSURE_PATH}?sessionId=${encodeURIComponent(browserSessionId)}`;
     const response = await fetchImpl(path, { method: 'POST' });
-    if (!response.ok) return false;
+    if (!response.ok) {
+      await cancelResponseBody(response, `HTTP ${response.status}`);
+      return false;
+    }
     const body = await response.json();
     if (
       body?.ready === true
       && typeof body.launchId === 'string'
       && typeof body.hubUrl === 'string'
       && typeof body.hubToken === 'string'
+      && typeof body.referenceToken === 'string'
+      && typeof body.templateToken === 'string'
     ) {
       devHubContext = {
         launchId: body.launchId,
         hubUrl: body.hubUrl,
         hubToken: body.hubToken,
+        referenceToken: body.referenceToken,
+        templateToken: body.templateToken,
       };
     }
     return body?.ready === true;
@@ -318,6 +331,8 @@ export function httpHubUrl(hubUrl: string) {
 export interface BrowserSessionContextOptions {
   hubUrl?: string;
   hubToken?: string;
+  referenceToken?: string;
+  templateToken?: string;
   launchId?: string;
   sessionId?: string;
 }
@@ -352,11 +367,14 @@ export async function resolveRendererSessionContext(
 
   const env = (import.meta as ImportMeta & { env?: ImportMetaEnv }).env;
   if (isDevBuild() && !browser.hubUrl) await requestDevAgentHub();
+  const hubToken = browser.hubToken ?? devHubContext?.hubToken ?? env?.VITE_RHWP_AGENT_TOKEN ?? 'dev';
   return {
     launchId: browser.launchId ?? devHubContext?.launchId ?? browserLaunchId,
     sessionId: browser.sessionId ?? browserSessionId,
     hubUrl: browser.hubUrl ?? devHubContext?.hubUrl ?? env?.VITE_RHWP_AGENT_URL ?? 'ws://127.0.0.1:5175',
-    hubToken: browser.hubToken ?? devHubContext?.hubToken ?? env?.VITE_RHWP_AGENT_TOKEN ?? 'dev',
+    hubToken,
+    referenceToken: browser.referenceToken ?? devHubContext?.referenceToken ?? hubToken,
+    templateToken: browser.templateToken ?? devHubContext?.templateToken ?? hubToken,
   };
 }
 
@@ -412,6 +430,10 @@ function validNativeDescriptor(value: unknown): value is NativeFileHandleDescrip
     && typeof descriptor.name === 'string'
     && descriptor.name.length > 0
     && (
+      descriptor.legacyPortableHistoryFolder === undefined
+      || descriptor.legacyPortableHistoryFolder === true
+    )
+    && (
       descriptor.verifiedDocumentId === undefined
       || (
         typeof descriptor.verifiedDocumentId === 'string'
@@ -420,6 +442,28 @@ function validNativeDescriptor(value: unknown): value is NativeFileHandleDescrip
         && !descriptor.verifiedDocumentId.includes('\0')
       )
     );
+}
+
+function checkedNativeFileReadResult(value: unknown): NativeFileReadResult {
+  if (!value || typeof value !== 'object') throw new Error('Native file read returned an invalid result');
+  const result = value as Partial<NativeFileReadResult>;
+  if (
+    typeof result.name !== 'string'
+    || !result.name
+    || !(result.bytes instanceof Uint8Array)
+    || result.bytes.byteLength > nativeFileMaxBytes(result.name)
+  ) throw new Error('Native file read returned invalid or oversized data');
+  return { name: result.name, bytes: result.bytes };
+}
+
+function nativeFileMaxBytes(fileName: string): number {
+  return fileName.toLowerCase().endsWith('.rhwpx')
+    ? PORTABLE_HISTORY_MAX_BYTES
+    : EXACT_LOCAL_DOCUMENT_MAX_BYTES;
+}
+
+function nativeWriteSizeError(maxBytes: number): Error {
+  return new Error(`저장 파일 크기는 ${Math.floor(maxBytes / MIB)} MiB를 초과할 수 없습니다.`);
 }
 
 export function createNativeFileHandle(
@@ -431,13 +475,14 @@ export function createNativeFileHandle(
     throw new Error('Invalid native file handle descriptor');
   }
 
+  const maxBytes = nativeFileMaxBytes(descriptor.name);
   let unusedSaveTarget = saveTarget;
   const handle: FileSystemFileHandleLike = {
     kind: 'file',
     name: descriptor.name,
     identityKind: 'native-path',
     async getFile() {
-      const result = await api.readNativeFile!(descriptor.handleId);
+      const result = checkedNativeFileReadResult(await api.readNativeFile!(descriptor.handleId));
       return new File([result.bytes as BlobPart], result.name);
     },
     async releaseUnusedSaveTarget() {
@@ -456,19 +501,55 @@ export function createNativeFileHandle(
     },
     async createWritable(): Promise<FileSystemWritableFileStreamLike> {
       const chunks: Blob[] = [];
+      let totalBytes = 0;
       let closed = false;
+      let closePromise: Promise<void> | null = null;
       return {
         async write(data) {
           if (closed) throw new Error('Native file stream is closed');
+          if (
+            !data
+            || !Number.isSafeInteger(data.size)
+            || data.size < 0
+            || data.size > maxBytes - totalBytes
+          ) {
+            closed = true;
+            chunks.length = 0;
+            totalBytes = 0;
+            throw nativeWriteSizeError(maxBytes);
+          }
           chunks.push(data);
+          totalBytes += data.size;
         },
-        async close() {
-          if (closed) return;
+        close() {
+          if (closePromise) return closePromise;
+          if (closed) return Promise.resolve();
           const metadata = nativeHandleMetadata.get(handle);
-          if (!metadata?.identity) throw new Error('Native save target has no active document ownership');
-          const bytes = new Uint8Array(await new Blob(chunks).arrayBuffer());
-          await api.writeNativeFile!(descriptor.handleId, bytes, metadata.identity);
+          if (!metadata?.identity) {
+            return Promise.reject(new Error('Native save target has no active document ownership'));
+          }
+          const identity = metadata.identity;
           closed = true;
+          const payload = chunks.length === 1 ? chunks[0]! : new Blob(chunks);
+          chunks.length = 0;
+          closePromise = (async () => {
+            const bytes = await readBlobBytesWithLimit(
+              payload,
+              maxBytes,
+              '저장 파일',
+            );
+            if (bytes.byteLength !== totalBytes) {
+              throw new Error('저장 파일을 읽는 동안 크기가 변경되었습니다.');
+            }
+            totalBytes = 0;
+            await api.writeNativeFile!(descriptor.handleId, bytes, identity);
+          })();
+          return closePromise;
+        },
+        async abort() {
+          closed = true;
+          chunks.length = 0;
+          totalBytes = 0;
         },
       };
     },
@@ -492,6 +573,7 @@ export function createNativeFileHandle(
     handleId: descriptor.handleId,
     identity: null,
     verifiedDocumentId: descriptor.verifiedDocumentId ?? null,
+    legacyPortableHistoryFolder: descriptor.legacyPortableHistoryFolder === true,
   });
   return handle;
 }
@@ -501,6 +583,13 @@ export function getNativeFileHandleVerifiedDocumentId(
   handle: FileSystemFileHandleLike | null | undefined,
 ): string | null {
   return handle ? nativeHandleMetadata.get(handle)?.verifiedDocumentId ?? null : null;
+}
+
+/** Legacy folder handles are readable once for migration but can never become save targets. */
+export function isLegacyPortableHistoryFolderHandle(
+  handle: FileSystemFileHandleLike | null | undefined,
+): boolean {
+  return handle ? nativeHandleMetadata.get(handle)?.legacyPortableHistoryFolder === true : false;
 }
 
 export function bindNativeFileHandleIdentity(
@@ -564,6 +653,20 @@ export async function pickDesktopNativeOpenFile(
   return createNativeFileHandle(result, api, { saveTarget: result.saveTargetCreated !== false });
 }
 
+export async function pickDesktopLegacyHistoryFolder(
+  win?: DesktopHost,
+): Promise<FileSystemFileHandleLike | null | undefined> {
+  const api = desktopHost(win)?.rhwpDesktop;
+  if (!api?.pickLegacyHistoryFolder) return undefined;
+  const result = await api.pickLegacyHistoryFolder();
+  if (!result) return null;
+  if ('owned' in result) throw new Error('다른 창에서 이미 가져오고 있는 기록 폴더입니다.');
+  if (!validNativeDescriptor(result) || result.legacyPortableHistoryFolder !== true) {
+    throw new Error('Desktop legacy history picker returned an invalid handle');
+  }
+  return createNativeFileHandle(result, api, { saveTarget: result.saveTargetCreated !== false });
+}
+
 export async function pickDesktopNativeSaveFile(
   options: SaveFilePickerOptionsLike,
   win?: DesktopHost,
@@ -583,47 +686,20 @@ export async function pickDesktopNativeSaveFile(
   return createNativeFileHandle(result, api, { saveTarget: result.saveTargetCreated !== false });
 }
 
-export async function saveDesktopPortableHistoryFile(
-  folder: { folderName: string; files: ReadonlyArray<{ name: string; bytes: Uint8Array }> },
+export async function pickDesktopPortableHistorySaveFile(
+  archive: { fileName: string; bytes: Uint8Array },
   win?: DesktopHost,
-): Promise<'saved' | 'cancelled' | 'unavailable'> {
+): Promise<FileSystemFileHandleLike | null | undefined> {
   const api = desktopHost(win)?.rhwpDesktop;
-  if (!api?.savePortableHistoryFile) return 'unavailable';
-  const result = await api.savePortableHistoryFile({
-    suggestedName: folder.folderName,
-    files: folder.files.map((file) => ({
-      name: file.name,
-      bytes: new Uint8Array(file.bytes),
-    })),
+  if (!api?.pickNativeSaveFile) return undefined;
+  const result = await api.pickNativeSaveFile({
+    suggestedName: archive.fileName,
+    extension: 'rhwpx',
   });
-  return result ? 'saved' : 'cancelled';
-}
-
-/** Overwrite an already-open native `.rhwpx` package without showing a save picker. */
-export async function writeDesktopPortableHistoryFile(
-  handle: FileSystemFileHandleLike | null | undefined,
-  folder: { folderName: string; files: ReadonlyArray<{ name: string; bytes: Uint8Array }> },
-  win?: DesktopHost,
-): Promise<'saved' | 'unavailable'> {
-  const metadata = handle ? nativeHandleMetadata.get(handle) : null;
-  const api = desktopHost(win)?.rhwpDesktop ?? metadata?.api;
-  if (
-    !handle
-    || handle.identityKind !== 'native-path'
-    || !metadata?.identity
-    || !api?.writePortableHistoryFile
-  ) {
-    return 'unavailable';
-  }
-  await api.writePortableHistoryFile(
-    metadata.handleId,
-    folder.files.map((file) => ({
-      name: file.name,
-      bytes: new Uint8Array(file.bytes),
-    })),
-    metadata.identity,
-  );
-  return 'saved';
+  if (!result) return null;
+  if ('owned' in result) throw new Error('다른 창에서 이미 열려 있는 기록 파일입니다.');
+  if (!validNativeDescriptor(result)) throw new Error('Desktop history save picker returned an invalid handle');
+  return createNativeFileHandle(result, api, { saveTarget: result.saveTargetCreated !== false });
 }
 
 export async function rememberNativeDocument(
@@ -688,8 +764,7 @@ export async function readNativeProbe(
 ): Promise<{ bytes: Uint8Array; fileName: string } | null> {
   const api = desktopHost(win)?.rhwpDesktop;
   if (!api?.readNativeProbe || !probeId) return null;
-  const result = await api.readNativeProbe(probeId);
-  if (!result || typeof result.name !== 'string') return null;
+  const result = checkedNativeFileReadResult(await api.readNativeProbe(probeId));
   return { bytes: result.bytes, fileName: result.name };
 }
 

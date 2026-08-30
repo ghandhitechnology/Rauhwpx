@@ -147,18 +147,20 @@ fn run_inner(options: Options) -> Result<(), String> {
         )
     })?;
 
-    let oracle_bytes = fs::read(&options.oracle).map_err(|error| {
-        format!(
-            "oracle 파일 읽기 실패 - {}: {error}",
-            options.oracle.display()
-        )
-    })?;
-    let generated_bytes = fs::read(&options.generated).map_err(|error| {
-        format!(
-            "generated 파일 읽기 실패 - {}: {error}",
-            options.generated.display()
-        )
-    })?;
+    let oracle_bytes =
+        crate::parser::limits::read_local_file_once(&options.oracle).map_err(|error| {
+            format!(
+                "oracle 파일 읽기 실패 - {}: {error}",
+                options.oracle.display()
+            )
+        })?;
+    let generated_bytes =
+        crate::parser::limits::read_local_file_once(&options.generated).map_err(|error| {
+            format!(
+                "generated 파일 읽기 실패 - {}: {error}",
+                options.generated.display()
+            )
+        })?;
 
     let oracle_compressed = hwp_is_compressed(&oracle_bytes)?;
     let generated_compressed = hwp_is_compressed(&generated_bytes)?;

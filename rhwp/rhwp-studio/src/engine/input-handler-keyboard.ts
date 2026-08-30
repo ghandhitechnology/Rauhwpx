@@ -13,6 +13,7 @@ import {
 } from './navigation-keymap';
 import type { DocumentPosition, CellBbox, CellPathLike } from '@/core/types';
 import type { WasmBridge } from '@/core/wasm-bridge';
+import { INSERTED_IMAGE_MAX_BYTES, readBlobBytesWithLimit } from '@/core/document-input-limits';
 import { canDeleteObjectControl } from './input-handler-picture';
 
 const RHWP_CLIPBOARD_MARKER_RE = /<!--\s*rhwp-studio-clipboard:([A-Za-z0-9._:-]+)\s*-->/;
@@ -1891,7 +1892,7 @@ export function onPaste(this: any, e: ClipboardEvent): void {
 /** 클립보드의 이미지 파일을 커서 위치에 삽입한다. */
 async function pasteImageFile(this: any, file: File, hasSelection: boolean): Promise<void> {
   try {
-    const data = new Uint8Array(await file.arrayBuffer());
+    const data = await readBlobBytesWithLimit(file, INSERTED_IMAGE_MAX_BYTES, '클립보드 그림');
     const ext = (file.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
 
     // 이미지 크기 측정

@@ -4,6 +4,7 @@ import { CompareSessionStore } from '../compare/session.ts';
 import { compareDocuments, compareSnapshots } from '../compare/diff-engine.ts';
 import type { EventBus } from '../core/event-bus.ts';
 import type { DocumentDirtyState } from '../core/document-dirty-state.ts';
+import { INSERTED_IMAGE_MAX_BYTES, readBlobBytesWithLimit } from '../core/document-input-limits.ts';
 import { WasmBridge } from '../core/wasm-bridge.ts';
 import type { InputHandler } from '../engine/input-handler.ts';
 import {
@@ -31,11 +32,11 @@ import {
   VersionGraphStore,
   branchName,
   commitId,
-  createPortableHistoryFolder,
+  createPortableHistoryArchive,
   documentId,
   layoutCommitGraph,
   orderBranchHeadFrontier,
-  type PortableHistoryFolder,
+  type PortableHistoryArchive,
   shelfId,
   mergeDraftId,
   tagName,
@@ -947,7 +948,7 @@ export class DocumentVersionController implements VersionManagerController {
     });
   }
 
-  async createPortableHistoryBundle(): Promise<PortableHistoryFolder> {
+  async createPortableHistoryBundle(): Promise<PortableHistoryArchive> {
     return this.#enqueue(async () => {
       await this.#refreshData(false);
       await this.#guardMutation();
@@ -999,7 +1000,7 @@ export class DocumentVersionController implements VersionManagerController {
       if (sourceFormat !== 'hwp' && sourceFormat !== 'hwpx' && sourceFormat !== 'hml') {
         throw new VersionError('VERSION_STORE_FAILED', 'The document format cannot be bundled');
       }
-      return createPortableHistoryFolder({
+      return createPortableHistoryArchive({
         documentFileName: this.#wasm.fileName,
         sourceFormat,
         activeBranch: activeBranch.name,
@@ -1320,7 +1321,7 @@ export class DocumentVersionController implements VersionManagerController {
           });
         },
         uploadAsset: async (file, conflict) => {
-          const bytes = new Uint8Array(await file.arrayBuffer());
+          const bytes = await readBlobBytesWithLimit(file, INSERTED_IMAGE_MAX_BYTES, '병합 대체 이미지');
           const asset: VersionBlob = { id: hashBytes(bytes), byteLength: bytes.byteLength, bytes };
           await this.#enqueue(async () => {
             const existing = await this.#store.getMergeDraft(storedDraft.id);

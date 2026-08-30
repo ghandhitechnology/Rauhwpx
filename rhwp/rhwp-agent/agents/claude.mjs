@@ -3,14 +3,15 @@ import spawn from 'cross-spawn';
 import crypto from 'node:crypto';
 import { query as queryClaude } from '@anthropic-ai/claude-agent-sdk';
 import {
-  copyFileSync,
-  lstatSync,
   mkdirSync,
-  readlinkSync,
-  symlinkSync,
-  unlinkSync,
+  rmSync,
 } from 'node:fs';
 import path from 'node:path';
+import {
+  credentialMirrorHasPendingCopybackSync,
+  flushCredentialMirrorSync,
+  prepareCredentialMirrorSync,
+} from '../credential-mirror.mjs';
 import {
   createLineReader,
   isPlanningRestricted,
@@ -19,7 +20,9 @@ import {
   normalizeExecutionMode,
   normalizeTaskUsage,
   normalizeUsageTokens,
+  providerReadOnlyRoots,
   providerInteractionMode,
+  redactDiagnosticText,
   RHWP_SUBAGENTS,
   systemBriefFor,
   truncate,
@@ -84,40 +87,39 @@ function createClaudeInputQueue() {
 // rhwp 전용 서브에이전트 정의(RHWP_SUBAGENTS)는 backend.mjs 로 이동했다 —
 // grok 도 같은 정의를 --agents 로 공유한다.
 
-function seedClaudeCredential(source, target, {
-  copyFile = copyFileSync,
-  platform = process.platform,
-  symlink = symlinkSync,
-} = {}) {
-  if (!source) return;
-  let sourceStat;
-  try {
-    sourceStat = lstatSync(source);
-  } catch (error) {
-    if (error?.code === 'ENOENT') return;
-    throw error;
-  }
-  if (!sourceStat.isFile() || sourceStat.isSymbolicLink()) return;
+const claudeMirrorsByHome = new Map();
 
-  mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
-  try {
-    const targetStat = lstatSync(target);
-    if (!targetStat.isSymbolicLink()) return;
-    const linkedTarget = path.resolve(path.dirname(target), readlinkSync(target));
-    if (linkedTarget === path.resolve(source)) return;
-    unlinkSync(target);
-  } catch (error) {
-    if (error?.code !== 'ENOENT') throw error;
-  }
+function seedClaudeCredential(source, target, deps = {}) {
+  return prepareCredentialMirrorSync(source, target, {
+    platform: deps.platform ?? process.platform,
+    ...(deps.symlink ? { symlink: deps.symlink } : {}),
+    // Two live Claude sessions must never share a writable host credential
+    // inode. Copyback applies refreshes with the mirror's CAS rules on close.
+    copyOnly: true,
+  });
+}
 
-  try {
-    symlink(source, target);
-  } catch (error) {
-    const copyFallback = platform === 'win32'
-      && (error?.code === 'EPERM' || error?.code === 'EACCES' || error?.code === 'ENOTSUP');
-    if (!copyFallback) throw error;
-    copyFile(source, target);
+export function flushClaudeCredentialMirrors(isolatedHome) {
+  const key = path.resolve(String(isolatedHome ?? ''));
+  const mirrors = claudeMirrorsByHome.get(key) ?? [];
+  const pending = [];
+  for (const mirror of mirrors) {
+    try {
+      const result = flushCredentialMirrorSync(mirror, { platform: mirror.platform ?? process.platform });
+      if (result.pending) {
+        pending.push(mirror);
+        process.stderr.write(`[claude] credential refresh copyback pending: ${result.errorMessage}\n`);
+      } else if (result.conflict) {
+        process.stderr.write(`[claude] credential refresh copyback conflicted: ${mirror.source}\n`);
+      }
+    } catch (error) {
+      if (credentialMirrorHasPendingCopybackSync(mirror)) pending.push(mirror);
+      process.stderr.write(`[claude] credential refresh copyback failed: ${error?.message ?? error}\n`);
+    }
   }
+  if (pending.length > 0) claudeMirrorsByHome.set(key, pending);
+  else claudeMirrorsByHome.delete(key);
+  return pending.length === 0;
 }
 
 /** Seed only Claude's shared login files into an otherwise isolated home. */
@@ -125,18 +127,30 @@ export function prepareClaudeHome(isolatedHome, {
   credentialsPath,
   configPath,
 } = {}, deps = {}) {
+  const key = path.resolve(isolatedHome);
+  const previous = claudeMirrorsByHome.get(key) ?? [];
+  for (const mirror of previous) {
+    const result = flushCredentialMirrorSync(mirror, { platform: deps.platform ?? process.platform });
+    if (result.pending) throw Object.assign(new Error(result.errorMessage), { code: result.errorCode });
+    if (!result.conflict) rmSync(mirror.target, { force: true });
+  }
+  claudeMirrorsByHome.delete(key);
   mkdirSync(isolatedHome, { recursive: true, mode: 0o700 });
-  seedClaudeCredential(
+  const mirrors = [seedClaudeCredential(
     credentialsPath,
     path.join(isolatedHome, '.claude', '.credentials.json'),
     deps,
-  );
-  seedClaudeCredential(configPath, path.join(isolatedHome, '.claude.json'), deps);
+  ), seedClaudeCredential(
+    configPath,
+    path.join(isolatedHome, '.claude.json'),
+    deps,
+  )].filter((mirror) => mirror?.mode === 'copy');
+  if (mirrors.length > 0) claudeMirrorsByHome.set(key, mirrors);
+  return mirrors;
 }
 
 export function formatClaudeExitError(stderrText, code, signal, token) {
-  let clean = String(stderrText ?? '').replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
-  if (token) clean = clean.split(token).join('[redacted]');
+  const clean = redactDiagnosticText(stderrText, [token]);
   const detail = clean.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(-8).join('\n');
   const exit = signal ? `signal ${signal}` : `code ${code ?? 'unknown'}`;
   return detail
@@ -149,12 +163,24 @@ function permissionPathRule(tool, value) {
   return `${tool}(//${normalized.replace(/^\/+/, '')}/**)`;
 }
 
+function claudeProcessEnv(opts, sourceEnv) {
+  const env = isolatedProcessEnv(opts, sourceEnv);
+  if (!opts.isolatedHome) {
+    delete env.CLAUDE_CONFIG_DIR;
+    return env;
+  }
+  env.CLAUDE_CONFIG_DIR = path.join(String(opts.isolatedHome), '.claude');
+  return env;
+}
+
 export function buildClaudeArgv(opts, sessionId, resume) {
   const unrestricted = opts.permissionProfile === 'unrestricted';
   const planningRestricted = isPlanningRestricted(opts);
   const interactionMode = providerInteractionMode(opts);
-  const activeTools = planningRestricted ? PLANNING_TOOLS : DIRECT_TOOLS;
+  const copyLayoutWorker = opts.toolProfile === 'copy-layout-worker';
+  const activeTools = copyLayoutWorker ? 'Read,Glob,Grep' : planningRestricted ? PLANNING_TOOLS : DIRECT_TOOLS;
   const capabilityEnv = mcpCapabilityEnv(opts);
+  const readOnlyRoots = providerReadOnlyRoots(opts);
   const runtime = mcpRuntimeFor(opts);
   const mcpConfig = {
     mcpServers: {
@@ -173,14 +199,15 @@ export function buildClaudeArgv(opts, sessionId, resume) {
   };
   const allow = [
     permissionPathRule('Read', opts.rootDir),
-    ...(!planningRestricted ? [
+    ...readOnlyRoots.map((root) => permissionPathRule('Read', root)),
+    ...(!planningRestricted && !copyLayoutWorker ? [
       permissionPathRule('Write', opts.rootDir),
       permissionPathRule('Edit', opts.rootDir),
     ] : []),
     permissionPathRule('Glob', opts.rootDir),
     permissionPathRule('Grep', opts.rootDir),
-    'Bash',
-    'WebSearch', 'WebFetch', 'Agent', 'Workflow', 'mcp__rhwp__*',
+    ...(copyLayoutWorker ? [] : ['Bash', 'WebSearch', 'WebFetch', 'Agent', 'Workflow']),
+    'mcp__rhwp__*',
   ];
   const settings = unrestricted && !planningRestricted ? {} : {
     permissions: { allow },
@@ -189,8 +216,8 @@ export function buildClaudeArgv(opts, sessionId, resume) {
       failIfUnavailable: true,
       allowUnsandboxedCommands: false,
       filesystem: {
-        allowRead: [opts.rootDir],
-        allowWrite: planningRestricted ? [] : [opts.rootDir],
+        allowRead: [opts.rootDir, ...readOnlyRoots],
+        allowWrite: planningRestricted || copyLayoutWorker ? [] : [opts.rootDir],
       },
     },
   };
@@ -231,19 +258,22 @@ export function buildClaudeSdkOptions(opts, sessionId, resume, abortController) 
   const unrestricted = opts.permissionProfile === 'unrestricted';
   const planningRestricted = isPlanningRestricted(opts);
   const interactionMode = providerInteractionMode(opts);
-  const activeTools = planningRestricted ? PLANNING_TOOLS : DIRECT_TOOLS;
+  const copyLayoutWorker = opts.toolProfile === 'copy-layout-worker';
+  const activeTools = copyLayoutWorker ? 'Read,Glob,Grep' : planningRestricted ? PLANNING_TOOLS : DIRECT_TOOLS;
   const capabilityEnv = mcpCapabilityEnv(opts);
+  const readOnlyRoots = providerReadOnlyRoots(opts);
   const runtime = mcpRuntimeFor(opts);
   const allow = [
     permissionPathRule('Read', opts.rootDir),
-    ...(!planningRestricted ? [
+    ...readOnlyRoots.map((root) => permissionPathRule('Read', root)),
+    ...(!planningRestricted && !copyLayoutWorker ? [
       permissionPathRule('Write', opts.rootDir),
       permissionPathRule('Edit', opts.rootDir),
     ] : []),
     permissionPathRule('Glob', opts.rootDir),
     permissionPathRule('Grep', opts.rootDir),
-    'Bash',
-    'WebSearch', 'WebFetch', 'Agent', 'Workflow', 'mcp__rhwp__*',
+    ...(copyLayoutWorker ? [] : ['Bash', 'WebSearch', 'WebFetch', 'Agent', 'Workflow']),
+    'mcp__rhwp__*',
   ];
   const settings = unrestricted && !planningRestricted ? {} : {
     permissions: { allow },
@@ -252,8 +282,8 @@ export function buildClaudeSdkOptions(opts, sessionId, resume, abortController) 
       failIfUnavailable: true,
       allowUnsandboxedCommands: false,
       filesystem: {
-        allowRead: [opts.rootDir],
-        allowWrite: planningRestricted ? [] : [opts.rootDir],
+        allowRead: [opts.rootDir, ...readOnlyRoots],
+        allowWrite: planningRestricted || copyLayoutWorker ? [] : [opts.rootDir],
       },
     },
   };
@@ -265,7 +295,7 @@ export function buildClaudeSdkOptions(opts, sessionId, resume, abortController) 
     allowedTools: [...allow, 'AskUserQuestion'],
     canUseTool,
     cwd: opts.rootDir,
-    env: isolatedProcessEnv(opts, opts.providerEnv ?? process.env),
+    env: claudeProcessEnv(opts, opts.providerEnv ?? process.env),
     extraArgs: { 'disable-slash-commands': null },
     forwardSubagentText: true,
     includePartialMessages: true,
@@ -307,6 +337,7 @@ export function buildClaudeSdkOptions(opts, sessionId, resume, abortController) 
 export function createClaudeSession(opts, {
   spawnProcess = spawn,
   terminateProcess = terminateProcessTree,
+  waitForExit = waitForProcessTreeExit,
   queryAgent = queryClaude,
 } = {}) {
   let sessionId = crypto.randomUUID();
@@ -315,6 +346,7 @@ export function createClaudeSession(opts, {
   /** @type {import('node:child_process').ChildProcess | null} */
   let child = null;
   let childAlive = false;
+  const childCleanupPromises = new WeakMap();
   let hasCompletedTurn = false;
   // --session-id 는 한 번 스폰에 쓰면 소진된다: 그 스폰이 turn 을 완료하지 못한 채
   // 죽으면(인터럽트/크래시) 같은 ID 재사용 시 "Session ID … is already in use" 로
@@ -705,13 +737,13 @@ export function createClaudeSession(opts, {
         settleTimer = null;
         settleTurn();
       }, TASK_SETTLE_GRACE_MS);
-      if (settleTimer.unref) settleTimer.unref();
       return;
     }
   }
 
   function dispatchLegacy(text) {
-    if (!child || !childAlive) spawnChild();
+    if (!child) spawnChild();
+    else if (!childAlive) throw new Error('Previous Claude process tree cleanup is still pending');
     const line = JSON.stringify({
       type: 'user',
       message: { role: 'user', content: [{ type: 'text', text }] },
@@ -815,13 +847,13 @@ export function createClaudeSession(opts, {
     sdkAbortController = null;
     try { query?.close(); } catch {}
     if (!run) return Promise.resolve();
+    let timer;
     return Promise.race([
       Promise.resolve(run).catch(() => {}),
       new Promise((resolve) => {
-        const timer = setTimeout(resolve, 3500);
-        if (timer.unref) timer.unref();
+        timer = setTimeout(resolve, 3500);
       }),
-    ]).then(() => {});
+    ]).finally(() => clearTimeout(timer)).then(() => {});
   }
 
   function spawnChild() {
@@ -837,27 +869,27 @@ export function createClaudeSession(opts, {
     const proc = spawnProcess(opts.claudeBin ?? 'claude', buildArgv(resume), {
       ...processTreeSpawnOptions(),
       cwd: opts.rootDir,
-      env: isolatedProcessEnv(opts, opts.providerEnv ?? process.env),
+      env: claudeProcessEnv(opts, opts.providerEnv ?? process.env),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     child = proc;
     childAlive = true;
     stderrTail = '';
-    proc.stdout.on('data', createLineReader(handleEvent));
+    const readStdout = createLineReader(handleEvent);
+    proc.stdout.on('data', readStdout);
     proc.stderr.on('data', (chunk) => {
       stderrTail = (stderrTail + chunk.toString()).slice(-STDERR_TAIL_LIMIT);
-      for (const line of chunk.toString().split('\n')) {
-        if (line.trim()) process.stderr.write(`[claude] ${line}\n`);
-      }
     });
     proc.on('error', (err) => {
       if (proc !== child) return;
       childAlive = false;
-      process.stderr.write(`[claude] spawn error: ${err?.message ?? err}\n`);
+      const safeError = redactDiagnosticText(err?.message ?? err, [opts.token]);
+      process.stderr.write(`[claude] spawn error: ${safeError}\n`);
       if (turnOpen) {
-        onEvent({ type: 'error', agent: 'claude', message: `claude process error: ${err?.message ?? err}` });
+        onEvent({ type: 'error', agent: 'claude', message: `claude process error: ${safeError}` });
         endTurn({ type: 'turn-end', agent: 'claude', stopReason: 'exited' });
       }
+      void stopChildProcess(proc);
     });
     proc.on('exit', (code, signal) => {
       if (proc !== child) return;
@@ -870,42 +902,55 @@ export function createClaudeSession(opts, {
         });
         endTurn({ type: 'turn-end', agent: 'claude', stopReason: 'exited' });
       }
+      // A leader can exit before detached descendants. Retain `proc` and start
+      // bounded tree cleanup before another turn is allowed to replace it.
+      void stopChildProcess(proc).then((cleaned) => {
+        if (cleaned) readStdout.end();
+      });
+    });
+    proc.on('close', () => {
+      readStdout.end();
+      void stopChildProcess(proc);
     });
     return proc;
   }
 
+  function stopChildProcess(proc) {
+    if (!proc) return Promise.resolve(true);
+    const active = childCleanupPromises.get(proc);
+    if (active) return active;
+    let resolveCleanup = () => {};
+    const cleanup = new Promise((resolve) => { resolveCleanup = resolve; });
+    childCleanupPromises.set(proc, cleanup);
+    let termination;
+    let exited;
+    try { termination = Promise.resolve(terminateProcess(proc)); } catch { termination = Promise.resolve(false); }
+    try { exited = Promise.resolve(waitForExit(proc)); } catch { exited = Promise.resolve(false); }
+    void Promise.all([termination, exited]).then(
+      ([terminationResult, exitResult]) => terminationResult !== false && exitResult !== false,
+      () => false,
+    ).then((cleaned) => {
+      if (cleaned && child === proc) child = null;
+      resolveCleanup(cleaned);
+    });
+    return cleanup;
+  }
+
   function killChild() {
-    const proc = child;
-    if (!proc || proc.exitCode !== null || proc.signalCode !== null) return;
-    terminateProcess(proc);
+    return stopChildProcess(child);
   }
 
   function restartForConfigChange() {
     const priorReady = restartReady;
     const previous = child;
     const sdkShutdownReady = closeSdkQuery();
-    killChild();
-    child = null;
     childAlive = false;
-    let shutdownReady;
-    if (previous && previous.exitCode === null && previous.signalCode === null) {
-      shutdownReady = new Promise((resolve) => {
-        let settled = false;
-        const finish = () => {
-          if (settled) return;
-          settled = true;
-          resolve();
-        };
-        previous.once('exit', finish);
-        const timer = setTimeout(finish, 3500);
-        if (timer.unref) timer.unref();
-      });
-    } else {
-      shutdownReady = Promise.resolve();
-    }
+    const shutdownReady = stopChildProcess(previous);
     // Preserve an earlier in-flight restart barrier when permission and
     // execution-mode updates arrive back-to-back.
-    restartReady = Promise.all([priorReady, shutdownReady, sdkShutdownReady]).then(() => {});
+    restartReady = Promise.all([priorReady, shutdownReady, sdkShutdownReady]).then(([, cleaned]) => {
+      if (cleaned === false) throw new Error('Claude process tree could not be stopped for restart');
+    });
     return restartReady;
   }
 
@@ -999,8 +1044,13 @@ export function createClaudeSession(opts, {
       clearSettleTimer();
       // 죽어가는 자식의 stdout 을 아예 파싱하지 않는다.
       try { child?.stdout?.removeAllListeners('data'); } catch {}
-      const exited = Promise.all([waitForProcessTreeExit(child), closeSdkQuery()]).then(([childExited]) => childExited);
-      killChild();
+      const exited = Promise.all([stopChildProcess(child), closeSdkQuery()])
+        .then(([childExited]) => {
+          // A surviving descendant can still write the isolated credential.
+          // Leave its journal/root marker intact for dead-owner recovery.
+          if (childExited) flushClaudeCredentialMirrors(opts.isolatedHome);
+          return childExited;
+        });
       childAlive = false;
       return exited;
     },

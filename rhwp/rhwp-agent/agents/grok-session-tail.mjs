@@ -11,6 +11,8 @@ import path from 'node:path';
 
 /** 한 폴에서 위치 지정으로 읽는 최대 바이트 — 라인 하나보다 넉넉히 크다. */
 const MAX_READ_BYTES = 4 * 1024 * 1024;
+const MAX_PROVIDER_FRAME_BYTES = 8 * 1024 * 1024;
+const EMPTY = Buffer.alloc(0);
 
 /**
  * grok 이 sessions 디렉터리 키로 쓰는 cwd 인코딩. realpath 를 percent-encode 한다
@@ -62,10 +64,10 @@ export function createGrokSessionTail({
 
   /** @type {{ sessionDir: string, cwdDir: string } | null} */
   let resolved = null;
-  /** @type {{ path: string, offset: number } | null} */
+  /** @type {{ path: string, offset: number, pending: Buffer, discardingOversizedFrame: boolean } | null} */
   let parentFile = null;
   // subagent_id → 파일 상태. 발견 순서가 전달 순서다.
-  /** @type {Map<string, { path: string, offset: number }>} */
+  /** @type {Map<string, { path: string, offset: number, pending: Buffer, discardingOversizedFrame: boolean }>} */
   const childFiles = new Map();
   let stopped = false;
   /** @type {ReturnType<typeof setTimeout> | null} */
@@ -108,7 +110,7 @@ export function createGrokSessionTail({
    * 재독하지 않는다 (codex-rollout-watcher 의 readTailFrom 과 같은 패턴).
    * 저수준 API 가 없는 주입 fs 는 readFileSync 전체 읽기로 폴백한다.
    *
-   * @param {{ path: string, offset: number }} state
+   * @param {{ path: string, offset: number, pending: Buffer, discardingOversizedFrame: boolean }} state
    * @returns {Buffer | null}
    */
   function readTailChunk(state) {
@@ -120,7 +122,11 @@ export function createGrokSessionTail({
       } catch {
         return null;
       }
-      if (size < state.offset) state.offset = 0; // 파일이 줄었다(재작성) — 처음부터.
+      if (size < state.offset) {
+        state.offset = 0;
+        state.pending = EMPTY;
+        state.discardingOversizedFrame = false;
+      }
       if (size === state.offset) return null;
       const length = Math.min(size - state.offset, MAX_READ_BYTES);
       let fd;
@@ -128,6 +134,7 @@ export function createGrokSessionTail({
         fd = fs.openSync(state.path, 'r');
         const buf = Buffer.allocUnsafe(length);
         const read = fs.readSync(fd, buf, 0, length, state.offset);
+        state.offset += read;
         return buf.subarray(0, read);
       } catch {
         return null;
@@ -144,33 +151,48 @@ export function createGrokSessionTail({
       return null;
     }
     const buf = Buffer.isBuffer(whole) ? whole : Buffer.from(String(whole));
-    if (buf.length < state.offset) state.offset = 0;
+    if (buf.length < state.offset) {
+      state.offset = 0;
+      state.pending = EMPTY;
+      state.discardingOversizedFrame = false;
+    }
     if (buf.length === state.offset) return null;
-    return buf.subarray(state.offset);
+    const chunk = buf.subarray(state.offset, Math.min(buf.length, state.offset + MAX_READ_BYTES));
+    state.offset += chunk.length;
+    return chunk;
   }
 
   /**
    * 파일의 새 완성 라인들을 파싱해 돌려준다. 바이트 오프셋으로 증분을 읽고,
    * 개행 없는 꼬리(쓰다 만 라인)는 남겨 다음 폴에서 이어 읽는다.
    *
-   * @param {{ path: string, offset: number }} state
+   * @param {{ path: string, offset: number, pending: Buffer, discardingOversizedFrame: boolean }} state
    */
   function readNewUpdates(state) {
-    const chunk = readTailChunk(state);
+    let chunk = readTailChunk(state);
     if (!chunk) return [];
-    const lastNewline = chunk.lastIndexOf(0x0a);
-    if (lastNewline === -1) return [];
-    const text = chunk.subarray(0, lastNewline + 1).toString('utf8');
-    state.offset += lastNewline + 1;
+    if (state.discardingOversizedFrame) {
+      const newline = chunk.indexOf(0x0a);
+      if (newline === -1) return [];
+      state.discardingOversizedFrame = false;
+      chunk = chunk.subarray(newline + 1);
+    }
+    const buffer = state.pending.length ? Buffer.concat([state.pending, chunk]) : chunk;
+    state.pending = EMPTY;
     const updates = [];
-    for (const line of text.split('\n')) {
-      const trimmed = line.trim();
+    let start = 0;
+    let newline;
+    while ((newline = buffer.indexOf(0x0a, start)) !== -1) {
+      const lineBytes = buffer.subarray(start, newline);
+      start = newline + 1;
+      if (lineBytes.length > MAX_PROVIDER_FRAME_BYTES) continue;
+      const trimmed = lineBytes.toString('utf8').trim();
       if (!trimmed) continue;
       let obj;
       try {
         obj = JSON.parse(trimmed);
       } catch {
-        process.stderr.write(`[grok-tail] skipping unparseable line: ${trimmed.slice(0, 200)}\n`);
+        process.stderr.write('[grok-tail] skipping an unparseable provider frame\n');
         continue;
       }
       // method 는 session/update 와 _x.ai/session/update 가 섞여 온다 —
@@ -186,6 +208,12 @@ export function createGrokSessionTail({
         ...(rawMeta.eventId ? { eventId: String(rawMeta.eventId) } : {}),
       };
       updates.push({ update, meta });
+    }
+    const pending = start < buffer.length ? buffer.subarray(start) : EMPTY;
+    if (pending.length > MAX_PROVIDER_FRAME_BYTES) {
+      state.discardingOversizedFrame = true;
+    } else if (pending.length) {
+      state.pending = Buffer.from(pending);
     }
     return updates;
   }
@@ -204,6 +232,8 @@ export function createGrokSessionTail({
     childFiles.set(subagentId, {
       path: path.join(resolved.cwdDir, subagentId, 'updates.jsonl'),
       offset: 0,
+      pending: EMPTY,
+      discardingOversizedFrame: false,
     });
   }
 
@@ -221,7 +251,12 @@ export function createGrokSessionTail({
     if (!resolved) {
       resolved = resolveSessionDir();
       if (!resolved) return;
-      parentFile = { path: path.join(resolved.sessionDir, 'updates.jsonl'), offset: 0 };
+      parentFile = {
+        path: path.join(resolved.sessionDir, 'updates.jsonl'),
+        offset: 0,
+        pending: EMPTY,
+        discardingOversizedFrame: false,
+      };
     }
     // 부모를 먼저 비운다 — subagent_spawned 가 자식 추적과 taskId 매핑을 만들고
     // 나서야 자식 라인이 귀속될 수 있다.

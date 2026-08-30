@@ -338,6 +338,13 @@ fn extract_json_string(json: &str, key: &str) -> Option<String> {
 /// extra_streams에서 Scripts/DefaultJScript 스트림을 찾아 디코딩한다.
 /// HWP 스크립트는 zlib 압축 + UTF-16LE로 저장됨.
 fn decode_hwp_script(extra_streams: &[(String, Vec<u8>)]) -> Option<String> {
+    decode_hwp_script_with_limit(extra_streams, crate::parser::limits::MAX_STRUCTURAL_BYTES)
+}
+
+fn decode_hwp_script_with_limit(
+    extra_streams: &[(String, Vec<u8>)],
+    max_bytes: usize,
+) -> Option<String> {
     let data = extra_streams
         .iter()
         .find(|(path, _)| path == "/Scripts/DefaultJScript" || path == "Scripts/DefaultJScript")
@@ -347,23 +354,31 @@ fn decode_hwp_script(extra_streams: &[(String, Vec<u8>)]) -> Option<String> {
         return None;
     }
 
-    // zlib 해제 (raw deflate, no header)
-    use std::io::Read;
-    let mut decoder = flate2::read::DeflateDecoder::new(&data[..]);
-    let mut decompressed = Vec::new();
-    if decoder.read_to_end(&mut decompressed).is_err() {
-        return None;
-    }
+    // HWP stores this stream as raw deflate. Stop after max_bytes + 1 so a
+    // small compressed script cannot expand into an unbounded allocation.
+    let max_bytes = max_bytes.min(crate::parser::limits::MAX_STRUCTURAL_BYTES);
+    let decompressed =
+        crate::parser::cfb_reader::decompress_stream_limited(data, max_bytes).ok()?;
 
     // UTF-16LE 디코딩
     if decompressed.len() < 2 {
         return None;
     }
-    let u16s: Vec<u16> = decompressed
+    // Decode directly into the String. `String::from_utf16_lossy` would first
+    // duplicate the full stream into Vec<u16>, then allocate up to three UTF-8
+    // bytes per code unit. Apply the same cap to the final UTF-8 representation.
+    let code_units = decompressed
         .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
-        .collect();
-    Some(String::from_utf16_lossy(&u16s))
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]));
+    let mut script = String::with_capacity(decompressed.len().min(max_bytes));
+    for decoded in char::decode_utf16(code_units) {
+        let character = decoded.unwrap_or(char::REPLACEMENT_CHARACTER);
+        if character.len_utf8() > max_bytes.saturating_sub(script.len()) {
+            return None;
+        }
+        script.push(character);
+    }
+    Some(script)
 }
 
 /// 스크립트에서 ComboBox InsertString 패턴을 추출하여 항목 목록을 반환한다.
@@ -434,6 +449,7 @@ mod tests {
     use crate::model::paragraph::Paragraph;
     use crate::model::table::{Cell, Table};
     use crate::serializer::body_text::serialize_section;
+    use std::io::Write;
 
     const SENTINEL: u8 = 0xAB;
 
@@ -482,6 +498,33 @@ mod tests {
         let mut doc = Document::default();
         doc.sections.push(section_with_raw_stream(vec![para]));
         doc
+    }
+
+    fn raw_deflate(bytes: &[u8]) -> Vec<u8> {
+        let mut encoder =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(bytes).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    #[test]
+    fn script_decoder_stops_a_deflate_bomb_at_the_supplied_budget() {
+        let expanded = vec![0u8; 4096];
+        let streams = vec![(
+            "/Scripts/DefaultJScript".to_string(),
+            raw_deflate(&expanded),
+        )];
+
+        assert!(super::decode_hwp_script_with_limit(&streams, 1024).is_none());
+    }
+
+    #[test]
+    fn script_decoder_caps_utf8_expansion_without_a_u16_copy() {
+        // Two U+FFFF code units occupy four bytes as UTF-16LE but six as UTF-8.
+        let utf16 = [0xff, 0xff, 0xff, 0xff];
+        let streams = vec![("/Scripts/DefaultJScript".to_string(), raw_deflate(&utf16))];
+
+        assert!(super::decode_hwp_script_with_limit(&streams, utf16.len()).is_none());
     }
 
     #[test]

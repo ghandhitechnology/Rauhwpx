@@ -1,15 +1,33 @@
 import assert from 'node:assert/strict';
-import { EventEmitter } from 'node:events';
+import { EventEmitter, once } from 'node:events';
 import { PassThrough } from 'node:stream';
 import test from 'node:test';
 
 import {
   acpMcpServer,
   acpPermissionResponse,
+  createBoundedNdjsonTransform,
   createPersistentAcpSession,
   isRhwpAcpPermissionRequest,
   selectAcpMode,
 } from '../agents/acp-session.mjs';
+
+test('ACP NDJSON framing rejects one oversized provider frame across chunks', async () => {
+  const accepted = createBoundedNdjsonTransform(5);
+  let output = '';
+  accepted.on('data', (chunk) => { output += String(chunk); });
+  const ended = once(accepted, 'end');
+  accepted.end('12345\n12\n');
+  await ended;
+  assert.equal(output, '12345\n12\n');
+
+  const rejected = createBoundedNdjsonTransform(5);
+  rejected.write('123');
+  const failed = once(rejected, 'error');
+  rejected.write('456');
+  const [error] = await failed;
+  assert.match(error.message, /exceeded 5 bytes/);
+});
 
 test('ACP helpers preserve MCP env names and only select advertised permission IDs', () => {
   assert.deepEqual(acpMcpServer('rhwp', {

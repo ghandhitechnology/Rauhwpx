@@ -1,9 +1,19 @@
-import { WasmBridge } from '@/core/wasm-bridge';
+import { WasmBridge, type PreparedWasmDocument } from '@/core/wasm-bridge';
 import { FALLBACK_DOCUMENT_FILE_NAME } from '@/core/document-names';
 import type { DocumentInfo } from '@/core/types';
 import { EventBus } from '@/core/event-bus';
 import { assertRemoteDocumentBytes } from '@/core/document-signature';
+import { consumeExactLocalFileRead } from '@/core/local-file-grant';
+import {
+  EXACT_LOCAL_DOCUMENT_MAX_BYTES,
+  INSERTED_IMAGE_MAX_BYTES,
+  UNTRUSTED_DOCUMENT_MAX_BYTES,
+  cancelResponseBody,
+  readBlobBytesWithLimit,
+  readResponseBytesWithLimit,
+} from '@/core/document-input-limits';
 import { RemoteDocumentUrlError, validateRemoteDocumentUrl } from '@/core/remote-document-url';
+import { ExtensionRemoteProxyUnavailableError } from '@/core/extension-file-transfer';
 import { CanvasView } from '@/view/canvas-view';
 import { InputHandler } from '@/engine/input-handler';
 import { Toolbar } from '@/ui/toolbar';
@@ -92,6 +102,7 @@ import {
   installDesktopPlainTextPasteHandling,
   installDesktopWindowChrome,
   installWebAppShell,
+  isLegacyPortableHistoryFolderHandle,
   pickDesktopNativeOpenFile,
   pickDesktopNativeSaveFile,
   releaseDesktopDocument,
@@ -902,7 +913,7 @@ function setupFileInput(): void {
 
     if (isImage) {
       if (!inputHandler || wasm.pageCount === 0) return;
-      const data = new Uint8Array(await file.arrayBuffer());
+      const data = await readBlobBytesWithLimit(file, INSERTED_IMAGE_MAX_BYTES, '그림');
       const ext = file.name.split('.').pop()?.toLowerCase() || 'png';
       const img = new Image();
       const url = URL.createObjectURL(file);
@@ -943,7 +954,7 @@ function setupFileInput(): void {
     } catch {
       return;
     }
-    await loadFile(file, { fileHandle });
+    await loadFile(file, { fileHandle, untrustedSource: true });
   });
 }
 
@@ -1360,16 +1371,29 @@ async function promptLocalFontsIfNeeded(docInfo: DocumentInfo, displayName: stri
 
 async function loadFile(
   file: File,
-  options: { skipUnsavedGuard?: boolean; fileHandle?: FileSystemFileHandleLike | null } = {},
+  options: {
+    skipUnsavedGuard?: boolean;
+    fileHandle?: FileSystemFileHandleLike | null;
+    /** Drag payloads retain a save handle but never receive the exact-picker parser grant. */
+    untrustedSource?: boolean;
+  } = {},
 ): Promise<boolean> {
   try {
     if (!await canReplaceCurrentDocument(options.skipUnsavedGuard)) return false;
-    const startTime = performance.now();
     await updateLoadProgress(0, '파일 읽는 중...');
-    const data = new Uint8Array(await file.arrayBuffer());
+    const selected = options.fileHandle && !options.untrustedSource
+      ? await readFileFromHandle(options.fileHandle)
+      : {
+        bytes: await readBlobBytesWithLimit(file, UNTRUSTED_DOCUMENT_MAX_BYTES, '문서'),
+        name: file.name,
+      };
     await updateLoadProgress(15, '파일 읽기 완료');
-    await loadBytes(data, file.name, options.fileHandle ?? null, startTime, { dataReadProgressShown: true });
-    return true;
+    return openDocumentBytes({
+      bytes: selected.bytes,
+      fileName: selected.name,
+      fileHandle: options.fileHandle ?? null,
+      skipUnsavedGuard: true,
+    });
   } catch (error) {
     await options.fileHandle?.releaseUnusedSaveTarget?.().catch(() => {});
     if (!(error instanceof DocumentOwnedElsewhereError)) showLoadError(error);
@@ -1441,7 +1465,11 @@ async function reserveSaveHandleForWrite(
   }
 
   const target = await handle.getFile();
-  const targetBytes = new Uint8Array(await target.arrayBuffer());
+  const targetBytes = await readBlobBytesWithLimit(
+    target,
+    EXACT_LOCAL_DOCUMENT_MAX_BYTES,
+    '저장 대상 문서',
+  );
   const identity = await resolveDocumentPreflight(targetBytes, handle, await listRecentDocs());
   if (identity.documentId === activeDocumentId) return;
 
@@ -1461,6 +1489,7 @@ async function loadBytes(
     skipRecent?: boolean;
     suppressDialogs?: boolean;
     grant?: VerifiedDocumentGrant | null;
+    preparedDocument?: PreparedWasmDocument;
   } = {},
 ): Promise<void> {
   const ownership = await reserveDocumentOpen(
@@ -1477,7 +1506,11 @@ async function loadBytes(
   let docInfo: DocumentInfo;
   try {
     inputHandler?.deactivate();
-    docInfo = wasm.loadDocument(data, fileName);
+    docInfo = options.preparedDocument
+      ? wasm.adoptPreparedDocument(options.preparedDocument)
+      : consumeExactLocalFileRead(data, fileHandle)
+        ? wasm.loadTrustedLocalFileOnce(data, fileName)
+        : wasm.loadDocument(data, fileName);
     await commitDesktopDocument(ownership.reservationId);
     fileHandle?.adoptSaveTarget?.();
   } catch (error) {
@@ -1707,35 +1740,36 @@ async function openDocumentBytes(data: OpenDocumentBytesEvent) {
   try {
     if (isPortableHistoryFileName(data.fileName) || isPortableHistoryBytes(data.bytes)) {
       const bundle = openPortableHistoryBundle(data.bytes);
-      const probe = new WasmBridge();
-      try {
-        await probe.initialize();
-        probe.loadDocument(bundle.currentDocumentBytes, bundle.documentFileName);
-      } finally {
-        probe.releaseDocument();
-      }
       const store = new VersionGraphStore();
-      const imported = await store.importRepositorySnapshot(bundle.snapshot);
-      const retainNativeBundleHandle = Boolean(
+      const retainPortableHistoryHandle = Boolean(
         data.fileHandle
-        && data.fileHandle.identityKind === 'native-path'
+        && !isLegacyPortableHistoryFolderHandle(data.fileHandle)
         && isPortableHistoryFileName(data.fileName),
       );
-      const openFileName = retainNativeBundleHandle
+      const openFileName = retainPortableHistoryHandle
         ? data.fileName
         : bundle.documentFileName;
+      let importedRepository = false;
+      let preparedDocument: PreparedWasmDocument | null = null;
       try {
+        const imported = await store.importRepositorySnapshot(bundle.snapshot);
+        importedRepository = imported.imported;
+        preparedDocument = wasm.prepareDocument(
+          bundle.currentDocumentBytes,
+          openFileName,
+        );
         userSettings.setUseHancomGit(true);
         await loadBytes(
           bundle.currentDocumentBytes,
           openFileName,
-          retainNativeBundleHandle ? data.fileHandle : null,
+          retainPortableHistoryHandle ? data.fileHandle : null,
           performance.now(),
           {
             grant: {
               kind: 'verified',
               documentId: bundle.snapshot.repository.documentId,
             },
+            preparedDocument,
           },
         );
         persistActiveBranch(bundle.snapshot.repository.documentId, bundle.activeBranch);
@@ -1743,7 +1777,7 @@ async function openDocumentBytes(data: OpenDocumentBytesEvent) {
           console.warn('[versioning] 가져온 기록 새로고침 실패:', error);
         });
       } catch (error) {
-        if (imported.imported) {
+        if (importedRepository) {
           await store.removeImportedRepository(
             bundle.snapshot.repository.id,
             versionDocumentId(bundle.snapshot.repository.documentId),
@@ -1752,9 +1786,10 @@ async function openDocumentBytes(data: OpenDocumentBytesEvent) {
         }
         throw error;
       } finally {
+        preparedDocument?.dispose();
         await store.close();
       }
-      if (!retainNativeBundleHandle) {
+      if (!retainPortableHistoryHandle) {
         await data.fileHandle?.releaseUnusedSaveTarget?.().catch(() => {});
       }
       showToast({ message: '문서와 전체 버전 기록을 불러왔습니다.', durationMs: 3500 });
@@ -1821,6 +1856,7 @@ async function loadFromUrlParam(): Promise<void> {
 
     // file:// 은 확장 권한을 먼저 확인한다. 공개 URL 정책은 HTTP(S) 직접 fetch와
     // SW 프록시 우회 방지에만 적용한다.
+    let validatedRemoteUrl: URL | null = null;
     if (fileUrl.startsWith('file:')) {
       if (typeof chrome === 'undefined') {
         throw new RemoteDocumentUrlError('scheme-blocked', 'file: URL은 확장 프로그램에서만 열 수 있습니다.');
@@ -1831,32 +1867,43 @@ async function loadFromUrlParam(): Promise<void> {
         return;
       }
     } else {
-      validateRemoteDocumentUrl(fileUrl);
+      // Keep the parsed URL as the authority for both policy and fetch. URL()
+      // canonicalizes leading ASCII whitespace/control characters that a raw
+      // /^https?:/ check can miss.
+      validatedRemoteUrl = validateRemoteDocumentUrl(fileUrl);
     }
 
-    let response: Response;
-
-    // Chrome 확장 환경: Service Worker를 통한 CORS 우회 fetch
-    if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-      try {
-        response = await fetch(fileUrl);
-      } catch {
-        // 직접 fetch 실패 시 Service Worker 프록시
-        const result = await chrome.runtime.sendMessage({ type: 'fetch-file', url: fileUrl });
-        if (result.error) throw new Error(result.error);
-        const data = new Uint8Array(result.data);
-        assertRemoteDocumentBytes(data);
-        await loadBytes(data, fileName, null);
-        return;
+    const browserRuntime = (
+      globalThis as typeof globalThis & {
+        browser?: { runtime?: { sendMessage?: unknown } };
       }
-    } else {
-      response = await fetch(fileUrl);
+    ).browser?.runtime;
+    const hasExtensionRuntime = (
+      typeof chrome !== 'undefined'
+      && typeof (chrome as { runtime?: { sendMessage?: unknown } }).runtime?.sendMessage === 'function'
+    ) || typeof browserRuntime?.sendMessage === 'function';
+    if (hasExtensionRuntime && validatedRemoteUrl) {
+      // Extension-origin fetch and its service worker both carry host
+      // permissions. Hostname validation cannot stop DNS rebinding, so remote
+      // URLs stay fail-closed until a native/server fetcher can resolve and pin
+      // every redirect hop while preserving Host/SNI.
+      throw new ExtensionRemoteProxyUnavailableError();
     }
 
-    if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    // file: remains an explicitly granted local read; ordinary web Studio
+    // fetches retain the browser's CORS/private-network enforcement.
+    const response = await fetch(validatedRemoteUrl?.href ?? fileUrl);
+
+    if (!response.ok) {
+      await cancelResponseBody(response, `HTTP ${response.status}`);
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
     const contentType = response.headers.get('content-type');
-    const buffer = await response.arrayBuffer();
-    const data = new Uint8Array(buffer);
+    const data = await readResponseBytesWithLimit(
+      response,
+      UNTRUSTED_DOCUMENT_MAX_BYTES,
+      '원격 문서',
+    );
     assertRemoteDocumentBytes(data, contentType);
     await loadBytes(data, fileName, null);
   } catch (error) {

@@ -16,13 +16,15 @@ concurrency:
 
 jobs:
   session-tests:
-    name: Session tests (${{ matrix.os }})
+    name: Session tests (${{ matrix.os }}, ${{ matrix.architecture }})
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - macos-15
-          - windows-latest
+        include:
+          - os: macos-15
+            architecture: arm64
+          - os: windows-latest
+            architecture: x64
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
 
@@ -33,15 +35,22 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: 22.18.0
           cache: npm
           cache-dependency-path: |
             package-lock.json
             rhwp/rhwp-studio/package-lock.json
             rhwp/rhwp-agent/package-lock.json
 
+      - name: Assert runner architecture
+        env:
+          EXPECTED_NODE_ARCH: ${{ matrix.architecture }}
+        shell: bash
+        run: |
+          node -e "if (process.arch !== process.env.EXPECTED_NODE_ARCH) throw new Error('Expected ' + process.env.EXPECTED_NODE_ARCH + ', got ' + process.arch)"
+
       - name: Install pinned Rust toolchain for browser merge tests
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           toolchain: 1.93.1
           targets: wasm32-unknown-unknown
@@ -69,7 +78,10 @@ jobs:
           node --check rhwp/rhwp-agent/server.mjs
 
       - name: Test agent hub and process lifecycle
-        run: npm --prefix rhwp/rhwp-agent test
+        run: node --test --test-concurrency=1 rhwp/rhwp-agent/tests/*.test.mjs
+
+      - name: Test hosted Rau authorization service
+        run: npm --prefix rhwp/rau-credits test
 
       - name: Test Studio session persistence and desktop contracts
         run: npm --prefix rhwp/rhwp-studio test

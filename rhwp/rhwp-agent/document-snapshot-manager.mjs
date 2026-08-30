@@ -2,9 +2,11 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 
-import { sanitizeFilename } from './download-manager.mjs';
+import { pathsOverlap, sanitizeFilename } from './download-manager.mjs';
 
 const DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
+const DEFAULT_MAX_FILES_PER_CHAT = 20;
+const DEFAULT_MAX_CHAT_BYTES = 128 * 1024 * 1024;
 const CFB_SIGNATURE = Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
 const ZIP_SIGNATURE = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
 
@@ -36,6 +38,31 @@ async function ensurePlainDirectory(directory) {
   if (!stat.isDirectory() || stat.isSymbolicLink()) {
     throw snapshotError('SNAPSHOT_PATH_UNSAFE', `Snapshot directory is not a plain directory: ${directory}`);
   }
+}
+
+async function snapshotUsage(chatDirectory) {
+  let files = 0;
+  let bytes = 0;
+  for (const allocation of await fs.readdir(chatDirectory, { withFileTypes: true })) {
+    const allocationPath = path.join(chatDirectory, allocation.name);
+    const allocationStat = await fs.lstat(allocationPath);
+    if (!allocation.isDirectory() || allocationStat.isSymbolicLink()) {
+      throw snapshotError('SNAPSHOT_PATH_UNSAFE', 'Snapshot chat directory contains an unsafe entry');
+    }
+    for (const entry of await fs.readdir(allocationPath, { withFileTypes: true })) {
+      const candidate = path.join(allocationPath, entry.name);
+      const stat = await fs.lstat(candidate);
+      if (!entry.isFile() || stat.isSymbolicLink()) {
+        throw snapshotError('SNAPSHOT_PATH_UNSAFE', 'Snapshot allocation contains a non-plain file');
+      }
+      files += 1;
+      bytes += stat.size;
+      if (!Number.isSafeInteger(bytes)) {
+        throw snapshotError('SNAPSHOT_CHAT_QUOTA', 'Snapshot storage accounting overflowed');
+      }
+    }
+  }
+  return { files, bytes };
 }
 
 function decodeSnapshot(dataBase64, declaredBytes, maxBytes) {
@@ -81,15 +108,54 @@ function snapshotFilename(documentName, format) {
 }
 
 export class DocumentSnapshotManager {
-  constructor({ rootDir, maxBytes = DEFAULT_MAX_BYTES, createId = crypto.randomUUID } = {}) {
-    if (!rootDir) throw new Error('DocumentSnapshotManager requires rootDir');
+  constructor({
+    rootDir,
+    writableRoot,
+    maxBytes = DEFAULT_MAX_BYTES,
+    maxFilesPerChat = DEFAULT_MAX_FILES_PER_CHAT,
+    maxChatBytes = DEFAULT_MAX_CHAT_BYTES,
+    createId = crypto.randomUUID,
+  } = {}) {
+    if (!rootDir) throw new Error('DocumentSnapshotManager requires a hub-owned rootDir');
+    if (writableRoot && pathsOverlap(rootDir, writableRoot)) {
+      throw new Error('DocumentSnapshotManager storage must not overlap the provider-writable root');
+    }
     this.agentDir = path.resolve(rootDir, '.rhwp-agent');
     this.baseDir = path.resolve(this.agentDir, 'document-snapshots');
     this.maxBytes = maxBytes;
+    this.maxFilesPerChat = maxFilesPerChat;
+    this.maxChatBytes = maxChatBytes;
     this.createId = createId;
+    this.chatQueues = new Map();
   }
 
-  async materialize({ chatId, documentIdentity, snapshot }) {
+  /** Exact provider-read-only root used by one chat/job's future snapshots. */
+  readOnlyRootForChat(chatId) {
+    if (typeof chatId !== 'string' || !chatId) {
+      throw snapshotError('SNAPSHOT_SCOPE_MISSING', 'The snapshot chat identity is unavailable');
+    }
+    const directory = path.resolve(this.baseDir, directoryKey(chatId));
+    if (!isInside(this.baseDir, directory)) {
+      throw snapshotError('SNAPSHOT_PATH_UNSAFE', 'Resolved snapshot scope escaped its storage root');
+    }
+    return directory;
+  }
+
+  materialize(args) {
+    const queueKey = directoryKey(args.chatId);
+    const previous = this.chatQueues.get(queueKey) ?? Promise.resolve();
+    const running = previous.then(() => this.materializeSerial(args), () => this.materializeSerial(args));
+    const tail = running.catch(() => {});
+    this.chatQueues.set(queueKey, tail);
+    return running.finally(() => {
+      if (this.chatQueues.get(queueKey) === tail) this.chatQueues.delete(queueKey);
+    });
+  }
+
+  async materializeSerial({ chatId, documentIdentity, snapshot }) {
+    if (typeof chatId !== 'string' || !chatId) {
+      throw snapshotError('SNAPSHOT_SCOPE_MISSING', 'The active chat identity is unavailable');
+    }
     const documentId = documentIdentity?.documentId;
     if (typeof documentId !== 'string' || !documentId) {
       throw snapshotError('SNAPSHOT_SCOPE_MISSING', 'The active document identity is unavailable');
@@ -98,10 +164,7 @@ export class DocumentSnapshotManager {
     if (format !== 'hwp' && format !== 'hwpx') {
       throw snapshotError('SNAPSHOT_FORMAT_UNSUPPORTED', `Unsupported document snapshot format: ${format || 'unknown'}`);
     }
-    const bytes = decodeSnapshot(snapshot?.dataBase64, snapshot?.byteLength, this.maxBytes);
-    validateSignature(format, bytes);
-
-    const chatDirectory = path.resolve(this.baseDir, directoryKey(chatId));
+    const chatDirectory = this.readOnlyRootForChat(chatId);
     const allocation = String(this.createId());
     if (!/^[A-Za-z0-9_-]{1,100}$/.test(allocation)) {
       throw snapshotError('SNAPSHOT_PATH_UNSAFE', 'Snapshot allocation id is invalid');
@@ -113,7 +176,25 @@ export class DocumentSnapshotManager {
     await ensurePlainDirectory(this.agentDir);
     await ensurePlainDirectory(this.baseDir);
     await ensurePlainDirectory(chatDirectory);
-    await ensurePlainDirectory(snapshotDirectory);
+    const existing = await snapshotUsage(chatDirectory);
+    if (existing.files >= this.maxFilesPerChat) {
+      throw snapshotError('SNAPSHOT_FILE_LIMIT', `A chat can keep at most ${this.maxFilesPerChat} snapshots`);
+    }
+
+    const bytes = decodeSnapshot(snapshot?.dataBase64, snapshot?.byteLength, this.maxBytes);
+    validateSignature(format, bytes);
+    if (existing.bytes + bytes.length > this.maxChatBytes) {
+      throw snapshotError('SNAPSHOT_CHAT_QUOTA', `Snapshots exceed the ${this.maxChatBytes}-byte chat limit`);
+    }
+
+    try {
+      await fs.mkdir(snapshotDirectory, { mode: 0o700 });
+    } catch (error) {
+      if (error?.code === 'EEXIST') {
+        throw snapshotError('SNAPSHOT_ID_COLLISION', 'Snapshot allocation id already exists');
+      }
+      throw error;
+    }
 
     const fileName = snapshotFilename(documentIdentity?.documentName, format);
     const destination = path.resolve(snapshotDirectory, fileName);
@@ -127,6 +208,7 @@ export class DocumentSnapshotManager {
       await handle.sync();
     } catch (error) {
       await fs.unlink(destination).catch(() => {});
+      await fs.rmdir(snapshotDirectory).catch(() => {});
       if (error?.code) throw error;
       throw snapshotError('SNAPSHOT_WRITE_FAILED', String(error?.message ?? error));
     } finally {

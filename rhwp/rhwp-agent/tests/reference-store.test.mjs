@@ -60,15 +60,23 @@ test('image references persist with zero chunks and are read only through vision
   assert.ok(restarted.list({ scope: 'chat', scopeId: 'image-chat' }).some((file) => file.id === image.id && file.kind === 'image'));
 });
 
-test('staged message files stay out of counts, survive restart, and promote into their chat', async (t) => {
+test('staged message files consume chat quota, survive restart, and promote in place', async (t) => {
   const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-reference-stage-'));
   t.after(() => fs.rm(parent, { recursive: true, force: true }));
   const root = path.join(parent, 'references');
-  const first = await new ReferenceStore({ root }).init();
+  const first = await new ReferenceStore({ root, maxChatFiles: 1 }).init();
   const staged = await stageText(first);
   assert.equal(first.list({ scope: 'chat', scopeId: 'chat-a' }).length, 0);
+  await assert.rejects(
+    stageText(first, { name: 'second.txt' }),
+    (error) => error.code === 'REFERENCE_FILE_COUNT_LIMIT',
+  );
+  await assert.rejects(
+    first.addBuffer({ scope: 'chat', scopeId: 'chat-a', name: 'ready.txt', bytes: Buffer.from('ready') }),
+    (error) => error.code === 'REFERENCE_FILE_COUNT_LIMIT',
+  );
 
-  const restarted = await new ReferenceStore({ root }).init();
+  const restarted = await new ReferenceStore({ root, maxChatFiles: 1 }).init();
   assert.equal((await restarted.getStaged({ stageId: staged.id, scopeId: 'chat-a' })).name, 'draft.txt');
   await assert.rejects(
     restarted.getStaged({ stageId: staged.id, scopeId: 'chat-b' }),
@@ -334,4 +342,171 @@ test('metadata write failures roll back uploads and deletions in memory and on d
 
   await store.remove({ fileId: saved.id, scope: 'chat', scopeId: 'rollback-chat' });
   assert.deepEqual(store.list({ scope: 'chat', scopeId: 'rollback-chat' }), []);
+});
+
+test('metadata bytes and record count are bounded before parsing', async (t) => {
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-reference-metadata-bounds-'));
+  t.after(() => fs.rm(parent, { recursive: true, force: true }));
+  const root = path.join(parent, 'references');
+  const initialized = await new ReferenceStore({ root }).init();
+
+  await fs.writeFile(initialized.metadataPath, ' '.repeat(257));
+  await assert.rejects(
+    new ReferenceStore({ root, maxMetadataBytes: 256 }).init(),
+    (error) => error.code === 'REFERENCE_METADATA_TOO_LARGE',
+  );
+
+  await fs.writeFile(initialized.metadataPath, JSON.stringify({ schemaVersion: 1, files: ['a', 'b', 'c'] }));
+  await assert.rejects(
+    new ReferenceStore({ root, maxMetadataRecords: 2 }).init(),
+    (error) => error.code === 'REFERENCE_METADATA_RECORD_LIMIT',
+  );
+});
+
+test('global physical quotas count metadata, blobs, objects, and deduplicate across scopes', async (t) => {
+  const store = await storeFor(t, {
+    maxTotalFiles: 5,
+    maxMetadataRecords: 20,
+    maxChatFiles: 5,
+  });
+  const bytes = Buffer.from('same physical reference');
+  await store.addBuffer({ scope: 'chat', scopeId: 'a', name: 'a.txt', bytes });
+  await store.addBuffer({ scope: 'chat', scopeId: 'b', name: 'b.txt', bytes });
+
+  const usage = store.storageUsage();
+  assert.equal(usage.totalFiles, 3, 'metadata + one blob + one extracted object');
+  assert.equal(usage.metadataRecords, 2);
+  const physicalBytes = (await fs.stat(store.metadataPath)).size
+    + (await fs.stat(path.join(store.blobsDir, store.list({ scope: 'chat', scopeId: 'a' })[0].sha256))).size
+    + (await fs.stat(path.join(store.objectsDir, `${store.list({ scope: 'chat', scopeId: 'a' })[0].sha256}.json`))).size;
+  assert.equal(usage.totalBytes, physicalBytes);
+
+  await assert.rejects(
+    store.addBuffer({ scope: 'chat', scopeId: 'c', name: 'c.txt', bytes: Buffer.from('different physical reference') }),
+    (error) => error.code === 'REFERENCE_GLOBAL_FILE_COUNT_LIMIT',
+  );
+  assert.deepEqual(await fs.readdir(store.stagingDir), []);
+  assert.equal(store.storageUsage().totalFiles, 3);
+});
+
+test('global extracted-character quota is reserved and released across concurrent uploads', async (t) => {
+  const store = await storeFor(t, { maxFileBytes: 100, maxExtractedChars: 30 });
+  await store.addBuffer({ scope: 'chat', scopeId: 'chars', name: 'one.txt', bytes: Buffer.from('abcdefghij') });
+  await assert.rejects(
+    store.addBuffer({ scope: 'chat', scopeId: 'chars-2', name: 'two.txt', bytes: Buffer.from('abcdefghijklmnopqrstu') }),
+    (error) => error.code === 'REFERENCE_GLOBAL_EXTRACTED_LIMIT',
+  );
+
+  let releaseFirst;
+  let markStarted;
+  const gate = new Promise((resolve) => { releaseFirst = resolve; });
+  const started = new Promise((resolve) => { markStarted = resolve; });
+  async function* heldUpload() {
+    markStarted();
+    await gate;
+    throw new Error('held upload aborted');
+  }
+  const isolated = await storeFor(t, { maxFileBytes: 100, maxTotalBytes: 150 });
+  const first = isolated.addStream({ scope: 'chat', scopeId: 'one', name: 'held.txt', stream: heldUpload() });
+  await started;
+  let secondRead = false;
+  async function* secondUpload() { secondRead = true; yield Buffer.from('x'); }
+  await assert.rejects(
+    isolated.addStream({ scope: 'chat', scopeId: 'two', name: 'second.txt', stream: secondUpload() }),
+    (error) => error.code === 'REFERENCE_GLOBAL_SIZE_LIMIT',
+  );
+  assert.equal(secondRead, false, 'quota must be reserved before the request stream is consumed');
+  releaseFirst();
+  await assert.rejects(first, /held upload aborted/);
+  assert.equal(isolated.storageUsage().reservedUploads, 0);
+  assert.deepEqual(await fs.readdir(isolated.stagingDir), []);
+});
+
+test('restart is lazy, scoped activation is LRU-bounded, and pinned teardown is refused', async (t) => {
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-reference-lazy-index-'));
+  t.after(() => fs.rm(parent, { recursive: true, force: true }));
+  const root = path.join(parent, 'references');
+  const first = await new ReferenceStore({ root }).init();
+  await first.addBuffer({ scope: 'chat', scopeId: 'a', name: 'a.txt', bytes: Buffer.from('alpha searchable text') });
+  await first.addBuffer({ scope: 'chat', scopeId: 'b', name: 'b.txt', bytes: Buffer.from('bravo searchable text') });
+
+  const restarted = await new ReferenceStore({
+    root,
+    maxStartupIndexChars: 0,
+    maxResidentIndexChars: 24,
+  }).init();
+  assert.equal(restarted.objects.size, 0);
+  assert.equal(restarted.indexChunks.size, 0);
+  assert.deepEqual(restarted.search({ query: 'alpha', scopes: [{ scope: 'chat', scopeId: 'a' }] }), []);
+
+  const release = restarted.retainScopes([{ scope: 'chat', scopeId: 'a' }]);
+  assert.equal((await restarted.activateScopes([{ scope: 'chat', scopeId: 'a' }])).complete, true);
+  assert.equal(restarted.search({ query: 'alpha', scopes: [{ scope: 'chat', scopeId: 'a' }] })[0].name, 'a.txt');
+  assert.throws(
+    () => restarted.unloadScopeIndexes({ scope: 'chat', scopeId: 'a' }),
+    (error) => error.code === 'REFERENCE_SCOPE_BUSY',
+  );
+  assert.equal((await restarted.activateScopes([{ scope: 'chat', scopeId: 'b' }])).complete, true);
+  assert.ok(restarted.storageUsage().residentIndexChars <= 24);
+  assert.equal(restarted.search({ query: 'bravo', scopes: [{ scope: 'chat', scopeId: 'b' }] })[0].name, 'b.txt');
+  release();
+  assert.equal(restarted.unloadScopeIndexes({ scope: 'chat', scopeId: 'b' }), 1);
+});
+
+test('scope GC preserves shared objects and refuses active or staged scopes', async (t) => {
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-reference-scope-gc-'));
+  t.after(() => fs.rm(parent, { recursive: true, force: true }));
+  const root = path.join(parent, 'references');
+  const store = await new ReferenceStore({ root }).init();
+  const shared = Buffer.from('shared searchable body');
+  await store.addBuffer({ scope: 'chat', scopeId: 'old', name: 'shared.txt', bytes: shared });
+  await store.addBuffer({ scope: 'global', name: 'global.txt', bytes: shared });
+  await store.addBuffer({ scope: 'chat', scopeId: 'old', name: 'unique.txt', bytes: Buffer.from('unique old body') });
+
+  const release = store.retainScopes([{ scope: 'chat', scopeId: 'old' }]);
+  await assert.rejects(
+    store.removeScope({ scope: 'chat', scopeId: 'old' }),
+    (error) => error.code === 'REFERENCE_SCOPE_BUSY',
+  );
+  release();
+  const staged = await stageText(store, { scopeId: 'old', name: 'pending.txt' });
+  await assert.rejects(
+    store.removeScope({ scope: 'chat', scopeId: 'old' }),
+    (error) => error.code === 'REFERENCE_SCOPE_BUSY',
+  );
+  await store.discardStaged({ stageId: staged.id, scopeId: 'old' });
+
+  const removed = await store.removeScope({ scope: 'chat', scopeId: 'old' });
+  assert.deepEqual(removed, { scope: 'chat', scopeId: 'old', deletedFiles: 2, deletedObjects: 1 });
+  assert.equal(store.list({ scope: 'chat', scopeId: 'old' }).length, 0);
+  assert.equal(store.list({ scope: 'global' }).length, 1);
+  assert.equal((await fs.readdir(store.blobsDir)).length, 1);
+  assert.equal((await fs.readdir(store.objectsDir)).length, 1);
+  const restarted = await new ReferenceStore({ root, maxStartupIndexChars: 0 }).init();
+  assert.equal(restarted.list({ scope: 'chat', scopeId: 'old' }).length, 0);
+  assert.equal(restarted.list({ scope: 'global' }).length, 1);
+});
+
+test('restart inventories orphan files and TTL cleanup reclaims them', async (t) => {
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-reference-orphan-gc-'));
+  t.after(() => fs.rm(parent, { recursive: true, force: true }));
+  const root = path.join(parent, 'references');
+  let nowMs = Date.now();
+  const first = await new ReferenceStore({ root, now: () => new Date(nowMs).toISOString() }).init();
+  const orphanBlob = path.join(first.blobsDir, 'f'.repeat(64));
+  const orphanStage = path.join(first.stagingDir, '.upload-orphan.txt');
+  const orphanRoot = path.join(root, 'metadata.json.tmp-crash');
+  await Promise.all([
+    fs.writeFile(orphanBlob, 'orphan blob'),
+    fs.writeFile(orphanStage, 'orphan stage'),
+    fs.writeFile(orphanRoot, 'orphan metadata'),
+  ]);
+
+  const restarted = await new ReferenceStore({ root, now: () => new Date(nowMs).toISOString() }).init();
+  assert.equal(restarted.storageUsage().quarantinedFiles, 3);
+  nowMs += (12 * 60 * 60 * 1000) + 10_000;
+  assert.equal(await restarted.cleanupStaged(), 3);
+  await Promise.all([orphanBlob, orphanStage, orphanRoot].map(async (file) => {
+    await assert.rejects(fs.stat(file), (error) => error.code === 'ENOENT');
+  }));
 });

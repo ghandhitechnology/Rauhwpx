@@ -18,6 +18,7 @@ pub mod section;
 pub mod utils;
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use crate::model::bin_data::{BinData, BinDataContent, BinDataType};
 use crate::model::document::{Document, FileHeader, HwpVersion, Section};
@@ -252,8 +253,10 @@ fn attach_hwpx_master_page(
 
 /// HWPX 파일 바이트 데이터를 파싱하여 Document IR로 변환
 pub fn parse_hwpx(data: &[u8]) -> Result<Document, HwpxError> {
-    // 1. ZIP 컨테이너 열기
-    let mut reader = reader::HwpxReader::open(data)?;
+    // 1. ZIP 컨테이너 열기. The active reader and lazy binary resolver share
+    // one immutable source allocation instead of each cloning the archive.
+    let source_bytes: Arc<[u8]> = Arc::from(data);
+    let mut reader = reader::HwpxReader::open_shared(source_bytes.clone())?;
 
     // [Issue #1946] 암호화 HWPX 조기 감지. META-INF/manifest.xml 은 암호화 문서에서도
     // 평문이며, 암호화된 엔트리마다 <odf:encryption-data> 블록을 갖는다. 감지하면
@@ -454,11 +457,15 @@ pub fn parse_hwpx(data: &[u8]) -> Result<Document, HwpxError> {
         .filter(|item| is_internal_ole_package_item(item))
         .map(|item| item.href.clone())
         .collect();
-    let bin_resolver: std::sync::Arc<dyn crate::model::bin_data::BinDataResolver> =
+    let raw_bin_resolver: std::sync::Arc<dyn crate::model::bin_data::BinDataResolver> =
         std::sync::Arc::new(HwpxBinResolver {
-            reader: std::sync::Mutex::new(reader::HwpxReader::open(data)?),
+            reader: std::sync::Mutex::new(reader::HwpxReader::open_shared(source_bytes)?),
             ole_hrefs,
         });
+    let bin_resolver: std::sync::Arc<dyn crate::model::bin_data::BinDataResolver> =
+        std::sync::Arc::new(crate::model::bin_data::SharedBinDataResolver::new(
+            raw_bin_resolver,
+        ));
 
     let mut bin_data_content = Vec::new();
     for (i, item) in package_info.bin_data_items.iter().enumerate() {
@@ -473,10 +480,10 @@ pub fn parse_hwpx(data: &[u8]) -> Result<Document, HwpxError> {
         }
         bin_data_content.push(BinDataContent {
             id: (i + 1) as u16,
-            data: crate::model::bin_data::BinDataBytes::Lazy {
-                resolver: bin_resolver.clone(),
-                key: item.href.clone(),
-            },
+            data: crate::model::bin_data::BinDataBytes::lazy(
+                bin_resolver.clone(),
+                item.href.clone(),
+            ),
             extension: hwpx_bin_data_extension(item),
         });
     }
@@ -608,6 +615,37 @@ mod tests {
         // CFB/HWP 데이터로 시도
         let result = parse_hwpx(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn duplicate_hwpx_entries_share_one_inflated_payload() {
+        use crate::model::bin_data::{BinDataBytes, BinDataResolver, SharedBinDataResolver};
+        use std::io::{Cursor, Write};
+        use std::sync::Arc;
+        use zip::write::SimpleFileOptions;
+
+        let expected = vec![0x6d; 64 * 1024];
+        let mut output = Cursor::new(Vec::new());
+        {
+            let mut archive = zip::ZipWriter::new(&mut output);
+            let options =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            archive.start_file("BinData/shared.png", options).unwrap();
+            archive.write_all(&expected).unwrap();
+            archive.finish().unwrap();
+        }
+        let raw: Arc<dyn BinDataResolver> = Arc::new(HwpxBinResolver {
+            reader: std::sync::Mutex::new(reader::HwpxReader::open(&output.into_inner()).unwrap()),
+            ole_hrefs: HashSet::new(),
+        });
+        let shared: Arc<dyn BinDataResolver> = Arc::new(SharedBinDataResolver::new(raw));
+        let first = BinDataBytes::lazy(shared.clone(), "BinData/shared.png".to_string());
+        let duplicate = BinDataBytes::lazy(shared, "BinData/shared.png".to_string());
+
+        let first_payload = first.load_shared();
+        let duplicate_payload = duplicate.load_shared();
+        assert_eq!(first_payload.as_ref(), expected.as_slice());
+        assert!(Arc::ptr_eq(&first_payload, &duplicate_payload));
     }
 
     #[test]
