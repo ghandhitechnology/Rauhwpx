@@ -448,6 +448,11 @@
   color: #b7c9ad;
 }
 
+.rhwp-setup-account[data-signed-in='true'] .rhwp-setup-primary {
+  background: #b7c9ad;
+  color: #15161a;
+}
+
 .rhwp-setup-account-actions {
   display: flex;
   flex-wrap: wrap;
