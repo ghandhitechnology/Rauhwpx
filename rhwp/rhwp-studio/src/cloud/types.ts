@@ -175,6 +175,7 @@ export interface CloudSandboxOutcome {
 
 export interface CloudSnapshot {
   revision: number;
+  profileEpoch: number;
   available: boolean;
   profile: CloudProfileState;
   server: CloudServerState;
@@ -206,6 +207,7 @@ export interface CloudDocumentPayload {
 
 export interface CloudCheckpointPayload extends CloudDocumentPayload {
   sessionId: string;
+  documentId: string | null;
   kind: 'handoff' | 'operation' | 'turn';
   originOnThisDevice?: boolean;
   expectedOriginSha256?: string;

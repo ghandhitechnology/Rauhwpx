@@ -12,6 +12,7 @@ import {
 
 const baseSnapshot = {
   revision: 1,
+  profileEpoch: 1,
   available: true,
   profile: { kind: 'unconfigured' as const },
   server: {
