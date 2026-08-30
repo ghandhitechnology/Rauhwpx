@@ -25,16 +25,27 @@ export const PUBLISH_DOCS = [
 
 const LINK_RE = /\[(?:[^\]]*)\]\(([^)]+)\)/g;
 const TOOL_NAME_RE = /^\s+name: '([a-z0-9_]+)',$/gm;
-export const HARDCODED_TOOL_COUNT_RE =
-  /\b(\d+)\s+MCP tools\b|도구는 정확히 (\d+)개|(\d+)\s*개\s*(?:MCP\s*)?도구/gi;
+const HARDCODED_TOOL_COUNT_PATTERNS = [
+  /\b(\d+)\s+MCP tools\b/gi,
+  /\bMCP tools[:\s]+(\d+)\b/gi,
+  /도구는 정확히 (\d+)개/gi,
+  /(\d+)\s*개\s*(?:MCP\s*)?도구/gi,
+  /MCP 도구 수는\s*(\d+)\s*개/gi,
+];
 
 export function toolNamesFromSource(source) {
   return [...source.matchAll(TOOL_NAME_RE)].map((match) => match[1]);
 }
 
 export function hardcodedMcpCountClaims(markdown) {
-  const re = new RegExp(HARDCODED_TOOL_COUNT_RE.source, HARDCODED_TOOL_COUNT_RE.flags);
-  return [...markdown.matchAll(re)].map((hit) => Number(hit[1] || hit[2] || hit[3]));
+  const claims = [];
+  for (const pattern of HARDCODED_TOOL_COUNT_PATTERNS) {
+    const re = new RegExp(pattern.source, pattern.flags);
+    for (const hit of markdown.matchAll(re)) {
+      claims.push(Number(hit[1]));
+    }
+  }
+  return claims;
 }
 
 export function assertNoHardcodedMcpCount(rel, markdown) {
@@ -55,7 +66,7 @@ export function relativeTargets(markdown) {
 }
 
 export function checkPublishDocs(options = {}) {
-  const root = options.root ?? ROOT;
+  const root = path.resolve(options.root ?? ROOT);
   const readRel = (rel) => readFileSync(path.join(root, rel), 'utf8');
   const failures = [];
 
