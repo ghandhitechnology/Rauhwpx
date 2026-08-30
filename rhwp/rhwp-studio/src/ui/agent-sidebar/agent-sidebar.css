@@ -413,7 +413,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
 }
 
 .ag-header-icon-btn {
@@ -432,10 +432,6 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 
 .ag-header-icon-btn[hidden] {
-  display: none;
-}
-
-.ag-environment-wrap[hidden] {
   display: none;
 }
 
@@ -3663,18 +3659,6 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   transition: border-color 140ms ease, box-shadow 140ms ease;
 }
 
-.ag-composer-target-message {
-  margin: 1px 4px 6px;
-  color: var(--ag-text-secondary);
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1.35;
-}
-
-.ag-composer-target-message[hidden] {
-  display: none;
-}
-
 /* 입력기 위의 진행 정보는 계획/변경 surface의 높이를 만들지 않는다.
    텍스트와 계획 복원 버튼은 한 overlay 행에서 서로의 폭을 예약한다.
    편대 도크가 서 있는 동안에는 --ag-fleet-dock-h 만큼 위로 올라간다. */
@@ -5267,48 +5251,13 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   letter-spacing: -0.01em;
 }
 
-.ag-workspace-mode-switch {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 1px;
-  padding: 2px;
-  border: 1px solid var(--ag-border);
-  border-radius: 7px;
-  background: var(--ag-bg-2);
-}
-
-.ag-workspace-mode-option {
-  min-height: 24px;
-  padding: 0 8px;
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--ag-text-muted);
-  font: inherit;
-  font-size: 10px;
-  font-weight: 650;
-  letter-spacing: -0.01em;
-  cursor: pointer;
-}
-
-.ag-workspace-mode-option:hover {
-  color: var(--ag-text);
-}
-
-.ag-workspace-mode-option[aria-pressed='true'] {
-  background: var(--ag-raised);
-  color: var(--ag-text);
-  box-shadow: 0 1px 2px rgb(0 0 0 / 9%);
-}
-
-.ag-workspace-mode-option:focus-visible {
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 1px;
-}
-
 .ag-workspace-agent-context {
-  display: none;
+  overflow: hidden;
+  max-width: 190px;
+  color: var(--ag-text-muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .ag-workspace-exit-btn {

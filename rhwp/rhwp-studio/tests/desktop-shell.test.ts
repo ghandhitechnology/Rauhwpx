@@ -124,9 +124,6 @@ test('desktop packages register as an HWPX editor with the operating system', ()
   const associations = rootPackage.build.fileAssociations;
   assert.ok(associations.some((association: { ext: string | string[] }) =>
     associationExts(association).includes('hwpx')));
-  const hangulExtensions = associations.flatMap((association: { ext: string | string[] }) =>
-    associationExts(association)).filter((ext: string) => ext !== 'rhwpx');
-  assert.deepEqual(hangulExtensions.sort(), ['hml', 'hwp', 'hwpx']);
   const hangulAssociation = associations.find((association: { name?: string }) =>
     association.name === 'Hangul document');
   assert.equal(associationExts(hangulAssociation ?? {}).includes('rhwpx'), false);
@@ -283,15 +280,16 @@ test('one failed startup launch does not abort the remaining launches', () => {
 });
 
 test('desktop package registers supported document associations without bundling runtime data', () => {
-  const extensions = rootPackage.build.fileAssociations.flatMap(
-    (association: { ext?: string | string[] }) => associationExts(association),
+  const hangulAssociation = rootPackage.build.fileAssociations.find(
+    (association: { name?: string }) => association.name === 'Hangul document',
   );
-  assert.deepEqual(extensions.filter((ext: string) => ext !== 'rhwpx').sort(), ['hml', 'hwp', 'hwpx']);
   const historyAssociation = rootPackage.build.fileAssociations.find(
     (association: { ext?: string | string[] }) => associationExts(association).includes('rhwpx'),
   );
+  assert.deepEqual(hangulAssociation?.ext, ['hwp', 'hwpx', 'hml']);
   assert.deepEqual(historyAssociation?.ext, ['rhwpx']);
   assert.equal(historyAssociation?.name, 'Rauhwpx history bundle');
+  assert.notEqual(historyAssociation?.name, 'Hangul document');
   assert.equal(historyAssociation?.isPackage, true);
   assert.match(desktopMain, /desktop:save-portable-history-file/);
   assert.match(desktopMain, /desktop:native-file-write-portable-history/);

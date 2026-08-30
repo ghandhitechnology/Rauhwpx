@@ -134,8 +134,7 @@ test('past chats on the active file reopen as writable and adopt stable document
   assert.match(source, /threadMatchesDocument\(\s*loaded,\s*currentDocumentId,\s*currentDocKey/);
   assert.match(source, /currentThread\.documentId = currentDocumentId \?\? currentThread\.documentId/);
   assert.match(source, /currentThread\.docKey = currentDocKey \?\? currentThread\.docKey/);
-  assert.match(source, /persistCurrentThread\(\);\s*localThreadId = currentThread\.id;[\s\S]*editorCloudScope\.bind\([\s\S]*const scopeRefresh = cloudUi\.refreshLeaseScope\(\);\s*exitReadOnlyMode\(\);\s*void scopeRefresh\.then/);
-  assert.match(source, /currentThread\.id !== selectedThreadId[\s\S]*if \(liveQuestion\)[\s\S]*composerExecution\(workspace\.composerTarget\(\)\)\.kind === 'local'[\s\S]*startCurrentBridgeChat\(true\)/);
+  assert.match(source, /persistCurrentThread\(\);\s*exitReadOnlyMode\(\);[\s\S]*if \(liveQuestion\)[\s\S]*startCurrentBridgeChat\(true\)/);
   assert.match(source, /const history = serializeThreadMessagesForProviderHistory\(currentThread\.messages\)/);
   assert.match(source, /currentThread\.id, currentThread\.documentId, currentThread\.docKey, history/);
   assert.match(serverSource, /bootstrapHistory: normalizeChatHistory\(requestedHistory\)/);
@@ -152,8 +151,7 @@ test('rapid past-chat switches cannot activate a stale provider session', () => 
 });
 
 test('changing files ends the open chat and starts a fresh chat for the next file', () => {
-  assert.match(documentSwitchSource, /startNewChat\(\{ silent: true, documentSwitch: true \}\)/);
-  assert.match(documentSwitchSource, /if \(workspace\.mode\(\) === 'cloud'\)[\s\S]*localThreadSnapshot = structuredClone\(nextThread\);[\s\S]*editorCloudScope\.bind\([\s\S]*cloudUi\.refreshLeaseScope\(\)/);
+  assert.match(documentSwitchSource, /startNewChat\(\{ silent: true \}\)/);
   assert.match(documentSwitchSource, /rebuildThreadsList\(\);/);
   assert.doesNotMatch(documentSwitchSource, /if \(threadsListVisible\(\)\) rebuildThreadsList/);
   assert.doesNotMatch(documentSwitchSource, /currentThreadMatches/);

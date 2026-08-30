@@ -1,15 +1,7 @@
-desktop/packaged-railway.json
 .worktrees/
 node_modules/
 release/
 build/icon.iconset/
 .DS_Store
 .run/
-cloud/runtime-assets/
-desktop/bin/
-cloud/.linux-target.*/
-.env
-.env.*
-!.env.example
-.rauhwpx-live-*.json
-.rauhwpx-live-*.bin
+

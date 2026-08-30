@@ -1,27 +1,26 @@
-# Depot CI copy of .github/workflows/desktop-sessions.yml.
-# Depot CI sandboxes are Ubuntu only. Keep GitHub-hosted macOS/Windows session
-# jobs in .github/workflows. Linux session tests run here with Chrome and a
-# 90-minute timeout so wasm-pack plus Studio browser merge tests can finish.
-# Linux packaging stays on Depot because electron-builder --linux needs a
-# Linux sandbox; GitHub-hosted Linux session jobs were removed in #122.
+# Depot CI Migration
+# Source: .github/workflows/desktop-sessions.yml
+#
+# 변경 사항:
+# - depot-ubuntu-latest에서 실행. Depot CI에는 macOS/Windows 샌드박스가 없고
+#   ${{ matrix.os }}(macos-15 / windows-latest)는 여기서 스케줄할 수 없습니다.
+# - Studio npm test 전에 고정 WASM 엔진을 빌드해
+#   rhwp/pkg/rhwp.js와 rhwp/pkg/rhwp_bg.wasm이 브라우저 병합 테스트에 있게 합니다.
+# - 해당 테스트를 위해 Google Chrome을 설치하고 PUPPETEER_EXECUTABLE_PATH를 설정합니다.
+# - WASM 컴파일이 들어가도록 제한 시간을 90분으로 올립니다.
 
 name: Desktop session checks
-
 on:
   pull_request:
   push:
     branches:
       - main
       - 'feat/**'
-  workflow_dispatch:
-
 permissions:
   contents: read
-
 concurrency:
   group: desktop-sessions-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
 jobs:
   session-tests:
     name: Session tests (depot-ubuntu-latest)
@@ -30,7 +29,6 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v5
-
       - name: Set up Node.js
         uses: actions/setup-node@v5
         with:
@@ -40,20 +38,16 @@ jobs:
             package-lock.json
             rhwp/rhwp-studio/package-lock.json
             rhwp/rhwp-agent/package-lock.json
-
       - name: Install pinned Rust toolchain for browser merge tests
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.1
           targets: wasm32-unknown-unknown
-
       - name: Install wasm-pack for browser merge tests
         run: cargo install wasm-pack --version 0.15.0 --locked
-
       - name: Build WASM engine for browser merge tests
         working-directory: rhwp
         run: wasm-pack build --target web
-
       - name: Install Google Chrome for browser merge tests
         run: |
           set -euo pipefail
@@ -82,14 +76,12 @@ jobs:
             echo "지원하는 브라우저 실행 파일을 찾지 못했습니다." >&2
             exit 1
           fi
-
       - name: Install dependencies
         shell: bash
         run: |
           npm ci
           npm --prefix rhwp/rhwp-agent ci
           npm --prefix rhwp/rhwp-studio ci
-
       - name: Check desktop and hub syntax
         shell: bash
         run: |
@@ -97,70 +89,7 @@ jobs:
           node --check desktop/agent-hub.mjs
           node --check desktop/session-manager.mjs
           node --check rhwp/rhwp-agent/server.mjs
-
       - name: Test agent hub and process lifecycle
         run: npm --prefix rhwp/rhwp-agent test
-
       - name: Test Studio session persistence and desktop contracts
         run: npm --prefix rhwp/rhwp-studio test
-
-  linux-packaging:
-    name: Linux package (${{ matrix.arch }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: depot-ubuntu-24.04
-            arch: x64
-          - runner: depot-ubuntu-24.04-arm
-            arch: arm64
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
-
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v5
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v5
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            rhwp/rhwp-studio/package-lock.json
-            rhwp/rhwp-agent/package-lock.json
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.93.1
-          targets: wasm32-unknown-unknown
-
-      - name: Install wasm-pack
-        run: cargo install wasm-pack --version 0.15.0 --locked
-
-      - name: Build WASM engine
-        working-directory: rhwp
-        run: wasm-pack build --target web
-
-      - name: Install root dependencies
-        run: npm ci
-
-      - name: Build AppImage and Debian package
-        run: npm run dist:linux:${{ matrix.arch }}
-
-      - name: Verify Linux artifacts
-        env:
-          EXPECTED_ARCH: ${{ matrix.arch }}
-        run: |
-          set -euo pipefail
-          if [ "${EXPECTED_ARCH}" = arm64 ]; then
-            test -f release/Rauhwpx-*-arm64.AppImage
-            test -f release/Rauhwpx-*-arm64.deb
-            test -f release/latest-linux-arm64.yml
-          else
-            test -f release/Rauhwpx-*-x86_64.AppImage
-            test -f release/Rauhwpx-*-amd64.deb
-            test -f release/latest-linux.yml
-          fi

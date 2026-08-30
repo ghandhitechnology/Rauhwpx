@@ -58,7 +58,6 @@ const PENDING_NOTE = 'staged now as live preview; when the turn ends it is auto-
 export const DOCUMENT_WRITE_TOOLS: ReadonlySet<string> = new Set([
   'apply_edits',
   'insert_text',
-  'insert_paragraph_after',
   'delete_range',
   'replace_range',
   'apply_char_format',
@@ -99,7 +98,6 @@ const RAW_ENGINE_WRITE_TOOLS = new Set(['apply_engine_edits', 'prepare_engine_ed
  */
 const BATCHABLE_EDIT_TOOLS: ReadonlySet<string> = new Set([
   'insert_text',
-  'insert_paragraph_after',
   'delete_range',
   'replace_range',
   'apply_char_format',
@@ -454,7 +452,6 @@ export class AgentToolExecutor {
       case 'template_insert_block': return this.templateInsertBlock(args, agent, capability);
       case 'apply_edits': return this.applyEdits(args, agent);
       case 'insert_text': return this.insertText(args, agent);
-      case 'insert_paragraph_after': return this.insertParagraphAfter(args, agent);
       case 'delete_range': return this.deleteRange(args, agent);
       case 'replace_range': return this.replaceRange(args, agent);
       case 'apply_char_format': return this.applyCharFormat(args, agent);
@@ -2255,28 +2252,6 @@ export class AgentToolExecutor {
         endCharOffset: r.insertedRange.endCharOffset,
       },
       postEdit: this.readPostEditDigest(sectionIdx, r.insertedRange.startParaIdx, r.insertedRange.startCharOffset, cell),
-      ...(shift !== 0 ? { rebasedParaShift: shift } : {}),
-      note: PENDING_NOTE,
-    };
-  }
-
-  private insertParagraphAfter(args: Record<string, unknown>, agent: AgentName): unknown {
-    const sectionIdx = reqInt(args, 'sectionIdx');
-    let afterParaIdx = reqInt(args, 'afterParaIdx');
-    const shift = this.requireRevisionRebasable(args, sectionIdx, afterParaIdx, afterParaIdx);
-    afterParaIdx += shift;
-    const text = reqString(args, 'text');
-    if (text.length < 1 || text.length > 10_000 || /[\r\n]/.test(text)) {
-      throw new AgentToolError('INVALID_ARGS', 'text must be one non-empty line of at most 10000 characters');
-    }
-    this.validateAddress(sectionIdx, afterParaIdx, 0);
-    const revBefore = this.revision;
-    const result = this.deps.pending.insertParagraphAfter(agent, sectionIdx, afterParaIdx, text);
-    this.recordJournal(revBefore, sectionIdx, afterParaIdx, afterParaIdx, 1);
-    return {
-      revision: this.revision,
-      changeSetId: result.changeSetId,
-      insertedRange: result.insertedRange,
       ...(shift !== 0 ? { rebasedParaShift: shift } : {}),
       note: PENDING_NOTE,
     };

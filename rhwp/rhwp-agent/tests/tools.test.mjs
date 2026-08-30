@@ -17,8 +17,8 @@ import {
 
 const byName = new Map(TOOL_DEFINITIONS.map((d) => [d.name, d]));
 
-test('도구는 정확히 78개, 이름 중복 없음', () => {
-  assert.equal(TOOL_DEFINITIONS.length, 78);
+test('도구는 정확히 76개, 이름 중복 없음', () => {
+  assert.equal(TOOL_DEFINITIONS.length, 76);
   assert.equal(byName.size, TOOL_DEFINITIONS.length, 'duplicate tool names');
 });
 
@@ -50,14 +50,13 @@ test('document-write annotations stay non-destructive so safe mode can edit', ()
 
 test('도구 프로필은 direct 호환성과 planning/implementing 가시성을 지킨다', () => {
   const direct = new Set(filterToolDefinitions('direct').map((definition) => definition.name));
-  assert.equal(direct.size, 68);
+  assert.equal(direct.size, 66);
   assert.ok(direct.has('read_agent_instructions'));
   assert.ok(direct.has('update_agent_instructions'));
   assert.ok(direct.has('materialize_document_snapshot'));
   assert.ok(direct.has('publish_artifact'));
   assert.ok(direct.has('apply_edits'));
   assert.ok(direct.has('insert_text'));
-  assert.ok(direct.has('insert_paragraph_after'));
   assert.ok(direct.has('get_engine_edit_capabilities'));
   assert.ok(direct.has('apply_engine_edits'));
   assert.ok(direct.has('prepare_engine_edit_session'));
@@ -69,7 +68,6 @@ test('도구 프로필은 direct 호환성과 planning/implementing 가시성을
   assert.ok(direct.has('search_reference_files'));
   assert.ok(direct.has('template_get_structure'));
   assert.ok(direct.has('template_insert_block'));
-  assert.ok(direct.has('environment_screenshot'));
   assert.ok(!direct.has('download_file'));
   assert.ok(!direct.has('present_implementation_plan'));
   assert.ok(direct.has('delegate_copy_layout'));
@@ -80,7 +78,6 @@ test('도구 프로필은 direct 호환성과 planning/implementing 가시성을
   assert.match(byName.get('delegate_copy_layout')?.description ?? '', /hub will start a new owning-chat turn/);
 
   const planning = new Set(filterToolDefinitions('planning').map((definition) => definition.name));
-  assert.equal(planning.size, 44);
   assert.ok(planning.has('get_structure'));
   assert.ok(planning.has('download_file'));
   assert.ok(planning.has('browserbase_act'));
@@ -93,7 +90,6 @@ test('도구 프로필은 direct 호환성과 planning/implementing 가시성을
   assert.ok(!planning.has('insert_text'));
 
   const question = new Set(filterToolDefinitions('question').map((definition) => definition.name));
-  assert.equal(question.size, 43);
   assert.ok(question.has('get_structure'));
   assert.ok(question.has('download_file'));
   assert.ok(question.has('browserbase_act'));
@@ -102,7 +98,6 @@ test('도구 프로필은 direct 호환성과 planning/implementing 가시성을
   assert.ok(!question.has('insert_text'));
 
   const implementing = new Set(filterToolDefinitions('implementing').map((definition) => definition.name));
-  assert.equal(implementing.size, 75);
   assert.equal(implementing.size, TOOL_DEFINITIONS.length - 3);
   assert.ok(implementing.has('insert_text'));
   assert.ok(implementing.has('download_file'));
@@ -110,9 +105,7 @@ test('도구 프로필은 direct 호환성과 planning/implementing 가시성을
   assert.ok(implementing.has('ask_user_question'));
   assert.ok(!implementing.has('present_implementation_plan'));
 
-  const awaitingApproval = filterToolDefinitions('awaiting-approval');
-  assert.equal(awaitingApproval.length, 42);
-  assert.ok(!awaitingApproval.some((definition) => definition.name === 'ask_user_question'));
+  assert.ok(!filterToolDefinitions('awaiting-approval').some((definition) => definition.name === 'ask_user_question'));
 
   const worker = filterToolDefinitions('copy-layout-worker').map((definition) => definition.name);
   assert.deepEqual(worker, [

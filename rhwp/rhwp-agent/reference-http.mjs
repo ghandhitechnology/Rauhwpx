@@ -4,33 +4,9 @@ import { normalizeReferenceScope } from './reference-store.mjs';
 
 export const PACKAGED_STUDIO_ORIGIN = 'rauhwpx://app';
 const LOCAL_STUDIO_ORIGIN = /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?$/i;
-const CONFIGURED_STUDIO_ORIGINS = configuredStudioOrigins(process.env.RHWP_STUDIO_ORIGINS);
 
-/**
- * Parse an operator-owned, comma-separated allowlist of exact HTTPS origins.
- * This is intentionally stricter than a hostname suffix match: Tailscale and
- * other remote previews must opt in to the one Studio origin they expose.
- */
-export function configuredStudioOrigins(value) {
-  const origins = new Set();
-  for (const candidate of String(value ?? '').split(',')) {
-    const raw = candidate.trim();
-    if (!raw) continue;
-    try {
-      const url = new URL(raw);
-      if (url.protocol !== 'https:' || url.username || url.password
-        || url.pathname !== '/' || url.search || url.hash) continue;
-      origins.add(url.origin);
-    } catch {}
-  }
-  return origins;
-}
-
-export function isAllowedStudioOrigin(origin, configured = CONFIGURED_STUDIO_ORIGINS) {
-  const normalized = String(origin ?? '');
-  return normalized === PACKAGED_STUDIO_ORIGIN
-    || LOCAL_STUDIO_ORIGIN.test(normalized)
-    || configured.has(normalized);
+export function isAllowedStudioOrigin(origin) {
+  return origin === PACKAGED_STUDIO_ORIGIN || LOCAL_STUDIO_ORIGIN.test(String(origin ?? ''));
 }
 
 function sendJson(res, status, body, origin = null) {
@@ -91,22 +67,7 @@ function errorStatus(error) {
     case 'REFERENCE_EXTRACTION_TIMEOUT': return 504;
     case 'REFERENCE_EXTRACTOR_UNAVAILABLE': return 503;
     case 'REFERENCE_STORE_CORRUPT': return 500;
-    // Known validation faults are client errors; anything unexpected (missing
-    // store artifacts, allocation conflicts, disk faults) is a server fault
-    // and must not read as a 400.
-    case 'REFERENCE_ID_INVALID':
-    case 'REFERENCE_NAME_INVALID':
-    case 'REFERENCE_SCOPE_ID_INVALID':
-    case 'REFERENCE_SCOPE_ID_REQUIRED':
-    case 'REFERENCE_SCOPE_INVALID':
-    case 'REFERENCE_QUERY_REQUIRED':
-    case 'REFERENCE_TYPE_REQUIRED':
-    case 'REFERENCE_FILE_EMPTY':
-    case 'REFERENCE_EMPTY_TEXT':
-    case 'REFERENCE_SIZE_MISMATCH': return 400;
-    case 'REFERENCE_NOT_TEXT':
-    case 'REFERENCE_NOT_IMAGE': return 415;
-    default: return 500;
+    default: return 400;
   }
 }
 
@@ -218,36 +179,6 @@ export function createReferenceHttpHandler({ store, tokens, allowedScopes }) {
         const scopes = [resolvedScope];
         const results = store.search({ query, scopes, maxResults });
         sendJson(res, 200, { status: 'ready', query, results }, origin);
-        return true;
-      }
-      if (req.method === 'GET' && url.pathname.startsWith('/reference-files/')) {
-        const fileId = decodeURIComponent(url.pathname.slice('/reference-files/'.length));
-        if (!fileId || fileId.length > 128 || /[\u0000-\u001f\u007f/]/.test(fileId)) {
-          const error = new Error('Invalid reference file id');
-          error.code = 'REFERENCE_ID_INVALID';
-          throw error;
-        }
-        const file = await store.readFile({
-          fileId,
-          scope: resolvedScope.scope,
-          scopeId: resolvedScope.scopeId,
-        });
-        const encodedName = encodeURIComponent(file.name);
-        const asciiName = file.name.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
-        res.writeHead(200, {
-          'content-type': file.mimeType,
-          'content-length': String(file.bytes.length),
-          'content-disposition': `attachment; filename="${asciiName}"; filename*=UTF-8''${encodedName}`,
-          'cache-control': 'no-store, private',
-          'x-content-type-options': 'nosniff',
-          'x-content-sha256': file.sha256,
-          ...(origin ? {
-            'access-control-allow-origin': origin,
-            'access-control-expose-headers': 'Content-Disposition, Content-Length, X-Content-SHA256',
-            vary: 'Origin',
-          } : {}),
-        });
-        res.end(file.bytes);
         return true;
       }
       if (req.method === 'DELETE' && url.pathname.startsWith('/reference-files/')) {

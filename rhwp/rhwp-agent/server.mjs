@@ -25,7 +25,6 @@ import { AgentInstructionsStore } from './agent-instructions.mjs';
 import { calibrateWritingStyle } from './style-calibrator.mjs';
 import { buildWritingStyleCatalog, resolveWritingStyleSelection } from './writing-style-catalog.mjs';
 import { filterToolDefinitions, TOOL_DEFINITIONS } from './tools.mjs';
-import { takeEnvironmentScreenshot } from './environment-screenshot.mjs';
 import { replayMissedTurnEnd } from './turn-outcome-replay.mjs';
 import {
   PlanningState,
@@ -3467,12 +3466,6 @@ function handleMcpMessage(record, sock, msg) {
         void record.downloadManager.download({ sessionId: record.agentSession.chatId, ...args })
           .then(sendResult)
           .catch((error) => sendError(error, 'DOWNLOAD_FAILED'));
-        return;
-      }
-      if (tool === 'environment_screenshot') {
-        void takeEnvironmentScreenshot({ workDir: record.workDir })
-          .then((result) => sendResult(result))
-          .catch((error) => sendError(error, error?.code || 'SCREENSHOT_FAILED'));
         return;
       }
       if (tool === 'publish_artifact') {

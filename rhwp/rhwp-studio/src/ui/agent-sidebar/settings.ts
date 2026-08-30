@@ -1,4 +1,4 @@
-/** 설정 허브의 탐색과 AI·연결 목적지를 소유한다. Cloud 카드는 연결 목적지에 둔다. */
+/** 설정 허브의 탐색과 AI·연결 목적지를 소유한다. 편집 설정은 전용 모듈이 맡는다. */
 import './settings.css';
 
 import {
@@ -325,8 +325,6 @@ export interface SettingsPanelDeps {
   openCalibration: () => void;
   /** 현재 대화의 CLI 세션을 다시 시작한다. */
   reconnectSession: () => void;
-  cloudSettings?: HTMLElement;
-  refreshCloudSettings?: () => void;
 }
 
 export interface SettingsPanel {
@@ -355,8 +353,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     applyDefaults,
     openCalibration,
     reconnectSession,
-    cloudSettings,
-    refreshCloudSettings,
   } = deps;
 
   let disposed = false;
@@ -1290,7 +1286,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   panes.get('ai')?.appendChild(aiContent);
 
   const connectionContent = el('div', 'ag-settings-destination-content');
-  connectionContent.append(connection.root, ...(cloudSettings ? [cloudSettings] : []), usageSection.root);
+  connectionContent.append(connection.root, usageSection.root);
   panes.get('connections')?.appendChild(connectionContent);
 
   aiApply.addEventListener('click', () => void applyAiDraft());
@@ -3020,7 +3016,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       void refreshPiStatus();
       void refreshSetupStatuses();
       void refreshTemplates();
-      refreshCloudSettings?.();
     },
     close(): void {
       if (editingSettings.isDirty()) editingSettings.cancel();
