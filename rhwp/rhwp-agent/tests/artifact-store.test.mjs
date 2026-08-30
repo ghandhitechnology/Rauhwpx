@@ -7,10 +7,45 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 import { ArtifactStore, validateHwpxPackage } from '../artifact-store.mjs';
+import { requireCapabilityResource } from '../hub-session-registry.mjs';
 
 const CFB = await fs.readFile(new URL('../../saved/blank2010.hwp', import.meta.url));
 const BLANK_HWPX = fileURLToPath(new URL('../../saved/blank_hwpx.hwpx', import.meta.url));
 const COPY_LAYOUT = fileURLToPath(new URL('../skills/copy-layout/scripts/copy_layout.py', import.meta.url));
+
+async function createFakeRhwp(root) {
+  await fs.writeFile(
+    path.join(root, 'info'),
+    `process.stdout.write(JSON.stringify({ pageCount: 1, sections: 1 }));\n`,
+  );
+  await fs.writeFile(
+    path.join(root, 'export-svg'),
+    `const fs = require('node:fs');
+const path = require('node:path');
+const arguments = process.argv.slice(2);
+const outputIndex = arguments.indexOf('--output');
+const pageIndex = arguments.indexOf('--page');
+if (outputIndex < 0 || pageIndex < 0 || !arguments[outputIndex + 1] || !arguments[pageIndex + 1]) {
+  process.stderr.write('invalid export-svg arguments\\n');
+  process.exit(2);
+}
+const output = arguments[outputIndex + 1];
+const page = Number.parseInt(arguments[pageIndex + 1], 10);
+if (!Number.isSafeInteger(page) || page < 0) {
+  process.stderr.write('invalid export-svg page\\n');
+  process.exit(2);
+}
+fs.writeFileSync(
+  path.join(output, \`page-\${page}.svg\`),
+  '<svg width="612" height="792" xmlns="http://www.w3.org/2000/svg">' +
+    '<rect width="612" height="792" fill="white"/></svg>',
+  'utf8',
+);
+process.stdout.write(JSON.stringify({ pages: [page] }));
+`,
+  );
+  return process.execPath;
+}
 
 async function fixture(t) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-artifact-store-'));
@@ -54,6 +89,25 @@ test('publishes and rereads a generated HWP inside the chat workspace', async (t
   assert.equal(published.fileName, '보고서 - Layout.hwp');
   assert.match(published.checksum, /^sha256:[0-9a-f]{64}$/);
   assert.deepEqual((await store.read(published.artifactId)).bytes, CFB);
+});
+
+test('generated artifact ids are valid scoped-capability resources', async (t) => {
+  const { root } = await fixture(t);
+  const filePath = path.join(root, 'report.hwp');
+  await fs.writeFile(filePath, CFB);
+
+  const generated = await new ArtifactStore({ rootDir: root }).publish({ filePath });
+  assert.match(generated.artifactId, /^artifact_[A-Za-z0-9_-]{32}$/);
+  assert.equal(requireCapabilityResource(generated.artifactId), generated.artifactId);
+
+  const invalid = new ArtifactStore({
+    rootDir: root,
+    createId: () => '_artifact_token_1234567890',
+  });
+  await assert.rejects(
+    invalid.publish({ filePath }),
+    (error) => error.code === 'ARTIFACT_ID_INVALID',
+  );
 });
 
 test('publishes hub-private snapshot inputs without trusting adjacent private paths', async (t) => {
@@ -219,7 +273,12 @@ test('publishes copy-layout HWPX output without agent-side package repair', asyn
   const { root, store } = await fixture(t);
   const output = path.join(root, 'layout', 'blank - Layout.hwpx');
   const python = process.platform === 'win32' ? 'python' : 'python3';
-  const result = spawnSync(python, ['-S', COPY_LAYOUT, BLANK_HWPX, '-o', output], { encoding: 'utf8' });
+  const fakeRhwp = await createFakeRhwp(root);
+  const result = spawnSync(
+    python,
+    ['-S', COPY_LAYOUT, BLANK_HWPX, '-o', output, '--rhwp-bin', fakeRhwp],
+    { cwd: root, encoding: 'utf8' },
+  );
   if (result.error?.code === 'ENOENT') {
     t.skip('Python is unavailable');
     return;
@@ -231,6 +290,10 @@ test('publishes copy-layout HWPX output without agent-side package repair', asyn
     'Preview/PrvImage.png',
     'Preview/PrvText.txt',
   ]);
+  assert.equal(report.candidate_evidence.render_compared, true);
+  assert.deepEqual(report.candidate_evidence.representative_pages, [0]);
+  assert.equal(report.candidate_evidence.source_renders.length, 1);
+  assert.equal(report.candidate_evidence.output_renders.length, 1);
 
   const published = await store.publish({ filePath: output });
   assert.equal(published.fileName, 'blank - Layout.hwpx');

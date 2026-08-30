@@ -401,7 +401,18 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
     args: { filePath: materialized.path, fileName: '보고서(팀) - Layout.hwp' },
     workflow: 'direct', capabilityEpoch: alphaSession.capabilityEpoch,
   });
-  const published = (await publishResult).result;
+  const publishFrame = await publishResult;
+  assert.equal(
+    publishFrame.error,
+    undefined,
+    `publish_artifact failed: ${JSON.stringify(publishFrame.error)}`,
+  );
+  assert.equal(
+    publishFrame.ok,
+    true,
+    `publish_artifact returned an invalid frame: ${JSON.stringify(publishFrame)}`,
+  );
+  const published = publishFrame.result;
   assert.equal(published.fileName, '보고서(팀) - Layout.hwp');
   assert.match(published.downloadUrl, /%28%ED%8C%80%29/);
   assert.doesNotMatch(new URL(published.downloadUrl).pathname, /[()]/);

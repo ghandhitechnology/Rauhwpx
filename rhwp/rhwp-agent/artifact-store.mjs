@@ -326,7 +326,7 @@ export class ArtifactStore {
     rootDir,
     trustedReadRoots = [],
     maxBytes = DEFAULT_MAX_BYTES,
-    createId = () => crypto.randomBytes(24).toString('base64url'),
+    createId = () => `artifact_${crypto.randomBytes(24).toString('base64url')}`,
     readExactFileImpl = readExactFile,
   } = {}) {
     if (!rootDir) throw new Error('ArtifactStore requires rootDir');
@@ -429,7 +429,7 @@ export class ArtifactStore {
     return this.runWithInspectionMemory(async () => {
       const inspected = await this.inspectFileUnchecked(filePath, fileName);
       const artifactId = String(this.createId());
-      if (!/^[A-Za-z0-9_-]{16,128}$/.test(artifactId)) {
+      if (!/^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/.test(artifactId)) {
         throw artifactError('ARTIFACT_ID_INVALID', 'Artifact id generator returned an invalid id');
       }
       if (this.records.has(artifactId)) {
