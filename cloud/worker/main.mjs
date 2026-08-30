@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createSessionDisplay } from '../document-runtime/session-display.mjs';
+import { createSessionFramePublisher } from '../document-runtime/session-frame-publisher.mjs';
 import { WorkerClient } from './client.mjs';
 
 process.umask(0o077);
@@ -65,6 +66,12 @@ try {
     },
   });
   await sessionDisplay.start();
+  const sessionFramePublisher = createSessionFramePublisher({
+    client,
+    sessionDisplay,
+    onEvent: (event) => client.event(event.type, event).catch(() => {}),
+  });
+  await sessionFramePublisher.start();
   try {
     const runtimePath = process.env.RAUHWpx_DOCUMENT_RUNTIME || '/app/document-runtime/run.mjs';
     const runtime = await import(pathToFileURL(runtimePath).href);
@@ -86,6 +93,7 @@ try {
       await client.publishResult(result);
     }
   } finally {
+    await sessionFramePublisher.stop().catch(() => {});
     await sessionDisplay.stop().catch(() => {});
   }
 } catch (error) {

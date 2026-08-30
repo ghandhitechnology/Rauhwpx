@@ -5,6 +5,8 @@ import path from 'node:path';
 import { CloudError } from './protocol.mjs';
 
 const STOP_GRACE_MS = 5_000;
+const GROUP_POLL_MS = 25;
+const GROUP_KILL_WAIT_MS = 1_000;
 
 /** 워커가 이미지에서 받아야 하는 실행 경로. 값은 비밀이 아니고 경로뿐이다. */
 const WORKER_RUNTIME_ENV = Object.freeze([
@@ -59,6 +61,51 @@ async function chownTree(root, uid, gid) {
     if (entry.isDirectory() && !entry.isSymbolicLink()) await chownTree(target, uid, gid);
     else await fs.lchown(target, uid, gid);
   }
+}
+
+function processGroupExists(groupId) {
+  try {
+    process.kill(-groupId, 0);
+    return true;
+  } catch (error) {
+    if (error.code === 'ESRCH') return false;
+    if (error.code === 'EPERM') return true;
+    throw error;
+  }
+}
+
+function signalProcessGroup(groupId, signal) {
+  try {
+    process.kill(-groupId, signal);
+    return true;
+  } catch (error) {
+    if (error.code === 'ESRCH') return false;
+    throw error;
+  }
+}
+
+async function waitForProcessGroupExit(groupId, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (processGroupExists(groupId)) {
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, GROUP_POLL_MS));
+  }
+  return true;
+}
+
+async function terminateProcessGroup(entry, { fallbackToChild = false } = {}) {
+  if (entry.groupTermination) return entry.groupTermination;
+  entry.groupTermination = (async () => {
+    const signaled = signalProcessGroup(entry.groupId, 'SIGTERM');
+    if (!signaled) {
+      if (fallbackToChild && entry.running) entry.child.kill('SIGTERM');
+      return;
+    }
+    if (await waitForProcessGroupExit(entry.groupId, STOP_GRACE_MS)) return;
+    signalProcessGroup(entry.groupId, 'SIGKILL');
+    await waitForProcessGroupExit(entry.groupId, GROUP_KILL_WAIT_MS);
+  })();
+  return entry.groupTermination;
 }
 
 /**
@@ -128,7 +175,19 @@ export class LocalRunner {
         RAUHWpx_PROVIDER_AUTH: providerAuth,
       }),
     });
-    const entry = { sessionId: session.id, child, workspace, temporaryDirectory, running: true };
+    let resolveExit;
+    const entry = {
+      sessionId: session.id,
+      child,
+      groupId: child.pid,
+      workspace,
+      temporaryDirectory,
+      running: true,
+      stopping: false,
+      cleanup: null,
+      groupTermination: null,
+      exited: new Promise((resolve) => { resolveExit = resolve; }),
+    };
     this.children.set(sandboxId, entry);
     // stderr is the worker's only diagnostics channel; an unread pipe fills
     // up and blocks the worker, so keep a bounded tail and log it on exit.
@@ -141,12 +200,9 @@ export class LocalRunner {
     }
     const exited = (code) => {
       entry.running = false;
-      if (this.children.get(sandboxId) === entry) {
-        this.children.delete(sandboxId);
-        void Promise.allSettled([
-          fs.rm(workspace, { recursive: true, force: true }),
-          fs.rm(temporaryDirectory, { recursive: true, force: true }),
-        ]);
+      resolveExit();
+      if (!entry.stopping && this.children.get(sandboxId) === entry) {
+        void this.#cleanupEntry(sandboxId, entry, { terminate: true });
       }
       if (code) this.onWorkerExit?.(sandboxId, session.id, code, stderrTail.trim());
     };
@@ -178,21 +234,22 @@ export class LocalRunner {
     if (!sandboxId) return;
     const entry = this.children.get(sandboxId);
     if (!entry) return;
-    this.children.delete(sandboxId);
-    if (entry.running) {
-      const exited = new Promise((resolve) => entry.child.once('exit', resolve));
-      try { process.kill(-entry.child.pid, 'SIGTERM'); } catch { entry.child.kill('SIGTERM'); }
-      const timer = setTimeout(() => {
-        try { process.kill(-entry.child.pid, 'SIGKILL'); } catch { entry.child.kill('SIGKILL'); }
-      }, STOP_GRACE_MS);
-      timer.unref();
-      await exited;
-      clearTimeout(timer);
-    }
-    entry.running = false;
-    await Promise.allSettled([
-      fs.rm(entry.workspace, { recursive: true, force: true }),
-      fs.rm(entry.temporaryDirectory, { recursive: true, force: true }),
-    ]);
+    entry.stopping = true;
+    await this.#cleanupEntry(sandboxId, entry, { terminate: entry.running, fallbackToChild: true });
+  }
+
+  #cleanupEntry(sandboxId, entry, { terminate = false, fallbackToChild = false } = {}) {
+    if (entry.cleanup) return entry.cleanup;
+    entry.cleanup = (async () => {
+      if (terminate) await terminateProcessGroup(entry, { fallbackToChild });
+      if (entry.running) await entry.exited;
+      entry.running = false;
+      if (this.children.get(sandboxId) === entry) this.children.delete(sandboxId);
+      await Promise.allSettled([
+        fs.rm(entry.workspace, { recursive: true, force: true }),
+        fs.rm(entry.temporaryDirectory, { recursive: true, force: true }),
+      ]);
+    })();
+    return entry.cleanup;
   }
 }

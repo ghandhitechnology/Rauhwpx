@@ -4,6 +4,7 @@ import http from 'node:http';
 import { AuthService } from './auth.mjs';
 import { BlobStore } from './blob-store.mjs';
 import { openDatabase } from './database.mjs';
+import { DisplayFrameStore } from './display-frame-store.mjs';
 import { createCloudHttpHandler } from './http-server.mjs';
 import { loadOrCreateServerIdentity } from './identity.mjs';
 import { LocalRunner } from './local-runner.mjs';
@@ -41,9 +42,13 @@ export function createCloudRuntime(config, dependencies = {}) {
     retrySecret: identity.privateKey,
     bootstrapToken: config.bootstrapToken,
   });
+  const displayFrameStore = dependencies.displayFrameStore ?? new DisplayFrameStore({
+    maxSessions: config.maxRunningSessions,
+  });
   const sessionStore = dependencies.sessionStore ?? new SessionStore(database, blobStore, {
     maxQueuedSessions: config.maxQueuedSessions,
   });
+  sessionStore.setRuntimeInvalidationHandler?.((sessionId) => displayFrameStore.closeSession(sessionId));
   const logger = dependencies.logger ?? new RedactedLogger(database);
   const vault = dependencies.vault ?? new SecretVault(database, { dataDirectory: config.dataDirectory });
   const providerManager = dependencies.providerManager ?? new ProviderManager(sessionStore, {
@@ -76,6 +81,7 @@ export function createCloudRuntime(config, dependencies = {}) {
   const services = {
     auth,
     blobStore,
+    displayFrameStore,
     sessionStore,
     identity,
     config,
@@ -103,6 +109,7 @@ export function createCloudRuntime(config, dependencies = {}) {
     identity,
     auth,
     blobStore,
+    displayFrameStore,
     sessionStore,
     logger,
     providerManager,
@@ -144,6 +151,7 @@ export function createCloudRuntime(config, dependencies = {}) {
           serverPublicKey: identity.serverPublicKey,
         };
       } catch (error) {
+        displayFrameStore.closeAll();
         await Promise.allSettled([
           ...(publicServer.listening ? [close(publicServer)] : []),
           ...(workerServer.listening ? [close(workerServer)] : []),
@@ -157,6 +165,7 @@ export function createCloudRuntime(config, dependencies = {}) {
       // Kill every worker before the control socket disappears so detached
       // workers cannot survive a restart and double-execute their session.
       await runner.stopAll?.();
+      displayFrameStore.closeAll();
       await Promise.allSettled([close(publicServer), close(workerServer)]);
       if (config.workerControlMode === 'socket' && existsSync(config.workerControlSocket)) unlinkSync(config.workerControlSocket);
       database.close();

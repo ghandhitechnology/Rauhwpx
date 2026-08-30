@@ -208,3 +208,15 @@ test('worker image packages the real Studio, agent hub, Chromium, and locked run
   const releaseSyntax = spawnSync('/bin/bash', ['-n', path.join(root, 'install/package-release.sh')], { encoding: 'utf8' });
   assert.equal(releaseSyntax.status, 0, releaseSyntax.stderr);
 });
+
+test('worker runtime images pin ffmpeg, probe x11grab, and expose no display port', async () => {
+  for (const filename of ['Containerfile.worker', 'Containerfile.sandbox']) {
+    const containerfile = await fs.readFile(path.join(root, 'install', filename), 'utf8');
+    assert.match(containerfile, /ARG FFMPEG_VERSION=\S+/, filename);
+    assert.match(containerfile, /ffmpeg="\$FFMPEG_VERSION"/, filename);
+    assert.match(containerfile, /ffmpeg -hide_banner -devices 2>&1 \| grep -q 'x11grab'/, filename);
+    assert.doesNotMatch(containerfile, /EXPOSE\s+(?:59\d\d|60\d\d|3389)\b/, filename);
+  }
+  const publisher = await fs.readFile(path.join(root, 'document-runtime/session-frame-publisher.mjs'), 'utf8');
+  assert.doesNotMatch(publisher, /\.\.\/src\//, 'dedicated worker image does not package control-plane src');
+});

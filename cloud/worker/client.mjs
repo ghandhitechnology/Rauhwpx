@@ -7,7 +7,12 @@ import { setTimeout as delay } from 'node:timers/promises';
 const DEFAULT_TIMEOUT_MS = 120_000;
 const UPLOAD_RETRY_ATTEMPTS = 5;
 
-function request(target, token, method, pathname, { body, headers = {}, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+function request(target, token, method, pathname, {
+  body,
+  headers = {},
+  timeoutMs = DEFAULT_TIMEOUT_MS,
+  signal,
+} = {}) {
   return new Promise((resolve, reject) => {
     const bytes = body === undefined ? null : Buffer.isBuffer(body) ? body : Buffer.from(JSON.stringify(body));
     const requestHandle = http.request({
@@ -17,6 +22,7 @@ function request(target, token, method, pathname, { body, headers = {}, timeoutM
       }),
       method,
       path: pathname,
+      signal,
       headers: {
         Authorization: `Bearer ${token}`,
         ...(bytes ? { 'Content-Length': bytes.length } : {}),
@@ -81,8 +87,8 @@ export class WorkerClient {
     this.prefix = `/v1/internal/worker/${encodeURIComponent(sessionId)}`;
   }
 
-  async json(method, action, body) {
-    return responseJson(await request(this.target, this.token, method, `${this.prefix}${action}`, { body }));
+  async json(method, action, body, options = {}) {
+    return responseJson(await request(this.target, this.token, method, `${this.prefix}${action}`, { body, ...options }));
   }
 
   async retryJson(method, action, body, { attempts = UPLOAD_RETRY_ATTEMPTS } = {}) {
@@ -116,6 +122,40 @@ export class WorkerClient {
   finishClaim() { return this.json('POST', '/finish-claim', {}); }
   takeoverAck() { return this.json('POST', '/takeover-ack', {}); }
   suspend(code, message) { return this.json('POST', '/suspend', { code, message }); }
+
+  openFrameStream({ width, height, signal }) {
+    return this.json('POST', '/display/streams', { width, height }, { signal });
+  }
+
+  frameDemand(streamId, { after = 0, signal } = {}) {
+    return this.json(
+      'GET',
+      `/display/streams/${encodeURIComponent(streamId)}/demand?after=${encodeURIComponent(after)}`,
+      undefined,
+      { signal, timeoutMs: 30_000 },
+    );
+  }
+
+  async publishFrame(streamId, { sequence, capturedAt, bytes, signal }) {
+    return responseJson(await request(
+      this.target,
+      this.token,
+      'POST',
+      `${this.prefix}/display/streams/${encodeURIComponent(streamId)}/frames/${encodeURIComponent(sequence)}`,
+      {
+        body: bytes,
+        headers: {
+          'Content-Type': 'image/jpeg',
+          'X-Rauhwpx-Frame-Captured-At': capturedAt,
+        },
+        signal,
+      },
+    ));
+  }
+
+  closeFrameStream(streamId) {
+    return this.json('DELETE', `/display/streams/${encodeURIComponent(streamId)}`);
+  }
 
   async download(blobId, destination) {
     const response = await request(this.target, this.token, 'GET', `${this.prefix}/blobs/${blobId}`);

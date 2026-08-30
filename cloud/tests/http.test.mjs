@@ -15,6 +15,7 @@ import test from 'node:test';
 import { AuthService } from '../src/auth.mjs';
 import { BlobStore } from '../src/blob-store.mjs';
 import { openDatabase } from '../src/database.mjs';
+import { DisplayFrameStore, MAX_DISPLAY_FRAME_BYTES } from '../src/display-frame-store.mjs';
 import { createCloudHttpHandler } from '../src/http-server.mjs';
 import { applyProviderAuth, parseProviderAuth } from '../src/provider-auth.mjs';
 import { SessionStore } from '../src/session-store.mjs';
@@ -65,13 +66,21 @@ async function assertResponseProof(response, identity, { nonce, method = 'GET', 
 }
 
 async function fixture(t, {
-  workerOnly = false, withProviderAuth = false, seedProvider, browserOrigins = [],
+  workerOnly = false,
+  withProviderAuth = false,
+  withWorkerControl = false,
+  displayFrames = true,
+  seedProvider,
+  browserOrigins = [],
 } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-cloud-http-'));
   const database = openDatabase(path.join(root, 'cloud.sqlite3'));
   const blobStore = new BlobStore(database, { root: path.join(root, 'objects'), chunkBytes: 8 });
   const auth = new AuthService(database);
-  const sessionStore = new SessionStore(database, blobStore);
+  const displayFrameStore = displayFrames ? new DisplayFrameStore() : null;
+  const sessionStore = new SessionStore(database, blobStore, {
+    onRuntimeInvalidated: (sessionId) => displayFrameStore?.closeSession(sessionId),
+  });
   const identity = testIdentity();
   const config = {
     basePath: '/rauhwpx-cloud', maxRunningSessions: 2, maxQueuedSessions: 20, browserOrigins,
@@ -92,21 +101,43 @@ async function fixture(t, {
       };
     }
     : null;
-  const server = http.createServer(createCloudHttpHandler({
+  const services = {
     auth, blobStore, sessionStore, identity, config, logger, vault,
+    displayFrameStore,
     applyProviderAuth: apply,
     seedProvider,
-  }, { workerOnly }));
+  };
+  const server = http.createServer(createCloudHttpHandler(services, { workerOnly }));
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
   const base = `http://127.0.0.1:${address.port}`;
+  const workerServer = withWorkerControl
+    ? http.createServer(createCloudHttpHandler(services, { workerOnly: true }))
+    : null;
+  if (workerServer) await new Promise((resolve) => workerServer.listen(0, '127.0.0.1', resolve));
+  const workerBase = workerServer ? `http://127.0.0.1:${workerServer.address().port}` : null;
   t.after(async () => {
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
+    if (workerServer) {
+      workerServer.closeAllConnections();
+      await new Promise((resolve) => workerServer.close(resolve));
+    }
+    displayFrameStore?.closeAll();
     database.close();
     await fs.rm(root, { recursive: true, force: true });
   });
-  return { base, database, blobStore, auth, sessionStore, identity, root };
+  return {
+    base,
+    workerBase,
+    database,
+    blobStore,
+    displayFrameStore,
+    auth,
+    sessionStore,
+    identity,
+    root,
+  };
 }
 
 test('configured PWA origins receive narrow CORS headers and unlisted origins fail preflight', async (t) => {
@@ -546,6 +577,346 @@ test('worker API accepts only the session worker token', async (t) => {
   assert.equal(takeover.takeover.status, 'ready');
   assert.equal(takeover.takeover.boundary.checkpoint.blobId, checkpoint.id);
   assert.equal(takeover.takeover.boundary.timeline.blobId, timeline.id);
+});
+
+test('an authenticated worker frame reaches paired devices with signed transient responses', async (t) => {
+  const {
+    base,
+    workerBase,
+    auth,
+    displayFrameStore,
+    sessionStore,
+    identity,
+    database,
+  } = await fixture(t, { withWorkerControl: true });
+  const origin = await pairOverHttp(auth, base);
+  const second = auth.redeemPairingCode({
+    code: auth.createPairingCode().code,
+    deviceName: 'Viewer',
+  });
+  sessionStore.setProviderStatus('codex', { available: true, version: 'codex 1' });
+  const sourceBytes = Buffer.from('display source');
+  const document = await uploadOverHttp(base, origin.accessToken, sourceBytes, {
+    name: 'display.hwpx', kind: 'document',
+  });
+  const created = sessionStore.createSession(origin.device, {
+    sessionId: 'session_display_http_01',
+    provider: 'codex',
+    goal: 'Show the display',
+    originDocument: { blobId: document.id, size: document.size, name: 'display.hwpx' },
+    resources: [],
+    timeline: null,
+    limits: { maxDurationSeconds: 3600, maxTurns: 10 },
+  });
+  sessionStore.createSession(origin.device, {
+    sessionId: 'session_display_other_01',
+    provider: 'codex',
+    goal: 'Other session',
+    originDocument: { blobId: document.id, size: document.size, name: 'display.hwpx' },
+    resources: [],
+    timeline: null,
+    limits: { maxDurationSeconds: 3600, maxTurns: 10 },
+  });
+  sessionStore.executeCommand(origin.device, created.id, {
+    commandId: 'activate_display_http_01',
+    type: 'session.activate',
+    payload: { expectedVersion: created.stateVersion },
+  });
+  sessionStore.claimNextSession();
+  sessionStore.prepareWorker(created.id, 'ra_wt_display_one');
+
+  const deniedWorker = new WorkerClient({
+    baseUrl: workerBase,
+    token: 'wrong-worker-token',
+    sessionId: created.id,
+  });
+  await assert.rejects(
+    deniedWorker.openFrameStream({ width: 1280, height: 800 }),
+    (error) => error.status === 401 && error.code === 'WORKER_UNAUTHORIZED',
+  );
+
+  const unavailableNonce = proofNonce();
+  const unavailable = await publicFetch(`${base}/v1/sessions/${created.id}/display`, {
+    headers: { Authorization: `Bearer ${second.accessToken}` },
+    proofNonce: unavailableNonce,
+  });
+  assert.equal(unavailable.status, 200);
+  assert.equal(unavailable.headers.get('cache-control'), 'no-store');
+  assert.equal((await unavailable.clone().json()).reason, 'stream-unavailable');
+  await assertResponseProof(unavailable, identity, {
+    nonce: unavailableNonce,
+    pathAndQuery: `/rauhwpx-cloud/v1/sessions/${created.id}/display`,
+  });
+
+  const worker = new WorkerClient({
+    baseUrl: workerBase,
+    token: 'ra_wt_display_one',
+    sessionId: created.id,
+  });
+  const capability = await worker.openFrameStream({ width: 1280, height: 800 });
+  assert.deepEqual(capability, {
+    kind: 'available',
+    protocol: 'rauhwpx-frame-v1',
+    sessionId: created.id,
+    streamId: capability.streamId,
+    width: 1280,
+    height: 800,
+    maxFrameBytes: 524288,
+    maxFps: 2,
+  });
+  const capabilityNonce = proofNonce();
+  const publicCapability = await publicFetch(`${base}/v1/sessions/${created.id}/display`, {
+    headers: { Authorization: `Bearer ${second.accessToken}` },
+    proofNonce: capabilityNonce,
+  });
+  assert.deepEqual(await publicCapability.clone().json(), capability);
+  await assertResponseProof(publicCapability, identity, {
+    nonce: capabilityNonce,
+    pathAndQuery: `/rauhwpx-cloud/v1/sessions/${created.id}/display`,
+  });
+
+  const durableEventCount = database.prepare(
+    'SELECT COUNT(*) AS count FROM session_events WHERE session_id = ?',
+  ).get(created.id).count;
+  const demand = worker.frameDemand(capability.streamId, { after: 1 });
+  for (let attempt = 0; attempt < 100 && displayFrameStore.snapshot().streams[0].waiters === 0; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(displayFrameStore.snapshot().streams[0].waiters, 1);
+  const interest = await publicFetch(`${base}/v1/sessions/${created.id}/display/interest`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${second.accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ streamId: capability.streamId, active: true }),
+  });
+  assert.equal(interest.status, 200);
+  assert.equal((await interest.json()).maxFps, 2);
+  assert.equal(database.prepare(`SELECT COUNT(*) AS count FROM session_presence WHERE session_id = ?`).get(created.id).count, 0);
+  assert.equal((await demand).interested, true);
+
+  const frameBytes = Buffer.concat([
+    Buffer.from([0xff, 0xd8]),
+    Buffer.from('paired-device-jpeg'),
+    Buffer.from([0xff, 0xd9]),
+  ]);
+  const metadata = await worker.publishFrame(capability.streamId, {
+    sequence: 1,
+    capturedAt: '2026-08-30T12:00:00.000Z',
+    bytes: frameBytes,
+  });
+  assert.equal(metadata.mimeType, 'image/jpeg');
+  assert.equal(metadata.byteLength, frameBytes.length);
+  assert.equal(metadata.sha256, createHash('sha256').update(frameBytes).digest('hex'));
+  assert.equal(database.prepare(
+    'SELECT COUNT(*) AS count FROM session_events WHERE session_id = ?',
+  ).get(created.id).count, durableEventCount);
+
+  displayFrameStore.maxViewersPerStream = 1;
+  const watchController = new AbortController();
+  const watchNonce = proofNonce();
+  const watchPath = `/v1/sessions/${created.id}/display/frames?streamId=${encodeURIComponent(capability.streamId)}&after=0`;
+  const watch = await publicFetch(`${base}${watchPath}`, {
+    headers: { Authorization: `Bearer ${second.accessToken}` },
+    proofNonce: watchNonce,
+    signal: watchController.signal,
+  });
+  assert.equal(watch.status, 200);
+  assert.equal(watch.headers.get('cache-control'), 'no-store, no-transform');
+  assert.equal(watch.headers.get('x-rauhwpx-content-sha256'), SSE_STREAM_DIGEST);
+  const watchCanonical = canonicalResponse({
+    nonce: watchNonce,
+    method: 'GET',
+    pathAndQuery: `/rauhwpx-cloud${watchPath}`,
+    status: 200,
+    digest: SSE_STREAM_DIGEST,
+  });
+  assert.equal(verify(
+    null,
+    Buffer.from(watchCanonical),
+    identity.publicKey,
+    Buffer.from(watch.headers.get('x-rauhwpx-response-signature'), 'base64url'),
+  ), true);
+  const watchReader = watch.body.getReader();
+  let watchText = '';
+  while (!watchText.includes('\n\n')) {
+    const chunk = await watchReader.read();
+    assert.equal(chunk.done, false);
+    watchText += Buffer.from(chunk.value).toString('utf8');
+  }
+  const fields = Object.fromEntries(watchText.trim().split('\n').map((line) => {
+    const separator = line.indexOf(': ');
+    return [line.slice(0, separator), line.slice(separator + 2)];
+  }));
+  const frameEvent = JSON.parse(fields.data);
+  assert.equal(frameEvent.type, 'display.frame');
+  assert.deepEqual(frameEvent.payload, metadata);
+  const eventDigest = createHash('sha256').update(fields.data).digest('hex');
+  assert.equal(fields['rauhwpx-sha256'], eventDigest);
+  assert.equal(verify(
+    null,
+    Buffer.from(canonicalSseEvent({
+      nonce: watchNonce,
+      method: 'GET',
+      pathAndQuery: `/rauhwpx-cloud${watchPath}`,
+      status: 200,
+      seq: 1,
+      type: 'display.frame',
+      digest: eventDigest,
+    })),
+    identity.publicKey,
+    Buffer.from(fields['rauhwpx-signature'], 'base64url'),
+  ), true);
+  assert.equal(database.prepare(`SELECT COUNT(*) AS count FROM session_presence WHERE session_id = ?`).get(created.id).count, 0);
+  const rejectedWatchNonce = proofNonce();
+  const rejectedWatch = await publicFetch(`${base}${watchPath}`, {
+    headers: { Authorization: `Bearer ${second.accessToken}` },
+    proofNonce: rejectedWatchNonce,
+  });
+  assert.equal(rejectedWatch.status, 429);
+  assert.equal((await rejectedWatch.clone().json()).error.code, 'DISPLAY_VIEWER_LIMIT');
+  await assertResponseProof(rejectedWatch, identity, {
+    nonce: rejectedWatchNonce,
+    pathAndQuery: `/rauhwpx-cloud${watchPath}`,
+  });
+  watchController.abort();
+  await watchReader.cancel().catch(() => {});
+
+  const unauthenticatedFrame = await publicFetch(`${base}${metadata.framePath}`);
+  assert.equal(unauthenticatedFrame.status, 401);
+  const frameNonce = proofNonce();
+  const frame = await publicFetch(`${base}${metadata.framePath}`, {
+    headers: { Authorization: `Bearer ${second.accessToken}` },
+    proofNonce: frameNonce,
+  });
+  assert.equal(frame.status, 200);
+  assert.equal(frame.headers.get('cache-control'), 'no-store');
+  assert.equal(frame.headers.get('content-type'), 'image/jpeg');
+  assert.deepEqual(Buffer.from(await frame.clone().arrayBuffer()), frameBytes);
+  await assertResponseProof(frame, identity, {
+    nonce: frameNonce,
+    pathAndQuery: `/rauhwpx-cloud${metadata.framePath}`,
+  });
+  const crossSession = await publicFetch(
+    `${base}${metadata.framePath.replace(created.id, 'session_display_other_01')}`,
+    { headers: { Authorization: `Bearer ${second.accessToken}` } },
+  );
+  assert.equal(crossSession.status, 404);
+  assert.equal((await crossSession.json()).error.code, 'DISPLAY_STREAM_NOT_FOUND');
+
+  const oversized = await fetch(
+    `${workerBase}/v1/internal/worker/${created.id}/display/streams/${capability.streamId}/frames/2`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer ra_wt_display_one',
+        'Content-Type': 'image/jpeg',
+        'X-Rauhwpx-Frame-Captured-At': '2026-08-30T12:00:01.000Z',
+      },
+      body: Buffer.alloc(MAX_DISPLAY_FRAME_BYTES + 1),
+    },
+  );
+  assert.equal(oversized.status, 413);
+  assert.equal((await oversized.json()).error.code, 'REQUEST_TOO_LARGE');
+
+  const authenticateWorker = sessionStore.authenticateWorker.bind(sessionStore);
+  let oldRequestAuthenticated;
+  const oldRequestStarted = new Promise((resolve) => { oldRequestAuthenticated = resolve; });
+  sessionStore.authenticateWorker = (...args) => {
+    const authenticated = authenticateWorker(...args);
+    if (args[1] === 'ra_wt_display_one') oldRequestAuthenticated();
+    return authenticated;
+  };
+  let finishDelayedRequest;
+  const delayedResponse = new Promise((resolve, reject) => {
+    const request = http.request(
+      `${workerBase}/v1/internal/worker/${created.id}/display/streams`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer ra_wt_display_one',
+          'Content-Type': 'application/json',
+          'Transfer-Encoding': 'chunked',
+        },
+      },
+      async (response) => {
+        const chunks = [];
+        for await (const chunk of response) chunks.push(chunk);
+        resolve({ status: response.statusCode, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) });
+      },
+    );
+    request.once('error', reject);
+    request.write('{"width":1280,');
+    finishDelayedRequest = () => request.end('"height":800}');
+  });
+  await oldRequestStarted;
+  sessionStore.prepareWorker(created.id, 'ra_wt_display_two');
+  const replacement = new WorkerClient({
+    baseUrl: workerBase,
+    token: 'ra_wt_display_two',
+    sessionId: created.id,
+  });
+  const nextCapability = await replacement.openFrameStream({ width: 1280, height: 800 });
+  finishDelayedRequest();
+  const staleOpen = await delayedResponse;
+  assert.equal(staleOpen.status, 401);
+  assert.equal(staleOpen.body.error.code, 'WORKER_UNAUTHORIZED');
+  assert.equal(displayFrameStore.capability(created.id).streamId, nextCapability.streamId);
+  sessionStore.authenticateWorker = authenticateWorker;
+  await assert.rejects(
+    worker.publishFrame(capability.streamId, {
+      sequence: 2,
+      capturedAt: '2026-08-30T12:00:01.000Z',
+      bytes: frameBytes,
+    }),
+    (error) => error.status === 401 && error.code === 'WORKER_UNAUTHORIZED',
+  );
+  assert.notEqual(nextCapability.streamId, capability.streamId);
+  await assert.rejects(
+    replacement.publishFrame(capability.streamId, {
+      sequence: 2,
+      capturedAt: '2026-08-30T12:00:01.000Z',
+      bytes: frameBytes,
+    }),
+    (error) => error.status === 404 && error.code === 'DISPLAY_STREAM_NOT_FOUND',
+  );
+  assert.deepEqual(await replacement.closeFrameStream(nextCapability.streamId), {
+    streamId: nextCapability.streamId,
+    closed: true,
+  });
+});
+
+test('display capability reports server-unsupported without a frame store', async (t) => {
+  const { base, auth, sessionStore, identity } = await fixture(t, { displayFrames: false });
+  const tokens = await pairOverHttp(auth, base);
+  sessionStore.setProviderStatus('codex', { available: true, version: 'codex 1' });
+  const bytes = Buffer.from('unsupported source');
+  const document = await uploadOverHttp(base, tokens.accessToken, bytes, {
+    name: 'source.hwpx', kind: 'document',
+  });
+  sessionStore.createSession(tokens.device, {
+    sessionId: 'session_display_unsupported',
+    provider: 'codex',
+    goal: 'Check display support',
+    originDocument: { blobId: document.id, size: document.size, name: 'source.hwpx' },
+    resources: [],
+    timeline: null,
+    limits: { maxDurationSeconds: 3600, maxTurns: 10 },
+  });
+  const nonce = proofNonce();
+  const response = await publicFetch(`${base}/v1/sessions/session_display_unsupported/display`, {
+    headers: { Authorization: `Bearer ${tokens.accessToken}` },
+    proofNonce: nonce,
+  });
+  assert.deepEqual(await response.clone().json(), {
+    kind: 'unavailable',
+    sessionId: 'session_display_unsupported',
+    reason: 'server-unsupported',
+    message: 'This Cloud server does not support live display frames',
+    retryable: false,
+  });
+  await assertResponseProof(response, identity, {
+    nonce,
+    pathAndQuery: '/rauhwpx-cloud/v1/sessions/session_display_unsupported/display',
+  });
 });
 
 test('worker result retry survives a lost commit response and immediate origin purge', async (t) => {
