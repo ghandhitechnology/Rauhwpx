@@ -13,7 +13,7 @@
 
 ## Related implementations
 
-- [noVNC](https://novnc.com/noVNC/) renders VNC in a browser and carries the protocol over WebSocket, usually through websockify. It is the smallest established fit for the existing Xvfb display.
+- [noVNC](https://novnc.com/noVNC/) renders VNC in a browser and carries the protocol over WebSocket, usually through websockify. It is a strong fit when remote pointer and keyboard input are required.
 - [websockify](https://github.com/novnc/websockify) bridges browser WebSocket traffic to a TCP VNC server. The bridge can stay inside the authenticated cloud route instead of exposing a VNC port.
 - [Apache Guacamole](https://guacamole.apache.org/doc/gug/guacamole-architecture.html) provides a broader remote desktop gateway with a server-side protocol translator. It adds more services than this single Xvfb target needs.
 
