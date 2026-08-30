@@ -129,6 +129,30 @@ export function createRauCreditsClient({
         headers: { Authorization: `Bearer ${value}` },
       }, { signal });
     },
+    account(token, { signal } = {}) {
+      const value = String(token ?? '').trim();
+      if (!value) return Promise.resolve({
+        signedIn: false,
+        account: null,
+        quota: null,
+        managedCloud: { state: 'logged-out' },
+        updatedAt: new Date(now()).toISOString(),
+      });
+      return request('/v1/account', {
+        headers: { Authorization: `Bearer ${value}` },
+      }, { signal });
+    },
+    cloudStatus(token, { signal, deviceId = null, timezone = null } = {}) {
+      const value = String(token ?? '').trim();
+      if (!value) return Promise.resolve(null);
+      const query = new URLSearchParams();
+      if (deviceId) query.set('deviceId', String(deviceId));
+      if (timezone) query.set('timezone', String(timezone));
+      const suffix = query.size ? `?${query}` : '';
+      return request(`/v1/cloud/status${suffix}`, {
+        headers: { Authorization: `Bearer ${value}` },
+      }, { signal });
+    },
     /**
      * ready 가 될 때까지 폴링한다. 저장 확인 전까지 같은 키를 다시 받을 수 있다.
      * 로그인한 계정 이메일은 redeem 응답에 한 번만 실려 오므로 함께 돌려준다.

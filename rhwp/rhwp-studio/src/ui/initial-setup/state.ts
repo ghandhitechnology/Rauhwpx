@@ -9,10 +9,11 @@ export const INITIAL_SETUP_STORAGE_KEY = 'rhwp-initial-setup';
 export type InitialSetupStepState = 'pending' | 'configured' | 'skipped' | 'done';
 
 export interface InitialSetupRecord {
-  version: 1;
+  version: 2;
   completed: boolean;
   completedAt: string | null;
   providerStep: Exclude<InitialSetupStepState, 'done'>;
+  accountStep: Exclude<InitialSetupStepState, 'done'>;
   calibrationStep: Exclude<InitialSetupStepState, 'configured'>;
 }
 
@@ -32,10 +33,11 @@ function resolveStorage(storage?: InitialSetupStorage | null): InitialSetupStora
 
 export function defaultInitialSetup(): InitialSetupRecord {
   return {
-    version: 1,
+    version: 2,
     completed: false,
     completedAt: null,
     providerStep: 'pending',
+    accountStep: 'pending',
     calibrationStep: 'pending',
   };
 }
@@ -50,11 +52,17 @@ function asStep<T extends InitialSetupStepState>(
 
 export function normalizeInitialSetup(raw: unknown): InitialSetupRecord {
   const src = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const completed = src['completed'] === true;
+  const legacyCompleted = src['version'] === 1 && completed;
   return {
-    version: 1,
-    completed: src['completed'] === true,
+    version: 2,
+    completed,
     completedAt: typeof src['completedAt'] === 'string' ? src['completedAt'] : null,
     providerStep: asStep(src['providerStep'], ['pending', 'configured', 'skipped'] as const, 'pending'),
+    // Keep the completed v1 wizard closed. Account login remains available in Settings.
+    accountStep: legacyCompleted
+      ? 'skipped'
+      : asStep(src['accountStep'], ['pending', 'configured', 'skipped'] as const, 'pending'),
     calibrationStep: asStep(src['calibrationStep'], ['pending', 'done', 'skipped'] as const, 'pending'),
   };
 }
@@ -87,7 +95,7 @@ export function saveInitialSetup(
 }
 
 export function completeInitialSetup(
-  partial: Pick<InitialSetupRecord, 'providerStep' | 'calibrationStep'>,
+  partial: Pick<InitialSetupRecord, 'providerStep' | 'accountStep' | 'calibrationStep'>,
   storage?: InitialSetupStorage | null,
   now = () => new Date().toISOString(),
 ): InitialSetupRecord {

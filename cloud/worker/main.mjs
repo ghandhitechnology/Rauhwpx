@@ -20,7 +20,13 @@ const client = new WorkerClient({ socketPath, baseUrl, token, sessionId });
 // a clean crash with a stderr trace beats a zombie still holding its tokens.
 let heartbeatFailures = 0;
 const heartbeat = setInterval(() => {
-  client.heartbeat().then(() => { heartbeatFailures = 0; }, () => {
+  client.heartbeat().then((lease) => {
+    heartbeatFailures = 0;
+    if (lease?.mustStop === true) {
+      console.error('[worker] managed Cloud lease ended; stopping');
+      process.exit(1);
+    }
+  }, () => {
     heartbeatFailures += 1;
     if (heartbeatFailures >= 4) {
       console.error(`[worker] control plane unreachable after ${heartbeatFailures} heartbeats; stopping`);

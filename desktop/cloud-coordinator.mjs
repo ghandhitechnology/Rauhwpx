@@ -269,6 +269,10 @@ export class CloudCoordinator extends EventEmitter {
   #appServers;
   #sandboxLifecycle = 'idle';
   #sandboxMessage = null;
+  #managedCloudStatus = null;
+  #accountSnapshot = null;
+  #accountStatusPromise = null;
+  #accountStatusAt = 0;
   #spawnPromise = null;
   #spawnController = null;
   #statusPromise = null;
@@ -312,8 +316,47 @@ export class CloudCoordinator extends EventEmitter {
     return importedAuthFromCollected(await this.#providerAuth(provider));
   }
 
+  #managedAccountProvider() {
+    if (!this.#appServers?.size) return null;
+    const preferred = this.#appServers.preferred();
+    return preferred && typeof preferred.accountStatus === 'function' ? preferred : null;
+  }
+
+  async #refreshAccountStatus({ force = false } = {}) {
+    const provider = this.#managedAccountProvider();
+    if (!provider) {
+      this.#accountSnapshot = null;
+      return null;
+    }
+    if (!force && this.#accountSnapshot && Date.now() - this.#accountStatusAt < 15_000) {
+      return this.#accountSnapshot;
+    }
+    if (this.#accountStatusPromise) return this.#accountStatusPromise;
+    const operation = provider.accountStatus().then((snapshot) => {
+      this.#accountSnapshot = snapshot ?? null;
+      this.#accountStatusAt = Date.now();
+      return this.#accountSnapshot;
+    }, (error) => {
+      const updatedAt = new Date().toISOString();
+      this.#accountSnapshot = {
+        signedIn: true,
+        account: null,
+        quota: null,
+        managedCloud: { kind: 'unavailable', reason: error?.message ?? 'Managed Cloud status is unavailable' },
+        updatedAt,
+      };
+      this.#accountStatusAt = Date.now();
+      return this.#accountSnapshot;
+    }).finally(() => {
+      if (this.#accountStatusPromise === operation) this.#accountStatusPromise = null;
+    });
+    this.#accountStatusPromise = operation;
+    return operation;
+  }
+
   async start() {
     this.#stopped = false;
+    await this.#refreshAccountStatus({ force: true });
     this.#preferredMode = await this.#client.loadServerMode?.().catch(() => null) ?? null;
     const profile = await this.#client.loadProfile().catch(() => null);
     const pendingSandboxBlocked = await this.#recoverPendingAppSandbox(profile);
@@ -377,6 +420,7 @@ export class CloudCoordinator extends EventEmitter {
       this.#spawnPromise,
       this.#teardownPromise,
       this.#provisionPromise,
+      this.#accountStatusPromise,
     ].filter(Boolean);
     for (const controller of this.#watchers.values()) controller.abort();
     this.#watchers.clear();
@@ -616,6 +660,7 @@ export class CloudCoordinator extends EventEmitter {
     profileMessage = null,
     extra = {},
   } = {}, profileEpoch) {
+    await this.#refreshAccountStatus();
     const profile = await this.#client.loadProfile().catch(() => null);
     const paired = profile ? await this.#client.isPaired().catch(() => false) : false;
     const records = await this.#store.list();
@@ -727,6 +772,7 @@ export class CloudCoordinator extends EventEmitter {
         providers: this.#appServers.list(),
         lifecycle: this.#sandboxLifecycle,
         message: this.#sandboxMessage,
+        ...(this.#managedCloudStatus ? { managedCloud: this.#managedCloudStatus } : {}),
       },
       lease: scopedLeaseRecord
         ? { owner: 'cloud', sessionId: scopedLeaseRecord.cloudSessionId ?? scopedLeaseRecord.id, acquiredAt: scopedLeaseRecord.createdAt }
@@ -750,6 +796,7 @@ export class CloudCoordinator extends EventEmitter {
       queuedMessages: selected?.queuedMessages ?? [],
       timeline: selected?.timeline ?? remote?.timeline ?? null,
       updatedAt: now,
+      ...(this.#accountSnapshot ? { account: this.#accountSnapshot } : {}),
       ...extra,
     };
   }
@@ -759,6 +806,7 @@ export class CloudCoordinator extends EventEmitter {
   }
 
   async #refresh(options, profileEpoch) {
+    await this.#refreshAccountStatus({ force: true });
     const profile = await this.#client.loadProfile().catch(() => null);
     this.#assertProfileEpoch(profileEpoch);
     if (profile && await this.#client.isPaired().catch(() => false)) {
@@ -1175,6 +1223,11 @@ export class CloudCoordinator extends EventEmitter {
           await this.#client.clearPendingAppSandbox?.();
         },
       });
+      this.#managedCloudStatus = spawned.managedCloud ?? null;
+      if (spawned.account) {
+        this.#accountSnapshot = spawned.account;
+        this.#accountStatusAt = Date.now();
+      }
       const profile = normalizeCloudProfile({
         mode: 'app-hosted',
         name: provider.displayName,
@@ -1184,10 +1237,17 @@ export class CloudCoordinator extends EventEmitter {
         provider: current?.provider ?? 'codex',
         limits: current?.limits,
       });
-      const pairing = await this.#client.redeemPairingCode(spawned.receipt.pairingCode, deviceName, {
-        profile,
-        persist: false,
-      });
+      const reusePairing = Boolean(
+        current?.mode === 'app-hosted'
+        && current.endpoint === profile.endpoint
+        && current.serverPublicKey === profile.serverPublicKey
+        && await this.#client.isPaired().catch(() => false),
+      );
+      const pairing = reusePairing ? null : await this.#client.redeemPairingCode(
+        spawned.receipt.pairingCode,
+        deviceName,
+        { profile, persist: false },
+      );
       const health = await this.#client.health(profile);
       if (health.ok !== true || health.serverPublicKey !== spawned.receipt.serverPublicKey) {
         throw new AppServerError('App sandbox failed identity verification', {
@@ -1195,7 +1255,9 @@ export class CloudCoordinator extends EventEmitter {
           retryable: false,
         });
       }
-      await this.#changeProfile(() => this.#client.activateProfile(profile, {
+      await this.#changeProfile(() => this.#client.activateProfile(profile, reusePairing ? {
+        preserveCredentials: true,
+      } : {
         tokens: pairing.credentials,
         device: pairing.credentials.device,
       }));
@@ -1261,6 +1323,11 @@ export class CloudCoordinator extends EventEmitter {
     }
     try {
       const status = await provider.status(profile.sandbox);
+      this.#managedCloudStatus = status.managedCloud ?? null;
+      if (status.account) {
+        this.#accountSnapshot = status.account;
+        this.#accountStatusAt = Date.now();
+      }
       this.#setSandboxLifecycle(status.lifecycle, status.message ?? null);
       return this.snapshot({ extra: { sandbox: { ok: true, status: status.status ?? null } } });
     } catch (error) {
@@ -1317,6 +1384,11 @@ export class CloudCoordinator extends EventEmitter {
     try {
       const result = await provider.teardown(profile.sandbox);
       await this.#changeProfile(() => this.#client.forgetProfile());
+      this.#managedCloudStatus = null;
+      if (result.account) {
+        this.#accountSnapshot = result.account;
+        this.#accountStatusAt = Date.now();
+      }
       this.#setSandboxLifecycle('idle');
       const snapshot = await this.snapshot({ extra: { sandbox: { ok: true, removed: result.removed === true } } });
       this.#emit({ type: 'sandbox-torn-down', providerId: provider.id, snapshot });
@@ -1324,6 +1396,108 @@ export class CloudCoordinator extends EventEmitter {
     } catch (error) {
       this.#setSandboxLifecycle('error', error.message);
       this.#emit({ type: 'sandbox-teardown-failed', providerId: provider.id, error: error.message });
+      throw error;
+    }
+  }
+
+  takeoverAppServer(options = {}) {
+    return this.#withProfileWriter(() => this.#takeoverAppServer(options));
+  }
+
+  async #takeoverAppServer({ deviceName = hostname() } = {}) {
+    const profile = await this.#client.loadProfile().catch(() => null);
+    const provider = profile?.mode === 'app-hosted'
+      ? this.#sandboxProvider(profile.sandbox)
+      : this.#managedAccountProvider();
+    if (!provider || typeof provider.takeover !== 'function') {
+      throw new AppServerError('This legacy app sandbox does not support account takeover.', {
+        code: 'MANAGED_CLOUD_TAKEOVER_UNAVAILABLE', retryable: false,
+      });
+    }
+    this.#setSandboxLifecycle('provisioning', 'Waiting for the other device to save a checkpoint.');
+    this.#emit({ type: 'sandbox-takeover-started', providerId: provider.id });
+    try {
+      const taken = await provider.takeover(profile?.sandbox ?? null, { deviceName });
+      const updated = normalizeCloudProfile(profile?.mode === 'app-hosted' ? {
+        ...profile,
+        endpoint: taken.receipt.endpoint,
+        serverPublicKey: taken.receipt.serverPublicKey,
+        sandbox: taken.sandbox ?? profile.sandbox,
+      } : {
+        mode: 'app-hosted',
+        name: provider.displayName,
+        endpoint: taken.receipt.endpoint,
+        serverPublicKey: taken.receipt.serverPublicKey,
+        sandbox: taken.sandbox,
+        provider: 'codex',
+      });
+      const pairing = await this.#client.redeemPairingCode(taken.receipt.pairingCode, deviceName, {
+        profile: updated,
+        persist: false,
+      });
+      const health = await this.#client.health(updated);
+      if (health.ok !== true || health.serverPublicKey !== updated.serverPublicKey) {
+        throw new AppServerError('Managed Cloud takeover failed identity verification', {
+          code: 'SANDBOX_IDENTITY_MISMATCH', retryable: false,
+        });
+      }
+      await this.#changeProfile(() => this.#client.activateProfile(updated, {
+        tokens: pairing.credentials,
+        device: pairing.credentials.device,
+      }));
+      this.#managedCloudStatus = taken.managedCloud ?? null;
+      if (taken.account) {
+        this.#accountSnapshot = taken.account;
+        this.#accountStatusAt = Date.now();
+      }
+      this.#setSandboxLifecycle('ready');
+      const snapshot = await this.snapshot({ extra: { sandbox: { ok: true, takenOver: true } } });
+      this.#emit({ type: 'sandbox-takeover-completed', providerId: provider.id, snapshot });
+      return snapshot;
+    } catch (error) {
+      this.#setSandboxLifecycle('error', error.message);
+      this.#emit({ type: 'sandbox-takeover-failed', providerId: provider.id, error: error.message });
+      throw error;
+    }
+  }
+
+  logoutManagedCloud(options = {}) {
+    return this.#withProfileWriter(() => this.#logoutManagedCloud(options));
+  }
+
+  async #logoutManagedCloud() {
+    const profile = await this.#client.loadProfile().catch(() => null);
+    // Signing out of app-hosted Cloud does not change self-hosted VPS profiles.
+    if (profile?.mode !== 'app-hosted') return this.snapshot();
+    const provider = this.#sandboxProvider(profile.sandbox);
+    if (!provider || typeof provider.logout !== 'function') {
+      throw new AppServerError('Save a checkpoint before signing out of this legacy sandbox.', {
+        code: 'LEGACY_SANDBOX_CHECKPOINT_REQUIRED', retryable: false,
+      });
+    }
+    this.#setSandboxLifecycle('tearing-down', 'Saving the current Cloud turn before signing out.');
+    this.#emit({ type: 'sandbox-logout-started', providerId: provider.id });
+    try {
+      const status = await provider.logout(profile.sandbox);
+      await this.#changeProfile(() => this.#client.forgetProfile());
+      this.#managedCloudStatus = null;
+      this.#accountSnapshot = {
+        signedIn: false,
+        account: null,
+        quota: null,
+        managedCloud: { kind: 'logged-out' },
+        updatedAt: new Date().toISOString(),
+      };
+      this.#accountStatusAt = Date.now();
+      this.#setSandboxLifecycle('idle');
+      const snapshot = await this.snapshot({
+        extra: { sandbox: { ok: true, logout: true, finishingTurn: status.status === 'stopping' } },
+      });
+      this.#emit({ type: 'sandbox-logout-completed', providerId: provider.id, snapshot });
+      return snapshot;
+    } catch (error) {
+      this.#setSandboxLifecycle('error', error.message);
+      this.#emit({ type: 'sandbox-logout-failed', providerId: provider.id, error: error.message });
       throw error;
     }
   }

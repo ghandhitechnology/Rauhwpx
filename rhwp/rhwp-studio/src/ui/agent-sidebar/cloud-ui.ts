@@ -96,6 +96,18 @@ function serverIdentity(snapshot: CloudSnapshot): string {
   return `self:${profile.serverPublicKey ?? ''}:${endpoint}`;
 }
 
+function managedCloudLock(snapshot: CloudSnapshot): string | null {
+  if (snapshot.profile.kind !== 'configured' || snapshot.profile.mode !== 'app-hosted') return null;
+  const gate = snapshot.account?.managedCloud;
+  if (!gate || gate.kind === 'available') return null;
+  switch (gate.kind) {
+    case 'logged-out': return 'Managed Cloud를 시작하려면 Rauhwpx 계정으로 로그인하세요.';
+    case 'exhausted': return '오늘의 Managed Cloud 시간을 모두 사용했습니다. 실행 중인 응답까지만 끝낼 수 있습니다.';
+    case 'active-elsewhere': return `${gate.deviceName ?? '다른 기기'}에서 Managed Cloud가 실행 중입니다.`;
+    case 'unavailable': return gate.reason;
+  }
+}
+
 function sessionKindLabel(kind: CloudSnapshot['session']['kind']): string {
   switch (kind) {
     case 'waiting-local-turn': return '전송 대기';
@@ -610,6 +622,21 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       case 'idle':
         const profileReady = snapshot.profile.kind === 'configured' && snapshot.profile.connection === 'ready';
         const appHosted = snapshot.profile.kind === 'configured' && snapshot.profile.mode === 'app-hosted';
+        const appHostedLock = managedCloudLock(snapshot);
+        if (appHostedLock) {
+          panelStatus.textContent = snapshot.account?.managedCloud.kind === 'logged-out'
+            ? 'Managed Cloud를 사용하려면 로그인해야 합니다.'
+            : snapshot.account?.managedCloud.kind === 'active-elsewhere'
+              ? '다른 기기의 Cloud 작업이 실행 중입니다.'
+              : '새 Managed Cloud 작업을 시작할 수 없습니다.';
+          panelDetail.textContent = appHostedLock;
+          panelActions.append(action('Cloud 설정 확인', () => {
+            const focusTrigger = panelTrigger ?? sidebarButton;
+            closePanel();
+            onboarding.open('manage', focusTrigger);
+          }));
+          break;
+        }
         panelStatus.textContent = profileReady
           ? appHosted ? '앱 제공 서버가 준비되어 있습니다.' : '내 서버가 준비되어 있습니다.'
           : snapshot.profile.kind === 'configured'
@@ -761,7 +788,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       case 'failed':
         panelStatus.textContent = session.message;
         panelDetail.textContent = session.code;
-        if (session.retryable) panelActions.append(action('새 클라우드 작업으로 다시 전송', deps.onRequestTransfer, 'ag-primary'));
+        if (session.retryable && !managedCloudLock(snapshot)) panelActions.append(action('새 클라우드 작업으로 다시 전송', deps.onRequestTransfer, 'ag-primary'));
         panelActions.append(action('기록 지우기', dismissSession));
         break;
       case 'cancelled':
@@ -795,7 +822,16 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     const running = snapshot.session.kind === 'running';
     sidebarButton.dataset.state = setupActive ? 'setup' : localTurnPending ? 'waiting' : snapshot.session.kind;
     workspaceButton.dataset.state = setupActive ? 'setup' : localTurnPending ? 'waiting' : snapshot.session.kind;
-    const label = setupActive ? 'Cloud 환경 설정 중' : running ? '클라우드에서 작업 중' : active ? '클라우드 상태' : '클라우드로 계속';
+    const lock = managedCloudLock(snapshot);
+    const label = setupActive
+      ? 'Cloud 환경 설정 중'
+      : running
+        ? '클라우드에서 작업 중'
+        : active
+          ? '클라우드 상태'
+          : lock
+            ? 'Managed Cloud 사용 제한'
+            : '클라우드로 계속';
     sidebarButton.setAttribute('aria-label', label);
     sidebarButton.title = label;
     workspaceButton.setAttribute('aria-label', label);

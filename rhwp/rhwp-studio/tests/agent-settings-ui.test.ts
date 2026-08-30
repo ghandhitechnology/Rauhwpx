@@ -147,7 +147,8 @@ test('설정은 편집·AI·연결 목적지와 업무별 묶음을 갖는다', 
   assert.match(settings, /\{ id: 'editing', label: '편집' \}/);
   assert.match(settings, /\{ id: 'ai', label: 'AI 설정' \}/);
   assert.match(settings, /\{ id: 'connections', label: 'AI 연결' \}/);
-  assert.match(settings, /connectionContent\.append\(connection\.root, \.\.\.\(cloudSettings \? \[cloudSettings\] : \[\]\), usageSection\.root\)/);
+  assert.match(settings, /connectionContent\.append\(accountSection\.root, connection\.root, \.\.\.\(cloudSettings \? \[cloudSettings\] : \[\]\), usageSection\.root\)/);
+  assert.match(settings, /createSection\('Rauhwpx 계정'\)/);
   assert.match(settingsCss, /\.ag-settings-section-title/);
 });
 
@@ -587,6 +588,21 @@ test('Rau 설정 카드는 로그인된 계정과 체험 크레딧 잔량 막대
   assert.match(settings, /renderUsage\(\): void \{\s*\n\s*renderCliproxy\(\);\s*\n\s*renderRauUsage\(\);\s*\n\s*renderRauAccount\(\);/);
   assert.match(settingsCss, /\.ag-agent-setup-account \{[\s\S]*?border-radius: 12px/);
   assert.match(settingsCss, /\.ag-agent-setup-account-meter \.ag-settings-meter-track \{[\s\S]*?height: 8px/);
+});
+
+test('전역 계정 카드는 Managed Cloud 한도와 로그아웃 순서를 보여 준다', () => {
+  assert.match(settings, /createSection\('Rauhwpx 계정'\)/);
+  assert.match(settings, /Managed Cloud 오늘 사용량/);
+  assert.match(settings, /quota\.remainingMs < 15 \* 60_000/);
+  assert.match(settings, /quota\.remainingMs < 5 \* 60_000/);
+  assert.match(settings, /오늘 시작 \$\{quota\.coldStarts\.usedToday\}\/\$\{quota\.coldStarts\.dailyLimit\}/);
+  assert.match(settings, /최근 \$\{quota\.coldStarts\.recent\}\/\$\{quota\.coldStarts\.recentLimit\}/);
+  assert.match(settings, /case 'rau-account-status':[\s\S]*accountSnapshot = ev\.account/);
+  assert.match(settings, /window\.open\(next\.authUrl, '_blank', 'noopener,noreferrer'\)/);
+  const logout = settings.match(/async function logoutAccount\(\): Promise<void> \{[\s\S]*?\n  \}/)?.[0] ?? '';
+  assert.ok(logout.indexOf('await cloudLogout()') < logout.indexOf('accountBridge.logoutRauAccount()'));
+  assert.match(settingsCss, /\.ag-settings-account-card\[data-state='subtle'\]/);
+  assert.match(settingsCss, /\.ag-settings-account-card\[data-state='warning'\]/);
 });
 
 test('Rau 재설정은 압축 동작만 두고 OAuth 완료를 잠깐 알린다', () => {

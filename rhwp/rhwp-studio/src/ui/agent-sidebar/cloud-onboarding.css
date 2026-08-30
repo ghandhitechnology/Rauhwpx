@@ -192,6 +192,15 @@
   background: color-mix(in srgb, var(--accent-primary) 9%, var(--ag-bg-2));
 }
 
+.ag-cloud-setup-option:disabled {
+  opacity: 0.68;
+  cursor: not-allowed;
+}
+
+.ag-cloud-setup-option:disabled .ag-cloud-setup-option-note {
+  color: var(--ag-text-secondary);
+}
+
 .ag-cloud-setup-option-copy {
   display: grid;
   min-width: 0;
@@ -393,6 +402,11 @@
 .ag-cloud-setup-button:hover:not(:disabled) {
   background: var(--ag-hover);
   color: var(--ag-text);
+}
+
+.ag-cloud-setup-button:disabled {
+  opacity: 0.52;
+  cursor: not-allowed;
 }
 
 .ag-cloud-setup-button.ag-primary {

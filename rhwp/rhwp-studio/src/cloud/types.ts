@@ -24,6 +24,51 @@ export interface CloudProfileDraft {
 export type CloudServerMode = 'self-hosted' | 'app-hosted';
 export type CloudConnectionState = 'unknown' | 'testing' | 'ready' | 'error';
 
+/** Managed Cloud usage shared by every device on an account. Durations use milliseconds. */
+export interface CloudQuotaSnapshot {
+  dailyLimitMs: number;
+  usedMs: number;
+  remainingMs: number;
+  debtMs: number;
+  graceUsedMs: number;
+  resetAt: string;
+  timeZone: string;
+  activeRun: {
+    runId: string;
+    deviceId: string;
+    deviceName?: string | null;
+    startedAt: string;
+    controllingThisDevice: boolean;
+  } | null;
+  coldStarts: {
+    usedToday: number;
+    dailyLimit: number;
+    recent: number;
+    recentLimit: number;
+  };
+  graceEndsAt?: string | null;
+}
+
+/** Why the app-hosted Cloud path can or cannot start a new run. Self-hosted ignores this gate. */
+export type ManagedCloudGate =
+  | { kind: 'available' }
+  | { kind: 'logged-out' }
+  | { kind: 'exhausted'; resetAt: string }
+  | { kind: 'active-elsewhere'; runId: string; deviceName?: string | null }
+  | { kind: 'unavailable'; reason: string };
+
+export interface AccountSnapshot {
+  signedIn: boolean;
+  account: {
+    id: string;
+    email: string;
+    displayName?: string | null;
+  } | null;
+  quota: CloudQuotaSnapshot | null;
+  managedCloud: ManagedCloudGate;
+  updatedAt: string;
+}
+
 /** 앱이 제공하는 샌드박스의 수명주기. 사용자가 다음 행동을 고를 수 있는 단위로만 나눈다. */
 export type SandboxLifecycle = 'idle' | 'provisioning' | 'ready' | 'error' | 'tearing-down';
 
@@ -177,6 +222,8 @@ export interface CloudSnapshot {
   queuedMessages: CloudQueuedMessage[];
   timeline: PortableCloudTimelineV1 | null;
   updatedAt: string;
+  /** Present when the desktop is connected to the managed Cloud account broker. */
+  account?: AccountSnapshot | null;
   takeover?: CloudTakeoverPayload;
 }
 

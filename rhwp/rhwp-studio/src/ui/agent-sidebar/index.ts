@@ -2629,6 +2629,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   initialSetup = maybeStartInitialSetup({
     openAgentSetup: (agent) => settingsPanel.openAgentSetup(agent),
     beginAgentConnect: (agent) => settingsPanel.beginAgentConnect(agent),
+    requestAccount: () => bridge.requestRauAccount(),
+    loginAccount: () => bridge.loginRauAccount(),
     openCalibration: (options) => writingStyleCalibration.open(options),
   });
   settingsPage.addEventListener('ag-settings-close-request', () => {

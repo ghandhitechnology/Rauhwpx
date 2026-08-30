@@ -63,6 +63,49 @@ test('cloud state parser preserves the cloud lease and bounded running status', 
   }
 });
 
+test('cloud state parser preserves broker account quota and logged-out gates', () => {
+  const signedIn = parseCloudSnapshot({
+    ...state(8),
+    account: {
+      signedIn: true,
+      account: { id: 'user-1', email: 'user@example.test', displayName: 'User' },
+      quota: {
+        dailyLimitMs: 3_600_000,
+        usedMs: 600_000,
+        remainingMs: 3_000_000,
+        debtMs: 0,
+        graceUsedMs: 0,
+        resetAt: '2026-08-24T00:00:00.000Z',
+        timeZone: 'Asia/Seoul',
+        activeRun: null,
+        coldStarts: { usedToday: 1, dailyLimit: 12, recent: 1, recentLimit: 3 },
+        graceEndsAt: null,
+      },
+      managedCloud: { kind: 'available' },
+      updatedAt: now,
+    },
+  });
+  assert.equal(signedIn?.account?.account?.email, 'user@example.test');
+  assert.equal(signedIn?.account?.quota?.remainingMs, 3_000_000);
+  assert.deepEqual(signedIn?.account?.managedCloud, { kind: 'available' });
+
+  const loggedOut = parseCloudSnapshot({
+    ...state(9),
+    account: {
+      signedIn: false,
+      account: null,
+      quota: null,
+      managedCloud: { kind: 'logged-out' },
+      updatedAt: now,
+    },
+  });
+  assert.deepEqual(loggedOut?.account?.managedCloud, { kind: 'logged-out' });
+  assert.equal(parseCloudSnapshot({
+    ...state(10),
+    account: { signedIn: false, account: null, quota: null, managedCloud: { kind: 'available' }, updatedAt: now },
+  }), null);
+});
+
 test('cloud state parser preserves a custom Tailscale HTTPS port and rejects invalid values', () => {
   const custom = state(8);
   const withPort = {

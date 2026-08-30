@@ -176,6 +176,7 @@ export function createCloudHttpHandler({
   vault,
   applyProviderAuth = null,
   seedProvider,
+  managedLease = null,
 }, { workerOnly = false } = {}) {
   const authenticate = (request) => auth.authenticate(bearer(request));
   const authenticateWorker = (request, sessionId, options) => (
@@ -248,7 +249,9 @@ export function createCloudHttpHandler({
         });
         const authenticatedWorkerId = workerIdentity(session);
         if (request.method === 'POST' && action === '/heartbeat') {
-          json(response, 200, { ok: sessionStore.heartbeat(sessionId) });
+          const ok = sessionStore.heartbeat(sessionId);
+          const lease = await managedLease?.heartbeat?.();
+          json(response, 200, { ok, ...(lease?.mustStop === undefined ? {} : { mustStop: lease.mustStop }) });
           return;
         }
         if (request.method === 'POST' && action === '/display/streams') {
@@ -352,15 +355,21 @@ export function createCloudHttpHandler({
           return;
         }
         if (request.method === 'POST' && action === '/pause-ack') {
-          json(response, 200, sessionStore.acknowledgePause(sessionId));
+          const result = sessionStore.acknowledgePause(sessionId);
+          await managedLease?.checkpoint?.();
+          json(response, 200, result);
           return;
         }
         if (request.method === 'POST' && action === '/sleep-ack') {
-          json(response, 200, sessionStore.acknowledgeSleep(sessionId));
+          const result = sessionStore.acknowledgeSleep(sessionId);
+          await managedLease?.checkpoint?.();
+          json(response, 200, result);
           return;
         }
         if (request.method === 'POST' && action === '/takeover-ack') {
-          json(response, 200, sessionStore.acknowledgeTakeover(sessionId));
+          const result = sessionStore.acknowledgeTakeover(sessionId);
+          await managedLease?.checkpoint?.();
+          json(response, 200, result);
           return;
         }
         if (request.method === 'POST' && action === '/finish-claim') {
@@ -422,7 +431,7 @@ export function createCloudHttpHandler({
         }
         if (request.method === 'POST' && action === '/boundary') {
           const body = await readJson(request);
-          json(response, 201, await sessionStore.commitBoundary(sessionId, {
+          const result = await sessionStore.commitBoundary(sessionId, {
             operationId: body.operationId,
             turnNumber: body.turnNumber,
             revision: body.revision,
@@ -435,11 +444,14 @@ export function createCloudHttpHandler({
               blobId: body.timeline?.blobId,
               size: body.timeline?.size,
             },
-          }));
+          });
+          managedLease?.rememberCheckpoint?.(body.operationId);
+          json(response, 201, result);
           return;
         }
         if (request.method === 'POST' && action === '/turn-start') {
           const body = await readJson(request);
+          await managedLease?.beforeTurnStart?.();
           json(response, 201, sessionStore.beginTurn(sessionId, {
             turnNumber: body.turnNumber,
             messageId: body.messageId ?? null,
@@ -449,10 +461,12 @@ export function createCloudHttpHandler({
         }
         if (request.method === 'POST' && action === '/turn-complete') {
           const body = await readJson(request);
-          json(response, 200, sessionStore.completeTurn(sessionId, {
+          const result = sessionStore.completeTurn(sessionId, {
             outcome: body.outcome,
             boundaryOperationId: body.boundaryOperationId ?? null,
-          }));
+          });
+          await managedLease?.complete?.(body.boundaryOperationId ?? null);
+          json(response, 200, result);
           return;
         }
         if (request.method === 'POST' && action === '/result') {
@@ -467,10 +481,13 @@ export function createCloudHttpHandler({
         }
         if (request.method === 'POST' && action === '/suspend') {
           const body = await readJson(request);
-          json(response, 200, sessionStore.suspend(sessionId, {
-            code: String(body.code || 'WORKER_SUSPENDED').slice(0, 64),
+          const failureCode = String(body.code || 'WORKER_SUSPENDED').slice(0, 64);
+          const result = sessionStore.suspend(sessionId, {
+            code: failureCode,
             message: String(body.message || 'Worker suspended').slice(0, 1024),
-          }));
+          });
+          await managedLease?.release?.(failureCode);
+          json(response, 200, result);
           return;
         }
         throw new CloudError('NOT_FOUND', 'Worker endpoint was not found', 404);
@@ -699,7 +716,9 @@ export function createCloudHttpHandler({
           return;
         }
         if (request.method === 'POST' && sessionRoute[2] === '/commands') {
-          json(response, 200, sessionStore.executeCommand(device, sessionId, parseCommand(await readJson(request))));
+          const command = parseCommand(await readJson(request));
+          await managedLease?.assertCommandAllowed?.(command.type);
+          json(response, 200, sessionStore.executeCommand(device, sessionId, command));
           return;
         }
         if (request.method === 'GET' && sessionRoute[2] === '/timeline') {

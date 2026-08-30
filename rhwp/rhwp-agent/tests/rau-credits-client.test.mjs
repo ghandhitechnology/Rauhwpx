@@ -122,6 +122,36 @@ test('Rau client exposes the proxy URL and sends the current token for replaceme
   ]);
 });
 
+test('Rau account status uses the shared account token', async () => {
+  const calls = [];
+  const client = createRauCreditsClient({
+    baseUrl: 'https://credits.rau.test',
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url: String(url), authorization: init.headers?.Authorization ?? null });
+      return jsonResponse({ account: { id: 'user-1', email: 'andy@example.com' } });
+    },
+  });
+
+  const response = await client.account('rau_v1_account');
+  assert.equal(response.account.email, 'andy@example.com');
+  assert.deepEqual(calls, [{
+    url: 'https://credits.rau.test/v1/account',
+    authorization: 'Bearer rau_v1_account',
+  }]);
+});
+
+test('Rau account status stays local while logged out', async () => {
+  let calls = 0;
+  const client = createRauCreditsClient({
+    fetchImpl: async () => { calls += 1; return jsonResponse({}); },
+  });
+
+  const response = await client.account(null);
+  assert.equal(calls, 0);
+  assert.equal(response.signedIn, false);
+  assert.equal(response.managedCloud.state, 'logged-out');
+});
+
 test('Rau credit requests time out while reading the response body', async () => {
   const client = createRauCreditsClient({
     timeoutMs: 10,

@@ -153,6 +153,10 @@ export interface RhwpDesktopApi {
   cloudSpawnSandbox?: (payload: { providerId?: string }) => Promise<unknown>;
   cloudSandboxStatus?: () => Promise<unknown>;
   cloudTeardownSandbox?: (payload: { force?: boolean }) => Promise<unknown>;
+  /** Checkpoints the prior controller and explicitly transfers the account-global worker lease. */
+  cloudTakeoverSandbox?: () => Promise<unknown>;
+  /** Blocks new managed-Cloud input, checkpoints the controlling turn, then releases the worker. */
+  cloudAccountLogout?: () => Promise<unknown>;
   cloudTransfer?: (payload: CloudTransferRequest) => Promise<unknown>;
   cloudSetTransferIntent?: (payload: CloudTransferIntentRequest) => Promise<unknown>;
   cloudReadReference?: (payload: Pick<CloudTransferReference, 'id' | 'scope' | 'scopeId'>) => Promise<unknown>;
