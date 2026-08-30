@@ -770,7 +770,12 @@ export class CloudCoordinator extends EventEmitter {
     });
   }
 
-  async #spawnAppServer({ providerId = null, deviceName = hostname() } = {}) {
+  async #spawnAppServer({
+    providerId = null,
+    deviceName = hostname(),
+    selectedProvider = null,
+    credentials = null,
+  } = {}) {
     const pending = await this.#client.loadPendingAppSandbox?.();
     if (pending) {
       throw new AppServerError(
@@ -834,6 +839,10 @@ export class CloudCoordinator extends EventEmitter {
       this.#emit({ type: 'provision-log', line: status.message ?? 'The previous app sandbox no longer exists.' });
     }
     const provider = this.#appServerFor(providerId);
+    const agentProvider = selectedProvider || current?.provider || 'codex';
+    const providerAuth = credentials?.provider === agentProvider && credentials.apiKey
+      ? { provider: agentProvider, apiKey: credentials.apiKey, files: [] }
+      : await this.#providerAuth(agentProvider);
     this.#setSandboxLifecycle('provisioning', 'Starting an app-provided sandbox.');
     this.#emit({ type: 'sandbox-provision-started', providerId: provider.id });
     let spawned = null;
@@ -843,8 +852,8 @@ export class CloudCoordinator extends EventEmitter {
       spawned = await provider.spawn({
         deviceName,
         limits: current?.limits,
-        selectedProvider: current?.provider ?? 'codex',
-        credentials: await this.#providerAuth(current?.provider ?? 'codex'),
+        selectedProvider: agentProvider,
+        credentials: providerAuth,
         signal: controller.signal,
         onLine: (line) => this.#emit({ type: 'provision-log', line }),
         onSandboxCreated: async (sandbox) => {
@@ -860,7 +869,7 @@ export class CloudCoordinator extends EventEmitter {
         endpoint: spawned.receipt.endpoint,
         serverPublicKey: spawned.receipt.serverPublicKey,
         sandbox: spawned.sandbox,
-        provider: current?.provider ?? 'codex',
+        provider: agentProvider,
         limits: current?.limits,
       });
       const pairing = await this.#client.redeemPairingCode(spawned.receipt.pairingCode, deviceName, {

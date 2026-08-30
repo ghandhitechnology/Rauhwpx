@@ -79,6 +79,7 @@ function appHosted(lifecycle: CloudSnapshot['server']['lifecycle'], connection: 
       providers: [RAILWAY_PROVIDER],
       lifecycle,
       message: lifecycle === 'error' ? 'Railway reports CRASHED.' : null,
+      credential: { provider: null, stored: false, localProviders: [] },
     },
   });
 }
@@ -138,6 +139,7 @@ test('the parser keeps app sandboxes, user hosts, and legacy snapshots apart', (
     providers: [],
     lifecycle: 'idle',
     message: null,
+    credential: { provider: null, stored: false, localProviders: [] },
   });
 
   const base = {
@@ -199,14 +201,14 @@ test('the controller forwards every server mode call to its own IPC channel', as
   };
   const controller = createCloudController(api as never);
   await controller.selectServerMode('app-hosted');
-  await controller.spawnSandbox('railway');
+  await controller.spawnSandbox('railway', { provider: 'codex', apiKey: 'sk-live' });
   await controller.spawnSandbox();
   await controller.sandboxStatus();
   await controller.teardownSandbox();
   await controller.teardownSandbox({ force: true });
   assert.deepEqual(calls, [
     ['select', { mode: 'app-hosted' }],
-    ['spawn', { providerId: 'railway' }],
+    ['spawn', { providerId: 'railway', provider: 'codex', apiKey: 'sk-live' }],
     ['spawn', {}],
     ['status', undefined],
     ['teardown', { force: false }],
@@ -367,7 +369,7 @@ test('the dialog offers both servers and every sandbox action', () => {
   assert.match(onboarding, /role', 'radiogroup'/);
   assert.match(onboarding, /dataset\.serverMode = mode/);
   assert.match(onboarding, /controller\.selectServerMode\(mode\)/);
-  assert.match(onboarding, /controller\.spawnSandbox\(providerId\)/);
+  assert.match(onboarding, /controller\.spawnSandbox\(providerId, credential\)/);
   assert.match(onboarding, /controller\.teardownSandbox\(options\)/);
   assert.match(onboarding, /작업을 버리고 종료/);
   assert.match(onboarding, /teardownSandbox\(\{ force: true \}\)/);

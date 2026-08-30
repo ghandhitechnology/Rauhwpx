@@ -1060,6 +1060,10 @@ ipcMain.handle('cloud:spawn-sandbox', async (event, payload = {}) => {
   const session = sessionForEvent(event);
   return scopedCloudSnapshot(session, await requireCloudCoordinator().spawnAppServer({
     providerId: payload?.providerId ?? null,
+    selectedProvider: payload?.provider ?? null,
+    credentials: payload?.provider && payload?.apiKey
+      ? { provider: payload.provider, apiKey: payload.apiKey }
+      : null,
   }));
 });
 ipcMain.handle('cloud:sandbox-status', async (event) => {
