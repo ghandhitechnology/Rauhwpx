@@ -4,6 +4,9 @@
   "version": "1.1.0",
   "description": "HWP/HWPX editor with a local Claude/Codex agent sidebar.",
   "author": "Hataewook",
+  "license": "MIT",
+  "homepage": "https://github.com/ghandhitechnology/Rauhwpx",
+  "desktopName": "rauhwpx.desktop",
   "private": true,
   "main": "desktop/main.mjs",
   "scripts": {
@@ -22,6 +25,11 @@
     "desktop": "npm run build:desktop && electron .",
     "dist:mac": "npm run build:desktop && electron-builder --mac dmg zip --arm64 --publish never",
     "dist:win": "npm run build:desktop && electron-builder --win --publish never",
+    "dist:linux": "npm run build:desktop && electron-builder --linux AppImage deb --publish never",
+    "dist:linux:x64": "npm run build:desktop && electron-builder --linux AppImage deb --x64 --publish never",
+    "dist:linux:arm64": "npm run build:desktop && electron-builder --linux AppImage deb --arm64 --publish never",
+    "test:cloud": "node --test tests/desktop-cloud.test.mjs tests/desktop-cloud-display.test.mjs tests/desktop-cloud-protocol.test.mjs tests/desktop-cloud-client-reliability.test.mjs tests/desktop-cloud-connection-reliability.test.mjs tests/desktop-cloud-handoff-reliability.test.mjs tests/desktop-cloud-provisioner-recovery.test.mjs tests/desktop-provider-auth.test.mjs tests/desktop-app-servers.test.mjs tests/desktop-app-server-live.test.mjs && npm --prefix cloud test",
+    "check:cloud": "node --check desktop/cloud-*.mjs desktop/fs-replace.mjs && npm --prefix cloud run check",
     "verify:package": "node scripts/verify-desktop-package.mjs"
   },
   "dependencies": {
@@ -41,6 +49,9 @@
     "asar": true,
     "files": [
       "desktop/**/*",
+      "cloud/install/install.sh",
+      "cloud/install/install-macos.sh",
+      "cloud/release/rauhwpx-cloud-bootstrap-linux-*.tar.gz",
       "rhwp/rhwp-studio/dist/**/*",
       "!rhwp/rhwp-studio/dist/samples/**",
       "rhwp/rhwp-agent/**/*",
@@ -50,7 +61,10 @@
       "!rhwp/rhwp-agent/tsconfig.agents.json"
     ],
     "asarUnpack": [
-      "rhwp/rhwp-agent/**"
+      "rhwp/rhwp-agent/**",
+      "cloud/install/install.sh",
+      "cloud/install/install-macos.sh",
+      "cloud/release/rauhwpx-cloud-bootstrap-linux-*.tar.gz"
     ],
     "extraResources": [
       {
@@ -64,13 +78,24 @@
     ],
     "fileAssociations": [
       {
-        "ext": [
-          "hwp",
-          "hwpx",
-          "hml"
-        ],
-        "name": "Hangul document",
-        "description": "Hangul word-processing document",
+        "ext": "hwp",
+        "name": "HWP document",
+        "description": "Hangul HWP document",
+        "mimeType": "application/x-hwp",
+        "role": "Editor"
+      },
+      {
+        "ext": "hwpx",
+        "name": "HWPX document",
+        "description": "Hangul HWPX document",
+        "mimeType": "application/vnd.hancom.hwpx",
+        "role": "Editor"
+      },
+      {
+        "ext": "hml",
+        "name": "HML document",
+        "description": "Hangul XML document",
+        "mimeType": "application/x-hml",
         "role": "Editor"
       },
       {
@@ -174,6 +199,53 @@
             "x64"
           ]
         }
+      ]
+    },
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "rhwp/assets/logo/logo-512.png",
+      "category": "Office",
+      "synopsis": "HWP and HWPX document editor",
+      "description": "Open, edit, and save Hangul HWP, HWPX, and HML documents with an integrated agent sidebar.",
+      "executableName": "rauhwpx",
+      "maintainer": "Rauhwpx maintainers <noreply@github.com>",
+      "vendor": "ghandhitechnology",
+      "syncDesktopName": true,
+      "desktop": {
+        "entry": {
+          "StartupWMClass": "Rauhwpx",
+          "X-GNOME-UsesNotifications": "true"
+        }
+      }
+    },
+    "deb": {
+      "packageName": "rauhwpx",
+      "packageCategory": "editors",
+      "depends": [
+        "libgtk-3-0 | libgtk-3-0t64",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0 | libatspi2.0-0t64",
+        "libuuid1",
+        "libsecret-1-0"
       ]
     },
     "nsis": {

@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+INSTALL_ROOT='/Library/Application Support/Rauhwpx Cloud'
+set -a
+source "${INSTALL_ROOT}/cloud.env"
+set +a
+PODMAN=/opt/homebrew/bin/podman
+NODE=$(command -v node)
+STATE=$("${PODMAN}" machine inspect "${RAUHWpx_PODMAN_CONNECTION}" | "${NODE}" -e '
+  let value="";process.stdin.on("data",(c)=>value+=c);process.stdin.on("end",()=>process.stdout.write(JSON.parse(value)[0].State));
+')
+if [[ ${STATE} != running ]]; then
+  "${PODMAN}" machine start --update-connection=false "${RAUHWpx_PODMAN_CONNECTION}"
+fi
+for _ in $(seq 1 60); do
+  if "${PODMAN}" --connection "${RAUHWpx_PODMAN_CONNECTION}" info >/dev/null 2>&1; then break; fi
+  sleep 1
+done
+"${PODMAN}" --connection "${RAUHWpx_PODMAN_CONNECTION}" info >/dev/null
+exec "${NODE}" "${INSTALL_ROOT}/current/src/main.mjs"

@@ -1,0 +1,112 @@
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { createSessionDisplay, createSessionDisplayMode } from '../document-runtime/session-display.mjs';
+import { createSessionFramePublisher } from '../document-runtime/session-frame-publisher.mjs';
+import { WorkerClient } from './client.mjs';
+
+process.umask(0o077);
+
+const sessionId = process.env.RAUHWpx_SESSION_ID;
+const token = process.env.RAUHWpx_WORKER_TOKEN;
+const socketPath = process.env.RAUHWpx_CONTROL_SOCKET;
+const baseUrl = process.env.RAUHWpx_CONTROL_URL;
+const workspace = process.env.RAUHWpx_WORKSPACE || '/workspace';
+const providerAuth = process.env.RAUHWpx_PROVIDER_AUTH || '/provider-auth';
+if (!sessionId || !token || (!socketPath && !baseUrl)) throw new Error('Worker identity is incomplete');
+
+const client = new WorkerClient({ socketPath, baseUrl, token, sessionId });
+// After four silent heartbeats the control plane considers this worker lost;
+// a clean crash with a stderr trace beats a zombie still holding its tokens.
+let heartbeatFailures = 0;
+const heartbeat = setInterval(() => {
+  client.heartbeat().then(() => { heartbeatFailures = 0; }, () => {
+    heartbeatFailures += 1;
+    if (heartbeatFailures >= 4) {
+      console.error(`[worker] control plane unreachable after ${heartbeatFailures} heartbeats; stopping`);
+      process.exit(1);
+    }
+  });
+}, 15_000);
+heartbeat.unref();
+
+function safeName(name) {
+  return path.basename(name).replace(/[^\p{L}\p{N}._ -]/gu, '_').slice(0, 180) || 'resource.bin';
+}
+
+try {
+  await fs.mkdir(path.join(workspace, 'home'), { recursive: true, mode: 0o700 });
+  await fs.cp(providerAuth, path.join(workspace, 'home'), { recursive: true, force: false });
+  const manifest = await client.manifest();
+  const { credentials } = await client.credentials();
+  const inputDirectory = path.join(workspace, 'input');
+  await fs.mkdir(inputDirectory, { recursive: true, mode: 0o700 });
+  const localResources = [];
+  for (const resource of manifest.resources) {
+    const filename = path.join(inputDirectory, `${resource.kind}-${safeName(resource.name)}`);
+    await client.download(resource.blobId, filename);
+    localResources.push({ ...resource, filename });
+  }
+  if (manifest.latestCheckpoint) {
+    const filename = path.join(inputDirectory, `checkpoint-${manifest.latestCheckpoint.revision}.bin`);
+    await client.download(manifest.latestCheckpoint.blobId, filename);
+    manifest.latestCheckpoint.filename = filename;
+  }
+  const resolvedManifest = { ...manifest, resources: localResources };
+  await fs.writeFile(
+    path.join(workspace, 'manifest.json'),
+    JSON.stringify(resolvedManifest),
+    { mode: 0o600 },
+  );
+  const sessionDisplay = createSessionDisplay({
+    workspace,
+    onEvent: (event) => {
+      console.log(JSON.stringify(event));
+      client.event(event.type, event).catch(() => {});
+    },
+  });
+  const displaySnapshot = await sessionDisplay.start();
+  const displayMode = createSessionDisplayMode(sessionDisplay, displaySnapshot);
+  sessionDisplay.disableRestarts();
+  const sessionFramePublisher = createSessionFramePublisher({
+    client,
+    sessionDisplay,
+    displayMode,
+    onEvent: (event) => client.event(event.type, event).catch(() => {}),
+  });
+  try {
+    await sessionFramePublisher.start();
+    const runtimePath = process.env.RAUHWpx_DOCUMENT_RUNTIME || '/app/document-runtime/run.mjs';
+    const runtime = await import(pathToFileURL(runtimePath).href);
+    if (typeof runtime.runSession !== 'function') throw new Error('Document runtime must export runSession');
+    const outcome = await runtime.runSession({
+      manifest: resolvedManifest,
+      workspace,
+      credentials,
+      client,
+      sessionDisplay,
+      displayMode,
+      onStudioReady: () => sessionFramePublisher.markReady(),
+      onStudioUnavailable: () => sessionFramePublisher.markUnavailable(),
+    });
+    if (outcome?.paused !== true && outcome?.suspended !== true && outcome?.takenOver !== true) {
+      if (!outcome?.timelinePath) throw new Error('Document runtime did not return timelinePath');
+      if (!outcome?.resultPath) throw new Error('Document runtime did not return resultPath');
+      const result = await client.upload(outcome.resultPath, {
+        name: outcome.resultName || manifest.resources.find((resource) => resource.kind === 'document')?.name || 'result.hwpx',
+        kind: 'result',
+      });
+      await client.publishResult(result);
+    }
+  } finally {
+    await sessionFramePublisher.stop().catch(() => {});
+    await sessionDisplay.stop().catch(() => {});
+  }
+} catch (error) {
+  await client.suspend(error.code || 'WORKER_FAILED', error.message || String(error)).catch((suspendError) => {
+    console.error('[worker] failed to report suspension:', suspendError?.message ?? suspendError);
+  });
+  throw error;
+} finally {
+  clearInterval(heartbeat);
+}

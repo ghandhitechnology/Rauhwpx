@@ -91,6 +91,13 @@ import type {
   UserQuestionOutcome,
 } from './types.ts';
 
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const copy = new Uint8Array(bytes.byteLength);
+  copy.set(bytes);
+  const digest = await crypto.subtle.digest('SHA-256', copy.buffer);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
 export interface ChatHistoryEntry {
   role: 'user' | 'assistant';
   text: string;
@@ -162,6 +169,7 @@ export interface AgentBridge {
   /** 참고자료 원본은 HTTP로 스트리밍하고, 브라우저에는 메타데이터만 돌려준다. */
   uploadReference(scope: ReferenceScope, scopeId: string, file: File): Promise<ReferenceFile>;
   listReferences(scope: ReferenceScope, scopeId: string): Promise<ReferenceFile[]>;
+  downloadReference(file: Pick<ReferenceFile, 'id' | 'scope' | 'scopeId'>): Promise<Uint8Array>;
   searchReferences(query: string, scope: ReferenceScope, scopeId: string, limit?: number): Promise<ReferenceSearchHit[]>;
   deleteReference(file: Pick<ReferenceFile, 'id' | 'scope' | 'scopeId'>): Promise<void>;
   setWorkflow(workflow: AgentWorkflow): void;
@@ -2813,6 +2821,20 @@ class AgentBridgeImpl implements AgentBridge {
     return Array.isArray(source)
       ? source.map((item) => normalizeReferenceFile(item, { scope, scopeId })).filter((item): item is ReferenceFile => item !== null)
       : [];
+  }
+
+  async downloadReference(file: Pick<ReferenceFile, 'id' | 'scope' | 'scopeId'>): Promise<Uint8Array> {
+    const response = await fetch(this.referenceUrl(`/reference-files/${encodeURIComponent(file.id)}`, {
+      scope: file.scope,
+      scopeId: file.scopeId,
+    }), { headers: { Authorization: `Bearer ${this.token}` } });
+    if (!response.ok) throw new Error(`참고자료 ${file.id}를 읽지 못했습니다.`);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const expected = response.headers.get('x-content-sha256') ?? '';
+    if (!expected || expected !== await sha256Hex(bytes)) {
+      throw new Error(`참고자료 ${file.id} 무결성 검증에 실패했습니다.`);
+    }
+    return bytes;
   }
 
   async searchReferences(

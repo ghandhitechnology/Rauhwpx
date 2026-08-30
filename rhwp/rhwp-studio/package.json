@@ -15,6 +15,8 @@
     "preview": "vite preview",
     "test": "npm run generate:agent-edit-capabilities && node --test tests/*.test.ts ../npm/editor/tests/*.test.mjs",
     "e2e": "node e2e/text-flow.test.mjs",
+    "e2e:cloud-onboarding": "node e2e/cloud-onboarding.test.mjs",
+    "e2e:cloud-workspace": "node e2e/cloud-workspace.test.mjs",
     "e2e:agent-edit-loop": "node e2e/agent-edit-loop.test.mjs --mode=headless",
     "e2e:user-question": "node e2e/user-question-flow.test.mjs --mode=headless",
     "e2e:subagent-fleet": "node e2e/subagent-fleet.test.mjs --mode=headless",

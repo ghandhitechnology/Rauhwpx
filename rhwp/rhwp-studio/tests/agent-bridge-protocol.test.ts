@@ -121,6 +121,21 @@ function makeExecutor(paragraphs: string[][] = [['hello world', 'second para']])
         },
       };
     },
+    insertParagraphAfter: (agent: string, sectionIdx: number, afterParaIdx: number, text: string) => {
+      calls.push({ method: 'insertParagraphAfter', args: [agent, sectionIdx, afterParaIdx, text] });
+      bus.emit('document-mutated', 'agent-pending-edit');
+      bus.emit('document-changed');
+      return {
+        changeSetId: 'cs-1',
+        insertedRange: {
+          sectionIdx,
+          startParaIdx: afterParaIdx,
+          startCharOffset: paragraphs[sectionIdx][afterParaIdx].length,
+          endParaIdx: afterParaIdx + 1,
+          endCharOffset: [...text].length,
+        },
+      };
+    },
     markDelete: (agent: string, range: unknown) => {
       calls.push({ method: 'markDelete', args: [agent, range] });
       return { changeSetId: 'cs-1', markedText: 'marked' };
@@ -208,6 +223,7 @@ test('executor: document-write helper covers every mutating tool', () => {
     'insert_footnote',
     'insert_image',
     'insert_page_break',
+    'insert_paragraph_after',
     'insert_text',
     'prepare_engine_edit_session',
     'replace_all',
@@ -457,6 +473,41 @@ test('executor: replace_range = 원자적 pending.replaceText 위임', async () 
   assert.equal(typeof r.postEdit, 'string');
 });
 
+test('executor: insert_paragraph_after 는 새 문단 삽입을 pending manager에 위임한다', async () => {
+  const { executor, calls } = makeExecutor([['anchor']]);
+  const result = (await executor.execute('insert_paragraph_after', {
+    expectedRevision: 1,
+    sectionIdx: 0,
+    afterParaIdx: 0,
+    text: '새 문단 🎉',
+  }, 'claude')) as any;
+
+  assert.deepEqual(calls.map((call) => call.method), ['insertParagraphAfter']);
+  assert.deepEqual(calls[0].args, ['claude', 0, 0, '새 문단 🎉']);
+  assert.deepEqual(result.insertedRange, {
+    sectionIdx: 0,
+    startParaIdx: 0,
+    startCharOffset: 6,
+    endParaIdx: 1,
+    endCharOffset: 6,
+  });
+  assert.equal(result.revision, 2);
+  assert.equal(result.changeSetId, 'cs-1');
+});
+
+test('executor: insert_paragraph_after 는 빈 텍스트와 줄바꿈을 거부한다', async () => {
+  const { executor, calls } = makeExecutor([['anchor']]);
+  for (const text of ['', '첫줄\n둘째줄']) {
+    await expectToolError(executor.execute('insert_paragraph_after', {
+      expectedRevision: 1,
+      sectionIdx: 0,
+      afterParaIdx: 0,
+      text,
+    }, 'claude'), 'INVALID_ARGS');
+  }
+  assert.deepEqual(calls, []);
+});
+
 test('executor: apply_edits 는 revision 검사 한 번으로 항목들을 원자 배치로 순차 적용한다', async () => {
   const { executor, calls } = makeExecutor([['hello world', 'second para']]);
   const r = (await executor.execute('apply_edits', {
@@ -467,13 +518,18 @@ test('executor: apply_edits 는 revision 검사 한 번으로 항목들을 원�
         tool: 'replace_range',
         args: { sectionIdx: 0, startParaIdx: 1, startCharOffset: 0, endParaIdx: 1, endCharOffset: 6, text: 'third' },
       },
+      { tool: 'insert_paragraph_after', args: { sectionIdx: 0, afterParaIdx: 1, text: 'appended' } },
     ],
   }, 'claude')) as any;
-  assert.deepEqual(calls.map((c) => c.method), ['runAtomicBatch', 'insertText', 'replaceText']);
-  assert.equal(r.applied, 2);
-  assert.equal(r.results.length, 2);
+  assert.deepEqual(
+    calls.map((c) => c.method),
+    ['runAtomicBatch', 'insertText', 'replaceText', 'insertParagraphAfter'],
+  );
+  assert.equal(r.applied, 3);
+  assert.equal(r.results.length, 3);
   assert.equal(r.results[0].tool, 'insert_text');
   assert.equal(r.results[1].tool, 'replace_range');
+  assert.equal(r.results[2].tool, 'insert_paragraph_after');
   // 항목별 revision/note 는 제거된다 — 최상위 값만 유효
   assert.equal(r.results[0].revision, undefined);
   assert.equal(r.results[0].note, undefined);

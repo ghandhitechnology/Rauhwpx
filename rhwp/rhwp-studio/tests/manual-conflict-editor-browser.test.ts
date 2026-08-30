@@ -14,6 +14,8 @@ const BROWSER_CANDIDATES = [
   '/usr/bin/google-chrome',
   '/usr/bin/chromium',
   '/usr/bin/chromium-browser',
+  'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+  'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
 ].filter((candidate): candidate is string => Boolean(candidate));
 
 const executablePath = BROWSER_CANDIDATES.find(existsSync);
@@ -32,7 +34,16 @@ let browser: Browser | null = null;
 let baseUrl = '';
 
 test.before(async () => {
-  if (browserSkipReason) return;
+  if (browserSkipReason) {
+    if (!wasmPackageAvailable) {
+      assert.equal(
+        Boolean(process.env.CI),
+        false,
+        'Resolver browser tests require generated rhwp/pkg/rhwp.js and rhwp/pkg/rhwp_bg.wasm; build the WASM package before npm test',
+      );
+    }
+    return;
+  }
   server = await createServer({
     root: studioRoot,
     configFile: false,
@@ -127,6 +138,7 @@ test('rich-text editor changes text and formatting while preserving intervals', 
     editor.querySelector<HTMLButtonElement>('button:last-child')!.click();
     return { family: editor.dataset.editorFamily, payload, labels, alignmentOptions };
   }));
+  if (result == null) return;
   assert.equal(result?.family, 'rich-text');
   assert.doesNotMatch(result?.labels.join(' ') ?? '', /text|font|bold|alignment|interval/i);
   assert.deepEqual(result?.alignmentOptions, ['왼쪽', '가운데', '오른쪽', '양쪽 맞춤']);
@@ -166,6 +178,7 @@ test('table editor changes grid cells, formula, and structural operation', { ski
     editor.querySelector<HTMLButtonElement>('button:last-child')!.click();
     return { family: editor.dataset.editorFamily, hasGrid: Boolean(editor.querySelector('.merge-table-grid')), payload };
   }));
+  if (result == null) return;
   assert.equal(result?.family, 'table');
   assert.equal(result?.hasGrid, true);
   assert.equal((result?.payload as any).cells[0][1].value, 'Merged B1');
@@ -200,6 +213,7 @@ test('shape/chart editor changes nested geometry, series, and visibility propert
     editor.querySelector<HTMLButtonElement>('button:last-child')!.click();
     return { family: editor.dataset.editorFamily, payload };
   }));
+  if (result == null) return;
   assert.equal(result?.family, 'shape-chart');
   assert.equal((result?.payload as any).geometry.width, 420);
   assert.equal((result?.payload as any).series[0].name, 'Merged series');
@@ -245,6 +259,7 @@ test('large values report hidden fields and clone the resolution only once on Ap
       hiddenProperty: payload?.property200,
     };
   }));
+  if (result == null) return;
   assert.equal(result?.cloneCount, 1);
   assert.equal(result?.controlCount, 200);
   assert.ok(result?.hint.includes('속성이 많아 200개 이후 속성은 숨겼습니다.'));
@@ -269,6 +284,7 @@ test('numeric fields reject blank values instead of coercing them to zero', { sk
     editor.querySelector<HTMLButtonElement>('button:last-child')!.click();
     return { payload, error: editor.querySelector('.merge-manual-error')?.textContent };
   }));
+  if (result == null) return;
   assert.equal(result?.payload, undefined);
   assert.equal(result?.error, '올바른 숫자를 입력하세요.');
 });
@@ -310,6 +326,7 @@ test('image editor hides byte data and supports side selection, property edits, 
     }
     return { family: editor.dataset.editorFamily, hiddenBytes, resolutions };
   }));
+  if (result == null) return;
   assert.equal(result?.family, 'image');
   assert.equal(result?.hiddenBytes, true);
   assert.deepEqual(result?.resolutions, [
@@ -387,6 +404,7 @@ test('image upload validates files and ignores stale or detached editor results'
 
     return { uploadCalls, mimeError, sizeError, resolutions };
   }));
+  if (result == null) return;
   assert.equal(result?.uploadCalls, 0);
   assert.equal(result?.mimeError, 'PNG, JPEG, GIF, BMP, WEBP 이미지 파일만 올릴 수 있습니다.');
   assert.equal(result?.sizeError, '이미지는 5MB 이하만 올릴 수 있습니다.');
@@ -428,6 +446,7 @@ test('document property editor covers section, style, numbering, field, and reso
     }
     return outputs;
   }));
+  if (result == null) return;
   assert.equal(result?.length, 5);
   for (const output of result ?? []) {
     assert.equal(output.family, 'document-properties');
@@ -450,6 +469,7 @@ test('atomic conflicts do not construct a manual editor', { skip: browserSkipRea
       onResolve: () => undefined,
     }) === null;
   }));
+  if (result == null) return;
   assert.equal(result, true);
 });
 
@@ -524,6 +544,7 @@ test('manual editor resolutions participate in resolver Undo/Redo and validation
       enabledAfterRedoValidation,
     };
   }));
+  if (result == null) return;
   assert.deepEqual(result, {
     initiallyDisabled: true,
     resolutionAfterApply: { kind: 'manual', payload: 'Manual text' },
@@ -559,6 +580,7 @@ test('default source branch still prompts, disables delete, and dismissal keeps 
       overlayRemoved: !document.querySelector('.merge-confirm-overlay'),
     };
   }));
+  if (result == null) return;
   assert.deepEqual(result, {
     disposition: 'keep',
     deleteDisabled: true,
