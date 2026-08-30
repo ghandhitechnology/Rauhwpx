@@ -272,9 +272,13 @@ try {
 
     await page.waitForSelector('.ag-user-question[data-inactive="false"] .ag-question-option', { timeout: 10_000 });
     assert(
-      await page.$eval('.ag-user-question', (node) => node.parentElement?.classList.contains('ag-messages')),
-      'Live question is parented by the transcript',
+      await page.$eval('.ag-user-question', (node) => (
+        node.parentElement?.classList.contains('ag-chat-page')
+        && node.nextElementSibling?.classList.contains('ag-composer')
+      )),
+      'Live question is attached immediately above the composer',
     );
+    assert(await page.$('.ag-messages > .ag-question-timeline-anchor'), 'Transcript position is reserved while the question is live');
     assert(await page.$eval('.ag-question-count', (node) => node.textContent === '1 / 2'), 'First card is active');
     // The prompt receives focus when a card opens, so number shortcuts must
     // select options without stealing an editable control's keystrokes.
@@ -307,9 +311,10 @@ try {
     assert(restored.value === 'Keep my reconnect\ndraft', 'Other draft and Shift+Enter newline restored after reload');
     assert(restored.label === '현재 질문의 직접 답변' && restored.maxLength === 2_000, 'Other composer semantics restored');
     assert(
-      await page.$eval('.ag-user-question', (node) => node.parentElement?.classList.contains('ag-messages')),
-      'Reloaded live question is remounted in the transcript',
+      await page.$eval('.ag-user-question', (node) => node.nextElementSibling?.classList.contains('ag-composer')),
+      'Reloaded live question is restored above the composer',
     );
+    assert(await page.$('.ag-messages > .ag-question-timeline-anchor'), 'Reload restores the chronological transcript position');
 
     await page.click('.ag-question-back');
     const selectedAfterReload = await page.$$eval(
@@ -323,36 +328,30 @@ try {
       await page.setViewport({ width: Math.max(720, width + 120), height });
       await page.evaluate((value) => document.documentElement.style.setProperty('--ag-sidebar-width', `${value}px`), width);
       await page.waitForFunction(() => {
-        const messages = document.querySelector('.ag-messages');
         const question = document.querySelector('.ag-user-question[data-inactive="false"]');
         const actions = question?.querySelector('.ag-question-actions');
-        if (!(messages instanceof HTMLElement) || !(question instanceof HTMLElement) || !(actions instanceof HTMLElement)) return false;
-        const viewport = messages.getBoundingClientRect();
+        const composer = question?.nextElementSibling;
+        if (!(question instanceof HTMLElement) || !(actions instanceof HTMLElement) || !(composer instanceof HTMLElement)) return false;
         const card = question.getBoundingClientRect();
         const actionRow = actions.getBoundingClientRect();
-        return question.parentElement === messages
-          && card.top >= viewport.top
-          && actionRow.bottom <= viewport.bottom + 2;
+        return composer.classList.contains('ag-composer')
+          && actionRow.bottom <= card.bottom + 2;
       }, { timeout: 10_000 });
       const layout = await page.$eval('.ag-user-question', (node) => {
-        const messages = node.parentElement;
         const actions = node.querySelector('.ag-question-actions');
-        const viewport = messages.getBoundingClientRect();
+        const composer = node.nextElementSibling;
         const card = node.getBoundingClientRect();
         const actionRow = actions.getBoundingClientRect();
         return {
-          parentIsTranscript: messages.classList.contains('ag-messages'),
-          questionTop: card.top,
-          transcriptTop: viewport.top,
+          aboveComposer: composer?.classList.contains('ag-composer'),
           actionBottom: actionRow.bottom,
-          transcriptBottom: viewport.bottom,
+          questionBottom: card.bottom,
           scrollWidth: node.scrollWidth,
           clientWidth: node.clientWidth,
         };
       });
-      assert(layout.parentIsTranscript, `${width}px question remains in the transcript`);
-      assert(layout.questionTop >= layout.transcriptTop, `${width}px question top stays in the transcript viewport`);
-      assert(layout.actionBottom <= layout.transcriptBottom + 2, `${width}px action row stays in the transcript viewport`);
+      assert(layout.aboveComposer, `${width}px question remains above the composer`);
+      assert(layout.actionBottom <= layout.questionBottom + 2, `${width}px action row stays inside the question drawer`);
       assert(layout.scrollWidth <= layout.clientWidth + 1, `${width}px question has no horizontal overflow`);
       await screenshot(page, `ask-user-question-${width}x${height}`);
     }
@@ -390,14 +389,28 @@ try {
       'Provider received selections and Other text on the original call',
     );
     await page.waitForSelector('.ag-question-history');
-    const resolvedHistory = await page.$eval('.ag-question-history', (node) => ({
-      answered: node.textContent.includes('답변 완료'),
-      parentIsTranscript: node.parentElement?.classList.contains('ag-messages'),
-      transientCount: document.querySelectorAll('.ag-user-question').length,
-    }));
+    const resolvedHistory = await page.$eval('.ag-question-history', (node) => {
+      const title = node.querySelector('.ag-question-history-title')?.getBoundingClientRect();
+      const label = node.querySelector('.ag-question-history-label');
+      const labelRect = label?.getBoundingClientRect();
+      const status = node.querySelector('.ag-question-history-status');
+      const statusRect = status?.getBoundingClientRect();
+      return {
+        answered: status?.textContent === '답변 완료',
+        label: label?.textContent,
+        headerAligned: Boolean(title && labelRect && statusRect
+          && Math.abs(labelRect.left - title.left) <= 2
+          && Math.abs(statusRect.right - title.right) <= 2),
+        parentIsTranscript: node.parentElement?.classList.contains('ag-messages'),
+        activeCount: document.querySelectorAll('.ag-user-question[data-inactive="false"]').length,
+        anchorCount: document.querySelectorAll('.ag-question-timeline-anchor').length,
+      };
+    });
     assert(
-      resolvedHistory.answered && resolvedHistory.parentIsTranscript && resolvedHistory.transientCount === 0,
-      'Resolved history replaces the live card inline',
+      resolvedHistory.answered && resolvedHistory.label === '에이전트 질문'
+        && resolvedHistory.headerAligned && resolvedHistory.parentIsTranscript
+        && resolvedHistory.activeCount === 0 && resolvedHistory.anchorCount === 0,
+      'Resolved history aligns its label and status across the chronological card header',
     );
     await screenshot(page, 'ask-user-question-resolved-history');
 
@@ -532,8 +545,9 @@ try {
     assert(lostResponse.error?.code === 'SOCKET_CLOSED', 'Mock provider observed the connection loss');
     await page.waitForFunction(() => [...document.querySelectorAll('.ag-question-history')]
       .some((node) => node.textContent?.includes('만료') && node.parentElement?.classList.contains('ag-messages'))
-      && !document.querySelector('.ag-user-question'));
-    assert(!await page.$('.ag-user-question'), 'Provider loss removes the transient question node');
+      && !document.querySelector('.ag-user-question[data-inactive="false"]')
+      && !document.querySelector('.ag-question-timeline-anchor'));
+    assert(!await page.$('.ag-user-question[data-inactive="false"]'), 'Provider loss closes the live question drawer');
     await screenshot(page, 'ask-user-question-provider-loss-history');
     await page.click('.ag-send');
   });

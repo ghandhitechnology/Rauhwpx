@@ -78,9 +78,9 @@ test('conversation follows streamed output until the user scrolls away', () => {
   assert.match(source, /scrollConversationToMessage/);
   assert.match(source, /scrollConversationToEnd/);
   assert.match(source, /return content\.classList\.contains\('ag-msg-user'\) \? content : messagesEnd/);
-  assert.match(source, /questionController\.hasPending\(\) && questionController\.root\.parentElement === messages[\s\S]*return questionController\.root/);
+  assert.doesNotMatch(source, /return questionController\.root/);
   assert.match(source, /function conversationScrollTarget\(node: HTMLElement\)/);
-  assert.match(source, /const offset = node === questionController\.root \? 0 : conversationFocusOffset\(\)/);
+  assert.match(source, /conversationAnchorTop\(node\) - conversationFocusOffset\(\)/);
   assert.match(source, /Math\.min\(target, Math\.max\(0, messages\.scrollHeight - messages\.clientHeight\)\)/);
   assert.match(source, /followConversation = isConversationFollowingTurn\(\)/);
   assert.match(source, /appendConversation\(userBubble\)/);

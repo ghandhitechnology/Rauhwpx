@@ -39,24 +39,41 @@ test('question interaction uses strict protocol v4 and a reconnect-idempotent an
   );
 });
 
-test('pending question is an ordered transcript card and blocks ordinary chat without hiding Stop', () => {
-  assert.match(sidebar, /chatPage\.append\(header, connBanner, messages, review, planSurface, composer\)/);
-  assert.match(sidebar, /function mountLiveQuestion\(\): void \{[\s\S]*questionController\.root\.parentElement === messages\) return;[\s\S]*appendConversation\(questionController\.root\)/);
-  assert.match(sidebar, /case 'user-question-requested': \{[\s\S]*flushAssistantBuffer\(\{ kind: 'progress' \}\);[\s\S]*compactStreamIntoActivity\(e\.interaction\.agent\);[\s\S]*streamBubble = null;[\s\S]*questionController\.request\(e\.interaction, stored\);[\s\S]*mountLiveQuestion\(\);/);
+test('pending question stays above the composer while its transcript position is reserved', () => {
+  assert.match(sidebar, /chatPage\.append\(header, connBanner, messages, review, planSurface, questionController\.root, composer\)/);
+  assert.match(sidebar, /const questionTimelineAnchor = el\('span', 'ag-question-timeline-anchor'\)/);
+  assert.match(sidebar, /function mountQuestionTimelineAnchor\(\): void \{[\s\S]*appendConversation\(questionTimelineAnchor\)/);
+  assert.doesNotMatch(sidebar, /appendConversation\(questionController\.root\)/);
+  assert.match(sidebar, /case 'user-question-requested': \{[\s\S]*flushAssistantBuffer\(\{ kind: 'progress' \}\);[\s\S]*compactStreamIntoActivity\(e\.interaction\.agent\);[\s\S]*streamBubble = null;[\s\S]*questionController\.request\(e\.interaction, stored\);[\s\S]*mountQuestionTimelineAnchor\(\);/);
   assert.match(sidebar, /if \(questionController\.hasPending\(\)\) \{[\s\S]*questionController\.handleComposerSubmit\(\)/);
   assert.match(controller, /const stop = element\('button', 'ag-question-stop', '중지'\)/);
   assert.match(controller, /stop\.addEventListener\('click', options\.stop\)/);
   assert.match(css, /\.ag-user-question \{/);
   assert.match(css, /--ag-question-surface: var\(--ag-input-bg\)/);
   assert.match(css, /--ag-question-border/);
-  assert.match(css, /\.ag-user-question\s*\{[^}]*align-self:\s*stretch;[^}]*max-width:\s*100%;[^}]*max-height:\s*min\(70dvh, 580px, 100%\);/s);
-  assert.doesNotMatch(css, /\.ag-user-question:not\(\[data-inactive='true'\]\) \+ \.ag-composer/);
+  assert.match(css, /\.ag-user-question:not\(\[data-inactive='true'\]\) \+ \.ag-composer/);
+  assert.match(css, /\.ag-user-question\s*\{[^}]*margin:\s*0 12px;[^}]*border-bottom:\s*0;[^}]*border-radius:\s*12px 12px 0 0;/s);
 });
 
-test('question resolution replaces the mounted live card with immutable history', () => {
+test('question resolution replaces its chronological anchor with immutable history', () => {
   assert.match(sidebar, /const historyCard = renderUserQuestionHistory\(historyMessage\)/);
-  assert.match(sidebar, /questionController\.root\.parentElement === messages[\s\S]*questionController\.root\.replaceWith\(historyCard\)/);
+  assert.match(sidebar, /questionTimelineAnchorInteractionId === interaction\.interactionId[\s\S]*questionTimelineAnchor\.parentElement === messages[\s\S]*questionTimelineAnchor\.replaceWith\(historyCard\)/);
   assert.match(sidebar, /else appendConversation\(historyCard\)/);
+});
+
+test('question history separates its label and outcome across the card header', () => {
+  assert.match(sidebar, /title\.append\([\s\S]*'ag-question-history-label', '에이전트 질문'[\s\S]*'ag-question-history-status', status[\s\S]*\)/);
+  assert.doesNotMatch(sidebar, /`에이전트 질문 · \$\{status\}`/);
+  assert.match(sidebar, /\? '답변 완료'[\s\S]*\? '중단됨'[\s\S]*: '만료됨'/);
+  assert.match(css, /\.ag-question-history-title\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*minmax\(0, 1fr\) auto;[^}]*align-items:\s*center;/s);
+  assert.match(css, /\.ag-question-history-status\s*\{[^}]*text-align:\s*right;[^}]*white-space:\s*nowrap;/s);
+});
+
+test('expanded drawer uses the question metadata as its only header', () => {
+  assert.match(controller, /collapsed \? question\.question : question\.header/);
+  assert.doesNotMatch(controller, /collapsed \? question\.question : '에이전트 질문'/);
+  assert.doesNotMatch(controller, /const heading = element\('div', 'ag-question-heading'\)/);
+  assert.match(css, /\.ag-question-disclosure\[aria-expanded='true'\] \.ag-question-disclosure-label/);
 });
 
 test('cards support single, multiple, Other, navigation and atomic submission', () => {

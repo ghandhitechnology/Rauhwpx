@@ -1739,6 +1739,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   // 편대 도크는 입력기 위에 뜨는 오버레이라서 입력기의 자식으로 붙는다 —
   // 사이드바·전체 화면 어디로 옮겨져도 입력기를 따라간다.
   composer.appendChild(fleetView.root);
+  const questionTimelineAnchor = el('span', 'ag-question-timeline-anchor');
+  questionTimelineAnchor.hidden = true;
+  questionTimelineAnchor.setAttribute('aria-hidden', 'true');
+  let questionTimelineAnchorInteractionId: string | null = null;
   const questionController = createUserQuestionController({
     input,
     submitAnswers: (interactionId, answers) => bridge.answerUserQuestion(interactionId, answers),
@@ -1769,10 +1773,17 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       if (target === currentThread) {
         const historyCard = renderUserQuestionHistory(historyMessage);
         withAutoScroll(() => {
-          if (questionController.root.parentElement === messages) {
-            questionController.root.replaceWith(historyCard);
+          if (
+            questionTimelineAnchorInteractionId === interaction.interactionId
+            && questionTimelineAnchor.parentElement === messages
+          ) {
+            questionTimelineAnchor.replaceWith(historyCard);
           } else appendConversation(historyCard);
         });
+      }
+      if (questionTimelineAnchorInteractionId === interaction.interactionId) {
+        questionTimelineAnchor.remove();
+        questionTimelineAnchorInteractionId = null;
       }
     },
   });
@@ -1786,7 +1797,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   dockResizeObserver?.observe(fleetView.root);
   // 사이드바에서는 변경 검토와 계획을 분리한다. 계획은 입력기 바로 위에
   // 머물러 접었을 때 작은 진행 표시로 이어지고, 변경 검토는 가려지지 않는다.
-  chatPage.append(header, connBanner, messages, review, planSurface, composer);
+  chatPage.append(header, connBanner, messages, review, planSurface, questionController.root, composer);
 
   /** 입력기 하단 한 줄이 겹치지 않고 붙는 폭을 재서 사이드바 최솟값으로 쓴다.
    *  펼쳐진 사이드바의 현재 폭이 아니라 max-content(말줄임 바닥)로 잰다.
@@ -2353,7 +2364,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     reviewResize.inert = !detailActive;
     if (focusLayoutActive) {
       chatPage.setAttribute('aria-hidden', 'false');
-      if (composer.parentElement !== chatPage) chatPage.appendChild(composer);
+      if (composer.parentElement !== chatPage) chatPage.append(questionController.root, composer);
     }
     applyPlanMinimizedState();
   }
@@ -2487,8 +2498,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     planColumn.setAttribute('aria-hidden', 'true');
     threadsPage.setAttribute('aria-hidden', 'true');
     chatPage.setAttribute('aria-hidden', 'false');
-    // 변경 검토·계획·입력기는 다시 사이드바의 분리된 inline 흐름으로 돌아간다.
-    chatPage.append(review, planSurface, composer);
+    // 변경 검토·계획·질문·입력기는 다시 사이드바의 분리된 inline 흐름으로 돌아간다.
+    chatPage.append(review, planSurface, questionController.root, composer);
     applyPlanMinimizedState();
   }
 
@@ -3851,7 +3862,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }
     if (questionController.interaction()?.threadId === thread.id) {
       questionController.setVisible(true);
-      mountLiveQuestion();
+      mountQuestionTimelineAnchor();
     }
     scrollConversationToEnd();
   }
@@ -3864,7 +3875,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       : message.outcome.status === 'cancelled'
         ? '중단됨'
         : '만료됨';
-    card.append(el('div', 'ag-question-history-title', `에이전트 질문 · ${status}`));
+    const title = el('div', 'ag-question-history-title');
+    title.append(
+      el('span', 'ag-question-history-label', '에이전트 질문'),
+      el('span', 'ag-question-history-status', status),
+    );
+    card.append(title);
     for (const question of message.interaction.questions) {
       const item = el('div', 'ag-question-history-item');
       item.append(
@@ -4400,7 +4416,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     );
     const showingLiveQuestion = liveQuestion?.threadId === currentThread.id;
     questionController.setVisible(showingLiveQuestion);
-    if (showingLiveQuestion) mountLiveQuestion();
+    if (showingLiveQuestion) mountQuestionTimelineAnchor();
     if (liveQuestion && !showingLiveQuestion) {
       enterReadOnlyMode('에이전트가 다른 채팅에서 답변을 기다리는 중');
       setThreadsPanelOpen(false);
@@ -4643,10 +4659,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     messages.insertBefore(node, conversationTail());
   }
 
-  function mountLiveQuestion(): void {
+  function mountQuestionTimelineAnchor(): void {
     const interaction = questionController.interaction();
-    if (interaction?.threadId !== currentThread.id || questionController.root.parentElement === messages) return;
-    withAutoScroll(() => appendConversation(questionController.root));
+    if (interaction?.threadId !== currentThread.id) return;
+    questionTimelineAnchorInteractionId = interaction.interactionId;
+    if (questionTimelineAnchor.parentElement === messages) return;
+    withAutoScroll(() => appendConversation(questionTimelineAnchor));
   }
 
   function resetConversation(): void {
@@ -4655,13 +4673,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     // 편대 카드는 도구 행처럼 휘발성이다 — 대화를 갈아 끼우면 타이머까지 버린다.
     suppressedSpawnCalls.clear();
     fleetView.reset();
+    questionTimelineAnchorInteractionId = null;
     messages.replaceChildren(turnPending, messagesEnd);
   }
 
   function latestTurnAnchor(): HTMLElement | null {
-    if (questionController.hasPending() && questionController.root.parentElement === messages) {
-      return questionController.root;
-    }
     const last = messagesEnd.previousElementSibling;
     const content = last === turnPending ? turnPending.previousElementSibling : last;
     if (!(content instanceof HTMLElement)) return null;
@@ -4675,8 +4691,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   }
 
   function conversationScrollTarget(node: HTMLElement): number {
-    const offset = node === questionController.root ? 0 : conversationFocusOffset();
-    const target = Math.max(0, conversationAnchorTop(node) - offset);
+    const target = Math.max(0, conversationAnchorTop(node) - conversationFocusOffset());
     return Math.min(target, Math.max(0, messages.scrollHeight - messages.clientHeight));
   }
 
@@ -5265,7 +5280,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         if (target === currentThread) {
           questionController.setVisible(true);
           questionController.request(e.interaction, stored);
-          mountLiveQuestion();
+          mountQuestionTimelineAnchor();
           persistCurrentThread();
         } else {
           upsertThread(target);
@@ -5348,7 +5363,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
             : undefined;
           questionController.setVisible(true);
           questionController.request(liveQuestion, stored);
-          mountLiveQuestion();
+          mountQuestionTimelineAnchor();
         }
         if (currentThread.pendingUserQuestion) {
           const pendingId = currentThread.pendingUserQuestion.interaction.interactionId;

@@ -3197,10 +3197,10 @@ function handleMcpMessage(record, sock, msg) {
         }
         const generation = record.agentSession.generation;
         void (async () => {
-          // Pi에는 위임 에이전트 질문 경로가 없어 MCP 프로세스 자체가 루트다.
+          // Pi/Rau에는 위임 에이전트 질문 경로가 없어 MCP 프로세스 자체가 루트다.
           // 다른 레거시 전송은 별도 프로바이더 스트림의 정확한 일회용 범위 티켓을
           // 기다린 뒤 소비해, 상속된 환경 변수만으로 루트를 사칭하지 못하게 한다.
-          if (sock.agentLabel !== 'pi') {
+          if (!OPENROUTER_AGENTS.has(sock.agentLabel)) {
             const matchingScopes = await waitForUserQuestionScopes(
               record,
               sock.agentLabel,

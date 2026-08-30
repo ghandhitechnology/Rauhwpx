@@ -277,7 +277,7 @@ test('direct MCP questions survive Studio reload and settle atomically', { timeo
   await studio.next((frame) => frame.type === 'welcome');
   await startRunningChat(studio);
 
-  const mcp = await openClient(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=question-session&agent=pi&role=chat`);
+  const mcp = await openClient(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=question-session&agent=rau&role=chat`);
   t.after(() => closeClient(mcp));
   sendFrame(mcp, {
     type: 'tool-call', id: 17, tool: 'ask_user_question', args: questionArgs(), workflow: 'direct',

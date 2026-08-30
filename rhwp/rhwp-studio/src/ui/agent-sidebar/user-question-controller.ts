@@ -216,7 +216,10 @@ export function createUserQuestionController(options: UserQuestionControllerOpti
     disclosure.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
     disclosure.setAttribute('aria-controls', bodyId);
     disclosure.append(
-      element('span', 'ag-question-disclosure-label', collapsed ? question.question : '에이전트 질문'),
+      element('span', 'ag-question-disclosure-label', collapsed ? question.question : question.header),
+      ...(!collapsed
+        ? [element('span', 'ag-question-mode', question.mode === 'multiple' ? '복수 선택' : '하나 선택')]
+        : []),
       element('span', 'ag-question-count', `${draft.activeQuestionIndex + 1} / ${interaction.questions.length}`),
     );
     disclosure.addEventListener('click', () => {
@@ -229,11 +232,6 @@ export function createUserQuestionController(options: UserQuestionControllerOpti
 
     const body = element('div', 'ag-question-body');
     body.id = bodyId;
-    const heading = element('div', 'ag-question-heading');
-    heading.append(
-      element('span', 'ag-question-header', question.header),
-      element('span', 'ag-question-mode', question.mode === 'multiple' ? '복수 선택' : '하나 선택'),
-    );
     const prompt = element('h3', 'ag-question-prompt', question.question);
     prompt.tabIndex = -1;
     const optionsGroup = element('div', 'ag-question-options');
@@ -278,7 +276,7 @@ export function createUserQuestionController(options: UserQuestionControllerOpti
       other.addEventListener('click', selectOther);
       optionsGroup.appendChild(other);
     }
-    body.append(heading, prompt, optionsGroup);
+    body.append(prompt, optionsGroup);
     if (errorMessage) {
       const error = element('div', 'ag-question-error', errorMessage);
       error.setAttribute('role', 'alert');
