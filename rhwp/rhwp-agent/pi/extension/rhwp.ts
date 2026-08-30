@@ -132,7 +132,7 @@ export function hubSocketUrl(config: PiExtensionConfig): string {
   return `${config.wsUrl}?${parts.join('&')}`;
 }
 
-/** 허브로 보낼 v3 tool-call 프레임. */
+/** 허브로 보낼 v4 tool-call 프레임. */
 export function encodeToolCallFrame(
   id: number,
   tool: string,
@@ -140,7 +140,7 @@ export function encodeToolCallFrame(
   config: PiExtensionConfig,
 ): Record<string, unknown> {
   return {
-    v: 3,
+    v: 4,
     type: 'tool-call',
     id,
     tool,
@@ -445,7 +445,7 @@ export async function fetchToolDefinitions(
 interface Inflight {
   resolve: (value: unknown) => void;
   reject: (err: unknown) => void;
-  timer: ReturnType<typeof setTimeout>;
+  timer: ReturnType<typeof setTimeout> | null;
 }
 
 /** 허브 /mcp WS 클라이언트 — 지연 연결, 끊기면 다음 호출에서 다시 연결한다. */
@@ -457,7 +457,7 @@ function createHubClient(config: PiExtensionConfig) {
 
   function failAllInflight(err: unknown): void {
     for (const [, entry] of inflight) {
-      clearTimeout(entry.timer);
+      if (entry.timer) clearTimeout(entry.timer);
       entry.reject(err);
     }
     inflight.clear();
@@ -501,7 +501,7 @@ function createHubClient(config: PiExtensionConfig) {
         const entry = inflight.get(frame.id);
         if (!entry) return;
         inflight.delete(frame.id);
-        clearTimeout(entry.timer);
+        if (entry.timer) clearTimeout(entry.timer);
         if (frame.ok) entry.resolve(frame.result);
         else entry.reject(hubError(frame.code, frame.message));
       });
@@ -535,17 +535,21 @@ function createHubClient(config: PiExtensionConfig) {
         const entry = inflight.get(id);
         if (!entry) return;
         inflight.delete(id);
-        clearTimeout(entry.timer);
+        if (entry.timer) clearTimeout(entry.timer);
         settle(reject, hubError('ABORTED', 'tool call was aborted'));
       }
-      const timer = setTimeout(() => {
-        inflight.delete(id);
-        settle(reject, hubError(
-          'TOOL_TIMEOUT',
-          'The hub did not respond within 180s; if this was a document edit, re-read before '
-            + 'retrying to avoid duplicates',
-        ));
-      }, CALL_TIMEOUT_MS);
+      // A user-question call is intentionally unbounded. The hub resolves it on
+      // answer/cancel and provider or hub disconnects still reject the socket.
+      const timer = tool === 'ask_user_question'
+        ? null
+        : setTimeout(() => {
+          inflight.delete(id);
+          settle(reject, hubError(
+            'TOOL_TIMEOUT',
+            'The hub did not respond within 180s; if this was a document edit, re-read before '
+              + 'retrying to avoid duplicates',
+          ));
+        }, CALL_TIMEOUT_MS);
       inflight.set(id, {
         resolve: (value) => settle(resolve, value),
         reject: (err) => settle(reject, err),
@@ -556,7 +560,7 @@ function createHubClient(config: PiExtensionConfig) {
         socket.send(JSON.stringify(encodeToolCallFrame(id, tool, args, config)));
       } catch (e: any) {
         inflight.delete(id);
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
         settle(reject, hubError('HUB_UNAVAILABLE', `failed to send to hub: ${e?.message ?? e}`));
       }
     });

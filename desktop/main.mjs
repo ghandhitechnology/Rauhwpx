@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, dirname, extname, join, sep } from 'node:path';
+import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   app,
@@ -24,6 +24,7 @@ import {
   isHubHealthy,
   issueHubSessionToken,
   nextHubRestartDelay,
+  packagedRhwpBinary,
   requestHubShutdown,
   resolveHubLaunch,
   spawnHubProcess,
@@ -50,6 +51,7 @@ import {
   STUDIO_URL,
   installStudioProtocol,
   registerStudioScheme,
+  resolveDevelopmentUrl,
 } from './studio-protocol.mjs';
 import { createSecretVault, handleSecretRequest } from './secret-vault.mjs';
 import { CloudClient } from './cloud-client.mjs';
@@ -71,7 +73,10 @@ const __dirname = fileURLToPath(new URL('.', import.meta.url));
 const RELEASES_URL = 'https://github.com/ghandhitechnology/Rauhwpx/releases/latest';
 const RELEASES_API_URL = 'https://api.github.com/repos/ghandhitechnology/Rauhwpx/releases/latest';
 const PRELOAD_PATH = join(__dirname, 'preload.cjs');
-const devUrl = process.env.RHWP_DEV_URL || '';
+const devUrl = resolveDevelopmentUrl({
+  packaged: app.isPackaged,
+  rawUrl: process.env.RHWP_DEV_URL,
+});
 const launchId = randomUUID();
 const hubToken = createHubToken();
 const devOrigin = devUrl ? new URL(devUrl).origin : null;
@@ -95,6 +100,12 @@ function sessionForEvent(event) {
 }
 
 app.setName('Rauhwpx');
+if (!app.isPackaged) {
+  const developmentUserData = process.env.RHWP_DESKTOP_USER_DATA
+    ? resolve(process.env.RHWP_DESKTOP_USER_DATA)
+    : join(__dirname, '..', '.run', 'desktop-user-data');
+  app.setPath('userData', developmentUserData);
+}
 registerStudioScheme(protocol);
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
@@ -109,17 +120,6 @@ function unpackedPath(path) {
 
 function agentScript() {
   return unpackedPath(join(__dirname, '..', 'rhwp', 'rhwp-agent', 'server.mjs'));
-}
-
-function nativeRhwpExecutable() {
-  const executable = process.platform === 'win32' ? 'rhwp.exe' : 'rhwp';
-  const bundled = unpackedPath(join(__dirname, 'bin', `${process.platform}-${process.arch}`, executable));
-  if (existsSync(bundled)) return bundled;
-  if (app.isPackaged) throw new Error(`Packaged native document extractor is missing: ${bundled}`);
-  const configured = String(process.env.RHWP_BIN ?? '').trim();
-  if (configured && existsSync(configured)) return configured;
-  const development = join(__dirname, '..', 'rhwp', 'target', 'release', executable);
-  return existsSync(development) ? development : null;
 }
 
 class AgentHubOwner {
@@ -206,7 +206,10 @@ class AgentHubOwner {
     }
 
     const server = agentScript();
-    const rhwpExecutable = nativeRhwpExecutable();
+    const rhwpBinary = packagedRhwpBinary({
+      packaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+    });
     const launch = resolveHubLaunch({
       packaged: app.isPackaged,
       execPath: process.execPath,
@@ -220,6 +223,7 @@ class AgentHubOwner {
         RHWP_AGENT_PORT: '0',
         RHWP_AGENT_TOKEN: hubToken,
         RHWP_AGENT_MODE: 'production',
+        ...(rhwpBinary ? { RHWP_BIN: rhwpBinary } : {}),
         RHWP_LAUNCH_ID: launchId,
         RHWP_OWNER_PID: String(process.pid),
         RHWP_RUNTIME_DIR: this.runtimeDir,
@@ -228,7 +232,6 @@ class AgentHubOwner {
         RHWP_OWN_RUNTIME_DIR: '1',
         RHWP_OWN_WORK_DIR: '1',
         RHWP_SECRET_BROKER: 'ipc',
-        ...(rhwpExecutable ? { RHWP_BIN: rhwpExecutable } : {}),
       },
     });
     if (!launch) throw new Error(`Agent hub launch command not found: ${server}`);
@@ -672,7 +675,7 @@ async function createWindow(launch = launchRequest(), { generatedDocument = null
   const closeDisplayConnection = () => {
     void cloudDisplayConnections.close(displayOwnerId);
   };
-  const session = sessions.addWindow(window, { source: launch.source, openFiles: [] });
+  const session = sessions.addWindow(window);
   session.generatedDocument = generatedDocument
     ? { launchDocumentId: randomUUID(), ...generatedDocument }
     : null;

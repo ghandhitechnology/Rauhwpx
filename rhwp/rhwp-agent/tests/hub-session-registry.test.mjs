@@ -14,6 +14,8 @@ test('registry keeps mutable tenant state in separate Map records', () => {
   const beta = registry.getOrCreate('beta');
 
   alpha.pendingCalls.set(1, { clientId: 10 });
+  alpha.userQuestionResponseReceipts.set('response-1', { ok: true });
+  alpha.pendingUserQuestion = { interactionId: 'interaction-1' };
   alpha.mcpSockets.add('alpha-socket');
   alpha.nextCapabilityEpoch++;
 
@@ -22,6 +24,8 @@ test('registry keeps mutable tenant state in separate Map records', () => {
   assert.equal(registry.get('beta'), beta);
   assert.notEqual(alpha, beta);
   assert.equal(beta.pendingCalls.size, 0);
+  assert.equal(beta.userQuestionResponseReceipts.size, 0);
+  assert.equal(beta.pendingUserQuestion, null);
   assert.equal(beta.mcpSockets.size, 0);
   assert.equal(beta.nextCapabilityEpoch, 1);
 });

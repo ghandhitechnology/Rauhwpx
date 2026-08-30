@@ -51,7 +51,7 @@ test('bridge owns the lease and retains it until every in-flight tool settles', 
     deriveAgentEditingLease({ turnRunning: false, activeToolRequests: 0, agent: 'pi' }),
     { active: false, agent: 'pi' },
   );
-  assert.match(bridge, /deriveAgentEditingLease\(\{[\s\S]*turnRunning: this\.turnRunning,[\s\S]*activeToolRequests: this\.activeToolRequests[\s\S]*workflow: this\.workflow,[\s\S]*phase: this\.phase/);
+  assert.match(bridge, /deriveAgentEditingLease\(\{[\s\S]*turnRunning: this\.turnRunning,[\s\S]*activeToolRequests: this\.activeToolRequests[\s\S]*workflow: this\.workflow,[\s\S]*phase: this\.phase,[\s\S]*waitingForUser: this\.pendingUserQuestionId !== null/);
   assert.match(bridge, /case 'turn-start':[\s\S]*this\.editingAgent = event\.agent;[\s\S]*this\.syncEditingLease\(\)/);
   assert.match(bridge, /case 'turn-end':[\s\S]*this\.turnRunning = false;[\s\S]*this\.syncEditingLease\(\)/);
   assert.match(bridge, /this\.activeToolRequests \+= 1;[\s\S]*\.finally\(\(\) => \{[\s\S]*this\.activeToolRequests = Math\.max\(0, this\.activeToolRequests - 1\);[\s\S]*this\.syncEditingLease\(\)/);
@@ -102,6 +102,39 @@ test('plan mode leaves the document editable while a planning turn is running', 
       turnRunning: true, activeToolRequests: 0, agent: 'pi', workflow: 'direct', phase: 'direct',
     }),
     { active: true, agent: 'pi' },
+  );
+  assert.deepEqual(
+    deriveAgentEditingLease({
+      turnRunning: true,
+      activeToolRequests: 0,
+      agent: 'claude',
+      workflow: 'plan',
+      phase: 'planning',
+      waitingForUser: true,
+    }),
+    { active: false, agent: 'claude', waitingForUser: true },
+  );
+  assert.deepEqual(
+    deriveAgentEditingLease({
+      turnRunning: true,
+      activeToolRequests: 0,
+      agent: 'codex',
+      workflow: 'question',
+      phase: 'questioning',
+      waitingForUser: true,
+    }),
+    { active: false, agent: 'codex', waitingForUser: true },
+  );
+  assert.deepEqual(
+    deriveAgentEditingLease({
+      turnRunning: true,
+      activeToolRequests: 0,
+      agent: 'grok',
+      workflow: 'direct',
+      phase: 'direct',
+      waitingForUser: true,
+    }),
+    { active: true, agent: 'grok', waitingForUser: true },
   );
 });
 
@@ -157,6 +190,7 @@ test('editing frame reflects the active agent and has responsive reduced-motion 
   assert.match(html, /id="agent-editing-frame"[\s\S]*id="agent-editing-status"[^>]*role="status"[^>]*aria-live="polite"/);
   assert.match(main, /editorArea\?\.setAttribute\('aria-busy', lease\.active \? 'true' : 'false'\)/);
   assert.match(main, /statusLabel\.textContent = `\$\{AGENT_LABEL\[lease\.agent\]\}가 문서를 편집 중이에요`/);
+  assert.match(main, /if \(lease\.waitingForUser\) statusLabel\.textContent = `\$\{AGENT_LABEL\[lease\.agent\]\}가 답변을 기다리고 있어요`/);
   for (const agent of ['claude', 'pi', 'grok', 'cursor']) {
     assert.match(css, new RegExp(`data-editing-agent='${agent}'`));
   }

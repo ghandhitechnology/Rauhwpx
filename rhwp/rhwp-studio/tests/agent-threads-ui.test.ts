@@ -73,7 +73,7 @@ test('reasoning and model tweaks do not lock or rebuild the composer', () => {
   // 계획 상태가 그대로면 검토 칸을 비웠다 다시 그리지 않는다.
   assert.match(
     source,
-    /if \(chatWorkflow === state\.workflow && planningPhase === state\.phase && samePlanId && sameApproval\) \{\s*return;/,
+    /if \(chatWorkflow === state\.workflow && planningPhase === state\.phase && samePlanId && sameApproval\) \{\s*if \(hadPendingAction\) \{[\s\S]*?\}\s*return;/,
   );
 });
 
@@ -84,7 +84,7 @@ test('model, permission, and skill utilities live in the composer accessory row'
   assert.match(source, /composerUtilities\.append\(composerUtilityActions\)/);
   assert.match(source, /composerMeta\.append\(selectors, composerUtilities\)/);
   assert.match(source, /composer\.append\(composerOverlay, slashMenu, templateChip, composerField, composerMeta, configPanel\)/);
-  assert.match(source, /chatPage\.append\(header, connBanner, messages, review, planSurface, composer\)/);
+  assert.match(source, /chatPage\.append\(header, connBanner, messages, review, planSurface, questionController\.root, composer\)/);
   assert.match(source, /permissionBtn\.textContent = unrestricted \? '전체' : '안전'/);
   assert.match(css, /\.ag-composer-meta\s*\{/);
   assert.doesNotMatch(css, /\.ag-composer-utilities\s*\{[^}]*flex-direction:\s*column;/s);
@@ -135,8 +135,8 @@ test('past chats on the active file reopen as writable and adopt stable document
   assert.match(source, /currentThread\.documentId = currentDocumentId \?\? currentThread\.documentId/);
   assert.match(source, /currentThread\.docKey = currentDocKey \?\? currentThread\.docKey/);
   assert.match(source, /persistCurrentThread\(\);\s*localThreadId = currentThread\.id;[\s\S]*editorCloudScope\.bind\([\s\S]*const scopeRefresh = cloudUi\.refreshLeaseScope\(\);\s*exitReadOnlyMode\(\);\s*void scopeRefresh\.then/);
-  assert.match(source, /currentThread\.id !== selectedThreadId[\s\S]*composerExecution\(workspace\.composerTarget\(\)\)\.kind === 'local'[\s\S]*startCurrentBridgeChat\(true\)/);
-  assert.match(source, /const history = currentThread\.messages\.flatMap/);
+  assert.match(source, /currentThread\.id !== selectedThreadId[\s\S]*if \(liveQuestion\)[\s\S]*composerExecution\(workspace\.composerTarget\(\)\)\.kind === 'local'[\s\S]*startCurrentBridgeChat\(true\)/);
+  assert.match(source, /const history = serializeThreadMessagesForProviderHistory\(currentThread\.messages\)/);
   assert.match(source, /currentThread\.id, currentThread\.documentId, currentThread\.docKey, history/);
   assert.match(serverSource, /bootstrapHistory: normalizeChatHistory\(requestedHistory\)/);
   assert.match(serverSource, /addReopenedChatHistory\(\s*activeSession,/);

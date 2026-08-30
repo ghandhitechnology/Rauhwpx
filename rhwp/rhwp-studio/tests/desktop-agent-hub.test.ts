@@ -251,6 +251,8 @@ test('launch falls back to Electron-as-Node when npm and node are missing', () =
 
 test('desktop shell owns one ephemeral authenticated hub and exposes session IPC', () => {
   assert.match(desktopMain, /app\.requestSingleInstanceLock\(\)/);
+  assert.match(desktopMain, /if \(!app\.isPackaged\)[\s\S]*app\.setPath\('userData', developmentUserData\)/);
+  assert.match(desktopMain, /\.run', 'desktop-user-data'/);
   assert.match(desktopMain, /app\.on\('second-instance'/);
   assert.match(desktopMain, /await hubOwner\.ensure\(\);[\s\S]*await createWindow\(request\)/);
   assert.match(desktopMain, /ipcMain\.handle\('desktop:get-session-context'/);
@@ -288,6 +290,32 @@ test('ready-line parser binds readiness to the Electron launch', async () => {
   assert.deepEqual(await pending, { launchId: 'launch-a', pid: 44, port: 32123 });
 });
 
+test('ready-line waiter accepts output emitted before it attaches', async () => {
+  const ready = { launchId: 'launch-fast', pid: 55, port: 32124 };
+  const child = new EventEmitter() as EventEmitter & {
+    stdout: EventEmitter;
+    rhwpStdoutHistory: string;
+  };
+  child.stdout = new EventEmitter();
+  child.rhwpStdoutHistory = `startup log\n${HUB_READY_PREFIX}${JSON.stringify(ready)}\n`;
+
+  assert.deepEqual(await waitForHubReadyLine(child, { launchId: ready.launchId }), ready);
+});
+
+test('ready-line waiter rejects a child that already exited', async () => {
+  const child = new EventEmitter() as EventEmitter & {
+    stdout: EventEmitter;
+    exitCode: number;
+  };
+  child.stdout = new EventEmitter();
+  child.exitCode = 1;
+
+  await assert.rejects(
+    waitForHubReadyLine(child, { launchId: 'launch-dead', timeoutMs: 100 }),
+    /exited before ready \(1\)/,
+  );
+});
+
 test('owned health checks send launch authentication and verify the child pid', async () => {
   let headers: Record<string, string> = {};
   const healthy = await isHubHealthy(32123, {
@@ -313,7 +341,7 @@ test('owned health checks send launch authentication and verify the child pid', 
   }), false);
 });
 
-test('studio dev server and repo npm start both boot the hub', () => {
+test('studio development and desktop builds include the agent hub', () => {
   assert.match(viteConfig, /rhwpAgentHubPlugin\(__dirname\)/);
   assert.match(viteHubPlugin, /spawnHubProcess\(\{/);
   assert.match(viteHubPlugin, /process\.execPath/);
@@ -327,6 +355,8 @@ test('studio dev server and repo npm start both boot the hub', () => {
   assert.match(rootPackage, /"start": "node rhwp\/rhwp-agent\/ctl.mjs start"/);
   assert.match(rootPackage, /"start:fg": "node rhwp\/rhwp-agent\/server.mjs"/);
   assert.match(rootPackage, /"stop": "node rhwp\/rhwp-agent\/ctl.mjs stop"/);
+  assert.match(rootPackage, /"build:desktop": "npm run build:native && npm run build:studio && npm run build:agent"/);
+  assert.match(rootPackage, /"desktop": "npm run build:desktop && electron \."/);
 });
 
 test('healthz JSON exposes pid for process control', () => {

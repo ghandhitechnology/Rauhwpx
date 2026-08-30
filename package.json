@@ -17,22 +17,26 @@
     "status": "node rhwp/rhwp-agent/ctl.mjs status",
     "dev:desktop": "wait-on http://127.0.0.1:7700 && cross-env RHWP_DEV_URL=http://127.0.0.1:7700 electron .",
     "build:wasm": "wasm-pack build rhwp --target web",
-    "build:studio": "npm run build:wasm && npm --prefix rhwp/rhwp-studio ci && npm --prefix rhwp/rhwp-studio run build",
+    "build:native": "cargo build --locked --release --manifest-path rhwp/Cargo.toml --bin rhwp",
+    "build:studio:app": "npm --prefix rhwp/rhwp-studio ci && npm --prefix rhwp/rhwp-studio run build",
+    "build:studio": "npm run build:wasm && npm run build:studio:app",
     "build:agent": "npm --prefix rhwp/rhwp-agent ci --omit=dev",
-    "build:native": "cargo build --manifest-path rhwp/Cargo.toml --release --locked --bin rhwp && node desktop/stage-native-rhwp.mjs",
-    "desktop": "npm run build:studio && electron .",
-    "dist:mac": "npm run build:native && npm run build:studio && npm run build:agent && electron-builder --mac dmg zip --arm64 --publish never",
-    "dist:win": "npm run build:native && npm run build:studio && npm run build:agent && electron-builder --win --publish never",
-    "dist:linux": "npm run build:native && npm run build:studio && npm run build:agent && electron-builder --linux AppImage deb --publish never",
-    "dist:linux:x64": "npm run build:native && npm run build:studio && npm run build:agent && electron-builder --linux AppImage deb --x64 --publish never",
-    "dist:linux:arm64": "npm run build:native && npm run build:studio && npm run build:agent && electron-builder --linux AppImage deb --arm64 --publish never",
+    "build:desktop": "npm run build:native && npm run build:studio && npm run build:agent",
+    "desktop": "npm run build:desktop && electron .",
+    "dist:mac": "npm run build:desktop && electron-builder --mac dmg zip --arm64 --publish never",
+    "dist:win": "npm run build:desktop && electron-builder --win --publish never",
+    "dist:linux": "npm run build:desktop && electron-builder --linux AppImage deb --publish never",
+    "dist:linux:x64": "npm run build:desktop && electron-builder --linux AppImage deb --x64 --publish never",
+    "dist:linux:arm64": "npm run build:desktop && electron-builder --linux AppImage deb --arm64 --publish never",
     "test:cloud": "node --test tests/desktop-cloud.test.mjs tests/desktop-cloud-display.test.mjs tests/desktop-cloud-protocol.test.mjs tests/desktop-cloud-client-reliability.test.mjs tests/desktop-cloud-connection-reliability.test.mjs tests/desktop-cloud-handoff-reliability.test.mjs tests/desktop-cloud-provisioner-recovery.test.mjs tests/desktop-provider-auth.test.mjs tests/desktop-app-servers.test.mjs tests/desktop-app-server-live.test.mjs && npm --prefix cloud test",
-    "check:cloud": "node --check desktop/cloud-*.mjs desktop/fs-replace.mjs && npm --prefix cloud run check"
+    "check:cloud": "node --check desktop/cloud-*.mjs desktop/fs-replace.mjs && npm --prefix cloud run check",
+    "verify:package": "node scripts/verify-desktop-package.mjs"
   },
   "dependencies": {
     "electron-updater": "^6.8.9"
   },
   "devDependencies": {
+    "@electron/asar": "3.4.1",
     "cross-env": "^10.1.0",
     "electron": "^43.3.0",
     "electron-builder": "^26.15.3",
@@ -49,16 +53,28 @@
       "cloud/install/install-macos.sh",
       "cloud/release/rauhwpx-cloud-bootstrap-linux-*.tar.gz",
       "rhwp/rhwp-studio/dist/**/*",
+      "!rhwp/rhwp-studio/dist/samples/**",
       "rhwp/rhwp-agent/**/*",
-      "rhwp/rhwp-agent/node_modules/**/*",
-      "!rhwp/rhwp-agent/tests/**"
+      "!rhwp/rhwp-agent/tests/**",
+      "!rhwp/rhwp-agent/README.md",
+      "!rhwp/rhwp-agent/package-lock.json",
+      "!rhwp/rhwp-agent/tsconfig.agents.json"
     ],
     "asarUnpack": [
       "rhwp/rhwp-agent/**",
-      "desktop/bin/**",
       "cloud/install/install.sh",
       "cloud/install/install-macos.sh",
       "cloud/release/rauhwpx-cloud-bootstrap-linux-*.tar.gz"
+    ],
+    "extraResources": [
+      {
+        "from": "rhwp/target/release",
+        "to": "bin",
+        "filter": [
+          "rhwp",
+          "rhwp.exe"
+        ]
+      }
     ],
     "fileAssociations": [
       {

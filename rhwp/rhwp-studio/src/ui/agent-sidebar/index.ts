@@ -49,6 +49,10 @@ import { renderChatMarkdown } from './chat-markdown.ts';
 import { appendMarkdown, planToMarkdown } from './plan-markdown.ts';
 import {
   createEmptyThread,
+  createPendingUserQuestionDraftSnapshot,
+  createUserQuestionHistoryMessage,
+  archivePendingUserQuestion,
+  expirePendingUserQuestion,
   fallbackTitle,
   getThread,
   explorerGroupIsCurrent,
@@ -58,6 +62,8 @@ import {
   removeThread,
   renameThread,
   setThreadTitle,
+  serializeThreadMessagesForProviderHistory,
+  pendingUserQuestionMatchesInteraction,
   subscribeThreadChanges,
   threadMatchesDocument,
   upsertThread,
@@ -137,6 +143,7 @@ import type {
   InlinePromptSendResult,
   InlinePromptSubmission,
 } from '../../agent/inline-prompt-context.ts';
+import { createUserQuestionController } from './user-question-controller.ts';
 import './sidebar-button-modern.css';
 
 export interface AgentSidebarDeps {
@@ -627,8 +634,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   } | null = null;
   /** chat-started 후 입력기를 여는 건 마지막으로 요청한 스레드뿐이다. */
   let chatStartPendingThreadId: string | null = null;
-  /** 계획 모드로 들어갈 때 안전 권한이면 전환 완료 후 전체 접근을 기본 적용한다. */
-  let planPermissionDefaultPending = false;
   /** 현재 스트리밍 중인 assistant 텍스트 (tool-call 이후에는 새로 연다). */
   let streamBubble: HTMLElement | null = null;
   const toolRows = new Map<string, ToolRowState>();
@@ -646,6 +651,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   let planCardPending = false;
   let followConversation = true;
   let conversationScrollRaf: number | null = null;
+  let conversationScrollTargetNode: HTMLElement | null = null;
+  let conversationScrollSmooth = false;
+  let conversationScrollLastFrame = 0;
   let conversationScrollLock = false;
   let conversationScrollUnlock: number | null = null;
   let replyPending = false;
@@ -713,6 +721,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   const assistantBubbleSources = new WeakMap<HTMLElement, string>();
   let attachmentsSending = false;
   let threadsPanelOpen = false;
+  let restoringLiveQuestion = false;
   let skillsPanelOpen = false;
   let settingsPanelOpen = false;
   let versionsPanelOpen = false;
@@ -761,6 +770,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     : initialWorkflowState.latestPlan;
   /** 서버가 현재 살아 있다고 말한 계획만 승인할 수 있다(기록 복원본은 읽기 전용). */
   let planApprovable = activePlan !== null && planningPhase === 'awaiting-approval';
+  let planActionPending = false;
   /** 이 채팅에서 원격 브라우저 전체 제어 경고를 이미 받았는가. */
   let browserbaseAcknowledged = chatWorkflow === 'plan' || chatWorkflow === 'question';
   /** 계획 모드 전환이 서버에서 확인된 뒤에만 활성화 안내를 표시한다. */
@@ -775,17 +785,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     // 같은 대화를 다시 열 뿐이라 입력칸·피커가 비활성으로 깜빡이지 않게 둔다.
     bridge.setServiceTier(selectedServiceTier);
     if (force) chatStartPendingThreadId = currentThread.id;
-    const history = currentThread.messages.flatMap((message) => (
-      (message.role === 'user' || (message.role === 'assistant' && message.kind === undefined))
-        && (message.text.trim() || (message.role === 'user' && message.skillName))
-        ? [{
-            role: message.role,
-            text: message.role === 'user' && message.skillName
-              ? `/${message.skillName}${message.text.trim() ? ` ${message.text}` : ''}`
-              : message.text,
-          }]
-        : []
-    ));
+    const history = serializeThreadMessagesForProviderHistory(currentThread.messages);
     bridge.startChat(selectedAgent, selectedModel, selectedEffort, force, permissionProfile, chatWorkflow,
       currentThread.id, currentThread.documentId, currentThread.docKey, history);
     if (force) updateComposer();
@@ -2141,7 +2141,27 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (conversationScrollLock) return;
     followConversation = isConversationFollowingTurn();
   };
+  const onMessagesWheel = (event: WheelEvent): void => {
+    if (event.deltaY < 0) stopFollowingConversation();
+  };
+  let messagesTouchStartY: number | null = null;
+  const onMessagesTouchStart = (event: TouchEvent): void => {
+    messagesTouchStartY = event.touches[0]?.clientY ?? null;
+  };
+  const onMessagesTouchMove = (event: TouchEvent): void => {
+    const y = event.touches[0]?.clientY;
+    if (y !== undefined && messagesTouchStartY !== null && y - messagesTouchStartY > 6) {
+      stopFollowingConversation();
+    }
+  };
+  const onMessagesPointerDown = (event: PointerEvent): void => {
+    if (event.target === messages && event.offsetX >= messages.clientWidth) stopFollowingConversation();
+  };
   messages.addEventListener('scroll', onMessagesScroll, { passive: true });
+  messages.addEventListener('wheel', onMessagesWheel, { passive: true });
+  messages.addEventListener('touchstart', onMessagesTouchStart, { passive: true });
+  messages.addEventListener('touchmove', onMessagesTouchMove, { passive: true });
+  messages.addEventListener('pointerdown', onMessagesPointerDown);
   const messagesMutationObserver = typeof MutationObserver === 'function'
     ? new MutationObserver(() => {
         if (followConversation) scrollConversationToEnd();
@@ -2261,6 +2281,62 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   // 편대 도크는 입력기 위에 뜨는 오버레이라서 입력기의 자식으로 붙는다 —
   // 사이드바·전체 화면 어디로 옮겨져도 입력기를 따라간다.
   composer.appendChild(fleetView.root);
+  const questionTimelineAnchor = el('span', 'ag-question-timeline-anchor');
+  questionTimelineAnchor.hidden = true;
+  questionTimelineAnchor.setAttribute('aria-hidden', 'true');
+  let questionTimelineAnchorInteractionId: string | null = null;
+  const questionController = createUserQuestionController({
+    input,
+    submitAnswers: (interactionId, answers) => bridge.answerUserQuestion(interactionId, answers),
+    stop: () => bridge.interrupt(),
+    onDraftChange(interaction, draft) {
+      const target = interaction.threadId === currentThread.id ? currentThread : getThread(interaction.threadId);
+      if (!target) return;
+      target.pendingUserQuestion = {
+        interaction,
+        selectedOptionIdsByQuestionId: draft.selectedOptionIdsByQuestionId,
+        otherTextByQuestionId: draft.otherTextByQuestionId,
+        activeQuestionIndex: draft.activeQuestionIndex,
+        updatedAt: Date.now(),
+      };
+      if (target === currentThread) persistCurrentThread();
+      else upsertThread(target);
+    },
+    onComposerModeChange() {
+      updateComposer();
+    },
+    onResolved(interaction, outcome) {
+      const target = interaction.threadId === currentThread.id ? currentThread : getThread(interaction.threadId);
+      if (!target) return;
+      const historyMessage = archivePendingUserQuestion(target, interaction.interactionId, outcome)
+        ?? createUserQuestionHistoryMessage(interaction, outcome);
+      if (!target.messages.includes(historyMessage)) target.messages.push(historyMessage);
+      upsertThread(target);
+      if (target === currentThread) {
+        const historyCard = renderUserQuestionHistory(historyMessage);
+        withAutoScroll(() => {
+          if (
+            questionTimelineAnchorInteractionId === interaction.interactionId
+            && questionTimelineAnchor.parentElement === messages
+          ) {
+            questionTimelineAnchor.replaceWith(historyCard);
+          } else appendConversation(historyCard);
+        });
+      }
+      if (questionTimelineAnchorInteractionId === interaction.interactionId) {
+        questionTimelineAnchor.remove();
+        questionTimelineAnchorInteractionId = null;
+      }
+    },
+  });
+  function hasCurrentLocalQuestion(): boolean {
+    const interaction = questionController.interaction();
+    return workspace.mode() === 'local' && interaction?.threadId === currentThread.id;
+  }
+
+  function syncQuestionVisibility(): void {
+    questionController.setVisible(hasCurrentLocalQuestion());
+  }
   // 도크가 차지하는 높이를 입력기에 알려 계획 복원 버튼(overlay)이 겹치지 않게 한다.
   const dockResizeObserver = typeof ResizeObserver === 'function'
     ? new ResizeObserver((entries) => {
@@ -2271,7 +2347,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   dockResizeObserver?.observe(fleetView.root);
   // 사이드바에서는 변경 검토와 계획을 분리한다. 계획은 입력기 바로 위에
   // 머물러 접었을 때 작은 진행 표시로 이어지고, 변경 검토는 가려지지 않는다.
-  chatPage.append(header, connBanner, messages, review, planSurface, composer);
+  chatPage.append(header, connBanner, messages, review, planSurface, questionController.root, composer);
 
   /** 입력기 하단 한 줄이 겹치지 않고 붙는 폭을 재서 사이드바 최솟값으로 쓴다.
    *  펼쳐진 사이드바의 현재 폭이 아니라 max-content(말줄임 바닥)로 잰다.
@@ -2844,7 +2920,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     reviewResize.inert = !detailActive;
     if (focusLayoutActive) {
       chatPage.setAttribute('aria-hidden', 'false');
-      if (composer.parentElement !== chatPage) chatPage.appendChild(composer);
+      if (composer.parentElement !== chatPage) chatPage.append(questionController.root, composer);
     }
     applyPlanMinimizedState();
   }
@@ -2978,8 +3054,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     planColumn.setAttribute('aria-hidden', 'true');
     threadsPage.setAttribute('aria-hidden', 'true');
     chatPage.setAttribute('aria-hidden', 'false');
-    // 변경 검토·계획·입력기는 다시 사이드바의 분리된 inline 흐름으로 돌아간다.
-    chatPage.append(review, planSurface, composer);
+    // 변경 검토·계획·질문·입력기는 다시 사이드바의 분리된 inline 흐름으로 돌아간다.
+    chatPage.append(review, planSurface, questionController.root, composer);
     applyPlanMinimizedState();
   }
 
@@ -3107,11 +3183,24 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   function updatePermissionButton(): void {
     const unrestricted = permissionProfile === 'unrestricted';
+    const planReadOnly = chatWorkflow === 'question'
+      || (chatWorkflow === 'plan' && planningPhase !== 'implementing');
     permissionBtn.textContent = unrestricted ? '전체' : '안전';
-    permissionBtn.setAttribute('aria-label', unrestricted ? '에이전트 권한: 전체 접근' : '에이전트 권한: 안전');
+    permissionBtn.setAttribute(
+      'aria-label',
+      unrestricted && planReadOnly
+        ? (chatWorkflow === 'question'
+          ? '실행 단계 권한: 전체 접근, 질문 단계는 읽기 전용'
+          : '실행 단계 권한: 전체 접근, 계획 단계는 읽기 전용')
+        : unrestricted ? '에이전트 권한: 전체 접근' : '에이전트 권한: 안전',
+    );
     permissionBtn.setAttribute('aria-pressed', unrestricted ? 'true' : 'false');
     permissionBtn.classList.toggle('ag-permission-unrestricted', unrestricted);
-    permissionBtn.title = unrestricted
+    permissionBtn.title = unrestricted && planReadOnly
+      ? (chatWorkflow === 'question'
+        ? '질문 단계는 읽기 전용입니다. /build 로 전환하면 전체 접근을 적용합니다. 클릭하여 안전 모드로 전환'
+        : '계획 단계는 읽기 전용입니다. 승인 후 실행 단계부터 전체 접근을 적용합니다. 클릭하여 안전 모드로 전환')
+      : unrestricted
       ? '에이전트가 승인 없이 문서를 편집하고, 파일·명령이 노트북 전체에 접근할 수 있습니다. 클릭하여 안전 모드로 전환'
       : '문서 편집은 턴이 끝나면 검토 대기로 남아 승인 후 반영됩니다. 파일과 명령은 프로젝트 안에서만 사용합니다';
     refreshSidebarWidthMin();
@@ -3119,12 +3208,22 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   permissionBtn.addEventListener('click', () => {
     if (isControlLocked()) return;
+    let nextProfile: PermissionProfile;
     if (permissionProfile === 'safe') {
       const confirmed = window.confirm('전체 접근을 켜면 에이전트가 승인 없이 문서를 편집하고, 명령과 파일 도구가 노트북 전체에 접근할 수 있습니다. 이 채팅에서 계속 허용할까요?');
       if (!confirmed) return;
-      bridge.setPermissionProfile('unrestricted');
+      nextProfile = 'unrestricted';
     } else {
-      bridge.setPermissionProfile('safe');
+      nextProfile = 'safe';
+    }
+    workflowTransitionPending = true;
+    updateComposer();
+    try {
+      bridge.setPermissionProfile(nextProfile);
+    } catch (err) {
+      workflowTransitionPending = false;
+      updateComposer();
+      systemMessage(`권한 전환 실패: ${err instanceof Error ? err.message : String(err)}`);
     }
   });
   updatePermissionButton();
@@ -3782,6 +3881,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   }
 
   input.addEventListener('keydown', (e) => {
+    if (hasCurrentLocalQuestion()) {
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && questionController.usesComposerForOther()) {
+        e.preventDefault();
+        composer.requestSubmit();
+      }
+      return;
+    }
     if (!slashMenu.hidden && slashOptions.length > 0) {
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         e.preventDefault();
@@ -3811,6 +3917,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }
   });
   input.addEventListener('input', () => {
+    if (hasCurrentLocalQuestion()) {
+      questionController.handleComposerInput();
+      resizeComposerInput();
+      return;
+    }
     if (!activeComposerSkill) {
       // 공백이 slash command를 끝내는 순간 skill을 토큰으로 승격하고,
       // 뒤 문장만 textarea에 남긴다. 이름 prefix가 겹치는 스킬도 안전하다.
@@ -3830,6 +3941,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   composer.addEventListener('submit', (e) => {
     e.preventDefault();
     if (readOnlyDocLabel !== null || mergeResolverLocked) return;
+    if (hasCurrentLocalQuestion()) {
+      if (!questionController.handleComposerSubmit()) bridge.interrupt();
+      return;
+    }
     const execution = composerExecution(workspace.composerTarget());
     if (execution.kind === 'blocked') {
       updateComposer();
@@ -3947,7 +4062,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       bridge.interrupt();
       return;
     }
-    if (planningPhase === 'switching' || chatStartPendingThreadId !== null || attachmentsSending || referenceLibrary.hasBlockingDrafts()) return;
+    if (planningPhase === 'switching' || workflowTransitionPending || planActionPending
+      || chatStartPendingThreadId !== null || attachmentsSending || referenceLibrary.hasBlockingDrafts()) return;
     if (selectedAgent === 'rau' && !rauSetupComplete) {
       systemMessage('Rau 연결을 먼저 완료해 주세요.');
       return;
@@ -4064,11 +4180,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     // protocol은 비어 있지 않은 text를 요구하므로 명시적 slash 호출 자체를
     // 요청 본문으로 보낸다. 자연어 fallback을 UI나 기록에 숨겨 넣지 않는다.
     const requestText = requestTextForSkillInvocation(text, skillNameForMessage);
-    // 승인 대기 중 입력은 언제나 계획 수정 의견이다. '네'/'승인' 같은
-    // 텍스트로는 절대 승인되지 않는다 — 승인은 계획 카드의 버튼뿐.
-    if (chatWorkflow === 'plan' && planningPhase === 'awaiting-approval') {
-      setPlanningPhase('planning');
-    }
     const staged = referenceLibrary.takeReadyDrafts();
     const messageAttachments: ThreadAttachment[] = staged.map((file) => ({
       stageId: file.id,
@@ -4539,7 +4650,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         appendConversation(renderUserMessage(msg));
       } else if (msg.role === 'assistant') {
         const agent = msg.agent ?? thread.agent;
-        if (msg.kind === 'progress') {
+        if (msg.kind === 'user-question') {
+          appendConversation(renderUserQuestionHistory(msg));
+        } else if (msg.kind === 'progress') {
           const step = el('div', 'ag-progress-step ag-progress-step-restored');
           const milestone = el('div', `ag-msg ag-progress-milestone ag-${agent}`);
           renderAssistantMessage(milestone, msg.text);
@@ -4560,7 +4673,43 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         appendConversation(el('div', 'ag-msg ag-msg-system', msg.text));
       }
     }
+    syncQuestionVisibility();
+    if (hasCurrentLocalQuestion() && questionController.interaction()?.threadId === thread.id) {
+      mountQuestionTimelineAnchor();
+    }
     scrollConversationToEnd();
+  }
+
+  function renderUserQuestionHistory(message: Extract<ThreadMessage, { kind: 'user-question' }>): HTMLElement {
+    const card = el('section', 'ag-question-history');
+    card.setAttribute('aria-label', '에이전트 질문 기록');
+    const status = message.outcome.status === 'answered'
+      ? '답변 완료'
+      : message.outcome.status === 'cancelled'
+        ? '중단됨'
+        : '만료됨';
+    const title = el('div', 'ag-question-history-title');
+    title.append(
+      el('span', 'ag-question-history-label', '에이전트 질문'),
+      el('span', 'ag-question-history-status', status),
+    );
+    card.append(title);
+    for (const question of message.interaction.questions) {
+      const item = el('div', 'ag-question-history-item');
+      item.append(
+        el('span', 'ag-question-history-header', question.header),
+        el('p', 'ag-question-history-prompt', question.question),
+      );
+      if (message.outcome.status === 'answered') {
+        const answer = message.outcome.answers[question.id];
+        const selected = new Set(answer?.selectedOptionIds ?? []);
+        const labels = question.options.filter((option) => selected.has(option.id)).map((option) => option.label);
+        if (answer?.otherText) labels.push(answer.otherText);
+        item.append(el('p', 'ag-question-history-answer', labels.join(', ') || '답변 없음'));
+      }
+      card.appendChild(item);
+    }
+    return card;
   }
 
   function clearChatUi(): void {
@@ -4767,7 +4916,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   /** 실행 상태 점 — 노란 불(작업 중)·초록 점(완료)·빨간 점(승인 대기). */
   function buildStatusDot(status: ChatRunStatus, extraClass?: string): HTMLElement {
     const dot = el('span', `ag-thread-status ag-thread-status-${status}${extraClass ? ` ${extraClass}` : ''}`);
-    dot.title = status === 'working' ? '작업 중' : status === 'needs-input' ? '승인 대기' : '완료';
+    dot.title = status === 'working' ? '작업 중' : status === 'needs-input' ? '입력 대기' : '완료';
     return dot;
   }
 
@@ -5040,8 +5189,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     localThreadSnapshot = structuredClone(nextThread);
     editorCloudScope.bind({ threadId: nextThread.id, documentId: currentDocumentId });
     selectTemplate(null);
-    referenceLibrary.contextChanged();
     bridge.stopChat();
+    referenceLibrary.contextChanged();
     const nextThreadId = nextThread.id;
     void cloudUi.refreshLeaseScope().then((refreshed) => {
       if (!refreshed || root.dataset.disposed === 'true' || currentThread.id !== nextThreadId) return;
@@ -5065,7 +5214,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       systemMessage('클라우드 작업을 이어받거나 결과를 정리한 뒤 다른 채팅을 여세요.');
       return;
     }
-    if (turnRunning) bridge.interrupt();
+    // During a reload the bridge reconstructs the authoritative question
+    // before the drawer can bind it. Treat that snapshot as live too, so
+    // opening its persisted thread never stops the still-blocked provider.
+    const liveQuestion = questionController.interaction() ?? bridge.getPendingUserQuestion();
+    if (!liveQuestion && turnRunning) bridge.interrupt();
     flushAssistantBuffer();
     persistCurrentThread();
     const loaded = getThread(id);
@@ -5082,14 +5235,22 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       titleRequested: Boolean(loaded.titleRequested),
     };
     referenceLibrary.contextChanged();
-    bridge.stopChat();
     applyThreadMeta(currentThread);
     renderMessagesFromThread(currentThread);
+    if (!liveQuestion) bridge.stopChat();
     const matchesCurrentDocument = threadMatchesDocument(
       loaded,
       currentDocumentId,
       currentDocKey,
     );
+    const showingLiveQuestion = workspace.mode() === 'local' && liveQuestion?.threadId === currentThread.id;
+    questionController.setVisible(showingLiveQuestion);
+    if (showingLiveQuestion) mountQuestionTimelineAnchor();
+    if (liveQuestion && !showingLiveQuestion) {
+      enterReadOnlyMode('에이전트가 다른 채팅에서 답변을 기다리는 중');
+      setThreadsPanelOpen(false);
+      return;
+    }
     if (!matchesCurrentDocument) {
       // 다른 문서의 채팅 — 열람은 되지만 이어가지는 못한다.
       enterReadOnlyMode(docGroupLabel(loaded.docKey));
@@ -5109,9 +5270,17 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     exitReadOnlyMode();
     void scopeRefresh.then((refreshed) => {
       if (!refreshed || root.dataset.disposed === 'true' || currentThread.id !== selectedThreadId) return;
+      if (liveQuestion) {
+        updateComposer();
+        return;
+      }
       if (composerExecution(workspace.composerTarget()).kind === 'local') startCurrentBridgeChat(true);
       else updateComposer();
     });
+    if (liveQuestion) {
+      setThreadsPanelOpen(false);
+      return;
+    }
     setThreadsPanelOpen(false);
     input.focus();
   }
@@ -5286,10 +5455,20 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       input.placeholder = '체험 크레딧이 다 됐어요. 다른 모델을 연결해 주세요.';
     } else {
       const chatStarting = chatStartPendingThreadId !== null;
-      input.disabled = connState !== 'connected' || attachmentsSending || chatStarting;
-      send.disabled = connState !== 'connected' || attachmentsSending || chatStarting || referenceLibrary.hasBlockingDrafts();
+      const questionPending = hasCurrentLocalQuestion();
+      const questionUsesComposer = questionController.usesComposerForOther();
+      input.disabled = connState !== 'connected' || attachmentsSending || chatStarting
+        || workflowTransitionPending || planActionPending
+        || (questionPending && !questionUsesComposer);
+      send.disabled = connState !== 'connected' || attachmentsSending || chatStarting
+        || workflowTransitionPending || planActionPending
+        || (!questionPending && referenceLibrary.hasBlockingDrafts());
       composerSkillClear.disabled = input.disabled;
-      input.placeholder = chatStarting
+      input.placeholder = questionPending
+        ? questionUsesComposer ? '직접 답변을 입력하세요' : '위 질문에 답해 주세요'
+        : workflowTransitionPending || planActionPending
+        ? '전환을 적용하는 중…'
+        : chatStarting
         ? '채팅을 여는 중…'
         : activeComposerSkill
           ? '추가 요청을 입력하세요 (선택)'
@@ -5301,19 +5480,23 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
             ? '구상할 내용을 입력하세요'
             : '문서 작업을 입력하세요';
     }
+    const questionPending = execution.kind === 'local' && hasCurrentLocalQuestion();
+    const questionUsesComposer = questionPending && questionController.usesComposerForOther();
     const localTurnRunning = execution.kind === 'local' && turnRunning;
-    const sendLabel = localTurnRunning ? '중지' : '보내기';
+    const showStop = localTurnRunning && !questionUsesComposer;
+    const sendLabel = questionUsesComposer ? '답변 계속' : showStop ? '중지' : '보내기';
     if (send.getAttribute('aria-label') !== sendLabel) {
-      send.replaceChildren(localTurnRunning ? createStopIcon() : createIcon('send'));
+      send.replaceChildren(showStop ? createStopIcon() : createIcon('send'));
       send.setAttribute('aria-label', sendLabel);
       send.title = sendLabel;
     }
-    send.classList.toggle('ag-stop', localTurnRunning);
+    send.classList.toggle('ag-stop', showStop);
     // 실행 중에는 Enter 가 전송이 아니므로 힌트를 숨긴다.
-    sendHint.hidden = localTurnRunning || attachmentsSending || chatStartPendingThreadId !== null
+    sendHint.hidden = execution.kind !== 'local' || questionPending || localTurnRunning
+      || attachmentsSending || chatStartPendingThreadId !== null
+      || workflowTransitionPending || planActionPending
       || referenceLibrary.hasBlockingDrafts()
-      || execution.kind === 'blocked'
-      || (execution.kind === 'local' && connState !== 'connected')
+      || connState !== 'connected'
       || readOnlyDocLabel !== null
       || mergeResolverLocked;
     // 실행 중이거나 작업 방식/계획→실행 전환 중에는 모드·모델·권한을 잠근다.
@@ -5340,12 +5523,21 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     messages.insertBefore(node, conversationTail());
   }
 
+  function mountQuestionTimelineAnchor(): void {
+    const interaction = questionController.interaction();
+    if (interaction?.threadId !== currentThread.id) return;
+    questionTimelineAnchorInteractionId = interaction.interactionId;
+    if (questionTimelineAnchor.parentElement === messages) return;
+    withAutoScroll(() => appendConversation(questionTimelineAnchor));
+  }
+
   function resetConversation(): void {
     replyPending = false;
     turnPending.hidden = true;
     // 편대 카드는 도구 행처럼 휘발성이다 — 대화를 갈아 끼우면 타이머까지 버린다.
     suppressedSpawnCalls.clear();
     fleetView.reset();
+    questionTimelineAnchorInteractionId = null;
     messages.replaceChildren(turnPending, messagesEnd);
   }
 
@@ -5394,19 +5586,59 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }, ms);
   }
 
+  function cancelConversationScroll(): void {
+    conversationScrollTargetNode = null;
+    conversationScrollSmooth = false;
+    conversationScrollLastFrame = 0;
+    if (conversationScrollRaf !== null) window.cancelAnimationFrame(conversationScrollRaf);
+    conversationScrollRaf = null;
+  }
+
+  function stopFollowingConversation(): void {
+    followConversation = false;
+    cancelConversationScroll();
+    conversationScrollLock = false;
+    if (conversationScrollUnlock !== null) {
+      window.clearTimeout(conversationScrollUnlock);
+      conversationScrollUnlock = null;
+    }
+  }
+
+  function animateConversationScroll(now: number): void {
+    conversationScrollRaf = null;
+    const node = conversationScrollTargetNode;
+    if (!node?.isConnected || !followConversation) {
+      cancelConversationScroll();
+      return;
+    }
+
+    const target = conversationScrollTarget(node);
+    const distance = target - messages.scrollTop;
+    if (!conversationScrollSmooth || Math.abs(distance) <= 1) {
+      lockConversationScroll(80);
+      messages.scrollTop = target;
+      conversationScrollTargetNode = null;
+      conversationScrollLastFrame = 0;
+      return;
+    }
+
+    const elapsed = conversationScrollLastFrame === 0
+      ? 16
+      : Math.min(32, Math.max(8, now - conversationScrollLastFrame));
+    conversationScrollLastFrame = now;
+    const progress = 1 - Math.exp(-elapsed / 90);
+    lockConversationScroll(80);
+    messages.scrollTop += distance * progress;
+    conversationScrollRaf = window.requestAnimationFrame(animateConversationScroll);
+  }
+
   function scrollConversationToMessage(node: HTMLElement, opts?: { smooth?: boolean }): void {
     followConversation = true;
     syncConversationSpacer();
     const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    const smooth = opts?.smooth !== false && !reduce;
-    if (conversationScrollRaf !== null) window.cancelAnimationFrame(conversationScrollRaf);
-    conversationScrollRaf = window.requestAnimationFrame(() => {
-      conversationScrollRaf = null;
-      const target = conversationScrollTarget(node);
-      if (Math.abs(messages.scrollTop - target) <= 2) return;
-      lockConversationScroll(smooth ? 480 : 80);
-      messages.scrollTo({ top: target, behavior: smooth ? 'smooth' : 'auto' });
-    });
+    conversationScrollTargetNode = node;
+    conversationScrollSmooth = opts?.smooth !== false && !reduce;
+    if (conversationScrollRaf === null) conversationScrollRaf = window.requestAnimationFrame(animateConversationScroll);
   }
 
   function updateTurnPending(agent?: AgentName): void {
@@ -6110,13 +6342,65 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     initialSetup?.handleEvent(e);
     if (handlePlanningSidebarEvent(e)) return;
     switch (e.type) {
+      case 'user-question-requested': {
+        flushPendingAssistantRender();
+        flushAssistantBuffer({ kind: 'progress' });
+        compactStreamIntoActivity(e.interaction.agent);
+        streamBubble = null;
+        let target = e.interaction.threadId === currentThread.id ? currentThread : getThread(e.interaction.threadId);
+        if (!target) break;
+        // A fresh renderer starts on a disposable empty thread. On reconnect,
+        // reclaim the persisted owner thread so the live card is immediately
+        // visible; deliberate switches between real threads remain untouched.
+        if (target !== currentThread && currentThread.messages.length === 0) {
+          const wasRestoring = restoringLiveQuestion;
+          restoringLiveQuestion = true;
+          try { openThread(target.id); } finally { restoringLiveQuestion = wasRestoring; }
+          target = currentThread.id === e.interaction.threadId ? currentThread : target;
+        }
+        const stored = target.pendingUserQuestion
+          && pendingUserQuestionMatchesInteraction(target.pendingUserQuestion, e.interaction)
+          ? target.pendingUserQuestion
+          : undefined;
+        target.pendingUserQuestion = stored ?? createPendingUserQuestionDraftSnapshot(e.interaction);
+        if (target === currentThread) {
+          questionController.request(e.interaction, stored);
+          syncQuestionVisibility();
+          mountQuestionTimelineAnchor();
+          persistCurrentThread();
+        } else {
+          upsertThread(target);
+          questionController.setVisible(false);
+        }
+        runStatusThreadId = target.id;
+        markChatNeedsInput(target.id);
+        updateComposer();
+        break;
+      }
+      case 'user-question-answer-result':
+        questionController.answerResult(e);
+        break;
+      case 'user-question-resolved':
+        {
+        const activeQuestion = questionController.interaction();
+        const targetThreadId = activeQuestion?.interactionId === e.interactionId
+          ? activeQuestion.threadId
+          : null;
+        questionController.resolve(e.interactionId, e.outcome);
+        if (targetThreadId) {
+          if (e.outcome.status === 'answered' && turnRunning) markChatWorking(targetThreadId);
+          else if (e.outcome.status !== 'answered') clearChatStatus(targetThreadId);
+        }
+        updateComposer();
+        break;
+        }
       case 'connection':
         setConnection(e.state, { attempt: e.attempt, retryInMs: e.retryInMs });
         // 재연결 시 진행 상태를 브리지와 다시 동기화한다.
         setTurnRunning(bridge.isTurnRunning());
         dropRunStatusIfIdle();
         break;
-      case 'chat-started':
+      case 'chat-started': {
         if (e.threadId && e.threadId !== currentThread.id) break;
         chatStartPendingThreadId = null;
         const prevAgent = selectedAgent;
@@ -6151,13 +6435,45 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
           rebuildEffortMenu();
         }
         updateComposer();
+        // Socket-open precedes the authoritative welcome/chat-started frame,
+        // so non-global reference scopes are refreshed only after the hub has
+        // bound this exact thread and document identity.
+        void referenceLibrary.refresh();
         // 새 채팅(welcome)·재시작 시 작업 방식과 계획 단계를 서버와 다시 맞춘다.
         syncPlanningFromBridge();
+        const liveQuestion = bridge.getPendingUserQuestion();
+        if (liveQuestion?.threadId === currentThread.id) {
+          const stored = currentThread.pendingUserQuestion
+            && pendingUserQuestionMatchesInteraction(currentThread.pendingUserQuestion, liveQuestion)
+            ? currentThread.pendingUserQuestion
+            : undefined;
+          questionController.request(liveQuestion, stored);
+          syncQuestionVisibility();
+          mountQuestionTimelineAnchor();
+        }
+        if (currentThread.pendingUserQuestion) {
+          const pendingId = currentThread.pendingUserQuestion.interaction.interactionId;
+          queueMicrotask(() => {
+            if (currentThread.pendingUserQuestion?.interaction.interactionId !== pendingId) return;
+            if (questionController.interaction()?.interactionId === pendingId) return;
+            const expired = expirePendingUserQuestion(currentThread, 'request-invalidated', pendingId);
+            if (!expired) return;
+            persistCurrentThread();
+            appendConversation(renderUserQuestionHistory(expired));
+          });
+        }
         break;
+      }
       case 'permission-changed':
+        workflowTransitionPending = false;
         permissionProfile = e.permissionProfile;
         updatePermissionButton();
-        systemMessage(permissionProfile === 'unrestricted' ? '전체 접근을 켰습니다. 에이전트가 승인 없이 문서를 편집하고, 명령과 파일 도구가 노트북 전체에 접근할 수 있습니다. 이미 검토 대기 중인 변경은 그대로 남습니다.' : '안전 모드로 돌아왔습니다. 문서 편집은 턴이 끝나면 검토 대기로 남아 승인 후 반영되고, 파일과 명령은 프로젝트 범위로 제한됩니다.');
+        updateComposer();
+        systemMessage(permissionProfile === 'unrestricted'
+          ? chatWorkflow === 'plan' && planningPhase !== 'implementing'
+            ? '전체 접근을 켰습니다. 계획 단계는 계속 읽기 전용이며, 계획을 승인해 실행 단계로 전환하면 전체 접근을 적용합니다.'
+            : '전체 접근을 켰습니다. 에이전트가 승인 없이 문서를 편집하고, 명령과 파일 도구가 노트북 전체에 접근할 수 있습니다. 이미 검토 대기 중인 변경은 그대로 남습니다.'
+          : '안전 모드로 돌아왔습니다. 문서 편집은 턴이 끝나면 검토 대기로 남아 승인 후 반영되고, 파일과 명령은 프로젝트 범위로 제한됩니다.');
         break;
       case 'service-tier-changed':
         selectedServiceTier = resolveServiceTier(selectedAgent, e.serviceTier);
@@ -6411,7 +6727,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         systemMessage(`오류 (${e.code}): ${e.message}`);
         if (e.code === 'AGENT_SPAWN_FAILED') appendSpawnRetryAction();
         workflowTransitionPending = false;
-        planPermissionDefaultPending = false;
+        planActionPending = false;
         syncPlanningFromBridge();
         setTurnRunning(bridge.isTurnRunning());
         dropRunStatusIfIdle();
@@ -6471,7 +6787,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   function isControlLocked(): boolean {
     if (mergeResolverLocked || composerExecution(workspace.composerTarget()).kind !== 'local') return true;
     return turnRunning || attachmentsSending || chatStartPendingThreadId !== null
-      || workflowTransitionPending || planningPhase === 'switching';
+      || workflowTransitionPending || planActionPending || planningPhase === 'switching';
   }
 
   function hasPendingDocumentEdits(): boolean {
@@ -6485,6 +6801,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     phaseBadge.dataset.phase = planningPhase;
     root.dataset.workflow = chatWorkflow;
     root.dataset.planningPhase = planningPhase;
+    updatePermissionButton();
     refreshSidebarWidthMin();
   }
 
@@ -6552,12 +6869,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         browserbaseAcknowledged = true;
         browserbaseNoticePending = true;
       }
-      planPermissionDefaultPending = permissionProfile === 'safe';
-    } else {
-      planPermissionDefaultPending = false;
     }
     workflowTransitionPending = true;
-    applyWorkflow(next);
     bridge.setWorkflow(next);
     input.focus();
     return true;
@@ -6689,6 +7002,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (!activePlanHistorical) {
       const approvableNow = planApprovable
         && planningPhase === 'awaiting-approval'
+        && !planActionPending
         && !turnRunning;
       const footer = el('footer', 'ag-plan-footer');
       const actions = el('div', 'ag-review-actions ag-plan-actions');
@@ -6698,7 +7012,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       approve.addEventListener('click', () => approveActivePlan(plan.planId));
       const revise = el('button', 'ag-reject ag-plan-revise', '수정 요청');
       revise.type = 'button';
-      revise.disabled = !planApprovable || planningPhase === 'switching' || turnRunning;
+      revise.disabled = !planApprovable || planActionPending || planningPhase === 'switching' || turnRunning;
       revise.addEventListener('click', () => requestPlanRevision(plan.planId));
       actions.append(approve, revise);
       footer.appendChild(actions);
@@ -6718,28 +7032,35 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   }
 
   function approveActivePlan(planId: string): void {
-    if (!planApprovable || planningPhase !== 'awaiting-approval' || turnRunning) return;
+    if (!planApprovable || planActionPending || planningPhase !== 'awaiting-approval' || turnRunning) return;
     // 정확히 이 계획 id 로만 승인한다 — 오래된 카드가 다른 계획을 통과시키지 않는다.
-    setPlanningPhase('switching');
-    systemMessage('계획을 승인했습니다. 실행 단계로 전환 중입니다.');
+    planActionPending = true;
+    rebuildReview();
     try {
-      bridge.approvePlan(planId);
+      if (!bridge.approvePlan(planId)) {
+        throw new Error('허브 연결이 끊겨 승인 요청을 보내지 못했습니다.');
+      }
     } catch (err) {
-      setPlanningPhase('awaiting-approval');
+      planActionPending = false;
+      rebuildReview();
       systemMessage(`계획 승인 실패: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
   function requestPlanRevision(planId: string): void {
-    if (!planApprovable) return;
+    if (!planApprovable || planActionPending) return;
+    planActionPending = true;
+    rebuildReview();
     try {
-      bridge.requestPlanChanges(planId);
+      if (!bridge.requestPlanChanges(planId)) {
+        throw new Error('허브 연결이 끊겨 수정 요청을 보내지 못했습니다.');
+      }
     } catch (err) {
+      planActionPending = false;
+      rebuildReview();
       systemMessage(`수정 요청 실패: ${err instanceof Error ? err.message : String(err)}`);
       return;
     }
-    settlePlanAttention();
-    setPlanningPhase('planning');
     systemMessage('수정 요청을 보냈습니다. 바꾸고 싶은 부분을 입력창에 적어 주세요.');
     updateComposer();
     input.focus();
@@ -6750,13 +7071,15 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     switch (e.type) {
       case 'workflow-changed':
         workflowTransitionPending = false;
+        planActionPending = false;
         applyWorkflow(e.workflow);
         setPlanningPhase(e.phase);
-        if (e.workflow === 'plan' && planPermissionDefaultPending) {
-          planPermissionDefaultPending = false;
-          bridge.setPermissionProfile('unrestricted');
-        } else if (e.workflow === 'direct') {
-          planPermissionDefaultPending = false;
+        if (e.phase === 'awaiting-approval' && e.latestPlan) {
+          activePlan = e.latestPlan;
+          activePlanHistorical = false;
+          planApprovable = true;
+          recordPlan(e.latestPlan);
+          rebuildReview();
         }
         if ((e.workflow === 'plan' || e.workflow === 'question') && browserbaseNoticePending) {
           browserbaseNoticePending = false;
@@ -6766,6 +7089,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         }
         return true;
       case 'plan-ready':
+        planActionPending = false;
         turnPresentedPlan = true;
         planCardPending = false;
         activePlan = e.plan;
@@ -6783,11 +7107,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       case 'plan-approved':
         // 서버가 승인했다고 말한 계획이 지금 카드와 다르면 표시를 건드리지 않는다.
         if (activePlan && e.planId && e.planId !== activePlan.planId) return true;
+        planActionPending = false;
         planApprovable = false;
         settlePlanAttention();
         setPlanningPhase(e.phase);
+        systemMessage('계획을 승인했습니다. 실행 단계로 전환 중입니다.');
         return true;
       case 'implementation-started':
+        planActionPending = false;
         planApprovable = false;
         settlePlanAttention();
         closePlanForExecution(e.planId || activePlan?.planId || '');
@@ -6798,6 +7125,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         systemMessage('문서를 저장했습니다');
         return true;
       case 'plan-invalidated':
+        planActionPending = false;
         planApprovable = false;
         settlePlanAttention();
         activePlanHistorical = activePlan !== null;
@@ -6818,10 +7146,16 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   /** 채팅 시작/재연결 시 브리지의 계획 상태와 다시 맞춘다. */
   function syncPlanningFromBridge(): void {
+    const hadPendingAction = planActionPending;
+    planActionPending = false;
     const state = bridge.getWorkflowState();
     const samePlanId = (activePlan?.planId ?? null) === (state.latestPlan?.planId ?? null);
     const sameApproval = planApprovable === (state.latestPlan !== null && state.phase === 'awaiting-approval');
     if (chatWorkflow === state.workflow && planningPhase === state.phase && samePlanId && sameApproval) {
+      if (hadPendingAction) {
+        updateComposer();
+        rebuildReview();
+      }
       return;
     }
     chatWorkflow = state.workflow;
@@ -6981,6 +7315,19 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   const unsubBridge = bridge.onEvent(handleSidebarEvent);
   const unsubThreads = subscribeThreadChanges(() => {
     if (threadsListVisible()) rebuildThreadsList();
+    if (restoringLiveQuestion) return;
+    const liveQuestion = bridge.getPendingUserQuestion();
+    if (!liveQuestion || questionController.interaction()?.interactionId === liveQuestion.interactionId) return;
+    const owner = getThread(liveQuestion.threadId);
+    if (!owner) return;
+    // IndexedDB hydration can finish after the v4 welcome snapshot. Replay the
+    // canonical bridge interaction once its persisted owner becomes available.
+    restoringLiveQuestion = true;
+    try {
+      handleSidebarEvent({ type: 'user-question-requested', interaction: liveQuestion });
+    } finally {
+      restoringLiveQuestion = false;
+    }
   });
   // 다른 탭의 채팅이 일을 시작하거나 끝내면 이 탭의 목록에도 불이 옮겨 붙는다.
   const unsubChatStatus = subscribeChatStatus(() => {
@@ -7040,6 +7387,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     const transitionLocked = target.kind === 'workspace-blocked';
     syncWorkspaceModeAvailability(target);
     cloudUi.setWorkspaceLocked(transitionLocked);
+    syncQuestionVisibility();
     updateComposer();
   });
   setSelectedAgent(selectedAgent);
@@ -7073,7 +7421,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       return { ok: false, reason: '체험 크레딧이 다 됐어요. 다른 모델을 연결해 주세요.' };
     }
     if (turnRunning) return { ok: false, reason: '에이전트가 응답 중입니다' };
-    if (planningPhase === 'switching' || chatStartPendingThreadId !== null || attachmentsSending) {
+    if (planningPhase === 'switching' || workflowTransitionPending || planActionPending
+      || chatStartPendingThreadId !== null || attachmentsSending) {
       return { ok: false, reason: '잠시 후 다시 시도해 주세요' };
     }
     setCollapsed(false);
@@ -7081,10 +7430,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (skillsPanelOpen) setSkillsPanelOpen(false);
     if (settingsPanelOpen) setSettingsPanelOpen(false);
     if (versionsPanelOpen) setVersionsPanelOpen(false);
-    // 승인 대기 중 입력은 계획 수정 의견으로 취급한다 (입력기와 같은 규칙).
-    if (chatWorkflow === 'plan' && planningPhase === 'awaiting-approval') {
-      setPlanningPhase('planning');
-    }
     const userMessage = recordUserMessage(prompt, [], {
       label: submission.selection.label,
       excerpt: submission.selection.excerpt,
@@ -7114,6 +7459,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       root.dataset.disposed = 'true';
       cloudTransferCloseWaiter?.reject(new Error('클라우드 전송을 기다리는 동안 사이드바가 닫혔습니다.'));
       cloudTransferCloseWaiter = null;
+      questionController.dispose();
       unsubBridge();
       unsubThreads();
       unsubChatStatus();
@@ -7125,11 +7471,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       messagesResizeObserver?.disconnect();
       dockResizeObserver?.disconnect();
       messages.removeEventListener('scroll', onMessagesScroll);
+      messages.removeEventListener('wheel', onMessagesWheel);
+      messages.removeEventListener('touchstart', onMessagesTouchStart);
+      messages.removeEventListener('touchmove', onMessagesTouchMove);
+      messages.removeEventListener('pointerdown', onMessagesPointerDown);
       if (configHideTimer !== null) window.clearTimeout(configHideTimer);
-      if (conversationScrollRaf !== null) {
-        window.cancelAnimationFrame(conversationScrollRaf);
-        conversationScrollRaf = null;
-      }
+      cancelConversationScroll();
       if (conversationScrollUnlock !== null) {
         window.clearTimeout(conversationScrollUnlock);
         conversationScrollUnlock = null;

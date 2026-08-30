@@ -16,7 +16,7 @@ test('plan and build slash commands accept a trailing prompt and switch before s
   assert.match(source, /function requestWorkflow\(next: AgentWorkflow\): boolean/);
 });
 
-test('workflow switches use local slash commands and plan mode defaults to full access', () => {
+test('workflow switches use local slash commands without changing the access profile', () => {
   assert.match(source, /value: '\/plan',[^\n]*workflow: 'plan'/);
   assert.match(source, /value: '\/question',[^\n]*workflow: 'question'/);
   assert.match(source, /value: '\/build',[^\n]*workflow: 'direct'/);
@@ -31,10 +31,19 @@ test('workflow switches use local slash commands and plan mode defaults to full 
   assert.match(source, /composerUtilities\.append\(composerUtilityActions\)/);
   assert.doesNotMatch(css, /\.ag-composer-utilities\s*\{[^}]*flex-direction:\s*column;/s);
   assert.match(source, /permissionBtn\.textContent = unrestricted \? '전체' : '안전'/);
-  assert.match(source, /planPermissionDefaultPending = permissionProfile === 'safe'/);
+  assert.match(source, /const planReadOnly = chatWorkflow === 'question'\s*\|\| \(chatWorkflow === 'plan' && planningPhase !== 'implementing'\)/);
+  assert.match(source, /계획 단계는 읽기 전용입니다\. 승인 후 실행 단계부터 전체 접근을 적용합니다/);
+  assert.match(source, /질문 단계는 읽기 전용입니다\. \/build 로 전환하면 전체 접근을 적용합니다/);
+  assert.doesNotMatch(source, /planPermissionDefaultPending/);
+  assert.doesNotMatch(source, /e\.workflow === 'plan'[\s\S]{0,300}bridge\.setPermissionProfile\('unrestricted'\)/);
+  assert.doesNotMatch(source, /workflowTransitionPending = true;\s*applyWorkflow\(next\);\s*bridge\.setWorkflow\(next\)/);
+  assert.match(source, /workflowTransitionPending = true;\s*bridge\.setWorkflow\(next\)/);
+});
+
+test('composer submit keeps plan-transition locks and Rau credit gates', () => {
   assert.match(
     source,
-    /e\.workflow === 'plan' && planPermissionDefaultPending[\s\S]*bridge\.setPermissionProfile\('unrestricted'\)/,
+    /if \(planningPhase === 'switching' \|\| workflowTransitionPending \|\| planActionPending[\s\S]*selectedAgent === 'rau' && !rauSetupComplete[\s\S]*rauCreditsEmpty\(\)/,
   );
 });
 
@@ -85,29 +94,33 @@ test('plan sections and actions share normal flow inside the separate plan scrol
   assert.doesNotMatch(css, /\.ag-plan-footer \{[^}]*position: sticky;/s);
 });
 
-test('approval uses the exact plan id and revision routes feedback through the composer', () => {
+test('approval uses the exact plan id and waits for authoritative hub phase events', () => {
   assert.match(source, /el\('button', 'ag-approve ag-plan-approve', '편집 모드로 전환'\)/);
   assert.match(source, /approve\.addEventListener\('click', \(\) => approveActivePlan\(plan\.planId\)\)/);
   assert.match(source, /bridge\.approvePlan\(planId\)/);
   assert.match(source, /el\('button', 'ag-reject ag-plan-revise', '수정 요청'\)/);
   assert.match(source, /bridge\.requestPlanChanges\(planId\)/);
   assert.match(source, /footer\.appendChild\(actions\);[\s\S]*card\.appendChild\(footer\)/);
-  assert.match(source, /setPlanningPhase\('planning'\);\s*\n\s*systemMessage\('수정 요청을 보냈습니다/);
+  assert.match(source, /planActionPending = true;[\s\S]*bridge\.requestPlanChanges\(planId\)/);
   assert.match(source, /input\.focus\(\);/);
-  // 텍스트 '네/승인'으로는 절대 승인되지 않는다 — 승인 대기 중 입력은 피드백.
-  assert.match(
+  assert.doesNotMatch(
     source,
     /if \(chatWorkflow === 'plan' && planningPhase === 'awaiting-approval'\) \{\s*\n\s*setPlanningPhase\('planning'\);/,
   );
+  assert.doesNotMatch(source, /function approveActivePlan[\s\S]{0,500}setPlanningPhase\('switching'\)/);
+  assert.doesNotMatch(source, /function requestPlanRevision[\s\S]{0,500}setPlanningPhase\('planning'\)/);
   assert.doesNotMatch(source, /승인은 이 버튼으로만 됩니다/);
 });
 
-test('approval immediately switches to implementation with a disabled, announced switching state', () => {
-  assert.match(source, /setPlanningPhase\('switching'\);\s*\n\s*systemMessage\('계획을 승인했습니다\. 실행 단계로 전환 중입니다\.'\)/);
+test('approval disables duplicate actions and switches only after hub acknowledgement', () => {
+  assert.match(source, /planActionPending = true;\s*rebuildReview\(\);\s*try \{\s*if \(!bridge\.approvePlan\(planId\)\)/);
+  assert.match(source, /if \(!bridge\.requestPlanChanges\(planId\)\)/);
+  assert.match(source, /const hadPendingAction = planActionPending;\s*planActionPending = false;\s*const state = bridge\.getWorkflowState\(\)/);
+  assert.match(source, /case 'plan-approved':[\s\S]*planActionPending = false;[\s\S]*setPlanningPhase\(e\.phase\)/);
   assert.match(source, /case 'implementation-started':[\s\S]*closePlanForExecution\(e\.planId \|\| activePlan\?\.planId \|\| ''\);[\s\S]*setPlanningPhase\(e\.phase\)/);
   assert.match(source, /function closePlanForExecution\(planId: string\): void \{[\s\S]*activePlan = null;[\s\S]*planMinimized = false;[\s\S]*persistCurrentThread\(\);/);
-  assert.match(source, /approve\.disabled = !approvableNow/);
-  assert.match(source, /if \(planningPhase === 'switching' \|\| chatStartPendingThreadId !== null \|\| attachmentsSending \|\| referenceLibrary\.hasBlockingDrafts\(\)\) return;/);
+  assert.match(source, /&& !planActionPending[\s\S]*approve\.disabled = !approvableNow/);
+  assert.match(source, /if \(planningPhase === 'switching' \|\| workflowTransitionPending \|\| planActionPending[\s\S]*referenceLibrary\.hasBlockingDrafts\(\)\) return;/);
   assert.match(source, /if \(planningPhase === 'switching'\)[\s\S]*else if \(!planApprovable\)/);
   assert.match(source, /승인했습니다\. 실행 단계로 전환 중입니다…/);
 });
@@ -134,9 +147,13 @@ test('plan mode warns once about full remote-browser control and scoped download
 });
 
 test('mode, model and permission switches are locked while a turn runs or the chat is switching', () => {
-  assert.match(source, /function isControlLocked\(\): boolean \{[\s\S]*return turnRunning \|\| attachmentsSending \|\| chatStartPendingThreadId !== null[\s\S]*workflowTransitionPending \|\| planningPhase === 'switching';/);
+  assert.match(source, /function isControlLocked\(\): boolean \{[\s\S]*return turnRunning \|\| attachmentsSending \|\| chatStartPendingThreadId !== null[\s\S]*workflowTransitionPending \|\| planActionPending \|\| planningPhase === 'switching';/);
   assert.match(source, /workflowTransitionPending = true;[\s\S]*bridge\.setWorkflow\(next\)/);
   assert.match(source, /case 'workflow-changed':[\s\S]*workflowTransitionPending = false/);
+  assert.match(source, /permissionBtn\.addEventListener[\s\S]*workflowTransitionPending = true;[\s\S]*bridge\.setPermissionProfile\(nextProfile\)/);
+  assert.match(source, /case 'permission-changed':[\s\S]*workflowTransitionPending = false/);
+  assert.match(source, /input\.disabled =[\s\S]*workflowTransitionPending \|\| planActionPending/);
+  assert.match(source, /send\.disabled =[\s\S]*workflowTransitionPending \|\| planActionPending/);
   assert.match(source, /const controlsLocked = isControlLocked\(\)/);
   assert.match(source, /providerTrigger\.disabled = controlsLocked/);
   assert.match(source, /llmTrigger\.disabled = controlsLocked/);
@@ -189,8 +206,8 @@ test('sidebar consumes the planning bridge contract and its sidebar events', () 
   for (const method of [
     'getWorkflowState\\(\\): AgentWorkflowState',
     'setWorkflow\\(workflow: AgentWorkflow\\): void',
-    'approvePlan\\(planId: string\\): void',
-    'requestPlanChanges\\(planId: string, feedback\\?: string\\): void',
+    'approvePlan\\(planId: string\\): boolean',
+    'requestPlanChanges\\(planId: string, feedback\\?: string\\): boolean',
   ]) {
     assert.match(bridge, new RegExp(method));
   }

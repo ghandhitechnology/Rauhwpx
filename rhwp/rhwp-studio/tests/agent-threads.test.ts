@@ -3,20 +3,31 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
+  archivePendingUserQuestion,
+  clearPendingUserQuestion,
+  createPendingUserQuestionDraftSnapshot,
   createEmptyThread,
+  createUserQuestionHistoryMessage,
+  expirePendingUserQuestion,
   fallbackTitle,
   forgetDocumentThreads,
   getThread,
   explorerGroupIsCurrent,
   listThreads,
   listThreadsByDocument,
+  pendingUserQuestionMatchesInteraction,
   recordDocumentOpened,
+  serializeThreadMessagesForProviderHistory,
   setThreadTitle,
   subscribeThreadChanges,
   threadMatchesDocument,
   upsertThread,
 } from '../src/agent/threads.ts';
-import type { StructuredPlan } from '../src/agent/types.ts';
+import type {
+  StructuredPlan,
+  UserQuestionInteraction,
+  UserQuestionOutcome,
+} from '../src/agent/types.ts';
 
 const source = readFileSync(new URL('../src/agent/threads.ts', import.meta.url), 'utf8');
 const mem = new Map<string, string>();
@@ -34,6 +45,33 @@ Object.defineProperty(globalThis, 'localStorage', {
   value: storage,
   configurable: true,
 });
+
+function userQuestionInteraction(overrides: Partial<UserQuestionInteraction> = {}): UserQuestionInteraction {
+  return {
+    interactionId: 'interaction-1',
+    providerRequestId: 'provider-request-1',
+    threadId: 'thread-1',
+    turnId: 'turn-1',
+    agent: 'codex',
+    source: 'native',
+    createdAt: '2026-08-25T00:00:00.000Z',
+    updatedAt: '2026-08-25T00:00:00.000Z',
+    questions: [
+      {
+        id: 'format',
+        header: 'Format',
+        question: 'Which format should I use?',
+        mode: 'multiple',
+        options: [
+          { id: 'table', label: 'Table', description: 'Use a compact table.' },
+          { id: 'list', label: 'List', description: 'Use a short list.' },
+        ],
+        allowOther: true,
+      },
+    ],
+    ...overrides,
+  };
+}
 
 test('empty threads are not listed until they have messages', () => {
   mem.clear();
@@ -140,6 +178,220 @@ test('clickable plan presentations keep their plan identity in thread history', 
   assert.match(source, /typeof message\.planId !== 'string'/);
 });
 
+test('pending user-question drafts persist selections, custom text, position, and update time', () => {
+  mem.clear();
+  const thread = createEmptyThread({ agent: 'codex', model: 'gpt-5.6-sol', effort: 'high' });
+  thread.messages.push({ role: 'user', text: 'Choose the output format.' });
+  const interaction = userQuestionInteraction({ threadId: thread.id });
+  const pending = createPendingUserQuestionDraftSnapshot(interaction, 1234);
+  pending.selectedOptionIdsByQuestionId.format = ['list', 'table'];
+  pending.otherTextByQuestionId.format = 'Keep it compact.';
+  pending.activeQuestionIndex = 0;
+  thread.pendingUserQuestion = pending;
+  upsertThread(thread);
+
+  const restored = getThread(thread.id)?.pendingUserQuestion;
+  assert.deepEqual(restored?.selectedOptionIdsByQuestionId.format, ['table', 'list']);
+  assert.equal(restored?.otherTextByQuestionId.format, 'Keep it compact.');
+  assert.equal(restored?.activeQuestionIndex, 0);
+  assert.equal(restored?.updatedAt, 1234);
+  assert.deepEqual(restored?.interaction, interaction);
+});
+
+test('stored user-question drafts normalize legacy fields and discard mismatched or archived requests', () => {
+  mem.clear();
+  const interaction = userQuestionInteraction({ threadId: 'legacy-question-thread' });
+  const history = createUserQuestionHistoryMessage(interaction, {
+    status: 'expired',
+    reason: 'hub-restarted',
+  });
+  storage.setItem('rhwp-agent-threads', JSON.stringify([{
+    id: 'legacy-question-thread',
+    title: 'Question history',
+    titleRequested: false,
+    createdAt: 1,
+    updatedAt: 2,
+    agent: 'codex',
+    model: 'gpt-5.6-sol',
+    effort: 'high',
+    messages: [{ role: 'user', text: 'Choose.' }, history],
+    pendingUserQuestion: {
+      interaction,
+      selectedOptionIdsByQuestionId: { format: ['unknown', 'list', 'table'] },
+      otherTextByQuestionId: { format: 'Draft' },
+      activeQuestionIndex: 99,
+      updatedAt: 5,
+    },
+  }, {
+    id: 'mismatched-question-thread',
+    title: 'Mismatched question',
+    titleRequested: false,
+    createdAt: 1,
+    updatedAt: 2,
+    agent: 'codex',
+    model: 'gpt-5.6-sol',
+    effort: 'high',
+    messages: [{ role: 'user', text: 'Choose.' }],
+    pendingUserQuestion: {
+      interaction,
+      selectedOptionIdsByQuestionId: {},
+      otherTextByQuestionId: {},
+      activeQuestionIndex: 0,
+      updatedAt: 5,
+    },
+  }, {
+    id: 'legacy-draft-thread',
+    title: 'Legacy question draft',
+    titleRequested: false,
+    createdAt: 1,
+    updatedAt: 2,
+    agent: 'codex',
+    model: 'gpt-5.6-sol',
+    effort: 'high',
+    messages: [{ role: 'user', text: 'Choose.' }],
+    pendingUserQuestion: {
+      interaction: {
+        ...interaction,
+        threadId: 'legacy-draft-thread',
+        questions: [{
+          id: 'legacy-format',
+          question: 'Choose legacy formats.',
+          multiSelect: true,
+          options: [
+            { label: 'Table', description: 'A table.' },
+            { label: 'List', description: 'A list.' },
+          ],
+        }],
+      },
+      selectedOptionIdsByQuestionId: { 'legacy-format': ['unknown', 'List', 'Table'] },
+      otherTextByQuestionId: { 'legacy-format': 'Legacy custom answer.' },
+      activeQuestionIndex: 99,
+      updatedAt: 6,
+    },
+  }]));
+
+  assert.equal(getThread('legacy-question-thread')?.pendingUserQuestion, undefined);
+  assert.equal(getThread('mismatched-question-thread')?.pendingUserQuestion, undefined);
+  const legacyDraft = getThread('legacy-draft-thread')?.pendingUserQuestion;
+  assert.equal(legacyDraft?.interaction.questions[0]?.header, 'Question 1');
+  assert.equal(legacyDraft?.interaction.questions[0]?.mode, 'multiple');
+  assert.equal(legacyDraft?.interaction.questions[0]?.allowOther, true);
+  assert.deepEqual(legacyDraft?.interaction.questions[0]?.options.map((option) => option.id), [
+    'Table',
+    'List',
+  ]);
+  assert.deepEqual(legacyDraft?.selectedOptionIdsByQuestionId['legacy-format'], ['Table', 'List']);
+  assert.equal(legacyDraft?.otherTextByQuestionId['legacy-format'], 'Legacy custom answer.');
+  assert.equal(legacyDraft?.activeQuestionIndex, 0);
+});
+
+test('completed user-question history owns an immutable copy of its request and answers', () => {
+  mem.clear();
+  const interaction = userQuestionInteraction();
+  const outcome: UserQuestionOutcome = {
+    status: 'answered',
+    answers: {
+      format: { selectedOptionIds: ['table'], otherText: 'Use narrow columns.' },
+    },
+  };
+  const message = createUserQuestionHistoryMessage(interaction, outcome);
+  interaction.questions[0]!.question = 'Mutated question';
+  if (outcome.status === 'answered') outcome.answers.format!.otherText = 'Mutated answer';
+
+  assert.equal(message.interaction.questions[0]?.question, 'Which format should I use?');
+  assert.equal(
+    message.outcome.status === 'answered' ? message.outcome.answers.format?.otherText : undefined,
+    'Use narrow columns.',
+  );
+  assert.doesNotMatch(message.text, /Use narrow columns/);
+
+  const thread = createEmptyThread({ agent: 'codex', model: 'gpt-5.6-sol', effort: 'high' });
+  thread.id = interaction.threadId;
+  thread.messages.push({ role: 'user', text: 'Choose.' }, message);
+  upsertThread(thread);
+  const restored = getThread(thread.id)?.messages.at(-1);
+  assert.equal(restored?.kind, 'user-question');
+  assert.equal(
+    restored?.kind === 'user-question' && restored.outcome.status === 'answered'
+      ? restored.outcome.answers.format?.otherText
+      : undefined,
+    'Use narrow columns.',
+  );
+});
+
+test('pending user-question completion is interaction-scoped and archives expiry once', () => {
+  const thread = createEmptyThread({ agent: 'codex', model: 'gpt-5.6-sol', effort: 'high' });
+  const interaction = userQuestionInteraction({ threadId: thread.id });
+  thread.pendingUserQuestion = createPendingUserQuestionDraftSnapshot(interaction, 1);
+
+  assert.equal(pendingUserQuestionMatchesInteraction(thread.pendingUserQuestion, interaction), true);
+  assert.equal(pendingUserQuestionMatchesInteraction(
+    thread.pendingUserQuestion,
+    { ...interaction, providerRequestId: 'replacement-request' },
+  ), false);
+  assert.equal(archivePendingUserQuestion(
+    thread,
+    'stale-interaction',
+    { status: 'cancelled', reason: 'user-stop' },
+  ), null);
+  assert.equal(thread.pendingUserQuestion?.interaction.interactionId, interaction.interactionId);
+  const archived = expirePendingUserQuestion(thread, 'provider-disconnected');
+  assert.equal(archived?.outcome.status, 'expired');
+  assert.equal(thread.pendingUserQuestion, undefined);
+  assert.equal(thread.messages.at(-1), archived);
+  assert.equal(expirePendingUserQuestion(thread, 'provider-disconnected'), null);
+
+  thread.pendingUserQuestion = createPendingUserQuestionDraftSnapshot(interaction, 2);
+  assert.equal(clearPendingUserQuestion(thread, 'stale-interaction'), null);
+  assert.equal(clearPendingUserQuestion(thread, interaction.interactionId)?.updatedAt, 2);
+  assert.equal(thread.pendingUserQuestion, undefined);
+});
+
+test('user-question provider history is deterministic and follows question option order', () => {
+  const interaction = userQuestionInteraction();
+  const message = createUserQuestionHistoryMessage(interaction, {
+    status: 'answered',
+    answers: {
+      format: { selectedOptionIds: ['list', 'table'], otherText: 'Keep captions.' },
+    },
+  });
+  const messages = [
+    { role: 'user' as const, text: 'Prepare the report.', skillName: 'report-format' },
+    { role: 'assistant' as const, text: 'Checking.', kind: 'progress' as const },
+    message,
+  ];
+  const first = serializeThreadMessagesForProviderHistory(messages);
+  const second = serializeThreadMessagesForProviderHistory(messages);
+
+  assert.deepEqual(first, second);
+  assert.equal(first.length, 3);
+  assert.equal(first[0]?.text, '/report-format Prepare the report.');
+  assert.match(first[1]?.text ?? '', /^<user_question_request>/);
+  assert.match(first[2]?.text ?? '', /^<user_question_response>/);
+  assert.ok((first[2]?.text ?? '').indexOf('"id":"table"')
+    < (first[2]?.text ?? '').indexOf('"id":"list"'));
+  assert.match(first[2]?.text ?? '', /Keep captions\./);
+});
+
+test('user-question history counts toward the existing 200-message persistence cap', () => {
+  mem.clear();
+  const thread = createEmptyThread({ agent: 'codex', model: 'gpt-5.6-sol', effort: 'high' });
+  for (let index = 0; index < 200; index += 1) {
+    thread.messages.push({ role: 'user', text: `message-${index}` });
+  }
+  const interaction = userQuestionInteraction({ threadId: thread.id });
+  thread.messages.push(createUserQuestionHistoryMessage(interaction, {
+    status: 'cancelled',
+    reason: 'user-stop',
+  }));
+  upsertThread(thread);
+
+  const restored = getThread(thread.id);
+  assert.equal(restored?.messages.length, 200);
+  assert.equal(restored?.messages[0]?.text, 'message-1');
+  assert.equal(restored?.messages.at(-1)?.kind, 'user-question');
+});
+
 test('persisted Pi chats remain available after reload', () => {
   mem.clear();
   storage.setItem('rhwp-agent-threads', JSON.stringify([{
@@ -154,6 +406,24 @@ test('persisted Pi chats remain available after reload', () => {
     messages: [{ role: 'user', text: '기존 Pi 메시지' }],
   }]));
   assert.equal(getThread('pi-thread')?.agent, 'pi');
+});
+
+test('persisted Rau chats keep the provider on the thread and messages', () => {
+  mem.clear();
+  storage.setItem('rhwp-agent-threads', JSON.stringify([{
+    id: 'rau-thread',
+    title: 'Rau 대화',
+    titleRequested: false,
+    createdAt: 1,
+    updatedAt: 2,
+    agent: 'rau',
+    model: 'rau-trial',
+    effort: 'medium',
+    messages: [{ role: 'assistant', text: '체험 답변', agent: 'rau' }],
+  }]));
+  const restored = getThread('rau-thread');
+  assert.equal(restored?.agent, 'rau');
+  assert.equal(restored?.messages[0]?.agent, 'rau');
 });
 
 test('legacy threads default to the standard service tier', () => {

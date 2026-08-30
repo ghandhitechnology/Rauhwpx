@@ -42,12 +42,12 @@ let ws = null;
 /** @type {Promise<WebSocket> | null} */
 let connecting = null;
 let nextId = 1;
-/** @type {Map<number, { resolve: (v: any) => void, reject: (e: any) => void, timer: NodeJS.Timeout }>} */
+/** @type {Map<number, { resolve: (v: any) => void, reject: (e: any) => void, timer: NodeJS.Timeout | null }>} */
 const inflight = new Map();
 
 function failAllInflight(err) {
   for (const [, entry] of inflight) {
-    clearTimeout(entry.timer);
+    if (entry.timer) clearTimeout(entry.timer);
     entry.reject(err);
   }
   inflight.clear();
@@ -98,7 +98,7 @@ function ensureConnected() {
         const entry = inflight.get(msg.id);
         if (!entry) return;
         inflight.delete(msg.id);
-        clearTimeout(entry.timer);
+        if (entry.timer) clearTimeout(entry.timer);
         if (msg.ok) entry.resolve(msg.result);
         else entry.reject(hubError(msg.error?.code ?? 'RPC_ERROR', msg.error?.message ?? 'unknown hub error'));
       } else if (msg?.type === 'protocol-error') {
@@ -127,14 +127,19 @@ async function callHub(tool, args) {
   const sock = await ensureConnected();
   const id = nextId++;
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      inflight.delete(id);
-      reject(hubError('TOOL_TIMEOUT', 'The hub did not respond within 180s; if this was a document edit, re-read before retrying to avoid duplicates'));
-    }, CALL_TIMEOUT_MS);
+    // Human input is hub-owned and lives until answered, cancelled, or its provider
+    // connection disappears. Applying the ordinary MCP timeout would turn a normal
+    // pause into a false tool failure.
+    const timer = tool === 'ask_user_question'
+      ? null
+      : setTimeout(() => {
+        inflight.delete(id);
+        reject(hubError('TOOL_TIMEOUT', 'The hub did not respond within 180s; if this was a document edit, re-read before retrying to avoid duplicates'));
+      }, CALL_TIMEOUT_MS);
     inflight.set(id, { resolve, reject, timer });
     try {
       sock.send(JSON.stringify({
-        v: 3,
+        v: 4,
         type: 'tool-call',
         id,
         tool,
@@ -144,7 +149,7 @@ async function callHub(tool, args) {
       }));
     } catch (e) {
       inflight.delete(id);
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       reject(hubError('HUB_UNAVAILABLE', `failed to send to hub: ${e?.message ?? e}`));
     }
   });

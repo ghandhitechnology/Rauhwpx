@@ -56,17 +56,20 @@ test('Linux packages cover AppImage and deb on x64 and arm64', () => {
   assert.equal(rootPackage.desktopName, 'rauhwpx.desktop');
   assert.match(rootPackage.scripts?.['dist:linux:x64'] ?? '', /--x64/);
   assert.match(rootPackage.scripts?.['dist:linux:arm64'] ?? '', /--arm64/);
-  assert.match(rootPackage.scripts?.['dist:linux:x64'] ?? '', /build:native/);
-  assert.match(rootPackage.scripts?.['dist:linux:arm64'] ?? '', /build:native/);
+  assert.match(rootPackage.scripts?.['dist:linux:x64'] ?? '', /build:desktop/);
+  assert.match(rootPackage.scripts?.['dist:linux:arm64'] ?? '', /build:desktop/);
+  assert.match(rootPackage.scripts?.['build:desktop'] ?? '', /build:native/);
 });
 
 test('desktop packages and launches the native document reference extractor', () => {
   assert.match(rootPackage.scripts?.['build:native'] ?? '', /cargo build[\s\S]*--bin rhwp/);
   assert.equal(rootPackage.build?.files?.includes('desktop/**/*'), true);
-  assert.equal(rootPackage.build?.asarUnpack?.includes('desktop/bin/**'), true);
-  assert.match(desktopMain, /function nativeRhwpExecutable\(\)/);
-  assert.match(desktopMain, /RHWP_BIN: rhwpExecutable/);
-  assert.match(desktopMain, /Packaged native document extractor is missing/);
+  assert.equal(rootPackage.build?.asarUnpack?.includes('desktop/bin/**'), false);
+  const nativeResource = rootPackage.build?.extraResources?.find((entry) => entry.to === 'bin');
+  assert.equal(nativeResource?.from, 'rhwp/target/release');
+  assert.deepEqual(nativeResource?.filter, ['rhwp', 'rhwp.exe']);
+  assert.match(desktopMain, /packagedRhwpBinary\(\{/);
+  assert.match(desktopMain, /RHWP_BIN: rhwpBinary/);
 });
 
 test('Linux packages register every supported document MIME type', () => {

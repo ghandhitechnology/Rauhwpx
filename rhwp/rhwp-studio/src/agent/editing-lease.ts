@@ -6,6 +6,7 @@ export interface AgentEditingActivity {
   agent: AgentName;
   workflow?: AgentWorkflow;
   phase?: AgentPhase;
+  waitingForUser?: boolean;
 }
 
 /**
@@ -26,5 +27,6 @@ export function deriveAgentEditingLease(activity: AgentEditingActivity): AgentEd
   return {
     active: switching || (busy && !planModeAllowsUserEditing(activity.workflow, activity.phase)),
     agent: activity.agent,
+    ...(activity.waitingForUser === true ? { waitingForUser: true } : {}),
   };
 }
