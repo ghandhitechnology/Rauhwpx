@@ -2007,10 +2007,7 @@ impl DocumentCore {
 
         let is_treat_as_char = (table.attr & 0x01) != 0;
 
-        // 현재 오프셋은 common 에서 읽는다. raw 가 빈 HWPX 표를 다루려고
-        // 0으로 채우면 serialize_table / HWPX→HWP 어댑터가 12바이트 raw 를
-        // 정본으로 쓰고 width/height/여백이 저장에서 사라진다.
-        // 쓰기는 common 에 하고, raw 에는 길이가 허락할 때만 덧쓴다.
+        // 현재 오프셋은 common. raw 는 길이가 허락할 때만 덧쓴다.
 
         // vertical_offset: CommonObjAttr::V_OFFSET (i32 LE)
         let mut new_v = if delta_v != 0 {
