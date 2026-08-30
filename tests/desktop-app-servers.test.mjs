@@ -785,11 +785,13 @@ function sandboxCoordinator({
   vault = memoryVault(),
   appServers,
   collectProviderAuth = null,
+  onRedeem = null,
 } = {}) {
   const client = new CloudClient({
     vault,
     fetchImpl: signedFetch(async (url) => {
       if (url.endsWith('/v1/pairing/redeem')) {
+        onRedeem?.();
         return new Response(JSON.stringify({
           accessToken: 'sandbox-access',
           accessExpiresAt: new Date(Date.now() + 60_000).toISOString(),
@@ -868,6 +870,39 @@ test('concurrent spawns share one sandbox and the choice survives a restart', as
   assert.equal(resumed.server.preferredMode, 'app-hosted');
   assert.equal(resumed.server.lifecycle, 'ready');
   assert.equal(resumed.profile.mode, 'app-hosted');
+});
+
+test('a second managed run on the same warm worker reuses the paired device credentials', async () => {
+  const vault = memoryVault();
+  let redeemCalls = 0;
+  let status = 'ready';
+  const secondSandbox = { ...SANDBOX, sandboxId: 'run-2' };
+  const provider = appServerStub({
+    status: async () => ({ lifecycle: status, status: status === 'ready' ? 'active' : 'completed', message: null }),
+    spawn: async (options) => {
+      provider.calls.spawn += 1;
+      const sandbox = provider.calls.spawn === 1 ? SANDBOX : secondSandbox;
+      await options.onSandboxCreated?.(sandbox);
+      return {
+        sandbox,
+        receipt: {
+          endpoint: 'https://sandbox-1.up.railway.app/rauhwpx-cloud',
+          serverPublicKey: SERVER_KEY,
+          pairingCode: 'ABCD-EFGH-JKLM',
+        },
+      };
+    },
+  });
+  const { coordinator } = sandboxCoordinator({ provider, vault, onRedeem: () => { redeemCalls += 1; } });
+  await coordinator.start();
+  await coordinator.spawnAppServer();
+  assert.equal(redeemCalls, 1);
+  status = 'idle';
+  const second = await coordinator.spawnAppServer();
+  assert.equal(provider.calls.spawn, 2);
+  assert.equal(redeemCalls, 1, 'the one-time bootstrap code is not redeemed again');
+  assert.equal(second.profile.sandbox.sandboxId, 'run-2');
+  assert.equal(vault.values.get('cloud.refresh'), 'sandbox-refresh');
 });
 
 test('startup removes a journaled sandbox left by an interrupted spawn', async () => {

@@ -364,7 +364,7 @@ test('app server failures read as something the user can act on', () => {
   );
 });
 
-test('the dialog offers both servers and every sandbox action', () => {
+test('the dialog offers both servers and only restorable sandbox actions', () => {
   assert.match(onboarding, /Cloud 서버 선택/);
   assert.match(onboarding, /앱에서 제공하는 서버/);
   assert.match(onboarding, /내 서버 사용/);
@@ -374,6 +374,8 @@ test('the dialog offers both servers and every sandbox action', () => {
   assert.match(onboarding, /controller\.spawnSandbox\(providerId\)/);
   assert.match(onboarding, /controller\.teardownSandbox\(\)/);
   assert.match(onboarding, /controller\.sandboxStatus\(\)/);
+  assert.doesNotMatch(onboarding, /controller\.takeoverSandbox\(\)/);
+  assert.match(onboarding, /그 기기에서 작업을 마친 뒤 계속할 수 있습니다/);
   assert.match(onboarding, /남은 서버는 공급자 콘솔에서 직접 삭제하세요/);
   // 놓고 온 유료 서버는 화면에 보여야 한다. 스크린 리더 전용 안내로는 부족하다.
   assert.match(onboarding, /state\.notice.*callout\('cloud', '남은 서버를 확인하세요', state\.notice\)/);
@@ -389,10 +391,11 @@ test('the dialog offers both servers and every sandbox action', () => {
   assert.match(preload, /cloudSpawnSandbox: \(payload\) => ipcRenderer\.invoke\('cloud:spawn-sandbox', payload\)/);
   assert.match(preload, /cloudSandboxStatus: \(\) => ipcRenderer\.invoke\('cloud:sandbox-status'\)/);
   assert.match(preload, /cloudTeardownSandbox: \(payload\) => ipcRenderer\.invoke\('cloud:teardown-sandbox', payload\)/);
-  for (const channel of ['cloud:select-server-mode', 'cloud:spawn-sandbox', 'cloud:sandbox-status', 'cloud:teardown-sandbox']) {
+  assert.match(preload, /cloudTakeoverSandbox: \(\) => ipcRenderer\.invoke\('cloud:takeover-sandbox'\)/);
+  for (const channel of ['cloud:select-server-mode', 'cloud:spawn-sandbox', 'cloud:sandbox-status', 'cloud:teardown-sandbox', 'cloud:takeover-sandbox']) {
     assert.match(desktopMain, new RegExp(`ipcMain\\.handle\\('${channel}'`));
   }
-  assert.match(desktopMain, /createRailwayServerProvider\(\{/);
-  assert.match(desktopMain, /probeHealth: \(endpoint, options\) => cloudClient\.probeEndpointHealth/);
-  assert.match(desktopMain, /acquireReceipt: \(request\) => cloudClient\.bootstrapPairing/);
+  assert.match(desktopMain, /createManagedCloudBrokerProvider\(\{/);
+  assert.match(desktopMain, /getAccessToken: \(\) => secretVault\.get\(MANAGED_CLOUD_ACCESS_SECRET\)/);
+  assert.doesNotMatch(desktopMain, /createRailwayServerProvider\(\{/);
 });

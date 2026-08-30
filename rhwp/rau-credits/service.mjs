@@ -4,6 +4,7 @@ import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 import { decryptSecret, encryptSecret } from './crypto.mjs';
+import { createManagedCloudBroker } from './cloud-broker.mjs';
 import { RAU_CREDIT_LIMIT_USD, RAU_MODEL_IDS } from './catalog.mjs';
 import {
   renderCodePage,
@@ -74,6 +75,9 @@ function loginEmail(body) {
  *   inspectOpenRouterKey?: (input: { key: string }) => Promise<{ limit: number, usage: number }>,
  *   deleteOpenRouterKey?: (input: { id: string }) => Promise<void>,
  *   maxLiveSessions?: number,
+ *   cloudWorkerSecret?: string,
+ *   cloudProvisioner?: { provision: Function, teardown: Function }|null,
+ *   cloudProvisionerRequired?: boolean,
  * }} deps
  */
 export function createCreditsService({
@@ -92,6 +96,9 @@ export function createCreditsService({
   inspectOpenRouterKey = null,
   deleteOpenRouterKey = null,
   maxLiveSessions = 2000,
+  cloudWorkerSecret = '',
+  cloudProvisioner = null,
+  cloudProvisionerRequired = false,
 } = {}) {
   if (!origin) throw new Error('origin is required');
   if (!sessionSecret) throw new Error('sessionSecret is required');
@@ -100,6 +107,9 @@ export function createCreditsService({
   let mutationChain = Promise.resolve();
 
   function mutate(task) {
+    if (typeof store.mutate === 'function') {
+      return store.mutate((state) => task(ensureState(state)));
+    }
     const running = mutationChain.then(async () => {
       const state = ensureState(await store.load());
       const result = await task(state);
@@ -245,9 +255,8 @@ export function createCreditsService({
    * 같은 메일함을 다른 인증 수단으로 들어와도 두 번째 $5 가 만들어지지 않게 한다.
    */
   async function keyForUser(workosUserId, email = null) {
-    const normalizedEmail = typeof email === 'string' && email.includes('@')
-      ? email.trim().toLowerCase()
-      : null;
+    const accountEmail = typeof email === 'string' && email.includes('@') ? email.trim() : null;
+    const normalizedEmail = accountEmail?.toLowerCase() ?? null;
     return mutate(async (state) => {
       const byEmail = normalizedEmail ? state.emailIndex?.[normalizedEmail] : null;
       const existingId = state.users[workosUserId] ? workosUserId : byEmail;
@@ -262,28 +271,33 @@ export function createCreditsService({
         }
       }
       if (existingKey) {
+        if (accountEmail) existing.email = accountEmail;
+        const accountId = existing.accountId ?? existingId;
+        existing.accountId = accountId;
         if (existingId !== workosUserId) {
-          state.users[workosUserId] = { ...state.users[existingId] };
+          state.users[workosUserId] = { ...state.users[existingId], accountId };
         }
         if (normalizedEmail) {
           state.emailIndex ??= {};
-          state.emailIndex[normalizedEmail] = workosUserId;
+          state.emailIndex[normalizedEmail] = accountId;
         }
-        return existingKey;
+        return { key: existingKey, accountId };
       }
       const minted = await mintKey({ name: `rau-${workosUserId.slice(0, 12)}` });
       state.users[workosUserId] = {
         keyCiphertext: encryptSecret(sessionSecret, minted.key),
         openrouterKeyId: minted.id,
         credentialVersion: 2,
+        accountId: workosUserId,
         carriedUsageUsd: 0,
+        ...(accountEmail ? { email: accountEmail } : {}),
         createdAt: now(),
       };
       if (normalizedEmail) {
         state.emailIndex ??= {};
         state.emailIndex[normalizedEmail] = workosUserId;
       }
-      return minted.key;
+      return { key: minted.key, accountId: workosUserId };
     });
   }
 
@@ -298,7 +312,7 @@ export function createCreditsService({
     }
     // The provider key never leaves this service. The desktop receives a random,
     // revocable Rau token that is accepted only by the constrained proxy below.
-    await keyForUser(userId, accountEmail);
+    const account = await keyForUser(userId, accountEmail);
     const accessToken = newAccessToken();
     const accessHash = accessTokenHash(accessToken);
     await mutate((state) => {
@@ -316,6 +330,7 @@ export function createCreditsService({
       current.accessTokenCiphertext = encryptSecret(sessionSecret, accessToken);
       state.accessTokens[accessHash] = {
         workosUserId: userId,
+        accountId: account.accountId,
         createdAt: now(),
       };
       if (current.replaceAccessHash && current.replaceAccessHash !== accessHash) {
@@ -344,6 +359,30 @@ export function createCreditsService({
     }
     return { grant, user, apiKey };
   }
+
+  const cloudBroker = createManagedCloudBroker({
+    store,
+    mutate,
+    now,
+    workerSecret: cloudWorkerSecret,
+    provisioner: cloudProvisioner,
+    provisionerRequired: cloudProvisionerRequired,
+    authenticateAccessToken: async (token, deviceId = null) => {
+      const trimmed = String(token ?? '').trim();
+      const { grant } = await accessRecord(trimmed);
+      if (deviceId) {
+        await mutate((state) => {
+          const current = state.accessTokens[accessTokenHash(trimmed)];
+          if (!current) throw creditsError('RAU_ACCESS_INVALID', 'Rau 로그인이 만료되었어요. 다시 로그인해 주세요');
+          if (current.cloudDeviceId && current.cloudDeviceId !== deviceId) {
+            throw creditsError('CLOUD_DEVICE_MISMATCH', 'This account token is already bound to another Cloud device');
+          }
+          current.cloudDeviceId ??= deviceId;
+        });
+      }
+      return grant.accountId ?? grant.workosUserId;
+    },
+  });
 
   return {
     origin,
@@ -499,9 +538,10 @@ export function createCreditsService({
     },
 
     /** Idempotently revoke a device token. The provider key remains server-side. */
-    async revokeAccessToken(token) {
+    async revokeAccessToken(token, { deviceId = null } = {}) {
       const trimmed = String(token ?? '').trim();
       if (!trimmed) return { revoked: false };
+      if (deviceId) await cloudBroker.logoutCloudDevice(trimmed, deviceId);
       return mutate((state) => {
         const hash = accessTokenHash(trimmed);
         const revoked = Object.hasOwn(state.accessTokens, hash);
@@ -556,6 +596,8 @@ export function createCreditsService({
         headers: { 'Content-Type': 'application/json' },
       });
     },
+
+    ...cloudBroker,
   };
 }
 
@@ -610,6 +652,19 @@ function htmlErrorStatus(error) {
   if (error?.code === 'INVALID_JSON') return 400;
   if (error?.code === 'RATE_LIMITED') return 429;
   if (error?.code === 'BODY_TOO_LARGE') return 413;
+  if (error?.code === 'CLOUD_WORKER_UNAUTHORIZED' || error?.code === 'RAU_ACCESS_INVALID') return 401;
+  if (error?.code === 'CLOUD_RUN_NOT_FOUND') return 404;
+  if (error?.code === 'CLOUD_DEVICE_MISMATCH') return 403;
+  if (error?.code === 'CLOUD_UNAVAILABLE' || error?.code === 'CLOUD_PROVISION_FAILED') return 503;
+  if (error?.code === 'CLOUD_QUOTA_EXHAUSTED'
+    || error?.code === 'CLOUD_COLD_START_RATE_LIMITED'
+    || error?.code === 'CLOUD_TIMEZONE_CHANGE_RATE_LIMITED') return 429;
+  if (error?.code?.startsWith?.('CLOUD_OWNED_')
+    || error?.code === 'CLOUD_RUN_ALREADY_ACTIVE'
+    || error?.code === 'CLOUD_TEARDOWN_PENDING'
+    || error?.code === 'CLOUD_TAKEOVER_NOT_READY'
+    || error?.code === 'CLOUD_RUN_STATE_INVALID') return 409;
+  if (error?.code?.startsWith?.('CLOUD_')) return 400;
   return 500;
 }
 
@@ -653,6 +708,65 @@ export function creditsRequestListener(service) {
         send(200, { ok: true });
         return;
       }
+      if (req.method === 'GET' && url.pathname === '/v1/account') {
+        send(200, await service.getAccount(bearerToken(req)));
+        return;
+      }
+      if (req.method === 'PATCH' && (url.pathname === '/v1/account' || url.pathname === '/v1/account/timezone')) {
+        const body = await readJson(req);
+        send(200, await service.setAccountTimezone(bearerToken(req), body.timezone));
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/v1/cloud/status') {
+        send(200, await service.getCloudStatus(bearerToken(req), {
+          deviceId: url.searchParams.get('deviceId') ?? '',
+          timezone: url.searchParams.get('timezone'),
+        }));
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/v1/cloud/runs') {
+        const body = await readJson(req);
+        send(201, await service.createCloudRun(bearerToken(req), {
+          ...body,
+          idempotencyKey: body.idempotencyKey ?? req.headers['idempotency-key'],
+        }));
+        return;
+      }
+      const takeover = url.pathname.match(/^\/v1\/cloud\/runs\/([^/]+)\/takeover$/);
+      if (req.method === 'POST' && takeover) {
+        const body = await readJson(req);
+        send(201, await service.takeoverCloudRun(
+          bearerToken(req),
+          decodeURIComponent(takeover[1]),
+          { ...body, idempotencyKey: body.idempotencyKey ?? req.headers['idempotency-key'] },
+        ));
+        return;
+      }
+      const stop = url.pathname.match(/^\/v1\/cloud\/runs\/([^/]+)\/stop$/);
+      if (req.method === 'POST' && stop) {
+        const body = await readJson(req);
+        send(200, await service.stopCloudRun(bearerToken(req), decodeURIComponent(stop[1]), body));
+        return;
+      }
+      const internal = url.pathname.match(/^\/v1\/internal\/cloud\/runs\/([^/]+)\/(allocation|heartbeat|checkpoint|complete|release)$/);
+      if (req.method === 'POST' && internal) {
+        const body = await readJson(req);
+        const secret = bearerToken(req);
+        const runId = decodeURIComponent(internal[1]);
+        const action = internal[2];
+        let result;
+        if (action === 'allocation') result = await service.confirmCloudAllocation(secret, runId);
+        if (action === 'heartbeat') result = await service.heartbeatCloudRun(secret, runId);
+        if (action === 'checkpoint') result = await service.checkpointCloudRun(secret, runId, body.checkpointId);
+        if (action === 'complete') result = await service.completeCloudRun(secret, runId, body);
+        if (action === 'release') result = await service.releaseCloudRun(secret, runId, body);
+        send(200, result);
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/v1/internal/cloud/lease') {
+        send(200, await service.getCloudLease(bearerToken(req)));
+        return;
+      }
       const proxy = url.pathname.match(/^\/v1\/openrouter(\/.*)$/);
       if (proxy) {
         const token = bearerToken(req);
@@ -690,7 +804,8 @@ export function creditsRequestListener(service) {
         return;
       }
       if (req.method === 'POST' && url.pathname === '/v1/access/revoke') {
-        send(200, await service.revokeAccessToken(bearerToken(req)));
+        const body = await readJson(req);
+        send(200, await service.revokeAccessToken(bearerToken(req), { deviceId: body.deviceId ?? null }));
         return;
       }
       if (req.method === 'POST' && url.pathname === '/v1/device-sessions') {
@@ -812,6 +927,7 @@ export function creditsRequestListener(service) {
         send(htmlErrorStatus(error), {
           error: error?.code ?? 'RAU_CREDITS_FAILED',
           message: error?.message ?? String(error),
+          ...(error?.details === undefined ? {} : { details: error.details }),
         });
         return;
       }

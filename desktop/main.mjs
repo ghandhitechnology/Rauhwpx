@@ -53,12 +53,15 @@ import {
 } from './studio-protocol.mjs';
 import { createSecretVault, handleSecretRequest } from './secret-vault.mjs';
 import { CloudClient } from './cloud-client.mjs';
+import {
+  createManagedCloudBrokerProvider,
+  MANAGED_CLOUD_ACCESS_SECRET,
+} from './cloud-broker.mjs';
 import { CloudCoordinator } from './cloud-coordinator.mjs';
 import { CloudDisplayRegistry } from './cloud-display-registry.mjs';
 import { CloudHandoffStore } from './cloud-handoff.mjs';
 import { collectProviderAuth as collectImportedProviderAuth } from './cloud-provider-auth.mjs';
 import { CloudProvisioner } from './cloud-provisioner.mjs';
-import { createRailwayServerProvider } from './cloud-railway.mjs';
 import { mergeCloudOperationSnapshot } from './cloud-snapshot.mjs';
 import { CloudApiTransport, SshTunnelManager } from './cloud-ssh-tunnel.mjs';
 import { collectProviderAuth } from './provider-auth.mjs';
@@ -402,6 +405,17 @@ function queueCloudBroadcast(payload) {
 function requireCloudCoordinator() {
   if (!cloudCoordinator) throw new Error('Cloud service is not ready');
   return cloudCoordinator;
+}
+
+const MANAGED_CLOUD_DEVICE_SECRET = 'cloud.managed-device-id';
+
+async function managedCloudDeviceIdentity() {
+  let id = String(await secretVault.get(MANAGED_CLOUD_DEVICE_SECRET).catch(() => '') ?? '').trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(id)) {
+    id = randomUUID();
+    await secretVault.set(MANAGED_CLOUD_DEVICE_SECRET, id);
+  }
+  return { id, name: app.getName() };
 }
 
 async function loadNativeBookmarks() {
@@ -1086,6 +1100,14 @@ ipcMain.handle('cloud:teardown-sandbox', async (event, payload = {}) => {
     force: payload?.force === true,
   }));
 });
+ipcMain.handle('cloud:takeover-sandbox', async (event) => {
+  const session = sessionForEvent(event);
+  return scopedCloudSnapshot(session, await requireCloudCoordinator().takeoverAppServer());
+});
+ipcMain.handle('cloud:account-logout', async (event) => {
+  const session = sessionForEvent(event);
+  return scopedCloudSnapshot(session, await requireCloudCoordinator().logoutManagedCloud());
+});
 ipcMain.handle('cloud:transfer-intent', async (event, payload = {}) => {
   const session = sessionForEvent(event);
   const scope = normalizeCloudScope(payload);
@@ -1393,10 +1415,10 @@ if (!hasSingleInstanceLock) {
         knownHostsPath,
       }),
       recoveryDir: join(app.getPath('userData'), 'cloud', 'recovery'),
-      appServers: [createRailwayServerProvider({
+      appServers: [createManagedCloudBrokerProvider({
         fetchImpl: (...args) => net.fetch(...args),
-        probeHealth: (endpoint, options) => cloudClient.probeEndpointHealth(endpoint, options),
-        acquireReceipt: (request) => cloudClient.bootstrapPairing(request),
+        getAccessToken: () => secretVault.get(MANAGED_CLOUD_ACCESS_SECRET),
+        getDeviceIdentity: managedCloudDeviceIdentity,
       })],
       collectProviderAuth: (provider) => collectProviderAuth(provider, {
         vault: secretVault,

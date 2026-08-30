@@ -123,6 +123,7 @@
 }
 
 .rhwp-setup-dialog[data-stage='providers'] .rhwp-setup-progress-bar:first-child,
+.rhwp-setup-dialog[data-stage='account'] .rhwp-setup-progress-bar:nth-child(-n + 2),
 .rhwp-setup-dialog[data-stage='calibration'] .rhwp-setup-progress-bar {
   background: var(--setup-text);
 }
@@ -371,6 +372,72 @@
   animation: rhwp-setup-stage-enter 580ms var(--setup-spring-snappy) both;
 }
 
+.rhwp-setup-account {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: min(660px, 100%);
+  margin: 24px auto 0;
+  padding: 46px;
+  border: 1px solid var(--setup-line);
+  border-radius: 20px;
+  background: var(--setup-card);
+  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.22);
+  animation: rhwp-setup-stage-enter 580ms var(--setup-spring-snappy) both;
+}
+
+.rhwp-setup-account-mark {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  margin-bottom: 26px;
+  border: 1px solid var(--setup-line-strong);
+  border-radius: 14px;
+  background: #1d1f25;
+  color: var(--setup-text);
+}
+
+.rhwp-setup-account-mark .ag-provider-icon {
+  width: 28px;
+  height: 28px;
+}
+
+.rhwp-setup-account-title {
+  margin: 0;
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+}
+
+.rhwp-setup-account-copy {
+  max-width: 56ch;
+  margin: 12px 0 0;
+  color: var(--setup-soft);
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+.rhwp-setup-account-state {
+  min-height: 1.5em;
+  margin: 20px 0 0;
+  color: var(--setup-muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.rhwp-setup-account[data-signed-in='true'] .rhwp-setup-account-state {
+  color: #b7c9ad;
+}
+
+.rhwp-setup-account-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  width: 100%;
+  margin-top: 28px;
+}
+
 .rhwp-setup-cal-mark {
   display: grid;
   place-items: center;
@@ -458,6 +525,7 @@
 }
 
 .rhwp-setup-providers[hidden],
+.rhwp-setup-account[hidden],
 .rhwp-setup-cal[hidden],
 .rhwp-setup-footer[hidden],
 .rhwp-setup-back[hidden] {
@@ -599,6 +667,11 @@
     padding: 64px;
   }
 
+  .rhwp-setup-account {
+    width: min(800px, 100%);
+    padding: 64px;
+  }
+
   .rhwp-setup-cal-mark {
     width: 56px;
     height: 56px;
@@ -609,7 +682,12 @@
     font-size: 36px;
   }
 
-  .rhwp-setup-cal-copy {
+  .rhwp-setup-account-title {
+    font-size: 36px;
+  }
+
+  .rhwp-setup-cal-copy,
+  .rhwp-setup-account-copy {
     font-size: 16px;
   }
 }

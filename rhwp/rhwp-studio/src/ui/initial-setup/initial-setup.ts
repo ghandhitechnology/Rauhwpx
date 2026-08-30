@@ -7,6 +7,7 @@
 import './initial-setup.css';
 
 import type { AgentName, AgentSetupStatusMap, SidebarEvent } from '../../agent/types.ts';
+import type { AccountSnapshot } from '../../cloud/types.ts';
 import { AGENT_LABEL, createProviderIcon, PROVIDER_ORDER } from '../agent-sidebar/providers.ts';
 import {
   isProviderConfigured,
@@ -22,7 +23,7 @@ import {
   type InitialSetupStorage,
 } from './state.ts';
 
-type SetupStage = 'providers' | 'calibration';
+type SetupStage = 'providers' | 'account' | 'calibration';
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -39,6 +40,8 @@ export interface InitialSetupDeps {
   openAgentSetup: (agent: AgentName) => void;
   beginAgentConnect?: (agent: AgentName) => void;
   openCalibration: (options?: { elevate?: boolean }) => void;
+  requestAccount?: () => Promise<AccountSnapshot | null>;
+  loginAccount?: () => Promise<{ authUrl: string } | null>;
   storage?: InitialSetupStorage | null;
 }
 
@@ -52,11 +55,22 @@ export interface InitialSetupUi {
 }
 
 export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
-  const { openAgentSetup, beginAgentConnect, openCalibration, storage } = deps;
+  const {
+    openAgentSetup,
+    beginAgentConnect,
+    openCalibration,
+    requestAccount,
+    loginAccount,
+    storage,
+  } = deps;
   let disposed = false;
   let record: InitialSetupRecord = loadInitialSetup(storage);
   let stage: SetupStage = 'providers';
   let setupStatuses: AgentSetupStatusMap | null = null;
+  let account: AccountSnapshot | null = null;
+  let accountBusy = false;
+  let accountAuthPending = false;
+  let accountMessage = '';
   let lastFocus: HTMLElement | null = null;
 
   const overlay = el('div', 'rhwp-setup-overlay');
@@ -79,7 +93,11 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
   const brand = el('span', 'rhwp-setup-brand', 'Rauhwpx');
   const progress = el('div', 'rhwp-setup-progress');
   progress.setAttribute('aria-hidden', 'true');
-  progress.append(el('span', 'rhwp-setup-progress-bar'), el('span', 'rhwp-setup-progress-bar'));
+  progress.append(
+    el('span', 'rhwp-setup-progress-bar'),
+    el('span', 'rhwp-setup-progress-bar'),
+    el('span', 'rhwp-setup-progress-bar'),
+  );
   nav.append(back, brand, progress);
 
   const chrome = el('header', 'rhwp-setup-chrome');
@@ -87,7 +105,7 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
   const title = el('h1', 'rhwp-setup-title', '모델을 연결하세요');
   title.id = 'rhwp-setup-title';
   heading.append(title);
-  const step = el('span', 'rhwp-setup-step', '1 / 2');
+  const step = el('span', 'rhwp-setup-step', '1 / 3');
   chrome.append(heading, step);
 
   const providersPanel = el('div', 'rhwp-setup-providers');
@@ -120,6 +138,28 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
   }
   providersPanel.appendChild(grid);
 
+  const accountPanel = el('div', 'rhwp-setup-account');
+  accountPanel.hidden = true;
+  const accountMark = el('div', 'rhwp-setup-account-mark');
+  accountMark.setAttribute('aria-hidden', 'true');
+  accountMark.appendChild(createProviderIcon('rau'));
+  const accountTitle = el('h2', 'rhwp-setup-account-title', 'Rauhwpx 계정');
+  const accountCopy = el(
+    'p',
+    'rhwp-setup-account-copy',
+    '로그인하면 앱 제공 Cloud를 하루 60분까지 사용하고, 계정당 $5 모델 크레딧을 받을 수 있습니다. Rau 에이전트 설치 여부는 별도로 선택합니다.',
+  );
+  const accountState = el('p', 'rhwp-setup-account-state', '로그인하지 않아도 로컬 편집과 내 서버 Cloud를 사용할 수 있습니다.');
+  accountState.setAttribute('role', 'status');
+  accountState.setAttribute('aria-live', 'polite');
+  const accountActions = el('div', 'rhwp-setup-account-actions');
+  const accountSkip = el('button', 'rhwp-setup-text-btn', '로그인 없이 계속');
+  accountSkip.type = 'button';
+  const accountLogin = el('button', 'rhwp-setup-footer-btn rhwp-setup-primary', '계정으로 로그인');
+  accountLogin.type = 'button';
+  accountActions.append(accountSkip, accountLogin);
+  accountPanel.append(accountMark, accountTitle, accountCopy, accountState, accountActions);
+
   const calPanel = el('div', 'rhwp-setup-cal');
   calPanel.hidden = true;
   const calMark = el('div', 'rhwp-setup-cal-mark', '✎');
@@ -148,7 +188,7 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
   next.dataset.kind = 'next';
   footer.append(status, skip, next);
 
-  dialog.append(nav, chrome, providersPanel, calPanel, footer);
+  dialog.append(nav, chrome, providersPanel, accountPanel, calPanel, footer);
   overlay.appendChild(dialog);
 
   function configuredCount(): number {
@@ -178,44 +218,123 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
       : '아직 연결한 모델이 없습니다';
   }
 
+  function renderAccount(): void {
+    const signedIn = account?.signedIn === true;
+    accountPanel.dataset.signedIn = String(signedIn);
+    accountLogin.disabled = accountBusy || accountAuthPending || !loginAccount;
+    accountSkip.disabled = accountBusy;
+    accountLogin.textContent = accountBusy || accountAuthPending
+      ? '로그인 확인 중…'
+      : signedIn
+        ? '계속'
+        : '계정으로 로그인';
+    accountState.textContent = accountMessage || (signedIn
+      ? `${account?.account?.email ?? '계정'}으로 로그인했습니다. Cloud 사용량은 설정에서 확인할 수 있습니다.`
+      : loginAccount
+        ? '로그인은 선택 사항입니다. 나중에 설정에서도 로그인할 수 있습니다.'
+        : '이 환경에서는 계정 로그인을 열 수 없습니다. 나중에 데스크톱 설정에서 연결할 수 있습니다.');
+  }
+
+  async function refreshAccount(): Promise<void> {
+    if (!requestAccount || accountBusy) return;
+    accountBusy = true;
+    renderAccount();
+    try {
+      account = await requestAccount();
+      accountMessage = '';
+    } catch {
+      account = null;
+      accountMessage = '계정 상태를 확인하지 못했습니다. 로그인 없이 계속할 수 있습니다.';
+    } finally {
+      accountBusy = false;
+      if (!disposed) renderAccount();
+    }
+  }
+
   function showStage(nextStage: SetupStage): void {
     stage = nextStage;
     const providers = nextStage === 'providers';
     providersPanel.hidden = !providers;
-    calPanel.hidden = providers;
+    accountPanel.hidden = nextStage !== 'account';
+    calPanel.hidden = nextStage !== 'calibration';
     footer.hidden = !providers;
     back.hidden = providers;
     dialog.dataset.stage = nextStage;
-    step.textContent = providers ? '1 / 2' : '2 / 2';
-    title.textContent = providers ? '모델을 연결하세요' : '문체를 맞추세요';
+    step.textContent = providers ? '1 / 3' : nextStage === 'account' ? '2 / 3' : '3 / 3';
+    title.textContent = providers
+      ? '모델을 연결하세요'
+      : nextStage === 'account'
+        ? '계정 연결은 선택 사항입니다'
+        : '문체를 맞추세요';
+    back.setAttribute('aria-label', nextStage === 'calibration'
+      ? '계정 연결 단계로 돌아가기'
+      : '모델 연결 단계로 돌아가기');
     if (providers) renderCards();
+    if (nextStage === 'account') {
+      renderAccount();
+      void refreshAccount();
+    }
   }
 
   function goBack(): void {
-    if (stage !== 'calibration') return;
-    showStage('providers');
-    window.requestAnimationFrame(() => next.focus());
+    if (stage === 'providers') return;
+    const target = stage === 'calibration' ? 'account' : 'providers';
+    showStage(target);
+    window.requestAnimationFrame(() => (target === 'account' ? accountLogin : next).focus());
   }
 
-  function finish(partial: Pick<InitialSetupRecord, 'providerStep' | 'calibrationStep'>): void {
+  function finish(partial: Pick<InitialSetupRecord, 'providerStep' | 'accountStep' | 'calibrationStep'>): void {
     record = completeInitialSetup(partial, storage);
     close();
   }
 
   function skipProviders(): void {
     record = { ...record, providerStep: record.providerStep === 'configured' ? 'configured' : 'skipped' };
-    showStage('calibration');
+    showStage('account');
   }
 
   function goNext(): void {
     if (configuredCount() === 0) return;
     record = { ...record, providerStep: 'configured' };
+    showStage('account');
+  }
+
+  function continueFromAccount(): void {
+    record = { ...record, accountStep: account?.signedIn ? 'configured' : 'skipped' };
     showStage('calibration');
+  }
+
+  async function loginAndContinue(): Promise<void> {
+    if (account?.signedIn) {
+      continueFromAccount();
+      return;
+    }
+    if (!loginAccount || accountBusy || accountAuthPending) return;
+    accountBusy = true;
+    renderAccount();
+    try {
+      const auth = await loginAccount();
+      if (auth?.authUrl) {
+        window.open(auth.authUrl, '_blank', 'noopener,noreferrer');
+        accountAuthPending = true;
+        accountMessage = '브라우저에서 로그인을 마치면 이 화면에 자동으로 반영됩니다.';
+      } else {
+        accountAuthPending = false;
+        accountMessage = '로그인을 시작하지 못했습니다. 잠시 후 다시 시도해 주세요.';
+      }
+    } catch {
+      accountAuthPending = false;
+      accountMessage = '로그인을 시작하지 못했습니다. 로그인 없이 계속할 수 있습니다.';
+    } finally {
+      accountBusy = false;
+      if (!disposed) renderAccount();
+    }
   }
 
   function skipCalibration(): void {
     finish({
       providerStep: configuredCount() > 0 ? 'configured' : 'skipped',
+      accountStep: account?.signedIn ? 'configured' : record.accountStep === 'configured' ? 'configured' : 'skipped',
       calibrationStep: 'skipped',
     });
   }
@@ -228,6 +347,8 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
   next.addEventListener('click', goNext);
   calSkip.addEventListener('click', skipCalibration);
   calStart.addEventListener('click', startCalibration);
+  accountSkip.addEventListener('click', continueFromAccount);
+  accountLogin.addEventListener('click', () => { void loginAndContinue(); });
   back.addEventListener('click', goBack);
 
   function onKeyDown(event: KeyboardEvent): void {
@@ -266,15 +387,33 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
     close,
     handleEvent(event: SidebarEvent): void {
       if (disposed) return;
-      if (event.type !== 'agent-setup-status') return;
-      setupStatuses = event.statuses;
-      if (stage === 'providers') renderCards();
+      if (event.type === 'agent-setup-status') {
+        setupStatuses = event.statuses;
+        if (stage === 'providers') renderCards();
+        return;
+      }
+      if (event.type === 'rau-account-status') {
+        account = event.account;
+        accountBusy = false;
+        accountAuthPending = false;
+        accountMessage = '';
+        if (account.signedIn) record = { ...record, accountStep: 'configured' };
+        if (stage === 'account') renderAccount();
+        return;
+      }
+      if (event.type === 'rau-account-error' && stage === 'account') {
+        accountBusy = false;
+        accountAuthPending = false;
+        accountMessage = event.message;
+        renderAccount();
+      }
     },
     notifyCalibrationClosed(completed: boolean): void {
       if (disposed || !overlay.isConnected || stage !== 'calibration') return;
       if (!completed) return;
       finish({
         providerStep: configuredCount() > 0 ? 'configured' : 'skipped',
+        accountStep: account?.signedIn ? 'configured' : record.accountStep === 'configured' ? 'configured' : 'skipped',
         calibrationStep: 'done',
       });
     },

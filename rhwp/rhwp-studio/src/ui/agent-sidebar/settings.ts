@@ -32,6 +32,7 @@ import {
   formatUsageReset,
 } from './usage-format.ts';
 import type { AgentBridge } from '../../agent/bridge.ts';
+import type { AccountSnapshot } from '../../cloud/types.ts';
 import type { EventBus } from '../../core/event-bus.ts';
 import type {
   AgentName,
@@ -162,6 +163,12 @@ const UNRESTRICTED_DEFAULT_WARNING =
 
 /** 미터가 경고 색으로 넘어가는 소진율. */
 const METER_WARN_PERCENT = 80;
+
+type AccountBridge = AgentBridge & {
+  requestRauAccount?: () => Promise<AccountSnapshot | null>;
+  loginRauAccount?: () => Promise<{ authUrl: string } | null>;
+  logoutRauAccount?: () => Promise<AccountSnapshot | null>;
+};
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -358,12 +365,17 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     cloudSettings,
     refreshCloudSettings,
   } = deps;
+  const accountBridge = bridge as AccountBridge;
 
   let disposed = false;
   let prefs: AgentPrefs = loadAgentPrefs();
   let prefsBaseline: AgentPrefs = { ...prefs };
   let prefsDraft: AgentPrefs = { ...prefs };
   let connectionState: ConnectionState = bridge.getConnectionState();
+  let accountSnapshot: AccountSnapshot | null = null;
+  let accountBusy = false;
+  let accountAuthPending = false;
+  let accountMessage = '';
   let providers: ProviderStatusMap | null = null;
   let usage: UsageSummary | null = null;
   let writingStyle: WritingStyleStatus | null = null;
@@ -493,6 +505,46 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   // ── 1. 연결 ────────────────────────────────────────────
   const connection = createSection('연결');
+
+  const accountSection = createSection('Rauhwpx 계정');
+  const accountCard = el('div', 'ag-settings-account-card');
+  accountCard.dataset.state = 'logged-out';
+  const accountHead = el('div', 'ag-settings-account-head');
+  const accountIdentity = el('div', 'ag-settings-account-identity');
+  const accountName = el('strong', 'ag-settings-account-name', '로그인하지 않음');
+  const accountDetail = el('span', 'ag-settings-account-detail', '로컬 편집과 내 서버 Cloud는 로그인 없이 사용할 수 있습니다.');
+  accountIdentity.append(accountName, accountDetail);
+  const accountActions = el('div', 'ag-settings-actions ag-settings-account-actions');
+  const accountLogin = el('button', 'ag-settings-primary', '계정으로 로그인');
+  accountLogin.type = 'button';
+  const accountLogout = el('button', 'ag-settings-btn', '로그아웃');
+  accountLogout.type = 'button';
+  accountLogout.hidden = true;
+  accountActions.append(accountLogin, accountLogout);
+  accountHead.append(accountIdentity, accountActions);
+  const cloudQuota = el('div', 'ag-settings-cloud-quota');
+  const quotaHead = el('div', 'ag-settings-meter-head');
+  const quotaLabel = el('span', 'ag-settings-meter-label', 'Managed Cloud 오늘 사용량');
+  const quotaValue = el('span', 'ag-settings-meter-value', '로그인하면 하루 60분');
+  quotaHead.append(quotaLabel, quotaValue);
+  const quotaTrack = el('div', 'ag-settings-meter-track');
+  quotaTrack.setAttribute('role', 'progressbar');
+  quotaTrack.setAttribute('aria-valuemin', '0');
+  quotaTrack.setAttribute('aria-valuemax', '60');
+  quotaTrack.setAttribute('aria-valuenow', '0');
+  const quotaFill = el('div', 'ag-settings-meter-fill');
+  quotaTrack.appendChild(quotaFill);
+  const quotaFoot = el('p', 'ag-settings-account-foot', '사용량은 계정 기준으로 모든 기기에서 합산됩니다.');
+  cloudQuota.append(quotaHead, quotaTrack, quotaFoot);
+  const accountStatus = el('p', 'ag-settings-account-status');
+  accountStatus.hidden = true;
+  accountStatus.setAttribute('role', 'status');
+  accountStatus.setAttribute('aria-live', 'polite');
+  accountCard.append(accountHead, cloudQuota, accountStatus);
+  accountSection.body.appendChild(accountCard);
+
+  accountLogin.addEventListener('click', () => { void loginAccount(); });
+  accountLogout.addEventListener('click', () => { void logoutAccount(); });
   const hubRow = el('div', 'ag-settings-row ag-settings-hub-row');
   const hubDot = el('span', 'ag-settings-dot');
   hubDot.setAttribute('aria-hidden', 'true');
@@ -1290,7 +1342,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   panes.get('ai')?.appendChild(aiContent);
 
   const connectionContent = el('div', 'ag-settings-destination-content');
-  connectionContent.append(connection.root, ...(cloudSettings ? [cloudSettings] : []), usageSection.root);
+  connectionContent.append(accountSection.root, connection.root, ...(cloudSettings ? [cloudSettings] : []), usageSection.root);
   panes.get('connections')?.appendChild(connectionContent);
 
   aiApply.addEventListener('click', () => void applyAiDraft());
@@ -1697,6 +1749,142 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     const online = connectionState === 'connected';
     refreshBtn.disabled = !online;
     restartBtn.disabled = !online;
+  }
+
+  function quotaMinutes(ms: number): string {
+    return `${Math.max(0, Math.ceil(ms / 60_000))}분`;
+  }
+
+  function quotaResetLabel(value: string): string {
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime())) return '';
+    return new Intl.DateTimeFormat('ko-KR', {
+      hour: 'numeric',
+      minute: '2-digit',
+      timeZoneName: 'short',
+    }).format(date);
+  }
+
+  function renderAccount(): void {
+    const signedIn = accountSnapshot?.signedIn === true;
+    const quota = signedIn ? accountSnapshot?.quota ?? null : null;
+    accountLogin.hidden = signedIn;
+    accountLogout.hidden = !signedIn;
+    accountLogin.textContent = accountAuthPending ? '로그인 마치는 중…' : '계정으로 로그인';
+    accountLogin.disabled = accountBusy || accountAuthPending || !accountBridge.loginRauAccount;
+    accountLogout.disabled = accountBusy || !accountBridge.logoutRauAccount;
+    accountName.textContent = signedIn
+      ? accountSnapshot?.account?.displayName || accountSnapshot?.account?.email || 'Rauhwpx 계정'
+      : '로그인하지 않음';
+    accountDetail.textContent = signedIn
+      ? accountSnapshot?.account?.email ?? '계정이 연결되어 있습니다.'
+      : '로컬 편집과 내 서버 Cloud는 로그인 없이 사용할 수 있습니다.';
+
+    if (!signedIn || !quota) {
+      accountCard.dataset.state = signedIn ? 'normal' : 'logged-out';
+      quotaValue.textContent = signedIn ? '사용량을 확인하는 중…' : '로그인하면 하루 60분';
+      quotaFill.style.width = '0%';
+      quotaTrack.setAttribute('aria-valuenow', '0');
+      quotaFoot.textContent = signedIn
+        ? 'Managed Cloud 사용량을 불러오고 있습니다.'
+        : '로그인하면 Managed Cloud 하루 60분과 계정당 $5 모델 크레딧을 사용할 수 있습니다.';
+    } else {
+      const usedPercent = quota.dailyLimitMs > 0
+        ? Math.min(100, Math.max(0, quota.usedMs / quota.dailyLimitMs * 100))
+        : 100;
+      const inGrace = quota.debtMs > 0 || (quota.remainingMs <= 0 && Boolean(quota.graceEndsAt));
+      const state = inGrace || quota.remainingMs < 5 * 60_000
+        ? 'warning'
+        : quota.remainingMs < 15 * 60_000
+          ? 'subtle'
+          : 'normal';
+      accountCard.dataset.state = state;
+      quotaValue.textContent = inGrace
+        ? `현재 작업 마무리 중 · 다음 할당량에서 ${quotaMinutes(quota.debtMs)} 차감`
+        : `${quotaMinutes(quota.remainingMs)} 남음 / ${quotaMinutes(quota.dailyLimitMs)}`;
+      quotaFill.style.width = `${usedPercent}%`;
+      quotaTrack.setAttribute('aria-valuemax', String(Math.max(1, Math.ceil(quota.dailyLimitMs / 60_000))));
+      quotaTrack.setAttribute('aria-valuenow', String(Math.min(
+        Math.ceil(quota.dailyLimitMs / 60_000),
+        Math.ceil(quota.usedMs / 60_000),
+      )));
+      const reset = quotaResetLabel(quota.resetAt);
+      const starts = `오늘 시작 ${quota.coldStarts.usedToday}/${quota.coldStarts.dailyLimit} · 최근 ${quota.coldStarts.recent}/${quota.coldStarts.recentLimit}`;
+      const quotaNote = quota.activeRun && !quota.activeRun.controllingThisDevice
+        ? `${quota.activeRun.deviceName ?? '다른 기기'}에서 Cloud가 실행 중입니다. 이 기기에서는 새 작업을 시작할 수 없습니다.`
+        : inGrace
+          ? `현재 응답이 끝나면 Cloud가 중지됩니다${reset ? ` · 다음 정산 ${reset}` : ''}.`
+          : `모든 기기에서 합산됩니다${reset ? ` · ${reset} 초기화` : ''}.`;
+      quotaFoot.textContent = `${quotaNote} · ${starts}`;
+    }
+    accountStatus.textContent = accountMessage;
+    accountStatus.hidden = !accountMessage;
+    accountCard.setAttribute('aria-busy', String(accountBusy));
+  }
+
+  async function refreshAccount(_refresh = false): Promise<void> {
+    if (!accountBridge.requestRauAccount || accountBusy) {
+      renderAccount();
+      return;
+    }
+    accountBusy = true;
+    renderAccount();
+    try {
+      const next = await accountBridge.requestRauAccount();
+      if (next) accountSnapshot = next;
+      accountMessage = '';
+    } catch (error) {
+      accountMessage = error instanceof Error ? error.message : '계정 상태를 확인하지 못했습니다.';
+    } finally {
+      accountBusy = false;
+      if (!disposed) renderAccount();
+    }
+  }
+
+  async function loginAccount(): Promise<void> {
+    if (!accountBridge.loginRauAccount || accountBusy || accountAuthPending) return;
+    accountBusy = true;
+    accountMessage = '브라우저에서 로그인을 마쳐 주세요.';
+    renderAccount();
+    try {
+      const next = await accountBridge.loginRauAccount();
+      if (next?.authUrl) {
+        window.open(next.authUrl, '_blank', 'noopener,noreferrer');
+        accountAuthPending = true;
+        accountMessage = '브라우저 로그인이 끝나면 이 화면에 자동으로 반영됩니다.';
+      } else {
+        accountAuthPending = false;
+        accountMessage = '로그인을 시작하지 못했습니다.';
+      }
+    } catch (error) {
+      accountAuthPending = false;
+      accountMessage = error instanceof Error ? error.message : '로그인을 시작하지 못했습니다.';
+    } finally {
+      accountBusy = false;
+      if (!disposed) {
+        renderAccount();
+      }
+    }
+  }
+
+  async function logoutAccount(): Promise<void> {
+    if (!accountBridge.logoutRauAccount || accountBusy) return;
+    accountBusy = true;
+    accountMessage = '계정 연결을 정리하고 있습니다.';
+    renderAccount();
+    try {
+      const cloudLogout = (globalThis as {
+        rhwpDesktop?: { cloudAccountLogout?: () => Promise<unknown> };
+      }).rhwpDesktop?.cloudAccountLogout;
+      if (cloudLogout) await cloudLogout();
+      accountSnapshot = await accountBridge.logoutRauAccount();
+      accountMessage = '이 기기에서 로그아웃했습니다.';
+    } catch (error) {
+      accountMessage = error instanceof Error ? error.message : '로그아웃하지 못했습니다.';
+    } finally {
+      accountBusy = false;
+      if (!disposed) renderAccount();
+    }
   }
 
   function renderProviders(): void {
@@ -2985,6 +3173,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   syncPrefsInputs();
   renderCurrentSelection();
+  renderAccount();
   renderConnection();
   renderProviders();
   renderAgentInstructions();
@@ -3008,6 +3197,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       else selectDestination(lastDestination);
       syncPrefsInputs();
       renderCurrentSelection();
+      renderAccount();
       renderConnection();
       renderProviders();
       renderAgentInstructions();
@@ -3017,6 +3207,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       void refreshProviders(false);
       void refreshAgentInstructions(false);
       void refreshUsage();
+      void refreshAccount(false);
       void refreshPiStatus();
       void refreshSetupStatuses();
       void refreshTemplates();
@@ -3110,6 +3301,19 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
           syncPrefsInputs();
           break;
         }
+        case 'rau-account-status':
+          accountSnapshot = ev.account;
+          accountBusy = false;
+          accountAuthPending = false;
+          accountMessage = ev.account.signedIn ? '계정이 연결되었습니다.' : '';
+          renderAccount();
+          break;
+        case 'rau-account-error':
+          accountBusy = false;
+          accountAuthPending = false;
+          accountMessage = ev.message;
+          renderAccount();
+          break;
         case 'agent-setup-progress':
           if (setupAgent === ev.agent) {
             setupBusy = ev.state !== 'done';

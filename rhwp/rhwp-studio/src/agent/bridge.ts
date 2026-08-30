@@ -46,6 +46,8 @@ import type {
   AgentSetupAuthStart,
   AgentSetupStatus,
   AgentSetupStatusMap,
+  RauAccountAuthStart,
+  RauAccountSnapshot,
   CheckpointTitleRequest,
   CheckpointTitleResult,
   AgentPhase,
@@ -117,6 +119,9 @@ export interface AgentBridge {
   /** 로컬 CLI 설치 상태. refresh=true 면 허브가 새로 프로브한다. */
   requestProviderStatus(refresh?: boolean): Promise<ProviderStatusMap | null>;
   requestAgentSetupStatus(): Promise<AgentSetupStatusMap | null>;
+  requestRauAccount(): Promise<RauAccountSnapshot | null>;
+  loginRauAccount(): Promise<RauAccountAuthStart | null>;
+  logoutRauAccount(): Promise<RauAccountSnapshot | null>;
   installAgent(agent: AgentName): Promise<AgentSetupStatusMap | null>;
   authenticateAgent(agent: AgentName, method: AgentAuthMethod, key?: string): Promise<AgentSetupAuthStart | null>;
   /** 브라우저 로그인 뒤 받은 인증 코드를 진행 중인 CLI 로그인에 전달한다. */
@@ -614,6 +619,67 @@ function readAgentSetupStatuses(value: unknown): AgentSetupStatusMap {
     pi: readAgentSetupStatus(src['pi'], 'pi'),
     grok: readAgentSetupStatus(src['grok'], 'grok'),
     cursor: readAgentSetupStatus(src['cursor'], 'cursor'),
+  };
+}
+
+function readRauAccount(value: unknown): RauAccountSnapshot {
+  const src = (value ?? {}) as Record<string, unknown>;
+  const rawAccount = (src['account'] ?? {}) as Record<string, unknown>;
+  const rawQuota = src['quota'] && typeof src['quota'] === 'object'
+    ? src['quota'] as Record<string, unknown>
+    : null;
+  const rawRun = rawQuota?.['activeRun'] && typeof rawQuota['activeRun'] === 'object'
+    ? rawQuota['activeRun'] as Record<string, unknown>
+    : null;
+  const rawCold = (rawQuota?.['coldStarts'] ?? {}) as Record<string, unknown>;
+  const rawGate = (src['managedCloud'] ?? {}) as Record<string, unknown>;
+  const gateKind = rawGate['kind'];
+  const managedCloud: RauAccountSnapshot['managedCloud'] = gateKind === 'available'
+    ? { kind: 'available' }
+    : gateKind === 'exhausted'
+      ? { kind: 'exhausted', resetAt: String(rawGate['resetAt'] ?? rawQuota?.['resetAt'] ?? '') }
+      : gateKind === 'active-elsewhere'
+        ? {
+            kind: 'active-elsewhere',
+            runId: String(rawGate['runId'] ?? rawRun?.['runId'] ?? ''),
+            ...(typeof rawGate['deviceName'] === 'string' ? { deviceName: rawGate['deviceName'] } : {}),
+          }
+        : gateKind === 'unavailable'
+          ? { kind: 'unavailable', reason: String(rawGate['reason'] ?? 'Managed Cloud is unavailable.') }
+          : { kind: 'logged-out' };
+  const signedIn = src['signedIn'] === true && typeof rawAccount['id'] === 'string';
+  return {
+    signedIn,
+    account: signedIn ? {
+      id: rawAccount['id'] as string,
+      email: typeof rawAccount['email'] === 'string' ? rawAccount['email'] : '',
+      ...(typeof rawAccount['displayName'] === 'string' ? { displayName: rawAccount['displayName'] } : {}),
+    } : null,
+    quota: rawQuota ? {
+      dailyLimitMs: num(rawQuota['dailyLimitMs']),
+      usedMs: num(rawQuota['usedMs']),
+      remainingMs: num(rawQuota['remainingMs']),
+      debtMs: num(rawQuota['debtMs']),
+      graceUsedMs: num(rawQuota['graceUsedMs']),
+      resetAt: String(rawQuota['resetAt'] ?? ''),
+      timeZone: String(rawQuota['timeZone'] ?? 'UTC'),
+      activeRun: rawRun ? {
+        runId: String(rawRun['runId'] ?? ''),
+        deviceId: String(rawRun['deviceId'] ?? ''),
+        ...(typeof rawRun['deviceName'] === 'string' ? { deviceName: rawRun['deviceName'] } : {}),
+        startedAt: String(rawRun['startedAt'] ?? ''),
+        controllingThisDevice: rawRun['controllingThisDevice'] === true,
+      } : null,
+      coldStarts: {
+        usedToday: num(rawCold['usedToday']),
+        dailyLimit: num(rawCold['dailyLimit']),
+        recent: num(rawCold['recent']),
+        recentLimit: num(rawCold['recentLimit']),
+      },
+      ...(typeof rawQuota['graceEndsAt'] === 'string' ? { graceEndsAt: rawQuota['graceEndsAt'] } : {}),
+    } : null,
+    managedCloud,
+    updatedAt: typeof src['updatedAt'] === 'string' ? src['updatedAt'] : new Date().toISOString(),
   };
 }
 
@@ -1743,6 +1809,28 @@ class AgentBridgeImpl implements AgentBridge {
         this.emit({ type: 'agent-setup-status', statuses });
         break;
       }
+      case 'rau-account-status': {
+        const account = readRauAccount(msg.account);
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, account);
+        this.emit({ type: 'rau-account-status', account });
+        break;
+      }
+      case 'rau-account-auth-started': {
+        const authUrl = typeof msg.authUrl === 'string' ? msg.authUrl : '';
+        if (typeof msg.requestId === 'string') {
+          this.requests.settle(msg.requestId, authUrl ? { authUrl } satisfies RauAccountAuthStart : null);
+        }
+        break;
+      }
+      case 'rau-account-error': {
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, null);
+        this.emit({
+          type: 'rau-account-error',
+          code: typeof msg.code === 'string' ? msg.code : 'RAU_ACCOUNT_FAILED',
+          message: typeof msg.message === 'string' ? msg.message : 'Rauhwpx account request failed',
+        });
+        break;
+      }
       case 'agent-setup-auth-started': {
         const agent = isAgentName(msg.agent) ? msg.agent : null;
         if (typeof msg.requestId === 'string') {
@@ -2667,6 +2755,18 @@ class AgentBridgeImpl implements AgentBridge {
 
   requestAgentSetupStatus(): Promise<AgentSetupStatusMap | null> {
     return this.request<AgentSetupStatusMap>({ type: 'agent-setup-status-request' }, 'agent-setup-status', 30_000);
+  }
+
+  requestRauAccount(): Promise<RauAccountSnapshot | null> {
+    return this.request<RauAccountSnapshot>({ type: 'rau-account-status-request' }, 'rau-account-status', 30_000);
+  }
+
+  loginRauAccount(): Promise<RauAccountAuthStart | null> {
+    return this.request<RauAccountAuthStart>({ type: 'rau-account-login' }, 'rau-account-login', 30_000);
+  }
+
+  logoutRauAccount(): Promise<RauAccountSnapshot | null> {
+    return this.request<RauAccountSnapshot>({ type: 'rau-account-logout' }, 'rau-account-logout', 30_000);
   }
 
   installAgent(agent: AgentName): Promise<AgentSetupStatusMap | null> {

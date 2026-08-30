@@ -31,6 +31,7 @@ import type {
   CloudTakeoverPayload,
   CloudResultAction,
   CloudResultResolution,
+  AccountSnapshot,
 } from './types.ts';
 
 const SANDBOX_LIFECYCLES = ['idle', 'provisioning', 'ready', 'error', 'tearing-down'] as const;
@@ -48,6 +49,7 @@ export interface CloudDesktopApi {
   cloudSpawnSandbox?: (payload: { providerId?: string }) => Promise<unknown>;
   cloudSandboxStatus?: () => Promise<unknown>;
   cloudTeardownSandbox?: (payload: { force?: boolean }) => Promise<unknown>;
+  cloudTakeoverSandbox?: () => Promise<unknown>;
   cloudTransfer?: (payload: CloudTransferRequest) => Promise<unknown>;
   cloudSetTransferIntent?: (payload: CloudTransferIntentRequest) => Promise<unknown>;
   cloudReadReference?: (payload: Pick<CloudTransferReference, 'id' | 'scope' | 'scopeId'>) => Promise<unknown>;
@@ -77,6 +79,7 @@ export interface CloudController {
   spawnSandbox(providerId?: string): Promise<CloudSnapshot>;
   sandboxStatus(): Promise<CloudSnapshot>;
   teardownSandbox(options?: { force?: boolean }): Promise<CloudSnapshot>;
+  takeoverSandbox(): Promise<CloudSnapshot>;
   transfer(request: CloudTransferRequest): Promise<CloudSnapshot>;
   setTransferIntent(request: CloudTransferIntentRequest): Promise<CloudSnapshot>;
   readReference(reference: Pick<CloudTransferReference, 'id' | 'scope' | 'scopeId'>): Promise<Uint8Array>;
@@ -239,6 +242,83 @@ function parseServer(value: unknown, profile: CloudProfileState): CloudServerSta
     lifecycle,
     message: typeof server.message === 'string' ? server.message : null,
   };
+}
+
+function parseAccountSnapshot(value: unknown): AccountSnapshot | null {
+  const raw = record(value);
+  const updatedAt = strictIso(raw?.updatedAt);
+  if (!raw || typeof raw.signedIn !== 'boolean' || !updatedAt) return null;
+  const gate = record(raw.managedCloud);
+  let managedCloud: AccountSnapshot['managedCloud'] | null = null;
+  if (gate?.kind === 'available' || gate?.kind === 'logged-out') managedCloud = { kind: gate.kind };
+  if (gate?.kind === 'exhausted' && strictIso(gate.resetAt)) {
+    managedCloud = { kind: 'exhausted', resetAt: strictIso(gate.resetAt)! };
+  }
+  if (gate?.kind === 'active-elsewhere' && string(gate.runId).trim()) {
+    managedCloud = {
+      kind: 'active-elsewhere',
+      runId: string(gate.runId).trim(),
+      deviceName: typeof gate.deviceName === 'string' ? gate.deviceName : null,
+    };
+  }
+  if (gate?.kind === 'unavailable' && string(gate.reason).trim()) {
+    managedCloud = { kind: 'unavailable', reason: string(gate.reason).trim() };
+  }
+  if (!managedCloud) return null;
+  if (!raw.signedIn) {
+    return raw.account === null && raw.quota === null && managedCloud.kind === 'logged-out'
+      ? { signedIn: false, account: null, quota: null, managedCloud, updatedAt }
+      : null;
+  }
+  const accountRaw = raw.account === null ? null : record(raw.account);
+  const account = accountRaw ? {
+    id: string(accountRaw.id).trim(),
+    email: string(accountRaw.email).trim(),
+    displayName: typeof accountRaw.displayName === 'string' ? accountRaw.displayName : null,
+  } : null;
+  if (accountRaw && !account?.id) return null;
+  const quotaRaw = raw.quota === null ? null : record(raw.quota);
+  let quota: AccountSnapshot['quota'] = null;
+  if (quotaRaw) {
+    const dailyLimitMs = strictInteger(quotaRaw.dailyLimitMs);
+    const usedMs = strictInteger(quotaRaw.usedMs);
+    const remainingMs = strictInteger(quotaRaw.remainingMs);
+    const debtMs = strictInteger(quotaRaw.debtMs);
+    const graceUsedMs = strictInteger(quotaRaw.graceUsedMs);
+    const resetAt = strictIso(quotaRaw.resetAt);
+    const timeZone = string(quotaRaw.timeZone).trim();
+    const cold = record(quotaRaw.coldStarts);
+    const coldStarts = cold ? {
+      usedToday: strictInteger(cold.usedToday),
+      dailyLimit: strictInteger(cold.dailyLimit),
+      recent: strictInteger(cold.recent),
+      recentLimit: strictInteger(cold.recentLimit),
+    } : null;
+    const activeRaw = quotaRaw.activeRun === null ? null : record(quotaRaw.activeRun);
+    const activeRun = activeRaw ? {
+      runId: string(activeRaw.runId).trim(),
+      deviceId: string(activeRaw.deviceId).trim(),
+      deviceName: typeof activeRaw.deviceName === 'string' ? activeRaw.deviceName : null,
+      startedAt: strictIso(activeRaw.startedAt),
+      controllingThisDevice: activeRaw.controllingThisDevice,
+    } : null;
+    const graceEndsAt = quotaRaw.graceEndsAt === undefined || quotaRaw.graceEndsAt === null
+      ? null
+      : strictIso(quotaRaw.graceEndsAt);
+    if (dailyLimitMs === null || usedMs === null || remainingMs === null || debtMs === null
+      || graceUsedMs === null || !resetAt || !timeZone || !coldStarts
+      || Object.values(coldStarts).some((entry) => entry === null)
+      || (activeRaw && (!activeRun?.runId || !activeRun.deviceId || !activeRun.startedAt
+        || typeof activeRun.controllingThisDevice !== 'boolean'))
+      || (quotaRaw.graceEndsAt !== undefined && quotaRaw.graceEndsAt !== null && !graceEndsAt)) return null;
+    quota = {
+      dailyLimitMs, usedMs, remainingMs, debtMs, graceUsedMs, resetAt, timeZone,
+      activeRun: activeRun as NonNullable<AccountSnapshot['quota']>['activeRun'],
+      coldStarts: coldStarts as NonNullable<AccountSnapshot['quota']>['coldStarts'],
+      graceEndsAt,
+    };
+  } else if (raw.quota !== null) return null;
+  return { signedIn: true, account, quota, managedCloud, updatedAt };
 }
 
 function parseSessionBase(state: Record<string, unknown>): CloudSessionBase | null {
@@ -461,6 +541,8 @@ export function parseCloudSnapshot(value: unknown): CloudSnapshot | null {
   if (raw.takeover !== undefined && !takeover) return null;
   const server = parseServer(raw.server, profile);
   if (!server) return null;
+  const account = raw.account === undefined ? undefined : parseAccountSnapshot(raw.account);
+  if (raw.account !== undefined && !account) return null;
   const sandboxOutcome = record(raw.sandbox);
   const sandbox = sandboxOutcome
     ? { removed: sandboxOutcome.removed === true, unmanaged: sandboxOutcome.unmanaged === true }
@@ -478,6 +560,7 @@ export function parseCloudSnapshot(value: unknown): CloudSnapshot | null {
     queuedMessages,
     timeline,
     updatedAt,
+    ...(account ? { account } : {}),
     ...(takeover ? { takeover } : {}),
   };
 }
@@ -721,6 +804,7 @@ export function createCloudController(
     spawnSandbox: (providerId) => call('cloudSpawnSandbox', providerId ? { providerId } : {}),
     sandboxStatus: () => call('cloudSandboxStatus'),
     teardownSandbox: (options = {}) => call('cloudTeardownSandbox', { force: options.force === true }),
+    takeoverSandbox: () => call('cloudTakeoverSandbox'),
     transfer: (request) => call('cloudTransfer', request),
     setTransferIntent: (request) => call('cloudSetTransferIntent', request),
     async readReference(reference) {

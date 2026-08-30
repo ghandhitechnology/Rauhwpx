@@ -59,6 +59,17 @@ function operationActive(state: CloudSetupState | null): boolean {
     || state?.kind === 'sandbox-tearing-down';
 }
 
+function managedCloudLock(snapshot: CloudSnapshot): string | null {
+  const gate = snapshot.account?.managedCloud;
+  if (!gate || gate.kind === 'available') return null;
+  switch (gate.kind) {
+    case 'logged-out': return 'Rauhwpx 계정으로 로그인하면 사용할 수 있습니다.';
+    case 'exhausted': return '오늘 사용 시간을 모두 사용했습니다. 다음 초기화 뒤 다시 시작할 수 있습니다.';
+    case 'active-elsewhere': return `${gate.deviceName ?? '다른 기기'}에서 실행 중입니다. 그 기기에서 작업을 마친 뒤 계속할 수 있습니다.`;
+    case 'unavailable': return gate.reason;
+  }
+}
+
 function desktopPlatform(): string {
   const bridge = (globalThis as { rhwpDesktop?: { platform?: string } }).rhwpDesktop;
   if (bridge?.platform) return bridge.platform;
@@ -429,6 +440,11 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
   }
 
   function openSandboxStep(draft: CloudProfileDraft, intent: CloudSetupIntent): void {
+    const locked = managedCloudLock(snapshot);
+    if (locked) {
+      liveStatus.textContent = locked;
+      return;
+    }
     const provider = appServerProvider(snapshot);
     if (!provider || !provider.configured) {
       setState(
@@ -442,6 +458,11 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
 
   async function spawnSandbox(): Promise<void> {
     if (!state || (state.kind !== 'sandbox-intro' && state.kind !== 'sandbox-failed')) return;
+    const locked = managedCloudLock(snapshot);
+    if (locked) {
+      liveStatus.textContent = locked;
+      return;
+    }
     const { draft, intent } = state;
     const providerId = state.kind === 'sandbox-intro' ? state.provider.providerId : undefined;
     const operation = beginOperation();
@@ -533,18 +554,23 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     text: string,
     selected: boolean,
     note = '',
+    disabled = false,
   ): HTMLButtonElement {
     const option = el('button', 'ag-cloud-setup-option') as HTMLButtonElement;
     option.type = 'button';
     option.dataset.serverMode = mode;
     option.setAttribute('role', 'radio');
     option.setAttribute('aria-checked', String(selected));
+    option.disabled = disabled;
+    option.setAttribute('aria-disabled', String(disabled));
     if (selected) option.classList.add('ag-selected');
     const copy = el('div', 'ag-cloud-setup-option-copy');
     copy.append(el('strong', '', heading), el('p', '', text));
     if (note) copy.appendChild(el('span', 'ag-cloud-setup-option-note', note));
     option.append(copy);
-    option.addEventListener('click', () => { void selectMode(mode); });
+    option.addEventListener('click', () => {
+      if (!disabled) void selectMode(mode);
+    });
     return option;
   }
 
@@ -566,6 +592,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     if (state.kind === 'choose') {
       const { draft, intent, mode } = state;
       const provider = appServerProvider(snapshot);
+      const appHostedLock = managedCloudLock(snapshot);
       title.textContent = 'Cloud 서버 선택';
       body.append(description('에이전트가 앱을 닫아도 계속 작업할 서버를 고르세요. 나중에 바꿀 수 있습니다.'));
       if (state.notice) body.append(callout('cloud', '남은 서버를 확인하세요', state.notice));
@@ -576,13 +603,14 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
         serverOption(
           'app-hosted',
           '앱에서 제공하는 서버',
-          '앱이 관리하는 샌드박스를 즉시 만들어 사용합니다. 준비할 것이 없습니다.',
+          'Rauhwpx가 샌드박스를 만들고 이 기기에 연결합니다.',
           mode === 'app-hosted',
           provider
             ? provider.configured
-              ? `${provider.displayName} 사용 가능`
+              ? appHostedLock ?? `${provider.displayName} 사용 가능`
               : '이 빌드에서는 아직 사용할 수 없습니다'
             : '이 빌드에는 포함되지 않았습니다',
+          Boolean(appHostedLock),
         ),
         serverOption(
           'self-hosted',
@@ -594,6 +622,8 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       );
       body.appendChild(options);
       const primary = button('계속', 'primary');
+      primary.disabled = mode === 'app-hosted' && Boolean(appHostedLock);
+      if (primary.disabled) primary.textContent = '계정 로그인 필요';
       primary.addEventListener('click', () => {
         if (mode === 'app-hosted') openSandboxStep(draft, intent);
         else setState({ kind: 'intro', draft, intent });
@@ -601,13 +631,16 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       footer.append(cancel, primary);
     } else if (state.kind === 'sandbox-intro') {
       const { draft, intent, provider } = state;
+      const appHostedLock = managedCloudLock(snapshot);
       title.textContent = '앱 제공 서버 사용';
       body.append(
-        description('앱이 관리하는 샌드박스를 만들고 이 기기를 자동으로 연결합니다. 준비할 것은 없습니다.'),
-        callout('cloud', provider.displayName, '문서와 작업 상태는 앱이 운영하는 샌드박스로 전송되고, 종료하면 함께 지워집니다.'),
+        description('Rauhwpx가 샌드박스를 만들고 이 기기에 연결합니다.'),
+        callout('cloud', provider.displayName, '파일과 작업 상태를 샌드박스로 전송합니다. 서버를 종료하면 샌드박스도 삭제됩니다.'),
       );
       back.addEventListener('click', () => setState({ kind: 'choose', draft, intent, mode: 'app-hosted' }));
       const primary = button('서버 만들기', 'primary');
+      primary.disabled = Boolean(appHostedLock);
+      if (appHostedLock) body.append(callout('cloud', 'Managed Cloud를 사용할 수 없음', appHostedLock));
       primary.addEventListener('click', () => { void spawnSandbox(); });
       footer.append(back, cancel, primary);
     } else if (state.kind === 'sandbox-unavailable') {
@@ -682,6 +715,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       }
     } else if (state.kind === 'sandbox-ready') {
       const { intent, name, sandbox } = state;
+      const appHostedLock = managedCloudLock(snapshot);
       title.textContent = '앱 제공 서버가 준비되었습니다';
       body.append(
         callout('check', name, sandbox.host || sandbox.sandboxId),
@@ -696,6 +730,11 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       teardown.addEventListener('click', () => { void teardownSandbox(); });
       footer.append(refresh);
       const primary = button(intent === 'transfer' ? 'Cloud로 계속' : '완료', 'primary');
+      if (intent === 'transfer' && appHostedLock) {
+        primary.disabled = true;
+        primary.textContent = '새 작업을 시작할 수 없음';
+        body.append(callout('cloud', '새 작업을 시작할 수 없음', appHostedLock));
+      }
       primary.addEventListener('click', () => {
         if (intent === 'transfer') {
           close(false);
@@ -887,6 +926,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     }
     if (snapshot.profile.kind === 'unconfigured') {
       const provider = appServerProvider(snapshot);
+      const appHostedLock = managedCloudLock(snapshot);
       settingsAction.textContent = '설정';
       if (snapshot.server.lifecycle === 'provisioning') {
         settingsStatus.textContent = '서버 준비 중';
@@ -895,7 +935,9 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       }
       settingsStatus.textContent = '설정되지 않음';
       settingsDetail.textContent = provider?.configured
-        ? '앱 제공 서버 또는 내 서버에서 에이전트를 계속 실행합니다.'
+        ? appHostedLock
+          ? `${appHostedLock} 내 서버는 로그인 없이 연결할 수 있습니다.`
+          : '앱 제공 서버 또는 내 서버에서 에이전트를 계속 실행합니다.'
         : '내 VPS에서 에이전트를 계속 실행합니다.';
       return;
     }
@@ -911,14 +953,17 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       error: '서버에 문제가 있습니다',
     } as const;
     const lifecycle = snapshot.server.lifecycle;
+    const appHostedLock = snapshot.profile.mode === 'app-hosted' ? managedCloudLock(snapshot) : null;
     const sandboxLabel = lifecycle === 'provisioning' || lifecycle === 'tearing-down' || lifecycle === 'error'
       ? lifecycleLabels[lifecycle]
       : null;
-    settingsStatus.textContent = snapshot.profile.mode === 'app-hosted' && sandboxLabel
-      ? sandboxLabel
-      : labels[snapshot.profile.connection];
+    settingsStatus.textContent = appHostedLock
+      ? 'Managed Cloud 사용 제한'
+      : snapshot.profile.mode === 'app-hosted' && sandboxLabel
+        ? sandboxLabel
+        : labels[snapshot.profile.connection];
     settingsDetail.textContent = snapshot.profile.mode === 'app-hosted'
-      ? `앱 제공 서버 · ${snapshot.profile.name}${snapshot.profile.sandbox.host ? `, ${snapshot.profile.sandbox.host}` : ''}`
+      ? appHostedLock ?? `앱 제공 서버 · ${snapshot.profile.name}${snapshot.profile.sandbox.host ? `, ${snapshot.profile.sandbox.host}` : ''}`
       : `내 서버 · ${snapshot.profile.profile.name}, ${snapshot.profile.profile.host}`;
     settingsAction.textContent = '관리';
   }

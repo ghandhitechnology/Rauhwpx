@@ -332,6 +332,41 @@ export interface AgentSetupAuthStart {
   authUrl: string | null;
 }
 
+/** Global Rauhwpx account. It is independent from whether the Rau provider is installed. */
+export interface RauAccountSnapshot {
+  signedIn: boolean;
+  account: { id: string; email: string; displayName?: string | null } | null;
+  quota: {
+    dailyLimitMs: number;
+    usedMs: number;
+    remainingMs: number;
+    debtMs: number;
+    graceUsedMs: number;
+    resetAt: string;
+    timeZone: string;
+    activeRun: {
+      runId: string;
+      deviceId: string;
+      deviceName?: string | null;
+      startedAt: string;
+      controllingThisDevice: boolean;
+    } | null;
+    coldStarts: { usedToday: number; dailyLimit: number; recent: number; recentLimit: number };
+    graceEndsAt?: string | null;
+  } | null;
+  managedCloud:
+    | { kind: 'available' }
+    | { kind: 'logged-out' }
+    | { kind: 'exhausted'; resetAt: string }
+    | { kind: 'active-elsewhere'; runId: string; deviceName?: string | null }
+    | { kind: 'unavailable'; reason: string };
+  updatedAt: string;
+}
+
+export interface RauAccountAuthStart {
+  authUrl: string;
+}
+
 /** 요금제 — 한도 계산의 기준이 되므로 프로바이더별로 값이 다르다. */
 export type ClaudeUsagePlan = 'pro' | 'max5x' | 'max20x' | 'api';
 export type CodexUsagePlan = 'plus' | 'pro' | 'api';
@@ -658,6 +693,8 @@ export type SidebarEvent =
   | { type: 'writing-style-catalog'; requestId: string; catalog: WritingStyleCatalog }
   | { type: 'provider-status'; providers: ProviderStatusMap }
   | { type: 'agent-setup-status'; statuses: AgentSetupStatusMap }
+  | { type: 'rau-account-status'; account: RauAccountSnapshot }
+  | { type: 'rau-account-error'; code: string; message: string }
   | {
       type: 'agent-setup-progress';
       agent: AgentName;

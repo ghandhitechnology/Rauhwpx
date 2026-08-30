@@ -206,6 +206,86 @@ let rauStatus = await rauManager.status();
 /** OpenRouter 잔액. 키가 있을 때만 채워지고 사용량 리포트에 얹힌다. */
 let openRouterCredits = null;
 let rauCreditsBalance = null;
+
+function signedOutRauAccount() {
+  return {
+    signedIn: false,
+    account: null,
+    quota: null,
+    managedCloud: { state: 'logged-out' },
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function rauAccountTime(value) {
+  if (typeof value === 'string' && Number.isFinite(Date.parse(value))) return value;
+  const epoch = Number(value);
+  return Number.isFinite(epoch) && epoch > 0 ? new Date(epoch).toISOString() : '';
+}
+
+async function rauAccountSnapshot() {
+  const accessToken = rauManager.apiKey();
+  if (!accessToken) return signedOutRauAccount();
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  const [response, cloud] = await Promise.all([
+    rauCredits.account(accessToken),
+    rauCredits.cloudStatus(accessToken, { timezone }).catch(() => null),
+  ]);
+  const account = response?.account ?? cloud?.account ?? null;
+  const sourceQuota = cloud?.quota ?? response?.quota ?? null;
+  const grace = sourceQuota?.grace ?? {};
+  const sourceRun = cloud?.activeRun ?? sourceQuota?.activeRun ?? null;
+  const sourceGate = cloud?.gate ?? response?.managedCloud ?? null;
+  const gateState = String(sourceGate?.state ?? sourceGate?.kind ?? '').toLowerCase();
+  const managedCloud = gateState === 'ready'
+    ? { kind: 'available' }
+    : gateState === 'quota_exhausted'
+      ? { kind: 'exhausted', resetAt: rauAccountTime(sourceQuota?.resetsAt) }
+      : gateState === 'owned_elsewhere'
+        ? { kind: 'active-elsewhere', runId: String(sourceRun?.id ?? sourceRun?.runId ?? '') }
+        : gateState === 'grace_active'
+          ? { kind: 'exhausted', resetAt: rauAccountTime(sourceQuota?.resetsAt) }
+          : gateState === 'timezone_required'
+            ? { kind: 'unavailable', reason: 'Choose an account timezone to use managed Cloud.' }
+            : sourceGate?.kind
+              ? sourceGate
+              : { kind: account ? 'available' : 'logged-out' };
+  const coldStarts = sourceQuota?.coldStarts ?? cloud?.coldStarts ?? {};
+  const quota = sourceQuota ? {
+    dailyLimitMs: Number(sourceQuota.limitMs ?? sourceQuota.dailyLimitMs ?? 3_600_000),
+    usedMs: Number(sourceQuota.usedMs ?? 0),
+    remainingMs: Number(sourceQuota.remainingMs ?? 0),
+    debtMs: Number(grace.debtMs ?? sourceQuota.debtMs ?? 0),
+    graceUsedMs: Number(grace.usedMs ?? sourceQuota.graceUsedMs ?? 0),
+    resetAt: rauAccountTime(sourceQuota.resetsAt ?? sourceQuota.resetAt),
+    timeZone: String(sourceQuota.timezone ?? sourceQuota.timeZone ?? timezone),
+    activeRun: sourceRun ? {
+      runId: String(sourceRun.id ?? sourceRun.runId ?? ''),
+      deviceId: String(sourceRun.deviceId ?? sourceRun.controllerDeviceId ?? ''),
+      deviceName: sourceRun.deviceName ?? null,
+      startedAt: rauAccountTime(sourceRun.startedAt ?? sourceRun.allocatedAt),
+      controllingThisDevice: sourceRun.controllingThisDevice === true,
+    } : null,
+    coldStarts: {
+      usedToday: Number(coldStarts.usedToday ?? 0),
+      dailyLimit: Number(coldStarts.dailyLimit ?? 12),
+      recent: Number(coldStarts.recent ?? 0),
+      recentLimit: Number(coldStarts.recentLimit ?? 3),
+    },
+    graceEndsAt: grace.active ? rauAccountTime(grace.endsAt) || null : null,
+  } : null;
+  return {
+    signedIn: Boolean(account),
+    account: account ? {
+      id: String(account.id ?? ''),
+      email: typeof account.email === 'string' ? account.email : '',
+      ...(account.displayName ? { displayName: String(account.displayName) } : {}),
+    } : null,
+    quota,
+    managedCloud,
+    updatedAt: new Date().toISOString(),
+  };
+}
 if (piStatus.installed || rauStatus.installed) {
   // 저장소가 갱신되면 확장/스킬도 따라와야 한다 — 실패해도 허브는 그대로 뜬다.
   await piManager.syncAssets().catch((error) => log(`pi asset sync failed: ${error?.message ?? error}`));
@@ -2271,6 +2351,98 @@ async function handleStudioMessage(record, sock, msg) {
       void agentSetupStatuses()
         .then((statuses) => replyToStudio(record, sock, { v: 1, type: 'agent-setup-status', requestId, statuses }))
         .catch((e) => sendAgentSetupError(record, sock, requestId, null, e));
+      return;
+    }
+    case 'rau-account-status-request': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      void rauAccountSnapshot()
+        .then((account) => replyToStudio(record, sock, {
+          v: 1, type: 'rau-account-status', requestId, account,
+        }))
+        .catch((e) => replyToStudio(record, sock, {
+          v: 1,
+          type: 'rau-account-error',
+          requestId,
+          code: e?.code ?? 'RAU_ACCOUNT_FAILED',
+          message: String(e?.message ?? e),
+        }));
+      return;
+    }
+    case 'rau-account-login': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      if (rauLogin?.abort) rauLogin.abort.abort();
+      const abort = new AbortController();
+      const login = { id: null, abort };
+      rauLogin = login;
+      void (async () => {
+        const session = await rauCredits.createDeviceSession({
+          signal: abort.signal,
+          replaceAccessToken: rauManager.apiKey(),
+        });
+        login.id = session.id;
+        replyToStudio(record, sock, {
+          v: 1,
+          type: 'rau-account-auth-started',
+          requestId,
+          authUrl: session.loginUrl,
+        });
+        const { key, email } = await rauCredits.redeem(session.id, { signal: abort.signal });
+        // Account login stores the shared credential only. Installing or selecting
+        // the Rau provider remains a separate, explicit provider action.
+        rauStatus = await storeRauAccessToken(rauManager.setApiKey.bind(rauManager), key, {
+          signal: abort.signal,
+          account: email,
+        });
+        await rauCredits.acknowledgeDeviceSession(session.id, { signal: abort.signal })
+          .catch((error) => {
+            if (error?.code === 'RAU_LOGIN_CANCELLED') throw error;
+            log(`Rau account session acknowledgement failed: ${error?.message ?? error}`);
+          });
+        const account = await rauAccountSnapshot();
+        replyToStudio(record, sock, { v: 1, type: 'rau-account-status', account });
+        replyToStudio(record, sock, {
+          v: 1, type: 'agent-setup-status', statuses: await agentSetupStatuses(),
+        });
+      })().catch((e) => {
+        if (e?.code !== 'RAU_LOGIN_CANCELLED' && e?.code !== 'AGENT_AUTH_CANCELLED') {
+          replyToStudio(record, sock, {
+            v: 1,
+            type: 'rau-account-error',
+            requestId,
+            code: e?.code ?? 'RAU_ACCOUNT_AUTH_FAILED',
+            message: String(e?.message ?? e),
+          });
+        }
+      }).finally(() => {
+        if (rauLogin === login) rauLogin = null;
+      });
+      return;
+    }
+    case 'rau-account-logout': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      rauLogin?.abort.abort();
+      rauLogin = null;
+      const rauSessions = [...sessions.values()]
+        .filter((session) => session.agentSession?.agent === 'rau');
+      const accessToken = rauManager.apiKey();
+      void Promise.all(rauSessions.map(disposeSession))
+        .then(() => rauCredits.revokeAccessToken(accessToken)
+          .catch((error) => log(`Rau account logout failed remotely: ${error?.message ?? error}`)))
+        .then(() => rauManager.clearApiKey())
+        .then((status) => {
+          rauStatus = status;
+          rauCreditsBalance = null;
+          replyToStudio(record, sock, {
+            v: 1, type: 'rau-account-status', requestId, account: signedOutRauAccount(),
+          });
+        })
+        .catch((e) => replyToStudio(record, sock, {
+          v: 1,
+          type: 'rau-account-error',
+          requestId,
+          code: e?.code ?? 'RAU_ACCOUNT_LOGOUT_FAILED',
+          message: String(e?.message ?? e),
+        }));
       return;
     }
     case 'agent-setup-install': {

@@ -101,6 +101,7 @@ test('service and Podman assets keep the trust boundaries explicit', async () =>
   assert.match(runner, /env: \{ \.\.\.process\.env, RAUHWpx_WORKER_TOKEN: workerToken \}/);
   const worker = await fs.readFile(path.join(root, 'worker/main.mjs'), 'utf8');
   assert.match(worker, /process\.umask\(0o077\)/);
+  assert.match(worker, /lease\?\.mustStop === true/);
   assert.match(runner, /path\.dirname\(endpoint\.socketPath\).*\/run\/rauhwpx:ro,Z/);
   assert.match(runner, /RAUHWpx_CONTROL_URL/);
 });

@@ -90,6 +90,7 @@ async function fixture(t, {
   displayFrames = true,
   seedProvider,
   browserOrigins = [],
+  managedLease = null,
 } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-cloud-http-'));
   const database = openDatabase(path.join(root, 'cloud.sqlite3'));
@@ -124,6 +125,7 @@ async function fixture(t, {
     displayFrameStore,
     applyProviderAuth: apply,
     seedProvider,
+    managedLease,
   };
   const server = http.createServer(createCloudHttpHandler(services, { workerOnly }));
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -286,7 +288,18 @@ test('Ed25519 JSON proofs bind the configured external path behind a path-stripp
 });
 
 test('HTTP handoff, idempotent command, SSE replay, and verified result download work end to end', async (t) => {
-  const { base, auth, sessionStore, identity } = await fixture(t);
+  const admittedCommands = [];
+  const managedLease = {
+    async assertCommandAllowed(type) {
+      admittedCommands.push(type);
+      if (type === 'message.queue') {
+        throw Object.assign(new Error('Managed Cloud input is blocked'), {
+          code: 'MANAGED_CLOUD_INPUT_BLOCKED', status: 409,
+        });
+      }
+    },
+  };
+  const { base, auth, sessionStore, identity } = await fixture(t, { managedLease });
   const tokens = await pairOverHttp(auth, base);
   const secondPairing = auth.createPairingCode();
   const second = auth.redeemPairingCode({ code: secondPairing.code, deviceName: 'Second' });
@@ -331,6 +344,14 @@ test('HTTP handoff, idempotent command, SSE replay, and verified result download
     body: JSON.stringify(commandBody),
   });
   assert.deepEqual(await retry.json(), commandResult);
+  const blockedMessage = await publicFetch(`${base}/v1/sessions/session_http_01/commands`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${tokens.accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ commandId: 'managed_blocked_01', type: 'message.queue', payload: { content: 'Too late' } }),
+  });
+  assert.equal(blockedMessage.status, 409);
+  assert.equal((await blockedMessage.json()).error.code, 'MANAGED_CLOUD_INPUT_BLOCKED');
+  assert.deepEqual(admittedCommands, ['session.activate', 'session.activate', 'message.queue']);
 
   const controller = new AbortController();
   const eventNonce = proofNonce();

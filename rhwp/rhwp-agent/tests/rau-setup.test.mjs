@@ -39,3 +39,16 @@ test('Rau redeem stores only a proxy token and revokes it on logout', async () =
     assert.match(source.slice(start, index), /mutateSharedNpmPrefix/);
   }
 });
+
+test('global Rauhwpx account login does not install or select the Rau provider', async () => {
+  const source = await fs.readFile(path.join(hubDir, 'server.mjs'), 'utf8');
+  const start = source.indexOf("case 'rau-account-login'");
+  const end = source.indexOf("case 'rau-account-logout'", start);
+  assert.notEqual(start, -1, 'Rauhwpx account login handler is missing');
+  assert.notEqual(end, -1, 'Rauhwpx account logout handler is missing');
+  const block = source.slice(start, end);
+  assert.match(block, /createDeviceSession/);
+  assert.match(block, /storeRauAccessToken\(rauManager\.setApiKey\.bind\(rauManager\), key/);
+  assert.doesNotMatch(block, /rauManager\.install/);
+  assert.doesNotMatch(block, /defaultAgent|selectedAgent|startSession/);
+});
