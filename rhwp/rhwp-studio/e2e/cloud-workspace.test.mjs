@@ -246,12 +246,18 @@ function installDesktopCloudMock() {
           width: 64,
           height: 40,
           maxFrameBytes: 524288,
-          maxFps: 2,
+          maxFps: 12,
+          inputProtocol: 'rauhwpx-input-v1',
+          maxInputEventsPerSecond: 60,
         },
       };
     },
     async cloudCloseDisplay(payload) {
       record('cloudCloseDisplay', payload);
+    },
+    async cloudDisplayInput(payload) {
+      record('cloudDisplayInput', payload);
+      return true;
     },
     onCloudEvent(listener) {
       record('onCloudEvent');
@@ -368,7 +374,7 @@ try {
   }));
   assert.deepEqual(cloudVisual, {
     state: 'live',
-    status: 'Cloud 화면 연결됨',
+    status: 'Cloud 화면 연결됨 · 클릭하여 제어',
     editorHidden: 'true',
     editorInert: true,
     editorVisibility: 'hidden',
@@ -376,6 +382,18 @@ try {
     cloudInert: false,
     imageSize: [64, 40],
   });
+  await page.click('.cloud-workspace-canvas');
+  await page.keyboard.type('A');
+  await page.waitForFunction(() => window.__cloudWorkspaceHarness.calls
+    .filter((call) => call.method === 'cloudDisplayInput').length >= 4);
+  const remoteInput = await page.evaluate(() => window.__cloudWorkspaceHarness.calls
+    .filter((call) => call.method === 'cloudDisplayInput')
+    .map((call) => call.payload.event));
+  assert.deepEqual(remoteInput.filter((event) => event.action !== 'move').slice(0, 3), [
+    { kind: 'pointer', action: 'down', x: 32, y: 20, button: 'left' },
+    { kind: 'pointer', action: 'up', x: 32, y: 20, button: 'left' },
+    { kind: 'text', text: 'A' },
+  ]);
   if (process.env.CLOUD_WORKSPACE_SCREENSHOT) {
     await page.screenshot({ path: process.env.CLOUD_WORKSPACE_SCREENSHOT, fullPage: true });
   }

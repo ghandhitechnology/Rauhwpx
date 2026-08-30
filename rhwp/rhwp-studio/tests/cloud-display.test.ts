@@ -27,7 +27,9 @@ function capability() {
     width: 1280,
     height: 800,
     maxFrameBytes: 524288 as const,
-    maxFps: 2 as const,
+    maxFps: 12 as const,
+    inputProtocol: 'rauhwpx-input-v1' as const,
+    maxInputEventsPerSecond: 60 as const,
   };
 }
 
@@ -319,6 +321,7 @@ test('CloudController replaces one display connection and suppresses stale host 
       closed.push(connectionId);
       return true;
     },
+    cloudDisplayInput: async () => true,
     onCloudDisplayEvent: (listener) => {
       hostListener = listener;
       return () => { hostListener = undefined; };
@@ -366,6 +369,7 @@ test('CloudController replays a verified frame that arrives during the open hand
       return { connectionId: 'connection-opening', capability: capability() };
     },
     cloudCloseDisplay: async () => true,
+    cloudDisplayInput: async () => true,
     onCloudDisplayEvent: (listener) => {
       hostListener = listener;
       return () => { hostListener = undefined; };
@@ -386,6 +390,7 @@ test('CloudController disposal closes owned resources exactly once', async () =>
   const controller = createCloudController({
     cloudOpenDisplay: async () => ({ connectionId: 'connection-owned', capability: capability() }),
     cloudCloseDisplay: async () => { closes += 1; },
+    cloudDisplayInput: async () => true,
     onCloudEvent: () => () => { cloudUnsubscribes += 1; },
     onCloudDisplayEvent: () => () => { displayUnsubscribes += 1; },
   } as never);

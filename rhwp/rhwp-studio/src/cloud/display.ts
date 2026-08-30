@@ -10,8 +10,10 @@ import type {
 } from './types.ts';
 
 export const CLOUD_DISPLAY_PROTOCOL = 'rauhwpx-frame-v1' as const;
+export const CLOUD_DISPLAY_INPUT_PROTOCOL = 'rauhwpx-input-v1' as const;
 export const CLOUD_DISPLAY_MAX_FRAME_BYTES = 524288 as const;
-export const CLOUD_DISPLAY_MAX_FPS = 2 as const;
+export const CLOUD_DISPLAY_MAX_FPS = 12 as const;
+export const CLOUD_DISPLAY_MAX_INPUT_EVENTS_PER_SECOND = 60 as const;
 
 const UNAVAILABLE_REASONS = new Set<CloudDisplayUnavailableReason>([
   'server-unsupported',
@@ -74,7 +76,9 @@ export function parseCloudDisplayCapability(value: unknown): CloudDisplayCapabil
     const height = dimension(raw.height);
     if (raw.protocol !== CLOUD_DISPLAY_PROTOCOL || !streamId || width === null || height === null
       || raw.reason !== undefined || raw.message !== undefined || raw.retryable !== undefined
-      || raw.maxFrameBytes !== CLOUD_DISPLAY_MAX_FRAME_BYTES || raw.maxFps !== CLOUD_DISPLAY_MAX_FPS) return null;
+      || raw.maxFrameBytes !== CLOUD_DISPLAY_MAX_FRAME_BYTES || raw.maxFps !== CLOUD_DISPLAY_MAX_FPS
+      || raw.inputProtocol !== CLOUD_DISPLAY_INPUT_PROTOCOL
+      || raw.maxInputEventsPerSecond !== CLOUD_DISPLAY_MAX_INPUT_EVENTS_PER_SECOND) return null;
     return {
       kind: 'available',
       protocol: CLOUD_DISPLAY_PROTOCOL,
@@ -84,10 +88,13 @@ export function parseCloudDisplayCapability(value: unknown): CloudDisplayCapabil
       height,
       maxFrameBytes: CLOUD_DISPLAY_MAX_FRAME_BYTES,
       maxFps: CLOUD_DISPLAY_MAX_FPS,
+      inputProtocol: CLOUD_DISPLAY_INPUT_PROTOCOL,
+      maxInputEventsPerSecond: CLOUD_DISPLAY_MAX_INPUT_EVENTS_PER_SECOND,
     };
   }
   if (raw.kind !== 'unavailable' || raw.protocol !== undefined || raw.streamId !== undefined
     || raw.width !== undefined || raw.height !== undefined || raw.maxFrameBytes !== undefined || raw.maxFps !== undefined
+    || raw.inputProtocol !== undefined || raw.maxInputEventsPerSecond !== undefined
     || !UNAVAILABLE_REASONS.has(raw.reason as CloudDisplayUnavailableReason)
     || typeof raw.message !== 'string' || !raw.message || typeof raw.retryable !== 'boolean') return null;
   return {

@@ -55,6 +55,15 @@ export class CloudDisplayRegistry {
     return true;
   }
 
+  async sendInput(ownerId, connectionId, event) {
+    const entry = this.#entries.get(ownerId);
+    if (!entry || entry.connectionId !== connectionId) throw abortError();
+    const connection = entry.connection ?? await entry.opening;
+    if (!connection || this.#entries.get(ownerId) !== entry || entry.controller.signal.aborted) throw abortError();
+    await connection.sendInput(event);
+    return true;
+  }
+
   async closeAll() {
     const entries = [...this.#entries.values()];
     this.#entries.clear();

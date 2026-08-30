@@ -1,6 +1,7 @@
 import { openDisplayConnection, type CloudDisplayConnectionOptions } from './display-connection.ts';
 import {
   CLOUD_DISPLAY_MAX_FRAME_BYTES,
+  CLOUD_DISPLAY_MAX_FPS,
   parseCloudDisplayCapability,
   parseCloudDisplayFrameEnvelope,
 } from './display.ts';
@@ -9,6 +10,7 @@ import type {
   CloudDisplayConnection,
   CloudDisplayEvent,
   CloudDisplayFrameMetadata,
+  CloudDisplayInputEvent,
 } from './types.ts';
 import { parseSse, type BrowserRequestContext, type BrowserSseFrame } from './browser-protocol.ts';
 
@@ -109,10 +111,36 @@ export function createBrowserDisplayManager({
     const expiresAt = raw.expiresAt === null
       ? null
       : typeof raw.expiresAt === 'string' ? new Date(raw.expiresAt) : null;
-    if (raw.streamId !== streamId || raw.interested !== activeInterest || raw.maxFps !== (activeInterest ? 2 : 0)
+    if (raw.streamId !== streamId || raw.interested !== activeInterest
+      || raw.maxFps !== (activeInterest ? CLOUD_DISPLAY_MAX_FPS : 0)
       || (activeInterest && (!expiresAt || Number.isNaN(expiresAt.valueOf()) || expiresAt.toISOString() !== raw.expiresAt))
       || (!activeInterest && raw.expiresAt !== null)) {
       throw cloudError('Cloud 디스플레이 관심 응답이 잘못됐습니다.', 'DISPLAY_INTEREST_INVALID');
+    }
+  };
+
+  const input = async (
+    sessionId: string,
+    streamId: string,
+    viewerId: string,
+    sequence: number,
+    event: CloudDisplayInputEvent,
+    signal: AbortSignal,
+  ): Promise<void> => {
+    const result = await request(`/v1/sessions/${encodeURIComponent(sessionId)}/display/input`, {
+      method: 'POST',
+      body: { streamId, viewerId, sequence, event },
+      signal,
+      maxBytes: DISPLAY_JSON_BYTES,
+    });
+    const raw = result.parsed && typeof result.parsed === 'object' && !Array.isArray(result.parsed)
+      ? result.parsed as Record<string, unknown>
+      : null;
+    const acceptedAt = typeof raw?.acceptedAt === 'string' ? new Date(raw.acceptedAt) : null;
+    if (!raw || raw.streamId !== streamId || raw.viewerId !== viewerId || raw.sequence !== sequence
+      || raw.accepted !== true || !acceptedAt || Number.isNaN(acceptedAt.valueOf())
+      || acceptedAt.toISOString() !== raw.acceptedAt) {
+      throw cloudError('Cloud 디스플레이 입력 응답이 잘못됐습니다.', 'DISPLAY_INPUT_INVALID');
     }
   };
 
@@ -241,6 +269,9 @@ export function createBrowserDisplayManager({
           id, displayCapability, after, input.signal, input.onMetadata,
         ),
         frame: (metadata, input) => frame(metadata, input.signal),
+        input: (id, streamId, viewerId, sequence, event, inputOptions) => (
+          input(id, streamId, viewerId, sequence, event, inputOptions.signal)
+        ),
       }, sessionId, (event: CloudDisplayEvent) => {
         if (active === entry && !entry.controller.signal.aborted) {
           listener?.({ connectionId: entry.connectionId, event });
@@ -267,6 +298,16 @@ export function createBrowserDisplayManager({
       active = null;
       generation += 1;
       await closeEntry(entry);
+      return true;
+    },
+
+    async sendInput(payload: { connectionId: string; event: CloudDisplayInputEvent }) {
+      const entry = active;
+      if (!entry || entry.connectionId !== payload?.connectionId) {
+        throw cloudError('Cloud 디스플레이 연결이 바뀌었습니다.', 'DISPLAY_STREAM_REPLACED');
+      }
+      const connection = entry.connection ?? await entry.opening;
+      await connection?.sendInput(payload.event);
       return true;
     },
 

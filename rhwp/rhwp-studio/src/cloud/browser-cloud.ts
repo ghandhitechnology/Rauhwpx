@@ -1,6 +1,7 @@
 import type {
   CloudCommandRequest,
   CloudFollowupAttachment,
+  CloudDisplayInputEvent,
   CloudProfileDraft,
   CloudSessionScope,
   CloudTransferReference,
@@ -1599,6 +1600,9 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
     ),
     cloudOpenDisplay: (payload: { sessionId: string }) => readProfile(() => displayManager.open(payload)),
     cloudCloseDisplay: (payload: { connectionId: string }) => readProfile(() => displayManager.close(payload)),
+    cloudDisplayInput: (payload: { connectionId: string; event: CloudDisplayInputEvent }) => (
+      readProfile(() => displayManager.sendInput(payload))
+    ),
     cloudDownloadResult: (payload: { sessionId: string }) => readProfile(async () => {
       const selectedProfile = profile;
       if (!selectedProfile) throw new Error('Cloud 서버를 먼저 연결해 주세요.');

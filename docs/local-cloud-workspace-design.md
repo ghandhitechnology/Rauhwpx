@@ -92,7 +92,9 @@ type CloudDisplayCapability =
       width: number;
       height: number;
       maxFrameBytes: 524_288;
-      maxFps: 2;
+      maxFps: 12;
+      inputProtocol: 'rauhwpx-input-v1';
+      maxInputEventsPerSecond: 60;
     }
   | {
       kind: 'unavailable';
@@ -113,13 +115,21 @@ interface CloudDisplayFrame {
   sha256: string;
   bytes: Uint8Array;
 }
+
+type CloudDisplayInputEvent =
+  | { kind: 'pointer'; action: 'move' | 'down' | 'up'; x: number; y: number; button?: string }
+  | { kind: 'wheel'; x: number; y: number; deltaX: number; deltaY: number }
+  | { kind: 'key'; action: 'down' | 'up'; key: string }
+  | { kind: 'text'; text: string };
 ```
 
 The worker runs Studio in headed Chromium on its private Xvfb display and starts one demand-driven `ffmpeg x11grab` publisher after Studio is ready. Chromium, Xvfb, the window manager, and ffmpeg receive allowlisted environments without worker control credentials. The worker sends JPEG frames through its existing session-token control path. The control plane parses encoded JPEG dimensions, requires them to match the authenticated stream, and keeps the newest two frames in memory. Public clients receive signed frame metadata, verify decoded dimensions, and fetch signed image bytes with their normal access token.
 
 Frame streams bind to the worker identity accepted by `SessionStore.authenticateWorker()`. A replacement worker gets a new token and stream. Old publishers fail authentication. No display generation is inferred from the runtime lease row because that row currently resets after recovery.
 
-Capture runs at 2 fps only while Cloud mode has an authenticated visible viewer. Local mode releases display interest and keeps the last decoded frame. No viewer means no capture after a short grace period. Display interest does not create or renew conversation presence.
+Capture runs at up to 12 fps only while Cloud mode has an authenticated visible viewer. Local mode releases display interest and keeps the last decoded frame. No viewer means no capture after a short grace period. Display interest does not create or renew conversation presence.
+
+`rauhwpx-input-v1` adds a signed, authenticated control path without exposing the worker or its X display. A viewer posts bounded pointer, wheel, keyboard, or composed-text events with a monotonic sequence. The transient store admits input only from an active display-interest lease, grants one viewer the controller lease, rate-limits and bounds its queue, and wakes the existing worker long poll immediately. The worker delivers events in order through Puppeteer's mouse and keyboard APIs. Closing or expiring the controller lease queues a reset so modifiers and mouse buttons cannot remain pressed. Pointer moves are latest-wins in the renderer while clicks, scrolling, shortcuts, paste, and IME text stay ordered.
 
 ### Checkpoint ownership
 
@@ -143,15 +153,15 @@ This preserves the current whole-thread timeline contract. Source-aware concurre
 
 | Area | Change |
 | --- | --- |
-| `cloud/document-runtime/session-frame-publisher.mjs` | Own demand-driven ffmpeg capture, duplicate suppression, one in-flight upload, and fail-soft shutdown. |
-| `cloud/worker/client.mjs` and `cloud/worker/main.mjs` | Open, publish, wait for demand, and close a worker-authenticated frame stream. |
-| `cloud/src/display-frame-store.mjs` | Keep bounded transient frames, viewer interest, waiters, and worker ownership. |
-| `cloud/src/http-server.mjs` | Add worker publish routes and signed public capability, metadata, and image routes. |
+| `cloud/document-runtime/session-frame-publisher.mjs` | Own demand-driven ffmpeg capture, duplicate suppression, one in-flight upload, and ordered input delivery. |
+| `cloud/worker/client.mjs` and `cloud/worker/main.mjs` | Open, publish, wait for frame and input demand, and close a worker-authenticated stream. |
+| `cloud/src/display-frame-store.mjs` | Keep bounded transient frames, viewer/controller leases, input queues, waiters, and worker ownership. |
+| `cloud/src/http-server.mjs` | Add worker display routes and signed public capability, input, metadata, and image routes. |
 | `cloud/install/Containerfile.worker` and `.sandbox` | Install ffmpeg in both runtime products and verify x11grab support. |
 | `desktop/cloud-client.mjs` and `cloud-coordinator.mjs` | Verify and forward display state and frames outside the conversation event batch. |
-| `desktop/main.mjs` and `preload.cjs` | Scope display subscriptions to the sending window and close them with that window. |
+| `desktop/main.mjs` and `preload.cjs` | Scope display subscriptions and input to the sending window and close them with that window. |
 | `rhwp/rhwp-studio/src/cloud/*` | Parse the display contract, own the workspace reducer, and normalize desktop and browser transports. |
-| `rhwp/rhwp-studio/src/ui/cloud-workspace.ts` | Present frames, retain pan and zoom, manage object URLs, and announce connection state. |
+| `rhwp/rhwp-studio/src/ui/cloud-workspace.ts` | Present frames, retain pan and zoom, map remote input, manage object URLs, and announce connection/control state. |
 | `agent-sidebar/index.ts` and `cloud-ui.ts` | Add the Local and Cloud switch and route one composer from the derived target. |
 | `main.ts` | Mount both roots and split checkpoint persistence from takeover application. |
 
@@ -163,11 +173,12 @@ This preserves the current whole-thread timeline contract. Source-aware concurre
 - Browser credentials use one validated authoritative profile-and-token record. Web Locks serialize cross-tab commits, storage events advance the profile epoch and close stale streams, and legacy split-key migration never attaches an unscoped bearer token to a server profile.
 - The frame store retains two frames per stream and never writes frames to SQLite or BlobStore.
 - Every frame is JPEG, at most 512 KiB, and bound to an authenticated worker stream. The server computes its digest.
+- Every input is schema- and geometry-bounded, tied to current viewer interest, sequenced per viewer, and fenced by one transient controller lease.
 - Worker upload, server storage, and client decode are all latest-wins with one pending item.
 - Suspend, completion, requeue, worker loss, lease replacement, and runtime shutdown close publishers, subscribers, frame buffers, and demand.
 - A display startup failure uses the no-preview headless runtime. A display or headed-browser loss after startup fails the worker into the existing recovery path instead of publishing a false live preview.
-- The preview is view-only. Pointer and keyboard input need a separate audited capability and are outside `rauhwpx-frame-v1`.
-- The transcript and stable checkpoint mirror remain the accessible representation. Preview status uses an ARIA live region and never captures keyboard focus.
+- Remote input is a separate advertised `rauhwpx-input-v1` capability; `rauhwpx-frame-v1` remains image-only.
+- The transcript and stable checkpoint mirror remain the accessible representation. Display and control status use an ARIA live region, and a labeled focus sink supports keyboard, paste, and IME input.
 - Desktop self-hosted, app-hosted, and browser clients return the same typed unavailable reasons. Missing methods on older builds map to `client-unsupported`.
 
 ## Synthesis decision
@@ -182,19 +193,19 @@ The design takes these details from the reverse RFB candidate:
 - unavailable results are typed;
 - stale connections clean up idempotently.
 
-RFB, noVNC, public WebSocket upgrades, remote input, reusable viewer secrets, and a desktop loopback WebSocket proxy are rejected. They add capabilities outside the request and create another transport and authentication system.
+RFB, noVNC, public WebSocket upgrades, reusable viewer secrets, and a desktop loopback WebSocket proxy are rejected. They create another transport and authentication system; remote input instead reuses authenticated HTTP and the worker's existing outbound demand channel.
 
 ## Tradeoffs accepted
 
-- We accept a 2 fps read-only preview in exchange for one bounded transport that works on every current client path.
+- We accept a 12 fps JPEG workspace rather than video encoding in exchange for low interaction latency, latest-wins backpressure, and one bounded transport on every current client path.
 - We accept a blocked Local composer during a cloud lease in exchange for one transcript writer and one document writer.
 - We accept no frame history in exchange for fixed memory and zero long-session disk growth.
 - We accept one image request per changed frame in exchange for small signed metadata events and independent binary verification.
 
 ## Locked decisions, 2026-08-30
 
-- Cloud preview uses `rauhwpx-frame-v1` at up to 2 fps.
-- The first release is view-only.
+- Cloud display uses `rauhwpx-frame-v1` at up to 12 fps and `rauhwpx-input-v1` for remote control.
+- One active interested viewer controls a stream at a time; disconnect and expiry release pressed input.
 - Local and cloud roots stay mounted in one renderer.
 - The selected mode changes the main view and composer route together.
 - Local composer is blocked while cloud owns the document.
@@ -206,10 +217,10 @@ RFB, noVNC, public WebSocket upgrades, remote input, reusable viewer secrets, an
 
 ## Verification, 2026-08-30
 
-- 1,822 Studio tests passed.
-- 343 cloud and desktop tests passed with three platform skips.
+- 1,823 Studio tests passed.
+- 347 cloud and desktop tests passed with three platform skips.
 - The Studio production build, worker-only build, and cloud syntax checks passed.
-- The Chromium Local/Cloud workspace E2E passed with mounted editor identity, hidden-root inertness, display cleanup, lease ownership, and composer routing intact.
+- The Chromium Local/Cloud workspace E2E passed with mounted editor identity, hidden-root inertness, display cleanup, lease ownership, composer routing, pointer control, and typed remote input intact.
 - Chromium verified mounted editor, ruler, input, status bar, transcript, composer, draft, and scroll identity across Local and Cloud changes.
 - The Linux proof built the worker-only Studio runtime, loaded a real HWPX document, started its cloud chat, captured the headed window through Xvfb and ffmpeg, and validated the 1280 x 800 JPEG.
 - A Linux process proof verified that LocalRunner removes and reaps a detached same-UID descendant before workspace cleanup.

@@ -10,7 +10,9 @@ export function validDisplayCapability() {
     width: 1280,
     height: 800,
     maxFrameBytes: 524288 as const,
-    maxFps: 2 as const,
+    maxFps: 12 as const,
+    inputProtocol: 'rauhwpx-input-v1' as const,
+    maxInputEventsPerSecond: 60 as const,
   };
 }
 

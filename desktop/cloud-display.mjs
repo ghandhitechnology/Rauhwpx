@@ -2,8 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 
 export const DISPLAY_FRAME_PROTOCOL = 'rauhwpx-frame-v1';
+export const DISPLAY_INPUT_PROTOCOL = 'rauhwpx-input-v1';
 export const MAX_DISPLAY_FRAME_BYTES = 512 * 1024;
-export const MAX_DISPLAY_FPS = 2;
+export const MAX_DISPLAY_FPS = 12;
+export const MAX_DISPLAY_INPUT_EVENTS_PER_SECOND = 60;
 
 const DISPLAY_REASONS = new Set([
   'server-unsupported',
@@ -84,7 +86,9 @@ export function parseDisplayCapability(value, expectedSessionId) {
     const height = dimension(raw.height);
     if (raw.protocol !== DISPLAY_FRAME_PROTOCOL || !streamId || width === null || height === null
       || raw.reason !== undefined || raw.message !== undefined || raw.retryable !== undefined
-      || raw.maxFrameBytes !== MAX_DISPLAY_FRAME_BYTES || raw.maxFps !== MAX_DISPLAY_FPS) {
+      || raw.maxFrameBytes !== MAX_DISPLAY_FRAME_BYTES || raw.maxFps !== MAX_DISPLAY_FPS
+      || raw.inputProtocol !== DISPLAY_INPUT_PROTOCOL
+      || raw.maxInputEventsPerSecond !== MAX_DISPLAY_INPUT_EVENTS_PER_SECOND) {
       throw displayError('Cloud display capability is invalid', 'DISPLAY_CAPABILITY_INVALID');
     }
     return Object.freeze({
@@ -96,11 +100,14 @@ export function parseDisplayCapability(value, expectedSessionId) {
       height,
       maxFrameBytes: MAX_DISPLAY_FRAME_BYTES,
       maxFps: MAX_DISPLAY_FPS,
+      inputProtocol: DISPLAY_INPUT_PROTOCOL,
+      maxInputEventsPerSecond: MAX_DISPLAY_INPUT_EVENTS_PER_SECOND,
     });
   }
   if (raw.kind !== 'unavailable' || raw.protocol !== undefined || raw.streamId !== undefined
     || raw.width !== undefined || raw.height !== undefined
     || raw.maxFrameBytes !== undefined || raw.maxFps !== undefined
+    || raw.inputProtocol !== undefined || raw.maxInputEventsPerSecond !== undefined
     || !DISPLAY_REASONS.has(raw.reason)
     || typeof raw.message !== 'string' || !raw.message || typeof raw.retryable !== 'boolean') {
     throw displayError('Cloud display capability is invalid', 'DISPLAY_CAPABILITY_INVALID');
@@ -207,6 +214,8 @@ class CloudDisplayConnectionImpl {
   #pending = null;
   #downloading = null;
   #lastSequence = 0;
+  #inputSequence = 0;
+  #inputChain = Promise.resolve();
   #interestRenewMs;
   #retryBaseMs;
   #retryMaxMs;
@@ -262,13 +271,38 @@ class CloudDisplayConnectionImpl {
     return this.#closePromise;
   }
 
+  sendInput(event) {
+    const capability = this.#capability;
+    if (this.#closed || capability?.kind !== 'available') {
+      return Promise.reject(displayError('Cloud display input is unavailable', 'DISPLAY_INPUT_UNAVAILABLE'));
+    }
+    const streamId = capability.streamId;
+    const sequence = ++this.#inputSequence;
+    const operation = this.#inputChain.then(async () => {
+      if (this.#closed || this.#controller.signal.aborted) throw abortReason(this.#controller.signal);
+      if (this.#capability?.kind !== 'available' || this.#capability.streamId !== streamId) {
+        throw displayError('Cloud display stream was replaced', 'DISPLAY_STREAM_REPLACED');
+      }
+      await this.#client.sendDisplayInput(
+        this.#sessionId,
+        streamId,
+        this.#viewerId,
+        sequence,
+        event,
+        { signal: this.#controller.signal },
+      );
+    });
+    this.#inputChain = operation.catch(() => {});
+    return operation;
+  }
+
   async #close() {
     this.#closed = true;
     this.#removeExternalAbort();
     this.#controller.abort();
     this.#phase?.controller.abort();
     this.#pending = null;
-    await Promise.allSettled([this.#loop, this.#downloading].filter(Boolean));
+    await Promise.allSettled([this.#loop, this.#downloading, this.#inputChain].filter(Boolean));
     await this.#releaseInterest();
   }
 

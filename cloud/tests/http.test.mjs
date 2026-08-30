@@ -680,7 +680,9 @@ test('an authenticated worker frame reaches paired devices with signed transient
     width: 1280,
     height: 800,
     maxFrameBytes: 524288,
-    maxFps: 2,
+    maxFps: 12,
+    inputProtocol: 'rauhwpx-input-v1',
+    maxInputEventsPerSecond: 60,
   });
   const capabilityNonce = proofNonce();
   const publicCapability = await publicFetch(`${base}/v1/sessions/${created.id}/display`, {
@@ -714,7 +716,7 @@ test('an authenticated worker frame reaches paired devices with signed transient
     body: JSON.stringify({ streamId: capability.streamId, active: true }),
   });
   assert.equal(legacyInterest.status, 200);
-  assert.equal((await legacyInterest.json()).maxFps, 2);
+  assert.equal((await legacyInterest.json()).maxFps, 12);
   assert.equal((await demand).interested, true);
   const crossDeviceLegacyRelease = await publicFetch(`${base}/v1/sessions/${created.id}/display/interest`, {
     method: 'POST',
@@ -747,6 +749,36 @@ test('an authenticated worker frame reaches paired devices with signed transient
   });
   assert.equal(secondInterest.status, 200);
   assert.equal(displayFrameStore.snapshot().streams[0].viewers, 2);
+  const inputDemand = worker.frameDemand(capability.streamId, { after: 4 });
+  const acceptedInput = await publicFetch(`${base}/v1/sessions/${created.id}/display/input`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${second.accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      streamId: capability.streamId,
+      viewerId: 'viewer-window-a',
+      sequence: 1,
+      event: { kind: 'pointer', action: 'down', x: 640, y: 400, button: 'left' },
+    }),
+  });
+  assert.equal(acceptedInput.status, 202);
+  assert.equal((await acceptedInput.json()).accepted, true);
+  assert.deepEqual((await inputDemand).inputEvents, [{
+    version: 5,
+    sequence: 1,
+    event: { kind: 'pointer', action: 'down', x: 640, y: 400, button: 'left' },
+  }]);
+  const conflictingInput = await publicFetch(`${base}/v1/sessions/${created.id}/display/input`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${second.accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      streamId: capability.streamId,
+      viewerId: 'viewer-window-b',
+      sequence: 1,
+      event: { kind: 'text', text: 'blocked controller' },
+    }),
+  });
+  assert.equal(conflictingInput.status, 409);
+  assert.equal((await conflictingInput.json()).error.code, 'DISPLAY_CONTROL_CONFLICT');
   const crossDeviceExplicitRelease = await publicFetch(`${base}/v1/sessions/${created.id}/display/interest`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${origin.accessToken}`, 'Content-Type': 'application/json' },
@@ -768,7 +800,9 @@ test('an authenticated worker frame reaches paired devices with signed transient
   assert.equal(firstRelease.status, 200);
   assert.equal(displayFrameStore.snapshot().streams[0].viewers, 1);
   assert.equal((await worker.frameDemand(capability.streamId, { after: 0 })).interested, true);
-  const finalDemand = worker.frameDemand(capability.streamId, { after: 4 });
+  const controllerReset = await worker.frameDemand(capability.streamId, { after: 5 });
+  assert.deepEqual(controllerReset.inputEvents, [{ version: 6, sequence: 0, event: { kind: 'reset' } }]);
+  const finalDemand = worker.frameDemand(capability.streamId, { after: 6 });
   const secondRelease = await publicFetch(`${base}/v1/sessions/${created.id}/display/interest`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${second.accessToken}`, 'Content-Type': 'application/json' },

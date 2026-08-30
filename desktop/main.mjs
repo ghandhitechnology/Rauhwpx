@@ -1239,6 +1239,12 @@ ipcMain.handle('cloud:display-close', async (event, payload = {}) => {
   if (!connectionId) return false;
   return cloudDisplayConnections.close(event.sender.id, connectionId);
 });
+ipcMain.handle('cloud:display-input', async (event, payload = {}) => {
+  sessionForEvent(event);
+  const connectionId = typeof payload?.connectionId === 'string' ? payload.connectionId : '';
+  if (!connectionId) throw new Error('Invalid cloud display connection id');
+  return cloudDisplayConnections.sendInput(event.sender.id, connectionId, payload.event);
+});
 ipcMain.handle('cloud:resolve-result', async (event, payload = {}) => {
   const session = sessionForEvent(event);
   const coordinator = requireCloudCoordinator();

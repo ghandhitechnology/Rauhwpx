@@ -376,7 +376,7 @@ export async function runSession({
     }
     await harness.start({ history: recorder.history({ excludeTrailingUserText: stableRecovery ? null : initialGoal }) });
     await assertRuntimeHealthy();
-    await onStudioReady();
+    await onStudioReady(harness);
     await harness.setWorkflow?.(activeWorkflow);
 
     const materializeAttachments = async (message) => {

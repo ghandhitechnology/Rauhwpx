@@ -109,7 +109,7 @@ test('SessionFramePublisher starts and stops ffmpeg from demand', async () => {
     },
     spawnProcess(command, args, options) {
       assert.equal(command, 'ffmpeg');
-      assert.deepEqual(args.slice(args.indexOf('-framerate'), args.indexOf('-framerate') + 2), ['-framerate', '2']);
+      assert.deepEqual(args.slice(args.indexOf('-framerate'), args.indexOf('-framerate') + 2), ['-framerate', '12']);
       assert.ok(args.includes('1280x800'));
       assert.equal(options.env.DISPLAY, ':77');
       assert.equal(options.env.PATH, '/usr/bin:/bin');
@@ -129,6 +129,32 @@ test('SessionFramePublisher starts and stops ffmpeg from demand', async () => {
   assert.deepEqual(children[0].signals, ['SIGTERM']);
   await publisher.stop();
   assert.equal(client.closeCalls, 1);
+});
+
+test('SessionFramePublisher applies ordered remote input before advancing demand', async () => {
+  const events = [
+    { version: 2, sequence: 1, event: { kind: 'text', text: 'hello' } },
+    { version: 3, sequence: 2, event: { kind: 'key', action: 'down', key: 'Enter' } },
+  ];
+  const client = fakeClient([{ version: 3, interested: false, inputEvents: events, closed: false }]);
+  const applied = [];
+  const failures = [];
+  const publisher = new SessionFramePublisher({
+    client,
+    sessionDisplay,
+    onEvent: (event) => failures.push(event),
+  });
+  publisher.setInputHandler(async (event) => {
+    applied.push(event);
+    if (event.kind === 'key') throw new Error('synthetic key failure');
+  });
+  await publisher.start();
+  publisher.markReady();
+  await waitFor(() => client.waiting.length === 1, 'next demand after input');
+  assert.deepEqual(applied, events.map((entry) => entry.event));
+  assert.equal(publisher.demandVersion, 3);
+  assert.equal(failures.some((event) => event.type === 'display-input-failed'), true);
+  await publisher.stop();
 });
 
 test('SessionFramePublisher suppresses duplicate JPEGs', async () => {

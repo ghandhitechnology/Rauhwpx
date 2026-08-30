@@ -95,6 +95,7 @@ contextBridge.exposeInMainWorld('rhwpDesktop', {
   cloudDownloadCheckpoint: (payload) => ipcRenderer.invoke('cloud:download-checkpoint', payload),
   cloudOpenDisplay: (payload) => ipcRenderer.invoke('cloud:display-open', payload),
   cloudCloseDisplay: (payload) => ipcRenderer.invoke('cloud:display-close', payload),
+  cloudDisplayInput: (payload) => ipcRenderer.invoke('cloud:display-input', payload),
   cloudResolveResult: (payload) => ipcRenderer.invoke('cloud:resolve-result', payload),
   onCloudEvent: (callback) => {
     const listener = (_event, payload) => callback(payload);

@@ -610,6 +610,8 @@ export async function createStudioHarness({
       'Cloud Studio document load timed out',
     );
     assertBrowserHealthy();
+    const displayPressedKeys = new Set();
+    const displayPressedButtons = new Set();
     return {
       async start({ history }) {
         assertBrowserHealthy();
@@ -801,6 +803,47 @@ export async function createStudioHarness({
             page, bootstrap, origin, references: additions, scopeId: thread.id, onEvent,
           });
         }
+      },
+      async interact(input) {
+        assertBrowserHealthy();
+        if (input?.kind === 'pointer') {
+          await page.mouse.move(input.x, input.y);
+          if (input.action === 'down') {
+            await page.mouse.down({ button: input.button });
+            displayPressedButtons.add(input.button);
+          } else if (input.action === 'up') {
+            await page.mouse.up({ button: input.button });
+            displayPressedButtons.delete(input.button);
+          }
+          return;
+        }
+        if (input?.kind === 'wheel') {
+          await page.mouse.move(input.x, input.y);
+          await page.mouse.wheel({ deltaX: input.deltaX, deltaY: input.deltaY });
+          return;
+        }
+        if (input?.kind === 'key') {
+          if (input.action === 'down') {
+            await page.keyboard.down(input.key);
+            displayPressedKeys.add(input.key);
+          } else {
+            await page.keyboard.up(input.key);
+            displayPressedKeys.delete(input.key);
+          }
+          return;
+        }
+        if (input?.kind === 'text') {
+          await page.keyboard.insertText(input.text);
+          return;
+        }
+        if (input?.kind === 'reset') {
+          for (const key of displayPressedKeys) await page.keyboard.up(key).catch(() => {});
+          for (const button of displayPressedButtons) await page.mouse.up({ button }).catch(() => {});
+          displayPressedKeys.clear();
+          displayPressedButtons.clear();
+          return;
+        }
+        throw runtimeError('DISPLAY_INPUT_INVALID', 'Cloud display input event is invalid');
       },
       async exportDocument(format, destination) {
         assertBrowserHealthy();
