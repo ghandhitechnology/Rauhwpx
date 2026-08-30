@@ -100,6 +100,14 @@ test('pull requests build and inspect both supported desktop packages', () => {
   assert.match(workflow, /Verify Windows installer is unsigned by design/);
 });
 
+test('desktop session jobs preserve protected context names and assert architecture', () => {
+  const workflow = read('.github/workflows/desktop-sessions.yml');
+  assert.match(workflow, /^    name: Session tests \(\$\{\{ matrix\.os \}\}\)$/m);
+  assert.match(workflow, /os: macos-15[\s\S]*architecture: arm64/);
+  assert.match(workflow, /os: windows-latest[\s\S]*architecture: x64/);
+  assert.match(workflow, /EXPECTED_NODE_ARCH: \$\{\{ matrix\.architecture \}\}/);
+});
+
 test('Rust audits fail on new warnings while keeping known debt visible', () => {
   const workflows = [
     '.github/workflows/security-gates.yml',

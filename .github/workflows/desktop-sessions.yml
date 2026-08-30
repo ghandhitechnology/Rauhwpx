@@ -16,7 +16,9 @@ concurrency:
 
 jobs:
   session-tests:
-    name: Session tests (${{ matrix.os }}, ${{ matrix.architecture }})
+    # Keep these names aligned with the protected main-branch contexts. The
+    # matrix and explicit assertion below still enforce ARM64/x64 runners.
+    name: Session tests (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
