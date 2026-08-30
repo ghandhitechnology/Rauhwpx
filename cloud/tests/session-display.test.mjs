@@ -38,9 +38,35 @@ function fakeChild(pid = 4242) {
   return child;
 }
 
-test('allocateDisplay prefers a free :10-style display', async () => {
-  const display = await allocateDisplay(90);
-  assert.match(display, /^:\d+$/);
+function displayPaths(root) {
+  return {
+    x11Directory: path.join(root, 'x11'),
+    lockDirectory: path.join(root, 'locks'),
+  };
+}
+
+test('allocateDisplay atomically separates concurrent in-process allocators', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-display-allocation-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const paths = displayPaths(root);
+  const [first, second] = await Promise.all([
+    allocateDisplay(90, paths),
+    allocateDisplay(90, paths),
+  ]);
+  assert.deepEqual(new Set([first.display, second.display]), new Set([':90', ':91']));
+  await Promise.all([first.release(), second.release()]);
+});
+
+test('released display claims are reusable and release is idempotent', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-display-release-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const paths = displayPaths(root);
+  const first = await allocateDisplay(90, { ...paths, maxAttempts: 1 });
+  await first.release();
+  await first.release();
+  const reused = await allocateDisplay(90, { ...paths, maxAttempts: 1 });
+  assert.equal(reused.display, ':90');
+  await reused.release();
 });
 
 test('SessionDisplay reaches ready, restarts once on crash, then stops', async (t) => {
@@ -71,6 +97,12 @@ test('SessionDisplay reaches ready, restarts once on crash, then stops', async (
   assert.ok(events.includes('environment.display_failed'));
   assert.equal(display.environment, null);
 
+  const launchesBeforeLock = launches;
+  display.disableRestarts();
+  const locked = await display.restart({ reason: 'fixed-browser-mode' });
+  assert.equal(locked.restartBudget, 0);
+  assert.equal(launches, launchesBeforeLock, 'a fixed browser mode must never restart Xvfb');
+
   await display.stop();
   assert.equal(display.status, 'stopped');
   assert.ok(events.includes('environment.display_stopped'));
@@ -82,6 +114,7 @@ test('SessionDisplay fail-soft when Xvfb binary is missing', async (t) => {
   const display = new SessionDisplay({
     workspace: root,
     display: ':92',
+    ...displayPaths(root),
     startWindowManager: false,
     xvfbBin: '/nonexistent/Xvfb',
     startTimeoutMs: 500,
@@ -96,6 +129,67 @@ test('SessionDisplay fail-soft when Xvfb binary is missing', async (t) => {
   assert.equal(snapshot.status, 'error');
   assert.match(snapshot.lastError || '', /./);
   await display.stop();
+  const replacement = await allocateDisplay(92, displayPaths(root));
+  assert.equal(replacement.display, ':92', 'failed startup must release its local claim');
+  await replacement.release();
+});
+
+test('SessionDisplay releases an Xvfb collision and starts on the next claimed display', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-display-collision-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const spawns = [];
+  let xvfbSpawns = 0;
+  let socketChecks = 0;
+  const display = createSessionDisplay({
+    workspace: root,
+    baseDisplay: 100,
+    maxDisplayAttempts: 2,
+    ...displayPaths(root),
+    startWindowManager: true,
+    prepareAuthority: async () => {},
+    probe: async () => {},
+    waitForSocket: async () => {
+      socketChecks += 1;
+      if (socketChecks === 1) return new Promise(() => {});
+    },
+    environment: {
+      PATH: '/usr/bin:/bin',
+      RAUHWpx_WORKER_TOKEN: 'worker-secret',
+      RAUHWpx_CONTROL_SOCKET: '/run/rauhwpx/control.sock',
+      CONTROL_PLANE_SECRET: 'secret',
+    },
+    spawnProcess: (command, args, options) => {
+      const child = fakeChild(6000 + spawns.length);
+      spawns.push({ command, args, options, child });
+      if (command === 'Xvfb') xvfbSpawns += 1;
+      if (command === 'Xvfb' && xvfbSpawns === 1) {
+        queueMicrotask(() => {
+          child.stderr.emit('data', Buffer.from('Server is already active for display'));
+          child.exitCode = 1;
+          child.emit('exit', 1, null);
+        });
+      }
+      return child;
+    },
+  });
+  const snapshot = await display.start();
+  assert.equal(snapshot.status, 'ready', snapshot.lastError);
+  assert.equal(snapshot.display, ':101');
+  assert.deepEqual(
+    spawns.filter(({ command }) => command === 'Xvfb').map(({ args }) => args[0]),
+    [':100', ':101'],
+  );
+  assert.equal(spawns.some(({ command }) => command === 'matchbox-window-manager'), true);
+  for (const { options } of spawns) {
+    assert.equal(options.env.PATH, '/usr/bin:/bin');
+    assert.equal(options.env.RAUHWpx_WORKER_TOKEN, undefined);
+    assert.equal(options.env.RAUHWpx_CONTROL_SOCKET, undefined);
+    assert.equal(options.env.CONTROL_PLANE_SECRET, undefined);
+  }
+  await display.stop();
+  const released = await allocateDisplay(100, displayPaths(root));
+  assert.equal(released.display, ':100');
+  await released.release();
 });
 
 test('live Xvfb supervisor reaches ready, restarts, and screenshots', { skip: !xvfbAvailable() }, async (t) => {

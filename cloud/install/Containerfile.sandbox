@@ -3,17 +3,22 @@
 FROM node:24-bookworm-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03
 
 ARG CHROMIUM_VERSION=151.0.7922.173-1~deb12u1
+ARG FFMPEG_VERSION=7:5.1.9-0+deb12u1
+ARG TINI_VERSION=0.19.0-1+b3
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     ca-certificates \
     chromium="$CHROMIUM_VERSION" \
     curl \
+    ffmpeg="$FFMPEG_VERSION" \
     fonts-noto-cjk \
     matchbox-window-manager \
+    tini="$TINI_VERSION" \
     x11-apps \
     x11-utils \
     xauth \
     xvfb \
+  && ffmpeg -hide_banner -devices 2>&1 | grep -q 'x11grab' \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/rauhwpx-provider-cli
@@ -69,4 +74,4 @@ ENV PATH=/app/bin:/opt/rauhwpx-provider-cli/node_modules/.bin:/usr/local/bin:/us
     RAUHWpx_WORKSPACE_ROOT=/var/lib/rauhwpx-workspaces
 
 EXPOSE 7740
-ENTRYPOINT ["/app/install/sandbox-entrypoint.sh"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/install/sandbox-entrypoint.sh"]

@@ -24,13 +24,22 @@ function parseEvent(row) {
 }
 
 export class SessionStore {
-  constructor(database, blobStore, { now = Date.now, maxQueuedSessions = DEFAULT_LIMITS.maxQueuedSessions } = {}) {
+  constructor(database, blobStore, {
+    now = Date.now,
+    maxQueuedSessions = DEFAULT_LIMITS.maxQueuedSessions,
+    onRuntimeInvalidated = null,
+  } = {}) {
     this.database = database;
     this.blobStore = blobStore;
     this.now = now;
     this.maxQueuedSessions = maxQueuedSessions;
     this.events = new EventEmitter();
     this.events.setMaxListeners(0);
+    this.onRuntimeInvalidated = onRuntimeInvalidated;
+  }
+
+  setRuntimeInvalidationHandler(listener) {
+    this.onRuntimeInvalidated = typeof listener === 'function' ? listener : null;
   }
 
   setProviderStatus(provider, status) {
@@ -361,6 +370,10 @@ export class SessionStore {
     queueMicrotask(() => this.events.emit(`session:${event.sessionId}`, event));
   }
 
+  #invalidateRuntime(sessionId) {
+    try { this.onRuntimeInvalidated?.(sessionId); } catch { /* Runtime cleanup must not fail session work. */ }
+  }
+
   #appendEventInTransaction(sessionId, type, payload) {
     const session = this.database.prepare('SELECT state_version, next_event_seq FROM sessions WHERE id = ?').get(sessionId);
     const seq = session.next_event_seq;
@@ -413,6 +426,7 @@ export class SessionStore {
       return result.response;
     });
     if (event) this.#notify(event);
+    if (response?.session && response.session.status !== 'running') this.#invalidateRuntime(sessionId);
     return response;
   }
 
@@ -726,6 +740,7 @@ export class SessionStore {
       return this.getSession(row.id);
     });
     if (event) this.#notify(event);
+    if (session) this.#invalidateRuntime(session.id);
     return session;
   }
 
@@ -738,10 +753,11 @@ export class SessionStore {
   }
 
   clearSandbox(sessionId, sandboxId) {
-    this.database.prepare(`
+    const changed = this.database.prepare(`
       UPDATE sessions SET sandbox_id = NULL, worker_token_hash = NULL, worker_heartbeat_at = NULL, updated_at = ?
       WHERE id = ? AND sandbox_id = ?
     `).run(this.now(), sessionId, sandboxId);
+    if (changed.changes) this.#invalidateRuntime(sessionId);
   }
 
   prepareWorker(sessionId, workerToken) {
@@ -750,6 +766,7 @@ export class SessionStore {
       UPDATE sessions SET worker_token_hash = ?, updated_at = ? WHERE id = ? AND status = 'running'
     `).run(tokenHash, this.now(), sessionId);
     if (changed.changes !== 1) throw new CloudError('INVALID_SESSION_STATE', 'Session is no longer running', 409);
+    this.#invalidateRuntime(sessionId);
   }
 
   authenticateWorker(sessionId, workerToken, { allowCompletedResultRetry = false } = {}) {
@@ -1251,6 +1268,7 @@ export class SessionStore {
       return this.getSession(sessionId);
     });
     if (event) this.#notify(event);
+    if (session.status !== 'running') this.#invalidateRuntime(sessionId);
     return session;
   }
 
@@ -1277,6 +1295,7 @@ export class SessionStore {
       return this.getSession(sessionId);
     });
     if (event) this.#notify(event);
+    if (session.status !== 'running') this.#invalidateRuntime(sessionId);
     return session;
   }
 
@@ -1302,6 +1321,7 @@ export class SessionStore {
       result = this.#freezeTakeoverInTransaction(row, { forced, recovered });
     });
     if (result.event) this.#notify(result.event);
+    if (result.response.session.status !== 'running') this.#invalidateRuntime(sessionId);
     return result.response;
   }
 
@@ -1631,6 +1651,7 @@ export class SessionStore {
       return this.getSession(sessionId);
     });
     if (event) this.#notify(event);
+    if (result.status !== 'running') this.#invalidateRuntime(sessionId);
     return result;
   }
 
@@ -1690,6 +1711,7 @@ export class SessionStore {
       return this.getSession(sessionId);
     });
     if (event) this.#notify(event);
+    this.#invalidateRuntime(sessionId);
     return result;
   }
 
@@ -1718,6 +1740,7 @@ export class SessionStore {
       return this.getSession(sessionId);
     });
     if (event) this.#notify(event);
+    if (result.status !== 'running') this.#invalidateRuntime(sessionId);
     return result;
   }
 
@@ -1765,6 +1788,9 @@ export class SessionStore {
       }
     });
     for (const event of notifications) this.#notify(event);
+    for (const item of recovered) {
+      if (item.action !== 'adopted') this.#invalidateRuntime(item.sessionId);
+    }
     return recovered;
   }
 
@@ -1802,6 +1828,7 @@ export class SessionStore {
       return this.getSession(sessionId);
     });
     if (event) this.#notify(event);
+    if (session.status !== 'running') this.#invalidateRuntime(sessionId);
     return session;
   }
 
@@ -1936,6 +1963,7 @@ export class SessionStore {
     });
     const event = newlyPurged ? this.listEvents(sessionId, 0, 1)[0] : null;
     if (event) this.#notify(event);
+    if (newlyPurged) this.#invalidateRuntime(sessionId);
     return { receipt, unreferenced: [...new Set(unreferenced)], uploads };
   }
 }

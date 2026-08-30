@@ -130,11 +130,14 @@ test('config gates the local runner and keeps the control socket outside the dat
     RAUHWpx_RUNNER: 'local',
     RAUHWpx_WORKER_UID: '1001',
     RAUHWpx_WORKER_CONTROL_DIR: '/run/rauhwpx',
+    RAUHWpx_MAX_RUNNING: '8',
   });
   assert.equal(local.runner, 'local');
   assert.equal(local.workerUid, 1001);
   assert.equal(local.workerGid, 1001);
   assert.equal(local.workerControlSocket, '/run/rauhwpx/control.sock');
+  assert.equal(local.maxRunningSessions, 1);
+  assert.equal(parseConfig({ ...base, RAUHWpx_MAX_RUNNING: '8' }).maxRunningSessions, 8);
   assert.deepEqual(local.startupProviders, ['claude', 'codex', 'pi', 'grok', 'cursor']);
   assert.deepEqual(local.browserOrigins, []);
   assert.deepEqual(parseConfig({
@@ -178,6 +181,15 @@ function fakeChild() {
   return child;
 }
 
+async function waitFor(predicate, message, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.fail(`Timed out waiting for ${message}`);
+}
+
 test('local runner isolates each session workspace and cleans it up on stop', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-local-runner-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -198,6 +210,7 @@ test('local runner isolates each session workspace and cleans it up on stop', as
       return child;
     },
   });
+  assert.equal(runner.maxRunningSessions, 1);
 
   const first = await runner.start({ id: 'session-one', provider: 'codex' }, {
     workerToken: 'ra_wt_first',
@@ -241,6 +254,75 @@ test('local runner isolates each session workspace and cleans it up on stop', as
   await runner.stop('local-missing');
   await runner.stop(second);
   assert.deepEqual(await runner.list(), []);
+});
+
+test('local runner reaps a detached process group when its worker exits spontaneously', {
+  skip: process.platform === 'win32' ? 'POSIX process groups are unavailable on Windows' : false,
+}, async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-local-runner-exit-'));
+  const config = {
+    workspaceRoot: path.join(root, 'workspaces'),
+    providerAuthDirectory: path.join(root, 'provider-auth'),
+    workerUid: null,
+    workerGid: null,
+  };
+  await fs.mkdir(path.join(config.providerAuthDirectory, 'codex'), { recursive: true });
+  const workerEntry = path.join(root, 'worker.mjs');
+  await fs.writeFile(workerEntry, `
+    import { spawn } from 'node:child_process';
+    import { promises as fs } from 'node:fs';
+    import path from 'node:path';
+    const grandchild = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      stdio: 'ignore',
+    });
+    grandchild.unref();
+    await fs.writeFile(path.join(process.env.RAUHWpx_WORKSPACE, 'grandchild.pid'), String(grandchild.pid));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    process.exit(7);
+  `);
+  const runner = new LocalRunner(config, { workerEntry });
+  let grandchildPid;
+  let groupId;
+  t.after(async () => {
+    if (groupId) {
+      try { process.kill(-groupId, 'SIGKILL'); } catch { /* Already reaped. */ }
+    }
+    if (grandchildPid) {
+      try { process.kill(grandchildPid, 'SIGKILL'); } catch { /* Already reaped. */ }
+    }
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  const sandboxId = await runner.start({ id: 'session-exit', provider: 'codex' }, {
+    workerToken: 'ra_wt_exit',
+    controlSocket: '/run/rauhwpx/control.sock',
+  });
+  groupId = runner.children.get(sandboxId).child.pid;
+  const workspace = path.join(config.workspaceRoot, sandboxId);
+  const temporaryDirectory = path.join('/tmp', `rw-${sandboxId.slice(-12)}`);
+  await waitFor(async () => {
+    try {
+      grandchildPid = Number(await fs.readFile(path.join(workspace, 'grandchild.pid'), 'utf8'));
+      return Number.isSafeInteger(grandchildPid);
+    } catch {
+      return false;
+    }
+  }, 'grandchild PID');
+  await waitFor(() => runner.list().then((entries) => entries.length === 0), 'worker exit');
+  await waitFor(async () => {
+    const pathsGone = await Promise.all([workspace, temporaryDirectory].map(
+      (target) => fs.access(target).then(() => false, () => true),
+    ));
+    return pathsGone.every(Boolean);
+  }, 'workspace cleanup');
+  await waitFor(() => {
+    try {
+      process.kill(grandchildPid, 0);
+      return false;
+    } catch (error) {
+      return error.code === 'ESRCH';
+    }
+  }, 'grandchild process exit');
 });
 
 test('the local worker cannot inherit the control plane environment', () => {
@@ -314,12 +396,15 @@ test('the app sandbox image runs the control plane with the local runner and a b
   assert.match(containerfile, /COPY worker \/app\/worker/);
   assert.match(containerfile, /COPY document-runtime \/app\/document-runtime/);
   assert.match(containerfile, /useradd --system --uid 1001/);
-  assert.match(containerfile, /ENTRYPOINT \["\/app\/install\/sandbox-entrypoint\.sh"\]/);
+  assert.match(containerfile, /ENTRYPOINT \["\/usr\/bin\/tini", "--", "\/app\/install\/sandbox-entrypoint\.sh"\]/);
   assert.match(containerfile, /\bxvfb\b/);
   assert.match(containerfile, /\bxauth\b/);
   assert.match(containerfile, /\bx11-utils\b/);
   assert.match(containerfile, /\bx11-apps\b/);
   assert.match(containerfile, /matchbox-window-manager/);
+  assert.match(containerfile, /tini="\$TINI_VERSION"/);
+  assert.match(containerfile, /ffmpeg="\$FFMPEG_VERSION"/);
+  assert.match(containerfile, /ffmpeg -hide_banner -devices 2>&1 \| grep -q 'x11grab'/);
   assert.doesNotMatch(containerfile, /^USER /m);
 
   const entrypoint = await fs.readFile(new URL('install/sandbox-entrypoint.sh', root), 'utf8');

@@ -321,7 +321,7 @@ test('scheduler starts up to the configured cap and suspends failed sandboxes du
   const digest = createHash('sha256').update(documentBytes).digest('hex');
   const initialized = await blobs.initUpload({ deviceId: 'device', sha256: digest, size: documentBytes.length, name: 'doc', kind: 'document' });
   await blobs.appendChunk({ uploadId: initialized.uploadId, deviceId: 'device', offset: 0, bytes: documentBytes });
-  for (const id of ['session-scheduler-1', 'session-scheduler-2']) {
+  for (const id of ['session-scheduler-1', 'session-scheduler-2', 'session-scheduler-3']) {
     sessions.createSession({ id: 'device' }, {
       sessionId: id, provider: 'codex', goal: 'Work',
       originDocument: { blobId: digest, size: documentBytes.length, name: 'doc' },
@@ -333,6 +333,7 @@ test('scheduler starts up to the configured cap and suspends failed sandboxes du
   }
   const starts = [];
   const runner = {
+    maxRunningSessions: 1,
     async list() { return []; },
     async start(session, options) {
       starts.push({ session, options });
@@ -343,13 +344,16 @@ test('scheduler starts up to the configured cap and suspends failed sandboxes du
   };
   const logger = { info() {}, error() {} };
   const scheduler = new Scheduler(sessions, runner, {
-    logger, maxRunningSessions: 1, controlSocket: path.join(root, 'control.sock'),
+    logger, maxRunningSessions: 4, controlSocket: path.join(root, 'control.sock'),
   });
+  assert.equal(scheduler.maxRunningSessions, 1, 'local runners cap configured concurrency at one');
   await scheduler.tick();
   assert.equal(starts.length, 2, 'a failed claim should free capacity for the next queued session');
   assert.equal(sessions.getSession('session-scheduler-1').status, 'suspended');
   assert.equal(sessions.getSession('session-scheduler-2').status, 'running');
+  assert.equal(sessions.getSession('session-scheduler-3').status, 'queued');
   assert.equal(starts[1].options.controlSocket, path.join(root, 'control.sock'));
+  assert.equal(new Scheduler({}, {}, { maxRunningSessions: 4 }).maxRunningSessions, 4);
 });
 
 test('doctor separates managed CLI health from optional provider authentication', async () => {

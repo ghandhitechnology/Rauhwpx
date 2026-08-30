@@ -9,6 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { AuthService } from '../src/auth.mjs';
 import { BlobStore } from '../src/blob-store.mjs';
 import { databasePragmas, openDatabase } from '../src/database.mjs';
+import { DisplayFrameStore } from '../src/display-frame-store.mjs';
 import { parseCommand, parseSessionCreate, parseUploadInit } from '../src/protocol.mjs';
 import { SessionStore } from '../src/session-store.mjs';
 
@@ -965,4 +966,57 @@ test('an idle persistent room sleeps thirty minutes after the last presence and 
   assert.equal(waking.presence.waking, true);
   assert.ok(sessions.listEvents(input.sessionId, 0).some(({ type }) => type === 'runtime.sleeping'));
   assert.ok(sessions.listEvents(input.sessionId, 0).some(({ type }) => type === 'conversation.waking'));
+});
+
+test('session runtime invalidation clears transient display state across worker exits', async (t) => {
+  const { blobs, auth, sessions } = await fixture(t);
+  const frames = new DisplayFrameStore({ maxSessions: 1 });
+  sessions.setRuntimeInvalidationHandler((sessionId) => frames.closeSession(sessionId));
+  const origin = await pairedDevice(auth);
+  sessions.setProviderStatus('codex', { available: true, version: '1' });
+  const document = await upload(blobs, origin.device.id, Buffer.from('display lifecycle document'));
+  const start = (sessionId, token) => {
+    const created = sessions.createSession(origin.device, parseSessionCreate({
+      sessionId,
+      provider: 'codex',
+      goal: 'Exercise display cleanup',
+      originDocument: { blobId: document.id, name: 'display.hwpx', size: document.size },
+    }));
+    sessions.executeCommand(origin.device, sessionId, parseCommand({
+      commandId: `activate-${sessionId}`,
+      type: 'session.activate',
+      payload: { expectedVersion: created.stateVersion },
+    }));
+    sessions.claimNextSession();
+    sessions.prepareWorker(sessionId, token);
+    const workerId = Buffer.from(sessions.getSessionRow(sessionId).worker_token_hash).toString('hex');
+    const capability = frames.openStream({ sessionId, workerId, width: 1280, height: 800 });
+    return { capability, workerId };
+  };
+
+  start('session_display_suspend', 'worker-suspend');
+  sessions.suspend('session_display_suspend', { code: 'TEST', message: 'suspend' });
+  assert.equal(frames.capability('session_display_suspend'), null);
+
+  start('session_display_requeue', 'worker-requeue');
+  sessions.requeueInterruptedSession('session_display_requeue');
+  assert.equal(frames.capability('session_display_requeue'), null);
+  sessions.suspend('session_display_requeue', { code: 'TEST', message: 'stop requeue' });
+
+  const active = start('session_display_complete', 'worker-complete-one');
+  sessions.prepareWorker('session_display_complete', 'worker-complete-two');
+  assert.equal(frames.capability('session_display_complete'), null, 'replacement worker closes the old stream');
+  const replacementId = Buffer.from(
+    sessions.getSessionRow('session_display_complete').worker_token_hash,
+  ).toString('hex');
+  frames.openStream({
+    sessionId: 'session_display_complete', workerId: replacementId, width: 1280, height: 800,
+  });
+  assert.notEqual(active.workerId, replacementId);
+  assert.deepEqual(sessions.claimFinish('session_display_complete'), { ready: true, messages: [] });
+  const result = await upload(blobs, origin.device.id, Buffer.from('display lifecycle result'), {
+    name: 'result.hwpx', kind: 'result', sessionId: 'session_display_complete',
+  });
+  sessions.publishResult('session_display_complete', { blobId: result.id, size: result.size });
+  assert.equal(frames.capability('session_display_complete'), null);
 });

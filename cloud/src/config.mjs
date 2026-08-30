@@ -103,6 +103,12 @@ export function parseConfig(environment = process.env) {
     // 데이터 디렉터리는 0700이라 워커 uid가 통과하지 못한다. 세션마다 EACCES로 죽는 대신 부팅에서 막는다.
     throw new CloudError('CONFIG_INVALID', 'RAUHWpx_WORKSPACE_ROOT must live outside RAUHWpx_DATA_DIR');
   }
+  const configuredMaxRunningSessions = positiveInteger(
+    environment.RAUHWpx_MAX_RUNNING,
+    'RAUHWpx_MAX_RUNNING',
+    DEFAULT_LIMITS.maxRunningSessions,
+    { min: 1, max: 8 },
+  );
   return {
     platform,
     host: environment.RAUHWpx_HOST || '127.0.0.1',
@@ -126,12 +132,7 @@ export function parseConfig(environment = process.env) {
     workerImage: environment.RAUHWpx_WORKER_IMAGE || 'ghcr.io/ghandhitechnology/rauhwpx-cloud-worker:stable',
     podmanConnection: environment.RAUHWpx_PODMAN_CONNECTION || null,
     releaseChannel: environment.RAUHWpx_CHANNEL === 'prerelease' ? 'prerelease' : 'stable',
-    maxRunningSessions: positiveInteger(
-      environment.RAUHWpx_MAX_RUNNING,
-      'RAUHWpx_MAX_RUNNING',
-      DEFAULT_LIMITS.maxRunningSessions,
-      { min: 1, max: 8 },
-    ),
+    maxRunningSessions: runner === 'local' ? 1 : configuredMaxRunningSessions,
     maxQueuedSessions: positiveInteger(
       environment.RAUHWpx_MAX_QUEUED,
       'RAUHWpx_MAX_QUEUED',
