@@ -40,10 +40,11 @@ jobs:
           npm --prefix rhwp/rhwp-agent audit --omit=dev --audit-level=low
           npm --prefix rhwp/rhwp-studio audit --omit=dev --audit-level=low
 
-      - name: Test release artifact verifier
+      - name: Test release and package verifiers
         run: >-
           node --test
           scripts/ci-workflow-contracts.test.mjs
+          scripts/verify-desktop-package.test.mjs
           scripts/verify-release-artifacts.test.mjs
 
   rust-dependencies:

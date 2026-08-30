@@ -7,6 +7,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { RAU_DEFAULT_MODEL_ID, RAU_LOCKED_MODELS } from '../../rau-credits/catalog.mjs';
+import { replaceFileAtomically } from '../harness-update.mjs';
 import { createPiManager, defaultPiRoot, PI_SECRET_ID, RAU_SECRET_ID } from '../pi-manager.mjs';
 import { createMemorySecretStore } from '../secret-store.mjs';
 
@@ -692,21 +693,32 @@ test('Pi key persistence failures roll back the vault, memory, and written confi
   const rootDir = await tmpRoot();
   const configPath = path.join(rootDir, 'config.json');
   let stored = null;
+  let failConfigCommit = true;
+  const persistenceError = new Error('config persistence failed after replacement');
   const secretStore = {
     available: true,
     async get() { return stored; },
     async set(_id, value) {
       stored = value;
-      await fs.mkdir(configPath, { recursive: true });
     },
     async delete() {
       stored = null;
-      await fs.rm(configPath, { recursive: true, force: true });
     },
   };
-  const manager = createPiManager({ rootDir, openRouter: fakeOpenRouter(), secretStore });
+  const manager = createPiManager({
+    rootDir,
+    openRouter: fakeOpenRouter(),
+    secretStore,
+    async replaceFile(tempPath, targetPath, options) {
+      await replaceFileAtomically(tempPath, targetPath, options);
+      if (targetPath === configPath && failConfigCommit) {
+        failConfigCommit = false;
+        throw persistenceError;
+      }
+    },
+  });
 
-  await assert.rejects(manager.setApiKey('sk-or-v1-partial-write'));
+  await assert.rejects(manager.setApiKey('sk-or-v1-partial-write'), persistenceError);
   assert.equal(stored, null);
   assert.equal(manager.apiKey(), null);
   assert.equal((await manager.status()).keyConfigured, false);

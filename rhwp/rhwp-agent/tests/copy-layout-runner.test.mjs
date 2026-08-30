@@ -69,6 +69,7 @@ test('structured runner fixes shell:false executable, helper, source, and privat
   const dependencies = {
     ...paths,
     sourceFormat: 'hwpx',
+    platform: 'linux',
     pythonCommand: 'trusted-python',
     spawnProcess,
     cleanupProcess: async () => true,

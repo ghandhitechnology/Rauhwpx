@@ -94,6 +94,55 @@ class CopyLayoutHelperTests(unittest.TestCase):
             )
         self.assertLess(time.monotonic() - started, 2)
 
+    def test_windows_cleanup_forces_the_owned_console_tree(self):
+        class FakeKiller:
+            returncode = 0
+
+            def wait(self, timeout):
+                self.timeout = timeout
+
+        class FakeProcess:
+            pid = 4242
+
+            def poll(self):
+                return None
+
+            def wait(self, timeout):
+                self.timeout = timeout
+
+        killer = FakeKiller()
+        process = FakeProcess()
+        with patch.object(copy_layout.os, "name", "nt"), patch.object(
+            copy_layout.subprocess,
+            "Popen",
+            return_value=killer,
+        ) as popen:
+            self.assertTrue(copy_layout._terminate_rhwp_tree(process))
+
+        popen.assert_called_once_with(
+            ["taskkill.exe", "/PID", "4242", "/T", "/F"],
+            stdin=copy_layout.subprocess.DEVNULL,
+            stdout=copy_layout.subprocess.DEVNULL,
+            stderr=copy_layout.subprocess.DEVNULL,
+            shell=False,
+        )
+        self.assertEqual(killer.timeout, copy_layout.RHWP_COMMAND_CLEANUP_SECONDS)
+        self.assertEqual(process.timeout, copy_layout.RHWP_COMMAND_CLEANUP_SECONDS)
+
+    def test_windows_cleanup_never_taskkills_an_exited_pid(self):
+        class ExitedProcess:
+            pid = 4243
+
+            def poll(self):
+                return 0
+
+        with patch.object(copy_layout.os, "name", "nt"), patch.object(
+            copy_layout.subprocess,
+            "Popen",
+        ) as popen:
+            self.assertTrue(copy_layout._terminate_rhwp_tree(ExitedProcess()))
+        popen.assert_not_called()
+
     def test_run_rhwp_reports_unconfirmed_tree_cleanup(self):
         terminate = copy_layout._terminate_rhwp_tree
 

@@ -24,6 +24,10 @@ function deniedSymlink() {
   throw error;
 }
 
+// Windows mode bits do not expose the file's DACL. Node reports regular
+// writable files as 0666 there even when they were opened with mode 0600.
+const PRIVATE_FILE_MODE = process.platform === 'win32' ? 0o666 : 0o600;
+
 test('Windows credential copies journal and copy refreshed bytes back', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-credential-mirror-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -72,7 +76,7 @@ test('copyback does not overwrite a credential changed by another login', async 
   });
   assert.equal(await fs.readFile(source, 'utf8'), 'new-login');
   assert.equal(await fs.readFile(conflictPath, 'utf8'), 'isolated-refresh');
-  assert.equal((await fs.stat(conflictPath)).mode & 0o777, 0o600);
+  assert.equal((await fs.stat(conflictPath)).mode & 0o777, PRIVATE_FILE_MODE);
   assert.equal(existsSync(handle.journalPath), false);
   assert.equal(existsSync(target), false);
 });
@@ -264,7 +268,7 @@ test('uncertain process cleanup writes one bounded reboot-safe launch marker', a
   const original = await fs.readFile(marker, 'utf8');
 
   assert.equal(path.basename(marker), LAUNCH_CLEANUP_RETENTION_FILE);
-  assert.equal((await fs.stat(marker)).mode & 0o777, 0o600);
+  assert.equal((await fs.stat(marker)).mode & 0o777, PRIVATE_FILE_MODE);
   assert.equal(hasPendingLaunchCleanupSync(launch), true);
   retainLaunchRootForProcessCleanupSync(launch, {
     launchId,

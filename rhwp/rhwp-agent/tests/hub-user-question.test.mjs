@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
@@ -25,6 +25,14 @@ function waitForLine(stream, predicate, timeoutMs = 20_000) {
       resolve(line);
     });
   });
+}
+
+async function waitForPath(filePath, timeoutMs = 20_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!existsSync(filePath)) {
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for path: ${filePath}`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
 }
 
 async function registerSession(port, sessionId) {
@@ -138,15 +146,18 @@ function prepareFakePi(root) {
   }
 }
 
-async function startHub(t, { fakeCursor = false, fakePi = false, cursorQuestionDelayMs = 0 } = {}) {
+async function startHub(t, { fakeCursor = false, fakePi = false, gateCursorQuestion = false } = {}) {
   const workRoot = mkdtempSync(path.join(os.tmpdir(), 'rhwp-hub-user-question-'));
   const piRoot = path.join(workRoot, 'pi');
+  const cursorLegacyReadyPath = path.join(workRoot, 'cursor-legacy-ready');
+  const cursorQuestionReleasePath = path.join(workRoot, 'cursor-question-release');
   if (fakePi) prepareFakePi(piRoot);
   let testPath = process.env.PATH;
   if (fakeCursor) {
     const binDir = path.join(workRoot, 'bin');
     mkdirSync(binDir, { recursive: true });
-    const cursorBin = path.join(binDir, 'cursor-agent');
+    const cursorFixture = path.join(binDir, 'cursor-agent-fixture.cjs');
+    const cursorBin = path.join(binDir, process.platform === 'win32' ? 'cursor-agent.cmd' : 'cursor-agent');
     const init = {
       type: 'system', subtype: 'init',
       session_id: 'cursor-fallback-question', model: 'mock-cursor', permissionMode: 'default',
@@ -160,18 +171,38 @@ async function startHub(t, { fakeCursor = false, fakePi = false, cursorQuestionD
         smartModeApprovalOnly: false, skipApproval: false, serverIdentifier: '',
       } } },
     };
-    writeFileSync(cursorBin, [
-      '#!/usr/bin/env node',
+    writeFileSync(cursorFixture, [
+      "const fs = require('node:fs');",
       "if (process.argv.includes('--version')) { console.log('2026.08.11-e2e'); process.exit(0); }",
       "if (process.argv.includes('status')) { console.log('Not logged in'); process.exit(1); }",
       "if (process.argv[2] === 'acp') process.exit(1);",
       `process.stdout.write(${JSON.stringify(`${JSON.stringify(init)}\n`)});`,
-      ...(cursorQuestionDelayMs > 0
-        ? [`Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${cursorQuestionDelayMs});`]
+      `fs.writeFileSync(${JSON.stringify(cursorLegacyReadyPath)}, '');`,
+      ...(gateCursorQuestion
+        ? [
+          'const releaseWait = new Int32Array(new SharedArrayBuffer(4));',
+          'const releaseDeadline = Date.now() + 10000;',
+          `while (!fs.existsSync(${JSON.stringify(cursorQuestionReleasePath)})) {`,
+          "  if (Date.now() >= releaseDeadline) { console.error('timed out waiting for question release'); process.exit(2); }",
+          '  Atomics.wait(releaseWait, 0, 0, 20);',
+          '}',
+        ]
         : []),
       `process.stdout.write(${JSON.stringify(`${JSON.stringify(call)}\n`)});`,
       'setInterval(() => {}, 1000);',
-    ].join('\n'), { mode: 0o755 });
+    ].join('\n'));
+    if (process.platform === 'win32') {
+      writeFileSync(
+        cursorBin,
+        `@echo off\r\n"${process.execPath}" "${cursorFixture}" %*\r\n`,
+      );
+    } else {
+      writeFileSync(
+        cursorBin,
+        `#!/bin/sh\nexec "${process.execPath}" "${cursorFixture}" "$@"\n`,
+        { mode: 0o755 },
+      );
+    }
     testPath = `${binDir}${path.delimiter}${testPath}`;
   }
   const child = spawn(process.execPath, ['server.mjs'], {
@@ -198,7 +229,12 @@ async function startHub(t, { fakeCursor = false, fakePi = false, cursorQuestionD
   });
   const readyLine = await waitForLine(child.stdout, (line) => line.startsWith('RHWP_HUB_READY '));
   const ready = JSON.parse(readyLine.slice('RHWP_HUB_READY '.length));
-  return { port: ready.port, stderr: () => stderr };
+  return {
+    port: ready.port,
+    stderr: () => stderr,
+    cursorLegacyReadyPath,
+    cursorQuestionReleasePath,
+  };
 }
 
 function questionArgs() {
@@ -313,18 +349,33 @@ test('a standalone implementation command follows the same Plan approval transit
 });
 
 test('a correlated root provider event authorizes MCP even when its socket call arrives first', { timeout: 40_000 }, async (t) => {
-  const { port } = await startHub(t, { fakeCursor: true, cursorQuestionDelayMs: 500 });
+  const {
+    port,
+    cursorLegacyReadyPath,
+    cursorQuestionReleasePath,
+  } = await startHub(t, { fakeCursor: true, gateCursorQuestion: true });
   const sessionId = 'question-correlated-root';
   const studio = await openClient(`ws://127.0.0.1:${port}/studio?token=${TOKEN}&sessionId=${sessionId}&instance=page-1`);
   t.after(() => closeClient(studio));
   await studio.next((frame) => frame.type === 'welcome');
   await startRunningChat(studio, 'cursor');
+  // ACP fallback takes longer on Windows because the failed native process
+  // must be reaped first. The fixture stops after claiming the legacy turn.
+  await waitForPath(cursorLegacyReadyPath);
 
   const mcp = await openClient(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=${sessionId}&agent=cursor&role=chat`);
   t.after(() => closeClient(mcp));
   sendFrame(mcp, {
     type: 'tool-call', id: 9, tool: 'ask_user_question', args: questionArgs(), workflow: 'direct',
   });
+  // WebSocket message order plus this response proves the server handled id 9
+  // and entered its scope wait before the provider can publish the matching
+  // event. The unknown tool changes no session state.
+  sendFrame(mcp, { type: 'tool-call', id: 10, tool: 'ordering_barrier', args: {} });
+  const barrier = await mcp.next((frame) => frame.type === 'tool-result' && frame.id === 10);
+  assert.equal(barrier.ok, false);
+  assert.equal(barrier.error.code, 'UNKNOWN_TOOL');
+  writeFileSync(cursorQuestionReleasePath, '');
   const requested = await studio.next((frame) => frame.type === 'user-question-requested');
   sendFrame(studio, {
     type: 'user-question-answer',

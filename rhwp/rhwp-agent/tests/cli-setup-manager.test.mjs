@@ -12,6 +12,7 @@ import {
   defaultCursorConfigDir,
   defaultCursorHomeDir,
 } from '../cli-setup-manager.mjs';
+import { replaceFileAtomically } from '../harness-update.mjs';
 import { createMemorySecretStore } from '../secret-store.mjs';
 
 class FakeProcess extends EventEmitter {
@@ -523,7 +524,11 @@ test('a cursor login URL never registers as a device code', async () => {
     return proc;
   };
   const manager = await createCliSetupManager({
-    rootDir, spawnProcess, baseEnv: { PATH: '/usr/bin' }, homeDir: path.join(rootDir, 'no-home'),
+    rootDir,
+    spawnProcess,
+    platform: 'linux',
+    baseEnv: { PATH: '/usr/bin' },
+    homeDir: path.join(rootDir, 'no-home'),
   }).init();
 
   const progress = [];
@@ -749,7 +754,7 @@ test('Windows Claude OAuth redirects both profile variables and CLAUDE_CONFIG_DI
 
   assert.deepEqual(preparedWith, {
     sourceFile: 'E:\\Claude\\live-config\\.credentials.json',
-    stagingParent: path.win32.join(rootDir, 'claude-oauth-staging'),
+    stagingParent: path.join(rootDir, 'claude-oauth-staging'),
     relativeCredentialPath: '.credentials.json',
     platform: 'win32',
   });
@@ -1025,17 +1030,16 @@ test('Grok OAuth persistence failure restores prior auth and its app-owned crede
     grokKeyTail: '-key',
   })}\n`);
   let stored = 'xai-working-key';
+  let failConfigCommit = true;
+  const persistenceError = new Error('config persistence failed after replacement');
   const secretStore = {
     available: true,
     async get(id) { return id === 'rhwp.grok.api-key' ? stored : null; },
     async set(_id, value) {
       stored = value;
-      await fs.rm(configPath, { recursive: true, force: true });
     },
     async delete() {
       stored = null;
-      await fs.rm(configPath, { recursive: true, force: true });
-      await fs.mkdir(configPath, { recursive: true });
     },
   };
   const spawnProcess = (_command, argv) => {
@@ -1053,11 +1057,18 @@ test('Grok OAuth persistence failure restores prior auth and its app-owned crede
     rootDir,
     secretStore,
     spawnProcess,
+    async replaceConfigFile(tempPath, targetPath, options) {
+      await replaceFileAtomically(tempPath, targetPath, options);
+      if (targetPath === configPath && failConfigCommit) {
+        failConfigCommit = false;
+        throw persistenceError;
+      }
+    },
     baseEnv: { PATH: '/usr/bin' },
     homeDir: path.join(rootDir, 'no-home'),
   }).init();
 
-  await assert.rejects(manager.authenticate('grok', 'oauth'));
+  await assert.rejects(manager.authenticate('grok', 'oauth'), persistenceError);
   assert.equal(stored, 'xai-working-key');
   assert.equal(manager.envFor('grok').XAI_API_KEY, 'xai-working-key');
   const restored = JSON.parse(await fs.readFile(configPath, 'utf8'));
@@ -1184,7 +1195,11 @@ test('Cursor auth state trusts the status JSON body, never the exit code', async
     return proc;
   };
   const manager = await createCliSetupManager({
-    rootDir, spawnProcess, baseEnv: { PATH: '/usr/bin' }, homeDir: path.join(rootDir, 'no-home'),
+    rootDir,
+    spawnProcess,
+    platform: 'linux',
+    baseEnv: { PATH: '/usr/bin' },
+    homeDir: path.join(rootDir, 'no-home'),
   }).init();
 
   assert.equal((await manager.status('cursor')).authenticated, false);
@@ -1218,7 +1233,11 @@ test('Cursor OAuth login runs with NO_OPEN_BROWSER against the persistent home',
     return proc;
   };
   const manager = await createCliSetupManager({
-    rootDir, spawnProcess, baseEnv: { PATH: '/usr/bin' }, homeDir: path.join(rootDir, 'no-home'),
+    rootDir,
+    spawnProcess,
+    platform: 'linux',
+    baseEnv: { PATH: '/usr/bin' },
+    homeDir: path.join(rootDir, 'no-home'),
   }).init();
 
   const progress = [];
@@ -1287,7 +1306,7 @@ test('Windows Cursor OAuth uses an isolated profile and publishes only at the co
 
   assert.deepEqual(preparedWith, {
     sourceFile: path.win32.join(profile, '.cursor', 'cli-config.json'),
-    stagingParent: path.win32.join(rootDir, 'cursor-oauth-staging'),
+    stagingParent: path.join(rootDir, 'cursor-oauth-staging'),
     platform: 'win32',
   });
   const login = calls.find((call) => call.argv[0] === 'login');
@@ -1402,7 +1421,11 @@ test('Cursor model list parsing drops prose lines and caches with a TTL', async 
     return proc;
   };
   const manager = await createCliSetupManager({
-    rootDir, spawnProcess, baseEnv: { PATH: '/usr/bin' }, homeDir: path.join(rootDir, 'no-home'),
+    rootDir,
+    spawnProcess,
+    platform: 'linux',
+    baseEnv: { PATH: '/usr/bin' },
+    homeDir: path.join(rootDir, 'no-home'),
   }).init();
 
   const models = await manager.cursorModels();
@@ -1858,8 +1881,12 @@ test('a Cursor API key is checked through the CLI status command', async () => {
     };
     const secretStore = createMemorySecretStore();
     const manager = await createCliSetupManager({
-      rootDir, spawnProcess, secretStore,
-      baseEnv: { PATH: '/usr/bin' }, homeDir: path.join(rootDir, 'no-home'),
+      rootDir,
+      spawnProcess,
+      secretStore,
+      platform: 'linux',
+      baseEnv: { PATH: '/usr/bin' },
+      homeDir: path.join(rootDir, 'no-home'),
     }).init();
 
     if (authenticated) {
@@ -1877,9 +1904,10 @@ test('a Cursor API key is checked through the CLI status command', async () => {
     assert.deepEqual(check.argv, ['status', '--format', 'json']);
     assert.equal(check.options.env.CURSOR_API_KEY, authenticated ? 'cur-good-key' : 'cur-bad-key');
     // 로그인 세션이 남은 cursor-home 이 아니라 검증 전용 빈 HOME 에서 키만으로 판정한다.
-    assert.equal(check.options.env.HOME, path.join(rootDir, 'cursor-home', 'key-check'));
-    assert.equal(check.options.env.USERPROFILE, path.join(rootDir, 'cursor-home', 'key-check'));
-    assert.equal(check.options.env.CURSOR_CONFIG_DIR, path.join(rootDir, 'cursor-home', 'key-check'));
+    assert.ok(check.options.env.HOME.startsWith(path.join(rootDir, 'cursor-key-check-')));
+    assert.equal(check.options.env.USERPROFILE, check.options.env.HOME);
+    assert.equal(check.options.env.CURSOR_CONFIG_DIR, check.options.env.HOME);
+    assert.equal(existsSync(check.options.env.HOME), false, 'the one-shot check home is removed');
 
     await fs.rm(rootDir, { recursive: true, force: true });
   }
@@ -2032,22 +2060,28 @@ test('cursor key checks replace every inherited profile path with the isolated h
   };
   const secretStore = createMemorySecretStore();
   const manager = await createCliSetupManager({
-    rootDir, spawnProcess, secretStore, homeDir: path.join(rootDir, 'no-home'),
+    rootDir,
+    spawnProcess,
+    secretStore,
+    platform: 'linux',
+    homeDir: path.join(rootDir, 'no-home'),
     baseEnv: { PATH: '/usr/bin', CURSOR_CONFIG_DIR: path.join(rootDir, 'operator-config') },
   }).init();
 
   await manager.authenticate('cursor', 'api-key', 'cur-good-key');
 
   const check = calls.find((call) => call.argv[0] === 'status');
-  assert.equal(check.options.env.HOME, path.join(rootDir, 'cursor-home', 'key-check'));
-  assert.equal(check.options.env.USERPROFILE, path.join(rootDir, 'cursor-home', 'key-check'));
-  assert.equal(check.options.env.CURSOR_CONFIG_DIR, path.join(rootDir, 'cursor-home', 'key-check'));
+  assert.ok(check.options.env.HOME.startsWith(path.join(rootDir, 'cursor-key-check-')));
+  assert.equal(check.options.env.USERPROFILE, check.options.env.HOME);
+  assert.equal(check.options.env.CURSOR_CONFIG_DIR, check.options.env.HOME);
+  assert.equal(existsSync(check.options.env.HOME), false, 'the one-shot check home is removed');
 
   await fs.rm(rootDir, { recursive: true, force: true });
 });
 
-test('Windows Cursor key checks cannot reuse an OAuth session from the real profile', async () => {
+test('Windows Cursor key checks cannot reuse an OAuth session from the real profile', async (t) => {
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-cursor-win-key-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
   const realProfile = path.join(rootDir, 'real-profile');
   let check;
   const manager = await createCliSetupManager({
@@ -2075,12 +2109,197 @@ test('Windows Cursor key checks cannot reuse an OAuth session from the real prof
     manager.authenticate('cursor', 'api-key', 'cur-invalid-key'),
     { code: 'AGENT_KEY_INVALID' },
   );
-  const isolated = path.join(manager.cursorHomeDir, 'key-check');
+  const isolated = check.options.env.HOME;
+  assert.ok(isolated.startsWith(path.join(rootDir, 'cursor-key-check-')));
   assert.equal(check.options.env.HOME, isolated);
   assert.equal(check.options.env.USERPROFILE, isolated);
   assert.equal(check.options.env.CURSOR_CONFIG_DIR, isolated);
+  assert.equal(existsSync(isolated), false, 'the one-shot check home is removed');
+});
 
-  await fs.rm(rootDir, { recursive: true, force: true });
+test('Cursor key checks never reuse state written by an earlier validation', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-cursor-key-fresh-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const checkHomes = [];
+  const spawnProcess = (_command, argv, options) => {
+    const proc = new FakeProcess();
+    queueMicrotask(() => {
+      void (async () => {
+        if (argv[0] === 'status') {
+          const marker = path.join(options.env.HOME, 'stale-oauth-state');
+          const inheritedState = existsSync(marker);
+          checkHomes.push(options.env.HOME);
+          await fs.writeFile(marker, 'state written by the CLI');
+          proc.stdout.emit('data', `${JSON.stringify({
+            isAuthenticated: options.env.CURSOR_API_KEY === 'cur-good-key' || inheritedState,
+          })}\n`);
+        }
+        proc.emit('close', 0, null);
+      })().catch((error) => proc.emit('error', error));
+    });
+    return proc;
+  };
+  const secretStore = createMemorySecretStore();
+  const manager = await createCliSetupManager({
+    rootDir,
+    spawnProcess,
+    secretStore,
+    platform: 'win32',
+    baseEnv: { PATH: 'C:\\Windows\\System32', USERPROFILE: path.join(rootDir, 'real-profile') },
+    homeDir: path.join(rootDir, 'real-profile'),
+  }).init();
+
+  await manager.authenticate('cursor', 'api-key', 'cur-good-key');
+  await assert.rejects(
+    manager.authenticate('cursor', 'api-key', 'cur-bad-key'),
+    { code: 'AGENT_KEY_INVALID' },
+  );
+
+  assert.equal(checkHomes.length, 2);
+  assert.notEqual(checkHomes[0], checkHomes[1]);
+  assert.ok(checkHomes.every((home) => home.startsWith(path.join(rootDir, 'cursor-key-check-'))));
+  assert.ok(checkHomes.every((home) => !existsSync(home)), 'every one-shot check home is removed');
+  assert.equal(await secretStore.get('rhwp.cursor.api-key'), 'cur-good-key');
+});
+
+test('an uncertain Cursor key-check cleanup retains its home and blocks key persistence', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-cursor-key-uncertain-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const checkHomes = [];
+  const secretStore = createMemorySecretStore();
+  const manager = await createCliSetupManager({
+    rootDir,
+    secretStore,
+    platform: 'linux',
+    baseEnv: { PATH: '/usr/bin' },
+    homeDir: path.join(rootDir, 'real-profile'),
+    terminateProcessTreeImpl: async (proc) => {
+      proc.exitCode = 1;
+      proc.emit('exit', 1, null);
+      proc.emit('close', 1, null);
+      return false;
+    },
+    spawnProcess(_command, argv, options) {
+      const proc = new FakeProcess();
+      if (argv[0] === 'status') checkHomes.push(options.env.HOME);
+      queueMicrotask(() => proc.stdout.emit('data', Buffer.alloc(256 * 1024, 0x78)));
+      return proc;
+    },
+  }).init();
+
+  await assert.rejects(
+    manager.authenticate('cursor', 'api-key', 'cur-must-not-persist'),
+    (error) => {
+      assert.equal(error.code, 'AGENT_SETUP_OUTPUT_TOO_LARGE');
+      assert.equal(error.processCleanupUncertain, true);
+      return true;
+    },
+  );
+  assert.equal(checkHomes.length, 1);
+  assert.equal(existsSync(checkHomes[0]), true, 'a possibly live child may still use this home');
+  assert.equal(await secretStore.get('rhwp.cursor.api-key'), null);
+
+  await assert.rejects(
+    manager.authenticate('cursor', 'api-key', 'cur-retry-must-not-persist'),
+    { code: 'AGENT_SETUP_CLEANUP_PENDING' },
+  );
+  assert.equal(checkHomes.length, 1, 'a retry must not spawn while cleanup is uncertain');
+  assert.equal(await secretStore.get('rhwp.cursor.api-key'), null);
+});
+
+test('Cursor key checks fail closed when their isolated home cannot be created', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-cursor-key-create-fail-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const secretStore = createMemorySecretStore();
+  let keyCheckSpawned = false;
+  const manager = await createCliSetupManager({
+    rootDir,
+    secretStore,
+    platform: 'linux',
+    createCursorKeyCheckHome: async () => {
+      throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+    },
+    spawnProcess(_command, argv) {
+      if (argv[0] === 'status') keyCheckSpawned = true;
+      const proc = new FakeProcess();
+      queueMicrotask(() => proc.emit('close', 0, null));
+      return proc;
+    },
+  }).init();
+
+  await assert.rejects(
+    manager.authenticate('cursor', 'api-key', 'cur-must-not-persist'),
+    { code: 'AGENT_KEY_CHECK_ISOLATION_FAILED' },
+  );
+  assert.equal(keyCheckSpawned, false);
+  assert.equal(await secretStore.get('rhwp.cursor.api-key'), null);
+});
+
+test('Cursor key checks fail closed when their isolated home cannot be removed', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-cursor-key-remove-fail-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const secretStore = createMemorySecretStore();
+  let removeOptions = null;
+  const manager = await createCliSetupManager({
+    rootDir,
+    secretStore,
+    platform: 'win32',
+    baseEnv: { PATH: 'C:\\Windows\\System32', USERPROFILE: path.join(rootDir, 'real-profile') },
+    removeCursorKeyCheckHome: async (_home, options) => {
+      removeOptions = options;
+      throw Object.assign(new Error('profile is locked'), { code: 'EBUSY' });
+    },
+    spawnProcess(_command, _argv, options) {
+      const proc = new FakeProcess();
+      queueMicrotask(() => {
+        proc.stdout.emit('data', '{"isAuthenticated":true}\n');
+        proc.emit('close', 0, null);
+      });
+      return proc;
+    },
+  }).init();
+
+  await assert.rejects(
+    manager.authenticate('cursor', 'api-key', 'cur-must-not-persist'),
+    { code: 'AGENT_KEY_CHECK_CLEANUP_FAILED' },
+  );
+  assert.deepEqual(removeOptions, {
+    recursive: true,
+    force: true,
+    maxRetries: 3,
+    retryDelay: 100,
+  });
+  assert.equal(await secretStore.get('rhwp.cursor.api-key'), null);
+});
+
+test('cancelling a Cursor API-key check cannot persist the pending key', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-cursor-key-cancel-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const secretStore = createMemorySecretStore();
+  let checkProcess = null;
+  let checkHome = null;
+  const manager = await createCliSetupManager({
+    rootDir,
+    secretStore,
+    platform: 'linux',
+    spawnProcess(_command, argv, options) {
+      const proc = new FakeProcess();
+      if (argv[0] === 'status') {
+        checkProcess = proc;
+        checkHome = options.env.HOME;
+      } else {
+        queueMicrotask(() => proc.emit('close', 0, null));
+      }
+      return proc;
+    },
+  }).init();
+
+  const authentication = manager.authenticate('cursor', 'api-key', 'cur-cancelled');
+  await waitFor(() => checkProcess !== null);
+  assert.equal(await manager.cancel('cursor'), true);
+  await assert.rejects(authentication, { code: 'AGENT_AUTH_CANCELLED' });
+  assert.equal(await secretStore.get('rhwp.cursor.api-key'), null);
+  assert.equal(existsSync(checkHome), false, 'the confirmed-stopped process no longer needs its home');
 });
 
 test('a successful Cursor login refetches the model list instead of serving the pre-login cache', async () => {
@@ -2138,7 +2357,11 @@ test('cursor self-update is skipped while a session may start', async () => {
     return proc;
   };
   const manager = await createCliSetupManager({
-    rootDir, spawnProcess, baseEnv: { PATH: '/usr/bin' }, homeDir: path.join(rootDir, 'no-home'),
+    rootDir,
+    spawnProcess,
+    platform: 'linux',
+    baseEnv: { PATH: '/usr/bin' },
+    homeDir: path.join(rootDir, 'no-home'),
   }).init();
 
   const busy = await manager.automaticUpdate('cursor', { canActivate: () => false });

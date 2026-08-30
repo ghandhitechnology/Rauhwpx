@@ -1902,39 +1902,39 @@ class _BoundedPipeReader(threading.Thread):
 
 def _terminate_rhwp_tree(process: subprocess.Popen[bytes]) -> bool:
     if os.name == "nt":
-        taskkill_succeeded = False
-        for force in (False, True):
-            if process.poll() is not None:
-                break
-            command = ["taskkill.exe", "/PID", str(process.pid), "/T"]
-            if force:
-                command.append("/F")
+        if process.poll() is not None:
+            return True
+        # taskkill without /F does not reliably stop console processes. In
+        # particular, a Python or rhwp child can keep running until its natural
+        # exit while this helper waits the full cleanup bound. We arrive here
+        # only after a timeout or output-limit violation, so terminate the
+        # already-owned live tree in one forced operation.
+        command = ["taskkill.exe", "/PID", str(process.pid), "/T", "/F"]
+        try:
+            killer = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                shell=False,
+            )
+            killer.wait(timeout=RHWP_COMMAND_CLEANUP_SECONDS)
+        except subprocess.TimeoutExpired:
             try:
-                killer = subprocess.Popen(
-                    command,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    shell=False,
-                )
+                killer.kill()
                 killer.wait(timeout=RHWP_COMMAND_CLEANUP_SECONDS)
-                taskkill_succeeded = taskkill_succeeded or killer.returncode == 0
-            except subprocess.TimeoutExpired:
-                try:
-                    killer.kill()
-                    killer.wait(timeout=RHWP_COMMAND_CLEANUP_SECONDS)
-                except (OSError, subprocess.TimeoutExpired):
-                    pass
-                continue
-            except OSError:
-                continue
-            try:
-                process.wait(timeout=RHWP_COMMAND_CLEANUP_SECONDS)
-            except subprocess.TimeoutExpired:
-                continue
-            if taskkill_succeeded:
-                return True
-        return taskkill_succeeded and process.poll() is not None
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            return False
+        except OSError:
+            return False
+        if killer.returncode != 0:
+            return False
+        try:
+            process.wait(timeout=RHWP_COMMAND_CLEANUP_SECONDS)
+        except subprocess.TimeoutExpired:
+            return False
+        return True
 
     # Keep rhwp inside the Python helper's hub-owned POSIX process group. If
     # the outer runner times out or this trusted binary ever leaves a child,

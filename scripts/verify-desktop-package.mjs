@@ -2,6 +2,8 @@ import { existsSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { listPackage } from '@electron/asar';
 
+import { normalizeArchivePath } from './desktop-package-paths.mjs';
+
 const releaseDir = resolve(process.argv[2] ?? 'release');
 const resourcesDir = process.platform === 'darwin'
   ? join(releaseDir, 'mac-arm64', 'Rauhwpx.app', 'Contents', 'Resources')
@@ -38,7 +40,11 @@ for (const path of forbidden) {
   if (existsSync(path)) throw new Error(`Development-only file was packaged: ${path}`);
 }
 
-const archivedFiles = listPackage(archive);
+// @electron/asar builds listing entries with the host path implementation:
+// `/desktop/main.mjs` on POSIX and `\desktop\main.mjs` on Windows. Compare a
+// canonical archive namespace so the same package contract is enforced on
+// both builders.
+const archivedFiles = listPackage(archive).map(normalizeArchivePath);
 const requiredArchiveFiles = [
   '/desktop/main.mjs',
   '/rhwp/rhwp-studio/dist/index.html',

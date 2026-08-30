@@ -221,7 +221,18 @@ export function defaultCursorConfigDir(
  * @property {string} [userCode] 기기 인증 코드 — URL 과 함께 카드에 붙는다.
  */
 
-/** App-managed CLI installers (Codex/Claude/Grok/Cursor) plus their local authentication state. */
+/**
+ * App-managed CLI installers (Codex/Claude/Grok/Cursor) plus their local authentication state.
+ *
+ * @param {{ rootDir?: string, spawnProcess?: typeof spawn, npmCommand?: string | null,
+ *           nodeCommand?: string, platform?: NodeJS.Platform, baseEnv?: NodeJS.ProcessEnv,
+ *           homeDir?: string, fetchImpl?: typeof fetch, secretStore?: object | null,
+ *           prepareOAuthCredential?: typeof prepareStagedOAuthCredential,
+ *           replaceConfigFile?: typeof replaceFileAtomically,
+ *           terminateProcessTreeImpl?: typeof terminateProcessTree,
+ *           createCursorKeyCheckHome?: typeof fs.mkdtemp,
+ *           removeCursorKeyCheckHome?: typeof fs.rm }} [deps]
+ */
 export function createCliSetupManager({
   rootDir = defaultCliSetupRoot(),
   spawnProcess = spawn,
@@ -233,6 +244,10 @@ export function createCliSetupManager({
   fetchImpl = globalThis.fetch,
   secretStore = null,
   prepareOAuthCredential = prepareStagedOAuthCredential,
+  replaceConfigFile = replaceFileAtomically,
+  terminateProcessTreeImpl = terminateProcessTree,
+  createCursorKeyCheckHome = (prefix) => fs.mkdtemp(prefix),
+  removeCursorKeyCheckHome = (home, options) => fs.rm(home, options),
 } = {}) {
   const platformPath = platform === 'win32' ? path.win32 : path;
   const prefixDir = path.join(rootDir, 'prefix');
@@ -258,9 +273,12 @@ export function createCliSetupManager({
   const managedCursorBinFile = platform === 'win32' ? null : cursorBinFile;
   /** 세션 시딩용 영속 `.cursor` 디렉터리 (auth 토큰 등이 산다). */
   const cursorSourceDir = defaultCursorConfigDir(baseEnv, platform, cursorHomeDir);
-  const cursorOAuthStagingDir = platformPath.join(rootDir, 'cursor-oauth-staging');
-  const codexOAuthStagingDir = platformPath.join(rootDir, 'codex-oauth-staging');
-  const claudeOAuthStagingDir = platformPath.join(rootDir, 'claude-oauth-staging');
+  // rootDir is always native to the host performing filesystem I/O. Tests may
+  // inject another target platform, but applying that platform's path dialect
+  // here would turn an absolute temp path into a relative filename on the host.
+  const cursorOAuthStagingDir = path.join(rootDir, 'cursor-oauth-staging');
+  const codexOAuthStagingDir = path.join(rootDir, 'codex-oauth-staging');
+  const claudeOAuthStagingDir = path.join(rootDir, 'claude-oauth-staging');
   const hostProfileHome = platform === 'win32'
     ? platformPath.resolve(baseEnv.USERPROFILE || homeDir)
     : platformPath.resolve(homeDir);
@@ -510,7 +528,7 @@ export function createCliSetupManager({
     await fs.mkdir(rootDir, { recursive: true });
     const temp = `${configPath}.tmp-${process.pid}-${Date.now()}`;
     await fs.writeFile(temp, `${JSON.stringify(config, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
-    await replaceFileAtomically(temp, configPath, { platform });
+    await replaceConfigFile(temp, configPath, { platform });
   }
 
   /** Cursor version probe with config writes redirected away from the live config. */
@@ -637,7 +655,7 @@ export function createCliSetupManager({
         const current = processCleanupPromises.get(proc);
         if (current) return current;
         const cleanup = terminateAndWaitForProcessTreeExit(proc, {
-          terminateProcess: terminateProcessTree,
+          terminateProcess: terminateProcessTreeImpl,
           terminateOptions: { platform, spawnProcess },
         }).catch(() => false);
         processCleanupPromises.set(proc, cleanup);
@@ -1018,15 +1036,25 @@ export function createCliSetupManager({
    */
   async function verifyCursorApiKey(value, { signal } = {}) {
     let result;
+    let checkHome;
+    try {
+      throwIfAuthCancelled(signal);
+      checkHome = await createCursorKeyCheckHome(path.join(rootDir, 'cursor-key-check-'));
+    } catch (error) {
+      if (error?.code === 'AGENT_AUTH_CANCELLED') throw error;
+      throw setupError(
+        'AGENT_KEY_CHECK_ISOLATION_FAILED',
+        'Cursor API 키를 격리해 확인할 수 없어요. 앱을 다시 시작한 뒤 재시도해 주세요.',
+      );
+    }
+    let retainCheckHome = false;
     try {
       throwIfAuthCancelled(signal);
       // 로그인 세션이 남은 cursorHomeDir 로 물으면 키와 무관하게 인증됨으로 나온다 —
-      // 검증 전용 빈 HOME 에서 키만으로 판정한다.
-      const checkHome = path.join(cursorHomeDir, 'key-check');
-      await fs.mkdir(checkHome, { recursive: true });
-      throwIfAuthCancelled(signal);
+      // 매번 새 검증 HOME 을 만들어 이전 상태 없이 키만으로 판정한다.
       result = await run(binPath('cursor'), ['status', '--format', 'json'], {
         timeoutMs: KEY_CHECK_TIMEOUT_MS,
+        operationKey: 'auth:cursor',
         env: cursorEnv({
           HOME: checkHome,
           USERPROFILE: checkHome,
@@ -1034,9 +1062,35 @@ export function createCliSetupManager({
           CURSOR_API_KEY: value,
         }),
       });
-    } catch {
+    } catch (error) {
+      if (error?.processCleanupUncertain === true) {
+        retainCheckHome = true;
+        throw error;
+      }
+      if (error?.code === 'AGENT_SETUP_CLEANUP_PENDING') throw error;
+      if (cancelledAuth.delete('cursor')) {
+        throw setupError('AGENT_AUTH_CANCELLED', '로그인을 취소했어요.');
+      }
       throwIfAuthCancelled(signal);
       return;
+    } finally {
+      if (checkHome && !retainCheckHome) {
+        try {
+          await removeCursorKeyCheckHome(checkHome, {
+            recursive: true,
+            force: true,
+            ...(platform === 'win32' ? { maxRetries: 3, retryDelay: 100 } : {}),
+          });
+        } catch {
+          throw setupError(
+            'AGENT_KEY_CHECK_CLEANUP_FAILED',
+            'Cursor API 키 확인용 임시 프로필을 정리하지 못했어요. 앱을 다시 시작한 뒤 재시도해 주세요.',
+          );
+        }
+      }
+    }
+    if (cancelledAuth.delete('cursor')) {
+      throw setupError('AGENT_AUTH_CANCELLED', '로그인을 취소했어요.');
     }
     throwIfAuthCancelled(signal);
     const parsed = parseJsonOutput(result.stdout);
@@ -1571,7 +1625,7 @@ export function createCliSetupManager({
         let cleanup = processCleanupPromises.get(proc);
         if (!cleanup) {
           cleanup = terminateAndWaitForProcessTreeExit(proc, {
-            terminateProcess: terminateProcessTree,
+            terminateProcess: terminateProcessTreeImpl,
             terminateOptions: { platform, spawnProcess },
           }).catch(() => false);
           processCleanupPromises.set(proc, cleanup);

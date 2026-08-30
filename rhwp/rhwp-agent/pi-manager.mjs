@@ -208,7 +208,7 @@ export function defaultRauRoot(env = process.env, platform = process.platform, h
  *           npmCommand?: string, nodeCommand?: string, packageSpec?: string, platform?: string,
  *           baseEnv?: NodeJS.ProcessEnv, secretStore?: object, secretId?: string,
  *           lockedModels?: readonly object[] | null, skipLegacyKey?: boolean,
- *           tarballMaxBytes?: number }} [deps]
+ *           tarballMaxBytes?: number, replaceFile?: typeof replaceFileAtomically }} [deps]
  */
 export function createPiManager({
   rootDir = defaultPiRoot(),
@@ -227,6 +227,7 @@ export function createPiManager({
   lockedModels = null,
   skipLegacyKey = false,
   tarballMaxBytes = PI_TARBALL_MAX_BYTES,
+  replaceFile = replaceFileAtomically,
 } = {}) {
   const tarballLimitBytes = Number.isSafeInteger(tarballMaxBytes) && tarballMaxBytes > 0
     ? Math.min(tarballMaxBytes, PI_TARBALL_MAX_BYTES)
@@ -285,7 +286,7 @@ export function createPiManager({
     await fs.mkdir(path.dirname(file), { recursive: true });
     const temp = `${file}.tmp-${process.pid}-${now()}-${(tempSeq += 1)}`;
     await fs.writeFile(temp, text, { encoding: 'utf8', mode });
-    await replaceFileAtomically(temp, file, { platform });
+    await replaceFile(temp, file, { platform });
   }
 
   function serialized(task) {
