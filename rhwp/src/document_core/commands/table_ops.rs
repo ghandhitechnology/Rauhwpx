@@ -74,6 +74,15 @@ impl<'a> From<&'a Table> for SemanticTableProperties<'a> {
     }
 }
 
+/// 표 CTRL_HEADER raw 의 한 필드를 제자리에 덧쓴다. raw 를 늘리지 않는다.
+/// 빈 raw 를 0으로 채우면 serialize_table / HWPX→HWP 어댑터가 12바이트 raw 를
+/// 정본으로 쓰고 width/height/여백이 저장에서 사라진다.
+fn patch_raw_ctrl_field(raw: &mut [u8], range: std::ops::Range<usize>, bytes: &[u8]) {
+    if raw.len() >= range.end {
+        raw[range].copy_from_slice(bytes);
+    }
+}
+
 impl DocumentCore {
     pub(crate) fn get_table_mut(
         &mut self,
@@ -1996,42 +2005,36 @@ impl DocumentCore {
     ) -> Result<String, HwpError> {
         let table = self.get_table_mut(section_idx, parent_para_idx, control_idx)?;
 
-        // CommonObjAttr 바이트 레이아웃: flags/v_offset/h_offset
-        while table.raw_ctrl_data.len() < common_obj_offsets::H_OFFSET.end {
-            table.raw_ctrl_data.push(0);
-        }
-
         let is_treat_as_char = (table.attr & 0x01) != 0;
+
+        // 현재 오프셋은 common 에서 읽는다. raw 가 빈 HWPX 표를 다루려고
+        // 0으로 채우면 serialize_table / HWPX→HWP 어댑터가 12바이트 raw 를
+        // 정본으로 쓰고 width/height/여백이 저장에서 사라진다.
+        // 쓰기는 common 에 하고, raw 에는 길이가 허락할 때만 덧쓴다.
 
         // vertical_offset: CommonObjAttr::V_OFFSET (i32 LE)
         let mut new_v = if delta_v != 0 {
-            let cur_v = i32::from_le_bytes(
-                table.raw_ctrl_data[common_obj_offsets::V_OFFSET]
-                    .try_into()
-                    .unwrap(),
-            );
-            let nv = cur_v.wrapping_add(delta_v);
-            table.raw_ctrl_data[common_obj_offsets::V_OFFSET].copy_from_slice(&nv.to_le_bytes());
+            let nv = (table.common.vertical_offset as i32).wrapping_add(delta_v);
             table.common.vertical_offset = nv as u32;
+            patch_raw_ctrl_field(
+                &mut table.raw_ctrl_data,
+                common_obj_offsets::V_OFFSET,
+                &nv.to_le_bytes(),
+            );
             nv
         } else {
-            i32::from_le_bytes(
-                table.raw_ctrl_data[common_obj_offsets::V_OFFSET]
-                    .try_into()
-                    .unwrap(),
-            )
+            table.common.vertical_offset as i32
         };
 
         // horizontal_offset: CommonObjAttr::H_OFFSET (i32 LE)
         if delta_h != 0 {
-            let cur_h = i32::from_le_bytes(
-                table.raw_ctrl_data[common_obj_offsets::H_OFFSET]
-                    .try_into()
-                    .unwrap(),
-            );
-            let new_h = cur_h.wrapping_add(delta_h);
-            table.raw_ctrl_data[common_obj_offsets::H_OFFSET].copy_from_slice(&new_h.to_le_bytes());
+            let new_h = (table.common.horizontal_offset as i32).wrapping_add(delta_h);
             table.common.horizontal_offset = new_h as u32;
+            patch_raw_ctrl_field(
+                &mut table.raw_ctrl_data,
+                common_obj_offsets::H_OFFSET,
+                &new_h.to_le_bytes(),
+            );
         }
 
         // treat_as_char 표: 문단 경계를 넘으면 문단 이동 (다중 경계 루프)
@@ -2073,9 +2076,12 @@ impl DocumentCore {
             // 최종 v_offset 갱신
             if result_ppi != parent_para_idx {
                 let tbl = self.get_table_mut(section_idx, result_ppi, control_idx)?;
-                tbl.raw_ctrl_data[common_obj_offsets::V_OFFSET]
-                    .copy_from_slice(&new_v.to_le_bytes());
                 tbl.common.vertical_offset = new_v as u32;
+                patch_raw_ctrl_field(
+                    &mut tbl.raw_ctrl_data,
+                    common_obj_offsets::V_OFFSET,
+                    &new_v.to_le_bytes(),
+                );
             }
         }
 
