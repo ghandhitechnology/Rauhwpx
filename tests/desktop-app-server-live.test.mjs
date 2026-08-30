@@ -179,11 +179,14 @@ test('the app-provided path pairs against a real control plane and closes bootst
   const live = await liveHarness(t);
   await live.coordinator.start();
   assert.equal(await live.client.isPaired(), false);
-  await live.coordinator.saveSandboxCredential({ provider: 'codex', apiKey: 'sk-live' });
-
-  const ready = await live.coordinator.spawnAppServer({ deviceName: 'Rauhwpx integration' });
+  const ready = await live.coordinator.spawnAppServer({
+    deviceName: 'Rauhwpx integration',
+    selectedProvider: 'codex',
+    credentials: { provider: 'codex', apiKey: 'sk-live' },
+  });
   const plane = live.plane();
   assert.equal(live.createVariables().RAUHWpx_PORT, '7740', 'the image listens where the domain points');
+  assert.equal(live.createVariables().RAUHWpx_PROVIDER_KEY_CODEX, 'sk-live');
   assert.equal(plane.config.runner, 'local', 'the app sandbox runs sessions inside its own container');
   assert.match(plane.started.serverPublicKey, /^ed25519:[A-Za-z0-9_-]{59}$/);
 
@@ -235,8 +238,10 @@ test('the app-provided path pairs against a real control plane and closes bootst
 test('a sandbox that never answers is deleted and leaves the desktop unconfigured', async (t) => {
   const live = await liveHarness(t, { boot: false });
   await live.coordinator.start();
-  await live.coordinator.saveSandboxCredential({ provider: 'codex', apiKey: 'sk-live' });
-  await assert.rejects(live.coordinator.spawnAppServer(), { code: 'SANDBOX_UNHEALTHY' });
+  await assert.rejects(live.coordinator.spawnAppServer({
+    selectedProvider: 'codex',
+    credentials: { provider: 'codex', apiKey: 'sk-live' },
+  }), { code: 'SANDBOX_UNHEALTHY' });
   assert.equal(live.names().at(-1), 'RauhwpxServiceDelete', 'the paid service is removed');
   const snapshot = await live.coordinator.snapshot();
   assert.equal(snapshot.profile.kind, 'unconfigured');

@@ -37,7 +37,6 @@ export interface CloudDesktopApi {
   }) => Promise<unknown>;
   cloudPair?: (payload: { code: string; profile?: CloudProfileDraft }) => Promise<unknown>;
   cloudSelectServerMode?: (payload: { mode: CloudServerMode }) => Promise<unknown>;
-  cloudSaveSandboxCredential?: (payload: { provider: string; apiKey: string }) => Promise<unknown>;
   cloudSpawnSandbox?: (payload: { providerId?: string; provider?: string; apiKey?: string }) => Promise<unknown>;
   cloudSandboxStatus?: () => Promise<unknown>;
   cloudTeardownSandbox?: (payload: { force?: boolean }) => Promise<unknown>;
@@ -63,7 +62,6 @@ export interface CloudController {
   provision(installChannel?: 'stable' | 'prerelease', profile?: CloudProfileDraft): Promise<CloudSnapshot>;
   pair(code: string, profile?: CloudProfileDraft): Promise<CloudSnapshot>;
   selectServerMode(mode: CloudServerMode): Promise<CloudSnapshot>;
-  saveSandboxCredential(payload: { provider: string; apiKey: string }): Promise<CloudSnapshot>;
   spawnSandbox(providerId?: string, credential?: { provider: string; apiKey?: string }): Promise<CloudSnapshot>;
   sandboxStatus(): Promise<CloudSnapshot>;
   teardownSandbox(options?: { force?: boolean }): Promise<CloudSnapshot>;
@@ -643,7 +641,6 @@ export function createCloudController(
     }),
     pair: (code, profile) => call('cloudPair', { code, ...(profile ? { profile } : {}) }),
     selectServerMode: (mode) => call('cloudSelectServerMode', { mode }),
-    saveSandboxCredential: (payload) => call('cloudSaveSandboxCredential', payload),
     spawnSandbox: (providerId, credential) => call('cloudSpawnSandbox', {
       ...(providerId ? { providerId } : {}),
       ...(credential?.provider ? { provider: credential.provider } : {}),

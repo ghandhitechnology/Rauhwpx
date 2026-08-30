@@ -148,7 +148,7 @@ export interface RhwpDesktopApi {
   }) => Promise<unknown>;
   cloudPair?: (payload: { code: string; profile?: CloudProfileDraft }) => Promise<unknown>;
   cloudSelectServerMode?: (payload: { mode: CloudServerMode }) => Promise<unknown>;
-  cloudSpawnSandbox?: (payload: { providerId?: string }) => Promise<unknown>;
+  cloudSpawnSandbox?: (payload: { providerId?: string; provider?: string; apiKey?: string }) => Promise<unknown>;
   cloudSandboxStatus?: () => Promise<unknown>;
   cloudTeardownSandbox?: (payload: { force?: boolean }) => Promise<unknown>;
   cloudTransfer?: (payload: CloudTransferRequest) => Promise<unknown>;
