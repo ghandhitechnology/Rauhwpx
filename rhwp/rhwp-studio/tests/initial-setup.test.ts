@@ -186,6 +186,20 @@ test('사이드바가 첫 실행 마법사를 설정 모달·보정 창에 붙�
   assert.doesNotMatch(css, /\d+ms ease(?:;|,)/);
 });
 
+test('계정 로그인 신호를 받으면 첫 실행 버튼에 완료 상태를 계속 보여 준다', () => {
+  const setup = readSource('../src/ui/initial-setup/initial-setup.ts');
+  const css = readSource('../src/ui/initial-setup/initial-setup.css');
+
+  assert.match(setup, /const signedIn = account\?\.signedIn === true/);
+  assert.match(setup, /accountLogin\.textContent = [\s\S]*\? '로그인됨'/);
+  assert.match(setup, /accountLogin\.setAttribute\('aria-label', signedIn\s*\? '로그인됨\. 다음 단계로 계속'/);
+  assert.match(
+    setup,
+    /event\.type === 'rau-account-status'[\s\S]*accountAuthPending = false;[\s\S]*if \(stage === 'account'\) renderAccount\(\)/,
+  );
+  assert.match(css, /\.rhwp-setup-account\[data-signed-in='true'\] \.rhwp-setup-primary \{[\s\S]*background: #b7c9ad/);
+});
+
 test('첫 실행 프로바이더 카드는 1280×800 화면에 두 줄로 들어간다', () => {
   const css = readSource('../src/ui/initial-setup/initial-setup.css');
 

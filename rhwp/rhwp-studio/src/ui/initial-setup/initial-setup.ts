@@ -226,8 +226,12 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
     accountLogin.textContent = accountBusy || accountAuthPending
       ? '로그인 확인 중…'
       : signedIn
-        ? '계속'
+        ? '로그인됨'
         : '계정으로 로그인';
+    accountLogin.setAttribute('aria-label', signedIn
+      ? '로그인됨. 다음 단계로 계속'
+      : accountLogin.textContent);
+    accountLogin.title = signedIn ? '다음 단계로 계속' : '';
     accountState.textContent = accountMessage || (signedIn
       ? `${account?.account?.email ?? '계정'}으로 로그인했습니다. Cloud 사용량은 설정에서 확인할 수 있습니다.`
       : loginAccount
