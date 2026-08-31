@@ -82,11 +82,11 @@ jobs:
           node --check desktop/session-manager.mjs
           node --check rhwp/rhwp-agent/server.mjs
 
+      - name: Test agent hub and process lifecycle
+        run: node --test --test-concurrency=1 rhwp/rhwp-agent/tests/*.test.mjs
+
       - name: Test hosted Rau authorization service
         run: npm --prefix rhwp/rau-credits test
 
       - name: Test Studio session persistence and desktop contracts
         run: npm --prefix rhwp/rhwp-studio test
-
-      - name: Test agent hub and process lifecycle
-        run: node --test --test-concurrency=1 rhwp/rhwp-agent/tests/*.test.mjs
