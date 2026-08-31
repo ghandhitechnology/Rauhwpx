@@ -366,11 +366,12 @@ export function createRaucloudBrokerClient({
 
   return {
     baseUrl: normalizedBaseUrl,
-    async status({ runId: id = null, signal = null } = {}) {
+    async status({ runId: id = null, signal = null, timeoutMs } = {}) {
       const currentDevice = await device();
       return request('/v1/cloud/status', {
         query: { deviceId: currentDevice.id, ...(id ? { runId: id } : {}) },
         signal,
+        ...(timeoutMs == null ? {} : { timeoutMs }),
       });
     },
     async createRun({ deviceName, provider = 'codex', signal = null, idempotencyKey = randomUUID() } = {}) {
@@ -402,7 +403,7 @@ export function createRaucloudBrokerClient({
       signal = null, reason = 'force-quit', idempotencyKey = randomUUID(),
     } = {}) {
       return request('/v1/cloud/force-quit', {
-        method: 'POST', signal, idempotencyKey,
+        method: 'POST', signal, idempotencyKey, timeoutMs: 8_000,
         body: {
           deviceId: (await device()).id,
           reason,
@@ -411,12 +412,13 @@ export function createRaucloudBrokerClient({
     },
     async stopRun(id, {
       signal = null, reason = 'user-request', finishCurrentTurn = false, checkpoint = true,
-      idempotencyKey = randomUUID(),
+      idempotencyKey = randomUUID(), timeoutMs,
     } = {}) {
       const safeId = encodeURIComponent(trimmed(id, 128));
       if (!safeId) throw new AppServerError('Raucloud run id is invalid', { code: 'RAUCLOUD_RUN_INVALID', retryable: false });
       return request(`/v1/cloud/runs/${safeId}/stop`, {
         method: 'POST', signal, idempotencyKey,
+        ...(timeoutMs == null ? {} : { timeoutMs }),
         body: {
           deviceId: (await device()).id,
           reason,
@@ -570,8 +572,26 @@ export function createRaucloudBrokerProvider(options = {}) {
       };
     },
     async forceQuitAccount({ signal = null } = {}) {
-      const payload = await client.forceQuitAccount({ signal, reason: 'force-quit' });
-      return { ...normalizedStatus(payload, 'idle'), account: accountSnapshotFrom(payload) };
+      try {
+        const payload = await client.forceQuitAccount({ signal, reason: 'force-quit' });
+        return { ...normalizedStatus(payload, 'idle'), account: accountSnapshotFrom(payload) };
+      } catch (error) {
+        const status = await client.status({ signal, timeoutMs: 8_000 }).catch(() => null);
+        const knownRunId = trimmed(
+          status?.activeRun?.id ?? status?.run?.id ?? status?.worker?.runId ?? status?.worker?.id,
+          160,
+        );
+        if (knownRunId) {
+          const stopped = await client.stopRun(knownRunId, {
+            signal, reason: 'force-quit', finishCurrentTurn: false, checkpoint: false, timeoutMs: 8_000,
+          }).catch(() => null);
+          if (stopped) {
+            return { ...normalizedStatus(stopped, 'idle'), account: accountSnapshotFrom(stopped) };
+          }
+        }
+        if (status) return { ...normalizedStatus(status, 'idle'), account: accountSnapshotFrom(status) };
+        throw error;
+      }
     },
     async teardown(sandbox, { signal = null } = {}) {
       const payload = await client.stopRun(sandbox?.sandboxId, {

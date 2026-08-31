@@ -1466,19 +1466,31 @@ export class CloudCoordinator extends EventEmitter {
     this.#abortSessionWatchers();
     const provider = this.#managedAccountProvider();
     if (provider && typeof provider.forceQuitAccount === 'function') {
-      const result = await provider.forceQuitAccount();
-      if (result?.account) {
-        this.#accountSnapshot = result.account;
-        this.#accountStatusAt = Date.now();
+      try {
+        const result = await provider.forceQuitAccount();
+        if (result?.account) {
+          this.#accountSnapshot = result.account;
+          this.#accountStatusAt = Date.now();
+        }
+      } catch (error) {
+        this.#emit({ type: 'force-quit-broker-failed', error: error.message });
       }
     }
-    await this.#endLiveCloudSessions();
+    await this.#endLiveCloudSessions({ timeoutMs: 4_000 });
+    await this.#abandonLiveHandoffs();
     const profile = await this.#client.loadProfile().catch(() => null);
     if (profile?.mode === 'app-hosted') {
       try {
         await this.#teardownAppServer({ force: true });
       } catch (error) {
         this.#emit({ type: 'force-quit-teardown-failed', error: error.message });
+        try {
+          await this.#changeProfile(() => this.#client.forgetProfile());
+          this.#raucloudStatus = null;
+          this.#setSandboxLifecycle('idle');
+        } catch (forgetError) {
+          this.#emit({ type: 'force-quit-forget-failed', error: forgetError.message });
+        }
       }
     }
     await this.#refreshAccountStatus({ force: true }).catch(() => {});
@@ -1513,13 +1525,12 @@ export class CloudCoordinator extends EventEmitter {
       .includes(error.code);
   }
 
-  async #endLiveCloudSessions() {
+  async #endLiveCloudSessions({ timeoutMs = 4_000 } = {}) {
     if (typeof this.#client.sessions !== 'function' || typeof this.#client.command !== 'function') return;
     let sessions = [];
     try {
-      sessions = await this.#client.sessions();
+      sessions = await this.#client.sessions({ timeoutMs });
     } catch (error) {
-      if (error?.code === 'PROFILE_CHANGED') throw error;
       this.#emit({ type: 'force-quit-sessions-failed', error: error.message });
       return;
     }
@@ -1536,10 +1547,31 @@ export class CloudCoordinator extends EventEmitter {
           'session.end',
           { expectedVersion: Number(session.stateVersion ?? session.version) || 1 },
           `force_quit_${sessionId.replace(/[^A-Za-z0-9_-]/g, '_')}`,
+          { timeoutMs },
         );
       } catch (error) {
-        if (error?.code === 'PROFILE_CHANGED') throw error;
         this.#emit({ type: 'force-quit-session-failed', sessionId, error: error.message });
+      }
+    }
+  }
+
+  async #abandonLiveHandoffs() {
+    this.#remoteSessions.clear();
+    if (typeof this.#store.list !== 'function' || typeof this.#store.transition !== 'function') return;
+    const records = await this.#store.list().catch(() => []);
+    for (const record of records) {
+      if (!record || record.resolvedAt) continue;
+      if (!['preparing', 'uploading', 'committing', 'queued', 'running', 'suspended'].includes(record.state)) {
+        continue;
+      }
+      try {
+        await this.#store.transition(record.id, 'cancelled', {
+          cancelRequested: false,
+          error: 'force-quit',
+        });
+        await this.#store.clearPayload?.(record.id)?.catch(() => {});
+      } catch (error) {
+        this.#emit({ type: 'force-quit-handoff-failed', handoffId: record.id, error: error.message });
       }
     }
   }

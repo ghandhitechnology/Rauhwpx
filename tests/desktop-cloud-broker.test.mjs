@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { AppServerError } from '../desktop/cloud-app-server.mjs';
 import {
   createRaucloudBrokerClient,
   createRaucloudBrokerProvider,
@@ -416,6 +417,59 @@ test('account force-quit ends leftover sessions and the account worker', async (
     payload: { expectedVersion: 4 },
   }]);
   await coordinator.stop();
+});
+
+test('account force-quit still unlocks when Raucloud cannot complete the request', async () => {
+  const provider = {
+    id: RAUCLOUD_PROVIDER_ID,
+    displayName: 'Raucloud',
+    configuration: () => ({ configured: true, missing: [] }),
+    spawn: async () => { throw new Error('not used'); },
+    status: async () => ({ lifecycle: 'idle' }),
+    teardown: async () => { throw new AppServerError('Raucloud could not complete the request'); },
+    accountStatus: async () => ({
+      signedIn: true, account: { id: 'user-1' }, quota: null,
+      raucloud: { kind: 'available' }, updatedAt: new Date().toISOString(),
+    }),
+    forceQuitAccount: async () => {
+      throw new AppServerError('Raucloud could not complete the request', {
+        code: 'RAUCLOUD_REQUEST_FAILED', retryable: false,
+      });
+    },
+  };
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadServerMode: async () => null,
+      loadProfile: async () => null,
+      sessions: async () => { throw new Error('worker unreachable'); },
+      command: async () => { throw new Error('worker unreachable'); },
+    },
+    store: { load: async () => [], list: async () => [], flush: async () => {} },
+    appServers: [provider],
+  });
+  await coordinator.start();
+  const snapshot = await coordinator.forceQuitAccountCloud();
+  assert.equal(snapshot.session.kind, 'idle');
+  await coordinator.stop();
+});
+
+test('Raucloud force-quit falls back to stop when the broker endpoint is missing', async () => {
+  const { client, calls } = broker({
+    'POST /v1/cloud/force-quit': json({ error: 'not found' }, 404),
+    'GET /v1/cloud/status': json({
+      activeRun: { id: 'run-1', status: 'active', ownerDeviceId: 'device-desktop-123' },
+    }),
+    'POST /v1/cloud/runs/run-1/stop': json({ run: { id: 'run-1', status: 'stopped' } }),
+  });
+  const provider = createRaucloudBrokerProvider({ client });
+  const result = await provider.forceQuitAccount();
+  assert.equal(result.lifecycle, 'idle');
+  assert.equal(result.status, 'stopped');
+  assert.deepEqual(calls.map((call) => call.key), [
+    'POST /v1/cloud/force-quit',
+    'GET /v1/cloud/status',
+    'POST /v1/cloud/runs/run-1/stop',
+  ]);
 });
 
 test('Raucloud keeps broker conflict and quota failures stable for the UI', async () => {
