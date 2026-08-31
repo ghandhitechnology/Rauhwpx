@@ -836,8 +836,14 @@
 
 .ag-agent-login-box[hidden],
 .ag-agent-login-url-row[hidden],
-.ag-agent-login-code[hidden] {
+.ag-agent-login-code[hidden],
+.ag-agent-login-url[hidden],
+.ag-agent-login-code-value[hidden] {
   display: none;
+}
+
+.ag-account-login-box {
+  margin-top: 10px;
 }
 
 .ag-agent-login-url-row {

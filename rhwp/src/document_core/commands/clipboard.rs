@@ -59,7 +59,7 @@ fn recompute_clipboard_control_mask(para: &Paragraph) -> u32 {
     mask
 }
 
-fn strip_structural_controls_for_text_clipboard(para: &mut Paragraph) {
+pub(super) fn strip_structural_controls_for_text_clipboard(para: &mut Paragraph) {
     let old_controls = std::mem::take(&mut para.controls);
     let old_records = std::mem::take(&mut para.ctrl_data_records);
     let mut index_map = vec![None; old_controls.len()];
@@ -92,7 +92,7 @@ fn strip_structural_controls_for_text_clipboard(para: &mut Paragraph) {
     }
 }
 
-fn text_to_split_logical_offset(para: &Paragraph, text_offset: usize) -> usize {
+pub(super) fn text_to_split_logical_offset(para: &Paragraph, text_offset: usize) -> usize {
     let control_positions = para.control_text_positions();
     if control_positions.is_empty() {
         return text_offset;
@@ -112,7 +112,7 @@ fn text_to_split_logical_offset(para: &Paragraph, text_offset: usize) -> usize {
     text_offset + before_count
 }
 
-fn clip_paragraph_text_range_for_clipboard(
+pub(super) fn clip_paragraph_text_range_for_clipboard(
     source: &Paragraph,
     start_char_offset: usize,
     end_char_offset: usize,

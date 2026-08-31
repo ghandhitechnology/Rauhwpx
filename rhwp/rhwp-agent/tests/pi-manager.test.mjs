@@ -385,10 +385,13 @@ test('install runs npm with a prefix, reports progress and syncs assets', async 
   assert.equal(settings.defaultProjectTrust, 'never');
   assert.equal(settings.enableSkillCommands, false);
   assert.equal(settings.enableInstallTelemetry, false);
-  assert.equal(settings.extensions.length, 1);
+  assert.equal(settings.extensions.length, 2);
   assert.equal(path.isAbsolute(settings.extensions[0]), true);
   assert.match(settings.extensions[0], /rhwp-agent[/\\]pi[/\\]extension[/\\]rhwp\.ts$/);
   assert.equal(settings.extensions[0], manager.extensionPath);
+  assert.equal(path.isAbsolute(settings.extensions[1]), true);
+  assert.match(settings.extensions[1], /rhwp-agent[/\\]pi[/\\]extension[/\\]subagents\.ts$/);
+  assert.equal(settings.extensions[1], manager.subagentExtensionPath);
 
   await fs.stat(path.join(rootDir, 'sessions'));
   const config = await readJson(path.join(rootDir, 'config.json'));
@@ -1338,14 +1341,14 @@ test('syncAssets rewrites settings.json without an install', async () => {
 
   await manager.syncAssets();
   const settings = await readJson(path.join(rootDir, 'agent', 'settings.json'));
-  assert.deepEqual(settings.extensions, [manager.extensionPath]);
+  assert.deepEqual(settings.extensions, [manager.extensionPath, manager.subagentExtensionPath]);
   assert.equal(spawns.length, 0);
 
   // 두 번 불러도 그대로 덮어쓴다.
   await manager.syncAssets();
   assert.deepEqual(
     (await readJson(path.join(rootDir, 'agent', 'settings.json'))).extensions,
-    [manager.extensionPath],
+    [manager.extensionPath, manager.subagentExtensionPath],
   );
 
   await fs.rm(rootDir, { recursive: true, force: true });

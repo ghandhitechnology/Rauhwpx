@@ -530,7 +530,9 @@ test('legacy cleanup marks an old unowned launch and removes it only after an up
   const marker = JSON.parse(await readFile(markerPath, 'utf8'));
   assert.equal(marker.launchId, stale);
   assert.equal(marker.observedUptimeSeconds, 10_000);
-  assert.equal((await stat(markerPath)).mode & 0o777, 0o600);
+  // Windows mode bits do not expose the file's DACL. Node reports regular
+  // writable files as 0666 there even when they were opened with mode 0600.
+  assert.equal((await stat(markerPath)).mode & 0o777, process.platform === 'win32' ? 0o666 : 0o600);
 
   assert.deepEqual(await removeLegacyLaunchDirectories(root, '', {
     now: () => now + 1_000,

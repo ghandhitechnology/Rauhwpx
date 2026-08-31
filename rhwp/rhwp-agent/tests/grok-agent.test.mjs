@@ -977,7 +977,13 @@ test('a clean exit without a result ends the turn quietly', (t) => {
 });
 
 test('a successful drained close without tree proof quarantines later Grok turns', async (t) => {
-  const { session, events, spawns } = startSession(t);
+  // Pin Windows so this always starts live terminal cleanup, then refuse to
+  // claim tree proof. A pid-less FakeProcess kill would otherwise look proven.
+  const { session, events, spawns } = startSession(t, {}, {
+    platform: 'win32',
+    terminateProcess: async () => null,
+    waitForExit: async () => true,
+  });
   session.sendUserMessage('first');
   spawns[0].proc.emitJson(
     INIT_LINE,

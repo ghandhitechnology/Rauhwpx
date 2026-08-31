@@ -29,6 +29,7 @@ import {
   waitForHub,
   waitForHubChildExit,
   waitForHubReadyLine,
+  writeHostStream,
   writePidFile,
 } from '../../../desktop/agent-hub.mjs';
 
@@ -415,6 +416,58 @@ test('ready-line waiter bounds an unterminated stdout line while waiting', async
   child.stdout.emit('data', `\n${HUB_READY_PREFIX}${JSON.stringify(ready)}\n`);
   assert.deepEqual(await pending, ready);
   assert.match(agentHubSource, /buffer = buffer\.slice\(-MAX_HUB_READY_LINE_BUFFER_CHARS\)/);
+});
+
+test('hub stdio forwarding writes normally and skips unusable host streams', () => {
+  const chunks: string[] = [];
+  const stream = Object.assign(new EventEmitter(), {
+    destroyed: false,
+    writableEnded: false,
+    writable: true,
+    write(chunk: string) { chunks.push(String(chunk)); },
+  });
+
+  assert.equal(writeHostStream(stream, 'ready\n'), true);
+  assert.deepEqual(chunks, ['ready\n']);
+
+  stream.destroyed = true;
+  assert.equal(writeHostStream(stream, 'ignored'), false);
+  assert.deepEqual(chunks, ['ready\n']);
+});
+
+test('hub stdio forwarding tolerates expected host-pipe closures', () => {
+  for (const code of ['EIO', 'EPIPE', 'ENOTCONN', 'ERR_STREAM_DESTROYED']) {
+    const stream = Object.assign(new EventEmitter(), {
+      destroyed: false,
+      writableEnded: false,
+      writable: true,
+      write() { throw Object.assign(new Error(code), { code }); },
+    });
+    assert.equal(writeHostStream(stream, 'chunk'), false);
+    assert.doesNotThrow(() => stream.emit('error', Object.assign(new Error(code), { code })));
+  }
+});
+
+test('hub stdio forwarding keeps unexpected failures observable', () => {
+  const warnings: unknown[][] = [];
+  const asyncFailure = Object.assign(new EventEmitter(), {
+    destroyed: false,
+    writableEnded: false,
+    writable: true,
+    write() {},
+  });
+  writeHostStream(asyncFailure, 'chunk', { log: { warn: (...args: unknown[]) => warnings.push(args) } });
+  asyncFailure.emit('error', Object.assign(new Error('unexpected async failure'), { code: 'EACCES' }));
+  assert.equal(warnings.length, 1);
+  assert.match(String(warnings[0]?.[0]), /host stdio stream error/);
+
+  const syncFailure = Object.assign(new EventEmitter(), {
+    destroyed: false,
+    writableEnded: false,
+    writable: true,
+    write() { throw Object.assign(new Error('unexpected sync failure'), { code: 'EACCES' }); },
+  });
+  assert.throws(() => writeHostStream(syncFailure, 'chunk'), /unexpected sync failure/);
 });
 
 test('ready-line waiter rejects a child that already exited', async () => {

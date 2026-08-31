@@ -18,6 +18,26 @@ function abortError() {
   return creditsError('RAU_LOGIN_CANCELLED', 'Rau 로그인을 취소했어요.');
 }
 
+function accountAuthorization(token) {
+  const value = typeof token === 'string' ? token.trim() : '';
+  if (!/^rau_account_v1_[A-Za-z0-9_-]{43}$/.test(value)) {
+    throw creditsError('ACCOUNT_SESSION_INVALID', '저장된 계정 세션을 확인할 수 없어요.');
+  }
+  return `Bearer ${value}`;
+}
+
+function ownedBackendPath(pathname) {
+  const value = typeof pathname === 'string' ? pathname.trim() : '';
+  if (!value.startsWith('/') || value.startsWith('//')) {
+    throw creditsError('ACCOUNT_BACKEND_PATH_INVALID', '계정 요청 주소를 확인할 수 없어요.');
+  }
+  const parsed = new URL(value, 'http://owned.local');
+  if (parsed.origin !== 'http://owned.local') {
+    throw creditsError('ACCOUNT_BACKEND_PATH_INVALID', '계정 요청 주소를 확인할 수 없어요.');
+  }
+  return `${parsed.pathname}${parsed.search}`;
+}
+
 async function boundedJson(response) {
   const declared = Number(response.headers?.get?.('content-length'));
   if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
@@ -197,6 +217,32 @@ export function createRauCreditsClient({
       }, { signal });
       return { ...session, codeVerifier: proof.codeVerifier };
     },
+    async createAccountDeviceSessionV2({
+      signal,
+      currentToken = null,
+      redirectUri = null,
+      callbackState = null,
+      returnMode = redirectUri ? 'hybrid' : 'manual',
+      clientVersion = '',
+    } = {}) {
+      const proof = createPkceProof();
+      const session = await request('/v2/device-sessions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(currentToken ? { Authorization: accountAuthorization(currentToken) } : {}),
+        },
+        body: JSON.stringify({
+          purpose: 'account',
+          codeChallenge: proof.codeChallenge,
+          codeChallengeMethod: 'S256',
+          returnMode,
+          ...(redirectUri ? { redirectUri, callbackState } : {}),
+          clientVersion,
+        }),
+      }, { signal });
+      return { ...session, codeVerifier: proof.codeVerifier };
+    },
     redeemDeviceSessionV2(id, codeVerifier, proof, { signal } = {}) {
       return request(`/v2/device-sessions/${encodeURIComponent(id)}/redeem`, {
         method: 'POST',
@@ -209,6 +255,49 @@ export function createRauCreditsClient({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ codeVerifier, proof }),
+      }, { signal });
+    },
+    cancelDeviceSessionV2(id, codeVerifier, { signal } = {}) {
+      return request(`/v2/device-sessions/${encodeURIComponent(id)}/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ codeVerifier }),
+      }, { signal });
+    },
+    readAccountSession(token, { signal } = {}) {
+      return request('/v2/account-session', {
+        headers: { Authorization: accountAuthorization(token) },
+      }, { signal });
+    },
+    commitAccountSession(token, { signal } = {}) {
+      return request('/v2/account-session', {
+        method: 'POST',
+        headers: { Authorization: accountAuthorization(token) },
+      }, { signal });
+    },
+    revokeAccountSession(token, { signal } = {}) {
+      return request('/v2/account-session', {
+        method: 'DELETE',
+        headers: { Authorization: accountAuthorization(token) },
+      }, { signal });
+    },
+    authorizeOwnedBackend(token, backendRequest, { signal } = {}) {
+      const pathname = ownedBackendPath(backendRequest?.pathname);
+      const method = typeof backendRequest?.method === 'string'
+        ? backendRequest.method.toUpperCase()
+        : 'GET';
+      const headers = new Headers(backendRequest?.headers ?? {});
+      headers.delete('authorization');
+      headers.set('Authorization', accountAuthorization(token));
+      if (backendRequest?.body !== undefined && !headers.has('content-type')) {
+        headers.set('Content-Type', 'application/json');
+      }
+      return request(pathname, {
+        method,
+        headers,
+        ...(backendRequest?.body !== undefined
+          ? { body: JSON.stringify(backendRequest.body) }
+          : {}),
       }, { signal });
     },
     /**

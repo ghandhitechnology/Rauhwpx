@@ -11,6 +11,7 @@ import test from 'node:test';
 import WebSocket from 'ws';
 
 import { registerHubSession } from '../../../desktop/agent-hub.mjs';
+import { ALIVE_PI_FIXTURE_SOURCE, writeFakeCliBin } from './fake-cli-bin.mjs';
 
 const TOKEN = 'hub-tenancy-test-token';
 const LAUNCH_ID = 'hub-tenancy-test-launch';
@@ -151,16 +152,7 @@ function prepareFakePi(root) {
   writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify({
     providers: { openrouter: { apiKey: 'test-placeholder-key' } },
   }));
-  const fake = path.join(binDir, process.platform === 'win32' ? 'pi.cmd' : 'pi');
-  if (process.platform === 'win32') {
-    writeFileSync(fake, '@echo off\r\nnode -e "setInterval(() =^> {}, 1000)"\r\n');
-  } else {
-    writeFileSync(
-      fake,
-      `#!/bin/sh\nexec "${process.execPath}" -e 'setInterval(() => {}, 1000)'\n`,
-      { mode: 0o755 },
-    );
-  }
+  writeFakeCliBin(binDir, 'pi', ALIVE_PI_FIXTURE_SOURCE);
 }
 
 async function startProviderTurn(socket, session, text) {
@@ -357,6 +349,134 @@ test('two active provider turns route overlapping MCP ids only to their owning S
   ]);
   const { socket: alphaMcp } = await openSocket(`${wsBase}/mcp?token=${alphaProviderCapabilities.mcp}&sessionId=alpha&agent=pi`);
   let { socket: betaMcp } = await openSocket(`${wsBase}/mcp?token=${betaProviderCapabilities.mcp}&sessionId=beta&agent=pi`);
+
+  const childId = '550e8400-e29b-41d4-a716-446655440000';
+  const childRegistrationResponse = await fetch(
+    `${httpBase}/pi/subagents/${childId}?sessionId=alpha&taskId=sa-1&role=doc-researcher`,
+    {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${alphaProviderCapabilities.mcp}` },
+    },
+  );
+  assert.equal(childRegistrationResponse.status, 201, stderr);
+  const childRegistration = await childRegistrationResponse.json();
+  assert.equal(childRegistration.childId, childId);
+  assert.equal(childRegistration.profile, 'doc-researcher');
+  assert.match(childRegistration.agentRole, /^pi-subagent\./);
+
+  const childCatalogResponse = await fetch(
+    `${httpBase}/pi/tool-definitions?sessionId=alpha&profile=all&role=${encodeURIComponent(childRegistration.agentRole)}&subagentId=${childId}`,
+    { headers: { Authorization: `Bearer ${childRegistration.token}` } },
+  );
+  assert.equal(childCatalogResponse.status, 200, stderr);
+  const childCatalog = await childCatalogResponse.json();
+  const childTools = new Set(childCatalog.map((definition) => definition.name));
+  assert.equal(childTools.has('get_structure'), true);
+  assert.equal(childTools.has('apply_edits'), false);
+  assert.equal(childTools.has('ask_user_question'), false);
+  assert.equal(childTools.has('update_agent_instructions'), false);
+
+  const nestedRegistration = await fetch(
+    `${httpBase}/pi/subagents/550e8400-e29b-41d4-a716-446655440001?sessionId=alpha&taskId=sa-2&role=general`,
+    { method: 'POST', headers: { Authorization: `Bearer ${childRegistration.token}` } },
+  );
+  assert.equal(nestedRegistration.status, 401, 'child capability cannot register a nested child');
+  assert.equal(
+    await rejectedUpgrade(
+      `${wsBase}/mcp?token=${encodeURIComponent(childRegistration.token)}&sessionId=alpha&agent=pi&role=chat`,
+    ),
+    401,
+    'child capability cannot impersonate the root provider',
+  );
+
+  const childSocketUrl = new URL(`${wsBase}/mcp`);
+  childSocketUrl.searchParams.set('token', childRegistration.token);
+  childSocketUrl.searchParams.set('sessionId', 'alpha');
+  childSocketUrl.searchParams.set('agent', 'pi');
+  childSocketUrl.searchParams.set('role', childRegistration.agentRole);
+  childSocketUrl.searchParams.set('workflow', 'direct');
+  childSocketUrl.searchParams.set('capabilityEpoch', String(alphaSession.capabilityEpoch));
+  childSocketUrl.searchParams.set('subagentId', childId);
+  const { socket: childMcp } = await openSocket(childSocketUrl.href);
+
+  const deniedChildWrite = waitForMessage(childMcp, (msg) => msg.type === 'tool-result' && msg.id === 41);
+  sendFrame(childMcp, {
+    type: 'tool-call', id: 41, tool: 'apply_edits', args: {},
+    workflow: 'direct', capabilityEpoch: alphaSession.capabilityEpoch, parentTaskId: 'sa-1',
+  });
+  assert.equal((await deniedChildWrite).error.code, 'PI_SUBAGENT_TOOL_DENIED');
+
+  const childStudioRequest = waitForMessage(
+    alpha,
+    (msg) => msg.type === 'tool-request' && msg.parentTaskId === 'sa-1' && msg.tool === 'get_structure',
+  );
+  const childReadResult = waitForMessage(childMcp, (msg) => msg.type === 'tool-result' && msg.id === 42);
+  sendFrame(childMcp, {
+    type: 'tool-call', id: 42, tool: 'get_structure', args: {},
+    workflow: 'direct', capabilityEpoch: alphaSession.capabilityEpoch, parentTaskId: 'forged-parent',
+  });
+  const forwardedChildRead = await childStudioRequest;
+  assert.equal(forwardedChildRead.parentTaskId, 'sa-1', 'server binding overrides the child frame');
+  sendFrame(alpha, {
+    type: 'tool-response', id: forwardedChildRead.id, ok: true, result: { revision: 9, owner: 'child' },
+  });
+  assert.deepEqual((await childReadResult).result, { revision: 9, owner: 'child' });
+
+  const pendingChildStudioRequest = waitForMessage(
+    alpha,
+    (msg) => msg.type === 'tool-request' && msg.parentTaskId === 'sa-1' && msg.tool === 'get_structure',
+  );
+  sendFrame(childMcp, {
+    type: 'tool-call', id: 43, tool: 'get_structure', args: {},
+    workflow: 'direct', capabilityEpoch: alphaSession.capabilityEpoch,
+  });
+  const pendingChildRead = await pendingChildStudioRequest;
+  const cancelledChildStudioRequest = waitForMessage(
+    alpha,
+    (msg) => msg.type === 'tool-request-cancel'
+      && msg.id === pendingChildRead.id
+      && msg.reason === 'pi-subagent-revoked',
+  );
+  const childClosed = once(childMcp, 'close');
+  const childRevoke = await fetch(
+    `${httpBase}/pi/subagents/${childId}?sessionId=alpha`,
+    { method: 'DELETE', headers: { Authorization: `Bearer ${childRegistration.token}` } },
+  );
+  assert.equal(childRevoke.status, 200, stderr);
+  await cancelledChildStudioRequest;
+  const [childCloseCode] = await childClosed;
+  assert.equal(childCloseCode, 4003);
+  const staleChildCatalog = await fetch(
+    `${httpBase}/pi/tool-definitions?sessionId=alpha&role=${encodeURIComponent(childRegistration.agentRole)}&subagentId=${childId}`,
+    { headers: { Authorization: `Bearer ${childRegistration.token}` } },
+  );
+  assert.equal(staleChildCatalog.status, 401);
+  const replacementRegistrationResponse = await fetch(
+    `${httpBase}/pi/subagents/${childId}?sessionId=alpha&taskId=sa-1&role=doc-researcher`,
+    {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${alphaProviderCapabilities.mcp}` },
+    },
+  );
+  assert.equal(replacementRegistrationResponse.status, 201, stderr);
+  const replacementRegistration = await replacementRegistrationResponse.json();
+  assert.notEqual(replacementRegistration.token, childRegistration.token);
+  const resurrectedOldToken = await fetch(
+    `${httpBase}/pi/tool-definitions?sessionId=alpha&role=${encodeURIComponent(replacementRegistration.agentRole)}&subagentId=${childId}`,
+    { headers: { Authorization: `Bearer ${childRegistration.token}` } },
+  );
+  assert.equal(resurrectedOldToken.status, 401, 're-registration must not revive an old bearer token');
+  const replacementCatalog = await fetch(
+    `${httpBase}/pi/tool-definitions?sessionId=alpha&role=${encodeURIComponent(replacementRegistration.agentRole)}&subagentId=${childId}`,
+    { headers: { Authorization: `Bearer ${replacementRegistration.token}` } },
+  );
+  assert.equal(replacementCatalog.status, 200, stderr);
+  const replacementRevoke = await fetch(
+    `${httpBase}/pi/subagents/${childId}?sessionId=alpha`,
+    { method: 'DELETE', headers: { Authorization: `Bearer ${replacementRegistration.token}` } },
+  );
+  assert.equal(replacementRevoke.status, 200, stderr);
+
   const instructionsToolRead = waitForMessage(alphaMcp, (msg) => msg.type === 'tool-result' && msg.id === 4);
   sendFrame(alphaMcp, {
     type: 'tool-call', id: 4, tool: 'read_agent_instructions', args: {},
@@ -464,7 +584,7 @@ test('two active provider turns route overlapping MCP ids only to their owning S
   sendFrame(alphaMcp, { type: 'tool-call', id: 7, tool: 'get_structure', args: {}, workflow: 'direct', capabilityEpoch: alphaSession.capabilityEpoch });
   sendFrame(betaMcp, { type: 'tool-call', id: 7, tool: 'get_structure', args: {}, workflow: 'direct', capabilityEpoch: betaSession.capabilityEpoch });
   const [toAlpha, toBeta] = await Promise.all([alphaRequest, betaRequest]);
-  assert.equal(toAlpha.id, 1);
+  assert.equal(toAlpha.id, 3, 'the earlier child requests consumed alpha\'s first Studio request ids');
   assert.equal(toBeta.id, 1);
   sendFrame(alpha, { type: 'tool-response', id: toAlpha.id, ok: true, result: { owner: 'alpha' } });
   sendFrame(beta, { type: 'tool-response', id: toBeta.id, ok: true, result: { owner: 'beta' } });

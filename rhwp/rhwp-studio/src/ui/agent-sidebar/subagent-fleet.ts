@@ -33,7 +33,13 @@ import { createIcon } from './icons.ts';
 import { formatTokens } from './usage-format.ts';
 
 /** 편대를 띄우는 도구 — 카드가 그 스폰을 대신 나타내므로 도구 행은 접는다. */
-const SPAWN_TOOL_NAMES: ReadonlySet<string> = new Set(['Agent', 'Workflow']);
+const SPAWN_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'Agent',
+  'Workflow',
+  'subagent_spawn',
+  'spawn_agent',
+  'spawn_subagent',
+]);
 
 export function isSpawnToolName(tool: string): boolean {
   return SPAWN_TOOL_NAMES.has(tool);

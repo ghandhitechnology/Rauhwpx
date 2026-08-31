@@ -1244,6 +1244,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     e.stopPropagation();
     openConfiguredVersionControl();
   });
+  const applyHancomGitVisibility = (enabled: boolean): void => {
+    versionsBtn.hidden = !enabled;
+    if (!enabled && versionsPanelOpen) closeVersionsPage();
+  };
+  applyHancomGitVisibility(userSettings.getUseHancomGit());
+  const unsubscribeHancomGitVisibility = userSettings.subscribeUseHancomGit(applyHancomGitVisibility);
 
   // pane 액션은 문서 맥락 주변의 고정된 헤더 위치를 유지한다.
   headerActions.append(threadsBtn, versionsBtn, settingsBtn);
@@ -6348,6 +6354,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     },
     sendInlinePrompt,
     dispose(): void {
+      unsubscribeHancomGitVisibility();
       questionController.dispose();
       unsubBridge();
       unsubThreads();

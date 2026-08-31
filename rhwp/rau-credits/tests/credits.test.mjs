@@ -57,6 +57,29 @@ function pkce(verifier = 'v'.repeat(43)) {
   };
 }
 
+async function issueAccountSession(credits, {
+  replaceAccountToken = null,
+  verifier = 'a'.repeat(43),
+  email = 'andy@example.com',
+} = {}) {
+  const proof = pkce(verifier);
+  const created = await credits.createDeviceSessionV2({
+    purpose: 'account',
+    replaceAccountToken,
+    codeChallenge: proof.challenge,
+    codeChallengeMethod: 'S256',
+    returnMode: 'manual',
+  });
+  const authenticated = await credits.completeMagicLoginV2(created.id, email, '123456');
+  const ready = await credits.confirmDeviceSessionV2(created.id, authenticated.confirmationToken);
+  const redeemProof = { kind: 'manual', code: ready.manualCode };
+  const redeemed = await credits.redeemDeviceSessionV2(created.id, {
+    codeVerifier: proof.verifier,
+    proof: redeemProof,
+  });
+  return { created, proof, redeemProof, redeemed };
+}
+
 function rawHttpRequest(port, request) {
   return new Promise((resolve, reject) => {
     const socket = net.createConnection({ host: '127.0.0.1', port });
@@ -783,6 +806,130 @@ test('v2 requires confirmation and PKCE before a key can be redeemed', async () 
   assert.deepEqual(await credits.redeemDeviceSessionV2(created.id, redeemInput), { status: 'redeemed' });
 });
 
+test('account login reuses V2 PKCE while persisting only a token hash', async () => {
+  const store = createMemoryStore();
+  let providerMints = 0;
+  const credits = createCreditsService({
+    origin: 'https://credits.rau.test',
+    sessionSecret: 'test-secret-for-rau-credits',
+    store,
+    authenticateMagic: async (email) => ({ id: 'user_account', email }),
+    createOpenRouterKey: async () => {
+      providerMints += 1;
+      return { key: 'sk-or-v1-provider', id: 'provider-key' };
+    },
+  });
+
+  const login = await issueAccountSession(credits);
+  const accountToken = login.redeemed.accountToken;
+  assert.match(accountToken, /^rau_account_v1_[A-Za-z0-9_-]{43}$/);
+  assert.deepEqual(login.redeemed.account, { email: 'andy@example.com' });
+  assert.equal(providerMints, 0, 'account identity must not mint or replace the Rau provider key');
+  assert.deepEqual(await credits.readAccountSession(accountToken), {
+    state: 'pending', signedIn: false, account: null,
+  });
+
+  const stored = await store.load();
+  const serialized = JSON.stringify(stored);
+  assert.equal(serialized.includes(accountToken), false);
+  assert.equal(serialized.includes('accountToken'), false);
+  for (const record of Object.values(stored.accountSessions)) {
+    assert.deepEqual(
+      Object.keys(record).filter((key) => /token|ciphertext|secret/i.test(key)),
+      [],
+    );
+  }
+
+  const committed = await credits.commitAccountSession(accountToken);
+  assert.deepEqual(committed, {
+    state: 'signed-in',
+    signedIn: true,
+    account: { email: 'andy@example.com' },
+  });
+  assert.deepEqual(await credits.authorizeAccountSession(accountToken), {
+    subject: 'user_account',
+    email: 'andy@example.com',
+  });
+  await credits.acknowledgeDeviceSessionV2(
+    login.created.id,
+    { codeVerifier: login.proof.verifier, proof: login.redeemProof },
+  );
+  assert.deepEqual(
+    await credits.redeemDeviceSessionV2(login.created.id, {
+      codeVerifier: login.proof.verifier,
+      proof: login.redeemProof,
+    }),
+    { status: 'redeemed' },
+  );
+});
+
+test('account replacement preserves the old session until the new local commit', async () => {
+  const store = createMemoryStore();
+  const credits = createCreditsService({
+    origin: 'https://credits.rau.test',
+    sessionSecret: 'test-secret-for-rau-credits',
+    store,
+    authenticateMagic: async (email) => ({ id: 'user_account', email }),
+  });
+  const first = await issueAccountSession(credits, { verifier: 'b'.repeat(43) });
+  const oldToken = first.redeemed.accountToken;
+  await credits.commitAccountSession(oldToken);
+
+  const cancelled = await issueAccountSession(credits, {
+    replaceAccountToken: oldToken,
+    verifier: 'c'.repeat(43),
+  });
+  assert.equal((await credits.readAccountSession(oldToken)).signedIn, true);
+  assert.equal((await credits.readAccountSession(cancelled.redeemed.accountToken)).state, 'pending');
+  await credits.cancelDeviceSessionV2(
+    cancelled.created.id,
+    cancelled.proof.verifier,
+  );
+  assert.equal((await credits.readAccountSession(cancelled.redeemed.accountToken)).signedIn, false);
+  assert.equal((await credits.readAccountSession(oldToken)).signedIn, true);
+
+  const replacement = await issueAccountSession(credits, {
+    replaceAccountToken: oldToken,
+    verifier: 'd'.repeat(43),
+  });
+  const newToken = replacement.redeemed.accountToken;
+  assert.equal((await credits.readAccountSession(oldToken)).signedIn, true);
+  await credits.commitAccountSession(newToken);
+  assert.equal((await credits.readAccountSession(newToken)).signedIn, true);
+  assert.equal((await credits.readAccountSession(oldToken)).signedIn, false);
+  await assert.rejects(
+    () => credits.authorizeAccountSession(oldToken),
+    (error) => error.code === 'ACCOUNT_SESSION_UNAUTHORIZED',
+  );
+});
+
+test('account status survives restart and remote revocation is durable', async () => {
+  const store = createMemoryStore();
+  const options = {
+    origin: 'https://credits.rau.test',
+    sessionSecret: 'test-secret-for-rau-credits',
+    store,
+    authenticateMagic: async (email) => ({ id: 'user_restart', email }),
+  };
+  const firstProcess = createCreditsService(options);
+  const login = await issueAccountSession(firstProcess, { verifier: 'e'.repeat(43) });
+  const accountToken = login.redeemed.accountToken;
+  await firstProcess.commitAccountSession(accountToken);
+
+  const restarted = createCreditsService(options);
+  assert.equal((await restarted.readAccountSession(accountToken)).signedIn, true);
+  await restarted.revokeAccountSession(accountToken);
+
+  const afterRevocation = createCreditsService(options);
+  assert.deepEqual(await afterRevocation.readAccountSession(accountToken), {
+    state: 'signed-out', signedIn: false, account: null,
+  });
+  await assert.rejects(
+    () => afterRevocation.authorizeAccountSession(accountToken),
+    (error) => error.code === 'ACCOUNT_SESSION_UNAUTHORIZED',
+  );
+});
+
 test('v2 replays committed one-time responses after authentication and confirmation response loss', async () => {
   const store = createMemoryStore();
   const proof = pkce('r'.repeat(43));
@@ -1172,6 +1319,38 @@ test('HTTP v2 accepts only proof-bearing POST redemption and can retire v1', asy
     assert.equal((await response.json()).error, 'RAU_CLIENT_UPDATE_REQUIRED');
   } finally {
     await new Promise((resolve) => retiredServer.close(resolve));
+  }
+});
+
+test('HTTP account sessions accept credentials only through bearer headers', async () => {
+  const credits = service({
+    authenticateMagic: async (email) => ({ id: 'user_http_account', email }),
+  });
+  const login = await issueAccountSession(credits, { verifier: 'h'.repeat(43) });
+  const accountToken = login.redeemed.accountToken;
+  const server = http.createServer(creditsRequestListener(credits));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  const url = `http://127.0.0.1:${port}/v2/account-session`;
+  const headers = { Authorization: `Bearer ${accountToken}` };
+  try {
+    const missingBearer = await fetch(url);
+    assert.equal(missingBearer.status, 401);
+
+    const pending = await fetch(url, { headers });
+    assert.equal(pending.status, 200);
+    assert.equal((await pending.json()).state, 'pending');
+
+    const committed = await fetch(url, { method: 'POST', headers });
+    assert.equal(committed.status, 200);
+    assert.equal((await committed.json()).signedIn, true);
+
+    const revoked = await fetch(url, { method: 'DELETE', headers });
+    assert.equal(revoked.status, 200);
+    assert.equal((await revoked.json()).signedIn, false);
+    assert.equal((await credits.readAccountSession(accountToken)).signedIn, false);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
   }
 });
 

@@ -78,6 +78,7 @@ const INSTALL_PROGRESS = Object.freeze({
 /** 이 파일 기준 경로 — 확장/스킬은 저장소 안에 있고, pi 홈은 그것을 가리키기만 한다. */
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const EXTENSION_PATH = path.join(MODULE_DIR, 'pi', 'extension', 'rhwp.ts');
+const SUBAGENT_EXTENSION_PATH = path.join(MODULE_DIR, 'pi', 'extension', 'subagents.ts');
 const SKILLS_SOURCE_DIR = path.join(MODULE_DIR, 'pi', 'skills');
 
 /**
@@ -837,7 +838,7 @@ export function createPiManager({
       defaultProjectTrust: 'never',
       enableSkillCommands: false,
       enableInstallTelemetry: false,
-      extensions: [EXTENSION_PATH],
+      extensions: [EXTENSION_PATH, SUBAGENT_EXTENSION_PATH],
     }, null, 2)}\n`);
     try {
       await fs.cp(SKILLS_SOURCE_DIR, skillsDir, { recursive: true, force: true });
@@ -857,6 +858,7 @@ export function createPiManager({
     settingsPath,
     piBin,
     extensionPath: EXTENSION_PATH,
+    subagentExtensionPath: SUBAGENT_EXTENSION_PATH,
 
     /** 루트를 만들고 저장된 설정을 읽는다. 루트가 없어도 실패하지 않는다. */
     async init() {

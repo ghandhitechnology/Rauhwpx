@@ -83,6 +83,10 @@ import { CellSelectionRenderer } from '@/engine/cell-selection-renderer';
 import { TableObjectRenderer } from '@/engine/table-object-renderer';
 import { TableResizeRenderer } from '@/engine/table-resize-renderer';
 import { Ruler } from '@/view/ruler';
+import {
+  headerFooterApplyToLabel,
+  parseHeaderFooterModeChanged,
+} from '@/engine/header-footer-mode';
 import { RendererSession, type RendererSessionDiagnostics } from '@/view/renderer-session';
 import {
   resolveCanvasKitRenderModeRequest,
@@ -1211,16 +1215,27 @@ function setupEventListeners(): void {
 
   // 머리말/꼬리말 편집 모드 시 도구상자 전환 + 본문 dimming
   const hfLabel = document.querySelector<HTMLElement>('.tb-headerfooter-group .tb-hf-label');
+  const hfLiveStatus = document.getElementById('hf-edit-status-live');
   const scrollContainer = document.getElementById('scroll-container');
 
-  eventBus.on('headerFooterModeChanged', (mode) => {
-    const isActive = (mode as string) !== 'none';
+  eventBus.on('headerFooterModeChanged', (payload) => {
+    const state = parseHeaderFooterModeChanged(payload);
+    const isActive = state !== 'none';
     headerFooterActive = isActive;
     // 접힌 기본 도구 상자는 머리말/꼬리말 전용 버튼을 가리므로 모드 진입 시 펼친다.
     if (isActive) setBasicToolboxExpanded(true);
     // 도구상자 전환
     if (hfLabel) {
-      hfLabel.textContent = (mode as string) === 'header' ? '머리말' : (mode as string) === 'footer' ? '꼬리말' : '';
+      const kind = state === 'none' ? '' : state.mode === 'header' ? '머리말' : '꼬리말';
+      const target = state === 'none' ? '' : headerFooterApplyToLabel(state.applyTo);
+      hfLabel.textContent = state === 'none' ? '' : `${kind} · ${target} 편집 중`;
+      hfLabel.dataset.mode = state === 'none' ? '' : state.mode;
+      hfLabel.dataset.applyTo = state === 'none' ? '' : String(state.applyTo);
+      if (hfLiveStatus) {
+        hfLiveStatus.textContent = state === 'none'
+          ? '머리말 꼬리말 편집 종료'
+          : `${kind} ${target} 편집 중, 구역 ${state.sectionIdx + 1} 첫 페이지`;
+      }
     }
     applyContextualToolbarMode();
     // 서식 도구 모음은 머리말/꼬리말 편집 시에도 유지 (문단/글자 모양 설정 필요)
@@ -1294,6 +1309,11 @@ async function initializeDocument(
     toolbar?.initFontDropdown(docInfo.fontsUsed);
     toolbar?.initStyleDropdown();
     await updateLoadProgress(94, '문서 검증 및 글꼴 확인 중...');
+    const emptyState = document.getElementById('document-empty-state');
+    if (emptyState) {
+      emptyState.hidden = true;
+      emptyState.setAttribute('aria-hidden', 'true');
+    }
 
     // #177: HWPX 비표준 lineseg 감지 (진단 로그).
     // #2527: 자동 보정(reflowLinesegs)이 빈-lineseg 문서에서 글리프 좌표를 붕괴시켜
@@ -1320,11 +1340,6 @@ async function initializeDocument(
     // 로컬 글꼴 감지 결과가 뷰를 갱신한 뒤에 캐럿을 연결해야 입력 포커스가 재설정과 경합하지 않는다.
     await updateLoadProgress(96, '편집 상태 초기화 중...');
     inputHandler?.activateWithCaretPosition();
-    const emptyState = document.getElementById('document-empty-state');
-    if (emptyState) {
-      emptyState.hidden = true;
-      emptyState.setAttribute('aria-hidden', 'true');
-    }
     eventBus.emit('document-context-changed');
     // 최종 단계 뒤에는 비동기 작업이 없으므로 100% progress paint를 기다리지 않는다.
     msg.textContent = documentReadOnly

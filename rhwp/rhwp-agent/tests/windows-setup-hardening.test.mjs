@@ -45,7 +45,7 @@ test('Windows process cleanup never retargets a reusable PID after its first tre
     },
   });
   assert.equal(calls[0].command, 'C:\\Windows\\System32\\taskkill.exe');
-  assert.deepEqual(calls[0].argv, ['/PID', '4312', '/T']);
+  assert.deepEqual(calls[0].argv, ['/PID', '4312', '/T', '/F']);
   escalate();
   assert.equal(calls.length, 1);
   assert.ok(calls.every(({ options }) => options.shell === false && options.windowsHide === true));
@@ -68,6 +68,42 @@ test('Windows file locks are retried and then reported with a stable error code'
     ),
     (error) => error.code === 'HARNESS_FILES_LOCKED',
   );
+});
+
+test('Windows file replacement refuses to move a directory target aside', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-file-replace-dir-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const target = path.join(root, 'state.json');
+  const temp = path.join(root, 'state.tmp');
+  await fs.mkdir(target);
+  await fs.writeFile(path.join(target, 'inside.txt'), 'keep');
+  await fs.writeFile(temp, 'new');
+
+  await assert.rejects(
+    replaceFileAtomically(temp, target, { platform: 'win32' }),
+    { code: 'EISDIR' },
+  );
+  assert.equal(await fs.readFile(path.join(target, 'inside.txt'), 'utf8'), 'keep');
+  await assert.rejects(fs.access(`${target}.previous-write`), { code: 'ENOENT' });
+});
+
+test('Windows replacement recovery does not publish over a restored directory backup', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-file-replace-dir-recovery-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const target = path.join(root, 'state.json');
+  const temp = path.join(root, 'state.tmp');
+  const previous = `${target}.previous-write`;
+  await fs.mkdir(previous);
+  await fs.writeFile(path.join(previous, 'inside.txt'), 'keep');
+  await fs.writeFile(temp, 'new');
+
+  await assert.rejects(
+    replaceFileAtomically(temp, target, { platform: 'win32' }),
+    { code: 'EISDIR' },
+  );
+  assert.equal(await fs.readFile(path.join(target, 'inside.txt'), 'utf8'), 'keep');
+  await assert.rejects(fs.access(previous), { code: 'ENOENT' });
+  assert.equal(await fs.readFile(temp, 'utf8'), 'new');
 });
 
 test('a stale Windows backup cleanup cannot turn a committed replacement into failure', async (t) => {
