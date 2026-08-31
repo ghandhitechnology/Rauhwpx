@@ -132,6 +132,13 @@ test('#4121 HF IME 시작은 남아 있는 본문 selection을 삭제하지 않�
       textarea: { value: '' },
       deleteSelection: () => { bodyDeleteCalls++; },
       canInsertTextInFormMode: () => true,
+      captureCompositionAnchorRect: () => {},
+      imeSession: {
+        isComposing: false,
+        start() { handler.isComposing = true; this.isComposing = true; },
+        reset() { handler.isComposing = false; this.isComposing = false; },
+        cancel() {},
+      },
       isComposing: false,
       compositionAnchor: null,
       compositionLength: 0,

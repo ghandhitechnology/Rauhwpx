@@ -52,8 +52,61 @@ interface ScopedFormattingDocument {
   setCellParaShapeIdByPath(sec: number, parentPara: number, path: string, shapeId: number): string;
 }
 
+interface HeaderFooterEditDocument {
+  replaceRangeInHeaderFooter(
+    sec: number,
+    isHeader: boolean,
+    applyTo: number,
+    startHfParaIdx: number,
+    startOffset: number,
+    endHfParaIdx: number,
+    endOffset: number,
+    replacementText: string,
+  ): string;
+  copySelectionInHeaderFooter(
+    sec: number,
+    isHeader: boolean,
+    applyTo: number,
+    startHfParaIdx: number,
+    startOffset: number,
+    endHfParaIdx: number,
+    endOffset: number,
+  ): string;
+  getCharPropertiesInHeaderFooter(
+    sec: number,
+    isHeader: boolean,
+    applyTo: number,
+    hfParaIdx: number,
+    charOffset: number,
+  ): string;
+  applyCharFormatInHeaderFooter(
+    sec: number,
+    isHeader: boolean,
+    applyTo: number,
+    startHfParaIdx: number,
+    startOffset: number,
+    endHfParaIdx: number,
+    endOffset: number,
+    propsJson: string,
+  ): string;
+  getSelectionRectsInHeaderFooter(
+    sec: number,
+    isHeader: boolean,
+    applyTo: number,
+    pageNum: number,
+    startHfParaIdx: number,
+    startOffset: number,
+    endHfParaIdx: number,
+    endOffset: number,
+  ): string;
+}
+
 function scopedFormattingDocument(doc: HwpDocument) {
   return doc as unknown as ScopedFormattingDocument;
+}
+
+function headerFooterEditDocument(doc: HwpDocument) {
+  return doc as unknown as HeaderFooterEditDocument;
 }
 
 function serializeParaMeta(meta: RemovedParaMeta | undefined): string | undefined {
@@ -2982,7 +3035,7 @@ export class WasmBridge {
     replacementText: string,
   ): { ok: boolean; hfParaIndex: number; charOffset: number } {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
-    return JSON.parse(this.doc.replaceRangeInHeaderFooter(
+    return JSON.parse(headerFooterEditDocument(this.doc).replaceRangeInHeaderFooter(
       sec,
       isHeader,
       applyTo,
@@ -3004,7 +3057,7 @@ export class WasmBridge {
     endOffset: number,
   ): { ok: boolean; text: string } {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
-    return JSON.parse(this.doc.copySelectionInHeaderFooter(
+    return JSON.parse(headerFooterEditDocument(this.doc).copySelectionInHeaderFooter(
       sec,
       isHeader,
       applyTo,
@@ -3023,7 +3076,7 @@ export class WasmBridge {
     charOffset: number,
   ): CharProperties {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
-    return JSON.parse(this.doc.getCharPropertiesInHeaderFooter(
+    return JSON.parse(headerFooterEditDocument(this.doc).getCharPropertiesInHeaderFooter(
       sec,
       isHeader,
       applyTo,
@@ -3043,7 +3096,7 @@ export class WasmBridge {
     propsJson: string,
   ): string {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
-    return this.doc.applyCharFormatInHeaderFooter(
+    return headerFooterEditDocument(this.doc).applyCharFormatInHeaderFooter(
       sec,
       isHeader,
       applyTo,
@@ -3071,7 +3124,7 @@ export class WasmBridge {
     endOffset: number,
   ): SelectionRect[] {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
-    return JSON.parse(this.doc.getSelectionRectsInHeaderFooter(
+    return JSON.parse(headerFooterEditDocument(this.doc).getSelectionRectsInHeaderFooter(
       sec,
       isHeader,
       applyTo,

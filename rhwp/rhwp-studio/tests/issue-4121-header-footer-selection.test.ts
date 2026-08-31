@@ -163,6 +163,8 @@ test('#4121 macOS HF Option+Shift·Command+Shift 탐색은 실제 선택 범위�
       cursor,
       wasm,
       flushDeferredPaginationIfNeeded: () => {},
+      resetIosInputSession: () => {},
+      trimTextareaBufferIfIdle: () => {},
       updateCaret: () => { caretUpdates++; },
     };
     const key = (keyName: string, modifiers: Record<string, boolean>) => ({
@@ -229,6 +231,14 @@ test('#4121 HF 모두 선택은 메뉴와 Ctrl/Cmd+A 모두 현재 정의만 대
       cursor,
       wasm,
       flushDeferredPaginationIfNeeded: () => {},
+      resetIosInputSession: () => {},
+      trimTextareaBufferIfIdle: () => {},
+      handleCtrlKey: (e: KeyboardEvent) => {
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
+          e.preventDefault();
+          handler.dispatcher.dispatch('edit:select-all');
+        }
+      },
       updateCaret: () => { caretUpdates++; },
     };
     handler.dispatcher = {

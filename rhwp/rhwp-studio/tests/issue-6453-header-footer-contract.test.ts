@@ -53,14 +53,14 @@ test('#6453 HF 공개 커서 위치 API는 문단·문자 좌표만 받는다', 
 
 test('#6453 IME 조합 캐럿도 HF 대표 편집 페이지를 직접 사용한다', () => {
   const handler = src('src/engine/input-handler.ts');
-  const updateCaret = functionBodyFrom(handler, 'private updateCaret(');
+  const compositionStart = functionBodyFrom(handler, 'private compositionStartRect(');
 
   assert.match(
-    updateCaret,
+    compositionStart,
     /getCursorRectInHeaderFooter\([\s\S]*?this\.cursor\.hfPreviewPage/,
   );
   assert.doesNotMatch(
-    updateCaret,
+    compositionStart,
     /getCursorRectInHeaderFooter\([\s\S]*?this\.cursor\.getRect\(\)\?\.pageIndex/,
   );
 });
