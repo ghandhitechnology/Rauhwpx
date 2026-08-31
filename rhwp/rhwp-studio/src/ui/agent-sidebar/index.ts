@@ -2151,11 +2151,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     applyDefaults: (prefs) => applyAgentPrefs(prefs),
     openCalibration: () => writingStyleCalibration.open(),
     reconnectSession: () => restartAgentSession(),
+    onAgentSetupAbandoned: (info) => initialSetup?.notifySetupAbandoned(info),
   });
   const settingsPage = settingsPanel.element;
   initialSetup = maybeStartInitialSetup({
     openAgentSetup: (agent) => settingsPanel.openAgentSetup(agent),
     beginAgentConnect: (agent) => settingsPanel.beginAgentConnect(agent),
+    closeAgentSetup: () => settingsPanel.closeAgentSetup(),
+    requestAccountStatus: () => bridge.requestAccountStatus(),
     openCalibration: (options) => writingStyleCalibration.open(options),
   });
   settingsPage.addEventListener('ag-settings-close-request', () => {

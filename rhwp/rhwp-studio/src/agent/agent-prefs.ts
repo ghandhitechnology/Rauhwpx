@@ -39,6 +39,9 @@ function isAgentName(value: unknown): value is AgentName {
     || value === 'grok' || value === 'cursor' || value === 'rau';
 }
 
+/** 첫 실행·빈 프로필의 기본 프로바이더. 저장된 Codex/BYOK 선택은 건드리지 않는다. */
+export const DEFAULT_CHAT_AGENT: AgentName = 'rau';
+
 function isPermissionProfile(value: unknown): value is PermissionProfile {
   return value === 'safe' || value === 'unrestricted';
 }
@@ -53,7 +56,7 @@ function resolveStorage(storage?: AgentPrefsStorage | null): AgentPrefsStorage |
 }
 
 export function defaultAgentPrefs(): AgentPrefs {
-  const agent: AgentName = 'codex';
+  const agent: AgentName = DEFAULT_CHAT_AGENT;
   const model = defaultModelForAgent(agent);
   return {
     defaultAgent: agent,
@@ -66,7 +69,7 @@ export function defaultAgentPrefs(): AgentPrefs {
 /** 어떤 입력이 와도 쓸 수 있는 조합으로 접는다. */
 export function normalizeAgentPrefs(raw: unknown): AgentPrefs {
   const src = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
-  const agent: AgentName = isAgentName(src['defaultAgent']) ? src['defaultAgent'] : 'codex';
+  const agent: AgentName = isAgentName(src['defaultAgent']) ? src['defaultAgent'] : DEFAULT_CHAT_AGENT;
   const model = resolveModelForAgent(
     agent,
     typeof src['defaultModel'] === 'string' ? src['defaultModel'] : null,
@@ -132,3 +135,40 @@ export function trySaveAgentPrefs(
 }
 
 export const AGENT_PREFS_STORAGE_KEY = STORAGE_KEY;
+
+/** 사용자가 설정 탭에서 고른 값이 저장돼 있는지. 빈 프로필·깨진 JSON 은 false. */
+export function hasExplicitDefaultAgent(storage?: AgentPrefsStorage | null): boolean {
+  const store = resolveStorage(storage);
+  if (!store) return false;
+  try {
+    const raw = store.getItem(STORAGE_KEY);
+    if (!raw) return false;
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+    return isAgentName((parsed as Record<string, unknown>)['defaultAgent']);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 첫 실행이 끝날 때 쓸 기본 프로바이더.
+ * Rau 가 연결됐으면 Rau, 아니면 연결한 BYOK, 아무도 없으면 Rau.
+ */
+export function firstRunDefaultAgent(configured: readonly AgentName[]): AgentName {
+  if (configured.includes('rau')) return 'rau';
+  const first = configured[0];
+  return first ?? DEFAULT_CHAT_AGENT;
+}
+
+/**
+ * 저장된 선택이 없을 때만 첫 실행 결과를 기본값으로 심는다.
+ * 이미 Codex 등을 고른 프로필은 그대로 둔다.
+ */
+export function applyFirstRunDefaultAgent(
+  configured: readonly AgentName[],
+  storage?: AgentPrefsStorage | null,
+): AgentPrefs {
+  if (hasExplicitDefaultAgent(storage)) return loadAgentPrefs(storage);
+  return saveAgentPrefs({ defaultAgent: firstRunDefaultAgent(configured) }, storage);
+}
