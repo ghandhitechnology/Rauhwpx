@@ -107,6 +107,28 @@ export interface VersionRepositorySnapshot {
   mergeDrafts: VersionMergeDraft[];
 }
 
+const VERSION_SNAPSHOT_MAX_REPOSITORY_RECORDS = 50_000;
+
+function assertRepositorySnapshotRecordBudget(input: Partial<VersionRepositorySnapshot>): void {
+  const collections = [
+    input.commits,
+    input.refs,
+    input.shelves,
+    input.mergeManifests,
+    input.mergeDrafts,
+  ];
+  let total = 0;
+  for (const collection of collections) {
+    if (!Array.isArray(collection) || collection.length > VERSION_SNAPSHOT_MAX_REPOSITORY_RECORDS) {
+      throw new VersionError('VERSION_STORE_FAILED', 'Portable history contains too many repository records');
+    }
+    total += collection.length;
+    if (!Number.isSafeInteger(total) || total > VERSION_SNAPSHOT_MAX_REPOSITORY_RECORDS) {
+      throw new VersionError('VERSION_STORE_FAILED', 'Portable history contains too many repository records');
+    }
+  }
+}
+
 export interface ImportRepositorySnapshotResult {
   repository: VersionRepository;
   imported: boolean;
@@ -608,15 +630,21 @@ function commitTitle(title: VersionTitle): VersionTitle {
   };
 }
 
-function assertStoredBlob(blob: VersionBlob): VersionBlob {
-  const bytes = new Uint8Array(blob.bytes);
+function assertStoredBlob(
+  blob: VersionBlob,
+  { copyBytes = true }: { copyBytes?: boolean } = {},
+): VersionBlob {
+  const bytes = copyBytes ? new Uint8Array(blob.bytes) : blob.bytes;
   if (hashBytes(bytes) !== blob.id || blob.byteLength !== bytes.byteLength) {
     throw new VersionError('CORRUPT_BLOB', 'Merge draft asset failed verification');
   }
   return { id: blob.id, byteLength: bytes.byteLength, bytes };
 }
 
-function sortedRepositorySnapshot(snapshot: VersionRepositorySnapshot): VersionRepositorySnapshot {
+function sortedRepositorySnapshot(
+  snapshot: VersionRepositorySnapshot,
+  { copyBlobBytes = true }: { copyBlobBytes?: boolean } = {},
+): VersionRepositorySnapshot {
   const byId = <Value extends { id: string }>(left: Value, right: Value) => left.id.localeCompare(right.id);
   return {
     schemaVersion: 1,
@@ -625,7 +653,10 @@ function sortedRepositorySnapshot(snapshot: VersionRepositorySnapshot): VersionR
     refs: snapshot.refs.map(cloneValue).sort((left, right) => (
       left.kind.localeCompare(right.kind) || left.name.localeCompare(right.name)
     )),
-    blobs: snapshot.blobs.map((blob) => ({ ...blob, bytes: new Uint8Array(blob.bytes) })).sort(byId),
+    blobs: snapshot.blobs.map((blob) => ({
+      ...blob,
+      bytes: copyBlobBytes ? new Uint8Array(blob.bytes) : blob.bytes,
+    })).sort(byId),
     compareSnapshots: snapshot.compareSnapshots.map(cloneValue).sort(byId),
     shelves: snapshot.shelves.map(cloneValue).sort(byId),
     mergeManifests: snapshot.mergeManifests.map(cloneValue).sort(byId),
@@ -657,7 +688,9 @@ async function repositorySnapshotFromTransaction(
   for (const blobId of blobIds) {
     const blob = await tx.get('blobs', blobId);
     if (!blob) throw new VersionError('CORRUPT_BLOB', `Version blob ${blobId} is missing`);
-    blobs.push(assertStoredBlob(blob));
+    // Transaction reads already cross a clone boundary. Reusing those owned
+    // byte arrays avoids another aggregate repository-sized copy.
+    blobs.push(assertStoredBlob(blob, { copyBytes: false }));
   }
   const compareSnapshots: VersionCompareSnapshot[] = [];
   for (const snapshotId of compareSnapshotIds) {
@@ -677,11 +710,11 @@ async function repositorySnapshotFromTransaction(
     shelves,
     mergeManifests,
     mergeDrafts,
-  });
+  }, { copyBlobBytes: false });
 }
 
 function snapshotMetadata(snapshot: VersionRepositorySnapshot): unknown {
-  const sorted = sortedRepositorySnapshot(snapshot);
+  const sorted = sortedRepositorySnapshot(snapshot, { copyBlobBytes: false });
   return {
     schemaVersion: sorted.schemaVersion,
     repository: sorted.repository,
@@ -706,7 +739,11 @@ function validateRepositorySnapshot(input: VersionRepositorySnapshot): VersionRe
   if (!input || input.schemaVersion !== 1 || !input.repository) {
     throw new VersionError('VERSION_STORE_FAILED', 'Portable history repository schema is invalid');
   }
-  const snapshot = sortedRepositorySnapshot(input);
+  assertRepositorySnapshotRecordBudget(input);
+  // Portable bundle payloads are views into one resident archive. Validation
+  // must not materialize a second full repository; import makes one exact blob
+  // copy at a time immediately before handing it to the storage backend.
+  const snapshot = sortedRepositorySnapshot(input, { copyBlobBytes: false });
   const repository = snapshot.repository;
   const id = repositoryId(repository.id);
   documentId(repository.documentId);
@@ -734,7 +771,7 @@ function validateRepositorySnapshot(input: VersionRepositorySnapshot): VersionRe
     throw new VersionError('VERSION_STORE_FAILED', 'Portable history contains no commits');
   }
   const blobs = new Map(snapshot.blobs.map((blob) => {
-    const verified = assertStoredBlob(blob);
+    const verified = assertStoredBlob(blob, { copyBytes: false });
     return [verified.id, verified] as const;
   }));
   if (blobs.size !== snapshot.blobs.length) {
@@ -1123,8 +1160,14 @@ export class VersionGraphStore {
       }
       for (const blob of snapshot.blobs) {
         const existing = await tx.get('blobs', blob.id);
-        if (existing) assertStoredBlob(existing);
-        else await tx.put('blobs', blob);
+        if (existing) {
+          assertStoredBlob(existing, { copyBytes: false });
+        } else {
+          // Portable bundle blobs are subarray views into the full archive.
+          // Store one exact-sized copy so IndexedDB cannot clone the archive's
+          // complete backing buffer for every individual blob.
+          await tx.put('blobs', assertStoredBlob(blob));
+        }
       }
       for (const stored of snapshot.compareSnapshots) {
         const existing = await tx.get('compareSnapshots', stored.id);

@@ -3,6 +3,11 @@ import { constants as fsConstants, promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import {
+  recoverInterruptedFileReplacement,
+  replaceFileAtomically,
+} from './harness-update.mjs';
+
 export const MAX_AGENT_INSTRUCTIONS_CHARS = 30_000;
 const MAX_AGENT_INSTRUCTIONS_BYTES = MAX_AGENT_INSTRUCTIONS_CHARS * 4;
 const MAX_METADATA_BYTES = 4_096;
@@ -143,6 +148,14 @@ export class AgentInstructionsStore {
       );
     }
     await this.fs.chmod(this.rootDir, 0o700).catch(() => {});
+    await recoverInterruptedFileReplacement(this.filePath, {
+      platform: this.platform,
+      fsApi: this.fs,
+    });
+    await recoverInterruptedFileReplacement(this.metadataPath, {
+      platform: this.platform,
+      fsApi: this.fs,
+    });
     try {
       const loaded = await this.#readRegularText(this.filePath, {
         maxBytes: MAX_AGENT_INSTRUCTIONS_BYTES,
@@ -345,8 +358,11 @@ export class AgentInstructionsStore {
       `.${path.basename(targetPath)}.tmp-${process.pid}-${randomUUID()}`,
     );
     try {
-      await this.fs.writeFile(tempPath, content, { encoding: 'utf8', mode: 0o600 });
-      await this.fs.rename(tempPath, targetPath);
+      await this.fs.writeFile(tempPath, content, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+      await replaceFileAtomically(tempPath, targetPath, {
+        platform: this.platform,
+        fsApi: this.fs,
+      });
       await this.fs.chmod(targetPath, 0o600).catch(() => {});
     } catch (error) {
       await this.fs.rm(tempPath, { force: true }).catch(() => {});

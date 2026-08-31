@@ -2,21 +2,26 @@
   "name": "rhwp-agent",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22.18.0"
+  },
   "scripts": {
     "start": "node server.mjs",
     "start:bg": "node ctl.mjs start",
     "stop": "node ctl.mjs stop",
     "status": "node ctl.mjs status",
     "test": "node --test tests/*.test.mjs",
+    "test:browserbase:live": "node tests/browserbase-live-smoke.mjs",
     "typecheck": "../rhwp-studio/node_modules/.bin/tsc -p tsconfig.agents.json"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.4.0",
     "@anthropic-ai/claude-agent-sdk": "0.3.241",
-    "@browserbasehq/mcp": "3.0.0",
+    "@browserbasehq/stagehand": "4.0.2",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@sinclair/typebox": "^0.34.0",
     "cross-spawn": "^7.0.6",
+    "jszip": "^3.10.1",
     "mammoth": "^1.12.1",
     "npm": "11.19.1",
     "pdfjs-dist": "^4.10.38",

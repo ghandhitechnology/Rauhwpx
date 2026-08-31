@@ -94,6 +94,10 @@ test('와이어 값은 항상 두 프로바이더가 있는 형태로 정규화�
   assert.match(bridge, /session5h: nullableNum\(limit\['session5h'\]\)/);
   assert.match(bridge, /function readCliproxyStatus\(value: unknown\): CliproxyStatus/);
   assert.match(bridge, /source: readUsageSource\(src\['source'\]\)/);
+  assert.match(bridge, /const out = Object\.create\(null\) as Record<string, UsageModelBreakdown>/);
+  assert.match(bridge, /MAX_USAGE_MODEL_ENTRIES = 512/);
+  assert.match(bridge, /for \(const model in source\)/);
+  assert.match(bridge, /model\.length > MAX_USAGE_MODEL_NAME_CHARS/);
 });
 
 test('사용량·프로바이더 타입과 SidebarEvent 항목이 types.ts 에 산다', () => {

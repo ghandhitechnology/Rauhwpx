@@ -97,7 +97,7 @@ test('ctl replaces an authenticated detached hub from an older protocol', { time
     }
     if (req.url === '/shutdown' && req.method === 'POST') {
       res.setHeader('connection', 'close');
-      res.end(JSON.stringify({ status: 'shutting-down' }), () => {
+      res.end(JSON.stringify({ status: 'prepared', launchId: 'legacy-hub' }), () => {
         legacy.closeAllConnections?.();
         legacy.close();
       });
@@ -173,6 +173,24 @@ test('ctl start/stop roundtrip without holding the terminal', { timeout: 30_000 
     await stopHubByPort(port, { pidPath: join(runDir, 'rhwp-agent.pid') });
     await removeRunDir(runDir);
   }
+});
+
+test('ctl restart does not spawn after detached cleanup is unproven', async () => {
+  const stdout = { chunks: [], write(chunk) { this.chunks.push(String(chunk)); } };
+  let startCalls = 0;
+  const restarted = await runCtl('restart', {
+    json: true,
+    stdout,
+    stopHub: async () => ({ stopped: false, ready: false, pid: 4242 }),
+    startHub: async () => {
+      startCalls += 1;
+      return { started: true, ready: true, pid: 5252 };
+    },
+  });
+
+  assert.equal(restarted.code, 1);
+  assert.equal(restarted.result.error, 'hub-cleanup-unproven');
+  assert.equal(startCalls, 0);
 });
 
 test('Windows temp cleanup retries lock errors without remapping the code', async () => {

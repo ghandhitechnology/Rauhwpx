@@ -24,6 +24,11 @@ import {
   NEW_DOCUMENT_FILE_NAME,
   isUntitledNewDocumentName,
 } from './document-names';
+import {
+  INSERTED_IMAGE_MAX_BYTES,
+  cancelResponseBody,
+  readResponseBytesWithLimit,
+} from './document-input-limits';
 
 /**
  * 문단 병합으로 사라진 문단의 스코프 메타데이터 (Task #2342).
@@ -199,6 +204,50 @@ function installCanvasFontSubstitution(): void {
   canvasFontSubstitutionInstalled = true;
 }
 
+export interface PreparedWasmDocument {
+  readonly info: DocumentInfo;
+  dispose(): void;
+}
+
+interface PreparedWasmDocumentValue {
+  document: HwpDocument;
+  fileName: string;
+  documentDigest: string;
+  info: DocumentInfo;
+}
+
+class PreparedWasmDocumentState implements PreparedWasmDocument {
+  constructor(
+    private document: HwpDocument | null,
+    readonly fileName: string,
+    readonly documentDigest: string,
+    readonly info: DocumentInfo,
+  ) {}
+
+  take(): PreparedWasmDocumentValue {
+    const document = this.document;
+    if (!document) throw new Error('Prepared document has already been consumed or disposed');
+    this.document = null;
+    return {
+      document,
+      fileName: this.fileName,
+      documentDigest: this.documentDigest,
+      info: this.info,
+    };
+  }
+
+  dispose(): void {
+    const document = this.document;
+    this.document = null;
+    if (!document) return;
+    try {
+      document.free();
+    } catch {
+      /* noop */
+    }
+  }
+}
+
 export class WasmBridge {
   private doc: HwpDocument | null = null;
   private documentGeneration = 0;
@@ -294,13 +343,88 @@ export class WasmBridge {
   }
 
   loadDocument(data: Uint8Array, fileName?: string): DocumentInfo {
+    return this.loadDocumentFromFactory(data, fileName, (bytes) => new HwpDocument(bytes));
+  }
+
+  /**
+   * Parse a document without replacing the active one. The caller must either
+   * adopt or dispose the returned value. Portable-history import uses this to
+   * validate once, then hand the same WASM document to the normal load path.
+   */
+  prepareDocument(data: Uint8Array, fileName?: string): PreparedWasmDocument {
+    const nextFileName = fileName ?? FALLBACK_DOCUMENT_FILE_NAME;
+    const nextDocumentDigest = `blake3:${bytesToHex(blake3(data))}`;
+    let nextDoc: HwpDocument | null = null;
+    try {
+      nextDoc = new HwpDocument(data);
+      nextDoc.convertToEditable();
+      this.ensureParagraphStableIdsFor(nextDoc);
+      nextDoc.setFileName(nextFileName);
+      const info = JSON.parse(nextDoc.getDocumentInfo()) as DocumentInfo;
+      return new PreparedWasmDocumentState(
+        nextDoc,
+        nextFileName,
+        nextDocumentDigest,
+        info,
+      );
+    } catch (error) {
+      if (nextDoc) {
+        try {
+          nextDoc.free();
+        } catch {
+          /* noop */
+        }
+      }
+      throw error;
+    }
+  }
+
+  adoptPreparedDocument(prepared: PreparedWasmDocument): DocumentInfo {
+    if (!(prepared instanceof PreparedWasmDocumentState)) {
+      throw new Error('Prepared document was not created by this WASM bridge');
+    }
+    const next = prepared.take();
+    this.documentGeneration++;
+    if (this.doc) {
+      try {
+        this.doc.free();
+      } catch {
+        /* noop */
+      }
+    }
+    this.doc = next.document;
+    this._fileName = next.fileName;
+    this._currentFileHandle = null;
+    this._documentDigest = next.documentDigest;
+    console.log(`[WasmBridge] 문서 로드: ${next.info.pageCount}페이지`);
+    void this.populateExternalImagesFromDevServer(next.document, this.documentGeneration);
+    return next.info;
+  }
+
+  /** Parse one exact handle read with the larger local-file envelope. */
+  loadTrustedLocalFileOnce(data: Uint8Array, fileName?: string): DocumentInfo {
+    const constructor = HwpDocument as unknown as typeof HwpDocument & {
+      fromTrustedLocalFileBytes(bytes: Uint8Array): HwpDocument;
+    };
+    return this.loadDocumentFromFactory(
+      data,
+      fileName,
+      (bytes) => constructor.fromTrustedLocalFileBytes(bytes),
+    );
+  }
+
+  private loadDocumentFromFactory(
+    data: Uint8Array,
+    fileName: string | undefined,
+    createDocument: (bytes: Uint8Array) => HwpDocument,
+  ): DocumentInfo {
     this.releaseDocument();
     const nextFileName = fileName ?? FALLBACK_DOCUMENT_FILE_NAME;
     const nextDocumentDigest = `blake3:${bytesToHex(blake3(data))}`;
     let nextDoc: HwpDocument | null = null;
 
     try {
-      nextDoc = new HwpDocument(data);
+      nextDoc = createDocument(data);
       this.doc = nextDoc;
       this._fileName = nextFileName;
       this._documentDigest = nextDocumentDigest;
@@ -367,18 +491,23 @@ export class WasmBridge {
           const url = `/samples/${name}`;
           const res = await fetch(url);
           if (!res.ok) {
+            await cancelResponseBody(res, `HTTP ${res.status}`);
             console.warn(`[WasmBridge] 외부 image fetch 실패: ${url} (status=${res.status})`);
             continue;
           }
-          const buf = await res.arrayBuffer();
+          const bytes = await readResponseBytesWithLimit(
+            res,
+            INSERTED_IMAGE_MAX_BYTES,
+            '외부 이미지',
+          );
           if (this.doc !== doc || this.documentGeneration !== generation) return;
           // [Task #741 후속] OS 절대 경로는 X-File-Path header로 전달받아 dialog에
           // 표시해 한컴 viewer와 정합 (resolved local path 기준).
           const filePathHeader = res.headers.get('X-File-Path');
           const displayPath = filePathHeader ? decodeURI(filePathHeader) : '';
-          const injected = doc.injectExternalImage(name, new Uint8Array(buf), displayPath);
+          const injected = doc.injectExternalImage(name, bytes, displayPath);
           totalInjected += injected;
-          console.log(`[WasmBridge] 외부 image inject: ${name} → ${displayPath || url} (${buf.byteLength} bytes, ${injected}개)`);
+          console.log(`[WasmBridge] 외부 image inject: ${name} → ${displayPath || url} (${bytes.byteLength} bytes, ${injected}개)`);
         } catch (e) {
           console.warn(`[WasmBridge] 외부 image inject 실패: ${name}`, e);
         }
@@ -1120,7 +1249,11 @@ export class WasmBridge {
   /** 비교/스냅샷 생성 직전에만 stable_id를 보정한다(문서 로드 시 자동 호출 금지). */
   ensureParagraphStableIds(): void {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
-    const d = this.doc as unknown as { ensureParagraphStableIds?: () => void };
+    this.ensureParagraphStableIdsFor(this.doc);
+  }
+
+  private ensureParagraphStableIdsFor(doc: HwpDocument): void {
+    const d = doc as unknown as { ensureParagraphStableIds?: () => void };
     if (typeof d.ensureParagraphStableIds === 'function') {
       try {
         d.ensureParagraphStableIds();

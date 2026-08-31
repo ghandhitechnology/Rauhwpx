@@ -15,6 +15,7 @@ export async function executeReferenceTool({ tool, args, store, session }) {
     return { handled: true, result: { files: store.listAccessible(scopes) } };
   }
   if (tool === 'search_reference_files') {
+    await store.activateScopes(scopes);
     return {
       handled: true,
       result: {

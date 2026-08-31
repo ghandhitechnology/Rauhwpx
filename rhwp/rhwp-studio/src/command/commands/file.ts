@@ -41,6 +41,7 @@ import {
   pickOpenFileHandle,
   readFileFromHandle,
   saveDocumentToFileSystem,
+  writeBlobToHandle,
   type FileSystemDirectoryHandleLike,
   type FileSystemFileHandleLike,
   type SaveDocumentResult,
@@ -57,13 +58,13 @@ import type { ProjectFileClaim } from '@/project-file/identity';
 import {
   claimNativeProbe,
   isDesktopApp,
+  pickDesktopLegacyHistoryFolder,
   pickDesktopNativeProjectFile,
+  pickDesktopPortableHistorySaveFile,
   readNativeProbe,
   restoreNativeDocument,
   searchNearbyNativeDocuments,
   verifyNativePick,
-  saveDesktopPortableHistoryFile,
-  writeDesktopPortableHistoryFile,
 } from '@/desktop-integration';
 import {
   moveToLibraryDocument,
@@ -73,8 +74,8 @@ import {
 import {
   isPortableHistoryFileName,
   PORTABLE_HISTORY_FOLDER_HISTORY_NAME,
+  PORTABLE_HISTORY_MAX_BYTES,
   PORTABLE_HISTORY_MIME_TYPE,
-  type PortableHistoryFolder,
 } from '@/versioning/portable-bundle';
 
 async function openFileViaPicker(services: CommandServices): Promise<void> {
@@ -113,6 +114,67 @@ async function openFileViaPicker(services: CommandServices): Promise<void> {
     const msg = err instanceof Error ? err.message : String(err);
     console.error('[file:open] 열기 실패:', msg);
     alert(`파일 열기에 실패했습니다:\n${msg}`);
+  }
+}
+
+async function importLegacyHistoryFolder(services: CommandServices): Promise<void> {
+  let handle: FileSystemFileHandleLike | null | undefined;
+  try {
+    if (!await confirmSaveBeforeReplacingDocument(services)) return;
+    handle = await pickDesktopLegacyHistoryFolder();
+    if (handle === null) return;
+
+    if (handle) {
+      const { bytes, name } = await readFileFromHandle(handle);
+      services.eventBus.emit('open-document-bytes', {
+        bytes,
+        fileName: name,
+        fileHandle: handle,
+        skipUnsavedGuard: true,
+      });
+      return;
+    }
+
+    const windowLike = window as FileSystemWindowLike;
+    if (!windowLike.showDirectoryPicker) {
+      showToast({
+        message: '이 환경에서는 이전 기록 폴더를 선택할 수 없습니다.',
+        durationMs: 3500,
+      });
+      return;
+    }
+    let directory: FileSystemDirectoryHandleLike;
+    try {
+      directory = await windowLike.showDirectoryPicker({
+        id: 'rhwpx-legacy-history-import',
+        mode: 'read',
+      });
+    } catch (error) {
+      if (isUserCancelError(error)) return;
+      throw error;
+    }
+    if (!isPortableHistoryFileName(directory.name)) {
+      throw new Error('.rhwpx 확장자를 가진 이전 기록 폴더를 선택해야 합니다.');
+    }
+    const historyHandle = await directory.getFileHandle(PORTABLE_HISTORY_FOLDER_HISTORY_NAME);
+    const historyFile = await historyHandle.getFile();
+    if (historyFile.size <= 0 || historyFile.size > PORTABLE_HISTORY_MAX_BYTES) {
+      throw new Error('이전 기록 파일이 비어 있거나 128 MiB 한도를 초과했습니다.');
+    }
+    const bytes = new Uint8Array(await historyFile.arrayBuffer());
+    if (bytes.byteLength !== historyFile.size) {
+      throw new Error('읽는 동안 이전 기록 파일이 변경되었습니다.');
+    }
+    services.eventBus.emit('open-document-bytes', {
+      bytes,
+      fileName: directory.name,
+      skipUnsavedGuard: true,
+    });
+  } catch (error) {
+    await handle?.releaseUnusedSaveTarget?.().catch(() => {});
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('[file:import-legacy-history] 가져오기 실패:', message);
+    alert(`이전 기록 폴더를 가져오지 못했습니다:\n${message}`);
   }
 }
 
@@ -336,59 +398,50 @@ async function saveWithHistory(services: CommandServices): Promise<SaveCurrentDo
       throw new Error('버전 기록 서비스를 사용할 수 없습니다.');
     }
 
-    const bundle = await services.createPortableHistoryBundle();
+    const archive = await services.createPortableHistoryBundle();
     const currentHandle = services.wasm.currentFileHandle;
+    const historyBlob = new Blob([archive.bytes as unknown as BlobPart], {
+      type: PORTABLE_HISTORY_MIME_TYPE,
+    });
     if (
-      currentHandle?.identityKind === 'native-path'
+      currentHandle
       && isPortableHistoryFileName(currentHandle.name)
     ) {
-      const written = await writeDesktopPortableHistoryFile(currentHandle, bundle);
-      if (written === 'saved') {
-        services.wasm.fileName = currentHandle.name;
-        services.documentState.markClean('save-with-history');
-        services.eventBus.emit('document-context-changed');
-        services.eventBus.emit('document-saved', {
-          reason: 'save-with-history',
-          fileName: currentHandle.name,
-          sourceFormat: services.wasm.getSourceFormat(),
-        });
-        showToast({ message: '문서와 전체 버전 기록을 저장했습니다.', durationMs: 3000 });
-        return 'saved';
-      }
-    }
-
-    const desktopResult = await saveDesktopPortableHistoryFile(bundle);
-    if (desktopResult === 'cancelled') return 'cancelled';
-    if (desktopResult === 'saved') {
-      showToast({ message: '문서와 전체 버전 기록을 폴더로 저장했습니다.', durationMs: 3000 });
+      await writeBlobToHandle(currentHandle, historyBlob, services.validateSaveHandle);
+      completePortableHistorySave(services, currentHandle, currentHandle.name);
       return 'saved';
     }
 
     const windowLike = window as FileSystemWindowLike;
-    if (!isDesktopApp() && windowLike.showDirectoryPicker) {
+    let targetHandle = await pickDesktopPortableHistorySaveFile(archive);
+    if (targetHandle === null) return 'cancelled';
+    if (!targetHandle && windowLike.showSaveFilePicker) {
       try {
-        const picked = await windowLike.showDirectoryPicker({
-          id: 'rhwpx-history-bundle',
-          mode: 'readwrite',
+        targetHandle = await windowLike.showSaveFilePicker({
+          excludeAcceptAllOption: true,
+          suggestedName: archive.fileName,
+          types: [{
+            description: 'RauHWPX 기록 파일',
+            accept: { [PORTABLE_HISTORY_MIME_TYPE]: ['.rhwpx'] },
+          }],
         });
-        const folder = picked.name.toLowerCase().endsWith('.rhwpx')
-          ? picked
-          : await picked.getDirectoryHandle(bundle.folderName, { create: true });
-        await writePortableHistoryFolderToDirectory(folder, bundle);
       } catch (error) {
         if (isUserCancelError(error)) return 'cancelled';
         throw error;
       }
-      showToast({ message: '문서와 전체 버전 기록을 폴더로 저장했습니다.', durationMs: 3000 });
+    }
+
+    if (targetHandle) {
+      if (!isPortableHistoryFileName(targetHandle.name)) {
+        await targetHandle.releaseUnusedSaveTarget?.().catch(() => {});
+        throw new Error('.rhwpx 확장자를 가진 기록 파일을 선택해야 합니다.');
+      }
+      await writeBlobToHandle(targetHandle, historyBlob, services.validateSaveHandle);
+      completePortableHistorySave(services, targetHandle, targetHandle.name);
       return 'saved';
     }
 
-    const history = bundle.files.find((file) => file.name === PORTABLE_HISTORY_FOLDER_HISTORY_NAME);
-    if (!history) throw new Error('버전 기록 묶음을 만들지 못했습니다.');
-    downloadBlob(
-      new Blob([history.bytes as unknown as BlobPart], { type: PORTABLE_HISTORY_MIME_TYPE }),
-      bundle.folderName,
-    );
+    downloadBlob(historyBlob, archive.fileName);
     showToast({ message: '문서와 전체 버전 기록을 저장했습니다.', durationMs: 3000 });
     return 'saved';
   } catch (error) {
@@ -397,16 +450,28 @@ async function saveWithHistory(services: CommandServices): Promise<SaveCurrentDo
   }
 }
 
-async function writePortableHistoryFolderToDirectory(
-  directory: FileSystemDirectoryHandleLike,
-  bundle: PortableHistoryFolder,
-): Promise<void> {
-  for (const file of bundle.files) {
-    const handle = await directory.getFileHandle(file.name, { create: true });
-    const writable = await handle.createWritable();
-    await writable.write(new Blob([file.bytes as unknown as BlobPart]));
-    await writable.close();
-  }
+function completePortableHistorySave(
+  services: CommandServices,
+  handle: FileSystemFileHandleLike,
+  fileName: string,
+): void {
+  const previousFileHandle = services.wasm.currentFileHandle;
+  services.wasm.currentFileHandle = handle;
+  services.wasm.fileName = fileName;
+  services.documentState.markClean('save-with-history');
+  services.eventBus.emit('document-context-changed');
+  services.eventBus.emit('document-saved', {
+    reason: 'save-with-history',
+    fileName,
+    sourceFormat: services.wasm.getSourceFormat(),
+  });
+  services.eventBus.emit('document-file-handle-saved', {
+    fileHandle: handle,
+    previousFileHandle,
+    fileName,
+    sourceFormat: services.wasm.getSourceFormat(),
+  });
+  showToast({ message: '문서와 전체 버전 기록을 저장했습니다.', durationMs: 3000 });
 }
 
 function reportSaveError(scope: string, error: unknown): void {
@@ -838,6 +903,11 @@ export const fileCommands: CommandDef[] = [
     id: 'file:open',
     label: '열기',
     execute: openFileViaPicker,
+  },
+  {
+    id: 'file:import-legacy-history',
+    label: '이전 기록 폴더 가져오기',
+    execute: importLegacyHistoryFolder,
   },
   {
     id: 'file:open-recent',

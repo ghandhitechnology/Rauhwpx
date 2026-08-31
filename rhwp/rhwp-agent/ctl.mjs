@@ -23,7 +23,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_AGENT_DIR = HERE;
 const DEFAULT_REPO_ROOT = resolve(HERE, '..', '..');
 const DEFAULT_SCRIPT = resolve(HERE, 'server.mjs');
-export const EXPECTED_HUB_PROTOCOL = 4;
+export const EXPECTED_HUB_PROTOCOL = 5;
 
 export const CTL_COMMANDS = ['start', 'stop', 'restart', 'status'];
 
@@ -67,6 +67,8 @@ export async function runCtl(command, {
   stderr = process.stderr,
   env = process.env,
   home = env.HOME || env.USERPROFILE,
+  stopHub = stopHubByPort,
+  startHub = startDetachedHub,
 } = {}) {
   const paths = hubRunPaths(runDir);
   const token = env.RHWP_AGENT_TOKEN ?? env.RHWP_AGENT_DEV_TOKEN ?? 'dev';
@@ -95,18 +97,28 @@ export async function runCtl(command, {
   }
 
   if (command === 'stop') {
-    const result = await stopHubByPort(port, { pidPath: paths.pid, token });
+    const result = await stopHub(port, { pidPath: paths.pid, token });
+    const cleanupUnproven = result.pid !== null && !result.stopped;
     return print(
-      result,
-      result.pid
+      cleanupUnproven ? { ...result, error: 'hub-cleanup-unproven' } : result,
+      cleanupUnproven
+        ? [`허브 프로세스 트리 종료를 확인하지 못했습니다 (pid ${result.pid}). 재시작하지 않습니다.`]
+        : result.pid
         ? [`허브를 종료했습니다 (pid ${result.pid}).`]
         : ['허브가 실행 중이지 않습니다.'],
-      0,
+      cleanupUnproven ? 1 : 0,
     );
   }
 
   if (command === 'restart') {
-    await stopHubByPort(port, { pidPath: paths.pid, token });
+    const stopped = await stopHub(port, { pidPath: paths.pid, token });
+    if (stopped.pid !== null && !stopped.stopped) {
+      return print(
+        { ...stopped, error: 'hub-cleanup-unproven' },
+        [`허브 프로세스 트리 종료를 확인하지 못해 재시작하지 않습니다 (pid ${stopped.pid}).`],
+        1,
+      );
+    }
   }
 
   if (!existsSync(scriptPath)) {
@@ -114,7 +126,7 @@ export async function runCtl(command, {
     return print(result, [`허브 스크립트를 찾지 못했습니다: ${scriptPath}`], 1);
   }
 
-  const result = await startDetachedHub({
+  const result = await startHub({
     port,
     scriptPath,
     agentDir,

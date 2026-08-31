@@ -282,6 +282,14 @@ impl HwpDocument {
         DocumentCore::from_bytes(data).map(|core| HwpDocument { core })
     }
 
+    pub fn from_local_file_bytes(data: &[u8]) -> Result<HwpDocument, HwpError> {
+        DocumentCore::from_local_file_bytes(data).map(|core| HwpDocument { core })
+    }
+
+    pub(crate) fn from_regenerated_bytes(data: &[u8]) -> Result<HwpDocument, HwpError> {
+        DocumentCore::from_regenerated_bytes(data).map(|core| HwpDocument { core })
+    }
+
     pub fn find_initial_column_def(paragraphs: &[Paragraph]) -> ColumnDef {
         DocumentCore::find_initial_column_def(paragraphs)
     }
@@ -427,6 +435,15 @@ impl HwpDocument {
         DocumentCore::from_bytes(data)
             .map(|core| HwpDocument { core })
             .map_err(|e| e.into())
+    }
+
+    /// Open bytes from one exact local file approved by the native host.
+    /// The host must consume its approval after this call.
+    #[wasm_bindgen(js_name = fromTrustedLocalFileBytes)]
+    pub fn from_trusted_local_file_bytes(data: &[u8]) -> Result<HwpDocument, JsValue> {
+        DocumentCore::from_local_file_bytes(data)
+            .map(|core| HwpDocument { core })
+            .map_err(|error| error.into())
     }
 
     /// 현재 파일/편집 세션 정체성을 유지한 채 문서 내용만 교체한다.

@@ -51,9 +51,10 @@ test('bundled copy-layout skill is a valid explicit slash-command skill', () => 
   assert.match(markdown, /Hard safety\/readability gates/);
   assert.match(markdown, /publish nothing and complete the job as failed/);
   assert.match(markdown, /safe and readable candidate may complete as `best_effort`/);
-  assert.match(markdown, /Never run another script/);
-  assert.match(markdown, /--inspect-text/);
-  assert.match(markdown, /--text-plan/);
+  assert.match(markdown, /Never use Bash, a shell, Python/);
+  assert.match(markdown, /`run_copy_layout_helper`/);
+  assert.match(markdown, /`action: "inspect"`/);
+  assert.match(markdown, /`action: "generate"`/);
   assert.match(markdown, /"default": "keep"/);
   assert.match(markdown, /`text_decisions\.kept`/);
   assert.match(markdown, /preserve-by-default policy/);
@@ -95,6 +96,8 @@ test('copy-layout helper runs without site packages and defers only an intermedi
   assert.equal(availability.status, 0, availability.stderr || availability.stdout);
   const result = spawnSync(python, ['-S', fileURLToPath(helperTestUrl)], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr || result.stdout);
-  assert.match(result.stderr, /Ran 16 tests/);
+  const count = /Ran (\d+) tests/.exec(result.stderr);
+  assert.ok(count, result.stderr);
+  assert.ok(Number(count[1]) >= 31, `expected at least 31 helper tests, got ${count[1]}`);
   assert.match(result.stderr, /OK/);
 });

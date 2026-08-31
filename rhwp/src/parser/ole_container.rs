@@ -6,6 +6,22 @@
 use cfb::CompoundFile;
 use std::io::{Cursor, Read};
 
+use crate::parser::cfb_reader::validate_cfb_directory_entry_budget;
+use crate::parser::limits::{
+    MAX_BINARY_BYTES, MAX_CONTAINER_BYTES, MAX_STRUCTURAL_BYTES, MAX_THUMBNAIL_BYTES,
+};
+
+const MAX_RELEVANT_OLE_STREAMS: usize = 16;
+
+fn read_limited<R: Read>(reader: &mut R, max_bytes: usize) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader
+        .take((max_bytes as u64).saturating_add(1))
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() <= max_bytes).then_some(bytes)
+}
+
 /// OLE 컨테이너에서 추출한 네이티브 이미지 종류
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeImageKind {
@@ -61,91 +77,124 @@ impl OleContainer {
 /// 입력: CFB 매직(`D0CF11E0...`)로 시작하는 바이트 슬라이스
 /// 반환: 내부 스트림이 하나라도 존재하면 `Some(container)`, CFB 파싱 실패 시 `None`
 pub fn parse_ole_container(cfb_bytes: &[u8]) -> Option<OleContainer> {
-    if cfb_bytes.len() < 8 {
+    if cfb_bytes.len() < 8 || cfb_bytes.len() as u64 > MAX_CONTAINER_BYTES {
         return None;
     }
+    validate_cfb_directory_entry_budget(cfb_bytes).ok()?;
     let cursor = Cursor::new(cfb_bytes);
     let mut comp = CompoundFile::open(cursor).ok()?;
 
     let mut container = OleContainer::default();
 
     // 최상위 스트림 목록 수집
-    let entries: Vec<String> = comp
+    let mut entries: Vec<String> = comp
         .walk()
-        .filter(|e| e.is_stream())
-        .map(|e| e.path().to_string_lossy().to_string())
+        .filter(|entry| entry.is_stream())
+        .filter_map(|entry| {
+            let path = entry.path().to_string_lossy();
+            let name = path.trim_start_matches('/');
+            (name == "\u{0002}OlePres000"
+                || name.ends_with("OlePres000")
+                || name == "OOXMLChartContents"
+                || name == "Contents"
+                || name == "\u{0001}Ole10Native"
+                || name.ends_with("Ole10Native"))
+            .then(|| path.into_owned())
+        })
+        .take(MAX_RELEVANT_OLE_STREAMS)
         .collect();
+    // Prefer a real Ole10Native payload over a DIB synthesized from the preview,
+    // regardless of attacker-controlled directory order.
+    entries.sort_by_key(|path| (!path.ends_with("Ole10Native")) as u8);
+
+    let mut retained_bytes = 0u64;
 
     for path in entries {
         let name = path.trim_start_matches('/');
         if name == "\u{0002}OlePres000" || name.ends_with("OlePres000") {
+            if container.has_preview() {
+                continue;
+            }
             if let Ok(mut s) = comp.open_stream(&path) {
-                let mut buf = Vec::new();
-                if s.read_to_end(&mut buf).is_ok() {
+                let remaining = MAX_CONTAINER_BYTES.saturating_sub(retained_bytes) as usize;
+                let limit = MAX_THUMBNAIL_BYTES.min(remaining);
+                if s.len() <= limit as u64 {
+                    let Some(buf) = read_limited(&mut s, limit) else {
+                        continue;
+                    };
                     container.preview_emf = strip_ole_presentation_header(&buf);
                     // [#3363] EMF 부재 시 WMF 프레젠테이션 폴백 (HWP3 내장 OLE·글맵시)
                     if container.preview_emf.is_none() {
                         container.preview_wmf = strip_ole_presentation_header_wmf(&buf);
                     }
+                    let mut newly_retained = container
+                        .preview_emf
+                        .as_ref()
+                        .or(container.preview_wmf.as_ref())
+                        .map_or(0, Vec::len);
+                    if container.preview_emf.is_none()
+                        && container.preview_wmf.is_none()
+                        && container.native_image.is_none()
+                    {
+                        if let Some(bmp) = extract_dib_as_bmp(&buf) {
+                            if bmp.len() <= remaining {
+                                newly_retained = bmp.len();
+                                container.native_image = Some((NativeImageKind::Bmp, bmp));
+                            }
+                        }
+                    }
+                    retained_bytes = retained_bytes.saturating_add(newly_retained as u64);
                 }
             }
-        } else if name == "OOXMLChartContents" {
+        } else if name == "OOXMLChartContents" && container.ooxml_chart.is_none() {
             if let Ok(mut s) = comp.open_stream(&path) {
-                let mut buf = Vec::new();
-                if s.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
+                let remaining = MAX_CONTAINER_BYTES.saturating_sub(retained_bytes) as usize;
+                let limit = MAX_STRUCTURAL_BYTES.min(remaining);
+                if s.len() <= limit as u64 {
+                    let Some(buf) = read_limited(&mut s, limit) else {
+                        continue;
+                    };
+                    if buf.is_empty() {
+                        continue;
+                    }
+                    retained_bytes = retained_bytes.saturating_add(buf.len() as u64);
                     container.ooxml_chart = Some(buf);
                 }
             }
-        } else if name == "Contents" {
+        } else if name == "Contents" && container.raw_contents.is_none() {
             if let Ok(mut s) = comp.open_stream(&path) {
-                let mut buf = Vec::new();
-                if s.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
+                let remaining = MAX_CONTAINER_BYTES.saturating_sub(retained_bytes) as usize;
+                let limit = MAX_BINARY_BYTES.min(remaining);
+                if s.len() <= limit as u64 {
+                    let Some(buf) = read_limited(&mut s, limit) else {
+                        continue;
+                    };
+                    if buf.is_empty() {
+                        continue;
+                    }
+                    retained_bytes = retained_bytes.saturating_add(buf.len() as u64);
                     container.raw_contents = Some(buf);
                 }
             }
         } else if name == "\u{0001}Ole10Native" || name.ends_with("Ole10Native") {
-            if let Ok(mut s) = comp.open_stream(&path) {
-                let mut buf = Vec::new();
-                if s.read_to_end(&mut buf).is_ok() && buf.len() > 4 {
-                    // Ole10Native: [u32 LE length][payload] — payload가 BMP/PNG/JPEG 등 네이티브 바이트
-                    let inner = &buf[4..];
-                    if let Some(img) = detect_native_image(inner) {
-                        container.native_image = Some(img);
-                    }
-                }
+            if container.native_image.is_some() {
+                continue;
             }
-        }
-    }
-
-    // preview_emf가 없으면 OlePres000에서 DIB 추출 시도 → BMP로 포장
-    if container.preview_emf.is_none() && container.native_image.is_none() {
-        // OlePres000을 다시 읽어 DIB 헤더를 찾아본다
-        // (이미 preview_emf가 None인 경우만)
-        if let Ok(entries) = std::panic::catch_unwind(|| {
-            let cursor = Cursor::new(cfb_bytes);
-            CompoundFile::open(cursor).ok().map(|mut comp| {
-                comp.walk()
-                    .filter(|e| e.is_stream())
-                    .map(|e| e.path().to_string_lossy().to_string())
-                    .collect::<Vec<_>>()
-            })
-        }) {
-            if let Some(Some(paths)) = Some(entries) {
-                let cursor = Cursor::new(cfb_bytes);
-                if let Ok(mut comp2) = CompoundFile::open(cursor) {
-                    for path in &paths {
-                        let name = path.trim_start_matches('/');
-                        if name == "\u{0002}OlePres000" || name.ends_with("OlePres000") {
-                            if let Ok(mut s) = comp2.open_stream(path) {
-                                let mut buf = Vec::new();
-                                if s.read_to_end(&mut buf).is_ok() {
-                                    if let Some(bmp) = extract_dib_as_bmp(&buf) {
-                                        container.native_image = Some((NativeImageKind::Bmp, bmp));
-                                        break;
-                                    }
-                                }
-                            }
-                        }
+            if let Ok(mut s) = comp.open_stream(&path) {
+                let remaining = MAX_CONTAINER_BYTES.saturating_sub(retained_bytes) as usize;
+                let limit = MAX_BINARY_BYTES.min(remaining);
+                if s.len() <= limit as u64 {
+                    let Some(mut buf) = read_limited(&mut s, limit) else {
+                        continue;
+                    };
+                    if buf.len() <= 4 {
+                        continue;
+                    }
+                    // Ole10Native: [u32 LE length][payload] — payload가 BMP/PNG/JPEG 등 네이티브 바이트
+                    buf.drain(..4);
+                    if let Some(img) = detect_native_image_owned(buf) {
+                        retained_bytes = retained_bytes.saturating_add(img.1.len() as u64);
+                        container.native_image = Some(img);
                     }
                 }
             }
@@ -179,20 +228,24 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
 
 /// 바이트 슬라이스의 선두 매직으로 이미지 포맷을 판별
 pub fn detect_native_image(data: &[u8]) -> Option<(NativeImageKind, Vec<u8>)> {
-    if data.len() < 4 {
+    if data.len() < 4 || data.len() > MAX_BINARY_BYTES {
         return None;
     }
+    detect_native_image_owned(data.to_vec())
+}
+
+fn detect_native_image_owned(data: Vec<u8>) -> Option<(NativeImageKind, Vec<u8>)> {
     if data.starts_with(b"BM") {
-        return Some((NativeImageKind::Bmp, data.to_vec()));
+        return Some((NativeImageKind::Bmp, data));
     }
     if data.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
-        return Some((NativeImageKind::Png, data.to_vec()));
+        return Some((NativeImageKind::Png, data));
     }
     if data.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        return Some((NativeImageKind::Jpeg, data.to_vec()));
+        return Some((NativeImageKind::Jpeg, data));
     }
     if data.starts_with(b"GIF8") {
-        return Some((NativeImageKind::Gif, data.to_vec()));
+        return Some((NativeImageKind::Gif, data));
     }
     None
 }
@@ -212,7 +265,7 @@ fn extract_dib_as_bmp(data: &[u8]) -> Option<Vec<u8>> {
         // 유효성: width/height가 현실적인 범위
         let w = i32::from_le_bytes([data[i + 4], data[i + 5], data[i + 6], data[i + 7]]);
         let h = i32::from_le_bytes([data[i + 8], data[i + 9], data[i + 10], data[i + 11]]);
-        if w <= 0 || w > 100_000 || h.abs() == 0 || h.abs() > 100_000 {
+        if w <= 0 || w > 100_000 || h == 0 || h.unsigned_abs() > 100_000 {
             continue;
         }
         let bit_count = u16::from_le_bytes([data[i + 14], data[i + 15]]);
@@ -348,6 +401,26 @@ mod tests {
         // CFB 매직이 아닌 임의 바이트
         let bytes: Vec<u8> = (0..128u8).collect();
         assert!(parse_ole_container(&bytes).is_none());
+    }
+
+    #[test]
+    fn dib_minimum_signed_height_is_rejected_without_abs_overflow() {
+        let mut data = vec![0u8; 64];
+        data[0..4].copy_from_slice(&40u32.to_le_bytes());
+        data[4..8].copy_from_slice(&1i32.to_le_bytes());
+        data[8..12].copy_from_slice(&i32::MIN.to_le_bytes());
+        data[14..16].copy_from_slice(&24u16.to_le_bytes());
+
+        assert!(extract_dib_as_bmp(&data).is_none());
+    }
+
+    #[test]
+    fn nested_stream_reader_rejects_the_first_byte_over_its_budget() {
+        assert_eq!(
+            read_limited(&mut Cursor::new([1u8, 2, 3]), 3),
+            Some(vec![1, 2, 3])
+        );
+        assert!(read_limited(&mut Cursor::new([1u8, 2, 3, 4]), 3).is_none());
     }
 
     #[test]

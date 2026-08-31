@@ -190,8 +190,8 @@ pub fn build_inventory(path: &Path, section_filter: Option<u32>) -> Result<Hwp5I
         .and_then(|value| value.to_str())
         .unwrap_or("unknown")
         .to_string();
-    let bytes =
-        fs::read(path).map_err(|error| format!("파일 읽기 실패 - {source_path}: {error}"))?;
+    let bytes = crate::parser::limits::read_local_file_once(path)
+        .map_err(|error| format!("파일 읽기 실패 - {source_path}: {error}"))?;
 
     let mut cfb = CfbReader::open(&bytes).map_err(|error| format!("CFB 열기 실패: {error}"))?;
     let stream_paths = cfb.list_streams();

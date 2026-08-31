@@ -17,6 +17,17 @@ impl ByteWriter {
         ByteWriter { buf: Vec::new() }
     }
 
+    /// Create a writer whose complete payload capacity is reserved fallibly up
+    /// front. Callers that have computed an exact record size can then use the
+    /// normal write methods without any hidden growth allocation.
+    pub(crate) fn with_capacity_exact(capacity: usize) -> io::Result<Self> {
+        let mut buf = Vec::new();
+        buf.try_reserve_exact(capacity).map_err(|error| {
+            io::Error::other(format!("HWP record payload allocation failed: {error}"))
+        })?;
+        Ok(Self { buf })
+    }
+
     /// 현재 쓰기 위치 (바이트 수)
     pub fn position(&self) -> usize {
         self.buf.len()
@@ -68,17 +79,10 @@ impl ByteWriter {
     /// `ByteReader::read_hwp_string()`의 역방향.
     /// 형식: [u16 글자수] + [UTF-16LE 바이트 * 글자수]
     pub fn write_hwp_string(&mut self, s: &str) -> io::Result<()> {
-        let mut utf16: Vec<u16> = s.encode_utf16().collect();
-        // 글자수 필드가 u16이므로 초과 시 자르지 않으면 wraparound 로 레코드가 손상된다.
-        if utf16.len() > u16::MAX as usize {
-            utf16.truncate(u16::MAX as usize);
-            if matches!(utf16.last(), Some(&u) if (0xD800..=0xDBFF).contains(&u)) {
-                utf16.pop();
-            }
-        }
-        self.write_u16(utf16.len() as u16)?;
-        for code_unit in &utf16 {
-            self.write_u16(*code_unit)?;
+        let code_units = hwp_string_code_units(s);
+        self.write_u16(code_units as u16)?;
+        for code_unit in s.encode_utf16().take(code_units) {
+            self.write_u16(code_unit)?;
         }
         Ok(())
     }
@@ -103,6 +107,26 @@ impl ByteWriter {
     pub fn as_bytes(&self) -> &[u8] {
         &self.buf
     }
+}
+
+/// Number of UTF-16 code units representable by an HWP `WCHAR[]` string.
+/// Counting is allocation-free and avoids splitting a surrogate pair at the
+/// u16 length boundary.
+pub(crate) fn hwp_string_code_units(value: &str) -> usize {
+    let mut count = 0usize;
+    let mut last = 0u16;
+    for code_unit in value.encode_utf16().take(u16::MAX as usize) {
+        count += 1;
+        last = code_unit;
+    }
+    if count == u16::MAX as usize && (0xD800..=0xDBFF).contains(&last) {
+        count -= 1;
+    }
+    count
+}
+
+pub(crate) fn hwp_string_size(value: &str) -> usize {
+    2 + hwp_string_code_units(value) * 2
 }
 
 #[cfg(test)]

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -18,9 +19,22 @@ import {
   buildClaudeArgv,
   buildClaudeSdkOptions,
   createClaudeSession,
+  flushClaudeCredentialMirrors,
   prepareClaudeHome,
 } from '../agents/claude.mjs';
-import { createCodexSession, buildCodexArgv, prepareCodexHome } from '../agents/codex.mjs';
+import {
+  createCodexSession,
+  buildCodexArgv,
+  flushCodexCredentialMirror,
+  prepareCodexHome,
+} from '../agents/codex.mjs';
+import {
+  buildCodexAppServerArgv,
+  sandboxPolicy as codexAppServerSandboxPolicy,
+} from '../agents/codex-app-server.mjs';
+import { buildCursorCliConfig } from '../agents/cursor.mjs';
+import { buildGrokArgv } from '../agents/grok.mjs';
+import { buildPiArgv, buildPiEnv } from '../agents/pi.mjs';
 import {
   mcpCapabilityEnv,
   mcpRuntimeFor,
@@ -91,6 +105,7 @@ class FakeProcess extends EventEmitter {
     queueMicrotask(() => {
       this.signalCode = signal;
       this.emit('exit', null, signal);
+      this.emit('close', null, signal);
     });
     return true;
   }
@@ -98,10 +113,32 @@ class FakeProcess extends EventEmitter {
   emitJson(...events) {
     this.stdout.emit('data', events.map((event) => JSON.stringify(event)).join('\n') + '\n');
   }
+
+  exitOnly(code) {
+    this.exitCode = code;
+    this.emit('exit', code, null);
+  }
+
+  close(code) {
+    this.emit('close', code ?? this.exitCode, null);
+  }
+
+  exit(code) {
+    this.exitOnly(code);
+    this.close(code);
+  }
 }
 
 function nextTask() {
   return new Promise((resolve) => setImmediate(resolve));
+}
+
+async function waitUntil(predicate, message = 'condition did not settle') {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (predicate()) return;
+    await nextTask();
+  }
+  assert.fail(message);
 }
 
 test('MCP runtime defaults to the current executable for development', () => {
@@ -144,6 +181,47 @@ test('dedicated worker identity and exact tool profile reach every provider MCP 
   assert.match(codexEnv, /RHWP_AGENT_ROLE = "copy-layout-worker:job:secret"/);
 });
 
+test('safe copy-layout workers have job-local reads and no native write, shell, or web surface', () => {
+  const opts = {
+    ...baseOpts,
+    rootDir: '/tmp/job-only',
+    readOnlyRoots: ['/tmp/job-snapshot', '/tmp/job-generated'],
+    workflow: 'direct',
+    phase: 'implementing',
+    capabilityEpoch: 17,
+    permissionProfile: 'safe',
+    toolProfile: 'copy-layout-worker',
+    agentRole: 'copy-layout-worker:job:secret',
+  };
+
+  const claude = buildClaudeArgv(opts, sessionId, false);
+  assert.equal(argValue(claude, '--tools'), 'Read,Glob,Grep');
+  const claudeAllow = JSON.parse(argValue(claude, '--settings')).permissions.allow;
+  assert.equal(claudeAllow.some((rule) => /^(?:Bash|Web|Write|Edit|Agent|Workflow)/.test(rule)), false);
+
+  const codex = buildCodexArgv(opts, null);
+  assert.match(codexConfig(codex, 'sandbox_mode='), /read-only/);
+  for (const feature of ['multi_agent', 'shell_tool', 'unified_exec', 'code_mode_host', 'standalone_web_search']) {
+    assert.ok(codex.some((value, index) => value === '--disable' && codex[index + 1] === feature), feature);
+    const app = buildCodexAppServerArgv(opts);
+    assert.ok(app.some((value, index) => value === '--disable' && app[index + 1] === feature), `app:${feature}`);
+  }
+  assert.deepEqual(codexAppServerSandboxPolicy(opts), { type: 'readOnly', networkAccess: false });
+
+  const cursor = buildCursorCliConfig(opts, {});
+  assert.equal(cursor.permissions.allow.some((rule) => /^(?:Write|Shell|WebFetch)/.test(rule)), false);
+  assert.deepEqual(cursor.permissions.deny, ['Write(**)']);
+
+  const grok = buildGrokArgv(opts, 'session', false, '/tmp/prompt');
+  const grokAllow = grok.flatMap((value, index) => (value === '--allow' ? [grok[index + 1]] : []));
+  const grokDeny = grok.flatMap((value, index) => (value === '--deny' ? [grok[index + 1]] : []));
+  assert.equal(grokAllow.some((rule) => /^(?:Edit|WebFetch|WebSearch)/.test(rule)), false);
+  assert.deepEqual(grokDeny, ['Bash', 'Edit', 'Write']);
+
+  const pi = buildPiArgv({ ...opts, piRoot: '/tmp/pi' }, 'session');
+  assert.equal(pi[pi.indexOf('--exclude-tools') + 1], 'bash,edit,write');
+});
+
 test('image roots cannot smuggle extra allowlisted paths through the platform delimiter', () => {
   assert.throws(
     () => mcpCapabilityEnv({
@@ -155,6 +233,72 @@ test('image roots cannot smuggle extra allowlisted paths through the platform de
     }),
     /image root cannot contain the platform path delimiter/,
   );
+  assert.throws(
+    () => mcpCapabilityEnv({
+      ...baseOpts,
+      workflow: 'direct',
+      phase: 'implementing',
+      capabilityEpoch: 1,
+      readOnlyRoots: [`/tmp/private${path.delimiter}/etc`],
+    }),
+    /read-only root cannot contain the platform path delimiter/,
+  );
+});
+
+test('hub-private paths are readable but never writable across every provider profile', () => {
+  const privateRoot = '/tmp/Rau hub private/snapshots';
+  const opts = {
+    ...baseOpts,
+    readOnlyRoots: [privateRoot],
+    workflow: 'direct',
+    phase: 'implementing',
+    capabilityEpoch: 1,
+    permissionProfile: 'safe',
+  };
+  const imageRoots = [baseOpts.rootDir, privateRoot].join(path.delimiter);
+  assert.equal(mcpCapabilityEnv(opts).RHWP_IMAGE_ROOTS, imageRoots);
+
+  for (const planning of [false, true]) {
+    const profile = planning
+      ? { ...opts, workflow: 'plan', phase: 'planning' }
+      : opts;
+    const claude = buildClaudeArgv(profile, sessionId, false);
+    const claudeSettings = JSON.parse(argValue(claude, '--settings'));
+    assert.deepEqual(claudeSettings.sandbox.filesystem.allowRead, [baseOpts.rootDir, privateRoot]);
+    assert.equal(
+      claudeSettings.permissions.allow.includes(`Read(//tmp/Rau hub private/snapshots/**)`),
+      true,
+    );
+    assert.equal(
+      claudeSettings.permissions.allow.some((rule) => /^(?:Write|Edit)\(/.test(rule) && rule.includes(privateRoot)),
+      false,
+    );
+    assert.equal(claudeSettings.sandbox.filesystem.allowWrite.includes(privateRoot), false);
+
+    const codex = buildCodexArgv(profile, null);
+    assert.match(codexConfig(codex, 'mcp_servers.rhwp.env='), /Rau hub private\/snapshots/);
+    assert.equal(codex.some((value) => String(value).includes('writable_roots')), false);
+    const appPolicy = codexAppServerSandboxPolicy(profile);
+    assert.equal(appPolicy.writableRoots?.includes(privateRoot) ?? false, false);
+    if (!planning) assert.deepEqual(appPolicy.writableRoots, [baseOpts.rootDir]);
+    else assert.equal(appPolicy.type, 'readOnly');
+
+    const cursor = buildCursorCliConfig(profile, {});
+    assert.ok(cursor.permissions.allow.includes('Read(**)'));
+    assert.equal(cursor.permissions.allow.some((rule) => rule.startsWith(`Write(${privateRoot}`)), false);
+
+    const grok = buildGrokArgv(profile, 'session', false, '/tmp/prompt');
+    const grokAllows = grok.flatMap((value, index) => (value === '--allow' ? [grok[index + 1]] : []));
+    assert.ok(grokAllows.includes('Read(/tmp/Rau hub private/snapshots/**)'));
+    assert.equal(grokAllows.some((rule) => rule.startsWith(`Edit(${privateRoot}`)), false);
+
+    for (const agentName of ['pi', 'rau']) {
+      const env = buildPiEnv({ ...profile, piRoot: '/tmp/pi', agentName }, { PATH: '/usr/bin' });
+      assert.equal(env.RHWP_READONLY_ROOTS, privateRoot);
+      assert.equal(env.RHWP_ROOT_DIR, baseOpts.rootDir);
+      assert.equal(env.RHWP_AGENT_NAME, agentName);
+    }
+  }
 });
 
 test('execution mode validation rejects impossible direct workflow phases', () => {
@@ -305,10 +449,12 @@ test('Claude SDK projects plan and build intent independently from access', () =
     permissionProfile: 'unrestricted',
     requestUserInput,
     agentRole: 'chat',
+    providerEnv: { PATH: '/usr/bin', CLAUDE_CONFIG_DIR: '/host/custom-claude' },
   }, sessionId, false, new AbortController());
   assert.equal(plan.permissionMode, 'plan');
   assert.equal(plan.allowDangerouslySkipPermissions, undefined);
   assert.equal(plan.tools.includes('Write'), false);
+  assert.equal(plan.env.CLAUDE_CONFIG_DIR, path.join(testHome, '.claude'));
 
   const build = buildClaudeSdkOptions({
     ...baseOpts,
@@ -545,8 +691,7 @@ test('Codex recreates a purged isolated home before spawning', (t) => {
   assert.equal(spawnEnv.USERPROFILE, isolatedHome);
   assert.equal(spawnEnv.RHWP_SESSION_ID, 'studio-thread-42');
   assert.equal(spawnEnv.CODEX_HOME, codexHome);
-  child.exitCode = 0;
-  child.emit('exit', 0, null);
+  child.exit(0);
   session.dispose();
 });
 
@@ -561,18 +706,64 @@ test('Claude isolation seeds only the shared login files with a Windows copy fal
   writeFileSync(configPath, '{"account":"shared"}');
   t.after(() => rmSync(root, { recursive: true, force: true }));
 
-  prepareClaudeHome(isolatedHome, { credentialsPath, configPath }, {
+  const windowsDeps = {
     platform: 'win32',
     symlink() {
       const error = new Error('symlinks require elevation');
       error.code = 'EPERM';
       throw error;
     },
-  });
+  };
+  prepareClaudeHome(isolatedHome, { credentialsPath, configPath }, windowsDeps);
 
   assert.equal(readFileSync(path.join(isolatedHome, '.claude', '.credentials.json'), 'utf8'), '{"oauth":"shared"}');
   assert.equal(readFileSync(path.join(isolatedHome, '.claude.json'), 'utf8'), '{"account":"shared"}');
   assert.deepEqual(readdirSync(path.join(isolatedHome, '.claude')), ['.credentials.json']);
+  writeFileSync(path.join(isolatedHome, '.claude', '.credentials.json'), '{"oauth":"first-refresh"}');
+  writeFileSync(path.join(isolatedHome, '.claude.json'), '{"account":"first-refresh"}');
+  prepareClaudeHome(isolatedHome, { credentialsPath, configPath }, windowsDeps);
+  assert.equal(readFileSync(credentialsPath, 'utf8'), '{"oauth":"first-refresh"}');
+  assert.equal(readFileSync(configPath, 'utf8'), '{"account":"first-refresh"}');
+  writeFileSync(path.join(isolatedHome, '.claude', '.credentials.json'), '{"oauth":"refreshed"}');
+  writeFileSync(path.join(isolatedHome, '.claude.json'), '{"account":"refreshed"}');
+  flushClaudeCredentialMirrors(isolatedHome);
+  assert.equal(readFileSync(credentialsPath, 'utf8'), '{"oauth":"refreshed"}');
+  assert.equal(readFileSync(configPath, 'utf8'), '{"account":"refreshed"}');
+});
+
+test('Claude custom config credentials are copied per session and CAS refreshed', (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-claude-custom-isolation-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const customConfigDir = path.join(root, 'host-custom-config');
+  const credentialsPath = path.join(customConfigDir, '.credentials.json');
+  const configPath = path.join(root, 'host', '.claude.json');
+  const firstHome = path.join(root, 'session-a');
+  const secondHome = path.join(root, 'session-b');
+  mkdirSync(customConfigDir, { recursive: true });
+  mkdirSync(path.dirname(configPath), { recursive: true });
+  writeFileSync(credentialsPath, '{"oauth":"host-old"}');
+  writeFileSync(configPath, '{"account":"host"}');
+
+  prepareClaudeHome(firstHome, { credentialsPath, configPath });
+  prepareClaudeHome(secondHome, { credentialsPath, configPath });
+  const firstCredential = path.join(firstHome, '.claude', '.credentials.json');
+  const secondCredential = path.join(secondHome, '.claude', '.credentials.json');
+  assert.equal(lstatSync(firstCredential).isSymbolicLink(), false);
+  assert.equal(lstatSync(secondCredential).isSymbolicLink(), false);
+
+  writeFileSync(firstCredential, '{"oauth":"session-a-refresh"}');
+  assert.equal(readFileSync(credentialsPath, 'utf8'), '{"oauth":"host-old"}');
+  assert.equal(readFileSync(secondCredential, 'utf8'), '{"oauth":"host-old"}');
+  assert.equal(flushClaudeCredentialMirrors(firstHome), true);
+  assert.equal(readFileSync(credentialsPath, 'utf8'), '{"oauth":"session-a-refresh"}');
+
+  writeFileSync(secondCredential, '{"oauth":"session-b-refresh"}');
+  assert.equal(flushClaudeCredentialMirrors(secondHome), true);
+  assert.equal(
+    readFileSync(credentialsPath, 'utf8'),
+    '{"oauth":"session-a-refresh"}',
+    'the later session cannot overwrite a host credential changed since its seed',
+  );
 });
 
 test('Codex auth falls back to a copy when Windows rejects symlink creation', (t) => {
@@ -582,16 +773,28 @@ test('Codex auth falls back to a copy when Windows rejects symlink creation', (t
   writeFileSync(authPath, '{"token":"copied"}');
   t.after(() => rmSync(root, { recursive: true, force: true }));
 
-  prepareCodexHome(codexHome, authPath, {
+  const windowsDeps = {
     platform: 'win32',
     symlink() {
       const error = new Error('symlinks require elevation');
       error.code = 'EPERM';
       throw error;
     },
-  });
+  };
+  prepareCodexHome(codexHome, authPath, windowsDeps);
 
   assert.equal(readFileSync(path.join(codexHome, 'auth.json'), 'utf8'), '{"token":"copied"}');
+  writeFileSync(path.join(codexHome, 'auth.json'), '{"token":"first-refresh"}');
+  const mirror = prepareCodexHome(codexHome, authPath, windowsDeps);
+  assert.equal(readFileSync(authPath, 'utf8'), '{"token":"first-refresh"}');
+  writeFileSync(path.join(codexHome, 'auth.json'), '{"token":"refreshed"}');
+  const journal = readFileSync(mirror.journalPath);
+  writeFileSync(mirror.journalPath, Buffer.alloc(70 * 1024));
+  assert.equal(flushCodexCredentialMirror(codexHome), false);
+  assert.equal(existsSync(path.join(codexHome, 'auth.json')), true);
+  writeFileSync(mirror.journalPath, journal);
+  assert.equal(flushCodexCredentialMirror(codexHome), true);
+  assert.equal(readFileSync(authPath, 'utf8'), '{"token":"refreshed"}');
 });
 
 test('Codex keeps a completed turn open until its process exits', async () => {
@@ -606,6 +809,8 @@ test('Codex keeps a completed turn open until its process exits', async () => {
       process = new FakeProcess();
       return process;
     },
+    terminateProcess: async () => true,
+    waitForExit: async () => true,
   });
 
   session.sendUserMessage('inspect');
@@ -616,17 +821,393 @@ test('Codex keeps a completed turn open until its process exits', async () => {
     /only change between turns/,
   );
 
-  process.exitCode = 0;
-  process.emit('exit', 0, null);
+  process.exit(0);
   assert.equal(events.filter((event) => event.type === 'turn-end').length, 1);
   await session.setExecutionMode({ workflow: 'plan', phase: 'implementing', capabilityEpoch: 2 });
   session.dispose();
 });
 
+test('Codex interrupt discards an unterminated terminal frame', async () => {
+  const events = [];
+  let child;
+  const session = createCodexSession({
+    ...baseOpts,
+    permissionProfile: 'safe',
+    onEvent: (event) => events.push(event),
+  }, {
+    spawnProcess() {
+      child = new FakeProcess();
+      return child;
+    },
+    terminateProcess: async () => true,
+    waitForExit: async () => true,
+  });
+
+  session.sendUserMessage('interrupt before the terminal frame is drained');
+  child.stdout.emit('data', JSON.stringify({
+    type: 'turn.completed',
+    usage: { input_tokens: 12, output_tokens: 4 },
+  }));
+  session.interrupt();
+  child.exit(0);
+  await nextTask();
+
+  assert.equal(events.some((event) => event.type === 'usage'), false);
+  assert.deepEqual(
+    events.filter((event) => event.type === 'turn-end'),
+    [{ type: 'turn-end', agent: 'codex', stopReason: 'interrupted' }],
+  );
+  assert.equal(await session.dispose(), true);
+});
+
+test('Claude interrupt discards an unterminated terminal frame', async () => {
+  const events = [];
+  let child;
+  const session = createClaudeSession({
+    ...baseOpts,
+    permissionProfile: 'safe',
+    onEvent: (event) => events.push(event),
+  }, {
+    spawnProcess() {
+      child = new FakeProcess();
+      return child;
+    },
+    terminateProcess: async () => true,
+    waitForExit: async () => true,
+  });
+
+  session.sendUserMessage('interrupt before the terminal frame is drained');
+  await nextTask();
+  child.stdout.emit('data', JSON.stringify({
+    type: 'result',
+    subtype: 'success',
+    stop_reason: 'end_turn',
+    usage: { input_tokens: 12, output_tokens: 4 },
+  }));
+  session.interrupt();
+  child.exit(0);
+  await nextTask();
+
+  assert.equal(events.some((event) => event.type === 'usage'), false);
+  assert.deepEqual(
+    events.filter((event) => event.type === 'turn-end'),
+    [{ type: 'turn-end', agent: 'claude', stopReason: 'interrupted' }],
+  );
+  assert.equal(await session.dispose(), true);
+});
+
+test('Codex exit grace without close discards an unterminated terminal frame', async () => {
+  const events = [];
+  let child;
+  const session = createCodexSession({
+    ...baseOpts,
+    permissionProfile: 'safe',
+    onEvent: (event) => events.push(event),
+  }, {
+    closeGraceMs: 5,
+    spawnProcess() {
+      child = new FakeProcess();
+      return child;
+    },
+    terminateProcess: async () => null,
+    waitForExit: async () => true,
+  });
+
+  session.sendUserMessage('leader exits while a descendant retains stdout');
+  child.stdout.emit('data', JSON.stringify({
+    type: 'turn.completed',
+    usage: { input_tokens: 12, output_tokens: 4 },
+  }));
+  child.exitOnly(0);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(events.some((event) => event.type === 'usage'), false);
+  assert.deepEqual(events.at(-1), { type: 'turn-end', agent: 'codex', stopReason: 'exited' });
+  assert.equal(await session.dispose(), false);
+});
+
+test('Codex exit grace without close rejects a newline-terminated terminal frame', async () => {
+  const events = [];
+  let child;
+  const session = createCodexSession({
+    ...baseOpts,
+    permissionProfile: 'safe',
+    onEvent: (event) => events.push(event),
+  }, {
+    closeGraceMs: 5,
+    spawnProcess() {
+      child = new FakeProcess();
+      return child;
+    },
+    terminateProcess: async () => null,
+    waitForExit: async () => true,
+  });
+
+  session.sendUserMessage('terminal frame arrives but stdout never closes');
+  child.emitJson({ type: 'turn.completed', usage: { input_tokens: 12, output_tokens: 4 } });
+  child.exitOnly(0);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(events.some((event) => event.type === 'usage'), true);
+  assert.equal(
+    events.some((event) => event.type === 'turn-end' && event.stopReason === 'completed'),
+    false,
+  );
+  assert.deepEqual(events.at(-1), { type: 'turn-end', agent: 'codex', stopReason: 'exited' });
+  assert.equal(await session.dispose(), false);
+});
+
+test('Claude exit grace without close discards an unterminated terminal frame', async () => {
+  const events = [];
+  let child;
+  const session = createClaudeSession({
+    ...baseOpts,
+    permissionProfile: 'safe',
+    onEvent: (event) => events.push(event),
+  }, {
+    closeGraceMs: 5,
+    spawnProcess() {
+      child = new FakeProcess();
+      return child;
+    },
+    terminateProcess: async () => null,
+    waitForExit: async () => true,
+  });
+
+  session.sendUserMessage('leader exits while a descendant retains stdout');
+  await nextTask();
+  child.stdout.emit('data', JSON.stringify({
+    type: 'result',
+    subtype: 'success',
+    stop_reason: 'end_turn',
+    usage: { input_tokens: 12, output_tokens: 4 },
+  }));
+  child.exitOnly(0);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(events.some((event) => event.type === 'usage'), false);
+  assert.deepEqual(events.at(-1), { type: 'turn-end', agent: 'claude', stopReason: 'exited' });
+  assert.equal(await session.dispose(), false);
+});
+
+test('natural Codex leader exit retains tree cleanup result for delayed disposal', async () => {
+  let child;
+  let finishTermination;
+  let finishTreeWait;
+  let terminationCalls = 0;
+  const termination = new Promise((resolve) => { finishTermination = resolve; });
+  const treeWait = new Promise((resolve) => { finishTreeWait = resolve; });
+  const session = createCodexSession({
+    ...baseOpts,
+    permissionProfile: 'safe',
+  }, {
+    spawnProcess() {
+      child = new FakeProcess();
+      return child;
+    },
+    terminateProcess() {
+      terminationCalls += 1;
+      return termination;
+    },
+    waitForExit: () => treeWait,
+  });
+  session.sendUserMessage('finish while a descendant owns stdout');
+  child.emitJson({ type: 'turn.completed', usage: {} });
+  child.exitOnly(0);
+
+  let settled = false;
+  const disposed = session.dispose().then((value) => {
+    settled = true;
+    return value;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  assert.equal(terminationCalls, 1);
+  finishTermination(true);
+  finishTreeWait(false);
+  assert.equal(await disposed, false);
+  assert.equal(await session.dispose(), false);
+});
+
+test('a Windows Codex terminal tail without newline drains before unavailable cleanup quarantine', async () => {
+  const events = [];
+  const children = [];
+  const session = createCodexSession({
+    ...baseOpts,
+    permissionProfile: 'safe',
+    onEvent: (event) => events.push(event),
+  }, {
+    platform: 'win32',
+    spawnProcess() {
+      const child = new FakeProcess();
+      children.push(child);
+      return child;
+    },
+    terminateProcess: async () => null,
+    waitForExit: async () => true,
+  });
+
+  session.sendUserMessage('first');
+  children[0].stdout.emit('data', JSON.stringify({ type: 'turn.completed', usage: {} }));
+  children[0].exit(0);
+  await nextTask();
+  session.sendUserMessage('must not spawn');
+
+  assert.equal(children.length, 1);
+  assert.equal(
+    events.filter((event) => event.type === 'turn-start').length,
+    1,
+    'quarantined cleanup must not advertise a second provider turn',
+  );
+  assert.match(events.findLast((event) => event.type === 'error').message, /cleanup remains unconfirmed/);
+  assert.deepEqual(events.at(-1), { type: 'turn-end', agent: 'codex', stopReason: 'failed' });
+  assert.equal(await session.dispose(), false);
+});
+
+test('Windows Codex terminal cleanup starts live, drains buffered output, and allows another turn', async () => {
+  const events = [];
+  const children = [];
+  let cleanupCalls = 0;
+  const session = createCodexSession({
+    ...baseOpts,
+    permissionProfile: 'safe',
+    onEvent: (event) => events.push(event),
+  }, {
+    platform: 'win32',
+    spawnProcess() {
+      const child = new FakeProcess();
+      children.push(child);
+      return child;
+    },
+    terminateProcess(child) {
+      assert.equal(child.exitCode, null);
+      assert.equal(child.signalCode, null);
+      cleanupCalls += 1;
+      return true;
+    },
+    waitForExit: async () => true,
+  });
+
+  session.sendUserMessage('first');
+  children[0].emitJson(
+    { type: 'turn.completed', usage: {} },
+    {
+      type: 'item.completed',
+      item: {
+        id: 'buffered-command',
+        type: 'command_execution',
+        status: 'completed',
+        aggregated_output: 'drained',
+      },
+    },
+  );
+  assert.equal(cleanupCalls, 1);
+  assert.equal(events.some((event) => event.type === 'tool-result' && event.callId === 'buffered-command'), true);
+  children[0].exit(0);
+  await nextTask();
+
+  session.sendUserMessage('second');
+  assert.equal(children.length, 2);
+  const disposing = session.dispose();
+  children[1].exit(0);
+  assert.equal(await disposing, true);
+});
+
+test('a Windows Claude terminal tail without newline drains before unavailable cleanup quarantine', async () => {
+  const events = [];
+  const children = [];
+  const session = createClaudeSession({
+    ...baseOpts,
+    permissionProfile: 'safe',
+    onEvent: (event) => events.push(event),
+  }, {
+    platform: 'win32',
+    spawnProcess() {
+      const child = new FakeProcess();
+      children.push(child);
+      return child;
+    },
+    terminateProcess: async () => null,
+    waitForExit: async () => true,
+  });
+
+  session.sendUserMessage('first');
+  await nextTask();
+  children[0].stdout.emit('data', JSON.stringify({ type: 'result', stop_reason: 'end_turn' }));
+  children[0].exit(0);
+  await nextTask();
+  const turnStarts = events.filter((event) => event.type === 'turn-start').length;
+  const turnEnds = events.filter((event) => event.type === 'turn-end').length;
+  assert.throws(
+    () => session.sendUserMessage('must not spawn'),
+    /cleanup remains unconfirmed/,
+  );
+
+  assert.equal(children.length, 1);
+  assert.equal(events.filter((event) => event.type === 'turn-start').length, turnStarts);
+  assert.equal(events.filter((event) => event.type === 'turn-end').length, turnEnds);
+  assert.equal(await session.dispose(), false);
+});
+
+test('Claude proves legacy cleanup before turn-end and resumes in a fresh process', async () => {
+  const events = [];
+  const spawns = [];
+  let cleanupCalls = 0;
+  const session = createClaudeSession({
+    ...baseOpts,
+    permissionProfile: 'safe',
+    onEvent: (event) => events.push(event),
+  }, {
+    spawnProcess(command, argv, options) {
+      const process = new FakeProcess();
+      spawns.push({ command, argv, options, process });
+      return process;
+    },
+    terminateProcess(process) {
+      assert.equal(process.exitCode, null);
+      assert.equal(process.signalCode, null);
+      cleanupCalls += 1;
+      process.kill('SIGTERM');
+      return true;
+    },
+    waitForExit: async () => true,
+  });
+
+  session.sendUserMessage('turn A');
+  await nextTask();
+  spawns[0].process.emitJson(
+    { type: 'system', subtype: 'init', session_id: 'legacy-resume-id', model: 'claude-test' },
+    { type: 'result', subtype: 'success', stop_reason: 'end_turn' },
+    {
+      type: 'system',
+      subtype: 'task_notification',
+      task_id: 'stale-turn-a-task',
+      status: 'completed',
+    },
+  );
+  assert.equal(events.some((event) => event.type === 'turn-end'), false);
+  await waitUntil(() => events.filter((event) => event.type === 'turn-end').length === 1);
+  assert.equal(cleanupCalls, 1);
+  assert.equal(events.some((event) => event.type === 'task-end'), false);
+
+  session.sendUserMessage('turn B');
+  await waitUntil(() => spawns.length === 2);
+  assert.ok(spawns[1].argv.includes('--resume'));
+  assert.equal(argValue(spawns[1].argv, '--resume'), 'legacy-resume-id');
+  assert.equal(JSON.parse(spawns[1].process.stdin.chunks[0]).message.content[0].text, 'turn B');
+  assert.equal(events.filter((event) => event.type === 'turn-start').length, 2);
+  assert.equal(await session.dispose(), true);
+});
+
 test('Claude waits for an idle restart and resumes with the new phase', async () => {
   const spawns = [];
   const events = [];
-  const opts = { ...baseOpts, permissionProfile: 'safe', onEvent: (event) => events.push(event) };
+  const opts = {
+    ...baseOpts,
+    permissionProfile: 'safe',
+    providerEnv: { PATH: '/usr/bin', CLAUDE_CONFIG_DIR: '/host/custom-claude' },
+    onEvent: (event) => events.push(event),
+  };
   const session = createClaudeSession(opts, {
     spawnProcess(command, argv, options) {
       const process = new FakeProcess();
@@ -641,6 +1222,7 @@ test('Claude waits for an idle restart and resumes with the new phase', async ()
   assert.equal(spawns[0].options.cwd, '/tmp/Rau workspace');
   assert.equal(spawns[0].options.env.HOME, testHome);
   assert.equal(spawns[0].options.env.USERPROFILE, testHome);
+  assert.equal(spawns[0].options.env.CLAUDE_CONFIG_DIR, path.join(testHome, '.claude'));
   assert.equal(spawns[0].options.env.RHWP_SESSION_ID, 'studio-thread-42');
   assert.equal(spawns[0].options.detached, process.platform !== 'win32');
   assert.equal(spawns[0].options.windowsHide, true);
@@ -655,6 +1237,7 @@ test('Claude waits for an idle restart and resumes with the new phase', async ()
     { type: 'result', stop_reason: 'end_turn' },
   );
   assert.deepEqual(events.filter((event) => event.type === 'text-delta').map((event) => event.text), ['root', 'child']);
+  await waitUntil(() => events.some((event) => event.type === 'turn-end'));
 
   await session.setExecutionMode({ workflow: 'plan', phase: 'implementing', capabilityEpoch: 2 });
   session.sendUserMessage('approved kickoff');
@@ -670,6 +1253,78 @@ test('Claude waits for an idle restart and resumes with the new phase', async ()
   session.dispose();
 });
 
+test('Claude terminal cleanup quarantines config changes when proof is unavailable', async () => {
+  const events = [];
+  let child;
+  let finishTermination;
+  let finishTreeWait;
+  let terminationCalls = 0;
+  const termination = new Promise((resolve) => { finishTermination = resolve; });
+  const treeWait = new Promise((resolve) => { finishTreeWait = resolve; });
+  const session = createClaudeSession({
+    ...baseOpts,
+    permissionProfile: 'safe',
+    onEvent: (event) => events.push(event),
+  }, {
+    spawnProcess() {
+      child = new FakeProcess();
+      return child;
+    },
+    terminateProcess() {
+      terminationCalls += 1;
+      return termination;
+    },
+    waitForExit: () => treeWait,
+  });
+  session.sendUserMessage('complete the current turn');
+  await nextTask();
+  child.emitJson({ type: 'result', stop_reason: 'end_turn' });
+  await nextTask();
+  await assert.rejects(
+    session.setExecutionMode({ workflow: 'plan', phase: 'implementing', capabilityEpoch: 2 }),
+    /only change between turns/,
+  );
+  assert.equal(terminationCalls, 1);
+  finishTermination(true);
+  finishTreeWait(false);
+  await waitUntil(() => events.filter((event) => event.type === 'turn-end').length === 1);
+  assert.equal(events.at(-1).stopReason, 'failed');
+  await assert.rejects(
+    session.setExecutionMode({ workflow: 'plan', phase: 'implementing', capabilityEpoch: 2 }),
+    /cleanup remains unconfirmed/,
+  );
+  assert.equal(await session.dispose(), false);
+});
+
+test('Claude preserves a redacted spawn error through delayed exit settlement', async () => {
+  const events = [];
+  let child;
+  const session = createClaudeSession({
+    ...baseOpts,
+    permissionProfile: 'safe',
+    onEvent: (event) => events.push(event),
+  }, {
+    spawnProcess() {
+      child = new FakeProcess();
+      return child;
+    },
+  });
+
+  session.sendUserMessage('start');
+  await nextTask();
+  const error = new Error('spawn ENOENT for secret-token');
+  error.code = 'ENOENT';
+  child.emit('error', error);
+  await nextTask();
+  await nextTask();
+
+  const surfaced = events.find((event) => event.type === 'error');
+  assert.match(surfaced?.message ?? '', /claude process error: spawn ENOENT/);
+  assert.doesNotMatch(surfaced?.message ?? '', /secret-token/);
+  assert.equal(events.find((event) => event.type === 'turn-end')?.stopReason, 'exited');
+  await session.dispose();
+});
+
 async function runClaudeResult(result, opts = {}) {
   const events = [];
   let child;
@@ -680,7 +1335,8 @@ async function runClaudeResult(result, opts = {}) {
   session.sendUserMessage('go');
   await nextTask();
   child.emitJson(...(opts.prelude ?? []), { type: 'result', stop_reason: 'end_turn', ...result });
-  session.dispose();
+  await waitUntil(() => events.some((event) => event.type === 'turn-end'));
+  await session.dispose();
   return events;
 }
 
@@ -779,8 +1435,7 @@ test('Codex maps turn.completed usage and keeps it ahead of turn-end', () => {
   });
   assert.equal(events.some((event) => event.type === 'turn-end'), false);
 
-  child.exitCode = 0;
-  child.emit('exit', 0, null);
+  child.exit(0);
   assert.ok(events.indexOf(usage[0]) < events.findIndex((event) => event.type === 'turn-end'));
   session.dispose();
 });

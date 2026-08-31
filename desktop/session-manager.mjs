@@ -3,19 +3,21 @@ import { randomUUID } from 'node:crypto';
 export class SessionManager {
   #createId;
   #getHubContext;
-  #getSessionToken;
+  #getSessionCapabilities;
   #launchId;
   #sessions = new Map();
   #senderSessions = new Map();
   #windowSessions = new WeakMap();
 
-  constructor({ launchId, getHubContext, getSessionToken, createId = randomUUID } = {}) {
+  constructor({ launchId, getHubContext, getSessionCapabilities, createId = randomUUID } = {}) {
     if (!launchId) throw new Error('SessionManager requires a launchId');
     if (typeof getHubContext !== 'function') throw new Error('SessionManager requires getHubContext');
-    if (typeof getSessionToken !== 'function') throw new Error('SessionManager requires getSessionToken');
+    if (typeof getSessionCapabilities !== 'function') {
+      throw new Error('SessionManager requires getSessionCapabilities');
+    }
     this.#launchId = launchId;
     this.#getHubContext = getHubContext;
-    this.#getSessionToken = getSessionToken;
+    this.#getSessionCapabilities = getSessionCapabilities;
     this.#createId = createId;
   }
 
@@ -58,11 +60,14 @@ export class SessionManager {
   async contextForSender(sender) {
     const session = this.sessionForSender(sender);
     const hub = await this.#getHubContext();
+    const capabilities = await this.#getSessionCapabilities(session.sessionId, hub);
     return Object.freeze({
       launchId: this.#launchId,
       sessionId: session.sessionId,
       hubUrl: hub.hubUrl,
-      hubToken: this.#getSessionToken(session.sessionId, hub.hubToken),
+      hubToken: capabilities.studio,
+      referenceToken: capabilities.reference,
+      templateToken: capabilities.template,
     });
   }
 

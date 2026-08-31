@@ -60,6 +60,14 @@ function startSession(events) {
   return { session, child: () => child };
 }
 
+async function waitUntil(predicate, message = 'condition did not settle') {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (predicate()) return;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.fail(message);
+}
+
 const TASK_STARTED = {
   type: 'system', subtype: 'task_started', task_id: 'task-a', tool_use_id: 'toolu-1',
   description: '2쪽 정리', subagent_type: 'doc-editor', task_type: 'local_agent', prompt: 'p',
@@ -152,6 +160,7 @@ test('turn stays open across wake results and settles after quiescence', async (
   t.mock.timers.tick(1_400);
   assert.equal(events.filter((e) => e.type === 'turn-end').length, 0);
   t.mock.timers.tick(200);
+  await waitUntil(() => events.filter((e) => e.type === 'turn-end').length === 1);
 
   const turnEnds = events.filter((e) => e.type === 'turn-end');
   assert.equal(turnEnds.length, 1);
@@ -177,6 +186,7 @@ test('wake invocation root text starts a new paragraph', async (t) => {
     RESULT,
   );
   t.mock.timers.tick(1_600);
+  await waitUntil(() => events.filter((e) => e.type === 'turn-end').length === 1);
 
   const texts = events.filter((e) => e.type === 'text-delta' && !e.parentTaskId).map((e) => e.text);
   assert.deepEqual(texts, ['두 에이전트를 띄웁니다.', '\n\n완료했습니다.']);
@@ -186,14 +196,15 @@ test('wake invocation root text starts a new paragraph', async (t) => {
   await session.dispose();
 });
 
-test('turns without tasks settle immediately on result', async () => {
+test('turns without tasks settle after cleanup without task grace', async () => {
   const events = [];
   const { session, child } = startSession(events);
   await new Promise((resolve) => setImmediate(resolve));
 
   child().emitJson(RESULT);
+  await waitUntil(() => events.filter((e) => e.type === 'turn-end').length === 1);
   const turnEnds = events.filter((e) => e.type === 'turn-end');
-  assert.equal(turnEnds.length, 1, 'no grace latency for plain turns');
+  assert.equal(turnEnds.length, 1, 'plain turns wait only for process cleanup proof');
   assert.equal(turnEnds[0].stopReason, 'end_turn');
 
   await session.dispose();
@@ -212,6 +223,7 @@ test('any errored wake result marks the settled turn as failed', async (t) => {
     RESULT,
   );
   t.mock.timers.tick(1_600);
+  await waitUntil(() => events.filter((e) => e.type === 'turn-end').length === 1);
 
   const turnEnds = events.filter((e) => e.type === 'turn-end');
   assert.equal(turnEnds.length, 1);

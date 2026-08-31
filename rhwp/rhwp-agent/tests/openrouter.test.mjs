@@ -116,6 +116,16 @@ test('request timeout remains active while the response body is being consumed',
   );
 });
 
+test('small OpenRouter endpoints reject observed bodies above 64 KiB', async () => {
+  const client = createOpenRouter({
+    fetchImpl: async () => new Response(Buffer.alloc(64 * 1024 + 1, 0x78), { status: 200 }),
+  });
+  await assert.rejects(
+    client.validateKey('sk-oversized'),
+    (error) => error.code === 'OPENROUTER_RESPONSE_TOO_LARGE',
+  );
+});
+
 test('catalog keeps tool-capable text models and maps pricing and reasoning', async () => {
   const client = createOpenRouter({ fetchImpl: async () => jsonResponse(200, CATALOG_FIXTURE) });
   const models = await client.catalog();
@@ -176,6 +186,58 @@ test('catalog caches in memory and on disk, refresh bypasses both', async () => 
   assert.equal(hits, 3, '1시간이 지나면 다시 받아온다');
 
   await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('catalog rejects an oversized disk cache before reading it into memory', async () => {
+  const rootDir = await tmpRoot();
+  const cachePath = path.join(rootDir, 'models-cache.json');
+  await fs.writeFile(cachePath, 'x');
+  await fs.truncate(cachePath, (8 * 1024 * 1024) + 1);
+  let hits = 0;
+  const client = createOpenRouter({
+    cacheDir: rootDir,
+    fetchImpl: async () => {
+      hits += 1;
+      return jsonResponse(200, CATALOG_FIXTURE);
+    },
+  });
+
+  assert.equal((await client.catalog()).length, 3);
+  assert.equal(hits, 1);
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('catalog ignores a symlinked disk cache', async (t) => {
+  const rootDir = await tmpRoot();
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const outside = path.join(rootDir, 'outside-cache.json');
+  const cachePath = path.join(rootDir, 'models-cache.json');
+  await fs.writeFile(outside, `${JSON.stringify({
+    models: [{ id: 'untrusted/model' }],
+    fetchedAt: Date.now(),
+  })}\n`);
+  try {
+    await fs.symlink(outside, cachePath);
+  } catch (error) {
+    if (process.platform === 'win32' && ['EACCES', 'EPERM'].includes(error?.code)) {
+      t.skip('This Windows host does not permit unprivileged symlink creation');
+      return;
+    }
+    throw error;
+  }
+
+  let hits = 0;
+  const client = createOpenRouter({
+    cacheDir: rootDir,
+    fetchImpl: async () => {
+      hits += 1;
+      return jsonResponse(200, CATALOG_FIXTURE);
+    },
+  });
+  const models = await client.catalog();
+
+  assert.equal(hits, 1);
+  assert.equal(models.some((model) => model.id === 'untrusted/model'), false);
 });
 
 test('concurrent catalog calls share one request', async () => {
@@ -303,6 +365,46 @@ test('credit cache and in-flight work are isolated by trimmed key', async () => 
   assert.equal((await first).balanceUsd, 1);
   assert.equal((await client.credits('sk-second')).balanceUsd, 4);
   assert.equal(hits, 2);
+});
+
+test('credit lookups bound concurrent distinct keys and coalesce refreshes', async () => {
+  const releases = [];
+  let hits = 0;
+  const client = createOpenRouter({
+    fetchImpl: async () => {
+      hits += 1;
+      await new Promise((resolve) => releases.push(resolve));
+      return jsonResponse(200, { data: { limit: 5, usage: 1 } });
+    },
+  });
+
+  const pending = Array.from({ length: 8 }, (_, index) => client.credits(`sk-${index}`));
+  await new Promise((resolve) => setImmediate(resolve));
+  const duplicate = client.credits('sk-0', true);
+  await assert.rejects(client.credits('sk-overflow'), (error) => error.code === 'OPENROUTER_BUSY');
+  assert.equal(hits, 8);
+  releases.splice(0).forEach((release) => release());
+  await Promise.all([...pending, duplicate]);
+});
+
+test('credit cache expires old key identities before accepting replacements', async () => {
+  let clock = 0;
+  let hits = 0;
+  const client = createOpenRouter({
+    now: () => clock,
+    fetchImpl: async () => {
+      hits += 1;
+      return jsonResponse(200, { data: { limit: 5, usage: 1 } });
+    },
+  });
+
+  for (let index = 0; index < 12; index += 1) await client.credits(`sk-${index}`);
+  assert.equal(hits, 12, 'completed entries are evicted rather than growing without bound');
+  await client.credits('sk-0');
+  assert.equal(hits, 13, 'the oldest key was evicted');
+  clock += 6 * 60 * 1000;
+  await client.credits('sk-11');
+  assert.equal(hits, 14, 'expired identities do not remain cached');
 });
 
 test('chat posts a non-streaming completion and returns assistant text', async () => {

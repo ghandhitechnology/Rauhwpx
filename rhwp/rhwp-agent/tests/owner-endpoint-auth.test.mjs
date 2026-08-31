@@ -82,7 +82,8 @@ test('production hub keeps owner endpoints bearer-only and healthz quiet without
     method: 'POST',
     headers: { authorization: `Bearer ${TOKEN}`, 'x-rhwp-launch-id': LAUNCH_ID },
   });
-  assert.equal(shutdown.status, 202);
+  assert.equal(shutdown.status, 200);
+  assert.equal((await shutdown.json()).status, 'prepared');
 
   await exitPromise;
 });

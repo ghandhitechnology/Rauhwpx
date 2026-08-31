@@ -1,4 +1,5 @@
 import type { MergeConflict } from '../versioning/types.ts';
+import { readBlobBytesWithLimit } from '../core/document-input-limits.ts';
 import { mergeChoiceLabel, mergeErrorMessage, mergeTokenLabel } from './merge-labels.ts';
 
 export type ManualEditorFamily =
@@ -300,7 +301,11 @@ export function buildManualConflictEditor(options: ManualConflictEditorOptions):
           }
           const payload = options.uploadAsset
             ? await options.uploadAsset(file, conflict)
-            : { name: file.name, mimeType: file.type, bytes: new Uint8Array(await file.arrayBuffer()) };
+            : {
+                name: file.name,
+                mimeType: file.type,
+                bytes: await readBlobBytesWithLimit(file, MAX_IMAGE_UPLOAD_BYTES, '대체 이미지'),
+              };
           if (generation !== uploadGeneration || !section.isConnected) return;
           error.textContent = '';
           options.onResolve(payload);

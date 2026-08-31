@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
-import { readFile, rm, writeFile } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -22,20 +22,21 @@ import {
   closeHubSession,
   createHubToken,
   isHubHealthy,
-  issueHubSessionToken,
   nextHubRestartDelay,
   packagedRhwpBinary,
+  registerHubSession,
   requestHubShutdown,
   resolveHubLaunch,
   spawnHubProcess,
   stopHubChild,
   waitForHub,
-  waitForHubChildExit,
   waitForHubReadyLine,
 } from './agent-hub.mjs';
 import { DocumentLeaseManager } from './document-leases.mjs';
+import { quarantineBookmarkState, readBookmarkState } from './bookmark-state.mjs';
 import {
   MAX_GENERATED_DOCUMENT_BYTES,
+  readGeneratedDocumentResponse,
   resolveGeneratedDocumentArtifact,
 } from './generated-document-artifact.mjs';
 import { launchRequest } from './launch-routing.mjs';
@@ -43,10 +44,10 @@ import {
   NativeFileHandleRegistry,
   validateNativeDocumentBytes,
   writeNativeFileAtomically,
-  writePortableHistoryFolder,
 } from './native-file-handles.mjs';
 import { SerializedStateWriter } from './serialized-state-writer.mjs';
 import { SessionManager } from './session-manager.mjs';
+import { safeSuggestedFilename } from './safe-filename.mjs';
 import {
   STUDIO_URL,
   installStudioProtocol,
@@ -56,8 +57,15 @@ import {
 import { createSecretVault, handleSecretRequest } from './secret-vault.mjs';
 import { deliverPlainTextPaste } from './plain-text-paste.mjs';
 import {
+  hasPendingLaunchCleanupSync,
+  retainLaunchRootForProcessCleanupSync,
+} from '../rhwp/rhwp-agent/credential-mirror.mjs';
+import {
+  launchStoragePaths,
   prepareDevelopmentCaches,
+  removeLegacyLaunchDirectories,
   removeStaleLaunchDirectories,
+  writeLaunchOwnerMetadata,
 } from './runtime-cleanup.mjs';
 
 const { autoUpdater } = electronUpdater;
@@ -124,6 +132,8 @@ class AgentHubOwner {
   #stopPromise = null;
   #restartAttempt = 0;
   #restartTimer = null;
+  #stoppingChild = null;
+  #restartRequired = false;
 
   constructor({ runtimeDir, workDir }) {
     this.runtimeDir = runtimeDir;
@@ -140,40 +150,88 @@ class AgentHubOwner {
   }
 
   scheduleRestart() {
-    if (this.#disposed || quitting || this.#restartTimer) return;
+    if (this.#disposed || quitting || this.#restartTimer || this.#restartRequired) return;
     const delay = nextHubRestartDelay(this.#restartAttempt++);
     console.warn(`[rauhwpx] owned agent hub exited; restarting in ${delay}ms`);
     this.#restartTimer = setTimeout(() => {
       this.#restartTimer = null;
-      void this.ensure().catch((error) => console.warn('[rauhwpx] agent hub restart failed:', error));
+      void this.ensure().catch((error) => {
+        console.warn('[rauhwpx] agent hub restart failed:', error);
+        this.scheduleRestart();
+      });
     }, delay);
+  }
+
+  restartRequiredError() {
+    const error = new Error(
+      'The agent hub exited before its Windows process tree could be confirmed stopped. Restart Rauhwpx before using the agent hub again.',
+    );
+    error.code = 'AGENT_HUB_RESTART_REQUIRED';
+    return error;
+  }
+
+  quarantineUnexpectedWindowsExit() {
+    if (this.#restartRequired) return;
+    this.#restartRequired = true;
+    this.clearRestart();
+    try {
+      retainLaunchRootForProcessCleanupSync(this.workDir, { launchId });
+    } catch (error) {
+      console.warn('[rauhwpx] process cleanup retention marker failed:', error);
+    }
+    console.warn(
+      '[rauhwpx] owned agent hub exited unexpectedly on Windows; retaining launch work and requiring an app restart:',
+      this.workDir,
+    );
   }
 
   async stopCurrent() {
     const child = this.#child;
     const context = this.#context;
-    this.#child = null;
     this.#context = null;
-    let gracefulShutdownAccepted = false;
-    if (context) {
-      try {
-        await requestHubShutdown({
-          port: context.port,
-          token: hubToken,
-          launchId,
-          timeoutMs: 1500,
-        });
-        gracefulShutdownAccepted = true;
-      } catch (error) {
-        console.warn('[rauhwpx] graceful agent hub shutdown failed:', error);
+    this.#stoppingChild = child;
+    let cleanupPrepared = false;
+    try {
+      if (this.#restartRequired && (child?.exitCode != null || child?.signalCode != null)) {
+        throw this.restartRequiredError();
       }
+      if (context) {
+        try {
+          const response = await requestHubShutdown({
+            port: context.port,
+            token: hubToken,
+            launchId,
+            timeoutMs: 15_000,
+          });
+          cleanupPrepared = response?.status === 'prepared'
+            && response?.launchId === launchId;
+        } catch (error) {
+          console.warn('[rauhwpx] graceful agent hub shutdown failed:', error);
+        }
+      }
+      // A prepared response proves descendants were disposed. Windows can then
+      // wait on the retained child handle without resolving a reusable PID.
+      const stopped = await stopHubChild(child, { timeoutMs: 5000, cleanupPrepared });
+      if (!stopped) {
+        // Preserve the exited leader's PID/tree identity and make every outer
+        // cleanup layer retain the launch root until a reboot proves safety.
+        try {
+          retainLaunchRootForProcessCleanupSync(this.workDir, { launchId });
+        } catch (error) {
+          console.warn('[rauhwpx] process cleanup retention marker failed:', error);
+        }
+        if (!this.#child || this.#child === child) this.#child = child;
+        throw new Error(`Agent hub process tree ${child?.pid ?? 'unknown'} survived shutdown`);
+      }
+      if (this.#child === child) this.#child = null;
+    } finally {
+      if (this.#stoppingChild === child) this.#stoppingChild = null;
     }
-    if (gracefulShutdownAccepted && await waitForHubChildExit(child, { timeoutMs: 5000 })) return;
-    await stopHubChild(child, { timeoutMs: 5000 });
   }
 
   async start() {
     if (this.#disposed) throw new Error('Agent hub owner has been disposed');
+    if (this.#restartRequired) throw this.restartRequiredError();
     if (this.#startPromise) return this.#startPromise;
     this.#startPromise = this.startOwnedChild();
     try {
@@ -220,6 +278,7 @@ class AgentHubOwner {
         ...(rhwpBinary ? { RHWP_BIN: rhwpBinary } : {}),
         RHWP_LAUNCH_ID: launchId,
         RHWP_OWNER_PID: String(process.pid),
+        RHWP_OWNER_IPC: '1',
         RHWP_RUNTIME_DIR: this.runtimeDir,
         RHWP_WORK_DIR: this.workDir,
         RHWP_AGENT_INSTRUCTIONS_DIR: join(app.getPath('userData'), 'agent-instructions'),
@@ -246,8 +305,14 @@ class AgentHubOwner {
       onExit: (code, signal) => {
         console.warn('[rauhwpx] agent hub process exit:', code, signal ?? '');
         if (this.#child !== child) return;
-        this.#child = null;
         this.#context = null;
+        // `exit` only proves the leader died. Retain the ChildProcess/PID until
+        // stopCurrent has probed and escalated the complete owned tree.
+        if (this.#stoppingChild === child) return;
+        if (process.platform === 'win32') {
+          this.quarantineUnexpectedWindowsExit();
+          return;
+        }
         this.scheduleRestart();
       },
     });
@@ -290,10 +355,12 @@ class AgentHubOwner {
     this.#stopPromise = (async () => {
       await this.#startPromise?.catch(() => {});
       await this.stopCurrent();
-      await Promise.all([
-        rm(this.runtimeDir, { recursive: true, force: true }),
-        rm(this.workDir, { recursive: true, force: true }),
-      ]);
+      await rm(this.runtimeDir, { recursive: true, force: true });
+      if (hasPendingLaunchCleanupSync(this.workDir)) {
+        console.warn('[rauhwpx] retaining launch work for pending cleanup:', this.workDir);
+      } else {
+        await rm(this.workDir, { recursive: true, force: true });
+      }
     })();
     return this.#stopPromise;
   }
@@ -304,30 +371,53 @@ let quitRequested = false;
 let desktopReady = false;
 let secretVault = null;
 const pendingLaunches = [launchRequest({ argv: process.argv, source: 'initial' })];
-const runtimeRoot = join(app.getPath('temp'), 'rauhwpx', 'runtime');
-const workRoot = join(app.getPath('userData'), 'launch-work');
-const runtimeDir = join(runtimeRoot, launchId);
-const workDir = join(workRoot, launchId);
+const launchStorage = launchStoragePaths({
+  tempDir: app.getPath('temp'),
+  userDataDir: app.getPath('userData'),
+  launchId,
+});
+const {
+  profileId: userDataProfileId,
+  runtimeRoot,
+  workRoot,
+  runtimeDir,
+  workDir,
+  legacyRuntimeRoot,
+  legacyWorkRoot,
+} = launchStorage;
 const hubOwner = new AgentHubOwner({ runtimeDir, workDir });
 const sessions = new SessionManager({
   launchId,
   getHubContext: async () => (await hubOwner.ensure()).context,
-  getSessionToken: (sessionId, masterToken) => issueHubSessionToken(masterToken, sessionId),
+  getSessionCapabilities: (sessionId, hub) => registerHubSession({
+    port: hub.port,
+    token: hubToken,
+    launchId,
+    sessionId,
+  }),
 });
 const documentLeases = new DocumentLeaseManager();
 const nativeFiles = new NativeFileHandleRegistry();
 const nativeBookmarkFile = join(app.getPath('userData'), 'native-document-bookmarks.json');
 const nativeBookmarkWriter = new SerializedStateWriter({
-  write: (snapshot) => writeFile(nativeBookmarkFile, snapshot, 'utf8'),
+  write: (snapshot) => writeNativeFileAtomically(nativeBookmarkFile, Buffer.from(snapshot, 'utf8')),
   onError: (error) => console.warn('[rauhwpx] native bookmark persist failed:', error),
 });
 
 async function loadNativeBookmarks() {
   try {
-    const raw = JSON.parse(await readFile(nativeBookmarkFile, 'utf8'));
-    if (Array.isArray(raw)) nativeFiles.loadBookmarks(raw);
-  } catch {
-    // first run or corrupt file — start with an empty bookmark map
+    const raw = await readBookmarkState(nativeBookmarkFile);
+    if (raw === null) return;
+    try {
+      nativeFiles.loadBookmarks(raw, { strict: true });
+    } catch (error) {
+      error.code = 'BOOKMARK_STATE_CORRUPT';
+      throw error;
+    }
+  } catch (error) {
+    if (error?.code !== 'BOOKMARK_STATE_CORRUPT') throw error;
+    const quarantined = await quarantineBookmarkState(nativeBookmarkFile);
+    console.warn('[rauhwpx] corrupt native bookmark state quarantined:', quarantined);
   }
 }
 
@@ -681,17 +771,13 @@ ipcMain.handle('desktop:open-generated-document-window', async (event, payload =
       cache: 'no-store',
       signal: controller.signal,
     });
-    if (!response.ok) throw new Error(`Generated document request failed with HTTP ${response.status}`);
-    const declaredLength = Number(response.headers.get('content-length'));
-    if (Number.isFinite(declaredLength) && declaredLength > MAX_GENERATED_DOCUMENT_BYTES) {
-      throw new Error('Generated document exceeds the 64 MiB limit');
+    if (!response.ok) {
+      await response.body?.cancel?.('generated-document-http-error').catch(() => {});
+      throw new Error(`Generated document request failed with HTTP ${response.status}`);
     }
-    bytes = new Uint8Array(await response.arrayBuffer());
+    bytes = await readGeneratedDocumentResponse(response, MAX_GENERATED_DOCUMENT_BYTES);
   } finally {
     clearTimeout(timeout);
-  }
-  if (bytes.byteLength === 0 || bytes.byteLength > MAX_GENERATED_DOCUMENT_BYTES) {
-    throw new Error('Generated document bytes are empty or exceed the 64 MiB limit');
   }
   validateNativeDocumentBytes(artifact.fileName, bytes);
   const opened = await createWindow(
@@ -705,7 +791,7 @@ ipcMain.handle('desktop:pick-native-open-file', async (event, options = {}) => {
   const window = BrowserWindow.fromWebContents(event.sender);
   if (!window) throw new Error('Open picker sender window is unavailable');
   const suggestedName = typeof options?.suggestedName === 'string'
-    ? basename(options.suggestedName)
+    ? safeSuggestedFilename(options.suggestedName, 'document.hwp')
     : '';
   const documentId = typeof options?.documentId === 'string' ? options.documentId : '';
   const bookmarked = documentId ? nativeFiles.bookmarkPathFor(documentId) : null;
@@ -718,15 +804,37 @@ ipcMain.handle('desktop:pick-native-open-file', async (event, options = {}) => {
   const picked = await dialog.showOpenDialog(window, {
     ...(defaultPath ? { defaultPath } : {}),
     filters: [{ name: 'HWP/HWPX/HML documents and RauHWPX history', extensions: ['hwp', 'hwpx', 'hml', 'rhwpx'] }],
-    properties: process.platform === 'darwin'
-      ? ['openFile']
-      : ['openFile', 'openDirectory'],
+    properties: ['openFile'],
   });
   if (picked.canceled || !picked.filePaths[0]) return null;
   const result = await nativeFiles.create(session.sessionId, picked.filePaths[0]);
   if (!result.ok) {
     sessions.focusSession(result.ownerSessionId);
     return { owned: true };
+  }
+  return { ...result.descriptor, saveTargetCreated: result.created };
+});
+ipcMain.handle('desktop:pick-legacy-history-folder', async (event) => {
+  const session = sessionForEvent(event);
+  const window = BrowserWindow.fromWebContents(event.sender);
+  if (!window) throw new Error('Legacy history import sender window is unavailable');
+  const picked = await dialog.showOpenDialog(window, {
+    title: 'Import legacy RauHWPX history folder',
+    properties: ['openDirectory'],
+  });
+  if (picked.canceled || !picked.filePaths[0]) return null;
+  const folderPath = picked.filePaths[0];
+  if (extname(folderPath).toLowerCase() !== '.rhwpx') {
+    throw new Error('Legacy history folders must use the .rhwpx extension');
+  }
+  const result = await nativeFiles.create(session.sessionId, folderPath);
+  if (!result.ok) {
+    sessions.focusSession(result.ownerSessionId);
+    return { owned: true };
+  }
+  if (!result.descriptor.legacyPortableHistoryFolder) {
+    nativeFiles.releaseHandle(session.sessionId, result.descriptor.handleId);
+    throw new Error('The selected RHWPX item is a file, not a legacy history folder');
   }
   return { ...result.descriptor, saveTargetCreated: result.created };
 });
@@ -744,12 +852,17 @@ ipcMain.handle('desktop:pick-native-save-file', async (event, options = {}) => {
   const window = BrowserWindow.fromWebContents(event.sender);
   if (!window) throw new Error('Save picker sender window is unavailable');
   const extension = String(options.extension ?? '').toLowerCase();
-  if (!['hwp', 'hwpx', 'hml'].includes(extension)) throw new Error('Unsupported save format');
-  const rawName = basename(String(options.suggestedName ?? `document.${extension}`));
-  const suggestedName = rawName || `document.${extension}`;
+  if (!['hwp', 'hwpx', 'hml', 'rhwpx'].includes(extension)) throw new Error('Unsupported save format');
+  const suggestedName = safeSuggestedFilename(
+    options.suggestedName,
+    `document.${extension}`,
+  );
   const picked = await dialog.showSaveDialog(window, {
     defaultPath: suggestedName,
-    filters: [{ name: `${extension.toUpperCase()} document`, extensions: [extension] }],
+    filters: [{
+      name: extension === 'rhwpx' ? 'RauHWPX history archive' : `${extension.toUpperCase()} document`,
+      extensions: [extension],
+    }],
     properties: ['showOverwriteConfirmation', 'createDirectory'],
   });
   if (picked.canceled || !picked.filePath) return null;
@@ -763,29 +876,6 @@ ipcMain.handle('desktop:pick-native-save-file', async (event, options = {}) => {
     return { owned: true };
   }
   return { ...result.descriptor, saveTargetCreated: result.created };
-});
-ipcMain.handle('desktop:save-portable-history-file', async (event, payload = {}) => {
-  sessionForEvent(event);
-  const window = BrowserWindow.fromWebContents(event.sender);
-  if (!window) throw new Error('History export sender window is unavailable');
-  const rawName = basename(String(payload.suggestedName ?? 'document.rhwpx'));
-  const suggestedName = rawName.toLowerCase().endsWith('.rhwpx') ? rawName : `${rawName}.rhwpx`;
-  const files = Array.isArray(payload.files) ? payload.files : [];
-  const picked = await dialog.showSaveDialog(window, {
-    defaultPath: suggestedName,
-    filters: [{ name: 'RauHWPX history bundle', extensions: ['rhwpx'] }],
-    properties: ['showOverwriteConfirmation', 'createDirectory'],
-  });
-  if (picked.canceled || !picked.filePath) return null;
-  const filePath = extname(picked.filePath) ? picked.filePath : `${picked.filePath}.rhwpx`;
-  if (extname(filePath).toLowerCase() !== '.rhwpx') {
-    throw new Error('History export target must use the .rhwpx extension');
-  }
-  await writePortableHistoryFolder(filePath, files);
-  return { fileName: basename(filePath), byteLength: files.reduce(
-    (sum, file) => sum + (file?.bytes?.byteLength ?? file?.bytes?.length ?? 0),
-    0,
-  ) };
 });
 ipcMain.handle('desktop:release-native-file', (event, handleId) => {
   const session = sessionForEvent(event);
@@ -806,16 +896,6 @@ ipcMain.handle('desktop:native-file-validate-save', (event, handleId, identity) 
 ipcMain.handle('desktop:native-file-write', (event, handleId, bytes, identity) => {
   const session = sessionForEvent(event);
   return nativeFiles.write(session.sessionId, handleId, bytes, identity, documentLeases);
-});
-ipcMain.handle('desktop:native-file-write-portable-history', (event, handleId, files, identity) => {
-  const session = sessionForEvent(event);
-  return nativeFiles.writePortableHistory(
-    session.sessionId,
-    handleId,
-    files,
-    identity,
-    documentLeases,
-  );
 });
 ipcMain.handle('desktop:native-file-is-same', (event, firstHandleId, secondHandleId) => {
   const session = sessionForEvent(event);
@@ -940,14 +1020,31 @@ if (!hasSingleInstanceLock) {
   });
 
   app.whenReady().then(async () => {
+    const owner = { launchId, profileId: userDataProfileId, pid: process.pid };
+    await Promise.all([
+      writeLaunchOwnerMetadata(runtimeDir, owner),
+      writeLaunchOwnerMetadata(workDir, owner),
+    ]);
     await Promise.all([
       bestEffortStartupCleanup(
         'stale runtime',
-        removeStaleLaunchDirectories(runtimeRoot, launchId),
+        removeStaleLaunchDirectories(runtimeRoot, launchId, {
+          expectedProfileId: userDataProfileId,
+        }),
       ),
       bestEffortStartupCleanup(
         'stale launch workspace',
-        removeStaleLaunchDirectories(workRoot, launchId),
+        removeStaleLaunchDirectories(workRoot, launchId, {
+          expectedProfileId: userDataProfileId,
+        }),
+      ),
+      bestEffortStartupCleanup(
+        'legacy runtime',
+        removeLegacyLaunchDirectories(legacyRuntimeRoot, launchId),
+      ),
+      bestEffortStartupCleanup(
+        'legacy launch workspace',
+        removeLegacyLaunchDirectories(legacyWorkRoot, launchId),
       ),
       ...(devUrl ? [bestEffortStartupCleanup(
         'development browser cache',
@@ -1014,7 +1111,9 @@ if (!hasSingleInstanceLock) {
     if (teardownStarted) return;
     teardownStarted = true;
     quitting = true;
-    void hubOwner.teardown().finally(() => {
+    void hubOwner.teardown().catch((error) => {
+      console.warn('[rauhwpx] agent hub teardown did not finish:', error);
+    }).finally(() => {
       teardownFinished = true;
       app.exit(0);
     });

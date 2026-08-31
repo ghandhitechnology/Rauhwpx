@@ -21,6 +21,70 @@ fn test_compress_empty_data() {
 }
 
 #[test]
+fn bounded_compression_rejects_incompressible_output_at_the_sink() {
+    // Xorshift bytes are deterministic but do not collapse into a tiny deflate
+    // stream. The destination writer errors as soon as zlib tries to cross the
+    // 64-byte limit; it never grows a complete encoded copy first.
+    let mut state = 0x1234_5678u32;
+    let data = (0..16 * 1024)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state as u8
+        })
+        .collect::<Vec<_>>();
+    let error = compress_stream_limited(&data, 64)
+        .expect_err("incompressible output must stop at the bounded sink");
+    assert!(error.to_string().contains("byte limit"), "{error}");
+}
+
+#[test]
+fn raw_structural_streams_are_checked_before_copying() {
+    let section = Section {
+        raw_stream: Some(vec![0x5a; 65]),
+        ..Default::default()
+    };
+    let error = crate::serializer::body_text::serialize_section_limited(&section, 64)
+        .expect_err("oversized raw section must fail before cloning");
+    assert!(error.contains("65 > 64"), "{error}");
+
+    let borrowed = crate::serializer::body_text::serialize_section_limited(&section, 65)
+        .expect("exact raw-section limit");
+    assert!(matches!(borrowed, std::borrow::Cow::Borrowed(_)));
+
+    let doc_info = DocInfo {
+        raw_stream: Some(vec![0x7b; 65]),
+        raw_stream_dirty: false,
+        ..Default::default()
+    };
+    let error = crate::serializer::doc_info::serialize_doc_info_limited(
+        &doc_info,
+        &DocProperties::default(),
+        64,
+    )
+    .expect_err("oversized raw DocInfo must fail before cloning");
+    assert!(error.contains("65 > 64"), "{error}");
+}
+
+#[test]
+fn generated_preview_stops_at_the_character_limit() {
+    let doc = Document {
+        sections: vec![Section {
+            paragraphs: vec![Paragraph {
+                text: "가".repeat(100_000),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let preview = build_preview_text(&doc);
+    assert_eq!(preview.chars().count(), 1_000);
+    assert_eq!(preview.len(), 3_000);
+}
+
+#[test]
 fn test_serialize_hwp_empty_document() {
     let doc = Document::default();
     let bytes = serialize_hwp(&doc).unwrap();
@@ -55,6 +119,363 @@ fn extra_stream_cannot_shadow_generated_core_stream() {
     assert!(error
         .to_string()
         .contains("conflicts with generated HWP stream"));
+}
+
+#[test]
+fn failed_lazy_bindata_materialization_preserves_the_original_cfb_stream() {
+    #[derive(Debug)]
+    struct RawFallback(Vec<u8>);
+
+    impl crate::model::bin_data::BinDataResolver for RawFallback {
+        fn resolve(&self, _key: &str) -> Vec<u8> {
+            Vec::new()
+        }
+
+        fn resolve_limited(&self, _key: &str, _max_bytes: usize) -> Option<Vec<u8>> {
+            None
+        }
+
+        fn resolve_original_stream_limited(
+            &self,
+            _key: &str,
+            _expected_encoding: crate::model::bin_data::BinDataStreamEncoding,
+            max_bytes: usize,
+        ) -> Option<Vec<u8>> {
+            (self.0.len() <= max_bytes).then(|| self.0.clone())
+        }
+    }
+
+    let original = vec![0x78, 0x9c, 0x01, 0x02, 0x03];
+    let mut bin_data = crate::model::bin_data::BinData::default();
+    bin_data.data_type = crate::model::bin_data::BinDataType::Embedding;
+    bin_data.storage_id = 1;
+    bin_data.extension = Some("dat".to_string());
+    let doc = Document {
+        doc_info: DocInfo {
+            bin_data_list: vec![bin_data],
+            ..Default::default()
+        },
+        bin_data_content: vec![BinDataContent {
+            id: 1,
+            data: crate::model::bin_data::BinDataBytes::lazy(
+                std::sync::Arc::new(RawFallback(original.clone())),
+                "BIN0001.dat".to_string(),
+            ),
+            extension: "dat".to_string(),
+        }],
+        ..Default::default()
+    };
+
+    let bytes = serialize_hwp(&doc).expect("raw BinData fallback must serialize");
+    let mut cfb = crate::parser::cfb_reader::CfbReader::open(&bytes).expect("strict CFB open");
+    assert_eq!(cfb.read_bin_data("BIN0001.dat").unwrap(), original);
+}
+
+#[test]
+fn raw_bindata_fallback_is_limited_to_the_remaining_encoded_budget() {
+    #[derive(Debug)]
+    struct BudgetProbe {
+        decoded_limit: std::sync::atomic::AtomicUsize,
+        raw_limit: std::sync::atomic::AtomicUsize,
+    }
+
+    impl crate::model::bin_data::BinDataResolver for BudgetProbe {
+        fn resolve(&self, _key: &str) -> Vec<u8> {
+            unreachable!("bounded serializer path must be used")
+        }
+
+        fn resolve_limited(&self, _key: &str, max_bytes: usize) -> Option<Vec<u8>> {
+            self.decoded_limit
+                .store(max_bytes, std::sync::atomic::Ordering::SeqCst);
+            None
+        }
+
+        fn resolve_original_stream_limited(
+            &self,
+            _key: &str,
+            _expected_encoding: crate::model::bin_data::BinDataStreamEncoding,
+            max_bytes: usize,
+        ) -> Option<Vec<u8>> {
+            self.raw_limit
+                .store(max_bytes, std::sync::atomic::Ordering::SeqCst);
+            (6 <= max_bytes).then(|| vec![0; 6])
+        }
+    }
+
+    let resolver = std::sync::Arc::new(BudgetProbe {
+        decoded_limit: std::sync::atomic::AtomicUsize::new(0),
+        raw_limit: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let mut bin_data = crate::model::bin_data::BinData::default();
+    bin_data.data_type = crate::model::bin_data::BinDataType::Embedding;
+    bin_data.storage_id = 1;
+    bin_data.extension = Some("dat".to_string());
+    let content = BinDataContent {
+        id: 1,
+        data: crate::model::bin_data::BinDataBytes::lazy(
+            resolver.clone(),
+            "BIN0001.dat".to_string(),
+        ),
+        extension: "dat".to_string(),
+    };
+
+    let error = write_hwp_cfb_with_stream_budget(
+        b"123",
+        b"45",
+        &[],
+        &[bin_data],
+        &[content],
+        &None,
+        &[],
+        false,
+        10,
+    )
+    .expect_err("raw fallback larger than the remaining five bytes must fail closed");
+
+    assert!(error
+        .to_string()
+        .contains("could not be materialized safely"));
+    assert_eq!(
+        resolver
+            .decoded_limit
+            .load(std::sync::atomic::Ordering::SeqCst),
+        5
+    );
+    assert_eq!(
+        resolver.raw_limit.load(std::sync::atomic::Ordering::SeqCst),
+        5
+    );
+}
+
+#[test]
+fn compressed_lazy_fallbacks_charge_their_aggregate_decoded_size() {
+    #[derive(Debug)]
+    struct CompressedFallback {
+        encoded: Vec<u8>,
+        raw_reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl crate::model::bin_data::BinDataResolver for CompressedFallback {
+        fn resolve(&self, _key: &str) -> Vec<u8> {
+            unreachable!("bounded serializer path must be used")
+        }
+
+        fn resolve_limited(&self, _key: &str, _max_bytes: usize) -> Option<Vec<u8>> {
+            None
+        }
+
+        fn resolve_original_stream_limited(
+            &self,
+            _key: &str,
+            expected: crate::model::bin_data::BinDataStreamEncoding,
+            max_bytes: usize,
+        ) -> Option<Vec<u8>> {
+            assert!(expected.compressed);
+            self.raw_reads
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            (self.encoded.len() <= max_bytes).then(|| self.encoded.clone())
+        }
+    }
+
+    let decoded = vec![0x41; 12 * 1024];
+    let resolver = std::sync::Arc::new(CompressedFallback {
+        encoded: compress_stream(&decoded).expect("raw deflate fixture"),
+        raw_reads: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let mut bin_data_list = Vec::new();
+    let mut bin_data_content = Vec::new();
+    for id in 1..=2u16 {
+        let mut bin_data = crate::model::bin_data::BinData::default();
+        bin_data.data_type = crate::model::bin_data::BinDataType::Embedding;
+        bin_data.compression = crate::model::bin_data::BinDataCompression::Compress;
+        bin_data.storage_id = id;
+        bin_data.extension = Some("dat".to_string());
+        bin_data_list.push(bin_data);
+        bin_data_content.push(BinDataContent {
+            id,
+            data: crate::model::bin_data::BinDataBytes::lazy(
+                resolver.clone(),
+                format!("BIN{id:04X}.dat"),
+            ),
+            extension: "dat".to_string(),
+        });
+    }
+    let doc = Document {
+        doc_info: DocInfo {
+            bin_data_list,
+            ..Default::default()
+        },
+        bin_data_content,
+        ..Default::default()
+    };
+    let structural_bytes = serialize_file_header(&doc.header).len()
+        + serialize_doc_info(&doc.doc_info, &doc.doc_properties).len();
+    let error = serialize_hwp_with_limits(
+        &doc,
+        HwpWriteLimits {
+            max_structural_member_bytes: crate::parser::limits::MAX_STRUCTURAL_BYTES,
+            // The first decoded stream fits; the second is one byte over the
+            // aggregate budget. Charging encoded lengths would incorrectly
+            // permit both highly compressible streams.
+            max_expanded_bytes: (structural_bytes + decoded.len() * 2 - 1) as u64,
+            max_encoded_bytes: 1024 * 1024,
+            max_output_bytes: 1024 * 1024,
+        },
+    )
+    .expect_err("aggregate decoded BinData budget must fail closed");
+
+    assert!(
+        error
+            .to_string()
+            .contains("expanded BinData stream exceeds remaining byte budget"),
+        "{error}"
+    );
+    assert_eq!(
+        resolver.raw_reads.load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
+}
+
+#[test]
+fn duplicate_lazy_bindata_paths_fail_before_any_materialization() {
+    #[derive(Debug)]
+    struct CountingResolver(std::sync::atomic::AtomicUsize);
+
+    impl crate::model::bin_data::BinDataResolver for CountingResolver {
+        fn resolve(&self, _key: &str) -> Vec<u8> {
+            unreachable!("bounded serializer path must be used")
+        }
+
+        fn resolve_limited(&self, _key: &str, _max_bytes: usize) -> Option<Vec<u8>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Some(vec![1, 2, 3])
+        }
+    }
+
+    let resolver = std::sync::Arc::new(CountingResolver(std::sync::atomic::AtomicUsize::new(0)));
+    let mut bin_data = crate::model::bin_data::BinData::default();
+    bin_data.data_type = crate::model::bin_data::BinDataType::Embedding;
+    bin_data.storage_id = 1;
+    bin_data.extension = Some("dat".to_string());
+    let lazy = || BinDataContent {
+        id: 1,
+        data: crate::model::bin_data::BinDataBytes::lazy(
+            resolver.clone(),
+            "BIN0001.dat".to_string(),
+        ),
+        extension: "dat".to_string(),
+    };
+    let doc = Document {
+        doc_info: DocInfo {
+            bin_data_list: vec![bin_data],
+            ..Default::default()
+        },
+        bin_data_content: vec![lazy(), lazy()],
+        ..Default::default()
+    };
+
+    let error = serialize_hwp(&doc).expect_err("duplicate paths must fail before multiplying data");
+    assert!(error
+        .to_string()
+        .contains("duplicate generated BinData stream"));
+    assert_eq!(resolver.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[test]
+fn invalid_bindata_path_fails_before_lazy_materialization() {
+    #[derive(Debug)]
+    struct CountingResolver(std::sync::atomic::AtomicUsize);
+
+    impl crate::model::bin_data::BinDataResolver for CountingResolver {
+        fn resolve(&self, _key: &str) -> Vec<u8> {
+            unreachable!("bounded serializer path must be used")
+        }
+
+        fn resolve_limited(&self, _key: &str, _max_bytes: usize) -> Option<Vec<u8>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Some(vec![1, 2, 3])
+        }
+    }
+
+    let resolver = std::sync::Arc::new(CountingResolver(std::sync::atomic::AtomicUsize::new(0)));
+    let invalid_extension = "x/../../DocInfo";
+    let mut bin_data = crate::model::bin_data::BinData::default();
+    bin_data.data_type = crate::model::bin_data::BinDataType::Embedding;
+    bin_data.storage_id = 1;
+    bin_data.extension = Some(invalid_extension.to_string());
+    let doc = Document {
+        doc_info: DocInfo {
+            bin_data_list: vec![bin_data],
+            ..Default::default()
+        },
+        bin_data_content: vec![BinDataContent {
+            id: 1,
+            data: crate::model::bin_data::BinDataBytes::lazy(
+                resolver.clone(),
+                format!("BIN0001.{invalid_extension}"),
+            ),
+            extension: invalid_extension.to_string(),
+        }],
+        ..Default::default()
+    };
+
+    let error = serialize_hwp(&doc).expect_err("unsafe BinData paths must fail closed");
+    assert!(error.to_string().contains("invalid BinData storage name"));
+    assert_eq!(resolver.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[test]
+fn implicit_cfb_storages_are_counted_before_lazy_materialization() {
+    #[derive(Debug)]
+    struct CountingResolver(std::sync::atomic::AtomicUsize);
+
+    impl crate::model::bin_data::BinDataResolver for CountingResolver {
+        fn resolve(&self, _key: &str) -> Vec<u8> {
+            unreachable!("bounded serializer path must be used")
+        }
+
+        fn resolve_limited(&self, _key: &str, _max_bytes: usize) -> Option<Vec<u8>> {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Some(vec![1])
+        }
+    }
+
+    let resolver = std::sync::Arc::new(CountingResolver(std::sync::atomic::AtomicUsize::new(0)));
+    let mut bin_data_list = Vec::new();
+    let mut bin_data_content = Vec::new();
+    for id in 1..=2u16 {
+        let mut bin_data = crate::model::bin_data::BinData::default();
+        bin_data.data_type = crate::model::bin_data::BinDataType::Embedding;
+        bin_data.storage_id = id;
+        bin_data.extension = Some("dat".to_string());
+        bin_data_list.push(bin_data);
+        bin_data_content.push(BinDataContent {
+            id,
+            data: crate::model::bin_data::BinDataBytes::lazy(
+                resolver.clone(),
+                format!("BIN{id:04X}.dat"),
+            ),
+            extension: "dat".to_string(),
+        });
+    }
+    let doc = Document {
+        doc_info: DocInfo {
+            bin_data_list,
+            ..Default::default()
+        },
+        // Requested stream count is exactly 4096. The implicit BodyText and
+        // BinData storages make the real directory contain 4097 entries.
+        sections: vec![Section::default(); 4090],
+        bin_data_content,
+        ..Default::default()
+    };
+
+    let error = serialize_hwp(&doc).expect_err("implicit storage entries must share the limit");
+    assert!(
+        error.to_string().contains("directory entry count"),
+        "{error}"
+    );
+    assert_eq!(resolver.0.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
 #[test]

@@ -1,5 +1,33 @@
 import path from 'node:path';
-import { terminateProcessTree, waitForProcessTreeExit } from '../process-tree.mjs';
+import { StringDecoder } from 'node:string_decoder';
+import {
+  PROCESS_TREE_CLEANUP_OUTCOME,
+  processTreeCleanupOutcome,
+  terminateProcessTree,
+  waitForProcessTreeExit,
+} from '../process-tree.mjs';
+
+const ANSI_ESCAPE = /\x1B\[[0-?]*[ -/]*[@-~]/g;
+const SECRET_ASSIGNMENT = /((?:["']?(?:access[_-]?token|refresh[_-]?token|api[_-]?key|authorization|cookie|password|secret|token|oauth[_-]?code|authorization[_-]?code|user[_-]?code|code[_-]?verifier|state)["']?)\s*[:=]\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;}]+)/gi;
+const AUTH_HEADER = /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/gi;
+const KEY_SHAPED_SECRET = /\b(?:sk|pk)-[A-Za-z0-9_-]{12,}/g;
+const URL_USERINFO = /(https?:\/\/)[^/\s:@]+:[^@\s/]+@/gi;
+const URL_SECRET_PARAM = /([?&#](?:access[_-]?token|refresh[_-]?token|id[_-]?token|api[_-]?key|client[_-]?secret|oauth[_-]?code|authorization[_-]?code|user[_-]?code|code|state|token)=)[^&#\s]+/gi;
+
+/** Remove credentials from bounded diagnostics before they reach logs or UI. */
+export function redactDiagnosticText(value, secrets = []) {
+  let text = String(value ?? '').replace(ANSI_ESCAPE, '');
+  for (const candidate of secrets) {
+    const secret = typeof candidate === 'string' ? candidate : '';
+    if (secret.length >= 4) text = text.split(secret).join('[redacted]');
+  }
+  return text
+    .replace(URL_USERINFO, '$1[redacted]@')
+    .replace(URL_SECRET_PARAM, '$1[redacted]')
+    .replace(AUTH_HEADER, '$1 [redacted]')
+    .replace(KEY_SHAPED_SECRET, '[redacted]')
+    .replace(SECRET_ASSIGNMENT, '$1[redacted]');
+}
 
 /**
  * Shared helpers for agent CLI backends.
@@ -52,6 +80,7 @@ import { terminateProcessTree, waitForProcessTreeExit } from '../process-tree.mj
  * @typedef {Object} BackendOptions
  * @property {string} rootDir
  * @property {string} [workDir]
+ * @property {string[]} [readOnlyRoots] Hub-owned roots providers may read but must never write.
  * @property {string} mcpScriptPath
  * @property {string} [mcpRuntimeCommand]
  * @property {string[]} [mcpRuntimeArgs]
@@ -83,10 +112,6 @@ import { terminateProcessTree, waitForProcessTreeExit } from '../process-tree.mj
  * @property {'standard'|'fast'} [serviceTier]
  * @property {string} [toolProfile]
  * @property {string} [agentRole]
- * @property {string[]} [shellAllowPrefixes] 백그라운드 작업자 헬퍼 실행용 스코프 셸
- *   접두사 (grok 만 소비). 각 항목은 `python3 /abs/copy_layout.py` 처럼
- *   인터프리터+절대 스크립트 경로여야 한다. 맨 인터프리터 이름만 넘기면 무시되고
- *   전면 Bash deny 가 유지된다.
  * @property {string} [systemPromptOverride]
  * @property {(request: ProviderUserQuestionRequest, signal: AbortSignal) => Promise<UserQuestionOutcome>} [requestUserInput]
  * @property {(evt: UnifiedAgentEvent) => void} onEvent
@@ -119,31 +144,94 @@ import { terminateProcessTree, waitForProcessTreeExit } from '../process-tree.mj
  * newlines and invokes onLine with each JSON-parsed line. Parse failures are
  * logged to stderr and skipped.
  * @param {(obj: any) => void} onLine
- * @returns {(chunk: Buffer | string) => void}
+ * @param {{maxLineBytes?: number, onOverflow?: (() => void) | null}} [options]
+ * @returns {((chunk: Buffer | string) => void) & {end: () => void, discard: () => void}}
  */
-export function createLineReader(onLine) {
+export function createLineReader(onLine, { maxLineBytes = 8 * 1024 * 1024, onOverflow = null } = {}) {
+  let decoder = new StringDecoder('utf8');
   let buffer = '';
-  return (chunk) => {
-    buffer += chunk.toString();
-    let idx;
-    while ((idx = buffer.indexOf('\n')) !== -1) {
-      const line = buffer.slice(0, idx).trim();
-      buffer = buffer.slice(idx + 1);
-      if (!line) continue;
-      let obj;
-      try {
-        obj = JSON.parse(line);
-      } catch (e) {
-        process.stderr.write(`[backend] skipping unparseable line: ${line.slice(0, 200)}\n`);
-        continue;
-      }
-      try {
-        onLine(obj);
-      } catch (e) {
-        process.stderr.write(`[backend] onLine handler error: ${e?.stack ?? e}\n`);
-      }
+  let bufferBytes = 0;
+  let discarding = false;
+  let ended = false;
+
+  const resetLine = () => {
+    decoder = new StringDecoder('utf8');
+    buffer = '';
+    bufferBytes = 0;
+  };
+  const overflow = () => {
+    resetLine();
+    onOverflow?.();
+    process.stderr.write(`[backend] discarding provider frame larger than ${maxLineBytes} bytes\n`);
+  };
+  const emitLine = (rawLine) => {
+    const line = rawLine.trim();
+    if (!line) return;
+    let obj;
+    try {
+      obj = JSON.parse(line);
+    } catch (e) {
+      process.stderr.write('[backend] skipping an unparseable provider frame\n');
+      return;
+    }
+    try {
+      onLine(obj);
+    } catch (e) {
+      process.stderr.write(`[backend] provider frame handler error: ${redactDiagnosticText(e?.stack ?? e)}\n`);
     }
   };
+  const read = (chunk) => {
+    if (ended) return;
+    const incoming = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8');
+    let offset = 0;
+    while (offset < incoming.length) {
+      const newline = incoming.indexOf(0x0a, offset);
+      const end = newline < 0 ? incoming.length : newline;
+      if (discarding) {
+        if (newline < 0) return;
+        discarding = false;
+        resetLine();
+        offset = newline + 1;
+        continue;
+      }
+
+      const segment = incoming.subarray(offset, end);
+      bufferBytes += segment.length;
+      if (bufferBytes > maxLineBytes) {
+        overflow();
+        if (newline < 0) {
+          discarding = true;
+          return;
+        }
+        offset = newline + 1;
+        continue;
+      }
+      buffer += decoder.write(segment);
+      if (newline < 0) return;
+      buffer += decoder.end();
+      emitLine(buffer);
+      resetLine();
+      offset = newline + 1;
+    }
+  };
+  read.end = () => {
+    if (ended) return;
+    ended = true;
+    if (discarding) {
+      resetLine();
+      return;
+    }
+    buffer += decoder.end();
+    emitLine(buffer);
+    resetLine();
+  };
+  read.discard = () => {
+    if (ended) return;
+    ended = true;
+    discarding = false;
+    resetLine();
+  };
+  return read;
 }
 
 function usageCount(...candidates) {
@@ -470,10 +558,21 @@ export function systemBriefFor(opts = {}, agentName = 'claude') {
   return `${SHARED_SYSTEM_BRIEF}\n\n${INSTRUCTION_PLANNING_BRIEF}\n\n${PLANNING_SYSTEM_BRIEF}`;
 }
 
+export function providerReadOnlyRoots(opts = {}) {
+  const values = Array.isArray(opts.readOnlyRoots) ? opts.readOnlyRoots : [];
+  const roots = values
+    .map((root) => String(root ?? '').trim())
+    .filter(Boolean);
+  if (roots.some((root) => root.includes(path.delimiter))) {
+    throw new Error('read-only root cannot contain the platform path delimiter');
+  }
+  return [...new Set(roots)];
+}
+
 export function mcpCapabilityEnv(opts = {}) {
   const { workflow, phase, capabilityEpoch } = normalizeExecutionMode(opts);
   // insert_image 가 읽을 수 있는 로컬 루트 — 세션 작업 공간(다운로드 포함)으로 제한.
-  const rootValues = [opts.rootDir, opts.workDir]
+  const rootValues = [opts.rootDir, opts.workDir, ...providerReadOnlyRoots(opts)]
     .map((root) => String(root ?? '').trim())
     .filter(Boolean);
   if (rootValues.some((root) => root.includes(path.delimiter))) {
@@ -509,7 +608,8 @@ const EXIT_CLOSE_GRACE_MS = 2_000;
  * @param {(stderrText: string, code: number|null, signal: NodeJS.Signals|null) => string} config.formatExitError
  * @param {string} [config.processLabel] 사용자에게 보이는 실행 파일 이름 (기본값: agent)
  * @param {(child: import('node:child_process').ChildProcess) => unknown} [config.terminateProcess]
- * @param {(child: import('node:child_process').ChildProcess | null) => Promise<boolean>} [config.waitForExit]
+ * @param {(child: import('node:child_process').ChildProcess | null) => Promise<boolean|null>} [config.waitForExit]
+ * @param {NodeJS.Platform} [config.platform]
  * @param {number} [config.graceMs]
  * @param {number} [config.stderrTailLimit]
  */
@@ -520,6 +620,7 @@ export function createTurnProcessLifecycle({
   processLabel = agent,
   terminateProcess = terminateProcessTree,
   waitForExit = waitForProcessTreeExit,
+  platform = process.platform,
   graceMs = EXIT_CLOSE_GRACE_MS,
   stderrTailLimit = STDERR_TAIL_LIMIT,
 }) {
@@ -530,10 +631,15 @@ export function createTurnProcessLifecycle({
   let turnCompleted = false;
   let disposed = false;
   let stderrTail = '';
-  /** @type {Promise<void>} */
-  let childExitPromise = Promise.resolve();
-  /** @type {(() => void) | null} */
-  let resolveChildExit = null;
+  /** @type {Promise<boolean>} */
+  let childExitPromise = Promise.resolve(true);
+  /** @type {(reason?: 'forced'|'queue'|'terminal') => Promise<boolean>} */
+  let stopChild = () => Promise.resolve(true);
+  let suppressCurrentOutput = () => {};
+  const pendingTreeCleanups = new Set();
+  let uncertainTreeCleanup = false;
+  /** @type {{ prepare: () => void, start: () => void } | null} */
+  let queuedTurn = null;
 
   /** @param {UnifiedAgentEvent} evt */
   function endTurn(evt) {
@@ -543,63 +649,163 @@ export function createTurnProcessLifecycle({
   }
 
   function killChild() {
-    const proc = child;
-    if (!proc || proc.exitCode !== null || proc.signalCode !== null) return;
-    terminateProcess(proc);
+    return stopChild('forced');
   }
 
-  return {
+  function beginTurn() {
+    turnOpen = true;
+    turnCompleted = false;
+    stderrTail = '';
+    onEvent({ type: 'turn-start', agent });
+  }
+
+  function activateTurn(entry) {
+    if (disposed) return;
+    try {
+      entry.prepare();
+      beginTurn();
+      entry.start();
+    } catch (error) {
+      if (!turnOpen) beginTurn();
+      const safeError = redactDiagnosticText(error?.message ?? error);
+      onEvent({ type: 'error', agent, message: `failed to start ${processLabel}: ${safeError}` });
+      endTurn({ type: 'turn-end', agent, stopReason: 'exited' });
+    }
+  }
+
+  function failQueuedTurn(entry) {
+    if (disposed) return;
+    try { entry.prepare(); } catch {}
+    onEvent({
+      type: 'error',
+      agent,
+      message: `${processLabel} process-tree cleanup could not be confirmed before the next turn`,
+    });
+    // The caller already allocated this user turn, but an unproven previous
+    // tree must never receive a provider turn-start/MCP authority window.
+    onEvent({ type: 'turn-end', agent, stopReason: 'failed' });
+  }
+
+  const lifecycle = {
     isDisposed: () => disposed,
     isTurnOpen: () => turnOpen,
+    isTurnPending: () => queuedTurn !== null,
     endTurn,
     /** result 줄을 파싱했음을 기록한다 — 종료 판정이 이 값을 본다. */
     markTurnCompleted() {
       turnCompleted = true;
     },
+    /**
+     * Windows loses its safe tree identity when the leader exits. Providers
+     * call this only at a protocol-defined terminal boundary, while the PID is
+     * still live; stdout remains attached and drains through `close`.
+     */
+    beginTerminalCleanup() {
+      if (platform !== 'win32' || !child) return Promise.resolve(true);
+      return stopChild('terminal');
+    },
     /** 턴을 열고 turn-start 를 낸다. 하니스별 턴 상태는 이 호출 전에 초기화한다. */
     beginTurn() {
-      turnOpen = true;
-      turnCompleted = false;
-      stderrTail = '';
-      onEvent({ type: 'turn-start', agent });
+      beginTurn();
+    },
+    /**
+     * Start a turn only after ownership of the previous process tree has been
+     * released by both a drained stream boundary and either a proven cleanup,
+     * or the narrow successful-close exception described in attachChild().
+     *
+     * @param {() => void} prepare resets provider-specific turn state
+     * @param {() => void} start dispatches the prepared turn
+     */
+    queueTurn(prepare, start) {
+      if (disposed) return;
+      if (turnOpen || queuedTurn) throw new Error(`${processLabel} already has a turn in progress`);
+      const entry = { prepare, start };
+      if (uncertainTreeCleanup) {
+        failQueuedTurn(entry);
+        return;
+      }
+      if (!child) {
+        activateTurn(entry);
+        return;
+      }
+      queuedTurn = entry;
+      const ownership = childExitPromise;
+      void stopChild('queue');
+      void ownership.then((cleaned) => {
+        if (queuedTurn !== entry) return;
+        queuedTurn = null;
+        if (cleaned && !child && !uncertainTreeCleanup) activateTurn(entry);
+        else failQueuedTurn(entry);
+      }, () => {
+        if (queuedTurn !== entry) return;
+        queuedTurn = null;
+        failQueuedTurn(entry);
+      });
     },
     /** 스폰 전 준비나 spawn 자체가 실패한 턴을 닫는다. */
     failStart(error) {
-      onEvent({ type: 'error', agent, message: `failed to start ${processLabel}: ${error?.message ?? error}` });
+      const safeError = redactDiagnosticText(error?.message ?? error);
+      onEvent({ type: 'error', agent, message: `failed to start ${processLabel}: ${safeError}` });
       endTurn({ type: 'turn-end', agent, stopReason: 'exited' });
     },
     /**
      * 스폰한 자식을 이번 턴의 소유 프로세스로 붙인다. stdout 은 NDJSON 으로 파싱해
-     * onStdoutLine 에 넘기고, stderr 는 꼬리에 모으면서 그대로 중계한다.
+     * onStdoutLine 에 넘기고, stderr 는 실패 설명용 bounded tail 로만 보관한다.
+     * 공급자 stderr 를 서버 로그로 복제하면 공급자가 반사한 토큰/키가 유출될 수 있다.
      *
      * @param {import('node:child_process').ChildProcess & { stdout: NodeJS.ReadableStream, stderr: NodeJS.ReadableStream }} proc stdio 가 파이프로 열린 자식
      * @param {(obj: any) => void} onStdoutLine
+     * @param {{onDrainedClose?: (() => void) | null}} [options]
      */
-    attachChild(proc, onStdoutLine) {
+    attachChild(proc, onStdoutLine, { onDrainedClose = null } = {}) {
+      if (uncertainTreeCleanup) {
+        try { void Promise.resolve(terminateProcess(proc)); } catch {}
+        throw new Error(`${processLabel} process-tree cleanup remains unconfirmed`);
+      }
+      if (child && child !== proc) {
+        try { void Promise.resolve(terminateProcess(proc)); } catch {}
+        throw new Error(`${processLabel} process-tree cleanup is still pending`);
+      }
       child = proc;
-      childExitPromise = new Promise((resolve) => { resolveChildExit = resolve; });
+      /** @type {(cleaned: boolean) => void} */
+      let resolveOwnership = () => {};
+      childExitPromise = new Promise((resolve) => { resolveOwnership = resolve; });
       // 죽어가는 이전 턴의 자식이 버퍼에 남은 출력을 뒤늦게 흘려도 다음 턴의
       // 이벤트로 새면 안 된다 — 소유 프로세스가 바뀌면 그 뒤 출력은 전부 버린다.
       const readStdout = createLineReader(onStdoutLine);
+      let acceptOutput = true;
+      let readerEnded = false;
+      /** @type {string | null} */
+      let spawnErrorMessage = null;
+      const closeOutputReader = (flush) => {
+        if (readerEnded) return;
+        readerEnded = true;
+        acceptOutput = false;
+        if (flush) readStdout.end();
+        else readStdout.discard();
+      };
+      const flushOutput = () => closeOutputReader(true);
+      const discardOutput = () => closeOutputReader(false);
+      suppressCurrentOutput = () => {
+        if (proc === child) discardOutput();
+      };
       proc.stdout.on('data', (chunk) => {
-        if (proc !== child || disposed) return;
+        if (proc !== child || disposed || !acceptOutput) return;
         readStdout(chunk);
       });
       proc.stderr.on('data', (chunk) => {
-        if (proc !== child || disposed) return;
+        if (proc !== child || disposed || !acceptOutput) return;
         const chunkText = chunk.toString();
         stderrTail = (stderrTail + chunkText).slice(-stderrTailLimit);
-        for (const line of chunkText.split('\n')) {
-          if (line.trim()) process.stderr.write(`[${agent}] ${line}\n`);
-        }
       });
       proc.on('error', (err) => {
         if (proc !== child) return;
-        process.stderr.write(`[${agent}] spawn error: ${err?.message ?? err}\n`);
-        if (turnOpen) {
-          onEvent({ type: 'error', agent, message: `${processLabel} process error: ${err?.message ?? err}` });
-          endTurn({ type: 'turn-end', agent, stopReason: 'exited' });
-        }
+        discardOutput();
+        const safeError = redactDiagnosticText(err?.message ?? err);
+        spawnErrorMessage = `${processLabel} process error: ${safeError}`;
+        process.stderr.write(`[${agent}] spawn error: ${safeError}\n`);
+        void beginTreeCleanup(true);
+        scheduleCloseGrace(proc.exitCode ?? null, proc.signalCode ?? null);
       });
       // 'exit' 은 stdout 꼬리가 아직 파싱되기 전에 온다 — 큰 출력으로 끝난 성공 턴이
       // 여기서 실패로 처리되면 스테이징 편집이 통째로 되돌아간다. 턴 판정은 stdio 가
@@ -608,61 +814,190 @@ export function createTurnProcessLifecycle({
       let exitInfo = null;
       /** @type {ReturnType<typeof setTimeout> | null} */
       let closeGraceTimer = null;
+      let exitSettled = false;
+      let drainedClose = false;
+      let completedAtDrain = false;
+      let forcedCleanup = false;
+      let cleanupSettled = false;
+      /** @type {'proven' | 'failed' | 'unavailable'} */
+      let cleanupOutcome = PROCESS_TREE_CLEANUP_OUTCOME.FAILED;
+      /** @type {Promise<boolean> | null} */
+      let cleanupPromise = null;
+      const scheduleCloseGrace = (code, signal) => {
+        if (exitSettled || closeGraceTimer) return;
+        closeGraceTimer = setTimeout(() => {
+          closeGraceTimer = null;
+          settleExit(code ?? null, signal ?? null, false);
+        }, graceMs);
+        closeGraceTimer.unref?.();
+      };
+      const finishOwnership = () => {
+        if (!exitSettled || !cleanupSettled) return;
+        // Process-tree death alone is not a drained-output proof. A missing
+        // `close` means some process still owns an inherited stdio handle, so
+        // the session must remain quarantined even when the bounded tree probe
+        // happened to report success.
+        const proven = cleanupOutcome === PROCESS_TREE_CLEANUP_OUTCOME.PROVEN
+          && drainedClose;
+        // Windows cannot safely target an already-exited PID. A successful
+        // result followed by the real drained `close` boundary may release the
+        // local slot, but its session is quarantined: it cannot spawn again or
+        // delete/reuse the workspace.
+        const naturalDrainedRelease = cleanupOutcome === PROCESS_TREE_CLEANUP_OUTCOME.UNAVAILABLE
+          && drainedClose
+          && completedAtDrain
+          && exitInfo?.code === 0
+          && !forcedCleanup;
+        const released = proven || naturalDrainedRelease;
+        if (released && proc === child) child = null;
+        // `released` only frees the local slot after a fully drained natural
+        // close. It is not cleanup proof: the owning session is quarantined and
+        // every later turn/configuration change must remain fail-closed.
+        resolveOwnership(proven);
+        resolveOwnership = () => {};
+      };
+      const beginTreeCleanup = (forced = false) => {
+        forcedCleanup ||= forced;
+        if (cleanupPromise) return cleanupPromise;
+        /** @type {(cleaned: boolean) => void} */
+        let resolveCleanup = () => {};
+        cleanupPromise = new Promise((resolve) => { resolveCleanup = resolve; });
+        pendingTreeCleanups.add(cleanupPromise);
+        void cleanupPromise.then((cleaned) => {
+          pendingTreeCleanups.delete(cleanupPromise);
+          if (!cleaned) uncertainTreeCleanup = true;
+        });
+        let termination;
+        let exited;
+        try {
+          termination = Promise.resolve(terminateProcess(proc));
+        } catch {
+          termination = Promise.resolve(false);
+        }
+        try {
+          exited = Promise.resolve(waitForExit(proc));
+        } catch {
+          exited = Promise.resolve(false);
+        }
+        void Promise.all([termination, exited]).then(
+          ([terminationResult, exitResult]) => processTreeCleanupOutcome(
+            terminationResult,
+            exitResult,
+          ),
+          () => PROCESS_TREE_CLEANUP_OUTCOME.FAILED,
+        ).then((outcome) => {
+          cleanupSettled = true;
+          cleanupOutcome = outcome;
+          if (outcome !== PROCESS_TREE_CLEANUP_OUTCOME.PROVEN) {
+            uncertainTreeCleanup = true;
+          }
+          // Node can omit `close` when a descendant retains inherited stdio.
+          // Preserve a short drain window even when tree cleanup resolves first.
+          if (!exitSettled) {
+            scheduleCloseGrace(
+              exitInfo?.code ?? proc.exitCode ?? null,
+              exitInfo?.signal ?? proc.signalCode ?? null,
+            );
+          }
+          finishOwnership();
+          resolveCleanup(outcome === PROCESS_TREE_CLEANUP_OUTCOME.PROVEN);
+        });
+        return cleanupPromise;
+      };
+      stopChild = (reason = 'forced') => {
+        if (proc !== child) return Promise.resolve(true);
+        // A queued follow-up that arrives after the leader's natural exit does
+        // not turn that exit into a forced stop. Interrupt/config/dispose do.
+        const forced = reason === 'forced' || (reason === 'queue' && exitInfo === null);
+        if (forced) discardOutput();
+        return beginTreeCleanup(forced);
+      };
       /**
        * @param {number|null} code
        * @param {NodeJS.Signals|null} signal
        */
-      const settleExit = (code, signal) => {
+      const settleExit = (code, signal, fromClose) => {
         if (proc !== child) return;
+        if (exitSettled) return;
+        exitSettled = true;
+        drainedClose = fromClose;
+        exitInfo ??= { code, signal };
         if (closeGraceTimer) {
           clearTimeout(closeGraceTimer);
           closeGraceTimer = null;
         }
+        if (fromClose) flushOutput();
+        else discardOutput();
+        // Only `close` proves stdio reached EOF. A grace timeout means a
+        // descendant still owns the pipe, so its unterminated tail is discarded.
+        completedAtDrain = fromClose && turnCompleted;
+        if (!fromClose) uncertainTreeCleanup = true;
+        // Provider-specific terminal metadata may be parsed only by the final
+        // flush above. Give one-shot adapters a drained boundary at which to
+        // publish that exact result before the generic fallback is considered.
+        if (fromClose && turnOpen && !disposed && typeof onDrainedClose === 'function') {
+          try {
+            onDrainedClose();
+          } catch (error) {
+            const safeError = redactDiagnosticText(error?.message ?? error);
+            onEvent({ type: 'error', agent, message: `${processLabel} close handler failed: ${safeError}` });
+            endTurn({ type: 'turn-end', agent, stopReason: 'exited' });
+          }
+        }
         if (turnOpen && !disposed) {
-          if (!turnCompleted && code !== 0) {
+          if (spawnErrorMessage) {
+            onEvent({ type: 'error', agent, message: spawnErrorMessage });
+          } else if (!completedAtDrain && code !== 0) {
             // result 없이 비정상 종료 — 스트림이 잘렸거나 stderr 로만 끝난 실행이다.
             onEvent({ type: 'error', agent, message: formatExitError(stderrTail, code, signal) });
           }
-          endTurn({ type: 'turn-end', agent, stopReason: turnCompleted ? 'completed' : 'exited' });
+          endTurn({ type: 'turn-end', agent, stopReason: completedAtDrain ? 'completed' : 'exited' });
         }
-        child = null;
-        resolveChildExit?.();
-        resolveChildExit = null;
+        void beginTreeCleanup(false);
+        finishOwnership();
       };
-      proc.on('exit', (code, signal) => {
+      const onExit = (code, signal) => {
         if (proc !== child) return;
+        if (exitInfo) return;
         exitInfo = { code, signal };
-        // 프로세스는 이미 죽었으므로 모드 전환 대기는 여기서 풀어 준다.
-        resolveChildExit?.();
-        resolveChildExit = null;
+        // The leader can exit while descendants retain stdout or keep running.
+        // Start bounded group/tree cleanup now and retain `proc` until it ends.
+        void beginTreeCleanup(false);
         // 자손이 파이프를 붙들어 'close' 가 오지 않는 경우를 위한 상한이다.
-        closeGraceTimer = setTimeout(() => {
-          closeGraceTimer = null;
-          settleExit(code ?? null, signal ?? null);
-        }, graceMs);
-        closeGraceTimer.unref?.();
-      });
+        scheduleCloseGrace(code, signal);
+      };
+      proc.on('exit', onExit);
       proc.on('close', (code, signal) => {
-        settleExit(code ?? exitInfo?.code ?? null, signal ?? exitInfo?.signal ?? null);
+        exitInfo ??= { code: code ?? null, signal: signal ?? null };
+        settleExit(code ?? exitInfo.code ?? null, signal ?? exitInfo.signal ?? null, true);
       });
+      if (proc.exitCode != null || proc.signalCode != null) {
+        queueMicrotask(() => onExit(proc.exitCode ?? null, proc.signalCode ?? null));
+      }
     },
     killChild,
     /** 실행 중인 자식이 끝날 때까지 기다린다 — 모드 전환이 다음 스폰을 늦추는 지점. */
     waitForChildExit: () => childExitPromise,
+    isCleanupUncertain: () => uncertainTreeCleanup,
     interrupt() {
+      queuedTurn = null;
+      suppressCurrentOutput();
       killChild();
       endTurn({ type: 'turn-end', agent, stopReason: 'interrupted' });
     },
     dispose() {
       disposed = true;
       turnOpen = false;
+      queuedTurn = null;
+      suppressCurrentOutput();
       // 죽어가는 자식의 stdout 을 아예 파싱하지 않는다.
       try { child?.stdout?.removeAllListeners('data'); } catch {}
-      const exited = waitForExit(child);
-      killChild();
-      return exited;
+      const currentCleanup = killChild();
+      return Promise.all([currentCleanup, childExitPromise, ...pendingTreeCleanups])
+        .then((results) => !uncertainTreeCleanup && results.every((result) => result !== false));
     },
   };
+  return lifecycle;
 }
 
 /** Runtime used for the MCP stdio child. Prefix args support packaged Electron runtimes. */

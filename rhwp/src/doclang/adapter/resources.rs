@@ -118,12 +118,12 @@ mod tests {
             bin_data_content: vec![
                 BinDataContent {
                     id: 1,
-                    data: BinDataBytes::Loaded(vec![0xFF, 0xD8]),
+                    data: BinDataBytes::from(vec![0xFF, 0xD8]),
                     extension: "jpg".to_string(),
                 },
                 BinDataContent {
                     id: 2,
-                    data: BinDataBytes::Loaded(vec![0x89, 0x50]),
+                    data: BinDataBytes::from(vec![0x89, 0x50]),
                     extension: "png".to_string(),
                 },
             ],
@@ -145,7 +145,7 @@ mod tests {
         let doc = Document {
             bin_data_content: vec![BinDataContent {
                 id: 3,
-                data: BinDataBytes::Loaded(vec![]),
+                data: BinDataBytes::from(vec![]),
                 extension: "png".to_string(),
             }],
             ..Default::default()

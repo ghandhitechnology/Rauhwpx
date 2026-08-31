@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import test from 'node:test';
 
-import { createProviderHealth } from '../provider-health.mjs';
+import {
+  PROBE_STDERR_LIMIT_BYTES,
+  PROBE_STDOUT_LIMIT_BYTES,
+  createProviderHealth,
+} from '../provider-health.mjs';
 
 class FakeStream extends EventEmitter {}
 
@@ -13,6 +17,7 @@ class FakeProcess extends EventEmitter {
 
   kill(signal) {
     this.killed = signal;
+    queueMicrotask(() => this.emit('exit', null, signal));
     return true;
   }
 
@@ -126,7 +131,27 @@ test('a hung probe times out and kills the child', async () => {
   assert.equal(result.claude.available, true);
   assert.equal(result.codex.available, false);
   assert.match(result.codex.error, /응답하지 않았습니다/);
-  assert.equal(spawns.find((s) => s.command === 'codex').proc.killed, 'SIGKILL');
+  assert.equal(spawns.find((s) => s.command === 'codex').proc.killed, 'SIGTERM');
+});
+
+test('probe output floods terminate the owned process tree', async () => {
+  const { spawns, spawnProcess } = fakeSpawner((command, proc) => {
+    if (command === 'codex') {
+      proc.stdout.emit('data', Buffer.alloc(PROBE_STDOUT_LIMIT_BYTES + 1));
+      return;
+    }
+    if (command === 'grok') {
+      proc.stderr.emit('data', Buffer.alloc(PROBE_STDERR_LIMIT_BYTES + 1));
+      return;
+    }
+    proc.succeed(`${command} 1.0`);
+  });
+  const result = await createProviderHealth({ spawnProcess }).check();
+
+  assert.match(result.codex.error, /stdout.*64 KiB/);
+  assert.match(result.grok.error, /stderr.*16 KiB/);
+  assert.equal(spawns.find((item) => item.command === 'codex').proc.killed, 'SIGTERM');
+  assert.equal(spawns.find((item) => item.command === 'grok').proc.killed, 'SIGTERM');
 });
 
 test('results are cached for the ttl and refresh forces a re-probe', async () => {

@@ -3,6 +3,12 @@ import {
   type FilePickerType,
   type SaveFormat,
 } from './save-format.ts';
+import { markExactLocalFileRead } from '../core/local-file-grant.ts';
+import {
+  EXACT_LOCAL_DOCUMENT_MAX_BYTES,
+  PORTABLE_HISTORY_MAX_BYTES,
+  readBlobBytesWithLimit,
+} from '../core/document-input-limits.ts';
 
 export interface FileSystemWritableFileStreamLike {
   write(data: Blob): Promise<void>;
@@ -274,9 +280,14 @@ export async function pickOpenFileHandle(windowLike: FileSystemWindowLike): Prom
 
 export async function readFileFromHandle(handle: FileSystemFileHandleLike): Promise<FileHandleReadResult> {
   const file = await handle.getFile();
+  const maxBytes = file.name.toLowerCase().endsWith('.rhwpx')
+    ? PORTABLE_HISTORY_MAX_BYTES
+    : EXACT_LOCAL_DOCUMENT_MAX_BYTES;
+  const bytes = await readBlobBytesWithLimit(file, maxBytes, '로컬 문서');
+  markExactLocalFileRead(bytes, handle);
   return {
     name: file.name,
-    bytes: new Uint8Array(await file.arrayBuffer()),
+    bytes,
   };
 }
 

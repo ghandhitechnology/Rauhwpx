@@ -7,7 +7,7 @@
 //! DOCUMENT_PROPERTIES → ID_MAPPINGS → BIN_DATA → FACE_NAME →
 //! BORDER_FILL → CHAR_SHAPE → TAB_DEF → NUMBERING → PARA_SHAPE → STYLE
 
-use super::byte_writer::ByteWriter;
+use super::byte_writer::{hwp_string_size, ByteWriter};
 use super::record_writer::write_record;
 
 use crate::model::bin_data::{BinData, BinDataType};
@@ -20,125 +20,276 @@ use crate::parser::tags;
 
 /// DocInfo + DocProperties를 레코드 바이너리 스트림으로 직렬화
 pub fn serialize_doc_info(doc_info: &DocInfo, doc_props: &DocProperties) -> Vec<u8> {
+    serialize_doc_info_limited(doc_info, doc_props, usize::MAX)
+        .expect("unbounded DocInfo serialization")
+}
+
+/// Bounded counterpart used by the HWP container writer.
+///
+/// The limit is checked before raw round-trip streams are copied and before
+/// each generated record is appended. This prevents a malformed or
+/// programmatic IR from first constructing an oversized DocInfo stream and
+/// only discovering the container limit afterward.
+pub(crate) fn serialize_doc_info_limited(
+    doc_info: &DocInfo,
+    doc_props: &DocProperties,
+    max_bytes: usize,
+) -> Result<Vec<u8>, String> {
     // 원본 스트림이 있고 변경되지 않았으면 그대로 반환 (완벽한 라운드트립)
     if !doc_info.raw_stream_dirty {
         if let Some(ref raw) = doc_info.raw_stream {
-            let mut result = raw.clone();
+            if raw.len() > max_bytes {
+                return Err(format!(
+                    "HWP DocInfo structural stream exceeds byte limit: {} > {max_bytes}",
+                    raw.len()
+                ));
+            }
+            let mut result = Vec::new();
+            result
+                .try_reserve_exact(raw.len())
+                .map_err(|error| format!("HWP DocInfo allocation failed: {error}"))?;
+            result.extend_from_slice(raw);
             // 배포용 문서 해제 시 DISTRIBUTE_DOC_DATA 레코드 제거
             if doc_info.distribute_doc_data_removed {
                 surgical_remove_records(&mut result, tags::HWPTAG_DISTRIBUTE_DOC_DATA);
             }
-            return result;
+            return Ok(result);
         }
     }
 
-    let mut stream = Vec::new();
+    serialize_doc_info_records_limited(doc_info, doc_props, None, max_bytes)
+}
+
+/// Regenerate DocInfo records while ignoring raw stream/record seals. This is
+/// the bounded fallback when a pathological raw stream has no patchable
+/// DOCUMENT_PROPERTIES record.
+pub(crate) fn serialize_doc_info_generated_limited(
+    doc_info: &DocInfo,
+    doc_props: &DocProperties,
+    section_count: u16,
+    max_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    serialize_doc_info_records_limited(doc_info, doc_props, Some(section_count), max_bytes)
+}
+
+fn serialize_doc_info_records_limited(
+    doc_info: &DocInfo,
+    doc_props: &DocProperties,
+    section_count_override: Option<u16>,
+    max_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    let mut stream = LimitedRecordStream::new(max_bytes);
 
     // 1. DOCUMENT_PROPERTIES
-    stream.extend(write_record(
-        tags::HWPTAG_DOCUMENT_PROPERTIES,
-        0,
-        &serialize_document_properties(doc_props),
-    ));
+    if section_count_override.is_none() && doc_props.raw_data.is_some() {
+        let raw = doc_props.raw_data.as_deref().expect("checked above");
+        stream.append_record(tags::HWPTAG_DOCUMENT_PROPERTIES, 0, raw)?;
+    } else {
+        let data = serialize_document_properties_fields(
+            doc_props,
+            section_count_override.unwrap_or(doc_props.section_count),
+        );
+        stream.append_record(tags::HWPTAG_DOCUMENT_PROPERTIES, 0, &data)?;
+    }
 
     // 2. ID_MAPPINGS
-    stream.extend(write_record(
-        tags::HWPTAG_ID_MAPPINGS,
-        0,
-        &serialize_id_mappings(doc_info),
-    ));
+    let id_mappings = serialize_id_mappings(doc_info);
+    stream.append_record(tags::HWPTAG_ID_MAPPINGS, 0, &id_mappings)?;
 
     // 3~10: ID_MAPPINGS 하위 레코드 (모두 level 1)
     for bin_data in &doc_info.bin_data_list {
-        let data = bin_data
-            .raw_data
-            .clone()
-            .unwrap_or_else(|| serialize_bin_data(bin_data));
-        stream.extend(write_record(tags::HWPTAG_BIN_DATA, 1, &data));
+        if let Some(raw) = bin_data.raw_data.as_deref() {
+            stream.append_record(tags::HWPTAG_BIN_DATA, 1, raw)?;
+        } else {
+            let data = serialize_bin_data_limited(bin_data, stream.remaining())?;
+            stream.append_record(tags::HWPTAG_BIN_DATA, 1, &data)?;
+        }
     }
 
     for lang_fonts in &doc_info.font_faces {
         for font in lang_fonts {
-            let data = font
-                .raw_data
-                .clone()
-                .unwrap_or_else(|| serialize_face_name(font));
-            stream.extend(write_record(tags::HWPTAG_FACE_NAME, 1, &data));
+            if let Some(raw) = font.raw_data.as_deref() {
+                stream.append_record(tags::HWPTAG_FACE_NAME, 1, raw)?;
+            } else {
+                let data = serialize_face_name_limited(font, stream.remaining())?;
+                stream.append_record(tags::HWPTAG_FACE_NAME, 1, &data)?;
+            }
         }
     }
 
     for bf in &doc_info.border_fills {
-        let data = bf
-            .raw_data
-            .clone()
-            .unwrap_or_else(|| serialize_border_fill(bf));
-        stream.extend(write_record(tags::HWPTAG_BORDER_FILL, 1, &data));
+        if let Some(raw) = bf.raw_data.as_deref() {
+            stream.append_record(tags::HWPTAG_BORDER_FILL, 1, raw)?;
+        } else {
+            let data = serialize_border_fill_limited(bf, stream.remaining())?;
+            stream.append_record(tags::HWPTAG_BORDER_FILL, 1, &data)?;
+        }
     }
 
     for cs in &doc_info.char_shapes {
-        let data = cs
-            .raw_data
-            .clone()
-            .unwrap_or_else(|| serialize_char_shape(cs));
-        stream.extend(write_record(tags::HWPTAG_CHAR_SHAPE, 1, &data));
+        if let Some(raw) = cs.raw_data.as_deref() {
+            stream.append_record(tags::HWPTAG_CHAR_SHAPE, 1, raw)?;
+        } else {
+            let data = serialize_char_shape(cs);
+            stream.append_record(tags::HWPTAG_CHAR_SHAPE, 1, &data)?;
+        }
     }
 
     for td in &doc_info.tab_defs {
-        let data = td.raw_data.clone().unwrap_or_else(|| serialize_tab_def(td));
-        stream.extend(write_record(tags::HWPTAG_TAB_DEF, 1, &data));
+        if let Some(raw) = td.raw_data.as_deref() {
+            stream.append_record(tags::HWPTAG_TAB_DEF, 1, raw)?;
+        } else {
+            let data = serialize_tab_def_limited(td, stream.remaining())?;
+            stream.append_record(tags::HWPTAG_TAB_DEF, 1, &data)?;
+        }
     }
 
     for numbering in &doc_info.numberings {
-        let data = numbering
-            .raw_data
-            .clone()
-            .unwrap_or_else(|| serialize_numbering(numbering));
-        stream.extend(write_record(tags::HWPTAG_NUMBERING, 1, &data));
+        if let Some(raw) = numbering.raw_data.as_deref() {
+            stream.append_record(tags::HWPTAG_NUMBERING, 1, raw)?;
+        } else {
+            let data = serialize_numbering_limited(numbering, stream.remaining())?;
+            stream.append_record(tags::HWPTAG_NUMBERING, 1, &data)?;
+        }
     }
 
     for bullet in &doc_info.bullets {
-        let data = bullet
-            .raw_data
-            .clone()
-            .unwrap_or_else(|| serialize_bullet(bullet));
-        stream.extend(write_record(tags::HWPTAG_BULLET, 1, &data));
+        if let Some(raw) = bullet.raw_data.as_deref() {
+            stream.append_record(tags::HWPTAG_BULLET, 1, raw)?;
+        } else {
+            let data = serialize_bullet(bullet);
+            stream.append_record(tags::HWPTAG_BULLET, 1, &data)?;
+        }
     }
 
     for ps in &doc_info.para_shapes {
-        let data = ps
-            .raw_data
-            .clone()
-            .unwrap_or_else(|| serialize_para_shape(ps));
-        stream.extend(write_record(tags::HWPTAG_PARA_SHAPE, 1, &data));
+        if let Some(raw) = ps.raw_data.as_deref() {
+            stream.append_record(tags::HWPTAG_PARA_SHAPE, 1, raw)?;
+        } else {
+            let data = serialize_para_shape(ps);
+            stream.append_record(tags::HWPTAG_PARA_SHAPE, 1, &data)?;
+        }
     }
 
     for style in &doc_info.styles {
-        let data = style
-            .raw_data
-            .clone()
-            .unwrap_or_else(|| serialize_style(style));
-        stream.extend(write_record(tags::HWPTAG_STYLE, 1, &data));
+        if let Some(raw) = style.raw_data.as_deref() {
+            stream.append_record(tags::HWPTAG_STYLE, 1, raw)?;
+        } else {
+            let data = serialize_style_limited(style, stream.remaining())?;
+            stream.append_record(tags::HWPTAG_STYLE, 1, &data)?;
+        }
     }
 
     // 미지원 레코드 원본 보존
     for record in &doc_info.extra_records {
-        stream.extend(write_record(record.tag_id, record.level, &record.data));
+        stream.append_record(record.tag_id, record.level, &record.data)?;
     }
 
-    stream
+    Ok(stream.finish())
+}
+
+struct LimitedRecordStream {
+    bytes: Vec<u8>,
+    max_bytes: usize,
+}
+
+impl LimitedRecordStream {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            max_bytes,
+        }
+    }
+
+    fn append_record(&mut self, tag_id: u16, level: u16, data: &[u8]) -> Result<(), String> {
+        let data_len = u32::try_from(data.len()).map_err(|_| {
+            format!(
+                "HWP record payload exceeds the 32-bit format limit: {} bytes",
+                data.len()
+            )
+        })?;
+        let extended = data_len >= 0x0fff;
+        let record_len = 4usize
+            .checked_add(if extended { 4 } else { 0 })
+            .and_then(|length| length.checked_add(data.len()))
+            .ok_or_else(|| "HWP DocInfo stream size overflow".to_string())?;
+        let next = self
+            .bytes
+            .len()
+            .checked_add(record_len)
+            .ok_or_else(|| "HWP DocInfo stream size overflow".to_string())?;
+        if next > self.max_bytes {
+            return Err(format!(
+                "HWP DocInfo structural stream exceeds byte limit: {next} > {}",
+                self.max_bytes
+            ));
+        }
+        if next > self.bytes.capacity() {
+            let target_capacity = self
+                .bytes
+                .capacity()
+                .saturating_mul(2)
+                .max(next)
+                .min(self.max_bytes);
+            self.bytes
+                .try_reserve_exact(target_capacity - self.bytes.len())
+                .map_err(|error| format!("HWP DocInfo allocation failed: {error}"))?;
+        }
+
+        let header_size = if extended { 0x0fff } else { data_len };
+        let header = (u32::from(tag_id) & 0x03ff)
+            | ((u32::from(level) & 0x03ff) << 10)
+            | (header_size << 20);
+        self.bytes.extend_from_slice(&header.to_le_bytes());
+        if extended {
+            self.bytes.extend_from_slice(&data_len.to_le_bytes());
+        }
+        self.bytes.extend_from_slice(data);
+        Ok(())
+    }
+
+    fn finish(self) -> Vec<u8> {
+        self.bytes
+    }
+
+    fn remaining(&self) -> usize {
+        self.max_bytes.saturating_sub(self.bytes.len())
+    }
 }
 
 // ============================================================
 // 개별 레코드 직렬화
 // ============================================================
 
+fn limited_payload_writer(
+    payload_size: usize,
+    remaining_stream_bytes: usize,
+    label: &str,
+) -> Result<ByteWriter, String> {
+    let header_size = if payload_size >= 0x0fff { 8 } else { 4 };
+    let record_size = payload_size
+        .checked_add(header_size)
+        .ok_or_else(|| format!("HWP {label} record size overflow"))?;
+    if record_size > remaining_stream_bytes {
+        return Err(format!(
+            "HWP {label} record exceeds remaining DocInfo byte limit: {record_size} > {remaining_stream_bytes}"
+        ));
+    }
+    ByteWriter::with_capacity_exact(payload_size)
+        .map_err(|error| format!("HWP {label} allocation failed: {error}"))
+}
+
 pub fn serialize_document_properties(props: &DocProperties) -> Vec<u8> {
     // raw_data가 있으면 원본 바이트 사용 (라운드트립 보존)
     if let Some(ref raw) = props.raw_data {
         return raw.clone();
     }
+    serialize_document_properties_fields(props, props.section_count)
+}
+
+fn serialize_document_properties_fields(props: &DocProperties, section_count: u16) -> Vec<u8> {
     let mut w = ByteWriter::new();
-    w.write_u16(props.section_count).unwrap();
+    w.write_u16(section_count).unwrap();
     w.write_u16(props.page_start_num).unwrap();
     w.write_u16(props.footnote_start_num).unwrap();
     w.write_u16(props.endnote_start_num).unwrap();
@@ -199,7 +350,26 @@ pub fn serialize_id_mappings(doc_info: &DocInfo) -> Vec<u8> {
 }
 
 pub fn serialize_bin_data(bin_data: &BinData) -> Vec<u8> {
-    let mut w = ByteWriter::new();
+    serialize_bin_data_limited(bin_data, usize::MAX).expect("unbounded BinData serialization")
+}
+
+fn serialize_bin_data_limited(bin_data: &BinData, remaining: usize) -> Result<Vec<u8>, String> {
+    let size = match bin_data.data_type {
+        BinDataType::Link => 2usize
+            .checked_add(hwp_string_size(
+                bin_data.abs_path.as_deref().unwrap_or_default(),
+            ))
+            .and_then(|size| {
+                size.checked_add(hwp_string_size(
+                    bin_data.rel_path.as_deref().unwrap_or_default(),
+                ))
+            }),
+        BinDataType::Embedding | BinDataType::Storage => 4usize.checked_add(hwp_string_size(
+            bin_data.extension.as_deref().unwrap_or_default(),
+        )),
+    }
+    .ok_or_else(|| "HWP BinData payload size overflow".to_string())?;
+    let mut w = limited_payload_writer(size, remaining, "BinData")?;
     w.write_u16(bin_data.attr).unwrap();
 
     match bin_data.data_type {
@@ -225,12 +395,14 @@ pub fn serialize_bin_data(bin_data: &BinData) -> Vec<u8> {
         }
     }
 
-    w.into_bytes()
+    Ok(w.into_bytes())
 }
 
 pub fn serialize_face_name(font: &Font) -> Vec<u8> {
-    let mut w = ByteWriter::new();
+    serialize_face_name_limited(font, usize::MAX).expect("unbounded face-name serialization")
+}
 
+fn serialize_face_name_limited(font: &Font, remaining: usize) -> Result<Vec<u8>, String> {
     // 대체 글꼴 이름: HWP5 는 alt_name 한 곳에만 담는다. HWPX 파서는 같은 값을
     // subst_font(<hh:substFont face=...>)로 채우고 alt_name 은 None 으로 두므로,
     // 여기서 두 출처를 합쳐야 HWPX→HWP5 저장에서 대체 글꼴이 살아남는다.
@@ -241,6 +413,26 @@ pub fn serialize_face_name(font: &Font) -> Vec<u8> {
             .map(|s| s.face.as_str())
             .filter(|face| !face.is_empty())
     });
+
+    let size = 1usize
+        .checked_add(hwp_string_size(&font.name))
+        .and_then(|size| {
+            alt_name.map_or(Some(size), |name| {
+                size.checked_add(1)?.checked_add(hwp_string_size(name))
+            })
+        })
+        .and_then(|size| {
+            font.type_info
+                .as_ref()
+                .map_or(Some(size), |info| size.checked_add(info.len()))
+        })
+        .and_then(|size| {
+            font.default_name
+                .as_deref()
+                .map_or(Some(size), |name| size.checked_add(hwp_string_size(name)))
+        })
+        .ok_or_else(|| "HWP face-name payload size overflow".to_string())?;
+    let mut w = limited_payload_writer(size, remaining, "face-name")?;
 
     // attr 바이트 재구성
     let mut attr = font.alt_type & 0x03;
@@ -268,7 +460,7 @@ pub fn serialize_face_name(font: &Font) -> Vec<u8> {
         w.write_hwp_string(default_name).unwrap();
     }
 
-    w.into_bytes()
+    Ok(w.into_bytes())
 }
 
 fn border_line_type_to_u8(lt: BorderLineType) -> u8 {
@@ -317,7 +509,21 @@ fn image_fill_mode_to_u8(mode: ImageFillMode) -> u8 {
 }
 
 pub fn serialize_border_fill(bf: &BorderFill) -> Vec<u8> {
-    let mut w = ByteWriter::new();
+    serialize_border_fill_limited(bf, usize::MAX).expect("unbounded border-fill serialization")
+}
+
+fn serialize_border_fill_limited(bf: &BorderFill, remaining: usize) -> Result<Vec<u8>, String> {
+    let size = 2usize
+        .checked_add(
+            bf.borders
+                .len()
+                .checked_mul(6)
+                .ok_or_else(|| "HWP border-fill payload size overflow".to_string())?,
+        )
+        .and_then(|size| size.checked_add(6))
+        .and_then(|size| fill_payload_size(&bf.fill).and_then(|fill| size.checked_add(fill)))
+        .ok_or_else(|| "HWP border-fill payload size overflow".to_string())?;
+    let mut w = limited_payload_writer(size, remaining, "border-fill")?;
     let mut attr = bf.attr;
     let center_line = if bf.center_line != CenterLine::None {
         bf.center_line
@@ -352,7 +558,29 @@ pub fn serialize_border_fill(bf: &BorderFill) -> Vec<u8> {
     // 채우기
     serialize_fill(&mut w, &bf.fill);
 
-    w.into_bytes()
+    Ok(w.into_bytes())
+}
+
+fn fill_payload_size(fill: &crate::model::style::Fill) -> Option<usize> {
+    let body = match fill.fill_type {
+        FillType::Solid => 5usize.checked_add(if fill.solid.is_some() { 12 } else { 0 })?,
+        FillType::Gradient => {
+            let gradient = fill.gradient.as_ref().map_or(Some(0usize), |gradient| {
+                let positions = if gradient.colors.len() > 2 {
+                    gradient.positions.len().checked_mul(4)?
+                } else {
+                    0
+                };
+                21usize
+                    .checked_add(positions)?
+                    .checked_add(gradient.colors.len().checked_mul(4)?)
+            })?;
+            gradient.checked_add(6)?
+        }
+        FillType::Image => 5usize.checked_add(if fill.image.is_some() { 6 } else { 0 })?,
+        FillType::None => 4,
+    };
+    4usize.checked_add(body)
 }
 
 fn serialize_fill(w: &mut ByteWriter, fill: &crate::model::style::Fill) {
@@ -543,7 +771,17 @@ pub fn serialize_char_shape(cs: &CharShape) -> Vec<u8> {
 }
 
 pub fn serialize_tab_def(td: &TabDef) -> Vec<u8> {
-    let mut w = ByteWriter::new();
+    serialize_tab_def_limited(td, usize::MAX).expect("unbounded tab-definition serialization")
+}
+
+fn serialize_tab_def_limited(td: &TabDef, remaining: usize) -> Result<Vec<u8>, String> {
+    let size = td
+        .tabs
+        .len()
+        .checked_mul(8)
+        .and_then(|size| size.checked_add(8))
+        .ok_or_else(|| "HWP tab-definition payload size overflow".to_string())?;
+    let mut w = limited_payload_writer(size, remaining, "tab-definition")?;
     // auto tab 비트(bit0=left, bit1=right)를 불리언에서 재인코딩한다. 파서는 이 두
     // 불리언을 attr 하위 2비트로만 복원하므로(parser/doc_info.rs), HWPX 유래/IR 생성
     // TabDef(attr=0 이고 불리언만 세팅)를 그대로 쓰면 자동 탭 설정이 저장 시 유실된다.
@@ -556,11 +794,23 @@ pub fn serialize_tab_def(td: &TabDef) -> Vec<u8> {
         w.write_u8(tab.fill_type).unwrap();
         w.write_zeros(2).unwrap(); // 예약
     }
-    w.into_bytes()
+    Ok(w.into_bytes())
 }
 
 fn serialize_numbering(numbering: &Numbering) -> Vec<u8> {
-    let mut w = ByteWriter::new();
+    serialize_numbering_limited(numbering, usize::MAX).expect("unbounded numbering serialization")
+}
+
+fn serialize_numbering_limited(numbering: &Numbering, remaining: usize) -> Result<Vec<u8>, String> {
+    let size = numbering
+        .level_formats
+        .iter()
+        .take(7)
+        .try_fold(2usize + 7 * 4, |size, format| {
+            size.checked_add(12)?.checked_add(hwp_string_size(format))
+        })
+        .ok_or_else(|| "HWP numbering payload size overflow".to_string())?;
+    let mut w = limited_payload_writer(size, remaining, "numbering")?;
 
     // 수준별(1~7) 문단 머리 정보 + 번호 형식 문자열
     for level in 0..7 {
@@ -577,11 +827,7 @@ fn serialize_numbering(numbering: &Numbering) -> Vec<u8> {
 
         // 번호 형식 문자열
         let fmt_str = &numbering.level_formats[level];
-        let utf16: Vec<u16> = fmt_str.encode_utf16().collect();
-        w.write_u16(utf16.len() as u16).unwrap();
-        for &ch in &utf16 {
-            w.write_u16(ch).unwrap();
-        }
+        w.write_hwp_string(fmt_str).unwrap();
     }
 
     // 시작 번호
@@ -592,7 +838,7 @@ fn serialize_numbering(numbering: &Numbering) -> Vec<u8> {
         w.write_u32(numbering.level_start_numbers[level]).unwrap();
     }
 
-    w.into_bytes()
+    Ok(w.into_bytes())
 }
 
 /// HWPTAG_BULLET 직렬화 (표 44: 글머리표)
@@ -696,7 +942,15 @@ pub fn serialize_para_shape(ps: &ParaShape) -> Vec<u8> {
 }
 
 pub fn serialize_style(style: &Style) -> Vec<u8> {
-    let mut w = ByteWriter::new();
+    serialize_style_limited(style, usize::MAX).expect("unbounded style serialization")
+}
+
+fn serialize_style_limited(style: &Style, remaining: usize) -> Result<Vec<u8>, String> {
+    let size = hwp_string_size(&style.local_name)
+        .checked_add(hwp_string_size(&style.english_name))
+        .and_then(|size| size.checked_add(10))
+        .ok_or_else(|| "HWP style payload size overflow".to_string())?;
+    let mut w = limited_payload_writer(size, remaining, "style")?;
     w.write_hwp_string(&style.local_name).unwrap();
     w.write_hwp_string(&style.english_name).unwrap();
     w.write_u8(style.style_type).unwrap();
@@ -716,7 +970,7 @@ pub fn serialize_style(style: &Style) -> Vec<u8> {
     // footnote-01.hwp 의 모든 STYLE record 가 끝에 0x0000 (UINT16) 보유.
     // 누락 시 record size mismatch + DocInfo record 순서 shift.
     w.write_u16(0).unwrap();
-    w.into_bytes()
+    Ok(w.into_bytes())
 }
 
 // ============================================================

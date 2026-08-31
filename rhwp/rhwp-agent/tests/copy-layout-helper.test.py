@@ -1,6 +1,8 @@
 import importlib.util
 import json
+import sys
 import tempfile
+import time
 import unittest
 import zipfile
 from pathlib import Path
@@ -30,6 +32,219 @@ class CopyLayoutHelperTests(unittest.TestCase):
             node = copy_layout.etree.SubElement(run, "t")
             node.text = text
         return copy_layout.etree.ElementTree(root)
+
+    def test_rhwp_binary_prefers_the_explicit_environment_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            binary = Path(temp) / "custom-rhwp.exe"
+            binary.write_bytes(b"binary")
+            binary.chmod(0o755)
+            with patch.dict(copy_layout.os.environ, {"RHWP_BIN": str(binary)}), patch.object(
+                copy_layout.shutil,
+                "which",
+                return_value=None,
+            ):
+                resolved = copy_layout.resolve_rhwp_binary(
+                    None,
+                    platform_name="nt",
+                    repository_root=Path(temp) / "repository",
+                )
+            self.assertEqual(resolved, binary.resolve())
+
+    def test_run_rhwp_stops_an_oversized_stdout_tree(self):
+        started = time.monotonic()
+        with self.assertRaisesRegex(ValueError, "stdout exceeded its 64-byte limit"):
+            copy_layout.run_rhwp(
+                Path(sys.executable),
+                [
+                    "-S",
+                    "-c",
+                    "import sys,time; "
+                    "sys.stdout.buffer.write(b'x' * 1024); "
+                    "sys.stdout.buffer.flush(); time.sleep(5)",
+                ],
+                max_stdout_bytes=64,
+                timeout_seconds=2,
+            )
+        self.assertLess(time.monotonic() - started, 2)
+
+    def test_run_rhwp_stops_an_oversized_stderr_tree(self):
+        started = time.monotonic()
+        with self.assertRaisesRegex(ValueError, "stderr exceeded its 32-byte limit"):
+            copy_layout.run_rhwp(
+                Path(sys.executable),
+                [
+                    "-S",
+                    "-c",
+                    "import sys,time; "
+                    "sys.stderr.buffer.write(b'x' * 1024); "
+                    "sys.stderr.buffer.flush(); time.sleep(5)",
+                ],
+                max_stderr_bytes=32,
+                timeout_seconds=2,
+            )
+        self.assertLess(time.monotonic() - started, 2)
+
+    def test_run_rhwp_stops_a_timed_out_process_tree(self):
+        started = time.monotonic()
+        with self.assertRaisesRegex(ValueError, "exceeded its 0.05-second timeout"):
+            copy_layout.run_rhwp(
+                Path(sys.executable),
+                ["-S", "-c", "import time; time.sleep(5)"],
+                timeout_seconds=0.05,
+            )
+        self.assertLess(time.monotonic() - started, 2)
+
+    def test_windows_cleanup_forces_the_owned_console_tree(self):
+        class FakeKiller:
+            returncode = 0
+
+            def wait(self, timeout):
+                self.timeout = timeout
+
+        class FakeProcess:
+            pid = 4242
+
+            def poll(self):
+                return None
+
+            def wait(self, timeout):
+                self.timeout = timeout
+
+        killer = FakeKiller()
+        process = FakeProcess()
+        with (
+            patch.object(copy_layout.os, "name", "nt"),
+            patch.dict(copy_layout.os.environ, {"SystemRoot": r"C:\Windows"}),
+            patch.object(
+                copy_layout.subprocess,
+                "Popen",
+                return_value=killer,
+            ) as popen,
+        ):
+            self.assertTrue(copy_layout._terminate_rhwp_tree(process))
+
+        popen.assert_called_once_with(
+            [r"C:\Windows\System32\taskkill.exe", "/PID", "4242", "/T", "/F"],
+            stdin=copy_layout.subprocess.DEVNULL,
+            stdout=copy_layout.subprocess.DEVNULL,
+            stderr=copy_layout.subprocess.DEVNULL,
+            shell=False,
+        )
+        self.assertEqual(killer.timeout, copy_layout.RHWP_COMMAND_CLEANUP_SECONDS)
+        self.assertEqual(process.timeout, copy_layout.RHWP_COMMAND_CLEANUP_SECONDS)
+
+    def test_windows_cleanup_never_taskkills_an_exited_pid(self):
+        class ExitedProcess:
+            pid = 4243
+
+            def poll(self):
+                return 0
+
+        with patch.object(copy_layout.os, "name", "nt"), patch.object(
+            copy_layout.subprocess,
+            "Popen",
+        ) as popen:
+            self.assertTrue(copy_layout._terminate_rhwp_tree(ExitedProcess()))
+        popen.assert_not_called()
+
+    def test_windows_cleanup_fails_closed_without_an_absolute_system_root(self):
+        class LiveProcess:
+            pid = 4244
+
+            def poll(self):
+                return None
+
+        with (
+            patch.object(copy_layout.os, "name", "nt"),
+            patch.dict(
+                copy_layout.os.environ,
+                {"SystemRoot": "relative", "WINDIR": "also-relative"},
+            ),
+            patch.object(copy_layout.subprocess, "Popen") as popen,
+        ):
+            self.assertFalse(copy_layout._terminate_rhwp_tree(LiveProcess()))
+        popen.assert_not_called()
+
+    def test_run_rhwp_reports_unconfirmed_tree_cleanup(self):
+        terminate = copy_layout._terminate_rhwp_tree
+
+        def clean_but_withhold_proof(process):
+            terminate(process)
+            return False
+
+        with patch.object(
+            copy_layout,
+            "_terminate_rhwp_tree",
+            side_effect=clean_but_withhold_proof,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "process-tree cleanup could not be confirmed",
+            ):
+                copy_layout.run_rhwp(
+                    Path(sys.executable),
+                    ["-S", "-c", "import time; time.sleep(5)"],
+                    timeout_seconds=0.05,
+                )
+
+    def test_run_rhwp_inherits_the_private_temp_environment_without_a_shell(self):
+        with patch.dict(
+            copy_layout.os.environ,
+            {"TEMP": "private-temp", "TMP": "private-tmp"},
+        ):
+            result = copy_layout.run_rhwp(
+                Path(sys.executable),
+                [
+                    "-S",
+                    "-c",
+                    "import json,os; print(json.dumps([os.environ.get('TEMP'), os.environ.get('TMP')]))",
+                ],
+                expect_json=True,
+            )
+        self.assertEqual(result, ["private-temp", "private-tmp"])
+
+    def test_rhwp_binary_checks_windows_executable_names(self):
+        with tempfile.TemporaryDirectory() as temp:
+            binary = Path(temp) / "rhwp.exe"
+            binary.write_bytes(b"binary")
+            binary.chmod(0o755)
+            checked = []
+
+            def which(name):
+                checked.append(name)
+                return str(binary) if name == "rhwp.exe" else None
+
+            with patch.dict(copy_layout.os.environ, {"RHWP_BIN": ""}), patch.object(
+                copy_layout.shutil,
+                "which",
+                side_effect=which,
+            ):
+                resolved = copy_layout.resolve_rhwp_binary(
+                    None,
+                    platform_name="nt",
+                    repository_root=Path(temp) / "repository",
+                )
+            self.assertEqual(resolved, binary.resolve())
+            self.assertEqual(checked, ["rhwp.exe"])
+
+    def test_rhwp_binary_finds_the_windows_repository_build(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repository = Path(temp) / "repository"
+            binary = repository / "target" / "release" / "rhwp.exe"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(b"binary")
+            binary.chmod(0o755)
+            with patch.dict(copy_layout.os.environ, {"RHWP_BIN": ""}), patch.object(
+                copy_layout.shutil,
+                "which",
+                return_value=None,
+            ):
+                resolved = copy_layout.resolve_rhwp_binary(
+                    None,
+                    platform_name="nt",
+                    repository_root=repository,
+                )
+            self.assertEqual(resolved, binary.resolve())
 
     def test_guidance_mode_preserves_only_structure_and_instructions(self):
         tree = self.document_tree(
@@ -253,6 +468,55 @@ class CopyLayoutHelperTests(unittest.TestCase):
                 b'<!DOCTYPE root [<!ENTITY secret "private">]><root>&secret;</root>',
                 "unsafe.xml",
             )
+
+    def test_archive_inventory_rejects_duplicate_and_traversal_entries(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            for name, entries in {
+                "duplicate.hwpx": [("a.xml", b"<a/>"), ("a.xml", b"<b/>")],
+                "traversal.hwpx": [("../outside.xml", b"<a/>")],
+            }.items():
+                package = root / name
+                with zipfile.ZipFile(package, "w") as archive:
+                    for entry_name, payload in entries:
+                        archive.writestr(entry_name, payload)
+                with zipfile.ZipFile(package) as archive, self.assertRaisesRegex(
+                    ValueError, "unsafe or duplicate"
+                ):
+                    copy_layout.validate_archive_inventory(archive)
+
+    def test_archive_inventory_rejects_noncanonical_and_oversized_names(self):
+        hostile_names = [
+            "./a.xml",
+            "Contents//a.xml",
+            "Contents/./a.xml",
+            "Contents/",
+            "C:/a.xml",
+            f"{'a' * 4093}.xml",
+        ]
+        for index, name in enumerate(hostile_names):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary_directory:
+                package = Path(temporary_directory) / f"unsafe-name-{index}.hwpx"
+                with zipfile.ZipFile(package, "w") as archive:
+                    archive.writestr(name, b"<a/>")
+                with zipfile.ZipFile(package) as archive:
+                    with self.assertRaisesRegex(ValueError, "unsafe or duplicate"):
+                        copy_layout.validate_archive_inventory(archive)
+
+    def test_archive_reads_enforce_declared_member_and_aggregate_limits(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            package = Path(temporary_directory) / "bounded.hwpx"
+            with zipfile.ZipFile(package, "w") as archive:
+                archive.writestr("Preview/PrvImage.png", b"123456789")
+                archive.writestr("Contents/section0.xml", b"<section/>")
+            with zipfile.ZipFile(package) as archive, patch.object(
+                copy_layout, "MAX_HWPX_THUMBNAIL_ENTRY_BYTES", 8
+            ), self.assertRaisesRegex(ValueError, "entry exceeds"):
+                copy_layout.validate_archive_inventory(archive)
+            with zipfile.ZipFile(package) as archive, patch.object(
+                copy_layout, "MAX_HWPX_EXPANDED_BYTES", 8
+            ), self.assertRaisesRegex(ValueError, "512 MiB safety limit"):
+                copy_layout.validate_archive_inventory(archive)
 
     def test_parser_drops_nonsemantic_xml_control_bytes(self):
         tree = copy_layout.parse_xml(b"<root><a/>\x01<b/></root>", "control.xml")
@@ -553,6 +817,67 @@ class CopyLayoutHelperTests(unittest.TestCase):
                 result["delivery"]["warnings"],
                 ["final HWPX pageCount changed: 1 -> 2"],
             )
+
+    def test_candidate_render_evidence_is_derived_from_both_documents(self):
+        render_calls = []
+
+        def fake_info(_binary, document):
+            return {
+                "pageCount": 5,
+                "sections": 2,
+            }
+
+        def fake_render(_binary, document, page, _root, label):
+            render_calls.append((document.name, page, label))
+            return {
+                "page": page,
+                "width": 100,
+                "height": 200,
+                "bytes": 24,
+                "sha256": "a" * 64,
+            }
+
+        report = {
+            "verification": {
+                "zip_valid": True,
+                "xml_valid": True,
+                "layout_structure_match": True,
+                "layout_fingerprint_match": True,
+            },
+            "delivery": {"ready": True, "quality": "verified", "warnings": []},
+        }
+        with tempfile.TemporaryDirectory() as temporary_directory, patch.object(
+            copy_layout, "native_document_info", side_effect=fake_info
+        ), patch.object(copy_layout, "render_document_page", side_effect=fake_render):
+            evidence = copy_layout.candidate_render_evidence(
+                Path("rhwp"),
+                Path("source.hwpx"),
+                Path("candidate.hwpx"),
+                report,
+            )
+
+        self.assertEqual(evidence["representative_pages"], [0, 2, 4])
+        self.assertEqual(evidence["source_page_count"], 5)
+        self.assertEqual(evidence["output_page_count"], 5)
+        self.assertEqual(evidence["output_section_count"], 2)
+        self.assertTrue(evidence["render_compared"])
+        self.assertTrue(evidence["geometry_match"])
+        self.assertTrue(evidence["safety_verified"])
+        self.assertTrue(evidence["readability_verified"])
+        self.assertEqual(len(render_calls), 6)
+
+    def test_rendered_svg_record_rejects_invalid_render_output(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            svg = root / "page.svg"
+            svg.write_bytes(
+                b'<svg xmlns="http://www.w3.org/2000/svg" width="100.2" height="200.1"></svg>'
+            )
+            record = copy_layout.rendered_svg_record(svg, 0)
+            self.assertEqual((record["width"], record["height"]), (101, 201))
+            svg.write_bytes(b"not an svg document with enough bytes")
+            with self.assertRaisesRegex(ValueError, "not a valid SVG"):
+                copy_layout.rendered_svg_record(svg, 0)
 
 
 if __name__ == "__main__":

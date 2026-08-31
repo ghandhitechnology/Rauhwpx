@@ -92,6 +92,26 @@ p {
   color: #e8b4b4;
   font-size: 13px;
 }
+.pairing {
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--soft);
+  text-align: center;
+  font: 700 20px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace;
+  letter-spacing: 0.12em;
+}
+.return-code {
+  margin-top: 18px;
+  padding: 16px 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--text);
+  text-align: center;
+  font: 700 24px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace;
+  letter-spacing: 0.08em;
+}
 .stack {
   display: grid;
   gap: 8px;
@@ -184,7 +204,7 @@ function shell({ title, body }) {
 const GOOGLE = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21.6 12.23c0-.74-.07-1.45-.19-2.13H12v4.03h5.38a4.6 4.6 0 0 1-2 3.02v2.5h3.23c1.89-1.74 2.99-4.3 2.99-7.42Z"/><path d="M12 22c2.7 0 4.97-.9 6.63-2.35l-3.23-2.5c-.9.6-2.05.96-3.4.96-2.61 0-4.82-1.76-5.61-4.13H3.06v2.58A9.99 9.99 0 0 0 12 22Z"/><path d="M6.39 13.98A6.01 6.01 0 0 1 6.08 12c0-.69.12-1.35.31-1.98V7.44H3.06A9.99 9.99 0 0 0 2 12c0 1.61.39 3.14 1.06 4.56l3.33-2.58Z"/><path d="M12 5.89c1.47 0 2.79.5 3.83 1.5l2.87-2.87C16.96 2.91 14.7 2 12 2A9.99 9.99 0 0 0 3.06 7.44l3.33 2.58C7.18 7.65 9.39 5.89 12 5.89Z"/></svg>';
 const GITHUB = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2C6.48 2 2 6.58 2 12.26c0 4.52 2.87 8.35 6.84 9.7.5.1.68-.22.68-.49 0-.24-.01-.88-.01-1.73-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.5-1.11-1.5-.91-.64.07-.63.07-.63 1 .07 1.53 1.06 1.53 1.06.89 1.57 2.34 1.12 2.91.85.09-.67.35-1.12.63-1.38-2.22-.26-4.55-1.14-4.55-5.07 0-1.12.39-2.04 1.03-2.76-.1-.26-.45-1.32.1-2.75 0 0 .84-.27 2.75 1.05A9.3 9.3 0 0 1 12 6.84c.85 0 1.71.12 2.51.35 1.91-1.32 2.75-1.05 2.75-1.05.55 1.43.2 2.49.1 2.75.64.72 1.03 1.64 1.03 2.76 0 3.94-2.34 4.8-4.57 5.06.36.32.68.94.68 1.9 0 1.37-.01 2.47-.01 2.81 0 .27.18.6.69.49A10.03 10.03 0 0 0 22 12.26C22 6.58 17.52 2 12 2Z"/></svg>';
 
-export function renderLoginPage({ device, email = '', notice = '' }) {
+export function renderLoginPage({ device, email = '', pairingCode = null, notice = '' }) {
   const id = escapeHtml(device);
   const mail = escapeHtml(email);
   return shell({
@@ -193,6 +213,7 @@ export function renderLoginPage({ device, email = '', notice = '' }) {
 <section class="card">
   <div class="hero"><span></span></div>
   <h1>Rau에 연결</h1>
+  ${pairingCode ? `<p>Rauhwpx에 표시된 연결 코드와 같은지 확인하세요.</p><div class="pairing">${escapeHtml(pairingCode)}</div>` : ''}
   ${notice ? `<p class="notice">${escapeHtml(notice)}</p>` : ''}
   <div class="stack">
     <a class="btn" href="/continue?device=${encodeURIComponent(device)}&provider=GoogleOAuth">${GOOGLE}Google로 계속</a>
@@ -208,7 +229,7 @@ export function renderLoginPage({ device, email = '', notice = '' }) {
   });
 }
 
-export function renderCodePage({ device, email, notice = '' }) {
+export function renderCodePage({ device, email, pairingCode = null, notice = '' }) {
   return shell({
     title: 'Rauhwpx',
     body: `
@@ -216,6 +237,7 @@ export function renderCodePage({ device, email, notice = '' }) {
   <div class="hero"><span></span></div>
   <h1>코드를 보냈어요</h1>
   <p>${escapeHtml(email)}</p>
+  ${pairingCode ? `<div class="pairing">${escapeHtml(pairingCode)}</div>` : ''}
   ${notice ? `<p class="notice">${escapeHtml(notice)}</p>` : ''}
   <form method="post" action="/login/magic/verify" style="margin-top:26px">
     <input type="hidden" name="device" value="${escapeHtml(device)}">
@@ -236,6 +258,53 @@ export function renderDonePage() {
   <div class="hero"><span></span></div>
   <h1>연결했어요</h1>
   <p>Rauhwpx로 돌아가면 됩니다.</p>
+</section>`,
+  });
+}
+
+export function renderConfirmPage({ deviceId, pairingCode, confirmationToken }) {
+  return shell({
+    title: 'Rauhwpx',
+    body: `
+<section class="card">
+  <div class="hero"><span></span></div>
+  <h1>이 연결을 확인하세요</h1>
+  <p>직접 시작한 Rauhwpx에 아래 코드가 표시될 때만 계속하세요.</p>
+  <div class="pairing">${escapeHtml(pairingCode)}</div>
+  <p class="notice">다른 사람이 보낸 링크라면 확인하지 마세요.</p>
+  <form method="post" action="/v2/device-sessions/${encodeURIComponent(deviceId)}/confirm" style="margin-top:26px">
+    <input type="hidden" name="confirmationToken" value="${escapeHtml(confirmationToken)}">
+    <button class="btn btn-primary" type="submit">이 Rauhwpx에 연결</button>
+  </form>
+</section>`,
+  });
+}
+
+export function renderReadyPage({
+  pairingCode,
+  manualCode,
+  redirectUri = null,
+  callbackState = null,
+  authorizationCode,
+}) {
+  let callbackImage = '';
+  if (redirectUri) {
+    const callback = new URL(redirectUri);
+    callback.searchParams.set('code', authorizationCode);
+    callback.searchParams.set('state', callbackState);
+    callbackImage = `<img src="${escapeHtml(callback.toString())}" alt="" width="1" height="1" hidden>`;
+  }
+  return shell({
+    title: 'Rauhwpx',
+    body: `
+${callbackImage}
+<section class="card">
+  <div class="hero"><span></span></div>
+  <h1>연결을 마무리하세요</h1>
+  <p>같은 기기의 Rauhwpx에는 자동으로 전달됩니다. 다른 기기라면 아래 코드를 연결을 시작한 Rauhwpx에 입력하세요.</p>
+  <div class="pairing">${escapeHtml(pairingCode)}</div>
+  <div class="return-code">${escapeHtml(manualCode)}</div>
+  <p class="notice">이 코드는 2분 동안 한 번만 쓸 수 있습니다. 누구에게도 보내지 마세요.</p>
 </section>`,
   });
 }

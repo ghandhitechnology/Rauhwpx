@@ -178,18 +178,20 @@ fn run_inner(options: Options) -> Result<(), String> {
         )
     })?;
 
-    let oracle_bytes = fs::read(&options.oracle).map_err(|error| {
-        format!(
-            "oracle 파일 읽기 실패 - {}: {error}",
-            options.oracle.display()
-        )
-    })?;
-    let generated_bytes = fs::read(&options.generated).map_err(|error| {
-        format!(
-            "generated 파일 읽기 실패 - {}: {error}",
-            options.generated.display()
-        )
-    })?;
+    let oracle_bytes =
+        crate::parser::limits::read_local_file_once(&options.oracle).map_err(|error| {
+            format!(
+                "oracle 파일 읽기 실패 - {}: {error}",
+                options.oracle.display()
+            )
+        })?;
+    let generated_bytes =
+        crate::parser::limits::read_local_file_once(&options.generated).map_err(|error| {
+            format!(
+                "generated 파일 읽기 실패 - {}: {error}",
+                options.generated.display()
+            )
+        })?;
 
     let oracle_compressed = hwp_is_compressed(&oracle_bytes)?;
     let generated_compressed = hwp_is_compressed(&generated_bytes)?;
@@ -227,7 +229,7 @@ fn run_inner(options: Options) -> Result<(), String> {
         let out_path = options.out_dir.join(&file_name);
         fs::write(&out_path, &bytes)
             .map_err(|error| format!("probe 파일 쓰기 실패 - {}: {error}", out_path.display()))?;
-        let rhwp_pages = DocumentCore::from_bytes(&bytes)
+        let rhwp_pages = DocumentCore::from_regenerated_bytes(&bytes)
             .map(|core| core.page_count())
             .ok();
         results.push(GeneratedProbe {

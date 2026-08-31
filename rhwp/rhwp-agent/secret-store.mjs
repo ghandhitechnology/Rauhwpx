@@ -12,7 +12,7 @@ export function createIpcSecretStore({ processRef = process, timeoutMs = 10_000 
     clearTimeout(request.timer);
     if (message.ok) request.resolve(message.value ?? null);
     else request.reject(Object.assign(new Error(message.error || 'Secure secret storage failed.'), {
-      code: 'SECRET_STORE_FAILED',
+      code: message.code || 'SECRET_STORE_FAILED',
     }));
   });
 
@@ -46,6 +46,7 @@ export function createIpcSecretStore({ processRef = process, timeoutMs = 10_000 
     get: (key) => request('get', key),
     set: (key, value) => request('set', key, value),
     delete: (key) => request('delete', key),
+    reset: () => request('reset', ''),
   };
 }
 

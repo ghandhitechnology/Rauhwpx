@@ -132,7 +132,7 @@ const vite = spawnLogged(
   {
     BROWSER: 'none',
     VITE_RHWP_AGENT_URL: `ws://127.0.0.1:${hubPort}`,
-    VITE_RHWP_AGENT_TOKEN: HUB_TOKEN,
+    RHWP_AGENT_TOKEN: HUB_TOKEN,
   },
   path.join(repoRoot, 'target', 'rhwp-studio-fleet-e2e-vite.log'),
 );

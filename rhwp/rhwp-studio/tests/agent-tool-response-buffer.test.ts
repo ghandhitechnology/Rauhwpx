@@ -12,7 +12,8 @@ registerHooks({
   },
 });
 
-const { ToolResponseBuffer } = await import('../src/agent/bridge.ts');
+const { AgentBridgeImpl, ToolResponseBuffer, providerTurnEndMatches } = await import('../src/agent/bridge.ts');
+const { assertToolRequestActive } = await import('../src/agent/tool-executor.ts');
 const bridgeSource = readFileSync(new URL('../src/agent/bridge.ts', import.meta.url), 'utf8');
 
 test('ToolResponseBuffer: 담은 순서대로 흘려보내고 비운다', () => {
@@ -46,6 +47,81 @@ test('ToolResponseBuffer: clear 는 남은 프레임을 모두 버린다', () =>
   buffer.push({ id: 1 });
   buffer.clear();
   assert.equal(buffer.size, 0);
+});
+
+test('a delayed old turn-end cannot settle a newer identified turn', () => {
+  assert.equal(providerTurnEndMatches('turn-new', 'turn-old'), false);
+  assert.equal(providerTurnEndMatches('turn-new', null), false);
+  assert.equal(providerTurnEndMatches('turn-new', 'turn-new'), true);
+  assert.equal(providerTurnEndMatches(null, null), true);
+  assert.equal(providerTurnEndMatches(null, 'turn-replayed'), true);
+});
+
+test('turn cancellation releases the editing lease before deferred tools settle', async () => {
+  let releaseDeferredTools = () => {};
+  const deferredTools = new Promise<void>((resolve) => { releaseDeferredTools = resolve; });
+  const responses: unknown[] = [];
+  let lateMutations = 0;
+  const bridge = Object.create(AgentBridgeImpl.prototype) as any;
+  Object.assign(bridge, {
+    activeProviderTurnId: 'turn-active',
+    turnRunning: true,
+    editingAgent: 'pi',
+    activeToolRequests: 0,
+    activeToolRequestControllers: new Map(),
+    editingLease: { active: false, agent: 'pi' },
+    editingLeaseListeners: new Set(),
+    pendingUserQuestionId: null,
+    workflow: 'direct',
+    phase: 'direct',
+    capabilityEpoch: null,
+    permissionProfile: 'safe',
+    activeAgent: 'pi',
+    turnHadError: false,
+    pendingTurnOpen: false,
+    listeners: new Set(),
+    executor: {
+      async execute(tool: string, _args: unknown, _agent: string, capability: any) {
+        await deferredTools;
+        if (tool === 'deferred_mutator') {
+          assertToolRequestActive(capability);
+          lateMutations += 1;
+        }
+        return { tool };
+      },
+    },
+  });
+  bridge.sendToolResponse = (frame: unknown) => { responses.push(frame); };
+
+  for (const [id, tool] of [[1, 'deferred_mutator'], [2, 'deferred_result']] as const) {
+    bridge.handleToolRequest({
+      id,
+      tool,
+      args: {},
+      agent: 'pi',
+      workflow: 'direct',
+      providerTurnId: 'turn-active',
+      turnBound: true,
+    });
+  }
+  assert.equal(bridge.getEditingLease().active, true);
+  assert.equal(bridge.activeToolRequests, 2);
+
+  bridge.handleAgentEvent({
+    type: 'turn-end',
+    agent: 'pi',
+    turnId: 'turn-active',
+    stopReason: 'interrupted',
+  });
+  assert.equal(bridge.getEditingLease().active, false);
+  assert.equal(bridge.activeToolRequests, 0);
+  assert.equal(bridge.activeToolRequestControllers.size, 0);
+
+  releaseDeferredTools();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(lateMutations, 0);
+  assert.deepEqual(responses, []);
+  assert.equal(bridge.activeToolRequests, 0);
 });
 
 test('브리지는 전송 실패한 tool-response 를 버퍼에 넣고 재연결 때 흘려보낸다', () => {

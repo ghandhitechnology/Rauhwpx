@@ -72,7 +72,7 @@ pub fn read_variable<R: crate::wmf::Read>(
 
 macro_rules! impl_from_le_bytes {
     ($(($t:ty, $n:expr)),+) => {
-        paste::paste!{
+        pastey::paste!{
             $(
                 pub fn [<read_ $t _from_le_bytes>]<R: $crate::wmf::Read>(
                     buf: &mut R,
