@@ -245,7 +245,10 @@ export function terminateProcessTree(child, {
     if (platform === 'win32') {
       const taskkill = windowsTaskkillPath(env);
       if (!taskkill) return null;
-      const args = ['/PID', String(pid), '/T'];
+      // /F is required: windowsHide children have no console, so WM_CLOSE is a
+      // no-op and a graceful /T never proves cleanup. This is still one live
+      // PID command; an already-exited leader is not retargeted.
+      const args = ['/PID', String(pid), '/T', '/F'];
       try {
         return spawnProcess(taskkill, args, {
           detached: false,

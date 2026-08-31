@@ -45,7 +45,7 @@ test('Windows process cleanup never retargets a reusable PID after its first tre
     },
   });
   assert.equal(calls[0].command, 'C:\\Windows\\System32\\taskkill.exe');
-  assert.deepEqual(calls[0].argv, ['/PID', '4312', '/T']);
+  assert.deepEqual(calls[0].argv, ['/PID', '4312', '/T', '/F']);
   escalate();
   assert.equal(calls.length, 1);
   assert.ok(calls.every(({ options }) => options.shell === false && options.windowsHide === true));
