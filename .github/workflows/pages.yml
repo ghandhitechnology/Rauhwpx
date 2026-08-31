@@ -5,6 +5,7 @@ on:
     branches:
       - worktree-website
       - main
+      - feat/app-download-site
     paths:
       - website/**
       - .github/workflows/pages.yml
