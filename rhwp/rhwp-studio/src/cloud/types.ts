@@ -24,6 +24,16 @@ export interface CloudProfileDraft {
 export type CloudServerMode = 'self-hosted' | 'app-hosted';
 export type CloudConnectionState = 'unknown' | 'testing' | 'ready' | 'error';
 
+/** Live transport to the Cloud server. Missing on older snapshots; infer from profile.connection. */
+export type CloudLinkKind = 'ready' | 'reconnecting' | 'recreating' | 'failed';
+
+export interface CloudLinkState {
+  kind: CloudLinkKind;
+  error: string | null;
+  attempt: number;
+  canRecreate: boolean;
+}
+
 /** Raucloud usage shared by every device on an account. Durations use milliseconds. */
 export interface CloudQuotaSnapshot {
   dailyLimitMs: number;
@@ -225,6 +235,7 @@ export interface CloudSnapshot {
   /** Present when the desktop is connected to the Raucloud account broker. */
   account?: AccountSnapshot | null;
   takeover?: CloudTakeoverPayload;
+  link?: CloudLinkState;
 }
 
 export interface CloudTakeoverPayload {

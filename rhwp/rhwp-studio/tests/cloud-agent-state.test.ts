@@ -51,6 +51,25 @@ function running(version = 1) {
   };
 }
 
+test('cloud state parser keeps an optional link and ignores a malformed one', () => {
+  const withLink = parseCloudSnapshot({
+    ...state(12, running(4)),
+    link: { kind: 'reconnecting', error: 'stream closed', attempt: 2, canRecreate: true },
+  });
+  assert.deepEqual(withLink?.link, {
+    kind: 'reconnecting',
+    error: 'stream closed',
+    attempt: 2,
+    canRecreate: true,
+  });
+  const ignored = parseCloudSnapshot({
+    ...state(13, running(4)),
+    link: { kind: 'unknown' },
+  });
+  assert.equal(ignored?.session.kind, 'running');
+  assert.equal(ignored?.link, undefined);
+});
+
 test('cloud state parser preserves the cloud lease and bounded running status', () => {
   const parsed = parseCloudSnapshot(state(7, running(4)));
   assert.equal(parsed?.revision, 7);

@@ -268,6 +268,19 @@ test('a live running Cloud session stays addressable after the mounted binding i
   });
 });
 
+test('recreating a Cloud server blocks the composer until the new sandbox is ready', () => {
+  const running = sessions.find((session) => session.kind === 'running')!;
+  const snap = {
+    ...snapshot(running),
+    link: { kind: 'recreating' as const, error: null, attempt: 2, canRecreate: true },
+  };
+  assert.deepEqual(deriveComposerTarget('cloud', snap), {
+    kind: 'workspace-blocked',
+    reason: 'cloud-transfer',
+    message: 'Cloud 서버를 다시 만드는 중입니다.',
+  });
+});
+
 test('composer execution keeps local and cloud routing explicit and leaves blocked drafts to the caller', () => {
   assert.deepEqual(composerExecution({ kind: 'local-ready' }), { kind: 'local' });
   assert.deepEqual(composerExecution({ kind: 'cloud-start-ready' }), { kind: 'cloud-start' });

@@ -411,7 +411,7 @@ test('the dialog offers both servers and only restorable sandbox actions', () =>
   assert.match(onboarding, /Raucloud · /);
   assert.match(onboardingCss, /\.ag-cloud-setup-option\.ag-selected/);
   assert.match(cloudUi, /appHosted/);
-  assert.match(cloudUi, /setupActive \? '준비 중' : 'Cloud'/);
+  assert.match(cloudUi, /setupActive\n\s+\? '준비 중'\n\s+: link\.kind === 'reconnecting'/);
   assert.match(cloudUi, /if \(setupActive\) \{\n\s+onboarding\.open\('manage', trigger\)/);
   assert.match(preload, /cloudSelectServerMode: \(payload\) => ipcRenderer\.invoke\('cloud:select-server-mode', payload\)/);
   assert.match(preload, /cloudSpawnSandbox: \(payload\) => ipcRenderer\.invoke\('cloud:spawn-sandbox', payload\)/);
@@ -419,7 +419,9 @@ test('the dialog offers both servers and only restorable sandbox actions', () =>
   assert.match(preload, /cloudTeardownSandbox: \(payload\) => ipcRenderer\.invoke\('cloud:teardown-sandbox', payload\)/);
   assert.match(preload, /cloudTakeoverSandbox: \(\) => ipcRenderer\.invoke\('cloud:takeover-sandbox'\)/);
   assert.match(preload, /cloudForceQuitAccount: \(\) => ipcRenderer\.invoke\('cloud:force-quit-account'\)/);
-  for (const channel of ['cloud:select-server-mode', 'cloud:spawn-sandbox', 'cloud:sandbox-status', 'cloud:teardown-sandbox', 'cloud:takeover-sandbox', 'cloud:force-quit-account']) {
+  assert.match(preload, /cloudReconnectLink: \(\) => ipcRenderer\.invoke\('cloud:reconnect-link'\)/);
+  assert.match(preload, /cloudRecreateLink: \(\) => ipcRenderer\.invoke\('cloud:recreate-link'\)/);
+  for (const channel of ['cloud:select-server-mode', 'cloud:spawn-sandbox', 'cloud:sandbox-status', 'cloud:teardown-sandbox', 'cloud:takeover-sandbox', 'cloud:force-quit-account', 'cloud:reconnect-link', 'cloud:recreate-link']) {
     assert.match(desktopMain, new RegExp(`ipcMain\\.handle\\('${channel}'`));
   }
   assert.match(desktopMain, /createRaucloudBrokerProvider\(\{/);

@@ -276,6 +276,10 @@ export class CloudCoordinator extends EventEmitter {
   #provisionPromise = null;
   #preferredMode = null;
   #stopped = false;
+  #link = { kind: 'ready', error: null, attempt: 0, canRecreate: false };
+  #linkHealPromise = null;
+  #linkWatchdog = null;
+  #linkProbeBusy = false;
   #collectProviderAuth;
   #collectImportedAuth;
 
@@ -367,8 +371,10 @@ export class CloudCoordinator extends EventEmitter {
           try {
             await this.#waitForProfileHealth(profile, { attempts: 2 });
             this.#setSandboxLifecycle('ready');
+            this.#link = { kind: 'ready', error: null, attempt: 0, canRecreate: true };
           } catch (error) {
             this.#setSandboxLifecycle('error', `The saved app sandbox is not reachable: ${error.message}`);
+            this.#link = { kind: 'failed', error: error.message, attempt: 1, canRecreate: true };
           }
         }
       }
@@ -404,6 +410,7 @@ export class CloudCoordinator extends EventEmitter {
 
   async stop() {
     this.#stopped = true;
+    this.#disarmLinkWatchdog();
     const pending = [
       ...this.#transferOperations,
       ...this.#transferPromises.values(),
@@ -795,7 +802,185 @@ export class CloudCoordinator extends EventEmitter {
       updatedAt: now,
       ...(this.#accountSnapshot ? { account: this.#accountSnapshot } : {}),
       ...extra,
+      link: this.#publicLink(profile),
     };
+  }
+
+  #publicLink(profile) {
+    return {
+      kind: this.#link.kind,
+      error: this.#link.error,
+      attempt: this.#link.attempt,
+      canRecreate: profile?.mode === 'app-hosted',
+    };
+  }
+
+  #canRecreateProfile(profile) {
+    return profile?.mode === 'app-hosted';
+  }
+
+  reconnectCloud() {
+    return this.#withProfileOperation((profileEpoch) => this.#reconnectCloud(profileEpoch));
+  }
+
+  recreateCloud() {
+    return this.#withProfileWriter(() => this.#recreateCloud());
+  }
+
+  #noteBrokenLink(message) {
+    if (this.#stopped) return;
+    if (this.#link.kind === 'reconnecting' || this.#link.kind === 'recreating') return;
+    this.#link = {
+      kind: 'reconnecting',
+      error: message ?? null,
+      attempt: this.#link.attempt + 1,
+      canRecreate: this.#link.canRecreate,
+    };
+    this.#emit({ type: 'cloud-link-reconnecting', error: message ?? null });
+    this.#scheduleLinkHeal();
+  }
+
+  #scheduleLinkHeal() {
+    if (this.#stopped || this.#linkHealPromise) return;
+    this.#linkHealPromise = this.#profileOperationContext.exit(() => this.reconnectCloud())
+      .catch((error) => {
+        this.#emit({ type: 'cloud-link-heal-failed', error: error.message });
+      })
+      .finally(() => {
+        this.#linkHealPromise = null;
+      });
+  }
+
+  #armLinkWatchdog() {
+    if (this.#linkWatchdog || this.#stopped) return;
+    this.#linkWatchdog = setInterval(() => {
+      if (this.#stopped || this.#link.kind !== 'ready' || this.#linkProbeBusy) return;
+      if (!this.#hasLiveWatchedSession()) return;
+      void this.#probeLiveLink();
+    }, 20_000);
+    this.#linkWatchdog.unref?.();
+  }
+
+  #disarmLinkWatchdog() {
+    if (this.#linkWatchdog) clearInterval(this.#linkWatchdog);
+    this.#linkWatchdog = null;
+  }
+
+  #hasLiveWatchedSession() {
+    if (this.#watchers.size > 0) return true;
+    for (const session of this.#remoteSessions.values()) {
+      if (['queued', 'running', 'suspended'].includes(cloudState(session.status))) return true;
+    }
+    return false;
+  }
+
+  async #probeLiveLink() {
+    if (this.#stopped || this.#link.kind !== 'ready' || this.#linkProbeBusy) return;
+    this.#linkProbeBusy = true;
+    try {
+      const profile = await this.#client.loadProfile().catch(() => null);
+      if (!profile) return;
+      await this.#waitForProfileHealth(profile, { attempts: 1 });
+    } catch (error) {
+      this.#noteBrokenLink(error.message);
+    } finally {
+      this.#linkProbeBusy = false;
+    }
+  }
+
+  async #reconnectCloud(profileEpoch) {
+    this.#assertProfileEpoch(profileEpoch);
+    if (this.#link.kind === 'recreating') return this.snapshot();
+    const profile = await this.#client.loadProfile().catch(() => null);
+    this.#assertProfileEpoch(profileEpoch);
+    const canRecreate = this.#canRecreateProfile(profile);
+    if (this.#link.kind !== 'reconnecting') {
+      this.#link = {
+        kind: 'reconnecting',
+        error: null,
+        attempt: this.#link.attempt + 1,
+        canRecreate,
+      };
+      this.#emit({ type: 'cloud-link-reconnecting' });
+    } else {
+      this.#link = { ...this.#link, canRecreate };
+    }
+    if (!profile) {
+      this.#link = {
+        kind: 'failed',
+        error: 'Cloud 서버가 설정되어 있지 않습니다.',
+        attempt: this.#link.attempt,
+        canRecreate: false,
+      };
+      return this.snapshot({ profileConnection: 'error', profileMessage: this.#link.error });
+    }
+    try {
+      await this.#waitForProfileHealth(profile, { attempts: 3 });
+      this.#assertProfileEpoch(profileEpoch);
+      this.#abortSessionWatchers();
+      await this.#resumeRecoveriesForCurrentProfile();
+      this.#assertProfileEpoch(profileEpoch);
+      this.#link = { kind: 'ready', error: null, attempt: 0, canRecreate };
+      const snapshot = await this.snapshot({ profileConnection: 'ready', profileMessage: null });
+      this.#emit({ type: 'cloud-link-ready', snapshot });
+      return snapshot;
+    } catch (error) {
+      this.#link = {
+        kind: 'failed',
+        error: error.message,
+        attempt: this.#link.attempt,
+        canRecreate,
+      };
+      const snapshot = await this.snapshot({
+        profileConnection: 'error',
+        profileMessage: error.message,
+      });
+      this.#emit({ type: 'cloud-link-failed', snapshot, error: error.message });
+      if (canRecreate && this.#link.attempt >= 2) {
+        this.#profileOperationContext.exit(() => {
+          void this.recreateCloud().catch((healError) => {
+            this.#emit({ type: 'cloud-link-heal-failed', error: healError.message });
+          });
+        });
+      }
+      return snapshot;
+    }
+  }
+
+  async #recreateCloud() {
+    if (this.#link.kind === 'recreating') return this.snapshot();
+    const profile = await this.#client.loadProfile().catch(() => null);
+    if (!this.#canRecreateProfile(profile)) {
+      return this.#reconnectCloud(this.#profileEpoch);
+    }
+    this.#link = {
+      kind: 'recreating',
+      error: null,
+      attempt: this.#link.attempt + 1,
+      canRecreate: true,
+    };
+    this.#emit({ type: 'cloud-link-recreating' });
+    await this.#forceQuitAccountCloud();
+    try {
+      await this.spawnAppServer({});
+      this.#link = { kind: 'ready', error: null, attempt: 0, canRecreate: true };
+      const snapshot = await this.snapshot();
+      this.#emit({ type: 'cloud-link-ready', snapshot });
+      return snapshot;
+    } catch (error) {
+      this.#link = {
+        kind: 'failed',
+        error: error.message,
+        attempt: this.#link.attempt,
+        canRecreate: true,
+      };
+      const snapshot = await this.snapshot({
+        profileConnection: 'error',
+        profileMessage: error.message,
+      });
+      this.#emit({ type: 'cloud-link-failed', snapshot, error: error.message });
+      return snapshot;
+    }
   }
 
   refresh(options = {}) {
@@ -1494,6 +1679,9 @@ export class CloudCoordinator extends EventEmitter {
       }
     }
     await this.#refreshAccountStatus({ force: true }).catch(() => {});
+    if (this.#link.kind !== 'recreating') {
+      this.#link = { kind: 'ready', error: null, attempt: 0, canRecreate: false };
+    }
     const snapshot = await this.snapshot();
     this.#emit({ type: 'account-force-quit', snapshot });
     return snapshot;
@@ -2313,6 +2501,7 @@ export class CloudCoordinator extends EventEmitter {
     if (this.#stopped || !sessionId || profileEpoch !== this.#profileEpoch || this.#watchers.has(watcherKey)) return;
     const controller = new AbortController();
     this.#watchers.set(watcherKey, controller);
+    this.#armLinkWatchdog();
     const onReconnect = () => this.#profileOperationContext.exit(() => this.#withProfileOperation(async () => {
       this.#assertProfileEpoch(profileEpoch);
       try {
@@ -2460,6 +2649,7 @@ export class CloudCoordinator extends EventEmitter {
         if (error?.code !== 'PROFILE_CHANGED' && !controller.signal.aborted) {
           this.#emit({ type: 'session-stream-error', sessionId, error: error.message });
           restartWatch = this.#streamShouldRestart(error);
+          if (restartWatch) this.#noteBrokenLink(error.message);
         }
       })
         .finally(() => {
@@ -3184,6 +3374,7 @@ export class CloudCoordinator extends EventEmitter {
     if (this.#stopped || !sessionId || profileEpoch !== this.#profileEpoch || this.#watchers.has(watcherKey)) return;
     const controller = new AbortController();
     this.#watchers.set(watcherKey, controller);
+    this.#armLinkWatchdog();
     // Resume from the last seen sequence instead of replaying the full history
     // every time a window refreshes.
     const after = this.#remoteWatchSequence.get(sessionId) ?? 0;
@@ -3259,6 +3450,7 @@ export class CloudCoordinator extends EventEmitter {
         if (error?.code !== 'PROFILE_CHANGED' && !controller.signal.aborted) {
           this.#emit({ type: 'remote-session-stream-error', sessionId, error: error.message });
           restartWatch = this.#streamShouldRestart(error);
+          if (restartWatch) this.#noteBrokenLink(error.message);
         }
       })
         .finally(() => {

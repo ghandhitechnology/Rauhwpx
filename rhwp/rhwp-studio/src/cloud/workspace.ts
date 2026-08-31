@@ -1,4 +1,5 @@
 import type { CloudController } from './desktop-cloud.ts';
+import { inferCloudLink } from './link.ts';
 import type {
   CloudDisplayFrame,
   CloudDisplayUnavailableReason,
@@ -186,6 +187,13 @@ export function deriveComposerTarget(
         : lock === 'cloud-transfer'
           ? 'Cloud를 시작하는 중입니다.'
         : '문서 권한을 전환하는 중입니다.',
+    };
+  }
+  if (inferCloudLink(snapshot).kind === 'recreating') {
+    return {
+      kind: 'workspace-blocked',
+      reason: 'cloud-transfer',
+      message: 'Cloud 서버를 다시 만드는 중입니다.',
     };
   }
   if (mode === 'local') {

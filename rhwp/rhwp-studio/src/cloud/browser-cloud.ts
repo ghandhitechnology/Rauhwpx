@@ -2,6 +2,7 @@ import type {
   CloudCommandRequest,
   CloudFollowupAttachment,
   CloudDisplayInputEvent,
+  CloudLinkState,
   CloudProfileDraft,
   CloudSessionScope,
   CloudTransferReference,
@@ -492,6 +493,7 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
   let serviceVersion: string | null = null;
   let connection: 'unknown' | 'testing' | 'ready' | 'error' = 'unknown';
   let connectionMessage: string | null = null;
+  let link: CloudLinkState = { kind: 'ready', error: null, attempt: 0, canRecreate: false };
   let remoteSessions: Record<string, unknown>[] = [];
   const timelines = new Map<string, unknown>();
   let eventListener: ((event: unknown) => void) | null = null;
@@ -649,6 +651,7 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
       timeline: selected ? timelines.get(selected.sessionId) ?? null : null,
       updatedAt: new Date().toISOString(),
       ...extra,
+      link,
     };
   };
 
@@ -1280,12 +1283,24 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
             }
           }
           failures = 0;
+          if (link.kind !== 'ready' || connection === 'error') {
+            link = { kind: 'ready', error: null, attempt: 0, canRecreate: false };
+            connection = 'ready';
+            connectionMessage = null;
+            emit({ type: 'cloud-link-ready', sessionId }, generation);
+          }
         } catch (error) {
           if (controller.signal.aborted) break;
           if ((error as BrowserCloudError).code === 'PROFILE_CHANGED') break;
           failures += 1;
           if (failures >= 20) {
-            emit({ type: 'remote-session-stream-error', sessionId, error: error instanceof Error ? error.message : String(error) });
+            const message = error instanceof Error ? error.message : String(error);
+            if (link.kind === 'ready') {
+              link = { kind: 'reconnecting', error: message, attempt: link.attempt + 1, canRecreate: false };
+              connection = 'error';
+              connectionMessage = message;
+            }
+            emit({ type: 'remote-session-stream-error', sessionId, error: message }, generation);
             failures = 0;
             await new Promise((resolve) => setTimeout(resolve, 5_000));
             continue;
@@ -1382,6 +1397,77 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
     cloudSpawnSandbox: () => readProfile(async () => { throw new Error('브라우저 PWA에서는 Raucloud를 만들 수 없습니다.'); }),
     cloudSandboxStatus: () => readProfile(() => refresh()),
     cloudTeardownSandbox: () => readProfile(async () => ({ snapshot: snapshot(), removed: false, unmanaged: true })),
+    cloudReconnectLink: () => readProfile(async () => {
+      const selectedProfile = profile;
+      const generation = profileGeneration;
+      if (!selectedProfile) throw cloudError('Cloud 페어링이 필요합니다.', 'PAIRING_REQUIRED');
+      if (link.kind !== 'reconnecting' && link.kind !== 'recreating') {
+        link = { kind: 'reconnecting', error: null, attempt: link.attempt + 1, canRecreate: false };
+      }
+      connection = 'testing';
+      connectionMessage = null;
+      try {
+        await health(selectedProfile);
+        requireCurrentProfile(selectedProfile, generation);
+        connection = 'ready';
+        connectionMessage = null;
+        link = { kind: 'ready', error: null, attempt: 0, canRecreate: false };
+        resumeActiveWatchers();
+        return snapshot();
+      } catch (error) {
+        requireCurrentProfile(selectedProfile, generation);
+        connection = 'error';
+        connectionMessage = error instanceof Error ? error.message : String(error);
+        link = { kind: 'failed', error: connectionMessage, attempt: link.attempt, canRecreate: false };
+        return snapshot();
+      }
+    }),
+    cloudRecreateLink: () => readProfile(async () => {
+      const selectedProfile = profile;
+      const generation = profileGeneration;
+      if (!selectedProfile || !tokens) return snapshot();
+      link = { kind: 'recreating', error: null, attempt: link.attempt + 1, canRecreate: false };
+      const live = remoteSessions.filter((session) => (
+        !['completed', 'failed', 'cancelled', 'purged'].includes(String(session.status ?? ''))
+      ));
+      for (const session of live) {
+        const sessionId = String(session.id ?? '');
+        if (!sessionId) continue;
+        try {
+          await requestJson(`/v1/sessions/${encodeURIComponent(sessionId)}/commands`, {
+            method: 'POST',
+            selectedProfile,
+            body: {
+              commandId: `force_quit_${sessionId}`,
+              type: 'session.end',
+              payload: { expectedVersion: Number(session.stateVersion) || 1 },
+            },
+          });
+        } catch (error) {
+          if ((error as BrowserCloudError).code === 'PROFILE_CHANGED') throw error;
+        }
+        requireCurrentProfile(selectedProfile, generation);
+      }
+      await fetchRemoteSessions().catch((error) => {
+        if ((error as BrowserCloudError).code === 'PROFILE_CHANGED') throw error;
+      });
+      requireCurrentProfile(selectedProfile, generation);
+      try {
+        await health(selectedProfile);
+        requireCurrentProfile(selectedProfile, generation);
+        connection = 'ready';
+        connectionMessage = null;
+        link = { kind: 'ready', error: null, attempt: 0, canRecreate: false };
+        resumeActiveWatchers();
+        return snapshot();
+      } catch (error) {
+        requireCurrentProfile(selectedProfile, generation);
+        connection = 'error';
+        connectionMessage = error instanceof Error ? error.message : String(error);
+        link = { kind: 'failed', error: connectionMessage, attempt: link.attempt, canRecreate: false };
+        return snapshot();
+      }
+    }),
     cloudForceQuitAccount: () => readProfile(async () => {
       const selectedProfile = profile;
       const generation = profileGeneration;

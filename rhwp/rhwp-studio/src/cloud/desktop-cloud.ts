@@ -32,6 +32,7 @@ import type {
   CloudResultAction,
   CloudResultResolution,
   AccountSnapshot,
+  CloudLinkState,
 } from './types.ts';
 
 const SANDBOX_LIFECYCLES = ['idle', 'provisioning', 'ready', 'error', 'tearing-down'] as const;
@@ -50,6 +51,8 @@ export interface CloudDesktopApi {
   cloudSandboxStatus?: () => Promise<unknown>;
   cloudTeardownSandbox?: (payload: { force?: boolean }) => Promise<unknown>;
   cloudForceQuitAccount?: () => Promise<unknown>;
+  cloudReconnectLink?: () => Promise<unknown>;
+  cloudRecreateLink?: () => Promise<unknown>;
   cloudTakeoverSandbox?: () => Promise<unknown>;
   cloudTransfer?: (payload: CloudTransferRequest) => Promise<unknown>;
   cloudSetTransferIntent?: (payload: CloudTransferIntentRequest) => Promise<unknown>;
@@ -81,6 +84,8 @@ export interface CloudController {
   sandboxStatus(): Promise<CloudSnapshot>;
   teardownSandbox(options?: { force?: boolean }): Promise<CloudSnapshot>;
   forceQuitAccount(): Promise<CloudSnapshot>;
+  reconnectLink(): Promise<CloudSnapshot>;
+  recreateLink(): Promise<CloudSnapshot>;
   takeoverSandbox(): Promise<CloudSnapshot>;
   transfer(request: CloudTransferRequest): Promise<CloudSnapshot>;
   setTransferIntent(request: CloudTransferIntentRequest): Promise<CloudSnapshot>;
@@ -550,6 +555,7 @@ export function parseCloudSnapshot(value: unknown): CloudSnapshot | null {
   const sandbox = sandboxOutcome
     ? { removed: sandboxOutcome.removed === true, unmanaged: sandboxOutcome.unmanaged === true }
     : undefined;
+  const link = raw.link === undefined ? undefined : parseCloudLink(raw.link);
   return {
     revision,
     profileEpoch,
@@ -565,6 +571,24 @@ export function parseCloudSnapshot(value: unknown): CloudSnapshot | null {
     updatedAt,
     ...(account ? { account } : {}),
     ...(takeover ? { takeover } : {}),
+    ...(link ? { link } : {}),
+  };
+}
+
+function parseCloudLink(value: unknown): CloudLinkState | null {
+  const raw = record(value);
+  if (!raw) return null;
+  if (raw.kind !== 'ready' && raw.kind !== 'reconnecting' && raw.kind !== 'recreating' && raw.kind !== 'failed') {
+    return null;
+  }
+  if (raw.error !== null && raw.error !== undefined && typeof raw.error !== 'string') return null;
+  if (typeof raw.canRecreate !== 'boolean') return null;
+  const attempt = integer(raw.attempt);
+  return {
+    kind: raw.kind,
+    error: typeof raw.error === 'string' ? raw.error : null,
+    attempt,
+    canRecreate: raw.canRecreate,
   };
 }
 
@@ -809,6 +833,18 @@ export function createCloudController(
     sandboxStatus: () => call('cloudSandboxStatus'),
     teardownSandbox: (options = {}) => call('cloudTeardownSandbox', { force: options.force === true }),
     forceQuitAccount: () => call('cloudForceQuitAccount'),
+    async reconnectLink() {
+      if (typeof resolvedApi?.cloudReconnectLink === 'function') return call('cloudReconnectLink');
+      return call('cloudGetState');
+    },
+    async recreateLink() {
+      if (typeof resolvedApi?.cloudRecreateLink === 'function') return call('cloudRecreateLink');
+      await call('cloudForceQuitAccount').catch(() => snapshot);
+      if (snapshot.profile.kind === 'configured' && snapshot.profile.mode === 'app-hosted') {
+        return call('cloudSpawnSandbox');
+      }
+      return call('cloudGetState');
+    },
     takeoverSandbox: () => call('cloudTakeoverSandbox'),
     transfer: (request) => call('cloudTransfer', request),
     setTransferIntent: (request) => call('cloudSetTransferIntent', request),

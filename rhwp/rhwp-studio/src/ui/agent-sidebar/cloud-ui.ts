@@ -14,6 +14,7 @@ import type {
   CloudSnapshot,
   CloudTakeoverPayload,
 } from '../../cloud/types.ts';
+import { cloudLinkNeedsAttention, inferCloudLink } from '../../cloud/link.ts';
 import {
   shouldOfferAccountForceQuit,
   shouldShowCloudWorkspaceSwitch,
@@ -164,6 +165,7 @@ export interface CloudAgentUi {
   workspaceButton: HTMLButtonElement;
   statusPanel: HTMLElement;
   queueStrip: HTMLElement;
+  recoveryStrip: HTMLElement;
   settingsElement: HTMLElement;
   getSnapshot(): CloudSnapshot;
   isCloudConversation(): boolean;
@@ -254,6 +256,15 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   const sessionPickerLabel = el('span', 'ag-cloud-session-picker-label', '클라우드 작업');
   const sessionSelect = el('select', 'ag-cloud-session-select') as HTMLSelectElement;
   sessionPicker.append(sessionPickerLabel, sessionSelect);
+  const recovery = el('div', 'ag-cloud-recovery');
+  recovery.hidden = true;
+  recovery.setAttribute('role', 'status');
+  recovery.setAttribute('aria-live', 'polite');
+  const recoveryPulse = el('span', 'ag-cloud-recovery-pulse');
+  const recoveryTitle = el('div', 'ag-cloud-recovery-title');
+  const recoveryDetail = el('p', 'ag-cloud-recovery-detail');
+  const recoveryActions = el('div', 'ag-cloud-recovery-actions');
+  recovery.append(recoveryPulse, recoveryTitle, recoveryDetail, recoveryActions);
   const panelStatus = el('div', 'ag-cloud-panel-status');
   panelStatus.setAttribute('role', 'status');
   panelStatus.setAttribute('aria-live', 'polite');
@@ -268,13 +279,17 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   const panelConflict = el('div', 'ag-cloud-conflict');
   panelConflict.hidden = true;
   const panelActions = el('div', 'ag-cloud-panel-actions');
-  panelBody.append(sessionPicker, panelStatus, panelDetail, progress, panelConflict, panelActions);
+  panelBody.append(recovery, sessionPicker, panelStatus, panelDetail, progress, panelConflict, panelActions);
   statusPanel.append(panelHead, panelBody);
 
   const queueStrip = el('div', 'ag-cloud-queue-strip');
   queueStrip.hidden = true;
   queueStrip.setAttribute('role', 'status');
   queueStrip.setAttribute('aria-live', 'polite');
+  const recoveryStrip = el('div', 'ag-cloud-recovery-strip');
+  recoveryStrip.hidden = true;
+  recoveryStrip.setAttribute('role', 'status');
+  recoveryStrip.setAttribute('aria-live', 'polite');
 
   const onboarding = createCloudOnboarding({
     controller: deps.controller,
@@ -542,6 +557,20 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   function forceQuitAccount(): void {
     void operation(async () => {
       snapshot = await deps.controller.forceQuitAccount();
+      selectedSessionId = snapshot.session.kind === 'idle' ? null : snapshot.session.sessionId;
+      if (snapshot.session.kind === 'idle') clearCloudBinding();
+    });
+  }
+
+  function reconnectLink(): void {
+    void operation(async () => {
+      snapshot = await deps.controller.reconnectLink();
+    });
+  }
+
+  function recreateLink(): void {
+    void operation(async () => {
+      snapshot = await deps.controller.recreateLink();
       selectedSessionId = snapshot.session.kind === 'idle' ? null : snapshot.session.sessionId;
       if (snapshot.session.kind === 'idle') clearCloudBinding();
     });
@@ -827,6 +856,43 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     appendForceQuit();
   }
 
+  function renderRecovery(): void {
+    const link = inferCloudLink(snapshot);
+    const needsAttention = cloudLinkNeedsAttention(link);
+    statusPanel.dataset.link = link.kind;
+    recovery.hidden = !needsAttention;
+    recovery.dataset.kind = link.kind;
+    recoveryActions.replaceChildren();
+    recoveryStrip.hidden = !needsAttention;
+    recoveryStrip.replaceChildren();
+    recoveryStrip.dataset.kind = link.kind;
+    if (!needsAttention) {
+      recoveryTitle.textContent = '';
+      recoveryDetail.textContent = '';
+      return;
+    }
+    if (link.kind === 'reconnecting') {
+      recoveryTitle.textContent = '연결을 다시 맺는 중입니다.';
+      recoveryDetail.textContent = link.error ?? '서버에 다시 닿는 중입니다.';
+    } else if (link.kind === 'recreating') {
+      recoveryTitle.textContent = '서버를 다시 만들고 있습니다.';
+      recoveryDetail.textContent = '이전 작업을 끊고 새 서버를 켭니다.';
+    } else {
+      recoveryTitle.textContent = '연결이 끊겼습니다.';
+      recoveryDetail.textContent = link.error ?? 'Cloud 서버에 닿지 않습니다.';
+      recoveryActions.append(action('다시 연결', reconnectLink, 'ag-primary'));
+      if (link.canRecreate) {
+        recoveryActions.append(action('서버 다시 만들기', recreateLink));
+      }
+    }
+    const stripTitle = el('span', 'ag-cloud-recovery-strip-title', recoveryTitle.textContent);
+    recoveryStrip.append(el('span', 'ag-cloud-recovery-strip-pulse'), stripTitle);
+    if (link.kind === 'failed') {
+      recoveryStrip.append(action('다시 연결', reconnectLink, 'ag-primary'));
+      if (link.canRecreate) recoveryStrip.append(action('서버 다시 만들기', recreateLink));
+    }
+  }
+
   function renderQueue(): void {
     const queued = snapshot.queuedMessages.filter((message) => message.state === 'queued');
     queueStrip.hidden = queued.length === 0;
@@ -851,13 +917,35 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     sidebarButton.classList.toggle('ag-active', active || setupActive);
     workspaceButton.classList.toggle('ag-active', active || setupActive);
     const running = snapshot.session.kind === 'running';
-    sidebarButton.dataset.state = setupActive ? 'setup' : localTurnPending ? 'waiting' : snapshot.session.kind;
-    workspaceButton.dataset.state = setupActive ? 'setup' : localTurnPending ? 'waiting' : snapshot.session.kind;
-    sidebarButtonLabel.textContent = setupActive ? '준비 중' : 'Cloud';
-    workspaceButtonLabel.textContent = setupActive ? '준비 중' : 'Cloud';
+    const link = inferCloudLink(snapshot);
+    const buttonState = setupActive
+      ? 'setup'
+      : link.kind !== 'ready'
+        ? link.kind
+        : localTurnPending
+          ? 'waiting'
+          : snapshot.session.kind;
+    sidebarButton.dataset.state = buttonState;
+    workspaceButton.dataset.state = buttonState;
+    sidebarButtonLabel.textContent = setupActive
+      ? '준비 중'
+      : link.kind === 'reconnecting'
+        ? '다시 연결 중'
+        : link.kind === 'recreating'
+          ? '서버 생성 중'
+          : link.kind === 'failed'
+            ? '연결 끊김'
+            : 'Cloud';
+    workspaceButtonLabel.textContent = sidebarButtonLabel.textContent;
     const lock = raucloudLock(snapshot);
     const label = setupActive
       ? 'Cloud 환경 설정 중'
+      : link.kind === 'reconnecting'
+        ? '연결을 다시 맺는 중입니다'
+        : link.kind === 'recreating'
+          ? '서버를 다시 만드는 중입니다'
+          : link.kind === 'failed'
+            ? '연결이 끊겼습니다'
       : running
         ? '클라우드에서 작업 중'
         : active
@@ -874,6 +962,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   function render(): void {
     renderButtons();
     renderPanel();
+    renderRecovery();
     renderQueue();
     deps.onLeaseChange(snapshot.lease.owner === 'cloud', snapshot.lease.owner === 'cloud' ? snapshot.lease.sessionId : null);
     if (deps.isCloudMode() && snapshot.timeline) {
@@ -982,6 +1071,11 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     const host = raw && typeof raw === 'object' && !Array.isArray(raw)
       ? raw as Record<string, unknown>
       : null;
+    if (host?.type === 'session-stream-error' || host?.type === 'remote-session-stream-error') {
+      const link = inferCloudLink(snapshot);
+      if (link.kind === 'ready') reconnectLink();
+      return;
+    }
     const sessionId = typeof host?.sessionId === 'string' ? host.sessionId : '';
     const selected = snapshot.session.kind === 'idle' ? '' : snapshot.session.sessionId;
     const selectedThreadId = snapshot.session.kind === 'idle' ? '' : snapshot.session.threadId;
@@ -1020,6 +1114,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     workspaceButton,
     statusPanel,
     queueStrip,
+    recoveryStrip,
     settingsElement,
     getSnapshot: () => snapshot,
     isCloudConversation: () => cloudOwnsConversation(snapshot),

@@ -1133,6 +1133,14 @@ ipcMain.handle('cloud:force-quit-account', async (event) => {
   const session = sessionForEvent(event);
   return scopedCloudSnapshot(session, await requireCloudCoordinator().forceQuitAccountCloud());
 });
+ipcMain.handle('cloud:reconnect-link', async (event) => {
+  const session = sessionForEvent(event);
+  return scopedCloudSnapshot(session, await requireCloudCoordinator().reconnectCloud());
+});
+ipcMain.handle('cloud:recreate-link', async (event) => {
+  const session = sessionForEvent(event);
+  return scopedCloudSnapshot(session, await requireCloudCoordinator().recreateCloud());
+});
 ipcMain.handle('cloud:teardown-sandbox', async (event, payload = {}) => {
   const session = sessionForEvent(event);
   return scopedCloudSnapshot(session, await requireCloudCoordinator().teardownAppServer({

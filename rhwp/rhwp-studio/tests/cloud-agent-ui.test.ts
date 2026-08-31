@@ -192,6 +192,18 @@ test('follow-up Cloud sends use the live session and can force-quit leftover acc
   assert.match(onboarding, /서버 강제 종료로 끊을 수 있습니다/);
 });
 
+test('a dead Cloud stream shows reconnect and recreate instead of a stale running panel', () => {
+  assert.match(cloudUi, /다시 연결/);
+  assert.match(cloudUi, /서버 다시 만들기/);
+  assert.match(cloudUi, /reconnectLink/);
+  assert.match(cloudUi, /recreateLink/);
+  assert.match(cloudUi, /session-stream-error/);
+  assert.match(cloudUi, /ag-cloud-recovery-strip/);
+  assert.match(sidebar, /cloudUi\.recoveryStrip/);
+  assert.match(cloudCss, /ag-cloud-reconnect/);
+  assert.match(cloudCss, /prefers-reduced-motion/);
+});
+
 test('agents can append a paragraph without moving controls from an empty anchor paragraph', () => {
   assert.match(agentTools, /name: 'insert_paragraph_after'/);
   assert.match(agentTools, /inline controls[\s\S]*remain anchored/);

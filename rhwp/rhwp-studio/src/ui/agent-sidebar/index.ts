@@ -2577,6 +2577,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   composerModeRow.append(workspaceModeSwitch, cloudModeBadge);
   composer.insertBefore(composerTargetMessage, composerField);
   composer.insertBefore(cloudUi.queueStrip, composerField);
+  composer.insertBefore(cloudUi.recoveryStrip, composerField);
   composer.insertBefore(composerModeRow, composerField);
   // 편대 도크는 입력기 위에 뜨는 오버레이라서 입력기의 자식으로 붙는다 —
   // 사이드바·전체 화면 어디로 옮겨져도 입력기를 따라간다.

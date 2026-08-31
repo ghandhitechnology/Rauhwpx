@@ -419,6 +419,78 @@ test('account force-quit ends leftover sessions and the account worker', async (
   await coordinator.stop();
 });
 
+test('reconnect exposes link state after a health probe', async () => {
+  let healthy = false;
+  const profile = {
+    mode: 'self-hosted',
+    name: 'vps',
+    endpoint: 'https://vps.example.test/rauhwpx-cloud',
+    serverPublicKey: 'ed25519:test',
+    ssh: { host: 'vps.example.test', user: 'ubuntu', port: 22 },
+    transport: 'tailscale',
+  };
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadServerMode: async () => 'self-hosted',
+      loadProfile: async () => profile,
+      isPaired: async () => true,
+      health: async () => {
+        if (!healthy) throw new Error('temporary disconnect');
+        return { ok: true, serverPublicKey: profile.serverPublicKey };
+      },
+    },
+    store: { load: async () => [], list: async () => [], flush: async () => {} },
+  });
+  const started = await coordinator.start();
+  assert.equal(started.link.kind, 'ready');
+  const failed = await coordinator.reconnectCloud();
+  assert.equal(failed.link.kind, 'failed');
+  assert.equal(failed.link.error, 'temporary disconnect');
+  assert.equal(failed.link.canRecreate, false);
+  healthy = true;
+  const ready = await coordinator.reconnectCloud();
+  assert.equal(ready.link.kind, 'ready');
+  assert.equal(ready.link.attempt, 0);
+  await coordinator.stop();
+});
+
+test('self-hosted recreate reconnects instead of spawning a sandbox', async () => {
+  const profile = {
+    mode: 'self-hosted',
+    name: 'vps',
+    endpoint: 'https://vps.example.test/rauhwpx-cloud',
+    serverPublicKey: 'ed25519:test',
+    ssh: { host: 'vps.example.test', user: 'ubuntu', port: 22 },
+    transport: 'tailscale',
+  };
+  let spawned = false;
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadServerMode: async () => 'self-hosted',
+      loadProfile: async () => profile,
+      isPaired: async () => true,
+      health: async () => ({ ok: true, serverPublicKey: profile.serverPublicKey }),
+    },
+    store: { load: async () => [], list: async () => [], flush: async () => {} },
+    appServers: [{
+      id: RAUCLOUD_PROVIDER_ID,
+      displayName: 'Raucloud',
+      configuration: () => ({ configured: true, missing: [] }),
+      spawn: async () => {
+        spawned = true;
+        throw new Error('self-hosted recreate must not spawn');
+      },
+      status: async () => ({ lifecycle: 'idle' }),
+      teardown: async () => ({ removed: true }),
+    }],
+  });
+  await coordinator.start();
+  const snapshot = await coordinator.recreateCloud();
+  assert.equal(spawned, false);
+  assert.equal(snapshot.link.kind, 'ready');
+  await coordinator.stop();
+});
+
 test('account force-quit still unlocks when Raucloud cannot complete the request', async () => {
   const provider = {
     id: RAUCLOUD_PROVIDER_ID,
@@ -499,10 +571,15 @@ test('Raucloud keeps broker conflict and quota failures stable for the UI', asyn
 
 test('the packaged desktop uses the Rau account token and not the direct Railway provider', async () => {
   const source = await readFile(new URL('../desktop/main.mjs', import.meta.url), 'utf8');
+  const preload = await readFile(new URL('../desktop/preload.cjs', import.meta.url), 'utf8');
   assert.match(source, /createRaucloudBrokerProvider/);
   assert.match(source, /getAccessToken:\s*\(\) => secretVault\.get\(RAUCLOUD_ACCESS_SECRET\)/);
   assert.doesNotMatch(source, /createRailwayServerProvider/);
   assert.equal(RAUCLOUD_ACCESS_SECRET, 'rhwp.rau.openrouter-api-key');
+  assert.match(source, /cloud:reconnect-link/);
+  assert.match(source, /cloud:recreate-link/);
+  assert.match(preload, /cloudReconnectLink/);
+  assert.match(preload, /cloudRecreateLink/);
 });
 
 test('coordinator snapshots expose a logged-out account gate before any Cloud profile exists', async () => {
