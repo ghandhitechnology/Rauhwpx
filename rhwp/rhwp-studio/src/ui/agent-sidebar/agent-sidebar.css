@@ -3869,6 +3869,21 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   display: none;
 }
 
+/* 좁은 사이드바에서는 모델 선택을 우선한다. 첨부는 입력칸의 클립 버튼으로
+   계속 추가할 수 있고, 폭을 다시 넓히면 참고자료·스킬 도구가 돌아온다. */
+.ag-root:not(.ag-fullscreen).ag-composer-compact .ag-composer-meta .ag-references-btn,
+.ag-root:not(.ag-fullscreen).ag-composer-compact .ag-composer-meta .ag-skills-btn {
+  display: none;
+}
+
+.ag-root:not(.ag-fullscreen).ag-composer-compact .ag-composer-meta .ag-llm {
+  flex: 1 1 auto;
+}
+
+.ag-root:not(.ag-fullscreen).ag-composer-compact:not(.ag-measuring-min) .ag-composer-meta .ag-llm-name {
+  max-width: none;
+}
+
 /* 최솟값 측정 때 모델·추론 칸을 말줄임 바닥까지 줄인다. */
 .ag-root.ag-measuring-min .ag-composer-meta .ag-llm-name {
   max-width: 6ch;
@@ -4861,7 +4876,9 @@ body.ag-col-resizing {
 .ag-fullscreen.ag-workspace-compact .ag-stage,
 .ag-fullscreen.ag-workspace-compact.ag-rail-collapsed .ag-stage,
 .ag-fullscreen.ag-workspace-compact.ag-review-collapsed .ag-stage,
-.ag-fullscreen.ag-workspace-compact.ag-rail-collapsed.ag-review-collapsed .ag-stage {
+.ag-fullscreen.ag-workspace-compact.ag-rail-collapsed.ag-review-collapsed .ag-stage,
+.ag-fullscreen.ag-workspace-compact.ag-review-drawer-open:not(.ag-review-collapsed) .ag-stage,
+.ag-fullscreen.ag-workspace-compact.ag-plan-drawer-open:not(.ag-plan-collapsed) .ag-stage {
   grid-template-columns: minmax(0, 1fr);
   transition: none;
 }
@@ -5717,6 +5734,123 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 .ag-fullscreen.ag-workspace-compact .ag-plan-column,
 .ag-fullscreen.ag-workspace-compact.ag-plan-collapsed .ag-plan-column {
   grid-column: 1;
+}
+
+/* Compact focus mode keeps the conversation as the stable canvas. Navigation,
+   environment and detail surfaces become temporary edge drawers instead of
+   retaining their desktop column state. */
+.ag-workspace-drawer-scrim {
+  display: none;
+}
+
+.ag-compact-rail-hover-target {
+  display: none;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .ag-fullscreen.ag-workspace-compact .ag-compact-rail-hover-target {
+    position: absolute;
+    top: 48px;
+    bottom: 0;
+    left: 0;
+    z-index: 13;
+    display: block;
+    width: 24px;
+  }
+}
+
+.ag-fullscreen.ag-workspace-compact .ag-workspace-drawer-scrim {
+  position: absolute;
+  inset: 48px 0 0;
+  z-index: 11;
+  display: block;
+  padding: 0;
+  border: 0;
+  background: rgba(0, 0, 0, 0.18);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition:
+    opacity 160ms var(--ag-motion-out),
+    visibility 0s linear 180ms;
+}
+
+.ag-fullscreen.ag-workspace-compact:is(
+  .ag-compact-rail-open,
+  .ag-detail-drawer-open,
+  .ag-environment-open
+) .ag-workspace-drawer-scrim {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition-delay: 0s;
+}
+
+.ag-fullscreen.ag-workspace-compact .ag-threads-page {
+  z-index: 12;
+  grid-row: auto;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateX(calc(-100% - 12px));
+  transition:
+    opacity 160ms var(--ag-motion-out),
+    transform 220ms var(--ag-motion-out),
+    visibility 0s linear 220ms;
+}
+
+.ag-fullscreen.ag-workspace-compact.ag-compact-rail-open .ag-threads-page {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translateX(0);
+  transition-delay: 0s;
+}
+
+.ag-fullscreen.ag-workspace-compact .ag-review-column,
+.ag-fullscreen.ag-workspace-compact.ag-review-collapsed .ag-review-column,
+.ag-fullscreen.ag-workspace-compact .ag-plan-column,
+.ag-fullscreen.ag-workspace-compact.ag-plan-collapsed .ag-plan-column {
+  position: absolute;
+  top: 48px;
+  right: 0;
+  bottom: 0;
+  left: auto;
+  z-index: 12;
+  grid-row: auto;
+  width: min(var(--ag-review-w, 480px), 88vw);
+  border-left: 1px solid var(--ag-border);
+  box-shadow: var(--n-elev-3);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateX(calc(100% + 12px));
+  transition:
+    opacity 160ms var(--ag-motion-out),
+    transform 220ms var(--ag-motion-out),
+    visibility 0s linear 220ms;
+}
+
+.ag-fullscreen.ag-workspace-compact.ag-review-drawer-open:not(.ag-review-collapsed) .ag-review-column,
+.ag-fullscreen.ag-workspace-compact.ag-plan-drawer-open:not(.ag-plan-collapsed) .ag-plan-column {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translateX(0);
+  transition-delay: 0s;
+}
+
+.ag-fullscreen.ag-workspace-compact.ag-environment-open:not(.ag-detail-drawer-open) .ag-chat-page {
+  padding-inline-end: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-fullscreen.ag-workspace-compact .ag-workspace-drawer-scrim,
+  .ag-fullscreen.ag-workspace-compact .ag-threads-page,
+  .ag-fullscreen.ag-workspace-compact .ag-review-column,
+  .ag-fullscreen.ag-workspace-compact .ag-plan-column {
+    transition: none;
+  }
 }
 
 /* 설정은 focus title bar를 유지한 채 두 번째 grid row를 채운다. */

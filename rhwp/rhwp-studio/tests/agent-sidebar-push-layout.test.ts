@@ -43,6 +43,38 @@ test('agent sidebar toggles body.ag-sidebar-open with collapse state', () => {
   assert.match(source, /setCollapsed\(false, \{ recenter: false \}\)/);
 });
 
+test('compact fullscreen navigation uses temporary drawer state', () => {
+  assert.match(source, /let compactThreadsRailOpen = false/);
+  assert.match(source, /root\.classList\.toggle\('ag-compact-rail-open', compact && compactThreadsRailOpen\)/);
+  assert.match(source, /persistThreadsRailCollapsed\(collapsed\)/);
+  assert.match(source, /function setCompactThreadsRailOpen\(open: boolean, opts\?: \{ focus\?: boolean \}\)/);
+  assert.match(source, /document\.addEventListener\('focusin', onCompactDrawerFocusIn\)/);
+  assert.match(source, /document\.addEventListener\('pointerdown', onCompactDrawerPointerDown\)/);
+  assert.match(source, /document\.removeEventListener\('focusin', onCompactDrawerFocusIn\)/);
+  assert.match(source, /document\.removeEventListener\('pointerdown', onCompactDrawerPointerDown\)/);
+});
+
+test('compact fullscreen navigation can reveal from the left viewport edge', () => {
+  assert.match(source, /const COMPACT_RAIL_HOVER_OPEN_DELAY_MS = 260/);
+  assert.match(source, /ag-compact-rail-hover-target/);
+  assert.match(source, /compactRailHoverTarget\.addEventListener\('pointerenter', onCompactRailEdgeEnter\)/);
+  assert.match(source, /compactRailHoverOpenTimer = window\.setTimeout\([\s\S]*?COMPACT_RAIL_HOVER_OPEN_DELAY_MS\)/);
+  assert.match(source, /clearCompactRailHoverOpen\(\)/);
+  assert.match(source, /let compactRailLastPointerX: number \| null = null/);
+  assert.match(source, /root\.contains\(event\.relatedTarget\)/);
+  assert.match(source, /event\.clientX >= compactRailLastPointerX/);
+  assert.match(source, /root\.addEventListener\('pointermove', onCompactRailPointerMove/);
+  assert.match(source, /root\.removeEventListener\('pointermove', onCompactRailPointerMove/);
+  assert.match(source, /setCompactThreadsRailOpen\(true, \{ focus: false \}\)/);
+  assert.match(source, /threadsPage\.addEventListener\('pointerleave', onCompactRailPointerLeave\)/);
+  assert.match(source, /compactRailHoverTarget\.removeEventListener\('pointerenter', onCompactRailEdgeEnter\)/);
+  assert.match(source, /threadsPage\.removeEventListener\('pointerleave', onCompactRailPointerLeave\)/);
+  assert.match(
+    css,
+    /@media \(hover: hover\) and \(pointer: fine\)\s*\{[\s\S]*?\.ag-fullscreen\.ag-workspace-compact \.ag-compact-rail-hover-target\s*\{[\s\S]*?z-index:\s*13;[\s\S]*?width:\s*24px;/,
+  );
+});
+
 test('agent sidebar asks canvas to recenter during inset animation', () => {
   assert.match(source, /eventBus\?\.emit\('viewport-inset-changed'\)/);
   assert.match(source, /ag-sidebar-animating/);
@@ -118,4 +150,19 @@ test('composer metadata stays on one row at the minimum sidebar width', () => {
   assert.match(css, /\.ag-composer-meta \.ag-composer-utilities\s*\{[^}]*margin-left:\s*auto;/s);
   assert.match(css, /\.ag-composer-meta \.ag-references-btn-label\s*\{[^}]*display:\s*none;/s);
   assert.match(css, /\.ag-root\.ag-measuring-min \.ag-composer-meta \.ag-llm-name\s*\{[^}]*max-width:\s*6ch;/s);
+});
+
+test('compact sidebar prioritizes the full model name over secondary utilities', () => {
+  assert.match(source, /COMPOSER_COMPACT_WIDTH_PX\s*=\s*400/);
+  assert.match(source, /new ResizeObserver\(updateComposerCompactLayout\)/);
+  assert.match(source, /root\.classList\.toggle\('ag-composer-compact', compact\)/);
+  assert.match(source, /rootResizeObserver\?\.disconnect\(\)/);
+  assert.match(
+    css,
+    /\.ag-root:not\(\.ag-fullscreen\)\.ag-composer-compact \.ag-composer-meta \.ag-references-btn,\s*\.ag-root:not\(\.ag-fullscreen\)\.ag-composer-compact \.ag-composer-meta \.ag-skills-btn\s*\{[^}]*display:\s*none;/s,
+  );
+  assert.match(
+    css,
+    /\.ag-root:not\(\.ag-fullscreen\)\.ag-composer-compact:not\(\.ag-measuring-min\) \.ag-composer-meta \.ag-llm-name\s*\{[^}]*max-width:\s*none;/s,
+  );
 });

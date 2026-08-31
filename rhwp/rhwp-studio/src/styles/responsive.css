@@ -48,26 +48,16 @@
 /* ─── 태블릿 서식 리본: 필드 1행 + 명령 1행 ─────────── */
 @media (min-width: 768px) and (max-width: 1023px) {
   #style-bar {
-    display: grid;
-    grid-template-columns: max-content max-content;
+    display: flex;
+    flex-wrap: wrap;
     min-height: 0;
-    align-items: start;
-    align-content: start;
+    height: auto;
+    align-items: center;
+    align-content: center;
     justify-content: start;
     gap: 4px 0;
     padding: 4px 6px 5px;
-  }
-
-  .sb-field-ribbon-group {
-    grid-column: 1 / -1;
-  }
-
-  .sb-character-band {
-    grid-column: 1;
-  }
-
-  .sb-paragraph-band {
-    grid-column: 2;
+    overflow: visible;
   }
 
   .sb-ribbon-group {
@@ -145,10 +135,13 @@
   /* ── 서식 도구 모음: 필드 + 글자 + 문단 리본 ── */
   #style-bar {
     min-height: 40px;
+    height: auto;
+    flex-wrap: nowrap;
     flex-direction: column;
     align-items: stretch;
     gap: 5px;
     padding: 5px 6px 6px;
+    overflow: visible;
   }
 
   .sb-ribbon-group {

@@ -33,10 +33,13 @@ test('constrained layouts hide top-level separators and do not scroll the toolba
   assert.doesNotMatch(mobileToolbar[1], /-webkit-overflow-scrolling/);
 });
 
-test('style ribbon keeps a single fixed-height row that scrolls horizontally', () => {
-  assert.match(styleBar, /#style-bar\s*\{[^}]*flex-wrap:\s*nowrap;/s);
+test('style ribbon wraps complete groups into visible rows', () => {
+  assert.match(styleBar, /#style-bar\s*\{[^}]*flex-wrap:\s*wrap;/s);
   assert.match(styleBar, /#style-bar\s*\{[^}]*min-height:\s*38px;/s);
-  assert.match(styleBar, /#style-bar\s*\{[^}]*overflow-x:\s*auto;/s);
+  assert.match(styleBar, /#style-bar\s*\{[^}]*height:\s*auto;/s);
+  assert.match(styleBar, /#style-bar\s*\{[^}]*overflow:\s*visible;/s);
+  assert.match(styleBar, /\.sb-command-band\s*\{[^}]*flex-shrink:\s*0;/s);
+  assert.match(styleBar, /\.sb-ribbon-group\s*\{[^}]*flex-shrink:\s*0;/s);
 
   assert.match(
     responsive,
@@ -51,7 +54,7 @@ test('style ribbon keeps a single fixed-height row that scrolls horizontally', (
   }
 });
 
-test('tablet style ribbon uses compact field and command tracks instead of tall wrapped groups', () => {
+test('tablet style ribbon stacks compact field and command groups without clipping', () => {
   const tabletStart = responsive.indexOf('@media (min-width: 768px) and (max-width: 1023px)');
   const mobileStart = responsive.indexOf('/* ─── 모바일', tabletStart);
   assert.ok(tabletStart >= 0);
@@ -59,16 +62,8 @@ test('tablet style ribbon uses compact field and command tracks instead of tall 
   const tabletRibbon = responsive.slice(tabletStart, mobileStart);
   assert.match(
     tabletRibbon,
-    /#style-bar\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*max-content max-content;/s,
-  );
-  assert.match(
-    tabletRibbon,
-    /\.sb-field-ribbon-group\s*\{[^}]*grid-column:\s*1\s*\/\s*-1;/s,
+    /#style-bar\s*\{[^}]*display:\s*flex;[^}]*flex-wrap:\s*wrap;[^}]*height:\s*auto;[^}]*overflow:\s*visible;/s,
   );
   assert.match(tabletRibbon, /\.sb-ribbon-group\s*\{[^}]*min-height:\s*0;/s);
   assert.match(tabletRibbon, /\.sb-ribbon-label\s*\{[^}]*display:\s*none;/s);
-  assert.match(
-    tabletRibbon,
-    /\.sb-paragraph-band\s*\{[^}]*grid-column:\s*2;/s,
-  );
 });

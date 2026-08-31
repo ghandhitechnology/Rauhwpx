@@ -169,6 +169,7 @@ const SIDEBAR_WIDTH_DEFAULT = 480;
    묶인 폭으로 매 프레임 다시 잰다. */
 const SIDEBAR_WIDTH_MIN_FALLBACK = 280;
 const SIDEBAR_PACKED_BUFFER_PX = 8;
+const COMPOSER_COMPACT_WIDTH_PX = 400;
 const SIDEBAR_MOTION_DURATION_MS = 320;
 /* 전체 화면 전환도 사이드바·용지와 같은 320ms 축을 쓴다(모션 계약).
    타이머는 전이가 끝날 때까지의 여유분을 포함한다. */
@@ -176,6 +177,7 @@ const FS_MOTION_SETTLE_MS = SIDEBAR_MOTION_DURATION_MS + 60;
 /* The sidebar handoff briefly staggers its chrome after the fullscreen shell
    has folded away. Keep the class alive through the last control's entrance. */
 const FS_RETURN_SETTLE_MS = 300;
+const COMPACT_RAIL_HOVER_OPEN_DELAY_MS = 260;
 
 const CLIPBOARD_IMAGE_EXTENSION: Readonly<Record<string, string>> = {
   'image/png': 'png',
@@ -643,7 +645,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   /** 에이전트 집중 모드 — 스레드 레일과 대화 무대로 문서를 덮는다. */
   let fullscreen = false;
   let threadsRailCollapsed = readStoredThreadsRailCollapsed();
+  let workspaceCompact = false;
+  let compactThreadsRailOpen = false;
+  let compactRailHoverOpen = false;
+  let compactRailLastPointerX: number | null = null;
+  let compactRailHoverOpenTimer: number | null = null;
+  let compactRailHoverCloseTimer: number | null = null;
   let environmentPanelOpen = readStoredEnvironmentPanelOpen();
+  let desktopEnvironmentPanelOpen = environmentPanelOpen;
   // 검토 drawer는 focus mode에 들어갈 때마다 닫힌 상태로 시작하며,
   // 환경 패널의 `변경 사항` 행을 눌렀을 때만 열린다.
   let reviewColCollapsed = true;
@@ -1373,6 +1382,18 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       e.preventDefault();
       return;
     }
+    if (isCompactWorkspace() && compactThreadsRailOpen) {
+      setCompactThreadsRailOpen(false);
+      workspaceThreadsBtn.focus();
+      e.preventDefault();
+      return;
+    }
+    if (isCompactWorkspace() && environmentPanelOpen) {
+      setEnvironmentPanelOpen(false, { persist: false });
+      environmentToggle.focus();
+      e.preventDefault();
+      return;
+    }
     if (root.classList.contains('ag-detail-drawer-open')) {
       if (root.classList.contains('ag-plan-drawer-open')) setPlanColCollapsed(true);
       else setReviewColCollapsed(true);
@@ -1391,6 +1412,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
      이 bar는 viewport 전체를 가로지르며 pane 토글, 문서 맥락,
      대화 제목, 실행 맥락과 종료 동작을 한 축에 고정한다. */
   const workspaceBar = el('header', 'ag-workspace-bar');
+  const workspaceDrawerScrim = el('button', 'ag-workspace-drawer-scrim');
+  workspaceDrawerScrim.type = 'button';
+  workspaceDrawerScrim.tabIndex = -1;
+  workspaceDrawerScrim.setAttribute('aria-label', '열린 패널 닫기');
+  const compactRailHoverTarget = el('div', 'ag-compact-rail-hover-target');
+  compactRailHoverTarget.setAttribute('aria-hidden', 'true');
   const workspaceLeading = el('div', 'ag-workspace-leading');
   const workspaceThreadsBtn = el('button', 'ag-workspace-icon-btn ag-workspace-threads-btn');
   workspaceThreadsBtn.type = 'button';
@@ -1521,9 +1548,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (environmentPanelOpen) window.requestAnimationFrame(refreshEnvironmentFilenameMarquee);
   }
 
-  function setEnvironmentPanelOpen(open: boolean): void {
+  function setEnvironmentPanelOpen(open: boolean, opts?: { persist?: boolean }): void {
     environmentPanelOpen = open;
-    persistEnvironmentPanelOpen(open);
+    if (opts?.persist !== false) {
+      desktopEnvironmentPanelOpen = open;
+      persistEnvironmentPanelOpen(open);
+    }
     applyEnvironmentPanelState();
   }
 
@@ -1533,6 +1563,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   }
 
   workspaceThreadsBtn.addEventListener('click', () => {
+    if (isCompactWorkspace()) {
+      compactRailHoverOpen = false;
+      setCompactThreadsRailOpen(!compactThreadsRailOpen);
+      return;
+    }
     setThreadsRailCollapsed(!threadsRailCollapsed);
   });
   workspaceSettingsBack.addEventListener('click', () => void requestSettingsClose(workspaceSettingsBtn));
@@ -1541,13 +1576,17 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     requestSettingsOpen();
   });
   environmentToggle.addEventListener('click', () => {
-    setEnvironmentPanelOpen(!environmentPanelOpen);
+    const nextOpen = !environmentPanelOpen;
+    setEnvironmentPanelOpen(nextOpen, { persist: !isCompactWorkspace() });
+    if (nextOpen && isCompactWorkspace()) {
+      window.requestAnimationFrame(() => environmentFileRow.focus({ preventScroll: true }));
+    }
   });
   environmentFileRow.addEventListener('pointerenter', refreshEnvironmentFilenameMarquee);
   environmentFileRow.addEventListener('focus', refreshEnvironmentFilenameMarquee);
   environmentChanges.addEventListener('click', () => {
     setReviewColCollapsed(false);
-    setEnvironmentPanelOpen(false);
+    setEnvironmentPanelOpen(false, { persist: !isCompactWorkspace() });
     // drawer 가 열리는 도중의 focus 가 조상 스크롤을 밀어 판 전체를
     // 옮기지 않도록 스크롤 없이 초점만 옮긴다.
     window.requestAnimationFrame(() => reviewColumnClose.focus({ preventScroll: true }));
@@ -1555,7 +1594,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   environmentPlan.addEventListener('click', () => {
     if (!activePlan) return;
     setPlanColCollapsed(false);
-    setEnvironmentPanelOpen(false);
+    setEnvironmentPanelOpen(false, { persist: !isCompactWorkspace() });
     window.requestAnimationFrame(() => planColumnClose.focus({ preventScroll: true }));
   });
   workspaceExitBtn.addEventListener('click', () => {
@@ -2194,6 +2233,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   stage.append(
     workspaceBar,
+    workspaceDrawerScrim,
+    compactRailHoverTarget,
     chatPage,
     threadsPage,
     skillsPage,
@@ -2329,16 +2370,106 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   /* 스레드 레일 접기 — 전체 화면에서만 뜻이 있다. 헤더의 목록
      버튼이 토글이고, 접힘 여부는 사이드바 폭처럼 세션 간 유지된다. */
   function applyThreadsRailState(): void {
-    root.classList.toggle('ag-rail-collapsed', fullscreen && threadsRailCollapsed);
+    const compact = isCompactWorkspace();
+    const expanded = fullscreen && (compact ? compactThreadsRailOpen : !threadsRailCollapsed);
+    root.classList.toggle('ag-compact-rail-open', compact && compactThreadsRailOpen);
+    root.classList.toggle('ag-compact-rail-hover-open', compact && compactRailHoverOpen);
+    root.classList.toggle('ag-rail-collapsed', fullscreen && !expanded);
     if (!fullscreen) return;
-    threadsBtn.setAttribute('aria-expanded', threadsRailCollapsed ? 'false' : 'true');
-    threadsBtn.title = threadsRailCollapsed ? '채팅 목록 열기' : '채팅 목록 접기';
+    threadsBtn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    threadsBtn.title = expanded ? '채팅 목록 접기' : '채팅 목록 열기';
     threadsBtn.setAttribute('aria-label', threadsBtn.title);
-    threadsPage.setAttribute('aria-hidden', threadsRailCollapsed ? 'true' : 'false');
-    workspaceThreadsBtn.setAttribute('aria-expanded', threadsRailCollapsed ? 'false' : 'true');
-    workspaceThreadsBtn.title = threadsRailCollapsed ? '대화 목록 열기' : '대화 목록 접기';
+    threadsPage.setAttribute('aria-hidden', expanded ? 'false' : 'true');
+    workspaceThreadsBtn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    workspaceThreadsBtn.title = expanded ? '대화 목록 접기' : '대화 목록 열기';
     workspaceThreadsBtn.setAttribute('aria-label', workspaceThreadsBtn.title);
   }
+
+  function isCompactWorkspace(): boolean {
+    return fullscreen && workspaceCompact;
+  }
+
+  function clearCompactRailHoverClose(): void {
+    if (compactRailHoverCloseTimer === null) return;
+    window.clearTimeout(compactRailHoverCloseTimer);
+    compactRailHoverCloseTimer = null;
+  }
+
+  function clearCompactRailHoverOpen(): void {
+    if (compactRailHoverOpenTimer === null) return;
+    window.clearTimeout(compactRailHoverOpenTimer);
+    compactRailHoverOpenTimer = null;
+  }
+
+  function setCompactThreadsRailOpen(open: boolean, opts?: { focus?: boolean }): void {
+    clearCompactRailHoverOpen();
+    clearCompactRailHoverClose();
+    compactThreadsRailOpen = isCompactWorkspace() && open;
+    if (!compactThreadsRailOpen) compactRailHoverOpen = false;
+    if (compactThreadsRailOpen) {
+      reviewColCollapsed = true;
+      planColCollapsed = true;
+      applyReviewColState();
+      if (environmentPanelOpen) setEnvironmentPanelOpen(false, { persist: false });
+    }
+    applyThreadsRailState();
+    if (compactThreadsRailOpen) {
+      rebuildThreadsList();
+      if (opts?.focus !== false) {
+        window.requestAnimationFrame(() => threadsNew.focus({ preventScroll: true }));
+      }
+    }
+  }
+
+  function scheduleCompactRailHoverClose(): void {
+    if (!compactRailHoverOpen) return;
+    clearCompactRailHoverClose();
+    compactRailHoverCloseTimer = window.setTimeout(() => {
+      compactRailHoverCloseTimer = null;
+      if (!compactRailHoverOpen || threadsPage.contains(document.activeElement)) return;
+      setCompactThreadsRailOpen(false);
+    }, 100);
+  }
+
+  const onCompactRailPointerMove = (event: PointerEvent) => {
+    compactRailLastPointerX = event.clientX;
+  };
+  const onCompactRailPointerExit = () => {
+    compactRailLastPointerX = null;
+    clearCompactRailHoverOpen();
+  };
+  const onCompactRailEdgeEnter = (event: PointerEvent) => {
+    if (!isCompactWorkspace()) return;
+    if (!(event.relatedTarget instanceof Node) || !root.contains(event.relatedTarget)) return;
+    if (compactRailLastPointerX === null || event.clientX >= compactRailLastPointerX) return;
+    clearCompactRailHoverOpen();
+    clearCompactRailHoverClose();
+    compactRailHoverOpenTimer = window.setTimeout(() => {
+      compactRailHoverOpenTimer = null;
+      if (!isCompactWorkspace()) return;
+      compactRailHoverOpen = true;
+      setCompactThreadsRailOpen(true, { focus: false });
+    }, COMPACT_RAIL_HOVER_OPEN_DELAY_MS);
+  };
+  const onCompactRailEdgeLeave = (event: PointerEvent) => {
+    clearCompactRailHoverOpen();
+    if (event.relatedTarget instanceof Node && threadsPage.contains(event.relatedTarget)) return;
+    scheduleCompactRailHoverClose();
+  };
+  const onCompactRailPointerEnter = () => {
+    clearCompactRailHoverOpen();
+    clearCompactRailHoverClose();
+  };
+  const onCompactRailPointerLeave = (event: PointerEvent) => {
+    if (event.relatedTarget instanceof Node && compactRailHoverTarget.contains(event.relatedTarget)) return;
+    scheduleCompactRailHoverClose();
+  };
+  compactRailHoverTarget.addEventListener('pointerenter', onCompactRailEdgeEnter);
+  compactRailHoverTarget.addEventListener('pointerleave', onCompactRailEdgeLeave);
+  threadsPage.addEventListener('pointerenter', onCompactRailPointerEnter);
+  threadsPage.addEventListener('pointerleave', onCompactRailPointerLeave);
+  root.addEventListener('pointermove', onCompactRailPointerMove, { passive: true });
+  root.addEventListener('pointerleave', onCompactRailPointerExit);
 
   function setThreadsRailCollapsed(collapsed: boolean): void {
     threadsRailCollapsed = collapsed;
@@ -2380,15 +2511,51 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   function setReviewColCollapsed(collapsed: boolean): void {
     reviewColCollapsed = collapsed;
-    if (!collapsed) planColCollapsed = true;
+    if (!collapsed) {
+      planColCollapsed = true;
+      if (isCompactWorkspace()) setCompactThreadsRailOpen(false);
+    }
     applyReviewColState();
   }
 
   function setPlanColCollapsed(collapsed: boolean): void {
     planColCollapsed = collapsed;
-    if (!collapsed) reviewColCollapsed = true;
+    if (!collapsed) {
+      reviewColCollapsed = true;
+      if (isCompactWorkspace()) setCompactThreadsRailOpen(false);
+    }
     applyReviewColState();
   }
+
+  function dismissCompactDrawers(target: Node): void {
+    if (!isCompactWorkspace()) return;
+
+    const threadsOwnFocus = threadsPage.contains(target)
+      || workspaceThreadsBtn.contains(target)
+      || threadsBtn.contains(target);
+    if (compactThreadsRailOpen && !threadsOwnFocus) setCompactThreadsRailOpen(false);
+
+    const environmentOwnFocus = environmentPanel.contains(target) || environmentToggle.contains(target);
+    if (environmentPanelOpen && !environmentOwnFocus) {
+      setEnvironmentPanelOpen(false, { persist: false });
+    }
+
+    const detailOwnFocus = reviewColumn.contains(target) || planColumn.contains(target);
+    if (root.classList.contains('ag-detail-drawer-open') && !detailOwnFocus) {
+      reviewColCollapsed = true;
+      planColCollapsed = true;
+      applyReviewColState();
+    }
+  }
+
+  const onCompactDrawerPointerDown = (event: PointerEvent) => {
+    dismissCompactDrawers(event.target as Node);
+  };
+  const onCompactDrawerFocusIn = (event: FocusEvent) => {
+    dismissCompactDrawers(event.target as Node);
+  };
+  document.addEventListener('pointerdown', onCompactDrawerPointerDown);
+  document.addEventListener('focusin', onCompactDrawerFocusIn);
 
   function syncComposerOverlay(): void {
     const hasPlanRestore = !fullscreen && planMinimized && activePlan !== null;
@@ -3569,8 +3736,44 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   setCollapsed(false, { recenter: false });
 
   // ── 배치: #editor-area ↔ #status-bar 사이에 맞춘다 ────
+  function updateComposerCompactLayout(): void {
+    const compact = !fullscreen
+      && root.clientWidth > 0
+      && root.clientWidth <= COMPOSER_COMPACT_WIDTH_PX;
+    root.classList.toggle('ag-composer-compact', compact);
+  }
+
+  const rootResizeObserver = typeof ResizeObserver === 'function'
+    ? new ResizeObserver(updateComposerCompactLayout)
+    : null;
+  rootResizeObserver?.observe(root);
+
   function measure(): void {
-    root.classList.toggle('ag-workspace-compact', fullscreen && window.innerWidth <= 960);
+    updateComposerCompactLayout();
+    const nextWorkspaceCompact = fullscreen && window.innerWidth <= 960;
+    const enteringCompact = nextWorkspaceCompact && !workspaceCompact;
+    workspaceCompact = nextWorkspaceCompact;
+    root.classList.toggle('ag-workspace-compact', workspaceCompact);
+    if (enteringCompact) {
+      compactThreadsRailOpen = false;
+      compactRailHoverOpen = false;
+      clearCompactRailHoverOpen();
+      clearCompactRailHoverClose();
+      reviewColCollapsed = true;
+      planColCollapsed = true;
+      if (environmentPanelOpen) setEnvironmentPanelOpen(false, { persist: false });
+      applyReviewColState();
+    } else if (!workspaceCompact) {
+      compactThreadsRailOpen = false;
+      compactRailHoverOpen = false;
+      clearCompactRailHoverOpen();
+      clearCompactRailHoverClose();
+      if (environmentPanelOpen !== desktopEnvironmentPanelOpen) {
+        environmentPanelOpen = desktopEnvironmentPanelOpen;
+        applyEnvironmentPanelState();
+      }
+    }
+    applyThreadsRailState();
     // 전체 화면은 도구 모음·상태바까지 덮는다 — 인라인 배치를 걷어낸다.
     // 접혀 돌아가는 동안(ag-fs-to)에도 전체 화면 기준을 유지한다.
     if (fullscreen || root.classList.contains('ag-fs-to')) {
@@ -4456,6 +4659,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     e.stopPropagation();
     // 전체 화면에서는 페이지 전환이 아니라 레일 접기 토글이다.
     if (fullscreen) {
+      if (isCompactWorkspace()) {
+        compactRailHoverOpen = false;
+        setCompactThreadsRailOpen(!compactThreadsRailOpen);
+        return;
+      }
       setThreadsRailCollapsed(!threadsRailCollapsed);
       return;
     }
@@ -4470,6 +4678,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   threadsPage.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       e.preventDefault();
+      if (isCompactWorkspace()) {
+        setCompactThreadsRailOpen(false);
+        workspaceThreadsBtn.focus();
+        return;
+      }
       setThreadsPanelOpen(false);
       threadsBtn.focus();
     }
@@ -5862,7 +6075,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     rebuildReview();
     if (fullscreen) {
       setPlanColCollapsed(false);
-      setEnvironmentPanelOpen(false);
+      setEnvironmentPanelOpen(false, { persist: !isCompactWorkspace() });
     } else {
       setPlanMinimized(false);
     }
@@ -6368,6 +6581,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       messagesMutationObserver?.disconnect();
       messagesResizeObserver?.disconnect();
       dockResizeObserver?.disconnect();
+      rootResizeObserver?.disconnect();
       messages.removeEventListener('scroll', onMessagesScroll);
       messages.removeEventListener('wheel', onMessagesWheel);
       messages.removeEventListener('touchstart', onMessagesTouchStart);
@@ -6384,7 +6598,17 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         deferredVersionsOpenTimer = null;
       }
       window.removeEventListener('resize', measure);
+      clearCompactRailHoverOpen();
+      clearCompactRailHoverClose();
+      compactRailHoverTarget.removeEventListener('pointerenter', onCompactRailEdgeEnter);
+      compactRailHoverTarget.removeEventListener('pointerleave', onCompactRailEdgeLeave);
+      threadsPage.removeEventListener('pointerenter', onCompactRailPointerEnter);
+      threadsPage.removeEventListener('pointerleave', onCompactRailPointerLeave);
+      root.removeEventListener('pointermove', onCompactRailPointerMove);
+      root.removeEventListener('pointerleave', onCompactRailPointerExit);
       document.removeEventListener('pointerdown', onDocPointerDown);
+      document.removeEventListener('pointerdown', onCompactDrawerPointerDown);
+      document.removeEventListener('focusin', onCompactDrawerFocusIn);
       document.removeEventListener('keydown', onDocKeyDown);
       cancelFsMotionTimers();
       endSidebarResize();

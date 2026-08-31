@@ -3,7 +3,7 @@
    ================================================================ */
 #style-bar {
   display: flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   min-height: 38px;
   align-items: center;
   align-content: center;
@@ -15,10 +15,8 @@
   flex-shrink: 0;
   white-space: nowrap;
   font-size: var(--font-size-base);
-  height: 38px;
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: thin;
+  height: auto;
+  overflow: visible;
 }
 
 /* Google Docs 스타일: 서식 바 우측에서 위 도구 상자 접기/펼치기 */
@@ -75,6 +73,7 @@
 
 .sb-command-band {
   gap: 0;
+  flex-shrink: 0;
 }
 
 .sb-command-group {
@@ -94,6 +93,7 @@
   flex-direction: row;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
   padding: 0 6px;
   border-right: 1px solid var(--ui-border);
 }
