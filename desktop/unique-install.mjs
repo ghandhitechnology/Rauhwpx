@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import { rauCreditsUrl } from '../rhwp/rhwp-agent/rau-credits-client.mjs';
@@ -50,6 +50,7 @@ export async function loadOrCreateUniqueInstallState(filePath, {
   mkdirImpl = mkdir,
   writeFileImpl = writeFile,
   renameImpl = rename,
+  rmImpl = rm,
   randomUUIDImpl = randomUUID,
 } = {}) {
   try {
@@ -79,6 +80,7 @@ export async function loadOrCreateUniqueInstallState(filePath, {
     mkdirImpl,
     writeFileImpl,
     renameImpl,
+    rmImpl,
   });
   return created;
 }
@@ -87,12 +89,18 @@ export async function writeUniqueInstallState(filePath, state, {
   mkdirImpl = mkdir,
   writeFileImpl = writeFile,
   renameImpl = rename,
+  rmImpl = rm,
 } = {}) {
   const directory = dirname(filePath);
   await mkdirImpl(directory, { recursive: true });
-  const temp = `${filePath}.tmp`;
-  await writeFileImpl(temp, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
-  await renameImpl(temp, filePath);
+  const temp = `${filePath}.tmp-${process.pid}-${randomUUID()}`;
+  try {
+    await writeFileImpl(temp, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
+    await renameImpl(temp, filePath);
+  } catch (error) {
+    await rmImpl(temp, { force: true }).catch(() => {});
+    throw error;
+  }
 }
 
 async function readJson(fetchImpl, url, init, timeoutMs) {
@@ -136,6 +144,7 @@ export async function reportUniqueInstall({
   mkdirImpl = mkdir,
   writeFileImpl = writeFile,
   renameImpl = rename,
+  rmImpl = rm,
   randomUUIDImpl = randomUUID,
   now = Date.now,
 } = {}) {
@@ -157,6 +166,7 @@ export async function reportUniqueInstall({
       mkdirImpl,
       writeFileImpl,
       renameImpl,
+      rmImpl,
       randomUUIDImpl,
       now,
     });
@@ -180,6 +190,7 @@ async function reportUniqueInstallInner({
   mkdirImpl,
   writeFileImpl,
   renameImpl,
+  rmImpl,
   randomUUIDImpl,
   now,
 }) {
@@ -190,6 +201,7 @@ async function reportUniqueInstallInner({
       mkdirImpl,
       writeFileImpl,
       renameImpl,
+      rmImpl,
       randomUUIDImpl,
     });
   } catch (error) {
@@ -242,6 +254,7 @@ async function reportUniqueInstallInner({
       mkdirImpl,
       writeFileImpl,
       renameImpl,
+      rmImpl,
     });
     return snapshotFromBody(posted.body, origin, true);
   } catch {
