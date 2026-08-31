@@ -44,6 +44,12 @@ async function targetIsDirectory(targetPath, fsApi) {
   }
 }
 
+function directoryReplaceError(targetPath) {
+  const error = new Error(`Refusing to replace directory ${targetPath}`);
+  error.code = 'EISDIR';
+  return error;
+}
+
 /** Replace a file without relying on Windows rename-over-existing behavior. */
 export async function replaceFileAtomically(
   tempPath,
@@ -55,12 +61,15 @@ export async function replaceFileAtomically(
   // rename(file, dir) fails; without this check a directory named like the
   // target would be renamed to `.previous-write` and the write would publish.
   if (await targetIsDirectory(targetPath, fsApi)) {
-    const error = new Error(`Refusing to replace directory ${targetPath}`);
-    error.code = 'EISDIR';
-    throw error;
+    throw directoryReplaceError(targetPath);
   }
   const previousPath = `${targetPath}.previous-write`;
   await recoverInterruptedFileReplacement(targetPath, { platform, fsApi });
+  // Recovery can restore a directory that was left at `.previous-write`.
+  // Re-check before the two-step rename so that directory is not moved aside.
+  if (await targetIsDirectory(targetPath, fsApi)) {
+    throw directoryReplaceError(targetPath);
+  }
   await retryLockedOperation(() => fsApi.rm(previousPath, { force: true }), { platform });
   let moved = false;
   try {

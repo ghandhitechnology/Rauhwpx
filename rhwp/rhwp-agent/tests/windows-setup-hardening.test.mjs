@@ -87,6 +87,25 @@ test('Windows file replacement refuses to move a directory target aside', async 
   await assert.rejects(fs.access(`${target}.previous-write`), { code: 'ENOENT' });
 });
 
+test('Windows replacement recovery does not publish over a restored directory backup', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-file-replace-dir-recovery-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const target = path.join(root, 'state.json');
+  const temp = path.join(root, 'state.tmp');
+  const previous = `${target}.previous-write`;
+  await fs.mkdir(previous);
+  await fs.writeFile(path.join(previous, 'inside.txt'), 'keep');
+  await fs.writeFile(temp, 'new');
+
+  await assert.rejects(
+    replaceFileAtomically(temp, target, { platform: 'win32' }),
+    { code: 'EISDIR' },
+  );
+  assert.equal(await fs.readFile(path.join(target, 'inside.txt'), 'utf8'), 'keep');
+  await assert.rejects(fs.access(previous), { code: 'ENOENT' });
+  assert.equal(await fs.readFile(temp, 'utf8'), 'new');
+});
+
 test('a stale Windows backup cleanup cannot turn a committed replacement into failure', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-file-replace-cleanup-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
