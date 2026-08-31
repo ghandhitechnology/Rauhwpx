@@ -2,13 +2,28 @@ import type { CloudController } from './desktop-cloud.ts';
 import type {
   CloudDisplayFrame,
   CloudDisplayUnavailableReason,
+  CloudSessionScope,
   CloudSessionState,
+  CloudSnapshot,
 } from './types.ts';
 
 export type WorkspaceMode = 'local' | 'cloud';
 
 export function canSelectCloudWorkspace(mode: WorkspaceMode, localTurnRunning: boolean): boolean {
   return mode === 'cloud' || !localTurnRunning;
+}
+
+export function shouldShowCloudWorkspaceSwitch(
+  snapshot: CloudSnapshot,
+  scope: Pick<CloudSessionScope, 'threadId' | 'documentId'>,
+): boolean {
+  if (!snapshot.available) return false;
+  if (snapshot.account?.signedIn === true) return true;
+  return snapshot.sessions.some((session) => (
+    scope.documentId
+      ? session.documentId === scope.documentId
+      : session.threadId === scope.threadId
+  ));
 }
 
 export type WorkspaceExecutionLock =

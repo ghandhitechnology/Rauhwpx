@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 const sidebar = readFileSync(new URL('../src/ui/agent-sidebar/index.ts', import.meta.url), 'utf8');
+const sidebarCss = readFileSync(new URL('../src/ui/agent-sidebar/agent-sidebar.css', import.meta.url), 'utf8');
 const cloudUi = readFileSync(new URL('../src/ui/agent-sidebar/cloud-ui.ts', import.meta.url), 'utf8');
 const cloudCss = readFileSync(new URL('../src/ui/agent-sidebar/cloud-ui.css', import.meta.url), 'utf8');
 const onboarding = readFileSync(new URL('../src/ui/agent-sidebar/cloud-onboarding.ts', import.meta.url), 'utf8');
@@ -39,6 +40,9 @@ test('cloud action is available in sidebar and fullscreen headers', () => {
   assert.match(onboardingCss, /prefers-reduced-motion:\s*reduce/);
   assert.match(cloudUi, /sidebarButton\.hidden = !snapshot\.available/);
   assert.match(cloudUi, /workspaceButton\.hidden = !snapshot\.available/);
+  assert.match(cloudUi, /onWorkspaceSwitchVisibilityChange\([\s\S]*shouldShowCloudWorkspaceSwitch/);
+  assert.match(sidebar, /onWorkspaceSwitchVisibilityChange:[\s\S]*workspaceModeSwitch\.hidden = !visible/);
+  assert.match(sidebarCss, /\.ag-workspace-mode-switch\[hidden\][\s\S]*display:\s*none/);
   assert.match(cloudUi, /aria-controls', 'ag-cloud-panel/);
   assert.match(cloudUi, /closePanel\(true\)/);
   assert.match(cloudUi, /const focusTrigger = panelTrigger \?\? sidebarButton/);

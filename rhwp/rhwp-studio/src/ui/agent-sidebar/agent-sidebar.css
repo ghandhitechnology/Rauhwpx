@@ -5280,6 +5280,10 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   background: var(--ag-bg-2);
 }
 
+.ag-workspace-mode-switch[hidden] {
+  display: none;
+}
+
 .ag-workspace-mode-option {
   min-height: 24px;
   padding: 0 8px;

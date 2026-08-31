@@ -14,7 +14,11 @@ import type {
   CloudSnapshot,
   CloudTakeoverPayload,
 } from '../../cloud/types.ts';
-import type { CloudWorkspaceBinding, WorkspaceExecutionLock } from '../../cloud/workspace.ts';
+import {
+  shouldShowCloudWorkspaceSwitch,
+  type CloudWorkspaceBinding,
+  type WorkspaceExecutionLock,
+} from '../../cloud/workspace.ts';
 import {
   runResultAuthorityTransition,
   runTakeoverAuthorityTransition,
@@ -129,6 +133,7 @@ export interface CloudAgentUiDeps {
   onRequestTransfer(): void;
   onCancelPendingTransfer(): void;
   getScope(): CloudSessionScope;
+  onWorkspaceSwitchVisibilityChange(visible: boolean): void;
   onCloseSettings(): void;
   onLeaseChange(cloudOwned: boolean, sessionId: string | null): void;
   isCloudMode(): boolean;
@@ -815,6 +820,9 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   }
 
   function renderButtons(): void {
+    deps.onWorkspaceSwitchVisibilityChange(
+      shouldShowCloudWorkspaceSwitch(snapshot, selectedScope()),
+    );
     sidebarButton.hidden = !snapshot.available;
     workspaceButton.hidden = !snapshot.available;
     if (!snapshot.available && panelOpen) closePanel(false);
