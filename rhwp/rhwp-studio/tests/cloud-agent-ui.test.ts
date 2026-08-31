@@ -21,6 +21,8 @@ test('cloud action is available in sidebar and fullscreen headers', () => {
   assert.match(cloudUi, /ag-cloud-session-select/);
   assert.match(cloudUi, /selectedSessionId/);
   assert.match(cloudUi, /createCloudOnboarding/);
+  assert.match(sidebar, /loginAccount: \(\) => bridge\.loginRauAccount\(\)/);
+  assert.match(sidebar, /cloudUi\.handleAccountEvent/);
   assert.match(onboarding, /내 VPS에서 Cloud 시작하기/);
   assert.match(onboarding, /Tailscale HTTPS 포트/);
   assert.match(onboarding, /async function checkConnection[\s\S]*controller\.testProfile\(draft\)/);
@@ -57,7 +59,10 @@ test('Raucloud stays visible but locks account-scoped starts without locking sel
   assert.match(cloudUi, /sidebarButton\.hidden = !snapshot\.available/);
   assert.match(cloudUi, /Raucloud를 사용하려면 로그인해야 합니다/);
   assert.match(onboarding, /option\.disabled = disabled/);
-  assert.match(onboarding, /primary\.disabled = mode === 'app-hosted' && Boolean\(appHostedLock\)/);
+  assert.match(onboarding, /Boolean\(raucloudHardLock\(snapshot\)\)/);
+  assert.match(onboarding, /loginRequired && \(accountAuthPending \|\| accountBusy \|\| !deps\.loginAccount\)/);
+  assert.match(onboarding, /accountAuthPending \|\| accountBusy \? '로그인 확인 중…' : '로그인'/);
+  assert.match(onboarding, /window\.open\(next\.authUrl, '_blank', 'noopener,noreferrer'\)/);
   assert.match(onboarding, /'내 서버 사용'/);
   assert.match(onboarding, /내 서버는 로그인 없이 연결할 수 있습니다/);
 });

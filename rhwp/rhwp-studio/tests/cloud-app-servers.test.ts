@@ -382,6 +382,10 @@ test('the dialog offers both servers and only restorable sandbox actions', () =>
   assert.match(onboarding, /Cloud 서버 선택/);
   assert.match(onboarding, /Raucloud/);
   assert.match(onboarding, /내 서버 사용/);
+  assert.match(onboarding, /accountAuthPending \|\| accountBusy \? '로그인 확인 중…' : '로그인'/);
+  assert.match(onboarding, /justSignedIn && mode === 'app-hosted'\s*\n\s*\? '로그인됨'/);
+  assert.match(onboarding, /window\.open\(next\.authUrl, '_blank', 'noopener,noreferrer'\)/);
+  assert.match(cloudUi, /loginAccount: deps\.loginAccount/);
   assert.match(onboarding, /role', 'radiogroup'/);
   assert.match(onboarding, /dataset\.serverMode = mode/);
   assert.match(onboarding, /controller\.selectServerMode\(mode\)/);

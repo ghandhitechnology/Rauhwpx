@@ -1695,6 +1695,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   const cloudUi = createCloudAgentUi({
     controller: cloudController,
+    loginAccount: () => bridge.loginRauAccount(),
     onRequestTransfer: () => requestCloudTransfer(),
     onCancelPendingTransfer: () => cancelPendingCloudTransfer(),
     getScope: () => editorCloudScope.current(),
@@ -6332,6 +6333,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     // 설정 탭은 연결·프로바이더·사용량·문체 상태를 그대로 받아 그린다.
     settingsPanel.handleEvent(e);
     initialSetup?.handleEvent(e);
+    if (e.type === 'rau-account-status') {
+      cloudUi.handleAccountEvent({ signedIn: e.account.signedIn });
+    } else if (e.type === 'rau-account-error') {
+      cloudUi.handleAccountEvent({ signedIn: false, error: e.message });
+    }
     if (handlePlanningSidebarEvent(e)) return;
     switch (e.type) {
       case 'user-question-requested': {

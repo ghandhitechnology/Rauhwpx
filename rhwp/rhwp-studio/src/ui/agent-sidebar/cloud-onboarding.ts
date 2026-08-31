@@ -24,6 +24,8 @@ import { createIcon } from './icons.ts';
 
 export interface CloudOnboardingDeps {
   controller: CloudController;
+  loginAccount?: () => Promise<{ authUrl: string } | null>;
+  refreshSnapshot?: () => Promise<CloudSnapshot>;
   onRequestTransfer(): void;
   onCloseSettings(): void;
   onSetupStateChange(active: boolean): void;
@@ -33,6 +35,7 @@ export interface CloudOnboarding {
   settingsElement: HTMLElement;
   open(intent: CloudSetupIntent, trigger: HTMLElement): void;
   sync(snapshot: CloudSnapshot): void;
+  handleAccountEvent(event: { signedIn: boolean; error?: string }): void;
   setMutationLocked(locked: boolean): void;
   dispose(): void;
 }
@@ -72,6 +75,14 @@ function raucloudLock(snapshot: CloudSnapshot): string | null {
   }
 }
 
+function needsRaucloudLogin(snapshot: CloudSnapshot): boolean {
+  return snapshot.account?.raucloud.kind === 'logged-out';
+}
+
+function raucloudHardLock(snapshot: CloudSnapshot): string | null {
+  return needsRaucloudLogin(snapshot) ? null : raucloudLock(snapshot);
+}
+
 function desktopPlatform(): string {
   const bridge = (globalThis as { rhwpDesktop?: { platform?: string } }).rhwpDesktop;
   if (bridge?.platform) return bridge.platform;
@@ -92,6 +103,9 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
   let cachedHttpsEndpoint = '';
   let mutationLocked = false;
   let setupProgressTimer: ReturnType<typeof setInterval> | null = null;
+  let accountBusy = false;
+  let accountAuthPending = false;
+  let justSignedIn = false;
 
   const overlay = el('div', 'ag-cloud-setup-overlay');
   overlay.hidden = true;
@@ -466,6 +480,68 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     });
   }
 
+  async function startAccountLogin(): Promise<void> {
+    if (!deps.loginAccount || accountBusy || accountAuthPending) return;
+    accountBusy = true;
+    liveStatus.textContent = '브라우저에서 로그인을 마쳐 주세요.';
+    renderDialog();
+    try {
+      const next = await deps.loginAccount();
+      if (next?.authUrl) {
+        window.open(next.authUrl, '_blank', 'noopener,noreferrer');
+        accountAuthPending = true;
+        liveStatus.textContent = '브라우저에서 로그인을 마치면 이 화면에 반영됩니다.';
+      } else {
+        accountAuthPending = false;
+        liveStatus.textContent = '로그인을 시작하지 못했습니다.';
+      }
+    } catch (error) {
+      accountAuthPending = false;
+      liveStatus.textContent = error instanceof Error ? error.message : '로그인을 시작하지 못했습니다.';
+    } finally {
+      accountBusy = false;
+      if (!disposed) renderDialog();
+    }
+  }
+
+  function applySignedInSnapshot(next?: CloudSnapshot): void {
+    if (next) snapshot = next;
+    accountBusy = false;
+    accountAuthPending = false;
+    justSignedIn = true;
+    const email = snapshot.account?.account?.email;
+    liveStatus.textContent = email ? `${email}으로 로그인했습니다.` : '로그인했습니다.';
+    renderSettings();
+    if (visible) renderDialog();
+  }
+
+  function handleAccountEvent(event: { signedIn: boolean; error?: string }): void {
+    if (disposed) return;
+    if (event.error) {
+      accountBusy = false;
+      accountAuthPending = false;
+      liveStatus.textContent = event.error;
+      if (visible) renderDialog();
+      return;
+    }
+    if (!event.signedIn) {
+      accountBusy = false;
+      accountAuthPending = false;
+      justSignedIn = false;
+      if (visible) renderDialog();
+      return;
+    }
+    if (deps.refreshSnapshot) {
+      void deps.refreshSnapshot().then((next) => {
+        if (!disposed) applySignedInSnapshot(next);
+      }, () => {
+        if (!disposed) applySignedInSnapshot();
+      });
+      return;
+    }
+    applySignedInSnapshot();
+  }
+
   function openSandboxStep(draft: CloudProfileDraft, intent: CloudSetupIntent): void {
     const locked = raucloudLock(snapshot);
     if (locked) {
@@ -637,7 +713,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
               ? appHostedLock ?? `${provider.displayName} 사용 가능`
               : '이 빌드에서는 아직 사용할 수 없습니다'
             : '이 빌드에는 포함되지 않았습니다',
-          Boolean(appHostedLock),
+          Boolean(raucloudHardLock(snapshot)),
         ),
         serverOption(
           'self-hosted',
@@ -648,10 +724,23 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
         ),
       );
       body.appendChild(options);
-      const primary = button('계속', 'primary');
-      primary.disabled = mode === 'app-hosted' && Boolean(appHostedLock);
-      if (primary.disabled) primary.textContent = '계정 로그인 필요';
+      const loginRequired = mode === 'app-hosted' && needsRaucloudLogin(snapshot);
+      const hardLock = mode === 'app-hosted' ? raucloudHardLock(snapshot) : null;
+      const primary = button(
+        loginRequired
+          ? (accountAuthPending || accountBusy ? '로그인 확인 중…' : '로그인')
+          : justSignedIn && mode === 'app-hosted'
+            ? '로그인됨'
+            : '계속',
+        'primary',
+      );
+      primary.disabled = Boolean(hardLock)
+        || (loginRequired && (accountAuthPending || accountBusy || !deps.loginAccount));
       primary.addEventListener('click', () => {
+        if (loginRequired) {
+          void startAccountLogin();
+          return;
+        }
         if (mode === 'app-hosted') openSandboxStep(draft, intent);
         else setState({ kind: 'intro', draft, intent });
       });
@@ -1002,6 +1091,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
 
   function open(intent: CloudSetupIntent, nextTrigger: HTMLElement): void {
     if (mutationLocked) return;
+    if (!accountAuthPending) justSignedIn = false;
     trigger = nextTrigger;
     const preservedFailure = preserveOnOpen
       && (state?.kind === 'install-failed' || state?.kind === 'sandbox-failed');
@@ -1058,8 +1148,18 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
   return {
     settingsElement,
     open,
+    handleAccountEvent,
     sync(next) {
+      const previousLock = raucloudLock(snapshot);
+      const wasSignedIn = snapshot.account?.signedIn === true;
       snapshot = next;
+      if (next.account?.signedIn) {
+        accountAuthPending = false;
+        accountBusy = false;
+        if (!wasSignedIn) justSignedIn = true;
+      } else {
+        justSignedIn = false;
+      }
       const previous = state;
       const wasActive = operationActive(state);
       if (state) state = reconcileCloudSetupState(state, next);
@@ -1067,7 +1167,9 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       if (active !== wasActive) deps.onSetupStateChange(active);
       syncSetupProgressTimer();
       renderSettings();
-      if (visible && state !== previous) renderDialog();
+      const lockChanged = raucloudLock(snapshot) !== previousLock;
+      const signedInChanged = wasSignedIn !== (snapshot.account?.signedIn === true);
+      if (visible && (state !== previous || lockChanged || signedInChanged)) renderDialog();
     },
     setMutationLocked(locked) {
       mutationLocked = locked;

@@ -130,6 +130,7 @@ function sessionKindLabel(kind: CloudSnapshot['session']['kind']): string {
 
 export interface CloudAgentUiDeps {
   controller: CloudController;
+  loginAccount?: () => Promise<{ authUrl: string } | null>;
   onRequestTransfer(): void;
   onCancelPendingTransfer(): void;
   getScope(): CloudSessionScope;
@@ -180,6 +181,7 @@ export interface CloudAgentUi {
     target: CloudCommandTarget,
   ): Promise<void>;
   openSettings(): void;
+  handleAccountEvent(event: { signedIn: boolean; error?: string }): void;
   dispose(): void;
 }
 
@@ -273,6 +275,8 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
 
   const onboarding = createCloudOnboarding({
     controller: deps.controller,
+    loginAccount: deps.loginAccount,
+    refreshSnapshot: () => deps.controller.refresh(selectedScope()),
     onRequestTransfer: deps.onRequestTransfer,
     onCloseSettings: deps.onCloseSettings,
     onSetupStateChange: (active) => {
@@ -1069,6 +1073,9 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       void deps.controller.refresh(selectedScope()).catch((error) => {
         deps.onError(error instanceof Error ? error.message : String(error));
       });
+    },
+    handleAccountEvent(event) {
+      onboarding.handleAccountEvent(event);
     },
     dispose() {
       pendingTakeover?.state.transition.release();
