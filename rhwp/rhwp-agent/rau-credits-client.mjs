@@ -165,6 +165,8 @@ export function createRauCreditsClient({
               body?.message ?? body?.error ?? `Rau 크레딧 서버가 ${response.status} 을 돌려줬어요.`,
             );
             error.fromCreditsService = true;
+            error.status = response.status;
+            error.retryAfter = response.headers?.get?.('retry-after') ?? null;
             throw error;
           }
           return body;
