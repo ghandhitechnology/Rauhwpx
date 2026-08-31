@@ -787,6 +787,9 @@ export function createCreditsService({
           email: nextEmail,
           claimedAt: now(),
         };
+        // Bind the session before any paid provider mutation. The same
+        // principal can resume a durable provisioning intent after failure,
+        // while a different principal cannot consume the session.
       }
       return nextEmail;
     });
