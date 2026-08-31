@@ -282,6 +282,14 @@ impl HwpDocument {
         DocumentCore::from_bytes(data).map(|core| HwpDocument { core })
     }
 
+    pub fn from_local_file_bytes(data: &[u8]) -> Result<HwpDocument, HwpError> {
+        DocumentCore::from_local_file_bytes(data).map(|core| HwpDocument { core })
+    }
+
+    pub(crate) fn from_regenerated_bytes(data: &[u8]) -> Result<HwpDocument, HwpError> {
+        DocumentCore::from_regenerated_bytes(data).map(|core| HwpDocument { core })
+    }
+
     pub fn find_initial_column_def(paragraphs: &[Paragraph]) -> ColumnDef {
         DocumentCore::find_initial_column_def(paragraphs)
     }
@@ -427,6 +435,15 @@ impl HwpDocument {
         DocumentCore::from_bytes(data)
             .map(|core| HwpDocument { core })
             .map_err(|e| e.into())
+    }
+
+    /// Open bytes from one exact local file approved by the native host.
+    /// The host must consume its approval after this call.
+    #[wasm_bindgen(js_name = fromTrustedLocalFileBytes)]
+    pub fn from_trusted_local_file_bytes(data: &[u8]) -> Result<HwpDocument, JsValue> {
+        DocumentCore::from_local_file_bytes(data)
+            .map(|core| HwpDocument { core })
+            .map_err(|error| error.into())
     }
 
     /// 현재 파일/편집 세션 정체성을 유지한 채 문서 내용만 교체한다.
@@ -602,6 +619,45 @@ impl HwpDocument {
         renderer.show_control_codes = self.show_control_codes;
         renderer.set_scale(scale);
         renderer.render_page(&tree).map_err(JsValue::from)?;
+        Ok(())
+    }
+
+    /// 구역 첫 페이지에 요청한 머리말/꼬리말 정의를 가상 투영해 Canvas 2D로 렌더링한다.
+    ///
+    /// 일반 page tree cache와 pagination active target은 바꾸지 않는다. Studio는 결과 canvas를
+    /// 머리말/꼬리말 밴드에만 clip해 편집 중 비인쇄 overlay로 사용한다.
+    #[cfg(target_arch = "wasm32")]
+    #[wasm_bindgen(js_name = renderHeaderFooterEditPreviewToCanvas)]
+    pub fn render_header_footer_edit_preview_to_canvas(
+        &self,
+        page_num: u32,
+        section_idx: u32,
+        is_header: bool,
+        apply_to: u8,
+        canvas: &HtmlCanvasElement,
+        scale: f64,
+    ) -> Result<(), JsValue> {
+        use crate::renderer::web_canvas::WebCanvasRenderer;
+
+        let tree = self
+            .build_header_footer_edit_preview_tree(
+                page_num,
+                section_idx as usize,
+                is_header,
+                apply_to,
+            )
+            .map_err(JsValue::from)?;
+        let scale = normalize_canvas_scale(tree.root.bbox.width, tree.root.bbox.height, scale)
+            .map_err(JsValue::from_str)?;
+
+        canvas.set_width(scaled_canvas_extent(tree.root.bbox.width, scale));
+        canvas.set_height(scaled_canvas_extent(tree.root.bbox.height, scale));
+
+        let mut renderer = WebCanvasRenderer::new(canvas)?;
+        renderer.show_paragraph_marks = self.show_paragraph_marks;
+        renderer.show_control_codes = self.show_control_codes;
+        renderer.set_scale(scale);
+        renderer.render_tree(&tree);
         Ok(())
     }
 
@@ -1602,7 +1658,7 @@ impl HwpDocument {
 
     /// 머리말/꼬리말 문단 정보 조회
     ///
-    /// 반환: JSON `{"ok":true,"paraCount":N,"charCount":N}`
+    /// 반환: JSON `{"ok":true,"paraCount":N,"charCount":N,"text":"..."}`
     #[wasm_bindgen(js_name = getHeaderFooterParaInfo)]
     pub fn get_header_footer_para_info(
         &self,
@@ -1616,6 +1672,105 @@ impl HwpDocument {
             is_header,
             apply_to,
             hf_para_idx as usize,
+        )
+        .map_err(|e| e.into())
+    }
+
+    /// 머리말/꼬리말 선택 범위를 평문으로 원자 치환한다.
+    #[wasm_bindgen(js_name = replaceRangeInHeaderFooter)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn replace_range_in_header_footer(
+        &mut self,
+        section_idx: u32,
+        is_header: bool,
+        apply_to: u8,
+        start_hf_para_idx: u32,
+        start_char_offset: u32,
+        end_hf_para_idx: u32,
+        end_char_offset: u32,
+        replacement_text: &str,
+    ) -> Result<String, JsValue> {
+        self.replace_range_in_header_footer_native(
+            section_idx as usize,
+            is_header,
+            apply_to,
+            start_hf_para_idx as usize,
+            start_char_offset as usize,
+            end_hf_para_idx as usize,
+            end_char_offset as usize,
+            replacement_text,
+        )
+        .map_err(|e| e.into())
+    }
+
+    /// 머리말/꼬리말 선택 범위를 내부 클립보드에 복사한다.
+    #[wasm_bindgen(js_name = copySelectionInHeaderFooter)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn copy_selection_in_header_footer(
+        &mut self,
+        section_idx: u32,
+        is_header: bool,
+        apply_to: u8,
+        start_hf_para_idx: u32,
+        start_char_offset: u32,
+        end_hf_para_idx: u32,
+        end_char_offset: u32,
+    ) -> Result<String, JsValue> {
+        self.copy_selection_in_header_footer_native(
+            section_idx as usize,
+            is_header,
+            apply_to,
+            start_hf_para_idx as usize,
+            start_char_offset as usize,
+            end_hf_para_idx as usize,
+            end_char_offset as usize,
+        )
+        .map_err(|e| e.into())
+    }
+
+    /// 머리말/꼬리말 캐럿 위치의 글자 속성을 조회한다.
+    #[wasm_bindgen(js_name = getCharPropertiesInHeaderFooter)]
+    pub fn get_char_properties_in_header_footer(
+        &self,
+        section_idx: u32,
+        is_header: bool,
+        apply_to: u8,
+        hf_para_idx: u32,
+        char_offset: u32,
+    ) -> Result<String, JsValue> {
+        self.get_char_properties_in_header_footer_native(
+            section_idx as usize,
+            is_header,
+            apply_to,
+            hf_para_idx as usize,
+            char_offset as usize,
+        )
+        .map_err(|e| e.into())
+    }
+
+    /// 머리말/꼬리말 선택 범위에 글자 서식을 적용한다.
+    #[wasm_bindgen(js_name = applyCharFormatInHeaderFooter)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn apply_char_format_in_header_footer(
+        &mut self,
+        section_idx: u32,
+        is_header: bool,
+        apply_to: u8,
+        start_hf_para_idx: u32,
+        start_char_offset: u32,
+        end_hf_para_idx: u32,
+        end_char_offset: u32,
+        props_json: &str,
+    ) -> Result<String, JsValue> {
+        self.apply_char_format_in_header_footer_native(
+            section_idx as usize,
+            is_header,
+            apply_to,
+            start_hf_para_idx as usize,
+            start_char_offset as usize,
+            end_hf_para_idx as usize,
+            end_char_offset as usize,
+            props_json,
         )
         .map_err(|e| e.into())
     }
@@ -2482,7 +2637,7 @@ impl HwpDocument {
 
     /// 머리말/꼬리말 내 커서 위치의 픽셀 좌표를 반환한다.
     ///
-    /// preferred_page: 선호 페이지 (더블클릭한 페이지). -1이면 첫 번째 발견 페이지 사용.
+    /// preview_page_hint: 대표 편집 페이지. -1이면 첫 번째 발견 페이지 사용.
     /// 반환: JSON `{"pageIndex":N,"x":F,"y":F,"height":F}`
     #[wasm_bindgen(js_name = getCursorRectInHeaderFooter)]
     pub fn get_cursor_rect_in_header_footer(
@@ -2492,7 +2647,7 @@ impl HwpDocument {
         apply_to: u8,
         hf_para_idx: u32,
         char_offset: u32,
-        preferred_page: i32,
+        preview_page_hint: i32,
     ) -> Result<String, JsValue> {
         self.get_cursor_rect_in_header_footer_native(
             section_idx as usize,
@@ -2500,7 +2655,34 @@ impl HwpDocument {
             apply_to,
             hf_para_idx as usize,
             char_offset as usize,
-            preferred_page,
+            preview_page_hint,
+        )
+        .map_err(|e| e.into())
+    }
+
+    /// 요청한 한 페이지의 머리말/꼬리말 선택 사각형을 반환한다.
+    #[wasm_bindgen(js_name = getSelectionRectsInHeaderFooter)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn get_selection_rects_in_header_footer(
+        &self,
+        section_idx: u32,
+        is_header: bool,
+        apply_to: u8,
+        page_num: u32,
+        start_hf_para_idx: u32,
+        start_char_offset: u32,
+        end_hf_para_idx: u32,
+        end_char_offset: u32,
+    ) -> Result<String, JsValue> {
+        self.get_selection_rects_in_header_footer_native(
+            section_idx as usize,
+            is_header,
+            apply_to,
+            page_num,
+            start_hf_para_idx as usize,
+            start_char_offset as usize,
+            end_hf_para_idx as usize,
+            end_char_offset as usize,
         )
         .map_err(|e| e.into())
     }
@@ -2528,6 +2710,13 @@ impl HwpDocument {
             .map_err(|e| e.into())
     }
 
+    /// 머리말/꼬리말 정의가 속한 구역의 대표 편집 페이지(구역 첫 페이지)를 반환한다.
+    #[wasm_bindgen(js_name = getHeaderFooterPreviewPage)]
+    pub fn get_header_footer_preview_page(&self, section_idx: u32) -> Result<String, JsValue> {
+        self.get_header_footer_preview_page_native(section_idx as usize)
+            .map_err(|e| e.into())
+    }
+
     /// 머리말/꼬리말 내부 텍스트 히트테스트.
     ///
     /// 편집 모드에서 클릭한 좌표의 문단·문자 위치를 반환.
@@ -2542,6 +2731,28 @@ impl HwpDocument {
     ) -> Result<String, JsValue> {
         self.hit_test_in_header_footer_native(page_num, is_header, x, y)
             .map_err(|e| e.into())
+    }
+
+    /// 대표 편집 페이지에서 명시한 HF target으로 내부 텍스트를 히트테스트한다.
+    #[wasm_bindgen(js_name = hitTestInHeaderFooterTarget)]
+    pub fn hit_test_in_header_footer_target(
+        &self,
+        page_num: u32,
+        section_idx: u32,
+        is_header: bool,
+        apply_to: u8,
+        x: f64,
+        y: f64,
+    ) -> Result<String, JsValue> {
+        self.hit_test_in_header_footer_target_native(
+            page_num,
+            section_idx as usize,
+            is_header,
+            apply_to,
+            x,
+            y,
+        )
+        .map_err(|e| e.into())
     }
 
     /// 머리말/꼬리말 문단의 문단 속성을 조회한다.

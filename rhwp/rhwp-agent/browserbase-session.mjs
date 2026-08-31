@@ -1,15 +1,25 @@
-import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport, getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js';
 
-const require = createRequire(import.meta.url);
-const SIDECAR_CLI = require.resolve('@browserbasehq/mcp/cli.js');
+import { boundBrowserbaseResultContent } from './browserbase-result.mjs';
+
+const SIDECAR_CLI = fileURLToPath(new URL('./browserbase-sidecar.mjs', import.meta.url));
 const REQUIRED_TOOLS = Object.freeze(['start', 'end', 'navigate', 'act', 'observe', 'extract']);
-const MAX_RESULT_TEXT_BYTES = 50 * 1024;
 
 function browserError(code, message) {
   const error = new Error(message);
   error.code = code;
+  return error;
+}
+
+function cleanupUncertainError(cause = null) {
+  const error = browserError(
+    'BROWSERBASE_CLEANUP_UNCERTAIN',
+    'The previous Browserbase sidecar or remote session could not be confirmed closed. Restart the app before using Browserbase again.',
+  );
+  if (cause) error.cause = cause;
+  error.processCleanupUncertain = true;
   return error;
 }
 
@@ -32,39 +42,17 @@ function sidecarEnvironment(source) {
       `Browserbase is not configured. Set ${missing.join(', ')} in the rhwp-agent environment and restart the hub.`,
     );
   }
-  return {
+  const env = {
     ...getDefaultEnvironment(),
     BROWSERBASE_API_KEY: String(source.BROWSERBASE_API_KEY),
     BROWSERBASE_PROJECT_ID: String(source.BROWSERBASE_PROJECT_ID),
     GEMINI_API_KEY: String(source.GEMINI_API_KEY),
   };
-}
-
-function boundResultContent(content) {
-  let remaining = MAX_RESULT_TEXT_BYTES;
-  let truncated = false;
-  const bounded = [];
-  for (const block of content ?? []) {
-    if (block?.type !== 'text') {
-      bounded.push(block);
-      continue;
-    }
-    const bytes = Buffer.from(String(block.text ?? ''), 'utf8');
-    if (bytes.length <= remaining) {
-      bounded.push(block);
-      remaining -= bytes.length;
-      continue;
-    }
-    if (remaining > 0) {
-      bounded.push({ ...block, text: bytes.subarray(0, remaining).toString('utf8') });
-      remaining = 0;
-    }
-    truncated = true;
+  if (source.BROWSERBASE_MODEL_NAME) {
+    env.BROWSERBASE_MODEL_NAME = String(source.BROWSERBASE_MODEL_NAME);
   }
-  if (truncated) {
-    bounded.push({ type: 'text', text: `Browserbase text output truncated at ${MAX_RESULT_TEXT_BYTES} bytes.` });
-  }
-  return bounded;
+  if (source.ELECTRON_RUN_AS_NODE === '1') env.ELECTRON_RUN_AS_NODE = '1';
+  return env;
 }
 
 function resultText(result) {
@@ -76,12 +64,19 @@ function resultText(result) {
 
 /** Hub-owned, lazy Browserbase MCP sidecar and logical browser session. */
 export class BrowserbaseSession {
-  /** @param {{env?: NodeJS.ProcessEnv, startupTimeoutMs?: number, callTimeoutMs?: number, log?: (message: string) => void}} [options] */
+  /** @param {{env?: NodeJS.ProcessEnv, startupTimeoutMs?: number, callTimeoutMs?: number, log?: (message: string) => void, execPath?: string, sidecarPath?: string, clientFactory?: () => Client, transportFactory?: (options: object) => StdioClientTransport}} [options] */
   constructor(options = {}) {
     this.env = options.env ?? process.env;
     this.startupTimeoutMs = options.startupTimeoutMs ?? 20_000;
     this.callTimeoutMs = options.callTimeoutMs ?? 120_000;
     this.log = options.log ?? (() => {});
+    this.execPath = options.execPath ?? process.execPath;
+    this.sidecarPath = options.sidecarPath ?? SIDECAR_CLI;
+    this.clientFactory = options.clientFactory ?? (() => new Client({
+      name: 'rhwp-agent-browserbase-proxy',
+      version: '1.0.0',
+    }));
+    this.transportFactory = options.transportFactory ?? ((params) => new StdioClientTransport(params));
     /** @type {Client | null} */
     this.client = null;
     /** @type {StdioClientTransport | null} */
@@ -90,7 +85,19 @@ export class BrowserbaseSession {
     this.connecting = null;
     /** @type {string | null} */
     this.chatId = null;
+    // Once any end/client/transport cleanup is unconfirmed, later no-op
+    // cleanup calls must keep reporting false so the owning session root and
+    // hub process-tree identity are retained through shutdown.
+    this.cleanupConfirmed = true;
+    // Keep the exact client/transport objects alive after an unconfirmed close.
+    // The transport owns the sidecar child identity needed by bounded shutdown;
+    // fail-closed reconnects keep this list bounded to one failed generation.
+    this.uncertainResources = [];
     this.queue = Promise.resolve();
+  }
+
+  retainUncertainResources(client, transport, chatId = null) {
+    this.uncertainResources.push({ client, transport, chatId });
   }
 
   enqueue(operation) {
@@ -108,21 +115,22 @@ export class BrowserbaseSession {
   }
 
   async ensureConnected() {
+    if (!this.cleanupConfirmed) throw cleanupUncertainError();
     if (this.client) return this.client;
     if (this.connecting) return this.connecting;
     this.connecting = (async () => {
       const env = sidecarEnvironment(this.env);
-      const transport = new StdioClientTransport({
-        command: process.execPath,
-        args: ['--max-old-space-size=512', SIDECAR_CLI],
+      const transport = this.transportFactory({
+        command: this.execPath,
+        args: ['--max-old-space-size=512', this.sidecarPath],
         env,
         stderr: 'pipe',
       });
       transport.stderr?.on('data', (chunk) => {
-        const message = chunk.toString().trim();
+        const message = chunk.toString().trim().slice(0, 8 * 1024);
         if (message) this.log(`[browserbase] ${message}`);
       });
-      const client = new Client({ name: 'rhwp-agent-browserbase-proxy', version: '1.0.0' });
+      const client = this.clientFactory();
       try {
         await withTimeout(client.connect(transport), this.startupTimeoutMs, 'Browserbase sidecar did not become ready in time');
         const listed = await withTimeout(client.listTools(), this.startupTimeoutMs, 'Browserbase sidecar health check timed out');
@@ -134,8 +142,15 @@ export class BrowserbaseSession {
         this.log('Browserbase sidecar ready');
         return client;
       } catch (error) {
-        try { await client.close(); } catch {}
-        try { await transport.close(); } catch {}
+        const cleanupResults = await Promise.allSettled([
+          withTimeout(client.close(), 5_000, 'Browserbase client cleanup timed out'),
+          withTimeout(transport.close(), 5_000, 'Browserbase transport cleanup timed out'),
+        ]);
+        if (cleanupResults.some((result) => result.status === 'rejected')) {
+          this.cleanupConfirmed = false;
+          this.retainUncertainResources(client, transport, this.chatId);
+        }
+        if (!this.cleanupConfirmed) throw cleanupUncertainError(error);
         if (error?.code) throw error;
         throw browserError('BROWSERBASE_START_FAILED', String(error?.message ?? error));
       }
@@ -153,7 +168,10 @@ export class BrowserbaseSession {
 
   async callNow(chatId, name, args = {}) {
     if (!REQUIRED_TOOLS.includes(name)) throw browserError('BROWSERBASE_TOOL_UNKNOWN', `Unknown Browserbase tool: ${name}`);
-    if (this.chatId && this.chatId !== chatId) await this.cleanupNow('chat changed');
+    if (this.chatId && this.chatId !== chatId) {
+      const cleaned = await this.cleanupNow('chat changed');
+      if (!cleaned) throw cleanupUncertainError();
+    }
     this.chatId = chatId;
     const client = await this.ensureConnected();
     let result;
@@ -165,21 +183,33 @@ export class BrowserbaseSession {
       );
     } catch (error) {
       if (error?.code === 'BROWSERBASE_TIMEOUT') {
-        await this.abortNow(`tool timeout: ${name}`);
+        const cleaned = await this.abortNow(`tool timeout: ${name}`);
+        if (!cleaned) throw cleanupUncertainError(error);
         throw browserError(
           'BROWSERBASE_TIMEOUT',
           `${error.message}. The remote action may already have applied; start a fresh session and observe state before retrying.`,
         );
       }
+      const cleaned = await this.abortNow(`tool failure: ${name}`);
+      if (!cleaned) throw cleanupUncertainError(error);
       if (error?.code) throw error;
       throw browserError('BROWSERBASE_TOOL_FAILED', String(error?.message ?? error));
     }
     if (result?.isError) {
-      throw browserError('BROWSERBASE_TOOL_FAILED', resultText(result) || `Browserbase ${name} failed`);
+      const message = resultText(result) || `Browserbase ${name} failed`;
+      const remoteCleanupUncertain = message.includes('BROWSERBASE_CLEANUP_UNCERTAIN');
+      const cleaned = await this.abortNow(`tool error: ${name}`);
+      if (remoteCleanupUncertain) {
+        // The sidecar has an unresolved late remote session. Closing the local
+        // transport restarts the process but cannot prove that remote cleanup.
+        this.cleanupConfirmed = false;
+        throw cleanupUncertainError(browserError('BROWSERBASE_TOOL_FAILED', message));
+      }
+      if (!cleaned) throw cleanupUncertainError(browserError('BROWSERBASE_TOOL_FAILED', message));
+      throw browserError('BROWSERBASE_TOOL_FAILED', message);
     }
     return {
-      mcpContent: boundResultContent(result?.content),
-      ...(result?.structuredContent === undefined ? {} : { structuredContent: result.structuredContent }),
+      mcpContent: boundBrowserbaseResultContent(result?.content),
     };
   }
 
@@ -190,12 +220,33 @@ export class BrowserbaseSession {
   async abortNow(reason) {
     const client = this.client;
     const transport = this.transport;
+    const chatId = this.chatId;
     this.client = null;
     this.transport = null;
     this.chatId = null;
-    try { await withTimeout(transport?.close(), 5_000, 'Browserbase transport close timed out'); } catch {}
-    try { await withTimeout(client?.close(), 5_000, 'Browserbase client close timed out'); } catch {}
+    let confirmed = true;
+    if (client) {
+      try {
+        const result = await withTimeout(
+          client.callTool({ name: 'end', arguments: {} }),
+          5_000,
+          'Browserbase emergency cleanup timed out',
+        );
+        if (result?.isError) confirmed = false;
+      } catch (error) {
+        confirmed = false;
+        this.log(`Browserbase emergency cleanup failed: ${error?.message ?? error}`);
+      }
+    }
+    const closeResults = await Promise.allSettled([
+      withTimeout(client?.close(), 5_000, 'Browserbase client close timed out'),
+      withTimeout(transport?.close(), 5_000, 'Browserbase transport close timed out'),
+    ]);
+    if (closeResults.some((result) => result.status === 'rejected')) confirmed = false;
+    if (!confirmed) this.retainUncertainResources(client, transport, chatId);
+    this.cleanupConfirmed &&= confirmed;
     this.log(`Browserbase sidecar aborted (${reason})`);
+    return this.cleanupConfirmed;
   }
 
   async cleanupNow(reason = 'cleanup') {
@@ -204,19 +255,33 @@ export class BrowserbaseSession {
     }
     const client = this.client;
     const transport = this.transport;
+    const chatId = this.chatId;
     this.client = null;
     this.transport = null;
     this.chatId = null;
-    if (!client && !transport) return;
+    if (!client && !transport) return this.cleanupConfirmed;
+    let confirmed = true;
     if (client) {
       try {
-        await withTimeout(client.callTool({ name: 'end', arguments: {} }), 10_000, 'Browserbase end timed out');
+        const result = await withTimeout(
+          client.callTool({ name: 'end', arguments: {} }),
+          10_000,
+          'Browserbase end timed out',
+        );
+        if (result?.isError) confirmed = false;
       } catch (error) {
+        confirmed = false;
         this.log(`Browserbase end during ${reason} failed: ${error?.message ?? error}`);
       }
-      try { await client.close(); } catch {}
     }
-    try { await transport?.close(); } catch {}
+    const closeResults = await Promise.allSettled([
+      withTimeout(client?.close(), 5_000, 'Browserbase client close timed out'),
+      withTimeout(transport?.close(), 5_000, 'Browserbase transport close timed out'),
+    ]);
+    if (closeResults.some((result) => result.status === 'rejected')) confirmed = false;
+    if (!confirmed) this.retainUncertainResources(client, transport, chatId);
+    this.cleanupConfirmed &&= confirmed;
     this.log(`Browserbase sidecar closed (${reason})`);
+    return this.cleanupConfirmed;
   }
 }

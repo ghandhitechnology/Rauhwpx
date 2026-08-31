@@ -849,27 +849,27 @@ impl PaintOp {
                     {
                         match crate::renderer::svg::pcx_bytes_to_png_bytes(data) {
                             Some(png) => ("image/png", std::borrow::Cow::Owned(png)),
-                            None => (mime, std::borrow::Cow::Borrowed(data.as_slice())),
+                            None => (mime, std::borrow::Cow::Borrowed(data.as_ref())),
                         }
                     } else if mime == "image/bmp" {
                         match crate::renderer::svg::bmp_bytes_to_png_bytes(data) {
                             Some(png) => ("image/png", std::borrow::Cow::Owned(png)),
-                            None => (mime, std::borrow::Cow::Borrowed(data.as_slice())),
+                            None => (mime, std::borrow::Cow::Borrowed(data.as_ref())),
                         }
                     } else if mime == "image/tiff" {
                         match crate::renderer::image_resolver::tiff_bytes_to_png_bytes(data) {
                             Some(png) => ("image/png", std::borrow::Cow::Owned(png)),
-                            None => (mime, std::borrow::Cow::Borrowed(data.as_slice())),
+                            None => (mime, std::borrow::Cow::Borrowed(data.as_ref())),
                         }
                     } else if mime == "image/jpeg" {
                         match crate::renderer::image_resolver::grayscale_jpeg_bytes_to_png_bytes(
                             data,
                         ) {
                             Some(png) => ("image/png", std::borrow::Cow::Owned(png)),
-                            None => (mime, std::borrow::Cow::Borrowed(data.as_slice())),
+                            None => (mime, std::borrow::Cow::Borrowed(data.as_ref())),
                         }
                     } else {
-                        (mime, std::borrow::Cow::Borrowed(data.as_slice()))
+                        (mime, std::borrow::Cow::Borrowed(data.as_ref()))
                     };
                     let base64_data =
                         base64::engine::general_purpose::STANDARD.encode(&*final_data);

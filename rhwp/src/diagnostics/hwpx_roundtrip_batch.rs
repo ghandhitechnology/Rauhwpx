@@ -186,7 +186,7 @@ fn roundtrip_one(
         row
     };
 
-    let bytes = match fs::read(path) {
+    let bytes = match crate::parser::limits::read_local_file_once(path) {
         Ok(b) => b,
         Err(e) => {
             row.error = format!("읽기 실패: {e}");

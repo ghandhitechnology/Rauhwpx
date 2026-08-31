@@ -90,6 +90,20 @@ test('a missing AGENTS.md advances persisted revision and rejects stale drafts',
   assert.equal(repaired.revision, 3);
 });
 
+test('Windows startup recovers instruction state left at the replacement gap', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-agent-instructions-recovery-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const store = await new AgentInstructionsStore({ rootDir, platform: 'win32' }).init();
+  await store.update('saved instructions', { expectedRevision: 1 });
+  for (const name of ['AGENTS.md', '.AGENTS.md.meta.json']) {
+    await fs.rename(path.join(rootDir, name), path.join(rootDir, `${name}.previous-write`));
+  }
+
+  const recovered = await new AgentInstructionsStore({ rootDir, platform: 'win32' }).init();
+  assert.equal(recovered.snapshot().content, 'saved instructions\n');
+  assert.equal(recovered.snapshot().revision, 2);
+});
+
 test('corrupt revision metadata is repaired without reviving stale drafts', async (t) => {
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-agent-instructions-'));
   t.after(() => fs.rm(rootDir, { recursive: true, force: true }));

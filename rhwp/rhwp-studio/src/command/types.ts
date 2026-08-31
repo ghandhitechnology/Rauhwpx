@@ -7,7 +7,7 @@ import type {
   FileSystemFileHandleLike,
   SaveFilePickerOptionsLike,
 } from './file-system-access.ts';
-import type { PortableHistoryFolder } from '@/versioning/portable-bundle';
+import type { PortableHistoryArchive } from '@/versioning/portable-bundle';
 
 export type EditorEditMode = 'normal' | 'form';
 
@@ -109,7 +109,7 @@ export interface CommandServices {
     handle: FileSystemFileHandleLike,
   ) => Promise<((saved: boolean) => Promise<void>) | void>;
   /** Build a portable document bundle containing the complete local version graph. */
-  createPortableHistoryBundle?: () => Promise<PortableHistoryFolder>;
+  createPortableHistoryBundle?: () => Promise<PortableHistoryArchive>;
   /** 에디터 편집 모드 변경 */
   setEditMode: (mode: EditorEditMode) => void;
   /**

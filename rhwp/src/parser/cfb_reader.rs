@@ -8,10 +8,20 @@
 //! - BinData/BIN{XXXX}.{ext}: 바이너리 데이터
 
 use std::io::{Cursor, Read};
+use std::sync::Arc;
+
+use crate::parser::limits::{
+    MAX_BINARY_BYTES, MAX_CFB_DIRECTORY_ENTRIES, MAX_CFB_PATH_BYTES, MAX_CONTAINER_BYTES,
+    MAX_STRUCTURAL_BYTES, MAX_THUMBNAIL_BYTES,
+};
+
+// Real Hancom files sometimes keep a few now-unused FAT sectors. This small
+// compatibility allowance remains bounded independently of input size.
+const CFB_FAT_COMPAT_SLACK_SECTORS: usize = 8;
 
 /// CFB 컨테이너 리더
 pub struct CfbReader {
-    compound: cfb::CompoundFile<Cursor<Vec<u8>>>,
+    compound: cfb::CompoundFile<Cursor<Arc<[u8]>>>,
 }
 
 /// CFB 리더 에러
@@ -27,6 +37,10 @@ pub enum CfbError {
     DecompressError(String),
     /// 스트림 또는 압축 해제 결과가 호출부 상한을 초과함
     LimitExceeded(usize),
+    /// CFB directory entry count exceeds the parser-wide container limit.
+    DirectoryEntryLimitExceeded { actual: usize, limit: usize },
+    /// A reachable CFB directory path exceeds the parser-wide path limit.
+    DirectoryPathLimitExceeded { actual: usize, limit: usize },
 }
 
 impl std::fmt::Display for CfbError {
@@ -39,6 +53,14 @@ impl std::fmt::Display for CfbError {
             CfbError::LimitExceeded(limit) => {
                 write!(f, "스트림이 {} 바이트 상한을 초과했습니다", limit)
             }
+            CfbError::DirectoryEntryLimitExceeded { actual, limit } => write!(
+                f,
+                "CFB 디렉터리 엔트리 수 {actual}개가 {limit}개 상한을 초과했습니다"
+            ),
+            CfbError::DirectoryPathLimitExceeded { actual, limit } => write!(
+                f,
+                "CFB 디렉터리 경로 {actual}바이트가 {limit}바이트 상한을 초과했습니다"
+            ),
         }
     }
 }
@@ -48,11 +70,45 @@ impl std::error::Error for CfbError {}
 impl CfbReader {
     /// 바이트 데이터에서 CFB 컨테이너 열기
     pub fn open(data: &[u8]) -> Result<Self, CfbError> {
-        let cursor = Cursor::new(data.to_vec());
+        if data.len() > crate::parser::limits::MAX_UNTRUSTED_INPUT_BYTES {
+            return Err(CfbError::LimitExceeded(
+                crate::parser::limits::MAX_UNTRUSTED_INPUT_BYTES,
+            ));
+        }
+        Self::open_shared(Arc::from(data))
+    }
+
+    /// Open a CFB reader over shared immutable source bytes.
+    pub(crate) fn open_shared(data: Arc<[u8]>) -> Result<Self, CfbError> {
+        if data.len() as u64 > MAX_CONTAINER_BYTES {
+            return Err(CfbError::LimitExceeded(MAX_CONTAINER_BYTES as usize));
+        }
+        validate_cfb_directory_entry_budget(&data)?;
+        let cursor = Cursor::new(data);
         let compound =
             cfb::CompoundFile::open(cursor).map_err(|e| CfbError::OpenError(e.to_string()))?;
+        let reader = CfbReader { compound };
+        reader.validate_stream_budget()?;
+        Ok(reader)
+    }
 
-        Ok(CfbReader { compound })
+    fn validate_stream_budget(&self) -> Result<(), CfbError> {
+        let mut total = 0u64;
+        for entry in self.compound.walk().filter(|entry| entry.is_stream()) {
+            let path = entry.path().to_string_lossy().replace('\\', "/");
+            let size = entry.len();
+            let per_stream_limit = stream_limit(&path) as u64;
+            if size > per_stream_limit {
+                return Err(CfbError::LimitExceeded(per_stream_limit as usize));
+            }
+            total = total
+                .checked_add(size)
+                .ok_or(CfbError::LimitExceeded(MAX_CONTAINER_BYTES as usize))?;
+            if total > MAX_CONTAINER_BYTES {
+                return Err(CfbError::LimitExceeded(MAX_CONTAINER_BYTES as usize));
+            }
+        }
+        Ok(())
     }
 
     /// 스트림 존재 여부 확인
@@ -62,6 +118,16 @@ impl CfbReader {
 
     /// 스트림 원본 데이터 읽기 (압축 해제 없이)
     pub fn read_stream_raw(&mut self, path: &str) -> Result<Vec<u8>, CfbError> {
+        self.read_stream_raw_limited(path, stream_limit(path))
+    }
+
+    /// Read a stream without letting its declared or observed size exceed `max_bytes`.
+    pub fn read_stream_raw_limited(
+        &mut self,
+        path: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, CfbError> {
+        let max_bytes = max_bytes.min(stream_limit(path));
         if !self.compound.is_stream(path) {
             return Err(CfbError::StreamNotFound(path.to_string()));
         }
@@ -71,24 +137,47 @@ impl CfbReader {
             .open_stream(path)
             .map_err(|e| CfbError::StreamError(format!("{}: {}", path, e)))?;
 
+        if stream.len() > max_bytes as u64 {
+            return Err(CfbError::LimitExceeded(max_bytes));
+        }
+
         let mut data = Vec::new();
         stream
+            .by_ref()
+            .take((max_bytes as u64).saturating_add(1))
             .read_to_end(&mut data)
             .map_err(|e| CfbError::StreamError(format!("{}: {}", path, e)))?;
+
+        if data.len() > max_bytes {
+            return Err(CfbError::LimitExceeded(max_bytes));
+        }
 
         Ok(data)
     }
 
     /// FileHeader 스트림 읽기 (256바이트, 항상 비압축)
     pub fn read_file_header(&mut self) -> Result<Vec<u8>, CfbError> {
-        self.read_stream_raw("/FileHeader")
+        self.read_file_header_limited(MAX_STRUCTURAL_BYTES)
+    }
+
+    pub fn read_file_header_limited(&mut self, max_bytes: usize) -> Result<Vec<u8>, CfbError> {
+        self.read_stream_raw_limited("/FileHeader", max_bytes)
     }
 
     /// DocInfo 스트림 읽기 (압축 가능)
     pub fn read_doc_info(&mut self, compressed: bool) -> Result<Vec<u8>, CfbError> {
-        let raw = self.read_stream_raw("/DocInfo")?;
+        self.read_doc_info_limited(compressed, MAX_STRUCTURAL_BYTES)
+    }
+
+    pub fn read_doc_info_limited(
+        &mut self,
+        compressed: bool,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, CfbError> {
+        let max_bytes = max_bytes.min(MAX_STRUCTURAL_BYTES);
+        let raw = self.read_stream_raw_limited("/DocInfo", max_bytes)?;
         if compressed {
-            decompress_stream(&raw)
+            decompress_stream_limited(&raw, max_bytes)
         } else {
             Ok(raw)
         }
@@ -108,20 +197,31 @@ impl CfbReader {
         compressed: bool,
         distribution: bool,
     ) -> Result<Vec<u8>, CfbError> {
+        self.read_body_text_section_limited(index, compressed, distribution, MAX_STRUCTURAL_BYTES)
+    }
+
+    pub fn read_body_text_section_limited(
+        &mut self,
+        index: u32,
+        compressed: bool,
+        distribution: bool,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, CfbError> {
+        let max_bytes = max_bytes.min(MAX_STRUCTURAL_BYTES);
         if distribution {
             // 배포용 문서: ViewText 스트림 (암호화됨 → 호출자가 복호화)
             let viewtext_path = format!("/ViewText/Section{}", index);
             if self.has_stream(&viewtext_path) {
-                return self.read_stream_raw(&viewtext_path);
+                return self.read_stream_raw_limited(&viewtext_path, max_bytes);
             }
         }
 
         // 일반 문서: BodyText 스트림
         let bodytext_path = format!("/BodyText/Section{}", index);
         if self.has_stream(&bodytext_path) {
-            let raw = self.read_stream_raw(&bodytext_path)?;
+            let raw = self.read_stream_raw_limited(&bodytext_path, max_bytes)?;
             return if compressed {
-                decompress_stream(&raw)
+                decompress_stream_limited(&raw, max_bytes)
             } else {
                 Ok(raw)
             };
@@ -130,9 +230,9 @@ impl CfbReader {
         // 루트 레벨 Section (구버전 호환)
         let section_path = format!("/Section{}", index);
         if self.has_stream(&section_path) {
-            let raw = self.read_stream_raw(&section_path)?;
+            let raw = self.read_stream_raw_limited(&section_path, max_bytes)?;
             return if compressed {
-                decompress_stream(&raw)
+                decompress_stream_limited(&raw, max_bytes)
             } else {
                 Ok(raw)
             };
@@ -143,8 +243,7 @@ impl CfbReader {
 
     /// BinData 스트림 읽기 (BinData/BIN{XXXX}.{ext})
     pub fn read_bin_data(&mut self, storage_name: &str) -> Result<Vec<u8>, CfbError> {
-        let path = format!("/BinData/{}", storage_name);
-        self.read_stream_raw(&path)
+        self.read_bin_data_limited(storage_name, MAX_BINARY_BYTES)
     }
 
     /// BinData 스트림을 `max_bytes` 바이트까지만 읽는다.
@@ -153,6 +252,8 @@ impl CfbReader {
         storage_name: &str,
         max_bytes: usize,
     ) -> Result<Vec<u8>, CfbError> {
+        validate_bin_data_storage_name(storage_name)?;
+        let max_bytes = max_bytes.min(MAX_BINARY_BYTES);
         let path = format!("/BinData/{}", storage_name);
         if !self.compound.is_stream(&path) {
             return Err(CfbError::StreamNotFound(path));
@@ -171,6 +272,47 @@ impl CfbReader {
             return Err(CfbError::LimitExceeded(max_bytes));
         }
         Ok(data)
+    }
+
+    /// Hash one encoded BinData stream without retaining its bytes.
+    pub(crate) fn fingerprint_bin_data(
+        &mut self,
+        storage_name: &str,
+        max_bytes: usize,
+    ) -> Result<(u64, [u8; 32]), CfbError> {
+        validate_bin_data_storage_name(storage_name)?;
+        let max_bytes = max_bytes.min(MAX_BINARY_BYTES);
+        let path = format!("/BinData/{storage_name}");
+        if !self.compound.is_stream(&path) {
+            return Err(CfbError::StreamNotFound(path));
+        }
+        let mut stream = self
+            .compound
+            .open_stream(&path)
+            .map_err(|error| CfbError::StreamError(format!("{path}: {error}")))?;
+        if stream.len() > max_bytes as u64 {
+            return Err(CfbError::LimitExceeded(max_bytes));
+        }
+
+        let mut hasher = blake3::Hasher::new();
+        let mut observed = 0u64;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let read = stream
+                .read(&mut buffer)
+                .map_err(|error| CfbError::StreamError(format!("{path}: {error}")))?;
+            if read == 0 {
+                break;
+            }
+            observed = observed
+                .checked_add(read as u64)
+                .ok_or(CfbError::LimitExceeded(max_bytes))?;
+            if observed > max_bytes as u64 {
+                return Err(CfbError::LimitExceeded(max_bytes));
+            }
+            hasher.update(&buffer[..read]);
+        }
+        Ok((observed, *hasher.finalize().as_bytes()))
     }
 
     /// 본문 섹션 수 계산
@@ -237,8 +379,13 @@ impl CfbReader {
     /// BMP 또는 GIF 형식의 썸네일 이미지를 반환한다.
     /// 스트림이 없으면 None을 반환한다.
     pub fn read_preview_image(&mut self) -> Option<Vec<u8>> {
+        self.read_preview_image_limited(MAX_THUMBNAIL_BYTES)
+    }
+
+    pub fn read_preview_image_limited(&mut self, max_bytes: usize) -> Option<Vec<u8>> {
         if self.has_stream("/PrvImage") {
-            self.read_stream_raw("/PrvImage").ok()
+            self.read_stream_raw_limited("/PrvImage", max_bytes.min(MAX_THUMBNAIL_BYTES))
+                .ok()
         } else {
             None
         }
@@ -249,34 +396,23 @@ impl CfbReader {
     /// UTF-16LE 인코딩된 미리보기 텍스트를 반환한다.
     /// 스트림이 없으면 None을 반환한다.
     pub fn read_preview_text(&mut self) -> Option<String> {
+        self.read_preview_text_limited(MAX_STRUCTURAL_BYTES)
+    }
+
+    pub fn read_preview_text_limited(&mut self, max_bytes: usize) -> Option<String> {
         if !self.has_stream("/PrvText") {
             return None;
         }
 
-        let data = self.read_stream_raw("/PrvText").ok()?;
+        let max_bytes = max_bytes.min(MAX_STRUCTURAL_BYTES);
+        let data = self.read_stream_raw_limited("/PrvText", max_bytes).ok()?;
 
         // UTF-16LE 디코딩
         if data.len() < 2 {
             return None;
         }
 
-        let text: String = data
-            .chunks(2)
-            .filter_map(|chunk| {
-                if chunk.len() == 2 {
-                    let code = u16::from_le_bytes([chunk[0], chunk[1]]);
-                    char::from_u32(code as u32)
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        if text.is_empty() {
-            None
-        } else {
-            Some(text)
-        }
+        decode_utf16le_bounded(&data, max_bytes)
     }
 
     /// [Task #1001] HWP3 → HWP5 변환본 식별 (휴리스틱).
@@ -314,13 +450,406 @@ impl CfbReader {
     }
 }
 
+fn stream_limit(path: &str) -> usize {
+    if path == "/PrvImage" || path.starts_with("/Preview/PrvImage") {
+        MAX_THUMBNAIL_BYTES
+    } else if path == "/FileHeader"
+        || path == "/DocInfo"
+        || path == "/PrvText"
+        || path.starts_with("/BodyText/")
+        || path.starts_with("/ViewText/")
+        || path.starts_with("/Section")
+    {
+        MAX_STRUCTURAL_BYTES
+    } else {
+        MAX_BINARY_BYTES
+    }
+}
+
+pub(crate) fn validate_bin_data_storage_name(storage_name: &str) -> Result<(), CfbError> {
+    let invalid_component = storage_name.is_empty()
+        || matches!(storage_name, "." | "..")
+        || storage_name
+            .chars()
+            .any(|character| matches!(character, '/' | '\\' | '\0' | ':' | '!'));
+    if invalid_component || storage_name.encode_utf16().count() > 31 {
+        return Err(CfbError::StreamError(format!(
+            "invalid BinData storage name: {storage_name:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn decode_utf16le_bounded(data: &[u8], max_bytes: usize) -> Option<String> {
+    let units = data
+        .chunks_exact(2)
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]));
+    let mut text = String::with_capacity(data.len().min(max_bytes));
+    for decoded in char::decode_utf16(units) {
+        let character = decoded.unwrap_or(char::REPLACEMENT_CHARACTER);
+        if character.len_utf8() > max_bytes.saturating_sub(text.len()) {
+            return None;
+        }
+        text.push(character);
+    }
+    (!text.is_empty()).then_some(text)
+}
+
+fn lenient_stream_limit(path: &str) -> usize {
+    stream_limit(&format!("/{}", path.trim_start_matches('/')))
+}
+
+fn sector_range(data_len: usize, sid: u32, sector_size: usize) -> Option<(usize, usize)> {
+    // Version 4 CFB pads its 512-byte header to the 4096-byte sector boundary.
+    let start = (sid as usize).checked_add(1)?.checked_mul(sector_size)?;
+    let end = start.checked_add(sector_size)?;
+    (end <= data_len).then_some((start, end))
+}
+
+fn cfb_u32(data: &[u8], offset: usize) -> Result<u32, CfbError> {
+    let bytes = data
+        .get(offset..offset + 4)
+        .ok_or_else(|| CfbError::OpenError("CFB 헤더가 잘렸습니다".into()))?;
+    Ok(u32::from_le_bytes(
+        bytes.try_into().expect("four-byte slice"),
+    ))
+}
+
+const CFB_NO_STREAM: u32 = 0xFFFF_FFFF;
+
+#[derive(Debug, Clone, Copy)]
+struct CfbDirectoryPreflightEntry {
+    object_type: u8,
+    name_utf8_bytes: usize,
+    left_sibling: u32,
+    right_sibling: u32,
+    child: u32,
+}
+
+fn parse_cfb_directory_preflight_entry(
+    record: &[u8],
+) -> Result<CfbDirectoryPreflightEntry, CfbError> {
+    debug_assert_eq!(record.len(), 128);
+    let object_type = record[66];
+    let field = |offset: usize| {
+        u32::from_le_bytes(
+            record[offset..offset + 4]
+                .try_into()
+                .expect("four-byte directory field"),
+        )
+    };
+    let mut entry = CfbDirectoryPreflightEntry {
+        object_type,
+        name_utf8_bytes: 0,
+        left_sibling: field(68),
+        right_sibling: field(72),
+        child: field(76),
+    };
+
+    // Empty directory slots have no meaningful name or tree pointers.
+    if object_type == 0 {
+        return Ok(entry);
+    }
+    if !matches!(object_type, 1 | 2 | 5) {
+        return Err(CfbError::OpenError(format!(
+            "CFB 디렉터리 오브젝트 유형이 잘못되었습니다: {object_type}"
+        )));
+    }
+
+    let name_bytes = u16::from_le_bytes([record[64], record[65]]) as usize;
+    if !(2..=64).contains(&name_bytes) || name_bytes % 2 != 0 {
+        return Err(CfbError::OpenError(
+            "CFB 디렉터리 이름 길이가 잘못되었습니다".into(),
+        ));
+    }
+    if record[name_bytes - 2..name_bytes] != [0, 0] {
+        return Err(CfbError::OpenError(
+            "CFB 디렉터리 이름이 NUL로 끝나지 않습니다".into(),
+        ));
+    }
+
+    let units = record[..name_bytes - 2]
+        .chunks_exact(2)
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]));
+    for decoded in char::decode_utf16(units) {
+        let character = decoded.map_err(|_| {
+            CfbError::OpenError("CFB 디렉터리 이름의 UTF-16이 잘못되었습니다".into())
+        })?;
+        entry.name_utf8_bytes = entry
+            .name_utf8_bytes
+            .checked_add(character.len_utf8())
+            .ok_or(CfbError::DirectoryPathLimitExceeded {
+                actual: usize::MAX,
+                limit: MAX_CFB_PATH_BYTES,
+            })?;
+    }
+    Ok(entry)
+}
+
+/// Validate reachable paths without constructing any `PathBuf`s. The `cfb`
+/// crate's walker joins every ancestor for every entry, so an otherwise small
+/// directory stream with one entry at each nesting level can amplify into
+/// quadratic path allocation before stream-size checks run.
+fn validate_cfb_directory_path_budget(
+    entries: &[CfbDirectoryPreflightEntry],
+) -> Result<(), CfbError> {
+    let Some(root) = entries.first() else {
+        return Err(CfbError::OpenError(
+            "CFB 루트 디렉터리 엔트리가 없습니다".into(),
+        ));
+    };
+    if root.object_type != 5 {
+        return Err(CfbError::OpenError(
+            "CFB 루트 디렉터리 엔트리가 잘못되었습니다".into(),
+        ));
+    }
+
+    // Each stack item is (directory id, parent full-path byte length). Sibling
+    // tree edges retain the same parent; only a storage's child extends it.
+    let mut stack = Vec::new();
+    if root.child != CFB_NO_STREAM {
+        stack.push((root.child, 0usize));
+    }
+    let mut visited = vec![false; entries.len()];
+    while let Some((stream_id, parent_path_bytes)) = stack.pop() {
+        let index = usize::try_from(stream_id)
+            .map_err(|_| CfbError::OpenError("CFB 디렉터리 ID가 잘못되었습니다".into()))?;
+        let entry = entries
+            .get(index)
+            .ok_or_else(|| CfbError::OpenError("CFB 디렉터리 ID가 범위를 벗어났습니다".into()))?;
+        if std::mem::replace(&mut visited[index], true) {
+            return Err(CfbError::OpenError(
+                "CFB 디렉터리 트리에 순환 또는 중복 참조가 있습니다".into(),
+            ));
+        }
+        if !matches!(entry.object_type, 1 | 2) {
+            return Err(CfbError::OpenError(
+                "CFB 디렉터리 트리가 빈 엔트리나 루트를 참조합니다".into(),
+            ));
+        }
+        let path_bytes = parent_path_bytes
+            .checked_add(1) // leading slash or component separator
+            .and_then(|length| length.checked_add(entry.name_utf8_bytes))
+            .ok_or(CfbError::DirectoryPathLimitExceeded {
+                actual: usize::MAX,
+                limit: MAX_CFB_PATH_BYTES,
+            })?;
+        if path_bytes > MAX_CFB_PATH_BYTES {
+            return Err(CfbError::DirectoryPathLimitExceeded {
+                actual: path_bytes,
+                limit: MAX_CFB_PATH_BYTES,
+            });
+        }
+
+        if entry.left_sibling != CFB_NO_STREAM {
+            stack.push((entry.left_sibling, parent_path_bytes));
+        }
+        if entry.right_sibling != CFB_NO_STREAM {
+            stack.push((entry.right_sibling, parent_path_bytes));
+        }
+        if entry.object_type == 1 && entry.child != CFB_NO_STREAM {
+            stack.push((entry.child, path_bytes));
+        }
+    }
+    Ok(())
+}
+
+/// Validate the CFB directory chain before handing bytes to the `cfb` crate.
+/// That crate materializes every directory record while opening, so counting
+/// only after `CompoundFile::open` is too late to prevent an allocation bomb.
+pub(crate) fn validate_cfb_directory_entry_budget(data: &[u8]) -> Result<(), CfbError> {
+    validate_cfb_directory_entry_budget_with_mode(data, false)
+}
+
+fn validate_cfb_directory_entry_budget_lenient(data: &[u8]) -> Result<(), CfbError> {
+    validate_cfb_directory_entry_budget_with_mode(data, true)
+}
+
+fn validate_cfb_directory_entry_budget_with_mode(
+    data: &[u8],
+    tolerate_surplus_fat_sectors: bool,
+) -> Result<(), CfbError> {
+    const END_OF_CHAIN: u32 = 0xFFFF_FFFE;
+    const FREE_SECTOR: u32 = 0xFFFF_FFFF;
+    // A 512 MiB v3 CFB needs fewer than 65 DIFAT sectors. Keep compatibility
+    // slack for permissive legacy files while bounding the crate's DIFAT Vec.
+    const MAX_CFB_DIFAT_SECTORS: usize = 128;
+    const CFB_MAGIC: &[u8; 8] = b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1";
+
+    if data.len() < 512 || data.get(..8) != Some(CFB_MAGIC.as_slice()) {
+        return Err(CfbError::OpenError(
+            "CFB 헤더 또는 매직 넘버가 올바르지 않습니다".into(),
+        ));
+    }
+    let sector_power = u16::from_le_bytes([data[30], data[31]]) as usize;
+    if sector_power != 9 && sector_power != 12 {
+        return Err(CfbError::OpenError(format!(
+            "CFB 섹터 크기 지수가 사양 범위를 벗어남: {sector_power}"
+        )));
+    }
+    let sector_size = 1usize << sector_power;
+    if data.len() < sector_size {
+        return Err(CfbError::OpenError("CFB 섹터 헤더가 잘렸습니다".into()));
+    }
+    let physical_sectors = data.len().div_ceil(sector_size).saturating_sub(1);
+    let entries_per_fat_sector = sector_size / 4;
+    let declared_fat_sectors = cfb_u32(data, 44)? as usize;
+    let maximum_useful_fat_sectors = physical_sectors.div_ceil(entries_per_fat_sector);
+    if (!tolerate_surplus_fat_sectors
+        && declared_fat_sectors
+            > maximum_useful_fat_sectors.saturating_add(CFB_FAT_COMPAT_SLACK_SECTORS))
+        || (tolerate_surplus_fat_sectors && declared_fat_sectors > physical_sectors)
+    {
+        return Err(CfbError::OpenError(format!(
+            "CFB declares {declared_fat_sectors} FAT sectors, but {maximum_useful_fat_sectors} can index this file"
+        )));
+    }
+    // The lenient reader supports legacy files whose header counts unused FAT
+    // sectors. Only the prefix needed to index every physical sector can affect
+    // parsing; capping at that prefix prevents a forged count from amplifying
+    // allocations while retaining those files' historical compatibility.
+    let fat_sectors_to_index = if tolerate_surplus_fat_sectors {
+        declared_fat_sectors.min(maximum_useful_fat_sectors)
+    } else {
+        declared_fat_sectors
+    };
+
+    let mut fat_sector_ids = Vec::with_capacity(fat_sectors_to_index.min(109));
+    let mut seen_fat_sectors = std::collections::HashSet::new();
+    for index in 0..109 {
+        if fat_sector_ids.len() == fat_sectors_to_index {
+            break;
+        }
+        let sid = cfb_u32(data, 76 + index * 4)?;
+        if sid == FREE_SECTOR || sid == END_OF_CHAIN {
+            continue;
+        }
+        if sid as usize >= physical_sectors || !seen_fat_sectors.insert(sid) {
+            if tolerate_surplus_fat_sectors {
+                continue;
+            }
+            return Err(CfbError::OpenError(
+                "CFB DIFAT에 잘못된 FAT 섹터가 있습니다".into(),
+            ));
+        }
+        fat_sector_ids.push(sid);
+    }
+
+    let declared_difat_sectors = cfb_u32(data, 72)? as usize;
+    if declared_difat_sectors > MAX_CFB_DIFAT_SECTORS {
+        return Err(CfbError::OpenError(
+            "CFB DIFAT 섹터 수가 안전 상한을 초과했습니다".into(),
+        ));
+    }
+    let mut difat_sid = cfb_u32(data, 68)?;
+    let mut seen_difat_sectors = std::collections::HashSet::new();
+    while difat_sid != END_OF_CHAIN && difat_sid != FREE_SECTOR {
+        if fat_sector_ids.len() == fat_sectors_to_index {
+            break;
+        }
+        if seen_difat_sectors.len() >= MAX_CFB_DIFAT_SECTORS {
+            return Err(CfbError::OpenError(
+                "CFB DIFAT 체인이 안전 상한을 초과했습니다".into(),
+            ));
+        }
+        if !seen_difat_sectors.insert(difat_sid) {
+            return Err(CfbError::OpenError(
+                "CFB DIFAT 체인에 순환이 있습니다".into(),
+            ));
+        }
+        let (offset, _) = sector_range(data.len(), difat_sid, sector_size)
+            .ok_or_else(|| CfbError::OpenError("CFB DIFAT 섹터가 파일 밖을 가리킵니다".into()))?;
+        for index in 0..entries_per_fat_sector - 1 {
+            if fat_sector_ids.len() == fat_sectors_to_index {
+                break;
+            }
+            let sid = cfb_u32(data, offset + index * 4)?;
+            if sid == FREE_SECTOR || sid == END_OF_CHAIN {
+                continue;
+            }
+            if sid as usize >= physical_sectors || !seen_fat_sectors.insert(sid) {
+                if tolerate_surplus_fat_sectors {
+                    continue;
+                }
+                return Err(CfbError::OpenError(
+                    "CFB DIFAT에 잘못된 FAT 섹터가 있습니다".into(),
+                ));
+            }
+            fat_sector_ids.push(sid);
+        }
+        difat_sid = cfb_u32(data, offset + sector_size - 4)?;
+    }
+    if fat_sector_ids.len() != fat_sectors_to_index {
+        return Err(CfbError::OpenError(
+            "CFB FAT 섹터 목록이 불완전합니다".into(),
+        ));
+    }
+
+    let next_sector = |sid: u32| -> Result<u32, CfbError> {
+        let entry_index = sid as usize;
+        let fat_list_index = entry_index / entries_per_fat_sector;
+        let fat_sid = *fat_sector_ids
+            .get(fat_list_index)
+            .ok_or_else(|| CfbError::OpenError("CFB 디렉터리 FAT 엔트리가 없습니다".into()))?;
+        let (fat_offset, _) = sector_range(data.len(), fat_sid, sector_size)
+            .ok_or_else(|| CfbError::OpenError("CFB FAT 섹터가 파일 밖을 가리킵니다".into()))?;
+        cfb_u32(
+            data,
+            fat_offset + (entry_index % entries_per_fat_sector) * 4,
+        )
+    };
+
+    let entries_per_directory_sector = sector_size / 128;
+    let mut directory_sid = cfb_u32(data, 48)?;
+    let mut directory_entries = 0usize;
+    let mut directory_table = Vec::new();
+    let mut seen_directory_sectors = std::collections::HashSet::new();
+    while directory_sid != END_OF_CHAIN && directory_sid != FREE_SECTOR {
+        if directory_sid as usize >= physical_sectors
+            || !seen_directory_sectors.insert(directory_sid)
+        {
+            return Err(CfbError::OpenError(
+                "CFB 디렉터리 체인이 잘못되었습니다".into(),
+            ));
+        }
+        directory_entries = directory_entries.saturating_add(entries_per_directory_sector);
+        if directory_entries > MAX_CFB_DIRECTORY_ENTRIES {
+            return Err(CfbError::DirectoryEntryLimitExceeded {
+                actual: directory_entries,
+                limit: MAX_CFB_DIRECTORY_ENTRIES,
+            });
+        }
+        if !tolerate_surplus_fat_sectors {
+            let (offset, end) =
+                sector_range(data.len(), directory_sid, sector_size).ok_or_else(|| {
+                    CfbError::OpenError("CFB 디렉터리 섹터가 파일 밖을 가리킵니다".into())
+                })?;
+            directory_table
+                .try_reserve_exact(entries_per_directory_sector)
+                .map_err(|error| {
+                    CfbError::OpenError(format!(
+                        "CFB 디렉터리 예비 검증 할당이 실패했습니다: {error}"
+                    ))
+                })?;
+            for record in data[offset..end].chunks_exact(128) {
+                directory_table.push(parse_cfb_directory_preflight_entry(record)?);
+            }
+        }
+        directory_sid = next_sector(directory_sid)?;
+    }
+    if !tolerate_surplus_fat_sectors {
+        validate_cfb_directory_path_budget(&directory_table)?;
+    }
+    Ok(())
+}
+
 /// Lenient CFB 리더 (FAT 검증 무시)
 ///
 /// HWP 프로그램이 생성하는 일부 CFB 파일은 표준 cfb 크레이트의
 /// FAT 검증("sector 0 pointed to twice")을 통과하지 못한다.
 /// 이 구현체는 FAT 중복을 무시하고 스트림을 추출한다.
 pub struct LenientCfbReader {
-    data: Vec<u8>,
+    data: Arc<[u8]>,
     sector_size: usize,
     /// Directory entries: (name, start_sector, size, obj_type)
     entries: Vec<(String, u32, u64, u8)>,
@@ -339,6 +868,19 @@ impl LenientCfbReader {
     const FREE_SECT: u32 = 0xFFFFFFFF;
 
     pub fn open(data: &[u8]) -> Result<Self, CfbError> {
+        if data.len() > crate::parser::limits::MAX_UNTRUSTED_INPUT_BYTES {
+            return Err(CfbError::LimitExceeded(
+                crate::parser::limits::MAX_UNTRUSTED_INPUT_BYTES,
+            ));
+        }
+        Self::open_shared(Arc::from(data))
+    }
+
+    pub(crate) fn open_shared(data: Arc<[u8]>) -> Result<Self, CfbError> {
+        if data.len() as u64 > MAX_CONTAINER_BYTES {
+            return Err(CfbError::LimitExceeded(MAX_CONTAINER_BYTES as usize));
+        }
+        validate_cfb_directory_entry_budget_lenient(&data)?;
         if data.len() < 512 {
             return Err(CfbError::OpenError("파일이 너무 작음".into()));
         }
@@ -381,6 +923,15 @@ impl LenientCfbReader {
         let first_difat_sector = u32::from_le_bytes([data[68], data[69], data[70], data[71]]);
         let difat_sectors_count =
             u32::from_le_bytes([data[72], data[73], data[74], data[75]]) as usize;
+        let physical_sectors = data.len().div_ceil(sector_size).saturating_sub(1);
+        let fat_entries_per_sector = sector_size / 4;
+        let max_fat_sectors = physical_sectors.div_ceil(fat_entries_per_sector);
+        if fat_sectors_count > physical_sectors {
+            return Err(CfbError::OpenError(format!(
+                "CFB declares {fat_sectors_count} FAT sectors, but {max_fat_sectors} can index this file"
+            )));
+        }
+        let fat_sectors_to_read = fat_sectors_count.min(max_fat_sectors);
 
         // DIFAT 읽기: 헤더의 109개 + 추가 DIFAT 섹터
         //
@@ -393,29 +944,44 @@ impl LenientCfbReader {
         let mut fat_sector_ids = Vec::new();
         let mut visited_fat_sids = std::collections::HashSet::new();
         for i in 0..109.min(fat_sectors_count) {
+            if fat_sector_ids.len() == fat_sectors_to_read {
+                break;
+            }
             let off = 76 + i * 4;
             let sid = u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
-            if sid != Self::FREE_SECT && sid != Self::END_OF_CHAIN && visited_fat_sids.insert(sid) {
+            if sid != Self::FREE_SECT
+                && sid != Self::END_OF_CHAIN
+                && (sid as usize) < physical_sectors
+                && visited_fat_sids.insert(sid)
+            {
                 fat_sector_ids.push(sid);
             }
         }
         // 추가 DIFAT 섹터 체인
-        if difat_sectors_count > 0 && first_difat_sector != Self::END_OF_CHAIN {
+        if fat_sector_ids.len() < fat_sectors_to_read
+            && difat_sectors_count > 0
+            && first_difat_sector != Self::END_OF_CHAIN
+        {
             let mut dsid = first_difat_sector;
             // difat_sectors_count 는 파일 헤더에서 그대로 읽은 값(공격자 통제 가능)이라,
             // 실제 섹터 체인이 짧은 순환을 이뤄도 최대 u32::MAX 번 순회할 수 있다.
             // FAT/미니FAT 체인 순회(read_chain_static)처럼 방문 집합으로 순환을 조기 차단한다.
             let mut visited_difat = std::collections::HashSet::new();
             for _ in 0..difat_sectors_count {
+                if fat_sector_ids.len() == fat_sectors_to_read {
+                    break;
+                }
                 if !visited_difat.insert(dsid) {
                     break;
                 }
-                let off = 512 + dsid as usize * sector_size;
-                if off + sector_size > data.len() {
+                let Some((off, _)) = sector_range(data.len(), dsid, sector_size) else {
                     break;
-                }
+                };
                 let entries_per = sector_size / 4 - 1;
                 for i in 0..entries_per {
+                    if fat_sector_ids.len() == fat_sectors_to_read {
+                        break;
+                    }
                     let eoff = off + i * 4;
                     let sid = u32::from_le_bytes([
                         data[eoff],
@@ -425,6 +991,7 @@ impl LenientCfbReader {
                     ]);
                     if sid != Self::FREE_SECT
                         && sid != Self::END_OF_CHAIN
+                        && (sid as usize) < physical_sectors
                         && visited_fat_sids.insert(sid)
                     {
                         fat_sector_ids.push(sid);
@@ -447,10 +1014,9 @@ impl LenientCfbReader {
         // FAT 빌드
         let mut fat = Vec::new();
         for &fsid in &fat_sector_ids {
-            let off = 512 + fsid as usize * sector_size;
-            if off + sector_size > data.len() {
+            let Some((off, _)) = sector_range(data.len(), fsid, sector_size) else {
                 continue;
-            }
+            };
             let entries = sector_size / 4;
             for i in 0..entries {
                 let eoff = off + i * 4;
@@ -462,9 +1028,17 @@ impl LenientCfbReader {
                 ]));
             }
         }
+        drop(fat_sector_ids);
+        drop(visited_fat_sids);
 
         // Directory entries 읽기
-        let dir_data = Self::read_chain_static(data, &fat, first_dir_sector, sector_size);
+        let dir_data = Self::read_chain_static_limited(
+            &data,
+            &fat,
+            first_dir_sector,
+            sector_size,
+            MAX_CFB_DIRECTORY_ENTRIES * 128,
+        );
         let mut entries = Vec::new();
         let entry_size = 128;
         let n_entries = dir_data.len() / entry_size;
@@ -509,11 +1083,13 @@ impl LenientCfbReader {
                 entries.push((name, start_sector, size, obj_type));
             }
         }
+        drop(dir_data);
 
         // Mini-FAT 빌드
         let mut mini_fat = Vec::new();
         if mini_fat_sectors_count > 0 && first_mini_fat_sector != Self::END_OF_CHAIN {
-            let mfat_data = Self::read_chain_static(data, &fat, first_mini_fat_sector, sector_size);
+            let mfat_data =
+                Self::read_chain_static(&data, &fat, first_mini_fat_sector, sector_size);
             for chunk in mfat_data.chunks(4) {
                 if chunk.len() == 4 {
                     mini_fat.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
@@ -523,35 +1099,50 @@ impl LenientCfbReader {
 
         // Mini-stream: Root entry의 스트림 데이터
         let mini_stream = if !entries.is_empty() && entries[0].3 == 5 {
-            Self::read_chain_static(data, &fat, entries[0].1, sector_size)
+            let root_size = usize::try_from(entries[0].2)
+                .unwrap_or(MAX_BINARY_BYTES)
+                .min(MAX_BINARY_BYTES);
+            Self::read_chain_static_limited(&data, &fat, entries[0].1, sector_size, root_size)
         } else {
             Vec::new()
         };
 
-        Ok(LenientCfbReader {
-            data: data.to_vec(),
+        let reader = LenientCfbReader {
+            data,
             sector_size,
             entries,
             fat,
             mini_stream,
             mini_fat,
             mini_stream_cutoff,
-        })
+        };
+        reader.validate_stream_budget()?;
+        Ok(reader)
     }
 
     fn read_chain_static(data: &[u8], fat: &[u32], start: u32, sector_size: usize) -> Vec<u8> {
-        let mut result = Vec::new();
+        Self::read_chain_static_limited(data, fat, start, sector_size, data.len())
+    }
+
+    fn read_chain_static_limited(
+        data: &[u8],
+        fat: &[u32],
+        start: u32,
+        sector_size: usize,
+        max_bytes: usize,
+    ) -> Vec<u8> {
+        let mut result = Vec::with_capacity(max_bytes.min(data.len()).min(1024 * 1024));
         let mut sid = start;
         let mut visited = std::collections::HashSet::new();
-        while sid != Self::END_OF_CHAIN && sid != Self::FREE_SECT {
+        while result.len() < max_bytes && sid != Self::END_OF_CHAIN && sid != Self::FREE_SECT {
             if !visited.insert(sid) {
                 break;
             } // 순환 방지
-            let off = 512 + sid as usize * sector_size;
-            if off + sector_size > data.len() {
+            let Some((off, end)) = sector_range(data.len(), sid, sector_size) else {
                 break;
-            }
-            result.extend_from_slice(&data[off..off + sector_size]);
+            };
+            let take = (max_bytes - result.len()).min(end - off);
+            result.extend_from_slice(&data[off..off + take]);
             if (sid as usize) < fat.len() {
                 sid = fat[sid as usize];
             } else {
@@ -563,25 +1154,33 @@ impl LenientCfbReader {
 
     fn read_mini_stream(&self, start: u32, size: u64) -> Vec<u8> {
         let mini_sector_size = 64usize;
-        let mut result = Vec::new();
+        let max_bytes = usize::try_from(size)
+            .unwrap_or(MAX_BINARY_BYTES)
+            .min(MAX_BINARY_BYTES);
+        let mut result = Vec::with_capacity(max_bytes.min(1024 * 1024));
         let mut sid = start;
         let mut visited = std::collections::HashSet::new();
-        while sid != Self::END_OF_CHAIN && sid != Self::FREE_SECT {
+        while result.len() < max_bytes && sid != Self::END_OF_CHAIN && sid != Self::FREE_SECT {
             if !visited.insert(sid) {
                 break;
             }
-            let off = sid as usize * mini_sector_size;
-            if off + mini_sector_size > self.mini_stream.len() {
+            let Some(off) = (sid as usize).checked_mul(mini_sector_size) else {
+                break;
+            };
+            let Some(end) = off.checked_add(mini_sector_size) else {
+                break;
+            };
+            if end > self.mini_stream.len() {
                 break;
             }
-            result.extend_from_slice(&self.mini_stream[off..off + mini_sector_size]);
+            let take = (max_bytes - result.len()).min(mini_sector_size);
+            result.extend_from_slice(&self.mini_stream[off..off + take]);
             if (sid as usize) < self.mini_fat.len() {
                 sid = self.mini_fat[sid as usize];
             } else {
                 break;
             }
         }
-        result.truncate(size as usize);
         result
     }
 
@@ -611,24 +1210,58 @@ impl LenientCfbReader {
             .position(|(name, _, _, _)| name == &target_name)
     }
 
+    fn validate_stream_budget(&self) -> Result<(), CfbError> {
+        let mut total = 0u64;
+        for (name, _, size, obj_type) in &self.entries {
+            if *obj_type != 2 {
+                continue;
+            }
+            let limit = stream_limit(&format!("/{name}")) as u64;
+            if *size > limit {
+                return Err(CfbError::LimitExceeded(limit as usize));
+            }
+            total = total
+                .checked_add(*size)
+                .ok_or(CfbError::LimitExceeded(MAX_CONTAINER_BYTES as usize))?;
+            if total > MAX_CONTAINER_BYTES {
+                return Err(CfbError::LimitExceeded(MAX_CONTAINER_BYTES as usize));
+            }
+        }
+        Ok(())
+    }
+
     pub fn read_stream(&self, path: &str) -> Result<Vec<u8>, CfbError> {
+        self.read_stream_limited(path, usize::MAX)
+    }
+
+    pub fn read_stream_limited(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, CfbError> {
+        let requested_limit = max_bytes.min(lenient_stream_limit(path));
         let idx = self
             .find_entry_idx(path)
             .ok_or_else(|| CfbError::StreamNotFound(path.to_string()))?;
-        let (_, start, size, obj_type) = &self.entries[idx];
+        let (actual_name, start, size, obj_type) = &self.entries[idx];
+        let max_bytes = requested_limit.min(stream_limit(&format!("/{actual_name}")));
         if *obj_type != 2 {
             return Err(CfbError::StreamError(format!(
                 "{}: 스트림이 아님 (type={})",
                 path, obj_type
             )));
         }
+        if *size > max_bytes as u64 {
+            return Err(CfbError::LimitExceeded(max_bytes));
+        }
+        let size = usize::try_from(*size).map_err(|_| CfbError::LimitExceeded(max_bytes))?;
 
-        if *size < self.mini_stream_cutoff as u64 {
-            Ok(self.read_mini_stream(*start, *size))
+        if size < self.mini_stream_cutoff as usize {
+            Ok(self.read_mini_stream(*start, size as u64))
         } else {
-            let mut data = Self::read_chain_static(&self.data, &self.fat, *start, self.sector_size);
-            data.truncate(*size as usize);
-            Ok(data)
+            Ok(Self::read_chain_static_limited(
+                &self.data,
+                &self.fat,
+                *start,
+                self.sector_size,
+                size,
+            ))
         }
     }
 
@@ -637,9 +1270,18 @@ impl LenientCfbReader {
     }
 
     pub fn read_doc_info(&self, compressed: bool) -> Result<Vec<u8>, CfbError> {
-        let raw = self.read_stream("DocInfo")?;
+        self.read_doc_info_limited(compressed, MAX_STRUCTURAL_BYTES)
+    }
+
+    pub fn read_doc_info_limited(
+        &self,
+        compressed: bool,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, CfbError> {
+        let max_bytes = max_bytes.min(MAX_STRUCTURAL_BYTES);
+        let raw = self.read_stream_limited("DocInfo", max_bytes)?;
         if compressed {
-            decompress_stream(&raw)
+            decompress_stream_limited(&raw, max_bytes)
         } else {
             Ok(raw)
         }
@@ -650,10 +1292,20 @@ impl LenientCfbReader {
         index: u32,
         compressed: bool,
     ) -> Result<Vec<u8>, CfbError> {
+        self.read_body_text_section_limited(index, compressed, MAX_STRUCTURAL_BYTES)
+    }
+
+    pub fn read_body_text_section_limited(
+        &self,
+        index: u32,
+        compressed: bool,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, CfbError> {
+        let max_bytes = max_bytes.min(MAX_STRUCTURAL_BYTES);
         let name = format!("Section{}", index);
-        let raw = self.read_stream(&name)?;
+        let raw = self.read_stream_limited(&name, max_bytes)?;
         if compressed {
-            decompress_stream(&raw)
+            decompress_stream_limited(&raw, max_bytes)
         } else {
             Ok(raw)
         }
@@ -665,7 +1317,11 @@ impl LenientCfbReader {
 
     /// FileHeader 스트림 읽기 (256바이트, 항상 비압축)
     pub fn read_file_header(&self) -> Result<Vec<u8>, CfbError> {
-        self.read_stream("FileHeader")
+        self.read_file_header_limited(MAX_STRUCTURAL_BYTES)
+    }
+
+    pub fn read_file_header_limited(&self, max_bytes: usize) -> Result<Vec<u8>, CfbError> {
+        self.read_stream_limited("FileHeader", max_bytes)
     }
 
     /// 본문 섹션 스트림 읽기 (배포용 ViewText 지원)
@@ -675,18 +1331,34 @@ impl LenientCfbReader {
         compressed: bool,
         distribution: bool,
     ) -> Result<Vec<u8>, CfbError> {
+        self.read_body_text_section_full_limited(
+            index,
+            compressed,
+            distribution,
+            MAX_STRUCTURAL_BYTES,
+        )
+    }
+
+    pub fn read_body_text_section_full_limited(
+        &self,
+        index: u32,
+        compressed: bool,
+        distribution: bool,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, CfbError> {
+        let max_bytes = max_bytes.min(MAX_STRUCTURAL_BYTES);
         if distribution {
             let viewtext_name = format!("Section{}", index);
             // ViewText 하위 스트림 탐색
             if self.has_stream(&viewtext_name) {
-                return self.read_stream(&viewtext_name);
+                return self.read_stream_limited(&viewtext_name, max_bytes);
             }
         }
 
         let name = format!("Section{}", index);
-        let raw = self.read_stream(&name)?;
+        let raw = self.read_stream_limited(&name, max_bytes)?;
         if compressed {
-            decompress_stream(&raw)
+            decompress_stream_limited(&raw, max_bytes)
         } else {
             Ok(raw)
         }
@@ -711,27 +1383,12 @@ impl LenientCfbReader {
 ///
 /// HWP는 raw deflate (wbits=-15) 사용. 실패 시 표준 zlib도 시도.
 pub fn decompress_stream(data: &[u8]) -> Result<Vec<u8>, CfbError> {
-    // raw deflate (wbits=-15) 시도
-    use flate2::read::DeflateDecoder;
-    let mut decoder = DeflateDecoder::new(data);
-    let mut decompressed = Vec::new();
-    match decoder.read_to_end(&mut decompressed) {
-        Ok(_) => return Ok(decompressed),
-        Err(_) => {}
-    }
-
-    // 표준 zlib 시도
-    use flate2::read::ZlibDecoder;
-    let mut decoder = ZlibDecoder::new(data);
-    let mut decompressed = Vec::new();
-    match decoder.read_to_end(&mut decompressed) {
-        Ok(_) => Ok(decompressed),
-        Err(e) => Err(CfbError::DecompressError(e.to_string())),
-    }
+    decompress_stream_limited(data, MAX_BINARY_BYTES)
 }
 
 /// zlib/raw-deflate 데이터를 `max_bytes` 바이트까지만 압축 해제한다.
 pub fn decompress_stream_limited(data: &[u8], max_bytes: usize) -> Result<Vec<u8>, CfbError> {
+    let max_bytes = max_bytes.min(MAX_BINARY_BYTES);
     fn decode_limited<R: Read>(reader: R, max_bytes: usize) -> Result<Vec<u8>, CfbError> {
         let mut output = Vec::new();
         reader
@@ -762,6 +1419,72 @@ pub fn decompress_stream_limited(data: &[u8], max_bytes: usize) -> Result<Vec<u8
 mod tests {
     use super::*;
 
+    #[test]
+    fn utf16_preview_decoder_preserves_surrogate_pairs_within_the_bound() {
+        let encoded = "한글😀";
+        let bytes = encoded
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(decode_utf16le_bounded(&bytes, 64).as_deref(), Some(encoded));
+        assert!(decode_utf16le_bounded(&bytes, encoded.len() - 1).is_none());
+    }
+
+    #[test]
+    fn lenient_stream_limits_normalize_unprefixed_structural_names() {
+        assert_eq!(lenient_stream_limit("DocInfo"), MAX_STRUCTURAL_BYTES);
+        assert_eq!(
+            lenient_stream_limit("BodyText/Section0"),
+            MAX_STRUCTURAL_BYTES
+        );
+        assert_eq!(lenient_stream_limit("/DocInfo"), MAX_STRUCTURAL_BYTES);
+        assert_eq!(lenient_stream_limit("//DocInfo"), MAX_STRUCTURAL_BYTES);
+        assert_eq!(
+            lenient_stream_limit("///BodyText/Section0"),
+            MAX_STRUCTURAL_BYTES
+        );
+        assert_eq!(
+            lenient_stream_limit("BinData/BIN0001.png"),
+            MAX_BINARY_BYTES
+        );
+    }
+
+    #[test]
+    fn bindata_storage_names_reject_cross_platform_path_aliases() {
+        assert!(validate_bin_data_storage_name("BIN0001.png").is_ok());
+        for name in [
+            "BIN0001.x/../../DocInfo",
+            "BIN0001.x\\..\\..\\DocInfo",
+            "BIN0001:png",
+            "BIN0001!png",
+            ".",
+            "..",
+        ] {
+            assert!(
+                validate_bin_data_storage_name(name).is_err(),
+                "unsafe BinData name was accepted: {name:?}"
+            );
+        }
+        assert!(validate_bin_data_storage_name(&"A".repeat(32)).is_err());
+    }
+
+    #[test]
+    fn lenient_reads_apply_the_limit_of_the_resolved_entry() {
+        let reader = LenientCfbReader {
+            data: Arc::from(Vec::<u8>::new()),
+            sector_size: 512,
+            entries: vec![("DocInfo".to_string(), 0, MAX_STRUCTURAL_BYTES as u64 + 1, 2)],
+            fat: Vec::new(),
+            mini_stream: Vec::new(),
+            mini_fat: Vec::new(),
+            mini_stream_cutoff: 4096,
+        };
+        assert!(matches!(
+            reader.read_stream_limited("BinData/DocInfo", usize::MAX),
+            Err(CfbError::LimitExceeded(limit)) if limit == MAX_STRUCTURAL_BYTES
+        ));
+    }
+
     // ── LenientCfbReader 헤더 필드 검증 ──────────────────────────────────
     //
     // LenientCfbReader 는 엄격 파서가 실패한 뒤에만 쓰인다(parser/mod.rs). 즉 입력 모집단이
@@ -778,6 +1501,93 @@ mod tests {
         d[32..34].copy_from_slice(&6u16.to_le_bytes()); // mini sector size = 1 << 6
         d[68..72].copy_from_slice(&0xFFFF_FFFEu32.to_le_bytes()); // first DIFAT = EOC
         d
+    }
+
+    fn nested_directory_chain(component_count: usize) -> Vec<CfbDirectoryPreflightEntry> {
+        let mut entries = Vec::with_capacity(component_count + 1);
+        entries.push(CfbDirectoryPreflightEntry {
+            object_type: 5,
+            name_utf8_bytes: "Root Entry".len(),
+            left_sibling: CFB_NO_STREAM,
+            right_sibling: CFB_NO_STREAM,
+            child: if component_count == 0 {
+                CFB_NO_STREAM
+            } else {
+                1
+            },
+        });
+        for component in 0..component_count {
+            let is_leaf = component + 1 == component_count;
+            entries.push(CfbDirectoryPreflightEntry {
+                object_type: if is_leaf { 2 } else { 1 },
+                name_utf8_bytes: 1,
+                left_sibling: CFB_NO_STREAM,
+                right_sibling: CFB_NO_STREAM,
+                child: if is_leaf {
+                    CFB_NO_STREAM
+                } else {
+                    u32::try_from(component + 2).expect("bounded test directory id")
+                },
+            });
+        }
+        entries
+    }
+
+    #[test]
+    fn strict_preflight_bounds_nested_path_amplification_iteratively() {
+        // "/a" repeated 2,048 times is exactly 4,096 UTF-8 bytes. A directory
+        // walker that materializes every ancestor path performs O(n²) path work
+        // over this compact chain, so reject the very next component before the
+        // `cfb` crate can construct any PathBufs.
+        let at_limit = nested_directory_chain(MAX_CFB_PATH_BYTES / 2);
+        assert!(validate_cfb_directory_path_budget(&at_limit).is_ok());
+
+        let over_limit = nested_directory_chain(MAX_CFB_PATH_BYTES / 2 + 1);
+        assert!(matches!(
+            validate_cfb_directory_path_budget(&over_limit),
+            Err(CfbError::DirectoryPathLimitExceeded { actual, limit })
+                if actual == MAX_CFB_PATH_BYTES + 2 && limit == MAX_CFB_PATH_BYTES
+        ));
+    }
+
+    #[test]
+    fn strict_and_lenient_open_reject_directory_entry_bombs_before_parsing() {
+        let sector_size = 512usize;
+        let entries_per_directory_sector = sector_size / 128;
+        let directory_sector_count = MAX_CFB_DIRECTORY_ENTRIES / entries_per_directory_sector + 1;
+        let physical_sector_count = directory_sector_count + 9;
+        let mut data = minimal_header();
+        data.resize((physical_sector_count + 1) * sector_size, 0);
+        data[44..48].copy_from_slice(&9u32.to_le_bytes());
+        data[48..52].copy_from_slice(&9u32.to_le_bytes());
+        for fat_index in 0..9usize {
+            data[76 + fat_index * 4..80 + fat_index * 4]
+                .copy_from_slice(&(fat_index as u32).to_le_bytes());
+            let fat_offset = (fat_index + 1) * sector_size;
+            data[fat_offset..fat_offset + sector_size].fill(0xFF);
+        }
+        for index in 0..directory_sector_count {
+            let sid = 9 + index;
+            let next = if index + 1 == directory_sector_count {
+                LenientCfbReader::END_OF_CHAIN
+            } else {
+                (sid + 1) as u32
+            };
+            let fat_sector = sid / (sector_size / 4);
+            let fat_offset = (fat_sector + 1) * sector_size + (sid % (sector_size / 4)) * 4;
+            data[fat_offset..fat_offset + 4].copy_from_slice(&next.to_le_bytes());
+        }
+
+        assert!(matches!(
+            CfbReader::open(&data),
+            Err(CfbError::DirectoryEntryLimitExceeded { limit, .. })
+                if limit == MAX_CFB_DIRECTORY_ENTRIES
+        ));
+        assert!(matches!(
+            LenientCfbReader::open(&data),
+            Err(CfbError::DirectoryEntryLimitExceeded { limit, .. })
+                if limit == MAX_CFB_DIRECTORY_ENTRIES
+        ));
     }
 
     #[test]
@@ -811,6 +1621,54 @@ mod tests {
             LenientCfbReader::open(&d).is_err(),
             "shift overflow 대신 Err 이어야 함"
         );
+    }
+
+    #[test]
+    fn lenient_open_rejects_impossible_fat_count_before_allocating() {
+        let mut d = minimal_header();
+        d[44..48].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(matches!(
+            LenientCfbReader::open(&d),
+            Err(CfbError::OpenError(message)) if message.contains("FAT sectors")
+        ));
+    }
+
+    #[test]
+    fn lenient_open_caps_surplus_legacy_fat_sectors_to_the_physical_index_budget() {
+        for relative in [
+            "samples/issue2063_huge_cellbreak_table.hwp",
+            "samples/pic2.hwp",
+            "samples/task2097/18095317_eogu_geumji.hwp",
+        ] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+            let data = std::fs::read(&path).expect("legacy CFB fixture");
+            LenientCfbReader::open(&data)
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        }
+    }
+
+    #[test]
+    fn sector_offsets_use_checked_arithmetic_and_physical_bounds() {
+        assert_eq!(sector_range(1024, 0, 512), Some((512, 1024)));
+        assert_eq!(sector_range(1024, 1, 512), None);
+        assert_eq!(sector_range(1024, u32::MAX, 4096), None);
+    }
+
+    #[test]
+    fn lenient_stream_read_stops_at_declared_size_not_chain_length() {
+        let mut data = vec![0u8; 512 + 3 * 512];
+        data[512] = 0xAB;
+        let reader = LenientCfbReader {
+            data: Arc::from(data),
+            sector_size: 512,
+            entries: vec![("Payload".to_string(), 0, 1, 2)],
+            fat: vec![1, 2, LenientCfbReader::END_OF_CHAIN],
+            mini_stream: Vec::new(),
+            mini_fat: Vec::new(),
+            mini_stream_cutoff: 0,
+        };
+
+        assert_eq!(reader.read_stream("Payload").unwrap(), vec![0xAB]);
     }
 
     #[test]
@@ -957,6 +1815,28 @@ mod tests {
             decompress_stream_limited(&compressed, original.len()).unwrap(),
             original
         );
+    }
+
+    #[test]
+    fn aggregate_remainder_limits_decompression_before_a_full_member_allocation() {
+        use flate2::write::DeflateEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let original = vec![b'A'; 8];
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(&original).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let member_limit = crate::parser::limits::remaining_container_member_limit(
+            MAX_CONTAINER_BYTES - 7,
+            MAX_STRUCTURAL_BYTES,
+        );
+
+        assert_eq!(member_limit, 7);
+        assert!(matches!(
+            decompress_stream_limited(&compressed, member_limit),
+            Err(CfbError::LimitExceeded(7))
+        ));
     }
 
     #[test]

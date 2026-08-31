@@ -9,7 +9,29 @@ import { promises as fs } from 'node:fs';
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_REDIRECTS = 5;
 const DEFAULT_MAX_BYTES = 100 * 1024 * 1024;
+const DEFAULT_MAX_FILES_PER_CHAT = 20;
+const DEFAULT_MAX_CHAT_BYTES = 512 * 1024 * 1024;
 const DEFAULT_FREE_SPACE_RESERVE = 50 * 1024 * 1024;
+
+const blockedIpv6 = new net.BlockList();
+for (const [network, prefix] of [
+  ['::', 96], // IPv4-compatible addresses, including ::127.0.0.1.
+  ['::ffff:0:0', 96], // IPv4-mapped addresses use the ordinary A route instead.
+  ['64:ff9b::', 96], // NAT64 can otherwise translate to private IPv4 space.
+  ['64:ff9b:1::', 48],
+  ['100::', 64],
+  ['2001::', 32], // Teredo.
+  ['2001:2::', 48],
+  ['2001:10::', 28],
+  ['2001:20::', 28],
+  ['2001:db8::', 32],
+  ['2002::', 16], // 6to4 embeds an IPv4 destination.
+  ['3fff::', 20],
+  ['fc00::', 7],
+  ['fe80::', 10],
+  ['fec0::', 10],
+  ['ff00::', 8],
+]) blockedIpv6.addSubnet(network, prefix, 'ipv6');
 
 function downloadError(code, message) {
   const error = new Error(message);
@@ -36,7 +58,7 @@ function isPublicIpv4(address) {
     || a >= 224);
 }
 
-function isPublicAddress(address) {
+export function isPublicAddress(address) {
   const family = net.isIP(address);
   if (family === 4) return isPublicIpv4(address);
   if (family !== 6) return false;
@@ -49,13 +71,7 @@ function isPublicAddress(address) {
     const low = Number.parseInt(mappedHex[2], 16);
     return isPublicIpv4(`${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`);
   }
-  return normalized !== '::'
-    && normalized !== '::1'
-    && !normalized.startsWith('fc')
-    && !normalized.startsWith('fd')
-    && !/^fe[89ab]/.test(normalized)
-    && !normalized.startsWith('ff')
-    && !normalized.startsWith('2001:db8');
+  return !blockedIpv6.check(normalized, 'ipv6');
 }
 
 async function resolvePublicAddress(hostname) {
@@ -115,7 +131,11 @@ export function sanitizeFilename(value, fallback = 'download') {
     .replace(/^\.+/, '')
     .replace(/[. ]+$/g, '')
     .trim();
-  const safe = normalized || fallback;
+  let safe = normalized || fallback;
+  const stem = path.basename(safe, path.extname(safe));
+  if (/^(?:con|prn|aux|nul|conin\$|conout\$|com[1-9]|lpt[1-9])$/i.test(stem)) {
+    safe = `_${safe}`;
+  }
   const ext = path.extname(safe);
   const stemLimit = Math.max(1, 180 - ext.length);
   return `${path.basename(safe, ext).slice(0, stemLimit)}${ext.slice(0, 30)}`;
@@ -124,6 +144,13 @@ export function sanitizeFilename(value, fallback = 'download') {
 export function isPathInside(parent, candidate) {
   const relative = path.relative(path.resolve(parent), path.resolve(candidate));
   return relative !== '' && !relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative);
+}
+
+export function pathsOverlap(first, second) {
+  const left = path.resolve(first);
+  const right = path.resolve(second);
+  if (left === right) return true;
+  return isPathInside(left, right) || isPathInside(right, left);
 }
 
 function sessionDirectoryName(sessionId) {
@@ -170,6 +197,24 @@ async function assertDiskCapacity(directory, incomingBytes, reserveBytes) {
   }
 }
 
+async function chatUsage(directory) {
+  let files = 0;
+  let bytes = 0;
+  for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+    const candidate = path.join(directory, entry.name);
+    const stat = await fs.lstat(candidate);
+    if (!entry.isFile() || stat.isSymbolicLink()) {
+      throw downloadError('DOWNLOAD_PATH_UNSAFE', 'Download chat directory contains a non-plain file');
+    }
+    files += 1;
+    bytes += stat.size;
+    if (!Number.isSafeInteger(bytes)) {
+      throw downloadError('DOWNLOAD_QUOTA_EXCEEDED', 'Download chat storage accounting overflowed');
+    }
+  }
+  return { files, bytes };
+}
+
 async function openUniqueFile(directory, requestedName) {
   const safeName = sanitizeFilename(requestedName);
   const ext = path.extname(safeName);
@@ -188,6 +233,13 @@ async function openUniqueFile(directory, requestedName) {
   throw downloadError('DOWNLOAD_NAME_EXHAUSTED', 'Could not allocate a unique download filename');
 }
 
+async function cancelResponseBody(response) {
+  try {
+    if (typeof response?.body?.cancel === 'function') await response.body.cancel();
+    else response?.body?.destroy?.();
+  } catch {}
+}
+
 async function fetchWithRedirects(url, { signal, maxRedirects, fetchImpl }) {
   let current = new URL(url);
   for (let count = 0; count <= maxRedirects; count++) {
@@ -196,13 +248,16 @@ async function fetchWithRedirects(url, { signal, maxRedirects, fetchImpl }) {
     }
     const response = await fetchImpl(current, { redirect: 'manual', signal });
     if (![301, 302, 303, 307, 308].includes(response.status)) return { response, finalUrl: current.href };
-    if (count === maxRedirects) throw downloadError('DOWNLOAD_REDIRECT_LIMIT', `Download exceeded ${maxRedirects} redirects`);
+    if (count === maxRedirects) {
+      await cancelResponseBody(response);
+      throw downloadError('DOWNLOAD_REDIRECT_LIMIT', `Download exceeded ${maxRedirects} redirects`);
+    }
     const location = response.headers.get('location');
-    if (!location) throw downloadError('DOWNLOAD_REDIRECT_INVALID', 'Redirect response did not include a Location header');
-    try {
-      if (typeof response.body?.cancel === 'function') await response.body.cancel();
-      else response.body?.destroy?.();
-    } catch {}
+    if (!location) {
+      await cancelResponseBody(response);
+      throw downloadError('DOWNLOAD_REDIRECT_INVALID', 'Redirect response did not include a Location header');
+    }
+    await cancelResponseBody(response);
     current = new URL(location, current);
   }
   throw downloadError('DOWNLOAD_REDIRECT_LIMIT', `Download exceeded ${maxRedirects} redirects`);
@@ -210,16 +265,25 @@ async function fetchWithRedirects(url, { signal, maxRedirects, fetchImpl }) {
 
 export class DownloadManager {
   /**
-   * @param {{rootDir: string, timeoutMs?: number, maxRedirects?: number, maxBytes?: number, freeSpaceReserve?: number, fetchImpl?: typeof fetch}} options
+   * @param {{rootDir: string, timeoutMs?: number, maxRedirects?: number, maxBytes?: number,
+   *   maxFilesPerChat?: number, maxChatBytes?: number, freeSpaceReserve?: number,
+   *   writableRoot?: string, fetchImpl?: typeof fetch}} options
    */
   constructor(options) {
+    if (!options?.rootDir) throw new Error('DownloadManager requires a hub-owned rootDir');
+    if (options.writableRoot && pathsOverlap(options.rootDir, options.writableRoot)) {
+      throw new Error('DownloadManager storage must not overlap the provider-writable root');
+    }
     this.agentDir = path.resolve(options.rootDir, '.rhwp-agent');
     this.baseDir = path.resolve(this.agentDir, 'downloads');
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.maxRedirects = options.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
     this.maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
+    this.maxFilesPerChat = options.maxFilesPerChat ?? DEFAULT_MAX_FILES_PER_CHAT;
+    this.maxChatBytes = options.maxChatBytes ?? DEFAULT_MAX_CHAT_BYTES;
     this.freeSpaceReserve = options.freeSpaceReserve ?? DEFAULT_FREE_SPACE_RESERVE;
     this.fetchImpl = options.fetchImpl ?? safeNetworkFetch;
+    this.chatQueues = new Map();
   }
 
   chatDirectory(sessionId) {
@@ -228,7 +292,18 @@ export class DownloadManager {
     return directory;
   }
 
-  async download({ sessionId, url, filename }) {
+  download(args) {
+    const queueKey = sessionDirectoryName(args.sessionId);
+    const previous = this.chatQueues.get(queueKey) ?? Promise.resolve();
+    const running = previous.then(() => this.downloadSerial(args), () => this.downloadSerial(args));
+    const tail = running.catch(() => {});
+    this.chatQueues.set(queueKey, tail);
+    return running.finally(() => {
+      if (this.chatQueues.get(queueKey) === tail) this.chatQueues.delete(queueKey);
+    });
+  }
+
+  async downloadSerial({ sessionId, url, filename }) {
     const originalUrl = new URL(url);
     if (originalUrl.protocol !== 'http:' && originalUrl.protocol !== 'https:') {
       throw downloadError('DOWNLOAD_URL_INVALID', 'Downloads must use http or https');
@@ -237,23 +312,35 @@ export class DownloadManager {
     await ensurePlainDirectory(this.agentDir);
     await ensurePlainDirectory(this.baseDir);
     await ensurePlainDirectory(directory);
+    const existing = await chatUsage(directory);
+    if (existing.files >= this.maxFilesPerChat) {
+      throw downloadError('DOWNLOAD_FILE_LIMIT', `A chat can keep at most ${this.maxFilesPerChat} downloads`);
+    }
     await assertDiskCapacity(directory, this.maxBytes, this.freeSpaceReserve);
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     let destination = null;
     let handle = null;
+    let response = null;
+    let responseBodyFinished = false;
     try {
-      const { response, finalUrl } = await fetchWithRedirects(originalUrl, {
+      const fetched = await fetchWithRedirects(originalUrl, {
         signal: controller.signal,
         maxRedirects: this.maxRedirects,
         fetchImpl: this.fetchImpl,
       });
+      ({ response } = fetched);
+      const { finalUrl } = fetched;
       if (!response.ok) throw downloadError('DOWNLOAD_HTTP_ERROR', `Download failed with HTTP ${response.status}`);
       if (!response.body) throw downloadError('DOWNLOAD_EMPTY_RESPONSE', 'Download response had no body');
       const declaredSize = Number(response.headers.get('content-length'));
       if (Number.isFinite(declaredSize) && declaredSize > this.maxBytes) {
         throw downloadError('DOWNLOAD_TOO_LARGE', `Download exceeds the ${this.maxBytes}-byte safety limit`);
+      }
+      if (Number.isFinite(declaredSize) && declaredSize >= 0
+        && existing.bytes + declaredSize > this.maxChatBytes) {
+        throw downloadError('DOWNLOAD_CHAT_QUOTA', `Downloads exceed the ${this.maxChatBytes}-byte chat limit`);
       }
       if (Number.isFinite(declaredSize) && declaredSize >= 0) {
         await assertDiskCapacity(directory, declaredSize, this.freeSpaceReserve);
@@ -267,9 +354,13 @@ export class DownloadManager {
         const chunk = Buffer.from(rawChunk);
         size += chunk.length;
         if (size > this.maxBytes) throw downloadError('DOWNLOAD_TOO_LARGE', `Download exceeds the ${this.maxBytes}-byte safety limit`);
+        if (existing.bytes + size > this.maxChatBytes) {
+          throw downloadError('DOWNLOAD_CHAT_QUOTA', `Downloads exceed the ${this.maxChatBytes}-byte chat limit`);
+        }
         hash.update(chunk);
         await handle.write(chunk);
       }
+      responseBodyFinished = true;
       await handle.sync();
       await handle.close();
       handle = null;
@@ -291,6 +382,7 @@ export class DownloadManager {
       throw downloadError('DOWNLOAD_FAILED', String(error?.message ?? error));
     } finally {
       clearTimeout(timer);
+      if (!responseBodyFinished) await cancelResponseBody(response);
     }
   }
 }

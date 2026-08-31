@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createRauCreditsClient, storeRauAccessToken } from '../rau-credits-client.mjs';
+import {
+  createPkceProof,
+  createRauCreditsClient,
+  storeRauAccessToken,
+  storeRauApiKey,
+} from '../rau-credits-client.mjs';
 
 function jsonResponse(body, { ok = true, status = 200 } = {}) {
   return { ok, status, json: async () => body };
@@ -67,6 +72,23 @@ test('Rau redeem rejects an outdated ready response instead of polling until exp
   assert.equal(clock, 0);
 });
 
+test('Rau key storage receives the auth-run cancellation signal', async () => {
+  const abort = new AbortController();
+  let receivedSignal = null;
+  let committed = false;
+  await storeRauApiKey(async (_key, options = {}) => {
+    receivedSignal = options.signal;
+    options.onCommitted?.();
+    return { setupComplete: true };
+  }, 'sk-or-v1-ready', {
+    signal: abort.signal,
+    onCommitted: () => { committed = true; },
+  });
+
+  assert.equal(receivedSignal, abort.signal);
+  assert.equal(committed, true);
+});
+
 test('Rau credit acknowledgement is sent only after local setup can succeed', async () => {
   const calls = [];
   const client = createRauCreditsClient({
@@ -82,6 +104,43 @@ test('Rau credit acknowledgement is sent only after local setup can succeed', as
     url: 'https://credits.rau.test/v1/device-sessions/device%2Fa/acknowledge',
     method: 'POST',
   }]);
+});
+
+test('Rau v2 creates PKCE sessions and sends proof only in POST bodies', async () => {
+  const calls = [];
+  const client = createRauCreditsClient({
+    baseUrl: 'https://credits.rau.test',
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url, init });
+      if (url.endsWith('/v2/device-sessions')) {
+        return jsonResponse({ id: 'device/a', loginUrl: 'https://credits.rau.test/login?device=x' }, { status: 201 });
+      }
+      return jsonResponse({ status: 'ready', apiKey: 'sk-or-v1-v2' });
+    },
+  });
+  const session = await client.createDeviceSessionV2({
+    redirectUri: 'http://127.0.0.1:4321/oauth/rau/callback',
+    callbackState: 's'.repeat(32),
+    clientVersion: '1.2.0',
+  });
+  assert.match(session.codeVerifier, /^[A-Za-z0-9_-]{43}$/);
+  const createBody = JSON.parse(calls[0].init.body);
+  assert.equal(createBody.codeChallengeMethod, 'S256');
+  assert.equal(createBody.codeChallenge.length, 43);
+  assert.equal(createBody.codeChallenge.includes(session.codeVerifier), false);
+
+  const proof = { kind: 'manual', code: 'ABCD-EFGH-JKLM' };
+  await client.redeemDeviceSessionV2(session.id, session.codeVerifier, proof);
+  assert.equal(calls[1].url, 'https://credits.rau.test/v2/device-sessions/device%2Fa/redeem');
+  assert.equal(calls[1].url.includes(session.codeVerifier), false);
+  assert.deepEqual(JSON.parse(calls[1].init.body), { codeVerifier: session.codeVerifier, proof });
+});
+
+test('PKCE helper returns an S256 verifier/challenge pair', () => {
+  const proof = createPkceProof();
+  assert.match(proof.codeVerifier, /^[A-Za-z0-9_-]{43}$/);
+  assert.match(proof.codeChallenge, /^[A-Za-z0-9_-]{43}$/);
+  assert.notEqual(proof.codeVerifier, proof.codeChallenge);
 });
 
 test('new Rau access tokens are retried while proxy state propagates', async () => {
@@ -184,6 +243,24 @@ test('Rau credit requests time out while reading the response body', async () =>
     () => client.createDeviceSession(),
     { code: 'RAU_CREDITS_TIMEOUT' },
   );
+});
+
+test('Rau credit responses cancel declared oversized bodies before reading', async () => {
+  let cancelled = false;
+  const client = createRauCreditsClient({
+    fetchImpl: async () => new Response(new ReadableStream({
+      cancel() { cancelled = true; },
+    }), {
+      status: 200,
+      headers: { 'content-length': String((64 * 1024) + 1) },
+    }),
+  });
+
+  await assert.rejects(
+    () => client.createDeviceSession(),
+    { code: 'RAU_CREDITS_RESPONSE_TOO_LARGE' },
+  );
+  assert.equal(cancelled, true);
 });
 
 test('Rau cancellation reaches fetch and is never retried', async () => {

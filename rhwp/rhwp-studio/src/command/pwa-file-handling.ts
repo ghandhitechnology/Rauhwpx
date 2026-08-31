@@ -1,5 +1,6 @@
 import {
   isSupportedDocumentFileName,
+  readFileFromHandle,
   type FileSystemFileHandleLike,
 } from './file-system-access.ts';
 
@@ -30,17 +31,6 @@ export interface PwaFileHandlingCallbacks {
   notifyMultipleFiles?(count: number): void;
 }
 
-async function readLaunchFileFromHandle(handle: FileSystemFileHandleLike): Promise<{
-  name: string;
-  bytes: Uint8Array;
-}> {
-  const file = await handle.getFile();
-  return {
-    name: file.name,
-    bytes: new Uint8Array(await file.arrayBuffer()),
-  };
-}
-
 export async function handlePwaLaunchFiles(
   params: FileHandlingLaunchParamsLike,
   callbacks: PwaFileHandlingCallbacks,
@@ -56,7 +46,7 @@ export async function handlePwaLaunchFiles(
   }
 
   try {
-    const { bytes, name } = await readLaunchFileFromHandle(handle);
+    const { bytes, name } = await readFileFromHandle(handle);
     if (!isSupportedDocumentFileName(name)) {
       callbacks.notifyUnsupportedFile(name);
       return;

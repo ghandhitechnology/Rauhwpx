@@ -6,11 +6,27 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import spawn from 'cross-spawn';
 import { WebSocketServer } from 'ws';
-import { createClaudeSession, prepareClaudeHome } from './agents/claude.mjs';
-import { createCodexSession, prepareCodexHome } from './agents/codex.mjs';
+import {
+  createClaudeSession,
+  flushClaudeCredentialMirrors,
+  prepareClaudeHome,
+} from './agents/claude.mjs';
+import {
+  createCodexSession,
+  flushCodexCredentialMirror,
+  prepareCodexHome,
+} from './agents/codex.mjs';
 import { createPiSession, isOpenRouterCreditError } from './agents/pi.mjs';
-import { createGrokSession, prepareGrokHome } from './agents/grok.mjs';
-import { createCursorSession, prepareCursorHome } from './agents/cursor.mjs';
+import {
+  createGrokSession,
+  flushGrokCredentialMirror,
+  prepareGrokHome,
+} from './agents/grok.mjs';
+import {
+  createCursorSession,
+  flushCursorCredentialMirrors,
+  prepareCursorHome,
+} from './agents/cursor.mjs';
 import { generateChatTitle } from './agents/title.mjs';
 import {
   CHECKPOINT_TITLE_OVERALL_TIMEOUT_MS,
@@ -50,6 +66,7 @@ import {
   RAU_SECRET_ID,
 } from './pi-manager.mjs';
 import { createRauCreditsClient, storeRauAccessToken } from './rau-credits-client.mjs';
+import { AuthRunRegistry } from './auth-run-registry.mjs';
 import { createCliSetupManager } from './cli-setup-manager.mjs';
 import { createOpenRouter, creditBalanceEmpty } from './openrouter.mjs';
 import { createIpcSecretStore } from './secret-store.mjs';
@@ -81,26 +98,47 @@ import { createTemplateHttpHandler } from './template-http.mjs';
 import {
   buildCopyLayoutCompletionPrompt,
   buildCopyLayoutWorkerPrompt,
+  claimCopyLayoutPublication,
+  claimCopyLayoutSettlement,
+  claimCopyLayoutSnapshot,
+  COPY_LAYOUT_MAX_ITERATIONS,
   copyLayoutPhaseIndex,
   defaultTemplateName,
+  releaseCopyLayoutPublication,
+  releaseCopyLayoutSnapshot,
   taskProgressForJob,
 } from './template-perfection.mjs';
-import { copyLayoutShellAllowPrefixes } from './copy-layout-shell.mjs';
+import { runCopyLayoutHelper } from './copy-layout-runner.mjs';
 import { z } from 'zod/v3';
-import { terminateProcessTree } from './process-tree.mjs';
 import {
-  authenticateHubSession,
+  PROCESS_TREE_CLEANUP_OUTCOME,
+  terminateAndWaitForProcessTreeExitOutcome,
+  terminateProcessTree,
+} from './process-tree.mjs';
+import {
+  ensureCredentialRetentionRootSync,
+  hasPendingCredentialCopybackSync,
+  hasPendingLaunchCleanupSync,
+  retainLaunchRootForProcessCleanupSync,
+} from './credential-mirror.mjs';
+import {
   authenticateMasterToken,
+  HUB_CAPABILITY_AUDIENCES,
   HubSessionRegistry,
-  issueScopedHubToken,
+  mcpProviderResource,
   resolveHubIdentity,
   timingSafeTextEqual,
 } from './hub-session-registry.mjs';
+import {
+  AUTH_CODE_MAX_BYTES,
+  boundTextFields,
+  textFitsByteLimit,
+} from './input-bounds.mjs';
 
 const REQUESTED_PORT = Number(process.env.RHWP_AGENT_PORT ?? 5175);
 const PRODUCTION = process.env.NODE_ENV === 'production' || process.env.RHWP_AGENT_MODE === 'production';
 const { token: TOKEN, development: DEVELOPMENT_AUTH, launchId: LAUNCH_ID } = resolveHubIdentity();
-const PROTOCOL_VERSION = 4;
+const PROTOCOL_VERSION = 5;
 const HUB_NAME = 'rhwp-agent';
 const STARTED_AT = Date.now();
 // The bundle is discovery-only. Every per-window cwd, home, download, and
@@ -117,8 +155,30 @@ const RUNTIME_ROOT = process.env.RHWP_RUNTIME_DIR
   : null;
 const RECORDS_ROOT = path.join(WORK_ROOT, 'sessions');
 await fs.mkdir(RECORDS_ROOT, { recursive: true, mode: 0o700 });
+ensureCredentialRetentionRootSync(WORK_ROOT);
 let hubPort = REQUESTED_PORT;
 const STUDIO_TOOL_TIMEOUT_MS = 30_000;
+const MAX_CHAT_MESSAGE_CHARS = 128_000;
+const PLAN_CHANGE_TEXT_LIMITS = Object.freeze({
+  planId: 256,
+  promptOverride: MAX_CHAT_MESSAGE_CHARS,
+  feedback: MAX_CHAT_MESSAGE_CHARS,
+  reason: 4_000,
+});
+const SKILL_DRAFT_TEXT_LIMITS = Object.freeze({
+  goal: 8_000,
+  triggerExamples: 16_000,
+  nonTriggerExamples: 16_000,
+  resourceNotes: 16_000,
+  existingSkill: 128_000,
+  model: 256,
+});
+const MAX_SEMANTIC_REQUEST_BYTES = 512 * 1024;
+const MAX_PENDING_STUDIO_TOOL_CALLS = 64;
+// One 64 MiB snapshot expands to about 85.4 MiB as base64. Keep room for a
+// handful of small control messages without retaining a second giant frame.
+const MAX_STUDIO_QUEUED_FRAME_BYTES = 96 * 1024 * 1024;
+const MAX_STUDIO_QUEUED_MESSAGES = 64;
 // 스튜디오가 끊긴 뒤 다시 붙기를 기다려 주는 시간 — 브리지의 첫 재접속 백오프(250·500ms)보다
 // 넉넉하되, 탭이 아주 닫힌 경우 30초 타임아웃까지 끌지 않을 만큼 짧게 잡는다.
 const STUDIO_REATTACH_GRACE_MS = Number(process.env.RHWP_STUDIO_REATTACH_GRACE_MS ?? 5_000);
@@ -129,10 +189,21 @@ const HARNESS_UPDATE_INITIAL_DELAY_MS = 8_000;
 const HARNESS_UPDATE_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const HARNESS_UPDATE_BUSY_RETRY_MS = 5 * 60 * 1000;
 const HARNESS_UPDATE_FAILURE_RETRY_MS = 60 * 60 * 1000;
+const configuredOrphanIdleShutdownMs = Number(process.env.RHWP_ORPHAN_IDLE_SHUTDOWN_MS);
+const ORPHAN_IDLE_SHUTDOWN_MS = Number.isSafeInteger(configuredOrphanIdleShutdownMs)
+  && configuredOrphanIdleShutdownMs >= 100
+  ? configuredOrphanIdleShutdownMs
+  : 15 * 60 * 1000;
+const configuredOrphanHardShutdownMs = Number(process.env.RHWP_ORPHAN_HARD_SHUTDOWN_MS);
+const ORPHAN_HARD_SHUTDOWN_MS = Number.isSafeInteger(configuredOrphanHardShutdownMs)
+  && configuredOrphanHardShutdownMs >= 100
+  ? Math.max(configuredOrphanHardShutdownMs, ORPHAN_IDLE_SHUTDOWN_MS)
+  : 30 * 60 * 1000;
 const toolDefinitionsByName = new Map(TOOL_DEFINITIONS.map((definition) => [definition.name, definition]));
 const copyLayoutWorkerTools = new Set(
   filterToolDefinitions('copy-layout-worker').map((definition) => definition.name),
 );
+const MAX_COPY_LAYOUT_JOB_HISTORY = 20;
 // 인자 스키마는 도구마다 한 번만 만든다 — 호출마다 z.object() 를 다시 세우면
 // 툴 하나당 수십 개 필드를 매번 컴파일하게 된다. insert_image 는 passthrough,
 // 나머지는 strict 이므로 도구 이름으로 캐시하면 변형도 자연히 분리된다.
@@ -145,13 +216,20 @@ function toolArgSchema(tool, definition) {
   toolArgSchemas.set(tool, schema);
   return schema;
 }
+const HOST_PROFILE_HOME = process.platform === 'win32' && process.env.USERPROFILE
+  ? path.resolve(process.env.USERPROFILE)
+  : os.homedir();
+const SOURCE_CLAUDE_CONFIG_DIR = typeof process.env.CLAUDE_CONFIG_DIR === 'string'
+  && process.env.CLAUDE_CONFIG_DIR.trim()
+  ? path.resolve(process.env.CLAUDE_CONFIG_DIR)
+  : path.join(HOST_PROFILE_HOME, '.claude');
 const sourceClaudeAuth = {
-  credentialsPath: path.join(os.homedir(), '.claude', '.credentials.json'),
-  configPath: path.join(os.homedir(), '.claude.json'),
+  credentialsPath: path.join(SOURCE_CLAUDE_CONFIG_DIR, '.credentials.json'),
+  configPath: path.join(HOST_PROFILE_HOME, '.claude.json'),
 };
 const sourceCodexHomes = [...new Set([
   process.env.CODEX_HOME,
-  path.join(os.homedir(), '.codex'),
+  path.join(HOST_PROFILE_HOME, '.codex'),
 ].filter(Boolean))];
 async function findSourceCodexAuthPath() {
   for (const sourceCodexHome of sourceCodexHomes) {
@@ -178,6 +256,11 @@ const rauOpenRouter = createOpenRouter({
   baseUrl: rauCredits.openRouterBaseUrl,
 });
 const secretStore = createIpcSecretStore();
+if (process.env.RHWP_AGENT_MODE === 'production' && !secretStore.available) {
+  throw Object.assign(new Error('The packaged hub requires the desktop secure-secret broker.'), {
+    code: 'HUB_SECRET_BROKER_REQUIRED',
+  });
+}
 const piManager = await createPiManager({ rootDir: PI_ROOT, openRouter, secretStore }).init();
 const rauManager = await createPiManager({
   rootDir: RAU_ROOT,
@@ -190,6 +273,7 @@ const rauManager = await createPiManager({
   providerBaseUrl: rauCredits.openRouterBaseUrl,
   credentialPrefix: 'rau_v1_',
 }).init();
+const authRuns = new AuthRunRegistry();
 let rauLogin = null;
 let npmPrefixMutationQueue = Promise.resolve();
 function mutateSharedNpmPrefix(operation) {
@@ -198,6 +282,14 @@ function mutateSharedNpmPrefix(operation) {
   return running;
 }
 const cliSetup = await createCliSetupManager({ secretStore }).init();
+function claudeRuntimeEnv(isolatedHome) {
+  return {
+    ...cliSetup.envFor('claude'),
+    HOME: isolatedHome,
+    USERPROFILE: isolatedHome,
+    CLAUDE_CONFIG_DIR: path.join(isolatedHome, '.claude'),
+  };
+}
 // App-managed bins are available to auxiliary CLI calls as soon as installation completes.
 // 허브가 관리하는 API 키는 process.env 에 올리지 않는다 — npm lifecycle 스크립트,
 // 설치 스크립트 등 무관한 자식 프로세스까지 상속받는 누수 지점이 된다.
@@ -315,22 +407,30 @@ if (piStatus.installed || rauStatus.installed) {
 const providerHealth = createProviderHealth({
   piBin: () => (piStatus.installed ? piManager.piBin : null),
   cliBin: (agent) => (cliSetupStatus[agent]?.installed ? cliSetup.binPath(agent) : null),
-  // cursor-agent 는 CONFIG_DIR 재지정 없이 --version 만 실행해도 실제
-  // ~/.cursor/projects/ 에 디렉터리를 만든다 — 프로브를 관리형 홈으로 돌린다.
-  probeEnv: (agent) => (agent === 'cursor'
-    ? {
-      ...process.env,
-      HOME: cliSetup.cursorHomeDir,
-      CURSOR_CONFIG_DIR: path.join(cliSetup.cursorHomeDir, '.cursor-probe'),
+  // Version probes can write provider config. Keep both Cursor and Claude in
+  // app-owned probe homes instead of inheriting a live profile override.
+  probeEnv: (agent) => {
+    if (agent === 'cursor') {
+      return {
+        ...process.env,
+        HOME: cliSetup.cursorHomeDir,
+        CURSOR_CONFIG_DIR: path.join(cliSetup.cursorHomeDir, '.cursor-probe'),
+      };
     }
-    : undefined),
+    if (agent === 'claude') {
+      const probeHome = path.join(cliSetup.rootDir, 'claude-probe');
+      return claudeRuntimeEnv(probeHome);
+    }
+    return undefined;
+  },
 });
 const usageStore = await createUsageStore().init();
 const cliproxy = await createCliproxyClient({ rootDir: usageStore.rootDir }).init();
 const referenceStore = await new ReferenceStore({ projectRoot: ROOT }).init();
 const templateStore = await new TemplateStore().init();
 // .hwp/.hwpx/.hml 텍스트 추출은 rhwp 바이너리에 기댄다 — 없으면 첫 업로드가 아니라 기동 시점에 알린다.
-if (!(await resolveHwpExtractor(ROOT))) {
+const hwpExtractor = await resolveHwpExtractor(ROOT);
+if (!hwpExtractor) {
   log('hwp/hwpx text extraction unavailable: build target/release/rhwp, install rhwp on PATH, or set RHWP_BIN');
 }
 const stagedReferenceCleanupTimer = setInterval(() => {
@@ -338,20 +438,41 @@ const stagedReferenceCleanupTimer = setInterval(() => {
 }, 15 * 60 * 1000);
 stagedReferenceCleanupTimer.unref?.();
 let writingStyleCalibrationOwner = null;
+// If a bounded provider cleanup cannot prove tree exit, retain the backend
+// object (and therefore its exact child/process-group identity) until this hub
+// exits. A replacement provider must never share the same work/home paths.
+const retainedUncertainBackends = new Set();
+const retainedUncertainBrowserbaseSessions = new Set();
 const sessions = new HubSessionRegistry({
   createRecord(sessionId) {
     const recordKey = `${crypto.createHash('sha256').update(sessionId).digest('hex')}-${crypto.randomUUID()}`;
     const recordRoot = path.join(RECORDS_ROOT, recordKey);
     const workDir = path.join(recordRoot, 'work');
+    // Providers can mutate workDir. Hub-created files must live in a sibling
+    // tree whose parents are outside every safe-profile writable root, or a
+    // checked directory can be swapped for a symlink/junction before open().
+    const hubStorageDir = path.join(recordRoot, 'hub-storage');
     const isolatedHome = path.join(recordRoot, 'home');
     const codexHome = path.join(isolatedHome, '.codex');
     const grokHome = path.join(isolatedHome, '.grok');
     const cursorHome = path.join(isolatedHome, '.cursor');
     mkdirSync(workDir, { recursive: true, mode: 0o700 });
+    mkdirSync(hubStorageDir, { recursive: true, mode: 0o700 });
     prepareCodexHome(codexHome, sourceCodexAuthPath);
     prepareClaudeHome(isolatedHome, sourceClaudeAuth);
     prepareGrokHome(grokHome, sourceGrokAuthPath);
     prepareCursorHome(cursorHome, cliSetup.cursorSourceDir);
+    const downloadManager = new DownloadManager({ rootDir: hubStorageDir, writableRoot: workDir });
+    const documentSnapshotManager = new DocumentSnapshotManager({
+      rootDir: hubStorageDir,
+      writableRoot: workDir,
+    });
+    const copyLayoutGeneratedRoot = path.join(hubStorageDir, '.rhwp-agent', 'copy-layout-generated');
+    const hubReadOnlyRoots = Object.freeze([
+      downloadManager.baseDir,
+      documentSnapshotManager.baseDir,
+      copyLayoutGeneratedRoot,
+    ]);
     return {
       sessionId,
       disposed: false,
@@ -363,6 +484,7 @@ const sessions = new HubSessionRegistry({
       mcpSockets: new Set(),
       studioMessageQueue: Promise.resolve(),
       agentSession: null,
+      processCleanupUncertain: false,
       pendingReferenceMessage: null,
       nextCapabilityEpoch: 1,
       pendingCalls: new Map(),
@@ -376,17 +498,22 @@ const sessions = new HubSessionRegistry({
       styleCalibration: null,
       pendingInstructionDraft: null,
       auxiliaryProcesses: new Set(),
+      auxiliaryProcessCleanups: new Map(),
       checkpointTitleControllers: new Set(),
       templateJobs: new Map(),
       activeTemplateJobId: null,
+      copyLayoutStorageUncertain: false,
       pendingTemplateCompletions: [],
       pendingDocumentSaved: null,
       browserbaseSession: new BrowserbaseSession({ log }),
-      downloadManager: new DownloadManager({ rootDir: workDir }),
-      documentSnapshotManager: new DocumentSnapshotManager({ rootDir: workDir }),
-      artifactStore: new ArtifactStore({ rootDir: workDir }),
+      downloadManager,
+      documentSnapshotManager,
+      artifactStore: new ArtifactStore({ rootDir: workDir, trustedReadRoots: hubReadOnlyRoots }),
       recordRoot,
       workDir,
+      hubStorageDir,
+      hubReadOnlyRoots,
+      copyLayoutGeneratedRoot,
       isolatedHome,
       codexHome,
       grokHome,
@@ -398,6 +525,23 @@ const sessions = new HubSessionRegistry({
 function hasAgentSessions() {
   return [...sessions.values()].some((record) => (
     record.agentSession !== null
+    || record.processCleanupUncertain
+    || [...record.templateJobs.values()].some((job) => job.status === 'running')
+  ));
+}
+
+function hasConnectedSessionSockets() {
+  return [...sessions.values()].some((record) => (
+    record.studioSocket?.readyState === 1
+    || [...record.mcpSockets].some((socket) => socket?.readyState === 1)
+  ));
+}
+
+function hasOrphanActiveWork() {
+  return [...sessions.values()].some((record) => (
+    record.agentSession?.status === 'running'
+    || record.pendingCalls.size > 0
+    || record.auxiliaryProcesses.size > 0
     || [...record.templateJobs.values()].some((job) => job.status === 'running')
   ));
 }
@@ -494,6 +638,27 @@ function refreshSessionCredentials(agent) {
   }
 }
 
+function flushProviderCredentialHomes(homes) {
+  if (!homes) return true;
+  /** @type {Array<[string, () => boolean]>} */
+  const flushes = [
+    ['claude', () => flushClaudeCredentialMirrors(homes.isolatedHome)],
+    ['codex', () => flushCodexCredentialMirror(homes.codexHome)],
+    ['grok', () => flushGrokCredentialMirror(homes.grokHome)],
+    ['cursor', () => flushCursorCredentialMirrors(homes.cursorHome)],
+  ];
+  let settled = true;
+  for (const [agent, flush] of flushes) {
+    try {
+      if (!flush()) settled = false;
+    } catch (error) {
+      settled = false;
+      log(`${agent} credential refresh copyback failed: ${error?.message ?? error}`);
+    }
+  }
+  return settled;
+}
+
 /** CLI 설치·인증을 cli-setup-manager 가 관리하는 에이전트들. */
 const CLI_SETUP_AGENTS = ['claude', 'codex', 'grok', 'cursor'];
 const KNOWN_AGENTS = new Set([...CLI_SETUP_AGENTS, 'pi', 'rau']);
@@ -583,10 +748,30 @@ function piAgentSetupStatus() {
 
 function rauAgentSetupStatus() {
   const status = openRouterAgentSetupStatus('rau');
-  status.authenticating = Boolean(rauLogin);
   if (status.authenticated) status.authMethod = 'oauth';
   if (rauTrialEmpty()) status.exhausted = true;
   return status;
+}
+
+function withAuthRunStatus(statuses, ownerSessionId = null) {
+  return Object.fromEntries(Object.entries(statuses).map(([agent, status]) => {
+    const auth = authRuns.status(agent, ownerSessionId);
+    return [agent, {
+      ...status,
+      ...auth,
+      authenticating: status.authenticating === true || auth.authenticating,
+    }];
+  }));
+}
+
+function broadcastAgentSetupStatuses(statuses) {
+  for (const record of sessions.values()) {
+    sendJson(record.studioSocket, {
+      v: 1,
+      type: 'agent-setup-status',
+      statuses: withAuthRunStatus(statuses, record.sessionId),
+    });
+  }
 }
 
 /** 모델 목록 조회가 상태 응답을 붙잡아 둘 수 있는 상한. */
@@ -606,7 +791,7 @@ function cursorModelsSoon() {
   return Promise.race([probe, deadline]);
 }
 
-async function agentSetupStatuses() {
+async function agentSetupStatuses(ownerSessionId = null) {
   // cursor 프로브(status + --list-models)는 CLI 를 스폰해 초 단위로 걸린다 —
   // 클로드/코덱스 설정 UI 가 그만큼 늦지 않도록 전부 병렬로 돌린다.
   const [claudeSetup, codexSetup, grokSetup, cursorSetup, health, cursorModelProbe] = await Promise.all([
@@ -636,7 +821,10 @@ async function agentSetupStatuses() {
   cursorModelIds = cursor.authenticated ? (cursorModelProbe ?? cursorModelIds) : [];
   cursor.models = [...cursorModelIds];
   cliSetupStatus = { claude, codex, grok, cursor };
-  return { claude, codex, grok, cursor, pi: piAgentSetupStatus(), rau: rauAgentSetupStatus() };
+  return withAuthRunStatus(
+    { claude, codex, grok, cursor, pi: piAgentSetupStatus(), rau: rauAgentSetupStatus() },
+    typeof ownerSessionId === 'string' ? ownerSessionId : null,
+  );
 }
 
 let harnessUpdateTimer = null;
@@ -678,7 +866,7 @@ async function runAutomaticHarnessUpdates() {
     if (Object.values(statuses).some((status) => status.updateRequired)) {
       nextDelay = HARNESS_UPDATE_FAILURE_RETRY_MS;
     }
-    broadcastToStudios({ v: 1, type: 'agent-setup-status', statuses });
+    broadcastAgentSetupStatuses(statuses);
     const changed = before.claude !== statuses.claude.version
       || before.codex !== statuses.codex.version
       || before.grok !== statuses.grok.version
@@ -694,7 +882,7 @@ async function runAutomaticHarnessUpdates() {
       if (Object.values(statuses).some((status) => status.updateRequired)) {
         nextDelay = HARNESS_UPDATE_FAILURE_RETRY_MS;
       }
-      broadcastToStudios({ v: 1, type: 'agent-setup-status', statuses });
+      broadcastAgentSetupStatuses(statuses);
     }
   } finally {
     harnessUpdateRunning = false;
@@ -711,6 +899,64 @@ function sendAgentSetupError(record, sock, requestId, agent, error, fallback = '
     code: error?.code ?? fallback,
     message: String(error?.message ?? error),
   });
+}
+
+function agentAuthCancelled(message = '로그인을 취소했어요.') {
+  return Object.assign(new Error(message), { code: 'AGENT_AUTH_CANCELLED' });
+}
+
+function boundedAgentAuthCode(raw) {
+  if (typeof raw !== 'string') {
+    throw Object.assign(
+      new Error('인증 코드를 입력해 주세요.'),
+      { code: 'AGENT_AUTH_CODE_INVALID' },
+    );
+  }
+  const value = raw;
+  if (!textFitsByteLimit(value, AUTH_CODE_MAX_BYTES)) {
+    throw Object.assign(
+      new Error('인증 코드가 허용된 길이를 넘었어요.'),
+      { code: 'AGENT_AUTH_CODE_TOO_LARGE' },
+    );
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw Object.assign(
+      new Error('인증 코드를 입력해 주세요.'),
+      { code: 'AGENT_AUTH_CODE_INVALID' },
+    );
+  }
+  return trimmed;
+}
+
+function ownerRecordForAuthRun(run) {
+  return sessions.get(run.ownerSessionId);
+}
+
+function sendAuthRunFrame(run, frame) {
+  const owner = ownerRecordForAuthRun(run);
+  if (!owner) return;
+  sendJson(owner.studioSocket, { v: 1, authRunId: run.runId, agent: run.agent, ...frame });
+}
+
+function sendAuthRunError(run, error, fallback = 'AGENT_AUTH_FAILED') {
+  const owner = ownerRecordForAuthRun(run);
+  if (!owner) return;
+  sendJson(owner.studioSocket, {
+    v: 1,
+    type: 'agent-setup-error',
+    requestId: run.requestId,
+    authRunId: run.runId,
+    agent: run.agent,
+    code: error?.code ?? fallback,
+    message: String(error?.message ?? error),
+  });
+}
+
+async function broadcastFreshAgentSetupStatuses() {
+  const statuses = await agentSetupStatuses();
+  broadcastAgentSetupStatuses(statuses);
+  return statuses;
 }
 
 function resolveModel(agent, requested) {
@@ -780,10 +1026,19 @@ function failAllPendingCalls(record, message) {
   for (const [hubId, entry] of record.pendingCalls) {
     clearTimeout(entry.timer);
     record.pendingCalls.delete(hubId);
-    sendJson(entry.mcpSocket, {
-      v: 1, type: 'tool-result', id: entry.clientId, ok: false,
-      error: { code: 'NO_STUDIO', message },
-    });
+    cancelStudioToolRequest(record, hubId, entry, 'studio-call-failed');
+    if (entry.tool === 'materialize_document_snapshot' && entry.copyLayoutJobId) {
+      const job = record.templateJobs.get(entry.copyLayoutJobId);
+      releaseCopyLayoutSnapshot(job);
+    }
+    const error = workflowError('NO_STUDIO', message);
+    if (typeof entry.sendError === 'function') entry.sendError(error);
+    else {
+      sendJson(entry.mcpSocket, {
+        v: 1, type: 'tool-result', id: entry.clientId, ok: false,
+        error: { code: error.code, message: error.message },
+      });
+    }
   }
 }
 
@@ -858,13 +1113,89 @@ function beginAgentTurn(record, activeSession) {
   }
   record.userQuestionResponseReceipts.clear();
   activeSession.turnId = crypto.randomUUID();
+  // A queued provider turn is not authoritative until its backend emits the
+  // matching turn-start. Process-tree cleanup from the prior turn can still
+  // be in flight after Studio submits the next message; stale MCP descendants
+  // must remain unable to borrow that window.
+  activeSession.providerTurnStarted = false;
   activeSession.status = 'running';
 }
 
+function providerTurnIsCurrent(record, binding) {
+  const activeSession = record.agentSession;
+  return Boolean(
+    binding
+    && activeSession === binding.session
+    && activeSession.generation === binding.generation
+    && activeSession.status === 'running'
+    && activeSession.turnId === binding.turnId,
+  );
+}
+
+function providerTurnIsActive(record, binding) {
+  return providerTurnIsCurrent(record, binding)
+    && binding.session.providerTurnStarted === true;
+}
+
+function noActiveProviderTurnError() {
+  return workflowError(
+    'NO_ACTIVE_TURN',
+    'This provider tool call no longer belongs to an active running turn',
+  );
+}
+
+function cancelStudioToolRequest(record, hubId, entry, reason) {
+  sendJson(record.studioSocket, {
+    v: 1,
+    type: 'tool-request-cancel',
+    id: hubId,
+    reason,
+    ...(entry?.providerTurn?.turnId
+      ? { providerTurnId: entry.providerTurn.turnId }
+      : {}),
+  });
+}
+
+function failPendingProviderCallsForTurn(record, activeSession, turnId) {
+  if (!turnId) return;
+  for (const [hubId, entry] of record.pendingCalls) {
+    if (entry.providerTurn?.session !== activeSession || entry.providerTurn.turnId !== turnId) continue;
+    clearTimeout(entry.timer);
+    record.pendingCalls.delete(hubId);
+    cancelStudioToolRequest(record, hubId, entry, 'provider-turn-settled');
+    entry.sendError?.(noActiveProviderTurnError());
+  }
+}
+
+function retireProviderSockets(record, activeSession, {
+  turnId,
+  code = 4003,
+  reason = 'provider turn settled',
+} = {}) {
+  for (const sock of record.mcpSockets) {
+    if (sock.agentGeneration !== activeSession.generation
+      || sock.agentLabel !== activeSession.agent
+      || sock.agentRole !== activeSession.providerRole) continue;
+    if (turnId !== undefined && sock.agentTurnId !== turnId) continue;
+    // Invalidate synchronously. `close()` and already-buffered WebSocket
+    // messages are delivered asynchronously, so transport close alone cannot
+    // keep an old process generation from borrowing the next turn.
+    sock.providerTurnRetired = true;
+    sock.agentTurnId = null;
+    queueMicrotask(() => {
+      try { sock.close(code, reason); } catch {}
+    });
+  }
+}
+
 function settleAgentTurn(record, activeSession, event) {
+  const settledTurnId = activeSession.turnId;
   settleUserQuestion(record, userQuestionOutcomeForTurnEnd(event));
+  failPendingProviderCallsForTurn(record, activeSession, settledTurnId);
+  retireProviderSockets(record, activeSession, { turnId: settledTurnId });
   activeSession.status = 'idle';
   activeSession.turnId = null;
+  activeSession.providerTurnStarted = false;
 }
 
 function requestUserQuestion(record, request, {
@@ -881,7 +1212,9 @@ function requestUserQuestion(record, request, {
   if (normalizedRequest.parentTaskId) {
     throw workflowError('ROOT_INTERACTION_REQUIRED', 'Only the root conversation may ask the user questions');
   }
-  if (activeSession.status !== 'running' || !activeSession.turnId) {
+  if (activeSession.status !== 'running'
+    || !activeSession.turnId
+    || activeSession.providerTurnStarted !== true) {
     throw workflowError('NO_ACTIVE_TURN', 'User questions require an active root turn');
   }
   const current = record.pendingUserQuestion;
@@ -1125,12 +1458,48 @@ async function usageSnapshotRefreshing(refresh = false) {
  */
 function spawnAuxiliaryProcess(record, command, args, options = {}) {
   if (record.disposed) throw new Error('Hub session was disposed');
+  if (record.processCleanupUncertain) throw agentProcessCleanupUncertain();
   const child = spawn(command, args, { ...options, cwd: options.cwd ?? record.workDir });
   record.auxiliaryProcesses.add(child);
-  const forget = () => record.auxiliaryProcesses.delete(child);
-  child.once('exit', forget);
-  child.once('close', forget);
+  const cleanup = () => {
+    child.off?.('close', cleanup);
+    void beginAuxiliaryProcessCleanupOutcome(record, child);
+  };
+  // ChildProcess `close` is ordered after stdout/stderr have drained. Starting
+  // automatic cleanup on `exit` can beat a terminal protocol frame still in
+  // those pipes, record UNAVAILABLE, and quarantine an otherwise clean
+  // session. Terminal handlers start the shared cleanup while the process
+  // handle is live; this close hook is the fail-closed fallback.
+  child.once('close', cleanup);
   return child;
+}
+
+function beginAuxiliaryProcessCleanupOutcome(record, child) {
+  const current = record.auxiliaryProcessCleanups.get(child);
+  if (current) return current;
+  const cleanup = terminateAndWaitForProcessTreeExitOutcome(child)
+    .catch(() => PROCESS_TREE_CLEANUP_OUTCOME.FAILED)
+    .then((outcome) => {
+      if (outcome !== PROCESS_TREE_CLEANUP_OUTCOME.PROVEN) {
+        record.processCleanupUncertain = true;
+        retainUncertainProcessCleanup(record.recordRoot);
+      }
+      // UNAVAILABLE is not proof. Keep the child and its resolved cleanup
+      // sentinel tracked so a later record disposal cannot mistake an empty
+      // set for a safely drained process tree.
+      if (outcome === PROCESS_TREE_CLEANUP_OUTCOME.PROVEN) {
+        record.auxiliaryProcesses.delete(child);
+        record.auxiliaryProcessCleanups.delete(child);
+      }
+      return outcome;
+    });
+  record.auxiliaryProcessCleanups.set(child, cleanup);
+  return cleanup;
+}
+
+function beginAuxiliaryProcessCleanup(record, child) {
+  return beginAuxiliaryProcessCleanupOutcome(record, child)
+    .then((outcome) => outcome === PROCESS_TREE_CLEANUP_OUTCOME.PROVEN);
 }
 
 /**
@@ -1150,24 +1519,10 @@ function auxSpawnProcess(record, command, args, options = {}) {
 
 async function stopAuxiliaryProcesses(record) {
   const children = [...record.auxiliaryProcesses];
-  record.auxiliaryProcesses.clear();
-  await Promise.all(children.map((child) => new Promise((resolve) => {
-    if (child.exitCode !== null || child.signalCode !== null) {
-      resolve();
-      return;
-    }
-    let settled = false;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve();
-    };
-    const timer = setTimeout(finish, 3_500);
-    timer.unref?.();
-    child.once('exit', finish);
-    terminateProcessTree(child);
-  })));
+  const results = await Promise.all(children.map((child) => (
+    beginAuxiliaryProcessCleanup(record, child)
+  )));
+  return results.every(Boolean);
 }
 
 function cancelCheckpointTitleJobs(record) {
@@ -1220,10 +1575,11 @@ function checkpointTitleDeps(record, health, signal) {
         GROK_DISABLE_AUTOUPDATER: '1',
         GROK_MEMORY: '0',
       },
-      claude: cliSetup.envFor('claude'),
+      claude: claudeRuntimeEnv(record.isolatedHome),
     },
     spawnProcess: (command, args, options) => spawnAuxiliaryProcess(record, command, args, options),
     terminateProcess: terminateProcessTree,
+    cleanupProcessOutcome: (child) => beginAuxiliaryProcessCleanupOutcome(record, child),
     signal,
   };
 }
@@ -1249,6 +1605,7 @@ function auxDeps(record, requestedAgent, cliAgent) {
     sessionId: record.sessionId,
     spawnProcess: (command, args, options) => auxSpawnProcess(record, command, args, options),
     terminateProcess: terminateProcessTree,
+    cleanupProcessOutcome: (child) => beginAuxiliaryProcessCleanupOutcome(record, child),
   };
 }
 
@@ -1266,6 +1623,7 @@ function sessionInfo(record) {
       documentId: activeSession.documentId,
       documentName: activeSession.documentName,
       status: activeSession.status,
+      turnId: activeSession.turnId,
       activeTemplateId: activeSession.activeTemplateId,
       pendingUserQuestion: pendingUserQuestionSnapshot(record),
       ...activeSession.planning.snapshot(),
@@ -1283,7 +1641,10 @@ function artifactDownloadDescriptor(record, artifactId, artifact) {
     `http://127.0.0.1:${hubPort}`,
   );
   downloadUrl.searchParams.set('sessionId', record.sessionId);
-  downloadUrl.searchParams.set('token', issueScopedHubToken(TOKEN, record.sessionId));
+  downloadUrl.searchParams.set('token', sessions.issue(TOKEN, record.sessionId, {
+    audience: HUB_CAPABILITY_AUDIENCES.ARTIFACT,
+    resource: artifactId,
+  }));
   downloadUrl.searchParams.set('templatePreview', '1');
   return {
     artifactId,
@@ -1300,8 +1661,8 @@ function sendTemplateJobEvent(record, event) {
 }
 
 function workerJobForSocket(record, sock) {
-  if (typeof sock.agentRole !== 'string' || !sock.agentRole.startsWith('copy-layout-worker:')) return null;
-  return [...record.templateJobs.values()].find((job) => job.workerRole === sock.agentRole) ?? null;
+  if (typeof sock.copyLayoutJobId !== 'string') return null;
+  return record.templateJobs.get(sock.copyLayoutJobId) ?? null;
 }
 
 function templateCompletionResult(job) {
@@ -1313,9 +1674,100 @@ function templateCompletionResult(job) {
   };
 }
 
+function exactJsonArray(left, right) {
+  return Array.isArray(left)
+    && Array.isArray(right)
+    && left.length === right.length
+    && left.every((value, index) => value === right[index]);
+}
+
+function copyLayoutCandidateClaims(job, published) {
+  const report = published?.report;
+  const evidence = report?.candidate_evidence;
+  const pages = evidence?.representative_pages;
+  const validRender = (entry, page) => entry
+    && entry.page === page
+    && Number.isSafeInteger(entry.width) && entry.width > 0 && entry.width <= 16_384
+    && Number.isSafeInteger(entry.height) && entry.height > 0 && entry.height <= 16_384
+    && Number.isSafeInteger(entry.bytes) && entry.bytes >= 24 && entry.bytes <= 16 * 1024 * 1024
+    && typeof entry.sha256 === 'string' && /^[a-f0-9]{64}$/.test(entry.sha256);
+  if (!Array.isArray(pages)
+    || pages.length < 1 || pages.length > 3
+    || !pages.every((page, index) => Number.isSafeInteger(page)
+      && page >= 0 && (index === 0 || page > pages[index - 1]))
+    || !Number.isSafeInteger(evidence?.source_page_count) || evidence.source_page_count < 1
+    || !Number.isSafeInteger(evidence?.output_page_count) || evidence.output_page_count < 1
+    || !Number.isSafeInteger(evidence?.output_section_count) || evidence.output_section_count < 1
+    || evidence.render_compared !== true
+    || evidence.safety_verified !== true
+    || evidence.readability_verified !== true
+    || !Array.isArray(evidence.source_renders)
+    || !Array.isArray(evidence.output_renders)
+    || evidence.source_renders.length !== pages.length
+    || evidence.output_renders.length !== pages.length
+    || !pages.every((page, index) => validRender(evidence.source_renders[index], page)
+      && validRender(evidence.output_renders[index], page))) {
+    throw workflowError(
+      'COPY_LAYOUT_VERIFICATION_MISSING',
+      'The published candidate lacks bounded helper-owned source/candidate render evidence',
+    );
+  }
+  const quality = report?.delivery?.quality;
+  const warnings = report?.delivery?.warnings;
+  if (!['verified', 'best_effort'].includes(quality) || !Array.isArray(warnings)) {
+    throw workflowError('COPY_LAYOUT_VERIFICATION_MISSING', 'The helper omitted its delivery result');
+  }
+  if (quality === 'best_effort' && job.generatedCandidates.size < COPY_LAYOUT_MAX_ITERATIONS) {
+    throw workflowError(
+      'COPY_LAYOUT_ITERATIONS_REQUIRED',
+      `A best-effort candidate may settle only after all ${COPY_LAYOUT_MAX_ITERATIONS} bounded iterations`,
+    );
+  }
+  const counts = {
+    keptText: report?.text_decisions?.kept_count,
+    removedText: report?.text_decisions?.removed_count,
+    replacedText: report?.text_decisions?.replacement_count,
+    resetControls: Array.isArray(report?.reset_form_controls)
+      ? report.reset_form_controls.length : null,
+    clearedMarks: Array.isArray(report?.cleared_border_fill_marks)
+      ? report.cleared_border_fill_marks.length : null,
+    keptMedia: new Set([
+      ...(Array.isArray(report?.kept_layout_media) ? report.kept_layout_media : []),
+      ...(Array.isArray(report?.kept_explicit_media) ? report.kept_explicit_media : []),
+    ]).size,
+    removedMedia: new Set([
+      ...(Array.isArray(report?.removed_body_media) ? report.removed_body_media : []),
+      ...(Array.isArray(report?.removed_unreferenced_media) ? report.removed_unreferenced_media : []),
+    ]).size,
+    iterations: job.generatedCandidates.size,
+  };
+  if (Object.values(counts).some((value) => !Number.isSafeInteger(value) || value < 0)) {
+    throw workflowError('COPY_LAYOUT_VERIFICATION_MISSING', 'The helper omitted bounded decision counts');
+  }
+  return {
+    quality,
+    warnings,
+    counts,
+    preview: {
+      representativePages: [...pages],
+      sourcePageCount: evidence.source_page_count,
+      outputPageCount: evidence.output_page_count,
+      outputSectionCount: evidence.output_section_count,
+      renderCompared: true,
+      geometryMatch: evidence.geometry_match === true,
+      safetyVerified: true,
+      readabilityVerified: true,
+      stoppedReason: quality === 'verified'
+        ? 'verified-convergence'
+        : 'bounded-no-improvement',
+    },
+  };
+}
+
 function drainTemplateCompletion(record) {
   const activeSession = record.agentSession;
-  if (!activeSession || activeSession.status !== 'idle') return;
+  if (!activeSession || activeSession.status !== 'idle'
+    || activeSession.pendingTransitions > 0 || record.pendingReferenceMessage) return;
   const index = record.pendingTemplateCompletions.findIndex(
     (entry) => entry.ownerThreadId === activeSession.threadId,
   );
@@ -1327,6 +1779,7 @@ function drainTemplateCompletion(record) {
       buildCopyLayoutCompletionPrompt(entry.result),
     ));
   } catch (error) {
+    failPendingProviderCallsForTurn(record, activeSession, activeSession.turnId);
     activeSession.status = 'idle';
     activeSession.turnId = null;
     record.userQuestionResponseReceipts.clear();
@@ -1356,7 +1809,8 @@ function queuePlanningDocumentSaved(record, msg) {
 function drainPlanningDocumentSaved(record) {
   const activeSession = record.agentSession;
   const pending = record.pendingDocumentSaved;
-  if (!pending || !activeSession || activeSession.status !== 'idle') return;
+  if (!pending || !activeSession || activeSession.status !== 'idle'
+    || activeSession.pendingTransitions > 0 || record.pendingReferenceMessage) return;
   if (pending.threadId !== activeSession.threadId || !planningDocumentSavedAllowed(activeSession)) {
     record.pendingDocumentSaved = null;
     return;
@@ -1375,8 +1829,7 @@ function drainPlanningDocumentSaved(record) {
       planId,
       reason: 'document-saved',
       promptOverride: prompt,
-      sessionStatusOverride: 'idle',
-    }).catch((error) => {
+    }, { sessionStatusOverride: 'idle' }).catch((error) => {
       if (record.agentSession === activeSession) {
         if (activeSession.status === 'running') activeSession.status = 'idle';
         if (!record.pendingDocumentSaved) record.pendingDocumentSaved = pending;
@@ -1386,12 +1839,16 @@ function drainPlanningDocumentSaved(record) {
     return;
   }
   try {
+    beginAgentTurn(record, activeSession);
     activeSession.backend.sendUserMessage(addAgentInstructionsContext(addActiveDocumentContext(
       activeSession,
       addTemplateContext(record, activeSession, prompt),
     )));
   } catch (error) {
+    failPendingProviderCallsForTurn(record, activeSession, activeSession.turnId);
     activeSession.status = 'idle';
+    activeSession.turnId = null;
+    record.userQuestionResponseReceipts.clear();
     record.pendingDocumentSaved = pending;
     log(`planning document-saved dispatch failed: ${error?.message ?? error}`);
   }
@@ -1407,10 +1864,82 @@ function queueTemplateCompletion(record, job) {
   drainTemplateCompletion(record);
 }
 
+function pruneTemplateJobHistory(record) {
+  if (record.templateJobs.size <= MAX_COPY_LAYOUT_JOB_HISTORY) return;
+  for (const [jobId, job] of record.templateJobs) {
+    if (record.templateJobs.size <= MAX_COPY_LAYOUT_JOB_HISTORY) break;
+    if (job.status === 'running' || job.status === 'settling' || jobId === record.activeTemplateJobId) continue;
+    record.templateJobs.delete(jobId);
+  }
+}
+
+async function cleanupTemplateGeneratedRoot(record, job) {
+  if (!job?.generatedRoot && !job?.snapshotRoot) return true;
+  if (record.processCleanupUncertain) {
+    record.copyLayoutStorageUncertain = true;
+    return false;
+  }
+  try {
+    await Promise.all([
+      job.generatedRoot ? fs.rm(job.generatedRoot, { recursive: true, force: true }) : undefined,
+      job.snapshotRoot ? fs.rm(job.snapshotRoot, { recursive: true, force: true }) : undefined,
+    ]);
+    return true;
+  } catch (error) {
+    record.copyLayoutStorageUncertain = true;
+    log(`copy-layout private output cleanup failed: ${error?.message ?? error}`);
+    return false;
+  }
+}
+
+async function cleanupTemplateProviderRoots(record, job, backendCleaned) {
+  const credentialsCleaned = flushProviderCredentialHomes(job.providerHomes);
+  if (backendCleaned === false || !credentialsCleaned) {
+    record.copyLayoutStorageUncertain = true;
+    if (backendCleaned === false) {
+      record.processCleanupUncertain = true;
+      retainUncertainProcessCleanup(record.recordRoot);
+    }
+    return false;
+  }
+  try {
+    await Promise.all([
+      job.jobDir ? fs.rm(job.jobDir, { recursive: true, force: true }) : undefined,
+      job.providerRoot ? fs.rm(job.providerRoot, { recursive: true, force: true }) : undefined,
+    ]);
+    return true;
+  } catch (error) {
+    record.copyLayoutStorageUncertain = true;
+    log(`copy-layout provider workspace cleanup failed: ${error?.message ?? error}`);
+    return false;
+  }
+}
+
+function cancelPendingTemplateCalls(record, job) {
+  for (const [hubId, entry] of record.pendingCalls) {
+    if (entry.copyLayoutJobId !== job.jobId) continue;
+    record.pendingCalls.delete(hubId);
+    clearTimeout(entry.timer);
+    cancelStudioToolRequest(record, hubId, entry, 'copy-layout-job-settled');
+    releaseCopyLayoutSnapshot(job);
+    sendJson(entry.mcpSocket, {
+      v: 1,
+      type: 'tool-result',
+      id: entry.clientId,
+      ok: false,
+      error: {
+        code: 'COPY_LAYOUT_JOB_SETTLED',
+        message: 'The copy-layout job settled before Studio completed this tool request',
+      },
+    });
+  }
+}
+
 function settleTemplateJobFailure(record, job, error) {
   if (!job || job.status !== 'running') return;
   const message = String(error?.message ?? error ?? 'Autonomous copy-layout worker stopped without a completion report');
   job.status = 'failed';
+  cancelPendingTemplateCalls(record, job);
   job.activity = message;
   job.result = {
     summary: message,
@@ -1425,7 +1954,15 @@ function settleTemplateJobFailure(record, job, error) {
       safetyVerified: false, readabilityVerified: false, stoppedReason: 'hard-failure',
     },
   };
+  job.inspection = null;
+  job.generatedCandidates?.clear();
+  job.publishedArtifacts?.clear();
   record.activeTemplateJobId = null;
+  void Promise.allSettled([
+    Promise.resolve(job.helperPromise),
+    Promise.resolve(job.snapshotPromise),
+  ]).then(() => cleanupTemplateGeneratedRoot(record, job));
+  pruneTemplateJobHistory(record);
   sendTemplateJobEvent(record, {
     type: 'task-end', agent: job.agent, taskId: job.jobId,
     status: 'failed', summary: message, ...(job.usage ? { usage: job.usage } : {}),
@@ -1465,38 +2002,52 @@ function makeTemplateWorkerEventHandler(record, job) {
       if (job.status === 'running') settleTemplateJobFailure(record, job, job.lastError || event.errorMessage);
       const backend = job.backend;
       job.backend = null;
-      void Promise.resolve(backend?.dispose()).catch((error) => {
-        log(`copy-layout worker dispose failed: ${error?.message ?? error}`);
-      });
+      void Promise.resolve(backend?.dispose())
+        .catch((error) => {
+          log(`copy-layout worker dispose failed: ${error?.message ?? error}`);
+          return false;
+        })
+        .then((cleaned) => cleanupTemplateProviderRoots(record, job, cleaned));
     }
   };
 }
 
 async function launchTemplateJob(record, job) {
-  const jobDir = path.join(record.workDir, 'copy-layout-jobs', job.jobId);
-  const helperPath = path.join(jobDir, 'copy_layout.py');
+  // The owning chat provider can mutate record.workDir. Keep even the
+  // worker's read-only cwd under a sibling hub-owned parent so it cannot be
+  // swapped to a symlink/junction before the worker opens files.
+  const jobDir = path.join(record.recordRoot, 'copy-layout-workspaces', job.jobId);
+  const jobGeneratedRoot = path.join(record.copyLayoutGeneratedRoot, job.jobId);
+  const jobSnapshotRoot = record.documentSnapshotManager.readOnlyRootForChat(job.jobId);
   const providerRoot = path.join(record.recordRoot, 'copy-layout-providers', job.jobId);
   const isolatedHome = path.join(providerRoot, 'home');
   const codexHome = path.join(isolatedHome, '.codex');
   const grokHome = path.join(isolatedHome, '.grok');
   const cursorHome = path.join(isolatedHome, '.cursor');
+  job.providerHomes = { isolatedHome, codexHome, grokHome, cursorHome };
+  job.providerRoot = providerRoot;
   await fs.mkdir(jobDir, { recursive: true, mode: 0o700 });
   await fs.mkdir(providerRoot, { recursive: true, mode: 0o700 });
-  await fs.copyFile(path.join(BUNDLED_SKILLS, 'copy-layout', 'scripts', 'copy_layout.py'), helperPath);
-  await fs.chmod(helperPath, 0o500);
   prepareCodexHome(codexHome, sourceCodexAuthPath);
   prepareClaudeHome(isolatedHome, sourceClaudeAuth);
   prepareGrokHome(grokHome, sourceGrokAuthPath);
   prepareCursorHome(cursorHome, cliSetup.cursorSourceDir);
   job.jobDir = jobDir;
-  job.helperPath = helperPath;
+  job.generatedRoot = jobGeneratedRoot;
+  job.snapshotRoot = jobSnapshotRoot;
 
   const opts = {
-    rootDir: record.workDir,
-    workDir: record.workDir,
+    rootDir: jobDir,
+    workDir: jobDir,
+    // A background worker can read only its own immutable snapshot and
+    // generated candidates, never the owning chat's workspace/downloads.
+    readOnlyRoots: [jobSnapshotRoot, jobGeneratedRoot],
     mcpScriptPath: MCP_SCRIPT,
     hubPort,
-    token: issueScopedHubToken(TOKEN, record.sessionId),
+    token: sessions.issue(TOKEN, record.sessionId, {
+      audience: HUB_CAPABILITY_AUDIENCES.COPY_LAYOUT_WORKER,
+      resource: job.jobId,
+    }),
     sessionId: record.sessionId,
     model: job.model,
     effort: job.effort,
@@ -1511,22 +2062,18 @@ async function launchTemplateJob(record, job) {
     claudeBin: cliSetupStatus.claude?.installed ? cliSetup.binPath('claude') : 'claude',
     grokBin: cliSetupStatus.grok?.installed ? cliSetup.binPath('grok') : 'grok',
     cursorBin: cliSetupStatus.cursor?.installed ? cliSetup.binPath('cursor') : 'cursor-agent',
-    providerEnv: CLI_SETUP_AGENTS.includes(job.agent) ? cliSetup.envFor(job.agent) : {},
+    providerEnv: job.agent === 'claude'
+      ? claudeRuntimeEnv(isolatedHome)
+      : (CLI_SETUP_AGENTS.includes(job.agent) ? cliSetup.envFor(job.agent) : {}),
     onEvent: makeTemplateWorkerEventHandler(record, job),
     workflow: 'direct',
     phase: 'implementing',
     capabilityEpoch: job.capabilityEpoch,
     toolProfile: 'copy-layout-worker',
     agentRole: job.workerRole,
-    // 헬퍼(copy_layout.py) 실행은 모든 프로바이더 워커에 필요하다. 클로드/코덱스/
-    // 커서는 샌드박스가, pi 는 확장 가드가 경계를 진다 — grok 만 이 접두사 허용을
-    // 소비해 전면 Bash deny 대신 스코프 셸을 연다 (agents/grok.mjs). 접두사는
-    // 잡 헬퍼 절대 경로까지 고정한다. python3* 는 인라인/임의 스크립트까지 연다.
-    shellAllowPrefixes: copyLayoutShellAllowPrefixes(helperPath),
     systemPromptOverride: buildCopyLayoutWorkerPrompt({
       jobId: job.jobId,
       binding: job.binding,
-      helperPath,
       jobDir,
     }),
     piBin: (job.agent === 'rau' ? rauManager : piManager).piBin,
@@ -1544,14 +2091,29 @@ async function launchTemplateJob(record, job) {
 }
 
 function createTemplateJob(record, activeSession, binding) {
+  if (record.copyLayoutStorageUncertain) {
+    throw workflowError('COPY_LAYOUT_STORAGE_UNCERTAIN', 'A prior copy-layout workspace could not be cleaned; restart the hub before retrying');
+  }
   if (record.activeTemplateJobId) {
     const active = record.templateJobs.get(record.activeTemplateJobId);
-    if (active?.status === 'running') {
+    if (active && active.status !== 'completed' && active.status !== 'failed') {
       throw workflowError('COPY_LAYOUT_JOB_ACTIVE', 'A copy-layout job is already running for this Studio window');
     }
   }
   if (binding.documentId !== activeSession.documentId) {
     throw workflowError('DOCUMENT_ID_MISMATCH', 'The copy-layout binding does not match this chat\'s exact documentId');
+  }
+  const latest = activeSession.lastDocumentInfo;
+  if (!latest
+    || latest.documentId !== binding.documentId
+    || latest.digest !== binding.digest
+    || latest.sourceFormat !== binding.sourceFormat
+    || latest.dirty !== binding.dirty
+    || latest.sourcePath !== binding.sourcePath) {
+    throw workflowError(
+      'COPY_LAYOUT_BINDING_STALE',
+      'Call get_document_info immediately before delegation and pass its exact current binding',
+    );
   }
   const jobId = crypto.randomUUID();
   const job = {
@@ -1570,6 +2132,19 @@ function createTemplateJob(record, activeSession, binding) {
     usage: { toolUses: 0 },
     completionQueued: false,
     registeredTemplateId: null,
+    providerHomes: null,
+    snapshot: null,
+    snapshotPending: false,
+    snapshotPromise: null,
+    helperPending: 0,
+    helperPromise: null,
+    inspection: null,
+    generatedCandidates: new Map(),
+    publishedArtifacts: new Map(),
+    publishPending: false,
+    completionPromise: null,
+    generatedRoot: null,
+    snapshotRoot: null,
   };
   record.templateJobs.set(jobId, job);
   record.activeTemplateJobId = jobId;
@@ -1579,7 +2154,10 @@ function createTemplateJob(record, activeSession, binding) {
     taskKind: 'agent', background: true,
   });
   sendTemplateJobEvent(record, taskProgressForJob(job, job.activity));
-  void launchTemplateJob(record, job).catch((error) => settleTemplateJobFailure(record, job, error));
+  void launchTemplateJob(record, job).catch((error) => {
+    flushProviderCredentialHomes(job.providerHomes);
+    settleTemplateJobFailure(record, job, error);
+  });
   return job;
 }
 
@@ -1639,10 +2217,21 @@ function makeBackendEventHandler(record, generation) {
       };
       sendJson(record.studioSocket, { v: 1, type: 'usage-report', usage: usageSnapshot() });
     }
+    const providerTurnId = activeSession.turnId;
+    if (evt.type === 'turn-start') {
+      // Backends emit this only after their lifecycle has released the prior
+      // process tree and activated this queued turn. Accepting the Studio
+      // message alone is not provider-capability proof.
+      if (activeSession.status !== 'running' || !providerTurnId) return;
+      activeSession.providerTurnStarted = true;
+    }
+    const studioEvent = providerTurnId
+      ? { ...evt, turnId: providerTurnId }
+      : evt;
     if (evt.type === 'turn-start') record.missedTurnEnd = null;
     if (evt.type === 'turn-end') settleAgentTurn(record, activeSession, evt);
-    const delivered = sendJson(record.studioSocket, { v: 1, type: 'agent-event', event: evt });
-    if (evt.type === 'turn-end' && !delivered) record.missedTurnEnd = evt;
+    const delivered = sendJson(record.studioSocket, { v: 1, type: 'agent-event', event: studioEvent });
+    if (evt.type === 'turn-end' && !delivered) record.missedTurnEnd = studioEvent;
     if (evt.type === 'turn-end') {
       record.userQuestionResponseReceipts.clear();
       record.suppressedUserQuestionCallIds.clear();
@@ -1657,31 +2246,74 @@ function disposeSession(record) {
   record.pendingReferenceMessage = null;
   record.pendingDocumentSaved = null;
   const activeSession = record.agentSession;
-  if (!activeSession) return Promise.resolve();
+  if (!activeSession) return Promise.resolve(record.processCleanupUncertain !== true);
   const wasRunning = activeSession.status === 'running';
+  const disposedTurnId = activeSession.turnId;
   const agent = activeSession.agent;
   settleUserQuestion(record, { status: 'expired', reason: 'request-invalidated' });
   record.userQuestionResponseReceipts.clear();
   record.suppressedUserQuestionCallIds.clear();
   record.pendingUserQuestionScopes.length = 0;
+  failPendingProviderCallsForTurn(record, activeSession, activeSession.turnId);
   activeSession.turnId = null;
-  let backendExit = Promise.resolve();
+  activeSession.providerTurnStarted = false;
+  retireProviderSockets(record, activeSession, {
+    code: 4001,
+    reason: 'provider session replaced',
+  });
+  let backendExit = Promise.resolve(true);
   try {
     backendExit = Promise.resolve(activeSession.backend.dispose());
   } catch (e) {
     log(`session dispose error: ${e?.message ?? e}`);
+    backendExit = Promise.resolve(false);
   }
+  try { activeSession.releaseReferenceScopes?.(); } catch {}
   record.agentSession = null;
-  void record.browserbaseSession.cleanup('session disposed');
+  let browserbaseExit;
+  try {
+    browserbaseExit = Promise.resolve(record.browserbaseSession.cleanup('session disposed'));
+  } catch (error) {
+    log(`Browserbase session cleanup failed: ${error?.message ?? error}`);
+    browserbaseExit = Promise.resolve(false);
+  }
   if (wasRunning) {
-    const evt = { type: 'turn-end', agent, stopReason: 'interrupted' };
+    const evt = {
+      type: 'turn-end',
+      agent,
+      stopReason: 'interrupted',
+      ...(disposedTurnId ? { turnId: disposedTurnId } : {}),
+    };
     if (!sendJson(record.studioSocket, { v: 1, type: 'agent-event', event: evt })) {
       record.missedTurnEnd = evt;
     }
   }
-  return backendExit.catch((error) => {
-    log(`session process exit wait failed: ${error?.message ?? error}`);
+  return Promise.allSettled([backendExit, browserbaseExit]).then(([backend, browserbase]) => {
+    const backendCleaned = backend.status === 'fulfilled' && backend.value !== false;
+    const browserbaseCleaned = browserbase.status === 'fulfilled' && browserbase.value !== false;
+    if (backend.status === 'rejected') {
+      log(`session process exit wait failed: ${backend.reason?.message ?? backend.reason}`);
+    }
+    if (browserbase.status === 'rejected') {
+      log(`Browserbase session exit wait failed: ${browserbase.reason?.message ?? browserbase.reason}`);
+    }
+    if (backendCleaned && browserbaseCleaned && record.processCleanupUncertain !== true) return true;
+    record.processCleanupUncertain = true;
+    if (!backendCleaned) retainedUncertainBackends.add(activeSession.backend);
+    if (!browserbaseCleaned) retainedUncertainBrowserbaseSessions.add(record.browserbaseSession);
+    retainUncertainProcessCleanup(record.recordRoot);
+    return false;
   });
+}
+
+function agentProcessCleanupUncertain(cause = null) {
+  const error = new Error(
+    'The previous provider process tree could not be confirmed stopped. Restart the app before starting another provider.',
+    cause ? { cause } : undefined,
+  );
+  error.code = 'AGENT_PROCESS_CLEANUP_UNCERTAIN';
+  error.processCleanupUncertain = true;
+  return error;
 }
 
 function resolvePermissionProfile(value) {
@@ -1797,12 +2429,20 @@ function dispatchUserMessage(record, sock, msg, activeSession, messageAttachment
     return;
   }
   beginAgentTurn(record, activeSession);
+  const providerTurn = Object.freeze({
+    session: activeSession,
+    generation: activeSession.generation,
+    turnId: activeSession.turnId,
+  });
   void skillRegistry.promptContext(msg.text, typeof msg.skillName === 'string' ? msg.skillName : undefined, {
     phase: activeSession.planning.snapshot().phase,
     agent: activeSession.agent,
   })
     .then((prompt) => {
-      if (record.agentSession !== activeSession) throw new Error('Agent session changed before the message was dispatched');
+      // Skill context is loaded asynchronously. An interrupt can settle this
+      // turn and a later message can start another turn on the same session
+      // before the read completes, so session identity alone is insufficient.
+      if (!providerTurnIsCurrent(record, providerTurn)) return;
       activeSession.backend.sendUserMessage(addAgentInstructionsContext(addReopenedChatHistory(
         activeSession,
         addActiveDocumentContext(
@@ -1816,11 +2456,13 @@ function dispatchUserMessage(record, sock, msg, activeSession, messageAttachment
       )));
     })
     .catch((e) => {
-      if (record.agentSession === activeSession) {
-        activeSession.status = 'idle';
-        activeSession.turnId = null;
-        record.userQuestionResponseReceipts.clear();
-      }
+      // A stale rejection belongs to the settled turn. It must not idle or
+      // report an error against a newer turn on this same backend session.
+      if (!providerTurnIsCurrent(record, providerTurn)) return;
+      failPendingProviderCallsForTurn(record, activeSession, providerTurn.turnId);
+      activeSession.status = 'idle';
+      activeSession.turnId = null;
+      record.userQuestionResponseReceipts.clear();
       sendJson(sock, { v: 1, type: 'chat-error', code: e?.code ?? 'AGENT_SPAWN_FAILED', message: String(e?.message ?? e) });
     });
 }
@@ -1831,7 +2473,12 @@ async function dispatchStagedUserMessage(record, sock, msg, activeSession) {
   if (stageIds.length === 0 || stageIds.length !== rawIds.length || stageIds.length > 10) {
     throw Object.assign(new Error('Message attachments require 1-10 unique staged reference ids'), { code: 'INVALID_REFERENCE_MESSAGE' });
   }
-  record.pendingReferenceMessage = { messageId: msg.messageId, message: msg, owner: activeSession };
+  const pendingReferenceMessage = Object.freeze({
+    messageId: msg.messageId,
+    message: msg,
+    owner: activeSession,
+  });
+  record.pendingReferenceMessage = pendingReferenceMessage;
   sendJson(sock, {
     v: 1,
     type: 'chat-reference-status',
@@ -1849,9 +2496,17 @@ async function dispatchStagedUserMessage(record, sock, msg, activeSession) {
       error: String(entry.reason?.message ?? entry.reason ?? 'Attachment processing failed'),
     });
   sendJson(sock, { v: 1, type: 'chat-reference-status', messageId: msg.messageId, attachments });
-  if (record.pendingReferenceMessage?.messageId === msg.messageId) record.pendingReferenceMessage = null;
+  const stillCurrent = record.pendingReferenceMessage === pendingReferenceMessage;
+  if (stillCurrent) record.pendingReferenceMessage = null;
   const readyFiles = settled.flatMap((entry) => entry.status === 'fulfilled' ? [entry.value.file] : []);
-  if (record.agentSession === activeSession) dispatchUserMessage(record, sock, msg, activeSession, readyFiles);
+  if (!stillCurrent || record.agentSession !== activeSession) return;
+  if (activeSession.status !== 'idle' || activeSession.pendingTransitions > 0) {
+    throw workflowError(
+      'REQUEST_INVALIDATED',
+      'The agent state changed while message attachments were being prepared',
+    );
+  }
+  dispatchUserMessage(record, sock, msg, activeSession, readyFiles);
 }
 
 function emitWorkflowState(record, extra = {}) {
@@ -1874,6 +2529,7 @@ async function startSession(
   force = false,
   requestedServiceTier,
 ) {
+  if (record.processCleanupUncertain === true) throw agentProcessCleanupUncertain();
   const model = resolveModel(agent, requestedModel);
   const effort = resolveEffort(agent, model, requestedEffort);
   const permissionProfile = resolvePermissionProfile(requestedPermission);
@@ -1902,19 +2558,31 @@ async function startSession(
     currentSession.documentName = documentName;
     return currentSession;
   }
-  await disposeSession(record);
+  if (!await disposeSession(record)) throw agentProcessCleanupUncertain();
+  const sessionReferenceScopes = referenceScopesForSession({ threadId, documentId });
+  await referenceStore.activateScopes(sessionReferenceScopes);
   const planning = new PlanningState({
     workflow,
     initialCapabilityEpoch: record.nextCapabilityEpoch++,
     allocateEpoch: () => record.nextCapabilityEpoch++,
   });
   const generation = ++record.sessionGeneration;
+  const providerRole = 'chat';
+  const providerCapabilityResource = mcpProviderResource({
+    agent,
+    role: providerRole,
+    generation,
+  });
   const opts = {
     rootDir: record.workDir,
     workDir: record.workDir,
+    readOnlyRoots: record.hubReadOnlyRoots,
     mcpScriptPath: MCP_SCRIPT,
     hubPort,
-    token: issueScopedHubToken(TOKEN, record.sessionId),
+    token: sessions.issue(TOKEN, record.sessionId, {
+      audience: HUB_CAPABILITY_AUDIENCES.MCP,
+      resource: providerCapabilityResource,
+    }),
     sessionId: record.sessionId,
     model,
     effort,
@@ -1930,14 +2598,16 @@ async function startSession(
     claudeBin: cliSetupStatus.claude?.installed ? cliSetup.binPath('claude') : 'claude',
     grokBin: cliSetupStatus.grok?.installed ? cliSetup.binPath('grok') : 'grok',
     cursorBin: cliSetupStatus.cursor?.installed ? cliSetup.binPath('cursor') : 'cursor-agent',
-    providerEnv: CLI_SETUP_AGENTS.includes(agent) ? cliSetup.envFor(agent) : {},
+    providerEnv: agent === 'claude'
+      ? claudeRuntimeEnv(record.isolatedHome)
+      : (CLI_SETUP_AGENTS.includes(agent) ? cliSetup.envFor(agent) : {}),
     onEvent: makeBackendEventHandler(record, generation),
     requestUserInput: (request, signal) => requestUserQuestion(record, request, {
       source: 'native',
       generation,
       signal,
     }),
-    agentRole: 'chat',
+    agentRole: providerRole,
     workflow,
     phase: workflow === 'direct' ? 'implementing' : planning.phase,
     capabilityEpoch: planning.capabilityEpoch,
@@ -1961,8 +2631,11 @@ async function startSession(
     serviceTier,
     backend,
     generation,
+    providerRole,
+    providerCapabilityResource,
     status: 'idle',
     turnId: null,
+    providerTurnStarted: false,
     sessionId: backend.getSessionId(),
     threadId,
     documentId,
@@ -1971,10 +2644,12 @@ async function startSession(
     // thread identity rather than an unrelated hub-generated UUID.
     chatId: threadId,
     activeTemplateId: null,
+    lastDocumentInfo: null,
     bootstrapHistory: normalizeChatHistory(requestedHistory),
     planning,
     workflowTransition: Promise.resolve(),
     pendingTransitions: 0,
+    releaseReferenceScopes: referenceStore.retainScopes(sessionReferenceScopes),
   };
   if (workflow === 'plan') {
     requireWorkflowSwitchBackend(record.agentSession);
@@ -2030,6 +2705,12 @@ function enqueueWorkflowTransition(record, transitionOwner, transitionFn) {
   });
   const trackedTransition = transition.finally(() => {
     transitionOwner.pendingTransitions = Math.max(0, transitionOwner.pendingTransitions - 1);
+    if (transitionOwner.pendingTransitions === 0) {
+      queueMicrotask(() => {
+        drainTemplateCompletion(record);
+        drainPlanningDocumentSaved(record);
+      });
+    }
   });
   transitionOwner.workflowTransition = trackedTransition.catch(() => undefined);
   return trackedTransition;
@@ -2079,8 +2760,11 @@ async function approveImplementationPlan(record, sock, msg) {
       ),
     )));
   } catch (error) {
-    if (record.agentSession === activeSession && activeSession.planning.phase === 'switching') {
-      activeSession.planning.failSwitch(transition.approvedPlan.planId);
+    if (record.agentSession === activeSession) {
+      if (activeSession.planning.phase === 'switching') {
+        activeSession.planning.failSwitch(transition.approvedPlan.planId);
+      }
+      failPendingProviderCallsForTurn(record, activeSession, activeSession.turnId);
       activeSession.status = 'idle';
       activeSession.turnId = null;
       record.userQuestionResponseReceipts.clear();
@@ -2090,14 +2774,26 @@ async function approveImplementationPlan(record, sock, msg) {
   }
 }
 
-async function requestImplementationPlanChanges(record, sock, msg) {
+async function requestImplementationPlanChanges(record, sock, msg, {
+  sessionStatusOverride,
+} = {}) {
   const activeSession = record.agentSession;
   if (!activeSession) throw workflowError('AGENT_NOT_STARTED', 'Start a chat before requesting plan changes');
   requireWorkflowSwitchBackend(activeSession);
-  const planId = String(msg.planId ?? '');
+  const bounded = boundTextFields(msg, PLAN_CHANGE_TEXT_LIMITS, {
+    maxTotalChars: 160_000,
+    maxTotalBytes: MAX_SEMANTIC_REQUEST_BYTES,
+    label: 'Plan-change request',
+  });
+  const planId = bounded.planId;
+  const feedback = bounded.feedback.trim();
+  const promptOverride = bounded.promptOverride.trim();
   activeSession.planning.requestChanges({
     planId,
-    sessionStatus: msg.sessionStatusOverride ?? activeSession.status,
+    // Only an already-serialized internal document-saved transition may
+    // override this lock. Never trust a Studio frame to claim the provider is
+    // idle while its current turn is still running.
+    sessionStatus: sessionStatusOverride ?? activeSession.status,
   });
   try {
     await activeSession.backend.setExecutionMode(providerModeRequest(activeSession, 'planning'));
@@ -2106,15 +2802,12 @@ async function requestImplementationPlanChanges(record, sock, msg) {
       v: 1,
       type: 'plan-invalidated',
       planId,
-      reason: typeof msg.reason === 'string' && msg.reason
-        ? msg.reason
-        : (typeof msg.feedback === 'string' ? msg.feedback : 'changes-requested'),
+      reason: bounded.reason || feedback || 'changes-requested',
       ...activeSession.planning.snapshot(),
       latestPlan: null,
     });
-    const promptOverride = typeof msg.promptOverride === 'string' ? msg.promptOverride.trim() : '';
     if (promptOverride) {
-      activeSession.status = 'running';
+      beginAgentTurn(record, activeSession);
       activeSession.backend.sendUserMessage(addAgentInstructionsContext(addTemplateContext(
         record,
         activeSession,
@@ -2122,22 +2815,23 @@ async function requestImplementationPlanChanges(record, sock, msg) {
       )));
       return;
     }
-    if (typeof msg.feedback === 'string' && msg.feedback.trim()) {
+    if (feedback) {
       beginAgentTurn(record, activeSession);
       const revisionPrompt = [
         'The user requested changes, so the previous implementation plan is no longer authoritative.',
         'Return to discovery: inspect the affected current state and evaluate the feedback. If it is ambiguous or changes an assumption, discuss it with the user and ask one focused question in normal chat instead of immediately presenting a replacement. If it is already concrete, do not invent a question; follow the planning checkpoint and presentation rules before presenting a complete replacement.',
-        `Feedback: ${msg.feedback.trim()}`,
+        `Feedback: ${feedback}`,
       ].join('\n\n');
       activeSession.backend.sendUserMessage(addAgentInstructionsContext(addTemplateContext(
         record,
         activeSession,
-        addReferenceContext(activeSession, msg.feedback, revisionPrompt),
+        addReferenceContext(activeSession, feedback, revisionPrompt),
       )));
     }
   } catch (error) {
     if (record.agentSession === activeSession) {
       activeSession.planning.failRequestChanges(planId);
+      failPendingProviderCallsForTurn(record, activeSession, activeSession.turnId);
       activeSession.status = 'idle';
       activeSession.turnId = null;
       record.userQuestionResponseReceipts.clear();
@@ -2198,7 +2892,18 @@ async function setChatWorkflow(record, sock, msg) {
     throw error;
   }
   if (record.agentSession !== activeSession) return;
-  if (msg.workflow === 'direct') void record.browserbaseSession.cleanup('workflow changed to direct');
+  if (msg.workflow === 'direct') {
+    const browserbaseCleaned = await record.browserbaseSession.cleanup('workflow changed to direct')
+      .catch(() => false);
+    if (!browserbaseCleaned) {
+      record.processCleanupUncertain = true;
+      retainedUncertainBrowserbaseSessions.add(record.browserbaseSession);
+      retainUncertainProcessCleanup(record.recordRoot);
+      // The workflow switch itself already succeeded. Report the cleanup
+      // failure separately while still publishing the authoritative new mode.
+      sendChatError(sock, agentProcessCleanupUncertain(), 'AGENT_PROCESS_CLEANUP_UNCERTAIN');
+    }
+  }
   if (previousPlanId) {
     sendJson(sock, {
       v: 1,
@@ -2274,8 +2979,14 @@ async function handleStudioMessage(record, sock, msg) {
           ...s.planning.snapshot(),
         });
       } catch (e) {
-        await disposeSession(record);
-        sendJson(sock, { v: 1, type: 'chat-error', code: e?.code ?? 'AGENT_SPAWN_FAILED', message: String(e?.message ?? e) });
+        const cleaned = await disposeSession(record);
+        const reported = cleaned ? e : agentProcessCleanupUncertain(e);
+        sendJson(sock, {
+          v: 1,
+          type: 'chat-error',
+          code: reported?.code ?? 'AGENT_SPAWN_FAILED',
+          message: String(reported?.message ?? reported),
+        });
       }
       return;
     }
@@ -2664,7 +3375,18 @@ async function handleStudioMessage(record, sock, msg) {
       return;
     }
     case 'skill-draft-request': {
-      if (typeof msg.goal !== 'string' || !msg.goal.trim()) {
+      let draftInput;
+      try {
+        draftInput = boundTextFields(msg, SKILL_DRAFT_TEXT_LIMITS, {
+          maxTotalChars: 160_000,
+          maxTotalBytes: MAX_SEMANTIC_REQUEST_BYTES,
+          label: 'Skill-draft request',
+        });
+      } catch (error) {
+        sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: error?.code ?? 'INVALID_REQUEST', message: String(error?.message ?? error) });
+        return;
+      }
+      if (!draftInput.goal.trim()) {
         sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: 'INVALID_REQUEST', message: 'Skill goal is required.' });
         return;
       }
@@ -2675,10 +3397,18 @@ async function handleStudioMessage(record, sock, msg) {
         : (skillHealth && skillHealth.claude?.available === false && skillHealth.codex?.available !== false
           ? 'codex'
           : 'claude');
-      const model = resolveModel(agent, msg.model);
+      const model = resolveModel(agent, draftInput.model);
       sendJson(sock, { v: 1, type: 'skill-draft-progress', requestId: msg.requestId ?? null, state: 'generating' });
       void generateSkillDraft(
-        { agent, model, goal: String(msg.goal ?? ''), triggerExamples: String(msg.triggerExamples ?? ''), nonTriggerExamples: String(msg.nonTriggerExamples ?? ''), resourceNotes: String(msg.resourceNotes ?? ''), existingSkill: typeof msg.existingSkill === 'string' ? msg.existingSkill : undefined },
+        {
+          agent,
+          model,
+          goal: draftInput.goal,
+          triggerExamples: draftInput.triggerExamples,
+          nonTriggerExamples: draftInput.nonTriggerExamples,
+          resourceNotes: draftInput.resourceNotes,
+          existingSkill: draftInput.existingSkill || undefined,
+        },
         auxDeps(record, agent, agent === 'claude' ? 'claude' : 'codex'),
       )
         .then((draft) => sendJson(sock, { v: 1, type: 'skill-draft-result', requestId: msg.requestId ?? null, draft }))
@@ -2697,7 +3427,7 @@ async function handleStudioMessage(record, sock, msg) {
     }
     case 'agent-setup-status-request': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
-      void agentSetupStatuses()
+      void agentSetupStatuses(record.sessionId)
         .then((statuses) => replyToStudio(record, sock, { v: 1, type: 'agent-setup-status', requestId, statuses }))
         .catch((e) => sendAgentSetupError(record, sock, requestId, null, e));
       return;
@@ -2826,7 +3556,7 @@ async function handleStudioMessage(record, sock, msg) {
           })
         : cliSetup.install(agent, progress).then((status) => { cliSetupStatus[agent] = status; });
       void installing
-        .then(agentSetupStatuses)
+        .then(() => agentSetupStatuses(record.sessionId))
         .then((statuses) => {
           replyToStudio(record, sock, { v: 1, type: 'agent-setup-status', requestId, statuses });
           void providerHealth.check(true).then((providers) => replyToStudio(record, sock, { v: 1, type: 'provider-status', providers }));
@@ -2842,129 +3572,198 @@ async function handleStudioMessage(record, sock, msg) {
         sendAgentSetupError(record, sock, requestId, null, new Error('로그인 요청을 확인하지 못했어요.'));
         return;
       }
-      let authUrl = null;
-      let run;
+      const abort = new AbortController();
+      let rejectProof = null;
+      let authRun;
+      let credentialsCommitted = false;
+      const cancelProvider = () => {
+        abort.abort();
+        rejectProof?.(agentAuthCancelled());
+        rejectProof = null;
+        if (agent === 'pi') void piManager.cancelSetup();
+        else if (agent === 'rau') void rauManager.cancelSetup();
+        else if (CLI_SETUP_AGENTS.includes(agent)) void cliSetup.cancel(agent);
+      };
+      try {
+        authRun = authRuns.begin({
+          agent,
+          ownerSessionId: record.sessionId,
+          requestId,
+          method,
+          cancel: cancelProvider,
+        });
+      } catch (error) {
+        sendAgentSetupError(record, sock, requestId, agent, error, 'AGENT_AUTH_FAILED');
+        return;
+      }
+
+      const isLiveAuthRun = () => !abort.signal.aborted && authRuns.get(agent) === authRun;
+      const commitAuthRun = () => {
+        if (credentialsCommitted) return;
+        if (!isLiveAuthRun() || !authRuns.finish(authRun)) throw agentAuthCancelled();
+        credentialsCommitted = true;
+        authRun.credentialsCommitted = true;
+      };
+      // Pi completes in the loopback HTTP callback, outside this WS handler stack.
+      // Keep only the exact originating run's cancellation and commit capabilities.
+      authRun.signal = abort.signal;
+      authRun.commitCredentials = commitAuthRun;
+
+      const progress = (entry) => {
+        if (!isLiveAuthRun()) return;
+        const replayableUi = {
+          ...(entry.authUrl ? { authUrl: entry.authUrl } : {}),
+          ...(entry.userCode ? { userCode: entry.userCode } : {}),
+          ...(entry.pairingCode ? { pairingCode: entry.pairingCode } : {}),
+        };
+        authRuns.update(authRun, { phase: entry.state ?? entry.phase ?? 'authorizing', replayableUi });
+        sendAuthRunFrame(authRun, {
+          type: 'agent-setup-progress',
+          state: entry.state ?? 'authorizing',
+          ...(entry.phase ? { phase: entry.phase } : {}),
+          ...(entry.authUrl ? { authUrl: entry.authUrl } : {}),
+          ...(entry.userCode ? { userCode: entry.userCode } : {}),
+          ...(entry.pairingCode ? { pairingCode: entry.pairingCode } : {}),
+          ...(entry.expiresAt ? { expiresAt: entry.expiresAt } : {}),
+          ...(Number.isFinite(entry.percent) ? { percent: entry.percent } : {}),
+          ...(entry.detail ? { detail: entry.detail } : {}),
+          ...(entry.activity === true ? { activity: true } : {}),
+        });
+      };
+      const started = (details = {}) => {
+        if (!isLiveAuthRun()) return;
+        authRuns.update(authRun, { phase: 'authorizing', replayableUi: details });
+        replyToStudio(record, sock, {
+          v: 1,
+          type: 'agent-setup-auth-started',
+          requestId,
+          authRunId: authRun.runId,
+          agent,
+          ...details,
+        });
+      };
+      const finish = async (error = null) => {
+        authRuns.finish(authRun);
+        if (error && credentialsCommitted) {
+          log(`post-auth ${agent} refresh failed: ${error?.message ?? error}`);
+        } else if (error && !['AGENT_AUTH_CANCELLED', 'RAU_LOGIN_CANCELLED'].includes(error?.code)) {
+          sendAuthRunError(authRun, error);
+        }
+        await broadcastFreshAgentSetupStatuses().catch((statusError) => {
+          log(`agent setup status refresh failed: ${statusError?.message ?? statusError}`);
+        });
+      };
+
       if (agent === 'rau' && method === 'oauth') {
-        if (rauLogin?.abort) rauLogin.abort.abort();
-        const abort = new AbortController();
-        const login = { id: null, abort };
-        rauLogin = login;
-        run = (async () => {
+        void (async () => {
           const session = await rauCredits.createDeviceSession({
             signal: abort.signal,
             replaceAccessToken: rauManager.apiKey(),
           });
-          login.id = session.id;
-          authUrl = session.loginUrl;
-          replyToStudio(record, sock, { v: 1, type: 'agent-setup-auth-started', requestId, agent, authUrl });
-          replyToStudio(record, sock, { v: 1, type: 'agent-setup-progress', agent, state: 'authorizing', authUrl });
+          if (!isLiveAuthRun()) throw agentAuthCancelled();
+          authRun.deviceSessionId = session.id;
+          const authDetails = { authUrl: session.loginUrl };
+          started(authDetails);
+          progress({ state: 'authorizing', ...authDetails });
           const { key, email } = await rauCredits.redeem(session.id, { signal: abort.signal });
+          if (!isLiveAuthRun()) throw agentAuthCancelled();
           rauStatus = await storeRauAccessToken(rauManager.setApiKey.bind(rauManager), key, {
             signal: abort.signal,
             account: email,
+            onCommitted: commitAuthRun,
           });
           await rauCredits.acknowledgeDeviceSession(session.id, { signal: abort.signal })
             .catch((error) => {
               if (error?.code === 'RAU_LOGIN_CANCELLED') throw error;
-              log(`Rau credit session acknowledgement failed: ${error?.message ?? error}`);
+              log(`Rau session acknowledgement failed after local token storage: ${error?.message ?? error}`);
             });
           if (!rauStatus.installed) {
-            rauStatus = await mutateSharedNpmPrefix(() => rauManager.install((entry) => replyToStudio(record, sock, {
-              v: 1,
-              type: 'agent-setup-progress',
-              agent,
-              state: entry.state,
-              ...(Number.isFinite(entry.percent) ? { percent: entry.percent } : {}),
-              ...(entry.detail ? { detail: entry.detail } : {}),
-              ...(entry.activity === true ? { activity: true } : {}),
-            })));
+            rauStatus = await mutateSharedNpmPrefix(() => rauManager.install(progress));
             piStatus = await piManager.status();
           }
           await refreshOpenRouterCredits(true);
-        })();
-        void run
-          .then(agentSetupStatuses)
-          .then((statuses) => {
-            if (rauLogin === login) rauLogin = null;
-            replyToStudio(record, sock, { v: 1, type: 'agent-setup-status', statuses });
-            void providerHealth.check(true).then((providers) => replyToStudio(record, sock, { v: 1, type: 'provider-status', providers }));
-            replyToStudio(record, sock, { v: 1, type: 'usage-report', usage: usageSnapshot() });
-          })
-          .catch((e) => {
-            if (rauLogin === login) rauLogin = null;
-            if (e?.code === 'RAU_LOGIN_CANCELLED' || e?.code === 'AGENT_AUTH_CANCELLED') {
-              void agentSetupStatuses().then((statuses) => replyToStudio(record, sock, { v: 1, type: 'agent-setup-status', statuses }));
-              return;
-            }
-            sendAgentSetupError(record, sock, null, agent, e, 'AGENT_AUTH_FAILED');
-          });
+          sendAuthRunFrame(authRun, { type: 'usage-report', usage: usageSnapshot() });
+        })().then(() => finish(), finish);
         return;
       }
+
+      let run;
       if (agent === 'pi' && method === 'oauth') {
-        const callbackUrl = `http://127.0.0.1:${hubPort}/oauth/openrouter/callback`;
-        authUrl = piManager.beginOAuth(callbackUrl).authUrl;
-        run = Promise.resolve(null);
-      } else if (agent === 'pi') {
-        run = piManager.setApiKey(String(msg.key ?? '')).then((status) => { piStatus = status; });
-      } else {
-        run = cliSetup.authenticate(agent, method, msg.key, (entry) => replyToStudio(record, sock, {
-          v: 1,
-          type: 'agent-setup-progress',
-          agent,
-          state: entry.state,
-          ...(entry.authUrl ? { authUrl: entry.authUrl } : {}),
-          ...(entry.userCode ? { userCode: entry.userCode } : {}),
-        })).then(async (status) => {
-          cliSetupStatus[agent] = status;
-          if (agent === 'codex') {
-            sourceCodexAuthPath = await findSourceCodexAuthPath();
-          }
-          if (agent === 'grok') {
-            sourceGrokAuthPath = (await cliSetup.grokAuthPath()) ?? undefined;
-          }
-          refreshSessionCredentials(agent);
-        });
-      }
-      replyToStudio(record, sock, { v: 1, type: 'agent-setup-auth-started', requestId, agent, ...(authUrl ? { authUrl } : {}) });
-      if (authUrl) {
-        replyToStudio(record, sock, { v: 1, type: 'agent-setup-progress', agent, state: 'authorizing', authUrl });
+        try {
+          const callbackUrl = `http://127.0.0.1:${hubPort}/oauth/openrouter/callback`;
+          const authUrl = piManager.beginOAuth(callbackUrl).authUrl;
+          started({ authUrl });
+          progress({ state: 'authorizing', authUrl });
+        } catch (error) {
+          void finish(error);
+        }
         return;
       }
-      void run
-        .then(agentSetupStatuses)
-        .then((statuses) => {
-          replyToStudio(record, sock, { v: 1, type: 'agent-setup-status', statuses });
-          if (agent === 'pi') replyToStudio(record, sock, { v: 1, type: 'pi-status', status: piStatus });
-          void providerHealth.check(true).then((providers) => replyToStudio(record, sock, { v: 1, type: 'provider-status', providers }));
+      started();
+      if (agent === 'pi') {
+        run = piManager.setApiKey(msg.key, {
+          signal: abort.signal,
+          onCommitted: commitAuthRun,
         })
-        .catch((e) => {
-          // 사용자가 스스로 취소한 로그인은 오류 카드 대신 새 상태만 보낸다.
-          if (e?.code === 'AGENT_AUTH_CANCELLED') {
-            void agentSetupStatuses().then((statuses) => replyToStudio(record, sock, { v: 1, type: 'agent-setup-status', statuses }));
-            return;
-          }
-          sendAgentSetupError(record, sock, null, agent, e, 'AGENT_AUTH_FAILED');
-        });
+          .then((status) => { piStatus = status; });
+      } else {
+        run = cliSetup.authenticate(agent, method, msg.key, progress, {
+          signal: abort.signal,
+          onCommitted: commitAuthRun,
+        })
+          .then(async (status) => {
+            cliSetupStatus[agent] = status;
+            if (agent === 'codex') sourceCodexAuthPath = await findSourceCodexAuthPath();
+            if (agent === 'grok') sourceGrokAuthPath = (await cliSetup.grokAuthPath()) ?? undefined;
+            refreshSessionCredentials(agent);
+          });
+      }
+      void run.then(async () => {
+        if (agent === 'pi') sendAuthRunFrame(authRun, { type: 'pi-status', status: piStatus });
+        const providers = await providerHealth.check(true);
+        sendAuthRunFrame(authRun, { type: 'provider-status', providers });
+      }).then(() => finish(), finish);
       return;
     }
     case 'agent-setup-auth-code': {
       const agent = msg.agent;
-      if (agent !== 'claude' && agent !== 'codex') {
-        sendAgentSetupError(record, sock, null, null, new Error('인증 코드 요청을 확인하지 못했어요.'));
+      let authRun;
+      let code;
+      try {
+        authRun = authRuns.requireOwned({
+          agent,
+          runId: msg.authRunId,
+          ownerSessionId: record.sessionId,
+        });
+        code = boundedAgentAuthCode(msg.code);
+      } catch (error) {
+        sendAgentSetupError(record, sock, null, agent, error, 'AGENT_AUTH_FAILED');
         return;
       }
-      void cliSetup.submitAuthCode(agent, msg.code)
+      if (agent === 'rau' && typeof authRun.submitProof === 'function') {
+        authRun.submitProof({ kind: 'manual', code });
+        return;
+      }
+      if (agent !== 'claude' && agent !== 'codex') {
+        sendAgentSetupError(record, sock, null, agent, new Error('인증 코드 요청을 확인하지 못했어요.'));
+        return;
+      }
+      void cliSetup.submitAuthCode(agent, code)
         .catch((e) => sendAgentSetupError(record, sock, null, agent, e, 'AGENT_AUTH_FAILED'));
       return;
     }
     case 'agent-setup-cancel': {
       const agent = msg.agent;
-      if (agent === 'rau') {
-        rauLogin?.abort.abort();
-        rauLogin = null;
-        void rauManager.cancelSetup();
-      } else if (agent === 'pi') void piManager.cancelSetup();
-      else if (CLI_SETUP_AGENTS.includes(agent)) void cliSetup.cancel(agent);
+      try {
+        authRuns.cancelOwned({
+          agent,
+          runId: msg.authRunId,
+          ownerSessionId: record.sessionId,
+        });
+        void broadcastFreshAgentSetupStatuses();
+      } catch (error) {
+        sendAgentSetupError(record, sock, null, agent, error, 'AGENT_AUTH_FAILED');
+      }
       return;
     }
     case 'agent-setup-disconnect': {
@@ -2976,14 +3775,14 @@ async function handleStudioMessage(record, sock, msg) {
       const rauSessions = [...sessions.values()]
         .filter((session) => session.agentSession?.agent === 'rau');
       const accessToken = rauManager.apiKey();
-      void Promise.all(rauSessions.map(disposeSession))
-        .then(() => rauCredits.revokeAccessToken(accessToken)
-          .catch((error) => log(`Rau access-token revocation failed: ${error?.message ?? error}`)))
-        .then(() => rauManager.clearApiKey())
+      void rauManager.clearApiKey()
         .then(async (status) => {
           rauStatus = status;
+          await Promise.all(rauSessions.map(disposeSession));
+          await rauCredits.revokeAccessToken(accessToken)
+            .catch((error) => log(`Rau access-token revocation failed: ${error?.message ?? error}`));
           await refreshOpenRouterCredits(true);
-          const statuses = await agentSetupStatuses();
+          const statuses = await agentSetupStatuses(record.sessionId);
           replyToStudio(record, sock, { v: 1, type: 'agent-setup-status', requestId, statuses });
           replyToStudio(record, sock, { v: 1, type: 'usage-report', usage: usageSnapshot() });
         })
@@ -3045,7 +3844,7 @@ async function handleStudioMessage(record, sock, msg) {
     }
     case 'pi-set-key': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
-      void piManager.setApiKey(String(msg.key ?? ''))
+      void piManager.setApiKey(msg.key)
         .then(async (status) => {
           piStatus = status;
           replyToStudio(record, sock, { v: 1, type: 'pi-status', requestId, status });
@@ -3168,6 +3967,7 @@ async function handleStudioMessage(record, sock, msg) {
             });
           }
           calibrationSources = await writingStyleStore.calibrationSources(msg.files, { append: msg.append === true });
+          if (Array.isArray(msg.files)) msg.files.length = 0;
           return calibrateWritingStyle(
             {
               language: msg.language,
@@ -3186,6 +3986,7 @@ async function handleStudioMessage(record, sock, msg) {
               sessionId: record.sessionId,
               spawnProcess: (command, args, options) => auxSpawnProcess(record, command, args, options),
               terminateProcess: terminateProcessTree,
+              cleanupProcessOutcome: (child) => beginAuxiliaryProcessCleanupOutcome(record, child),
               onProgress: (event) => {
                 if (record.styleCalibration?.jobId === jobId) sendStyleProgress(record, event);
               },
@@ -3236,14 +4037,23 @@ async function handleStudioMessage(record, sock, msg) {
     }
     case 'chat-interrupt': {
       if (record.agentSession) {
+        const interruptedSession = record.agentSession;
+        const interruptedTurnId = interruptedSession.turnId;
         settleUserQuestion(record, { status: 'cancelled', reason: 'user-stop' });
+        failPendingProviderCallsForTurn(
+          record,
+          interruptedSession,
+          interruptedTurnId,
+        );
+        retireProviderSockets(record, interruptedSession, { turnId: interruptedTurnId });
         try {
-          record.agentSession.backend.interrupt();
+          interruptedSession.backend.interrupt();
         } catch (e) {
           log(`interrupt error: ${e?.message ?? e}`);
         }
-        record.agentSession.status = 'idle';
-        record.agentSession.turnId = null;
+        interruptedSession.status = 'idle';
+        interruptedSession.turnId = null;
+        interruptedSession.providerTurnStarted = false;
         record.userQuestionResponseReceipts.clear();
       }
       return;
@@ -3251,7 +4061,9 @@ async function handleStudioMessage(record, sock, msg) {
     case 'chat-stop': {
       settleUserQuestion(record, { status: 'cancelled', reason: 'user-stop' });
       cancelCheckpointTitleJobs(record);
-      await disposeSession(record);
+      if (!await disposeSession(record)) {
+        sendChatError(sock, agentProcessCleanupUncertain(), 'AGENT_PROCESS_CLEANUP_UNCERTAIN');
+      }
       return;
     }
     case 'user-question-answer': {
@@ -3266,33 +4078,125 @@ async function handleStudioMessage(record, sock, msg) {
       }
       record.pendingCalls.delete(msg.id);
       clearTimeout(entry.timer);
-      if (entry.mcpSocket.readyState !== entry.mcpSocket.OPEN) return;
-      if (msg.ok) {
-        try {
-          const result = entry.tool === 'get_document_info'
-            ? attachActiveDocumentIdentity(msg.result, entry.documentIdentity)
-            : entry.tool === 'materialize_document_snapshot'
-              ? await record.documentSnapshotManager.materialize({
+      const releaseSnapshotClaim = () => {
+        if (entry.tool !== 'materialize_document_snapshot' || !entry.copyLayoutJobId) return;
+        const job = record.templateJobs.get(entry.copyLayoutJobId);
+        releaseCopyLayoutSnapshot(job);
+      };
+      const assertProviderTurn = () => {
+        if (entry.providerTurn && !providerTurnIsActive(record, entry.providerTurn)) {
+          throw noActiveProviderTurnError();
+        }
+      };
+      let unboundMaterialization = null;
+      try {
+        assertProviderTurn();
+        if (entry.mcpSocket.readyState !== entry.mcpSocket.OPEN) return;
+        if (msg.ok) {
+          try {
+            let result;
+            if (entry.tool === 'get_document_info') {
+              result = attachActiveDocumentIdentity(msg.result, entry.documentIdentity);
+            } else if (entry.tool === 'materialize_document_snapshot') {
+              const snapshotJob = entry.copyLayoutJobId
+                ? record.templateJobs.get(entry.copyLayoutJobId)
+                : null;
+              if (entry.copyLayoutJobId && (!snapshotJob || snapshotJob.status !== 'running')) {
+                throw workflowError('COPY_LAYOUT_JOB_SETTLED', 'The copy-layout job settled before its snapshot was bound');
+              }
+              if (snapshotJob && (
+                msg.result?.digest !== snapshotJob.binding.digest
+                || msg.result?.sourceFormat !== snapshotJob.binding.sourceFormat
+              )) {
+                throw workflowError('COPY_LAYOUT_SOURCE_MISMATCH', 'Studio returned snapshot bytes for a different document revision or format');
+              }
+              const materialization = record.documentSnapshotManager.materialize({
                 chatId: entry.chatId,
                 documentIdentity: entry.documentIdentity,
                 snapshot: msg.result,
-              })
-              : msg.result;
-          sendJson(entry.mcpSocket, { v: 1, type: 'tool-result', id: entry.clientId, ok: true, result });
-        } catch (error) {
-          sendJson(entry.mcpSocket, {
-            v: 1, type: 'tool-result', id: entry.clientId, ok: false,
-            error: {
-              code: error?.code ?? 'SNAPSHOT_WRITE_FAILED',
-              message: String(error?.message ?? error),
-            },
-          });
+              });
+              if (snapshotJob) snapshotJob.snapshotPromise = materialization;
+              try {
+                result = await materialization;
+                // Until this exact turn receives the path (or the owning
+                // copy-layout job binds it), the allocation is provisional.
+                // Turn settlement can happen while fsync is in flight.
+                unboundMaterialization = result;
+              } finally {
+                if (snapshotJob?.snapshotPromise === materialization) snapshotJob.snapshotPromise = null;
+              }
+            } else {
+              result = msg.result;
+            }
+            assertProviderTurn();
+            if (entry.tool === 'get_document_info' && !entry.copyLayoutJobId
+              && record.agentSession?.generation === entry.sessionGeneration) {
+              record.agentSession.lastDocumentInfo = Object.freeze({
+                documentId: result.documentId,
+                digest: result.digest,
+                sourceFormat: result.sourceFormat,
+                dirty: result.dirty === true,
+                sourcePath: result.sourcePath ?? null,
+              });
+            }
+            if (entry.tool === 'materialize_document_snapshot' && entry.copyLayoutJobId) {
+              const workerJob = record.templateJobs.get(entry.copyLayoutJobId);
+              if (!workerJob || workerJob.status !== 'running') {
+                throw workflowError('COPY_LAYOUT_JOB_SETTLED', 'The copy-layout job settled before its snapshot was bound');
+              }
+              if (result.documentId !== workerJob.binding.documentId
+                || result.digest !== workerJob.binding.digest
+                || result.sourceFormat !== workerJob.binding.sourceFormat) {
+                throw workflowError('COPY_LAYOUT_SOURCE_MISMATCH', 'The immutable snapshot no longer matches the delegated document binding');
+              }
+              if (workerJob.snapshot) {
+                if (workerJob.snapshot.checksum !== result.checksum
+                  || workerJob.snapshot.digest !== result.digest
+                  || workerJob.snapshot.path !== result.path) {
+                  throw workflowError('COPY_LAYOUT_SNAPSHOT_ALREADY_BOUND', 'This job is already bound to a different immutable snapshot');
+                }
+              } else {
+                workerJob.snapshot = Object.freeze({ ...result });
+                unboundMaterialization = null;
+              }
+            }
+            const delivered = typeof entry.sendResult === 'function'
+              ? entry.sendResult(result)
+              : sendJson(entry.mcpSocket, { v: 1, type: 'tool-result', id: entry.clientId, ok: true, result });
+            if (delivered && !entry.copyLayoutJobId) unboundMaterialization = null;
+          } catch (error) {
+            if (typeof entry.sendError === 'function') entry.sendError(error, 'SNAPSHOT_WRITE_FAILED');
+            else {
+              sendJson(entry.mcpSocket, {
+                v: 1, type: 'tool-result', id: entry.clientId, ok: false,
+                error: {
+                  code: error?.code ?? 'SNAPSHOT_WRITE_FAILED',
+                  message: String(error?.message ?? error),
+                },
+              });
+            }
+          }
+        } else {
+          const error = msg.error ?? { code: 'RPC_ERROR', message: 'unknown studio error' };
+          if (typeof entry.sendError === 'function') entry.sendError(error, 'RPC_ERROR');
+          else {
+            sendJson(entry.mcpSocket, {
+              v: 1, type: 'tool-result', id: entry.clientId, ok: false,
+              error,
+            });
+          }
         }
-      } else {
-        sendJson(entry.mcpSocket, {
-          v: 1, type: 'tool-result', id: entry.clientId, ok: false,
-          error: msg.error ?? { code: 'RPC_ERROR', message: 'unknown studio error' },
-        });
+      } catch (error) {
+        if (typeof entry.sendError === 'function') entry.sendError(error);
+      } finally {
+        if (unboundMaterialization) {
+          try {
+            await record.documentSnapshotManager.discard(unboundMaterialization);
+          } catch (error) {
+            log(`undelivered document snapshot cleanup failed: ${error?.message ?? error}`);
+          }
+        }
+        releaseSnapshotClaim();
       }
       return;
     }
@@ -3305,22 +4209,84 @@ function handleMcpMessage(record, sock, msg) {
   switch (msg.type) {
     case 'tool-call': {
       const clientId = msg.id;
+      if (!Number.isSafeInteger(clientId) || clientId < 0) {
+        sendJson(sock, {
+          v: 1,
+          type: 'protocol-error',
+          code: 'INVALID_CALL_ID',
+          message: 'tool-call id must be a non-negative safe integer',
+        });
+        try { sock.close(1002, 'invalid tool-call id'); } catch {}
+        return;
+      }
       const tool = String(msg.tool ?? '');
       const definition = toolDefinitionsByName.get(tool);
-      const sendResult = (result) => sendJson(sock, { v: 1, type: 'tool-result', id: clientId, ok: true, result });
-      const sendError = (error, fallback = 'TOOL_ERROR') => sendJson(sock, {
-        v: 1,
-        type: 'tool-result',
-        id: clientId,
-        ok: false,
-        error: { code: error?.code ?? fallback, message: String(error?.message ?? error) },
-      });
+      const workerJob = workerJobForSocket(record, sock);
+      let providerTurn = null;
+      let callSettled = false;
+      const sendError = (error, fallback = 'TOOL_ERROR') => {
+        if (callSettled) return false;
+        const terminalQuestionOutcome = tool === 'ask_user_question'
+          && (error?.code === 'USER_QUESTION_CANCELLED' || error?.code === 'USER_QUESTION_EXPIRED');
+        const reported = providerTurn && !providerTurnIsActive(record, providerTurn)
+          && !terminalQuestionOutcome
+          ? noActiveProviderTurnError()
+          : error;
+        callSettled = true;
+        return sendJson(sock, {
+          v: 1,
+          type: 'tool-result',
+          id: clientId,
+          ok: false,
+          error: {
+            code: reported?.code ?? fallback,
+            message: String(reported?.message ?? reported),
+          },
+        });
+      };
+      const sendResult = (result) => {
+        if (callSettled) return false;
+        if (providerTurn && !providerTurnIsActive(record, providerTurn)) {
+          return sendError(noActiveProviderTurnError());
+        }
+        callSettled = true;
+        return sendJson(sock, { v: 1, type: 'tool-result', id: clientId, ok: true, result });
+      };
+      if (!workerJob) {
+        const activeSession = record.agentSession;
+        if (
+          !activeSession
+          || sock.agentGeneration !== activeSession.generation
+          || sock.agentLabel !== activeSession.agent
+          || sock.agentRole !== activeSession.providerRole
+        ) {
+          sendError(workflowError(
+            'PROVIDER_SESSION_STALE',
+            'This MCP connection no longer belongs to the active provider session',
+          ));
+          try { sock.close(4001, 'provider session replaced'); } catch {}
+          return;
+        }
+        if (activeSession.status !== 'running'
+          || !activeSession.turnId
+          || activeSession.providerTurnStarted !== true
+          || sock.providerTurnRetired === true
+          || sock.agentTurnId !== activeSession.turnId) {
+          sendError(noActiveProviderTurnError());
+          try { sock.close(4003, 'provider tool call outside active turn'); } catch {}
+          return;
+        }
+        providerTurn = Object.freeze({
+          session: activeSession,
+          generation: activeSession.generation,
+          turnId: activeSession.turnId,
+        });
+      }
       if (!definition) {
         sendError(workflowError('UNKNOWN_TOOL', `Unknown tool: ${tool}`));
         return;
       }
       let args;
-      const workerJob = workerJobForSocket(record, sock);
       try {
         args = toolArgSchema(tool, definition).parse(msg.args ?? {});
         definition.validate?.(args);
@@ -3461,16 +4427,138 @@ function handleMcpMessage(record, sock, msg) {
         });
         return;
       }
+      if (tool === 'run_copy_layout_helper') {
+        if (!workerJob) {
+          sendError(workflowError('COPY_LAYOUT_JOB_UNAUTHORIZED', 'Only the bound copy-layout worker can run the helper'));
+          return;
+        }
+        if (!workerJob.snapshot?.path) {
+          sendError(workflowError('COPY_LAYOUT_SNAPSHOT_REQUIRED', 'Call materialize_document_snapshot before running the helper'));
+          return;
+        }
+        if (workerJob.helperPending > 0) {
+          sendError(workflowError('COPY_LAYOUT_HELPER_ACTIVE', 'Only one structured helper call may run at a time'));
+          return;
+        }
+        if (args.action === 'inspect' && workerJob.inspection) {
+          sendError(workflowError('COPY_LAYOUT_INSPECTION_COMPLETE', 'This immutable snapshot was already inspected'));
+          return;
+        }
+        if (args.action === 'generate') {
+          if (workerJob.publishedArtifacts.size > 0) {
+            sendError(workflowError('COPY_LAYOUT_ARTIFACT_ALREADY_PUBLISHED', 'The final candidate is already snapshotted for completion'));
+            return;
+          }
+          if (!workerJob.inspection) {
+            sendError(workflowError('COPY_LAYOUT_INSPECTION_REQUIRED', 'Inspect the bound snapshot before generating a candidate'));
+            return;
+          }
+          if (workerJob.generatedCandidates.has(args.iteration)
+            || workerJob.generatedCandidates.size >= COPY_LAYOUT_MAX_ITERATIONS) {
+            sendError(workflowError('COPY_LAYOUT_ITERATION_USED', 'Each of the three bounded candidate iterations may run only once'));
+            return;
+          }
+        }
+        const boundSnapshot = workerJob.snapshot;
+        workerJob.helperPending = 1;
+        const run = runCopyLayoutHelper(args, {
+          sourcePath: boundSnapshot.path,
+          sourceFormat: boundSnapshot.sourceFormat,
+          helperPath: path.join(BUNDLED_SKILLS, 'copy-layout', 'scripts', 'copy_layout.py'),
+          privateRoot: workerJob.generatedRoot,
+          hwpBinary: hwpExtractor,
+          spawnProcess: (command, argv, options) => spawnAuxiliaryProcess(
+            record,
+            command,
+            argv,
+            options,
+          ),
+          cleanupProcess: (child) => beginAuxiliaryProcessCleanup(record, child),
+        }).then((result) => {
+          if (workerJob.status !== 'running' || workerJob.snapshot !== boundSnapshot) {
+            throw workflowError('COPY_LAYOUT_JOB_SETTLED', 'The copy-layout job changed before the helper completed');
+          }
+          if (args.action === 'inspect') workerJob.inspection = Object.freeze(result);
+          else workerJob.generatedCandidates.set(args.iteration, Object.freeze(result));
+          return result;
+        }).finally(() => { workerJob.helperPending = 0; });
+        workerJob.helperPromise = run;
+        void run.then((result) => {
+          sendTemplateJobEvent(record, taskProgressForJob(workerJob, `${args.action} helper completed`, tool));
+          sendResult(result);
+        }).catch((error) => {
+          if (error?.processCleanupUncertain) {
+            record.processCleanupUncertain = true;
+            retainUncertainProcessCleanup(record.recordRoot);
+          }
+          sendError(error, 'COPY_LAYOUT_HELPER_FAILED');
+        });
+        return;
+      }
       if (tool === 'complete_copy_layout_job') {
         if (!workerJob) {
           sendError(workflowError('COPY_LAYOUT_JOB_UNAUTHORIZED', 'Only the bound copy-layout worker can complete this job'));
+          return;
+        }
+        if (workerJob.helperPending > 0) {
+          sendError(workflowError('COPY_LAYOUT_HELPER_ACTIVE', 'Wait for the structured helper call to finish before completing the job'));
           return;
         }
         if (args.sourceDocumentId !== workerJob.binding.documentId || args.sourceDigest !== workerJob.binding.digest) {
           sendError(workflowError('COPY_LAYOUT_SOURCE_MISMATCH', 'Completion does not match the immutable source binding'));
           return;
         }
-        void (async () => {
+        const published = args.outcome === 'succeeded'
+          ? workerJob.publishedArtifacts.get(args.artifactId)
+          : null;
+        if (args.outcome === 'succeeded' && !published) {
+          sendError(workflowError('COPY_LAYOUT_ARTIFACT_UNBOUND', 'Completion must use an artifact published from this job\'s verified helper candidate'));
+          return;
+        }
+        let storedClaims = null;
+        try {
+          storedClaims = published ? copyLayoutCandidateClaims(workerJob, published) : null;
+        } catch (error) {
+          sendError(error, 'COPY_LAYOUT_VERIFICATION_MISSING');
+          return;
+        }
+        if (storedClaims && (
+          published.report?.delivery?.ready !== true
+          || published.report?.verification?.layout_structure_match !== true
+          || args.quality !== storedClaims.quality
+          || !exactJsonArray(args.warnings, storedClaims.warnings)
+          || Object.entries(storedClaims.counts).some(([key, value]) => args.counts[key] !== value)
+          || !exactJsonArray(args.preview.representativePages, storedClaims.preview.representativePages)
+          || Object.entries(storedClaims.preview)
+            .filter(([key]) => key !== 'representativePages')
+            .some(([key, value]) => args.preview[key] !== value)
+        )) {
+          sendError(workflowError('COPY_LAYOUT_VERIFICATION_MISMATCH', 'Completion claims do not exactly match the stored helper render and verification evidence'));
+          return;
+        }
+        const completionClaims = storedClaims ?? {
+          quality: null,
+          warnings: args.warnings,
+          counts: {
+            keptText: 0, removedText: 0, replacedText: 0, resetControls: 0,
+            clearedMarks: 0, keptMedia: 0, removedMedia: 0,
+            iterations: Math.max(1, Math.min(COPY_LAYOUT_MAX_ITERATIONS, workerJob.generatedCandidates.size || 1)),
+          },
+          preview: {
+            representativePages: [], sourcePageCount: 1, outputPageCount: 1,
+            outputSectionCount: 1, renderCompared: false, geometryMatch: false,
+            safetyVerified: false, readabilityVerified: false, stoppedReason: 'hard-failure',
+          },
+        };
+        // Claim the one-shot completion before the first await so concurrent
+        // requests cannot both settle the same worker job.
+        try {
+          claimCopyLayoutSettlement(workerJob);
+        } catch (error) {
+          sendError(error, 'COPY_LAYOUT_JOB_SETTLED');
+          return;
+        }
+        const completion = (async () => {
           let artifact = null;
           if (args.outcome === 'succeeded') {
             artifact = await record.artifactStore.read(args.artifactId);
@@ -3479,15 +4567,19 @@ function handleMcpMessage(record, sock, msg) {
           workerJob.activity = args.summary;
           workerJob.result = {
             summary: args.summary,
-            warnings: args.warnings,
-            counts: args.counts,
-            preview: args.preview,
+            warnings: completionClaims.warnings,
+            counts: completionClaims.counts,
+            preview: completionClaims.preview,
             ...(artifact ? {
-              quality: args.quality,
+              quality: completionClaims.quality,
               artifact: artifactDownloadDescriptor(record, args.artifactId, artifact),
             } : {}),
           };
+          workerJob.inspection = null;
+          workerJob.generatedCandidates.clear();
+          workerJob.publishedArtifacts.clear();
           record.activeTemplateJobId = null;
+          pruneTemplateJobHistory(record);
           sendTemplateJobEvent(record, {
             type: 'task-end',
             agent: workerJob.agent,
@@ -3498,7 +4590,10 @@ function handleMcpMessage(record, sock, msg) {
           });
           queueTemplateCompletion(record, workerJob);
           sendResult({ jobId: workerJob.jobId, status: workerJob.status });
-        })().catch((error) => {
+        })();
+        workerJob.completionPromise = completion;
+        void completion.catch((error) => {
+          if (workerJob.status === 'settling') workerJob.status = 'running';
           settleTemplateJobFailure(record, workerJob, error);
           sendError(error, 'COPY_LAYOUT_COMPLETION_FAILED');
         });
@@ -3660,8 +4755,44 @@ function handleMcpMessage(record, sock, msg) {
         return;
       }
       if (tool === 'publish_artifact') {
+        let workerCandidate = null;
+        let workerPublishClaimed = false;
+        if (workerJob) {
+          const requestedPath = path.resolve(String(args.filePath ?? ''));
+          workerCandidate = [...workerJob.generatedCandidates.values()]
+            .find((candidate) => path.resolve(candidate.outputPath) === requestedPath) ?? null;
+          try {
+            if (workerCandidate) {
+              copyLayoutCandidateClaims(workerJob, { report: workerCandidate.report });
+            }
+            claimCopyLayoutPublication(workerJob, workerCandidate);
+          } catch (error) {
+            sendError(error, 'COPY_LAYOUT_ARTIFACT_UNBOUND');
+            return;
+          }
+          workerPublishClaimed = true;
+        }
         void record.artifactStore.publish(args)
-          .then(({ artifactId, fileName, mime, size, checksum }) => {
+          .then(async ({ artifactId, fileName, mime, size, checksum }) => {
+            if (workerJob) {
+              await Promise.resolve(workerJob.helperPromise);
+              if (workerJob.status !== 'running'
+                || workerJob.helperPending !== 0
+                || workerJob.generatedCandidates.get(workerCandidate.iteration) !== workerCandidate
+                || checksum !== workerCandidate.checksum) {
+                throw workflowError('COPY_LAYOUT_ARTIFACT_MISMATCH', 'Published bytes no longer match the verified helper candidate');
+              }
+              workerJob.publishedArtifacts.set(artifactId, Object.freeze({
+                checksum,
+                outputPath: workerCandidate.outputPath,
+                iteration: workerCandidate.iteration,
+                report: workerCandidate.report,
+              }));
+              // ArtifactStore owns an immutable byte snapshot now. Remove all
+              // private candidates immediately so sequential jobs cannot grow
+              // hub storage by 3 x 64 MiB each.
+              await cleanupTemplateGeneratedRoot(record, workerJob);
+            }
             const encodePathSegment = (value) => encodeURIComponent(value).replace(
               /[!'()*]/g,
               (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
@@ -3671,21 +4802,56 @@ function handleMcpMessage(record, sock, msg) {
               `http://127.0.0.1:${hubPort}`,
             );
             downloadUrl.searchParams.set('sessionId', record.sessionId);
-            downloadUrl.searchParams.set('token', issueScopedHubToken(TOKEN, record.sessionId));
+            downloadUrl.searchParams.set('token', sessions.issue(TOKEN, record.sessionId, {
+              audience: HUB_CAPABILITY_AUDIENCES.ARTIFACT,
+              resource: artifactId,
+            }));
             sendResult({ artifactId, fileName, mime, size, checksum, downloadUrl: downloadUrl.href });
           })
-          .catch((error) => sendError(error, 'ARTIFACT_PUBLISH_FAILED'));
+          .catch((error) => {
+            if (workerJob && workerPublishClaimed) {
+              releaseCopyLayoutPublication(workerJob, workerCandidate);
+            }
+            sendError(error, 'ARTIFACT_PUBLISH_FAILED');
+          });
         return;
       }
       if (definition.category === 'browser') {
         const sidecarTool = tool.replace(/^browserbase_/, '');
         void record.browserbaseSession.call(record.agentSession.chatId, sidecarTool, args)
           .then(sendResult)
-          .catch((error) => sendError(error, 'BROWSERBASE_TOOL_FAILED'));
+          .catch((error) => {
+            if (error?.processCleanupUncertain) {
+              record.processCleanupUncertain = true;
+              retainedUncertainBrowserbaseSessions.add(record.browserbaseSession);
+              retainUncertainProcessCleanup(record.recordRoot);
+            }
+            sendError(error, 'BROWSERBASE_TOOL_FAILED');
+          });
         return;
+      }
+      if (workerJob && tool === 'materialize_document_snapshot') {
+        if (workerJob.snapshot) {
+          sendResult(workerJob.snapshot);
+          return;
+        }
+        if (workerJob.snapshotPending) {
+          sendError(workflowError(
+            'COPY_LAYOUT_SNAPSHOT_ACTIVE',
+            'The immutable document snapshot is already being materialized for this job',
+          ));
+          return;
+        }
       }
       if (!record.studioSocket || record.studioSocket.readyState !== record.studioSocket.OPEN) {
         sendError(workflowError('NO_STUDIO', 'Studio is not connected; open rhwp-studio in a browser'));
+        return;
+      }
+      if (record.pendingCalls.size >= MAX_PENDING_STUDIO_TOOL_CALLS) {
+        sendError(workflowError(
+          'TOO_MANY_INFLIGHT_CALLS',
+          `At most ${MAX_PENDING_STUDIO_TOOL_CALLS} Studio tool calls may be in flight`,
+        ));
         return;
       }
       let activeTemplate = null;
@@ -3702,6 +4868,14 @@ function handleMcpMessage(record, sock, msg) {
         }
       }
       const hubId = record.nextHubId++;
+      if (workerJob && tool === 'materialize_document_snapshot') {
+        try {
+          claimCopyLayoutSnapshot(workerJob);
+        } catch (error) {
+          sendError(error, 'COPY_LAYOUT_SNAPSHOT_ACTIVE');
+          return;
+        }
+      }
       // apply_edits 는 항목 수만큼 변이+마감 리플로우를 안고 오므로 배치 크기에
       // 비례해 늘린다. 전체 문서 직렬화+base64 전송도 큰 파일에서는 길어질 수 있어
       // 별도 예산을 준다 (둘 다 mcp-stdio 의 180s 한도 아래로 유지).
@@ -3711,15 +4885,23 @@ function handleMcpMessage(record, sock, msg) {
           ? 120_000
           : STUDIO_TOOL_TIMEOUT_MS;
       const timer = setTimeout(() => {
+        const pendingEntry = record.pendingCalls.get(hubId);
         record.pendingCalls.delete(hubId);
-        sendJson(sock, {
-          v: 1, type: 'tool-result', id: clientId, ok: false,
-          error: { code: 'STUDIO_TIMEOUT', message: `Studio did not answer within ${timeoutMs / 1000}s — the edit may still have applied; re-read with get_structure/get_text_range before retrying to avoid duplicates` },
-        });
+        cancelStudioToolRequest(record, hubId, pendingEntry, 'studio-timeout');
+        if (workerJob && tool === 'materialize_document_snapshot') {
+          releaseCopyLayoutSnapshot(workerJob);
+        }
+        sendError(workflowError(
+          'STUDIO_TIMEOUT',
+          `Studio did not answer within ${timeoutMs / 1000}s — the edit may still have applied; re-read with get_structure/get_text_range before retrying to avoid duplicates`,
+        ));
       }, timeoutMs);
       record.pendingCalls.set(hubId, {
         mcpSocket: sock,
         clientId,
+        sendResult,
+        sendError,
+        providerTurn,
         timer,
         tool,
         documentIdentity: workerJob
@@ -3729,8 +4911,10 @@ function handleMcpMessage(record, sock, msg) {
           ?? record.agentSession?.chatId
           ?? record.agentSession?.threadId
           ?? record.sessionId,
+        copyLayoutJobId: workerJob?.jobId ?? null,
+        sessionGeneration: record.agentSession?.generation ?? null,
       });
-      sendJson(record.studioSocket, {
+      const forwarded = sendJson(record.studioSocket, {
         v: 1, type: 'tool-request', id: hubId,
         // 호출을 보낸 MCP 소켓의 에이전트 라벨을 단다 — 현재 세션 기준으로 찍으면
         // 세션 교체 직후 남은 호출이 엉뚱한 에이전트로 기록될 수 있다.
@@ -3741,7 +4925,17 @@ function handleMcpMessage(record, sock, msg) {
         workflow: record.agentSession?.planning.snapshot().workflow,
         phase: record.agentSession?.planning.snapshot().phase,
         capabilityEpoch: record.agentSession?.planning.capabilityEpoch,
+        turnBound: !workerJob,
+        ...(providerTurn ? { providerTurnId: providerTurn.turnId } : {}),
       });
+      if (!forwarded) {
+        clearTimeout(timer);
+        record.pendingCalls.delete(hubId);
+        if (workerJob && tool === 'materialize_document_snapshot') {
+          releaseCopyLayoutSnapshot(workerJob);
+        }
+        sendError(workflowError('NO_STUDIO', 'Studio disconnected before receiving the tool request'));
+      }
       return;
     }
     default:
@@ -3750,6 +4944,8 @@ function handleMcpMessage(record, sock, msg) {
 }
 
 function attachSocket(record, sock, role) {
+  let queuedStudioBytes = 0;
+  let queuedStudioMessages = 0;
   sock.on('message', async (data, isBinary) => {
     if (record.disposed) {
       try { sock.close(1001, 'hub session closed'); } catch {}
@@ -3759,14 +4955,35 @@ function attachSocket(record, sock, role) {
       sock.close(4400, 'binary frames not supported');
       return;
     }
+    const frameBytes = Number(data?.byteLength ?? Buffer.byteLength(String(data), 'utf8'));
+    let releaseStudioBudget = () => {};
+    if (role === 'studio') {
+      if (!Number.isSafeInteger(frameBytes) || frameBytes < 0
+        || queuedStudioMessages >= MAX_STUDIO_QUEUED_MESSAGES
+        || queuedStudioBytes + frameBytes > MAX_STUDIO_QUEUED_FRAME_BYTES) {
+        sock.close(4408, 'studio message queue limit exceeded');
+        return;
+      }
+      queuedStudioMessages += 1;
+      queuedStudioBytes += frameBytes;
+      let released = false;
+      releaseStudioBudget = () => {
+        if (released) return;
+        released = true;
+        queuedStudioMessages -= 1;
+        queuedStudioBytes -= frameBytes;
+      };
+    }
     let msg;
     try {
       msg = JSON.parse(data.toString());
     } catch {
+      releaseStudioBudget();
       sock.close(4400, 'malformed JSON');
       return;
     }
     if (msg?.v !== PROTOCOL_VERSION) {
+      releaseStudioBudget();
       sendJson(sock, {
         v: 1, type: 'protocol-error', code: 'UNSUPPORTED_VERSION',
         message: `protocol version ${String(msg?.v)} is not supported`, supportedVersions: [PROTOCOL_VERSION],
@@ -3785,11 +5002,13 @@ function attachSocket(record, sock, role) {
           })
           .catch((error) => {
             log(`message handler error (${role}, session=${record.sessionId}): ${error?.stack ?? error}`);
-          });
+          })
+          .finally(releaseStudioBudget);
       } else {
         handleMcpMessage(record, sock, msg);
       }
     } catch (e) {
+      releaseStudioBudget();
       log(`message handler error (${role}, session=${record.sessionId}): ${e?.stack ?? e}`);
     }
   });
@@ -3834,11 +5053,13 @@ function sendHttpJson(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
-function authenticateHttpSession(req, url) {
-  return authenticateHubSession({
+function authenticateHttpSession(req, url, { audience, resource } = {}) {
+  return sessions.authenticate({
     masterToken: TOKEN,
     token: requestToken(req, url),
     sessionId: url.searchParams.get('sessionId'),
+    audience,
+    ...(resource === undefined ? {} : { resource }),
     allowMaster: !PRODUCTION,
   });
 }
@@ -3888,20 +5109,24 @@ const httpServer = http.createServer((req, res) => {
       sendHttpJson(res, 403, { status: 'forbidden' });
       return;
     }
+    if (shutdownPreparationPromise
+      && !(req.method === 'POST' && url.pathname === '/shutdown')) {
+      sendHttpJson(res, 503, { status: 'shutting-down' });
+      return;
+    }
     if (req.method === 'GET' && url.pathname.startsWith('/artifacts/')) {
       const origin = typeof req.headers.origin === 'string' ? req.headers.origin : null;
       if (origin && !isAllowedStudioOrigin(origin)) {
         sendHttpJson(res, 403, { status: 'forbidden' });
         return;
       }
-      const sessionId = authenticateHttpSession(req, url);
-      const record = sessions.get(sessionId);
-      if (!record) {
-        sendHttpJson(res, 404, { status: 'not-found' });
-        return;
-      }
       const [, , encodedArtifactId] = url.pathname.split('/');
       const artifactId = decodeURIComponent(encodedArtifactId ?? '');
+      const sessionId = authenticateHttpSession(req, url, {
+        audience: HUB_CAPABILITY_AUDIENCES.ARTIFACT,
+        resource: artifactId,
+      });
+      const record = sessions.require(sessionId);
       let artifact;
       try {
         artifact = await record.artifactStore.read(artifactId);
@@ -3930,16 +5155,20 @@ const httpServer = http.createServer((req, res) => {
     if (isReferencePath(url.pathname) || isTemplatePath(url.pathname)) {
       let authSessionId = null;
       if (req.method !== 'OPTIONS') {
-        authSessionId = authenticateHttpSession(req, url);
-        sessions.getOrCreate(authSessionId);
+        authSessionId = authenticateHttpSession(req, url, {
+          audience: isReferencePath(url.pathname)
+            ? HUB_CAPABILITY_AUDIENCES.REFERENCE
+            : HUB_CAPABILITY_AUDIENCES.TEMPLATE,
+        });
+        sessions.require(authSessionId);
       }
-      // 이후 bearer 검증은 요청이 스스로 제시한 값을 비교하는 게 아니라
-      // 인증된 세션의 스코프 토큰과 비교한다(개발 모드 마스터 토큰도 수용).
+      // The route handler still enforces a Bearer header. Its accepted value is
+      // the capability already authenticated above, never a freshly derived
+      // session-wide token.
       const presentedToken = requestToken(req, url);
-      const expectedTokens = authSessionId ? [issueScopedHubToken(TOKEN, authSessionId)] : [];
-      if (!PRODUCTION && timingSafeTextEqual(presentedToken, TOKEN)) expectedTokens.push(presentedToken);
+      const expectedTokens = authSessionId ? [presentedToken] : [];
       const allowedScopes = authSessionId
-        ? referenceScopesForSession(sessions.getOrCreate(authSessionId).agentSession)
+        ? referenceScopesForSession(sessions.require(authSessionId).agentSession)
         : [];
       if (isReferencePath(url.pathname)) {
         const handleReferenceHttp = createReferenceHttpHandler({
@@ -3958,36 +5187,101 @@ const httpServer = http.createServer((req, res) => {
         if (await handleTemplateHttp(req, res, url)) return;
       }
     }
+    if (req.method === 'GET' && url.pathname === '/oauth/rau/callback') {
+      const code = url.searchParams.get('code');
+      const state = url.searchParams.get('state');
+      const authRun = authRuns.get('rau');
+      if (!authRun || !code || !state || !timingSafeTextEqual(state, authRun.callbackState ?? '')) {
+        res.writeHead(400, {
+          'content-type': 'text/plain; charset=utf-8',
+          'cache-control': 'no-store',
+          'x-content-type-options': 'nosniff',
+        });
+        res.end('Invalid or expired Rau login callback.');
+        return;
+      }
+      if (typeof authRun.submitProof !== 'function') {
+        res.writeHead(409, { 'cache-control': 'no-store' });
+        res.end();
+        return;
+      }
+      authRun.submitProof({ kind: 'loopback', code });
+      res.writeHead(204, {
+        'cache-control': 'no-store',
+        'referrer-policy': 'no-referrer',
+        'x-content-type-options': 'nosniff',
+      });
+      res.end();
+      return;
+    }
     if (req.method === 'GET' && url.pathname === '/oauth/openrouter/callback') {
       const code = url.searchParams.get('code');
       const state = url.searchParams.get('state');
-      if (!code) {
+      const authRun = authRuns.get('pi');
+      if (!code || !authRun || authRun.method !== 'oauth'
+        || authRun.signal?.aborted || typeof authRun.commitCredentials !== 'function') {
         res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
         res.end('<!doctype html><meta charset="utf-8"><title>Rauhwpx</title><p>OpenRouter login did not return a code.</p>');
         return;
       }
       try {
-        piStatus = await piManager.completeOAuth(code, state);
-        const statuses = await agentSetupStatuses();
-        broadcastToStudios({ v: 1, type: 'agent-setup-status', statuses });
-        broadcastToStudios({ v: 1, type: 'pi-status', status: piStatus });
+        // The manager checks this exact run signal throughout exchange and commits.
+        // commitCredentials rechecks identity and removes the run synchronously with
+        // the credential write, before any slow post-auth status work begins.
+        piStatus = await piManager.completeOAuth(code, state, {
+          signal: authRun.signal,
+          onCommitted: authRun.commitCredentials,
+        });
+        if (authRun.credentialsCommitted !== true) throw agentAuthCancelled();
+        await broadcastFreshAgentSetupStatuses();
+        sendAuthRunFrame(authRun, { type: 'pi-status', status: piStatus });
         void refreshOpenRouterCredits(true).then(() => {
           broadcastToStudios({ v: 1, type: 'usage-report', usage: usageSnapshot() });
+        }).catch((refreshError) => {
+          log(`post-auth pi credit refresh failed: ${refreshError?.message ?? refreshError}`);
         });
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
         res.end('<!doctype html><meta charset="utf-8"><title>Rauhwpx</title><style>body{font:16px system-ui;margin:48px;color:#202124}</style><h1>OpenRouter connected</h1><p>You can return to Rauhwpx and close this tab.</p>');
       } catch (error) {
-        broadcastToStudios({
-          v: 1,
-          type: 'agent-setup-error',
-          requestId: null,
-          agent: 'pi',
-          code: error?.code ?? 'OPENROUTER_OAUTH_FAILED',
-          message: String(error?.message ?? error),
-        });
+        if (authRun.credentialsCommitted === true) {
+          log(`post-auth pi status refresh failed: ${error?.message ?? error}`);
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+          res.end('<!doctype html><meta charset="utf-8"><title>Rauhwpx</title><h1>OpenRouter connected</h1><p>You can return to Rauhwpx and close this tab.</p>');
+          return;
+        }
+        if (error?.code !== 'OPENROUTER_OAUTH_INVALID') {
+          sendAuthRunError(authRun, error, 'OPENROUTER_OAUTH_FAILED');
+        }
         res.writeHead(400, { 'content-type': 'text/html; charset=utf-8' });
         res.end('<!doctype html><meta charset="utf-8"><title>Rauhwpx</title><p>OpenRouter login could not be completed. Return to Rauhwpx and try again.</p>');
       }
+      return;
+    }
+    if (req.method === 'POST' && url.pathname.startsWith('/sessions/')) {
+      authenticateOwnerRequest(req, url);
+      const sessionId = decodeURIComponent(url.pathname.slice('/sessions/'.length));
+      const record = sessions.register(sessionId);
+      sendHttpJson(res, 200, {
+        status: 'registered',
+        sessionId: record.sessionId,
+        capabilities: {
+          studio: sessions.issue(TOKEN, record.sessionId, {
+            audience: HUB_CAPABILITY_AUDIENCES.STUDIO,
+          }),
+          mcp: sessions.issue(TOKEN, record.sessionId, {
+            audience: HUB_CAPABILITY_AUDIENCES.MCP,
+            ...(record.agentSession?.providerCapabilityResource
+              ? { resource: record.agentSession.providerCapabilityResource }
+              : {}),
+          }),
+          reference: sessions.issue(TOKEN, record.sessionId, {
+            audience: HUB_CAPABILITY_AUDIENCES.REFERENCE,
+          }),
+          template: sessions.issue(TOKEN, record.sessionId, {
+            audience: HUB_CAPABILITY_AUDIENCES.TEMPLATE,
+          }),
+        },
+      });
       return;
     }
     if (req.method === 'DELETE' && url.pathname.startsWith('/sessions/')) {
@@ -3999,15 +5293,27 @@ const httpServer = http.createServer((req, res) => {
         return;
       }
       sessions.delete(sessionId);
+      authRuns.cancelForSession(sessionId, 'owner-session-closed');
       await disposeRecord(record, 'hub session closed');
       sendHttpJson(res, 200, { status: 'deleted', sessionId });
       return;
     }
     if (req.method === 'POST' && url.pathname === '/shutdown') {
       authenticateOwnerRequest(req, url);
-      sendHttpJson(res, 202, { status: 'shutting-down', launchId: LAUNCH_ID });
-      setImmediate(() => {
-        void shutdown('owner request').finally(() => process.exit(0));
+      const cleanupProven = await prepareShutdown('owner request');
+      let scheduled = false;
+      const finishShutdown = () => {
+        if (scheduled) return;
+        scheduled = true;
+        setImmediate(() => {
+          void shutdown('owner request').finally(() => process.exit(0));
+        });
+      };
+      res.once('finish', finishShutdown);
+      res.once('close', finishShutdown);
+      sendHttpJson(res, cleanupProven ? 200 : 503, {
+        status: cleanupProven ? 'prepared' : 'cleanup-unproven',
+        launchId: LAUNCH_ID,
       });
       return;
     }
@@ -4039,9 +5345,51 @@ const httpServer = http.createServer((req, res) => {
     }
     // pi extension requests a shared catalog with its signed session credential.
     if (req.method === 'GET' && url.pathname === '/pi/tool-definitions') {
-      authenticateHttpSession(req, url);
+      const candidateSession = sessions.get(url.searchParams.get('sessionId'));
+      const requestedWorkerJobId = url.searchParams.get('workerJobId');
+      const requestedAgentRole = url.searchParams.get('role') ?? 'chat';
+      const workerJob = requestedWorkerJobId
+        ? candidateSession?.templateJobs.get(requestedWorkerJobId)
+        : null;
+      let audience;
+      let resource;
+      let profile;
+      if (requestedWorkerJobId) {
+        if (
+          !workerJob
+          || workerJob.status !== 'running'
+          || requestedAgentRole !== workerJob.workerRole
+        ) {
+          const error = new Error('copy-layout worker identity mismatch');
+          error.code = 'UNAUTHORIZED_SESSION';
+          throw error;
+        }
+        audience = HUB_CAPABILITY_AUDIENCES.COPY_LAYOUT_WORKER;
+        resource = workerJob.jobId;
+        profile = 'copy-layout-worker';
+      } else if (candidateSession?.agentSession?.providerCapabilityResource) {
+        if (requestedAgentRole !== candidateSession.agentSession.providerRole) {
+          const error = new Error('provider identity mismatch');
+          error.code = 'UNAUTHORIZED_SESSION';
+          throw error;
+        }
+        audience = HUB_CAPABILITY_AUDIENCES.MCP;
+        resource = candidateSession.agentSession.providerCapabilityResource;
+        profile = candidateSession.agentSession.planning.mcpEnvironment().RHWP_TOOL_PROFILE;
+      } else {
+        const error = new Error('no active provider session');
+        error.code = 'UNAUTHORIZED_SESSION';
+        throw error;
+      }
+      authenticateHttpSession(req, url, {
+        audience,
+        resource,
+      });
       const authenticatedUrl = new URL(url);
       authenticatedUrl.searchParams.set('token', TOKEN);
+      // Never trust a provider-supplied profile. The authenticated live
+      // session/worker capability fixes the only catalog it may receive.
+      authenticatedUrl.searchParams.set('profile', profile);
       const { status, body } = handlePiToolDefinitions({ url: authenticatedUrl, token: TOKEN });
       sendHttpJson(res, status, body);
       return;
@@ -4051,10 +5399,14 @@ const httpServer = http.createServer((req, res) => {
   }).catch((error) => {
     const unauthorized = error?.code === 'UNAUTHORIZED' || error?.code === 'UNAUTHORIZED_SESSION';
     const invalidSession = error?.code === 'INVALID_SESSION_ID' || error instanceof URIError;
-    if (unauthorized || invalidSession) {
-      if (!res.headersSent) sendHttpJson(res, unauthorized ? 401 : 400, {
+    const sessionLimitReached = error?.code === 'SESSION_LIMIT_REACHED';
+    if (unauthorized || invalidSession || sessionLimitReached) {
+      if (!res.headersSent) sendHttpJson(res, unauthorized ? 401 : sessionLimitReached ? 429 : 400, {
         status: 'error',
-        error: { code: error?.code ?? 'INVALID_SESSION_ID', message: String(error.message) },
+        error: {
+          code: error?.code ?? 'INVALID_SESSION_ID',
+          message: sessionLimitReached ? 'Too many hub sessions are registered.' : String(error.message),
+        },
       });
       return;
     }
@@ -4064,16 +5416,21 @@ const httpServer = http.createServer((req, res) => {
   });
 });
 
-const wss = new WebSocketServer({ noServer: true, maxPayload: 1_000_000 });
-/** 채팅 한 메시지 상한 — 과대 프레임이 유료 CLI 호출로 그대로 흘러가지 않게 한다. */
-const MAX_CHAT_MESSAGE_CHARS = 128_000;
-
+// MCP provider frames stay tightly bounded. Studio additionally carries the
+// 64 MiB document-snapshot payload as base64 (about 85.4 MiB on the wire), so
+// it needs a separate authenticated transport budget.
+const mcpWss = new WebSocketServer({ noServer: true, maxPayload: 8 * 1024 * 1024 });
+const studioWss = new WebSocketServer({ noServer: true, maxPayload: 88 * 1024 * 1024 });
 function rejectUpgrade(socket, status, message) {
   socket.write(`HTTP/1.1 ${status} ${message}\r\nConnection: close\r\n\r\n`);
   socket.destroy();
 }
 
 httpServer.on('upgrade', (req, socket, head) => {
+  if (shutdownPreparationPromise) {
+    rejectUpgrade(socket, 503, 'Service Unavailable');
+    return;
+  }
   let url;
   try {
     url = new URL(req.url, `http://127.0.0.1:${hubPort || REQUESTED_PORT || 5175}`);
@@ -4103,19 +5460,74 @@ httpServer.on('upgrade', (req, socket, head) => {
   }
   const token = url.searchParams.get('token') ?? '';
   const sessionId = url.searchParams.get('sessionId');
+  const requestedAgentRole = url.searchParams.get('role') ?? 'chat';
+  const requestedWorkerJobId = pathname === '/mcp'
+    ? url.searchParams.get('workerJobId')
+    : null;
+  const requestedAgent = pathname === '/mcp' ? url.searchParams.get('agent') : null;
   let record;
+  let authenticatedWorkerJob = null;
+  let authenticatedProviderIdentity = null;
   try {
-    const authenticatedSessionId = authenticateHubSession({
+    const audience = pathname === '/studio'
+      ? HUB_CAPABILITY_AUDIENCES.STUDIO
+      : requestedWorkerJobId
+        ? HUB_CAPABILITY_AUDIENCES.COPY_LAYOUT_WORKER
+        : HUB_CAPABILITY_AUDIENCES.MCP;
+    let providerCapabilityResource;
+    if (pathname === '/mcp' && !requestedWorkerJobId) {
+      const candidateRecord = sessions.get(sessionId);
+      const activeSession = candidateRecord?.agentSession;
+      if (!activeSession?.providerCapabilityResource) {
+        throw new Error('active provider identity required');
+      }
+      providerCapabilityResource = activeSession.providerCapabilityResource;
+    }
+    const authenticatedSessionId = sessions.authenticate({
       masterToken: TOKEN,
       token,
       sessionId,
+      audience,
+      ...(requestedWorkerJobId
+        ? { resource: requestedWorkerJobId }
+        : providerCapabilityResource
+          ? { resource: providerCapabilityResource }
+          : {}),
       allowMaster: !PRODUCTION,
     });
-    record = sessions.getOrCreate(authenticatedSessionId);
+    record = sessions.require(authenticatedSessionId);
+    if (requestedWorkerJobId) {
+      authenticatedWorkerJob = record.templateJobs.get(requestedWorkerJobId);
+      if (
+        !authenticatedWorkerJob
+        || authenticatedWorkerJob.status !== 'running'
+        || requestedAgentRole !== authenticatedWorkerJob.workerRole
+      ) {
+        throw new Error('copy-layout worker identity mismatch');
+      }
+    } else if (requestedAgentRole.startsWith('copy-layout-worker:')) {
+      throw new Error('copy-layout worker capability required');
+    } else if (pathname === '/mcp') {
+      const activeSession = record.agentSession;
+      if (
+        !activeSession
+        || activeSession.providerCapabilityResource !== providerCapabilityResource
+        || requestedAgent !== activeSession.agent
+        || requestedAgentRole !== activeSession.providerRole
+      ) {
+        throw new Error('provider identity mismatch');
+      }
+      authenticatedProviderIdentity = Object.freeze({
+        agent: activeSession.agent,
+        role: activeSession.providerRole,
+        generation: activeSession.generation,
+      });
+    }
   } catch {
     rejectUpgrade(socket, 401, 'Unauthorized');
     return;
   }
+  const wss = pathname === '/studio' ? studioWss : mcpWss;
   wss.handleUpgrade(req, socket, head, (ws) => {
     if (pathname === '/studio') {
       // 페이지 로드마다 새로 발급되는 인스턴스 id — 같으면 같은 페이지의 WS 끊김,
@@ -4155,6 +5567,15 @@ httpServer.on('upgrade', (req, socket, head) => {
         hubSessionId: record.sessionId,
         session: sessionInfo(record),
       });
+      for (const authRun of authRuns.forSession(record.sessionId)) {
+        sendJson(ws, {
+          v: 1,
+          type: 'agent-setup-progress',
+          state: 'authorizing',
+          replayed: true,
+          ...authRun,
+        });
+      }
       sendJson(ws, {
         v: 1,
         type: 'agent-instructions',
@@ -4213,7 +5634,7 @@ httpServer.on('upgrade', (req, socket, head) => {
         if (providers !== cachedProviders) replyToStudio(record, ws, { v: 1, type: 'provider-status', providers });
       });
       sendJson(ws, { v: 1, type: 'pi-status', status: piStatus });
-      void agentSetupStatuses().then((statuses) => {
+      void agentSetupStatuses(record.sessionId).then((statuses) => {
         replyToStudio(record, ws, { v: 1, type: 'agent-setup-status', statuses });
       });
       sendJson(ws, { v: 1, type: 'writing-style-catalog', ...writingStyleCatalog(record) });
@@ -4232,13 +5653,35 @@ httpServer.on('upgrade', (req, socket, head) => {
       return;
     }
 
-    const agentLabel = url.searchParams.get('agent') ?? 'unknown';
-    ws.agentLabel = url.searchParams.get('agent');
-    ws.agentRole = url.searchParams.get('role') ?? 'chat';
+    const agentLabel = authenticatedWorkerJob?.agent ?? authenticatedProviderIdentity.agent;
+    ws.agentLabel = agentLabel;
+    ws.agentRole = authenticatedWorkerJob?.workerRole ?? authenticatedProviderIdentity.role;
+    ws.agentGeneration = authenticatedWorkerJob ? null : authenticatedProviderIdentity.generation;
+    const activeProviderSession = authenticatedWorkerJob ? null : record.agentSession;
+    const providerTurnId = activeProviderSession
+      && activeProviderSession.generation === ws.agentGeneration
+      && activeProviderSession.agent === ws.agentLabel
+      && activeProviderSession.providerRole === ws.agentRole
+      && activeProviderSession.status === 'running'
+      && activeProviderSession.providerTurnStarted === true
+      && activeProviderSession.turnId
+      ? activeProviderSession.turnId
+      : null;
+    // A root MCP socket is born into exactly one provider turn. Never promote
+    // a connection that arrived while idle/queued: it may belong to a stale
+    // descendant from the process tree that just settled.
+    ws.agentTurnId = authenticatedWorkerJob ? null : providerTurnId;
+    ws.providerTurnRetired = authenticatedWorkerJob ? false : providerTurnId === null;
+    ws.copyLayoutJobId = authenticatedWorkerJob?.jobId ?? null;
     ws.workflow = url.searchParams.get('workflow');
     ws.capabilityEpoch = url.searchParams.get('capabilityEpoch');
     record.mcpSockets.add(ws);
     attachSocket(record, ws, 'mcp');
+    if (!authenticatedWorkerJob && ws.providerTurnRetired) {
+      queueMicrotask(() => {
+        try { ws.close(4003, 'provider tool connection outside active turn'); } catch {}
+      });
+    }
     ws.on('close', () => {
       record.mcpSockets.delete(ws);
       if (record.pendingUserQuestion?.mcpSocket === ws) {
@@ -4248,6 +5691,7 @@ httpServer.on('upgrade', (req, socket, head) => {
         if (entry.mcpSocket === ws) {
           clearTimeout(entry.timer);
           record.pendingCalls.delete(hubId);
+          cancelStudioToolRequest(record, hubId, entry, 'provider-disconnected');
         }
       }
       log(`mcp client disconnected (agent=${agentLabel}, session=${record.sessionId})`);
@@ -4271,9 +5715,23 @@ httpServer.on('error', (err) => {
   process.exitCode = 1;
 });
 
+let shutdownPreparationPromise = null;
 let shutdownPromise = null;
+let launchCleanupRetentionRequired = false;
+
+function retainUncertainProcessCleanup(recordRoot) {
+  launchCleanupRetentionRequired = true;
+  try {
+    retainLaunchRootForProcessCleanupSync(WORK_ROOT, { launchId: LAUNCH_ID });
+  } catch (error) {
+    log(`failed to persist process cleanup retention marker: ${error?.message ?? error}`);
+  }
+  log(`retaining session root after uncertain process cleanup: ${recordRoot}`);
+}
+
 async function disposeRecord(record, reason) {
   record.disposed = true;
+  authRuns.cancelForSession(record.sessionId, reason);
   cancelCheckpointTitleJobs(record);
   if (record.pendingInstructionDraft?.expiryTimer) {
     clearTimeout(record.pendingInstructionDraft.expiryTimer);
@@ -4295,9 +5753,11 @@ async function disposeRecord(record, reason) {
     try {
       templateBackendExits.push(Promise.resolve(backend.dispose()).catch((error) => {
         log(`copy-layout worker exit wait failed: ${error?.message ?? error}`);
+        return false;
       }));
     } catch (error) {
       log(`copy-layout worker dispose failed: ${error?.message ?? error}`);
+      templateBackendExits.push(Promise.resolve(false));
     }
   }
   for (const sock of [record.studioSocket, ...record.mcpSockets]) {
@@ -4305,45 +5765,124 @@ async function disposeRecord(record, reason) {
   }
   record.mcpSockets.clear();
   record.studioSocket = null;
-  await Promise.all([
+  const cleanupResults = await Promise.allSettled([
     backendExit,
     ...templateBackendExits,
     stopAuxiliaryProcesses(record),
     record.browserbaseSession.cleanup(reason),
+    record.documentSnapshotManager.drain(),
   ]);
+  let processCleanupSettled = record.processCleanupUncertain !== true;
+  for (const result of cleanupResults) {
+    if (result.status === 'rejected') {
+      processCleanupSettled = false;
+      log(`session cleanup failed: ${result.reason?.message ?? result.reason}`);
+    } else if (result.value === false) {
+      processCleanupSettled = false;
+    }
+  }
+  if (!processCleanupSettled) {
+    retainUncertainProcessCleanup(record.recordRoot);
+    return false;
+  }
+  let credentialCopiesSettled = flushProviderCredentialHomes(record);
+  for (const job of record.templateJobs.values()) {
+    if (!flushProviderCredentialHomes(job.providerHomes)) credentialCopiesSettled = false;
+  }
+  // Another live record may own a WORK_ROOT journal. It must retain the launch
+  // root at shutdown, but must not pin this already-flushed record (including
+  // its hub-private downloads and snapshots).
+  if (!credentialCopiesSettled || hasPendingCredentialCopybackSync(record.recordRoot)) {
+    log(`retaining session root for pending credential copyback: ${record.recordRoot}`);
+    return false;
+  }
   await fs.rm(record.recordRoot, { recursive: true, force: true });
+  return true;
+}
+
+function prepareShutdown(signal) {
+  if (shutdownPreparationPromise) return shutdownPreparationPromise;
+  shutdownPreparationPromise = (async () => {
+    clearInterval(stagedReferenceCleanupTimer);
+    if (harnessUpdateTimer) clearTimeout(harnessUpdateTimer);
+    if (ownerWatchdog) clearInterval(ownerWatchdog);
+    log(`shutting down (${signal})`);
+    const cleanupProven = await sessions.disposeAll(
+      (record) => disposeRecord(record, 'hub shutdown'),
+    );
+    if (!cleanupProven) retainUncertainProcessCleanup(WORK_ROOT);
+    for (const wss of [studioWss, mcpWss]) {
+      for (const sock of wss.clients) {
+        try { sock.close(1001, 'server shutting down'); } catch {}
+      }
+    }
+    return cleanupProven;
+  })();
+  return shutdownPreparationPromise;
 }
 
 function shutdown(signal) {
   if (shutdownPromise) return shutdownPromise;
   shutdownPromise = (async () => {
-    clearInterval(stagedReferenceCleanupTimer);
-    if (harnessUpdateTimer) clearTimeout(harnessUpdateTimer);
-    if (ownerWatchdog) clearInterval(ownerWatchdog);
-    log(`shutting down (${signal})`);
-    await sessions.disposeAll((record) => disposeRecord(record, 'hub shutdown'));
-    for (const sock of wss.clients) {
-      try { sock.close(1001, 'server shutting down'); } catch {}
-    }
+    await prepareShutdown(signal);
     if (httpServer.listening) await new Promise((resolve) => httpServer.close(resolve));
     const ownedRoots = [
       process.env.RHWP_OWN_WORK_DIR === '1' ? WORK_ROOT : null,
       process.env.RHWP_OWN_RUNTIME_DIR === '1' ? RUNTIME_ROOT : null,
     ].filter(Boolean);
-    await Promise.all(ownedRoots.map((root) => fs.rm(root, { recursive: true, force: true })));
+    await Promise.all(ownedRoots.map(async (root) => {
+      if (root === WORK_ROOT
+        && (launchCleanupRetentionRequired || hasPendingLaunchCleanupSync(root))) {
+        log(`retaining owned work root for pending cleanup: ${root}`);
+        return;
+      }
+      await fs.rm(root, { recursive: true, force: true });
+    }));
   })();
   return shutdownPromise;
 }
 
 const ownerPid = Number(process.env.RHWP_OWNER_PID);
+let ownerMissing = false;
+let ownerMissingSince = null;
+let orphanIdleSince = null;
+function noteMissingOwner(reason = `owner process ${ownerPid} exited`) {
+  if (!ownerMissing) {
+    log(`${reason}; waiting for orphaned work to become idle`);
+    ownerMissingSince = Date.now();
+  }
+  ownerMissing = true;
+}
+if (process.env.RHWP_OWNER_IPC === '1') {
+  if (process.connected) {
+    process.once('disconnect', () => noteMissingOwner('owner IPC channel closed'));
+  } else {
+    noteMissingOwner('required owner IPC channel was unavailable');
+  }
+}
 const ownerWatchdog = Number.isSafeInteger(ownerPid) && ownerPid > 0
   ? setInterval(() => {
-    try {
-      process.kill(ownerPid, 0);
-    } catch (error) {
-      if (error?.code !== 'EPERM') {
-        void shutdown('owner exited').finally(() => process.exit(0));
+    if (!ownerMissing) {
+      let alive = true;
+      try {
+        process.kill(ownerPid, 0);
+      } catch (error) {
+        if (error?.code !== 'EPERM') alive = false;
       }
+      if (alive) return;
+      noteMissingOwner();
+    }
+    if (Date.now() - ownerMissingSince >= ORPHAN_HARD_SHUTDOWN_MS) {
+      void shutdown('owner exited and orphan deadline elapsed').finally(() => process.exit(0));
+      return;
+    }
+    if (hasConnectedSessionSockets() || hasOrphanActiveWork()) {
+      orphanIdleSince = null;
+      return;
+    }
+    orphanIdleSince ??= Date.now();
+    if (Date.now() - orphanIdleSince >= ORPHAN_IDLE_SHUTDOWN_MS) {
+      void shutdown('owner exited and hub stayed idle').finally(() => process.exit(0));
     }
   }, 1_000)
   : null;

@@ -54,17 +54,27 @@ class FakeProcess extends EventEmitter {
   }
 
   exit(code) {
+    this.exitOnly(code);
+    this.close(code);
+  }
+
+  exitOnly(code) {
     this.exitCode = code;
     this.emit('exit', code, null);
+  }
+
+  close(code) {
+    this.emit('close', code ?? this.exitCode, null);
   }
 }
 
 /** 세션을 만들고 스폰 기록/이벤트 배열을 함께 돌려준다. */
-function startSession(extra = {}) {
+function startSession(extra = {}, dependencies = {}) {
   const events = [];
   const spawns = [];
   const opts = { ...baseOpts, ...extra, onEvent: (event) => events.push(event) };
   const session = createPiSession(opts, {
+    ...dependencies,
     spawnProcess(command, argv, options) {
       const proc = new FakeProcess();
       spawns.push({ command, argv, options, proc });
@@ -361,6 +371,62 @@ test('interrupt kills the child and closes the turn once', () => {
   session.dispose();
 });
 
+test('interrupt discards an unterminated Pi terminal frame', async () => {
+  const { session, events, spawns } = startSession({}, {
+    terminateProcess: async () => true,
+    waitForExit: async () => true,
+  });
+  session.sendUserMessage('interrupt before the terminal frame is drained');
+  const { proc } = spawns[0];
+  proc.stdout.emit('data', JSON.stringify({ type: 'agent_settled' }));
+
+  session.interrupt();
+  proc.exit(0);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(
+    events.filter((event) => event.type === 'turn-end'),
+    [{ type: 'turn-end', agent: 'pi', stopReason: 'interrupted' }],
+  );
+  assert.equal(await session.dispose(), true);
+});
+
+test('exit grace without close discards an unterminated Pi terminal frame', async () => {
+  const { session, events, spawns } = startSession({}, {
+    closeGraceMs: 5,
+    terminateProcess: async () => null,
+    waitForExit: async () => true,
+  });
+  session.sendUserMessage('leader exits while a descendant retains stdout');
+  const { proc } = spawns[0];
+  proc.stdout.emit('data', JSON.stringify({ type: 'agent_settled' }));
+  proc.exitOnly(0);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.deepEqual(events.at(-1), { type: 'turn-end', agent: 'pi', stopReason: 'exited' });
+  assert.equal(await session.dispose(), false);
+});
+
+test('exit grace without close rejects a newline-terminated Pi terminal frame', async () => {
+  const { session, events, spawns } = startSession({}, {
+    closeGraceMs: 5,
+    terminateProcess: async () => null,
+    waitForExit: async () => true,
+  });
+  session.sendUserMessage('terminal frame arrives but stdout never closes');
+  const { proc } = spawns[0];
+  proc.emitJson({ type: 'agent_settled' });
+  proc.exitOnly(0);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(
+    events.some((event) => event.type === 'turn-end' && event.stopReason === 'completed'),
+    false,
+  );
+  assert.deepEqual(events.at(-1), { type: 'turn-end', agent: 'pi', stopReason: 'exited' });
+  assert.equal(await session.dispose(), false);
+});
+
 test('argv carries the model, thinking level, session and system brief', () => {
   const argv = buildPiArgv({ ...baseOpts, workflow: 'direct', phase: 'implementing' }, 'sess-1');
   assert.deepEqual(argv.slice(0, 6), [
@@ -370,7 +436,7 @@ test('argv carries the model, thinking level, session and system brief', () => {
   assert.equal(argv[argv.indexOf('--session-id') + 1], 'sess-1');
   assert.match(argv[argv.indexOf('--append-system-prompt') + 1], /rhwp MCP tools/);
   assert.ok(argv.includes('--no-context-files'));
-  assert.equal(argv.includes('--exclude-tools'), false);
+  assert.equal(argv[argv.indexOf('--exclude-tools') + 1], 'bash');
 });
 
 test('argv omits thinking for non-reasoning models and never doubles the provider prefix', () => {
@@ -406,8 +472,16 @@ test('planning phases exclude the built-in write and shell tools', () => {
     assert.match(argv[argv.indexOf('--append-system-prompt') + 1], /planning mode|implementation mode/);
   }
   const implementing = buildPiArgv({ ...baseOpts, workflow: 'plan', phase: 'implementing' }, 'x');
-  assert.equal(implementing.includes('--exclude-tools'), false);
+  assert.equal(implementing[implementing.indexOf('--exclude-tools') + 1], 'bash');
   assert.match(implementing[implementing.indexOf('--append-system-prompt') + 1], /implementation mode/);
+
+  const unrestricted = buildPiArgv({
+    ...baseOpts,
+    workflow: 'plan',
+    phase: 'implementing',
+    permissionProfile: 'unrestricted',
+  }, 'x');
+  assert.equal(unrestricted.includes('--exclude-tools'), false);
 });
 
 test('the child env is built from scratch without ambient provider keys', () => {
@@ -482,7 +556,10 @@ test('a prompt starting with a dash is not parsed as a flag', () => {
 });
 
 test('a mode switch waits for the running child to exit', async () => {
-  const { session, opts, spawns } = startSession();
+  const { session, opts, spawns } = startSession({}, {
+    terminateProcess: async () => true,
+    waitForExit: async () => true,
+  });
   session.sendUserMessage('go');
   const { proc } = spawns[0];
   proc.emitJson({ type: 'agent_settled' });
@@ -500,7 +577,7 @@ test('a mode switch waits for the running child to exit', async () => {
 
   session.sendUserMessage('approved kickoff');
   assert.equal(spawns.length, 2);
-  assert.equal(spawns[1].argv.includes('--exclude-tools'), false);
+  assert.equal(spawns[1].argv[spawns[1].argv.indexOf('--exclude-tools') + 1], 'bash');
   assert.equal(spawns[1].options.env.RHWP_AGENT_PHASE, 'implementing');
   assert.equal(spawns[1].argv[spawns[1].argv.indexOf('--session-id') + 1], session.getSessionId());
   session.dispose();
@@ -634,4 +711,147 @@ test('unwaited subagents are stopped when the turn ends', () => {
   assert.equal(events.at(-1).type, 'task-end');
   assert.equal(events.at(-1).status, 'stopped');
   assert.equal(events.at(-1).taskId, 'call-1');
+});
+test('natural Pi leader exit retains tree cleanup result for delayed disposal', async () => {
+  let finishTermination;
+  let finishTreeWait;
+  let terminationCalls = 0;
+  const termination = new Promise((resolve) => { finishTermination = resolve; });
+  const treeWait = new Promise((resolve) => { finishTreeWait = resolve; });
+  const { session, spawns } = startSession({}, {
+    terminateProcess() {
+      terminationCalls += 1;
+      return termination;
+    },
+    waitForExit: () => treeWait,
+  });
+  session.sendUserMessage('finish while a descendant owns stdout');
+  const { proc } = spawns[0];
+  proc.emitJson({ type: 'agent_settled' });
+  proc.exitOnly(0);
+
+  let settled = false;
+  const disposed = session.dispose().then((value) => {
+    settled = true;
+    return value;
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  assert.equal(terminationCalls, 1);
+  finishTermination(true);
+  finishTreeWait(false);
+  assert.equal(await disposed, false);
+  assert.equal(await session.dispose(), false);
+});
+
+test('a follow-up waits for prior tree cleanup before spawning', async () => {
+  let finishTermination;
+  let finishTreeWait;
+  const termination = new Promise((resolve) => { finishTermination = resolve; });
+  const treeWait = new Promise((resolve) => { finishTreeWait = resolve; });
+  const { session, events, spawns } = startSession({}, {
+    terminateProcess: () => termination,
+    waitForExit: () => treeWait,
+  });
+
+  session.sendUserMessage('first turn');
+  spawns[0].proc.emitJson({ type: 'agent_settled' });
+  spawns[0].proc.exit(0);
+  session.sendUserMessage('follow-up');
+
+  assert.equal(spawns.length, 1, 'the follow-up must not overlap the prior process tree');
+  assert.equal(events.filter((event) => event.type === 'turn-start').length, 1);
+
+  finishTermination(true);
+  finishTreeWait(true);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(spawns.length, 2);
+  assert.equal(spawns[1].argv.at(-1), 'follow-up');
+  assert.equal(events.filter((event) => event.type === 'turn-start').length, 2);
+
+  spawns[1].proc.emitJson({ type: 'agent_settled' });
+  spawns[1].proc.exit(0);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(events.filter((event) => event.type === 'turn-end').length, 2);
+  assert.equal(await session.dispose(), true);
+});
+
+test('an unconfirmed prior cleanup fails the queued Pi turn closed', async () => {
+  const { session, events, spawns } = startSession({}, {
+    terminateProcess: async () => true,
+    waitForExit: async () => false,
+  });
+
+  session.sendUserMessage('first turn');
+  spawns[0].proc.emitJson({ type: 'agent_settled' });
+  spawns[0].proc.exit(0);
+  session.sendUserMessage('follow-up');
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(spawns.length, 1);
+  assert.equal(
+    events.filter((event) => event.type === 'turn-start').length,
+    1,
+    'an unproven process tree must not reopen provider/MCP turn authority',
+  );
+  assert.match(events.findLast((event) => event.type === 'error').message, /cleanup could not be confirmed/);
+  assert.deepEqual(events.at(-1), { type: 'turn-end', agent: 'pi', stopReason: 'exited' });
+  assert.equal(await session.dispose(), false);
+});
+
+test('a Windows Pi terminal tail without newline drains before unavailable cleanup quarantine', async () => {
+  const { session, events, spawns } = startSession({}, {
+    platform: 'win32',
+    terminateProcess: async () => null,
+    waitForExit: async () => true,
+  });
+  session.sendUserMessage('first');
+  spawns[0].proc.stdout.emit('data', JSON.stringify({ type: 'agent_settled' }));
+  spawns[0].proc.exit(0);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  session.sendUserMessage('must not spawn');
+  assert.equal(spawns.length, 1);
+  assert.equal(
+    events.filter((event) => event.type === 'turn-start').length,
+    1,
+    'quarantined cleanup must fail before advertising another provider turn',
+  );
+  assert.match(events.findLast((event) => event.type === 'error').message, /cleanup remains unconfirmed/);
+  assert.deepEqual(events.at(-1), { type: 'turn-end', agent: 'pi', stopReason: 'failed' });
+  assert.equal(await session.dispose(), false);
+});
+
+test('Windows Pi terminal cleanup starts live, drains buffered output, and allows another turn', async () => {
+  let cleanupCalls = 0;
+  const { session, events, spawns } = startSession({}, {
+    platform: 'win32',
+    terminateProcess(proc) {
+      assert.equal(proc.exitCode, null);
+      assert.equal(proc.signalCode, null);
+      cleanupCalls += 1;
+      return true;
+    },
+    waitForExit: async () => true,
+  });
+
+  session.sendUserMessage('first');
+  spawns[0].proc.emitJson(
+    { type: 'agent_settled' },
+    {
+      type: 'message_end',
+      message: { role: 'assistant', model: 'buffered-model', usage: TOOL_USAGE, content: [] },
+    },
+  );
+  assert.equal(cleanupCalls, 1);
+  assert.equal(events.some((event) => event.type === 'usage' && event.model === baseOpts.model), true);
+  spawns[0].proc.exit(0);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  session.sendUserMessage('second');
+  assert.equal(spawns.length, 2);
+  const disposing = session.dispose();
+  spawns[1].proc.exit(0);
+  assert.equal(await disposing, true);
 });

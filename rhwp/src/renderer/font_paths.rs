@@ -90,6 +90,30 @@ pub fn env_font_paths() -> Vec<PathBuf> {
         .collect()
 }
 
+/// Native Windows font locations. `WINDIR` is not guaranteed to be `C:\Windows`,
+/// and fonts installed for one user live below LOCALAPPDATA rather than there.
+pub fn windows_font_dirs(
+    windows_dir: Option<PathBuf>,
+    local_app_data: Option<PathBuf>,
+    user_profile: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let system_root = windows_dir.unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    let user_local = local_app_data
+        .or_else(|| user_profile.map(|profile| profile.join("AppData").join("Local")));
+    let mut dirs = vec![system_root.join("Fonts")];
+    if let Some(local) = user_local {
+        let user_fonts = local.join("Microsoft").join("Windows").join("Fonts");
+        let normalized = user_fonts.to_string_lossy().to_ascii_lowercase();
+        if !dirs
+            .iter()
+            .any(|item| item.to_string_lossy().to_ascii_lowercase() == normalized)
+        {
+            dirs.push(user_fonts);
+        }
+    }
+    dirs
+}
+
 #[cfg(target_os = "windows")]
 const PATH_SEPARATOR: char = ';';
 
@@ -118,7 +142,13 @@ pub fn system_font_dirs() -> Vec<PathBuf> {
     }
     #[cfg(target_os = "windows")]
     {
-        vec![PathBuf::from("C:\\Windows\\Fonts")]
+        windows_font_dirs(
+            std::env::var_os("WINDIR")
+                .or_else(|| std::env::var_os("SystemRoot"))
+                .map(PathBuf::from),
+            std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
+            std::env::var_os("USERPROFILE").map(PathBuf::from),
+        )
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
@@ -350,6 +380,40 @@ mod tests {
         assert_eq!(
             bundled_font_dirs(),
             vec![PathBuf::from(BUNDLED_OPENSOURCE_DIR)]
+        );
+    }
+
+    #[test]
+    fn windows_font_dirs_include_relocated_system_and_per_user_fonts() {
+        assert_eq!(
+            windows_font_dirs(
+                Some(PathBuf::from(r"D:\Windows")),
+                Some(PathBuf::from(r"E:\Profiles\Rau\Local")),
+                Some(PathBuf::from(r"C:\ignored")),
+            ),
+            vec![
+                PathBuf::from(r"D:\Windows").join("Fonts"),
+                PathBuf::from(r"E:\Profiles\Rau\Local")
+                    .join("Microsoft")
+                    .join("Windows")
+                    .join("Fonts"),
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_font_dirs_fall_back_through_userprofile() {
+        assert_eq!(
+            windows_font_dirs(None, None, Some(PathBuf::from(r"C:\Users\Rau")),),
+            vec![
+                PathBuf::from(r"C:\Windows").join("Fonts"),
+                PathBuf::from(r"C:\Users\Rau")
+                    .join("AppData")
+                    .join("Local")
+                    .join("Microsoft")
+                    .join("Windows")
+                    .join("Fonts"),
+            ]
         );
     }
 }

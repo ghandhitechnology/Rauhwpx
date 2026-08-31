@@ -14,8 +14,10 @@ pub mod queries;
 pub mod table_calc;
 pub mod validation;
 
+use crate::model::control::Control;
 use crate::model::document::{Document, Section};
 use crate::model::event::DocumentEvent;
+use crate::model::header_footer::HeaderFooterApply;
 use crate::model::paragraph::Paragraph;
 use crate::model::table::TableTransposeData;
 use crate::renderer::composer::ComposedParagraph;
@@ -31,9 +33,31 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
+const MAX_BATCH_EVENTS: usize = 65_536;
+
 /// 기본 폰트 fallback 경로
 pub const DEFAULT_FALLBACK_FONT: &str = "/usr/share/fonts/truetype/nanum/NanumGothic.ttf";
 pub(crate) const TABLE_CAPTION_CELL_SENTINEL: usize = 65_534;
+
+/// Studio/WASM의 `applyTo` 숫자를 core 열거형으로 변환한다.
+///
+/// 공개 API의 기존 호환 규칙대로 1=짝수, 2=홀수, 나머지는 양쪽이다.
+pub(crate) fn header_footer_apply_from_u8(value: u8) -> HeaderFooterApply {
+    match value {
+        1 => HeaderFooterApply::Even,
+        2 => HeaderFooterApply::Odd,
+        _ => HeaderFooterApply::Both,
+    }
+}
+
+/// core 열거형을 Studio/WASM의 `applyTo` 숫자로 변환한다.
+pub(crate) fn header_footer_apply_to_u8(value: HeaderFooterApply) -> u8 {
+    match value {
+        HeaderFooterApply::Both => 0,
+        HeaderFooterApply::Even => 1,
+        HeaderFooterApply::Odd => 2,
+    }
+}
 
 /// 내부 클립보드 데이터
 pub(crate) struct ClipboardData {
@@ -117,6 +141,7 @@ pub(crate) struct RenderNormalizationState {
 #[derive(Default)]
 pub(crate) struct DocumentEventLog {
     events: Vec<DocumentEvent>,
+    dropped_events: usize,
     section_revisions: Vec<u64>,
     paragraph_sequence_revisions: Vec<u64>,
     paragraph_revisions: Vec<Vec<u64>>,
@@ -146,12 +171,32 @@ impl DocumentEventLog {
                 revision,
             );
         }
-        self.events.push(event);
+        // Keep the public event-log API useful outside batch mode without
+        // allowing a long-lived document to retain an unbounded command log.
+        if self.events.len() < MAX_BATCH_EVENTS {
+            self.events.push(event);
+        } else {
+            self.dropped_events = self.dropped_events.saturating_add(1);
+        }
     }
 
     pub(crate) fn clear(&mut self) {
         // batch 이벤트 소비는 문서 상태를 바꾸지 않으므로 snapshot revision은 유지한다.
         self.events.clear();
+        // A pathological batch may grow this buffer to the hard cap. Do not
+        // pin that allocation for the lifetime of an otherwise idle document.
+        if self.events.capacity() > 1024 {
+            self.events.shrink_to(1024);
+        }
+        self.dropped_events = 0;
+    }
+
+    fn begin_capture(&mut self) {
+        self.clear();
+    }
+
+    fn dropped_events(&self) -> usize {
+        self.dropped_events
     }
 
     fn mark_section_changed(&mut self, section_idx: usize) {
@@ -334,6 +379,9 @@ pub struct DocumentCore {
     pub(crate) page_tree_cache: RefCell<Vec<Option<PageRenderTree>>>,
     /// 페이지 렌더 캐시 LRU 순서. 앞이 가장 오래된 페이지다.
     pub(crate) page_tree_cache_order: RefCell<VecDeque<usize>>,
+    /// 머리말/꼬리말 대표 편집 트리 캐시 (마지막 target 한 건만 재사용).
+    pub(crate) header_footer_preview_tree_cache:
+        RefCell<Option<((u32, usize, bool, u8), PageRenderTree)>>,
     /// [Task #2222] 페이지 레이어 트리 JSON 캐시 — (출력옵션 지문, 직렬화 결과).
     /// 이미지 base64 인라인으로 페이지당 1MB 급이라 재직렬화(실측 15ms/회)가
     /// 렌더 자체와 맞먹는다. 편집 무효화는 page_tree_cache 와 동일 지점에서.
@@ -377,6 +425,34 @@ const _: () = {
     const fn assert_send<T: Send>() {}
     assert_send::<DocumentCore>();
 };
+
+impl DocumentCore {
+    /// 구역에서 지정한 머리말/꼬리말 정의의 원본 control 위치를 찾는다.
+    ///
+    /// 편집 command와 대표 페이지 renderer가 반드시 이 resolver를 공유해야 한다
+    /// (#6453). 먼저 발견된 동일 종류·적용 범위 control이 canonical target이다.
+    pub(crate) fn find_header_footer_control(
+        &self,
+        section_idx: usize,
+        is_header: bool,
+        apply_to: HeaderFooterApply,
+    ) -> Option<(usize, usize)> {
+        let section = self.document.sections.get(section_idx)?;
+        for (para_index, para) in section.paragraphs.iter().enumerate() {
+            for (control_index, control) in para.controls.iter().enumerate() {
+                let matches = match control {
+                    Control::Header(header) => is_header && header.apply_to == apply_to,
+                    Control::Footer(footer) => !is_header && footer.apply_to == apply_to,
+                    _ => false,
+                };
+                if matches {
+                    return Some((para_index, control_index));
+                }
+            }
+        }
+        None
+    }
+}
 
 /// 활성 필드 위치 정보
 #[derive(Debug, Clone, PartialEq)]
@@ -482,7 +558,10 @@ impl DocumentCore {
 
     /// 이벤트 로그를 JSON 배열로 직렬화한다.
     pub fn serialize_event_log(&self) -> String {
-        crate::model::event::serialize_event_log(&self.event_log)
+        crate::model::event::serialize_event_log_bounded(
+            &self.event_log,
+            self.event_log.dropped_events(),
+        )
     }
 
     /// DPI를 설정하고 스타일을 재해소한 후 재페이지네이션한다.
@@ -527,6 +606,7 @@ impl DocumentCore {
             pending_pagination_job: None,
             page_tree_cache: RefCell::new(Vec::new()),
             page_tree_cache_order: RefCell::new(VecDeque::new()),
+            header_footer_preview_tree_cache: RefCell::new(None),
             layer_tree_json_cache: RefCell::new(Vec::new()),
             batch_mode: false,
             event_log: DocumentEventLog::default(),
@@ -555,5 +635,52 @@ impl DocumentCore {
     /// 명시적으로 `reflow_linesegs_on_demand()` 를 호출해야 보정된다.
     pub fn validation_report(&self) -> &validation::ValidationReport {
         &self.validation_report
+    }
+}
+
+#[cfg(test)]
+mod event_log_tests {
+    use super::*;
+
+    fn event(offset: usize) -> DocumentEvent {
+        DocumentEvent::TextInserted {
+            section: 0,
+            para: 0,
+            offset,
+            len: 1,
+        }
+    }
+
+    #[test]
+    fn events_outside_a_batch_remain_available_through_the_bounded_public_log() {
+        let mut log = DocumentEventLog::default();
+        log.push(event(0));
+
+        assert!(matches!(
+            log.as_ref(),
+            [DocumentEvent::TextInserted { offset: 0, .. }]
+        ));
+        assert_eq!(log.dropped_events(), 0);
+        assert!(log.section_revisions(1)[0] > 0);
+        assert!(log.paragraph_revisions(0, 1)[0] > 0);
+    }
+
+    #[test]
+    fn batch_event_payloads_are_capped_and_report_the_omitted_tail() {
+        let mut log = DocumentEventLog::default();
+        log.begin_capture();
+        for offset in 0..=MAX_BATCH_EVENTS {
+            log.push(event(offset));
+        }
+
+        assert_eq!(log.len(), MAX_BATCH_EVENTS);
+        assert_eq!(log.dropped_events(), 1);
+        let json = crate::model::event::serialize_event_log_bounded(&log, log.dropped_events());
+        assert!(json.contains(r#""truncated":true"#));
+        assert!(json.contains(r#""droppedEventCount":1"#));
+        assert_eq!(
+            log.paragraph_revisions(0, 1)[0],
+            (MAX_BATCH_EVENTS + 1) as u64
+        );
     }
 }

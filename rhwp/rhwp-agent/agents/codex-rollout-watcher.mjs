@@ -17,6 +17,7 @@ const ROLLOUT_FILE_RE = /^rollout-.*\.jsonl$/;
 const DEFAULT_POLL_MS = 500;
 /** 한 번의 폴링에서 파일 하나당 읽을 최대 바이트 (버스트 방어). */
 const MAX_READ_BYTES = 1_048_576;
+const MAX_PROVIDER_FRAME_BYTES = 8 * 1024 * 1024;
 /** 추적할 롤아웃 파일 수 상한 — 오래된 세션 파일이 쌓인 CODEX_HOME 방어. */
 const MAX_TRACKED_FILES = 96;
 /** 카드 수 상한. 넘으면 새 자식은 무시한다(루트 스트림은 영향 없음). */
@@ -500,19 +501,31 @@ export function createCodexRolloutWatcher({
     const read = readTailFrom(fs, file, state.offset);
     if (!read) return;
     // 파일이 잘려 처음부터 다시 읽는 경우, 남아 있던 부분 줄은 이제 쓸모가 없다.
-    if (read.restarted) state.pending = EMPTY;
+    if (read.restarted) {
+      state.pending = EMPTY;
+      state.discardingOversizedFrame = false;
+    }
     state.offset = read.nextOffset;
-    if (read.chunk.length === 0 && state.pending.length === 0) return;
+    let chunk = read.chunk;
+    if (state.discardingOversizedFrame) {
+      const newline = chunk.indexOf(0x0a);
+      if (newline === -1) return;
+      state.discardingOversizedFrame = false;
+      chunk = chunk.subarray(newline + 1);
+    }
+    if (chunk.length === 0 && state.pending.length === 0) return;
     // 부분 줄과 멀티바이트 경계를 안전하게 넘기기 위해 바이트 버퍼로 이어 붙인다.
-    let buf = state.pending.length ? Buffer.concat([state.pending, read.chunk]) : read.chunk;
+    const buf = state.pending.length ? Buffer.concat([state.pending, chunk]) : chunk;
     let start = 0;
     let nl;
     const prevConsuming = consumingState;
     consumingState = state;
     try {
       while ((nl = buf.indexOf(0x0a, start)) !== -1) {
-        const line = buf.subarray(start, nl).toString('utf8').trim();
+        const lineBytes = buf.subarray(start, nl);
         start = nl + 1;
+        if (lineBytes.length > MAX_PROVIDER_FRAME_BYTES) continue;
+        const line = lineBytes.toString('utf8').trim();
         if (!line) continue;
         let obj;
         try {
@@ -530,7 +543,13 @@ export function createCodexRolloutWatcher({
           return;
         }
       }
-      state.pending = start < buf.length ? Buffer.from(buf.subarray(start)) : EMPTY;
+      const pending = start < buf.length ? buf.subarray(start) : EMPTY;
+      if (pending.length > MAX_PROVIDER_FRAME_BYTES) {
+        state.pending = EMPTY;
+        state.discardingOversizedFrame = true;
+      } else {
+        state.pending = pending.length ? Buffer.from(pending) : EMPTY;
+      }
     } finally {
       consumingState = prevConsuming;
     }
@@ -612,11 +631,15 @@ export function createCodexRolloutWatcher({
           } catch {
             continue;
           }
-          files.set(full, { offset: size, pending: EMPTY, kind: 'parent' });
+          files.set(full, {
+            offset: size, pending: EMPTY, discardingOversizedFrame: false, kind: 'parent',
+          });
           continue;
         }
         if (files.size >= MAX_TRACKED_FILES) return;
-        files.set(full, { offset: 0, pending: EMPTY, kind: isRoot ? 'parent' : 'unknown' });
+        files.set(full, {
+          offset: 0, pending: EMPTY, discardingOversizedFrame: false, kind: isRoot ? 'parent' : 'unknown',
+        });
       }
     }
   }

@@ -355,7 +355,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'materialize_document_snapshot',
-    description: `Materialize the exact current in-memory HWP/HWPX document into this chat's isolated local workspace and return its absolute path, format, size, checksum, revision, digest, and dirty state. Use this whenever a file-processing workflow needs a local path but get_document_info.sourcePath is null, or when dirty is true and the visible revision must be captured. This does not modify the open document, does not expose or overwrite its native source file, and does not require the user to save first. ${REVISION_NOTE}`,
+    description: `Materialize the exact current in-memory HWP/HWPX document into this chat's hub-owned read-only input storage and return its absolute path, format, size, checksum, revision, digest, and dirty state. Use this whenever a file-processing workflow needs a local path but get_document_info.sourcePath is null, or when dirty is true and the visible revision must be captured. This does not modify the open document, does not expose or overwrite its native source file, and does not require the user to save first. ${REVISION_NOTE}`,
     shape: {},
   },
   {
@@ -970,6 +970,27 @@ const BASE_TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'run_copy_layout_helper',
+    description: 'Run the bundled copy-layout helper through a hub-owned structured runner. Available only to the bound background worker. The hub fixes the executable, script, immutable source snapshot, private output directory, timeout, and shell:false process policy; callers provide no command or filesystem path.',
+    shape: {
+      jobId: z.string().uuid(),
+      action: z.enum(['inspect', 'generate']),
+      iteration: z.number().int().min(1).max(3).optional(),
+      textPlan: z.record(z.unknown()).optional(),
+      keepMedia: z.array(z.string().min(1).max(256)).max(512).default([]).optional(),
+    },
+    validate(args) {
+      if (args.action === 'inspect') {
+        if (args.iteration !== undefined || args.textPlan !== undefined
+          || args.keepMedia?.length) {
+          throw invalidArgs('inspect accepts no generation options');
+        }
+      } else if (args.iteration === undefined || args.textPlan === undefined) {
+        throw invalidArgs('generate requires iteration and textPlan');
+      }
+    },
+  },
+  {
     name: 'complete_copy_layout_job',
     description: 'Settle the autonomous copy-layout job with its source-bound, safety-verified structured report. Available only to the dedicated background worker process and callable exactly once.',
     shape: {
@@ -990,7 +1011,7 @@ const BASE_TOOL_DEFINITIONS = [
         keptMedia: z.number().int().min(0),
         removedMedia: z.number().int().min(0),
         iterations: z.number().int().min(1).max(3),
-      }),
+      }).optional(),
       preview: z.object({
         representativePages: z.array(z.number().int().min(0)).max(12),
         sourcePageCount: z.number().int().min(1),
@@ -1001,11 +1022,13 @@ const BASE_TOOL_DEFINITIONS = [
         safetyVerified: z.boolean(),
         readabilityVerified: z.boolean(),
         stoppedReason: z.enum(['verified-convergence', 'bounded-no-improvement', 'hard-failure']),
-      }),
+      }).optional(),
     },
     validate(args) {
       if (args.outcome === 'succeeded') {
-        if (!args.artifactId || !args.quality) throw invalidArgs('successful copy-layout completion requires artifactId and quality');
+        if (!args.artifactId || !args.quality || !args.counts || !args.preview) {
+          throw invalidArgs('successful copy-layout completion requires artifactId and exact helper-owned claims');
+        }
         if (!args.preview.safetyVerified || !args.preview.readabilityVerified) {
           throw invalidArgs('successful copy-layout completion requires safety and readability verification');
         }
@@ -1021,8 +1044,8 @@ const BASE_TOOL_DEFINITIONS = [
         if (hasFidelityMismatch && args.warnings.length === 0) {
           throw invalidArgs('fidelity mismatches require at least one precise warning');
         }
-      } else if (args.artifactId || args.quality) {
-        throw invalidArgs('failed copy-layout completion must not publish an artifact or quality');
+      } else if (args.artifactId || args.quality || args.counts || args.preview) {
+        throw invalidArgs('failed copy-layout completion must not publish an artifact or assert verification claims');
       }
     },
   },
@@ -1138,6 +1161,7 @@ export const TOOL_CLASSIFICATIONS = Object.freeze({
   publish_artifact: 'artifact-write',
   delegate_copy_layout: 'background-control',
   update_copy_layout_job: 'background-worker',
+  run_copy_layout_helper: 'background-worker',
   complete_copy_layout_job: 'background-worker',
   register_copy_layout_template: 'background-control',
   browserbase_start: 'browser',
@@ -1164,9 +1188,9 @@ export const TOOL_PROFILES = Object.freeze({
     'read_product_skill',
     'get_document_info',
     'materialize_document_snapshot',
-    'render_page',
     'publish_artifact',
     'update_copy_layout_job',
+    'run_copy_layout_helper',
     'complete_copy_layout_job',
   ]),
   all: TOOL_CATEGORIES,

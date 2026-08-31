@@ -36,6 +36,8 @@
     "e2e:clipboard-priority": "node e2e/task-871-clipboard-priority.test.mjs",
     "e2e:editor-interactions": "node e2e/editor-table-interactions.test.mjs",
     "e2e:drag-autoscroll": "node e2e/drag-selection-autoscroll.test.mjs",
+    "e2e:page-break-caret": "node e2e/page-break-caret-reveal.test.mjs --mode=headless",
+    "e2e:issue-4121": "node e2e/header-footer-selection-issue4121.test.mjs --mode=headless",
     "e2e:renderer-contract": "node e2e/renderer-contract.test.mjs",
     "e2e:issue-2214": "node e2e/issue-2214-page-local-repaint.test.mjs --mode=headless",
     "e2e:issue-2809": "node e2e/issue-2809-split-alignment.test.mjs --mode=headless",

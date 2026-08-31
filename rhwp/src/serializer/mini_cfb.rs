@@ -9,6 +9,10 @@
 //! - 미니 섹터 크기: 64바이트
 //! - 미니 스트림 컷오프: 4096바이트 (표준값)
 
+use std::cmp::Ordering;
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
 const SECTOR_SIZE: usize = 512;
 const MINI_SECTOR_SIZE: usize = 64;
 const MINI_STREAM_CUTOFF: usize = 4096;
@@ -26,13 +30,58 @@ const FATSECT: u32 = 0xFFFFFFFD;
 const DIFSECT: u32 = 0xFFFFFFFC;
 const NOSTREAM: u32 = 0xFFFFFFFF;
 
+fn sectors_for(bytes: usize, sector_size: usize) -> Result<usize, String> {
+    if bytes == 0 {
+        return Ok(0);
+    }
+    bytes
+        .checked_add(sector_size - 1)
+        .map(|rounded| rounded / sector_size)
+        .ok_or_else(|| "CFB sector count overflow".to_string())
+}
+
+fn try_filled_vec<T: Clone>(len: usize, value: T, label: &str) -> Result<Vec<T>, String> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(len)
+        .map_err(|error| format!("{label} allocation failed: {error}"))?;
+    values.resize(len, value);
+    Ok(values)
+}
+
 /// CFB 시그니처 (Magic Number)
 const CFB_SIGNATURE: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 
-struct DirEntry {
+pub(crate) enum CfbStreamData<'a> {
+    Borrowed(&'a [u8]),
+    Owned(Vec<u8>),
+    Shared(std::sync::Arc<[u8]>),
+}
+
+impl CfbStreamData<'_> {
+    pub(crate) fn len(&self) -> usize {
+        self.as_ref().len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.as_ref().is_empty()
+    }
+}
+
+impl AsRef<[u8]> for CfbStreamData<'_> {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Borrowed(bytes) => bytes,
+            Self::Owned(bytes) => bytes,
+            Self::Shared(bytes) => bytes,
+        }
+    }
+}
+
+struct DirEntry<'a> {
     name: String,
     obj_type: u8,
-    data: Vec<u8>,
+    data: CfbStreamData<'a>,
     parent: usize,
     children: Vec<usize>,
     left: u32,
@@ -43,12 +92,12 @@ struct DirEntry {
     is_mini: bool,
 }
 
-impl DirEntry {
+impl DirEntry<'_> {
     fn new(name: &str, obj_type: u8, parent: usize) -> Self {
         DirEntry {
             name: name.to_string(),
             obj_type,
-            data: Vec::new(),
+            data: CfbStreamData::Owned(Vec::new()),
             parent,
             children: Vec::new(),
             left: NOSTREAM,
@@ -71,71 +120,135 @@ impl DirEntry {
 /// # 반환
 /// CFB v3 바이너리 바이트.
 pub fn build_cfb(named_streams: &[(&str, &[u8])]) -> Result<Vec<u8>, String> {
+    if named_streams.len() > crate::parser::limits::MAX_CFB_DIRECTORY_ENTRIES {
+        return Err(format!(
+            "CFB stream count exceeds limit: {} > {}",
+            named_streams.len(),
+            crate::parser::limits::MAX_CFB_DIRECTORY_ENTRIES
+        ));
+    }
+    for (path, _) in named_streams {
+        validate_cfb_path(path)?;
+    }
+    let borrowed_streams = named_streams
+        .iter()
+        .map(|(path, data)| ((*path).to_string(), CfbStreamData::Borrowed(*data)))
+        .collect();
+    build_cfb_streams_with_limit(
+        borrowed_streams,
+        crate::parser::limits::MAX_CONTAINER_BYTES as usize,
+    )
+}
+
+/// Build a bounded CFB while taking ownership of stream payloads. The HWP
+/// serializer uses this path so mini-CFB assembly does not clone every large
+/// payload before allocating the final container.
+pub(crate) fn build_cfb_owned_with_limit(
+    named_streams: Vec<(String, Vec<u8>)>,
+    max_output_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    build_cfb_streams_with_limit(
+        named_streams
+            .into_iter()
+            .map(|(path, data)| (path, CfbStreamData::Owned(data)))
+            .collect(),
+        max_output_bytes,
+    )
+}
+
+/// Validate the exact directory tree, including implicit storage entries,
+/// before a caller materializes any stream payloads.
+pub(crate) fn validate_cfb_stream_paths(paths: Vec<String>) -> Result<(), String> {
+    let empty: &[u8] = &[];
+    build_entries(
+        paths
+            .into_iter()
+            .map(|path| (path, CfbStreamData::Borrowed(empty)))
+            .collect(),
+    )
+    .map(|_| ())
+}
+
+pub(crate) fn build_cfb_streams_with_limit(
+    named_streams: Vec<(String, CfbStreamData<'_>)>,
+    max_output_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    // Every CFB contains all payload bytes plus sector/directory overhead. This
+    // cheap lower bound rejects an impossible output before path-tree or
+    // mini-stream allocations begin.
+    let payload_bytes = named_streams.iter().try_fold(0usize, |total, (_, data)| {
+        total
+            .checked_add(data.len())
+            .ok_or_else(|| "CFB payload size overflow".to_string())
+    })?;
+    if payload_bytes > max_output_bytes {
+        return Err(format!(
+            "CFB output exceeds byte limit: payload {payload_bytes} > {max_output_bytes}"
+        ));
+    }
+
     // 1. 엔트리 목록 구축
     let mut entries = build_entries(named_streams)?;
 
     // 2. 디렉토리 트리 구축
     build_tree(&mut entries, 0);
 
-    // 3. 미니 스트림 구축 (< 4096 바이트 스트림)
-    let mut mini_stream = Vec::new();
-    let mut mini_fat: Vec<u32> = Vec::new();
-
+    // 3. Compute the exact layout before allocating mini-stream/FAT/output
+    // buffers. A low output limit must fail before any payload-sized clone.
+    let mut mini_sector_count = 0usize;
     for entry in entries.iter_mut() {
         if entry.obj_type == 2 && !entry.data.is_empty() && entry.data.len() < MINI_STREAM_CUTOFF {
             entry.is_mini = true;
-            let start_mini = mini_fat.len();
-            entry.start_sector = start_mini as u32;
-
-            let num_mini = (entry.data.len() + MINI_SECTOR_SIZE - 1) / MINI_SECTOR_SIZE;
-            for i in 0..num_mini {
-                mini_fat.push(if i + 1 < num_mini {
-                    (start_mini + i + 1) as u32
-                } else {
-                    ENDOFCHAIN
-                });
-            }
-
-            mini_stream.extend_from_slice(&entry.data);
-            let pad = (MINI_SECTOR_SIZE - (entry.data.len() % MINI_SECTOR_SIZE)) % MINI_SECTOR_SIZE;
-            mini_stream.resize(mini_stream.len() + pad, 0);
+            entry.start_sector = u32::try_from(mini_sector_count)
+                .map_err(|_| "CFB mini-sector index overflow".to_string())?;
+            let num_mini = sectors_for(entry.data.len(), MINI_SECTOR_SIZE)?;
+            mini_sector_count = mini_sector_count
+                .checked_add(num_mini)
+                .ok_or_else(|| "CFB mini-stream size overflow".to_string())?;
         }
     }
-
-    // Root Entry에 미니 스트림 컨테이너 저장
-    let mini_stream_size = mini_stream.len();
-    if !mini_stream.is_empty() {
-        entries[0].data = mini_stream;
-    }
+    let mini_stream_size = mini_sector_count
+        .checked_mul(MINI_SECTOR_SIZE)
+        .ok_or_else(|| "CFB mini-stream size overflow".to_string())?;
 
     // 4. 정규 섹터 할당
-    let dir_sectors = (entries.len() + ENTRIES_PER_DIR_SECTOR - 1) / ENTRIES_PER_DIR_SECTOR;
-    let mut next_sector = dir_sectors as u32;
+    let dir_sectors = sectors_for(entries.len(), ENTRIES_PER_DIR_SECTOR)?;
+    let mut next_sector = dir_sectors;
 
     // 큰 스트림 (>= 4096 바이트) → 정규 섹터
     for entry in entries.iter_mut() {
         if entry.obj_type == 2 && !entry.data.is_empty() && !entry.is_mini {
-            entry.start_sector = next_sector;
-            let num = (entry.data.len() + SECTOR_SIZE - 1) / SECTOR_SIZE;
-            next_sector += num as u32;
+            entry.start_sector =
+                u32::try_from(next_sector).map_err(|_| "CFB sector index overflow".to_string())?;
+            let num = sectors_for(entry.data.len(), SECTOR_SIZE)?;
+            next_sector = next_sector
+                .checked_add(num)
+                .ok_or_else(|| "CFB sector count overflow".to_string())?;
         }
     }
 
     // Root Entry 미니 스트림 컨테이너 → 정규 섹터
     if mini_stream_size > 0 {
-        entries[0].start_sector = next_sector;
-        let num = (entries[0].data.len() + SECTOR_SIZE - 1) / SECTOR_SIZE;
-        next_sector += num as u32;
+        entries[0].start_sector =
+            u32::try_from(next_sector).map_err(|_| "CFB sector index overflow".to_string())?;
+        let num = sectors_for(mini_stream_size, SECTOR_SIZE)?;
+        next_sector = next_sector
+            .checked_add(num)
+            .ok_or_else(|| "CFB sector count overflow".to_string())?;
     }
 
     // 미니 FAT 섹터
     let mini_fat_start;
     let mini_fat_sector_count;
-    if !mini_fat.is_empty() {
-        mini_fat_start = next_sector;
+    if mini_sector_count > 0 {
+        mini_fat_start = u32::try_from(next_sector)
+            .map_err(|_| "CFB mini-FAT sector index overflow".to_string())?;
         mini_fat_sector_count =
-            ((mini_fat.len() + FAT_ENTRIES_PER_SECTOR - 1) / FAT_ENTRIES_PER_SECTOR) as u32;
-        next_sector += mini_fat_sector_count;
+            u32::try_from(sectors_for(mini_sector_count, FAT_ENTRIES_PER_SECTOR)?)
+                .map_err(|_| "CFB mini-FAT sector count overflow".to_string())?;
+        next_sector = next_sector
+            .checked_add(mini_fat_sector_count as usize)
+            .ok_or_else(|| "CFB sector count overflow".to_string())?;
     } else {
         mini_fat_start = ENDOFCHAIN;
         mini_fat_sector_count = 0;
@@ -148,16 +261,23 @@ pub fn build_cfb(named_streams: &[(&str, &[u8])]) -> Result<Vec<u8>, String> {
     // DIFAT(이중 간접 FAT) 섹터에 기록해야 한다. FAT 섹터와 DIFAT 섹터 자체도
     // 섹터를 차지하여 total_sectors를 늘리고, 이는 다시 fat_count(→difat_count)를
     // 늘릴 수 있으므로 두 값을 함께 고정점 반복으로 수렴시킨다.
-    let non_meta_sectors = next_sector; // FAT/DIFAT 제외 섹터 수
+    let non_meta_sectors = u32::try_from(next_sector)
+        .map_err(|_| "CFB non-metadata sector count overflow".to_string())?;
     let mut fat_count = 1u32;
     let mut difat_count = 0u32;
     loop {
-        let total = non_meta_sectors + fat_count + difat_count;
-        let needed_fat =
-            (((total as usize) + FAT_ENTRIES_PER_SECTOR - 1) / FAT_ENTRIES_PER_SECTOR) as u32;
+        let total = non_meta_sectors
+            .checked_add(fat_count)
+            .and_then(|count| count.checked_add(difat_count))
+            .ok_or_else(|| "CFB sector count overflow".to_string())?;
+        let needed_fat = u32::try_from(sectors_for(total as usize, FAT_ENTRIES_PER_SECTOR)?)
+            .map_err(|_| "CFB FAT sector count overflow".to_string())?;
         let needed_difat = if needed_fat as usize > HEADER_DIFAT_COUNT {
-            (((needed_fat as usize - HEADER_DIFAT_COUNT) + DIFAT_ENTRIES_PER_SECTOR - 1)
-                / DIFAT_ENTRIES_PER_SECTOR) as u32
+            u32::try_from(sectors_for(
+                needed_fat as usize - HEADER_DIFAT_COUNT,
+                DIFAT_ENTRIES_PER_SECTOR,
+            )?)
+            .map_err(|_| "CFB DIFAT sector count overflow".to_string())?
         } else {
             0
         };
@@ -170,11 +290,49 @@ pub fn build_cfb(named_streams: &[(&str, &[u8])]) -> Result<Vec<u8>, String> {
     }
 
     let fat_start = non_meta_sectors;
-    let difat_start = fat_start + fat_count;
-    let total_sectors = non_meta_sectors + fat_count + difat_count;
+    let difat_start = fat_start
+        .checked_add(fat_count)
+        .ok_or_else(|| "CFB FAT sector index overflow".to_string())?;
+    let total_sectors = difat_start
+        .checked_add(difat_count)
+        .ok_or_else(|| "CFB sector count overflow".to_string())?;
+
+    let file_size = (total_sectors as usize)
+        .checked_mul(SECTOR_SIZE)
+        .and_then(|bytes| bytes.checked_add(512))
+        .ok_or_else(|| "CFB output size overflow".to_string())?;
+    if file_size > max_output_bytes {
+        return Err(format!(
+            "CFB output exceeds byte limit: {file_size} > {max_output_bytes}"
+        ));
+    }
+
+    // The exact layout fits. Allocate and populate the mini stream and mini
+    // FAT only now, then allocate the regular FAT and final output.
+    let mut mini_stream = try_filled_vec(mini_stream_size, 0u8, "CFB mini stream")?;
+    let mut mini_fat = try_filled_vec(mini_sector_count, FREESECT, "CFB mini FAT")?;
+    for entry in entries.iter().filter(|entry| entry.is_mini) {
+        let start_mini = entry.start_sector as usize;
+        let num_mini = sectors_for(entry.data.len(), MINI_SECTOR_SIZE)?;
+        for i in 0..num_mini {
+            mini_fat[start_mini + i] = if i + 1 < num_mini {
+                u32::try_from(start_mini + i + 1)
+                    .map_err(|_| "CFB mini-sector index overflow".to_string())?
+            } else {
+                ENDOFCHAIN
+            };
+        }
+        let offset = start_mini
+            .checked_mul(MINI_SECTOR_SIZE)
+            .ok_or_else(|| "CFB mini-stream offset overflow".to_string())?;
+        mini_stream[offset..offset + entry.data.len()].copy_from_slice(entry.data.as_ref());
+    }
+    if !mini_stream.is_empty() {
+        entries[0].data = CfbStreamData::Owned(mini_stream);
+    }
 
     // 5. FAT 구축
-    let mut fat = vec![FREESECT; total_sectors as usize];
+    let mut fat = try_filled_vec(total_sectors as usize, FREESECT, "CFB FAT")?;
 
     // 디렉토리 체인
     for i in 0..dir_sectors {
@@ -236,8 +394,7 @@ pub fn build_cfb(named_streams: &[(&str, &[u8])]) -> Result<Vec<u8>, String> {
     }
 
     // 6. 바이너리 조립
-    let file_size = 512 + total_sectors as usize * SECTOR_SIZE;
-    let mut output = vec![0u8; file_size];
+    let mut output = try_filled_vec(file_size, 0u8, "CFB output")?;
 
     // 헤더 작성
     write_header(
@@ -262,7 +419,8 @@ pub fn build_cfb(named_streams: &[(&str, &[u8])]) -> Result<Vec<u8>, String> {
     for entry in &entries {
         if entry.obj_type == 2 && !entry.data.is_empty() && !entry.is_mini {
             let start_offset = 512 + entry.start_sector as usize * SECTOR_SIZE;
-            output[start_offset..start_offset + entry.data.len()].copy_from_slice(&entry.data);
+            output[start_offset..start_offset + entry.data.len()]
+                .copy_from_slice(entry.data.as_ref());
         }
     }
 
@@ -270,7 +428,7 @@ pub fn build_cfb(named_streams: &[(&str, &[u8])]) -> Result<Vec<u8>, String> {
     if entries[0].start_sector != ENDOFCHAIN && !entries[0].data.is_empty() {
         let start_offset = 512 + entries[0].start_sector as usize * SECTOR_SIZE;
         output[start_offset..start_offset + entries[0].data.len()]
-            .copy_from_slice(&entries[0].data);
+            .copy_from_slice(entries[0].data.as_ref());
     }
 
     // 미니 FAT 작성
@@ -321,30 +479,52 @@ pub fn build_cfb(named_streams: &[(&str, &[u8])]) -> Result<Vec<u8>, String> {
     Ok(output)
 }
 
+pub(crate) fn validate_cfb_path(path: &str) -> Result<(), String> {
+    if path.len() > crate::parser::limits::MAX_CFB_PATH_BYTES {
+        return Err(format!("CFB path exceeds byte limit: {}", path.len()));
+    }
+    let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    if parts.is_empty() || parts.iter().any(|part| part.is_empty()) {
+        return Err(format!("invalid empty CFB path component: {path}"));
+    }
+    if let Some(part) = parts.iter().find(|part| {
+        matches!(**part, "." | "..")
+            || part
+                .chars()
+                .any(|character| matches!(character, '\\' | '\0' | ':' | '!'))
+    }) {
+        return Err(format!(
+            "invalid cross-platform CFB path component: {part:?}"
+        ));
+    }
+    if let Some(part) = parts.iter().find(|part| part.encode_utf16().count() > 31) {
+        return Err(format!(
+            "CFB path component exceeds 31 UTF-16 code units: {part}"
+        ));
+    }
+    Ok(())
+}
+
 /// 경로 목록에서 엔트리 목록을 구축한다.
-fn build_entries(named_streams: &[(&str, &[u8])]) -> Result<Vec<DirEntry>, String> {
+fn build_entries(
+    named_streams: Vec<(String, CfbStreamData<'_>)>,
+) -> Result<Vec<DirEntry<'_>>, String> {
     let mut entries = Vec::new();
 
     // Root Entry
     entries.push(DirEntry::new("Root Entry", 5, 0));
 
-    for &(path, data) in named_streams {
+    for (path, data) in named_streams {
+        validate_cfb_path(&path)?;
         let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
-        if parts.is_empty() || parts.iter().any(|part| part.is_empty()) {
-            return Err(format!("invalid empty CFB path component: {path}"));
-        }
-        if let Some(part) = parts.iter().find(|part| part.encode_utf16().count() > 31) {
-            return Err(format!(
-                "CFB path component exceeds 31 UTF-16 code units: {part}"
-            ));
-        }
         let mut parent_idx = 0;
 
         for (i, part) in parts.iter().enumerate() {
             let is_last = i == parts.len() - 1;
 
-            let existing = entries.iter().position(|e| {
-                e.parent == parent_idx && cfb_name_key(&e.name) == cfb_name_key(part)
+            let existing = entries.iter().position(|entry| {
+                entry.parent == parent_idx
+                    && cfb_compare_names(&entry.name, part) == Ordering::Equal
             });
 
             if let Some(idx) = existing {
@@ -357,55 +537,242 @@ fn build_entries(named_streams: &[(&str, &[u8])]) -> Result<Vec<DirEntry>, Strin
                 parent_idx = idx;
             } else {
                 let new_idx = entries.len();
-                let obj_type = if is_last { 2 } else { 1 };
-                let mut entry = DirEntry::new(part, obj_type, parent_idx);
-                if is_last {
-                    entry.data = data.to_vec();
+                if new_idx >= crate::parser::limits::MAX_CFB_DIRECTORY_ENTRIES {
+                    return Err(format!(
+                        "CFB directory entry count exceeds limit: {}",
+                        crate::parser::limits::MAX_CFB_DIRECTORY_ENTRIES
+                    ));
                 }
+                let obj_type = if is_last { 2 } else { 1 };
+                let entry = DirEntry::new(part, obj_type, parent_idx);
                 entries[parent_idx].children.push(new_idx);
                 entries.push(entry);
                 parent_idx = new_idx;
             }
         }
+        entries[parent_idx].data = data;
     }
 
     Ok(entries)
 }
 
-fn cfb_name_key(name: &str) -> Vec<u16> {
-    name.to_uppercase().encode_utf16().collect()
+// Exceptional one-to-one uppercase mappings used by cfb 0.14/MS-CFB name
+// comparison. Rust's full `to_uppercase` expands characters such as ß to SS;
+// CFB uses simple uppercase and must keep those as one character.
+const CFB_SIMPLE_UPPERCASE_EXCEPTIONS: &[(char, char)] = &[
+    ('ß', 'ß'),
+    ('ŉ', 'ŉ'),
+    ('ƛ', 'ƛ'),
+    ('ǰ', 'ǰ'),
+    ('ɤ', 'ɤ'),
+    ('ΐ', 'ΐ'),
+    ('ΰ', 'ΰ'),
+    ('և', 'և'),
+    ('ᲊ', 'ᲊ'),
+    ('ẖ', 'ẖ'),
+    ('ẗ', 'ẗ'),
+    ('ẘ', 'ẘ'),
+    ('ẙ', 'ẙ'),
+    ('ẚ', 'ẚ'),
+    ('ὐ', 'ὐ'),
+    ('ὒ', 'ὒ'),
+    ('ὔ', 'ὔ'),
+    ('ὖ', 'ὖ'),
+    ('ᾀ', 'ᾈ'),
+    ('ᾁ', 'ᾉ'),
+    ('ᾂ', 'ᾊ'),
+    ('ᾃ', 'ᾋ'),
+    ('ᾄ', 'ᾌ'),
+    ('ᾅ', 'ᾍ'),
+    ('ᾆ', 'ᾎ'),
+    ('ᾇ', 'ᾏ'),
+    ('ᾈ', 'ᾈ'),
+    ('ᾉ', 'ᾉ'),
+    ('ᾊ', 'ᾊ'),
+    ('ᾋ', 'ᾋ'),
+    ('ᾌ', 'ᾌ'),
+    ('ᾍ', 'ᾍ'),
+    ('ᾎ', 'ᾎ'),
+    ('ᾏ', 'ᾏ'),
+    ('ᾐ', 'ᾘ'),
+    ('ᾑ', 'ᾙ'),
+    ('ᾒ', 'ᾚ'),
+    ('ᾓ', 'ᾛ'),
+    ('ᾔ', 'ᾜ'),
+    ('ᾕ', 'ᾝ'),
+    ('ᾖ', 'ᾞ'),
+    ('ᾗ', 'ᾟ'),
+    ('ᾘ', 'ᾘ'),
+    ('ᾙ', 'ᾙ'),
+    ('ᾚ', 'ᾚ'),
+    ('ᾛ', 'ᾛ'),
+    ('ᾜ', 'ᾜ'),
+    ('ᾝ', 'ᾝ'),
+    ('ᾞ', 'ᾞ'),
+    ('ᾟ', 'ᾟ'),
+    ('ᾠ', 'ᾨ'),
+    ('ᾡ', 'ᾩ'),
+    ('ᾢ', 'ᾪ'),
+    ('ᾣ', 'ᾫ'),
+    ('ᾤ', 'ᾬ'),
+    ('ᾥ', 'ᾭ'),
+    ('ᾦ', 'ᾮ'),
+    ('ᾧ', 'ᾯ'),
+    ('ᾨ', 'ᾨ'),
+    ('ᾩ', 'ᾩ'),
+    ('ᾪ', 'ᾪ'),
+    ('ᾫ', 'ᾫ'),
+    ('ᾬ', 'ᾬ'),
+    ('ᾭ', 'ᾭ'),
+    ('ᾮ', 'ᾮ'),
+    ('ᾯ', 'ᾯ'),
+    ('ᾲ', 'ᾲ'),
+    ('ᾳ', 'ᾼ'),
+    ('ᾴ', 'ᾴ'),
+    ('ᾶ', 'ᾶ'),
+    ('ᾷ', 'ᾷ'),
+    ('ᾼ', 'ᾼ'),
+    ('ῂ', 'ῂ'),
+    ('ῃ', 'ῌ'),
+    ('ῄ', 'ῄ'),
+    ('ῆ', 'ῆ'),
+    ('ῇ', 'ῇ'),
+    ('ῌ', 'ῌ'),
+    ('ῒ', 'ῒ'),
+    ('ΐ', 'ΐ'),
+    ('ῖ', 'ῖ'),
+    ('ῗ', 'ῗ'),
+    ('ῢ', 'ῢ'),
+    ('ΰ', 'ΰ'),
+    ('ῤ', 'ῤ'),
+    ('ῦ', 'ῦ'),
+    ('ῧ', 'ῧ'),
+    ('ῲ', 'ῲ'),
+    ('ῳ', 'ῼ'),
+    ('ῴ', 'ῴ'),
+    ('ῶ', 'ῶ'),
+    ('ῷ', 'ῷ'),
+    ('ῼ', 'ῼ'),
+    ('ꟍ', 'ꟍ'),
+    ('ꟛ', 'ꟛ'),
+    ('ﬀ', 'ﬀ'),
+    ('ﬁ', 'ﬁ'),
+    ('ﬂ', 'ﬂ'),
+    ('ﬃ', 'ﬃ'),
+    ('ﬄ', 'ﬄ'),
+    ('ﬅ', 'ﬅ'),
+    ('ﬆ', 'ﬆ'),
+    ('ﬓ', 'ﬓ'),
+    ('ﬔ', 'ﬔ'),
+    ('ﬕ', 'ﬕ'),
+    ('ﬖ', 'ﬖ'),
+    ('ﬗ', 'ﬗ'),
+    ('𐵰', '𐵰'),
+    ('𐵱', '𐵱'),
+    ('𐵲', '𐵲'),
+    ('𐵳', '𐵳'),
+    ('𐵴', '𐵴'),
+    ('𐵵', '𐵵'),
+    ('𐵶', '𐵶'),
+    ('𐵷', '𐵷'),
+    ('𐵸', '𐵸'),
+    ('𐵹', '𐵹'),
+    ('𐵺', '𐵺'),
+    ('𐵻', '𐵻'),
+    ('𐵼', '𐵼'),
+    ('𐵽', '𐵽'),
+    ('𐵾', '𐵾'),
+    ('𐵿', '𐵿'),
+    ('𐶀', '𐶀'),
+    ('𐶁', '𐶁'),
+    ('𐶂', '𐶂'),
+    ('𐶃', '𐶃'),
+    ('𐶄', '𐶄'),
+    ('𐶅', '𐶅'),
+];
+
+fn cfb_uppercase_char(character: char) -> char {
+    static EXCEPTIONS: OnceLock<HashMap<char, char>> = OnceLock::new();
+    EXCEPTIONS
+        .get_or_init(|| CFB_SIMPLE_UPPERCASE_EXCEPTIONS.iter().copied().collect())
+        .get(&character)
+        .copied()
+        .or_else(|| character.to_uppercase().next())
+        .unwrap_or_default()
+}
+
+fn cfb_compare_names(left: &str, right: &str) -> Ordering {
+    if left.is_ascii() && right.is_ascii() {
+        return left.len().cmp(&right.len()).then_with(|| {
+            left.bytes()
+                .map(|byte| byte.to_ascii_uppercase())
+                .cmp(right.bytes().map(|byte| byte.to_ascii_uppercase()))
+        });
+    }
+    left.encode_utf16()
+        .count()
+        .cmp(&right.encode_utf16().count())
+        .then_with(|| {
+            left.chars()
+                .map(cfb_uppercase_char)
+                .cmp(right.chars().map(cfb_uppercase_char))
+        })
+}
+
+/// Collision key for a full CFB path. Each component carries its original
+/// UTF-16 length because length participates in MS-CFB comparison before case
+/// mapping (notably, `ß` and `ss` are distinct).
+pub(crate) fn cfb_path_key(path: &str) -> Vec<u16> {
+    let components = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
+    let mut key = Vec::new();
+    let component_count = components.len() as u32;
+    key.extend_from_slice(&[component_count as u16, (component_count >> 16) as u16]);
+    for component in components {
+        let original_len = component.encode_utf16().count() as u32;
+        key.extend_from_slice(&[original_len as u16, (original_len >> 16) as u16]);
+        let mut mapped = Vec::new();
+        for character in component.chars().map(cfb_uppercase_char) {
+            let mut encoded = [0u16; 2];
+            mapped.extend_from_slice(character.encode_utf16(&mut encoded));
+        }
+        let mapped_len = mapped.len() as u32;
+        key.extend_from_slice(&[mapped_len as u16, (mapped_len >> 16) as u16]);
+        key.extend_from_slice(&mapped);
+    }
+    key
 }
 
 /// 각 스토리지의 자식을 정렬된 균형 이진 트리로 구축한다.
-fn build_tree(entries: &mut Vec<DirEntry>, idx: usize) {
-    let children = entries[idx].children.clone();
-    if children.is_empty() {
-        entries[idx].child = NOSTREAM;
-        return;
-    }
+fn build_tree(entries: &mut Vec<DirEntry<'_>>, idx: usize) {
+    // A valid 4,096-byte CFB path can contain roughly 2,048 one-character
+    // storage components. Keep hierarchy traversal iterative so serializing a
+    // caller-built or preserved path cannot consume one call frame per level.
+    let mut pending = vec![idx];
+    while let Some(idx) = pending.pop() {
+        let children = entries[idx].children.clone();
+        if children.is_empty() {
+            entries[idx].child = NOSTREAM;
+            continue;
+        }
 
-    // CFB 사양에 따라 이름 비교: 길이 우선, 같은 길이면 대소문자 무시
-    let mut sorted = children.clone();
-    sorted.sort_by(|&a, &b| {
-        let na = cfb_name_key(&entries[a].name);
-        let nb = cfb_name_key(&entries[b].name);
-        na.len().cmp(&nb.len()).then(na.cmp(&nb))
-    });
+        // CFB 사양에 따라 이름 비교: 길이 우선, 같은 길이면 대소문자 무시
+        let mut sorted = children.clone();
+        sorted.sort_by(|&a, &b| cfb_compare_names(&entries[a].name, &entries[b].name));
 
-    let root = build_balanced_tree(entries, &sorted);
-    color_balanced_tree(entries, root);
-    entries[idx].child = root;
+        let root = build_balanced_tree(entries, &sorted);
+        color_balanced_tree(entries, root);
+        entries[idx].child = root;
 
-    // 하위 스토리지에 대해 재귀
-    for &child_idx in &children {
-        if entries[child_idx].obj_type == 1 {
-            build_tree(entries, child_idx);
+        for child_idx in children {
+            if entries[child_idx].obj_type == 1 {
+                pending.push(child_idx);
+            }
         }
     }
 }
 
 /// 정렬된 인덱스 배열로 균형 이진 트리를 구축한다.
-fn build_balanced_tree(entries: &mut Vec<DirEntry>, sorted: &[usize]) -> u32 {
+fn build_balanced_tree(entries: &mut Vec<DirEntry<'_>>, sorted: &[usize]) -> u32 {
     if sorted.is_empty() {
         return NOSTREAM;
     }
@@ -429,7 +796,7 @@ fn build_balanced_tree(entries: &mut Vec<DirEntry>, sorted: &[usize]) -> u32 {
 /// Median construction yields leaf depths differing by at most one. Coloring
 /// only nodes on the deepest level red equalizes black height, keeps every red
 /// node a leaf with a black parent, and leaves the sibling-tree root black.
-fn color_balanced_tree(entries: &mut [DirEntry], root: u32) {
+fn color_balanced_tree(entries: &mut [DirEntry<'_>], root: u32) {
     if root == NOSTREAM {
         return;
     }
@@ -438,7 +805,7 @@ fn color_balanced_tree(entries: &mut [DirEntry], root: u32) {
     entries[root as usize].color = 1;
 }
 
-fn tree_max_depth(entries: &[DirEntry], node: u32, depth: usize) -> usize {
+fn tree_max_depth(entries: &[DirEntry<'_>], node: u32, depth: usize) -> usize {
     if node == NOSTREAM {
         return depth.saturating_sub(1);
     }
@@ -448,7 +815,7 @@ fn tree_max_depth(entries: &[DirEntry], node: u32, depth: usize) -> usize {
         .max(depth)
 }
 
-fn color_tree_depth(entries: &mut [DirEntry], node: u32, depth: usize, max_depth: usize) {
+fn color_tree_depth(entries: &mut [DirEntry<'_>], node: u32, depth: usize, max_depth: usize) {
     if node == NOSTREAM {
         return;
     }
@@ -533,7 +900,7 @@ fn write_header(
 }
 
 /// 디렉토리 엔트리 (128바이트) 작성
-fn write_dir_entry(output: &mut [u8], offset: usize, entry: &DirEntry) {
+fn write_dir_entry(output: &mut [u8], offset: usize, entry: &DirEntry<'_>) {
     let buf = &mut output[offset..offset + DIR_ENTRY_SIZE];
 
     // 이름 (UTF-16LE, null 종료, 최대 32 UTF-16 코드 유닛)
@@ -598,6 +965,13 @@ fn write_dir_entry(output: &mut [u8], offset: usize, entry: &DirEntry) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oversized_internal_buffer_request_returns_error_instead_of_panicking() {
+        let error = try_filled_vec(usize::MAX, 0u8, "test buffer")
+            .expect_err("capacity overflow must be reported");
+        assert!(error.contains("allocation failed"), "{error}");
+    }
 
     #[test]
     fn test_build_cfb_signature() {
@@ -720,11 +1094,75 @@ mod tests {
                 .unwrap_err()
                 .contains("stream/storage")
         );
+        for path in [
+            "/BodyText/.",
+            "/BodyText/..",
+            "/BodyText\\Section0",
+            "/Body:Text/Section0",
+            "/Body!Text/Section0",
+            "/Body\0Text/Section0",
+        ] {
+            assert!(
+                build_cfb(&[(path, b"x")])
+                    .unwrap_err()
+                    .contains("cross-platform"),
+                "unsafe path was accepted: {path:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cfb_simple_uppercase_does_not_expand_sharp_s() {
+        assert_ne!(cfb_path_key("/ß"), cfb_path_key("/ss"));
+        assert_eq!(cfb_path_key("/é"), cfb_path_key("/É"));
+
+        let bytes = build_cfb(&[("/ß", b"sharp"), ("/ss", b"double")])
+            .expect("MS-CFB treats sharp-s and two ASCII letters as distinct names");
+        let mut compound = cfb::CompoundFile::open(std::io::Cursor::new(bytes)).unwrap();
+        let mut sharp = Vec::new();
+        std::io::Read::read_to_end(&mut compound.open_stream("/ß").unwrap(), &mut sharp).unwrap();
+        let mut double = Vec::new();
+        std::io::Read::read_to_end(&mut compound.open_stream("/ss").unwrap(), &mut double).unwrap();
+        assert_eq!(sharp, b"sharp");
+        assert_eq!(double, b"double");
+    }
+
+    #[test]
+    fn deepest_allowed_cfb_path_builds_without_recursive_storage_walk() {
+        let component_count = crate::parser::limits::MAX_CFB_PATH_BYTES / 2;
+        let path = format!("/{}", vec!["a"; component_count].join("/"));
+        assert_eq!(path.len(), crate::parser::limits::MAX_CFB_PATH_BYTES);
+
+        let bytes = build_cfb(&[(path.as_str(), b"x")])
+            .expect("the deepest byte-limited path must serialize iteratively");
+        let mut compound = cfb::CompoundFile::open(std::io::Cursor::new(bytes))
+            .expect("deep serialized CFB must remain valid");
+        let mut payload = Vec::new();
+        std::io::Read::read_to_end(&mut compound.open_stream(&path).unwrap(), &mut payload)
+            .unwrap();
+        assert_eq!(payload, b"x");
+    }
+
+    #[test]
+    fn owned_builder_checks_the_final_padded_container_size() {
+        let streams = vec![("/DocInfo".to_string(), vec![1, 2, 3])];
+        let exact = build_cfb_owned_with_limit(streams.clone(), usize::MAX)
+            .expect("tiny CFB")
+            .len();
+        assert!(build_cfb_owned_with_limit(streams.clone(), exact - 1)
+            .unwrap_err()
+            .contains("output exceeds"));
+        assert_eq!(
+            build_cfb_owned_with_limit(streams, exact)
+                .expect("exact output budget")
+                .len(),
+            exact
+        );
     }
 
     #[test]
     fn sibling_directories_are_valid_red_black_trees() {
-        fn black_height(entries: &[DirEntry], node: u32, parent_red: bool) -> usize {
+        fn black_height(entries: &[DirEntry<'_>], node: u32, parent_red: bool) -> usize {
             if node == NOSTREAM {
                 return 1;
             }
@@ -739,11 +1177,11 @@ mod tests {
 
         for count in 1..=64 {
             let names: Vec<String> = (0..count).map(|i| format!("/Stream{i:02}")).collect();
-            let streams: Vec<(&str, &[u8])> = names
+            let streams: Vec<(String, CfbStreamData<'static>)> = names
                 .iter()
-                .map(|name| (name.as_str(), b"x".as_slice()))
+                .map(|name| (name.clone(), CfbStreamData::Owned(b"x".to_vec())))
                 .collect();
-            let mut entries = build_entries(&streams).expect("valid names");
+            let mut entries = build_entries(streams).expect("valid names");
             build_tree(&mut entries, 0);
             let root = entries[0].child;
             assert_eq!(entries[root as usize].color, 1, "root must be black");

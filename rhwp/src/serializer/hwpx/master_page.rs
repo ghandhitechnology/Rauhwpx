@@ -10,7 +10,10 @@
 use crate::model::header_footer::{HeaderFooterApply, MasterPage};
 
 use super::context::SerializeContext;
-use super::section::{render_hp_p_open, render_paragraph_parts};
+use super::section::{
+    ensure_paragraph_graph_within_limit, render_hp_p_open, render_paragraph_parts_limited,
+};
+use super::utils::BoundedXmlString;
 use super::SerializeError;
 
 /// `<masterPage>`/section XML 공용 네임스페이스 블록 (empty_section0.xml 와 동일).
@@ -56,26 +59,47 @@ pub fn render_master_page_xml(
     id: &str,
     ctx: &mut SerializeContext,
 ) -> Result<String, SerializeError> {
-    let mut body = String::new();
-    let mut vert_cursor: u32 = 0;
-    for p in &mp.paragraphs {
-        let (runs, linesegs, advance) = render_paragraph_parts(p, vert_cursor, ctx)?;
-        vert_cursor = advance;
-        let pid = ctx.next_para_id();
-        let sid = ctx.effective_style_id(p.style_id);
-        body.push_str(&render_hp_p_open(p, pid, sid));
-        body.push_str(&runs);
-        body.push_str(&linesegs);
-        body.push_str("</hp:p>");
-    }
+    render_master_page_xml_inner(mp, id, ctx, usize::MAX)
+}
 
-    Ok(format!(
+pub(crate) fn render_master_page_xml_limited(
+    mp: &MasterPage,
+    id: &str,
+    ctx: &mut SerializeContext,
+    max_bytes: usize,
+) -> Result<String, SerializeError> {
+    const MASTER_PAGE_FIXED_SLACK: usize = 2048;
+    let fixed_bytes = XMLNS
+        .len()
+        .checked_add(MASTER_PAGE_FIXED_SLACK)
+        .and_then(|bytes| {
+            id.len()
+                .checked_mul(6)
+                .and_then(|id_bytes| bytes.checked_add(id_bytes))
+        })
+        .ok_or_else(|| master_page_generation_limit_error(id, max_bytes))?;
+    let graph_limit = max_bytes
+        .checked_sub(fixed_bytes)
+        .ok_or_else(|| master_page_generation_limit_error(id, max_bytes))?;
+    ensure_paragraph_graph_within_limit(&mp.paragraphs, graph_limit)?;
+    render_master_page_xml_inner(mp, id, ctx, max_bytes)
+}
+
+fn render_master_page_xml_inner(
+    mp: &MasterPage,
+    id: &str,
+    ctx: &mut SerializeContext,
+    max_bytes: usize,
+) -> Result<String, SerializeError> {
+    use std::fmt::Write as _;
+
+    let mut output = BoundedXmlString::new(max_bytes);
+    write!(
+        output,
         concat!(
             r#"<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>"#,
             r#"<masterPage {xmlns} id="{id}" type="{ty}" pageNumber="{pn}" pageDuplicate="{pd}" pageFront="{pf}">"#,
             r#"<hp:subList id="" textDirection="{td}" lineWrap="BREAK" vertAlign="TOP" linkListIDRef="0" linkListNextIDRef="0" textWidth="{tw}" textHeight="{th}" hasTextRef="{tr}" hasNumRef="{nr}">"#,
-            "{body}",
-            r#"</hp:subList></masterPage>"#,
         ),
         xmlns = XMLNS,
         id = id,
@@ -92,7 +116,28 @@ pub fn render_master_page_xml(
         th = mp.text_height,
         tr = mp.text_ref,
         nr = mp.num_ref,
-        body = body,
+    )
+    .map_err(|_| master_page_generation_limit_error(id, max_bytes))?;
+
+    let mut vert_cursor: u32 = 0;
+    for p in &mp.paragraphs {
+        let (runs, linesegs, advance) =
+            render_paragraph_parts_limited(p, vert_cursor, ctx, output.remaining())?;
+        vert_cursor = advance;
+        let pid = ctx.next_para_id();
+        let sid = ctx.effective_style_id(p.style_id);
+        output.push_str(&render_hp_p_open(p, pid, sid))?;
+        output.push_str(&runs)?;
+        output.push_str(&linesegs)?;
+        output.push_str("</hp:p>")?;
+    }
+    output.push_str("</hp:subList></masterPage>")?;
+    Ok(output.into_inner())
+}
+
+fn master_page_generation_limit_error(id: &str, max_bytes: usize) -> SerializeError {
+    SerializeError::XmlError(format!(
+        "master page {id} exceeds the {max_bytes} byte generation limit"
     ))
 }
 
@@ -108,6 +153,49 @@ pub fn render_master_page_refs(ids: &[String]) -> String {
 mod tests {
     use super::*;
     use crate::model::document::Document;
+
+    #[test]
+    fn master_page_generation_rejects_an_exhausted_member_budget_before_rendering() {
+        let page = MasterPage::default();
+        let doc = Document::default();
+        let mut ctx = SerializeContext::collect_from_document(&doc);
+
+        let error = render_master_page_xml_limited(&page, "masterpage0", &mut ctx, 1)
+            .expect_err("master-page XML must honor its prospective ZIP member budget");
+
+        assert!(error.to_string().contains("generation limit"), "{error}");
+    }
+
+    #[test]
+    fn master_page_limit_reaches_nested_table_paragraphs_before_rendering() {
+        const LIMIT: usize = 64 * 1024;
+        let table = crate::model::table::Table {
+            row_count: 1,
+            col_count: 1,
+            cells: vec![crate::model::table::Cell {
+                paragraphs: vec![crate::model::paragraph::Paragraph {
+                    text: "&".repeat(20_000),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let page = MasterPage {
+            paragraphs: vec![crate::model::paragraph::Paragraph {
+                controls: vec![crate::model::control::Control::Table(Box::new(table))],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let doc = Document::default();
+        let mut ctx = SerializeContext::collect_from_document(&doc);
+
+        let error = render_master_page_xml_limited(&page, "masterpage0", &mut ctx, LIMIT)
+            .expect_err("nested escaped content must be rejected before table XML allocation");
+
+        assert!(error.to_string().contains("generation limit"), "{error}");
+    }
 
     #[test]
     fn master_page_page_front_round_trips() {

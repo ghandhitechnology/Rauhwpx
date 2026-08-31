@@ -9,6 +9,19 @@ use crate::parser::record::Record;
 use crate::parser::tags;
 
 #[test]
+fn generated_large_style_string_is_rejected_before_payload_allocation() {
+    let mut doc_info = DocInfo::default();
+    doc_info.styles.push(Style {
+        local_name: "x".repeat(1_000_000),
+        ..Default::default()
+    });
+
+    let error = serialize_doc_info_limited(&doc_info, &DocProperties::default(), 512)
+        .expect_err("generated style payload must honor remaining DocInfo budget");
+    assert!(error.contains("style record exceeds"), "{error}");
+}
+
+#[test]
 fn test_serialize_document_properties() {
     let props = DocProperties {
         section_count: 2,

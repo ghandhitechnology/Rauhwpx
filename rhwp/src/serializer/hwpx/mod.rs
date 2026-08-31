@@ -27,14 +27,29 @@ pub mod utils;
 pub mod writer;
 
 use std::collections::HashSet;
-use std::fmt::Write as _;
 
+use crate::model::bin_data::BinDataBytes;
 use crate::model::document::{Document, HWP5_ORIGIN_HWPX_MARKER_PATH};
 
 use super::SerializeError;
 use content::BinDataEntry as ContentBinDataEntry;
 use context::SerializeContext;
 use writer::HwpxZipWriter;
+
+fn write_bounded_binary_entry(
+    writer: &mut HwpxZipWriter,
+    href: &str,
+    data: &BinDataBytes,
+    label: &str,
+) -> Result<(), SerializeError> {
+    let member_limit = writer.remaining_entry_limit(href)?;
+    let bytes = data.load_limited_payload(member_limit).ok_or_else(|| {
+        SerializeError::ZipError(format!(
+            "{label} entry could not be materialized within HWPX limits: {href}"
+        ))
+    })?;
+    writer.write_deflated(href, bytes.as_ref())
+}
 
 /// Document IR을 HWPX(ZIP+XML) 바이트로 직렬화한다.
 ///
@@ -62,7 +77,8 @@ pub fn serialize_hwpx(doc: &Document) -> Result<Vec<u8>, SerializeError> {
     )?;
 
     // 3. Contents/header.xml — Stage 1 동적 생성 (IR 기반)
-    let header_xml = header::write_header(doc, &ctx)?;
+    let header_limit = z.remaining_entry_limit("Contents/header.xml")?;
+    let header_xml = header::write_header_limited(doc, &ctx, header_limit)?;
     z.write_deflated("Contents/header.xml", &header_xml)?;
 
     // 4. Contents/section{N}.xml — 실제 섹션만큼, 없으면 0개
@@ -70,7 +86,8 @@ pub fn serialize_hwpx(doc: &Document) -> Result<Vec<u8>, SerializeError> {
         .map(|i| format!("Contents/section{}.xml", i))
         .collect();
     for (i, sec) in doc.sections.iter().enumerate() {
-        let xml = section::write_section(sec, doc, i, &mut ctx)?;
+        let section_limit = z.remaining_entry_limit(&section_hrefs[i])?;
+        let xml = section::write_section_limited(sec, doc, i, &mut ctx, section_limit)?;
         z.write_deflated(&section_hrefs[i], &xml)?;
     }
 
@@ -83,7 +100,8 @@ pub fn serialize_hwpx(doc: &Document) -> Result<Vec<u8>, SerializeError> {
         for mp in &sec.section_def.master_pages {
             let id = format!("masterpage{}", mp_global);
             let href = format!("Contents/masterpage{}.xml", mp_global);
-            let xml = master_page::render_master_page_xml(mp, &id, &mut ctx)?;
+            let master_limit = z.remaining_entry_limit(&href)?;
+            let xml = master_page::render_master_page_xml_limited(mp, &id, &mut ctx, master_limit)?;
             z.write_deflated(&href, xml.as_bytes())?;
             master_items.push((id, href));
             mp_global += 1;
@@ -116,8 +134,9 @@ pub fn serialize_hwpx(doc: &Document) -> Result<Vec<u8>, SerializeError> {
     // Hancom uses this RDF graph alongside content.hpf; a stale one-section
     // RDF makes multi-section documents fail to open even when the ZIP and
     // content.hpf contain every section.
-    let container_rdf = write_container_rdf(&section_hrefs);
-    z.write_deflated("META-INF/container.rdf", container_rdf.as_bytes())?;
+    let rdf_limit = z.remaining_entry_limit("META-INF/container.rdf")?;
+    let container_rdf = write_container_rdf_limited(&section_hrefs, rdf_limit)?;
+    z.write_deflated("META-INF/container.rdf", &container_rdf)?;
 
     // 8. BinData ZIP 엔트리 (Stage 4)
     //    `ctx.bin_data_map` 의 엔트리 순서대로 실제 바이너리를 ZIP에 추가.
@@ -139,7 +158,7 @@ pub fn serialize_hwpx(doc: &Document) -> Result<Vec<u8>, SerializeError> {
                     entry.bin_data_id
                 ))
             })?;
-        z.write_deflated(&entry.href, &data.data.load())?;
+        write_bounded_binary_entry(&mut z, &entry.href, &data.data, "BinData")?;
         zip_bin_entries.insert(entry.href.clone());
     }
 
@@ -157,7 +176,7 @@ pub fn serialize_hwpx(doc: &Document) -> Result<Vec<u8>, SerializeError> {
                 "duplicate HWPX chart part: {href}"
             )));
         }
-        z.write_deflated(&href, &chart.data.load())?;
+        write_bounded_binary_entry(&mut z, &href, &chart.data, "chart")?;
     }
 
     // Preserve safe, unmodeled package entries (Scripts/* and vendor extension
@@ -211,12 +230,14 @@ pub fn serialize_hwpx(doc: &Document) -> Result<Vec<u8>, SerializeError> {
             is_embedded: e.is_embedded,
         })
         .collect();
-    let content_hpf = content::write_content_hpf(
+    let content_limit = z.remaining_entry_limit("Contents/content.hpf")?;
+    let content_hpf = content::write_content_hpf_limited(
         &section_hrefs,
         &content_bin_entries,
         &master_items,
         &passthrough_hrefs,
         doc.hwpx_aux_entry("Contents/content.hpf"),
+        content_limit,
     )?;
     z.write_deflated("Contents/content.hpf", &content_hpf)?;
 
@@ -255,39 +276,47 @@ fn is_safe_passthrough_path(path: &str) -> bool {
             .all(|component| !component.is_empty() && component != "." && component != "..")
 }
 
-fn write_container_rdf(section_hrefs: &[String]) -> String {
+fn write_container_rdf_limited(
+    section_hrefs: &[String],
+    max_bytes: usize,
+) -> Result<Vec<u8>, SerializeError> {
     const PKG_NS: &str = "http://www.hancom.co.kr/hwpml/2016/meta/pkg#";
 
-    let mut out = String::new();
-    out.push_str(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>"#);
-    out.push_str(r#"<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">"#);
-    out.push_str(r#"<rdf:Description rdf:about="">"#);
-    let _ = write!(
-        out,
+    let mut out = utils::BoundedXmlBuffer::new(max_bytes);
+    let mut append = |value: &str| {
+        std::io::Write::write_all(&mut out, value.as_bytes())
+            .map_err(|error| SerializeError::XmlError(format!("container.rdf: {error}")))
+    };
+    append(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>"#)?;
+    append(r#"<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">"#)?;
+    append(r#"<rdf:Description rdf:about="">"#)?;
+    append(&format!(
         r#"<ns0:hasPart xmlns:ns0="{PKG_NS}" rdf:resource="Contents/header.xml"/>"#
-    );
-    out.push_str(r#"</rdf:Description>"#);
-    out.push_str(r#"<rdf:Description rdf:about="Contents/header.xml">"#);
-    let _ = write!(out, r#"<rdf:type rdf:resource="{PKG_NS}HeaderFile"/>"#);
-    out.push_str(r#"</rdf:Description>"#);
+    ))?;
+    append(r#"</rdf:Description>"#)?;
+    append(r#"<rdf:Description rdf:about="Contents/header.xml">"#)?;
+    append(&format!(r#"<rdf:type rdf:resource="{PKG_NS}HeaderFile"/>"#))?;
+    append(r#"</rdf:Description>"#)?;
 
     for href in section_hrefs {
-        out.push_str(r#"<rdf:Description rdf:about="">"#);
-        let _ = write!(
-            out,
+        append(r#"<rdf:Description rdf:about="">"#)?;
+        append(&format!(
             r#"<ns0:hasPart xmlns:ns0="{PKG_NS}" rdf:resource="{href}"/>"#
-        );
-        out.push_str(r#"</rdf:Description>"#);
-        let _ = write!(out, r#"<rdf:Description rdf:about="{href}">"#);
-        let _ = write!(out, r#"<rdf:type rdf:resource="{PKG_NS}SectionFile"/>"#);
-        out.push_str(r#"</rdf:Description>"#);
+        ))?;
+        append(r#"</rdf:Description>"#)?;
+        append(&format!(r#"<rdf:Description rdf:about="{href}">"#))?;
+        append(&format!(
+            r#"<rdf:type rdf:resource="{PKG_NS}SectionFile"/>"#
+        ))?;
+        append(r#"</rdf:Description>"#)?;
     }
 
-    out.push_str(r#"<rdf:Description rdf:about="">"#);
-    let _ = write!(out, r#"<rdf:type rdf:resource="{PKG_NS}Document"/>"#);
-    out.push_str(r#"</rdf:Description>"#);
-    out.push_str(r#"</rdf:RDF>"#);
-    out
+    append(r#"<rdf:Description rdf:about="">"#)?;
+    append(&format!(r#"<rdf:type rdf:resource="{PKG_NS}Document"/>"#))?;
+    append(r#"</rdf:Description>"#)?;
+    append(r#"</rdf:RDF>"#)?;
+    drop(append);
+    Ok(out.into_inner())
 }
 
 /// 3-way BinData 동기화 단언: `ctx.bin_data_entries()`, content.hpf manifest,
@@ -670,6 +699,17 @@ mod tests {
                 "missing type description for {href}: {container_rdf}"
             );
         }
+    }
+
+    #[test]
+    fn container_rdf_generation_is_bounded_before_buffer_growth() {
+        let hrefs = vec!["Contents/section0.xml".to_string()];
+        let full = write_container_rdf_limited(&hrefs, usize::MAX).expect("reference RDF");
+
+        let error = write_container_rdf_limited(&hrefs, full.len() - 1)
+            .expect_err("RDF generation must enforce the member budget while appending");
+
+        assert!(error.to_string().contains("generation limit"), "{error}");
     }
 
     #[test]

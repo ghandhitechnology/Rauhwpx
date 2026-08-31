@@ -6,6 +6,7 @@ import { RevisionTracker } from '../src/agent/revision.ts';
 import {
   AgentToolExecutor,
   DOCUMENT_WRITE_TOOLS,
+  assertToolRequestActive,
   isDocumentWriteTool,
 } from '../src/agent/tool-executor.ts';
 import { AgentToolError } from '../src/agent/types.ts';
@@ -292,6 +293,21 @@ test('executor: implementing requires the current capability epoch', async () =>
     activeCapabilityEpoch: 4,
   }), 'STALE_CAPABILITY_EPOCH');
   assert.deepEqual(calls, []);
+});
+
+test('executor: a settled provider turn is rejected before a document write', async () => {
+  const { executor, calls } = makeExecutor();
+  await expectToolError(executor.execute('insert_text', {
+    expectedRevision: 1, sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'late',
+  }, 'claude', {
+    workflow: 'direct',
+    requestIsActive: () => false,
+  }), 'NO_ACTIVE_TURN');
+  assert.deepEqual(calls, []);
+  assert.throws(
+    () => assertToolRequestActive({ workflow: 'direct', requestIsActive: () => false }),
+    (error: unknown) => error instanceof AgentToolError && error.code === 'NO_ACTIVE_TURN',
+  );
 });
 
 test('executor: raw and semantic write modes cannot mix in either order within one turn', async () => {

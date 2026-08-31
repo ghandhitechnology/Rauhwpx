@@ -37,3 +37,48 @@ test('image inspection rejects renamed files and conflicting content types', asy
     (error) => error.code === 'REFERENCE_FILE_TOO_LARGE',
   );
 });
+
+test('image inspection reports files that change during a bounded read as extraction failures', async (t) => {
+  for (const mutation of ['shrinks', 'grows']) {
+    await t.test(mutation, async () => {
+      let reads = 0;
+      let closed = false;
+      const handle = {
+        async stat() {
+          return { isFile: () => true, size: PNG.length };
+        },
+        async read(target, offset) {
+          reads += 1;
+          if (mutation === 'shrinks') {
+            if (reads > 1) return { bytesRead: 0 };
+            const length = Math.floor(PNG.length / 2);
+            PNG.copy(target, offset, 0, length);
+            return { bytesRead: length };
+          }
+          if (reads > 1) {
+            target[offset] = 0;
+            return { bytesRead: 1 };
+          }
+          PNG.copy(target, offset);
+          return { bytesRead: PNG.length };
+        },
+        async close() {
+          closed = true;
+        },
+      };
+
+      await assert.rejects(
+        inspectReferenceImage(
+          { filePath: '/fake/capture.png', name: 'capture.png', mimeType: 'image/png' },
+          { openFile: async () => handle },
+        ),
+        (error) => {
+          assert.equal(error.code, 'REFERENCE_EXTRACTION_FAILED');
+          assert.match(error.message, /changed while it was read/);
+          return true;
+        },
+      );
+      assert.equal(closed, true);
+    });
+  }
+});

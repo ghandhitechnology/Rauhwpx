@@ -2,12 +2,16 @@ import spawn from 'cross-spawn';
 
 import {
   isolatedProcessEnv,
+  PROCESS_TREE_CLEANUP_OUTCOME,
   processTreeSpawnOptions,
+  terminateAndWaitForProcessTreeExitOutcome,
   terminateProcessTree,
 } from '../process-tree.mjs';
 
 /** 제목 자체는 짧지만 추론 모델은 생각에도 토큰을 쓴다 — 잘리지 않을 만큼만 준다. */
 const TITLE_MAX_TOKENS = 256;
+const TITLE_STDOUT_LIMIT_BYTES = 64 * 1024;
+const TITLE_STDERR_LIMIT_BYTES = 16 * 1024;
 
 /** OpenRouter 폴백을 실제로 탈 수 있는지 — 어떤 경우에 태울지는 서버가 정한다. */
 export function openRouterReady({ useOpenRouter, piManager, openRouter } = {}) {
@@ -21,7 +25,8 @@ export function openRouterReady({ useOpenRouter, piManager, openRouter } = {}) {
  * @param {string} preview
  * @param {{ useOpenRouter?: boolean, piManager?: any, openRouter?: any, isolatedHome?: string,
  *   sessionId?: string, cwd?: string, spawnProcess?: typeof spawn,
- *   terminateProcess?: typeof terminateProcessTree }} [deps]
+ *   terminateProcess?: typeof terminateProcessTree,
+ *   cleanupProcessOutcome?: (child: any) => Promise<'proven'|'failed'|'unavailable'> }} [deps]
  * @returns {Promise<string | null>}
  */
 export function generateChatTitle(preview, deps = {}) {
@@ -43,11 +48,31 @@ export function generateChatTitle(preview, deps = {}) {
     let settled = false;
     let buf = '';
     let lastAssistant = '';
+    let stdoutBytes = 0;
+    let stderr = '';
+    let timer = null;
+    let cleanupPromise = null;
 
     const finish = (value) => {
       if (settled) return;
       settled = true;
+      if (timer) clearTimeout(timer);
       resolve(value);
+    };
+    const finishAfterCleanup = (value, { allowUnavailable = false } = {}) => {
+      if (timer) clearTimeout(timer);
+      if (!cleanupPromise) {
+        cleanupPromise = (typeof deps.cleanupProcessOutcome === 'function'
+          ? Promise.resolve(deps.cleanupProcessOutcome(proc))
+          : terminateAndWaitForProcessTreeExitOutcome(proc, { terminateProcess }))
+          .catch(() => PROCESS_TREE_CLEANUP_OUTCOME.FAILED);
+      }
+      void cleanupPromise.then((outcome) => finish(
+        outcome === PROCESS_TREE_CLEANUP_OUTCOME.PROVEN
+          || (allowUnavailable && outcome === PROCESS_TREE_CLEANUP_OUTCOME.UNAVAILABLE)
+          ? value
+          : null,
+      ));
     };
 
     let proc;
@@ -81,14 +106,17 @@ export function generateChatTitle(preview, deps = {}) {
       return;
     }
 
-    const timer = setTimeout(() => {
-      terminateProcess(proc);
-      finish(cleanTitle(lastAssistant) || null);
+    timer = setTimeout(() => {
+      finishAfterCleanup(cleanTitle(lastAssistant) || null);
     }, 45_000);
-    if (timer.unref) timer.unref();
 
     proc.stdout.setEncoding('utf8');
     proc.stdout.on('data', (chunk) => {
+      stdoutBytes += Buffer.byteLength(chunk, 'utf8');
+      if (stdoutBytes > TITLE_STDOUT_LIMIT_BYTES) {
+        finishAfterCleanup(cleanTitle(lastAssistant) || null);
+        return;
+      }
       buf += chunk;
       let nl;
       while ((nl = buf.indexOf('\n')) >= 0) {
@@ -100,28 +128,43 @@ export function generateChatTitle(preview, deps = {}) {
         const type = evt?.type;
         if (type === 'item.completed' && evt.item?.type === 'agent_message') {
           const t = String(evt.item.text ?? '').trim();
-          if (t) lastAssistant = t;
+          if (t) {
+            lastAssistant = t;
+            // The hub owns this cleanup promise. Start it at the semantic
+            // terminal event while a Windows PID still belongs to this child.
+            if (typeof deps.cleanupProcessOutcome === 'function') {
+              finishAfterCleanup(cleanTitle(lastAssistant) || null);
+            }
+          }
         } else if (type === 'agent.message' || type === 'message') {
           const t = String(evt.text ?? evt.message ?? '').trim();
           if (t) lastAssistant = t;
         }
       }
     });
+    proc.stderr?.on?.('data', (chunk) => {
+      stderr = (stderr + String(chunk)).slice(-TITLE_STDERR_LIMIT_BYTES);
+    });
 
     proc.on('error', () => {
-      clearTimeout(timer);
-      finish(null);
+      if (proc.pid) finishAfterCleanup(null);
+      else finish(null);
     });
-    proc.on('close', () => {
-      clearTimeout(timer);
-      finish(cleanTitle(lastAssistant) || null);
+    proc.on('close', (code) => {
+      const title = code === 0 ? (cleanTitle(lastAssistant) || null) : null;
+      // `close` is the drained boundary. Preserve a completed title when an
+      // already-exited Windows PID makes tree proof unavailable; forced paths
+      // above still require PROVEN cleanup.
+      finishAfterCleanup(title, { allowUnavailable: code === 0 && title !== null });
+    });
+    proc.stdin?.on?.('error', () => {
+      finishAfterCleanup(null);
     });
 
     try {
       proc.stdin.end(prompt);
     } catch {
-      clearTimeout(timer);
-      finish(null);
+      finishAfterCleanup(null);
     }
   });
 }

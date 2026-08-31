@@ -414,6 +414,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   let rauAuthFeedbackTimer: ReturnType<typeof setTimeout> | null = null;
   let setupAuthUrl: string | null = null;
   let setupUserCode: string | null = null;
+  let setupAuthRunId: string | null = null;
   let setupCopyResetTimer: ReturnType<typeof setTimeout> | null = null;
   let setupProgressPercent = 0;
   let setupProgressLabel = '';
@@ -886,7 +887,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     if (setupUserCode) void copySetupText(setupUserCode, setupUserCodeCopy, '코드 복사');
   });
   setupLoginCancel.addEventListener('click', () => {
-    if (setupAgent) bridge.cancelAgentSetup(setupAgent);
+    if (setupAgent && setupAuthRunId) bridge.cancelAgentSetup(setupAgent, setupAuthRunId);
     setupBusy = false;
     setupCodePending = false;
     resetRauAuthFeedback();
@@ -1929,6 +1930,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     setupOauthPending = false;
     setupAuthUrl = null;
     setupUserCode = null;
+    setupAuthRunId = null;
     if (setupCopyResetTimer) {
       clearTimeout(setupCopyResetTimer);
       setupCopyResetTimer = null;
@@ -2088,7 +2090,9 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   function closeAgentSetup(): void {
     if (!setupOverlay.isConnected) return;
-    if (setupBusy && setupAgent) bridge.cancelAgentSetup(setupAgent);
+    if (setupBusy && setupAgent && setupAuthRunId) {
+      bridge.cancelAgentSetup(setupAgent, setupAuthRunId);
+    }
     setupBusy = false;
     resetRauAuthFeedback();
     clearSetupAuthPrompt();
@@ -2232,11 +2236,15 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       ? `${setupProgressLabel} · ${Math.floor(setupProgressPercent)}%`
       : '';
     setupInstall.disabled = setupBusy || connectionState !== 'connected';
-    setupOauth.disabled = setupBusy || connectionState !== 'connected';
-    setupApiToggle.disabled = setupBusy || connectionState !== 'connected';
+    const authBusyElsewhere = status?.authenticating === true && status.authOwnedByThisSession !== true;
+    setupOauth.disabled = setupBusy || authBusyElsewhere || connectionState !== 'connected';
+    setupApiToggle.disabled = setupBusy || authBusyElsewhere || connectionState !== 'connected';
     setupKeySubmit.disabled = setupBusy || !setupKey.input.value.trim();
     renderSetupLoginBox();
-    setupCodeBox.hidden = agent !== 'claude' || !setupCodePending || !setupBusy;
+    setupCodeBox.hidden = (agent !== 'claude' && agent !== 'rau') || !setupCodePending || !setupBusy;
+    setupCodeNote.textContent = agent === 'rau'
+      ? '브라우저에 표시된 12자리 반환 코드를 붙여넣어 주세요.'
+      : '브라우저에서 로그인하면 인증 코드가 표시됩니다. 코드를 붙여넣어 주세요.';
     setupCodeSubmit.disabled = connectionState !== 'connected' || !setupCode.input.value.trim();
     restoreSetupFocus();
   }
@@ -2253,6 +2261,9 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     }
     setupUserCodeRow.hidden = !setupUserCode;
     if (setupUserCode) setupUserCodeValue.textContent = setupUserCode;
+    setupUserCodeCaption.textContent = setupAgent === 'rau'
+      ? '브라우저에 같은 연결 코드가 표시되는지 확인해 주세요.'
+      : '브라우저에서 이 코드를 확인해 주세요.';
   }
 
   async function refreshSetupStatuses(): Promise<void> {
@@ -2334,10 +2345,20 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       renderAgentSetup();
       return;
     }
+    if (!started.authRunId) {
+      setupBusy = false;
+      setupMessage = '로그인 보안 정보를 받지 못했어요. 다시 시도해 주세요.';
+      resetRauAuthFeedback();
+      clearSetupAuthPrompt();
+      renderAgentSetup();
+      return;
+    }
+    setupAuthRunId = started.authRunId;
     keyInput.value = '';
     // pi 는 인증 주소를 시작 응답에만 실어 보낸다.
     if (method === 'oauth' && started.authUrl) setupAuthUrl = started.authUrl;
-    if (method === 'oauth' && setupAgent === 'claude') {
+    if (method === 'oauth' && started.pairingCode) setupUserCode = started.pairingCode;
+    if (method === 'oauth' && (setupAgent === 'claude' || setupAgent === 'rau')) {
       // claude 는 브라우저 로그인 뒤 표시되는 인증 코드를 CLI 에 넘겨야 로그인이 끝난다.
       setupCodePending = true;
       setupCode.input.value = '';
@@ -2349,8 +2370,9 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   function submitSetupAuthCode(): void {
     const code = setupCode.input.value.trim();
-    if (!code || setupAgent !== 'claude' || connectionState !== 'connected') return;
-    bridge.submitAgentAuthCode('claude', code);
+    if (!code || !setupAuthRunId || (setupAgent !== 'claude' && setupAgent !== 'rau')
+      || connectionState !== 'connected') return;
+    bridge.submitAgentAuthCode(setupAgent, setupAuthRunId, code);
     setupCode.input.value = '';
     setupMessage = '';
     renderAgentSetup();
@@ -3275,6 +3297,15 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
           const rauWasIncomplete = setupStatuses !== null
             && setupStatuses.rau?.setupComplete !== true;
           setupStatuses = ev.statuses;
+          const selectedStatus = setupAgent ? ev.statuses[setupAgent] : null;
+          if (setupAgent && selectedStatus?.authOwnedByThisSession && selectedStatus.authRunId) {
+            setupAuthRunId = selectedStatus.authRunId;
+            setupBusy = true;
+            setupOauthPending = Boolean(selectedStatus.authUrl || selectedStatus.pairingCode);
+            setupAuthUrl = selectedStatus.authUrl ?? setupAuthUrl;
+            setupUserCode = selectedStatus.pairingCode ?? setupUserCode;
+            if (setupAgent === 'rau' || setupAgent === 'claude') setupCodePending = true;
+          }
           if (rauWasIncomplete && ev.statuses.rau?.setupComplete === true) {
             persistPrefs({
               ...prefs,
@@ -3284,7 +3315,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
           }
           // 로그인·설치가 아직 진행 중이면 주기 방송이 카드 상태(주소·코드)를 지우지 않는다.
           const inFlight = setupAgent !== null && setupBusy
-            && (ev.statuses[setupAgent]?.authenticating === true
+            && ((ev.statuses[setupAgent]?.authenticating === true
+                && ev.statuses[setupAgent]?.authOwnedByThisSession === true)
               || ev.statuses[setupAgent]?.installing === true);
           if (!inFlight) {
             setupBusy = false;
@@ -3316,11 +3348,14 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
           break;
         case 'agent-setup-progress':
           if (setupAgent === ev.agent) {
+            if (ev.authRunId && setupAuthRunId && ev.authRunId !== setupAuthRunId) break;
+            if (ev.authRunId) setupAuthRunId = ev.authRunId;
             setupBusy = ev.state !== 'done';
             // API 키 검증 중에도 authorizing 이 온다 — 브라우저 로그인 근거가 있을 때만 상자를 연다.
-            if (ev.state === 'authorizing' && (ev.authUrl || ev.userCode)) setupOauthPending = true;
+            if (ev.state === 'authorizing' && (ev.authUrl || ev.userCode || ev.pairingCode)) setupOauthPending = true;
             if (ev.authUrl) setupAuthUrl = ev.authUrl;
-            if (ev.userCode) setupUserCode = ev.userCode;
+            if (ev.userCode || ev.pairingCode) setupUserCode = ev.userCode ?? ev.pairingCode ?? null;
+            if (ev.agent === 'rau' && ev.state === 'authorizing') setupCodePending = true;
             if (ev.state === 'done') clearSetupAuthPrompt();
             maybeOpenAuthUrl(ev.authUrl);
             if (typeof ev.percent === 'number') {
@@ -3331,6 +3366,15 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
           break;
         case 'agent-setup-error':
           if (!ev.agent || setupAgent === ev.agent) {
+            if (ev.authRunId && setupAuthRunId && ev.authRunId !== setupAuthRunId) break;
+            if (ev.code === 'DEVICE_PROOF_INVALID' && setupAgent === 'rau') {
+              setupMessage = ev.message;
+              setupBusy = true;
+              setupCodePending = true;
+              setupCode.input.value = '';
+              renderAgentSetup();
+              break;
+            }
             setupBusy = false;
             setupCodePending = false;
             setupMessage = ev.message;

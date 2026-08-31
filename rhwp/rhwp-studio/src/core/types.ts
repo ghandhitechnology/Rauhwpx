@@ -29,6 +29,12 @@ export interface PageInfo {
   marginHeader: number;
   /** 꼬리말 여백 (px) */
   marginFooter: number;
+  /** 렌더러가 사용하는 정확한 머리말/꼬리말 영역 (px, 페이지 좌표). */
+  headerArea?: { x: number; y: number; width: number; height: number };
+  footerArea?: { x: number; y: number; width: number; height: number };
+  /** 본문 상자의 왼쪽/오른쪽 (px, 페이지 좌표). 구 WASM/미포함 시 여백으로 대체. */
+  bodyLeft?: number;
+  bodyRight?: number;
   /** 쪽 테두리/쪽 영역 왼쪽 위치 (px) */
   pageBorderLeft?: number;
   /** 쪽 테두리/쪽 영역 오른쪽 여백 (px) */

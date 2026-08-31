@@ -167,7 +167,7 @@ impl LayoutEngine {
 
         // BinData에서 이미지 데이터 찾기 (bin_data_id는 1-indexed 순번)
         let bin_data_id = picture.image_attr.bin_data_id;
-        let image_data = find_bin_data(bin_data_content, bin_data_id).map(|c| c.data.load());
+        let image_data = find_bin_data(bin_data_content, bin_data_id).map(|c| c.data.load_shared());
         // [Task #2225] 그림 미지정(bin 참조 실패 + 외부 경로 없음): 한컴은 편집기
         // 에서만 점선 테두리+그림-없음 아이콘으로 표시하고 인쇄 등가 출력은
         // 미출력 — 의미 노드(MissingPicture)로 방출해 백엔드별 분기를 일원화.
@@ -236,7 +236,7 @@ impl LayoutEngine {
                 outer_table_control_index: otci,
                 // [Task #1161] 전체 다단계 경로 보존(스칼라는 위 innermost 투영).
                 cell_context: cell_ctx.cloned(),
-                ..ImageNode::new(bin_data_id, image_data)
+                ..ImageNode::new_shared(bin_data_id, image_data)
             }),
             BoundingBox::new(pic_x, pic_y, pic_width, pic_height),
         );
@@ -469,7 +469,7 @@ impl LayoutEngine {
 
         // BinData에서 이미지 데이터 찾기 (bin_data_id는 1-indexed 순번)
         let bin_data_id = picture.image_attr.bin_data_id;
-        let image_data = find_bin_data(bin_data_content, bin_data_id).map(|c| c.data.load());
+        let image_data = find_bin_data(bin_data_content, bin_data_id).map(|c| c.data.load_shared());
         // [Task #2225] 그림 미지정 — layout_picture_full 과 동일 분기.
         if image_data.as_ref().is_none_or(|d| d.is_empty())
             && picture.image_attr.external_path.is_none()
@@ -534,7 +534,7 @@ impl LayoutEngine {
                 text_wrap: Some(picture.common.text_wrap),
                 transform: extract_shape_transform(&picture.shape_attr),
                 external_path: picture.image_attr.external_path.clone(),
-                ..ImageNode::new(bin_data_id, image_data)
+                ..ImageNode::new_shared(bin_data_id, image_data)
             }),
             BoundingBox::new(adjusted_pic_x, pic_y, pic_width, pic_height),
         );

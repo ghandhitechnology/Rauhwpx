@@ -13,16 +13,18 @@ use crate::model::{
         Axis, Caption, ChartShape, CommonObjAttr, DataSeries, DrawingObjAttr, Legend, OleShape,
         ShapeComponentAttr, ShapeObject, TextBox,
     },
-    style::{BorderFill, Bullet, CharShape, Font, Numbering, ParaShape, Style, TabDef},
+    style::{BorderFill, Bullet, CharShape, Font, HeadType, Numbering, ParaShape, Style, TabDef},
     table::{Cell, Table},
     Point,
 };
-use crate::parser::{detect_format, parse_document, FileFormat};
+use crate::parser::{detect_format, parse_document, parse_regenerated_document, FileFormat};
 use crate::serializer::{serialize_hwp, serialize_hwpx};
+use crate::xml_attr::{image_ref_u16_ascii, ExactXmlAttributeScanner};
 use base64::Engine as _;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::time::Duration;
@@ -31,6 +33,8 @@ use web_time::Instant;
 
 pub const ANALYSIS_VERSION: u32 = 1;
 pub const DEFAULT_SOFT_BUDGET_MS: u64 = 5_000;
+const MAX_STRUCTURAL_MANIFEST_OUTPUT_BYTES: usize =
+    crate::parser::limits::MAX_UNTRUSTED_INPUT_BYTES;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -810,12 +814,111 @@ pub fn synthesize_virtual_base(bases: &[Value]) -> Result<Value, String> {
 // Conservative document adapter. Debug hashes are deterministic for the model's
 // Vec/BTree-shaped IR except Form properties; those stay atomic at control scope.
 fn dv<T: Debug>(kind: &str, v: &T) -> Value {
-    let h = blake3::hash(format!("{v:#?}").as_bytes());
+    let h = dh(v);
     json!({"kind":kind,"hash":format!("blake3:{}",h.to_hex())})
 }
-fn dh<T: Debug + ?Sized>(v: &T) -> blake3::Hash {
-    blake3::hash(format!("{v:#?}").as_bytes())
+
+struct Blake3DebugWriter(blake3::Hasher);
+
+impl std::fmt::Write for Blake3DebugWriter {
+    fn write_str(&mut self, value: &str) -> std::fmt::Result {
+        self.0.update(value.as_bytes());
+        Ok(())
+    }
 }
+
+fn dh<T: Debug + ?Sized>(v: &T) -> blake3::Hash {
+    let mut writer = Blake3DebugWriter(blake3::Hasher::new());
+    std::fmt::write(&mut writer, format_args!("{v:#?}"))
+        .expect("Blake3 Debug writer is infallible");
+    writer.0.finalize()
+}
+
+fn update_length_prefixed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    hasher.update(&(bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+fn opaque_streams_hash(values: &[(String, Vec<u8>)]) -> blake3::Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&(values.len() as u64).to_le_bytes());
+    for (name, bytes) in values {
+        update_length_prefixed(&mut hasher, name.as_bytes());
+        update_length_prefixed(&mut hasher, bytes);
+    }
+    hasher.finalize()
+}
+
+fn opaque_streams_value(kind: &str, values: &[(String, Vec<u8>)]) -> Value {
+    let total_bytes = values.iter().fold(0u64, |total, (_, bytes)| {
+        total.saturating_add(bytes.len() as u64)
+    });
+    json!({
+        "kind": kind,
+        "count": values.len(),
+        "byteLength": total_bytes,
+        "hash": format!("blake3:{}", opaque_streams_hash(values).to_hex()),
+    })
+}
+
+fn choose_opaque_streams(
+    path: &[String],
+    kind: &str,
+    base: &[(String, Vec<u8>)],
+    current: &[(String, Vec<u8>)],
+    incoming: &[(String, Vec<u8>)],
+    resolutions: Option<&BTreeMap<String, MergeResolution>>,
+    context: &mut Ctx,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let (base_hash, current_hash, incoming_hash) = (
+        opaque_streams_hash(base),
+        opaque_streams_hash(current),
+        opaque_streams_hash(incoming),
+    );
+    if current_hash == incoming_hash {
+        context.auto += 1;
+        return Ok(current.to_vec());
+    }
+    if current_hash == base_hash {
+        context.auto += 1;
+        return Ok(incoming.to_vec());
+    }
+    if incoming_hash == base_hash {
+        context.auto += 1;
+        return Ok(current.to_vec());
+    }
+    let (base_value, current_value, incoming_value) = (
+        opaque_streams_value(kind, base),
+        opaque_streams_value(kind, current),
+        opaque_streams_value(kind, incoming),
+    );
+    if !context.enter(path, &base_value, &current_value, &incoming_value) {
+        let item = context.conflicts.last_mut().expect("budget conflict");
+        item.supports_manual = false;
+        return match resolutions.and_then(|values| values.get(&item.id)) {
+            None | Some(MergeResolution::Current) => Ok(current.to_vec()),
+            Some(MergeResolution::Incoming) => Ok(incoming.to_vec()),
+            _ => Err(format!("{} is an atomic budget conflict", item.id)),
+        };
+    }
+    let mut item = conflict(
+        path,
+        MergeConflictReason::UnknownControlModified,
+        &base_value,
+        &current_value,
+        &incoming_value,
+        false,
+    );
+    item.supports_manual = false;
+    let output = match resolutions.and_then(|values| values.get(&item.id)) {
+        None | Some(MergeResolution::Current) => current.to_vec(),
+        Some(MergeResolution::Incoming) => incoming.to_vec(),
+        _ => return Err(format!("{} is atomic; both/manual unsupported", item.id)),
+    };
+    context.conflicts.push(item);
+    Ok(output)
+}
+
 fn choose<T: Clone + Debug>(
     p: &[String],
     kind: &str,
@@ -3716,52 +3819,191 @@ fn merge_master_pages(
 fn summary(d: &Document) -> Value {
     json!({"kind":"document","sections":d.sections.iter().enumerate().map(|(s,x)|json!({"stableId":format!("section:{s}"),"kind":"section","paragraphs":x.paragraphs.iter().enumerate().map(|(p,x)|json!({"stableId":format!("paragraph:{s}:{p}"),"kind":"paragraph","text":x.text,"styleId":x.style_id,"paraShapeId":x.para_shape_id,"controlCount":x.controls.len()})).collect::<Vec<_>>() })).collect::<Vec<_>>(),"resourceCount":d.bin_data_content.len(),"styleCount":d.doc_info.styles.len()})
 }
-fn resource_value(v: Option<&BinDataContent>) -> Value {
-    match v {
-        None => Value::Null,
-        Some(v) => {
-            json!({"kind":"image-bytes","id":v.id,"extension":v.extension,"bytesBase64":base64::engine::general_purpose::STANDARD.encode(v.data.load())})
+
+enum ResourcePayloadObservation {
+    Stable(crate::model::bin_data::BinDataPayloadIdentity),
+    OpaqueLazy {
+        resolver: std::sync::Arc<dyn crate::model::bin_data::BinDataResolver>,
+        key: String,
+    },
+}
+
+impl ResourcePayloadObservation {
+    fn from_bytes(bytes: &BinDataBytes) -> Self {
+        if let Some(identity) = bytes.payload_identity() {
+            return Self::Stable(identity);
+        }
+        match bytes {
+            BinDataBytes::Lazy { resolver, key } => Self::OpaqueLazy {
+                resolver: resolver.clone(),
+                key: key.clone(),
+            },
+            BinDataBytes::Loaded(_) | BinDataBytes::Shared(_) => {
+                unreachable!("in-memory BinData always has a payload identity")
+            }
+        }
+    }
+
+    fn equivalent(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Stable(left), Self::Stable(right)) => left == right,
+            (
+                Self::OpaqueLazy {
+                    resolver: left_resolver,
+                    key: left_key,
+                },
+                Self::OpaqueLazy {
+                    resolver: right_resolver,
+                    key: right_key,
+                },
+            ) => std::sync::Arc::ptr_eq(left_resolver, right_resolver) && left_key == right_key,
+            _ => false,
+        }
+    }
+
+    fn external_identity(&self) -> Option<String> {
+        match self {
+            Self::Stable(identity) => Some(identity.token()),
+            Self::OpaqueLazy { .. } => None,
         }
     }
 }
-fn remap_picture_refs_in_shape(shape: &mut ShapeObject, old: u16, new: u16) {
+
+struct ResourceObservation<'a> {
+    content: &'a BinDataContent,
+    payload: ResourcePayloadObservation,
+}
+
+impl<'a> ResourceObservation<'a> {
+    fn new(content: &'a BinDataContent) -> Self {
+        Self {
+            content,
+            payload: ResourcePayloadObservation::from_bytes(&content.data),
+        }
+    }
+
+    fn equivalent(&self, other: &Self) -> bool {
+        self.content.id == other.content.id && self.payload_equivalent(other)
+    }
+
+    fn payload_equivalent(&self, other: &Self) -> bool {
+        self.content.extension == other.content.extension && self.payload.equivalent(&other.payload)
+    }
+
+    fn value(&self) -> Value {
+        json!({
+            "kind": "image-bytes",
+            "id": self.content.id,
+            "extension": self.content.extension,
+            "contentIdentity": self.payload.external_identity(),
+        })
+    }
+}
+
+fn resource_value(v: Option<&BinDataContent>) -> Value {
+    match v {
+        None => Value::Null,
+        Some(v) => ResourceObservation::new(v).value(),
+    }
+}
+
+fn resources_equal(left: Option<&BinDataContent>, right: Option<&BinDataContent>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => {
+            ResourceObservation::new(left).equivalent(&ResourceObservation::new(right))
+        }
+        (None, Some(_)) | (Some(_), None) => false,
+    }
+}
+#[derive(Debug, Clone, Copy)]
+struct TargetBinDataRef {
+    slot: u16,
+    storage_id: u16,
+}
+
+#[derive(Default)]
+struct SourceBinDataRefMap {
+    by_slot: BTreeMap<u16, TargetBinDataRef>,
+    by_storage_id: BTreeMap<u16, TargetBinDataRef>,
+}
+
+#[derive(Default)]
+struct BinDataRefRewrite {
+    image: BTreeMap<u16, u16>,
+    storage: BTreeMap<u16, u16>,
+}
+
+fn remap_u16_ref(value: &mut u16, remap: &BTreeMap<u16, u16>) -> bool {
+    let Some(new) = remap.get(value).copied() else {
+        return false;
+    };
+    if *value == new {
+        return false;
+    }
+    *value = new;
+    true
+}
+
+fn remap_fill_bin_data_ref(
+    fill: &mut crate::model::style::Fill,
+    remap: &BTreeMap<u16, u16>,
+) -> bool {
+    fill.image
+        .as_mut()
+        .is_some_and(|image| remap_u16_ref(&mut image.bin_data_id, remap))
+}
+
+fn remap_bin_data_refs_in_shape(shape: &mut ShapeObject, remap: &BinDataRefRewrite) -> bool {
+    let mut changed = false;
     if let Some(d) = shape.drawing_mut() {
+        changed |= remap_fill_bin_data_ref(&mut d.fill, &remap.image);
         if let Some(tb) = &mut d.text_box {
-            remap_picture_refs_in_paragraphs(&mut tb.paragraphs, old, new)
+            changed |= remap_bin_data_refs_in_paragraphs(&mut tb.paragraphs, remap);
         }
         if let Some(c) = &mut d.caption {
-            remap_picture_refs_in_paragraphs(&mut c.paragraphs, old, new)
+            changed |= remap_bin_data_refs_in_paragraphs(&mut c.paragraphs, remap);
         }
     }
     match shape {
         ShapeObject::Picture(p) => {
-            if p.image_attr.bin_data_id == old {
-                p.image_attr.bin_data_id = new
-            }
+            changed |= remap_u16_ref(&mut p.image_attr.bin_data_id, &remap.image);
             if let Some(c) = &mut p.caption {
-                remap_picture_refs_in_paragraphs(&mut c.paragraphs, old, new)
+                changed |= remap_bin_data_refs_in_paragraphs(&mut c.paragraphs, remap);
             }
         }
         ShapeObject::Group(g) => {
             if let Some(c) = &mut g.caption {
-                remap_picture_refs_in_paragraphs(&mut c.paragraphs, old, new)
+                changed |= remap_bin_data_refs_in_paragraphs(&mut c.paragraphs, remap);
             }
             for child in &mut g.children {
-                remap_picture_refs_in_shape(child, old, new)
+                changed |= remap_bin_data_refs_in_shape(child, remap);
             }
         }
         ShapeObject::Chart(v) => {
             if let Some(c) = &mut v.caption {
-                remap_picture_refs_in_paragraphs(&mut c.paragraphs, old, new)
+                changed |= remap_bin_data_refs_in_paragraphs(&mut c.paragraphs, remap);
             }
         }
         ShapeObject::Ole(v) => {
+            if let Ok(old) = u16::try_from(v.bin_data_id) {
+                if let Some(new) = remap.storage.get(&old).copied().filter(|new| *new != old) {
+                    v.bin_data_id = u32::from(new);
+                    changed = true;
+                }
+            }
+            if changed {
+                // HWP serialization otherwise emits the stale resource ID from
+                // the preserved SHAPE_COMPONENT_OLE record verbatim.
+                v.raw_tag_data.clear();
+            }
             if let Some(c) = &mut v.caption {
-                remap_picture_refs_in_paragraphs(&mut c.paragraphs, old, new)
+                changed |= remap_bin_data_refs_in_paragraphs(&mut c.paragraphs, remap);
             }
         }
         _ => {}
     }
+    changed
 }
 fn visit_nested_paragraphs_mut(paragraphs: &mut [Paragraph], f: &mut impl FnMut(&mut Paragraph)) {
     fn drawing(d: &mut DrawingObjAttr, f: &mut impl FnMut(&mut Paragraph)) {
@@ -3807,6 +4049,11 @@ fn visit_nested_paragraphs_mut(paragraphs: &mut [Paragraph], f: &mut impl FnMut(
         f(paragraph);
         for control in &mut paragraph.controls {
             match control {
+                Control::SectionDef(section_def) => {
+                    for page in &mut section_def.master_pages {
+                        visit_nested_paragraphs_mut(&mut page.paragraphs, f)
+                    }
+                }
                 Control::Table(v) => {
                     for cell in &mut v.cells {
                         visit_nested_paragraphs_mut(&mut cell.paragraphs, f)
@@ -3832,203 +4079,1540 @@ fn visit_nested_paragraphs_mut(paragraphs: &mut [Paragraph], f: &mut impl FnMut(
         }
     }
 }
-fn remap_document_paragraph_refs(
-    doc: &mut Document,
-    style: Option<(usize, usize)>,
-    para: Option<(usize, usize)>,
-    char_shape: Option<(usize, usize)>,
-) {
-    let mut rewrite = |p: &mut Paragraph| {
-        if let Some((base, shift)) = style {
-            if p.style_id as usize >= base {
-                p.style_id = p
-                    .style_id
-                    .saturating_add(shift.try_into().unwrap_or(u8::MAX));
-            }
+fn any_nested_paragraph(
+    paragraphs: &[Paragraph],
+    predicate: &mut impl FnMut(&Paragraph) -> bool,
+) -> bool {
+    fn drawing(drawing: &DrawingObjAttr, predicate: &mut impl FnMut(&Paragraph) -> bool) -> bool {
+        drawing
+            .text_box
+            .as_ref()
+            .is_some_and(|text_box| any_nested_paragraph(&text_box.paragraphs, predicate))
+            || drawing
+                .caption
+                .as_ref()
+                .is_some_and(|caption| any_nested_paragraph(&caption.paragraphs, predicate))
+    }
+    fn shape_matches(shape: &ShapeObject, predicate: &mut impl FnMut(&Paragraph) -> bool) -> bool {
+        if shape
+            .drawing()
+            .is_some_and(|value| drawing(value, predicate))
+        {
+            return true;
         }
-        if let Some((base, shift)) = para {
-            if p.para_shape_id as usize >= base {
-                p.para_shape_id = p
-                    .para_shape_id
-                    .saturating_add(shift.try_into().unwrap_or(u16::MAX));
+        match shape {
+            ShapeObject::Group(group) => {
+                group
+                    .caption
+                    .as_ref()
+                    .is_some_and(|caption| any_nested_paragraph(&caption.paragraphs, predicate))
+                    || group
+                        .children
+                        .iter()
+                        .any(|child| shape_matches(child, predicate))
             }
-        }
-        if let Some((base, shift)) = char_shape {
-            for cs in &mut p.char_shapes {
-                if cs.char_shape_id as usize >= base {
-                    cs.char_shape_id = cs
-                        .char_shape_id
-                        .saturating_add(shift.try_into().unwrap_or(u32::MAX));
-                }
-            }
-        }
-    };
-    for section in &mut doc.sections {
-        visit_nested_paragraphs_mut(&mut section.paragraphs, &mut rewrite);
-        for page in &mut section.section_def.master_pages {
-            visit_nested_paragraphs_mut(&mut page.paragraphs, &mut rewrite);
+            ShapeObject::Picture(picture) => picture
+                .caption
+                .as_ref()
+                .is_some_and(|caption| any_nested_paragraph(&caption.paragraphs, predicate)),
+            ShapeObject::Chart(chart) => chart
+                .caption
+                .as_ref()
+                .is_some_and(|caption| any_nested_paragraph(&caption.paragraphs, predicate)),
+            ShapeObject::Ole(ole) => ole
+                .caption
+                .as_ref()
+                .is_some_and(|caption| any_nested_paragraph(&caption.paragraphs, predicate)),
+            _ => false,
         }
     }
+
+    paragraphs.iter().any(|paragraph| {
+        predicate(paragraph)
+            || paragraph.controls.iter().any(|control| match control {
+                Control::SectionDef(section_def) => section_def
+                    .master_pages
+                    .iter()
+                    .any(|page| any_nested_paragraph(&page.paragraphs, predicate)),
+                Control::Table(table) => {
+                    table
+                        .cells
+                        .iter()
+                        .any(|cell| any_nested_paragraph(&cell.paragraphs, predicate))
+                        || table.caption.as_ref().is_some_and(|caption| {
+                            any_nested_paragraph(&caption.paragraphs, predicate)
+                        })
+                }
+                Control::Shape(value) => shape_matches(value, predicate),
+                Control::Picture(value) => value
+                    .caption
+                    .as_ref()
+                    .is_some_and(|caption| any_nested_paragraph(&caption.paragraphs, predicate)),
+                Control::Header(value) => any_nested_paragraph(&value.paragraphs, predicate),
+                Control::Footer(value) => any_nested_paragraph(&value.paragraphs, predicate),
+                Control::Footnote(value) => any_nested_paragraph(&value.paragraphs, predicate),
+                Control::Endnote(value) => any_nested_paragraph(&value.paragraphs, predicate),
+                Control::HiddenComment(value) => any_nested_paragraph(&value.paragraphs, predicate),
+                Control::Field(value) => any_nested_paragraph(&value.memo_paragraphs, predicate),
+                _ => false,
+            })
+    })
 }
-fn remap_picture_refs_in_paragraphs(paragraphs: &mut [Paragraph], old: u16, new: u16) {
+
+fn remap_bin_data_refs_in_paragraphs(
+    paragraphs: &mut [Paragraph],
+    remap: &BinDataRefRewrite,
+) -> bool {
+    let mut changed = false;
     for paragraph in paragraphs {
         for control in &mut paragraph.controls {
             match control {
-                Control::Picture(p) => {
-                    if p.image_attr.bin_data_id == old {
-                        p.image_attr.bin_data_id = new
-                    }
-                    if let Some(c) = &mut p.caption {
-                        remap_picture_refs_in_paragraphs(&mut c.paragraphs, old, new)
+                Control::SectionDef(section_def) => {
+                    for page in &mut section_def.master_pages {
+                        changed |= remap_bin_data_refs_in_paragraphs(&mut page.paragraphs, remap);
                     }
                 }
-                Control::Shape(s) => remap_picture_refs_in_shape(s, old, new),
+                Control::Picture(p) => {
+                    changed |= remap_u16_ref(&mut p.image_attr.bin_data_id, &remap.image);
+                    if let Some(c) = &mut p.caption {
+                        changed |= remap_bin_data_refs_in_paragraphs(&mut c.paragraphs, remap);
+                    }
+                }
+                Control::Shape(s) => changed |= remap_bin_data_refs_in_shape(s, remap),
                 Control::Table(t) => {
                     for cell in &mut t.cells {
-                        remap_picture_refs_in_paragraphs(&mut cell.paragraphs, old, new)
+                        changed |= remap_bin_data_refs_in_paragraphs(&mut cell.paragraphs, remap);
                     }
                     if let Some(c) = &mut t.caption {
-                        remap_picture_refs_in_paragraphs(&mut c.paragraphs, old, new)
+                        changed |= remap_bin_data_refs_in_paragraphs(&mut c.paragraphs, remap);
                     }
                 }
-                Control::Header(h) => remap_picture_refs_in_paragraphs(&mut h.paragraphs, old, new),
-                Control::Footer(f) => remap_picture_refs_in_paragraphs(&mut f.paragraphs, old, new),
+                Control::Header(h) => {
+                    changed |= remap_bin_data_refs_in_paragraphs(&mut h.paragraphs, remap)
+                }
+                Control::Footer(f) => {
+                    changed |= remap_bin_data_refs_in_paragraphs(&mut f.paragraphs, remap)
+                }
                 Control::Footnote(f) => {
-                    remap_picture_refs_in_paragraphs(&mut f.paragraphs, old, new)
+                    changed |= remap_bin_data_refs_in_paragraphs(&mut f.paragraphs, remap)
                 }
                 Control::Endnote(e) => {
-                    remap_picture_refs_in_paragraphs(&mut e.paragraphs, old, new)
+                    changed |= remap_bin_data_refs_in_paragraphs(&mut e.paragraphs, remap)
                 }
                 Control::HiddenComment(h) => {
-                    remap_picture_refs_in_paragraphs(&mut h.paragraphs, old, new)
+                    changed |= remap_bin_data_refs_in_paragraphs(&mut h.paragraphs, remap)
                 }
                 Control::Field(f) => {
-                    remap_picture_refs_in_paragraphs(&mut f.memo_paragraphs, old, new)
+                    changed |= remap_bin_data_refs_in_paragraphs(&mut f.memo_paragraphs, remap)
                 }
                 _ => {}
             }
         }
     }
+    changed
 }
-fn remap_incoming_resource_collisions(b: &Document, c: &Document, i: &Document) -> Document {
-    let mut out = i.clone();
-    let base_ids = b
-        .bin_data_content
-        .iter()
-        .map(|x| x.id)
-        .collect::<BTreeSet<_>>();
-    let current = c
-        .bin_data_content
-        .iter()
-        .map(|x| (x.id, resource_value(Some(x))))
-        .collect::<BTreeMap<_, _>>();
-    let mut used = c
-        .bin_data_content
-        .iter()
-        .chain(i.bin_data_content.iter())
-        .map(|x| x.id)
-        .collect::<BTreeSet<_>>();
-    for index in 0..out.bin_data_content.len() {
-        let id = out.bin_data_content[index].id;
-        if base_ids.contains(&id) {
-            continue;
+
+fn fill_needs_bin_data_remap(fill: &crate::model::style::Fill, remap: &BTreeMap<u16, u16>) -> bool {
+    fill.image.as_ref().is_some_and(|image| {
+        remap
+            .get(&image.bin_data_id)
+            .is_some_and(|new| *new != image.bin_data_id)
+    })
+}
+
+fn shape_needs_bin_data_remap(shape: &ShapeObject, remap: &BinDataRefRewrite) -> bool {
+    shape.drawing().is_some_and(|drawing| {
+        fill_needs_bin_data_remap(&drawing.fill, &remap.image)
+            || drawing
+                .text_box
+                .as_ref()
+                .is_some_and(|text_box| paragraphs_need_bin_data_remap(&text_box.paragraphs, remap))
+            || drawing
+                .caption
+                .as_ref()
+                .is_some_and(|caption| paragraphs_need_bin_data_remap(&caption.paragraphs, remap))
+    }) || match shape {
+        ShapeObject::Picture(picture) => {
+            remap
+                .image
+                .get(&picture.image_attr.bin_data_id)
+                .is_some_and(|new| *new != picture.image_attr.bin_data_id)
+                || picture.caption.as_ref().is_some_and(|caption| {
+                    paragraphs_need_bin_data_remap(&caption.paragraphs, remap)
+                })
         }
-        let Some(cv) = current.get(&id) else { continue };
-        if *cv == resource_value(Some(&out.bin_data_content[index])) {
-            continue;
+        ShapeObject::Group(group) => {
+            group
+                .caption
+                .as_ref()
+                .is_some_and(|caption| paragraphs_need_bin_data_remap(&caption.paragraphs, remap))
+                || group
+                    .children
+                    .iter()
+                    .any(|child| shape_needs_bin_data_remap(child, remap))
         }
-        let mut new = used
-            .iter()
-            .next_back()
+        ShapeObject::Ole(ole) => {
+            u16::try_from(ole.bin_data_id)
+                .ok()
+                .is_some_and(|id| remap.storage.get(&id).is_some_and(|new| *new != id))
+                || ole.caption.as_ref().is_some_and(|caption| {
+                    paragraphs_need_bin_data_remap(&caption.paragraphs, remap)
+                })
+        }
+        ShapeObject::Chart(chart) => chart
+            .caption
+            .as_ref()
+            .is_some_and(|caption| paragraphs_need_bin_data_remap(&caption.paragraphs, remap)),
+        _ => false,
+    }
+}
+
+fn paragraphs_need_bin_data_remap(paragraphs: &[Paragraph], remap: &BinDataRefRewrite) -> bool {
+    paragraphs.iter().any(|paragraph| {
+        paragraph.controls.iter().any(|control| match control {
+            Control::SectionDef(section_def) => section_def
+                .master_pages
+                .iter()
+                .any(|page| paragraphs_need_bin_data_remap(&page.paragraphs, remap)),
+            Control::Picture(picture) => {
+                remap
+                    .image
+                    .get(&picture.image_attr.bin_data_id)
+                    .is_some_and(|new| *new != picture.image_attr.bin_data_id)
+                    || picture.caption.as_ref().is_some_and(|caption| {
+                        paragraphs_need_bin_data_remap(&caption.paragraphs, remap)
+                    })
+            }
+            Control::Shape(shape) => shape_needs_bin_data_remap(shape, remap),
+            Control::Table(table) => {
+                table
+                    .cells
+                    .iter()
+                    .any(|cell| paragraphs_need_bin_data_remap(&cell.paragraphs, remap))
+                    || table.caption.as_ref().is_some_and(|caption| {
+                        paragraphs_need_bin_data_remap(&caption.paragraphs, remap)
+                    })
+            }
+            Control::Header(value) => paragraphs_need_bin_data_remap(&value.paragraphs, remap),
+            Control::Footer(value) => paragraphs_need_bin_data_remap(&value.paragraphs, remap),
+            Control::Footnote(value) => paragraphs_need_bin_data_remap(&value.paragraphs, remap),
+            Control::Endnote(value) => paragraphs_need_bin_data_remap(&value.paragraphs, remap),
+            Control::HiddenComment(value) => {
+                paragraphs_need_bin_data_remap(&value.paragraphs, remap)
+            }
+            Control::Field(value) => paragraphs_need_bin_data_remap(&value.memo_paragraphs, remap),
+            _ => false,
+        })
+    })
+}
+
+fn sections_need_bin_data_remap(sections: &[Section], remap: &BinDataRefRewrite) -> bool {
+    sections.iter().any(|section| {
+        paragraphs_need_bin_data_remap(&section.paragraphs, remap)
+            || section
+                .section_def
+                .master_pages
+                .iter()
+                .any(|page| paragraphs_need_bin_data_remap(&page.paragraphs, remap))
+    })
+}
+
+fn doc_info_needs_bin_data_remap(doc_info: &DocInfo, remap: &BinDataRefRewrite) -> bool {
+    doc_info
+        .border_fills
+        .iter()
+        .any(|border_fill| fill_needs_bin_data_remap(&border_fill.fill, &remap.image))
+        || doc_info.bullets.iter().any(|bullet| {
+            u16::try_from(bullet.image_bullet)
+                .ok()
+                .is_some_and(|id| remap.image.get(&id).is_some_and(|new| *new != id))
+        })
+        || doc_info.font_faces.iter().flatten().any(|font| {
+            font.resolved_bin_data_id
+                .is_some_and(|id| remap.storage.get(&id).is_some_and(|new| *new != id))
+                || font.subst_font.as_ref().is_some_and(|substitute| {
+                    substitute
+                        .resolved_bin_data_id
+                        .is_some_and(|id| remap.storage.get(&id).is_some_and(|new| *new != id))
+                })
+        })
+}
+
+fn exact_binary_item_numeric_id(value: &str) -> Option<u16> {
+    let digits = value
+        .strip_prefix("image")
+        .or_else(|| value.strip_prefix("ole"))
+        .or_else(|| {
+            value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit())
+                .then_some(value)
+        })?;
+    (!digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| digits.parse::<u16>().ok())
+        .flatten()
+}
+
+fn remap_raw_binary_item_refs<'a>(
+    raw: &'a str,
+    remap: &BTreeMap<u16, u16>,
+) -> Result<(Cow<'a, str>, bool), String> {
+    remap_raw_binary_item_refs_limited(raw, remap, crate::parser::limits::MAX_STRUCTURAL_BYTES)
+}
+
+fn remap_raw_binary_item_refs_limited<'a>(
+    raw: &'a str,
+    remap: &BTreeMap<u16, u16>,
+    max_bytes: usize,
+) -> Result<(Cow<'a, str>, bool), String> {
+    if raw.len() > max_bytes {
+        return Err(format!(
+            "raw HWPX XML exceeds structural byte limit: {} > {max_bytes}",
+            raw.len()
+        ));
+    }
+
+    let mut scanner = ExactXmlAttributeScanner::new(raw);
+    let mut projected_len = raw.len();
+    let mut matched = false;
+    let mut changed = false;
+    while let Some((value_start, value_end)) = scanner.next_value("binaryItemIDRef") {
+        let Some(new) = exact_binary_item_numeric_id(&raw[value_start..value_end])
+            .and_then(|old| remap.get(&old))
             .copied()
-            .unwrap_or(0)
-            .saturating_add(1);
-        while used.contains(&new) && new < u16::MAX {
-            new += 1
+        else {
+            continue;
+        };
+        matched = true;
+        let mut replacement_buffer = [0u8; 10];
+        let replacement = image_ref_u16_ascii(new, &mut replacement_buffer);
+        let original = &raw[value_start..value_end];
+        if replacement != original {
+            changed = true;
+            projected_len = projected_len
+                .checked_sub(original.len())
+                .and_then(|length| length.checked_add(replacement.len()))
+                .ok_or_else(|| "raw HWPX BinData reference size overflow".to_string())?;
         }
-        if used.contains(&new) {
+    }
+    if !changed {
+        return Ok((Cow::Borrowed(raw), matched));
+    }
+    if projected_len > max_bytes {
+        return Err(format!(
+            "rewritten raw HWPX XML exceeds structural byte limit: {projected_len} > {max_bytes}"
+        ));
+    }
+
+    let mut output = String::new();
+    output
+        .try_reserve_exact(projected_len)
+        .map_err(|error| format!("raw HWPX BinData reference allocation failed: {error}"))?;
+    let mut copied = 0usize;
+    let mut scanner = ExactXmlAttributeScanner::new(raw);
+    while let Some((value_start, value_end)) = scanner.next_value("binaryItemIDRef") {
+        let Some(new) = exact_binary_item_numeric_id(&raw[value_start..value_end])
+            .and_then(|old| remap.get(&old))
+            .copied()
+        else {
+            continue;
+        };
+        let mut replacement_buffer = [0u8; 10];
+        let replacement = image_ref_u16_ascii(new, &mut replacement_buffer);
+        if replacement != &raw[value_start..value_end] {
+            output.push_str(&raw[copied..value_start]);
+            output.push_str(replacement);
+            copied = value_end;
+        }
+    }
+    output.push_str(&raw[copied..]);
+    debug_assert_eq!(output.len(), projected_len);
+    Ok((Cow::Owned(output), matched))
+}
+
+fn regenerated_image_bullet_para_head(bullet: &crate::model::style::Bullet) -> String {
+    format!(
+        concat!(
+            r#"<hh:paraHead level="0" align="LEFT" useInstWidth="0" autoIndent="1" "#,
+            r#"widthAdjust="{}" textOffsetType="PERCENT" textOffset="{}" "#,
+            r#"numFormat="DIGIT" charPrIDRef="{}" checkable="{}"/>"#,
+            r#"<hh:img binaryItemIDRef="image{}"/>"#
+        ),
+        bullet.width_adjust,
+        bullet.text_distance,
+        bullet.char_shape_id,
+        u8::from(bullet.check_bullet_char != '\0'),
+        bullet.image_bullet,
+    )
+}
+
+fn remap_doc_info_bin_data_refs(
+    doc_info: &mut DocInfo,
+    remap: &BinDataRefRewrite,
+) -> Result<bool, String> {
+    let mut changed = false;
+    for border_fill in &mut doc_info.border_fills {
+        if remap_fill_bin_data_ref(&mut border_fill.fill, &remap.image) {
+            // HWP DocInfo prefers raw records when present, so the structured
+            // remap must invalidate the stale record bytes.
+            border_fill.raw_data = None;
+            changed = true;
+        }
+    }
+    for bullet in &mut doc_info.bullets {
+        if let Ok(old) = u16::try_from(bullet.image_bullet) {
+            let Some(new) = remap.image.get(&old).copied().filter(|new| *new != old) else {
+                continue;
+            };
+            bullet.image_bullet = i32::from(new);
+            bullet.raw_data = None;
+            bullet.raw_para_head = if let Some(raw) = bullet.raw_para_head.take() {
+                let (rewritten, found) = remap_raw_binary_item_refs(&raw, &remap.image)?;
+                // Parsed HWPX image bullets carry the exact <hh:img> reference
+                // in this splice. Retain its otherwise-unmodelled attributes
+                // only when that stale resource reference was rewritten.
+                found.then(|| rewritten.into_owned())
+            } else {
+                None
+            };
+            if bullet.raw_para_head.is_none() {
+                // HWPX's fallback serializer emits only paraHead, so regenerate
+                // the image element when no trustworthy splice remains.
+                bullet.raw_para_head = Some(regenerated_image_bullet_para_head(bullet));
+            }
+            changed = true;
+        }
+    }
+    for font in doc_info.font_faces.iter_mut().flatten() {
+        let mut font_changed = false;
+        if let Some(id) = &mut font.resolved_bin_data_id {
+            font_changed |= remap_u16_ref(id, &remap.storage);
+        }
+        if let Some(substitute) = font.subst_font.as_mut() {
+            if let Some(id) = &mut substitute.resolved_bin_data_id {
+                font_changed |= remap_u16_ref(id, &remap.storage);
+            }
+        }
+        if font_changed {
+            font.raw_data = None;
+            changed = true;
+        }
+        // bin_item_id_ref is package provenance, not the canonical IR link.
+        // HWPX serialization derives a fresh manifest reference from the
+        // resolved ID and only falls back to this string when unresolved.
+    }
+    if changed {
+        doc_info.raw_stream_dirty = true;
+    }
+    Ok(changed)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum FinalBinDataOrigin {
+    Base(usize),
+    CurrentAppend(usize),
+    IncomingAppend(usize),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FinalBinDataDeclaration {
+    slot: u16,
+    storage_id: u16,
+    origin: FinalBinDataOrigin,
+}
+
+struct BinDataMergePlan {
+    declarations: Vec<FinalBinDataDeclaration>,
+    current_refs: BinDataRefRewrite,
+    incoming_refs: BinDataRefRewrite,
+    current_map: SourceBinDataRefMap,
+    incoming_map: SourceBinDataRefMap,
+    base_map: SourceBinDataRefMap,
+    incoming_chart_ids: BTreeMap<u16, u16>,
+}
+
+fn insert_source_bin_data_mapping(
+    map: &mut SourceBinDataRefMap,
+    source_slot: u16,
+    source_storage_id: u16,
+    target: TargetBinDataRef,
+) -> Result<(), String> {
+    map.by_slot.insert(source_slot, target);
+    if source_storage_id != 0 {
+        if let Some(previous) = map.by_storage_id.insert(source_storage_id, target) {
+            if previous.slot != target.slot {
+                return Err(format!(
+                    "duplicate BinData declaration storage id {source_storage_id}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn allocate_bin_data_storage_id(
+    used: &mut BTreeSet<u16>,
+    reserved: &BTreeSet<u16>,
+) -> Result<u16, String> {
+    let after_max = used
+        .iter()
+        .chain(reserved.iter())
+        .next_back()
+        .copied()
+        .unwrap_or(0)
+        .saturating_add(1);
+    let candidate = (after_max..=u16::MAX)
+        .chain(1..after_max)
+        .find(|candidate| {
+            *candidate != 0 && !used.contains(candidate) && !reserved.contains(candidate)
+        })
+        .ok_or_else(|| "no free nonzero BinData storage id remains".to_string())?;
+    used.insert(candidate);
+    Ok(candidate)
+}
+
+fn source_image_ref_map(
+    source: &Document,
+    target_format: crate::model::provenance::SourceFormat,
+    source_map: &SourceBinDataRefMap,
+) -> BTreeMap<u16, u16> {
+    use crate::model::provenance::SourceFormat;
+    let source_refs = match source.provenance.format {
+        SourceFormat::Hwp5 | SourceFormat::Hwp3 => &source_map.by_slot,
+        SourceFormat::Hwpx | SourceFormat::Hml => &source_map.by_storage_id,
+    };
+    source_refs
+        .iter()
+        .filter_map(|(old, target)| {
+            let new = match target_format {
+                SourceFormat::Hwp5 | SourceFormat::Hwp3 => target.slot,
+                SourceFormat::Hwpx | SourceFormat::Hml => target.storage_id,
+            };
+            (*old != new).then_some((*old, new))
+        })
+        .collect()
+}
+
+fn source_storage_ref_map(source_map: &SourceBinDataRefMap) -> BTreeMap<u16, u16> {
+    source_map
+        .by_storage_id
+        .iter()
+        .filter_map(|(old, target)| {
+            (*old != target.storage_id).then_some((*old, target.storage_id))
+        })
+        .collect()
+}
+
+fn prepare_bin_data_merge(
+    base: &Document,
+    current: &Document,
+    incoming: &Document,
+    target_format: crate::model::provenance::SourceFormat,
+) -> Result<BinDataMergePlan, String> {
+    let base_len = base.doc_info.bin_data_list.len();
+    if current.doc_info.bin_data_list.len() < base_len
+        || incoming.doc_info.bin_data_list.len() < base_len
+    {
+        return Err("BinData declaration deletion cannot be merged positionally".to_string());
+    }
+    let final_len = current
+        .doc_info
+        .bin_data_list
+        .len()
+        .checked_add(incoming.doc_info.bin_data_list.len() - base_len)
+        .ok_or_else(|| "BinData declaration count overflow".to_string())?;
+    if final_len > usize::from(u16::MAX) {
+        return Err(format!(
+            "merged BinData declaration count {final_len} exceeds {}",
+            u16::MAX
+        ));
+    }
+
+    let mut reserved = current
+        .doc_info
+        .bin_data_list
+        .iter()
+        .chain(incoming.doc_info.bin_data_list.iter())
+        .map(|declaration| declaration.storage_id)
+        .chain(current.bin_data_content.iter().map(|content| content.id))
+        .chain(incoming.bin_data_content.iter().map(|content| content.id))
+        .filter(|id| *id != 0)
+        .collect::<BTreeSet<_>>();
+    let mut used = BTreeSet::new();
+    let mut declarations = Vec::with_capacity(final_len);
+    let mut base_map = SourceBinDataRefMap::default();
+    let mut current_map = SourceBinDataRefMap::default();
+    let mut incoming_map = SourceBinDataRefMap::default();
+
+    let mut add_current_declaration = |source_index: usize,
+                                       origin: FinalBinDataOrigin,
+                                       declarations: &mut Vec<FinalBinDataDeclaration>,
+                                       used: &mut BTreeSet<u16>,
+                                       reserved: &mut BTreeSet<u16>,
+                                       base_mapping: Option<(u16, u16)>|
+     -> Result<(), String> {
+        let declaration = &current.doc_info.bin_data_list[source_index];
+        let target_slot = u16::try_from(declarations.len() + 1)
+            .map_err(|_| "BinData target slot overflow".to_string())?;
+        let target_storage_id = if declaration.storage_id == 0 {
+            allocate_bin_data_storage_id(used, reserved)?
+        } else {
+            if declaration.storage_id != 0 && !used.insert(declaration.storage_id) {
+                return Err(format!(
+                    "duplicate current BinData declaration storage id {}",
+                    declaration.storage_id
+                ));
+            }
+            declaration.storage_id
+        };
+        reserved.remove(&target_storage_id);
+        let target = TargetBinDataRef {
+            slot: target_slot,
+            storage_id: target_storage_id,
+        };
+        insert_source_bin_data_mapping(
+            &mut current_map,
+            u16::try_from(source_index + 1).unwrap(),
+            declaration.storage_id,
+            target,
+        )?;
+        if let Some((base_slot, base_storage_id)) = base_mapping {
+            insert_source_bin_data_mapping(&mut base_map, base_slot, base_storage_id, target)?;
+            let incoming_declaration = &incoming.doc_info.bin_data_list[source_index];
+            insert_source_bin_data_mapping(
+                &mut incoming_map,
+                base_slot,
+                incoming_declaration.storage_id,
+                target,
+            )?;
+        }
+        declarations.push(FinalBinDataDeclaration {
+            slot: target_slot,
+            storage_id: target_storage_id,
+            origin,
+        });
+        Ok(())
+    };
+
+    for index in 0..base_len {
+        let slot = u16::try_from(index + 1).unwrap();
+        add_current_declaration(
+            index,
+            FinalBinDataOrigin::Base(index),
+            &mut declarations,
+            &mut used,
+            &mut reserved,
+            Some((slot, base.doc_info.bin_data_list[index].storage_id)),
+        )?;
+    }
+    for index in base_len..current.doc_info.bin_data_list.len() {
+        add_current_declaration(
+            index,
+            FinalBinDataOrigin::CurrentAppend(index),
+            &mut declarations,
+            &mut used,
+            &mut reserved,
+            None,
+        )?;
+    }
+    drop(add_current_declaration);
+
+    for index in base_len..incoming.doc_info.bin_data_list.len() {
+        let declaration = &incoming.doc_info.bin_data_list[index];
+        let target_slot = u16::try_from(declarations.len() + 1)
+            .map_err(|_| "BinData target slot overflow".to_string())?;
+        let target_storage_id =
+            if declaration.storage_id == 0 || used.contains(&declaration.storage_id) {
+                allocate_bin_data_storage_id(&mut used, &reserved)?
+            } else {
+                used.insert(declaration.storage_id);
+                declaration.storage_id
+            };
+        reserved.remove(&target_storage_id);
+        let target = TargetBinDataRef {
+            slot: target_slot,
+            storage_id: target_storage_id,
+        };
+        insert_source_bin_data_mapping(
+            &mut incoming_map,
+            u16::try_from(index + 1).unwrap(),
+            declaration.storage_id,
+            target,
+        )?;
+        declarations.push(FinalBinDataDeclaration {
+            slot: target_slot,
+            storage_id: target_storage_id,
+            origin: FinalBinDataOrigin::IncomingAppend(index),
+        });
+    }
+
+    let mut incoming_chart_ids = BTreeMap::new();
+    let base_chart_ids = base
+        .bin_data_content
+        .iter()
+        .filter(|content| content.extension == "ooxml_chart")
+        .map(|content| content.id)
+        .collect::<BTreeSet<_>>();
+    let mut used_chart_ids = used.clone();
+    used_chart_ids.extend(
+        current
+            .bin_data_content
+            .iter()
+            .chain(incoming.bin_data_content.iter())
+            .filter(|content| content.extension != "ooxml_chart")
+            .map(|content| content.id),
+    );
+    used_chart_ids.extend(
+        current
+            .bin_data_content
+            .iter()
+            .filter(|content| content.extension == "ooxml_chart")
+            .map(|content| content.id),
+    );
+    for content in incoming.bin_data_content.iter().filter(|content| {
+        content.extension == "ooxml_chart" && !base_chart_ids.contains(&content.id)
+    }) {
+        if used_chart_ids.contains(&content.id) {
+            let new = (60001..=u16::MAX)
+                .find(|candidate| !used_chart_ids.contains(candidate))
+                .ok_or_else(|| "no free OOXML chart resource id remains".to_string())?;
+            used_chart_ids.insert(new);
+            incoming_chart_ids.insert(content.id, new);
+        } else {
+            used_chart_ids.insert(content.id);
+        }
+    }
+
+    let current_refs = BinDataRefRewrite {
+        image: source_image_ref_map(current, target_format, &current_map),
+        storage: source_storage_ref_map(&current_map),
+    };
+    let mut incoming_storage = source_storage_ref_map(&incoming_map);
+    incoming_storage.extend(incoming_chart_ids.iter().map(|(old, new)| (*old, *new)));
+    let incoming_refs = BinDataRefRewrite {
+        image: source_image_ref_map(incoming, target_format, &incoming_map),
+        storage: incoming_storage,
+    };
+
+    Ok(BinDataMergePlan {
+        declarations,
+        current_refs,
+        incoming_refs,
+        current_map,
+        incoming_map,
+        base_map,
+        incoming_chart_ids,
+    })
+}
+
+struct RemappedIncoming<'a> {
+    source: &'a Document,
+    doc_info: Option<DocInfo>,
+    sections: Option<Vec<Section>>,
+    bin_data_content: Option<Vec<BinDataContent>>,
+}
+
+impl<'a> RemappedIncoming<'a> {
+    fn new(source: &'a Document) -> Self {
+        Self {
+            source,
+            doc_info: None,
+            sections: None,
+            bin_data_content: None,
+        }
+    }
+
+    fn doc_info(&self) -> &DocInfo {
+        self.doc_info.as_ref().unwrap_or(&self.source.doc_info)
+    }
+
+    fn doc_info_mut(&mut self) -> &mut DocInfo {
+        if self.doc_info.is_none() {
+            self.doc_info = Some(self.source.doc_info.clone());
+        }
+        self.doc_info.as_mut().expect("initialized above")
+    }
+
+    fn sections(&self) -> &[Section] {
+        self.sections.as_deref().unwrap_or(&self.source.sections)
+    }
+
+    fn sections_mut(&mut self) -> &mut Vec<Section> {
+        if self.sections.is_none() {
+            self.sections = Some(self.source.sections.clone());
+        }
+        self.sections.as_mut().expect("initialized above")
+    }
+
+    fn bin_data_content(&self) -> &[BinDataContent] {
+        self.bin_data_content
+            .as_deref()
+            .unwrap_or(&self.source.bin_data_content)
+    }
+
+    fn bin_data_content_mut(&mut self) -> &mut Vec<BinDataContent> {
+        if self.bin_data_content.is_none() {
+            self.bin_data_content = Some(self.source.bin_data_content.clone());
+        }
+        self.bin_data_content.as_mut().expect("initialized above")
+    }
+}
+
+fn apply_bin_data_ref_rewrite(
+    view: &mut RemappedIncoming<'_>,
+    remap: &BinDataRefRewrite,
+) -> Result<(), String> {
+    if doc_info_needs_bin_data_remap(view.doc_info(), remap) {
+        remap_doc_info_bin_data_refs(view.doc_info_mut(), remap)?;
+    }
+    if sections_need_bin_data_remap(view.sections(), remap) {
+        for section in view.sections_mut() {
+            let mut changed = remap_bin_data_refs_in_paragraphs(&mut section.paragraphs, remap);
+            for page in &mut section.section_def.master_pages {
+                changed |= remap_bin_data_refs_in_paragraphs(&mut page.paragraphs, remap);
+            }
+            if changed {
+                // HWP body serialization otherwise emits the stale raw stream.
+                section.raw_stream = None;
+            }
+        }
+    }
+    Ok(())
+}
+
+struct PreparedMergeViews<'c, 'i> {
+    current: RemappedIncoming<'c>,
+    incoming: RemappedIncoming<'i>,
+    bin_data: BinDataMergePlan,
+}
+
+fn merged_append_count(base: usize, current: usize, incoming: usize) -> Result<usize, String> {
+    if current < base || incoming < base {
+        // Non-append edits remain atomic in merge_list. There is no incoming
+        // suffix to shift, so only the chosen branch's cardinality matters.
+        return Ok(current.max(incoming));
+    }
+    current
+        .checked_add(incoming - base)
+        .ok_or_else(|| "merged positional collection count overflow".to_string())
+}
+
+fn checked_shift_u8(value: u8, shift: usize, kind: &str) -> Result<u8, String> {
+    let shift = u8::try_from(shift).map_err(|_| format!("{kind} shift exceeds u8"))?;
+    value
+        .checked_add(shift)
+        .ok_or_else(|| format!("{kind} reference {value} overflows u8 after shift {shift}"))
+}
+
+fn checked_shift_u16(value: u16, shift: usize, kind: &str) -> Result<u16, String> {
+    let shift = u16::try_from(shift).map_err(|_| format!("{kind} shift exceeds u16"))?;
+    value
+        .checked_add(shift)
+        .ok_or_else(|| format!("{kind} reference {value} overflows u16 after shift {shift}"))
+}
+
+fn checked_shift_u32(value: u32, shift: usize, kind: &str) -> Result<u32, String> {
+    let shift = u32::try_from(shift).map_err(|_| format!("{kind} shift exceeds u32"))?;
+    value
+        .checked_add(shift)
+        .ok_or_else(|| format!("{kind} reference {value} overflows u32 after shift {shift}"))
+}
+
+#[derive(Clone, Copy, Default)]
+struct PositionalRefShifts {
+    style: Option<(usize, usize)>,
+    para_shape: Option<(usize, usize)>,
+    char_shape: Option<(usize, usize)>,
+    tab_def: Option<(usize, usize)>,
+    numbering: Option<(usize, usize)>,
+    bullet: Option<(usize, usize)>,
+    border_fill: Option<(usize, usize)>,
+    font_face: [Option<(usize, usize)>; 7],
+}
+
+fn concurrent_append_shift(base: usize, current: usize, incoming: usize) -> Option<(usize, usize)> {
+    (current >= base && incoming >= base && current > base && incoming > base)
+        .then_some((base, current - base))
+}
+
+fn ensure_positional_count(kind: &str, count: usize, max_count: usize) -> Result<(), String> {
+    if count > max_count {
+        return Err(format!(
+            "merged {kind} count {count} exceeds the {max_count} representable IDs"
+        ));
+    }
+    Ok(())
+}
+
+fn zero_based_u16_needs_shift(value: u16, shift: Option<(usize, usize)>) -> bool {
+    shift.is_some_and(|(base, amount)| amount != 0 && value as usize >= base)
+}
+
+fn one_based_u16_needs_shift(value: u16, shift: Option<(usize, usize)>) -> bool {
+    value != 0 && shift.is_some_and(|(base, amount)| amount != 0 && value as usize > base)
+}
+
+fn zero_based_u32_needs_shift(value: u32, shift: Option<(usize, usize)>) -> bool {
+    value != u32::MAX && shift.is_some_and(|(base, amount)| amount != 0 && value as usize >= base)
+}
+
+fn shift_zero_based_u16(
+    value: &mut u16,
+    shift: Option<(usize, usize)>,
+    kind: &str,
+) -> Result<bool, String> {
+    if let Some((base, amount)) = shift {
+        if amount != 0 && *value as usize >= base {
+            *value = checked_shift_u16(*value, amount, kind)?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn shift_one_based_u16(
+    value: &mut u16,
+    shift: Option<(usize, usize)>,
+    kind: &str,
+) -> Result<bool, String> {
+    if *value == 0 {
+        return Ok(false);
+    }
+    if let Some((base, amount)) = shift {
+        if amount != 0 && *value as usize > base {
+            *value = checked_shift_u16(*value, amount, kind)?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn shift_zero_based_u32(
+    value: &mut u32,
+    shift: Option<(usize, usize)>,
+    kind: &str,
+) -> Result<bool, String> {
+    if *value == u32::MAX {
+        return Ok(false);
+    }
+    if let Some((base, amount)) = shift {
+        if amount != 0 && *value as usize >= base {
+            *value = checked_shift_u32(*value, amount, kind)?;
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn remap_raw_decimal_attribute_refs(
+    raw: &str,
+    attribute: &str,
+    shift: Option<(usize, usize)>,
+    kind: &str,
+) -> Result<(String, bool), String> {
+    let Some((base, amount)) = shift.filter(|(_, amount)| *amount != 0) else {
+        return Ok((raw.to_string(), false));
+    };
+    let mut output = String::with_capacity(raw.len());
+    let mut cursor = 0usize;
+    let mut changed = false;
+    while let Some(relative) = raw[cursor..].find(attribute) {
+        let attribute_start = cursor + relative;
+        let mut position = attribute_start + attribute.len();
+        let bytes = raw.as_bytes();
+        while bytes
+            .get(position)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
+            position += 1;
+        }
+        if bytes.get(position) != Some(&b'=') {
+            output.push_str(&raw[cursor..position]);
+            cursor = position;
             continue;
         }
-        used.insert(new);
-        out.bin_data_content[index].id = new;
-        let old_ref = id;
-        let new_ref = new;
-        for section in &mut out.sections {
-            remap_picture_refs_in_paragraphs(&mut section.paragraphs, old_ref, new_ref)
+        position += 1;
+        while bytes
+            .get(position)
+            .is_some_and(|byte| byte.is_ascii_whitespace())
+        {
+            position += 1;
         }
-        if let Some(info) = out.doc_info.bin_data_list.get_mut(index) {
-            info.storage_id = new
+        let Some(quote @ (b'\'' | b'"')) = bytes.get(position).copied() else {
+            output.push_str(&raw[cursor..position]);
+            cursor = position;
+            continue;
+        };
+        let value_start = position + 1;
+        let Some(relative_end) = bytes[value_start..].iter().position(|byte| *byte == quote) else {
+            output.push_str(&raw[cursor..]);
+            return Ok((output, changed));
+        };
+        let value_end = value_start + relative_end;
+        let Ok(value) = raw[value_start..value_end].parse::<u32>() else {
+            output.push_str(&raw[cursor..value_end]);
+            cursor = value_end;
+            continue;
+        };
+        if value != u32::MAX && value as usize >= base {
+            let remapped = checked_shift_u32(value, amount, kind)?;
+            output.push_str(&raw[cursor..value_start]);
+            output.push_str(&remapped.to_string());
+            cursor = value_end;
+            changed = true;
+        } else {
+            output.push_str(&raw[cursor..value_end]);
+            cursor = value_end;
         }
     }
-    let base_styles = b.doc_info.styles.len();
-    if c.doc_info.styles.len() > base_styles && out.doc_info.styles.len() > base_styles {
-        let shift = c.doc_info.styles.len() - base_styles;
-        remap_document_paragraph_refs(&mut out, Some((base_styles, shift)), None, None);
-        for style in &mut out.doc_info.styles[base_styles..] {
-            if style.next_style_id as usize >= base_styles {
-                style.next_style_id = style
-                    .next_style_id
-                    .saturating_add(shift.try_into().unwrap_or(u8::MAX));
+    output.push_str(&raw[cursor..]);
+    Ok((output, changed))
+}
+
+fn section_def_needs_positional_remap(
+    section_def: &SectionDef,
+    shifts: &PositionalRefShifts,
+) -> bool {
+    one_based_u16_needs_shift(section_def.outline_numbering_id, shifts.numbering)
+        || one_based_u16_needs_shift(
+            section_def.page_border_fill.border_fill_id,
+            shifts.border_fill,
+        )
+        || section_def
+            .extra_page_border_fills
+            .iter()
+            .any(|fill| one_based_u16_needs_shift(fill.border_fill_id, shifts.border_fill))
+}
+
+fn paragraph_needs_positional_remap(paragraph: &Paragraph, shifts: &PositionalRefShifts) -> bool {
+    shifts
+        .style
+        .is_some_and(|(base, amount)| amount != 0 && paragraph.style_id as usize >= base)
+        || shifts
+            .para_shape
+            .is_some_and(|(base, amount)| amount != 0 && paragraph.para_shape_id as usize >= base)
+        || paragraph
+            .char_shapes
+            .iter()
+            .any(|shape| zero_based_u32_needs_shift(shape.char_shape_id, shifts.char_shape))
+        || paragraph.controls.iter().any(|control| match control {
+            Control::SectionDef(section_def) => {
+                section_def_needs_positional_remap(section_def, shifts)
             }
+            Control::Table(table) => {
+                one_based_u16_needs_shift(table.border_fill_id, shifts.border_fill)
+                    || table.zones.iter().any(|zone| {
+                        one_based_u16_needs_shift(zone.border_fill_id, shifts.border_fill)
+                    })
+                    || table.cells.iter().any(|cell| {
+                        one_based_u16_needs_shift(cell.border_fill_id, shifts.border_fill)
+                    })
+            }
+            Control::Ruby(ruby) => shifts
+                .style
+                .is_some_and(|(base, amount)| amount != 0 && ruby.style_id_ref as usize >= base),
+            Control::CharOverlap(overlap) => overlap
+                .char_shape_ids
+                .iter()
+                .any(|id| zero_based_u32_needs_shift(*id, shifts.char_shape)),
+            Control::Form(form) => {
+                shifts.char_shape.is_some()
+                    && form.properties.get("CharShapeID").is_some_and(|value| {
+                        value
+                            .parse::<u32>()
+                            .map_or(true, |id| zero_based_u32_needs_shift(id, shifts.char_shape))
+                    })
+            }
+            _ => false,
+        })
+}
+
+fn sections_need_positional_remap(sections: &[Section], shifts: &PositionalRefShifts) -> bool {
+    sections.iter().any(|section| {
+        section_def_needs_positional_remap(&section.section_def, shifts)
+            || any_nested_paragraph(&section.paragraphs, &mut |paragraph| {
+                paragraph_needs_positional_remap(paragraph, shifts)
+            })
+            || section.section_def.master_pages.iter().any(|page| {
+                any_nested_paragraph(&page.paragraphs, &mut |paragraph| {
+                    paragraph_needs_positional_remap(paragraph, shifts)
+                })
+            })
+    })
+}
+
+fn remap_section_def_positional_refs(
+    section_def: &mut SectionDef,
+    shifts: &PositionalRefShifts,
+) -> Result<bool, String> {
+    let mut changed = shift_one_based_u16(
+        &mut section_def.outline_numbering_id,
+        shifts.numbering,
+        "section outline numbering",
+    )?;
+    changed |= shift_one_based_u16(
+        &mut section_def.page_border_fill.border_fill_id,
+        shifts.border_fill,
+        "page border fill",
+    )?;
+    for fill in &mut section_def.extra_page_border_fills {
+        changed |= shift_one_based_u16(
+            &mut fill.border_fill_id,
+            shifts.border_fill,
+            "page border fill",
+        )?;
+    }
+    Ok(changed)
+}
+
+fn remap_paragraph_positional_refs(
+    paragraph: &mut Paragraph,
+    shifts: &PositionalRefShifts,
+) -> Result<bool, String> {
+    let mut changed = false;
+    if let Some((base, amount)) = shifts.style {
+        if amount != 0 && paragraph.style_id as usize >= base {
+            paragraph.style_id = checked_shift_u8(paragraph.style_id, amount, "style")?;
+            changed = true;
         }
     }
-    let base_para = b.doc_info.para_shapes.len();
-    if c.doc_info.para_shapes.len() > base_para && out.doc_info.para_shapes.len() > base_para {
-        let shift = c.doc_info.para_shapes.len() - base_para;
-        remap_document_paragraph_refs(&mut out, None, Some((base_para, shift)), None);
-        for style in &mut out.doc_info.styles {
-            if style.para_shape_id as usize >= base_para {
-                style.para_shape_id = style
-                    .para_shape_id
-                    .saturating_add(shift.try_into().unwrap_or(u16::MAX));
+    changed |= shift_zero_based_u16(
+        &mut paragraph.para_shape_id,
+        shifts.para_shape,
+        "paragraph-shape",
+    )?;
+    for shape in &mut paragraph.char_shapes {
+        changed |= shift_zero_based_u32(
+            &mut shape.char_shape_id,
+            shifts.char_shape,
+            "character-shape",
+        )?;
+    }
+    for control in &mut paragraph.controls {
+        match control {
+            Control::SectionDef(section_def) => {
+                changed |= remap_section_def_positional_refs(section_def, shifts)?;
             }
+            Control::Table(table) => {
+                changed |= shift_one_based_u16(
+                    &mut table.border_fill_id,
+                    shifts.border_fill,
+                    "table border fill",
+                )?;
+                for zone in &mut table.zones {
+                    changed |= shift_one_based_u16(
+                        &mut zone.border_fill_id,
+                        shifts.border_fill,
+                        "table-zone border fill",
+                    )?;
+                }
+                for cell in &mut table.cells {
+                    changed |= shift_one_based_u16(
+                        &mut cell.border_fill_id,
+                        shifts.border_fill,
+                        "table-cell border fill",
+                    )?;
+                }
+            }
+            Control::Ruby(ruby) => {
+                changed |=
+                    shift_zero_based_u16(&mut ruby.style_id_ref, shifts.style, "ruby style")?;
+            }
+            Control::CharOverlap(overlap) => {
+                for id in &mut overlap.char_shape_ids {
+                    changed |=
+                        shift_zero_based_u32(id, shifts.char_shape, "overlap character-shape")?;
+                }
+            }
+            Control::Form(form) => {
+                if let Some(value) = form.properties.get("CharShapeID").cloned() {
+                    let mut id = value
+                        .parse::<u32>()
+                        .map_err(|_| "form CharShapeID is not numeric".to_string())?;
+                    if shift_zero_based_u32(&mut id, shifts.char_shape, "form character-shape")? {
+                        form.properties
+                            .insert("CharShapeID".to_string(), id.to_string());
+                        changed = true;
+                    }
+                }
+            }
+            _ => {}
         }
     }
-    let base_char = b.doc_info.char_shapes.len();
-    if c.doc_info.char_shapes.len() > base_char && out.doc_info.char_shapes.len() > base_char {
-        let shift = c.doc_info.char_shapes.len() - base_char;
-        remap_document_paragraph_refs(&mut out, None, None, Some((base_char, shift)));
-        for style in &mut out.doc_info.styles {
-            if style.char_shape_id as usize >= base_char {
-                style.char_shape_id = style
-                    .char_shape_id
-                    .saturating_add(shift.try_into().unwrap_or(u16::MAX));
+    Ok(changed)
+}
+
+fn remap_sections_positional_refs(
+    sections: &mut [Section],
+    shifts: &PositionalRefShifts,
+) -> Result<(), String> {
+    let mut error = None;
+    for section in sections {
+        let mut changed = remap_section_def_positional_refs(&mut section.section_def, shifts)?;
+        let mut rewrite = |paragraph: &mut Paragraph| {
+            if error.is_some() {
+                return;
             }
+            match remap_paragraph_positional_refs(paragraph, shifts) {
+                Ok(paragraph_changed) => changed |= paragraph_changed,
+                Err(value) => error = Some(value),
+            }
+        };
+        visit_nested_paragraphs_mut(&mut section.paragraphs, &mut rewrite);
+        for page in &mut section.section_def.master_pages {
+            visit_nested_paragraphs_mut(&mut page.paragraphs, &mut rewrite);
         }
-        for numbering in &mut out.doc_info.numberings {
-            for head in &mut numbering.heads {
-                if head.char_shape_id as usize >= base_char {
-                    head.char_shape_id = head
-                        .char_shape_id
-                        .saturating_add(shift.try_into().unwrap_or(u32::MAX));
+        if changed {
+            section.raw_stream = None;
+        }
+        if let Some(value) = error.take() {
+            return Err(value);
+        }
+    }
+    Ok(())
+}
+
+fn doc_info_needs_positional_remap(doc_info: &DocInfo, shifts: &PositionalRefShifts) -> bool {
+    doc_info.char_shapes.iter().any(|shape| {
+        shape
+            .font_ids
+            .iter()
+            .enumerate()
+            .any(|(language, id)| zero_based_u16_needs_shift(*id, shifts.font_face[language]))
+            || one_based_u16_needs_shift(shape.border_fill_id, shifts.border_fill)
+    }) || doc_info.para_shapes.iter().any(|shape| {
+        zero_based_u16_needs_shift(shape.tab_def_id, shifts.tab_def)
+            || match shape.head_type {
+                HeadType::Bullet => one_based_u16_needs_shift(shape.numbering_id, shifts.bullet),
+                HeadType::Number | HeadType::Outline => {
+                    one_based_u16_needs_shift(shape.numbering_id, shifts.numbering)
+                }
+                HeadType::None => false,
+            }
+            || one_based_u16_needs_shift(shape.border_fill_id, shifts.border_fill)
+    }) || doc_info.styles.iter().any(|style| {
+        (style.next_style_id != u8::MAX
+            && shifts
+                .style
+                .is_some_and(|(base, amount)| amount != 0 && style.next_style_id as usize >= base))
+            || zero_based_u16_needs_shift(style.para_shape_id, shifts.para_shape)
+            || zero_based_u16_needs_shift(style.char_shape_id, shifts.char_shape)
+    }) || doc_info.numberings.iter().any(|numbering| {
+        numbering
+            .heads
+            .iter()
+            .any(|head| zero_based_u32_needs_shift(head.char_shape_id, shifts.char_shape))
+    }) || doc_info
+        .bullets
+        .iter()
+        .any(|bullet| zero_based_u32_needs_shift(bullet.char_shape_id, shifts.char_shape))
+}
+
+fn remap_doc_info_positional_refs(
+    doc_info: &mut DocInfo,
+    shifts: &PositionalRefShifts,
+) -> Result<(), String> {
+    let mut changed = false;
+    for shape in &mut doc_info.char_shapes {
+        let mut shape_changed = false;
+        for (language, id) in shape.font_ids.iter_mut().enumerate() {
+            shape_changed |= shift_zero_based_u16(id, shifts.font_face[language], "font-face")?;
+        }
+        shape_changed |= shift_one_based_u16(
+            &mut shape.border_fill_id,
+            shifts.border_fill,
+            "character-shape border fill",
+        )?;
+        if shape_changed {
+            shape.raw_data = None;
+            changed = true;
+        }
+    }
+    for shape in &mut doc_info.para_shapes {
+        let mut shape_changed =
+            shift_zero_based_u16(&mut shape.tab_def_id, shifts.tab_def, "tab-definition")?;
+        shape_changed |= match shape.head_type {
+            HeadType::Bullet => {
+                shift_one_based_u16(&mut shape.numbering_id, shifts.bullet, "bullet")?
+            }
+            HeadType::Number | HeadType::Outline => {
+                shift_one_based_u16(&mut shape.numbering_id, shifts.numbering, "numbering")?
+            }
+            HeadType::None => false,
+        };
+        shape_changed |= shift_one_based_u16(
+            &mut shape.border_fill_id,
+            shifts.border_fill,
+            "paragraph-shape border fill",
+        )?;
+        if shape_changed {
+            shape.raw_data = None;
+            changed = true;
+        }
+    }
+    for style in &mut doc_info.styles {
+        let mut style_changed = false;
+        if style.next_style_id != u8::MAX {
+            if let Some((base, amount)) = shifts.style {
+                if amount != 0 && style.next_style_id as usize >= base {
+                    style.next_style_id =
+                        checked_shift_u8(style.next_style_id, amount, "next-style")?;
+                    style_changed = true;
                 }
             }
         }
-        for bullet in &mut out.doc_info.bullets {
-            if bullet.char_shape_id as usize >= base_char {
-                bullet.char_shape_id = bullet
-                    .char_shape_id
-                    .saturating_add(shift.try_into().unwrap_or(u32::MAX));
-            }
+        style_changed |= shift_zero_based_u16(
+            &mut style.para_shape_id,
+            shifts.para_shape,
+            "paragraph-shape",
+        )?;
+        style_changed |= shift_zero_based_u16(
+            &mut style.char_shape_id,
+            shifts.char_shape,
+            "character-shape",
+        )?;
+        if style_changed {
+            style.raw_data = None;
+            changed = true;
         }
     }
-    let base_numbering = b.doc_info.numberings.len();
-    if c.doc_info.numberings.len() > base_numbering
-        && out.doc_info.numberings.len() > base_numbering
-    {
-        let shift = c.doc_info.numberings.len() - base_numbering;
-        // numbering_id is one-based (zero means no numbering).
-        for para_shape in &mut out.doc_info.para_shapes {
-            if para_shape.numbering_id as usize > base_numbering {
-                para_shape.numbering_id = para_shape
-                    .numbering_id
-                    .saturating_add(shift.try_into().unwrap_or(u16::MAX));
+    for numbering in &mut doc_info.numberings {
+        let mut numbering_changed = false;
+        for head in &mut numbering.heads {
+            numbering_changed |= shift_zero_based_u32(
+                &mut head.char_shape_id,
+                shifts.char_shape,
+                "numbering character-shape",
+            )?;
+        }
+        if numbering_changed {
+            numbering.raw_data = None;
+            if let Some(raw) = numbering.raw_para_heads.take() {
+                let (rewritten, found) = remap_raw_decimal_attribute_refs(
+                    &raw,
+                    "charPrIDRef",
+                    shifts.char_shape,
+                    "numbering character-shape",
+                )?;
+                numbering.raw_para_heads = found.then_some(rewritten);
             }
+            changed = true;
         }
     }
-    out
+    for bullet in &mut doc_info.bullets {
+        if shift_zero_based_u32(
+            &mut bullet.char_shape_id,
+            shifts.char_shape,
+            "bullet character-shape",
+        )? {
+            bullet.raw_data = None;
+            bullet.raw_para_head = if let Some(raw) = bullet.raw_para_head.take() {
+                let (rewritten, found) = remap_raw_decimal_attribute_refs(
+                    &raw,
+                    "charPrIDRef",
+                    shifts.char_shape,
+                    "bullet character-shape",
+                )?;
+                found.then_some(rewritten)
+            } else {
+                None
+            };
+            if bullet.raw_para_head.is_none() && bullet.image_bullet > 0 {
+                bullet.raw_para_head = Some(regenerated_image_bullet_para_head(bullet));
+            }
+            changed = true;
+        }
+    }
+    if changed {
+        doc_info.raw_stream_dirty = true;
+    }
+    Ok(())
 }
-fn resource_from_value(v: &Value, default_id: u16) -> Result<Option<BinDataContent>, String> {
+
+fn prepare_merge_views<'c, 'i>(
+    b: &Document,
+    c: &'c Document,
+    i: &'i Document,
+) -> Result<PreparedMergeViews<'c, 'i>, String> {
+    prepare_merge_views_for_format(b, c, i, c.provenance.format)
+}
+
+fn prepare_merge_views_for_format<'c, 'i>(
+    b: &Document,
+    c: &'c Document,
+    i: &'i Document,
+    target_format: crate::model::provenance::SourceFormat,
+) -> Result<PreparedMergeViews<'c, 'i>, String> {
+    let bin_data = prepare_bin_data_merge(b, c, i, target_format)?;
+    let mut current = RemappedIncoming::new(c);
+    let mut out = RemappedIncoming::new(i);
+    apply_bin_data_ref_rewrite(&mut current, &bin_data.current_refs)?;
+    apply_bin_data_ref_rewrite(&mut out, &bin_data.incoming_refs)?;
+
+    let incoming_doc_info = out.doc_info();
+    let base_styles = b.doc_info.styles.len();
+    let base_para_shapes = b.doc_info.para_shapes.len();
+    let base_char_shapes = b.doc_info.char_shapes.len();
+    let base_tab_defs = b.doc_info.tab_defs.len();
+    let base_numberings = b.doc_info.numberings.len();
+    let base_bullets = b.doc_info.bullets.len();
+    let base_border_fills = b.doc_info.border_fills.len();
+
+    ensure_positional_count(
+        "style",
+        merged_append_count(
+            base_styles,
+            c.doc_info.styles.len(),
+            incoming_doc_info.styles.len(),
+        )?,
+        usize::from(u8::MAX) + 1,
+    )?;
+    ensure_positional_count(
+        "paragraph-shape",
+        merged_append_count(
+            base_para_shapes,
+            c.doc_info.para_shapes.len(),
+            incoming_doc_info.para_shapes.len(),
+        )?,
+        usize::from(u16::MAX) + 1,
+    )?;
+    ensure_positional_count(
+        "character-shape",
+        merged_append_count(
+            base_char_shapes,
+            c.doc_info.char_shapes.len(),
+            incoming_doc_info.char_shapes.len(),
+        )?,
+        usize::from(u16::MAX) + 1,
+    )?;
+    ensure_positional_count(
+        "tab-definition",
+        merged_append_count(
+            base_tab_defs,
+            c.doc_info.tab_defs.len(),
+            incoming_doc_info.tab_defs.len(),
+        )?,
+        usize::from(u16::MAX) + 1,
+    )?;
+    ensure_positional_count(
+        "numbering",
+        merged_append_count(
+            base_numberings,
+            c.doc_info.numberings.len(),
+            incoming_doc_info.numberings.len(),
+        )?,
+        usize::from(u16::MAX),
+    )?;
+    ensure_positional_count(
+        "bullet",
+        merged_append_count(
+            base_bullets,
+            c.doc_info.bullets.len(),
+            incoming_doc_info.bullets.len(),
+        )?,
+        usize::from(u16::MAX),
+    )?;
+    ensure_positional_count(
+        "border-fill",
+        merged_append_count(
+            base_border_fills,
+            c.doc_info.border_fills.len(),
+            incoming_doc_info.border_fills.len(),
+        )?,
+        usize::from(u16::MAX),
+    )?;
+
+    let mut shifts = PositionalRefShifts {
+        style: concurrent_append_shift(
+            base_styles,
+            c.doc_info.styles.len(),
+            incoming_doc_info.styles.len(),
+        ),
+        para_shape: concurrent_append_shift(
+            base_para_shapes,
+            c.doc_info.para_shapes.len(),
+            incoming_doc_info.para_shapes.len(),
+        ),
+        char_shape: concurrent_append_shift(
+            base_char_shapes,
+            c.doc_info.char_shapes.len(),
+            incoming_doc_info.char_shapes.len(),
+        ),
+        tab_def: concurrent_append_shift(
+            base_tab_defs,
+            c.doc_info.tab_defs.len(),
+            incoming_doc_info.tab_defs.len(),
+        ),
+        numbering: concurrent_append_shift(
+            base_numberings,
+            c.doc_info.numberings.len(),
+            incoming_doc_info.numberings.len(),
+        ),
+        bullet: concurrent_append_shift(
+            base_bullets,
+            c.doc_info.bullets.len(),
+            incoming_doc_info.bullets.len(),
+        ),
+        border_fill: concurrent_append_shift(
+            base_border_fills,
+            c.doc_info.border_fills.len(),
+            incoming_doc_info.border_fills.len(),
+        ),
+        ..Default::default()
+    };
+    let font_group_shapes_match = b.doc_info.font_faces.len() == c.doc_info.font_faces.len()
+        && b.doc_info.font_faces.len() == incoming_doc_info.font_faces.len();
+    for language in 0..7 {
+        let base_fonts = b.doc_info.font_faces.get(language).map_or(0, Vec::len);
+        let current_fonts = c.doc_info.font_faces.get(language).map_or(0, Vec::len);
+        let incoming_fonts = incoming_doc_info
+            .font_faces
+            .get(language)
+            .map_or(0, Vec::len);
+        let final_fonts = if font_group_shapes_match {
+            merged_append_count(base_fonts, current_fonts, incoming_fonts)?
+        } else {
+            current_fonts.max(incoming_fonts)
+        };
+        ensure_positional_count(
+            &format!("font-face language {language}"),
+            final_fonts,
+            usize::from(u16::MAX) + 1,
+        )?;
+        if font_group_shapes_match {
+            shifts.font_face[language] =
+                concurrent_append_shift(base_fonts, current_fonts, incoming_fonts);
+        }
+    }
+
+    if doc_info_needs_positional_remap(out.doc_info(), &shifts) {
+        remap_doc_info_positional_refs(out.doc_info_mut(), &shifts)?;
+    }
+    if sections_need_positional_remap(out.sections(), &shifts) {
+        remap_sections_positional_refs(out.sections_mut(), &shifts)?;
+    }
+    Ok(PreparedMergeViews {
+        current,
+        incoming: out,
+        bin_data,
+    })
+}
+fn manual_resource_from_value(
+    v: &Value,
+    default_id: u16,
+) -> Result<Option<BinDataContent>, String> {
+    manual_resource_from_value_with_limit(
+        v,
+        default_id,
+        crate::parser::limits::MAX_UNTRUSTED_INPUT_BYTES,
+    )
+}
+
+fn manual_resource_from_value_with_limit(
+    v: &Value,
+    default_id: u16,
+    max_bytes: usize,
+) -> Result<Option<BinDataContent>, String> {
     if v.is_null() {
         return Ok(None);
     }
@@ -4050,12 +5634,23 @@ fn resource_from_value(v: &Value, default_id: u16) -> Result<Option<BinDataConte
         .get("bytesBase64")
         .and_then(Value::as_str)
         .ok_or("manual image bytesBase64 is required")?;
+    let decoded_len = base64::decoded_len_estimate(encoded.len());
+    if decoded_len > max_bytes {
+        return Err(format!(
+            "manual image exceeds the {max_bytes} byte merge resource limit"
+        ));
+    }
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(encoded)
         .map_err(|e| format!("invalid image bytesBase64: {e}"))?;
+    if bytes.len() > max_bytes {
+        return Err(format!(
+            "manual image exceeds the {max_bytes} byte merge resource limit"
+        ));
+    }
     Ok(Some(BinDataContent {
         id,
-        data: BinDataBytes::Loaded(bytes),
+        data: BinDataBytes::from(bytes),
         extension,
     }))
 }
@@ -4084,24 +5679,29 @@ fn merge_resources(
         .collect::<BTreeSet<_>>();
     let mut out = vec![];
     for id in ids {
-        let (bv, cv, iv) = (
-            resource_value(bm.get(&id).copied()),
-            resource_value(cm.get(&id).copied()),
-            resource_value(im.get(&id).copied()),
+        let (base, current, incoming) = (
+            bm.get(&id).copied(),
+            cm.get(&id).copied(),
+            im.get(&id).copied(),
         );
-        let chosen = if cv == iv {
+        let chosen = if resources_equal(current, incoming) {
             x.auto += 1;
-            cv.clone()
-        } else if cv == bv {
+            current
+        } else if resources_equal(current, base) {
             x.auto += 1;
-            iv.clone()
-        } else if iv == bv {
+            incoming
+        } else if resources_equal(incoming, base) {
             x.auto += 1;
-            cv.clone()
+            current
         } else {
             let p = vec!["bin_data_content".into(), format!("@{id}")];
+            let (bv, cv, iv) = (
+                resource_value(base),
+                resource_value(current),
+                resource_value(incoming),
+            );
             if !x.enter(&p, &bv, &cv, &iv) {
-                cv.clone()
+                current
             } else {
                 let item = conflict(
                     &p,
@@ -4117,24 +5717,260 @@ fn merge_resources(
                     &iv,
                     false,
                 );
-                let value = match r.and_then(|m| m.get(&item.id)) {
-                    None | Some(MergeResolution::Current) => cv.clone(),
-                    Some(MergeResolution::Incoming) => iv.clone(),
-                    Some(MergeResolution::Manual { payload }) => payload.clone(),
+                let selected = match r.and_then(|m| m.get(&item.id)) {
+                    None | Some(MergeResolution::Current) => current,
+                    Some(MergeResolution::Incoming) => incoming,
+                    Some(MergeResolution::Manual { payload }) => {
+                        let manual = manual_resource_from_value(payload, id)?;
+                        x.conflicts.push(item);
+                        if let Some(manual) = manual {
+                            out.push(manual);
+                        }
+                        continue;
+                    }
                     Some(MergeResolution::Both { .. }) => {
                         return Err(format!("{} image bytes are atomic", item.id))
                     }
                 };
                 x.conflicts.push(item);
-                value
+                selected
             }
         };
-        if let Some(value) = resource_from_value(&chosen, id)? {
-            out.push(value)
+        if let Some(value) = chosen {
+            out.push(value.clone())
         }
     }
     Ok(out)
 }
+
+fn declaration_content<'a>(document: &'a Document, index: usize) -> Option<&'a BinDataContent> {
+    use crate::model::bin_data::BinDataType;
+    let declaration = document.doc_info.bin_data_list.get(index)?;
+    let id = if declaration.storage_id != 0 {
+        declaration.storage_id
+    } else if matches!(declaration.data_type, BinDataType::Link) {
+        u16::try_from(index + 1).ok()?
+    } else {
+        return None;
+    };
+    document
+        .bin_data_content
+        .iter()
+        .find(|content| content.extension != "ooxml_chart" && content.id == id)
+}
+
+fn normalized_bin_data_declaration(
+    declaration: &crate::model::bin_data::BinData,
+    storage_id: u16,
+) -> crate::model::bin_data::BinData {
+    let mut normalized = declaration.clone();
+    if normalized.storage_id != storage_id {
+        normalized.storage_id = storage_id;
+        normalized.raw_data = None;
+    }
+    normalized
+}
+
+fn resources_payload_equal(left: Option<&BinDataContent>, right: Option<&BinDataContent>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => {
+            ResourceObservation::new(left).payload_equivalent(&ResourceObservation::new(right))
+        }
+        (None, Some(_)) | (Some(_), None) => false,
+    }
+}
+
+fn choose_bin_data_content(
+    path: Vec<String>,
+    id: u16,
+    base: Option<&BinDataContent>,
+    current: Option<&BinDataContent>,
+    incoming: Option<&BinDataContent>,
+    resolutions: Option<&BTreeMap<String, MergeResolution>>,
+    context: &mut Ctx,
+) -> Result<Option<BinDataContent>, String> {
+    let selected = if resources_payload_equal(current, incoming) {
+        context.auto += 1;
+        current
+    } else if resources_payload_equal(current, base) {
+        context.auto += 1;
+        incoming
+    } else if resources_payload_equal(incoming, base) {
+        context.auto += 1;
+        current
+    } else {
+        let (base_value, current_value, incoming_value) = (
+            resource_value(base),
+            resource_value(current),
+            resource_value(incoming),
+        );
+        if !context.enter(&path, &base_value, &current_value, &incoming_value) {
+            current
+        } else {
+            let item = conflict(
+                &path,
+                if base_value.is_null() {
+                    MergeConflictReason::ConcurrentInsertion
+                } else if current_value.is_null() || incoming_value.is_null() {
+                    MergeConflictReason::DeleteVersusEdit
+                } else {
+                    MergeConflictReason::SameFieldChanged
+                },
+                &base_value,
+                &current_value,
+                &incoming_value,
+                false,
+            );
+            let selected = match resolutions.and_then(|values| values.get(&item.id)) {
+                None | Some(MergeResolution::Current) => current.map(Clone::clone),
+                Some(MergeResolution::Incoming) => incoming.map(Clone::clone),
+                Some(MergeResolution::Manual { payload }) => {
+                    manual_resource_from_value(payload, id)?
+                }
+                Some(MergeResolution::Both { .. }) => {
+                    return Err(format!("{} binary payload is atomic", item.id))
+                }
+            };
+            context.conflicts.push(item);
+            return Ok(selected.map(|mut content| {
+                content.id = id;
+                content
+            }));
+        }
+    };
+    Ok(selected.map(|content| {
+        let mut content = content.clone();
+        content.id = id;
+        content
+    }))
+}
+
+fn merge_bin_data_resources(
+    base: &Document,
+    current: &Document,
+    incoming: &Document,
+    plan: &BinDataMergePlan,
+    resolutions: Option<&BTreeMap<String, MergeResolution>>,
+    context: &mut Ctx,
+) -> Result<(Vec<crate::model::bin_data::BinData>, Vec<BinDataContent>), String> {
+    let mut declarations = Vec::with_capacity(plan.declarations.len());
+    let mut contents = Vec::new();
+    for final_declaration in &plan.declarations {
+        debug_assert_eq!(usize::from(final_declaration.slot), declarations.len() + 1);
+        let (declaration, content) = match final_declaration.origin {
+            FinalBinDataOrigin::Base(index) => {
+                let base_declaration = normalized_bin_data_declaration(
+                    &base.doc_info.bin_data_list[index],
+                    final_declaration.storage_id,
+                );
+                let current_declaration = normalized_bin_data_declaration(
+                    &current.doc_info.bin_data_list[index],
+                    final_declaration.storage_id,
+                );
+                let incoming_declaration = normalized_bin_data_declaration(
+                    &incoming.doc_info.bin_data_list[index],
+                    final_declaration.storage_id,
+                );
+                let declaration = choose(
+                    &["doc_info".into(), "bin_data_list".into(), index.to_string()],
+                    "resource-index",
+                    MergeConflictReason::SameFieldChanged,
+                    &base_declaration,
+                    &current_declaration,
+                    &incoming_declaration,
+                    resolutions,
+                    context,
+                )?;
+                let content = choose_bin_data_content(
+                    vec!["bin_data_content".into(), format!("@slot{}", index + 1)],
+                    final_declaration.storage_id,
+                    declaration_content(base, index),
+                    declaration_content(current, index),
+                    declaration_content(incoming, index),
+                    resolutions,
+                    context,
+                )?;
+                (declaration, content)
+            }
+            FinalBinDataOrigin::CurrentAppend(index) => {
+                context.auto += 1;
+                (
+                    normalized_bin_data_declaration(
+                        &current.doc_info.bin_data_list[index],
+                        final_declaration.storage_id,
+                    ),
+                    declaration_content(current, index).map(|content| {
+                        let mut content = content.clone();
+                        content.id = final_declaration.storage_id;
+                        content
+                    }),
+                )
+            }
+            FinalBinDataOrigin::IncomingAppend(index) => {
+                context.auto += 1;
+                (
+                    normalized_bin_data_declaration(
+                        &incoming.doc_info.bin_data_list[index],
+                        final_declaration.storage_id,
+                    ),
+                    declaration_content(incoming, index).map(|content| {
+                        let mut content = content.clone();
+                        content.id = final_declaration.storage_id;
+                        content
+                    }),
+                )
+            }
+        };
+        declarations.push(declaration);
+        if let Some(content) = content {
+            contents.push(content);
+        }
+    }
+
+    fn chart_map<'a>(
+        document: &'a Document,
+        remap: Option<&BTreeMap<u16, u16>>,
+    ) -> BTreeMap<u16, &'a BinDataContent> {
+        document
+            .bin_data_content
+            .iter()
+            .filter(|content| content.extension == "ooxml_chart")
+            .map(|content| {
+                let id = remap
+                    .and_then(|values| values.get(&content.id).copied())
+                    .unwrap_or(content.id);
+                (id, content)
+            })
+            .collect::<BTreeMap<_, _>>()
+    }
+    let (base_charts, current_charts, incoming_charts) = (
+        chart_map(base, None),
+        chart_map(current, None),
+        chart_map(incoming, Some(&plan.incoming_chart_ids)),
+    );
+    let chart_ids = base_charts
+        .keys()
+        .chain(current_charts.keys())
+        .chain(incoming_charts.keys())
+        .copied()
+        .collect::<BTreeSet<_>>();
+    for id in chart_ids {
+        if let Some(content) = choose_bin_data_content(
+            vec!["bin_data_content".into(), format!("@chart{id}")],
+            id,
+            base_charts.get(&id).copied(),
+            current_charts.get(&id).copied(),
+            incoming_charts.get(&id).copied(),
+            resolutions,
+            context,
+        )? {
+            contents.push(content);
+        }
+    }
+    Ok((declarations, contents))
+}
+
 fn debug_prefix<T: Debug>(values: &[T], prefix: &[T]) -> bool {
     values.len() >= prefix.len() && values.iter().zip(prefix).all(|(a, b)| dh(a) == dh(b))
 }
@@ -4200,15 +6036,9 @@ fn merge_doc_info(
     r: Option<&BTreeMap<String, MergeResolution>>,
     x: &mut Ctx,
 ) -> Result<DocInfo, String> {
-    let mut out = c.clone();
-    macro_rules! list {
-        ($name:ident,$kind:literal) => {
-            out.$name = merge_list(stringify!($name), $kind, &b.$name, &c.$name, &i.$name, r, x)?;
-        };
-    }
     macro_rules! t {
         ($name:ident,$kind:literal) => {
-            out.$name = choose_typed(
+            choose_typed(
                 &["doc_info".into(), stringify!($name).into()],
                 $kind,
                 &b.$name,
@@ -4216,28 +6046,39 @@ fn merge_doc_info(
                 &i.$name,
                 r,
                 x,
-            )?;
+            )?
         };
     }
-    list!(bin_data_list, "resource-index");
-    out.font_faces = merge_font_faces(&b.font_faces, &c.font_faces, &i.font_faces, r, x)?;
-    out.border_fills = merge_border_fills(&b.border_fills, &c.border_fills, &i.border_fills, r, x)?;
-    out.char_shapes = merge_character_styles(&b.char_shapes, &c.char_shapes, &i.char_shapes, r, x)?;
-    out.tab_defs = merge_tab_defs(&b.tab_defs, &c.tab_defs, &i.tab_defs, r, x)?;
-    out.numberings = merge_numberings(&b.numberings, &c.numberings, &i.numberings, r, x)?;
-    out.bullets = merge_bullets(&b.bullets, &c.bullets, &i.bullets, r, x)?;
-    out.para_shapes = merge_para_styles(&b.para_shapes, &c.para_shapes, &i.para_shapes, r, x)?;
-    out.styles = merge_styles(&b.styles, &c.styles, &i.styles, r, x)?;
-    list!(extra_records, "opaque-resources");
-    out.raw_stream = None;
-    t!(bullet_count, "resource-count");
-    t!(memo_shape_count, "resource-count");
-    t!(memo_properties_xml, "memo-properties");
-    t!(distribute_doc_data_removed, "document-property");
-    out.raw_stream_dirty = true;
-    t!(hwpx_head_tail, "document-property");
-    t!(hwpml_version, "document-property");
-    Ok(out)
+    Ok(DocInfo {
+        // BinData declarations and payloads are merged together by
+        // merge_bin_data_resources so slot identity cannot drift from bytes.
+        bin_data_list: Vec::new(),
+        font_faces: merge_font_faces(&b.font_faces, &c.font_faces, &i.font_faces, r, x)?,
+        border_fills: merge_border_fills(&b.border_fills, &c.border_fills, &i.border_fills, r, x)?,
+        char_shapes: merge_character_styles(&b.char_shapes, &c.char_shapes, &i.char_shapes, r, x)?,
+        tab_defs: merge_tab_defs(&b.tab_defs, &c.tab_defs, &i.tab_defs, r, x)?,
+        numberings: merge_numberings(&b.numberings, &c.numberings, &i.numberings, r, x)?,
+        bullets: merge_bullets(&b.bullets, &c.bullets, &i.bullets, r, x)?,
+        para_shapes: merge_para_styles(&b.para_shapes, &c.para_shapes, &i.para_shapes, r, x)?,
+        styles: merge_styles(&b.styles, &c.styles, &i.styles, r, x)?,
+        extra_records: merge_list(
+            "extra_records",
+            "opaque-resources",
+            &b.extra_records,
+            &c.extra_records,
+            &i.extra_records,
+            r,
+            x,
+        )?,
+        raw_stream: None,
+        bullet_count: t!(bullet_count, "resource-count"),
+        memo_shape_count: t!(memo_shape_count, "resource-count"),
+        memo_properties_xml: t!(memo_properties_xml, "memo-properties"),
+        distribute_doc_data_removed: t!(distribute_doc_data_removed, "document-property"),
+        raw_stream_dirty: true,
+        hwpx_head_tail: t!(hwpx_head_tail, "document-property"),
+        hwpml_version: t!(hwpml_version, "document-property"),
+    })
 }
 fn merge_styles(
     b: &[Style],
@@ -4822,68 +6663,112 @@ fn merge_doc(
     i: &Document,
     r: Option<&BTreeMap<String, MergeResolution>>,
 ) -> Result<(Document, MergeAnalysis), String> {
-    let incoming = remap_incoming_resource_collisions(b, c, i);
-    let i = &incoming;
+    merge_doc_for_format(b, c, i, r, c.provenance.format)
+}
+
+fn merge_doc_for_format(
+    b: &Document,
+    c: &Document,
+    i: &Document,
+    r: Option<&BTreeMap<String, MergeResolution>>,
+    target_format: crate::model::provenance::SourceFormat,
+) -> Result<(Document, MergeAnalysis), String> {
+    let prepared = prepare_merge_views_for_format(b, c, i, target_format)?;
+    let current = &prepared.current;
+    let incoming = &prepared.incoming;
     let mut x = Ctx::new(MergeOptions::default());
-    let mut d = c.clone();
     macro_rules! f {
         ($n:ident,$k:literal,$why:expr) => {
-            d.$n = choose(
+            choose(
                 &[stringify!($n).into()],
                 $k,
                 $why,
                 &b.$n,
-                &c.$n,
-                &i.$n,
+                &current.source.$n,
+                &incoming.source.$n,
                 r,
                 &mut x,
-            )?;
+            )?
         };
     }
-    f!(header, "file-header", MergeConflictReason::SameFieldChanged);
-    d.doc_properties = merge_doc_properties(
+    let header = f!(header, "file-header", MergeConflictReason::SameFieldChanged);
+    let mut doc_properties = merge_doc_properties(
         &b.doc_properties,
-        &c.doc_properties,
-        &i.doc_properties,
+        &current.source.doc_properties,
+        &incoming.source.doc_properties,
         r,
         &mut x,
     )?;
-    d.doc_info = merge_doc_info(&b.doc_info, &c.doc_info, &i.doc_info, r, &mut x)?;
-    f!(preview, "preview", MergeConflictReason::SameFieldChanged);
-    d.bin_data_content = merge_resources(
-        &b.bin_data_content,
-        &c.bin_data_content,
-        &i.bin_data_content,
+    let mut doc_info = merge_doc_info(
+        &b.doc_info,
+        current.doc_info(),
+        incoming.doc_info(),
         r,
         &mut x,
     )?;
-    f!(
-        extra_streams,
+    let preview = f!(preview, "preview", MergeConflictReason::SameFieldChanged);
+    let (bin_data_list, bin_data_content) =
+        merge_bin_data_resources(b, c, i, &prepared.bin_data, r, &mut x)?;
+    doc_info.bin_data_list = bin_data_list;
+    let extra_streams = choose_opaque_streams(
+        &["extra_streams".into()],
         "opaque-streams",
-        MergeConflictReason::UnknownControlModified
-    );
-    f!(
-        hwpx_aux_entries,
+        &b.extra_streams,
+        &c.extra_streams,
+        &incoming.source.extra_streams,
+        r,
+        &mut x,
+    )?;
+    let hwpx_aux_entries = choose_opaque_streams(
+        &["hwpx_aux_entries".into()],
         "opaque-hwpx-resources",
-        MergeConflictReason::UnknownControlModified
-    );
-    f!(
+        &b.hwpx_aux_entries,
+        &c.hwpx_aux_entries,
+        &incoming.source.hwpx_aux_entries,
+        r,
+        &mut x,
+    )?;
+    let is_hwp3_variant = f!(
         is_hwp3_variant,
         "source-property",
         MergeConflictReason::SameFieldChanged
     );
-    f!(
+    let is_hwpx_variant = f!(
         is_hwpx_variant,
         "source-property",
         MergeConflictReason::SameFieldChanged
     );
-    f!(
+    let mut provenance = f!(
         provenance,
         "source-property",
         MergeConflictReason::SameFieldChanged
     );
-    d.sections = merge_sections(&b.sections, &c.sections, &i.sections, r, &mut x)?;
-    d.doc_properties.section_count = d.sections.len().try_into().unwrap_or(u16::MAX);
+    // Materialization always preserves the current container format. Keep the
+    // model's reference semantics aligned with that serializer target even
+    // when the incoming document came from another format.
+    provenance.format = target_format;
+    let sections = merge_sections(
+        &b.sections,
+        current.sections(),
+        incoming.sections(),
+        r,
+        &mut x,
+    )?;
+    doc_properties.section_count = u16::try_from(sections.len())
+        .map_err(|_| "merged section count exceeds u16".to_string())?;
+    let d = Document {
+        header,
+        doc_properties,
+        doc_info,
+        sections,
+        preview,
+        bin_data_content,
+        extra_streams,
+        hwpx_aux_entries,
+        is_hwp3_variant,
+        is_hwpx_variant,
+        provenance,
+    };
     x.conflicts
         .sort_by(|a, b| a.path.cmp(&b.path).then(a.id.cmp(&b.id)));
     let a = MergeAnalysis {
@@ -4919,23 +6804,176 @@ fn counts(d: &Document) -> (usize, usize, usize, usize) {
     )
 }
 fn validate_resource_dependencies(d: &Document) -> Result<(), String> {
-    let mut ids = BTreeSet::new();
+    use crate::model::bin_data::BinDataType;
+    use crate::model::provenance::SourceFormat;
+
+    ensure_positional_count("style", d.doc_info.styles.len(), usize::from(u8::MAX) + 1)?;
+    ensure_positional_count(
+        "paragraph-shape",
+        d.doc_info.para_shapes.len(),
+        usize::from(u16::MAX) + 1,
+    )?;
+    ensure_positional_count(
+        "character-shape",
+        d.doc_info.char_shapes.len(),
+        usize::from(u16::MAX) + 1,
+    )?;
+    ensure_positional_count(
+        "tab-definition",
+        d.doc_info.tab_defs.len(),
+        usize::from(u16::MAX) + 1,
+    )?;
+    ensure_positional_count(
+        "numbering",
+        d.doc_info.numberings.len(),
+        usize::from(u16::MAX),
+    )?;
+    ensure_positional_count("bullet", d.doc_info.bullets.len(), usize::from(u16::MAX))?;
+    ensure_positional_count(
+        "border-fill",
+        d.doc_info.border_fills.len(),
+        usize::from(u16::MAX),
+    )?;
+    for (language, fonts) in d.doc_info.font_faces.iter().enumerate() {
+        ensure_positional_count(
+            &format!("font-face language {language}"),
+            fonts.len(),
+            usize::from(u16::MAX) + 1,
+        )?;
+    }
+
+    let mut content_ids = BTreeSet::new();
+    let mut declared_content_ids = BTreeSet::new();
+    let mut chart_ids = BTreeSet::new();
     for content in &d.bin_data_content {
-        if content.id == 0 || !ids.insert(content.id) {
+        if content.id == 0 || !content_ids.insert(content.id) {
             return Err(format!(
                 "invalid or duplicate BinData content id {}",
                 content.id
             ));
         }
+        if content.extension == "ooxml_chart" {
+            if content.id <= 60000 {
+                return Err(format!(
+                    "OOXML chart content id {} is outside the chart resource domain",
+                    content.id
+                ));
+            }
+            chart_ids.insert(content.id);
+        } else {
+            declared_content_ids.insert(content.id);
+        }
     }
-    // Link declarations may intentionally have no embedded byte stream.
-    let declared = d
-        .doc_info
-        .bin_data_list
+    let target_hwpx = matches!(d.provenance.format, SourceFormat::Hwpx | SourceFormat::Hml);
+    let mut storage_ids = BTreeSet::new();
+    for (slot, declaration) in d.doc_info.bin_data_list.iter().enumerate() {
+        if declaration.storage_id == 0 {
+            if target_hwpx || !matches!(declaration.data_type, BinDataType::Link) {
+                return Err(format!(
+                    "BinData declaration {} has invalid zero storage id",
+                    slot + 1
+                ));
+            }
+            continue;
+        }
+        if !storage_ids.insert(declaration.storage_id) {
+            return Err(format!(
+                "duplicate BinData declaration storage id {}",
+                declaration.storage_id
+            ));
+        }
+        if matches!(
+            declaration.data_type,
+            BinDataType::Embedding | BinDataType::Storage
+        ) && !declared_content_ids.contains(&declaration.storage_id)
+        {
+            return Err(format!(
+                "BinData declaration {} references missing content id {}",
+                slot + 1,
+                declaration.storage_id
+            ));
+        }
+    }
+    for content in d
+        .bin_data_content
         .iter()
-        .map(|v| v.storage_id)
-        .filter(|id| *id != 0)
-        .collect::<BTreeSet<_>>();
+        .filter(|content| content.extension != "ooxml_chart")
+    {
+        if !storage_ids.contains(&content.id) {
+            return Err(format!(
+                "BinData content id {} has no matching declaration",
+                content.id
+            ));
+        }
+    }
+    let image_refs = if target_hwpx {
+        storage_ids.clone()
+    } else {
+        d.doc_info
+            .bin_data_list
+            .iter()
+            .enumerate()
+            .filter_map(|(index, _)| u16::try_from(index + 1).ok())
+            .collect::<BTreeSet<_>>()
+    };
+    fn require_ref(kind: &str, id: u16, valid: &BTreeSet<u16>) -> Result<(), String> {
+        if id == 0 || !valid.contains(&id) {
+            return Err(format!("{kind} references missing BinData id {id}"));
+        }
+        Ok(())
+    }
+    fn image_fill(
+        fill: &crate::model::style::Fill,
+        kind: &str,
+        image_refs: &BTreeSet<u16>,
+    ) -> Result<(), String> {
+        if let Some(image) = &fill.image {
+            if image.bin_data_id != 0 {
+                require_ref(kind, image.bin_data_id, image_refs)?;
+            }
+        }
+        Ok(())
+    }
+    for (index, border_fill) in d.doc_info.border_fills.iter().enumerate() {
+        image_fill(
+            &border_fill.fill,
+            &format!("border fill {index} image"),
+            &image_refs,
+        )?;
+    }
+    for (language, fonts) in d.doc_info.font_faces.iter().enumerate() {
+        for (index, font) in fonts.iter().enumerate() {
+            if let Some(id) = font.resolved_bin_data_id {
+                require_ref(
+                    &format!("font {index} in language {language}"),
+                    id,
+                    &storage_ids,
+                )?;
+            } else if font.is_embedded && !font.bin_item_id_ref.is_empty() {
+                return Err(format!(
+                    "embedded font {index} in language {language} has unresolved binaryItemIDRef `{}`",
+                    font.bin_item_id_ref
+                ));
+            }
+            if let Some(id) = font
+                .subst_font
+                .as_ref()
+                .and_then(|substitute| substitute.resolved_bin_data_id)
+            {
+                require_ref(
+                    &format!("substitute font {index} in language {language}"),
+                    id,
+                    &storage_ids,
+                )?;
+            } else if font.subst_font.as_ref().is_some_and(|substitute| {
+                substitute.is_embedded && !substitute.bin_item_id_ref.is_empty()
+            }) {
+                return Err(format!(
+                    "embedded substitute font {index} in language {language} has unresolved binaryItemIDRef"
+                ));
+            }
+        }
+    }
     for (n, style) in d.doc_info.styles.iter().enumerate() {
         if style.next_style_id != u8::MAX
             && !d.doc_info.styles.is_empty()
@@ -4965,12 +7003,12 @@ fn validate_resource_dependencies(d: &Document) -> Result<(), String> {
     }
     for (n, shape) in d.doc_info.char_shapes.iter().enumerate() {
         for (lang, font) in shape.font_ids.iter().enumerate() {
-            if let Some(group) = d.doc_info.font_faces.get(lang) {
-                if !group.is_empty() && *font as usize >= group.len() {
-                    return Err(format!(
-                        "character style {n} references missing font {font} in language {lang}"
-                    ));
-                }
+            let font_count = d.doc_info.font_faces.get(lang).map_or(0, Vec::len);
+            if (font_count == 0 && *font != 0) || (font_count != 0 && *font as usize >= font_count)
+            {
+                return Err(format!(
+                    "character style {n} references missing font {font} in language {lang}"
+                ));
             }
         }
         if shape.border_fill_id != 0
@@ -4983,19 +7021,29 @@ fn validate_resource_dependencies(d: &Document) -> Result<(), String> {
         }
     }
     for (n, shape) in d.doc_info.para_shapes.iter().enumerate() {
-        if !d.doc_info.tab_defs.is_empty() && shape.tab_def_id as usize >= d.doc_info.tab_defs.len()
+        if (d.doc_info.tab_defs.is_empty() && shape.tab_def_id != 0)
+            || (!d.doc_info.tab_defs.is_empty()
+                && shape.tab_def_id as usize >= d.doc_info.tab_defs.len())
         {
             return Err(format!(
                 "paragraph style {n} references missing tab definition {}",
                 shape.tab_def_id
             ));
         }
-        let numbering_count = d.doc_info.numberings.len().max(d.doc_info.bullets.len());
-        if shape.numbering_id != 0 && shape.numbering_id as usize > numbering_count {
-            return Err(format!(
-                "paragraph style {n} references missing numbering/bullet {}",
-                shape.numbering_id
-            ));
+        let referenced_count = match shape.head_type {
+            HeadType::Bullet => Some(("bullet", d.doc_info.bullets.len())),
+            HeadType::Number | HeadType::Outline => {
+                Some(("numbering", d.doc_info.numberings.len()))
+            }
+            HeadType::None => None,
+        };
+        if let Some((kind, count)) = referenced_count {
+            if shape.numbering_id != 0 && shape.numbering_id as usize > count {
+                return Err(format!(
+                    "paragraph style {n} references missing {kind} {}",
+                    shape.numbering_id
+                ));
+            }
         }
         if shape.border_fill_id != 0
             && shape.border_fill_id as usize > d.doc_info.border_fills.len()
@@ -5020,6 +7068,27 @@ fn validate_resource_dependencies(d: &Document) -> Result<(), String> {
         }
     }
     for (n, bullet) in d.doc_info.bullets.iter().enumerate() {
+        if bullet.image_bullet != 0 {
+            let id = u16::try_from(bullet.image_bullet).map_err(|_| {
+                format!(
+                    "image bullet {n} has invalid BinData id {}",
+                    bullet.image_bullet
+                )
+            })?;
+            require_ref(&format!("image bullet {n}"), id, &image_refs)?;
+            if target_hwpx {
+                let raw = bullet.raw_para_head.as_deref().ok_or_else(|| {
+                    format!("image bullet {n} has no serialized hh:img reference")
+                })?;
+                let identity = BTreeMap::from([(id, id)]);
+                let (_, found) = remap_raw_binary_item_refs(raw, &identity)?;
+                if !found {
+                    return Err(format!(
+                        "image bullet {n} raw binaryItemIDRef does not match typed id {id}"
+                    ));
+                }
+            }
+        }
         if bullet.char_shape_id != u32::MAX
             && !d.doc_info.char_shapes.is_empty()
             && bullet.char_shape_id as usize >= d.doc_info.char_shapes.len()
@@ -5030,202 +7099,289 @@ fn validate_resource_dependencies(d: &Document) -> Result<(), String> {
             ));
         }
     }
-    fn picture(p: &Picture, ids: &BTreeSet<u16>, declared: &BTreeSet<u16>) -> Result<(), String> {
+    fn picture(p: &Picture, image_refs: &BTreeSet<u16>) -> Result<(), String> {
         let id = p.image_attr.bin_data_id;
-        if id != 0
-            && p.image_attr.external_path.is_none()
-            && !ids.contains(&id)
-            && !declared.contains(&id)
-        {
-            return Err(format!("picture references missing BinData id {id}"));
+        if id != 0 {
+            require_ref("picture", id, image_refs)?;
         }
         Ok(())
     }
     fn drawing(
         d: &DrawingObjAttr,
-        ids: &BTreeSet<u16>,
-        declared: &BTreeSet<u16>,
+        image_refs: &BTreeSet<u16>,
+        storage_ids: &BTreeSet<u16>,
+        chart_ids: &BTreeSet<u16>,
     ) -> Result<(), String> {
+        image_fill(&d.fill, "shape fill image", image_refs)?;
         if let Some(tb) = &d.text_box {
-            paras(&tb.paragraphs, ids, declared)?;
+            paras(&tb.paragraphs, image_refs, storage_ids, chart_ids)?;
         }
         if let Some(c) = &d.caption {
-            paras(&c.paragraphs, ids, declared)?;
+            paras(&c.paragraphs, image_refs, storage_ids, chart_ids)?;
         }
         Ok(())
     }
-    fn shape(s: &ShapeObject, ids: &BTreeSet<u16>, declared: &BTreeSet<u16>) -> Result<(), String> {
+    fn shape(
+        s: &ShapeObject,
+        image_refs: &BTreeSet<u16>,
+        storage_ids: &BTreeSet<u16>,
+        chart_ids: &BTreeSet<u16>,
+    ) -> Result<(), String> {
+        if let Some(drawing_attr) = s.drawing() {
+            drawing(drawing_attr, image_refs, storage_ids, chart_ids)?;
+        }
         match s {
-            ShapeObject::Picture(p) => picture(p, ids, declared)?,
+            ShapeObject::Picture(p) => {
+                picture(p, image_refs)?;
+                if let Some(c) = &p.caption {
+                    paras(&c.paragraphs, image_refs, storage_ids, chart_ids)?;
+                }
+            }
             ShapeObject::Group(g) => {
                 if let Some(c) = &g.caption {
-                    paras(&c.paragraphs, ids, declared)?;
+                    paras(&c.paragraphs, image_refs, storage_ids, chart_ids)?;
                 }
                 for child in &g.children {
-                    shape(child, ids, declared)?;
+                    shape(child, image_refs, storage_ids, chart_ids)?;
                 }
             }
             ShapeObject::Ole(o) => {
-                if o.bin_data_id != 0
-                    && !ids.contains(&(o.bin_data_id as u16))
-                    && !declared.contains(&(o.bin_data_id as u16))
-                {
-                    return Err(format!(
-                        "OLE references missing BinData id {}",
-                        o.bin_data_id
-                    ));
+                if o.bin_data_id != 0 {
+                    let id = u16::try_from(o.bin_data_id)
+                        .map_err(|_| format!("OLE has invalid BinData id {}", o.bin_data_id))?;
+                    if !chart_ids.contains(&id) {
+                        require_ref("OLE", id, storage_ids)?;
+                    }
                 }
-                drawing(&o.drawing, ids, declared)?;
                 if let Some(c) = &o.caption {
-                    paras(&c.paragraphs, ids, declared)?;
+                    paras(&c.paragraphs, image_refs, storage_ids, chart_ids)?;
                 }
             }
-            _ => {
-                if let Some(d) = s.drawing() {
-                    drawing(d, ids, declared)?;
+            ShapeObject::Chart(chart) => {
+                if let Some(c) = &chart.caption {
+                    paras(&c.paragraphs, image_refs, storage_ids, chart_ids)?;
                 }
             }
+            ShapeObject::Line(_)
+            | ShapeObject::Rectangle(_)
+            | ShapeObject::Ellipse(_)
+            | ShapeObject::Arc(_)
+            | ShapeObject::Polygon(_)
+            | ShapeObject::Curve(_) => {}
         }
         Ok(())
     }
     fn paras(
         ps: &[Paragraph],
-        ids: &BTreeSet<u16>,
-        declared: &BTreeSet<u16>,
+        image_refs: &BTreeSet<u16>,
+        storage_ids: &BTreeSet<u16>,
+        chart_ids: &BTreeSet<u16>,
     ) -> Result<(), String> {
         for p in ps {
             for ctrl in &p.controls {
                 match ctrl {
-                    Control::Picture(v) => picture(v, ids, declared)?,
-                    Control::Shape(v) => shape(v, ids, declared)?,
-                    Control::Table(v) => {
-                        for cell in &v.cells {
-                            paras(&cell.paragraphs, ids, declared)?;
-                        }
-                        if let Some(c) = &v.caption {
-                            paras(&c.paragraphs, ids, declared)?
+                    Control::SectionDef(section_def) => {
+                        for page in &section_def.master_pages {
+                            paras(&page.paragraphs, image_refs, storage_ids, chart_ids)?;
                         }
                     }
-                    Control::Header(v) => paras(&v.paragraphs, ids, declared)?,
-                    Control::Footer(v) => paras(&v.paragraphs, ids, declared)?,
-                    Control::Footnote(v) => paras(&v.paragraphs, ids, declared)?,
-                    Control::Endnote(v) => paras(&v.paragraphs, ids, declared)?,
-                    Control::HiddenComment(v) => paras(&v.paragraphs, ids, declared)?,
-                    Control::Field(v) => paras(&v.memo_paragraphs, ids, declared)?,
+                    Control::Picture(v) => {
+                        picture(v, image_refs)?;
+                        if let Some(c) = &v.caption {
+                            paras(&c.paragraphs, image_refs, storage_ids, chart_ids)?;
+                        }
+                    }
+                    Control::Shape(v) => shape(v, image_refs, storage_ids, chart_ids)?,
+                    Control::Table(v) => {
+                        for cell in &v.cells {
+                            paras(&cell.paragraphs, image_refs, storage_ids, chart_ids)?;
+                        }
+                        if let Some(c) = &v.caption {
+                            paras(&c.paragraphs, image_refs, storage_ids, chart_ids)?
+                        }
+                    }
+                    Control::Header(v) => paras(&v.paragraphs, image_refs, storage_ids, chart_ids)?,
+                    Control::Footer(v) => paras(&v.paragraphs, image_refs, storage_ids, chart_ids)?,
+                    Control::Footnote(v) => {
+                        paras(&v.paragraphs, image_refs, storage_ids, chart_ids)?
+                    }
+                    Control::Endnote(v) => {
+                        paras(&v.paragraphs, image_refs, storage_ids, chart_ids)?
+                    }
+                    Control::HiddenComment(v) => {
+                        paras(&v.paragraphs, image_refs, storage_ids, chart_ids)?
+                    }
+                    Control::Field(v) => {
+                        paras(&v.memo_paragraphs, image_refs, storage_ids, chart_ids)?
+                    }
                     _ => {}
                 }
             }
         }
         Ok(())
     }
-    fn paragraph_refs(
-        ps: &[Paragraph],
+    #[derive(Clone, Copy)]
+    struct PositionalCounts {
         styles: usize,
         para_shapes: usize,
         char_shapes: usize,
-    ) -> Result<(), String> {
-        fn drawing_refs(
-            d: &DrawingObjAttr,
-            styles: usize,
-            para_shapes: usize,
-            char_shapes: usize,
-        ) -> Result<(), String> {
-            if let Some(tb) = &d.text_box {
-                paragraph_refs(&tb.paragraphs, styles, para_shapes, char_shapes)?
-            }
-            if let Some(c) = &d.caption {
-                paragraph_refs(&c.paragraphs, styles, para_shapes, char_shapes)?
-            }
-            Ok(())
+        border_fills: usize,
+        numberings: usize,
+    }
+    fn zero_based_ref(kind: &str, id: u64, count: usize) -> Result<(), String> {
+        if (count == 0 && id != 0) || (count != 0 && id >= count as u64) {
+            return Err(format!("{kind} references missing positional id {id}"));
         }
-        fn shape_refs(
-            s: &ShapeObject,
-            styles: usize,
-            para_shapes: usize,
-            char_shapes: usize,
-        ) -> Result<(), String> {
-            if let Some(d) = s.drawing() {
-                drawing_refs(d, styles, para_shapes, char_shapes)?
-            }
-            match s {
-                ShapeObject::Group(v) => {
-                    if let Some(c) = &v.caption {
-                        paragraph_refs(&c.paragraphs, styles, para_shapes, char_shapes)?
-                    }
-                    for child in &v.children {
-                        shape_refs(child, styles, para_shapes, char_shapes)?
-                    }
-                }
-                ShapeObject::Picture(v) => {
-                    if let Some(c) = &v.caption {
-                        paragraph_refs(&c.paragraphs, styles, para_shapes, char_shapes)?
-                    }
-                }
-                ShapeObject::Chart(v) => {
-                    if let Some(c) = &v.caption {
-                        paragraph_refs(&c.paragraphs, styles, para_shapes, char_shapes)?
-                    }
-                }
-                ShapeObject::Ole(v) => {
-                    if let Some(c) = &v.caption {
-                        paragraph_refs(&c.paragraphs, styles, para_shapes, char_shapes)?
-                    }
-                }
-                _ => {}
-            }
-            Ok(())
+        Ok(())
+    }
+    fn one_based_ref(kind: &str, id: u16, count: usize) -> Result<(), String> {
+        if id != 0 && id as usize > count {
+            return Err(format!("{kind} references missing positional id {id}"));
         }
+        Ok(())
+    }
+    fn section_def_refs(section_def: &SectionDef, counts: PositionalCounts) -> Result<(), String> {
+        one_based_ref(
+            "section outline numbering",
+            section_def.outline_numbering_id,
+            counts.numberings,
+        )?;
+        one_based_ref(
+            "page border fill",
+            section_def.page_border_fill.border_fill_id,
+            counts.border_fills,
+        )?;
+        for fill in &section_def.extra_page_border_fills {
+            one_based_ref(
+                "extra page border fill",
+                fill.border_fill_id,
+                counts.border_fills,
+            )?;
+        }
+        for page in &section_def.master_pages {
+            paragraph_refs(&page.paragraphs, counts)?;
+        }
+        Ok(())
+    }
+    fn drawing_refs(d: &DrawingObjAttr, counts: PositionalCounts) -> Result<(), String> {
+        if let Some(tb) = &d.text_box {
+            paragraph_refs(&tb.paragraphs, counts)?
+        }
+        if let Some(c) = &d.caption {
+            paragraph_refs(&c.paragraphs, counts)?
+        }
+        Ok(())
+    }
+    fn shape_refs(s: &ShapeObject, counts: PositionalCounts) -> Result<(), String> {
+        if let Some(d) = s.drawing() {
+            drawing_refs(d, counts)?
+        }
+        match s {
+            ShapeObject::Group(v) => {
+                if let Some(c) = &v.caption {
+                    paragraph_refs(&c.paragraphs, counts)?
+                }
+                for child in &v.children {
+                    shape_refs(child, counts)?
+                }
+            }
+            ShapeObject::Picture(v) => {
+                if let Some(c) = &v.caption {
+                    paragraph_refs(&c.paragraphs, counts)?
+                }
+            }
+            ShapeObject::Chart(v) => {
+                if let Some(c) = &v.caption {
+                    paragraph_refs(&c.paragraphs, counts)?
+                }
+            }
+            ShapeObject::Ole(v) => {
+                if let Some(c) = &v.caption {
+                    paragraph_refs(&c.paragraphs, counts)?
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+    fn paragraph_refs(ps: &[Paragraph], counts: PositionalCounts) -> Result<(), String> {
         for p in ps {
-            if styles > 0 && p.style_id as usize >= styles {
-                return Err(format!("paragraph references missing style {}", p.style_id));
-            }
-            if para_shapes > 0 && p.para_shape_id as usize >= para_shapes {
-                return Err(format!(
-                    "paragraph references missing paragraph style {}",
-                    p.para_shape_id
-                ));
-            }
+            zero_based_ref("paragraph style", u64::from(p.style_id), counts.styles)?;
+            zero_based_ref(
+                "paragraph shape",
+                u64::from(p.para_shape_id),
+                counts.para_shapes,
+            )?;
             for cs in &p.char_shapes {
-                if char_shapes > 0 && cs.char_shape_id as usize >= char_shapes {
-                    return Err(format!(
-                        "formatting interval references missing character style {}",
-                        cs.char_shape_id
-                    ));
-                }
+                zero_based_ref(
+                    "formatting interval character shape",
+                    u64::from(cs.char_shape_id),
+                    counts.char_shapes,
+                )?;
             }
             for control in &p.controls {
                 match control {
+                    Control::SectionDef(section_def) => section_def_refs(section_def, counts)?,
                     Control::Table(v) => {
+                        one_based_ref("table border fill", v.border_fill_id, counts.border_fills)?;
+                        for zone in &v.zones {
+                            one_based_ref(
+                                "table-zone border fill",
+                                zone.border_fill_id,
+                                counts.border_fills,
+                            )?;
+                        }
                         for cell in &v.cells {
-                            paragraph_refs(&cell.paragraphs, styles, para_shapes, char_shapes)?
+                            one_based_ref(
+                                "table-cell border fill",
+                                cell.border_fill_id,
+                                counts.border_fills,
+                            )?;
+                            paragraph_refs(&cell.paragraphs, counts)?
                         }
                         if let Some(c) = &v.caption {
-                            paragraph_refs(&c.paragraphs, styles, para_shapes, char_shapes)?
+                            paragraph_refs(&c.paragraphs, counts)?
                         }
                     }
-                    Control::Shape(v) => shape_refs(v, styles, para_shapes, char_shapes)?,
+                    Control::Shape(v) => shape_refs(v, counts)?,
                     Control::Picture(v) => {
                         if let Some(c) = &v.caption {
-                            paragraph_refs(&c.paragraphs, styles, para_shapes, char_shapes)?
+                            paragraph_refs(&c.paragraphs, counts)?
                         }
                     }
-                    Control::Header(v) => {
-                        paragraph_refs(&v.paragraphs, styles, para_shapes, char_shapes)?
+                    Control::Header(v) => paragraph_refs(&v.paragraphs, counts)?,
+                    Control::Footer(v) => paragraph_refs(&v.paragraphs, counts)?,
+                    Control::Footnote(v) => paragraph_refs(&v.paragraphs, counts)?,
+                    Control::Endnote(v) => paragraph_refs(&v.paragraphs, counts)?,
+                    Control::HiddenComment(v) => paragraph_refs(&v.paragraphs, counts)?,
+                    Control::Field(v) => paragraph_refs(&v.memo_paragraphs, counts)?,
+                    Control::Ruby(v) => {
+                        zero_based_ref("ruby style", u64::from(v.style_id_ref), counts.styles)?
                     }
-                    Control::Footer(v) => {
-                        paragraph_refs(&v.paragraphs, styles, para_shapes, char_shapes)?
+                    Control::CharOverlap(v) => {
+                        for id in &v.char_shape_ids {
+                            if *id != u32::MAX {
+                                zero_based_ref(
+                                    "character overlap character shape",
+                                    u64::from(*id),
+                                    counts.char_shapes,
+                                )?;
+                            }
+                        }
                     }
-                    Control::Footnote(v) => {
-                        paragraph_refs(&v.paragraphs, styles, para_shapes, char_shapes)?
-                    }
-                    Control::Endnote(v) => {
-                        paragraph_refs(&v.paragraphs, styles, para_shapes, char_shapes)?
-                    }
-                    Control::HiddenComment(v) => {
-                        paragraph_refs(&v.paragraphs, styles, para_shapes, char_shapes)?
-                    }
-                    Control::Field(v) => {
-                        paragraph_refs(&v.memo_paragraphs, styles, para_shapes, char_shapes)?
+                    Control::Form(v) => {
+                        if let Some(value) = v.properties.get("CharShapeID") {
+                            let id = value
+                                .parse::<u32>()
+                                .map_err(|_| "form CharShapeID is not numeric".to_string())?;
+                            if id != u32::MAX {
+                                zero_based_ref(
+                                    "form character shape",
+                                    u64::from(id),
+                                    counts.char_shapes,
+                                )?;
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -5233,22 +7389,19 @@ fn validate_resource_dependencies(d: &Document) -> Result<(), String> {
         }
         Ok(())
     }
+    let positional_counts = PositionalCounts {
+        styles: d.doc_info.styles.len(),
+        para_shapes: d.doc_info.para_shapes.len(),
+        char_shapes: d.doc_info.char_shapes.len(),
+        border_fills: d.doc_info.border_fills.len(),
+        numberings: d.doc_info.numberings.len(),
+    };
     for section in &d.sections {
-        paragraph_refs(
-            &section.paragraphs,
-            d.doc_info.styles.len(),
-            d.doc_info.para_shapes.len(),
-            d.doc_info.char_shapes.len(),
-        )?;
-        paras(&section.paragraphs, &ids, &declared)?;
+        section_def_refs(&section.section_def, positional_counts)?;
+        paragraph_refs(&section.paragraphs, positional_counts)?;
+        paras(&section.paragraphs, &image_refs, &storage_ids, &chart_ids)?;
         for page in &section.section_def.master_pages {
-            paragraph_refs(
-                &page.paragraphs,
-                d.doc_info.styles.len(),
-                d.doc_info.para_shapes.len(),
-                d.doc_info.char_shapes.len(),
-            )?;
-            paras(&page.paragraphs, &ids, &declared)?;
+            paras(&page.paragraphs, &image_refs, &storage_ids, &chart_ids)?;
         }
     }
     Ok(())
@@ -5291,7 +7444,8 @@ pub fn materialize_document_bytes(
     if detect_format(&bytes) != format {
         return Err("export changed current format".into());
     }
-    let loaded = parse_document(&bytes).map_err(|e| format!("reload validation failed: {e}"))?;
+    let loaded =
+        parse_regenerated_document(&bytes).map_err(|e| format!("reload validation failed: {e}"))?;
     validate_resource_dependencies(&loaded)?;
     if counts(&loaded) != expected {
         return Err(format!(
@@ -5595,7 +7749,7 @@ pub fn materialize_document_bytes_with_manifests(
         _ => unreachable!(),
     }
     .map_err(|e| e.to_string())?;
-    let loaded = parse_document(&bytes)
+    let loaded = parse_regenerated_document(&bytes)
         .map_err(|e| format!("manifest merge reload validation failed: {e}"))?;
     validate_resource_dependencies(&loaded)?;
     if counts(&loaded) != expected {
@@ -5729,16 +7883,24 @@ pub fn synthesize_virtual_base_document_bytes(
     if !matches!(current_format, FileFormat::Hwp | FileFormat::Hwpx) {
         return Err("virtual base output must be HWP or HWPX".into());
     }
+    let target_format = match current_format {
+        FileFormat::Hwp => crate::model::provenance::SourceFormat::Hwp5,
+        FileFormat::Hwpx => crate::model::provenance::SourceFormat::Hwpx,
+        _ => unreachable!(),
+    };
     let mut docs = bases
         .iter()
         .enumerate()
-        .map(|(n, b)| parse(b, &format!("merge base {n}")))
+        .map(|(n, b)| {
+            parse(b, &format!("merge base {n}"))
+                .map(|document| (*blake3::hash(b).as_bytes(), document))
+        })
         .collect::<Result<Vec<_>, _>>()?;
-    docs.sort_by_key(|d| format!("{}", dh(d).to_hex()));
-    let mut out = docs.remove(0);
-    for incoming in docs {
+    docs.sort_by_key(|(hash, _)| *hash);
+    let mut out = docs.remove(0).1;
+    for (_, incoming) in docs {
         let neutral = neutral_document(&out);
-        let (_, analysis) = merge_doc(&neutral, &out, &incoming, None)?;
+        let (_, analysis) = merge_doc_for_format(&neutral, &out, &incoming, None, target_format)?;
         let resolutions = analysis
             .conflicts
             .iter()
@@ -5751,7 +7913,7 @@ pub fn synthesize_virtual_base_document_bytes(
                 (conflict.id.clone(), choice)
             })
             .collect::<BTreeMap<_, _>>();
-        out = merge_doc(&neutral, &out, &incoming, Some(&resolutions))?.0;
+        out = merge_doc_for_format(&neutral, &out, &incoming, Some(&resolutions), target_format)?.0;
     }
     out.doc_properties.section_count = out.sections.len().try_into().unwrap_or(u16::MAX);
     validate_resource_dependencies(&out)?;
@@ -5762,7 +7924,7 @@ pub fn synthesize_virtual_base_document_bytes(
         _ => unreachable!(),
     }
     .map_err(|e| e.to_string())?;
-    let loaded = parse_document(&bytes)
+    let loaded = parse_regenerated_document(&bytes)
         .map_err(|e| format!("virtual base reload validation failed: {e}"))?;
     validate_resource_dependencies(&loaded)?;
     if counts(&loaded) != expected {
@@ -5904,25 +8066,112 @@ pub struct StructuralManifest {
     pub analysis_version: u32,
     pub entries: Vec<StructuralManifestEntry>,
 }
+
+struct ManifestSizeCounter {
+    bytes: usize,
+    limit: usize,
+}
+
+impl std::io::Write for ManifestSizeCounter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        let next = self
+            .bytes
+            .checked_add(data.len())
+            .ok_or_else(|| std::io::Error::other("structural manifest size overflow"))?;
+        if next > self.limit {
+            return Err(std::io::Error::other(format!(
+                "structural manifest exceeds the {} byte output limit",
+                self.limit
+            )));
+        }
+        self.bytes = next;
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+struct ManifestEntries {
+    values: Vec<StructuralManifestEntry>,
+    encoded_bytes: usize,
+    output_limit: usize,
+}
+
+impl ManifestEntries {
+    // The serialized wrapper is currently much smaller than this. Reserving a
+    // fixed upper bound keeps per-entry checks simple and fail-closed.
+    const WRAPPER_BUDGET: usize = 128;
+
+    fn new(output_limit: usize) -> Result<Self, String> {
+        if output_limit < Self::WRAPPER_BUDGET {
+            return Err(format!(
+                "structural manifest exceeds the {output_limit} byte output limit"
+            ));
+        }
+        Ok(Self {
+            values: Vec::new(),
+            encoded_bytes: Self::WRAPPER_BUDGET,
+            output_limit,
+        })
+    }
+
+    fn push<T: Debug>(
+        &mut self,
+        kind: &str,
+        path: Vec<String>,
+        value: &T,
+        identity_hint: Option<String>,
+    ) -> Result<(), String> {
+        let entry = StructuralManifestEntry {
+            kind: kind.into(),
+            path,
+            property_hash: format!("blake3:{}", dh(value).to_hex()),
+            identity_hint,
+        };
+        let remaining = self.output_limit.saturating_sub(self.encoded_bytes);
+        let mut counter = ManifestSizeCounter {
+            bytes: 0,
+            limit: remaining,
+        };
+        serde_json::to_writer(&mut counter, &entry).map_err(|error| {
+            format!(
+                "structural manifest exceeds the {} byte output limit: {error}",
+                self.output_limit
+            )
+        })?;
+        let next = self
+            .encoded_bytes
+            .checked_add(counter.bytes)
+            .and_then(|bytes| bytes.checked_add(1))
+            .ok_or_else(|| "structural manifest size overflow".to_string())?;
+        if next > self.output_limit {
+            return Err(format!(
+                "structural manifest exceeds the {} byte output limit",
+                self.output_limit
+            ));
+        }
+        self.encoded_bytes = next;
+        self.values.push(entry);
+        Ok(())
+    }
+}
+
 fn manifest_entry<T: Debug>(
-    entries: &mut Vec<StructuralManifestEntry>,
+    entries: &mut ManifestEntries,
     kind: &str,
     path: Vec<String>,
     value: &T,
     identity_hint: Option<String>,
-) {
-    entries.push(StructuralManifestEntry {
-        kind: kind.into(),
-        path,
-        property_hash: format!("blake3:{}", dh(value).to_hex()),
-        identity_hint,
-    })
+) -> Result<(), String> {
+    entries.push(kind, path, value, identity_hint)
 }
 fn manifest_paragraphs(
-    entries: &mut Vec<StructuralManifestEntry>,
+    entries: &mut ManifestEntries,
     root: &[String],
     paragraphs: &[Paragraph],
-) {
+) -> Result<(), String> {
     for (n, p) in paragraphs.iter().enumerate() {
         let mut path = root.to_vec();
         path.push("paragraphs".into());
@@ -5932,14 +8181,14 @@ fn manifest_paragraphs(
             (id != 0).then(|| format!("paragraph:{id}"))
         });
         let shell = no_controls(p);
-        manifest_entry(entries, "paragraph", path.clone(), &shell, identity);
+        manifest_entry(entries, "paragraph", path.clone(), &shell, identity)?;
         manifest_entry(
             entries,
             "text",
             [path.clone(), vec!["text".into()]].concat(),
             &p.text,
             None,
-        );
+        )?;
         for (f, shape) in p.char_shapes.iter().enumerate() {
             manifest_entry(
                 entries,
@@ -5947,41 +8196,43 @@ fn manifest_paragraphs(
                 [path.clone(), vec!["charShapes".into(), f.to_string()]].concat(),
                 shape,
                 Some(format!("offset:{}", shape.start_pos)),
-            );
+            )?;
         }
         for (k, control) in p.controls.iter().enumerate() {
             manifest_control(
                 entries,
                 &[path.clone(), vec!["controls".into(), k.to_string()]].concat(),
                 control,
-            );
+            )?;
         }
     }
+    Ok(())
 }
 fn manifest_caption(
-    entries: &mut Vec<StructuralManifestEntry>,
+    entries: &mut ManifestEntries,
     path: &[String],
     caption: &Option<Caption>,
-) {
+) -> Result<(), String> {
     if let Some(v) = caption {
         let mut shell = v.clone();
         shell.paragraphs.clear();
-        manifest_entry(entries, "caption", path.to_vec(), &shell, None);
-        manifest_paragraphs(entries, path, &v.paragraphs)
+        manifest_entry(entries, "caption", path.to_vec(), &shell, None)?;
+        manifest_paragraphs(entries, path, &v.paragraphs)?;
     }
+    Ok(())
 }
 fn manifest_shape(
-    entries: &mut Vec<StructuralManifestEntry>,
+    entries: &mut ManifestEntries,
     path: &[String],
     shape: &ShapeObject,
-) {
+) -> Result<(), String> {
     manifest_entry(
         entries,
         "shape",
         path.to_vec(),
         shape,
         control_identity(&Control::Shape(Box::new(shape.clone()))),
-    );
+    )?;
     if let Some(d) = shape.drawing() {
         manifest_entry(
             entries,
@@ -5989,7 +8240,7 @@ fn manifest_shape(
             [path.to_vec(), vec!["drawing".into()]].concat(),
             d,
             None,
-        );
+        )?;
         if let Some(tb) = &d.text_box {
             manifest_paragraphs(
                 entries,
@@ -6002,13 +8253,13 @@ fn manifest_shape(
                 ]
                 .concat(),
                 &tb.paragraphs,
-            )
+            )?;
         }
         manifest_caption(
             entries,
             &[path.to_vec(), vec!["drawing".into(), "caption".into()]].concat(),
             &d.caption,
-        )
+        )?;
     }
     match shape {
         ShapeObject::Group(g) => {
@@ -6016,13 +8267,13 @@ fn manifest_shape(
                 entries,
                 &[path.to_vec(), vec!["caption".into()]].concat(),
                 &g.caption,
-            );
+            )?;
             for (n, child) in g.children.iter().enumerate() {
                 manifest_shape(
                     entries,
                     &[path.to_vec(), vec!["children".into(), n.to_string()]].concat(),
                     child,
-                )
+                )?;
             }
         }
         ShapeObject::Picture(p) => manifest_entry(
@@ -6031,7 +8282,7 @@ fn manifest_shape(
             [path.to_vec(), vec!["binDataId".into()]].concat(),
             &p.image_attr.bin_data_id,
             None,
-        ),
+        )?,
         ShapeObject::Chart(c) => {
             manifest_entry(
                 entries,
@@ -6039,12 +8290,12 @@ fn manifest_shape(
                 [path.to_vec(), vec!["chart".into()]].concat(),
                 c,
                 None,
-            );
+            )?;
             manifest_caption(
                 entries,
                 &[path.to_vec(), vec!["caption".into()]].concat(),
                 &c.caption,
-            )
+            )?;
         }
         ShapeObject::Ole(o) => {
             manifest_entry(
@@ -6053,21 +8304,22 @@ fn manifest_shape(
                 [path.to_vec(), vec!["ole".into()]].concat(),
                 o,
                 None,
-            );
+            )?;
             manifest_caption(
                 entries,
                 &[path.to_vec(), vec!["caption".into()]].concat(),
                 &o.caption,
-            )
+            )?;
         }
         _ => {}
     }
+    Ok(())
 }
 fn manifest_control(
-    entries: &mut Vec<StructuralManifestEntry>,
+    entries: &mut ManifestEntries,
     path: &[String],
     control: &Control,
-) {
+) -> Result<(), String> {
     let kind = match control {
         Control::SectionDef(_) => "section-def",
         Control::ColumnDef(_) => "column-settings",
@@ -6098,21 +8350,21 @@ fn manifest_control(
         path.to_vec(),
         control,
         control_identity(control),
-    );
+    )?;
     match control {
         Control::Table(t) => {
             for (n, cell) in t.cells.iter().enumerate() {
                 let cp = [path.to_vec(), vec!["cells".into(), n.to_string()]].concat();
-                manifest_entry(entries, "table-cell", cp.clone(), cell, None);
-                manifest_paragraphs(entries, &cp, &cell.paragraphs)
+                manifest_entry(entries, "table-cell", cp.clone(), cell, None)?;
+                manifest_paragraphs(entries, &cp, &cell.paragraphs)?;
             }
             manifest_caption(
                 entries,
                 &[path.to_vec(), vec!["caption".into()]].concat(),
                 &t.caption,
-            );
+            )?;
         }
-        Control::Shape(s) => manifest_shape(entries, path, s),
+        Control::Shape(s) => manifest_shape(entries, path, s)?,
         Control::Picture(p) => {
             manifest_entry(
                 entries,
@@ -6120,37 +8372,41 @@ fn manifest_control(
                 [path.to_vec(), vec!["binDataId".into()]].concat(),
                 &p.image_attr.bin_data_id,
                 None,
-            );
+            )?;
             manifest_caption(
                 entries,
                 &[path.to_vec(), vec!["caption".into()]].concat(),
                 &p.caption,
-            )
+            )?;
         }
-        Control::Header(v) => manifest_paragraphs(entries, path, &v.paragraphs),
-        Control::Footer(v) => manifest_paragraphs(entries, path, &v.paragraphs),
-        Control::Footnote(v) => manifest_paragraphs(entries, path, &v.paragraphs),
-        Control::Endnote(v) => manifest_paragraphs(entries, path, &v.paragraphs),
-        Control::HiddenComment(v) => manifest_paragraphs(entries, path, &v.paragraphs),
+        Control::Header(v) => manifest_paragraphs(entries, path, &v.paragraphs)?,
+        Control::Footer(v) => manifest_paragraphs(entries, path, &v.paragraphs)?,
+        Control::Footnote(v) => manifest_paragraphs(entries, path, &v.paragraphs)?,
+        Control::Endnote(v) => manifest_paragraphs(entries, path, &v.paragraphs)?,
+        Control::HiddenComment(v) => manifest_paragraphs(entries, path, &v.paragraphs)?,
         Control::Field(v) => manifest_paragraphs(
             entries,
             &[path.to_vec(), vec!["memo".into()]].concat(),
             &v.memo_paragraphs,
-        ),
+        )?,
         _ => {}
     }
+    Ok(())
 }
-pub fn build_structural_manifest(bytes: &[u8]) -> Result<StructuralManifest, String> {
+fn build_structural_manifest_with_output_limit(
+    bytes: &[u8],
+    output_limit: usize,
+) -> Result<StructuralManifest, String> {
     let d = parse(bytes, "manifest document")?;
-    let mut entries = vec![];
-    manifest_entry(&mut entries, "document", vec![], &counts(&d), None);
+    let mut entries = ManifestEntries::new(output_limit)?;
+    manifest_entry(&mut entries, "document", vec![], &counts(&d), None)?;
     manifest_entry(
         &mut entries,
         "document-properties",
         vec!["docProperties".into()],
         &d.doc_properties,
         None,
-    );
+    )?;
     for (s, section) in d.sections.iter().enumerate() {
         let path = vec!["sections".into(), s.to_string()];
         manifest_entry(
@@ -6159,19 +8415,19 @@ pub fn build_structural_manifest(bytes: &[u8]) -> Result<StructuralManifest, Str
             path.clone(),
             &section.section_def,
             None,
-        );
+        )?;
         manifest_entry(
             &mut entries,
             "section-settings",
             [path.clone(), vec!["settings".into()]].concat(),
             &section.section_def,
             None,
-        );
-        manifest_paragraphs(&mut entries, &path, &section.paragraphs);
+        )?;
+        manifest_paragraphs(&mut entries, &path, &section.paragraphs)?;
         for (m, page) in section.section_def.master_pages.iter().enumerate() {
             let mp = [path.clone(), vec!["masterPages".into(), m.to_string()]].concat();
-            manifest_entry(&mut entries, "master-page", mp.clone(), page, None);
-            manifest_paragraphs(&mut entries, &mp, &page.paragraphs)
+            manifest_entry(&mut entries, "master-page", mp.clone(), page, None)?;
+            manifest_paragraphs(&mut entries, &mp, &page.paragraphs)?;
         }
     }
     macro_rules! list {
@@ -6183,7 +8439,7 @@ pub fn build_structural_manifest(bytes: &[u8]) -> Result<StructuralManifest, Str
                     vec!["docInfo".into(), stringify!($field).into(), n.to_string()],
                     v,
                     None,
-                );
+                )?;
             }
         };
     }
@@ -6202,13 +8458,19 @@ pub fn build_structural_manifest(bytes: &[u8]) -> Result<StructuralManifest, Str
             vec!["resources".into(), resource.id.to_string()],
             &resource_value(Some(resource)),
             Some(format!("resource:{}", resource.id)),
-        );
+        )?;
     }
-    entries.sort_by(|a, b| a.path.cmp(&b.path).then(a.kind.cmp(&b.kind)));
+    entries
+        .values
+        .sort_by(|a, b| a.path.cmp(&b.path).then(a.kind.cmp(&b.kind)));
     Ok(StructuralManifest {
         analysis_version: ANALYSIS_VERSION,
-        entries,
+        entries: entries.values,
     })
+}
+
+pub fn build_structural_manifest(bytes: &[u8]) -> Result<StructuralManifest, String> {
+    build_structural_manifest_with_output_limit(bytes, MAX_STRUCTURAL_MANIFEST_OUTPUT_BYTES)
 }
 
 #[wasm_bindgen(js_name=structuralMergeBuildManifest)]
@@ -6221,6 +8483,129 @@ pub fn structural_merge_build_manifest(bytes: &[u8]) -> Result<String, JsValue> 
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn raw_binary_item_rewrite_requires_an_exact_numeric_value() {
+        let raw = r#"<hh:img binaryItemIDRef="asset-1-v2"/>"#;
+        let remap = BTreeMap::from([(12, 99)]);
+
+        let (rewritten, matched) = remap_raw_binary_item_refs(raw, &remap).unwrap();
+
+        assert!(!matched);
+        assert!(matches!(
+            rewritten,
+            Cow::Borrowed(value) if value.as_ptr() == raw.as_ptr()
+        ));
+    }
+
+    #[test]
+    fn raw_binary_item_rewrite_ignores_comments_text_and_prefixed_names() {
+        let raw = concat!(
+            r#"<root>"#,
+            r#"<!-- <hh:img binaryItemIDRef="image1"/> -->"#,
+            r#"<![CDATA[<hh:img binaryItemIDRef="image1"/>]]>"#,
+            r#"<hp:t>binaryItemIDRef="image1"</hp:t>"#,
+            r#"<x x:binaryItemIDRef="image1" foobinaryItemIDRef="image1" binaryItemIDRefExtra="image1"/>"#,
+            r#"<x a=binaryItemIDRef="image1"/>"#,
+            r#"<hh:img binaryItemIDRef="image1"/>"#,
+            r#"</root>"#,
+        );
+        let expected = raw.replacen(
+            r#"<hh:img binaryItemIDRef="image1"/></root>"#,
+            r#"<hh:img binaryItemIDRef="image7"/></root>"#,
+            1,
+        );
+
+        let (rewritten, matched) =
+            remap_raw_binary_item_refs(raw, &BTreeMap::from([(1, 7)])).unwrap();
+
+        assert!(matched);
+        assert_eq!(rewritten, expected);
+    }
+
+    #[test]
+    fn raw_binary_item_rewrite_is_two_pass_and_bounded_for_many_replacements() {
+        const COUNT: usize = 16_384;
+        let raw = r#"<hh:img binaryItemIDRef="image1"/>"#.repeat(COUNT);
+        let remap = BTreeMap::from([(1, u16::MAX)]);
+        let projected_len = raw.len() + COUNT * 4;
+
+        let (rewritten, matched) = remap_raw_binary_item_refs_limited(&raw, &remap, projected_len)
+            .expect("many rewrites must use one preflighted output allocation");
+
+        assert!(matched);
+        assert!(matches!(&rewritten, Cow::Owned(_)));
+        assert_eq!(rewritten.len(), projected_len);
+        assert_eq!(rewritten.matches("image65535").count(), COUNT);
+        assert!(remap_raw_binary_item_refs_limited(&raw, &remap, projected_len - 1).is_err());
+    }
+
+    #[test]
+    fn raw_binary_item_identity_match_borrows_unchanged_xml() {
+        let raw = r#"<hh:img binaryItemIDRef="image42"/>"#;
+
+        let (rewritten, matched) =
+            remap_raw_binary_item_refs(raw, &BTreeMap::from([(42, 42)])).unwrap();
+
+        assert!(matched);
+        assert!(matches!(
+            rewritten,
+            Cow::Borrowed(value) if value.as_ptr() == raw.as_ptr()
+        ));
+    }
+
+    #[test]
+    fn debug_hash_streams_formatter_output_into_blake3() {
+        struct ChunkedDebug;
+
+        impl std::fmt::Debug for ChunkedDebug {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                for _ in 0..4096 {
+                    formatter.write_str("0123456789abcdef")?;
+                }
+                Ok(())
+            }
+        }
+
+        let mut expected = blake3::Hasher::new();
+        for _ in 0..4096 {
+            expected.update(b"0123456789abcdef");
+        }
+        assert_eq!(dh(&ChunkedDebug), expected.finalize());
+    }
+
+    #[test]
+    fn opaque_stream_hash_is_length_delimited_and_byte_sensitive() {
+        let original = vec![
+            ("A".to_string(), vec![1, 2, 3]),
+            ("BC".to_string(), vec![4, 5]),
+        ];
+        let equivalent = original.clone();
+        let mut changed_bytes = original.clone();
+        changed_bytes[1].1[0] ^= 0xff;
+        let changed_boundaries = vec![
+            ("AB".to_string(), vec![1, 2, 3]),
+            ("C".to_string(), vec![4, 5]),
+        ];
+
+        assert_eq!(
+            opaque_streams_hash(&original),
+            opaque_streams_hash(&equivalent)
+        );
+        assert_ne!(
+            opaque_streams_hash(&original),
+            opaque_streams_hash(&changed_bytes)
+        );
+        assert_ne!(
+            opaque_streams_hash(&original),
+            opaque_streams_hash(&changed_boundaries)
+        );
+        let descriptor = opaque_streams_value("opaque", &original);
+        assert_eq!(descriptor["byteLength"], 5);
+        assert!(descriptor.get("bytes").is_none());
+        assert!(descriptor.get("bytesBase64").is_none());
+    }
+
     #[test]
     fn matrix_and_disjoint() {
         assert_eq!(
@@ -6711,7 +9096,7 @@ mod tests {
 
         let resource = |bytes: &[u8]| BinDataContent {
             id: 1,
-            data: BinDataBytes::Loaded(bytes.to_vec()),
+            data: BinDataBytes::from(bytes.to_vec()),
             extension: "png".into(),
         };
         let (br, cr, ir) = (
@@ -6723,7 +9108,10 @@ mod tests {
         let _ = merge_resources(&br, &cr, &ir, None, &mut ctx).unwrap();
         let image = &ctx.conflicts[0];
         assert_eq!(image.kind, "image-bytes");
-        assert!(image.current["bytesBase64"].is_string());
+        assert!(image.current.get("bytesBase64").is_none());
+        assert!(image.current["contentIdentity"]
+            .as_str()
+            .is_some_and(|identity| identity.starts_with("decoded:")));
         let manual = json!({"kind":"image-bytes","id":1,"extension":"png","bytesBase64":base64::engine::general_purpose::STANDARD.encode(b"manual")});
         let mut resolved = Ctx::new(MergeOptions::default());
         let out = merge_resources(
@@ -6738,6 +9126,33 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out[0].data.load(), b"manual");
+    }
+
+    #[test]
+    fn manual_resource_rejects_oversized_base64_before_decode() {
+        let payload = json!({
+            "kind": "image-bytes",
+            "id": 1,
+            "extension": "png",
+            "bytesBase64": base64::engine::general_purpose::STANDARD.encode(b"12345"),
+        });
+
+        let error = manual_resource_from_value_with_limit(&payload, 1, 4)
+            .expect_err("decoded output must be checked before allocation");
+
+        assert!(error.contains("4 byte merge resource limit"));
+    }
+
+    #[test]
+    fn structural_manifest_budget_fails_before_building_unbounded_output() {
+        let bytes = serialize_hwp(&Document::default()).expect("fixture serialization");
+
+        let error =
+            build_structural_manifest_with_output_limit(&bytes, ManifestEntries::WRAPPER_BUDGET)
+                .expect_err("the first entry must exceed an exhausted output budget");
+
+        assert!(error.contains("structural manifest exceeds"));
+        assert!(error.contains("output limit"));
     }
     #[test]
     fn picture_placement_and_crop_are_disjoint_regions() {
@@ -6754,15 +9169,23 @@ mod tests {
     }
     #[test]
     fn concurrent_resource_and_style_ids_are_deterministically_remapped() {
+        use crate::model::bin_data::{BinData, BinDataType};
+
         let mut b = Document::default();
         b.sections = vec![Section {
             paragraphs: vec![Paragraph::default()],
             ..Section::default()
         }];
         let mut c = b.clone();
+        c.doc_info.bin_data_list.push(BinData {
+            data_type: BinDataType::Embedding,
+            storage_id: 7,
+            extension: Some("png".into()),
+            ..Default::default()
+        });
         c.bin_data_content.push(BinDataContent {
-            id: 1,
-            data: BinDataBytes::Loaded(b"current".to_vec()),
+            id: 7,
+            data: BinDataBytes::from(b"current".to_vec()),
             extension: "png".into(),
         });
         c.sections[0].paragraphs[0]
@@ -6775,9 +9198,15 @@ mod tests {
                 ..Picture::default()
             })));
         let mut i = b.clone();
+        i.doc_info.bin_data_list.push(BinData {
+            data_type: BinDataType::Embedding,
+            storage_id: 7,
+            extension: Some("png".into()),
+            ..Default::default()
+        });
         i.bin_data_content.push(BinDataContent {
-            id: 1,
-            data: BinDataBytes::Loaded(b"incoming".to_vec()),
+            id: 7,
+            data: BinDataBytes::from(b"incoming".to_vec()),
             extension: "png".into(),
         });
         i.sections[0].paragraphs[0]
@@ -6793,25 +9222,741 @@ mod tests {
         i.doc_info.styles.push(Default::default());
         c.sections[0].paragraphs[0].style_id = 0;
         i.sections[0].paragraphs[0].style_id = 0;
-        let remapped = remap_incoming_resource_collisions(&b, &c, &i);
-        assert_eq!(remapped.bin_data_content[0].id, 2);
-        let Control::Picture(pic) = &remapped.sections[0].paragraphs[0].controls[0] else {
+        let prepared = prepare_merge_views(&b, &c, &i).unwrap();
+        assert_eq!(prepared.bin_data.declarations[0].storage_id, 7);
+        assert_eq!(prepared.bin_data.declarations[1].storage_id, 8);
+        let Control::Picture(pic) = &prepared.incoming.sections()[0].paragraphs[0].controls[0]
+        else {
             panic!()
         };
+        // HWP image references are declaration slots, not sparse storage IDs.
         assert_eq!(pic.image_attr.bin_data_id, 2);
-        assert_eq!(remapped.sections[0].paragraphs[0].style_id, 1);
+        assert_eq!(prepared.incoming.sections()[0].paragraphs[0].style_id, 1);
         let mut ctx = Ctx::new(MergeOptions::default());
-        let resources = merge_resources(
-            &b.bin_data_content,
-            &c.bin_data_content,
-            &remapped.bin_data_content,
+        let (declarations, resources) =
+            merge_bin_data_resources(&b, &c, &i, &prepared.bin_data, None, &mut ctx).unwrap();
+        assert_eq!(
+            declarations
+                .iter()
+                .map(|declaration| declaration.storage_id)
+                .collect::<Vec<_>>(),
+            vec![7, 8]
+        );
+        assert_eq!(
+            resources.iter().map(|r| r.id).collect::<Vec<_>>(),
+            vec![7, 8]
+        );
+    }
+
+    #[test]
+    fn collision_remap_covers_slots_storage_refs_raw_buffers_and_links() {
+        use crate::model::bin_data::{BinData, BinDataType};
+        use crate::model::shape::{GroupShape, RectangleShape};
+        use crate::model::style::{Fill, FillType, ImageFill, SubstFont};
+
+        let declaration = |data_type| BinData {
+            data_type,
+            attr: match data_type {
+                BinDataType::Link => 0,
+                BinDataType::Embedding => 1,
+                BinDataType::Storage => 2,
+            },
+            storage_id: 10,
+            extension: Some("dat".into()),
+            ..Default::default()
+        };
+        let content = |bytes: &[u8]| BinDataContent {
+            id: 10,
+            data: BinDataBytes::from(bytes.to_vec()),
+            extension: "dat".into(),
+        };
+        let image_fill = || Fill {
+            fill_type: FillType::Image,
+            image: Some(ImageFill {
+                bin_data_id: 1,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let ole = || {
+            ShapeObject::Ole(Box::new(OleShape {
+                bin_data_id: 10,
+                raw_tag_data: vec![9, 9, 9],
+                ..Default::default()
+            }))
+        };
+
+        let base = Document::default();
+        let current = Document {
+            doc_info: DocInfo {
+                bin_data_list: vec![declaration(BinDataType::Link)],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut incoming = Document {
+            doc_info: DocInfo {
+                bin_data_list: vec![declaration(BinDataType::Embedding)],
+                border_fills: vec![BorderFill {
+                    raw_data: Some(vec![4, 5, 6]),
+                    fill: image_fill(),
+                    ..Default::default()
+                }],
+                bullets: vec![Bullet {
+                    image_bullet: 1,
+                    raw_data: Some(vec![7, 8]),
+                    raw_para_head: Some(
+                        r#"<hh:paraHead custom="kept"/><hh:img binaryItemIDRef="image1"/>"#.into(),
+                    ),
+                    ..Default::default()
+                }],
+                font_faces: vec![vec![Font {
+                    raw_data: Some(vec![9, 8, 7]),
+                    is_embedded: true,
+                    bin_item_id_ref: "font-resource-alpha".into(),
+                    resolved_bin_data_id: Some(10),
+                    subst_font: Some(SubstFont {
+                        is_embedded: true,
+                        bin_item_id_ref: "font-resource-beta".into(),
+                        resolved_bin_data_id: Some(10),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]],
+                ..Default::default()
+            },
+            sections: vec![Section {
+                raw_stream: Some(vec![0xaa, 0xbb]),
+                paragraphs: vec![Paragraph {
+                    controls: vec![
+                        Control::Picture(Box::new(Picture {
+                            image_attr: ImageAttr {
+                                bin_data_id: 1,
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        })),
+                        Control::Shape(Box::new(ShapeObject::Rectangle(RectangleShape {
+                            drawing: DrawingObjAttr {
+                                fill: image_fill(),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        }))),
+                        Control::Shape(Box::new(ole())),
+                        Control::Shape(Box::new(ShapeObject::Group(GroupShape {
+                            children: vec![ole()],
+                            ..Default::default()
+                        }))),
+                    ],
+                    ..Default::default()
+                }],
+                section_def: SectionDef {
+                    master_pages: vec![MasterPage {
+                        paragraphs: vec![Paragraph {
+                            controls: vec![Control::Shape(Box::new(ole()))],
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            bin_data_content: vec![content(b"incoming")],
+            ..Default::default()
+        };
+        incoming.doc_info.bin_data_list[0].raw_data = Some(vec![1, 2, 3]);
+
+        let prepared = prepare_merge_views(&base, &current, &incoming).unwrap();
+        assert_eq!(prepared.bin_data.declarations[0].storage_id, 10);
+        assert_eq!(prepared.bin_data.declarations[1].storage_id, 11);
+        assert_eq!(
+            prepared.incoming.doc_info().border_fills[0]
+                .fill
+                .image
+                .as_ref()
+                .unwrap()
+                .bin_data_id,
+            2
+        );
+        assert!(prepared.incoming.doc_info().border_fills[0]
+            .raw_data
+            .is_none());
+        let bullet = &prepared.incoming.doc_info().bullets[0];
+        assert_eq!(bullet.image_bullet, 2);
+        assert!(bullet.raw_data.is_none());
+        assert!(bullet.raw_para_head.as_deref().unwrap().contains("image2"));
+        let font = &prepared.incoming.doc_info().font_faces[0][0];
+        assert!(font.raw_data.is_none());
+        assert_eq!(font.resolved_bin_data_id, Some(11));
+        assert_eq!(font.bin_item_id_ref, "font-resource-alpha");
+        assert_eq!(
+            font.subst_font.as_ref().unwrap().resolved_bin_data_id,
+            Some(11)
+        );
+        assert_eq!(
+            font.subst_font.as_ref().unwrap().bin_item_id_ref,
+            "font-resource-beta"
+        );
+        assert!(prepared.incoming.sections()[0].raw_stream.is_none());
+        let controls = &prepared.incoming.sections()[0].paragraphs[0].controls;
+        let Control::Picture(picture) = &controls[0] else {
+            panic!()
+        };
+        assert_eq!(picture.image_attr.bin_data_id, 2);
+        let Control::Shape(rectangle) = &controls[1] else {
+            panic!()
+        };
+        assert_eq!(
+            rectangle
+                .drawing()
+                .unwrap()
+                .fill
+                .image
+                .as_ref()
+                .unwrap()
+                .bin_data_id,
+            2
+        );
+        let Control::Shape(top_ole) = &controls[2] else {
+            panic!()
+        };
+        let ShapeObject::Ole(top_ole) = top_ole.as_ref() else {
+            panic!()
+        };
+        assert_eq!(top_ole.bin_data_id, 11);
+        assert!(top_ole.raw_tag_data.is_empty());
+        let Control::Shape(group) = &controls[3] else {
+            panic!()
+        };
+        let ShapeObject::Group(group) = group.as_ref() else {
+            panic!()
+        };
+        let ShapeObject::Ole(nested_ole) = &group.children[0] else {
+            panic!()
+        };
+        assert_eq!(nested_ole.bin_data_id, 11);
+        let Control::Shape(master_ole) =
+            &prepared.incoming.sections()[0].section_def.master_pages[0].paragraphs[0].controls[0]
+        else {
+            panic!()
+        };
+        let ShapeObject::Ole(master_ole) = master_ole.as_ref() else {
+            panic!()
+        };
+        assert_eq!(master_ole.bin_data_id, 11);
+
+        let mut context = Ctx::new(MergeOptions::default());
+        let (declarations, contents) = merge_bin_data_resources(
+            &base,
+            &current,
+            &incoming,
+            &prepared.bin_data,
             None,
-            &mut ctx,
+            &mut context,
+        )
+        .unwrap();
+        assert!(declarations[1].raw_data.is_none());
+        let mut validated = incoming.clone();
+        validated.doc_info = prepared.incoming.doc_info().clone();
+        validated.doc_info.bin_data_list = declarations;
+        validated.sections = prepared.incoming.sections().to_vec();
+        validated.bin_data_content = contents;
+        validate_resource_dependencies(&validated).unwrap();
+        let reparsed = parse_document(&serialize_hwp(&validated).unwrap()).unwrap();
+        assert_eq!(
+            reparsed
+                .doc_info
+                .bin_data_list
+                .iter()
+                .map(|declaration| declaration.storage_id)
+                .collect::<Vec<_>>(),
+            vec![0, 11]
+        );
+        assert_eq!(reparsed.doc_info.bullets[0].image_bullet, 2);
+        let Control::Picture(reparsed_picture) = &reparsed.sections[0].paragraphs[0].controls[0]
+        else {
+            panic!()
+        };
+        assert_eq!(reparsed_picture.image_attr.bin_data_id, 2);
+        let Control::Shape(reparsed_ole) = &reparsed.sections[0].paragraphs[0].controls[2] else {
+            panic!()
+        };
+        let ShapeObject::Ole(reparsed_ole) = reparsed_ole.as_ref() else {
+            panic!()
+        };
+        assert_eq!(reparsed_ole.bin_data_id, 11);
+
+        // The reverse collision keeps embedded bytes on the current declaration
+        // while assigning the incoming Link its own storage ID and final slot.
+        let reverse_current = Document {
+            doc_info: DocInfo {
+                bin_data_list: vec![declaration(BinDataType::Embedding)],
+                ..Default::default()
+            },
+            bin_data_content: vec![content(b"current")],
+            ..Default::default()
+        };
+        let mut reverse_incoming = Document {
+            doc_info: DocInfo {
+                bin_data_list: vec![declaration(BinDataType::Link)],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        reverse_incoming.doc_info.bin_data_list[0].abs_path =
+            Some("C:\\linked-resource.dat".into());
+        let reverse = prepare_merge_views(&base, &reverse_current, &reverse_incoming).unwrap();
+        assert_eq!(reverse.bin_data.declarations[0].storage_id, 10);
+        assert_eq!(reverse.bin_data.declarations[1].storage_id, 11);
+
+        let (reverse_hwpx, analysis) = merge_doc_for_format(
+            &base,
+            &reverse_current,
+            &reverse_incoming,
+            None,
+            crate::model::provenance::SourceFormat::Hwpx,
+        )
+        .unwrap();
+        assert!(analysis.conflicts.is_empty());
+        assert_eq!(
+            reverse_hwpx
+                .doc_info
+                .bin_data_list
+                .iter()
+                .map(|declaration| declaration.storage_id)
+                .collect::<Vec<_>>(),
+            vec![10, 11]
+        );
+        validate_resource_dependencies(&reverse_hwpx).unwrap();
+        let bytes = serialize_hwpx(&reverse_hwpx).unwrap();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut manifest = String::new();
+        std::io::Read::read_to_string(
+            &mut archive.by_name("Contents/content.hpf").unwrap(),
+            &mut manifest,
+        )
+        .unwrap();
+        assert!(manifest.contains(r#"id="image10""#));
+        assert!(manifest.contains(r#"id="image11""#));
+        let reverse_reparsed = parse_document(&serialize_hwpx(&reverse_hwpx).unwrap()).unwrap();
+        validate_resource_dependencies(&reverse_reparsed).unwrap();
+        assert_eq!(
+            reverse_reparsed
+                .doc_info
+                .bin_data_list
+                .iter()
+                .map(|declaration| declaration.storage_id)
+                .collect::<Vec<_>>(),
+            vec![10, 11]
+        );
+    }
+
+    #[test]
+    fn target_hwpx_maps_both_hwp_sources_from_slots_to_sparse_storage_ids() {
+        use crate::model::bin_data::{BinData, BinDataType};
+        use crate::model::provenance::SourceFormat;
+
+        let with_picture = |storage_id: u16| Document {
+            doc_info: DocInfo {
+                bin_data_list: vec![BinData {
+                    data_type: BinDataType::Embedding,
+                    storage_id,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            sections: vec![Section {
+                paragraphs: vec![Paragraph {
+                    controls: vec![Control::Picture(Box::new(Picture {
+                        image_attr: ImageAttr {
+                            bin_data_id: 1,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    }))],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            bin_data_content: vec![BinDataContent {
+                id: storage_id,
+                data: BinDataBytes::from(vec![storage_id as u8]),
+                extension: "dat".into(),
+            }],
+            ..Default::default()
+        };
+        let base = Document::default();
+        let current = with_picture(10);
+        let incoming = with_picture(20);
+        let prepared =
+            prepare_merge_views_for_format(&base, &current, &incoming, SourceFormat::Hwpx).unwrap();
+        let picture_id = |view: &RemappedIncoming<'_>| {
+            let Control::Picture(picture) = &view.sections()[0].paragraphs[0].controls[0] else {
+                panic!()
+            };
+            picture.image_attr.bin_data_id
+        };
+        assert_eq!(picture_id(&prepared.current), 10);
+        assert_eq!(picture_id(&prepared.incoming), 20);
+        assert_eq!(
+            prepared
+                .bin_data
+                .declarations
+                .iter()
+                .map(|declaration| (declaration.slot, declaration.storage_id))
+                .collect::<Vec<_>>(),
+            vec![(1, 10), (2, 20)]
+        );
+    }
+
+    #[test]
+    fn collision_detector_reaches_picture_inside_shape_text_box() {
+        use crate::model::bin_data::{BinData, BinDataType};
+        use crate::model::shape::LineShape;
+
+        let declaration = || BinData {
+            data_type: BinDataType::Link,
+            storage_id: 1,
+            ..Default::default()
+        };
+        let base = Document::default();
+        let current = Document {
+            doc_info: DocInfo {
+                bin_data_list: vec![declaration()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut line = LineShape::default();
+        line.drawing.text_box = Some(TextBox {
+            paragraphs: vec![Paragraph {
+                controls: vec![Control::Picture(Box::new(Picture {
+                    image_attr: ImageAttr {
+                        bin_data_id: 1,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }))],
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let incoming = Document {
+            doc_info: DocInfo {
+                bin_data_list: vec![declaration()],
+                ..Default::default()
+            },
+            sections: vec![Section {
+                raw_stream: Some(vec![0xde, 0xad]),
+                paragraphs: vec![Paragraph {
+                    controls: vec![Control::Shape(Box::new(ShapeObject::Line(line)))],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let prepared = prepare_merge_views(&base, &current, &incoming).unwrap();
+        assert!(prepared.incoming.sections()[0].raw_stream.is_none());
+        let Control::Shape(line) = &prepared.incoming.sections()[0].paragraphs[0].controls[0]
+        else {
+            panic!()
+        };
+        let picture = line
+            .drawing()
+            .unwrap()
+            .text_box
+            .as_ref()
+            .unwrap()
+            .paragraphs[0]
+            .controls
+            .first()
+            .unwrap();
+        let Control::Picture(picture) = picture else {
+            panic!()
+        };
+        assert_eq!(picture.image_attr.bin_data_id, 2);
+    }
+
+    #[test]
+    fn incoming_chart_id_avoids_final_ordinary_storage_domain() {
+        use crate::model::bin_data::{BinData, BinDataType};
+        use crate::model::provenance::SourceFormat;
+
+        let base = Document::default();
+        let current = Document {
+            doc_info: DocInfo {
+                bin_data_list: vec![BinData {
+                    data_type: BinDataType::Embedding,
+                    storage_id: 60001,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            bin_data_content: vec![BinDataContent {
+                id: 60001,
+                data: BinDataBytes::from(b"ordinary".to_vec()),
+                extension: "dat".into(),
+            }],
+            ..Default::default()
+        };
+        let mut incoming = Document {
+            sections: vec![Section {
+                paragraphs: vec![Paragraph {
+                    controls: vec![Control::Shape(Box::new(ShapeObject::Ole(Box::new(
+                        OleShape {
+                            bin_data_id: 60001,
+                            raw_tag_data: vec![1, 2, 3],
+                            ..Default::default()
+                        },
+                    ))))],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            bin_data_content: vec![BinDataContent {
+                id: 60001,
+                data: BinDataBytes::from(b"chart".to_vec()),
+                extension: "ooxml_chart".into(),
+            }],
+            ..Default::default()
+        };
+        incoming.provenance.format = SourceFormat::Hwpx;
+
+        let prepared = prepare_merge_views(&base, &current, &incoming).unwrap();
+        assert_eq!(
+            prepared.bin_data.incoming_chart_ids.get(&60001),
+            Some(&60002)
+        );
+        let Control::Shape(ole) = &prepared.incoming.sections()[0].paragraphs[0].controls[0] else {
+            panic!()
+        };
+        let ShapeObject::Ole(ole) = ole.as_ref() else {
+            panic!()
+        };
+        assert_eq!(ole.bin_data_id, 60002);
+        assert!(ole.raw_tag_data.is_empty());
+        let mut context = Ctx::new(MergeOptions::default());
+        let (_, contents) = merge_bin_data_resources(
+            &base,
+            &current,
+            &incoming,
+            &prepared.bin_data,
+            None,
+            &mut context,
         )
         .unwrap();
         assert_eq!(
-            resources.iter().map(|r| r.id).collect::<Vec<_>>(),
+            contents
+                .iter()
+                .map(|content| (content.id, content.extension.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(60001, "dat"), (60002, "ooxml_chart")]
+        );
+    }
+
+    #[test]
+    fn collision_remap_keeps_untouched_incoming_opaque_buffers_borrowed() {
+        use crate::model::bin_data::{BinData, BinDataType};
+
+        let base = Document::default();
+        let current = Document {
+            doc_info: DocInfo {
+                bin_data_list: vec![BinData {
+                    data_type: BinDataType::Embedding,
+                    storage_id: 7,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            bin_data_content: vec![BinDataContent {
+                id: 7,
+                data: BinDataBytes::from(b"current".to_vec()),
+                extension: "dat".to_string(),
+            }],
+            ..Default::default()
+        };
+        let incoming = Document {
+            doc_info: DocInfo {
+                bin_data_list: vec![BinData {
+                    data_type: BinDataType::Embedding,
+                    storage_id: 7,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            bin_data_content: vec![BinDataContent {
+                id: 7,
+                data: BinDataBytes::from(b"incoming".to_vec()),
+                extension: "dat".to_string(),
+            }],
+            extra_streams: vec![("/Opaque".to_string(), vec![0x5a; 4096])],
+            hwpx_aux_entries: vec![("Aux/opaque.bin".to_string(), vec![0xa5; 4096])],
+            ..Default::default()
+        };
+        let extra_ptr = incoming.extra_streams[0].1.as_ptr();
+        let aux_ptr = incoming.hwpx_aux_entries[0].1.as_ptr();
+
+        let prepared = prepare_merge_views(&base, &current, &incoming).unwrap();
+
+        assert!(prepared.incoming.bin_data_content.is_none());
+        assert!(prepared.incoming.doc_info.is_none());
+        assert!(prepared.incoming.sections.is_none());
+        assert_eq!(prepared.bin_data.declarations[1].storage_id, 8);
+        assert_eq!(
+            prepared.incoming.source.extra_streams[0].1.as_ptr(),
+            extra_ptr
+        );
+        assert_eq!(
+            prepared.incoming.source.hwpx_aux_entries[0].1.as_ptr(),
+            aux_ptr
+        );
+    }
+
+    #[test]
+    fn remapped_lazy_resource_preserves_raw_fallback_and_reparsed_storage_id() {
+        use crate::model::bin_data::{
+            BinData, BinDataCompression, BinDataResolver, BinDataStreamEncoding, BinDataType,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Debug)]
+        struct RawOnlyResolver {
+            bytes: Vec<u8>,
+            decoded_calls: AtomicUsize,
+            raw_calls: AtomicUsize,
+        }
+
+        impl BinDataResolver for RawOnlyResolver {
+            fn resolve(&self, _key: &str) -> Vec<u8> {
+                panic!("merge must not eagerly resolve the lazy resource")
+            }
+
+            fn resolve_limited(&self, _key: &str, _max_bytes: usize) -> Option<Vec<u8>> {
+                self.decoded_calls.fetch_add(1, Ordering::SeqCst);
+                None
+            }
+
+            fn resolve_original_stream_limited(
+                &self,
+                key: &str,
+                expected_encoding: BinDataStreamEncoding,
+                max_bytes: usize,
+            ) -> Option<Vec<u8>> {
+                self.raw_calls.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(key, "BIN0001.dat");
+                assert_eq!(
+                    expected_encoding,
+                    BinDataStreamEncoding {
+                        compressed: false,
+                        ole_storage: false,
+                    }
+                );
+                (self.bytes.len() <= max_bytes).then(|| self.bytes.clone())
+            }
+        }
+
+        let bin_info = || BinData {
+            attr: 0x0021,
+            data_type: BinDataType::Embedding,
+            compression: BinDataCompression::NoCompress,
+            storage_id: 1,
+            extension: Some("dat".to_string()),
+            ..Default::default()
+        };
+        let source = Document {
+            doc_info: DocInfo {
+                bin_data_list: vec![bin_info()],
+                ..Default::default()
+            },
+            bin_data_content: vec![BinDataContent {
+                id: 1,
+                data: BinDataBytes::from(b"incoming-raw".to_vec()),
+                extension: "dat".to_string(),
+            }],
+            ..Default::default()
+        };
+        let source_bytes = serialize_hwp(&source).expect("source serialization");
+        let parsed_source = parse_document(&source_bytes).expect("source reparse");
+        let incoming_info = parsed_source.doc_info.bin_data_list[0].clone();
+        assert!(incoming_info.raw_data.is_some());
+
+        let base = Document::default();
+        let current = Document {
+            doc_info: DocInfo {
+                bin_data_list: vec![bin_info()],
+                ..Default::default()
+            },
+            bin_data_content: vec![BinDataContent {
+                id: 1,
+                data: BinDataBytes::from(b"current".to_vec()),
+                extension: "dat".to_string(),
+            }],
+            ..Default::default()
+        };
+        let resolver = std::sync::Arc::new(RawOnlyResolver {
+            bytes: b"incoming-raw".to_vec(),
+            decoded_calls: AtomicUsize::new(0),
+            raw_calls: AtomicUsize::new(0),
+        });
+        let incoming = Document {
+            doc_info: DocInfo {
+                bin_data_list: vec![incoming_info.clone()],
+                ..Default::default()
+            },
+            bin_data_content: vec![BinDataContent {
+                id: 1,
+                data: BinDataBytes::lazy(resolver.clone(), "BIN0001.dat".to_string()),
+                extension: "dat".to_string(),
+            }],
+            ..Default::default()
+        };
+
+        let (merged, _) = merge_doc(&base, &current, &incoming, None).expect("document merge");
+        assert_eq!(
+            merged
+                .doc_info
+                .bin_data_list
+                .iter()
+                .map(|info| info.storage_id)
+                .collect::<Vec<_>>(),
             vec![1, 2]
+        );
+        assert!(merged.doc_info.bin_data_list[1].raw_data.is_none());
+        assert_eq!(
+            merged
+                .bin_data_content
+                .iter()
+                .map(|content| content.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(resolver.decoded_calls.load(Ordering::SeqCst), 0);
+
+        let merged_bytes = serialize_hwp(&merged).expect("merged serialization");
+        assert_eq!(resolver.decoded_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(resolver.raw_calls.load(Ordering::SeqCst), 1);
+        let reparsed = parse_document(&merged_bytes).expect("merged reparse");
+        assert_eq!(
+            reparsed
+                .doc_info
+                .bin_data_list
+                .iter()
+                .map(|info| info.storage_id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        let remapped = reparsed
+            .bin_data_content
+            .iter()
+            .find(|content| content.id == 2)
+            .expect("remapped BinData content");
+        assert_eq!(
+            remapped.data.load_limited(64).as_deref(),
+            Some(b"incoming-raw".as_slice())
         );
     }
     #[test]
@@ -7153,5 +10298,640 @@ mod tests {
         assert!(validate_resource_dependencies(&d)
             .unwrap_err()
             .contains("missing BinData id 42"));
+    }
+
+    #[test]
+    fn hwp_link_declaration_slot_is_a_valid_image_reference() {
+        use crate::model::bin_data::{BinData, BinDataType};
+        use crate::model::provenance::SourceFormat;
+
+        let mut document = Document::default();
+        document.provenance.format = SourceFormat::Hwp5;
+        document.doc_info.bin_data_list.push(BinData {
+            data_type: BinDataType::Link,
+            storage_id: 0,
+            abs_path: Some("C:\\external.png".into()),
+            ..Default::default()
+        });
+        document.sections.push(Section {
+            paragraphs: vec![Paragraph {
+                controls: vec![Control::Picture(Box::new(Picture {
+                    image_attr: ImageAttr {
+                        bin_data_id: 1,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }))],
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        validate_resource_dependencies(&document).unwrap();
+        let reparsed = parse_document(&serialize_hwp(&document).unwrap()).unwrap();
+        validate_resource_dependencies(&reparsed).unwrap();
+        let Control::Picture(picture) = &reparsed.sections[0].paragraphs[0].controls[0] else {
+            panic!()
+        };
+        assert_eq!(picture.image_attr.bin_data_id, 1);
+    }
+
+    #[test]
+    fn dependency_validation_covers_every_bin_data_consumer_and_association() {
+        use crate::model::bin_data::{BinData, BinDataType};
+        use crate::model::provenance::SourceFormat;
+        use crate::model::shape::{GroupShape, RectangleShape};
+        use crate::model::style::{Fill, FillType, ImageFill, SubstFont};
+
+        let valid_declaration = || BinData {
+            data_type: BinDataType::Embedding,
+            storage_id: 1,
+            ..Default::default()
+        };
+        let valid_content = || BinDataContent {
+            id: 1,
+            data: BinDataBytes::from(vec![1]),
+            extension: "dat".into(),
+        };
+        let valid = || Document {
+            doc_info: DocInfo {
+                bin_data_list: vec![valid_declaration()],
+                ..Default::default()
+            },
+            bin_data_content: vec![valid_content()],
+            ..Default::default()
+        };
+        let missing_fill = || Fill {
+            fill_type: FillType::Image,
+            image: Some(ImageFill {
+                bin_data_id: 2,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let mut duplicate = valid();
+        duplicate.doc_info.bin_data_list.push(valid_declaration());
+        assert!(validate_resource_dependencies(&duplicate)
+            .unwrap_err()
+            .contains("duplicate BinData declaration"));
+
+        let orphan = Document {
+            bin_data_content: vec![valid_content()],
+            ..Default::default()
+        };
+        assert!(validate_resource_dependencies(&orphan)
+            .unwrap_err()
+            .contains("no matching declaration"));
+
+        let missing_payload = Document {
+            doc_info: DocInfo {
+                bin_data_list: vec![valid_declaration()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(validate_resource_dependencies(&missing_payload)
+            .unwrap_err()
+            .contains("missing content"));
+
+        let mut border = valid();
+        border.doc_info.border_fills.push(BorderFill {
+            fill: missing_fill(),
+            ..Default::default()
+        });
+        assert!(validate_resource_dependencies(&border)
+            .unwrap_err()
+            .contains("border fill"));
+
+        let mut fonts = valid();
+        fonts.doc_info.font_faces = vec![vec![Font {
+            resolved_bin_data_id: Some(2),
+            subst_font: Some(SubstFont {
+                resolved_bin_data_id: Some(2),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }]];
+        assert!(validate_resource_dependencies(&fonts)
+            .unwrap_err()
+            .contains("font"));
+
+        let mut bullet = valid();
+        bullet.doc_info.bullets.push(Bullet {
+            image_bullet: 2,
+            ..Default::default()
+        });
+        assert!(validate_resource_dependencies(&bullet)
+            .unwrap_err()
+            .contains("image bullet"));
+
+        let mut nested_fill = valid();
+        nested_fill.sections.push(Section {
+            paragraphs: vec![Paragraph {
+                controls: vec![Control::Shape(Box::new(ShapeObject::Group(GroupShape {
+                    children: vec![ShapeObject::Rectangle(RectangleShape {
+                        drawing: DrawingObjAttr {
+                            fill: missing_fill(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    })],
+                    ..Default::default()
+                })))],
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        assert!(validate_resource_dependencies(&nested_fill)
+            .unwrap_err()
+            .contains("shape fill image"));
+
+        let mut overflowing_ole = valid();
+        overflowing_ole.sections.push(Section {
+            paragraphs: vec![Paragraph {
+                controls: vec![Control::Shape(Box::new(ShapeObject::Ole(Box::new(
+                    OleShape {
+                        bin_data_id: u32::from(u16::MAX) + 1,
+                        ..Default::default()
+                    },
+                ))))],
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        assert!(validate_resource_dependencies(&overflowing_ole)
+            .unwrap_err()
+            .contains("65536"));
+
+        let mut stale_bullet = valid();
+        stale_bullet.provenance.format = SourceFormat::Hwpx;
+        stale_bullet.doc_info.bullets.push(Bullet {
+            image_bullet: 1,
+            raw_para_head: Some(r#"<hh:img binaryItemIDRef="image2"/>"#.into()),
+            ..Default::default()
+        });
+        assert!(validate_resource_dependencies(&stale_bullet)
+            .unwrap_err()
+            .contains("does not match typed id"));
+    }
+
+    #[test]
+    fn numbering_and_bullet_appends_shift_only_matching_head_types() {
+        let mut base = Document::default();
+        base.doc_info.numberings.push(Numbering::default());
+        base.doc_info.bullets.push(Bullet::default());
+
+        let mut current_numbering = base.clone();
+        current_numbering
+            .doc_info
+            .numberings
+            .push(Numbering::default());
+        let mut incoming = base.clone();
+        incoming.doc_info.numberings.push(Numbering::default());
+        incoming.doc_info.bullets.push(Bullet::default());
+        incoming.doc_info.para_shapes = vec![
+            ParaShape {
+                head_type: HeadType::Number,
+                numbering_id: 2,
+                raw_data: Some(vec![1]),
+                ..Default::default()
+            },
+            ParaShape {
+                head_type: HeadType::Bullet,
+                numbering_id: 2,
+                raw_data: Some(vec![2]),
+                ..Default::default()
+            },
+        ];
+
+        let prepared = prepare_merge_views(&base, &current_numbering, &incoming).unwrap();
+        assert_eq!(prepared.incoming.doc_info().para_shapes[0].numbering_id, 3);
+        assert_eq!(prepared.incoming.doc_info().para_shapes[1].numbering_id, 2);
+        assert!(prepared.incoming.doc_info().para_shapes[0]
+            .raw_data
+            .is_none());
+        assert_eq!(
+            prepared.incoming.doc_info().para_shapes[1].raw_data,
+            Some(vec![2])
+        );
+
+        let mut current_bullet = base.clone();
+        current_bullet.doc_info.bullets.push(Bullet::default());
+        let prepared = prepare_merge_views(&base, &current_bullet, &incoming).unwrap();
+        assert_eq!(prepared.incoming.doc_info().para_shapes[0].numbering_id, 2);
+        assert_eq!(prepared.incoming.doc_info().para_shapes[1].numbering_id, 3);
+    }
+
+    #[test]
+    fn concurrent_positional_resources_remap_every_consumer_and_reparse() {
+        use crate::model::control::{CharOverlap, FormObject, Ruby};
+        use crate::model::provenance::SourceFormat;
+        use crate::model::table::TableZone;
+
+        let mut base = Document::default();
+        base.doc_info.font_faces = (0..7)
+            .map(|language| {
+                vec![Font {
+                    name: format!("Base font {language}"),
+                    ..Default::default()
+                }]
+            })
+            .collect();
+        base.doc_info.border_fills.push(BorderFill::default());
+        base.doc_info.char_shapes.push(CharShape::default());
+        base.doc_info.tab_defs.push(TabDef::default());
+        base.doc_info.numberings.push(Numbering::default());
+        base.doc_info.bullets.push(Bullet::default());
+        base.doc_info.para_shapes.push(ParaShape::default());
+        base.doc_info.styles.push(Style::default());
+        base.sections.push(Section {
+            paragraphs: vec![Paragraph::default()],
+            ..Default::default()
+        });
+
+        let mut current = base.clone();
+        current.doc_info.font_faces[0].push(Font {
+            name: "Current appended font".into(),
+            ..Default::default()
+        });
+        current.doc_info.border_fills.push(BorderFill::default());
+        current.doc_info.char_shapes.push(CharShape::default());
+        current.doc_info.tab_defs.push(TabDef::default());
+        current.doc_info.numberings.push(Numbering::default());
+        current.doc_info.bullets.push(Bullet::default());
+        current.doc_info.para_shapes.push(ParaShape::default());
+        current.doc_info.styles.push(Style::default());
+
+        let mut incoming = base.clone();
+        incoming.doc_info.font_faces[0].push(Font {
+            name: "Incoming appended font".into(),
+            ..Default::default()
+        });
+        incoming.doc_info.border_fills.push(BorderFill::default());
+        incoming.doc_info.char_shapes.push(CharShape {
+            raw_data: Some(vec![1, 2]),
+            font_ids: [1, 0, 0, 0, 0, 0, 0],
+            border_fill_id: 2,
+            ..Default::default()
+        });
+        incoming.doc_info.tab_defs.push(TabDef::default());
+        let mut incoming_numbering = Numbering {
+            raw_para_heads: Some(r#"<hh:paraHead level="1" charPrIDRef="1"/>"#.into()),
+            raw_data: Some(vec![9]),
+            ..Default::default()
+        };
+        incoming_numbering.heads[0].char_shape_id = 1;
+        incoming.doc_info.numberings.push(incoming_numbering);
+        incoming.doc_info.bullets.push(Bullet {
+            char_shape_id: 1,
+            raw_para_head: Some(r#"<hh:paraHead charPrIDRef="1"/>"#.into()),
+            raw_data: Some(vec![10]),
+            ..Default::default()
+        });
+        incoming.doc_info.para_shapes.extend([
+            ParaShape {
+                raw_data: Some(vec![3, 4]),
+                tab_def_id: 1,
+                head_type: HeadType::Number,
+                numbering_id: 2,
+                border_fill_id: 2,
+                ..Default::default()
+            },
+            ParaShape {
+                raw_data: Some(vec![5, 6]),
+                tab_def_id: 1,
+                head_type: HeadType::Bullet,
+                numbering_id: 2,
+                border_fill_id: 2,
+                ..Default::default()
+            },
+        ]);
+        incoming.doc_info.styles.push(Style {
+            raw_data: Some(vec![7, 8]),
+            next_style_id: 1,
+            para_shape_id: 1,
+            char_shape_id: 1,
+            ..Default::default()
+        });
+
+        let mut form = FormObject::default();
+        form.name = "positional-form".into();
+        form.properties.insert("CharShapeID".into(), "1".into());
+        let nested_cell = Cell {
+            border_fill_id: 2,
+            paragraphs: vec![Paragraph {
+                para_shape_id: 1,
+                style_id: 1,
+                char_shapes: vec![CharShapeRef {
+                    char_shape_id: 1,
+                    ..Default::default()
+                }],
+                controls: vec![Control::Ruby(Ruby {
+                    style_id_ref: 1,
+                    ..Default::default()
+                })],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let nested_table = Table {
+            row_count: 1,
+            col_count: 1,
+            row_sizes: vec![1],
+            border_fill_id: 2,
+            zones: vec![TableZone {
+                border_fill_id: 2,
+                ..Default::default()
+            }],
+            cells: vec![nested_cell],
+            ..Default::default()
+        };
+        incoming.sections[0] = Section {
+            raw_stream: Some(vec![0xaa, 0xbb]),
+            paragraphs: vec![Paragraph {
+                para_shape_id: 1,
+                style_id: 1,
+                char_shapes: vec![CharShapeRef {
+                    char_shape_id: 1,
+                    ..Default::default()
+                }],
+                controls: vec![
+                    Control::Ruby(Ruby {
+                        style_id_ref: 1,
+                        ..Default::default()
+                    }),
+                    Control::CharOverlap(CharOverlap {
+                        chars: vec!['A'],
+                        char_shape_ids: vec![1, u32::MAX],
+                        ..Default::default()
+                    }),
+                    Control::Form(Box::new(form)),
+                ],
+                ..Default::default()
+            }],
+            section_def: SectionDef {
+                outline_numbering_id: 2,
+                page_border_fill: PageBorderFill {
+                    border_fill_id: 2,
+                    ..Default::default()
+                },
+                extra_page_border_fills: vec![PageBorderFill {
+                    border_fill_id: 2,
+                    ..Default::default()
+                }],
+                master_pages: vec![MasterPage {
+                    paragraphs: vec![Paragraph {
+                        controls: vec![Control::Table(Box::new(nested_table))],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let prepared =
+            prepare_merge_views_for_format(&base, &current, &incoming, SourceFormat::Hwpx).unwrap();
+        let info = prepared.incoming.doc_info();
+        assert_eq!(info.char_shapes[1].font_ids[0], 2);
+        assert_eq!(info.char_shapes[1].border_fill_id, 3);
+        assert!(info.char_shapes[1].raw_data.is_none());
+        assert_eq!(info.para_shapes[1].tab_def_id, 2);
+        assert_eq!(info.para_shapes[1].numbering_id, 3);
+        assert_eq!(info.para_shapes[2].numbering_id, 3);
+        assert_eq!(info.para_shapes[1].border_fill_id, 3);
+        assert!(info.para_shapes[1].raw_data.is_none());
+        assert_eq!(info.styles[1].next_style_id, 2);
+        assert_eq!(info.styles[1].para_shape_id, 2);
+        assert_eq!(info.styles[1].char_shape_id, 2);
+        assert!(info.styles[1].raw_data.is_none());
+        assert_eq!(info.numberings[1].heads[0].char_shape_id, 2);
+        assert!(info.numberings[1].raw_data.is_none());
+        assert!(info.numberings[1]
+            .raw_para_heads
+            .as_deref()
+            .unwrap()
+            .contains(r#"charPrIDRef="2""#));
+        assert_eq!(info.bullets[1].char_shape_id, 2);
+        assert!(info.bullets[1].raw_data.is_none());
+        assert!(info.bullets[1]
+            .raw_para_head
+            .as_deref()
+            .unwrap()
+            .contains(r#"charPrIDRef="2""#));
+
+        let section = &prepared.incoming.sections()[0];
+        assert!(section.raw_stream.is_none());
+        assert_eq!(section.section_def.outline_numbering_id, 3);
+        assert_eq!(section.section_def.page_border_fill.border_fill_id, 3);
+        assert_eq!(
+            section.section_def.extra_page_border_fills[0].border_fill_id,
+            3
+        );
+        let paragraph = &section.paragraphs[0];
+        assert_eq!(paragraph.style_id, 2);
+        assert_eq!(paragraph.para_shape_id, 2);
+        assert_eq!(paragraph.char_shapes[0].char_shape_id, 2);
+        let Control::Ruby(ruby) = &paragraph.controls[0] else {
+            panic!()
+        };
+        assert_eq!(ruby.style_id_ref, 2);
+        let Control::CharOverlap(overlap) = &paragraph.controls[1] else {
+            panic!()
+        };
+        assert_eq!(overlap.char_shape_ids, vec![2, u32::MAX]);
+        let Control::Form(form) = &paragraph.controls[2] else {
+            panic!()
+        };
+        assert_eq!(form.properties["CharShapeID"], "2");
+        let Control::Table(table) = &section.section_def.master_pages[0].paragraphs[0].controls[0]
+        else {
+            panic!()
+        };
+        assert_eq!(table.border_fill_id, 3);
+        assert_eq!(table.zones[0].border_fill_id, 3);
+        assert_eq!(table.cells[0].border_fill_id, 3);
+        assert_eq!(table.cells[0].paragraphs[0].style_id, 2);
+
+        let (merged, analysis) =
+            merge_doc_for_format(&base, &current, &incoming, None, SourceFormat::Hwpx).unwrap();
+        assert!(analysis.conflicts.is_empty());
+        validate_resource_dependencies(&merged).unwrap();
+        let reparsed = parse_document(&serialize_hwpx(&merged).unwrap()).unwrap();
+        validate_resource_dependencies(&reparsed).unwrap();
+        assert_eq!(reparsed.doc_info.char_shapes[2].font_ids[0], 2);
+        assert_eq!(reparsed.doc_info.char_shapes[2].border_fill_id, 3);
+        assert_eq!(reparsed.doc_info.para_shapes[2].tab_def_id, 2);
+        assert_eq!(reparsed.doc_info.para_shapes[2].numbering_id, 3);
+        assert_eq!(reparsed.doc_info.numberings[2].heads[0].char_shape_id, 2);
+        assert_eq!(reparsed.doc_info.bullets[2].char_shape_id, 2);
+        assert_eq!(reparsed.sections[0].section_def.outline_numbering_id, 3);
+        assert_eq!(
+            reparsed.sections[0].section_def.master_pages[0].paragraphs[0]
+                .controls
+                .iter()
+                .find_map(|control| match control {
+                    Control::Table(table) => Some(table.cells[0].border_fill_id),
+                    _ => None,
+                }),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn dependency_validation_covers_positional_consumers() {
+        use crate::model::control::{CharOverlap, FormObject, Ruby};
+
+        let mut valid = Document::default();
+        valid.doc_info.font_faces = vec![vec![Font::default()]; 7];
+        valid.doc_info.border_fills.push(BorderFill::default());
+        valid.doc_info.char_shapes.push(CharShape::default());
+        valid.doc_info.tab_defs.push(TabDef::default());
+        valid.doc_info.numberings.push(Numbering::default());
+        valid.doc_info.bullets.push(Bullet::default());
+        valid.doc_info.para_shapes.push(ParaShape::default());
+        valid.doc_info.styles.push(Style::default());
+        let mut form = FormObject::default();
+        form.properties.insert("CharShapeID".into(), "0".into());
+        valid.sections.push(Section {
+            section_def: SectionDef {
+                outline_numbering_id: 1,
+                page_border_fill: PageBorderFill {
+                    border_fill_id: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            paragraphs: vec![Paragraph {
+                controls: vec![
+                    Control::Table(Box::new(Table {
+                        border_fill_id: 1,
+                        cells: vec![Cell {
+                            border_fill_id: 1,
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    })),
+                    Control::Ruby(Ruby::default()),
+                    Control::CharOverlap(CharOverlap {
+                        char_shape_ids: vec![0, u32::MAX],
+                        ..Default::default()
+                    }),
+                    Control::Form(Box::new(form)),
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        validate_resource_dependencies(&valid).unwrap();
+
+        let mut invalid = valid.clone();
+        invalid.doc_info.char_shapes[0].font_ids[0] = 1;
+        assert!(validate_resource_dependencies(&invalid)
+            .unwrap_err()
+            .contains("missing font"));
+
+        let mut invalid = valid.clone();
+        invalid.doc_info.para_shapes[0].tab_def_id = 1;
+        assert!(validate_resource_dependencies(&invalid)
+            .unwrap_err()
+            .contains("tab definition"));
+
+        let mut invalid = valid.clone();
+        invalid.doc_info.para_shapes[0].head_type = HeadType::Bullet;
+        invalid.doc_info.para_shapes[0].numbering_id = 2;
+        assert!(validate_resource_dependencies(&invalid)
+            .unwrap_err()
+            .contains("missing bullet"));
+
+        let mut invalid = valid.clone();
+        invalid.sections[0].section_def.outline_numbering_id = 2;
+        assert!(validate_resource_dependencies(&invalid)
+            .unwrap_err()
+            .contains("section outline numbering"));
+
+        let mut invalid = valid.clone();
+        invalid.sections[0]
+            .section_def
+            .page_border_fill
+            .border_fill_id = 2;
+        assert!(validate_resource_dependencies(&invalid)
+            .unwrap_err()
+            .contains("page border fill"));
+
+        let mut invalid = valid.clone();
+        let Control::Table(table) = &mut invalid.sections[0].paragraphs[0].controls[0] else {
+            panic!()
+        };
+        table.cells[0].border_fill_id = 2;
+        assert!(validate_resource_dependencies(&invalid)
+            .unwrap_err()
+            .contains("table-cell border fill"));
+
+        let mut invalid = valid.clone();
+        let Control::Ruby(ruby) = &mut invalid.sections[0].paragraphs[0].controls[1] else {
+            panic!()
+        };
+        ruby.style_id_ref = 1;
+        assert!(validate_resource_dependencies(&invalid)
+            .unwrap_err()
+            .contains("ruby style"));
+
+        let mut invalid = valid.clone();
+        let Control::CharOverlap(overlap) = &mut invalid.sections[0].paragraphs[0].controls[2]
+        else {
+            panic!()
+        };
+        overlap.char_shape_ids[0] = 1;
+        assert!(validate_resource_dependencies(&invalid)
+            .unwrap_err()
+            .contains("character overlap"));
+
+        let mut invalid = valid;
+        let Control::Form(form) = &mut invalid.sections[0].paragraphs[0].controls[3] else {
+            panic!()
+        };
+        form.properties.insert("CharShapeID".into(), "1".into());
+        assert!(validate_resource_dependencies(&invalid)
+            .unwrap_err()
+            .contains("form character shape"));
+    }
+
+    #[test]
+    fn style_reference_shift_accepts_id_255_and_rejects_257_styles() {
+        let mut base = Document::default();
+        base.doc_info.styles = vec![Style::default(); 254];
+        base.sections = vec![Section {
+            paragraphs: vec![Paragraph {
+                style_id: 253,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }];
+        let mut current = base.clone();
+        current.doc_info.styles.push(Style::default());
+        let mut incoming = base.clone();
+        incoming.doc_info.styles.push(Style::default());
+        incoming.sections[0].paragraphs[0].style_id = 254;
+
+        let prepared = prepare_merge_views(&base, &current, &incoming).unwrap();
+        assert_eq!(prepared.incoming.sections()[0].paragraphs[0].style_id, 255);
+        let mut boundary = incoming.clone();
+        boundary.doc_info.styles = current.doc_info.styles.clone();
+        boundary.doc_info.styles.push(Style::default());
+        boundary.sections = prepared.incoming.sections().to_vec();
+        boundary.sections[0].raw_stream = None;
+        let bytes = serialize_hwp(&boundary).unwrap();
+        let reparsed = parse_document(&bytes).unwrap();
+        assert_eq!(reparsed.doc_info.styles.len(), 256);
+        assert_eq!(reparsed.sections[0].paragraphs[0].style_id, 255);
+
+        current.doc_info.styles.push(Style::default());
+        let error = prepare_merge_views(&base, &current, &incoming)
+            .err()
+            .expect("257 merged styles must fail before u8 reference saturation");
+        assert!(error.contains("merged style count 257"), "{error}");
     }
 }

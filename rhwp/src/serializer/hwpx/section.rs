@@ -38,7 +38,7 @@ use super::context::SerializeContext;
 use super::field::{
     write_bookmark, write_field_begin, write_field_end, write_field_end_full, write_hyperlink_begin,
 };
-use super::utils::xml_escape;
+use super::utils::{push_xml_escaped, xml_escape, BoundedXmlBuffer, BoundedXmlString};
 use super::SerializeError;
 use super::{picture, table};
 
@@ -55,6 +55,348 @@ fn render_sub_list_open(text_direction: Option<&str>) -> String {
 const LINESEG_SLOT_OPEN: &str = "<hp:linesegarray>";
 const LINESEG_SLOT_CLOSE: &str = "</hp:linesegarray>";
 const PARA_CLOSE: &str = "</hp:p></hs:sec>";
+
+const MAX_XML_GRAPH_DEPTH: usize = 256;
+
+/// Conservative upper bound for XML emitted by a paragraph graph.
+///
+/// This pass deliberately runs before any renderer builds a `String`. Dynamic
+/// text is charged at its maximum XML-escaped size, and every collection that
+/// can multiply markup is charged per element. The constants cover only fixed
+/// tags and decimal attributes; attacker-controlled strings are always charged
+/// separately. A bounded renderer can therefore proceed without first
+/// materializing an over-budget table, caption, shape text box, note, or field.
+struct ParagraphGraphBudget {
+    used: usize,
+    max_bytes: usize,
+}
+
+impl ParagraphGraphBudget {
+    fn new(max_bytes: usize) -> Self {
+        Self { used: 0, max_bytes }
+    }
+
+    fn charge(&mut self, bytes: usize) -> Result<(), SerializeError> {
+        self.used = self
+            .used
+            .checked_add(bytes)
+            .ok_or_else(|| xml_generation_limit_error(self.max_bytes))?;
+        if self.used > self.max_bytes {
+            return Err(xml_generation_limit_error(self.max_bytes));
+        }
+        Ok(())
+    }
+
+    fn charge_items(&mut self, count: usize, bytes_each: usize) -> Result<(), SerializeError> {
+        let bytes = count
+            .checked_mul(bytes_each)
+            .ok_or_else(|| xml_generation_limit_error(self.max_bytes))?;
+        self.charge(bytes)
+    }
+
+    fn charge_escaped(&mut self, value: &str) -> Result<(), SerializeError> {
+        // `&quot;`/`&apos;` are the longest XML entities emitted by our
+        // helpers (six ASCII bytes for one input byte). UTF-8 scalars that do
+        // not need escaping retain their original byte length.
+        let bytes = value
+            .len()
+            .checked_mul(6)
+            .ok_or_else(|| xml_generation_limit_error(self.max_bytes))?;
+        self.charge(bytes)
+    }
+
+    fn charge_opt_escaped(&mut self, value: Option<&str>) -> Result<(), SerializeError> {
+        if let Some(value) = value {
+            self.charge_escaped(value)?;
+        }
+        Ok(())
+    }
+
+    fn paragraphs(&mut self, paragraphs: &[Paragraph], depth: usize) -> Result<(), SerializeError> {
+        if depth > MAX_XML_GRAPH_DEPTH {
+            return Err(SerializeError::XmlError(format!(
+                "HWPX paragraph graph exceeds the {MAX_XML_GRAPH_DEPTH} level generation limit"
+            )));
+        }
+        for paragraph in paragraphs {
+            self.paragraph(paragraph, depth)?;
+        }
+        Ok(())
+    }
+
+    fn paragraph(&mut self, paragraph: &Paragraph, depth: usize) -> Result<(), SerializeError> {
+        // hp:p + at least one run/t wrapper + numeric attributes.
+        self.charge(512)?;
+        self.charge_items(paragraph.char_shapes.len(), 128)?;
+        self.charge_items(paragraph.line_segs.len(), 320)?;
+        self.charge_items(paragraph.field_ranges.len(), 384)?;
+        self.charge_items(paragraph.orphan_field_ends.len(), 256)?;
+
+        // Tabs expand from one byte to a roughly 50-byte element; line breaks
+        // similarly become an element. Other text is bounded by XML escaping.
+        for character in paragraph.text.chars() {
+            match character {
+                '\t' => self.charge(128)?,
+                '\n' => self.charge(32)?,
+                value if (value as u32) < 0x20 => {}
+                value => self.charge(value.len_utf8().saturating_mul(6))?,
+            }
+        }
+
+        for control in &paragraph.controls {
+            self.control(control, depth + 1)?;
+        }
+        Ok(())
+    }
+
+    fn common_object(&mut self, common: &CommonObjAttr) -> Result<(), SerializeError> {
+        self.charge_escaped(&common.description)
+    }
+
+    fn caption(
+        &mut self,
+        caption: &crate::model::shape::Caption,
+        depth: usize,
+    ) -> Result<(), SerializeError> {
+        self.charge(768)?;
+        self.paragraphs(&caption.paragraphs, depth + 1)
+    }
+
+    fn drawing(
+        &mut self,
+        drawing: &crate::model::shape::DrawingObjAttr,
+        depth: usize,
+    ) -> Result<(), SerializeError> {
+        self.charge(4096)?;
+        if let Some(gradient) = &drawing.fill.gradient {
+            self.charge_items(gradient.colors.len(), 128)?;
+            self.charge_items(gradient.positions.len(), 64)?;
+        }
+        if let Some(text_box) = &drawing.text_box {
+            self.charge(768)?;
+            self.paragraphs(&text_box.paragraphs, depth + 1)?;
+        }
+        if let Some(caption) = &drawing.caption {
+            self.caption(caption, depth + 1)?;
+        }
+        Ok(())
+    }
+
+    fn picture(
+        &mut self,
+        picture: &crate::model::image::Picture,
+        depth: usize,
+    ) -> Result<(), SerializeError> {
+        self.charge(8192)?;
+        self.common_object(&picture.common)?;
+        self.charge_opt_escaped(picture.href.as_deref())?;
+        if let Some(shadow) = &picture.effects.shadow {
+            for value in [
+                shadow.style.as_deref(),
+                shadow.alpha.as_deref(),
+                shadow.radius.as_deref(),
+                shadow.direction.as_deref(),
+                shadow.distance.as_deref(),
+                shadow.align_style.as_deref(),
+                shadow.rotation_style.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                self.charge_escaped(value)?;
+            }
+            for point in [shadow.skew.as_ref(), shadow.scale.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                self.charge_opt_escaped(point.x.as_deref())?;
+                self.charge_opt_escaped(point.y.as_deref())?;
+            }
+            if let Some(color) = &shadow.color {
+                for value in [
+                    color.color_type.as_deref(),
+                    color.scheme_idx.as_deref(),
+                    color.system_idx.as_deref(),
+                    color.preset_idx.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    self.charge_escaped(value)?;
+                }
+                if let Some(rgb) = &color.rgb {
+                    self.charge_opt_escaped(rgb.r.as_deref())?;
+                    self.charge_opt_escaped(rgb.g.as_deref())?;
+                    self.charge_opt_escaped(rgb.b.as_deref())?;
+                }
+            }
+        }
+        if let Some(caption) = &picture.caption {
+            self.caption(caption, depth + 1)?;
+        }
+        Ok(())
+    }
+
+    fn shape(&mut self, shape: &ShapeObject, depth: usize) -> Result<(), SerializeError> {
+        if depth > MAX_XML_GRAPH_DEPTH {
+            return Err(SerializeError::XmlError(format!(
+                "HWPX shape graph exceeds the {MAX_XML_GRAPH_DEPTH} level generation limit"
+            )));
+        }
+        self.charge(4096)?;
+        self.common_object(shape.common())?;
+        if let Some(drawing) = shape.drawing() {
+            self.drawing(drawing, depth + 1)?;
+        }
+        match shape {
+            ShapeObject::Line(line) => {
+                if let Some(connector) = &line.connector {
+                    self.charge_items(connector.control_points.len(), 192)?;
+                }
+            }
+            ShapeObject::Polygon(polygon) => self.charge_items(polygon.points.len(), 128)?,
+            ShapeObject::Curve(curve) => {
+                self.charge_items(curve.points.len(), 128)?;
+                self.charge_items(curve.segment_types.len(), 32)?;
+            }
+            ShapeObject::Group(group) => {
+                if let Some(caption) = &group.caption {
+                    self.caption(caption, depth + 1)?;
+                }
+                for child in &group.children {
+                    self.shape(child, depth + 1)?;
+                }
+            }
+            ShapeObject::Picture(picture) => self.picture(picture, depth + 1)?,
+            ShapeObject::Chart(chart) => {
+                self.charge_opt_escaped(chart.title.as_deref())?;
+                for axis in [chart.x_axis.as_ref(), chart.y_axis.as_ref()]
+                    .into_iter()
+                    .flatten()
+                {
+                    self.charge_opt_escaped(axis.label.as_deref())?;
+                    for label in &axis.labels {
+                        self.charge_escaped(label)?;
+                    }
+                }
+                for series in &chart.series {
+                    self.charge_escaped(&series.name)?;
+                    self.charge_items(series.values.len(), 64)?;
+                    for category in &series.categories {
+                        self.charge_escaped(category)?;
+                    }
+                }
+                if let Some(caption) = &chart.caption {
+                    self.caption(caption, depth + 1)?;
+                }
+            }
+            ShapeObject::Ole(ole) => {
+                if let Some(caption) = &ole.caption {
+                    self.caption(caption, depth + 1)?;
+                }
+            }
+            ShapeObject::Rectangle(_) | ShapeObject::Ellipse(_) | ShapeObject::Arc(_) => {}
+        }
+        Ok(())
+    }
+
+    fn table(
+        &mut self,
+        table: &crate::model::table::Table,
+        depth: usize,
+    ) -> Result<(), SerializeError> {
+        self.charge(4096)?;
+        self.common_object(&table.common)?;
+        self.charge_items(usize::from(table.row_count), 64)?;
+        self.charge_items(table.zones.len(), 256)?;
+        if let Some(caption) = &table.caption {
+            self.caption(caption, depth + 1)?;
+        }
+        for cell in &table.cells {
+            self.charge(2048)?;
+            self.charge_opt_escaped(cell.field_name.as_deref())?;
+            self.paragraphs(&cell.paragraphs, depth + 1)?;
+        }
+        Ok(())
+    }
+
+    fn form(&mut self, form: &crate::model::control::FormObject) -> Result<(), SerializeError> {
+        self.charge(4096)?;
+        self.charge_escaped(&form.name)?;
+        self.charge_escaped(&form.caption)?;
+        self.charge_escaped(&form.text)?;
+        self.charge_items(form.properties.len(), 256)?;
+        for (key, value) in &form.properties {
+            self.charge_escaped(key)?;
+            self.charge_escaped(value)?;
+        }
+        Ok(())
+    }
+
+    fn control(&mut self, control: &Control, depth: usize) -> Result<(), SerializeError> {
+        self.charge(1024)?;
+        match control {
+            Control::ColumnDef(column) => {
+                self.charge_items(column.widths.len(), 96)?;
+                self.charge_items(column.gaps.len(), 64)?;
+            }
+            Control::Table(table) => self.table(table, depth + 1)?,
+            Control::Shape(shape) => self.shape(shape, depth + 1)?,
+            Control::Picture(picture) => self.picture(picture, depth + 1)?,
+            Control::Header(header) => self.paragraphs(&header.paragraphs, depth + 1)?,
+            Control::Footer(footer) => self.paragraphs(&footer.paragraphs, depth + 1)?,
+            Control::Footnote(note) => self.paragraphs(&note.paragraphs, depth + 1)?,
+            Control::Endnote(note) => self.paragraphs(&note.paragraphs, depth + 1)?,
+            Control::Bookmark(bookmark) => self.charge_escaped(&bookmark.name)?,
+            Control::Hyperlink(link) => {
+                self.charge_escaped(&link.url)?;
+                self.charge_escaped(&link.text)?;
+            }
+            Control::Ruby(ruby) => {
+                self.charge_escaped(&ruby.main_text)?;
+                self.charge_escaped(&ruby.ruby_text)?;
+            }
+            Control::CharOverlap(overlap) => {
+                self.charge_items(overlap.chars.len(), 24)?;
+                self.charge_items(overlap.char_shape_ids.len(), 64)?;
+            }
+            Control::Equation(equation) => {
+                self.charge(4096)?;
+                self.common_object(&equation.common)?;
+                self.charge_escaped(&equation.script)?;
+                self.charge_escaped(&equation.version_info)?;
+                self.charge_escaped(&equation.font_name)?;
+            }
+            Control::Field(field) => {
+                self.charge_escaped(&field.command)?;
+                self.charge_opt_escaped(field.ctrl_data_name.as_deref())?;
+                self.charge_opt_escaped(field.memo_text_direction.as_deref())?;
+                if let Some(raw) = &field.raw_parameters_xml {
+                    self.charge(raw.len())?;
+                }
+                self.paragraphs(&field.memo_paragraphs, depth + 1)?;
+            }
+            Control::Form(form) => self.form(form)?,
+            // These variants emit only fixed-size markup or are intentionally
+            // omitted from inline HWPX run output.
+            Control::SectionDef(_)
+            | Control::AutoNumber(_)
+            | Control::NewNumber(_)
+            | Control::PageNumberPos(_)
+            | Control::PageHide(_)
+            | Control::HiddenComment(_)
+            | Control::Unknown(_) => {}
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn ensure_paragraph_graph_within_limit(
+    paragraphs: &[Paragraph],
+    max_bytes: usize,
+) -> Result<(), SerializeError> {
+    ParagraphGraphBudget::new(max_bytes).paragraphs(paragraphs, 0)
+}
 
 // 템플릿 내 첫 <hp:p> 태그의 실제 문자열 (id="3121190098" 랜덤 해시 포함).
 // 템플릿은 정적이므로 이 문자열이 고정 위치에 있음이 보장됨.
@@ -408,6 +750,45 @@ pub fn write_section(
     index: usize,
     ctx: &mut SerializeContext,
 ) -> Result<Vec<u8>, SerializeError> {
+    write_section_inner(section, doc, index, ctx, usize::MAX)
+}
+
+pub(crate) fn write_section_limited(
+    section: &Section,
+    doc: &Document,
+    index: usize,
+    ctx: &mut SerializeContext,
+    max_bytes: usize,
+) -> Result<Vec<u8>, SerializeError> {
+    // The template and section-property substitutions have bounded, fixed
+    // cardinality. Master-page refs are the only section-level collection;
+    // every paragraph/control/nested subList is accounted by the graph pass.
+    const SECTION_PROPERTY_SLACK: usize = 16 * 1024;
+    let master_ref_bytes = section
+        .section_def
+        .master_pages
+        .len()
+        .checked_mul(128)
+        .ok_or_else(|| xml_generation_limit_error(max_bytes))?;
+    let fixed_bytes = EMPTY_SECTION_XML
+        .len()
+        .checked_add(SECTION_PROPERTY_SLACK)
+        .and_then(|bytes| bytes.checked_add(master_ref_bytes))
+        .ok_or_else(|| xml_generation_limit_error(max_bytes))?;
+    let graph_limit = max_bytes
+        .checked_sub(fixed_bytes)
+        .ok_or_else(|| xml_generation_limit_error(max_bytes))?;
+    ensure_paragraph_graph_within_limit(&section.paragraphs, graph_limit)?;
+    write_section_inner(section, doc, index, ctx, max_bytes)
+}
+
+fn write_section_inner(
+    section: &Section,
+    doc: &Document,
+    index: usize,
+    ctx: &mut SerializeContext,
+    max_bytes: usize,
+) -> Result<Vec<u8>, SerializeError> {
     let mut vert_cursor: u32 = 0;
 
     let first_para = section.paragraphs.first();
@@ -415,12 +796,21 @@ pub fn write_section(
     // XML 방출만 1회 억제한다(슬롯 위치는 보존). 렌더 직후 reset 하여 추가 문단 누설 방지.
     ctx.body_coldef_template_pending = true;
     let (first_runs, first_linesegs, first_advance) = match first_para {
-        Some(p) => render_paragraph_parts(p, vert_cursor, ctx)?,
+        Some(p) => render_paragraph_parts_limited(p, vert_cursor, ctx, max_bytes)?,
         // 문단이 없는 섹션(비파싱 IR) — linesegarray 방출 생략 (#1380)
         None => (String::new(), String::new(), vert_cursor),
     };
     ctx.body_coldef_template_pending = false;
     vert_cursor = first_advance;
+    if first_runs
+        .len()
+        .checked_add(first_linesegs.len())
+        .map_or(true, |bytes| bytes > max_bytes)
+    {
+        return Err(SerializeError::XmlError(format!(
+            "section{index}.xml exceeds the {max_bytes} byte generation limit"
+        )));
+    }
 
     // 치환은 모두 pristine 템플릿의 고정 anchor 에 대해 수행한다 (#1378):
     // linesegarray 치환을 콘텐츠(run 시퀀스) 삽입보다 먼저 두어, 콘텐츠에 포함된
@@ -442,6 +832,11 @@ pub fn write_section(
     // [#1984] 각주/미주 모양(구분선 여백·주석간격)을 IR 값으로 치환 — 미치환 시 각주 zone
     // 높이가 기본값으로 고정돼 각주 있는 페이지의 표 분할·페이지 수가 갈린다.
     out = replace_footnote_shape(&out, &section.section_def);
+    if out.len() > max_bytes {
+        return Err(SerializeError::XmlError(format!(
+            "section{index}.xml exceeds the {max_bytes} byte generation limit"
+        )));
+    }
 
     // 바탕쪽(masterPage) — secPr 의 masterPageCnt 치환 + secPr 내부 끝에 idRef 참조 삽입.
     // 누락 시 라운드트립에서 바탕쪽 전체(그 안의 그림/표/문단 노드 포함)가 소실된다.
@@ -455,6 +850,15 @@ pub fn write_section(
         let ids: Vec<String> = (0..master_pages.len())
             .map(|k| format!("masterpage{}", base + k))
             .collect();
+        if ids
+            .len()
+            .checked_mul(64)
+            .map_or(true, |bytes| bytes > max_bytes)
+        {
+            return Err(SerializeError::XmlError(format!(
+                "section{index}.xml exceeds the {max_bytes} byte generation limit"
+            )));
+        }
         out = out.replacen(
             r#"masterPageCnt="0""#,
             &format!(r#"masterPageCnt="{}""#, master_pages.len()),
@@ -502,20 +906,31 @@ pub fn write_section(
 
     // 추가 문단: `</hp:p></hs:sec>` 직전에 `<hp:p>` 요소를 삽입.
     if section.paragraphs.len() > 1 {
-        let mut extra = String::new();
+        let mut extra = BoundedXmlString::new(max_bytes);
         for p in section.paragraphs.iter().skip(1) {
-            let (runs, linesegs, advance) = render_paragraph_parts(p, vert_cursor, ctx)?;
+            let remaining = max_bytes.saturating_sub(extra.len());
+            let (runs, linesegs, advance) =
+                render_paragraph_parts_limited(p, vert_cursor, ctx, remaining)?;
             vert_cursor = advance;
             let pid = ctx.next_para_id();
             let sid = ctx.effective_style_id(p.style_id);
-            extra.push_str(&render_hp_p_open(p, pid, sid));
-            extra.push_str(&runs);
-            extra.push_str(&linesegs);
-            extra.push_str("</hp:p>");
+            extra.push_str(&render_hp_p_open(p, pid, sid))?;
+            extra.push_str(&runs)?;
+            extra.push_str(&linesegs)?;
+            extra.push_str("</hp:p>")?;
         }
-        out = out.replacen(PARA_CLOSE, &format!("</hp:p>{}</hs:sec>", extra), 1);
+        out = out.replacen(
+            PARA_CLOSE,
+            &format!("</hp:p>{}</hs:sec>", extra.as_str()),
+            1,
+        );
     }
 
+    if out.len() > max_bytes {
+        return Err(SerializeError::XmlError(format!(
+            "section{index}.xml exceeds the {max_bytes} byte generation limit"
+        )));
+    }
     Ok(out.into_bytes())
 }
 
@@ -562,18 +977,26 @@ pub(crate) fn render_paragraph_parts(
     vert_start: u32,
     ctx: &mut SerializeContext,
 ) -> Result<(String, String, u32), SerializeError> {
-    let runs_xml = render_runs(para, ctx)?;
+    render_paragraph_parts_limited(para, vert_start, ctx, usize::MAX)
+}
+
+pub(crate) fn render_paragraph_parts_limited(
+    para: &Paragraph,
+    vert_start: u32,
+    ctx: &mut SerializeContext,
+    max_bytes: usize,
+) -> Result<(String, String, u32), SerializeError> {
+    ensure_paragraph_graph_within_limit(std::slice::from_ref(para), max_bytes)?;
+    let runs_xml = render_runs_limited(para, ctx, max_bytes)?;
 
     if !para.line_segs.is_empty() {
         // IR 기반 출력 — 원본 lineseg 값 보존 (#177)
-        let linesegs = format!(
-            "{}{}{}",
-            LINESEG_SLOT_OPEN,
-            render_lineseg_array_from_ir(&para.line_segs),
-            LINESEG_SLOT_CLOSE
-        );
+        let mut linesegs = BoundedXmlString::new(max_bytes.saturating_sub(runs_xml.len()));
+        linesegs.push_str(LINESEG_SLOT_OPEN)?;
+        render_lineseg_array_from_ir_limited(&para.line_segs, &mut linesegs)?;
+        linesegs.push_str(LINESEG_SLOT_CLOSE)?;
         let vert_end = next_vert_cursor_from_ir(&para.line_segs, vert_start);
-        Ok((runs_xml, linesegs, vert_end))
+        Ok((runs_xml, linesegs.into_inner(), vert_end))
     } else {
         // IR 에 line_segs 없음 — linesegarray 방출 생략 (#1380)
         Ok((runs_xml, String::new(), vert_start))
@@ -589,34 +1012,54 @@ pub(crate) fn render_hp_t_content(
     tab_extended: &[[u16; 7]],
     tab_idx: &mut usize,
 ) -> String {
-    let mut t_xml = String::from("<hp:t>");
-    let mut buf = String::new();
+    render_hp_t_content_limited(text, tab_extended, tab_idx, usize::MAX)
+        .expect("unbounded hp:t rendering")
+}
+
+fn render_hp_t_content_limited(
+    text: &str,
+    tab_extended: &[[u16; 7]],
+    tab_idx: &mut usize,
+    max_bytes: usize,
+) -> Result<String, SerializeError> {
+    use std::fmt::Write as _;
+
+    let mut t_xml = BoundedXmlString::from_str("<hp:t>", max_bytes)?;
+    let mut buf = BoundedXmlString::new(max_bytes);
     for c in text.chars() {
         match c {
             '\t' => {
-                flush_buf(&mut t_xml, &mut buf);
+                flush_buf_limited(&mut t_xml, &mut buf)?;
                 let (width, leader, tab_type) = if let Some(ext) = tab_extended.get(*tab_idx) {
                     *tab_idx += 1;
                     (ext[0] as u32, ext[2] & 0x00ff, (ext[2] >> 8) & 0x00ff)
                 } else {
                     (TAB_DEFAULT_WIDTH, 0u16, 1u16)
                 };
-                t_xml.push_str(&format!(
+                write!(
+                    t_xml,
                     r#"<hp:tab width="{}" leader="{}" type="{}"/>"#,
                     width, leader, tab_type
-                ));
+                )
+                .map_err(|_| xml_generation_limit_error(max_bytes))?;
             }
             '\n' => {
-                flush_buf(&mut t_xml, &mut buf);
-                t_xml.push_str("<hp:lineBreak/>");
+                flush_buf_limited(&mut t_xml, &mut buf)?;
+                t_xml.push_str("<hp:lineBreak/>")?;
             }
             c if (c as u32) < 0x20 => { /* 기타 제어문자 무시 */ }
-            c => buf.push(c),
+            c => buf.push(c)?,
         }
     }
-    flush_buf(&mut t_xml, &mut buf);
-    t_xml.push_str("</hp:t>");
-    t_xml
+    flush_buf_limited(&mut t_xml, &mut buf)?;
+    t_xml.push_str("</hp:t>")?;
+    Ok(t_xml.into_inner())
+}
+
+fn xml_generation_limit_error(max_bytes: usize) -> SerializeError {
+    SerializeError::XmlError(format!(
+        "HWPX XML exceeds the {max_bytes} byte generation limit"
+    ))
 }
 
 /// 문단 콘텐츠를 `char_shapes` 경계 기준 다중 `<hp:run>` 으로 분할 출력하는 빌더 (#1378).
@@ -746,7 +1189,12 @@ fn emit_orphan_field_end(out: &mut String, ofe: &OrphanFieldEnd) -> Result<(), S
 ///
 /// `char_offsets` 로 문자 idx → UTF-16 위치를 매핑하므로 IR 내 컨트롤(8 유닛 갭)이
 /// 있어도 경계 위치가 어긋나지 않는다.
-fn split_text_into(splitter: &mut RunSplitter, para: &Paragraph, tab_idx: &mut usize) {
+fn split_text_into(
+    splitter: &mut RunSplitter,
+    para: &Paragraph,
+    tab_idx: &mut usize,
+    max_bytes: usize,
+) -> Result<(), SerializeError> {
     let mut text_buf = String::new();
     let mut running_pos = 0u32;
     for (idx, c) in para.text.chars().enumerate() {
@@ -757,7 +1205,8 @@ fn split_text_into(splitter: &mut RunSplitter, para: &Paragraph, tab_idx: &mut u
                 &mut text_buf,
                 &para.tab_extended,
                 tab_idx,
-            );
+                max_bytes.saturating_sub(splitter.runs.len()),
+            )?;
             splitter.cut_before(char_pos);
         }
         text_buf.push(c);
@@ -770,11 +1219,21 @@ fn split_text_into(splitter: &mut RunSplitter, para: &Paragraph, tab_idx: &mut u
         &mut text_buf,
         &para.tab_extended,
         tab_idx,
-    );
+        max_bytes.saturating_sub(splitter.runs.len()),
+    )?;
+    Ok(())
 }
 
 /// Paragraph 본문을 완전한 `<hp:run>` 시퀀스로 직렬화한다 (#1378 다중 run 분할).
 fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> Result<String, SerializeError> {
+    render_runs_limited(para, ctx, usize::MAX)
+}
+
+fn render_runs_limited(
+    para: &Paragraph,
+    ctx: &mut SerializeContext,
+    max_bytes: usize,
+) -> Result<String, SerializeError> {
     // ID 참조 무결성 (구현계획서 1.5): 실제 char_shapes entry 만 reference.
     // 빈 IR 의 fallback 0 은 제외 — char_shapes 미등록 문서(`Document::default()`)의
     // 직렬화를 깨지 않도록.
@@ -903,14 +1362,18 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> Result<String, S
         && para.orphan_field_ends.is_empty()
         && splitter.single_run()
     {
-        let t = render_hp_t_content(&para.text, &para.tab_extended, &mut tab_idx);
+        let remaining = max_bytes
+            .saturating_sub(splitter.runs.len())
+            .saturating_sub(splitter.content.len());
+        let t =
+            render_hp_t_content_limited(&para.text, &para.tab_extended, &mut tab_idx, remaining)?;
         splitter.content.push_str(&t);
-        return Ok(splitter.finish());
+        return finish_runs_limited(splitter, max_bytes);
     }
 
     // mismatch 경로: 슬롯 위치 추정 불가 — 텍스트(경계 분할 포함) 후 슬롯 일괄 방출
     if slot_count != slots.len() {
-        split_text_into(&mut splitter, para, &mut tab_idx);
+        split_text_into(&mut splitter, para, &mut tab_idx, max_bytes)?;
         let mut bm_done = vec![false; para.controls.len()];
         for (si, slot) in slots.iter().enumerate() {
             // [Task #1627] empty-text 문단: 이 slot 앞(controls 순서)의 bookmark 를 먼저 방출.
@@ -922,7 +1385,12 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> Result<String, S
                     slot_ctrl_indices[si],
                 )?;
             }
-            render_control_slot(&mut splitter.content, slot, ctx)?;
+            render_control_slot_limited(
+                &mut splitter.content,
+                slot,
+                ctx,
+                max_bytes.saturating_sub(splitter.runs.len()),
+            )?;
         }
         if bm_inorder {
             // 마지막 slot 뒤에 오는 trailing bookmark.
@@ -939,7 +1407,7 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> Result<String, S
         for ofe in &para.orphan_field_ends {
             emit_orphan_field_end(&mut splitter.content, ofe)?;
         }
-        return Ok(splitter.finish());
+        return finish_runs_limited(splitter, max_bytes);
     }
 
     // 메인 경로 — UTF-16 위치 축 위에서 슬롯/필드/문자/경계를 함께 처리
@@ -969,7 +1437,12 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> Result<String, S
                     slot_ctrl_indices[slot_idx],
                 )?;
             }
-            render_control_slot(&mut splitter.content, slots[slot_idx], ctx)?;
+            render_control_slot_limited(
+                &mut splitter.content,
+                slots[slot_idx],
+                ctx,
+                max_bytes.saturating_sub(splitter.runs.len()),
+            )?;
             slot_idx += 1;
             expected_utf16_pos = expected_utf16_pos.saturating_add(8);
         }
@@ -1019,7 +1492,8 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> Result<String, S
                     &mut text_buf,
                     &para.tab_extended,
                     &mut tab_idx,
-                );
+                    max_bytes.saturating_sub(splitter.runs.len()),
+                )?;
                 splitter.cut_before(expected_utf16_pos);
                 emit_orphan_field_end(&mut splitter.content, &para.orphan_field_ends[oi])?;
                 expected_utf16_pos = expected_utf16_pos.saturating_add(8);
@@ -1031,7 +1505,8 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> Result<String, S
                 &mut text_buf,
                 &para.tab_extended,
                 &mut tab_idx,
-            );
+                max_bytes.saturating_sub(splitter.runs.len()),
+            )?;
             // 슬롯 시작 위치의 경계 — 슬롯은 새 run 소속 (규칙 1)
             splitter.cut_before(expected_utf16_pos);
             if bm_inorder {
@@ -1042,7 +1517,12 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> Result<String, S
                     slot_ctrl_indices[slot_idx],
                 )?;
             }
-            render_control_slot(&mut splitter.content, slots[slot_idx], ctx)?;
+            render_control_slot_limited(
+                &mut splitter.content,
+                slots[slot_idx],
+                ctx,
+                max_bytes.saturating_sub(splitter.runs.len()),
+            )?;
             let emitted_ctrl_idx = slot_ctrl_indices[slot_idx];
             slot_idx += 1;
             expected_utf16_pos = expected_utf16_pos.saturating_add(8);
@@ -1072,7 +1552,8 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> Result<String, S
                     &mut text_buf,
                     &para.tab_extended,
                     &mut tab_idx,
-                );
+                    max_bytes.saturating_sub(splitter.runs.len()),
+                )?;
                 splitter.cut_before(expected_utf16_pos);
                 emit_orphan_field_end(&mut splitter.content, ofe)?;
                 expected_utf16_pos = expected_utf16_pos.saturating_add(8);
@@ -1093,7 +1574,8 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> Result<String, S
                     &mut text_buf,
                     &para.tab_extended,
                     &mut tab_idx,
-                );
+                    max_bytes.saturating_sub(splitter.runs.len()),
+                )?;
                 splitter.cut_before(expected_utf16_pos);
                 emit_field_end(&mut splitter.content, para, fr)?;
                 field_end_emitted[i] = true;
@@ -1124,9 +1606,15 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> Result<String, S
                 &mut text_buf,
                 &para.tab_extended,
                 &mut tab_idx,
-            );
+                max_bytes.saturating_sub(splitter.runs.len()),
+            )?;
             splitter.cut_before(expected_utf16_pos);
-            render_control_slot(&mut splitter.content, slots[slot_idx], ctx)?;
+            render_control_slot_limited(
+                &mut splitter.content,
+                slots[slot_idx],
+                ctx,
+                max_bytes.saturating_sub(splitter.runs.len()),
+            )?;
             slot_idx += 1;
             expected_utf16_pos = expected_utf16_pos.saturating_add(8);
             continue;
@@ -1139,7 +1627,8 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> Result<String, S
                 &mut text_buf,
                 &para.tab_extended,
                 &mut tab_idx,
-            );
+                max_bytes.saturating_sub(splitter.runs.len()),
+            )?;
             splitter.cut_before(char_pos);
         }
 
@@ -1164,7 +1653,8 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> Result<String, S
                     &mut text_buf,
                     &para.tab_extended,
                     &mut tab_idx,
-                );
+                    max_bytes.saturating_sub(splitter.runs.len()),
+                )?;
                 splitter.cut_before(expected_utf16_pos);
                 emit_field_end(&mut splitter.content, para, fr)?;
                 // [#1407] fieldEnd 는 8유닛 슬롯을 소비한다. expected 를 +8 진행하지
@@ -1181,7 +1671,8 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> Result<String, S
         &mut text_buf,
         &para.tab_extended,
         &mut tab_idx,
-    );
+        max_bytes.saturating_sub(splitter.runs.len()),
+    )?;
 
     // end_char_idx >= text.len() 인 경우 루프에서 감지되지 않으므로 루프 후에 처리.
     // [Task #1893] 단, 문단 끝의 0-length 필드(start == end == text.len())는 자기
@@ -1228,7 +1719,12 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> Result<String, S
                 slot_ctrl_indices[slot_idx],
             )?;
         }
-        render_control_slot(&mut splitter.content, slots[slot_idx], ctx)?;
+        render_control_slot_limited(
+            &mut splitter.content,
+            slots[slot_idx],
+            ctx,
+            max_bytes.saturating_sub(splitter.runs.len()),
+        )?;
         let emitted_ctrl_idx = slot_ctrl_indices[slot_idx];
         slot_idx += 1;
         expected_utf16_pos = expected_utf16_pos.saturating_add(8);
@@ -1260,7 +1756,15 @@ fn render_runs(para: &Paragraph, ctx: &mut SerializeContext) -> Result<String, S
         emit_inorder_bookmarks(&mut splitter.content, para, &mut bm_done, usize::MAX)?;
     }
 
-    Ok(splitter.finish())
+    finish_runs_limited(splitter, max_bytes)
+}
+
+fn finish_runs_limited(splitter: RunSplitter, max_bytes: usize) -> Result<String, SerializeError> {
+    let runs = splitter.finish();
+    if runs.len() > max_bytes {
+        return Err(xml_generation_limit_error(max_bytes));
+    }
+    Ok(runs)
 }
 
 fn inferred_control_slot_count(para: &Paragraph) -> usize {
@@ -1331,11 +1835,18 @@ fn flush_text_fragment(
     text_buf: &mut String,
     tab_extended: &[[u16; 7]],
     tab_idx: &mut usize,
-) {
+    max_bytes: usize,
+) -> Result<(), SerializeError> {
     if !text_buf.is_empty() {
-        out.push_str(&render_hp_t_content(text_buf, tab_extended, tab_idx));
+        let remaining = max_bytes.saturating_sub(out.len());
+        let rendered = render_hp_t_content_limited(text_buf, tab_extended, tab_idx, remaining)?;
+        out.try_reserve(rendered.len()).map_err(|error| {
+            SerializeError::XmlError(format!("HWPX XML allocation failed: {error}"))
+        })?;
+        out.push_str(&rendered);
         text_buf.clear();
     }
+    Ok(())
 }
 
 /// [Task #1627] empty-text 문단에서 bookmark 를 para.controls 순서대로 in-order 방출한다.
@@ -1370,15 +1881,30 @@ fn render_control_slot(
     control: &Control,
     ctx: &mut SerializeContext,
 ) -> Result<(), SerializeError> {
+    render_control_slot_inner(out, control, ctx, usize::MAX)
+}
+
+fn render_control_slot_inner(
+    out: &mut String,
+    control: &Control,
+    ctx: &mut SerializeContext,
+    max_bytes: usize,
+) -> Result<(), SerializeError> {
     match control {
         Control::Equation(eq) => {
             out.push_str(&render_equation(eq));
         }
         Control::Table(tbl) => {
-            out.push_str(&writer_to_string(|w| table::write_table(w, tbl, ctx))?);
+            let remaining = max_bytes.saturating_sub(out.len());
+            out.push_str(&writer_to_string_limited(remaining, |w| {
+                table::write_table(w, tbl, ctx)
+            })?);
         }
         Control::Picture(pic) => {
-            out.push_str(&writer_to_string(|w| picture::write_picture(w, pic, ctx))?);
+            let remaining = max_bytes.saturating_sub(out.len());
+            out.push_str(&writer_to_string_limited(remaining, |w| {
+                picture::write_picture(w, pic, ctx)
+            })?);
         }
         Control::Shape(shape) => {
             out.push_str(&render_shape(shape, ctx)?);
@@ -1427,7 +1953,10 @@ fn render_control_slot(
                 }
                 out.push_str("</hp:fieldBegin>");
             } else {
-                out.push_str(&writer_to_string(|w| write_field_begin(w, f))?);
+                let remaining = max_bytes.saturating_sub(out.len());
+                out.push_str(&writer_to_string_limited(remaining, |w| {
+                    write_field_begin(w, f)
+                })?);
             }
             out.push_str("</hp:ctrl>");
         }
@@ -1439,7 +1968,10 @@ fn render_control_slot(
         Control::AutoNumber(an) => out.push_str(&render_autonum(an)),
         // 폼은 <hp:run> 직접 자식 (Table/Picture와 동일, <hp:ctrl> 비포장)
         Control::Form(form) => {
-            out.push_str(&writer_to_string(|w| super::form::write_form(w, form))?);
+            let remaining = max_bytes.saturating_sub(out.len());
+            out.push_str(&writer_to_string_limited(remaining, |w| {
+                super::form::write_form(w, form)
+            })?);
         }
         Control::CharOverlap(co) => out.push_str(&render_compose(co)),
         // [Task #1587] 덧말(Ruby) 인라인 방출. is_hwpx_inline_slot 에 등록돼 슬롯 위치는
@@ -1463,7 +1995,19 @@ fn render_control_slot(
         }
         _ => {}
     }
+    if out.len() > max_bytes {
+        return Err(xml_generation_limit_error(max_bytes));
+    }
     Ok(())
+}
+
+fn render_control_slot_limited(
+    out: &mut String,
+    control: &Control,
+    ctx: &mut SerializeContext,
+    max_bytes: usize,
+) -> Result<(), SerializeError> {
+    render_control_slot_inner(out, control, ctx, max_bytes)
 }
 
 /// 덧말(Ruby) `<hp:dutmal>` 직렬화 (#1587). `parse_dutmal` 의 역매핑.
@@ -1874,11 +2418,18 @@ fn render_new_num(nn: &NewNumber) -> String {
 
 fn writer_to_string<F>(f: F) -> Result<String, SerializeError>
 where
-    F: FnOnce(&mut Writer<Vec<u8>>) -> Result<(), SerializeError>,
+    F: FnOnce(&mut Writer<BoundedXmlBuffer>) -> Result<(), SerializeError>,
 {
-    let mut writer = Writer::new(Vec::new());
+    writer_to_string_limited(usize::MAX, f)
+}
+
+fn writer_to_string_limited<F>(max_bytes: usize, f: F) -> Result<String, SerializeError>
+where
+    F: FnOnce(&mut Writer<BoundedXmlBuffer>) -> Result<(), SerializeError>,
+{
+    let mut writer = Writer::new(BoundedXmlBuffer::new(max_bytes));
     f(&mut writer)?;
-    let bytes = writer.into_inner();
+    let bytes = writer.into_inner().into_inner();
     String::from_utf8(bytes)
         .map_err(|e| SerializeError::XmlError(format!("invalid UTF-8 from XML writer: {e}")))
 }
@@ -2391,6 +2942,31 @@ fn render_lineseg_array_from_ir(segs: &[LineSeg]) -> String {
     out
 }
 
+fn render_lineseg_array_from_ir_limited(
+    segs: &[LineSeg],
+    out: &mut BoundedXmlString,
+) -> Result<(), SerializeError> {
+    use std::fmt::Write as _;
+
+    for seg in segs {
+        write!(
+            out,
+            r#"<hp:lineseg textpos="{}" vertpos="{}" vertsize="{}" textheight="{}" baseline="{}" spacing="{}" horzpos="{}" horzsize="{}" flags="{}"/>"#,
+            seg.text_start,
+            seg.vertical_pos,
+            seg.line_height,
+            seg.text_height,
+            seg.baseline_distance,
+            seg.line_spacing,
+            seg.column_start,
+            seg.segment_width,
+            seg.tag,
+        )
+        .map_err(|_| SerializeError::XmlError("HWPX lineseg generation limit exceeded".into()))?;
+    }
+    Ok(())
+}
+
 /// IR 기반 다음 문단의 vert_start 계산 — 마지막 lineseg 의 vpos + lh 사용.
 fn next_vert_cursor_from_ir(segs: &[LineSeg], vert_start: u32) -> u32 {
     if segs.len() == 1 && segs[0].is_missing_lineseg_placeholder() {
@@ -2411,11 +2987,15 @@ fn next_vert_cursor_from_ir(segs: &[LineSeg], vert_start: u32) -> u32 {
     }
 }
 
-fn flush_buf(t_xml: &mut String, buf: &mut String) {
+fn flush_buf_limited(
+    t_xml: &mut BoundedXmlString,
+    buf: &mut BoundedXmlString,
+) -> Result<(), SerializeError> {
     if !buf.is_empty() {
-        t_xml.push_str(&xml_escape(buf));
+        push_xml_escaped(t_xml, buf.as_str())?;
         buf.clear();
     }
+    Ok(())
 }
 
 /// 템플릿의 첫 `<hp:linesegarray>...</hp:linesegarray>` **요소 전체**를
@@ -2632,6 +3212,60 @@ fn render_page_border_fill(ty: &str, pbf: &crate::model::page::PageBorderFill) -
 mod tests {
     use super::*;
     use crate::model::paragraph::{CharShapeRef, Paragraph};
+
+    #[test]
+    fn section_generation_rejects_an_exhausted_member_budget_before_rendering() {
+        let section = Section::default();
+        let doc = Document::default();
+        let mut ctx = SerializeContext::collect_from_document(&doc);
+
+        let error = write_section_limited(&section, &doc, 0, &mut ctx, 1)
+            .expect_err("section XML must honor its prospective ZIP member budget");
+
+        assert!(error.to_string().contains("generation limit"), "{error}");
+    }
+
+    #[test]
+    fn section_limit_accounts_for_xml_escape_expansion_before_rendering() {
+        const LIMIT: usize = 64 * 1024;
+        let section = Section {
+            paragraphs: vec![Paragraph {
+                // Raw input is well below LIMIT, but `&amp;` expansion is not.
+                text: "&".repeat(20_000),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let doc = Document::default();
+        let mut ctx = SerializeContext::collect_from_document(&doc);
+
+        let error = write_section_limited(&section, &doc, 0, &mut ctx, LIMIT)
+            .expect_err("escaped hp:t content must be rejected before allocation");
+
+        assert!(error.to_string().contains("generation limit"), "{error}");
+    }
+
+    #[test]
+    fn section_limit_accounts_for_control_payloads_before_rendering() {
+        const LIMIT: usize = 64 * 1024;
+        let section = Section {
+            paragraphs: vec![Paragraph {
+                controls: vec![Control::Ruby(Ruby {
+                    main_text: "&".repeat(20_000),
+                    ..Default::default()
+                })],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let doc = Document::default();
+        let mut ctx = SerializeContext::collect_from_document(&doc);
+
+        let error = write_section_limited(&section, &doc, 0, &mut ctx, LIMIT)
+            .expect_err("escaped control content must be rejected before allocation");
+
+        assert!(error.to_string().contains("generation limit"), "{error}");
+    }
 
     /// [#XXXX] `<hp:pageNum formatType="...">`의 원문자(circled digit) 값은 OWPML Core
     /// 스키마 NumberType1 표기인 "CIRCLED_DIGIT"이어야 한다. 종전엔 "CIRCLE_DIGIT"(D 없음)

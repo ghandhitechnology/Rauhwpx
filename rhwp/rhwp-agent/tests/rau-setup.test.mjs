@@ -17,7 +17,7 @@ test('Rau redeem stores only a proxy token and revokes it on logout', async () =
   assert.match(block, /storeRauAccessToken\(rauManager\.setApiKey\.bind\(rauManager\), key/);
   assert.match(block, /replaceAccessToken: rauManager\.apiKey\(\)/);
   assert.match(block, /acknowledgeDeviceSession\(session\.id, \{ signal: abort\.signal \}\)/);
-  assert.ok(block.indexOf('rauLogin = login') < block.indexOf('createDeviceSession'));
+  assert.ok(block.indexOf('storeRauAccessToken') < block.indexOf('acknowledgeDeviceSession'));
   assert.doesNotMatch(block, /piManager\.setApiKey/);
   assert.match(source, /code: 'RAU_CREDITS_EMPTY'/);
   assert.match(source, /creditBalanceEmpty\(rauCreditsBalance\)/);
@@ -29,6 +29,13 @@ test('Rau redeem stores only a proxy token and revokes it on logout', async () =
   assert.match(source, /baseUrl: rauCredits\.openRouterBaseUrl/);
   assert.match(source, /providerBaseUrl: rauCredits\.openRouterBaseUrl/);
   assert.match(source, /credentialPrefix: 'rau_v1_'/);
+  const disconnectStart = source.indexOf("case 'agent-setup-disconnect'");
+  const disconnect = source.slice(disconnectStart, source.indexOf("case 'usage-request'", disconnectStart));
+  const clearKey = disconnect.indexOf('void rauManager.clearApiKey()');
+  const disposeSessions = disconnect.indexOf('Promise.all(rauSessions.map(disposeSession))');
+  assert.notEqual(clearKey, -1);
+  assert.notEqual(disposeSessions, -1);
+  assert.ok(clearKey < disposeSessions);
   assert.match(source, /isOpenRouterCreditError\(evt\.message\)/);
   assert.match(source, /piManager: selection\.agent === 'rau' \? rauManager : piManager/);
   assert.match(source, /openRouter: selection\.agent === 'rau' \? rauOpenRouter : openRouter/);

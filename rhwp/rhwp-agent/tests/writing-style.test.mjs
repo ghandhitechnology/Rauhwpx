@@ -367,6 +367,26 @@ test('writing-style store persists the structured profile and injects generative
   assert.equal(cleared.additionalInstruction, '');
 });
 
+test('Windows startup recovers an additional instruction left at the replacement gap', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-writing-style-instruction-recovery-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const store = await new WritingStyleStore({ root, platform: 'win32' }).init();
+  await store.save({
+    markdown: `# Style\n\n${'Prefer concrete openings and explicit decisions. '.repeat(12)}`,
+    language: 'en', sourceCount: 1, pageEstimate: 12, summary: '',
+  });
+  await store.setAdditionalInstruction('Preserve this instruction.');
+  const instructionPath = path.join(root, 'additional-instruction.md');
+  await fs.rename(instructionPath, `${instructionPath}.previous-write`);
+
+  const recovered = await new WritingStyleStore({ root, platform: 'win32' }).init();
+  assert.equal((await recovered.status()).additionalInstruction, 'Preserve this instruction.');
+  await fs.copyFile(instructionPath, `${instructionPath}.previous-write`);
+  await recovered.setAdditionalInstruction('');
+  const restarted = await new WritingStyleStore({ root, platform: 'win32' }).init();
+  assert.equal((await restarted.status()).additionalInstruction, '');
+});
+
 test('re-calibrating without measurements clears the stale quantitative layer', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-writing-style-test-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -393,11 +413,42 @@ test('saved source documents support additive recalibration without re-uploading
     upload('new.txt', 'new original'),
   ], { append: true });
   assert.deepEqual(combined.map((file) => file.name), ['old.txt', 'new.txt']);
+  assert.ok(combined.every((file) => Buffer.isBuffer(file.bytes)));
+  assert.ok(combined.every((file) => !Object.hasOwn(file, 'content')));
   const status = await store.save({ ...payload, sourceCount: 2 }, { sources: combined });
   assert.equal(status.savedSourceCount, 2);
   assert.deepEqual(status.sources.map((source) => source.name), ['old.txt', 'new.txt']);
   assert.equal(status.agent, 'claude');
   assert.equal(status.model, 'sonnet');
+});
+
+test('source metadata is bounded before it can make a saved profile unreadable', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-writing-style-source-metadata-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const store = await new WritingStyleStore({ root }).init();
+  const payload = {
+    markdown: `# Style\n\n${'Prefer concrete openings and explicit decisions. '.repeat(12)}`,
+    language: 'en', sourceCount: 1, pageEstimate: 12, summary: '',
+  };
+
+  await assert.rejects(
+    store.calibrationSources([{ ...upload('source.txt', 'original'), type: 'x'.repeat(257) }]),
+    { code: 'STYLE_SOURCES_LIMIT' },
+  );
+  const sources = await store.calibrationSources([upload('source.txt', 'original')]);
+  sources[0].addedAt = 'x'.repeat(65);
+  await assert.rejects(
+    store.save(payload, { sources }),
+    { code: 'STYLE_SOURCES_LIMIT' },
+  );
+  await assert.rejects(
+    store.save(payload, {
+      sources: [{ name: 'oversized.txt', type: 'text/plain', bytes: Buffer.alloc((20 * 1024 * 1024) + 1) }],
+    }),
+    { code: 'STYLE_SOURCES_LIMIT' },
+  );
+  assert.equal((await store.status()).active, false);
+  assert.equal((await fs.readdir(root)).some((name) => name.endsWith('.json')), false);
 });
 
 test('a corrupt saved-source manifest is surfaced instead of silently discarding the corpus', async (t) => {
@@ -406,6 +457,48 @@ test('a corrupt saved-source manifest is surfaced instead of silently discarding
   const store = await new WritingStyleStore({ root }).init();
   await fs.writeFile(path.join(root, 'sources.json'), '{broken', 'utf8');
   await assert.rejects(store.sourceDocuments(), (error) => error?.code === 'STYLE_SOURCES_CORRUPT');
+});
+
+test('writing-style persisted text and source catalogs are bounded before allocation', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-writing-style-bounds-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const store = await new WritingStyleStore({ root }).init();
+  await fs.writeFile(path.join(root, 'style.md'), 'x'.repeat(257 * 1024));
+  await assert.rejects(store.status(), (error) => error?.code === 'BOUNDED_FILE_TOO_LARGE');
+
+  await fs.rm(path.join(root, 'style.md'));
+  const files = Array.from({ length: 21 }, (_, index) => {
+    const id = (index + 1).toString(16).padStart(64, '0');
+    return {
+      id,
+      sha256: id,
+      storedName: `${String(index + 1).padStart(2, '0')}-${id}.txt`,
+      name: `sample-${index + 1}.txt`,
+      type: 'text/plain',
+      size: 1,
+      addedAt: '2026-08-31T00:00:00.000Z',
+    };
+  });
+  await fs.writeFile(path.join(root, 'sources.json'), JSON.stringify({ version: 1, files }));
+  await assert.rejects(store.sourceDocuments(), (error) => error?.code === 'STYLE_SOURCES_CORRUPT');
+});
+
+test('writing-style mutations serialize and a failed mutation does not poison the queue', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-writing-style-mutations-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const store = await new WritingStyleStore({ root }).init();
+  await store.save({
+    markdown: `# Style\n\n${'Prefer concrete openings and explicit decisions. '.repeat(12)}`,
+    language: 'en', sourceCount: 1, pageEstimate: 12, summary: '',
+  });
+  await Promise.all([
+    store.setAdditionalInstruction('First queued instruction.'),
+    store.setAdditionalInstruction('Second queued instruction.'),
+  ]);
+  assert.equal((await store.status()).additionalInstruction, 'Second queued instruction.');
+  await assert.rejects(store.setAdditionalInstruction('x'.repeat(4_001)));
+  await store.setAdditionalInstruction('Queue recovered.');
+  assert.equal((await store.status()).additionalInstruction, 'Queue recovered.');
 });
 
 test('a missing saved-source blob is corruption instead of an omitted document', async (t) => {

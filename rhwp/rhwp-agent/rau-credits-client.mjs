@@ -1,9 +1,12 @@
+import { createHash, randomBytes } from 'node:crypto';
+
 const DEFAULT_URL = 'https://rau-credits-production.up.railway.app';
 const POLL_INTERVAL_MS = 1_000;
 const POLL_TIMEOUT_MS = 10 * 60 * 1000;
 const REQUEST_TIMEOUT_MS = 15_000;
 const TRANSIENT_POLL_RETRIES = 5;
 const KEY_VALIDATION_RETRY_MS = [250, 500, 1_000, 2_000];
+const MAX_RESPONSE_BYTES = 64 * 1024;
 
 function creditsError(code, message) {
   const error = new Error(message);
@@ -15,13 +18,69 @@ function abortError() {
   return creditsError('RAU_LOGIN_CANCELLED', 'Rau 로그인을 취소했어요.');
 }
 
+async function boundedJson(response) {
+  const declared = Number(response.headers?.get?.('content-length'));
+  if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
+    try { await response?.body?.cancel?.(); } catch {}
+    throw creditsError('RAU_CREDITS_RESPONSE_TOO_LARGE', 'Rau 크레딧 서버 응답이 너무 커요.');
+  }
+  if (!response.body?.getReader) return response.json().catch(() => ({}));
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  let complete = false;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        complete = true;
+        break;
+      }
+      total += value.byteLength;
+      if (total > MAX_RESPONSE_BYTES) {
+        await reader.cancel().catch(() => {});
+        throw creditsError('RAU_CREDITS_RESPONSE_TOO_LARGE', 'Rau 크레딧 서버 응답이 너무 커요.');
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    if (!complete) await reader.cancel(error).catch(() => {});
+    throw error;
+  } finally {
+    reader.releaseLock?.();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return JSON.parse(new TextDecoder().decode(bytes) || '{}');
+  } catch {
+    return {};
+  }
+}
+
+export function createPkceProof() {
+  const codeVerifier = randomBytes(32).toString('base64url');
+  const codeChallenge = createHash('sha256').update(codeVerifier).digest('base64url');
+  return { codeVerifier, codeChallenge };
+}
+
 /**
- * A newly issued Rau access token can briefly race the proxy's persisted state.
- * Retry only the read-only validation step before the manager persists it.
+ * A newly provisioned OpenRouter child key can briefly be unavailable to the
+ * validation endpoint. Retry only the read-only validation step before the
+ * manager persists the key.
  */
-export async function storeRauAccessToken(setAccessToken, token, {
+export async function storeRauAccessToken(setAccessToken, token, options = {}) {
+  return storeRauApiKey(setAccessToken, token, options);
+}
+
+export async function storeRauApiKey(setApiKey, key, {
   signal,
   account = null,
+  onCommitted,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   retryMs = KEY_VALIDATION_RETRY_MS,
 } = {}) {
@@ -34,8 +93,9 @@ export async function storeRauAccessToken(setAccessToken, token, {
   for (let attempt = 0; ; attempt += 1) {
     if (signal?.aborted) throw abortError();
     try {
-      return await setAccessToken(token, { account });
+      return await setApiKey(key, { account, signal, onCommitted });
     } catch (error) {
+      if (signal?.aborted) throw abortError();
       if (!retryable.has(error?.code) || attempt >= retryMs.length) throw error;
       await sleep(retryMs[attempt]);
     }
@@ -82,12 +142,14 @@ export function createRauCreditsClient({
       return await Promise.race([
         (async () => {
           const response = await fetchImpl(`${origin}${pathname}`, { ...init, signal: controller.signal });
-          const body = await response.json().catch(() => ({}));
+          const body = await boundedJson(response);
           if (!response.ok) {
-            throw creditsError(
+            const error = creditsError(
               body?.error ?? body?.code ?? 'RAU_CREDITS_HTTP',
               body?.message ?? body?.error ?? `Rau 크레딧 서버가 ${response.status} 을 돌려줬어요.`,
             );
+            error.fromCreditsService = true;
+            throw error;
           }
           return body;
         })(),
@@ -98,6 +160,7 @@ export function createRauCreditsClient({
       if (timedOut || error?.code === 'RAU_CREDITS_TIMEOUT') {
         throw creditsError('RAU_CREDITS_TIMEOUT', 'Rau 크레딧 서버 응답이 너무 느려요.');
       }
+      if (error?.fromCreditsService) throw error;
       if (typeof error?.code === 'string' && error.code.startsWith('RAU_')) throw error;
       throw creditsError('RAU_CREDITS_UNREACHABLE', 'Rau 크레딧 서버에 닿지 못했어요.');
     } finally {
@@ -153,6 +216,41 @@ export function createRauCreditsClient({
         headers: { Authorization: `Bearer ${value}` },
       }, { signal });
     },
+    async createDeviceSessionV2({
+      signal,
+      redirectUri = null,
+      callbackState = null,
+      returnMode = redirectUri ? 'hybrid' : 'manual',
+      clientVersion = '',
+    } = {}) {
+      const proof = createPkceProof();
+      const session = await request('/v2/device-sessions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          codeChallenge: proof.codeChallenge,
+          codeChallengeMethod: 'S256',
+          returnMode,
+          ...(redirectUri ? { redirectUri, callbackState } : {}),
+          clientVersion,
+        }),
+      }, { signal });
+      return { ...session, codeVerifier: proof.codeVerifier };
+    },
+    redeemDeviceSessionV2(id, codeVerifier, proof, { signal } = {}) {
+      return request(`/v2/device-sessions/${encodeURIComponent(id)}/redeem`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ codeVerifier, proof }),
+      }, { signal });
+    },
+    acknowledgeDeviceSessionV2(id, codeVerifier, proof, { signal } = {}) {
+      return request(`/v2/device-sessions/${encodeURIComponent(id)}/acknowledge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ codeVerifier, proof }),
+      }, { signal });
+    },
     /**
      * ready 가 될 때까지 폴링한다. 저장 확인 전까지 같은 키를 다시 받을 수 있다.
      * 로그인한 계정 이메일은 redeem 응답에 한 번만 실려 오므로 함께 돌려준다.
@@ -182,6 +280,9 @@ export function createRauCreditsClient({
         if (next.status === 'ready') {
           if (typeof next.accessToken === 'string' && next.accessToken) {
             return { key: next.accessToken, email: typeof next.email === 'string' ? next.email : null };
+          }
+          if (typeof next.apiKey === 'string' && next.apiKey) {
+            return { key: next.apiKey, email: typeof next.email === 'string' ? next.email : null };
           }
           throw creditsError(
             'RAU_LOGIN_SERVER_INCOMPATIBLE',

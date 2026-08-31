@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::io::Cursor;
+use std::sync::Arc;
 
 use crate::model::image::ImageEffect;
 use crate::paint::{ResolvedImageKind, ResolvedImagePayload};
@@ -50,13 +51,13 @@ enum Conversion {
 #[derive(Default)]
 struct ConversionMemo {
     /// (키, 결과) — 접근 순서대로, 최근 것이 뒤.
-    entries: Vec<(u64, Option<Vec<u8>>)>,
+    entries: Vec<(u64, Option<Arc<[u8]>>)>,
     /// 지금 들고 있는 결과 바이트 합.
     bytes: usize,
 }
 
 impl ConversionMemo {
-    fn get(&mut self, key: u64) -> Option<Option<Vec<u8>>> {
+    fn get(&mut self, key: u64) -> Option<Option<Arc<[u8]>>> {
         let idx = self.entries.iter().position(|(k, _)| *k == key)?;
         let entry = self.entries.remove(idx);
         let hit = entry.1.clone();
@@ -64,14 +65,14 @@ impl ConversionMemo {
         Some(hit)
     }
 
-    fn insert(&mut self, key: u64, value: Option<Vec<u8>>) {
-        let size = value.as_ref().map_or(0, Vec::len);
+    fn insert(&mut self, key: u64, value: Option<Arc<[u8]>>) {
+        let size = value.as_ref().map_or(0, |data| data.len());
         if size > MAX_MEMO_BYTES {
             return;
         }
         while self.bytes + size > MAX_MEMO_BYTES || self.entries.len() >= MAX_MEMO_ENTRIES {
             let (_, evicted) = self.entries.remove(0);
-            self.bytes -= evicted.as_ref().map_or(0, Vec::len);
+            self.bytes -= evicted.as_ref().map_or(0, |data| data.len());
         }
         self.bytes += size;
         self.entries.push((key, value));
@@ -90,17 +91,17 @@ thread_local! {
     static CONVERSIONS_RUN: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-fn memoized(
+fn memoized_shared(
     conversion: Conversion,
     data: &[u8],
     convert: impl FnOnce() -> Option<Vec<u8>>,
-) -> Option<Vec<u8>> {
+) -> Option<Arc<[u8]>> {
     let key = conversion_key(conversion, data);
     if let Some(hit) = CONVERSION_MEMO.with(|memo| memo.borrow_mut().get(key)) {
         return hit;
     }
 
-    let converted = convert();
+    let converted = convert().map(Arc::from);
     #[cfg(test)]
     CONVERSIONS_RUN.with(|runs| runs.set(runs.get() + 1));
     CONVERSION_MEMO.with(|memo| memo.borrow_mut().insert(key, converted.clone()));
@@ -131,38 +132,42 @@ pub(crate) fn resolve_image_payload(image: &ImageNode) -> Option<ResolvedImagePa
     let mime = detect_image_mime_type(data);
 
     match mime {
-        "image/bmp" => bmp_bytes_to_png_bytes(data).map(|data| ResolvedImagePayload {
+        "image/bmp" => bmp_bytes_to_png_bytes_shared(data).map(|data| ResolvedImagePayload {
             data,
             mime: "image/png",
             kind: ResolvedImageKind::FormatConverted,
             suppress_effects: false,
         }),
-        "image/x-pcx" => pcx_bytes_to_png_bytes(data).map(|data| ResolvedImagePayload {
+        "image/x-pcx" => pcx_bytes_to_png_bytes_shared(data).map(|data| ResolvedImagePayload {
             data,
             mime: "image/png",
             kind: ResolvedImageKind::FormatConverted,
             suppress_effects: false,
         }),
-        "image/tiff" => tiff_bytes_to_png_bytes(data).map(|data| ResolvedImagePayload {
+        "image/tiff" => tiff_bytes_to_png_bytes_shared(data).map(|data| ResolvedImagePayload {
             data,
             mime: "image/png",
             kind: ResolvedImageKind::FormatConverted,
             suppress_effects: false,
         }),
         "image/jpeg" if is_watermark_image(image) => {
-            watermark_jpeg_bytes_to_hancom_baked_png_bytes(data).map(|data| ResolvedImagePayload {
-                data,
-                mime: "image/png",
-                kind: ResolvedImageKind::BakedWatermark,
-                suppress_effects: true,
+            watermark_jpeg_bytes_to_hancom_baked_png_bytes_shared(data).map(|data| {
+                ResolvedImagePayload {
+                    data,
+                    mime: "image/png",
+                    kind: ResolvedImageKind::BakedWatermark,
+                    suppress_effects: true,
+                }
             })
         }
-        "image/jpeg" => grayscale_jpeg_bytes_to_png_bytes(data).map(|data| ResolvedImagePayload {
-            data,
-            mime: "image/png",
-            kind: ResolvedImageKind::FormatConverted,
-            suppress_effects: false,
-        }),
+        "image/jpeg" => {
+            grayscale_jpeg_bytes_to_png_bytes_shared(data).map(|data| ResolvedImagePayload {
+                data,
+                mime: "image/png",
+                kind: ResolvedImageKind::FormatConverted,
+                suppress_effects: false,
+            })
+        }
         _ => None,
     }
 }
@@ -192,7 +197,11 @@ fn is_watermark_image(image: &ImageNode) -> bool {
 /// 브라우저는 SVG `<image>` 내부의 `data:image/bmp` URI를 표준 지원하지 않으므로,
 /// SVG 임베딩 전에 PNG로 변환해 호환성을 확보한다.
 pub(crate) fn bmp_bytes_to_png_bytes(data: &[u8]) -> Option<Vec<u8>> {
-    memoized(Conversion::Bmp, data, || {
+    bmp_bytes_to_png_bytes_shared(data).map(|payload| payload.as_ref().to_vec())
+}
+
+fn bmp_bytes_to_png_bytes_shared(data: &[u8]) -> Option<Arc<[u8]>> {
+    memoized_shared(Conversion::Bmp, data, || {
         use image::ImageFormat;
 
         let img = decode_image_with_format_limited(data, ImageFormat::Bmp)?;
@@ -208,7 +217,11 @@ pub(crate) fn bmp_bytes_to_png_bytes(data: &[u8]) -> Option<Vec<u8>> {
 /// 브라우저와 rsvg는 SVG `<image>` 내부의 `data:image/tiff` URI를 안정적으로
 /// 렌더링하지 못하므로, SVG/Canvas/HTML 임베딩 전에 PNG로 변환한다.
 pub(crate) fn tiff_bytes_to_png_bytes(data: &[u8]) -> Option<Vec<u8>> {
-    memoized(Conversion::Tiff, data, || {
+    tiff_bytes_to_png_bytes_shared(data).map(|payload| payload.as_ref().to_vec())
+}
+
+fn tiff_bytes_to_png_bytes_shared(data: &[u8]) -> Option<Arc<[u8]>> {
+    memoized_shared(Conversion::Tiff, data, || {
         use image::ImageFormat;
 
         let img = decode_image_with_format_limited(data, ImageFormat::Tiff)?;
@@ -223,7 +236,11 @@ pub(crate) fn tiff_bytes_to_png_bytes(data: &[u8]) -> Option<Vec<u8>> {
 /// grayscale JPEGs. Re-encode only visually gray JPEGs to PNG so color photos
 /// keep the compact JPEG path.
 pub(crate) fn grayscale_jpeg_bytes_to_png_bytes(data: &[u8]) -> Option<Vec<u8>> {
-    memoized(Conversion::GrayscaleJpeg, data, || {
+    grayscale_jpeg_bytes_to_png_bytes_shared(data).map(|payload| payload.as_ref().to_vec())
+}
+
+fn grayscale_jpeg_bytes_to_png_bytes_shared(data: &[u8]) -> Option<Arc<[u8]>> {
+    memoized_shared(Conversion::GrayscaleJpeg, data, || {
         grayscale_jpeg_bytes_to_png_bytes_uncached(data)
     })
 }
@@ -283,7 +300,11 @@ fn grayscale_jpeg_bytes_to_png_bytes_uncached(data: &[u8]) -> Option<Vec<u8>> {
 /// 보여야 한다 (한컴 호환). 변환 시 흰색 픽셀을 투명 알파로 매핑한 RGBA PNG 를
 /// 출력한다.
 pub(crate) fn pcx_bytes_to_png_bytes(data: &[u8]) -> Option<Vec<u8>> {
-    memoized(Conversion::Pcx, data, || {
+    pcx_bytes_to_png_bytes_shared(data).map(|payload| payload.as_ref().to_vec())
+}
+
+fn pcx_bytes_to_png_bytes_shared(data: &[u8]) -> Option<Arc<[u8]>> {
+    memoized_shared(Conversion::Pcx, data, || {
         pcx_bytes_to_png_bytes_uncached(data)
     })
 }
@@ -426,7 +447,12 @@ fn apply_real_picture_watermark_fill_tone_rgb(r: u8, g: u8, b: u8) -> [u8; 3] {
 pub(crate) fn real_picture_watermark_bytes_to_hancom_tone_png_bytes(
     data: &[u8],
 ) -> Option<Vec<u8>> {
-    memoized(Conversion::RealPictureTone, data, || {
+    real_picture_watermark_bytes_to_hancom_tone_png_bytes_shared(data)
+        .map(|payload| payload.as_ref().to_vec())
+}
+
+fn real_picture_watermark_bytes_to_hancom_tone_png_bytes_shared(data: &[u8]) -> Option<Arc<[u8]>> {
+    memoized_shared(Conversion::RealPictureTone, data, || {
         real_picture_watermark_bytes_to_tone_png_bytes(data, apply_real_picture_watermark_tone_rgb)
     })
 }
@@ -434,12 +460,13 @@ pub(crate) fn real_picture_watermark_bytes_to_hancom_tone_png_bytes(
 pub(crate) fn real_picture_watermark_fill_bytes_to_hancom_tone_png_bytes(
     data: &[u8],
 ) -> Option<Vec<u8>> {
-    memoized(Conversion::RealPictureFillTone, data, || {
+    memoized_shared(Conversion::RealPictureFillTone, data, || {
         real_picture_watermark_bytes_to_tone_png_bytes(
             data,
             apply_real_picture_watermark_fill_tone_rgb,
         )
     })
+    .map(|payload| payload.as_ref().to_vec())
 }
 
 fn real_picture_watermark_bytes_to_tone_png_bytes(
@@ -463,7 +490,12 @@ fn real_picture_watermark_bytes_to_tone_png_bytes(
 
 /// 워터마크 JPEG 를 한컴 PDF 정답지에 가까운 회색 톤 PNG 로 변환한다.
 pub(crate) fn watermark_jpeg_bytes_to_hancom_baked_png_bytes(data: &[u8]) -> Option<Vec<u8>> {
-    memoized(Conversion::WatermarkJpeg, data, || {
+    watermark_jpeg_bytes_to_hancom_baked_png_bytes_shared(data)
+        .map(|payload| payload.as_ref().to_vec())
+}
+
+fn watermark_jpeg_bytes_to_hancom_baked_png_bytes_shared(data: &[u8]) -> Option<Arc<[u8]>> {
+    memoized_shared(Conversion::WatermarkJpeg, data, || {
         watermark_jpeg_bytes_to_hancom_baked_png_bytes_uncached(data)
     })
 }
@@ -725,6 +757,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn repeated_converted_image_payloads_share_the_cached_allocation() {
+        let bmp = bmp_with_middle_band([80, 120, 160]);
+        let image = ImageNode::new(1, Some(bmp));
+
+        let first = resolve_image_payload(&image).expect("bmp should convert");
+        let second = resolve_image_payload(&image).expect("bmp should hit memo");
+
+        assert!(std::sync::Arc::ptr_eq(&first.data, &second.data));
+        assert_eq!(first.data.len(), second.data.len());
+    }
+
     /// 메모가 다른 그림의 결과를 흘리지 않는다.
     #[test]
     fn different_images_keep_their_own_results() {
@@ -771,7 +815,7 @@ mod tests {
         let mut memo = ConversionMemo::default();
         let chunk = MAX_MEMO_BYTES / 4 + 1;
         for key in 0..8u64 {
-            memo.insert(key, Some(vec![0u8; chunk]));
+            memo.insert(key, Some(vec![0u8; chunk].into()));
         }
 
         assert!(memo.bytes <= MAX_MEMO_BYTES);

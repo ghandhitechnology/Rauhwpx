@@ -6,8 +6,8 @@ import { AGENT_PROTOCOL_VERSION, isStructuredPlan } from '../src/agent/types.ts'
 
 const bridgeSource = readFileSync(new URL('../src/agent/bridge.ts', import.meta.url), 'utf8');
 
-test('planning and user-input protocol uses v4 and validates the complete structured plan', () => {
-  assert.equal(AGENT_PROTOCOL_VERSION, 4);
+test('planning and user-input protocol uses v5 and validates the complete structured plan', () => {
+  assert.equal(AGENT_PROTOCOL_VERSION, 5);
   const plan = {
     planId: 'plan-1',
     title: '정리 계획',

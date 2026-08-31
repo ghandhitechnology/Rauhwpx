@@ -41,8 +41,46 @@ use super::utils::{
 };
 use super::HwpxError;
 
+const MAX_HWPX_XML_DEPTH: usize = 256;
+
+/// Bound element nesting before entering the recursive paragraph/control parser.
+///
+/// quick-xml itself is iterative, so this preflight cannot overflow the stack.
+/// Every recursive parser edge consumes a nested start element; keeping the XML
+/// depth bounded therefore also bounds table/cell/paragraph and group recursion.
+fn validate_hwpx_xml_depth(xml: &str) -> Result<(), HwpxError> {
+    let mut reader = Reader::from_str(xml);
+    let mut buf = Vec::new();
+    let mut depth = 0usize;
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(_)) => {
+                depth = depth.checked_add(1).ok_or_else(|| {
+                    HwpxError::XmlError("HWPX XML element depth overflowed".to_string())
+                })?;
+                if depth > MAX_HWPX_XML_DEPTH {
+                    return Err(HwpxError::XmlError(format!(
+                        "HWPX XML exceeds the {MAX_HWPX_XML_DEPTH} level nesting limit"
+                    )));
+                }
+            }
+            Ok(Event::End(_)) => depth = depth.saturating_sub(1),
+            Ok(Event::Eof) => break,
+            Err(error) => {
+                return Err(HwpxError::XmlError(format!(
+                    "HWPX XML depth preflight: {error}"
+                )))
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+    Ok(())
+}
+
 /// section*.xml을 파싱하여 Section 모델로 변환한다.
 pub fn parse_hwpx_section(xml: &str) -> Result<Section, HwpxError> {
+    validate_hwpx_xml_depth(xml)?;
     let mut section = Section::default();
     let mut reader = Reader::from_str(xml);
     let mut buf = Vec::new();
@@ -115,6 +153,7 @@ fn push_master_page_id_ref(e: &quick_xml::events::BytesStart, refs: &mut Vec<Str
 
 /// masterpage*.xml을 파싱하여 기존 HWP 바탕쪽 모델로 변환한다.
 pub fn parse_hwpx_master_page(xml: &str) -> Result<MasterPage, HwpxError> {
+    validate_hwpx_xml_depth(xml)?;
     let mut master_page = MasterPage::default();
     let mut reader = Reader::from_str(xml);
     let mut buf = Vec::new();
@@ -6421,6 +6460,29 @@ fn parse_common_shape_children(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hwpx_xml_depth_preflight_accepts_limit_and_rejects_next_level() {
+        fn nested_xml(depth: usize) -> String {
+            let mut xml = String::with_capacity(depth.saturating_mul(7));
+            for _ in 0..depth {
+                xml.push_str("<node>");
+            }
+            for _ in 0..depth {
+                xml.push_str("</node>");
+            }
+            xml
+        }
+
+        parse_hwpx_section(&nested_xml(MAX_HWPX_XML_DEPTH))
+            .expect("the documented maximum element depth must remain parseable");
+        let error = parse_hwpx_section(&nested_xml(MAX_HWPX_XML_DEPTH + 1))
+            .expect_err("one level beyond the limit must fail before recursive parsing");
+        assert!(
+            error.to_string().contains("256 level nesting limit"),
+            "unexpected error: {error}"
+        );
+    }
 
     #[test]
     fn test_parse_simple_section() {

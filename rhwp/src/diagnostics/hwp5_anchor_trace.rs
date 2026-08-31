@@ -127,7 +127,7 @@ fn print_usage() {
 }
 
 fn run_inner(options: &Options) -> Result<String, String> {
-    let bytes = fs::read(&options.input)
+    let bytes = crate::parser::limits::read_local_file_once(&options.input)
         .map_err(|error| format!("파일 읽기 실패 - {}: {error}", options.input.display()))?;
     let mut cfb = CfbReader::open(&bytes).map_err(|error| format!("CFB 열기 실패: {error}"))?;
     let header_data = cfb

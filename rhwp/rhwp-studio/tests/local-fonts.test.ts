@@ -8,6 +8,9 @@ import {
   getLocalFontRecords,
   getLocalFontState,
   getLocalFonts,
+  LOCAL_FONT_BYTE_READ_CONCURRENCY,
+  LOCAL_FONT_MAX_BYTES_PER_FACE,
+  LOCAL_FONT_MAX_FACES_PER_DOCUMENT,
   localFontFaceKey,
   loadLocalFontBytes,
   loadLocalFontBytesFor,
@@ -509,6 +512,49 @@ test('SFNT 지역화 이름을 보존해 HWP 한글 full name을 영문 family�
   }
 });
 
+test('SFNT metadata discovery rejects an oversized font before reading any table bytes', async () => {
+  const g = globalThis as TestGlobals;
+  const originals = {
+    browser: g.browser,
+    chrome: g.chrome,
+    document: g.document,
+    localStorage: g.localStorage,
+    queryLocalFonts: g.queryLocalFonts,
+  };
+  const storage = createStorage();
+  let sliceReads = 0;
+
+  resetLocalFontsForTests();
+  g.browser = undefined;
+  g.chrome = undefined;
+  g.localStorage = storage;
+  g.queryLocalFonts = async () => [{
+    family: 'Oversized Font',
+    fullName: 'Oversized Font Regular',
+    postscriptName: 'OversizedFont-Regular',
+    style: 'Regular',
+    blob: async () => ({
+      size: LOCAL_FONT_MAX_BYTES_PER_FACE + 1,
+      slice: () => {
+        sliceReads += 1;
+        return new Blob();
+      },
+    }) as Blob,
+  }];
+
+  try {
+    assert.deepEqual(
+      await detectLocalFonts({ force: true, includeRegistered: true }),
+      ['Oversized Font Regular'],
+    );
+    assert.equal(sliceReads, 0);
+  } finally {
+    await clearStoredLocalFonts();
+    resetLocalFontsForTests();
+    restoreGlobals(originals);
+  }
+});
+
 test('legacy Macintosh name record는 표시 이름에 섞지 않는다', async () => {
   const g = globalThis as TestGlobals;
   const originals = {
@@ -653,6 +699,127 @@ test('CanvasKit용 SFNT 바이트는 여러 PostScript face를 일괄 조회하�
     assert.equal(queryCalls.length, 2);
     assert.equal(queryCalls[0], undefined);
     assert.deepEqual(new Set(queryCalls[1]), new Set(['SeoulHangangM', 'SeoulHangangL']));
+  } finally {
+    await clearStoredLocalFonts();
+    resetLocalFontsForTests();
+    restoreGlobals(originals);
+  }
+});
+
+test('CanvasKit local font byte reads use bounded worker concurrency', async () => {
+  const g = globalThis as TestGlobals;
+  const originals = {
+    browser: g.browser,
+    chrome: g.chrome,
+    document: g.document,
+    localStorage: g.localStorage,
+    queryLocalFonts: g.queryLocalFonts,
+  };
+  const records = Array.from({ length: LOCAL_FONT_BYTE_READ_CONCURRENCY + 3 }, (_, index) => ({
+    family: `Bounded Font ${index}`,
+    fullName: `Bounded Font ${index} Regular`,
+    postscriptName: `BoundedFont${index}-Regular`,
+    style: 'Regular',
+    displayName: `Bounded Font ${index}`,
+    aliases: [`Bounded Font ${index}`, `Bounded Font ${index} Regular`],
+  }));
+  const snapshot: LocalFontSnapshot = {
+    version: 2,
+    detectedAt: new Date(0).toISOString(),
+    families: records.map(record => record.family),
+    fontRecords: records,
+    source: 'local-font-access',
+  };
+  const storage = createStorage({ [STORAGE_KEY]: JSON.stringify(snapshot) });
+  let activeReads = 0;
+  let maximumActiveReads = 0;
+  let completedReads = 0;
+
+  resetLocalFontsForTests();
+  g.browser = undefined;
+  g.chrome = undefined;
+  g.localStorage = storage;
+  g.queryLocalFonts = async () => records.map((record, index) => ({
+    ...record,
+    blob: async () => ({
+      size: 4,
+      arrayBuffer: async () => {
+        activeReads += 1;
+        maximumActiveReads = Math.max(maximumActiveReads, activeReads);
+        await new Promise<void>(resolve => setTimeout(resolve, 0));
+        activeReads -= 1;
+        completedReads += 1;
+        return new Uint8Array([0, 1, 2, index]).buffer;
+      },
+    }) as Blob,
+  }));
+
+  try {
+    await loadStoredLocalFonts();
+    const loaded = await loadLocalFontBytesFor(records.map(record => record.fullName));
+    assert.equal(loaded.size, records.length);
+    assert.equal(completedReads, records.length);
+    assert.ok(maximumActiveReads > 1);
+    assert.ok(maximumActiveReads <= LOCAL_FONT_BYTE_READ_CONCURRENCY);
+  } finally {
+    await clearStoredLocalFonts();
+    resetLocalFontsForTests();
+    restoreGlobals(originals);
+  }
+});
+
+test('CanvasKit local font byte reads cap face count and reject oversized blobs before allocation', async () => {
+  const g = globalThis as TestGlobals;
+  const originals = {
+    browser: g.browser,
+    chrome: g.chrome,
+    document: g.document,
+    localStorage: g.localStorage,
+    queryLocalFonts: g.queryLocalFonts,
+  };
+  const records = Array.from({ length: LOCAL_FONT_MAX_FACES_PER_DOCUMENT + 1 }, (_, index) => ({
+    family: `Large Font ${index}`,
+    fullName: `Large Font ${index} Regular`,
+    postscriptName: `LargeFont${index}-Regular`,
+    style: 'Regular',
+    displayName: `Large Font ${index}`,
+    aliases: [`Large Font ${index}`, `Large Font ${index} Regular`],
+  }));
+  const snapshot: LocalFontSnapshot = {
+    version: 2,
+    detectedAt: new Date(0).toISOString(),
+    families: records.map(record => record.family),
+    fontRecords: records,
+    source: 'local-font-access',
+  };
+  const storage = createStorage({ [STORAGE_KEY]: JSON.stringify(snapshot) });
+  let requestedPostscriptNames: string[] = [];
+  let arrayBufferReads = 0;
+
+  resetLocalFontsForTests();
+  g.browser = undefined;
+  g.chrome = undefined;
+  g.localStorage = storage;
+  g.queryLocalFonts = async (options?: { postscriptNames?: string[] }) => {
+    requestedPostscriptNames = options?.postscriptNames ?? [];
+    return records.map(record => ({
+      ...record,
+      blob: async () => ({
+        size: LOCAL_FONT_MAX_BYTES_PER_FACE + 1,
+        arrayBuffer: async () => {
+          arrayBufferReads += 1;
+          return new ArrayBuffer(0);
+        },
+      }) as Blob,
+    }));
+  };
+
+  try {
+    await loadStoredLocalFonts();
+    const loaded = await loadLocalFontBytesFor(records.map(record => record.fullName));
+    assert.equal(loaded.size, 0);
+    assert.equal(requestedPostscriptNames.length, LOCAL_FONT_MAX_FACES_PER_DOCUMENT);
+    assert.equal(arrayBufferReads, 0);
   } finally {
     await clearStoredLocalFonts();
     resetLocalFontsForTests();

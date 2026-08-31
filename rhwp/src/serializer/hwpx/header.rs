@@ -25,12 +25,20 @@ use crate::model::ColorRef;
 
 use super::canonical_defaults::FONTFACE_LANG_NAMES;
 use super::context::SerializeContext;
-use super::utils::{empty_tag, end_tag, start_tag_attrs, write_xml_decl};
+use super::utils::{empty_tag, end_tag, start_tag_attrs, write_xml_decl, BoundedXmlBuffer};
 use super::SerializeError;
 
 /// `header.xml` 바이트 생성. Stage 1 진입점.
 pub fn write_header(doc: &Document, ctx: &SerializeContext) -> Result<Vec<u8>, SerializeError> {
-    let mut w: Writer<Vec<u8>> = Writer::new(Vec::new());
+    write_header_limited(doc, ctx, usize::MAX)
+}
+
+pub(crate) fn write_header_limited(
+    doc: &Document,
+    ctx: &SerializeContext,
+    max_bytes: usize,
+) -> Result<Vec<u8>, SerializeError> {
+    let mut w = Writer::new(BoundedXmlBuffer::new(max_bytes));
     write_xml_decl(&mut w)?;
 
     // <hh:head> 루트 + 전체 네임스페이스 (parser가 기대하는 접두어 모두 선언)
@@ -112,7 +120,7 @@ pub fn write_header(doc: &Document, ctx: &SerializeContext) -> Result<Vec<u8>, S
     }
 
     end_tag(&mut w, "hh:head")?;
-    Ok(w.into_inner())
+    Ok(w.into_inner().into_inner())
 }
 
 // =====================================================================
@@ -1389,6 +1397,17 @@ use super::utils::start_tag;
 mod tests {
     use super::*;
     use crate::parser::hwpx::parse_hwpx;
+
+    #[test]
+    fn header_generation_honors_a_low_member_budget() {
+        let doc = Document::default();
+        let ctx = SerializeContext::collect_from_document(&doc);
+
+        let error = write_header_limited(&doc, &ctx, 1)
+            .expect_err("XML generation must stop at the prospective ZIP member budget");
+
+        assert!(error.to_string().contains("generation limit"), "{error}");
+    }
 
     #[test]
     fn write_style_emits_ir_lang_id() {

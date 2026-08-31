@@ -1,11 +1,15 @@
 import assert from 'node:assert/strict';
 import {
   FetchSecurityError,
+  REMOTE_THUMBNAIL_MAX_BYTES,
   fetchDocumentWithPolicy,
   isTrustedExtensionPageSender,
   isWebPageSender,
+  readResponseBytesWithLimit,
   validateDocumentFetchUrl
 } from './fetch-security.js';
+
+assert.equal(REMOTE_THUMBNAIL_MAX_BYTES, 64 * 1024 * 1024);
 
 function assertBlocked(url, reason, options = {}) {
   assert.throws(
@@ -77,6 +81,27 @@ globalThis.fetch = async (url, init) => {
 await fetchDocumentWithPolicy('https://example.com/a.hwpx', { requireDocumentPath: true });
 assert.equal(calls[0].init.credentials, 'omit');
 assert.equal(calls[0].init.redirect, 'manual');
+
+assert.deepEqual(
+  await readResponseBytesWithLimit(new Response(new Uint8Array([1, 2, 3])), 3),
+  new Uint8Array([1, 2, 3])
+);
+await assert.rejects(
+  () => {
+    let cancelReason = null;
+    const response = new Response(new ReadableStream({
+      cancel(reason) { cancelReason = reason; }
+    }), { headers: { 'content-length': '5' } });
+    return readResponseBytesWithLimit(response, 4).finally(() => {
+      assert.equal(cancelReason, 'response-too-large');
+    });
+  },
+  (error) => error instanceof FetchSecurityError && error.reason === 'response-too-large'
+);
+await assert.rejects(
+  () => readResponseBytesWithLimit(new Response(new Uint8Array([1, 2, 3, 4, 5])), 4),
+  (error) => error instanceof FetchSecurityError && error.reason === 'response-too-large'
+);
 
 globalThis.fetch = async () => new Response(null, {
   status: 302,

@@ -1514,12 +1514,14 @@ fn compute_line_extra_spacing(
 fn needs_word_distribution(
     alignment: Alignment,
     is_last_line_of_para: bool,
-    is_header_footer_para: bool,
+    distribute_justify_last_line: bool,
     has_forced_break: bool,
 ) -> bool {
     match alignment {
         Alignment::Split => !has_forced_break,
-        Alignment::Justify => (!is_last_line_of_para || is_header_footer_para) && !has_forced_break,
+        Alignment::Justify => {
+            (!is_last_line_of_para || distribute_justify_last_line) && !has_forced_break
+        }
         _ => false,
     }
 }
@@ -2554,7 +2556,8 @@ impl LayoutEngine {
                             }
                             let img_y = (y + baseline - pic_h).max(y);
                             let bin_data_id = pic.image_attr.bin_data_id;
-                            let image_data = find_bin_data(bdc, bin_data_id).map(|c| c.data.load());
+                            let image_data =
+                                find_bin_data(bdc, bin_data_id).map(|c| c.data.load_shared());
                             let crop = {
                                 let c = &pic.crop;
                                 if c.right > c.left
@@ -3896,14 +3899,18 @@ impl LayoutEngine {
             // 정렬별 간격 분배 계산
             let has_forced_break = comp_line.has_line_break;
             // 머리말/꼬리말은 내부 문단 인덱스를 `usize::MAX - i`로 넘긴다.
-            // Justify와 HWPX DISTRIBUTE_SPACE/HWP5 Split은 모두 공백에 배분하지만,
-            // 마지막 줄 규칙은 다르다. Split(나눔 정렬)은 마지막 줄도 영역 끝까지
-            // 배분한다. 머리말/꼬리말 Justify 단일 줄도 한컴처럼 공백을 벌린다.
+            // 저장 LINE_SEG가 있는 가져온 HF는 한컴 원본의 단일 줄 Justify 분배를
+            // 보존한다(#1692). 새로 만든 합성 HF는 본문 기본 양쪽 정렬과 같은 마지막
+            // 줄 규칙을 사용해, 짧은 한 줄의 공백이 영역 전체로 늘어나지 않게 한다.
             let is_header_footer_para = para_index >= usize::MAX - 1024;
+            let distribute_stored_hf_justify_last_line = is_header_footer_para
+                && para.is_some_and(|paragraph| {
+                    !crate::renderer::para_has_no_stored_line_segs(paragraph)
+                });
             let needs_justify = needs_word_distribution(
                 alignment,
                 is_last_line_of_para,
-                is_header_footer_para,
+                distribute_stored_hf_justify_last_line,
                 has_forced_break,
             );
             let needs_distribute = alignment == Alignment::Distribute;
@@ -5385,7 +5392,7 @@ impl LayoutEngine {
                                 let img_y = base_img_y + sibling_reserved_px;
                                 let bin_data_id = pic.image_attr.bin_data_id;
                                 let image_data =
-                                    find_bin_data(bdc, bin_data_id).map(|c| c.data.load());
+                                    find_bin_data(bdc, bin_data_id).map(|c| c.data.load_shared());
                                 let crop = {
                                     let c = &pic.crop;
                                     if c.right > c.left
@@ -6536,7 +6543,8 @@ impl LayoutEngine {
                             };
                             let img_y = base_img_y + sibling_reserved_px;
                             let bin_data_id = pic.image_attr.bin_data_id;
-                            let image_data = find_bin_data(bdc, bin_data_id).map(|c| c.data.load());
+                            let image_data =
+                                find_bin_data(bdc, bin_data_id).map(|c| c.data.load_shared());
                             let crop = {
                                 let c = &pic.crop;
                                 if c.right > c.left
@@ -6941,7 +6949,7 @@ fn make_picture_image_node(
     crop: Option<(i32, i32, i32, i32)>,
     original_size_hu: Option<(u32, u32)>,
     bin_data_id: u16,
-    image_data: Option<Vec<u8>>,
+    image_data: Option<std::sync::Arc<[u8]>>,
     bbox: BoundingBox,
 ) -> RenderNode {
     let (cei, cpi, otci) = cell_ctx
@@ -6969,7 +6977,7 @@ fn make_picture_image_node(
             text_wrap: Some(pic.common.text_wrap),
             transform: extract_shape_transform(&pic.shape_attr),
             external_path: pic.image_attr.external_path.clone(),
-            ..ImageNode::new(bin_data_id, image_data)
+            ..ImageNode::new_shared(bin_data_id, image_data)
         }),
         bbox,
     )
@@ -7047,6 +7055,12 @@ mod issue_2809_split_alignment_tests {
             Alignment::Justify,
             true,
             false,
+            false
+        ));
+        assert!(needs_word_distribution(
+            Alignment::Justify,
+            true,
+            true,
             false
         ));
         assert!(needs_word_distribution(

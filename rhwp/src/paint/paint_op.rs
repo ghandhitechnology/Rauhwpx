@@ -35,7 +35,7 @@ pub enum ResolvedImageKind {
 
 #[derive(Debug, Clone)]
 pub struct ResolvedImagePayload {
-    pub data: Vec<u8>,
+    pub data: std::sync::Arc<[u8]>,
     pub mime: &'static str,
     pub kind: ResolvedImageKind,
     pub suppress_effects: bool,

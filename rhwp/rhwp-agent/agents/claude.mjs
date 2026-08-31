@@ -3,14 +3,15 @@ import spawn from 'cross-spawn';
 import crypto from 'node:crypto';
 import { query as queryClaude } from '@anthropic-ai/claude-agent-sdk';
 import {
-  copyFileSync,
-  lstatSync,
   mkdirSync,
-  readlinkSync,
-  symlinkSync,
-  unlinkSync,
+  rmSync,
 } from 'node:fs';
 import path from 'node:path';
+import {
+  credentialMirrorHasPendingCopybackSync,
+  flushCredentialMirrorSync,
+  prepareCredentialMirrorSync,
+} from '../credential-mirror.mjs';
 import {
   createLineReader,
   isPlanningRestricted,
@@ -19,7 +20,9 @@ import {
   normalizeExecutionMode,
   normalizeTaskUsage,
   normalizeUsageTokens,
+  providerReadOnlyRoots,
   providerInteractionMode,
+  redactDiagnosticText,
   RHWP_SUBAGENTS,
   systemBriefFor,
   truncate,
@@ -36,6 +39,8 @@ export {
 } from './provider-user-input.mjs';
 import {
   isolatedProcessEnv,
+  PROCESS_TREE_CLEANUP_OUTCOME,
+  processTreeCleanupOutcome,
   processTreeSpawnOptions,
   terminateProcessTree,
   waitForProcessTreeExit,
@@ -84,40 +89,39 @@ function createClaudeInputQueue() {
 // rhwp 전용 서브에이전트 정의(RHWP_SUBAGENTS)는 backend.mjs 로 이동했다 —
 // grok 도 같은 정의를 --agents 로 공유한다.
 
-function seedClaudeCredential(source, target, {
-  copyFile = copyFileSync,
-  platform = process.platform,
-  symlink = symlinkSync,
-} = {}) {
-  if (!source) return;
-  let sourceStat;
-  try {
-    sourceStat = lstatSync(source);
-  } catch (error) {
-    if (error?.code === 'ENOENT') return;
-    throw error;
-  }
-  if (!sourceStat.isFile() || sourceStat.isSymbolicLink()) return;
+const claudeMirrorsByHome = new Map();
 
-  mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
-  try {
-    const targetStat = lstatSync(target);
-    if (!targetStat.isSymbolicLink()) return;
-    const linkedTarget = path.resolve(path.dirname(target), readlinkSync(target));
-    if (linkedTarget === path.resolve(source)) return;
-    unlinkSync(target);
-  } catch (error) {
-    if (error?.code !== 'ENOENT') throw error;
-  }
+function seedClaudeCredential(source, target, deps = {}) {
+  return prepareCredentialMirrorSync(source, target, {
+    platform: deps.platform ?? process.platform,
+    ...(deps.symlink ? { symlink: deps.symlink } : {}),
+    // Two live Claude sessions must never share a writable host credential
+    // inode. Copyback applies refreshes with the mirror's CAS rules on close.
+    copyOnly: true,
+  });
+}
 
-  try {
-    symlink(source, target);
-  } catch (error) {
-    const copyFallback = platform === 'win32'
-      && (error?.code === 'EPERM' || error?.code === 'EACCES' || error?.code === 'ENOTSUP');
-    if (!copyFallback) throw error;
-    copyFile(source, target);
+export function flushClaudeCredentialMirrors(isolatedHome) {
+  const key = path.resolve(String(isolatedHome ?? ''));
+  const mirrors = claudeMirrorsByHome.get(key) ?? [];
+  const pending = [];
+  for (const mirror of mirrors) {
+    try {
+      const result = flushCredentialMirrorSync(mirror, { platform: mirror.platform ?? process.platform });
+      if (result.pending) {
+        pending.push(mirror);
+        process.stderr.write(`[claude] credential refresh copyback pending: ${result.errorMessage}\n`);
+      } else if (result.conflict) {
+        process.stderr.write(`[claude] credential refresh copyback conflicted: ${mirror.source}\n`);
+      }
+    } catch (error) {
+      if (credentialMirrorHasPendingCopybackSync(mirror)) pending.push(mirror);
+      process.stderr.write(`[claude] credential refresh copyback failed: ${error?.message ?? error}\n`);
+    }
   }
+  if (pending.length > 0) claudeMirrorsByHome.set(key, pending);
+  else claudeMirrorsByHome.delete(key);
+  return pending.length === 0;
 }
 
 /** Seed only Claude's shared login files into an otherwise isolated home. */
@@ -125,18 +129,30 @@ export function prepareClaudeHome(isolatedHome, {
   credentialsPath,
   configPath,
 } = {}, deps = {}) {
+  const key = path.resolve(isolatedHome);
+  const previous = claudeMirrorsByHome.get(key) ?? [];
+  for (const mirror of previous) {
+    const result = flushCredentialMirrorSync(mirror, { platform: deps.platform ?? process.platform });
+    if (result.pending) throw Object.assign(new Error(result.errorMessage), { code: result.errorCode });
+    if (!result.conflict) rmSync(mirror.target, { force: true });
+  }
+  claudeMirrorsByHome.delete(key);
   mkdirSync(isolatedHome, { recursive: true, mode: 0o700 });
-  seedClaudeCredential(
+  const mirrors = [seedClaudeCredential(
     credentialsPath,
     path.join(isolatedHome, '.claude', '.credentials.json'),
     deps,
-  );
-  seedClaudeCredential(configPath, path.join(isolatedHome, '.claude.json'), deps);
+  ), seedClaudeCredential(
+    configPath,
+    path.join(isolatedHome, '.claude.json'),
+    deps,
+  )].filter((mirror) => mirror?.mode === 'copy');
+  if (mirrors.length > 0) claudeMirrorsByHome.set(key, mirrors);
+  return mirrors;
 }
 
 export function formatClaudeExitError(stderrText, code, signal, token) {
-  let clean = String(stderrText ?? '').replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
-  if (token) clean = clean.split(token).join('[redacted]');
+  const clean = redactDiagnosticText(stderrText, [token]);
   const detail = clean.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(-8).join('\n');
   const exit = signal ? `signal ${signal}` : `code ${code ?? 'unknown'}`;
   return detail
@@ -149,12 +165,24 @@ function permissionPathRule(tool, value) {
   return `${tool}(//${normalized.replace(/^\/+/, '')}/**)`;
 }
 
+function claudeProcessEnv(opts, sourceEnv) {
+  const env = isolatedProcessEnv(opts, sourceEnv);
+  if (!opts.isolatedHome) {
+    delete env.CLAUDE_CONFIG_DIR;
+    return env;
+  }
+  env.CLAUDE_CONFIG_DIR = path.join(String(opts.isolatedHome), '.claude');
+  return env;
+}
+
 export function buildClaudeArgv(opts, sessionId, resume) {
   const unrestricted = opts.permissionProfile === 'unrestricted';
   const planningRestricted = isPlanningRestricted(opts);
   const interactionMode = providerInteractionMode(opts);
-  const activeTools = planningRestricted ? PLANNING_TOOLS : DIRECT_TOOLS;
+  const copyLayoutWorker = opts.toolProfile === 'copy-layout-worker';
+  const activeTools = copyLayoutWorker ? 'Read,Glob,Grep' : planningRestricted ? PLANNING_TOOLS : DIRECT_TOOLS;
   const capabilityEnv = mcpCapabilityEnv(opts);
+  const readOnlyRoots = providerReadOnlyRoots(opts);
   const runtime = mcpRuntimeFor(opts);
   const mcpConfig = {
     mcpServers: {
@@ -173,14 +201,15 @@ export function buildClaudeArgv(opts, sessionId, resume) {
   };
   const allow = [
     permissionPathRule('Read', opts.rootDir),
-    ...(!planningRestricted ? [
+    ...readOnlyRoots.map((root) => permissionPathRule('Read', root)),
+    ...(!planningRestricted && !copyLayoutWorker ? [
       permissionPathRule('Write', opts.rootDir),
       permissionPathRule('Edit', opts.rootDir),
     ] : []),
     permissionPathRule('Glob', opts.rootDir),
     permissionPathRule('Grep', opts.rootDir),
-    'Bash',
-    'WebSearch', 'WebFetch', 'Agent', 'Workflow', 'mcp__rhwp__*',
+    ...(copyLayoutWorker ? [] : ['Bash', 'WebSearch', 'WebFetch', 'Agent', 'Workflow']),
+    'mcp__rhwp__*',
   ];
   const settings = unrestricted && !planningRestricted ? {} : {
     permissions: { allow },
@@ -189,8 +218,8 @@ export function buildClaudeArgv(opts, sessionId, resume) {
       failIfUnavailable: true,
       allowUnsandboxedCommands: false,
       filesystem: {
-        allowRead: [opts.rootDir],
-        allowWrite: planningRestricted ? [] : [opts.rootDir],
+        allowRead: [opts.rootDir, ...readOnlyRoots],
+        allowWrite: planningRestricted || copyLayoutWorker ? [] : [opts.rootDir],
       },
     },
   };
@@ -231,19 +260,22 @@ export function buildClaudeSdkOptions(opts, sessionId, resume, abortController) 
   const unrestricted = opts.permissionProfile === 'unrestricted';
   const planningRestricted = isPlanningRestricted(opts);
   const interactionMode = providerInteractionMode(opts);
-  const activeTools = planningRestricted ? PLANNING_TOOLS : DIRECT_TOOLS;
+  const copyLayoutWorker = opts.toolProfile === 'copy-layout-worker';
+  const activeTools = copyLayoutWorker ? 'Read,Glob,Grep' : planningRestricted ? PLANNING_TOOLS : DIRECT_TOOLS;
   const capabilityEnv = mcpCapabilityEnv(opts);
+  const readOnlyRoots = providerReadOnlyRoots(opts);
   const runtime = mcpRuntimeFor(opts);
   const allow = [
     permissionPathRule('Read', opts.rootDir),
-    ...(!planningRestricted ? [
+    ...readOnlyRoots.map((root) => permissionPathRule('Read', root)),
+    ...(!planningRestricted && !copyLayoutWorker ? [
       permissionPathRule('Write', opts.rootDir),
       permissionPathRule('Edit', opts.rootDir),
     ] : []),
     permissionPathRule('Glob', opts.rootDir),
     permissionPathRule('Grep', opts.rootDir),
-    'Bash',
-    'WebSearch', 'WebFetch', 'Agent', 'Workflow', 'mcp__rhwp__*',
+    ...(copyLayoutWorker ? [] : ['Bash', 'WebSearch', 'WebFetch', 'Agent', 'Workflow']),
+    'mcp__rhwp__*',
   ];
   const settings = unrestricted && !planningRestricted ? {} : {
     permissions: { allow },
@@ -252,8 +284,8 @@ export function buildClaudeSdkOptions(opts, sessionId, resume, abortController) 
       failIfUnavailable: true,
       allowUnsandboxedCommands: false,
       filesystem: {
-        allowRead: [opts.rootDir],
-        allowWrite: planningRestricted ? [] : [opts.rootDir],
+        allowRead: [opts.rootDir, ...readOnlyRoots],
+        allowWrite: planningRestricted || copyLayoutWorker ? [] : [opts.rootDir],
       },
     },
   };
@@ -265,7 +297,7 @@ export function buildClaudeSdkOptions(opts, sessionId, resume, abortController) 
     allowedTools: [...allow, 'AskUserQuestion'],
     canUseTool,
     cwd: opts.rootDir,
-    env: isolatedProcessEnv(opts, opts.providerEnv ?? process.env),
+    env: claudeProcessEnv(opts, opts.providerEnv ?? process.env),
     extraArgs: { 'disable-slash-commands': null },
     forwardSubagentText: true,
     includePartialMessages: true,
@@ -307,7 +339,10 @@ export function buildClaudeSdkOptions(opts, sessionId, resume, abortController) 
 export function createClaudeSession(opts, {
   spawnProcess = spawn,
   terminateProcess = terminateProcessTree,
+  waitForExit = waitForProcessTreeExit,
   queryAgent = queryClaude,
+  closeGraceMs = 2_000,
+  flushCredentialMirrors = flushClaudeCredentialMirrors,
 } = {}) {
   let sessionId = crypto.randomUUID();
   const onEvent = opts.onEvent;
@@ -315,6 +350,13 @@ export function createClaudeSession(opts, {
   /** @type {import('node:child_process').ChildProcess | null} */
   let child = null;
   let childAlive = false;
+  const childCleanupPromises = new WeakMap();
+  const childDrainPromises = new WeakMap();
+  const childDrainStarters = new WeakMap();
+  const childLifecycleStates = new WeakMap();
+  const childOutputDiscarders = new WeakMap();
+  let suppressChildOutput = () => {};
+  let uncertainTreeCleanup = false;
   let hasCompletedTurn = false;
   // --session-id 는 한 번 스폰에 쓰면 소진된다: 그 스폰이 turn 을 완료하지 못한 채
   // 죽으면(인터럽트/크래시) 같은 ID 재사용 시 "Session ID … is already in use" 로
@@ -325,18 +367,35 @@ export function createClaudeSession(opts, {
   const streamedSubagents = new Set();
   let disposed = false;
   let restartReady = Promise.resolve();
+  /** @type {{ text: string } | null} */
+  let queuedTurn = null;
   let stderrTail = '';
   // Only root chat sessions with a host callback enter the bidirectional SDK
   // transport. Any SDK initialization failure before the first provider frame
   // permanently selects the existing CLI+MCP path for this session.
   let nativeUserInput = typeof opts.requestUserInput === 'function'
     && isRootUserInputContext({ agentRole: opts.agentRole });
-  let sdkQuery = null;
-  let sdkQueue = null;
-  let sdkRun = null;
-  let sdkAbortController = null;
-  let sdkSawEvent = false;
-  let sdkPendingPrompt = null;
+  /**
+   * The Agent SDK owns a Claude process and its MCP descendants. Keep one
+   * owner record per provider turn so callbacks and iterator events from a
+   * closed query cannot be accepted by a later resumed query.
+   * @type {{
+   *   generation: number,
+   *   query: any,
+   *   queue: ReturnType<typeof createClaudeInputQueue>,
+   *   run: Promise<void> | null,
+   *   abortController: AbortController,
+   *   active: boolean,
+   *   sawEvent: boolean,
+   *   pendingPrompt: string | null,
+   *   shutdown: Promise<boolean> | null,
+   *   settling: boolean,
+   * } | null}
+   */
+  let sdkOwner = null;
+  let sdkGeneration = 0;
+  let sdkShutdownReady = Promise.resolve(true);
+  let uncertainSdkCleanup = false;
   // usage 집계에 붙일 모델 — CLI 가 보고한 실제 모델을 우선한다.
   let currentModel = opts.model ?? null;
 
@@ -394,12 +453,52 @@ export function createClaudeSession(opts, {
   }
 
   /** result 라인이 담아 온 정보로 턴을 닫는다 — 정착 판정을 거친 뒤에만 호출된다. */
-  function settleTurn() {
-    endTurn({
+  function settleTurn(source = null) {
+    if (!turnOpen) return;
+    const event = {
       type: 'turn-end',
       agent: 'claude',
       stopReason: lastStopReason,
       errorMessage: resultErrorMessage,
+    };
+    if (!source) {
+      const proc = child;
+      if (!proc) {
+        const message = 'Claude process ownership was lost before terminal cleanup';
+        uncertainTreeCleanup = true;
+        onEvent({ type: 'error', agent: 'claude', message });
+        event.stopReason = 'failed';
+        event.errorMessage ??= message;
+        endTurn(event);
+        return;
+      }
+      const state = childLifecycleStates.get(proc);
+      if (state?.settling) return;
+      if (state) state.settling = true;
+      childAlive = false;
+      void stopChildProcess(proc, true).then((cleaned) => {
+        if (disposed || !turnOpen) return;
+        if (!cleaned) {
+          const message = 'Claude process-tree cleanup could not be confirmed after the terminal result';
+          onEvent({ type: 'error', agent: 'claude', message });
+          event.stopReason = 'failed';
+          event.errorMessage ??= message;
+        }
+        endTurn(event);
+      });
+      return;
+    }
+    if (source !== sdkOwner || !source.active || source.settling) return;
+    source.settling = true;
+    void closeSdkQuery(source).then((cleaned) => {
+      if (disposed || !turnOpen) return;
+      if (!cleaned) {
+        const message = 'Claude SDK cleanup could not be confirmed after the terminal result';
+        onEvent({ type: 'error', agent: 'claude', message });
+        event.stopReason = 'failed';
+        event.errorMessage ??= message;
+      }
+      endTurn(event);
     });
   }
 
@@ -410,8 +509,8 @@ export function createClaudeSession(opts, {
   }
 
   // ── usage: result 의 modelUsage 는 프로세스 수명 누적치다 ──────────
-  // (백그라운드 task 알림이 만드는 wake 재호출마다 result 가 반복되고, 같은
-  // 프로세스의 다음 턴에도 누적이 이어진다.) 마지막 스냅샷과의 차분만 흘린다.
+  // (백그라운드 task 알림이 만드는 wake 재호출마다 같은 턴/프로세스 안에서
+  // result 가 반복된다.) 마지막 스냅샷과의 차분만 흘린다.
   /** @type {Map<string, {inputTokens:number,outputTokens:number,cacheReadTokens:number,cacheCreationTokens:number,costUsd:number}>} */
   let usageBaseline = new Map();
 
@@ -602,8 +701,9 @@ export function createClaudeSession(opts, {
     // 정보성 — task_* 수명주기가 유일한 진실이므로 버린다.
   }
 
-  function handleEvent(e) {
+  function handleEvent(e, source = null) {
     if (disposed) return; // 폐기 후 죽어가는 CLI 가 흘리는 stdout 은 무시한다.
+    if (source && (source !== sdkOwner || !source.active)) return;
     // 새 stdout 라인 = CLI 가 아직 할 일이 있다 — 예약된 턴 정착을 미룬다.
     // (result 분기가 처리 끝에 다시 예약한다.)
     clearSettleTimer();
@@ -696,22 +796,22 @@ export function createClaudeSession(opts, {
       if (pendingTasks.size > 0) return; // 백그라운드 fleet 진행 중 — 턴 유지.
       if (tasksSeenThisTurn === 0) {
         // 서브에이전트 없는 보통 턴 — 기존과 동일하게 즉시 닫는다 (지연 없음).
-        settleTurn();
+        settleTurn(source);
         return;
       }
       // task 가 있었던 턴: task_notification 이 큐에 남긴 wake 재호출이 이 result
       // 뒤에 이어질 수 있다 (init→…→result 반복). 짧은 정적 후에만 닫는다.
       settleTimer = setTimeout(() => {
         settleTimer = null;
-        settleTurn();
+        settleTurn(source);
       }, TASK_SETTLE_GRACE_MS);
-      if (settleTimer.unref) settleTimer.unref();
       return;
     }
   }
 
   function dispatchLegacy(text) {
-    if (!child || !childAlive) spawnChild();
+    if (!child) spawnChild();
+    else if (!childAlive) throw new Error('Previous Claude process tree cleanup is still pending');
     const line = JSON.stringify({
       type: 'user',
       message: { role: 'user', content: [{ type: 'text', text }] },
@@ -721,107 +821,191 @@ export function createClaudeSession(opts, {
     });
   }
 
+  function sdkAbortError(message = 'Claude SDK turn is no longer active') {
+    return new DOMException(message, 'AbortError');
+  }
+
+  async function requestSdkUserInput(owner, request, signal) {
+    if (owner !== sdkOwner || !owner.active || !turnOpen || disposed) {
+      throw sdkAbortError();
+    }
+    const generationSignal = owner.abortController.signal;
+    const combinedSignal = signal
+      ? AbortSignal.any([signal, generationSignal])
+      : generationSignal;
+    if (combinedSignal.aborted) throw combinedSignal.reason ?? sdkAbortError();
+    const outcome = await new Promise((resolve, reject) => {
+      const onAbort = () => reject(combinedSignal.reason ?? sdkAbortError());
+      combinedSignal.addEventListener('abort', onAbort, { once: true });
+      Promise.resolve()
+        .then(() => opts.requestUserInput(request, combinedSignal))
+        .then(resolve, reject)
+        .finally(() => combinedSignal.removeEventListener('abort', onAbort));
+    });
+    if (combinedSignal.aborted) throw combinedSignal.reason ?? sdkAbortError();
+    if (owner !== sdkOwner || !owner.active || !turnOpen || disposed) {
+      throw sdkAbortError();
+    }
+    return outcome;
+  }
+
+  function failSdkTurn(owner, error) {
+    if (owner !== sdkOwner || !owner.active || !turnOpen || disposed) return;
+    const message = `claude SDK error: ${error?.message ?? error}`;
+    onEvent({ type: 'error', agent: 'claude', message });
+    void closeSdkQuery(owner).then((cleaned) => {
+      if (disposed || !turnOpen) return;
+      if (!cleaned) {
+        onEvent({
+          type: 'error',
+          agent: 'claude',
+          message: 'Claude SDK cleanup could not be confirmed after the transport failed',
+        });
+      }
+      endTurn({
+        type: 'turn-end',
+        agent: 'claude',
+        stopReason: cleaned ? 'exited' : 'failed',
+      });
+    });
+  }
+
   function startSdkQuery() {
+    if (sdkOwner) throw new Error('Previous Claude SDK query still owns the session');
     const resume = hasCompletedTurn;
     if (!resume && sessionIdConsumed) sessionId = crypto.randomUUID();
     sessionIdConsumed = true;
     usageBaseline = new Map();
-    sdkSawEvent = false;
-    sdkAbortController = new AbortController();
-    sdkQueue = createClaudeInputQueue();
+    const owner = {
+      generation: ++sdkGeneration,
+      query: null,
+      queue: createClaudeInputQueue(),
+      run: null,
+      abortController: new AbortController(),
+      active: true,
+      sawEvent: false,
+      pendingPrompt: null,
+      shutdown: null,
+      settling: false,
+    };
+    sdkOwner = owner;
     let query;
     try {
       query = queryAgent({
-        prompt: sdkQueue,
-        options: buildClaudeSdkOptions(opts, sessionId, resume, sdkAbortController),
+        prompt: owner.queue,
+        options: buildClaudeSdkOptions({
+          ...opts,
+          requestUserInput(request, signal) {
+            return requestSdkUserInput(owner, request, signal);
+          },
+        }, sessionId, resume, owner.abortController),
       });
     } catch (error) {
-      try { sdkQueue.close(); } catch {}
-      try { sdkAbortController.abort(new DOMException('Claude SDK startup failed', 'AbortError')); } catch {}
-      sdkQueue = null;
-      sdkAbortController = null;
+      owner.active = false;
+      if (sdkOwner === owner) sdkOwner = null;
+      try { owner.queue.close(); } catch {}
+      try { owner.abortController.abort(sdkAbortError('Claude SDK startup failed')); } catch {}
       throw error;
     }
-    sdkQuery = query;
-    sdkRun = (async () => {
+    owner.query = query;
+    owner.run = (async () => {
       try {
         for await (const event of query) {
-          sdkSawEvent = true;
-          handleEvent(event);
+          if (!owner.active || owner !== sdkOwner) continue;
+          owner.sawEvent = true;
+          handleEvent(event, owner);
         }
-        if (query === sdkQuery && !disposed && turnOpen) {
-          throw new Error(sdkSawEvent
+        if (owner === sdkOwner && owner.active && !disposed && turnOpen) {
+          throw new Error(owner.sawEvent
             ? 'Claude SDK stream ended before the turn settled'
             : 'Claude SDK transport ended during startup');
         }
       } catch (error) {
-        if (query !== sdkQuery || disposed) return;
-        const pendingPrompt = sdkPendingPrompt;
-        if (!sdkSawEvent && turnOpen && pendingPrompt !== null) {
+        if (owner !== sdkOwner || !owner.active || disposed) return;
+        const pendingPrompt = owner.pendingPrompt;
+        if (!owner.sawEvent && turnOpen && pendingPrompt !== null) {
           // Capability negotiation failed before Claude produced anything.
-          // Retry this turn once through the proven CLI/MCP transport.
+          // Shut the SDK transport down before retrying through CLI/MCP. An
+          // async first-next rejection can leave the SDK subprocess alive even
+          // though this iterator has rejected; overlapping it with legacy would
+          // give two providers ownership of the same turn and workspace.
           nativeUserInput = false;
-          try { sdkQueue?.close(); } catch {}
-          try { sdkAbortController?.abort(new DOMException('Claude SDK startup failed', 'AbortError')); } catch {}
-          sdkQuery = null;
-          sdkQueue = null;
-          sdkAbortController = null;
-          sdkPendingPrompt = null;
-          process.stderr.write(`[claude] native user-input transport unavailable; using MCP fallback: ${error?.message ?? error}\n`);
-          try {
-            dispatchLegacy(pendingPrompt);
-          } catch (fallbackError) {
-            onEvent({ type: 'error', agent: 'claude', message: `failed to dispatch message: ${fallbackError?.message ?? fallbackError}` });
-            endTurn({ type: 'turn-end', agent: 'claude', stopReason: 'exited' });
-          }
+          const cleanupReady = closeSdkQuery(owner);
+          void cleanupReady.then((cleaned) => {
+            if (disposed || !turnOpen) return;
+            if (!cleaned) {
+              onEvent({
+                type: 'error',
+                agent: 'claude',
+                message: 'Claude SDK cleanup could not be confirmed; legacy fallback was not started',
+              });
+              endTurn({ type: 'turn-end', agent: 'claude', stopReason: 'failed' });
+              return;
+            }
+            process.stderr.write(`[claude] native user-input transport unavailable; using MCP fallback: ${error?.message ?? error}\n`);
+            try {
+              dispatchLegacy(pendingPrompt);
+            } catch (fallbackError) {
+              onEvent({ type: 'error', agent: 'claude', message: `failed to dispatch message: ${fallbackError?.message ?? fallbackError}` });
+              endTurn({ type: 'turn-end', agent: 'claude', stopReason: 'exited' });
+            }
+          });
           return;
         }
-        if (turnOpen) {
-          onEvent({ type: 'error', agent: 'claude', message: `claude SDK error: ${error?.message ?? error}` });
-          endTurn({ type: 'turn-end', agent: 'claude', stopReason: 'exited' });
-        }
-      } finally {
-        if (query === sdkQuery) {
-          sdkQuery = null;
-          sdkQueue = null;
-          sdkAbortController = null;
-          sdkPendingPrompt = null;
-        }
+        failSdkTurn(owner, error);
       }
     })();
-    return query;
+    return owner;
   }
 
   function dispatchNative(text) {
-    if (!sdkQuery) startSdkQuery();
-    sdkPendingPrompt = text;
-    sdkQueue.push({
+    const owner = startSdkQuery();
+    owner.pendingPrompt = text;
+    owner.queue.push({
       type: 'user',
       message: { role: 'user', content: [{ type: 'text', text }] },
       parent_tool_use_id: null,
     });
   }
 
-  function closeSdkQuery() {
-    const query = sdkQuery;
-    const queue = sdkQueue;
-    const run = sdkRun;
-    sdkQuery = null;
-    sdkQueue = null;
-    sdkRun = null;
-    sdkPendingPrompt = null;
-    try { queue?.close(); } catch {}
-    try { sdkAbortController?.abort(new DOMException('Claude session closed', 'AbortError')); } catch {}
-    sdkAbortController = null;
-    try { query?.close(); } catch {}
-    if (!run) return Promise.resolve();
-    return Promise.race([
-      Promise.resolve(run).catch(() => {}),
+  function closeSdkQuery(owner = sdkOwner) {
+    if (!owner) return sdkShutdownReady;
+    if (owner.shutdown) return owner.shutdown;
+    owner.active = false;
+    owner.pendingPrompt = null;
+    if (sdkOwner === owner) sdkOwner = null;
+    try { owner.queue.close(); } catch {}
+    try { owner.abortController.abort(sdkAbortError('Claude SDK session closed')); } catch {}
+
+    let closeResult;
+    let closeFailed = false;
+    try {
+      if (typeof owner.query?.close !== 'function') closeFailed = true;
+      else closeResult = owner.query.close();
+    } catch {
+      closeFailed = true;
+    }
+    const closeReady = closeFailed
+      ? Promise.resolve(false)
+      : Promise.resolve(closeResult).then(() => true, () => false);
+    // Rejection still means the iterator run settled. A close rejection is
+    // tracked separately above and remains a failed cleanup outcome.
+    const runReady = owner.run
+      ? Promise.resolve(owner.run).then(() => true, () => true)
+      : Promise.resolve(true);
+    let timer;
+    const shutdown = Promise.race([
+      Promise.all([closeReady, runReady]).then(([closed]) => closed),
       new Promise((resolve) => {
-        const timer = setTimeout(resolve, 3500);
-        if (timer.unref) timer.unref();
+        timer = setTimeout(() => resolve(false), closeGraceMs);
       }),
-    ]).then(() => {});
+    ]).finally(() => clearTimeout(timer));
+    owner.shutdown = shutdown.then((cleaned) => {
+      if (!cleaned) uncertainSdkCleanup = true;
+      return cleaned;
+    });
+    sdkShutdownReady = owner.shutdown;
+    return owner.shutdown;
   }
 
   function spawnChild() {
@@ -837,76 +1021,219 @@ export function createClaudeSession(opts, {
     const proc = spawnProcess(opts.claudeBin ?? 'claude', buildArgv(resume), {
       ...processTreeSpawnOptions(),
       cwd: opts.rootDir,
-      env: isolatedProcessEnv(opts, opts.providerEnv ?? process.env),
+      env: claudeProcessEnv(opts, opts.providerEnv ?? process.env),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     child = proc;
     childAlive = true;
     stderrTail = '';
-    proc.stdout.on('data', createLineReader(handleEvent));
-    proc.stderr.on('data', (chunk) => {
-      stderrTail = (stderrTail + chunk.toString()).slice(-STDERR_TAIL_LIMIT);
-      for (const line of chunk.toString().split('\n')) {
-        if (line.trim()) process.stderr.write(`[claude] ${line}\n`);
-      }
+    let acceptOutput = true;
+    let outputEnded = false;
+    let readerEnded = false;
+    let spawnErrorMessage = null;
+    /** @type {{ code: number|null, signal: NodeJS.Signals|null } | null} */
+    let exitInfo = null;
+    /** @type {ReturnType<typeof setTimeout> | null} */
+    let closeGraceTimer = null;
+    let resolveDrain = () => {};
+    const readStdout = createLineReader((event) => {
+      // createLineReader can have more complete frames in the chunk that
+      // contained the terminal result. Recheck ownership for every frame, not
+      // only once at the data-event boundary.
+      if (proc !== child || disposed || !acceptOutput) return;
+      handleEvent(event);
     });
-    proc.on('error', (err) => {
-      if (proc !== child) return;
-      childAlive = false;
-      process.stderr.write(`[claude] spawn error: ${err?.message ?? err}\n`);
-      if (turnOpen) {
-        onEvent({ type: 'error', agent: 'claude', message: `claude process error: ${err?.message ?? err}` });
-        endTurn({ type: 'turn-end', agent: 'claude', stopReason: 'exited' });
+    const lifecycleState = {
+      forcedCleanup: false,
+      drainedClose: false,
+      completedAtDrain: false,
+      code: null,
+      settling: false,
+    };
+    childLifecycleStates.set(proc, lifecycleState);
+    const drained = new Promise((resolve) => { resolveDrain = resolve; });
+    childDrainPromises.set(proc, drained);
+    const closeOutputReader = (flush) => {
+      if (readerEnded) return;
+      readerEnded = true;
+      acceptOutput = false;
+      if (flush) readStdout.end();
+      else readStdout.discard();
+    };
+    const discardOutputReader = () => closeOutputReader(false);
+    const finishOutput = (flush) => {
+      if (outputEnded) return;
+      outputEnded = true;
+      if (closeGraceTimer) {
+        clearTimeout(closeGraceTimer);
+        closeGraceTimer = null;
       }
-    });
-    proc.on('exit', (code, signal) => {
-      if (proc !== child) return;
-      childAlive = false;
+      closeOutputReader(flush);
+      resolveDrain(true);
+      resolveDrain = () => {};
+    };
+    const endOutput = () => finishOutput(true);
+    const discardOutput = () => finishOutput(false);
+    childOutputDiscarders.set(proc, discardOutput);
+    suppressChildOutput = () => {
+      if (proc === child) discardOutput();
+    };
+    const settleUnexpectedExit = (code, signal, fromClose) => {
+      if (proc !== child || outputEnded) return;
+      lifecycleState.drainedClose = fromClose;
+      lifecycleState.code = code ?? null;
+      if (fromClose) endOutput();
+      else discardOutput();
+      lifecycleState.completedAtDrain = !turnOpen && hasCompletedTurn;
       if (turnOpen && !disposed) {
         onEvent({
           type: 'error',
           agent: 'claude',
-          message: formatClaudeExitError(stderrTail, code, signal, opts.token),
+          message: spawnErrorMessage
+            ?? formatClaudeExitError(stderrTail, code, signal, opts.token),
         });
         endTurn({ type: 'turn-end', agent: 'claude', stopReason: 'exited' });
       }
+    };
+    const scheduleCloseGrace = (code, signal) => {
+      if (outputEnded || closeGraceTimer) return;
+      closeGraceTimer = setTimeout(() => {
+        closeGraceTimer = null;
+        settleUnexpectedExit(code ?? null, signal ?? null, false);
+      }, closeGraceMs);
+      closeGraceTimer.unref?.();
+    };
+    childDrainStarters.set(proc, () => scheduleCloseGrace(
+      exitInfo?.code ?? proc.exitCode ?? null,
+      exitInfo?.signal ?? proc.signalCode ?? null,
+    ));
+    proc.stdout.on('data', (chunk) => {
+      if (proc !== child || disposed || !acceptOutput) return;
+      readStdout(chunk);
+    });
+    proc.stderr.on('data', (chunk) => {
+      if (proc !== child || disposed || !acceptOutput) return;
+      stderrTail = (stderrTail + chunk.toString()).slice(-STDERR_TAIL_LIMIT);
+    });
+    proc.on('error', (err) => {
+      if (proc !== child) return;
+      childAlive = false;
+      discardOutputReader();
+      const safeError = redactDiagnosticText(err?.message ?? err, [opts.token]);
+      spawnErrorMessage = `claude process error: ${safeError}`;
+      process.stderr.write(`[claude] spawn error: ${safeError}\n`);
+      void stopChildProcess(proc, true, false);
+      scheduleCloseGrace(proc.exitCode ?? null, proc.signalCode ?? null);
+    });
+    proc.on('exit', (code, signal) => {
+      if (proc !== child) return;
+      childAlive = false;
+      exitInfo = { code, signal };
+      void stopChildProcess(proc, false);
+      scheduleCloseGrace(code, signal);
+    });
+    proc.on('close', (code, signal) => {
+      settleUnexpectedExit(code ?? exitInfo?.code ?? null, signal ?? exitInfo?.signal ?? null, true);
+      void stopChildProcess(proc, false);
     });
     return proc;
   }
 
+  function stopChildProcess(proc, forced = true, suppressOutput = forced) {
+    if (!proc) return Promise.resolve(true);
+    if (suppressOutput) childOutputDiscarders.get(proc)?.();
+    const lifecycleState = childLifecycleStates.get(proc);
+    if (lifecycleState) lifecycleState.forcedCleanup ||= forced;
+    const active = childCleanupPromises.get(proc);
+    if (active) return active;
+    let resolveCleanup = () => {};
+    const cleanup = new Promise((resolve) => { resolveCleanup = resolve; });
+    childCleanupPromises.set(proc, cleanup);
+    let termination;
+    let exited;
+    try { termination = Promise.resolve(terminateProcess(proc)); } catch { termination = Promise.resolve(false); }
+    try { exited = Promise.resolve(waitForExit(proc)); } catch { exited = Promise.resolve(false); }
+    void Promise.all([termination, exited]).then(
+      ([terminationResult, exitResult]) => processTreeCleanupOutcome(
+        terminationResult,
+        exitResult,
+      ),
+      () => PROCESS_TREE_CLEANUP_OUTCOME.FAILED,
+    ).then(async (outcome) => {
+      if (outcome !== PROCESS_TREE_CLEANUP_OUTCOME.PROVEN) uncertainTreeCleanup = true;
+      childDrainStarters.get(proc)?.();
+      await (childDrainPromises.get(proc) ?? Promise.resolve());
+      const state = childLifecycleStates.get(proc);
+      const naturalDrainedRelease = outcome === PROCESS_TREE_CLEANUP_OUTCOME.UNAVAILABLE
+        && state?.drainedClose === true
+        && state.completedAtDrain === true
+        && state.code === 0
+        && state.forcedCleanup !== true;
+      const released = outcome === PROCESS_TREE_CLEANUP_OUTCOME.PROVEN || naturalDrainedRelease;
+      if (released && child === proc) child = null;
+      resolveCleanup(outcome === PROCESS_TREE_CLEANUP_OUTCOME.PROVEN);
+    });
+    return cleanup;
+  }
+
   function killChild() {
-    const proc = child;
-    if (!proc || proc.exitCode !== null || proc.signalCode !== null) return;
-    terminateProcess(proc);
+    return stopChildProcess(child);
   }
 
   function restartForConfigChange() {
     const priorReady = restartReady;
     const previous = child;
     const sdkShutdownReady = closeSdkQuery();
-    killChild();
-    child = null;
     childAlive = false;
-    let shutdownReady;
-    if (previous && previous.exitCode === null && previous.signalCode === null) {
-      shutdownReady = new Promise((resolve) => {
-        let settled = false;
-        const finish = () => {
-          if (settled) return;
-          settled = true;
-          resolve();
-        };
-        previous.once('exit', finish);
-        const timer = setTimeout(finish, 3500);
-        if (timer.unref) timer.unref();
-      });
-    } else {
-      shutdownReady = Promise.resolve();
-    }
+    const shutdownReady = stopChildProcess(previous, true);
     // Preserve an earlier in-flight restart barrier when permission and
     // execution-mode updates arrive back-to-back.
-    restartReady = Promise.all([priorReady, shutdownReady, sdkShutdownReady]).then(() => {});
+    restartReady = Promise.all([priorReady, shutdownReady, sdkShutdownReady]).then(([, childCleaned, sdkCleaned]) => {
+      if (sdkCleaned === false) throw new Error('Claude SDK cleanup could not be confirmed for restart');
+      if (childCleaned === false) throw new Error('Claude process tree could not be stopped for restart');
+    });
     return restartReady;
+  }
+
+  function beginQueuedTurn(text) {
+    if (disposed) return;
+    turnOpen = true;
+    sawRootTextDelta = false;
+    streamedSubagents.clear();
+    resetTurnTaskState();
+    onEvent({ type: 'turn-start', agent: 'claude' });
+    try {
+      if (nativeUserInput) dispatchNative(text);
+      else dispatchLegacy(text);
+    } catch (error) {
+      let failure = error;
+      if (nativeUserInput) {
+        nativeUserInput = false;
+        process.stderr.write(`[claude] native user-input transport unavailable; using MCP fallback: ${error?.message ?? error}\n`);
+        try {
+          dispatchLegacy(text);
+          return;
+        } catch (fallbackError) {
+          failure = fallbackError;
+        }
+      }
+      onEvent({ type: 'error', agent: 'claude', message: `failed to dispatch message: ${failure?.message ?? failure}` });
+      endTurn({ type: 'turn-end', agent: 'claude', stopReason: 'exited' });
+    }
+  }
+
+  function failQueuedTurn(entry, error) {
+    if (queuedTurn !== entry) return;
+    queuedTurn = null;
+    if (disposed) return;
+    onEvent({
+      type: 'error',
+      agent: 'claude',
+      message: error?.message ?? 'Claude process-tree cleanup could not be confirmed before the next turn',
+    });
+    // The hub allocated this user turn before dispatch. Close that allocation
+    // without advertising provider authority through a matching turn-start.
+    onEvent({ type: 'turn-end', agent: 'claude', stopReason: 'failed' });
   }
 
   return {
@@ -916,38 +1243,43 @@ export function createClaudeSession(opts, {
     },
     sendUserMessage(text) {
       if (disposed) return;
-      turnOpen = true;
-      sawRootTextDelta = false;
-      streamedSubagents.clear();
-      resetTurnTaskState();
-      onEvent({ type: 'turn-start', agent: 'claude' });
-      void restartReady.then(() => {
-        if (disposed || !turnOpen) return;
-        try {
-          if (nativeUserInput) dispatchNative(text);
-          else dispatchLegacy(text);
-        } catch (e) {
-          let failure = e;
-          if (nativeUserInput) {
-            nativeUserInput = false;
-            process.stderr.write(`[claude] native user-input transport unavailable; using MCP fallback: ${e?.message ?? e}\n`);
-            try {
-              dispatchLegacy(text);
-              return;
-            } catch (fallbackError) {
-              failure = fallbackError;
-            }
-          }
-          onEvent({ type: 'error', agent: 'claude', message: `failed to dispatch message: ${failure?.message ?? failure}` });
-          endTurn({ type: 'turn-end', agent: 'claude', stopReason: 'exited' });
+      if (turnOpen || queuedTurn) throw new Error('Claude already has a turn in progress');
+      if (uncertainSdkCleanup) {
+        throw new Error('Claude SDK cleanup remains unconfirmed; start a new isolated session');
+      }
+      if (uncertainTreeCleanup) {
+        throw new Error('Claude process-tree cleanup remains unconfirmed; start a new isolated session');
+      }
+      const entry = { text };
+      queuedTurn = entry;
+      void Promise.all([restartReady, sdkShutdownReady]).then(async ([, sdkCleaned]) => {
+        if (queuedTurn !== entry || disposed) return;
+        if (!sdkCleaned) {
+          failQueuedTurn(entry, new Error(
+            'Claude SDK cleanup remains unconfirmed; start a new isolated session',
+          ));
+          return;
         }
-      });
+        if (child && !childAlive) {
+          const released = await stopChildProcess(child, false);
+          if (queuedTurn !== entry || disposed) return;
+          if (!released || child) {
+            failQueuedTurn(entry);
+            return;
+          }
+        }
+        queuedTurn = null;
+        beginQueuedTurn(entry.text);
+      }, (error) => failQueuedTurn(entry, error));
     },
     async setPermissionProfile(profile) {
-      if (turnOpen) throw new Error('Permission profile can only change between turns');
+      if (turnOpen || queuedTurn) throw new Error('Permission profile can only change between turns');
+      if (uncertainSdkCleanup) throw new Error('Claude SDK cleanup remains unconfirmed');
+      if (uncertainTreeCleanup) throw new Error('Claude process tree cleanup remains unconfirmed');
       if (profile !== 'safe' && profile !== 'unrestricted') throw new Error(`Unknown permission profile: ${profile}`);
       if (opts.permissionProfile === profile) {
-        await restartReady;
+        const [, sdkCleaned] = await Promise.all([restartReady, sdkShutdownReady]);
+        if (!sdkCleaned) throw new Error('Claude SDK cleanup remains unconfirmed');
         return;
       }
       const previous = opts.permissionProfile;
@@ -961,13 +1293,16 @@ export function createClaudeSession(opts, {
       }
     },
     async setExecutionMode(mode) {
-      if (turnOpen) throw new Error('Execution mode can only change between turns');
+      if (turnOpen || queuedTurn) throw new Error('Execution mode can only change between turns');
+      if (uncertainSdkCleanup) throw new Error('Claude SDK cleanup remains unconfirmed');
+      if (uncertainTreeCleanup) throw new Error('Claude process tree cleanup remains unconfirmed');
       validateExecutionMode(mode);
       const current = normalizeExecutionMode(opts);
       if (current.workflow === mode.workflow
         && current.phase === mode.phase
         && String(current.capabilityEpoch) === String(mode.capabilityEpoch)) {
-        await restartReady;
+        const [, sdkCleaned] = await Promise.all([restartReady, sdkShutdownReady]);
+        if (!sdkCleaned) throw new Error('Claude SDK cleanup remains unconfirmed');
         return;
       }
       opts.workflow = mode.workflow;
@@ -984,11 +1319,13 @@ export function createClaudeSession(opts, {
       }
     },
     interrupt() {
-      if (sdkQuery) {
+      queuedTurn = null;
+      if (sdkOwner) {
         // Closing the SDK query aborts the exact signal handed to canUseTool,
         // so an open host question is cancelled with the turn.
         void closeSdkQuery();
       }
+      suppressChildOutput();
       killChild();
       childAlive = false;
       endTurn({ type: 'turn-end', agent: 'claude', stopReason: 'interrupted' });
@@ -996,11 +1333,20 @@ export function createClaudeSession(opts, {
     dispose() {
       disposed = true;
       turnOpen = false;
+      queuedTurn = null;
       clearSettleTimer();
+      suppressChildOutput();
       // 죽어가는 자식의 stdout 을 아예 파싱하지 않는다.
       try { child?.stdout?.removeAllListeners('data'); } catch {}
-      const exited = Promise.all([waitForProcessTreeExit(child), closeSdkQuery()]).then(([childExited]) => childExited);
-      killChild();
+      const exited = Promise.all([stopChildProcess(child, true), closeSdkQuery()])
+        .then(([childExited, sdkExited]) => {
+          // A surviving descendant can still write the isolated credential.
+          // Leave its journal/root marker intact for dead-owner recovery.
+          const cleaned = childExited && sdkExited
+            && !uncertainTreeCleanup && !uncertainSdkCleanup;
+          if (cleaned) flushCredentialMirrors(opts.isolatedHome);
+          return cleaned;
+        });
       childAlive = false;
       return exited;
     },

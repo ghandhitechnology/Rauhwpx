@@ -5,16 +5,50 @@ import { join, resolve } from 'node:path';
 import {
   createHubToken,
   isHubHealthy,
-  issueHubSessionToken,
+  readHubHealth,
+  registerHubSession,
   requestHubShutdown,
   spawnHubProcess,
   stopHubChild,
   waitForHub,
-  waitForHubChildExit,
   waitForHubReadyLine,
 } from '../../desktop/agent-hub.mjs';
+import {
+  hasPendingLaunchCleanupSync,
+  retainLaunchRootForProcessCleanupSync,
+} from '../rhwp-agent/credential-mirror.mjs';
 
 export const AGENT_HUB_ENSURE_PATH = '/__rhwp/ensure-agent-hub';
+const DEV_SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/;
+
+/** Capability minting is browser-only: require the request's exact transport origin. */
+export function isExactSameOriginRequest(req) {
+  const originHeader = req?.headers?.origin;
+  const hostHeader = req?.headers?.host;
+  if (typeof originHeader !== 'string' || typeof hostHeader !== 'string'
+    || !originHeader || !hostHeader) return false;
+  try {
+    const origin = new URL(originHeader);
+    // Browser Origin headers contain only the serialized origin. Reject more
+    // permissive URL spellings before comparing them to the actual Host.
+    if (originHeader !== origin.origin) return false;
+    const protocol = req?.socket?.encrypted === true ? 'https:' : 'http:';
+    const expected = new URL(`${protocol}//${hostHeader}`);
+    if (expected.username || expected.password || expected.pathname !== '/'
+      || expected.search || expected.hash) return false;
+    return origin.origin === expected.origin;
+  } catch {
+    return false;
+  }
+}
+
+function sendJson(res, status, body) {
+  res.statusCode = status;
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.end(JSON.stringify(body));
+}
 
 function explicitHubConfig() {
   const hubUrl = process.env.VITE_RHWP_AGENT_URL;
@@ -23,7 +57,7 @@ function explicitHubConfig() {
   const port = Number(url.port || (url.protocol === 'wss:' ? 443 : 80));
   return {
     hubUrl: hubUrl.replace(/\/$/, ''),
-    hubToken: process.env.VITE_RHWP_AGENT_TOKEN ?? process.env.RHWP_AGENT_TOKEN ?? 'dev',
+    hubToken: process.env.RHWP_AGENT_TOKEN ?? 'dev',
     launchId: process.env.RHWP_LAUNCH_ID ?? 'external-dev-hub',
     port,
   };
@@ -47,13 +81,22 @@ export function rhwpAgentHubPlugin(studioRoot = process.cwd()) {
   let ensuring = null;
   let workRoot = null;
 
+  function removeOwnedWorkRoot(candidate) {
+    if (!candidate) return;
+    if (hasPendingLaunchCleanupSync(join(candidate, 'work'))) {
+      console.warn(`[rhwp-agent] retaining dev hub work for pending cleanup: ${candidate}`);
+      return;
+    }
+    rmSync(candidate, { recursive: true, force: true });
+    if (workRoot === candidate) workRoot = null;
+  }
+
   function publicContext(started, ready) {
     return {
       started,
       ready,
       ...(context ? {
         hubUrl: context.hubUrl,
-        hubToken: context.hubToken,
         launchId: context.launchId,
       } : {}),
     };
@@ -62,27 +105,35 @@ export function rhwpAgentHubPlugin(studioRoot = process.cwd()) {
   async function stopOwnedHub({ removeWork = false } = {}) {
     const current = child;
     const currentContext = context;
-    child = null;
+    const currentWorkRoot = workRoot;
     context = null;
-    let gracefulShutdownAccepted = false;
+    let cleanupPrepared = false;
     if (currentContext && current) {
       try {
-        await requestHubShutdown({
+        const response = await requestHubShutdown({
           port: currentContext.port,
           token,
           launchId,
-          timeoutMs: 1000,
+          timeoutMs: 15_000,
         });
-        gracefulShutdownAccepted = true;
+        cleanupPrepared = response?.status === 'prepared'
+          && response?.launchId === launchId;
       } catch {}
     }
-    const exited = gracefulShutdownAccepted
-      ? await waitForHubChildExit(current, { timeoutMs: 3000 })
-      : false;
-    if (!exited) await stopHubChild(current, { timeoutMs: 3000 });
-    if (removeWork && workRoot) {
-      rmSync(workRoot, { recursive: true, force: true });
-      workRoot = null;
+    // A prepared response proves descendants were disposed. Windows can then
+    // wait on the retained child handle without resolving a reusable PID.
+    const stopped = await stopHubChild(current, { timeoutMs: 3000, cleanupPrepared });
+    if (stopped && child === current) child = null;
+    if (removeWork && currentWorkRoot && stopped) removeOwnedWorkRoot(currentWorkRoot);
+    if (!stopped) {
+      if (currentWorkRoot) {
+        try {
+          retainLaunchRootForProcessCleanupSync(join(currentWorkRoot, 'work'), { launchId });
+        } catch (error) {
+          console.warn(`[rhwp-agent] process cleanup retention marker failed: ${error}`);
+        }
+      }
+      throw new Error(`Owned dev hub process tree ${current?.pid ?? 'unknown'} survived shutdown`);
     }
   }
 
@@ -97,7 +148,6 @@ export function rhwpAgentHubPlugin(studioRoot = process.cwd()) {
     if (child) await stopOwnedHub({ removeWork: true });
 
     workRoot = mkdtempSync(join(tmpdir(), 'rauhwpx-vite-hub-'));
-    const spawnedWorkRoot = workRoot;
     const spawned = spawnHubProcess({
       command: process.execPath,
       args: [script],
@@ -109,20 +159,21 @@ export function rhwpAgentHubPlugin(studioRoot = process.cwd()) {
         RHWP_AGENT_MODE: 'production',
         RHWP_LAUNCH_ID: launchId,
         RHWP_OWNER_PID: String(process.pid),
+        RHWP_OWNER_IPC: '1',
         RHWP_RUNTIME_DIR: join(workRoot, 'runtime'),
         RHWP_WORK_DIR: join(workRoot, 'work'),
         RHWP_OWN_RUNTIME_DIR: '1',
         RHWP_OWN_WORK_DIR: '1',
       },
     }, {
+      stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
       onExit(code, signal) {
         console.warn(`[rhwp-agent] owned dev hub exited (${code ?? signal ?? 'unknown'})`);
         if (child === spawned) {
-          child = null;
           context = null;
-          rmSync(spawnedWorkRoot, { recursive: true, force: true });
-          if (workRoot === spawnedWorkRoot) workRoot = null;
         }
+        // Keep the exited leader and its work root until stopOwnedHub has
+        // positively cleaned its process group/task tree.
       },
     });
     child = spawned;
@@ -146,7 +197,11 @@ export function rhwpAgentHubPlugin(studioRoot = process.cwd()) {
       };
       return publicContext(true, true);
     } catch (error) {
-      await stopOwnedHub({ removeWork: true });
+      try {
+        await stopOwnedHub({ removeWork: true });
+      } catch (cleanupError) {
+        console.warn('[rhwp-agent] owned dev hub cleanup failed after startup failed:', cleanupError);
+      }
       throw error;
     }
   }
@@ -156,8 +211,11 @@ export function rhwpAgentHubPlugin(studioRoot = process.cwd()) {
     ensuring = (async () => {
       if (skipOwnedHub) {
         if (!external) return publicContext(false, false);
-        const ready = await isHubHealthy(external.port, { token: external.hubToken });
-        return publicContext(false, ready);
+        const health = await readHubHealth(external.port, { token: external.hubToken });
+        if (health?.ok === true && typeof health.launchId === 'string') {
+          context = { ...external, launchId: health.launchId };
+        }
+        return publicContext(false, health?.ok === true);
       }
       return startOwnedHub();
     })().finally(() => {
@@ -170,35 +228,65 @@ export function rhwpAgentHubPlugin(studioRoot = process.cwd()) {
     name: 'rhwp-agent-hub',
     apply: 'serve',
     config() {
-      if (!external) return undefined;
       return {
         define: {
-          'import.meta.env.VITE_RHWP_AGENT_URL': JSON.stringify(external.hubUrl),
-          'import.meta.env.VITE_RHWP_AGENT_TOKEN': JSON.stringify(external.hubToken),
+          // A hub master token must never be compiled into renderer code. The
+          // ensure route exchanges it for audience-scoped capabilities.
+          'import.meta.env.VITE_RHWP_AGENT_TOKEN': 'undefined',
+          ...(external ? {
+            'import.meta.env.VITE_RHWP_AGENT_URL': JSON.stringify(external.hubUrl),
+          } : {}),
         },
       };
     },
     configureServer(server) {
       server.middlewares.use(async (req, res, next) => {
-        const requestUrl = new URL(req.url ?? '/', 'http://127.0.0.1');
+        let requestUrl;
+        try {
+          requestUrl = new URL(req.url ?? '/', 'http://127.0.0.1');
+        } catch {
+          sendJson(res, 400, { started: false, ready: false, error: 'Malformed request target' });
+          return;
+        }
         if (requestUrl.pathname !== AGENT_HUB_ENSURE_PATH) {
           next();
           return;
         }
-        res.setHeader('Content-Type', 'application/json');
-        res.setHeader('Cache-Control', 'no-store');
+        if (req.method !== 'POST') {
+          res.setHeader('Allow', 'POST');
+          sendJson(res, 405, { started: false, ready: false, error: 'POST required' });
+          return;
+        }
+        if (!isExactSameOriginRequest(req)) {
+          sendJson(res, 403, { started: false, ready: false, error: 'Same-origin request required' });
+          return;
+        }
+        const sessionId = requestUrl.searchParams.get('sessionId');
+        if (!sessionId || !DEV_SESSION_ID_PATTERN.test(sessionId)) {
+          sendJson(res, 400, { started: false, ready: false, error: 'Valid sessionId is required' });
+          return;
+        }
         try {
           const result = await ensureHub();
-          const sessionId = requestUrl.searchParams.get('sessionId');
-          if (result.ready && !sessionId) throw new Error('sessionId is required');
-          res.statusCode = 200;
-          res.end(JSON.stringify({
+          const capabilities = result.ready
+            ? await registerHubSession({
+              port: context.port,
+              token,
+              launchId: context.launchId,
+              sessionId,
+            })
+            : null;
+          sendJson(res, 200, {
             ...result,
-            ...(result.ready ? { hubToken: issueHubSessionToken(token, sessionId) } : {}),
-          }));
+            ...(capabilities ? {
+              hubToken: capabilities.studio,
+              referenceToken: capabilities.reference,
+              templateToken: capabilities.template,
+            } : {}),
+          });
         } catch (error) {
-          res.statusCode = 500;
-          res.end(JSON.stringify({ started: false, ready: false, error: String(error) }));
+          const status = error?.status === 429 ? 429 : 500;
+          sendJson(res, status, { started: false, ready: false, error: String(error) });
         }
       });
 
@@ -210,7 +298,9 @@ export function rhwpAgentHubPlugin(studioRoot = process.cwd()) {
         });
       }
       server.httpServer?.once('close', () => {
-        void stopOwnedHub({ removeWork: true });
+        void stopOwnedHub({ removeWork: true }).catch((error) => {
+          console.warn(`[rhwp-agent] owned dev hub cleanup remains pending: ${error}`);
+        });
       });
     },
   };

@@ -2,8 +2,8 @@
 
 use super::super::helpers::color_ref_to_css;
 use crate::document_core::{
-    DeferredPaginationJobState, DeferredPaginationStepResult, DeferredPaginationTargetStatus,
-    DocumentCore, PendingPaginationJob,
+    header_footer_apply_from_u8, DeferredPaginationJobState, DeferredPaginationStepResult,
+    DeferredPaginationTargetStatus, DocumentCore, PendingPaginationJob,
 };
 use crate::error::HwpError;
 use crate::model::control::Control;
@@ -21,7 +21,9 @@ use crate::renderer::html::HtmlRenderer;
 use crate::renderer::layer_renderer::LayerRenderer;
 use crate::renderer::layout::LayoutEngine;
 use crate::renderer::page_layout::PageLayoutInfo;
-use crate::renderer::pagination::{MasterPageRef, PageContent, PaginationResult, Paginator};
+use crate::renderer::pagination::{
+    HeaderFooterRef, MasterPageRef, PageContent, PaginationResult, Paginator,
+};
 use crate::renderer::render_tree::PageRenderTree;
 use crate::renderer::style_resolver::resolve_styles;
 use crate::renderer::svg::SvgRenderer;
@@ -99,7 +101,7 @@ fn load_bounded_embedded_font_bytes(
     font_ids: &[u16],
     per_font_limit: usize,
     page_limit: usize,
-) -> std::collections::HashMap<u16, Vec<u8>> {
+) -> std::collections::HashMap<u16, std::sync::Arc<[u8]>> {
     let mut bytes_by_id = std::collections::HashMap::new();
     let mut attempted_ids = std::collections::HashSet::new();
     let mut loaded_bytes = 0usize;
@@ -116,7 +118,7 @@ fn load_bounded_embedded_font_bytes(
         let Some(bytes) = contents
             .iter()
             .find(|content| content.id == font_id)
-            .and_then(|content| content.data.load_limited(load_limit))
+            .and_then(|content| content.data.load_limited_shared(load_limit))
             .filter(|bytes| !bytes.is_empty())
         else {
             continue;
@@ -785,7 +787,7 @@ impl DocumentCore {
                             language_index,
                             family,
                             alternate_family,
-                            bytes: font_bytes_by_id.get(&bin_data_id)?.as_slice(),
+                            bytes: font_bytes_by_id.get(&bin_data_id)?.as_ref(),
                             face_index,
                         })
                     },
@@ -1041,7 +1043,7 @@ impl DocumentCore {
         let mut map = std::collections::HashMap::new();
         for (name, id) in name_id {
             if let Some(bytes) = bytes_by_id.get(&id) {
-                map.entry(name).or_insert_with(|| bytes.clone());
+                map.entry(name).or_insert_with(|| bytes.as_ref().to_vec());
             }
         }
         map
@@ -1573,15 +1575,15 @@ impl DocumentCore {
                     if detected == "image/x-pcx" {
                         match crate::renderer::svg::pcx_bytes_to_png_bytes(data) {
                             Some(png) => ("image/png", std::borrow::Cow::Owned(png)),
-                            None => (detected, std::borrow::Cow::Borrowed(data.as_slice())),
+                            None => (detected, std::borrow::Cow::Borrowed(data.as_ref())),
                         }
                     } else if detected == "image/bmp" {
                         match crate::renderer::svg::bmp_bytes_to_png_bytes(data) {
                             Some(png) => ("image/png", std::borrow::Cow::Owned(png)),
-                            None => (detected, std::borrow::Cow::Borrowed(data.as_slice())),
+                            None => (detected, std::borrow::Cow::Borrowed(data.as_ref())),
                         }
                     } else {
-                        (detected, std::borrow::Cow::Borrowed(data.as_slice()))
+                        (detected, std::borrow::Cow::Borrowed(data.as_ref()))
                     };
                 mime = final_mime;
                 base64_data = base64::engine::general_purpose::STANDARD.encode(&*final_data);
@@ -1833,6 +1835,8 @@ impl DocumentCore {
             "{{\"pageIndex\":{},\"width\":{:.1},\"height\":{:.1},\"sectionIndex\":{},\
             \"marginLeft\":{:.1},\"marginRight\":{:.1},\"marginTop\":{:.1},\"marginBottom\":{:.1},\
             \"marginHeader\":{:.1},\"marginFooter\":{:.1},\
+            \"headerArea\":{{\"x\":{:.1},\"y\":{:.1},\"width\":{:.1},\"height\":{:.1}}},\
+            \"footerArea\":{{\"x\":{:.1},\"y\":{:.1},\"width\":{:.1},\"height\":{:.1}}},\
             \"pageBorderLeft\":{:.1},\"pageBorderRight\":{:.1},\"pageBorderTop\":{:.1},\"pageBorderBottom\":{:.1},\
             \"columns\":[{}]}}",
             page_content.page_index,
@@ -1845,6 +1849,14 @@ impl DocumentCore {
             mb,
             mh,
             mf,
+            page_content.layout.header_area.x,
+            page_content.layout.header_area.y,
+            page_content.layout.header_area.width,
+            page_content.layout.header_area.height,
+            page_content.layout.footer_area.x,
+            page_content.layout.footer_area.y,
+            page_content.layout.footer_area.width,
+            page_content.layout.footer_area.height,
             page_border_left,
             page_border_right,
             page_border_top,
@@ -3058,6 +3070,9 @@ impl DocumentCore {
     pub(crate) fn mark_section_dirty(&mut self, section_idx: usize) {
         self.mark_section_pagination_dirty(section_idx);
         self.invalidate_render_normalization_section(section_idx);
+        // batch_mode에서는 paginate_if_needed가 미뤄지므로, HF 편집 직후
+        // 같은 키의 미리보기 tree를 쓰지 않도록 여기서 비운다 (#6452).
+        self.header_footer_preview_tree_cache.borrow_mut().take();
     }
 
     /// 구조가 안정적인 path edit에서 pagination만 dirty로 표시한다.
@@ -3552,6 +3567,7 @@ impl DocumentCore {
     /// 측정 통일(B). `paginate_pass` 의 `force_break_before` 훅과 `LayoutOverflow` 의
     /// section_index/is_first_in_column 계측은 측정 통일 작업의 진단·후속용으로 유지한다.
     pub(crate) fn paginate(&mut self) {
+        self.header_footer_preview_tree_cache.borrow_mut().take();
         self.pending_pagination_job = None;
         let sec_count = self.document.sections.len().max(1);
         let empty_breaks: Vec<std::collections::HashSet<usize>> =
@@ -5100,6 +5116,10 @@ impl DocumentCore {
         self.page_tree_cache_order
             .borrow_mut()
             .retain(|page| *page < from);
+        // 대표 HF tree는 일반 pagination tree와 다른 active target을 담는다. 부분
+        // 무효화의 원인이 HF 자체가 아니더라도 body/쪽번호/페이지 기하가 바뀔 수 있어
+        // 단일 entry를 보수적으로 비운다 (#6452).
+        self.header_footer_preview_tree_cache.borrow_mut().take();
         let mut json_cache = self.layer_tree_json_cache.borrow_mut();
         for i in from..json_cache.len() {
             json_cache[i].clear();
@@ -5131,6 +5151,8 @@ impl DocumentCore {
         self.page_tree_cache_order
             .borrow_mut()
             .retain(|cached_page| *cached_page != page);
+        // 대표 HF tree도 페이지 숨김 상태를 포함하므로 함께 무효화한다 (#6452).
+        self.header_footer_preview_tree_cache.borrow_mut().take();
         if let Some(variants) = self.layer_tree_json_cache.borrow_mut().get_mut(page) {
             variants.clear();
         }
@@ -5140,6 +5162,7 @@ impl DocumentCore {
     pub(crate) fn invalidate_page_tree_cache(&self) {
         self.page_tree_cache.borrow_mut().clear();
         self.page_tree_cache_order.borrow_mut().clear();
+        self.header_footer_preview_tree_cache.borrow_mut().take();
         self.layer_tree_json_cache.borrow_mut().clear();
         // [Task #1949] IR 이 바뀌는 재조판 경계에서 셀 단위 레이아웃 캐시(포인터 키)도
         // 함께 비워 다른 IR 의 셀 포인터 재사용으로 인한 오재사용을 방지한다.
@@ -5253,11 +5276,104 @@ impl DocumentCore {
         build(tree)
     }
 
+    /// 머리말/꼬리말 정의가 속한 구역의 대표 편집 페이지를 반환한다.
+    ///
+    /// 대표 페이지는 구역 첫 페이지다. 물리 홀짝과 무관한 편집 표면일 뿐 pagination의
+    /// active_header/active_footer나 문서 IR을 바꾸지 않는다.
+    pub(crate) fn header_footer_preview_page_for_section(
+        &self,
+        section_idx: usize,
+    ) -> Result<u32, HwpError> {
+        let result = self
+            .pagination
+            .get(section_idx)
+            .ok_or_else(|| HwpError::RenderError(format!("구역 {} 범위 초과", section_idx)))?;
+        if result.pages.is_empty() {
+            return Err(HwpError::RenderError(format!(
+                "구역 {}에 편집할 페이지가 없습니다",
+                section_idx
+            )));
+        }
+        // PageContent.page_index는 구역 로컬이다. Studio·find_page·preview tree는
+        // 문서 전역 쪽 번호를 쓰므로 앞 구역 쪽 수를 더한다.
+        Ok(self
+            .pagination
+            .iter()
+            .take(section_idx)
+            .map(|result| result.pages.len() as u32)
+            .sum())
+    }
+
+    fn header_footer_ref_for_edit_target(
+        &self,
+        section_idx: usize,
+        is_header: bool,
+        apply_to: u8,
+    ) -> Result<HeaderFooterRef, HwpError> {
+        let apply = header_footer_apply_from_u8(apply_to);
+        let (para_index, control_index) = self
+            .find_header_footer_control(section_idx, is_header, apply)
+            .ok_or_else(|| {
+                HwpError::RenderError(format!(
+                    "머리말/꼬리말 편집 target을 찾을 수 없습니다: sec={}, is_header={}, apply_to={}",
+                    section_idx, is_header, apply_to
+                ))
+            })?;
+        Ok(HeaderFooterRef {
+            para_index,
+            control_index,
+            source_section_index: section_idx,
+        })
+    }
+
+    /// 구역 첫 페이지에 요청한 HF 정의를 임시로 투영한 렌더 트리.
+    ///
+    /// 실제 page tree cache와 섞지 않고 마지막 편집 target 한 건만 재사용한다. 선택
+    /// 드래그는 hit-test와 selection geometry를 프레임마다 연속 조회하므로, 캐시가
+    /// 없으면 같은 대표 페이지를 매번 full build하게 된다 (#6452).
+    pub(crate) fn build_header_footer_edit_preview_tree(
+        &self,
+        page_num: u32,
+        section_idx: usize,
+        is_header: bool,
+        apply_to: u8,
+    ) -> Result<PageRenderTree, HwpError> {
+        if self.header_footer_preview_page_for_section(section_idx)? != page_num {
+            return Err(HwpError::RenderError(format!(
+                "쪽 {}은 구역 {}의 대표 HF 편집 페이지가 아닙니다",
+                page_num, section_idx
+            )));
+        }
+        let key = (page_num, section_idx, is_header, apply_to);
+        if let Some((cached_key, tree)) = self.header_footer_preview_tree_cache.borrow().as_ref() {
+            if *cached_key == key {
+                return Ok(tree.clone());
+            }
+        }
+
+        let tree = self.build_page_tree_with_header_footer_override(
+            page_num,
+            Some((section_idx, is_header, apply_to)),
+        )?;
+        *self.header_footer_preview_tree_cache.borrow_mut() = Some((key, tree.clone()));
+        Ok(tree)
+    }
+
     /// 페이지 렌더 트리를 빌드한다.
     pub(crate) fn build_page_tree(&self, page_num: u32) -> Result<PageRenderTree, HwpError> {
+        self.build_page_tree_with_header_footer_override(page_num, None)
+    }
+
+    fn build_page_tree_with_header_footer_override(
+        &self,
+        page_num: u32,
+        header_footer_override: Option<(usize, bool, u8)>,
+    ) -> Result<PageRenderTree, HwpError> {
         use crate::model::style::HeadType;
         use crate::renderer::layout::resolve_numbering_id;
         use crate::renderer::pagination::PageItem;
+
+        crate::diagnostics::perf_counters::record_page_tree_build();
 
         self.layout_engine
             .set_show_transparent_borders(self.show_transparent_borders);
@@ -5287,7 +5403,24 @@ impl DocumentCore {
                     af.cell_path.clone(),
                 )
             }));
-        let (page_content, paragraphs, composed) = self.find_page(page_num)?;
+        let (base_page_content, paragraphs, composed) = self.find_page(page_num)?;
+        let overridden_page_content =
+            if let Some((section_idx, is_header, apply_to)) = header_footer_override {
+                let mut page_content = base_page_content.clone();
+                let target =
+                    self.header_footer_ref_for_edit_target(section_idx, is_header, apply_to)?;
+                if is_header {
+                    page_content.active_header = Some(target);
+                } else {
+                    page_content.active_footer = Some(target);
+                }
+                Some(page_content)
+            } else {
+                None
+            };
+        let page_content = overridden_page_content
+            .as_ref()
+            .unwrap_or(base_page_content);
         // 구역의 각주 모양 정보
         let footnote_shape = if page_content.section_index < self.document.sections.len() {
             &self.document.sections[page_content.section_index]
@@ -6601,10 +6734,10 @@ mod tests {
         let loaded = load_bounded_embedded_font_bytes(&contents, &[1, 2, 3, 1], 4, 6);
 
         assert_eq!(loaded.len(), 2);
-        assert_eq!(loaded.get(&1).map(Vec::len), Some(4));
+        assert_eq!(loaded.get(&1).map(|bytes| bytes.len()), Some(4));
         assert!(!loaded.contains_key(&2));
-        assert_eq!(loaded.get(&3).map(Vec::len), Some(2));
-        assert_eq!(loaded.values().map(Vec::len).sum::<usize>(), 6);
+        assert_eq!(loaded.get(&3).map(|bytes| bytes.len()), Some(2));
+        assert_eq!(loaded.values().map(|bytes| bytes.len()).sum::<usize>(), 6);
     }
 
     #[test]
@@ -6633,10 +6766,7 @@ mod tests {
         });
         let contents = vec![BinDataContent {
             id: 1,
-            data: BinDataBytes::Lazy {
-                resolver: resolver.clone(),
-                key: "compressed-oversized-font".to_string(),
-            },
+            data: BinDataBytes::lazy(resolver.clone(), "compressed-oversized-font".to_string()),
             extension: "ttf".to_string(),
         }];
 
@@ -6765,10 +6895,10 @@ mod tests {
         });
         document.bin_data_content.push(BinDataContent {
             id: 2,
-            data: BinDataBytes::Lazy {
-                resolver: std::sync::Arc::new(UnexpectedFontResolver),
-                key: "font-unused".to_string(),
-            },
+            data: BinDataBytes::lazy(
+                std::sync::Arc::new(UnexpectedFontResolver),
+                "font-unused".to_string(),
+            ),
             extension: "ttf".to_string(),
         });
         document.sections.push(Section {

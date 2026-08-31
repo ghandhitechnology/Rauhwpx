@@ -7,7 +7,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
-use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 
 use crate::diagnostics::hwp5_inventory::{build_inventory, Hwp5InventoryItem};
@@ -16,6 +15,7 @@ use crate::model::document::Document;
 use crate::model::paragraph::Paragraph;
 use crate::model::shape::ShapeObject;
 use crate::parser::hwpx::parse_hwpx;
+use crate::parser::hwpx::reader::HwpxReader;
 use crate::parser::tags;
 
 #[derive(Debug)]
@@ -149,7 +149,7 @@ fn run_inner(options: Options) -> Result<(), String> {
 
     let oracle = build_inventory(&options.oracle, options.section)?;
     let generated = build_inventory(&options.generated, options.section)?;
-    let hwpx_bytes = fs::read(&options.hwpx)
+    let hwpx_bytes = crate::parser::limits::read_local_file_once(&options.hwpx)
         .map_err(|error| format!("HWPX 파일 읽기 실패 - {}: {error}", options.hwpx.display()))?;
     let hwpx_xml = summarize_hwpx_xml(&hwpx_bytes)?;
     let ir_summary = parse_hwpx(&hwpx_bytes)
@@ -733,16 +733,15 @@ fn render_hwpx_ir_serializer_trace(
 }
 
 fn summarize_hwpx_xml(bytes: &[u8]) -> Result<HwpxXmlSummary, String> {
-    let cursor = Cursor::new(bytes.to_vec());
+    // Use the same preflighted reader as the parser. Opening `zip` directly
+    // would materialize an unbounded central directory, clone the entire local
+    // file, and allow each XML member to inflate without the aggregate budget.
     let mut archive =
-        zip::ZipArchive::new(cursor).map_err(|error| format!("HWPX ZIP 열기 실패: {error}"))?;
+        HwpxReader::open(bytes).map_err(|error| format!("HWPX ZIP 열기 실패: {error}"))?;
+    let file_names = archive.file_names();
     let mut summary = HwpxXmlSummary::default();
 
-    for index in 0..archive.len() {
-        let mut file = archive
-            .by_index(index)
-            .map_err(|error| format!("HWPX entry 열기 실패: {error}"))?;
-        let name = file.name().to_string();
+    for name in file_names {
         if name.starts_with("BinData/") {
             summary.bindata_files += 1;
         }
@@ -753,10 +752,9 @@ fn summarize_hwpx_xml(bytes: &[u8]) -> Result<HwpxXmlSummary, String> {
             continue;
         }
         summary.xml_files += 1;
-        let mut text = String::new();
-        if file.read_to_string(&mut text).is_err() {
+        let Ok(text) = archive.read_file(&name) else {
             continue;
-        }
+        };
         add_marker_count(&mut summary.counts, "hp:tbl", &text, "<hp:tbl");
         add_marker_count(&mut summary.counts, "hp:pic", &text, "<hp:pic");
         add_marker_count(&mut summary.counts, "hp:container", &text, "<hp:container");
@@ -814,6 +812,35 @@ fn summarize_ir(doc: &Document) -> IrSummary {
         summarize_paragraphs(&section.paragraphs, &mut summary);
     }
     summary
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::limits::MAX_HWPX_ENTRIES;
+    use std::io::{Cursor, Write};
+    use zip::write::SimpleFileOptions;
+    use zip::ZipWriter;
+
+    #[test]
+    fn xml_summary_reuses_the_preconstructor_archive_entry_budget() {
+        let mut output = Cursor::new(Vec::new());
+        {
+            let mut zip = ZipWriter::new(&mut output);
+            for index in 0..=MAX_HWPX_ENTRIES {
+                zip.start_file(
+                    format!("Contents/empty-{index}.xml"),
+                    SimpleFileOptions::default(),
+                )
+                .unwrap();
+                zip.write_all(&[]).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+
+        let error = summarize_hwpx_xml(&output.into_inner()).expect_err("entry bomb must fail");
+        assert!(error.contains("4096 entry limit"), "{error}");
+    }
 }
 
 fn summarize_paragraphs(paragraphs: &[Paragraph], summary: &mut IrSummary) {

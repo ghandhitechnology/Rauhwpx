@@ -10,6 +10,7 @@ import {
   buildCursorCliConfig,
   buildCursorMcpConfig,
   createCursorSession,
+  flushCursorCredentialMirrors,
   formatCursorExitError,
   prepareCursorHome,
 } from '../agents/cursor.mjs';
@@ -73,8 +74,13 @@ class FakeProcess extends EventEmitter {
   }
 }
 
+const PROVEN_TREE_CLEANUP = {
+  terminateProcess: (child) => child.kill('SIGTERM'),
+  waitForExit: async () => true,
+};
+
 /** 세션을 만들고 스폰 기록/이벤트 배열과 임시 격리 홈을 함께 돌려준다. */
-function startSession(t, extra = {}) {
+function startSession(t, extra = {}, dependencies = {}) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-cursor-test-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const events = [];
@@ -93,6 +99,7 @@ function startSession(t, extra = {}) {
       spawns.push({ command, argv, options, proc });
       return proc;
     },
+    ...dependencies,
   });
   return { session, events, spawns, opts, root };
 }
@@ -173,6 +180,23 @@ test('cli-config merges the source file and overwrites permissions per profile',
   assert.deepEqual(planning.permissions.deny, ['Write(**)']);
   assert.equal(planning.sandbox.mode, 'enabled');
 
+  const worker = buildCursorCliConfig({
+    ...baseOpts,
+    toolProfile: 'copy-layout-worker',
+    readOnlyRoots: ['/private/snapshot', '/private/generated'],
+  }, source);
+  assert.deepEqual(worker.permissions, {
+    allow: [
+      'Read(/tmp/rhwp/**)',
+      'Read(/private/snapshot/**)',
+      'Read(/private/generated/**)',
+      'Mcp(rhwp:*)',
+    ],
+    deny: ['Write(**)'],
+  });
+  assert.equal(worker.permissions.allow.includes('Read(**)'), false);
+  assert.equal(worker.sandbox.mode, 'enabled');
+
   const unrestricted = buildCursorCliConfig({ ...baseOpts, permissionProfile: 'unrestricted' }, source);
   assert.equal(unrestricted.approvalMode, 'unrestricted');
   assert.deepEqual(unrestricted.permissions, { allow: [], deny: [] });
@@ -212,6 +236,87 @@ test('the session cursor home is seeded with links and authored config files', (
   assert.equal(existsSync(path.join(bare, 'mcp.json')), true);
 });
 
+test('Windows Cursor copy fallback journals refreshed credentials for copyback', (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-cursor-copyback-test-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const sourceCursorDir = path.join(root, 'source', '.cursor');
+  const sessionCursorDir = path.join(root, 'isolated', '.cursor');
+  const source = path.join(sourceCursorDir, 'auth-token.json');
+  const target = path.join(sessionCursorDir, 'auth-token.json');
+  mkdirSync(sourceCursorDir, { recursive: true });
+  writeFileSync(source, '{"token":"shared"}');
+
+  const windowsDeps = {
+    platform: 'win32',
+    symlink() {
+      const error = new Error('symlinks require elevation');
+      error.code = 'EPERM';
+      throw error;
+    },
+  };
+  prepareCursorHome(sessionCursorDir, sourceCursorDir, {}, windowsDeps);
+  assert.equal(readFileSync(target, 'utf8'), '{"token":"shared"}');
+  writeFileSync(target, '{"token":"first-refresh"}');
+  prepareCursorHome(sessionCursorDir, sourceCursorDir, {}, windowsDeps);
+  assert.equal(readFileSync(source, 'utf8'), '{"token":"first-refresh"}');
+  writeFileSync(target, '{"token":"refreshed"}');
+  flushCursorCredentialMirrors(sessionCursorDir);
+  assert.equal(readFileSync(source, 'utf8'), '{"token":"refreshed"}');
+});
+
+test('uncertain Cursor descendant cleanup defers credential copyback', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-cursor-uncertain-cleanup-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const sourceCursorDir = path.join(root, 'source', '.cursor');
+  const isolatedHome = path.join(root, 'isolated');
+  const sessionCursorDir = path.join(isolatedHome, '.cursor');
+  mkdirSync(sourceCursorDir, { recursive: true });
+
+  const session = createCursorSession({
+    ...baseOpts,
+    agentRole: 'root',
+    isolatedHome,
+    cursorSourceDir: sourceCursorDir,
+    requestUserInput: async () => ({ status: 'cancelled' }),
+  }, {
+    createAcpSession(input) {
+      return {
+        async configure() {
+          input.onSessionStarted({ sessionId: 'cursor-uncertain-cleanup', setupResponse: {} });
+        },
+        async prompt() { return new Promise(() => {}); },
+        getSessionId: () => 'cursor-uncertain-cleanup',
+        hasSeenPromptUpdate: () => true,
+        restart: async () => {},
+        cancel: async () => {},
+        dispose: async () => false,
+      };
+    },
+  });
+  session.sendUserMessage('keep the provider alive');
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const source = path.join(sourceCursorDir, 'auth-token.json');
+  const target = path.join(sessionCursorDir, 'auth-token.json');
+  writeFileSync(source, '{"token":"shared"}');
+  prepareCursorHome(sessionCursorDir, sourceCursorDir, {}, {
+    platform: 'win32',
+    symlink() {
+      const error = new Error('symlinks require elevation');
+      error.code = 'EPERM';
+      throw error;
+    },
+  });
+  writeFileSync(target, '{"token":"provider-refresh"}');
+
+  assert.equal(await session.dispose(), false);
+  assert.equal(readFileSync(source, 'utf8'), '{"token":"shared"}');
+  assert.equal(readFileSync(target, 'utf8'), '{"token":"provider-refresh"}');
+
+  assert.equal(flushCursorCredentialMirrors(sessionCursorDir), true);
+  assert.equal(readFileSync(source, 'utf8'), '{"token":"provider-refresh"}');
+});
+
 test('a turn maps init, partial deltas, mcp tool calls and the result line', (t) => {
   const { session, events, spawns } = startSession(t);
   session.sendUserMessage('probe the document');
@@ -236,6 +341,7 @@ test('a turn maps init, partial deltas, mcp tool calls and the result line', (t)
     { type: 'assistant', message: { content: [{ type: 'text', text: '표를 확인합니다.' }] } },
     { type: 'result', subtype: 'success', is_error: false, result: '표를 확인합니다.', session_id: INIT_LINE.session_id, duration_ms: 10 },
   );
+  proc.exit(0);
 
   assert.deepEqual(types(events), [
     'turn-start', 'session-info', 'text-delta', 'text-delta', 'tool-call', 'tool-result', 'turn-end',
@@ -375,6 +481,30 @@ test('a result line delivered between exit and close still completes the turn', 
   session.dispose();
 });
 
+test('a newline terminal result without close cannot complete a legacy Cursor turn', async (t) => {
+  const { session, events, spawns } = startSession(t, {}, {
+    closeGraceMs: 5,
+    terminateProcess: async () => true,
+    waitForExit: async () => true,
+  });
+  session.sendUserMessage('descendant keeps stdout open');
+  const { proc } = spawns[0];
+
+  proc.emitJson(INIT_LINE, {
+    type: 'result', subtype: 'success', is_error: false, result: 'must not commit',
+  });
+  assert.equal(events.some((event) => event.type === 'turn-end'), false);
+  proc.exitOnly(0);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(
+    events.some((event) => event.type === 'turn-end' && event.stopReason === 'success'),
+    false,
+  );
+  assert.deepEqual(events.at(-1), { type: 'turn-end', agent: 'cursor', stopReason: 'exited' });
+  assert.equal(await session.dispose(), false);
+});
+
 test('a clean exit without a result ends the turn quietly', (t) => {
   const { session, events, spawns } = startSession(t);
   session.sendUserMessage('go');
@@ -383,6 +513,54 @@ test('a clean exit without a result ends the turn quietly', (t) => {
   assert.equal(events.filter((event) => event.type === 'error').length, 0);
   assert.deepEqual(events.at(-1), { type: 'turn-end', agent: 'cursor', stopReason: 'exited' });
   session.dispose();
+});
+
+test('a Windows Cursor terminal tail without newline drains before unavailable cleanup quarantine', async (t) => {
+  const { session, events, spawns } = startSession(t, {}, {
+    platform: 'win32',
+    terminateProcess: async () => null,
+    waitForExit: async () => true,
+  });
+  session.sendUserMessage('first');
+  spawns[0].proc.stdout.emit('data', `${JSON.stringify(INIT_LINE)}\n${JSON.stringify({
+    type: 'result', subtype: 'success', is_error: false, result: 'done',
+  })}`);
+  spawns[0].proc.exit(0);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  session.sendUserMessage('must not spawn');
+  assert.equal(spawns.length, 1);
+  assert.match(events.findLast((event) => event.type === 'error').message, /cleanup could not be confirmed/);
+  assert.deepEqual(events.at(-1), { type: 'turn-end', agent: 'cursor', stopReason: 'failed' });
+  assert.equal(await session.dispose(), false);
+});
+
+test('Windows Cursor settles before live cleanup and permits a proven follow-up turn', async (t) => {
+  let cleanupCalls = 0;
+  const { session, spawns } = startSession(t, {}, {
+    platform: 'win32',
+    terminateProcess(proc) {
+      assert.equal(proc.exitCode, null);
+      assert.equal(proc.signalCode, null);
+      cleanupCalls += 1;
+      return true;
+    },
+    waitForExit: async () => true,
+  });
+  session.sendUserMessage('first');
+  spawns[0].proc.emitJson(
+    INIT_LINE,
+    { type: 'result', subtype: 'success', is_error: false, result: 'done' },
+  );
+  assert.equal(cleanupCalls, 1);
+  spawns[0].proc.exit(0);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  session.sendUserMessage('second');
+  assert.equal(spawns.length, 2);
+  const disposing = session.dispose();
+  spawns[1].proc.exit(0);
+  assert.equal(await disposing, true);
 });
 
 test('error-ish tool results and unknown tool payloads stay defensive', (t) => {
@@ -407,8 +585,8 @@ test('error-ish tool results and unknown tool payloads stay defensive', (t) => {
   session.dispose();
 });
 
-test('the system brief is prepended except when resuming a direct-workflow chat', (t) => {
-  const { session, spawns } = startSession(t);
+test('the system brief is prepended except when resuming a direct-workflow chat', async (t) => {
+  const { session, spawns } = startSession(t, {}, PROVEN_TREE_CLEANUP);
   session.sendUserMessage('첫 요청');
   assert.match(spawns[0].argv.at(-1), /rhwp MCP tools/);
   assert.match(spawns[0].argv.at(-1), /첫 요청$/);
@@ -418,6 +596,7 @@ test('the system brief is prepended except when resuming a direct-workflow chat'
   spawns[0].proc.exit(0);
 
   session.sendUserMessage('이어지는 요청');
+  await new Promise((resolve) => setImmediate(resolve));
   const second = spawns[1].argv;
   assert.equal(second[second.indexOf('--resume') + 1], INIT_LINE.session_id);
   assert.equal(second.at(-1), '이어지는 요청', '재개 턴에는 브리핑을 다시 붙이지 않는다');
@@ -459,6 +638,20 @@ test('the spawn env keeps HOME on the isolated home and authors the session curs
   const cli = JSON.parse(readFileSync(path.join(sessionCursorDir, 'cli-config.json'), 'utf8'));
   assert.equal(cli.someToken, 'persisted', '영속 홈의 설정 필드를 보존한다');
   assert.equal(existsSync(path.join(sessionCursorDir, 'mcp.json')), true);
+  session.dispose();
+});
+
+test('an oversized persistent Cursor config is ignored before spawning', (t) => {
+  const { session, opts, root } = startSession(t);
+  mkdirSync(opts.cursorSourceDir, { recursive: true });
+  writeFileSync(
+    path.join(opts.cursorSourceDir, 'cli-config.json'),
+    JSON.stringify({ someToken: 'x'.repeat(1024 * 1024) }),
+  );
+
+  session.sendUserMessage('go');
+  const cli = JSON.parse(readFileSync(path.join(root, 'home', '.cursor', 'cli-config.json'), 'utf8'));
+  assert.equal(cli.someToken, undefined);
   session.dispose();
 });
 
@@ -539,7 +732,7 @@ test('native ACP MCP question calls emit the canonical root-scope ticket', async
         hasSeenPromptUpdate: () => true,
         restart: async () => {},
         cancel: async () => {},
-        dispose: async () => {},
+        dispose: async () => true,
       };
     },
   });
@@ -615,6 +808,7 @@ test('native ACP keeps one Cursor session across turns and streams through unifi
 
   assert.equal(createCount, 1);
   assert.equal(config.args[0], 'acp');
+  assert.equal(config.isolatePrompts, true);
   assert.equal(config.requestHandlers[0].method, 'cursor/ask_question');
   assert.match(prompts[0], /one/);
   assert.equal(prompts[1], 'two');
@@ -630,7 +824,7 @@ test('native ACP keeps one Cursor session across turns and streams through unifi
   assert.deepEqual(events.filter((event) => event.type === 'text-delta').map((event) => event.text), ['ok', 'ok', 'ok', 'ok']);
   assert.equal(events.filter((event) => event.type === 'session-info').length, 1);
   assert.equal(events.filter((event) => event.type === 'turn-end').length, 4);
-  assert.equal(restarts, 3);
+  assert.equal(restarts, 4);
 });
 
 test('Cursor rejects Plan before ACK when ACP cannot prove the mode', async (t) => {
@@ -661,6 +855,10 @@ test('Cursor rejects Plan before ACK when ACP cannot prove the mode', async (t) 
     session.setExecutionMode({ workflow: 'plan', phase: 'planning', capabilityEpoch: 2 }),
     /does not advertise required mode/,
   );
+  await assert.rejects(
+    session.setExecutionMode({ workflow: 'plan', phase: 'planning', capabilityEpoch: 3 }),
+    /cleanup remains unconfirmed/,
+  );
   assert.deepEqual([opts.workflow, opts.phase, opts.capabilityEpoch], ['direct', 'implementing', 1]);
   assert.equal(disposed, 1);
 });
@@ -681,7 +879,7 @@ test('Cursor ACP startup failure falls back before any native provider event', a
       return {
         configure: async () => { throw new Error('Authentication required'); },
         hasSeenPromptUpdate: () => false,
-        dispose: async () => {},
+        dispose: async () => true,
       };
     },
     spawnProcess(command, argv, options) {
@@ -766,6 +964,252 @@ test('Cursor never switches transports after the native prompt starts', async (t
   assert.equal(events.filter((event) => event.type === 'turn-end').at(-1)?.stopReason, 'failed');
 });
 
+test('Cursor does not advertise the next turn until interrupted ACP teardown finishes', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-cursor-native-turn-barrier-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const events = [];
+  let prompts = 0;
+  let releaseFirstPrompt = () => {};
+  let markFirstPromptStarted = () => {};
+  const firstPromptStarted = new Promise((resolve) => { markFirstPromptStarted = resolve; });
+  const firstPrompt = new Promise((resolve) => {
+    releaseFirstPrompt = () => resolve({ stopReason: 'cancelled' });
+  });
+  const session = createCursorSession({
+    ...baseOpts,
+    agentRole: 'root',
+    isolatedHome: path.join(root, 'home'),
+    requestUserInput: async () => ({ status: 'cancelled' }),
+    onEvent: (event) => events.push(event),
+  }, {
+    createAcpSession() {
+      return {
+        configure: async () => {},
+        getSessionId: () => 'cursor-turn-barrier',
+        async prompt() {
+          prompts += 1;
+          if (prompts === 1) {
+            markFirstPromptStarted();
+            return firstPrompt;
+          }
+          return { stopReason: 'end_turn' };
+        },
+        isCleanupUncertain: () => false,
+        cancel: async () => {},
+        dispose: async () => true,
+      };
+    },
+  });
+  t.after(() => session.dispose());
+
+  session.sendUserMessage('first');
+  await firstPromptStarted;
+  session.interrupt();
+  session.sendUserMessage('second');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(prompts, 1);
+  assert.equal(events.filter((event) => event.type === 'turn-start').length, 1);
+
+  releaseFirstPrompt();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(prompts, 2);
+  assert.equal(events.filter((event) => event.type === 'turn-start').length, 2);
+  assert.equal(events.filter((event) => event.type === 'turn-end').at(-1)?.stopReason, 'end_turn');
+});
+
+test('Cursor never sends a stale ACP prompt after interrupt or dispose during configure', async (t) => {
+  for (const action of ['interrupt', 'dispose']) {
+    await t.test(action, async () => {
+      const root = mkdtempSync(path.join(os.tmpdir(), `rhwp-cursor-configure-${action}-`));
+      t.after(() => rmSync(root, { recursive: true, force: true }));
+      let releaseConfigure = () => {};
+      let markConfigureStarted = () => {};
+      const configureGate = new Promise((resolve) => { releaseConfigure = resolve; });
+      const configureStarted = new Promise((resolve) => { markConfigureStarted = resolve; });
+      let prompts = 0;
+      const session = createCursorSession({
+        ...baseOpts,
+        agentRole: 'root',
+        isolatedHome: path.join(root, 'home'),
+        requestUserInput: async () => ({ status: 'cancelled' }),
+      }, {
+        createAcpSession() {
+          return {
+            async configure() {
+              markConfigureStarted();
+              await configureGate;
+            },
+            getSessionId: () => 'cursor-stale-configure',
+            prompt: async () => { prompts += 1; return { stopReason: 'end_turn' }; },
+            cancel: async () => {},
+            dispose: async () => true,
+          };
+        },
+      });
+
+      session.sendUserMessage('must not be sent');
+      await configureStarted;
+      const disposing = action === 'dispose' ? session.dispose() : null;
+      if (action === 'interrupt') session.interrupt();
+      releaseConfigure();
+      await new Promise((resolve) => setImmediate(resolve));
+      if (disposing) await disposing;
+      else await session.dispose();
+      assert.equal(prompts, 0);
+    });
+  }
+});
+
+test('Cursor tracks deferred failed ACP startup cleanup across interrupt and dispose', async (t) => {
+  for (const action of ['interrupt', 'dispose']) {
+    await t.test(action, async () => {
+      const root = mkdtempSync(path.join(os.tmpdir(), `rhwp-cursor-deferred-cleanup-${action}-`));
+      t.after(() => rmSync(root, { recursive: true, force: true }));
+      const events = [];
+      let legacySpawns = 0;
+      let cleanupCalls = 0;
+      let releaseCleanup = () => {};
+      let markCleanupStarted = () => {};
+      const cleanupGate = new Promise((resolve) => { releaseCleanup = resolve; });
+      const cleanupStarted = new Promise((resolve) => { markCleanupStarted = resolve; });
+      const session = createCursorSession({
+        ...baseOpts,
+        agentRole: 'root',
+        isolatedHome: path.join(root, 'home'),
+        requestUserInput: async () => ({ status: 'cancelled' }),
+        onEvent: (event) => events.push(event),
+      }, {
+        createAcpSession() {
+          return {
+            configure: async () => { throw new Error('ACP startup failed'); },
+            async dispose() {
+              cleanupCalls += 1;
+              markCleanupStarted();
+              await cleanupGate;
+              return false;
+            },
+          };
+        },
+        spawnProcess() {
+          legacySpawns += 1;
+          return new FakeProcess();
+        },
+      });
+
+      session.sendUserMessage('start');
+      await cleanupStarted;
+
+      if (action === 'interrupt') {
+        session.interrupt();
+        session.sendUserMessage('must remain quarantined');
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(legacySpawns, 0);
+        assert.match(events.find((event) => event.type === 'error')?.message ?? '', /cleanup remains unconfirmed/);
+        releaseCleanup();
+        await new Promise((resolve) => setImmediate(resolve));
+        session.sendUserMessage('must stay quarantined after cleanup fails');
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(events.filter((event) => event.type === 'error').length, 2);
+        assert.equal(await session.dispose(), false);
+      } else {
+        let disposeSettled = false;
+        const disposing = session.dispose().then((cleaned) => {
+          disposeSettled = true;
+          return cleaned;
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(disposeSettled, false, 'dispose must wait for the detached ACP cleanup');
+        releaseCleanup();
+        assert.equal(await disposing, false);
+      }
+
+      assert.equal(cleanupCalls, 1);
+      assert.equal(legacySpawns, 0);
+    });
+  }
+});
+
+test('Cursor disposal fences native configuration before accepting cleanup proof', async (t) => {
+  await t.test('same-tick disposal prevents late native-session creation', async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-cursor-same-tick-dispose-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    let creates = 0;
+    const session = createCursorSession({
+      ...baseOpts,
+      agentRole: 'root',
+      isolatedHome: path.join(root, 'home'),
+      requestUserInput: async () => ({ status: 'cancelled' }),
+    }, {
+      createAcpSession() {
+        creates += 1;
+        return {
+          configure: async () => {},
+          getSessionId: () => 'cursor-too-late',
+          dispose: async () => true,
+        };
+      },
+    });
+
+    session.sendUserMessage('do not start after disposal');
+    assert.equal(await session.dispose(), true);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(creates, 0);
+  });
+
+  await t.test('in-flight configuration and its failed cleanup are awaited', async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-cursor-configure-dispose-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    let releaseConfigure = () => {};
+    let markConfigureStarted = () => {};
+    const configureGate = new Promise((resolve) => { releaseConfigure = resolve; });
+    const configureStarted = new Promise((resolve) => { markConfigureStarted = resolve; });
+    let releaseCleanup = () => {};
+    let markCleanupStarted = () => {};
+    const cleanupGate = new Promise((resolve) => { releaseCleanup = resolve; });
+    const cleanupStarted = new Promise((resolve) => { markCleanupStarted = resolve; });
+    let cleanupCalls = 0;
+    const session = createCursorSession({
+      ...baseOpts,
+      agentRole: 'root',
+      isolatedHome: path.join(root, 'home'),
+      requestUserInput: async () => ({ status: 'cancelled' }),
+    }, {
+      createAcpSession() {
+        return {
+          async configure() {
+            markConfigureStarted();
+            await configureGate;
+          },
+          getSessionId: () => 'cursor-configuring-at-dispose',
+          async dispose() {
+            cleanupCalls += 1;
+            markCleanupStarted();
+            await cleanupGate;
+            return false;
+          },
+        };
+      },
+    });
+
+    session.sendUserMessage('configure');
+    await configureStarted;
+    let disposeSettled = false;
+    const disposing = session.dispose().then((cleaned) => {
+      disposeSettled = true;
+      return cleaned;
+    });
+    await cleanupStarted;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(disposeSettled, false, 'dispose must wait for native cleanup proof');
+    releaseCleanup();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(disposeSettled, false, 'dispose must also wait for the in-flight configure operation');
+    releaseConfigure();
+    assert.equal(await disposing, false);
+    assert.equal(cleanupCalls, 1);
+  });
+});
+
 test('interrupt kills the child and closes the turn once', (t) => {
   const { session, events, spawns } = startSession(t);
   session.sendUserMessage('long task');
@@ -784,7 +1228,10 @@ test('interrupt kills the child and closes the turn once', (t) => {
 });
 
 test('a mode switch waits for the running child to exit', async (t) => {
-  const { session, opts, spawns } = startSession(t);
+  const { session, opts, spawns } = startSession(t, {}, {
+    terminateProcess: async () => true,
+    waitForExit: async () => true,
+  });
   session.sendUserMessage('go');
   const { proc } = spawns[0];
 

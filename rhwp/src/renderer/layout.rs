@@ -3335,7 +3335,7 @@ impl LayoutEngine {
                         bs.image_fill.as_ref().and_then(|img_fill| {
                             find_bin_data(bin_data_content, img_fill.bin_data_id).map(|c| {
                                 PageBackgroundImage {
-                                    data: c.data.load(),
+                                    data: c.data.load_shared(),
                                     fill_mode: img_fill.fill_mode,
                                     brightness: img_fill.brightness,
                                     contrast: img_fill.contrast,
@@ -7237,11 +7237,22 @@ impl LayoutEngine {
                     // outer margin box.  Move the empty-host lane anchor with the painted table so
                     // `(painted_bottom - lane_top)` remains the same table-only reservation; the
                     // stored following-paragraph ladder already accounts for both outer margins.
-                    let hwpx_margin_box_outer_top_px = hwpx_empty_host_float_outer_top_px(
-                        self.profile.get().hwpx_stored_layout(),
-                        t,
-                        self.dpi,
-                    );
+                    // Do not move the first table in a consecutive empty-host stack. Its flow
+                    // boundary already places the following table, so shifting only the painted
+                    // first table consumes its outer-top from the visible inter-table gap. The
+                    // HWP/HWPX #1133 pair exposes this exactly: 283 HU became a 3.77 px gap loss.
+                    let followed_by_empty_topbottom_table = paragraphs
+                        .get(para_index + 1)
+                        .is_some_and(para_is_empty_topbottom_table_anchor);
+                    let hwpx_margin_box_outer_top_px = if followed_by_empty_topbottom_table {
+                        0.0
+                    } else {
+                        hwpx_empty_host_float_outer_top_px(
+                            self.profile.get().hwpx_stored_layout(),
+                            t,
+                            self.dpi,
+                        )
+                    };
                     let fragment_outer_top_px =
                         native_fragment_outer_top_px + hwpx_margin_box_outer_top_px;
                     let raw_top = empty_host_float_raw_top(
@@ -8954,8 +8965,8 @@ impl LayoutEngine {
 
                         if !already_registered && !host_para_laid_out {
                             let bin_data_id = pic.image_attr.bin_data_id;
-                            let image_data =
-                                find_bin_data(bin_data_content, bin_data_id).map(|c| c.data.load());
+                            let image_data = find_bin_data(bin_data_content, bin_data_id)
+                                .map(|c| c.data.load_shared());
                             let crop = {
                                 let c = &pic.crop;
                                 if c.right > c.left && c.bottom > c.top {
@@ -8984,7 +8995,7 @@ impl LayoutEngine {
                                     // 경로(skia/canvaskit)는 별도로 image.text_wrap 을 set 하므로 무관.
                                     text_wrap: Some(pic.common.text_wrap),
                                     external_path: pic.image_attr.external_path.clone(),
-                                    ..ImageNode::new(bin_data_id, image_data)
+                                    ..ImageNode::new_shared(bin_data_id, image_data)
                                 }),
                                 BoundingBox::new(pic_x, pic_y, pic_w, pic_h),
                             );

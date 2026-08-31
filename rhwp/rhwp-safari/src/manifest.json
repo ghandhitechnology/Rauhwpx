@@ -18,7 +18,7 @@
     "default_title": "__MSG_actionTitle__"
   },
   "background": {
-    "scripts": ["file-signature.js", "private-network.js", "background.js"],
+    "scripts": ["private-network.js", "fetch-security.js", "background.js"],
     "persistent": false
   },
   "content_scripts": [

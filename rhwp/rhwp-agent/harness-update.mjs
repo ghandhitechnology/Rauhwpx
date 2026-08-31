@@ -1,8 +1,11 @@
 import { promises as fs } from 'node:fs';
 
+import { cancelResponseBody, readResponseJsonBounded } from './response-bounds.mjs';
+
 const REGISTRY_BASE = 'https://registry.npmjs.org';
 const LOCK_CODES = new Set(['EPERM', 'EBUSY', 'ENOTEMPTY', 'EACCES']);
 const RETRY_DELAYS_MS = [80, 160, 320, 640, 1_000, 1_500];
+const REGISTRY_METADATA_LIMIT_BYTES = 64 * 1024;
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -30,25 +33,122 @@ export async function retryLockedOperation(operation, {
   throw lastError;
 }
 
+async function targetIsDirectory(targetPath, fsApi) {
+  const lstat = typeof fsApi.lstat === 'function' ? fsApi.lstat.bind(fsApi) : fs.lstat;
+  try {
+    const stats = await lstat(targetPath);
+    return typeof stats?.isDirectory === 'function' ? stats.isDirectory() : false;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+function directoryReplaceError(targetPath) {
+  const error = new Error(`Refusing to replace directory ${targetPath}`);
+  error.code = 'EISDIR';
+  return error;
+}
+
 /** Replace a file without relying on Windows rename-over-existing behavior. */
-export async function replaceFileAtomically(tempPath, targetPath, { platform = process.platform } = {}) {
-  if (platform !== 'win32') return fs.rename(tempPath, targetPath);
+export async function replaceFileAtomically(
+  tempPath,
+  targetPath,
+  { platform = process.platform, fsApi = fs } = {},
+) {
+  if (platform !== 'win32') return fsApi.rename(tempPath, targetPath);
+  // The two-step Windows replace moves the live target aside. POSIX
+  // rename(file, dir) fails; without this check a directory named like the
+  // target would be renamed to `.previous-write` and the write would publish.
+  if (await targetIsDirectory(targetPath, fsApi)) {
+    throw directoryReplaceError(targetPath);
+  }
   const previousPath = `${targetPath}.previous-write`;
-  await retryLockedOperation(() => fs.rm(previousPath, { force: true }), { platform });
+  await recoverInterruptedFileReplacement(targetPath, { platform, fsApi });
+  // Recovery can restore a directory that was left at `.previous-write`.
+  // Re-check before the two-step rename so that directory is not moved aside.
+  if (await targetIsDirectory(targetPath, fsApi)) {
+    throw directoryReplaceError(targetPath);
+  }
+  await retryLockedOperation(() => fsApi.rm(previousPath, { force: true }), { platform });
   let moved = false;
   try {
-    await retryLockedOperation(() => fs.rename(targetPath, previousPath), { platform });
+    await retryLockedOperation(() => fsApi.rename(targetPath, previousPath), { platform });
     moved = true;
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error;
   }
   try {
-    await retryLockedOperation(() => fs.rename(tempPath, targetPath), { platform });
+    await retryLockedOperation(() => fsApi.rename(tempPath, targetPath), { platform });
   } catch (error) {
-    if (moved) await retryLockedOperation(() => fs.rename(previousPath, targetPath), { platform }).catch(() => {});
+    let restoreError = null;
+    if (moved) {
+      try {
+        await retryLockedOperation(() => fsApi.rename(previousPath, targetPath), { platform });
+      } catch (candidate) {
+        restoreError = candidate;
+      }
+    }
+    if (restoreError) {
+      const recoveryError = new Error('File replacement failed and the previous file could not be restored');
+      recoveryError.code = 'FILE_REPLACE_RECOVERY_FAILED';
+      recoveryError.cause = new AggregateError([error, restoreError]);
+      throw recoveryError;
+    }
     throw error;
   }
-  if (moved) await retryLockedOperation(() => fs.rm(previousPath, { force: true }), { platform });
+  // The commit boundary is the temp -> target rename. A locked stale backup is
+  // safe to clean up on the next write/startup and must not turn a committed
+  // state change into a reported failure.
+  if (moved) {
+    await retryLockedOperation(() => fsApi.rm(previousPath, { force: true }), { platform })
+      .catch(() => {});
+  }
+}
+
+/** Restore the old target after a process died between the two Windows renames. */
+export async function recoverInterruptedFileReplacement(
+  targetPath,
+  { platform = process.platform, fsApi = fs } = {},
+) {
+  if (platform !== 'win32') return false;
+  const previousPath = `${targetPath}.previous-write`;
+  const exists = async (filePath) => {
+    try {
+      await fsApi.access(filePath);
+      return true;
+    } catch (error) {
+      if (error?.code === 'ENOENT') return false;
+      throw error;
+    }
+  };
+  if (!await exists(previousPath)) return false;
+  if (await exists(targetPath)) {
+    await retryLockedOperation(() => fsApi.rm(previousPath, { force: true }), { platform })
+      .catch(() => {});
+    return false;
+  }
+  await retryLockedOperation(() => fsApi.rename(previousPath, targetPath), { platform });
+  return true;
+}
+
+/** Delete a Windows-replaced file without leaving an old backup to resurrect. */
+export async function removeFileAndReplacementBackup(
+  targetPath,
+  { platform = process.platform, fsApi = fs, delays } = {},
+) {
+  if (platform === 'win32') {
+    // Removing the backup first makes a crash conservative: before the target
+    // removal the old live value remains, and after it no recovery copy exists.
+    await retryLockedOperation(
+      () => fsApi.rm(`${targetPath}.previous-write`, { force: true }),
+      { platform, ...(delays ? { delays } : {}) },
+    );
+  }
+  await retryLockedOperation(
+    () => fsApi.rm(targetPath, { force: true }),
+    { platform, ...(delays ? { delays } : {}) },
+  );
 }
 
 /** registry 가 준 version 문자열이 npm 인자로 안전한 semver 인지 확인한다. */
@@ -63,8 +163,14 @@ export async function fetchLatestPackage(fetchImpl, packageName, timeoutMs = 10_
   const response = await fetchImpl(`${REGISTRY_BASE}/${encoded}/latest`, {
     signal: AbortSignal.timeout(timeoutMs),
   });
-  if (!response.ok) throw new Error(`registry HTTP ${response.status}`);
-  const metadata = await response.json();
+  if (!response.ok) {
+    await cancelResponseBody(response, new Error(`registry HTTP ${response.status}`));
+    throw new Error(`registry HTTP ${response.status}`);
+  }
+  const metadata = await readResponseJsonBounded(response, {
+    maxBytes: REGISTRY_METADATA_LIMIT_BYTES,
+    label: `${packageName} registry metadata`,
+  });
   // 버전은 npm argv 에 보간된다 — semver 형태가 아니면 설치 플래그 주입으로 이어질 수
   // 있으니 비정형 메타데이터는 업데이트 실패로 간주한다.
   if (!isSafeSemverVersion(metadata?.version)) {
@@ -90,6 +196,7 @@ export async function updatePrefixAtomically({
   const stagingDir = `${prefixDir}.update-${label}-${suffix}`;
   const previousDir = `${prefixDir}.previous`;
   let activeMoved = false;
+  let cleanupUncertain = false;
 
   try {
     try {
@@ -122,10 +229,15 @@ export async function updatePrefixAtomically({
       }
       throw error;
     }
+  } catch (error) {
+    cleanupUncertain = error?.processCleanupUncertain === true;
+    throw error;
   } finally {
-    await retryLockedOperation(
-      () => fs.rm(stagingDir, { recursive: true, force: true }),
-      { platform },
-    ).catch(() => {});
+    if (!cleanupUncertain) {
+      await retryLockedOperation(
+        () => fs.rm(stagingDir, { recursive: true, force: true }),
+        { platform },
+      ).catch(() => {});
+    }
   }
 }

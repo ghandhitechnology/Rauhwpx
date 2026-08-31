@@ -131,6 +131,17 @@ export interface ToolCapabilityContext {
   /** 현재 채팅의 권한 프로필 — 안전 모드에서는 즉시 커밋되는 raw 엔진 쓰기를 막는다. */
   permissionProfile?: PermissionProfile;
   template?: DocumentTemplate;
+  /** Exact hub turn/cancellation fence captured for this request. */
+  requestIsActive?: () => boolean;
+}
+
+export function assertToolRequestActive(capability?: ToolCapabilityContext): void {
+  if (capability?.requestIsActive && !capability.requestIsActive()) {
+    throw new AgentToolError(
+      'NO_ACTIVE_TURN',
+      'The provider tool request no longer belongs to the active turn.',
+    );
+  }
 }
 
 /** Enforce plan-mode write authority before dispatch can touch document state. */
@@ -379,6 +390,7 @@ export class AgentToolExecutor {
   ): Promise<unknown> {
     let claimedMode = false;
     try {
+      assertToolRequestActive(capability);
       assertToolCapability(tool, capability);
       if (isDocumentWriteTool(tool) && this.deps.isReadOnly?.()) {
         throw new AgentToolError(
@@ -411,6 +423,7 @@ export class AgentToolExecutor {
       }
       // await 필수 — 비동기 툴(insert_chart)의 rejection 도 여기서 에러 코드로 매핑된다
       const result = await this.dispatch(tool, args, agent, capability);
+      assertToolRequestActive(capability);
       if (tool === 'get_structure') this.documentInspectionRevision = this.revision;
       return result;
     } catch (e) {
@@ -472,7 +485,7 @@ export class AgentToolExecutor {
       case 'set_page_layout': return this.setPageLayout(args, agent);
       case 'edit_header_footer': return this.editHeaderFooter(args, agent);
       case 'insert_page_break': return this.insertPageBreak(args, agent);
-      case 'insert_chart': return this.insertChart(args, agent);
+      case 'insert_chart': return this.insertChart(args, agent, capability);
       case 'replace_all': return this.replaceAll(args, agent);
       case 'get_outline': return this.getOutline(args);
       case 'list_footnotes': return this.listFootnotes();
@@ -1926,6 +1939,7 @@ export class AgentToolExecutor {
     const { template, wasm } = await this.ensureTemplate(capability);
     const nested = new AgentToolExecutor({ ...this.deps, wasm, loadTemplateBytes: undefined });
     const result = await nested.execute(tool, this.templateArgs(args, template));
+    assertToolRequestActive(capability);
     if (marksInspection) this.templateInspectionKey = `${template.id}:${template.revision}`;
     if (result && typeof result === 'object' && !Array.isArray(result)) {
       const { revision: _documentRevision, ...rest } = result as Record<string, unknown>;
@@ -1967,6 +1981,7 @@ export class AgentToolExecutor {
   ): Promise<unknown> {
     this.requireRevision(args);
     const { template, wasm: source } = await this.ensureTemplate(capability);
+    assertToolRequestActive(capability);
     this.templateArgs(args, template);
     this.requireTemplateMapping(template);
     const mappings = Array.isArray(args['mappings']) ? args['mappings'].map(asRecord) : [];
@@ -2045,6 +2060,7 @@ export class AgentToolExecutor {
   ): Promise<unknown> {
     this.requireRevision(args);
     const { template, wasm: sourceWasm } = await this.ensureTemplate(capability);
+    assertToolRequestActive(capability);
     this.templateArgs(args, template);
     this.requireTemplateMapping(template);
     const source = asRecord(args['source']);
@@ -2086,6 +2102,7 @@ export class AgentToolExecutor {
   ): Promise<unknown> {
     this.requireRevision(args);
     const { template, wasm: sourceWasm, bytes: templateBytes } = await this.ensureTemplate(capability);
+    assertToolRequestActive(capability);
     this.templateArgs(args, template);
     this.requireTemplateMapping(template);
     const source = asRecord(args['source']);
@@ -3561,7 +3578,11 @@ export class AgentToolExecutor {
    * 차트 삽입 (Phase 3, image 경로) — spec 을 studio 쪽 canvas 로 PNG 렌더 후
    * insertImage 객체 op 을 재사용한다. OLE 차트 저작은 범위 밖 (설계 확정).
    */
-  private async insertChart(args: Record<string, unknown>, agent: AgentName): Promise<unknown> {
+  private async insertChart(
+    args: Record<string, unknown>,
+    agent: AgentName,
+    capability?: ToolCapabilityContext,
+  ): Promise<unknown> {
     this.requireRevision(args);
     const sectionIdx = reqInt(args, 'sectionIdx');
     const paraIdx = reqInt(args, 'paraIdx');
@@ -3590,6 +3611,7 @@ export class AgentToolExecutor {
       const msg = e instanceof Error ? e.message : String(e);
       throw new AgentToolError('CHART_RENDER_FAILED', `chart rendering failed: ${msg}`);
     }
+    assertToolRequestActive(capability);
     // await 동안 사용자가 편집했을 수 있다 — 삽입 직전 revision/주소를 재검증한다 (리뷰 확정 결함 수정)
     this.requireRevision(args);
     this.validateAddress(sectionIdx, paraIdx, charOffset);

@@ -7,6 +7,9 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use snafu::Snafu;
 use std::io::{self, Cursor, Read, Seek};
 
+use crate::parser::cfb_reader::validate_cfb_directory_entry_budget;
+use crate::parser::limits::{MAX_BINARY_BYTES, MAX_CFB_DIRECTORY_ENTRIES, MAX_CONTAINER_BYTES};
+
 #[derive(Debug, Snafu)]
 pub enum Hwp3OleError {
     #[snafu(display("입출력 오류가 발생했습니다: {source}"))]
@@ -40,8 +43,7 @@ impl Hwp3OleInfo {
         }
         let signature = reader.read_u32::<LittleEndian>()?;
 
-        let mut storage_data = super::alloc_record_buf((total_length - 4) as usize)?;
-        reader.read_exact(&mut storage_data)?;
+        let storage_data = super::read_record_buf(&mut reader, (total_length - 4) as usize)?;
 
         // 0xF8995567 (한글 3.0 ~ 3.0a - ILockBytes)
         // 0xF8995568 (한글 3.0b 이상 - StgCreateDocfile)
@@ -165,9 +167,18 @@ impl Hwp3ChartConnectionInfo {
 /// 입력은 인식 정보(4바이트)를 제외한 CFB 바이트. 실패 개체는 건너뛴다(읽기 관대).
 pub fn extract_ole_payloads(cfb_bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
     let mut out = Vec::new();
-    let Ok(mut comp) = cfb::CompoundFile::open(Cursor::new(cfb_bytes.to_vec())) else {
+    if cfb_bytes.len() > MAX_BINARY_BYTES {
+        return out;
+    }
+    if validate_cfb_directory_entry_budget(cfb_bytes).is_err() {
+        return out;
+    }
+    let Ok(mut comp) = cfb::CompoundFile::open(Cursor::new(cfb_bytes)) else {
         return out;
     };
+    if comp.walk().take(MAX_CFB_DIRECTORY_ENTRIES + 1).count() > MAX_CFB_DIRECTORY_ENTRIES {
+        return out;
+    }
 
     // root 직속 서브 스토리지 = OLE 개체 하나 (이름 = 그림 레코드 참조명)
     let root = std::path::Path::new("/");
@@ -177,6 +188,8 @@ pub fn extract_ole_payloads(cfb_bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
         .filter(|e| e.path().parent() == Some(root))
         .map(|e| e.path().to_path_buf())
         .collect();
+
+    let mut retained_total = 0u64;
 
     for storage in storages {
         let Some(name) = storage
@@ -204,8 +217,25 @@ pub fn extract_ole_payloads(cfb_bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
             let Ok(mut stream) = comp.open_stream(&path) else {
                 continue;
             };
-            let mut buf = Vec::new();
-            if stream.read_to_end(&mut buf).is_ok() {
+            let remaining = MAX_CONTAINER_BYTES.saturating_sub(retained_total);
+            if stream.len() > remaining || stream.len() > MAX_BINARY_BYTES as u64 {
+                continue;
+            }
+            let max_bytes = usize::try_from(stream.len())
+                .unwrap_or(MAX_BINARY_BYTES)
+                .min(MAX_BINARY_BYTES);
+            let mut buf = Vec::with_capacity(max_bytes.min(1024 * 1024));
+            if stream
+                .by_ref()
+                .take((max_bytes as u64).saturating_add(1))
+                .read_to_end(&mut buf)
+                .is_ok()
+                && buf.len() <= max_bytes
+            {
+                retained_total = match retained_total.checked_add(buf.len() as u64) {
+                    Some(total) if total <= MAX_CONTAINER_BYTES => total,
+                    _ => return out,
+                };
                 named.push((stream_name, buf));
             }
         }
@@ -218,7 +248,22 @@ pub fn extract_ole_payloads(cfb_bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
             .map(|(n, d)| (n.as_str(), d.as_slice()))
             .collect();
         if let Ok(bytes) = crate::serializer::mini_cfb::build_cfb(&refs) {
+            let prior_stream_bytes = named
+                .iter()
+                .map(|(_, bytes)| bytes.len() as u64)
+                .sum::<u64>();
+            retained_total = retained_total.saturating_sub(prior_stream_bytes);
+            retained_total = match retained_total.checked_add(bytes.len() as u64) {
+                Some(total) if total <= MAX_CONTAINER_BYTES => total,
+                _ => return out,
+            };
             out.push((name, bytes));
+        } else {
+            let prior_stream_bytes = named
+                .iter()
+                .map(|(_, bytes)| bytes.len() as u64)
+                .sum::<u64>();
+            retained_total = retained_total.saturating_sub(prior_stream_bytes);
         }
     }
     out

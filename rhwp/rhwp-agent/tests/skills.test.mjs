@@ -97,6 +97,123 @@ test('SkillRegistry rejects traversal and bundled overwrites', async (t) => {
   await assert.rejects(() => registry.save({ name: 'starter', files: [{ path: 'SKILL.md', content: MARKDOWN('starter') }] }), /cannot be overwritten/);
 });
 
+test('SkillRegistry restores the previous skill when post-rename verification fails', async (t) => {
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-skill-rollback-test-'));
+  t.after(() => fs.rm(temp, { recursive: true, force: true }));
+  const bundledRoot = path.join(temp, 'bundled');
+  const userRoot = path.join(temp, 'user');
+  await fs.mkdir(bundledRoot, { recursive: true });
+  const registry = await new SkillRegistry({ bundledRoot, userRoot }).init();
+  await registry.save({
+    name: 'rollback-skill',
+    files: [{ path: 'SKILL.md', content: MARKDOWN('rollback-skill', 'Original version') }],
+  });
+
+  const originalRead = registry.read.bind(registry);
+  let failVerification = true;
+  registry.read = async (...args) => {
+    if (failVerification) {
+      failVerification = false;
+      throw new Error('injected post-rename verification failure');
+    }
+    return originalRead(...args);
+  };
+  await assert.rejects(() => registry.save({
+    name: 'rollback-skill',
+    files: [{ path: 'SKILL.md', content: MARKDOWN('rollback-skill', 'Replacement version') }],
+  }), /injected post-rename verification failure/);
+  registry.read = originalRead;
+
+  const restored = await registry.read('rollback-skill');
+  const markdown = restored.skill.files.find((file) => file.path === 'SKILL.md').content;
+  assert.match(markdown, /Original version/);
+  assert.doesNotMatch(markdown, /Replacement version/);
+  const trash = await fs.readdir(path.join(userRoot, '.trash'));
+  assert.ok(trash.some((entry) => entry.includes('-rollback-skill-failed-')));
+});
+
+test('SkillRegistry serializes concurrent catalog mutations and recovers Windows state', async (t) => {
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-skill-mutation-test-'));
+  t.after(() => fs.rm(temp, { recursive: true, force: true }));
+  const bundledRoot = path.join(temp, 'bundled');
+  const userRoot = path.join(temp, 'user');
+  await fs.mkdir(bundledRoot, { recursive: true });
+  const registry = await new SkillRegistry({ bundledRoot, userRoot, platform: 'win32' }).init();
+  const payload = (name) => ({
+    name,
+    files: [{ path: 'SKILL.md', content: MARKDOWN(name) }],
+  });
+  await Promise.all([registry.save(payload('first-skill')), registry.save(payload('second-skill'))]);
+  await Promise.all([
+    registry.setEnabled('first-skill', false),
+    registry.setEnabled('second-skill', false),
+  ]);
+  let catalog = await registry.list();
+  assert.equal(catalog.skills.find((skill) => skill.name === 'first-skill').enabled, false);
+  assert.equal(catalog.skills.find((skill) => skill.name === 'second-skill').enabled, false);
+
+  await fs.rename(registry.statePath, `${registry.statePath}.previous-write`);
+  const recovered = await new SkillRegistry({ bundledRoot, userRoot, platform: 'win32' }).init();
+  catalog = await recovered.list();
+  assert.equal(catalog.skills.find((skill) => skill.name === 'first-skill').enabled, false);
+  assert.equal(catalog.skills.find((skill) => skill.name === 'second-skill').enabled, false);
+});
+
+test('corrupt or oversized catalog state fails closed without re-enabling or rewriting skills', async (t) => {
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-skill-state-test-'));
+  t.after(() => fs.rm(temp, { recursive: true, force: true }));
+  const bundledRoot = path.join(temp, 'bundled');
+  const userRoot = path.join(temp, 'user');
+  await fs.mkdir(path.join(userRoot, 'scripted-skill'), { recursive: true });
+  await fs.mkdir(bundledRoot, { recursive: true });
+  await fs.writeFile(path.join(userRoot, 'scripted-skill', 'SKILL.md'), MARKDOWN('scripted-skill'));
+  await fs.mkdir(path.join(userRoot, 'scripted-skill', 'scripts'));
+  await fs.writeFile(path.join(userRoot, 'scripted-skill', 'scripts', 'run.js'), 'process.exit(0)');
+  const statePath = path.join(userRoot, '.catalog-state.json');
+  await fs.writeFile(statePath, '{"disabled":["scripted-skill"]}\n');
+  const registry = await new SkillRegistry({ bundledRoot, userRoot }).init();
+  assert.equal((await registry.list()).skills.find((skill) => skill.name === 'scripted-skill').enabled, false);
+
+  const corrupt = '{"disabled":';
+  await fs.writeFile(statePath, corrupt);
+  await assert.rejects(() => registry.list(), (error) => error.code === 'SKILL_STATE_CORRUPT');
+  await assert.rejects(() => registry.setEnabled('scripted-skill', true), (error) => error.code === 'SKILL_STATE_CORRUPT');
+  assert.equal(await fs.readFile(statePath, 'utf8'), corrupt);
+
+  await fs.writeFile(statePath, JSON.stringify({ disabled: ['scripted-skill'], padding: 'x'.repeat(70 * 1024) }));
+  await assert.rejects(
+    () => new SkillRegistry({ bundledRoot, userRoot }).init(),
+    (error) => error.code === 'SKILL_STATE_CORRUPT',
+  );
+});
+
+test('disabled-skill state never writes past its cap and deletion removes stale state', async (t) => {
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-skill-state-cap-test-'));
+  t.after(() => fs.rm(temp, { recursive: true, force: true }));
+  const bundledRoot = path.join(temp, 'bundled');
+  const userRoot = path.join(temp, 'user');
+  await fs.mkdir(bundledRoot, { recursive: true });
+  const registry = await new SkillRegistry({ bundledRoot, userRoot }).init();
+  await registry.save({
+    name: 'cap-target',
+    files: [{ path: 'SKILL.md', content: MARKDOWN('cap-target') }],
+  });
+  const disabled = Array.from({ length: 1_000 }, (_, index) => `ghost-${String(index).padStart(4, '0')}`);
+  const originalState = `${JSON.stringify({ disabled }, null, 2)}\n`;
+  await fs.writeFile(registry.statePath, originalState);
+
+  await assert.rejects(
+    registry.setEnabled('cap-target', false),
+    { code: 'SKILL_STATE_TOO_LARGE' },
+  );
+  assert.equal(await fs.readFile(registry.statePath, 'utf8'), originalState);
+
+  await fs.writeFile(registry.statePath, '{"disabled":["cap-target"]}\n');
+  await registry.delete('cap-target');
+  assert.deepEqual(JSON.parse(await fs.readFile(registry.statePath, 'utf8')), { disabled: [] });
+  assert.equal((await registry.list()).skills.some((skill) => skill.name === 'cap-target'), false);
+});
+
 test('promptContext appends provider tool notes only for a known activated agent', async (t) => {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-skill-notes-test-'));
   t.after(() => fs.rm(temp, { recursive: true, force: true }));

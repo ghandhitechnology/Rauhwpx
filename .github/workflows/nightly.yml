@@ -24,10 +24,32 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           toolchain: 1.93.1
           targets: wasm32-unknown-unknown
+
+      - name: Cache cargo-audit executable
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}-${{ runner.arch }}-0.22.2
+
+      - name: Install pinned cargo-audit
+        run: |
+          if [[ "$(cargo audit --version 2>/dev/null || true)" != "cargo-audit 0.22.2" ]]; then
+            cargo install cargo-audit --version 0.22.2 --locked --force
+          fi
+
+      - name: Reject RustSec vulnerabilities and new warnings
+        working-directory: rhwp
+        run: |
+          set -euo pipefail
+          # Print accepted existing warnings, then fail if RustSec adds a new warning.
+          cargo audit
+          cargo audit --no-fetch -D warnings \
+            --ignore RUSTSEC-2026-0192 \
+            --ignore RUSTSEC-2026-0206
 
       - name: Test Rust workspace
         working-directory: rhwp
@@ -52,7 +74,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: 22.18.0
           cache: npm
           cache-dependency-path: |
             package-lock.json
@@ -60,7 +82,7 @@ jobs:
             rhwp/rhwp-agent/package-lock.json
 
       - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           toolchain: 1.93.1
           targets: wasm32-unknown-unknown
@@ -78,6 +100,13 @@ jobs:
           npm --prefix rhwp/rhwp-agent ci
           npm --prefix rhwp/rhwp-studio ci
 
+      - name: Reject vulnerable production dependency trees
+        run: |
+          set -euo pipefail
+          npm audit --omit=dev --audit-level=low
+          npm --prefix rhwp/rhwp-agent audit --omit=dev --audit-level=low
+          npm --prefix rhwp/rhwp-studio audit --omit=dev --audit-level=low
+
       - name: Check desktop and hub syntax
         run: |
           node --check desktop/main.mjs
@@ -86,10 +115,46 @@ jobs:
           node --check rhwp/rhwp-agent/server.mjs
 
       - name: Test agent hub and process lifecycle
-        run: npm --prefix rhwp/rhwp-agent test
+        run: node --test --test-concurrency=1 rhwp/rhwp-agent/tests/*.test.mjs
+
+      - name: Test hosted Rau authorization service
+        run: npm --prefix rhwp/rau-credits test
 
       - name: Test Studio session persistence and desktop contracts
         run: npm --prefix rhwp/rhwp-studio test
 
       - name: Build Studio
         run: npm --prefix rhwp/rhwp-studio run build
+
+  hostile-input-smoke:
+    name: Seeded hostile-input fuzz smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Install nightly Rust toolchain
+        uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # nightly
+        with:
+          toolchain: nightly
+
+      - name: Install pinned cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
+
+      - name: Build all parser fuzz targets
+        working-directory: rhwp
+        run: cargo +nightly fuzz build
+
+      - name: Replay and mutate each seeded corpus
+        working-directory: rhwp
+        run: |
+          set -euo pipefail
+          for target in parse_hwp parse_hwp3 parse_hwpx parse_hml parse_wmf parse_ooxml_chart; do
+            cargo +nightly fuzz run "${target}" "fuzz/corpus/${target}" -- \
+              -runs=2000 \
+              -max_total_time=30 \
+              -rss_limit_mb=2048 \
+              -timeout=30
+          done
