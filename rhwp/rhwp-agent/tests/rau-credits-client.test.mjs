@@ -136,6 +136,42 @@ test('Rau v2 creates PKCE sessions and sends proof only in POST bodies', async (
   assert.deepEqual(JSON.parse(calls[1].init.body), { codeVerifier: session.codeVerifier, proof });
 });
 
+test('account requests keep the bearer in headers and cancel V2 sessions with PKCE', async () => {
+  const calls = [];
+  const accountToken = `rau_account_v1_${'a'.repeat(43)}`;
+  const client = createRauCreditsClient({
+    baseUrl: 'https://credits.rau.test',
+    fetchImpl: async (url, init = {}) => {
+      calls.push({ url, init });
+      if (url.endsWith('/v2/device-sessions')) {
+        return jsonResponse({ id: 'account/device', loginUrl: 'https://credits.rau.test/login?device=x' }, { status: 201 });
+      }
+      return jsonResponse({ state: 'signed-in', signedIn: true, account: { email: 'andy@example.com' } });
+    },
+  });
+
+  const login = await client.createAccountDeviceSessionV2({ currentToken: accountToken });
+  await client.readAccountSession(accountToken);
+  await client.commitAccountSession(accountToken);
+  await client.revokeAccountSession(accountToken);
+  await client.cancelDeviceSessionV2(login.id, login.codeVerifier);
+  await client.authorizeOwnedBackend(accountToken, {
+    pathname: '/owned/profile?view=compact',
+    method: 'POST',
+    headers: { Authorization: 'Bearer caller-controlled' },
+    body: { refresh: true },
+  });
+
+  assert.equal(calls.every((call) => !call.url.includes(accountToken)), true);
+  assert.equal(JSON.parse(calls[0].init.body).purpose, 'account');
+  assert.equal(new Headers(calls[0].init.headers).get('authorization'), `Bearer ${accountToken}`);
+  assert.equal(calls[4].url, 'https://credits.rau.test/v2/device-sessions/account%2Fdevice/cancel');
+  assert.deepEqual(JSON.parse(calls[4].init.body), { codeVerifier: login.codeVerifier });
+  assert.equal(calls[4].url.includes(login.codeVerifier), false);
+  assert.equal(calls[5].url, 'https://credits.rau.test/owned/profile?view=compact');
+  assert.equal(new Headers(calls[5].init.headers).get('authorization'), `Bearer ${accountToken}`);
+});
+
 test('PKCE helper returns an S256 verifier/challenge pair', () => {
   const proof = createPkceProof();
   assert.match(proof.codeVerifier, /^[A-Za-z0-9_-]{43}$/);

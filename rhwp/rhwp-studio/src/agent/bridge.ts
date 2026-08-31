@@ -50,6 +50,8 @@ import type {
   AgentEditingLease,
   AgentName,
   AgentAuthMethod,
+  AccountLoginStart,
+  AccountSessionStatus,
   AgentSetupAuthStart,
   AgentSetupStatus,
   AgentSetupStatusMap,
@@ -144,6 +146,11 @@ export interface AgentBridge {
   requestRauAccount(): Promise<RauAccountSnapshot | null>;
   loginRauAccount(): Promise<RauAccountAuthStart | null>;
   logoutRauAccount(): Promise<RauAccountSnapshot | null>;
+  requestAccountStatus(): Promise<AccountSessionStatus | null>;
+  loginAccount(): Promise<AccountLoginStart | null>;
+  submitAccountAuthCode(authRunId: string, code: string): void;
+  cancelAccountLogin(authRunId: string): void;
+  logoutAccount(): Promise<AccountSessionStatus | null>;
   installAgent(agent: AgentName): Promise<AgentSetupStatusMap | null>;
   authenticateAgent(agent: AgentName, method: AgentAuthMethod, key?: string): Promise<AgentSetupAuthStart | null>;
   /** 브라우저 로그인 뒤 받은 인증 코드를 진행 중인 CLI 로그인에 전달한다. */
@@ -827,6 +834,36 @@ function readRauAccount(value: unknown): RauAccountSnapshot {
     } : null,
     raucloud,
     updatedAt: typeof src['updatedAt'] === 'string' ? src['updatedAt'] : new Date().toISOString(),
+  };
+}
+
+function readAccountSessionStatus(value: unknown): AccountSessionStatus {
+  const src = (value ?? {}) as Record<string, unknown>;
+  const rawAccount = src['account'];
+  const account = rawAccount && typeof rawAccount === 'object' && !Array.isArray(rawAccount)
+    ? rawAccount as Record<string, unknown>
+    : null;
+  const state = src['state'] === 'signed-in'
+    || src['state'] === 'pending'
+    || src['state'] === 'unknown'
+    ? src['state']
+    : 'signed-out';
+  const signedIn = state === 'signed-in' && src['signedIn'] === true;
+  return {
+    state: signedIn ? 'signed-in' : state === 'signed-in' ? 'signed-out' : state,
+    signedIn,
+    account: signedIn
+      ? { email: typeof account?.['email'] === 'string' ? account['email'] : null }
+      : null,
+    updatedAt: typeof src['updatedAt'] === 'string' ? src['updatedAt'] : new Date(0).toISOString(),
+    authenticating: src['authenticating'] === true,
+    authOwnedByThisSession: src['authOwnedByThisSession'] === true,
+    ...(typeof src['authRunId'] === 'string' ? { authRunId: src['authRunId'] } : {}),
+    ...(typeof src['authPhase'] === 'string' ? { authPhase: src['authPhase'] } : {}),
+    ...(typeof src['authUrl'] === 'string' ? { authUrl: src['authUrl'] } : {}),
+    ...(typeof src['pairingCode'] === 'string' ? { pairingCode: src['pairingCode'] } : {}),
+    ...(typeof src['expiresAt'] === 'string' ? { expiresAt: src['expiresAt'] } : {}),
+    ...(typeof src['error'] === 'string' ? { error: src['error'] } : {}),
   };
 }
 
@@ -2270,6 +2307,45 @@ export class AgentBridgeImpl implements AgentBridge {
         });
         break;
       }
+      case 'account-status': {
+        const status = readAccountSessionStatus(msg.status);
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, status);
+        this.emit({ type: 'account-status', status });
+        break;
+      }
+      case 'account-login-started': {
+        if (typeof msg.requestId === 'string') {
+          this.requests.settle(msg.requestId, {
+            authRunId: typeof msg.authRunId === 'string' ? msg.authRunId : '',
+            authUrl: typeof msg.authUrl === 'string' ? msg.authUrl : null,
+            pairingCode: typeof msg.pairingCode === 'string' ? msg.pairingCode : null,
+            expiresAt: typeof msg.expiresAt === 'string' ? msg.expiresAt : null,
+          } satisfies AccountLoginStart);
+        }
+        break;
+      }
+      case 'account-login-progress': {
+        this.emit({
+          type: 'account-login-progress',
+          ...(typeof msg.authRunId === 'string' ? { authRunId: msg.authRunId } : {}),
+          state: 'authorizing',
+          ...(typeof msg.authUrl === 'string' ? { authUrl: msg.authUrl } : {}),
+          ...(typeof msg.pairingCode === 'string' ? { pairingCode: msg.pairingCode } : {}),
+          ...(typeof msg.expiresAt === 'string' ? { expiresAt: msg.expiresAt } : {}),
+          ...(msg.replayed === true ? { replayed: true } : {}),
+        });
+        break;
+      }
+      case 'account-error': {
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, null);
+        this.emit({
+          type: 'account-error',
+          ...(typeof msg.authRunId === 'string' ? { authRunId: msg.authRunId } : {}),
+          code: typeof msg.code === 'string' ? msg.code : 'ACCOUNT_SESSION_FAILED',
+          message: typeof msg.message === 'string' ? msg.message : 'Account request failed',
+        });
+        break;
+      }
       case 'usage-report': {
         const usage = readUsageSummary(msg.usage);
         if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, usage);
@@ -3345,6 +3421,35 @@ export class AgentBridgeImpl implements AgentBridge {
 
   logoutRauAccount(): Promise<RauAccountSnapshot | null> {
     return this.request<RauAccountSnapshot>({ type: 'rau-account-logout' }, 'rau-account-logout', 30_000);
+  }
+
+  requestAccountStatus(): Promise<AccountSessionStatus | null> {
+    return this.request<AccountSessionStatus>(
+      { type: 'account-status-request' },
+      'account-status',
+      30_000,
+    );
+  }
+
+  loginAccount(): Promise<AccountLoginStart | null> {
+    return this.request<AccountLoginStart>({ type: 'account-login' }, 'account-login', 30_000);
+  }
+
+  submitAccountAuthCode(authRunId: string, code: string): void {
+    this.sendJson({
+      v: AGENT_PROTOCOL_VERSION,
+      type: 'account-auth-code',
+      authRunId,
+      code,
+    });
+  }
+
+  cancelAccountLogin(authRunId: string): void {
+    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'account-login-cancel', authRunId });
+  }
+
+  logoutAccount(): Promise<AccountSessionStatus | null> {
+    return this.request<AccountSessionStatus>({ type: 'account-logout' }, 'account-logout', 30_000);
   }
 
   installAgent(agent: AgentName): Promise<AgentSetupStatusMap | null> {

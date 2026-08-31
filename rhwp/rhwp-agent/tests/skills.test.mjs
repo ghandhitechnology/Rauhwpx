@@ -231,7 +231,13 @@ test('promptContext appends provider tool notes only for a known activated agent
 
   const pi = await registry.promptContext('복사', 'starter', { agent: 'pi' });
   assert.match(pi, /<provider_tool_notes agent="pi">/);
-  assert.match(pi, /subagent_spawn\/subagent_wait/);
+  assert.match(pi, /subagent_spawn\/subagent_wait\/subagent_check\/subagent_list\/subagent_cancel/);
+  assert.match(pi, /Background hub jobs .* are not collaboration agents/);
+
+  const rau = await registry.promptContext('복사', 'starter', { agent: 'rau' });
+  assert.match(rau, /<provider_tool_notes agent="rau">/);
+  assert.match(rau, /subagent_spawn\/subagent_wait\/subagent_check\/subagent_list\/subagent_cancel/);
+  assert.match(rau, /Background hub jobs .* are not collaboration agents/);
 
   // 미활성·미지정·미지 에이전트에는 주석이 붙지 않는다 — 기존 프롬프트 모양 유지.
   const noSkill = await registry.promptContext('복사', undefined, { agent: 'grok' });

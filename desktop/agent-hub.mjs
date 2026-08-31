@@ -500,6 +500,35 @@ export async function killPid(pid, {
  * Spawn the hub as a child of this process. Desktop and Vite keep the child
  * attached so they can restart or tear it down with the parent.
  */
+const EXPECTED_HOST_PIPE_CLOSURE_CODES = new Set([
+  'EIO',
+  'EPIPE',
+  'ENOTCONN',
+  'ERR_STREAM_DESTROYED',
+]);
+const guardedHostStreams = new WeakSet();
+
+function guardHostStream(stream, log) {
+  if (!stream || typeof stream.on !== 'function' || guardedHostStreams.has(stream)) return;
+  guardedHostStreams.add(stream);
+  stream.on('error', (error) => {
+    if (EXPECTED_HOST_PIPE_CLOSURE_CODES.has(error?.code)) return;
+    log.warn?.('[rauhwpx] host stdio stream error:', error);
+  });
+}
+
+export function writeHostStream(stream, chunk, { log = console } = {}) {
+  guardHostStream(stream, log);
+  if (!stream || stream.destroyed || stream.writableEnded || stream.writable === false) return false;
+  try {
+    stream.write(chunk);
+    return true;
+  } catch (error) {
+    if (EXPECTED_HOST_PIPE_CLOSURE_CODES.has(error?.code)) return false;
+    throw error;
+  }
+}
+
 export function spawnHubProcess(launch, {
   platform = process.platform,
   detached = platform !== 'win32',
@@ -527,9 +556,11 @@ export function spawnHubProcess(launch, {
   child.rhwpStdoutHistory = '';
   child.stdout?.on('data', (chunk) => {
     child.rhwpStdoutHistory = `${child.rhwpStdoutHistory}${String(chunk)}`.slice(-64 * 1024);
-    if (forwardStdio) process.stdout.write(chunk);
+    if (forwardStdio) writeHostStream(process.stdout, chunk, { log });
   });
-  if (forwardStdio) child.stderr?.on('data', (chunk) => process.stderr.write(chunk));
+  if (forwardStdio) {
+    child.stderr?.on('data', (chunk) => writeHostStream(process.stderr, chunk, { log }));
+  }
   if (typeof onError === 'function') {
     child.on('error', onError);
   } else {

@@ -40,6 +40,8 @@ import type {
   AgentInstructionsStatus,
   AgentAuthMethod,
   AgentSetupStatusMap,
+  AccountLoginStart,
+  AccountSessionStatus,
   PermissionProfile,
   PiCatalogModel,
   PiStatus,
@@ -373,9 +375,15 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   let prefsDraft: AgentPrefs = { ...prefs };
   let connectionState: ConnectionState = bridge.getConnectionState();
   let accountSnapshot: AccountSnapshot | null = null;
-  let accountBusy = false;
+  let accountSnapshotBusy = false;
   let accountAuthPending = false;
+  let accountSnapshotMessage = '';
+  let accountStatus: AccountSessionStatus | null = null;
+  let accountBusy = false;
   let accountMessage = '';
+  let accountAuthRunId: string | null = null;
+  let accountAuthUrl: string | null = null;
+  let accountPairingCode: string | null = null;
   let providers: ProviderStatusMap | null = null;
   let usage: UsageSummary | null = null;
   let writingStyle: WritingStyleStatus | null = null;
@@ -504,17 +512,61 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   });
   panes.get('editing')?.appendChild(editingSettings.element);
 
+  // ── Rauhwpx 계정 ───────────────────────────────────────
+  const accountSection = createSection('Rauhwpx 계정');
+  const accountRow = el('div', 'ag-settings-row ag-account-session-row');
+  const accountDot = el('span', 'ag-settings-dot');
+  accountDot.setAttribute('aria-hidden', 'true');
+  const accountText = el('div', 'ag-settings-row-text');
+  const accountName = el('span', 'ag-settings-row-name', '계정');
+  const accountDetail = el('span', 'ag-settings-row-detail', '확인 중…');
+  accountText.append(accountName, accountDetail);
+  const accountAction = el('button', 'ag-settings-btn', '로그인');
+  accountAction.type = 'button';
+  accountRow.append(accountDot, accountText, accountAction);
+
+  const accountLoginBox = el('div', 'ag-agent-login-box ag-account-login-box');
+  accountLoginBox.hidden = true;
+  const accountAuthLink = el('a', 'ag-agent-login-url', '브라우저에서 로그인');
+  accountAuthLink.target = '_blank';
+  accountAuthLink.rel = 'noopener noreferrer';
+  const accountPairing = el('strong', 'ag-agent-login-code-value');
+  const accountCode = createTextField('반환 코드', { autocomplete: 'off' });
+  const accountLoginActions = el('div', 'ag-settings-actions');
+  const accountCodeSubmit = el('button', 'ag-settings-primary', '코드 확인');
+  accountCodeSubmit.type = 'button';
+  const accountLoginCancel = el('button', 'ag-settings-btn', '로그인 취소');
+  accountLoginCancel.type = 'button';
+  accountLoginActions.append(accountCodeSubmit, accountLoginCancel);
+  accountLoginBox.append(accountAuthLink, accountPairing, accountCode.field, accountLoginActions);
+  const accountError = el('p', 'ag-settings-cliproxy-error');
+  accountError.hidden = true;
+  accountError.setAttribute('role', 'status');
+  accountSection.body.append(accountRow, accountLoginBox, accountError);
+
+  accountAction.addEventListener('click', () => {
+    if (accountStatus?.signedIn) void logoutAccountSession();
+    else void startAccountLogin();
+  });
+  accountCodeSubmit.addEventListener('click', submitAccountCode);
+  accountCode.input.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    submitAccountCode();
+  });
+  accountCode.input.addEventListener('input', renderAccount);
+  accountLoginCancel.addEventListener('click', cancelAccountLogin);
+
   // ── 1. 연결 ────────────────────────────────────────────
   const connection = createSection('연결');
 
-  const accountSection = createSection('Rauhwpx 계정');
   const accountCard = el('div', 'ag-settings-account-card');
   accountCard.dataset.state = 'logged-out';
   const accountHead = el('div', 'ag-settings-account-head');
   const accountIdentity = el('div', 'ag-settings-account-identity');
-  const accountName = el('strong', 'ag-settings-account-name', '로그인하지 않음');
-  const accountDetail = el('span', 'ag-settings-account-detail', '로컬 편집과 내 서버 Cloud는 로그인 없이 사용할 수 있습니다.');
-  accountIdentity.append(accountName, accountDetail);
+  const rauAccountName = el('strong', 'ag-settings-account-name', '로그인하지 않음');
+  const rauAccountDetail = el('span', 'ag-settings-account-detail', '로컬 편집과 내 서버 Cloud는 로그인 없이 사용할 수 있습니다.');
+  accountIdentity.append(rauAccountName, rauAccountDetail);
   const accountActions = el('div', 'ag-settings-actions ag-settings-account-actions');
   const accountLogin = el('button', 'ag-settings-primary', '계정으로 로그인');
   accountLogin.type = 'button';
@@ -537,14 +589,14 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   quotaTrack.appendChild(quotaFill);
   const quotaFoot = el('p', 'ag-settings-account-foot', '사용량은 계정 기준으로 모든 기기에서 합산됩니다.');
   cloudQuota.append(quotaHead, quotaTrack, quotaFoot);
-  const accountStatus = el('p', 'ag-settings-account-status');
-  accountStatus.hidden = true;
-  accountStatus.setAttribute('role', 'status');
-  accountStatus.setAttribute('aria-live', 'polite');
-  accountCard.append(accountHead, cloudQuota, accountStatus);
+  const rauAccountStatusEl = el('p', 'ag-settings-account-status');
+  rauAccountStatusEl.hidden = true;
+  rauAccountStatusEl.setAttribute('role', 'status');
+  rauAccountStatusEl.setAttribute('aria-live', 'polite');
+  accountCard.append(accountHead, cloudQuota, rauAccountStatusEl);
   accountSection.body.appendChild(accountCard);
 
-  accountLogin.addEventListener('click', () => { void loginAccount(); });
+  accountLogin.addEventListener('click', () => { void loginRauCloudAccount(); });
   accountLogout.addEventListener('click', () => { void logoutAccount(); });
   const hubRow = el('div', 'ag-settings-row ag-settings-hub-row');
   const hubDot = el('span', 'ag-settings-dot');
@@ -1743,6 +1795,114 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       `현재 대화: ${AGENT_LABEL[current.agent]} / ${labelForModel(current.agent, current.model)} / ${permission}`;
   }
 
+  function applyAccountLoginStart(started: AccountLoginStart): void {
+    accountAuthRunId = started.authRunId;
+    accountAuthUrl = started.authUrl;
+    accountPairingCode = started.pairingCode;
+    accountBusy = true;
+    if (started.authUrl) maybeOpenAuthUrl(started.authUrl);
+  }
+
+  function renderAccount(): void {
+    const signedIn = accountStatus?.signedIn === true;
+    const authenticating = accountBusy || accountStatus?.authenticating === true;
+    accountDot.dataset.state = signedIn
+      ? 'connected'
+      : accountStatus?.state === 'unknown'
+        ? 'unknown'
+        : 'disconnected';
+    accountDetail.textContent = signedIn
+      ? (accountStatus?.account?.email ?? '로그인됨')
+      : authenticating
+        ? '로그인 확인 중…'
+        : accountStatus?.state === 'unknown'
+          ? '상태 확인이 지연되고 있어요'
+          : '로그인되지 않음';
+    accountAction.textContent = signedIn ? '로그아웃' : '로그인';
+    accountAction.disabled = connectionState !== 'connected' || accountBusy
+      || (accountStatus?.authenticating === true
+        && accountStatus.authOwnedByThisSession !== true);
+    const ownsAuthentication = accountBusy || accountStatus?.authOwnedByThisSession === true;
+    accountLoginBox.hidden = !ownsAuthentication || signedIn;
+    accountAuthLink.hidden = !accountAuthUrl;
+    if (accountAuthUrl) accountAuthLink.href = accountAuthUrl;
+    accountPairing.hidden = !accountPairingCode;
+    accountPairing.textContent = accountPairingCode ?? '';
+    accountCodeSubmit.disabled = !accountAuthRunId || !accountCode.input.value.trim();
+    accountLoginCancel.disabled = !accountAuthRunId;
+    accountError.textContent = accountMessage;
+    accountError.hidden = !accountMessage;
+  }
+
+  async function refreshAccount(): Promise<void> {
+    const status = await bridge.requestAccountStatus();
+    if (disposed || !status) return;
+    accountStatus = status;
+    if (!status.authenticating) {
+      accountBusy = false;
+      accountAuthRunId = null;
+      accountAuthUrl = null;
+      accountPairingCode = null;
+    } else if (status.authOwnedByThisSession) {
+      accountBusy = true;
+      accountAuthRunId = status.authRunId ?? accountAuthRunId;
+      accountAuthUrl = status.authUrl ?? accountAuthUrl;
+      accountPairingCode = status.pairingCode ?? accountPairingCode;
+    }
+    renderAccount();
+  }
+
+  async function startAccountLogin(): Promise<void> {
+    if (accountBusy || connectionState !== 'connected') return;
+    accountBusy = true;
+    accountMessage = '';
+    accountCode.input.value = '';
+    renderAccount();
+    const started = await bridge.loginAccount();
+    if (disposed) return;
+    if (!started?.authRunId) {
+      accountBusy = false;
+      if (!accountMessage) accountMessage = '로그인을 시작하지 못했어요.';
+      renderAccount();
+      return;
+    }
+    applyAccountLoginStart(started);
+    renderAccount();
+  }
+
+  function submitAccountCode(): void {
+    const code = accountCode.input.value.trim();
+    if (!accountAuthRunId || !code) return;
+    bridge.submitAccountAuthCode(accountAuthRunId, code);
+    accountCode.input.value = '';
+    accountMessage = '';
+    renderAccount();
+  }
+
+  function cancelAccountLogin(): void {
+    if (accountAuthRunId) bridge.cancelAccountLogin(accountAuthRunId);
+    accountBusy = false;
+    accountAuthRunId = null;
+    accountAuthUrl = null;
+    accountPairingCode = null;
+    accountCode.input.value = '';
+    accountMessage = '';
+    renderAccount();
+  }
+
+  async function logoutAccountSession(): Promise<void> {
+    if (accountBusy || connectionState !== 'connected') return;
+    accountBusy = true;
+    accountMessage = '';
+    renderAccount();
+    const status = await bridge.logoutAccount();
+    if (disposed) return;
+    accountBusy = false;
+    if (status) accountStatus = status;
+    else if (!accountMessage) accountMessage = '로그아웃하지 못했어요.';
+    renderAccount();
+  }
+
   function renderConnection(): void {
     hubDot.dataset.state = connectionState;
     hubLabel.textContent = CONN_LABEL[connectionState];
@@ -1750,6 +1910,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     const online = connectionState === 'connected';
     refreshBtn.disabled = !online;
     restartBtn.disabled = !online;
+    renderAccount();
   }
 
   function quotaMinutes(ms: number): string {
@@ -1766,18 +1927,18 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     }).format(date);
   }
 
-  function renderAccount(): void {
+  function renderRauCloudAccount(): void {
     const signedIn = accountSnapshot?.signedIn === true;
     const quota = signedIn ? accountSnapshot?.quota ?? null : null;
     accountLogin.hidden = signedIn;
     accountLogout.hidden = !signedIn;
     accountLogin.textContent = accountAuthPending ? '로그인 마치는 중…' : '계정으로 로그인';
-    accountLogin.disabled = accountBusy || accountAuthPending || !accountBridge.loginRauAccount;
-    accountLogout.disabled = accountBusy || !accountBridge.logoutRauAccount;
-    accountName.textContent = signedIn
+    accountLogin.disabled = accountSnapshotBusy || accountAuthPending || !accountBridge.loginRauAccount;
+    accountLogout.disabled = accountSnapshotBusy || !accountBridge.logoutRauAccount;
+    rauAccountName.textContent = signedIn
       ? accountSnapshot?.account?.displayName || accountSnapshot?.account?.email || 'Rauhwpx 계정'
       : '로그인하지 않음';
-    accountDetail.textContent = signedIn
+    rauAccountDetail.textContent = signedIn
       ? accountSnapshot?.account?.email ?? '계정이 연결되어 있습니다.'
       : '로컬 편집과 내 서버 Cloud는 로그인 없이 사용할 수 있습니다.';
 
@@ -1818,73 +1979,73 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
           : `모든 기기에서 합산됩니다${reset ? ` · ${reset} 초기화` : ''}.`;
       quotaFoot.textContent = `${quotaNote} · ${starts}`;
     }
-    accountStatus.textContent = accountMessage;
-    accountStatus.hidden = !accountMessage;
-    accountCard.setAttribute('aria-busy', String(accountBusy));
+    rauAccountStatusEl.textContent = accountSnapshotMessage;
+    rauAccountStatusEl.hidden = !accountSnapshotMessage;
+    accountCard.setAttribute('aria-busy', String(accountSnapshotBusy));
   }
 
-  async function refreshAccount(_refresh = false): Promise<void> {
-    if (!accountBridge.requestRauAccount || accountBusy) {
-      renderAccount();
+  async function refreshRauCloudAccount(_refresh = false): Promise<void> {
+    if (!accountBridge.requestRauAccount || accountSnapshotBusy) {
+      renderRauCloudAccount();
       return;
     }
-    accountBusy = true;
-    renderAccount();
+    accountSnapshotBusy = true;
+    renderRauCloudAccount();
     try {
       const next = await accountBridge.requestRauAccount();
       if (next) accountSnapshot = next;
-      accountMessage = '';
+      accountSnapshotMessage = '';
     } catch (error) {
-      accountMessage = error instanceof Error ? error.message : '계정 상태를 확인하지 못했습니다.';
+      accountSnapshotMessage = error instanceof Error ? error.message : '계정 상태를 확인하지 못했습니다.';
     } finally {
-      accountBusy = false;
-      if (!disposed) renderAccount();
+      accountSnapshotBusy = false;
+      if (!disposed) renderRauCloudAccount();
     }
   }
 
-  async function loginAccount(): Promise<void> {
-    if (!accountBridge.loginRauAccount || accountBusy || accountAuthPending) return;
-    accountBusy = true;
-    accountMessage = '브라우저에서 로그인을 마쳐 주세요.';
-    renderAccount();
+  async function loginRauCloudAccount(): Promise<void> {
+    if (!accountBridge.loginRauAccount || accountSnapshotBusy || accountAuthPending) return;
+    accountSnapshotBusy = true;
+    accountSnapshotMessage = '브라우저에서 로그인을 마쳐 주세요.';
+    renderRauCloudAccount();
     try {
       const next = await accountBridge.loginRauAccount();
       if (next?.authUrl) {
         window.open(next.authUrl, '_blank', 'noopener,noreferrer');
         accountAuthPending = true;
-        accountMessage = '브라우저 로그인이 끝나면 이 화면에 자동으로 반영됩니다.';
+        accountSnapshotMessage = '브라우저 로그인이 끝나면 이 화면에 자동으로 반영됩니다.';
       } else {
         accountAuthPending = false;
-        accountMessage = '로그인을 시작하지 못했습니다.';
+        accountSnapshotMessage = '로그인을 시작하지 못했습니다.';
       }
     } catch (error) {
       accountAuthPending = false;
-      accountMessage = error instanceof Error ? error.message : '로그인을 시작하지 못했습니다.';
+      accountSnapshotMessage = error instanceof Error ? error.message : '로그인을 시작하지 못했습니다.';
     } finally {
-      accountBusy = false;
+      accountSnapshotBusy = false;
       if (!disposed) {
-        renderAccount();
+        renderRauCloudAccount();
       }
     }
   }
 
   async function logoutAccount(): Promise<void> {
-    if (!accountBridge.logoutRauAccount || accountBusy) return;
-    accountBusy = true;
-    accountMessage = '계정 연결을 정리하고 있습니다.';
-    renderAccount();
+    if (!accountBridge.logoutRauAccount || accountSnapshotBusy) return;
+    accountSnapshotBusy = true;
+    accountSnapshotMessage = '계정 연결을 정리하고 있습니다.';
+    renderRauCloudAccount();
     try {
       const cloudLogout = (globalThis as {
         rhwpDesktop?: { cloudAccountLogout?: () => Promise<unknown> };
       }).rhwpDesktop?.cloudAccountLogout;
       if (cloudLogout) await cloudLogout();
       accountSnapshot = await accountBridge.logoutRauAccount();
-      accountMessage = '이 기기에서 로그아웃했습니다.';
+      accountSnapshotMessage = '이 기기에서 로그아웃했습니다.';
     } catch (error) {
-      accountMessage = error instanceof Error ? error.message : '로그아웃하지 못했습니다.';
+      accountSnapshotMessage = error instanceof Error ? error.message : '로그아웃하지 못했습니다.';
     } finally {
-      accountBusy = false;
-      if (!disposed) renderAccount();
+      accountSnapshotBusy = false;
+      if (!disposed) renderRauCloudAccount();
     }
   }
 
@@ -3194,8 +3355,9 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   }
 
   syncPrefsInputs();
-  renderCurrentSelection();
   renderAccount();
+  renderRauCloudAccount();
+  renderCurrentSelection();
   renderConnection();
   renderProviders();
   renderAgentInstructions();
@@ -3220,6 +3382,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       syncPrefsInputs();
       renderCurrentSelection();
       renderAccount();
+      renderRauCloudAccount();
       renderConnection();
       renderProviders();
       renderAgentInstructions();
@@ -3227,9 +3390,10 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       renderTemplates();
       renderPi();
       void refreshProviders(false);
+      void refreshAccount();
       void refreshAgentInstructions(false);
       void refreshUsage();
-      void refreshAccount(false);
+      void refreshRauCloudAccount(false);
       void refreshPiStatus();
       void refreshSetupStatuses();
       void refreshTemplates();
@@ -3257,7 +3421,45 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
           renderPi();
           renderTemplates();
           renderAgentInstructions();
+          renderAccount();
+          if (ev.state === 'connected' && !accountStatus) void refreshAccount();
           if (ev.state === 'connected' && !agentInstructions) void refreshAgentInstructions(false);
+          break;
+        case 'account-status':
+          accountStatus = ev.status;
+          if (!ev.status.authenticating || ev.status.signedIn) {
+            accountBusy = false;
+            accountAuthRunId = null;
+            accountAuthUrl = null;
+            accountPairingCode = null;
+            accountCode.input.value = '';
+          } else if (ev.status.authOwnedByThisSession) {
+            accountBusy = true;
+            accountAuthRunId = ev.status.authRunId ?? accountAuthRunId;
+            accountAuthUrl = ev.status.authUrl ?? accountAuthUrl;
+            accountPairingCode = ev.status.pairingCode ?? accountPairingCode;
+          }
+          renderAccount();
+          break;
+        case 'account-login-progress':
+          if (ev.authRunId && accountAuthRunId && ev.authRunId !== accountAuthRunId) break;
+          accountBusy = true;
+          accountAuthRunId = ev.authRunId ?? accountAuthRunId;
+          accountAuthUrl = ev.authUrl ?? accountAuthUrl;
+          accountPairingCode = ev.pairingCode ?? accountPairingCode;
+          maybeOpenAuthUrl(ev.authUrl);
+          renderAccount();
+          break;
+        case 'account-error':
+          if (ev.authRunId && accountAuthRunId && ev.authRunId !== accountAuthRunId) break;
+          accountMessage = ev.message;
+          if (ev.code !== 'DEVICE_PROOF_INVALID') {
+            accountBusy = false;
+            accountAuthRunId = null;
+            accountAuthUrl = null;
+            accountPairingCode = null;
+          }
+          renderAccount();
           break;
         case 'agent-instructions':
           acceptAgentInstructions(ev.status, ev.changedBy);
@@ -3335,16 +3537,16 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
         }
         case 'rau-account-status':
           accountSnapshot = ev.account;
-          accountBusy = false;
+          accountSnapshotBusy = false;
           accountAuthPending = false;
-          accountMessage = ev.account.signedIn ? '계정이 연결되었습니다.' : '';
-          renderAccount();
+          accountSnapshotMessage = ev.account.signedIn ? '계정이 연결되었습니다.' : '';
+          renderRauCloudAccount();
           break;
         case 'rau-account-error':
-          accountBusy = false;
+          accountSnapshotBusy = false;
           accountAuthPending = false;
-          accountMessage = ev.message;
-          renderAccount();
+          accountSnapshotMessage = ev.message;
+          renderRauCloudAccount();
           break;
         case 'agent-setup-progress':
           if (setupAgent === ev.agent) {

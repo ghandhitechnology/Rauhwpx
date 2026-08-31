@@ -32,6 +32,8 @@ export interface PiExtensionConfig {
   agentName: string;
   agentRole: string;
   copyLayoutJobId: string | null;
+  subagentId: string | null;
+  parentTaskId: string | null;
   workflow: string;
   phase: string;
   capabilityEpoch: string | undefined;
@@ -111,6 +113,8 @@ export function readExtensionConfig(
     agentName: env.RHWP_AGENT_NAME ?? 'pi',
     agentRole,
     copyLayoutJobId,
+    subagentId: env.RHWP_PI_SUBAGENT_ID ?? null,
+    parentTaskId: env.RHWP_PI_PARENT_TASK_ID ?? null,
     workflow,
     phase,
     capabilityEpoch: env.RHWP_CAPABILITY_EPOCH,
@@ -136,6 +140,9 @@ export function hubToolDefinitionsUrl(config: PiExtensionConfig): string {
   if (config.copyLayoutJobId) {
     params.push(`workerJobId=${encodeURIComponent(config.copyLayoutJobId)}`);
   }
+  if (config.subagentId) {
+    params.push(`subagentId=${encodeURIComponent(config.subagentId)}`);
+  }
   return `${base}/pi/tool-definitions?${params.join('&')}`;
 }
 
@@ -151,6 +158,9 @@ export function hubSocketUrl(config: PiExtensionConfig): string {
   ];
   if (config.copyLayoutJobId) {
     parts.push(`workerJobId=${encodeURIComponent(config.copyLayoutJobId)}`);
+  }
+  if (config.subagentId) {
+    parts.push(`subagentId=${encodeURIComponent(config.subagentId)}`);
   }
   if (config.capabilityEpoch) {
     parts.push(`capabilityEpoch=${encodeURIComponent(config.capabilityEpoch)}`);
@@ -173,6 +183,7 @@ export function encodeToolCallFrame(
     args,
     workflow: config.workflow,
     ...(config.capabilityEpoch ? { capabilityEpoch: config.capabilityEpoch } : {}),
+    ...(config.parentTaskId ? { parentTaskId: config.parentTaskId } : {}),
   };
 }
 
@@ -559,13 +570,16 @@ export async function guardToolCall(
   const toolName = event?.toolName;
   if (typeof toolName !== 'string') return undefined;
   if (PLANNING_BLOCKED_TOOLS.includes(toolName)
-    && isPlanningRestricted(config.workflow, config.phase)) {
+    && (isPlanningRestricted(config.workflow, config.phase)
+      || config.toolProfile === 'doc-researcher')) {
     return {
       block: true,
-      reason: config.workflow === 'question'
-        ? `Question mode: the built-in ${toolName} tool is disabled. Inspect and answer; do not edit.`
-        : `Planning phase: the built-in ${toolName} tool is disabled. Inspect only, and call `
-      + 'present_implementation_plan only when the user asks for a plan.',
+      reason: config.toolProfile === 'doc-researcher'
+        ? `Researcher role: the built-in ${toolName} tool is disabled. Read only; do not edit the workspace.`
+        : config.workflow === 'question'
+          ? `Question mode: the built-in ${toolName} tool is disabled. Inspect and answer; do not edit.`
+          : `Planning phase: the built-in ${toolName} tool is disabled. Inspect only, and call `
+            + 'present_implementation_plan only when the user asks for a plan.',
     };
   }
   if (config.permissionProfile === 'safe' && toolName === 'bash') {

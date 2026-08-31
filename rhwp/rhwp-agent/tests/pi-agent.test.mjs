@@ -855,3 +855,75 @@ test('Windows Pi terminal cleanup starts live, drains buffered output, and allow
   spawns[1].proc.exit(0);
   assert.equal(await disposing, true);
 });
+
+test('Pi fleet events preserve child terminal status and Rau identity', () => {
+  const events = [];
+  const mapper = createPiFleetMapper((event) => events.push(event), 'rau');
+  for (const [callId, id, name] of [
+    ['spawn-ok', 'sa-1', 'Edit'],
+    ['spawn-fail', 'sa-2', 'Research'],
+  ]) {
+    mapper.onToolStart({ toolCallId: callId, toolName: 'subagent_spawn', args: { name } });
+    mapper.onToolEnd({
+      toolCallId: callId,
+      toolName: 'subagent_spawn',
+      result: { details: { id } },
+    });
+  }
+  mapper.onToolStart({
+    toolCallId: 'wait', toolName: 'subagent_wait', args: { ids: ['sa-1', 'sa-2'] },
+  });
+  mapper.onToolEnd({
+    toolCallId: 'wait',
+    toolName: 'subagent_wait',
+    result: { details: { records: [
+      { id: 'sa-1', status: 'completed' },
+      { id: 'sa-2', status: 'failed' },
+    ] } },
+  });
+  assert.deepEqual(events.filter((event) => event.type === 'task-end'), [
+    { type: 'task-end', agent: 'rau', taskId: 'spawn-ok', status: 'completed' },
+    { type: 'task-end', agent: 'rau', taskId: 'spawn-fail', status: 'failed' },
+  ]);
+});
+
+test('an aborted wait leaves its fleet card running until final cleanup', () => {
+  const events = [];
+  const mapper = createPiFleetMapper((event) => events.push(event));
+  mapper.onToolStart({ toolCallId: 'spawn', toolName: 'subagent_spawn', args: { name: 'Research' } });
+  mapper.onToolEnd({
+    toolCallId: 'spawn', toolName: 'subagent_spawn', result: { details: { id: 'sa-1' } },
+  });
+  mapper.onToolStart({ toolCallId: 'wait', toolName: 'subagent_wait', args: { ids: ['sa-1'] } });
+  mapper.onToolEnd({
+    toolCallId: 'wait', toolName: 'subagent_wait', isError: true,
+    result: { content: [{ type: 'text', text: 'Wait aborted. Subagents keep running.' }] },
+  });
+  assert.equal(events.some((event) => event.type === 'task-end'), false);
+  mapper.finalize('stopped');
+  assert.equal(events.at(-1).status, 'stopped');
+});
+
+test('Pi fleet metadata is bounded before it reaches Studio', () => {
+  const events = [];
+  const mapper = createPiFleetMapper((event) => events.push(event));
+  mapper.onToolStart({
+    toolCallId: 'spawn',
+    toolName: 'subagent_spawn',
+    args: { name: 'n'.repeat(5_000), role: 'r'.repeat(5_000) },
+  });
+  assert.equal(events[0].title.length, 160);
+  assert.equal(events[0].role.length, 64);
+});
+
+test('a failed Pi cancellation marks the affected fleet card failed', () => {
+  const events = [];
+  const mapper = createPiFleetMapper((event) => events.push(event));
+  mapper.onToolStart({ toolCallId: 'spawn', toolName: 'subagent_spawn', args: { name: 'Edit' } });
+  mapper.onToolEnd({
+    toolCallId: 'spawn', toolName: 'subagent_spawn', result: { details: { id: 'sa-1' } },
+  });
+  mapper.onToolStart({ toolCallId: 'cancel', toolName: 'subagent_cancel', args: { ids: ['sa-1'] } });
+  mapper.onToolEnd({ toolCallId: 'cancel', toolName: 'subagent_cancel', isError: true, result: {} });
+  assert.equal(events.at(-1).status, 'failed');
+});

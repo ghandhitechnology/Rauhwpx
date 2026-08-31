@@ -1745,6 +1745,11 @@ async function initializeDocument(
     toolbar?.initFontDropdown(docInfo.fontsUsed);
     toolbar?.initStyleDropdown();
     await updateLoadProgress(94, '문서 검증 및 글꼴 확인 중...');
+    const emptyState = document.getElementById('document-empty-state');
+    if (emptyState) {
+      emptyState.hidden = true;
+      emptyState.setAttribute('aria-hidden', 'true');
+    }
 
     // #177: HWPX 비표준 lineseg 감지 (진단 로그).
     // #2527: 자동 보정(reflowLinesegs)이 빈-lineseg 문서에서 글리프 좌표를 붕괴시켜
@@ -1771,11 +1776,6 @@ async function initializeDocument(
     // 로컬 글꼴 감지 결과가 뷰를 갱신한 뒤에 캐럿을 연결해야 입력 포커스가 재설정과 경합하지 않는다.
     await updateLoadProgress(96, '편집 상태 초기화 중...');
     inputHandler?.activateWithCaretPosition();
-    const emptyState = document.getElementById('document-empty-state');
-    if (emptyState) {
-      emptyState.hidden = true;
-      emptyState.setAttribute('aria-hidden', 'true');
-    }
     eventBus.emit('document-context-changed');
     // 최종 단계 뒤에는 비동기 작업이 없으므로 100% progress paint를 기다리지 않는다.
     msg.textContent = documentReadOnly

@@ -1344,7 +1344,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     e.stopPropagation();
     openConfiguredVersionControl();
   });
-
   // pane 액션은 문서 맥락 주변의 고정된 헤더 위치를 유지한다.
   headerActions.append(versionsBtn, settingsBtn, threadsBtn);
 

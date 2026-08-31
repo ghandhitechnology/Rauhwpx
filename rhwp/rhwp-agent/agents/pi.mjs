@@ -172,20 +172,39 @@ export function buildPiEnv(opts, sourceEnv = process.env) {
   };
 }
 
-/**
- * pi 확장의 subagent_* 도구 호출을 편대 task-* 이벤트로 옮긴다.
- * 자식 본문은 json 스트림에 없으므로 카드는 스폰/대기/취소와 턴 종료로만 움직인다.
- *
- * @param {(event: any) => void} onEvent
- * @param {'pi' | 'rau'} [agentName]
- */
-export function createPiFleetMapper(onEvent, agentName = 'pi') {
-  const agent = agentName === 'rau' ? 'rau' : 'pi';
-  /** @type {Map<string, string>} sa-N → taskId(스폰 callId) */
+function fleetStatusFromWait(status) {
+  return ['completed', 'failed', 'stopped'].includes(status) ? status : null;
+}
+
+function waitRecordsFromResult(result) {
+  const records = result && typeof result === 'object' ? result?.details?.records : null;
+  if (!Array.isArray(records)) return [];
+  return records.slice(0, 64).flatMap((entry) => {
+    if (!entry || typeof entry.id !== 'string' || !/^sa-[1-9][0-9]{0,8}$/.test(entry.id)) return [];
+    const status = fleetStatusFromWait(entry.status);
+    return status ? [{ id: entry.id, status }] : [];
+  });
+}
+
+function toolResultText(result) {
+  if (typeof result === 'string') return result;
+  if (typeof result?.message === 'string') return result.message;
+  if (Array.isArray(result?.content)) {
+    return result.content.map((block) => String(block?.text ?? '')).join('\n');
+  }
+  return JSON.stringify(result ?? '');
+}
+
+function spawnIdFromToolResult(result) {
+  const direct = result?.details?.id ?? result?.id;
+  if (typeof direct === 'string' && /^sa-\d+$/.test(direct)) return direct;
+  return toolResultText(result).match(/sa-\d+/)?.[0] ?? null;
+}
+
+/** Map Pi extension subagent tools onto the unified task-card event stream. */
+export function createPiFleetMapper(onEvent, agent = 'pi') {
   const taskIdBySubagent = new Map();
-  /** @type {Map<string, { tool: string, args: Record<string, unknown> }>} */
   const callMeta = new Map();
-  /** @type {Set<string>} */
   const running = new Set();
 
   function emitEnd(taskId, status, summary) {
@@ -193,23 +212,22 @@ export function createPiFleetMapper(onEvent, agentName = 'pi') {
     onEvent({ type: 'task-end', agent, taskId, status, ...(summary ? { summary } : {}) });
   }
 
-  function taskIdsFor(ids) {
-    return ids
-      .map((id) => taskIdBySubagent.get(String(id)))
-      .filter((taskId) => typeof taskId === 'string');
+  function idsFrom(callId, fallback = {}) {
+    const args = callMeta.get(callId)?.args ?? fallback;
+    return Array.isArray(args?.ids)
+      ? args.ids.slice(0, 64).map(String).filter((id) => /^sa-[1-9][0-9]{0,8}$/.test(id))
+      : [];
   }
 
-  function idsFrom(callId, fallbackArgs) {
-    const meta = callMeta.get(callId);
-    const args = meta?.args ?? fallbackArgs ?? {};
-    return Array.isArray(args.ids) ? args.ids.map(String) : [];
+  function taskIdsFor(ids) {
+    return ids.map((id) => taskIdBySubagent.get(id)).filter(Boolean);
   }
 
   return {
     onToolStart(event) {
-      const tool = String(event.toolName ?? '');
-      const callId = String(event.toolCallId ?? '');
-      const args = event.args && typeof event.args === 'object' ? event.args : {};
+      const tool = String(event?.toolName ?? '');
+      const callId = String(event?.toolCallId ?? '');
+      const args = event?.args && typeof event.args === 'object' ? event.args : {};
       callMeta.set(callId, { tool, args });
       if (tool === SPAWN_TOOL) {
         running.add(callId);
@@ -218,85 +236,59 @@ export function createPiFleetMapper(onEvent, agentName = 'pi') {
           agent,
           taskId: callId,
           callId,
-          title: String(args.name ?? args.title ?? 'subagent'),
-          ...(args.role ? { role: String(args.role) } : {}),
+          title: truncate(String(args.name ?? args.title ?? 'subagent'), 159),
+          ...(args.role ? { role: truncate(String(args.role), 63) } : {}),
           taskKind: 'agent',
         });
-        return;
-      }
-      if (tool === WAIT_TOOL) {
+      } else if (tool === WAIT_TOOL) {
         for (const taskId of taskIdsFor(idsFrom(callId, args))) {
           onEvent({ type: 'task-progress', agent, taskId, activity: 'waiting' });
         }
       }
     },
     onToolEnd(event) {
-      const callId = String(event.toolCallId ?? '');
+      const callId = String(event?.toolCallId ?? '');
       const meta = callMeta.get(callId);
-      const tool = String(event.toolName ?? meta?.tool ?? '');
+      const tool = String(event?.toolName ?? meta?.tool ?? '');
       const args = meta?.args ?? {};
       callMeta.delete(callId);
       if (tool === SPAWN_TOOL) {
-        const spawnId = spawnIdFromToolResult(event.result);
-        if (spawnId) taskIdBySubagent.set(spawnId, callId);
-        if (event.isError) emitEnd(callId, 'failed', String(event.result?.content ?? 'spawn failed'));
+        const subagentId = spawnIdFromToolResult(event?.result);
+        if (subagentId) {
+          while (taskIdBySubagent.size >= 64) {
+            taskIdBySubagent.delete(taskIdBySubagent.keys().next().value);
+          }
+          taskIdBySubagent.set(subagentId, callId);
+        }
+        if (event?.isError) emitEnd(callId, 'failed', truncate(toolResultText(event.result), 1_199));
         return;
       }
       if (tool === WAIT_TOOL) {
-        const ids = idsFrom(callId, args);
-        const records = waitRecordsFromResult(event.result);
+        if (event?.isError && /Wait aborted\. Subagents keep running/.test(toolResultText(event.result))) return;
+        const records = waitRecordsFromResult(event?.result);
         if (records.length > 0) {
-          for (const rec of records) {
-            const taskId = taskIdBySubagent.get(rec.id);
-            if (taskId) emitEnd(taskId, rec.status);
+          for (const record of records) {
+            const taskId = taskIdBySubagent.get(record.id);
+            if (taskId) emitEnd(taskId, record.status);
           }
           return;
         }
-        const status = event.isError ? 'failed' : 'completed';
+        const ids = idsFrom(callId, args);
         for (const taskId of taskIdsFor(ids.length > 0 ? ids : [...taskIdBySubagent.keys()])) {
-          emitEnd(taskId, status);
+          emitEnd(taskId, event?.isError ? 'failed' : 'completed');
         }
         return;
       }
       if (tool === CANCEL_TOOL) {
-        for (const taskId of taskIdsFor(idsFrom(callId, args))) emitEnd(taskId, 'stopped');
+        for (const taskId of taskIdsFor(idsFrom(callId, args))) {
+          emitEnd(taskId, event?.isError ? 'failed' : 'stopped');
+        }
       }
     },
     finalize(status = 'stopped') {
       for (const taskId of [...running]) emitEnd(taskId, status);
     },
   };
-}
-
-function waitRecordsFromResult(result) {
-  const rec = result && typeof result === 'object' ? result : null;
-  const records = rec?.details?.records;
-  if (!Array.isArray(records)) return [];
-  return records.flatMap((entry) => {
-    if (!entry || typeof entry.id !== 'string') return [];
-    const status = fleetStatusFromWait(entry.status);
-    return status ? [{ id: entry.id, status }] : [];
-  });
-}
-
-function fleetStatusFromWait(status) {
-  switch (status) {
-    case 'completed':
-    case 'failed':
-    case 'stopped':
-      return status;
-    default:
-      return null;
-  }
-}
-
-function spawnIdFromToolResult(result) {
-  const rec = result && typeof result === 'object' ? result : null;
-  const direct = rec?.details?.id ?? rec?.id;
-  if (typeof direct === 'string' && /^sa-\d+$/.test(direct)) return direct;
-  const text = typeof result === 'string' ? result : JSON.stringify(rec?.content ?? result ?? '');
-  const match = text.match(/sa-\d+/);
-  return match?.[0] ?? null;
 }
 
 /**

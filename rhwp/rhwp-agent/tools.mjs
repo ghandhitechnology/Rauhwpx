@@ -1193,6 +1193,12 @@ export const TOOL_PROFILES = Object.freeze({
     'run_copy_layout_helper',
     'complete_copy_layout_job',
   ]),
+  'doc-researcher': Object.freeze([
+    'instruction-read',
+    'document-read',
+    'reference-read',
+    'template-read',
+  ]),
   all: TOOL_CATEGORIES,
 });
 

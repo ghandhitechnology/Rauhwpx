@@ -18,7 +18,7 @@ const WINDOWS_DIRECTORY_OPEN_ERRORS = new Set([
 ]);
 
 function emptyState() {
-  return { users: {}, sessions: {}, accessTokens: {} };
+  return { users: {}, sessions: {}, accessTokens: {}, accountSessions: {} };
 }
 
 function serializeState(next) {

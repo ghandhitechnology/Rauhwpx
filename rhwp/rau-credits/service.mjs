@@ -19,6 +19,8 @@ import { assertStoreStateFits, createMemoryStore } from './store.mjs';
 
 const SESSION_TTL_MS = 10 * 60 * 1000;
 const AUTHORIZATION_TTL_MS = 2 * 60 * 1000;
+const ACCOUNT_SESSION_PENDING_TTL_MS = 10 * 60 * 1000;
+const ACCOUNT_SESSION_REVOKED_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_BODY_BYTES = 16 * 1024;
 const MAX_JSON_BODY_BYTES = 64 * 1024;
 const MAX_UPSTREAM_BODY_BYTES = 64 * 1024;
@@ -29,6 +31,7 @@ const MAX_WORKOS_USER_ID_BYTES = 256;
 const MAX_LOGIN_EMAIL_BYTES = 320;
 const MAX_OPENROUTER_KEY_BYTES = 8 * 1024;
 const MAX_OPENROUTER_KEY_ID_BYTES = 1024;
+const MAX_ACCOUNT_TOKEN_BYTES = 256;
 const MAX_PROVISIONING_INTENT_ID_BYTES = 64;
 const MAX_PROVISIONING_INTENT_NAME_BYTES = 320;
 const MANUAL_CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
@@ -43,6 +46,7 @@ const PROXY_BODY_BYTES = 24 * 1024 * 1024;
 const WORKOS_PROVIDERS = new Set(['GoogleOAuth', 'GitHubOAuth']);
 const RAU_ICON_PATH = fileURLToPath(new URL('./public/rau.png', import.meta.url));
 const OPENROUTER_MINT_NOT_DISPATCHED = Symbol('openrouter-mint-not-dispatched');
+const ACCOUNT_TOKEN_PREFIX = 'rau_account_v1_';
 
 function creditsError(code, message) {
   const error = new Error(message);
@@ -63,6 +67,7 @@ function ensureState(state) {
   state.sessions ??= {};
   state.emailIndex ??= {};
   state.accessTokens ??= {};
+  state.accountSessions ??= {};
   return state;
 }
 
@@ -133,6 +138,29 @@ function sameDigest(left, right) {
   const a = Buffer.from(String(left ?? ''), 'utf8');
   const b = Buffer.from(String(right ?? ''), 'utf8');
   return a.length === b.length && timingSafeEqual(a, b);
+}
+
+function accountTokenDigest(value, { optional = false } = {}) {
+  const token = typeof value === 'string' ? value.trim() : '';
+  if (!token && optional) return null;
+  if (!boundedUtf8(token, MAX_ACCOUNT_TOKEN_BYTES)
+    || !/^rau_account_v1_[A-Za-z0-9_-]{43}$/.test(token)) {
+    throw creditsError('ACCOUNT_SESSION_INVALID', '계정 세션을 확인할 수 없어요');
+  }
+  return digest(token);
+}
+
+function accountSnapshot(record) {
+  if (!record || record.status !== 'active') {
+    return { state: record?.status === 'pending' ? 'pending' : 'signed-out', signedIn: false, account: null };
+  }
+  return {
+    state: 'signed-in',
+    signedIn: true,
+    account: {
+      email: typeof record.email === 'string' ? record.email : null,
+    },
+  };
 }
 
 function randomManualCode() {
@@ -218,7 +246,7 @@ function validatedLoopbackUri(value) {
     || !url.port
     || Number(url.port) < 1
     || Number(url.port) > 65_535
-    || url.pathname !== '/oauth/rau/callback'
+    || !['/oauth/rau/callback', '/oauth/account/callback'].includes(url.pathname)
     || url.username
     || url.password
     || url.search
@@ -357,6 +385,39 @@ export function createCreditsService({
       }
       delete state.sessions[id];
     }
+  }
+
+  function accountSessionsIn(state) {
+    state.accountSessions ??= {};
+    if (typeof state.accountSessions !== 'object' || Array.isArray(state.accountSessions)) {
+      throw creditsError('ACCOUNT_SESSION_UNREADABLE', '저장된 계정 세션 정보를 읽을 수 없어요');
+    }
+    return state.accountSessions;
+  }
+
+  function pruneAccountSessions(state) {
+    const records = accountSessionsIn(state);
+    for (const [tokenDigest, record] of Object.entries(records)) {
+      if (!record || typeof record !== 'object' || Array.isArray(record)) continue;
+      if (record.status === 'pending' && record.pendingExpiresAt < now()) {
+        record.status = 'revoked';
+        record.revokedAt = now();
+        delete record.pendingExpiresAt;
+      }
+      if (record.status === 'revoked'
+        && Number.isFinite(record.revokedAt)
+        && now() - record.revokedAt > ACCOUNT_SESSION_REVOKED_RETENTION_MS) {
+        delete records[tokenDigest];
+      }
+    }
+    return records;
+  }
+
+  function activeReplacementDigest(state, token) {
+    const tokenDigest = accountTokenDigest(token, { optional: true });
+    if (!tokenDigest) return null;
+    const record = accountSessionsIn(state)[tokenDigest];
+    return record?.status === 'active' ? tokenDigest : null;
   }
 
   function liveSessionCount(state) {
@@ -1042,6 +1103,10 @@ export function createCreditsService({
       if (input.codeChallengeMethod !== 'S256' || !validPkceChallenge(input.codeChallenge)) {
         throw creditsError('PKCE_CHALLENGE_INVALID', '로그인 보안 정보를 확인할 수 없어요');
       }
+      const purpose = input.purpose === 'account' ? 'account' : 'provider';
+      if (input.purpose !== undefined && !['account', 'provider'].includes(input.purpose)) {
+        throw creditsError('DEVICE_PURPOSE_INVALID', '지원하지 않는 로그인 목적이에요');
+      }
       const requestedMode = String(input.returnMode ?? 'hybrid');
       if (!['hybrid', 'loopback', 'manual'].includes(requestedMode)) {
         throw creditsError('RETURN_MODE_INVALID', '지원하지 않는 로그인 반환 방식이에요');
@@ -1060,11 +1125,13 @@ export function createCreditsService({
       const returnMode = loopbackUri ? requestedMode : 'manual';
       await mutate((state) => {
         pruneSessions(state);
+        pruneAccountSessions(state);
         if (liveSessionCount(state) >= maxLiveSessions) {
           throw creditsError('RATE_LIMITED', '로그인 요청이 너무 많아요. 잠시 후 다시 시도해 주세요');
         }
         state.sessions[id] = {
           protocol: 2,
+          purpose,
           status: 'pending',
           createdAt: now(),
           codeChallenge: String(input.codeChallenge),
@@ -1073,6 +1140,9 @@ export function createCreditsService({
           callbackState,
           pairingCode,
           clientVersion: String(input.clientVersion ?? '').slice(0, 64),
+          ...(purpose === 'account'
+            ? { replaceAccountTokenDigest: activeReplacementDigest(state, input.replaceAccountToken) }
+            : {}),
         };
       });
       return {
@@ -1147,7 +1217,9 @@ export function createCreditsService({
         || !sameDigest(confirmationDigest, snapshot.confirmationTokenDigest)) {
         throw creditsError('CONFIRMATION_INVALID', '로그인 확인 요청이 만료됐거나 올바르지 않아요');
       }
-      const apiKey = await keyForUser(snapshot.workosUserId, snapshot.email);
+      const apiKey = snapshot.purpose === 'account'
+        ? null
+        : await keyForUser(snapshot.workosUserId, snapshot.email);
       const authorizationCode = randomBytes(32).toString('base64url');
       const manualCode = randomManualCode();
       const authorizationExpiresAt = now() + AUTHORIZATION_TTL_MS;
@@ -1165,7 +1237,9 @@ export function createCreditsService({
           throw creditsError('CONFIRMATION_INVALID', '로그인 확인 요청이 만료됐거나 올바르지 않아요');
         }
         session.status = 'ready';
-        session.apiKeyCiphertext = encryptSecret(sessionSecret, apiKey);
+        if (session.purpose !== 'account') {
+          session.apiKeyCiphertext = encryptSecret(sessionSecret, apiKey);
+        }
         session.authorizationCodeDigest = digest(authorizationCode);
         session.manualCodeDigest = digest(manualCode);
         session.authorizationCodeCiphertext = encryptSecret(sessionSecret, authorizationCode);
@@ -1183,6 +1257,9 @@ export function createCreditsService({
       const result = await mutate((state) => {
         const session = assertLiveV2Session(state.sessions[String(deviceId ?? '')]);
         if (session.status === 'redeemed') return { status: 'redeemed' };
+        if (session.purpose === 'account' && session.status === 'transferred') {
+          return { status: 'redeemed' };
+        }
         if (session.status !== 'ready') return { status: session.status };
         if (session.manualAttempts >= MAX_MANUAL_ATTEMPTS) {
           throw creditsError('DEVICE_PROOF_LOCKED', '반환 코드를 너무 많이 틀렸어요. 로그인을 다시 시작해 주세요');
@@ -1202,6 +1279,39 @@ export function createCreditsService({
             }
           }
           return { proofError: { code: error.code, message: error.message } };
+        }
+        if (session.purpose === 'account') {
+          const records = pruneAccountSessions(state);
+          let accountToken;
+          let tokenDigest;
+          do {
+            accountToken = `${ACCOUNT_TOKEN_PREFIX}${randomBytes(32).toString('base64url')}`;
+            tokenDigest = accountTokenDigest(accountToken);
+          } while (Object.hasOwn(records, tokenDigest));
+          records[tokenDigest] = {
+            status: 'pending',
+            workosUserId: session.workosUserId,
+            email: session.email ?? null,
+            createdAt: now(),
+            pendingExpiresAt: now() + ACCOUNT_SESSION_PENDING_TTL_MS,
+            replaces: session.replaceAccountTokenDigest ?? null,
+          };
+          try {
+            assertStoreStateFits(state);
+          } catch (error) {
+            if (error?.code !== 'RAU_CREDITS_STORE_TOO_LARGE') throw error;
+            throw creditsError(
+              'RAU_CREDITS_CAPACITY_EXCEEDED',
+              '계정 세션을 안전하게 저장할 공간이 부족해요',
+            );
+          }
+          session.status = 'transferred';
+          session.issuedAccountDigest = tokenDigest;
+          return {
+            status: 'ready',
+            accountToken,
+            account: { email: session.email ?? null },
+          };
         }
         let apiKey;
         try {
@@ -1225,7 +1335,8 @@ export function createCreditsService({
       return mutate((state) => {
         const session = assertLiveV2Session(state.sessions[String(deviceId ?? '')]);
         if (session.status === 'redeemed') return { status: 'redeemed' };
-        if (session.status !== 'ready') {
+        const expectedStatus = session.purpose === 'account' ? 'transferred' : 'ready';
+        if (session.status !== expectedStatus) {
           throw creditsError('DEVICE_SESSION_INVALID', '완료되지 않은 로그인 세션이에요');
         }
         authorizationProof(session, input, now);
@@ -1238,8 +1349,103 @@ export function createCreditsService({
         delete session.authorizationCodeCiphertext;
         delete session.manualCodeDigest;
         delete session.manualCodeCiphertext;
+        delete session.issuedAccountDigest;
+        delete session.replaceAccountTokenDigest;
         return { status: 'redeemed' };
       });
+    },
+
+    async cancelDeviceSessionV2(deviceId, codeVerifier) {
+      return mutate((state) => {
+        const session = assertLiveV2Session(state.sessions[String(deviceId ?? '')]);
+        const verifier = String(codeVerifier ?? '');
+        if (verifier.length < 43 || verifier.length > 128
+          || !sameDigest(digest(verifier), session.codeChallenge)) {
+          throw creditsError('DEVICE_PROOF_INVALID', '로그인 증명을 확인할 수 없어요');
+        }
+        if (session.status === 'cancelled' || session.status === 'redeemed') {
+          return { status: session.status };
+        }
+        if (session.purpose === 'account' && typeof session.issuedAccountDigest === 'string') {
+          const record = accountSessionsIn(state)[session.issuedAccountDigest];
+          if (record?.status === 'pending') {
+            record.status = 'revoked';
+            record.revokedAt = now();
+            delete record.pendingExpiresAt;
+          }
+        }
+        session.status = 'cancelled';
+        session.cancelledAt = now();
+        delete session.confirmationTokenDigest;
+        delete session.confirmationTokenCiphertext;
+        delete session.authorizationCodeDigest;
+        delete session.authorizationCodeCiphertext;
+        delete session.manualCodeDigest;
+        delete session.manualCodeCiphertext;
+        delete session.issuedAccountDigest;
+        delete session.replaceAccountTokenDigest;
+        return { status: 'cancelled' };
+      });
+    },
+
+    async readAccountSession(token) {
+      const tokenDigest = accountTokenDigest(token);
+      return mutate((state) => {
+        const records = pruneAccountSessions(state);
+        return accountSnapshot(records[tokenDigest]);
+      });
+    },
+
+    async commitAccountSession(token) {
+      const tokenDigest = accountTokenDigest(token);
+      return mutate((state) => {
+        const records = pruneAccountSessions(state);
+        const record = records[tokenDigest];
+        if (!record || record.status === 'revoked') {
+          throw creditsError('ACCOUNT_SESSION_INVALID', '계정 세션을 확인할 수 없어요');
+        }
+        if (record.status === 'pending') {
+          record.status = 'active';
+          record.activatedAt = now();
+          delete record.pendingExpiresAt;
+          const previous = typeof record.replaces === 'string'
+            ? records[record.replaces]
+            : null;
+          if (previous && previous.status !== 'revoked') {
+            previous.status = 'revoked';
+            previous.revokedAt = now();
+            previous.replacedBy = tokenDigest;
+          }
+        }
+        return accountSnapshot(record);
+      });
+    },
+
+    async revokeAccountSession(token) {
+      const tokenDigest = accountTokenDigest(token);
+      return mutate((state) => {
+        const records = pruneAccountSessions(state);
+        const record = records[tokenDigest];
+        if (record && record.status !== 'revoked') {
+          record.status = 'revoked';
+          record.revokedAt = now();
+          delete record.pendingExpiresAt;
+        }
+        return { state: 'signed-out', signedIn: false, account: null };
+      });
+    },
+
+    async authorizeAccountSession(token) {
+      const tokenDigest = accountTokenDigest(token);
+      const records = accountSessionsIn(await store.load());
+      const record = records[tokenDigest];
+      if (!record || record.status !== 'active') {
+        throw creditsError('ACCOUNT_SESSION_UNAUTHORIZED', '계정 로그인이 필요해요');
+      }
+      return {
+        subject: validatedWorkosUserId(record.workosUserId),
+        email: validatedAccountEmail(record.email),
+      };
     },
 
     async sendMagicCode(email) {
@@ -1463,6 +1669,17 @@ function clientIp(req) {
   return req.socket?.remoteAddress ?? 'unknown';
 }
 
+function requestBearerToken(req, { optional = false } = {}) {
+  const authorization = req.headers.authorization;
+  if (authorization === undefined && optional) return null;
+  if (typeof authorization !== 'string'
+    || !boundedUtf8(authorization, MAX_ACCOUNT_TOKEN_BYTES + 16)
+    || !authorization.startsWith('Bearer ')) {
+    throw creditsError('ACCOUNT_SESSION_INVALID', '계정 세션을 확인할 수 없어요');
+  }
+  return authorization.slice('Bearer '.length);
+}
+
 function decodeRequestPathSegment(req, encoded) {
   try {
     return decodeURIComponent(encoded);
@@ -1475,6 +1692,8 @@ function decodeRequestPathSegment(req, encoded) {
 }
 
 function htmlErrorStatus(error) {
+  if (error?.code === 'ACCOUNT_SESSION_UNAUTHORIZED') return 401;
+  if (error?.code === 'ACCOUNT_SESSION_INVALID') return 401;
   if (error?.code === 'DEVICE_SESSION_INVALID' || error?.code === 'DEVICE_SESSION_EXPIRED') return 400;
   if (error?.code === 'RAU_ACCESS_INVALID' || error?.code === 'CLOUD_WORKER_UNAUTHORIZED') return 401;
   if (error?.code === 'RAU_PROXY_FORBIDDEN' || error?.code === 'RAU_MODEL_FORBIDDEN'
@@ -1670,6 +1889,28 @@ export function creditsRequestListener(service) {
         send(200, await service.revokeAccessToken(bearerToken(req), { deviceId: body.deviceId ?? null }));
         return;
       }
+      if (url.pathname === '/v2/account-session') {
+        if (!limiter.check(`account:${ip}`, 60, MINUTE)) {
+          req.resume?.();
+          send(429, { error: 'RATE_LIMITED', message: '요청이 너무 많아요. 잠시 후 다시 시도해 주세요' });
+          return;
+        }
+        const token = requestBearerToken(req);
+        if (req.method === 'GET') {
+          send(200, await service.readAccountSession(token));
+          return;
+        }
+        if (req.method === 'POST') {
+          req.resume?.();
+          send(200, await service.commitAccountSession(token));
+          return;
+        }
+        if (req.method === 'DELETE') {
+          req.resume?.();
+          send(200, await service.revokeAccountSession(token));
+          return;
+        }
+      }
       if (url.pathname.startsWith('/v1/device-sessions') && service.minDeviceProtocol >= 2) {
         send(426, {
           error: 'RAU_CLIENT_UPDATE_REQUIRED',
@@ -1711,7 +1952,13 @@ export function creditsRequestListener(service) {
           send(429, { error: 'RATE_LIMITED', message: '로그인 요청이 너무 많아요. 잠시 후 다시 시도해 주세요' });
           return;
         }
-        send(201, await service.createDeviceSessionV2(await readJson(req)));
+        const input = await readJson(req);
+        send(201, await service.createDeviceSessionV2({
+          ...input,
+          ...(input.purpose === 'account'
+            ? { replaceAccountToken: requestBearerToken(req, { optional: true }) }
+            : {}),
+        }));
         return;
       }
       const redeemV2 = url.pathname.match(/^\/v2\/device-sessions\/([^/]+)\/redeem$/);
@@ -1737,6 +1984,20 @@ export function creditsRequestListener(service) {
         send(200, await service.acknowledgeDeviceSessionV2(
           decodeRequestPathSegment(req, acknowledgeV2[1]),
           await readJson(req),
+        ));
+        return;
+      }
+      const cancelV2 = url.pathname.match(/^\/v2\/device-sessions\/([^/]+)\/cancel$/);
+      if (req.method === 'POST' && cancelV2) {
+        if (!limiter.check(`cancel-v2:${ip}`, 30, MINUTE)) {
+          req.resume?.();
+          send(429, { error: 'RATE_LIMITED', message: '요청이 너무 많아요. 잠시 후 다시 시도해 주세요' });
+          return;
+        }
+        const input = await readJson(req);
+        send(200, await service.cancelDeviceSessionV2(
+          decodeRequestPathSegment(req, cancelV2[1]),
+          input.codeVerifier,
         ));
         return;
       }

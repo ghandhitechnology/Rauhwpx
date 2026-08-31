@@ -383,6 +383,8 @@ export interface AgentSetupAuthStart {
   expiresAt?: string | null;
 }
 
+}
+
 /** Global Rauhwpx account. It is independent from whether the Rau provider is installed. */
 export interface RauAccountSnapshot {
   signedIn: boolean;
@@ -416,6 +418,35 @@ export interface RauAccountSnapshot {
 
 export interface RauAccountAuthStart {
   authUrl: string;
+}
+
+export type AccountSessionState = 'signed-out' | 'signed-in' | 'pending' | 'unknown';
+
+export interface AccountIdentity {
+  email: string | null;
+}
+
+/** Generic Rauhwpx account identity. It never contains the account bearer. */
+export interface AccountSessionStatus {
+  state: AccountSessionState;
+  signedIn: boolean;
+  account: AccountIdentity | null;
+  updatedAt: string;
+  authenticating: boolean;
+  authOwnedByThisSession?: boolean;
+  authRunId?: string;
+  authPhase?: string;
+  authUrl?: string;
+  pairingCode?: string;
+  expiresAt?: string;
+  error?: string;
+}
+
+export interface AccountLoginStart {
+  authRunId: string;
+  authUrl: string | null;
+  pairingCode: string | null;
+  expiresAt: string | null;
 }
 
 /** 요금제 — 한도 계산의 기준이 되므로 프로바이더별로 값이 다르다. */
@@ -768,6 +799,17 @@ export type SidebarEvent =
       totalBytes?: number;
     }
   | { type: 'agent-setup-error'; agent: AgentName | null; authRunId?: string; code: string; message: string }
+  | { type: 'account-status'; status: AccountSessionStatus }
+  | {
+      type: 'account-login-progress';
+      authRunId?: string;
+      state: 'authorizing';
+      authUrl?: string;
+      pairingCode?: string;
+      expiresAt?: string;
+      replayed?: boolean;
+    }
+  | { type: 'account-error'; authRunId?: string; code: string; message: string }
   | { type: 'usage-report'; usage: UsageSummary }
   | { type: 'pi-status'; status: PiStatus }
   | {

@@ -390,6 +390,7 @@ test('install runs npm with a prefix, reports progress and syncs assets', async 
   assert.match(settings.extensions[0], /rhwp-agent[/\\]pi[/\\]extension[/\\]rhwp\.ts$/);
   assert.match(settings.extensions[1], /rhwp-agent[/\\]pi[/\\]extension[/\\]subagents\.ts$/);
   assert.equal(settings.extensions[0], manager.extensionPath);
+  assert.equal(path.isAbsolute(settings.extensions[1]), true);
   assert.equal(settings.extensions[1], manager.subagentExtensionPath);
 
   await fs.stat(path.join(rootDir, 'sessions'));

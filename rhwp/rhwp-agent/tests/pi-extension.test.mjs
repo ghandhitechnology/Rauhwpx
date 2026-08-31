@@ -71,6 +71,8 @@ test('환경 기본값은 mcp-stdio 와 같은 계약을 따른다', () => {
   assert.equal(config.agentName, 'pi');
   assert.equal(config.agentRole, 'chat');
   assert.equal(config.copyLayoutJobId, null);
+  assert.equal(config.subagentId, null);
+  assert.equal(config.parentTaskId, null);
   assert.equal(config.workflow, 'direct');
   assert.equal(config.phase, 'implementing');
   assert.equal(config.toolProfile, 'direct');
@@ -135,6 +137,22 @@ test('허브 URL 은 토큰/프로필/에폭을 인코딩한다', () => {
     hubSocketUrl(worker),
     `ws://127.0.0.1:5175/mcp?token=worker-token&sessionId=window-worker&agent=rau&role=${encodeURIComponent(workerRole)}&workflow=direct&phase=implementing&workerJobId=11111111-1111-4111-8111-111111111111`,
   );
+
+  const child = configFor({
+    RHWP_AGENT_TOKEN: 'child-token',
+    RHWP_SESSION_ID: 'window-child',
+    RHWP_AGENT_NAME: 'rau',
+    RHWP_AGENT_ROLE: 'pi-subagent.550e8400-e29b-41d4-a716-446655440000.doc-researcher',
+    RHWP_PI_SUBAGENT_ID: '550e8400-e29b-41d4-a716-446655440000',
+    RHWP_PI_PARENT_TASK_ID: 'sa-1',
+    RHWP_TOOL_PROFILE: 'doc-researcher',
+    RHWP_PERMISSION_PROFILE: 'unrestricted',
+  });
+  assert.equal(child.subagentId, '550e8400-e29b-41d4-a716-446655440000');
+  assert.equal(child.parentTaskId, 'sa-1');
+  assert.match(hubToolDefinitionsUrl(child), /subagentId=550e8400-e29b-41d4-a716-446655440000/);
+  assert.match(hubSocketUrl(child), /subagentId=550e8400-e29b-41d4-a716-446655440000/);
+  assert.equal(encodeToolCallFrame(2, 'get_structure', {}, child).parentTaskId, 'sa-1');
 });
 
 test('도구 정의 HTTP 응답은 8 MiB 전에 거절된다', async (t) => {
@@ -437,6 +455,18 @@ test('계획 단계에서는 내장 bash/edit/write 를 막는다', async () => 
     { toolName: 'write', input: { path: 'a.txt' } }, implementing, ROOT,
   ),
     undefined);
+});
+
+test('doc-researcher 프로필은 direct 턴에서도 내장 쓰기 도구를 막는다', async () => {
+  const researcher = configFor({
+    RHWP_TOOL_PROFILE: 'doc-researcher',
+    RHWP_PERMISSION_PROFILE: 'unrestricted',
+  });
+  for (const toolName of PLANNING_BLOCKED_TOOLS) {
+    const result = await guardToolCall({ toolName, input: { path: 'a.txt' } }, researcher, ROOT);
+    assert.equal(result?.block, true, toolName);
+    assert.match(result?.reason ?? '', /Researcher role/);
+  }
 });
 
 test('safe 프로필은 캐논 경로를 도구에 넘기고 workspace 밖은 막는다', async (t) => {

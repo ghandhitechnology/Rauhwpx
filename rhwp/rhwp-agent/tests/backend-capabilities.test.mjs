@@ -541,7 +541,7 @@ test('parallel-work guidance is tuned to each provider surface', () => {
   assert.match(pi, /role=doc-editor/);
   assert.match(pi, /subagent_wait until every agent/);
   assert.match(pi, /Never call subagent_wait for an MCP-managed background job/);
-  assert.match(pi, /ONE apply_edits call/);
+  assert.match(pi, /ONE apply_edits call/, '배치가 pi 의 대체 병렬성이다');
   assert.equal(parallelWorkBriefFor('rau'), pi);
 
   const grok = parallelWorkBriefFor('grok');
