@@ -161,8 +161,15 @@ test('사이드바가 첫 실행 마법사를 설정 모달·보정 창에 붙�
   assert.match(setup, /보정 시작/);
   assert.match(setup, /모델을 연결하세요/);
   assert.match(setup, /말투를 맞출까요\?/);
-  assert.match(setup, /계정 연결은 선택 사항입니다/);
-  assert.match(setup, /Rau 에이전트 설치 여부는 별도로 선택합니다/);
+  assert.match(setup, /Rauhwpx 계정에 로그인하세요/);
+  assert.doesNotMatch(setup, /선택 사항입니다/);
+  assert.doesNotMatch(setup, /Rau 에이전트 설치 여부는 별도로 선택합니다/);
+  assert.doesNotMatch(setup, /나중에 설정에서도 로그인할 수 있습니다/);
+  assert.match(css, /\.rhwp-setup-account-state:empty\s*\{\s*display: none/);
+  assert.match(setup, /createPixelCloudArtwork/);
+  assert.match(setup, /rhwp-setup-cloud-art/);
+  assert.match(setup, /rhwp-setup-account-content/);
+  assert.doesNotMatch(setup, /rhwp-setup-account-mark/);
   assert.match(setup, /원고 10페이지를 올리면, 에이전트가 문장 규칙이 아니라 그 목소리로 씁니다/);
   assert.doesNotMatch(setup, /rhwp-setup-kicker/);
   assert.doesNotMatch(setup, /rhwp-setup-lead/);
@@ -175,6 +182,10 @@ test('사이드바가 첫 실행 마법사를 설정 모달·보정 창에 붙�
   assert.match(css, /\.rhwp-setup-card\[data-agent='rau'\]\[data-suggested='true'\]::before \{\s*content: none/);
   assert.match(css, /rhwp-setup-cal\[hidden\]/);
   assert.match(css, /prefers-reduced-motion: reduce/);
+  assert.match(css, /@keyframes rhwp-setup-cloud-float/);
+  assert.match(css, /\.rhwp-setup-account\[data-signed-in='true'\] \.rhwp-setup-cloud-main/);
+  assert.match(css, /\.rhwp-setup-account-content \{[\s\S]*?justify-content: center/);
+  assert.doesNotMatch(css, /\.rhwp-setup-cloud-art::before/);
   assert.match(css, /--setup-spring-snappy: linear\(/);
   assert.match(css, /@media \(min-width: 1440px\) and \(min-height: 820px\)/);
   assert.match(css, /width: min\(1480px, 100%\)/);

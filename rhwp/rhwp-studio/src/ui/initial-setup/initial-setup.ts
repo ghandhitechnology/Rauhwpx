@@ -36,6 +36,41 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
+function createPixelCloudArtwork(): HTMLElement {
+  const artwork = el('div', 'rhwp-setup-cloud-art');
+  artwork.setAttribute('aria-hidden', 'true');
+  artwork.innerHTML = `
+    <svg viewBox="0 0 240 160" focusable="false" shape-rendering="crispEdges">
+      <g class="rhwp-setup-cloud-stars">
+        <path class="rhwp-setup-cloud-star rhwp-setup-cloud-star-a" d="M34 31h4v8h8v4h-8v8h-4v-8h-8v-4h8z" />
+        <path class="rhwp-setup-cloud-star rhwp-setup-cloud-star-b" d="M195 43h3v6h6v3h-6v6h-3v-6h-6v-3h6z" />
+        <rect class="rhwp-setup-cloud-star rhwp-setup-cloud-star-c" x="55" y="105" width="5" height="5" />
+        <rect class="rhwp-setup-cloud-star rhwp-setup-cloud-star-d" x="205" y="91" width="4" height="4" />
+      </g>
+      <g class="rhwp-setup-cloud-streams">
+        <path d="M21 70h18v4H21zm8 11h22v4H29z" />
+        <path d="M192 70h27v4h-27zm8 11h17v4h-17z" />
+      </g>
+      <g class="rhwp-setup-cloud-shadow">
+        <rect x="68" y="133" width="104" height="4" />
+        <rect x="84" y="137" width="72" height="3" />
+      </g>
+      <g class="rhwp-setup-cloud-float">
+        <g class="rhwp-setup-cloud-outline">
+          <path d="M44 76h16V60h24V44h24V32h48v12h20v16h20v16h16v40h-16v12H60v-12H44z" />
+        </g>
+        <g class="rhwp-setup-cloud-body">
+          <path class="rhwp-setup-cloud-main" d="M52 80h16V64h24V48h24V40h32v8h20v16h20v16h16v28h-16v12H68v-12H52z" />
+          <path class="rhwp-setup-cloud-shade" d="M52 100h16v12h16v8h84v-8h20v-12h16v8h-16v12h-20v8H68v-8H52z" />
+          <path class="rhwp-setup-cloud-light" d="M92 56h24V44h32v8h-24v8H92zm-24 20h16V64h8v8H76v12h-8z" />
+          <path class="rhwp-setup-cloud-glint" d="M152 64h16v8h8v8h-8v-4h-16z" />
+        </g>
+      </g>
+    </svg>
+  `;
+  return artwork;
+}
+
 export interface InitialSetupDeps {
   openAgentSetup: (agent: AgentName) => void;
   beginAgentConnect?: (agent: AgentName) => void;
@@ -140,16 +175,15 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
 
   const accountPanel = el('div', 'rhwp-setup-account');
   accountPanel.hidden = true;
-  const accountMark = el('div', 'rhwp-setup-account-mark');
-  accountMark.setAttribute('aria-hidden', 'true');
-  accountMark.appendChild(createProviderIcon('rau'));
+  const accountArtwork = createPixelCloudArtwork();
+  const accountContent = el('div', 'rhwp-setup-account-content');
   const accountTitle = el('h2', 'rhwp-setup-account-title', 'Rauhwpx 계정');
   const accountCopy = el(
     'p',
     'rhwp-setup-account-copy',
-    '로그인하면 Raucloud를 하루 60분까지 사용하고, 계정당 $5 모델 크레딧을 받을 수 있습니다. Rau 에이전트 설치 여부는 별도로 선택합니다.',
+    '로그인하면 Raucloud를 하루 60분까지 사용하고, 계정당 $5 모델 크레딧을 받을 수 있습니다.',
   );
-  const accountState = el('p', 'rhwp-setup-account-state', '로그인하지 않아도 로컬 편집과 내 서버 Cloud를 사용할 수 있습니다.');
+  const accountState = el('p', 'rhwp-setup-account-state');
   accountState.setAttribute('role', 'status');
   accountState.setAttribute('aria-live', 'polite');
   const accountActions = el('div', 'rhwp-setup-account-actions');
@@ -158,7 +192,8 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
   const accountLogin = el('button', 'rhwp-setup-footer-btn rhwp-setup-primary', '계정으로 로그인');
   accountLogin.type = 'button';
   accountActions.append(accountSkip, accountLogin);
-  accountPanel.append(accountMark, accountTitle, accountCopy, accountState, accountActions);
+  accountContent.append(accountTitle, accountCopy, accountState, accountActions);
+  accountPanel.append(accountArtwork, accountContent);
 
   const calPanel = el('div', 'rhwp-setup-cal');
   calPanel.hidden = true;
@@ -221,6 +256,7 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
   function renderAccount(): void {
     const signedIn = account?.signedIn === true;
     accountPanel.dataset.signedIn = String(signedIn);
+    accountPanel.dataset.busy = String(accountBusy || accountAuthPending);
     accountLogin.disabled = accountBusy || accountAuthPending || !loginAccount;
     accountSkip.disabled = accountBusy;
     accountLogin.textContent = accountBusy || accountAuthPending
@@ -235,8 +271,8 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
     accountState.textContent = accountMessage || (signedIn
       ? `${account?.account?.email ?? '계정'}으로 로그인했습니다. Cloud 사용량은 설정에서 확인할 수 있습니다.`
       : loginAccount
-        ? '로그인은 선택 사항입니다. 나중에 설정에서도 로그인할 수 있습니다.'
-        : '이 환경에서는 계정 로그인을 열 수 없습니다. 나중에 데스크톱 설정에서 연결할 수 있습니다.');
+        ? ''
+        : '이 환경에서는 계정 로그인을 열 수 없습니다.');
   }
 
   async function refreshAccount(): Promise<void> {
@@ -268,7 +304,7 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
     title.textContent = providers
       ? '모델을 연결하세요'
       : nextStage === 'account'
-        ? '계정 연결은 선택 사항입니다'
+        ? 'Rauhwpx 계정에 로그인하세요'
         : '문체를 맞추세요';
     back.setAttribute('aria-label', nextStage === 'calibration'
       ? '계정 연결 단계로 돌아가기'
