@@ -2,6 +2,24 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 /**
+ * Write a Windows `.cmd` that cross-spawn will run as Node, not cmd.exe.
+ *
+ * Batch shims go through `cmd.exe /c`, which caps the command line at 8191
+ * characters. Pi's `--append-system-prompt` brief is ~5k characters and
+ * caret-escaping pushes that over the limit, so the fake provider never
+ * starts. A shebang `.cmd` makes cross-spawn spawn `node.exe` with an argv
+ * array, which is also the live PID Windows can taskkill.
+ */
+export function writeWindowsCliLauncher(binPath, fixturePath) {
+  const interpreter = process.execPath.replace(/\\/g, '/');
+  writeFileSync(
+    binPath,
+    `#!${interpreter}\nrequire(${JSON.stringify(fixturePath)});\n`,
+    { mode: 0o755 },
+  );
+}
+
+/**
  * Write a test CLI shim that Windows cmd.exe can actually execute.
  *
  * A `.cmd` file with `node -e "setInterval(() =^> {}, 1000)"` is a syntax
@@ -15,7 +33,7 @@ export function writeFakeCliBin(binDir, binName, fixtureSource) {
   const binPath = path.join(binDir, process.platform === 'win32' ? `${binName}.cmd` : binName);
   writeFileSync(fixturePath, fixtureSource);
   if (process.platform === 'win32') {
-    writeFileSync(binPath, `@echo off\r\n"${process.execPath}" "${fixturePath}" %*\r\n`);
+    writeWindowsCliLauncher(binPath, fixturePath);
   } else {
     writeFileSync(
       binPath,

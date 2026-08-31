@@ -154,8 +154,6 @@ async function startHub(t, {
   if (fakeCursor) {
     const binDir = path.join(workRoot, 'bin');
     mkdirSync(binDir, { recursive: true });
-    const cursorFixture = path.join(binDir, 'cursor-agent-fixture.cjs');
-    const cursorBin = path.join(binDir, process.platform === 'win32' ? 'cursor-agent.cmd' : 'cursor-agent');
     const init = {
       type: 'system', subtype: 'init',
       session_id: 'cursor-fallback-question', model: 'mock-cursor', permissionMode: 'default',
@@ -169,7 +167,7 @@ async function startHub(t, {
         smartModeApprovalOnly: false, skipApproval: false, serverIdentifier: '',
       } } },
     };
-    writeFileSync(cursorFixture, [
+    writeFakeCliBin(binDir, 'cursor-agent', [
       "const fs = require('node:fs');",
       "if (process.argv.includes('--version')) { console.log('2026.08.11-e2e'); process.exit(0); }",
       "if (process.argv.includes('status')) { console.log('Not logged in'); process.exit(1); }",
@@ -218,18 +216,6 @@ async function startHub(t, {
         : []),
       'setInterval(() => {}, 1000);',
     ].join('\n'));
-    if (process.platform === 'win32') {
-      writeFileSync(
-        cursorBin,
-        `@echo off\r\n"${process.execPath}" "${cursorFixture}" %*\r\n`,
-      );
-    } else {
-      writeFileSync(
-        cursorBin,
-        `#!/bin/sh\nexec "${process.execPath}" "${cursorFixture}" "$@"\n`,
-        { mode: 0o755 },
-      );
-    }
     testPath = `${binDir}${path.delimiter}${testPath}`;
   }
   const child = spawn(process.execPath, ['server.mjs'], {

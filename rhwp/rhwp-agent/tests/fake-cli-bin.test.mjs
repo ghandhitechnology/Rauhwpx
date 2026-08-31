@@ -1,21 +1,26 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { spawn as nodeSpawn } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { ALIVE_PI_FIXTURE_SOURCE, writeFakeCliBin } from './fake-cli-bin.mjs';
+import spawn from 'cross-spawn';
 
-function spawnFakeCli(binPath, args) {
-  if (process.platform !== 'win32') {
-    return spawn(binPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-  }
-  // Node cannot exec .cmd through CreateProcess; cmd.exe must interpret it.
-  const command = [`"${binPath}"`, ...args.map((arg) => `"${arg}"`)].join(' ');
-  return spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', command], {
-    windowsVerbatimArguments: true,
-    stdio: ['ignore', 'pipe', 'pipe'],
+import {
+  ALIVE_PI_FIXTURE_SOURCE,
+  writeFakeCliBin,
+  writeWindowsCliLauncher,
+} from './fake-cli-bin.mjs';
+
+function collectProcess(child) {
+  let stdout = '';
+  let stderr = '';
+  child.stdout?.on('data', (chunk) => { stdout += chunk; });
+  child.stderr?.on('data', (chunk) => { stderr += chunk; });
+  return new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('exit', (code) => resolve({ code, stdout, stderr }));
   });
 }
 
@@ -28,18 +33,37 @@ test('fake CLI fixtures stay valid JS and never embed cmd caret-arrow node -e', 
 
   assert.equal(fixture.includes('=^>'), false);
   assert.equal(wrapper.includes('node -e'), false);
-  assert.match(wrapper, process.platform === 'win32' ? /\.cmd|%\*/ : /exec /);
-  const checked = spawn(process.execPath, ['--check', fixturePath], { stdio: 'ignore' });
+  assert.match(wrapper, process.platform === 'win32' ? /^#!/ : /exec /);
+  const checked = nodeSpawn(process.execPath, ['--check', fixturePath], { stdio: 'ignore' });
   const checkCode = await new Promise((resolve) => checked.once('exit', resolve));
   assert.equal(checkCode, 0);
 
-  const child = spawnFakeCli(binPath, ['--version']);
-  let stdout = '';
-  child.stdout.on('data', (chunk) => { stdout += chunk; });
-  const code = await new Promise((resolve, reject) => {
-    child.once('error', reject);
-    child.once('exit', resolve);
-  });
-  assert.equal(code, 0, stdout);
+  const { code, stdout, stderr } = await collectProcess(
+    spawn(binPath, ['--version'], { stdio: ['ignore', 'pipe', 'pipe'] }),
+  );
+  assert.equal(code, 0, stderr || stdout);
+  assert.match(stdout.trim(), /^0\.0\.0-test$/);
+});
+
+test('Windows cmd launcher is a Node shebang shim that survives a cmd.exe-length argv', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-fake-cli-shebang-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const fixturePath = path.join(root, 'pi-fixture.cjs');
+  const binPath = path.join(root, 'pi.cmd');
+  writeFileSync(fixturePath, ALIVE_PI_FIXTURE_SOURCE);
+  writeWindowsCliLauncher(binPath, fixturePath);
+
+  const launcher = readFileSync(binPath, 'utf8');
+  assert.match(launcher, /^#!/);
+  assert.equal(launcher.includes('@echo off'), false);
+  assert.equal(launcher.includes('%*'), false);
+
+  const longArg = 'x'.repeat(9_000);
+  const { code, stdout, stderr } = await collectProcess(
+    nodeSpawn(process.execPath, [binPath, longArg, '--version'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }),
+  );
+  assert.equal(code, 0, stderr || stdout);
   assert.match(stdout.trim(), /^0\.0\.0-test$/);
 });
