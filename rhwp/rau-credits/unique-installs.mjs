@@ -1,6 +1,9 @@
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 
 import { createMemoryStore } from './store.mjs';
+
+/** Shared with the packaged desktop client. Railway may override via RAU_UNIQUE_INSTALL_PING_KEY. */
+export const DEFAULT_UNIQUE_INSTALL_PING_KEY = 'rau.unique-install.v1.desktop-first-launch';
 
 const INSTALL_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_APP_VERSION_BYTES = 32;
@@ -30,6 +33,24 @@ export function uniqueInstallDigest(installId) {
   return createHash('sha256').update(String(installId), 'utf8').digest('hex');
 }
 
+export function createUniqueInstallProof(ping, key = DEFAULT_UNIQUE_INSTALL_PING_KEY) {
+  return createHmac('sha256', String(key)).update(
+    `${ping.installId}\n${ping.appVersion}\n${ping.os}\n${ping.arch}`,
+    'utf8',
+  ).digest('hex');
+}
+
+function uniqueInstallProofMatches(proof, ping, key) {
+  const expected = createUniqueInstallProof(ping, key);
+  try {
+    const left = Buffer.from(String(proof), 'hex');
+    const right = Buffer.from(expected, 'hex');
+    return left.length === 32 && left.length === right.length && timingSafeEqual(left, right);
+  } catch {
+    return false;
+  }
+}
+
 export function isOfficialDesktopPlatform(os, arch) {
   return (os === 'darwin' && arch === 'arm64') || (os === 'win32' && arch === 'x64');
 }
@@ -43,7 +64,7 @@ export function countOfficialUniqueInstalls(state) {
   return count;
 }
 
-export function parseUniqueInstallPing(body) {
+export function parseUniqueInstallPing(body, pingKey = DEFAULT_UNIQUE_INSTALL_PING_KEY) {
   const installId = typeof body?.installId === 'string' ? body.installId.trim().toLowerCase() : '';
   if (!INSTALL_ID_RE.test(installId)) {
     throw uniqueInstallsError('UNIQUE_INSTALL_ID_INVALID', '설치 식별자가 올바르지 않아요');
@@ -60,12 +81,18 @@ export function parseUniqueInstallPing(body) {
   if (!boundedToken(arch, MAX_ARCH_BYTES) || !ALLOWED_ARCH.has(arch)) {
     throw uniqueInstallsError('UNIQUE_INSTALL_PAYLOAD_INVALID', '아키텍처 정보가 올바르지 않아요');
   }
-  return { installId, appVersion, os, arch };
+  const ping = { installId, appVersion, os, arch };
+  const proof = typeof body?.proof === 'string' ? body.proof.trim().toLowerCase() : '';
+  if (!uniqueInstallProofMatches(proof, ping, pingKey)) {
+    throw uniqueInstallsError('UNIQUE_INSTALL_PROOF_INVALID', '설치 확인 값이 올바르지 않아요');
+  }
+  return ping;
 }
 
 export function createUniqueInstallsService({
   store = createMemoryStore(emptyUniqueInstallsState()),
   now = Date.now,
+  pingKey = DEFAULT_UNIQUE_INSTALL_PING_KEY,
 } = {}) {
   let mutation = Promise.resolve();
 
@@ -81,7 +108,7 @@ export function createUniqueInstallsService({
   }
 
   async function record(body) {
-    const ping = parseUniqueInstallPing(body);
+    const ping = parseUniqueInstallPing(body, pingKey);
     return withLock(async () => {
       const state = await store.load();
       if (!state.installs || typeof state.installs !== 'object' || Array.isArray(state.installs)) {

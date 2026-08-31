@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
@@ -9,6 +9,15 @@ export const UNIQUE_INSTALLS_JSON_PATH = '/v1/unique-installs';
 export const UNIQUE_INSTALLS_PAGE_PATH = '/unique-installs';
 const INSTALL_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const REQUEST_TIMEOUT_MS = 8_000;
+/** Must match rhwp/rau-credits/unique-installs.mjs DEFAULT_UNIQUE_INSTALL_PING_KEY. */
+export const DEFAULT_UNIQUE_INSTALL_PING_KEY = 'rau.unique-install.v1.desktop-first-launch';
+
+export function createUniqueInstallProof(ping, key = DEFAULT_UNIQUE_INSTALL_PING_KEY) {
+  return createHmac('sha256', String(key)).update(
+    `${ping.installId}\n${ping.appVersion}\n${ping.os}\n${ping.arch}`,
+    'utf8',
+  ).digest('hex');
+}
 
 export function uniqueInstallStatePath(userDataDir) {
   return join(String(userDataDir), UNIQUE_INSTALL_FILE);
@@ -242,6 +251,12 @@ async function reportUniqueInstallInner({
           appVersion,
           os,
           arch,
+          proof: createUniqueInstallProof({
+            installId: state.installId,
+            appVersion,
+            os,
+            arch,
+          }),
         }),
       },
       timeoutMs,

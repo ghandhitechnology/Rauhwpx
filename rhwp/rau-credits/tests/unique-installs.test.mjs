@@ -15,16 +15,29 @@ import { creditsRequestListener, createCreditsService } from '../service.mjs';
 import { createFileStore, createMemoryStore } from '../store.mjs';
 import {
   countOfficialUniqueInstalls,
+  createUniqueInstallProof,
   createUniqueInstallsService,
   emptyUniqueInstallsState,
   isOfficialDesktopPlatform,
   uniqueInstallDigest,
 } from '../unique-installs.mjs';
+import { createUniqueInstallProof as desktopCreateUniqueInstallProof } from '../../../desktop/unique-install.mjs';
 
 const MAC_ID = '11111111-1111-4111-8111-111111111111';
 const WIN_ID = '22222222-2222-4222-8222-222222222222';
 const LINUX_ID = '33333333-3333-4333-8333-333333333333';
 const UPDATE_ID = '44444444-4444-4444-8444-444444444444';
+
+function signedPing(installId, extras = {}) {
+  const ping = {
+    installId,
+    appVersion: '1.1.0',
+    os: 'darwin',
+    arch: 'arm64',
+    ...extras,
+  };
+  return { ...ping, proof: createUniqueInstallProof(ping) };
+}
 
 function credits() {
   return createCreditsService({
@@ -71,54 +84,28 @@ test('official unique installs count only macOS arm64 and Windows x64', () => {
 
 test('the first official ping counts once and a second launch does not increment', async () => {
   const installs = uniqueInstalls();
-  const first = await installs.record({
-    installId: MAC_ID,
-    appVersion: '1.1.0',
-    os: 'darwin',
-    arch: 'arm64',
-  });
-  const second = await installs.record({
-    installId: MAC_ID,
-    appVersion: '1.1.1',
-    os: 'darwin',
-    arch: 'arm64',
-  });
+  const first = await installs.record(signedPing(MAC_ID));
+  const second = await installs.record(signedPing(MAC_ID, { appVersion: '1.1.1' }));
   assert.deepEqual(first, { uniqueInstalls: 1, created: true, official: true });
   assert.deepEqual(second, { uniqueInstalls: 1, created: false, official: true });
 });
 
 test('an auto-update restart with the same install id does not increment', async () => {
   const installs = uniqueInstalls();
-  await installs.record({
-    installId: UPDATE_ID,
-    appVersion: '1.1.0',
-    os: 'win32',
-    arch: 'x64',
-  });
-  const afterUpdate = await installs.record({
-    installId: UPDATE_ID,
+  await installs.record(signedPing(UPDATE_ID, { os: 'win32', arch: 'x64' }));
+  const afterUpdate = await installs.record(signedPing(UPDATE_ID, {
     appVersion: '1.2.0',
     os: 'win32',
     arch: 'x64',
-  });
+  }));
   assert.equal(afterUpdate.created, false);
   assert.equal(afterUpdate.uniqueInstalls, 1);
 });
 
 test('Linux may ping but is excluded from the citable unique-install total', async () => {
   const installs = uniqueInstalls();
-  const linux = await installs.record({
-    installId: LINUX_ID,
-    appVersion: '1.1.0',
-    os: 'linux',
-    arch: 'x64',
-  });
-  const windows = await installs.record({
-    installId: WIN_ID,
-    appVersion: '1.1.0',
-    os: 'win32',
-    arch: 'x64',
-  });
+  const linux = await installs.record(signedPing(LINUX_ID, { os: 'linux', arch: 'x64' }));
+  const windows = await installs.record(signedPing(WIN_ID, { os: 'win32', arch: 'x64' }));
   assert.equal(linux.official, false);
   assert.equal(linux.uniqueInstalls, 0);
   assert.equal(windows.uniqueInstalls, 1);
@@ -127,12 +114,7 @@ test('Linux may ping but is excluded from the citable unique-install total', asy
 test('stored records hash the install id and never keep IP or hostname', async () => {
   const store = createMemoryStore(emptyUniqueInstallsState());
   const installs = createUniqueInstallsService({ store });
-  await installs.record({
-    installId: MAC_ID,
-    appVersion: '1.1.0',
-    os: 'darwin',
-    arch: 'arm64',
-  });
+  await installs.record(signedPing(MAC_ID));
   const state = await store.load();
   const digest = uniqueInstallDigest(MAC_ID);
   assert.deepEqual(Object.keys(state.installs), [digest]);
@@ -140,6 +122,7 @@ test('stored records hash the install id and never keep IP or hostname', async (
   assert.equal(JSON.stringify(state).includes(MAC_ID), false);
   assert.equal(JSON.stringify(state).includes('hostname'), false);
   assert.equal(JSON.stringify(state).includes('127.0.0.1'), false);
+  assert.equal(JSON.stringify(state).includes('proof'), false);
   assert.deepEqual(state.installs[digest], {
     official: true,
     firstSeenAt: state.installs[digest].firstSeenAt,
@@ -161,12 +144,7 @@ test('HTTP GET is the running total and POST is idempotent per machine', async (
     const first = await fetch(`${server.origin}/v1/unique-installs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        installId: MAC_ID,
-        appVersion: '1.1.0',
-        os: 'darwin',
-        arch: 'arm64',
-      }),
+      body: JSON.stringify(signedPing(MAC_ID)),
     });
     assert.equal(first.status, 200);
     assert.deepEqual(await first.json(), { uniqueInstalls: 1, created: true, official: true });
@@ -174,12 +152,7 @@ test('HTTP GET is the running total and POST is idempotent per machine', async (
     const second = await fetch(`${server.origin}/v1/unique-installs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        installId: MAC_ID,
-        appVersion: '1.1.0',
-        os: 'darwin',
-        arch: 'arm64',
-      }),
+      body: JSON.stringify(signedPing(MAC_ID)),
     });
     assert.equal((await second.json()).uniqueInstalls, 1);
 
@@ -220,7 +193,7 @@ test('invalid pings fail closed without incrementing the total', async () => {
     const missing = await fetch(`${server.origin}/v1/unique-installs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ installId: 'not-a-uuid', appVersion: '1.1.0', os: 'darwin', arch: 'arm64' }),
+      body: JSON.stringify(signedPing('not-a-uuid')),
     });
     assert.equal(missing.status, 400);
     assert.equal((await missing.json()).error, 'UNIQUE_INSTALL_ID_INVALID');
@@ -237,12 +210,7 @@ test('unique-installs persist on a separate Railway volume file', async () => {
     const filePath = path.join(directory, 'unique-installs.json');
     const store = createFileStore(filePath, { emptyState: emptyUniqueInstallsState });
     const installs = createUniqueInstallsService({ store });
-    await installs.record({
-      installId: MAC_ID,
-      appVersion: '1.1.0',
-      os: 'darwin',
-      arch: 'arm64',
-    });
+    await installs.record(signedPing(MAC_ID));
     const saved = JSON.parse(await fs.readFile(filePath, 'utf8'));
     assert.equal(countOfficialUniqueInstalls(saved), 1);
     assert.equal(saved.users, undefined);
@@ -263,4 +231,45 @@ test('install digests are stable UUIDs hashed with SHA-256', () => {
     uniqueInstallDigest(randomUUID().toLowerCase()).length,
     64,
   );
+});
+
+test('POSTs without desktop proof are rejected and do not increment', async () => {
+  const unsigned = {
+    installId: MAC_ID,
+    appVersion: '1.1.0',
+    os: 'darwin',
+    arch: 'arm64',
+  };
+  const desktopProof = desktopCreateUniqueInstallProof(unsigned);
+  const serverProof = createUniqueInstallProof(unsigned);
+  assert.equal(desktopProof, serverProof);
+
+  const server = await listen(creditsRequestListener(credits(), { uniqueInstalls: uniqueInstalls() }));
+  try {
+    const missing = await fetch(`${server.origin}/v1/unique-installs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(unsigned),
+    });
+    assert.equal(missing.status, 400);
+    assert.equal((await missing.json()).error, 'UNIQUE_INSTALL_PROOF_INVALID');
+
+    const forged = await fetch(`${server.origin}/v1/unique-installs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...unsigned, proof: '00'.repeat(32) }),
+    });
+    assert.equal(forged.status, 400);
+    assert.equal((await forged.json()).error, 'UNIQUE_INSTALL_PROOF_INVALID');
+
+    const accepted = await fetch(`${server.origin}/v1/unique-installs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...unsigned, proof: desktopProof }),
+    });
+    assert.equal(accepted.status, 200);
+    assert.deepEqual(await accepted.json(), { uniqueInstalls: 1, created: true, official: true });
+  } finally {
+    await server.close();
+  }
 });

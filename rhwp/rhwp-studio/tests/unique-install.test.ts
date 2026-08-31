@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs';
 
 import {
   UNIQUE_INSTALL_FILE,
+  createUniqueInstallProof,
   reportUniqueInstall,
   shouldPingUniqueInstall,
   uniqueInstallsJsonUrl,
@@ -98,6 +99,12 @@ test('only packaged production launches ping, and they ping once per machine', a
       appVersion: '1.1.0',
       os: 'darwin',
       arch: 'arm64',
+      proof: createUniqueInstallProof({
+        installId: INSTALL_ID,
+        appVersion: '1.1.0',
+        os: 'darwin',
+        arch: 'arm64',
+      }),
     });
     const saved = JSON.parse(await readFile(path.join(userDataDir, UNIQUE_INSTALL_FILE), 'utf8'));
     assert.equal(saved.installId, INSTALL_ID);

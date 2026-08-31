@@ -7,11 +7,13 @@ import {
   assertCreditsEnv,
   resolveCreditsDbPath,
   resolveCreditsOrigin,
+  resolveUniqueInstallPingKey,
   resolveUniqueInstallsDbPath,
 } from './config.mjs';
 import { creditsRequestListener, createCreditsService } from './service.mjs';
 import { createFileStore } from './store.mjs';
 import {
+  DEFAULT_UNIQUE_INSTALL_PING_KEY,
   createUniqueInstallsService,
   emptyUniqueInstallsState,
 } from './unique-installs.mjs';
@@ -44,6 +46,8 @@ export function createCreditsHttpServer(options = {}) {
       emptyState: emptyUniqueInstallsState,
     }),
     now: options.now,
+    pingKey: options.pingKey
+      ?? (resolveUniqueInstallPingKey() || DEFAULT_UNIQUE_INSTALL_PING_KEY),
   });
   const listener = creditsRequestListener(service, { uniqueInstalls });
   const server = http.createServer((req, res) => {

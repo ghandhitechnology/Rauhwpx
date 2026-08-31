@@ -48,6 +48,13 @@ export function resolveUniqueInstallsDbPath(env = process.env) {
   return path.join(dataDir, 'unique-installs.json');
 }
 
+export function resolveUniqueInstallPingKey(env = process.env) {
+  const explicit = typeof env.RAU_UNIQUE_INSTALL_PING_KEY === 'string'
+    ? env.RAU_UNIQUE_INSTALL_PING_KEY.trim()
+    : '';
+  return explicit;
+}
+
 export function assertCreditsEnv(env = process.env) {
   const names = isRailway(env) ? REQUIRED_ON_RAILWAY : ['SESSION_SECRET'];
   const missing = names.filter((name) => !String(env[name] ?? '').trim());
