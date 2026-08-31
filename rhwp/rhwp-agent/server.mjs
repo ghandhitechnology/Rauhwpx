@@ -65,6 +65,7 @@ import {
   RAU_SECRET_ID,
 } from './pi-manager.mjs';
 import { createRauCreditsClient, storeRauApiKey } from './rau-credits-client.mjs';
+import { createAccountSession } from './account-session.mjs';
 import { AuthRunRegistry } from './auth-run-registry.mjs';
 import { createCliSetupManager } from './cli-setup-manager.mjs';
 import { createOpenRouter, creditBalanceEmpty } from './openrouter.mjs';
@@ -267,6 +268,10 @@ const rauManager = await createPiManager({
   skipLegacyKey: true,
 }).init();
 const rauCredits = createRauCreditsClient();
+const accountSession = createAccountSession({
+  secretStore,
+  creditsClient: rauCredits,
+});
 const authRuns = new AuthRunRegistry();
 let npmPrefixMutationQueue = Promise.resolve();
 function mutateSharedNpmPrefix(operation) {
@@ -869,6 +874,177 @@ async function broadcastFreshAgentSetupStatuses() {
   const statuses = await agentSetupStatuses();
   broadcastAgentSetupStatuses(statuses);
   return statuses;
+}
+
+async function accountStatusForOwner(ownerSessionId = null) {
+  const status = await accountSession.status();
+  return decorateAccountStatus(status, ownerSessionId);
+}
+
+function decorateAccountStatus(status, ownerSessionId = null) {
+  const auth = authRuns.status('account', ownerSessionId);
+  return {
+    ...status,
+    ...auth,
+    authenticating: auth.authenticating,
+  };
+}
+
+async function broadcastAccountStatus() {
+  const status = await accountSession.status();
+  for (const record of sessions.values()) {
+    sendJson(record.studioSocket, {
+      v: 1,
+      type: 'account-status',
+      status: decorateAccountStatus(status, record.sessionId),
+    });
+  }
+}
+
+function sendAccountRunFrame(run, frame) {
+  const owner = ownerRecordForAuthRun(run);
+  if (!owner) return;
+  sendJson(owner.studioSocket, { v: 1, authRunId: run.runId, ...frame });
+}
+
+function sendAccountRunError(run, error, fallback = 'ACCOUNT_LOGIN_FAILED') {
+  const owner = ownerRecordForAuthRun(run);
+  if (!owner) return;
+  sendJson(owner.studioSocket, {
+    v: 1,
+    type: 'account-error',
+    requestId: run.requestId,
+    authRunId: run.runId,
+    code: error?.code ?? fallback,
+    message: String(error?.message ?? error),
+  });
+}
+
+function beginAccountLogin(record, sock, requestId) {
+  const abort = new AbortController();
+  let rejectProof = null;
+  let authRun;
+  let credentialsCommitted = false;
+  const cancel = () => {
+    abort.abort();
+    rejectProof?.(agentAuthCancelled());
+    rejectProof = null;
+    if (authRun?.accountLoginId) void accountSession.cancelLogin(authRun.accountLoginId);
+  };
+  try {
+    authRun = authRuns.begin({
+      agent: 'account',
+      ownerSessionId: record.sessionId,
+      requestId,
+      method: 'oauth',
+      cancel,
+    });
+  } catch (error) {
+    replyToStudio(record, sock, {
+      v: 1,
+      type: 'account-error',
+      requestId,
+      code: error?.code ?? 'ACCOUNT_LOGIN_FAILED',
+      message: String(error?.message ?? error),
+    });
+    return;
+  }
+
+  const isLiveAuthRun = () => !abort.signal.aborted && authRuns.get('account') === authRun;
+  const commitAuthRun = () => {
+    if (credentialsCommitted) return;
+    if (!isLiveAuthRun() || !authRuns.finish(authRun)) throw agentAuthCancelled();
+    credentialsCommitted = true;
+    authRun.credentialsCommitted = true;
+  };
+  authRun.signal = abort.signal;
+  authRun.commitCredentials = commitAuthRun;
+
+  const progress = (details) => {
+    if (!isLiveAuthRun()) return;
+    const replayableUi = {
+      ...(details.authUrl ? { authUrl: details.authUrl } : {}),
+      ...(details.pairingCode ? { pairingCode: details.pairingCode } : {}),
+      ...(details.expiresAt ? { expiresAt: details.expiresAt } : {}),
+    };
+    authRuns.update(authRun, { phase: 'authorizing', replayableUi });
+    sendAccountRunFrame(authRun, {
+      type: 'account-login-progress',
+      state: 'authorizing',
+      ...replayableUi,
+    });
+  };
+
+  void (async () => {
+    const callbackState = crypto.randomBytes(24).toString('base64url');
+    const login = await accountSession.startLogin({
+      signal: abort.signal,
+      redirectUri: `http://127.0.0.1:${hubPort}/oauth/account/callback`,
+      callbackState,
+      returnMode: 'hybrid',
+      clientVersion: `hub-protocol-${PROTOCOL_VERSION}`,
+    });
+    if (!isLiveAuthRun()) throw agentAuthCancelled();
+    authRun.accountLoginId = login.loginId;
+    authRun.callbackState = callbackState;
+    const authDetails = {
+      authUrl: login.authUrl,
+      pairingCode: login.pairingCode,
+      expiresAt: login.expiresAt,
+    };
+    authRuns.update(authRun, { phase: 'authorizing', replayableUi: authDetails });
+    replyToStudio(record, sock, {
+      v: 1,
+      type: 'account-login-started',
+      requestId,
+      authRunId: authRun.runId,
+      ...authDetails,
+    });
+    progress(authDetails);
+
+    let proof = null;
+    while (!proof) {
+      const candidate = await new Promise((resolve, reject) => {
+        rejectProof = reject;
+        authRun.submitProof = (value) => {
+          rejectProof = null;
+          authRun.submitProof = null;
+          resolve(value);
+        };
+      });
+      if (!isLiveAuthRun()) throw agentAuthCancelled();
+      authRuns.update(authRun, { phase: 'redeeming' });
+      try {
+        await accountSession.completeLogin(login.loginId, candidate, {
+          signal: abort.signal,
+          onCommitted: commitAuthRun,
+        });
+        proof = candidate;
+      } catch (error) {
+        if (error?.code !== 'DEVICE_PROOF_INVALID') throw error;
+        if (!isLiveAuthRun()) throw agentAuthCancelled();
+        authRuns.update(authRun, { phase: 'authorizing' });
+        sendAccountRunError(authRun, error, 'DEVICE_PROOF_INVALID');
+        progress(authDetails);
+      }
+    }
+  })().then(
+    async () => {
+      authRuns.finish(authRun);
+      await broadcastAccountStatus().catch((error) => {
+        log(`account status refresh failed: ${error?.message ?? error}`);
+      });
+    },
+    async (error) => {
+      authRuns.finish(authRun);
+      if (!['AGENT_AUTH_CANCELLED', 'ACCOUNT_LOGIN_CANCELLED', 'RAU_LOGIN_CANCELLED'].includes(error?.code)) {
+        sendAccountRunError(authRun, error);
+      }
+      await broadcastAccountStatus().catch((statusError) => {
+        log(`account status refresh failed: ${statusError?.message ?? statusError}`);
+      });
+    },
+  );
 }
 
 function resolveModel(agent, requested) {
@@ -3337,6 +3513,99 @@ async function handleStudioMessage(record, sock, msg) {
         }));
       return;
     }
+    case 'account-status-request': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      void accountStatusForOwner(record.sessionId)
+        .then((status) => replyToStudio(record, sock, {
+          v: 1, type: 'account-status', requestId, status,
+        }))
+        .catch((error) => replyToStudio(record, sock, {
+          v: 1,
+          type: 'account-error',
+          requestId,
+          code: error?.code ?? 'ACCOUNT_STATUS_FAILED',
+          message: String(error?.message ?? error),
+        }));
+      return;
+    }
+    case 'account-login': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      beginAccountLogin(record, sock, requestId);
+      return;
+    }
+    case 'account-auth-code': {
+      let authRun;
+      let code;
+      try {
+        code = boundedAgentAuthCode(msg.code);
+        authRun = authRuns.requireOwned({
+          agent: 'account',
+          runId: msg.authRunId,
+          ownerSessionId: record.sessionId,
+        });
+      } catch (error) {
+        replyToStudio(record, sock, {
+          v: 1,
+          type: 'account-error',
+          requestId: msg.requestId ?? null,
+          code: error?.code ?? 'ACCOUNT_AUTH_CODE_INVALID',
+          message: String(error?.message ?? error),
+        });
+        return;
+      }
+      if (typeof authRun.submitProof !== 'function') {
+        sendAccountRunError(authRun, agentAuthCancelled('로그인 코드를 받을 준비가 되지 않았어요.'));
+        return;
+      }
+      authRun.submitProof({ kind: 'manual', code });
+      return;
+    }
+    case 'account-login-cancel': {
+      try {
+        authRuns.cancelOwned({
+          agent: 'account',
+          runId: msg.authRunId,
+          ownerSessionId: record.sessionId,
+          reason: 'user-cancelled',
+        });
+      } catch (error) {
+        replyToStudio(record, sock, {
+          v: 1,
+          type: 'account-error',
+          requestId: msg.requestId ?? null,
+          code: error?.code ?? 'ACCOUNT_CANCEL_FAILED',
+          message: String(error?.message ?? error),
+        });
+      }
+      return;
+    }
+    case 'account-logout': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      if (authRuns.get('account')) {
+        replyToStudio(record, sock, {
+          v: 1,
+          type: 'account-error',
+          requestId,
+          code: 'ACCOUNT_AUTH_BUSY',
+          message: '진행 중인 계정 로그인을 먼저 마쳐 주세요.',
+        });
+        return;
+      }
+      void accountSession.logout()
+        .then(async () => {
+          const status = await accountStatusForOwner(record.sessionId);
+          replyToStudio(record, sock, { v: 1, type: 'account-status', requestId, status });
+          await broadcastAccountStatus();
+        })
+        .catch((error) => replyToStudio(record, sock, {
+          v: 1,
+          type: 'account-error',
+          requestId,
+          code: error?.code ?? 'ACCOUNT_LOGOUT_FAILED',
+          message: String(error?.message ?? error),
+        }));
+      return;
+    }
     case 'agent-setup-status-request': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
       void agentSetupStatuses(record.sessionId)
@@ -5041,6 +5310,33 @@ const httpServer = http.createServer((req, res) => {
         if (await handleTemplateHttp(req, res, url)) return;
       }
     }
+    if (req.method === 'GET' && url.pathname === '/oauth/account/callback') {
+      const code = url.searchParams.get('code');
+      const state = url.searchParams.get('state');
+      const authRun = authRuns.get('account');
+      if (!authRun || !code || !state || !timingSafeTextEqual(state, authRun.callbackState ?? '')) {
+        res.writeHead(400, {
+          'content-type': 'text/plain; charset=utf-8',
+          'cache-control': 'no-store',
+          'x-content-type-options': 'nosniff',
+        });
+        res.end('Invalid or expired account login callback.');
+        return;
+      }
+      if (typeof authRun.submitProof !== 'function') {
+        res.writeHead(409, { 'cache-control': 'no-store' });
+        res.end();
+        return;
+      }
+      authRun.submitProof({ kind: 'loopback', code });
+      res.writeHead(204, {
+        'cache-control': 'no-store',
+        'referrer-policy': 'no-referrer',
+        'x-content-type-options': 'nosniff',
+      });
+      res.end();
+      return;
+    }
     if (req.method === 'GET' && url.pathname === '/oauth/rau/callback') {
       const code = url.searchParams.get('code');
       const state = url.searchParams.get('state');
@@ -5424,7 +5720,9 @@ httpServer.on('upgrade', (req, socket, head) => {
       for (const authRun of authRuns.forSession(record.sessionId)) {
         sendJson(ws, {
           v: 1,
-          type: 'agent-setup-progress',
+          type: authRun.agent === 'account'
+            ? 'account-login-progress'
+            : 'agent-setup-progress',
           state: 'authorizing',
           replayed: true,
           ...authRun,
@@ -5491,6 +5789,9 @@ httpServer.on('upgrade', (req, socket, head) => {
       void agentSetupStatuses(record.sessionId).then((statuses) => {
         replyToStudio(record, ws, { v: 1, type: 'agent-setup-status', statuses });
       });
+      void accountStatusForOwner(record.sessionId).then((status) => {
+        replyToStudio(record, ws, { v: 1, type: 'account-status', status });
+      }).catch((error) => log(`account status on connect failed: ${error?.message ?? error}`));
       sendJson(ws, { v: 1, type: 'writing-style-catalog', ...writingStyleCatalog(record) });
       sendJson(ws, { v: 1, type: 'templates-catalog', ...templateStore.list() });
       sendJson(ws, { v: 1, type: 'usage-report', usage: usageSnapshot() });

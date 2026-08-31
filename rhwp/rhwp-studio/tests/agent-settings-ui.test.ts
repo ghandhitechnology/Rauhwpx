@@ -24,6 +24,8 @@ const readSource = (relativePath: string) => readFileSync(
 ).replace(/\r\n/g, '\n');
 const source = readSource('../src/ui/agent-sidebar/index.ts');
 const settings = readSource('../src/ui/agent-sidebar/settings.ts');
+const bridgeSource = readSource('../src/agent/bridge.ts');
+const agentTypesSource = readSource('../src/agent/types.ts');
 const editingSettings = readSource('../src/ui/agent-sidebar/settings-editing.ts');
 const settingsCss = readSource('../src/ui/agent-sidebar/settings.css');
 const css = readSource('../src/ui/agent-sidebar/agent-sidebar.css');
@@ -234,6 +236,35 @@ test('연결 묶음은 허브 상태와 프로바이더 상태, 세 동작을 �
   assert.match(settings, /health\.version \?\? '설치됨'/);
   assert.match(settings, /health\.error \?\? '실행할 수 없어요'/);
   assert.match(settingsCss, /\.ag-settings-dot\[data-state='connected'\]/);
+});
+
+test('Rauhwpx 계정은 Cloud와 분리된 일반 브릿지와 설정 카드로 로그인한다', () => {
+  const accountTypes = agentTypesSource.slice(
+    agentTypesSource.indexOf('export type AccountSessionState'),
+    agentTypesSource.indexOf('/** 요금제', agentTypesSource.indexOf('export type AccountSessionState')),
+  );
+  const accountCard = settings.slice(
+    settings.indexOf('// ── Rauhwpx 계정'),
+    settings.indexOf('// ── 1. 연결'),
+  );
+
+  assert.match(accountTypes, /'signed-out' \| 'signed-in' \| 'pending' \| 'unknown'/);
+  assert.doesNotMatch(accountTypes, /cloud|quota|allowance/i);
+  assert.match(bridgeSource, /requestAccountStatus\(\): Promise<AccountSessionStatus \| null>/);
+  assert.match(bridgeSource, /loginAccount\(\): Promise<AccountLoginStart \| null>/);
+  assert.match(bridgeSource, /cancelAccountLogin\(authRunId: string\): void/);
+  assert.match(bridgeSource, /logoutAccount\(\): Promise<AccountSessionStatus \| null>/);
+  assert.match(bridgeSource, /function readAccountSessionStatus\([\s\S]+account: signedIn[\s\S]+email:/);
+  assert.match(accountCard, /createSection\('Rauhwpx 계정'\)/);
+  assert.match(accountCard, /'로그인'/);
+  assert.match(accountCard, /'로그인 취소'/);
+  assert.doesNotMatch(accountCard, /cloud|quota|allowance|크레딧|한도/i);
+  assert.match(settings, /connectionContent\.append\(accountSection\.root, connection\.root, usageSection\.root\)/);
+  assert.match(settings, /bridge\.requestAccountStatus\(\)/);
+  assert.match(settings, /bridge\.loginAccount\(\)/);
+  assert.match(settings, /bridge\.cancelAccountLogin\(accountAuthRunId\)/);
+  assert.match(settings, /bridge\.logoutAccount\(\)/);
+  assert.match(settings, /case 'account-status':[\s\S]+case 'account-login-progress':[\s\S]+case 'account-error':/);
 });
 
 test('각 프로바이더 설정은 별도 시작 화면 없이 설정 모달에서 끝난다', () => {
@@ -452,7 +483,7 @@ test('사이드바가 설정 탭에 이벤트를 흘려준다', () => {
   assert.match(settings, /case 'writing-style-status':\s*case 'writing-style-result':/);
   assert.match(settings, /case 'connection':\s*connectionState = ev\.state/);
   // 열 때 최신값을 다시 받는다.
-  assert.match(settings, /void refreshProviders\(false\);\s*void refreshAgentInstructions\(false\);\s*void refreshUsage\(\);/);
+  assert.match(settings, /void refreshProviders\(false\);\s*void refreshAccount\(\);\s*void refreshAgentInstructions\(false\);\s*void refreshUsage\(\);/);
   assert.match(source, /settingsPanel\.dispose\(\)/);
 });
 
