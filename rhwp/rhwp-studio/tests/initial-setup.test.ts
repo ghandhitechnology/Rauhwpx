@@ -257,7 +257,23 @@ test('Rau 카드가 generic account snapshot의 로그인 진행과 완료를 �
   assert.match(setup, /accountStatus\?\.signedIn === true[\s\S]*goNext\(\)/);
   assert.match(setup, /requestAccountStatus\(\)/);
   assert.match(css, /data-account-state='signed-in'[\s\S]*background: #b7c9ad/);
-  assert.doesNotMatch(setup, /Cloud|quota|allowance|크레딧|한도/);
+  assert.doesNotMatch(setup, /Raucloud|Railway|quota|allowance|크레딧|한도|60분|\$5/);
+});
+
+test('Rau 카드의 픽셀 구름은 상태·좁은 화면·reduced motion을 따른다', () => {
+  const setup = readSource('../src/ui/initial-setup/initial-setup.ts');
+  const css = readSource('../src/ui/initial-setup/initial-setup.css');
+
+  assert.match(setup, /function createPixelCloudArtwork\(\)/);
+  assert.match(setup, /<svg viewBox="0 0 240 160"/);
+  assert.match(setup, /agent === 'rau' \? createPixelCloudArtwork\(\) : null/);
+  assert.match(css, /\.rhwp-setup-pixel-cloud \{/);
+  assert.match(css, /image-rendering: pixelated/);
+  assert.match(css, /data-account-state='pending'[\s\S]*rhwp-setup-cloud-glint/);
+  assert.match(css, /data-account-state='signed-in'[\s\S]*fill: #edf6e8/);
+  assert.match(css, /@media \(max-width: 720px\)[\s\S]*\.rhwp-setup-pixel-cloud/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.rhwp-setup-cloud-float,[\s\S]*animation: none/);
+  assert.doesNotMatch(setup, /Raucloud|Railway|quota|allowance|60분|\$5/);
 });
 
 test('실패 경로의 건너뛰기는 보정 단계 없이 편집기로 끝낸다', () => {
