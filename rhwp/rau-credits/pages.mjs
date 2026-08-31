@@ -180,6 +180,12 @@ input::placeholder { color: #6d6e76; }
   font-weight: 600;
   text-decoration: none;
 }
+.hero-count {
+  margin: 18px 0 0;
+  color: var(--text);
+  font: 700 56px/1.05 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+  letter-spacing: -0.04em;
+}
 `.trim();
 
 function shell({ title, body }) {
@@ -305,6 +311,22 @@ ${callbackImage}
   <div class="pairing">${escapeHtml(pairingCode)}</div>
   <div class="return-code">${escapeHtml(manualCode)}</div>
   <p class="notice">이 코드는 2분 동안 한 번만 쓸 수 있습니다. 누구에게도 보내지 마세요.</p>
+</section>`,
+  });
+}
+
+export function renderUniqueInstallsPage({ uniqueInstalls }) {
+  const count = Number.isSafeInteger(uniqueInstalls) && uniqueInstalls >= 0 ? uniqueInstalls : 0;
+  return shell({
+    title: 'Rauhwpx 고유 설치',
+    body: `
+<section class="card">
+  <div class="hero"><span></span></div>
+  <h1>고유 데스크톱 설치</h1>
+  <p class="hero-count">${escapeHtml(count.toLocaleString('ko-KR'))}</p>
+  <p>공식 macOS arm64·Windows x64 앱을 설치한 뒤 그 기기에서 처음 연 횟수입니다. 자동 업데이트와 GitHub 다운로드 수는 넣지 않습니다.</p>
+  <p>데스크톱 앱이 보낸 첫 실행 보고이며 기기 증명(attestation)은 아닙니다. HMAC은 아무 서명 없는 요청을 거를 뿐, 패키지를 연 누구나 같은 서명을 만들 수 있습니다.</p>
+  <p>첫 실행 때 익명 설치 식별자, 앱 버전, OS, 아키텍처만 받습니다. 이름, 이메일, 호스트 이름, 문서 경로는 저장하지 않으며 IP는 신원으로 쓰지 않습니다.</p>
 </section>`,
   });
 }

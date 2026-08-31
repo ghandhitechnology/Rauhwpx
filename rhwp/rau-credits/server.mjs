@@ -7,9 +7,16 @@ import {
   assertCreditsEnv,
   resolveCreditsDbPath,
   resolveCreditsOrigin,
+  resolveUniqueInstallPingKey,
+  resolveUniqueInstallsDbPath,
 } from './config.mjs';
 import { creditsRequestListener, createCreditsService } from './service.mjs';
 import { createFileStore } from './store.mjs';
+import {
+  DEFAULT_UNIQUE_INSTALL_PING_KEY,
+  createUniqueInstallsService,
+  emptyUniqueInstallsState,
+} from './unique-installs.mjs';
 
 export function createCreditsHttpServer(options = {}) {
   const port = options.port ?? DEFAULT_PORT;
@@ -17,6 +24,7 @@ export function createCreditsHttpServer(options = {}) {
   const sessionSecret = options.sessionSecret ?? process.env.SESSION_SECRET;
   if (!sessionSecret) throw new Error('SESSION_SECRET is required');
   const dbPath = options.dbPath ?? resolveCreditsDbPath();
+  const uniqueInstallsDbPath = options.uniqueInstallsDbPath ?? resolveUniqueInstallsDbPath();
   const service = createCreditsService({
     origin,
     sessionSecret,
@@ -33,7 +41,15 @@ export function createCreditsHttpServer(options = {}) {
     minDeviceProtocol: options.minDeviceProtocol
       ?? Number(process.env.RAU_MIN_DEVICE_PROTOCOL ?? 1),
   });
-  const listener = creditsRequestListener(service);
+  const uniqueInstalls = createUniqueInstallsService({
+    store: options.uniqueInstallsStore ?? createFileStore(uniqueInstallsDbPath, {
+      emptyState: emptyUniqueInstallsState,
+    }),
+    now: options.now,
+    pingKey: options.pingKey
+      ?? (resolveUniqueInstallPingKey() || DEFAULT_UNIQUE_INSTALL_PING_KEY),
+  });
+  const listener = creditsRequestListener(service, { uniqueInstalls });
   const server = http.createServer((req, res) => {
     void Promise.resolve(listener(req, res)).catch(() => {
       if (!res.headersSent) {
@@ -53,7 +69,7 @@ export function createCreditsHttpServer(options = {}) {
       socket.destroy();
     }
   });
-  return { server, service, origin, dbPath };
+  return { server, service, uniqueInstalls, origin, dbPath, uniqueInstallsDbPath };
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));

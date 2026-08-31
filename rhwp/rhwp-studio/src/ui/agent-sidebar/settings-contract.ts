@@ -1,6 +1,11 @@
 import type { EditorScalarSettings } from '../../core/user-settings.ts';
 
-export type SettingsDestination = 'editing' | 'ai' | 'connections';
+export const SETTINGS_DESTINATIONS = ['editing', 'ai', 'connections', 'product'] as const;
+export type SettingsDestination = (typeof SETTINGS_DESTINATIONS)[number];
+
+export function isSettingsDestination(value: unknown): value is SettingsDestination {
+  return SETTINGS_DESTINATIONS.some((destination) => destination === value);
+}
 
 export interface EditorSettingsRuntime {
   /** 테마와 문서 보기 상태를 저장 없이 현재 창에 반영한다. */

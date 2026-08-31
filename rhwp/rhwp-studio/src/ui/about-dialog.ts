@@ -5,6 +5,11 @@
  * 사용된 외부 크레이트의 오픈소스 라이선스 목록도 표시한다.
  */
 import { ModalDialog } from './dialog';
+import {
+  formatUniqueInstallCount,
+  loadUniqueInstallSnapshot,
+  uniqueInstallPublicUrl,
+} from '../unique-installs';
 
 /**
  * 외부 크레이트 라이선스 정보.
@@ -33,6 +38,8 @@ const THIRD_PARTY_LICENSES = [
 ];
 
 export class AboutDialog extends ModalDialog {
+  private uniqueInstallsEl: HTMLElement | null = null;
+
   constructor() {
     super('제품 정보', 460);
   }
@@ -58,6 +65,12 @@ export class AboutDialog extends ModalDialog {
     version.className = 'about-version';
     version.textContent = `Version ${__APP_VERSION__}`;
     body.appendChild(version);
+
+    const uniqueInstalls = document.createElement('div');
+    uniqueInstalls.className = 'about-unique-installs';
+    uniqueInstalls.hidden = true;
+    this.uniqueInstallsEl = uniqueInstalls;
+    body.appendChild(uniqueInstalls);
 
     // 기술 스택
     const tech = document.createElement('div');
@@ -115,6 +128,7 @@ export class AboutDialog extends ModalDialog {
 
   override show(): void {
     super.show();
+    void this.loadUniqueInstalls();
     // footer를 "닫기" 버튼 하나로 교체
     const footer = this.dialog.querySelector('.dialog-footer');
     if (footer) {
@@ -125,5 +139,25 @@ export class AboutDialog extends ModalDialog {
       closeBtn.addEventListener('click', () => this.hide());
       footer.appendChild(closeBtn);
     }
+  }
+
+  private async loadUniqueInstalls(): Promise<void> {
+    const target = this.uniqueInstallsEl;
+    if (!target) return;
+    const snapshot = await loadUniqueInstallSnapshot();
+    const count = snapshot.uniqueInstalls;
+    if (count == null) {
+      target.hidden = true;
+      return;
+    }
+    target.hidden = false;
+    target.replaceChildren();
+    const value = document.createElement('div');
+    value.className = 'about-unique-installs-count';
+    value.textContent = `고유 설치 ${formatUniqueInstallCount(count)}`;
+    const note = document.createElement('div');
+    note.className = 'about-unique-installs-note';
+    note.textContent = `첫 실행 보고만 세며 업데이트와 기기 증명은 넣지 않습니다. ${uniqueInstallPublicUrl(snapshot)}`;
+    target.append(value, note);
   }
 }

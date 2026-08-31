@@ -230,6 +230,7 @@ test('desktop close and native-file IPC contracts stay sender-owned', () => {
     'desktop:document-cancel',
     'desktop:document-release',
     'desktop:close-response',
+    'desktop:get-unique-installs',
   ]) {
     assert.match(desktopMain, new RegExp(`ipcMain\\.handle\\('${channel}'`));
     assert.match(preload, new RegExp(channel));

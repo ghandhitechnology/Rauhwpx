@@ -88,7 +88,11 @@ import { AGENT_LABEL, createProviderIcon, PROVIDER_ORDER } from './providers.ts'
 import { createEffortSlider } from './effort-slider.ts';
 import { createSubagentFleet, isSpawnToolName } from './subagent-fleet.ts';
 import { createSettingsPanel } from './settings.ts';
-import type { EditorSettingsRuntime, SettingsDestination } from './settings-contract.ts';
+import {
+  isSettingsDestination,
+  type EditorSettingsRuntime,
+  type SettingsDestination,
+} from './settings-contract.ts';
 import { createWritingStyleCalibration } from './writing-style-calibration.ts';
 import { maybeStartInitialSetup, type InitialSetupUi } from '../initial-setup/initial-setup.ts';
 import { summarizePendingDiffs } from './pending-diff-summary.ts';
@@ -6503,11 +6507,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         }),
         eventBus.on('settings:open', (payload) => {
           const requested = (payload as { destination?: unknown } | undefined)?.destination;
-          const destination: SettingsDestination | undefined = requested === 'editing'
-            || requested === 'ai'
-            || requested === 'connections'
-            ? requested
-            : undefined;
+          const destination = isSettingsDestination(requested) ? requested : undefined;
           setCollapsed(false);
           setSettingsPanelOpen(true, destination);
         }),

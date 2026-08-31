@@ -54,6 +54,11 @@ interface NativeFileReadResult {
 export interface RhwpDesktopApi {
   ensureAgentHub?: () => Promise<{ started?: boolean; ready?: boolean } | boolean>;
   getSessionContext?: () => Promise<RendererSessionContext>;
+  getUniqueInstalls?: () => Promise<{
+    uniqueInstalls: number | null;
+    publicUrl?: string | null;
+    recorded?: boolean;
+  } | null>;
   getLaunchFiles?: () => Promise<NativeFileHandleDescriptor[]>;
   getLaunchGeneratedDocument?: () => Promise<{
     launchDocumentId: string;

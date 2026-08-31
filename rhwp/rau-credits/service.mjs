@@ -11,9 +11,14 @@ import {
   renderFailPage,
   renderLoginPage,
   renderReadyPage,
+  renderUniqueInstallsPage,
 } from './pages.mjs';
 import { createRateLimiter } from './rate-limit.mjs';
 import { assertStoreStateFits, createMemoryStore } from './store.mjs';
+import {
+  createUniqueInstallsService,
+  emptyUniqueInstallsState,
+} from './unique-installs.mjs';
 
 const SESSION_TTL_MS = 10 * 60 * 1000;
 const AUTHORIZATION_TTL_MS = 2 * 60 * 1000;
@@ -1463,6 +1468,7 @@ function htmlErrorStatus(error) {
   if (error?.code === 'DEVICE_SESSION_INVALID' || error?.code === 'DEVICE_SESSION_EXPIRED') return 400;
   if (error?.code === 'RATE_LIMITED' || error?.code === 'DEVICE_PROOF_LOCKED') return 429;
   if (error?.code === 'BODY_TOO_LARGE') return 413;
+  if (error?.code === 'UNIQUE_INSTALLS_CAPACITY_EXCEEDED') return 503;
   if (error?.code === 'ERR_INVALID_URL' || error?.code === 'REQUEST_TARGET_INVALID') return 400;
   if (error?.code === 'TRIAL_KEY_UNREADABLE') return 409;
   if (error?.code?.endsWith('_INVALID') || error?.code === 'DEVICE_PROOF_EXPIRED') return 400;
@@ -1483,7 +1489,11 @@ function responseSecurityHeaders(isHtml) {
   };
 }
 
-export function creditsRequestListener(service) {
+export function creditsRequestListener(service, {
+  uniqueInstalls = createUniqueInstallsService({
+    store: createMemoryStore(emptyUniqueInstallsState()),
+  }),
+} = {}) {
   const limiter = createRateLimiter();
   const MINUTE = 60 * 1000;
   const TEN_MINUTES = 10 * MINUTE;
@@ -1533,6 +1543,34 @@ export function creditsRequestListener(service) {
       }
       if (req.method === 'GET' && url.pathname === '/healthz') {
         send(200, { ok: true });
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/unique-installs') {
+        if (!limiter.check(`unique-install-page:${ip}`, 120, MINUTE)) {
+          throttled();
+          return;
+        }
+        const summary = await uniqueInstalls.summary();
+        send(200, renderUniqueInstallsPage(summary));
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/v1/unique-installs') {
+        if (!limiter.check(`unique-install-read:${ip}`, 120, MINUTE)) {
+          send(429, { error: 'RATE_LIMITED', message: '요청이 너무 많아요. 잠시 후 다시 시도해 주세요' });
+          return;
+        }
+        send(200, await uniqueInstalls.summary(), {
+          'Access-Control-Allow-Origin': '*',
+        });
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/v1/unique-installs') {
+        if (!limiter.check(`unique-install-write:${ip}`, 30, TEN_MINUTES)) {
+          req.resume?.();
+          send(429, { error: 'RATE_LIMITED', message: '요청이 너무 많아요. 잠시 후 다시 시도해 주세요' });
+          return;
+        }
+        send(200, await uniqueInstalls.record(await readJson(req)));
         return;
       }
       if (url.pathname === '/v2/account-session') {

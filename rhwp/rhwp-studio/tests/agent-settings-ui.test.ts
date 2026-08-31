@@ -139,8 +139,8 @@ test('설정 적용 버튼은 카드 없이 콘텐츠 하단에 머문다', () =
   assert.doesNotMatch(footerRule, /bottom:|z-index:|border:|border-radius:|box-shadow:|backdrop-filter:/);
 });
 
-test('설정은 편집·AI·연결 목적지와 업무별 묶음을 갖는다', () => {
-  for (const title of ['연결', '기본 설정', '글쓰기 보정', '템플릿', '사용량']) {
+test('설정은 편집·AI·연결·제품 목적지와 업무별 묶음을 갖는다', () => {
+  for (const title of ['연결', '기본 설정', '글쓰기 보정', '템플릿', '사용량', '고유 설치']) {
     assert.match(settings, new RegExp(`createSection\\('${title}'\\)`));
   }
   for (const title of ['화면과 보기', '글꼴', '저장과 파일']) {
@@ -149,7 +149,10 @@ test('설정은 편집·AI·연결 목적지와 업무별 묶음을 갖는다', 
   assert.match(settings, /\{ id: 'editing', label: '편집' \}/);
   assert.match(settings, /\{ id: 'ai', label: 'AI 설정' \}/);
   assert.match(settings, /\{ id: 'connections', label: 'AI 연결' \}/);
+  assert.match(settings, /\{ id: 'product', label: '제품' \}/);
+  assert.match(settings, /if \(destination === 'product'\) void refreshUniqueInstalls\(\)/);
   assert.match(settingsCss, /\.ag-settings-section-title/);
+  assert.match(settingsCss, /\.ag-unique-install-count/);
 });
 
 test('복구 간격은 복구용 자동 저장을 켰 때만 보인다', () => {
