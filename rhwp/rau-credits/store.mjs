@@ -75,6 +75,7 @@ export async function syncDirectory(directory, {
 
 export function createFileStore(filePath, {
   syncDirectoryImpl = syncDirectory,
+  emptyState: createEmpty = emptyState,
 } = {}) {
   let chain = Promise.resolve();
 
@@ -100,7 +101,7 @@ export function createFileStore(filePath, {
       }
       return JSON.parse(bytes.toString('utf8'));
     } catch (error) {
-      if (error?.code === 'ENOENT') return emptyState();
+      if (error?.code === 'ENOENT') return createEmpty();
       throw error;
     } finally {
       await handle?.close().catch(() => {});

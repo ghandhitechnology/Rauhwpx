@@ -37,6 +37,17 @@ export function resolveCreditsDbPath(env = process.env) {
   return path.join(dataDir, 'rau-credits.json');
 }
 
+/** Distinct from credits JSON so unique-install growth cannot crowd out keys. */
+export function resolveUniqueInstallsDbPath(env = process.env) {
+  if (typeof env.RAU_UNIQUE_INSTALLS_DB === 'string' && env.RAU_UNIQUE_INSTALLS_DB.trim()) {
+    return env.RAU_UNIQUE_INSTALLS_DB.trim();
+  }
+  const dataDir = typeof env.RAU_CREDITS_DATA === 'string' && env.RAU_CREDITS_DATA.trim()
+    ? env.RAU_CREDITS_DATA.trim()
+    : (isRailway(env) ? RAILWAY_DATA_DIR : '.');
+  return path.join(dataDir, 'unique-installs.json');
+}
+
 export function assertCreditsEnv(env = process.env) {
   const names = isRailway(env) ? REQUIRED_ON_RAILWAY : ['SESSION_SECRET'];
   const missing = names.filter((name) => !String(env[name] ?? '').trim());

@@ -457,6 +457,23 @@
   margin-bottom: 12px;
 }
 
+.about-unique-installs {
+  margin: -4px 0 12px;
+}
+
+.about-unique-installs-count {
+  font-size: var(--font-size-md);
+  color: var(--color-text);
+}
+
+.about-unique-installs-note {
+  margin-top: 4px;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  line-height: 1.45;
+  word-break: break-all;
+}
+
 .about-tech {
   font-size: var(--font-size-sm);
   color: var(--color-text-hint);

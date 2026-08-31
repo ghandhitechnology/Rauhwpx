@@ -46,6 +46,7 @@ jobs:
         run: >-
           node --test
           scripts/ci-workflow-contracts.test.mjs
+          scripts/github-installer-counts.test.mjs
           scripts/verify-desktop-package.test.mjs
           scripts/verify-release-artifacts.test.mjs
 

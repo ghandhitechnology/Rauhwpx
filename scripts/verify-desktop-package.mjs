@@ -47,6 +47,7 @@ for (const path of forbidden) {
 const archivedFiles = listPackage(archive).map(normalizeArchivePath);
 const requiredArchiveFiles = [
   '/desktop/main.mjs',
+  '/desktop/unique-install.mjs',
   '/rhwp/rhwp-studio/dist/index.html',
 ];
 for (const path of requiredArchiveFiles) {

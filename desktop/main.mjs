@@ -67,6 +67,8 @@ import {
   removeStaleLaunchDirectories,
   writeLaunchOwnerMetadata,
 } from './runtime-cleanup.mjs';
+import { reportUniqueInstall, uniqueInstallsPublicUrl } from './unique-install.mjs';
+import { rauCreditsUrl } from '../rhwp/rhwp-agent/rau-credits-client.mjs';
 
 const { autoUpdater } = electronUpdater;
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
@@ -399,6 +401,23 @@ const sessions = new SessionManager({
 const documentLeases = new DocumentLeaseManager();
 const nativeFiles = new NativeFileHandleRegistry();
 const nativeBookmarkFile = join(app.getPath('userData'), 'native-document-bookmarks.json');
+let uniqueInstallSnapshot = {
+  uniqueInstalls: null,
+  publicUrl: uniqueInstallsPublicUrl(),
+  recorded: false,
+};
+
+async function syncUniqueInstallMetric() {
+  uniqueInstallSnapshot = await reportUniqueInstall({
+    userDataDir: app.getPath('userData'),
+    packaged: app.isPackaged,
+    devUrl,
+    appVersion: app.getVersion(),
+    os: process.platform,
+    arch: process.arch,
+    baseUrl: rauCreditsUrl(),
+  });
+}
 const nativeBookmarkWriter = new SerializedStateWriter({
   write: (snapshot) => writeNativeFileAtomically(nativeBookmarkFile, Buffer.from(snapshot, 'utf8')),
   onError: (error) => console.warn('[rauhwpx] native bookmark persist failed:', error),
@@ -743,6 +762,10 @@ function showLaunchError(error) {
   dialog.showErrorBox('Rauhwpx could not open', error instanceof Error ? error.message : String(error));
 }
 
+ipcMain.handle('desktop:get-unique-installs', (event) => {
+  sessionForEvent(event);
+  return uniqueInstallSnapshot;
+});
 ipcMain.handle('desktop:get-session-context', (event) => {
   sessionForEvent(event);
   return sessions.contextForSender(event.sender);
@@ -1077,6 +1100,9 @@ if (!hasSingleInstanceLock) {
       app.quit();
       return;
     }
+    void syncUniqueInstallMetric().catch((error) => {
+      console.warn('[rauhwpx] unique install ping failed:', error);
+    });
     if (app.isPackaged && process.platform === 'darwin') {
       setTimeout(() => {
         void autoUpdater.checkForUpdates().catch(() => {});

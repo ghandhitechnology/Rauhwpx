@@ -76,6 +76,7 @@ test('제품 정보는 Rauhwpx이며 새 문서 기본 형식이 HWPX임을 밝�
   const about = source('src/ui/about-dialog.ts');
   assert.match(about, /textContent = 'Rauhwpx'/);
   assert.match(about, /새 문서와 내보내기 기본 형식은 HWPX/);
+  assert.match(about, /고유 설치/);
   assert.doesNotMatch(about, /HWP\/HWPX Compatible Module for Rust/);
   assert.doesNotMatch(about, /HWP 오픈소스 편집/);
 });

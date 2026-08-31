@@ -77,6 +77,7 @@ jobs:
         shell: bash
         run: |
           node --check desktop/main.mjs
+          node --check desktop/unique-install.mjs
           node --check desktop/agent-hub.mjs
           node --check desktop/session-manager.mjs
           node --check rhwp/rhwp-agent/server.mjs
