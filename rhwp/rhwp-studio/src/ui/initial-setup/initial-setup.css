@@ -168,8 +168,10 @@
 }
 
 .rhwp-setup-card {
+  position: relative;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
   min-height: 318px;
   padding: 22px 18px 18px;
   border: 1px solid var(--setup-line);
@@ -242,6 +244,112 @@
 .rhwp-setup-card[data-agent='rau'][data-account-state='signed-in'] .rhwp-setup-card-action {
   background: #b7c9ad;
   color: #15161a;
+}
+
+.rhwp-setup-pixel-cloud {
+  position: absolute;
+  z-index: 0;
+  top: 8px;
+  right: 8px;
+  width: clamp(132px, 11vw, 168px);
+  aspect-ratio: 3 / 2;
+  pointer-events: none;
+  opacity: 0.92;
+}
+
+.rhwp-setup-pixel-cloud svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  image-rendering: pixelated;
+}
+
+.rhwp-setup-cloud-float,
+.rhwp-setup-cloud-shadow,
+.rhwp-setup-cloud-streams,
+.rhwp-setup-cloud-star,
+.rhwp-setup-cloud-glint {
+  transform-box: fill-box;
+  transform-origin: center;
+  will-change: transform, opacity;
+}
+
+.rhwp-setup-cloud-float {
+  animation: rhwp-setup-cloud-float 3.4s steps(8, end) infinite;
+}
+
+.rhwp-setup-cloud-outline {
+  fill: #56627f;
+}
+
+.rhwp-setup-cloud-main {
+  fill: #e5ebfa;
+  transition: fill 420ms var(--setup-spring-smooth);
+}
+
+.rhwp-setup-cloud-shade {
+  fill: #a8b6d5;
+  transition: fill 420ms var(--setup-spring-smooth);
+}
+
+.rhwp-setup-cloud-light {
+  fill: #ffffff;
+}
+
+.rhwp-setup-cloud-glint,
+.rhwp-setup-cloud-star {
+  fill: #a9c1ff;
+}
+
+.rhwp-setup-cloud-shadow {
+  fill: #080a10;
+  opacity: 0.62;
+  animation: rhwp-setup-cloud-shadow 3.4s steps(8, end) infinite;
+}
+
+.rhwp-setup-cloud-streams {
+  fill: #667aa9;
+  opacity: 0.5;
+  animation: rhwp-setup-cloud-stream 2.8s steps(7, end) infinite;
+}
+
+.rhwp-setup-cloud-star {
+  animation: rhwp-setup-cloud-twinkle 2.2s steps(1, end) infinite;
+}
+
+.rhwp-setup-cloud-star-b { animation-delay: -0.7s; }
+.rhwp-setup-cloud-star-c { animation-delay: -1.3s; }
+.rhwp-setup-cloud-star-d { animation-delay: -1.8s; }
+
+.rhwp-setup-card[data-agent='rau'][data-account-state='pending'] .rhwp-setup-cloud-glint {
+  animation: rhwp-setup-cloud-glint 1.1s steps(4, end) infinite;
+}
+
+.rhwp-setup-card[data-agent='rau'][data-account-state='pending'] .rhwp-setup-cloud-streams {
+  animation-duration: 1.4s;
+}
+
+.rhwp-setup-card[data-agent='rau'][data-account-state='signed-in'] .rhwp-setup-cloud-main {
+  fill: #edf6e8;
+}
+
+.rhwp-setup-card[data-agent='rau'][data-account-state='signed-in'] .rhwp-setup-cloud-shade {
+  fill: #a9c4a4;
+}
+
+.rhwp-setup-card[data-agent='rau'][data-account-state='signed-in'] .rhwp-setup-cloud-star,
+.rhwp-setup-card[data-agent='rau'][data-account-state='signed-in'] .rhwp-setup-cloud-glint {
+  fill: #c8e5b8;
+}
+
+.rhwp-setup-card[data-agent='rau'] > :not(.rhwp-setup-pixel-cloud) {
+  position: relative;
+  z-index: 1;
+}
+
+.rhwp-setup-card[data-agent='rau'] .rhwp-setup-card-models {
+  max-width: 56%;
 }
 
 .rhwp-setup-card-logo {
@@ -588,6 +696,32 @@
   }
 }
 
+@keyframes rhwp-setup-cloud-float {
+  0%, 100% { transform: translateY(0); }
+  45%, 55% { transform: translateY(-7px); }
+}
+
+@keyframes rhwp-setup-cloud-shadow {
+  0%, 100% { opacity: 0.62; transform: scaleX(1); }
+  45%, 55% { opacity: 0.34; transform: scaleX(0.78); }
+}
+
+@keyframes rhwp-setup-cloud-stream {
+  0%, 100% { opacity: 0.18; transform: translateX(-5px); }
+  50% { opacity: 0.56; transform: translateX(5px); }
+}
+
+@keyframes rhwp-setup-cloud-twinkle {
+  0%, 44%, 100% { opacity: 0.2; }
+  45%, 72% { opacity: 1; }
+  73% { opacity: 0.46; }
+}
+
+@keyframes rhwp-setup-cloud-glint {
+  0%, 100% { opacity: 0.28; transform: translateX(-8px); }
+  50% { opacity: 1; transform: translateX(3px); }
+}
+
 @media (min-width: 1440px) and (min-height: 820px) {
   .rhwp-setup-overlay {
     padding: clamp(48px, 6vh, 72px) clamp(64px, 5vw, 96px);
@@ -724,6 +858,17 @@
     min-height: 0;
   }
 
+  .rhwp-setup-pixel-cloud {
+    top: 2px;
+    right: 2px;
+    width: 124px;
+    opacity: 0.78;
+  }
+
+  .rhwp-setup-card[data-agent='rau'] .rhwp-setup-card-models {
+    max-width: calc(100% - 112px);
+  }
+
   .rhwp-setup-cal {
     margin-top: 0;
     padding: 30px 24px;
@@ -748,6 +893,17 @@
     transition-property: opacity, background-color, color;
     transform: none;
     filter: none;
+  }
+
+  .rhwp-setup-cloud-float,
+  .rhwp-setup-cloud-shadow,
+  .rhwp-setup-cloud-streams,
+  .rhwp-setup-cloud-star,
+  .rhwp-setup-cloud-glint {
+    animation: none;
+    transition: none;
+    transform: none;
+    will-change: auto;
   }
 }
 

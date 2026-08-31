@@ -47,6 +47,37 @@ function el<K extends keyof HTMLElementTagNameMap>(
   return node;
 }
 
+function createPixelCloudArtwork(): HTMLElement {
+  const artwork = el('div', 'rhwp-setup-pixel-cloud');
+  artwork.setAttribute('aria-hidden', 'true');
+  artwork.innerHTML = `
+    <svg viewBox="0 0 240 160" focusable="false" shape-rendering="crispEdges">
+      <g class="rhwp-setup-cloud-stars">
+        <path class="rhwp-setup-cloud-star rhwp-setup-cloud-star-a" d="M34 31h4v8h8v4h-8v8h-4v-8h-8v-4h8z" />
+        <path class="rhwp-setup-cloud-star rhwp-setup-cloud-star-b" d="M195 43h3v6h6v3h-6v6h-3v-6h-6v-3h6z" />
+        <rect class="rhwp-setup-cloud-star rhwp-setup-cloud-star-c" x="55" y="105" width="5" height="5" />
+        <rect class="rhwp-setup-cloud-star rhwp-setup-cloud-star-d" x="205" y="91" width="4" height="4" />
+      </g>
+      <g class="rhwp-setup-cloud-streams">
+        <path d="M21 70h18v4H21zm8 11h22v4H29z" />
+        <path d="M192 70h27v4h-27zm8 11h17v4h-17z" />
+      </g>
+      <g class="rhwp-setup-cloud-shadow">
+        <rect x="68" y="133" width="104" height="4" />
+        <rect x="84" y="137" width="72" height="3" />
+      </g>
+      <g class="rhwp-setup-cloud-float">
+        <path class="rhwp-setup-cloud-outline" d="M44 76h16V60h24V44h24V32h48v12h20v16h20v16h16v40h-16v12H60v-12H44z" />
+        <path class="rhwp-setup-cloud-main" d="M52 80h16V64h24V48h24V40h32v8h20v16h20v16h16v28h-16v12H68v-12H52z" />
+        <path class="rhwp-setup-cloud-shade" d="M52 100h16v12h16v8h84v-8h20v-12h16v8h-16v12h-20v8H68v-8H52z" />
+        <path class="rhwp-setup-cloud-light" d="M92 56h24V44h32v8h-24v8H92zm-24 20h16V64h8v8H76v12h-8z" />
+        <path class="rhwp-setup-cloud-glint" d="M152 64h16v8h8v8h-8v-4h-16z" />
+      </g>
+    </svg>
+  `;
+  return artwork;
+}
+
 export interface InitialSetupDeps {
   openAgentSetup: (agent: AgentName) => void;
   beginAgentConnect?: (agent: AgentName) => void;
@@ -131,6 +162,7 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
     if (isByokAgent(agent)) card.dataset.byok = 'true';
     const logo = el('div', 'rhwp-setup-card-logo');
     logo.appendChild(createProviderIcon(agent));
+    const artwork = agent === 'rau' ? createPixelCloudArtwork() : null;
     const name = el('h2', 'rhwp-setup-card-name', AGENT_LABEL[agent]);
     const vendor = el('p', 'rhwp-setup-card-vendor', PROVIDER_VENDOR[agent]);
     const models = el('ul', 'rhwp-setup-card-models');
@@ -146,7 +178,9 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
       }
       (beginAgentConnect ?? openAgentSetup)(agent);
     });
-    card.append(logo, name, vendor, models, action);
+    card.append(logo);
+    if (artwork) card.append(artwork);
+    card.append(name, vendor, models, action);
     grid.appendChild(card);
     cards.set(agent, { root: card, action });
   }
