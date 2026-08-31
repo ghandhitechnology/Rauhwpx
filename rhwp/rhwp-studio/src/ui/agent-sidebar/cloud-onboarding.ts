@@ -152,7 +152,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
   }
 
   function setupProgressText(startedAt: number): string {
-    return `${raucloudSetupElapsed(startedAt)}, 초기 설정에서는 최대 ${RAUCLOUD_SETUP_WAIT_MINUTES}분 걸릴 수 있습니다.`;
+    return raucloudSetupElapsed(startedAt);
   }
 
   function updateSetupProgress(): void {
@@ -690,7 +690,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     } else if (state.kind === 'sandbox-provisioning') {
       title.textContent = 'Raucloud 준비 중';
       body.append(
-        description('샌드박스를 만들고 이 기기를 연결하고 있습니다. 서버 생성과 첫 시작에는 몇 분이 걸릴 수 있습니다.'),
+        description(`샌드박스를 만들고 이 기기에 연결하고 있습니다. 서버 생성과 첫 시작에는 최대 ${RAUCLOUD_SETUP_WAIT_MINUTES}분이 걸릴 수 있습니다.`),
         el('div', 'ag-cloud-setup-indeterminate'),
         el('p', 'ag-cloud-setup-wait', setupProgressText(state.startedAt)),
       );

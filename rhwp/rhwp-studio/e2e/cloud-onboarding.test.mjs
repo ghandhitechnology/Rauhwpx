@@ -824,7 +824,8 @@ try {
   await page.evaluate(() => window.__cloudHarness.setSpawnDelay(1_500));
   await clickButton(page, '다시 시도');
   await waitForTitle(page, 'Raucloud 준비 중');
-  assert.match(await page.$eval('.ag-cloud-setup-wait', (node) => node.textContent), /최대 30분/);
+  assert.match(await page.$eval('.ag-cloud-setup-description', (node) => node.textContent), /최대 30분이 걸릴 수 있습니다/);
+  assert.match(await page.$eval('.ag-cloud-setup-wait', (node) => node.textContent), /^(?:\d+분 )?\d+초$/);
   assert.deepEqual(
     await page.$$eval('.ag-cloud-setup-footer button', (nodes) => nodes.map((node) => ({
       label: node.textContent.trim(), disabled: node.disabled,
