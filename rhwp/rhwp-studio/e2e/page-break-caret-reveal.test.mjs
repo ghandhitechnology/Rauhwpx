@@ -12,6 +12,7 @@ import {
   assert,
 } from './helpers.mjs';
 
+/** Ctrl+Enter — Rauhwpx shortcut map treats Ctrl and Meta as the same modifier. */
 async function pressCommandEnter(page) {
   await page.keyboard.down('Control');
   await page.keyboard.press('Enter');
