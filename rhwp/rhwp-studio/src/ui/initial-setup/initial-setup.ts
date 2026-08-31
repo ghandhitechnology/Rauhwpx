@@ -22,6 +22,7 @@ import {
 import {
   completeInitialSetup,
   loadInitialSetup,
+  shouldForceRauFailurePreview,
   shouldShowInitialSetup,
   type InitialSetupRecord,
   type InitialSetupStorage,
@@ -311,6 +312,10 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
     document.body.appendChild(overlay);
     overlay.setAttribute('aria-hidden', 'false');
     showStage('providers');
+    if (shouldForceRauFailurePreview()) {
+      rauFailureActive = true;
+      renderCards();
+    }
     requestAnimationFrame(() => {
       overlay.classList.add('rhwp-setup-open');
       dialog.focus();

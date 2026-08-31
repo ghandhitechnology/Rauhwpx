@@ -20,6 +20,7 @@ import {
   isInitialSetupComplete,
   loadInitialSetup,
   shouldForceInitialSetup,
+  shouldForceRauFailurePreview,
   shouldShowInitialSetup,
   shouldSuppressInitialSetup,
 } from '../src/ui/initial-setup/state.ts';
@@ -84,6 +85,9 @@ test('?initial-setup=1 이면 끝난 뒤에도 다시 연다', () => {
   assert.equal(shouldForceInitialSetup('?initial-setup=1'), true);
   assert.equal(shouldForceInitialSetup('initial-setup'), true);
   assert.equal(shouldForceInitialSetup('?foo=1'), false);
+  assert.equal(shouldForceRauFailurePreview('?initial-setup=1&rau-failure=1'), true);
+  assert.equal(shouldForceRauFailurePreview('rau-failure'), true);
+  assert.equal(shouldForceRauFailurePreview('?initial-setup=1'), false);
   assert.equal(shouldShowInitialSetup(storage, '?initial-setup=1'), true);
   assert.equal(shouldSuppressInitialSetup(), typeof navigator !== 'undefined' && navigator.webdriver === true);
 });
@@ -164,6 +168,7 @@ test('사이드바가 첫 실행 마법사를 설정 모달·보정 창에 붙�
   assert.match(setup, /dataset\.byok = 'true'/);
   assert.match(setup, /agent === 'rau' \? 'Rau로 시작' : '설정'/);
   assert.match(setup, /RAU_FAILURE_FORWARD_COPY/);
+  assert.match(setup, /shouldForceRauFailurePreview\(\)/);
   assert.match(setup, /notifySetupAbandoned/);
 
   assert.match(css, /grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)/);
