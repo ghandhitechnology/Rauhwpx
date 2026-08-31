@@ -176,6 +176,9 @@ test('사이드바가 첫 실행 마법사를 설정 모달·보정 창에 붙�
   assert.match(css, /\.rhwp-setup-card\[data-agent='rau'\] \{\s*border-color: #ffffff/);
   assert.match(css, /\.rhwp-setup-card\[data-agent='rau'\]\[data-suggested='true'\]::before \{\s*content: none/);
   assert.match(css, /rhwp-setup-cal\[hidden\]/);
+  assert.match(css, /\.rhwp-setup-providers \{[\s\S]*overflow: auto/);
+  assert.match(css, /\.rhwp-setup-footer \{[\s\S]*position: sticky/);
+  assert.match(css, /data-recovery='true'[\s\S]*rhwp-setup-card-models \{[\s\S]*display: none/);
   assert.match(css, /prefers-reduced-motion: reduce/);
   assert.match(css, /--setup-spring-snappy: linear\(/);
   assert.match(css, /@media \(min-width: 1440px\) and \(min-height: 820px\)/);

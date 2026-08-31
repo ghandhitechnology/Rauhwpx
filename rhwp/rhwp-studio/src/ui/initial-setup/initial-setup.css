@@ -31,6 +31,8 @@
   z-index: 1100;
   display: grid;
   place-items: center;
+  align-content: center;
+  overflow: auto;
   padding: clamp(20px, 4vw, 48px);
   background:
     radial-gradient(circle at 50% -42%, rgba(82, 105, 169, 0.065), transparent 38%),
@@ -48,11 +50,12 @@
 
 .rhwp-setup-dialog {
   width: min(1120px, 100%);
-  max-height: min(760px, 100%);
+  max-height: 100%;
   display: flex;
   flex-direction: column;
   gap: 24px;
   outline: none;
+  min-height: 0;
   opacity: 0;
   transform: translateY(18px) scale(0.985);
   transition:
@@ -149,6 +152,12 @@
   padding-bottom: 3px;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+}
+
+.rhwp-setup-providers {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
 }
 
 .rhwp-setup-grid {
@@ -414,6 +423,11 @@
   justify-content: flex-end;
   gap: 10px;
   min-height: 44px;
+  flex-shrink: 0;
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  background: var(--setup-bg);
   animation: rhwp-setup-stage-enter 520ms var(--setup-spring-snappy) 220ms both;
 }
 
@@ -469,19 +483,21 @@
   animation: rhwp-setup-stage-enter 480ms var(--setup-spring-snappy) both;
 }
 
-.rhwp-setup-recovery-title {
-  margin: 0;
-  font-size: 18px;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-}
-
 .rhwp-setup-recovery-copy {
   max-width: 62ch;
-  margin: 8px 0 0;
+  margin: 0;
   color: var(--setup-soft);
   font-size: 13px;
   line-height: 1.55;
+}
+
+.rhwp-setup-dialog[data-recovery='true'] .rhwp-setup-card {
+  min-height: 0;
+  padding: 18px 16px 16px;
+}
+
+.rhwp-setup-dialog[data-recovery='true'] .rhwp-setup-card-models {
+  display: none;
 }
 
 .rhwp-setup-dialog[data-recovery='true'] .rhwp-setup-card[data-recovery-option='true'] {
@@ -570,7 +586,7 @@
 
   .rhwp-setup-dialog {
     width: min(1480px, 100%);
-    max-height: none;
+    max-height: 100%;
     gap: clamp(28px, 3vh, 36px);
   }
 
@@ -599,6 +615,11 @@
     min-height: clamp(380px, 44vh, 460px);
     padding: 30px 26px 24px;
     border-radius: 18px;
+  }
+
+  .rhwp-setup-dialog[data-recovery='true'] .rhwp-setup-card {
+    min-height: 0;
+    padding: 20px 18px 16px;
   }
 
   .rhwp-setup-card-logo {

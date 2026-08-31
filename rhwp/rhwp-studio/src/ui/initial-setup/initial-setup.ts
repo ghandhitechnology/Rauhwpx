@@ -133,9 +133,8 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
   recovery.hidden = true;
   recovery.setAttribute('role', 'status');
   recovery.setAttribute('aria-live', 'polite');
-  const recoveryTitle = el('h2', 'rhwp-setup-recovery-title', RAU_FAILURE_FORWARD_COPY.title);
   const recoveryCopy = el('p', 'rhwp-setup-recovery-copy', RAU_FAILURE_FORWARD_COPY.body);
-  recovery.append(recoveryTitle, recoveryCopy);
+  recovery.append(recoveryCopy);
   providersPanel.append(recovery, grid);
 
   const calPanel = el('div', 'rhwp-setup-cal');
