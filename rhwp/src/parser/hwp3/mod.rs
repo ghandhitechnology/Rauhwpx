@@ -3050,6 +3050,21 @@ pub(crate) fn parse_paragraph_list(
 
 /// HWP 3.0 포맷 바이너리를 파싱하여 내부 Document 모델로 변환한다.
 pub fn parse_hwp3(data: &[u8]) -> Result<Document, Hwp3Error> {
+    validate_hwp3_input_size(data.len(), crate::parser::limits::MAX_UNTRUSTED_INPUT_BYTES)?;
+    parse_hwp3_validated(data)
+}
+
+fn validate_hwp3_input_size(byte_len: usize, limit: usize) -> Result<(), Hwp3Error> {
+    if byte_len > limit {
+        return Err(Hwp3Error::ResourceLimitExceeded {
+            context: "HWP 3.0 input",
+            limit,
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn parse_hwp3_validated(data: &[u8]) -> Result<Document, Hwp3Error> {
     if data.len() as u64 > MAX_CONTAINER_BYTES {
         return Err(Hwp3Error::ResourceLimitExceeded {
             context: "HWP 3.0 input",
@@ -4280,6 +4295,20 @@ fn assign_pic_numbers_in_controls(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn public_hwp3_size_policy_rejects_one_byte_over_untrusted_limit_without_allocation() {
+        assert!(validate_hwp3_input_size(
+            crate::parser::limits::MAX_UNTRUSTED_INPUT_BYTES,
+            crate::parser::limits::MAX_UNTRUSTED_INPUT_BYTES,
+        )
+        .is_ok());
+        assert!(validate_hwp3_input_size(
+            crate::parser::limits::MAX_UNTRUSTED_INPUT_BYTES + 1,
+            crate::parser::limits::MAX_UNTRUSTED_INPUT_BYTES,
+        )
+        .is_err());
+    }
     use std::fs::File;
     use std::io::Read;
 

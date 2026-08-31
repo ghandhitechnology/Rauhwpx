@@ -371,7 +371,7 @@ fn equation_container_path(path: &str) -> String {
 fn serialize_validated_hwp(document: &Document) -> Result<Vec<u8>, HwpError> {
     let bytes = crate::serializer::serialize_document(document)
         .map_err(|e| HwpError::RenderError(e.to_string()))?;
-    let reparsed = crate::parser::parse_hwp_strict(&bytes).map_err(|error| {
+    let reparsed = crate::parser::parse_hwp_strict_regenerated(&bytes).map_err(|error| {
         HwpError::RenderError(format!(
             "generated HWP failed strict package validation: {error}"
         ))
@@ -398,7 +398,12 @@ fn serialize_validated_hwpx(document: &Document) -> Result<Vec<u8>, HwpError> {
             package_report.summary(),
         )));
     }
-    let reparsed = crate::parser::hwpx::parse_hwpx(&bytes).map_err(|error| {
+    crate::parser::limits::validate_input_size(
+        bytes.len(),
+        crate::parser::limits::InputPolicy::Regenerated,
+    )
+    .map_err(|error| HwpError::InvalidFile(error.to_string()))?;
+    let reparsed = crate::parser::hwpx::parse_hwpx_validated(&bytes).map_err(|error| {
         HwpError::RenderError(format!("generated HWPX failed reparse validation: {error}"))
     })?;
     if reparsed.sections.len() != document.sections.len() {
@@ -552,7 +557,12 @@ impl DocumentCore {
         Self::from_bytes_with_policy(data, crate::parser::limits::InputPolicy::LocalFileOnce)
     }
 
-    pub fn from_bytes_with_policy(
+    /// Reparse output created by this process's bounded serializers.
+    pub(crate) fn from_regenerated_bytes(data: &[u8]) -> Result<DocumentCore, HwpError> {
+        Self::from_bytes_with_policy(data, crate::parser::limits::InputPolicy::Regenerated)
+    }
+
+    pub(crate) fn from_bytes_with_policy(
         data: &[u8],
         policy: crate::parser::limits::InputPolicy,
     ) -> Result<DocumentCore, HwpError> {
@@ -1700,7 +1710,7 @@ impl DocumentCore {
         let (structure_before, mut serialization_losses) = hwp_structure_counts(&export_document);
         let bytes = serialize_validated_hwp(&export_document)?;
         let bytes_len = bytes.len();
-        let reloaded = DocumentCore::from_bytes(&bytes)?;
+        let reloaded = DocumentCore::from_regenerated_bytes(&bytes)?;
         let page_count_after = reloaded.page_count();
         let (structure_after, _) = hwp_structure_counts(reloaded.document());
         let page_count_matches = page_count_before == page_count_after;
@@ -2104,7 +2114,6 @@ impl DocumentCore {
     /// 종료 시 paginate()를 1회 실행하여 모든 dirty 구역을 처리한다.
     pub fn end_batch_native(&mut self) -> Result<String, HwpError> {
         self.batch_mode = false;
-        self.event_log.finish_capture();
         self.paginate();
         let result = self.serialize_event_log();
         self.event_log.clear();

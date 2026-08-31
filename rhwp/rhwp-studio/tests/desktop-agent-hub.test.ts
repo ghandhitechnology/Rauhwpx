@@ -15,6 +15,7 @@ import {
   hubRunPaths,
   isHubHealthy,
   isProcessAlive,
+  killPid,
   nextHubRestartDelay,
   parseHubReadyLine,
   readPidFile,
@@ -22,6 +23,7 @@ import {
   registerHubSession,
   requestHubShutdown,
   resolveHubLaunch,
+  startDetachedHub,
   stopHubByPort,
   stopHubChild,
   waitForHub,
@@ -36,6 +38,7 @@ const preload = readFileSync(new URL('../../../desktop/preload.cjs', import.meta
 const viteConfig = readFileSync(new URL('../vite.config.ts', import.meta.url), 'utf8');
 const viteHubPlugin = readFileSync(new URL('../vite-plugin-agent-hub.mjs', import.meta.url), 'utf8');
 const rootPackage = readFileSync(new URL('../../../package.json', import.meta.url), 'utf8');
+const windowsEnv = Object.freeze({ SystemRoot: 'C:\\Windows' });
 
 function jsonResponse(body: unknown, ok = true) {
   return {
@@ -343,9 +346,28 @@ test('desktop shell owns one ephemeral authenticated hub and exposes session IPC
   assert.match(desktopMain, /sandbox: true/);
   assert.match(desktopMain, /contextIsolation: true/);
   assert.match(desktopMain, /stopHubChild\(/);
+  assert.match(
+    desktopMain,
+    /cleanupPrepared = response\?\.status === 'prepared'[\s\S]{0,100}response\?\.launchId === launchId/,
+  );
   assert.match(desktopMain, /hasPendingLaunchCleanupSync\(this\.workDir\)/);
   assert.match(desktopMain, /retainLaunchRootForProcessCleanupSync\(this\.workDir, \{ launchId \}\)/);
-  assert.match(desktopMain, /if \(this\.#stoppingChild !== child\) this\.scheduleRestart\(\)/);
+  assert.match(desktopMain, /#restartRequired = false/);
+  assert.match(desktopMain, /this\.#restartTimer \|\| this\.#restartRequired/);
+  assert.match(desktopMain, /if \(this\.#restartRequired\) throw this\.restartRequiredError\(\)/);
+  assert.match(desktopMain, /error\.code = 'AGENT_HUB_RESTART_REQUIRED'/);
+  assert.match(
+    desktopMain,
+    /if \(process\.platform === 'win32'\) \{\s*this\.quarantineUnexpectedWindowsExit\(\);\s*return;/,
+  );
+  assert.match(
+    desktopMain,
+    /quarantineUnexpectedWindowsExit\(\)[\s\S]*this\.#restartRequired = true;[\s\S]*retainLaunchRootForProcessCleanupSync\(this\.workDir, \{ launchId \}\)[\s\S]*requiring an app restart/,
+  );
+  assert.match(
+    desktopMain,
+    /if \(this\.#stoppingChild === child\) return;[\s\S]*if \(process\.platform === 'win32'\)/,
+  );
   assert.doesNotMatch(desktopMain, /onExit: \(code, signal\) => \{[\s\S]{0,300}this\.#child = null/);
   assert.match(preload, /getSessionContext: \(\) => ipcRenderer\.invoke\('desktop:get-session-context'\)/);
   assert.match(preload, /ensureAgentHub: \(\) => ipcRenderer\.invoke\('agent-hub:ensure'\)/);
@@ -451,6 +473,15 @@ test('studio development and desktop builds include the agent hub', () => {
   assert.match(viteHubPlugin, /retainLaunchRootForProcessCleanupSync\(join\(currentWorkRoot, 'work'\), \{ launchId \}\)/);
   assert.match(viteHubPlugin, /onExit\(code, signal\)[\s\S]{0,300}Keep the exited leader/);
   assert.doesNotMatch(viteHubPlugin, /onExit\(code, signal\) \{[\s\S]{0,300}(?:child = null|removeOwnedWorkRoot)/);
+  assert.match(
+    viteHubPlugin,
+    /catch \(error\) \{\s*try \{\s*await stopOwnedHub\(\{ removeWork: true \}\);[\s\S]*?catch \(cleanupError\)[\s\S]*?throw error;/,
+  );
+  assert.doesNotMatch(viteHubPlugin, /waitForHubChildExit/);
+  assert.match(
+    viteHubPlugin,
+    /await requestHubShutdown\([\s\S]{0,500}cleanupPrepared = response\?\.status === 'prepared'[\s\S]{0,100}response\?\.launchId === launchId[\s\S]{0,300}const stopped = await stopHubChild\(current/,
+  );
   assert.match(rootPackage, /"start": "node rhwp\/rhwp-agent\/ctl.mjs start"/);
   assert.match(rootPackage, /"start:fg": "node rhwp\/rhwp-agent\/server.mjs"/);
   assert.match(rootPackage, /"stop": "node rhwp\/rhwp-agent\/ctl.mjs stop"/);
@@ -497,7 +528,9 @@ test('stopHubByPort waits for health-down and process exit before removing its p
     const result = await stopHubByPort(5175, {
       pidPath,
       fetchImpl: async (_url: string, init?: { method?: string }) => {
-        if (init?.method === 'POST') return jsonResponse({ status: 'shutting-down' });
+        if (init?.method === 'POST') {
+          return jsonResponse({ status: 'prepared', launchId: 'launch-a' });
+        }
         healthReads += 1;
         if (healthReads === 1) return jsonResponse({ ok: true, pid: 4242, launchId: 'launch-a' });
         return { ok: false, json: async () => null };
@@ -520,6 +553,49 @@ test('stopHubByPort waits for health-down and process exit before removing its p
   }
 });
 
+test('stopHubByPort lets authenticated cleanup proof outlive the leader polling window', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rhwp-stop-proof-window-'));
+  const pidPath = join(dir, 'rhwp-agent.pid');
+  let healthReads = 0;
+  let clock = 0;
+  let shutdownAborted = false;
+  writePidFile(pidPath, 4242);
+  try {
+    const result = await stopHubByPort(5175, {
+      pidPath,
+      fetchImpl: async (_url: string, init?: { method?: string; signal?: AbortSignal }) => {
+        if (init?.method === 'POST') {
+          return new Promise((resolve, reject) => {
+            const timer = setTimeout(() => {
+              resolve(jsonResponse({ status: 'prepared', launchId: 'launch-a' }));
+            }, 25);
+            init.signal?.addEventListener('abort', () => {
+              shutdownAborted = true;
+              clearTimeout(timer);
+              reject(init.signal?.reason ?? new Error('shutdown request aborted'));
+            }, { once: true });
+          });
+        }
+        healthReads += 1;
+        if (healthReads === 1) return jsonResponse({ ok: true, pid: 4242, launchId: 'launch-a' });
+        return { ok: false, json: async () => null };
+      },
+      // Process-tree preparation is allowed to use its own longer bound. This
+      // shorter interval controls only the post-proof leader polling below.
+      timeoutMs: 10,
+      wait: async (ms) => { clock += ms; },
+      now: () => clock,
+      processAlive: () => false,
+    });
+
+    assert.equal(shutdownAborted, false);
+    assert.deepEqual(result, { stopped: true, ready: false, pid: 4242 });
+    assert.equal(readPidFile(pidPath), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('stopHubByPort reports a timeout and retains the pid file while the process is alive', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'rhwp-stop-timeout-'));
   const pidPath = join(dir, 'rhwp-agent.pid');
@@ -530,7 +606,9 @@ test('stopHubByPort reports a timeout and retains the pid file while the process
     const result = await stopHubByPort(5175, {
       pidPath,
       fetchImpl: async (_url: string, init?: { method?: string }) => {
-        if (init?.method === 'POST') return jsonResponse({ status: 'shutting-down' });
+        if (init?.method === 'POST') {
+          return jsonResponse({ status: 'prepared', launchId: 'launch-a' });
+        }
         healthReads += 1;
         if (healthReads === 1) return jsonResponse({ ok: true, pid: 4242, launchId: 'launch-a' });
         return { ok: false, json: async () => null };
@@ -543,6 +621,95 @@ test('stopHubByPort reports a timeout and retains the pid file while the process
 
     assert.deepEqual(result, { stopped: false, ready: false, pid: 4242 });
     assert.equal(readPidFile(pidPath), 4242);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('stopHubByPort retains quarantine after cleanup-unproven even when the leader exits', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rhwp-stop-unproven-'));
+  const pidPath = join(dir, 'rhwp-agent.pid');
+  let healthReads = 0;
+  let clock = 0;
+  try {
+    const result = await stopHubByPort(5175, {
+      pidPath,
+      fetchImpl: async (_url: string, init?: { method?: string }) => {
+        if (init?.method === 'POST') {
+          return jsonResponse({ status: 'cleanup-unproven', launchId: 'launch-a' }, false);
+        }
+        healthReads += 1;
+        if (healthReads === 1) return jsonResponse({ ok: true, pid: 4242, launchId: 'launch-a' });
+        return { ok: false, json: async () => null };
+      },
+      timeoutMs: 100,
+      wait: async (ms) => { clock += ms; },
+      now: () => clock,
+      processAlive: () => false,
+    });
+
+    assert.deepEqual(result, { stopped: false, ready: false, pid: 4242 });
+    assert.equal(readPidFile(pidPath), 4242);
+    const laterStart = await startDetachedHub({
+      port: 5175,
+      runDir: dir,
+      fetchImpl: async () => ({ ok: false, json: async () => null }),
+    });
+    assert.equal(laterStart.error, 'hub-cleanup-unproven');
+    assert.equal(laterStart.pid, 4242);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('stopHubByPort rejects a prepared response from a different launch', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rhwp-stop-wrong-launch-'));
+  const pidPath = join(dir, 'rhwp-agent.pid');
+  let healthReads = 0;
+  let clock = 0;
+  writePidFile(pidPath, 4243);
+  try {
+    const result = await stopHubByPort(5175, {
+      pidPath,
+      fetchImpl: async (_url: string, init?: { method?: string }) => {
+        if (init?.method === 'POST') {
+          return jsonResponse({ status: 'prepared', launchId: 'launch-b' });
+        }
+        healthReads += 1;
+        if (healthReads === 1) return jsonResponse({ ok: true, pid: 4243, launchId: 'launch-a' });
+        return { ok: false, json: async () => null };
+      },
+      timeoutMs: 100,
+      wait: async (ms) => { clock += ms; },
+      now: () => clock,
+      processAlive: () => false,
+    });
+
+    assert.deepEqual(result, { stopped: false, ready: false, pid: 4243 });
+    assert.equal(readPidFile(pidPath), 4243);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('startDetachedHub does not bypass a quarantined detached pid record', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rhwp-start-quarantined-'));
+  const paths = hubRunPaths(dir);
+  writePidFile(paths.pid, 4244);
+  try {
+    const result = await startDetachedHub({
+      port: 5175,
+      runDir: dir,
+      fetchImpl: async () => ({ ok: false, json: async () => null }),
+    });
+    assert.deepEqual(result, {
+      started: false,
+      ready: false,
+      pid: 4244,
+      log: paths.log,
+      error: 'hub-cleanup-unproven',
+    });
+    assert.equal(readPidFile(paths.pid), 4244);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -660,19 +827,24 @@ test('leader crash retains POSIX group identity through restart cleanup', async 
   assert.deepEqual(signals, [[-4323, 'SIGTERM'], [-4323, 'SIGKILL']]);
 });
 
-test('stopHubChild waits for taskkill completion as well as Windows child exit', async () => {
+test('prepared Windows cleanup waits for the retained child to exit without resolving its PID again', async () => {
   const child = Object.assign(new EventEmitter(), {
     pid: 5432,
     exitCode: null as number | null,
     signalCode: null,
   });
-  const killer = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null });
+  const commands: string[] = [];
   let settled = false;
   const stopped = stopHubChild(child, {
     timeoutMs: 100,
     finalGraceMs: 50,
     platform: 'win32',
-    spawnProcess: () => killer,
+    cleanupPrepared: true,
+    env: windowsEnv,
+    spawnProcess: (command) => {
+      commands.push(command);
+      return new EventEmitter();
+    },
   }).then((value) => {
     settled = true;
     return value;
@@ -680,23 +852,53 @@ test('stopHubChild waits for taskkill completion as well as Windows child exit',
   child.exitCode = 0;
   child.emit('exit', 0, null);
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(settled, false);
-  killer.exitCode = 0;
-  killer.emit('close', 0, null);
+  assert.equal(settled, true);
   assert.equal(await stopped, true);
+  assert.deepEqual(commands, []);
 });
 
-test('stopHubChild reports a surviving Windows child after bounded force cleanup', async () => {
+test('unprepared Windows cleanup uses only the retained handle and fails closed', async () => {
+  const child = Object.assign(new EventEmitter(), {
+    pid: 5436,
+    exitCode: null as number | null,
+    signalCode: null,
+    kill: () => {
+      queueMicrotask(() => {
+        child.exitCode = 0;
+        child.emit('exit', 0, null);
+      });
+      return true;
+    },
+  });
+  const calls: string[][] = [];
+  const stopped = stopHubChild(child, {
+    timeoutMs: 100,
+    finalGraceMs: 50,
+    platform: 'win32',
+    env: windowsEnv,
+    spawnProcess: (_command, args) => {
+      calls.push(args);
+      return new EventEmitter();
+    },
+  });
+
+  assert.equal(await stopped, false);
+  assert.deepEqual(calls, []);
+});
+
+test('stopHubChild never retargets a surviving Windows child by reusable PID', async () => {
   const child = Object.assign(new EventEmitter(), {
     pid: 5433,
     exitCode: null,
     signalCode: null,
+    kill: () => true,
   });
   const calls: string[][] = [];
   const stopped = await stopHubChild(child, {
     timeoutMs: 10,
     finalGraceMs: 10,
     platform: 'win32',
+    env: windowsEnv,
     spawnProcess: (_command, args) => {
       calls.push(args);
       const killer = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null });
@@ -709,10 +911,40 @@ test('stopHubChild reports a surviving Windows child after bounded force cleanup
   });
 
   assert.equal(stopped, false);
-  assert.deepEqual(calls, [
-    ['/PID', '5433', '/T'],
-    ['/PID', '5433', '/T', '/F'],
-  ]);
+  assert.deepEqual(calls, []);
+});
+
+test('a completed prepared shutdown remains proof after the Windows leader exits', async () => {
+  const child = Object.assign(new EventEmitter(), {
+    pid: 5437,
+    exitCode: 0,
+    signalCode: null,
+  });
+  const calls: string[][] = [];
+  assert.equal(await stopHubChild(child, {
+    platform: 'win32',
+    cleanupPrepared: true,
+    spawnProcess: (_command, args) => {
+      calls.push(args);
+      return new EventEmitter();
+    },
+  }), true);
+  assert.deepEqual(calls, []);
+});
+
+test('bare Windows PID cleanup fails closed without spawning taskkill', async () => {
+  let helperSpawned = false;
+  const result = await killPid(6000, {
+    platform: 'win32',
+    env: windowsEnv,
+    spawnProcess: () => {
+      helperSpawned = true;
+      return new EventEmitter();
+    },
+    processAlive: () => true,
+  });
+  assert.deepEqual(result, { killed: false, alive: true });
+  assert.equal(helperSpawned, false);
 });
 
 test('exited Windows leader fails closed when task-tree death cannot be proved', async () => {
@@ -726,6 +958,7 @@ test('exited Windows leader fails closed when task-tree death cannot be proved',
     timeoutMs: 10,
     finalGraceMs: 10,
     platform: 'win32',
+    env: windowsEnv,
     spawnProcess: (_command, args) => {
       calls.push(args);
       const killer = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null });
@@ -738,10 +971,29 @@ test('exited Windows leader fails closed when task-tree death cannot be proved',
   });
 
   assert.equal(stopped, false);
-  assert.deepEqual(calls, [
-    ['/PID', '5434', '/T'],
-    ['/PID', '5434', '/T', '/F'],
-  ]);
+  assert.deepEqual(calls, [], 'an expired PID must never be passed to taskkill');
+});
+
+test('Windows hub cleanup never consults a caller-controlled taskkill path', async () => {
+  const child = Object.assign(new EventEmitter(), {
+    pid: 5435,
+    exitCode: null,
+    signalCode: null,
+  });
+  const calls: string[] = [];
+  const stopped = await stopHubChild(child, {
+    timeoutMs: 1,
+    finalGraceMs: 1,
+    platform: 'win32',
+    env: { SystemRoot: 'relative' },
+    spawnProcess: (command) => {
+      calls.push(command);
+      return new EventEmitter();
+    },
+  });
+
+  assert.equal(stopped, false);
+  assert.deepEqual(calls, []);
 });
 
 test('stopHubChild is a no-op without a child', async () => {

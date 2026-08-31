@@ -3,6 +3,13 @@ import crypto from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 
+import {
+  recoverInterruptedFileReplacement,
+  removeFileAndReplacementBackup,
+  replaceFileAtomically,
+} from './harness-update.mjs';
+import { readFileBytesBounded, readUtf8FileBounded } from './bounded-file.mjs';
+
 const PROFILE_FILE = 'style.md';
 const METADATA_FILE = 'metadata.json';
 const STRUCTURED_FILE = 'profile.json';
@@ -11,6 +18,15 @@ const SOURCES_DIR = 'sources';
 const SOURCES_MANIFEST_FILE = 'sources.json';
 const COMMIT_JOURNAL_FILE = 'commit-journal.json';
 const MAX_ADDITIONAL_INSTRUCTION_CHARS = 4_000;
+const MAX_PROFILE_BYTES = 256 * 1024;
+const MAX_METADATA_BYTES = 64 * 1024;
+const MAX_STRUCTURED_PROFILE_BYTES = 512 * 1024;
+const MAX_ADDITIONAL_INSTRUCTION_BYTES = 16 * 1024;
+const MAX_SOURCES_MANIFEST_BYTES = 128 * 1024;
+const MAX_TRANSACTION_JOURNAL_BYTES = 64 * 1024;
+const MAX_SOURCE_FILES = 20;
+const MAX_SOURCE_FILE_BYTES = 20 * 1024 * 1024;
+const MAX_SOURCE_TOTAL_BYTES = 50 * 1024 * 1024;
 
 export function defaultWritingStyleRoot(env = process.env, platform = process.platform, home = os.homedir()) {
   if (env.RHWP_WRITING_STYLE_DIR) return path.resolve(env.RHWP_WRITING_STYLE_DIR);
@@ -19,29 +35,51 @@ export function defaultWritingStyleRoot(env = process.env, platform = process.pl
   return path.join(env.XDG_DATA_HOME || path.join(home, '.local', 'share'), 'rhwp', 'writing-style');
 }
 
-async function readJson(file, fallback) {
+async function readJson(file, fallback, { maxBytes, label, platform }) {
   try {
-    return JSON.parse(await fs.readFile(file, 'utf8'));
-  } catch {
-    return fallback;
+    return JSON.parse(await readUtf8FileBounded(file, { maxBytes, label, platform }));
+  } catch (error) {
+    if (error?.code === 'ENOENT' || error instanceof SyntaxError) return fallback;
+    throw error;
   }
 }
 
-async function readSourcesManifest(file) {
+async function readSourcesManifest(file, platform = process.platform) {
   let text;
-  try { text = await fs.readFile(file, 'utf8'); }
+  try {
+    text = await readUtf8FileBounded(file, {
+      maxBytes: MAX_SOURCES_MANIFEST_BYTES,
+      label: 'Writing-style source manifest',
+      platform,
+    });
+  }
   catch (error) {
     if (error?.code === 'ENOENT') return { version: 1, files: [] };
-    throw error;
+    throw corruptSources(error?.message ?? error);
   }
   try {
     const parsed = JSON.parse(text);
-    if (!parsed || !Array.isArray(parsed.files)) throw new Error('files must be an array');
+    if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.files)) throw new Error('files must be an array');
+    if (parsed.files.length > MAX_SOURCE_FILES) throw new Error(`more than ${MAX_SOURCE_FILES} sources are listed`);
+    const ids = new Set();
+    const storedNames = new Set();
+    let declaredBytes = 0;
     for (const entry of parsed.files) {
       if (!entry || typeof entry.id !== 'string' || !/^[a-f0-9]{64}$/.test(entry.id)
-        || typeof entry.storedName !== 'string' || path.basename(entry.storedName) !== entry.storedName) {
+        || entry.sha256 !== entry.id
+        || typeof entry.storedName !== 'string' || path.basename(entry.storedName) !== entry.storedName
+        || !/^\d{2}-[a-f0-9]{64}(?:\.[a-z0-9]{1,11})?$/.test(entry.storedName)
+        || typeof entry.name !== 'string' || entry.name.length < 1 || entry.name.length > 512
+        || typeof entry.type !== 'string' || entry.type.length < 1 || entry.type.length > 256
+        || !Number.isSafeInteger(entry.size) || entry.size < 1 || entry.size > MAX_SOURCE_FILE_BYTES
+        || typeof entry.addedAt !== 'string' || entry.addedAt.length > 64
+        || ids.has(entry.id) || storedNames.has(entry.storedName)) {
         throw new Error('a source entry is invalid');
       }
+      ids.add(entry.id);
+      storedNames.add(entry.storedName);
+      declaredBytes += entry.size;
+      if (declaredBytes > MAX_SOURCE_TOTAL_BYTES) throw new Error('source bytes exceed the corpus limit');
     }
     return parsed;
   } catch (error) {
@@ -51,10 +89,48 @@ async function readSourcesManifest(file) {
   }
 }
 
+function decodedBase64Size(value) {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9+/]*={0,2}$/.test(value) || value.length % 4 === 1) return null;
+  const padding = value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0;
+  return Math.floor((value.length * 3) / 4) - padding;
+}
+
+function sourceBytes(file) {
+  if (Buffer.isBuffer(file?.bytes)) {
+    if (file.bytes.length < 1 || file.bytes.length > MAX_SOURCE_FILE_BYTES) {
+      throw sourceLimit('A writing sample exceeds its file-size limit.');
+    }
+    return file.bytes;
+  }
+  const size = decodedBase64Size(file?.content);
+  if (size === null) throw corruptSources('a source has invalid file data');
+  if (size < 1 || size > MAX_SOURCE_FILE_BYTES) throw corruptSources('a source exceeds its file-size limit');
+  return Buffer.from(file.content, 'base64');
+}
+
 function corruptSources(message) {
   const error = new Error(`Saved writing samples are unreadable: ${message}`);
   error.code = 'STYLE_SOURCES_CORRUPT';
   return error;
+}
+
+function sourceLimit(message) {
+  const error = new Error(message);
+  error.code = 'STYLE_SOURCES_LIMIT';
+  return error;
+}
+
+function normalizedSourceMetadata(file, index) {
+  const fallbackName = `sample-${index + 1}`;
+  const name = typeof file?.name === 'string' && file.name ? file.name : fallbackName;
+  const type = typeof file?.type === 'string' && file.type
+    ? file.type
+    : 'application/octet-stream';
+  const addedAt = typeof file?.addedAt === 'string' ? file.addedAt : new Date().toISOString();
+  if (name.length > 512) throw sourceLimit('A writing sample name exceeds 512 characters.');
+  if (type.length > 256) throw sourceLimit('A writing sample media type exceeds 256 characters.');
+  if (addedAt.length > 64) throw sourceLimit('A writing sample timestamp exceeds 64 characters.');
+  return { name, type, addedAt };
 }
 
 const TRANSACTION_TARGETS = new Set([
@@ -80,8 +156,9 @@ export function assertWritingStyleAppendCompatible(status, { language, baseRevis
 }
 
 export class WritingStyleStore {
-  constructor({ root = defaultWritingStyleRoot() } = {}) {
+  constructor({ root = defaultWritingStyleRoot(), platform = process.platform } = {}) {
     this.root = root;
+    this.platform = platform;
     this.profilePath = path.join(root, PROFILE_FILE);
     this.metadataPath = path.join(root, METADATA_FILE);
     this.structuredPath = path.join(root, STRUCTURED_FILE);
@@ -89,17 +166,27 @@ export class WritingStyleStore {
     this.sourcesPath = path.join(root, SOURCES_DIR);
     this.sourcesManifestPath = path.join(root, SOURCES_MANIFEST_FILE);
     this.commitJournalPath = path.join(root, COMMIT_JOURNAL_FILE);
+    this.mutationQueue = Promise.resolve();
   }
 
   async init() {
     await fs.mkdir(this.root, { recursive: true });
+    await recoverInterruptedFileReplacement(this.additionalInstructionPath, {
+      platform: this.platform,
+    });
     await this.recoverInterruptedCommit();
     return this;
   }
 
   async recoverInterruptedCommit() {
     let journal = null;
-    try { journal = JSON.parse(await fs.readFile(this.commitJournalPath, 'utf8')); }
+    try {
+      journal = JSON.parse(await readUtf8FileBounded(this.commitJournalPath, {
+        maxBytes: MAX_TRANSACTION_JOURNAL_BYTES,
+        label: 'Writing-style transaction journal',
+        platform: this.platform,
+      }));
+    }
     catch (error) {
       if (error?.code === 'ENOENT') journal = null;
       else if (error instanceof SyntaxError) {
@@ -160,9 +247,21 @@ export class WritingStyleStore {
   async status() {
     try {
       const [markdown, metadata, additionalInstruction, sourceDocuments] = await Promise.all([
-        fs.readFile(this.profilePath, 'utf8'),
-        readJson(this.metadataPath, {}),
-        fs.readFile(this.additionalInstructionPath, 'utf8').catch((error) => {
+        readUtf8FileBounded(this.profilePath, {
+          maxBytes: MAX_PROFILE_BYTES,
+          label: 'Writing-style profile',
+          platform: this.platform,
+        }),
+        readJson(this.metadataPath, {}, {
+          maxBytes: MAX_METADATA_BYTES,
+          label: 'Writing-style metadata',
+          platform: this.platform,
+        }),
+        readUtf8FileBounded(this.additionalInstructionPath, {
+          maxBytes: MAX_ADDITIONAL_INSTRUCTION_BYTES,
+          label: 'Writing-style additional instruction',
+          platform: this.platform,
+        }).catch((error) => {
           if (error?.code === 'ENOENT') return '';
           throw error;
         }),
@@ -205,15 +304,21 @@ export class WritingStyleStore {
 
   /** 정량 계층. 없으면 null — 구버전 프로필이거나 원고를 추출하지 못한 경우다. */
   async profile() {
-    const value = await readJson(this.structuredPath, null);
+    const value = await readJson(this.structuredPath, null, {
+      maxBytes: MAX_STRUCTURED_PROFILE_BYTES,
+      label: 'Structured writing-style profile',
+      platform: this.platform,
+    });
     return value && typeof value === 'object' ? value : null;
   }
 
   /** Persisted sample metadata is safe to expose in status; sample contents are not. */
   async sourceDocuments() {
-    const manifest = await readSourcesManifest(this.sourcesManifestPath);
+    const manifest = await readSourcesManifest(this.sourcesManifestPath, this.platform);
     if (!Array.isArray(manifest?.files)) return [];
-    return Promise.all(manifest.files.map(async (entry) => {
+    const documents = [];
+    let totalBytes = 0;
+    for (const entry of manifest.files) {
       const blobPath = path.join(this.sourcesPath, entry.storedName);
       let stat;
       try { stat = await fs.lstat(blobPath); }
@@ -222,36 +327,53 @@ export class WritingStyleStore {
         throw error;
       }
       if (!stat.isFile() || stat.isSymbolicLink()) throw corruptSources(`source file is invalid: ${entry.name || entry.id}`);
-      return {
+      if (stat.size !== entry.size || stat.size > MAX_SOURCE_FILE_BYTES) {
+        throw corruptSources(`source file size changed: ${entry.name || entry.id}`);
+      }
+      totalBytes += stat.size;
+      if (totalBytes > MAX_SOURCE_TOTAL_BYTES) throw corruptSources('source bytes exceed the corpus limit');
+      documents.push({
         id: entry.id,
         name: String(entry.name || 'sample'),
         type: String(entry.type || 'application/octet-stream'),
         size: Math.max(0, Math.round(Number(entry.size) || 0)),
         addedAt: typeof entry.addedAt === 'string' ? entry.addedAt : null,
-      };
-    }));
+      });
+    }
+    return documents;
   }
 
   /** Read the private originals only for an explicit additive recalibration. */
   async sources() {
-    const manifest = await readSourcesManifest(this.sourcesManifestPath);
+    const manifest = await readSourcesManifest(this.sourcesManifestPath, this.platform);
     if (!Array.isArray(manifest?.files)) return [];
-    const loaded = await Promise.all(manifest.files.map(async (entry) => {
-      if (!entry || typeof entry.storedName !== 'string') return null;
+    const loaded = [];
+    let totalBytes = 0;
+    for (const entry of manifest.files) {
       try {
-        const bytes = await fs.readFile(path.join(this.sourcesPath, path.basename(entry.storedName)));
-        return {
+        const bytes = await readFileBytesBounded(path.join(this.sourcesPath, entry.storedName), {
+          maxBytes: MAX_SOURCE_FILE_BYTES,
+          label: `Writing-style source ${entry.name}`,
+          platform: this.platform,
+        });
+        totalBytes += bytes.length;
+        if (totalBytes > MAX_SOURCE_TOTAL_BYTES) throw corruptSources('source bytes exceed the corpus limit');
+        const digest = crypto.createHash('sha256').update(bytes).digest('hex');
+        if (bytes.length !== entry.size || digest !== entry.id) {
+          throw corruptSources(`source file changed: ${entry.name || entry.id}`);
+        }
+        loaded.push({
           name: String(entry.name || 'sample'),
           type: String(entry.type || 'application/octet-stream'),
           size: bytes.length,
           addedAt: typeof entry.addedAt === 'string' ? entry.addedAt : null,
-          content: bytes.toString('base64'),
-        };
+          bytes,
+        });
       } catch (error) {
         if (error?.code === 'ENOENT') throw corruptSources(`source file is missing: ${entry.name || entry.id}`);
         throw error;
       }
-    }));
+    }
     return loaded;
   }
 
@@ -260,15 +382,33 @@ export class WritingStyleStore {
     const incoming = Array.isArray(files) ? files : [];
     const candidates = append ? [...await this.sources(), ...incoming] : incoming;
     const seen = new Set();
-    return candidates.filter((file) => {
-      if (!file || typeof file.content !== 'string') return true;
-      let digest;
-      try { digest = crypto.createHash('sha256').update(Buffer.from(file.content, 'base64')).digest('hex'); }
-      catch { return true; }
-      if (seen.has(digest)) return false;
+    const normalized = [];
+    let totalBytes = 0;
+    for (const [index, file] of candidates.entries()) {
+      const existingBytes = Buffer.isBuffer(file?.bytes) ? file.bytes : null;
+      const size = existingBytes?.length ?? decodedBase64Size(file?.content);
+      if (!Number.isSafeInteger(size) || size < 1 || size > MAX_SOURCE_FILE_BYTES) {
+        throw sourceLimit('A writing sample exceeds its file-size limit or has invalid data.');
+      }
+      const digest = crypto.createHash('sha256')
+        .update(existingBytes ?? file.content, existingBytes ? undefined : 'base64')
+        .digest('hex');
+      if (seen.has(digest)) continue;
       seen.add(digest);
-      return true;
-    });
+      if (normalized.length >= MAX_SOURCE_FILES || totalBytes + size > MAX_SOURCE_TOTAL_BYTES) {
+        throw sourceLimit(`Writing samples must contain at most ${MAX_SOURCE_FILES} files and ${MAX_SOURCE_TOTAL_BYTES / (1024 * 1024)} MB.`);
+      }
+      const bytes = existingBytes ?? Buffer.from(file.content, 'base64');
+      totalBytes += bytes.length;
+      const { content: _content, ...rest } = file ?? {};
+      normalized.push({
+        ...rest,
+        ...normalizedSourceMetadata(file, index),
+        bytes,
+        size: bytes.length,
+      });
+    }
+    return normalized;
   }
 
   async stageSources(files, transactionId) {
@@ -277,9 +417,14 @@ export class WritingStyleStore {
     const manifestTemp = `${this.sourcesManifestPath}.tmp-${transactionId}`;
     await fs.mkdir(staging, { recursive: true, mode: 0o700 });
     try {
-      for (const [index, file] of (Array.isArray(files) ? files : []).entries()) {
-        if (!file || typeof file.content !== 'string') continue;
-        const bytes = Buffer.from(file.content, 'base64');
+      const values = Array.isArray(files) ? files : [];
+      if (values.length > MAX_SOURCE_FILES) throw sourceLimit(`Writing samples exceed ${MAX_SOURCE_FILES} files.`);
+      let totalBytes = 0;
+      for (const [index, file] of values.entries()) {
+        const bytes = sourceBytes(file);
+        const metadata = normalizedSourceMetadata(file, index);
+        totalBytes += bytes.length;
+        if (totalBytes > MAX_SOURCE_TOTAL_BYTES) throw sourceLimit('Writing samples exceed 50 MB in total.');
         const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
         const extension = path.extname(String(file.name || '')).toLowerCase().replace(/[^a-z0-9.]/g, '').slice(0, 12);
         const storedName = `${String(index + 1).padStart(2, '0')}-${sha256}${extension}`;
@@ -288,10 +433,10 @@ export class WritingStyleStore {
           id: sha256,
           sha256,
           storedName,
-          name: String(file.name || `sample-${index + 1}`),
-          type: String(file.type || 'application/octet-stream'),
+          name: metadata.name,
+          type: metadata.type,
           size: bytes.length,
-          addedAt: typeof file.addedAt === 'string' ? file.addedAt : new Date().toISOString(),
+          addedAt: metadata.addedAt,
         });
       }
       await fs.writeFile(manifestTemp, `${JSON.stringify({ version: 1, files: entries }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
@@ -358,7 +503,11 @@ export class WritingStyleStore {
     await Promise.all(committed.map((artifact) => fs.rm(artifact.backup, { recursive: true, force: true }).catch(() => {})));
   }
 
-  async save({ markdown, language, sourceCount, pageEstimate, summary, profile = null, agent = null, model = null }, { sources } = {}) {
+  async save(profile, options = {}) {
+    return this.#mutate(() => this._save(profile, options));
+  }
+
+  async _save({ markdown, language, sourceCount, pageEstimate, summary, profile = null, agent = null, model = null }, { sources } = {}) {
     if (typeof markdown !== 'string' || markdown.trim().length < 200) {
       throw new Error('The generated style guide is incomplete.');
     }
@@ -411,6 +560,10 @@ export class WritingStyleStore {
   }
 
   async setAdditionalInstruction(value) {
+    return this.#mutate(() => this._setAdditionalInstruction(value));
+  }
+
+  async _setAdditionalInstruction(value) {
     const status = await this.status();
     if (!status.active) throw new Error('Calibrate a writing style before adding a tone instruction.');
     const instruction = String(value ?? '').trim();
@@ -418,20 +571,42 @@ export class WritingStyleStore {
       throw new Error(`The additional instruction must be ${MAX_ADDITIONAL_INSTRUCTION_CHARS} characters or fewer.`);
     }
     if (!instruction) {
-      await fs.rm(this.additionalInstructionPath, { force: true });
+      await removeFileAndReplacementBackup(this.additionalInstructionPath, {
+        platform: this.platform,
+      });
       return this.status();
     }
-    const temp = `${this.additionalInstructionPath}.tmp-${process.pid}-${Date.now()}`;
-    await fs.writeFile(temp, `${instruction}\n`, { encoding: 'utf8', mode: 0o600 });
-    await fs.rename(temp, this.additionalInstructionPath);
+    const temp = `${this.additionalInstructionPath}.tmp-${process.pid}-${crypto.randomUUID()}`;
+    try {
+      await fs.writeFile(temp, `${instruction}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+      await replaceFileAtomically(temp, this.additionalInstructionPath, {
+        platform: this.platform,
+      });
+    } finally {
+      await fs.rm(temp, { force: true }).catch(() => {});
+    }
     return this.status();
+  }
+
+  #mutate(operation) {
+    const result = this.mutationQueue.then(operation, operation);
+    this.mutationQueue = result.then(() => undefined, () => undefined);
+    return result;
   }
 
   async promptBlock() {
     try {
       const [markdown, additionalInstruction] = await Promise.all([
-        fs.readFile(this.profilePath, 'utf8'),
-        fs.readFile(this.additionalInstructionPath, 'utf8').catch((error) => {
+        readUtf8FileBounded(this.profilePath, {
+          maxBytes: MAX_PROFILE_BYTES,
+          label: 'Writing-style profile',
+          platform: this.platform,
+        }),
+        readUtf8FileBounded(this.additionalInstructionPath, {
+          maxBytes: MAX_ADDITIONAL_INSTRUCTION_BYTES,
+          label: 'Writing-style additional instruction',
+          platform: this.platform,
+        }).catch((error) => {
           if (error?.code === 'ENOENT') return '';
           throw error;
         }),

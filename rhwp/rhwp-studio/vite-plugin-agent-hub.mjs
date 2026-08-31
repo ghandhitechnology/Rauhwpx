@@ -11,7 +11,6 @@ import {
   spawnHubProcess,
   stopHubChild,
   waitForHub,
-  waitForHubChildExit,
   waitForHubReadyLine,
 } from '../../desktop/agent-hub.mjs';
 import {
@@ -20,6 +19,36 @@ import {
 } from '../rhwp-agent/credential-mirror.mjs';
 
 export const AGENT_HUB_ENSURE_PATH = '/__rhwp/ensure-agent-hub';
+const DEV_SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._~-]{0,127}$/;
+
+/** Capability minting is browser-only: require the request's exact transport origin. */
+export function isExactSameOriginRequest(req) {
+  const originHeader = req?.headers?.origin;
+  const hostHeader = req?.headers?.host;
+  if (typeof originHeader !== 'string' || typeof hostHeader !== 'string'
+    || !originHeader || !hostHeader) return false;
+  try {
+    const origin = new URL(originHeader);
+    // Browser Origin headers contain only the serialized origin. Reject more
+    // permissive URL spellings before comparing them to the actual Host.
+    if (originHeader !== origin.origin) return false;
+    const protocol = req?.socket?.encrypted === true ? 'https:' : 'http:';
+    const expected = new URL(`${protocol}//${hostHeader}`);
+    if (expected.username || expected.password || expected.pathname !== '/'
+      || expected.search || expected.hash) return false;
+    return origin.origin === expected.origin;
+  } catch {
+    return false;
+  }
+}
+
+function sendJson(res, status, body) {
+  res.statusCode = status;
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.end(JSON.stringify(body));
+}
 
 function explicitHubConfig() {
   const hubUrl = process.env.VITE_RHWP_AGENT_URL;
@@ -78,24 +107,22 @@ export function rhwpAgentHubPlugin(studioRoot = process.cwd()) {
     const currentContext = context;
     const currentWorkRoot = workRoot;
     context = null;
-    let gracefulShutdownAccepted = false;
+    let cleanupPrepared = false;
     if (currentContext && current) {
       try {
-        await requestHubShutdown({
+        const response = await requestHubShutdown({
           port: currentContext.port,
           token,
           launchId,
-          timeoutMs: 1000,
+          timeoutMs: 15_000,
         });
-        gracefulShutdownAccepted = true;
+        cleanupPrepared = response?.status === 'prepared'
+          && response?.launchId === launchId;
       } catch {}
     }
-    // Leader exit is only a grace signal. Always make stopHubChild prove the
-    // process group/task tree is gone before releasing its work directory.
-    if (gracefulShutdownAccepted) {
-      await waitForHubChildExit(current, { timeoutMs: 3000 });
-    }
-    const stopped = await stopHubChild(current, { timeoutMs: 3000 });
+    // A prepared response proves descendants were disposed. Windows can then
+    // wait on the retained child handle without resolving a reusable PID.
+    const stopped = await stopHubChild(current, { timeoutMs: 3000, cleanupPrepared });
     if (stopped && child === current) child = null;
     if (removeWork && currentWorkRoot && stopped) removeOwnedWorkRoot(currentWorkRoot);
     if (!stopped) {
@@ -170,7 +197,11 @@ export function rhwpAgentHubPlugin(studioRoot = process.cwd()) {
       };
       return publicContext(true, true);
     } catch (error) {
-      await stopOwnedHub({ removeWork: true });
+      try {
+        await stopOwnedHub({ removeWork: true });
+      } catch (cleanupError) {
+        console.warn('[rhwp-agent] owned dev hub cleanup failed after startup failed:', cleanupError);
+      }
       throw error;
     }
   }
@@ -210,17 +241,33 @@ export function rhwpAgentHubPlugin(studioRoot = process.cwd()) {
     },
     configureServer(server) {
       server.middlewares.use(async (req, res, next) => {
-        const requestUrl = new URL(req.url ?? '/', 'http://127.0.0.1');
+        let requestUrl;
+        try {
+          requestUrl = new URL(req.url ?? '/', 'http://127.0.0.1');
+        } catch {
+          sendJson(res, 400, { started: false, ready: false, error: 'Malformed request target' });
+          return;
+        }
         if (requestUrl.pathname !== AGENT_HUB_ENSURE_PATH) {
           next();
           return;
         }
-        res.setHeader('Content-Type', 'application/json');
-        res.setHeader('Cache-Control', 'no-store');
+        if (req.method !== 'POST') {
+          res.setHeader('Allow', 'POST');
+          sendJson(res, 405, { started: false, ready: false, error: 'POST required' });
+          return;
+        }
+        if (!isExactSameOriginRequest(req)) {
+          sendJson(res, 403, { started: false, ready: false, error: 'Same-origin request required' });
+          return;
+        }
+        const sessionId = requestUrl.searchParams.get('sessionId');
+        if (!sessionId || !DEV_SESSION_ID_PATTERN.test(sessionId)) {
+          sendJson(res, 400, { started: false, ready: false, error: 'Valid sessionId is required' });
+          return;
+        }
         try {
           const result = await ensureHub();
-          const sessionId = requestUrl.searchParams.get('sessionId');
-          if (result.ready && !sessionId) throw new Error('sessionId is required');
           const capabilities = result.ready
             ? await registerHubSession({
               port: context.port,
@@ -229,18 +276,17 @@ export function rhwpAgentHubPlugin(studioRoot = process.cwd()) {
               sessionId,
             })
             : null;
-          res.statusCode = 200;
-          res.end(JSON.stringify({
+          sendJson(res, 200, {
             ...result,
             ...(capabilities ? {
               hubToken: capabilities.studio,
               referenceToken: capabilities.reference,
               templateToken: capabilities.template,
             } : {}),
-          }));
+          });
         } catch (error) {
-          res.statusCode = 500;
-          res.end(JSON.stringify({ started: false, ready: false, error: String(error) }));
+          const status = error?.status === 429 ? 429 : 500;
+          sendJson(res, status, { started: false, ready: false, error: String(error) });
         }
       });
 

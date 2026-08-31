@@ -10,6 +10,7 @@ import {
   OAUTH_STAGING_OWNER_MAX_BYTES,
   cleanupStaleOAuthCredentialStaging,
   prepareStagedOAuthCredential,
+  recoverOAuthCredentialPublication,
 } from '../oauth-credential-transaction.mjs';
 
 async function fixture(t, initial, overrides = {}) {
@@ -51,6 +52,82 @@ test('existing source is seeded privately, published, and restored on precommit 
   assert.deepEqual(JSON.parse(await fs.readFile(sourceFile, 'utf8')), { token: 'new' });
   await transaction.rollback();
   assert.deepEqual(JSON.parse(await fs.readFile(sourceFile, 'utf8')), { token: 'old' });
+});
+
+test('a retained hash-only recovery record rolls back publication after restart', async (t) => {
+  const { sourceFile, transaction } = await fixture(t, { token: 'old-secret' });
+  await fs.writeFile(transaction.credentialFile, '{"token":"new-secret"}');
+  const recovery = await transaction.prepareRecovery();
+  assert.doesNotMatch(JSON.stringify(recovery), /old-secret|new-secret/u);
+  await transaction.publish();
+  assert.equal(existsSync(recovery.backupFile), true);
+
+  await recoverOAuthCredentialPublication(recovery, { commit: false, platform: 'win32' });
+
+  assert.deepEqual(JSON.parse(await fs.readFile(sourceFile, 'utf8')), { token: 'old-secret' });
+  assert.equal(existsSync(recovery.backupFile), false);
+});
+
+test('restart finalization keeps the published credential and removes its retained backup', async (t) => {
+  const { sourceFile, transaction } = await fixture(t, { token: 'old-secret' });
+  await fs.writeFile(transaction.credentialFile, '{"token":"new-secret"}');
+  const recovery = await transaction.prepareRecovery();
+  await transaction.publish();
+
+  await recoverOAuthCredentialPublication(recovery, { commit: true, platform: 'win32' });
+
+  assert.deepEqual(JSON.parse(await fs.readFile(sourceFile, 'utf8')), { token: 'new-secret' });
+  assert.equal(existsSync(recovery.backupFile), false);
+  assert.equal(
+    await recoverOAuthCredentialPublication(recovery, { commit: true, platform: 'win32' }),
+    'committed',
+    'finalization remains idempotent after the backup was removed',
+  );
+});
+
+test('restart restores the retained credential when publication crashed at the rename gap', async (t) => {
+  const { sourceFile, transaction } = await fixture(t, { token: 'old-secret' });
+  await fs.writeFile(transaction.credentialFile, '{"token":"new-secret"}');
+  const recovery = await transaction.prepareRecovery();
+  await fs.rename(sourceFile, recovery.backupFile);
+
+  await recoverOAuthCredentialPublication(recovery, { commit: false, platform: 'win32' });
+
+  assert.deepEqual(JSON.parse(await fs.readFile(sourceFile, 'utf8')), { token: 'old-secret' });
+  assert.equal(existsSync(recovery.backupFile), false);
+});
+
+test('restart discards a partial retained backup when the original credential is intact', async (t) => {
+  const { sourceFile, transaction } = await fixture(t, { token: 'old-secret' });
+  await fs.writeFile(transaction.credentialFile, '{"token":"new-secret"}');
+  const recovery = await transaction.prepareRecovery();
+  await fs.writeFile(recovery.backupFile, '{"token":');
+
+  await recoverOAuthCredentialPublication(recovery, { commit: false, platform: 'win32' });
+
+  assert.deepEqual(JSON.parse(await fs.readFile(sourceFile, 'utf8')), { token: 'old-secret' });
+  assert.equal(existsSync(recovery.backupFile), false);
+});
+
+test('recovery rejects a traversal-shaped backup path without touching its target', async (t) => {
+  const { root, sourceFile, transaction } = await fixture(t, { token: 'old-secret' });
+  await fs.writeFile(transaction.credentialFile, '{"token":"new-secret"}');
+  const recovery = await transaction.prepareRecovery();
+  const traversalAnchor = `${sourceFile}.oauth-`;
+  await fs.mkdir(traversalAnchor);
+  const victim = path.join(root, 'profile', 'victim.held');
+  await fs.writeFile(victim, 'do-not-delete');
+  const malicious = {
+    ...recovery,
+    backupFile: `${traversalAnchor}${path.sep}..${path.sep}..${path.sep}victim.held`,
+  };
+
+  await assert.rejects(
+    recoverOAuthCredentialPublication(malicious, { commit: false, platform: 'linux' }),
+    { code: 'AGENT_AUTH_CREDENTIAL_RECOVERY_REQUIRED' },
+  );
+  assert.equal(await fs.readFile(victim, 'utf8'), 'do-not-delete');
+  assert.deepEqual(JSON.parse(await fs.readFile(sourceFile, 'utf8')), { token: 'old-secret' });
 });
 
 test('filesystems without hard links publish and roll back an existing credential safely', async (t) => {

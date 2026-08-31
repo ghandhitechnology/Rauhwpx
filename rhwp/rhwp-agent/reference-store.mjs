@@ -5,6 +5,10 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
+  recoverInterruptedFileReplacement,
+  replaceFileAtomically,
+} from './harness-update.mjs';
+import {
   MAX_EXTRACTED_CHARS as MAX_EXTRACTED_CHARS_PER_FILE,
   ReferenceExtractionError,
   SUPPORTED_REFERENCE_EXTENSIONS,
@@ -331,7 +335,7 @@ async function atomicWriteJson(file, value, { onRetainedTemp = null } = {}) {
     await handle.sync();
     await handle.close();
     handle = null;
-    await fs.rename(temp, file);
+    await replaceFileAtomically(temp, file);
   } finally {
     await handle?.close().catch(() => undefined);
     await fs.unlink(temp).catch((error) => {
@@ -436,6 +440,7 @@ export class ReferenceStore {
     createId = () => crypto.randomUUID(),
     persistMetadata = atomicWriteJson,
     stagedReferenceTtlMs = DEFAULT_STAGED_REFERENCE_TTL_MS,
+    platform = process.platform,
   } = {}) {
     for (const [name, value, allowZero] of [
       ['maxFileBytes', maxFileBytes, false],
@@ -483,6 +488,7 @@ export class ReferenceStore {
     this.createId = createId;
     this.persistMetadata = persistMetadata;
     this.stagedReferenceTtlMs = stagedReferenceTtlMs;
+    this.platform = platform;
     this.metadata = { schemaVersion: SCHEMA_VERSION, files: [] };
     this.metadataPhysicalBytes = 0;
     this.objects = new Map();
@@ -511,6 +517,9 @@ export class ReferenceStore {
     await ensurePlainDirectory(this.blobsDir);
     await ensurePlainDirectory(this.objectsDir);
     await ensurePlainDirectory(this.stagingDir);
+    await recoverInterruptedFileReplacement(this.metadataPath, {
+      platform: this.platform,
+    });
     try {
       const serialized = await readPlainUtf8FileBounded(
         this.metadataPath,

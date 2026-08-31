@@ -286,6 +286,10 @@ impl HwpDocument {
         DocumentCore::from_local_file_bytes(data).map(|core| HwpDocument { core })
     }
 
+    pub(crate) fn from_regenerated_bytes(data: &[u8]) -> Result<HwpDocument, HwpError> {
+        DocumentCore::from_regenerated_bytes(data).map(|core| HwpDocument { core })
+    }
+
     pub fn find_initial_column_def(paragraphs: &[Paragraph]) -> ColumnDef {
         DocumentCore::find_initial_column_def(paragraphs)
     }

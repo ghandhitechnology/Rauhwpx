@@ -2,8 +2,9 @@ import spawn from 'cross-spawn';
 
 import {
   isolatedProcessEnv,
+  PROCESS_TREE_CLEANUP_OUTCOME,
   processTreeSpawnOptions,
-  terminateAndWaitForProcessTreeExit,
+  terminateAndWaitForProcessTreeExitOutcome,
   terminateProcessTree,
 } from '../process-tree.mjs';
 
@@ -24,7 +25,8 @@ export function openRouterReady({ useOpenRouter, piManager, openRouter } = {}) {
  * @param {string} preview
  * @param {{ useOpenRouter?: boolean, piManager?: any, openRouter?: any, isolatedHome?: string,
  *   sessionId?: string, cwd?: string, spawnProcess?: typeof spawn,
- *   terminateProcess?: typeof terminateProcessTree }} [deps]
+ *   terminateProcess?: typeof terminateProcessTree,
+ *   cleanupProcessOutcome?: (child: any) => Promise<'proven'|'failed'|'unavailable'> }} [deps]
  * @returns {Promise<string | null>}
  */
 export function generateChatTitle(preview, deps = {}) {
@@ -57,12 +59,20 @@ export function generateChatTitle(preview, deps = {}) {
       if (timer) clearTimeout(timer);
       resolve(value);
     };
-    const finishAfterCleanup = (value) => {
+    const finishAfterCleanup = (value, { allowUnavailable = false } = {}) => {
+      if (timer) clearTimeout(timer);
       if (!cleanupPromise) {
-        cleanupPromise = terminateAndWaitForProcessTreeExit(proc, { terminateProcess })
-          .catch(() => false);
+        cleanupPromise = (typeof deps.cleanupProcessOutcome === 'function'
+          ? Promise.resolve(deps.cleanupProcessOutcome(proc))
+          : terminateAndWaitForProcessTreeExitOutcome(proc, { terminateProcess }))
+          .catch(() => PROCESS_TREE_CLEANUP_OUTCOME.FAILED);
       }
-      void cleanupPromise.then((cleaned) => finish(cleaned ? value : null));
+      void cleanupPromise.then((outcome) => finish(
+        outcome === PROCESS_TREE_CLEANUP_OUTCOME.PROVEN
+          || (allowUnavailable && outcome === PROCESS_TREE_CLEANUP_OUTCOME.UNAVAILABLE)
+          ? value
+          : null,
+      ));
     };
 
     let proc;
@@ -118,7 +128,14 @@ export function generateChatTitle(preview, deps = {}) {
         const type = evt?.type;
         if (type === 'item.completed' && evt.item?.type === 'agent_message') {
           const t = String(evt.item.text ?? '').trim();
-          if (t) lastAssistant = t;
+          if (t) {
+            lastAssistant = t;
+            // The hub owns this cleanup promise. Start it at the semantic
+            // terminal event while a Windows PID still belongs to this child.
+            if (typeof deps.cleanupProcessOutcome === 'function') {
+              finishAfterCleanup(cleanTitle(lastAssistant) || null);
+            }
+          }
         } else if (type === 'agent.message' || type === 'message') {
           const t = String(evt.text ?? evt.message ?? '').trim();
           if (t) lastAssistant = t;
@@ -133,8 +150,15 @@ export function generateChatTitle(preview, deps = {}) {
       if (proc.pid) finishAfterCleanup(null);
       else finish(null);
     });
-    proc.on('close', () => {
-      finishAfterCleanup(cleanTitle(lastAssistant) || null);
+    proc.on('close', (code) => {
+      const title = code === 0 ? (cleanTitle(lastAssistant) || null) : null;
+      // `close` is the drained boundary. Preserve a completed title when an
+      // already-exited Windows PID makes tree proof unavailable; forced paths
+      // above still require PROVEN cleanup.
+      finishAfterCleanup(title, { allowUnavailable: code === 0 && title !== null });
+    });
+    proc.stdin?.on?.('error', () => {
+      finishAfterCleanup(null);
     });
 
     try {

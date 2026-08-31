@@ -1,6 +1,13 @@
+import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+
+import { readUtf8FileBounded } from './bounded-file.mjs';
+import {
+  recoverInterruptedFileReplacement,
+  replaceFileAtomically,
+} from './harness-update.mjs';
 
 const EVENTS_FILE = 'events.jsonl';
 const PLANS_FILE = 'plans.json';
@@ -14,6 +21,10 @@ const DAY_WINDOW_MS = 24 * 60 * 60 * 1000;
 const WEEK_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 export const MAX_USAGE_LOG_BYTES = 32 * 1024 * 1024;
 export const MAX_USAGE_EVENTS = 50_000;
+export const MAX_USAGE_MODEL_CHARS = 256;
+export const MAX_USAGE_MODELS = 512;
+export const MAX_USAGE_TOKEN_COUNT = 1_000_000_000;
+const MAX_USAGE_COST_USD = 1_000_000_000;
 const MAX_PLANS_BYTES = 64 * 1024;
 const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
 
@@ -75,7 +86,13 @@ export function defaultUsageRoot(env = process.env, platform = process.platform,
 function toCount(value) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return 0;
-  return Math.round(n);
+  return Math.min(Math.round(n), MAX_USAGE_TOKEN_COUNT);
+}
+
+function normalizeModel(value) {
+  if (typeof value !== 'string') return 'unknown';
+  const normalized = value.trim();
+  return normalized ? normalized.slice(0, MAX_USAGE_MODEL_CHARS) : 'unknown';
 }
 
 function normalizeAgent(agent) {
@@ -86,7 +103,7 @@ function normalizeAgent(agent) {
 function toCost(value) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return 0;
-  return Math.round(n * 1e6) / 1e6;
+  return Math.min(Math.round(n * 1e6) / 1e6, MAX_USAGE_COST_USD);
 }
 
 export function weightedTokensOf({ inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens }) {
@@ -137,7 +154,7 @@ function parseEventLine(line) {
   const event = {
     ts,
     agent,
-    model: typeof raw.model === 'string' && raw.model ? raw.model : 'unknown',
+    model: normalizeModel(raw.model),
     inputTokens: toCount(raw.inputTokens),
     outputTokens: toCount(raw.outputTokens),
     cacheReadTokens: toCount(raw.cacheReadTokens),
@@ -145,32 +162,11 @@ function parseEventLine(line) {
     costUsd: toCost(raw.costUsd),
     weightedTokens: 0,
   };
-  event.weightedTokens = Number.isFinite(Number(raw.weightedTokens)) && Number(raw.weightedTokens) > 0
-    ? Math.round(Number(raw.weightedTokens))
-    : weightedTokensOf(event);
+  // Weighted usage is redundant persisted data. Recompute it from the
+  // independently bounded components so replay cannot disagree with record()
+  // (their sum can legitimately exceed the cap for one component).
+  event.weightedTokens = weightedTokensOf(event);
   return event;
-}
-
-async function readSmallFile(file, maxBytes) {
-  const handle = await fs.open(file, 'r');
-  try {
-    const stat = await handle.stat();
-    if (!stat.isFile() || stat.size > maxBytes) {
-      const error = new Error(`${path.basename(file)} exceeds its ${maxBytes}-byte read limit`);
-      error.code = 'USAGE_FILE_TOO_LARGE';
-      throw error;
-    }
-    const bytes = Buffer.allocUnsafe(stat.size);
-    let offset = 0;
-    while (offset < bytes.length) {
-      const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset);
-      if (bytesRead === 0) break;
-      offset += bytesRead;
-    }
-    return bytes.subarray(0, offset).toString('utf8');
-  } finally {
-    await handle.close();
-  }
 }
 
 async function readEventTail(file, maxBytes) {
@@ -201,7 +197,8 @@ async function readEventTail(file, maxBytes) {
  * 프로바이더 토큰 사용량을 append-only JSONL 로 남기고 롤링 윈도우로 집계한다.
  *
  * @param {{ rootDir?: string, now?: () => number, maxEvents?: number,
- *           retentionMs?: number, pruneIntervalMs?: number, maxLogBytes?: number }} [opts]
+ *           retentionMs?: number, pruneIntervalMs?: number, maxLogBytes?: number,
+ *           platform?: NodeJS.Platform }} [opts]
  */
 export function createUsageStore({
   rootDir = defaultUsageRoot(),
@@ -210,6 +207,7 @@ export function createUsageStore({
   retentionMs = RETENTION_MS,
   pruneIntervalMs = PRUNE_INTERVAL_MS,
   maxLogBytes = MAX_USAGE_LOG_BYTES,
+  platform = process.platform,
 } = {}) {
   maxEvents = Number.isSafeInteger(maxEvents) && maxEvents > 0
     ? Math.min(maxEvents, MAX_USAGE_EVENTS)
@@ -227,9 +225,13 @@ export function createUsageStore({
   let lastPrunedAt = now();
 
   async function writeAtomic(file, text) {
-    const temp = `${file}.tmp-${process.pid}-${now()}`;
-    await fs.writeFile(temp, text, { encoding: 'utf8', mode: 0o600 });
-    await fs.rename(temp, file);
+    const temp = `${file}.tmp-${process.pid}-${randomUUID()}`;
+    try {
+      await fs.writeFile(temp, text, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+      await replaceFileAtomically(temp, file, { platform });
+    } finally {
+      await fs.rm(temp, { force: true }).catch(() => {});
+    }
   }
 
   function serialize(event) {
@@ -242,7 +244,10 @@ export function createUsageStore({
 
   function pruneEvents(current) {
     const retained = events.filter((event) => current - event.ts <= retentionMs);
-    events = retained.length > maxEvents ? retained.slice(-maxEvents) : retained;
+    // Leave headroom after a count-based compaction. Otherwise every new event
+    // above the cap rewrites the entire log instead of taking the append path.
+    const target = Math.max(1, Math.floor(maxEvents * 0.9));
+    events = retained.length > maxEvents ? retained.slice(-target) : retained;
     lastPrunedAt = current;
   }
 
@@ -264,7 +269,8 @@ export function createUsageStore({
     const day = emptyWindow();
     const week = emptyWindow();
     /** @type {Record<string, { turns: number, inputTokens: number, outputTokens: number, weightedTokens: number, costUsd: number }>} */
-    const byModel = {};
+    const byModel = Object.create(null);
+    let modelCount = 0;
     let updatedAt = null;
     for (const event of events) {
       if (event.agent !== agent) continue;
@@ -275,7 +281,16 @@ export function createUsageStore({
       if (age > WEEK_WINDOW_MS) continue;
       addToWindow(week, event);
       // 모델별 내역은 주간 창(7일) 기준이다 — 한도 표시와 같은 범위를 쓴다.
-      const entry = byModel[event.model] ?? (byModel[event.model] = {
+      let modelKey = event.model;
+      if (!Object.hasOwn(byModel, modelKey)) {
+        // Reserve the final slot for overflow so an attacker cannot create
+        // MAX_USAGE_MODELS distinct keys plus a separate `other` bucket.
+        if (modelCount >= MAX_USAGE_MODELS - 1 && modelKey !== 'other') {
+          modelKey = 'other';
+        }
+        if (!Object.hasOwn(byModel, modelKey)) modelCount += 1;
+      }
+      const entry = byModel[modelKey] ?? (byModel[modelKey] = {
         turns: 0, inputTokens: 0, outputTokens: 0, weightedTokens: 0, costUsd: 0,
       });
       entry.turns += 1;
@@ -296,8 +311,13 @@ export function createUsageStore({
 
     async init() {
       await fs.mkdir(rootDir, { recursive: true });
+      await recoverInterruptedFileReplacement(plansPath, { platform });
+      await recoverInterruptedFileReplacement(eventsPath, { platform });
       try {
-        const raw = JSON.parse(await readSmallFile(plansPath, MAX_PLANS_BYTES));
+        const raw = JSON.parse(await readUtf8FileBounded(plansPath, {
+          maxBytes: MAX_PLANS_BYTES,
+          label: 'Usage plans',
+        }));
         for (const agent of AGENTS) {
           if (validPlan(agent, raw?.[agent])) plans[agent] = raw[agent];
         }
@@ -346,7 +366,7 @@ export function createUsageStore({
       const event = {
         ts: now(),
         agent: normalizedAgent,
-        model: typeof model === 'string' && model.trim() ? model.trim() : 'unknown',
+        model: normalizeModel(model),
         inputTokens: toCount(inputTokens),
         outputTokens: toCount(outputTokens),
         cacheReadTokens: toCount(cacheReadTokens),
@@ -394,9 +414,18 @@ export function createUsageStore({
         error.code = 'INVALID_PLAN';
         throw error;
       }
-      plans = { ...plans, [normalizedAgent]: plan };
-      await writeAtomic(plansPath, `${JSON.stringify(plans, null, 2)}\n`);
-      return this.summary();
+      const persisted = writeChain.then(async () => {
+        const nextPlans = { ...plans, [normalizedAgent]: plan };
+        await writeAtomic(plansPath, `${JSON.stringify(nextPlans, null, 2)}\n`);
+        // Publish the new in-memory selection only after the durable replace.
+        // A disk failure must not leave summary() ahead of restart state.
+        plans = nextPlans;
+        return this.summary();
+      });
+      // Keep later appends/replacements moving after a surfaced plan-write
+      // failure instead of permanently poisoning the shared persistence queue.
+      writeChain = persisted.catch(() => {});
+      return persisted;
     },
 
     summary() {

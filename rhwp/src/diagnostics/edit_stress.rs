@@ -1333,7 +1333,9 @@ pub fn run(args: &[String]) {
     let export = panic::catch_unwind(AssertUnwindSafe(|| doc.export_hwpx_native()));
     match export {
         Ok(Ok(out_bytes)) => {
-            match panic::catch_unwind(AssertUnwindSafe(|| HwpDocument::from_bytes(&out_bytes))) {
+            match panic::catch_unwind(AssertUnwindSafe(|| {
+                HwpDocument::from_regenerated_bytes(&out_bytes)
+            })) {
                 Ok(Ok(doc2)) => {
                     let rt_pages = doc2.page_count();
                     if rt_pages != edited_pages {

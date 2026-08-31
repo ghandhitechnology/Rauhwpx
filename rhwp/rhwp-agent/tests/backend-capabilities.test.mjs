@@ -105,6 +105,7 @@ class FakeProcess extends EventEmitter {
     queueMicrotask(() => {
       this.signalCode = signal;
       this.emit('exit', null, signal);
+      this.emit('close', null, signal);
     });
     return true;
   }
@@ -112,10 +113,32 @@ class FakeProcess extends EventEmitter {
   emitJson(...events) {
     this.stdout.emit('data', events.map((event) => JSON.stringify(event)).join('\n') + '\n');
   }
+
+  exitOnly(code) {
+    this.exitCode = code;
+    this.emit('exit', code, null);
+  }
+
+  close(code) {
+    this.emit('close', code ?? this.exitCode, null);
+  }
+
+  exit(code) {
+    this.exitOnly(code);
+    this.close(code);
+  }
 }
 
 function nextTask() {
   return new Promise((resolve) => setImmediate(resolve));
+}
+
+async function waitUntil(predicate, message = 'condition did not settle') {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (predicate()) return;
+    await nextTask();
+  }
+  assert.fail(message);
 }
 
 test('MCP runtime defaults to the current executable for development', () => {
@@ -668,8 +691,7 @@ test('Codex recreates a purged isolated home before spawning', (t) => {
   assert.equal(spawnEnv.USERPROFILE, isolatedHome);
   assert.equal(spawnEnv.RHWP_SESSION_ID, 'studio-thread-42');
   assert.equal(spawnEnv.CODEX_HOME, codexHome);
-  child.exitCode = 0;
-  child.emit('exit', 0, null);
+  child.exit(0);
   session.dispose();
 });
 
@@ -787,6 +809,8 @@ test('Codex keeps a completed turn open until its process exits', async () => {
       process = new FakeProcess();
       return process;
     },
+    terminateProcess: async () => true,
+    waitForExit: async () => true,
   });
 
   session.sendUserMessage('inspect');
@@ -797,11 +821,173 @@ test('Codex keeps a completed turn open until its process exits', async () => {
     /only change between turns/,
   );
 
-  process.exitCode = 0;
-  process.emit('exit', 0, null);
+  process.exit(0);
   assert.equal(events.filter((event) => event.type === 'turn-end').length, 1);
   await session.setExecutionMode({ workflow: 'plan', phase: 'implementing', capabilityEpoch: 2 });
   session.dispose();
+});
+
+test('Codex interrupt discards an unterminated terminal frame', async () => {
+  const events = [];
+  let child;
+  const session = createCodexSession({
+    ...baseOpts,
+    permissionProfile: 'safe',
+    onEvent: (event) => events.push(event),
+  }, {
+    spawnProcess() {
+      child = new FakeProcess();
+      return child;
+    },
+    terminateProcess: async () => true,
+    waitForExit: async () => true,
+  });
+
+  session.sendUserMessage('interrupt before the terminal frame is drained');
+  child.stdout.emit('data', JSON.stringify({
+    type: 'turn.completed',
+    usage: { input_tokens: 12, output_tokens: 4 },
+  }));
+  session.interrupt();
+  child.exit(0);
+  await nextTask();
+
+  assert.equal(events.some((event) => event.type === 'usage'), false);
+  assert.deepEqual(
+    events.filter((event) => event.type === 'turn-end'),
+    [{ type: 'turn-end', agent: 'codex', stopReason: 'interrupted' }],
+  );
+  assert.equal(await session.dispose(), true);
+});
+
+test('Claude interrupt discards an unterminated terminal frame', async () => {
+  const events = [];
+  let child;
+  const session = createClaudeSession({
+    ...baseOpts,
+    permissionProfile: 'safe',
+    onEvent: (event) => events.push(event),
+  }, {
+    spawnProcess() {
+      child = new FakeProcess();
+      return child;
+    },
+    terminateProcess: async () => true,
+    waitForExit: async () => true,
+  });
+
+  session.sendUserMessage('interrupt before the terminal frame is drained');
+  await nextTask();
+  child.stdout.emit('data', JSON.stringify({
+    type: 'result',
+    subtype: 'success',
+    stop_reason: 'end_turn',
+    usage: { input_tokens: 12, output_tokens: 4 },
+  }));
+  session.interrupt();
+  child.exit(0);
+  await nextTask();
+
+  assert.equal(events.some((event) => event.type === 'usage'), false);
+  assert.deepEqual(
+    events.filter((event) => event.type === 'turn-end'),
+    [{ type: 'turn-end', agent: 'claude', stopReason: 'interrupted' }],
+  );
+  assert.equal(await session.dispose(), true);
+});
+
+test('Codex exit grace without close discards an unterminated terminal frame', async () => {
+  const events = [];
+  let child;
+  const session = createCodexSession({
+    ...baseOpts,
+    permissionProfile: 'safe',
+    onEvent: (event) => events.push(event),
+  }, {
+    closeGraceMs: 5,
+    spawnProcess() {
+      child = new FakeProcess();
+      return child;
+    },
+    terminateProcess: async () => null,
+    waitForExit: async () => true,
+  });
+
+  session.sendUserMessage('leader exits while a descendant retains stdout');
+  child.stdout.emit('data', JSON.stringify({
+    type: 'turn.completed',
+    usage: { input_tokens: 12, output_tokens: 4 },
+  }));
+  child.exitOnly(0);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(events.some((event) => event.type === 'usage'), false);
+  assert.deepEqual(events.at(-1), { type: 'turn-end', agent: 'codex', stopReason: 'exited' });
+  assert.equal(await session.dispose(), false);
+});
+
+test('Codex exit grace without close rejects a newline-terminated terminal frame', async () => {
+  const events = [];
+  let child;
+  const session = createCodexSession({
+    ...baseOpts,
+    permissionProfile: 'safe',
+    onEvent: (event) => events.push(event),
+  }, {
+    closeGraceMs: 5,
+    spawnProcess() {
+      child = new FakeProcess();
+      return child;
+    },
+    terminateProcess: async () => null,
+    waitForExit: async () => true,
+  });
+
+  session.sendUserMessage('terminal frame arrives but stdout never closes');
+  child.emitJson({ type: 'turn.completed', usage: { input_tokens: 12, output_tokens: 4 } });
+  child.exitOnly(0);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(events.some((event) => event.type === 'usage'), true);
+  assert.equal(
+    events.some((event) => event.type === 'turn-end' && event.stopReason === 'completed'),
+    false,
+  );
+  assert.deepEqual(events.at(-1), { type: 'turn-end', agent: 'codex', stopReason: 'exited' });
+  assert.equal(await session.dispose(), false);
+});
+
+test('Claude exit grace without close discards an unterminated terminal frame', async () => {
+  const events = [];
+  let child;
+  const session = createClaudeSession({
+    ...baseOpts,
+    permissionProfile: 'safe',
+    onEvent: (event) => events.push(event),
+  }, {
+    closeGraceMs: 5,
+    spawnProcess() {
+      child = new FakeProcess();
+      return child;
+    },
+    terminateProcess: async () => null,
+    waitForExit: async () => true,
+  });
+
+  session.sendUserMessage('leader exits while a descendant retains stdout');
+  await nextTask();
+  child.stdout.emit('data', JSON.stringify({
+    type: 'result',
+    subtype: 'success',
+    stop_reason: 'end_turn',
+    usage: { input_tokens: 12, output_tokens: 4 },
+  }));
+  child.exitOnly(0);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(events.some((event) => event.type === 'usage'), false);
+  assert.deepEqual(events.at(-1), { type: 'turn-end', agent: 'claude', stopReason: 'exited' });
+  assert.equal(await session.dispose(), false);
 });
 
 test('natural Codex leader exit retains tree cleanup result for delayed disposal', async () => {
@@ -827,8 +1013,7 @@ test('natural Codex leader exit retains tree cleanup result for delayed disposal
   });
   session.sendUserMessage('finish while a descendant owns stdout');
   child.emitJson({ type: 'turn.completed', usage: {} });
-  child.exitCode = 0;
-  child.emit('exit', 0, null);
+  child.exitOnly(0);
 
   let settled = false;
   const disposed = session.dispose().then((value) => {
@@ -842,6 +1027,176 @@ test('natural Codex leader exit retains tree cleanup result for delayed disposal
   finishTreeWait(false);
   assert.equal(await disposed, false);
   assert.equal(await session.dispose(), false);
+});
+
+test('a Windows Codex terminal tail without newline drains before unavailable cleanup quarantine', async () => {
+  const events = [];
+  const children = [];
+  const session = createCodexSession({
+    ...baseOpts,
+    permissionProfile: 'safe',
+    onEvent: (event) => events.push(event),
+  }, {
+    platform: 'win32',
+    spawnProcess() {
+      const child = new FakeProcess();
+      children.push(child);
+      return child;
+    },
+    terminateProcess: async () => null,
+    waitForExit: async () => true,
+  });
+
+  session.sendUserMessage('first');
+  children[0].stdout.emit('data', JSON.stringify({ type: 'turn.completed', usage: {} }));
+  children[0].exit(0);
+  await nextTask();
+  session.sendUserMessage('must not spawn');
+
+  assert.equal(children.length, 1);
+  assert.equal(
+    events.filter((event) => event.type === 'turn-start').length,
+    1,
+    'quarantined cleanup must not advertise a second provider turn',
+  );
+  assert.match(events.findLast((event) => event.type === 'error').message, /cleanup remains unconfirmed/);
+  assert.deepEqual(events.at(-1), { type: 'turn-end', agent: 'codex', stopReason: 'failed' });
+  assert.equal(await session.dispose(), false);
+});
+
+test('Windows Codex terminal cleanup starts live, drains buffered output, and allows another turn', async () => {
+  const events = [];
+  const children = [];
+  let cleanupCalls = 0;
+  const session = createCodexSession({
+    ...baseOpts,
+    permissionProfile: 'safe',
+    onEvent: (event) => events.push(event),
+  }, {
+    platform: 'win32',
+    spawnProcess() {
+      const child = new FakeProcess();
+      children.push(child);
+      return child;
+    },
+    terminateProcess(child) {
+      assert.equal(child.exitCode, null);
+      assert.equal(child.signalCode, null);
+      cleanupCalls += 1;
+      return true;
+    },
+    waitForExit: async () => true,
+  });
+
+  session.sendUserMessage('first');
+  children[0].emitJson(
+    { type: 'turn.completed', usage: {} },
+    {
+      type: 'item.completed',
+      item: {
+        id: 'buffered-command',
+        type: 'command_execution',
+        status: 'completed',
+        aggregated_output: 'drained',
+      },
+    },
+  );
+  assert.equal(cleanupCalls, 1);
+  assert.equal(events.some((event) => event.type === 'tool-result' && event.callId === 'buffered-command'), true);
+  children[0].exit(0);
+  await nextTask();
+
+  session.sendUserMessage('second');
+  assert.equal(children.length, 2);
+  const disposing = session.dispose();
+  children[1].exit(0);
+  assert.equal(await disposing, true);
+});
+
+test('a Windows Claude terminal tail without newline drains before unavailable cleanup quarantine', async () => {
+  const events = [];
+  const children = [];
+  const session = createClaudeSession({
+    ...baseOpts,
+    permissionProfile: 'safe',
+    onEvent: (event) => events.push(event),
+  }, {
+    platform: 'win32',
+    spawnProcess() {
+      const child = new FakeProcess();
+      children.push(child);
+      return child;
+    },
+    terminateProcess: async () => null,
+    waitForExit: async () => true,
+  });
+
+  session.sendUserMessage('first');
+  await nextTask();
+  children[0].stdout.emit('data', JSON.stringify({ type: 'result', stop_reason: 'end_turn' }));
+  children[0].exit(0);
+  await nextTask();
+  const turnStarts = events.filter((event) => event.type === 'turn-start').length;
+  const turnEnds = events.filter((event) => event.type === 'turn-end').length;
+  assert.throws(
+    () => session.sendUserMessage('must not spawn'),
+    /cleanup remains unconfirmed/,
+  );
+
+  assert.equal(children.length, 1);
+  assert.equal(events.filter((event) => event.type === 'turn-start').length, turnStarts);
+  assert.equal(events.filter((event) => event.type === 'turn-end').length, turnEnds);
+  assert.equal(await session.dispose(), false);
+});
+
+test('Claude proves legacy cleanup before turn-end and resumes in a fresh process', async () => {
+  const events = [];
+  const spawns = [];
+  let cleanupCalls = 0;
+  const session = createClaudeSession({
+    ...baseOpts,
+    permissionProfile: 'safe',
+    onEvent: (event) => events.push(event),
+  }, {
+    spawnProcess(command, argv, options) {
+      const process = new FakeProcess();
+      spawns.push({ command, argv, options, process });
+      return process;
+    },
+    terminateProcess(process) {
+      assert.equal(process.exitCode, null);
+      assert.equal(process.signalCode, null);
+      cleanupCalls += 1;
+      process.kill('SIGTERM');
+      return true;
+    },
+    waitForExit: async () => true,
+  });
+
+  session.sendUserMessage('turn A');
+  await nextTask();
+  spawns[0].process.emitJson(
+    { type: 'system', subtype: 'init', session_id: 'legacy-resume-id', model: 'claude-test' },
+    { type: 'result', subtype: 'success', stop_reason: 'end_turn' },
+    {
+      type: 'system',
+      subtype: 'task_notification',
+      task_id: 'stale-turn-a-task',
+      status: 'completed',
+    },
+  );
+  assert.equal(events.some((event) => event.type === 'turn-end'), false);
+  await waitUntil(() => events.filter((event) => event.type === 'turn-end').length === 1);
+  assert.equal(cleanupCalls, 1);
+  assert.equal(events.some((event) => event.type === 'task-end'), false);
+
+  session.sendUserMessage('turn B');
+  await waitUntil(() => spawns.length === 2);
+  assert.ok(spawns[1].argv.includes('--resume'));
+  assert.equal(argValue(spawns[1].argv, '--resume'), 'legacy-resume-id');
+  assert.equal(JSON.parse(spawns[1].process.stdin.chunks[0]).message.content[0].text, 'turn B');
+  assert.equal(events.filter((event) => event.type === 'turn-start').length, 2);
+  assert.equal(await session.dispose(), true);
 });
 
 test('Claude waits for an idle restart and resumes with the new phase', async () => {
@@ -882,6 +1237,7 @@ test('Claude waits for an idle restart and resumes with the new phase', async ()
     { type: 'result', stop_reason: 'end_turn' },
   );
   assert.deepEqual(events.filter((event) => event.type === 'text-delta').map((event) => event.text), ['root', 'child']);
+  await waitUntil(() => events.some((event) => event.type === 'turn-end'));
 
   await session.setExecutionMode({ workflow: 'plan', phase: 'implementing', capabilityEpoch: 2 });
   session.sendUserMessage('approved kickoff');
@@ -897,7 +1253,8 @@ test('Claude waits for an idle restart and resumes with the new phase', async ()
   session.dispose();
 });
 
-test('Claude config restart propagates uncertain process-tree cleanup', async () => {
+test('Claude terminal cleanup quarantines config changes when proof is unavailable', async () => {
+  const events = [];
   let child;
   let finishTermination;
   let finishTreeWait;
@@ -907,6 +1264,7 @@ test('Claude config restart propagates uncertain process-tree cleanup', async ()
   const session = createClaudeSession({
     ...baseOpts,
     permissionProfile: 'safe',
+    onEvent: (event) => events.push(event),
   }, {
     spawnProcess() {
       child = new FakeProcess();
@@ -921,20 +1279,50 @@ test('Claude config restart propagates uncertain process-tree cleanup', async ()
   session.sendUserMessage('complete the current turn');
   await nextTask();
   child.emitJson({ type: 'result', stop_reason: 'end_turn' });
-
-  let settled = false;
-  const switched = session.setExecutionMode({
-    workflow: 'plan', phase: 'implementing', capabilityEpoch: 2,
-  }).then(() => {
-    settled = true;
-  });
   await nextTask();
-  assert.equal(settled, false);
+  await assert.rejects(
+    session.setExecutionMode({ workflow: 'plan', phase: 'implementing', capabilityEpoch: 2 }),
+    /only change between turns/,
+  );
   assert.equal(terminationCalls, 1);
   finishTermination(true);
   finishTreeWait(false);
-  await assert.rejects(switched, /process tree could not be stopped/);
+  await waitUntil(() => events.filter((event) => event.type === 'turn-end').length === 1);
+  assert.equal(events.at(-1).stopReason, 'failed');
+  await assert.rejects(
+    session.setExecutionMode({ workflow: 'plan', phase: 'implementing', capabilityEpoch: 2 }),
+    /cleanup remains unconfirmed/,
+  );
   assert.equal(await session.dispose(), false);
+});
+
+test('Claude preserves a redacted spawn error through delayed exit settlement', async () => {
+  const events = [];
+  let child;
+  const session = createClaudeSession({
+    ...baseOpts,
+    permissionProfile: 'safe',
+    onEvent: (event) => events.push(event),
+  }, {
+    spawnProcess() {
+      child = new FakeProcess();
+      return child;
+    },
+  });
+
+  session.sendUserMessage('start');
+  await nextTask();
+  const error = new Error('spawn ENOENT for secret-token');
+  error.code = 'ENOENT';
+  child.emit('error', error);
+  await nextTask();
+  await nextTask();
+
+  const surfaced = events.find((event) => event.type === 'error');
+  assert.match(surfaced?.message ?? '', /claude process error: spawn ENOENT/);
+  assert.doesNotMatch(surfaced?.message ?? '', /secret-token/);
+  assert.equal(events.find((event) => event.type === 'turn-end')?.stopReason, 'exited');
+  await session.dispose();
 });
 
 async function runClaudeResult(result, opts = {}) {
@@ -947,7 +1335,8 @@ async function runClaudeResult(result, opts = {}) {
   session.sendUserMessage('go');
   await nextTask();
   child.emitJson(...(opts.prelude ?? []), { type: 'result', stop_reason: 'end_turn', ...result });
-  session.dispose();
+  await waitUntil(() => events.some((event) => event.type === 'turn-end'));
+  await session.dispose();
   return events;
 }
 
@@ -1046,8 +1435,7 @@ test('Codex maps turn.completed usage and keeps it ahead of turn-end', () => {
   });
   assert.equal(events.some((event) => event.type === 'turn-end'), false);
 
-  child.exitCode = 0;
-  child.emit('exit', 0, null);
+  child.exit(0);
   assert.ok(events.indexOf(usage[0]) < events.findIndex((event) => event.type === 'turn-end'));
   session.dispose();
 });

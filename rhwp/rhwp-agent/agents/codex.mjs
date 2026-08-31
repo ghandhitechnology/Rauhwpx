@@ -33,6 +33,8 @@ export {
 } from './provider-user-input.mjs';
 import {
   isolatedProcessEnv,
+  PROCESS_TREE_CLEANUP_OUTCOME,
+  processTreeCleanupOutcome,
   processTreeSpawnOptions,
   terminateProcessTree,
   waitForProcessTreeExit,
@@ -200,6 +202,8 @@ export function createLegacyCodexSession(opts, {
   waitForExit = waitForProcessTreeExit,
   createRolloutWatcher = createCodexRolloutWatcher,
   initialThreadId = null,
+  closeGraceMs = 2_000,
+  platform = process.platform,
 } = {}) {
   const onEvent = opts.onEvent;
 
@@ -214,9 +218,14 @@ export function createLegacyCodexSession(opts, {
   let loggedToolCallSample = false;
   let stderrTail = '';
   let childExitPromise = Promise.resolve(true);
+  /** @type {(reason?: 'forced'|'queue') => Promise<boolean>} */
   let stopChild = () => Promise.resolve(true);
+  let beginTerminalCleanup = () => Promise.resolve(true);
+  let suppressChildOutput = () => {};
   const pendingTreeCleanups = new Set();
   let uncertainTreeCleanup = false;
+  /** @type {{ text: string } | null} */
+  let queuedTurn = null;
   /**
    * 이번 턴의 롤아웃 워처. codex --json 에는 자식 에이전트 활동이 한 줄도 오지
    * 않으므로 fleet 카드의 유일한 소스다.
@@ -380,6 +389,7 @@ export function createLegacyCodexSession(opts, {
             usage: { ...usage, cacheCreationTokens: 0 },
           });
         }
+        void beginTerminalCleanup();
         return;
       }
       if (type === 'turn.failed') {
@@ -387,6 +397,7 @@ export function createLegacyCodexSession(opts, {
         const message = String(e.error?.message ?? e.message ?? 'turn failed');
         turnFailureMessage = message;
         onEvent({ type: 'error', agent: 'codex', message });
+        void beginTerminalCleanup();
         return;
       }
       if (type === 'error') {
@@ -397,23 +408,69 @@ export function createLegacyCodexSession(opts, {
   }
 
   function killChild() {
-    return stopChild();
+    return stopChild('forced');
   }
 
-  return {
+  const session = {
     agent: 'codex',
     getSessionId() {
       return threadId;
     },
     sendUserMessage(text) {
       if (disposed) return;
+      if (turnOpen || queuedTurn) throw new Error('Codex already has a turn in progress');
+      if (uncertainTreeCleanup) {
+        turnOpen = true;
+        turnCompleted = false;
+        turnFailureMessage = null;
+        onEvent({
+          type: 'error',
+          agent: 'codex',
+          message: 'Codex process-tree cleanup remains unconfirmed; start a new isolated session',
+        });
+        endTurn({ type: 'turn-end', agent: 'codex', stopReason: 'failed' });
+        return;
+      }
+      if (child) {
+        const queued = { text };
+        queuedTurn = queued;
+        const ownership = childExitPromise;
+        void stopChild('queue');
+        void ownership.then((cleaned) => {
+          if (queuedTurn !== queued) return;
+          queuedTurn = null;
+          if (disposed) return;
+          if (cleaned && !child) {
+            session.sendUserMessage(queued.text);
+            return;
+          }
+          turnOpen = true;
+          turnCompleted = false;
+          turnFailureMessage = null;
+          onEvent({
+            type: 'error',
+            agent: 'codex',
+            message: 'Codex process-tree cleanup could not be confirmed before the next turn',
+          });
+          endTurn({ type: 'turn-end', agent: 'codex', stopReason: 'failed' });
+        }, () => {
+          if (queuedTurn !== queued) return;
+          queuedTurn = null;
+          if (disposed) return;
+          turnOpen = true;
+          onEvent({
+            type: 'error',
+            agent: 'codex',
+            message: 'Codex process-tree cleanup could not be confirmed before the next turn',
+          });
+          endTurn({ type: 'turn-end', agent: 'codex', stopReason: 'failed' });
+        });
+        return;
+      }
       // 이전 턴의 워처가 남아 있으면 turn-start 보다 먼저 정리한다 — 그래야 남은
       // 카드를 닫는 task-end 가 지난 턴 안에서 끝난다 (정상 흐름에서는 exit 에서
       // 이미 정리됐고, 여기 걸리는 건 exit 이 오지 않은 예외 경로다).
       finalizeRolloutWatcher();
-      // A same-tick next turn must not discard the previous tree identity.
-      // Capture its bounded cleanup before replacing the active child slot.
-      if (child) void stopChild();
       turnOpen = true;
       turnCompleted = false;
       turnFailureMessage = null;
@@ -457,13 +514,96 @@ export function createLegacyCodexSession(opts, {
       childExitPromise = new Promise((resolve) => { resolveOwnership = resolve; });
       let cleanupPromise = null;
       let outputEnded = false;
+      let readerEnded = false;
+      let acceptOutput = true;
+      let cleanupSettled = false;
+      let cleanupOutcome = PROCESS_TREE_CLEANUP_OUTCOME.FAILED;
+      let drainedClose = false;
+      let completedAtDrain = false;
+      let forcedCleanup = false;
+      /** @type {{ code: number|null, signal: NodeJS.Signals|null } | null} */
+      let exitInfo = null;
+      /** @type {ReturnType<typeof setTimeout> | null} */
+      let closeGraceTimer = null;
       const readStdout = createLineReader(makeHandler());
-      const endOutput = () => {
+      const closeOutputReader = (flush) => {
+        if (readerEnded) return;
+        readerEnded = true;
+        acceptOutput = false;
+        if (flush) readStdout.end();
+        else readStdout.discard();
+      };
+      const discardOutputReader = () => closeOutputReader(false);
+      const finishOutput = (flush) => {
         if (outputEnded) return;
         outputEnded = true;
-        readStdout.end();
+        if (closeGraceTimer) {
+          clearTimeout(closeGraceTimer);
+          closeGraceTimer = null;
+        }
+        closeOutputReader(flush);
       };
-      stopChild = () => {
+      const endOutput = () => finishOutput(true);
+      const discardOutput = () => finishOutput(false);
+      suppressChildOutput = () => {
+        if (proc === child) discardOutput();
+      };
+      const finishOwnership = () => {
+        if (!outputEnded || !cleanupSettled) return;
+        const proven = cleanupOutcome === PROCESS_TREE_CLEANUP_OUTCOME.PROVEN;
+        const naturalDrainedRelease = cleanupOutcome === PROCESS_TREE_CLEANUP_OUTCOME.UNAVAILABLE
+          && drainedClose
+          && completedAtDrain
+          && exitInfo?.code === 0
+          && !forcedCleanup;
+        const released = proven || naturalDrainedRelease;
+        if (released && proc === child) {
+          child = null;
+          beginTerminalCleanup = () => Promise.resolve(true);
+        }
+        // A natural drained close can release the local child reference, but
+        // unavailable proof quarantines this session and never authorizes a
+        // follow-up spawn in the same workspace.
+        resolveOwnership(proven);
+        resolveOwnership = () => {};
+      };
+      const settleOutput = (code, signal, fromClose) => {
+        if (proc !== child || outputEnded) return;
+        drainedClose = fromClose;
+        exitInfo ??= { code, signal };
+        if (fromClose) endOutput();
+        else discardOutput();
+        completedAtDrain = fromClose && turnCompleted;
+        // A bounded grace settles the turn but cannot manufacture EOF for an
+        // unterminated frame while a descendant still owns stdout.
+        finalizeRolloutWatcher();
+        if (turnOpen && !disposed) {
+          if (turnFailureMessage) {
+            endTurn({ type: 'turn-end', agent: 'codex', stopReason: 'failed', errorMessage: turnFailureMessage });
+          } else if (!completedAtDrain && code !== 0) {
+            onEvent({
+              type: 'error',
+              agent: 'codex',
+              message: formatCodexExitError(stderrTail, code, signal, opts.token),
+            });
+            endTurn({ type: 'turn-end', agent: 'codex', stopReason: 'exited' });
+          } else {
+            endTurn({ type: 'turn-end', agent: 'codex', stopReason: completedAtDrain ? 'completed' : 'exited' });
+          }
+        }
+        void beginCleanup(false);
+        finishOwnership();
+      };
+      const scheduleCloseGrace = (code, signal) => {
+        if (outputEnded || closeGraceTimer) return;
+        closeGraceTimer = setTimeout(() => {
+          closeGraceTimer = null;
+          settleOutput(code ?? null, signal ?? null, false);
+        }, closeGraceMs);
+        closeGraceTimer.unref?.();
+      };
+      const beginCleanup = (forced = false) => {
+        forcedCleanup ||= forced;
         if (proc !== child) return Promise.resolve(true);
         if (cleanupPromise) return cleanupPromise;
         let resolveCleanup = () => {};
@@ -478,80 +618,88 @@ export function createLegacyCodexSession(opts, {
         try { termination = Promise.resolve(terminateProcess(proc)); } catch { termination = Promise.resolve(false); }
         try { exited = Promise.resolve(waitForExit(proc)); } catch { exited = Promise.resolve(false); }
         void Promise.all([termination, exited]).then(
-          ([terminationResult, exitResult]) => terminationResult !== false && exitResult !== false,
-          () => false,
-        ).then((cleaned) => {
-          endOutput();
-          if (cleaned && proc === child) child = null;
-          resolveOwnership(cleaned);
-          resolveOwnership = () => {};
-          resolveCleanup(cleaned);
+          ([terminationResult, exitResult]) => processTreeCleanupOutcome(
+            terminationResult,
+            exitResult,
+          ),
+          () => PROCESS_TREE_CLEANUP_OUTCOME.FAILED,
+        ).then((outcome) => {
+          cleanupSettled = true;
+          cleanupOutcome = outcome;
+          if (outcome !== PROCESS_TREE_CLEANUP_OUTCOME.PROVEN) {
+            uncertainTreeCleanup = true;
+          }
+          if (!outputEnded) {
+            scheduleCloseGrace(
+              exitInfo?.code ?? proc.exitCode ?? null,
+              exitInfo?.signal ?? proc.signalCode ?? null,
+            );
+          }
+          finishOwnership();
+          resolveCleanup(outcome === PROCESS_TREE_CLEANUP_OUTCOME.PROVEN);
         });
         return cleanupPromise;
       };
+      stopChild = (reason = 'forced') => {
+        const forced = reason === 'forced' || (reason === 'queue' && exitInfo === null);
+        if (forced) discardOutput();
+        return beginCleanup(forced);
+      };
+      beginTerminalCleanup = () => platform === 'win32'
+        ? beginCleanup(false)
+        : Promise.resolve(true);
       proc.stdin.on('error', (err) => {
         process.stderr.write(`[codex] stdin write error: ${err?.message ?? err}\n`);
       });
       proc.stdin.end(prompt);
-      proc.stdout.on('data', readStdout);
+      proc.stdout.on('data', (chunk) => {
+        if (proc !== child || disposed || !acceptOutput) return;
+        readStdout(chunk);
+      });
       proc.stderr.on('data', (chunk) => {
+        if (proc !== child || disposed || !acceptOutput) return;
         const text = chunk.toString();
         stderrTail = (stderrTail + text).slice(-STDERR_TAIL_LIMIT);
       });
       proc.on('error', (err) => {
         if (proc !== child) return;
+        discardOutputReader();
         const safeError = redactDiagnosticText(err?.message ?? err, [opts.token]);
         process.stderr.write(`[codex] spawn error: ${safeError}\n`);
-        // exit 경로와 똑같이 워처부터 정리한다 — 여기서 turn-end 가 나가면
-        // 열린 카드가 그대로 매달린 채 턴이 닫힌다.
-        finalizeRolloutWatcher();
         if (turnOpen) {
-          onEvent({ type: 'error', agent: 'codex', message: `codex process error: ${safeError}` });
-          endTurn({ type: 'turn-end', agent: 'codex', stopReason: 'exited' });
+          turnFailureMessage = `codex process error: ${safeError}`;
+          onEvent({ type: 'error', agent: 'codex', message: turnFailureMessage });
         }
+        void beginCleanup(true);
+        scheduleCloseGrace(proc.exitCode ?? null, proc.signalCode ?? null);
       });
       proc.on('exit', (code, signal) => {
         if (proc !== child) return;
-        // 자식 에이전트는 부모 프로세스 안에서 돌기 때문에 여기서 전부 죽는다.
-        // turn-end 보다 먼저 마지막 롤아웃을 훑어 카드를 닫는다 — 턴이 끝날 때
-        // 열린 task 가 남아 있으면 안 된다.
-        finalizeRolloutWatcher();
-        if (turnOpen && !disposed) {
-          if (turnFailureMessage) {
-            endTurn({ type: 'turn-end', agent: 'codex', stopReason: 'failed', errorMessage: turnFailureMessage });
-          } else if (!turnCompleted && code !== 0) {
-            onEvent({
-              type: 'error',
-              agent: 'codex',
-              message: formatCodexExitError(stderrTail, code, signal, opts.token),
-            });
-            endTurn({ type: 'turn-end', agent: 'codex', stopReason: 'exited' });
-          } else {
-            endTurn({ type: 'turn-end', agent: 'codex', stopReason: turnCompleted ? 'completed' : 'exited' });
-          }
-        }
-        // Preserve the exited leader until its process group/task tree has
-        // completed bounded cleanup.
-        void stopChild();
+        exitInfo = { code, signal };
+        void beginCleanup(false);
+        scheduleCloseGrace(code, signal);
       });
-      proc.on('close', () => {
+      proc.on('close', (code, signal) => {
         if (proc !== child) return;
-        endOutput();
-        void stopChild();
+        exitInfo ??= { code: code ?? null, signal: signal ?? null };
+        settleOutput(code ?? exitInfo.code ?? null, signal ?? exitInfo.signal ?? null, true);
       });
     },
     setPermissionProfile(profile) {
-      if (turnOpen) throw new Error('Permission profile can only change between turns');
+      if (turnOpen || queuedTurn) throw new Error('Permission profile can only change between turns');
+      if (uncertainTreeCleanup) throw new Error('Codex process tree cleanup remains unconfirmed');
       if (profile !== 'safe' && profile !== 'unrestricted') throw new Error(`Unknown permission profile: ${profile}`);
       opts.permissionProfile = profile;
     },
     setServiceTier(tier) {
-      if (turnOpen) throw new Error('Service tier can only change between turns');
+      if (turnOpen || queuedTurn) throw new Error('Service tier can only change between turns');
+      if (uncertainTreeCleanup) throw new Error('Codex process tree cleanup remains unconfirmed');
       if (tier !== 'standard' && tier !== 'fast') throw new Error(`Unknown service tier: ${tier}`);
       opts.serviceTier = tier;
     },
     async setExecutionMode(mode) {
-      if (turnOpen) throw new Error('Execution mode can only change between turns');
+      if (turnOpen || queuedTurn) throw new Error('Execution mode can only change between turns');
+      if (uncertainTreeCleanup) throw new Error('Codex process tree cleanup remains unconfirmed');
       validateExecutionMode(mode);
       if (child) killChild();
       const cleanupResults = await Promise.all([childExitPromise, ...pendingTreeCleanups]);
@@ -563,6 +711,8 @@ export function createLegacyCodexSession(opts, {
       opts.capabilityEpoch = mode.capabilityEpoch;
     },
     interrupt() {
+      queuedTurn = null;
+      suppressChildOutput();
       killChild();
       finalizeRolloutWatcher();
       endTurn({ type: 'turn-end', agent: 'codex', stopReason: 'interrupted' });
@@ -570,15 +720,18 @@ export function createLegacyCodexSession(opts, {
     dispose() {
       disposed = true;
       turnOpen = false;
+      queuedTurn = null;
+      suppressChildOutput();
       // 죽어가는 자식의 stdout 을 아예 파싱하지 않는다. 롤아웃 폴링도 같이 멈춘다.
       try { child?.stdout?.removeAllListeners('data'); } catch {}
       rolloutWatcher?.stop();
       rolloutWatcher = null;
       const currentCleanup = killChild();
-      return Promise.all([currentCleanup, ...pendingTreeCleanups])
+      return Promise.all([currentCleanup, childExitPromise, ...pendingTreeCleanups])
         .then((results) => !uncertainTreeCleanup && results.every((result) => result !== false));
     },
   };
+  return session;
 }
 
 /**

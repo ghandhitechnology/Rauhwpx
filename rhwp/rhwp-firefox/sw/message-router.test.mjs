@@ -11,7 +11,9 @@ try {
   const respond = (value) => responses.push(value);
 
   assert.equal(dispatchRuntimeMessage(null, {}, respond), false);
-  assert.equal(dispatchRuntimeMessage({ type: '__proto__' }, {}, respond), false);
+  for (const type of ['__proto__', 'constructor', 'toString', 'valueOf']) {
+    assert.equal(dispatchRuntimeMessage({ type }, {}, respond), false);
+  }
   assert.equal(dispatchRuntimeMessage({ type: 'missing' }, {}, respond), false);
   assert.deepEqual(responses, []);
 

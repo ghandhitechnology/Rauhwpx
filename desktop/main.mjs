@@ -30,7 +30,6 @@ import {
   spawnHubProcess,
   stopHubChild,
   waitForHub,
-  waitForHubChildExit,
   waitForHubReadyLine,
 } from './agent-hub.mjs';
 import { DocumentLeaseManager } from './document-leases.mjs';
@@ -134,6 +133,7 @@ class AgentHubOwner {
   #restartAttempt = 0;
   #restartTimer = null;
   #stoppingChild = null;
+  #restartRequired = false;
 
   constructor({ runtimeDir, workDir }) {
     this.runtimeDir = runtimeDir;
@@ -150,7 +150,7 @@ class AgentHubOwner {
   }
 
   scheduleRestart() {
-    if (this.#disposed || quitting || this.#restartTimer) return;
+    if (this.#disposed || quitting || this.#restartTimer || this.#restartRequired) return;
     const delay = nextHubRestartDelay(this.#restartAttempt++);
     console.warn(`[rauhwpx] owned agent hub exited; restarting in ${delay}ms`);
     this.#restartTimer = setTimeout(() => {
@@ -162,32 +162,56 @@ class AgentHubOwner {
     }, delay);
   }
 
+  restartRequiredError() {
+    const error = new Error(
+      'The agent hub exited before its Windows process tree could be confirmed stopped. Restart Rauhwpx before using the agent hub again.',
+    );
+    error.code = 'AGENT_HUB_RESTART_REQUIRED';
+    return error;
+  }
+
+  quarantineUnexpectedWindowsExit() {
+    if (this.#restartRequired) return;
+    this.#restartRequired = true;
+    this.clearRestart();
+    try {
+      retainLaunchRootForProcessCleanupSync(this.workDir, { launchId });
+    } catch (error) {
+      console.warn('[rauhwpx] process cleanup retention marker failed:', error);
+    }
+    console.warn(
+      '[rauhwpx] owned agent hub exited unexpectedly on Windows; retaining launch work and requiring an app restart:',
+      this.workDir,
+    );
+  }
+
   async stopCurrent() {
     const child = this.#child;
     const context = this.#context;
     this.#context = null;
     this.#stoppingChild = child;
-    let gracefulShutdownAccepted = false;
+    let cleanupPrepared = false;
     try {
+      if (this.#restartRequired && (child?.exitCode != null || child?.signalCode != null)) {
+        throw this.restartRequiredError();
+      }
       if (context) {
         try {
-          await requestHubShutdown({
+          const response = await requestHubShutdown({
             port: context.port,
             token: hubToken,
             launchId,
-            timeoutMs: 1500,
+            timeoutMs: 15_000,
           });
-          gracefulShutdownAccepted = true;
+          cleanupPrepared = response?.status === 'prepared'
+            && response?.launchId === launchId;
         } catch (error) {
           console.warn('[rauhwpx] graceful agent hub shutdown failed:', error);
         }
       }
-      // This wait is only a grace period for the leader. stopHubChild must
-      // still prove the POSIX group or Windows task tree is gone afterward.
-      if (gracefulShutdownAccepted) {
-        await waitForHubChildExit(child, { timeoutMs: 5000 });
-      }
-      const stopped = await stopHubChild(child, { timeoutMs: 5000 });
+      // A prepared response proves descendants were disposed. Windows can then
+      // wait on the retained child handle without resolving a reusable PID.
+      const stopped = await stopHubChild(child, { timeoutMs: 5000, cleanupPrepared });
       if (!stopped) {
         // Preserve the exited leader's PID/tree identity and make every outer
         // cleanup layer retain the launch root until a reboot proves safety.
@@ -207,6 +231,7 @@ class AgentHubOwner {
 
   async start() {
     if (this.#disposed) throw new Error('Agent hub owner has been disposed');
+    if (this.#restartRequired) throw this.restartRequiredError();
     if (this.#startPromise) return this.#startPromise;
     this.#startPromise = this.startOwnedChild();
     try {
@@ -283,7 +308,12 @@ class AgentHubOwner {
         this.#context = null;
         // `exit` only proves the leader died. Retain the ChildProcess/PID until
         // stopCurrent has probed and escalated the complete owned tree.
-        if (this.#stoppingChild !== child) this.scheduleRestart();
+        if (this.#stoppingChild === child) return;
+        if (process.platform === 'win32') {
+          this.quarantineUnexpectedWindowsExit();
+          return;
+        }
+        this.scheduleRestart();
       },
     });
     this.#child = child;

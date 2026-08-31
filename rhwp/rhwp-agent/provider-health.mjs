@@ -109,7 +109,12 @@ export function createProviderHealth({
         void terminateAndWaitForProcessTreeExit(proc, {
           timeoutMs: Math.min(4_000, Math.max(1_500, timeoutMs)),
           terminateProcess: terminateProcessTree,
-          terminateOptions: { platform, spawnProcess, graceMs: 1_000 },
+          terminateOptions: {
+            platform,
+            spawnProcess,
+            graceMs: 1_000,
+            env: env ?? process.env,
+          },
         }).finally(() => done(health));
       };
 

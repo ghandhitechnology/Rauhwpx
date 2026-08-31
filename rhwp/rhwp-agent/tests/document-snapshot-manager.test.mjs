@@ -180,3 +180,55 @@ test('per-chat snapshot aggregate bytes are bounded', async (t) => {
   await request();
   await assert.rejects(request(), (error) => error.code === 'SNAPSHOT_CHAT_QUOTA');
 });
+
+test('discard removes an undelivered allocation and releases its chat quota', async (t) => {
+  let sequence = 0;
+  const { manager } = await temporaryManager(t, {
+    maxFilesPerChat: 1,
+    maxChatBytes: CFB.length,
+    createId: () => `snapshot-${++sequence}`,
+  });
+  const request = () => manager.materialize({
+    chatId: 'chat-cancelled',
+    documentIdentity: { documentId: 'doc-a', documentName: 'cancelled.hwp' },
+    snapshot: { sourceFormat: 'hwp', byteLength: CFB.length, dataBase64: CFB.toString('base64') },
+  });
+
+  const cancelled = await request();
+  await manager.discard(cancelled);
+  await assert.rejects(fs.stat(cancelled.path), (error) => error.code === 'ENOENT');
+
+  const replacement = await request();
+  assert.deepEqual(await fs.readFile(replacement.path), CFB);
+  await assert.rejects(
+    manager.discard({ path: path.join(manager.baseDir, '..', 'outside.hwp') }),
+    (error) => error.code === 'SNAPSHOT_PATH_UNSAFE',
+  );
+});
+
+test('drain waits for admitted snapshot writes before record cleanup', async (t) => {
+  const { manager } = await temporaryManager(t);
+  const materializeSerial = manager.materializeSerial.bind(manager);
+  let releaseWrite;
+  const writeGate = new Promise((resolve) => { releaseWrite = resolve; });
+  manager.materializeSerial = async (args) => {
+    await writeGate;
+    return materializeSerial(args);
+  };
+
+  const pending = manager.materialize({
+    chatId: 'chat-drain',
+    documentIdentity: { documentId: 'doc-a', documentName: 'drain.hwp' },
+    snapshot: { sourceFormat: 'hwp', byteLength: CFB.length, dataBase64: CFB.toString('base64') },
+  });
+  let drained = false;
+  const drain = manager.drain().then(() => { drained = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(drained, false);
+
+  releaseWrite();
+  const result = await pending;
+  await drain;
+  assert.equal(drained, true);
+  assert.deepEqual(await fs.readFile(result.path), CFB);
+});

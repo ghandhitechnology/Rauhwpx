@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import {
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync,
+} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
@@ -23,6 +25,38 @@ test('hub bounds Studio-bound calls retained across provider sockets', () => {
   assert.match(serverSource, /const MAX_STUDIO_QUEUED_FRAME_BYTES = 96 \* 1024 \* 1024/);
   assert.match(serverSource, /queuedStudioBytes \+ frameBytes > MAX_STUDIO_QUEUED_FRAME_BYTES/);
   assert.match(serverSource, /\.finally\(releaseStudioBudget\)/);
+});
+
+test('owner shutdown acknowledges only proven cleanup and retains unproven work', () => {
+  assert.match(serverSource, /const cleanupProven = await prepareShutdown\('owner request'\)/);
+  assert.match(
+    serverSource,
+    /sendHttpJson\(res, cleanupProven \? 200 : 503, \{\s*status: cleanupProven \? 'prepared' : 'cleanup-unproven'/,
+  );
+  assert.match(serverSource, /const cleanupProven = await sessions\.disposeAll\(/);
+  assert.match(serverSource, /if \(!cleanupProven\) retainUncertainProcessCleanup\(WORK_ROOT\)/);
+});
+
+test('provider capabilities open only after the backend starts the exact queued turn', () => {
+  assert.match(
+    serverSource,
+    /function beginAgentTurn[\s\S]{0,500}activeSession\.turnId = crypto\.randomUUID\(\);[\s\S]{0,300}activeSession\.providerTurnStarted = false;/,
+  );
+  assert.match(
+    serverSource,
+    /if \(evt\.type === 'turn-start'\)[\s\S]{0,400}activeSession\.providerTurnStarted = true;/,
+  );
+  assert.match(
+    serverSource,
+    /if \(activeSession\.status !== 'running'[\s\S]{0,240}activeSession\.providerTurnStarted !== true[\s\S]{0,240}sock\.agentTurnId !== activeSession\.turnId\)[\s\S]{0,180}noActiveProviderTurnError\(\)/,
+  );
+  assert.match(
+    serverSource,
+    /function providerTurnIsActive[\s\S]{0,220}binding\.session\.providerTurnStarted === true/,
+  );
+  assert.match(serverSource, /ws\.agentTurnId = authenticatedWorkerJob \? null : providerTurnId/);
+  assert.match(serverSource, /sock\.agentTurnId !== activeSession\.turnId/);
+  assert.match(serverSource, /function retireProviderSockets[\s\S]{0,700}sock\.providerTurnRetired = true/);
 });
 
 function waitForLine(stream, predicate, timeoutMs = 20_000) {
@@ -63,7 +97,7 @@ function rejectedUpgrade(url, { origin } = {}) {
       resolve(response.statusCode);
     });
     socket.once('open', () => reject(new Error('WebSocket upgrade unexpectedly succeeded')));
-    socket.once('error', () => {});
+    socket.once('error', reject);
   });
 }
 
@@ -96,6 +130,53 @@ async function closeSocket(socket) {
   await closed;
 }
 
+function prepareFakePi(root) {
+  const packageDir = path.join(root, 'prefix', 'node_modules', '@earendil-works', 'pi-coding-agent');
+  const binDir = path.join(root, 'prefix', 'node_modules', '.bin');
+  mkdirSync(packageDir, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  writeFileSync(path.join(packageDir, 'package.json'), JSON.stringify({ version: '0.0.0-test' }));
+  writeFileSync(path.join(root, 'config.json'), JSON.stringify({
+    version: 1,
+    installedVersion: '0.0.0-test',
+    models: [{
+      id: 'mock-model', name: 'Mock model', reasoning: false, supportsImages: false,
+      efforts: [], defaultEffort: null, contextLength: 8_192,
+      pricing: { prompt: 0, completion: 0 },
+    }],
+    defaultModelId: 'mock-model',
+  }));
+  const agentDir = path.join(root, 'agent');
+  mkdirSync(agentDir, { recursive: true });
+  writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify({
+    providers: { openrouter: { apiKey: 'test-placeholder-key' } },
+  }));
+  const fake = path.join(binDir, process.platform === 'win32' ? 'pi.cmd' : 'pi');
+  if (process.platform === 'win32') {
+    writeFileSync(fake, '@echo off\r\nnode -e "setInterval(() =^> {}, 1000)"\r\n');
+  } else {
+    writeFileSync(
+      fake,
+      `#!/bin/sh\nexec "${process.execPath}" -e 'setInterval(() => {}, 1000)'\n`,
+      { mode: 0o755 },
+    );
+  }
+}
+
+async function startProviderTurn(socket, session, text) {
+  const turnStarted = waitForMessage(
+    socket,
+    (msg) => msg.type === 'agent-event' && msg.event?.type === 'turn-start',
+  );
+  sendFrame(socket, {
+    type: 'chat-user-message',
+    threadId: session.threadId,
+    documentId: session.documentId,
+    text,
+  });
+  await turnStarted;
+}
+
 function waitForExit(child, timeoutMs = 5_000) {
   if (child.exitCode !== null || child.signalCode !== null) {
     return Promise.resolve([child.exitCode, child.signalCode]);
@@ -109,8 +190,10 @@ function waitForExit(child, timeoutMs = 5_000) {
   });
 }
 
-test('two idle backends route overlapping MCP ids only to their owning Studio', { timeout: 35_000 }, async (t) => {
+test('two active provider turns route overlapping MCP ids only to their owning Studio', { timeout: 35_000 }, async (t) => {
   const workRoot = mkdtempSync(path.join(os.tmpdir(), 'rhwp-hub-tenancy-'));
+  const piRoot = path.join(workRoot, 'pi');
+  prepareFakePi(piRoot);
   const child = spawn(process.execPath, ['server.mjs'], {
     cwd: new URL('..', import.meta.url),
     env: {
@@ -122,6 +205,7 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
       RHWP_WORK_DIR: workRoot,
       RHWP_TEMPLATES_DIR: path.join(workRoot, 'templates'),
       RHWP_AGENT_INSTRUCTIONS_DIR: path.join(workRoot, 'agent-instructions'),
+      RHWP_PI_DIR: piRoot,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -231,8 +315,8 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
 
   const alphaStarted = waitForMessage(alpha, (msg) => msg.type === 'chat-started');
   const betaStarted = waitForMessage(beta, (msg) => msg.type === 'chat-started');
-  sendFrame(alpha, { type: 'chat-start', agent: 'claude', threadId: 'thread-alpha', documentId: 'doc-alpha' });
-  sendFrame(beta, { type: 'chat-start', agent: 'claude', threadId: 'thread-beta', documentId: 'doc-beta' });
+  sendFrame(alpha, { type: 'chat-start', agent: 'pi', threadId: 'thread-alpha', documentId: 'doc-alpha' });
+  sendFrame(beta, { type: 'chat-start', agent: 'pi', threadId: 'thread-beta', documentId: 'doc-beta' });
   const [alphaSession, betaSession] = await Promise.all([alphaStarted, betaStarted]);
   assert.equal(alphaSession.status, undefined);
   assert.equal(betaSession.status, undefined);
@@ -247,13 +331,13 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
 
   assert.equal(
     await rejectedUpgrade(
-      `${wsBase}/mcp?token=${alphaProviderCapabilities.mcp}&sessionId=alpha&agent=pi&role=chat`,
+      `${wsBase}/mcp?token=${alphaProviderCapabilities.mcp}&sessionId=alpha&agent=claude&role=chat`,
     ),
     401,
   );
   assert.equal(
     await rejectedUpgrade(
-      `${wsBase}/mcp?token=${alphaProviderCapabilities.mcp}&sessionId=alpha&agent=claude&role=subagent`,
+      `${wsBase}/mcp?token=${alphaProviderCapabilities.mcp}&sessionId=alpha&agent=pi&role=subagent`,
     ),
     401,
   );
@@ -262,8 +346,17 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
   sendFrame(alpha, { type: 'chat-template-set', templateId: uploadedTemplate.id });
   assert.equal((await alphaTemplateChanged).template.id, uploadedTemplate.id);
 
-  const { socket: alphaMcp } = await openSocket(`${wsBase}/mcp?token=${alphaProviderCapabilities.mcp}&sessionId=alpha&agent=claude`);
-  const { socket: betaMcp } = await openSocket(`${wsBase}/mcp?token=${betaProviderCapabilities.mcp}&sessionId=beta&agent=claude`);
+  const { socket: queuedMcp } = await openSocket(
+    `${wsBase}/mcp?token=${alphaProviderCapabilities.mcp}&sessionId=alpha&agent=pi`,
+  );
+  const [queuedCloseCode] = await once(queuedMcp, 'close');
+  assert.equal(queuedCloseCode, 4003, 'an idle/pre-bind MCP socket is never promoted into a later turn');
+  await Promise.all([
+    startProviderTurn(alpha, alphaSession, 'Keep alpha active for tenancy checks.'),
+    startProviderTurn(beta, betaSession, 'Keep beta active for tenancy checks.'),
+  ]);
+  const { socket: alphaMcp } = await openSocket(`${wsBase}/mcp?token=${alphaProviderCapabilities.mcp}&sessionId=alpha&agent=pi`);
+  let { socket: betaMcp } = await openSocket(`${wsBase}/mcp?token=${betaProviderCapabilities.mcp}&sessionId=beta&agent=pi`);
   const instructionsToolRead = waitForMessage(alphaMcp, (msg) => msg.type === 'tool-result' && msg.id === 4);
   sendFrame(alphaMcp, {
     type: 'tool-call', id: 4, tool: 'read_agent_instructions', args: {},
@@ -327,7 +420,7 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
   ));
   const agentInstructionsBroadcast = waitForMessage(beta, (msg) => (
     msg.type === 'agent-instructions'
-      && msg.changedBy === 'agent-confirmed:claude'
+      && msg.changedBy === 'agent-confirmed:pi'
       && msg.status?.revision === 3
   ));
   sendFrame(alpha, {
@@ -350,9 +443,19 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
   assert.equal((await alphaTemplateResult).result.template.id, uploadedTemplate.id);
   assert.equal((await betaTemplateResult).error.code, 'TEMPLATE_NOT_SELECTED');
 
+  const betaTurnEnded = waitForMessage(
+    beta,
+    (msg) => msg.type === 'agent-event' && msg.event?.type === 'turn-end',
+  );
+  const betaMcpClosed = once(betaMcp, 'close');
+  sendFrame(beta, { type: 'chat-interrupt' });
+  const [, [betaCloseCode]] = await Promise.all([betaTurnEnded, betaMcpClosed]);
+  assert.equal(betaCloseCode, 4003, 'settling a turn retires its exact MCP socket');
   const betaTemplateChanged = waitForMessage(beta, (msg) => msg.type === 'chat-template-changed');
   sendFrame(beta, { type: 'chat-template-set', templateId: uploadedTemplate.id });
   assert.equal((await betaTemplateChanged).template.id, uploadedTemplate.id);
+  await startProviderTurn(beta, betaSession, 'Continue beta after selecting the shared template.');
+  ({ socket: betaMcp } = await openSocket(`${wsBase}/mcp?token=${betaProviderCapabilities.mcp}&sessionId=beta&agent=pi`));
 
   const alphaRequest = waitForMessage(alpha, (msg) => msg.type === 'tool-request');
   const betaRequest = waitForMessage(beta, (msg) => msg.type === 'tool-request');
@@ -474,8 +577,8 @@ test('two idle backends route overlapping MCP ids only to their owning Studio', 
     method: 'POST',
     headers: { Authorization: `Bearer ${TOKEN}`, 'X-RHWP-Launch-ID': LAUNCH_ID },
   });
-  assert.equal(shutdown.status, 202);
-  assert.deepEqual(await shutdown.json(), { status: 'shutting-down', launchId: LAUNCH_ID });
+  assert.equal(shutdown.status, 200);
+  assert.deepEqual(await shutdown.json(), { status: 'prepared', launchId: LAUNCH_ID });
   assert.deepEqual(await waitForExit(child), [0, null]);
 });
 

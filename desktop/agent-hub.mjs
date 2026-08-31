@@ -24,6 +24,7 @@ export const DEFAULT_HUB_PORT = 5175;
 export const DEFAULT_HEALTH_TIMEOUT_MS = 500;
 export const DEFAULT_STOP_TIMEOUT_MS = 5000;
 export const DEFAULT_READY_TIMEOUT_MS = 15000;
+export const DEFAULT_SHUTDOWN_PREPARE_TIMEOUT_MS = 15000;
 export const DEFAULT_POLL_INTERVAL_MS = 150;
 export const HUB_RESTART_DELAYS_MS = [500, 1000, 2000, 5000];
 export const HUB_READY_PREFIX = 'RHWP_HUB_READY ';
@@ -484,65 +485,15 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function terminateProcessTree(child, { platform = process.platform, spawnProcess = spawn } = {}) {
-  if (!child?.pid) return;
-  if (platform !== 'win32') {
-    try { child.kill('SIGKILL'); } catch {}
-    return;
-  }
-  await new Promise((resolve) => {
-    let settled = false;
-    const finish = () => {
-      if (settled) return;
-      settled = true;
-      resolve();
-    };
-    try {
-      const killer = spawnProcess('taskkill.exe', ['/pid', String(child.pid), '/T', '/F'], {
-        detached: false,
-        shell: false,
-        stdio: 'ignore',
-        windowsHide: true,
-      });
-      killer.once?.('error', () => {
-        try { child.kill('SIGKILL'); } catch {}
-        finish();
-      });
-      killer.once?.('close', finish);
-      killer.once?.('exit', finish);
-    } catch {
-      try { child.kill('SIGKILL'); } catch {}
-      finish();
-    }
-  });
-}
-
 export async function killPid(pid, {
-  timeoutMs = DEFAULT_STOP_TIMEOUT_MS,
-  wait = sleep,
-  now = Date.now,
-  platform = process.platform,
-  spawnProcess = spawn,
+  processAlive = isProcessAlive,
 } = {}) {
-  if (!isProcessAlive(pid)) return { killed: false, alive: false };
-  if (platform === 'win32') {
-    await terminateProcessTree({ pid, kill: (signal) => process.kill(pid, signal) }, { platform, spawnProcess });
-    const deadline = now() + timeoutMs;
-    while (now() < deadline && isProcessAlive(pid)) await wait(50);
-    return { killed: true, alive: isProcessAlive(pid) };
-  }
-  try {
-    process.kill(pid, 'SIGTERM');
-  } catch {
-    return { killed: false, alive: isProcessAlive(pid) };
-  }
-  const deadline = now() + timeoutMs;
-  while (now() < deadline && isProcessAlive(pid)) {
-    await wait(50);
-  }
-  // A bare PID has no stable process identity. Escalating after the original
-  // process exits could kill an unrelated process that reused the number.
-  return { killed: true, alive: isProcessAlive(pid) };
+  // A bare PID is not a stable process identity. Any signal can be delivered
+  // to an unrelated process if the observed hub exits and its PID is reused
+  // between the liveness check and the kill operation. Callers with a retained
+  // ChildProcess must use stopHubChild; detached hubs stop through the
+  // authenticated owner endpoint and otherwise fail closed.
+  return { killed: false, alive: processAlive(pid) };
 }
 
 /**
@@ -679,46 +630,6 @@ export function waitForHubChildExit(child, { timeoutMs = 5000 } = {}) {
   });
 }
 
-function waitForHelperCompletion(child, { timeoutMs }) {
-  if (!child) return Promise.resolve(false);
-  if (child.exitCode != null) return Promise.resolve(child.exitCode === 0);
-  if (child.signalCode != null) return Promise.resolve(false);
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (completed) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      child.off?.('close', onClose);
-      child.off?.('error', onError);
-      resolve(completed);
-    };
-    const onClose = (code) => finish(code === 0);
-    const onError = () => finish(false);
-    const timer = setTimeout(() => finish(false), timeoutMs);
-    // taskkill completion is part of the Windows tree-death proof; do not let
-    // the process disappear merely because no unrelated event-loop handle is
-    // still referenced.
-    child.once?.('close', onClose);
-    child.once?.('error', onError);
-  });
-}
-
-async function runWindowsTaskkill(pid, force, { spawnProcess, timeoutMs }) {
-  let killer;
-  try {
-    killer = spawnProcess('taskkill', ['/PID', String(pid), '/T', ...(force ? ['/F'] : [])], {
-      detached: false,
-      shell: false,
-      stdio: 'ignore',
-      windowsHide: true,
-    });
-  } catch {
-    return false;
-  }
-  return waitForHelperCompletion(killer, { timeoutMs });
-}
-
 function posixProcessGroupAlive(pid, killProcess) {
   try {
     killProcess(-pid, 0);
@@ -746,26 +657,31 @@ export async function stopHubChild(child, {
   finalGraceMs = 2000,
   platform = process.platform,
   killProcess = process.kill,
-  spawnProcess = spawn,
   treeAlive,
   wait = sleep,
   now = Date.now,
+  cleanupPrepared = false,
 } = {}) {
   if (!child) return true;
   const pid = Number.isSafeInteger(child.pid) && child.pid > 0 ? child.pid : null;
 
   if (platform === 'win32' && pid !== null) {
-    const [gracefulTaskkill, gracefulExit] = await Promise.all([
-      runWindowsTaskkill(pid, false, { spawnProcess, timeoutMs }),
-      waitForHubChildExit(child, { timeoutMs }),
-    ]);
-    if (gracefulTaskkill && gracefulExit) return true;
-
-    const [forcedTaskkill, forcedExit] = await Promise.all([
-      runWindowsTaskkill(pid, true, { spawnProcess, timeoutMs: finalGraceMs }),
-      gracefulExit ? Promise.resolve(true) : waitForHubChildExit(child, { timeoutMs: finalGraceMs }),
-    ]);
-    return forcedTaskkill && forcedExit;
+    // taskkill resolves a numeric PID again inside a separate process and can
+    // retarget an unrelated process if the leader exits in that gap. Only the
+    // retained ChildProcess handle is stable. A prepared shutdown has already
+    // disposed every hub-owned descendant, so only then may leader exit prove
+    // cleanup; otherwise the launch root remains quarantined.
+    if (cleanupPrepared) {
+      if (child.exitCode != null || child.signalCode != null) return true;
+      if (await waitForHubChildExit(child, { timeoutMs })) return true;
+      try { child.kill('SIGTERM'); } catch {}
+      return waitForHubChildExit(child, { timeoutMs: finalGraceMs });
+    }
+    if (child.exitCode == null && child.signalCode == null) {
+      try { child.kill('SIGTERM'); } catch {}
+      await waitForHubChildExit(child, { timeoutMs });
+    }
+    return false;
   }
 
   const ownsProcessGroup = pid !== null && child.rhwpProcessGroup === true;
@@ -823,22 +739,31 @@ export async function stopHubByPort(port, {
   const body = await readHubHealth(port, { fetchImpl, token });
   const pid = hubPidFromHealth(body);
   if (!body?.ok || !pid || typeof body.launchId !== 'string') {
-    if (pidPath) removePidFile(pidPath);
-    return { stopped: false, ready: false, pid: null };
+    // A missing health response cannot prove that an earlier detached hub's
+    // descendants are gone. Preserve a valid PID record as a quarantine marker
+    // instead of silently authorizing the same work roots to be reused.
+    return { stopped: false, ready: false, pid: pidPath ? readPidFile(pidPath) : null };
   }
 
+  let cleanupPrepared = false;
   try {
-    await requestHubShutdown({
+    const response = await requestHubShutdown({
       port,
       token,
       launchId: body.launchId,
       fetchImpl,
-      timeoutMs: Math.min(timeoutMs, 1500),
+      // `/shutdown` replies only after every owned provider/tree cleanup has
+      // settled. That proof can legitimately outlive the shorter leader-exit
+      // polling window below; aborting it early turns a clean shutdown into a
+      // permanent quarantine and makes `ctl restart` fail unnecessarily.
+      timeoutMs: Math.max(timeoutMs, DEFAULT_SHUTDOWN_PREPARE_TIMEOUT_MS),
     });
+    cleanupPrepared = response?.status === 'prepared'
+      && response?.launchId === body.launchId;
   } catch {
-    // Compatibility with an older development hub. The PID came from the
-    // authenticated live listener, so one non-escalating TERM is safe.
-    await killPid(pid, { timeoutMs, wait, now });
+    // A response failure does not prove the hub ignored the authenticated
+    // request, and the numeric PID may already have been reused. Keep polling
+    // the exact launch and fail closed instead of signalling a bare PID.
   }
 
   const deadline = now() + timeoutMs;
@@ -853,8 +778,14 @@ export async function stopHubByPort(port, {
     if (processExited) break;
     await wait(50);
   }
-  const stopped = !ready && processExited;
-  if (stopped && pidPath) removePidFile(pidPath);
+  // Leader exit is not descendant-cleanup proof. Only the authenticated hub
+  // can prepare its owned sessions, and the response must be bound to the exact
+  // launch observed above before callers may remove the PID record or restart.
+  const stopped = cleanupPrepared && !ready && processExited;
+  if (pidPath) {
+    if (stopped) removePidFile(pidPath);
+    else writePidFile(pidPath, pid);
+  }
   return { stopped, ready, pid };
 }
 
@@ -911,7 +842,20 @@ export async function startDetachedHub({
     }
   }
 
-  // A stale PID file cannot prove process identity. Never kill it implicitly.
+  // A stale PID file cannot prove process identity or descendant cleanup. It is
+  // deliberately retained when an authenticated shutdown was not proven, so a
+  // later `start` must not bypass the quarantine and reuse the same work roots.
+  const recordedPid = readPidFile(paths.pid);
+  if (recordedPid !== null) {
+    return {
+      started: false,
+      ready: false,
+      pid: recordedPid,
+      log: paths.log,
+      error: 'hub-cleanup-unproven',
+    };
+  }
+  // Junk or an already-removed record carries no process identity.
   if (paths.pid) removePidFile(paths.pid);
 
   const ownsWorkDir = !env.RHWP_WORK_DIR;

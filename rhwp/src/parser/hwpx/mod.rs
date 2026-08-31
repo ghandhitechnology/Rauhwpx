@@ -17,11 +17,13 @@ pub mod reader;
 pub mod section;
 pub mod utils;
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::model::bin_data::{BinData, BinDataContent, BinDataType};
 use crate::model::document::{Document, FileHeader, HwpVersion, Section};
+use crate::xml_attr::{image_ref_u16_ascii, ExactXmlAttributeScanner};
 
 fn is_internal_bin_data_href(href: &str) -> bool {
     let href = href.to_ascii_lowercase();
@@ -122,11 +124,43 @@ impl crate::model::bin_data::BinDataResolver for HwpxBinResolver {
             } else {
                 data
             }),
+            Err(HwpxError::MissingFile(error)) => {
+                // Preserve the established #1917 placeholder behavior for a
+                // manifest item whose package part is absent. Resource-limit
+                // and decompression failures remain `None` so serializers do
+                // not silently replace oversized attacker data with empties.
+                eprintln!(
+                    "경고: BinData '{}' bounded 로드 실패: {} — 빈 placeholder 유지",
+                    key, error
+                );
+                Some(Vec::new())
+            }
             Err(error) => {
                 eprintln!("경고: BinData '{}' bounded 로드 실패: {}", key, error);
                 None
             }
         }
+    }
+
+    fn payload_identity(
+        &self,
+        key: &str,
+    ) -> Option<crate::model::bin_data::BinDataPayloadIdentity> {
+        let mut reader = match self.reader.lock() {
+            Ok(reader) => reader,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let (byte_len, digest) = reader
+            .fingerprint_file_limited(key, crate::parser::limits::MAX_BINARY_BYTES)
+            .ok()?;
+        let domain = if self.ole_hrefs.contains(key) {
+            "hwpx-entry:ole"
+        } else {
+            "hwpx-entry"
+        };
+        Some(crate::model::bin_data::BinDataPayloadIdentity::new(
+            domain, byte_len, digest,
+        ))
     }
 }
 
@@ -228,31 +262,224 @@ fn resolve_master_page_hrefs<'a, 'b>(
     (hrefs, missing_refs)
 }
 
+#[derive(Debug)]
+struct HwpxBinDataIds {
+    ordered: Vec<u16>,
+    by_manifest_id: HashMap<String, u16>,
+}
+
+fn exact_manifest_numeric_id(value: &str) -> Option<u16> {
+    let digits = value
+        .strip_prefix("image")
+        .or_else(|| value.strip_prefix("ole"))
+        .or_else(|| value.chars().all(|ch| ch.is_ascii_digit()).then_some(value))?;
+    (!digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit()))
+        .then(|| digits.parse::<u16>().ok())
+        .flatten()
+        .filter(|id| *id != 0)
+}
+
+fn build_hwpx_bin_data_ids(
+    items: &[content::PackageItem],
+    chart_ids: impl IntoIterator<Item = u16>,
+) -> Result<HwpxBinDataIds, HwpxError> {
+    if items.len() > usize::from(u16::MAX) {
+        return Err(HwpxError::XmlError(format!(
+            "HWPX manifest contains {} BinData items; at most {} are representable",
+            items.len(),
+            u16::MAX
+        )));
+    }
+
+    let candidates = items
+        .iter()
+        .map(|item| exact_manifest_numeric_id(&item.id))
+        .collect::<Vec<_>>();
+    let mut used = chart_ids.into_iter().collect::<HashSet<_>>();
+    let mut ordered = vec![0; items.len()];
+
+    // Reserve every unique exact numeric manifest ID before allocating IDs for
+    // arbitrary names. This keeps a preceding `font-resource-alpha` from
+    // stealing the ID of a later `image1` entry.
+    for (index, candidate) in candidates.iter().copied().enumerate() {
+        if let Some(id) = candidate.filter(|id| !used.contains(id)) {
+            used.insert(id);
+            ordered[index] = id;
+        }
+    }
+    let mut next_free = 1u32;
+    for id in &mut ordered {
+        if *id != 0 {
+            continue;
+        }
+        while next_free <= u32::from(u16::MAX) && used.contains(&(next_free as u16)) {
+            next_free += 1;
+        }
+        let allocated = u16::try_from(next_free).map_err(|_| {
+            HwpxError::XmlError("HWPX manifest has no collision-free BinData ID".to_string())
+        })?;
+        used.insert(allocated);
+        *id = allocated;
+        next_free += 1;
+    }
+
+    let mut by_manifest_id = HashMap::with_capacity(items.len());
+    for (item, id) in items.iter().zip(ordered.iter().copied()) {
+        // Duplicate manifest IDs are ambiguous by definition. Keep the first
+        // declaration as the deterministic typed-reference target while still
+        // assigning every declaration a unique storage ID.
+        by_manifest_id.entry(item.id.clone()).or_insert(id);
+    }
+    Ok(HwpxBinDataIds {
+        ordered,
+        by_manifest_id,
+    })
+}
+
+fn rewrite_binary_item_id_refs<'a>(
+    xml: &'a str,
+    ids: &HashMap<String, u16>,
+) -> Result<Cow<'a, str>, HwpxError> {
+    rewrite_binary_item_id_refs_limited(xml, ids, crate::parser::limits::MAX_STRUCTURAL_BYTES)
+}
+
+fn rewrite_binary_item_id_refs_limited<'a>(
+    xml: &'a str,
+    ids: &HashMap<String, u16>,
+    max_bytes: usize,
+) -> Result<Cow<'a, str>, HwpxError> {
+    if xml.len() > max_bytes {
+        return Err(HwpxError::XmlError(format!(
+            "HWPX XML exceeds structural byte limit: {} > {max_bytes}",
+            xml.len()
+        )));
+    }
+    if ids.is_empty() {
+        return Ok(Cow::Borrowed(xml));
+    }
+
+    // Pass one is allocation-free. It both keeps unchanged members borrowed
+    // and computes the exact final size before the one member-sized allocation
+    // is attempted.
+    let mut changed = false;
+    let mut scanner = ExactXmlAttributeScanner::new(xml);
+    let mut projected_len = xml.len();
+    while let Some((value_start, value_end)) = scanner.next_value("binaryItemIDRef") {
+        if let Some(id) = ids.get(&xml[value_start..value_end]) {
+            let mut replacement_buffer = [0u8; 10];
+            let replacement = image_ref_u16_ascii(*id, &mut replacement_buffer);
+            let original = &xml[value_start..value_end];
+            if replacement != original {
+                changed = true;
+                projected_len = projected_len
+                    .checked_sub(original.len())
+                    .and_then(|length| length.checked_add(replacement.len()))
+                    .ok_or_else(|| {
+                        HwpxError::XmlError(
+                            "HWPX binaryItemIDRef rewrite size overflow".to_string(),
+                        )
+                    })?;
+            }
+        }
+    }
+    if !changed {
+        return Ok(Cow::Borrowed(xml));
+    }
+    if projected_len > max_bytes {
+        return Err(HwpxError::XmlError(format!(
+            "HWPX rewritten XML exceeds structural byte limit: {projected_len} > {max_bytes}"
+        )));
+    }
+
+    let mut output = String::new();
+    output.try_reserve_exact(projected_len).map_err(|error| {
+        HwpxError::XmlError(format!(
+            "HWPX binaryItemIDRef rewrite allocation failed: {error}"
+        ))
+    })?;
+    let mut copied_cursor = 0usize;
+    let mut scanner = ExactXmlAttributeScanner::new(xml);
+    while let Some((value_start, value_end)) = scanner.next_value("binaryItemIDRef") {
+        if let Some(id) = ids.get(&xml[value_start..value_end]) {
+            let mut replacement_buffer = [0u8; 10];
+            let replacement = image_ref_u16_ascii(*id, &mut replacement_buffer);
+            if replacement != &xml[value_start..value_end] {
+                output.push_str(&xml[copied_cursor..value_start]);
+                output.push_str(&replacement);
+                copied_cursor = value_end;
+            }
+        }
+    }
+    output.push_str(&xml[copied_cursor..]);
+    debug_assert_eq!(output.len(), projected_len);
+    debug_assert!(output.capacity() >= projected_len);
+    Ok(Cow::Owned(output))
+}
+
+fn restore_font_manifest_refs(
+    target: &mut crate::model::document::DocInfo,
+    original: &crate::model::document::DocInfo,
+) {
+    for (target_group, original_group) in
+        target.font_faces.iter_mut().zip(original.font_faces.iter())
+    {
+        for (target_font, original_font) in target_group.iter_mut().zip(original_group.iter()) {
+            target_font.bin_item_id_ref = original_font.bin_item_id_ref.clone();
+            if let (Some(target_substitute), Some(original_substitute)) = (
+                target_font.subst_font.as_mut(),
+                original_font.subst_font.as_ref(),
+            ) {
+                target_substitute.bin_item_id_ref = original_substitute.bin_item_id_ref.clone();
+            }
+        }
+    }
+}
+
 fn attach_hwpx_master_page(
     reader: &mut reader::HwpxReader,
     section: &mut Section,
     master_page_href: &str,
-) -> bool {
+    bin_data_ids: &HashMap<String, u16>,
+) -> Result<bool, HwpxError> {
     match reader.read_file(master_page_href) {
-        Ok(master_page_xml) => match section::parse_hwpx_master_page(&master_page_xml) {
-            Ok(master_page) => {
-                section.section_def.master_pages.push(master_page);
-                true
+        Ok(master_page_xml) => {
+            let rewritten = rewrite_binary_item_id_refs(&master_page_xml, bin_data_ids)?;
+            match section::parse_hwpx_master_page(&rewritten) {
+                Ok(master_page) => {
+                    section.section_def.master_pages.push(master_page);
+                    Ok(true)
+                }
+                Err(e) => {
+                    eprintln!("경고: {} 파싱 실패: {}", master_page_href, e);
+                    Ok(false)
+                }
             }
-            Err(e) => {
-                eprintln!("경고: {} 파싱 실패: {}", master_page_href, e);
-                false
-            }
-        },
+        }
         Err(e) => {
             eprintln!("경고: {} 읽기 실패: {}", master_page_href, e);
-            false
+            Ok(false)
         }
     }
 }
 
 /// HWPX 파일 바이트 데이터를 파싱하여 Document IR로 변환
 pub fn parse_hwpx(data: &[u8]) -> Result<Document, HwpxError> {
+    validate_untrusted_input_size(data.len())?;
+    parse_hwpx_validated(data)
+}
+
+pub(super) fn validate_untrusted_input_size(byte_len: usize) -> Result<(), HwpxError> {
+    if byte_len > crate::parser::limits::MAX_UNTRUSTED_INPUT_BYTES {
+        return Err(HwpxError::ZipError(format!(
+            "HWPX input is {} bytes and exceeds the {} byte untrusted-input limit",
+            byte_len,
+            crate::parser::limits::MAX_UNTRUSTED_INPUT_BYTES
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn parse_hwpx_validated(data: &[u8]) -> Result<Document, HwpxError> {
     // 1. ZIP 컨테이너 열기. The active reader and lazy binary resolver share
     // one immutable source allocation instead of each cloning the archive.
     let source_bytes: Arc<[u8]> = Arc::from(data);
@@ -291,17 +518,20 @@ pub fn parse_hwpx(data: &[u8]) -> Result<Document, HwpxError> {
     // content.hpf 의 manifest/spine 은 본문 의존(섹션/BinData)이라 재생성하지만,
     // <opf:metadata>(저작자/생성·수정일자/주제 등)는 본문과 무관하므로 직렬화 시
     // 원본 블록을 그대로 splice 하기 위해 원본 바이트를 보존한다.
-    hwpx_aux_entries.push((
-        "Contents/content.hpf".to_string(),
-        content_xml.clone().into_bytes(),
-    ));
     let package_info = content::parse_content_hpf(&content_xml)?;
+    hwpx_aux_entries.push(("Contents/content.hpf".to_string(), content_xml.into_bytes()));
 
     // Preserve package parts that are not represented by the IR.  In particular,
     // Hancom stores document scripts and editable OOXML charts outside Contents/
     // and BinData/.  Dropping those ZIP entries on save can disable scripts or
     // turn a chart into an unusable fallback object.
     let package_file_names = reader.file_names();
+    let bin_data_ids = build_hwpx_bin_data_ids(
+        &package_info.bin_data_items,
+        package_file_names
+            .iter()
+            .filter_map(|path| chart_number_from_path(path).map(|number| 60000 + number)),
+    )?;
     let mut modeled_paths: HashSet<String> = [
         "mimetype",
         "version.xml",
@@ -348,8 +578,17 @@ pub fn parse_hwpx(data: &[u8]) -> Result<Document, HwpxError> {
 
     // 3. header.xml → DocInfo, DocProperties
     let header_xml = reader.read_file("Contents/header.xml")?;
-    let (mut doc_info, doc_properties) = header::parse_hwpx_header(&header_xml)?;
-    resolve_embedded_font_references(&mut doc_info, &package_info.bin_data_items);
+    let (original_doc_info, doc_properties) = header::parse_hwpx_header(&header_xml)?;
+    let remapped_header_xml =
+        rewrite_binary_item_id_refs(&header_xml, &bin_data_ids.by_manifest_id)?;
+    let mut doc_info = if matches!(&remapped_header_xml, Cow::Borrowed(_)) {
+        original_doc_info
+    } else {
+        let (mut remapped_doc_info, _) = header::parse_hwpx_header(&remapped_header_xml)?;
+        restore_font_manifest_refs(&mut remapped_doc_info, &original_doc_info);
+        remapped_doc_info
+    };
+    resolve_embedded_font_references(&mut doc_info, &bin_data_ids.by_manifest_id);
 
     // [Task #1608] head version("1.4")은 HWPML **스키마 버전**일 뿐 HWP3→HWPX 변환 지표가
     // 아니다. 네이티브 한글2022 HWPX(version.xml: major=5 minor=1 "Hancom Office Hangul")도
@@ -366,7 +605,11 @@ pub fn parse_hwpx(data: &[u8]) -> Result<Document, HwpxError> {
     // [Task #873] isEmbeded="0" 인 외부 file 참조 (예: HWP3 → HWPX 변환본 의 절대 경로)
     // 는 BinDataType::Link + abs_path 로 등록. 이후 populate_link_image_paths (parser/mod.rs)
     // 가 Picture.external_path 설정 → Task #741 fallback 로 같은 dir 영역 image load.
-    for (i, item) in package_info.bin_data_items.iter().enumerate() {
+    for (item, storage_id) in package_info
+        .bin_data_items
+        .iter()
+        .zip(bin_data_ids.ordered.iter().copied())
+    {
         let ext = hwpx_bin_data_extension(item);
         let (data_type, abs_path) = if is_internal_ole_package_item(item) {
             (BinDataType::Storage, None)
@@ -377,7 +620,7 @@ pub fn parse_hwpx(data: &[u8]) -> Result<Document, HwpxError> {
         };
         doc_info.bin_data_list.push(BinData {
             data_type,
-            storage_id: (i + 1) as u16,
+            storage_id,
             extension: Some(ext),
             abs_path,
             ..Default::default()
@@ -395,7 +638,9 @@ pub fn parse_hwpx(data: &[u8]) -> Result<Document, HwpxError> {
                 Vec::new()
             }
         };
-        match section::parse_hwpx_section(&section_xml) {
+        let remapped_section_xml =
+            rewrite_binary_item_id_refs(&section_xml, &bin_data_ids.by_manifest_id)?;
+        match section::parse_hwpx_section(&remapped_section_xml) {
             Ok(mut section) => {
                 let (master_page_hrefs, missing_master_page_refs) =
                     resolve_master_page_hrefs(&master_page_refs, &package_info.master_page_items);
@@ -408,7 +653,12 @@ pub fn parse_hwpx(data: &[u8]) -> Result<Document, HwpxError> {
 
                 let mut attached_master_page_count = 0usize;
                 for master_page_href in master_page_hrefs {
-                    if attach_hwpx_master_page(&mut reader, &mut section, master_page_href) {
+                    if attach_hwpx_master_page(
+                        &mut reader,
+                        &mut section,
+                        master_page_href,
+                        &bin_data_ids.by_manifest_id,
+                    )? {
                         attached_master_page_count += 1;
                     }
                 }
@@ -424,7 +674,8 @@ pub fn parse_hwpx(data: &[u8]) -> Result<Document, HwpxError> {
                                     &mut reader,
                                     &mut section,
                                     master_page_href,
-                                );
+                                    &bin_data_ids.by_manifest_id,
+                                )?;
                             }
                         }
                     }
@@ -457,9 +708,13 @@ pub fn parse_hwpx(data: &[u8]) -> Result<Document, HwpxError> {
         .filter(|item| is_internal_ole_package_item(item))
         .map(|item| item.href.clone())
         .collect();
+    let bin_data_budget = reader.expanded_budget_handle();
     let raw_bin_resolver: std::sync::Arc<dyn crate::model::bin_data::BinDataResolver> =
         std::sync::Arc::new(HwpxBinResolver {
-            reader: std::sync::Mutex::new(reader::HwpxReader::open_shared(source_bytes)?),
+            reader: std::sync::Mutex::new(reader::HwpxReader::open_shared_with_budget(
+                source_bytes,
+                bin_data_budget,
+            )?),
             ole_hrefs,
         });
     let bin_resolver: std::sync::Arc<dyn crate::model::bin_data::BinDataResolver> =
@@ -468,7 +723,11 @@ pub fn parse_hwpx(data: &[u8]) -> Result<Document, HwpxError> {
         ));
 
     let mut bin_data_content = Vec::new();
-    for (i, item) in package_info.bin_data_items.iter().enumerate() {
+    for (item, storage_id) in package_info
+        .bin_data_items
+        .iter()
+        .zip(bin_data_ids.ordered.iter().copied())
+    {
         // [Task #873] isEmbeded="0" (외부 file 참조) 는 ZIP 영역 영역 부재. skip.
         // populate_link_image_paths + populate_external_images_from_dir 가 후처리.
         //
@@ -479,7 +738,7 @@ pub fn parse_hwpx(data: &[u8]) -> Result<Document, HwpxError> {
             continue;
         }
         bin_data_content.push(BinDataContent {
-            id: (i + 1) as u16,
+            id: storage_id,
             data: crate::model::bin_data::BinDataBytes::lazy(
                 bin_resolver.clone(),
                 item.href.clone(),
@@ -549,9 +808,118 @@ pub fn parse_hwpx(data: &[u8]) -> Result<Document, HwpxError> {
     // [Task #873] BinData Link 타입 의 외부 file path 영역 영역 Picture.external_path 영역
     // 전달. 이후 model::document::populate_external_images_from_dir (Task #741) 가 같은
     // dir 영역 basename 매칭 영역 image 영역 자동 load. HWP5 parser 와 동일 처리.
-    super::populate_link_image_paths(&mut doc);
+    populate_hwpx_link_image_paths(&mut doc);
 
     Ok(doc)
+}
+
+/// HWPX typed BinData references are manifest item IDs, whereas HWP5 typed
+/// image references are one-based declaration slots. The shared HWP helper
+/// therefore cannot resolve sparse HWPX IDs without silently selecting the
+/// wrong declaration.
+fn populate_hwpx_link_image_paths(doc: &mut Document) {
+    use crate::model::control::Control;
+    use crate::model::image::Picture;
+    use crate::model::paragraph::Paragraph;
+    use crate::model::shape::{Caption, DrawingObjAttr, ShapeObject};
+
+    fn set_picture_path(picture: &mut Picture, links: &HashMap<u16, String>) {
+        if picture.image_attr.external_path.is_none() {
+            picture.image_attr.external_path = links.get(&picture.image_attr.bin_data_id).cloned();
+        }
+    }
+
+    fn visit_caption(caption: &mut Option<Caption>, links: &HashMap<u16, String>) {
+        if let Some(caption) = caption {
+            visit_paragraphs(&mut caption.paragraphs, links);
+        }
+    }
+
+    fn visit_drawing(drawing: &mut DrawingObjAttr, links: &HashMap<u16, String>) {
+        if let Some(text_box) = &mut drawing.text_box {
+            visit_paragraphs(&mut text_box.paragraphs, links);
+        }
+        visit_caption(&mut drawing.caption, links);
+    }
+
+    fn visit_shape(shape: &mut ShapeObject, links: &HashMap<u16, String>) {
+        if let Some(drawing) = shape.drawing_mut() {
+            visit_drawing(drawing, links);
+        }
+        match shape {
+            ShapeObject::Group(group) => {
+                visit_caption(&mut group.caption, links);
+                for child in &mut group.children {
+                    visit_shape(child, links);
+                }
+            }
+            ShapeObject::Picture(picture) => {
+                set_picture_path(picture, links);
+                visit_caption(&mut picture.caption, links);
+            }
+            ShapeObject::Chart(chart) => visit_caption(&mut chart.caption, links),
+            ShapeObject::Ole(ole) => visit_caption(&mut ole.caption, links),
+            _ => {}
+        }
+    }
+
+    fn visit_paragraphs(paragraphs: &mut [Paragraph], links: &HashMap<u16, String>) {
+        for paragraph in paragraphs {
+            for control in &mut paragraph.controls {
+                match control {
+                    Control::SectionDef(section_def) => {
+                        for page in &mut section_def.master_pages {
+                            visit_paragraphs(&mut page.paragraphs, links);
+                        }
+                    }
+                    Control::Table(table) => {
+                        for cell in &mut table.cells {
+                            visit_paragraphs(&mut cell.paragraphs, links);
+                        }
+                        visit_caption(&mut table.caption, links);
+                    }
+                    Control::Shape(shape) => visit_shape(shape, links),
+                    Control::Picture(picture) => {
+                        set_picture_path(picture, links);
+                        visit_caption(&mut picture.caption, links);
+                    }
+                    Control::Header(header) => visit_paragraphs(&mut header.paragraphs, links),
+                    Control::Footer(footer) => visit_paragraphs(&mut footer.paragraphs, links),
+                    Control::Footnote(footnote) => {
+                        visit_paragraphs(&mut footnote.paragraphs, links)
+                    }
+                    Control::Endnote(endnote) => visit_paragraphs(&mut endnote.paragraphs, links),
+                    Control::HiddenComment(comment) => {
+                        visit_paragraphs(&mut comment.paragraphs, links)
+                    }
+                    Control::Field(field) => visit_paragraphs(&mut field.memo_paragraphs, links),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let links = doc
+        .doc_info
+        .bin_data_list
+        .iter()
+        .filter(|bin_data| matches!(bin_data.data_type, BinDataType::Link))
+        .filter_map(|bin_data| {
+            bin_data
+                .abs_path
+                .as_ref()
+                .filter(|path| !path.is_empty())
+                .or_else(|| bin_data.rel_path.as_ref().filter(|path| !path.is_empty()))
+                .map(|path| (bin_data.storage_id, path.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+
+    for section in &mut doc.sections {
+        visit_paragraphs(&mut section.paragraphs, &links);
+        for page in &mut section.section_def.master_pages {
+            visit_paragraphs(&mut page.paragraphs, &links);
+        }
+    }
 }
 
 fn is_safe_hwpx_passthrough_path(path: &str) -> bool {
@@ -574,18 +942,8 @@ fn chart_number_from_path(path: &str) -> Option<u16> {
 
 fn resolve_embedded_font_references(
     doc_info: &mut crate::model::document::DocInfo,
-    items: &[content::PackageItem],
+    item_ids: &HashMap<String, u16>,
 ) {
-    let item_ids = items
-        .iter()
-        .enumerate()
-        .filter_map(|(index, item)| {
-            u16::try_from(index + 1)
-                .ok()
-                .map(|id| (item.id.as_str(), id))
-        })
-        .collect::<HashMap<_, _>>();
-
     for font in doc_info.font_faces.iter_mut().flatten() {
         font.resolved_bin_data_id = font
             .is_embedded
@@ -605,6 +963,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn public_hwpx_size_policy_rejects_one_byte_over_untrusted_limit_without_allocation() {
+        assert!(
+            validate_untrusted_input_size(crate::parser::limits::MAX_UNTRUSTED_INPUT_BYTES).is_ok()
+        );
+        assert!(validate_untrusted_input_size(
+            crate::parser::limits::MAX_UNTRUSTED_INPUT_BYTES + 1
+        )
+        .is_err());
+    }
+
+    #[test]
     fn test_parse_hwpx_invalid_data() {
         let result = parse_hwpx(&[0u8; 10]);
         assert!(result.is_err());
@@ -615,6 +984,164 @@ mod tests {
         // CFB/HWP 데이터로 시도
         let result = parse_hwpx(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn manifest_ids_preserve_exact_numeric_values_and_allocate_collisions() {
+        let item = |id: &str| content::PackageItem {
+            id: id.to_string(),
+            href: format!("BinData/{id}.bin"),
+            media_type: "application/octet-stream".to_string(),
+            is_embedded: true,
+        };
+        let items = vec![
+            item("font-resource-alpha"),
+            item("image1"),
+            item("ole1"),
+            item("image60001"),
+            item("42"),
+            item("image1"),
+        ];
+
+        let ids = build_hwpx_bin_data_ids(&items, [60001]).unwrap();
+
+        assert_eq!(ids.ordered, vec![2, 1, 3, 4, 42, 5]);
+        assert_eq!(ids.by_manifest_id["font-resource-alpha"], 2);
+        assert_eq!(ids.by_manifest_id["image1"], 1);
+        assert_eq!(ids.by_manifest_id["ole1"], 3);
+        assert_eq!(ids.by_manifest_id["image60001"], 4);
+        assert_eq!(ids.by_manifest_id["42"], 42);
+        assert_eq!(ids.ordered.iter().copied().collect::<HashSet<_>>().len(), 6);
+    }
+
+    #[test]
+    fn binary_item_ref_rewrite_matches_whole_manifest_ids_only() {
+        let ids = HashMap::from([
+            ("font-resource-123".to_string(), 7),
+            ("image10".to_string(), 10),
+        ]);
+        let xml = r#"<root><a binaryItemIDRef = 'font-resource-123'/><b binaryItemIDRef="asset-123"/><c binaryItemIDRef="image10"/></root>"#;
+
+        let rewritten = rewrite_binary_item_id_refs(xml, &ids).unwrap();
+
+        assert_eq!(
+            rewritten.as_ref(),
+            r#"<root><a binaryItemIDRef = 'image7'/><b binaryItemIDRef="asset-123"/><c binaryItemIDRef="image10"/></root>"#
+        );
+    }
+
+    #[test]
+    fn binary_item_ref_rewrite_ignores_non_attributes_and_malformed_values() {
+        let ids = HashMap::from([("image1".to_string(), 7)]);
+        let xml = concat!(
+            r#"<root>"#,
+            r#"<!-- <x binaryItemIDRef="image1"/> -->"#,
+            r#"<![CDATA[<x binaryItemIDRef="image1"/>]]>"#,
+            r#"<t>binaryItemIDRef="image1"</t>"#,
+            r#"<x x:binaryItemIDRef="image1" binaryItemIDRefExtra="image1"/>"#,
+            r#"<x a=binaryItemIDRef="image1"/>"#,
+            r#"<x binaryItemIDRef="image1"/>"#,
+            r#"</root>"#,
+        );
+        let expected = xml.replacen(
+            r#"<x binaryItemIDRef="image1"/></root>"#,
+            r#"<x binaryItemIDRef="image7"/></root>"#,
+            1,
+        );
+
+        let rewritten = rewrite_binary_item_id_refs(xml, &ids).unwrap();
+
+        assert_eq!(rewritten, expected);
+    }
+
+    #[test]
+    fn binary_item_ref_rewrite_borrows_when_values_are_already_canonical() {
+        let ids = HashMap::from([("image10".to_string(), 10)]);
+        let xml = r#"<root binaryItemIDRef="image10"><a binaryItemIDRef="unmapped"/></root>"#;
+
+        let rewritten = rewrite_binary_item_id_refs_limited(xml, &ids, xml.len()).unwrap();
+
+        assert!(matches!(
+            rewritten,
+            Cow::Borrowed(value) if value.as_ptr() == xml.as_ptr()
+        ));
+    }
+
+    #[test]
+    fn binary_item_ref_rewrite_rejects_expansion_before_structural_limit() {
+        let ids = HashMap::from([("x".to_string(), u16::MAX)]);
+        let xml = r#"<root binaryItemIDRef="x"/>"#;
+        let expanded_len = xml.len() + "image65535".len() - 1;
+
+        let error = rewrite_binary_item_id_refs_limited(xml, &ids, expanded_len - 1)
+            .expect_err("expanded XML must remain inside the structural limit");
+
+        assert!(matches!(
+            error,
+            HwpxError::XmlError(message) if message.contains("rewritten XML exceeds")
+        ));
+    }
+
+    #[test]
+    fn binary_item_ref_rewrite_handles_many_replacements_with_one_output_budget() {
+        const REPLACEMENTS: usize = 4096;
+        let ids = HashMap::from([("x".to_string(), u16::MAX)]);
+        let item = r#"<a binaryItemIDRef="x"/>"#;
+        let xml = item.repeat(REPLACEMENTS);
+        let projected_len = xml.len() + REPLACEMENTS * ("image65535".len() - 1);
+
+        let rewritten = rewrite_binary_item_id_refs_limited(&xml, &ids, projected_len)
+            .expect("many rewrites should use their exact preflighted output budget");
+
+        let Cow::Owned(rewritten) = rewritten else {
+            panic!("changed XML must own its rewritten output");
+        };
+        assert_eq!(rewritten.len(), projected_len);
+        assert_eq!(rewritten.matches("image65535").count(), REPLACEMENTS);
+    }
+
+    #[test]
+    fn sparse_hwpx_link_paths_resolve_by_storage_id_not_declaration_slot() {
+        let mut picture = crate::model::image::Picture::default();
+        picture.image_attr.bin_data_id = 10;
+        let mut doc = Document {
+            doc_info: crate::model::document::DocInfo {
+                bin_data_list: vec![
+                    BinData {
+                        data_type: BinDataType::Embedding,
+                        storage_id: 1,
+                        ..Default::default()
+                    },
+                    BinData {
+                        data_type: BinDataType::Link,
+                        storage_id: 10,
+                        abs_path: Some("../linked/sparse.png".to_string()),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+            sections: vec![Section {
+                paragraphs: vec![crate::model::paragraph::Paragraph {
+                    controls: vec![crate::model::control::Control::Picture(Box::new(picture))],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        populate_hwpx_link_image_paths(&mut doc);
+
+        let crate::model::control::Control::Picture(picture) =
+            &doc.sections[0].paragraphs[0].controls[0]
+        else {
+            panic!("expected picture control");
+        };
+        assert_eq!(
+            picture.image_attr.external_path.as_deref(),
+            Some("../linked/sparse.png")
+        );
     }
 
     #[test]
@@ -713,7 +1240,8 @@ mod tests {
             },
         ];
 
-        resolve_embedded_font_references(&mut doc_info, &items);
+        let ids = build_hwpx_bin_data_ids(&items, []).unwrap();
+        resolve_embedded_font_references(&mut doc_info, &ids.by_manifest_id);
 
         let font = &doc_info.font_faces[0][0];
         assert_eq!(font.resolved_bin_data_id, Some(2));

@@ -36,7 +36,7 @@ pub fn parse_ingest_bytes_from_local_file(bytes: &[u8]) -> Result<IngestDocument
     parse_ingest_bytes_with_policy(bytes, InputPolicy::LocalFileOnce)
 }
 
-pub fn parse_ingest_bytes_with_policy(
+pub(crate) fn parse_ingest_bytes_with_policy(
     bytes: &[u8],
     policy: InputPolicy,
 ) -> Result<IngestDocument, HwpError> {

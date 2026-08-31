@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import math
+import ntpath
 import os
 import re
 import shutil
@@ -1842,7 +1843,8 @@ def resolve_rhwp_binary(
         if resolved.is_file() and os.access(resolved, os.X_OK):
             return resolved
     raise ValueError(
-        "HWP support requires the Rauhwpx 'rhwp' binary; pass --rhwp-bin, "
+        "Copy-layout generation and HWP inspection require the Rauhwpx 'rhwp' "
+        "binary for native validation; pass --rhwp-bin, "
         "set RHWP_BIN, add rhwp (rhwp.exe on Windows) to PATH, or build it with cargo build"
     )
 
@@ -1909,7 +1911,11 @@ def _terminate_rhwp_tree(process: subprocess.Popen[bytes]) -> bool:
         # exit while this helper waits the full cleanup bound. We arrive here
         # only after a timeout or output-limit violation, so terminate the
         # already-owned live tree in one forced operation.
-        command = ["taskkill.exe", "/PID", str(process.pid), "/T", "/F"]
+        system_root = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
+        if not isinstance(system_root, str) or not ntpath.isabs(system_root):
+            return False
+        taskkill = ntpath.join(system_root, "System32", "taskkill.exe")
+        command = [taskkill, "/PID", str(process.pid), "/T", "/F"]
         try:
             killer = subprocess.Popen(
                 command,
@@ -2505,10 +2511,10 @@ def copy_layout(
                         sanitized_hwpx = destination
                         output_info = native_document_info(binary, destination)
                         output_page_count = output_info.get("pageCount")
-                    if source_info.get("pageCount") != output_info.get("pageCount"):
+                    if source_page_count != output_page_count:
                         fidelity_warnings.append(
                             "final HWPX pageCount changed: "
-                            f"{source_info.get('pageCount')!r} -> {output_info.get('pageCount')!r}"
+                            f"{source_page_count!r} -> {output_page_count!r}"
                         )
                     native_verification = {
                         "format": output_info.get("format"),
@@ -2583,7 +2589,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--rhwp-bin",
         type=Path,
-        help="Rauhwpx CLI path for HWP input/output (otherwise RHWP_BIN, PATH, or repo build)",
+        help=(
+            "Rauhwpx CLI path required for generation evidence and HWP input/output "
+            "(otherwise RHWP_BIN, PATH, or repo build)"
+        ),
     )
     parser.add_argument(
         "--keep-media",
@@ -2646,6 +2655,8 @@ def main() -> int:
             )
             output = Path(str(report.get("output", ""))).resolve()
             try:
+                # A generated candidate is publishable only after native page and
+                # geometry evidence succeeds, including for pure-Python HWPX output.
                 binary = resolve_rhwp_binary(args.rhwp_bin)
                 report["candidate_evidence"] = candidate_render_evidence(
                     binary,

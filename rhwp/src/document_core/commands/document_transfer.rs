@@ -16,6 +16,7 @@ use crate::model::event::DocumentEvent;
 use crate::model::paragraph::Paragraph;
 use crate::model::shape::{Caption, CommonObjAttr, DrawingObjAttr, ShapeObject};
 use crate::model::style::{Fill, HeadType};
+use crate::xml_attr::{decimal_u32_ascii, image_ref_u16_ascii, ExactXmlAttributeScanner};
 
 #[derive(Debug)]
 struct ResourceMap {
@@ -316,50 +317,118 @@ fn build_resource_map(target: &Document, source: &Document) -> Result<ResourceMa
     })
 }
 
-fn remap_decimal_xml_attr<F>(xml: &str, attr: &str, mut mapper: F) -> Result<String, HwpError>
+fn remap_decimal_xml_attr<F>(xml: &str, attr: &str, mapper: F) -> Result<String, HwpError>
 where
-    F: FnMut(u32) -> Result<u32, HwpError>,
+    F: Fn(u32) -> Result<u32, HwpError>,
 {
-    let needle = format!("{attr}=\"");
-    let mut cursor = 0usize;
-    let mut out = String::with_capacity(xml.len());
-    while let Some(relative) = xml[cursor..].find(&needle) {
-        let start = cursor + relative;
-        let value_start = start + needle.len();
-        let Some(relative_end) = xml[value_start..].find('"') else {
-            return Err(transfer_error(format!("malformed {attr} in preserved XML")));
-        };
-        let value_end = value_start + relative_end;
+    let max_bytes = crate::parser::limits::MAX_STRUCTURAL_BYTES;
+    if xml.len() > max_bytes {
+        return Err(transfer_error(format!(
+            "preserved XML exceeds structural byte limit: {} > {max_bytes}",
+            xml.len()
+        )));
+    }
+
+    let mut projected_len = xml.len();
+    let mut scanner = ExactXmlAttributeScanner::new(xml);
+    while let Some((value_start, value_end)) = scanner.next_value(attr) {
         let value = xml[value_start..value_end]
             .parse::<u32>()
             .map_err(|_| transfer_error(format!("non-numeric {attr} in preserved XML")))?;
-        out.push_str(&xml[cursor..value_start]);
-        out.push_str(&mapper(value)?.to_string());
-        cursor = value_end;
+        let mapped = mapper(value)?;
+        let mut replacement_buffer = [0u8; 10];
+        let replacement = decimal_u32_ascii(mapped, &mut replacement_buffer);
+        projected_len = projected_len
+            .checked_sub(value_end - value_start)
+            .and_then(|length| length.checked_add(replacement.len()))
+            .ok_or_else(|| transfer_error(format!("{attr} rewrite size overflow")))?;
     }
-    out.push_str(&xml[cursor..]);
+    if projected_len > max_bytes {
+        return Err(transfer_error(format!(
+            "rewritten preserved XML exceeds structural byte limit: {projected_len} > {max_bytes}"
+        )));
+    }
+
+    let mut out = String::new();
+    out.try_reserve_exact(projected_len)
+        .map_err(|error| transfer_error(format!("{attr} rewrite allocation failed: {error}")))?;
+    let mut copied = 0usize;
+    let mut scanner = ExactXmlAttributeScanner::new(xml);
+    while let Some((value_start, value_end)) = scanner.next_value(attr) {
+        let value = xml[value_start..value_end]
+            .parse::<u32>()
+            .map_err(|_| transfer_error(format!("non-numeric {attr} in preserved XML")))?;
+        let mapped = mapper(value)?;
+        let mut replacement_buffer = [0u8; 10];
+        let replacement = decimal_u32_ascii(mapped, &mut replacement_buffer);
+        out.push_str(&xml[copied..value_start]);
+        out.push_str(replacement);
+        copied = value_end;
+    }
+    out.push_str(&xml[copied..]);
+    debug_assert_eq!(out.len(), projected_len);
     Ok(out)
 }
 
 fn remap_image_xml_attr(xml: &str, resources: &ResourceMap) -> Result<String, HwpError> {
-    let attr = "binaryItemIDRef=\"image";
-    let mut cursor = 0usize;
-    let mut out = String::with_capacity(xml.len());
-    while let Some(relative) = xml[cursor..].find(attr) {
-        let start = cursor + relative;
-        let value_start = start + attr.len();
-        let Some(relative_end) = xml[value_start..].find('"') else {
-            return Err(transfer_error("malformed binaryItemIDRef in preserved XML"));
+    const ATTR: &str = "binaryItemIDRef";
+    let max_bytes = crate::parser::limits::MAX_STRUCTURAL_BYTES;
+    if xml.len() > max_bytes {
+        return Err(transfer_error(format!(
+            "preserved XML exceeds structural byte limit: {} > {max_bytes}",
+            xml.len()
+        )));
+    }
+
+    let mut projected_len = xml.len();
+    let mut scanner = ExactXmlAttributeScanner::new(xml);
+    while let Some((value_start, value_end)) = scanner.next_value(ATTR) {
+        let value = &xml[value_start..value_end];
+        let Some(digits) = value.strip_prefix("image") else {
+            continue;
         };
-        let value_end = value_start + relative_end;
-        let value = xml[value_start..value_end]
+        let value = digits
             .parse::<u16>()
             .map_err(|_| transfer_error("non-numeric binaryItemIDRef in preserved XML"))?;
-        out.push_str(&xml[cursor..value_start]);
-        out.push_str(&resources.bin_id(value)?.to_string());
-        cursor = value_end;
+        let mapped = resources.bin_id(value)?;
+        let mut replacement_buffer = [0u8; 10];
+        let replacement = image_ref_u16_ascii(mapped, &mut replacement_buffer);
+        projected_len = projected_len
+            .checked_sub(value_end - value_start)
+            .and_then(|length| length.checked_add(replacement.len()))
+            .ok_or_else(|| transfer_error("binaryItemIDRef rewrite size overflow"))?;
     }
-    out.push_str(&xml[cursor..]);
+    if projected_len > max_bytes {
+        return Err(transfer_error(format!(
+            "rewritten preserved XML exceeds structural byte limit: {projected_len} > {max_bytes}"
+        )));
+    }
+
+    let mut out = String::new();
+    out.try_reserve_exact(projected_len).map_err(|error| {
+        transfer_error(format!(
+            "binaryItemIDRef rewrite allocation failed: {error}"
+        ))
+    })?;
+    let mut copied = 0usize;
+    let mut scanner = ExactXmlAttributeScanner::new(xml);
+    while let Some((value_start, value_end)) = scanner.next_value(ATTR) {
+        let value = &xml[value_start..value_end];
+        let Some(digits) = value.strip_prefix("image") else {
+            continue;
+        };
+        let value = digits
+            .parse::<u16>()
+            .map_err(|_| transfer_error("non-numeric binaryItemIDRef in preserved XML"))?;
+        let mapped = resources.bin_id(value)?;
+        let mut replacement_buffer = [0u8; 10];
+        let replacement = image_ref_u16_ascii(mapped, &mut replacement_buffer);
+        out.push_str(&xml[copied..value_start]);
+        out.push_str(replacement);
+        copied = value_end;
+    }
+    out.push_str(&xml[copied..]);
+    debug_assert_eq!(out.len(), projected_len);
     Ok(out)
 }
 
@@ -1375,6 +1444,54 @@ impl DocumentCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preserved_decimal_attribute_rewrite_uses_exact_start_tag_attributes() {
+        let xml = concat!(
+            r#"<!-- charPrIDRef="1" -->"#,
+            r#"<t>charPrIDRef="1"</t>"#,
+            r#"<x x:charPrIDRef="1" charPrIDRefExtra="1"/>"#,
+            r#"<x a=charPrIDRef="1"/>"#,
+            r#"<x charPrIDRef="1"/>"#,
+        );
+        let expected = xml.replacen(r#"<x charPrIDRef="1"/>"#, r#"<x charPrIDRef="11"/>"#, 1);
+
+        let rewritten = remap_decimal_xml_attr(xml, "charPrIDRef", |id| Ok(id + 10)).unwrap();
+
+        assert_eq!(rewritten, expected);
+    }
+
+    #[test]
+    fn preserved_image_attribute_rewrite_uses_exact_start_tag_attributes() {
+        let resources = ResourceMap {
+            font_bases: [0; 7],
+            border_base: 0,
+            char_base: 0,
+            tab_base: 0,
+            numbering_base: 0,
+            bullet_base: 0,
+            para_base: 0,
+            style_base: 0,
+            bin_ids: vec![7],
+            bin_storage_ids: HashMap::new(),
+        };
+        let xml = concat!(
+            r#"<!-- binaryItemIDRef="image1" -->"#,
+            r#"<t>binaryItemIDRef="image1"</t>"#,
+            r#"<x x:binaryItemIDRef="image1" binaryItemIDRefExtra="image1"/>"#,
+            r#"<x a=binaryItemIDRef="image1"/>"#,
+            r#"<x binaryItemIDRef="image1"/>"#,
+        );
+        let expected = xml.replacen(
+            r#"<x binaryItemIDRef="image1"/>"#,
+            r#"<x binaryItemIDRef="image7"/>"#,
+            1,
+        );
+
+        let rewritten = remap_image_xml_attr(xml, &resources).unwrap();
+
+        assert_eq!(rewritten, expected);
+    }
 
     fn count_tables(paragraphs: &[Paragraph]) -> usize {
         let mut count = 0;

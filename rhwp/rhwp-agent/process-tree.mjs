@@ -1,7 +1,34 @@
 import spawn from 'cross-spawn';
+import { win32 } from 'node:path';
 
 const activeTerminations = new WeakMap();
 const completedTerminations = new WeakMap();
+
+/**
+ * Process-tree cleanup has three outcomes. `UNAVAILABLE` means the leader
+ * exited before Windows could safely target its tree. It is not cleanup proof.
+ */
+export const PROCESS_TREE_CLEANUP_OUTCOME = Object.freeze({
+  PROVEN: 'proven',
+  FAILED: 'failed',
+  UNAVAILABLE: 'unavailable',
+});
+
+/**
+ * Combine the termination command and exit waiter without letting an
+ * unavailable proof become truthy by accident. Legacy injected terminators
+ * may return undefined after dispatching a signal, so the independent exit
+ * waiter remains the proof in that case.
+ */
+export function processTreeCleanupOutcome(terminationResult, exitResult) {
+  if (terminationResult === false || (exitResult !== true && exitResult !== null)) {
+    return PROCESS_TREE_CLEANUP_OUTCOME.FAILED;
+  }
+  if (terminationResult === null || exitResult === null) {
+    return PROCESS_TREE_CLEANUP_OUTCOME.UNAVAILABLE;
+  }
+  return PROCESS_TREE_CLEANUP_OUTCOME.PROVEN;
+}
 
 /** Spawn options that make one owned CLI and all of its descendants killable as a unit. */
 export function processTreeSpawnOptions(platform = process.platform) {
@@ -29,6 +56,12 @@ function validPid(child) {
   return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
 }
 
+function windowsTaskkillPath(sourceEnv) {
+  const systemRoot = sourceEnv?.SystemRoot ?? sourceEnv?.WINDIR;
+  if (typeof systemRoot !== 'string' || !win32.isAbsolute(systemRoot)) return null;
+  return win32.join(systemRoot, 'System32', 'taskkill.exe');
+}
+
 function posixProcessGroupAlive(pid, killProcess) {
   try {
     killProcess(-pid, 0);
@@ -47,7 +80,11 @@ function waitForActiveTermination(child) {
   return Promise.resolve(true);
 }
 
-/** Wait until an owned child has exited, bounded beyond TERM→KILL escalation. */
+/**
+ * Wait until an owned child has exited, bounded beyond TERM→KILL escalation.
+ * Null means an exited leader no longer has a safely targetable tree identity.
+ * @returns {Promise<boolean|null>}
+ */
 export function waitForProcessTreeExit(child, {
   timeoutMs = 4_000,
   setTimer = setTimeout,
@@ -56,11 +93,15 @@ export function waitForProcessTreeExit(child, {
 } = {}) {
   if (!child) return Promise.resolve(true);
   if (child.exitCode != null || child.signalCode != null) {
-    if (!activeTerminations.has(child) && !completedTerminations.has(child) && validPid(child) !== null) {
+    const pid = validPid(child);
+    if (!activeTerminations.has(child) && !completedTerminations.has(child) && pid !== null) {
       // `exit` can precede `close` while descendants still own the pipes. The
       // leader's numeric exit code is therefore not proof that its group/tree
       // is gone; begin the same bounded cleanup a live leader would receive.
       try { terminateProcess(child); } catch {}
+    }
+    if (!activeTerminations.has(child) && !completedTerminations.has(child) && pid === null) {
+      return Promise.resolve(null);
     }
     return waitForActiveTermination(child);
   }
@@ -99,14 +140,14 @@ export function waitForProcessTreeExit(child, {
  *   terminateProcess?: (child: any, options?: any) => any,
  *   terminateOptions?: any,
  * }} [options]
- * @returns {Promise<boolean>}
+ * @returns {Promise<'proven'|'failed'|'unavailable'>}
  */
-export async function terminateAndWaitForProcessTreeExit(child, {
+export async function terminateAndWaitForProcessTreeExitOutcome(child, {
   timeoutMs = 4_000,
   terminateProcess = terminateProcessTree,
   terminateOptions,
 } = {}) {
-  if (!child) return true;
+  if (!child) return PROCESS_TREE_CLEANUP_OUTCOME.PROVEN;
   // Let callers publish the returned promise before termination can emit a
   // synchronous fake `exit`/`close` event and re-enter their cleanup handler.
   await Promise.resolve();
@@ -129,7 +170,19 @@ export async function terminateAndWaitForProcessTreeExit(child, {
   });
   startTermination();
   const [terminationResult, exitResult] = await Promise.all([termination, exited]);
-  return terminationResult !== false && exitResult;
+  return processTreeCleanupOutcome(terminationResult, exitResult);
+}
+
+/**
+ * Backward-compatible fail-closed wrapper. Call the outcome variant only when
+ * a natural, drained close needs to distinguish unavailable proof from a
+ * failed cleanup attempt.
+ *
+ * @returns {Promise<boolean>}
+ */
+export async function terminateAndWaitForProcessTreeExit(child, options = {}) {
+  return (await terminateAndWaitForProcessTreeExitOutcome(child, options))
+    === PROCESS_TREE_CLEANUP_OUTCOME.PROVEN;
 }
 
 /**
@@ -146,7 +199,9 @@ export async function terminateAndWaitForProcessTreeExit(child, {
  *   setTimer?: typeof setTimeout,
  *   clearTimer?: typeof clearTimeout,
  *   processGroupAlive?: (() => boolean),
+ *   env?: NodeJS.ProcessEnv,
  * }} [options]
+ * @returns {Promise<boolean|null>|null}
  */
 export function terminateProcessTree(child, {
   platform = process.platform,
@@ -157,6 +212,7 @@ export function terminateProcessTree(child, {
   setTimer = setTimeout,
   clearTimer = clearTimeout,
   processGroupAlive,
+  env = process.env,
 } = {}) {
   if (!child) return null;
   const active = activeTerminations.get(child);
@@ -173,10 +229,13 @@ export function terminateProcessTree(child, {
     // process-not-found while descendants survive or target a reused pid.
     // Callers that need a positive proof must start cleanup while their owned
     // leader is still alive (the structured copy-layout runner does this).
-    completedTerminations.set(child, false);
-    return Promise.resolve(false);
+    completedTerminations.set(child, null);
+    return Promise.resolve(null);
   }
-  if (pid === null && (child.exitCode != null || child.signalCode != null)) return null;
+  if (pid === null && (child.exitCode != null || child.signalCode != null)) {
+    completedTerminations.set(child, null);
+    return null;
+  }
   const signal = (name) => {
     if (pid === null) {
       if (child.exitCode != null || child.signalCode != null) return;
@@ -184,10 +243,13 @@ export function terminateProcessTree(child, {
       return;
     }
     if (platform === 'win32') {
-      const args = ['/PID', String(pid), '/T', ...(name === 'SIGKILL' ? ['/F'] : [])];
+      const taskkill = windowsTaskkillPath(env);
+      if (!taskkill) return null;
+      const args = ['/PID', String(pid), '/T'];
       try {
-        return spawnProcess('taskkill', args, {
+        return spawnProcess(taskkill, args, {
           detached: false,
+          env,
           shell: false,
           stdio: 'ignore',
           windowsHide: true,
@@ -204,10 +266,10 @@ export function terminateProcessTree(child, {
     }
   };
 
-  /** @type {(cleaned: boolean) => void} */
+  /** @type {(cleaned: boolean | null) => void} */
   let resolveCompletion = () => {};
   const completion = new Promise((resolve) => { resolveCompletion = resolve; });
-  /** @type {{ completion: Promise<boolean>, finished: boolean, timer: ReturnType<typeof setTimeout> | null }} */
+  /** @type {{ completion: Promise<boolean | null>, finished: boolean, timer: ReturnType<typeof setTimeout> | null }} */
   const state = {
     completion,
     finished: false,
@@ -223,16 +285,16 @@ export function terminateProcessTree(child, {
   };
   activeTerminations.set(child, state);
 
-  // Without a stable tree identity, leader exit is the only safe point to
-  // cancel escalation. Owned POSIX groups and Windows trees can retain live
-  // descendants after the leader exits, so their force step must still run.
+  // POSIX owns a stable process-group identity and can safely escalate after
+  // leader exit. Windows owns only a reusable numeric PID, so it gets one
+  // taskkill command while the leader is known live and never retargets later.
   if (pid === null) {
     child.once?.('exit', () => finish(true));
     child.once?.('close', () => finish(true));
   }
 
+  let initialTaskkillSettled = false;
   let initialTaskkillSucceeded = false;
-  let forceTaskkillSucceeded = false;
   let leaderExited = child.exitCode != null || child.signalCode != null;
   const groupAlive = () => {
     try {
@@ -243,14 +305,24 @@ export function terminateProcessTree(child, {
       return true;
     }
   };
+  const settleExitedWindowsLeader = () => {
+    if (!leaderExited || state.finished) return;
+    if (initialTaskkillSucceeded) {
+      finish(true);
+      return;
+    }
+    // Once the leader exits, its numeric PID can be recycled. Wait only for
+    // the single taskkill command started while the leader was known live.
+    if (initialTaskkillSettled) finish(null);
+  };
   const noteLeaderExit = () => {
     leaderExited = true;
     if (pid === null) {
       finish(true);
     } else if (platform !== 'win32') {
       if (!groupAlive()) finish(true);
-    } else if (initialTaskkillSucceeded || forceTaskkillSucceeded) {
-      finish(true);
+    } else {
+      settleExitedWindowsLeader();
     }
   };
   if (pid !== null) {
@@ -276,8 +348,9 @@ export function terminateProcessTree(child, {
   const initialSignal = signal('SIGTERM');
   if (platform === 'win32') {
     watchTaskkill(initialSignal, (succeeded) => {
+      initialTaskkillSettled = true;
       initialTaskkillSucceeded ||= succeeded;
-      if (leaderExited && initialTaskkillSucceeded) finish(true);
+      settleExitedWindowsLeader();
     });
   } else if (pid !== null && leaderExited && !groupAlive()) {
     finish(true);
@@ -286,6 +359,7 @@ export function terminateProcessTree(child, {
 
   if (state.finished) return completion;
   state.timer = setTimer(() => {
+    if (state.finished) return;
     if (pid === null) {
       signal('SIGKILL');
       finish(child.exitCode != null || child.signalCode != null);
@@ -305,16 +379,20 @@ export function terminateProcessTree(child, {
       return;
     }
 
-    const forcedTaskkill = signal('SIGKILL');
-    watchTaskkill(forcedTaskkill, (succeeded) => {
-      forceTaskkillSucceeded ||= succeeded;
-      if (leaderExited && (initialTaskkillSucceeded || forceTaskkillSucceeded)) finish(true);
-    });
+    // Never issue a second Windows PID command. Even when Node has not yet
+    // delivered the exit event, the first taskkill may already have ended the
+    // process and made its numeric PID reusable.
+    leaderExited ||= child.exitCode != null || child.signalCode != null;
+    settleExitedWindowsLeader();
     if (!state.finished) {
-      state.timer = setTimer(
-        () => finish(leaderExited && (initialTaskkillSucceeded || forceTaskkillSucceeded)),
-        finalGraceMs,
-      );
+      state.timer = setTimer(() => {
+        leaderExited ||= child.exitCode != null || child.signalCode != null;
+        if (leaderExited) {
+          finish(initialTaskkillSucceeded ? true : null);
+          return;
+        }
+        finish(false);
+      }, finalGraceMs);
     }
   }, graceMs);
   return completion;

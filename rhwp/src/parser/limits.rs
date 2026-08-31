@@ -41,6 +41,9 @@ pub const MAX_HWPX_CENTRAL_DIRECTORY_BYTES: usize = 32 * 1024 * 1024;
 /// memory and traversal cost with hundreds of thousands of 128-byte records.
 pub const MAX_CFB_DIRECTORY_ENTRIES: usize = 4096;
 
+/// Maximum UTF-8 byte length of one serializer-side CFB path.
+pub const MAX_CFB_PATH_BYTES: usize = 4096;
+
 /// Maximum UTF-8 byte length of one HWPX member name.
 ///
 /// ZIP permits 65,535-byte names. Keeping thousands of names of that size is a
@@ -49,25 +52,31 @@ pub const MAX_HWPX_ENTRY_NAME_BYTES: usize = 4096;
 
 /// Describes how the caller obtained the raw document bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InputPolicy {
+pub(crate) enum InputPolicy {
     /// Network, IPC, clipboard, drag, or any source without a fresh exact-file approval.
     Untrusted,
     /// A single exact local file approved through a native picker for this open attempt.
     LocalFileOnce,
+    /// Bytes produced inside this process by a bounded serializer.
+    ///
+    /// This is not an acquisition permission: callers must never apply it to
+    /// network, IPC, clipboard, drag, or arbitrary caller-provided bytes.
+    Regenerated,
 }
 
 impl InputPolicy {
     pub const fn max_input_bytes(self) -> usize {
         match self {
             Self::Untrusted => MAX_UNTRUSTED_INPUT_BYTES,
-            Self::LocalFileOnce => MAX_LOCAL_FILE_INPUT_BYTES,
+            Self::LocalFileOnce | Self::Regenerated => MAX_LOCAL_FILE_INPUT_BYTES,
         }
     }
 
     const fn label(self) -> &'static str {
         match self {
-            Self::Untrusted => "untrusted",
-            Self::LocalFileOnce => "approved local file",
+            Self::Untrusted => "신뢰되지 않은",
+            Self::LocalFileOnce => "승인된 로컬 파일",
+            Self::Regenerated => "내부 재생성 문서",
         }
     }
 }
@@ -179,6 +188,7 @@ mod tests {
         assert!(
             validate_input_size(MAX_LOCAL_FILE_INPUT_BYTES, InputPolicy::LocalFileOnce).is_ok()
         );
+        assert!(validate_input_size(MAX_LOCAL_FILE_INPUT_BYTES, InputPolicy::Regenerated).is_ok());
         assert!(
             validate_input_size(MAX_LOCAL_FILE_INPUT_BYTES + 1, InputPolicy::LocalFileOnce)
                 .is_err()

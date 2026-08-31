@@ -4,11 +4,17 @@ import test from 'node:test';
 
 import {
   isolatedProcessEnv,
+  PROCESS_TREE_CLEANUP_OUTCOME,
+  processTreeCleanupOutcome,
   processTreeSpawnOptions,
   terminateAndWaitForProcessTreeExit,
+  terminateAndWaitForProcessTreeExitOutcome,
   terminateProcessTree,
   waitForProcessTreeExit,
 } from '../process-tree.mjs';
+
+const WINDOWS_ENV = Object.freeze({ SystemRoot: 'C:\\Windows' });
+const WINDOWS_TASKKILL = 'C:\\Windows\\System32\\taskkill.exe';
 
 function timerHarness() {
   let callback = null;
@@ -123,7 +129,7 @@ test('already-exited POSIX leader still cleans a live descendant group', async (
   assert.equal(await exited, true);
 });
 
-test('Windows termination invokes taskkill with argv only and force-escalates the tree', () => {
+test('Windows termination invokes one trusted taskkill command with argv only', () => {
   const child = Object.assign(new EventEmitter(), { pid: 9876, exitCode: null, signalCode: null });
   const calls = [];
   const timers = timerHarness();
@@ -134,14 +140,14 @@ test('Windows termination invokes taskkill with argv only and force-escalates th
 
   terminateProcessTree(child, {
     platform: 'win32',
+    env: WINDOWS_ENV,
     spawnProcess,
     setTimer: timers.setTimer,
   });
   timers.fire();
 
   assert.deepEqual(calls.map(({ command, args }) => [command, args]), [
-    ['taskkill', ['/PID', '9876', '/T']],
-    ['taskkill', ['/PID', '9876', '/T', '/F']],
+    [WINDOWS_TASKKILL, ['/PID', '9876', '/T']],
   ]);
   assert.ok(calls.every(({ options }) => (
     options.shell === false
@@ -151,27 +157,32 @@ test('Windows termination invokes taskkill with argv only and force-escalates th
   )));
 });
 
-test('Windows leader exit does not cancel forced descendant cleanup', () => {
+test('Windows leader exit after graceful taskkill starts blocks PID-based escalation', async () => {
   const child = Object.assign(new EventEmitter(), { pid: 9877, exitCode: null, signalCode: null });
   const calls = [];
+  const taskkills = [];
   const timers = timerHarness();
 
-  terminateProcessTree(child, {
+  const cleanup = terminateProcessTree(child, {
     platform: 'win32',
+    env: WINDOWS_ENV,
     spawnProcess(command, args) {
       calls.push([command, args]);
-      return new EventEmitter();
+      const taskkill = new EventEmitter();
+      taskkills.push(taskkill);
+      return taskkill;
     },
     setTimer: timers.setTimer,
   });
   child.exitCode = 0;
   child.emit('exit', 0, null);
+  taskkills[0].emit('close', 1, null);
   timers.fire();
 
   assert.deepEqual(calls, [
-    ['taskkill', ['/PID', '9877', '/T']],
-    ['taskkill', ['/PID', '9877', '/T', '/F']],
+    [WINDOWS_TASKKILL, ['/PID', '9877', '/T']],
   ]);
+  assert.equal(await cleanup, null);
 });
 
 test('already-exited Windows leader fails closed without targeting a reusable pid', async () => {
@@ -192,16 +203,57 @@ test('already-exited Windows leader fails closed without targeting a reusable pi
     },
   });
 
-  assert.equal(await exited, false);
+  assert.equal(await exited, null);
   assert.deepEqual(calls, [], 'an expired Windows pid must never be passed to taskkill');
 });
 
-test('Windows taskkill success is not cleanup proof while the owned leader survives', async () => {
+test('an exited leader without a tree identity reports unavailable proof', async () => {
+  const child = Object.assign(new EventEmitter(), { exitCode: 0, signalCode: null });
+  assert.equal(await waitForProcessTreeExit(child), null);
+  assert.equal(terminateProcessTree(child), null);
+});
+
+test('cleanup outcomes keep unavailable proof distinct and fail closed in the boolean wrapper', async () => {
+  assert.equal(
+    processTreeCleanupOutcome(true, true),
+    PROCESS_TREE_CLEANUP_OUTCOME.PROVEN,
+  );
+  assert.equal(
+    processTreeCleanupOutcome(false, true),
+    PROCESS_TREE_CLEANUP_OUTCOME.FAILED,
+  );
+  assert.equal(
+    processTreeCleanupOutcome(true, undefined),
+    PROCESS_TREE_CLEANUP_OUTCOME.FAILED,
+  );
+  assert.equal(
+    processTreeCleanupOutcome(null, true),
+    PROCESS_TREE_CLEANUP_OUTCOME.UNAVAILABLE,
+  );
+
+  const child = Object.assign(new EventEmitter(), { pid: 9880, exitCode: 0, signalCode: null });
+  const calls = [];
+  const options = {
+    terminateOptions: {
+      platform: 'win32',
+      spawnProcess(command, args) { calls.push([command, args]); },
+    },
+  };
+  assert.equal(
+    await terminateAndWaitForProcessTreeExitOutcome(child, options),
+    PROCESS_TREE_CLEANUP_OUTCOME.UNAVAILABLE,
+  );
+  assert.equal(await terminateAndWaitForProcessTreeExit(child, options), false);
+  assert.deepEqual(calls, [], 'an unavailable proof must not target the expired pid');
+});
+
+test('Windows taskkill success never retargets a delayed leader PID', async () => {
   const child = Object.assign(new EventEmitter(), { pid: 9879, exitCode: null, signalCode: null });
   const commands = [];
   const timers = timerHarness();
   const termination = terminateProcessTree(child, {
     platform: 'win32',
+    env: WINDOWS_ENV,
     setTimer: timers.setTimer,
     spawnProcess() {
       const taskkill = new EventEmitter();
@@ -216,11 +268,28 @@ test('Windows taskkill success is not cleanup proof while the owned leader survi
   await Promise.resolve();
   assert.equal(result, null);
   timers.fire();
-  commands[1].emit('exit', 0, null);
   await Promise.resolve();
+  assert.equal(commands.length, 1, 'a delayed exit must not trigger a second PID command');
   assert.equal(result, null, 'taskkill exit zero does not replace the leader-exit proof');
   timers.fire();
   assert.equal(await termination, false);
+});
+
+test('Windows cleanup fails closed when the trusted system taskkill path is unavailable', async () => {
+  const child = Object.assign(new EventEmitter(), { pid: 9881, exitCode: null, signalCode: null });
+  const calls = [];
+  const timers = timerHarness();
+  const termination = terminateProcessTree(child, {
+    platform: 'win32',
+    env: { SystemRoot: 'relative-root' },
+    setTimer: timers.setTimer,
+    spawnProcess(command, args) { calls.push([command, args]); },
+  });
+  timers.fire();
+  timers.fire();
+
+  assert.equal(await termination, false);
+  assert.deepEqual(calls, []);
 });
 
 test('isolated process environments set both home conventions and the RHWP session', () => {

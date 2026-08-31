@@ -759,6 +759,7 @@ test('CanvasKit local font byte reads use bounded worker concurrency', async () 
     const loaded = await loadLocalFontBytesFor(records.map(record => record.fullName));
     assert.equal(loaded.size, records.length);
     assert.equal(completedReads, records.length);
+    assert.ok(maximumActiveReads > 1);
     assert.ok(maximumActiveReads <= LOCAL_FONT_BYTE_READ_CONCURRENCY);
   } finally {
     await clearStoredLocalFonts();

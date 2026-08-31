@@ -16,6 +16,8 @@ import {
   validateExecutionMode,
 } from './backend.mjs';
 import {
+  PROCESS_TREE_CLEANUP_OUTCOME,
+  processTreeCleanupOutcome,
   processTreeSpawnOptions,
   terminateProcessTree,
   waitForProcessTreeExit,
@@ -218,6 +220,8 @@ export function createPiSession(opts, {
   spawnProcess = spawn,
   terminateProcess = terminateProcessTree,
   waitForExit = waitForProcessTreeExit,
+  closeGraceMs = 2_000,
+  platform = process.platform,
 } = {}) {
   const onEvent = opts.onEvent;
 
@@ -236,7 +240,13 @@ export function createPiSession(opts, {
   let stderrTail = '';
   let childExitPromise = Promise.resolve(true);
   let resolveChildExit = null;
+  /** @type {(reason?: 'forced'|'queue') => Promise<boolean>} */
   let stopChild = () => Promise.resolve(true);
+  let beginTerminalCleanup = () => Promise.resolve(true);
+  let suppressChildOutput = () => {};
+  let uncertainTreeCleanup = false;
+  /** @type {{ text: string } | null} */
+  let queuedTurn = null;
 
   function endTurn(evt) {
     if (!turnOpen) return;
@@ -314,6 +324,7 @@ export function createPiSession(opts, {
         // 완료 신호는 agent_end 가 아니라 agent_settled 다 — agent_end 뒤에도
         // 자동 재시도/압축이 이어질 수 있다.
         turnCompleted = true;
+        void beginTerminalCleanup();
         return;
       }
       if (type === 'error') {
@@ -323,17 +334,64 @@ export function createPiSession(opts, {
   }
 
   function killChild() {
-    return stopChild();
+    return stopChild('forced');
   }
 
-  return {
+  const session = {
     agent,
     getSessionId() {
       return sessionId;
     },
     sendUserMessage(text) {
       if (disposed) return;
-      if (child) throw new Error('Pi process tree cleanup is still pending');
+      if (turnOpen || queuedTurn) throw new Error('Pi already has a turn in progress');
+      if (uncertainTreeCleanup) {
+        turnOpen = true;
+        turnCompleted = false;
+        turnFailureMessage = null;
+        onEvent({
+          type: 'error',
+          agent,
+          message: 'Pi process-tree cleanup remains unconfirmed; start a new isolated session',
+        });
+        endTurn({ type: 'turn-end', agent, stopReason: 'failed' });
+        return;
+      }
+      if (child) {
+        const queued = { text };
+        queuedTurn = queued;
+        const ownership = childExitPromise;
+        void stopChild('queue');
+        void ownership.then((cleaned) => {
+          if (queuedTurn !== queued) return;
+          queuedTurn = null;
+          if (disposed) return;
+          if (cleaned && !child) {
+            session.sendUserMessage(queued.text);
+            return;
+          }
+          turnOpen = true;
+          turnCompleted = false;
+          turnFailureMessage = null;
+          const message = 'Pi process tree cleanup could not be confirmed before the next turn';
+          onEvent({ type: 'error', agent, message });
+          endTurn({ type: 'turn-end', agent, stopReason: 'exited' });
+        }, () => {
+          if (queuedTurn !== queued) return;
+          queuedTurn = null;
+          if (disposed) return;
+          turnOpen = true;
+          turnCompleted = false;
+          turnFailureMessage = null;
+          onEvent({
+            type: 'error',
+            agent,
+            message: 'Pi process tree cleanup could not be confirmed before the next turn',
+          });
+          endTurn({ type: 'turn-end', agent, stopReason: 'exited' });
+        });
+        return;
+      }
       turnOpen = true;
       turnCompleted = false;
       turnFailureMessage = null;
@@ -370,15 +428,91 @@ export function createPiSession(opts, {
       child = proc;
       childExitPromise = new Promise((resolve) => { resolveChildExit = resolve; });
       const readStdout = createLineReader(makeHandler());
-      proc.stdout.on('data', readStdout);
       let outputEnded = false;
-      const endOutput = () => {
+      let readerEnded = false;
+      let acceptOutput = true;
+      let cleanupSettled = false;
+      let cleanupOutcome = PROCESS_TREE_CLEANUP_OUTCOME.FAILED;
+      let drainedClose = false;
+      let completedAtDrain = false;
+      let forcedCleanup = false;
+      /** @type {{ code: number|null, signal: NodeJS.Signals|null } | null} */
+      let exitInfo = null;
+      /** @type {ReturnType<typeof setTimeout> | null} */
+      let closeGraceTimer = null;
+      const closeOutputReader = (flush) => {
+        if (readerEnded) return;
+        readerEnded = true;
+        acceptOutput = false;
+        if (flush) readStdout.end();
+        else readStdout.discard();
+      };
+      const discardOutputReader = () => closeOutputReader(false);
+      const finishOutput = (flush) => {
         if (outputEnded) return;
         outputEnded = true;
-        readStdout.end();
+        if (closeGraceTimer) {
+          clearTimeout(closeGraceTimer);
+          closeGraceTimer = null;
+        }
+        closeOutputReader(flush);
+      };
+      const endOutput = () => finishOutput(true);
+      const discardOutput = () => finishOutput(false);
+      suppressChildOutput = () => {
+        if (proc === child) discardOutput();
+      };
+      const finishOwnership = () => {
+        if (!outputEnded || !cleanupSettled) return;
+        const proven = cleanupOutcome === PROCESS_TREE_CLEANUP_OUTCOME.PROVEN;
+        const naturalDrainedRelease = cleanupOutcome === PROCESS_TREE_CLEANUP_OUTCOME.UNAVAILABLE
+          && drainedClose
+          && completedAtDrain
+          && exitInfo?.code === 0
+          && !forcedCleanup;
+        const released = proven || naturalDrainedRelease;
+        if (released && proc === child) {
+          child = null;
+          beginTerminalCleanup = () => Promise.resolve(true);
+        }
+        resolveChildExit?.(proven);
+        resolveChildExit = null;
+      };
+      const settleOutput = (code, signal, fromClose) => {
+        if (proc !== child || outputEnded) return;
+        drainedClose = fromClose;
+        exitInfo ??= { code, signal };
+        if (fromClose) endOutput();
+        else discardOutput();
+        completedAtDrain = fromClose && turnCompleted;
+        if (turnOpen && !disposed) {
+          if (turnFailureMessage) {
+            endTurn({ type: 'turn-end', agent, stopReason: 'failed', errorMessage: turnFailureMessage });
+          } else if (!completedAtDrain && code !== 0) {
+            onEvent({
+              type: 'error',
+              agent,
+              message: formatPiExitError(stderrTail, code, signal, opts.token, opts.agentName),
+            });
+            endTurn({ type: 'turn-end', agent, stopReason: 'exited' });
+          } else {
+            endTurn({ type: 'turn-end', agent, stopReason: completedAtDrain ? 'completed' : 'exited' });
+          }
+        }
+        void beginCleanup(false);
+        finishOwnership();
+      };
+      const scheduleCloseGrace = (code, signal) => {
+        if (outputEnded || closeGraceTimer) return;
+        closeGraceTimer = setTimeout(() => {
+          closeGraceTimer = null;
+          settleOutput(code ?? null, signal ?? null, false);
+        }, closeGraceMs);
+        closeGraceTimer.unref?.();
       };
       let cleanupPromise = null;
-      stopChild = () => {
+      const beginCleanup = (forced = false) => {
+        forcedCleanup ||= forced;
         if (proc !== child) return Promise.resolve(true);
         if (cleanupPromise) return cleanupPromise;
         let resolveCleanup = () => {};
@@ -388,63 +522,78 @@ export function createPiSession(opts, {
         try { termination = Promise.resolve(terminateProcess(proc)); } catch { termination = Promise.resolve(false); }
         try { exited = Promise.resolve(waitForExit(proc)); } catch { exited = Promise.resolve(false); }
         void Promise.all([termination, exited]).then(
-          ([terminationResult, exitResult]) => terminationResult !== false && exitResult !== false,
-          () => false,
-        ).then((cleaned) => {
-          endOutput();
-          if (cleaned && proc === child) child = null;
-          resolveChildExit?.(cleaned);
-          resolveChildExit = null;
-          resolveCleanup(cleaned);
+          ([terminationResult, exitResult]) => processTreeCleanupOutcome(
+            terminationResult,
+            exitResult,
+          ),
+          () => PROCESS_TREE_CLEANUP_OUTCOME.FAILED,
+        ).then((outcome) => {
+          cleanupSettled = true;
+          cleanupOutcome = outcome;
+          if (outcome !== PROCESS_TREE_CLEANUP_OUTCOME.PROVEN) {
+            uncertainTreeCleanup = true;
+          }
+          if (!outputEnded) {
+            scheduleCloseGrace(
+              exitInfo?.code ?? proc.exitCode ?? null,
+              exitInfo?.signal ?? proc.signalCode ?? null,
+            );
+          }
+          finishOwnership();
+          resolveCleanup(outcome === PROCESS_TREE_CLEANUP_OUTCOME.PROVEN);
         });
         return cleanupPromise;
       };
+      stopChild = (reason = 'forced') => {
+        const forced = reason === 'forced' || (reason === 'queue' && exitInfo === null);
+        if (forced) discardOutput();
+        return beginCleanup(forced);
+      };
+      beginTerminalCleanup = () => platform === 'win32'
+        ? beginCleanup(false)
+        : Promise.resolve(true);
+      proc.stdout.on('data', (chunk) => {
+        if (proc !== child || disposed || !acceptOutput) return;
+        readStdout(chunk);
+      });
       proc.stderr.on('data', (chunk) => {
+        if (proc !== child || disposed || !acceptOutput) return;
         const chunkText = chunk.toString();
         stderrTail = (stderrTail + chunkText).slice(-STDERR_TAIL_LIMIT);
       });
       proc.on('error', (err) => {
         if (proc !== child) return;
+        discardOutputReader();
         const safeError = redactDiagnosticText(err?.message ?? err, [opts.token]);
         process.stderr.write(`[pi] spawn error: ${safeError}\n`);
         if (turnOpen) {
-          onEvent({ type: 'error', agent, message: `pi process error: ${safeError}` });
-          endTurn({ type: 'turn-end', agent, stopReason: 'exited' });
+          turnFailureMessage = `pi process error: ${safeError}`;
+          onEvent({ type: 'error', agent, message: turnFailureMessage });
         }
+        void beginCleanup(true);
+        scheduleCloseGrace(proc.exitCode ?? null, proc.signalCode ?? null);
       });
       proc.on('exit', (code, signal) => {
         if (proc !== child) return;
-        if (turnOpen && !disposed) {
-          if (turnFailureMessage) {
-            endTurn({ type: 'turn-end', agent, stopReason: 'failed', errorMessage: turnFailureMessage });
-          } else if (!turnCompleted && code !== 0) {
-            onEvent({
-              type: 'error',
-              agent,
-              message: formatPiExitError(stderrTail, code, signal, opts.token, opts.agentName),
-            });
-            endTurn({ type: 'turn-end', agent, stopReason: 'exited' });
-          } else {
-            endTurn({ type: 'turn-end', agent, stopReason: turnCompleted ? 'completed' : 'exited' });
-          }
-        }
-        // Leader exit is not process-tree exit. Keep its identity until the
-        // bounded group/task-tree cleanup settles.
-        void stopChild();
+        exitInfo = { code, signal };
+        void beginCleanup(false);
+        scheduleCloseGrace(code, signal);
       });
-      proc.on('close', () => {
+      proc.on('close', (code, signal) => {
         if (proc !== child) return;
-        endOutput();
-        void stopChild();
+        exitInfo ??= { code: code ?? null, signal: signal ?? null };
+        settleOutput(code ?? exitInfo.code ?? null, signal ?? exitInfo.signal ?? null, true);
       });
     },
     setPermissionProfile(profile) {
-      if (turnOpen) throw new Error('Permission profile can only change between turns');
+      if (turnOpen || queuedTurn) throw new Error('Permission profile can only change between turns');
+      if (uncertainTreeCleanup) throw new Error('Pi process tree cleanup remains unconfirmed');
       if (profile !== 'safe' && profile !== 'unrestricted') throw new Error(`Unknown permission profile: ${profile}`);
       opts.permissionProfile = profile;
     },
     async setExecutionMode(mode) {
-      if (turnOpen) throw new Error('Execution mode can only change between turns');
+      if (turnOpen || queuedTurn) throw new Error('Execution mode can only change between turns');
+      if (uncertainTreeCleanup) throw new Error('Pi process tree cleanup remains unconfirmed');
       validateExecutionMode(mode);
       if (child) killChild();
       if (await childExitPromise === false) {
@@ -455,15 +604,22 @@ export function createPiSession(opts, {
       opts.capabilityEpoch = mode.capabilityEpoch;
     },
     interrupt() {
+      queuedTurn = null;
+      suppressChildOutput();
       killChild();
       endTurn({ type: 'turn-end', agent, stopReason: 'interrupted' });
     },
     dispose() {
       disposed = true;
       turnOpen = false;
+      queuedTurn = null;
+      suppressChildOutput();
       // 죽어가는 자식의 stdout 을 아예 파싱하지 않는다.
       try { child?.stdout?.removeAllListeners('data'); } catch {}
-      return killChild();
+      const currentCleanup = killChild();
+      return Promise.all([currentCleanup, childExitPromise])
+        .then((results) => !uncertainTreeCleanup && results.every((result) => result !== false));
     },
   };
+  return session;
 }

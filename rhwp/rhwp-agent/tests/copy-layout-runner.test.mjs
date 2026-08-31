@@ -204,6 +204,7 @@ test('Windows result handoff starts taskkill while the retained Python leader is
       assert.equal(child.exitCode, null, 'cleanup must begin before the retained leader exits');
       return terminateProcessTree(child, {
         platform: 'win32',
+        env: { SystemRoot: 'C:\\Windows' },
         spawnProcess(command, argv) {
           taskkillCalls.push([command, argv]);
           const killer = new EventEmitter();
@@ -224,7 +225,10 @@ test('Windows result handoff starts taskkill while the retained Python leader is
   assert.ok(helperSpawn.argv.includes('--runner-framed'));
   assert.equal(helperSpawn.options.detached, false);
   assert.deepEqual(helperSpawn.options.stdio, ['pipe', 'pipe', 'pipe']);
-  assert.deepEqual(taskkillCalls, [['taskkill', ['/PID', '4242', '/T']]]);
+  assert.deepEqual(taskkillCalls, [[
+    'C:\\Windows\\System32\\taskkill.exe',
+    ['/PID', '4242', '/T'],
+  ]]);
 });
 
 test('the real framed Python helper remains live until the hub starts cleanup', async (t) => {

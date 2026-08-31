@@ -110,7 +110,8 @@ import {
 import { runCopyLayoutHelper } from './copy-layout-runner.mjs';
 import { z } from 'zod/v3';
 import {
-  terminateAndWaitForProcessTreeExit,
+  PROCESS_TREE_CLEANUP_OUTCOME,
+  terminateAndWaitForProcessTreeExitOutcome,
   terminateProcessTree,
 } from './process-tree.mjs';
 import {
@@ -127,6 +128,11 @@ import {
   resolveHubIdentity,
   timingSafeTextEqual,
 } from './hub-session-registry.mjs';
+import {
+  AUTH_CODE_MAX_BYTES,
+  boundTextFields,
+  textFitsByteLimit,
+} from './input-bounds.mjs';
 
 const REQUESTED_PORT = Number(process.env.RHWP_AGENT_PORT ?? 5175);
 const PRODUCTION = process.env.NODE_ENV === 'production' || process.env.RHWP_AGENT_MODE === 'production';
@@ -152,6 +158,21 @@ ensureCredentialRetentionRootSync(WORK_ROOT);
 let hubPort = REQUESTED_PORT;
 const STUDIO_TOOL_TIMEOUT_MS = 30_000;
 const MAX_CHAT_MESSAGE_CHARS = 128_000;
+const PLAN_CHANGE_TEXT_LIMITS = Object.freeze({
+  planId: 256,
+  promptOverride: MAX_CHAT_MESSAGE_CHARS,
+  feedback: MAX_CHAT_MESSAGE_CHARS,
+  reason: 4_000,
+});
+const SKILL_DRAFT_TEXT_LIMITS = Object.freeze({
+  goal: 8_000,
+  triggerExamples: 16_000,
+  nonTriggerExamples: 16_000,
+  resourceNotes: 16_000,
+  existingSkill: 128_000,
+  model: 256,
+});
+const MAX_SEMANTIC_REQUEST_BYTES = 512 * 1024;
 const MAX_PENDING_STUDIO_TOOL_CALLS = 64;
 // One 64 MiB snapshot expands to about 85.4 MiB as base64. Keep room for a
 // handful of small control messages without retaining a second giant frame.
@@ -796,6 +817,30 @@ function agentAuthCancelled(message = '로그인을 취소했어요.') {
   return Object.assign(new Error(message), { code: 'AGENT_AUTH_CANCELLED' });
 }
 
+function boundedAgentAuthCode(raw) {
+  if (typeof raw !== 'string') {
+    throw Object.assign(
+      new Error('인증 코드를 입력해 주세요.'),
+      { code: 'AGENT_AUTH_CODE_INVALID' },
+    );
+  }
+  const value = raw;
+  if (!textFitsByteLimit(value, AUTH_CODE_MAX_BYTES)) {
+    throw Object.assign(
+      new Error('인증 코드가 허용된 길이를 넘었어요.'),
+      { code: 'AGENT_AUTH_CODE_TOO_LARGE' },
+    );
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw Object.assign(
+      new Error('인증 코드를 입력해 주세요.'),
+      { code: 'AGENT_AUTH_CODE_INVALID' },
+    );
+  }
+  return trimmed;
+}
+
 function ownerRecordForAuthRun(run) {
   return sessions.get(run.ownerSessionId);
 }
@@ -893,14 +938,19 @@ function failAllPendingCalls(record, message) {
   for (const [hubId, entry] of record.pendingCalls) {
     clearTimeout(entry.timer);
     record.pendingCalls.delete(hubId);
+    cancelStudioToolRequest(record, hubId, entry, 'studio-call-failed');
     if (entry.tool === 'materialize_document_snapshot' && entry.copyLayoutJobId) {
       const job = record.templateJobs.get(entry.copyLayoutJobId);
       releaseCopyLayoutSnapshot(job);
     }
-    sendJson(entry.mcpSocket, {
-      v: 1, type: 'tool-result', id: entry.clientId, ok: false,
-      error: { code: 'NO_STUDIO', message },
-    });
+    const error = workflowError('NO_STUDIO', message);
+    if (typeof entry.sendError === 'function') entry.sendError(error);
+    else {
+      sendJson(entry.mcpSocket, {
+        v: 1, type: 'tool-result', id: entry.clientId, ok: false,
+        error: { code: error.code, message: error.message },
+      });
+    }
   }
 }
 
@@ -975,13 +1025,89 @@ function beginAgentTurn(record, activeSession) {
   }
   record.userQuestionResponseReceipts.clear();
   activeSession.turnId = crypto.randomUUID();
+  // A queued provider turn is not authoritative until its backend emits the
+  // matching turn-start. Process-tree cleanup from the prior turn can still
+  // be in flight after Studio submits the next message; stale MCP descendants
+  // must remain unable to borrow that window.
+  activeSession.providerTurnStarted = false;
   activeSession.status = 'running';
 }
 
+function providerTurnIsCurrent(record, binding) {
+  const activeSession = record.agentSession;
+  return Boolean(
+    binding
+    && activeSession === binding.session
+    && activeSession.generation === binding.generation
+    && activeSession.status === 'running'
+    && activeSession.turnId === binding.turnId,
+  );
+}
+
+function providerTurnIsActive(record, binding) {
+  return providerTurnIsCurrent(record, binding)
+    && binding.session.providerTurnStarted === true;
+}
+
+function noActiveProviderTurnError() {
+  return workflowError(
+    'NO_ACTIVE_TURN',
+    'This provider tool call no longer belongs to an active running turn',
+  );
+}
+
+function cancelStudioToolRequest(record, hubId, entry, reason) {
+  sendJson(record.studioSocket, {
+    v: 1,
+    type: 'tool-request-cancel',
+    id: hubId,
+    reason,
+    ...(entry?.providerTurn?.turnId
+      ? { providerTurnId: entry.providerTurn.turnId }
+      : {}),
+  });
+}
+
+function failPendingProviderCallsForTurn(record, activeSession, turnId) {
+  if (!turnId) return;
+  for (const [hubId, entry] of record.pendingCalls) {
+    if (entry.providerTurn?.session !== activeSession || entry.providerTurn.turnId !== turnId) continue;
+    clearTimeout(entry.timer);
+    record.pendingCalls.delete(hubId);
+    cancelStudioToolRequest(record, hubId, entry, 'provider-turn-settled');
+    entry.sendError?.(noActiveProviderTurnError());
+  }
+}
+
+function retireProviderSockets(record, activeSession, {
+  turnId,
+  code = 4003,
+  reason = 'provider turn settled',
+} = {}) {
+  for (const sock of record.mcpSockets) {
+    if (sock.agentGeneration !== activeSession.generation
+      || sock.agentLabel !== activeSession.agent
+      || sock.agentRole !== activeSession.providerRole) continue;
+    if (turnId !== undefined && sock.agentTurnId !== turnId) continue;
+    // Invalidate synchronously. `close()` and already-buffered WebSocket
+    // messages are delivered asynchronously, so transport close alone cannot
+    // keep an old process generation from borrowing the next turn.
+    sock.providerTurnRetired = true;
+    sock.agentTurnId = null;
+    queueMicrotask(() => {
+      try { sock.close(code, reason); } catch {}
+    });
+  }
+}
+
 function settleAgentTurn(record, activeSession, event) {
+  const settledTurnId = activeSession.turnId;
   settleUserQuestion(record, userQuestionOutcomeForTurnEnd(event));
+  failPendingProviderCallsForTurn(record, activeSession, settledTurnId);
+  retireProviderSockets(record, activeSession, { turnId: settledTurnId });
   activeSession.status = 'idle';
   activeSession.turnId = null;
+  activeSession.providerTurnStarted = false;
 }
 
 function requestUserQuestion(record, request, {
@@ -998,7 +1124,9 @@ function requestUserQuestion(record, request, {
   if (normalizedRequest.parentTaskId) {
     throw workflowError('ROOT_INTERACTION_REQUIRED', 'Only the root conversation may ask the user questions');
   }
-  if (activeSession.status !== 'running' || !activeSession.turnId) {
+  if (activeSession.status !== 'running'
+    || !activeSession.turnId
+    || activeSession.providerTurnStarted !== true) {
     throw workflowError('NO_ACTIVE_TURN', 'User questions require an active root turn');
   }
   const current = record.pendingUserQuestion;
@@ -1242,28 +1370,48 @@ async function usageSnapshotRefreshing(refresh = false) {
  */
 function spawnAuxiliaryProcess(record, command, args, options = {}) {
   if (record.disposed) throw new Error('Hub session was disposed');
+  if (record.processCleanupUncertain) throw agentProcessCleanupUncertain();
   const child = spawn(command, args, { ...options, cwd: options.cwd ?? record.workDir });
   record.auxiliaryProcesses.add(child);
-  const cleanup = () => beginAuxiliaryProcessCleanup(record, child);
-  child.once('exit', cleanup);
+  const cleanup = () => {
+    child.off?.('close', cleanup);
+    void beginAuxiliaryProcessCleanupOutcome(record, child);
+  };
+  // ChildProcess `close` is ordered after stdout/stderr have drained. Starting
+  // automatic cleanup on `exit` can beat a terminal protocol frame still in
+  // those pipes, record UNAVAILABLE, and quarantine an otherwise clean
+  // session. Terminal handlers start the shared cleanup while the process
+  // handle is live; this close hook is the fail-closed fallback.
   child.once('close', cleanup);
   return child;
 }
 
-function beginAuxiliaryProcessCleanup(record, child) {
+function beginAuxiliaryProcessCleanupOutcome(record, child) {
   const current = record.auxiliaryProcessCleanups.get(child);
   if (current) return current;
-  const cleanup = terminateAndWaitForProcessTreeExit(child)
-    .catch(() => false)
-    .then((cleaned) => {
-      if (cleaned) {
+  const cleanup = terminateAndWaitForProcessTreeExitOutcome(child)
+    .catch(() => PROCESS_TREE_CLEANUP_OUTCOME.FAILED)
+    .then((outcome) => {
+      if (outcome !== PROCESS_TREE_CLEANUP_OUTCOME.PROVEN) {
+        record.processCleanupUncertain = true;
+        retainUncertainProcessCleanup(record.recordRoot);
+      }
+      // UNAVAILABLE is not proof. Keep the child and its resolved cleanup
+      // sentinel tracked so a later record disposal cannot mistake an empty
+      // set for a safely drained process tree.
+      if (outcome === PROCESS_TREE_CLEANUP_OUTCOME.PROVEN) {
         record.auxiliaryProcesses.delete(child);
         record.auxiliaryProcessCleanups.delete(child);
       }
-      return cleaned;
+      return outcome;
     });
   record.auxiliaryProcessCleanups.set(child, cleanup);
   return cleanup;
+}
+
+function beginAuxiliaryProcessCleanup(record, child) {
+  return beginAuxiliaryProcessCleanupOutcome(record, child)
+    .then((outcome) => outcome === PROCESS_TREE_CLEANUP_OUTCOME.PROVEN);
 }
 
 /**
@@ -1343,6 +1491,7 @@ function checkpointTitleDeps(record, health, signal) {
     },
     spawnProcess: (command, args, options) => spawnAuxiliaryProcess(record, command, args, options),
     terminateProcess: terminateProcessTree,
+    cleanupProcessOutcome: (child) => beginAuxiliaryProcessCleanupOutcome(record, child),
     signal,
   };
 }
@@ -1368,6 +1517,7 @@ function auxDeps(record, requestedAgent, cliAgent) {
     sessionId: record.sessionId,
     spawnProcess: (command, args, options) => auxSpawnProcess(record, command, args, options),
     terminateProcess: terminateProcessTree,
+    cleanupProcessOutcome: (child) => beginAuxiliaryProcessCleanupOutcome(record, child),
   };
 }
 
@@ -1385,6 +1535,7 @@ function sessionInfo(record) {
       documentId: activeSession.documentId,
       documentName: activeSession.documentName,
       status: activeSession.status,
+      turnId: activeSession.turnId,
       activeTemplateId: activeSession.activeTemplateId,
       pendingUserQuestion: pendingUserQuestionSnapshot(record),
       ...activeSession.planning.snapshot(),
@@ -1527,7 +1678,8 @@ function copyLayoutCandidateClaims(job, published) {
 
 function drainTemplateCompletion(record) {
   const activeSession = record.agentSession;
-  if (!activeSession || activeSession.status !== 'idle') return;
+  if (!activeSession || activeSession.status !== 'idle'
+    || activeSession.pendingTransitions > 0 || record.pendingReferenceMessage) return;
   const index = record.pendingTemplateCompletions.findIndex(
     (entry) => entry.ownerThreadId === activeSession.threadId,
   );
@@ -1539,6 +1691,7 @@ function drainTemplateCompletion(record) {
       buildCopyLayoutCompletionPrompt(entry.result),
     ));
   } catch (error) {
+    failPendingProviderCallsForTurn(record, activeSession, activeSession.turnId);
     activeSession.status = 'idle';
     activeSession.turnId = null;
     record.userQuestionResponseReceipts.clear();
@@ -1568,7 +1721,8 @@ function queuePlanningDocumentSaved(record, msg) {
 function drainPlanningDocumentSaved(record) {
   const activeSession = record.agentSession;
   const pending = record.pendingDocumentSaved;
-  if (!pending || !activeSession || activeSession.status !== 'idle') return;
+  if (!pending || !activeSession || activeSession.status !== 'idle'
+    || activeSession.pendingTransitions > 0 || record.pendingReferenceMessage) return;
   if (pending.threadId !== activeSession.threadId || !planningDocumentSavedAllowed(activeSession)) {
     record.pendingDocumentSaved = null;
     return;
@@ -1587,8 +1741,7 @@ function drainPlanningDocumentSaved(record) {
       planId,
       reason: 'document-saved',
       promptOverride: prompt,
-      sessionStatusOverride: 'idle',
-    }).catch((error) => {
+    }, { sessionStatusOverride: 'idle' }).catch((error) => {
       if (record.agentSession === activeSession) {
         if (activeSession.status === 'running') activeSession.status = 'idle';
         if (!record.pendingDocumentSaved) record.pendingDocumentSaved = pending;
@@ -1598,12 +1751,16 @@ function drainPlanningDocumentSaved(record) {
     return;
   }
   try {
+    beginAgentTurn(record, activeSession);
     activeSession.backend.sendUserMessage(addAgentInstructionsContext(addActiveDocumentContext(
       activeSession,
       addTemplateContext(record, activeSession, prompt),
     )));
   } catch (error) {
+    failPendingProviderCallsForTurn(record, activeSession, activeSession.turnId);
     activeSession.status = 'idle';
+    activeSession.turnId = null;
+    record.userQuestionResponseReceipts.clear();
     record.pendingDocumentSaved = pending;
     log(`planning document-saved dispatch failed: ${error?.message ?? error}`);
   }
@@ -1675,6 +1832,7 @@ function cancelPendingTemplateCalls(record, job) {
     if (entry.copyLayoutJobId !== job.jobId) continue;
     record.pendingCalls.delete(hubId);
     clearTimeout(entry.timer);
+    cancelStudioToolRequest(record, hubId, entry, 'copy-layout-job-settled');
     releaseCopyLayoutSnapshot(job);
     sendJson(entry.mcpSocket, {
       v: 1,
@@ -1971,10 +2129,21 @@ function makeBackendEventHandler(record, generation) {
       };
       sendJson(record.studioSocket, { v: 1, type: 'usage-report', usage: usageSnapshot() });
     }
+    const providerTurnId = activeSession.turnId;
+    if (evt.type === 'turn-start') {
+      // Backends emit this only after their lifecycle has released the prior
+      // process tree and activated this queued turn. Accepting the Studio
+      // message alone is not provider-capability proof.
+      if (activeSession.status !== 'running' || !providerTurnId) return;
+      activeSession.providerTurnStarted = true;
+    }
+    const studioEvent = providerTurnId
+      ? { ...evt, turnId: providerTurnId }
+      : evt;
     if (evt.type === 'turn-start') record.missedTurnEnd = null;
     if (evt.type === 'turn-end') settleAgentTurn(record, activeSession, evt);
-    const delivered = sendJson(record.studioSocket, { v: 1, type: 'agent-event', event: evt });
-    if (evt.type === 'turn-end' && !delivered) record.missedTurnEnd = evt;
+    const delivered = sendJson(record.studioSocket, { v: 1, type: 'agent-event', event: studioEvent });
+    if (evt.type === 'turn-end' && !delivered) record.missedTurnEnd = studioEvent;
     if (evt.type === 'turn-end') {
       record.userQuestionResponseReceipts.clear();
       record.suppressedUserQuestionCallIds.clear();
@@ -1991,19 +2160,18 @@ function disposeSession(record) {
   const activeSession = record.agentSession;
   if (!activeSession) return Promise.resolve(record.processCleanupUncertain !== true);
   const wasRunning = activeSession.status === 'running';
+  const disposedTurnId = activeSession.turnId;
   const agent = activeSession.agent;
   settleUserQuestion(record, { status: 'expired', reason: 'request-invalidated' });
   record.userQuestionResponseReceipts.clear();
   record.suppressedUserQuestionCallIds.clear();
   record.pendingUserQuestionScopes.length = 0;
+  failPendingProviderCallsForTurn(record, activeSession, activeSession.turnId);
   activeSession.turnId = null;
-  const replacedProviderSockets = [...record.mcpSockets].filter(
-    (sock) => sock.agentGeneration === activeSession.generation,
-  );
-  queueMicrotask(() => {
-    for (const sock of replacedProviderSockets) {
-      try { sock.close(4001, 'provider session replaced'); } catch {}
-    }
+  activeSession.providerTurnStarted = false;
+  retireProviderSockets(record, activeSession, {
+    code: 4001,
+    reason: 'provider session replaced',
   });
   let backendExit = Promise.resolve(true);
   try {
@@ -2022,7 +2190,12 @@ function disposeSession(record) {
     browserbaseExit = Promise.resolve(false);
   }
   if (wasRunning) {
-    const evt = { type: 'turn-end', agent, stopReason: 'interrupted' };
+    const evt = {
+      type: 'turn-end',
+      agent,
+      stopReason: 'interrupted',
+      ...(disposedTurnId ? { turnId: disposedTurnId } : {}),
+    };
     if (!sendJson(record.studioSocket, { v: 1, type: 'agent-event', event: evt })) {
       record.missedTurnEnd = evt;
     }
@@ -2168,12 +2341,20 @@ function dispatchUserMessage(record, sock, msg, activeSession, messageAttachment
     return;
   }
   beginAgentTurn(record, activeSession);
+  const providerTurn = Object.freeze({
+    session: activeSession,
+    generation: activeSession.generation,
+    turnId: activeSession.turnId,
+  });
   void skillRegistry.promptContext(msg.text, typeof msg.skillName === 'string' ? msg.skillName : undefined, {
     phase: activeSession.planning.snapshot().phase,
     agent: activeSession.agent,
   })
     .then((prompt) => {
-      if (record.agentSession !== activeSession) throw new Error('Agent session changed before the message was dispatched');
+      // Skill context is loaded asynchronously. An interrupt can settle this
+      // turn and a later message can start another turn on the same session
+      // before the read completes, so session identity alone is insufficient.
+      if (!providerTurnIsCurrent(record, providerTurn)) return;
       activeSession.backend.sendUserMessage(addAgentInstructionsContext(addReopenedChatHistory(
         activeSession,
         addActiveDocumentContext(
@@ -2187,11 +2368,13 @@ function dispatchUserMessage(record, sock, msg, activeSession, messageAttachment
       )));
     })
     .catch((e) => {
-      if (record.agentSession === activeSession) {
-        activeSession.status = 'idle';
-        activeSession.turnId = null;
-        record.userQuestionResponseReceipts.clear();
-      }
+      // A stale rejection belongs to the settled turn. It must not idle or
+      // report an error against a newer turn on this same backend session.
+      if (!providerTurnIsCurrent(record, providerTurn)) return;
+      failPendingProviderCallsForTurn(record, activeSession, providerTurn.turnId);
+      activeSession.status = 'idle';
+      activeSession.turnId = null;
+      record.userQuestionResponseReceipts.clear();
       sendJson(sock, { v: 1, type: 'chat-error', code: e?.code ?? 'AGENT_SPAWN_FAILED', message: String(e?.message ?? e) });
     });
 }
@@ -2202,7 +2385,12 @@ async function dispatchStagedUserMessage(record, sock, msg, activeSession) {
   if (stageIds.length === 0 || stageIds.length !== rawIds.length || stageIds.length > 10) {
     throw Object.assign(new Error('Message attachments require 1-10 unique staged reference ids'), { code: 'INVALID_REFERENCE_MESSAGE' });
   }
-  record.pendingReferenceMessage = { messageId: msg.messageId, message: msg, owner: activeSession };
+  const pendingReferenceMessage = Object.freeze({
+    messageId: msg.messageId,
+    message: msg,
+    owner: activeSession,
+  });
+  record.pendingReferenceMessage = pendingReferenceMessage;
   sendJson(sock, {
     v: 1,
     type: 'chat-reference-status',
@@ -2220,9 +2408,17 @@ async function dispatchStagedUserMessage(record, sock, msg, activeSession) {
       error: String(entry.reason?.message ?? entry.reason ?? 'Attachment processing failed'),
     });
   sendJson(sock, { v: 1, type: 'chat-reference-status', messageId: msg.messageId, attachments });
-  if (record.pendingReferenceMessage?.messageId === msg.messageId) record.pendingReferenceMessage = null;
+  const stillCurrent = record.pendingReferenceMessage === pendingReferenceMessage;
+  if (stillCurrent) record.pendingReferenceMessage = null;
   const readyFiles = settled.flatMap((entry) => entry.status === 'fulfilled' ? [entry.value.file] : []);
-  if (record.agentSession === activeSession) dispatchUserMessage(record, sock, msg, activeSession, readyFiles);
+  if (!stillCurrent || record.agentSession !== activeSession) return;
+  if (activeSession.status !== 'idle' || activeSession.pendingTransitions > 0) {
+    throw workflowError(
+      'REQUEST_INVALIDATED',
+      'The agent state changed while message attachments were being prepared',
+    );
+  }
+  dispatchUserMessage(record, sock, msg, activeSession, readyFiles);
 }
 
 function emitWorkflowState(record, extra = {}) {
@@ -2351,6 +2547,7 @@ async function startSession(
     providerCapabilityResource,
     status: 'idle',
     turnId: null,
+    providerTurnStarted: false,
     sessionId: backend.getSessionId(),
     threadId,
     documentId,
@@ -2420,6 +2617,12 @@ function enqueueWorkflowTransition(record, transitionOwner, transitionFn) {
   });
   const trackedTransition = transition.finally(() => {
     transitionOwner.pendingTransitions = Math.max(0, transitionOwner.pendingTransitions - 1);
+    if (transitionOwner.pendingTransitions === 0) {
+      queueMicrotask(() => {
+        drainTemplateCompletion(record);
+        drainPlanningDocumentSaved(record);
+      });
+    }
   });
   transitionOwner.workflowTransition = trackedTransition.catch(() => undefined);
   return trackedTransition;
@@ -2469,8 +2672,11 @@ async function approveImplementationPlan(record, sock, msg) {
       ),
     )));
   } catch (error) {
-    if (record.agentSession === activeSession && activeSession.planning.phase === 'switching') {
-      activeSession.planning.failSwitch(transition.approvedPlan.planId);
+    if (record.agentSession === activeSession) {
+      if (activeSession.planning.phase === 'switching') {
+        activeSession.planning.failSwitch(transition.approvedPlan.planId);
+      }
+      failPendingProviderCallsForTurn(record, activeSession, activeSession.turnId);
       activeSession.status = 'idle';
       activeSession.turnId = null;
       record.userQuestionResponseReceipts.clear();
@@ -2480,14 +2686,26 @@ async function approveImplementationPlan(record, sock, msg) {
   }
 }
 
-async function requestImplementationPlanChanges(record, sock, msg) {
+async function requestImplementationPlanChanges(record, sock, msg, {
+  sessionStatusOverride,
+} = {}) {
   const activeSession = record.agentSession;
   if (!activeSession) throw workflowError('AGENT_NOT_STARTED', 'Start a chat before requesting plan changes');
   requireWorkflowSwitchBackend(activeSession);
-  const planId = String(msg.planId ?? '');
+  const bounded = boundTextFields(msg, PLAN_CHANGE_TEXT_LIMITS, {
+    maxTotalChars: 160_000,
+    maxTotalBytes: MAX_SEMANTIC_REQUEST_BYTES,
+    label: 'Plan-change request',
+  });
+  const planId = bounded.planId;
+  const feedback = bounded.feedback.trim();
+  const promptOverride = bounded.promptOverride.trim();
   activeSession.planning.requestChanges({
     planId,
-    sessionStatus: msg.sessionStatusOverride ?? activeSession.status,
+    // Only an already-serialized internal document-saved transition may
+    // override this lock. Never trust a Studio frame to claim the provider is
+    // idle while its current turn is still running.
+    sessionStatus: sessionStatusOverride ?? activeSession.status,
   });
   try {
     await activeSession.backend.setExecutionMode(providerModeRequest(activeSession, 'planning'));
@@ -2496,15 +2714,12 @@ async function requestImplementationPlanChanges(record, sock, msg) {
       v: 1,
       type: 'plan-invalidated',
       planId,
-      reason: typeof msg.reason === 'string' && msg.reason
-        ? msg.reason
-        : (typeof msg.feedback === 'string' ? msg.feedback : 'changes-requested'),
+      reason: bounded.reason || feedback || 'changes-requested',
       ...activeSession.planning.snapshot(),
       latestPlan: null,
     });
-    const promptOverride = typeof msg.promptOverride === 'string' ? msg.promptOverride.trim() : '';
     if (promptOverride) {
-      activeSession.status = 'running';
+      beginAgentTurn(record, activeSession);
       activeSession.backend.sendUserMessage(addAgentInstructionsContext(addTemplateContext(
         record,
         activeSession,
@@ -2512,22 +2727,23 @@ async function requestImplementationPlanChanges(record, sock, msg) {
       )));
       return;
     }
-    if (typeof msg.feedback === 'string' && msg.feedback.trim()) {
+    if (feedback) {
       beginAgentTurn(record, activeSession);
       const revisionPrompt = [
         'The user requested changes, so the previous implementation plan is no longer authoritative.',
         'Return to discovery: inspect the affected current state and evaluate the feedback. If it is ambiguous or changes an assumption, discuss it with the user and ask one focused question in normal chat instead of immediately presenting a replacement. If it is already concrete, do not invent a question; follow the planning checkpoint and presentation rules before presenting a complete replacement.',
-        `Feedback: ${msg.feedback.trim()}`,
+        `Feedback: ${feedback}`,
       ].join('\n\n');
       activeSession.backend.sendUserMessage(addAgentInstructionsContext(addTemplateContext(
         record,
         activeSession,
-        addReferenceContext(activeSession, msg.feedback, revisionPrompt),
+        addReferenceContext(activeSession, feedback, revisionPrompt),
       )));
     }
   } catch (error) {
     if (record.agentSession === activeSession) {
       activeSession.planning.failRequestChanges(planId);
+      failPendingProviderCallsForTurn(record, activeSession, activeSession.turnId);
       activeSession.status = 'idle';
       activeSession.turnId = null;
       record.userQuestionResponseReceipts.clear();
@@ -3071,7 +3287,18 @@ async function handleStudioMessage(record, sock, msg) {
       return;
     }
     case 'skill-draft-request': {
-      if (typeof msg.goal !== 'string' || !msg.goal.trim()) {
+      let draftInput;
+      try {
+        draftInput = boundTextFields(msg, SKILL_DRAFT_TEXT_LIMITS, {
+          maxTotalChars: 160_000,
+          maxTotalBytes: MAX_SEMANTIC_REQUEST_BYTES,
+          label: 'Skill-draft request',
+        });
+      } catch (error) {
+        sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: error?.code ?? 'INVALID_REQUEST', message: String(error?.message ?? error) });
+        return;
+      }
+      if (!draftInput.goal.trim()) {
         sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: 'INVALID_REQUEST', message: 'Skill goal is required.' });
         return;
       }
@@ -3082,10 +3309,18 @@ async function handleStudioMessage(record, sock, msg) {
         : (skillHealth && skillHealth.claude?.available === false && skillHealth.codex?.available !== false
           ? 'codex'
           : 'claude');
-      const model = resolveModel(agent, msg.model);
+      const model = resolveModel(agent, draftInput.model);
       sendJson(sock, { v: 1, type: 'skill-draft-progress', requestId: msg.requestId ?? null, state: 'generating' });
       void generateSkillDraft(
-        { agent, model, goal: String(msg.goal ?? ''), triggerExamples: String(msg.triggerExamples ?? ''), nonTriggerExamples: String(msg.nonTriggerExamples ?? ''), resourceNotes: String(msg.resourceNotes ?? ''), existingSkill: typeof msg.existingSkill === 'string' ? msg.existingSkill : undefined },
+        {
+          agent,
+          model,
+          goal: draftInput.goal,
+          triggerExamples: draftInput.triggerExamples,
+          nonTriggerExamples: draftInput.nonTriggerExamples,
+          resourceNotes: draftInput.resourceNotes,
+          existingSkill: draftInput.existingSkill || undefined,
+        },
         auxDeps(record, agent, agent === 'claude' ? 'claude' : 'codex'),
       )
         .then((draft) => sendJson(sock, { v: 1, type: 'skill-draft-result', requestId: msg.requestId ?? null, draft }))
@@ -3329,7 +3564,7 @@ async function handleStudioMessage(record, sock, msg) {
       }
       started();
       if (agent === 'pi') {
-        run = piManager.setApiKey(String(msg.key ?? ''), {
+        run = piManager.setApiKey(msg.key, {
           signal: abort.signal,
           onCommitted: commitAuthRun,
         })
@@ -3356,25 +3591,27 @@ async function handleStudioMessage(record, sock, msg) {
     case 'agent-setup-auth-code': {
       const agent = msg.agent;
       let authRun;
+      let code;
       try {
         authRun = authRuns.requireOwned({
           agent,
           runId: msg.authRunId,
           ownerSessionId: record.sessionId,
         });
+        code = boundedAgentAuthCode(msg.code);
       } catch (error) {
         sendAgentSetupError(record, sock, null, agent, error, 'AGENT_AUTH_FAILED');
         return;
       }
       if (agent === 'rau' && typeof authRun.submitProof === 'function') {
-        authRun.submitProof({ kind: 'manual', code: String(msg.code ?? '') });
+        authRun.submitProof({ kind: 'manual', code });
         return;
       }
       if (agent !== 'claude' && agent !== 'codex') {
         sendAgentSetupError(record, sock, null, agent, new Error('인증 코드 요청을 확인하지 못했어요.'));
         return;
       }
-      void cliSetup.submitAuthCode(agent, msg.code)
+      void cliSetup.submitAuthCode(agent, code)
         .catch((e) => sendAgentSetupError(record, sock, null, agent, e, 'AGENT_AUTH_FAILED'));
       return;
     }
@@ -3467,7 +3704,7 @@ async function handleStudioMessage(record, sock, msg) {
     }
     case 'pi-set-key': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
-      void piManager.setApiKey(String(msg.key ?? ''))
+      void piManager.setApiKey(msg.key)
         .then(async (status) => {
           piStatus = status;
           replyToStudio(record, sock, { v: 1, type: 'pi-status', requestId, status });
@@ -3590,6 +3827,7 @@ async function handleStudioMessage(record, sock, msg) {
             });
           }
           calibrationSources = await writingStyleStore.calibrationSources(msg.files, { append: msg.append === true });
+          if (Array.isArray(msg.files)) msg.files.length = 0;
           return calibrateWritingStyle(
             {
               language: msg.language,
@@ -3608,6 +3846,7 @@ async function handleStudioMessage(record, sock, msg) {
               sessionId: record.sessionId,
               spawnProcess: (command, args, options) => auxSpawnProcess(record, command, args, options),
               terminateProcess: terminateProcessTree,
+              cleanupProcessOutcome: (child) => beginAuxiliaryProcessCleanupOutcome(record, child),
               onProgress: (event) => {
                 if (record.styleCalibration?.jobId === jobId) sendStyleProgress(record, event);
               },
@@ -3658,14 +3897,23 @@ async function handleStudioMessage(record, sock, msg) {
     }
     case 'chat-interrupt': {
       if (record.agentSession) {
+        const interruptedSession = record.agentSession;
+        const interruptedTurnId = interruptedSession.turnId;
         settleUserQuestion(record, { status: 'cancelled', reason: 'user-stop' });
+        failPendingProviderCallsForTurn(
+          record,
+          interruptedSession,
+          interruptedTurnId,
+        );
+        retireProviderSockets(record, interruptedSession, { turnId: interruptedTurnId });
         try {
-          record.agentSession.backend.interrupt();
+          interruptedSession.backend.interrupt();
         } catch (e) {
           log(`interrupt error: ${e?.message ?? e}`);
         }
-        record.agentSession.status = 'idle';
-        record.agentSession.turnId = null;
+        interruptedSession.status = 'idle';
+        interruptedSession.turnId = null;
+        interruptedSession.providerTurnStarted = false;
         record.userQuestionResponseReceipts.clear();
       }
       return;
@@ -3695,7 +3943,14 @@ async function handleStudioMessage(record, sock, msg) {
         const job = record.templateJobs.get(entry.copyLayoutJobId);
         releaseCopyLayoutSnapshot(job);
       };
+      const assertProviderTurn = () => {
+        if (entry.providerTurn && !providerTurnIsActive(record, entry.providerTurn)) {
+          throw noActiveProviderTurnError();
+        }
+      };
+      let unboundMaterialization = null;
       try {
+        assertProviderTurn();
         if (entry.mcpSocket.readyState !== entry.mcpSocket.OPEN) return;
         if (msg.ok) {
           try {
@@ -3723,59 +3978,84 @@ async function handleStudioMessage(record, sock, msg) {
               if (snapshotJob) snapshotJob.snapshotPromise = materialization;
               try {
                 result = await materialization;
+                // Until this exact turn receives the path (or the owning
+                // copy-layout job binds it), the allocation is provisional.
+                // Turn settlement can happen while fsync is in flight.
+                unboundMaterialization = result;
               } finally {
                 if (snapshotJob?.snapshotPromise === materialization) snapshotJob.snapshotPromise = null;
               }
             } else {
               result = msg.result;
             }
-          if (entry.tool === 'get_document_info' && !entry.copyLayoutJobId
-            && record.agentSession?.generation === entry.sessionGeneration) {
-            record.agentSession.lastDocumentInfo = Object.freeze({
-              documentId: result.documentId,
-              digest: result.digest,
-              sourceFormat: result.sourceFormat,
-              dirty: result.dirty === true,
-              sourcePath: result.sourcePath ?? null,
-            });
-          }
-          if (entry.tool === 'materialize_document_snapshot' && entry.copyLayoutJobId) {
-            const workerJob = record.templateJobs.get(entry.copyLayoutJobId);
-            if (!workerJob || workerJob.status !== 'running') {
-              throw workflowError('COPY_LAYOUT_JOB_SETTLED', 'The copy-layout job settled before its snapshot was bound');
+            assertProviderTurn();
+            if (entry.tool === 'get_document_info' && !entry.copyLayoutJobId
+              && record.agentSession?.generation === entry.sessionGeneration) {
+              record.agentSession.lastDocumentInfo = Object.freeze({
+                documentId: result.documentId,
+                digest: result.digest,
+                sourceFormat: result.sourceFormat,
+                dirty: result.dirty === true,
+                sourcePath: result.sourcePath ?? null,
+              });
             }
-            if (result.documentId !== workerJob.binding.documentId
-              || result.digest !== workerJob.binding.digest
-              || result.sourceFormat !== workerJob.binding.sourceFormat) {
-              throw workflowError('COPY_LAYOUT_SOURCE_MISMATCH', 'The immutable snapshot no longer matches the delegated document binding');
-            }
-            if (workerJob.snapshot) {
-              if (workerJob.snapshot.checksum !== result.checksum
-                || workerJob.snapshot.digest !== result.digest
-                || workerJob.snapshot.path !== result.path) {
-                throw workflowError('COPY_LAYOUT_SNAPSHOT_ALREADY_BOUND', 'This job is already bound to a different immutable snapshot');
+            if (entry.tool === 'materialize_document_snapshot' && entry.copyLayoutJobId) {
+              const workerJob = record.templateJobs.get(entry.copyLayoutJobId);
+              if (!workerJob || workerJob.status !== 'running') {
+                throw workflowError('COPY_LAYOUT_JOB_SETTLED', 'The copy-layout job settled before its snapshot was bound');
               }
-            } else {
-              workerJob.snapshot = Object.freeze({ ...result });
+              if (result.documentId !== workerJob.binding.documentId
+                || result.digest !== workerJob.binding.digest
+                || result.sourceFormat !== workerJob.binding.sourceFormat) {
+                throw workflowError('COPY_LAYOUT_SOURCE_MISMATCH', 'The immutable snapshot no longer matches the delegated document binding');
+              }
+              if (workerJob.snapshot) {
+                if (workerJob.snapshot.checksum !== result.checksum
+                  || workerJob.snapshot.digest !== result.digest
+                  || workerJob.snapshot.path !== result.path) {
+                  throw workflowError('COPY_LAYOUT_SNAPSHOT_ALREADY_BOUND', 'This job is already bound to a different immutable snapshot');
+                }
+              } else {
+                workerJob.snapshot = Object.freeze({ ...result });
+                unboundMaterialization = null;
+              }
             }
-          }
-            sendJson(entry.mcpSocket, { v: 1, type: 'tool-result', id: entry.clientId, ok: true, result });
+            const delivered = typeof entry.sendResult === 'function'
+              ? entry.sendResult(result)
+              : sendJson(entry.mcpSocket, { v: 1, type: 'tool-result', id: entry.clientId, ok: true, result });
+            if (delivered && !entry.copyLayoutJobId) unboundMaterialization = null;
           } catch (error) {
-            sendJson(entry.mcpSocket, {
-              v: 1, type: 'tool-result', id: entry.clientId, ok: false,
-              error: {
-                code: error?.code ?? 'SNAPSHOT_WRITE_FAILED',
-                message: String(error?.message ?? error),
-              },
-            });
+            if (typeof entry.sendError === 'function') entry.sendError(error, 'SNAPSHOT_WRITE_FAILED');
+            else {
+              sendJson(entry.mcpSocket, {
+                v: 1, type: 'tool-result', id: entry.clientId, ok: false,
+                error: {
+                  code: error?.code ?? 'SNAPSHOT_WRITE_FAILED',
+                  message: String(error?.message ?? error),
+                },
+              });
+            }
           }
         } else {
-          sendJson(entry.mcpSocket, {
-            v: 1, type: 'tool-result', id: entry.clientId, ok: false,
-            error: msg.error ?? { code: 'RPC_ERROR', message: 'unknown studio error' },
-          });
+          const error = msg.error ?? { code: 'RPC_ERROR', message: 'unknown studio error' };
+          if (typeof entry.sendError === 'function') entry.sendError(error, 'RPC_ERROR');
+          else {
+            sendJson(entry.mcpSocket, {
+              v: 1, type: 'tool-result', id: entry.clientId, ok: false,
+              error,
+            });
+          }
         }
+      } catch (error) {
+        if (typeof entry.sendError === 'function') entry.sendError(error);
       } finally {
+        if (unboundMaterialization) {
+          try {
+            await record.documentSnapshotManager.discard(unboundMaterialization);
+          } catch (error) {
+            log(`undelivered document snapshot cleanup failed: ${error?.message ?? error}`);
+          }
+        }
         releaseSnapshotClaim();
       }
       return;
@@ -3801,20 +4081,37 @@ function handleMcpMessage(record, sock, msg) {
       }
       const tool = String(msg.tool ?? '');
       const definition = toolDefinitionsByName.get(tool);
-      const sendResult = (result) => sendJson(sock, { v: 1, type: 'tool-result', id: clientId, ok: true, result });
-      const sendError = (error, fallback = 'TOOL_ERROR') => sendJson(sock, {
-        v: 1,
-        type: 'tool-result',
-        id: clientId,
-        ok: false,
-        error: { code: error?.code ?? fallback, message: String(error?.message ?? error) },
-      });
-      if (!definition) {
-        sendError(workflowError('UNKNOWN_TOOL', `Unknown tool: ${tool}`));
-        return;
-      }
-      let args;
       const workerJob = workerJobForSocket(record, sock);
+      let providerTurn = null;
+      let callSettled = false;
+      const sendError = (error, fallback = 'TOOL_ERROR') => {
+        if (callSettled) return false;
+        const terminalQuestionOutcome = tool === 'ask_user_question'
+          && (error?.code === 'USER_QUESTION_CANCELLED' || error?.code === 'USER_QUESTION_EXPIRED');
+        const reported = providerTurn && !providerTurnIsActive(record, providerTurn)
+          && !terminalQuestionOutcome
+          ? noActiveProviderTurnError()
+          : error;
+        callSettled = true;
+        return sendJson(sock, {
+          v: 1,
+          type: 'tool-result',
+          id: clientId,
+          ok: false,
+          error: {
+            code: reported?.code ?? fallback,
+            message: String(reported?.message ?? reported),
+          },
+        });
+      };
+      const sendResult = (result) => {
+        if (callSettled) return false;
+        if (providerTurn && !providerTurnIsActive(record, providerTurn)) {
+          return sendError(noActiveProviderTurnError());
+        }
+        callSettled = true;
+        return sendJson(sock, { v: 1, type: 'tool-result', id: clientId, ok: true, result });
+      };
       if (!workerJob) {
         const activeSession = record.agentSession;
         if (
@@ -3830,7 +4127,26 @@ function handleMcpMessage(record, sock, msg) {
           try { sock.close(4001, 'provider session replaced'); } catch {}
           return;
         }
+        if (activeSession.status !== 'running'
+          || !activeSession.turnId
+          || activeSession.providerTurnStarted !== true
+          || sock.providerTurnRetired === true
+          || sock.agentTurnId !== activeSession.turnId) {
+          sendError(noActiveProviderTurnError());
+          try { sock.close(4003, 'provider tool call outside active turn'); } catch {}
+          return;
+        }
+        providerTurn = Object.freeze({
+          session: activeSession,
+          generation: activeSession.generation,
+          turnId: activeSession.turnId,
+        });
       }
+      if (!definition) {
+        sendError(workflowError('UNKNOWN_TOOL', `Unknown tool: ${tool}`));
+        return;
+      }
+      let args;
       try {
         args = toolArgSchema(tool, definition).parse(msg.args ?? {});
         definition.validate?.(args);
@@ -4423,18 +4739,23 @@ function handleMcpMessage(record, sock, msg) {
           ? 120_000
           : STUDIO_TOOL_TIMEOUT_MS;
       const timer = setTimeout(() => {
+        const pendingEntry = record.pendingCalls.get(hubId);
         record.pendingCalls.delete(hubId);
+        cancelStudioToolRequest(record, hubId, pendingEntry, 'studio-timeout');
         if (workerJob && tool === 'materialize_document_snapshot') {
           releaseCopyLayoutSnapshot(workerJob);
         }
-        sendJson(sock, {
-          v: 1, type: 'tool-result', id: clientId, ok: false,
-          error: { code: 'STUDIO_TIMEOUT', message: `Studio did not answer within ${timeoutMs / 1000}s — the edit may still have applied; re-read with get_structure/get_text_range before retrying to avoid duplicates` },
-        });
+        sendError(workflowError(
+          'STUDIO_TIMEOUT',
+          `Studio did not answer within ${timeoutMs / 1000}s — the edit may still have applied; re-read with get_structure/get_text_range before retrying to avoid duplicates`,
+        ));
       }, timeoutMs);
       record.pendingCalls.set(hubId, {
         mcpSocket: sock,
         clientId,
+        sendResult,
+        sendError,
+        providerTurn,
         timer,
         tool,
         documentIdentity: workerJob
@@ -4458,6 +4779,8 @@ function handleMcpMessage(record, sock, msg) {
         workflow: record.agentSession?.planning.snapshot().workflow,
         phase: record.agentSession?.planning.snapshot().phase,
         capabilityEpoch: record.agentSession?.planning.capabilityEpoch,
+        turnBound: !workerJob,
+        ...(providerTurn ? { providerTurnId: providerTurn.turnId } : {}),
       });
       if (!forwarded) {
         clearTimeout(timer);
@@ -4638,6 +4961,11 @@ const httpServer = http.createServer((req, res) => {
     // 브라우저는 요청에 재바인딩된 도메인을 Host 로 실어 보내므로 여기서 걸러진다.
     if (PRODUCTION && !isLoopbackHost(req.headers.host)) {
       sendHttpJson(res, 403, { status: 'forbidden' });
+      return;
+    }
+    if (shutdownPreparationPromise
+      && !(req.method === 'POST' && url.pathname === '/shutdown')) {
+      sendHttpJson(res, 503, { status: 'shutting-down' });
       return;
     }
     if (req.method === 'GET' && url.pathname.startsWith('/artifacts/')) {
@@ -4826,9 +5154,20 @@ const httpServer = http.createServer((req, res) => {
     }
     if (req.method === 'POST' && url.pathname === '/shutdown') {
       authenticateOwnerRequest(req, url);
-      sendHttpJson(res, 202, { status: 'shutting-down', launchId: LAUNCH_ID });
-      setImmediate(() => {
-        void shutdown('owner request').finally(() => process.exit(0));
+      const cleanupProven = await prepareShutdown('owner request');
+      let scheduled = false;
+      const finishShutdown = () => {
+        if (scheduled) return;
+        scheduled = true;
+        setImmediate(() => {
+          void shutdown('owner request').finally(() => process.exit(0));
+        });
+      };
+      res.once('finish', finishShutdown);
+      res.once('close', finishShutdown);
+      sendHttpJson(res, cleanupProven ? 200 : 503, {
+        status: cleanupProven ? 'prepared' : 'cleanup-unproven',
+        launchId: LAUNCH_ID,
       });
       return;
     }
@@ -4914,10 +5253,14 @@ const httpServer = http.createServer((req, res) => {
   }).catch((error) => {
     const unauthorized = error?.code === 'UNAUTHORIZED' || error?.code === 'UNAUTHORIZED_SESSION';
     const invalidSession = error?.code === 'INVALID_SESSION_ID' || error instanceof URIError;
-    if (unauthorized || invalidSession) {
-      if (!res.headersSent) sendHttpJson(res, unauthorized ? 401 : 400, {
+    const sessionLimitReached = error?.code === 'SESSION_LIMIT_REACHED';
+    if (unauthorized || invalidSession || sessionLimitReached) {
+      if (!res.headersSent) sendHttpJson(res, unauthorized ? 401 : sessionLimitReached ? 429 : 400, {
         status: 'error',
-        error: { code: error?.code ?? 'INVALID_SESSION_ID', message: String(error.message) },
+        error: {
+          code: error?.code ?? 'INVALID_SESSION_ID',
+          message: sessionLimitReached ? 'Too many hub sessions are registered.' : String(error.message),
+        },
       });
       return;
     }
@@ -4938,6 +5281,10 @@ function rejectUpgrade(socket, status, message) {
 }
 
 httpServer.on('upgrade', (req, socket, head) => {
+  if (shutdownPreparationPromise) {
+    rejectUpgrade(socket, 503, 'Service Unavailable');
+    return;
+  }
   let url;
   try {
     url = new URL(req.url, `http://127.0.0.1:${hubPort || REQUESTED_PORT || 5175}`);
@@ -5164,11 +5511,31 @@ httpServer.on('upgrade', (req, socket, head) => {
     ws.agentLabel = agentLabel;
     ws.agentRole = authenticatedWorkerJob?.workerRole ?? authenticatedProviderIdentity.role;
     ws.agentGeneration = authenticatedWorkerJob ? null : authenticatedProviderIdentity.generation;
+    const activeProviderSession = authenticatedWorkerJob ? null : record.agentSession;
+    const providerTurnId = activeProviderSession
+      && activeProviderSession.generation === ws.agentGeneration
+      && activeProviderSession.agent === ws.agentLabel
+      && activeProviderSession.providerRole === ws.agentRole
+      && activeProviderSession.status === 'running'
+      && activeProviderSession.providerTurnStarted === true
+      && activeProviderSession.turnId
+      ? activeProviderSession.turnId
+      : null;
+    // A root MCP socket is born into exactly one provider turn. Never promote
+    // a connection that arrived while idle/queued: it may belong to a stale
+    // descendant from the process tree that just settled.
+    ws.agentTurnId = authenticatedWorkerJob ? null : providerTurnId;
+    ws.providerTurnRetired = authenticatedWorkerJob ? false : providerTurnId === null;
     ws.copyLayoutJobId = authenticatedWorkerJob?.jobId ?? null;
     ws.workflow = url.searchParams.get('workflow');
     ws.capabilityEpoch = url.searchParams.get('capabilityEpoch');
     record.mcpSockets.add(ws);
     attachSocket(record, ws, 'mcp');
+    if (!authenticatedWorkerJob && ws.providerTurnRetired) {
+      queueMicrotask(() => {
+        try { ws.close(4003, 'provider tool connection outside active turn'); } catch {}
+      });
+    }
     ws.on('close', () => {
       record.mcpSockets.delete(ws);
       if (record.pendingUserQuestion?.mcpSocket === ws) {
@@ -5178,6 +5545,7 @@ httpServer.on('upgrade', (req, socket, head) => {
         if (entry.mcpSocket === ws) {
           clearTimeout(entry.timer);
           record.pendingCalls.delete(hubId);
+          cancelStudioToolRequest(record, hubId, entry, 'provider-disconnected');
         }
       }
       log(`mcp client disconnected (agent=${agentLabel}, session=${record.sessionId})`);
@@ -5201,6 +5569,7 @@ httpServer.on('error', (err) => {
   process.exitCode = 1;
 });
 
+let shutdownPreparationPromise = null;
 let shutdownPromise = null;
 let launchCleanupRetentionRequired = false;
 
@@ -5255,8 +5624,9 @@ async function disposeRecord(record, reason) {
     ...templateBackendExits,
     stopAuxiliaryProcesses(record),
     record.browserbaseSession.cleanup(reason),
+    record.documentSnapshotManager.drain(),
   ]);
-  let processCleanupSettled = true;
+  let processCleanupSettled = record.processCleanupUncertain !== true;
   for (const result of cleanupResults) {
     if (result.status === 'rejected') {
       processCleanupSettled = false;
@@ -5284,19 +5654,31 @@ async function disposeRecord(record, reason) {
   return true;
 }
 
-function shutdown(signal) {
-  if (shutdownPromise) return shutdownPromise;
-  shutdownPromise = (async () => {
+function prepareShutdown(signal) {
+  if (shutdownPreparationPromise) return shutdownPreparationPromise;
+  shutdownPreparationPromise = (async () => {
     clearInterval(stagedReferenceCleanupTimer);
     if (harnessUpdateTimer) clearTimeout(harnessUpdateTimer);
     if (ownerWatchdog) clearInterval(ownerWatchdog);
     log(`shutting down (${signal})`);
-    await sessions.disposeAll((record) => disposeRecord(record, 'hub shutdown'));
+    const cleanupProven = await sessions.disposeAll(
+      (record) => disposeRecord(record, 'hub shutdown'),
+    );
+    if (!cleanupProven) retainUncertainProcessCleanup(WORK_ROOT);
     for (const wss of [studioWss, mcpWss]) {
       for (const sock of wss.clients) {
         try { sock.close(1001, 'server shutting down'); } catch {}
       }
     }
+    return cleanupProven;
+  })();
+  return shutdownPreparationPromise;
+}
+
+function shutdown(signal) {
+  if (shutdownPromise) return shutdownPromise;
+  shutdownPromise = (async () => {
+    await prepareShutdown(signal);
     if (httpServer.listening) await new Promise((resolve) => httpServer.close(resolve));
     const ownedRoots = [
       process.env.RHWP_OWN_WORK_DIR === '1' ? WORK_ROOT : null,

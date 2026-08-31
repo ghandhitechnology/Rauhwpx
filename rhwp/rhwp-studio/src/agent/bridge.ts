@@ -98,6 +98,17 @@ import type {
   UserQuestionOutcome,
 } from './types.ts';
 
+export function providerTurnEndMatches(
+  activeTurnId: string | null,
+  eventTurnId: string | null,
+): boolean {
+  // A reconnect can replay the terminal event before its welcome snapshot, so
+  // an event is safe when Studio has no active turn identity. Once a newer
+  // identified turn is active, only its exact ID may settle it; a legacy
+  // no-ID event fails closed in that state.
+  return activeTurnId === null || eventTurnId === activeTurnId;
+}
+
 export interface ChatHistoryEntry {
   role: 'user' | 'assistant';
   text: string;
@@ -803,10 +814,21 @@ function readCliproxyStatus(value: unknown): CliproxyStatus {
   };
 }
 
+const MAX_USAGE_MODEL_ENTRIES = 512;
+const MAX_USAGE_MODEL_NAME_CHARS = 256;
+
 function readUsageByModel(value: unknown): Record<string, UsageModelBreakdown> {
-  const out: Record<string, UsageModelBreakdown> = {};
-  if (!value || typeof value !== 'object') return out;
-  for (const [model, raw] of Object.entries(value as Record<string, unknown>)) {
+  const out = Object.create(null) as Record<string, UsageModelBreakdown>;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return out;
+  const source = value as Record<string, unknown>;
+  let visited = 0;
+  for (const model in source) {
+    if (!Object.hasOwn(source, model)) continue;
+    if (visited >= MAX_USAGE_MODEL_ENTRIES) break;
+    visited += 1;
+    const raw = source[model];
+    if (!model || model.length > MAX_USAGE_MODEL_NAME_CHARS
+      || !raw || typeof raw !== 'object' || Array.isArray(raw)) continue;
     const src = (raw ?? {}) as Record<string, unknown>;
     const costUsd = nullableNum(src['costUsd']);
     out[model] = {
@@ -989,7 +1011,7 @@ function isPiSetupState(value: unknown): value is 'preparing' | 'downloading' | 
     || value === 'configuring' || value === 'verifying' || value === 'done';
 }
 
-class AgentBridgeImpl implements AgentBridge {
+export class AgentBridgeImpl implements AgentBridge {
   readonly pendingEdits: PendingEditManager;
 
   private revision: RevisionTracker;
@@ -1040,8 +1062,16 @@ class AgentBridgeImpl implements AgentBridge {
   private latestPlan: StructuredPlan | null = null;
   private activeAgent: AgentName | null = null;
   private turnRunning = false;
+  /** Hub-issued identity for the one root provider turn allowed to mutate. */
+  private activeProviderTurnId: string | null = null;
   private editingAgent: AgentName = 'codex';
   private activeToolRequests = 0;
+  private activeToolRequestControllers = new Map<number, {
+    controller: AbortController;
+    turnBound: boolean;
+    providerTurnId: string | null;
+    releaseEditingLease: () => void;
+  }>();
   private editingLease: AgentEditingLease = { active: false, agent: 'codex' };
   private editingLeaseListeners = new Set<(lease: AgentEditingLease) => void>();
   /** 구상 중 사용자 편집이 있었고, 저장 알림을 아직 보내지 않았다. */
@@ -1276,6 +1306,7 @@ class AgentBridgeImpl implements AgentBridge {
 
   /** 진행 중 소켓을 핸들러 없이 닫아, 닫힘 이벤트가 재시도를 이중으로 걸지 않게 한다. */
   private abortSocket(): void {
+    this.abortActiveToolRequests();
     const ws = this.ws;
     this.ws = null;
     this.clearConnectTimer();
@@ -1391,6 +1422,7 @@ class AgentBridgeImpl implements AgentBridge {
       if (this.ws !== ws) return;
       this.ws = null;
       this.clearConnectTimer();
+      this.abortActiveToolRequests();
       if (this.disposed) return;
       // 응답을 기다리던 요청은 연결과 함께 사라진다 — null 로 닫아 UI 가 멈추지 않게.
       this.requests.cancelAll();
@@ -1586,6 +1618,34 @@ class AgentBridgeImpl implements AgentBridge {
     }
   }
 
+  private abortActiveToolRequests(): void {
+    for (const [id, request] of this.activeToolRequestControllers) {
+      this.cancelActiveToolRequest(id, request);
+    }
+  }
+
+  private abortProviderToolRequests(providerTurnId?: string): void {
+    for (const [id, request] of this.activeToolRequestControllers) {
+      if (!request.turnBound) continue;
+      if (providerTurnId && request.providerTurnId !== providerTurnId) continue;
+      this.cancelActiveToolRequest(id, request);
+    }
+  }
+
+  private cancelActiveToolRequest(
+    id: number,
+    request: {
+      controller: AbortController;
+      releaseEditingLease: () => void;
+    },
+  ): void {
+    if (this.activeToolRequestControllers.get(id) === request) {
+      this.activeToolRequestControllers.delete(id);
+    }
+    request.controller.abort();
+    request.releaseEditingLease();
+  }
+
   /**
    * 성공한 턴의 편집 처리는 권한 프로필이 가른다:
    * 안전(safe) → 'review' (사용자 승인 대기), 전체(unrestricted) → 'commit' (자동 반영).
@@ -1660,6 +1720,9 @@ class AgentBridgeImpl implements AgentBridge {
           if (typeof session.documentId === 'string' || session.documentId === null) this.documentId = session.documentId;
           if (typeof session.documentName === 'string' || session.documentName === null) this.documentName = session.documentName;
           this.turnRunning = session.status === 'running';
+          this.activeProviderTurnId = this.turnRunning && typeof session.turnId === 'string'
+            ? session.turnId
+            : null;
           this.permissionProfile = session.permissionProfile === 'unrestricted' ? 'unrestricted' : 'safe';
           this.serviceTier = session.serviceTier === 'fast' ? 'fast' : 'standard';
           this.activeTemplateId = typeof session.activeTemplateId === 'string' ? session.activeTemplateId : null;
@@ -1741,6 +1804,8 @@ class AgentBridgeImpl implements AgentBridge {
           this.activeTemplateId = null;
           this.activeTemplate = null;
           this.turnRunning = false;
+          this.activeProviderTurnId = null;
+          this.abortActiveToolRequests();
           if (this.pendingTurnOpen) {
             try {
               this.endPendingTurn();
@@ -2210,6 +2275,8 @@ class AgentBridgeImpl implements AgentBridge {
           }
           this.activeAgent = null;
           this.turnRunning = false;
+          this.activeProviderTurnId = null;
+          this.abortActiveToolRequests();
           this.syncEditingLease();
         } else {
           this.pendingChatStart = null;
@@ -2246,6 +2313,13 @@ class AgentBridgeImpl implements AgentBridge {
         this.handleToolRequest(msg);
         break;
       }
+      case 'tool-request-cancel': {
+        if (typeof msg.id === 'number') {
+          const request = this.activeToolRequestControllers.get(msg.id);
+          if (request) this.cancelActiveToolRequest(msg.id, request);
+        }
+        break;
+      }
       default:
         // 알 수 없는 타입은 무시 (전방 호환).
         break;
@@ -2256,6 +2330,7 @@ class AgentBridgeImpl implements AgentBridge {
     switch (event.type) {
       case 'turn-start':
         this.turnRunning = true;
+        this.activeProviderTurnId = typeof event.turnId === 'string' ? event.turnId : null;
         this.editingAgent = event.agent;
         this.turnHadError = false;
         try {
@@ -2265,7 +2340,11 @@ class AgentBridgeImpl implements AgentBridge {
         }
         break;
       case 'turn-end': {
+        const eventTurnId = typeof event.turnId === 'string' ? event.turnId : null;
+        if (!providerTurnEndMatches(this.activeProviderTurnId, eventTurnId)) return;
         this.turnRunning = false;
+        this.activeProviderTurnId = null;
+        this.abortProviderToolRequests(eventTurnId ?? undefined);
         const succeeded = !this.turnHadError
           && !event.errorMessage
           && (event.stopReason === 'end_turn'
@@ -2298,6 +2377,39 @@ class AgentBridgeImpl implements AgentBridge {
   private handleToolRequest(msg: any): void {
     const id = msg.id;
     if (typeof id !== 'number') return;
+    const turnBound = msg.turnBound !== false;
+    const providerTurnId = typeof msg.providerTurnId === 'string'
+      ? msg.providerTurnId
+      : null;
+    const belongsToActiveTurn = () => !turnBound || (
+      providerTurnId !== null && providerTurnId === this.activeProviderTurnId
+    );
+    if (!belongsToActiveTurn()) {
+      this.sendToolResponse({
+        v: AGENT_PROTOCOL_VERSION,
+        type: 'tool-response',
+        id,
+        ok: false,
+        error: {
+          code: 'NO_ACTIVE_TURN',
+          message: 'The provider tool request no longer belongs to the active turn.',
+        },
+      });
+      return;
+    }
+    const previous = this.activeToolRequestControllers.get(id);
+    if (previous) this.cancelActiveToolRequest(id, previous);
+    const controller = new AbortController();
+    let editingLeaseHeld = true;
+    const releaseEditingLease = () => {
+      if (!editingLeaseHeld) return;
+      editingLeaseHeld = false;
+      this.activeToolRequests = Math.max(0, this.activeToolRequests - 1);
+      this.syncEditingLease();
+    };
+    const request = { controller, turnBound, providerTurnId, releaseEditingLease };
+    this.activeToolRequestControllers.set(id, request);
+    const requestIsActive = () => !controller.signal.aborted && belongsToActiveTurn();
     const tool = typeof msg.tool === 'string' ? msg.tool : '';
     const args = msg.args;
     const agent: AgentName = isAgentName(msg.agent) ? msg.agent : (this.activeAgent ?? 'claude');
@@ -2322,11 +2434,14 @@ class AgentBridgeImpl implements AgentBridge {
         activeCapabilityEpoch: this.capabilityEpoch,
         permissionProfile: this.permissionProfile,
         template: readDocumentTemplate(msg.template) ?? undefined,
+        requestIsActive,
       })
       .then((result) => {
+        if (!requestIsActive()) return;
         this.sendToolResponse({ v: AGENT_PROTOCOL_VERSION, type: 'tool-response', id, ok: true, result });
       })
       .catch((e: unknown) => {
+        if (!requestIsActive()) return;
         const error =
           e instanceof AgentToolError
             ? { code: e.code, message: e.message }
@@ -2334,8 +2449,10 @@ class AgentBridgeImpl implements AgentBridge {
         this.sendToolResponse({ v: AGENT_PROTOCOL_VERSION, type: 'tool-response', id, ok: false, error });
       })
       .finally(() => {
-        this.activeToolRequests = Math.max(0, this.activeToolRequests - 1);
-        this.syncEditingLease();
+        if (this.activeToolRequestControllers.get(id) === request) {
+          this.activeToolRequestControllers.delete(id);
+        }
+        releaseEditingLease();
       });
   }
 
@@ -2474,7 +2591,11 @@ class AgentBridgeImpl implements AgentBridge {
         outcome: { status: 'cancelled', reason: 'user-stop' },
       });
     }
-    if (!waitForAuthoritativeTurnEnd) this.turnRunning = false;
+    if (!waitForAuthoritativeTurnEnd) {
+      this.turnRunning = false;
+      this.activeProviderTurnId = null;
+      this.abortProviderToolRequests();
+    }
     this.syncEditingLease();
     // 전체 접근은 현재 채팅 하나에만 적용하고 새 스레드나 다시 연 스레드의 기본값으로 삼지 않는다.
     this.permissionProfile = 'safe';
@@ -3053,6 +3174,7 @@ class AgentBridgeImpl implements AgentBridge {
   }
 
   interrupt(): void {
+    this.abortProviderToolRequests(this.activeProviderTurnId ?? undefined);
     const pendingQuestion = this.pendingUserQuestion;
     if (pendingQuestion) {
       this.setPendingQuestionCancellation(pendingQuestion.interactionId, 'chat-interrupt');
@@ -3204,6 +3326,8 @@ class AgentBridgeImpl implements AgentBridge {
     if (this.disposed) return;
     this.disposed = true;
     this.turnRunning = false;
+    this.activeProviderTurnId = null;
+    this.abortActiveToolRequests();
     this.activeToolRequests = 0;
     this.syncEditingLease();
     this.editingLeaseListeners.clear();

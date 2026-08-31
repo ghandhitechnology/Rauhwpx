@@ -6,14 +6,16 @@ import path from 'node:path';
 import { openRouterReady } from './agents/title.mjs';
 import {
   isolatedProcessEnv,
+  PROCESS_TREE_CLEANUP_OUTCOME,
   processTreeSpawnOptions,
-  terminateAndWaitForProcessTreeExit,
+  terminateAndWaitForProcessTreeExitOutcome,
   terminateProcessTree,
 } from './process-tree.mjs';
 import { extractReferenceText, markupToText, SUPPORTED_REFERENCE_EXTENSIONS } from './reference-extractor.mjs';
 import {
   analyzeText, baselineLines, confidenceFor, deriveBands, splitHalfStability,
 } from './style-metrics.mjs';
+import { createTerminalJsonScanner } from './terminal-json-scanner.mjs';
 
 const MAX_FILES = 20;
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
@@ -114,13 +116,18 @@ function decodeUpload(file, index) {
   if (!file || typeof file !== 'object') throw new StyleCalibrationError('INVALID_FILE', 'Invalid uploaded file.');
   const name = String(file.name || '').trim();
   const extension = safeExtension(name);
-  if (!name || !ALLOWED_EXTENSIONS.has(extension)) {
+  if (!name || name.length > 512 || !ALLOWED_EXTENSIONS.has(extension)) {
     throw new StyleCalibrationError('UNSUPPORTED_FILE', `${name || `File ${index + 1}`} is not a supported writing sample.`);
   }
-  if (typeof file.content !== 'string' || !/^[A-Za-z0-9+/]*={0,2}$/.test(file.content)) {
-    throw new StyleCalibrationError('INVALID_FILE', `${name} has invalid file data.`);
+  let bytes;
+  if (Buffer.isBuffer(file.bytes)) {
+    bytes = file.bytes;
+  } else {
+    if (typeof file.content !== 'string' || !/^[A-Za-z0-9+/]*={0,2}$/.test(file.content)) {
+      throw new StyleCalibrationError('INVALID_FILE', `${name} has invalid file data.`);
+    }
+    bytes = Buffer.from(file.content, 'base64');
   }
-  const bytes = Buffer.from(file.content, 'base64');
   if (bytes.length === 0) throw new StyleCalibrationError('EMPTY_FILE', `${name} is empty.`);
   if (bytes.length > MAX_FILE_BYTES) throw new StyleCalibrationError('FILE_TOO_LARGE', `${name} exceeds 20 MB.`);
   const stem = path.basename(name, extension).replace(/[^a-zA-Z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'sample';
@@ -260,12 +267,16 @@ function runCli(command, args, stdin, cwd, timeoutMs, unavailableCode, deps = {}
     let stderr = '';
     let stdoutBytes = 0;
     let settled = false;
+    let finalizing = false;
     let timedOut = false;
     let outputExceeded = false;
     let inputError = null;
     let processError = null;
     let stopping = false;
     let cleanupPromise = null;
+    const terminalScanner = createTerminalJsonScanner(deps.terminalProtocol, {
+      maxFrameBytes: MAX_CLI_OUTPUT_BYTES,
+    });
     const finish = (error, value) => {
       if (settled) return;
       settled = true;
@@ -275,16 +286,24 @@ function runCli(command, args, stdin, cwd, timeoutMs, unavailableCode, deps = {}
     };
     const cleanup = () => {
       if (cleanupPromise) return cleanupPromise;
-      cleanupPromise = terminateAndWaitForProcessTreeExit(child, {
-        timeoutMs: 7_000,
-        terminateProcess,
-        terminateOptions: { graceMs: 5_000 },
-      }).catch(() => false);
+      cleanupPromise = (typeof deps.cleanupProcessOutcome === 'function'
+        ? Promise.resolve(deps.cleanupProcessOutcome(child))
+        : terminateAndWaitForProcessTreeExitOutcome(child, {
+          timeoutMs: 7_000,
+          terminateProcess,
+          terminateOptions: { graceMs: 5_000 },
+        })).catch(() => PROCESS_TREE_CLEANUP_OUTCOME.FAILED);
       return cleanupPromise;
     };
-    const resultAfterCleanup = (code, signal) => {
-      void cleanup().then((cleaned) => {
-        if (!cleaned) {
+    const resultAfterCleanup = (code, signal, { allowUnavailable = false } = {}) => {
+      if (settled || finalizing) return;
+      finalizing = true;
+      clearTimeout(timer);
+      void cleanup().then((outcome) => {
+        const naturalUnavailable = allowUnavailable
+          && outcome === PROCESS_TREE_CLEANUP_OUTCOME.UNAVAILABLE;
+        if (naturalUnavailable) deps.onCleanupUncertain?.();
+        if (outcome !== PROCESS_TREE_CLEANUP_OUTCOME.PROVEN && !naturalUnavailable) {
           const error = new StyleCalibrationError(
             'PROCESS_CLEANUP_UNCERTAIN',
             'The selected model process tree did not stop within the cleanup deadline.',
@@ -322,14 +341,19 @@ function runCli(command, args, stdin, cwd, timeoutMs, unavailableCode, deps = {}
       stop();
     }, timeoutMs);
     timer.unref?.();
+    child.stdout.setEncoding?.('utf8');
     child.stdout.on('data', (chunk) => {
-      stdoutBytes += chunk.length;
+      stdoutBytes += Buffer.byteLength(chunk, 'utf8');
       if (stdoutBytes > MAX_CLI_OUTPUT_BYTES) {
         outputExceeded = true;
         stop();
         return;
       }
       stdout += chunk;
+      if (typeof deps.cleanupProcessOutcome === 'function'
+        && terminalScanner.push(chunk)) {
+        resultAfterCleanup(0, null);
+      }
     });
     child.stderr.on('data', (chunk) => { stderr = (stderr + chunk).slice(-8000); });
     child.stdout.on('error', () => {});
@@ -339,7 +363,9 @@ function runCli(command, args, stdin, cwd, timeoutMs, unavailableCode, deps = {}
       if (child.pid) stop();
       else finish(new StyleCalibrationError(unavailableCode, processError));
     });
-    child.once('close', (code, signal) => resultAfterCleanup(code, signal));
+    child.once('close', (code, signal) => resultAfterCleanup(code, signal, {
+      allowUnavailable: !stopping && code === 0,
+    }));
     child.stdin.on('error', (error) => {
       if (!timedOut) {
         inputError = String(error?.message ?? error);
@@ -355,11 +381,17 @@ function runCli(command, args, stdin, cwd, timeoutMs, unavailableCode, deps = {}
 }
 
 function runCodex(args, stdin, cwd, timeoutMs = ANALYSIS_TIMEOUT_MS, deps = {}) {
-  return runCli('codex', args, stdin, cwd, timeoutMs, 'CODEX_UNAVAILABLE', deps);
+  return runCli('codex', args, stdin, cwd, timeoutMs, 'CODEX_UNAVAILABLE', {
+    ...deps,
+    terminalProtocol: 'codex-jsonl',
+  });
 }
 
 function runClaude(args, stdin, cwd, timeoutMs = ANALYSIS_TIMEOUT_MS, deps = {}) {
-  return runCli('claude', args, stdin, cwd, timeoutMs, 'CLAUDE_UNAVAILABLE', deps);
+  return runCli('claude', args, stdin, cwd, timeoutMs, 'CLAUDE_UNAVAILABLE', {
+    ...deps,
+    terminalProtocol: 'claude-json',
+  });
 }
 
 function extractStructuredResult(output, unavailableCode = 'CODEX_UNAVAILABLE') {
@@ -841,6 +873,10 @@ export async function calibrateWritingStyle(input, { run = runCodex, ...deps } =
     }, 8_000);
     activityTimer.unref?.();
     let result;
+    const runDeps = {
+      ...deps,
+      onCleanupUncertain: () => { cleanupUncertain = true; },
+    };
     try {
       if (viaOpenRouter) {
         result = await analyzeViaOpenRouter({
@@ -849,11 +885,11 @@ export async function calibrateWritingStyle(input, { run = runCodex, ...deps } =
       } else if (agent === 'claude') {
         const claudeRunner = deps.runClaude ?? runClaude;
         result = extractStructuredResult(await claudeRunner(
-          claudeArgs(ANALYSIS_SCHEMA, 'read-only', temp, { model, effort }), prompt, temp, timeoutMs, deps,
+          claudeArgs(ANALYSIS_SCHEMA, 'read-only', temp, { model, effort }), prompt, temp, timeoutMs, runDeps,
         ), 'CLAUDE_UNAVAILABLE');
       } else {
         result = extractStructuredResult(await run(
-          codexArgs(analysisSchemaPath, 'read-only', { model, effort }), prompt, temp, timeoutMs, deps,
+          codexArgs(analysisSchemaPath, 'read-only', { model, effort }), prompt, temp, timeoutMs, runDeps,
         ));
       }
     } finally {
@@ -930,7 +966,7 @@ export async function calibrateWritingStyle(input, { run = runCodex, ...deps } =
       },
     };
   } catch (error) {
-    cleanupUncertain = error?.processCleanupUncertain === true;
+    cleanupUncertain ||= error?.processCleanupUncertain === true;
     throw error;
   } finally {
     // Cleanup failures must not replace a useful provider/validation error.

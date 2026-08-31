@@ -9,6 +9,10 @@ import type { CellPathLike } from '@/core/types';
 import { objectAddressScope } from '@/core/object-address';
 import { INSERTED_IMAGE_MAX_BYTES, readBlobBytesWithLimit } from '@/core/document-input-limits';
 import { showToast } from '@/ui/toast';
+import {
+  assertEncodedImageDecodeDimensions,
+  assertImageDecodeDimensions,
+} from '@/view/canvaskit/image-header';
 
 type PictureObjectRef = {
   sec: number;
@@ -162,6 +166,7 @@ export function promptAssignPictureImage(this: any, ref: PictureObjectRef): void
     try {
       const data = await readBlobBytesWithLimit(file, INSERTED_IMAGE_MAX_BYTES, '그림');
       const ext = file.name.split('.').pop()?.toLowerCase() || 'png';
+      assertEncodedImageDecodeDimensions(data, '그림');
       const img = new Image();
       objectUrl = URL.createObjectURL(file);
       await new Promise<void>((resolve, reject) => {
@@ -170,7 +175,12 @@ export function promptAssignPictureImage(this: any, ref: PictureObjectRef): void
             reject(new Error('이미지 크기를 확인할 수 없습니다.'));
             return;
           }
-          resolve();
+          try {
+            assertImageDecodeDimensions(img.naturalWidth, img.naturalHeight, '그림');
+            resolve();
+          } catch (error) {
+            reject(error);
+          }
         };
         img.onerror = () => reject(new Error('브라우저가 이 이미지 파일을 읽지 못했습니다.'));
         img.src = objectUrl;

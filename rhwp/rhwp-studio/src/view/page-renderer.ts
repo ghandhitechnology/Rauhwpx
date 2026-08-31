@@ -2,6 +2,7 @@ import { WasmBridge } from '@/core/wasm-bridge';
 import type { LayerRenderProfile, PageInfo } from '@/core/types';
 import { layerPaintOpReplayPlane } from './canvaskit/replay-plane';
 import type { CanvasKitLayerRenderer, CanvasKitRenderDiagnostics } from './canvaskit-renderer';
+import { assertBase64EncodedImageDecodeDimensions } from './canvaskit/image-header';
 import { collectVectorRawSvgDataUrls } from './raw-svg-prefetch';
 import {
   collectFlowImagePaintOps,
@@ -426,6 +427,11 @@ export class PageRenderer {
     layer.style.background = 'var(--doc-paper)';
 
     for (const image of images) {
+      try {
+        assertBase64EncodedImageDecodeDimensions(image.base64, '문서 그림');
+      } catch {
+        continue;
+      }
       // clip이 실제 그림보다 작을 때만 별도 wrapper를 둔다. 일반 그림은 기존 DOM
       // 경로를 그대로 사용해 정적 이미지 분리의 비용 이점을 유지한다.
       // 회전한 그림은 미회전 bbox 가 아니라 회전 후 AABB 로 판단한다 — bbox 로 자르면
@@ -986,7 +992,7 @@ export class PageRenderer {
     }
     const tasks: Promise<unknown>[] = [];
     const seen = new Set<string>();
-    const enqueue = (dataUrl: string) => {
+    const enqueueValidated = (dataUrl: string) => {
       if (seen.has(dataUrl)) return;
       seen.add(dataUrl);
       tasks.push(
@@ -1002,11 +1008,19 @@ export class PageRenderer {
         }),
       );
     };
+    const enqueueRaster = (mime: string, base64: string) => {
+      try {
+        assertBase64EncodedImageDecodeDimensions(base64, '문서 그림');
+      } catch {
+        return;
+      }
+      enqueueValidated(`data:${mime};base64,${base64}`);
+    };
     // image 항목들의 mime + base64 추출 (간단한 정규식)
     const re = /"type":"image"[^}]*?(?:"wrap":"(behindText|inFrontOfText)")?[^}]*?"mime":"([^"]+)","base64":"([^"]+)"/g;
     let m: RegExpExecArray | null;
     while ((m = re.exec(json)) !== null) {
-      enqueue(`data:${m[2]};base64,${m[3]}`);
+      enqueueRaster(m[2], m[3]);
     }
     // rawSvg 항목 (OLE/차트 미리보기) 의 embedded data URL 추출.
     // svg 필드는 JSON 인코딩 문자열이며 내부에 data:image/MIME;base64,... 가 등장한다.
@@ -1014,7 +1028,7 @@ export class PageRenderer {
     const dataUrlRe = /data:(image\/[A-Za-z0-9.+-]+);base64,([A-Za-z0-9+/=]+)/g;
     let d: RegExpExecArray | null;
     while ((d = dataUrlRe.exec(json)) !== null) {
-      enqueue(`data:${d[1]};base64,${d[2]}`);
+      enqueueRaster(d[1], d[2]);
     }
     // 벡터 rawSvg(차트/OLE 미리보기)는 내부 raster data URL 이 없어 위 정규식으로
     // 잡히지 않는다. web_canvas.render_raw_svg 와 동일하게 조각을 wrap 한 SVG data URL
@@ -1024,7 +1038,8 @@ export class PageRenderer {
       try {
         const vectorRawSvgUrls: string[] = [];
         collectVectorRawSvgDataUrls(JSON.parse(json), vectorRawSvgUrls);
-        for (const dataUrl of vectorRawSvgUrls) enqueue(dataUrl);
+        // These URLs are generated from bounded page vector fragments, not encoded rasters.
+        for (const dataUrl of vectorRawSvgUrls) enqueueValidated(dataUrl);
       } catch {
         // 파싱 실패 시 raster 프리페치 결과만 사용한다.
       }

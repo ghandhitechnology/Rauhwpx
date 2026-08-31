@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { promises as fs } from 'node:fs';
@@ -13,6 +14,8 @@ import {
   defaultCursorHomeDir,
 } from '../cli-setup-manager.mjs';
 import { replaceFileAtomically } from '../harness-update.mjs';
+import { API_KEY_MAX_BYTES, AUTH_CODE_MAX_BYTES } from '../input-bounds.mjs';
+import { prepareStagedOAuthCredential } from '../oauth-credential-transaction.mjs';
 import { createMemorySecretStore } from '../secret-store.mjs';
 
 class FakeProcess extends EventEmitter {
@@ -73,6 +76,21 @@ function oauthTransactionStub(homeDir, configDir = homeDir, lifecycle = []) {
   };
 }
 
+function sha256(bytes) {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+
+function oauthJournal(agent, credential, phase = 'ready') {
+  return {
+    version: 1,
+    agent,
+    phase,
+    previousAuthMethod: 'api-key',
+    previousKeyTail: '-key',
+    credential,
+  };
+}
+
 test('CLI setup root follows the app data directory on each platform', () => {
   assert.equal(defaultCliSetupRoot({ RHWP_CLI_DIR: '/tmp/rhwp-cli' }), path.resolve('/tmp/rhwp-cli'));
   assert.equal(
@@ -88,6 +106,177 @@ test('CLI setup root follows the app data directory on each platform', () => {
     path.win32.join('D:\\Profiles\\tester', 'AppData', 'Roaming', 'rhwp', 'cli'),
   );
   assert.equal(defaultCliSetupRoot({}, 'linux', '/home/tester'), '/home/tester/.local/share/rhwp/cli');
+});
+
+test('Windows startup recovers setup config, fallback secrets, and managed Grok auth', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-recovery-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const configPath = path.join(rootDir, 'config.json');
+  const secretsPath = path.join(rootDir, 'secrets.json');
+  const grokAuthPath = path.join(rootDir, 'grok', 'auth.json');
+  await fs.mkdir(path.dirname(grokAuthPath), { recursive: true });
+  await fs.writeFile(`${configPath}.previous-write`, JSON.stringify({
+    codexAuthMethod: 'api-key', codexKeyTail: 'tail',
+  }));
+  await fs.writeFile(`${secretsPath}.previous-write`, JSON.stringify({
+    'rhwp.codex.api-key': 'sk-recovered',
+  }));
+  await fs.writeFile(`${grokAuthPath}.previous-write`, '{"oauth":"recovered"}');
+
+  const manager = await createCliSetupManager({
+    rootDir,
+    platform: 'win32',
+    baseEnv: { PATH: '', USERPROFILE: 'C:\\Users\\tester' },
+    homeDir: rootDir,
+  }).init();
+
+  assert.equal(manager.envFor('codex').OPENAI_API_KEY, 'sk-recovered');
+  assert.equal(JSON.parse(await fs.readFile(configPath, 'utf8')).codexKeyTail, 'tail');
+  assert.equal(await fs.readFile(grokAuthPath, 'utf8'), '{"oauth":"recovered"}');
+  assert.equal(await manager.grokAuthPath(), grokAuthPath);
+});
+
+test('restart rolls back a published OAuth credential when config never committed', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-oauth-crash-rollback-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const codexHome = path.join(rootDir, 'profile', '.codex');
+  const sourceFile = path.join(codexHome, 'auth.json');
+  await fs.mkdir(codexHome, { recursive: true });
+  await fs.writeFile(sourceFile, '{"token":"old-oauth-secret"}');
+  await fs.writeFile(path.join(rootDir, 'config.json'), JSON.stringify({
+    codexAuthMethod: 'api-key',
+    codexKeyTail: '-key',
+  }));
+  await fs.writeFile(path.join(rootDir, 'secrets.json'), JSON.stringify({
+    'rhwp.codex.api-key': 'sk-api-plaintext',
+  }));
+  const transaction = await prepareStagedOAuthCredential({
+    sourceFile,
+    stagingParent: path.join(rootDir, 'codex-oauth-staging'),
+    relativeCredentialPath: 'auth.json',
+    platform: 'linux',
+  });
+  await fs.writeFile(transaction.credentialFile, '{"token":"new-oauth-secret"}');
+  const credential = await transaction.prepareRecovery();
+  const journalPath = path.join(rootDir, 'oauth-auth-codex.journal.json');
+  await fs.writeFile(journalPath, JSON.stringify(oauthJournal('codex', credential)));
+  assert.doesNotMatch(await fs.readFile(journalPath, 'utf8'), /old-oauth-secret|new-oauth-secret|sk-api-plaintext/u);
+  await transaction.publish();
+
+  const manager = await createCliSetupManager({
+    rootDir,
+    platform: 'linux',
+    baseEnv: { PATH: '/usr/bin', CODEX_HOME: codexHome },
+    homeDir: path.dirname(codexHome),
+  }).init();
+
+  assert.equal(await fs.readFile(sourceFile, 'utf8'), '{"token":"old-oauth-secret"}');
+  assert.equal(manager.envFor('codex').OPENAI_API_KEY, 'sk-api-plaintext');
+  assert.equal(JSON.parse(await fs.readFile(path.join(rootDir, 'config.json'), 'utf8')).codexAuthMethod, 'api-key');
+  await assert.rejects(fs.access(journalPath), { code: 'ENOENT' });
+  await assert.rejects(fs.access(credential.backupFile), { code: 'ENOENT' });
+});
+
+test('restart finishes OAuth after config commit and removes the stale API secret', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-oauth-crash-commit-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const codexHome = path.join(rootDir, 'profile', '.codex');
+  const sourceFile = path.join(codexHome, 'auth.json');
+  await fs.mkdir(codexHome, { recursive: true });
+  await fs.writeFile(sourceFile, '{"token":"old-oauth-secret"}');
+  await fs.writeFile(path.join(rootDir, 'secrets.json'), JSON.stringify({
+    'rhwp.codex.api-key': 'sk-api-plaintext',
+  }));
+  const transaction = await prepareStagedOAuthCredential({
+    sourceFile,
+    stagingParent: path.join(rootDir, 'codex-oauth-staging'),
+    relativeCredentialPath: 'auth.json',
+    platform: 'linux',
+  });
+  await fs.writeFile(transaction.credentialFile, '{"token":"new-oauth-secret"}');
+  const credential = await transaction.prepareRecovery();
+  const journalPath = path.join(rootDir, 'oauth-auth-codex.journal.json');
+  await fs.writeFile(journalPath, JSON.stringify(oauthJournal('codex', credential)));
+  await transaction.publish();
+  await fs.writeFile(path.join(rootDir, 'config.json'), JSON.stringify({
+    codexAuthMethod: 'oauth',
+    codexKeyTail: null,
+  }));
+
+  const manager = await createCliSetupManager({
+    rootDir,
+    platform: 'linux',
+    baseEnv: { PATH: '/usr/bin', CODEX_HOME: codexHome },
+    homeDir: path.dirname(codexHome),
+  }).init();
+
+  assert.equal(await fs.readFile(sourceFile, 'utf8'), '{"token":"new-oauth-secret"}');
+  assert.equal(manager.envFor('codex').OPENAI_API_KEY, undefined);
+  assert.equal(JSON.parse(await fs.readFile(path.join(rootDir, 'config.json'), 'utf8')).codexAuthMethod, 'oauth');
+  await assert.rejects(fs.access(path.join(rootDir, 'secrets.json')), { code: 'ENOENT' });
+  await assert.rejects(fs.access(journalPath), { code: 'ENOENT' });
+  await assert.rejects(fs.access(credential.backupFile), { code: 'ENOENT' });
+});
+
+test('restart rolls back a direct managed OAuth file changed during login', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-oauth-login-crash-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const sourceFile = path.join(rootDir, 'grok', 'auth.json');
+  const oldCredential = Buffer.from('{"token":"old-grok-secret"}');
+  const newCredential = Buffer.from('{"token":"partial-grok-secret"}');
+  await fs.mkdir(path.dirname(sourceFile), { recursive: true });
+  await fs.writeFile(sourceFile, oldCredential);
+  const backupFile = `${sourceFile}.oauth-${process.pid}-${randomUUID()}.held`;
+  await fs.writeFile(backupFile, oldCredential, { mode: 0o600 });
+  await fs.writeFile(sourceFile, newCredential);
+  await fs.writeFile(path.join(rootDir, 'config.json'), JSON.stringify({
+    grokAuthMethod: 'api-key',
+    grokKeyTail: '-key',
+  }));
+  await fs.writeFile(path.join(rootDir, 'secrets.json'), JSON.stringify({
+    'rhwp.grok.api-key': 'xai-api-plaintext',
+  }));
+  const credential = {
+    version: 1,
+    sourceFile,
+    initialState: 'file',
+    initialDigest: sha256(oldCredential),
+    publishedDigest: null,
+    backupFile,
+  };
+  const journalPath = path.join(rootDir, 'oauth-auth-grok.journal.json');
+  await fs.writeFile(journalPath, JSON.stringify(oauthJournal('grok', credential, 'login')));
+
+  const manager = await createCliSetupManager({
+    rootDir,
+    platform: 'linux',
+    baseEnv: { PATH: '/usr/bin' },
+    homeDir: path.join(rootDir, 'profile'),
+  }).init();
+
+  assert.deepEqual(await fs.readFile(sourceFile), oldCredential);
+  assert.equal(manager.envFor('grok').XAI_API_KEY, 'xai-api-plaintext');
+  await assert.rejects(fs.access(journalPath), { code: 'ENOENT' });
+  await assert.rejects(fs.access(backupFile), { code: 'ENOENT' });
+});
+
+test('startup preserves and rejects an oversized OAuth recovery journal', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-oauth-journal-bound-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const journalPath = path.join(rootDir, 'oauth-auth-codex.journal.json');
+  const original = Buffer.alloc((16 * 1024) + 1, 0x61);
+  await fs.writeFile(journalPath, original);
+
+  await assert.rejects(
+    createCliSetupManager({
+      rootDir,
+      platform: 'linux',
+      baseEnv: { PATH: '/usr/bin' },
+      homeDir: path.join(rootDir, 'profile'),
+    }).init(),
+    { code: 'AGENT_AUTH_RECOVERY_REQUIRED' },
+  );
+  assert.deepEqual(await fs.readFile(journalPath), original);
 });
 
 test('Cursor uses USERPROFILE for native Windows config discovery', async () => {
@@ -166,6 +355,84 @@ test('Codex installs into the app prefix and API login never persists the full k
   assert.match(configText, /"codexKeyTail": "alue"/);
 
   await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('concurrent provider API logins serialize shared fallback secrets and config', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-concurrent-auth-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const spawnProcess = () => {
+    const proc = new FakeProcess();
+    queueMicrotask(() => proc.emit('close', 1, null));
+    return proc;
+  };
+  const manager = await createCliSetupManager({
+    rootDir,
+    platform: 'win32',
+    spawnProcess,
+    fetchImpl: acceptingFetch,
+    baseEnv: { PATH: '', USERPROFILE: 'C:\\Users\\tester' },
+  }).init();
+
+  await Promise.all([
+    manager.authenticate('codex', 'api-key', 'sk-codex-concurrent'),
+    manager.authenticate('grok', 'api-key', 'xai-grok-concurrent'),
+  ]);
+
+  const secrets = JSON.parse(await fs.readFile(path.join(rootDir, 'secrets.json'), 'utf8'));
+  assert.equal(secrets['rhwp.codex.api-key'], 'sk-codex-concurrent');
+  assert.equal(secrets['rhwp.grok.api-key'], 'xai-grok-concurrent');
+  const config = JSON.parse(await fs.readFile(path.join(rootDir, 'config.json'), 'utf8'));
+  assert.equal(config.codexAuthMethod, 'api-key');
+  assert.equal(config.grokAuthMethod, 'api-key');
+  assert.equal(manager.envFor('codex').OPENAI_API_KEY, 'sk-codex-concurrent');
+  assert.equal(manager.envFor('grok').XAI_API_KEY, 'xai-grok-concurrent');
+});
+
+test('a failed shared auth write does not poison later providers or resurrect a deleted secret', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-auth-write-recovery-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const configPath = path.join(rootDir, 'config.json');
+  const secretsPath = path.join(rootDir, 'secrets.json');
+  const failure = new Error('injected shared config failure');
+  let failNext = true;
+  const spawnProcess = () => {
+    const proc = new FakeProcess();
+    queueMicrotask(() => proc.emit('close', 1, null));
+    return proc;
+  };
+  const manager = await createCliSetupManager({
+    rootDir,
+    platform: 'win32',
+    spawnProcess,
+    fetchImpl: acceptingFetch,
+    baseEnv: { PATH: '', USERPROFILE: 'C:\\Users\\tester' },
+    async replaceConfigFile(tempPath, targetPath, options) {
+      if (targetPath === configPath && failNext) {
+        failNext = false;
+        await fs.copyFile(secretsPath, `${secretsPath}.previous-write`);
+        throw failure;
+      }
+      return replaceFileAtomically(tempPath, targetPath, options);
+    },
+  }).init();
+
+  await assert.rejects(manager.authenticate('codex', 'api-key', 'sk-rolled-back'), failure);
+  await assert.rejects(fs.access(secretsPath), { code: 'ENOENT' });
+  await assert.rejects(fs.access(`${secretsPath}.previous-write`), { code: 'ENOENT' });
+
+  await manager.authenticate('grok', 'api-key', 'xai-after-failure');
+  assert.equal(
+    JSON.parse(await fs.readFile(secretsPath, 'utf8'))['rhwp.grok.api-key'],
+    'xai-after-failure',
+  );
+  const restarted = await createCliSetupManager({
+    rootDir,
+    platform: 'win32',
+    spawnProcess,
+    baseEnv: { PATH: '', USERPROFILE: 'C:\\Users\\tester' },
+  }).init();
+  assert.equal(restarted.envFor('codex').OPENAI_API_KEY, undefined);
+  assert.equal(restarted.envFor('grok').XAI_API_KEY, 'xai-after-failure');
 });
 
 test('Claude API setup is restored through the provider environment', async () => {
@@ -585,6 +852,42 @@ test('Claude OAuth surfaces a clean login URL and finishes with a pasted code', 
   assert.equal(status.authenticated, true);
   assert.equal(status.authMethod, 'oauth');
 
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('oversized OAuth codes are rejected before child stdin is touched', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-auth-code-bound-'));
+  let authProc = null;
+  const spawnProcess = (_command, argv) => {
+    const proc = new FakeProcess();
+    if (argv[0] === 'auth' && argv[1] === 'login') authProc = proc;
+    else queueMicrotask(() => proc.emit('close', 0, null));
+    return proc;
+  };
+  const stagedHome = path.join(rootDir, 'claude-oauth-staging', 'run-test');
+  const manager = await createCliSetupManager({
+    rootDir,
+    spawnProcess,
+    platform: 'linux',
+    prepareOAuthCredential: async () => oauthTransactionStub(stagedHome),
+  }).init();
+
+  const running = manager.authenticate('claude', 'oauth');
+  await waitFor(() => authProc !== null);
+  await assert.rejects(
+    manager.submitAuthCode('claude', { toString: () => { throw new Error('must not coerce'); } }),
+    { code: 'AGENT_AUTH_CODE_INVALID' },
+  );
+  await assert.rejects(
+    manager.submitAuthCode('claude', 'c'.repeat(AUTH_CODE_MAX_BYTES + 1)),
+    { code: 'AGENT_AUTH_CODE_TOO_LARGE' },
+  );
+  assert.equal(authProc.input, '', 'rejected code must not enqueue any child stdin bytes');
+
+  await manager.submitAuthCode('claude', 'safe-code');
+  assert.equal(authProc.input, 'safe-code\n');
+  authProc.emit('close', 0, null);
+  await running;
   await fs.rm(rootDir, { recursive: true, force: true });
 });
 
@@ -1714,6 +2017,72 @@ test('API keys are checked against the provider before they are stored', async (
   }
 });
 
+test('oversized CLI API keys are rejected before load, fetch, vault, or file side effects', async () => {
+  const rootDir = path.join(os.tmpdir(), `rhwp-cli-key-input-bound-${randomUUID()}`);
+  let fetchCalls = 0;
+  let vaultCalls = 0;
+  const secretStore = {
+    available: true,
+    async get() { vaultCalls += 1; return null; },
+    async set() { vaultCalls += 1; },
+    async delete() { vaultCalls += 1; },
+  };
+  const manager = createCliSetupManager({
+    rootDir,
+    secretStore,
+    fetchImpl: async () => { fetchCalls += 1; return { status: 200, ok: true }; },
+    baseEnv: { PATH: '/usr/bin' },
+    spawnProcess: () => { throw new Error('oversized key must not spawn'); },
+  });
+
+  await assert.rejects(
+    manager.authenticate('codex', 'api-key', { toString: () => { throw new Error('must not coerce'); } }),
+    { code: 'AGENT_KEY_INVALID' },
+  );
+  for (const oversized of [
+    'k'.repeat(API_KEY_MAX_BYTES + 1),
+    '한'.repeat(Math.floor(API_KEY_MAX_BYTES / 3) + 1),
+  ]) {
+    await assert.rejects(
+      manager.authenticate('codex', 'api-key', oversized),
+      { code: 'AGENT_KEY_TOO_LARGE' },
+    );
+  }
+  assert.equal(fetchCalls, 0);
+  assert.equal(vaultCalls, 0);
+  await assert.rejects(fs.stat(rootDir), { code: 'ENOENT' });
+});
+
+test('oversized persisted CLI keys are never loaded into provider environments', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-key-load-bound-'));
+  const oversized = 'k'.repeat(API_KEY_MAX_BYTES + 1);
+  const secretsPath = path.join(rootDir, 'secrets.json');
+  await fs.writeFile(secretsPath, JSON.stringify({ 'rhwp.codex.api-key': oversized }));
+
+  const fromFile = await createCliSetupManager({
+    rootDir,
+    baseEnv: { PATH: '/usr/bin' },
+    spawnProcess: () => { throw new Error('oversized stored key must not spawn'); },
+  }).init();
+  assert.equal(fromFile.envFor('codex').OPENAI_API_KEY, undefined);
+  assert.equal(await fs.readFile(secretsPath, 'utf8'), JSON.stringify({ 'rhwp.codex.api-key': oversized }));
+
+  const fromVault = await createCliSetupManager({
+    rootDir: path.join(rootDir, 'vault-case'),
+    secretStore: {
+      available: true,
+      async get(id) { return id === 'rhwp.codex.api-key' ? oversized : null; },
+      async set() { throw new Error('oversized stored key must not migrate'); },
+      async delete() { throw new Error('oversized stored key must not mutate'); },
+    },
+    baseEnv: { PATH: '/usr/bin' },
+    spawnProcess: () => { throw new Error('oversized stored key must not spawn'); },
+  }).init();
+  assert.equal(fromVault.envFor('codex').OPENAI_API_KEY, undefined);
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
 test('a rejected API key is reported and never persisted', async () => {
   for (const agent of ['claude', 'codex', 'grok']) {
     const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-keybad-'));
@@ -2511,7 +2880,7 @@ test('Windows OAuth output failure waits for taskkill and leader exit before rol
   let login;
   let taskkill;
   const spawnProcess = (command, argv) => {
-    if (command === 'taskkill') {
+    if (command === 'C:\\Windows\\System32\\taskkill.exe') {
       taskkill = new EventEmitter();
       return taskkill;
     }
@@ -2528,7 +2897,7 @@ test('Windows OAuth output failure waits for taskkill and leader exit before rol
     rootDir,
     spawnProcess,
     platform: 'win32',
-    baseEnv: { PATH: 'C:\\bin', USERPROFILE: rootDir },
+    baseEnv: { PATH: 'C:\\bin', USERPROFILE: rootDir, SystemRoot: 'C:\\Windows' },
     homeDir: rootDir,
   }).init();
 

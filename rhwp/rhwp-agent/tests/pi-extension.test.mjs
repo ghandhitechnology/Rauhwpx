@@ -155,7 +155,7 @@ test('도구 정의 HTTP 응답은 8 MiB 전에 거절된다', async (t) => {
   );
 });
 
-test('tool-call 프레임은 v4 계약을 쓴다', () => {
+test('tool-call 프레임은 v5 계약을 쓴다', () => {
   const plain = encodeToolCallFrame(3, 'get_structure', { sectionIdx: 0 }, configFor());
   assert.deepEqual(plain, {
     v: 5,

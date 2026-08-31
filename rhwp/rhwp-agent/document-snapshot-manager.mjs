@@ -152,6 +152,40 @@ export class DocumentSnapshotManager {
     });
   }
 
+  /** Wait until every already-admitted per-chat write has stopped touching disk. */
+  async drain() {
+    while (this.chatQueues.size > 0) {
+      await Promise.all([...this.chatQueues.values()]);
+    }
+  }
+
+  /**
+   * Remove one materialization that was never authoritatively delivered or
+   * bound to a live job. The returned path is treated as untrusted even though
+   * normal callers receive it from materializeSerial(): only the exact
+   * base/chat/allocation/file shape may be removed.
+   */
+  async discard(materialized) {
+    const destination = typeof materialized?.path === 'string'
+      ? path.resolve(materialized.path)
+      : null;
+    if (!destination || !isInside(this.baseDir, destination)) {
+      throw snapshotError('SNAPSHOT_PATH_UNSAFE', 'Discarded snapshot path escaped its storage root');
+    }
+    const allocationDirectory = path.dirname(destination);
+    const chatDirectory = path.dirname(allocationDirectory);
+    if (path.dirname(chatDirectory) !== this.baseDir
+      || !/^[0-9a-f]{32}$/.test(path.basename(chatDirectory))
+      || !/^[A-Za-z0-9_-]{1,100}$/.test(path.basename(allocationDirectory))
+      || !isInside(chatDirectory, allocationDirectory)) {
+      throw snapshotError('SNAPSHOT_PATH_UNSAFE', 'Discarded snapshot allocation has an invalid scope');
+    }
+    await fs.rm(allocationDirectory, { recursive: true, force: true });
+    await fs.rmdir(chatDirectory).catch((error) => {
+      if (error?.code !== 'ENOENT' && error?.code !== 'ENOTEMPTY') throw error;
+    });
+  }
+
   async materializeSerial({ chatId, documentIdentity, snapshot }) {
     if (typeof chatId !== 'string' || !chatId) {
       throw snapshotError('SNAPSHOT_SCOPE_MISSING', 'The active chat identity is unavailable');

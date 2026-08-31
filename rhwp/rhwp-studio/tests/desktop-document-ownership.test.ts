@@ -67,11 +67,16 @@ function minimalPortableHistoryBytes(marker = 0): Uint8Array {
 }
 
 async function withTemporaryDirectory(run: (directory: string) => Promise<void>) {
-  const directory = await mkdtemp(join(tmpdir(), 'rauhwpx-native-save-'));
+  // Nearby recovery intentionally searches both the document directory and
+  // its parent. Nest each fixture below its own container so unrelated tests
+  // creating .hwp files in the shared OS temp root cannot become candidates.
+  const container = await mkdtemp(join(tmpdir(), 'rauhwpx-native-save-'));
+  const directory = join(container, 'workspace');
+  await mkdir(directory);
   try {
     await run(directory);
   } finally {
-    await rmFs(directory, { recursive: true, force: true });
+    await rmFs(container, { recursive: true, force: true });
   }
 }
 

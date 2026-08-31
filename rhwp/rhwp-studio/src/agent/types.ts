@@ -642,7 +642,7 @@ export interface AgentTaskMember {
  * 선택 필드 — 있으면 그 task 카드로, 모르는 id 면 루트 활동 그룹으로 그린다.
  */
 export type AgentStreamEvent =
-  | { type: 'turn-start'; agent: AgentName }
+  | { type: 'turn-start'; agent: AgentName; turnId?: string }
   | { type: 'session-info'; agent: AgentName; sessionId: string; model?: string; mcpStatus?: string }
   | { type: 'text-delta'; agent: AgentName; text: string; parentTaskId?: string }
   | { type: 'tool-call'; agent: AgentName; callId: string; tool: string; argsJson: string; parentTaskId?: string }
@@ -650,7 +650,7 @@ export type AgentStreamEvent =
   | { type: 'task-start'; agent: AgentName; taskId: string; callId?: string; title: string; role?: string; taskKind: 'agent' | 'workflow'; workflowName?: string; /** Owning turn may end while this real process keeps running. */ background?: boolean }
   | { type: 'task-progress'; agent: AgentName; taskId: string; activity?: string; lastTool?: string; usage?: AgentTaskUsage; phases?: AgentTaskPhase[]; members?: AgentTaskMember[]; /** Current task-level phase when there is no child member row. */ phaseIndex?: number }
   | { type: 'task-end'; agent: AgentName; taskId: string; status: 'completed' | 'failed' | 'stopped'; summary?: string; usage?: AgentTaskUsage }
-  | { type: 'turn-end'; agent: AgentName; stopReason?: string; errorMessage?: string }
+  | { type: 'turn-end'; agent: AgentName; stopReason?: string; errorMessage?: string; turnId?: string }
   | { type: 'error'; agent: AgentName; message: string };
 
 export type SidebarEvent =

@@ -301,6 +301,11 @@ class FakeProcess extends EventEmitter {
   }
 }
 
+const PROVEN_TREE_CLEANUP = {
+  terminateProcess: (child) => child.kill('SIGTERM'),
+  waitForExit: async () => true,
+};
+
 const INIT_LINE = {
   type: 'system', subtype: 'init',
   session_id: '11111111-2222-4333-8444-555555555555',
@@ -317,7 +322,7 @@ const SPAWN_BLOCK = {
 const RESULT = { type: 'result', subtype: 'success', is_error: false, result: 'done', stop_reason: 'end_turn' };
 
 /** 가짜 꼬리 추적기 — 테스트가 디스크 라인을 직접 밀어 넣는다. */
-function startFleetSession(t, extra = {}) {
+function startFleetSession(t, extra = {}, dependencies = {}) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-grok-fleet-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const events = [];
@@ -352,6 +357,7 @@ function startFleetSession(t, extra = {}) {
       return tail;
     },
     now: () => clock,
+    ...dependencies,
   });
   return { session, events, spawns, tails, opts, setClock: (value) => { clock = value; } };
 }
@@ -369,6 +375,7 @@ test('a solo turn never touches the disk tail and keeps today\'s event sequence'
     { type: 'assistant', message: { content: [{ type: 'text', text: '확인했습니다.' }] } },
     RESULT,
   );
+  spawns[0].proc.exit(0);
   assert.deepEqual(types(events), ['turn-start', 'session-info', 'text-delta', 'turn-end']);
   assert.deepEqual(events.at(-1), {
     type: 'turn-end', agent: 'grok', stopReason: 'completed', errorMessage: undefined,
@@ -483,10 +490,10 @@ test('a mid-message spawn switches sources: task-start, suppressed rows, deduped
     summary: '2쪽 정리 완료', usage: { totalTokens: 10613, toolUses: 1, durationMs: 7229 },
   });
 
-  // result 뒤에도 정착 유예를 지나야 턴이 닫힌다.
+  // result 는 보류되고 실제 stdout close 가 턴을 닫는다.
   proc.emitJson(RESULT);
-  assert.equal(events.filter((event) => event.type === 'turn-end').length, 0, '유예 전에는 닫지 않는다');
-  t.mock.timers.tick(1_600);
+  assert.equal(events.filter((event) => event.type === 'turn-end').length, 0, 'close 전에는 닫지 않는다');
+  proc.exit(0);
   assert.deepEqual(
     events.filter((event) => event.type === 'turn-end'),
     [{ type: 'turn-end', agent: 'grok', stopReason: 'completed', errorMessage: undefined }],
@@ -604,7 +611,7 @@ test('a spawn rejected mid-text (unknown type) reverts to stdout and renders eve
   const rootTexts = events.filter((event) => event.type === 'text-delta' && !event.parentTaskId).map((event) => event.text);
   assert.deepEqual(rootTexts, ['먼저 확인합니다. ', '스폰을 기다립니다. ', '직접 진행합니다.']);
   assert.equal(tails[0].stopped, true, '복원이 디스크 꼬리를 멈춘다');
-  t.mock.timers.tick(1_600);
+  proc.exit(0);
   assert.equal(events.filter((event) => event.type === 'turn-end').length, 1);
   session.dispose();
 });
@@ -665,7 +672,7 @@ test('a dontAsk-cancelled spawn fails its task with a readable summary', (t) => 
   const end = events.find((event) => event.type === 'task-end');
   assert.equal(end.status, 'failed');
   assert.match(end.summary, /User cancelled the execution/);
-  t.mock.timers.tick(1_600);
+  spawns[0].proc.exit(0);
   assert.equal(events.filter((event) => event.type === 'turn-end').length, 1);
   session.dispose();
 });
@@ -707,6 +714,7 @@ test('a stdout-only collection turn suppresses the subagent meta tool rows', (t)
     { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'call-kill-0', is_error: false, content: 'killed' }] } },
     RESULT,
   );
+  spawns[0].proc.exit(0);
   assert.equal(events.filter((event) => event.type === 'tool-call').length, 0, '메타 도구는 stdout 경로에서도 행이 아니다');
   assert.equal(events.filter((event) => event.type === 'tool-result').length, 0);
   assert.deepEqual(
@@ -764,20 +772,26 @@ test('a late subagent_finished after the result settles the held turn', (t) => {
   t.mock.timers.tick(5_000);
   assert.equal(events.filter((event) => event.type === 'turn-end').length, 0, 'pending 이 남아 있으면 계속 연다');
 
-  // will_wake 성 늦은 종료 — 도착하면 유예를 지나 닫힌다.
+  // will_wake 성 늦은 종료 — 도착해도 stdout close 전에는 보류된다.
   tail.push({ kind: 'parent' }, {
     sessionUpdate: 'subagent_finished', subagent_id: 'kid-1', status: 'completed',
     tool_calls: 0, turns: 1, duration_ms: 9000, tokens_used: 42, output: '끝', will_wake: true,
   });
   assert.equal(events.filter((event) => event.type === 'turn-end').length, 0);
   t.mock.timers.tick(1_600);
+  assert.equal(events.filter((event) => event.type === 'turn-end').length, 0);
+  spawns[0].proc.exit(0);
   assert.equal(events.filter((event) => event.type === 'turn-end').length, 1);
   session.dispose();
 });
 
-test('a resumed turn skips disk lines stamped before this turn began', (t) => {
+test('a resumed turn skips disk lines stamped before this turn began', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
-  const { session, events, spawns, tails, setClock } = startFleetSession(t);
+  const { session, events, spawns, tails, setClock } = startFleetSession(
+    t,
+    {},
+    PROVEN_TREE_CLEANUP,
+  );
 
   // 턴 1: 보통 턴으로 완료 → -r 재개 경로를 연다.
   session.sendUserMessage('first');
@@ -786,6 +800,7 @@ test('a resumed turn skips disk lines stamped before this turn began', (t) => {
 
   setClock(50_000);
   session.sendUserMessage('second');
+  await new Promise((resolve) => setImmediate(resolve));
   assert.ok(spawns[1].argv.includes('-r'), '재개 턴이어야 한다');
   spawns[1].proc.emitJson(
     { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: '이어서 ' } } },

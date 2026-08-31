@@ -369,7 +369,7 @@ root, verifies one immutable checksum through inspection and generation, and
 lets its worker publish only an exact helper-returned candidate. After
 ArtifactStore snapshots those bytes, the hub removes the candidate and source
 snapshot; failed cleanup blocks another job until the hub restarts. Browser
-documents therefore need no OS path without letting a worker publish the
+documents therefore do not need an OS path, and the worker cannot publish the
 unsanitized source.
 
 Browserbase tools proxy an in-repo stdio sidecar backed by the pinned

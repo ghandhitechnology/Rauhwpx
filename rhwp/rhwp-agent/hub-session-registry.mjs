@@ -7,6 +7,7 @@ const CAPABILITY_GENERATION_MAX = 0xffffffffffff;
 const SCOPED_TOKEN_PREFIX = 'rhwp2';
 const MAX_ENCODED_ENVELOPE_LENGTH = 2_048;
 const MAC_BYTES = 32;
+export const MAX_HUB_SESSIONS = 64;
 
 export const HUB_CAPABILITY_AUDIENCES = Object.freeze({
   STUDIO: 'studio',
@@ -359,12 +360,17 @@ export class HubSessionRegistry {
     createRecord = createHubSessionRecord,
     createGeneration = monotonicCapabilityGeneration(),
     now = Date.now,
+    maxSessions = MAX_HUB_SESSIONS,
   } = {}) {
+    if (!Number.isSafeInteger(maxSessions) || maxSessions < 1 || maxSessions > MAX_HUB_SESSIONS) {
+      throw new TypeError(`maxSessions must be an integer from 1 to ${MAX_HUB_SESSIONS}`);
+    }
     this.records = new Map();
     this.createRecord = createRecord;
     this.createGeneration = createGeneration;
     this.lastCapabilityGeneration = null;
     this.now = now;
+    this.maxSessions = maxSessions;
   }
 
   get(sessionId) {
@@ -385,6 +391,15 @@ export class HubSessionRegistry {
     if (existing) {
       existing.lastConnectedAt = this.now();
       return existing;
+    }
+    // Refuse before invoking createRecord: the production factory creates
+    // per-session credential mirrors and directories, so a rejected request
+    // must not leave any of those resources behind.
+    if (this.records.size >= this.maxSessions) {
+      throw registryError(
+        'SESSION_LIMIT_REACHED',
+        `hub session limit of ${this.maxSessions} has been reached`,
+      );
     }
     const record = this.createRecord(normalizedSessionId);
     if (!record || typeof record !== 'object' || record.sessionId !== normalizedSessionId) {
@@ -450,7 +465,8 @@ export class HubSessionRegistry {
     const records = [...this.records.values()];
     this.records.clear();
     this.#capabilityGenerations.clear();
-    await Promise.allSettled(records.map((record) => dispose(record)));
+    const results = await Promise.allSettled(records.map(async (record) => dispose(record)));
+    return results.every((result) => result.status === 'fulfilled' && result.value === true);
   }
 
   #nextGeneration(previous) {

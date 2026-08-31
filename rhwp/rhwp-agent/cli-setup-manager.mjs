@@ -1,16 +1,30 @@
 import { constants as fsConstants, existsSync, promises as fs } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 
 import { redactDiagnosticText } from './agents/backend.mjs';
 import { readUtf8FileBounded } from './bounded-file.mjs';
-import { fetchLatestPackage, replaceFileAtomically, updatePrefixAtomically } from './harness-update.mjs';
+import {
+  fetchLatestPackage,
+  recoverInterruptedFileReplacement,
+  removeFileAndReplacementBackup,
+  replaceFileAtomically,
+  updatePrefixAtomically,
+} from './harness-update.mjs';
 import { bundledNpmLaunch } from './npm-runtime.mjs';
 import {
   cleanupStaleOAuthCredentialStaging,
+  isValidOAuthRecoveryBackupPath,
   prepareStagedOAuthCredential,
+  recoverOAuthCredentialPublication,
 } from './oauth-credential-transaction.mjs';
+import {
+  API_KEY_MAX_BYTES,
+  AUTH_CODE_MAX_BYTES,
+  textFitsByteLimit,
+} from './input-bounds.mjs';
 import { readResponseTextBounded } from './response-bounds.mjs';
 import {
   processTreeSpawnOptions,
@@ -69,6 +83,7 @@ const STRUCTURED_STDERR_LIMIT_BYTES = 64 * 1024;
 const SECRET_FILE_MAX_BYTES = 64 * 1024;
 const CONFIG_FILE_MAX_BYTES = 64 * 1024;
 const PACKAGE_MANIFEST_MAX_BYTES = 1024 * 1024;
+const OAUTH_AUTH_JOURNAL_MAX_BYTES = 16 * 1024;
 
 /**
  * 기기 인증(device auth) 코드 한 줄. URL 줄은 통째로 비교하기 때문에 절대 걸리지 않는다.
@@ -96,6 +111,40 @@ function setupError(code, message) {
   const error = new Error(message);
   error.code = code;
   return error;
+}
+
+function submittedApiKey(raw) {
+  if (typeof raw !== 'string') {
+    throw setupError('AGENT_KEY_INVALID', 'API 키를 입력해 주세요.');
+  }
+  const value = raw;
+  if (!textFitsByteLimit(value, API_KEY_MAX_BYTES)) {
+    throw setupError('AGENT_KEY_TOO_LARGE', 'API 키가 허용된 길이를 넘었어요.');
+  }
+  const trimmed = value.trim();
+  if (!trimmed) throw setupError('AGENT_KEY_INVALID', 'API 키를 입력해 주세요.');
+  return trimmed;
+}
+
+function submittedAuthCode(raw) {
+  if (typeof raw !== 'string') {
+    throw setupError('AGENT_AUTH_CODE_INVALID', '인증 코드를 입력해 주세요.');
+  }
+  const value = raw;
+  if (!textFitsByteLimit(value, AUTH_CODE_MAX_BYTES)) {
+    throw setupError('AGENT_AUTH_CODE_TOO_LARGE', '인증 코드가 허용된 길이를 넘었어요.');
+  }
+  const trimmed = value.trim();
+  if (!trimmed) throw setupError('AGENT_AUTH_CODE_INVALID', '인증 코드를 입력해 주세요.');
+  return trimmed;
+}
+
+function storedApiKey(raw) {
+  if (raw == null) return null;
+  if (!textFitsByteLimit(raw, API_KEY_MAX_BYTES) || !raw.trim()) {
+    throw setupError('SECRET_STORE_CORRUPT', '저장된 API 키가 허용된 길이 또는 형식이 아니에요.');
+  }
+  return raw.trim();
 }
 
 function throwIfAuthCancelled(signal) {
@@ -300,6 +349,7 @@ export function createCliSetupManager({
   const cancelledAuth = new Set();
   const activeProcesses = new Map();
   const processCleanupPromises = new WeakMap();
+  const processEnvironments = new WeakMap();
   const updateInfo = new Map([
     ['claude', { latestVersion: null, updateRequired: false, error: null }],
     ['codex', { latestVersion: null, updateRequired: false, error: null }],
@@ -309,6 +359,7 @@ export function createCliSetupManager({
   const npmLaunch = bundledNpmLaunch({ nodeCommand, npmCommand });
   /** 공용 prefix 를 건드리는 작업(설치·자동 업데이트)의 직렬화 큐. */
   let prefixChain = Promise.resolve();
+  let authPersistenceChain = Promise.resolve();
   let loaded = false;
   /** 에이전트별 저장 API 키 (보안 저장소에서 로드). */
   const apiKeys = { claude: null, codex: null, grok: null, cursor: null };
@@ -406,11 +457,13 @@ export function createCliSetupManager({
         : null;
       const knownSecretIds = new Set(Object.values(CLI_CONFIG).map((item) => item.secretId));
       if (!entries || entries.length > knownSecretIds.size || entries.some(
-        ([key, value]) => !knownSecretIds.has(key) || typeof value !== 'string' || !value.trim(),
+        ([key, value]) => !knownSecretIds.has(key)
+          || !textFitsByteLimit(value, API_KEY_MAX_BYTES)
+          || !value.trim(),
       )) {
         throw rememberSecretFileFailure();
       }
-      return Object.fromEntries(entries);
+      return Object.fromEntries(entries.map(([key, value]) => [key, value.trim()]));
     } catch (error) {
       if (error?.code === 'ENOENT') return {};
       if (error?.code === 'SECRET_FILE_CORRUPT') throw error;
@@ -422,30 +475,40 @@ export function createCliSetupManager({
 
   /** config.json 과 같은 방식으로 원자적으로 바꿔 쓴다. 빈 보관소는 파일째 지운다. */
   async function writeFileSecrets(secrets) {
-    const entries = Object.entries(secrets).filter(([, value]) => typeof value === 'string' && value.trim());
+    const entries = Object.entries(secrets)
+      .filter(([, value]) => typeof value === 'string' && value.trim())
+      .map(([key, value]) => [key, submittedApiKey(value)]);
     if (entries.length === 0) {
-      await fs.rm(secretsPath, { force: true }).catch(() => {});
+      await removeFileAndReplacementBackup(secretsPath, { platform });
       return;
     }
-    await fs.mkdir(rootDir, { recursive: true });
-    const temp = `${secretsPath}.tmp-${process.pid}-${Date.now()}`;
     const body = `${JSON.stringify(Object.fromEntries(entries), null, 2)}\n`;
-    await fs.writeFile(temp, body, { encoding: 'utf8', mode: 0o600 });
-    await replaceFileAtomically(temp, secretsPath, { platform });
+    if (Buffer.byteLength(body, 'utf8') > SECRET_FILE_MAX_BYTES) {
+      throw setupError('SECRET_FILE_TOO_LARGE', 'API 키 파일이 허용된 크기를 넘었어요.');
+    }
+    await fs.mkdir(rootDir, { recursive: true });
+    const temp = `${secretsPath}.tmp-${process.pid}-${randomUUID()}`;
+    try {
+      await fs.writeFile(temp, body, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+      await replaceFileAtomically(temp, secretsPath, { platform });
+    } finally {
+      await fs.rm(temp, { force: true }).catch(() => {});
+    }
   }
 
   /** vault 가 있으면 vault, 없으면 파일 보관소에 저장한다. */
   async function storeSecret(secretId, value) {
+    const boundedValue = submittedApiKey(value);
     const secrets = await readFileSecrets();
     if (secretStore?.available) {
-      await secretStore.set(secretId, value);
+      await secretStore.set(secretId, boundedValue);
       if (secretId in secrets) {
         delete secrets[secretId];
         await writeFileSecrets(secrets);
       }
       return;
     }
-    secrets[secretId] = value;
+    secrets[secretId] = boundedValue;
     await writeFileSecrets(secrets);
   }
 
@@ -469,8 +532,8 @@ export function createCliSetupManager({
         platform,
       }));
     } catch {}
-    const legacyClaudeKey = typeof raw?.claudeApiKey === 'string' && raw.claudeApiKey.trim()
-      ? raw.claudeApiKey.trim() : null;
+    let legacyClaudeKey = null;
+    try { legacyClaudeKey = storedApiKey(raw?.claudeApiKey); } catch {}
     config.claudeAuthMethod = readAuthMethod(raw, 'claudeAuthMethod');
     config.codexAuthMethod = readAuthMethod(raw, 'codexAuthMethod');
     config.codexKeyTail = typeof raw?.codexKeyTail === 'string' ? raw.codexKeyTail : null;
@@ -488,7 +551,8 @@ export function createCliSetupManager({
     try {
       if (secretStore?.available) {
         const values = await Promise.all(agents.map((agent) => secretStore.get(CLI_CONFIG[agent].secretId)));
-        agents.forEach((agent, index) => { apiKeys[agent] = values[index]; });
+        const boundedValues = values.map(storedApiKey);
+        agents.forEach((agent, index) => { apiKeys[agent] = boundedValues[index]; });
         // 파일에 남은 키는 vault 로 옮기고 파일에서 지운다 (legacy claudeApiKey 이관과 같은 규칙).
         let migrated = false;
         if (!secretFileFailure) {
@@ -498,7 +562,7 @@ export function createCliSetupManager({
             if (!stored) continue;
             if (!apiKeys[agent]) {
               await secretStore.set(secretId, stored);
-              apiKeys[agent] = await secretStore.get(secretId);
+              apiKeys[agent] = storedApiKey(await secretStore.get(secretId));
               // 이관이 확인되지 않으면 파일 사본을 남겨 둔다.
               if (apiKeys[agent] !== stored) continue;
             }
@@ -525,10 +589,205 @@ export function createCliSetupManager({
   }
 
   async function persist() {
-    await fs.mkdir(rootDir, { recursive: true });
-    const temp = `${configPath}.tmp-${process.pid}-${Date.now()}`;
-    await fs.writeFile(temp, `${JSON.stringify(config, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
-    await replaceConfigFile(temp, configPath, { platform });
+    await writePrivateFileAtomically(
+      configPath,
+      `${JSON.stringify(config, null, 2)}\n`,
+      replaceConfigFile,
+    );
+  }
+
+  async function writePrivateFileAtomically(target, body, replaceFile = replaceFileAtomically) {
+    await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+    const temp = `${target}.tmp-${process.pid}-${randomUUID()}`;
+    let handle = null;
+    try {
+      handle = await fs.open(temp, 'wx', 0o600);
+      await handle.writeFile(body, 'utf8');
+      await handle.sync();
+      await handle.close();
+      handle = null;
+      await replaceFile(temp, target, { platform });
+    } finally {
+      await handle?.close().catch(() => {});
+      await fs.rm(temp, { force: true }).catch(() => {});
+    }
+  }
+
+  function oauthJournalPath(agent) {
+    return path.join(rootDir, `oauth-auth-${agent}.journal.json`);
+  }
+
+  function oauthJournalError(message) {
+    return setupError('AGENT_AUTH_RECOVERY_REQUIRED', message);
+  }
+
+  async function writeOAuthJournal(agent, previous, credential, phase = 'ready') {
+    const journal = {
+      version: 1,
+      agent,
+      phase,
+      previousAuthMethod: previous.authMethod ?? null,
+      previousKeyTail: previous.keyTail ?? null,
+      credential,
+    };
+    const body = `${JSON.stringify(journal, null, 2)}\n`;
+    if (Buffer.byteLength(body) > OAUTH_AUTH_JOURNAL_MAX_BYTES) {
+      throw oauthJournalError('OAuth authentication recovery metadata is too large.');
+    }
+    await writePrivateFileAtomically(oauthJournalPath(agent), body);
+    return journal;
+  }
+
+  async function removeOAuthJournal(agent) {
+    await removeFileAndReplacementBackup(oauthJournalPath(agent), { platform });
+  }
+
+  async function expectedOAuthCredentialPath(agent) {
+    if (agent === 'codex') return codexCredentialFile();
+    if (agent === 'claude') return claudeCredentialFile;
+    if (agent === 'cursor' && platform === 'win32') {
+      return platformPath.join(cursorSourceDir, 'cli-config.json');
+    }
+    return managedOAuthCredentialPath(agent);
+  }
+
+  function validateOAuthJournal(raw, expectedAgent) {
+    const keys = raw && typeof raw === 'object' && !Array.isArray(raw)
+      ? Object.keys(raw).sort()
+      : [];
+    const credential = raw?.credential;
+    const credentialKeys = credential && typeof credential === 'object' && !Array.isArray(credential)
+      ? Object.keys(credential).sort()
+      : [];
+    const digestPattern = /^[0-9a-f]{64}$/;
+    if (
+      keys.join(',') !== 'agent,credential,phase,previousAuthMethod,previousKeyTail,version'
+      || raw.version !== 1
+      || raw.agent !== expectedAgent
+      || (raw.phase !== 'login' && raw.phase !== 'ready')
+      || ![null, 'api-key', 'oauth'].includes(raw.previousAuthMethod)
+      || !(raw.previousKeyTail === null
+        || (typeof raw.previousKeyTail === 'string' && raw.previousKeyTail.length <= 16))
+      || credentialKeys.join(',') !== 'backupFile,initialDigest,initialState,publishedDigest,sourceFile,version'
+      || credential.version !== 1
+      || typeof credential.sourceFile !== 'string'
+      || !credential.sourceFile
+      || !['absent', 'file'].includes(credential.initialState)
+      || (credential.initialState === 'absent' && credential.initialDigest !== null)
+      || (credential.initialState === 'file' && !digestPattern.test(credential.initialDigest))
+      || !(digestPattern.test(credential.publishedDigest)
+        || (raw.phase === 'login' && credential.publishedDigest === null))
+      || (credential.initialState === 'absent' && credential.backupFile !== null)
+      || (credential.initialState === 'file'
+        && !isValidOAuthRecoveryBackupPath(
+          credential.sourceFile,
+          credential.backupFile,
+          platform,
+        ))
+    ) {
+      throw oauthJournalError('OAuth authentication recovery metadata is invalid.');
+    }
+    return raw;
+  }
+
+  async function readConfigForOAuthRecovery() {
+    try {
+      const text = await readUtf8FileBounded(configPath, {
+        maxBytes: CONFIG_FILE_MAX_BYTES,
+        label: 'CLI setup config recovery',
+        platform,
+      });
+      const raw = JSON.parse(text);
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('config is not an object');
+      return raw;
+    } catch (error) {
+      if (error?.code === 'ENOENT') return {};
+      throw oauthJournalError('CLI authentication config could not be read during recovery.');
+    }
+  }
+
+  async function persistRecoveredConfig(raw) {
+    const body = `${JSON.stringify(raw, null, 2)}\n`;
+    if (Buffer.byteLength(body) > CONFIG_FILE_MAX_BYTES) {
+      throw oauthJournalError('Recovered CLI authentication config exceeds its size limit.');
+    }
+    await writePrivateFileAtomically(configPath, body, replaceConfigFile);
+  }
+
+  async function recoverOAuthJournal(agent) {
+    const journalPath = oauthJournalPath(agent);
+    await recoverInterruptedFileReplacement(journalPath, { platform });
+    let raw;
+    try {
+      raw = JSON.parse(await readUtf8FileBounded(journalPath, {
+        maxBytes: OAUTH_AUTH_JOURNAL_MAX_BYTES,
+        label: `${agent} OAuth authentication recovery journal`,
+        platform,
+      }));
+    } catch (error) {
+      if (error?.code === 'ENOENT') return false;
+      throw oauthJournalError('OAuth authentication recovery journal could not be read.');
+    }
+    const journal = validateOAuthJournal(raw, agent);
+    const expectedSource = await expectedOAuthCredentialPath(agent);
+    if (
+      typeof expectedSource !== 'string'
+      || platformPath.resolve(journal.credential.sourceFile) !== platformPath.resolve(expectedSource)
+    ) {
+      throw oauthJournalError('OAuth authentication recovery journal names an unexpected credential file.');
+    }
+
+    const recoveredConfig = await readConfigForOAuthRecovery();
+    const methodKey = `${agent}AuthMethod`;
+    const tailKey = `${agent}KeyTail`;
+    if (journal.phase === 'login') {
+      if (!managedOAuthCredentialPath(agent)) {
+        throw oauthJournalError('OAuth login-phase recovery is not valid for this provider.');
+      }
+      const current = await snapshotManagedOAuthCredential(agent);
+      await recoverOAuthCredentialPublication({
+        ...journal.credential,
+        publishedDigest: current?.existed ? oauthDigest(current.bytes) : '0'.repeat(64),
+      }, { commit: false, platform });
+      recoveredConfig[methodKey] = journal.previousAuthMethod;
+      if (agent !== 'claude') recoveredConfig[tailKey] = journal.previousKeyTail;
+      await persistRecoveredConfig(recoveredConfig);
+      await removeOAuthJournal(agent);
+      return true;
+    }
+    const configSaysOAuth = recoveredConfig[methodKey] === 'oauth'
+      && (agent === 'claude' || recoveredConfig[tailKey] == null);
+    let committed = false;
+    if (configSaysOAuth) {
+      try {
+        await recoverOAuthCredentialPublication(journal.credential, { commit: true, platform });
+        committed = true;
+      } catch (error) {
+        if (journal.previousAuthMethod !== 'oauth') throw error;
+        await recoverOAuthCredentialPublication(journal.credential, { commit: false, platform });
+      }
+    } else {
+      await recoverOAuthCredentialPublication(journal.credential, { commit: false, platform });
+    }
+
+    if (committed) {
+      recoveredConfig[methodKey] = 'oauth';
+      if (agent !== 'claude') recoveredConfig[tailKey] = null;
+      await persistRecoveredConfig(recoveredConfig);
+      await deleteSecret(CLI_CONFIG[agent].secretId);
+    } else {
+      recoveredConfig[methodKey] = journal.previousAuthMethod;
+      if (agent !== 'claude') recoveredConfig[tailKey] = journal.previousKeyTail;
+      await persistRecoveredConfig(recoveredConfig);
+    }
+    await removeOAuthJournal(agent);
+    return true;
+  }
+
+  function serializeAuthPersistence(operation) {
+    const result = authPersistenceChain.then(operation, operation);
+    authPersistenceChain = result.then(() => undefined, () => undefined);
+    return result;
   }
 
   /** Cursor version probe with config writes redirected away from the live config. */
@@ -650,13 +909,14 @@ export function createCliSetupManager({
         finish(error);
         return;
       }
+      processEnvironments.set(proc, env);
       if (operationKey) activeProcesses.set(operationKey, proc);
       const cleanupProcess = () => {
         const current = processCleanupPromises.get(proc);
         if (current) return current;
         const cleanup = terminateAndWaitForProcessTreeExit(proc, {
           terminateProcess: terminateProcessTreeImpl,
-          terminateOptions: { platform, spawnProcess },
+          terminateOptions: { platform, spawnProcess, env },
         }).catch(() => false);
         processCleanupPromises.set(proc, cleanup);
         return cleanup;
@@ -1231,7 +1491,7 @@ export function createCliSetupManager({
   async function restoreManagedOAuthCredential(snapshot) {
     if (!snapshot) return;
     if (!snapshot.existed) {
-      await fs.rm(snapshot.file, { force: true }).catch(() => {});
+      await removeFileAndReplacementBackup(snapshot.file, { platform });
       return;
     }
     await fs.mkdir(path.dirname(snapshot.file), { recursive: true });
@@ -1244,105 +1504,227 @@ export function createCliSetupManager({
     }
   }
 
-  async function commitApiKey(agent, item, value, signal, onCommitted) {
-    const authMethodKey = `${agent}AuthMethod`;
-    const keyTailKey = `${agent}KeyTail`;
-    const previous = authStateSnapshot(agent);
-    let commitStarted = false;
-    try {
-      throwIfAuthCancelled(signal);
-      // Corrupt fallback storage is a precondition failure, not a partial commit.
-      await readFileSecrets();
-      throwIfAuthCancelled(signal);
-      commitStarted = true;
-      await storeSecret(item.secretId, value);
-      throwIfAuthCancelled(signal);
-
-      // These assignments are synchronous, so one fence immediately before the block
-      // covers the complete in-memory commit.
-      apiKeys[agent] = value;
-      secretStoreError = null;
-      config[authMethodKey] = 'api-key';
-      // claude 는 기존 설정 파일 스키마를 유지한다 — keyTail 을 저장하지 않는다.
-      if (agent !== 'claude') config[keyTailKey] = keyTail(value);
-      if (agent === 'cursor') resetCursorModelsCache();
-
-      throwIfAuthCancelled(signal);
-      await persist();
-      throwIfAuthCancelled(signal);
-      onCommitted?.();
-    } catch (error) {
-      if (!commitStarted) throw error;
-      // A vault or config write may already have completed. Until onCommitted returns,
-      // every failure restores both persistence and the live provider environment.
-      const rollbackErrors = [];
-      restoreAuthMemory(agent, previous);
-      try { await restoreAuthSecret(item, previous); } catch (rollbackError) {
-        rollbackErrors.push(rollbackError);
-      }
-      try { await persist(); } catch (rollbackError) { rollbackErrors.push(rollbackError); }
-      if (rollbackErrors.length > 0) {
-        throw authRollbackError(
-          error,
-          new AggregateError(rollbackErrors, 'One or more credential rollback steps failed.'),
-        );
-      }
-      throw error;
-    }
+  function oauthDigest(bytes) {
+    return createHash('sha256').update(bytes).digest('hex');
   }
 
-  async function commitOAuth(agent, item, previous, signal, onCommitted, credentialTransaction = null) {
-    let commitStarted = false;
+  async function prepareDirectOAuthRecovery(agent, previous, snapshot) {
+    if (!snapshot) return null;
+    const backupFile = snapshot.existed
+      ? `${snapshot.file}.oauth-${process.pid}-${randomUUID()}.held`
+      : null;
+    const recovery = {
+      version: 1,
+      sourceFile: snapshot.file,
+      initialState: snapshot.existed ? 'file' : 'absent',
+      initialDigest: snapshot.existed ? oauthDigest(snapshot.bytes) : null,
+      publishedDigest: null,
+      backupFile,
+    };
     try {
-      throwIfAuthCancelled(signal);
-      // Check this before publishing the staged host credential. Otherwise a
-      // corrupt fallback store would force a rollback after host publication.
-      await readFileSecrets();
-      throwIfAuthCancelled(signal);
-      await credentialTransaction?.publish();
-      throwIfAuthCancelled(signal);
-      commitStarted = true;
-      await deleteSecret(item.secretId);
-      throwIfAuthCancelled(signal);
-
-      apiKeys[agent] = null;
-      secretStoreError = null;
-      config[`${agent}AuthMethod`] = 'oauth';
-      if (agent !== 'claude') config[`${agent}KeyTail`] = null;
-      if (agent === 'cursor') resetCursorModelsCache();
-
-      throwIfAuthCancelled(signal);
-      await persist();
-      throwIfAuthCancelled(signal);
-      await credentialTransaction?.cleanup();
-      throwIfAuthCancelled(signal);
-      onCommitted?.();
-      // onCommitted is the synchronous registry boundary: once it returns,
-      // later cancellation must not undo the published host credential.
-      credentialTransaction?.markCommitted();
+      await writeOAuthJournal(agent, previous, recovery, 'login');
+      if (backupFile) {
+        let handle = null;
+        try {
+          handle = await fs.open(backupFile, 'wx', 0o600);
+          await handle.writeFile(snapshot.bytes);
+          await handle.sync();
+        } finally {
+          await handle?.close().catch(() => {});
+        }
+      }
     } catch (error) {
-      const rollbackErrors = [];
-      if (commitStarted) {
+      if (backupFile) await fs.rm(backupFile, { force: true }).catch(() => {});
+      await removeOAuthJournal(agent).catch(() => {});
+      throw error;
+    }
+    return { previous, recovery };
+  }
+
+  async function markDirectOAuthRecoveryReady(agent, state) {
+    const published = await snapshotManagedOAuthCredential(agent);
+    if (!published?.existed) {
+      await finishDirectOAuthRollback(agent, state);
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(published.bytes.toString('utf8'));
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('invalid object');
+    } catch {
+      throw setupError('AGENT_AUTH_CREDENTIAL_INVALID', 'OAuth login created an invalid credential file.');
+    }
+    state.recovery.publishedDigest = oauthDigest(published.bytes);
+    await writeOAuthJournal(agent, state.previous, state.recovery, 'ready');
+    return state;
+  }
+
+  async function finishDirectOAuthRollback(agent, state) {
+    if (!state) return;
+    await recoverOAuthCredentialPublication({
+      ...state.recovery,
+      publishedDigest: state.recovery.publishedDigest ?? '0'.repeat(64),
+    }, { commit: false, platform });
+    await removeOAuthJournal(agent);
+  }
+
+  async function commitApiKey(agent, item, value, signal, onCommitted) {
+    return serializeAuthPersistence(async () => {
+      const authMethodKey = `${agent}AuthMethod`;
+      const keyTailKey = `${agent}KeyTail`;
+      const previous = authStateSnapshot(agent);
+      let commitStarted = false;
+      try {
+        throwIfAuthCancelled(signal);
+        // Corrupt fallback storage is a precondition failure, not a partial commit.
+        await readFileSecrets();
+        throwIfAuthCancelled(signal);
+        commitStarted = true;
+        await storeSecret(item.secretId, value);
+        throwIfAuthCancelled(signal);
+
+        // These assignments are synchronous, so one fence immediately before the block
+        // covers the complete in-memory commit.
+        apiKeys[agent] = value;
+        secretStoreError = null;
+        config[authMethodKey] = 'api-key';
+        // claude 는 기존 설정 파일 스키마를 유지한다 — keyTail 을 저장하지 않는다.
+        if (agent !== 'claude') config[keyTailKey] = keyTail(value);
+        if (agent === 'cursor') resetCursorModelsCache();
+
+        throwIfAuthCancelled(signal);
+        await persist();
+        throwIfAuthCancelled(signal);
+        onCommitted?.();
+      } catch (error) {
+        if (!commitStarted) throw error;
+        // A vault or config write may already have completed. Until onCommitted returns,
+        // every failure restores both persistence and the live provider environment.
+        const rollbackErrors = [];
         restoreAuthMemory(agent, previous);
         try { await restoreAuthSecret(item, previous); } catch (rollbackError) {
           rollbackErrors.push(rollbackError);
         }
         try { await persist(); } catch (rollbackError) { rollbackErrors.push(rollbackError); }
+        if (rollbackErrors.length > 0) {
+          throw authRollbackError(
+            error,
+            new AggregateError(rollbackErrors, 'One or more credential rollback steps failed.'),
+          );
+        }
+        throw error;
       }
-      try { await credentialTransaction?.rollback(); } catch (rollbackError) {
-        rollbackErrors.push(rollbackError);
+    });
+  }
+
+  async function commitOAuth(
+    agent,
+    item,
+    signal,
+    onCommitted,
+    credentialTransaction = null,
+    directCredentialRecovery = null,
+  ) {
+    return serializeAuthPersistence(async () => {
+      const previous = authStateSnapshot(agent);
+      let commitStarted = false;
+      let journalWritten = false;
+      let credentialCommitted = false;
+      try {
+        throwIfAuthCancelled(signal);
+        // Check this before publishing the staged host credential. Otherwise a
+        // corrupt fallback store would force a rollback after host publication.
+        await readFileSecrets();
+        throwIfAuthCancelled(signal);
+        const credentialRecovery = directCredentialRecovery
+          ?? await credentialTransaction?.prepareRecovery?.();
+        if (directCredentialRecovery) {
+          journalWritten = true;
+        } else if (credentialRecovery) {
+          await writeOAuthJournal(agent, previous, credentialRecovery);
+          journalWritten = true;
+        }
+        throwIfAuthCancelled(signal);
+        await credentialTransaction?.publish();
+        throwIfAuthCancelled(signal);
+        commitStarted = true;
+
+        apiKeys[agent] = null;
+        secretStoreError = null;
+        config[`${agent}AuthMethod`] = 'oauth';
+        if (agent !== 'claude') config[`${agent}KeyTail`] = null;
+        if (agent === 'cursor') resetCursorModelsCache();
+
+        // Config is the durable commit marker. Keep the API secret until that
+        // marker exists, so a crash before it can restore the old credential
+        // without storing the API key in the journal.
+        throwIfAuthCancelled(signal);
+        await persist();
+        throwIfAuthCancelled(signal);
+        await deleteSecret(item.secretId);
+        throwIfAuthCancelled(signal);
+        await credentialTransaction?.cleanup();
+        throwIfAuthCancelled(signal);
+        onCommitted?.();
+        // onCommitted is the synchronous registry boundary: once it returns,
+        // later cancellation must not undo the published host credential.
+        credentialCommitted = true;
+        if (credentialTransaction?.finalizeCommit) {
+          await credentialTransaction.finalizeCommit();
+        } else if (directCredentialRecovery) {
+          await recoverOAuthCredentialPublication(directCredentialRecovery, {
+            commit: true,
+            platform,
+          });
+        } else {
+          credentialTransaction?.markCommitted();
+        }
+        if (journalWritten) {
+          await removeOAuthJournal(agent);
+          journalWritten = false;
+        }
+      } catch (error) {
+        if (credentialCommitted) throw error;
+        const rollbackErrors = [];
+        if (commitStarted) {
+          restoreAuthMemory(agent, previous);
+          try { await restoreAuthSecret(item, previous); } catch (rollbackError) {
+            rollbackErrors.push(rollbackError);
+          }
+          try { await persist(); } catch (rollbackError) { rollbackErrors.push(rollbackError); }
+        }
+        try { await credentialTransaction?.rollback(); } catch (rollbackError) {
+          rollbackErrors.push(rollbackError);
+        }
+        if (directCredentialRecovery) {
+          try {
+            await recoverOAuthCredentialPublication(directCredentialRecovery, {
+              commit: false,
+              platform,
+            });
+          } catch (rollbackError) {
+            rollbackErrors.push(rollbackError);
+          }
+        }
+        try { await credentialTransaction?.cleanup(); } catch (rollbackError) {
+          rollbackErrors.push(rollbackError);
+        }
+        if (journalWritten && rollbackErrors.length === 0) {
+          try {
+            await removeOAuthJournal(agent);
+            journalWritten = false;
+          } catch (rollbackError) {
+            rollbackErrors.push(rollbackError);
+          }
+        }
+        if (rollbackErrors.length > 0) {
+          throw authRollbackError(
+            error,
+            new AggregateError(rollbackErrors, 'One or more credential rollback steps failed.'),
+          );
+        }
+        throw error;
       }
-      try { await credentialTransaction?.cleanup(); } catch (rollbackError) {
-        rollbackErrors.push(rollbackError);
-      }
-      if (rollbackErrors.length > 0) {
-        throw authRollbackError(
-          error,
-          new AggregateError(rollbackErrors, 'One or more credential rollback steps failed.'),
-        );
-      }
-      throw error;
-    }
+    });
   }
 
   /**
@@ -1356,6 +1738,9 @@ export function createCliSetupManager({
     const item = assertAgent(agent);
     throwIfAuthCancelled(signal);
     if (authRuns.has(agent)) throw setupError('AGENT_AUTH_BUSY', '이미 로그인 작업이 진행 중이에요.');
+    // Reject oversized credentials before load() can migrate or rewrite any
+    // persisted state, and before a provider request can build a huge header.
+    const apiKeyValue = method === 'api-key' ? submittedApiKey(key) : null;
     // 지난 로그인에서 남은 취소 표시는 이번 시도와 무관하다 — 진짜 실패를 취소로
     // 둔갑시키지 않도록 시작할 때 지운다.
     cancelledAuth.delete(agent);
@@ -1375,18 +1760,16 @@ export function createCliSetupManager({
       const command = managedVersion ? binPath(agent) : item.bin;
       onProgress?.({ state: 'authorizing' });
       if (method === 'api-key') {
-        const value = String(key ?? '').trim();
-        if (!value) throw setupError('AGENT_KEY_INVALID', 'API 키를 입력해 주세요.');
-        await verifyApiKey(agent, value, { signal });
-        await commitApiKey(agent, item, value, signal, onCommitted);
+        await verifyApiKey(agent, apiKeyValue, { signal });
+        await commitApiKey(agent, item, apiKeyValue, signal, onCommitted);
         onProgress?.({ state: 'done' });
         return status(agent);
       }
       if (method !== 'oauth') throw setupError('AGENT_AUTH_INVALID', '지원하지 않는 로그인 방식이에요.');
       throwIfAuthCancelled(signal);
-      const previous = authStateSnapshot(agent);
       let credentialSnapshot = null;
       let credentialTransaction = null;
+      let directOAuthRecoveryState = null;
       let credentialCommitAttempted = false;
       let buffered = '';
       let oauthCommitted = false;
@@ -1413,6 +1796,11 @@ export function createCliSetupManager({
           });
         } else {
           credentialSnapshot = await snapshotManagedOAuthCredential(agent);
+          directOAuthRecoveryState = await prepareDirectOAuthRecovery(
+            agent,
+            authStateSnapshot(agent),
+            credentialSnapshot,
+          );
         }
         throwIfAuthCancelled(signal);
         const loginEnv = (env) => {
@@ -1497,8 +1885,21 @@ export function createCliSetupManager({
         // 성공으로 끝난 실행이 취소 표시를 남기면 다음 실패가 취소로 보고된다.
         cancelledAuth.delete(agent);
         throwIfAuthCancelled(signal);
+        if (directOAuthRecoveryState) {
+          directOAuthRecoveryState = await markDirectOAuthRecoveryReady(
+            agent,
+            directOAuthRecoveryState,
+          );
+        }
         credentialCommitAttempted = true;
-        await commitOAuth(agent, item, previous, signal, onCommitted, credentialTransaction);
+        await commitOAuth(
+          agent,
+          item,
+          signal,
+          onCommitted,
+          credentialTransaction,
+          directOAuthRecoveryState?.recovery ?? null,
+        );
         oauthCommitted = true;
         onProgress?.({ state: 'done' });
         return status(agent);
@@ -1510,6 +1911,7 @@ export function createCliSetupManager({
               await credentialTransaction.cleanup();
             } else if (!credentialTransaction) {
               await restoreManagedOAuthCredential(credentialSnapshot);
+              await finishDirectOAuthRollback(agent, directOAuthRecoveryState);
             }
           } catch (rollbackError) {
             throw authRollbackError(error, rollbackError);
@@ -1528,8 +1930,7 @@ export function createCliSetupManager({
 
   async function submitAuthCode(agent, code) {
     assertAgent(agent);
-    const value = String(code ?? '').trim();
-    if (!value) throw setupError('AGENT_AUTH_CODE_INVALID', '인증 코드를 입력해 주세요.');
+    const value = submittedAuthCode(code);
     const proc = activeProcesses.get(`auth:${agent}`);
     if (!proc || !authRuns.has(agent)) {
       throw setupError('AGENT_AUTH_NOT_RUNNING', '진행 중인 로그인이 없어요. 브라우저 로그인부터 다시 시작해 주세요.');
@@ -1600,6 +2001,12 @@ export function createCliSetupManager({
     cursorModels,
     async init() {
       await fs.mkdir(rootDir, { recursive: true }).catch(() => {});
+      await recoverInterruptedFileReplacement(configPath, { platform });
+      await recoverInterruptedFileReplacement(secretsPath, { platform });
+      await recoverInterruptedFileReplacement(path.join(grokHomeDir, 'auth.json'), { platform });
+      for (const agent of Object.keys(CLI_CONFIG)) {
+        await recoverOAuthJournal(agent);
+      }
       // A hard crash cannot run the transaction finally path. Reap only
       // expired profiles whose recorded owner process is no longer alive.
       const stagingDirs = [codexOAuthStagingDir];
@@ -1626,7 +2033,11 @@ export function createCliSetupManager({
         if (!cleanup) {
           cleanup = terminateAndWaitForProcessTreeExit(proc, {
             terminateProcess: terminateProcessTreeImpl,
-            terminateOptions: { platform, spawnProcess },
+            terminateOptions: {
+              platform,
+              spawnProcess,
+              env: processEnvironments.get(proc) ?? baseEnv,
+            },
           }).catch(() => false);
           processCleanupPromises.set(proc, cleanup);
         }

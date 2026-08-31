@@ -36,6 +36,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@v5
@@ -59,6 +61,11 @@ jobs:
         with:
           toolchain: 1.93.1
           targets: wasm32-unknown-unknown
+
+      - name: Verify native Windows atomic replacement
+        if: matrix.platform == 'windows'
+        working-directory: rhwp
+        run: cargo test --locked --bin rhwp atomic_file::tests -- --nocapture
 
       - name: Install wasm-pack
         run: cargo install wasm-pack --version 0.15.0 --locked

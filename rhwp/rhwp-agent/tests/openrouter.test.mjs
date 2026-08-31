@@ -207,6 +207,39 @@ test('catalog rejects an oversized disk cache before reading it into memory', as
   await fs.rm(rootDir, { recursive: true, force: true });
 });
 
+test('catalog ignores a symlinked disk cache', async (t) => {
+  const rootDir = await tmpRoot();
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const outside = path.join(rootDir, 'outside-cache.json');
+  const cachePath = path.join(rootDir, 'models-cache.json');
+  await fs.writeFile(outside, `${JSON.stringify({
+    models: [{ id: 'untrusted/model' }],
+    fetchedAt: Date.now(),
+  })}\n`);
+  try {
+    await fs.symlink(outside, cachePath);
+  } catch (error) {
+    if (process.platform === 'win32' && ['EACCES', 'EPERM'].includes(error?.code)) {
+      t.skip('This Windows host does not permit unprivileged symlink creation');
+      return;
+    }
+    throw error;
+  }
+
+  let hits = 0;
+  const client = createOpenRouter({
+    cacheDir: rootDir,
+    fetchImpl: async () => {
+      hits += 1;
+      return jsonResponse(200, CATALOG_FIXTURE);
+    },
+  });
+  const models = await client.catalog();
+
+  assert.equal(hits, 1);
+  assert.equal(models.some((model) => model.id === 'untrusted/model'), false);
+});
+
 test('concurrent catalog calls share one request', async () => {
   let hits = 0;
   const client = createOpenRouter({

@@ -1,7 +1,12 @@
+import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
 import { readUtf8FileBounded } from './bounded-file.mjs';
+import {
+  recoverInterruptedFileReplacement,
+  replaceFileAtomically,
+} from './harness-update.mjs';
 import { readResponseTextBounded } from './response-bounds.mjs';
 
 export const CLIPROXY_FILE = 'cliproxy.json';
@@ -11,6 +16,8 @@ const FETCH_TIMEOUT_MS = 8_000;
 const QUOTA_CACHE_MS = 60_000;
 const RESPONSE_LIMIT_BYTES = 8 * 1024 * 1024;
 const CONFIG_FILE_MAX_BYTES = 64 * 1024;
+export const MAX_CLIPROXY_URL_CHARS = 2_048;
+export const MAX_CLIPROXY_KEY_CHARS = 8_192;
 const CLAUDE_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
 const CODEX_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage';
 
@@ -40,6 +47,11 @@ export function normalizeCliproxyUrl(value) {
     error.code = 'INVALID_CLIPROXY_URL';
     throw error;
   }
+  if (raw.length > MAX_CLIPROXY_URL_CHARS) {
+    const error = new Error('CLIProxyAPI 주소가 너무 길어요');
+    error.code = 'INVALID_CLIPROXY_URL';
+    throw error;
+  }
   let parsed;
   try {
     parsed = new URL(raw.includes('://') ? raw : `http://${raw}`);
@@ -66,9 +78,21 @@ export function normalizeCliproxyUrl(value) {
   return href;
 }
 
+function normalizeCliproxyKey(value, { required = true } = {}) {
+  const key = String(value ?? '').trim();
+  if ((required && !key) || key.length > MAX_CLIPROXY_KEY_CHARS) {
+    const error = new Error(key ? '관리 키가 너무 길어요' : '관리 키가 필요해요');
+    error.code = 'INVALID_CLIPROXY_KEY';
+    throw error;
+  }
+  return key;
+}
+
 export function cliproxyConfigFromEnv(env = process.env) {
   const url = typeof env.RHWP_CLIPROXY_URL === 'string' ? env.RHWP_CLIPROXY_URL.trim() : '';
-  const key = typeof env.RHWP_CLIPROXY_KEY === 'string' ? env.RHWP_CLIPROXY_KEY.trim() : '';
+  const key = typeof env.RHWP_CLIPROXY_KEY === 'string'
+    ? normalizeCliproxyKey(env.RHWP_CLIPROXY_KEY, { required: false })
+    : '';
   if (!url && !key) return null;
   return {
     url: url ? normalizeCliproxyUrl(url) : DEFAULT_CLIPROXY_URL,
@@ -84,7 +108,9 @@ function readConfigObject(raw) {
     return { url: DEFAULT_CLIPROXY_URL, key: '', enabled: false, source: 'file' };
   }
   const url = typeof raw.url === 'string' ? raw.url.trim() : '';
-  const key = typeof raw.key === 'string' ? raw.key.trim() : '';
+  const key = typeof raw.key === 'string'
+    ? normalizeCliproxyKey(raw.key, { required: false })
+    : '';
   if (!url || !key) return null;
   return {
     url: normalizeCliproxyUrl(url),
@@ -305,13 +331,16 @@ function httpErrorMessage(status, bodyText) {
 /**
  * CLIProxyAPI 관리 API 로 공식 요금제 사용량(5시간·주간 %)을 가져온다.
  *
- * @param {{ rootDir: string, now?: () => number, fetchImpl?: typeof fetch, env?: NodeJS.ProcessEnv }} opts
+ * @param {{ rootDir: string, now?: () => number, fetchImpl?: typeof fetch,
+ *           env?: NodeJS.ProcessEnv, platform?: NodeJS.Platform }} opts
  */
 export function createCliproxyClient({
   rootDir,
   now = Date.now,
   fetchImpl = globalThis.fetch,
   env = process.env,
+  platform = process.platform,
+  replaceFile = replaceFileAtomically,
 } = {}) {
   if (!rootDir) throw new Error('cliproxy rootDir is required');
   const configPath = path.join(rootDir, CLIPROXY_FILE);
@@ -324,17 +353,30 @@ export function createCliproxyClient({
   let inFlight = null;
 
   async function writeAtomic(file, text) {
-    const temp = `${file}.tmp-${process.pid}-${now()}`;
-    await fs.writeFile(temp, text, { encoding: 'utf8', mode: 0o600 });
-    await fs.rename(temp, file);
+    const temp = `${file}.tmp-${process.pid}-${randomUUID()}`;
+    try {
+      await fs.writeFile(temp, text, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+      await replaceFile(temp, file, { platform });
+    } finally {
+      await fs.rm(temp, { force: true }).catch(() => {});
+    }
   }
 
-  function persist(next) {
-    writeChain = writeChain.then(async () => {
-      await fs.mkdir(rootDir, { recursive: true });
-      await writeAtomic(configPath, `${JSON.stringify(next, null, 2)}\n`);
-    });
-    return writeChain;
+  async function persist(next) {
+    const body = `${JSON.stringify(next, null, 2)}\n`;
+    if (Buffer.byteLength(body) > CONFIG_FILE_MAX_BYTES) {
+      const error = new Error('CLIProxyAPI 설정이 저장 한도를 초과해요');
+      error.code = 'CLIPROXY_CONFIG_TOO_LARGE';
+      throw error;
+    }
+    await fs.mkdir(rootDir, { recursive: true });
+    await writeAtomic(configPath, body);
+  }
+
+  function mutate(operation) {
+    const result = writeChain.then(operation, operation);
+    writeChain = result.then(() => undefined, () => undefined);
+    return result;
   }
 
   async function request(configRef, method, pathname, body) {
@@ -518,6 +560,7 @@ export function createCliproxyClient({
 
     async init() {
       await fs.mkdir(rootDir, { recursive: true });
+      await recoverInterruptedFileReplacement(configPath, { platform });
       try {
         config = readConfigObject(JSON.parse(await readUtf8FileBounded(configPath, {
           maxBytes: CONFIG_FILE_MAX_BYTES,
@@ -550,32 +593,33 @@ export function createCliproxyClient({
     async connect({ url, key } = {}) {
       const next = {
         url: normalizeCliproxyUrl(url || DEFAULT_CLIPROXY_URL),
-        key: String(key ?? '').trim(),
+        key: normalizeCliproxyKey(key),
         enabled: true,
         source: 'file',
       };
-      if (!next.key) {
-        const error = new Error('관리 키가 필요해요');
-        error.code = 'INVALID_CLIPROXY_KEY';
-        throw error;
-      }
-      const status = await fetchQuota(next);
-      config = next;
-      cache = { status, fetchedAt: now() };
-      await persist({ url: next.url, key: next.key, enabled: true });
-      return status;
+      return mutate(async () => {
+        const status = await fetchQuota(next);
+        await persist({ url: next.url, key: next.key, enabled: true });
+        config = next;
+        cache = { status, fetchedAt: now() };
+        return status;
+      });
     },
 
     async disconnect() {
-      config = { url: DEFAULT_CLIPROXY_URL, key: '', enabled: false, source: 'file' };
-      cache = { status: emptyCliproxyStatus(), fetchedAt: now() };
-      await persist({ url: DEFAULT_CLIPROXY_URL, key: '', enabled: false });
-      return cache.status;
+      return mutate(async () => {
+        const next = { url: DEFAULT_CLIPROXY_URL, key: '', enabled: false, source: 'file' };
+        const status = emptyCliproxyStatus();
+        await persist({ url: next.url, key: next.key, enabled: false });
+        config = next;
+        cache = { status, fetchedAt: now() };
+        return status;
+      });
     },
 
     refresh(force = false) {
       if (inFlight) return inFlight;
-      inFlight = refreshLocked(force).finally(() => {
+      inFlight = mutate(() => refreshLocked(force)).finally(() => {
         inFlight = null;
       });
       return inFlight;

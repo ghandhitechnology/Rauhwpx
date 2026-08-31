@@ -17,6 +17,18 @@ test('external picture files use the shared 64 MiB pre-allocation guard', () => 
     assert.match(code, /readBlobBytesWithLimit\(file, INSERTED_IMAGE_MAX_BYTES/);
     assert.doesNotMatch(code, /file\.arrayBuffer\(\)/);
   }
+
+  const main = source('../src/main.ts');
+  const dropStart = main.indexOf('if (isImage) {');
+  const dropEnd = main.indexOf('// HWP/HWPX/HML/RHWPX', dropStart);
+  assert.notEqual(dropStart, -1);
+  assert.ok(dropEnd > dropStart);
+  const droppedImage = main.slice(dropStart, dropEnd);
+  assert.match(
+    droppedImage,
+    /try \{[\s\S]*readBlobBytesWithLimit\(file, INSERTED_IMAGE_MAX_BYTES, '그림'\)[\s\S]*catch \(error\)/,
+  );
+  assert.match(droppedImage, /message: `그림을 삽입할 수 없습니다\.\\n\$\{message\}`/);
 });
 
 test('smaller upload policies remain enforced at the actual read', () => {

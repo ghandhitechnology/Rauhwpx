@@ -99,11 +99,27 @@ test('hub cleanup retains every root that contains a pending credential copyback
   assert.match(server, /if \(!processCleanupSettled\)[\s\S]*retainUncertainProcessCleanup\(record\.recordRoot\)/);
 });
 
-test('auxiliary leader exit retains tree identity until cleanup is proven', () => {
+test('auxiliary cleanup waits for drained output and retains identity until proven', () => {
   assert.match(server, /auxiliaryProcessCleanups: new Map\(\)/);
-  assert.match(server, /child\.once\('exit', cleanup\)/);
-  assert.match(server, /terminateAndWaitForProcessTreeExit\(child\)/);
-  assert.match(server, /if \(cleaned\) \{[\s\S]*record\.auxiliaryProcesses\.delete\(child\)/);
+  assert.match(
+    server,
+    /function spawnAuxiliaryProcess[\s\S]*if \(record\.processCleanupUncertain\) throw agentProcessCleanupUncertain\(\)/,
+  );
+  assert.match(server, /child\.once\('close', cleanup\)/);
+  assert.match(server, /terminateAndWaitForProcessTreeExitOutcome\(child\)/);
+  assert.match(server, /cleanupProcessOutcome: \(child\) => beginAuxiliaryProcessCleanupOutcome\(record, child\)/);
+  assert.match(server, /ChildProcess `close` is ordered after stdout\/stderr have drained/);
+  assert.doesNotMatch(server, /child\.once\('exit', cleanup\)/);
+  assert.match(
+    server,
+    /outcome !== PROCESS_TREE_CLEANUP_OUTCOME\.PROVEN[\s\S]*record\.processCleanupUncertain = true;[\s\S]*retainUncertainProcessCleanup\(record\.recordRoot\)/,
+  );
+  assert.match(
+    server,
+    /outcome === PROCESS_TREE_CLEANUP_OUTCOME\.PROVEN[\s\S]*record\.auxiliaryProcesses\.delete\(child\);[\s\S]*record\.auxiliaryProcessCleanups\.delete\(child\)/,
+  );
+  assert.match(server, /return beginAuxiliaryProcessCleanupOutcome\(record, child\)[\s\S]*outcome === PROCESS_TREE_CLEANUP_OUTCOME\.PROVEN/);
+  assert.match(server, /child\.off\?\.\('close', cleanup\)/);
   assert.doesNotMatch(server, /child\.once\('exit', forget\)/);
   assert.doesNotMatch(server, /record\.auxiliaryProcesses\.clear\(\)/);
 });
@@ -142,5 +158,13 @@ test('provider replacement and stop fail closed on an unconfirmed process tree',
   assert.match(
     server,
     /case 'chat-stop':[\s\S]*if \(!await disposeSession\(record\)\)[\s\S]*sendChatError\(sock, agentProcessCleanupUncertain\(\)/,
+  );
+});
+
+test('record disposal retains an auxiliary tree whose natural-exit cleanup was unavailable', () => {
+  assert.match(server, /let processCleanupSettled = record\.processCleanupUncertain !== true/);
+  assert.match(
+    server,
+    /if \(!processCleanupSettled\) \{[\s\S]*retainUncertainProcessCleanup\(record\.recordRoot\);[\s\S]*return false;[\s\S]*flushProviderCredentialHomes\(record\)/,
   );
 });

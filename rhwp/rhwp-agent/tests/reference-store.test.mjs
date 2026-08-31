@@ -60,6 +60,21 @@ test('image references persist with zero chunks and are read only through vision
   assert.ok(restarted.list({ scope: 'chat', scopeId: 'image-chat' }).some((file) => file.id === image.id && file.kind === 'image'));
 });
 
+test('Windows startup recovers reference metadata left at the replacement gap', async (t) => {
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-reference-recovery-'));
+  t.after(() => fs.rm(parent, { recursive: true, force: true }));
+  const root = path.join(parent, 'references');
+  const first = await new ReferenceStore({ root, platform: 'win32' }).init();
+  const added = await first.addBuffer({
+    scope: 'chat', scopeId: 'recover-chat', name: 'notes.txt', bytes: Buffer.from('saved text'),
+  });
+  const metadataPath = path.join(root, 'metadata.json');
+  await fs.rename(metadataPath, `${metadataPath}.previous-write`);
+
+  const recovered = await new ReferenceStore({ root, platform: 'win32' }).init();
+  assert.equal(recovered.list({ scope: 'chat', scopeId: 'recover-chat' })[0].id, added.id);
+});
+
 test('staged message files consume chat quota, survive restart, and promote in place', async (t) => {
   const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-reference-stage-'));
   t.after(() => fs.rm(parent, { recursive: true, force: true }));

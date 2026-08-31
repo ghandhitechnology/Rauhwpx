@@ -27,7 +27,11 @@ test('Rau v2 redemption stores the local secret before acknowledgement and delet
   assert.match(source, /filter\(\(session\) => session\.agentSession\?\.agent === 'rau'\)/);
   assert.match(source, /Promise\.all\(rauSessions\.map\(disposeSession\)\)/);
   assert.match(source, /rauManager\.clearApiKey\(\)/);
-  assert.ok(source.indexOf('void rauManager.clearApiKey()') < source.indexOf('Promise.all(rauSessions.map(disposeSession))'));
+  const clearKey = source.indexOf('void rauManager.clearApiKey()');
+  const disposeSessions = source.indexOf('Promise.all(rauSessions.map(disposeSession))');
+  assert.notEqual(clearKey, -1);
+  assert.notEqual(disposeSessions, -1);
+  assert.ok(clearKey < disposeSessions);
   assert.match(source, /isOpenRouterCreditError\(evt\.message\)/);
   assert.match(source, /piManager: selection\.agent === 'rau' \? rauManager : piManager/);
   assert.match(source, /openRouter: selection\.agent === 'rau' \? rauOpenRouter : openRouter/);

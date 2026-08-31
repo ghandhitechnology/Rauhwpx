@@ -1036,11 +1036,11 @@ fn shape_caption(s: &ShapeObject) -> &Option<crate::model::shape::Caption> {
 
 /// HWP5 왕복(`parse → serialize → reparse`) 후 IR 필드 전수 스윕.
 pub fn sweep_hwp5_roundtrip(bytes: &[u8]) -> Result<SweepReport, String> {
-    use crate::parser::parse_document;
+    use crate::parser::{parse_document, parse_regenerated_document};
     use crate::serializer::serialize_document;
     let doc1 = parse_document(bytes).map_err(|e| format!("파싱 실패: {e}"))?;
     let out = serialize_document(&doc1).map_err(|e| format!("직렬화 실패: {e}"))?;
-    let doc2 = parse_document(&out).map_err(|e| format!("재파싱 실패: {e}"))?;
+    let doc2 = parse_regenerated_document(&out).map_err(|e| format!("재파싱 실패: {e}"))?;
     Ok(sweep_documents(&doc1, &doc2))
 }
 
@@ -1056,7 +1056,7 @@ pub fn sweep_hwp5_roundtrip(bytes: &[u8]) -> Result<SweepReport, String> {
 /// **레코드를 다시 만드는 경로**로 저장한다. 반복돼 온 1속성 소실은 전부 이 경로에서
 /// 난다. 이 함수는 그 무효화를 그대로 재현해 진짜 저장 경로를 측정한다.
 pub fn sweep_hwp5_rebuild_roundtrip(bytes: &[u8]) -> Result<SweepReport, String> {
-    use crate::parser::parse_document;
+    use crate::parser::{parse_document, parse_regenerated_document};
     use crate::serializer::serialize_document;
     let doc1 = parse_document(bytes).map_err(|e| format!("파싱 실패: {e}"))?;
 
@@ -1068,7 +1068,7 @@ pub fn sweep_hwp5_rebuild_roundtrip(bytes: &[u8]) -> Result<SweepReport, String>
     }
 
     let out = serialize_document(&edited).map_err(|e| format!("직렬화 실패: {e}"))?;
-    let doc2 = parse_document(&out).map_err(|e| format!("재파싱 실패: {e}"))?;
+    let doc2 = parse_regenerated_document(&out).map_err(|e| format!("재파싱 실패: {e}"))?;
     Ok(sweep_documents(&doc1, &doc2))
 }
 

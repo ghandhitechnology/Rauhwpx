@@ -15,6 +15,10 @@ import {
 import { RemoteDocumentUrlError, validateRemoteDocumentUrl } from '@/core/remote-document-url';
 import { ExtensionRemoteProxyUnavailableError } from '@/core/extension-file-transfer';
 import { CanvasView } from '@/view/canvas-view';
+import {
+  assertEncodedImageDecodeDimensions,
+  assertImageDecodeDimensions,
+} from '@/view/canvaskit/image-header';
 import { InputHandler } from '@/engine/input-handler';
 import { Toolbar } from '@/ui/toolbar';
 import { MenuBar } from '@/ui/menu-bar';
@@ -913,13 +917,16 @@ function setupFileInput(): void {
 
     if (isImage) {
       if (!inputHandler || wasm.pageCount === 0) return;
-      const data = await readBlobBytesWithLimit(file, INSERTED_IMAGE_MAX_BYTES, '그림');
-      const ext = file.name.split('.').pop()?.toLowerCase() || 'png';
-      const img = new Image();
-      const url = URL.createObjectURL(file);
+      let objectUrl = '';
       try {
-        img.src = url;
+        const data = await readBlobBytesWithLimit(file, INSERTED_IMAGE_MAX_BYTES, '그림');
+        const ext = file.name.split('.').pop()?.toLowerCase() || 'png';
+        assertEncodedImageDecodeDimensions(data, '그림');
+        const img = new Image();
+        objectUrl = URL.createObjectURL(file);
+        img.src = objectUrl;
         await img.decode();
+        assertImageDecodeDimensions(img.naturalWidth, img.naturalHeight, '그림');
         const result = inputHandler.insertDroppedImageAtClientPoint(
           data,
           ext,
@@ -935,14 +942,17 @@ function setupFileInput(): void {
             durationMs: 6000,
           });
         }
-      } catch {
-        console.warn('[drop] 이미지 디코딩 실패:', file.name);
+      } catch (error) {
+        const message = error instanceof Error && error.message
+          ? error.message
+          : '브라우저가 이 이미지 파일을 읽지 못했습니다.';
+        console.warn('[drop] 이미지 준비 실패:', error);
         showToast({
-          message: '그림을 삽입할 수 없습니다.\n브라우저가 이 이미지 파일을 읽지 못했습니다.',
+          message: `그림을 삽입할 수 없습니다.\n${message}`,
           durationMs: 6000,
         });
       } finally {
-        URL.revokeObjectURL(url);
+        if (objectUrl) URL.revokeObjectURL(objectUrl);
       }
       return;
     }

@@ -655,7 +655,7 @@ test('owner metadata is written before cleanup begins', async () => {
     createdAtMs: 1_234,
   });
   assert.deepEqual(writes[0].options, { encoding: 'utf8', mode: 0o600 });
-  assert.equal(renames[0][1], `/runtime/launch/${LAUNCH_OWNER_FILE}`);
+  assert.equal(renames[0][1], path.join('/runtime/launch', LAUNCH_OWNER_FILE));
 });
 
 test('desktop package registers supported document associations without bundling runtime data', () => {

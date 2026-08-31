@@ -155,8 +155,8 @@ impl std::fmt::Display for ParseError {
                 source,
             } => write!(
                 f,
-                "{} input is {} bytes and exceeds the {} byte limit",
-                source, actual, limit
+                "{} 입력이 {}바이트로 {}바이트 제한을 초과했습니다",
+                source, actual, limit,
             ),
             ParseError::ContainerLimitExceeded {
                 actual,
@@ -164,8 +164,8 @@ impl std::fmt::Display for ParseError {
                 context,
             } => write!(
                 f,
-                "{} is {} bytes and exceeds the {} byte document container limit",
-                context, actual, limit
+                "{} 크기가 {}바이트로 {}바이트 문서 컨테이너 제한을 초과했습니다",
+                context, actual, limit,
             ),
             ParseError::UnsupportedFormat { code, format, hint } => {
                 write!(
@@ -205,6 +205,11 @@ impl From<hml::HmlError> for ParseError {
 /// 3. DocInfo 파싱 (참조 테이블)
 /// 4. BodyText 섹션별 파싱 (배포용 문서: ViewText 복호화)
 pub fn parse_hwp(data: &[u8]) -> Result<Document, ParseError> {
+    limits::validate_input_size(data.len(), limits::InputPolicy::Untrusted)?;
+    parse_hwp_validated(data)
+}
+
+fn parse_hwp_validated(data: &[u8]) -> Result<Document, ParseError> {
     if data.len() as u64 > limits::MAX_CONTAINER_BYTES {
         return Err(ParseError::ContainerLimitExceeded {
             actual: data.len() as u64,
@@ -234,6 +239,16 @@ pub fn parse_hwp(data: &[u8]) -> Result<Document, ParseError> {
 /// accepting our own bytes only through the lenient recovery reader could hide
 /// a malformed FAT/directory tree and let a package rejected by Hancom reach disk.
 pub fn parse_hwp_strict(data: &[u8]) -> Result<Document, ParseError> {
+    limits::validate_input_size(data.len(), limits::InputPolicy::Untrusted)?;
+    parse_hwp_strict_validated(data)
+}
+
+pub(crate) fn parse_hwp_strict_regenerated(data: &[u8]) -> Result<Document, ParseError> {
+    limits::validate_input_size(data.len(), limits::InputPolicy::Regenerated)?;
+    parse_hwp_strict_validated(data)
+}
+
+fn parse_hwp_strict_validated(data: &[u8]) -> Result<Document, ParseError> {
     if data.len() as u64 > limits::MAX_CONTAINER_BYTES {
         return Err(ParseError::ContainerLimitExceeded {
             actual: data.len() as u64,
@@ -666,6 +681,7 @@ fn parse_hwp_with_lenient(lenient: cfb_reader::LenientCfbReader) -> Result<Docum
     let bin_data_content = load_bin_data_content_lenient(
         &lenient,
         &doc_info.bin_data_list,
+        compressed,
         &mut expanded_structural_bytes,
     )?;
 
@@ -729,9 +745,10 @@ fn parse_hwp_with_lenient(lenient: cfb_reader::LenientCfbReader) -> Result<Docum
 fn load_bin_data_content_lenient(
     lenient: &cfb_reader::LenientCfbReader,
     bin_data_list: &[crate::model::bin_data::BinData],
+    document_compressed: bool,
     expanded_bytes: &mut u64,
 ) -> Result<Vec<BinDataContent>, ParseError> {
-    use crate::model::bin_data::BinDataType;
+    use crate::model::bin_data::{BinDataCompression, BinDataType};
 
     let mut contents = Vec::new();
 
@@ -748,15 +765,27 @@ fn load_bin_data_content_lenient(
             bd.extension.as_deref().unwrap_or("dat")
         };
         let storage_name = format!("BIN{:04X}.{}", bd.storage_id, ext);
+        cfb_reader::validate_bin_data_storage_name(&storage_name).map_err(ParseError::CfbError)?;
         let member_limit =
             limits::remaining_container_member_limit(*expanded_bytes, limits::MAX_BINARY_BYTES);
+        let stream_compressed = match bd.compression {
+            BinDataCompression::Default => document_compressed,
+            BinDataCompression::Compress => true,
+            BinDataCompression::NoCompress => false,
+        };
 
         match lenient.read_stream_limited(&storage_name, member_limit) {
             Ok(data) => {
                 let mut decompressed =
-                    match cfb_reader::decompress_stream_limited(&data, member_limit) {
-                        Ok(d) => d,
-                        Err(_) => data,
+                    match decode_hwp_bin_data_stream(data, stream_compressed, member_limit) {
+                        Ok(decoded) => decoded,
+                        Err(error) => {
+                            eprintln!(
+                                "경고: BinData '{}' 압축 해제 실패 (lenient): {}",
+                                storage_name, error
+                            );
+                            continue;
+                        }
                     };
 
                 // Task #195 단계 6: OLE Storage는 CFB 매직 바로 앞의 4-byte size prefix 스킵
@@ -1129,6 +1158,7 @@ pub struct HmlParser;
 
 impl DocumentParser for HmlParser {
     fn parse(&self, data: &[u8]) -> Result<Document, ParseError> {
+        limits::validate_input_size(data.len(), limits::InputPolicy::Untrusted)?;
         hml::parse_hml(data)
             .map(|result| result.document)
             .map_err(ParseError::from)
@@ -1161,15 +1191,19 @@ pub fn parse_document_with_metadata(data: &[u8]) -> Result<ParsedDocument, Parse
 ///
 /// `LocalFileOnce` is only for one file returned by a fresh native file-picker
 /// approval. Parser and expanded-container limits remain in force.
-pub fn parse_document_with_metadata_policy(
+pub(crate) fn parse_document_with_metadata_policy(
     data: &[u8],
     policy: limits::InputPolicy,
 ) -> Result<ParsedDocument, ParseError> {
     limits::validate_input_size(data.len(), policy)?;
     match detect_format(data) {
-        FileFormat::Hwp => HwpParser.parse(data).map(without_hml_metadata),
-        FileFormat::Hwpx => HwpxParser.parse(data).map(without_hml_metadata),
-        FileFormat::Hwp3 => Hwp3Parser.parse(data).map(without_hml_metadata),
+        FileFormat::Hwp => parse_hwp_validated(data).map(without_hml_metadata),
+        FileFormat::Hwpx => hwpx::parse_hwpx_validated(data)
+            .map(without_hml_metadata)
+            .map_err(ParseError::from),
+        FileFormat::Hwp3 => hwp3::parse_hwp3_validated(data)
+            .map(without_hml_metadata)
+            .map_err(ParseError::from),
         FileFormat::Hml => {
             let result = hml::parse_hml(data).map_err(ParseError::from)?;
             Ok(ParsedDocument {
@@ -1218,6 +1252,15 @@ pub fn parse_document(data: &[u8]) -> Result<Document, ParseError> {
 /// Parse one exact local file after a fresh native approval.
 pub fn parse_document_from_local_file(data: &[u8]) -> Result<Document, ParseError> {
     parse_document_with_metadata_policy(data, limits::InputPolicy::LocalFileOnce)
+        .map(|parsed| parsed.document)
+}
+
+/// Reparse bytes emitted by an in-process bounded serializer.
+///
+/// Kept crate-private so the larger raw-byte allowance cannot become a generic
+/// bypass for untrusted acquisition paths.
+pub(crate) fn parse_regenerated_document(data: &[u8]) -> Result<Document, ParseError> {
+    parse_document_with_metadata_policy(data, limits::InputPolicy::Regenerated)
         .map(|parsed| parsed.document)
 }
 
@@ -1276,18 +1319,27 @@ pub fn extract_thumbnail_only(data: &[u8]) -> Option<ThumbnailResult> {
     extract_thumbnail_only_with_policy(data, limits::InputPolicy::Untrusted)
 }
 
+/// Extract a thumbnail from one exact local file approved by the native host.
+pub fn extract_thumbnail_only_from_local_file(data: &[u8]) -> Option<ThumbnailResult> {
+    extract_thumbnail_only_with_policy(data, limits::InputPolicy::LocalFileOnce)
+}
+
 /// Extract a thumbnail using the same raw-input policy as full parsing.
-pub fn extract_thumbnail_only_with_policy(
+pub(crate) fn extract_thumbnail_only_with_policy(
     data: &[u8],
     policy: limits::InputPolicy,
 ) -> Option<ThumbnailResult> {
     limits::validate_input_size(data.len(), policy).ok()?;
+    // The acquisition policy was already checked above. Use the shared-reader
+    // entry points so approved local files do not accidentally pass through the
+    // public, untrusted-only 128 MiB gate a second time.
+    let source: std::sync::Arc<[u8]> = std::sync::Arc::from(data);
     let image_data = if detect_format(data) == FileFormat::Hwpx {
         // HWPX: ZIP 컨테이너에서 Preview/PrvImage.png 읽기
-        extract_thumbnail_from_hwpx(data)?
+        extract_thumbnail_from_hwpx(source)?
     } else {
         // HWP: CFB 컨테이너에서 /PrvImage 스트림 읽기
-        let mut cfb = cfb_reader::CfbReader::open(data).ok()?;
+        let mut cfb = cfb_reader::CfbReader::open_shared(source).ok()?;
         cfb.read_preview_image()?
     };
     let format = detect_image_format(&image_data);
@@ -1350,8 +1402,8 @@ pub fn extract_thumbnail_only_with_policy(
 }
 
 /// HWPX(ZIP)에서 Preview/PrvImage.png 추출
-fn extract_thumbnail_from_hwpx(data: &[u8]) -> Option<Vec<u8>> {
-    let mut archive = hwpx::reader::HwpxReader::open(data).ok()?;
+fn extract_thumbnail_from_hwpx(data: std::sync::Arc<[u8]>) -> Option<Vec<u8>> {
+    let mut archive = hwpx::reader::HwpxReader::open_shared(data).ok()?;
 
     // Preview/PrvImage.png 또는 Preview/PrvImage.* 탐색
     let entry_name = archive
@@ -1414,7 +1466,7 @@ fn collect_extra_streams(
     // 을 미러링하여 계산한다. 이 집합에 들어가지 않는 /BinData 스트림은 대응 BinData
     // 레코드가 없는 "고아 스트림"(예: img-start-001 의 20개 BIN, interview.hwp 의 BIN0001)
     // 이며, 그대로 두면 저장 시 통째 드롭된다. extra_streams 로 원본 바이트를 보존한다.
-    let emitted_bin_paths: std::collections::HashSet<String> = bin_data_list
+    let emitted_bin_paths: std::collections::HashSet<Vec<u16>> = bin_data_list
         .iter()
         .filter_map(|bin_data| {
             if !matches!(
@@ -1428,7 +1480,10 @@ fn collect_extra_streams(
             } else {
                 bin_data.extension.as_deref().unwrap_or("dat")
             };
-            Some(format!("/BinData/BIN{:04X}.{}", bin_data.storage_id, ext))
+            Some(crate::serializer::mini_cfb::cfb_path_key(&format!(
+                "/BinData/BIN{:04X}.{}",
+                bin_data.storage_id, ext
+            )))
         })
         .collect();
 
@@ -1445,7 +1500,7 @@ fn collect_extra_streams(
         }
 
         // /BinData 는 직렬화기가 재생성하는 스트림만 제외하고, 고아 스트림은 보존
-        if path.starts_with("/BinData/") && emitted_bin_paths.contains(path) {
+        if emitted_bin_paths.contains(&crate::serializer::mini_cfb::cfb_path_key(path)) {
             continue;
         }
 
@@ -1521,17 +1576,32 @@ impl HwpExpandedBudget {
     }
 }
 
+fn decode_hwp_bin_data_stream(
+    raw: Vec<u8>,
+    compressed: bool,
+    max_bytes: usize,
+) -> Result<Vec<u8>, cfb_reader::CfbError> {
+    if compressed {
+        cfb_reader::decompress_stream_limited(&raw, max_bytes)
+    } else if raw.len() <= max_bytes {
+        Ok(raw)
+    } else {
+        Err(cfb_reader::CfbError::LimitExceeded(max_bytes))
+    }
+}
+
 struct Hwp5BinResolver {
     cfb: std::sync::Mutex<cfb_reader::CfbReader>,
-    /// 선두 4-byte size prefix 정규화가 필요한 OLE Storage 스트림명
-    ole_streams: std::collections::HashSet<String>,
+    /// Source-container encoding for streams that can be copied verbatim.
+    source_encodings:
+        std::collections::HashMap<String, crate::model::bin_data::BinDataStreamEncoding>,
     expanded_budget: std::sync::Mutex<HwpExpandedBudget>,
 }
 
 impl std::fmt::Debug for Hwp5BinResolver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Hwp5BinResolver")
-            .field("ole_streams", &self.ole_streams.len())
+            .field("source_encodings", &self.source_encodings.len())
             .field(
                 "expanded_bytes",
                 &self
@@ -1566,15 +1636,26 @@ impl crate::model::bin_data::BinDataResolver for Hwp5BinResolver {
             }
         };
 
-        // 압축 해제 실패 시 원본 사용 (비압축 데이터)
-        let mut decompressed = match cfb_reader::decompress_stream_limited(&raw, member_limit) {
-            Ok(d) => d,
-            Err(_) => raw,
+        let Some(source_encoding) = self.source_encodings.get(key).copied() else {
+            return Vec::new();
         };
+        let mut decompressed =
+            match decode_hwp_bin_data_stream(raw, source_encoding.compressed, member_limit) {
+                Ok(data) => data,
+                Err(error) => {
+                    eprintln!("경고: BinData '{}' 압축 해제 실패: {}", key, error);
+                    return Vec::new();
+                }
+            };
 
         // Task #195 단계 6: OLE Storage는 해제 후 선두 4바이트 size prefix를 스킵하여
         // 내부 CFB(`d0cf11e0...`) 시작 바이트부터 노출한다.
-        if self.ole_streams.contains(key) && decompressed.len() >= 12 {
+        if self
+            .source_encodings
+            .get(key)
+            .is_some_and(|encoding| encoding.ole_storage)
+            && decompressed.len() >= 12
+        {
             let cfb_magic = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
             if decompressed[..8] != cfb_magic && decompressed[4..12] == cfb_magic {
                 decompressed.drain(..4);
@@ -1610,12 +1691,15 @@ impl crate::model::bin_data::BinDataResolver for Hwp5BinResolver {
             }
         };
 
-        let mut bytes = match cfb_reader::decompress_stream_limited(&raw, member_limit) {
-            Ok(data) => data,
-            Err(cfb_reader::CfbError::LimitExceeded(_)) => return None,
-            Err(_) => raw,
-        };
-        if self.ole_streams.contains(key) && bytes.len() >= 12 {
+        let source_encoding = self.source_encodings.get(key).copied()?;
+        let mut bytes =
+            decode_hwp_bin_data_stream(raw, source_encoding.compressed, member_limit).ok()?;
+        if self
+            .source_encodings
+            .get(key)
+            .is_some_and(|encoding| encoding.ole_storage)
+            && bytes.len() >= 12
+        {
             let cfb_magic = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
             if bytes[..8] != cfb_magic && bytes[4..12] == cfb_magic {
                 bytes.drain(..4);
@@ -1626,24 +1710,82 @@ impl crate::model::bin_data::BinDataResolver for Hwp5BinResolver {
         }
         budget.reserve(key, bytes.len()).then_some(bytes)
     }
+
+    fn resolve_original_stream_limited(
+        &self,
+        key: &str,
+        expected_encoding: crate::model::bin_data::BinDataStreamEncoding,
+        max_bytes: usize,
+    ) -> Option<Vec<u8>> {
+        if self.source_encodings.get(key).copied() != Some(expected_encoding) {
+            return None;
+        }
+        let mut cfb = match self.cfb.lock() {
+            Ok(cfb) => cfb,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        cfb.read_bin_data_limited(key, max_bytes).ok()
+    }
+
+    fn payload_identity(
+        &self,
+        key: &str,
+    ) -> Option<crate::model::bin_data::BinDataPayloadIdentity> {
+        let encoding = self.source_encodings.get(key).copied()?;
+        let mut cfb = match self.cfb.lock() {
+            Ok(cfb) => cfb,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let (byte_len, digest) = cfb
+            .fingerprint_bin_data(key, limits::MAX_BINARY_BYTES)
+            .ok()?;
+        Some(crate::model::bin_data::BinDataPayloadIdentity::new(
+            format!(
+                "hwp5-stream:compressed={}:ole={}",
+                encoding.compressed, encoding.ole_storage
+            ),
+            byte_len,
+            digest,
+        ))
+    }
 }
 
 fn load_bin_data_content(
     cfb: &mut cfb_reader::CfbReader,
     source_bytes: Arc<[u8]>,
     bin_data_list: &[crate::model::bin_data::BinData],
-    _compressed: bool,
+    compressed: bool,
     initial_expanded_bytes: u64,
 ) -> Result<Vec<BinDataContent>, ParseError> {
-    use crate::model::bin_data::BinDataType;
+    use crate::model::bin_data::{BinDataCompression, BinDataStreamEncoding, BinDataType};
 
-    // 지연 로딩 리졸버가 참조할 OLE Storage 스트림 집합을 먼저 구성한다.
-    let mut ole_streams = std::collections::HashSet::new();
+    // Verbatim fallback is sound only while the destination expects the same
+    // compression and OLE prefix semantics as the source stream.
+    let mut source_encodings = std::collections::HashMap::new();
     for bd in bin_data_list.iter() {
-        if bd.data_type == BinDataType::Storage {
-            let ext = bd.extension.as_deref().unwrap_or("OLE");
-            ole_streams.insert(format!("BIN{:04X}.{}", bd.storage_id, ext));
-        }
+        let ole_storage = match bd.data_type {
+            BinDataType::Embedding => false,
+            BinDataType::Storage => true,
+            BinDataType::Link => continue,
+        };
+        let ext = bd
+            .extension
+            .as_deref()
+            .unwrap_or(if ole_storage { "OLE" } else { "dat" });
+        let stream_compressed = match bd.compression {
+            BinDataCompression::Default => compressed,
+            BinDataCompression::Compress => true,
+            BinDataCompression::NoCompress => false,
+        };
+        let storage_name = format!("BIN{:04X}.{}", bd.storage_id, ext);
+        cfb_reader::validate_bin_data_storage_name(&storage_name).map_err(ParseError::CfbError)?;
+        source_encodings.insert(
+            storage_name,
+            BinDataStreamEncoding {
+                compressed: stream_compressed,
+                ole_storage,
+            },
+        );
     }
 
     let resolver: Option<std::sync::Arc<dyn crate::model::bin_data::BinDataResolver>> =
@@ -1652,7 +1794,7 @@ fn load_bin_data_content(
                 let inner: std::sync::Arc<dyn crate::model::bin_data::BinDataResolver> =
                     std::sync::Arc::new(Hwp5BinResolver {
                         cfb: std::sync::Mutex::new(reader),
-                        ole_streams,
+                        source_encodings,
                         expanded_budget: std::sync::Mutex::new(HwpExpandedBudget::new(
                             initial_expanded_bytes,
                         )),
@@ -1716,11 +1858,18 @@ fn load_bin_data_content(
             limits::remaining_container_member_limit(fallback_total, limits::MAX_BINARY_BYTES);
         match cfb.read_bin_data_limited(&storage_name, member_limit) {
             Ok(data) => {
-                // 압축된 BinData 해제 시도
+                let stream_compressed = match bd.compression {
+                    BinDataCompression::Default => compressed,
+                    BinDataCompression::Compress => true,
+                    BinDataCompression::NoCompress => false,
+                };
                 let mut decompressed =
-                    match cfb_reader::decompress_stream_limited(&data, member_limit) {
-                        Ok(d) => d,
-                        Err(_) => data, // 압축 해제 실패 시 원본 사용 (비압축 데이터)
+                    match decode_hwp_bin_data_stream(data, stream_compressed, member_limit) {
+                        Ok(decoded) => decoded,
+                        Err(error) => {
+                            eprintln!("경고: BinData '{}' 압축 해제 실패: {}", storage_name, error);
+                            continue;
+                        }
                     };
 
                 // Task #195 단계 6: OLE Storage는 해제 후 선두 4바이트 size prefix를 스킵하여
@@ -1757,6 +1906,55 @@ fn load_bin_data_content(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extra_stream_collection_matches_emitted_bindata_paths_with_cfb_case_rules() {
+        let source = crate::serializer::mini_cfb::build_cfb(&[(
+            "/bInDaTa/bin0001.StrAße",
+            b"resource".as_slice(),
+        )])
+        .expect("source CFB");
+        let mut cfb = cfb_reader::CfbReader::open(&source).expect("strict source reader");
+        let bin_data = crate::model::bin_data::BinData {
+            data_type: crate::model::bin_data::BinDataType::Embedding,
+            storage_id: 1,
+            extension: Some("straße".to_string()),
+            ..Default::default()
+        };
+        let mut expanded_bytes = 0;
+
+        let extra = collect_extra_streams(&mut cfb, &[bin_data], &mut expanded_bytes)
+            .expect("extra stream collection");
+
+        assert!(extra.is_empty());
+        assert_eq!(expanded_bytes, 0);
+    }
+
+    #[test]
+    fn cfb_simple_uppercase_does_not_expand_sharp_s_when_collecting_extras() {
+        let source = crate::serializer::mini_cfb::build_cfb(&[(
+            "/BinData/BIN0001.STRASSE",
+            b"orphan".as_slice(),
+        )])
+        .expect("source CFB");
+        let mut cfb = cfb_reader::CfbReader::open(&source).expect("strict source reader");
+        let bin_data = crate::model::bin_data::BinData {
+            data_type: crate::model::bin_data::BinDataType::Embedding,
+            storage_id: 1,
+            extension: Some("straße".to_string()),
+            ..Default::default()
+        };
+        let mut expanded_bytes = 0;
+
+        let extra = collect_extra_streams(&mut cfb, &[bin_data], &mut expanded_bytes)
+            .expect("extra stream collection");
+
+        assert_eq!(
+            extra,
+            vec![("/BinData/BIN0001.STRASSE".to_string(), b"orphan".to_vec())]
+        );
+        assert_eq!(expanded_bytes, 6);
+    }
 
     #[test]
     fn expanded_hwp_budget_counts_unique_lazy_members_and_checked_boundaries() {
@@ -1799,6 +1997,74 @@ mod tests {
             17
         );
         assert_eq!(budget.member_limit("BIN0001.png", 9), 9);
+    }
+
+    #[test]
+    fn hwp_raw_fallback_requires_matching_source_encoding() {
+        use crate::model::bin_data::{BinDataResolver, BinDataStreamEncoding};
+
+        let corrupt_compressed = vec![0xff; 16];
+        let source = crate::serializer::mini_cfb::build_cfb(&[(
+            "/BinData/BIN0001.dat",
+            corrupt_compressed.as_slice(),
+        )])
+        .expect("source CFB");
+        let reader = cfb_reader::CfbReader::open(&source).expect("strict source reader");
+        let source_encoding = BinDataStreamEncoding {
+            compressed: true,
+            ole_storage: false,
+        };
+        let resolver = Hwp5BinResolver {
+            cfb: std::sync::Mutex::new(reader),
+            source_encodings: std::collections::HashMap::from([(
+                "BIN0001.dat".to_string(),
+                source_encoding,
+            )]),
+            expanded_budget: std::sync::Mutex::new(HwpExpandedBudget::new(0)),
+        };
+
+        assert!(resolver.resolve_limited("BIN0001.dat", 64).is_none());
+        assert!(resolver
+            .resolve_original_stream_limited(
+                "BIN0001.dat",
+                BinDataStreamEncoding {
+                    compressed: false,
+                    ole_storage: false,
+                },
+                16,
+            )
+            .is_none());
+        assert_eq!(
+            resolver.resolve_original_stream_limited("BIN0001.dat", source_encoding, 32),
+            Some(corrupt_compressed)
+        );
+
+        use std::io::Write;
+        let mut encoder =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(b"plain bytes").unwrap();
+        let deflate_shaped_uncompressed = encoder.finish().unwrap();
+        let source = crate::serializer::mini_cfb::build_cfb(&[(
+            "/BinData/BIN0002.dat",
+            deflate_shaped_uncompressed.as_slice(),
+        )])
+        .expect("source CFB");
+        let reader = cfb_reader::CfbReader::open(&source).expect("strict source reader");
+        let resolver = Hwp5BinResolver {
+            cfb: std::sync::Mutex::new(reader),
+            source_encodings: std::collections::HashMap::from([(
+                "BIN0002.dat".to_string(),
+                BinDataStreamEncoding {
+                    compressed: false,
+                    ole_storage: false,
+                },
+            )]),
+            expanded_budget: std::sync::Mutex::new(HwpExpandedBudget::new(0)),
+        };
+        assert_eq!(
+            resolver.resolve_limited("BIN0002.dat", 64),
+            Some(deflate_shaped_uncompressed)
+        );
     }
 
     #[test]

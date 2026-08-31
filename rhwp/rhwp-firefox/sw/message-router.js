@@ -36,7 +36,9 @@ export function dispatchRuntimeMessage(message, sender, sendResponse) {
     return false;
   }
 
-  const handler = messageHandlers[message.type];
+  const handler = Object.hasOwn(messageHandlers, message.type)
+    ? messageHandlers[message.type]
+    : undefined;
   if (typeof handler !== 'function') {
     return false;
   }

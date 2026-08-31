@@ -21670,13 +21670,14 @@ fn create_editable_doc() -> HwpDocument {
 }
 
 #[test]
-fn test_single_command_updates_document_without_retaining_event_payload() {
+fn test_single_command_updates_document_and_retains_a_bounded_public_event_payload() {
     let mut doc = create_editable_doc();
     assert!(doc.event_log.is_empty());
 
     let result = doc.insert_text_native(0, 0, 0, "Hello");
     assert!(result.is_ok(), "insert_text_native failed: {:?}", result);
-    assert!(doc.event_log.is_empty());
+    assert_eq!(doc.event_log.len(), 1);
+    assert!(doc.get_event_log().contains("\"type\":\"TextInserted\""));
     assert_eq!(doc.get_text_range_native(0, 0, 0, 5).unwrap(), "Hello");
 }
 

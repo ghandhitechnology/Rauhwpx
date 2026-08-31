@@ -3,7 +3,77 @@ export interface EncodedImageDimensions {
   height: number;
 }
 
-/** CanvasKit decode 전에 bounded raster dimensions를 확인한다. */
+export const MAX_IMAGE_DECODE_DIMENSION = 16_384;
+export const MAX_IMAGE_DECODE_PIXELS = 32 * 1024 * 1024;
+export const MAX_ENCODED_IMAGE_BYTES = 64 * 1024 * 1024;
+
+// JPEG allows metadata segments before its size marker. Inspect a generous, bounded
+// prefix when the only available representation is base64 so this guard does not
+// duplicate an entire embedded image just to read its dimensions.
+const MAX_ENCODED_IMAGE_HEADER_BYTES = 4 * 1024 * 1024;
+const MAX_SVG_ROOT_BYTES = 64 * 1024;
+const SVG_DEFAULT_WIDTH = 300;
+const SVG_DEFAULT_HEIGHT = 150;
+
+function svgLength(value: string | undefined): number | null {
+  if (!value) return null;
+  const match = /^([+]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)(px|in|cm|mm|pt|pc)?$/i.exec(value.trim());
+  if (!match) return null;
+  const amount = Number(match[1]);
+  const factors: Record<string, number> = {
+    px: 1,
+    in: 96,
+    cm: 96 / 2.54,
+    mm: 96 / 25.4,
+    pt: 96 / 72,
+    pc: 16,
+  };
+  const pixels = amount * (factors[match[2]?.toLowerCase() ?? 'px'] ?? 1);
+  return Number.isFinite(pixels) && pixels > 0 ? Math.ceil(pixels) : null;
+}
+
+function svgEncodedDimensions(bytes: Uint8Array): EncodedImageDimensions | null {
+  // Only the bounded root tag is needed. This also keeps arbitrary unsupported
+  // formats from being decoded into a second multi-megabyte string.
+  const prefix = bytes.subarray(0, Math.min(bytes.byteLength, MAX_SVG_ROOT_BYTES));
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(prefix);
+  } catch {
+    return null;
+  }
+  const root = /<svg\b[^>]{0,65535}>/i.exec(text)?.[0];
+  if (!root) return null;
+  const attribute = (name: string) => new RegExp(`\\b${name}\\s*=\\s*["']([^"']+)["']`, 'i')
+    .exec(root)?.[1];
+  const width = svgLength(attribute('width'));
+  const height = svgLength(attribute('height'));
+  const viewBox = attribute('viewBox')
+    ?.trim()
+    .split(/[\s,]+/)
+    .map(Number);
+  const hasViewBox = viewBox?.length === 4
+    && viewBox.every(Number.isFinite)
+    && viewBox[2] > 0
+    && viewBox[3] > 0;
+
+  if (width !== null && height !== null) return { width, height };
+  if (hasViewBox && width !== null) {
+    return { width, height: Math.ceil(width * (viewBox[3] / viewBox[2])) };
+  }
+  if (hasViewBox && height !== null) {
+    return { width: Math.ceil(height * (viewBox[2] / viewBox[3])), height };
+  }
+  if (hasViewBox || (width === null && height === null)) {
+    // SVG without two absolute intrinsic dimensions uses the browser's default
+    // replaced-element viewport; a large coordinate-space viewBox does not
+    // imply a correspondingly large pixel allocation.
+    return { width: SVG_DEFAULT_WIDTH, height: SVG_DEFAULT_HEIGHT };
+  }
+  return null;
+}
+
+/** Encoded raster decode 전에 bounded dimensions를 확인한다. */
 export function encodedImageDimensions(bytes: Uint8Array): EncodedImageDimensions | null {
   if (bytes.byteLength < 10) return null;
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -87,8 +157,90 @@ export function encodedImageDimensions(bytes: Uint8Array): EncodedImageDimension
       }
       offset += segmentLength;
     }
+  } else {
+    return svgEncodedDimensions(bytes);
   }
   return Number.isInteger(width) && Number.isInteger(height) && width > 0 && height > 0
     ? { width, height }
     : null;
+}
+
+/** Browser/CanvasKit decode에 허용할 공통 raster dimensions를 검증한다. */
+export function assertImageDecodeDimensions(
+  width: number,
+  height: number,
+  label = '이미지',
+): EncodedImageDimensions {
+  const pixels = width * height;
+  if (
+    !Number.isSafeInteger(width)
+    || !Number.isSafeInteger(height)
+    || width <= 0
+    || height <= 0
+  ) {
+    throw new Error(`${label}의 크기 정보를 확인할 수 없습니다.`);
+  }
+  if (
+    width > MAX_IMAGE_DECODE_DIMENSION
+    || height > MAX_IMAGE_DECODE_DIMENSION
+    || !Number.isSafeInteger(pixels)
+    || pixels > MAX_IMAGE_DECODE_PIXELS
+  ) {
+    throw new Error(
+      `${label} 해상도가 안전 한도(${MAX_IMAGE_DECODE_DIMENSION}px, `
+      + `${MAX_IMAGE_DECODE_PIXELS}픽셀)를 초과합니다.`,
+    );
+  }
+  return { width, height };
+}
+
+/** Encoded bytes의 raster header를 읽고 browser decode 전에 공통 한도를 적용한다. */
+export function assertEncodedImageDecodeDimensions(
+  bytes: Uint8Array,
+  label = '이미지',
+): EncodedImageDimensions {
+  if (bytes.byteLength > MAX_ENCODED_IMAGE_BYTES) {
+    throw new Error(`${label} 데이터가 안전 한도를 초과합니다.`);
+  }
+  const dimensions = encodedImageDimensions(bytes);
+  if (!dimensions) {
+    throw new Error(`${label}의 인코딩된 크기 정보를 확인할 수 없습니다.`);
+  }
+  return assertImageDecodeDimensions(dimensions.width, dimensions.height, label);
+}
+
+/**
+ * Embedded base64 raster의 bounded prefix만 복사하여 decode 전 dimensions를 검증한다.
+ * 전체 decoded byte 길이도 먼저 제한해 큰 문자열이 header 검사에서 복제되지 않게 한다.
+ */
+export function assertBase64EncodedImageDecodeDimensions(
+  base64: string,
+  label = '이미지',
+): EncodedImageDimensions {
+  if (!base64) {
+    throw new Error(`${label} 데이터가 비어 있습니다.`);
+  }
+  const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
+  const decodedLength = Math.floor((base64.length * 3) / 4) - padding;
+  if (
+    !Number.isSafeInteger(decodedLength)
+    || decodedLength <= 0
+    || decodedLength > MAX_ENCODED_IMAGE_BYTES
+  ) {
+    throw new Error(`${label} 데이터가 안전 한도를 초과합니다.`);
+  }
+
+  const maxHeaderChars = Math.ceil(MAX_ENCODED_IMAGE_HEADER_BYTES / 3) * 4;
+  const prefixLength = base64.length <= maxHeaderChars
+    ? base64.length
+    : maxHeaderChars - (maxHeaderChars % 4);
+  let binary: string;
+  try {
+    binary = atob(base64.slice(0, prefixLength));
+  } catch {
+    throw new Error(`${label} 데이터가 올바른 base64 형식이 아닙니다.`);
+  }
+  const header = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) header[i] = binary.charCodeAt(i);
+  return assertEncodedImageDecodeDimensions(header, label);
 }

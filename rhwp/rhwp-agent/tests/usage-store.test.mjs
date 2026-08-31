@@ -9,6 +9,9 @@ import {
   CODEX_PLANS,
   CURSOR_PLANS,
   GROK_PLANS,
+  MAX_USAGE_MODEL_CHARS,
+  MAX_USAGE_MODELS,
+  MAX_USAGE_TOKEN_COUNT,
   PI_PLANS,
   createUsageStore,
   defaultUsageRoot,
@@ -67,7 +70,8 @@ test('summary aggregates rolling windows, weights and percents', async () => {
   assert.equal(empty.providers.claude.session.percent, 0);
   assert.deepEqual(empty.providers.claude.limit, CLAUDE_PLANS.pro);
   assert.deepEqual(empty.providers.codex.limit, CODEX_PLANS.plus);
-  assert.deepEqual(empty.providers.claude.byModel, {});
+  assert.equal(Object.getPrototypeOf(empty.providers.claude.byModel), null);
+  assert.deepEqual(Object.keys(empty.providers.claude.byModel), []);
 
   // 6일 전: 주간 창에만 들어간다.
   time.advance(-6 * DAY);
@@ -162,6 +166,94 @@ test('plans are validated, persisted and reloaded', async () => {
   await fs.rm(rootDir, { recursive: true, force: true });
 });
 
+test('Windows plan replacement serializes concurrent writes and leaves no staging files', async (t) => {
+  const rootDir = await tmpRoot();
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const time = clock();
+  const store = await createUsageStore({ rootDir, now: time.now, platform: 'win32' }).init();
+
+  // A constant clock used to make both calls reuse the old timestamp-derived
+  // staging name. Unique staging files plus the shared queue must retain both
+  // updates even when Windows cannot rename over an existing destination.
+  await Promise.all([
+    store.setPlan('claude', 'max20x'),
+    store.setPlan('codex', 'pro'),
+  ]);
+  await store.flush();
+
+  const saved = JSON.parse(await fs.readFile(path.join(rootDir, 'plans.json'), 'utf8'));
+  assert.equal(saved.claude, 'max20x');
+  assert.equal(saved.codex, 'pro');
+  assert.deepEqual(
+    (await fs.readdir(rootDir)).filter((name) => name.includes('.tmp-') || name.endsWith('.previous-write')),
+    [],
+  );
+});
+
+test('Windows startup recovers usage plans and events left at the replacement gap', async (t) => {
+  const rootDir = await tmpRoot();
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const time = clock();
+  const store = await createUsageStore({ rootDir, now: time.now, platform: 'win32' }).init();
+  await store.setPlan('claude', 'max20x');
+  store.record({
+    agent: 'claude', model: 'opus', inputTokens: 100, outputTokens: 10,
+    cacheReadTokens: 0, cacheCreationTokens: 0,
+  });
+  await store.flush();
+  for (const name of ['plans.json', 'events.jsonl']) {
+    await fs.rename(path.join(rootDir, name), path.join(rootDir, `${name}.previous-write`));
+  }
+
+  const recovered = await createUsageStore({ rootDir, now: time.now, platform: 'win32' }).init();
+  assert.equal(recovered.plans().claude, 'max20x');
+  assert.equal(recovered.summary().providers.claude.week.turns, 1);
+  recovered.record({
+    agent: 'claude', model: 'sonnet', inputTokens: 20, outputTokens: 5,
+    cacheReadTokens: 0, cacheCreationTokens: 0,
+  });
+  await recovered.flush();
+
+  const reloaded = await createUsageStore({ rootDir, now: time.now, platform: 'win32' }).init();
+  assert.equal(reloaded.summary().providers.claude.week.turns, 2);
+});
+
+test('a failed plan replacement does not publish an in-memory-only selection', async (t) => {
+  const rootDir = await tmpRoot();
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const store = await createUsageStore({ rootDir }).init();
+
+  // A directory cannot be atomically replaced by the plans file. The failed
+  // durable write must leave both the visible selection and staging area clean.
+  await fs.mkdir(path.join(rootDir, 'plans.json'));
+  await assert.rejects(() => store.setPlan('claude', 'max20x'));
+  assert.equal(store.plans().claude, 'pro');
+  assert.deepEqual(
+    (await fs.readdir(rootDir)).filter((name) => name.includes('.tmp-')),
+    [],
+  );
+});
+
+test('startup ignores a symlinked plans file', async (t) => {
+  const rootDir = await tmpRoot();
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const outside = path.join(rootDir, 'outside-plans.json');
+  const plansPath = path.join(rootDir, 'plans.json');
+  await fs.writeFile(outside, JSON.stringify({ claude: 'max20x' }));
+  try {
+    await fs.symlink(outside, plansPath);
+  } catch (error) {
+    if (process.platform === 'win32' && ['EACCES', 'EPERM'].includes(error?.code)) {
+      t.skip('This Windows host does not permit unprivileged symlink creation');
+      return;
+    }
+    throw error;
+  }
+
+  const store = await createUsageStore({ rootDir }).init();
+  assert.equal(store.plans().claude, 'pro');
+});
+
 test('events replay from the jsonl log in a new store', async () => {
   const rootDir = await tmpRoot();
   const time = clock();
@@ -182,6 +274,69 @@ test('events replay from the jsonl log in a new store', async () => {
   assert.equal(usage.providers.claude.byModel.opus.turns, 1);
 
   await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('extreme weighted usage is stable across flush and replay', async (t) => {
+  const rootDir = await tmpRoot();
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const time = clock();
+  const store = await createUsageStore({ rootDir, now: time.now }).init();
+  const event = store.record({
+    agent: 'codex',
+    model: 'bounded-extreme',
+    inputTokens: Number.MAX_VALUE,
+    outputTokens: Number.MAX_VALUE,
+    cacheReadTokens: Number.MAX_VALUE,
+    cacheCreationTokens: Number.MAX_VALUE,
+  });
+  const expected = (MAX_USAGE_TOKEN_COUNT * 3) + (MAX_USAGE_TOKEN_COUNT / 10);
+  assert.equal(event.weightedTokens, expected);
+  assert.equal(store.summary().providers.codex.week.weightedTokens, expected);
+  await store.flush();
+
+  const reloaded = await createUsageStore({ rootDir, now: time.now }).init();
+  assert.equal(reloaded.summary().providers.codex.week.weightedTokens, expected);
+});
+
+test('usage model keys and numeric fields are bounded without touching Object.prototype', async (t) => {
+  const rootDir = await tmpRoot();
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const store = await createUsageStore({ rootDir }).init();
+  const longModel = `model-${'x'.repeat(MAX_USAGE_MODEL_CHARS * 2)}`;
+
+  store.record({
+    agent: 'codex',
+    model: '__proto__',
+    inputTokens: Number.MAX_VALUE,
+    outputTokens: Infinity,
+  });
+  store.record({ agent: 'codex', model: longModel, outputTokens: Number.MAX_VALUE });
+  await store.flush();
+
+  const byModel = store.summary().providers.codex.byModel;
+  assert.equal(Object.getPrototypeOf(byModel), null);
+  assert.equal(Object.hasOwn(byModel, '__proto__'), true);
+  assert.equal(byModel.__proto__.inputTokens, MAX_USAGE_TOKEN_COUNT);
+  assert.equal(byModel.__proto__.outputTokens, 0);
+  assert.equal(Object.prototype.turns, undefined);
+  const boundedName = Object.keys(byModel).find((name) => name.startsWith('model-'));
+  assert.equal(boundedName.length, MAX_USAGE_MODEL_CHARS);
+  assert.equal(byModel[boundedName].outputTokens, MAX_USAGE_TOKEN_COUNT);
+});
+
+test('weekly model aggregation reserves one bounded overflow bucket', async (t) => {
+  const rootDir = await tmpRoot();
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const store = await createUsageStore({ rootDir }).init();
+  for (let index = 0; index < MAX_USAGE_MODELS + 20; index += 1) {
+    store.record({ agent: 'codex', model: `model-${index}`, inputTokens: 1 });
+  }
+
+  const byModel = store.summary().providers.codex.byModel;
+  assert.equal(Object.keys(byModel).length, MAX_USAGE_MODELS);
+  assert.equal(Object.hasOwn(byModel, 'other'), true);
+  assert.equal(byModel.other.turns, 21);
+  await store.flush();
 });
 
 test('load prunes events older than eight days and rewrites the log', async () => {
@@ -329,4 +484,25 @@ test('long-running recording compacts by count and age without a restart', async
   await store.flush();
   assert.equal((await fs.readFile(path.join(rootDir, 'events.jsonl'), 'utf8')).trim().split('\n').length, 1);
   await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('count compaction leaves headroom before the next full-log rewrite', async (t) => {
+  const rootDir = await tmpRoot();
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const time = clock();
+  const store = await createUsageStore({
+    rootDir,
+    now: time.now,
+    maxEvents: 10,
+    pruneIntervalMs: HOUR,
+  }).init();
+
+  for (let index = 0; index < 11; index += 1) {
+    store.record({ agent: 'codex', model: `m${index}`, inputTokens: 1 });
+  }
+  await store.flush();
+
+  const lines = (await fs.readFile(path.join(rootDir, 'events.jsonl'), 'utf8')).trim().split('\n');
+  assert.equal(lines.length, 9);
+  assert.equal(store.summary().providers.codex.week.turns, 9);
 });

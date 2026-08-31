@@ -8,7 +8,16 @@ import test from 'node:test';
 
 import { RAU_DEFAULT_MODEL_ID, RAU_LOCKED_MODELS } from '../../rau-credits/catalog.mjs';
 import { replaceFileAtomically } from '../harness-update.mjs';
-import { createPiManager, defaultPiRoot, PI_SECRET_ID, RAU_SECRET_ID } from '../pi-manager.mjs';
+import {
+  createPiManager,
+  defaultPiRoot,
+  PI_API_KEY_MAX_CHARS,
+  PI_MODEL_ID_MAX_CHARS,
+  PI_MODEL_NAME_MAX_CHARS,
+  PI_SECRET_ID,
+  PI_SETTINGS_MAX_BYTES,
+  RAU_SECRET_ID,
+} from '../pi-manager.mjs';
 import { createMemorySecretStore } from '../secret-store.mjs';
 
 const PI_PACKAGE = '@earendil-works/pi-coding-agent';
@@ -146,6 +155,16 @@ function sha512Integrity(chunks) {
 function fastClock() {
   let tick = 0;
   return () => (tick += 1_000);
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((onResolve, onReject) => {
+    resolve = onResolve;
+    reject = onReject;
+  });
+  return { promise, resolve, reject };
 }
 
 async function readJson(file) {
@@ -287,6 +306,47 @@ test('OpenRouter OAuth cannot commit after cancel or owner-session close during 
   }
 });
 
+test('OpenRouter OAuth cannot commit after its exchange timeout', async () => {
+  const rootDir = await tmpRoot();
+  const secretStore = createMemorySecretStore();
+  const openRouter = fakeOpenRouter();
+  let markExchangeStarted = () => {};
+  let releaseExchange = () => {};
+  let requestSignal = null;
+  const exchangeStarted = new Promise((resolve) => { markExchangeStarted = resolve; });
+  const exchangeGate = new Promise((resolve) => { releaseExchange = resolve; });
+  const manager = await createPiManager({
+    rootDir,
+    secretStore,
+    openRouter,
+    oauthExchangeTimeoutMs: 5,
+    fetchImpl: async (_url, init = {}) => {
+      requestSignal = init.signal;
+      markExchangeStarted();
+      await exchangeGate;
+      return { ok: true, json: async () => ({ key: 'sk-or-v1-timeout-late' }) };
+    },
+  }).init();
+  const started = manager.beginOAuth('http://127.0.0.1:5175/oauth/openrouter/callback');
+  let committed = false;
+
+  const pending = manager.completeOAuth('late-code', started.state, {
+    onCommitted: () => { committed = true; },
+  });
+  await exchangeStarted;
+  await assert.rejects(pending, { code: 'OPENROUTER_OAUTH_TIMEOUT' });
+  assert.equal(requestSignal?.aborted, true);
+  assert.equal(committed, false);
+
+  // A transport that ignores the timeout abort cannot enter key validation or persistence.
+  releaseExchange();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(openRouter.calls.validate, []);
+  assert.equal(await secretStore.get('rhwp.pi.openrouter-api-key'), null);
+  assert.equal(manager.apiKey(), null);
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
 test('install runs npm with a prefix, reports progress and syncs assets', async () => {
   const rootDir = await tmpRoot();
   const prefixDir = path.join(rootDir, 'prefix');
@@ -366,7 +426,7 @@ test('Windows Pi cancellation waits for taskkill proof after leader exit', async
   let npmProcess;
   let taskkill;
   const spawnProcess = (command) => {
-    if (command === 'taskkill') {
+    if (command === 'C:\\Windows\\System32\\taskkill.exe') {
       taskkill = new EventEmitter();
       return taskkill;
     }
@@ -382,7 +442,7 @@ test('Windows Pi cancellation waits for taskkill proof after leader exit', async
     platform: 'win32',
     openRouter: fakeOpenRouter(),
     fetchImpl: offlineFetch,
-    baseEnv: { PATH: 'C:\\bin' },
+    baseEnv: { PATH: 'C:\\bin', SystemRoot: 'C:\\Windows' },
   });
   const installing = manager.install();
   const installFailure = assert.rejects(installing, { code: 'PI_INSTALL_FAILED' });
@@ -632,6 +692,96 @@ test('setApiKey validates first, stores the key only in the secure vault and kee
   await fs.rm(rootDir, { recursive: true, force: true });
 });
 
+test('a clear queued behind a deferred vault write wins without racing the credential store', async () => {
+  const rootDir = await tmpRoot();
+  const vaultWriteStarted = deferred();
+  const releaseVaultWrite = deferred();
+  let shouldBlockWrite = true;
+  let stored = null;
+  let deleteCalls = 0;
+  const secretStore = {
+    available: true,
+    async get() { return stored; },
+    async set(_id, value) {
+      if (shouldBlockWrite) {
+        shouldBlockWrite = false;
+        vaultWriteStarted.resolve();
+        await releaseVaultWrite.promise;
+      }
+      stored = value;
+    },
+    async delete() {
+      deleteCalls += 1;
+      stored = null;
+    },
+  };
+  const manager = createPiManager({ rootDir, openRouter: fakeOpenRouter(), secretStore });
+
+  const setting = manager.setApiKey('sk-or-v1-serialized-key');
+  await vaultWriteStarted.promise;
+  const clearing = manager.clearApiKey();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(deleteCalls, 0, 'clear must not touch the vault while setApiKey owns the transaction');
+
+  releaseVaultWrite.resolve();
+  await setting;
+  const cleared = await clearing;
+  assert.equal(deleteCalls, 1);
+  assert.equal(stored, null);
+  assert.equal(manager.apiKey(), null);
+  assert.equal(cleared.keyConfigured, false);
+  assert.equal((await readJson(path.join(rootDir, 'config.json'))).keyTail, null);
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('a model edit stays isolated while a deferred vault write owns the settings transaction', async () => {
+  const rootDir = await tmpRoot();
+  const vaultWriteStarted = deferred();
+  const releaseVaultWrite = deferred();
+  let shouldBlockWrite = true;
+  let stored = null;
+  const secretStore = {
+    available: true,
+    async get() { return stored; },
+    async set(_id, value) {
+      if (shouldBlockWrite) {
+        shouldBlockWrite = false;
+        vaultWriteStarted.resolve();
+        await releaseVaultWrite.promise;
+      }
+      stored = value;
+    },
+    async delete() { stored = null; },
+  };
+  const openRouter = fakeOpenRouter();
+  const manager = createPiManager({ rootDir, openRouter, secretStore });
+
+  const setting = manager.setApiKey('sk-or-v1-model-queue');
+  await vaultWriteStarted.promise;
+  const selecting = manager.setModels([{ id: 'anthropic/claude-haiku-4.5' }]);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(openRouter.calls.catalog, 1);
+  assert.deepEqual(
+    (await manager.status()).models,
+    [],
+    'setModels must not expose shared state before its queued transaction starts',
+  );
+
+  releaseVaultWrite.resolve();
+  await setting;
+  const selected = await selecting;
+  assert.equal(selected.keyTail, 'ueue');
+  assert.equal(selected.setupComplete, true);
+  assert.deepEqual(selected.models.map(({ id }) => id), ['anthropic/claude-haiku-4.5']);
+  assert.deepEqual(
+    (await readJson(path.join(rootDir, 'config.json'))).models.map(({ id }) => id),
+    ['anthropic/claude-haiku-4.5'],
+  );
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
 test('a rejected key throws OPENROUTER_KEY_INVALID and writes nothing', async () => {
   const rootDir = await tmpRoot();
   const manager = createPiManager({
@@ -728,6 +878,81 @@ test('Pi key persistence failures roll back the vault, memory, and written confi
   await fs.rm(rootDir, { recursive: true, force: true });
 });
 
+test('setApiKey restores the exact fresh vault snapshot after an earlier vault read failure', async () => {
+  const rootDir = await tmpRoot();
+  const configPath = path.join(rootDir, 'config.json');
+  const initialReadError = new Error('vault was locked during initialization');
+  const persistenceError = new Error('config persistence failed after vault replacement');
+  let stored = 'sk-or-v1-existing-vault-value';
+  let getCalls = 0;
+  let failNextConfigCommit = true;
+  const writes = [];
+  const secretStore = {
+    available: true,
+    async get() {
+      getCalls += 1;
+      if (getCalls === 1) throw initialReadError;
+      return stored;
+    },
+    async set(_id, value) {
+      writes.push(value);
+      stored = value;
+    },
+    async delete() { stored = null; },
+  };
+  const manager = await createPiManager({
+    rootDir,
+    openRouter: fakeOpenRouter(),
+    secretStore,
+    async replaceFile(tempPath, targetPath, options) {
+      await replaceFileAtomically(tempPath, targetPath, options);
+      if (targetPath === configPath && failNextConfigCommit) {
+        failNextConfigCommit = false;
+        throw persistenceError;
+      }
+    },
+  }).init();
+  assert.equal(manager.apiKey(), null, 'the failed initial read must not invent a vault value');
+
+  await assert.rejects(manager.setApiKey('sk-or-v1-replacement'), persistenceError);
+  assert.equal(getCalls, 2, 'the transaction obtains a fresh vault snapshot');
+  assert.deepEqual(writes, [
+    'sk-or-v1-replacement',
+    'sk-or-v1-existing-vault-value',
+  ]);
+  assert.equal(stored, 'sk-or-v1-existing-vault-value');
+  assert.equal(manager.apiKey(), null);
+  assert.equal((await readJson(configPath)).keyTail, null);
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('setApiKey aborts before vault mutation when its fresh snapshot cannot be read', async () => {
+  const rootDir = await tmpRoot();
+  const readError = new Error('vault remains locked');
+  let setCalls = 0;
+  let deleteCalls = 0;
+  const manager = await createPiManager({
+    rootDir,
+    openRouter: fakeOpenRouter(),
+    secretStore: {
+      available: true,
+      async get() { throw readError; },
+      async set() { setCalls += 1; },
+      async delete() { deleteCalls += 1; },
+    },
+  }).init();
+
+  await assert.rejects(manager.setApiKey('sk-or-v1-must-not-write'), readError);
+  assert.equal(setCalls, 0);
+  assert.equal(deleteCalls, 0);
+  assert.equal(manager.apiKey(), null);
+  await assert.rejects(fs.stat(path.join(rootDir, 'config.json')));
+  await assert.rejects(fs.stat(path.join(rootDir, 'agent', 'models.json')));
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
 test('Pi reports both the auth failure and a failed rollback', async () => {
   const rootDir = await tmpRoot();
   const original = new Error('vault write failed after mutation');
@@ -752,6 +977,48 @@ test('Pi reports both the auth failure and a failed rollback', async () => {
     return true;
   });
   assert.equal(manager.apiKey(), null);
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('a failed clear persistence restores the vault, memory and both settings files', async () => {
+  const rootDir = await tmpRoot();
+  const configPath = path.join(rootDir, 'config.json');
+  const persistenceError = new Error('clear config persistence failed after replacement');
+  let failNextConfigCommit = false;
+  const secretStore = createMemorySecretStore();
+  const manager = createPiManager({
+    rootDir,
+    openRouter: fakeOpenRouter(),
+    secretStore,
+    async replaceFile(tempPath, targetPath, options) {
+      await replaceFileAtomically(tempPath, targetPath, options);
+      if (targetPath === configPath && failNextConfigCommit) {
+        failNextConfigCommit = false;
+        throw persistenceError;
+      }
+    },
+  });
+  await manager.setApiKey('sk-or-v1-restore-clear', { account: 'andy@example.com' });
+  await manager.setModels([{ id: 'deepseek/deepseek-chat-v3.1' }]);
+  failNextConfigCommit = true;
+
+  await assert.rejects(manager.clearApiKey(), persistenceError);
+  const status = await manager.status();
+  assert.equal(await secretStore.get(PI_SECRET_ID), 'sk-or-v1-restore-clear');
+  assert.equal(manager.apiKey(), 'sk-or-v1-restore-clear');
+  assert.equal(status.keyTail, 'lear');
+  assert.equal(status.account, 'andy@example.com');
+  assert.equal(status.setupComplete, true);
+  assert.deepEqual(status.models.map(({ id }) => id), ['deepseek/deepseek-chat-v3.1']);
+  const persisted = await readJson(configPath);
+  assert.equal(persisted.keyTail, 'lear');
+  assert.equal(persisted.account, 'andy@example.com');
+  assert.equal(persisted.setupComplete, true);
+  assert.deepEqual(
+    (await readJson(path.join(rootDir, 'agent', 'models.json'))).providers.openrouter.models.map(({ id }) => id),
+    ['deepseek/deepseek-chat-v3.1'],
+  );
 
   await fs.rm(rootDir, { recursive: true, force: true });
 });
@@ -820,6 +1087,47 @@ test('setModels writes the pi provider block and survives a reopen', async () =>
   assert.equal(reloaded.models.length, 2);
   assert.equal(reloaded.models[0].name, '빠른 딥식');
   assert.equal(reopened.apiKey(), 'sk-or-v1-secret-abcd');
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('a failed model persistence restores the previous in-memory and on-disk selection', async () => {
+  const rootDir = await tmpRoot();
+  const configPath = path.join(rootDir, 'config.json');
+  const persistenceError = new Error('model config persistence failed after replacement');
+  let failNextConfigCommit = false;
+  const manager = createPiManager({
+    rootDir,
+    openRouter: fakeOpenRouter(),
+    secretStore: createMemorySecretStore(),
+    async replaceFile(tempPath, targetPath, options) {
+      await replaceFileAtomically(tempPath, targetPath, options);
+      if (targetPath === configPath && failNextConfigCommit) {
+        failNextConfigCommit = false;
+        throw persistenceError;
+      }
+    },
+  });
+  await manager.setApiKey('sk-or-v1-model-rollback');
+  await manager.setModels([{ id: 'deepseek/deepseek-chat-v3.1' }]);
+  failNextConfigCommit = true;
+
+  await assert.rejects(
+    manager.setModels([{ id: 'anthropic/claude-haiku-4.5' }]),
+    persistenceError,
+  );
+  assert.deepEqual(
+    (await manager.status()).models.map(({ id }) => id),
+    ['deepseek/deepseek-chat-v3.1'],
+  );
+  assert.deepEqual(
+    (await readJson(configPath)).models.map(({ id }) => id),
+    ['deepseek/deepseek-chat-v3.1'],
+  );
+  assert.deepEqual(
+    (await readJson(path.join(rootDir, 'agent', 'models.json'))).providers.openrouter.models.map(({ id }) => id),
+    ['deepseek/deepseek-chat-v3.1'],
+  );
 
   await fs.rm(rootDir, { recursive: true, force: true });
 });
@@ -907,7 +1215,118 @@ test('setModels rejects unknown ids, empty lists and more than three picks', asy
     assert.match(error.message, /nope\/not-a-model/);
     return true;
   });
+  await assert.rejects(
+    () => manager.setModels([{ id: `a${'b'.repeat(PI_MODEL_ID_MAX_CHARS)}` }]),
+    { code: 'PI_MODEL_INVALID' },
+  );
+  await assert.rejects(
+    () => manager.setModels([{
+      id: 'deepseek/deepseek-chat-v3.1',
+      name: 'n'.repeat(PI_MODEL_NAME_MAX_CHARS + 1),
+    }]),
+    { code: 'PI_MODEL_NAME_INVALID' },
+  );
+  await assert.rejects(
+    () => manager.setModels([{ id: 'deepseek/deepseek-chat-v3.1', name: 'line\nbreak' }]),
+    { code: 'PI_MODEL_NAME_INVALID' },
+  );
   assert.deepEqual((await manager.status()).models, []);
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('Pi rejects oversized API keys before validation or persistence', async () => {
+  const rootDir = await tmpRoot();
+  const openRouter = fakeOpenRouter();
+  const manager = createPiManager({ rootDir, openRouter });
+
+  await assert.rejects(
+    manager.setApiKey({ toString: () => { throw new Error('must not coerce'); } }),
+    { code: 'OPENROUTER_KEY_INVALID' },
+  );
+  await assert.rejects(
+    manager.setApiKey('k'.repeat(PI_API_KEY_MAX_CHARS + 1)),
+    { code: 'OPENROUTER_KEY_TOO_LARGE' },
+  );
+  assert.deepEqual(openRouter.calls.validate, []);
+  await assert.rejects(fs.stat(path.join(rootDir, 'config.json')), { code: 'ENOENT' });
+  await assert.rejects(fs.stat(path.join(rootDir, 'agent', 'models.json')), { code: 'ENOENT' });
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('Pi ignores oversized persisted config and legacy model files', async () => {
+  const rootDir = await tmpRoot();
+  const configPath = path.join(rootDir, 'config.json');
+  const modelsPath = path.join(rootDir, 'agent', 'models.json');
+  await fs.mkdir(path.dirname(modelsPath), { recursive: true });
+  await fs.writeFile(configPath, JSON.stringify({
+    models: [{ id: 'deepseek/deepseek-chat-v3.1', name: 'unsafe persisted model' }],
+    padding: 'c'.repeat(PI_SETTINGS_MAX_BYTES),
+  }));
+  await fs.writeFile(modelsPath, JSON.stringify({
+    providers: { openrouter: { apiKey: 'sk-or-v1-should-not-load' } },
+    padding: 'm'.repeat(PI_SETTINGS_MAX_BYTES),
+  }));
+
+  const manager = await createPiManager({ rootDir, openRouter: fakeOpenRouter() }).init();
+  const status = await manager.status();
+  assert.deepEqual(status.models, []);
+  assert.equal(status.keyConfigured, false);
+  assert.ok((await fs.stat(configPath)).size > PI_SETTINGS_MAX_BYTES);
+  assert.ok((await fs.stat(modelsPath)).size > PI_SETTINGS_MAX_BYTES);
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('Pi never coerces non-string keys loaded from legacy files or the vault', async () => {
+  const legacyRoot = await tmpRoot();
+  const legacyModels = path.join(legacyRoot, 'agent', 'models.json');
+  await fs.mkdir(path.dirname(legacyModels), { recursive: true });
+  await fs.writeFile(legacyModels, JSON.stringify({
+    providers: { openrouter: { apiKey: { nested: 'not-a-key' } } },
+  }));
+  const legacy = await createPiManager({
+    rootDir: legacyRoot,
+    openRouter: fakeOpenRouter(),
+  }).init();
+  assert.equal((await legacy.status()).keyConfigured, false);
+
+  const vaultRoot = await tmpRoot();
+  let writes = 0;
+  const vault = await createPiManager({
+    rootDir: vaultRoot,
+    openRouter: fakeOpenRouter(),
+    secretStore: {
+      available: true,
+      async get() { return { toString: () => { throw new Error('must not coerce'); } }; },
+      async set() { writes += 1; },
+      async delete() { writes += 1; },
+    },
+  }).init();
+  assert.equal((await vault.status()).keyConfigured, false);
+  assert.equal(writes, 0);
+
+  await fs.rm(legacyRoot, { recursive: true, force: true });
+  await fs.rm(vaultRoot, { recursive: true, force: true });
+});
+
+test('Pi atomic settings writes remove staged files after replacement failure', async () => {
+  const rootDir = await tmpRoot();
+  const replacementError = new Error('replacement failed before consuming the temp file');
+  let stagedPath = null;
+  const manager = createPiManager({
+    rootDir,
+    openRouter: fakeOpenRouter(),
+    async replaceFile(tempPath) {
+      stagedPath = tempPath;
+      throw replacementError;
+    },
+  });
+
+  await assert.rejects(manager.syncAssets(), replacementError);
+  assert.ok(stagedPath);
+  await assert.rejects(fs.stat(stagedPath), { code: 'ENOENT' });
 
   await fs.rm(rootDir, { recursive: true, force: true });
 });

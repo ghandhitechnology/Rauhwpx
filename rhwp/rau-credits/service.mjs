@@ -13,7 +13,7 @@ import {
   renderReadyPage,
 } from './pages.mjs';
 import { createRateLimiter } from './rate-limit.mjs';
-import { createMemoryStore } from './store.mjs';
+import { assertStoreStateFits, createMemoryStore } from './store.mjs';
 
 const SESSION_TTL_MS = 10 * 60 * 1000;
 const AUTHORIZATION_TTL_MS = 2 * 60 * 1000;
@@ -23,6 +23,12 @@ const MAX_UPSTREAM_BODY_BYTES = 64 * 1024;
 const UPSTREAM_TIMEOUT_MS = 15_000;
 const MAX_MANUAL_ATTEMPTS = 5;
 const MAX_KEY_RECONCILE_PAGES = 10;
+const MAX_WORKOS_USER_ID_BYTES = 256;
+const MAX_LOGIN_EMAIL_BYTES = 320;
+const MAX_OPENROUTER_KEY_BYTES = 8 * 1024;
+const MAX_OPENROUTER_KEY_ID_BYTES = 1024;
+const MAX_PROVISIONING_INTENT_ID_BYTES = 64;
+const MAX_PROVISIONING_INTENT_NAME_BYTES = 320;
 const MANUAL_CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 const WORKOS_AUTHORIZE = 'https://api.workos.com/user_management/authorize';
 const WORKOS_AUTHENTICATE = 'https://api.workos.com/user_management/authenticate';
@@ -30,11 +36,66 @@ const WORKOS_MAGIC_AUTH = 'https://api.workos.com/user_management/magic_auth';
 const OPENROUTER_KEYS = 'https://openrouter.ai/api/v1/keys';
 const WORKOS_PROVIDERS = new Set(['GoogleOAuth', 'GitHubOAuth']);
 const RAU_ICON_PATH = fileURLToPath(new URL('./public/rau.png', import.meta.url));
+const OPENROUTER_MINT_NOT_DISPATCHED = Symbol('openrouter-mint-not-dispatched');
 
 function creditsError(code, message) {
   const error = new Error(message);
   error.code = code;
   return error;
+}
+
+/**
+ * Mark only failures for which the adapter can prove that no paid provider
+ * request was dispatched. Ordinary fetch/network failures remain uncertain.
+ */
+export function markOpenRouterMintNotDispatched(error) {
+  const marked = error instanceof Error ? error : new Error(String(error ?? 'OpenRouter mint failed'));
+  Object.defineProperty(marked, OPENROUTER_MINT_NOT_DISPATCHED, { value: true });
+  return marked;
+}
+
+function isOpenRouterMintNotDispatched(error) {
+  return error?.[OPENROUTER_MINT_NOT_DISPATCHED] === true;
+}
+
+function boundedUtf8(value, maxBytes) {
+  return typeof value === 'string'
+    && value.length <= maxBytes
+    && Buffer.byteLength(value, 'utf8') <= maxBytes;
+}
+
+function validatedWorkosUserId(value) {
+  if (!boundedUtf8(value, MAX_WORKOS_USER_ID_BYTES)
+    || !/^user_[A-Za-z0-9_-]+$/.test(value)) {
+    throw creditsError('WORKOS_AUTH_FAILED', '로그인 계정 정보를 확인하지 못했어요');
+  }
+  return value;
+}
+
+function validatedAccountEmail(value) {
+  if (value == null) return null;
+  if (!boundedUtf8(value, MAX_LOGIN_EMAIL_BYTES)) {
+    throw creditsError('WORKOS_AUTH_FAILED', '로그인 이메일 정보를 확인하지 못했어요');
+  }
+  const normalized = value.trim().toLowerCase();
+  if (!normalized.includes('@')) return null;
+  return normalized;
+}
+
+function validatedMintedKey(value) {
+  if (!boundedUtf8(value, MAX_OPENROUTER_KEY_BYTES) || !value.trim()) {
+    throw creditsError('OPENROUTER_PROVISION_FAILED', '발급된 체험 키 형식을 확인하지 못했어요');
+  }
+  return value.trim();
+}
+
+function validatedMintedKeyId(value) {
+  if (value == null) return null;
+  if (!boundedUtf8(value, MAX_OPENROUTER_KEY_ID_BYTES)
+    || !/^[A-Za-z0-9._:-]+$/.test(value)) {
+    throw creditsError('OPENROUTER_PROVISION_FAILED', '발급된 체험 키 식별자를 확인하지 못했어요');
+  }
+  return value;
 }
 
 function digest(value) {
@@ -321,6 +382,13 @@ export function createCreditsService({
   }
 
   async function defaultCreateKey({ name }) {
+    if (!boundedUtf8(openRouterProvisioningKey, MAX_OPENROUTER_KEY_BYTES)
+      || !openRouterProvisioningKey.trim()) {
+      throw markOpenRouterMintNotDispatched(creditsError(
+        'OPENROUTER_PROVISION_FAILED',
+        '체험 키 발급 설정을 확인하지 못했어요',
+      ));
+    }
     const { response, body } = await upstreamJson(OPENROUTER_KEYS, {
       method: 'POST',
       headers: {
@@ -391,160 +459,285 @@ export function createCreditsService({
   const mintKey = createOpenRouterKey ?? defaultCreateKey;
   const reconcileKey = reconcileOpenRouterKey ?? defaultReconcileKey;
 
+  function assertFinalKeyRecordFits(state, ownerId, workosUserId, normalizedEmail, createdAt) {
+    const projected = structuredClone(state);
+    const maximumRecord = {
+      keyCiphertext: encryptSecret(sessionSecret, 'k'.repeat(MAX_OPENROUTER_KEY_BYTES)),
+      openrouterKeyId: 'i'.repeat(MAX_OPENROUTER_KEY_ID_BYTES),
+      createdAt,
+    };
+    projected.users[ownerId] = maximumRecord;
+    if (ownerId !== workosUserId) projected.users[workosUserId] = { ...maximumRecord };
+    if (normalizedEmail) {
+      projected.emailIndex ??= {};
+      projected.emailIndex[normalizedEmail] = workosUserId;
+    }
+    try {
+      assertStoreStateFits(projected);
+    } catch (error) {
+      if (error?.code !== 'RAU_CREDITS_STORE_TOO_LARGE') throw error;
+      throw creditsError(
+        'RAU_CREDITS_CAPACITY_EXCEEDED',
+        '체험 키를 안전하게 저장할 공간이 부족해 새 키를 만들지 않았습니다',
+      );
+    }
+  }
+
   /**
    * 계정당 키 하나. WorkOS 사용자 id 와 검증된 이메일을 둘 다 인덱스로 걸어,
    * 같은 메일함을 다른 인증 수단으로 들어와도 두 번째 $5 가 만들어지지 않게 한다.
    */
-  async function keyForUser(workosUserId, email = null) {
-    const normalizedEmail = typeof email === 'string' && email.includes('@')
-      ? email.trim().toLowerCase()
+  async function keyForUserWithinMutation(workosUserId, email = null) {
+    workosUserId = validatedWorkosUserId(workosUserId);
+    const normalizedEmail = validatedAccountEmail(email);
+    const state = await store.load();
+    state.users ??= {};
+    state.sessions ??= {};
+    if (typeof state.users !== 'object' || Array.isArray(state.users)
+      || typeof state.sessions !== 'object' || Array.isArray(state.sessions)) {
+      throw creditsError('TRIAL_KEY_UNREADABLE', '저장된 체험 키 정보를 읽을 수 없어요');
+    }
+    const directUser = Object.hasOwn(state.users, workosUserId);
+    const byEmail = normalizedEmail && state.emailIndex
+      && typeof state.emailIndex === 'object' && !Array.isArray(state.emailIndex)
+      && Object.hasOwn(state.emailIndex, normalizedEmail)
+      ? state.emailIndex[normalizedEmail]
       : null;
-    return serializeMutation(async () => {
-      const state = await store.load();
-      state.users ??= {};
-      state.sessions ??= {};
-      const byEmail = normalizedEmail ? state.emailIndex?.[normalizedEmail] : null;
-      const existingId = state.users[workosUserId] ? workosUserId : byEmail;
-      const existing = existingId ? state.users[existingId] : null;
-      if (byEmail && !existing) {
+    const existingId = directUser ? workosUserId : byEmail;
+    const existing = typeof existingId === 'string' && Object.hasOwn(state.users, existingId)
+      ? state.users[existingId]
+      : null;
+    if (byEmail && !existing) {
+      throw creditsError(
+        'TRIAL_KEY_UNREADABLE',
+        '기존 체험 키 연결 정보가 손상됐어요. 새 키를 만들지 않았습니다',
+      );
+    }
+    let existingKey = null;
+    if (existing?.keyCiphertext) {
+      try {
+        existingKey = validatedMintedKey(decryptSecret(sessionSecret, existing.keyCiphertext));
+      } catch {
         throw creditsError(
           'TRIAL_KEY_UNREADABLE',
-          '기존 체험 키 연결 정보가 손상됐어요. 새 키를 만들지 않았습니다',
+          '기존 체험 키를 읽을 수 없어요. 새 키를 만들기 전에 지원팀에서 기존 키를 해지해야 합니다',
         );
       }
-      let existingKey = null;
-      if (existing?.keyCiphertext) {
-        try {
-          existingKey = decryptSecret(sessionSecret, existing.keyCiphertext);
-        } catch {
-          throw creditsError(
-            'TRIAL_KEY_UNREADABLE',
-            '기존 체험 키를 읽을 수 없어요. 새 키를 만들기 전에 지원팀에서 기존 키를 해지해야 합니다',
-          );
-        }
+    }
+    if (existingKey) {
+      if (existingId !== workosUserId) {
+        state.users[workosUserId] = { ...state.users[existingId] };
       }
-      if (existingKey) {
-        if (existingId !== workosUserId) {
-          state.users[workosUserId] = { ...state.users[existingId] };
-        }
-        if (normalizedEmail) {
-          state.emailIndex ??= {};
-          state.emailIndex[normalizedEmail] = workosUserId;
-        }
-        await store.save(state);
-        return existingKey;
-      }
-
-      if (existing && !existing.provisioning) {
-        throw creditsError(
-          'TRIAL_KEY_UNREADABLE',
-          '기존 체험 키 정보가 불완전해요. 새 키를 만들지 않았습니다',
-        );
-      }
-      const ownerId = existingId ?? workosUserId;
-      let intent = null;
-      if (existing?.provisioning) {
-        const pending = existing.provisioning;
-        if (typeof pending.id !== 'string' || typeof pending.name !== 'string'
-          || !Number.isFinite(pending.createdAt)
-          || (pending.phase !== undefined
-            && pending.phase !== 'prepared'
-            && pending.phase !== 'submitting')) {
-          throw creditsError(
-            'TRIAL_KEY_UNREADABLE',
-            '중단된 체험 키 발급 정보가 손상됐어요. 새 키를 만들지 않았습니다',
-          );
-        }
-        if (pending.phase === 'prepared') {
-          // The external call always follows a durable `submitting` save, so a
-          // prepared intent is proof that no request was sent yet.
-          intent = pending;
-        } else {
-          // Missing phase is the compatibility form of an older uncertain
-          // intent. OpenRouter returns plaintext only once and list results may
-          // lag creation, so absence can never authorize another paid POST.
-          const removed = await reconcileKey({
-            intentId: pending.id,
-            name: pending.name,
-            createdAt: pending.createdAt,
-          });
-          if (removed !== true) {
-            throw creditsError(
-              'OPENROUTER_RECONCILE_PENDING',
-              '중단된 체험 키가 아직 확인되지 않아 새 키를 만들지 않았습니다. 잠시 후 다시 시도해 주세요',
-            );
-          }
-        }
-      }
-
-      if (!intent) {
-        const intentId = randomBytes(12).toString('base64url');
-        intent = {
-          id: intentId,
-          name: `rau-${ownerId.slice(0, 12)}-${intentId}`,
-          createdAt: now(),
-          phase: 'prepared',
-        };
-        state.users[ownerId] = { provisioning: intent };
-        if (normalizedEmail) {
-          state.emailIndex ??= {};
-          state.emailIndex[normalizedEmail] = ownerId;
-        }
-        // Persist a no-side-effect state first. A crash here can safely resume
-        // the same intent without querying or minting a replacement.
-        await store.save(state);
-      }
-
-      intent = { ...intent, phase: 'submitting', submittedAt: now() };
-      state.users[ownerId] = { provisioning: intent };
-      // This phase must be durable before the paid external mutation. Any
-      // crash after it is uncertain and must reconcile positively or fail.
-      await store.save(state);
-
-      const minted = await mintKey({ name: intent.name });
-      if (typeof minted?.key !== 'string' || !minted.key) {
-        throw creditsError('OPENROUTER_PROVISION_FAILED', '체험 키를 만들지 못했어요');
-      }
-      const record = {
-        keyCiphertext: encryptSecret(sessionSecret, minted.key),
-        openrouterKeyId: typeof minted.id === 'string' ? minted.id : null,
-        createdAt: now(),
-      };
-      state.users[ownerId] = record;
-      if (ownerId !== workosUserId) state.users[workosUserId] = { ...record };
       if (normalizedEmail) {
         state.emailIndex ??= {};
         state.emailIndex[normalizedEmail] = workosUserId;
       }
       await store.save(state);
-      return minted.key;
-    });
+      return existingKey;
+    }
+
+    if (existing && !existing.provisioning) {
+      throw creditsError(
+        'TRIAL_KEY_UNREADABLE',
+        '기존 체험 키 정보가 불완전해요. 새 키를 만들지 않았습니다',
+      );
+    }
+    const ownerId = existingId == null ? workosUserId : validatedWorkosUserId(existingId);
+    let intent = null;
+    if (existing?.provisioning) {
+      const pending = existing.provisioning;
+      if (!boundedUtf8(pending.id, MAX_PROVISIONING_INTENT_ID_BYTES)
+        || !/^[A-Za-z0-9_-]+$/.test(pending.id)
+        || !boundedUtf8(pending.name, MAX_PROVISIONING_INTENT_NAME_BYTES)
+        || !/^[A-Za-z0-9_-]+$/.test(pending.name)
+        || !Number.isFinite(pending.createdAt)
+        || (pending.phase !== undefined
+          && pending.phase !== 'prepared'
+          && pending.phase !== 'submitting')) {
+        throw creditsError(
+          'TRIAL_KEY_UNREADABLE',
+          '중단된 체험 키 발급 정보가 손상됐어요. 새 키를 만들지 않았습니다',
+        );
+      }
+      if (pending.phase === 'prepared') {
+        // The external call always follows a durable `submitting` save, so a
+        // prepared intent is proof that no request was sent yet.
+        intent = pending;
+      } else {
+        // Missing phase is the compatibility form of an older uncertain
+        // intent. OpenRouter returns plaintext only once and list results may
+        // lag creation, so absence can never authorize another paid POST.
+        const removed = await reconcileKey({
+          intentId: pending.id,
+          name: pending.name,
+          createdAt: pending.createdAt,
+        });
+        if (removed !== true) {
+          throw creditsError(
+            'OPENROUTER_RECONCILE_PENDING',
+            '중단된 체험 키가 아직 확인되지 않아 새 키를 만들지 않았습니다. 잠시 후 다시 시도해 주세요',
+          );
+        }
+      }
+    }
+
+    if (!intent) {
+      const intentId = randomBytes(12).toString('base64url');
+      intent = {
+        id: intentId,
+        name: `rau-${ownerId.slice(0, 12)}-${intentId}`,
+        createdAt: now(),
+        phase: 'prepared',
+      };
+      state.users[ownerId] = { provisioning: intent };
+      if (normalizedEmail) {
+        state.emailIndex ??= {};
+        state.emailIndex[normalizedEmail] = ownerId;
+      }
+      // Persist a no-side-effect state first. A crash here can safely resume
+      // the same intent without querying or minting a replacement.
+      await store.save(state);
+    }
+
+    const recordCreatedAt = now();
+    // Prove that the largest accepted key record can be committed before the
+    // paid mutation. This uses the exact serializer and cap as the file store.
+    assertFinalKeyRecordFits(
+      state,
+      ownerId,
+      workosUserId,
+      normalizedEmail,
+      recordCreatedAt,
+    );
+
+    intent = { ...intent, phase: 'submitting', submittedAt: now() };
+    state.users[ownerId] = { provisioning: intent };
+    // This phase must be durable before the paid external mutation. Any
+    // crash after it is uncertain and must reconcile positively or fail.
+    await store.save(state);
+
+    let minted;
+    try {
+      minted = await mintKey({ name: intent.name });
+    } catch (error) {
+      if (!isOpenRouterMintNotDispatched(error)) throw error;
+      const prepared = {
+        id: intent.id,
+        name: intent.name,
+        createdAt: intent.createdAt,
+        phase: 'prepared',
+      };
+      state.users[ownerId] = { provisioning: prepared };
+      try {
+        await store.save(state);
+      } catch (rollbackError) {
+        const failure = new AggregateError(
+          [error, rollbackError],
+          'OpenRouter mint was not dispatched, but restoring the prepared intent failed.',
+          { cause: error },
+        );
+        failure.code = 'OPENROUTER_PROVISION_ROLLBACK_FAILED';
+        throw failure;
+      }
+      throw error;
+    }
+    const mintedKey = validatedMintedKey(minted?.key);
+    const mintedId = validatedMintedKeyId(minted?.id);
+    const record = {
+      keyCiphertext: encryptSecret(sessionSecret, mintedKey),
+      openrouterKeyId: mintedId,
+      createdAt: recordCreatedAt,
+    };
+    state.users[ownerId] = record;
+    if (ownerId !== workosUserId) state.users[workosUserId] = { ...record };
+    if (normalizedEmail) {
+      state.emailIndex ??= {};
+      state.emailIndex[normalizedEmail] = workosUserId;
+    }
+    await store.save(state);
+    return mintedKey;
+  }
+
+  function keyForUser(workosUserId, email = null) {
+    return serializeMutation(() => keyForUserWithinMutation(workosUserId, email));
+  }
+
+  function isV1Session(session) {
+    return Boolean(session) && (session.protocol === undefined || session.protocol === 1);
+  }
+
+  function assertV1Session(session) {
+    if (!isV1Session(session)) {
+      throw creditsError('DEVICE_SESSION_INVALID', '로그인 세션이 없거나 만료됐어요');
+    }
+    return session;
+  }
+
+  function assertLiveV1Session(session) {
+    const current = assertV1Session(session);
+    if (now() - current.createdAt > SESSION_TTL_MS) {
+      throw creditsError('DEVICE_SESSION_EXPIRED', '로그인 세션이 만료됐어요');
+    }
+    return current;
+  }
+
+  function assertPendingV1Session(session) {
+    const current = assertLiveV1Session(session);
+    if (current.status !== 'pending') {
+      throw creditsError('DEVICE_SESSION_INVALID', '로그인 세션이 없거나 만료됐어요');
+    }
+    return current;
   }
 
   async function finishDeviceLogin(deviceId, userId, email = null) {
-    const accountEmail = typeof email === 'string' && email.includes('@') ? email.trim() : null;
-    const session = (await store.load()).sessions[deviceId];
-    if (!session || session.status !== 'pending') {
-      throw creditsError('DEVICE_SESSION_INVALID', '로그인 세션이 없거나 만료됐어요');
-    }
-    if (now() - session.createdAt > SESSION_TTL_MS) {
-      throw creditsError('DEVICE_SESSION_EXPIRED', '로그인 세션이 만료됐어요');
-    }
-    const apiKey = await keyForUser(userId, accountEmail);
-    await mutate((state) => {
-      const current = state.sessions[deviceId];
-      if (!current || current.status !== 'pending') {
-        throw creditsError('DEVICE_SESSION_INVALID', '로그인 세션이 없거나 만료됐어요');
+    userId = validatedWorkosUserId(userId);
+    const requestedEmail = validatedAccountEmail(email);
+    return serializeMutation(async () => {
+      let state = await store.load();
+      let current = assertPendingV1Session(state.sessions[deviceId]);
+      const claim = current.completionClaim;
+      if (claim !== undefined && (
+        !claim || typeof claim !== 'object'
+        || typeof claim.workosUserId !== 'string'
+        || claim.workosUserId !== userId
+      )) {
+        throw creditsError(
+          'DEVICE_SESSION_INVALID',
+          '이미 다른 계정으로 처리 중인 로그인 세션이에요',
+        );
       }
-      if (now() - current.createdAt > SESSION_TTL_MS) {
-        throw creditsError('DEVICE_SESSION_EXPIRED', '로그인 세션이 만료됐어요');
+      const accountEmail = claim?.email != null
+        ? validatedAccountEmail(claim.email)
+        : requestedEmail;
+      if (claim === undefined) {
+        current.completionClaim = {
+          workosUserId: userId,
+          email: accountEmail,
+          claimedAt: now(),
+        };
+        // Bind the session before any paid provider mutation. The same
+        // principal can resume a durable provisioning intent after failure,
+        // while a different principal cannot consume the session.
+        await store.save(state);
+      }
+
+      const apiKey = await keyForUserWithinMutation(userId, accountEmail);
+      state = await store.load();
+      current = assertPendingV1Session(state.sessions[deviceId]);
+      if (current.completionClaim?.workosUserId !== userId) {
+        throw creditsError(
+          'DEVICE_SESSION_INVALID',
+          '로그인 세션의 계정 연결 정보를 확인할 수 없어요',
+        );
       }
       current.status = 'ready';
       current.workosUserId = userId;
       current.email = accountEmail;
       current.apiKeyCiphertext = encryptSecret(sessionSecret, apiKey);
+      delete current.completionClaim;
+      await store.save(state);
+      return { deviceId, workosUserId: userId, email: accountEmail };
     });
-    return { deviceId, workosUserId: userId, email: accountEmail };
   }
 
   function assertLiveV2Session(session) {
@@ -557,11 +750,48 @@ export function createCreditsService({
     return session;
   }
 
-  async function markV2Authenticated(deviceId, userId, email = null) {
+  function authenticatedV2Result(deviceId, session) {
+    try {
+      return {
+        deviceId,
+        pairingCode: session.pairingCode,
+        confirmationToken: decryptSecret(sessionSecret, session.confirmationTokenCiphertext),
+      };
+    } catch {
+      throw creditsError('DEVICE_SESSION_INVALID', '로그인 확인 정보를 읽을 수 없어요');
+    }
+  }
+
+  function readyV2Result(session) {
+    try {
+      return {
+        pairingCode: session.pairingCode,
+        redirectUri: session.redirectUri,
+        callbackState: session.callbackState,
+        returnMode: session.returnMode,
+        authorizationCode: decryptSecret(sessionSecret, session.authorizationCodeCiphertext),
+        manualCode: displayCode(decryptSecret(sessionSecret, session.manualCodeCiphertext)),
+        expiresAt: new Date(session.authorizationExpiresAt).toISOString(),
+      };
+    } catch {
+      throw creditsError('DEVICE_SESSION_INVALID', '로그인 반환 정보를 읽을 수 없어요');
+    }
+  }
+
+  async function markV2Authenticated(deviceId, userId, email = null, magicRetryDigest = null) {
+    userId = validatedWorkosUserId(userId);
     const confirmationToken = randomBytes(24).toString('base64url');
-    const accountEmail = typeof email === 'string' && email.includes('@') ? email.trim() : null;
-    const result = await mutate((state) => {
+    const accountEmail = validatedAccountEmail(email);
+    return mutate((state) => {
       const session = assertLiveV2Session(state.sessions[deviceId]);
+      if (session.status === 'authenticated') {
+        if (session.workosUserId !== userId
+          || (magicRetryDigest !== null
+            && !sameDigest(session.magicRetryDigest, magicRetryDigest))) {
+          throw creditsError('DEVICE_SESSION_INVALID', '이미 다른 계정으로 처리된 로그인 세션이에요');
+        }
+        return authenticatedV2Result(deviceId, session);
+      }
       if (session.status !== 'pending') {
         throw creditsError('DEVICE_SESSION_INVALID', '이미 처리된 로그인 세션이에요');
       }
@@ -569,10 +799,10 @@ export function createCreditsService({
       session.workosUserId = userId;
       session.email = accountEmail;
       session.confirmationTokenDigest = digest(confirmationToken);
-      delete session.oauthStateDigest;
-      return { deviceId, pairingCode: session.pairingCode };
+      session.confirmationTokenCiphertext = encryptSecret(sessionSecret, confirmationToken);
+      if (magicRetryDigest !== null) session.magicRetryDigest = magicRetryDigest;
+      return { deviceId, pairingCode: session.pairingCode, confirmationToken };
     });
-    return { ...result, confirmationToken };
   }
 
   async function findV2SessionByOauthState(oauthState) {
@@ -580,13 +810,34 @@ export function createCreditsService({
     const state = await store.load();
     for (const [deviceId, session] of Object.entries(state.sessions)) {
       if (session?.protocol === 2
-        && session.status === 'pending'
+        && (session.status === 'pending' || session.status === 'authenticated')
         && sameDigest(session.oauthStateDigest, wanted)) {
         assertLiveV2Session(session);
-        return deviceId;
+        return { deviceId, status: session.status };
       }
     }
     throw creditsError('OAUTH_STATE_INVALID', '로그인 요청을 확인할 수 없어요');
+  }
+
+  async function oauthCallbackTarget(oauthState) {
+    const rawState = String(oauthState ?? '');
+    const wanted = digest(rawState);
+    const state = await store.load();
+    for (const [deviceId, session] of Object.entries(state.sessions)) {
+      if (session?.protocol === 2
+        && (session.status === 'pending' || session.status === 'authenticated')
+        && sameDigest(session.oauthStateDigest, wanted)) {
+        assertLiveV2Session(session);
+        return { protocol: 2, deviceId, status: session.status };
+      }
+    }
+
+    const v1Session = state.sessions[rawState];
+    if (!isV1Session(v1Session)) {
+      throw creditsError('OAUTH_STATE_INVALID', '로그인 요청을 확인할 수 없어요');
+    }
+    assertPendingV1Session(v1Session);
+    return { protocol: 1, deviceId: rawState };
   }
 
   return {
@@ -600,7 +851,9 @@ export function createCreditsService({
       return `${origin.replace(/\/$/, '')}/login?device=${encodeURIComponent(deviceId)}`;
     },
 
-    authorizationUrl(deviceId, provider = 'GoogleOAuth') {
+    async authorizationUrl(deviceId, provider = 'GoogleOAuth') {
+      const id = String(deviceId ?? '');
+      assertPendingV1Session((await store.load()).sessions[id]);
       const chosen = WORKOS_PROVIDERS.has(provider) ? provider : 'GoogleOAuth';
       const url = new URL(WORKOS_AUTHORIZE);
       url.searchParams.set('client_id', workosClientId);
@@ -609,19 +862,13 @@ export function createCreditsService({
       url.searchParams.set('provider', chosen);
       // IdP 세션이 남아 있어도 로그아웃한 사용자가 다른 계정을 고를 수 있어야 한다.
       url.searchParams.set('prompt', 'select_account');
-      url.searchParams.set('state', deviceId);
+      url.searchParams.set('state', id);
       return url.toString();
     },
 
     async assertPendingDevice(deviceId) {
       const id = String(deviceId ?? '');
-      const session = (await store.load()).sessions[id];
-      if (!session || session.status !== 'pending') {
-        throw creditsError('DEVICE_SESSION_INVALID', '로그인 세션이 없거나 만료됐어요');
-      }
-      if (now() - session.createdAt > SESSION_TTL_MS) {
-        throw creditsError('DEVICE_SESSION_EXPIRED', '로그인 세션이 만료됐어요');
-      }
+      assertPendingV1Session((await store.load()).sessions[id]);
       return id;
     },
 
@@ -634,11 +881,11 @@ export function createCreditsService({
       if (now() - session.createdAt > SESSION_TTL_MS) {
         throw creditsError('DEVICE_SESSION_EXPIRED', '로그인 세션이 만료됐어요');
       }
-      return {
-        id,
-        protocol: session.protocol === 2 ? 2 : 1,
-        pairingCode: session.protocol === 2 ? session.pairingCode : null,
-      };
+      const protocol = session.protocol === 2 ? 2 : isV1Session(session) ? 1 : null;
+      if (protocol === null) {
+        throw creditsError('DEVICE_SESSION_INVALID', '로그인 세션이 없거나 만료됐어요');
+      }
+      return { id, protocol, pairingCode: protocol === 2 ? session.pairingCode : null };
     },
 
     async createDeviceSession() {
@@ -648,7 +895,7 @@ export function createCreditsService({
         if (liveSessionCount(state) >= maxLiveSessions) {
           throw creditsError('RATE_LIMITED', '로그인 요청이 너무 많아요. 잠시 후 다시 시도해 주세요');
         }
-        state.sessions[id] = { status: 'pending', createdAt: now() };
+        state.sessions[id] = { protocol: 1, status: 'pending', createdAt: now() };
       });
       return { id, loginUrl: this.loginUrl(id) };
     },
@@ -719,53 +966,79 @@ export function createCreditsService({
     },
 
     async completeLoginV2(code, oauthState) {
-      const deviceId = await findV2SessionByOauthState(oauthState);
+      const target = await findV2SessionByOauthState(oauthState);
+      if (target.status === 'authenticated') {
+        const session = assertLiveV2Session((await store.load()).sessions[target.deviceId]);
+        return authenticatedV2Result(target.deviceId, session);
+      }
       const user = await resolveUser(String(code ?? ''));
-      return markV2Authenticated(deviceId, user.id, user.email ?? null);
+      return markV2Authenticated(target.deviceId, user.id, user.email ?? null);
     },
 
     async completeMagicLoginV2(deviceId, email, code) {
+      const id = String(deviceId ?? '');
+      const snapshot = assertLiveV2Session((await store.load()).sessions[id]);
       const submitted = String(email ?? '').trim();
-      const user = await resolveMagicUser(submitted, String(code ?? '').trim());
-      return markV2Authenticated(String(deviceId ?? ''), user.id, user.email ?? submitted);
+      const submittedCode = String(code ?? '').trim();
+      const retryDigest = digest(`${submitted.toLowerCase()}\0${submittedCode}`);
+      if (snapshot.status === 'authenticated') {
+        if (!sameDigest(snapshot.magicRetryDigest, retryDigest)) {
+          throw creditsError('DEVICE_SESSION_INVALID', '이미 처리된 로그인 세션이에요');
+        }
+        return authenticatedV2Result(id, snapshot);
+      }
+      if (snapshot.status !== 'pending') {
+        throw creditsError('DEVICE_SESSION_INVALID', '이미 처리된 로그인 세션이에요');
+      }
+      const user = await resolveMagicUser(submitted, submittedCode);
+      return markV2Authenticated(id, user.id, user.email ?? submitted, retryDigest);
     },
 
     async confirmDeviceSessionV2(deviceId, confirmationToken) {
       const id = String(deviceId ?? '');
       const snapshot = assertLiveV2Session((await store.load()).sessions[id]);
+      const confirmationDigest = digest(confirmationToken);
+      if (snapshot.status === 'ready'
+        && sameDigest(confirmationDigest, snapshot.confirmationTokenDigest)) {
+        if (snapshot.authorizationExpiresAt < now()) {
+          throw creditsError('CONFIRMATION_INVALID', '로그인 확인 요청이 만료됐거나 올바르지 않아요');
+        }
+        return readyV2Result(snapshot);
+      }
       if (snapshot.status !== 'authenticated'
-        || !sameDigest(digest(confirmationToken), snapshot.confirmationTokenDigest)) {
+        || !sameDigest(confirmationDigest, snapshot.confirmationTokenDigest)) {
         throw creditsError('CONFIRMATION_INVALID', '로그인 확인 요청이 만료됐거나 올바르지 않아요');
       }
       const apiKey = await keyForUser(snapshot.workosUserId, snapshot.email);
       const authorizationCode = randomBytes(32).toString('base64url');
       const manualCode = randomManualCode();
-      const result = await mutate((state) => {
+      const authorizationExpiresAt = now() + AUTHORIZATION_TTL_MS;
+      return mutate((state) => {
         const session = assertLiveV2Session(state.sessions[id]);
+        if (session.status === 'ready'
+          && sameDigest(confirmationDigest, session.confirmationTokenDigest)) {
+          if (session.authorizationExpiresAt < now()) {
+            throw creditsError('CONFIRMATION_INVALID', '로그인 확인 요청이 만료됐거나 올바르지 않아요');
+          }
+          return readyV2Result(session);
+        }
         if (session.status !== 'authenticated'
-          || !sameDigest(digest(confirmationToken), session.confirmationTokenDigest)) {
+          || !sameDigest(confirmationDigest, session.confirmationTokenDigest)) {
           throw creditsError('CONFIRMATION_INVALID', '로그인 확인 요청이 만료됐거나 올바르지 않아요');
         }
         session.status = 'ready';
         session.apiKeyCiphertext = encryptSecret(sessionSecret, apiKey);
         session.authorizationCodeDigest = digest(authorizationCode);
         session.manualCodeDigest = digest(manualCode);
-        session.authorizationExpiresAt = now() + AUTHORIZATION_TTL_MS;
+        session.authorizationCodeCiphertext = encryptSecret(sessionSecret, authorizationCode);
+        session.manualCodeCiphertext = encryptSecret(sessionSecret, manualCode);
+        session.authorizationExpiresAt = authorizationExpiresAt;
         session.manualAttempts = 0;
-        delete session.confirmationTokenDigest;
-        return {
-          pairingCode: session.pairingCode,
-          redirectUri: session.redirectUri,
-          callbackState: session.callbackState,
-          returnMode: session.returnMode,
-        };
+        delete session.confirmationTokenCiphertext;
+        delete session.oauthStateDigest;
+        delete session.magicRetryDigest;
+        return readyV2Result(session);
       });
-      return {
-        ...result,
-        authorizationCode,
-        manualCode: displayCode(manualCode),
-        expiresAt: new Date(now() + AUTHORIZATION_TTL_MS).toISOString(),
-      };
     },
 
     async redeemDeviceSessionV2(deviceId, input = {}) {
@@ -821,15 +1094,20 @@ export function createCreditsService({
         session.status = 'redeemed';
         session.redeemedAt = now();
         delete session.apiKeyCiphertext;
+        delete session.confirmationTokenDigest;
+        delete session.confirmationTokenCiphertext;
         delete session.authorizationCodeDigest;
+        delete session.authorizationCodeCiphertext;
         delete session.manualCodeDigest;
+        delete session.manualCodeCiphertext;
         return { status: 'redeemed' };
       });
     },
 
     async sendMagicCode(email) {
-      const trimmed = String(email ?? '').trim();
-      if (!trimmed.includes('@')) {
+      let trimmed;
+      try { trimmed = validatedAccountEmail(email); } catch {}
+      if (!trimmed) {
         throw creditsError('MAGIC_EMAIL_INVALID', '이메일 주소를 확인해 주세요');
       }
       await sendMagic(trimmed);
@@ -837,19 +1115,41 @@ export function createCreditsService({
     },
 
     async completeLogin(code, state) {
+      const deviceId = String(state ?? '');
+      assertPendingV1Session((await store.load()).sessions[deviceId]);
       const user = await resolveUser(String(code ?? ''));
-      return finishDeviceLogin(String(state ?? ''), user.id, user.email ?? null);
+      return finishDeviceLogin(deviceId, user.id, user.email ?? null);
     },
 
     async completeMagicLogin(deviceId, email, code) {
+      const id = String(deviceId ?? '');
+      assertPendingV1Session((await store.load()).sessions[id]);
       const submitted = String(email ?? '').trim();
       const user = await resolveMagicUser(submitted, String(code ?? '').trim());
-      return finishDeviceLogin(String(deviceId ?? ''), user.id, user.email ?? submitted);
+      return finishDeviceLogin(id, user.id, user.email ?? submitted);
+    },
+
+    async completeOAuthLogin(code, state) {
+      const target = await oauthCallbackTarget(state);
+      if (target.protocol === 2 && target.status === 'authenticated') {
+        const session = assertLiveV2Session((await store.load()).sessions[target.deviceId]);
+        return { protocol: 2, ...authenticatedV2Result(target.deviceId, session) };
+      }
+      const user = await resolveUser(String(code ?? ''));
+      if (target.protocol === 2) {
+        const completed = await markV2Authenticated(
+          target.deviceId,
+          user.id,
+          user.email ?? null,
+        );
+        return { protocol: 2, ...completed };
+      }
+      const completed = await finishDeviceLogin(target.deviceId, user.id, user.email ?? null);
+      return { protocol: 1, ...completed };
     },
 
     async redeemDeviceSession(id) {
-      const session = (await store.load()).sessions[id];
-      if (!session) throw creditsError('DEVICE_SESSION_INVALID', '로그인 세션이 없어요');
+      const session = assertV1Session((await store.load()).sessions[id]);
       if (now() - session.createdAt > SESSION_TTL_MS) return { status: 'expired' };
       if (session.status === 'pending') return { status: 'pending' };
       if (session.status === 'redeemed') return { status: 'redeemed' };
@@ -870,8 +1170,7 @@ export function createCreditsService({
     async acknowledgeDeviceSession(id) {
       return mutate((state) => {
         pruneSessions(state);
-        const session = state.sessions[id];
-        if (!session) throw creditsError('DEVICE_SESSION_INVALID', '로그인 세션이 없어요');
+        const session = assertLiveV1Session(state.sessions[id]);
         if (session.status === 'redeemed') return { status: 'redeemed' };
         if (session.status !== 'ready') {
           throw creditsError('DEVICE_SESSION_INVALID', '완료되지 않은 로그인 세션이에요');
@@ -929,6 +1228,17 @@ function clientIp(req) {
     if (hops.length > 0) return hops[hops.length - 1];
   }
   return req.socket?.remoteAddress ?? 'unknown';
+}
+
+function decodeRequestPathSegment(req, encoded) {
+  try {
+    return decodeURIComponent(encoded);
+  } catch {
+    // Keep the connection reusable after rejecting a malformed POST target.
+    // The limiter must run before this decoder at every call site.
+    req.resume?.();
+    throw creditsError('REQUEST_TARGET_INVALID', '요청 주소가 올바르지 않아요');
+  }
 }
 
 function htmlErrorStatus(error) {
@@ -1028,16 +1338,19 @@ export function creditsRequestListener(service) {
           send(429, { error: 'RATE_LIMITED', message: '요청이 너무 많아요. 잠시 후 다시 시도해 주세요' });
           return;
         }
-        send(200, await service.redeemDeviceSession(decodeURIComponent(redeem[1])));
+        send(200, await service.redeemDeviceSession(decodeRequestPathSegment(req, redeem[1])));
         return;
       }
       const acknowledge = url.pathname.match(/^\/v1\/device-sessions\/([^/]+)\/acknowledge$/);
       if (req.method === 'POST' && acknowledge) {
         if (!limiter.check(`ack:${ip}`, 30, MINUTE)) {
+          req.resume?.();
           send(429, { error: 'RATE_LIMITED', message: '요청이 너무 많아요. 잠시 후 다시 시도해 주세요' });
           return;
         }
-        send(200, await service.acknowledgeDeviceSession(decodeURIComponent(acknowledge[1])));
+        send(200, await service.acknowledgeDeviceSession(
+          decodeRequestPathSegment(req, acknowledge[1]),
+        ));
         return;
       }
       if (req.method === 'POST' && url.pathname === '/v2/device-sessions') {
@@ -1051,11 +1364,12 @@ export function creditsRequestListener(service) {
       const redeemV2 = url.pathname.match(/^\/v2\/device-sessions\/([^/]+)\/redeem$/);
       if (req.method === 'POST' && redeemV2) {
         if (!limiter.check(`redeem-v2:${ip}`, 30, MINUTE)) {
+          req.resume?.();
           send(429, { error: 'RATE_LIMITED', message: '요청이 너무 많아요. 잠시 후 다시 시도해 주세요' });
           return;
         }
         send(200, await service.redeemDeviceSessionV2(
-          decodeURIComponent(redeemV2[1]),
+          decodeRequestPathSegment(req, redeemV2[1]),
           await readJson(req),
         ));
         return;
@@ -1063,11 +1377,12 @@ export function creditsRequestListener(service) {
       const acknowledgeV2 = url.pathname.match(/^\/v2\/device-sessions\/([^/]+)\/acknowledge$/);
       if (req.method === 'POST' && acknowledgeV2) {
         if (!limiter.check(`ack-v2:${ip}`, 30, MINUTE)) {
+          req.resume?.();
           send(429, { error: 'RATE_LIMITED', message: '요청이 너무 많아요. 잠시 후 다시 시도해 주세요' });
           return;
         }
         send(200, await service.acknowledgeDeviceSessionV2(
-          decodeURIComponent(acknowledgeV2[1]),
+          decodeRequestPathSegment(req, acknowledgeV2[1]),
           await readJson(req),
         ));
         return;
@@ -1100,7 +1415,7 @@ export function creditsRequestListener(service) {
         const context = await service.deviceLoginContext(device);
         const location = context.protocol === 2
           ? await service.authorizationUrlV2(device, provider)
-          : service.authorizationUrl(device, provider);
+          : await service.authorizationUrl(device, provider);
         send(302, '', { Location: location });
         return;
       }
@@ -1171,17 +1486,17 @@ export function creditsRequestListener(service) {
           return;
         }
         try {
-          try {
-            if (typeof service.completeLoginV2 !== 'function') {
-              throw creditsError('OAUTH_STATE_INVALID', 'v1 callback');
-            }
-            const completed = await service.completeLoginV2(
+          if (typeof service.completeOAuthLogin === 'function') {
+            const completed = await service.completeOAuthLogin(
               url.searchParams.get('code'),
               url.searchParams.get('state'),
             );
-            send(200, renderConfirmPage(completed));
-          } catch (error) {
-            if (error?.code !== 'OAUTH_STATE_INVALID') throw error;
+            send(200, completed.protocol === 2
+              ? renderConfirmPage(completed)
+              : renderDonePage());
+          } else if (typeof service.completeLoginV2 === 'function') {
+            throw creditsError('OAUTH_STATE_INVALID', '로그인 요청을 확인할 수 없어요');
+          } else {
             await service.completeLogin(url.searchParams.get('code'), url.searchParams.get('state'));
             send(200, renderDonePage());
           }
@@ -1192,16 +1507,30 @@ export function creditsRequestListener(service) {
       }
       const confirmV2 = url.pathname.match(/^\/v2\/device-sessions\/([^/]+)\/confirm$/);
       if (req.method === 'POST' && confirmV2) {
+        // Charge the IP budget before decoding the attacker-controlled path.
+        // Malformed percent escapes must not bypass the limiter by throwing.
         if (!limiter.check(`confirm-v2:${ip}`, 10, TEN_MINUTES)) {
-          throttled(decodeURIComponent(confirmV2[1]));
+          req.resume?.();
+          throttled();
           return;
         }
-        const form = await readForm(req);
-        const ready = await service.confirmDeviceSessionV2(
-          decodeURIComponent(confirmV2[1]),
-          form.get('confirmationToken'),
-        );
-        send(200, renderReadyPage(ready));
+        let deviceId = '';
+        try {
+          deviceId = decodeRequestPathSegment(req, confirmV2[1]);
+        } catch (error) {
+          fail(error);
+          return;
+        }
+        try {
+          const form = await readForm(req);
+          const ready = await service.confirmDeviceSessionV2(
+            deviceId,
+            form.get('confirmationToken'),
+          );
+          send(200, renderReadyPage(ready));
+        } catch (error) {
+          fail(error, deviceId);
+        }
         return;
       }
       send(404, { error: 'not found' });

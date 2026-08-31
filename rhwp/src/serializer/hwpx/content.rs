@@ -4,12 +4,12 @@
 //! 기본 metadata를 선언한다.
 
 use std::collections::HashSet;
-use std::io::{Cursor, Write};
+use std::io::Write;
 
 use quick_xml::events::Event;
 use quick_xml::Writer;
 
-use super::utils::{empty_tag, end_tag, start_tag_attrs, text, write_xml_decl};
+use super::utils::{empty_tag, end_tag, start_tag_attrs, text, write_xml_decl, BoundedXmlBuffer};
 use super::SerializeError;
 
 /// BinData 엔트리 (manifest 등록용)
@@ -52,6 +52,24 @@ pub fn write_content_hpf(
     passthrough_hrefs: &[String],
     original_content_hpf: Option<&[u8]>,
 ) -> Result<Vec<u8>, SerializeError> {
+    write_content_hpf_limited(
+        section_hrefs,
+        bin_data,
+        master_items,
+        passthrough_hrefs,
+        original_content_hpf,
+        usize::MAX,
+    )
+}
+
+pub(crate) fn write_content_hpf_limited(
+    section_hrefs: &[String],
+    bin_data: &[BinDataEntry],
+    master_items: &[(String, String)],
+    passthrough_hrefs: &[String],
+    original_content_hpf: Option<&[u8]>,
+    max_bytes: usize,
+) -> Result<Vec<u8>, SerializeError> {
     // 원본 metadata 블록(있으면) — 본문과 무관한 저작자/일자/주제 보존용.
     let original_str = original_content_hpf.and_then(|b| std::str::from_utf8(b).ok());
     let original_metadata = original_str.and_then(extract_metadata_block);
@@ -59,8 +77,7 @@ pub fn write_content_hpf(
         .map(|xml| extract_passthrough_manifest_items(xml, passthrough_hrefs))
         .unwrap_or_default();
 
-    let buf = Cursor::new(Vec::new());
-    let mut w = Writer::new(buf);
+    let mut w = Writer::new(BoundedXmlBuffer::new(max_bytes));
 
     write_xml_decl(&mut w)?;
 
@@ -318,6 +335,14 @@ fn extract_passthrough_manifest_items(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_manifest_generation_honors_a_low_member_budget() {
+        let error = write_content_hpf_limited(&[], &[], &[], &[], None, 1)
+            .expect_err("XML generation must stop at the prospective ZIP member budget");
+
+        assert!(error.to_string().contains("generation limit"), "{error}");
+    }
 
     /// 원본 metadata 블록이 주어지면 저작자/일자/주제가 그대로 보존되고,
     /// spine itemref 에는 linear="yes" 가, package 에는 hwpunitchar 네임스페이스가

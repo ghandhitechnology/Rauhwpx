@@ -34,24 +34,93 @@ export async function retryLockedOperation(operation, {
 }
 
 /** Replace a file without relying on Windows rename-over-existing behavior. */
-export async function replaceFileAtomically(tempPath, targetPath, { platform = process.platform } = {}) {
-  if (platform !== 'win32') return fs.rename(tempPath, targetPath);
+export async function replaceFileAtomically(
+  tempPath,
+  targetPath,
+  { platform = process.platform, fsApi = fs } = {},
+) {
+  if (platform !== 'win32') return fsApi.rename(tempPath, targetPath);
   const previousPath = `${targetPath}.previous-write`;
-  await retryLockedOperation(() => fs.rm(previousPath, { force: true }), { platform });
+  await recoverInterruptedFileReplacement(targetPath, { platform, fsApi });
+  await retryLockedOperation(() => fsApi.rm(previousPath, { force: true }), { platform });
   let moved = false;
   try {
-    await retryLockedOperation(() => fs.rename(targetPath, previousPath), { platform });
+    await retryLockedOperation(() => fsApi.rename(targetPath, previousPath), { platform });
     moved = true;
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error;
   }
   try {
-    await retryLockedOperation(() => fs.rename(tempPath, targetPath), { platform });
+    await retryLockedOperation(() => fsApi.rename(tempPath, targetPath), { platform });
   } catch (error) {
-    if (moved) await retryLockedOperation(() => fs.rename(previousPath, targetPath), { platform }).catch(() => {});
+    let restoreError = null;
+    if (moved) {
+      try {
+        await retryLockedOperation(() => fsApi.rename(previousPath, targetPath), { platform });
+      } catch (candidate) {
+        restoreError = candidate;
+      }
+    }
+    if (restoreError) {
+      const recoveryError = new Error('File replacement failed and the previous file could not be restored');
+      recoveryError.code = 'FILE_REPLACE_RECOVERY_FAILED';
+      recoveryError.cause = new AggregateError([error, restoreError]);
+      throw recoveryError;
+    }
     throw error;
   }
-  if (moved) await retryLockedOperation(() => fs.rm(previousPath, { force: true }), { platform });
+  // The commit boundary is the temp -> target rename. A locked stale backup is
+  // safe to clean up on the next write/startup and must not turn a committed
+  // state change into a reported failure.
+  if (moved) {
+    await retryLockedOperation(() => fsApi.rm(previousPath, { force: true }), { platform })
+      .catch(() => {});
+  }
+}
+
+/** Restore the old target after a process died between the two Windows renames. */
+export async function recoverInterruptedFileReplacement(
+  targetPath,
+  { platform = process.platform, fsApi = fs } = {},
+) {
+  if (platform !== 'win32') return false;
+  const previousPath = `${targetPath}.previous-write`;
+  const exists = async (filePath) => {
+    try {
+      await fsApi.access(filePath);
+      return true;
+    } catch (error) {
+      if (error?.code === 'ENOENT') return false;
+      throw error;
+    }
+  };
+  if (!await exists(previousPath)) return false;
+  if (await exists(targetPath)) {
+    await retryLockedOperation(() => fsApi.rm(previousPath, { force: true }), { platform })
+      .catch(() => {});
+    return false;
+  }
+  await retryLockedOperation(() => fsApi.rename(previousPath, targetPath), { platform });
+  return true;
+}
+
+/** Delete a Windows-replaced file without leaving an old backup to resurrect. */
+export async function removeFileAndReplacementBackup(
+  targetPath,
+  { platform = process.platform, fsApi = fs, delays } = {},
+) {
+  if (platform === 'win32') {
+    // Removing the backup first makes a crash conservative: before the target
+    // removal the old live value remains, and after it no recovery copy exists.
+    await retryLockedOperation(
+      () => fsApi.rm(`${targetPath}.previous-write`, { force: true }),
+      { platform, ...(delays ? { delays } : {}) },
+    );
+  }
+  await retryLockedOperation(
+    () => fsApi.rm(targetPath, { force: true }),
+    { platform, ...(delays ? { delays } : {}) },
+  );
 }
 
 /** registry 가 준 version 문자열이 npm 인자로 안전한 semver 인지 확인한다. */

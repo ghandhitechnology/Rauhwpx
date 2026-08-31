@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
@@ -95,8 +95,43 @@ async function closeSocket(socket) {
   await closed;
 }
 
+function prepareFakePi(root) {
+  const packageDir = path.join(root, 'prefix', 'node_modules', '@earendil-works', 'pi-coding-agent');
+  const binDir = path.join(root, 'prefix', 'node_modules', '.bin');
+  mkdirSync(packageDir, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  writeFileSync(path.join(packageDir, 'package.json'), JSON.stringify({ version: '0.0.0-test' }));
+  writeFileSync(path.join(root, 'config.json'), JSON.stringify({
+    version: 1,
+    installedVersion: '0.0.0-test',
+    models: [{
+      id: 'mock-model', name: 'Mock model', reasoning: false, supportsImages: false,
+      efforts: [], defaultEffort: null, contextLength: 8_192,
+      pricing: { prompt: 0, completion: 0 },
+    }],
+    defaultModelId: 'mock-model',
+  }));
+  const agentDir = path.join(root, 'agent');
+  mkdirSync(agentDir, { recursive: true });
+  writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify({
+    providers: { openrouter: { apiKey: 'test-placeholder-key' } },
+  }));
+  const fake = path.join(binDir, process.platform === 'win32' ? 'pi.cmd' : 'pi');
+  if (process.platform === 'win32') {
+    writeFileSync(fake, '@echo off\r\nnode -e "setInterval(() =^> {}, 1000)"\r\n');
+  } else {
+    writeFileSync(
+      fake,
+      `#!/bin/sh\nexec "${process.execPath}" -e 'setInterval(() => {}, 1000)'\n`,
+      { mode: 0o755 },
+    );
+  }
+}
+
 async function startHub(t) {
   const workRoot = mkdtempSync(path.join(os.tmpdir(), 'rhwp-hub-reattach-'));
+  const piRoot = path.join(workRoot, 'pi');
+  prepareFakePi(piRoot);
   const child = spawn(process.execPath, ['server.mjs'], {
     cwd: new URL('..', import.meta.url),
     env: {
@@ -108,6 +143,7 @@ async function startHub(t) {
       RHWP_WORK_DIR: workRoot,
       RHWP_TEMPLATES_DIR: path.join(workRoot, 'templates'),
       RHWP_AGENT_INSTRUCTIONS_DIR: path.join(workRoot, 'agent-instructions'),
+      RHWP_PI_DIR: piRoot,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -121,6 +157,24 @@ async function startHub(t) {
   const readyLine = await waitForLine(child.stdout, (line) => line.startsWith('RHWP_HUB_READY '));
   const ready = JSON.parse(readyLine.slice('RHWP_HUB_READY '.length));
   return { port: ready.port, stderr: () => stderr };
+}
+
+async function startRunningChat(studio, { threadId, documentId }) {
+  const started = waitForMessage(studio, (msg) => msg.type === 'chat-started');
+  sendFrame(studio, { type: 'chat-start', agent: 'pi', threadId, documentId });
+  const session = await started;
+  const turnStarted = waitForMessage(
+    studio,
+    (msg) => msg.type === 'agent-event' && msg.event?.type === 'turn-start',
+  );
+  sendFrame(studio, {
+    type: 'chat-user-message',
+    threadId: session.threadId,
+    documentId: session.documentId,
+    text: 'Keep this provider turn active while the Studio connection is tested.',
+  });
+  await turnStarted;
+  return session;
 }
 
 /** 스튜디오·MCP 소켓을 붙이고 세션을 띄운 뒤 사용할 준비를 마친다. */
@@ -139,11 +193,9 @@ test('same-instance reattach keeps in-flight tool calls alive', { timeout: 40_00
   const { port, stderr } = await startHub(t);
   const sessionId = 'blip';
   const studio = await connectStudio(port, { sessionId, instance: 'page-1' });
-  const started = waitForMessage(studio, (msg) => msg.type === 'chat-started');
-  sendFrame(studio, { type: 'chat-start', agent: 'claude', threadId: 'thread-blip', documentId: 'doc-blip' });
-  const session = await started;
+  const session = await startRunningChat(studio, { threadId: 'thread-blip', documentId: 'doc-blip' });
 
-  const mcp = await openSocket(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=${sessionId}&agent=claude`);
+  const mcp = await openSocket(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=${sessionId}&agent=pi`);
   const request = waitForMessage(studio, (msg) => msg.type === 'tool-request');
   const result = waitForMessage(mcp, (msg) => msg.type === 'tool-result' && msg.id === 11);
   sendFrame(mcp, {
@@ -172,11 +224,9 @@ test('a studio that never comes back fails in-flight calls after the grace windo
   const { port, stderr } = await startHub(t);
   const sessionId = 'gone';
   const studio = await connectStudio(port, { sessionId, instance: 'page-1' });
-  const started = waitForMessage(studio, (msg) => msg.type === 'chat-started');
-  sendFrame(studio, { type: 'chat-start', agent: 'claude', threadId: 'thread-gone', documentId: 'doc-gone' });
-  const session = await started;
+  const session = await startRunningChat(studio, { threadId: 'thread-gone', documentId: 'doc-gone' });
 
-  const mcp = await openSocket(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=${sessionId}&agent=claude`);
+  const mcp = await openSocket(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=${sessionId}&agent=pi`);
   t.after(() => closeSocket(mcp));
   const request = waitForMessage(studio, (msg) => msg.type === 'tool-request');
   const result = waitForMessage(mcp, (msg) => msg.type === 'tool-result' && msg.id === 41, 20_000);
@@ -201,10 +251,8 @@ test('different-instance reattach fails in-flight tool calls at once', { timeout
   const { port, stderr } = await startHub(t);
   const sessionId = 'reload';
   const studio = await connectStudio(port, { sessionId, instance: 'page-1' });
-  const started = waitForMessage(studio, (msg) => msg.type === 'chat-started');
-  sendFrame(studio, { type: 'chat-start', agent: 'claude', threadId: 'thread-reload', documentId: 'doc-reload' });
-  const session = await started;
-  const mcp = await openSocket(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=${sessionId}&agent=claude`);
+  const session = await startRunningChat(studio, { threadId: 'thread-reload', documentId: 'doc-reload' });
+  const mcp = await openSocket(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=${sessionId}&agent=pi`);
 
   // (1) 새로고침: 소켓이 닫힌 뒤 다른 instance 가 붙는다.
   const reloadRequest = waitForMessage(studio, (msg) => msg.type === 'tool-request');
@@ -259,10 +307,8 @@ test('cached argument schemas keep strict/passthrough validation', { timeout: 40
   const sessionId = 'schema';
   const studio = await connectStudio(port, { sessionId, instance: 'page-1' });
   t.after(() => closeSocket(studio));
-  const started = waitForMessage(studio, (msg) => msg.type === 'chat-started');
-  sendFrame(studio, { type: 'chat-start', agent: 'claude', threadId: 'thread-schema', documentId: 'doc-schema' });
-  const session = await started;
-  const mcp = await openSocket(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=${sessionId}&agent=claude`);
+  const session = await startRunningChat(studio, { threadId: 'thread-schema', documentId: 'doc-schema' });
+  const mcp = await openSocket(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=${sessionId}&agent=pi`);
   t.after(() => closeSocket(mcp));
   const call = (id, tool, args) => {
     const answer = waitForMessage(mcp, (msg) => msg.type === 'tool-result' && msg.id === id);

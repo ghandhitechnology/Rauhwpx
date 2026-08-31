@@ -7128,7 +7128,10 @@ fn test_field_roundtrip(args: &[String]) {
     println!("\n저장: {} ({}바이트)", output, saved.len());
 
     // 5. 재로딩 → 필드 확인
-    let mut core2 = rhwp::document_core::DocumentCore::from_bytes(&saved).expect("재로딩 실패");
+    // The bytes came from our bounded serializer and may legitimately exceed
+    // the smaller remote/untrusted-input allowance used by `from_bytes`.
+    let mut core2 =
+        rhwp::wasm_api::HwpDocument::from_local_file_bytes(&saved).expect("재로딩 실패");
     let fields3 = core2.collect_all_fields();
     println!("\n=== 재로딩 후 확인 ===");
     for fi in &fields3 {
@@ -8964,10 +8967,7 @@ fn extract_thumbnail(args: &[String]) -> i32 {
         }
     };
 
-    let result = match rhwp::parser::extract_thumbnail_only_with_policy(
-        &data,
-        rhwp::parser::limits::InputPolicy::LocalFileOnce,
-    ) {
+    let result = match rhwp::parser::extract_thumbnail_only_from_local_file(&data) {
         Some(r) => r,
         None => {
             eprintln!("오류: PrvImage 썸네일이 없습니다: {}", input_path);

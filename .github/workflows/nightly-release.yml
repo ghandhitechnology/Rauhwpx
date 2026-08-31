@@ -432,10 +432,19 @@ jobs:
             if [ -f "${blockmap}" ]; then extras+=("${blockmap}"); fi
           done
 
-          existing_release_id="$(
-            gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
-              --jq '.[] | select(.tag_name == "nightly") | .id'
-          )"
+          lookup_error="release/nightly-release-lookup.err"
+          if existing_release_id="$(
+            gh api "repos/${GITHUB_REPOSITORY}/releases/tags/nightly" --jq '.id' \
+              2>"${lookup_error}"
+          )"; then
+            rm -f "${lookup_error}"
+          elif grep -q 'HTTP 404' "${lookup_error}"; then
+            existing_release_id=""
+            rm -f "${lookup_error}"
+          else
+            cat "${lookup_error}" >&2
+            exit 1
+          fi
           if [[ -n "${existing_release_id}" ]]; then
             gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/${existing_release_id}"
           fi

@@ -14,6 +14,7 @@ import {
   normalizeCheckpointTitleRequest,
   resolveCheckpointTitleCliRoute,
 } from '../agents/checkpoint-title.mjs';
+import { PROCESS_TREE_CLEANUP_OUTCOME } from '../process-tree.mjs';
 
 test('checkpoint titles accept authenticated CLIs from PATH as well as managed installs', () => {
   assert.deepEqual(
@@ -220,6 +221,93 @@ class HungProcess extends EventEmitter {
   exitCode = null;
   signalCode = null;
 }
+
+test('a successful drained CLI close keeps its title and retains its unproven workspace', async (t) => {
+  let cwd = null;
+  const proc = new HungProcess();
+  const result = generateCheckpointTitle(request(), {
+    readiness: readiness({
+      pi: { ready: false, model: '' },
+      grok: { ready: false, model: '' },
+      claude: { ready: false, model: '' },
+    }),
+    spawnProcess(command, argv, options) {
+      cwd = options.cwd;
+      queueMicrotask(() => {
+        proc.stdout.emit('data', `${JSON.stringify({
+          type: 'item.completed',
+          item: { type: 'agent_message', text: '표 구조 정리' },
+        })}\n`);
+        proc.exitCode = 0;
+        proc.emit('close', 0, null);
+      });
+      return proc;
+    },
+    terminateProcess: async () => null,
+  });
+
+  assert.equal((await result)?.title, '표 구조 정리');
+  await fs.access(cwd);
+  t.after(() => fs.rm(cwd, { recursive: true, force: true }));
+});
+
+test('CLI title starts hub-owned cleanup at a terminal payload while its leader is live', async () => {
+  const proc = new HungProcess();
+  proc.pid = 7101;
+  let cleanups = 0;
+  const result = generateCheckpointTitle(request(), {
+    readiness: readiness({
+      pi: { ready: false, model: '' },
+      grok: { ready: false, model: '' },
+      claude: { ready: false, model: '' },
+    }),
+    spawnProcess() { return proc; },
+    cleanupProcessOutcome(child) {
+      cleanups += 1;
+      assert.equal(child, proc);
+      assert.equal(child.exitCode, null);
+      return PROCESS_TREE_CLEANUP_OUTCOME.PROVEN;
+    },
+  });
+
+  while (cleanups === 0) {
+    proc.stdout.emit('data', `${JSON.stringify({
+      type: 'item.completed',
+      item: { type: 'agent_message', text: '표 구조 정리' },
+    })}\n`);
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal((await result)?.title, '표 구조 정리');
+  assert.equal(cleanups, 1);
+});
+
+test('an invalid title with unproven cleanup stops the provider cascade and retains its workspace', async (t) => {
+  let cwd = null;
+  let spawns = 0;
+  const result = await generateCheckpointTitle(request(), {
+    readiness: readiness({ pi: { ready: false, model: '' } }),
+    spawnProcess(command, argv, options) {
+      spawns += 1;
+      cwd = options.cwd;
+      const proc = new HungProcess();
+      queueMicrotask(() => {
+        proc.stdout.emit('data', `${JSON.stringify({
+          type: 'item.completed',
+          item: { type: 'agent_message', text: 'invalid\nsecond line' },
+        })}\n`);
+        proc.exitCode = 0;
+        proc.emit('close', 0, null);
+      });
+      return proc;
+    },
+    terminateProcess: async () => null,
+  });
+
+  assert.equal(result, null);
+  assert.equal(spawns, 1, 'cleanup uncertainty must stop the provider cascade');
+  await fs.access(cwd);
+  t.after(() => fs.rm(cwd, { recursive: true, force: true }));
+});
 
 async function waitForMissing(filePath) {
   const deadline = Date.now() + 500;

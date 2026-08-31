@@ -43,8 +43,10 @@ class FakeProcess extends EventEmitter {
 
   kill(signal) {
     queueMicrotask(() => {
+      if (this.exitCode !== null || this.signalCode !== null) return;
       this.signalCode = signal ?? 'SIGTERM';
       this.emit('exit', null, this.signalCode);
+      this.emit('close', null, this.signalCode);
     });
     return true;
   }
@@ -56,6 +58,7 @@ class FakeProcess extends EventEmitter {
   exit(code = 0) {
     this.exitCode = code;
     this.emit('exit', code, null);
+    this.emit('close', code, null);
   }
 }
 
@@ -108,7 +111,8 @@ function startSession(events, extraOpts = {}) {
     },
     {
       spawnProcess() { child = new FakeProcess(); return child; },
-      terminateProcess(proc) { proc.kill('SIGTERM'); },
+      terminateProcess(proc) { return proc.kill('SIGTERM'); },
+      waitForExit: async () => true,
       createRolloutWatcher: fakeWatcher(log, state),
     },
   );
@@ -197,7 +201,7 @@ test('프로세스 종료 시 turn-end 보다 먼저 워처를 정리해 열린 
   }
 });
 
-test('턴마다 새 워처를 만들고 이전 워처는 정리한다', () => {
+test('턴마다 새 워처를 만들고 이전 워처는 정리한다', async () => {
   const events = [];
   const h = startSession(events);
   try {
@@ -205,6 +209,7 @@ test('턴마다 새 워처를 만들고 이전 워처는 정리한다', () => {
     h.child().emitJson({ type: 'thread.started', thread_id: 'root-thread' });
     h.child().exit(0);
     h.session.sendUserMessage('두 번째 턴');
+    await new Promise((resolve) => setImmediate(resolve));
     assert.equal(h.watchers.length, 2);
     assert.equal(h.watchers[0].finalized, 1);
     assert.equal(h.watchers[1].finalized, 0);
@@ -213,7 +218,7 @@ test('턴마다 새 워처를 만들고 이전 워처는 정리한다', () => {
   }
 });
 
-test('남아 있던 워처는 다음 턴의 turn-start 보다 먼저 정리한다', () => {
+test('열린 턴은 새 턴과 워처가 겹치지 못하게 막는다', () => {
   const events = [];
   const h = startSession(events);
   try {
@@ -222,33 +227,33 @@ test('남아 있던 워처는 다음 턴의 turn-start 보다 먼저 정리한�
     h.child().emitJson({ type: 'thread.started', thread_id: 'root-thread' });
     assert.equal(h.watchers[0].finalized, 0);
 
-    const before = events.length;
-    h.session.sendUserMessage('두 번째 턴');
-    const emitted = events.slice(before);
-    const endIdx = emitted.findIndex((e) => e.type === 'task-end');
-    const startIdx = emitted.findIndex((e) => e.type === 'turn-start');
-    assert.equal(h.watchers[0].finalized, 1);
-    assert.ok(endIdx !== -1, '남은 카드를 닫는 task-end 가 있어야 한다');
-    assert.ok(endIdx < startIdx, '워처 정리는 새 턴이 열리기 전에 끝나야 한다');
+    assert.throws(
+      () => h.session.sendUserMessage('두 번째 턴'),
+      /already has a turn in progress/,
+    );
+    assert.equal(h.watchers.length, 1);
+    assert.equal(h.watchers[0].finalized, 0);
+    assert.equal(events.filter((event) => event.type === 'turn-start').length, 1);
   } finally {
     h.cleanup();
   }
 });
 
-test('spawn error 도 exit 과 같이 turn-end 앞에서 워처를 정리한다', () => {
+test('spawn error 도 exit 과 같이 turn-end 앞에서 워처를 정리한다', async () => {
   const events = [];
   const h = startSession(events);
   try {
     h.session.sendUserMessage('go');
     h.child().emitJson({ type: 'thread.started', thread_id: 'root-thread' });
     h.child().emit('error', new Error('spawn ENOENT'));
+    await new Promise((resolve) => setImmediate(resolve));
 
     const endIdx = events.findIndex((e) => e.type === 'task-end');
     const turnEndIdx = events.findIndex((e) => e.type === 'turn-end');
     assert.equal(h.watchers[0].finalized, 1);
     assert.ok(endIdx !== -1, 'task-end 가 있어야 한다');
     assert.ok(endIdx < turnEndIdx, 'task-end 는 turn-end 보다 먼저 나가야 한다');
-    assert.equal(events[turnEndIdx].stopReason, 'exited');
+    assert.equal(events[turnEndIdx].stopReason, 'failed');
   } finally {
     h.cleanup();
   }

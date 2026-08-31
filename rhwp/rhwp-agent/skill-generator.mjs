@@ -6,17 +6,20 @@ import path from 'node:path';
 import { openRouterReady } from './agents/title.mjs';
 import {
   isolatedProcessEnv,
+  PROCESS_TREE_CLEANUP_OUTCOME,
   processTreeSpawnOptions,
-  terminateAndWaitForProcessTreeExit,
+  terminateAndWaitForProcessTreeExitOutcome,
   terminateProcessTree,
 } from './process-tree.mjs';
+import { validateSkillPayload } from './skills.mjs';
+import { createTerminalJsonScanner } from './terminal-json-scanner.mjs';
 
 const SCHEMA = {
   type: 'object',
   additionalProperties: false,
   required: ['name', 'files'],
   properties: {
-    name: { type: 'string', pattern: '^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$' },
+    name: { type: 'string', pattern: '^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$' },
     files: {
       type: 'array', minItems: 1, maxItems: 30,
       items: {
@@ -47,8 +50,12 @@ function run(command, args, stdin, timeoutMs = 90_000, spawnOptions = {}, deps =
     let stderr = '';
     let stdoutBytes = 0;
     let settled = false;
+    let finalizing = false;
     let forcedError = null;
     let cleanupPromise = null;
+    const terminalScanner = createTerminalJsonScanner(deps.terminalProtocol, {
+      maxFrameBytes: MAX_STRUCTURED_STDOUT_BYTES,
+    });
     const finish = (error, value) => {
       if (settled) return;
       settled = true;
@@ -58,13 +65,24 @@ function run(command, args, stdin, timeoutMs = 90_000, spawnOptions = {}, deps =
     };
     const cleanup = () => {
       if (cleanupPromise) return cleanupPromise;
-      cleanupPromise = terminateAndWaitForProcessTreeExit(child, { terminateProcess })
-        .catch(() => false);
+      cleanupPromise = (typeof deps.cleanupProcessOutcome === 'function'
+        ? Promise.resolve(deps.cleanupProcessOutcome(child))
+        : terminateAndWaitForProcessTreeExitOutcome(child, { terminateProcess }))
+        .catch(() => PROCESS_TREE_CLEANUP_OUTCOME.FAILED);
       return cleanupPromise;
     };
-    const finishAfterCleanup = (error, value) => {
-      void cleanup().then((cleaned) => {
-        if (!cleaned) {
+    const finishAfterCleanup = (error, value, { allowUnavailable = false } = {}) => {
+      if (settled || finalizing) return;
+      finalizing = true;
+      clearTimeout(timer);
+      void cleanup().then((outcome) => {
+        if (!error && allowUnavailable
+          && outcome === PROCESS_TREE_CLEANUP_OUTCOME.UNAVAILABLE) {
+          deps.onCleanupUncertain?.();
+          finish(null, value);
+          return;
+        }
+        if (outcome !== PROCESS_TREE_CLEANUP_OUTCOME.PROVEN) {
           const cleanupError = error ?? new Error('Skill generator process-tree cleanup could not be confirmed');
           cleanupError.processCleanupUncertain = true;
           finish(cleanupError);
@@ -83,13 +101,18 @@ function run(command, args, stdin, timeoutMs = 90_000, spawnOptions = {}, deps =
       forceFailure(new Error('Skill generation timed out'));
     }, timeoutMs);
     timer.unref?.();
+    child.stdout.setEncoding?.('utf8');
     child.stdout.on('data', (chunk) => {
-      stdoutBytes += chunk.length;
+      stdoutBytes += Buffer.byteLength(chunk, 'utf8');
       if (stdoutBytes > MAX_STRUCTURED_STDOUT_BYTES) {
         forceFailure(new Error('Skill generation output exceeded the 8 MiB safety limit'));
         return;
       }
       stdout += chunk;
+      if (typeof deps.cleanupProcessOutcome === 'function'
+        && terminalScanner.push(chunk)) {
+        finishAfterCleanup(null, stdout);
+      }
     });
     child.stderr.on('data', (chunk) => {
       stderr = (stderr + chunk).slice(-MAX_STRUCTURED_STDERR_BYTES);
@@ -99,12 +122,20 @@ function run(command, args, stdin, timeoutMs = 90_000, spawnOptions = {}, deps =
       if (child.pid) finishAfterCleanup(error);
       else finish(error);
     });
-    child.on('exit', (code) => {
+    child.on('close', (code) => {
       if (forcedError) return;
-      if (code === 0) finishAfterCleanup(null, stdout);
-      else finishAfterCleanup(new Error(stderr.trim() || `${command} exited with code ${code}`));
+      if (code === 0) finishAfterCleanup(null, stdout, { allowUnavailable: true });
+      else finishAfterCleanup(
+        new Error(stderr.trim() || `${command} exited with code ${code}`),
+        undefined,
+      );
     });
-    child.stdin.end(stdin);
+    child.stdin?.on?.('error', forceFailure);
+    try {
+      child.stdin.end(stdin);
+    } catch (error) {
+      forceFailure(error);
+    }
   });
 }
 
@@ -150,9 +181,6 @@ function parseJsonObject(text) {
 export function validateSkillDraft(draft) {
   if (!draft || typeof draft !== 'object' || Array.isArray(draft)) throw new Error('draft is not an object');
   const name = draft.name;
-  if (typeof name !== 'string' || !new RegExp(SCHEMA.properties.name.pattern).test(name)) {
-    throw new Error('name must be lowercase hyphen-case');
-  }
   const files = draft.files;
   if (!Array.isArray(files) || files.length === 0 || files.length > SCHEMA.properties.files.maxItems) {
     throw new Error('files must hold 1-30 entries');
@@ -163,10 +191,16 @@ export function validateSkillDraft(draft) {
     }
     return { path: file.path.trim(), content: file.content };
   });
-  if (!normalized.some((file) => /(^|\/)SKILL\.md$/.test(file.path))) {
-    throw new Error('files must include SKILL.md');
-  }
-  return { name, files: normalized };
+  const checked = validateSkillPayload({ name, files: normalized }, {
+    maxFiles: SCHEMA.properties.files.maxItems,
+  });
+  return {
+    name: checked.name,
+    files: checked.decoded.map((file) => ({
+      path: file.path,
+      content: file.bytes.toString('utf8'),
+    })),
+  };
 }
 
 /** 한 번 더 시킨다 — 형식만 틀린 경우가 대부분이라 재시도로 붙는다. */
@@ -213,8 +247,8 @@ export async function generateSkillDraft(input, deps = {}) {
     const output = await run('claude', [
       '-p', '--safe-mode', '--output-format', 'json', '--tools', '', '--disable-slash-commands',
       '--json-schema', JSON.stringify(SCHEMA), ...(input.model ? ['--model', input.model] : []),
-    ], prompt, 90_000, {}, deps);
-    return extractClaude(output);
+    ], prompt, 90_000, {}, { ...deps, terminalProtocol: 'claude-json' });
+    return validateSkillDraft(extractClaude(output));
   }
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-skill-schema-'));
   const schemaPath = path.join(temp, 'schema.json');
@@ -228,10 +262,14 @@ export async function generateSkillDraft(input, deps = {}) {
       '--disable', 'skill_search',
       '--sandbox', 'read-only', '--output-schema', schemaPath,
       ...(input.model ? ['--model', input.model] : []), '-'
-    ], prompt, 90_000, { cwd: temp }, deps);
-    return extractCodex(output);
+    ], prompt, 90_000, { cwd: temp }, {
+      ...deps,
+      terminalProtocol: 'codex-jsonl',
+      onCleanupUncertain: () => { cleanupUncertain = true; },
+    });
+    return validateSkillDraft(extractCodex(output));
   } catch (error) {
-    cleanupUncertain = error?.processCleanupUncertain === true;
+    cleanupUncertain ||= error?.processCleanupUncertain === true;
     throw error;
   } finally {
     if (!cleanupUncertain) await fs.rm(temp, { recursive: true, force: true });

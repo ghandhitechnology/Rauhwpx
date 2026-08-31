@@ -98,7 +98,7 @@ function rejectedUpgrade(url) {
       resolve(response.statusCode);
     });
     socket.once('open', () => reject(new Error('WebSocket upgrade unexpectedly succeeded')));
-    socket.once('error', () => {});
+    socket.once('error', reject);
   });
 }
 
@@ -146,7 +146,12 @@ function prepareFakePi(root) {
   }
 }
 
-async function startHub(t, { fakeCursor = false, fakePi = false, gateCursorQuestion = false } = {}) {
+async function startHub(t, {
+  fakeCursor = false,
+  fakePi = false,
+  gateCursorQuestion = false,
+  emitCursorQuestion = true,
+} = {}) {
   const workRoot = mkdtempSync(path.join(os.tmpdir(), 'rhwp-hub-user-question-'));
   const piRoot = path.join(workRoot, 'pi');
   const cursorLegacyReadyPath = path.join(workRoot, 'cursor-legacy-ready');
@@ -178,17 +183,22 @@ async function startHub(t, { fakeCursor = false, fakePi = false, gateCursorQuest
       "if (process.argv[2] === 'acp') process.exit(1);",
       `process.stdout.write(${JSON.stringify(`${JSON.stringify(init)}\n`)});`,
       `fs.writeFileSync(${JSON.stringify(cursorLegacyReadyPath)}, '');`,
-      ...(gateCursorQuestion
+      ...(emitCursorQuestion && gateCursorQuestion
         ? [
           'const releaseWait = new Int32Array(new SharedArrayBuffer(4));',
-          'const releaseDeadline = Date.now() + 10000;',
+          // Windows must first fail the ACP launch and reap that process tree.
+          // Keep the fixture gate inside the test's 40-second outer deadline
+          // without racing the valid fallback path on slower hosted runners.
+          'const releaseDeadline = Date.now() + 30000;',
           `while (!fs.existsSync(${JSON.stringify(cursorQuestionReleasePath)})) {`,
           "  if (Date.now() >= releaseDeadline) { console.error('timed out waiting for question release'); process.exit(2); }",
           '  Atomics.wait(releaseWait, 0, 0, 20);',
           '}',
         ]
         : []),
-      `process.stdout.write(${JSON.stringify(`${JSON.stringify(call)}\n`)});`,
+      ...(emitCursorQuestion
+        ? [`process.stdout.write(${JSON.stringify(`${JSON.stringify(call)}\n`)});`]
+        : []),
       'setInterval(() => {}, 1000);',
     ].join('\n'));
     if (process.platform === 'win32') {
@@ -280,7 +290,9 @@ async function startRunningChat(studio, agent = 'claude') {
     documentId: started.documentId,
     text: 'Wait while a tool asks me one question.',
   });
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  await studio.next(
+    (frame) => frame.type === 'agent-event' && frame.event?.type === 'turn-start',
+  );
   return started;
 }
 
@@ -303,14 +315,14 @@ test('an explicit unknown workflow is rejected instead of opening Direct mode', 
 });
 
 test('a standalone implementation command follows the same Plan approval transition', { timeout: 40_000 }, async (t) => {
-  const { port } = await startHub(t);
+  const { port } = await startHub(t, { fakePi: true });
   const sessionId = 'typed-plan-approval';
   const studio = await openClient(`ws://127.0.0.1:${port}/studio?token=${TOKEN}&sessionId=${sessionId}&instance=page-1`);
   t.after(() => closeClient(studio));
   await studio.next((frame) => frame.type === 'welcome');
   sendFrame(studio, {
     type: 'chat-start',
-    agent: 'claude',
+    agent: 'pi',
     workflow: 'plan',
     threadId: 'thread-typed-plan-approval',
     documentId: 'document-typed-plan-approval',
@@ -319,7 +331,17 @@ test('a standalone implementation command follows the same Plan approval transit
   assert.equal(started.workflow, 'plan');
   assert.equal(started.phase, 'planning');
 
-  const mcp = await openClient(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=${sessionId}&agent=claude&role=chat`);
+  sendFrame(studio, {
+    type: 'chat-user-message',
+    threadId: started.threadId,
+    documentId: started.documentId,
+    text: 'Prepare the implementation plan.',
+  });
+  await studio.next(
+    (frame) => frame.type === 'agent-event' && frame.event?.type === 'turn-start',
+  );
+
+  const mcp = await openClient(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=${sessionId}&agent=pi&role=chat`);
   t.after(() => closeClient(mcp));
   sendFrame(mcp, {
     type: 'tool-call',
@@ -333,6 +355,24 @@ test('a standalone implementation command follows the same Plan approval transit
   const planResult = await mcp.next((frame) => frame.type === 'tool-result' && frame.id === 31);
   assert.equal(planResult.ok, true);
   assert.equal(ready.phase, 'awaiting-approval');
+
+  // A Studio frame cannot forge the internal document-save transition lock
+  // and revise a plan while the provider turn that presented it is active.
+  sendFrame(studio, {
+    type: 'plan-request-changes',
+    planId: ready.planId,
+    feedback: 'This must wait until the current turn settles.',
+    sessionStatusOverride: 'idle',
+  });
+  const busy = await studio.next(
+    (frame) => frame.type === 'chat-error' && frame.code === 'AGENT_BUSY',
+  );
+  assert.match(busy.message, /agent is idle/i);
+
+  sendFrame(studio, { type: 'chat-interrupt' });
+  await studio.next(
+    (frame) => frame.type === 'agent-event' && frame.event?.type === 'turn-end',
+  );
 
   sendFrame(studio, {
     type: 'chat-user-message',
@@ -472,14 +512,78 @@ test('direct MCP questions survive Studio reload and settle atomically', { timeo
   assert.doesNotMatch(stderr(), /response-valid|option-2/);
 });
 
+test('provider MCP writes are bound to one exact running turn', { timeout: 40_000 }, async (t) => {
+  const { port, stderr } = await startHub(t, { fakePi: true });
+  const sessionId = 'mcp-turn-ownership';
+  const studio = await openClient(
+    `ws://127.0.0.1:${port}/studio?token=${TOKEN}&sessionId=${sessionId}&instance=page-1`,
+  );
+  t.after(() => closeClient(studio));
+  await studio.next((frame) => frame.type === 'welcome');
+  const started = await startRunningChat(studio, 'pi');
+  const mcp = await openClient(
+    `ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=${sessionId}&agent=pi&role=chat`,
+  );
+  t.after(() => closeClient(mcp));
+  const writeArgs = {
+    expectedRevision: 0,
+    sectionIdx: 0,
+    paraIdx: 0,
+    charOffset: 0,
+    text: 'must stay inside the owning turn',
+  };
+
+  sendFrame(mcp, {
+    type: 'tool-call', id: 61, tool: 'insert_text', args: writeArgs,
+    workflow: 'direct', capabilityEpoch: started.capabilityEpoch,
+  });
+  const forwarded = await studio.next(
+    (frame) => frame.type === 'tool-request' && frame.tool === 'insert_text',
+  );
+  assert.equal(forwarded.turnBound, true);
+  assert.equal(typeof forwarded.providerTurnId, 'string');
+  const mcpClosed = once(mcp.socket, 'close');
+  sendFrame(studio, { type: 'chat-interrupt' });
+  const cancelled = await studio.next(
+    (frame) => frame.type === 'tool-request-cancel' && frame.id === forwarded.id,
+  );
+  assert.equal(cancelled.providerTurnId, forwarded.providerTurnId);
+  const invalidated = await mcp.next(
+    (frame) => frame.type === 'tool-result' && frame.id === 61,
+  );
+  assert.equal(invalidated.ok, false, stderr());
+  assert.equal(invalidated.error.code, 'NO_ACTIVE_TURN');
+  const [closeCode] = await mcpClosed;
+  assert.equal(closeCode, 4003, 'the settled turn permanently retires its MCP socket');
+
+  // A late Studio response cannot be rebound to the settled or a future turn.
+  sendFrame(studio, {
+    type: 'tool-response', id: forwarded.id, ok: true, result: { revision: 1 },
+  });
+  await assert.rejects(
+    mcp.next((frame) => frame.type === 'tool-result' && frame.id === 61, 300),
+    /Timed out waiting for websocket frame/,
+  );
+
+  const idleMcp = await openClient(
+    `ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=${sessionId}&agent=pi&role=chat`,
+  );
+  const [idleCloseCode] = await once(idleMcp.socket, 'close');
+  assert.equal(idleCloseCode, 4003, 'a socket opened between turns is never eligible later');
+  await assert.rejects(
+    studio.next((frame) => frame.type === 'tool-request' && frame.tool === 'insert_text', 300),
+    /Timed out waiting for websocket frame/,
+  );
+});
+
 test('URL agent and role spoofing cannot bypass root question correlation', { timeout: 40_000 }, async (t) => {
-  const { port } = await startHub(t);
+  const { port } = await startHub(t, { fakeCursor: true, emitCursorQuestion: false });
   const studio = await openClient(`ws://127.0.0.1:${port}/studio?token=${TOKEN}&sessionId=question-loss&instance=page-1`);
   t.after(() => closeClient(studio));
   await studio.next((frame) => frame.type === 'welcome');
-  await startRunningChat(studio, 'claude');
+  await startRunningChat(studio, 'cursor');
 
-  const subagent = await openClient(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=question-loss&agent=claude&role=chat`);
+  const subagent = await openClient(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=question-loss&agent=cursor&role=chat`);
   sendFrame(subagent, {
     type: 'tool-call', id: 20, tool: 'ask_user_question', args: questionArgs(),
     workflow: 'direct', parentTaskId: 'child-task',
@@ -494,7 +598,7 @@ test('URL agent and role spoofing cannot bypass root question correlation', { ti
     401,
   );
 
-  const unknownRoot = await openClient(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=question-loss&agent=claude&role=chat`);
+  const unknownRoot = await openClient(`ws://127.0.0.1:${port}/mcp?token=${TOKEN}&sessionId=question-loss&agent=cursor&role=chat`);
   sendFrame(unknownRoot, {
     type: 'tool-call', id: 21, tool: 'ask_user_question', args: questionArgs(), workflow: 'direct',
   });
@@ -582,7 +686,8 @@ test('hub shutdown expires an active question before closing transports', { time
       'x-rhwp-launch-id': 'hub-user-question-test-launch',
     },
   });
-  assert.equal(response.status, 202);
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).status, 'prepared');
 
   const resolved = await studio.next((frame) => (
     frame.type === 'user-question-resolved'

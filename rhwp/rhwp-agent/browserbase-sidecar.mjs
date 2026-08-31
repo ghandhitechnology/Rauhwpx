@@ -9,8 +9,9 @@ import { z } from 'zod';
 import { boundBrowserbaseResultContent } from './browserbase-result.mjs';
 import { BrowserbaseSidecarRuntime } from './browserbase-sidecar-runtime.mjs';
 
-const MINIMUM_NODE = Object.freeze([22, 18, 0]);
+const MINIMUM_NODE = Object.freeze([22n, 18n, 0n]);
 const SHUTDOWN_TIMEOUT_MS = 12_000;
+const SEMVER_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
 function settleWithin(promise, label) {
   let timer;
@@ -56,17 +57,27 @@ export const BROWSERBASE_TOOL_DEFINITIONS = Object.freeze([
 ]);
 
 function versionTuple(version) {
-  return String(version).split('.').slice(0, 3).map((part) => Number(part));
+  const text = String(version);
+  if (text.length > 128) return null;
+  const match = SEMVER_PATTERN.exec(text);
+  if (!match) return null;
+  const coreAndPrerelease = text.split('+', 1)[0];
+  return {
+    numbers: match.slice(1, 4).map((part) => BigInt(part)),
+    prerelease: coreAndPrerelease.includes('-'),
+  };
 }
 
 export function supportsStagehandNode(version = process.versions.node) {
   const actual = versionTuple(version);
+  if (!actual) return false;
   for (let index = 0; index < MINIMUM_NODE.length; index += 1) {
-    if (!Number.isInteger(actual[index])) return false;
-    if (actual[index] > MINIMUM_NODE[index]) return true;
-    if (actual[index] < MINIMUM_NODE[index]) return false;
+    if (actual.numbers[index] > MINIMUM_NODE[index]) return true;
+    if (actual.numbers[index] < MINIMUM_NODE[index]) return false;
   }
-  return true;
+  // SemVer prereleases sort before the corresponding release. In particular,
+  // 22.18.0-rc.1 does not satisfy a minimum of the stable 22.18.0 runtime.
+  return !actual.prerelease;
 }
 
 export function createBrowserbaseMcpServer({ runtime = new BrowserbaseSidecarRuntime() } = {}) {

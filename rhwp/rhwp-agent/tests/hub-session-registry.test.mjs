@@ -45,6 +45,30 @@ test('registry creates tenant state only through explicit registration', () => {
   assert.equal(beta.nextCapabilityEpoch, 1);
 });
 
+test('registry refuses new sessions at the cap without allocating tenant state', () => {
+  const created = [];
+  const registry = new HubSessionRegistry({
+    maxSessions: 2,
+    createGeneration: generations(101, 202, 303),
+    createRecord(sessionId) {
+      created.push(sessionId);
+      return {
+        sessionId,
+        lastConnectedAt: 0,
+      };
+    },
+  });
+
+  const alpha = registry.register('alpha');
+  registry.register('beta');
+  assert.equal(registry.register('alpha'), alpha, 'existing sessions remain re-registerable at the cap');
+  assert.throws(() => registry.register('gamma'), { code: 'SESSION_LIMIT_REACHED' });
+  assert.deepEqual(created, ['alpha', 'beta'], 'rejected sessions must not invoke the resource-allocating factory');
+
+  registry.delete('beta');
+  assert.equal(registry.register('gamma').sessionId, 'gamma', 'deletion frees one registration slot');
+});
+
 test('rhwp2 capabilities authenticate only their session and audience', () => {
   const masterToken = 'production-secret';
   const registry = new HubSessionRegistry({ createGeneration: generations(11, 22) });
@@ -358,8 +382,45 @@ test('disposeAll clears the Map and visits every registered session', async () =
   registry.register('beta');
   const disposed = [];
 
-  await registry.disposeAll(async (record) => disposed.push(record.sessionId));
+  const cleanupProven = await registry.disposeAll(async (record) => {
+    disposed.push(record.sessionId);
+    return true;
+  });
 
   assert.deepEqual(disposed.sort(), ['alpha', 'beta']);
   assert.equal(registry.records.size, 0);
+  assert.equal(cleanupProven, true);
+});
+
+test('disposeAll reports false when any disposer cannot prove cleanup', async () => {
+  const registry = new HubSessionRegistry({ createGeneration: generations(81, 82) });
+  registry.register('alpha');
+  registry.register('beta');
+  const disposed = [];
+
+  const cleanupProven = await registry.disposeAll(async (record) => {
+    disposed.push(record.sessionId);
+    return record.sessionId !== 'alpha';
+  });
+
+  assert.deepEqual(disposed.sort(), ['alpha', 'beta']);
+  assert.equal(registry.records.size, 0);
+  assert.equal(cleanupProven, false);
+});
+
+test('disposeAll reports false when any disposer rejects and still visits every session', async () => {
+  const registry = new HubSessionRegistry({ createGeneration: generations(91, 92) });
+  registry.register('alpha');
+  registry.register('beta');
+  const disposed = [];
+
+  const cleanupProven = await registry.disposeAll((record) => {
+    disposed.push(record.sessionId);
+    if (record.sessionId === 'alpha') throw new Error('cleanup failed');
+    return true;
+  });
+
+  assert.deepEqual(disposed.sort(), ['alpha', 'beta']);
+  assert.equal(registry.records.size, 0);
+  assert.equal(cleanupProven, false);
 });

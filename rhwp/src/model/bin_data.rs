@@ -72,6 +72,54 @@ pub struct BinDataContent {
     pub extension: String,
 }
 
+/// Encoding properties that must remain unchanged when an HWP5 BinData stream
+/// is copied verbatim from its source container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BinDataStreamEncoding {
+    pub compressed: bool,
+    pub ole_storage: bool,
+}
+
+/// Small, stable identity for a BinData payload.
+///
+/// The identity lets merge and manifest code compare or describe lazy payloads
+/// without materializing them. `domain` distinguishes decoded bytes from exact
+/// source-container streams so two different encodings cannot compare equal by
+/// accident.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinDataPayloadIdentity {
+    domain: String,
+    byte_len: u64,
+    digest: [u8; 32],
+}
+
+impl BinDataPayloadIdentity {
+    pub fn new(domain: impl Into<String>, byte_len: u64, digest: [u8; 32]) -> Self {
+        Self {
+            domain: domain.into(),
+            byte_len,
+            digest,
+        }
+    }
+
+    fn decoded(bytes: &[u8]) -> Self {
+        Self::new(
+            "decoded",
+            bytes.len() as u64,
+            *blake3::hash(bytes).as_bytes(),
+        )
+    }
+
+    pub(crate) fn token(&self) -> String {
+        format!(
+            "{}:{}:blake3:{}",
+            self.domain,
+            self.byte_len,
+            blake3::Hash::from_bytes(self.digest).to_hex()
+        )
+    }
+}
+
 /// 지연 로딩 대상 BinData 를 원본 컨테이너에서 다시 읽어오는 주체.
 ///
 /// [Task #2263] 압축 해제된 이미지 바이트를 IR 에 상주시키지 않기 위해,
@@ -103,6 +151,26 @@ pub trait BinDataResolver:
     /// Bounded counterpart to [`BinDataResolver::resolve_shared`].
     fn resolve_limited_shared(&self, key: &str, max_bytes: usize) -> Option<std::sync::Arc<[u8]>> {
         self.resolve_limited(key, max_bytes).map(Into::into)
+    }
+
+    /// Return the exact encoded source-container stream for fail-closed
+    /// round-trip preservation when decoded materialization is unavailable.
+    /// Resolvers must leave this unsupported when the source stream cannot be
+    /// copied verbatim into the destination container format.
+    fn resolve_original_stream_limited(
+        &self,
+        _key: &str,
+        _expected_encoding: BinDataStreamEncoding,
+        _max_bytes: usize,
+    ) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Return a bounded, stable payload identity without materializing the
+    /// complete payload. Container resolvers should hash the source stream
+    /// incrementally and include its representation in the identity domain.
+    fn payload_identity(&self, _key: &str) -> Option<BinDataPayloadIdentity> {
+        None
     }
 }
 
@@ -157,6 +225,7 @@ impl BinDataPayloadCache {
 pub struct SharedBinDataResolver {
     inner: std::sync::Arc<dyn BinDataResolver>,
     cache: BinDataPayloadCache,
+    identities: std::sync::Mutex<std::collections::HashMap<String, BinDataPayloadIdentity>>,
 }
 
 impl SharedBinDataResolver {
@@ -164,6 +233,7 @@ impl SharedBinDataResolver {
         Self {
             inner,
             cache: BinDataPayloadCache::default(),
+            identities: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 }
@@ -186,6 +256,29 @@ impl BinDataResolver for SharedBinDataResolver {
     fn resolve_limited_shared(&self, key: &str, max_bytes: usize) -> Option<std::sync::Arc<[u8]>> {
         self.cache.load_limited(self.inner.as_ref(), key, max_bytes)
     }
+
+    fn resolve_original_stream_limited(
+        &self,
+        key: &str,
+        expected_encoding: BinDataStreamEncoding,
+        max_bytes: usize,
+    ) -> Option<Vec<u8>> {
+        self.inner
+            .resolve_original_stream_limited(key, expected_encoding, max_bytes)
+    }
+
+    fn payload_identity(&self, key: &str) -> Option<BinDataPayloadIdentity> {
+        let mut identities = self
+            .identities
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(identity) = identities.get(key) {
+            return Some(identity.clone());
+        }
+        let identity = self.inner.payload_identity(key)?;
+        identities.insert(key.to_string(), identity.clone());
+        Some(identity)
+    }
 }
 
 /// BinData 바이트의 보관 방식.
@@ -206,6 +299,22 @@ pub enum BinDataBytes {
         /// 리졸버가 해석하는 항목 키 (HWPX: ZIP 엔트리 경로, HWP5: 스토리지 스트림명)
         key: String,
     },
+}
+
+/// Bounded payload view used by serializers. In-memory variants stay borrowed;
+/// only lazy resolvers return an owned shared payload.
+pub(crate) enum BinDataPayload<'a> {
+    Borrowed(&'a [u8]),
+    Shared(std::sync::Arc<[u8]>),
+}
+
+impl AsRef<[u8]> for BinDataPayload<'_> {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Borrowed(bytes) => bytes,
+            Self::Shared(bytes) => bytes,
+        }
+    }
 }
 
 impl BinDataBytes {
@@ -262,6 +371,49 @@ impl BinDataBytes {
             BinDataBytes::Lazy { resolver, key } => resolver
                 .resolve_limited_shared(key, max_bytes)
                 .filter(|payload| payload.len() <= max_bytes),
+        }
+    }
+
+    pub(crate) fn load_limited_payload(&self, max_bytes: usize) -> Option<BinDataPayload<'_>> {
+        match self {
+            BinDataBytes::Loaded(bytes) if bytes.len() <= max_bytes => {
+                Some(BinDataPayload::Borrowed(bytes))
+            }
+            BinDataBytes::Loaded(_) => None,
+            BinDataBytes::Shared(bytes) if bytes.len() <= max_bytes => {
+                Some(BinDataPayload::Borrowed(bytes))
+            }
+            BinDataBytes::Shared(_) => None,
+            BinDataBytes::Lazy { resolver, key } => resolver
+                .resolve_limited_shared(key, max_bytes)
+                .filter(|payload| payload.len() <= max_bytes)
+                .map(BinDataPayload::Shared),
+        }
+    }
+
+    /// Exact encoded source stream, available only for lazy data whose source
+    /// container is compatible with the destination serializer.
+    pub fn load_original_stream_limited(
+        &self,
+        expected_encoding: BinDataStreamEncoding,
+        max_bytes: usize,
+    ) -> Option<Vec<u8>> {
+        match self {
+            BinDataBytes::Lazy { resolver, key } => resolver
+                .resolve_original_stream_limited(key, expected_encoding, max_bytes)
+                .filter(|stream| stream.len() <= max_bytes),
+            BinDataBytes::Loaded(_) | BinDataBytes::Shared(_) => None,
+        }
+    }
+
+    /// Stable payload identity used by merge and manifest paths. Lazy
+    /// resolvers compute this incrementally; this method never falls back to a
+    /// full lazy materialization.
+    pub(crate) fn payload_identity(&self) -> Option<BinDataPayloadIdentity> {
+        match self {
+            BinDataBytes::Loaded(bytes) => Some(BinDataPayloadIdentity::decoded(bytes)),
+            BinDataBytes::Shared(bytes) => Some(BinDataPayloadIdentity::decoded(bytes)),
+            BinDataBytes::Lazy { resolver, key } => resolver.payload_identity(key),
         }
     }
 
@@ -352,6 +504,37 @@ mod tests {
 
         assert!(bytes.load_limited(16).is_none());
         assert_eq!(resolver.requested_limit.load(Ordering::SeqCst), 16);
+    }
+
+    #[test]
+    fn original_stream_boundary_rechecks_resolver_length() {
+        #[derive(Debug)]
+        struct OversizedOriginal;
+
+        impl BinDataResolver for OversizedOriginal {
+            fn resolve(&self, _key: &str) -> Vec<u8> {
+                Vec::new()
+            }
+
+            fn resolve_original_stream_limited(
+                &self,
+                _key: &str,
+                _expected_encoding: BinDataStreamEncoding,
+                max_bytes: usize,
+            ) -> Option<Vec<u8>> {
+                Some(vec![0; max_bytes + 1])
+            }
+        }
+
+        let bytes = BinDataBytes::lazy(
+            std::sync::Arc::new(OversizedOriginal),
+            "BIN0001.dat".to_string(),
+        );
+        let encoding = BinDataStreamEncoding {
+            compressed: false,
+            ole_storage: false,
+        };
+        assert!(bytes.load_original_stream_limited(encoding, 8).is_none());
     }
 
     #[derive(Debug)]

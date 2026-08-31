@@ -256,7 +256,7 @@ fn run_inner(options: Options) -> Result<(), String> {
         let out_path = options.out_dir.join(&file_name);
         fs::write(&out_path, &bytes)
             .map_err(|error| format!("probe 파일 쓰기 실패 - {}: {error}", out_path.display()))?;
-        let rhwp_pages = DocumentCore::from_bytes(&bytes)
+        let rhwp_pages = DocumentCore::from_regenerated_bytes(&bytes)
             .map(|core| core.page_count())
             .ok();
         results.push(GeneratedProbe {

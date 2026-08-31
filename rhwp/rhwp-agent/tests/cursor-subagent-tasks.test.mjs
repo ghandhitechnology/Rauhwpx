@@ -62,7 +62,12 @@ class FakeProcess extends EventEmitter {
   }
 }
 
-function startSession(t, extra = {}) {
+const PROVEN_TREE_CLEANUP = {
+  terminateProcess() { return true; },
+  waitForExit: async () => true,
+};
+
+function startSession(t, extra = {}, dependencies = {}) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-cursor-task-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const events = [];
@@ -81,6 +86,7 @@ function startSession(t, extra = {}) {
         spawns.push(proc);
         return proc;
       },
+      ...dependencies,
     },
   );
   t.after(() => session.dispose());
@@ -226,7 +232,7 @@ test('the completed transcript replays as parentTaskId-attributed child events',
   );
   // task 가 있었던 턴은 카드가 다 닫힌 뒤 조용해져야 정착한다.
   assert.equal(events.some((event) => event.type === 'turn-end'), false);
-  t.mock.timers.tick(1_600);
+  proc.exit(0);
   assert.equal(events.at(-1).type, 'turn-end');
 });
 
@@ -278,7 +284,7 @@ test('a task error result closes the card as failed', (t) => {
     type: 'task-end', agent: 'cursor', taskId: 'call-task-1', status: 'failed',
     summary: 'subagent exceeded its budget',
   });
-  t.mock.timers.tick(1_600);
+  proc.exit(0);
   assert.equal(events.filter((event) => event.type === 'turn-end').length, 1);
 });
 
@@ -325,7 +331,7 @@ test('a background task stays open until task_notification closes it', (t) => {
     type: 'task-end', agent: 'cursor', taskId: 'call-task-1', status: 'completed',
     summary: '표 너비를 맞췄습니다.',
   }]);
-  t.mock.timers.tick(1_600);
+  proc.exit(0);
   assert.deepEqual(events.at(-1), {
     type: 'turn-end', agent: 'cursor', stopReason: 'success', errorMessage: undefined,
   });
@@ -389,13 +395,15 @@ test('an open background task holds the turn indefinitely after the result line'
   });
   assert.equal(events.filter((event) => event.type === 'turn-end').length, 0, '카드가 닫혀도 유예는 남는다');
 
-  // 카드가 다 닫힌 뒤에만 유예가 돌고, 그 사이 새 줄이 오면 다시 미뤄진다.
+  // 카드가 다 닫혀도 legacy 성공은 실제 stdout close 전에는 보류된다.
   t.mock.timers.tick(1_200);
   proc.emitJson({ type: 'thinking', subtype: 'delta', text: '...', session_id: SESSION, timestamp_ms: 95 });
   t.mock.timers.tick(1_400);
   assert.equal(events.filter((event) => event.type === 'turn-end').length, 0);
 
   t.mock.timers.tick(200);
+  assert.equal(events.filter((event) => event.type === 'turn-end').length, 0);
+  proc.exit(0);
   assert.deepEqual(events.at(-1), {
     type: 'turn-end', agent: 'cursor', stopReason: 'success', errorMessage: undefined,
   });
@@ -434,34 +442,46 @@ test('a card closed by the exit sweep is not closed again by a late line', (t) =
   // 아직 열린 stdout 이 뒤늦게 흘린 완료 — 이미 닫힌 카드를 다시 닫지 않는다.
   proc.emitJson(taskCompleted('call-task-1', taskSuccess({ resultSuffix: '끝냈습니다' })));
   assert.equal(events.filter((event) => event.type === 'task-end').length, 1);
+
+  // Complete the fake stream lifecycle so test teardown does not wait on an
+  // intentionally missing `close` after the assertion has already exercised it.
+  proc.emit('close', 0, null);
 });
 
-test('a leftover card from a process that never closed is swept before the next turn', (t) => {
+test('even proved tree cleanup cannot reuse an exit-only Cursor turn without close', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
-  const { session, events, proc } = startSession(t);
+  const { session, events, proc, spawns } = startSession(t, {}, PROVEN_TREE_CLEANUP);
   proc.emitJson(INIT_LINE, taskStarted('call-task-1'));
-  // 'exit' 만 오고 'close' 는 오지 않은 채 다음 턴이 시작되면, 예약된 정리는
-  // 세대 토큰 때문에 무력화된다 — 새 턴이 직접 남은 카드를 닫아야 한다.
+  // `exit` alone does not end the current turn. Even with positive cleanup
+  // proof, a second request must wait for the bounded close grace to settle.
   proc.emit('exit', 0, null);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.throws(
+    () => session.sendUserMessage('그럼 다시 해줘'),
+    /already has a turn in progress/,
+  );
+  assert.equal(spawns.length, 1, '이전 턴의 close 유예 전에는 다음 턴을 스폰하지 않는다');
+
+  t.mock.timers.tick(2_000);
   session.sendUserMessage('그럼 다시 해줘');
 
-  const tail = events.filter((event) => event.type === 'task-end' || event.type === 'turn-start');
-  assert.deepEqual(tail, [
-    { type: 'turn-start', agent: 'cursor' },
-    { type: 'task-end', agent: 'cursor', taskId: 'call-task-1', status: 'stopped' },
-    { type: 'turn-start', agent: 'cursor' },
-  ], '남은 카드는 새 turn-start 앞에서 stopped 로 닫힌다');
+  assert.equal(spawns.length, 1, 'stdio close 없는 이전 턴 뒤에는 새 프로세스를 띄우지 않는다');
+  assert.match(events.findLast((event) => event.type === 'error').message, /cleanup could not be confirmed/);
+  assert.deepEqual(events.at(-1), { type: 'turn-end', agent: 'cursor', stopReason: 'failed' });
 
   // 뒤늦게 도착한 예약 정리가 카드를 두 번 닫지 않는다.
   t.mock.timers.tick(5_000);
   assert.equal(events.filter((event) => event.type === 'task-end').length, 1);
+  assert.equal(await session.dispose(), false);
 });
 
-test('turns without tasks settle immediately on the result line', (t) => {
+test('turns without tasks settle on the drained close after the result line', (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const { events, proc } = startSession(t);
   proc.emitJson(INIT_LINE, RESULT);
-  assert.equal(events.filter((event) => event.type === 'turn-end').length, 1, '서브에이전트 없는 턴은 지연이 없다');
+  assert.equal(events.filter((event) => event.type === 'turn-end').length, 0);
+  proc.exit(0);
+  assert.equal(events.filter((event) => event.type === 'turn-end').length, 1);
 });
 
 test('a process that dies with an open task sweeps it before turn-end', (t) => {
@@ -484,7 +504,7 @@ test('an errored result keeps its error message through the settle', (t) => {
     taskCompleted('call-task-1', taskSuccess({ resultSuffix: '끝냈습니다' })),
     { ...RESULT, is_error: true, result: 'boom' },
   );
-  t.mock.timers.tick(1_600);
+  proc.exit(0);
   const turnEnds = events.filter((event) => event.type === 'turn-end');
   assert.equal(turnEnds.length, 1);
   assert.equal(turnEnds[0].errorMessage, 'boom', '스테이징 편집 롤백 판정이 살아 있어야 한다');

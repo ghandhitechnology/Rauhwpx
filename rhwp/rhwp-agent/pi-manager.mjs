@@ -6,9 +6,16 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { RAU_DEFAULT_MODEL_ID, RAU_LOCKED_MODELS } from '../rau-credits/catalog.mjs';
+import { readUtf8FileBounded } from './bounded-file.mjs';
 import { createOpenRouter } from './openrouter.mjs';
-import { fetchLatestPackage, replaceFileAtomically, updatePrefixAtomically } from './harness-update.mjs';
+import {
+  fetchLatestPackage,
+  recoverInterruptedFileReplacement,
+  replaceFileAtomically,
+  updatePrefixAtomically,
+} from './harness-update.mjs';
 import { bundledNpmLaunch } from './npm-runtime.mjs';
+import { API_KEY_MAX_BYTES, textFitsByteLimit } from './input-bounds.mjs';
 import { cancelResponseBody, readResponseJsonBounded } from './response-bounds.mjs';
 import {
   processTreeSpawnOptions,
@@ -33,6 +40,12 @@ const PI_PACKAGE = '@earendil-works/pi-coding-agent';
 const CONFIG_FILE = 'config.json';
 const CONFIG_VERSION = 1;
 const MAX_MODELS = 3;
+export const PI_MODEL_ID_MAX_CHARS = 256;
+export const PI_MODEL_NAME_MAX_CHARS = 256;
+export const PI_API_KEY_MAX_CHARS = API_KEY_MAX_BYTES;
+export const PI_SETTINGS_MAX_BYTES = 64 * 1024;
+const PI_PACKAGE_MANIFEST_MAX_BYTES = 1024 * 1024;
+const PI_ACCOUNT_MAX_CHARS = 320;
 /** OpenRouter 의 reasoning_effort 가 받는 값 — 우리는 이 셋만 노출한다. */
 const EFFORTS = /** @type {const} */ (['low', 'medium', 'high']);
 const DEFAULT_EFFORT = 'medium';
@@ -117,6 +130,16 @@ function authRollbackError(original, rollback) {
   return error;
 }
 
+function modelRollbackError(original, rollback) {
+  const error = new AggregateError(
+    [original, rollback],
+    'Model configuration failed and its settings rollback also failed.',
+    { cause: original },
+  );
+  error.code = 'PI_MODELS_ROLLBACK_FAILED';
+  return error;
+}
+
 function stderrTail(text) {
   return String(text ?? '')
     .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
@@ -148,7 +171,34 @@ function keyTailOf(key) {
 
 /** 저장된 로그인 계정 — 이메일 형식이 아니면 버린다. */
 function storedAccount(raw) {
-  return typeof raw === 'string' && raw.includes('@') ? raw.trim() : null;
+  if (typeof raw !== 'string') return null;
+  const value = raw.trim();
+  return value.length > 0
+    && value.length <= PI_ACCOUNT_MAX_CHARS
+    && value.includes('@')
+    && !/[\x00-\x1f\x7f]/u.test(value)
+    ? value
+    : null;
+}
+
+function normalizedModelId(raw) {
+  if (typeof raw !== 'string') return null;
+  const value = raw.trim();
+  return value.length > 0
+    && value.length <= PI_MODEL_ID_MAX_CHARS
+    && !/[\s\x00-\x1f\x7f]/u.test(value)
+    ? value
+    : null;
+}
+
+function normalizedModelName(raw, fallback) {
+  const value = typeof raw === 'string' && raw.trim() ? raw.trim() : fallback;
+  return typeof value === 'string'
+    && value.length > 0
+    && value.length <= PI_MODEL_NAME_MAX_CHARS
+    && !/[\x00-\x1f\x7f]/u.test(value)
+    ? value
+    : null;
 }
 
 async function boundedJsonResponse(response, limit = OAUTH_RESPONSE_LIMIT_BYTES) {
@@ -208,7 +258,8 @@ export function defaultRauRoot(env = process.env, platform = process.platform, h
  *           npmCommand?: string, nodeCommand?: string, packageSpec?: string, platform?: string,
  *           baseEnv?: NodeJS.ProcessEnv, secretStore?: object, secretId?: string,
  *           lockedModels?: readonly object[] | null, skipLegacyKey?: boolean,
- *           tarballMaxBytes?: number, replaceFile?: typeof replaceFileAtomically }} [deps]
+ *           tarballMaxBytes?: number, oauthExchangeTimeoutMs?: number,
+ *           replaceFile?: typeof replaceFileAtomically }} [deps]
  */
 export function createPiManager({
   rootDir = defaultPiRoot(),
@@ -227,11 +278,15 @@ export function createPiManager({
   lockedModels = null,
   skipLegacyKey = false,
   tarballMaxBytes = PI_TARBALL_MAX_BYTES,
+  oauthExchangeTimeoutMs = OAUTH_EXCHANGE_TIMEOUT_MS,
   replaceFile = replaceFileAtomically,
 } = {}) {
   const tarballLimitBytes = Number.isSafeInteger(tarballMaxBytes) && tarballMaxBytes > 0
     ? Math.min(tarballMaxBytes, PI_TARBALL_MAX_BYTES)
     : PI_TARBALL_MAX_BYTES;
+  const oauthTimeoutMs = Number.isSafeInteger(oauthExchangeTimeoutMs) && oauthExchangeTimeoutMs > 0
+    ? Math.min(oauthExchangeTimeoutMs, OAUTH_EXCHANGE_TIMEOUT_MS)
+    : OAUTH_EXCHANGE_TIMEOUT_MS;
   const prefixDir = prefixDirOverride ?? path.join(rootDir, 'prefix');
   const locked = Array.isArray(lockedModels) && lockedModels.length > 0
     ? lockedModels.map((model) => ({ ...model, pricing: { ...model.pricing } }))
@@ -283,10 +338,20 @@ export function createPiManager({
   let oauthFlow = null;
 
   async function writeAtomic(file, text, mode = 0o600) {
+    if (Buffer.byteLength(text, 'utf8') > PI_SETTINGS_MAX_BYTES) {
+      throw piError(
+        'PI_SETTINGS_TOO_LARGE',
+        `Pi 설정 파일은 ${PI_SETTINGS_MAX_BYTES}바이트를 넘을 수 없어요`,
+      );
+    }
     await fs.mkdir(path.dirname(file), { recursive: true });
     const temp = `${file}.tmp-${process.pid}-${now()}-${(tempSeq += 1)}`;
-    await fs.writeFile(temp, text, { encoding: 'utf8', mode });
-    await replaceFile(temp, file, { platform });
+    try {
+      await fs.writeFile(temp, text, { encoding: 'utf8', mode, flag: 'wx' });
+      await replaceFile(temp, file, { platform });
+    } finally {
+      await fs.rm(temp, { force: true }).catch(() => {});
+    }
   }
 
   function serialized(task) {
@@ -296,7 +361,10 @@ export function createPiManager({
   }
 
   function normalizeStoredModel(raw) {
-    if (!raw || typeof raw.id !== 'string' || !raw.id) return null;
+    const id = normalizedModelId(raw?.id);
+    if (!id) return null;
+    const name = normalizedModelName(raw?.name, id);
+    if (!name) return null;
     const reasoning = Boolean(raw.reasoning);
     const efforts = reasoning && Array.isArray(raw.efforts)
       ? raw.efforts.filter((effort) => EFFORTS.includes(effort))
@@ -306,8 +374,8 @@ export function createPiManager({
       : (efforts.length > 0 ? DEFAULT_EFFORT : null);
     const contextLength = Number(raw.contextLength);
     return {
-      id: raw.id,
-      name: typeof raw.name === 'string' && raw.name.trim() ? raw.name.trim() : raw.id,
+      id,
+      name,
       reasoning,
       supportsImages: raw.supportsImages === true,
       efforts,
@@ -322,7 +390,11 @@ export function createPiManager({
 
   async function readInstalledVersion(basePrefix = prefixDir) {
     try {
-      const raw = JSON.parse(await fs.readFile(packageJsonPath(basePrefix), 'utf8'));
+      const raw = JSON.parse(await readUtf8FileBounded(packageJsonPath(basePrefix), {
+        maxBytes: PI_PACKAGE_MANIFEST_MAX_BYTES,
+        label: 'Pi package manifest',
+        platform,
+      }));
       return typeof raw?.version === 'string' && raw.version ? raw.version : null;
     } catch {
       return null;
@@ -331,9 +403,15 @@ export function createPiManager({
 
   async function readLegacyStoredKey() {
     try {
-      const raw = JSON.parse(await fs.readFile(modelsPath, 'utf8'));
+      const raw = JSON.parse(await readUtf8FileBounded(modelsPath, {
+        maxBytes: PI_SETTINGS_MAX_BYTES,
+        label: 'Pi models config',
+        platform,
+      }));
       const key = raw?.providers?.openrouter?.apiKey;
-      return typeof key === 'string' && key.trim() ? key.trim() : null;
+      if (!textFitsByteLimit(key, API_KEY_MAX_BYTES)) return null;
+      const trimmed = key.trim();
+      return trimmed || null;
     } catch {
       return null;
     }
@@ -341,7 +419,11 @@ export function createPiManager({
 
   async function readConfig() {
     try {
-      const raw = JSON.parse(await fs.readFile(configPath, 'utf8'));
+      const raw = JSON.parse(await readUtf8FileBounded(configPath, {
+        maxBytes: PI_SETTINGS_MAX_BYTES,
+        label: 'Pi config',
+        platform,
+      }));
       const models = (Array.isArray(raw?.models) ? raw.models : [])
         .map(normalizeStoredModel)
         .filter(Boolean)
@@ -364,10 +446,15 @@ export function createPiManager({
     const legacyKey = skipLegacyKey ? null : await readLegacyStoredKey();
     if (secretStore?.available) {
       try {
-        apiKey = await secretStore.get(secretId);
+        const stored = await secretStore.get(secretId);
+        if (stored != null && (!textFitsByteLimit(stored, API_KEY_MAX_BYTES) || !stored.trim())) {
+          throw piError('OPENROUTER_KEY_TOO_LARGE', '저장된 OpenRouter 키가 허용된 길이를 넘었어요');
+        }
+        apiKey = stored?.trim() || null;
         if (!apiKey && legacyKey) {
           await secretStore.set(secretId, legacyKey);
-          apiKey = await secretStore.get(secretId);
+          const migrated = await secretStore.get(secretId);
+          apiKey = textFitsByteLimit(migrated, API_KEY_MAX_BYTES) ? migrated.trim() : null;
           if (apiKey === legacyKey) await writeModelsJson();
         }
       } catch (error) {
@@ -434,6 +521,57 @@ export function createPiManager({
     if (apiKey && (!secretStore?.available || secretStoreError)) provider.apiKey = apiKey;
     const payload = { providers: { openrouter: provider } };
     await writeAtomic(modelsPath, `${JSON.stringify(payload, null, 2)}\n`);
+  }
+
+  function snapshotSettingsState() {
+    return {
+      apiKey,
+      config: structuredClone(config),
+      secretStoreError,
+      vaultSnapshot: /** @type {{ present: boolean, value: unknown } | null} */ (null),
+    };
+  }
+
+  async function captureVaultSnapshot(previous) {
+    if (!secretStore?.available) return;
+    const value = await secretStore.get(secretId);
+    previous.vaultSnapshot = {
+      present: value !== null && value !== undefined,
+      value,
+    };
+  }
+
+  async function rollbackSettingsState(previous, {
+    restoreSecret = false,
+    restoreFiles = true,
+    clearClientCache = false,
+  } = {}) {
+    apiKey = previous.apiKey;
+    config = structuredClone(previous.config);
+    secretStoreError = previous.secretStoreError;
+    const rollbackErrors = [];
+    if (restoreSecret && secretStore?.available) {
+      try {
+        if (!previous.vaultSnapshot) {
+          throw new Error('Cannot restore a vault value that was not snapshotted.');
+        }
+        if (previous.vaultSnapshot.present) {
+          await secretStore.set(secretId, previous.vaultSnapshot.value);
+        } else {
+          await secretStore.delete(secretId);
+        }
+      } catch (error) {
+        rollbackErrors.push(error);
+      }
+    }
+    if (restoreFiles) {
+      try { await writeModelsJson(); } catch (error) { rollbackErrors.push(error); }
+      try { await persistConfig(); } catch (error) { rollbackErrors.push(error); }
+    }
+    if (clearClientCache) {
+      try { client.clearCache(); } catch (error) { rollbackErrors.push(error); }
+    }
+    return rollbackErrors;
   }
 
   /**
@@ -603,7 +741,7 @@ export function createPiManager({
         if (current) return current;
         const cleanup = terminateAndWaitForProcessTreeExit(proc, {
           terminateProcess: terminateProcessTree,
-          terminateOptions: { platform, spawnProcess },
+          terminateOptions: { platform, spawnProcess, env: baseEnv },
         }).catch(() => false);
         installCleanupPromises.set(proc, cleanup);
         return cleanup;
@@ -723,6 +861,8 @@ export function createPiManager({
     /** 루트를 만들고 저장된 설정을 읽는다. 루트가 없어도 실패하지 않는다. */
     async init() {
       await fs.mkdir(rootDir, { recursive: true }).catch(() => {});
+      await recoverInterruptedFileReplacement(configPath, { platform });
+      await recoverInterruptedFileReplacement(modelsPath, { platform });
       await load();
       return this;
     },
@@ -871,21 +1011,28 @@ export function createPiManager({
      * 로그인한 계정 이메일과 취소 신호 (Rau 체험 로그인).
      */
     async setApiKey(key, { account = null, signal, onCommitted } = {}) {
+      if (typeof key !== 'string') {
+        throw piError('OPENROUTER_KEY_INVALID', 'OpenRouter 키를 입력하세요');
+      }
+      const rawKey = key;
+      if (!textFitsByteLimit(rawKey, API_KEY_MAX_BYTES)) {
+        throw piError('OPENROUTER_KEY_TOO_LARGE', 'OpenRouter 키가 허용된 길이를 넘었어요');
+      }
+      const trimmed = rawKey.trim();
+      if (!trimmed) throw piError('OPENROUTER_KEY_INVALID', 'OpenRouter 키를 입력하세요');
       await load();
       throwIfAuthCancelled(signal);
-      const trimmed = String(key ?? '').trim();
-      if (!trimmed) throw piError('OPENROUTER_KEY_INVALID', 'OpenRouter 키를 입력하세요');
       const check = await client.validateKey(trimmed);
       throwIfAuthCancelled(signal);
       if (!check.valid) throw piError('OPENROUTER_KEY_INVALID', 'OpenRouter 키가 거절됐어요');
       await serialized(async () => {
         // Validation runs outside the write queue. Snapshot only after entering it so a
         // cancelled rollback can never overwrite a newer queued settings change.
-        const previous = {
-          apiKey,
-          config: structuredClone(config),
-          secretStoreError,
-        };
+        const previous = snapshotSettingsState();
+        // readConfig may have fallen back after a transient vault read failure. Capture
+        // the actual current value here, before mutation, so rollback never substitutes
+        // stale in-memory state for a different credential that is still in the vault.
+        await captureVaultSnapshot(previous);
         let commitStarted = false;
         try {
           throwIfAuthCancelled(signal);
@@ -921,21 +1068,10 @@ export function createPiManager({
           // Any failure can land after an async vault/file write has taken effect. Restore
           // the exact pre-run state before releasing the write queue; the transaction is
           // not committed until onCommitted returns.
-          const rollbackErrors = [];
-          apiKey = previous.apiKey;
-          config = structuredClone(previous.config);
-          secretStoreError = previous.secretStoreError;
-          try {
-            if (secretStore?.available) {
-              if (previous.apiKey) await secretStore.set(secretId, previous.apiKey);
-              else await secretStore.delete(secretId);
-            }
-          } catch (rollbackError) {
-            rollbackErrors.push(rollbackError);
-          }
-          try { await writeModelsJson(); } catch (rollbackError) { rollbackErrors.push(rollbackError); }
-          try { await persistConfig(); } catch (rollbackError) { rollbackErrors.push(rollbackError); }
-          try { client.clearCache(); } catch (rollbackError) { rollbackErrors.push(rollbackError); }
+          const rollbackErrors = await rollbackSettingsState(previous, {
+            restoreSecret: true,
+            clearClientCache: true,
+          });
           if (rollbackErrors.length > 0) {
             throw authRollbackError(
               error,
@@ -1001,7 +1137,7 @@ export function createPiManager({
       const timer = setTimeout(() => {
         controller.abort();
         rejectTimeout(piError('OPENROUTER_OAUTH_TIMEOUT', 'OpenRouter 로그인 응답이 너무 느려요'));
-      }, OAUTH_EXCHANGE_TIMEOUT_MS);
+      }, oauthTimeoutMs);
       try {
         const operation = (async () => {
           const response = await fetchImpl('https://openrouter.ai/api/v1/auth/keys', {
@@ -1015,15 +1151,15 @@ export function createPiManager({
             signal: exchangeSignal,
           });
           const body = await boundedJsonResponse(response);
-          throwIfAuthCancelled(signal);
+          throwIfAuthCancelled(exchangeSignal);
           if (!response.ok || typeof body?.key !== 'string' || !body.key) {
             throw piError('OPENROUTER_OAUTH_FAILED', 'OpenRouter 로그인을 완료하지 못했어요');
           }
-          throwIfAuthCancelled(signal);
-          const status = await this.setApiKey(body.key, { signal, onCommitted });
+          throwIfAuthCancelled(exchangeSignal);
+          const status = await this.setApiKey(body.key, { signal: exchangeSignal, onCommitted });
           // onCommitted synchronously removes the exact auth run. If it did not,
           // the same signal still fences this late exchange from reporting success.
-          throwIfAuthCancelled(signal);
+          throwIfAuthCancelled(exchangeSignal);
           return status;
         })();
         const status = await Promise.race([operation, timeout, cancellation]);
@@ -1048,25 +1184,53 @@ export function createPiManager({
     /** 로컬 키만 지운다. 호스티드 $5 키는 서버에 남는다. */
     async clearApiKey() {
       await load();
-      if (secretStore?.available) {
+      return serialized(async () => {
+        const previous = snapshotSettingsState();
+        // Deletion is reversible only when the precise pre-delete value is known.
+        await captureVaultSnapshot(previous);
+        let vaultTouched = false;
+        let stateMutated = false;
+        let deleteFailureMessage = null;
         try {
-          await secretStore.delete(secretId);
-          secretStoreError = null;
+          if (secretStore?.available) {
+            vaultTouched = true;
+            try {
+              await secretStore.delete(secretId);
+            } catch (error) {
+              deleteFailureMessage = error?.message ?? 'OS 보안 저장소에서 키를 지우지 못했어요.';
+              secretStoreError = deleteFailureMessage;
+              throw piError('SECRET_DELETE_FAILED', deleteFailureMessage);
+            }
+            secretStoreError = null;
+          }
+          stateMutated = true;
+          apiKey = null;
+          config.keyTail = null;
+          config.account = null;
+          config.setupComplete = false;
+          await writeModelsJson();
+          await persistConfig();
+          client.clearCache();
+          return currentStatus();
         } catch (error) {
-          secretStoreError = error?.message ?? 'OS 보안 저장소에서 키를 지우지 못했어요.';
-          throw piError('SECRET_DELETE_FAILED', secretStoreError);
+          const rollbackErrors = await rollbackSettingsState(previous, {
+            restoreSecret: vaultTouched,
+            restoreFiles: stateMutated,
+          });
+          // Keep the existing diagnostics for a vault deletion failure after the
+          // credential itself has been restored successfully.
+          if (deleteFailureMessage && rollbackErrors.length === 0) {
+            secretStoreError = deleteFailureMessage;
+          }
+          if (rollbackErrors.length > 0) {
+            throw authRollbackError(
+              error,
+              new AggregateError(rollbackErrors, 'One or more credential rollback steps failed.'),
+            );
+          }
+          throw error;
         }
-      }
-      apiKey = null;
-      config.keyTail = null;
-      config.account = null;
-      config.setupComplete = false;
-      client.clearCache();
-      await serialized(async () => {
-        await writeModelsJson();
-        await persistConfig();
       });
-      return currentStatus();
     },
 
     async cancelSetup() {
@@ -1077,7 +1241,7 @@ export function createPiManager({
       if (!cleanup) {
         cleanup = terminateAndWaitForProcessTreeExit(proc, {
           terminateProcess: terminateProcessTree,
-          terminateOptions: { platform, spawnProcess },
+          terminateOptions: { platform, spawnProcess, env: baseEnv },
         }).catch(() => false);
         installCleanupPromises.set(proc, cleanup);
       }
@@ -1099,18 +1263,33 @@ export function createPiManager({
       if (requested.length > MAX_MODELS) {
         throw piError('PI_TOO_MANY_MODELS', `모델은 최대 ${MAX_MODELS}개까지 고를 수 있어요`);
       }
+      const normalizedRequested = requested.map((item) => {
+        const rawId = typeof item?.id === 'string' ? item.id.trim() : '';
+        const id = normalizedModelId(rawId);
+        if (rawId && !id) {
+          throw piError('PI_MODEL_INVALID', '모델 ID가 허용된 길이 또는 형식이 아니에요');
+        }
+        const rawName = typeof item?.name === 'string' ? item.name.trim() : '';
+        const name = rawName ? normalizedModelName(rawName, '') : null;
+        if (rawName && !name) {
+          throw piError('PI_MODEL_NAME_INVALID', '모델 이름이 허용된 길이 또는 형식이 아니에요');
+        }
+        return { item, id: id ?? '', name };
+      });
       const catalog = await client.catalog(false, apiKey);
-      const byId = new Map(catalog.map((entry) => [entry.id, entry]));
+      const byId = new Map(catalog.flatMap((entry) => {
+        const id = normalizedModelId(entry?.id);
+        return id ? [[id, entry]] : [];
+      }));
       const seen = new Set();
       /** @type {PiModelConfig[]} */
       const next = [];
-      for (const item of requested) {
-        const id = typeof item?.id === 'string' ? item.id.trim() : '';
+      for (const { item, id, name: requestedName } of normalizedRequested) {
         const entry = byId.get(id);
         if (!entry) throw piError('PI_MODEL_UNKNOWN', `OpenRouter 에 없는 모델이에요: ${id || '(빈 값)'}`);
         if (seen.has(id)) continue;
         seen.add(id);
-        const name = typeof item?.name === 'string' && item.name.trim() ? item.name.trim() : entry.name;
+        const name = requestedName ?? normalizedModelName(entry.name, id) ?? id;
         const efforts = entry.reasoning ? [...EFFORTS] : [];
         const defaultEffort = efforts.includes(item?.effortDefault)
           ? item.effortDefault
@@ -1126,16 +1305,28 @@ export function createPiManager({
           pricing: { ...entry.pricing },
         });
       }
-      config.models = next;
-      config.defaultModelId = next.some((model) => model.id === config.defaultModelId)
-        ? config.defaultModelId
-        : next[0].id;
-      config.setupComplete = Boolean(apiKey) && next.length > 0;
-      await serialized(async () => {
-        await writeModelsJson();
-        await persistConfig();
+      return serialized(async () => {
+        const previous = snapshotSettingsState();
+        try {
+          config.models = next;
+          config.defaultModelId = next.some((model) => model.id === config.defaultModelId)
+            ? config.defaultModelId
+            : next[0].id;
+          config.setupComplete = Boolean(apiKey) && next.length > 0;
+          await writeModelsJson();
+          await persistConfig();
+          return currentStatus();
+        } catch (error) {
+          const rollbackErrors = await rollbackSettingsState(previous);
+          if (rollbackErrors.length > 0) {
+            throw modelRollbackError(
+              error,
+              new AggregateError(rollbackErrors, 'One or more model rollback steps failed.'),
+            );
+          }
+          throw error;
+        }
       });
-      return currentStatus();
     },
 
     /** 설정된 모델 중 출력 단가가 가장 싼 것. 없으면 null. */

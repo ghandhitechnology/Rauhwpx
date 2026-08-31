@@ -28,15 +28,15 @@ use std::time::Instant;
 
 use crate::document_core::DocumentCore;
 use crate::parser::cfb_reader::{decompress_stream, CfbReader};
-use crate::parser::parse_document;
+use crate::parser::{parse_document, parse_regenerated_document};
 use crate::serializer::hwpx::roundtrip::diff_documents;
 use crate::serializer::serialize_document;
 
 /// C3 — 바이트에서 페이지 수 산출(파싱+페이지네이션). 실패/패닉 시 `None`.
 /// 배치 중 단일 파일 패닉이 전체를 중단시키지 않도록 `catch_unwind` 로 격리.
-fn page_count_of(bytes: &[u8]) -> Option<u32> {
+fn page_count_of(bytes: &[u8], policy: crate::parser::limits::InputPolicy) -> Option<u32> {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        DocumentCore::from_local_file_bytes(bytes)
+        DocumentCore::from_bytes_with_policy(bytes, policy)
             .ok()
             .map(|dc| dc.page_count())
     }))
@@ -314,7 +314,7 @@ fn roundtrip_one(path: &Path, rel_path: &str, rt_path: &Path) -> RoundtripRow {
         return finish(row, started);
     }
 
-    let doc2 = match parse_document(&out) {
+    let doc2 = match parse_regenerated_document(&out) {
         Ok(d) => d,
         Err(e) => {
             row.error = format!("재파싱 실패: {e}");
@@ -339,8 +339,8 @@ fn roundtrip_one(path: &Path, rel_path: &str, rt_path: &Path) -> RoundtripRow {
     }
 
     // C3 — 페이지수 복원 (rhwp 자기 일관 기준; 외부 한글-only 붕괴는 미검출 한계)
-    row.page_before = page_count_of(&bytes);
-    row.page_after = page_count_of(&out);
+    row.page_before = page_count_of(&bytes, crate::parser::limits::InputPolicy::LocalFileOnce);
+    row.page_after = page_count_of(&out, crate::parser::limits::InputPolicy::Regenerated);
 
     // C4 — 저장본 CFB 구조
     let (cfb_ok, cfb_problems) = cfb_structure_ok(&out, doc1.sections.len());
@@ -349,7 +349,7 @@ fn roundtrip_one(path: &Path, rel_path: &str, rt_path: &Path) -> RoundtripRow {
 
     // 2-round 안정성: round1 IR(doc2) 을 다시 직렬화→파싱한 IR(doc3) 과 비교해 0 이어야 안정.
     match serialize_document(&doc2) {
-        Ok(out2) => match parse_document(&out2) {
+        Ok(out2) => match parse_regenerated_document(&out2) {
             Ok(doc3) => {
                 let diff2 = diff_documents(&doc2, &doc3);
                 row.round2_diff_count = Some(diff2.differences.len());
@@ -369,7 +369,7 @@ fn roundtrip_one(path: &Path, rel_path: &str, rt_path: &Path) -> RoundtripRow {
 pub fn baseline_check(bytes: &[u8]) -> Result<(), String> {
     let doc1 = parse_document(bytes).map_err(|e| format!("파싱 실패: {e}"))?;
     let out = serialize_document(&doc1).map_err(|e| format!("직렬화 실패: {e}"))?;
-    let doc2 = parse_document(&out).map_err(|e| format!("재파싱 실패: {e}"))?;
+    let doc2 = parse_regenerated_document(&out).map_err(|e| format!("재파싱 실패: {e}"))?;
 
     // C1 IR 뼈대
     let diff = diff_documents(&doc1, &doc2);
@@ -404,7 +404,10 @@ pub fn baseline_check(bytes: &[u8]) -> Result<(), String> {
     }
 
     // C3 페이지수 복원
-    if let (Some(a), Some(b)) = (page_count_of(bytes), page_count_of(&out)) {
+    if let (Some(a), Some(b)) = (
+        page_count_of(bytes, crate::parser::limits::InputPolicy::Untrusted),
+        page_count_of(&out, crate::parser::limits::InputPolicy::Regenerated),
+    ) {
         if a != b {
             return Err(format!("페이지 변화 {a}→{b}"));
         }
@@ -412,7 +415,8 @@ pub fn baseline_check(bytes: &[u8]) -> Result<(), String> {
 
     // C5 2-round 안정성
     let out2 = serialize_document(&doc2).map_err(|e| format!("2-round 직렬화 실패: {e}"))?;
-    let doc3 = parse_document(&out2).map_err(|e| format!("2-round 재파싱 실패: {e}"))?;
+    let doc3 =
+        parse_regenerated_document(&out2).map_err(|e| format!("2-round 재파싱 실패: {e}"))?;
     let diff2 = diff_documents(&doc2, &doc3);
     if !diff2.differences.is_empty() {
         return Err(format!(

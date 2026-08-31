@@ -467,7 +467,7 @@ pub fn roundtrip_geom(data: &[u8], via: Via) -> Result<DocGeomDiff, HwpError> {
             c.export_hwp_with_adapter()?
         }
     };
-    let core_b = DocumentCore::from_bytes(&rt_bytes)?;
+    let core_b = DocumentCore::from_regenerated_bytes(&rt_bytes)?;
     diff_render_geometry(&core_a, &core_b)
 }
 

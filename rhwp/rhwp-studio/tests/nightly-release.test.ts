@@ -74,7 +74,9 @@ test('nightly macOS releases use the tagged release signing contract', () => {
 test('nightly publishing replaces the prerelease only after both builds pass', () => {
   assert.match(publishJob, /needs:\s*\[macos,\s*windows\]/);
   assert.match(publishJob, /if:\s*github\.ref == 'refs\/heads\/main'/);
-  assert.match(publishJob, /select\(\.tag_name == "nightly"\) \| \.id/);
+  assert.match(publishJob, /releases\/tags\/nightly" --jq '\.id'/);
+  assert.match(publishJob, /elif grep -q 'HTTP 404'/);
+  assert.doesNotMatch(publishJob, /releases\?per_page=/);
   assert.match(
     publishJob,
     /gh api --method DELETE "repos\/\$\{GITHUB_REPOSITORY\}\/releases\/\$\{existing_release_id\}"/,

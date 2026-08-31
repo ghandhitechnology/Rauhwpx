@@ -69,8 +69,13 @@ class FakeProcess extends EventEmitter {
   }
 }
 
+const PROVEN_TREE_CLEANUP = {
+  terminateProcess: (child) => child.kill('SIGTERM'),
+  waitForExit: async () => true,
+};
+
 /** 세션을 만들고 스폰 기록/이벤트 배열과 임시 grokHome 을 함께 돌려준다. */
-function startSession(t, extra = {}) {
+function startSession(t, extra = {}, dependencies = {}) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-grok-test-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const events = [];
@@ -89,6 +94,7 @@ function startSession(t, extra = {}) {
       spawns.push({ command, argv, options, proc });
       return proc;
     },
+    ...dependencies,
   });
   return { session, events, spawns, opts, root };
 }
@@ -239,7 +245,7 @@ test('the child env pins GROK_HOME and turns off the auto-updater and memory', (
   assert.equal(env.RHWP_SESSION_ID, 'studio-thread-grok');
 });
 
-test('native ACP keeps one Grok process, registers both question methods and routes cancel', async (t) => {
+test('native ACP keeps one Grok session, isolates prompts, registers questions and routes cancel', async (t) => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-grok-native-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const events = [];
@@ -323,6 +329,7 @@ test('native ACP keeps one Grok process, registers both question methods and rou
 
   assert.equal(creates, 1);
   assert.deepEqual(config.args, ['agent', 'stdio']);
+  assert.equal(config.isolatePrompts, true);
   assert.deepEqual(config.requestHandlers.map((entry) => entry.method), [
     'x.ai/ask_user_question', '_x.ai/ask_user_question',
   ]);
@@ -339,7 +346,7 @@ test('native ACP keeps one Grok process, registers both question methods and rou
     ['agent', 'code', 'default'],
   ]);
   assert.deepEqual(events.filter((event) => event.type === 'text-delta').map((event) => event.text), ['native', 'native', 'native', 'native']);
-  assert.equal(restarts, 3);
+  assert.equal(restarts, 4);
 
   session.sendUserMessage('pending interrupt');
   session.interrupt();
@@ -377,6 +384,10 @@ test('Grok rejects Plan before ACK when ACP cannot prove the mode', async (t) =>
     session.setExecutionMode({ workflow: 'plan', phase: 'planning', capabilityEpoch: 2 }),
     /does not advertise required mode/,
   );
+  await assert.rejects(
+    session.setExecutionMode({ workflow: 'plan', phase: 'planning', capabilityEpoch: 3 }),
+    /cleanup remains unconfirmed/,
+  );
   assert.deepEqual([opts.workflow, opts.phase, opts.capabilityEpoch], ['direct', 'implementing', 1]);
   assert.equal(disposed, 1);
 });
@@ -399,7 +410,7 @@ test('Grok ACP startup failure falls back before emitting a native provider upda
         isStarted: () => false,
         configure: async () => { throw new Error('ACP unavailable'); },
         hasSeenPromptUpdate: () => false,
-        dispose: async () => {},
+        dispose: async () => true,
       };
     },
     spawnProcess(command, argv, options) {
@@ -449,6 +460,262 @@ test('Grok never switches transports after the native prompt starts', async (t) 
   assert.equal(events.filter((event) => event.type === 'turn-end').at(-1)?.stopReason, 'failed');
 });
 
+test('Grok does not advertise the next turn until interrupted ACP teardown finishes', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-grok-native-turn-barrier-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const events = [];
+  let prompts = 0;
+  let releaseFirstPrompt = () => {};
+  let markFirstPromptStarted = () => {};
+  const firstPromptStarted = new Promise((resolve) => { markFirstPromptStarted = resolve; });
+  const firstPrompt = new Promise((resolve) => {
+    releaseFirstPrompt = () => resolve({ stopReason: 'cancelled' });
+  });
+  const session = createGrokSession({
+    ...baseOpts,
+    agentRole: 'root',
+    isolatedHome: path.join(root, 'home'),
+    grokHome: path.join(root, 'home', '.grok'),
+    requestUserInput: async () => ({ status: 'cancelled' }),
+    onEvent: (event) => events.push(event),
+  }, {
+    createAcpSession() {
+      return {
+        isStarted: () => true,
+        configure: async () => {},
+        getSessionId: () => 'grok-turn-barrier',
+        async prompt() {
+          prompts += 1;
+          if (prompts === 1) {
+            markFirstPromptStarted();
+            return firstPrompt;
+          }
+          return { stopReason: 'end_turn' };
+        },
+        isCleanupUncertain: () => false,
+        cancel: async () => {},
+        dispose: async () => true,
+      };
+    },
+  });
+  t.after(() => session.dispose());
+
+  session.sendUserMessage('first');
+  await firstPromptStarted;
+  session.interrupt();
+  session.sendUserMessage('second');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(prompts, 1);
+  assert.equal(events.filter((event) => event.type === 'turn-start').length, 1);
+
+  releaseFirstPrompt();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(prompts, 2);
+  assert.equal(events.filter((event) => event.type === 'turn-start').length, 2);
+  assert.equal(events.filter((event) => event.type === 'turn-end').at(-1)?.stopReason, 'completed');
+});
+
+test('Grok never sends a stale ACP prompt after interrupt or dispose during configure', async (t) => {
+  for (const action of ['interrupt', 'dispose']) {
+    await t.test(action, async () => {
+      const root = mkdtempSync(path.join(os.tmpdir(), `rhwp-grok-configure-${action}-`));
+      t.after(() => rmSync(root, { recursive: true, force: true }));
+      let releaseConfigure = () => {};
+      let markConfigureStarted = () => {};
+      const configureGate = new Promise((resolve) => { releaseConfigure = resolve; });
+      const configureStarted = new Promise((resolve) => { markConfigureStarted = resolve; });
+      let prompts = 0;
+      const session = createGrokSession({
+        ...baseOpts,
+        agentRole: 'root',
+        isolatedHome: path.join(root, 'home'),
+        grokHome: path.join(root, 'home', '.grok'),
+        requestUserInput: async () => ({ status: 'cancelled' }),
+      }, {
+        createAcpSession() {
+          return {
+            isStarted: () => true,
+            async configure() {
+              markConfigureStarted();
+              await configureGate;
+            },
+            getSessionId: () => 'grok-stale-configure',
+            prompt: async () => { prompts += 1; return { stopReason: 'end_turn' }; },
+            cancel: async () => {},
+            dispose: async () => true,
+          };
+        },
+      });
+
+      session.sendUserMessage('must not be sent');
+      await configureStarted;
+      const disposing = action === 'dispose' ? session.dispose() : null;
+      if (action === 'interrupt') session.interrupt();
+      releaseConfigure();
+      await new Promise((resolve) => setImmediate(resolve));
+      if (disposing) await disposing;
+      else await session.dispose();
+      assert.equal(prompts, 0);
+    });
+  }
+});
+
+test('Grok tracks deferred failed ACP startup cleanup across interrupt and dispose', async (t) => {
+  for (const action of ['interrupt', 'dispose']) {
+    await t.test(action, async () => {
+      const root = mkdtempSync(path.join(os.tmpdir(), `rhwp-grok-deferred-cleanup-${action}-`));
+      t.after(() => rmSync(root, { recursive: true, force: true }));
+      const events = [];
+      let legacySpawns = 0;
+      let cleanupCalls = 0;
+      let releaseCleanup = () => {};
+      let markCleanupStarted = () => {};
+      const cleanupGate = new Promise((resolve) => { releaseCleanup = resolve; });
+      const cleanupStarted = new Promise((resolve) => { markCleanupStarted = resolve; });
+      const session = createGrokSession({
+        ...baseOpts,
+        agentRole: 'root',
+        isolatedHome: path.join(root, 'home'),
+        grokHome: path.join(root, 'home', '.grok'),
+        requestUserInput: async () => ({ status: 'cancelled' }),
+        onEvent: (event) => events.push(event),
+      }, {
+        createAcpSession() {
+          return {
+            isStarted: () => false,
+            configure: async () => { throw new Error('ACP startup failed'); },
+            async dispose() {
+              cleanupCalls += 1;
+              markCleanupStarted();
+              await cleanupGate;
+              return false;
+            },
+          };
+        },
+        spawnProcess() {
+          legacySpawns += 1;
+          return new FakeProcess();
+        },
+      });
+
+      session.sendUserMessage('start');
+      await cleanupStarted;
+
+      if (action === 'interrupt') {
+        session.interrupt();
+        session.sendUserMessage('must remain quarantined');
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(legacySpawns, 0);
+        assert.match(events.find((event) => event.type === 'error')?.message ?? '', /cleanup remains unconfirmed/);
+        releaseCleanup();
+        await new Promise((resolve) => setImmediate(resolve));
+        session.sendUserMessage('must stay quarantined after cleanup fails');
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(events.filter((event) => event.type === 'error').length, 2);
+        assert.equal(await session.dispose(), false);
+      } else {
+        let disposeSettled = false;
+        const disposing = session.dispose().then((cleaned) => {
+          disposeSettled = true;
+          return cleaned;
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.equal(disposeSettled, false, 'dispose must wait for the detached ACP cleanup');
+        releaseCleanup();
+        assert.equal(await disposing, false);
+      }
+
+      assert.equal(cleanupCalls, 1);
+      assert.equal(legacySpawns, 0);
+    });
+  }
+});
+
+test('Grok disposal fences native configuration before accepting cleanup proof', async (t) => {
+  await t.test('same-tick disposal prevents late native-session creation', async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-grok-same-tick-dispose-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    let creates = 0;
+    const session = createGrokSession({
+      ...baseOpts,
+      agentRole: 'root',
+      isolatedHome: path.join(root, 'home'),
+      grokHome: path.join(root, 'home', '.grok'),
+      requestUserInput: async () => ({ status: 'cancelled' }),
+    }, {
+      createAcpSession() {
+        creates += 1;
+        return {
+          isStarted: () => false,
+          configure: async () => {},
+          getSessionId: () => 'grok-too-late',
+          dispose: async () => true,
+        };
+      },
+    });
+
+    session.sendUserMessage('do not start after disposal');
+    assert.equal(await session.dispose(), true);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(creates, 0);
+  });
+
+  await t.test('in-flight configuration and its failed cleanup are awaited', async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-grok-configure-dispose-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    let releaseConfigure = () => {};
+    let markConfigureStarted = () => {};
+    const configureGate = new Promise((resolve) => { releaseConfigure = resolve; });
+    const configureStarted = new Promise((resolve) => { markConfigureStarted = resolve; });
+    let releaseCleanup = () => {};
+    let markCleanupStarted = () => {};
+    const cleanupGate = new Promise((resolve) => { releaseCleanup = resolve; });
+    const cleanupStarted = new Promise((resolve) => { markCleanupStarted = resolve; });
+    let cleanupCalls = 0;
+    const session = createGrokSession({
+      ...baseOpts,
+      agentRole: 'root',
+      isolatedHome: path.join(root, 'home'),
+      grokHome: path.join(root, 'home', '.grok'),
+      requestUserInput: async () => ({ status: 'cancelled' }),
+    }, {
+      createAcpSession() {
+        return {
+          isStarted: () => false,
+          async configure() {
+            markConfigureStarted();
+            await configureGate;
+          },
+          getSessionId: () => 'grok-configuring-at-dispose',
+          async dispose() {
+            cleanupCalls += 1;
+            markCleanupStarted();
+            await cleanupGate;
+            return false;
+          },
+        };
+      },
+    });
+
+    session.sendUserMessage('configure');
+    await configureStarted;
+    let disposeSettled = false;
+    const disposing = session.dispose().then((cleaned) => {
+      disposeSettled = true;
+      return cleaned;
+    });
+    await cleanupStarted;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(disposeSettled, false, 'dispose must wait for native cleanup proof');
+    releaseCleanup();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(disposeSettled, false, 'dispose must also wait for the in-flight configure operation');
+    releaseConfigure();
+    assert.equal(await disposing, false);
+    assert.equal(cleanupCalls, 1);
+  });
+});
+
 test('a tool-call turn maps the Anthropic wire stream to the unified sequence', (t) => {
   const { session, events, spawns } = startSession(t);
   session.sendUserMessage('probe the document');
@@ -483,6 +750,7 @@ test('a tool-call turn maps the Anthropic wire stream to the unified sequence', 
       usage: { input_tokens: 120, output_tokens: 40, cache_read_input_tokens: 10, cache_creation_input_tokens: 5 },
     },
   );
+  proc.exit(0);
 
   assert.deepEqual(types(events), [
     'turn-start', 'session-info', 'text-delta', 'tool-call', 'tool-result', 'usage', 'turn-end',
@@ -510,22 +778,24 @@ test('a tool-call turn maps the Anthropic wire stream to the unified sequence', 
   session.dispose();
 });
 
-test('a non-end_turn stop reason still ends the turn as completed, and errors keep their subtype', (t) => {
-  const { session, events, spawns } = startSession(t);
+test('a non-end_turn stop reason still ends the turn as completed, and errors keep their subtype', async (t) => {
+  const { session, events, spawns } = startSession(t, {}, PROVEN_TREE_CLEANUP);
   session.sendUserMessage('long rewrite');
   spawns[0].proc.emitJson({
     type: 'result', subtype: 'success', is_error: false, result: '중간에 잘렸습니다.',
     stop_reason: 'max_tokens',
   });
+  spawns[0].proc.exit(0);
   assert.deepEqual(events.at(-1), {
     type: 'turn-end', agent: 'grok', stopReason: 'completed', errorMessage: undefined,
   }, 'max_tokens 를 그대로 흘리면 스튜디오가 스테이징 편집을 되돌린다');
-
   session.sendUserMessage('again');
+  await new Promise((resolve) => setImmediate(resolve));
   spawns[1].proc.emitJson({
     type: 'result', subtype: 'error_during_execution', is_error: true, result: '도구 호출이 실패했습니다.',
     stop_reason: 'refusal',
   });
+  spawns[1].proc.exit(0);
   assert.deepEqual(events.at(-1), {
     type: 'turn-end', agent: 'grok', stopReason: 'error_during_execution',
     errorMessage: '도구 호출이 실패했습니다.',
@@ -533,8 +803,8 @@ test('a non-end_turn stop reason still ends the turn as completed, and errors ke
   session.dispose();
 });
 
-test('per-model usage is preferred and an all-zero ledger emits nothing', (t) => {
-  const { session, events, spawns } = startSession(t);
+test('per-model usage is preferred and an all-zero ledger emits nothing', async (t) => {
+  const { session, events, spawns } = startSession(t, {}, PROVEN_TREE_CLEANUP);
   session.sendUserMessage('go');
   spawns[0].proc.emitJson(
     INIT_LINE,
@@ -550,8 +820,10 @@ test('per-model usage is preferred and an all-zero ledger emits nothing', (t) =>
   const usage = events.filter((event) => event.type === 'usage');
   assert.equal(usage.length, 1, '모델별 사용량이 있으면 집계본은 버린다');
   assert.equal(usage[0].model, 'grok-4.6');
+  spawns[0].proc.exit(0);
 
   session.sendUserMessage('again');
+  await new Promise((resolve) => setImmediate(resolve));
   spawns[1].proc.emitJson({
     type: 'result', subtype: 'success', is_error: false, result: 'done',
     usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0 },
@@ -611,8 +883,8 @@ test('the prompt goes through a file, the config is authored per spawn and stdin
   session.dispose();
 });
 
-test('a completed turn resumes with -r and a dead first spawn gets a fresh session UUID', (t) => {
-  const { session, spawns } = startSession(t);
+test('a completed turn resumes with -r and a dead first spawn gets a fresh session UUID', async (t) => {
+  const { session, spawns } = startSession(t, {}, PROVEN_TREE_CLEANUP);
   session.sendUserMessage('first');
   const firstId = argValue(spawns[0].argv, '-s');
   assert.ok(firstId);
@@ -620,6 +892,7 @@ test('a completed turn resumes with -r and a dead first spawn gets a fresh sessi
   // 첫 스폰이 turn 완료 없이 죽으면 -s UUID 는 소진된 것으로 보고 새로 발급한다.
   spawns[0].proc.exit(1);
   session.sendUserMessage('retry');
+  await new Promise((resolve) => setImmediate(resolve));
   const retryId = argValue(spawns[1].argv, '-s');
   assert.ok(retryId);
   assert.notEqual(retryId, firstId);
@@ -628,6 +901,7 @@ test('a completed turn resumes with -r and a dead first spawn gets a fresh sessi
   spawns[1].proc.exit(0);
 
   session.sendUserMessage('follow-up');
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(argValue(spawns[2].argv, '-r'), INIT_LINE.session_id, '완료된 턴 뒤에는 CLI 가 보고한 ID 로 재개한다');
   assert.equal(spawns[2].argv.includes('-s'), false);
   session.dispose();
@@ -668,6 +942,30 @@ test('a result line delivered between exit and close still completes the turn', 
   session.dispose();
 });
 
+test('a newline terminal result without close cannot complete a legacy Grok turn', async (t) => {
+  const { session, events, spawns } = startSession(t, {}, {
+    closeGraceMs: 5,
+    terminateProcess: async () => true,
+    waitForExit: async () => true,
+  });
+  session.sendUserMessage('descendant keeps stdout open');
+  const { proc } = spawns[0];
+
+  proc.emitJson(INIT_LINE, {
+    type: 'result', subtype: 'success', is_error: false, result: 'must not commit',
+  });
+  assert.equal(events.some((event) => event.type === 'turn-end'), false);
+  proc.exitOnly(0);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(
+    events.some((event) => event.type === 'turn-end' && event.stopReason === 'completed'),
+    false,
+  );
+  assert.deepEqual(events.at(-1), { type: 'turn-end', agent: 'grok', stopReason: 'exited' });
+  assert.equal(await session.dispose(), false);
+});
+
 test('a clean exit without a result ends the turn quietly', (t) => {
   const { session, events, spawns } = startSession(t);
   session.sendUserMessage('go');
@@ -676,6 +974,51 @@ test('a clean exit without a result ends the turn quietly', (t) => {
   assert.equal(events.filter((event) => event.type === 'error').length, 0);
   assert.deepEqual(events.at(-1), { type: 'turn-end', agent: 'grok', stopReason: 'exited' });
   session.dispose();
+});
+
+test('a successful drained close without tree proof quarantines later Grok turns', async (t) => {
+  const { session, events, spawns } = startSession(t);
+  session.sendUserMessage('first');
+  spawns[0].proc.emitJson(
+    INIT_LINE,
+    { type: 'result', subtype: 'success', is_error: false, result: 'done' },
+  );
+  spawns[0].proc.exit(0);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  session.sendUserMessage('must not spawn');
+  assert.equal(spawns.length, 1);
+  assert.match(events.findLast((event) => event.type === 'error').message, /cleanup could not be confirmed/);
+  assert.deepEqual(events.at(-1), { type: 'turn-end', agent: 'grok', stopReason: 'failed' });
+  assert.equal(await session.dispose(), false);
+});
+
+test('Windows Grok drains its final tail before live cleanup and permits a follow-up turn', async (t) => {
+  let cleanupCalls = 0;
+  const { session, spawns } = startSession(t, {}, {
+    platform: 'win32',
+    terminateProcess(proc) {
+      assert.equal(proc.exitCode, null);
+      assert.equal(proc.signalCode, null);
+      cleanupCalls += 1;
+      return true;
+    },
+    waitForExit: async () => true,
+  });
+  session.sendUserMessage('first');
+  spawns[0].proc.emitJson(
+    INIT_LINE,
+    { type: 'result', subtype: 'success', is_error: false, result: 'done' },
+  );
+  assert.equal(cleanupCalls, 1);
+  spawns[0].proc.exit(0);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  session.sendUserMessage('second');
+  assert.equal(spawns.length, 2);
+  const disposing = session.dispose();
+  spawns[1].proc.exit(0);
+  assert.equal(await disposing, true);
 });
 
 test('formatGrokExitError falls back to a plain message without stderr', () => {
@@ -703,7 +1046,10 @@ test('interrupt kills the child and closes the turn once', (t) => {
 });
 
 test('a mode switch waits for the running child and the next spawn reflects it', async (t) => {
-  const { session, opts, spawns } = startSession(t);
+  const { session, opts, spawns } = startSession(t, {}, {
+    terminateProcess: async () => true,
+    waitForExit: async () => true,
+  });
   session.sendUserMessage('go');
   const { proc } = spawns[0];
 

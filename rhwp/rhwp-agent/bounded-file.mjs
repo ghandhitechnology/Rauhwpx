@@ -9,7 +9,7 @@ import {
 } from 'node:fs';
 
 /**
- * @typedef {{ maxBytes: number, label?: string, platform?: NodeJS.Platform }} BoundedFileOptions
+ * @typedef {{ maxBytes: number, label?: string, platform?: NodeJS.Platform, allowEmpty?: boolean }} BoundedFileOptions
  */
 
 /** @returns {Error & { code: string }} */
@@ -30,14 +30,14 @@ function validateLimit(maxBytes) {
  * @param {number} maxBytes
  * @param {string} label
  */
-function validatePlainFile(pathStat, descriptorStat, maxBytes, label) {
+function validatePlainFile(pathStat, descriptorStat, maxBytes, label, allowEmpty = false) {
   if (pathStat.isSymbolicLink() || !pathStat.isFile() || !descriptorStat.isFile()) {
     throw boundedFileError('BOUNDED_FILE_UNSAFE', label, 'must be a plain file');
   }
   if (pathStat.dev !== descriptorStat.dev || pathStat.ino !== descriptorStat.ino) {
     throw boundedFileError('BOUNDED_FILE_CHANGED', label, 'changed before it could be opened');
   }
-  if (!Number.isSafeInteger(descriptorStat.size) || descriptorStat.size < 1
+  if (!Number.isSafeInteger(descriptorStat.size) || descriptorStat.size < (allowEmpty ? 0 : 1)
     || descriptorStat.size > maxBytes) {
     throw boundedFileError(
       'BOUNDED_FILE_TOO_LARGE',
@@ -63,12 +63,13 @@ function decodeUtf8(bytes, label) {
   }
 }
 
-/** Read a small persistent UTF-8 file through one no-follow descriptor. */
+/** Read a small persistent file through one no-follow descriptor. */
 /** @param {string} file @param {BoundedFileOptions} options */
-export async function readUtf8FileBounded(file, {
+export async function readFileBytesBounded(file, {
   maxBytes,
   label = 'File',
   platform = process.platform,
+  allowEmpty = false,
 }) {
   validateLimit(maxBytes);
   /** @type {import('node:fs/promises').FileHandle | null} */
@@ -79,7 +80,7 @@ export async function readUtf8FileBounded(file, {
     const noFollow = platform === 'win32' ? 0 : (fsConstants.O_NOFOLLOW ?? 0);
     handle = await fs.open(file, fsConstants.O_RDONLY | noFollow);
     const descriptorStat = await handle.stat();
-    validatePlainFile(pathStat, descriptorStat, maxBytes, label);
+    validatePlainFile(pathStat, descriptorStat, maxBytes, label, allowEmpty);
 
     const bytes = Buffer.allocUnsafe(descriptorStat.size);
     let offset = 0;
@@ -94,10 +95,16 @@ export async function readUtf8FileBounded(file, {
     if ((await handle.read(extra, 0, 1, offset)).bytesRead !== 0) {
       throw boundedFileError('BOUNDED_FILE_CHANGED', label, 'grew while it was being read');
     }
-    return decodeUtf8(bytes, label);
+    return bytes;
   } finally {
     await handle?.close().catch(() => {});
   }
+}
+
+/** Read a small persistent UTF-8 file through one no-follow descriptor. */
+/** @param {string} file @param {BoundedFileOptions} options */
+export async function readUtf8FileBounded(file, options) {
+  return decodeUtf8(await readFileBytesBounded(file, options), options?.label ?? 'File');
 }
 
 /** Synchronous counterpart for provider setup that must finish before spawning. */
@@ -106,6 +113,7 @@ export function readUtf8FileBoundedSync(file, {
   maxBytes,
   label = 'File',
   platform = process.platform,
+  allowEmpty = false,
 }) {
   validateLimit(maxBytes);
   /** @type {number | null} */
@@ -116,7 +124,7 @@ export function readUtf8FileBoundedSync(file, {
     const noFollow = platform === 'win32' ? 0 : (fsConstants.O_NOFOLLOW ?? 0);
     descriptor = openSync(file, fsConstants.O_RDONLY | noFollow);
     const descriptorStat = fstatSync(descriptor);
-    validatePlainFile(pathStat, descriptorStat, maxBytes, label);
+    validatePlainFile(pathStat, descriptorStat, maxBytes, label, allowEmpty);
 
     const bytes = Buffer.allocUnsafe(descriptorStat.size);
     let offset = 0;

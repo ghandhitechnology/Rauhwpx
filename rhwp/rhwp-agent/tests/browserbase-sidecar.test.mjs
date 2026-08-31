@@ -16,6 +16,7 @@ import {
   MAX_BROWSERBASE_RESULT_TEXT_BYTES,
   browserbaseJsonResult,
 } from '../browserbase-result.mjs';
+import { cleanupBrowserbaseLiveCycle } from './browserbase-live-smoke.mjs';
 
 function parsed(result) {
   return JSON.parse(result.content[0].text);
@@ -358,6 +359,40 @@ test('sidecar validates credentials and the Stagehand Node floor', () => {
   });
   assert.equal(supportsStagehandNode('22.17.9'), false);
   assert.equal(supportsStagehandNode('22.18.0'), true);
+  assert.equal(supportsStagehandNode('22.18.0-rc.1'), false);
+  assert.equal(supportsStagehandNode('22.18.0-rc.1+build.5'), false);
+  assert.equal(supportsStagehandNode('22.18.0+build'), true);
+  assert.equal(supportsStagehandNode('22.17.9-rc.1'), false);
+  assert.equal(supportsStagehandNode('23.0.0-rc.1'), true);
   assert.equal(supportsStagehandNode('24.0.0'), true);
+  assert.equal(supportsStagehandNode('22.18.0.1'), false);
+  assert.equal(supportsStagehandNode('022.18.0'), false);
+  assert.equal(supportsStagehandNode('22.18.0-01'), false);
+  assert.equal(supportsStagehandNode('22.18.0+'), false);
+  assert.equal(supportsStagehandNode(`22.${'9'.repeat(256)}.0`), false);
   assert.equal(supportsStagehandNode('not-a-version'), false);
+});
+
+test('live smoke cleanup preserves and annotates its primary failure', async () => {
+  const primary = new Error('navigate failed');
+  const reports = [];
+  const cleaned = await cleanupBrowserbaseLiveCycle({
+    cleanup: async () => false,
+  }, 2, primary, (message) => reports.push(message));
+
+  assert.equal(cleaned, false);
+  assert.equal(primary.message, 'navigate failed');
+  assert.equal(primary.processCleanupUncertain, true);
+  assert.equal(primary.cleanupError?.code, 'BROWSERBASE_CLEANUP_UNCERTAIN');
+  assert.match(reports.join(''), /preserving the primary cycle error/);
+});
+
+test('live smoke cleanup failure is primary when the cycle otherwise passed', async () => {
+  await assert.rejects(
+    cleanupBrowserbaseLiveCycle({ cleanup: async () => false }, 3),
+    {
+      code: 'BROWSERBASE_CLEANUP_UNCERTAIN',
+      processCleanupUncertain: true,
+    },
+  );
 });

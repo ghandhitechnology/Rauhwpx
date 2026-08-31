@@ -374,12 +374,17 @@ export function createCodexAppServerSession(opts, dependencies = {}) {
   /** @type {Promise<void>} */
   let restartPromise = Promise.resolve();
   let expectedShutdown = false;
+  let cleanupUncertain = false;
   let attachedGeneration = 0;
   let generation = 0;
   /** @type {string | null} */
   let threadId = null;
   /** @type {string | null} */
   let activeTurnId = null;
+  /** @type {{ connection: CodexJsonRpcConnection, generation: number } | null} */
+  let pendingTurnStart = null;
+  /** @type {string | null} */
+  let settlingTurnId = null;
   let turnOpen = false;
   let starting = false;
   let disposed = false;
@@ -413,7 +418,7 @@ export function createCodexAppServerSession(opts, dependencies = {}) {
   }
 
   function abortQuestions(reason = new Error('Codex request was invalidated')) {
-    for (const controller of questionControllers.values()) controller.abort(reason);
+    for (const entry of questionControllers.values()) entry.controller.abort(reason);
     questionControllers.clear();
   }
 
@@ -422,6 +427,8 @@ export function createCodexAppServerSession(opts, dependencies = {}) {
     turnOpen = false;
     starting = false;
     activeTurnId = null;
+    pendingTurnStart = null;
+    settlingTurnId = null;
     pendingUsage = null;
     interruptRequested = event.stopReason === 'interrupted';
     finalizeRolloutWatcher();
@@ -434,7 +441,84 @@ export function createCodexAppServerSession(opts, dependencies = {}) {
     onEvent({ type: 'session-info', agent: 'codex', sessionId: id });
   }
 
-  function handleNotification(frame) {
+  function connectionIsCurrent(connection, frameGeneration) {
+    return rpc === connection
+      && !connection.closed
+      && generation === frameGeneration;
+  }
+
+  function notificationMatchesActiveTurn(params) {
+    const notificationTurnId = String(params?.turnId ?? params?.turn?.id ?? '');
+    return turnOpen
+      && Boolean(activeTurnId)
+      && notificationTurnId === activeTurnId;
+  }
+
+  function activateTurn(connection, frameGeneration, turnId) {
+    const pending = pendingTurnStart;
+    if (!starting
+      || !pending
+      || pending.connection !== connection
+      || pending.generation !== frameGeneration
+      || !connectionIsCurrent(connection, frameGeneration)
+      || !turnId) return false;
+    activeTurnId = turnId;
+    pendingTurnStart = null;
+    starting = false;
+    turnOpen = true;
+    onEvent({ type: 'turn-start', agent: 'codex' });
+    const codexHome = opts.codexHome ?? process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex');
+    rolloutWatcher = createRolloutWatcher?.({
+      codexHome,
+      emit: (event) => { if (!disposed && turnOpen && activeTurnId === turnId) onEvent(event); },
+    }) ?? null;
+    rolloutWatcher?.start(threadId);
+    pendingUsage = null;
+    turnUsageBaseline = cumulativeUsage ? { ...cumulativeUsage } : null;
+    return true;
+  }
+
+  async function settleCompletedTurn(connection, frameGeneration, params) {
+    const completedTurnId = String(params?.turn?.id ?? '');
+    if (!connectionIsCurrent(connection, frameGeneration)
+      || !notificationMatchesActiveTurn(params)
+      || settlingTurnId === completedTurnId) return;
+    settlingTurnId = completedTurnId;
+    const status = String(params.turn?.status ?? 'completed');
+    const usage = pendingUsage;
+    const failureMessage = status === 'failed'
+      ? String(params.turn?.error?.message ?? 'Codex turn failed')
+      : null;
+    abortQuestions(Object.assign(new Error('Codex turn completed'), { code: 'REQUEST_INVALIDATED' }));
+    // The app-server owns the MCP stdio child. A protocol terminal frame does
+    // not prove that background work is quiescent, so close and prove this
+    // process generation before publishing turn-end. The next turn resumes
+    // the same thread in a fresh app-server process.
+    const cleaned = await stopConnection();
+    if (disposed || !turnOpen || activeTurnId !== completedTurnId) return;
+    if (usage) {
+      onEvent({
+        type: 'usage', agent: 'codex', model: opts.model ?? DEFAULT_CODEX_MODEL,
+        usage,
+      });
+    }
+    if (!cleaned) {
+      const message = 'Codex app-server process-tree cleanup could not be confirmed after the turn';
+      onEvent({ type: 'error', agent: 'codex', message });
+      endTurn({ type: 'turn-end', agent: 'codex', stopReason: 'failed', errorMessage: message });
+    } else if (failureMessage) {
+      onEvent({ type: 'error', agent: 'codex', message: failureMessage });
+      endTurn({ type: 'turn-end', agent: 'codex', stopReason: 'failed', errorMessage: failureMessage });
+    } else {
+      endTurn({
+        type: 'turn-end', agent: 'codex',
+        stopReason: status === 'interrupted' ? 'interrupted' : 'completed',
+      });
+    }
+  }
+
+  function handleNotification(frame, connection, frameGeneration) {
+    if (!connectionIsCurrent(connection, frameGeneration)) return;
     const method = frame?.method;
     const params = frame?.params ?? {};
     if (method === 'thread/started') {
@@ -444,18 +528,16 @@ export function createCodexAppServerSession(opts, dependencies = {}) {
     }
     if (params.threadId && threadId && String(params.threadId) !== threadId) return;
     if (method === 'turn/started') {
-      activeTurnId = String(params.turn?.id ?? activeTurnId ?? '');
-      if (interruptRequested && threadId && activeTurnId) {
-        rpc?.request('turn/interrupt', { threadId, turnId: activeTurnId }).catch(() => {});
-        interruptRequested = false;
-      }
+      activateTurn(connection, frameGeneration, String(params.turn?.id ?? ''));
       return;
     }
     if (method === 'item/agentMessage/delta') {
+      if (!notificationMatchesActiveTurn(params)) return;
       if (params.delta) onEvent({ type: 'text-delta', agent: 'codex', text: String(params.delta) });
       return;
     }
     if (method === 'item/started' || method === 'item/completed') {
+      if (!notificationMatchesActiveTurn(params)) return;
       const info = toolInfo(params.item);
       if (!info || info.tool === 'ask_user_question') return;
       if (method === 'item/started') {
@@ -472,67 +554,53 @@ export function createCodexAppServerSession(opts, dependencies = {}) {
       return;
     }
     if (method === 'thread/tokenUsage/updated') {
-      if (!activeTurnId || !params.turnId || String(params.turnId) === activeTurnId) {
-        const total = normalizedUsage(params.tokenUsage?.total);
-        if (total) {
-          const baseline = turnUsageBaseline ?? {
-            inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0,
-          };
-          pendingUsage = {
-            inputTokens: Math.max(0, total.inputTokens - baseline.inputTokens),
-            outputTokens: Math.max(0, total.outputTokens - baseline.outputTokens),
-            cacheReadTokens: Math.max(0, total.cacheReadTokens - baseline.cacheReadTokens),
-            cacheCreationTokens: Math.max(0, total.cacheCreationTokens - baseline.cacheCreationTokens),
-          };
-          if (!Object.values(pendingUsage).some((value) => value > 0)) pendingUsage = null;
-          cumulativeUsage = total;
-        } else {
-          // Older app-server fixtures exposed only `last`; retain compatibility
-          // while current servers use cumulative totals to cover both sides of
-          // a request_user_input pause in one logical turn.
-          pendingUsage = normalizedUsage(params.tokenUsage?.last);
-        }
+      if (!notificationMatchesActiveTurn(params)) return;
+      const total = normalizedUsage(params.tokenUsage?.total);
+      if (total) {
+        const baseline = turnUsageBaseline ?? {
+          inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0,
+        };
+        pendingUsage = {
+          inputTokens: Math.max(0, total.inputTokens - baseline.inputTokens),
+          outputTokens: Math.max(0, total.outputTokens - baseline.outputTokens),
+          cacheReadTokens: Math.max(0, total.cacheReadTokens - baseline.cacheReadTokens),
+          cacheCreationTokens: Math.max(0, total.cacheCreationTokens - baseline.cacheCreationTokens),
+        };
+        if (!Object.values(pendingUsage).some((value) => value > 0)) pendingUsage = null;
+        cumulativeUsage = total;
+      } else {
+        // Older app-server fixtures exposed only `last`; retain compatibility
+        // while current servers use cumulative totals to cover both sides of
+        // a request_user_input pause in one logical turn.
+        pendingUsage = normalizedUsage(params.tokenUsage?.last);
       }
       return;
     }
     if (method === 'turn/completed') {
-      const status = String(params.turn?.status ?? 'completed');
-      if (pendingUsage) {
-        onEvent({
-          type: 'usage', agent: 'codex', model: opts.model ?? DEFAULT_CODEX_MODEL,
-          usage: pendingUsage,
-        });
-      }
-      if (status === 'failed') {
-        const message = String(params.turn?.error?.message ?? 'Codex turn failed');
-        onEvent({ type: 'error', agent: 'codex', message });
-        endTurn({ type: 'turn-end', agent: 'codex', stopReason: 'failed', errorMessage: message });
-      } else {
-        endTurn({
-          type: 'turn-end', agent: 'codex',
-          stopReason: status === 'interrupted' ? 'interrupted' : 'completed',
-        });
-      }
+      void settleCompletedTurn(connection, frameGeneration, params);
       return;
     }
-    if (method === 'error' && params.message) {
+    if (method === 'error' && params.message
+      && (!params.turnId || notificationMatchesActiveTurn(params))) {
       onEvent({ type: 'error', agent: 'codex', message: String(params.message) });
     }
   }
 
-  async function handleServerRequest(frame) {
+  async function handleServerRequest(frame, connection, frameGeneration) {
+    if (!connectionIsCurrent(connection, frameGeneration)) return;
     if (frame.method !== CODEX_REQUEST_USER_INPUT_METHOD) {
       // Approval requests should be impossible under approvalPolicy=never. If a
       // future server still sends one, fail closed instead of hanging it.
       if (frame.id !== undefined) {
-        rpc?.send({ id: frame.id, error: { code: -32601, message: `Unsupported server request: ${frame.method}` } });
+        connection.send({ id: frame.id, error: { code: -32601, message: `Unsupported server request: ${frame.method}` } });
       }
       return;
     }
     const requestThreadId = String(frame.params?.threadId ?? '');
     const requestTurnId = String(frame.params?.turnId ?? '');
-    if (!threadId || requestThreadId !== threadId || (activeTurnId && requestTurnId !== activeTurnId)) {
-      rpc?.send(questionErrorFrame(frame, Object.assign(
+    if (!turnOpen || !activeTurnId || !threadId
+      || requestThreadId !== threadId || requestTurnId !== activeTurnId) {
+      connection.send(questionErrorFrame(frame, Object.assign(
         new Error('Codex user questions are restricted to the active root turn'),
         { code: 'SUBAGENT_USER_INPUT_DENIED' },
       )));
@@ -541,30 +609,38 @@ export function createCodexAppServerSession(opts, dependencies = {}) {
     const key = rpcKey(frame.id);
     if (questionControllers.has(key)) return;
     const controller = new AbortController();
-    questionControllers.set(key, controller);
+    const binding = { controller, connection, generation: frameGeneration, turnId: activeTurnId };
+    questionControllers.set(key, binding);
     try {
       const response = await handleCodexRequestUserInputFrame(opts, frame, controller.signal, {
         agentRole: opts.agentRole,
       });
-      if (rpc && !rpc.closed) rpc.send(response);
+      if (connectionIsCurrent(connection, frameGeneration)
+        && turnOpen && activeTurnId === binding.turnId) connection.send(response);
     } catch (error) {
-      if (rpc && !rpc.closed) rpc.send(questionErrorFrame(frame, error));
+      if (!connection.closed) connection.send(questionErrorFrame(frame, error));
     } finally {
-      questionControllers.delete(key);
+      if (questionControllers.get(key) === binding) questionControllers.delete(key);
     }
   }
 
-  function handleFrame(frame) {
-    if (frame?.method && frame.id !== undefined) return handleServerRequest(frame);
-    if (frame?.method) handleNotification(frame);
+  function handleFrame(frame, connection, frameGeneration) {
+    if (frame?.method && frame.id !== undefined) {
+      return handleServerRequest(frame, connection, frameGeneration);
+    }
+    if (frame?.method) handleNotification(frame, connection, frameGeneration);
   }
 
-  function handleConnectionClosed(child, error, cleaned = null) {
+  function handleConnectionClosed(child, connection, error, cleaned = null) {
     if (proc === child && cleaned === true) proc = null;
-    rpc = null;
-    readyPromise = null;
-    attachedGeneration = 0;
-    abortQuestions(Object.assign(new Error('Codex provider disconnected'), { code: 'PROVIDER_DISCONNECTED' }));
+    if (cleaned === false) cleanupUncertain = true;
+    if (rpc === connection) {
+      rpc = null;
+      readyPromise = null;
+      attachedGeneration = 0;
+      pendingTurnStart = null;
+      abortQuestions(Object.assign(new Error('Codex provider disconnected'), { code: 'PROVIDER_DISCONNECTED' }));
+    }
     if (!expectedShutdown && turnOpen && !disposed && !fallback) {
       const clean = redactDiagnosticText(stderrTail, [opts.token]);
       const message = clean.trim()
@@ -663,9 +739,12 @@ export function createCodexAppServerSession(opts, dependencies = {}) {
 
   async function stopNegotiationProcess(child, connection) {
     expectedShutdown = true;
-    connection.close(new Error('Restarting Codex app-server with native user input enabled'));
-    const cleaned = await terminateAndWaitForProcessTreeExit(child, { terminateProcess });
+    const cleaned = await connection.close(
+      new Error('Restarting Codex app-server with native user input enabled'),
+      { terminate: true },
+    );
     if (cleaned && proc === child) proc = null;
+    if (!cleaned) cleanupUncertain = true;
     expectedShutdown = false;
     if (!cleaned) {
       throw new CodexAppServerUnavailableError('Codex app-server process tree cleanup could not be confirmed');
@@ -694,10 +773,13 @@ export function createCodexAppServerSession(opts, dependencies = {}) {
       throw new CodexAppServerUnavailableError('Failed to start Codex app-server', error);
     }
     proc = child;
-    generation += 1;
-    const connection = new CodexJsonRpcConnection(child, {
-      onFrame: handleFrame,
-      onClosed: (error, cleaned) => handleConnectionClosed(child, error, cleaned),
+    const connectionGeneration = ++generation;
+    let connection;
+    connection = new CodexJsonRpcConnection(child, {
+      onFrame: (frame) => handleFrame(frame, connection, connectionGeneration),
+      onClosed: (error, cleaned) => handleConnectionClosed(
+        child, connection, error, cleaned,
+      ),
       terminateProcess,
     });
     rpc = connection;
@@ -724,6 +806,9 @@ export function createCodexAppServerSession(opts, dependencies = {}) {
 
   function ensureConnection() {
     return restartPromise.then(async () => {
+      if (cleanupUncertain) {
+        throw new CodexAppServerUnavailableError('Codex app-server process tree cleanup remains unconfirmed');
+      }
       if (rpc && !rpc.closed) return rpc;
       if (proc) {
         const cleaned = await stopConnection();
@@ -771,15 +856,25 @@ export function createCodexAppServerSession(opts, dependencies = {}) {
   }
 
   async function stopConnection() {
+    if (cleanupUncertain) return false;
     const child = proc;
     if (!child) return true;
+    const connection = rpc?.proc === child ? rpc : null;
     expectedShutdown = true;
-    rpc?.close(new Error('Codex app-server restarted between turns'));
-    rpc = null;
+    let cleaned;
+    if (connection) {
+      cleaned = await connection.close(
+        new Error('Codex app-server restarted between turns'),
+        { terminate: true },
+      );
+    } else {
+      cleaned = await terminateAndWaitForProcessTreeExit(child, { terminateProcess });
+    }
+    if (cleaned && proc === child) proc = null;
+    if (!cleaned) cleanupUncertain = true;
+    if (rpc === connection) rpc = null;
     readyPromise = null;
     attachedGeneration = 0;
-    const cleaned = await terminateAndWaitForProcessTreeExit(child, { terminateProcess });
-    if (cleaned && proc === child) proc = null;
     expectedShutdown = false;
     return cleaned;
   }
@@ -787,7 +882,6 @@ export function createCodexAppServerSession(opts, dependencies = {}) {
   async function switchToLegacy(text, error) {
     const reportCleanupFailure = () => {
       const message = 'Codex app-server process-tree cleanup could not be confirmed.';
-      onEvent({ type: 'turn-start', agent: 'codex' });
       onEvent({ type: 'error', agent: 'codex', message });
       onEvent({ type: 'turn-end', agent: 'codex', stopReason: 'failed', errorMessage: message });
     };
@@ -801,7 +895,6 @@ export function createCodexAppServerSession(opts, dependencies = {}) {
       }
       if (disposed) return;
       const message = `Codex native Plan mode is unavailable: ${safeMessage(error)}`;
-      onEvent({ type: 'turn-start', agent: 'codex' });
       onEvent({ type: 'error', agent: 'codex', message });
       onEvent({ type: 'turn-end', agent: 'codex', stopReason: 'failed', errorMessage: message });
       return;
@@ -817,7 +910,6 @@ export function createCodexAppServerSession(opts, dependencies = {}) {
     fallback = createLegacySession?.(threadId) ?? null;
     starting = false;
     if (!fallback) {
-      onEvent({ type: 'turn-start', agent: 'codex' });
       onEvent({ type: 'error', agent: 'codex', message: 'Codex native and legacy transports are unavailable.' });
       onEvent({ type: 'turn-end', agent: 'codex', stopReason: 'exited' });
       return;
@@ -841,10 +933,11 @@ export function createCodexAppServerSession(opts, dependencies = {}) {
       await attachThread(connection);
     } catch (error) {
       starting = false;
-      onEvent({ type: 'turn-start', agent: 'codex' });
       const detail = safeMessage(error);
-      onEvent({ type: 'error', agent: 'codex', message: `Codex app-server could not open the thread: ${detail}` });
-      onEvent({ type: 'turn-end', agent: 'codex', stopReason: 'failed', errorMessage: detail });
+      const cleaned = await stopConnection();
+      const message = `Codex app-server could not open the thread: ${detail}${cleaned ? '' : ' Process-tree cleanup could not be confirmed.'}`;
+      onEvent({ type: 'error', agent: 'codex', message });
+      onEvent({ type: 'turn-end', agent: 'codex', stopReason: 'failed', errorMessage: message });
       return;
     }
     if (disposed || interruptRequested) {
@@ -852,17 +945,8 @@ export function createCodexAppServerSession(opts, dependencies = {}) {
       return;
     }
 
-    starting = false;
-    turnOpen = true;
-    onEvent({ type: 'turn-start', agent: 'codex' });
-    const codexHome = opts.codexHome ?? process.env.CODEX_HOME ?? path.join(os.homedir(), '.codex');
-    rolloutWatcher = createRolloutWatcher?.({
-      codexHome,
-      emit: (event) => { if (!disposed && turnOpen) onEvent(event); },
-    }) ?? null;
-    rolloutWatcher?.start(threadId);
-    pendingUsage = null;
-    turnUsageBaseline = cumulativeUsage ? { ...cumulativeUsage } : null;
+    const turnGeneration = generation;
+    pendingTurnStart = { connection, generation: turnGeneration };
     try {
       const response = await connection.request('turn/start', {
         threadId,
@@ -874,16 +958,32 @@ export function createCodexAppServerSession(opts, dependencies = {}) {
         effort: opts.effort ?? null,
         collaborationMode: collaborationMode(opts),
       });
-      activeTurnId = String(response?.turn?.id ?? activeTurnId ?? '');
-      if (interruptRequested && activeTurnId && rpc && !rpc.closed) {
-        rpc.request('turn/interrupt', { threadId, turnId: activeTurnId }).catch(() => {});
-        interruptRequested = false;
+      if (disposed || interruptRequested || (!starting && !turnOpen)) return;
+      const responseTurnId = String(response?.turn?.id ?? '');
+      if (!responseTurnId) throw new Error('Codex app-server turn/start returned no turn id');
+      if (turnOpen) {
+        if (activeTurnId !== responseTurnId) {
+          throw new Error('Codex app-server returned a mismatched turn id');
+        }
+      } else if (!activateTurn(connection, turnGeneration, responseTurnId)) {
+        throw new Error('Codex app-server turn start was superseded');
       }
     } catch (error) {
-      if (turnOpen) {
-        const message = `Codex app-server could not start the turn: ${safeMessage(error)}`;
+      const ownsPending = pendingTurnStart?.connection === connection
+        && pendingTurnStart.generation === turnGeneration;
+      if (ownsPending) pendingTurnStart = null;
+      const ownedActiveTurn = turnOpen && connectionIsCurrent(connection, turnGeneration);
+      if (starting || ownedActiveTurn) {
+        starting = false;
+        const cleaned = await stopConnection();
+        const cleanupDetail = cleaned ? '' : ' Process-tree cleanup could not be confirmed.';
+        const message = `Codex app-server could not start the turn: ${safeMessage(error)}${cleanupDetail}`;
         onEvent({ type: 'error', agent: 'codex', message });
-        endTurn({ type: 'turn-end', agent: 'codex', stopReason: 'failed', errorMessage: message });
+        if (ownedActiveTurn) {
+          endTurn({ type: 'turn-end', agent: 'codex', stopReason: 'failed', errorMessage: message });
+        } else {
+          onEvent({ type: 'turn-end', agent: 'codex', stopReason: 'failed', errorMessage: message });
+        }
       }
     }
   }
@@ -976,12 +1076,15 @@ export function createCodexAppServerSession(opts, dependencies = {}) {
         if (threadId && activeTurnId && rpc && !rpc.closed) {
           rpc.request('turn/interrupt', { threadId, turnId: activeTurnId }).catch(() => {});
         }
+        const priorRestart = restartPromise;
+        restartPromise = priorRestart.then(() => stopConnection());
         endTurn({ type: 'turn-end', agent: 'codex', stopReason: 'interrupted' });
       } else if (starting) {
         starting = false;
-        onEvent({ type: 'turn-start', agent: 'codex' });
+        pendingTurnStart = null;
         onEvent({ type: 'turn-end', agent: 'codex', stopReason: 'interrupted' });
-        void stopConnection();
+        const priorRestart = restartPromise;
+        restartPromise = priorRestart.then(() => stopConnection());
       }
     },
     async dispose() {

@@ -45,6 +45,7 @@ import {
   isolatedProcessEnv,
   processTreeSpawnOptions,
   terminateProcessTree,
+  waitForProcessTreeExit,
 } from '../process-tree.mjs';
 
 /** grok compat 스캐너가 읽는 외부 벤더 아티팩트 종류 — 전부 끈다. */
@@ -346,9 +347,12 @@ function stripRhwpPrefix(name) {
 export function createGrokSession(opts, {
   spawnProcess = spawn,
   terminateProcess = terminateProcessTree,
+  waitForExit = waitForProcessTreeExit,
   createSessionTail = createGrokSessionTail,
   createAcpSession = createPersistentAcpSession,
   now = Date.now,
+  platform = process.platform,
+  closeGraceMs = 2_000,
 } = {}) {
   const rawOnEvent = opts.onEvent;
   /**
@@ -374,6 +378,9 @@ export function createGrokSession(opts, {
     onEvent,
     formatExitError: (stderrText, code, signal) => formatGrokExitError(stderrText, code, signal, opts.token),
     terminateProcess,
+    waitForExit,
+    platform,
+    graceMs: closeGraceMs,
   });
 
   /** @type {string} */
@@ -395,8 +402,67 @@ export function createGrokSession(opts, {
   /** @type {ReturnType<typeof createPersistentAcpSession>|null} */
   let nativeSession = null;
   let nativeRestart = Promise.resolve();
+  /** @type {Promise<void>|null} */
+  let nativeTurnCompletion = null;
   let nativeTurnToken = 0;
   let nativeSessionInfoEmitted = false;
+  let legacyTurnActive = false;
+  let nativeCleanupUncertain = false;
+  const nativeCleanupPromises = new Set();
+  const nativeCleanupBySession = new WeakMap();
+  const nativeConfigurePromises = new Set();
+
+  function beginNativeCleanup(session) {
+    if (!session) return Promise.resolve(true);
+    const existing = nativeCleanupBySession.get(session);
+    if (existing) return existing;
+    let cleanup;
+    cleanup = Promise.resolve()
+      .then(() => session.dispose())
+      .then(
+        (result) => {
+          const cleaned = result === true;
+          if (!cleaned) nativeCleanupUncertain = true;
+          return cleaned;
+        },
+        () => {
+          nativeCleanupUncertain = true;
+          return false;
+        },
+      )
+      .finally(() => nativeCleanupPromises.delete(cleanup));
+    nativeCleanupBySession.set(session, cleanup);
+    nativeCleanupPromises.add(cleanup);
+    return cleanup;
+  }
+
+  async function waitForNativeCleanups() {
+    let cleaned = true;
+    while (nativeCleanupPromises.size > 0) {
+      const results = await Promise.all([...nativeCleanupPromises]);
+      cleaned = results.every(Boolean) && cleaned;
+    }
+    return cleaned && !nativeCleanupUncertain;
+  }
+
+  function hasNativeCleanupRisk() {
+    return nativeCleanupUncertain
+      || nativeSession?.isCleanupUncertain?.() === true
+      || nativeCleanupPromises.size > 0;
+  }
+
+  function trackNativeTurn(completion) {
+    nativeTurnCompletion = completion;
+    void completion.finally(() => {
+      if (nativeTurnCompletion === completion) nativeTurnCompletion = null;
+    }).catch(() => {});
+  }
+
+  async function waitForNativeConfigures() {
+    while (nativeConfigurePromises.size > 0) {
+      await Promise.allSettled([...nativeConfigurePromises]);
+    }
+  }
 
   // ── 서브에이전트 fleet 상태 ─────────────────────────────────────
   // subagent_id → 방출한 taskId (스폰 tool_use id). 늦은 디스크 라인 대비
@@ -489,6 +555,7 @@ export function createGrokSession(opts, {
     resultSeen = false;
     lastStopReason = undefined;
     resultErrorMessage = undefined;
+    legacyTurnActive = false;
   }
 
   /** result 가 담아 온 정보로 턴을 닫는다 — onEvent 래퍼가 잔여 task 를 정리한다. */
@@ -499,6 +566,10 @@ export function createGrokSession(opts, {
       stopReason: lastStopReason ?? 'completed',
       errorMessage: resultErrorMessage,
     });
+    // endTurn synchronously drains and stops the disk tail wrapper above.
+    // Only then is the legacy one-shot process safe to stop on Windows.
+    void lifecycle.beginTerminalCleanup();
+    legacyTurnActive = false;
   }
 
   function scheduleSettle() {
@@ -512,7 +583,7 @@ export function createGrokSession(opts, {
 
   /** 디스크 활동이 잦아든 뒤에만 fleet 턴을 닫는다. */
   function maybeScheduleSettle() {
-    if (fleetActive && lifecycle.isTurnOpen() && resultSeen
+    if (!legacyTurnActive && fleetActive && lifecycle.isTurnOpen() && resultSeen
       && tasksSeenThisTurn > 0 && pendingTasks.size === 0) {
       scheduleSettle();
     }
@@ -1098,6 +1169,14 @@ export function createGrokSession(opts, {
       } else if (resultErrorMessage === undefined) {
         lastStopReason = 'completed';
       }
+      if (legacyTurnActive) {
+        // The legacy CLI is one-shot. Keep its result staged until the actual
+        // ChildProcess `close` event proves every stdout byte was drained.
+        // Windows must also begin cleanup while the retained process handle is
+        // still live; this promise alone does not authorize completion.
+        void lifecycle.beginTerminalCleanup();
+        return;
+      }
       if (tasksSeenThisTurn === 0) {
         // 서브에이전트 없는 보통 턴 — 기존과 동일하게 즉시 닫는다 (지연 없음).
         settleTurn();
@@ -1156,6 +1235,7 @@ export function createGrokSession(opts, {
       authMethodId: String(childEnv['XAI_API_KEY'] ?? '').trim() ? 'xai.api_key' : 'cached_token',
       setModelMethod: 'session/set_model',
       promptCompletionMethods: ['x.ai/session/prompt_complete', '_x.ai/session/prompt_complete'],
+      isolatePrompts: true,
       mcpServers: [acpMcpServer('rhwp', {
         ...runtime,
         env: {
@@ -1186,21 +1266,46 @@ export function createGrokSession(opts, {
     return grokHome;
   }
 
-  async function configureNativeMode() {
+  function configureNativeMode(turnToken) {
+    let configure;
+    configure = (async () => {
+      await nativeRestart;
+      if (lifecycle.isDisposed()
+        || (turnToken !== undefined
+          && (turnToken !== nativeTurnToken || !lifecycle.isTurnOpen()))) {
+        throw new Error('Grok native configuration was superseded');
+      }
+      if (!nativeSession) nativeSession = makeNativeSession();
+      const session = nativeSession;
+      prepareNativeHome();
+      const interactionMode = providerInteractionMode(opts);
+      await session.configure({
+        modeAliases: interactionMode === 'plan'
+          ? ['plan', 'architect']
+          : ['agent', 'code', 'default'],
+        requireModeMatch: interactionMode === 'plan',
+        model: opts.model,
+        effort: opts.effort,
+      });
+      if (lifecycle.isDisposed()
+        || (turnToken !== undefined
+          && (turnToken !== nativeTurnToken || !lifecycle.isTurnOpen()))) {
+        throw new Error('Grok native configuration was superseded');
+      }
+      sessionId = session.getSessionId() ?? sessionId;
+      return session;
+    })().finally(() => nativeConfigurePromises.delete(configure));
+    nativeConfigurePromises.add(configure);
+    return configure;
+  }
+
+  async function proveNativeModeReadiness() {
+    const session = await configureNativeMode();
+    // Plan-mode validation runs without an active provider turn. Close that
+    // ACP/MCP generation before ACK so its socket cannot be rebound to the
+    // next user turn.
+    nativeRestart = nativeRestart.then(() => session.restart());
     await nativeRestart;
-    if (!nativeSession) nativeSession = makeNativeSession();
-    prepareNativeHome();
-    const interactionMode = providerInteractionMode(opts);
-    await nativeSession.configure({
-      modeAliases: interactionMode === 'plan'
-        ? ['plan', 'architect']
-        : ['agent', 'code', 'default'],
-      requireModeMatch: interactionMode === 'plan',
-      model: opts.model,
-      effort: opts.effort,
-    });
-    sessionId = nativeSession.getSessionId() ?? sessionId;
-    return nativeSession;
   }
 
   function startLegacyTurn(text) {
@@ -1224,19 +1329,28 @@ export function createGrokSession(opts, {
       lifecycle.failStart(e);
       return;
     }
-    lifecycle.attachChild(proc, handleEvent);
+    legacyTurnActive = true;
+    const finishOnClose = () => {
+      if (!legacyTurnActive || lifecycle.isDisposed() || !lifecycle.isTurnOpen()) return;
+      if (resultSeen) settleTurn();
+    };
+    lifecycle.attachChild(proc, handleEvent, { onDrainedClose: finishOnClose });
   }
 
   async function runNativeTurn(text, token) {
     let promptStarted = false;
+    /** @type {any} */
+    let promptedSession = null;
     try {
       const firstPrompt = !hasCompletedTurn;
-      const session = await configureNativeMode();
+      const session = await configureNativeMode(token);
+      if (token !== nativeTurnToken || lifecycle.isDisposed() || !lifecycle.isTurnOpen()) return;
       const prompt = firstPrompt ? `${systemBriefFor(opts, 'grok')}\n\n${text}` : text;
       // Never replay a message through legacy after ACP has accepted the
       // prompt. A cancelled or malformed native question belongs to this exact
       // turn and cannot trigger a mid-turn transport switch.
       promptStarted = true;
+      promptedSession = session;
       const response = await session.prompt(prompt);
       if (token !== nativeTurnToken || !lifecycle.isTurnOpen()) return;
       emitNativeSessionInfo();
@@ -1259,8 +1373,21 @@ export function createGrokSession(opts, {
       if (!promptStarted) {
         nativeDisabled = true;
         const failed = nativeSession;
+        const cleanup = beginNativeCleanup(failed);
         nativeSession = null;
-        try { await failed?.dispose(); } catch {}
+        const cleaned = await cleanup;
+        if (token !== nativeTurnToken || !lifecycle.isTurnOpen()) return;
+        if (!cleaned) {
+          onEvent({
+            type: 'error',
+            agent: 'grok',
+            message: 'Grok ACP process-tree cleanup could not be confirmed before legacy fallback',
+          });
+          resultErrorMessage = 'Grok ACP process-tree cleanup could not be confirmed before legacy fallback';
+          lastStopReason = 'failed';
+          settleTurn();
+          return;
+        }
         startLegacyTurn(text);
         return;
       }
@@ -1268,6 +1395,8 @@ export function createGrokSession(opts, {
       resultErrorMessage = error?.message ?? String(error);
       lastStopReason = 'failed';
       settleTurn();
+    } finally {
+      if (promptedSession?.isCleanupUncertain?.() === true) nativeCleanupUncertain = true;
     }
   }
 
@@ -1278,21 +1407,62 @@ export function createGrokSession(opts, {
     },
     sendUserMessage(text) {
       if (lifecycle.isDisposed()) return;
-      sawRootTextDelta = false;
-      streamedSubagents.clear();
-      resetTurnFleetState();
-      // 디스크 타임스탬프 필터의 기준 — 스폰 전에 찍어야 첫 라인도 걸리지 않는다.
-      turnStartMs = now();
-      lifecycle.beginTurn();
-      if (nativeDisabled) {
-        startLegacyTurn(text);
+      const token = nativeDisabled ? null : ++nativeTurnToken;
+      const activate = () => {
+        if (lifecycle.isDisposed() || (token !== null && token !== nativeTurnToken)) return;
+        if (hasNativeCleanupRisk()) {
+          sawRootTextDelta = false;
+          streamedSubagents.clear();
+          resetTurnFleetState();
+          onEvent({
+            type: 'error',
+            agent: 'grok',
+            message: 'Grok ACP process-tree cleanup remains unconfirmed',
+          });
+          // Do not advertise a provider turn while a prior ACP/MCP process
+          // generation remains unproven. A turn-end alone settles the hub's
+          // already-allocated user turn without opening MCP admission.
+          onEvent({
+            type: 'turn-end',
+            agent: 'grok',
+            stopReason: 'failed',
+            errorMessage: 'Grok ACP process-tree cleanup remains unconfirmed',
+          });
+          return;
+        }
+        lifecycle.queueTurn(
+          () => {
+            sawRootTextDelta = false;
+            streamedSubagents.clear();
+            resetTurnFleetState();
+            // 디스크 타임스탬프 필터의 기준 — 스폰 전에 찍어야 첫 라인도 걸리지 않는다.
+            turnStartMs = now();
+          },
+          () => {
+            if (nativeDisabled) {
+              startLegacyTurn(text);
+              return;
+            }
+            const completion = runNativeTurn(text, /** @type {number} */ (token));
+            trackNativeTurn(completion);
+          },
+        );
+      };
+      const priorTurn = nativeTurnCompletion;
+      if (hasNativeCleanupRisk() || !priorTurn) {
+        activate();
         return;
       }
-      const token = ++nativeTurnToken;
-      void runNativeTurn(text, token);
+      void priorTurn.then(activate, () => {
+        nativeCleanupUncertain = true;
+        activate();
+      });
     },
     async setPermissionProfile(profile) {
-      if (lifecycle.isTurnOpen()) throw new Error('Permission profile can only change between turns');
+      if (lifecycle.isTurnOpen() || lifecycle.isTurnPending()) throw new Error('Permission profile can only change between turns');
+      if (lifecycle.isCleanupUncertain() || hasNativeCleanupRisk()) {
+        throw new Error('Grok process-tree cleanup remains unconfirmed');
+      }
       if (profile !== 'safe' && profile !== 'unrestricted') throw new Error(`Unknown permission profile: ${profile}`);
       const previous = opts.permissionProfile;
       const previousNativeSession = nativeSession;
@@ -1305,22 +1475,26 @@ export function createGrokSession(opts, {
           await nativeRestart;
         }
         if (!nativeDisabled && providerInteractionMode(opts) === 'plan') {
-          await configureNativeMode();
+          await proveNativeModeReadiness();
         }
       } catch (error) {
         opts.permissionProfile = previous;
         nativeRestart = Promise.resolve();
         if (!previousNativeSession && nativeSession) {
           const failed = nativeSession;
+          const cleanup = beginNativeCleanup(failed);
           nativeSession = null;
           sessionId = previousSessionId;
-          try { await failed.dispose(); } catch {}
+          await cleanup;
         }
         throw error;
       }
     },
     async setExecutionMode(mode) {
-      if (lifecycle.isTurnOpen()) throw new Error('Execution mode can only change between turns');
+      if (lifecycle.isTurnOpen() || lifecycle.isTurnPending()) throw new Error('Execution mode can only change between turns');
+      if (lifecycle.isCleanupUncertain() || hasNativeCleanupRisk()) {
+        throw new Error('Grok process-tree cleanup remains unconfirmed');
+      }
       validateExecutionMode(mode);
       const previous = normalizeExecutionMode(opts);
       const previousNativeSession = nativeSession;
@@ -1342,7 +1516,7 @@ export function createGrokSession(opts, {
         // Plan/Architect mode. Legacy-only sessions use the explicit CLI
         // --permission-mode plan contract.
         if (!nativeDisabled && providerInteractionMode(opts) === 'plan') {
-          await configureNativeMode();
+          await proveNativeModeReadiness();
         }
       } catch (error) {
         opts.workflow = previous.workflow;
@@ -1351,9 +1525,10 @@ export function createGrokSession(opts, {
         nativeRestart = Promise.resolve();
         if (!previousNativeSession && nativeSession) {
           const failed = nativeSession;
+          const cleanup = beginNativeCleanup(failed);
           nativeSession = null;
           sessionId = previousSessionId;
-          try { await failed.dispose(); } catch {}
+          await cleanup;
         }
         throw error;
       }
@@ -1368,9 +1543,16 @@ export function createGrokSession(opts, {
       clearConfirmTimer();
       stopTail();
       nativeTurnToken += 1;
-      const [native, legacy] = await Promise.allSettled([nativeSession?.dispose(), lifecycle.dispose()]);
-      const cleaned = native.status === 'fulfilled' && native.value !== false
-        && legacy.status === 'fulfilled' && legacy.value !== false;
+      const legacyCleanup = lifecycle.dispose();
+      void beginNativeCleanup(nativeSession);
+      nativeSession = null;
+      await waitForNativeConfigures();
+      void beginNativeCleanup(nativeSession);
+      nativeSession = null;
+      const [native, legacy] = await Promise.allSettled([waitForNativeCleanups(), legacyCleanup]);
+      const cleaned = native.status === 'fulfilled' && native.value === true
+        && legacy.status === 'fulfilled' && legacy.value !== false
+        && !nativeCleanupUncertain;
       const grokHomeToFlush = turnGrokHome || opts.grokHome;
       if (cleaned && grokHomeToFlush) flushGrokCredentialMirror(grokHomeToFlush);
       return cleaned;

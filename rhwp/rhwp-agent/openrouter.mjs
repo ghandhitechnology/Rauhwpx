@@ -1,7 +1,12 @@
 import { promises as fs } from 'node:fs';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 
+import { readUtf8FileBounded } from './bounded-file.mjs';
+import {
+  recoverInterruptedFileReplacement,
+  replaceFileAtomically,
+} from './harness-update.mjs';
 import { readResponseTextBounded } from './response-bounds.mjs';
 
 const API_BASE = 'https://openrouter.ai/api/v1';
@@ -20,31 +25,6 @@ function creditKeyId(key) {
   // Do not retain API keys as long-lived Map keys. The digest is only an
   // in-process cache identity; authentication still uses the original key.
   return createHash('sha256').update(key, 'utf8').digest('base64url');
-}
-
-async function readUtf8FileBounded(filePath, maxBytes) {
-  let handle;
-  try {
-    handle = await fs.open(filePath, 'r');
-    const info = await handle.stat();
-    if (!info.isFile() || !Number.isSafeInteger(info.size) || info.size < 1 || info.size > maxBytes) {
-      throw new Error('OpenRouter catalog cache is empty, oversized, or not a regular file');
-    }
-    const bytes = Buffer.allocUnsafe(info.size);
-    let offset = 0;
-    while (offset < bytes.length) {
-      const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset);
-      if (bytesRead === 0) throw new Error('OpenRouter catalog cache changed while it was read');
-      offset += bytesRead;
-    }
-    const extra = Buffer.allocUnsafe(1);
-    if ((await handle.read(extra, 0, 1, offset)).bytesRead !== 0) {
-      throw new Error('OpenRouter catalog cache changed while it was read');
-    }
-    return bytes.toString('utf8');
-  } finally {
-    await handle?.close().catch(() => {});
-  }
 }
 
 /**
@@ -169,7 +149,7 @@ function messageText(message) {
  * OpenRouter REST 클라이언트. 네트워크는 전부 fetchImpl 로 주입 가능하다.
  *
  * @param {{ fetchImpl?: typeof fetch, now?: () => number, cacheDir?: string|null,
- *           baseUrl?: string, timeoutMs?: number }} [deps]
+ *           baseUrl?: string, timeoutMs?: number, platform?: NodeJS.Platform }} [deps]
  */
 export function createOpenRouter({
   fetchImpl = globalThis.fetch,
@@ -177,6 +157,7 @@ export function createOpenRouter({
   cacheDir = null,
   baseUrl = API_BASE,
   timeoutMs = REQUEST_TIMEOUT_MS,
+  platform = process.platform,
 } = {}) {
   const cachePath = cacheDir ? path.join(cacheDir, CATALOG_CACHE_FILE) : null;
   /** @type {{ models: CatalogModel[], fetchedAt: number } | null} */
@@ -256,7 +237,11 @@ export function createOpenRouter({
   async function readDiskCache() {
     if (!cachePath) return null;
     try {
-      const raw = JSON.parse(await readUtf8FileBounded(cachePath, CATALOG_CACHE_LIMIT_BYTES));
+      await recoverInterruptedFileReplacement(cachePath, { platform });
+      const raw = JSON.parse(await readUtf8FileBounded(cachePath, {
+        maxBytes: CATALOG_CACHE_LIMIT_BYTES,
+        label: 'OpenRouter catalog cache',
+      }));
       const fetchedAt = Number(raw?.fetchedAt);
       if (!Array.isArray(raw?.models) || !Number.isFinite(fetchedAt)) return null;
       return { models: raw.models, fetchedAt };
@@ -270,11 +255,11 @@ export function createOpenRouter({
     let temp = null;
     try {
       await fs.mkdir(path.dirname(cachePath), { recursive: true });
-      temp = `${cachePath}.tmp-${process.pid}-${now()}`;
+      temp = `${cachePath}.tmp-${process.pid}-${randomUUID()}`;
       const serialized = `${JSON.stringify(entry)}\n`;
       if (Buffer.byteLength(serialized, 'utf8') > CATALOG_CACHE_LIMIT_BYTES) return;
-      await fs.writeFile(temp, serialized, { encoding: 'utf8', mode: 0o600 });
-      await fs.rename(temp, cachePath);
+      await fs.writeFile(temp, serialized, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+      await replaceFileAtomically(temp, cachePath, { platform });
       temp = null;
     } catch {
       // 캐시 저장 실패는 무시한다 — 다음 요청에서 다시 받아오면 된다.

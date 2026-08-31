@@ -6,7 +6,12 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { createSecretVault, handleSecretRequest } from '../../../desktop/secret-vault.mjs';
-import { retryLockedOperation } from '../harness-update.mjs';
+import {
+  recoverInterruptedFileReplacement,
+  removeFileAndReplacementBackup,
+  replaceFileAtomically,
+  retryLockedOperation,
+} from '../harness-update.mjs';
 import { bundledNpmLaunch } from '../npm-runtime.mjs';
 import { terminateProcessTree } from '../process-tree.mjs';
 import { createIpcSecretStore } from '../secret-store.mjs';
@@ -18,7 +23,7 @@ test('the bundled npm launcher uses the current Node-compatible executable', () 
   assert.match(launch.leadingArgs[0], /npm[/\\]bin[/\\]npm-cli\.js$/);
 });
 
-test('Windows process cleanup gracefully terminates then force-kills the descendant tree', async () => {
+test('Windows process cleanup never retargets a reusable PID after its first tree command', async () => {
   const calls = [];
   const child = Object.assign(new EventEmitter(), {
     pid: 4312,
@@ -29,6 +34,7 @@ test('Windows process cleanup gracefully terminates then force-kills the descend
   let escalate;
   terminateProcessTree(child, {
     platform: 'win32',
+    env: { SystemRoot: 'C:\\Windows' },
     spawnProcess(command, argv, options) {
       calls.push({ command, argv, options });
       return new EventEmitter();
@@ -38,9 +44,10 @@ test('Windows process cleanup gracefully terminates then force-kills the descend
       return { unref() {} };
     },
   });
+  assert.equal(calls[0].command, 'C:\\Windows\\System32\\taskkill.exe');
   assert.deepEqual(calls[0].argv, ['/PID', '4312', '/T']);
   escalate();
-  assert.deepEqual(calls[1].argv, ['/PID', '4312', '/T', '/F']);
+  assert.equal(calls.length, 1);
   assert.ok(calls.every(({ options }) => options.shell === false && options.windowsHide === true));
 });
 
@@ -61,6 +68,77 @@ test('Windows file locks are retried and then reported with a stable error code'
     ),
     (error) => error.code === 'HARNESS_FILES_LOCKED',
   );
+});
+
+test('a stale Windows backup cleanup cannot turn a committed replacement into failure', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-file-replace-cleanup-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const target = path.join(root, 'state.json');
+  const temp = path.join(root, 'state.tmp');
+  const previous = `${target}.previous-write`;
+  await fs.writeFile(target, 'old');
+  await fs.writeFile(temp, 'new');
+  let previousRemovals = 0;
+  const fsApi = {
+    access: (...args) => fs.access(...args),
+    rename: (...args) => fs.rename(...args),
+    async rm(filePath, options) {
+      if (filePath === previous && ++previousRemovals === 2) {
+        throw Object.assign(new Error('backup still locked'), { code: 'EIO' });
+      }
+      return fs.rm(filePath, options);
+    },
+  };
+
+  await replaceFileAtomically(temp, target, { platform: 'win32', fsApi });
+
+  assert.equal(await fs.readFile(target, 'utf8'), 'new');
+  assert.equal(await fs.readFile(previous, 'utf8'), 'old');
+});
+
+test('Windows replacement recovery restores a backup left at the rename gap', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-file-replace-recovery-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const target = path.join(root, 'state.json');
+  const previous = `${target}.previous-write`;
+  await fs.writeFile(previous, 'recover me');
+
+  assert.equal(
+    await recoverInterruptedFileReplacement(target, { platform: 'win32' }),
+    true,
+  );
+  assert.equal(await fs.readFile(target, 'utf8'), 'recover me');
+  await assert.rejects(fs.access(previous), { code: 'ENOENT' });
+});
+
+test('Windows deletion removes recovery state first and fails closed when it is locked', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-file-delete-recovery-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const target = path.join(root, 'state.json');
+  const previous = `${target}.previous-write`;
+  await fs.writeFile(target, 'current');
+  await fs.writeFile(previous, 'stale');
+
+  await assert.rejects(
+    removeFileAndReplacementBackup(target, {
+      platform: 'win32',
+      delays: [],
+      fsApi: {
+        async rm(filePath, options) {
+          if (filePath === previous) {
+            throw Object.assign(new Error('backup locked'), { code: 'EACCES' });
+          }
+          return fs.rm(filePath, options);
+        },
+      },
+    }),
+    { code: 'HARNESS_FILES_LOCKED' },
+  );
+  assert.equal(await fs.readFile(target, 'utf8'), 'current');
+
+  await removeFileAndReplacementBackup(target, { platform: 'win32' });
+  await assert.rejects(fs.access(target), { code: 'ENOENT' });
+  await assert.rejects(fs.access(previous), { code: 'ENOENT' });
 });
 
 test('setup errors give Windows-specific proxy, certificate, lock and path guidance', () => {

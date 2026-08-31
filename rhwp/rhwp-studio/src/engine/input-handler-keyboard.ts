@@ -15,6 +15,10 @@ import type { DocumentPosition, CellBbox, CellPathLike } from '@/core/types';
 import type { WasmBridge } from '@/core/wasm-bridge';
 import { INSERTED_IMAGE_MAX_BYTES, readBlobBytesWithLimit } from '@/core/document-input-limits';
 import { canDeleteObjectControl } from './input-handler-picture';
+import {
+  assertEncodedImageDecodeDimensions,
+  assertImageDecodeDimensions,
+} from '@/view/canvaskit/image-header';
 
 const RHWP_CLIPBOARD_MARKER_RE = /<!--\s*rhwp-studio-clipboard:([A-Za-z0-9._:-]+)\s*-->/;
 const PAGINATION_BOUNDARY_KEYS = new Set([
@@ -312,14 +316,18 @@ export async function writeTextHtmlToClipboard(text: string, html: string): Prom
 
 /** 비-PNG 이미지를 PNG Blob으로 변환한다. PNG는 그대로 반환. */
 async function convertToPngBlob(data: Uint8Array, mime: string): Promise<Blob> {
-  // new Uint8Array(data)로 ArrayBuffer 기반 복사 — WASM 반환 Uint8Array의 SharedArrayBuffer 호환 문제 방지
+  if (mime === 'image/png') {
+    // ArrayBuffer 기반 복사 — WASM 반환 Uint8Array의 SharedArrayBuffer 호환 문제 방지
+    return new Blob([new Uint8Array(data)], { type: 'image/png' });
+  }
+  assertEncodedImageDecodeDimensions(data, '클립보드 그림');
   const buf = new Uint8Array(data);
-  if (mime === 'image/png') return new Blob([buf], { type: 'image/png' });
   const img = new Image();
   const url = URL.createObjectURL(new Blob([buf], { type: mime }));
   try {
     img.src = url;
     await img.decode();
+    assertImageDecodeDimensions(img.naturalWidth, img.naturalHeight, '클립보드 그림');
     const canvas = document.createElement('canvas');
     canvas.width = img.naturalWidth;
     canvas.height = img.naturalHeight;
@@ -1896,11 +1904,13 @@ async function pasteImageFile(this: any, file: File, hasSelection: boolean): Pro
     const ext = (file.type.split('/')[1] || 'png').replace('jpeg', 'jpg');
 
     // 이미지 크기 측정
+    assertEncodedImageDecodeDimensions(data, '클립보드 그림');
     const img = new Image();
     const url = URL.createObjectURL(file);
     try {
       img.src = url;
       await img.decode();
+      assertImageDecodeDimensions(img.naturalWidth, img.naturalHeight, '클립보드 그림');
     } finally {
       URL.revokeObjectURL(url);
     }

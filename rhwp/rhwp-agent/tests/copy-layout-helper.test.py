@@ -112,15 +112,19 @@ class CopyLayoutHelperTests(unittest.TestCase):
 
         killer = FakeKiller()
         process = FakeProcess()
-        with patch.object(copy_layout.os, "name", "nt"), patch.object(
-            copy_layout.subprocess,
-            "Popen",
-            return_value=killer,
-        ) as popen:
+        with (
+            patch.object(copy_layout.os, "name", "nt"),
+            patch.dict(copy_layout.os.environ, {"SystemRoot": r"C:\Windows"}),
+            patch.object(
+                copy_layout.subprocess,
+                "Popen",
+                return_value=killer,
+            ) as popen,
+        ):
             self.assertTrue(copy_layout._terminate_rhwp_tree(process))
 
         popen.assert_called_once_with(
-            ["taskkill.exe", "/PID", "4242", "/T", "/F"],
+            [r"C:\Windows\System32\taskkill.exe", "/PID", "4242", "/T", "/F"],
             stdin=copy_layout.subprocess.DEVNULL,
             stdout=copy_layout.subprocess.DEVNULL,
             stderr=copy_layout.subprocess.DEVNULL,
@@ -141,6 +145,24 @@ class CopyLayoutHelperTests(unittest.TestCase):
             "Popen",
         ) as popen:
             self.assertTrue(copy_layout._terminate_rhwp_tree(ExitedProcess()))
+        popen.assert_not_called()
+
+    def test_windows_cleanup_fails_closed_without_an_absolute_system_root(self):
+        class LiveProcess:
+            pid = 4244
+
+            def poll(self):
+                return None
+
+        with (
+            patch.object(copy_layout.os, "name", "nt"),
+            patch.dict(
+                copy_layout.os.environ,
+                {"SystemRoot": "relative", "WINDIR": "also-relative"},
+            ),
+            patch.object(copy_layout.subprocess, "Popen") as popen,
+        ):
+            self.assertFalse(copy_layout._terminate_rhwp_tree(LiveProcess()))
         popen.assert_not_called()
 
     def test_run_rhwp_reports_unconfirmed_tree_cleanup(self):
@@ -801,7 +823,7 @@ class CopyLayoutHelperTests(unittest.TestCase):
 
         def fake_info(_binary, document):
             return {
-                "pageCount": 5 if document.name == "source.hwpx" else 5,
+                "pageCount": 5,
                 "sections": 2,
             }
 

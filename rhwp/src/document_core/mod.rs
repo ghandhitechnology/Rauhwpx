@@ -119,7 +119,6 @@ pub(crate) struct RenderNormalizationState {
 #[derive(Default)]
 pub(crate) struct DocumentEventLog {
     events: Vec<DocumentEvent>,
-    capture_events: bool,
     dropped_events: usize,
     section_revisions: Vec<u64>,
     paragraph_sequence_revisions: Vec<u64>,
@@ -150,12 +149,12 @@ impl DocumentEventLog {
                 revision,
             );
         }
-        if self.capture_events {
-            if self.events.len() < MAX_BATCH_EVENTS {
-                self.events.push(event);
-            } else {
-                self.dropped_events = self.dropped_events.saturating_add(1);
-            }
+        // Keep the public event-log API useful outside batch mode without
+        // allowing a long-lived document to retain an unbounded command log.
+        if self.events.len() < MAX_BATCH_EVENTS {
+            self.events.push(event);
+        } else {
+            self.dropped_events = self.dropped_events.saturating_add(1);
         }
     }
 
@@ -172,11 +171,6 @@ impl DocumentEventLog {
 
     fn begin_capture(&mut self) {
         self.clear();
-        self.capture_events = true;
-    }
-
-    fn finish_capture(&mut self) {
-        self.capture_events = false;
     }
 
     fn dropped_events(&self) -> usize {
@@ -604,11 +598,15 @@ mod event_log_tests {
     }
 
     #[test]
-    fn events_outside_a_batch_update_revisions_without_retaining_payloads() {
+    fn events_outside_a_batch_remain_available_through_the_bounded_public_log() {
         let mut log = DocumentEventLog::default();
         log.push(event(0));
 
-        assert!(log.is_empty());
+        assert!(matches!(
+            log.as_ref(),
+            [DocumentEvent::TextInserted { offset: 0, .. }]
+        ));
+        assert_eq!(log.dropped_events(), 0);
         assert!(log.section_revisions(1)[0] > 0);
         assert!(log.paragraph_revisions(0, 1)[0] > 0);
     }
@@ -620,7 +618,6 @@ mod event_log_tests {
         for offset in 0..=MAX_BATCH_EVENTS {
             log.push(event(offset));
         }
-        log.finish_capture();
 
         assert_eq!(log.len(), MAX_BATCH_EVENTS);
         assert_eq!(log.dropped_events(), 1);

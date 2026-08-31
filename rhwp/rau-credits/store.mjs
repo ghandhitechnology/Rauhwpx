@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 
-const MAX_STORE_BYTES = 8 * 1024 * 1024;
+export const MAX_STORE_BYTES = 8 * 1024 * 1024;
 
 const UNSUPPORTED_DIRECTORY_SYNC_ERRORS = new Set([
   'EINVAL',
@@ -21,6 +21,23 @@ function emptyState() {
   return { users: {}, sessions: {} };
 }
 
+function serializeState(next) {
+  const serialized = `${JSON.stringify(next, null, 2)}\n`;
+  if (Buffer.byteLength(serialized, 'utf8') > MAX_STORE_BYTES) {
+    throw Object.assign(
+      new Error('Rau credits state exceeds the 8 MiB safety limit'),
+      { code: 'RAU_CREDITS_STORE_TOO_LARGE' },
+    );
+  }
+  return serialized;
+}
+
+/** Use the exact durable-store accounting before an irreversible provider call. */
+export function assertStoreStateFits(next) {
+  serializeState(next);
+  return true;
+}
+
 export function createMemoryStore(initial = emptyState()) {
   let state = structuredClone(initial);
   return {
@@ -28,6 +45,7 @@ export function createMemoryStore(initial = emptyState()) {
       return structuredClone(state);
     },
     async save(next) {
+      serializeState(next);
       state = structuredClone(next);
     },
   };
@@ -117,10 +135,7 @@ export function createFileStore(filePath, {
       return readState();
     },
     async save(next) {
-      const serialized = `${JSON.stringify(next, null, 2)}\n`;
-      if (Buffer.byteLength(serialized, 'utf8') > MAX_STORE_BYTES) {
-        throw new Error('Rau credits state exceeds the 8 MiB safety limit');
-      }
+      const serialized = serializeState(next);
       chain = chain.then(
         () => writeState(serialized),
         () => writeState(serialized),

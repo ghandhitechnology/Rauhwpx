@@ -3,6 +3,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 pub(crate) fn write_atomically(output: &Path, bytes: &[u8]) -> io::Result<()> {
+    // `std::fs::rename` uses replacement semantics on supported platforms. On
+    // Windows it also preserves std's extended-length path normalization and
+    // access-denied fallback, which a direct MoveFileExW call would bypass.
     write_atomically_with(output, bytes, |from, to| fs::rename(from, to))
 }
 
@@ -100,5 +103,30 @@ mod tests {
             1,
             "only the original destination should remain"
         );
+        std::fs::remove_dir_all(directory).expect("remove temp directory");
+    }
+
+    #[test]
+    fn atomic_write_replaces_an_existing_destination_without_leaking_temp_files() {
+        let directory = unique_temp_dir();
+        std::fs::create_dir_all(&directory).expect("create temp directory");
+        let destination = directory.join("output.hml");
+        std::fs::write(&destination, b"old bytes").expect("seed destination");
+
+        write_atomically(&destination, b"new bytes").expect("replace destination atomically");
+
+        assert_eq!(
+            std::fs::read(&destination).expect("read replaced destination"),
+            b"new bytes"
+        );
+        assert_eq!(
+            std::fs::read_dir(&directory)
+                .expect("read temp directory")
+                .filter_map(Result::ok)
+                .count(),
+            1,
+            "only the replaced destination should remain"
+        );
+        std::fs::remove_dir_all(directory).expect("remove temp directory");
     }
 }

@@ -15,9 +15,19 @@ import {
   resolveCreditsDbPath,
   resolveCreditsOrigin,
 } from '../config.mjs';
-import { creditsRequestListener, createCreditsService } from '../service.mjs';
+import {
+  creditsRequestListener,
+  createCreditsService,
+  markOpenRouterMintNotDispatched,
+} from '../service.mjs';
 import { renderReadyPage } from '../pages.mjs';
-import { createFileStore, createMemoryStore, syncDirectory } from '../store.mjs';
+import {
+  assertStoreStateFits,
+  createFileStore,
+  createMemoryStore,
+  MAX_STORE_BYTES,
+  syncDirectory,
+} from '../store.mjs';
 import { createRateLimiter } from '../rate-limit.mjs';
 
 function service(overrides = {}) {
@@ -324,6 +334,157 @@ test('a prepared provisioning intent resumes without reconciliation', async () =
   assert.equal((await credits.redeemDeviceSession('device')).apiKey, 'sk-or-v1-prepared');
 });
 
+test('a definitely undispatched mint restores prepared state and retries the same intent', async () => {
+  const store = createMemoryStore();
+  const names = [];
+  let calls = 0;
+  const credits = createCreditsService({
+    origin: 'https://credits.rau.test',
+    sessionSecret: 'test-secret-for-rau-credits',
+    store,
+    authenticateWorkos: async () => ({ id: 'user_abc' }),
+    reconcileOpenRouterKey: async () => {
+      assert.fail('a definitely undispatched request must resume prepared state directly');
+    },
+    createOpenRouterKey: async ({ name }) => {
+      calls += 1;
+      names.push(name);
+      if (calls === 1) {
+        throw markOpenRouterMintNotDispatched(new Error('local preflight rejected the request'));
+      }
+      return { key: 'sk-or-v1-retried-once', id: 'retry-hash' };
+    },
+  });
+  const session = await credits.createDeviceSession();
+
+  await assert.rejects(
+    () => credits.completeLogin('ok-code', session.id),
+    /local preflight rejected/,
+  );
+  assert.equal((await store.load()).users.user_abc.provisioning.phase, 'prepared');
+
+  await credits.completeLogin('ok-code', session.id);
+  assert.deepEqual(names, [names[0], names[0]], 'the retry reuses the durable intent name');
+  assert.equal((await credits.redeemDeviceSession(session.id)).apiKey, 'sk-or-v1-retried-once');
+});
+
+test('an ambiguous mint failure stays submitting when reconciliation finds nothing', async () => {
+  const store = createMemoryStore();
+  const first = createCreditsService({
+    origin: 'https://credits.rau.test',
+    sessionSecret: 'test-secret-for-rau-credits',
+    store,
+    authenticateWorkos: async () => ({ id: 'user_abc' }),
+    createOpenRouterKey: async () => { throw new Error('connection reset after dispatch'); },
+  });
+  const session = await first.createDeviceSession();
+  await assert.rejects(
+    () => first.completeLogin('ok-code', session.id),
+    /connection reset after dispatch/,
+  );
+  assert.equal((await store.load()).users.user_abc.provisioning.phase, 'submitting');
+
+  const recovered = createCreditsService({
+    origin: 'https://credits.rau.test',
+    sessionSecret: 'test-secret-for-rau-credits',
+    store,
+    authenticateWorkos: async () => ({ id: 'user_abc' }),
+    reconcileOpenRouterKey: async () => false,
+    createOpenRouterKey: async () => {
+      assert.fail('absence cannot prove an ambiguous provider request was never dispatched');
+    },
+  });
+  await assert.rejects(
+    () => recovered.completeLogin('ok-code', session.id),
+    { code: 'OPENROUTER_RECONCILE_PENDING' },
+  );
+  assert.equal((await store.load()).users.user_abc.provisioning.phase, 'submitting');
+});
+
+test('durable capacity is reserved for the largest accepted key before paid mint', async () => {
+  const initial = {
+    users: {
+      user_abc: {
+        provisioning: {
+          id: 'intent-prepared',
+          name: 'rau-user_abc-intent-prepared',
+          createdAt: 10,
+          phase: 'prepared',
+        },
+      },
+    },
+    sessions: {
+      device: {
+        status: 'pending',
+        createdAt: 10,
+        completionClaim: { workosUserId: 'user_abc', email: null, claimedAt: 10 },
+      },
+    },
+    padding: '',
+  };
+  const baseBytes = Buffer.byteLength(`${JSON.stringify(initial, null, 2)}\n`, 'utf8');
+  initial.padding = 'x'.repeat(MAX_STORE_BYTES - baseBytes - 2_048);
+  assertStoreStateFits(initial);
+  const submitting = structuredClone(initial);
+  submitting.users.user_abc.provisioning = {
+    ...submitting.users.user_abc.provisioning,
+    phase: 'submitting',
+    submittedAt: 20,
+  };
+  assertStoreStateFits(submitting);
+
+  let mintCalls = 0;
+  const store = createMemoryStore(initial);
+  const credits = createCreditsService({
+    origin: 'https://credits.rau.test',
+    sessionSecret: 'test-secret-for-rau-credits',
+    store,
+    now: () => 20,
+    authenticateWorkos: async () => ({ id: 'user_abc' }),
+    createOpenRouterKey: async () => {
+      mintCalls += 1;
+      return { key: 'must-not-mint', id: 'must-not-mint' };
+    },
+  });
+
+  await assert.rejects(
+    () => credits.completeLogin('ok-code', 'device'),
+    { code: 'RAU_CREDITS_CAPACITY_EXCEEDED' },
+  );
+  assert.equal(mintCalls, 0);
+  assert.equal((await store.load()).users.user_abc.provisioning.phase, 'prepared');
+});
+
+test('oversized WorkOS identity fields are rejected before session persistence or paid mint', async () => {
+  for (const user of [
+    { id: 'u'.repeat(257), email: 'ok@example.com' },
+    { id: 'user_abc', email: `${'e'.repeat(309)}@example.com` },
+  ]) {
+    let mintCalls = 0;
+    const store = createMemoryStore();
+    const credits = createCreditsService({
+      origin: 'https://credits.rau.test',
+      sessionSecret: 'test-secret-for-rau-credits',
+      store,
+      authenticateWorkos: async () => user,
+      createOpenRouterKey: async () => {
+        mintCalls += 1;
+        return { key: 'must-not-mint', id: 'must-not-mint' };
+      },
+    });
+    const session = await credits.createDeviceSession();
+
+    await assert.rejects(
+      () => credits.completeLogin('ok-code', session.id),
+      { code: 'WORKOS_AUTH_FAILED' },
+    );
+    assert.equal(mintCalls, 0);
+    const state = await store.load();
+    assert.deepEqual(state.users, {});
+    assert.equal(state.sessions[session.id].completionClaim, undefined);
+  }
+});
+
 test('an empty OpenRouter list does not clear an uncertain provisioning intent', async () => {
   const calls = [];
   const store = createMemoryStore({
@@ -495,6 +656,46 @@ test('concurrent session creation cannot overwrite another session', async () =>
   await credits.assertPendingDevice(second.id);
 });
 
+test('concurrent v1 completions bind one device session to one principal before provisioning', async () => {
+  const store = createMemoryStore();
+  const minted = [];
+  let authenticatedCount = 0;
+  let releaseAuthenticated;
+  const bothAuthenticated = new Promise((resolve) => { releaseAuthenticated = resolve; });
+  const credits = createCreditsService({
+    origin: 'https://credits.rau.test',
+    sessionSecret: 'test-secret-for-rau-credits',
+    store,
+    authenticateWorkos: async (code) => {
+      authenticatedCount += 1;
+      if (authenticatedCount === 2) releaseAuthenticated();
+      await bothAuthenticated;
+      return {
+        id: `user_${code}`,
+        email: `${code}@example.com`,
+      };
+    },
+    createOpenRouterKey: async ({ name }) => {
+      minted.push(name);
+      return { key: `sk-or-v1-concurrent-${minted.length}`, id: `or-${minted.length}` };
+    },
+  });
+  const session = await credits.createDeviceSession();
+
+  const outcomes = await Promise.allSettled([
+    credits.completeLogin('first', session.id),
+    credits.completeLogin('second', session.id),
+  ]);
+
+  assert.equal(outcomes.filter(({ status }) => status === 'fulfilled').length, 1);
+  const rejected = outcomes.find(({ status }) => status === 'rejected');
+  assert.equal(rejected?.reason?.code, 'DEVICE_SESSION_INVALID');
+  assert.equal(minted.length, 1, 'one device session must never provision two principals');
+  const state = await store.load();
+  assert.equal(Object.keys(state.users).length, 1);
+  assert.equal(state.sessions[session.id].completionClaim, undefined);
+});
+
 test('pending polling is read-only and cannot save stale session state', async () => {
   const backing = createMemoryStore();
   let saves = 0;
@@ -582,6 +783,60 @@ test('v2 requires confirmation and PKCE before a key can be redeemed', async () 
   assert.deepEqual(await credits.redeemDeviceSessionV2(created.id, redeemInput), { status: 'redeemed' });
 });
 
+test('v2 replays committed one-time responses after authentication and confirmation response loss', async () => {
+  const store = createMemoryStore();
+  const proof = pkce('r'.repeat(43));
+  let authenticationCalls = 0;
+  let mintCalls = 0;
+  const makeService = () => createCreditsService({
+    origin: 'https://credits.rau.test',
+    sessionSecret: 'test-secret-for-rau-credits',
+    workosClientId: 'client_test',
+    store,
+    authenticateWorkos: async () => {
+      authenticationCalls += 1;
+      return { id: 'user_retry', email: 'retry@example.com' };
+    },
+    createOpenRouterKey: async () => {
+      mintCalls += 1;
+      return { key: 'sk-or-retry', id: 'or-retry' };
+    },
+  });
+  const first = makeService();
+  const created = await first.createDeviceSessionV2({
+    codeChallenge: proof.challenge,
+    codeChallengeMethod: 'S256',
+    returnMode: 'manual',
+  });
+  const oauthState = new URL(await first.authorizationUrlV2(created.id)).searchParams.get('state');
+
+  const lostAuthenticationResponse = await first.completeLoginV2('one-time-code', oauthState);
+  const afterAuthenticationRestart = makeService();
+  const replayedAuthentication = await afterAuthenticationRestart.completeLoginV2(
+    'one-time-code',
+    oauthState,
+  );
+  assert.equal(replayedAuthentication.confirmationToken, lostAuthenticationResponse.confirmationToken);
+  assert.equal(authenticationCalls, 1, 'a consumed OAuth code must not be sent upstream again');
+
+  const lostConfirmationResponse = await afterAuthenticationRestart.confirmDeviceSessionV2(
+    created.id,
+    replayedAuthentication.confirmationToken,
+  );
+  const afterConfirmationRestart = makeService();
+  const replayedConfirmation = await afterConfirmationRestart.confirmDeviceSessionV2(
+    created.id,
+    replayedAuthentication.confirmationToken,
+  );
+  assert.deepEqual(replayedConfirmation, lostConfirmationResponse);
+  assert.equal(mintCalls, 1, 'a lost confirmation response must not provision another key');
+
+  const serialized = JSON.stringify(await store.load());
+  assert.doesNotMatch(serialized, new RegExp(lostAuthenticationResponse.confirmationToken));
+  assert.doesNotMatch(serialized, new RegExp(lostConfirmationResponse.authorizationCode));
+  assert.doesNotMatch(serialized, new RegExp(lostConfirmationResponse.manualCode.replaceAll('-', '')));
+});
+
 test('v2 wrong OAuth state does not consume the valid flow', async () => {
   const proof = pkce('a'.repeat(43));
   const credits = service();
@@ -598,6 +853,102 @@ test('v2 wrong OAuth state does not consume the valid flow', async () => {
   );
   const completed = await credits.completeLoginV2('ok-code', validState);
   assert.equal(completed.deviceId, created.id);
+});
+
+test('v1 and v2 service methods reject sessions from the other protocol', async () => {
+  let oauthCalls = 0;
+  let magicCalls = 0;
+  const proof = pkce('p'.repeat(43));
+  const credits = service({
+    authenticateWorkos: async () => {
+      oauthCalls += 1;
+      return { id: 'user_protocol' };
+    },
+    authenticateMagic: async () => {
+      magicCalls += 1;
+      return { id: 'user_protocol' };
+    },
+  });
+  const v2 = await credits.createDeviceSessionV2({
+    codeChallenge: proof.challenge,
+    codeChallengeMethod: 'S256',
+    returnMode: 'manual',
+  });
+
+  for (const operation of [
+    () => credits.authorizationUrl(v2.id),
+    () => credits.assertPendingDevice(v2.id),
+    () => credits.completeLogin('ok-code', v2.id),
+    () => credits.completeMagicLogin(v2.id, 'andy@example.com', '123456'),
+  ]) {
+    await assert.rejects(operation, (error) => error.code === 'DEVICE_SESSION_INVALID');
+  }
+  assert.equal(oauthCalls, 0);
+  assert.equal(magicCalls, 0);
+
+  const authorize = await credits.authorizationUrlV2(v2.id);
+  const authenticated = await credits.completeLoginV2(
+    'ok-code',
+    new URL(authorize).searchParams.get('state'),
+  );
+  await credits.confirmDeviceSessionV2(v2.id, authenticated.confirmationToken);
+  await assert.rejects(
+    () => credits.redeemDeviceSession(v2.id),
+    (error) => error.code === 'DEVICE_SESSION_INVALID',
+  );
+  await assert.rejects(
+    () => credits.acknowledgeDeviceSession(v2.id),
+    (error) => error.code === 'DEVICE_SESSION_INVALID',
+  );
+
+  const v1 = await credits.createDeviceSession();
+  for (const operation of [
+    () => credits.authorizationUrlV2(v1.id),
+    () => credits.completeMagicLoginV2(v1.id, 'andy@example.com', '123456'),
+    () => credits.confirmDeviceSessionV2(v1.id, 'invalid-token'),
+    () => credits.redeemDeviceSessionV2(v1.id, {}),
+    () => credits.acknowledgeDeviceSessionV2(v1.id, {}),
+  ]) {
+    await assert.rejects(operation, (error) => error.code === 'DEVICE_SESSION_INVALID');
+  }
+  assert.equal(magicCalls, 0, 'v2 must reject a v1 id before authenticating the magic code');
+});
+
+test('OAuth callback cannot downgrade a v2 device id into v1 completion', async () => {
+  let oauthCalls = 0;
+  const proof = pkce('z'.repeat(43));
+  const credits = service({
+    authenticateWorkos: async () => {
+      oauthCalls += 1;
+      return { id: 'user_callback' };
+    },
+  });
+  const created = await credits.createDeviceSessionV2({
+    codeChallenge: proof.challenge,
+    codeChallengeMethod: 'S256',
+    returnMode: 'manual',
+  });
+  const authorize = await credits.authorizationUrlV2(created.id);
+  const validState = new URL(authorize).searchParams.get('state');
+  const server = http.createServer(creditsRequestListener(credits));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  try {
+    const invalid = await fetch(
+      `http://127.0.0.1:${port}/callback?code=ok-code&state=${encodeURIComponent(created.id)}`,
+    );
+    assert.equal(invalid.status, 400);
+    assert.equal(oauthCalls, 0, 'an invalid v2 state must be rejected before authentication');
+
+    const valid = await fetch(
+      `http://127.0.0.1:${port}/callback?code=ok-code&state=${encodeURIComponent(validState)}`,
+    );
+    assert.equal(valid.status, 200);
+    assert.match(await valid.text(), /이 연결을 확인하세요/);
+    assert.equal(oauthCalls, 1);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
 });
 
 test('hosted authentication rejects oversized upstream responses', async () => {
@@ -821,6 +1172,87 @@ test('HTTP v2 accepts only proof-bearing POST redemption and can retire v1', asy
     assert.equal((await response.json()).error, 'RAU_CLIENT_UPDATE_REQUIRED');
   } finally {
     await new Promise((resolve) => retiredServer.close(resolve));
+  }
+});
+
+test('HTTP v2 confirm failures render the browser failure page', async () => {
+  const credits = service();
+  const server = http.createServer(creditsRequestListener(credits));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  try {
+    const response = await fetch(
+      `http://127.0.0.1:${port}/v2/device-sessions/missing-session/confirm`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ confirmationToken: 'invalid-token' }),
+      },
+    );
+    const html = await response.text();
+    assert.equal(response.status, 400);
+    assert.equal(response.headers.get('content-type'), 'text/html; charset=utf-8');
+    assert.match(html, /연결하지 못했어요/);
+    assert.match(html, /로그인 세션이 없거나 만료됐어요/);
+    assert.match(html, /\/login\?device=missing-session/);
+    assert.doesNotMatch(html, /^\s*\{/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('malformed v2 confirm paths return 400 and still consume the IP rate limit', async () => {
+  const credits = service();
+  const server = http.createServer(creditsRequestListener(credits));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  try {
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const response = await fetch(`http://127.0.0.1:${port}/v2/device-sessions/%ZZ/confirm`, {
+        method: 'POST',
+      });
+      assert.equal(response.status, 400);
+    }
+    const throttled = await fetch(`http://127.0.0.1:${port}/v2/device-sessions/%ZZ/confirm`, {
+      method: 'POST',
+    });
+    assert.equal(throttled.status, 429);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('malformed encoded device paths return 400 and drain POST bodies', async () => {
+  const listener = creditsRequestListener(service());
+  const cases = [
+    { method: 'GET', url: '/v1/device-sessions/%ZZ', html: false },
+    { method: 'POST', url: '/v1/device-sessions/%ZZ/acknowledge', html: false },
+    { method: 'POST', url: '/v2/device-sessions/%ZZ/redeem', html: false },
+    { method: 'POST', url: '/v2/device-sessions/%ZZ/acknowledge', html: false },
+    { method: 'POST', url: '/v2/device-sessions/%ZZ/confirm', html: true },
+  ];
+
+  for (const entry of cases) {
+    let resumed = 0;
+    let status = null;
+    let body = '';
+    const req = {
+      method: entry.method,
+      url: entry.url,
+      headers: { host: '127.0.0.1' },
+      socket: { remoteAddress: `test-${entry.url}` },
+      resume() { resumed += 1; },
+    };
+    const res = {
+      writeHead(code) { status = code; },
+      end(value) { body = String(value ?? ''); },
+    };
+    await listener(req, res);
+
+    assert.equal(status, 400, entry.url);
+    if (entry.html) assert.match(body, /연결하지 못했어요/);
+    else assert.equal(JSON.parse(body).error, 'REQUEST_TARGET_INVALID');
+    if (entry.method === 'POST') assert.equal(resumed, 1, entry.url);
   }
 });
 
