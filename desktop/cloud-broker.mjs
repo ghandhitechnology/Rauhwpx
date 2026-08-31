@@ -438,7 +438,20 @@ export function createRaucloudBrokerProvider(options = {}) {
       onLine = () => {}, onSandboxCreated = async () => {}, onSandboxRemoved = async () => {},
     } = {}) {
       onLine('Checking account and daily Cloud allowance');
-      let payload = await client.createRun({ deviceName, provider: selectedProvider, signal });
+      let payload;
+      try {
+        payload = await client.createRun({ deviceName, provider: selectedProvider, signal });
+      } catch (error) {
+        if (error?.code !== 'RAUCLOUD_TIMEOUT' && error?.code !== 'CLOUD_RUN_ALREADY_ACTIVE') throw error;
+        const recovered = await client.status({ signal }).catch(() => {
+          throw error;
+        });
+        if (!runId(recovered) || !['provisioning', 'ready'].includes(normalizedStatus(recovered, 'idle').lifecycle)) {
+          throw error;
+        }
+        payload = recovered;
+        onLine('Reconnecting to the Cloud worker already being prepared');
+      }
       const id = runId(payload);
       if (!id) throw new AppServerError('Raucloud returned no run id', {
         code: 'RAUCLOUD_RESPONSE_INVALID', retryable: false,

@@ -148,6 +148,26 @@ test('Raucloud allows the full 30-minute setup window when allocation needs many
   assert.equal(result.receipt.pairingCode, RECEIPT.pairingCode);
 });
 
+function hangingFetch(routes, overrides = {}) {
+  const fetchImpl = (url, options = {}) => {
+    const parsed = new URL(url);
+    const key = `${options.method ?? 'GET'} ${parsed.pathname}`;
+    const route = routes[key];
+    if (!route) throw new Error(`unexpected request: ${key}`);
+    return typeof route === 'function' ? route(options) : route;
+  };
+  const client = createRaucloudBrokerClient({
+    baseUrl: 'https://broker.example.test',
+    getAccessToken: async () => ACCESS_TOKEN,
+    getDeviceIdentity: async () => ({ id: 'device-desktop-123', name: 'Laptop' }),
+    fetchImpl,
+    requestTimeoutMs: overrides.requestTimeoutMs ?? 20,
+    setupRequestTimeoutMs: overrides.setupRequestTimeoutMs ?? 20,
+    sleep: async () => {},
+  });
+  return { client };
+}
+
 test('create requests use a looser compatibility timeout than ordinary status requests', async () => {
   const fetchImpl = (_url, options = {}) => new Promise((resolve, reject) => {
     const timer = setTimeout(() => resolve(json({ run: { id: 'run-delayed', status: 'allocating' } })), 30);
@@ -170,6 +190,56 @@ test('create requests use a looser compatibility timeout than ordinary status re
     assert.equal(error.code, 'RAUCLOUD_TIMEOUT');
     return true;
   });
+});
+
+test('spawn attaches to the in-flight run after a blocking create is aborted', async () => {
+  let statusCalls = 0;
+  const { client } = hangingFetch({
+    'POST /v1/cloud/runs': (options) => new Promise((_, reject) => {
+      options.signal?.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+    }),
+    'GET /v1/cloud/status': () => {
+      statusCalls += 1;
+      return json(statusCalls === 1
+        ? { activeRun: { id: 'run-blocked', status: 'allocating' } }
+        : { activeRun: { id: 'run-blocked', status: 'ready' }, receipt: RECEIPT });
+    },
+  });
+  const result = await createRaucloudBrokerProvider({
+    client, allocationAttempts: 3, allocationPollMs: 10,
+  }).spawn();
+  assert.equal(result.sandbox.sandboxId, 'run-blocked');
+  assert.equal(result.receipt.pairingCode, RECEIPT.pairingCode);
+  assert.ok(statusCalls >= 2);
+});
+
+test('spawn resumes the same-device run after create reports it is already active', async () => {
+  const { client } = broker({
+    'POST /v1/cloud/runs': json({
+      error: 'CLOUD_RUN_ALREADY_ACTIVE', message: 'A Raucloud run is already active',
+      details: { runId: 'run-existing' },
+    }, 409),
+    'GET /v1/cloud/status': json({
+      activeRun: { id: 'run-existing', status: 'ready' },
+      receipt: RECEIPT,
+    }),
+  });
+  const result = await createRaucloudBrokerProvider({ client }).spawn();
+  assert.equal(result.sandbox.sandboxId, 'run-existing');
+  assert.deepEqual(result.receipt, RECEIPT);
+});
+
+test('spawn still fails when create times out and status has no run', async () => {
+  const { client } = hangingFetch({
+    'POST /v1/cloud/runs': (options) => new Promise((_, reject) => {
+      options.signal?.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+    }),
+    'GET /v1/cloud/status': json({ gate: { state: 'ready', canStart: true } }),
+  });
+  await assert.rejects(
+    () => createRaucloudBrokerProvider({ client }).spawn(),
+    (error) => error.code === 'RAUCLOUD_TIMEOUT',
+  );
 });
 
 test('Raucloud status preserves warm reuse, controller lease, and quota visuals', async () => {
