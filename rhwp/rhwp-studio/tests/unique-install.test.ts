@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { readFileSync } from 'node:fs';
@@ -12,6 +12,7 @@ import {
   shouldPingUniqueInstall,
   uniqueInstallsJsonUrl,
   uniqueInstallsPublicUrl,
+  writeUniqueInstallState,
 } from '../../../desktop/unique-install.mjs';
 import {
   formatUniqueInstallCount,
@@ -110,6 +111,55 @@ test('only packaged production launches ping, and they ping once per machine', a
     assert.equal(saved.installId, INSTALL_ID);
     assert.equal(saved.recorded, true);
     assert.equal(JSON.stringify(saved).includes('hostname'), false);
+  });
+});
+
+test('Windows unique-install writes move the previous file aside instead of renaming over it', async () => {
+  await withUserData(async (userDataDir) => {
+    const filePath = path.join(userDataDir, UNIQUE_INSTALL_FILE);
+    const ops = [];
+    const existing = { isFile: () => true };
+    await writeUniqueInstallState(filePath, {
+      installId: INSTALL_ID,
+      recorded: true,
+      recordedAt: '2026-08-31T00:00:00.000Z',
+    }, {
+      platform: 'win32',
+      mkdirImpl: async () => {},
+      writeFileImpl: async () => {},
+      statImpl: async () => existing,
+      renameImpl: async (from, to) => {
+        ops.push(['rename', path.basename(from), path.basename(to)]);
+      },
+      rmImpl: async (target) => {
+        ops.push(['rm', path.basename(target)]);
+      },
+    });
+    assert.equal(ops.some((op) => op[0] === 'rename' && op[2] === UNIQUE_INSTALL_FILE
+      && op[1] !== UNIQUE_INSTALL_FILE), true);
+    assert.equal(ops.some((op) => op[0] === 'rename' && op[1] === UNIQUE_INSTALL_FILE
+      && op[2] === `${UNIQUE_INSTALL_FILE}.previous-write`), true);
+    assert.equal(ops.some((op) => op[0] === 'rename' && op[1] === UNIQUE_INSTALL_FILE
+      && op[2] === UNIQUE_INSTALL_FILE), false);
+  });
+});
+
+test('a directory occupying unique-install.json fails closed without minting a ping', async () => {
+  await withUserData(async (userDataDir) => {
+    const { calls, fetchImpl } = fetchLog();
+    await mkdir(path.join(userDataDir, UNIQUE_INSTALL_FILE));
+    const blocked = await reportUniqueInstall({
+      userDataDir,
+      packaged: true,
+      appVersion: '1.1.0',
+      os: 'win32',
+      arch: 'x64',
+      baseUrl: 'https://credits.rau.test',
+      fetchImpl,
+      randomUUIDImpl: () => INSTALL_ID,
+    });
+    assert.equal(blocked.recorded, false);
+    assert.equal(calls.filter((call) => call.method === 'POST').length, 0);
   });
 });
 

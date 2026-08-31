@@ -118,7 +118,9 @@ function prepareFakePi(root) {
   }));
   const fake = path.join(binDir, process.platform === 'win32' ? 'pi.cmd' : 'pi');
   if (process.platform === 'win32') {
-    writeFileSync(fake, '@echo off\r\nnode -e "setInterval(() =^> {}, 1000)"\r\n');
+    const keepAlive = path.join(binDir, 'pi-keep-alive.mjs');
+    writeFileSync(keepAlive, 'setInterval(() => {}, 1000);\n');
+    writeFileSync(fake, `@echo off\r\n"${process.execPath}" "${keepAlive}"\r\n`);
   } else {
     writeFileSync(
       fake,

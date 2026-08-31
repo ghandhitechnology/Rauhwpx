@@ -977,7 +977,10 @@ test('a clean exit without a result ends the turn quietly', (t) => {
 });
 
 test('a successful drained close without tree proof quarantines later Grok turns', async (t) => {
-  const { session, events, spawns } = startSession(t);
+  const { session, events, spawns } = startSession(t, {}, {
+    platform: 'linux',
+    waitForExit: async () => false,
+  });
   session.sendUserMessage('first');
   spawns[0].proc.emitJson(
     INIT_LINE,

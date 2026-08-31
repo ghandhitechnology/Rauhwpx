@@ -220,8 +220,9 @@ test('unique-installs persist on a separate Railway volume file', async () => {
     const store = createFileStore(filePath, { emptyState: emptyUniqueInstallsState });
     const installs = createUniqueInstallsService({ store });
     await installs.record(signedPing(MAC_ID));
+    await installs.record(signedPing(WIN_ID, { os: 'win32', arch: 'x64' }));
     const saved = JSON.parse(await fs.readFile(filePath, 'utf8'));
-    assert.equal(countOfficialUniqueInstalls(saved), 1);
+    assert.equal(countOfficialUniqueInstalls(saved), 2);
     assert.equal(saved.users, undefined);
     assert.equal(resolveUniqueInstallsDbPath({}), path.join('.', 'unique-installs.json'));
     assert.equal(

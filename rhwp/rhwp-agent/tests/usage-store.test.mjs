@@ -221,7 +221,7 @@ test('Windows startup recovers usage plans and events left at the replacement ga
 test('a failed plan replacement does not publish an in-memory-only selection', async (t) => {
   const rootDir = await tmpRoot();
   t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
-  const store = await createUsageStore({ rootDir }).init();
+  const store = await createUsageStore({ rootDir, platform: 'linux' }).init();
 
   // A directory cannot be atomically replaced by the plans file. The failed
   // durable write must leave both the visible selection and staging area clean.
