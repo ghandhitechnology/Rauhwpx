@@ -333,6 +333,15 @@ export interface SettingsPanelDeps {
   openCalibration: () => void;
   /** 현재 대화의 CLI 세션을 다시 시작한다. */
   reconnectSession: () => void;
+  /**
+   * 첫 실행 마법사가 열려 있을 때 로그인/민트 실패·취소를 같은 화면의
+   * BYOK 경로로 넘긴다. 설정 탭만 쓸 때는 없어도 된다.
+   */
+  onAgentSetupAbandoned?: (info: {
+    agent: AgentName;
+    code: string;
+    message: string;
+  }) => void;
 }
 
 export interface SettingsPanel {
@@ -348,6 +357,7 @@ export interface SettingsPanel {
    * 이미 로그인된 프로바이더는 완료 화면만 보여 준다.
    */
   beginAgentConnect(agent: AgentName): void;
+  closeAgentSetup(): void;
   handleEvent(ev: SidebarEvent): void;
   dispose(): void;
 }
@@ -361,6 +371,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     applyDefaults,
     openCalibration,
     reconnectSession,
+    onAgentSetupAbandoned,
   } = deps;
 
   let disposed = false;
@@ -897,6 +908,13 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     resetRauAuthFeedback();
     clearSetupAuthPrompt();
     renderAgentSetup();
+    if (setupAgent === 'rau') {
+      onAgentSetupAbandoned?.({
+        agent: 'rau',
+        code: 'RAU_LOGIN_CANCELLED',
+        message: 'Rau 로그인을 취소했어요.',
+      });
+    }
   });
   setupCodeSubmit.addEventListener('click', submitSetupAuthCode);
   setupCode.input.addEventListener('keydown', (event) => {
@@ -2130,6 +2148,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   }
 
   function closeAgentSetup(): void {
+    const dismissingRau = setupOverlay.isConnected && setupAgent === 'rau' && !isAgentLoggedIn('rau');
     if (!setupOverlay.isConnected) return;
     if (setupBusy && setupAgent && setupAuthRunId) {
       bridge.cancelAgentSetup(setupAgent, setupAuthRunId);
@@ -2141,6 +2160,13 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     setupOverlay.setAttribute('aria-hidden', 'true');
     resetSetupInstallProgress();
     window.setTimeout(() => setupOverlay.remove(), 180);
+    if (dismissingRau) {
+      onAgentSetupAbandoned?.({
+        agent: 'rau',
+        code: 'RAU_LOGIN_CANCELLED',
+        message: 'Rau 로그인을 취소했어요.',
+      });
+    }
   }
 
   function resetSetupInstallProgress(): void {
@@ -2384,6 +2410,13 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       resetRauAuthFeedback();
       clearSetupAuthPrompt();
       renderAgentSetup();
+      if (setupAgent === 'rau') {
+        onAgentSetupAbandoned?.({
+          agent: 'rau',
+          code: 'RAU_LOGIN_START_FAILED',
+          message: setupMessage,
+        });
+      }
       return;
     }
     if (!started.authRunId) {
@@ -2392,6 +2425,13 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       resetRauAuthFeedback();
       clearSetupAuthPrompt();
       renderAgentSetup();
+      if (setupAgent === 'rau') {
+        onAgentSetupAbandoned?.({
+          agent: 'rau',
+          code: 'RAU_LOGIN_START_FAILED',
+          message: setupMessage,
+        });
+      }
       return;
     }
     setupAuthRunId = started.authRunId;
@@ -3287,6 +3327,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     },
     openAgentSetup,
     beginAgentConnect,
+    closeAgentSetup,
     handleEvent(ev: SidebarEvent): void {
       switch (ev.type) {
         case 'connection':

@@ -1402,6 +1402,50 @@ test('Rau profile shares the Pi prefix but keeps a separate secret and locked ca
   await fs.rm(rauRoot, { recursive: true, force: true });
 });
 
+test('Rau ignores retired proxy credentials after upgrading to direct OpenRouter access', async () => {
+  const rootDir = await tmpRoot();
+  const secretStore = createMemorySecretStore();
+  const retiredProxyToken = `rau_v1_${'a'.repeat(43)}`;
+  await secretStore.set(RAU_SECRET_ID, retiredProxyToken);
+  await fs.writeFile(path.join(rootDir, 'config.json'), `${JSON.stringify({
+    version: 1,
+    keyTail: retiredProxyToken.slice(-4),
+    account: 'andy@example.com',
+    models: RAU_LOCKED_MODELS,
+    defaultModelId: RAU_DEFAULT_MODEL_ID,
+    setupComplete: true,
+  })}\n`);
+
+  const manager = createPiManager({
+    rootDir,
+    openRouter: fakeOpenRouter(),
+    secretStore,
+    secretId: RAU_SECRET_ID,
+    lockedModels: RAU_LOCKED_MODELS,
+    skipLegacyKey: true,
+  });
+
+  const status = await manager.status();
+  assert.equal(status.keyConfigured, false);
+  assert.equal(status.setupComplete, false);
+  assert.equal(status.keyTail, null);
+  assert.equal(manager.apiKey(), null);
+  assert.match(status.error, /다시 완료/);
+  assert.equal(await secretStore.get(RAU_SECRET_ID), retiredProxyToken);
+
+  await manager.syncAssets();
+  const models = await readJson(path.join(rootDir, 'agent', 'models.json'));
+  assert.equal(models.providers.openrouter.baseUrl, 'https://openrouter.ai/api/v1');
+  assert.equal(models.providers.openrouter.apiKey, undefined);
+
+  const recovered = await manager.setApiKey('sk-or-v1-reconnected', { account: 'andy@example.com' });
+  assert.equal(recovered.setupComplete, true);
+  assert.equal(recovered.error, null);
+  assert.equal(await secretStore.get(RAU_SECRET_ID), 'sk-or-v1-reconnected');
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
 test('clearing an API key fails closed when vault deletion fails', async () => {
   const rootDir = await tmpRoot();
   let stored = null;

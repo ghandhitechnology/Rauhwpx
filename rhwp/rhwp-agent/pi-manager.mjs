@@ -64,6 +64,17 @@ export const PI_SECRET_ID = 'rhwp.pi.openrouter-api-key';
 export const RAU_SECRET_ID = 'rhwp.rau.openrouter-api-key';
 const OPENROUTER_SECRET_ID = PI_SECRET_ID;
 export { RAU_DEFAULT_MODEL_ID, RAU_LOCKED_MODELS };
+
+// Early Rau builds stored a proxy bearer here instead of an OpenRouter key.
+// The proxy route is retired, so carrying this token across an upgrade makes
+// the provider look configured while every request targets a dead endpoint.
+const RETIRED_RAU_PROXY_CREDENTIAL = /^rau_v1_[A-Za-z0-9_-]{43}$/;
+
+function isRetiredRauCredential(secretId, value) {
+  return secretId === RAU_SECRET_ID
+    && typeof value === 'string'
+    && RETIRED_RAU_PROXY_CREDENTIAL.test(value);
+}
 const INSTALL_PROGRESS = Object.freeze({
   preparing: 8,
   downloadStart: 12,
@@ -326,6 +337,7 @@ export function createPiManager({
   let latestVersion = null;
   let updateRequired = false;
   let secretStoreError = null;
+  let retiredRauCredential = false;
   /** @type {Promise<PiStatus> | null} */
   let installInFlight = null;
   let installProcess = null;
@@ -451,7 +463,13 @@ export function createPiManager({
         if (stored != null && (!textFitsByteLimit(stored, API_KEY_MAX_BYTES) || !stored.trim())) {
           throw piError('OPENROUTER_KEY_TOO_LARGE', '저장된 OpenRouter 키가 허용된 길이를 넘었어요');
         }
-        apiKey = stored?.trim() || null;
+        const storedKey = stored?.trim() || null;
+        retiredRauCredential = isRetiredRauCredential(secretId, storedKey);
+        apiKey = retiredRauCredential ? null : storedKey;
+        if (retiredRauCredential) {
+          config.keyTail = null;
+          config.account = null;
+        }
         if (!apiKey && legacyKey) {
           await secretStore.set(secretId, legacyKey);
           const migrated = await secretStore.get(secretId);
@@ -527,6 +545,7 @@ export function createPiManager({
   function snapshotSettingsState() {
     return {
       apiKey,
+      retiredRauCredential,
       config: structuredClone(config),
       secretStoreError,
       vaultSnapshot: /** @type {{ present: boolean, value: unknown } | null} */ (null),
@@ -548,6 +567,7 @@ export function createPiManager({
     clearClientCache = false,
   } = {}) {
     apiKey = previous.apiKey;
+    retiredRauCredential = previous.retiredRauCredential;
     config = structuredClone(previous.config);
     secretStoreError = previous.secretStoreError;
     const rollbackErrors = [];
@@ -828,6 +848,9 @@ export function createPiManager({
       latestVersion,
       updateRequired,
       error: lastError ?? secretStoreError,
+      ...(retiredRauCredential && !lastError && !secretStoreError
+        ? { error: 'Rau 연결을 다시 완료해 주세요.' }
+        : {}),
     };
   }
 
@@ -840,6 +863,9 @@ export function createPiManager({
       enableInstallTelemetry: false,
       extensions: [EXTENSION_PATH, SUBAGENT_EXTENSION_PATH],
     }, null, 2)}\n`);
+    // Rebuild the provider file on every startup. This repairs installs that
+    // still point at Rau's retired hosted proxy before any chat can spawn.
+    await writeModelsJson();
     try {
       await fs.cp(SKILLS_SOURCE_DIR, skillsDir, { recursive: true, force: true });
     } catch (error) {
@@ -1049,6 +1075,7 @@ export function createPiManager({
           throwIfAuthCancelled(signal);
           commitStarted = true;
           apiKey = trimmed;
+          retiredRauCredential = false;
           secretStoreError = null;
           config.keyTail = keyTailOf(trimmed);
           // 계정이 함께 오면 갱신한다. 없으면(API 키 직접 입력) 이전 값을 지운다.
@@ -1207,6 +1234,7 @@ export function createPiManager({
           }
           stateMutated = true;
           apiKey = null;
+          retiredRauCredential = false;
           config.keyTail = null;
           config.account = null;
           config.setupComplete = false;
