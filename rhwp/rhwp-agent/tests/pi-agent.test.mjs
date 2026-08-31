@@ -6,6 +6,7 @@ import test from 'node:test';
 import {
   buildPiArgv,
   buildPiEnv,
+  createPiFleetMapper,
   createPiSession,
   formatOpenRouterCreditError,
   formatPiExitError,
@@ -414,17 +415,17 @@ test('argv omits thinking for non-reasoning models and never doubles the provide
   assert.equal(argv.includes('--thinking'), false);
 });
 
-test('pi gets its own sequential brief instead of claude fleet instructions', () => {
-  // 미지정 agentName 은 클로드 기본 브리프를 낳아 없는 doc-editor 스폰을
-  // 지시했다 — pi 는 스폰 도구가 없으므로 단독 실행 규율이 와야 한다.
+test('pi gets its own subagent fleet instructions', () => {
   for (const mode of [
     { workflow: 'direct', phase: 'implementing' },
     { workflow: 'plan', phase: 'implementing' },
   ]) {
     const argv = buildPiArgv({ ...baseOpts, ...mode }, 'sess-1');
     const brief = argv[argv.indexOf('--append-system-prompt') + 1];
-    assert.doesNotMatch(brief, /doc-editor|doc-researcher|Workflow tool|Sibling agents/, mode.phase);
-    assert.match(brief, /no subagent or delegation tools/, mode.phase);
+    assert.doesNotMatch(brief, /Workflow tool/, mode.phase);
+    assert.match(brief, /subagent_spawn/, mode.phase);
+    assert.match(brief, /role=doc-editor/, mode.phase);
+    assert.match(brief, /subagent_wait/, mode.phase);
     assert.match(brief, /ONE apply_edits call/, mode.phase);
   }
 });
@@ -476,6 +477,11 @@ test('the child env is built from scratch without ambient provider keys', () => 
   assert.equal(env.RHWP_AGENT_WORKFLOW, 'plan');
   assert.equal(env.RHWP_AGENT_PHASE, 'planning');
   assert.equal(env.RHWP_CAPABILITY_EPOCH, '4');
+  assert.equal(env.RHWP_PI_BIN, baseOpts.piBin);
+  assert.equal(env.RHWP_PI_MODEL, baseOpts.model);
+  assert.equal(env.RHWP_PI_EFFORT, 'high');
+  assert.equal(env.RHWP_PI_REASONING, '1');
+  assert.equal(env.RHWP_PI_SESSION_DIR, path.join('/pi', 'sessions'));
 
   assert.equal(buildPiEnv({ ...baseOpts }, sourceEnv).RHWP_TOOL_PROFILE, 'direct');
   assert.equal(
@@ -683,4 +689,76 @@ test('Windows Pi terminal cleanup starts live, drains buffered output, and allow
   const disposing = session.dispose();
   spawns[1].proc.exit(0);
   assert.equal(await disposing, true);
+});
+
+test('Pi fleet events preserve child terminal status and Rau identity', () => {
+  const events = [];
+  const mapper = createPiFleetMapper((event) => events.push(event), 'rau');
+  for (const [callId, id, name] of [
+    ['spawn-ok', 'sa-1', 'Edit'],
+    ['spawn-fail', 'sa-2', 'Research'],
+  ]) {
+    mapper.onToolStart({ toolCallId: callId, toolName: 'subagent_spawn', args: { name } });
+    mapper.onToolEnd({
+      toolCallId: callId,
+      toolName: 'subagent_spawn',
+      result: { details: { id } },
+    });
+  }
+  mapper.onToolStart({
+    toolCallId: 'wait', toolName: 'subagent_wait', args: { ids: ['sa-1', 'sa-2'] },
+  });
+  mapper.onToolEnd({
+    toolCallId: 'wait',
+    toolName: 'subagent_wait',
+    result: { details: { records: [
+      { id: 'sa-1', status: 'completed' },
+      { id: 'sa-2', status: 'failed' },
+    ] } },
+  });
+  assert.deepEqual(events.filter((event) => event.type === 'task-end'), [
+    { type: 'task-end', agent: 'rau', taskId: 'spawn-ok', status: 'completed' },
+    { type: 'task-end', agent: 'rau', taskId: 'spawn-fail', status: 'failed' },
+  ]);
+});
+
+test('an aborted wait leaves its fleet card running until final cleanup', () => {
+  const events = [];
+  const mapper = createPiFleetMapper((event) => events.push(event));
+  mapper.onToolStart({ toolCallId: 'spawn', toolName: 'subagent_spawn', args: { name: 'Research' } });
+  mapper.onToolEnd({
+    toolCallId: 'spawn', toolName: 'subagent_spawn', result: { details: { id: 'sa-1' } },
+  });
+  mapper.onToolStart({ toolCallId: 'wait', toolName: 'subagent_wait', args: { ids: ['sa-1'] } });
+  mapper.onToolEnd({
+    toolCallId: 'wait', toolName: 'subagent_wait', isError: true,
+    result: { content: [{ type: 'text', text: 'Wait aborted. Subagents keep running.' }] },
+  });
+  assert.equal(events.some((event) => event.type === 'task-end'), false);
+  mapper.finalize('stopped');
+  assert.equal(events.at(-1).status, 'stopped');
+});
+
+test('Pi fleet metadata is bounded before it reaches Studio', () => {
+  const events = [];
+  const mapper = createPiFleetMapper((event) => events.push(event));
+  mapper.onToolStart({
+    toolCallId: 'spawn',
+    toolName: 'subagent_spawn',
+    args: { name: 'n'.repeat(5_000), role: 'r'.repeat(5_000) },
+  });
+  assert.equal(events[0].title.length, 160);
+  assert.equal(events[0].role.length, 64);
+});
+
+test('a failed Pi cancellation marks the affected fleet card failed', () => {
+  const events = [];
+  const mapper = createPiFleetMapper((event) => events.push(event));
+  mapper.onToolStart({ toolCallId: 'spawn', toolName: 'subagent_spawn', args: { name: 'Edit' } });
+  mapper.onToolEnd({
+    toolCallId: 'spawn', toolName: 'subagent_spawn', result: { details: { id: 'sa-1' } },
+  });
+  mapper.onToolStart({ toolCallId: 'cancel', toolName: 'subagent_cancel', args: { ids: ['sa-1'] } });
+  mapper.onToolEnd({ toolCallId: 'cancel', toolName: 'subagent_cancel', isError: true, result: {} });
+  assert.equal(events.at(-1).status, 'failed');
 });

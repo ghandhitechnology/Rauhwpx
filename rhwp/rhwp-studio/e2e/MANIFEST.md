@@ -54,6 +54,7 @@ e2e 스크립트의 **단일 권위 목록**이다. 파일 추가/변경/폐기 
 | `gen-screenshot.mjs` | 유틸 | active | README 용 렌더 스크린샷 생성기 | basic/KTX.hwp | 수동 |  |
 | `global-shortcut.test.mjs` | 상시 | active | 전역 단축키 (문서 미로드 상태) | — | 수동 |  |
 | `grid-mode-click-coord.test.mjs` | 진단 | hold | 보류 ① 그리드 좌표 결함 — 정량 e2e 측정 | exam_kor.hwp | 수동 | legacy-name · 보류① 이슈 종속 |
+| `header-footer-selection-issue4121.test.mjs` | 상시 | active | #4121 HF 선택 생성·반복 페이지 투영과 delete/type/paste/copy/cut/format history | biz_plan.hwp | npm e2e:issue-4121 | Stage 2~3 선택 생성·소비 계약 |
 | `helpers.mjs` | 유틸 | active | E2E 테스트 헬퍼 — Puppeteer + Chrome CDP | — | 수동 |  |
 | `hml-equation-embed.test.mjs` | 상시 | active | PR #2219 HML equation canvas edit/undo/export/reload | — | 수동 |  |
 | `hml-open.check.mjs` | 상시 | active | Standalone HML browser regression. | — | 수동 | legacy-name |

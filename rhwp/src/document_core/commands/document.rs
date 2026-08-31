@@ -676,6 +676,7 @@ impl DocumentCore {
             pending_pagination_job: None,
             page_tree_cache: RefCell::new(Vec::new()),
             page_tree_cache_order: RefCell::new(VecDeque::new()),
+            header_footer_preview_tree_cache: RefCell::new(None),
             layer_tree_json_cache: RefCell::new(Vec::new()),
             batch_mode: false,
             event_log: DocumentEventLog::default(),

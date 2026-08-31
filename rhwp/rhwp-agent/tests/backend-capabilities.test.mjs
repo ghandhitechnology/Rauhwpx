@@ -535,12 +535,11 @@ test('permission profiles split approval-gated staging from free editing', () =>
 });
 
 test('parallel-work guidance is tuned to each provider surface', () => {
-  // pi 는 스폰/수거 도구가 아예 없다 — 클로드 기본 브리프가 흘러 나와 없는
-  // doc-editor 스폰을 지시하는 사고를 막은 것이 이 브리프의 존재 이유다.
   const pi = parallelWorkBriefFor('pi');
-  assert.doesNotMatch(pi, /doc-editor|doc-researcher|Workflow tool|Sibling agents/);
-  assert.match(pi, /no subagent or delegation tools/);
-  assert.match(pi, /sequentially/);
+  assert.doesNotMatch(pi, /Workflow tool/);
+  assert.match(pi, /subagent_spawn/);
+  assert.match(pi, /role=doc-editor/);
+  assert.match(pi, /subagent_wait until every agent/);
   assert.match(pi, /ONE apply_edits call/, '배치가 pi 의 대체 병렬성이다');
 
   const grok = parallelWorkBriefFor('grok');
@@ -570,7 +569,7 @@ test('provider tool notes correct activated skill text per collaboration surface
     ['codex', /never call wait_agent or list_agents for one/],
     ['grok', /never collect them with get_command_or_subagent_output/],
     ['cursor', /there is no polling tool/],
-    ['pi', /no collaboration or polling tools/],
+    ['pi', /never call subagent_wait or subagent_list for one/],
   ]) {
     const note = providerToolNoteFor(agent);
     assert.match(note, fragment, agent);

@@ -195,11 +195,16 @@ test('한컴용 Git 토글은 기본 이력과 Git 버전 관리 진입을 전�
   assert.match(editCommandsSource, /new HistoryDialog\(services, compareSessionStore\)/);
 });
 
-test('버전 버튼은 설정과 관계없이 표시되고 현재 버전 관리 방식을 연다', () => {
-  assert.doesNotMatch(source, /versionsBtn\.hidden/);
+test('사이드바 버전 버튼은 한컴 Git 설정을 따르고 상단 메뉴는 항상 남는다', () => {
+  assert.match(source, /versionsBtn\.hidden = !enabled/);
+  assert.match(source, /applyHancomGitVisibility\(userSettings\.getUseHancomGit\(\)\)/);
+  assert.match(source, /userSettings\.subscribeUseHancomGit\(applyHancomGitVisibility\)/);
+  assert.match(source, /if \(!enabled && versionsPanelOpen\) closeVersionsPage\(\)/);
+  assert.match(source, /dispose\(\): void \{[\s\S]*unsubscribeHancomGitVisibility\(\)/);
   assert.match(source, /versionsBtn\.addEventListener\('click',[\s\S]*openConfiguredVersionControl\(\)/);
   assert.doesNotMatch(mainSource, /gitVersionToolbarButton/);
   assert.match(editCommandsSource, /userSettings\.getUseHancomGit\(\)[\s\S]*versions:open[\s\S]*openClassicDocumentHistory/);
+  assert.match(editCommandsSource, /id: 'edit:document-history'/);
 });
 
 test('템플릿 설정은 추가·이름 변경·교체·확인 삭제를 제공한다', () => {

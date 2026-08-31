@@ -30,6 +30,9 @@ const PROMPT_ARG_LIMIT = 700_000;
 const PLANNING_EXCLUDED_TOOLS = 'bash,edit,write';
 const SAFE_EXCLUDED_TOOLS = 'bash';
 const SAFE_WORKER_EXCLUDED_TOOLS = 'bash,edit,write';
+const SPAWN_TOOL = 'subagent_spawn';
+const WAIT_TOOL = 'subagent_wait';
+const CANCEL_TOOL = 'subagent_cancel';
 
 /**
  * 자식에게 넘겨줄 환경변수 화이트리스트. 여기 없는 값은 전달하지 않는다 —
@@ -156,7 +159,131 @@ export function buildPiEnv(opts, sourceEnv = process.env) {
     ...(readOnlyRoots.length > 0 ? { RHWP_READONLY_ROOTS: readOnlyRoots.join(path.delimiter) } : {}),
     RHWP_PERMISSION_PROFILE: opts.permissionProfile ?? 'safe',
     RHWP_TOOL_PROFILE: toolProfileFor(opts),
+    RHWP_PI_BIN: String(opts.piBin ?? 'pi'),
+    RHWP_PI_MODEL: String(opts.model ?? ''),
+    ...(opts.effort ? { RHWP_PI_EFFORT: String(opts.effort) } : {}),
+    ...(opts.reasoning ? { RHWP_PI_REASONING: '1' } : {}),
+    RHWP_PI_SESSION_DIR: path.join(piRoot, 'sessions'),
     ...mcpCapabilityEnv(opts),
+  };
+}
+
+function fleetStatusFromWait(status) {
+  return ['completed', 'failed', 'stopped'].includes(status) ? status : null;
+}
+
+function waitRecordsFromResult(result) {
+  const records = result && typeof result === 'object' ? result?.details?.records : null;
+  if (!Array.isArray(records)) return [];
+  return records.slice(0, 64).flatMap((entry) => {
+    if (!entry || typeof entry.id !== 'string' || !/^sa-[1-9][0-9]{0,8}$/.test(entry.id)) return [];
+    const status = fleetStatusFromWait(entry.status);
+    return status ? [{ id: entry.id, status }] : [];
+  });
+}
+
+function toolResultText(result) {
+  if (typeof result === 'string') return result;
+  if (typeof result?.message === 'string') return result.message;
+  if (Array.isArray(result?.content)) {
+    return result.content.map((block) => String(block?.text ?? '')).join('\n');
+  }
+  return JSON.stringify(result ?? '');
+}
+
+function spawnIdFromToolResult(result) {
+  const direct = result?.details?.id ?? result?.id;
+  if (typeof direct === 'string' && /^sa-\d+$/.test(direct)) return direct;
+  return toolResultText(result).match(/sa-\d+/)?.[0] ?? null;
+}
+
+/** Map Pi extension subagent tools onto the unified task-card event stream. */
+export function createPiFleetMapper(onEvent, agent = 'pi') {
+  const taskIdBySubagent = new Map();
+  const callMeta = new Map();
+  const running = new Set();
+
+  function emitEnd(taskId, status, summary) {
+    if (!running.delete(taskId)) return;
+    onEvent({ type: 'task-end', agent, taskId, status, ...(summary ? { summary } : {}) });
+  }
+
+  function idsFrom(callId, fallback = {}) {
+    const args = callMeta.get(callId)?.args ?? fallback;
+    return Array.isArray(args?.ids)
+      ? args.ids.slice(0, 64).map(String).filter((id) => /^sa-[1-9][0-9]{0,8}$/.test(id))
+      : [];
+  }
+
+  function taskIdsFor(ids) {
+    return ids.map((id) => taskIdBySubagent.get(id)).filter(Boolean);
+  }
+
+  return {
+    onToolStart(event) {
+      const tool = String(event?.toolName ?? '');
+      const callId = String(event?.toolCallId ?? '');
+      const args = event?.args && typeof event.args === 'object' ? event.args : {};
+      callMeta.set(callId, { tool, args });
+      if (tool === SPAWN_TOOL) {
+        running.add(callId);
+        onEvent({
+          type: 'task-start',
+          agent,
+          taskId: callId,
+          callId,
+          title: truncate(String(args.name ?? args.title ?? 'subagent'), 159),
+          ...(args.role ? { role: truncate(String(args.role), 63) } : {}),
+          taskKind: 'agent',
+        });
+      } else if (tool === WAIT_TOOL) {
+        for (const taskId of taskIdsFor(idsFrom(callId, args))) {
+          onEvent({ type: 'task-progress', agent, taskId, activity: 'waiting' });
+        }
+      }
+    },
+    onToolEnd(event) {
+      const callId = String(event?.toolCallId ?? '');
+      const meta = callMeta.get(callId);
+      const tool = String(event?.toolName ?? meta?.tool ?? '');
+      const args = meta?.args ?? {};
+      callMeta.delete(callId);
+      if (tool === SPAWN_TOOL) {
+        const subagentId = spawnIdFromToolResult(event?.result);
+        if (subagentId) {
+          while (taskIdBySubagent.size >= 64) {
+            taskIdBySubagent.delete(taskIdBySubagent.keys().next().value);
+          }
+          taskIdBySubagent.set(subagentId, callId);
+        }
+        if (event?.isError) emitEnd(callId, 'failed', truncate(toolResultText(event.result), 1_199));
+        return;
+      }
+      if (tool === WAIT_TOOL) {
+        if (event?.isError && /Wait aborted\. Subagents keep running/.test(toolResultText(event.result))) return;
+        const records = waitRecordsFromResult(event?.result);
+        if (records.length > 0) {
+          for (const record of records) {
+            const taskId = taskIdBySubagent.get(record.id);
+            if (taskId) emitEnd(taskId, record.status);
+          }
+          return;
+        }
+        const ids = idsFrom(callId, args);
+        for (const taskId of taskIdsFor(ids.length > 0 ? ids : [...taskIdBySubagent.keys()])) {
+          emitEnd(taskId, event?.isError ? 'failed' : 'completed');
+        }
+        return;
+      }
+      if (tool === CANCEL_TOOL) {
+        for (const taskId of taskIdsFor(idsFrom(callId, args))) {
+          emitEnd(taskId, event?.isError ? 'failed' : 'stopped');
+        }
+      }
+    },
+    finalize(status = 'stopped') {
+      for (const taskId of [...running]) emitEnd(taskId, status);
+    },
   };
 }
 
@@ -247,10 +374,12 @@ export function createPiSession(opts, {
   let uncertainTreeCleanup = false;
   /** @type {{ text: string } | null} */
   let queuedTurn = null;
+  const fleet = createPiFleetMapper(onEvent, agent);
 
   function endTurn(evt) {
     if (!turnOpen) return;
     turnOpen = false;
+    fleet.finalize(evt?.stopReason === 'failed' ? 'failed' : 'stopped');
     onEvent(evt);
   }
 
@@ -301,6 +430,7 @@ export function createPiSession(opts, {
         return;
       }
       if (type === 'tool_execution_start') {
+        fleet.onToolStart(e);
         onEvent({
           type: 'tool-call',
           agent,
@@ -311,6 +441,7 @@ export function createPiSession(opts, {
         return;
       }
       if (type === 'tool_execution_end') {
+        fleet.onToolEnd(e);
         onEvent({
           type: 'tool-result',
           agent,
