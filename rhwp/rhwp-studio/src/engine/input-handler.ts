@@ -46,6 +46,7 @@ import type { NavigationKeyInput } from './navigation-keymap';
 import { isPointNearBoxBorder } from './table-border-hit';
 import { DeferredPaginationRunner } from './deferred-pagination-runner';
 import { ImeSession } from './ime-session';
+import { CaretLayoutReveal } from './caret-layout-reveal';
 import {
   editableTargetFromPosition,
   positionsShareEditableContainer,
@@ -326,6 +327,8 @@ export class InputHandler {
   private deferredPaginationPending = false;
   private readonly deferredPaginationRunner: DeferredPaginationRunner;
   private rawTextMutationEffects = new TextMutationEffectAccumulator();
+  /** 쪽/단 나누기 뒤 CanvasView의 새 page offset이 준비되면 캐럿을 다시 드러낸다. */
+  private readonly caretLayoutReveal = new CaretLayoutReveal();
 
   // 표 경계선 리사이즈 드래그 상태
   private isResizeDragging = false;
@@ -675,6 +678,17 @@ export class InputHandler {
     eventBus.on('document-view-changed', () => {
       if (!this.active) return;
       requestAnimationFrame(() => this.updateCaret(true));
+    });
+
+    // 전체 mutation render는 renderer 선택 때문에 비동기다. 쪽/단 나누기 직후의 첫
+    // updateCaret은 아직 이전 VirtualScroll을 보므로, 새 쪽 배치가 준비된 이 시점에
+    // page-local rect와 DOM 위치를 다시 계산하고 한컴처럼 대상 쪽을 화면에 드러낸다.
+    // zoom/resize가 쏘는 page-layout-changed는 소비하지 않는다 — 배율 변경마다
+    // 스크롤을 옮기면 안 된다.
+    eventBus.on('document-layout-refreshed', () => {
+      if (!this.caretLayoutReveal.consume() || !this.active) return;
+      this.cursor.updateRect();
+      this.updateCaret();
     });
 
     // 표 객체 선택 변경 시 렌더링
@@ -2590,6 +2604,7 @@ export class InputHandler {
       this.resetDerivedStateAfterHistoryJump();
       // [Task #2337] 방금 되돌린 커맨드가 HF/FN 편집이면 그 커서 모드로 복원(본문 moveTo 대신).
       this.restoreEditContextAfterHistory(this.history.peekRedoTop(), newPos);
+      this.caretLayoutReveal.requestFor(this.history.peekRedoTop()?.type ?? '');
       this.afterEdit();
     }
   }
@@ -2606,6 +2621,7 @@ export class InputHandler {
       this.resetDerivedStateAfterHistoryJump();
       // [Task #2337] 방금 다시 실행한 커맨드가 HF/FN 편집이면 그 커서 모드로 복원.
       this.restoreEditContextAfterHistory(this.history.peekUndoTop(), newPos);
+      this.caretLayoutReveal.requestFor(this.history.peekUndoTop()?.type ?? '');
       this.afterEdit(!boundaryHandled);
     }
   }
@@ -2762,6 +2778,7 @@ export class InputHandler {
         this.pastedFieldEndOutsidePending = false;
         this.cursor.moveTo(newPos);
         this.cursor.resetPreferredX();
+        this.caretLayoutReveal.requestFor(desc.operationType);
         if (markPastedFieldEndOutside) {
           this.markCurrentFieldEndOutside();
         }
@@ -3946,6 +3963,9 @@ export class InputHandler {
     this.flushDeferredPaginationIfNeeded('before-deactivate', false);
     this.cancelPicturePreviewDrags();
     this.active = false;
+    // 문서 교체와 mutation renderer 선택이 경합해 layout 완료 이벤트가 생략돼도
+    // 이전 문서의 one-shot reveal 예약을 다음 문서로 넘기지 않는다.
+    this.caretLayoutReveal.clear();
     this.cancelDeferredPaginationFlush();
     this.deferredPaginationRunner.cancel();
     this.deferredPaginationPending = false;

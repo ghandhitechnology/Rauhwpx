@@ -223,10 +223,19 @@ export class CanvasView {
     this.refreshPages();
   }
 
+  /**
+   * 현재 mutation revision의 페이지 배치를 갱신한다. 선택이 유효할 때만
+   * `document-layout-refreshed`를 보내 쪽/단 나누기 캐럿 reveal의 완료 경계가 된다.
+   */
   private async refreshPagesForMutation(): Promise<void> {
     const selected = await this.selectMutationRevision();
     if (!selected || !this.rendererSession.isCurrent(selected.selection)) return;
     this.refreshPages();
+    // InputHandler의 mutation 직후 caret 갱신보다 VirtualScroll 재계산이 늦다.
+    // 새 page offset을 소비할 수 있는 완료 경계를 별도 이벤트로 알린다.
+    // zoom/resize의 page-layout-changed와 분리한다 — 그쪽을 reveal에 쓰면
+    // 배율 변경마다 스크롤이 따라간다.
+    this.eventBus.emit('document-layout-refreshed', { source: 'mutation' });
   }
 
   private async refreshInvalidatedPageForMutation(payload: unknown): Promise<void> {
