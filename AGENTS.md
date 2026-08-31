@@ -46,7 +46,8 @@ Use this structure:
    - Write "None" when there are no notable risks or rollout steps.
 
 8. **Visual evidence**
-   - For UI changes, include before/after screenshots or a short recording when practical.
+   - Every PR with a UI, styling, layout, image, chart, or other graphical change must include screenshots or a short recording of the changed result.
+   - Include before/after evidence when it helps reviewers compare behavior. If capture is impossible, state the blocker in the PR description.
    - For non-UI changes, omit this section.
 
 Keep PR descriptions detailed but relevant. Do not pad them with boilerplate, repeat the commit history, or claim tests that were not run.
