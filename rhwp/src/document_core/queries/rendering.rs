@@ -3070,6 +3070,9 @@ impl DocumentCore {
     pub(crate) fn mark_section_dirty(&mut self, section_idx: usize) {
         self.mark_section_pagination_dirty(section_idx);
         self.invalidate_render_normalization_section(section_idx);
+        // batch_mode에서는 paginate_if_needed가 미뤄지므로, HF 편집 직후
+        // 같은 키의 미리보기 tree를 쓰지 않도록 여기서 비운다 (#6452).
+        self.header_footer_preview_tree_cache.borrow_mut().take();
     }
 
     /// 구조가 안정적인 path edit에서 pagination만 dirty로 표시한다.
@@ -3564,6 +3567,7 @@ impl DocumentCore {
     /// 측정 통일(B). `paginate_pass` 의 `force_break_before` 훅과 `LayoutOverflow` 의
     /// section_index/is_first_in_column 계측은 측정 통일 작업의 진단·후속용으로 유지한다.
     pub(crate) fn paginate(&mut self) {
+        self.header_footer_preview_tree_cache.borrow_mut().take();
         self.pending_pagination_job = None;
         let sec_count = self.document.sections.len().max(1);
         let empty_breaks: Vec<std::collections::HashSet<usize>> =
@@ -5284,13 +5288,20 @@ impl DocumentCore {
             .pagination
             .get(section_idx)
             .ok_or_else(|| HwpError::RenderError(format!("구역 {} 범위 초과", section_idx)))?;
-        result
-            .pages
-            .first()
-            .map(|page| page.page_index)
-            .ok_or_else(|| {
-                HwpError::RenderError(format!("구역 {}에 편집할 페이지가 없습니다", section_idx))
-            })
+        if result.pages.is_empty() {
+            return Err(HwpError::RenderError(format!(
+                "구역 {}에 편집할 페이지가 없습니다",
+                section_idx
+            )));
+        }
+        // PageContent.page_index는 구역 로컬이다. Studio·find_page·preview tree는
+        // 문서 전역 쪽 번호를 쓰므로 앞 구역 쪽 수를 더한다.
+        Ok(self
+            .pagination
+            .iter()
+            .take(section_idx)
+            .map(|result| result.pages.len() as u32)
+            .sum())
     }
 
     fn header_footer_ref_for_edit_target(

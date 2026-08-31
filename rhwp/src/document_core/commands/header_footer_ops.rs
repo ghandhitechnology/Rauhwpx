@@ -2,6 +2,7 @@
 
 use super::clipboard::{
     clip_paragraph_text_range_for_clipboard, strip_structural_controls_for_text_clipboard,
+    text_to_split_logical_offset,
 };
 use super::formatting::char_shape_mods_affect_text_flow;
 use crate::document_core::helpers::{
@@ -733,22 +734,25 @@ impl DocumentCore {
             let paragraphs = self.get_hf_paragraphs_mut(section_idx, is_header, apply_to)?;
 
             // 끝 문단의 선택 뒤 suffix를 서식·인라인 컨트롤과 함께 보존한다.
+            // split_at은 텍스트 offset이 아니라 movable control을 포함한 논리 offset을 받는다.
             let suffix = {
                 let mut end_snapshot = paragraphs[end_para].clone();
-                end_snapshot.split_at(end_offset)
+                let end_logical = text_to_split_logical_offset(&end_snapshot, end_offset);
+                end_snapshot.split_at(end_logical)
             };
 
             // 시작 문단은 선택 앞 prefix만 남긴다. 다문단이면 선택에 포함된 나머지
             // 문단을 제거하고 이 prefix가 결과의 첫 문단을 소유한다.
-            let _discarded_tail = paragraphs[start_para].split_at(start_offset);
+            let start_logical = text_to_split_logical_offset(&paragraphs[start_para], start_offset);
+            let _discarded_tail = paragraphs[start_para].split_at(start_logical);
             if end_para > start_para {
                 paragraphs.drain((start_para + 1)..=end_para);
             }
 
-            paragraphs[start_para].insert_text_at(start_offset, lines[0]);
+            let inserted_at = paragraphs[start_para].insert_text_at(start_offset, lines[0]);
             let mut result_para = start_para;
             if lines.len() == 1 {
-                cursor_offset = start_offset + lines[0].chars().count();
+                cursor_offset = inserted_at + lines[0].chars().count();
             } else {
                 for line in lines.iter().skip(1) {
                     let mut next = Paragraph::new_empty_like(&paragraphs[result_para]);

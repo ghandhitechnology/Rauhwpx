@@ -104,6 +104,17 @@ test('CanvasView는 대표 preview와 실제 적용 쪽 overlay를 비인쇄 계
   assert.match(source, /removeHeaderFooterEditOverlays\(\)/);
 });
 
+test('HF 상태 live region은 display:none 도구상자 밖에 있다', () => {
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  const live = html.indexOf('id="hf-edit-status-live"');
+  const group = html.indexOf('class="tb-group tb-mode-group tb-headerfooter-group"');
+  assert.ok(live >= 0 && group >= 0, 'live region과 HF 도구상자가 있어야 한다');
+  assert.ok(live < group, 'aria-live는 숨긴 도구상자보다 앞에 있어야 한다');
+  const groupBlock = html.slice(group, html.indexOf('</div>', group) + 6);
+  assert.doesNotMatch(groupBlock, /hf-edit-status-live/);
+  assert.match(html, /id="hf-edit-status-live"[^>]*aria-live="polite"/);
+});
+
 test('HF 편집 안내는 내용을 덮지 않고 모서리와 텍스트만 표시한다', () => {
   const css = readFileSync(new URL('../src/styles/editor.css', import.meta.url), 'utf8');
   const representative = css.match(/\.hf-edit-region\.is-representative\s*\{([^}]*)\}/)?.[1] ?? '';

@@ -92,7 +92,7 @@ pub(super) fn strip_structural_controls_for_text_clipboard(para: &mut Paragraph)
     }
 }
 
-fn text_to_split_logical_offset(para: &Paragraph, text_offset: usize) -> usize {
+pub(super) fn text_to_split_logical_offset(para: &Paragraph, text_offset: usize) -> usize {
     let control_positions = para.control_text_positions();
     if control_positions.is_empty() {
         return text_offset;

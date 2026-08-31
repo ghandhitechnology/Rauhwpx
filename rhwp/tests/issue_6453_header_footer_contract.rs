@@ -1,6 +1,8 @@
 //! [#6453] 머리말/꼬리말 편집 resolver와 원자 text event 계약.
 #![cfg(not(target_arch = "wasm32"))]
 
+use std::path::Path;
+
 use rhwp::wasm_api::HwpDocument;
 
 fn header_with_text(text: &str) -> HwpDocument {
@@ -167,4 +169,60 @@ fn multi_paragraph_insert_delete_and_replace_events_are_exact() {
         .expect("다문단 치환");
     let event = only_event(&replacement.end_batch_native().expect("치환 event log"));
     assert_range_event(&event, (0, 1), (1, 1), (1, 2));
+}
+
+#[test]
+fn header_footer_preview_page_is_document_global_for_later_sections() {
+    let bytes =
+        std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("samples/hwp-multi-001.hwp"))
+            .expect("다구역 샘플");
+    let mut doc = HwpDocument::from_bytes(&bytes).expect("다구역 문서 파싱");
+    assert!(doc.document().sections.len() > 1, "다구역 샘플이어야 한다");
+
+    let mut section1_first_page = None;
+    for page_num in 0..doc.page_count() {
+        let info: serde_json::Value =
+            serde_json::from_str(&doc.get_page_info_native(page_num).expect("페이지 정보"))
+                .expect("페이지 JSON");
+        if info["sectionIndex"].as_u64() == Some(1) {
+            section1_first_page = Some(page_num);
+            break;
+        }
+    }
+    let section1_first_page = section1_first_page.expect("2번째 구역의 첫 전역 쪽을 찾아야 한다");
+    assert!(
+        section1_first_page > 0,
+        "2번째 구역 첫 쪽은 문서 전역 0이 아니어야 한다"
+    );
+
+    doc.create_header_footer_native(1, true, 0)
+        .expect("2번째 구역 머리말 생성");
+    let preview: serde_json::Value = serde_json::from_str(
+        &doc.get_header_footer_preview_page_native(1)
+            .expect("대표 페이지 조회"),
+    )
+    .expect("대표 페이지 JSON");
+    assert_eq!(
+        preview["pageIndex"].as_u64().expect("pageIndex"),
+        u64::from(section1_first_page),
+        "2번째 구역 대표 페이지는 구역 로컬 0이 아니라 문서 전역 쪽이어야 한다"
+    );
+
+    doc.insert_text_in_header_footer_native(1, true, 0, 0, 0, "SEC1")
+        .expect("2번째 구역 머리말 입력");
+    let rects: serde_json::Value = serde_json::from_str(
+        &doc.get_selection_rects_in_header_footer_native(
+            1,
+            true,
+            0,
+            section1_first_page,
+            0,
+            0,
+            0,
+            4,
+        )
+        .expect("2번째 구역 대표 쪽 selection"),
+    )
+    .expect("selection JSON");
+    assert_eq!(rects[0]["pageIndex"], section1_first_page);
 }

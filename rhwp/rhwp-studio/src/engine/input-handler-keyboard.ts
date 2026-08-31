@@ -38,14 +38,17 @@ const PAGINATION_BOUNDARY_KEYS = new Set([
 
 /**
  * 머리말/꼬리말·각주처럼 별도 편집 모델을 쓰는 모드에서도 안전하게 실행할 수 있는
- * 전역 편집 명령이다. 이 모드의 문자 입력은 아래 전용 분기가 소유하지만, 되돌리기와
- * 찾아가기는 문서 전체 명령이므로 조기 반환 전에 dispatcher로 전달해야 한다.
+ * 전역 편집 명령이다. 이 모드의 문자 입력은 아래 전용 분기가 소유하지만, 되돌리기·
+ * 찾아가기·굵게/기울임/밑줄은 문서 전체 명령이므로 조기 반환 전에 dispatcher로 전달해야 한다.
  */
 const SUBMODE_GLOBAL_COMMANDS = new Set([
   'edit:undo',
   'edit:redo',
   'edit:goto',
   'edit:select-all',
+  'format:bold',
+  'format:italic',
+  'format:underline',
 ]);
 
 function dispatchSubmodeGlobalShortcut(this: any, e: KeyboardEvent): boolean {

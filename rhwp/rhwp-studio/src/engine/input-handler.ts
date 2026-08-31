@@ -688,9 +688,6 @@ export class InputHandler {
     eventBus.on('viewport-scroll', () => {
       if (this.cursor.getHeaderFooterSelectionOrdered()) this.updateSelection();
     });
-    eventBus.on('viewport-resize', () => {
-      if (this.cursor.getHeaderFooterSelectionOrdered()) this.updateSelection();
-    });
 
     // 전체 mutation render는 renderer 선택 때문에 비동기다. 쪽/단 나누기 직후의 첫
     // updateCaret은 아직 이전 VirtualScroll을 보므로, 새 쪽 배치가 준비된 이 시점에
@@ -3077,34 +3074,17 @@ export class InputHandler {
         const cursorBefore = this.cursor.getPosition();
         // 일반 snapshot은 구조 편집의 본문 복귀 의미를 유지한다. HF/FN 안에서만
         // 문맥을 보존하는 전용 명령을 써서 undo/redo의 대상 범위를 호출부가 드러낸다.
-        const hasSelectionContext = desc.editContext !== undefined
-          && (
-            desc.editContextAfter !== undefined
-            || desc.selectionBefore !== undefined
-            || desc.selectionAfter !== undefined
-          );
         const cmd = desc.editContext
-          ? hasSelectionContext
-            ? new SubmodeSelectionSnapshotCommand(
-                desc.operationType,
-                cursorBefore,
-                cursorBefore,
-                desc.operation,
-                desc.editContext,
-                desc.editContextAfter ?? desc.editContext,
-                desc.selectionBefore ?? null,
-                desc.selectionAfter ?? null,
-              )
-            : new SubmodeSelectionSnapshotCommand(
-                desc.operationType,
-                cursorBefore,
-                cursorBefore,
-                desc.operation,
-                desc.editContext,
-                desc.editContextAfter ?? desc.editContext,
-                null,
-                null,
-              )
+          ? new SubmodeSelectionSnapshotCommand(
+              desc.operationType,
+              cursorBefore,
+              cursorBefore,
+              desc.operation,
+              desc.editContext,
+              desc.editContextAfter ?? desc.editContext,
+              desc.selectionBefore ?? null,
+              desc.selectionAfter ?? null,
+            )
           : new SnapshotCommand(desc.operationType, cursorBefore, cursorBefore, desc.operation);
         const newPos = this.history.execute(cmd, this.wasm);
         const markPastedFieldEndOutside = this.pastedFieldEndOutsidePending;
@@ -3965,16 +3945,23 @@ export class InputHandler {
         height,
       );
       try {
-        const rects = pages.flatMap((pageNum) => this.wasm.getSelectionRectsInHeaderFooter(
-          start.sectionIdx,
-          start.isHeader,
-          start.applyTo,
-          pageNum,
-          start.paraIdx,
-          start.charOffset,
-          end.paraIdx,
-          end.charOffset,
-        ));
+        const rects = pages.flatMap((pageNum) => {
+          try {
+            return this.wasm.getSelectionRectsInHeaderFooter(
+              start.sectionIdx,
+              start.isHeader,
+              start.applyTo,
+              pageNum,
+              start.paraIdx,
+              start.charOffset,
+              end.paraIdx,
+              end.charOffset,
+            );
+          } catch (e) {
+            console.warn('[InputHandler] getSelectionRectsInHeaderFooter 쪽 실패:', pageNum, e);
+            return [];
+          }
+        });
         this.selectionRenderer.render(rects, zoom);
       } catch (e) {
         console.warn('[InputHandler] getSelectionRectsInHeaderFooter 실패:', e);

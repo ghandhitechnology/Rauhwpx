@@ -293,12 +293,23 @@ test('#4121 HF 키보드는 Shift 선택과 Esc 2단계를 제공한다', () => 
   assert.match(hf, /clearSelection\(\)/);
 });
 
+test('#4121 HF Ctrl/Cmd+B·I·U는 전용 글자 서식 경로로 전달된다', () => {
+  const keyboard = src('src/engine/input-handler-keyboard.ts');
+  const allowlistStart = keyboard.indexOf('const SUBMODE_GLOBAL_COMMANDS = new Set([');
+  const allowlist = keyboard.slice(allowlistStart, keyboard.indexOf(']);', allowlistStart) + 3);
+  assert.match(allowlist, /'format:bold'/);
+  assert.match(allowlist, /'format:italic'/);
+  assert.match(allowlist, /'format:underline'/);
+  assert.match(keyboard, /dispatchSubmodeGlobalShortcut/);
+});
+
 test('#4121 HF overlay는 visible page마다 코어 기하를 조회한다', () => {
   const handler = src('src/engine/input-handler.ts');
   const update = functionBodyFrom(handler, 'private updateSelection()');
   assert.match(update, /getHeaderFooterSelectionOrdered\(\)/);
   assert.match(update, /getVisiblePages\(/);
   assert.match(update, /getSelectionRectsInHeaderFooter\(/);
+  assert.match(update, /return \[\];/);
   assert.match(handler, /eventBus\.on\('viewport-scroll',[\s\S]*updateSelection\(\)/);
 });
 
