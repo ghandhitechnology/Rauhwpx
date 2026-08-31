@@ -19,6 +19,7 @@ import {
   assertEncodedImageDecodeDimensions,
   assertImageDecodeDimensions,
 } from '@/view/canvaskit/image-header';
+import { emitHeaderFooterModeChanged } from './header-footer-mode';
 
 const RHWP_CLIPBOARD_MARKER_RE = /<!--\s*rhwp-studio-clipboard:([A-Za-z0-9._:-]+)\s*-->/;
 const PAGINATION_BOUNDARY_KEYS = new Set([
@@ -230,6 +231,71 @@ function handleNavigationShortcut(this: any, e: KeyboardEvent): boolean {
     executeNavigationAction.call(this, action, e.shiftKey);
     return true;
   }
+  if (shouldSuppressUnmappedNavigation(input, platform)) {
+    e.preventDefault();
+    return true;
+  }
+  return false;
+}
+
+function executeHeaderFooterNavigationAction(
+  this: any,
+  action: NavigationAction,
+  shiftKey: boolean,
+): void {
+  if (shiftKey) this.cursor.setHfAnchor();
+  else this.cursor.clearSelection();
+
+  switch (action) {
+    case 'wordBackward':
+      this.cursor.moveToWordBoundaryInHf(-1);
+      break;
+    case 'wordForward':
+      this.cursor.moveToWordBoundaryInHf(1);
+      break;
+    case 'lineStart':
+      this.cursor.moveToParagraphEdgeInHf(-1);
+      break;
+    case 'lineEnd':
+      this.cursor.moveToParagraphEdgeInHf(1);
+      break;
+    case 'paragraphBackward':
+      this.cursor.moveToParagraphBoundaryInHf(-1);
+      break;
+    case 'paragraphForward':
+      this.cursor.moveToParagraphBoundaryInHf(1);
+      break;
+  }
+
+  this.updateCaret();
+}
+
+/** 본문과 같은 플랫폼별 탐색 규칙을 머리말/꼬리말 좌표계에 적용한다. */
+function handleHeaderFooterNavigationShortcut(this: any, e: KeyboardEvent): boolean {
+  const input = toNavigationKeyInput(e);
+  const platform = detectPlatformKind();
+  const action = getNavigationAction(input, platform);
+  if (action) {
+    e.preventDefault();
+    executeHeaderFooterNavigationAction.call(this, action, e.shiftKey);
+    return true;
+  }
+
+  const isTargetBoundary =
+    ((e.metaKey && !e.ctrlKey && !e.altKey)
+      && (e.key === 'ArrowUp' || e.key === 'ArrowDown'))
+    || (((e.ctrlKey || e.metaKey) && !e.altKey)
+      && (e.key === 'Home' || e.key === 'End'));
+  if (isTargetBoundary) {
+    e.preventDefault();
+    if (e.shiftKey) this.cursor.setHfAnchor();
+    else this.cursor.clearSelection();
+    const towardStart = e.key === 'ArrowUp' || e.key === 'Home';
+    this.cursor.moveToHeaderFooterBoundary(towardStart ? -1 : 1);
+    this.updateCaret();
+    return true;
+  }
+
   if (shouldSuppressUnmappedNavigation(input, platform)) {
     e.preventDefault();
     return true;
@@ -622,13 +688,18 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
       this.handleCtrlKey(e);
       return;
     }
-    // Shift+Esc 또는 Esc → 편집 모드 탈출
+    // 선택이 있는 Esc는 선택만 해제한다. Shift+Esc 또는 선택 없는 Esc는 모드 탈출.
     if (e.key === 'Escape') {
       e.preventDefault();
+      if (!e.shiftKey && this.cursor.hasHeaderFooterSelection()) {
+        this.cursor.clearSelection();
+        this.updateCaret();
+        return;
+      }
       // 현재 보고 있는 페이지 기억
       const hfPage = this.cursor.rect?.pageIndex ?? 0;
       this.cursor.exitHeaderFooterMode();
-      this.eventBus.emit('headerFooterModeChanged', 'none');
+      emitHeaderFooterModeChanged(this.eventBus, this.cursor);
       // 해당 페이지의 본문 첫 문단 시작점으로 커서 이동
       try {
         const pageInfo = this.wasm.getPageInfo(hfPage);
@@ -644,15 +715,25 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
       return;
     }
 
-    // 방향키 → 머리말/꼬리말 내 이동
-    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+    if (handleHeaderFooterNavigationShortcut.call(this, e)) return;
+
+    // 수정자에 별도 의미가 없는 방향키 → 머리말/꼬리말 내 시각 이동.
+    // Shift는 현재 위치를 HF anchor로 고정해 범위를 확장한다.
+    if (
+      e.key === 'ArrowLeft'
+      || e.key === 'ArrowRight'
+      || e.key === 'ArrowUp'
+      || e.key === 'ArrowDown'
+    ) {
       e.preventDefault();
-      const delta = e.key === 'ArrowLeft' ? -1 : 1;
       if (e.shiftKey) this.cursor.setHfAnchor();
       else this.cursor.clearSelection();
-      this.cursor.moveHorizontalInHf(delta);
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        this.cursor.moveHorizontalInHf(e.key === 'ArrowLeft' ? -1 : 1);
+      } else {
+        this.cursor.moveVerticalInHf(e.key === 'ArrowUp' ? -1 : 1);
+      }
       this.updateCaret();
-      if (e.shiftKey) this.updateSelection();
       return;
     }
 
@@ -661,7 +742,10 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
       e.preventDefault();
       const isHeader = this.cursor.headerFooterMode === 'header';
       try {
-        const target = { sectionIdx: this.cursor.hfSectionIdx, isHeader, applyTo: this.cursor.hfApplyTo };
+        const target = {
+          sectionIdx: this.cursor.hfSectionIdx, isHeader, applyTo: this.cursor.hfApplyTo,
+          previewPage: this.cursor.hfPreviewPage,
+        };
         const paraIdx = this.cursor.hfParaIdx;
         const charOffset = this.cursor.hfCharOffset;
         this.wasm.insertTextInHeaderFooter(target.sectionIdx, isHeader, target.applyTo, paraIdx, charOffset, '\n');
@@ -677,7 +761,10 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
       e.preventDefault();
       const isHeader = this.cursor.headerFooterMode === 'header';
       try {
-        const target = { sectionIdx: this.cursor.hfSectionIdx, isHeader, applyTo: this.cursor.hfApplyTo };
+        const target = {
+          sectionIdx: this.cursor.hfSectionIdx, isHeader, applyTo: this.cursor.hfApplyTo,
+          previewPage: this.cursor.hfPreviewPage,
+        };
         const paraIdx = this.cursor.hfParaIdx;
         const charOffset = this.cursor.hfCharOffset;
         const result = JSON.parse(this.wasm.splitParagraphInHeaderFooter(target.sectionIdx, isHeader, target.applyTo, paraIdx, charOffset));
@@ -691,6 +778,10 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
     // Backspace / Delete는 handleBackspace/handleDelete에서 처리
     if (e.key === 'Backspace' || e.key === 'Delete') {
       e.preventDefault();
+      if (this.getNonEmptyHeaderFooterSelection()) {
+        this.deleteSelection();
+        return;
+      }
       withEraseCaretMotion(this, () => {
         const pos = this.cursor.getPosition();
         if (e.key === 'Backspace') {
@@ -1612,6 +1703,12 @@ export function handleCtrlKey(this: any, e: KeyboardEvent): void {
 }
 
 export function handleSelectAll(this: any): void {
+  if (this.cursor.isInHeaderFooter()) {
+    this.cursor.selectAllInHeaderFooter();
+    this.updateCaret();
+    return;
+  }
+
   if (this.cursor.isInCell() && !this.cursor.isInTextBox()) {
     this.cursor.exitCellSelectionMode();
     this.cellSelectionRenderer?.clear();
@@ -1629,8 +1726,42 @@ export function handleSelectAll(this: any): void {
   this.updateCaret();
 }
 
+function copyHeaderFooterSelection(this: any, e: ClipboardEvent): boolean {
+  const selection = this.getNonEmptyHeaderFooterSelection();
+  if (!selection) return false;
+  e.preventDefault();
+  try {
+    const result = this.wasm.copySelectionInHeaderFooter(
+      selection.start.sectionIdx,
+      selection.start.isHeader,
+      selection.start.applyTo,
+      selection.start.paraIdx,
+      selection.start.charOffset,
+      selection.end.paraIdx,
+      selection.end.charOffset,
+    );
+    if (!result.ok) return false;
+    if (e.clipboardData) {
+      e.clipboardData.setData('text/plain', result.text);
+      e.clipboardData.setData(
+        'text/html',
+        prepareRhwpInternalClipboardHtml(this, '', result.text),
+      );
+    }
+    return true;
+  } catch (err) {
+    console.warn('[InputHandler] HF 선택 복사 실패:', err);
+    return false;
+  }
+}
+
 export function onCopy(this: any, e: ClipboardEvent): void {
   if (!this.active) return;
+
+  if (this.cursor.isInHeaderFooter() && this.getNonEmptyHeaderFooterSelection()) {
+    copyHeaderFooterSelection.call(this, e);
+    return;
+  }
 
   // 개체(글상자/그림) 선택 모드 → 개체 복사
   if (this.cursor.isInPictureObjectSelection()) {
@@ -1733,6 +1864,11 @@ export function onCut(this: any, e: ClipboardEvent): void {
     return;
   }
 
+  if (this.cursor.isInHeaderFooter() && this.getNonEmptyHeaderFooterSelection()) {
+    if (copyHeaderFooterSelection.call(this, e)) this.deleteSelection();
+    return;
+  }
+
   // 개체 선택 모드 → 개체 잘라내기 (복사 후 삭제)
   if (this.cursor.isInPictureObjectSelection()) {
     const ref = this.cursor.getSelectedPictureRef();
@@ -1783,6 +1919,17 @@ export function onPaste(this: any, e: ClipboardEvent): void {
   const clipboardData = e.clipboardData;
   const html = clipboardData?.getData('text/html') || '';
   const text = clipboardData?.getData('text/plain') || '';
+  // HF는 이번 이슈에서 rich clipboard round-trip을 만들지 않는다. 내부 marker/HTML이
+  // 있어도 시스템 plain text를 코어의 원자 범위 primitive로 삽입·치환한다.
+  if (this.cursor.isInHeaderFooter()) {
+    if (text) {
+      this.replaceHeaderFooterSelection(text, {
+        operationType: 'pastePlainTextInHeaderFooter',
+        allowCollapsed: true,
+      });
+    }
+    return;
+  }
   if (pasteWithoutFormatting) {
     pastePlainText.call(this, text);
     return;
