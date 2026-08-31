@@ -2014,7 +2014,7 @@ impl LayoutEngine {
                 // 그룹 내 그림: common이 비어있으므로 w, h(shape_attr 기반)를 직접 사용
                 let bin_data_id = pic.image_attr.bin_data_id;
                 let image_data =
-                    find_bin_data(bin_data_content, bin_data_id).map(|c| c.data.load());
+                    find_bin_data(bin_data_content, bin_data_id).map(|c| c.data.load_shared());
                 let img_id = tree.next_id();
                 let img_node = RenderNode::new(
                     img_id,
@@ -2026,7 +2026,7 @@ impl LayoutEngine {
                         opacity: pic.image_attr.opacity(),
                         text_wrap: Some(pic.common.text_wrap),
                         external_path: pic.image_attr.external_path.clone(),
-                        ..ImageNode::new(bin_data_id, image_data)
+                        ..ImageNode::new_shared(bin_data_id, image_data)
                     }),
                     BoundingBox::new(render_x, render_y, render_w, render_h),
                 );
@@ -2073,7 +2073,7 @@ impl LayoutEngine {
                     // HWPX에서 주입된 OOXML 차트 XML 직접 경로 (CFB 컨테이너 없음)
                     if content.extension == "ooxml_chart" {
                         if let Some(chart) =
-                            crate::ooxml_chart::OoxmlChart::parse(&content.data.load())
+                            crate::ooxml_chart::OoxmlChart::parse(&content.data.load_shared())
                         {
                             let svg_fragment =
                                 chart.render_svg(render_x, render_y, render_w, render_h);
@@ -2090,9 +2090,9 @@ impl LayoutEngine {
                         }
                     }
                     if !rendered {
-                        if let Some(container) =
-                            crate::parser::ole_container::parse_ole_container(&content.data.load())
-                        {
+                        if let Some(container) = crate::parser::ole_container::parse_ole_container(
+                            &content.data.load_shared(),
+                        ) {
                             if let Some(ooxml_bytes) = container.ooxml_chart.as_ref() {
                                 if let Some(chart) =
                                     crate::ooxml_chart::OoxmlChart::parse(ooxml_bytes)
@@ -2252,7 +2252,7 @@ impl LayoutEngine {
                                 tree,
                                 parent,
                                 BoundingBox::new(render_x, render_y, render_w, render_h),
-                                &content.data.load(),
+                                &content.data.load_shared(),
                                 section_index,
                                 para_index,
                                 control_index,
@@ -2303,7 +2303,7 @@ impl LayoutEngine {
             if let Some(ref img_fill) = drawing.fill.image {
                 let bin_data_id = img_fill.bin_data_id;
                 let image_data =
-                    find_bin_data(bin_data_content, bin_data_id).map(|c| c.data.load());
+                    find_bin_data(bin_data_content, bin_data_id).map(|c| c.data.load_shared());
                 // 이미지 원본 크기: shape_attr의 original_width/height (HWPUNIT)
                 let original_size = {
                     let ow = drawing.shape_attr.original_width;
@@ -2332,7 +2332,7 @@ impl LayoutEngine {
                             3 => crate::model::image::ImageEffect::Pattern8x8,
                             _ => crate::model::image::ImageEffect::RealPic,
                         },
-                        ..ImageNode::new(bin_data_id, image_data)
+                        ..ImageNode::new_shared(bin_data_id, image_data)
                     }),
                     BoundingBox::new(base_x, base_y, w, h),
                 );

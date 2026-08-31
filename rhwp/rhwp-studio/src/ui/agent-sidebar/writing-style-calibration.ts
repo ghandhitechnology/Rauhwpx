@@ -21,6 +21,7 @@ import type {
   WritingStyleStatus,
   WritingStyleUpload,
 } from '../../agent/types.ts';
+import { readBlobBytesWithLimit } from '../../core/document-input-limits.ts';
 
 const ACCEPTED_EXTENSIONS = ['txt', 'md', 'markdown', 'pdf', 'docx', 'rtf', 'html', 'htm', 'csv', 'hwp', 'hwpx'];
 const MAX_FILES = 20;
@@ -236,8 +237,7 @@ function localizedDetail(value: string | undefined, fallback: string): string {
   return text;
 }
 
-function toBase64(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer);
+function toBase64(bytes: Uint8Array): string {
   let binary = '';
   const chunk = 0x8000;
   for (let offset = 0; offset < bytes.length; offset += chunk) {
@@ -927,7 +927,8 @@ export function createWritingStyleCalibration(
     try {
       const files: WritingStyleUpload[] = [];
       for (const file of selectedFiles) {
-        files.push({ name: file.name, type: file.type, size: file.size, content: toBase64(await file.arrayBuffer()) });
+        const bytes = await readBlobBytesWithLimit(file, MAX_FILE_BYTES, '문체 분석 문서');
+        files.push({ name: file.name, type: file.type, size: file.size, content: toBase64(bytes) });
       }
       requestId = bridge.calibrateWritingStyle({ language, files, agent: selectedAgent, model: selectedModel, append: corpusMode === 'append' && hasActiveCorpus() });
       calibrationBaselineUpdatedAt = activeStatus?.updatedAt ?? null;

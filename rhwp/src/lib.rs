@@ -21,6 +21,7 @@ pub mod serializer;
 pub mod subsecond_dev;
 pub mod wasm_api;
 pub mod wmf;
+mod xml_attr;
 
 pub use document_core::DocumentCore;
 pub use error::HwpError;

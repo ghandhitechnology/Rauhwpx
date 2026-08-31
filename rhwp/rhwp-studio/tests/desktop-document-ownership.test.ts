@@ -1,15 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import {
+  chmod,
+  copyFile,
+  mkdir,
   mkdtemp,
   open as openFs,
   readFile as readFs,
   readdir,
   rm as rmFs,
+  stat as statFs,
   writeFile as writeFs,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 
 import { DocumentLeaseManager } from '../../../desktop/document-leases.mjs';
 import {
@@ -18,13 +24,21 @@ import {
 } from '../src/desktop-integration.ts';
 import {
   canonicalNativePath,
+  fingerprintNativeFile,
+  NATIVE_FILE_ATOMIC_UNSUPPORTED_CODE,
+  NATIVE_FILE_CONFLICT_CODE,
+  NATIVE_FILE_CONFLICT_MESSAGE,
+  NATIVE_FILE_RECOVERY_REQUIRED_CODE,
+  NATIVE_FILE_WRITE_BUSY_CODE,
+  MAX_NATIVE_DOCUMENT_BYTES,
+  MAX_PORTABLE_HISTORY_BYTES,
   NativeFileHandleRegistry,
   nativePathOwnershipKey,
   readPortableHistoryBytes,
+  runNativeMetadataCommand,
   validateNativeDocumentBytes,
   validateNativeDocumentPath,
   writeNativeFileAtomically,
-  writePortableHistoryFolder,
 } from '../../../desktop/native-file-handles.mjs';
 
 function minimalCfbBytes(fill = 0): Uint8Array {
@@ -35,18 +49,48 @@ function minimalCfbBytes(fill = 0): Uint8Array {
   return bytes;
 }
 
+function minimalPortableHistoryBytes(marker = 0): Uint8Array {
+  const magic = new TextEncoder().encode('RAUHWPX-HISTORY\0');
+  const manifest = new TextEncoder().encode(JSON.stringify({
+    format: 'rauhwpx-history',
+    version: 1,
+    document: {},
+    repository: {},
+    objects: [{ kind: 'blob', id: 'test-object', offset: 0, byteLength: 1 }],
+  }));
+  const result = new Uint8Array(magic.byteLength + 4 + manifest.byteLength + 1);
+  result.set(magic);
+  new DataView(result.buffer).setUint32(magic.byteLength, manifest.byteLength, true);
+  result.set(manifest, magic.byteLength + 4);
+  result[result.length - 1] = marker;
+  return result;
+}
+
 async function withTemporaryDirectory(run: (directory: string) => Promise<void>) {
-  const directory = await mkdtemp(join(tmpdir(), 'rauhwpx-native-save-'));
+  // Nearby recovery intentionally searches both the document directory and
+  // its parent. Nest each fixture below its own container so unrelated tests
+  // creating .hwp files in the shared OS temp root cannot become candidates.
+  const container = await mkdtemp(join(tmpdir(), 'rauhwpx-native-save-'));
+  const directory = join(container, 'workspace');
+  await mkdir(directory);
   try {
     await run(directory);
   } finally {
-    await rmFs(directory, { recursive: true, force: true });
+    await rmFs(container, { recursive: true, force: true });
   }
 }
 
 function identity(documentId: string, sourceDigest: string) {
   return { documentId, sourceDigest };
 }
+
+const TEST_NATIVE_FINGERPRINT = Object.freeze({
+  state: 'file',
+  generation: 'test-generation',
+  changeTime: 'test-change',
+  digest: `sha256:${'0'.repeat(64)}`,
+});
+const fakeNativeFingerprint = async () => TEST_NATIVE_FINGERPRINT;
 
 test('failed duplicate reservation preserves the caller and owner leases', () => {
   const ids = ['reservation-a', 'reservation-b', 'reservation-c'];
@@ -155,6 +199,7 @@ test('opaque native handles are sender-scoped and validate ownership before writ
   const registry = new NativeFileHandleRegistry({
     createId: () => 'opaque-handle',
     canonicalize: async () => '/canonical/report.hwp',
+    fingerprintImpl: fakeNativeFingerprint,
     readFileImpl: async () => new Uint8Array([1, 2, 3]),
     writeFileImpl: async (path: string, bytes: Uint8Array) => {
       writes.push({ path, bytes: [...bytes] });
@@ -211,10 +256,31 @@ test('opaque native handles are sender-scoped and validate ownership before writ
   assert.deepEqual(writes[0].bytes, [...minimalCfbBytes(4)]);
 });
 
+test('concurrent open fingerprinting cannot publish two owners for one path', async () => {
+  const finish: Array<() => void> = [];
+  const registry = new NativeFileHandleRegistry({
+    canonicalize: async () => '/canonical/report.hwp',
+    createId: () => 'winner',
+    fingerprintImpl: async () => new Promise((resolve) => {
+      finish.push(() => resolve(TEST_NATIVE_FINGERPRINT));
+    }),
+  });
+  const first = registry.create('session-a', '/report.hwp');
+  const second = registry.create('session-b', '/report.hwp');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(finish.length, 2);
+  finish[0]();
+  const winner = await first;
+  assert.equal(winner.ok, true);
+  finish[1]();
+  assert.deepEqual(await second, { ok: false, ownerSessionId: 'session-a' });
+});
+
 test('an in-flight atomic write pins its path until completion', async () => {
   let finishWrite: (() => void) | undefined;
   const registry = new NativeFileHandleRegistry({
     canonicalize: async () => '/Canonical/Report.HWP',
+    fingerprintImpl: fakeNativeFingerprint,
     createId: (() => {
       const ids = ['writer', 'next-owner'];
       return () => ids.shift()!;
@@ -335,6 +401,7 @@ test('re-acquiring a handle cancels a release pending behind an in-flight write'
   let finishWrite: (() => void) | undefined;
   const registry = new NativeFileHandleRegistry({
     canonicalize: async () => '/canonical/report.hwp',
+    fingerprintImpl: fakeNativeFingerprint,
     createId: () => 'writer',
     writeFileImpl: async () => new Promise<void>((resolve) => { finishWrite = resolve; }),
   });
@@ -368,6 +435,7 @@ test('native bookmarks reopen a released handle without leaking the path', async
   const ids = ['first', 'restored'];
   const registry = new NativeFileHandleRegistry({
     canonicalize: async () => '/canonical/report.hwp',
+    fingerprintImpl: fakeNativeFingerprint,
     createId: () => ids.shift()!,
     readFileImpl: async () => new Uint8Array([1, 2, 3]),
   });
@@ -392,6 +460,7 @@ test('native bookmarks reopen a released handle without leaking the path', async
 test('native bookmarks persist independently of live handles', async () => {
   const registry = new NativeFileHandleRegistry({
     canonicalize: async () => '/canonical/report.hwp',
+    fingerprintImpl: fakeNativeFingerprint,
     createId: () => 'bookmarked',
   });
   registry.loadBookmarks([['document-a', '/canonical/report.hwp']]);
@@ -413,6 +482,7 @@ test('native bookmarks persist independently of live handles', async () => {
 test('native descriptors omit identity for unbookmarked files and different canonical paths', async () => {
   const registry = new NativeFileHandleRegistry({
     canonicalize: async (filePath: string) => filePath,
+    fingerprintImpl: fakeNativeFingerprint,
     createId: () => 'unbookmarked',
   });
   registry.loadBookmarks([['document-a', '/canonical/original.hwp']]);
@@ -430,6 +500,7 @@ test('native descriptors omit identity for unbookmarked files and different cano
 test('legacy duplicate bookmark paths prefer the oldest owner and collapse after remember', async () => {
   const registry = new NativeFileHandleRegistry({
     canonicalize: async () => '/canonical/report.hwp',
+    fingerprintImpl: fakeNativeFingerprint,
     createId: () => 'restored',
   });
   registry.loadBookmarks([
@@ -459,7 +530,20 @@ test('native package validation accepts real fixtures and rejects truncation or 
   const realHwpx = new Uint8Array(await readFs(new URL('../../samples/hwpx/footnote-01.hwpx', import.meta.url)));
   assert.doesNotThrow(() => validateNativeDocumentBytes('/docs/report.hwp', realHwp));
   assert.doesNotThrow(() => validateNativeDocumentBytes('/docs/report.hwpx', realHwpx));
+  assert.doesNotThrow(() => validateNativeDocumentBytes('/docs/report.rhwpx', minimalPortableHistoryBytes()));
+  assert.doesNotThrow(() => validateNativeDocumentBytes(
+    '/docs/report.hml',
+    new TextEncoder().encode('<?xml version="1.0" encoding="UTF-8"?><HWPML Version="2.8"></HWPML>'),
+  ));
 
+  assert.throws(
+    () => validateNativeDocumentBytes('/docs/report.hml', new Uint8Array()),
+    /empty or oversized/,
+  );
+  assert.throws(
+    () => validateNativeDocumentBytes('/docs/report.hml', new TextEncoder().encode('<html>wrong</html>')),
+    /invalid or truncated XML/,
+  );
   assert.throws(
     () => validateNativeDocumentBytes('/docs/report.hwp', realHwp.subarray(0, 900)),
     /invalid or truncated CFB/,
@@ -472,6 +556,103 @@ test('native package validation accepts real fixtures and rejects truncation or 
     () => validateNativeDocumentBytes('/docs/report.hwpx', realHwpx.subarray(0, realHwpx.length - 8)),
     /invalid or truncated ZIP/,
   );
+  assert.throws(
+    () => validateNativeDocumentBytes('/docs/report.rhwpx', new Uint8Array([1, 2, 3])),
+    /invalid or truncated history archive/,
+  );
+  const portable = minimalPortableHistoryBytes();
+  assert.throws(
+    () => validateNativeDocumentBytes('/docs/report.rhwpx', portable.subarray(0, -1)),
+    /invalid or truncated history archive/,
+  );
+  const portableWithTrailingData = new Uint8Array(portable.byteLength + 1);
+  portableWithTrailingData.set(portable);
+  assert.throws(
+    () => validateNativeDocumentBytes('/docs/report.rhwpx', portableWithTrailingData),
+    /invalid or truncated history archive/,
+  );
+});
+
+test('portable reads reject oversized files before allocating their contents', async () => {
+  let readAttempted = false;
+  await assert.rejects(
+    readPortableHistoryBytes('/docs/huge.rhwpx', {
+      statImpl: async () => ({
+        isDirectory: () => false,
+        isFile: () => true,
+        size: MAX_PORTABLE_HISTORY_BYTES + 1,
+      }),
+      readFileImpl: async () => {
+        readAttempted = true;
+        return new Uint8Array();
+      },
+    }),
+    /128 MiB limit/,
+  );
+  assert.equal(readAttempted, false);
+});
+
+test('portable fallback reads retain the 128 MiB cap when the file changes after stat', async () => {
+  const oversized = Object.create(Uint8Array.prototype) as Uint8Array;
+  Object.defineProperty(oversized, 'byteLength', {
+    value: MAX_PORTABLE_HISTORY_BYTES + 1,
+  });
+
+  await assert.rejects(
+    readPortableHistoryBytes('/docs/growing.rhwpx', {
+      statImpl: async () => ({
+        isDirectory: () => false,
+        isFile: () => true,
+        size: 1,
+      }),
+      readFileImpl: async () => oversized,
+      openImpl: null,
+    }),
+    /changed while it was being read/,
+  );
+});
+
+test('native reads use one opened file, reject its fstat size, and preserve Buffer views', async () => {
+  let handleRead = false;
+  let handleClosed = false;
+  await assert.rejects(
+    readPortableHistoryBytes('/docs/growing.hwp', {
+      statImpl: async () => ({
+        isDirectory: () => false,
+        isFile: () => true,
+        size: 10,
+      }),
+      openImpl: async () => ({
+        stat: async () => ({
+          isFile: () => true,
+          size: MAX_NATIVE_DOCUMENT_BYTES + 1,
+        }),
+        read: async () => {
+          handleRead = true;
+          return { bytesRead: 0 };
+        },
+        close: async () => { handleClosed = true; },
+      }),
+    }),
+    /512 MiB limit/,
+  );
+  assert.equal(handleRead, false);
+  assert.equal(handleClosed, true);
+
+  const original = Buffer.from([1, 2, 3, 4]);
+  const read = await readPortableHistoryBytes('/docs/report.hwp', {
+    statImpl: async () => ({
+      isDirectory: () => false,
+      isFile: () => true,
+      size: original.byteLength,
+    }),
+    readFileImpl: async () => original,
+    openImpl: null,
+  });
+  assert.equal(Buffer.isBuffer(read), false);
+  assert.equal(read.buffer, original.buffer);
+  assert.equal(read.byteOffset, original.byteOffset);
+  assert.equal(read.byteLength, original.byteLength);
 });
 
 test('atomic native replacement preserves the destination on temp write and rename failures', async () => {
@@ -482,7 +663,9 @@ test('atomic native replacement preserves the destination on temp write and rena
     const writeFailureOpen = async (path: string, flags: string) => {
       const file = await openFs(path, flags);
       return {
+        truncate: (length: number) => file.truncate(length),
         writeFile: async () => { throw new Error('injected write failure'); },
+        chmod: (mode: number) => file.chmod(mode),
         sync: () => file.sync(),
         close: () => file.close(),
       };
@@ -505,22 +688,15 @@ test('atomic native replacement preserves the destination on temp write and rena
   });
 });
 
-test('portable history bundles replace as a folder containing the document and history', async () => {
+test('portable history archives are single atomic files that can be rewritten in place', async () => {
   await withTemporaryDirectory(async (directory) => {
     const target = join(directory, 'report.rhwpx');
     await writeFs(target, 'old-file');
-    const history = new Uint8Array(24).fill(7);
-    history.set(new TextEncoder().encode('RAUHWPX-HISTORY\0'));
-    const document = new Uint8Array([0x50, 0x4b, 3, 4, 5]);
-    await writePortableHistoryFolder(target, [
-      { name: 'history', bytes: history },
-      { name: 'report.hwpx', bytes: document },
-    ]);
+    const history = minimalPortableHistoryBytes(7);
+    await writeNativeFileAtomically(target, history);
 
     assert.deepEqual((await readdir(directory)).sort(), ['report.rhwpx']);
-    assert.deepEqual((await readdir(target)).sort(), ['history', 'report.hwpx']);
     assert.deepEqual(await readPortableHistoryBytes(target), history);
-    assert.deepEqual(new Uint8Array(await readFs(join(target, 'report.hwpx'))), document);
 
     const files = new NativeFileHandleRegistry();
     const opened = await files.create('session-a', target);
@@ -528,11 +704,10 @@ test('portable history bundles replace as a folder containing the document and h
     if (!opened.ok) return;
     const read = await files.read('session-a', opened.descriptor.handleId);
     assert.equal(read.name, 'report.rhwpx');
+    assert.equal(opened.descriptor.legacyPortableHistoryFolder, undefined);
     assert.deepEqual(read.bytes, history);
 
-    const nextHistory = new Uint8Array(24).fill(9);
-    nextHistory.set(new TextEncoder().encode('RAUHWPX-HISTORY\0'));
-    const nextDocument = new Uint8Array([0x50, 0x4b, 6, 7, 8]);
+    const nextHistory = minimalPortableHistoryBytes(9);
     const active = identity('document-a', 'blake3:a');
     const leases = new DocumentLeaseManager({ createId: () => 'open' });
     const reservation = leases.reserve(
@@ -542,23 +717,40 @@ test('portable history bundles replace as a folder containing the document and h
     if (!reservation.ok) return;
     leases.commit('session-a', reservation.reservationId);
 
-    await assert.rejects(
-      files.write('session-a', opened.descriptor.handleId, nextDocument, active, leases),
-      /folder packages/,
-    );
-
-    await files.writePortableHistory(
-      'session-a',
-      opened.descriptor.handleId,
-      [
-        { name: 'history', bytes: nextHistory },
-        { name: 'report.hwpx', bytes: nextDocument },
-      ],
-      active,
-      leases,
-    );
+    await files.write('session-a', opened.descriptor.handleId, nextHistory, active, leases);
     assert.deepEqual(await readPortableHistoryBytes(target), nextHistory);
-    assert.deepEqual(new Uint8Array(await readFs(join(target, 'report.hwpx'))), nextDocument);
+  });
+});
+
+test('legacy RHWPX folders are readable for import but can never become save targets', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const target = join(directory, 'legacy.rhwpx');
+    const history = minimalPortableHistoryBytes(4);
+    await mkdir(target);
+    await writeFs(join(target, 'history'), history);
+    await writeFs(join(target, 'report.hwpx'), new Uint8Array([0x50, 0x4b, 3, 4]));
+
+    const files = new NativeFileHandleRegistry();
+    const opened = await files.create('session-a', target);
+    assert.equal(opened.ok, true);
+    if (!opened.ok) return;
+    assert.equal(opened.descriptor.legacyPortableHistoryFolder, true);
+    assert.deepEqual((await files.read('session-a', opened.descriptor.handleId)).bytes, history);
+
+    const active = identity('document-a', 'blake3:a');
+    const leases = new DocumentLeaseManager({ createId: () => 'open' });
+    const reservation = leases.reserve(
+      'session-a', active, files.pathForSender('session-a', opened.descriptor.handleId),
+    );
+    assert.equal(reservation.ok, true);
+    if (!reservation.ok) return;
+    leases.commit('session-a', reservation.reservationId);
+    await assert.rejects(
+      files.write('session-a', opened.descriptor.handleId, minimalPortableHistoryBytes(5), active, leases),
+      /import-only/,
+    );
+    await assert.rejects(files.createSaveTarget('session-b', target), /import-only/);
+    assert.deepEqual(await readPortableHistoryBytes(target), history);
   });
 });
 
@@ -572,6 +764,490 @@ test('atomic native replacement fsyncs and replaces a real destination', async (
   });
 });
 
+test('native save rejects an external same-size edit and leaves those bytes untouched', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const target = join(directory, 'report.hwp');
+    const original = minimalCfbBytes(1);
+    const external = minimalCfbBytes(2);
+    const local = minimalCfbBytes(3);
+    await writeFs(target, original);
+
+    const registry = new NativeFileHandleRegistry();
+    const opened = await registry.create('session-a', target);
+    assert.equal(opened.ok, true);
+    if (!opened.ok) return;
+    const active = identity('document-a', 'blake3:a');
+    const leases = new DocumentLeaseManager({ createId: () => 'open' });
+    const reservation = leases.reserve(
+      'session-a', active, registry.pathForSender('session-a', opened.descriptor.handleId),
+    );
+    assert.equal(reservation.ok, true);
+    if (!reservation.ok) return;
+    leases.commit('session-a', reservation.reservationId);
+
+    await writeFs(target, external);
+    await assert.rejects(
+      registry.write('session-a', opened.descriptor.handleId, local, active, leases),
+      (error: NodeJS.ErrnoException) => (
+        error.code === NATIVE_FILE_CONFLICT_CODE
+        && error.message === NATIVE_FILE_CONFLICT_MESSAGE
+      ),
+    );
+    assert.deepEqual(new Uint8Array(await readFs(target)), external);
+    assert.deepEqual(await readdir(directory), ['report.hwp']);
+  });
+});
+
+test('rename-aside CAS catches an external replacement made after temp preparation', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const target = join(directory, 'report.hwp');
+    const original = minimalCfbBytes(1);
+    const external = minimalCfbBytes(8);
+    await writeFs(target, original);
+    const expectedFingerprint = await fingerprintNativeFile(target);
+    let injected = false;
+
+    await assert.rejects(
+      writeNativeFileAtomically(target, minimalCfbBytes(9), {
+        platform: 'linux',
+        expectedFingerprint,
+        renameImpl: async (from: string, to: string) => {
+          if (!injected) {
+            injected = true;
+            await writeFs(target, external);
+          }
+          const { rename } = await import('node:fs/promises');
+          await rename(from, to);
+        },
+      }),
+      { code: NATIVE_FILE_CONFLICT_CODE },
+    );
+    assert.equal(injected, true);
+    assert.deepEqual(new Uint8Array(await readFs(target)), external);
+    assert.deepEqual(await readdir(directory), ['report.hwp']);
+  });
+});
+
+test('a destination recreated after compare preserves both it and the recovery original', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const target = join(directory, 'report.hwp');
+    const original = minimalCfbBytes(1);
+    const external = minimalCfbBytes(7);
+    await writeFs(target, original);
+    const expectedFingerprint = await fingerprintNativeFile(target);
+    let injected = false;
+    let recoveryFile = '';
+
+    await assert.rejects(
+      writeNativeFileAtomically(target, minimalCfbBytes(9), {
+        platform: 'linux',
+        expectedFingerprint,
+        linkImpl: async (from: string, to: string) => {
+          if (!injected && to === target) {
+            injected = true;
+            await writeFs(target, external);
+          }
+          const { link } = await import('node:fs/promises');
+          await link(from, to);
+        },
+      }),
+      (error: any) => {
+        assert.equal(error?.code, NATIVE_FILE_RECOVERY_REQUIRED_CODE);
+        assert.equal(error?.cause?.code, NATIVE_FILE_CONFLICT_CODE);
+        assert.equal(error?.errors?.filter((entry: any) => entry?.code === 'EEXIST').length, 2);
+        recoveryFile = error.recoveryFile;
+        return true;
+      },
+    );
+    assert.equal(injected, true);
+    assert.deepEqual(new Uint8Array(await readFs(target)), external);
+    assert.match(recoveryFile, /report\.rauhwpx-recovery-.*\.hwp$/);
+    assert.deepEqual(new Uint8Array(await readFs(recoveryFile)), original);
+    assert.deepEqual((await readdir(directory)).sort(), [basename(recoveryFile), 'report.hwp'].sort());
+  });
+});
+
+test('unsupported hard links fail before an existing destination is moved', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const target = join(directory, 'report.hwp');
+    await writeFs(target, 'previous');
+    let renamed = false;
+    const unsupported = Object.assign(new Error('hard links unavailable'), { code: 'ENOTSUP' });
+    await assert.rejects(
+      writeNativeFileAtomically(target, new Uint8Array([1, 2, 3]), {
+        platform: 'linux',
+        linkImpl: async () => { throw unsupported; },
+        renameImpl: async () => { renamed = true; },
+      }),
+      { code: NATIVE_FILE_ATOMIC_UNSUPPORTED_CODE },
+    );
+    assert.equal(renamed, false);
+    assert.equal(await readFs(target, 'utf8'), 'previous');
+    assert.deepEqual(await readdir(directory), ['report.hwp']);
+  });
+});
+
+test('unsupported hard links leave a missing Save As destination missing', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const target = join(directory, 'new-report.hwp');
+    const unsupported = Object.assign(new Error('hard links unavailable'), { code: 'EOPNOTSUPP' });
+    await assert.rejects(
+      writeNativeFileAtomically(target, new Uint8Array([1, 2, 3]), {
+        platform: 'linux',
+        linkImpl: async () => { throw unsupported; },
+      }),
+      { code: NATIVE_FILE_ATOMIC_UNSUPPORTED_CODE },
+    );
+    assert.deepEqual(await readdir(directory), []);
+  });
+});
+
+test('a post-probe hard-link failure restores the moved file without overwriting', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const target = join(directory, 'report.hwp');
+    await writeFs(target, 'previous');
+    let linkCalls = 0;
+    await assert.rejects(
+      writeNativeFileAtomically(target, new Uint8Array([1, 2, 3]), {
+        platform: 'linux',
+        linkImpl: async (from: string, to: string) => {
+          linkCalls += 1;
+          if (linkCalls > 1) {
+            throw Object.assign(new Error('link support disappeared'), { code: 'ENOTSUP' });
+          }
+          const { link } = await import('node:fs/promises');
+          await link(from, to);
+        },
+      }),
+      { code: NATIVE_FILE_ATOMIC_UNSUPPORTED_CODE },
+    );
+    assert.equal(linkCalls, 3, 'probe, publication, and hard-link rollback were attempted');
+    assert.equal(await readFs(target, 'utf8'), 'previous');
+    assert.deepEqual(await readdir(directory), ['report.hwp']);
+  });
+});
+
+test('dual rollback failure retains an openable recovery document and reports its path', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const target = join(directory, 'report.hwp');
+    await writeFs(target, 'previous');
+    let linkCalls = 0;
+    let recoveryFile = '';
+    await assert.rejects(
+      writeNativeFileAtomically(target, new Uint8Array([1, 2, 3]), {
+        platform: 'linux',
+        linkImpl: async (from: string, to: string) => {
+          linkCalls += 1;
+          if (linkCalls === 1) {
+            const { link } = await import('node:fs/promises');
+            await link(from, to);
+            return;
+          }
+          throw Object.assign(new Error('hard-link operation failed'), { code: 'EIO' });
+        },
+        copyFileImpl: async () => {
+          throw Object.assign(new Error('exclusive copy failed'), { code: 'EIO' });
+        },
+      }),
+      (error: any) => {
+        assert.equal(error?.code, NATIVE_FILE_RECOVERY_REQUIRED_CODE);
+        assert.match(error?.message ?? '', /recovery copy was retained/);
+        assert.equal(typeof error?.recoveryFile, 'string');
+        recoveryFile = error.recoveryFile;
+        return true;
+      },
+    );
+    assert.equal(await statFs(target).catch((error) => error?.code), 'ENOENT');
+    assert.match(recoveryFile, /report\.rauhwpx-recovery-.*\.hwp$/);
+    assert.equal(await readFs(recoveryFile, 'utf8'), 'previous');
+    assert.deepEqual(await readdir(directory), [basename(recoveryFile)]);
+  });
+});
+
+test('content digest detects an edit even when the disk-generation token is unchanged', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const target = join(directory, 'report.hwp');
+    await writeFs(target, 'external');
+    await assert.rejects(
+      writeNativeFileAtomically(target, new Uint8Array([1, 2, 3]), {
+        platform: 'linux',
+        expectedFingerprint: TEST_NATIVE_FINGERPRINT,
+        fingerprintImpl: async () => ({
+          ...TEST_NATIVE_FINGERPRINT,
+          digest: `sha256:${'1'.repeat(64)}`,
+        }),
+      }),
+      { code: NATIVE_FILE_CONFLICT_CODE },
+    );
+    assert.equal(await readFs(target, 'utf8'), 'external');
+    assert.deepEqual(await readdir(directory), ['report.hwp']);
+  });
+});
+
+test('a Save As handle never overwrites a destination created after the picker returned', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const target = join(directory, 'new-report.hwp');
+    const external = minimalCfbBytes(4);
+    const local = minimalCfbBytes(5);
+    const registry = new NativeFileHandleRegistry();
+    const picked = await registry.createSaveTarget('session-a', target);
+    assert.equal(picked.ok, true);
+    if (!picked.ok) return;
+    const active = identity('document-a', 'blake3:a');
+    const leases = new DocumentLeaseManager({ createId: () => 'save-as' });
+    const reservation = leases.reserve(
+      'session-a', active, registry.pathForSender('session-a', picked.descriptor.handleId),
+    );
+    assert.equal(reservation.ok, true);
+    if (!reservation.ok) return;
+    leases.commit('session-a', reservation.reservationId);
+
+    await writeFs(target, external);
+    await assert.rejects(
+      registry.write('session-a', picked.descriptor.handleId, local, active, leases),
+      { code: NATIVE_FILE_CONFLICT_CODE },
+    );
+    assert.deepEqual(new Uint8Array(await readFs(target)), external);
+  });
+});
+
+test('successful native saves advance the disk fingerprint for the next save', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const target = join(directory, 'report.hwp');
+    await writeFs(target, minimalCfbBytes(1));
+    const registry = new NativeFileHandleRegistry();
+    const opened = await registry.create('session-a', target);
+    assert.equal(opened.ok, true);
+    if (!opened.ok) return;
+    const active = identity('document-a', 'blake3:a');
+    const leases = new DocumentLeaseManager({ createId: () => 'open' });
+    const reservation = leases.reserve(
+      'session-a', active, registry.pathForSender('session-a', opened.descriptor.handleId),
+    );
+    assert.equal(reservation.ok, true);
+    if (!reservation.ok) return;
+    leases.commit('session-a', reservation.reservationId);
+
+    await registry.write(
+      'session-a', opened.descriptor.handleId, minimalCfbBytes(6), active, leases,
+    );
+    await registry.write(
+      'session-a', opened.descriptor.handleId, minimalCfbBytes(7), active, leases,
+    );
+    assert.deepEqual(new Uint8Array(await readFs(target)), minimalCfbBytes(7));
+  });
+});
+
+test('POSIX atomic replacement preserves the destination mode bits', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const target = join(directory, 'report.hwp');
+    await writeFs(target, 'previous');
+    await chmod(target, 0o640);
+    await writeNativeFileAtomically(target, new Uint8Array([4, 5, 6]), {
+      platform: 'linux',
+    });
+    assert.equal((await statFs(target)).mode & 0o7777, 0o640);
+  });
+});
+
+test('macOS replacement copies ACLs and extended attributes before writing the temp file', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const target = join(directory, 'report.hwp');
+    await writeFs(target, 'previous');
+    const commands: Array<{ command: string; args: string[] }> = [];
+    await writeNativeFileAtomically(target, new Uint8Array([8, 9]), {
+      platform: 'darwin',
+      runCommandImpl: async (command: string, args: string[]) => {
+        commands.push({ command, args });
+        await copyFile(args.at(-2)!, args.at(-1)!);
+      },
+    });
+    assert.equal(commands.length, 1);
+    assert.equal(commands[0].command, '/bin/cp');
+    assert.deepEqual(commands[0].args.slice(0, 1), ['-p']);
+    assert.equal(commands[0].args[1], target);
+    assert.match(commands[0].args[2], /\.rauhwpx-.*\.tmp$/);
+    assert.deepEqual(new Uint8Array(await readFs(target)), new Uint8Array([8, 9]));
+  });
+});
+
+test('real macOS replacement preserves an ACL and extended attribute', {
+  skip: process.platform !== 'darwin',
+}, async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const target = join(directory, 'report.hwp');
+    await writeFs(target, 'previous');
+    execFileSync('/usr/bin/xattr', [
+      '-w', 'com.rauhwpx.metadata-test', 'preserved', target,
+    ]);
+    execFileSync('/bin/chmod', ['+a', 'everyone deny execute', target]);
+
+    await writeNativeFileAtomically(target, new Uint8Array([8, 9]), {
+      platform: 'darwin',
+    });
+
+    assert.equal(
+      execFileSync('/usr/bin/xattr', [
+        '-p', 'com.rauhwpx.metadata-test', target,
+      ], { encoding: 'utf8' }).trim(),
+      'preserved',
+    );
+    assert.match(
+      execFileSync('/bin/ls', ['-le', target], { encoding: 'utf8' }),
+      /everyone deny execute/,
+    );
+  });
+});
+
+test('macOS metadata-copy failure leaves the destination and removes the temp file', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const target = join(directory, 'report.hwp');
+    await writeFs(target, 'previous');
+    await assert.rejects(
+      writeNativeFileAtomically(target, new Uint8Array([8, 9]), {
+        platform: 'darwin',
+        runCommandImpl: async () => { throw new Error('ACL copy failed'); },
+      }),
+      /ACL copy failed/,
+    );
+    assert.equal(await readFs(target, 'utf8'), 'previous');
+    assert.deepEqual(await readdir(directory), ['report.hwp']);
+  });
+});
+
+test('Windows replacement copies only the source DACL before compare and rename', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const target = join(directory, 'report.hwp');
+    await writeFs(target, 'previous');
+    const events: string[] = [];
+    let commandCall: { command: string; args: string[]; options: { env: Record<string, string> } } | null = null;
+    await writeNativeFileAtomically(target, new Uint8Array([7, 8]), {
+      platform: 'win32',
+      windowsSystemRoot: 'C:\\Windows',
+      expectedFingerprint: TEST_NATIVE_FINGERPRINT,
+      fingerprintImpl: async () => {
+        events.push('fingerprint');
+        return TEST_NATIVE_FINGERPRINT;
+      },
+      runCommandImpl: async (command: string, args: string[], options: { env: Record<string, string> }) => {
+        events.push('dacl');
+        commandCall = { command, args, options };
+      },
+      renameImpl: async (from: string, to: string) => {
+        events.push('rename-aside');
+        const { rename } = await import('node:fs/promises');
+        await rename(from, to);
+      },
+      linkImpl: async (from: string, to: string) => {
+        if (to === target) events.push('publish');
+        const { link } = await import('node:fs/promises');
+        await link(from, to);
+      },
+    });
+    assert.deepEqual(events, ['dacl', 'rename-aside', 'fingerprint', 'publish']);
+    assert.equal(
+      commandCall?.command,
+      'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+    );
+    assert.equal(commandCall?.options.env.RAUHWPX_METADATA_SOURCE, target);
+    assert.match(commandCall?.options.env.RAUHWPX_METADATA_TARGET ?? '', /\.rauhwpx-.*\.tmp$/);
+    assert.deepEqual(Object.keys(commandCall?.options.env ?? {}).sort(), [
+      'RAUHWPX_METADATA_SOURCE',
+      'RAUHWPX_METADATA_TARGET',
+      'SystemRoot',
+      'WINDIR',
+    ]);
+    const encoded = commandCall?.args.at(-1) ?? '';
+    const script = Buffer.from(encoded, 'base64').toString('utf16le');
+    assert.match(script, /AccessControlSections\]::Access/);
+    assert.match(script, /Get-Acl -LiteralPath/);
+    assert.match(script, /Set-Acl -LiteralPath/);
+    assert.doesNotMatch(script, /AccessControlSections\]::(?:Owner|Audit|Group)/);
+  });
+});
+
+test('Windows DACL-copy failure leaves the destination and removes the temp file', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const target = join(directory, 'report.hwp');
+    await writeFs(target, 'previous');
+    await assert.rejects(
+      writeNativeFileAtomically(target, new Uint8Array([7, 8]), {
+        platform: 'win32',
+        windowsSystemRoot: 'C:\\Windows',
+        runCommandImpl: async () => { throw new Error('DACL copy failed'); },
+      }),
+      /DACL copy failed/,
+    );
+    assert.equal(await readFs(target, 'utf8'), 'previous');
+    assert.deepEqual(await readdir(directory), ['report.hwp']);
+  });
+});
+
+test('a hung Windows metadata command is tree-killed and awaited before rejection', async () => {
+  class FakeChild extends EventEmitter {
+    exitCode: number | null = null;
+    signalCode: string | null = null;
+    pid: number;
+
+    constructor(pid: number) {
+      super();
+      this.pid = pid;
+    }
+
+    kill() {}
+  }
+
+  const metadata = new FakeChild(4242);
+  const calls: Array<{ command: string; args: string[] }> = [];
+  const spawnImpl = (command: string, args: string[]) => {
+    calls.push({ command, args });
+    if (calls.length === 1) return metadata;
+    const killer = new FakeChild(4343);
+    setImmediate(() => {
+      killer.exitCode = 0;
+      killer.emit('exit', 0, null);
+      metadata.exitCode = 1;
+      metadata.emit('exit', 1, null);
+    });
+    return killer;
+  };
+
+  await assert.rejects(
+    runNativeMetadataCommand(
+      'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+      ['-EncodedCommand', 'ignored'],
+      {
+        platform: 'win32',
+        env: { SystemRoot: 'C:\\Windows', WINDIR: 'C:\\Windows' },
+        spawnImpl,
+        timeoutMs: 1,
+      },
+    ),
+    { code: 'NATIVE_FILE_METADATA_COPY_TIMEOUT' },
+  );
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].command, 'C:\\Windows\\System32\\taskkill.exe');
+  assert.deepEqual(calls[1].args, ['/PID', '4242', '/T', '/F']);
+  assert.notEqual(metadata.exitCode, null, 'timeout rejection must wait for observed child exit');
+});
+
+test('atomic native replacement reports a real directory fsync failure after rename', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const target = join(directory, 'report.hwp');
+    await writeFs(target, 'previous');
+    const failure = Object.assign(new Error('storage I/O failed'), { code: 'EIO' });
+
+    await assert.rejects(
+      writeNativeFileAtomically(target, new Uint8Array([4, 5, 6]), {
+        platform: 'linux',
+        syncParentImpl: async () => { throw failure; },
+      }),
+      (error: NodeJS.ErrnoException) => error === failure && error.code === 'EIO',
+    );
+    assert.deepEqual(new Uint8Array(await readFs(target)), new Uint8Array([4, 5, 6]));
+  });
+});
+
 test('Windows atomic replacement retries transient destination locks without deleting the old file', async () => {
   await withTemporaryDirectory(async (directory) => {
     const target = join(directory, 'report.hwp');
@@ -579,6 +1255,8 @@ test('Windows atomic replacement retries transient destination locks without del
     let attempts = 0;
     await writeNativeFileAtomically(target, new Uint8Array([7, 8]), {
       platform: 'win32',
+      windowsSystemRoot: 'C:\\Windows',
+      runCommandImpl: async () => {},
       renameImpl: async (from: string, to: string) => {
         attempts += 1;
         if (attempts === 1) throw Object.assign(new Error('temporarily locked'), { code: 'EPERM' });
@@ -591,11 +1269,12 @@ test('Windows atomic replacement retries transient destination locks without del
   });
 });
 
-test('concurrent native saves are serialized in invocation order', async () => {
+test('a second native save is rejected while the first retains its large buffer', async () => {
   const started: number[] = [];
   const finish: Array<() => void> = [];
   const registry = new NativeFileHandleRegistry({
     canonicalize: async () => '/canonical/report.hwp',
+    fingerprintImpl: fakeNativeFingerprint,
     createId: () => 'writer',
     writeFileImpl: async (_path: string, bytes: Uint8Array) => new Promise<void>((resolve) => {
       started.push(bytes[34]);
@@ -620,19 +1299,23 @@ test('concurrent native saves are serialized in invocation order', async () => {
   newer[34] = 2;
   const first = registry.write('session-a', opened.descriptor.handleId, older, active, leases);
   const second = registry.write('session-a', opened.descriptor.handleId, newer, active, leases);
+  await assert.rejects(second, { code: NATIVE_FILE_WRITE_BUSY_CODE });
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(started, [1], 'the newer save must wait for the older save');
+  assert.deepEqual(started, [1]);
   finish.shift()?.();
   await first;
+
+  const retry = registry.write('session-a', opened.descriptor.handleId, newer, active, leases);
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(started, [1, 2]);
   finish.shift()?.();
-  await second;
+  await retry;
 });
 
 test('legacy bookmark pairs still reopen after the digest-aware dump format', async () => {
   const registry = new NativeFileHandleRegistry({
     canonicalize: async () => '/canonical/report.hwp',
+    fingerprintImpl: fakeNativeFingerprint,
     createId: () => 'bookmarked',
   });
   registry.loadBookmarks([['document-a', '/canonical/report.hwp']]);
@@ -786,6 +1469,7 @@ const VALID_DIGEST = `blake3:${'ab'.repeat(32)}`;
 test('bookmark digest must be a 64-character blake3 hex string', async () => {
   const registry = new NativeFileHandleRegistry({
     canonicalize: async () => '/canonical/report.hwp',
+    fingerprintImpl: fakeNativeFingerprint,
     createId: () => 'handle',
   });
   const created = await registry.create('session-a', '/canonical/report.hwp');

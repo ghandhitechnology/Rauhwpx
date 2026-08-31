@@ -15,6 +15,8 @@ test('Electron renderer session context is loaded asynchronously from preload', 
     sessionId: 'window-2',
     hubUrl: 'http://127.0.0.1:6123',
     hubToken: 'desktop-secret',
+    referenceToken: 'desktop-reference',
+    templateToken: 'desktop-template',
   };
   let calls = 0;
   const context = await resolveRendererSessionContext({
@@ -46,12 +48,16 @@ test('browser/dev context keeps explicit overrides and HTTP hub URLs become WebS
     sessionId: 'browser-window',
     hubUrl: 'https://hub.example.test/base/',
     hubToken: 'browser-token',
+    referenceToken: 'browser-token',
+    templateToken: 'browser-token',
   });
   assert.deepEqual(context, {
     launchId: 'browser-launch',
     sessionId: 'browser-window',
     hubUrl: 'https://hub.example.test/base/',
     hubToken: 'browser-token',
+    referenceToken: 'browser-token',
+    templateToken: 'browser-token',
   });
   assert.equal(websocketHubUrl(context!.hubUrl), 'wss://hub.example.test/base');
 });

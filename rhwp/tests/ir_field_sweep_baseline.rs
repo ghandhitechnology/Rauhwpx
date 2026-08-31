@@ -41,15 +41,14 @@
 //!
 //! ## 진단
 //!
-//! `RHWP_IR_SWEEP_DETAIL="샘플명조각;다른조각"` 을 주면 해당 샘플의 발산을
-//! 경로·값까지 전부 출력한다 — 잔여 항목 분류용.
+//! `RHWP_IR_SWEEP_DETAIL="샘플명조각;다른조각"` 을 주면 해당 샘플의 발산 상세
+//! 예시를 최대 2,000건 출력한다. 정규화 경로별 건수는 이 상한과 무관하게 정확하다.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use rhwp::diagnostics::ir_field_sweep::{
-    sweep_hwp5_rebuild_roundtrip, sweep_hwp5_roundtrip, sweep_hwpx_roundtrip, tally,
-    FieldDivergence,
+    sweep_hwp5_rebuild_roundtrip, sweep_hwp5_roundtrip, sweep_hwpx_roundtrip, SweepReport,
 };
 use rhwp::parser::{detect_format, parse_document, FileFormat};
 
@@ -124,7 +123,7 @@ fn hwp5_out_of_scope(bytes: &[u8]) -> bool {
 }
 
 /// 상세 출력 대상 필터 — `RHWP_IR_SWEEP_DETAIL` 의 `;` 구분 문자열 중 하나가
-/// 샘플명에 있으면 그 샘플의 발산을 경로·값까지 전부 출력한다(메인테이너 분류용).
+/// 샘플명에 있으면 그 샘플의 보관된 발산 예시를 출력한다(메인테이너 분류용).
 fn detail_filter() -> Option<Vec<String>> {
     let raw = std::env::var("RHWP_IR_SWEEP_DETAIL").ok()?;
     let parts: Vec<String> = raw
@@ -135,15 +134,20 @@ fn detail_filter() -> Option<Vec<String>> {
     (!parts.is_empty()).then_some(parts)
 }
 
-fn print_detail(lane: &str, rel: &str, divs: &[FieldDivergence]) {
+fn print_detail(lane: &str, rel: &str, report: &SweepReport) {
     let Some(filters) = detail_filter() else {
         return;
     };
     if !filters.iter().any(|f| rel.contains(f.as_str())) {
         return;
     }
-    println!("--- [{lane}] {rel} — 발산 {}건 ---", divs.len());
-    for d in divs {
+    println!(
+        "--- [{lane}] {rel} — 발산 {}건 / 상세 {}건 / details_truncated={} ---",
+        report.total(),
+        report.details.len(),
+        report.details_truncated
+    );
+    for d in &report.details {
         println!("  {d}");
     }
 }
@@ -155,15 +159,19 @@ fn print_detail(lane: &str, rel: &str, divs: &[FieldDivergence]) {
 /// - `hwp5` — HWP5 왕복(원본 `raw_stream` 재생 경로)
 /// - `hwp5rb` — HWP5 **레코드 재생성** 경로 (편집 후 저장과 동일; 진짜 직렬화기 측정)
 /// - `hwpx` — HWPX 왕복
-fn sweep_corpus(size_filter: &dyn Fn(u64) -> bool) -> (Baseline, usize, usize) {
+fn sweep_corpus(size_filter: &dyn Fn(u64) -> bool) -> (Baseline, usize, usize, usize) {
     let mut acc: Baseline = BTreeMap::new();
     let mut swept = 0usize;
     let mut skipped = 0usize;
+    let mut details_truncated = 0usize;
 
-    let mut record = |lane: &str, rel: &str, divs: &[FieldDivergence]| {
-        print_detail(lane, rel, divs);
-        for (p, n) in tally(divs) {
-            acc.insert((lane.to_string(), rel.to_string(), p), n);
+    let mut record = |lane: &str, rel: &str, report: &SweepReport| {
+        print_detail(lane, rel, report);
+        if report.details_truncated {
+            details_truncated += 1;
+        }
+        for (p, n) in &report.tallies {
+            acc.insert((lane.to_string(), rel.to_string(), p.clone()), *n);
         }
     };
 
@@ -211,7 +219,7 @@ fn sweep_corpus(size_filter: &dyn Fn(u64) -> bool) -> (Baseline, usize, usize) {
         }
     }
 
-    (acc, swept, skipped)
+    (acc, swept, skipped, details_truncated)
 }
 
 fn load_baseline() -> Baseline {
@@ -260,7 +268,7 @@ fn write_dump(path: &str, rows: &Baseline) {
 fn ir_field_sweep_does_not_regress() {
     let full = full_mode();
     let started = std::time::Instant::now();
-    let (current, swept, skipped) = if full {
+    let (current, swept, skipped, details_truncated) = if full {
         sweep_corpus(&|_| true)
     } else {
         sweep_corpus(&|sz| sz <= FAST_LIMIT)
@@ -276,7 +284,7 @@ fn ir_field_sweep_does_not_regress() {
 
     let total: usize = current.values().sum();
     println!(
-        "IR 필드 스윕: 샘플 {swept}건(스킵 {skipped}) / 발산 경로 {}종 / 총 {total}건 / {:.1}s{}",
+        "IR 필드 스윕: 샘플 {swept}건(스킵 {skipped}) / 발산 경로 {}종 / 총 {total}건 / 상세 절단 샘플 {details_truncated}건 / {:.1}s{}",
         current.len(),
         elapsed.as_secs_f64(),
         if full {

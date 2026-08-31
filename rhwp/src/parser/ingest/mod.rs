@@ -14,15 +14,56 @@ pub mod schema;
 pub use schema::*;
 
 use crate::error::HwpError;
+use crate::parser::limits::{InputPolicy, MAX_STRUCTURAL_BYTES};
+
+fn validate_ingest_size(byte_len: usize, policy: InputPolicy) -> Result<(), HwpError> {
+    let limit = policy.max_input_bytes().min(MAX_STRUCTURAL_BYTES);
+    if byte_len > limit {
+        return Err(HwpError::InvalidFile(format!(
+            "ingest JSON is {byte_len} bytes and exceeds the {limit} byte limit"
+        )));
+    }
+    Ok(())
+}
 
 /// JSON 바이트로부터 [`IngestDocument`]를 파싱한다.
 pub fn parse_ingest_bytes(bytes: &[u8]) -> Result<IngestDocument, HwpError> {
+    parse_ingest_bytes_with_policy(bytes, InputPolicy::Untrusted)
+}
+
+/// Parse one ingest file supplied by an explicit native CLI path.
+pub fn parse_ingest_bytes_from_local_file(bytes: &[u8]) -> Result<IngestDocument, HwpError> {
+    parse_ingest_bytes_with_policy(bytes, InputPolicy::LocalFileOnce)
+}
+
+pub(crate) fn parse_ingest_bytes_with_policy(
+    bytes: &[u8],
+    policy: InputPolicy,
+) -> Result<IngestDocument, HwpError> {
+    validate_ingest_size(bytes.len(), policy)?;
     serde_json::from_slice::<IngestDocument>(bytes)
         .map_err(|e| HwpError::InvalidFile(format!("ingest JSON 파싱 실패: {e}")))
 }
 
 /// 문자열로부터 [`IngestDocument`]를 파싱한다.
 pub fn parse_ingest_str(s: &str) -> Result<IngestDocument, HwpError> {
-    serde_json::from_str::<IngestDocument>(s)
-        .map_err(|e| HwpError::InvalidFile(format!("ingest JSON 파싱 실패: {e}")))
+    parse_ingest_bytes(s.as_bytes())
+}
+
+#[cfg(test)]
+mod resource_limit_tests {
+    use super::*;
+    use crate::parser::limits::{MAX_STRUCTURAL_BYTES, MAX_UNTRUSTED_INPUT_BYTES};
+
+    #[test]
+    fn ingest_policy_boundaries_do_not_require_large_allocations_to_test() {
+        assert!(validate_ingest_size(MAX_UNTRUSTED_INPUT_BYTES, InputPolicy::Untrusted).is_ok());
+        assert!(
+            validate_ingest_size(MAX_UNTRUSTED_INPUT_BYTES + 1, InputPolicy::Untrusted).is_err()
+        );
+        assert!(validate_ingest_size(MAX_STRUCTURAL_BYTES, InputPolicy::LocalFileOnce).is_ok());
+        assert!(
+            validate_ingest_size(MAX_STRUCTURAL_BYTES + 1, InputPolicy::LocalFileOnce).is_err()
+        );
+    }
 }

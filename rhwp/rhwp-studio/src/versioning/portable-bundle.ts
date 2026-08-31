@@ -1,4 +1,5 @@
 import type { CompareDocumentSnapshot } from '../compare/types.ts';
+import { PORTABLE_HISTORY_MAX_BYTES } from '../core/document-input-limits.ts';
 import { hashBytes, serializeCompareSnapshot } from './hash.ts';
 import {
   blobId,
@@ -15,14 +16,21 @@ export const PORTABLE_HISTORY_EXTENSION = '.rhwpx';
 export const PORTABLE_HISTORY_MIME_TYPE = 'application/vnd.rauhwpx.history';
 export const PORTABLE_HISTORY_FORMAT = 'rauhwpx-history';
 export const PORTABLE_HISTORY_VERSION = 1;
-/** Filename of the history payload inside a `.rhwpx` folder bundle. */
+export { PORTABLE_HISTORY_MAX_BYTES };
+export const PORTABLE_HISTORY_MAX_MANIFEST_BYTES = 32 * 1024 * 1024;
+export const PORTABLE_HISTORY_MAX_OBJECTS = 50_000;
+export const PORTABLE_HISTORY_MAX_REPOSITORY_RECORDS = 50_000;
+export const PORTABLE_HISTORY_MAX_COMPARE_SNAPSHOT_BYTES = 16 * 1024 * 1024;
+export const PORTABLE_HISTORY_MAX_COMPARE_SNAPSHOT_TOTAL_BYTES = 32 * 1024 * 1024;
+export const PORTABLE_HISTORY_MAX_COMPARE_SNAPSHOT_ENTRIES = 50_000;
+const PORTABLE_HISTORY_MAX_MANIFEST_TOKENS = 1_000_000;
+const PORTABLE_HISTORY_MAX_MANIFEST_DEPTH = 64;
+const PORTABLE_HISTORY_MAX_SNAPSHOT_TOKENS = 500_000;
+/** Payload name used by legacy `.rhwpx` folder bundles. New exports are single files. */
 export const PORTABLE_HISTORY_FOLDER_HISTORY_NAME = 'history';
 
 const MAGIC = new TextEncoder().encode('RAUHWPX-HISTORY\0');
 const PREFIX_LENGTH = MAGIC.byteLength + 4;
-const MAX_BUNDLE_BYTES = 512 * 1024 * 1024;
-const MAX_MANIFEST_BYTES = 32 * 1024 * 1024;
-const MAX_OBJECTS = 50_000;
 
 type PortableSourceFormat = 'hwp' | 'hwpx' | 'hml';
 
@@ -66,14 +74,9 @@ export interface OpenedPortableHistoryBundle {
   createdAt: number;
 }
 
-export interface PortableHistoryFolderFile {
-  name: string;
+export interface PortableHistoryArchive {
+  fileName: string;
   bytes: Uint8Array;
-}
-
-export interface PortableHistoryFolder {
-  folderName: string;
-  files: PortableHistoryFolderFile[];
 }
 
 export class PortableHistoryError extends Error {
@@ -125,10 +128,72 @@ function concatBytes(chunks: readonly Uint8Array[], totalLength: number): Uint8A
 
 function manifestBytes(manifest: PortableHistoryManifest): Uint8Array {
   const bytes = new TextEncoder().encode(JSON.stringify(manifest));
-  if (bytes.byteLength > MAX_MANIFEST_BYTES) {
+  if (bytes.byteLength > PORTABLE_HISTORY_MAX_MANIFEST_BYTES) {
     throw new PortableHistoryError('The history bundle manifest is too large');
   }
   return bytes;
+}
+
+function repositoryRecordCount(repository: Partial<VersionRepositorySnapshot>): number {
+  const collections = [
+    repository.commits,
+    repository.refs,
+    repository.shelves,
+    repository.mergeManifests,
+    repository.mergeDrafts,
+  ];
+  let total = 0;
+  for (const collection of collections) {
+    if (!Array.isArray(collection) || collection.length > PORTABLE_HISTORY_MAX_REPOSITORY_RECORDS) {
+      throw new PortableHistoryError('The history bundle contains too many repository records');
+    }
+    total += collection.length;
+    if (!Number.isSafeInteger(total) || total > PORTABLE_HISTORY_MAX_REPOSITORY_RECORDS) {
+      throw new PortableHistoryError('The history bundle contains too many repository records');
+    }
+  }
+  return total;
+}
+
+/** Bound JSON object/array amplification before `JSON.parse` materializes it. */
+function preflightJsonStructure(
+  text: string,
+  label: string,
+  maxTokens: number,
+): void {
+  let depth = 0;
+  let tokens = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index]!;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === '\\') escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+      continue;
+    }
+    if (character === '{' || character === '[') {
+      depth += 1;
+      tokens += 1;
+      if (depth > PORTABLE_HISTORY_MAX_MANIFEST_DEPTH) {
+        throw new PortableHistoryError(`${label} is nested too deeply`);
+      }
+    } else if (character === '}' || character === ']') {
+      depth -= 1;
+      if (depth < 0) throw new PortableHistoryError(`${label} is invalid`);
+    } else if (character === ',' || character === ':') {
+      tokens += 1;
+    }
+    if (tokens > maxTokens) {
+      throw new PortableHistoryError(`${label} is too complex`);
+    }
+  }
+  if (inString || depth !== 0) throw new PortableHistoryError(`${label} is invalid`);
 }
 
 export function portableHistoryFileName(fileName: string): string {
@@ -144,18 +209,12 @@ export function isPortableHistoryBytes(bytes: Uint8Array): boolean {
   return bytes.byteLength >= MAGIC.byteLength && bytesEqual(bytes.subarray(0, MAGIC.byteLength), MAGIC);
 }
 
-export function createPortableHistoryFolder(input: CreatePortableHistoryBundleInput): PortableHistoryFolder {
-  const historyBytes = createPortableHistoryBundle(input);
-  const currentBlob = input.snapshot.blobs.find((blob) => blob.id === input.currentBlobId);
-  if (!currentBlob) throw new PortableHistoryError('The current document snapshot is missing or corrupt');
-  const sourceFormat = detectPortableDocumentFormat(currentBlob.bytes);
-  const documentFileName = checkedFileName(input.documentFileName, sourceFormat);
+export function createPortableHistoryArchive(
+  input: CreatePortableHistoryBundleInput,
+): PortableHistoryArchive {
   return {
-    folderName: portableHistoryFileName(input.documentFileName),
-    files: [
-      { name: PORTABLE_HISTORY_FOLDER_HISTORY_NAME, bytes: historyBytes },
-      { name: documentFileName, bytes: new Uint8Array(currentBlob.bytes) },
-    ],
+    fileName: portableHistoryFileName(input.documentFileName),
+    bytes: createPortableHistoryBundle(input),
   };
 }
 
@@ -169,6 +228,40 @@ export function detectPortableDocumentFormat(bytes: Uint8Array): PortableSourceF
 }
 
 export function createPortableHistoryBundle(input: CreatePortableHistoryBundleInput): Uint8Array {
+  const objectCount = input.snapshot.blobs.length + input.snapshot.compareSnapshots.length;
+  if (!Number.isSafeInteger(objectCount) || objectCount > PORTABLE_HISTORY_MAX_OBJECTS) {
+    throw new PortableHistoryError('The history bundle contains too many objects');
+  }
+  repositoryRecordCount(input.snapshot);
+  let preflightPayloadBytes = 0;
+  const reservePayloadBytes = (byteLength: number) => {
+    if (
+      !Number.isSafeInteger(byteLength)
+      || byteLength < 0
+      || byteLength > PORTABLE_HISTORY_MAX_BYTES - PREFIX_LENGTH - preflightPayloadBytes
+    ) throw new PortableHistoryError('The history bundle exceeds the 128 MiB limit');
+    preflightPayloadBytes += byteLength;
+  };
+  for (const blob of input.snapshot.blobs) reservePayloadBytes(blob.bytes.byteLength);
+  let declaredCompareSnapshotBytes = 0;
+  for (const stored of input.snapshot.compareSnapshots) {
+    if (stored.byteLength > PORTABLE_HISTORY_MAX_COMPARE_SNAPSHOT_BYTES) {
+      throw new PortableHistoryError('A comparison snapshot exceeds its 16 MiB limit');
+    }
+    declaredCompareSnapshotBytes += stored.byteLength;
+    if (
+      !Number.isSafeInteger(declaredCompareSnapshotBytes)
+      || declaredCompareSnapshotBytes > PORTABLE_HISTORY_MAX_COMPARE_SNAPSHOT_TOTAL_BYTES
+    ) throw new PortableHistoryError('Comparison snapshots exceed their 32 MiB aggregate limit');
+    if (
+      !Array.isArray(stored.snapshot?.paragraphs)
+      || !Array.isArray(stored.snapshot?.controls)
+      || stored.snapshot.paragraphs.length + stored.snapshot.controls.length
+        > PORTABLE_HISTORY_MAX_COMPARE_SNAPSHOT_ENTRIES
+    ) throw new PortableHistoryError('A comparison snapshot contains too many structural entries');
+    reservePayloadBytes(stored.byteLength);
+  }
+
   const active = input.snapshot.refs.find((ref) => (
     ref.kind === 'branch' && ref.name === input.activeBranch
   ));
@@ -187,20 +280,32 @@ export function createPortableHistoryBundle(input: CreatePortableHistoryBundleIn
   const chunks: Uint8Array[] = [];
   const objects: PortableObjectDescriptor[] = [];
   let offset = 0;
+  let appendedCompareSnapshotBytes = 0;
   const append = (kind: PortableObjectDescriptor['kind'], id: string, bytes: Uint8Array) => {
+    if (kind === 'compare-snapshot') {
+      if (bytes.byteLength > PORTABLE_HISTORY_MAX_COMPARE_SNAPSHOT_BYTES) {
+        throw new PortableHistoryError('A comparison snapshot exceeds its 16 MiB limit');
+      }
+      appendedCompareSnapshotBytes += bytes.byteLength;
+      if (
+        !Number.isSafeInteger(appendedCompareSnapshotBytes)
+        || appendedCompareSnapshotBytes > PORTABLE_HISTORY_MAX_COMPARE_SNAPSHOT_TOTAL_BYTES
+      ) throw new PortableHistoryError('Comparison snapshots exceed their 32 MiB aggregate limit');
+    }
+    if (bytes.byteLength > PORTABLE_HISTORY_MAX_BYTES - PREFIX_LENGTH - offset) {
+      throw new PortableHistoryError('The history bundle exceeds the 128 MiB limit');
+    }
     if (hashBytes(bytes) !== id) throw new PortableHistoryError(`Portable object ${id} is corrupt`);
     objects.push({ kind, id, offset, byteLength: bytes.byteLength });
     chunks.push(bytes);
     offset += bytes.byteLength;
   };
   for (const blob of [...input.snapshot.blobs].sort((left, right) => left.id.localeCompare(right.id))) {
-    append('blob', blob.id, new Uint8Array(blob.bytes));
+    append('blob', blob.id, blob.bytes);
   }
   for (const stored of [...input.snapshot.compareSnapshots].sort((left, right) => left.id.localeCompare(right.id))) {
     append('compare-snapshot', stored.id, serializeCompareSnapshot(stored.snapshot));
   }
-  if (objects.length > MAX_OBJECTS) throw new PortableHistoryError('The history bundle contains too many objects');
-
   const { blobs: _blobs, compareSnapshots: _compareSnapshots, ...repository } = input.snapshot;
   const manifest: PortableHistoryManifest = {
     format: PORTABLE_HISTORY_FORMAT,
@@ -217,7 +322,9 @@ export function createPortableHistoryBundle(input: CreatePortableHistoryBundleIn
   };
   const encodedManifest = manifestBytes(manifest);
   const totalLength = PREFIX_LENGTH + encodedManifest.byteLength + offset;
-  if (totalLength > MAX_BUNDLE_BYTES) throw new PortableHistoryError('The history bundle exceeds the 512 MiB limit');
+  if (totalLength > PORTABLE_HISTORY_MAX_BYTES) {
+    throw new PortableHistoryError('The history bundle exceeds the 128 MiB limit');
+  }
   const prefix = new Uint8Array(PREFIX_LENGTH);
   prefix.set(MAGIC, 0);
   new DataView(prefix.buffer).setUint32(MAGIC.byteLength, encodedManifest.byteLength, true);
@@ -225,22 +332,32 @@ export function createPortableHistoryBundle(input: CreatePortableHistoryBundleIn
 }
 
 function parseManifest(bytes: Uint8Array): { manifest: PortableHistoryManifest; payloadOffset: number } {
-  if (bytes.byteLength < PREFIX_LENGTH || bytes.byteLength > MAX_BUNDLE_BYTES) {
-    throw new PortableHistoryError('The history bundle is empty or exceeds the 512 MiB limit');
+  if (bytes.byteLength < PREFIX_LENGTH || bytes.byteLength > PORTABLE_HISTORY_MAX_BYTES) {
+    throw new PortableHistoryError('The history bundle is empty or exceeds the 128 MiB limit');
   }
   if (!bytesEqual(bytes.subarray(0, MAGIC.byteLength), MAGIC)) {
     throw new PortableHistoryError('This is not a RauHWPX history bundle');
   }
   const length = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
     .getUint32(MAGIC.byteLength, true);
-  if (length === 0 || length > MAX_MANIFEST_BYTES || PREFIX_LENGTH + length > bytes.byteLength) {
+  if (
+    length === 0
+    || length > PORTABLE_HISTORY_MAX_MANIFEST_BYTES
+    || PREFIX_LENGTH + length > bytes.byteLength
+  ) {
     throw new PortableHistoryError('The history bundle manifest length is invalid');
   }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(
       bytes.subarray(PREFIX_LENGTH, PREFIX_LENGTH + length),
-    ));
+    );
+    preflightJsonStructure(
+      text,
+      'The history bundle manifest',
+      PORTABLE_HISTORY_MAX_MANIFEST_TOKENS,
+    );
+    parsed = JSON.parse(text);
   } catch (error) {
     throw new PortableHistoryError('The history bundle manifest is invalid', {
       cause: error instanceof Error ? error : undefined,
@@ -259,15 +376,30 @@ function parseManifest(bytes: Uint8Array): { manifest: PortableHistoryManifest; 
 
 export function openPortableHistoryBundle(bytes: Uint8Array): OpenedPortableHistoryBundle {
   const { manifest, payloadOffset } = parseManifest(bytes);
-  if (manifest.objects.length > MAX_OBJECTS) {
+  if (manifest.objects.length > PORTABLE_HISTORY_MAX_OBJECTS) {
     throw new PortableHistoryError('The history bundle contains too many objects');
   }
-  const descriptors = [...manifest.objects].sort((left, right) => left.offset - right.offset);
+  const repository = manifest.repository as Partial<VersionRepositorySnapshot>;
+  if (
+    repository.schemaVersion !== 1
+    || !repository.repository
+    || !Array.isArray(repository.commits)
+    || !Array.isArray(repository.refs)
+    || !Array.isArray(repository.shelves)
+    || !Array.isArray(repository.mergeManifests)
+    || !Array.isArray(repository.mergeDrafts)
+  ) throw new PortableHistoryError('The history bundle repository schema is invalid');
+  repositoryRecordCount(repository);
+
+  type CheckedDescriptor = PortableObjectDescriptor & { offset: number; byteLength: number };
+  const descriptors: CheckedDescriptor[] = [];
   const ids = new Set<string>();
-  let expectedOffset = 0;
-  const blobs: VersionBlob[] = [];
-  const compareSnapshots: VersionCompareSnapshot[] = [];
-  for (const descriptor of descriptors) {
+  let compareSnapshotBytes = 0;
+  for (const candidate of manifest.objects) {
+    if (!candidate || typeof candidate !== 'object') {
+      throw new PortableHistoryError('The history bundle object table is invalid');
+    }
+    const descriptor = candidate as PortableObjectDescriptor;
     if (
       (descriptor.kind !== 'blob' && descriptor.kind !== 'compare-snapshot')
       || typeof descriptor.id !== 'string'
@@ -276,22 +408,58 @@ export function openPortableHistoryBundle(bytes: Uint8Array): OpenedPortableHist
     ids.add(`${descriptor.kind}:${descriptor.id}`);
     const offset = checkedInteger(descriptor.offset, 'Portable object offset', bytes.byteLength);
     const byteLength = checkedInteger(descriptor.byteLength, 'Portable object length', bytes.byteLength);
+    if (descriptor.kind === 'compare-snapshot') {
+      if (byteLength > PORTABLE_HISTORY_MAX_COMPARE_SNAPSHOT_BYTES) {
+        throw new PortableHistoryError('A comparison snapshot exceeds its 16 MiB limit');
+      }
+      compareSnapshotBytes += byteLength;
+      if (
+        !Number.isSafeInteger(compareSnapshotBytes)
+        || compareSnapshotBytes > PORTABLE_HISTORY_MAX_COMPARE_SNAPSHOT_TOTAL_BYTES
+      ) throw new PortableHistoryError('Comparison snapshots exceed their 32 MiB aggregate limit');
+    }
+    descriptors.push({ ...descriptor, offset, byteLength });
+  }
+  descriptors.sort((left, right) => left.offset - right.offset);
+
+  let expectedOffset = 0;
+  for (const descriptor of descriptors) {
+    const { offset, byteLength } = descriptor;
     if (offset !== expectedOffset || payloadOffset + offset + byteLength > bytes.byteLength) {
       throw new PortableHistoryError('The history bundle object boundaries are invalid');
     }
-    const payload = new Uint8Array(bytes.subarray(
-      payloadOffset + offset,
-      payloadOffset + offset + byteLength,
-    ));
+    expectedOffset += byteLength;
+  }
+  if (payloadOffset + expectedOffset !== bytes.byteLength) {
+    throw new PortableHistoryError('The history bundle contains unindexed trailing data');
+  }
+
+  for (const descriptor of descriptors) {
+    const payload = bytes.subarray(
+      payloadOffset + descriptor.offset,
+      payloadOffset + descriptor.offset + descriptor.byteLength,
+    );
     if (hashBytes(payload) !== descriptor.id) {
       throw new PortableHistoryError(`Portable object ${descriptor.id} failed integrity verification`);
     }
-    if (descriptor.kind === 'blob') {
-      blobs.push({ id: blobId(descriptor.id), byteLength, bytes: payload });
-    } else {
+  }
+
+  const compareSnapshots: VersionCompareSnapshot[] = [];
+  for (const descriptor of descriptors) {
+    if (descriptor.kind === 'compare-snapshot') {
+      const payload = bytes.subarray(
+        payloadOffset + descriptor.offset,
+        payloadOffset + descriptor.offset + descriptor.byteLength,
+      );
       let snapshot: CompareDocumentSnapshot;
       try {
-        snapshot = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(payload)) as CompareDocumentSnapshot;
+        const text = new TextDecoder('utf-8', { fatal: true }).decode(payload);
+        preflightJsonStructure(
+          text,
+          `Comparison snapshot ${descriptor.id}`,
+          PORTABLE_HISTORY_MAX_SNAPSHOT_TOKENS,
+        );
+        snapshot = JSON.parse(text) as CompareDocumentSnapshot;
       } catch (error) {
         throw new PortableHistoryError(`Comparison snapshot ${descriptor.id} is invalid`, {
           cause: error instanceof Error ? error : undefined,
@@ -303,13 +471,31 @@ export function openPortableHistoryBundle(bytes: Uint8Array): OpenedPortableHist
         || !snapshot.meta
         || !Array.isArray(snapshot.paragraphs)
         || !Array.isArray(snapshot.controls)
+        || snapshot.paragraphs.length + snapshot.controls.length
+          > PORTABLE_HISTORY_MAX_COMPARE_SNAPSHOT_ENTRIES
       ) throw new PortableHistoryError(`Comparison snapshot ${descriptor.id} has an invalid schema`);
-      compareSnapshots.push({ id: compareSnapshotId(descriptor.id), byteLength, snapshot });
+      compareSnapshots.push({
+        id: compareSnapshotId(descriptor.id),
+        byteLength: descriptor.byteLength,
+        snapshot,
+      });
     }
-    expectedOffset += byteLength;
   }
-  if (payloadOffset + expectedOffset !== bytes.byteLength) {
-    throw new PortableHistoryError('The history bundle contains unindexed trailing data');
+  const blobs: VersionBlob[] = [];
+  for (const descriptor of descriptors) {
+    if (descriptor.kind !== 'blob') continue;
+    const payload = bytes.subarray(
+      payloadOffset + descriptor.offset,
+      payloadOffset + descriptor.offset + descriptor.byteLength,
+    );
+    blobs.push({
+      id: blobId(descriptor.id),
+      byteLength: descriptor.byteLength,
+      // Keep a view into the already-resident archive. Import copies one exact
+      // blob at a time at the storage boundary; copying every payload here
+      // would temporarily retain a second full archive.
+      bytes: payload,
+    });
   }
 
   const sourceFormat = checkedSourceFormat(manifest.document.sourceFormat);
@@ -334,7 +520,7 @@ export function openPortableHistoryBundle(bytes: Uint8Array): OpenedPortableHist
     sourceFormat,
     activeBranch: branchName(manifest.activeBranch),
     currentBlobId,
-    currentDocumentBytes: new Uint8Array(current.bytes),
+    currentDocumentBytes: current.bytes,
     snapshot,
     createdAt: checkedInteger(manifest.createdAt, 'History bundle creation time'),
   };

@@ -7,6 +7,8 @@ import argparse
 import hashlib
 import io
 import json
+import math
+import ntpath
 import os
 import re
 import shutil
@@ -14,6 +16,8 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unicodedata
 import zipfile
 import zlib
@@ -77,6 +81,7 @@ PUBLISHABLE_PREVIEW_ENTRIES = {
     "Preview/PrvText.txt": PUBLISHABLE_PREVIEW_TEXT,
     "Preview/PrvImage.png": PUBLISHABLE_PREVIEW_IMAGE,
 }
+RUNNER_RESULT_FRAME = b"RHWP_COPY_LAYOUT_RESULT "
 GEOMETRY_ELEMENTS = {
     "cellAddr",
     "cellMargin",
@@ -122,6 +127,13 @@ OBJECT_ELEMENTS = {
     "tbl",
     "textart",
 }
+MAX_HWPX_ENTRIES = 4096
+MAX_HWPX_ENTRY_NAME_BYTES = 4096
+MAX_HWPX_XML_ENTRY_BYTES = 256 * 1024 * 1024
+MAX_HWPX_BINARY_ENTRY_BYTES = 512 * 1024 * 1024
+MAX_HWPX_THUMBNAIL_ENTRY_BYTES = 64 * 1024 * 1024
+MAX_HWPX_EXPANDED_BYTES = 512 * 1024 * 1024
+MAX_RENDER_SVG_BYTES = 16 * 1024 * 1024
 GUIDANCE_HEADINGS = {
     "개요",
     "결과",
@@ -780,12 +792,11 @@ def clear_border_fill_marks(
 
 def inspect_hwpx(source: Path, identity_source: Path | None = None) -> dict[str, object]:
     with zipfile.ZipFile(source) as archive:
-        if archive.testzip():
-            raise ValueError("source HWPX contains a corrupt ZIP entry")
+        infos = validate_archive_inventory(archive)
         trees = {
-            name: parse_xml(archive.read(name), name)
-            for name in archive.namelist()
-            if is_xml_part(name)
+            info.filename: parse_xml(read_archive_entry(archive, info), info.filename)
+            for info in infos
+            if is_xml_part(info.filename)
         }
     records = text_inventory_from_trees(trees)
     identity = (identity_source or source).resolve()
@@ -995,6 +1006,57 @@ def remove_child_preserving_tail(parent: etree.Element, child: etree.Element) ->
 
 def is_xml_part(name: str) -> bool:
     return PurePosixPath(name).suffix.lower() in {".xml", ".hpf", ".rdf"}
+
+
+def archive_entry_limit(name: str) -> int:
+    if is_xml_part(name):
+        return MAX_HWPX_XML_ENTRY_BYTES
+    if name.startswith("Preview/"):
+        return MAX_HWPX_THUMBNAIL_ENTRY_BYTES
+    return MAX_HWPX_BINARY_ENTRY_BYTES
+
+
+def validate_archive_inventory(archive: zipfile.ZipFile) -> list[zipfile.ZipInfo]:
+    infos = archive.infolist()
+    if not infos or len(infos) > MAX_HWPX_ENTRIES:
+        raise ValueError(f"HWPX must contain 1-{MAX_HWPX_ENTRIES} ZIP entries")
+    names: set[str] = set()
+    expanded = 0
+    for info in infos:
+        name = info.filename
+        components = name.split("/")
+        first_component = components[0] if components else ""
+        if (
+            not name
+            or "\x00" in name
+            or "\\" in name
+            or name.startswith("/")
+            or name.endswith("/")
+            or len(name.encode("utf-8")) > MAX_HWPX_ENTRY_NAME_BYTES
+            or first_component.endswith(":")
+            or any(component in {"", ".", ".."} for component in components)
+            or name in names
+        ):
+            raise ValueError(f"unsafe or duplicate HWPX ZIP entry: {name!r}")
+        names.add(name)
+        limit = archive_entry_limit(name)
+        if info.file_size < 0 or info.file_size > limit:
+            raise ValueError(f"HWPX ZIP entry exceeds its {limit}-byte limit: {name}")
+        expanded += info.file_size
+        if expanded > MAX_HWPX_EXPANDED_BYTES:
+            raise ValueError("HWPX expands beyond the 512 MiB safety limit")
+    return infos
+
+
+def read_archive_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
+    limit = archive_entry_limit(info.filename)
+    with archive.open(info, "r") as member:
+        data = member.read(limit + 1)
+        if len(data) > limit or member.read(1):
+            raise ValueError(f"HWPX ZIP entry exceeds its {limit}-byte limit: {info.filename}")
+    if len(data) != info.file_size:
+        raise ValueError(f"HWPX ZIP entry size is inconsistent: {info.filename}")
+    return data
 
 
 def is_document_xml(name: str) -> bool:
@@ -1430,21 +1492,20 @@ def validate_output(
     expected_visible_text: Sequence[tuple[str, str]] | None = (),
 ) -> dict[str, object]:
     with zipfile.ZipFile(output) as archive:
-        bad = archive.testzip()
-        if bad:
-            raise ValueError(f"corrupt ZIP entry: {bad}")
-        names = archive.namelist()
+        infos = validate_archive_inventory(archive)
+        info_by_name = {info.filename: info for info in infos}
+        names = [info.filename for info in infos]
         if not names or names[0] != "mimetype":
             raise ValueError("mimetype is not the first package entry")
         if archive.getinfo("mimetype").compress_type != zipfile.ZIP_STORED:
             raise ValueError("mimetype must be stored without compression")
-        if archive.read("mimetype").strip() != b"application/hwp+zip":
+        if read_archive_entry(archive, info_by_name["mimetype"]).strip() != b"application/hwp+zip":
             raise ValueError("unexpected HWPX mimetype")
 
         trees: dict[str, etree.ElementTree] = {}
         for name in names:
             if is_xml_part(name):
-                trees[name] = parse_xml(archive.read(name), name)
+                trees[name] = parse_xml(read_archive_entry(archive, info_by_name[name]), name)
             if is_document_xml(name):
                 if name not in trees:
                     raise ValueError(f"document part is not XML: {name}")
@@ -1465,7 +1526,7 @@ def validate_output(
             if preview_names != set(PUBLISHABLE_PREVIEW_ENTRIES):
                 raise ValueError("publishable HWPX preview entries are missing or unexpected")
             for name, expected in PUBLISHABLE_PREVIEW_ENTRIES.items():
-                if archive.read(name) != expected:
+                if read_archive_entry(archive, info_by_name[name]) != expected:
                     raise ValueError(f"privacy-safe HWPX preview differs: {name}")
 
         content_tree = trees.get("Contents/content.hpf")
@@ -1515,10 +1576,8 @@ def sanitize_hwpx(
     text_plan: dict[str, object] | None = None,
 ) -> dict[str, object]:
     with zipfile.ZipFile(source) as archive:
-        if archive.testzip():
-            raise ValueError("source HWPX contains a corrupt ZIP entry")
-        infos = archive.infolist()
-        entries = {info.filename: archive.read(info.filename) for info in infos}
+        infos = validate_archive_inventory(archive)
+        entries = {info.filename: read_archive_entry(archive, info) for info in infos}
 
     trees = {
         name: parse_xml(data, name)
@@ -1720,8 +1779,8 @@ def add_page_break_hints(
     expected_visible_text: Sequence[tuple[str, str]] = (),
 ) -> int:
     with zipfile.ZipFile(source) as archive:
-        infos = archive.infolist()
-        entries = {info.filename: archive.read(info.filename) for info in infos}
+        infos = validate_archive_inventory(archive)
+        entries = {info.filename: read_archive_entry(archive, info) for info in infos}
     remaining = count
     added = 0
     for part in sorted(entries):
@@ -1751,21 +1810,32 @@ def add_page_break_hints(
     return added
 
 
-def resolve_rhwp_binary(requested: Path | None) -> Path:
+def resolve_rhwp_binary(
+    requested: Path | None,
+    platform_name: str | None = None,
+    repository_root: Path | None = None,
+) -> Path:
+    platform_name = platform_name or os.name
+    executable_name = "rhwp.exe" if platform_name == "nt" else "rhwp"
     candidates: list[Path] = []
     if requested:
         candidates.append(requested.expanduser())
     env_binary = os.environ.get("RHWP_BIN")
     if env_binary:
         candidates.append(Path(env_binary).expanduser())
-    path_binary = shutil.which("rhwp")
-    if path_binary:
-        candidates.append(Path(path_binary))
-    repository_root = Path(__file__).resolve().parents[4]
+    path_names = [executable_name]
+    if executable_name != "rhwp":
+        path_names.append("rhwp")
+    for path_name in path_names:
+        path_binary = shutil.which(path_name)
+        if path_binary:
+            candidates.append(Path(path_binary))
+            break
+    repository_root = repository_root or Path(__file__).resolve().parents[4]
     candidates.extend(
         [
-            repository_root / "target" / "release" / "rhwp",
-            repository_root / "target" / "debug" / "rhwp",
+            repository_root / "target" / "release" / executable_name,
+            repository_root / "target" / "debug" / executable_name,
         ]
     )
     for candidate in candidates:
@@ -1773,8 +1843,9 @@ def resolve_rhwp_binary(requested: Path | None) -> Path:
         if resolved.is_file() and os.access(resolved, os.X_OK):
             return resolved
     raise ValueError(
-        "HWP support requires the Rauhwpx 'rhwp' binary; pass --rhwp-bin, "
-        "set RHWP_BIN, add rhwp to PATH, or build it with cargo build"
+        "Copy-layout generation and HWP inspection require the Rauhwpx 'rhwp' "
+        "binary for native validation; pass --rhwp-bin, "
+        "set RHWP_BIN, add rhwp (rhwp.exe on Windows) to PATH, or build it with cargo build"
     )
 
 
@@ -1786,16 +1857,204 @@ class RhwpCommandError(ValueError):
         self.returncode = returncode
 
 
-def run_rhwp(binary: Path, arguments: list[str], expect_json: bool = False) -> object:
+RHWP_COMMAND_MAX_STDOUT_BYTES = 8 * 1024 * 1024
+RHWP_COMMAND_MAX_STDERR_BYTES = 64 * 1024
+RHWP_COMMAND_TIMEOUT_SECONDS = 120.0
+RHWP_COMMAND_CLEANUP_SECONDS = 5.0
+
+
+class _BoundedPipeReader(threading.Thread):
+    def __init__(
+        self,
+        stream: object,
+        limit: int,
+        label: str,
+        report_issue: object,
+    ) -> None:
+        super().__init__(daemon=True)
+        self.stream = stream
+        self.limit = limit
+        self.label = label
+        self.report_issue = report_issue
+        self.chunks: list[bytes] = []
+        self.total = 0
+
+    def run(self) -> None:
+        try:
+            read_chunk = getattr(self.stream, "read1", self.stream.read)
+            while True:
+                chunk = read_chunk(64 * 1024)
+                if not chunk:
+                    return
+                if self.total + len(chunk) > self.limit:
+                    self.report_issue(
+                        f"rhwp {self.label} exceeded its {self.limit}-byte limit"
+                    )
+                    # Drain without retaining bytes until tree cleanup closes
+                    # the pipe. This prevents a full pipe from blocking exit.
+                    continue
+                self.chunks.append(chunk)
+                self.total += len(chunk)
+        except (OSError, ValueError) as exc:
+            self.report_issue(f"could not read rhwp {self.label}: {exc}")
+
+    def output(self) -> bytes:
+        return b"".join(self.chunks)
+
+
+def _terminate_rhwp_tree(process: subprocess.Popen[bytes]) -> bool:
+    if os.name == "nt":
+        if process.poll() is not None:
+            return True
+        # taskkill without /F does not reliably stop console processes. In
+        # particular, a Python or rhwp child can keep running until its natural
+        # exit while this helper waits the full cleanup bound. We arrive here
+        # only after a timeout or output-limit violation, so terminate the
+        # already-owned live tree in one forced operation.
+        system_root = os.environ.get("SystemRoot") or os.environ.get("WINDIR")
+        if not isinstance(system_root, str) or not ntpath.isabs(system_root):
+            return False
+        taskkill = ntpath.join(system_root, "System32", "taskkill.exe")
+        command = [taskkill, "/PID", str(process.pid), "/T", "/F"]
+        try:
+            killer = subprocess.Popen(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                shell=False,
+            )
+            killer.wait(timeout=RHWP_COMMAND_CLEANUP_SECONDS)
+        except subprocess.TimeoutExpired:
+            try:
+                killer.kill()
+                killer.wait(timeout=RHWP_COMMAND_CLEANUP_SECONDS)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            return False
+        except OSError:
+            return False
+        if killer.returncode != 0:
+            return False
+        try:
+            process.wait(timeout=RHWP_COMMAND_CLEANUP_SECONDS)
+        except subprocess.TimeoutExpired:
+            return False
+        return True
+
+    # Keep rhwp inside the Python helper's hub-owned POSIX process group. If
+    # the outer runner times out or this trusted binary ever leaves a child,
+    # the hub can still prove and clean the whole group after Python exits.
+    for force in (False, True):
+        if process.poll() is not None:
+            return True
+        try:
+            process.kill() if force else process.terminate()
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False
+        try:
+            process.wait(timeout=RHWP_COMMAND_CLEANUP_SECONDS)
+            return True
+        except subprocess.TimeoutExpired:
+            continue
+    return process.poll() is not None
+
+
+def run_rhwp(
+    binary: Path,
+    arguments: list[str],
+    expect_json: bool = False,
+    *,
+    max_stdout_bytes: int = RHWP_COMMAND_MAX_STDOUT_BYTES,
+    max_stderr_bytes: int = RHWP_COMMAND_MAX_STDERR_BYTES,
+    timeout_seconds: float = RHWP_COMMAND_TIMEOUT_SECONDS,
+) -> object:
     command = [str(binary), *arguments]
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
-    if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or "no diagnostic output"
-        raise RhwpCommandError(" ".join(arguments[:1]), result.returncode, detail)
+    timeout_seconds = min(float(timeout_seconds), RHWP_COMMAND_TIMEOUT_SECONDS)
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        raise ValueError("rhwp command timeout must be positive")
+    if max_stdout_bytes < 1 or max_stderr_bytes < 1:
+        raise ValueError("rhwp command output limits must be positive")
+    popen_options: dict[str, object] = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "env": dict(os.environ),
+        "shell": False,
+    }
+    if os.name == "nt":
+        popen_options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    process = subprocess.Popen(command, **popen_options)
+    if process.stdout is None or process.stderr is None:
+        raise ValueError("rhwp subprocess pipes were unavailable")
+
+    issue_lock = threading.Lock()
+    issue_event = threading.Event()
+    issue: list[str] = []
+
+    def report_issue(message: str) -> None:
+        with issue_lock:
+            if issue:
+                return
+            issue.append(message)
+            issue_event.set()
+
+    stdout_reader = _BoundedPipeReader(
+        process.stdout,
+        max_stdout_bytes,
+        "stdout",
+        report_issue,
+    )
+    stderr_reader = _BoundedPipeReader(
+        process.stderr,
+        max_stderr_bytes,
+        "stderr",
+        report_issue,
+    )
+    stdout_reader.start()
+    stderr_reader.start()
+    deadline = time.monotonic() + timeout_seconds
+    while process.poll() is None and not issue_event.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            report_issue(f"rhwp command exceeded its {timeout_seconds:g}-second timeout")
+            break
+        issue_event.wait(min(0.01, remaining))
+
+    cleanup_confirmed = True
+    if issue_event.is_set() and process.poll() is None:
+        cleanup_confirmed = _terminate_rhwp_tree(process)
+    elif process.poll() is None:
+        try:
+            process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            report_issue(f"rhwp command exceeded its {timeout_seconds:g}-second timeout")
+            cleanup_confirmed = _terminate_rhwp_tree(process)
+
+    stdout_reader.join(timeout=RHWP_COMMAND_CLEANUP_SECONDS)
+    stderr_reader.join(timeout=RHWP_COMMAND_CLEANUP_SECONDS)
+    if stdout_reader.is_alive() or stderr_reader.is_alive():
+        report_issue("rhwp output pipes did not close after process cleanup")
+        cleanup_confirmed = False
+    else:
+        process.stdout.close()
+        process.stderr.close()
+    if issue:
+        if not cleanup_confirmed:
+            raise ValueError(f"{issue[0]}; process-tree cleanup could not be confirmed")
+        raise ValueError(issue[0])
+
+    stdout = stdout_reader.output().decode("utf-8", errors="replace")
+    stderr = stderr_reader.output().decode("utf-8", errors="replace")
+    if process.returncode != 0:
+        detail = stderr.strip() or stdout.strip() or "no diagnostic output"
+        raise RhwpCommandError(" ".join(arguments[:1]), process.returncode, detail)
     if not expect_json:
-        return result.stdout.strip()
+        return stdout.strip()
     try:
-        return json.loads(result.stdout)
+        return json.loads(stdout)
     except json.JSONDecodeError as exc:
         raise ValueError(f"rhwp {' '.join(arguments[:1])} returned invalid JSON") from exc
 
@@ -1805,6 +2064,136 @@ def native_document_info(binary: Path, document: Path) -> dict[str, object]:
     if not isinstance(payload, dict):
         raise ValueError("rhwp info returned an unexpected JSON value")
     return payload
+
+
+def representative_page_indices(page_count: int) -> list[int]:
+    if not isinstance(page_count, int) or isinstance(page_count, bool) or page_count < 1:
+        raise ValueError("rhwp info returned an invalid pageCount")
+    return sorted({0, page_count // 2, page_count - 1})
+
+
+def rendered_svg_record(svg: Path, page: int) -> dict[str, object]:
+    stat = svg.lstat()
+    if not svg.is_file() or svg.is_symlink() or stat.st_size < 32:
+        raise ValueError(f"candidate page {page} did not produce a plain SVG file")
+    if stat.st_size > MAX_RENDER_SVG_BYTES:
+        raise ValueError(
+            f"candidate page {page} SVG exceeds the {MAX_RENDER_SVG_BYTES}-byte limit"
+        )
+    digest = hashlib.sha256()
+    with svg.open("rb") as stream:
+        header = stream.read(min(stat.st_size, 64 * 1024))
+        if not header.lstrip().startswith(b"<svg"):
+            raise ValueError(f"candidate page {page} render is not a valid SVG")
+        width_match = re.search(rb'\bwidth="([0-9]+(?:\.[0-9]+)?)"', header)
+        height_match = re.search(rb'\bheight="([0-9]+(?:\.[0-9]+)?)"', header)
+        if not width_match or not height_match:
+            raise ValueError(f"candidate page {page} render omitted SVG dimensions")
+        width = math.ceil(float(width_match.group(1)))
+        height = math.ceil(float(height_match.group(1)))
+        if width < 1 or height < 1 or width > 16_384 or height > 16_384:
+            raise ValueError(f"candidate page {page} render has unsafe dimensions")
+        digest.update(header)
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return {
+        "page": page,
+        "width": width,
+        "height": height,
+        "bytes": stat.st_size,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def render_document_page(
+    binary: Path,
+    document: Path,
+    page: int,
+    output_root: Path,
+    label: str,
+) -> dict[str, object]:
+    output_directory = output_root / f"{label}-{page}"
+    output_directory.mkdir(mode=0o700)
+    run_rhwp(
+        binary,
+        [
+            "export-svg",
+            str(document),
+            "--output",
+            str(output_directory),
+            "--page",
+            str(page),
+            "--profile",
+            "screen",
+            "--json",
+        ],
+    )
+    entries = list(output_directory.iterdir())
+    if len(entries) != 1 or entries[0].suffix.lower() != ".svg":
+        raise ValueError(f"candidate page {page} render produced unexpected files")
+    return rendered_svg_record(entries[0], page)
+
+
+def candidate_render_evidence(
+    binary: Path,
+    source: Path,
+    output: Path,
+    report: dict[str, object],
+) -> dict[str, object]:
+    source_info = native_document_info(binary, source)
+    output_info = native_document_info(binary, output)
+    source_pages = source_info.get("pageCount")
+    output_pages = output_info.get("pageCount")
+    output_sections = output_info.get("sections")
+    if (
+        not isinstance(source_pages, int)
+        or isinstance(source_pages, bool)
+        or source_pages < 1
+        or not isinstance(output_pages, int)
+        or isinstance(output_pages, bool)
+        or output_pages < 1
+        or not isinstance(output_sections, int)
+        or isinstance(output_sections, bool)
+        or output_sections < 1
+    ):
+        raise ValueError("rhwp info returned invalid candidate document counts")
+    pages = representative_page_indices(min(source_pages, output_pages))
+    with tempfile.TemporaryDirectory(prefix="copy-layout-render-") as temporary_directory:
+        render_root = Path(temporary_directory)
+        source_renders = [
+            render_document_page(binary, source, page, render_root, "source")
+            for page in pages
+        ]
+        output_renders = [
+            render_document_page(binary, output, page, render_root, "output")
+            for page in pages
+        ]
+    verification = report.get("verification")
+    delivery = report.get("delivery")
+    safety_verified = bool(
+        isinstance(verification, dict)
+        and verification.get("zip_valid") is True
+        and verification.get("xml_valid") is True
+        and verification.get("layout_structure_match") is True
+        and isinstance(delivery, dict)
+        and delivery.get("ready") is True
+    )
+    return {
+        "representative_pages": pages,
+        "source_page_count": source_pages,
+        "output_page_count": output_pages,
+        "output_section_count": output_sections,
+        "render_compared": True,
+        "geometry_match": bool(
+            isinstance(verification, dict)
+            and verification.get("layout_fingerprint_match") is True
+            and source_pages == output_pages
+        ),
+        "safety_verified": safety_verified,
+        "readability_verified": bool(source_renders and output_renders),
+        "source_renders": source_renders,
+        "output_renders": output_renders,
+    }
 
 
 def export_hwpx_for_sanitization(
@@ -2122,10 +2511,10 @@ def copy_layout(
                         sanitized_hwpx = destination
                         output_info = native_document_info(binary, destination)
                         output_page_count = output_info.get("pageCount")
-                    if source_info.get("pageCount") != output_info.get("pageCount"):
+                    if source_page_count != output_page_count:
                         fidelity_warnings.append(
                             "final HWPX pageCount changed: "
-                            f"{source_info.get('pageCount')!r} -> {output_info.get('pageCount')!r}"
+                            f"{source_page_count!r} -> {output_page_count!r}"
                         )
                     native_verification = {
                         "format": output_info.get("format"),
@@ -2200,7 +2589,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--rhwp-bin",
         type=Path,
-        help="Rauhwpx CLI path for HWP input/output (otherwise RHWP_BIN, PATH, or repo build)",
+        help=(
+            "Rauhwpx CLI path required for generation evidence and HWP input/output "
+            "(otherwise RHWP_BIN, PATH, or repo build)"
+        ),
     )
     parser.add_argument(
         "--keep-media",
@@ -2217,7 +2609,30 @@ def parse_args() -> argparse.Namespace:
             "for competition or assignment templates"
         ),
     )
+    parser.add_argument(
+        "--runner-framed",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     return parser.parse_args()
+
+
+def emit_runner_result(payload: dict[str, object]) -> None:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    sys.stdout.buffer.write(RUNNER_RESULT_FRAME + str(len(encoded)).encode("ascii") + b"\n")
+    sys.stdout.buffer.write(encoded)
+    sys.stdout.buffer.flush()
+
+
+def retain_runner_identity() -> None:
+    # The Windows hub owns this stdin pipe. Staying alive after the complete
+    # result frame gives taskkill /T a live, non-reusable leader pid. The hub
+    # terminates the tree instead of sending an acknowledgement byte.
+    sys.stdin.buffer.read(1)
 
 
 def main() -> int:
@@ -2238,9 +2653,31 @@ def main() -> int:
                 args.preserve_guidance,
                 args.text_plan,
             )
+            output = Path(str(report.get("output", ""))).resolve()
+            try:
+                # A generated candidate is publishable only after native page and
+                # geometry evidence succeeds, including for pure-Python HWPX output.
+                binary = resolve_rhwp_binary(args.rhwp_bin)
+                report["candidate_evidence"] = candidate_render_evidence(
+                    binary,
+                    args.source.expanduser().resolve(),
+                    output,
+                    report,
+                )
+            except Exception:
+                output.unlink(missing_ok=True)
+                raise
     except (FileExistsError, OSError, ValueError, zipfile.BadZipFile) as exc:
+        if args.runner_framed:
+            emit_runner_result({"ok": False, "error": str(exc)})
+            retain_runner_identity()
+            return 1
         print(f"copy-layout: {exc}", file=sys.stderr)
         return 1
+    if args.runner_framed:
+        emit_runner_result({"ok": True, "report": report})
+        retain_runner_identity()
+        return 0
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0
 

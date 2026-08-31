@@ -1,17 +1,23 @@
 // cross-spawn: Windows에서 npm .cmd 심을 인자 이스케이프 손상 없이 실행한다.
 import spawn from 'cross-spawn';
 import {
-  copyFileSync,
   lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   readlinkSync,
+  rmSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import path from 'node:path';
+import { readUtf8FileBoundedSync } from '../bounded-file.mjs';
+import {
+  credentialMirrorHasPendingCopybackSync,
+  flushCredentialMirrorSync,
+  prepareCredentialMirrorSync,
+} from '../credential-mirror.mjs';
 import {
   createTurnProcessLifecycle,
   isPlanningRestricted,
@@ -21,6 +27,7 @@ import {
   normalizeTaskUsage,
   normalizeUsageTokens,
   providerInteractionMode,
+  redactDiagnosticText,
   systemBriefFor,
   truncate,
   validateExecutionMode,
@@ -29,6 +36,7 @@ import {
   isolatedProcessEnv,
   processTreeSpawnOptions,
   terminateProcessTree,
+  waitForProcessTreeExit,
 } from '../process-tree.mjs';
 import { acpMcpServer, createPersistentAcpSession } from './acp-session.mjs';
 import {
@@ -48,12 +56,15 @@ export {
 
 /** 세션 디렉터리에 새로 저작하는 파일 — 영속 홈에서 링크로 끌어오지 않는다. */
 const AUTHORED_FILES = new Set(['mcp.json', 'cli-config.json']);
+const CURSOR_COPY_FALLBACK_CODES = new Set(['EPERM', 'EACCES', 'ENOTSUP']);
+const cursorMirrorsByHome = new Map();
 /**
  * 프롬프트 바이트 상한. cursor-agent 는 프롬프트를 positional 인자로 받는데,
  * 470 KB 부근부터 stdout/stderr 없이 코드 0 으로 죽고 1 MB 대에서는 spawn 이
  * E2BIG 으로 실패한다(리눅스는 인자당 128 KiB 라 한계가 더 낮다).
  */
 const PROMPT_BYTE_LIMIT = 600_000;
+const CURSOR_CLI_CONFIG_MAX_BYTES = 1024 * 1024;
 /** 재생으로 판정할 최소 길이 — 이보다 짧은 조각은 정상적으로 반복될 수 있다. */
 const REPLAY_MIN_LENGTH = 24;
 /**
@@ -99,11 +110,19 @@ export function prepareCursorHome(sessionCursorDir, sourceCursorDir, {
   mcpConfig = null,
   cliConfig = null,
 } = {}, {
-  copyFile = copyFileSync,
   platform = process.platform,
   symlink = symlinkSync,
 } = {}) {
+  const key = path.resolve(sessionCursorDir);
+  const previous = cursorMirrorsByHome.get(key) ?? [];
+  for (const mirror of previous) {
+    const result = flushCredentialMirrorSync(mirror, { platform });
+    if (result.pending) throw Object.assign(new Error(result.errorMessage), { code: result.errorCode });
+    if (!result.conflict) rmSync(mirror.target, { force: true });
+  }
+  cursorMirrorsByHome.delete(key);
   mkdirSync(sessionCursorDir, { recursive: true, mode: 0o700 });
+  const mirrors = [];
   // 원본이 없으면 목록이 비어 아래 루프를 돌지 않는다.
   const sourceDir = sourceCursorDir ? String(sourceCursorDir) : '';
   let entries = [];
@@ -118,6 +137,29 @@ export function prepareCursorHome(sessionCursorDir, sourceCursorDir, {
     if (AUTHORED_FILES.has(name)) continue;
     const source = path.join(sourceDir, name);
     const target = path.join(sessionCursorDir, name);
+    let sourceStat;
+    try {
+      sourceStat = lstatSync(source);
+    } catch (error) {
+      if (error?.code === 'ENOENT') continue;
+      throw error;
+    }
+
+    if (sourceStat.isFile() && !sourceStat.isSymbolicLink()) {
+      try {
+        const targetStat = lstatSync(target);
+        if (targetStat.isSymbolicLink()) {
+          const existingTarget = path.resolve(sessionCursorDir, readlinkSync(target));
+          if (existingTarget !== path.resolve(source)) unlinkSync(target);
+        }
+      } catch (error) {
+        if (error?.code !== 'ENOENT') throw error;
+      }
+      const mirror = prepareCredentialMirrorSync(source, target, { platform, symlink });
+      if (mirror?.mode === 'copy') mirrors.push(mirror);
+      continue;
+    }
+
     try {
       const targetStat = lstatSync(target);
       if (!targetStat.isSymbolicLink()) continue;
@@ -130,10 +172,7 @@ export function prepareCursorHome(sessionCursorDir, sourceCursorDir, {
     try {
       symlink(source, target);
     } catch (error) {
-      if (platform !== 'win32' || error?.code !== 'EPERM') throw error;
-      try {
-        if (lstatSync(source).isFile()) copyFile(source, target);
-      } catch {}
+      if (platform !== 'win32' || !CURSOR_COPY_FALLBACK_CODES.has(error?.code)) throw error;
     }
   }
   if (mcpConfig) {
@@ -142,6 +181,31 @@ export function prepareCursorHome(sessionCursorDir, sourceCursorDir, {
   if (cliConfig) {
     writeFileSync(path.join(sessionCursorDir, 'cli-config.json'), `${JSON.stringify(cliConfig, null, 2)}\n`, 'utf8');
   }
+  if (mirrors.length > 0) cursorMirrorsByHome.set(key, mirrors);
+  return mirrors;
+}
+
+export function flushCursorCredentialMirrors(sessionCursorDir) {
+  const key = path.resolve(sessionCursorDir);
+  const mirrors = cursorMirrorsByHome.get(key) ?? [];
+  const pending = [];
+  for (const mirror of mirrors) {
+    try {
+      const result = flushCredentialMirrorSync(mirror);
+      if (result.pending) {
+        pending.push(mirror);
+        process.stderr.write(`[cursor] credential refresh copyback pending: ${result.errorMessage}\n`);
+      } else if (result.conflict) {
+        process.stderr.write(`[cursor] credential refresh copyback conflicted: ${mirror.source}\n`);
+      }
+    } catch (error) {
+      if (credentialMirrorHasPendingCopybackSync(mirror)) pending.push(mirror);
+      process.stderr.write(`[cursor] credential refresh copyback failed: ${error?.message ?? error}\n`);
+    }
+  }
+  if (pending.length > 0) cursorMirrorsByHome.set(key, pending);
+  else cursorMirrorsByHome.delete(key);
+  return pending.length === 0;
 }
 
 /**
@@ -183,6 +247,11 @@ export function buildCursorCliConfig(opts, sourceCliConfig = null) {
   const planningRestricted = isPlanningRestricted(opts);
   const unrestricted = opts.permissionProfile === 'unrestricted' && !planningRestricted;
   const rootGlob = `${String(opts.rootDir ?? '').replace(/\\/g, '/')}/**`;
+  const copyLayoutReadRules = opts.toolProfile === 'copy-layout-worker'
+    ? [...new Set([opts.rootDir, ...(opts.readOnlyRoots ?? [])]
+      .filter((root) => typeof root === 'string' && root)
+      .map((root) => `Read(${root.replace(/\\/g, '/')}/**)`))]
+    : null;
   if (unrestricted) {
     base.approvalMode = 'unrestricted';
     base.permissions = { allow: [], deny: [] };
@@ -192,13 +261,12 @@ export function buildCursorCliConfig(opts, sourceCliConfig = null) {
   base.approvalMode = 'allowlist';
   base.permissions = {
     allow: [
-      'Read(**)',
-      ...(planningRestricted ? [] : [`Write(${rootGlob})`]),
-      'Shell(*)',
-      'WebFetch(*)',
+      ...(copyLayoutReadRules ?? ['Read(**)']),
+      ...(planningRestricted || opts.toolProfile === 'copy-layout-worker' ? [] : [`Write(${rootGlob})`]),
+      ...(opts.toolProfile === 'copy-layout-worker' ? [] : ['Shell(*)', 'WebFetch(*)']),
       'Mcp(rhwp:*)',
     ],
-    deny: planningRestricted ? ['Write(**)'] : [],
+    deny: planningRestricted || opts.toolProfile === 'copy-layout-worker' ? ['Write(**)'] : [],
   };
   base.sandbox = { ...baseSandbox, mode: 'enabled' };
   return base;
@@ -242,8 +310,7 @@ export function buildCursorArgv(opts, chatId, prompt) {
  * @param {string} token
  */
 export function formatCursorExitError(stderrText, code, signal, token) {
-  let clean = String(stderrText ?? '').replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
-  if (token) clean = clean.split(token).join('[redacted]');
+  const clean = redactDiagnosticText(stderrText, [token]);
   const detail = clean
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -393,7 +460,10 @@ function taskNotificationStatus(status) {
 export function createCursorSession(opts, {
   spawnProcess = spawn,
   terminateProcess = terminateProcessTree,
+  waitForExit = waitForProcessTreeExit,
   createAcpSession = createPersistentAcpSession,
+  platform = process.platform,
+  closeGraceMs = 2_000,
 } = {}) {
   const onEvent = opts.onEvent;
   const lifecycle = createTurnProcessLifecycle({
@@ -403,6 +473,9 @@ export function createCursorSession(opts, {
     processLabel: 'cursor-agent',
     formatExitError: (stderrText, code, signal) => formatCursorExitError(stderrText, code, signal, opts.token),
     terminateProcess,
+    waitForExit,
+    platform,
+    graceMs: closeGraceMs,
   });
 
   /** @type {string | null} */
@@ -415,9 +488,67 @@ export function createCursorSession(opts, {
   /** @type {ReturnType<typeof createPersistentAcpSession>|null} */
   let nativeSession = null;
   let nativeRestart = Promise.resolve();
+  /** @type {Promise<void>|null} */
+  let nativeTurnCompletion = null;
   let nativeTurnToken = 0;
   let nativeSessionInfoEmitted = false;
+  let nativeCleanupUncertain = false;
+  const nativeCleanupPromises = new Set();
+  const nativeCleanupBySession = new WeakMap();
+  const nativeConfigurePromises = new Set();
   const acpToolState = new Map();
+
+  function beginNativeCleanup(session) {
+    if (!session) return Promise.resolve(true);
+    const existing = nativeCleanupBySession.get(session);
+    if (existing) return existing;
+    let cleanup;
+    cleanup = Promise.resolve()
+      .then(() => session.dispose())
+      .then(
+        (result) => {
+          const cleaned = result === true;
+          if (!cleaned) nativeCleanupUncertain = true;
+          return cleaned;
+        },
+        () => {
+          nativeCleanupUncertain = true;
+          return false;
+        },
+      )
+      .finally(() => nativeCleanupPromises.delete(cleanup));
+    nativeCleanupBySession.set(session, cleanup);
+    nativeCleanupPromises.add(cleanup);
+    return cleanup;
+  }
+
+  async function waitForNativeCleanups() {
+    let cleaned = true;
+    while (nativeCleanupPromises.size > 0) {
+      const results = await Promise.all([...nativeCleanupPromises]);
+      cleaned = results.every(Boolean) && cleaned;
+    }
+    return cleaned && !nativeCleanupUncertain;
+  }
+
+  function hasNativeCleanupRisk() {
+    return nativeCleanupUncertain
+      || nativeSession?.isCleanupUncertain?.() === true
+      || nativeCleanupPromises.size > 0;
+  }
+
+  function trackNativeTurn(completion) {
+    nativeTurnCompletion = completion;
+    void completion.finally(() => {
+      if (nativeTurnCompletion === completion) nativeTurnCompletion = null;
+    }).catch(() => {});
+  }
+
+  async function waitForNativeConfigures() {
+    while (nativeConfigurePromises.size > 0) {
+      await Promise.allSettled([...nativeConfigurePromises]);
+    }
+  }
 
   // ── 서브에이전트 task 추적 ────────────────────────────────────────
   // cursor 의 서브에이전트 표면은 tool_call 의 taskToolCall oneof 하나뿐이고,
@@ -496,6 +627,7 @@ export function createCursorSession(opts, {
     const result = pendingTurnResult ?? { stopReason: 'completed', errorMessage: undefined };
     pendingTurnResult = null;
     sweepOpenTasks();
+    void lifecycle.beginTerminalCleanup();
     lifecycle.endTurn({
       type: 'turn-end',
       agent: 'cursor',
@@ -796,6 +928,11 @@ export function createCursorSession(opts, {
           stopReason: e.subtype ?? 'completed',
           errorMessage: e.is_error ? String(e.result) : undefined,
         };
+        // Legacy Cursor is a one-shot process. Stage its terminal result, but
+        // do not publish success until ChildProcess `close` proves stdout was
+        // fully drained. On Windows, start the live-handle cleanup now so that
+        // proof does not depend on resolving a reusable PID after leader exit.
+        void lifecycle.beginTerminalCleanup();
         return;
       }
     };
@@ -804,7 +941,8 @@ export function createCursorSession(opts, {
       // 새 stdout 라인 = CLI 가 아직 할 일이 있다 — 예약된 정착을 미룬다.
       clearSettleTimer();
       handleLine(e);
-      settleIfReady();
+      // Native ACP calls settleIfReady() after its prompt promise resolves.
+      // The legacy stream must wait for startLegacyTurn's real close handler.
     };
   }
 
@@ -883,6 +1021,7 @@ export function createCursorSession(opts, {
         return childEnv;
       })(),
       authMethodId: 'cursor_login',
+      isolatePrompts: true,
       mcpServers: [acpMcpServer('rhwp', {
         ...runtime,
         env: {
@@ -920,7 +1059,14 @@ export function createCursorSession(opts, {
     let sourceCliConfig = null;
     if (opts.cursorSourceDir) {
       try {
-        sourceCliConfig = JSON.parse(readFileSync(path.join(String(opts.cursorSourceDir), 'cli-config.json'), 'utf8'));
+        sourceCliConfig = JSON.parse(readUtf8FileBoundedSync(
+          path.join(String(opts.cursorSourceDir), 'cli-config.json'),
+          {
+            maxBytes: CURSOR_CLI_CONFIG_MAX_BYTES,
+            label: 'Cursor CLI config',
+            platform: process.platform,
+          },
+        ));
       } catch {}
     }
     prepareCursorHome(sessionCursorDir, opts.cursorSourceDir, {
@@ -929,21 +1075,46 @@ export function createCursorSession(opts, {
     });
   }
 
-  async function configureNativeMode() {
+  function configureNativeMode(turnToken) {
+    let configure;
+    configure = (async () => {
+      await nativeRestart;
+      if (lifecycle.isDisposed()
+        || (turnToken !== undefined
+          && (turnToken !== nativeTurnToken || !lifecycle.isTurnOpen()))) {
+        throw new Error('Cursor native configuration was superseded');
+      }
+      if (!nativeSession) nativeSession = makeNativeSession();
+      const session = nativeSession;
+      prepareNativeHome();
+      const interactionMode = providerInteractionMode(opts);
+      await session.configure({
+        modeAliases: interactionMode === 'plan'
+          ? ['plan', 'architect']
+          : ['agent', 'code', 'default'],
+        requireModeMatch: interactionMode === 'plan',
+        model: opts.model === 'auto' ? null : opts.model,
+        effort: opts.effort,
+      });
+      if (lifecycle.isDisposed()
+        || (turnToken !== undefined
+          && (turnToken !== nativeTurnToken || !lifecycle.isTurnOpen()))) {
+        throw new Error('Cursor native configuration was superseded');
+      }
+      chatId = session.getSessionId() ?? chatId;
+      return session;
+    })().finally(() => nativeConfigurePromises.delete(configure));
+    nativeConfigurePromises.add(configure);
+    return configure;
+  }
+
+  async function proveNativeModeReadiness() {
+    const session = await configureNativeMode();
+    // Readiness checks happen outside a provider turn. Do not leave their MCP
+    // process/socket alive for a later turn; resume the session in a fresh
+    // generation only after that turn has emitted turn-start.
+    nativeRestart = nativeRestart.then(() => session.restart());
     await nativeRestart;
-    if (!nativeSession) nativeSession = makeNativeSession();
-    prepareNativeHome();
-    const interactionMode = providerInteractionMode(opts);
-    await nativeSession.configure({
-      modeAliases: interactionMode === 'plan'
-        ? ['plan', 'architect']
-        : ['agent', 'code', 'default'],
-      requireModeMatch: interactionMode === 'plan',
-      model: opts.model === 'auto' ? null : opts.model,
-      effort: opts.effort,
-    });
-    chatId = nativeSession.getSessionId() ?? chatId;
-    return nativeSession;
   }
 
   function startLegacyTurn(prompt) {
@@ -973,23 +1144,33 @@ export function createCursorSession(opts, {
       }
       sweepOpenTasks();
     };
-    proc.on('close', finishOnClose);
     proc.on('exit', () => {
       if (token !== turnToken || lifecycle.isDisposed() || exitSweepTimer) return;
-      exitSweepTimer = setTimeout(finishOnClose, TASK_SETTLE_GRACE_MS);
+      // `exit` is not an EOF boundary: descendants can retain stdout. Never
+      // authorize the staged result from this fallback; only keep task cards
+      // from spinning forever while the lifecycle waits for close/grace.
+      exitSweepTimer = setTimeout(() => {
+        exitSweepTimer = null;
+        if (token !== turnToken || lifecycle.isDisposed()) return;
+        sweepOpenTasks();
+      }, TASK_SETTLE_GRACE_MS);
       exitSweepTimer.unref?.();
     });
-    lifecycle.attachChild(proc, makeHandler());
+    lifecycle.attachChild(proc, makeHandler(), { onDrainedClose: finishOnClose });
   }
 
   async function runNativeTurn(prompt, token) {
     let promptStarted = false;
+    /** @type {any} */
+    let promptedSession = null;
     try {
-      const session = await configureNativeMode();
+      const session = await configureNativeMode(token);
+      if (token !== nativeTurnToken || lifecycle.isDisposed() || !lifecycle.isTurnOpen()) return;
       // Transport selection is atomic at the prompt boundary. Once ACP owns
       // the turn, a provider/question failure must settle that turn instead of
       // replaying the same user message through the legacy transport.
       promptStarted = true;
+      promptedSession = session;
       const response = await session.prompt(prompt);
       if (token !== nativeTurnToken || !lifecycle.isTurnOpen()) return;
       emitNativeSessionInfo();
@@ -1006,13 +1187,26 @@ export function createCursorSession(opts, {
       if (!promptStarted) {
         nativeDisabled = true;
         const failed = nativeSession;
+        const cleanup = beginNativeCleanup(failed);
         nativeSession = null;
-        try { await failed?.dispose(); } catch {}
+        const cleaned = await cleanup;
+        if (token !== nativeTurnToken || !lifecycle.isTurnOpen()) return;
+        if (!cleaned) {
+          onEvent({
+            type: 'error',
+            agent: 'cursor',
+            message: 'Cursor ACP process-tree cleanup could not be confirmed before legacy fallback',
+          });
+          lifecycle.endTurn({ type: 'turn-end', agent: 'cursor', stopReason: 'failed' });
+          return;
+        }
         startLegacyTurn(prompt);
         return;
       }
       onEvent({ type: 'error', agent: 'cursor', message: error?.message ?? String(error) });
       lifecycle.endTurn({ type: 'turn-end', agent: 'cursor', stopReason: 'failed' });
+    } finally {
+      if (promptedSession?.isCleanupUncertain?.() === true) nativeCleanupUncertain = true;
     }
   }
 
@@ -1023,34 +1217,67 @@ export function createCursorSession(opts, {
     },
     sendUserMessage(text) {
       if (lifecycle.isDisposed()) return;
-      resetTurnTaskState();
-      acpToolState.clear();
-      lifecycle.beginTurn();
-
       const mode = normalizeExecutionMode(opts);
       const prompt = chatId && mode.workflow === 'direct'
         ? text
         : systemBriefFor(opts, 'cursor') + '\n\n' + text;
-
-      if (Buffer.byteLength(prompt, 'utf8') > PROMPT_BYTE_LIMIT) {
-        // 이 크기를 넘기면 CLI 가 아무 출력 없이 죽거나 spawn 이 E2BIG 으로 실패한다.
-        onEvent({
-          type: 'error',
-          agent: 'cursor',
-          message: '메시지가 너무 커서 Cursor CLI 인자로 전달할 수 없습니다. 내용을 나눠 보내 주세요.',
-        });
-        lifecycle.endTurn({ type: 'turn-end', agent: 'cursor', stopReason: 'failed' });
+      const token = nativeDisabled ? null : ++nativeTurnToken;
+      const activate = () => {
+        if (lifecycle.isDisposed() || (token !== null && token !== nativeTurnToken)) return;
+        if (hasNativeCleanupRisk()) {
+          resetTurnTaskState();
+          acpToolState.clear();
+          onEvent({
+            type: 'error',
+            agent: 'cursor',
+            message: 'Cursor ACP process-tree cleanup remains unconfirmed',
+          });
+          // Deliberately omit turn-start. The server has already allocated the
+          // user turn, but must never open provider/MCP admission after an
+          // unproven prior ACP tree.
+          onEvent({ type: 'turn-end', agent: 'cursor', stopReason: 'failed' });
+          return;
+        }
+        lifecycle.queueTurn(
+          () => {
+            resetTurnTaskState();
+            acpToolState.clear();
+          },
+          () => {
+          if (Buffer.byteLength(prompt, 'utf8') > PROMPT_BYTE_LIMIT) {
+            // 이 크기를 넘기면 CLI 가 아무 출력 없이 죽거나 spawn 이 E2BIG 으로 실패한다.
+            onEvent({
+              type: 'error',
+              agent: 'cursor',
+              message: '메시지가 너무 커서 Cursor CLI 인자로 전달할 수 없습니다. 내용을 나눠 보내 주세요.',
+            });
+            lifecycle.endTurn({ type: 'turn-end', agent: 'cursor', stopReason: 'failed' });
+            return;
+          }
+          if (nativeDisabled) {
+            startLegacyTurn(prompt);
+            return;
+          }
+            const completion = runNativeTurn(prompt, /** @type {number} */ (token));
+            trackNativeTurn(completion);
+          },
+        );
+      };
+      const priorTurn = nativeTurnCompletion;
+      if (hasNativeCleanupRisk() || !priorTurn) {
+        activate();
         return;
       }
-      if (nativeDisabled) {
-        startLegacyTurn(prompt);
-        return;
-      }
-      const token = ++nativeTurnToken;
-      void runNativeTurn(prompt, token);
+      void priorTurn.then(activate, () => {
+        nativeCleanupUncertain = true;
+        activate();
+      });
     },
     async setPermissionProfile(profile) {
-      if (lifecycle.isTurnOpen()) throw new Error('Permission profile can only change between turns');
+      if (lifecycle.isTurnOpen() || lifecycle.isTurnPending()) throw new Error('Permission profile can only change between turns');
+      if (lifecycle.isCleanupUncertain() || hasNativeCleanupRisk()) {
+        throw new Error('Cursor process-tree cleanup remains unconfirmed');
+      }
       if (profile !== 'safe' && profile !== 'unrestricted') throw new Error(`Unknown permission profile: ${profile}`);
       const previous = opts.permissionProfile;
       const previousNativeSession = nativeSession;
@@ -1063,28 +1290,34 @@ export function createCursorSession(opts, {
           await nativeRestart;
         }
         if (!nativeDisabled && providerInteractionMode(opts) === 'plan') {
-          await configureNativeMode();
+          await proveNativeModeReadiness();
         }
       } catch (error) {
         opts.permissionProfile = previous;
         nativeRestart = Promise.resolve();
         if (!previousNativeSession && nativeSession) {
           const failed = nativeSession;
+          const cleanup = beginNativeCleanup(failed);
           nativeSession = null;
           chatId = previousChatId;
-          try { await failed.dispose(); } catch {}
+          await cleanup;
         }
         throw error;
       }
     },
     async setExecutionMode(mode) {
-      if (lifecycle.isTurnOpen()) throw new Error('Execution mode can only change between turns');
+      if (lifecycle.isTurnOpen() || lifecycle.isTurnPending()) throw new Error('Execution mode can only change between turns');
+      if (lifecycle.isCleanupUncertain() || hasNativeCleanupRisk()) {
+        throw new Error('Cursor process-tree cleanup remains unconfirmed');
+      }
       validateExecutionMode(mode);
       const previous = normalizeExecutionMode(opts);
       const previousNativeSession = nativeSession;
       const previousChatId = chatId;
       lifecycle.killChild();
-      await lifecycle.waitForChildExit();
+      if (await lifecycle.waitForChildExit() === false) {
+        throw new Error('Cursor process tree could not be stopped for the mode change');
+      }
       opts.workflow = mode.workflow;
       opts.phase = mode.phase;
       opts.capabilityEpoch = mode.capabilityEpoch;
@@ -1098,7 +1331,7 @@ export function createCursorSession(opts, {
         // selectable Plan/Architect mode. Legacy-only sessions are covered by
         // the explicit CLI --mode plan contract instead.
         if (!nativeDisabled && providerInteractionMode(opts) === 'plan') {
-          await configureNativeMode();
+          await proveNativeModeReadiness();
         }
       } catch (error) {
         opts.workflow = previous.workflow;
@@ -1107,9 +1340,10 @@ export function createCursorSession(opts, {
         nativeRestart = Promise.resolve();
         if (!previousNativeSession && nativeSession) {
           const failed = nativeSession;
+          const cleanup = beginNativeCleanup(failed);
           nativeSession = null;
           chatId = previousChatId;
-          try { await failed.dispose(); } catch {}
+          await cleanup;
         }
         throw error;
       }
@@ -1128,8 +1362,20 @@ export function createCursorSession(opts, {
       clearSettleTimer();
       clearExitSweepTimer();
       nativeTurnToken += 1;
-      const [, legacy] = await Promise.allSettled([nativeSession?.dispose(), lifecycle.dispose()]);
-      return legacy.status === 'fulfilled' ? legacy.value : false;
+      const legacyCleanup = lifecycle.dispose();
+      void beginNativeCleanup(nativeSession);
+      nativeSession = null;
+      await waitForNativeConfigures();
+      void beginNativeCleanup(nativeSession);
+      nativeSession = null;
+      const [native, legacy] = await Promise.allSettled([waitForNativeCleanups(), legacyCleanup]);
+      const cleaned = native.status === 'fulfilled' && native.value === true
+        && legacy.status === 'fulfilled' && legacy.value !== false
+        && !nativeCleanupUncertain;
+      if (cleaned && opts.isolatedHome) {
+        flushCursorCredentialMirrors(path.join(String(opts.isolatedHome), '.cursor'));
+      }
+      return cleaned;
     },
   };
 }

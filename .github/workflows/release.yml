@@ -6,7 +6,7 @@ on:
       - 'v*'
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -21,6 +21,11 @@ jobs:
       - name: Check out tagged source
         uses: actions/checkout@v5
 
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22.18.0
+
       - name: Require a version tag matching package.json
         env:
           RELEASE_TAG: ${{ github.ref_name }}
@@ -31,9 +36,135 @@ jobs:
             exit 1
           fi
 
+      - name: Reject vulnerable production dependency trees
+        run: |
+          set -euo pipefail
+          npm audit --omit=dev --audit-level=low
+          npm --prefix rhwp/rhwp-agent audit --omit=dev --audit-level=low
+          npm --prefix rhwp/rhwp-studio audit --omit=dev --audit-level=low
+
+  verification:
+    name: Test tagged source
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22.18.0
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            rhwp/rhwp-studio/package-lock.json
+            rhwp/rhwp-agent/package-lock.json
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: 1.93.1
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo-audit executable
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}-${{ runner.arch }}-0.22.2
+
+      - name: Install pinned cargo-audit
+        run: |
+          if [[ "$(cargo audit --version 2>/dev/null || true)" != "cargo-audit 0.22.2" ]]; then
+            cargo install cargo-audit --version 0.22.2 --locked --force
+          fi
+
+      - name: Reject RustSec vulnerabilities and new warnings
+        working-directory: rhwp
+        run: |
+          set -euo pipefail
+          # Print accepted existing warnings, then fail if RustSec adds a new warning.
+          cargo audit
+          cargo audit --no-fetch -D warnings \
+            --ignore RUSTSEC-2026-0192 \
+            --ignore RUSTSEC-2026-0206
+
+      - name: Test Rust workspace
+        working-directory: rhwp
+        run: cargo test --locked --workspace
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --version 0.15.0 --locked
+
+      - name: Build WASM engine
+        working-directory: rhwp
+        run: wasm-pack build --target web
+
+      - name: Install application dependencies
+        run: |
+          npm ci
+          npm --prefix rhwp/rhwp-agent ci
+          npm --prefix rhwp/rhwp-studio ci
+
+      - name: Test agent hub and process lifecycle
+        run: node --test --test-concurrency=1 rhwp/rhwp-agent/tests/*.test.mjs
+
+      - name: Test hosted Rau authorization service
+        run: npm --prefix rhwp/rau-credits test
+
+      - name: Test and build Studio
+        run: |
+          npm --prefix rhwp/rhwp-studio test
+          npm --prefix rhwp/rhwp-studio run build
+
+  browserbase-live:
+    name: Browserbase Stagehand live smoke
+    if: github.repository == 'ghandhitechnology/Rauhwpx'
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22.18.0
+          cache: npm
+          cache-dependency-path: rhwp/rhwp-agent/package-lock.json
+
+      - name: Install production agent dependencies
+        run: npm --prefix rhwp/rhwp-agent ci --omit=dev
+
+      - name: Require Browserbase live-test secrets
+        env:
+          BROWSERBASE_API_KEY: ${{ secrets.BROWSERBASE_API_KEY }}
+          BROWSERBASE_PROJECT_ID: ${{ secrets.BROWSERBASE_PROJECT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          set -euo pipefail
+          for name in BROWSERBASE_API_KEY BROWSERBASE_PROJECT_ID GEMINI_API_KEY; do
+            if [[ -z "${!name}" ]]; then
+              echo "Required Browserbase live-test secret is missing: ${name}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Run three fresh Stagehand sessions
+        env:
+          BROWSERBASE_API_KEY: ${{ secrets.BROWSERBASE_API_KEY }}
+          BROWSERBASE_PROJECT_ID: ${{ secrets.BROWSERBASE_PROJECT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          BROWSERBASE_SMOKE_URL: ${{ vars.BROWSERBASE_SMOKE_URL }}
+        run: npm --prefix rhwp/rhwp-agent run test:browserbase:live
+
   macos:
     name: Build macOS installers
-    needs: preflight
+    needs: [preflight, verification, browserbase-live]
     runs-on: macos-15
     timeout-minutes: 90
     environment: macos-release
@@ -45,15 +176,20 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: 22.18.0
           cache: npm
           cache-dependency-path: |
             package-lock.json
             rhwp/rhwp-studio/package-lock.json
             rhwp/rhwp-agent/package-lock.json
 
+      - name: Assert macOS ARM64 runner
+        run: |
+          test "$(uname -m)" = arm64
+          node -e "if (process.arch !== 'arm64') throw new Error('Expected Node arm64, got ' + process.arch)"
+
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           toolchain: 1.93.1
           targets: wasm32-unknown-unknown
@@ -94,6 +230,9 @@ jobs:
       - name: Verify packaged runtime files
         run: npm run verify:package
 
+      - name: Verify macOS artifact set and architecture
+        run: node scripts/verify-release-artifacts.mjs macos arm64
+
       - name: Verify Developer ID signature and notarization
         env:
           EXPECTED_IDENTITY: "Developer ID Application: TAEWOOK HA (C8M34MMT8W)"
@@ -126,8 +265,8 @@ jobs:
             release/latest-mac.yml
 
   windows:
-    name: Build Windows installer
-    needs: preflight
+    name: Build unsigned Windows x64 installer
+    needs: [preflight, verification, browserbase-live]
     runs-on: windows-latest
     timeout-minutes: 90
 
@@ -138,15 +277,19 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: 22.18.0
           cache: npm
           cache-dependency-path: |
             package-lock.json
             rhwp/rhwp-studio/package-lock.json
             rhwp/rhwp-agent/package-lock.json
 
+      - name: Assert Windows x64 runner
+        shell: bash
+        run: node -e "if (process.arch !== 'x64') throw new Error('Expected Node x64, got ' + process.arch)"
+
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           toolchain: 1.93.1
           targets: wasm32-unknown-unknown
@@ -166,6 +309,22 @@ jobs:
         shell: bash
         run: npm run verify:package
 
+      - name: Verify Windows artifact set and architecture
+        shell: bash
+        run: node scripts/verify-release-artifacts.mjs windows x64
+
+      - name: Verify Windows installer is unsigned by design
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem -Path release -Filter '*-x64.exe' -File)
+          if ($installers.Count -ne 1) {
+            throw "Expected one Windows x64 installer, found $($installers.Count)."
+          }
+          $signature = Get-AuthenticodeSignature -FilePath $installers[0].FullName
+          if ($signature.Status -ne 'NotSigned') {
+            throw "The Windows installer must remain unsigned; status was $($signature.Status)."
+          }
+
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -181,6 +340,8 @@ jobs:
     needs: [macos, windows]
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: write
 
     steps:
       - name: Check out tagged source

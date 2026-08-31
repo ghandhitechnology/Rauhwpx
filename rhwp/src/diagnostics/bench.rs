@@ -14,7 +14,7 @@ use std::fs;
 use std::time::Instant;
 
 use crate::document_core::DocumentCore;
-use crate::parser::parse_document;
+use crate::parser::parse_document_from_local_file;
 use crate::serializer::serialize_hwpx;
 
 struct Row {
@@ -138,11 +138,11 @@ fn collect_samples(dir: &std::path::Path, acc: &mut Vec<String>) {
 }
 
 fn bench_one(path: &str, iters: usize) -> Result<Row, String> {
-    let data = fs::read(path).map_err(|e| e.to_string())?;
+    let data = crate::parser::limits::read_local_file_once(path).map_err(|e| e.to_string())?;
     let size_kb = data.len() as f64 / 1024.0;
 
     // 워밍업 (페이지 캐시·할당자 정상화) — 측정에서 제외.
-    let _ = DocumentCore::from_bytes(&data).map_err(|e| format!("{e:?}"))?;
+    let _ = DocumentCore::from_local_file_bytes(&data).map_err(|e| format!("{e:?}"))?;
 
     let mut parse_v = Vec::with_capacity(iters);
     let mut load_v = Vec::with_capacity(iters);
@@ -157,12 +157,12 @@ fn bench_one(path: &str, iters: usize) -> Result<Row, String> {
     for _ in 0..iters {
         // parse: 바이트 → Document IR (격리)
         let t = Instant::now();
-        let _doc = parse_document(&data).map_err(|e| format!("{e:?}"))?;
+        let _doc = parse_document_from_local_file(&data).map_err(|e| format!("{e:?}"))?;
         parse_v.push(ms_since(t));
 
         // load: parse + layout (studio "열기" 비용). layout ≈ load − parse.
         let t = Instant::now();
-        let core = DocumentCore::from_bytes(&data).map_err(|e| format!("{e:?}"))?;
+        let core = DocumentCore::from_local_file_bytes(&data).map_err(|e| format!("{e:?}"))?;
         load_v.push(ms_since(t));
         pages = core.page_count();
 

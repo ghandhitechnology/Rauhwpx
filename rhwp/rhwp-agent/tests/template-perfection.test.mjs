@@ -6,7 +6,12 @@ import {
   COPY_LAYOUT_PHASES,
   buildCopyLayoutCompletionPrompt,
   buildCopyLayoutWorkerPrompt,
+  claimCopyLayoutPublication,
+  claimCopyLayoutSettlement,
+  claimCopyLayoutSnapshot,
   defaultTemplateName,
+  releaseCopyLayoutPublication,
+  releaseCopyLayoutSnapshot,
   taskProgressForJob,
 } from '../template-perfection.mjs';
 
@@ -23,7 +28,6 @@ test('copy-layout worker prompt defines a fresh bounded no-prompt process', () =
   const prompt = buildCopyLayoutWorkerPrompt({
     jobId: 'job-1',
     binding,
-    helperPath: '/private/job/copy_layout.py',
     jobDir: '/private/job',
   });
   assert.equal(COPY_LAYOUT_MAX_ITERATIONS, 3);
@@ -39,9 +43,9 @@ test('copy-layout worker prompt defines a fresh bounded no-prompt process', () =
   assert.match(prompt, /publish_artifact exactly once/);
   assert.match(prompt, /complete_copy_layout_job/);
   assert.match(prompt, /"documentId": "document-exact"/);
-  assert.match(prompt, /\/private\/job\/copy_layout\.py/);
-  assert.match(prompt, /Invoke the helper only as python3 or python followed by this exact helper path/);
-  assert.match(prompt, /Do not use python -c\/-m, another script, or --rhwp-bin/);
+  assert.match(prompt, /Never use Bash, a shell, Python/);
+  assert.match(prompt, /run_copy_layout_helper\(action=inspect\)/);
+  assert.match(prompt, /provider-read-only private storage/);
 });
 
 test('completion prompt leaves one exact registration decision to the owning chat', () => {
@@ -87,4 +91,38 @@ test('fleet progress reports one task row with a direct phase index', () => {
 test('default registration name strips format and generated collision suffixes', () => {
   assert.equal(defaultTemplateName('신청서 - Layout (3).hwpx'), '신청서');
   assert.equal(defaultTemplateName('보고서.hwp'), '보고서');
+});
+
+test('copy-layout snapshot, publication, and settlement claims are one-shot before awaits', () => {
+  const candidate = { iteration: 1, outputPath: '/private/candidate.hwpx' };
+  const job = {
+    status: 'running',
+    snapshot: null,
+    snapshotPending: false,
+    helperPending: 0,
+    publishPending: false,
+    generatedCandidates: new Map([[1, candidate]]),
+    publishedArtifacts: new Map(),
+  };
+
+  assert.deepEqual(claimCopyLayoutSnapshot(job), { bound: null, claimed: true });
+  assert.throws(() => claimCopyLayoutSnapshot(job), (error) => (
+    error.code === 'COPY_LAYOUT_SNAPSHOT_ACTIVE'
+  ));
+  releaseCopyLayoutSnapshot(job);
+  job.snapshot = Object.freeze({ path: '/private/snapshot.hwpx' });
+  assert.deepEqual(claimCopyLayoutSnapshot(job), { bound: job.snapshot, claimed: false });
+
+  assert.equal(claimCopyLayoutPublication(job, candidate), candidate);
+  assert.throws(() => claimCopyLayoutPublication(job, candidate), (error) => (
+    error.code === 'COPY_LAYOUT_ARTIFACT_ALREADY_PUBLISHED'
+  ));
+  releaseCopyLayoutPublication(job, candidate);
+  assert.equal(job.publishPending, false);
+
+  claimCopyLayoutSettlement(job);
+  assert.equal(job.status, 'settling');
+  assert.throws(() => claimCopyLayoutSettlement(job), (error) => (
+    error.code === 'COPY_LAYOUT_JOB_SETTLED'
+  ));
 });

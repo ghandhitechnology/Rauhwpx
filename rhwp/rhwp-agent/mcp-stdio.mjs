@@ -1,19 +1,25 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { readFile } from 'node:fs/promises';
+import { open } from 'node:fs/promises';
 import path from 'node:path';
 import WebSocket from 'ws';
-import { resolveHubIdentity, sessionIdFromScopedHubToken } from './hub-session-registry.mjs';
+import {
+  HUB_CAPABILITY_AUDIENCES,
+  resolveHubIdentity,
+  sessionIdFromScopedHubToken,
+} from './hub-session-registry.mjs';
 import { filterToolDefinitions, toToolContent, toolAnnotations } from './tools.mjs';
 import { assertImagePathInsideRoots, imageRootsFromEnv } from './image-path-policy.mjs';
 
 const WS_URL = process.env.RHWP_WS_URL ?? 'ws://127.0.0.1:5175/mcp';
 const { token: TOKEN, development: DEVELOPMENT_AUTH } = resolveHubIdentity();
 const SESSION_ID = process.env.RHWP_SESSION_ID
-  ?? sessionIdFromScopedHubToken(TOKEN)
+  ?? sessionIdFromScopedHubToken(TOKEN, { audience: HUB_CAPABILITY_AUDIENCES.MCP })
+  ?? sessionIdFromScopedHubToken(TOKEN, { audience: HUB_CAPABILITY_AUDIENCES.COPY_LAYOUT_WORKER })
   ?? (DEVELOPMENT_AUTH ? 'dev' : null);
 const AGENT_NAME = process.env.RHWP_AGENT_NAME ?? 'unknown';
 const AGENT_ROLE = process.env.RHWP_AGENT_ROLE ?? 'chat';
+const COPY_LAYOUT_JOB_ID = /^copy-layout-worker:([^:]+):[A-Za-z0-9_-]+$/.exec(AGENT_ROLE)?.[1] ?? null;
 const WORKFLOW = process.env.RHWP_AGENT_WORKFLOW ?? process.env.RHWP_WORKFLOW ?? 'direct';
 const PHASE = process.env.RHWP_AGENT_PHASE ?? process.env.RHWP_PLAN_PHASE
   ?? (WORKFLOW === 'plan' ? 'planning' : WORKFLOW === 'question' ? 'questioning' : 'implementing');
@@ -22,6 +28,8 @@ const TOOL_PROFILE = process.env.RHWP_TOOL_PROFILE
   ?? (WORKFLOW === 'direct' ? 'direct' : PHASE === 'questioning' ? 'question' : PHASE);
 const CONNECT_TIMEOUT_MS = 5_000;
 const CALL_TIMEOUT_MS = 180_000;
+const MAX_PROVIDER_FRAME_BYTES = 8 * 1024 * 1024;
+const MAX_INFLIGHT_CALLS = 64;
 
 // insert_image 가 읽을 수 있는 루트 디렉터리(세션 작업 공간·다운로드 등).
 // 어댑터가 루트를 넘겨주면 그 밖의 절대경로 읽기는 전부 거부한다.
@@ -30,6 +38,21 @@ const IMAGE_ALLOWED_ROOTS = imageRootsFromEnv(process.env);
 function log(msg) {
   process.stderr.write(`[rhwp-mcp] ${msg}\n`);
 }
+
+function safeHubEndpoint(raw) {
+  try {
+    const url = new URL(raw);
+    url.username = '';
+    url.password = '';
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return '<invalid hub URL>';
+  }
+}
+
+const LOG_WS_ENDPOINT = safeHubEndpoint(WS_URL);
 
 function hubError(code, message) {
   const err = new Error(message);
@@ -65,9 +88,10 @@ function ensureConnected() {
       url.searchParams.set('sessionId', SESSION_ID);
       url.searchParams.set('agent', AGENT_NAME);
       url.searchParams.set('role', AGENT_ROLE);
+      if (COPY_LAYOUT_JOB_ID) url.searchParams.set('workerJobId', COPY_LAYOUT_JOB_ID);
       url.searchParams.set('workflow', WORKFLOW);
       if (CAPABILITY_EPOCH) url.searchParams.set('capabilityEpoch', CAPABILITY_EPOCH);
-      sock = new WebSocket(url);
+      sock = new WebSocket(url, { maxPayload: MAX_PROVIDER_FRAME_BYTES });
     } catch (e) {
       connecting = null;
       reject(e?.code ? e : hubError('HUB_UNAVAILABLE', 'rhwp-agent hub is not running (node server.mjs)'));
@@ -83,7 +107,7 @@ function ensureConnected() {
       clearTimeout(openTimer);
       ws = sock;
       connecting = null;
-      log(`connected to hub at ${WS_URL}`);
+      log(`connected to hub at ${LOG_WS_ENDPOINT}`);
       resolve(sock);
     });
     sock.on('message', (data) => {
@@ -125,6 +149,9 @@ function ensureConnected() {
 
 async function callHub(tool, args) {
   const sock = await ensureConnected();
+  if (inflight.size >= MAX_INFLIGHT_CALLS) {
+    throw hubError('TOO_MANY_INFLIGHT_CALLS', `At most ${MAX_INFLIGHT_CALLS} tool calls may be in flight`);
+  }
   const id = nextId++;
   return new Promise((resolve, reject) => {
     // Human input is hub-owned and lives until answered, cancelled, or its provider
@@ -139,7 +166,7 @@ async function callHub(tool, args) {
     inflight.set(id, { resolve, reject, timer });
     try {
       sock.send(JSON.stringify({
-        v: 4,
+        v: 5,
         type: 'tool-call',
         id,
         tool,
@@ -230,6 +257,32 @@ function assertImagePathAllowed(imagePath) {
   return assertImagePathInsideRoots(imagePath, IMAGE_ALLOWED_ROOTS);
 }
 
+async function readImageFile(filePath) {
+  const handle = await open(filePath, 'r');
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) throw hubError('INVALID_ARGS', 'image path must name a regular file');
+    if (stat.size < 1) throw hubError('INVALID_ARGS', 'image file is empty');
+    if (stat.size > IMAGE_MAX_BYTES) {
+      throw hubError('INVALID_ARGS', `image is ${(stat.size / 1048576).toFixed(1)}MB — max 5MB`);
+    }
+    const bytes = Buffer.allocUnsafe(stat.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, offset);
+      if (bytesRead === 0) throw hubError('INVALID_ARGS', 'image file changed while it was read');
+      offset += bytesRead;
+    }
+    const extra = Buffer.allocUnsafe(1);
+    if ((await handle.read(extra, 0, 1, bytes.length)).bytesRead !== 0) {
+      throw hubError('INVALID_ARGS', 'image file changed while it was read');
+    }
+    return bytes;
+  } finally {
+    await handle.close();
+  }
+}
+
 function registerInsertImageTool(def) {
   server.registerTool(
     def.name,
@@ -246,7 +299,7 @@ function registerInsertImageTool(def) {
         let ext;
         if (typeof imagePath === 'string' && imagePath.length > 0) {
           const resolvedImagePath = await assertImagePathAllowed(imagePath);
-          buf = await readFile(resolvedImagePath);
+          buf = await readImageFile(resolvedImagePath);
           ext = path.extname(resolvedImagePath).slice(1).toLowerCase().replace('jpeg', 'jpg');
         } else if (typeof imageBase64 === 'string' && imageBase64.length > 0) {
           if (!extension) throw hubError('INVALID_ARGS', 'extension is required with imageBase64');
@@ -300,7 +353,7 @@ await server.connect(transport);
 server.server.onclose = () => shutdown('stdio transport closed');
 process.stdin.on('end', () => shutdown('stdin EOF'));
 process.stdin.on('close', () => shutdown('stdin closed'));
-log(`rhwp MCP stdio server started (agent=${AGENT_NAME}, session=${SESSION_ID ?? 'missing'}, hub=${WS_URL}, workflow=${WORKFLOW}, profile=${TOOL_PROFILE}, epoch=${CAPABILITY_EPOCH ?? 'legacy'})`);
+log(`rhwp MCP stdio server started (agent=${AGENT_NAME}, session=${SESSION_ID ?? 'missing'}, hub=${LOG_WS_ENDPOINT}, workflow=${WORKFLOW}, profile=${TOOL_PROFILE}, epoch=${CAPABILITY_EPOCH ?? 'legacy'})`);
 
 ensureConnected().then(
   () => log('eager hub connection established'),

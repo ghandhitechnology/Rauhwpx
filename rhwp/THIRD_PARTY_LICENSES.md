@@ -30,7 +30,7 @@ rhwp 프로젝트가 사용하는 서드파티 라이브러리 및 리소스의 
 | flate2 | 1.1.9 | MIT OR Apache-2.0 | rust-lang/flate2-rs | 압축/해제 |
 | image | 0.25.10 | MIT OR Apache-2.0 | image-rs/image | BMP/JPEG/PNG 디코딩 |
 | js-sys | 0.3.102 | MIT OR Apache-2.0 | rustwasm/wasm-bindgen | WASM JS interop |
-| paste | 1.0.15 | MIT OR Apache-2.0 | dtolnay/paste | 매크로 보조 |
+| pastey | 0.2.3 | MIT OR Apache-2.0 | as1100k/pastey | 매크로 보조 |
 | pcx | 0.2.5 | MIT OR Apache-2.0 OR WTFPL | kryptan/pcx | PCX 이미지 디코딩 |
 | pdf-writer | 0.12.1 | MIT OR Apache-2.0 | typst/pdf-writer | PDF 출력 |
 | quick-xml | 0.40.1 | MIT | tafia/quick-xml | HWPX XML 파싱 |
@@ -100,10 +100,10 @@ rhwp 프로젝트가 사용하는 서드파티 라이브러리 및 리소스의 
 
 | 패키지 | Lock 버전 | 라이선스 | 용도 |
 |--------|-----------|---------|------|
-| @browserbasehq/mcp | 3.0.0 | Apache-2.0 | 계획 모드의 Browserbase 원격 브라우저 sidecar |
+| @browserbasehq/stagehand | 4.0.2 | MIT | Browserbase 원격 브라우저 sidecar SDK |
 | @modelcontextprotocol/sdk | 1.30.0 | MIT | 에이전트·브라우저 MCP 서버/클라이언트 |
-| ws | 8.21.2 | MIT | 로컬 hub WebSocket transport |
-| zod | 3.25.76 | MIT | MCP 도구 입력 검증 |
+| ws | 8.21.3 | MIT | 로컬 hub WebSocket transport |
+| zod | 4.4.3 | MIT | MCP 도구 입력 검증 |
 
 ### rhwp-chrome / rhwp-firefox
 

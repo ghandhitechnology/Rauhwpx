@@ -8,7 +8,9 @@ import { z } from 'zod';
 
 import {
   isolatedProcessEnv,
+  PROCESS_TREE_CLEANUP_OUTCOME,
   processTreeSpawnOptions,
+  terminateAndWaitForProcessTreeExitOutcome,
   terminateProcessTree,
 } from '../process-tree.mjs';
 
@@ -178,6 +180,7 @@ export function buildCheckpointTitleCliSpec(provider, {
 } = {}) {
   if (provider === 'codex') {
     return {
+      provider,
       command: command ?? 'codex',
       argv: [
         'exec', '--json', '--ephemeral', '--skip-git-repo-check',
@@ -195,6 +198,7 @@ export function buildCheckpointTitleCliSpec(provider, {
   if (provider === 'grok') {
     if (!promptFilePath) throw new Error('Grok checkpoint titles require a prompt file');
     return {
+      provider,
       command: command ?? 'grok',
       argv: [
         '--prompt-file', promptFilePath,
@@ -209,6 +213,7 @@ export function buildCheckpointTitleCliSpec(provider, {
   }
   if (provider === 'claude') {
     return {
+      provider,
       command: command ?? 'claude',
       argv: [
         '-p', '--output-format', 'json', '--setting-sources', '',
@@ -256,20 +261,41 @@ export function extractCheckpointTitleText(stdout) {
   return last;
 }
 
+function hasTerminalCheckpointOutput(provider, stdout) {
+  for (const line of String(stdout).split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const event = JSON.parse(line);
+      if (event?.type === 'result' || event?.is_error === true || event?.type === 'turn.failed') {
+        return true;
+      }
+      if (provider === 'codex'
+        && event?.type === 'item.completed'
+        && event.item?.type === 'agent_message') return true;
+    } catch {}
+  }
+  return false;
+}
+
 function runCli(spec, prompt, timeoutMs, {
   env,
   cwd,
   signal,
   spawnProcess = spawn,
   terminateProcess = terminateProcessTree,
+  cleanupProcessOutcome,
+  onCleanupUncertain = () => {},
 } = {}) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let settled = false;
+    let finalizing = false;
     let stdout = '';
     let outputExceeded = false;
     let child;
     let timer = null;
     let stopping = false;
+    let cleanupPromise = null;
+    let abort = () => {};
 
     const finish = (value) => {
       if (settled) return;
@@ -278,12 +304,50 @@ function runCli(spec, prompt, timeoutMs, {
       signal?.removeEventListener?.('abort', abort);
       resolve(value);
     };
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener?.('abort', abort);
+      reject(error);
+    };
+    const finishAfterCleanup = (value, { allowUnavailable = false } = {}) => {
+      if (settled || finalizing) return;
+      finalizing = true;
+      if (timer) clearTimeout(timer);
+      if (!child) {
+        finish(value);
+        return;
+      }
+      if (!cleanupPromise) {
+        cleanupPromise = (typeof cleanupProcessOutcome === 'function'
+          ? Promise.resolve(cleanupProcessOutcome(child))
+          : terminateAndWaitForProcessTreeExitOutcome(child, { terminateProcess }))
+          .catch(() => PROCESS_TREE_CLEANUP_OUTCOME.FAILED);
+      }
+      void cleanupPromise.then((outcome) => {
+        if (allowUnavailable
+          && value !== null
+          && outcome === PROCESS_TREE_CLEANUP_OUTCOME.UNAVAILABLE) {
+          onCleanupUncertain();
+          finish(value);
+          return;
+        }
+        if (outcome !== PROCESS_TREE_CLEANUP_OUTCOME.PROVEN) {
+          const error = new Error('Checkpoint-title process-tree cleanup could not be confirmed');
+          error.processCleanupUncertain = true;
+          fail(error);
+          return;
+        }
+        finish(value);
+      });
+    };
     const stop = () => {
       if (!child || stopping) return;
       stopping = true;
-      terminateProcess(child);
+      finishAfterCleanup(null);
     };
-    const abort = () => {
+    abort = () => {
       stop();
     };
 
@@ -307,18 +371,29 @@ function runCli(spec, prompt, timeoutMs, {
       if (Buffer.byteLength(stdout, 'utf8') > MAX_CLI_OUTPUT_BYTES) {
         outputExceeded = true;
         stop();
+        return;
+      }
+      if (typeof cleanupProcessOutcome === 'function'
+        && hasTerminalCheckpointOutput(spec.provider, stdout)) {
+        finishAfterCleanup(extractCheckpointTitleText(stdout));
       }
     });
     child.stdout?.on?.('error', () => {});
     child.stderr?.on?.('data', () => {});
     child.stderr?.on?.('error', () => {});
-    child.on?.('error', () => finish(null));
+    child.on?.('error', () => {
+      if (child.pid) stop();
+      else finish(null);
+    });
     child.on?.('close', (code) => {
-      if (stopping || outputExceeded || code !== 0) {
-        finish(null);
+      if (stopping || outputExceeded) {
+        finishAfterCleanup(null);
         return;
       }
-      finish(extractCheckpointTitleText(stdout));
+      const value = code === 0 ? extractCheckpointTitleText(stdout) : null;
+      finishAfterCleanup(value, {
+        allowUnavailable: code === 0 && cleanCheckpointTitle(value) !== null,
+      });
     });
 
     timer = setTimeout(abort, timeoutMs);
@@ -396,16 +471,22 @@ async function prepareCliWorkspaceBounded(provider, prompt, timeoutMs, deps) {
 }
 
 async function runPreparedCli(workspace, prompt, timeoutMs, deps) {
+  let cleanupUncertain = false;
   try {
     return await runCli(workspace.spec, prompt, timeoutMs, {
       cwd: workspace.tempRoot,
       signal: deps.signal,
       spawnProcess: deps.spawnProcess,
       terminateProcess: deps.terminateProcess,
+      cleanupProcessOutcome: deps.cleanupProcessOutcome,
       env: workspace.env,
+      onCleanupUncertain: () => { cleanupUncertain = true; },
     });
+  } catch (error) {
+    cleanupUncertain ||= error?.processCleanupUncertain === true;
+    throw error;
   } finally {
-    await disposeCliWorkspace(workspace);
+    if (!cleanupUncertain) await disposeCliWorkspace(workspace);
   }
 }
 
@@ -501,21 +582,21 @@ async function runTimedProvider(provider, model, prompt, timeoutMs, overallDeadl
     return null;
   }
   if (!workspace) return null;
-  try {
-    if (deps.signal?.aborted) return null;
-    const remaining = overallDeadline - Date.now();
-    if (remaining <= 0) return null;
-    const runTimeoutMs = Math.max(1, Math.min(timeoutMs, remaining));
-    return await boundedAttempt(
-      (signal) => runPreparedCli(workspace, prompt, runTimeoutMs, { ...deps, signal }),
-      runTimeoutMs,
-      deps.signal,
-    );
-  } finally {
-    // Short provider timeouts leave only a few milliseconds of cleanup grace.
-    // Await the same in-flight rm so generateCheckpointTitle cannot return
-    // while the CLI temp workspace still exists.
+  if (deps.signal?.aborted) {
     await disposeCliWorkspace(workspace);
+    return null;
+  }
+  const remaining = overallDeadline - Date.now();
+  if (remaining <= 0) {
+    await disposeCliWorkspace(workspace);
+    return null;
+  }
+  const runTimeoutMs = Math.max(1, Math.min(timeoutMs, remaining));
+  try {
+    return await runPreparedCli(workspace, prompt, runTimeoutMs, deps);
+  } catch (error) {
+    if (error?.processCleanupUncertain === true) throw error;
+    return null;
   }
 }
 
@@ -536,14 +617,20 @@ export async function generateCheckpointTitle(raw, deps = {}) {
     const remaining = overallDeadline - Date.now();
     if (remaining <= 0) break;
     const timeoutMs = Math.max(1, Math.min(providerTimeoutMs, remaining));
-    const output = await runTimedProvider(
-      provider,
-      route.model,
-      prompt,
-      timeoutMs,
-      overallDeadline,
-      deps,
-    );
+    let output;
+    try {
+      output = await runTimedProvider(
+        provider,
+        route.model,
+        prompt,
+        timeoutMs,
+        overallDeadline,
+        deps,
+      );
+    } catch (error) {
+      if (error?.processCleanupUncertain === true) return null;
+      throw error;
+    }
     const title = cleanCheckpointTitle(output);
     if (!title) continue;
     return {

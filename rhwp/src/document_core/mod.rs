@@ -31,6 +31,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
+const MAX_BATCH_EVENTS: usize = 65_536;
+
 /// 기본 폰트 fallback 경로
 pub const DEFAULT_FALLBACK_FONT: &str = "/usr/share/fonts/truetype/nanum/NanumGothic.ttf";
 pub(crate) const TABLE_CAPTION_CELL_SENTINEL: usize = 65_534;
@@ -117,6 +119,7 @@ pub(crate) struct RenderNormalizationState {
 #[derive(Default)]
 pub(crate) struct DocumentEventLog {
     events: Vec<DocumentEvent>,
+    dropped_events: usize,
     section_revisions: Vec<u64>,
     paragraph_sequence_revisions: Vec<u64>,
     paragraph_revisions: Vec<Vec<u64>>,
@@ -146,12 +149,32 @@ impl DocumentEventLog {
                 revision,
             );
         }
-        self.events.push(event);
+        // Keep the public event-log API useful outside batch mode without
+        // allowing a long-lived document to retain an unbounded command log.
+        if self.events.len() < MAX_BATCH_EVENTS {
+            self.events.push(event);
+        } else {
+            self.dropped_events = self.dropped_events.saturating_add(1);
+        }
     }
 
     pub(crate) fn clear(&mut self) {
         // batch 이벤트 소비는 문서 상태를 바꾸지 않으므로 snapshot revision은 유지한다.
         self.events.clear();
+        // A pathological batch may grow this buffer to the hard cap. Do not
+        // pin that allocation for the lifetime of an otherwise idle document.
+        if self.events.capacity() > 1024 {
+            self.events.shrink_to(1024);
+        }
+        self.dropped_events = 0;
+    }
+
+    fn begin_capture(&mut self) {
+        self.clear();
+    }
+
+    fn dropped_events(&self) -> usize {
+        self.dropped_events
     }
 
     fn mark_section_changed(&mut self, section_idx: usize) {
@@ -482,7 +505,10 @@ impl DocumentCore {
 
     /// 이벤트 로그를 JSON 배열로 직렬화한다.
     pub fn serialize_event_log(&self) -> String {
-        crate::model::event::serialize_event_log(&self.event_log)
+        crate::model::event::serialize_event_log_bounded(
+            &self.event_log,
+            self.event_log.dropped_events(),
+        )
     }
 
     /// DPI를 설정하고 스타일을 재해소한 후 재페이지네이션한다.
@@ -555,5 +581,52 @@ impl DocumentCore {
     /// 명시적으로 `reflow_linesegs_on_demand()` 를 호출해야 보정된다.
     pub fn validation_report(&self) -> &validation::ValidationReport {
         &self.validation_report
+    }
+}
+
+#[cfg(test)]
+mod event_log_tests {
+    use super::*;
+
+    fn event(offset: usize) -> DocumentEvent {
+        DocumentEvent::TextInserted {
+            section: 0,
+            para: 0,
+            offset,
+            len: 1,
+        }
+    }
+
+    #[test]
+    fn events_outside_a_batch_remain_available_through_the_bounded_public_log() {
+        let mut log = DocumentEventLog::default();
+        log.push(event(0));
+
+        assert!(matches!(
+            log.as_ref(),
+            [DocumentEvent::TextInserted { offset: 0, .. }]
+        ));
+        assert_eq!(log.dropped_events(), 0);
+        assert!(log.section_revisions(1)[0] > 0);
+        assert!(log.paragraph_revisions(0, 1)[0] > 0);
+    }
+
+    #[test]
+    fn batch_event_payloads_are_capped_and_report_the_omitted_tail() {
+        let mut log = DocumentEventLog::default();
+        log.begin_capture();
+        for offset in 0..=MAX_BATCH_EVENTS {
+            log.push(event(offset));
+        }
+
+        assert_eq!(log.len(), MAX_BATCH_EVENTS);
+        assert_eq!(log.dropped_events(), 1);
+        let json = crate::model::event::serialize_event_log_bounded(&log, log.dropped_events());
+        assert!(json.contains(r#""truncated":true"#));
+        assert!(json.contains(r#""droppedEventCount":1"#));
+        assert_eq!(
+            log.paragraph_revisions(0, 1)[0],
+            (MAX_BATCH_EVENTS + 1) as u64
+        );
     }
 }

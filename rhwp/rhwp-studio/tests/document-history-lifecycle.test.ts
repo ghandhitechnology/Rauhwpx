@@ -31,7 +31,7 @@ test('document replacement and close wait for the current version operation queu
 test('failed document replacement clears and republishes document context', () => {
   assert.match(
     main,
-    /docInfo = wasm\.loadDocument[\s\S]*?catch \(error\) \{[\s\S]*?activeDocumentId = null;\s*eventBus\.emit\('document-context-changed'\)/,
+    /async function loadBytes[\s\S]*?docInfo =[\s\S]*?consumeExactLocalFileRead[\s\S]*?wasm\.loadDocument[\s\S]*?catch \(error\) \{[\s\S]*?activeDocumentId = null;\s*eventBus\.emit\('document-context-changed'\)/,
   );
   assert.match(
     main,
@@ -43,22 +43,31 @@ test('failed document replacement clears and republishes document context', () =
   );
 });
 
-test('opening a portable history package enables native version control and keeps the bundle handle', () => {
+test('opening a canonical history archive keeps its handle while legacy folder imports release theirs', () => {
   assert.match(main, /userSettings\.setUseHancomGit\(true\)/);
   assert.match(
     main,
-    /retainNativeBundleHandle[\s\S]*?identityKind === 'native-path'[\s\S]*?isPortableHistoryFileName/,
+    /retainPortableHistoryHandle[\s\S]*?!isLegacyPortableHistoryFolderHandle\(data\.fileHandle\)[\s\S]*?isPortableHistoryFileName/,
   );
   assert.match(
     main,
-    /retainNativeBundleHandle \? data\.fileHandle : null/,
+    /retainPortableHistoryHandle \? data\.fileHandle : null/,
   );
   assert.match(
     main,
-    /if \(!retainNativeBundleHandle\) \{[\s\S]*?releaseUnusedSaveTarget/,
+    /if \(!retainPortableHistoryHandle\) \{[\s\S]*?releaseUnusedSaveTarget/,
   );
   const fileCommands = source('../src/command/commands/file.ts');
-  assert.match(fileCommands, /writeDesktopPortableHistoryFile\(currentHandle, bundle\)/);
+  assert.match(
+    fileCommands,
+    /await writeBlobToHandle\(currentHandle, historyBlob, services\.validateSaveHandle\);\s*completePortableHistorySave/,
+  );
+  assert.match(
+    fileCommands,
+    /targetHandle = await windowLike\.showSaveFilePicker[\s\S]*?if \(targetHandle\)[\s\S]*?await writeBlobToHandle\(targetHandle[\s\S]*?completePortableHistorySave/,
+  );
+  assert.match(fileCommands, /if \(targetHandle === null\) return 'cancelled'/);
+  assert.match(fileCommands, /id: 'file:import-legacy-history'/);
   assert.match(
     fileCommands,
     /isPortableHistoryFileName\(services\.wasm\.fileName\)[\s\S]*?return saveWithHistory\(services\)/,

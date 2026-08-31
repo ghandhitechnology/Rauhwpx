@@ -10,6 +10,51 @@
   const BADGE_CLASS = 'rhwp-badge';
   const HOVER_CLASS = 'rhwp-hover-card';
   const PROCESSED_ATTR = 'data-rhwp-processed';
+  const THUMBNAIL_CACHE_MAX_ENTRIES = 32;
+  const THUMBNAIL_CACHE_MAX_ESTIMATED_BYTES = 32 * 1024 * 1024;
+
+  function createBoundedThumbnailCache() {
+    const entries = new Map();
+    let estimatedBytes = 0;
+    return {
+      has(url) { return entries.has(url); },
+      get(url) {
+        const entry = entries.get(url);
+        if (!entry) return undefined;
+        entries.delete(url);
+        entries.set(url, entry);
+        return entry.value;
+      },
+      set(url, value) {
+        const existing = entries.get(url);
+        if (existing) {
+          entries.delete(url);
+          estimatedBytes -= existing.estimatedBytes;
+        }
+        // JavaScript strings can occupy two bytes per code unit. Include the
+        // URL key and fixed object overhead as well as the data URI itself.
+        const entryBytes = (url.length * 2) + (typeof value?.dataUri === 'string'
+          ? value.dataUri.length * 2
+          : 0) + 256;
+        if (!Number.isSafeInteger(entryBytes) || entryBytes > THUMBNAIL_CACHE_MAX_ESTIMATED_BYTES) {
+          return false;
+        }
+        while (
+          entries.size >= THUMBNAIL_CACHE_MAX_ENTRIES
+          || estimatedBytes + entryBytes > THUMBNAIL_CACHE_MAX_ESTIMATED_BYTES
+        ) {
+          const oldestUrl = entries.keys().next().value;
+          if (oldestUrl === undefined) break;
+          const oldest = entries.get(oldestUrl);
+          entries.delete(oldestUrl);
+          estimatedBytes -= oldest.estimatedBytes;
+        }
+        entries.set(url, { value, estimatedBytes: entryBytes });
+        estimatedBytes += entryBytes;
+        return true;
+      }
+    };
+  }
   const HOVER_CARD_STYLE = `
     .rhwp-hover-card {
       background: #fff;
@@ -286,7 +331,7 @@
   let pendingAnchor = null;
   let showHoverTimeout = null;
   let hideHoverTimeout = null;
-  const thumbnailCache = new Map(); // URL → dataUri 캐시 (content-script 측)
+  const thumbnailCache = createBoundedThumbnailCache();
 
   function clearShowHoverTimer() {
     if (showHoverTimeout !== null) {
@@ -535,6 +580,8 @@
   // ─── 썸네일 프리페치 ───
 
   const PREFETCH_CONCURRENCY = 3; // 동시 fetch 최대 수
+  const PREFETCH_URL_LIMIT = 20;
+  const prefetchedUrls = new Set();
   let prefetchQueue = [];
   let prefetchActive = 0;
 
@@ -546,6 +593,9 @@
         if (!isHwpLink(anchor)) continue;
         if (anchor.getAttribute('data-hwp-thumbnail')) continue; // 사전 지정된 것은 제외
         if (thumbnailCache.has(anchor.href)) continue; // 이미 캐시됨
+        if (prefetchedUrls.has(anchor.href)) continue;
+        if (prefetchedUrls.size >= PREFETCH_URL_LIMIT) break;
+        prefetchedUrls.add(anchor.href);
         prefetchQueue.push({ url: anchor.href, allowDownloadUrl: isExplicitHwpLink(anchor) });
       }
       // 중복 제거
@@ -556,7 +606,7 @@
           allowDownloadUrl: Boolean(existing?.allowDownloadUrl || item.allowDownloadUrl)
         });
         return map;
-      }, new Map()).values()];
+      }, new Map()).values()].slice(0, PREFETCH_URL_LIMIT);
       drainPrefetchQueue();
     }, 1000);
   }

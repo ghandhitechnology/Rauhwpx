@@ -13,21 +13,27 @@ import {
   installDesktopPlainTextPasteHandling,
   installWebAppShell,
   isDesktopApp,
+  isLegacyPortableHistoryFolderHandle,
   openPublishedDocumentInNewWindow,
   parsePublishedDocumentLink,
+  pickDesktopLegacyHistoryFolder,
   pickDesktopNativeOpenFile,
   pickDesktopNativeSaveFile,
+  pickDesktopPortableHistorySaveFile,
   rememberNativeDocument,
   requestDevAgentHub,
   restoreNativeDocument,
   releaseReplacedNativeFileHandle,
   searchNearbyNativeDocuments,
-  saveDesktopPortableHistoryFile,
-  writeDesktopPortableHistoryFile,
   suppressDesktopServiceWorker,
   stableBrowserSessionId,
   type NativeFileHandleDescriptor,
 } from '../src/desktop-integration.ts';
+import { writeBlobToHandle } from '../src/command/file-system-access.ts';
+import {
+  EXACT_LOCAL_DOCUMENT_MAX_BYTES,
+  PORTABLE_HISTORY_MAX_BYTES,
+} from '../src/core/document-input-limits.ts';
 
 const source = readFileSync(new URL('../src/desktop-integration.ts', import.meta.url), 'utf8');
 const bridge = readFileSync(new URL('../src/agent/bridge.ts', import.meta.url), 'utf8');
@@ -81,6 +87,16 @@ test('dev ensure path asks Vite to start a missing hub', async () => {
   });
   assert.equal(ready, true);
   assert.equal(calls, 1);
+});
+
+test('dev ensure path cancels an unread non-ok body', async () => {
+  let cancelled = false;
+  const response = new Response(new ReadableStream<Uint8Array>({
+    cancel() { cancelled = true; },
+  }), { status: 503 });
+
+  assert.equal(await requestDevAgentHub(async () => response), false);
+  assert.equal(cancelled, true);
 });
 
 test('browser hub identity is stable across reloads but scoped to its tab storage', () => {
@@ -228,45 +244,100 @@ test('Electron Save As returns a temporary opaque handle and releases failed tar
   assert.deepEqual(released, ['drop-target', 'save-target']);
 });
 
-test('portable history export uses the dedicated desktop save boundary', async () => {
-  const writes: Array<{
-    suggestedName: string;
-    files: Array<{ name: string; bytes: number[] }>;
-  }> = [];
-  const folder = {
-    folderName: 'report.rhwpx',
-    files: [
-      { name: 'history', bytes: new Uint8Array([1, 2, 3]) },
-      { name: 'report.hwpx', bytes: new Uint8Array([4, 5]) },
-    ],
-  };
-  const result = await saveDesktopPortableHistoryFile(
-    folder,
-    {
-      rhwpDesktop: {
-        savePortableHistoryFile: async ({ suggestedName, files }) => {
-          writes.push({
-            suggestedName,
-            files: files.map((file) => ({ name: file.name, bytes: [...file.bytes] })),
-          });
-          return { fileName: suggestedName, byteLength: 5 };
-        },
+test('portable history export returns an opaque pending save handle', async () => {
+  const picks: Array<{ suggestedName: string; extension: string }> = [];
+  const released: string[] = [];
+  const archive = { fileName: 'report.rhwpx', bytes: new Uint8Array([1, 2, 3]) };
+  const handle = await pickDesktopPortableHistorySaveFile(archive, {
+    rhwpDesktop: {
+      pickNativeSaveFile: async (options) => {
+        picks.push(options);
+        return {
+          kind: 'file' as const,
+          handleId: 'history-target',
+          name: 'report.rhwpx',
+          saveTargetCreated: true,
+        };
       },
+      readNativeFile: async () => ({ name: 'report.rhwpx', bytes: new Uint8Array() }),
+      writeNativeFile: async () => ({ name: 'report.rhwpx', byteLength: 0 }),
+      releaseNativeFile: async (handleId) => { released.push(handleId); },
     },
-  );
-  assert.equal(result, 'saved');
-  assert.deepEqual(writes, [{
-    suggestedName: 'report.rhwpx',
-    files: [
-      { name: 'history', bytes: [1, 2, 3] },
-      { name: 'report.hwpx', bytes: [4, 5] },
-    ],
-  }]);
-  assert.equal(await saveDesktopPortableHistoryFile(folder, {}), 'unavailable');
+  });
+  assert.equal(handle?.name, 'report.rhwpx');
+  assert.deepEqual(picks, [{ suggestedName: 'report.rhwpx', extension: 'rhwpx' }]);
+  await handle?.releaseUnusedSaveTarget?.();
+  assert.deepEqual(released, ['history-target']);
+  assert.equal(await pickDesktopPortableHistorySaveFile(archive, {}), undefined);
 });
 
-test('open portable history packages can be rewritten in place through the native handle', async () => {
-  const rewritten: Array<{ handleId: string; names: string[] }> = [];
+test('portable history save targets adopt only after a successful write', async () => {
+  const events: string[] = [];
+  const archive = { fileName: 'report.rhwpx', bytes: new Uint8Array([1, 2, 3]) };
+  const handle = await pickDesktopPortableHistorySaveFile(archive, {
+    rhwpDesktop: {
+      pickNativeSaveFile: async () => ({
+        kind: 'file' as const,
+        handleId: 'history-target',
+        name: archive.fileName,
+        saveTargetCreated: true,
+      }),
+      readNativeFile: async () => ({ name: archive.fileName, bytes: new Uint8Array() }),
+      validateNativeSave: async () => { events.push('validate'); },
+      writeNativeFile: async () => {
+        events.push('write');
+        return { name: archive.fileName, byteLength: archive.bytes.byteLength };
+      },
+      releaseNativeFile: async () => { events.push('release'); },
+    },
+  });
+  assert.ok(handle);
+  bindNativeFileHandleIdentity(handle, {
+    documentId: 'document-a',
+    sourceDigest: 'blake3:a',
+    useSourceDigest: false,
+  });
+
+  await writeBlobToHandle(handle, new Blob([archive.bytes as BlobPart]));
+  await handle.releaseUnusedSaveTarget?.();
+  assert.deepEqual(events, ['validate', 'write']);
+});
+
+test('portable history write failures release the unadopted save target', async () => {
+  const released: string[] = [];
+  const handle = await pickDesktopPortableHistorySaveFile({
+    fileName: 'report.rhwpx',
+    bytes: new Uint8Array([1]),
+  }, {
+    rhwpDesktop: {
+      pickNativeSaveFile: async () => ({
+        kind: 'file' as const,
+        handleId: 'failed-history-target',
+        name: 'report.rhwpx',
+        saveTargetCreated: true,
+      }),
+      readNativeFile: async () => ({ name: 'report.rhwpx', bytes: new Uint8Array() }),
+      validateNativeSave: async () => {},
+      writeNativeFile: async () => { throw new Error('disk full'); },
+      releaseNativeFile: async (handleId) => { released.push(handleId); },
+    },
+  });
+  assert.ok(handle);
+  bindNativeFileHandleIdentity(handle, {
+    documentId: 'document-a',
+    sourceDigest: 'blake3:a',
+    useSourceDigest: false,
+  });
+
+  await assert.rejects(
+    writeBlobToHandle(handle, new Blob([new Uint8Array([1]) as BlobPart])),
+    /disk full/,
+  );
+  assert.deepEqual(released, ['failed-history-target']);
+});
+
+test('open portable history files rewrite the canonical bytes through the native handle', async () => {
+  const rewritten: Array<{ handleId: string; bytes: number[] }> = [];
   const win = {
     rhwpDesktop: {
       pickNativeOpenFile: async () => ({
@@ -275,13 +346,12 @@ test('open portable history packages can be rewritten in place through the nativ
         name: 'report.rhwpx',
       }),
       readNativeFile: async () => ({ name: 'report.rhwpx', bytes: new Uint8Array([1]) }),
-      writeNativeFile: async () => ({ name: 'report.rhwpx', byteLength: 0 }),
-      writePortableHistoryFile: async (handleId: string, files: Array<{ name: string }>, identity: {
+      writeNativeFile: async (handleId: string, bytes: Uint8Array, identity: {
         documentId: string;
       }) => {
         assert.equal(identity.documentId, 'document-a');
-        rewritten.push({ handleId, names: files.map((file) => file.name) });
-        return { name: 'report.rhwpx', byteLength: 8 };
+        rewritten.push({ handleId, bytes: [...bytes] });
+        return { name: 'report.rhwpx', byteLength: bytes.byteLength };
       },
       releaseNativeFile: async () => {},
     },
@@ -293,20 +363,134 @@ test('open portable history packages can be rewritten in place through the nativ
     sourceDigest: 'blake3:a',
     useSourceDigest: false,
   });
-  const folder = {
-    folderName: 'report.rhwpx',
-    files: [
-      { name: 'history', bytes: new Uint8Array([1, 2, 3]) },
-      { name: 'report.hwpx', bytes: new Uint8Array([4, 5]) },
-    ],
-  };
-  assert.equal(await writeDesktopPortableHistoryFile(handle, folder, win), 'saved');
-  assert.deepEqual(rewritten, [{ handleId: 'bundle', names: ['history', 'report.hwpx'] }]);
-  assert.equal(await writeDesktopPortableHistoryFile(null, folder, win), 'unavailable');
-  assert.equal(
-    await writeDesktopPortableHistoryFile({ name: 'report.rhwpx' } as never, folder, win),
-    'unavailable',
-  );
+  const writable = await handle.createWritable();
+  await writable.write(new Blob([new Uint8Array([1, 2, 3])]));
+  await writable.close();
+  assert.deepEqual(rewritten, [{ handleId: 'bundle', bytes: [1, 2, 3] }]);
+});
+
+test('native writable streams reject oversized chunks before reading or retaining them', async () => {
+  let read = false;
+  let writes = 0;
+  const handle = createNativeFileHandle({
+    kind: 'file',
+    handleId: 'bounded-save',
+    name: 'report.hwp',
+  }, {
+    readNativeFile: async () => ({ name: 'report.hwp', bytes: new Uint8Array() }),
+    writeNativeFile: async () => {
+      writes += 1;
+      return { name: 'report.hwp', byteLength: 0 };
+    },
+  });
+  bindNativeFileHandleIdentity(handle, {
+    documentId: 'document-a',
+    sourceDigest: null,
+  });
+  const writable = await handle.createWritable();
+  const oversized = {
+    size: EXACT_LOCAL_DOCUMENT_MAX_BYTES + 1,
+    arrayBuffer: async () => {
+      read = true;
+      return new ArrayBuffer(0);
+    },
+  } as Blob;
+
+  await assert.rejects(writable.write(oversized), /512 MiB/);
+  await writable.close();
+  assert.equal(read, false);
+  assert.equal(writes, 0);
+});
+
+test('native portable-history writable streams use the 128 MiB archive cap', async () => {
+  let writes = 0;
+  const handle = createNativeFileHandle({
+    kind: 'file',
+    handleId: 'bounded-portable-save',
+    name: 'report.rhwpx',
+  }, {
+    readNativeFile: async () => ({ name: 'report.rhwpx', bytes: new Uint8Array() }),
+    writeNativeFile: async () => {
+      writes += 1;
+      return { name: 'report.rhwpx', byteLength: 0 };
+    },
+  });
+  bindNativeFileHandleIdentity(handle, {
+    documentId: 'document-a',
+    sourceDigest: null,
+  });
+  const writable = await handle.createWritable();
+  const oversized = { size: PORTABLE_HISTORY_MAX_BYTES + 1 } as Blob;
+
+  await assert.rejects(writable.write(oversized), /128 MiB/);
+  await writable.close();
+  assert.equal(writes, 0);
+});
+
+test('native writable close is single-flight and sends the source buffer without another renderer copy', async () => {
+  let writes = 0;
+  let received: Uint8Array | null = null;
+  let startWrite: (() => void) | undefined;
+  let finishWrite: (() => void) | undefined;
+  const writeStarted = new Promise<void>((resolve) => { startWrite = resolve; });
+  const writeCanFinish = new Promise<void>((resolve) => { finishWrite = resolve; });
+  const handle = createNativeFileHandle({
+    kind: 'file',
+    handleId: 'single-flight-save',
+    name: 'report.hwp',
+  }, {
+    readNativeFile: async () => ({ name: 'report.hwp', bytes: new Uint8Array() }),
+    writeNativeFile: async (_handleId, bytes) => {
+      writes += 1;
+      received = bytes;
+      startWrite?.();
+      await writeCanFinish;
+      return { name: 'report.hwp', byteLength: bytes.byteLength };
+    },
+  });
+  bindNativeFileHandleIdentity(handle, {
+    documentId: 'document-a',
+    sourceDigest: null,
+  });
+  const writable = await handle.createWritable();
+  const sourceBuffer = new Uint8Array([1, 2, 3]).buffer;
+  await writable.write({
+    size: sourceBuffer.byteLength,
+    arrayBuffer: async () => sourceBuffer,
+  } as Blob);
+
+  const firstClose = writable.close();
+  const secondClose = writable.close();
+  let secondCloseSettled = false;
+  void secondClose.then(() => { secondCloseSettled = true; });
+  await writeStarted;
+  await Promise.resolve();
+  assert.equal(secondCloseSettled, false);
+  await assert.rejects(writable.write(new Blob()), /closed/);
+  finishWrite?.();
+  await Promise.all([firstClose, secondClose]);
+
+  assert.equal(writes, 1);
+  assert.equal(received?.buffer, sourceBuffer);
+});
+
+test('legacy history picker marks its opaque folder handle as import-only', async () => {
+  const handle = await pickDesktopLegacyHistoryFolder({
+    rhwpDesktop: {
+      pickLegacyHistoryFolder: async () => ({
+        kind: 'file' as const,
+        handleId: 'legacy-folder',
+        name: 'legacy.rhwpx',
+        legacyPortableHistoryFolder: true as const,
+      }),
+      readNativeFile: async () => ({ name: 'legacy.rhwpx', bytes: new Uint8Array([1]) }),
+      writeNativeFile: async () => ({ name: 'legacy.rhwpx', byteLength: 0 }),
+      releaseNativeFile: async () => {},
+    },
+  });
+  assert.ok(handle);
+  assert.equal(isLegacyPortableHistoryFolderHandle(handle), true);
+  await handle.releaseUnusedSaveTarget?.();
 });
 
 test('native document bookmarks restore opaque handles without exposing a path', async () => {

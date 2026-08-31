@@ -2665,7 +2665,10 @@ impl LayoutEngine {
                         brightness: img_fill.brightness,
                         contrast: img_fill.contrast,
                         effect: img_fill.effect,
-                        ..ImageNode::new(img_fill.bin_data_id, Some(img_content.data.load()))
+                        ..ImageNode::new_shared(
+                            img_fill.bin_data_id,
+                            Some(img_content.data.load_shared()),
+                        )
                     }),
                     BoundingBox::new(cell_x, cell_y, cell_w, cell_h),
                 );

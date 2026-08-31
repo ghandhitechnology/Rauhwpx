@@ -4,6 +4,7 @@
 //! 각 노드는 페이지 내 위치와 크기가 계산된 상태를 가진다.
 
 use serde::Serialize;
+use std::sync::Arc;
 
 use super::composer::CharOverlapInfo;
 use super::layout::CellContext;
@@ -649,7 +650,7 @@ pub struct PageBackgroundNode {
 pub struct PageBackgroundImage {
     /// 이미지 데이터 (JSON 직렬화 시 제외)
     #[serde(skip)]
-    pub data: Vec<u8>,
+    pub data: Arc<[u8]>,
     /// 이미지 채우기 모드
     pub fill_mode: ImageFillMode,
     /// 밝기
@@ -1090,7 +1091,7 @@ pub struct ImageNode {
     pub bin_data_id: u16,
     /// 이미지 데이터 (캐시용, JSON 직렬화 시 제외)
     #[serde(skip)]
-    pub data: Option<Vec<u8>>,
+    pub data: Option<Arc<[u8]>>,
     /// 소속 구역 인덱스
     pub section_index: Option<usize>,
     /// 이미지 컨트롤을 소유한 문단 인덱스
@@ -1188,6 +1189,11 @@ impl ImageNode {
     }
 
     pub fn new(bin_data_id: u16, data: Option<Vec<u8>>) -> Self {
+        Self::new_shared(bin_data_id, data.map(Arc::from))
+    }
+
+    /// Construct an image node without copying an already materialized BinData payload.
+    pub fn new_shared(bin_data_id: u16, data: Option<Arc<[u8]>>) -> Self {
         Self {
             bin_data_id,
             data,

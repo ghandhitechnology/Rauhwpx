@@ -346,8 +346,8 @@ impl Hwp3DrawingPolygon {
         let info1_len = reader.read_u32::<LittleEndian>()?;
         let point_count = reader.read_u32::<LittleEndian>()?;
         let info2_len = reader.read_u32::<LittleEndian>()?;
-        super::check_record_count(point_count as usize)?;
-        let mut points = Vec::with_capacity(point_count as usize);
+        super::check_record_items(point_count as usize, 8)?;
+        let mut points = Vec::with_capacity((point_count as usize).min(1024));
         for _ in 0..point_count {
             points.push([
                 reader.read_i32::<LittleEndian>()?,
@@ -374,10 +374,7 @@ impl Hwp3DrawingTextBox {
     pub fn read<R: Read>(mut reader: R) -> Result<Self, io::Error> {
         let info1_len = reader.read_u32::<LittleEndian>()?;
         let info2_len = reader.read_u32::<LittleEndian>()?;
-        let mut paragraph_list_data = super::alloc_record_buf(info2_len as usize)?;
-        if info2_len > 0 {
-            reader.read_exact(&mut paragraph_list_data)?;
-        }
+        let paragraph_list_data = super::read_record_buf(&mut reader, info2_len as usize)?;
         Ok(Hwp3DrawingTextBox {
             info1_len,
             info2_len,
@@ -399,8 +396,8 @@ impl Hwp3DrawingCurve {
         let info1_len = reader.read_u32::<LittleEndian>()?;
         let point_count = reader.read_u32::<LittleEndian>()?;
         let info2_len = reader.read_u32::<LittleEndian>()?;
-        super::check_record_count(point_count as usize)?;
-        let mut points = Vec::with_capacity(point_count as usize);
+        super::check_record_items(point_count as usize, 8)?;
+        let mut points = Vec::with_capacity((point_count as usize).min(1024));
         for _ in 0..point_count {
             points.push([
                 reader.read_i32::<LittleEndian>()?,
@@ -452,18 +449,15 @@ impl Hwp3DrawingExtendedPolygon {
         let info1_len = reader.read_u32::<LittleEndian>()?;
         let point_count = reader.read_u32::<LittleEndian>()?;
         let info2_len = reader.read_u32::<LittleEndian>()?;
-        super::check_record_count(point_count as usize)?;
-        let mut points = Vec::with_capacity(point_count as usize);
+        super::check_record_items(point_count as usize, 9)?;
+        let mut points = Vec::with_capacity((point_count as usize).min(1024));
         for _ in 0..point_count {
             points.push([
                 reader.read_i32::<LittleEndian>()?,
                 reader.read_i32::<LittleEndian>()?,
             ]);
         }
-        let mut line_attrs = super::alloc_record_buf(point_count as usize)?;
-        if point_count > 0 {
-            reader.read_exact(&mut line_attrs)?;
-        }
+        let line_attrs = super::read_record_buf(&mut reader, point_count as usize)?;
         Ok(Hwp3DrawingExtendedPolygon {
             info1_len,
             point_count,
@@ -471,6 +465,23 @@ impl Hwp3DrawingExtendedPolygon {
             points,
             line_attrs,
         })
+    }
+}
+
+#[cfg(test)]
+mod resource_limit_tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn polygon_rejects_hostile_point_count_before_preallocation() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+
+        let error = Hwp3DrawingPolygon::read(Cursor::new(bytes)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     }
 }
 
@@ -548,11 +559,9 @@ impl Hwp3DrawingObject {
             _ => {
                 // 알 수 없는 객체
                 let info1_len = reader.read_u32::<LittleEndian>()?;
-                let mut info1 = super::alloc_record_buf(info1_len as usize)?;
-                reader.read_exact(&mut info1)?;
+                let info1 = super::read_record_buf(&mut reader, info1_len as usize)?;
                 let info2_len = reader.read_u32::<LittleEndian>()?;
-                let mut info2 = super::alloc_record_buf(info2_len as usize)?;
-                reader.read_exact(&mut info2)?;
+                let info2 = super::read_record_buf(&mut reader, info2_len as usize)?;
 
                 let mut all_data = Vec::new();
                 all_data.extend(info1);

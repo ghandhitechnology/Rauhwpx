@@ -9,11 +9,13 @@ import {
   cliproxyConfigFromEnv,
   createCliproxyClient,
   DEFAULT_CLIPROXY_URL,
+  MAX_CLIPROXY_KEY_CHARS,
   normalizeCliproxyUrl,
   parseClaudeUsage,
   parseCodexUsage,
   summarizeAuthFiles,
 } from '../cliproxy.mjs';
+import { replaceFileAtomically } from '../harness-update.mjs';
 
 async function tmpRoot() {
   return fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cliproxy-'));
@@ -132,8 +134,9 @@ test('applyCliproxyToSummary overlays actual percents and keeps local token tota
   assert.equal(next.cliproxy.connected, true);
 });
 
-test('connect persists the key, queries official usage, and never returns the secret', async () => {
+test('connect persists the key, queries official usage, and never returns the secret', async (t) => {
   const rootDir = await tmpRoot();
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
   const calls = [];
   const client = createCliproxyClient({
     rootDir,
@@ -201,12 +204,11 @@ test('connect persists the key, queries official usage, and never returns the se
   const after = JSON.parse(await fs.readFile(path.join(rootDir, 'cliproxy.json'), 'utf8'));
   assert.equal(after.enabled, false);
   assert.equal(after.key, '');
-
-  await fs.rm(rootDir, { recursive: true, force: true });
 });
 
-test('connect fails closed on a bad management key and does not persist it', async () => {
+test('connect fails closed on a bad management key and does not persist it', async (t) => {
   const rootDir = await tmpRoot();
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
   const client = createCliproxyClient({
     rootDir,
     env: {},
@@ -215,11 +217,111 @@ test('connect fails closed on a bad management key and does not persist it', asy
   await client.init();
   await assert.rejects(() => client.connect({ url: DEFAULT_CLIPROXY_URL, key: 'nope' }), /관리 키/);
   await assert.rejects(fs.readFile(path.join(rootDir, 'cliproxy.json')));
-  await fs.rm(rootDir, { recursive: true, force: true });
 });
 
-test('refresh uses the saved config and caches a successful quota for a minute', async () => {
+test('connect bounds management keys before network access and persists a reloadable maximum', async (t) => {
   const rootDir = await tmpRoot();
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  let fetches = 0;
+  const client = await createCliproxyClient({
+    rootDir,
+    env: {},
+    fetchImpl: async () => {
+      fetches += 1;
+      return jsonResponse(200, { files: [] });
+    },
+  }).init();
+
+  await assert.rejects(
+    client.connect({ url: DEFAULT_CLIPROXY_URL, key: 'k'.repeat(MAX_CLIPROXY_KEY_CHARS + 1) }),
+    { code: 'INVALID_CLIPROXY_KEY' },
+  );
+  assert.equal(fetches, 0);
+  await assert.rejects(fs.access(client.configPath), { code: 'ENOENT' });
+
+  await client.connect({
+    url: DEFAULT_CLIPROXY_URL,
+    key: 'k'.repeat(MAX_CLIPROXY_KEY_CHARS),
+  });
+  const reloaded = await createCliproxyClient({ rootDir, env: {} }).init();
+  assert.equal(reloaded.configured(), true);
+});
+
+test('failed CLIProxy persistence leaves memory unchanged and does not poison later writes', async (t) => {
+  const rootDir = await tmpRoot();
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  let failNext = true;
+  const client = await createCliproxyClient({
+    rootDir,
+    env: {},
+    fetchImpl: async () => jsonResponse(200, { files: [] }),
+    async replaceFile(temp, target, options) {
+      if (failNext) {
+        failNext = false;
+        throw new Error('injected persistence failure');
+      }
+      return replaceFileAtomically(temp, target, options);
+    },
+  }).init();
+
+  await assert.rejects(
+    client.connect({ url: DEFAULT_CLIPROXY_URL, key: 'first-key' }),
+    /injected persistence failure/,
+  );
+  assert.equal(client.configured(), false);
+  await client.connect({ url: DEFAULT_CLIPROXY_URL, key: 'second-key' });
+  assert.equal(client.configured(), true);
+  assert.equal(JSON.parse(await fs.readFile(client.configPath, 'utf8')).key, 'second-key');
+});
+
+test('CLIProxy recovers a Windows config left at the replacement gap', async (t) => {
+  const rootDir = await tmpRoot();
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const configPath = path.join(rootDir, 'cliproxy.json');
+  await fs.writeFile(`${configPath}.previous-write`, JSON.stringify({
+    url: DEFAULT_CLIPROXY_URL,
+    key: 'recovered-key',
+    enabled: true,
+  }));
+
+  const client = await createCliproxyClient({
+    rootDir,
+    platform: 'win32',
+    env: {},
+    fetchImpl: async () => jsonResponse(200, { files: [] }),
+  }).init();
+  assert.equal(client.configured(), true);
+  assert.equal(JSON.parse(await fs.readFile(configPath, 'utf8')).key, 'recovered-key');
+});
+
+test('init rejects an oversized persistent config before parsing its management key', async (t) => {
+  const rootDir = await tmpRoot();
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  await fs.writeFile(path.join(rootDir, 'cliproxy.json'), Buffer.alloc(64 * 1024 + 1, 0x20));
+
+  await assert.rejects(createCliproxyClient({ rootDir, env: {} }).init(), {
+    code: 'BOUNDED_FILE_TOO_LARGE',
+  });
+});
+
+test('management responses above 8 MiB fail without being parsed or persisted', async (t) => {
+  const rootDir = await tmpRoot();
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const client = await createCliproxyClient({
+    rootDir,
+    env: {},
+    fetchImpl: async () => new Response(Buffer.alloc(8 * 1024 * 1024 + 1), { status: 200 }),
+  }).init();
+  await assert.rejects(
+    client.connect({ url: DEFAULT_CLIPROXY_URL, key: 'secret' }),
+    (error) => error.code === 'CLIPROXY_RESPONSE_TOO_LARGE',
+  );
+  await assert.rejects(fs.readFile(path.join(rootDir, 'cliproxy.json')));
+});
+
+test('refresh uses the saved config and caches a successful quota for a minute', async (t) => {
+  const rootDir = await tmpRoot();
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
   let hits = 0;
   const client = createCliproxyClient({
     rootDir,
@@ -245,5 +347,4 @@ test('refresh uses the saved config and caches a successful quota for a minute',
   assert.equal(hits, firstHits);
   await client.refresh(true);
   assert.ok(hits > firstHits);
-  await fs.rm(rootDir, { recursive: true, force: true });
 });

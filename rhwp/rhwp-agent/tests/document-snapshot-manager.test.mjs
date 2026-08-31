@@ -22,7 +22,7 @@ async function temporaryManager(t, options = {}) {
   };
 }
 
-test('materializes a browser document snapshot under the isolated chat workspace', async (t) => {
+test('materializes a browser document snapshot under hub-owned storage', async (t) => {
   const { root, manager } = await temporaryManager(t);
   const result = await manager.materialize({
     chatId: 'chat-a',
@@ -43,6 +43,7 @@ test('materializes a browser document snapshot under the isolated chat workspace
   assert.equal(result.revision, 7);
   assert.match(result.checksum, /^sha256:[0-9a-f]{64}$/);
   assert.ok(path.resolve(result.path).startsWith(path.resolve(root) + path.sep));
+  assert.ok(result.path.startsWith(manager.readOnlyRootForChat('chat-a') + path.sep));
   assert.deepEqual(await fs.readFile(result.path), CFB);
   if (process.platform !== 'win32') {
     assert.equal((await fs.stat(result.path)).mode & 0o077, 0);
@@ -62,6 +63,43 @@ test('preserves HWPX format while correcting a stale display-name extension', as
   });
   assert.equal(result.fileName, 'renamed.hwpx');
   assert.deepEqual(await fs.readFile(result.path), ZIP);
+});
+
+test('hub-private snapshots ignore provider-controlled workspace parents', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-snapshot-private-root-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const writableRoot = path.join(root, 'work');
+  const storageRoot = path.join(root, 'hub-storage');
+  const outside = path.join(root, 'outside');
+  await Promise.all([
+    fs.mkdir(writableRoot),
+    fs.mkdir(storageRoot),
+    fs.mkdir(outside),
+  ]);
+  await fs.symlink(
+    outside,
+    path.join(writableRoot, '.rhwp-agent'),
+    process.platform === 'win32' ? 'junction' : 'dir',
+  );
+  const manager = new DocumentSnapshotManager({
+    rootDir: storageRoot,
+    writableRoot,
+    createId: () => 'snapshot-private',
+  });
+
+  const result = await manager.materialize({
+    chatId: 'chat-private',
+    documentIdentity: { documentId: 'doc-private', documentName: 'private.hwp' },
+    snapshot: { sourceFormat: 'hwp', byteLength: CFB.length, dataBase64: CFB.toString('base64') },
+  });
+
+  assert.ok(path.resolve(result.path).startsWith(path.resolve(storageRoot) + path.sep));
+  assert.deepEqual(await fs.readFile(result.path), CFB);
+  assert.deepEqual(await fs.readdir(outside), []);
+  assert.throws(
+    () => new DocumentSnapshotManager({ rootDir: writableRoot, writableRoot }),
+    /must not overlap the provider-writable root/,
+  );
 });
 
 test('rejects malformed, oversized, mismatched, and unscoped snapshots', async (t) => {
@@ -95,9 +133,102 @@ test('rejects malformed, oversized, mismatched, and unscoped snapshots', async (
     }),
     (error) => error.code === 'SNAPSHOT_SCOPE_MISSING',
   );
+  await assert.rejects(
+    manager.materialize({
+      chatId: '', documentIdentity: base.documentIdentity,
+      snapshot: { sourceFormat: 'hwp', byteLength: CFB.length, dataBase64: CFB.toString('base64') },
+    }),
+    (error) => error.code === 'SNAPSHOT_SCOPE_MISSING',
+  );
   const huge = Buffer.alloc(17, 1).toString('base64');
   await assert.rejects(
     manager.materialize({ ...base, snapshot: { sourceFormat: 'hwp', dataBase64: huge } }),
     (error) => error.code === 'SNAPSHOT_TOO_LARGE',
   );
+});
+
+test('per-chat snapshot quotas are race-safe', async (t) => {
+  let sequence = 0;
+  const { manager } = await temporaryManager(t, {
+    maxFilesPerChat: 1,
+    maxChatBytes: 128,
+    createId: () => `snapshot-${++sequence}`,
+  });
+  const request = (name) => manager.materialize({
+    chatId: 'chat-quota',
+    documentIdentity: { documentId: 'doc-a', documentName: name },
+    snapshot: { sourceFormat: 'hwp', byteLength: CFB.length, dataBase64: CFB.toString('base64') },
+  });
+  const results = await Promise.allSettled([request('one.hwp'), request('two.hwp')]);
+  assert.equal(results[0].status, 'fulfilled');
+  assert.equal(results[1].status, 'rejected');
+  assert.equal(results[1].reason.code, 'SNAPSHOT_FILE_LIMIT');
+});
+
+test('per-chat snapshot aggregate bytes are bounded', async (t) => {
+  let sequence = 0;
+  const { manager } = await temporaryManager(t, {
+    maxFilesPerChat: 20,
+    maxChatBytes: CFB.length,
+    createId: () => `snapshot-${++sequence}`,
+  });
+  const request = () => manager.materialize({
+    chatId: 'chat-bytes',
+    documentIdentity: { documentId: 'doc-a', documentName: 'one.hwp' },
+    snapshot: { sourceFormat: 'hwp', byteLength: CFB.length, dataBase64: CFB.toString('base64') },
+  });
+  await request();
+  await assert.rejects(request(), (error) => error.code === 'SNAPSHOT_CHAT_QUOTA');
+});
+
+test('discard removes an undelivered allocation and releases its chat quota', async (t) => {
+  let sequence = 0;
+  const { manager } = await temporaryManager(t, {
+    maxFilesPerChat: 1,
+    maxChatBytes: CFB.length,
+    createId: () => `snapshot-${++sequence}`,
+  });
+  const request = () => manager.materialize({
+    chatId: 'chat-cancelled',
+    documentIdentity: { documentId: 'doc-a', documentName: 'cancelled.hwp' },
+    snapshot: { sourceFormat: 'hwp', byteLength: CFB.length, dataBase64: CFB.toString('base64') },
+  });
+
+  const cancelled = await request();
+  await manager.discard(cancelled);
+  await assert.rejects(fs.stat(cancelled.path), (error) => error.code === 'ENOENT');
+
+  const replacement = await request();
+  assert.deepEqual(await fs.readFile(replacement.path), CFB);
+  await assert.rejects(
+    manager.discard({ path: path.join(manager.baseDir, '..', 'outside.hwp') }),
+    (error) => error.code === 'SNAPSHOT_PATH_UNSAFE',
+  );
+});
+
+test('drain waits for admitted snapshot writes before record cleanup', async (t) => {
+  const { manager } = await temporaryManager(t);
+  const materializeSerial = manager.materializeSerial.bind(manager);
+  let releaseWrite;
+  const writeGate = new Promise((resolve) => { releaseWrite = resolve; });
+  manager.materializeSerial = async (args) => {
+    await writeGate;
+    return materializeSerial(args);
+  };
+
+  const pending = manager.materialize({
+    chatId: 'chat-drain',
+    documentIdentity: { documentId: 'doc-a', documentName: 'drain.hwp' },
+    snapshot: { sourceFormat: 'hwp', byteLength: CFB.length, dataBase64: CFB.toString('base64') },
+  });
+  let drained = false;
+  const drain = manager.drain().then(() => { drained = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(drained, false);
+
+  releaseWrite();
+  const result = await pending;
+  await drain;
+  assert.equal(drained, true);
+  assert.deepEqual(await fs.readFile(result.path), CFB);
 });

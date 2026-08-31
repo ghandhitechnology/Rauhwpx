@@ -11,9 +11,52 @@
   const BADGE_CLASS = 'rhwp-badge';
   const HOVER_CLASS = 'rhwp-hover-card';
   const PROCESSED_ATTR = 'data-rhwp-processed';
+  const THUMBNAIL_CACHE_MAX_ENTRIES = 32;
+  const THUMBNAIL_CACHE_MAX_ESTIMATED_BYTES = 32 * 1024 * 1024;
+
+  function createBoundedThumbnailCache() {
+    const entries = new Map();
+    let estimatedBytes = 0;
+    return {
+      has(url) { return entries.has(url); },
+      get(url) {
+        const entry = entries.get(url);
+        if (!entry) return undefined;
+        entries.delete(url);
+        entries.set(url, entry);
+        return entry.value;
+      },
+      set(url, value) {
+        const existing = entries.get(url);
+        if (existing) {
+          entries.delete(url);
+          estimatedBytes -= existing.estimatedBytes;
+        }
+        const entryBytes = (url.length * 2) + (typeof value?.dataUri === 'string'
+          ? value.dataUri.length * 2
+          : 0) + 256;
+        if (!Number.isSafeInteger(entryBytes) || entryBytes > THUMBNAIL_CACHE_MAX_ESTIMATED_BYTES) {
+          return false;
+        }
+        while (
+          entries.size >= THUMBNAIL_CACHE_MAX_ENTRIES
+          || estimatedBytes + entryBytes > THUMBNAIL_CACHE_MAX_ESTIMATED_BYTES
+        ) {
+          const oldestUrl = entries.keys().next().value;
+          if (oldestUrl === undefined) break;
+          const oldest = entries.get(oldestUrl);
+          entries.delete(oldestUrl);
+          estimatedBytes -= oldest.estimatedBytes;
+        }
+        entries.set(url, { value, estimatedBytes: entryBytes });
+        estimatedBytes += entryBytes;
+        return true;
+      }
+    };
+  }
 
   let settings = { autoOpen: true, showBadges: true, hoverPreview: true };
-  const thumbnailCache = new Map(); // URL → { dataUri, width, height } | null
+  const thumbnailCache = createBoundedThumbnailCache();
 
   // 설정 로드
   browser.runtime.sendMessage({ type: 'get-settings' }).then((result) => {

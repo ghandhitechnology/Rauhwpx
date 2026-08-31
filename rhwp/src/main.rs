@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::io;
 use std::path::Path;
 use std::process;
 
@@ -15,6 +16,13 @@ const EXIT_RUNTIME: i32 = 1;
 /// 이미 확립된 CLI 계약이므로 상수화 대상에서 제외하고
 /// 기존 `process::exit(3)`/`process::exit(4)` 호출부를 그대로 둔다.
 const EXIT_USAGE: i32 = 2;
+
+/// Read one explicit CLI path without allocating from an attacker-controlled
+/// file length. CLI paths count as one-shot local selections, but the parser's
+/// 512 MiB container and expanded-stream limits still apply.
+fn read_cli_file(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
+    rhwp::parser::limits::read_local_file_once(path)
+}
 
 /// [#2707] 명령 함수가 돌려준 종료 코드를 프로세스 종료 코드로 전파한다.
 ///
@@ -1183,7 +1191,7 @@ fn export_svg(args: &[String]) -> i32 {
     }
 
     // 파일 읽기
-    let data = match fs::read(file_path) {
+    let data = match read_cli_file(file_path) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
@@ -1194,7 +1202,7 @@ fn export_svg(args: &[String]) -> i32 {
     let source_format = rhwp::parser::detect_format(&data);
 
     // 문서 로드
-    let mut doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
+    let mut doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&data) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: 문서 파싱 실패 - {}", e);
@@ -1419,7 +1427,7 @@ fn export_render_tree(args: &[String]) -> i32 {
         return EXIT_USAGE;
     };
 
-    let data = match fs::read(file_path) {
+    let data = match read_cli_file(file_path) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
@@ -1428,7 +1436,7 @@ fn export_render_tree(args: &[String]) -> i32 {
     };
     let source_format = rhwp::parser::detect_format(&data);
 
-    let mut doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
+    let mut doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&data) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: HWP 파싱 실패 - {}", e);
@@ -1576,14 +1584,14 @@ fn export_structure(args: &[String]) -> i32 {
         return EXIT_USAGE;
     };
 
-    let data = match fs::read(file_path) {
+    let data = match read_cli_file(file_path) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
             return EXIT_RUNTIME;
         }
     };
-    let doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
+    let doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&data) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: HWP 파싱 실패 - {}", e);
@@ -1926,7 +1934,7 @@ fn export_png(args: &[String]) -> i32 {
         font_paths: font_paths.clone(),
     };
 
-    let data = match fs::read(file_path) {
+    let data = match read_cli_file(file_path) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
@@ -1934,7 +1942,7 @@ fn export_png(args: &[String]) -> i32 {
         }
     };
 
-    let mut core = match rhwp::document_core::DocumentCore::from_bytes(&data) {
+    let mut core = match rhwp::document_core::DocumentCore::from_local_file_bytes(&data) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("오류: HWP 파싱 실패 - {:?}", e);
@@ -2311,7 +2319,7 @@ fn export_pdf(args: &[String]) -> i32 {
             output_file = format!("output/{}.pdf", stem);
         }
 
-        let data = match fs::read(file_path) {
+        let data = match read_cli_file(file_path) {
             Ok(d) => d,
             Err(e) => {
                 eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
@@ -2319,7 +2327,7 @@ fn export_pdf(args: &[String]) -> i32 {
             }
         };
 
-        let mut doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
+        let mut doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&data) {
             Ok(d) => d,
             Err(e) => {
                 eprintln!("오류: 문서 파싱 실패 - {}", e);
@@ -2507,7 +2515,7 @@ fn export_text(args: &[String]) -> i32 {
         return EXIT_USAGE;
     };
 
-    let data = match fs::read(file_path) {
+    let data = match read_cli_file(file_path) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
@@ -2515,7 +2523,7 @@ fn export_text(args: &[String]) -> i32 {
         }
     };
 
-    let doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
+    let doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&data) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: HWP 파싱 실패 - {}", e);
@@ -2673,14 +2681,14 @@ fn export_tables(args: &[String]) -> i32 {
         return EXIT_USAGE;
     };
 
-    let data = match fs::read(file_path) {
+    let data = match read_cli_file(file_path) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
             return EXIT_RUNTIME;
         }
     };
-    let doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
+    let doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&data) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: HWP 파싱 실패 - {}", e);
@@ -2786,7 +2794,7 @@ fn export_markdown(args: &[String]) -> i32 {
         return EXIT_USAGE;
     };
 
-    let data = match fs::read(file_path) {
+    let data = match read_cli_file(file_path) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
@@ -2794,7 +2802,7 @@ fn export_markdown(args: &[String]) -> i32 {
         }
     };
 
-    let doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
+    let doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&data) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: HWP 파싱 실패 - {}", e);
@@ -3337,11 +3345,11 @@ fn batch_fail_record(path: &str, message: String) -> serde_json::Value {
 }
 
 fn batch_export_text_record_inner(path: &str) -> serde_json::Value {
-    let data = match fs::read(path) {
+    let data = match read_cli_file(path) {
         Ok(d) => d,
         Err(e) => return batch_fail_record(path, format!("파일을 읽을 수 없습니다: {}", e)),
     };
-    let doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
+    let doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&data) {
         Ok(d) => d,
         Err(e) => return batch_fail_record(path, format!("파싱 실패: {}", e)),
     };
@@ -3379,11 +3387,11 @@ fn batch_structure_record_inner(
     path: &str,
     mode: rhwp::document_core::queries::structure::StructureMode,
 ) -> serde_json::Value {
-    let data = match fs::read(path) {
+    let data = match read_cli_file(path) {
         Ok(d) => d,
         Err(e) => return batch_fail_record(path, format!("파일을 읽을 수 없습니다: {}", e)),
     };
-    let doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
+    let doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&data) {
         Ok(d) => d,
         Err(e) => return batch_fail_record(path, format!("파싱 실패: {}", e)),
     };
@@ -3395,11 +3403,11 @@ fn batch_structure_record_inner(
 /// 같은 스키마(`tables_json_value` 공유)다.
 fn batch_tables_record_inner(path: &str) -> serde_json::Value {
     use rhwp::document_core::queries::table_extract::extract_tables;
-    let data = match fs::read(path) {
+    let data = match read_cli_file(path) {
         Ok(d) => d,
         Err(e) => return batch_fail_record(path, format!("파일을 읽을 수 없습니다: {}", e)),
     };
-    let doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
+    let doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&data) {
         Ok(d) => d,
         Err(e) => return batch_fail_record(path, format!("파싱 실패: {}", e)),
     };
@@ -3409,11 +3417,11 @@ fn batch_tables_record_inner(path: &str) -> serde_json::Value {
 
 /// [#3346] `batch fields --json` 의 파일당 레코드 — `fields --json` 봉투와 같은 스키마.
 fn batch_fields_record_inner(path: &str) -> serde_json::Value {
-    let data = match fs::read(path) {
+    let data = match read_cli_file(path) {
         Ok(d) => d,
         Err(e) => return batch_fail_record(path, format!("파일을 읽을 수 없습니다: {}", e)),
     };
-    let doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
+    let doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&data) {
         Ok(d) => d,
         Err(e) => return batch_fail_record(path, format!("파싱 실패: {}", e)),
     };
@@ -3427,11 +3435,11 @@ fn batch_fields_record_inner(path: &str) -> serde_json::Value {
 /// 파일당 매치 상한을 둔다(단건 `search --limit` 과 같은 취지).
 fn batch_search_record_inner(path: &str, query: &str) -> serde_json::Value {
     const BATCH_MATCH_LIMIT: usize = 1000;
-    let data = match fs::read(path) {
+    let data = match read_cli_file(path) {
         Ok(d) => d,
         Err(e) => return batch_fail_record(path, format!("파일을 읽을 수 없습니다: {}", e)),
     };
-    let doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
+    let doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&data) {
         Ok(d) => d,
         Err(e) => return batch_fail_record(path, format!("파싱 실패: {}", e)),
     };
@@ -3446,13 +3454,13 @@ fn batch_search_record_inner(path: &str, query: &str) -> serde_json::Value {
 /// [#3238] `batch info --json` 의 파일당 레코드 — `info --json` 과 같은 스키마
 /// (`info_json_value` 공유)라 소비자가 단건/배치를 같은 코드로 읽는다.
 fn batch_info_record_inner(path: &str) -> serde_json::Value {
-    let data = match fs::read(path) {
+    let data = match read_cli_file(path) {
         Ok(d) => d,
         Err(e) => return batch_fail_record(path, format!("파일을 읽을 수 없습니다: {}", e)),
     };
     let file_size = data.len();
     let detected_format = rhwp::parser::detect_format(&data);
-    let doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
+    let doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&data) {
         Ok(d) => d,
         Err(e) => return batch_fail_record(path, format!("파싱 실패: {}", e)),
     };
@@ -3592,7 +3600,7 @@ fn show_info(args: &[String]) -> i32 {
     };
 
     // 파일 읽기
-    let data = match fs::read(file_path) {
+    let data = match read_cli_file(file_path) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
@@ -3604,7 +3612,7 @@ fn show_info(args: &[String]) -> i32 {
     let detected_format = rhwp::parser::detect_format(&data);
 
     // 문서 파싱
-    let doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
+    let doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&data) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: 문서 파싱 실패 - {}", e);
@@ -3927,7 +3935,7 @@ fn dump_note_shape(args: &[String]) -> i32 {
     }
 
     let file_path = &args[0];
-    let data = match fs::read(file_path) {
+    let data = match read_cli_file(file_path) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
@@ -3935,7 +3943,7 @@ fn dump_note_shape(args: &[String]) -> i32 {
         }
     };
 
-    let doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
+    let doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&data) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: HWP 파싱 실패 - {}", e);
@@ -4056,7 +4064,7 @@ fn dump_pages(args: &[String]) -> i32 {
         }
     }
 
-    let data = match fs::read(file_path) {
+    let data = match read_cli_file(file_path) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
@@ -4064,7 +4072,7 @@ fn dump_pages(args: &[String]) -> i32 {
         }
     };
 
-    let mut doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
+    let mut doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&data) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: HWP 파싱 실패 - {}", e);
@@ -4138,7 +4146,7 @@ fn dump_endnote_lines(args: &[String]) -> i32 {
         None
     };
 
-    let data = match fs::read(file_path) {
+    let data = match read_cli_file(file_path) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
@@ -4146,7 +4154,7 @@ fn dump_endnote_lines(args: &[String]) -> i32 {
         }
     };
 
-    let doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
+    let doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&data) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: HWP 파싱 실패 - {}", e);
@@ -4555,7 +4563,7 @@ fn dump_controls(args: &[String]) -> i32 {
         }
     }
 
-    let data = match fs::read(file_path) {
+    let data = match read_cli_file(file_path) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
@@ -4563,7 +4571,7 @@ fn dump_controls(args: &[String]) -> i32 {
         }
     };
 
-    let doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
+    let doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&data) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: 문서 파싱 실패 - {}", e);
@@ -5795,14 +5803,14 @@ fn search_document(args: &[String]) -> i32 {
         return EXIT_USAGE;
     };
 
-    let data = match fs::read(file_path) {
+    let data = match read_cli_file(file_path) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
             return EXIT_RUNTIME;
         }
     };
-    let doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
+    let doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&data) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: HWP 파싱 실패 - {}", e);
@@ -5863,7 +5871,7 @@ fn diag_document(args: &[String]) -> i32 {
     }
 
     let file_path = &args[0];
-    let data = match fs::read(file_path) {
+    let data = match read_cli_file(file_path) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
@@ -5871,7 +5879,7 @@ fn diag_document(args: &[String]) -> i32 {
         }
     };
 
-    let doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
+    let doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&data) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: HWP 파싱 실패 - {}", e);
@@ -6061,7 +6069,7 @@ fn convert_hwp(args: &[String]) -> i32 {
     let output_path = &positionals[1];
 
     // 입력 파일 읽기
-    let data = match fs::read(input_path) {
+    let data = match read_cli_file(input_path) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", input_path, e);
@@ -6070,7 +6078,7 @@ fn convert_hwp(args: &[String]) -> i32 {
     };
 
     // 문서 로드
-    let mut doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
+    let mut doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&data) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: HWP 파싱 실패 - {}", e);
@@ -6107,7 +6115,8 @@ fn convert_hwp(args: &[String]) -> i32 {
             Ok(_) => {
                 println!("저장 완료: {} ({}KB)", output_path, bytes.len() / 1024);
                 if verify_options.enabled() {
-                    let reloaded = match rhwp::wasm_api::HwpDocument::from_bytes(&bytes) {
+                    let reloaded = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&bytes)
+                    {
                         Ok(d) => d,
                         Err(e) => {
                             eprintln!("검증 실패: 저장된 HWP 재파싱 실패 - {}", e);
@@ -6216,7 +6225,7 @@ fn export_doclang(args: &[String]) -> i32 {
         return EXIT_USAGE;
     }
 
-    let data = match fs::read(input_path) {
+    let data = match read_cli_file(input_path) {
         Ok(d) => d,
         Err(e) => {
             eprintln!(
@@ -6326,7 +6335,7 @@ fn export_hwpx(args: &[String]) -> i32 {
         return EXIT_USAGE;
     }
 
-    let data = match fs::read(input_path) {
+    let data = match read_cli_file(input_path) {
         Ok(d) => d,
         Err(e) => {
             eprintln!(
@@ -6338,7 +6347,7 @@ fn export_hwpx(args: &[String]) -> i32 {
         }
     };
 
-    let doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
+    let doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&data) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: 문서 파싱 실패 - {}", e);
@@ -6361,7 +6370,8 @@ fn export_hwpx(args: &[String]) -> i32 {
                     bytes.len() / 1024
                 );
                 if verify_options.enabled() {
-                    let reloaded = match rhwp::wasm_api::HwpDocument::from_bytes(&bytes) {
+                    let reloaded = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&bytes)
+                    {
                         Ok(d) => d,
                         Err(e) => {
                             eprintln!("검증 실패: 저장된 HWPX 재파싱 실패 - {}", e);
@@ -6492,17 +6502,18 @@ fn export_hml(args: &[String]) {
         eprintln!("오류: 입력과 출력 경로가 같습니다. 원본을 덮어쓰지 않습니다.");
         process::exit(2);
     }
-    let data = fs::read(&paths.input).unwrap_or_else(|error| {
+    let data = read_cli_file(&paths.input).unwrap_or_else(|error| {
         eprintln!(
             "오류: 파일을 읽을 수 없습니다 - {}: {error}",
             paths.input.display()
         );
         process::exit(1);
     });
-    let core = rhwp::document_core::DocumentCore::from_bytes(&data).unwrap_or_else(|error| {
-        eprintln!("오류: 문서 파싱 실패 - {error}");
-        process::exit(1);
-    });
+    let core =
+        rhwp::document_core::DocumentCore::from_local_file_bytes(&data).unwrap_or_else(|error| {
+            eprintln!("오류: 문서 파싱 실패 - {error}");
+            process::exit(1);
+        });
     let bytes = core.export_hml_native().unwrap_or_else(|error| {
         print_hml_export_error(&error);
         process::exit(1);
@@ -6577,7 +6588,10 @@ fn build_from_ingest(args: &[String]) -> i32 {
         }
     };
 
-    let bytes = match fs::read(input) {
+    let bytes = match rhwp::parser::limits::read_local_file_once_with_limit(
+        Path::new(input),
+        rhwp::parser::limits::MAX_STRUCTURAL_BYTES,
+    ) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("오류: 입력 파일 읽기 실패 - {}: {}", input, e);
@@ -6585,7 +6599,7 @@ fn build_from_ingest(args: &[String]) -> i32 {
         }
     };
 
-    let ingest = match rhwp::parser::ingest::parse_ingest_bytes(&bytes) {
+    let ingest = match rhwp::parser::ingest::parse_ingest_bytes_from_local_file(&bytes) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: ingest JSON 파싱 실패 - {}", e);
@@ -6639,7 +6653,7 @@ fn dump_raw_records(args: &[String]) -> i32 {
         eprintln!("사용법: rhwp dump-records <파일.hwp>");
         return EXIT_USAGE;
     }
-    let data = match fs::read(&args[0]) {
+    let data = match read_cli_file(&args[0]) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: {}", e);
@@ -6737,7 +6751,7 @@ fn test_shape_roundtrip(args: &[String]) {
         "/tmp/test-shape-out.hwp"
     };
 
-    let data = match fs::read(input) {
+    let data = match read_cli_file(input) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("입력 파일 읽기 오류: {}", e);
@@ -6745,7 +6759,7 @@ fn test_shape_roundtrip(args: &[String]) {
         }
     };
 
-    let mut doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
+    let mut doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&data) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("HWP 파싱 오류: {:?}", e);
@@ -6798,7 +6812,7 @@ fn test_caption(args: &[String]) {
         return;
     }
 
-    let data = match fs::read(&args[0]) {
+    let data = match read_cli_file(&args[0]) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("파일 읽기 오류: {}", e);
@@ -6806,7 +6820,7 @@ fn test_caption(args: &[String]) {
         }
     };
 
-    let mut doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
+    let mut doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&data) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("파싱 오류: {}", e);
@@ -7064,8 +7078,9 @@ fn test_field_roundtrip(args: &[String]) {
         .map(|s| s.as_str())
         .unwrap_or("output/field_test.hwp");
 
-    let data = std::fs::read(input).expect("파일 읽기 실패");
-    let mut core = rhwp::document_core::DocumentCore::from_bytes(&data).expect("문서 파싱 실패");
+    let data = read_cli_file(input).expect("파일 읽기 실패");
+    let mut core =
+        rhwp::document_core::DocumentCore::from_local_file_bytes(&data).expect("문서 파싱 실패");
 
     // 1. 필드 목록 출력
     let fields = core.collect_all_fields();
@@ -7113,7 +7128,10 @@ fn test_field_roundtrip(args: &[String]) {
     println!("\n저장: {} ({}바이트)", output, saved.len());
 
     // 5. 재로딩 → 필드 확인
-    let mut core2 = rhwp::document_core::DocumentCore::from_bytes(&saved).expect("재로딩 실패");
+    // The bytes came from our bounded serializer and may legitimately exceed
+    // the smaller remote/untrusted-input allowance used by `from_bytes`.
+    let mut core2 =
+        rhwp::wasm_api::HwpDocument::from_local_file_bytes(&saved).expect("재로딩 실패");
     let fields3 = core2.collect_all_fields();
     println!("\n=== 재로딩 후 확인 ===");
     for fi in &fields3 {
@@ -7752,14 +7770,14 @@ fn ir_diff(args: &[String]) -> i32 {
 
     // [#3274] 읽기·파싱 실패는 exit 1 (#2707 정렬) — 종전엔 0 으로 끝나
     // "비교했고 차이 없음"과 "비교 자체를 못 함"을 구별할 수 없었다.
-    let data_a = match fs::read(file_a) {
+    let data_a = match read_cli_file(file_a) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: {} 읽기 실패: {}", file_a, e);
             return EXIT_RUNTIME;
         }
     };
-    let data_b = match fs::read(file_b) {
+    let data_b = match read_cli_file(file_b) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: {} 읽기 실패: {}", file_b, e);
@@ -7767,14 +7785,14 @@ fn ir_diff(args: &[String]) -> i32 {
         }
     };
 
-    let doc_a = match rhwp::parser::parse_document(&data_a) {
+    let doc_a = match rhwp::parser::parse_document_from_local_file(&data_a) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: {} 파싱 실패: {:?}", file_a, e);
             return EXIT_RUNTIME;
         }
     };
-    let doc_b = match rhwp::parser::parse_document(&data_b) {
+    let doc_b = match rhwp::parser::parse_document_from_local_file(&data_b) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: {} 파싱 실패: {:?}", file_b, e);
@@ -8146,14 +8164,14 @@ fn edit_fill_fields(args: &[String]) -> i32 {
             }
         };
 
-    let bytes = match fs::read(file_path) {
+    let bytes = match read_cli_file(file_path) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
             return EXIT_RUNTIME;
         }
     };
-    let mut doc = match rhwp::wasm_api::HwpDocument::from_bytes(&bytes) {
+    let mut doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&bytes) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: HWP 파싱 실패 - {}", e);
@@ -8330,14 +8348,14 @@ fn edit_replace_text(args: &[String]) -> i32 {
         return EXIT_USAGE;
     }
 
-    let bytes = match fs::read(file_path) {
+    let bytes = match read_cli_file(file_path) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
             return EXIT_RUNTIME;
         }
     };
-    let mut doc = match rhwp::wasm_api::HwpDocument::from_bytes(&bytes) {
+    let mut doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&bytes) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: HWP 파싱 실패 - {}", e);
@@ -8617,14 +8635,14 @@ fn edit_set_cell(args: &[String]) -> i32 {
         return EXIT_USAGE;
     }
 
-    let bytes = match fs::read(file_path) {
+    let bytes = match read_cli_file(file_path) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
             return EXIT_RUNTIME;
         }
     };
-    let mut doc = match rhwp::wasm_api::HwpDocument::from_bytes(&bytes) {
+    let mut doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&bytes) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: HWP 파싱 실패 - {}", e);
@@ -8850,14 +8868,14 @@ fn show_fields(args: &[String]) -> i32 {
         return EXIT_USAGE;
     };
 
-    let data = match fs::read(file_path) {
+    let data = match read_cli_file(file_path) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
             return EXIT_RUNTIME;
         }
     };
-    let doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
+    let doc = match rhwp::wasm_api::HwpDocument::from_local_file_bytes(&data) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: HWP 파싱 실패 - {}", e);
@@ -8941,7 +8959,7 @@ fn extract_thumbnail(args: &[String]) -> i32 {
         return EXIT_USAGE;
     };
 
-    let data = match fs::read(input_path) {
+    let data = match read_cli_file(input_path) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("오류: 파일을 읽을 수 없습니다: {} ({})", input_path, e);
@@ -8949,7 +8967,7 @@ fn extract_thumbnail(args: &[String]) -> i32 {
         }
     };
 
-    let result = match rhwp::parser::extract_thumbnail_only(&data) {
+    let result = match rhwp::parser::extract_thumbnail_only_from_local_file(&data) {
         Some(r) => r,
         None => {
             eprintln!("오류: PrvImage 썸네일이 없습니다: {}", input_path);
@@ -9018,6 +9036,31 @@ fn extract_thumbnail(args: &[String]) -> i32 {
 mod tests {
     use super::{allows_implicit_sibling_resources, tab_ext_semantic_differs};
     use rhwp::parser::FileFormat;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn cli_reader_rejects_oversized_files_before_unbounded_reading() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "rhwp-cli-bounded-read-{}-{nonce}.bin",
+            std::process::id()
+        ));
+        std::fs::write(&path, [0u8; 17]).unwrap();
+
+        assert_eq!(
+            rhwp::parser::limits::read_local_file_once_with_limit(&path, 17)
+                .unwrap()
+                .len(),
+            17
+        );
+        let error = rhwp::parser::limits::read_local_file_once_with_limit(&path, 16).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn hml_does_not_implicitly_load_sibling_resources() {

@@ -8,6 +8,8 @@ import { isDocumentPath, resolveDocumentUrl } from './document-url-resolver.js';
 import { DEFAULT_BLOCKED_HOST_SUFFIXES, isBlockedHost } from './private-network.js';
 
 const MAX_REDIRECTS = 5;
+export const REMOTE_DOCUMENT_MAX_BYTES = 128 * 1024 * 1024;
+export const REMOTE_THUMBNAIL_MAX_BYTES = 64 * 1024 * 1024;
 
 export class FetchSecurityError extends Error {
   constructor(reason, message) {
@@ -15,6 +17,52 @@ export class FetchSecurityError extends Error {
     this.name = 'FetchSecurityError';
     this.reason = reason;
   }
+}
+
+export async function cancelResponseBody(response, reason = 'response-discarded') {
+  try {
+    await response?.body?.cancel(reason);
+  } catch {
+    // Preserve the policy error if the transport cannot be cancelled.
+  }
+}
+
+export async function readResponseBytesWithLimit(response, maxBytes = REMOTE_DOCUMENT_MAX_BYTES) {
+  const declaredText = response.headers.get('content-length');
+  if (declaredText !== null) {
+    const declared = Number(declaredText);
+    if (!Number.isSafeInteger(declared) || declared < 0 || declared > maxBytes) {
+      await cancelResponseBody(response, 'response-too-large');
+      throw new FetchSecurityError('response-too-large', `Document response exceeds ${maxBytes} bytes.`);
+    }
+  }
+  if (!response.body) {
+    throw new FetchSecurityError('response-not-streamable', 'Document response cannot be read as a bounded stream.');
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (!Number.isSafeInteger(total) || total > maxBytes) {
+        await reader.cancel('response-too-large').catch(() => undefined);
+        throw new FetchSecurityError('response-too-large', `Document response exceeds ${maxBytes} bytes.`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
 }
 
 export function isTrustedExtensionPageSender(sender, runtimeApi, allowedPages = ['viewer.html']) {
@@ -97,12 +145,18 @@ export async function fetchDocumentWithPolicy(url, options = {}) {
       return response;
     }
 
-    const location = response.headers.get('Location');
-    if (!location) {
-      throw new FetchSecurityError('redirect-location-hidden', 'redirect 대상을 검증할 수 없습니다.');
+    try {
+      if (redirectCount === MAX_REDIRECTS) {
+        throw new FetchSecurityError('too-many-redirects', 'redirect 횟수가 너무 많습니다.');
+      }
+      const location = response.headers.get('Location');
+      if (!location) {
+        throw new FetchSecurityError('redirect-location-hidden', 'redirect 대상을 검증할 수 없습니다.');
+      }
+      current = validateDocumentFetchUrl(new URL(location, current.href).href, options);
+    } finally {
+      await cancelResponseBody(response, 'redirect-response-discarded');
     }
-
-    current = validateDocumentFetchUrl(new URL(location, current.href).href, options);
   }
 
   throw new FetchSecurityError('too-many-redirects', 'redirect 횟수가 너무 많습니다.');

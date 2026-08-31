@@ -20,7 +20,7 @@ macro_rules! impl_parser {
         $crate::wmf::parser::constants::impl_parser!(_, $t, i32, 4, 10);
     };
     (_, $t:ident, $raw:ty, $size:expr, $digits:expr) => {
-        paste::paste! {
+        pastey::paste! {
             impl $t {
                 #[cfg_attr(feature = "tracing", ::tracing::instrument(
                     level = tracing::Level::TRACE,

@@ -377,11 +377,39 @@ impl DocumentEvent {
 
 /// 이벤트 로그를 JSON 배열로 직렬화한다.
 pub fn serialize_event_log(events: &[DocumentEvent]) -> String {
+    serialize_event_log_bounded(events, 0)
+}
+
+/// Serialize a capped batch event log and report any omitted tail events.
+pub fn serialize_event_log_bounded(events: &[DocumentEvent], dropped_events: usize) -> String {
     if events.is_empty() {
-        return r#"{"ok":true,"events":[]}"#.to_string();
+        return if dropped_events == 0 {
+            r#"{"ok":true,"events":[]}"#.to_string()
+        } else {
+            format!(
+                r#"{{"ok":true,"events":[],"truncated":true,"droppedEventCount":{}}}"#,
+                dropped_events
+            )
+        };
     }
-    let items: Vec<String> = events.iter().map(|e| e.to_json()).collect();
-    format!(r#"{{"ok":true,"events":[{}]}}"#, items.join(","))
+    // Build the response incrementally. Collecting one String per event and
+    // then joining it temporarily retained two complete copies of a max batch.
+    let estimated = events.len().saturating_mul(96).min(8 * 1024 * 1024);
+    let mut output = String::with_capacity(estimated);
+    output.push_str(r#"{"ok":true,"events":["#);
+    for (index, event) in events.iter().enumerate() {
+        if index != 0 {
+            output.push(',');
+        }
+        output.push_str(&event.to_json());
+    }
+    output.push(']');
+    if dropped_events != 0 {
+        output.push_str(r#","truncated":true,"droppedEventCount":"#);
+        output.push_str(&dropped_events.to_string());
+    }
+    output.push('}');
+    output
 }
 
 #[cfg(test)]
@@ -408,6 +436,19 @@ mod tests {
     fn test_serialize_event_log_empty() {
         let result = serialize_event_log(&[]);
         assert_eq!(result, r#"{"ok":true,"events":[]}"#);
+    }
+
+    #[test]
+    fn bounded_event_log_is_valid_json_and_reports_dropped_tail() {
+        let event = DocumentEvent::ParagraphInserted {
+            section: 1,
+            para: 2,
+        };
+        let result = serialize_event_log_bounded(&[event], 3);
+        let value: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(value["events"].as_array().unwrap().len(), 1);
+        assert_eq!(value["truncated"], true);
+        assert_eq!(value["droppedEventCount"], 3);
     }
 
     #[test]

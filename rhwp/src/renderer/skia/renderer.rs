@@ -1184,7 +1184,7 @@ impl SkiaLayerRenderer {
                             }
                             let data = resolved
                                 .as_deref()
-                                .map(|payload| payload.data.as_slice())
+                                .map(|payload| payload.data.as_ref())
                                 .or(image.data.as_deref());
                             if let Some(data) = data {
                                 let effect = if resolved
@@ -2507,7 +2507,7 @@ mod tests {
                         border_width: 0.0,
                         gradient: None,
                         image: Some(PageBackgroundImage {
-                            data: solid_png([0, 0, 255, 255]),
+                            data: solid_png([0, 0, 255, 255]).into(),
                             fill_mode: ImageFillMode::FitToSize,
                             brightness: 0,
                             contrast: 0,

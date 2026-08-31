@@ -1,8 +1,14 @@
+import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 import { providerToolNoteFor } from './agents/backend.mjs';
+import {
+  recoverInterruptedFileReplacement,
+  replaceFileAtomically,
+} from './harness-update.mjs';
+import { readFileBytesBounded, readUtf8FileBounded } from './bounded-file.mjs';
 import { humanizerPromptBlock } from './humanizer.mjs';
 
 const SKILL_NAME_RE = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
@@ -10,9 +16,15 @@ const MAX_FILES = 100;
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const MAX_SKILL_BYTES = 50 * 1024 * 1024;
 const MAX_AGENT_RESOURCE_BYTES = 1024 * 1024;
+const MAX_STATE_BYTES = 64 * 1024;
+const MAX_DISABLED_SKILLS = 1_000;
+const MAX_CATALOG_SKILLS = 1_000;
+const MAX_SKILL_PATH_DEPTH = 32;
 const RESERVED_NAMES = new Set(['skills', 'skill-create', 'skill-edit', 'skill-delete']);
 const REQUIRED_BUNDLED_SKILLS = new Set(['present-plan']);
 const SKILL_ICONS = new Set(['pencil', 'bot', 'system']);
+const WINDOWS_FORBIDDEN_COMPONENT_RE = /[<>:"|?*\u0000-\u001f]/;
+const WINDOWS_DEVICE_COMPONENT_RE = /^(?:con|prn|aux|nul|com[1-9\u00b9\u00b2\u00b3]|lpt[1-9\u00b9\u00b2\u00b3])(?:\.|$)/i;
 
 export class SkillError extends Error {
   constructor(code, message) {
@@ -83,17 +95,36 @@ export function parseSkillMarkdown(markdown, expectedName) {
 }
 
 function safeRelativePath(value) {
-  if (typeof value !== 'string' || !value || value.includes('\\') || path.isAbsolute(value)) {
+  if (typeof value !== 'string' || !value || value.includes('\\')
+    || path.posix.isAbsolute(value) || path.win32.isAbsolute(value)) {
     throw new SkillError('INVALID_SKILL_FILE', `Invalid skill file path: ${String(value)}`);
   }
   const normalized = path.posix.normalize(value);
-  if (normalized === '..' || normalized.startsWith('../') || normalized.includes('/../')) {
+  if (normalized === '..' || normalized.startsWith('../')) {
     throw new SkillError('INVALID_SKILL_FILE', `Skill file escapes its folder: ${value}`);
   }
-  if (normalized.startsWith('.git/') || normalized === '.git') {
+  if (value.split('/').includes('..')) {
+    throw new SkillError('INVALID_SKILL_FILE', `Skill file path cannot contain traversal: ${value}`);
+  }
+  if (normalized === '.') {
+    throw new SkillError('INVALID_SKILL_FILE', `Invalid skill file path: ${value}`);
+  }
+  const components = normalized.split('/');
+  for (const component of components) {
+    if (!component || component.endsWith('.') || component.endsWith(' ')
+      || WINDOWS_FORBIDDEN_COMPONENT_RE.test(component)
+      || WINDOWS_DEVICE_COMPONENT_RE.test(component)) {
+      throw new SkillError('INVALID_SKILL_FILE', `Skill file path is not portable: ${value}`);
+    }
+  }
+  if (components[0].toLowerCase() === '.git') {
     throw new SkillError('INVALID_SKILL_FILE', 'Git metadata is not allowed in a skill');
   }
   return normalized;
+}
+
+function portablePathKey(value) {
+  return value.normalize('NFC').toLowerCase();
 }
 
 function decodeFile(file) {
@@ -105,27 +136,91 @@ function decodeFile(file) {
   return { path: rel, bytes, encoding };
 }
 
-async function readJson(file, fallback) {
+/** Canonical, storage-independent validation shared by generated drafts and saves. */
+export function validateSkillPayload(payload, { maxFiles = MAX_FILES } = {}) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new SkillError('INVALID_REQUEST', 'Missing skill payload');
+  }
+  const name = payload.name;
+  if (!SKILL_NAME_RE.test(name ?? '') || RESERVED_NAMES.has(name)) {
+    throw new SkillError('INVALID_SKILL_NAME', 'Invalid or reserved skill name');
+  }
+  if (!Array.isArray(payload.files) || payload.files.length === 0 || payload.files.length > maxFiles) {
+    throw new SkillError('INVALID_SKILL', `A skill must contain 1-${maxFiles} files`);
+  }
+  const decoded = payload.files.map(decodeFile);
+  if (decoded.filter((file) => file.path === 'SKILL.md').length !== 1) {
+    throw new SkillError('INVALID_SKILL', 'SKILL.md is required');
+  }
+  if (new Set(decoded.map((file) => portablePathKey(file.path))).size !== decoded.length) {
+    throw new SkillError(
+      'INVALID_SKILL_FILE',
+      'Duplicate skill file paths (including platform-aliased paths)',
+    );
+  }
+  const total = decoded.reduce((sum, file) => sum + file.bytes.length, 0);
+  if (total > MAX_SKILL_BYTES) throw new SkillError('SKILL_TOO_LARGE', 'Skill exceeds 50 MB');
+  const skillFile = decoded.find((file) => file.path === 'SKILL.md');
+  parseSkillMarkdown(skillFile.bytes.toString('utf8'), name);
+  return {
+    name,
+    decoded,
+    hasScripts: decoded.some((file) => file.path.startsWith('scripts/')),
+    hasAssets: decoded.some((file) => file.path.startsWith('assets/')),
+  };
+}
+
+async function readCatalogState(file, platform) {
+  let text;
   try {
-    return JSON.parse(await fs.readFile(file, 'utf8'));
+    text = await readUtf8FileBounded(file, {
+      maxBytes: MAX_STATE_BYTES,
+      label: 'Skill catalog state',
+      platform,
+    });
   } catch (error) {
-    if (error?.code === 'ENOENT') return fallback;
-    return fallback;
+    if (error?.code === 'ENOENT') return { disabled: [] };
+    const wrapped = new SkillError('SKILL_STATE_CORRUPT', `Skill catalog state cannot be read safely: ${error?.message ?? error}`);
+    wrapped.cause = error;
+    throw wrapped;
+  }
+  try {
+    const value = JSON.parse(text);
+    if (!value || typeof value !== 'object' || Array.isArray(value)
+      || Object.keys(value).some((key) => key !== 'disabled')
+      || !Array.isArray(value.disabled) || value.disabled.length > MAX_DISABLED_SKILLS
+      || value.disabled.some((name) => !SKILL_NAME_RE.test(name) || RESERVED_NAMES.has(name))
+      || new Set(value.disabled).size !== value.disabled.length) {
+      throw new Error('invalid state schema');
+    }
+    return { disabled: [...value.disabled] };
+  } catch (error) {
+    const wrapped = new SkillError('SKILL_STATE_CORRUPT', 'Skill catalog state is corrupt; disabled skills were not re-enabled.');
+    wrapped.cause = error;
+    throw wrapped;
   }
 }
 
 async function collectFiles(root) {
   const files = [];
-  async function walk(dir, prefix = '') {
-    const entries = await fs.readdir(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (entry.isSymbolicLink()) throw new SkillError('INVALID_SKILL_FILE', 'Symlinks are not allowed in skills');
+  let totalBytes = 0;
+  async function walk(dir, prefix = '', depth = 0) {
+    if (depth > MAX_SKILL_PATH_DEPTH) throw new SkillError('INVALID_SKILL_FILE', 'Skill folders are nested too deeply');
+    const directory = await fs.opendir(dir);
+    for await (const entry of directory) {
       const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      safeRelativePath(rel);
       const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) await walk(full, rel);
-      else if (entry.isFile()) {
-        const stat = await fs.stat(full);
+      const stat = await fs.lstat(full);
+      if (stat.isSymbolicLink()) throw new SkillError('INVALID_SKILL_FILE', 'Symlinks are not allowed in skills');
+      if (stat.isDirectory()) await walk(full, rel, depth + 1);
+      else if (stat.isFile()) {
+        if (stat.size > MAX_FILE_BYTES) throw new SkillError('SKILL_TOO_LARGE', `${rel} exceeds 10 MB`);
+        totalBytes += stat.size;
         files.push({ path: rel, size: stat.size });
+        if (files.length > MAX_FILES || totalBytes > MAX_SKILL_BYTES) {
+          throw new SkillError('SKILL_TOO_LARGE', 'Persisted skill exceeds its file or byte limit');
+        }
       }
     }
   }
@@ -134,46 +229,69 @@ async function collectFiles(root) {
 }
 
 export class SkillRegistry {
-  constructor({ bundledRoot, userRoot = defaultSkillDataRoot(), writingStyleStore = null }) {
+  constructor({
+    bundledRoot,
+    userRoot = defaultSkillDataRoot(),
+    writingStyleStore = null,
+    platform = process.platform,
+  }) {
     this.bundledRoot = bundledRoot;
     this.userRoot = userRoot;
     this.writingStyleStore = writingStyleStore;
+    this.platform = platform;
     this.statePath = path.join(userRoot, '.catalog-state.json');
     this.trashRoot = path.join(userRoot, '.trash');
     this.revision = 1;
+    this.mutationQueue = Promise.resolve();
   }
 
   async init() {
     await fs.mkdir(this.userRoot, { recursive: true });
     await fs.mkdir(this.trashRoot, { recursive: true });
+    await recoverInterruptedFileReplacement(this.statePath, { platform: this.platform });
+    await this._state();
     return this;
   }
 
   async _state() {
-    const value = await readJson(this.statePath, { disabled: [] });
-    return { disabled: Array.isArray(value.disabled) ? value.disabled.filter((x) => typeof x === 'string') : [] };
+    return readCatalogState(this.statePath, this.platform);
   }
 
   async _writeState(state) {
-    const temp = `${this.statePath}.tmp-${process.pid}-${Date.now()}`;
-    await fs.writeFile(temp, `${JSON.stringify(state, null, 2)}\n`, 'utf8');
-    await fs.rename(temp, this.statePath);
+    const temp = `${this.statePath}.tmp-${process.pid}-${randomUUID()}`;
+    try {
+      await fs.writeFile(temp, `${JSON.stringify(state, null, 2)}\n`, {
+        encoding: 'utf8',
+        mode: 0o600,
+        flag: 'wx',
+      });
+      await replaceFileAtomically(temp, this.statePath, { platform: this.platform });
+    } finally {
+      await fs.rm(temp, { force: true }).catch(() => {});
+    }
   }
 
   async _scanRoot(root, origin, disabled) {
-    let entries = [];
+    let directory;
     try {
-      entries = await fs.readdir(root, { withFileTypes: true });
+      directory = await fs.opendir(root);
     } catch (error) {
       if (error?.code === 'ENOENT') return [];
       throw error;
     }
     const skills = [];
-    for (const entry of entries) {
+    let entryCount = 0;
+    for await (const entry of directory) {
+      entryCount += 1;
+      if (entryCount > MAX_CATALOG_SKILLS) throw new SkillError('SKILL_CATALOG_TOO_LARGE', 'Skill catalog contains too many entries');
       if (!entry.isDirectory() || entry.isSymbolicLink() || entry.name.startsWith('.')) continue;
       const skillRoot = path.join(root, entry.name);
       try {
-        const markdown = await fs.readFile(path.join(skillRoot, 'SKILL.md'), 'utf8');
+        const markdown = await readUtf8FileBounded(path.join(skillRoot, 'SKILL.md'), {
+          maxBytes: MAX_FILE_BYTES,
+          label: `${entry.name}/SKILL.md`,
+          platform: this.platform,
+        });
         const parsed = parseSkillMarkdown(markdown, entry.name);
         const files = await collectFiles(skillRoot);
         const required = origin === 'bundled' && REQUIRED_BUNDLED_SKILLS.has(parsed.name);
@@ -230,8 +348,17 @@ export class SkillRegistry {
   async read(name) {
     const skill = await this._find(name);
     const files = [];
+    let totalBytes = 0;
     for (const entry of skill.files) {
-      const bytes = await fs.readFile(path.join(skill.root, entry.path));
+      const bytes = await readFileBytesBounded(path.join(skill.root, entry.path), {
+        maxBytes: MAX_FILE_BYTES,
+        label: `${skill.name}/${entry.path}`,
+        platform: this.platform,
+        allowEmpty: true,
+      });
+      if (bytes.length !== entry.size) throw new SkillError('SKILL_CHANGED', `${entry.path} changed while the skill was read`);
+      totalBytes += bytes.length;
+      if (totalBytes > MAX_SKILL_BYTES) throw new SkillError('SKILL_TOO_LARGE', 'Persisted skill exceeds 50 MB');
       const textLike = entry.path === 'SKILL.md' || /\.(?:md|txt|json|ya?ml|toml|js|mjs|cjs|ts|py|sh|css|html|xml|csv)$/i.test(entry.path);
       files.push({ path: entry.path, encoding: textLike ? 'utf8' : 'base64', content: bytes.toString(textLike ? 'utf8' : 'base64'), size: bytes.length });
     }
@@ -239,27 +366,11 @@ export class SkillRegistry {
   }
 
   async _validatePayload(payload) {
-    if (!payload || typeof payload !== 'object') throw new SkillError('INVALID_REQUEST', 'Missing skill payload');
-    const name = payload.name;
-    if (!SKILL_NAME_RE.test(name ?? '') || RESERVED_NAMES.has(name)) throw new SkillError('INVALID_SKILL_NAME', 'Invalid or reserved skill name');
+    const checked = validateSkillPayload(payload);
+    const { name } = checked;
     const existing = (await this.list()).skills.find((item) => item.name === name);
     if (existing?.origin === 'bundled') throw new SkillError('READ_ONLY_SKILL', 'Bundled skills cannot be overwritten');
-    if (!Array.isArray(payload.files) || payload.files.length === 0 || payload.files.length > MAX_FILES) {
-      throw new SkillError('INVALID_SKILL', `A skill must contain 1-${MAX_FILES} files`);
-    }
-    const decoded = payload.files.map(decodeFile);
-    if (!decoded.some((file) => file.path === 'SKILL.md')) throw new SkillError('INVALID_SKILL', 'SKILL.md is required');
-    if (new Set(decoded.map((file) => file.path)).size !== decoded.length) throw new SkillError('INVALID_SKILL_FILE', 'Duplicate skill file paths');
-    const total = decoded.reduce((sum, file) => sum + file.bytes.length, 0);
-    if (total > MAX_SKILL_BYTES) throw new SkillError('SKILL_TOO_LARGE', 'Skill exceeds 50 MB');
-    const skillFile = decoded.find((file) => file.path === 'SKILL.md');
-    parseSkillMarkdown(skillFile.bytes.toString('utf8'), name);
-    return {
-      name,
-      decoded,
-      hasScripts: decoded.some((file) => file.path.startsWith('scripts/')),
-      hasAssets: decoded.some((file) => file.path.startsWith('assets/')),
-    };
+    return checked;
   }
 
   async validate(payload) {
@@ -275,57 +386,117 @@ export class SkillRegistry {
   }
 
   async save(payload) {
-    const { name, decoded } = await this._validatePayload(payload);
+    return this.#mutate(async () => {
+      const { name, decoded } = await this._validatePayload(payload);
 
-    const temp = path.join(this.userRoot, `.tmp-${name}-${process.pid}-${Date.now()}`);
-    const target = path.join(this.userRoot, name);
-    const backup = path.join(this.trashRoot, `${Date.now()}-${name}-update`);
-    let backedUp = false;
-    await fs.mkdir(temp, { recursive: false });
-    try {
-      for (const file of decoded) {
-        const dest = path.join(temp, file.path);
-        await fs.mkdir(path.dirname(dest), { recursive: true });
-        await fs.writeFile(dest, file.bytes, { mode: file.path.startsWith('scripts/') ? 0o700 : 0o600 });
-      }
+      const temp = path.join(this.userRoot, `.tmp-${name}-${process.pid}-${randomUUID()}`);
+      const target = path.join(this.userRoot, name);
+      const backup = path.join(this.trashRoot, `${Date.now()}-${name}-update-${randomUUID()}`);
+      let backedUp = false;
+      let installed = false;
+      await fs.mkdir(temp, { recursive: false });
       try {
-        await fs.rename(target, backup);
-        backedUp = true;
+        for (const file of decoded) {
+          const dest = path.join(temp, file.path);
+          await fs.mkdir(path.dirname(dest), { recursive: true });
+          await fs.writeFile(dest, file.bytes, { mode: file.path.startsWith('scripts/') ? 0o700 : 0o600 });
+        }
+        try {
+          await fs.rename(target, backup);
+          backedUp = true;
+        } catch (error) {
+          if (error?.code !== 'ENOENT') throw error;
+        }
+        await fs.rename(temp, target);
+        installed = true;
+        const result = await this.read(name);
+        this.revision++;
+        return { ...result, revision: this.revision };
       } catch (error) {
-        if (error?.code !== 'ENOENT') throw error;
+        await fs.rm(temp, { recursive: true, force: true });
+        let rollbackError = null;
+        if (installed) {
+          const failedTarget = path.join(
+            this.trashRoot,
+            `${Date.now()}-${name}-failed-${randomUUID()}`,
+          );
+          try {
+            await fs.rename(target, failedTarget);
+          } catch (moveError) {
+            if (moveError?.code !== 'ENOENT') rollbackError = moveError;
+          }
+        }
+        if (backedUp) {
+          if (!rollbackError) {
+            try { await fs.rename(backup, target); }
+            catch (restoreError) { rollbackError = restoreError; }
+          }
+        }
+        if (rollbackError) {
+          const recoveryError = new SkillError(
+            'SKILL_ROLLBACK_FAILED',
+            'Skill update failed and the previous version could not be restored automatically',
+          );
+          recoveryError.cause = new AggregateError([error, rollbackError]);
+          throw recoveryError;
+        }
+        throw error;
       }
-      await fs.rename(temp, target);
-      this.revision++;
-      return this.read(name);
-    } catch (error) {
-      await fs.rm(temp, { recursive: true, force: true });
-      if (backedUp) {
-        try { await fs.rename(backup, target); } catch {}
-      }
-      throw error;
-    }
+    });
   }
 
   async setEnabled(name, enabled) {
-    const skill = await this._find(name);
-    if (skill.required && !enabled) {
-      throw new SkillError('REQUIRED_SKILL', `${name} is required by the planning workflow`);
-    }
-    const state = await this._state();
-    const disabled = new Set(state.disabled);
-    if (enabled) disabled.delete(name); else disabled.add(name);
-    await this._writeState({ disabled: [...disabled].sort() });
-    this.revision++;
-    return this.list();
+    return this.#mutate(async () => {
+      const skill = await this._find(name);
+      if (skill.required && !enabled) {
+        throw new SkillError('REQUIRED_SKILL', `${name} is required by the planning workflow`);
+      }
+      const state = await this._state();
+      const disabled = new Set(state.disabled);
+      if (enabled) {
+        disabled.delete(name);
+      } else if (!disabled.has(name)) {
+        if (disabled.size >= MAX_DISABLED_SKILLS) {
+          throw new SkillError(
+            'SKILL_STATE_TOO_LARGE',
+            `At most ${MAX_DISABLED_SKILLS} skills can be disabled`,
+          );
+        }
+        disabled.add(name);
+      }
+      await this._writeState({ disabled: [...disabled].sort() });
+      this.revision++;
+      return this.list();
+    });
   }
 
   async delete(name) {
-    const skill = await this._find(name);
-    if (skill.origin !== 'user') throw new SkillError('READ_ONLY_SKILL', 'Bundled skills cannot be deleted');
-    const trashPath = path.join(this.trashRoot, `${Date.now()}-${name}`);
-    await fs.rename(skill.root, trashPath);
-    this.revision++;
-    return { revision: this.revision, name, recoverable: true };
+    return this.#mutate(async () => {
+      const skill = await this._find(name);
+      if (skill.origin !== 'user') throw new SkillError('READ_ONLY_SKILL', 'Bundled skills cannot be deleted');
+      const trashPath = path.join(this.trashRoot, `${Date.now()}-${randomUUID()}-${name}`);
+      await fs.rename(skill.root, trashPath);
+      try {
+        const state = await this._state();
+        if (state.disabled.includes(name)) {
+          await this._writeState({ disabled: state.disabled.filter((entry) => entry !== name) });
+        }
+      } catch (error) {
+        try {
+          await fs.rename(trashPath, skill.root);
+        } catch (rollbackError) {
+          const recoveryError = new SkillError(
+            'SKILL_ROLLBACK_FAILED',
+            'Skill deletion failed and the original skill could not be restored automatically',
+          );
+          recoveryError.cause = new AggregateError([error, rollbackError]);
+          throw recoveryError;
+        }
+        throw error;
+      }
+      this.revision++;
+      return { revision: this.revision, name, recoverable: true };
+    });
   }
 
   async readResource(name, resourcePath = 'SKILL.md') {
@@ -338,8 +509,22 @@ export class SkillRegistry {
     }
     const textLike = rel === 'SKILL.md' || /\.(?:md|txt|json|ya?ml|toml|js|mjs|cjs|ts|py|sh|css|html|xml|csv)$/i.test(rel);
     if (!textLike) throw new SkillError('BINARY_SKILL_RESOURCE', `${rel} is a binary asset and cannot be injected as instructions`);
-    const content = await fs.readFile(path.join(skill.root, rel), 'utf8');
+    const content = await readUtf8FileBounded(path.join(skill.root, rel), {
+      maxBytes: MAX_AGENT_RESOURCE_BYTES,
+      label: `${skill.name}/${rel}`,
+      platform: this.platform,
+      allowEmpty: true,
+    });
+    if (Buffer.byteLength(content, 'utf8') !== entry.size) {
+      throw new SkillError('SKILL_CHANGED', `${rel} changed while the skill was read`);
+    }
     return { name: skill.name, resourcePath: rel, content };
+  }
+
+  #mutate(operation) {
+    const result = this.mutationQueue.then(operation, operation);
+    this.mutationQueue = result.then(() => undefined, () => undefined);
+    return result;
   }
 
   async promptContext(text, explicitName, { phase = 'direct', agent = null } = {}) {
@@ -349,7 +534,7 @@ export class SkillRegistry {
     let activated = '';
     if (explicitName) {
       const skill = await this._find(explicitName, true);
-      const markdown = await fs.readFile(path.join(skill.root, 'SKILL.md'), 'utf8');
+      const { content: markdown } = await this.readResource(explicitName, 'SKILL.md');
       activated = `\n\n<activated_product_skill name="${skill.name}" root="${skill.root}">\n${markdown}\n</activated_product_skill>`;
       // SKILL.md 는 provider 중립 카탈로그 텍스트다. 스킬이 협업 도구 이름을
       // 언급할 수 있으므로(복사 레이아웃의 wait_agent 등), 활성 시점에 이

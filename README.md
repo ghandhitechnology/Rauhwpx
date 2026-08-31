@@ -28,6 +28,7 @@ The agent reads structure, text ranges, tables, fields and rendered pages, then 
 - **Formats** — HWPX is the default save/export format for new work. HWP 5.0, HWPX and HML read/write, HWP3 read; opened `.hwp` files keep binary HWP on Save. Roundtrip fidelity is a core contract, backed by ~430 real documents in `rhwp/samples/`.
 - **Layout and rendering** — full pagination, 어울림 wrap, tables with page splitting, footnotes/endnotes, equations, shapes, charts and embedded objects, drawn to Canvas2D/CanvasKit in the browser and Skia natively.
 - **Editing** — character/paragraph/style dialogs, tables, list numbering, fields and forms, page setup, find/replace, document compare, revision history, undo throughout.
+- **Portable history** — save the document and its complete revision graph as one cross-platform `.rhwpx` archive. Older folder bundles remain available through the separate legacy import command.
 - **Export** — SVG, PNG, PDF, text, Markdown, table dumps, plus HWPX/HML conversion from the CLI.
 
 ## Agent sidebar
@@ -41,6 +42,16 @@ The agent reads structure, text ranges, tables, fields and rendered pages, then 
 ## Install
 
 Download a build from [Releases](https://github.com/ghandhitechnology/Rauhwpx/releases): macOS arm64 DMG/ZIP (signed), Windows x64 installer (unsigned for now — SmartScreen warns until we get a certificate).
+
+Windows installs per user by default. The installer detects an older all-users installation and requests elevation to upgrade it instead of creating a second copy.
+
+Saving over an existing desktop file uses a crash-safe compare-and-swap and
+requires hard-link support on that volume. FAT/exFAT, some SMB shares, and some
+cloud-synced volumes may reject the save without changing the original; use a
+local APFS or NTFS volume, or Save As to a supported destination. On Windows,
+preserving the original file's access rules also requires the built-in
+System32 Windows PowerShell. If both publication and rollback fail, Rauhwpx
+keeps an openable recovery copy and reports its exact path.
 
 Testers can download the current pre-release from the [nightly tag](https://github.com/ghandhitechnology/Rauhwpx/releases/tag/nightly).
 

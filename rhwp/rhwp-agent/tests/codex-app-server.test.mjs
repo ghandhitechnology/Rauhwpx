@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
@@ -6,6 +7,8 @@ import path from 'node:path';
 import test from 'node:test';
 
 import {
+  CODEX_RPC_LINE_LIMIT_BYTES,
+  CodexJsonRpcConnection,
   buildCodexAppServerArgv,
 } from '../agents/codex-app-server.mjs';
 import { createCodexSession } from '../agents/codex.mjs';
@@ -55,13 +58,17 @@ class FakeProcess extends EventEmitter {
   kill(signal = 'SIGTERM') {
     if (this.exitCode !== null || this.signalCode !== null) return true;
     this.signalCode = signal;
-    queueMicrotask(() => this.emit('exit', null, signal));
+    queueMicrotask(() => {
+      this.emit('exit', null, signal);
+      this.emit('close', null, signal);
+    });
     return true;
   }
 
   exit(code = 0) {
     this.exitCode = code;
     this.emit('exit', code, null);
+    this.emit('close', code, null);
   }
 }
 
@@ -140,6 +147,7 @@ function harness(t, {
   permissionProfile = 'safe',
   responder = appServerResponder(),
   requestUserInput = async () => ({ status: 'cancelled', reason: 'user-stop' }),
+  terminateProcess = (process) => process.kill('SIGTERM'),
 } = {}) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-codex-app-server-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -169,7 +177,8 @@ function harness(t, {
       spawns.push({ command, argv, options, process, native });
       return process;
     },
-    terminateProcess(process) { process.kill('SIGTERM'); },
+    terminateProcess,
+    waitForExit: async () => true,
     createRolloutWatcher: fakeWatcher,
   });
   return { session, events, spawns, opts };
@@ -180,6 +189,98 @@ async function settle(rounds = 12) {
     await new Promise((resolve) => setImmediate(resolve));
   }
 }
+
+test('JSON-RPC line overflow closes the connection before parsing', async () => {
+  const process = new FakeProcess();
+  let closed;
+  const connection = new CodexJsonRpcConnection(process, {
+    onFrame() { throw new Error('oversized frame must not be parsed'); },
+    onClosed(error) { closed = error; },
+  });
+
+  process.stdout.emit('data', Buffer.alloc(CODEX_RPC_LINE_LIMIT_BYTES + 1, 0x78));
+  await settle(2);
+  assert.equal(connection.closed, true);
+  assert.equal(process.signalCode, 'SIGTERM');
+  assert.match(closed.message, /larger than 8 MiB/);
+});
+
+test('JSON-RPC overflow does not reject requests before tree cleanup completes', async () => {
+  const process = new FakeProcess();
+  let releaseCleanup;
+  const cleanup = new Promise((resolve) => { releaseCleanup = resolve; });
+  let closed = false;
+  const connection = new CodexJsonRpcConnection(process, {
+    onFrame() {},
+    onClosed() { closed = true; },
+    terminateProcess(child) {
+      child.signalCode = 'SIGTERM';
+      child.emit('exit', null, 'SIGTERM');
+      return cleanup;
+    },
+  });
+  const request = connection.request('pending', {});
+  let rejected = false;
+  void request.catch(() => { rejected = true; });
+
+  process.stdout.emit('data', Buffer.alloc(CODEX_RPC_LINE_LIMIT_BYTES + 1, 0x78));
+  await settle(2);
+  assert.equal(connection.closed, true);
+  assert.equal(closed, false);
+  assert.equal(rejected, false);
+
+  releaseCleanup(true);
+  await assert.rejects(request, /larger than 8 MiB/);
+  assert.equal(closed, true);
+});
+
+test('JSON-RPC request deadlines remain referenced and leave no stale pending entry', async () => {
+  const process = new FakeProcess();
+  const connection = new CodexJsonRpcConnection(process, {
+    onFrame() {},
+    onClosed() {},
+  });
+  const request = connection.request('never/replies', {}, {
+    timeoutMs: 5,
+    label: 'fixture request',
+  });
+  const pending = [...connection.pending.values()][0];
+  assert.equal(pending.timer.hasRef(), true);
+  await assert.rejects(
+    request,
+    /fixture request timed out/,
+  );
+  assert.equal(connection.pending.size, 0);
+  connection.close();
+});
+
+test('a JSON-RPC request deadline settles when it is the idle process\'s only active handle', () => {
+  const serverUrl = new URL('../agents/codex-app-server.mjs', import.meta.url).href;
+  const script = `
+    const { EventEmitter } = await import('node:events');
+    const { CodexJsonRpcConnection } = await import(${JSON.stringify(serverUrl)});
+    const proc = new EventEmitter();
+    proc.stdout = new EventEmitter();
+    proc.stdin = { write() {} };
+    const connection = new CodexJsonRpcConnection(proc, {
+      onFrame() {},
+      onClosed() {},
+    });
+    try {
+      await connection.request('never/replies', {}, { timeoutMs: 5, label: 'idle request' });
+    } catch (error) {
+      process.stdout.write(String(error?.message));
+    }
+  `;
+  const child = spawnSync(process.execPath, ['--input-type=module', '--eval', script], {
+    encoding: 'utf8',
+    timeout: 5_000,
+  });
+
+  assert.equal(child.error, undefined);
+  assert.equal(child.status, 0, child.stderr);
+  assert.equal(child.stdout, 'idle request timed out');
+});
 
 test('app-server argv carries the isolated MCP capability profile', () => {
   const argv = buildCodexAppServerArgv({
@@ -286,6 +387,210 @@ test('direct mode negotiates native input and answers the original app-server re
   });
   assert.equal(h.events.at(-1).stopReason, 'completed');
   await h.session.dispose();
+});
+
+test('Codex opens provider authority only for the exact acknowledged app-server turn', async (t) => {
+  const base = appServerResponder();
+  let turnStartFrame = null;
+  let turnProcess = null;
+  let questionCalls = 0;
+  const h = harness(t, {
+    responder(frame, process) {
+      if (frame.method === 'turn/start') {
+        turnStartFrame = frame;
+        turnProcess = process;
+        return;
+      }
+      return base(frame, process);
+    },
+    requestUserInput: async () => {
+      questionCalls += 1;
+      return { status: 'cancelled', reason: 'user-stop' };
+    },
+  });
+  h.session.sendUserMessage('Wait for the exact turn');
+  await settle();
+  assert.ok(turnStartFrame);
+  assert.equal(h.events.some((event) => event.type === 'turn-start'), false);
+
+  turnProcess.send({
+    id: 'pre-start-question',
+    method: 'item/tool/requestUserInput',
+    params: {
+      threadId: 'thread-native', turnId: 'turn-before-ack', itemId: 'pre-start-item',
+      questions: [{
+        id: 'choice', header: 'Choice', question: 'Choose?', isOther: false, isSecret: false,
+        options: [{ label: 'A', description: 'A' }, { label: 'B', description: 'B' }],
+      }],
+      isBlocking: false,
+    },
+  });
+  await settle();
+  assert.equal(questionCalls, 0);
+  assert.equal(
+    turnProcess.frames.find((frame) => frame.id === 'pre-start-question')?.error?.data?.code,
+    'SUBAGENT_USER_INPUT_DENIED',
+  );
+
+  turnProcess.send({
+    method: 'turn/started',
+    params: { threadId: 'thread-native', turn: { id: 'turn-exact', status: 'inProgress' } },
+  });
+  turnProcess.send({ id: turnStartFrame.id, result: { turn: { id: 'turn-exact', status: 'inProgress' } } });
+  await settle();
+  assert.equal(h.events.filter((event) => event.type === 'turn-start').length, 1);
+
+  turnProcess.send({
+    method: 'item/agentMessage/delta',
+    params: { threadId: 'thread-native', turnId: 'turn-stale', delta: 'must not render' },
+  });
+  turnProcess.send({
+    method: 'turn/completed',
+    params: { threadId: 'thread-native', turn: { id: 'turn-stale', status: 'completed' } },
+  });
+  turnProcess.send({
+    id: 'wrong-turn-question',
+    method: 'item/tool/requestUserInput',
+    params: {
+      threadId: 'thread-native', turnId: 'turn-stale', itemId: 'wrong-turn-item',
+      questions: [{
+        id: 'choice', header: 'Choice', question: 'Choose?', isOther: false, isSecret: false,
+        options: [{ label: 'A', description: 'A' }, { label: 'B', description: 'B' }],
+      }],
+      isBlocking: false,
+    },
+  });
+  await settle();
+  assert.equal(questionCalls, 0);
+  assert.equal(h.events.some((event) => event.type === 'text-delta'), false);
+  assert.equal(h.events.some((event) => event.type === 'turn-end'), false);
+
+  turnProcess.send({
+    method: 'turn/completed',
+    params: { threadId: 'thread-native', turn: { id: 'turn-exact', status: 'completed' } },
+  });
+  await settle();
+  assert.equal(h.events.at(-1)?.stopReason, 'completed');
+  assert.equal(turnProcess.signalCode, 'SIGTERM', 'turn-end waits for app-server tree cleanup');
+  await h.session.dispose();
+});
+
+test('Codex settles once when started and completed arrive before the turn/start response', async (t) => {
+  const base = appServerResponder();
+  let terminateCalls = 0;
+  const h = harness(t, {
+    responder(frame, process) {
+      if (frame.method === 'turn/start') {
+        process.send({
+          method: 'turn/started',
+          params: {
+            threadId: frame.params.threadId,
+            turn: { id: 'turn-early-complete', status: 'inProgress' },
+          },
+        });
+        process.send({
+          method: 'turn/completed',
+          params: {
+            threadId: frame.params.threadId,
+            turn: { id: 'turn-early-complete', status: 'completed' },
+          },
+        });
+        queueMicrotask(() => process.send({
+          id: frame.id,
+          result: { turn: { id: 'turn-early-complete', status: 'completed' } },
+        }));
+        return;
+      }
+      return base(frame, process);
+    },
+    terminateProcess(process) {
+      terminateCalls += 1;
+      return process.kill('SIGTERM');
+    },
+  });
+
+  h.session.sendUserMessage('Complete before the response');
+  await settle(24);
+
+  assert.equal(terminateCalls, 1, 'the terminal notification and rejected start RPC share one cleanup');
+  assert.equal(h.events.filter((event) => event.type === 'turn-start').length, 1);
+  assert.deepEqual(
+    h.events.filter((event) => event.type === 'turn-end').map((event) => event.stopReason),
+    ['completed'],
+  );
+  assert.equal(h.events.some((event) => (
+    event.type === 'error' && /could not start the turn/i.test(event.message)
+  )), false);
+  assert.equal(await h.session.dispose(), true);
+});
+
+test('a retired Codex app-server generation cannot affect the resumed next turn', async (t) => {
+  let questionCalls = 0;
+  const h = harness(t, {
+    requestUserInput: async () => {
+      questionCalls += 1;
+      return { status: 'cancelled', reason: 'user-stop' };
+    },
+  });
+  h.session.sendUserMessage('turn A');
+  await settle();
+  const first = h.spawns[0].process;
+  first.send({
+    method: 'turn/completed',
+    params: { threadId: 'thread-native', turn: { id: 'turn-native', status: 'completed' } },
+  });
+  await settle();
+
+  h.session.sendUserMessage('turn B');
+  await settle();
+  assert.equal(h.spawns.length, 2);
+  const endsBeforeStaleFrames = h.events.filter((event) => event.type === 'turn-end').length;
+  first.send({
+    method: 'item/agentMessage/delta',
+    params: { threadId: 'thread-native', turnId: 'turn-native', delta: 'late A' },
+  });
+  first.send({
+    method: 'turn/completed',
+    params: { threadId: 'thread-native', turn: { id: 'turn-native', status: 'completed' } },
+  });
+  first.send({
+    id: 'late-a-question',
+    method: 'item/tool/requestUserInput',
+    params: {
+      threadId: 'thread-native', turnId: 'turn-native', itemId: 'late-a-item',
+      questions: [{
+        id: 'choice', header: 'Choice', question: 'Choose?', isOther: false, isSecret: false,
+        options: [{ label: 'A', description: 'A' }, { label: 'B', description: 'B' }],
+      }],
+      isBlocking: false,
+    },
+  });
+  await settle();
+  assert.equal(questionCalls, 0);
+  assert.equal(h.events.some((event) => event.type === 'text-delta' && event.text === 'late A'), false);
+  assert.equal(h.events.filter((event) => event.type === 'turn-end').length, endsBeforeStaleFrames);
+  h.session.interrupt();
+  await settle();
+  await h.session.dispose();
+});
+
+test('unproven app-server cleanup fails without advertising a provider turn', async (t) => {
+  const h = harness(t, {
+    responder: appServerResponder({ features: [] }),
+    terminateProcess(process) {
+      process.signalCode = 'SIGTERM';
+      process.emit('exit', null, 'SIGTERM');
+      process.emit('close', null, 'SIGTERM');
+      return null;
+    },
+  });
+  h.session.sendUserMessage('must remain quarantined');
+  await settle(24);
+  assert.equal(h.events.some((event) => event.type === 'turn-start'), false);
+  assert.match(h.events.find((event) => event.type === 'error')?.message ?? '', /cleanup could not be confirmed/i);
+  assert.equal(h.events.at(-1)?.stopReason, 'failed');
+  assert.equal(h.spawns.length, 1, 'legacy fallback must not start without cleanup proof');
+  assert.equal(await h.session.dispose(), false);
 });
 
 test('planning mode remains native without the default-mode feature', async (t) => {
@@ -678,9 +983,11 @@ test('Stop aborts a blocked question and sends turn/interrupt to Codex', async (
   await settle();
   assert.equal(receivedSignal.aborted, true);
   assert.ok(h.spawns[0].process.frames.some((frame) => frame.method === 'turn/interrupt'));
-  assert.deepEqual(h.spawns[0].process.frames.find((frame) => frame.id === 'stop-question' && frame.error)?.error?.data, {
-    code: 'USER_STOP',
-  });
+  assert.equal(
+    h.spawns[0].process.frames.some((frame) => frame.id === 'stop-question' && frame.result),
+    false,
+    'the stopped generation cannot publish a late successful question response',
+  );
   assert.equal(h.events.filter((event) => event.type === 'turn-end').at(-1).stopReason, 'interrupted');
   await h.session.dispose();
 });

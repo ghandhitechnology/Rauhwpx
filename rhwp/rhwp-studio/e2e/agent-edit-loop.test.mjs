@@ -24,7 +24,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { PNG } from 'pngjs';
 
-import { issueScopedHubToken } from '../../rhwp-agent/hub-session-registry.mjs';
+import { registerHubSession } from '../../../desktop/agent-hub.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const studioRoot = path.resolve(__dirname, '..');
@@ -172,7 +172,7 @@ const vite = spawnLogged(
   {
     BROWSER: 'none',
     VITE_RHWP_AGENT_URL: `ws://127.0.0.1:${hubPort}`,
-    VITE_RHWP_AGENT_TOKEN: HUB_TOKEN,
+    RHWP_AGENT_TOKEN: HUB_TOKEN,
   },
   path.join(repoRoot, 'target', 'rhwp-studio-agent-e2e-vite.log'),
 );
@@ -238,7 +238,10 @@ try {
     const health = await healthResponse.json();
     const sessionId = health.sessions?.[0]?.sessionId;
     if (!sessionId) throw new Error('Studio hub session was not registered');
-    const mcp = connectMcpClient(hubPort, issueScopedHubToken(HUB_TOKEN, sessionId), sessionId);
+    const capabilities = await registerHubSession({
+      port: hubPort, token: HUB_TOKEN, launchId: health.launchId, sessionId,
+    });
+    const mcp = connectMcpClient(hubPort, capabilities.mcp, sessionId);
     await mcp.opened;
     const call = mcp.call;
     try {

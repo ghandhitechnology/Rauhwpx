@@ -119,6 +119,10 @@ const PROBE_TEXTS = [
   '한글과 English 12345',
 ];
 const LOCAL_FONT_NAME_READ_CONCURRENCY = 4;
+export const LOCAL_FONT_BYTE_READ_CONCURRENCY = 4;
+export const LOCAL_FONT_MAX_BYTES_PER_FACE = 32 * 1024 * 1024;
+export const LOCAL_FONT_MAX_AGGREGATE_BYTES = 128 * 1024 * 1024;
+export const LOCAL_FONT_MAX_FACES_PER_DOCUMENT = 64;
 const HANGUL_RE = /[\u1100-\u11FF\u3130-\u318F\uAC00-\uD7A3]/;
 
 /** 캐시된 로컬 글꼴 snapshot (감지/저장소 로드 전 null) */
@@ -129,6 +133,7 @@ let storageLoaded = false;
 let lastStorageError: string | null = null;
 /** 동시에 들어온 CanvasKit SFNT 바이트 조회만 합치는 in-flight cache. */
 const localFontBytesByPostscriptName = new Map<string, Promise<ArrayBuffer | null>>();
+let localFontByteBatchTail: Promise<void> = Promise.resolve();
 
 /** Local Font Access API 지원 여부 */
 export function isLocalFontAccessSupported(): boolean {
@@ -357,7 +362,11 @@ async function readSfntFontNames(fontData: FontData): Promise<SfntFontNames> {
   if (!fontData.blob) return emptySfntFontNames();
   try {
     const blob = await fontData.blob();
-    if (blob.size < 12) return emptySfntFontNames();
+    if (
+      !Number.isSafeInteger(blob.size)
+      || blob.size < 12
+      || blob.size > LOCAL_FONT_MAX_BYTES_PER_FACE
+    ) return emptySfntFontNames();
     const header = new DataView(await blob.slice(0, 12).arrayBuffer());
     const tableCount = header.getUint16(4, false);
     const directoryLength = 12 + tableCount * 16;
@@ -895,17 +904,59 @@ async function readLocalFontBytesBatch(records: readonly LocalFontRecord[]): Pro
 
   try {
     const candidates = await queryLocalFonts({ postscriptNames });
-    await Promise.all(records.map(async (record) => {
-      const fontData = candidates.find(candidate => localFontRecordMatchesFontData(record, candidate));
-      if (!fontData?.blob) return;
-      const bytes = await (await fontData.blob()).arrayBuffer();
-      bytesByPostscriptName.set(normalizeFontAlias(record.postscriptName), bytes);
-    }));
+    let reservedBytes = 0;
+    let nextIndex = 0;
+    let firstReadError: unknown;
+    const worker = async (): Promise<void> => {
+      while (nextIndex < records.length) {
+        const record = records[nextIndex]!;
+        nextIndex += 1;
+        const fontData = candidates.find(candidate => localFontRecordMatchesFontData(record, candidate));
+        if (!fontData?.blob) continue;
+        let reserved = 0;
+        try {
+          const blob = await fontData.blob();
+          if (
+            !Number.isSafeInteger(blob.size)
+            || blob.size <= 0
+            || blob.size > LOCAL_FONT_MAX_BYTES_PER_FACE
+            || blob.size > LOCAL_FONT_MAX_AGGREGATE_BYTES - reservedBytes
+          ) continue;
+          reserved = blob.size;
+          reservedBytes += reserved;
+          const bytes = await blob.arrayBuffer();
+          if (bytes.byteLength !== reserved) {
+            reservedBytes -= reserved;
+            continue;
+          }
+          bytesByPostscriptName.set(normalizeFontAlias(record.postscriptName), bytes);
+        } catch (error) {
+          if (reserved > 0) reservedBytes -= reserved;
+          firstReadError ??= error;
+        }
+      }
+    };
+    await Promise.all(Array.from(
+      { length: Math.min(LOCAL_FONT_BYTE_READ_CONCURRENCY, records.length) },
+      () => worker(),
+    ));
+    if (firstReadError) {
+      console.warn('[LocalFonts] 일부 CanvasKit용 SFNT 바이트를 읽지 못했습니다:', firstReadError);
+    }
   } catch (error) {
     // 이미 승인된 글꼴을 다시 읽지 못해도 기본 Typeface fallback으로 계속 렌더한다.
     console.warn('[LocalFonts] CanvasKit용 SFNT 바이트 일괄 조회 실패:', error);
   }
   return bytesByPostscriptName;
+}
+
+function enqueueLocalFontBytesBatch(records: readonly LocalFontRecord[]): Promise<Map<string, ArrayBuffer>> {
+  const batch = localFontByteBatchTail.then(
+    () => readLocalFontBytesBatch(records),
+    () => readLocalFontBytesBatch(records),
+  );
+  localFontByteBatchTail = batch.then(() => undefined, () => undefined);
+  return batch;
 }
 
 /**
@@ -918,14 +969,17 @@ export async function loadLocalFontBytesFor(fontNames: readonly string[]): Promi
   for (const fontName of fontNames) {
     const record = resolveLocalFont(fontName);
     if (!record?.postscriptName) continue;
-    recordsByPostscriptName.set(normalizeFontAlias(record.postscriptName), record);
+    const postscriptName = normalizeFontAlias(record.postscriptName);
+    if (!recordsByPostscriptName.has(postscriptName)
+      && recordsByPostscriptName.size >= LOCAL_FONT_MAX_FACES_PER_DOCUMENT) continue;
+    recordsByPostscriptName.set(postscriptName, record);
   }
 
   const missing = Array.from(recordsByPostscriptName.entries())
     .filter(([postscriptName]) => !localFontBytesByPostscriptName.has(postscriptName));
   if (missing.length > 0) {
     const records = missing.map(([, record]) => record);
-    const batch = readLocalFontBytesBatch(records);
+    const batch = enqueueLocalFontBytesBatch(records);
     for (const [postscriptName] of missing) {
       const pending = batch.then(
         bytesByPostscriptName => bytesByPostscriptName.get(postscriptName) ?? null,

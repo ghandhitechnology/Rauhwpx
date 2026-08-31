@@ -61,9 +61,17 @@ function errorStatus(error) {
     case 'REFERENCE_TYPE_UNSUPPORTED':
     case 'REFERENCE_TYPE_MISMATCH': return 415;
     case 'REFERENCE_FILE_TOO_LARGE':
-    case 'REFERENCE_SCOPE_SIZE_LIMIT': return 413;
+    case 'REFERENCE_SCOPE_SIZE_LIMIT':
+    case 'REFERENCE_GLOBAL_SIZE_LIMIT':
+    case 'REFERENCE_GLOBAL_EXTRACTED_LIMIT':
+    case 'REFERENCE_INDEX_TOO_LARGE':
+    case 'REFERENCE_METADATA_TOO_LARGE':
+    case 'REFERENCE_QUERY_TOO_LARGE': return 413;
     case 'REFERENCE_SCOPE_FORBIDDEN': return 403;
-    case 'REFERENCE_FILE_COUNT_LIMIT': return 409;
+    case 'REFERENCE_FILE_COUNT_LIMIT':
+    case 'REFERENCE_GLOBAL_FILE_COUNT_LIMIT':
+    case 'REFERENCE_METADATA_RECORD_LIMIT':
+    case 'REFERENCE_SCOPE_BUSY': return 409;
     case 'REFERENCE_EXTRACTION_TIMEOUT': return 504;
     case 'REFERENCE_EXTRACTOR_UNAVAILABLE': return 503;
     case 'REFERENCE_STORE_CORRUPT': return 500;
@@ -177,6 +185,7 @@ export function createReferenceHttpHandler({ store, tokens, allowedScopes }) {
         const rawLimit = Number(url.searchParams.get('maxResults') ?? url.searchParams.get('limit') ?? 8);
         const maxResults = Number.isSafeInteger(rawLimit) ? Math.min(20, Math.max(1, rawLimit)) : 8;
         const scopes = [resolvedScope];
+        await store.activateScopes(scopes);
         const results = store.search({ query, scopes, maxResults });
         sendJson(res, 200, { status: 'ready', query, results }, origin);
         return true;

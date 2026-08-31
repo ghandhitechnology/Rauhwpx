@@ -459,15 +459,15 @@ pub fn diff_render_geometry(a: &DocumentCore, b: &DocumentCore) -> Result<DocGeo
 
 /// 원본 바이트를 라운드트립(직렬화→재로드)한 뒤 원본과 기하를 비교한다.
 pub fn roundtrip_geom(data: &[u8], via: Via) -> Result<DocGeomDiff, HwpError> {
-    let core_a = DocumentCore::from_bytes(data)?;
+    let core_a = DocumentCore::from_local_file_bytes(data)?;
     let rt_bytes = match via {
         Via::Hwpx => core_a.export_hwpx_native()?,
         Via::Hwp => {
-            let mut c = DocumentCore::from_bytes(data)?;
+            let mut c = DocumentCore::from_local_file_bytes(data)?;
             c.export_hwp_with_adapter()?
         }
     };
-    let core_b = DocumentCore::from_bytes(&rt_bytes)?;
+    let core_b = DocumentCore::from_regenerated_bytes(&rt_bytes)?;
     diff_render_geometry(&core_a, &core_b)
 }
 
@@ -708,7 +708,7 @@ fn run_batch(opts: &CliOptions) -> i32 {
             elapsed_ms: 0,
             error: String::new(),
         };
-        match fs::read(path)
+        match crate::parser::limits::read_local_file_once(path)
             .map_err(|e| e.to_string())
             .and_then(|data| roundtrip_geom(&data, opts.via).map_err(|e| format!("{e:?}")))
         {
@@ -810,9 +810,9 @@ fn run_single(opts: &CliOptions) -> i32 {
     let diff = if opts.positionals.len() == 2 {
         // 두 파일 직접 비교.
         let (a, b) = (&opts.positionals[0], &opts.positionals[1]);
-        let core_a = match fs::read(a)
+        let core_a = match crate::parser::limits::read_local_file_once(a)
             .map_err(|e| e.to_string())
-            .and_then(|d| DocumentCore::from_bytes(&d).map_err(|e| format!("{e:?}")))
+            .and_then(|d| DocumentCore::from_local_file_bytes(&d).map_err(|e| format!("{e:?}")))
         {
             Ok(c) => c,
             Err(e) => {
@@ -820,9 +820,9 @@ fn run_single(opts: &CliOptions) -> i32 {
                 return 2;
             }
         };
-        let core_b = match fs::read(b)
+        let core_b = match crate::parser::limits::read_local_file_once(b)
             .map_err(|e| e.to_string())
-            .and_then(|d| DocumentCore::from_bytes(&d).map_err(|e| format!("{e:?}")))
+            .and_then(|d| DocumentCore::from_local_file_bytes(&d).map_err(|e| format!("{e:?}")))
         {
             Ok(c) => c,
             Err(e) => {
@@ -840,7 +840,7 @@ fn run_single(opts: &CliOptions) -> i32 {
     } else {
         // 자기 라운드트립.
         let f = &opts.positionals[0];
-        let data = match fs::read(f) {
+        let data = match crate::parser::limits::read_local_file_once(f) {
             Ok(d) => d,
             Err(e) => {
                 eprintln!("오류: 파일 읽기 실패 {}: {e}", f.display());

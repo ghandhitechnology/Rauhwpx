@@ -22,6 +22,9 @@ function workflowJob(jobId: string): string {
 const macosJob = workflowJob('macos');
 const windowsJob = workflowJob('windows');
 const publishJob = workflowJob('publish');
+const verificationGateJob = workflowJob('verification-gate');
+const prepareJob = workflowJob('prepare');
+const browserbaseJob = workflowJob('browserbase-live');
 
 test('nightly desktop releases run daily and on demand without cancellation', () => {
   assert.match(nightlyReleaseWorkflow, /4:00am KST/);
@@ -45,6 +48,22 @@ test('nightly desktop releases build the existing macOS and Windows targets', ()
   assert.doesNotMatch(nightlyReleaseWorkflow, /dist:linux|electron-builder\s+--linux/);
 });
 
+test('nightly packaging is gated on an exact-SHA completed verification run', () => {
+  assert.match(verificationGateJob, /permissions:\s*\n\s+actions:\s*read/);
+  assert.match(
+    verificationGateJob,
+    /actions\/workflows\/nightly\.yml\/runs\?head_sha=\$\{GITHUB_SHA\}&status=completed/,
+  );
+  assert.match(verificationGateJob, /\.head_sha == \\\"\$\{GITHUB_SHA\}\\\"/);
+  assert.match(verificationGateJob, /\.status == \\\"completed\\\"/);
+  assert.match(verificationGateJob, /\.conclusion == \\\"success\\\"/);
+  assert.match(verificationGateJob, /if \[\[ -z "\$\{successful_run_id\}" \]\]/);
+  assert.match(prepareJob, /needs:\s*verification-gate/);
+  assert.match(browserbaseJob, /needs:\s*prepare/);
+  assert.match(macosJob, /needs:\s*\[prepare,\s*browserbase-live\]/);
+  assert.match(windowsJob, /needs:\s*\[prepare,\s*browserbase-live\]/);
+});
+
 test('nightly macOS releases use the tagged release signing contract', () => {
   assert.match(macosJob, /environment:\s*macos-release/);
   assert.match(macosJob, /CSC_NAME:\s*"TAEWOOK HA \(C8M34MMT8W\)"/);
@@ -55,8 +74,18 @@ test('nightly macOS releases use the tagged release signing contract', () => {
 test('nightly publishing replaces the prerelease only after both builds pass', () => {
   assert.match(publishJob, /needs:\s*\[macos,\s*windows\]/);
   assert.match(publishJob, /if:\s*github\.ref == 'refs\/heads\/main'/);
-  assert.match(publishJob, /gh release delete nightly/);
+  assert.match(publishJob, /releases\/tags\/nightly" --jq '\.id'/);
+  assert.match(publishJob, /elif grep -q 'HTTP 404'/);
+  assert.doesNotMatch(publishJob, /releases\?per_page=/);
+  assert.match(
+    publishJob,
+    /gh api --method DELETE "repos\/\$\{GITHUB_REPOSITORY\}\/releases\/\$\{existing_release_id\}"/,
+  );
   assert.match(publishJob, /gh release create nightly/);
+  assert.ok(
+    publishJob.indexOf('gh api --method DELETE') < publishJob.indexOf('gh release create nightly'),
+    'the old prerelease must be deleted before the replacement is created',
+  );
   assert.match(publishJob, /--prerelease/);
   assert.match(publishJob, /--latest=false/);
   assert.doesNotMatch(publishJob, /if:\s*(?:\$\{\{\s*)?(?:always|failure)\(\)/);

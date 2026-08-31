@@ -371,7 +371,7 @@ fn equation_container_path(path: &str) -> String {
 fn serialize_validated_hwp(document: &Document) -> Result<Vec<u8>, HwpError> {
     let bytes = crate::serializer::serialize_document(document)
         .map_err(|e| HwpError::RenderError(e.to_string()))?;
-    let reparsed = crate::parser::parse_hwp_strict(&bytes).map_err(|error| {
+    let reparsed = crate::parser::parse_hwp_strict_regenerated(&bytes).map_err(|error| {
         HwpError::RenderError(format!(
             "generated HWP failed strict package validation: {error}"
         ))
@@ -398,7 +398,12 @@ fn serialize_validated_hwpx(document: &Document) -> Result<Vec<u8>, HwpError> {
             package_report.summary(),
         )));
     }
-    let reparsed = crate::parser::hwpx::parse_hwpx(&bytes).map_err(|error| {
+    crate::parser::limits::validate_input_size(
+        bytes.len(),
+        crate::parser::limits::InputPolicy::Regenerated,
+    )
+    .map_err(|error| HwpError::InvalidFile(error.to_string()))?;
+    let reparsed = crate::parser::hwpx::parse_hwpx_validated(&bytes).map_err(|error| {
         HwpError::RenderError(format!("generated HWPX failed reparse validation: {error}"))
     })?;
     if reparsed.sections.len() != document.sections.len() {
@@ -544,8 +549,25 @@ impl DocumentCore {
     }
 
     pub fn from_bytes(data: &[u8]) -> Result<DocumentCore, HwpError> {
+        Self::from_bytes_with_policy(data, crate::parser::limits::InputPolicy::Untrusted)
+    }
+
+    /// Open one exact local file approved for this attempt by a native picker.
+    pub fn from_local_file_bytes(data: &[u8]) -> Result<DocumentCore, HwpError> {
+        Self::from_bytes_with_policy(data, crate::parser::limits::InputPolicy::LocalFileOnce)
+    }
+
+    /// Reparse output created by this process's bounded serializers.
+    pub(crate) fn from_regenerated_bytes(data: &[u8]) -> Result<DocumentCore, HwpError> {
+        Self::from_bytes_with_policy(data, crate::parser::limits::InputPolicy::Regenerated)
+    }
+
+    pub(crate) fn from_bytes_with_policy(
+        data: &[u8],
+        policy: crate::parser::limits::InputPolicy,
+    ) -> Result<DocumentCore, HwpError> {
         let source_format = crate::parser::detect_format(data);
-        let parsed = crate::parser::parse_document_with_metadata(data)
+        let parsed = crate::parser::parse_document_with_metadata_policy(data, policy)
             .map_err(|e| HwpError::InvalidFile(e.to_string()))?;
         let mut document = parsed.document;
         let hml_metadata = parsed.hml_metadata;
@@ -679,7 +701,18 @@ impl DocumentCore {
     /// 편집 세션의 정체성이므로 유지한다. 파싱과 편집 가능 변환을 임시 코어에서
     /// 끝낸 뒤 `Document`를 교체하므로 잘못된 바이트는 현재 상태를 바꾸지 않는다.
     pub fn replace_content_from_bytes_native(&mut self, data: &[u8]) -> Result<String, HwpError> {
-        let mut replacement = DocumentCore::from_bytes(data)?;
+        self.replace_content_from_bytes_with_policy(
+            data,
+            crate::parser::limits::InputPolicy::Untrusted,
+        )
+    }
+
+    fn replace_content_from_bytes_with_policy(
+        &mut self,
+        data: &[u8],
+        policy: crate::parser::limits::InputPolicy,
+    ) -> Result<String, HwpError> {
+        let mut replacement = DocumentCore::from_bytes_with_policy(data, policy)?;
         replacement.convert_to_editable_native()?;
 
         self.document = replacement.document;
@@ -1677,7 +1710,7 @@ impl DocumentCore {
         let (structure_before, mut serialization_losses) = hwp_structure_counts(&export_document);
         let bytes = serialize_validated_hwp(&export_document)?;
         let bytes_len = bytes.len();
-        let reloaded = DocumentCore::from_bytes(&bytes)?;
+        let reloaded = DocumentCore::from_regenerated_bytes(&bytes)?;
         let page_count_after = reloaded.page_count();
         let (structure_after, _) = hwp_structure_counts(reloaded.document());
         let page_count_matches = page_count_before == page_count_after;
@@ -2073,7 +2106,7 @@ impl DocumentCore {
     /// Batch 모드를 시작한다. 이후 Command 호출 시 paginate()를 건너뛴다.
     pub fn begin_batch_native(&mut self) -> Result<String, HwpError> {
         self.batch_mode = true;
-        self.event_log.clear();
+        self.event_log.begin_capture();
         Ok(super::super::helpers::json_ok())
     }
 

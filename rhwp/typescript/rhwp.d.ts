@@ -10,6 +10,9 @@ export class HwpDocument {
   /** HWP 파일 바이트로부터 문서를 로드한다. */
   constructor(data: Uint8Array);
 
+  /** Load one exact host-approved local file (the approval is single use). */
+  static fromTrustedLocalFileBytes(data: Uint8Array): HwpDocument;
+
   /** 현재 파일 정체성을 유지한 채 문서 내용만 교체한다. */
   replaceContentFromBytes(data: Uint8Array): string;
 
