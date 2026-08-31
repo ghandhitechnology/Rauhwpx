@@ -20,12 +20,17 @@ function initializeDocumentSource(): string {
 
 test('문서 초기화는 로컬 글꼴 확인 후에만 입력 핸들러를 활성화한다', () => {
   const initializeDocument = initializeDocumentSource();
+  const hideEmptyStateIndex = initializeDocument.indexOf("emptyState.setAttribute('aria-hidden', 'true');");
   const promptIndex = initializeDocument.indexOf('await promptLocalFontsIfNeeded(docInfo, displayName);');
   const activateIndex = initializeDocument.indexOf('inputHandler?.activateWithCaretPosition();');
+  const contextIndex = initializeDocument.indexOf("eventBus.emit('document-context-changed');");
   const completeIndex = initializeDocument.indexOf("documentState.markClean('document-initialized');");
 
+  assert.ok(hideEmptyStateIndex >= 0, '문서가 준비되면 빈 상태를 숨겨야 한다');
+  assert.ok(hideEmptyStateIndex < promptIndex, '로컬 글꼴 확인 전에 빈 상태를 숨겨야 한다');
   assert.ok(promptIndex >= 0, '로컬 글꼴 확인 단계가 있어야 한다');
   assert.ok(activateIndex > promptIndex, '로컬 글꼴 확인 뒤에 캐럿을 활성화해야 한다');
+  assert.ok(contextIndex > activateIndex, '캐럿 활성화 뒤에 문서 컨텍스트 변경을 알려야 한다');
   assert.ok(completeIndex > activateIndex, '편집 준비 뒤에 문서 초기화를 완료해야 한다');
   assert.doesNotMatch(
     initializeDocument,
