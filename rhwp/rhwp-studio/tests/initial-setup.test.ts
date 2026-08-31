@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { AGENT_MODELS } from '../src/agent/models.ts';
-import type { AgentName, AgentSetupStatus } from '../src/agent/types.ts';
+import type { AccountSessionStatus, AgentName, AgentSetupStatus } from '../src/agent/types.ts';
 import { PROVIDER_ORDER } from '../src/ui/agent-sidebar/providers.ts';
 import {
   BYOK_AGENTS,
@@ -12,6 +12,7 @@ import {
   previewModelLabels,
   PROVIDER_VENDOR,
   RAU_FAILURE_FORWARD_COPY,
+  rauSignInFeedback,
   SUGGESTED_AGENT,
 } from '../src/ui/initial-setup/catalog.ts';
 import {
@@ -217,6 +218,46 @@ test('Rau 로그인·민트 실패는 같은 화면의 BYOK 경로로 접는다'
   assert.match(setup, /if \(rauFailureActive\) \{\s*\n\s*skipToEditor\(\)/);
   assert.match(setup, /dataset\.recoveryOption = rauFailureActive && isByokAgent\(agent\)/);
   assert.match(setup, /dataset\.byok = 'true'/);
+});
+
+test('Rau 카드가 generic account snapshot의 로그인 진행과 완료를 정확히 보여 준다', () => {
+  const base: AccountSessionStatus = {
+    state: 'signed-out',
+    signedIn: false,
+    account: null,
+    updatedAt: '2026-09-01T00:00:00.000Z',
+    authenticating: false,
+  };
+
+  assert.deepEqual(rauSignInFeedback({ ...base, state: 'pending', authenticating: true }, 'Rau로 시작'), {
+    state: 'pending',
+    label: '로그인 확인 중…',
+    ariaLabel: '로그인 확인 중…',
+    title: '',
+  });
+  assert.deepEqual(rauSignInFeedback({
+    ...base,
+    state: 'signed-in',
+    signedIn: true,
+    account: { email: 'andy@example.com' },
+  }, 'Rau로 시작'), {
+    state: 'signed-in',
+    label: '로그인됨',
+    ariaLabel: '로그인됨. 다음 단계로 계속',
+    title: '다음 단계로 계속',
+  });
+  assert.equal(rauSignInFeedback({ ...base, error: 'cancelled' }, '다시 시도').state, 'idle');
+  assert.equal(rauSignInFeedback({ ...base, error: 'failed' }, '다시 시도').label, '다시 시도');
+
+  const setup = readSource('../src/ui/initial-setup/initial-setup.ts');
+  const css = readSource('../src/ui/initial-setup/initial-setup.css');
+  assert.match(setup, /event\.type === 'account-status'/);
+  assert.match(setup, /event\.type === 'account-login-progress'/);
+  assert.match(setup, /event\.type === 'account-error'/);
+  assert.match(setup, /accountStatus\?\.signedIn === true[\s\S]*goNext\(\)/);
+  assert.match(setup, /requestAccountStatus\(\)/);
+  assert.match(css, /data-account-state='signed-in'[\s\S]*background: #b7c9ad/);
+  assert.doesNotMatch(setup, /Cloud|quota|allowance|크레딧|한도/);
 });
 
 test('실패 경로의 건너뛰기는 보정 단계 없이 편집기로 끝낸다', () => {

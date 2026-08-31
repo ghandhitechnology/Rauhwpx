@@ -8,7 +8,12 @@ import './initial-setup.css';
 import {
   applyFirstRunDefaultAgent,
 } from '../../agent/agent-prefs.ts';
-import type { AgentName, AgentSetupStatusMap, SidebarEvent } from '../../agent/types.ts';
+import type {
+  AccountSessionStatus,
+  AgentName,
+  AgentSetupStatusMap,
+  SidebarEvent,
+} from '../../agent/types.ts';
 import { AGENT_LABEL, createProviderIcon, PROVIDER_ORDER } from '../agent-sidebar/providers.ts';
 import {
   isByokAgent,
@@ -17,6 +22,7 @@ import {
   previewModelLabels,
   PROVIDER_VENDOR,
   RAU_FAILURE_FORWARD_COPY,
+  rauSignInFeedback,
   SUGGESTED_AGENT,
 } from './catalog.ts';
 import {
@@ -46,6 +52,7 @@ export interface InitialSetupDeps {
   beginAgentConnect?: (agent: AgentName) => void;
   /** 실패 경로에서 설정 모달을 닫아 마법사 카드가 다시 보이게 한다. */
   closeAgentSetup?: () => void;
+  requestAccountStatus?: () => Promise<AccountSessionStatus | null>;
   openCalibration: (options?: { elevate?: boolean }) => void;
   storage?: InitialSetupStorage | null;
 }
@@ -61,11 +68,19 @@ export interface InitialSetupUi {
 }
 
 export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
-  const { openAgentSetup, beginAgentConnect, closeAgentSetup, openCalibration, storage } = deps;
+  const {
+    openAgentSetup,
+    beginAgentConnect,
+    closeAgentSetup,
+    requestAccountStatus,
+    openCalibration,
+    storage,
+  } = deps;
   let disposed = false;
   let record: InitialSetupRecord = loadInitialSetup(storage);
   let stage: SetupStage = 'providers';
   let setupStatuses: AgentSetupStatusMap | null = null;
+  let accountStatus: AccountSessionStatus | null = null;
   let rauFailureActive = false;
   let lastFocus: HTMLElement | null = null;
 
@@ -124,7 +139,13 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
     }
     const action = el('button', 'rhwp-setup-card-action', agent === 'rau' ? 'Rau로 시작' : '설정');
     action.type = 'button';
-    action.addEventListener('click', () => (beginAgentConnect ?? openAgentSetup)(agent));
+    action.addEventListener('click', () => {
+      if (agent === 'rau' && accountStatus?.signedIn === true) {
+        goNext();
+        return;
+      }
+      (beginAgentConnect ?? openAgentSetup)(agent);
+    });
     card.append(logo, name, vendor, models, action);
     grid.appendChild(card);
     cards.set(agent, { root: card, action });
@@ -169,7 +190,11 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
   overlay.appendChild(dialog);
 
   function configuredAgents(): AgentName[] {
-    return PROVIDER_ORDER.filter((agent) => isProviderConfigured(agent, setupStatuses));
+    return PROVIDER_ORDER.filter((agent) => (
+      agent === 'rau' && accountStatus?.signedIn === true
+        ? true
+        : isProviderConfigured(agent, setupStatuses)
+    ));
   }
 
   function configuredCount(): number {
@@ -196,9 +221,19 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
       const card = cards.get(agent);
       if (!card) continue;
       const configured = isProviderConfigured(agent, setupStatuses);
+      const rauFeedback = agent === 'rau'
+        ? rauSignInFeedback(
+          accountStatus,
+          connectActionLabel(agent, configured),
+        )
+        : null;
       card.root.dataset.configured = configured ? 'true' : 'false';
+      if (rauFeedback) card.root.dataset.accountState = rauFeedback.state;
       card.root.dataset.recoveryOption = rauFailureActive && isByokAgent(agent) ? 'true' : 'false';
-      card.action.textContent = connectActionLabel(agent, configured);
+      card.action.textContent = rauFeedback?.label ?? connectActionLabel(agent, configured);
+      card.action.disabled = rauFeedback?.state === 'pending';
+      card.action.setAttribute('aria-label', rauFeedback?.ariaLabel ?? card.action.textContent);
+      card.action.title = rauFeedback?.title ?? '';
       const models = card.root.querySelector('.rhwp-setup-card-models');
       if (models) {
         models.replaceChildren();
@@ -319,6 +354,13 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
       overlay.classList.add('rhwp-setup-open');
       dialog.focus();
     });
+    if (requestAccountStatus) {
+      void requestAccountStatus().then((status) => {
+        if (disposed || !status) return;
+        accountStatus = status;
+        if (stage === 'providers') renderCards();
+      });
+    }
   }
 
   function close(): void {
@@ -339,6 +381,40 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
       if (disposed) return;
       if (event.type === 'agent-setup-error') {
         if (isRauFirstRunFailure(event)) enterRauFailureRecovery();
+        return;
+      }
+      if (event.type === 'account-status') {
+        accountStatus = event.status;
+        if (stage === 'providers') renderCards();
+        return;
+      }
+      if (event.type === 'account-login-progress') {
+        accountStatus = {
+          state: 'pending',
+          signedIn: false,
+          account: null,
+          updatedAt: new Date().toISOString(),
+          authenticating: true,
+          authRunId: event.authRunId,
+          authUrl: event.authUrl,
+          pairingCode: event.pairingCode,
+          expiresAt: event.expiresAt,
+        };
+        if (stage === 'providers') renderCards();
+        return;
+      }
+      if (event.type === 'account-error') {
+        if (accountStatus?.signedIn !== true) {
+          accountStatus = {
+            state: 'signed-out',
+            signedIn: false,
+            account: null,
+            updatedAt: new Date().toISOString(),
+            authenticating: false,
+            error: event.message,
+          };
+        }
+        if (stage === 'providers') renderCards();
         return;
       }
       if (event.type !== 'agent-setup-status') return;

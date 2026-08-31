@@ -235,6 +235,15 @@
   background: var(--setup-card-on);
 }
 
+.rhwp-setup-card[data-agent='rau'][data-account-state='signed-in'] {
+  background: var(--setup-card-on);
+}
+
+.rhwp-setup-card[data-agent='rau'][data-account-state='signed-in'] .rhwp-setup-card-action {
+  background: #b7c9ad;
+  color: #15161a;
+}
+
 .rhwp-setup-card-logo {
   display: grid;
   place-items: center;
