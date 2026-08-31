@@ -1597,6 +1597,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     if (destination === currentDestination) return;
     if (!await resolveDirtyExit()) return;
     selectDestination(destination);
+    if (destination === 'product') void refreshUniqueInstalls();
     navButtons.get(destination)?.focus();
   }
 

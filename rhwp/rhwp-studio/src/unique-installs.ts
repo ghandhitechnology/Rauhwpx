@@ -43,7 +43,6 @@ export async function loadUniqueInstallSnapshot(
       uniqueInstalls,
       publicUrl: uniqueInstallPublicUrl(snapshot),
       recorded: snapshot.recorded === true,
-      unavailable: uniqueInstalls == null,
     };
   } catch {
     return { uniqueInstalls: null, publicUrl: UNIQUE_INSTALLS_PUBLIC_URL, unavailable: true };

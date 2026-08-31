@@ -194,6 +194,8 @@ async function reportUniqueInstallInner({
   randomUUIDImpl,
   now,
 }) {
+  if (!shouldPingUniqueInstall({ packaged, devUrl })) return snapshot;
+
   let state = null;
   try {
     state = await loadOrCreateUniqueInstallState(uniqueInstallStatePath(userDataDir), {
@@ -220,7 +222,7 @@ async function reportUniqueInstallInner({
     // Display is best-effort. Launch must not wait on a healthy counter.
   }
 
-  if (!shouldPingUniqueInstall({ packaged, devUrl }) || !state || state.recorded) {
+  if (!state || state.recorded) {
     snapshot.recorded = state?.recorded === true;
     return snapshot;
   }

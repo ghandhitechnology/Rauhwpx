@@ -121,6 +121,11 @@ test('unpackaged and failed pings never increment locally, and a later retry can
     });
     assert.equal(unpackaged.recorded, false);
     assert.equal(calls.filter((call) => call.method === 'POST').length, 0);
+    assert.equal(calls.length, 0);
+    await assert.rejects(
+      readFile(path.join(userDataDir, UNIQUE_INSTALL_FILE), 'utf8'),
+      { code: 'ENOENT' },
+    );
 
     const failingFetch = async (url, init = {}) => {
       if ((init.method ?? 'GET') === 'POST') throw new Error('offline');
@@ -186,6 +191,15 @@ test('public CEO readout URLs stay on the hosted rau-credits origin', () => {
 test('settings and about read the snapshot through desktop IPC without inventing a count', async () => {
   const missing = await loadUniqueInstallSnapshot({});
   assert.equal(missing.uniqueInstalls, null);
+  assert.equal(missing.unavailable, undefined);
+  const emptyIpc = await loadUniqueInstallSnapshot({
+    rhwpDesktop: {
+      getUniqueInstalls: async () => ({ uniqueInstalls: null, publicUrl: 'https://credits.rau.test/unique-installs' }),
+    },
+  });
+  assert.equal(emptyIpc.uniqueInstalls, null);
+  assert.equal(emptyIpc.unavailable, undefined);
+  assert.equal(emptyIpc.publicUrl, 'https://credits.rau.test/unique-installs');
   const live = await loadUniqueInstallSnapshot({
     rhwpDesktop: {
       getUniqueInstalls: async () => ({ uniqueInstalls: 12, publicUrl: 'https://credits.rau.test/unique-installs' }),
@@ -193,6 +207,15 @@ test('settings and about read the snapshot through desktop IPC without inventing
   });
   assert.equal(live.uniqueInstalls, 12);
   assert.equal(live.publicUrl, 'https://credits.rau.test/unique-installs');
+  const failed = await loadUniqueInstallSnapshot({
+    rhwpDesktop: {
+      getUniqueInstalls: async () => {
+        throw new Error('ipc failed');
+      },
+    },
+  });
+  assert.equal(failed.unavailable, true);
+  assert.equal(failed.uniqueInstalls, null);
 });
 
 test('the desktop shell pings only after a successful launch and never blocks startup', () => {
@@ -200,8 +223,9 @@ test('the desktop shell pings only after a successful launch and never blocks st
   assert.match(desktopMain, /failedLaunches > 0 && sessions\.windows\(\)\.length === 0/);
   assert.match(
     desktopMain,
-    /app\.quit\(\);\s*return;\s*\}\s*void syncUniqueInstallMetric\(\)/,
+    /resolveUniqueInstallSync\(\);\s*app\.quit\(\);\s*return;\s*\}\s*void finishUniqueInstallMetric\(\)/,
   );
+  assert.match(desktopMain, /await uniqueInstallSync/);
   assert.match(desktopMain, /unique install ping failed/);
   assert.doesNotMatch(desktopMain, /download_count/);
 });

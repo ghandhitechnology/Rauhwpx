@@ -406,6 +406,10 @@ let uniqueInstallSnapshot = {
   publicUrl: uniqueInstallsPublicUrl(),
   recorded: false,
 };
+let resolveUniqueInstallSync = () => {};
+const uniqueInstallSync = new Promise((resolve) => {
+  resolveUniqueInstallSync = resolve;
+});
 
 async function syncUniqueInstallMetric() {
   uniqueInstallSnapshot = await reportUniqueInstall({
@@ -417,6 +421,16 @@ async function syncUniqueInstallMetric() {
     arch: process.arch,
     baseUrl: rauCreditsUrl(),
   });
+}
+
+async function finishUniqueInstallMetric() {
+  try {
+    await syncUniqueInstallMetric();
+  } catch (error) {
+    console.warn('[rauhwpx] unique install ping failed:', error);
+  } finally {
+    resolveUniqueInstallSync();
+  }
 }
 const nativeBookmarkWriter = new SerializedStateWriter({
   write: (snapshot) => writeNativeFileAtomically(nativeBookmarkFile, Buffer.from(snapshot, 'utf8')),
@@ -762,8 +776,9 @@ function showLaunchError(error) {
   dialog.showErrorBox('Rauhwpx could not open', error instanceof Error ? error.message : String(error));
 }
 
-ipcMain.handle('desktop:get-unique-installs', (event) => {
+ipcMain.handle('desktop:get-unique-installs', async (event) => {
   sessionForEvent(event);
+  await uniqueInstallSync;
   return uniqueInstallSnapshot;
 });
 ipcMain.handle('desktop:get-session-context', (event) => {
@@ -1097,18 +1112,18 @@ if (!hasSingleInstanceLock) {
       });
     }
     if (failedLaunches > 0 && sessions.windows().length === 0) {
+      resolveUniqueInstallSync();
       app.quit();
       return;
     }
-    void syncUniqueInstallMetric().catch((error) => {
-      console.warn('[rauhwpx] unique install ping failed:', error);
-    });
+    void finishUniqueInstallMetric();
     if (app.isPackaged && process.platform === 'darwin') {
       setTimeout(() => {
         void autoUpdater.checkForUpdates().catch(() => {});
       }, 4000);
     }
   }).catch((error) => {
+    resolveUniqueInstallSync();
     showLaunchError(error);
     app.quit();
   });

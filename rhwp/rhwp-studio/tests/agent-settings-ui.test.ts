@@ -148,6 +148,7 @@ test('설정은 편집·AI·연결·제품 목적지와 업무별 묶음을 갖�
   assert.match(settings, /\{ id: 'ai', label: 'AI 설정' \}/);
   assert.match(settings, /\{ id: 'connections', label: 'AI 연결' \}/);
   assert.match(settings, /\{ id: 'product', label: '제품' \}/);
+  assert.match(settings, /if \(destination === 'product'\) void refreshUniqueInstalls\(\)/);
   assert.match(settingsCss, /\.ag-settings-section-title/);
   assert.match(settingsCss, /\.ag-unique-install-count/);
 });
