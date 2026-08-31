@@ -337,7 +337,8 @@
 }
 
 .rhwp-setup-card[data-suggested='true']:not([data-configured='true']) .rhwp-setup-card-action,
-.rhwp-setup-card-action.rhwp-setup-primary {
+.rhwp-setup-card-action.rhwp-setup-primary,
+.rhwp-setup-dialog[data-recovery='true'] .rhwp-setup-card[data-recovery-option='true']:not([data-configured='true']) .rhwp-setup-card-action {
   background: var(--setup-text);
   color: #15161a;
 }
@@ -457,10 +458,49 @@
   font-size: 12px;
 }
 
+.rhwp-setup-recovery {
+  width: min(720px, 100%);
+  margin: 0 0 18px;
+  padding: 18px 20px;
+  border: 1px solid #35466f;
+  border-radius: 16px;
+  background: #171c28;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset;
+  animation: rhwp-setup-stage-enter 480ms var(--setup-spring-snappy) both;
+}
+
+.rhwp-setup-recovery-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.rhwp-setup-recovery-copy {
+  max-width: 62ch;
+  margin: 8px 0 0;
+  color: var(--setup-soft);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.rhwp-setup-dialog[data-recovery='true'] .rhwp-setup-card[data-recovery-option='true'] {
+  border-color: #526795;
+  background: #171c28;
+  box-shadow:
+    0 0 0 1px #222c42 inset,
+    0 18px 50px rgba(0, 0, 0, 0.16);
+}
+
+.rhwp-setup-dialog[data-recovery='true'] .rhwp-setup-card[data-agent='rau']:not([data-configured='true']) {
+  opacity: 0.86;
+}
+
 .rhwp-setup-providers[hidden],
 .rhwp-setup-cal[hidden],
 .rhwp-setup-footer[hidden],
-.rhwp-setup-back[hidden] {
+.rhwp-setup-back[hidden],
+.rhwp-setup-recovery[hidden] {
   display: none;
 }
 
@@ -489,7 +529,9 @@
   }
 
   .rhwp-setup-card[data-suggested='true']:not([data-configured='true']) .rhwp-setup-card-action:hover,
-  .rhwp-setup-footer-btn[data-kind='next']:hover {
+  .rhwp-setup-dialog[data-recovery='true'] .rhwp-setup-card[data-recovery-option='true']:not([data-configured='true']) .rhwp-setup-card-action:hover,
+  .rhwp-setup-footer-btn[data-kind='next']:hover,
+  .rhwp-setup-text-btn[data-kind='next']:hover {
     background: #ffffff;
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22);
   }
@@ -663,6 +705,7 @@
   .rhwp-setup-dialog,
   .rhwp-setup-card,
   .rhwp-setup-cal,
+  .rhwp-setup-recovery,
   .rhwp-setup-footer,
   .rhwp-setup-back,
   .rhwp-setup-back-icon,
