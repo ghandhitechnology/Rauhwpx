@@ -70,6 +70,7 @@ import { createCliSetupManager } from './cli-setup-manager.mjs';
 import { createOpenRouter, creditBalanceEmpty } from './openrouter.mjs';
 import { createIpcSecretStore } from './secret-store.mjs';
 import { handlePiToolDefinitions } from './pi/tool-schema.mjs';
+import { PiSubagentCapabilityRegistry } from './pi/subagent-capabilities.mjs';
 import { resolveHwpExtractor } from './reference-extractor.mjs';
 import { ReferenceStore } from './reference-store.mjs';
 import { createReferenceHttpHandler, isAllowedStudioOrigin } from './reference-http.mjs';
@@ -394,6 +395,7 @@ const sessions = new HubSessionRegistry({
       studioInstanceId: null,
       studioReattachTimer: null,
       mcpSockets: new Set(),
+      piSubagents: new PiSubagentCapabilityRegistry(),
       studioMessageQueue: Promise.resolve(),
       agentSession: null,
       processCleanupUncertain: false,
@@ -1100,11 +1102,62 @@ function retireProviderSockets(record, activeSession, {
   }
 }
 
+function retirePiSubagentRegistration(record, registration, {
+  code = 4003,
+  reason = 'pi subagent capability revoked',
+} = {}) {
+  for (const sock of record.mcpSockets) {
+    if (sock.piSubagentId !== registration.childId) continue;
+    // Revoke the in-memory authority before transport close. Buffered frames
+    // are checked against piSubagents again in handleMcpMessage.
+    sock.providerTurnRetired = true;
+    sock.agentTurnId = null;
+    for (const [hubId, entry] of record.pendingCalls) {
+      if (entry.mcpSocket !== sock) continue;
+      clearTimeout(entry.timer);
+      record.pendingCalls.delete(hubId);
+      cancelStudioToolRequest(record, hubId, entry, 'pi-subagent-revoked');
+      entry.sendError?.(workflowError(
+        'PI_SUBAGENT_REVOKED',
+        'This Pi subagent capability was revoked before the tool call completed',
+      ));
+    }
+    queueMicrotask(() => {
+      try { sock.close(code, reason); } catch {}
+    });
+  }
+}
+
+function retirePiSubagentsForTurn(record, activeSession) {
+  for (const registration of record.piSubagents.clearTurn(activeSession)) {
+    retirePiSubagentRegistration(record, registration);
+  }
+}
+
+function retireAllPiSubagents(record, reason = 'provider session replaced') {
+  for (const registration of record.piSubagents.clear()) {
+    retirePiSubagentRegistration(record, registration, { code: 4001, reason });
+  }
+}
+
+function currentPiSubagentForSocket(record, sock) {
+  if (!sock.piSubagentId) return null;
+  const registration = record.piSubagents.get(sock.piSubagentId);
+  const activeSession = record.agentSession;
+  if (!registration || !record.piSubagents.isCurrent(registration, activeSession)) return null;
+  if (sock.agentGeneration !== registration.providerGeneration
+    || sock.agentLabel !== registration.agent
+    || sock.agentRole !== registration.agentRole
+    || sock.agentTurnId !== registration.parentTurnId) return null;
+  return registration;
+}
+
 function settleAgentTurn(record, activeSession, event) {
   const settledTurnId = activeSession.turnId;
   settleUserQuestion(record, userQuestionOutcomeForTurnEnd(event));
   failPendingProviderCallsForTurn(record, activeSession, settledTurnId);
   retireProviderSockets(record, activeSession, { turnId: settledTurnId });
+  retirePiSubagentsForTurn(record, activeSession);
   activeSession.status = 'idle';
   activeSession.turnId = null;
   activeSession.providerTurnStarted = false;
@@ -2158,7 +2211,10 @@ function disposeSession(record) {
   record.pendingReferenceMessage = null;
   record.pendingDocumentSaved = null;
   const activeSession = record.agentSession;
-  if (!activeSession) return Promise.resolve(record.processCleanupUncertain !== true);
+  if (!activeSession) {
+    retireAllPiSubagents(record);
+    return Promise.resolve(record.processCleanupUncertain !== true);
+  }
   const wasRunning = activeSession.status === 'running';
   const disposedTurnId = activeSession.turnId;
   const agent = activeSession.agent;
@@ -2167,6 +2223,7 @@ function disposeSession(record) {
   record.suppressedUserQuestionCallIds.clear();
   record.pendingUserQuestionScopes.length = 0;
   failPendingProviderCallsForTurn(record, activeSession, activeSession.turnId);
+  retireAllPiSubagents(record);
   activeSession.turnId = null;
   activeSession.providerTurnStarted = false;
   retireProviderSockets(record, activeSession, {
@@ -4082,6 +4139,9 @@ function handleMcpMessage(record, sock, msg) {
       const tool = String(msg.tool ?? '');
       const definition = toolDefinitionsByName.get(tool);
       const workerJob = workerJobForSocket(record, sock);
+      const piSubagent = sock.piSubagentId
+        ? record.piSubagents.get(sock.piSubagentId)
+        : null;
       let providerTurn = null;
       let callSettled = false;
       const sendError = (error, fallback = 'TOOL_ERROR') => {
@@ -4106,7 +4166,8 @@ function handleMcpMessage(record, sock, msg) {
       };
       const sendResult = (result) => {
         if (callSettled) return false;
-        if (providerTurn && !providerTurnIsActive(record, providerTurn)) {
+        if (providerTurn && (!providerTurnIsActive(record, providerTurn)
+          || (sock.piSubagentId && !currentPiSubagentForSocket(record, sock)))) {
           return sendError(noActiveProviderTurnError());
         }
         callSettled = true;
@@ -4114,12 +4175,17 @@ function handleMcpMessage(record, sock, msg) {
       };
       if (!workerJob) {
         const activeSession = record.agentSession;
-        if (
-          !activeSession
-          || sock.agentGeneration !== activeSession.generation
-          || sock.agentLabel !== activeSession.agent
-          || sock.agentRole !== activeSession.providerRole
-        ) {
+        const childIdentityCurrent = piSubagent
+          && record.piSubagents.isCurrent(piSubagent, activeSession)
+          && sock.agentGeneration === piSubagent.providerGeneration
+          && sock.agentLabel === piSubagent.agent
+          && sock.agentRole === piSubagent.agentRole;
+        const rootIdentityCurrent = !sock.piSubagentId
+          && activeSession
+          && sock.agentGeneration === activeSession.generation
+          && sock.agentLabel === activeSession.agent
+          && sock.agentRole === activeSession.providerRole;
+        if (!activeSession || (!childIdentityCurrent && !rootIdentityCurrent)) {
           sendError(workflowError(
             'PROVIDER_SESSION_STALE',
             'This MCP connection no longer belongs to the active provider session',
@@ -4144,6 +4210,13 @@ function handleMcpMessage(record, sock, msg) {
       }
       if (!definition) {
         sendError(workflowError('UNKNOWN_TOOL', `Unknown tool: ${tool}`));
+        return;
+      }
+      if (piSubagent && !piSubagent.allowedTools.has(tool)) {
+        sendError(workflowError(
+          'PI_SUBAGENT_TOOL_DENIED',
+          `This Pi subagent role cannot call ${tool}`,
+        ));
         return;
       }
       let args;
@@ -4191,7 +4264,7 @@ function handleMcpMessage(record, sock, msg) {
         return;
       }
       if (tool === 'ask_user_question') {
-        if (workerJob || sock.agentRole !== 'chat' || msg.parentTaskId) {
+        if (workerJob || sock.piSubagentId || sock.agentRole !== 'chat' || msg.parentTaskId) {
           sendError(workflowError(
             'ROOT_INTERACTION_REQUIRED',
             'Only the root conversation may ask the user questions',
@@ -4781,6 +4854,7 @@ function handleMcpMessage(record, sock, msg) {
         capabilityEpoch: record.agentSession?.planning.capabilityEpoch,
         turnBound: !workerJob,
         ...(providerTurn ? { providerTurnId: providerTurn.turnId } : {}),
+        ...(sock.parentTaskId ? { parentTaskId: sock.parentTaskId } : {}),
       });
       if (!forwarded) {
         clearTimeout(timer);
@@ -5197,13 +5271,70 @@ const httpServer = http.createServer((req, res) => {
       res.end(JSON.stringify(body));
       return;
     }
+    const piSubagentPath = /^\/pi\/subagents\/([^/]+)$/.exec(url.pathname);
+    const piSubagentChildId = piSubagentPath
+      ? decodeURIComponent(piSubagentPath[1])
+      : null;
+    if (req.method === 'POST' && piSubagentChildId) {
+      const record = sessions.get(url.searchParams.get('sessionId'));
+      const activeSession = record?.agentSession;
+      if (!record || !activeSession?.providerCapabilityResource) {
+        const error = new Error('active root provider identity required');
+        error.code = 'UNAUTHORIZED_SESSION';
+        throw error;
+      }
+      authenticateHttpSession(req, url, {
+        audience: HUB_CAPABILITY_AUDIENCES.MCP,
+        resource: activeSession.providerCapabilityResource,
+      });
+      const registration = record.piSubagents.register({
+        activeSession,
+        childId: piSubagentChildId,
+        taskId: url.searchParams.get('taskId'),
+        role: url.searchParams.get('role'),
+        parentProfile: activeSession.planning.mcpEnvironment().RHWP_TOOL_PROFILE,
+      });
+      const token = sessions.issue(TOKEN, record.sessionId, {
+        audience: HUB_CAPABILITY_AUDIENCES.MCP,
+        resource: registration.resource,
+        expiresAt: Date.now() + 4 * 60 * 60 * 1000,
+      });
+      sendHttpJson(res, 201, {
+        childId: registration.childId,
+        agentRole: registration.agentRole,
+        profile: registration.profile,
+        token,
+      });
+      return;
+    }
+    if (req.method === 'DELETE' && piSubagentChildId) {
+      const record = sessions.get(url.searchParams.get('sessionId'));
+      const registration = record?.piSubagents.get(piSubagentChildId);
+      if (!record || !registration) {
+        const error = new Error('active Pi subagent identity required');
+        error.code = 'UNAUTHORIZED_SESSION';
+        throw error;
+      }
+      authenticateHttpSession(req, url, {
+        audience: HUB_CAPABILITY_AUDIENCES.MCP,
+        resource: registration.resource,
+      });
+      const revoked = record.piSubagents.revoke(piSubagentChildId);
+      if (revoked) retirePiSubagentRegistration(record, revoked);
+      sendHttpJson(res, 200, { status: 'revoked', childId: registration.childId });
+      return;
+    }
     // pi extension requests a shared catalog with its signed session credential.
     if (req.method === 'GET' && url.pathname === '/pi/tool-definitions') {
       const candidateSession = sessions.get(url.searchParams.get('sessionId'));
       const requestedWorkerJobId = url.searchParams.get('workerJobId');
+      const requestedSubagentId = url.searchParams.get('subagentId');
       const requestedAgentRole = url.searchParams.get('role') ?? 'chat';
       const workerJob = requestedWorkerJobId
         ? candidateSession?.templateJobs.get(requestedWorkerJobId)
+        : null;
+      const piSubagent = requestedSubagentId
+        ? candidateSession?.piSubagents.get(requestedSubagentId)
         : null;
       let audience;
       let resource;
@@ -5221,6 +5352,19 @@ const httpServer = http.createServer((req, res) => {
         audience = HUB_CAPABILITY_AUDIENCES.COPY_LAYOUT_WORKER;
         resource = workerJob.jobId;
         profile = 'copy-layout-worker';
+      } else if (requestedSubagentId) {
+        if (
+          !piSubagent
+          || !candidateSession.piSubagents.isCurrent(piSubagent, candidateSession.agentSession)
+          || requestedAgentRole !== piSubagent.agentRole
+        ) {
+          const error = new Error('Pi subagent identity mismatch');
+          error.code = 'UNAUTHORIZED_SESSION';
+          throw error;
+        }
+        audience = HUB_CAPABILITY_AUDIENCES.MCP;
+        resource = piSubagent.resource;
+        profile = piSubagent.catalogProfile;
       } else if (candidateSession?.agentSession?.providerCapabilityResource) {
         if (requestedAgentRole !== candidateSession.agentSession.providerRole) {
           const error = new Error('provider identity mismatch');
@@ -5254,8 +5398,28 @@ const httpServer = http.createServer((req, res) => {
     const unauthorized = error?.code === 'UNAUTHORIZED' || error?.code === 'UNAUTHORIZED_SESSION';
     const invalidSession = error?.code === 'INVALID_SESSION_ID' || error instanceof URIError;
     const sessionLimitReached = error?.code === 'SESSION_LIMIT_REACHED';
-    if (unauthorized || invalidSession || sessionLimitReached) {
-      if (!res.headersSent) sendHttpJson(res, unauthorized ? 401 : sessionLimitReached ? 429 : 400, {
+    const invalidPiSubagent = [
+      'INVALID_PI_SUBAGENT_ID',
+      'INVALID_PI_SUBAGENT_TASK',
+      'INVALID_PI_SUBAGENT_ROLE',
+      'INVALID_PI_SUBAGENT_PROFILE',
+    ].includes(error?.code);
+    const piSubagentConflict = [
+      'PI_SUBAGENT_EXISTS',
+      'PI_SUBAGENT_ROOT_REQUIRED',
+      'NO_ACTIVE_TURN',
+    ].includes(error?.code);
+    const piSubagentLimitReached = error?.code === 'PI_SUBAGENT_LIMIT_REACHED';
+    if (unauthorized || invalidSession || sessionLimitReached || invalidPiSubagent
+      || piSubagentConflict || piSubagentLimitReached) {
+      const status = unauthorized
+        ? 401
+        : sessionLimitReached || piSubagentLimitReached
+          ? 429
+          : piSubagentConflict
+            ? 409
+            : 400;
+      if (!res.headersSent) sendHttpJson(res, status, {
         status: 'error',
         error: {
           code: error?.code ?? 'INVALID_SESSION_ID',
@@ -5318,9 +5482,13 @@ httpServer.on('upgrade', (req, socket, head) => {
   const requestedWorkerJobId = pathname === '/mcp'
     ? url.searchParams.get('workerJobId')
     : null;
+  const requestedSubagentId = pathname === '/mcp'
+    ? url.searchParams.get('subagentId')
+    : null;
   const requestedAgent = pathname === '/mcp' ? url.searchParams.get('agent') : null;
   let record;
   let authenticatedWorkerJob = null;
+  let authenticatedPiSubagent = null;
   let authenticatedProviderIdentity = null;
   try {
     const audience = pathname === '/studio'
@@ -5335,7 +5503,15 @@ httpServer.on('upgrade', (req, socket, head) => {
       if (!activeSession?.providerCapabilityResource) {
         throw new Error('active provider identity required');
       }
-      providerCapabilityResource = activeSession.providerCapabilityResource;
+      if (requestedSubagentId) {
+        const registration = candidateRecord.piSubagents.get(requestedSubagentId);
+        if (!registration || !candidateRecord.piSubagents.isCurrent(registration, activeSession)) {
+          throw new Error('active Pi subagent identity required');
+        }
+        providerCapabilityResource = registration.resource;
+      } else {
+        providerCapabilityResource = activeSession.providerCapabilityResource;
+      }
     }
     const authenticatedSessionId = sessions.authenticate({
       masterToken: TOKEN,
@@ -5363,19 +5539,38 @@ httpServer.on('upgrade', (req, socket, head) => {
       throw new Error('copy-layout worker capability required');
     } else if (pathname === '/mcp') {
       const activeSession = record.agentSession;
-      if (
-        !activeSession
-        || activeSession.providerCapabilityResource !== providerCapabilityResource
-        || requestedAgent !== activeSession.agent
-        || requestedAgentRole !== activeSession.providerRole
-      ) {
-        throw new Error('provider identity mismatch');
+      if (requestedSubagentId) {
+        const piSubagent = record.piSubagents.get(requestedSubagentId);
+        if (
+          !piSubagent
+          || !record.piSubagents.isCurrent(piSubagent, activeSession)
+          || piSubagent.resource !== providerCapabilityResource
+          || requestedAgent !== piSubagent.agent
+          || requestedAgentRole !== piSubagent.agentRole
+        ) {
+          throw new Error('Pi subagent identity mismatch');
+        }
+        authenticatedPiSubagent = piSubagent;
+        authenticatedProviderIdentity = Object.freeze({
+          agent: piSubagent.agent,
+          role: piSubagent.agentRole,
+          generation: piSubagent.providerGeneration,
+        });
+      } else {
+        if (
+          !activeSession
+          || activeSession.providerCapabilityResource !== providerCapabilityResource
+          || requestedAgent !== activeSession.agent
+          || requestedAgentRole !== activeSession.providerRole
+        ) {
+          throw new Error('provider identity mismatch');
+        }
+        authenticatedProviderIdentity = Object.freeze({
+          agent: activeSession.agent,
+          role: activeSession.providerRole,
+          generation: activeSession.generation,
+        });
       }
-      authenticatedProviderIdentity = Object.freeze({
-        agent: activeSession.agent,
-        role: activeSession.providerRole,
-        generation: activeSession.generation,
-      });
     }
   } catch {
     rejectUpgrade(socket, 401, 'Unauthorized');
@@ -5512,10 +5707,13 @@ httpServer.on('upgrade', (req, socket, head) => {
     ws.agentRole = authenticatedWorkerJob?.workerRole ?? authenticatedProviderIdentity.role;
     ws.agentGeneration = authenticatedWorkerJob ? null : authenticatedProviderIdentity.generation;
     const activeProviderSession = authenticatedWorkerJob ? null : record.agentSession;
+    const providerIdentityCurrent = authenticatedPiSubagent
+      ? record.piSubagents.isCurrent(authenticatedPiSubagent, activeProviderSession)
+      : activeProviderSession?.providerRole === ws.agentRole;
     const providerTurnId = activeProviderSession
       && activeProviderSession.generation === ws.agentGeneration
       && activeProviderSession.agent === ws.agentLabel
-      && activeProviderSession.providerRole === ws.agentRole
+      && providerIdentityCurrent
       && activeProviderSession.status === 'running'
       && activeProviderSession.providerTurnStarted === true
       && activeProviderSession.turnId
@@ -5527,6 +5725,9 @@ httpServer.on('upgrade', (req, socket, head) => {
     ws.agentTurnId = authenticatedWorkerJob ? null : providerTurnId;
     ws.providerTurnRetired = authenticatedWorkerJob ? false : providerTurnId === null;
     ws.copyLayoutJobId = authenticatedWorkerJob?.jobId ?? null;
+    ws.piSubagentId = authenticatedPiSubagent?.childId ?? null;
+    ws.parentTaskId = authenticatedPiSubagent?.taskId ?? null;
+    ws.toolProfile = authenticatedPiSubagent?.profile ?? null;
     ws.workflow = url.searchParams.get('workflow');
     ws.capabilityEpoch = url.searchParams.get('capabilityEpoch');
     record.mcpSockets.add(ws);
