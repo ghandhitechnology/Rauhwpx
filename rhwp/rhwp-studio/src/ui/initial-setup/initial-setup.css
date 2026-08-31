@@ -521,6 +521,10 @@
   line-height: 1.55;
 }
 
+.rhwp-setup-account-state:empty {
+  display: none;
+}
+
 .rhwp-setup-account[data-signed-in='true'] .rhwp-setup-account-state {
   color: #b7c9ad;
 }

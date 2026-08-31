@@ -161,8 +161,11 @@ test('사이드바가 첫 실행 마법사를 설정 모달·보정 창에 붙�
   assert.match(setup, /보정 시작/);
   assert.match(setup, /모델을 연결하세요/);
   assert.match(setup, /말투를 맞출까요\?/);
-  assert.match(setup, /계정 연결은 선택 사항입니다/);
-  assert.match(setup, /Rau 에이전트 설치 여부는 별도로 선택합니다/);
+  assert.match(setup, /Rauhwpx 계정에 로그인하세요/);
+  assert.doesNotMatch(setup, /선택 사항입니다/);
+  assert.doesNotMatch(setup, /Rau 에이전트 설치 여부는 별도로 선택합니다/);
+  assert.doesNotMatch(setup, /나중에 설정에서도 로그인할 수 있습니다/);
+  assert.match(css, /\.rhwp-setup-account-state:empty\s*\{\s*display: none/);
   assert.match(setup, /createPixelCloudArtwork/);
   assert.match(setup, /rhwp-setup-cloud-art/);
   assert.match(setup, /rhwp-setup-account-content/);
