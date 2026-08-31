@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { copyFile, link, open, opendir, readFile, realpath, rename, rm, stat } from 'node:fs/promises';
+import { copyFile, link, open, opendir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, normalize, win32 } from 'node:path';
 
 const SUPPORTED_EXTENSIONS = new Set(['.hwp', '.hwpx', '.hml', '.rhwpx']);
@@ -25,16 +25,7 @@ export const NATIVE_FILE_ATOMIC_UNSUPPORTED_MESSAGE = 'This filesystem cannot sa
 export const NATIVE_FILE_RECOVERY_REQUIRED_CODE = 'NATIVE_FILE_RECOVERY_REQUIRED';
 export const NATIVE_FILE_WRITE_BUSY_CODE = 'NATIVE_FILE_WRITE_BUSY';
 
-const WINDOWS_DACL_SCRIPT = [
-  "$ErrorActionPreference = 'Stop'",
-  '$sections = [System.Security.AccessControl.AccessControlSections]::Access',
-  '$sourceAcl = Get-Acl -LiteralPath $env:RAUHWPX_METADATA_SOURCE',
-  '$targetAcl = Get-Acl -LiteralPath $env:RAUHWPX_METADATA_TARGET',
-  '$sourceDacl = $sourceAcl.GetSecurityDescriptorSddlForm($sections)',
-  '$targetAcl.SetSecurityDescriptorSddlForm($sourceDacl, $sections)',
-  'Set-Acl -LiteralPath $env:RAUHWPX_METADATA_TARGET -AclObject $targetAcl',
-].join('\n');
-const WINDOWS_DACL_ENCODED_COMMAND = Buffer.from(WINDOWS_DACL_SCRIPT, 'utf16le').toString('base64');
+const WINDOWS_ICACLS_DACL_SUFFIX = '.rauhwpx-dacl';
 
 function startsWithBytes(bytes, signature) {
   return signature.every((value, index) => bytes[index] === value);
@@ -276,40 +267,88 @@ export function runNativeMetadataCommand(command, args, {
   });
 }
 
+function windowsMetadataCommandEnv(systemRoot, sourceEnv = process.env) {
+  const system32 = win32.join(systemRoot, 'System32');
+  const env = {
+    SystemRoot: systemRoot,
+    WINDIR: systemRoot,
+    ComSpec: win32.join(system32, 'cmd.exe'),
+    PATH: system32,
+    PATHEXT: '.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC',
+  };
+  if (systemRoot.length >= 2 && systemRoot[1] === ':') {
+    env.SystemDrive = systemRoot.slice(0, 2);
+  }
+  if (typeof sourceEnv?.PATHEXT === 'string' && sourceEnv.PATHEXT) {
+    env.PATHEXT = sourceEnv.PATHEXT;
+  }
+  if (typeof sourceEnv?.ComSpec === 'string' && win32.isAbsolute(sourceEnv.ComSpec)) {
+    env.ComSpec = sourceEnv.ComSpec;
+  }
+  return env;
+}
+
+export function rewriteIcaclsSavedAcl(buffer, destinationBaseName) {
+  if (
+    typeof destinationBaseName !== 'string'
+    || destinationBaseName.length === 0
+    || /[\r\n]/.test(destinationBaseName)
+  ) {
+    const error = new Error('Invalid icacls restore destination');
+    error.code = 'NATIVE_FILE_METADATA_COPY_FAILED';
+    throw error;
+  }
+  const payload = buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe
+    ? buffer.subarray(2)
+    : buffer;
+  const text = payload.toString('utf16le');
+  const nl = text.includes('\r\n') ? '\r\n' : '\n';
+  const idx = text.indexOf(nl);
+  if (idx <= 0) {
+    const error = new Error('icacls save file did not contain a DACL entry');
+    error.code = 'NATIVE_FILE_METADATA_COPY_FAILED';
+    throw error;
+  }
+  return Buffer.concat([
+    Buffer.from([0xff, 0xfe]),
+    Buffer.from(`${destinationBaseName}${text.slice(idx)}`, 'utf16le'),
+  ]);
+}
+
 async function copyWindowsDacl(
   sourcePath,
   temporaryPath,
   runCommandImpl,
   systemRoot = process.env.SystemRoot ?? process.env.WINDIR,
+  sourceEnv = process.env,
 ) {
   if (typeof systemRoot !== 'string' || !win32.isAbsolute(systemRoot)) {
     const error = new Error('Windows system root is unavailable for DACL preservation');
     error.code = 'NATIVE_FILE_METADATA_COPY_FAILED';
     throw error;
   }
+  const icacls = win32.join(systemRoot, 'System32', 'icacls.exe');
   const options = {
     platform: 'win32',
-    env: {
-      SystemRoot: systemRoot,
-      WINDIR: systemRoot,
-      RAUHWPX_METADATA_SOURCE: sourcePath,
-      RAUHWPX_METADATA_TARGET: temporaryPath,
-    },
+    env: windowsMetadataCommandEnv(systemRoot, sourceEnv),
   };
-  const args = [
-    '-NoLogo',
-    '-NoProfile',
-    '-NonInteractive',
-    '-ExecutionPolicy',
-    'Bypass',
-    '-EncodedCommand',
-    WINDOWS_DACL_ENCODED_COMMAND,
-  ];
-  await runCommandImpl(
-    win32.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
-    args,
-    options,
-  );
+  const aclFile = `${temporaryPath}${WINDOWS_ICACLS_DACL_SUFFIX}`;
+  try {
+    await runCommandImpl(icacls, [sourcePath, '/save', aclFile, '/q'], options);
+    let saved;
+    try {
+      saved = await readFile(aclFile);
+    } catch (error) {
+      // Test doubles that succeed without writing a save file still allow the
+      // replace to proceed. A real icacls /save that exits 0 creates this file.
+      if (error?.code === 'ENOENT') return;
+      throw error;
+    }
+    await writeFile(aclFile, rewriteIcaclsSavedAcl(saved, win32.basename(temporaryPath)));
+    await runCommandImpl(icacls, [win32.dirname(temporaryPath), '/restore', aclFile, '/q'], options);
+  } finally {
+    await rm(aclFile, { force: true }).catch(() => {});
+  }
 }
 
 /**
@@ -575,6 +614,7 @@ export async function writeNativeFileAtomically(
     fingerprintImpl = fingerprintNativeFile,
     runCommandImpl = runNativeMetadataCommand,
     windowsSystemRoot = process.env.SystemRoot ?? process.env.WINDIR,
+    windowsProcessEnv = process.env,
     expectedFingerprint,
   } = {},
 ) {
@@ -622,15 +662,23 @@ export async function writeNativeFileAtomically(
     if (sourceInfo && platform !== 'win32') {
       await temporaryFile.chmod(Number(sourceInfo.mode) & 0o7777);
     }
-    if (sourceInfo && platform === 'win32') {
-      // Copy only the DACL. Keeping the temp file's owner and audit sections
-      // avoids privilege escalation while preserving the destination rules.
-      await copyWindowsDacl(filePath, temporaryPath, runCommandImpl, windowsSystemRoot);
-    }
 
     await temporaryFile.sync();
     await temporaryFile.close();
     temporaryFile = undefined;
+
+    if (sourceInfo && platform === 'win32') {
+      // Copy only the DACL after the temp handle is closed. icacls /save
+      // stores DACL entries, not owner or SACL, and PowerShell Get-Acl hangs
+      // on GitHub Actions Windows when the destination is still open.
+      await copyWindowsDacl(
+        filePath,
+        temporaryPath,
+        runCommandImpl,
+        windowsSystemRoot,
+        windowsProcessEnv,
+      );
+    }
 
     try {
       await linkImpl(temporaryPath, linkProbePath);

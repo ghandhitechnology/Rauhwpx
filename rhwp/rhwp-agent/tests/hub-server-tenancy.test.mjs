@@ -11,6 +11,7 @@ import test from 'node:test';
 import WebSocket from 'ws';
 
 import { registerHubSession } from '../../../desktop/agent-hub.mjs';
+import { ALIVE_PI_FIXTURE_SOURCE, writeFakeCliBin } from './fake-cli-bin.mjs';
 
 const TOKEN = 'hub-tenancy-test-token';
 const LAUNCH_ID = 'hub-tenancy-test-launch';
@@ -151,16 +152,7 @@ function prepareFakePi(root) {
   writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify({
     providers: { openrouter: { apiKey: 'test-placeholder-key' } },
   }));
-  const fake = path.join(binDir, process.platform === 'win32' ? 'pi.cmd' : 'pi');
-  if (process.platform === 'win32') {
-    writeFileSync(fake, '@echo off\r\nnode -e "setInterval(() =^> {}, 1000)"\r\n');
-  } else {
-    writeFileSync(
-      fake,
-      `#!/bin/sh\nexec "${process.execPath}" -e 'setInterval(() => {}, 1000)'\n`,
-      { mode: 0o755 },
-    );
-  }
+  writeFakeCliBin(binDir, 'pi', ALIVE_PI_FIXTURE_SOURCE);
 }
 
 async function startProviderTurn(socket, session, text) {
