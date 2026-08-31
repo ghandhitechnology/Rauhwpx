@@ -5,6 +5,10 @@
 <h1 align="center">Rauhwpx</h1>
 
 <p align="center">
+  English · <a href="README.ko.md">한국어</a>
+</p>
+
+<p align="center">
   An HWP/HWPX editor with an AI agent that edits the document you have open.<br />
   Rust → WebAssembly engine, desktop app and web editor, everything local.
 </p>
