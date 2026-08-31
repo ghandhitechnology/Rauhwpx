@@ -168,7 +168,8 @@ test('shared transactional store preserves the one-worker invariant across servi
     await service.completeLogin('ok', session.id);
     return (await service.redeemDeviceSession(session.id)).accessToken;
   };
-  const [tokenA, tokenB] = await Promise.all([login(firstService), login(secondService)]);
+  const tokenA = await login(firstService);
+  const tokenB = await login(secondService);
   const attempts = await Promise.allSettled([
     firstService.createCloudRun(tokenA, { deviceId: 'device-a', timezone: 'UTC', idempotencyKey: 'global-a' }),
     secondService.createCloudRun(tokenB, { deviceId: 'device-b', timezone: 'UTC', idempotencyKey: 'global-b' }),

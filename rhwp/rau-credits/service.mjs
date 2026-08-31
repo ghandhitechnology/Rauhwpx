@@ -590,15 +590,17 @@ export function createCreditsService({
       }
     }
     if (existingKey) {
+      const accountId = existing.accountId ?? existingId;
+      existing.accountId = accountId;
       if (existingId !== workosUserId) {
-        state.users[workosUserId] = { ...state.users[existingId] };
+        state.users[workosUserId] = { ...state.users[existingId], accountId };
       }
       if (normalizedEmail) {
         state.emailIndex ??= {};
-        state.emailIndex[normalizedEmail] = workosUserId;
+        state.emailIndex[normalizedEmail] = accountId;
       }
       await store.save(state);
-      return existingKey;
+      return { key: existingKey, accountId };
     }
 
     if (existing && !existing.provisioning) {
@@ -720,14 +722,17 @@ export function createCreditsService({
     if (ownerId !== workosUserId) state.users[workosUserId] = { ...record };
     if (normalizedEmail) {
       state.emailIndex ??= {};
-      state.emailIndex[normalizedEmail] = workosUserId;
+      state.emailIndex[normalizedEmail] = ownerId;
     }
     await store.save(state);
-    return mintedKey;
+    return { key: mintedKey, accountId: ownerId };
   }
 
   function keyForUser(workosUserId, email = null) {
-    return serializeMutation(() => keyForUserWithinMutation(workosUserId, email));
+    return serializeMutation(async () => {
+      const account = await keyForUserWithinMutation(workosUserId, email);
+      return account.key;
+    });
   }
 
   function isV1Session(session) {
@@ -760,9 +765,8 @@ export function createCreditsService({
   async function finishDeviceLogin(deviceId, userId, email = null) {
     userId = validatedWorkosUserId(userId);
     const requestedEmail = validatedAccountEmail(email);
-    return serializeMutation(async () => {
-      let state = await store.load();
-      let current = assertPendingV1Session(state.sessions[deviceId]);
+    const accountEmail = await mutate((state) => {
+      const current = assertPendingV1Session(state.sessions[deviceId]);
       const claim = current.completionClaim;
       if (claim !== undefined && (
         !claim || typeof claim !== 'object'
@@ -774,24 +778,24 @@ export function createCreditsService({
           '이미 다른 계정으로 처리 중인 로그인 세션이에요',
         );
       }
-      const accountEmail = claim?.email != null
+      const nextEmail = claim?.email != null
         ? validatedAccountEmail(claim.email)
         : requestedEmail;
       if (claim === undefined) {
         current.completionClaim = {
           workosUserId: userId,
-          email: accountEmail,
+          email: nextEmail,
           claimedAt: now(),
         };
-        // Bind the session before any paid provider mutation. The same
-        // principal can resume a durable provisioning intent after failure,
-        // while a different principal cannot consume the session.
-        await store.save(state);
       }
+      return nextEmail;
+    });
 
-      const apiKey = await keyForUserWithinMutation(userId, accountEmail);
-      state = await store.load();
-      current = assertPendingV1Session(state.sessions[deviceId]);
+    const account = await keyForUserWithinMutation(userId, accountEmail);
+    const accessToken = newAccessToken();
+    const accessHash = accessTokenHash(accessToken);
+    await mutate((state) => {
+      const current = assertPendingV1Session(state.sessions[deviceId]);
       if (current.completionClaim?.workosUserId !== userId) {
         throw creditsError(
           'DEVICE_SESSION_INVALID',
@@ -801,23 +805,20 @@ export function createCreditsService({
       current.status = 'ready';
       current.workosUserId = userId;
       current.email = accountEmail;
-      current.apiKeyCiphertext = encryptSecret(sessionSecret, apiKey);
-      const accessToken = newAccessToken();
-      const accessHash = accessTokenHash(accessToken);
+      current.apiKeyCiphertext = encryptSecret(sessionSecret, account.key);
       current.accessHash = accessHash;
       current.accessTokenCiphertext = encryptSecret(sessionSecret, accessToken);
       state.accessTokens[accessHash] = {
         workosUserId: userId,
-        accountId: userId,
+        accountId: account.accountId,
         createdAt: now(),
       };
       if (current.replaceAccessHash && current.replaceAccessHash !== accessHash) {
         delete state.accessTokens[current.replaceAccessHash];
       }
       delete current.completionClaim;
-      await store.save(state);
-      return { deviceId, workosUserId: userId, email: accountEmail };
     });
+    return { deviceId, workosUserId: userId, email: accountEmail };
   }
 
   function assertLiveV2Session(session) {
