@@ -8,6 +8,7 @@ const ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 
 export const PUBLISH_DOCS = [
   'README.md',
+  'README.ko.md',
   'CONTRIBUTING.md',
   'PRODUCT.md',
   'DESIGN.md',

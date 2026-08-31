@@ -4,6 +4,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
+  PUBLISH_DOCS,
   assertNoHardcodedMcpCount,
   checkPublishDocs,
   hardcodedMcpCountClaims,
@@ -18,6 +19,10 @@ test('matching MCP tool counts in publish docs still fail', () => {
   assert.deepEqual(hardcodedMcpCountClaims('현재 76개 MCP 도구를 제공한다.'), [76]);
   assert.deepEqual(hardcodedMcpCountClaims('MCP 도구 수는 76개다.'), [76]);
   assert.deepEqual(hardcodedMcpCountClaims('See rhwp/rhwp-agent/tools.mjs for the live list.'), []);
+});
+
+test('Korean landing page is in the publish-docs set', () => {
+  assert.ok(PUBLISH_DOCS.includes('README.ko.md'));
 });
 
 test('relative options.root still accepts in-repo links', () => {
