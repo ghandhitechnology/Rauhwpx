@@ -218,7 +218,10 @@ export function handleBackspace(this: any, pos: DocumentPosition, inCell: boolea
   if (this.cursor.isInHeaderFooter()) {
     const isHeader = this.cursor.headerFooterMode === 'header';
     const hfOff = this.cursor.hfCharOffset;
-    const target = { sectionIdx: this.cursor.hfSectionIdx, isHeader, applyTo: this.cursor.hfApplyTo };
+    const target = {
+      sectionIdx: this.cursor.hfSectionIdx, isHeader, applyTo: this.cursor.hfApplyTo,
+      previewPage: this.cursor.hfPreviewPage,
+    };
     const paraIdx = this.cursor.hfParaIdx;
     if (hfOff > 0) {
       // [Task #2337] 삭제 텍스트를 WASM 반환에서 확보해 역연산(재삽입) 기록. Backspace 이므로
@@ -296,7 +299,10 @@ export function handleDelete(this: any, pos: DocumentPosition, inCell: boolean):
   // 머리말/꼬리말 편집 모드
   if (this.cursor.isInHeaderFooter()) {
     const isHeader = this.cursor.headerFooterMode === 'header';
-    const target = { sectionIdx: this.cursor.hfSectionIdx, isHeader, applyTo: this.cursor.hfApplyTo };
+    const target = {
+      sectionIdx: this.cursor.hfSectionIdx, isHeader, applyTo: this.cursor.hfApplyTo,
+      previewPage: this.cursor.hfPreviewPage,
+    };
     try {
       const paraIdx = this.cursor.hfParaIdx;
       const info = JSON.parse(this.wasm.getHeaderFooterParaInfo(target.sectionIdx, isHeader, target.applyTo, paraIdx));
@@ -433,8 +439,17 @@ function syncCompositionDocument(this: any, preedit: string): void {
 export function onCompositionStart(this: any): void {
   if (this.isComposing) onCompositionEnd.call(this);
   this.resetRawTextMutationEffects();
+  this.headerFooterSelectionComposition = false;
   // 선택 영역이 있으면 삭제 후 조합 시작
-  if (this.cursor.hasSelection()) {
+  if (
+    this.cursor.isInHeaderFooter()
+    && this.getNonEmptyHeaderFooterSelection()
+  ) {
+    if (!this.beginHeaderFooterSelectionComposition()) {
+      this.resetTextareaBuffer();
+      return;
+    }
+  } else if (!this.cursor.isInHeaderFooter() && this.cursor.hasSelection()) {
     if (!this.canDeleteSelectionInFormMode?.()) {
       this.resetTextareaBuffer();
       return;
@@ -475,6 +490,7 @@ export function onCompositionEnd(this: any, event?: CompositionEvent): void {
   const anchor = this.compositionAnchor;
   const previousPreedit = this.imeSession.preedit;
   const previousLength = this.compositionLength;
+  const headerFooterSelectionComposition = this.headerFooterSelectionComposition === true;
   const textareaText = this.unconsumedTextareaValue().replace(/[\r\n]+/g, '');
   const commit = this.imeSession.finish(event?.data, textareaText);
   if (!commit) return;
@@ -503,17 +519,22 @@ export function onCompositionEnd(this: any, event?: CompositionEvent): void {
         applyCompositionPreview.call(this, composed);
       }
       if (this.cursor.isInHeaderFooter()) {
-        const target = {
-          sectionIdx: this.cursor.hfSectionIdx,
-          isHeader: this.cursor.headerFooterMode === 'header',
-          applyTo: this.cursor.hfApplyTo,
-        };
-        this.executeOperation({
-          kind: 'record',
-          command: new InsertTextInHeaderFooterCommand(
-            target, this.cursor.hfParaIdx, anchor.charOffset, composed, this.peekPendingCharFormat?.(),
-          ),
-        });
+        // 선택 위 IME는 beginHeaderFooterSelectionComposition이 이미 snapshot을 만들었으므로
+        // 별도 InsertText record를 쌓지 않고 after 문맥만 확정한다.
+        if (!headerFooterSelectionComposition) {
+          const target = {
+            sectionIdx: this.cursor.hfSectionIdx,
+            isHeader: this.cursor.headerFooterMode === 'header',
+            applyTo: this.cursor.hfApplyTo,
+            previewPage: this.cursor.hfPreviewPage,
+          };
+          this.executeOperation({
+            kind: 'record',
+            command: new InsertTextInHeaderFooterCommand(
+              target, this.cursor.hfParaIdx, anchor.charOffset, composed, this.peekPendingCharFormat?.(),
+            ),
+          });
+        }
         committed = true;
       } else if (this.cursor.isInFootnote()) {
         const target = {
@@ -537,6 +558,10 @@ export function onCompositionEnd(this: any, event?: CompositionEvent): void {
         committed = true;
       }
     }
+  }
+
+  if (headerFooterSelectionComposition) {
+    this.finishHeaderFooterSelectionComposition();
   }
 
   this.compositionAnchor = null;
@@ -659,7 +684,16 @@ export function onInput(this: any, e?: InputEvent): void {
   if (this.cursor.isInHeaderFooter()) {
     const isHeader = this.cursor.headerFooterMode === 'header';
     try {
-      const target = { sectionIdx: this.cursor.hfSectionIdx, isHeader, applyTo: this.cursor.hfApplyTo };
+      if (this.getNonEmptyHeaderFooterSelection()) {
+        this.replaceHeaderFooterSelection(text, {
+          operationType: 'replaceSelectionInHeaderFooter',
+        });
+        return;
+      }
+      const target = {
+        sectionIdx: this.cursor.hfSectionIdx, isHeader, applyTo: this.cursor.hfApplyTo,
+        previewPage: this.cursor.hfPreviewPage,
+      };
       const paraIdx = this.cursor.hfParaIdx;
       const charOffset = this.cursor.hfCharOffset;
       this.wasm.insertTextInHeaderFooter(target.sectionIdx, isHeader, target.applyTo, paraIdx, charOffset, text);

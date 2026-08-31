@@ -11,6 +11,7 @@ import { findWordSelectionRange } from './word-selection';
 import { selectCurrentTableCell } from './table-cell-selection';
 import { CursorState } from './cursor';
 import { isTopLevelBodyObject } from '@/core/object-address';
+import { emitHeaderFooterModeChanged } from './header-footer-mode';
 
 function readCurrentParagraphText(self: any) {
   if (self.cursor.isInHeaderFooter()) {
@@ -974,12 +975,36 @@ export function onClick(this: any, e: MouseEvent): void {
       if (!hfHit.hit) {
         // 본문 영역 클릭 → 편집 모드 탈출 (스크롤 없이 — 이후 hitTest에서 커서 재배치)
         this.cursor.exitHeaderFooterMode();
-        this.eventBus.emit('headerFooterModeChanged', 'none');
+        emitHeaderFooterModeChanged(this.eventBus, this.cursor);
         // 본문 hitTest로 계속 진행
       } else {
+        const clickedIsHeader = hfHit.isHeader ?? (this.cursor.headerFooterMode === 'header');
+        const isPreviewSurface = pageIdx === this.cursor.hfPreviewPage
+          && clickedIsHeader === (this.cursor.headerFooterMode === 'header');
+        const clickedSection = isPreviewSurface
+          ? this.cursor.hfSectionIdx
+          : (hfHit.sectionIndex ?? this.cursor.hfSectionIdx);
+        const clickedApplyTo = isPreviewSurface
+          ? this.cursor.hfApplyTo
+          : (hfHit.applyTo ?? this.cursor.hfApplyTo);
+        const sameTarget = this.cursor.headerFooterMode === (clickedIsHeader ? 'header' : 'footer')
+          && this.cursor.hfSectionIdx === clickedSection
+          && this.cursor.hfApplyTo === clickedApplyTo;
+        if (!sameTarget) {
+          this.cursor.switchHeaderFooterTarget(
+            clickedIsHeader,
+            clickedSection,
+            clickedApplyTo,
+            pageIdx,
+          );
+          emitHeaderFooterModeChanged(this.eventBus, this.cursor);
+        }
+
         // [Task #825] 머리말/꼬리말 편집 모드 — 그림 hit-test 우선, miss 시 텍스트 hit.
         // 머리말 그림은 ImageNode 에 header_footer_ref 동반되어 picHit 정상 반환.
-        const picHit = this.findPictureAtClick(pageIdx, pageX, pageY);
+        const picHit = isPreviewSurface
+          ? null
+          : this.findPictureAtClick(pageIdx, pageX, pageY);
         if (picHit && (picHit.type === 'image' || picHit.type === 'shape' || picHit.type === 'line' || picHit.type === 'ole')) {
           // 머리말 안 그림 객체 선택 → context menu 에 "개체 속성" 표시 가능
           this.cursor.clearSelection();
@@ -995,11 +1020,29 @@ export function onClick(this: any, e: MouseEvent): void {
         }
         // 머리말/꼬리말 영역 클릭 → 내부 텍스트 히트테스트로 커서 이동
         try {
-          const isHeader = this.cursor.headerFooterMode === 'header';
-          const inHfHit = this.wasm.hitTestInHeaderFooter(pageIdx, isHeader, pageX, pageY);
-          if (inHfHit.hit && inHfHit.paraIndex !== undefined && inHfHit.charOffset !== undefined) {
+          const inHfHit = this.wasm.hitTestInHeaderFooterTarget(
+            pageIdx,
+            clickedSection,
+            clickedIsHeader,
+            clickedApplyTo,
+            pageX,
+            pageY,
+          );
+          if (
+            inHfHit.hit
+            && inHfHit.sectionIndex === clickedSection
+            && inHfHit.applyTo === clickedApplyTo
+            && inHfHit.paraIndex !== undefined
+            && inHfHit.charOffset !== undefined
+          ) {
+            if (e.shiftKey && sameTarget) this.cursor.setHfAnchor();
+            else this.cursor.clearSelection();
             this.cursor.setHfCursorPosition(inHfHit.paraIndex, inHfHit.charOffset);
+            if (!e.shiftKey || !sameTarget) this.cursor.setHfAnchor();
+            this.active = true;
+            this.startTextSelectionDrag(e);
             this.updateCaret();
+            document.addEventListener('mouseup', this.onMouseUpBound, { once: true });
           }
         } catch { /* 무시 */ }
         this.textarea.focus();
@@ -1464,7 +1507,7 @@ export function onDblClick(this: any, e: MouseEvent): void {
               this.wasm.createHeaderFooter(sectionIdx, isHeader, applyTo);
             }
             this.cursor.enterHeaderFooterMode(isHeader, sectionIdx, applyTo, pageIdx);
-            this.eventBus.emit('headerFooterModeChanged', isHeader ? 'header' : 'footer');
+            emitHeaderFooterModeChanged(this.eventBus, this.cursor);
             const textHit = this.wasm.hitTestInHeaderFooter(pageIdx, isHeader, pageX, pageY);
             if (textHit.hit && textHit.paraIndex !== undefined && textHit.charOffset !== undefined) {
               this.cursor.setHfCursorPosition(textHit.paraIndex, textHit.charOffset);
@@ -2095,6 +2138,12 @@ export function onMouseUp(this: any, _e: MouseEvent): void {
     if (samePos) {
       this.cursor.clearSelection();
     }
+  }
+  const hfSel = this.cursor.getHeaderFooterSelectionOrdered();
+  if (hfSel) {
+    const samePos = hfSel.start.paraIdx === hfSel.end.paraIdx
+      && hfSel.start.charOffset === hfSel.end.charOffset;
+    if (samePos) this.cursor.clearSelection();
   }
 
   // [Task #779] mouseup 영역 의 updateCaret 은 scrollCaretIntoView skip.

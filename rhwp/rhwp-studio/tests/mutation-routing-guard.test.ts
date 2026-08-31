@@ -160,7 +160,7 @@ const BASELINE: Readonly<Record<string, number>> = {
   'src/ui/table-cell-props-dialog.ts': 2,
   'src/ui/toolbar.ts': 4,
   // engine/input-handler* — 드래그/nudge 등 직접-뮤테이션 최고밀도 영역.
-  'src/engine/input-handler.ts': 29, // 누름틀/셀 편집 분기를 포함한 현재 직접 뮤테이션 표면
+  'src/engine/input-handler.ts': 31, // 누름틀/셀 편집 분기를 포함한 현재 직접 뮤테이션 표면 / +2: #4121 HF 범위 치환·부분 글자 서식
   'src/engine/input-handler-connector.ts': 1,
   // +1: 각주 문단 끝 Delete의 다음 문단 병합. 즉시 결과를 MergeParagraphInFootnoteCommand
   // record에 넘겨 undo/redo 및 removedParaMeta 복원을 보존한다.

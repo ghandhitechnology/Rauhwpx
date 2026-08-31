@@ -213,7 +213,7 @@ test('page render hot path reuses batched metadata and scans overlays once', () 
   );
   assert.match(
     view,
-    /querySelectorAll<HTMLElement>\('\[data-rhwp-overlay-page\], \[data-rhwp-grid-page\]'\)/,
+    /querySelectorAll<HTMLElement>\('\[data-rhwp-overlay-page\], \[data-rhwp-grid-page\], \[data-rhwp-hf-edit-page\]'\)/,
   );
   assert.doesNotMatch(
     view,

@@ -83,6 +83,10 @@ import { CellSelectionRenderer } from '@/engine/cell-selection-renderer';
 import { TableObjectRenderer } from '@/engine/table-object-renderer';
 import { TableResizeRenderer } from '@/engine/table-resize-renderer';
 import { Ruler } from '@/view/ruler';
+import {
+  headerFooterApplyToLabel,
+  parseHeaderFooterModeChanged,
+} from '@/engine/header-footer-mode';
 import { RendererSession, type RendererSessionDiagnostics } from '@/view/renderer-session';
 import {
   resolveCanvasKitRenderModeRequest,
@@ -1211,16 +1215,27 @@ function setupEventListeners(): void {
 
   // 머리말/꼬리말 편집 모드 시 도구상자 전환 + 본문 dimming
   const hfLabel = document.querySelector<HTMLElement>('.tb-headerfooter-group .tb-hf-label');
+  const hfLiveStatus = document.getElementById('hf-edit-status-live');
   const scrollContainer = document.getElementById('scroll-container');
 
-  eventBus.on('headerFooterModeChanged', (mode) => {
-    const isActive = (mode as string) !== 'none';
+  eventBus.on('headerFooterModeChanged', (payload) => {
+    const state = parseHeaderFooterModeChanged(payload);
+    const isActive = state !== 'none';
     headerFooterActive = isActive;
     // 접힌 기본 도구 상자는 머리말/꼬리말 전용 버튼을 가리므로 모드 진입 시 펼친다.
     if (isActive) setBasicToolboxExpanded(true);
     // 도구상자 전환
     if (hfLabel) {
-      hfLabel.textContent = (mode as string) === 'header' ? '머리말' : (mode as string) === 'footer' ? '꼬리말' : '';
+      const kind = state === 'none' ? '' : state.mode === 'header' ? '머리말' : '꼬리말';
+      const target = state === 'none' ? '' : headerFooterApplyToLabel(state.applyTo);
+      hfLabel.textContent = state === 'none' ? '' : `${kind} · ${target} 편집 중`;
+      hfLabel.dataset.mode = state === 'none' ? '' : state.mode;
+      hfLabel.dataset.applyTo = state === 'none' ? '' : String(state.applyTo);
+      if (hfLiveStatus) {
+        hfLiveStatus.textContent = state === 'none'
+          ? '머리말 꼬리말 편집 종료'
+          : `${kind} ${target} 편집 중, 구역 ${state.sectionIdx + 1} 첫 페이지`;
+      }
     }
     applyContextualToolbarMode();
     // 서식 도구 모음은 머리말/꼬리말 편집 시에도 유지 (문단/글자 모양 설정 필요)
