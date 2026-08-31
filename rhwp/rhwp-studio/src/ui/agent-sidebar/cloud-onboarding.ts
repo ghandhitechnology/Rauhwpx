@@ -152,7 +152,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
   }
 
   function setupProgressText(startedAt: number): string {
-    return `준비 작업이 계속 실행 중입니다. ${raucloudSetupElapsed(startedAt)} 경과. 초기 설정은 최대 ${RAUCLOUD_SETUP_WAIT_MINUTES}분 걸릴 수 있습니다.`;
+    return `${raucloudSetupElapsed(startedAt)}, 초기 설정에서는 최대 ${RAUCLOUD_SETUP_WAIT_MINUTES}분 걸릴 수 있습니다.`;
   }
 
   function updateSetupProgress(): void {
