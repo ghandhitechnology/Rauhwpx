@@ -127,6 +127,29 @@ export type ComposerExecution =
     }
   | { kind: 'blocked'; message: string };
 
+/** The live Cloud session is the conversation handle. A missing mounted binding is not a new start. */
+export function shouldOfferAccountForceQuit(snapshot: CloudSnapshot): boolean {
+  if (snapshot.account?.raucloud.kind === 'active-elsewhere') return true;
+  if (snapshot.account?.quota?.activeRun) return true;
+  if (snapshot.profile.kind === 'configured' && snapshot.profile.mode === 'app-hosted') return true;
+  if (snapshot.session.kind !== 'idle' && snapshot.session.kind !== 'completed') return true;
+  return snapshot.sessions.some((session) => (
+    session.kind !== 'completed' && session.kind !== 'failed' && session.kind !== 'cancelled'
+  ));
+}
+
+export function liveCloudHandle(
+  session: CloudSessionState,
+): (CloudWorkspaceBinding & { expectedVersion: number }) | null {
+  if (session.kind !== 'running') return null;
+  return {
+    sessionId: session.sessionId,
+    threadId: session.threadId,
+    documentId: session.documentId,
+    expectedVersion: session.version,
+  };
+}
+
 export function composerExecution(target: ComposerTarget): ComposerExecution {
   switch (target.kind) {
     case 'local-ready':
@@ -174,6 +197,7 @@ export function deriveComposerTarget(
           message: 'Cloud 작업이 문서를 사용 중입니다. Cloud로 전환하거나 이 기기에서 이어받으세요.',
         };
   }
+  const live = liveCloudHandle(snapshot.session);
   if (!cloudBinding) {
     if (snapshot.session.kind === 'transferring' || snapshot.session.kind === 'queued'
       || snapshot.session.kind === 'waiting-local-turn') {
@@ -183,7 +207,10 @@ export function deriveComposerTarget(
         message: 'Cloud를 시작하는 중입니다.',
       };
     }
-    if (snapshot.session.kind === 'idle' || snapshot.session.kind === 'running') {
+    if (live) {
+      return { kind: 'cloud-ready', ...live };
+    }
+    if (snapshot.session.kind === 'idle') {
       return { kind: 'cloud-start-ready' };
     }
     return {
@@ -203,24 +230,17 @@ export function deriveComposerTarget(
       message: 'Cloud를 시작하는 중입니다.',
     };
   }
-  if (snapshot.session.kind === 'running') {
-    if (!cloudBinding
-      || cloudBinding.sessionId !== snapshot.session.sessionId
-      || cloudBinding.threadId !== snapshot.session.threadId
-      || cloudBinding.documentId !== snapshot.session.documentId) {
+  if (live) {
+    if (cloudBinding.sessionId !== live.sessionId
+      || cloudBinding.threadId !== live.threadId
+      || cloudBinding.documentId !== live.documentId) {
       return {
         kind: 'cloud-blocked',
         reason: 'timeline-unavailable',
         message: 'Cloud 대화를 연결하는 중입니다.',
       };
     }
-    return {
-      kind: 'cloud-ready',
-      sessionId: snapshot.session.sessionId,
-      threadId: snapshot.session.threadId,
-      documentId: snapshot.session.documentId,
-      expectedVersion: snapshot.session.version,
-    };
+    return { kind: 'cloud-ready', ...live };
   }
   return {
     kind: 'cloud-blocked',

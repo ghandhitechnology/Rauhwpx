@@ -743,6 +743,11 @@ export function creditsRequestListener(service) {
         ));
         return;
       }
+      if (req.method === 'POST' && url.pathname === '/v1/cloud/force-quit') {
+        const body = await readJson(req);
+        send(200, await service.forceQuitAccountCloud(bearerToken(req), body));
+        return;
+      }
       const stop = url.pathname.match(/^\/v1\/cloud\/runs\/([^/]+)\/stop$/);
       if (req.method === 'POST' && stop) {
         const body = await readJson(req);

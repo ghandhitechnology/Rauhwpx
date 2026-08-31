@@ -1129,6 +1129,10 @@ ipcMain.handle('cloud:sandbox-status', async (event) => {
   const session = sessionForEvent(event);
   return scopedCloudSnapshot(session, await requireCloudCoordinator().appServerStatus());
 });
+ipcMain.handle('cloud:force-quit-account', async (event) => {
+  const session = sessionForEvent(event);
+  return scopedCloudSnapshot(session, await requireCloudCoordinator().forceQuitAccountCloud());
+});
 ipcMain.handle('cloud:teardown-sandbox', async (event, payload = {}) => {
   const session = sessionForEvent(event);
   return scopedCloudSnapshot(session, await requireCloudCoordinator().teardownAppServer({

@@ -153,6 +153,7 @@ export interface RhwpDesktopApi {
   cloudSpawnSandbox?: (payload: { providerId?: string }) => Promise<unknown>;
   cloudSandboxStatus?: () => Promise<unknown>;
   cloudTeardownSandbox?: (payload: { force?: boolean }) => Promise<unknown>;
+  cloudForceQuitAccount?: () => Promise<unknown>;
   /** Checkpoints the prior controller and explicitly transfers the account-global worker lease. */
   cloudTakeoverSandbox?: () => Promise<unknown>;
   /** Blocks new Raucloud input, checkpoints the controlling turn, then releases the worker. */

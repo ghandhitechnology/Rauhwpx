@@ -180,6 +180,18 @@ test('delayed selected timelines can establish a missing cloud binding', () => {
   assert.match(cloudUi, /if \(pendingSessionSelections > 0 && !profileChanged\) return;[\s\S]*snapshot = next/);
 });
 
+test('follow-up Cloud sends use the live session and can force-quit leftover account servers', () => {
+  assert.match(cloudUi, /session\.kind === 'running'/);
+  assert.doesNotMatch(
+    cloudUi.match(/function matchesTarget\([\s\S]*?\n  \}/)?.[0] ?? '',
+    /mountedBinding/,
+  );
+  assert.match(cloudUi, /서버 강제 종료/);
+  assert.match(cloudUi, /forceQuitAccount/);
+  assert.match(sidebar, /thread\.cloudSessionId[\s\S]*bindSelectedTimeline/);
+  assert.match(onboarding, /서버 강제 종료로 끊을 수 있습니다/);
+});
+
 test('agents can append a paragraph without moving controls from an empty anchor paragraph', () => {
   assert.match(agentTools, /name: 'insert_paragraph_after'/);
   assert.match(agentTools, /inline controls[\s\S]*remain anchored/);

@@ -49,6 +49,7 @@ export interface CloudDesktopApi {
   cloudSpawnSandbox?: (payload: { providerId?: string }) => Promise<unknown>;
   cloudSandboxStatus?: () => Promise<unknown>;
   cloudTeardownSandbox?: (payload: { force?: boolean }) => Promise<unknown>;
+  cloudForceQuitAccount?: () => Promise<unknown>;
   cloudTakeoverSandbox?: () => Promise<unknown>;
   cloudTransfer?: (payload: CloudTransferRequest) => Promise<unknown>;
   cloudSetTransferIntent?: (payload: CloudTransferIntentRequest) => Promise<unknown>;
@@ -79,6 +80,7 @@ export interface CloudController {
   spawnSandbox(providerId?: string): Promise<CloudSnapshot>;
   sandboxStatus(): Promise<CloudSnapshot>;
   teardownSandbox(options?: { force?: boolean }): Promise<CloudSnapshot>;
+  forceQuitAccount(): Promise<CloudSnapshot>;
   takeoverSandbox(): Promise<CloudSnapshot>;
   transfer(request: CloudTransferRequest): Promise<CloudSnapshot>;
   setTransferIntent(request: CloudTransferIntentRequest): Promise<CloudSnapshot>;
@@ -806,6 +808,7 @@ export function createCloudController(
     spawnSandbox: (providerId) => call('cloudSpawnSandbox', providerId ? { providerId } : {}),
     sandboxStatus: () => call('cloudSandboxStatus'),
     teardownSandbox: (options = {}) => call('cloudTeardownSandbox', { force: options.force === true }),
+    forceQuitAccount: () => call('cloudForceQuitAccount'),
     takeoverSandbox: () => call('cloudTakeoverSandbox'),
     transfer: (request) => call('cloudTransfer', request),
     setTransferIntent: (request) => call('cloudSetTransferIntent', request),

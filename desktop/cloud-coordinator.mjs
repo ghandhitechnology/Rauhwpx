@@ -237,6 +237,7 @@ export class CloudCoordinator extends EventEmitter {
   #provisioner;
   #recoveryDir;
   #watchers = new Map();
+  #watchRestartTimers = new Set();
   #recoveryTimers = new Map();
   #resultRecoveryTimers = new Map();
   #transferControllers = new Map();
@@ -419,6 +420,7 @@ export class CloudCoordinator extends EventEmitter {
     ].filter(Boolean);
     for (const controller of this.#watchers.values()) controller.abort();
     this.#watchers.clear();
+    this.#clearWatchRestartTimers();
     for (const timer of this.#recoveryTimers.values()) clearTimeout(timer);
     this.#recoveryTimers.clear();
     for (const timer of this.#resultRecoveryTimers.values()) clearTimeout(timer);
@@ -1456,6 +1458,92 @@ export class CloudCoordinator extends EventEmitter {
     }
   }
 
+  forceQuitAccountCloud(options = {}) {
+    return this.#withProfileWriter(() => this.#forceQuitAccountCloud(options));
+  }
+
+  async #forceQuitAccountCloud() {
+    this.#abortSessionWatchers();
+    const provider = this.#managedAccountProvider();
+    if (provider && typeof provider.forceQuitAccount === 'function') {
+      const result = await provider.forceQuitAccount();
+      if (result?.account) {
+        this.#accountSnapshot = result.account;
+        this.#accountStatusAt = Date.now();
+      }
+    }
+    await this.#endLiveCloudSessions();
+    const profile = await this.#client.loadProfile().catch(() => null);
+    if (profile?.mode === 'app-hosted') {
+      try {
+        await this.#teardownAppServer({ force: true });
+      } catch (error) {
+        this.#emit({ type: 'force-quit-teardown-failed', error: error.message });
+      }
+    }
+    await this.#refreshAccountStatus({ force: true }).catch(() => {});
+    const snapshot = await this.snapshot();
+    this.#emit({ type: 'account-force-quit', snapshot });
+    return snapshot;
+  }
+
+  #abortSessionWatchers() {
+    for (const controller of this.#watchers.values()) controller.abort();
+    this.#watchers.clear();
+    this.#clearWatchRestartTimers();
+  }
+
+  #clearWatchRestartTimers() {
+    for (const timer of this.#watchRestartTimers) clearTimeout(timer);
+    this.#watchRestartTimers.clear();
+  }
+
+  #scheduleWatchRestart(start) {
+    if (this.#stopped) return;
+    const timer = setTimeout(() => {
+      this.#watchRestartTimers.delete(timer);
+      if (!this.#stopped) void Promise.resolve(start()).catch(() => {});
+    }, 1_000);
+    this.#watchRestartTimers.add(timer);
+  }
+
+  #streamShouldRestart(error) {
+    if (!error || error.status === 404) return false;
+    return !['PROFILE_CHANGED', 'SESSION_NOT_FOUND', 'SSE_PROOF_INVALID', 'SSE_PAYLOAD_INVALID']
+      .includes(error.code);
+  }
+
+  async #endLiveCloudSessions() {
+    if (typeof this.#client.sessions !== 'function' || typeof this.#client.command !== 'function') return;
+    let sessions = [];
+    try {
+      sessions = await this.#client.sessions();
+    } catch (error) {
+      if (error?.code === 'PROFILE_CHANGED') throw error;
+      this.#emit({ type: 'force-quit-sessions-failed', error: error.message });
+      return;
+    }
+    const live = sessions.filter((session) => {
+      const status = String(session?.status ?? session?.state ?? '').toLowerCase();
+      return Boolean(session) && !['completed', 'failed', 'cancelled', 'purged', 'expired'].includes(status);
+    });
+    for (const session of live) {
+      const sessionId = String(session.id ?? session.sessionId ?? '');
+      if (!sessionId) continue;
+      try {
+        await this.#client.command(
+          sessionId,
+          'session.end',
+          { expectedVersion: Number(session.stateVersion ?? session.version) || 1 },
+          `force_quit_${sessionId.replace(/[^A-Za-z0-9_-]/g, '_')}`,
+        );
+      } catch (error) {
+        if (error?.code === 'PROFILE_CHANGED') throw error;
+        this.#emit({ type: 'force-quit-session-failed', sessionId, error: error.message });
+      }
+    }
+  }
+
   logoutRaucloud(options = {}) {
     return this.#withProfileWriter(() => this.#logoutRaucloud(options));
   }
@@ -2330,6 +2418,7 @@ export class CloudCoordinator extends EventEmitter {
       }
       if (['downloaded', 'cancelled', 'expired', 'failed'].includes(updated?.state)) controller.abort();
     }, { expectedEpoch: profileEpoch }));
+    let restartWatch = false;
     this.#profileOperationContext.exit(() => {
       void this.#client.watchSession(sessionId, after, {
         signal: controller.signal,
@@ -2338,11 +2427,19 @@ export class CloudCoordinator extends EventEmitter {
       }).catch((error) => {
         if (error?.code !== 'PROFILE_CHANGED' && !controller.signal.aborted) {
           this.#emit({ type: 'session-stream-error', sessionId, error: error.message });
+          restartWatch = this.#streamShouldRestart(error);
         }
       })
         .finally(() => {
           if (this.#watchers.get(watcherKey) === controller) this.#watchers.delete(watcherKey);
           if (profileEpoch === this.#profileEpoch) this.#timelinePending.delete(sessionId);
+          if (restartWatch && !this.#stopped && profileEpoch === this.#profileEpoch) {
+            this.#scheduleWatchRestart(async () => {
+              if (this.#stopped || profileEpoch !== this.#profileEpoch) return;
+              const latest = await this.#store.get(handoffId);
+              this.#watch(handoffId, sessionId, latest?.lastEventSequence ?? after, profileEpoch);
+            });
+          }
         });
     });
   }
@@ -3058,6 +3155,16 @@ export class CloudCoordinator extends EventEmitter {
     // Resume from the last seen sequence instead of replaying the full history
     // every time a window refreshes.
     const after = this.#remoteWatchSequence.get(sessionId) ?? 0;
+    const onReconnect = () => this.#profileOperationContext.exit(() => this.#withProfileOperation(async () => {
+      this.#assertProfileEpoch(profileEpoch);
+      const remote = await this.#hydrateRemoteTakeover(
+        await this.#client.session(sessionId),
+        null,
+        profileEpoch,
+      );
+      this.#remoteSessions.set(sessionId, remote);
+      this.#emit({ type: 'remote-session-reconciled', sessionId });
+    }, { expectedEpoch: profileEpoch }));
     const onEvent = (event) => this.#profileOperationContext.exit(() => this.#withProfileOperation(async () => {
       this.#assertProfileEpoch(profileEpoch);
       this.#remoteWatchSequence.set(sessionId, event.sequence);
@@ -3110,18 +3217,24 @@ export class CloudCoordinator extends EventEmitter {
       }
       if (['purged', 'cancelled', 'failed'].includes(session.status)) controller.abort();
     }, { expectedEpoch: profileEpoch }));
+    let restartWatch = false;
     this.#profileOperationContext.exit(() => {
       void this.#client.watchSession(sessionId, after, {
         signal: controller.signal,
+        onReconnect,
         onEvent,
       }).catch((error) => {
         if (error?.code !== 'PROFILE_CHANGED' && !controller.signal.aborted) {
           this.#emit({ type: 'remote-session-stream-error', sessionId, error: error.message });
+          restartWatch = this.#streamShouldRestart(error);
         }
       })
         .finally(() => {
           if (this.#watchers.get(watcherKey) === controller) this.#watchers.delete(watcherKey);
           if (profileEpoch === this.#profileEpoch) this.#timelinePending.delete(sessionId);
+          if (restartWatch && !this.#stopped && profileEpoch === this.#profileEpoch) {
+            this.#scheduleWatchRestart(() => this.#watchRemote(sessionId, profileEpoch));
+          }
         });
     });
   }

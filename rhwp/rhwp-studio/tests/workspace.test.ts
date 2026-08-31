@@ -9,6 +9,7 @@ import {
   createWorkspaceController,
   deriveComposerTarget,
   disposeCloudDependencies,
+  shouldOfferAccountForceQuit,
   shouldShowCloudComposerSwitch,
   shouldShowCloudWorkspaceSwitch,
   type CloudWorkspace,
@@ -216,24 +217,55 @@ test('every workspace mode derives its composer target from the lease and select
         message: 'Cloud를 시작하는 중입니다.',
       });
     } else if (session.kind === 'running') {
-      assert.equal(cloudTarget.kind, 'cloud-start-ready');
-      assert.deepEqual(deriveComposerTarget('cloud', snapshot(session), {
-        sessionId: baseSession.sessionId,
-        threadId: baseSession.threadId,
-        documentId: baseSession.documentId,
-      }), {
+      assert.deepEqual(cloudTarget, {
         kind: 'cloud-ready',
         sessionId: baseSession.sessionId,
         threadId: baseSession.threadId,
         documentId: baseSession.documentId,
         expectedVersion: 17,
       });
+      assert.deepEqual(deriveComposerTarget('cloud', snapshot(session), {
+        sessionId: baseSession.sessionId,
+        threadId: baseSession.threadId,
+        documentId: baseSession.documentId,
+      }), cloudTarget);
     } else {
       assert.equal(cloudTarget.kind, 'cloud-blocked');
       if (cloudTarget.kind === 'cloud-blocked') assert.equal(cloudTarget.reason, 'not-accepting-messages');
     }
     assert.deepEqual(deriveComposerTarget('cloud', snapshot(session, true)), cloudTarget);
   }
+});
+
+test('a live running Cloud session stays addressable after the mounted binding is lost', () => {
+  const running = sessions.find((session) => session.kind === 'running')!;
+  const snap = snapshot(running);
+  const bound = {
+    sessionId: baseSession.sessionId,
+    threadId: baseSession.threadId,
+    documentId: baseSession.documentId,
+  };
+  assert.deepEqual(deriveComposerTarget('cloud', snap, bound), {
+    kind: 'cloud-ready',
+    sessionId: baseSession.sessionId,
+    threadId: baseSession.threadId,
+    documentId: baseSession.documentId,
+    expectedVersion: 17,
+  });
+  assert.deepEqual(deriveComposerTarget('cloud', snap), {
+    kind: 'cloud-ready',
+    sessionId: baseSession.sessionId,
+    threadId: baseSession.threadId,
+    documentId: baseSession.documentId,
+    expectedVersion: 17,
+  });
+  assert.deepEqual(composerExecution(deriveComposerTarget('cloud', snap)), {
+    kind: 'cloud',
+    sessionId: baseSession.sessionId,
+    threadId: baseSession.threadId,
+    documentId: baseSession.documentId,
+    expectedVersion: 17,
+  });
 });
 
 test('composer execution keeps local and cloud routing explicit and leaves blocked drafts to the caller', () => {
@@ -342,17 +374,17 @@ test('workspace controller mounts sibling roots, updates atomically, and cleans 
 
   current = snapshot(sessions.find((session) => session.kind === 'running')!);
   for (const listener of cloudListeners) listener(current);
+  assert.deepEqual(notices, [
+    'local:local-ready',
+    'cloud:cloud-start-ready',
+    'cloud:cloud-ready',
+  ]);
   workspace.bindCloud({
     sessionId: baseSession.sessionId,
     threadId: baseSession.threadId,
     documentId: baseSession.documentId,
   });
   for (const listener of cloudListeners) listener(current);
-  assert.deepEqual(notices, [
-    'local:local-ready',
-    'cloud:cloud-start-ready',
-    'cloud:cloud-ready',
-  ]);
   assert.equal(localRoot.getAttribute('aria-hidden'), 'false');
   assert.ok(contextCalls >= 3);
 
@@ -453,6 +485,30 @@ test('execution lock freezes Local/Cloud switching without changing workspace vi
   assert.equal(workspace.executionLocked(), true);
   assert.equal(workspace.composerTarget().kind, 'cloud-start-ready');
   workspace.dispose();
+});
+
+test('account force-quit is offered for leftover runs and active-elsewhere locks', () => {
+  assert.equal(shouldOfferAccountForceQuit(snapshot({ kind: 'idle' })), false);
+  const elsewhere = snapshot({ kind: 'idle' });
+  elsewhere.account = {
+    signedIn: true,
+    account: { id: 'user-1', email: 'user@example.test' },
+    quota: {
+      dailyLimitMs: 1,
+      usedMs: 0,
+      remainingMs: 1,
+      debtMs: 0,
+      graceUsedMs: 0,
+      resetAt: '2026-08-31T00:00:00.000Z',
+      timeZone: 'UTC',
+      activeRun: { runId: 'run-other', deviceId: 'device-b', startedAt: '2026-08-31T00:00:00.000Z', controllingThisDevice: false },
+      coldStarts: { usedToday: 0, dailyLimit: 12, recent: 0, recentLimit: 3 },
+    },
+    raucloud: { kind: 'active-elsewhere', runId: 'run-other', deviceName: 'laptop' },
+    updatedAt: '2026-08-31T00:00:00.000Z',
+  };
+  assert.equal(shouldOfferAccountForceQuit(elsewhere), true);
+  assert.equal(shouldOfferAccountForceQuit(snapshot(sessions.find((session) => session.kind === 'running')!)), true);
 });
 
 test('composer Cloud switch stays hidden until an empty supported document chat can start', () => {

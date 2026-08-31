@@ -15,6 +15,7 @@ import type {
   CloudTakeoverPayload,
 } from '../../cloud/types.ts';
 import {
+  shouldOfferAccountForceQuit,
   shouldShowCloudWorkspaceSwitch,
   type CloudWorkspaceBinding,
   type WorkspaceExecutionLock,
@@ -107,7 +108,7 @@ function raucloudLock(snapshot: CloudSnapshot): string | null {
   switch (gate.kind) {
     case 'logged-out': return 'Raucloud를 시작하려면 Rauhwpx 계정으로 로그인하세요.';
     case 'exhausted': return '오늘의 Raucloud 시간을 모두 사용했습니다. 실행 중인 응답까지만 끝낼 수 있습니다.';
-    case 'active-elsewhere': return `${gate.deviceName ?? '다른 기기'}에서 Raucloud가 실행 중입니다.`;
+    case 'active-elsewhere': return `${gate.deviceName ?? '다른 기기'}에서 Raucloud가 실행 중입니다. 서버 강제 종료로 끊을 수 있습니다.`;
     case 'unavailable': return gate.reason;
   }
 }
@@ -357,10 +358,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       && session.kind === 'running'
       && session.sessionId === target.sessionId
       && session.threadId === target.threadId
-      && session.documentId === target.documentId
-      && mountedBinding?.sessionId === target.sessionId
-      && mountedBinding.threadId === target.threadId
-      && mountedBinding.documentId === target.documentId;
+      && session.documentId === target.documentId;
   }
 
   async function selectAndBind(sessionId: string | null, rollbackOnFailure: boolean): Promise<boolean> {
@@ -541,6 +539,19 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     });
   }
 
+  function forceQuitAccount(): void {
+    void operation(async () => {
+      snapshot = await deps.controller.forceQuitAccount();
+      selectedSessionId = snapshot.session.kind === 'idle' ? null : snapshot.session.sessionId;
+      if (snapshot.session.kind === 'idle') clearCloudBinding();
+    });
+  }
+
+  function appendForceQuit(): void {
+    if (!shouldOfferAccountForceQuit(snapshot)) return;
+    panelActions.append(action('서버 강제 종료', forceQuitAccount, 'ag-danger'));
+  }
+
   async function download(): Promise<void> {
     const session = snapshot.session;
     if (session.kind !== 'completed') return;
@@ -618,18 +629,21 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       panelStatus.textContent = 'Cloud 결과 반영을 다시 시도할 수 있습니다.';
       panelDetail.textContent = pendingResultReplace.result.fileName;
       panelActions.append(action('원본에 반영', () => resolveResult('replace'), 'ag-primary'));
+      appendForceQuit();
       return;
     }
     if (pendingTakeover) {
       panelStatus.textContent = '이어받기를 다시 시도할 수 있습니다.';
       panelDetail.textContent = '준비된 Cloud 경계부터 이어서 적용합니다.';
       panelActions.append(action('안전한 경계에서 이어받기', () => command('takeover'), 'ag-primary'));
+      appendForceQuit();
       return;
     }
     if (localTurnPending) {
       panelStatus.textContent = '현재 응답이 끝나면 클라우드로 옮깁니다.';
       panelDetail.textContent = '앱을 닫으면 전송 확인이 끝날 때까지 기다립니다.';
       panelActions.append(action('전송 예약 취소', deps.onCancelPendingTransfer));
+      appendForceQuit();
       return;
     }
     switch (session.kind) {
@@ -810,6 +824,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
         panelActions.append(action('기록 지우기', dismissSession));
         break;
     }
+    appendForceQuit();
   }
 
   function renderQueue(): void {
@@ -942,9 +957,15 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       checkpointMirror.reset();
       selectionFence.invalidate();
       liveSequence.clear();
-      selectedSessionId = null;
+      const previousId = snapshot.session.kind === 'idle' ? null : snapshot.session.sessionId;
+      const nextId = next.session.kind === 'idle' ? null : next.session.sessionId;
       if (!pendingResultReplace) downloadedResult = null;
-      clearCloudBinding();
+      if (previousId && previousId === nextId) {
+        selectedSessionId = nextId;
+      } else {
+        selectedSessionId = nextId;
+        if (!nextId) clearCloudBinding();
+      }
     }
     if (pendingSessionSelections > 0 && !profileChanged) return;
     snapshot = next;

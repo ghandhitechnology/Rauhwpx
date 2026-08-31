@@ -5460,6 +5460,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       workspace.select('cloud');
       workspace.lockExecution();
       syncCloudStartPlaceholder();
+      if (thread.cloudSessionId) void cloudUi.bindSelectedTimeline();
       return;
     }
     workspace.unlockExecution();
@@ -5471,6 +5472,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   function recoverCloudStartIfNeeded(): void {
     if (currentThread.executionMode !== 'cloud') return;
     applyThreadExecution(currentThread);
+    if (currentThread.firstMessageDelivery === 'accepted' && currentThread.cloudSessionId) {
+      void cloudUi.bindSelectedTimeline();
+      return;
+    }
     if (currentThread.firstMessageDelivery !== 'starting') return;
     const startId = currentThread.cloudStartId;
     const message = [...currentThread.messages].reverse().find((item) => item.role === 'user');

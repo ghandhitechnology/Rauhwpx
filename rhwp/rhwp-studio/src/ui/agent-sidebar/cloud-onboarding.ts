@@ -70,7 +70,7 @@ function raucloudLock(snapshot: CloudSnapshot): string | null {
   switch (gate.kind) {
     case 'logged-out': return 'Rauhwpx 계정으로 로그인하면 사용할 수 있습니다.';
     case 'exhausted': return '오늘 사용 시간을 모두 사용했습니다. 다음 초기화 뒤 다시 시작할 수 있습니다.';
-    case 'active-elsewhere': return `${gate.deviceName ?? '다른 기기'}에서 실행 중입니다. 그 기기에서 작업을 마친 뒤 계속할 수 있습니다.`;
+    case 'active-elsewhere': return `${gate.deviceName ?? '다른 기기'}에서 실행 중입니다. 서버 강제 종료로 끊을 수 있습니다.`;
     case 'unavailable': return gate.reason;
   }
 }

@@ -357,6 +357,67 @@ test('Raucloud exposes explicit checkpointed takeover and graceful logout stop',
   });
 });
 
+test('Raucloud force-quit stops every live account run from any signed-in device', async () => {
+  const { client, calls } = broker({
+    'POST /v1/cloud/force-quit': json({
+      worker: null,
+      activeRun: null,
+      gate: { state: 'ready', canStart: true, reason: null },
+    }),
+  });
+  const provider = createRaucloudBrokerProvider({ client });
+  const result = await provider.forceQuitAccount();
+  assert.equal(result.status, 'idle');
+  assert.equal(calls[0].key, 'POST /v1/cloud/force-quit');
+  assert.deepEqual(calls[0].body, {
+    deviceId: 'device-desktop-123',
+    reason: 'force-quit',
+  });
+});
+
+test('account force-quit ends leftover sessions and the account worker', async () => {
+  const ended = [];
+  let forceQuitCalled = false;
+  const provider = {
+    id: RAUCLOUD_PROVIDER_ID,
+    displayName: 'Raucloud',
+    configuration: () => ({ configured: true, missing: [] }),
+    spawn: async () => { throw new Error('not used'); },
+    status: async () => ({ lifecycle: 'idle' }),
+    teardown: async () => ({ removed: true }),
+    accountStatus: async () => ({
+      signedIn: true, account: { id: 'user-1' }, quota: null,
+      raucloud: { kind: 'available' }, updatedAt: new Date().toISOString(),
+    }),
+    forceQuitAccount: async () => {
+      forceQuitCalled = true;
+      return { worker: null, account: { signedIn: true, account: { id: 'user-1' }, quota: null, raucloud: { kind: 'available' }, updatedAt: new Date().toISOString() } };
+    },
+  };
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadServerMode: async () => null,
+      loadProfile: async () => null,
+      sessions: async () => [{ id: 'session-live', status: 'running', stateVersion: 4 }],
+      command: async (sessionId, type, payload) => {
+        ended.push({ sessionId, type, payload });
+        return { session: { id: sessionId, status: 'cancelled' } };
+      },
+    },
+    store: { load: async () => [], list: async () => [], flush: async () => {} },
+    appServers: [provider],
+  });
+  await coordinator.start();
+  await coordinator.forceQuitAccountCloud();
+  assert.equal(forceQuitCalled, true);
+  assert.deepEqual(ended, [{
+    sessionId: 'session-live',
+    type: 'session.end',
+    payload: { expectedVersion: 4 },
+  }]);
+  await coordinator.stop();
+});
+
 test('Raucloud keeps broker conflict and quota failures stable for the UI', async () => {
   const conflict = broker({
     'POST /v1/cloud/runs': json({

@@ -398,6 +398,17 @@ export function createRaucloudBrokerClient({
         },
       });
     },
+    async forceQuitAccount({
+      signal = null, reason = 'force-quit', idempotencyKey = randomUUID(),
+    } = {}) {
+      return request('/v1/cloud/force-quit', {
+        method: 'POST', signal, idempotencyKey,
+        body: {
+          deviceId: (await device()).id,
+          reason,
+        },
+      });
+    },
     async stopRun(id, {
       signal = null, reason = 'user-request', finishCurrentTurn = false, checkpoint = true,
       idempotencyKey = randomUUID(),
@@ -557,6 +568,10 @@ export function createRaucloudBrokerProvider(options = {}) {
         raucloud: normalizedStatus(payload).raucloud,
         account: accountSnapshotFrom(payload),
       };
+    },
+    async forceQuitAccount({ signal = null } = {}) {
+      const payload = await client.forceQuitAccount({ signal, reason: 'force-quit' });
+      return { ...normalizedStatus(payload, 'idle'), account: accountSnapshotFrom(payload) };
     },
     async teardown(sandbox, { signal = null } = {}) {
       const payload = await client.stopRun(sandbox?.sandboxId, {

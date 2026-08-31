@@ -1286,7 +1286,9 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
           failures += 1;
           if (failures >= 20) {
             emit({ type: 'remote-session-stream-error', sessionId, error: error instanceof Error ? error.message : String(error) });
-            break;
+            failures = 0;
+            await new Promise((resolve) => setTimeout(resolve, 5_000));
+            continue;
           }
           await new Promise((resolve) => setTimeout(resolve, Math.min(10_000, 250 * 2 ** failures)));
         }
@@ -1380,6 +1382,37 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
     cloudSpawnSandbox: () => readProfile(async () => { throw new Error('브라우저 PWA에서는 Raucloud를 만들 수 없습니다.'); }),
     cloudSandboxStatus: () => readProfile(() => refresh()),
     cloudTeardownSandbox: () => readProfile(async () => ({ snapshot: snapshot(), removed: false, unmanaged: true })),
+    cloudForceQuitAccount: () => readProfile(async () => {
+      const selectedProfile = profile;
+      const generation = profileGeneration;
+      if (!selectedProfile || !tokens) return snapshot();
+      const live = remoteSessions.filter((session) => (
+        !['completed', 'failed', 'cancelled', 'purged'].includes(String(session.status ?? ''))
+      ));
+      for (const session of live) {
+        const sessionId = String(session.id ?? '');
+        if (!sessionId) continue;
+        try {
+          await requestJson(`/v1/sessions/${encodeURIComponent(sessionId)}/commands`, {
+            method: 'POST',
+            selectedProfile,
+            body: {
+              commandId: `force_quit_${sessionId}`,
+              type: 'session.end',
+              payload: { expectedVersion: Number(session.stateVersion) || 1 },
+            },
+          });
+        } catch (error) {
+          if ((error as BrowserCloudError).code === 'PROFILE_CHANGED') throw error;
+        }
+        requireCurrentProfile(selectedProfile, generation);
+      }
+      await fetchRemoteSessions().catch((error) => {
+        if ((error as BrowserCloudError).code === 'PROFILE_CHANGED') throw error;
+      });
+      requireCurrentProfile(selectedProfile, generation);
+      return snapshot();
+    }),
     cloudSetTransferIntent: () => readProfile(async () => snapshot()),
     async cloudReadReference(reference: Pick<CloudTransferReference, 'id' | 'scope' | 'scopeId'>) {
       if (!options.readReference) throw new Error('브라우저 참고자료를 읽을 수 없습니다.');

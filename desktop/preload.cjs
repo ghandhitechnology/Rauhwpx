@@ -85,6 +85,7 @@ contextBridge.exposeInMainWorld('rhwpDesktop', {
   cloudSpawnSandbox: (payload) => ipcRenderer.invoke('cloud:spawn-sandbox', payload),
   cloudSandboxStatus: () => ipcRenderer.invoke('cloud:sandbox-status'),
   cloudTeardownSandbox: (payload) => ipcRenderer.invoke('cloud:teardown-sandbox', payload),
+  cloudForceQuitAccount: () => ipcRenderer.invoke('cloud:force-quit-account'),
   cloudTakeoverSandbox: () => ipcRenderer.invoke('cloud:takeover-sandbox'),
   cloudAccountLogout: () => ipcRenderer.invoke('cloud:account-logout'),
   cloudTransfer: (payload) => ipcRenderer.invoke('cloud:transfer', payload),

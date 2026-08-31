@@ -99,6 +99,13 @@ test('run creation is idempotent and enforces one account-global worker across d
     }),
     { code: 'CLOUD_OWNED_ELSEWHERE' },
   );
+  const quit = await f.service.forceQuitAccountCloud(f.secondToken, {
+    deviceId: 'device-b', reason: 'force-quit',
+  });
+  assert.equal(quit.worker, null);
+  await f.service.createCloudRun(f.secondToken, {
+    deviceId: 'device-b', timezone: 'UTC', idempotencyKey: 'create-after-force-quit',
+  });
 });
 
 test('different WorkOS identities for one verified email share one Cloud account and quota', async () => {

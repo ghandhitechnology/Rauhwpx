@@ -883,6 +883,38 @@ export function createRaucloudBroker({
       return created;
     },
 
+    async forceQuitAccountCloud(token, { deviceId, reason = 'force-quit' } = {}) {
+      const requesterDeviceId = validId(deviceId, 'deviceId');
+      const userId = await identity(token, requesterDeviceId);
+      const result = await mutate((state) => {
+        const at = now();
+        const cloud = ensureRaucloudState(state);
+        const account = ensureAccount(state, userId, at);
+        reconcileAccount(state, account, at);
+        const live = Object.values(cloud.runs).filter((run) => (
+          run?.accountId === userId
+          && ['allocating', 'ready', 'active', 'checkpointing'].includes(run.status)
+        ));
+        for (const run of live) {
+          if (run.status === 'active') chargeRun(account, run, at);
+          if (!['stopped', 'completed', 'failed'].includes(run.status)) {
+            run.status = 'stopped';
+            run.stopReason = String(reason ?? 'force-quit').slice(0, 80);
+            run.completedAt = at;
+          }
+          reserveTeardown(account, run, at);
+        }
+        if (account.worker && !live.some((run) => run.id === account.worker.runId)) {
+          const leftover = cloud.runs[account.worker.runId];
+          if (leftover) reserveTeardown(account, leftover, at);
+          else account.worker = null;
+        }
+        return envelope(state, account, state.users?.[userId], requesterDeviceId);
+      });
+      await cleanupPendingRemotes();
+      return result;
+    },
+
     async stopCloudRun(token, runId, {
       deviceId,
       reason = 'user',

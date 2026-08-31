@@ -202,6 +202,7 @@ test('the controller forwards every server mode call to its own IPC channel', as
     cloudSpawnSandbox: async (payload: unknown) => { calls.push(['spawn', payload]); return accepted; },
     cloudSandboxStatus: async () => { calls.push(['status', undefined]); return accepted; },
     cloudTeardownSandbox: async (payload: unknown) => { calls.push(['teardown', payload]); return accepted; },
+    cloudForceQuitAccount: async () => { calls.push(['force-quit', undefined]); return accepted; },
   };
   const controller = createCloudController(api as never);
   await controller.selectServerMode('app-hosted');
@@ -210,6 +211,7 @@ test('the controller forwards every server mode call to its own IPC channel', as
   await controller.sandboxStatus();
   await controller.teardownSandbox();
   await controller.teardownSandbox({ force: true });
+  await controller.forceQuitAccount();
   assert.deepEqual(calls, [
     ['select', { mode: 'app-hosted' }],
     ['spawn', { providerId: 'railway' }],
@@ -217,6 +219,7 @@ test('the controller forwards every server mode call to its own IPC channel', as
     ['status', undefined],
     ['teardown', { force: false }],
     ['teardown', { force: true }],
+    ['force-quit', undefined],
   ]);
 
   const bare = createCloudController({} as never);
@@ -393,7 +396,7 @@ test('the dialog offers both servers and only restorable sandbox actions', () =>
   assert.match(onboarding, /controller\.teardownSandbox\(\)/);
   assert.match(onboarding, /controller\.sandboxStatus\(\)/);
   assert.doesNotMatch(onboarding, /controller\.takeoverSandbox\(\)/);
-  assert.match(onboarding, /그 기기에서 작업을 마친 뒤 계속할 수 있습니다/);
+  assert.match(onboarding, /서버 강제 종료로 끊을 수 있습니다/);
   assert.match(onboarding, /남은 서버는 공급자 콘솔에서 직접 삭제하세요/);
   // 놓고 온 유료 서버는 화면에 보여야 한다. 스크린 리더 전용 안내로는 부족하다.
   assert.match(onboarding, /state\.notice.*callout\('cloud', '남은 서버를 확인하세요', state\.notice\)/);
@@ -409,13 +412,14 @@ test('the dialog offers both servers and only restorable sandbox actions', () =>
   assert.match(onboardingCss, /\.ag-cloud-setup-option\.ag-selected/);
   assert.match(cloudUi, /appHosted/);
   assert.match(cloudUi, /setupActive \? '준비 중' : 'Cloud'/);
-  assert.match(cloudUi, /if \(setupActive\) \{\n\s+onboarding\.open\('transfer', trigger\)/);
+  assert.match(cloudUi, /if \(setupActive\) \{\n\s+onboarding\.open\('manage', trigger\)/);
   assert.match(preload, /cloudSelectServerMode: \(payload\) => ipcRenderer\.invoke\('cloud:select-server-mode', payload\)/);
   assert.match(preload, /cloudSpawnSandbox: \(payload\) => ipcRenderer\.invoke\('cloud:spawn-sandbox', payload\)/);
   assert.match(preload, /cloudSandboxStatus: \(\) => ipcRenderer\.invoke\('cloud:sandbox-status'\)/);
   assert.match(preload, /cloudTeardownSandbox: \(payload\) => ipcRenderer\.invoke\('cloud:teardown-sandbox', payload\)/);
   assert.match(preload, /cloudTakeoverSandbox: \(\) => ipcRenderer\.invoke\('cloud:takeover-sandbox'\)/);
-  for (const channel of ['cloud:select-server-mode', 'cloud:spawn-sandbox', 'cloud:sandbox-status', 'cloud:teardown-sandbox', 'cloud:takeover-sandbox']) {
+  assert.match(preload, /cloudForceQuitAccount: \(\) => ipcRenderer\.invoke\('cloud:force-quit-account'\)/);
+  for (const channel of ['cloud:select-server-mode', 'cloud:spawn-sandbox', 'cloud:sandbox-status', 'cloud:teardown-sandbox', 'cloud:takeover-sandbox', 'cloud:force-quit-account']) {
     assert.match(desktopMain, new RegExp(`ipcMain\\.handle\\('${channel}'`));
   }
   assert.match(desktopMain, /createRaucloudBrokerProvider\(\{/);
