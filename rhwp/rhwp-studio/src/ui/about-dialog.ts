@@ -157,7 +157,7 @@ export class AboutDialog extends ModalDialog {
     value.textContent = `고유 설치 ${formatUniqueInstallCount(count)}`;
     const note = document.createElement('div');
     note.className = 'about-unique-installs-note';
-    note.textContent = `첫 실행만 세며 업데이트는 넣지 않습니다. ${uniqueInstallPublicUrl(snapshot)}`;
+    note.textContent = `첫 실행 보고만 세며 업데이트와 기기 증명은 넣지 않습니다. ${uniqueInstallPublicUrl(snapshot)}`;
     target.append(value, note);
   }
 }

@@ -64,6 +64,15 @@ export function countOfficialUniqueInstalls(state) {
   return count;
 }
 
+export function uniqueInstallsPublicSummary(count) {
+  const uniqueInstalls = Number.isSafeInteger(count) && count >= 0 ? count : 0;
+  return {
+    uniqueInstalls,
+    attested: false,
+    source: 'desktop-first-launch-ping',
+  };
+}
+
 export function parseUniqueInstallPing(body, pingKey = DEFAULT_UNIQUE_INSTALL_PING_KEY) {
   const installId = typeof body?.installId === 'string' ? body.installId.trim().toLowerCase() : '';
   if (!INSTALL_ID_RE.test(installId)) {
@@ -104,7 +113,7 @@ export function createUniqueInstallsService({
 
   async function summary() {
     const state = await store.load();
-    return { uniqueInstalls: countOfficialUniqueInstalls(state) };
+    return uniqueInstallsPublicSummary(countOfficialUniqueInstalls(state));
   }
 
   async function record(body) {

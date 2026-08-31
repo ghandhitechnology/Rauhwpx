@@ -1303,7 +1303,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const productNote = el(
     'p',
     'ag-settings-note',
-    '공식 macOS arm64·Windows x64 데스크톱 앱을 설치한 뒤 그 기기에서 처음 연 횟수입니다. 자동 업데이트와 GitHub 다운로드 수는 넣지 않습니다.',
+    '공식 macOS arm64·Windows x64 데스크톱 앱을 설치한 뒤 그 기기에서 처음 연 횟수입니다. 자동 업데이트와 GitHub 다운로드 수는 넣지 않습니다. 데스크톱 앱이 보낸 첫 실행 보고이며 기기 증명(attestation)은 아닙니다.',
   );
   const productPrivacy = el(
     'p',

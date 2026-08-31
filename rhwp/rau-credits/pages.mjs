@@ -325,6 +325,7 @@ export function renderUniqueInstallsPage({ uniqueInstalls }) {
   <h1>고유 데스크톱 설치</h1>
   <p class="hero-count">${escapeHtml(count.toLocaleString('ko-KR'))}</p>
   <p>공식 macOS arm64·Windows x64 앱을 설치한 뒤 그 기기에서 처음 연 횟수입니다. 자동 업데이트와 GitHub 다운로드 수는 넣지 않습니다.</p>
+  <p>데스크톱 앱이 보낸 첫 실행 보고이며 기기 증명(attestation)은 아닙니다. HMAC은 아무 서명 없는 요청을 거를 뿐, 패키지를 연 누구나 같은 서명을 만들 수 있습니다.</p>
   <p>첫 실행 때 익명 설치 식별자, 앱 버전, OS, 아키텍처만 받습니다. 이름, 이메일, 호스트 이름, 문서 경로는 저장하지 않으며 IP는 신원으로 쓰지 않습니다.</p>
 </section>`,
   });

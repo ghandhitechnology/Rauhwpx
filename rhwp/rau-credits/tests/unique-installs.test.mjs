@@ -138,7 +138,11 @@ test('HTTP GET is the running total and POST is idempotent per machine', async (
   try {
     const empty = await fetch(`${server.origin}/v1/unique-installs`);
     assert.equal(empty.status, 200);
-    assert.deepEqual(await empty.json(), { uniqueInstalls: 0 });
+    assert.deepEqual(await empty.json(), {
+      uniqueInstalls: 0,
+      attested: false,
+      source: 'desktop-first-launch-ping',
+    });
     assert.equal(empty.headers.get('access-control-allow-origin'), '*');
 
     const first = await fetch(`${server.origin}/v1/unique-installs`, {
@@ -162,6 +166,7 @@ test('HTTP GET is the running total and POST is idempotent per machine', async (
     assert.match(html, /고유 데스크톱 설치/);
     assert.match(html, />1</);
     assert.match(html, /자동 업데이트와 GitHub 다운로드 수는 넣지 않습니다/);
+    assert.match(html, /기기 증명\(attestation\)은 아닙니다/);
   } finally {
     await server.close();
   }
@@ -181,7 +186,11 @@ test('unique-install routes stay available when v1 login is retired', async () =
     assert.equal(login.status, 426);
     const counted = await fetch(`${server.origin}/v1/unique-installs`);
     assert.equal(counted.status, 200);
-    assert.deepEqual(await counted.json(), { uniqueInstalls: 0 });
+    assert.deepEqual(await counted.json(), {
+      uniqueInstalls: 0,
+      attested: false,
+      source: 'desktop-first-launch-ping',
+    });
   } finally {
     await server.close();
   }
