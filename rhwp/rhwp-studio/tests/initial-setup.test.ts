@@ -6,9 +6,12 @@ import { AGENT_MODELS } from '../src/agent/models.ts';
 import type { AgentName, AgentSetupStatus } from '../src/agent/types.ts';
 import { PROVIDER_ORDER } from '../src/ui/agent-sidebar/providers.ts';
 import {
+  BYOK_AGENTS,
   isProviderConfigured,
+  isRauFirstRunFailure,
   previewModelLabels,
   PROVIDER_VENDOR,
+  RAU_FAILURE_FORWARD_COPY,
   SUGGESTED_AGENT,
 } from '../src/ui/initial-setup/catalog.ts';
 import {
@@ -17,6 +20,7 @@ import {
   isInitialSetupComplete,
   loadInitialSetup,
   shouldForceInitialSetup,
+  shouldForceRauFailurePreview,
   shouldShowInitialSetup,
   shouldSuppressInitialSetup,
 } from '../src/ui/initial-setup/state.ts';
@@ -81,6 +85,9 @@ test('?initial-setup=1 이면 끝난 뒤에도 다시 연다', () => {
   assert.equal(shouldForceInitialSetup('?initial-setup=1'), true);
   assert.equal(shouldForceInitialSetup('initial-setup'), true);
   assert.equal(shouldForceInitialSetup('?foo=1'), false);
+  assert.equal(shouldForceRauFailurePreview('?initial-setup=1&rau-failure=1'), true);
+  assert.equal(shouldForceRauFailurePreview('rau-failure'), true);
+  assert.equal(shouldForceRauFailurePreview('?initial-setup=1'), false);
   assert.equal(shouldShowInitialSetup(storage, '?initial-setup=1'), true);
   assert.equal(shouldSuppressInitialSetup(), typeof navigator !== 'undefined' && navigator.webdriver === true);
 });
@@ -94,6 +101,7 @@ test('카드 모델 목록은 정적 카탈로그를 짧게 보여 준다', () =
   assert.deepEqual(previewModelLabels('rau'), ['GLM 5.3 Flash', 'DeepSeek V4 Flash', 'Qwen 3.8 Flash', 'Solar Pro 4']);
   assert.equal(SUGGESTED_AGENT, 'rau');
   assert.equal(PROVIDER_ORDER[0], 'rau');
+  assert.deepEqual([...BYOK_AGENTS], ['claude', 'codex', 'pi', 'grok', 'cursor']);
   for (const agent of PROVIDER_ORDER) {
     assert.ok(PROVIDER_VENDOR[agent]);
   }
@@ -125,10 +133,16 @@ test('사이드바가 첫 실행 마법사를 설정 모달·보정 창에 붙�
   assert.match(source, /maybeStartInitialSetup/);
   assert.match(source, /settingsPanel\.openAgentSetup\(agent\)/);
   assert.match(source, /settingsPanel\.beginAgentConnect\(agent\)/);
+  assert.match(source, /settingsPanel\.closeAgentSetup\(\)/);
+  assert.match(source, /initialSetup\?\.notifySetupAbandoned\(info\)/);
   assert.match(source, /writingStyleCalibration\.open\(options\)/);
   assert.match(source, /initialSetup\?\.notifyCalibrationClosed\(result\.completed\)/);
   assert.match(settings, /openAgentSetup,/);
   assert.match(settings, /beginAgentConnect,/);
+  assert.match(settings, /closeAgentSetup,/);
+  assert.match(settings, /onAgentSetupAbandoned\?/);
+  assert.match(settings, /code: 'RAU_LOGIN_CANCELLED'/);
+  assert.match(settings, /code: 'RAU_LOGIN_START_FAILED'/);
   assert.match(settings, /await startSetupAuth\('oauth'\)/);
   assert.match(calibration, /elevate\?: boolean/);
   assert.match(calibration, /onDismiss\?: \(result: \{ completed: boolean \}\) => void/);
@@ -148,12 +162,23 @@ test('사이드바가 첫 실행 마법사를 설정 모달·보정 창에 붙�
   assert.doesNotMatch(setup, /rhwp-setup-lead/);
   assert.match(setup, /\(beginAgentConnect \?\? openAgentSetup\)\(agent\)/);
   assert.match(setup, /openCalibration\(\{ elevate: true \}\)/);
+  assert.match(setup, /function enterRauFailureRecovery\(\)/);
+  assert.match(setup, /function skipToEditor\(\)/);
+  assert.match(setup, /applyFirstRunDefaultAgent\(configuredAgents\(\), storage \?\? null\)/);
+  assert.match(setup, /dataset\.byok = 'true'/);
+  assert.match(setup, /agent === 'rau' \? 'Rau로 시작' : '설정'/);
+  assert.match(setup, /RAU_FAILURE_FORWARD_COPY/);
+  assert.match(setup, /shouldForceRauFailurePreview\(\)/);
+  assert.match(setup, /notifySetupAbandoned/);
 
   assert.match(css, /grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)/);
   assert.match(css, /\.rhwp-setup-card:nth-child\(6\)/);
   assert.match(css, /\.rhwp-setup-card\[data-agent='rau'\] \{\s*border-color: #ffffff/);
   assert.match(css, /\.rhwp-setup-card\[data-agent='rau'\]\[data-suggested='true'\]::before \{\s*content: none/);
   assert.match(css, /rhwp-setup-cal\[hidden\]/);
+  assert.match(css, /\.rhwp-setup-providers \{[\s\S]*overflow: auto/);
+  assert.match(css, /\.rhwp-setup-footer \{[\s\S]*position: sticky/);
+  assert.match(css, /data-recovery='true'[\s\S]*rhwp-setup-card-models \{[\s\S]*display: none/);
   assert.match(css, /prefers-reduced-motion: reduce/);
   assert.match(css, /--setup-spring-snappy: linear\(/);
   assert.match(css, /@media \(min-width: 1440px\) and \(min-height: 820px\)/);
@@ -164,4 +189,43 @@ test('사이드바가 첫 실행 마법사를 설정 모달·보정 창에 붙�
   assert.match(css, /url\('\/icons\/provider-cursor\.svg'\)/);
   assert.doesNotMatch(css, /transition: all/);
   assert.doesNotMatch(css, /\d+ms ease(?:;|,)/);
+  assert.match(css, /\.rhwp-setup-recovery\[hidden\]/);
+  assert.match(css, /data-recovery-option='true'/);
+  assert.match(css, /\.rhwp-setup-recovery \{/);
+});
+
+test('Rau 로그인·민트 실패는 같은 화면의 BYOK 경로로 접는다', () => {
+  assert.equal(isRauFirstRunFailure({ agent: 'rau', code: 'RAU_CREDITS_TIMEOUT' }), true);
+  assert.equal(isRauFirstRunFailure({ agent: 'rau', code: 'RAU_LOGIN_CANCELLED' }), true);
+  assert.equal(isRauFirstRunFailure({ agent: 'rau', code: 'RAU_LOGIN_START_FAILED' }), true);
+  assert.equal(isRauFirstRunFailure({ agent: 'rau', code: 'UNAUTHORIZED' }), true);
+  assert.equal(isRauFirstRunFailure({ agent: 'rau', code: 'AGENT_AUTH_CANCELLED' }), true);
+  assert.equal(isRauFirstRunFailure({ agent: 'rau', code: 'DEVICE_PROOF_INVALID' }), false);
+  assert.equal(isRauFirstRunFailure({ agent: 'codex', code: 'AGENT_SETUP_FAILED' }), false);
+  assert.equal(isRauFirstRunFailure({ agent: null, code: 'RAU_CREDITS_TIMEOUT' }), false);
+  assert.deepEqual([...BYOK_AGENTS], ['claude', 'codex', 'pi', 'grok', 'cursor']);
+  assert.match(RAU_FAILURE_FORWARD_COPY.body, /Claude, Codex, Pi, Grok, Cursor/);
+  assert.match(RAU_FAILURE_FORWARD_COPY.body, /모델 없이 편집기로 바로 가세요/);
+  assert.match(RAU_FAILURE_FORWARD_COPY.body, /문서는 그대로 열고 저장할 수 있습니다/);
+  assert.equal(RAU_FAILURE_FORWARD_COPY.skip, '편집기로 계속');
+  assert.doesNotMatch(RAU_FAILURE_FORWARD_COPY.body, /설정에서만|Settings-only|설정 탭에서만/);
+
+  const setup = readSource('../src/ui/initial-setup/initial-setup.ts');
+  assert.match(setup, /event\.type === 'agent-setup-error'/);
+  assert.match(setup, /isRauFirstRunFailure\(event\)/);
+  assert.match(setup, /closeAgentSetup\?\.\(\)/);
+  assert.match(setup, /if \(rauFailureActive\) \{\s*\n\s*skipToEditor\(\)/);
+  assert.match(setup, /dataset\.recoveryOption = rauFailureActive && isByokAgent\(agent\)/);
+  assert.match(setup, /dataset\.byok = 'true'/);
+});
+
+test('실패 경로의 건너뛰기는 보정 단계 없이 편집기로 끝낸다', () => {
+  const setup = readSource('../src/ui/initial-setup/initial-setup.ts');
+  assert.match(
+    setup,
+    /function skipToEditor\(\): void \{\s*\n\s*finish\(\{\s*\n\s*providerStep: configuredCount\(\) > 0 \? 'configured' : 'skipped',\s*\n\s*calibrationStep: 'skipped',/,
+  );
+  assert.match(setup, /if \(rauFailureActive\) \{\s*\n\s*skipToEditor\(\);\s*\n\s*return;/);
+  assert.match(setup, /RAU_FAILURE_FORWARD_COPY\.skip/);
+  assert.equal(RAU_FAILURE_FORWARD_COPY.skip, '편집기로 계속');
 });

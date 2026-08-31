@@ -115,6 +115,19 @@ export function shouldForceInitialSetup(search?: string): boolean {
   }
 }
 
+/** `?rau-failure=1` 이면 로그인 실패 복구 화면을 바로 연다. */
+export function shouldForceRauFailurePreview(search?: string): boolean {
+  const raw = search ?? (typeof location !== 'undefined' ? location.search : '');
+  try {
+    const params = new URLSearchParams(raw.startsWith('?') ? raw.slice(1) : raw);
+    if (!params.has('rau-failure')) return false;
+    const value = params.get('rau-failure');
+    return value === null || value === '' || value === '1' || value === 'true';
+  } catch {
+    return false;
+  }
+}
+
 /** 자동화된 브라우저·임베드 프레임에서는 편집 화면을 가리지 않는다. */
 export function shouldSuppressInitialSetup(): boolean {
   try {

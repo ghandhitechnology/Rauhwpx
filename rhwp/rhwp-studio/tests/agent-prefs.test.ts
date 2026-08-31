@@ -2,7 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   AGENT_PREFS_STORAGE_KEY,
+  applyFirstRunDefaultAgent,
   defaultAgentPrefs,
+  DEFAULT_CHAT_AGENT,
+  firstRunDefaultAgent,
+  hasExplicitDefaultAgent,
   loadAgentPrefs,
   normalizeAgentPrefs,
   saveAgentPrefs,
@@ -28,15 +32,16 @@ function makeStorage(seed?: unknown) {
   };
 }
 
-test('빈 저장소는 Codex/Sol/Medium/안전 기본값을 준다', () => {
+test('빈 저장소는 Rau/GLM Flash/Medium/안전 기본값을 준다', () => {
   const prefs = loadAgentPrefs(makeStorage());
   assert.deepEqual(prefs, {
-    defaultAgent: 'codex',
-    defaultModel: 'gpt-5.6-sol',
+    defaultAgent: 'rau',
+    defaultModel: 'z-ai/glm-5.3-flash',
     defaultEffort: 'medium',
     defaultPermissionProfile: 'safe',
   });
   assert.deepEqual(prefs, defaultAgentPrefs());
+  assert.equal(DEFAULT_CHAT_AGENT, 'rau');
 });
 
 test('모르는 모델은 프로바이더 기본 모델로 접힌다', () => {
@@ -66,9 +71,9 @@ test('지원되는 조합은 그대로 살아남는다', () => {
   assert.equal(prefs.defaultEffort, 'xhigh');
 });
 
-test('모르는 프로바이더는 codex, 모르는 권한 프로필은 safe', () => {
+test('모르는 프로바이더는 rau, 모르는 권한 프로필은 safe', () => {
   const prefs = normalizeAgentPrefs({ defaultAgent: 'gemini', defaultPermissionProfile: 'root' });
-  assert.equal(prefs.defaultAgent, 'codex');
+  assert.equal(prefs.defaultAgent, 'rau');
   assert.equal(prefs.defaultPermissionProfile, 'safe');
 });
 
@@ -225,4 +230,35 @@ test('저장된 grok 기본값은 다시 읽어도 살아남는다', () => {
   assert.equal(saved.defaultModel, 'grok-4.6');
   assert.equal(saved.defaultEffort, 'medium');
   assert.deepEqual(loadAgentPrefs(storage), saved);
+});
+
+test('이미 고른 Codex 기본값은 첫 실행이 끝나도 그대로 둔다', () => {
+  const storage = makeStorage({
+    defaultAgent: 'codex',
+    defaultModel: 'gpt-5.6-terra',
+    defaultEffort: 'high',
+  });
+  assert.equal(hasExplicitDefaultAgent(storage), true);
+  const kept = applyFirstRunDefaultAgent(['rau'], storage);
+  assert.equal(kept.defaultAgent, 'codex');
+  assert.equal(kept.defaultModel, 'gpt-5.6-terra');
+  assert.equal(loadAgentPrefs(storage).defaultAgent, 'codex');
+});
+
+test('첫 실행을 마친 빈 프로필은 Rau 가 기본값이 된다', () => {
+  const storage = makeStorage();
+  assert.equal(hasExplicitDefaultAgent(storage), false);
+  assert.equal(firstRunDefaultAgent([]), 'rau');
+  const seeded = applyFirstRunDefaultAgent([], storage);
+  assert.equal(seeded.defaultAgent, 'rau');
+  assert.equal(seeded.defaultModel, 'z-ai/glm-5.3-flash');
+  assert.equal(loadAgentPrefs(storage).defaultAgent, 'rau');
+});
+
+test('첫 실행에서 BYOK 만 연결하면 그 프로바이더가 기본값이 된다', () => {
+  const storage = makeStorage();
+  assert.equal(firstRunDefaultAgent(['codex', 'claude']), 'codex');
+  const seeded = applyFirstRunDefaultAgent(['codex'], storage);
+  assert.equal(seeded.defaultAgent, 'codex');
+  assert.equal(seeded.defaultModel, 'gpt-5.6-sol');
 });
