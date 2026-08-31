@@ -223,6 +223,10 @@ export class CanvasView {
     this.refreshPages();
   }
 
+  /**
+   * 현재 mutation revision의 페이지 배치를 갱신한다. 선택이 유효할 때만
+   * `document-layout-refreshed`를 보내 쪽/단 나누기 캐럿 reveal의 완료 경계가 된다.
+   */
   private async refreshPagesForMutation(): Promise<void> {
     const selected = await this.selectMutationRevision();
     if (!selected || !this.rendererSession.isCurrent(selected.selection)) return;
