@@ -308,7 +308,11 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
   function goBack(): void {
     if (stage !== 'calibration') return;
     showStage('providers');
-    window.requestAnimationFrame(() => next.focus());
+    dialog.scrollTop = 0;
+    window.requestAnimationFrame(() => {
+      cards.get(PROVIDER_ORDER[0])?.action.focus({ preventScroll: true });
+      dialog.scrollTo({ top: 0, behavior: 'instant' });
+    });
   }
 
   function finish(partial: Pick<InitialSetupRecord, 'providerStep' | 'calibrationStep'>): void {

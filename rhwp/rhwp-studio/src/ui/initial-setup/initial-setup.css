@@ -54,6 +54,11 @@
   display: flex;
   flex-direction: column;
   gap: 24px;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  overflow-anchor: none;
+  scroll-behavior: smooth;
+  scrollbar-width: none;
   outline: none;
   min-height: 0;
   opacity: 0;
@@ -61,6 +66,10 @@
   transition:
     opacity 420ms var(--setup-spring-snappy),
     transform 520ms var(--setup-spring-snappy);
+}
+
+.rhwp-setup-dialog::-webkit-scrollbar {
+  display: none;
 }
 
 .rhwp-setup-open .rhwp-setup-dialog {

@@ -155,6 +155,10 @@ test('사이드바가 첫 실행 마법사를 설정 모달·보정 창에 붙�
   assert.match(setup, /나중에 하기/);
   assert.match(setup, /모델 연결 단계로 돌아가기/);
   assert.match(setup, /function goBack\(\)/);
+  assert.match(setup, /dialog\.scrollTop = 0/);
+  assert.match(setup, /cards\.get\(PROVIDER_ORDER\[0\]\)\?\.action/);
+  assert.match(setup, /focus\(\{ preventScroll: true \}\)/);
+  assert.match(setup, /requestAnimationFrame\([\s\S]*dialog\.scrollTo\(\{ top: 0, behavior: 'instant' \}\)/);
   assert.match(setup, /보정 시작/);
   assert.match(setup, /모델을 연결하세요/);
   assert.match(setup, /말투를 맞출까요\?/);
@@ -181,6 +185,7 @@ test('사이드바가 첫 실행 마법사를 설정 모달·보정 창에 붙�
   assert.match(css, /\.rhwp-setup-footer \{[\s\S]*position: sticky/);
   assert.match(css, /data-recovery='true'[\s\S]*rhwp-setup-card-models \{[\s\S]*display: none/);
   assert.match(css, /prefers-reduced-motion: reduce/);
+  assert.match(css, /overflow-anchor: none/);
   assert.match(css, /--setup-spring-snappy: linear\(/);
   assert.match(css, /@media \(min-width: 1440px\) and \(min-height: 820px\)/);
   assert.match(css, /width: min\(1480px, 100%\)/);
