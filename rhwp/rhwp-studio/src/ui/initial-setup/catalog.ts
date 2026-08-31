@@ -1,5 +1,5 @@
 import { AGENT_MODELS, modelsForAgent } from '../../agent/models.ts';
-import type { AgentName, AgentSetupStatusMap } from '../../agent/types.ts';
+import type { AccountSessionStatus, AgentName, AgentSetupStatusMap } from '../../agent/types.ts';
 
 export const PROVIDER_VENDOR: Record<AgentName, string> = {
   rau: 'Rau',
@@ -66,4 +66,40 @@ export function isProviderConfigured(
 ): boolean {
   const setup = statuses?.[agent];
   return setup?.connected === true || setup?.setupComplete === true || setup?.authenticated === true;
+}
+
+export interface RauSignInFeedback {
+  state: 'idle' | 'pending' | 'signed-in';
+  label: string;
+  ariaLabel: string;
+  title: string;
+}
+
+/** Generic account state controls only the Rau card's sign-in feedback. */
+export function rauSignInFeedback(
+  account: AccountSessionStatus | null,
+  idleLabel: string,
+): RauSignInFeedback {
+  if (account?.signedIn === true) {
+    return {
+      state: 'signed-in',
+      label: '로그인됨',
+      ariaLabel: '로그인됨. 다음 단계로 계속',
+      title: '다음 단계로 계속',
+    };
+  }
+  if (account?.authenticating === true || account?.state === 'pending') {
+    return {
+      state: 'pending',
+      label: '로그인 확인 중…',
+      ariaLabel: '로그인 확인 중…',
+      title: '',
+    };
+  }
+  return {
+    state: 'idle',
+    label: idleLabel,
+    ariaLabel: idleLabel,
+    title: '',
+  };
 }
