@@ -177,6 +177,7 @@ export function createRailwayCloudProvisioner({
         authorization: `Bearer ${bootstrapToken}`,
         'content-type': 'application/json',
         accept: 'application/json',
+        'x-rauhwpx-request-nonce': randomBytes(24).toString('base64url'),
       },
       body: JSON.stringify({ deviceName: String(deviceName ?? '').slice(0, 120) }),
     });
