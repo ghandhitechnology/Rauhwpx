@@ -3677,6 +3677,61 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   display: none;
 }
 
+.ag-composer-mode-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 4px 6px;
+}
+
+.ag-composer-mode-switch {
+  flex: 0 0 auto;
+}
+
+.ag-cloud-mode-badge {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  padding: 0 8px;
+  border-radius: 6px;
+  background: var(--ag-bg-2);
+  color: var(--ag-text-secondary);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.ag-cloud-mode-badge[hidden] {
+  display: none;
+}
+
+.ag-cloud-start-placeholder {
+  color: var(--ag-text-secondary);
+}
+
+.ag-cloud-start-phase {
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.ag-cloud-start-retry,
+.ag-cloud-return-owner {
+  margin-top: 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ag-text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.ag-cloud-start-retry:hover,
+.ag-cloud-return-owner:hover {
+  text-decoration: underline;
+}
+
 /* 입력기 위의 진행 정보는 계획/변경 surface의 높이를 만들지 않는다.
    텍스트와 계획 복원 버튼은 한 overlay 행에서 서로의 폭을 예약한다.
    편대 도크가 서 있는 동안에는 --ag-fleet-dock-h 만큼 위로 올라간다. */

@@ -12,6 +12,31 @@ import { CloudHandoffStore } from '../desktop/cloud-handoff.mjs';
 import { normalizeCloudProfile } from '../desktop/cloud-profile.mjs';
 import { collectProviderAuth } from '../desktop/provider-auth.mjs';
 
+function cloudStartTransfer(extra = {}) {
+  const text = 'Continue this document';
+  const messageId = 'msg-start';
+  return {
+    startId: extra.startId ?? 'startid01',
+    initialMessage: { id: messageId, text, attachmentReferenceIds: [] },
+    timeline: {
+      schema: 'rauhwpx.cloud.timeline',
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      thread: {
+        id: extra.threadId ?? 'thread-1',
+        title: 'Task',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        agent: 'codex',
+        model: 'gpt-5.6',
+        effort: 'high',
+        messages: [{ role: 'user', text, messageId }],
+      },
+    },
+    ...extra,
+  };
+}
+
 test('desktop checkpoint IPC preserves the immutable boundary operation id', async () => {
   const source = await readFile(new URL('../desktop/main.mjs', import.meta.url), 'utf8');
   assert.match(source, /cloud:download-checkpoint[\s\S]*?\^\[A-Za-z0-9\._:-\]\{1,160\}\$[\s\S]*?downloadCheckpoint\(\{ sessionId, operationId \}\)/);
@@ -648,18 +673,17 @@ test('activation receipt skips historical staged events before watching live upd
     await store.flush();
     await rm(directory, { recursive: true, force: true });
   });
-  await coordinator.transfer({
-    threadId: 'thread-1', documentId: 'document-1',
+  await coordinator.transfer(cloudStartTransfer({
+    startId: 'startwatch',
+    threadId: 'thread-1',
+    documentId: 'document-1',
     document: { fileName: 'source.hwpx', bytes: new Uint8Array(Buffer.from('document')) },
-    timeline: {
-      schema: 'rauhwpx.cloud.timeline', version: 1, exportedAt: new Date().toISOString(),
-      thread: {
-        id: 'thread-1', title: 'Task', createdAt: Date.now(), updatedAt: Date.now(),
-        agent: 'codex', model: 'gpt-5.6', effort: 'high', messages: [],
-      },
-    },
-    agent: 'codex', model: 'gpt-5.6', effort: 'high', workflow: 'direct', references: [],
-  }, { originSessionId: 'desktop-1' });
+    agent: 'codex',
+    model: 'gpt-5.6',
+    effort: 'high',
+    workflow: 'direct',
+    references: [],
+  }), { originSessionId: 'desktop-1' });
   let record = null;
   for (let attempt = 0; attempt < 50; attempt += 1) {
     [record] = await store.list();
@@ -822,16 +846,17 @@ test('cancelling during activation aborts the transfer and remotely cancels exac
     await store.flush();
     await rm(directory, { recursive: true, force: true });
   });
-  const transfer = coordinator.transfer({
+  const transfer = coordinator.transfer(cloudStartTransfer({
+    startId: 'startcncl',
     threadId: 'thread-1',
     documentId: 'document-1',
     document: { fileName: 'source.hwpx', bytes: new Uint8Array(Buffer.from('document')) },
-    timeline: {
-      schema: 'rauhwpx.cloud.timeline', version: 1, exportedAt: new Date().toISOString(),
-      thread: { id: 'thread-1', title: 'Task', messages: [] },
-    },
-    agent: 'codex', model: 'gpt-5.6', effort: 'high', workflow: 'direct', references: [],
-  }, { originSessionId: 'desktop-1' });
+    agent: 'codex',
+    model: 'gpt-5.6',
+    effort: 'high',
+    workflow: 'direct',
+    references: [],
+  }), { originSessionId: 'desktop-1' });
   await created;
   const [record] = await store.list();
   const cancellation = coordinator.command({ sessionId: record.id, command: 'cancel' });
@@ -3038,19 +3063,17 @@ test('a terminated upload returns retrying state and recovers in the background'
     await rm(directory, { recursive: true, force: true });
   });
 
-  const retrying = await coordinator.transfer({
+  const retrying = await coordinator.transfer(cloudStartTransfer({
+    startId: 'startretr',
     threadId: 'thread-1',
     documentId: 'document-1',
     document: { fileName: 'source.hwpx', bytes: new Uint8Array(Buffer.from('document')) },
-    timeline: {
-      schema: 'rauhwpx.cloud.timeline', version: 1, exportedAt: new Date().toISOString(),
-      thread: {
-        id: 'thread-1', title: 'Task', createdAt: Date.now(), updatedAt: Date.now(),
-        agent: 'codex', model: 'gpt-5.6', effort: 'high', messages: [],
-      },
-    },
-    agent: 'codex', model: 'gpt-5.6', effort: 'high', workflow: 'direct', references: [],
-  }, { originSessionId: 'desktop-1' });
+    agent: 'codex',
+    model: 'gpt-5.6',
+    effort: 'high',
+    workflow: 'direct',
+    references: [],
+  }), { originSessionId: 'desktop-1' });
 
   assert.equal(retrying.session.kind, 'transferring');
   assert.match(retrying.session.message, /Retrying the transfer automatically/);
@@ -3101,18 +3124,17 @@ test('transfer seeds an env-only provider key before creating the remote session
     }),
   });
   t.after(() => coordinator.stop());
-  await coordinator.transfer({
-    threadId: 'thread-1', documentId: 'document-1',
+  await coordinator.transfer(cloudStartTransfer({
+    startId: 'startseed',
+    threadId: 'thread-1',
+    documentId: 'document-1',
     document: { fileName: 'source.hwpx', bytes: new Uint8Array(Buffer.from('document')) },
-    timeline: {
-      schema: 'rauhwpx.cloud.timeline', version: 1, exportedAt: new Date().toISOString(),
-      thread: {
-        id: 'thread-1', title: 'Task', createdAt: Date.now(), updatedAt: Date.now(),
-        agent: 'codex', model: 'gpt-5.6', effort: 'high', messages: [],
-      },
-    },
-    agent: 'codex', model: 'gpt-5.6', effort: 'high', workflow: 'direct', references: [],
-  }, { originSessionId: 'desktop-1' });
+    agent: 'codex',
+    model: 'gpt-5.6',
+    effort: 'high',
+    workflow: 'direct',
+    references: [],
+  }), { originSessionId: 'desktop-1' });
   assert.deepEqual(calls, [
     ['seed', { provider: 'codex', apiKey: 'sk-proj-codex', files: [] }],
     ['transfer', 'codex'],
@@ -3152,18 +3174,17 @@ test('a PUT-only sandbox falls through from seed to transfer-time auth import', 
     collectImportedAuth: async () => null,
   });
   t.after(() => coordinator.stop());
-  const transferred = await coordinator.transfer({
-    threadId: 'thread-1', documentId: 'document-1',
+  const transferred = await coordinator.transfer(cloudStartTransfer({
+    startId: 'startput1',
+    threadId: 'thread-1',
+    documentId: 'document-1',
     document: { fileName: 'source.hwpx', bytes: new Uint8Array(Buffer.from('document')) },
-    timeline: {
-      schema: 'rauhwpx.cloud.timeline', version: 1, exportedAt: new Date().toISOString(),
-      thread: {
-        id: 'thread-1', title: 'Task', createdAt: Date.now(), updatedAt: Date.now(),
-        agent: 'codex', model: 'gpt-5.6', effort: 'high', messages: [],
-      },
-    },
-    agent: 'codex', model: 'gpt-5.6', effort: 'high', workflow: 'direct', references: [],
-  }, { originSessionId: 'desktop-1' });
+    agent: 'codex',
+    model: 'gpt-5.6',
+    effort: 'high',
+    workflow: 'direct',
+    references: [],
+  }), { originSessionId: 'desktop-1' });
   assert.equal(transferred.session.sessionId, 'cloud-put-only');
   assert.deepEqual(calls, [
     ['seed'],

@@ -77,6 +77,7 @@ export interface ReferenceLibraryUi {
   setOpen(open: boolean, scope?: ReferenceScope): void;
   setConnectionState(state: ReturnType<AgentBridge['getConnectionState']>): void;
   contextChanged(): void;
+  snapshotDraftFiles(): File[];
   hasDrafts(): boolean;
   hasBlockingDrafts(): boolean;
   takeReadyDrafts(): StagedReference[];
@@ -802,6 +803,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
       void refreshCounts();
       if (open) void refreshActiveScope();
     },
+    snapshotDraftFiles: () => draftUploads.map((chip) => chip.file),
     hasDrafts: () => draftUploads.length > 0,
     hasBlockingDrafts: () => draftUploads.some((chip) => chip.uploadState !== 'ready'),
     takeReadyDrafts,

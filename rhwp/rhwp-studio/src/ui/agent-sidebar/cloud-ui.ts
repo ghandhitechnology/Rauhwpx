@@ -152,6 +152,7 @@ export interface CloudAgentUiDeps {
     completed: boolean,
   ): void | Promise<void>;
   onError(message: string): void;
+  onComposerSetupChange?(active: boolean): void;
 }
 
 type CloudCommandTarget = CloudWorkspaceBinding & { expectedVersion: number };
@@ -180,6 +181,7 @@ export interface CloudAgentUi {
     attachments: CloudFollowupAttachment[] | undefined,
     target: CloudCommandTarget,
   ): Promise<void>;
+  openSetup(trigger: HTMLElement): void;
   openSettings(): void;
   handleAccountEvent(event: { signedIn: boolean; error?: string }): void;
   dispose(): void;
@@ -217,16 +219,16 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
 
   const sidebarButton = el('button', 'ag-header-icon-btn ag-cloud-btn') as HTMLButtonElement;
   sidebarButton.type = 'button';
-  sidebarButton.setAttribute('aria-label', '클라우드로 계속');
+  sidebarButton.setAttribute('aria-label', '클라우드 상태');
   sidebarButton.setAttribute('aria-controls', 'ag-cloud-panel');
   sidebarButton.setAttribute('aria-expanded', 'false');
-  sidebarButton.title = '클라우드로 계속';
+  sidebarButton.title = '클라우드 상태';
   const sidebarButtonLabel = el('span', 'ag-cloud-btn-label', 'Cloud');
   sidebarButton.append(createIcon('cloud'), sidebarButtonLabel);
 
   const workspaceButton = el('button', 'ag-workspace-cloud-btn') as HTMLButtonElement;
   workspaceButton.type = 'button';
-  workspaceButton.setAttribute('aria-label', '클라우드로 계속');
+  workspaceButton.setAttribute('aria-label', '클라우드 상태');
   workspaceButton.setAttribute('aria-controls', 'ag-cloud-panel');
   workspaceButton.setAttribute('aria-expanded', 'false');
   const workspaceButtonLabel = el('span', 'ag-workspace-cloud-label', 'Cloud');
@@ -282,6 +284,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     onSetupStateChange: (active) => {
       setupActive = active;
       renderButtons();
+      deps.onComposerSetupChange?.(active);
     },
   });
   const settingsElement = onboarding.settingsElement;
@@ -658,12 +661,11 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
           : snapshot.profile.mode === 'app-hosted'
             ? `${snapshot.profile.name} · ${snapshot.profile.sandbox.host || snapshot.profile.sandbox.sandboxId}`
             : `${snapshot.profile.profile.name} · ${snapshot.profile.profile.host}`;
-        panelActions.append(action(profileReady ? '클라우드로 계속' : 'Cloud 설정', () => {
+        panelActions.append(action('Cloud 설정', () => {
           const focusTrigger = panelTrigger ?? sidebarButton;
           closePanel();
-          if (profileReady) deps.onRequestTransfer();
-          else onboarding.open('transfer', focusTrigger);
-        }, 'ag-primary'));
+          onboarding.open('manage', focusTrigger);
+        }, profileReady ? undefined : 'ag-primary'));
         break;
       case 'waiting-local-turn':
         panelStatus.textContent = session.message;
@@ -799,7 +801,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       case 'failed':
         panelStatus.textContent = session.message;
         panelDetail.textContent = session.code;
-        if (session.retryable && !raucloudLock(snapshot)) panelActions.append(action('새 클라우드 작업으로 다시 전송', deps.onRequestTransfer, 'ag-primary'));
+        if (session.retryable && !raucloudLock(snapshot)) panelActions.append(action('다시 시도', () => command('retry'), 'ag-primary'));
         panelActions.append(action('기록 지우기', dismissSession));
         break;
       case 'cancelled':
@@ -847,7 +849,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
           ? '클라우드 상태'
           : lock
             ? 'Raucloud 사용 제한'
-            : '클라우드로 계속';
+            : '클라우드 상태';
     sidebarButton.setAttribute('aria-label', label);
     sidebarButton.title = label;
     workspaceButton.setAttribute('aria-label', label);
@@ -908,15 +910,10 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   function activate(event: MouseEvent): void {
     const trigger = event.currentTarget as HTMLButtonElement;
     if (setupActive) {
-      onboarding.open('transfer', trigger);
+      onboarding.open('manage', trigger);
       return;
     }
     void deps.controller.refresh(selectedScope()).then(() => {
-      if (snapshot.session.kind === 'idle' && !localTurnPending) {
-        if (snapshot.profile.kind === 'configured' && snapshot.profile.connection === 'ready') deps.onRequestTransfer();
-        else onboarding.open('transfer', trigger);
-        return;
-      }
       if (panelOpen) closePanel(true); else openPanel(trigger);
     }).catch((error) => deps.onError(error instanceof Error ? error.message : String(error)));
   }
@@ -1064,6 +1061,9 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
         messageId,
         attachments,
       });
+    },
+    openSetup(trigger: HTMLElement) {
+      onboarding.open('manage', trigger);
     },
     openSettings() {
       if (authorityTransitionActive()) {

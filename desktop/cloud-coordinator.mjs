@@ -213,14 +213,9 @@ function asIso(value, fallback = null) {
 }
 
 function goalFromTransfer(payload) {
-  const messages = payload?.timeline?.thread?.messages;
-  if (Array.isArray(messages)) {
-    const latest = messages.findLast((message) => message?.role === 'user' && typeof message.text === 'string' && message.text.trim());
-    if (latest) return latest.text.trim().slice(0, 64 * 1024);
-  }
-  const title = payload?.timeline?.thread?.title;
-  if (typeof title === 'string' && title.trim()) return title.trim().slice(0, 64 * 1024);
-  return 'Continue the active Rauhwpx task autonomously.';
+  const text = payload?.initialMessage?.text;
+  if (typeof text === 'string' && text.trim()) return text.trim().slice(0, 64 * 1024);
+  throw transferError('Cloud start requires an initial message', 'INITIAL_MESSAGE_REQUIRED');
 }
 
 const CLIENT_TO_SERVER_COMMAND = Object.freeze({
@@ -1546,12 +1541,16 @@ export class CloudCoordinator extends EventEmitter {
       if (this.#teardownPromise || this.#sandboxLifecycle === 'tearing-down') {
         throw transferError('Cloud sandbox is shutting down', 'SANDBOX_TEARDOWN_IN_PROGRESS');
       }
+      if (input.startId) {
+        const existing = (await this.#store.list()).find((record) => record.id === input.startId);
+        if (existing) return existing;
+      }
       const duplicate = (await this.#store.list({ activeOnly: true })).find((record) => (
         input.documentId
           ? record.originDocumentId === input.documentId
           : Boolean(input.sessionId && record.originSessionId === input.sessionId)
       ));
-      if (duplicate) {
+      if (duplicate && duplicate.id !== input.startId) {
         throw transferError('This document already has an active cloud transfer', 'TRANSFER_ALREADY_ACTIVE');
       }
       return this.#store.create({
@@ -1577,7 +1576,23 @@ export class CloudCoordinator extends EventEmitter {
   async #transfer(payload, { originSessionId, originPath = null } = {}, profileEpoch) {
     const bytes = Buffer.from(payload?.document?.bytes ?? []);
     const goal = goalFromTransfer(payload);
+    const startId = typeof payload?.startId === 'string' ? payload.startId.trim() : '';
+    if (!/^[A-Za-z0-9_-]{8,128}$/.test(startId)) {
+      throw transferError('Cloud start requires a stable start id', 'START_ID_REQUIRED');
+    }
+    const initialMessageId = String(payload?.initialMessage?.id ?? '');
+    const messages = payload?.timeline?.thread?.messages;
+    const userMatches = Array.isArray(messages)
+      ? messages.filter((message) => message?.role === 'user' && message.messageId === initialMessageId)
+      : [];
+    const latestUser = Array.isArray(messages)
+      ? [...messages].reverse().find((message) => message?.role === 'user')
+      : null;
+    if (userMatches.length !== 1 || latestUser?.messageId !== initialMessageId) {
+      throw transferError('Initial message must appear once as the latest user message', 'INITIAL_MESSAGE_MISMATCH');
+    }
     const record = await this.#admitTransfer({
+      startId,
       sessionId: originSessionId,
       threadId: payload?.threadId,
       documentId: payload?.documentId,
@@ -1599,6 +1614,11 @@ export class CloudCoordinator extends EventEmitter {
       },
       resources: payload?.references,
     });
+    const inflight = this.#transferPromises.get(record.id);
+    if (inflight) {
+      await inflight;
+      return this.snapshot({ selectedSessionId: record.id });
+    }
     await this.#store.transition(record.id, 'uploading');
     let committed = false;
     const controller = new AbortController();

@@ -364,10 +364,7 @@ function bytesToSha256(bytes: Uint8Array): Promise<string> {
 
 async function prepareCloudTransferDocument() {
   if (!wasm.hasLoadedDocument()) return null;
-  if (documentState.isDirty() || wasm.isNewDocument) {
-    const saved = await saveCurrentDocument(commandServices);
-    if (saved !== 'saved') return null;
-  }
+  if (documentState.isDirty() || wasm.isNewDocument) return null;
   const sourceFormat = wasm.getSourceFormat();
   if (sourceFormat !== 'hwp' && sourceFormat !== 'hwpx' && sourceFormat !== 'hml') {
     throw new Error(`클라우드에서 지원하지 않는 문서 형식입니다: ${sourceFormat}`);
@@ -1173,7 +1170,14 @@ async function initialize(): Promise<void> {
           } else if (inputHandler?.hasSelection()) {
             selectionLabel = '텍스트 선택됨';
           }
-          return { documentId: activeDocumentId, documentName, selectionLabel };
+          return {
+            documentId: activeDocumentId,
+            documentName,
+            selectionLabel,
+            isDirty: documentState.isDirty(),
+            isNewDocument: wasm.isNewDocument,
+            sourceFormat: wasm.getSourceFormat(),
+          };
         },
         moveToLibraryDocument: (target) => {
           void runLibraryMove(commandServices, target, () => activeDocumentId);

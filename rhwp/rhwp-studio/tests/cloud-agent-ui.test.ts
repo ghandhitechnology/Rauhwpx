@@ -13,6 +13,20 @@ const desktop = readFileSync(new URL('../src/desktop-integration.ts', import.met
 const agentTools = readFileSync(new URL('../../rhwp-agent/tools.mjs', import.meta.url), 'utf8');
 const executor = readFileSync(new URL('../src/agent/tool-executor.ts', import.meta.url), 'utf8');
 const pending = readFileSync(new URL('../src/agent/pending-edits.ts', import.meta.url), 'utf8');
+const cloudStart = readFileSync(new URL('../src/cloud/cloud-start.ts', import.meta.url), 'utf8');
+
+test('empty-thread composer exposes a Local/Cloud switch and starts Cloud on first Send', () => {
+  assert.match(sidebar, /ag-composer-mode-row/);
+  assert.match(sidebar, /ag-cloud-mode-badge/);
+  assert.match(sidebar, /function startCloudFromFirstMessage/);
+  assert.match(sidebar, /CLOUD_UNSAVED_MESSAGE/);
+  assert.match(cloudStart, /클라우드 사용 전 문서를 저장해주세요/);
+  assert.match(sidebar, /execution\.kind === 'cloud-start'/);
+  assert.match(sidebar, /if \(currentDocumentId\) void deleteCloudComposerDraft/);
+  assert.match(sidebarCss, /\.ag-composer-mode-row/);
+  assert.match(sidebarCss, /\.ag-cloud-start-placeholder/);
+  assert.doesNotMatch(sidebar, /클라우드로 계속/);
+});
 
 test('cloud action is available in sidebar and fullscreen headers', () => {
   assert.match(sidebar, /headerActions\.insertBefore\(cloudUi\.sidebarButton/);
@@ -43,7 +57,7 @@ test('cloud action is available in sidebar and fullscreen headers', () => {
   assert.match(cloudUi, /sidebarButton\.hidden = !snapshot\.available/);
   assert.match(cloudUi, /workspaceButton\.hidden = !snapshot\.available/);
   assert.match(cloudUi, /onWorkspaceSwitchVisibilityChange\([\s\S]*shouldShowCloudWorkspaceSwitch/);
-  assert.match(sidebar, /onWorkspaceSwitchVisibilityChange:[\s\S]*workspaceModeSwitch\.hidden = !visible/);
+  assert.match(sidebar, /onWorkspaceSwitchVisibilityChange:[\s\S]*syncWorkspaceModeAvailability\(\)/);
   assert.match(sidebarCss, /\.ag-workspace-mode-switch\[hidden\][\s\S]*display:\s*none/);
   assert.match(cloudUi, /aria-controls', 'ag-cloud-panel/);
   assert.match(cloudUi, /closePanel\(true\)/);
@@ -68,18 +82,23 @@ test('Raucloud stays visible but locks account-scoped starts without locking sel
 });
 
 test('cloud transfer includes portable timeline, exact document bytes and reference bytes', () => {
-  assert.match(sidebar, /timeline: exportCloudTimeline\(transferThread\)/);
+  assert.match(sidebar, /buildCloudStartTransfer\(\{/);
+  assert.match(sidebar, /startId/);
+  assert.match(sidebar, /initialMessage/);
   assert.match(sidebar, /const bytes = await cloudController\.readReference\(descriptor\)/);
   assert.match(sidebar, /references\.push\(\{ \.\.\.descriptor, bytes \}\)/);
-  assert.match(sidebar, /permissionProfile: 'unrestricted'/);
-  const transfer = sidebar.match(/async function transferCurrentSession\(\)[\s\S]*?\n  function ensureCloudTransferIntent/)?.[0] ?? '';
+  assert.match(cloudStart, /permissionProfile: 'unrestricted'/);
+  const transfer = sidebar.match(/async function transferCurrentSession\([\s\S]*?\n  function ensureCloudTransferIntent/)?.[0] ?? '';
   assert.doesNotMatch(transfer, /setPermissionProfile\('unrestricted'\)/);
-  assert.match(main, /await saveCurrentDocument\(commandServices\)/);
+  const prepare = main.match(/async function prepareCloudTransferDocument\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+  assert.doesNotMatch(prepare, /saveCurrentDocument/);
+  assert.match(prepare, /documentState\.isDirty\(\) \|\| wasm\.isNewDocument/);
   assert.match(main, /exportDocumentForFormat\(wasm, format\)/);
+  assert.match(main, /isNewDocument: wasm\.isNewDocument/);
 });
 
 test('cloud lease locks local editing and queued messages cross only at a remote boundary', () => {
-  assert.match(sidebar, /isCloudConversation\(\)/);
+  assert.match(cloudUi, /isCloudConversation: \(\) => cloudOwnsConversation\(snapshot\)/);
   assert.match(cloudUi, /async queueMessage\(text, messageId, attachments = \[\], target\)/);
   assert.match(cloudUi, /command: 'queue-message'/);
   assert.match(cloudUi, /expectedVersion: target\.expectedVersion/);
@@ -109,11 +128,11 @@ test('cloud lease scope stays bound to the primary editor context', () => {
 
 test('active Local turns keep the Local transcript mounted until authoritative turn-end', () => {
   const openCloud = sidebar.match(/function openCloudWorkspace\(\): void \{[\s\S]*?\n  \}/)?.[0] ?? '';
-  const guard = openCloud.indexOf('canSelectCloudWorkspace(workspace.mode(), bridge.isTurnRunning())');
+  const guard = openCloud.indexOf('canSelectCloudWorkspace(workspace.mode(), bridge.isTurnRunning()');
   assert.ok(guard >= 0);
-  assert.ok(guard < openCloud.indexOf('flushAssistantBuffer()'));
-  assert.ok(guard < openCloud.indexOf('bridge.stopChat()'));
   assert.ok(guard < openCloud.indexOf("workspace.select('cloud')"));
+  assert.doesNotMatch(openCloud, /flushAssistantBuffer\(\)/);
+  assert.doesNotMatch(openCloud, /bridge\.stopChat\(\)/);
   assert.match(sidebar, /cloudModeButton\.disabled = transitionLocked \|\| localTurnBlocksCloud/);
   assert.match(sidebar, /cloudModeButton\.setAttribute\(\s*'aria-label',[\s\S]*로컬 응답이 끝난 후 전환 가능/);
   assert.match(sidebar, /function setTurnRunning[\s\S]*syncWorkspaceModeAvailability\(\);/);
@@ -121,8 +140,8 @@ test('active Local turns keep the Local transcript mounted until authoritative t
 
 test('desktop close waits for a requested handoff through the local turn boundary', () => {
   assert.match(sidebar, /awaitPendingCloudTransferForClose\(\): Promise<void>/);
-  assert.match(sidebar, /if \(turnRunning\) \{[\s\S]*cloudTransferPending = true;[\s\S]*ensureCloudTransferCloseWaiter\(\)/);
-  assert.match(sidebar, /if \(cloudTransferPending\) requestCloudTransfer\(\)/);
+  assert.match(sidebar, /function startCloudFromFirstMessage/);
+  assert.doesNotMatch(sidebar, /requestCloudTransfer\(\)/);
   const cancel = sidebar.match(/function cancelPendingCloudTransfer\(\): void \{[\s\S]*?\n  \}/)?.[0] ?? '';
   const pendingOff = cancel.indexOf('cloudTransferPending = false;');
   const waitingOff = cancel.indexOf('setWaitingForLocalTurn(false)');

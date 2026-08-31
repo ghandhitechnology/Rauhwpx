@@ -1389,7 +1389,14 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
       if (!profile || !tokens) throw new Error('Cloud 페어링이 필요합니다.');
       const selectedProfile = profile;
       const generation = profileGeneration;
-      const sessionId = randomId('pwa_');
+      const startId = typeof input.startId === 'string' ? input.startId.trim() : '';
+      const sessionId = /^[A-Za-z0-9_-]{8,128}$/.test(startId) ? startId : randomId('pwa_');
+      const existing = remoteSessions.find((session) => session.id === sessionId);
+      if (existing) {
+        scope = { threadId: input.threadId, documentId: input.documentId, selectedSessionId: sessionId };
+        watch(sessionId);
+        return snapshot();
+      }
       const document = await upload(input.document.bytes, input.document.fileName, 'document', sessionId, selectedProfile);
       const resources = [];
       for (const reference of input.references) {
@@ -1398,8 +1405,8 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
       }
       const timelineBytes = utf8(JSON.stringify(input.timeline));
       const timelineUpload = await upload(timelineBytes, 'timeline.json', 'timeline', sessionId, selectedProfile);
-      const latestUser = [...input.timeline.thread.messages].reverse()
-        .find((message) => message.role === 'user' && message.text.trim());
+      const goal = typeof input.initialMessage?.text === 'string' ? input.initialMessage.text.trim() : '';
+      if (!goal) throw new Error('Cloud start requires an initial message');
       const created = await requestJson('/v1/sessions', {
         method: 'POST',
         selectedProfile,
@@ -1413,7 +1420,7 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
             workflow: input.workflow === 'plan' ? 'plan' : 'direct',
             permissionProfile: 'unrestricted',
           },
-          goal: latestUser?.text ?? 'Continue the document task.',
+          goal,
           clientContext: { threadId: input.threadId, documentId: input.documentId },
           originDocument: { name: input.document.fileName, blobId: document.blobId, size: document.size },
           resources,

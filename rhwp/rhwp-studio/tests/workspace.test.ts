@@ -4,10 +4,12 @@ import test from 'node:test';
 import type { CloudController } from '../src/cloud/desktop-cloud.ts';
 import {
   canSelectCloudWorkspace,
+  canSelectLocalWorkspace,
   composerExecution,
   createWorkspaceController,
   deriveComposerTarget,
   disposeCloudDependencies,
+  shouldShowCloudComposerSwitch,
   shouldShowCloudWorkspaceSwitch,
   type CloudWorkspace,
 } from '../src/cloud/workspace.ts';
@@ -205,14 +207,16 @@ test('every workspace mode derives its composer target from the lease and select
 
     const cloudTarget = deriveComposerTarget('cloud', snapshot(session));
     if (session.kind === 'idle') {
-      assert.equal(cloudTarget.kind, 'cloud-blocked');
-      if (cloudTarget.kind === 'cloud-blocked') assert.equal(cloudTarget.reason, 'no-session');
-    } else if (session.kind === 'running') {
+      assert.equal(cloudTarget.kind, 'cloud-start-ready');
+    } else if (session.kind === 'transferring' || session.kind === 'queued'
+      || session.kind === 'waiting-local-turn') {
       assert.deepEqual(cloudTarget, {
-        kind: 'cloud-blocked',
-        reason: 'timeline-unavailable',
-        message: 'Cloud 대화를 연결하는 중입니다.',
+        kind: 'workspace-blocked',
+        reason: 'cloud-transfer',
+        message: 'Cloud를 시작하는 중입니다.',
       });
+    } else if (session.kind === 'running') {
+      assert.equal(cloudTarget.kind, 'cloud-start-ready');
       assert.deepEqual(deriveComposerTarget('cloud', snapshot(session), {
         sessionId: baseSession.sessionId,
         threadId: baseSession.threadId,
@@ -234,6 +238,7 @@ test('every workspace mode derives its composer target from the lease and select
 
 test('composer execution keeps local and cloud routing explicit and leaves blocked drafts to the caller', () => {
   assert.deepEqual(composerExecution({ kind: 'local-ready' }), { kind: 'local' });
+  assert.deepEqual(composerExecution({ kind: 'cloud-start-ready' }), { kind: 'cloud-start' });
   assert.deepEqual(composerExecution({
     kind: 'cloud-ready',
     sessionId: 'session-workspace-01',
@@ -274,6 +279,11 @@ test('an active Local turn cannot expose a Cloud composer target before authorit
   assert.equal(canSelectCloudWorkspace('local', false), true);
   assert.equal(selectCloud(false).kind, 'cloud-ready');
   assert.equal(mode, 'cloud');
+
+  assert.equal(canSelectCloudWorkspace('local', false, { locked: true }), false);
+  assert.equal(canSelectCloudWorkspace('local', false, { emptyThread: false }), false);
+  assert.equal(canSelectLocalWorkspace(true), false);
+  assert.equal(canSelectLocalWorkspace(false), true);
 });
 
 test('workspace controller mounts sibling roots, updates atomically, and cleans up once', () => {
@@ -325,9 +335,10 @@ test('workspace controller mounts sibling roots, updates atomically, and cleans 
   const notices: string[] = [];
   const unsubscribe = workspace.subscribe((mode, target) => notices.push(`${mode}:${target.kind}`));
   workspace.select('cloud');
-  assert.equal(localRoot.getAttribute('aria-hidden'), 'true');
-  assert.equal(cloudRoot.getAttribute('aria-hidden'), 'false');
-  assert.equal(workspace.composerTarget().kind, 'cloud-blocked');
+  assert.equal(localRoot.getAttribute('aria-hidden'), 'false');
+  assert.equal(cloudRoot.getAttribute('aria-hidden'), 'true');
+  assert.equal(workspace.composerTarget().kind, 'cloud-start-ready');
+  assert.equal(workspace.workspaceView(), 'local');
 
   current = snapshot(sessions.find((session) => session.kind === 'running')!);
   for (const listener of cloudListeners) listener(current);
@@ -339,11 +350,17 @@ test('workspace controller mounts sibling roots, updates atomically, and cleans 
   for (const listener of cloudListeners) listener(current);
   assert.deepEqual(notices, [
     'local:local-ready',
-    'cloud:cloud-blocked',
-    'cloud:cloud-blocked',
+    'cloud:cloud-start-ready',
     'cloud:cloud-ready',
   ]);
+  assert.equal(localRoot.getAttribute('aria-hidden'), 'false');
   assert.ok(contextCalls >= 3);
+
+  workspace.setWorkspaceView('cloud');
+  assert.equal(localRoot.getAttribute('aria-hidden'), 'true');
+  assert.equal(cloudRoot.getAttribute('aria-hidden'), 'false');
+  workspace.setWorkspaceView('local');
+  assert.equal(localRoot.getAttribute('aria-hidden'), 'false');
 
   unsubscribe();
   workspace.dispose();
@@ -399,6 +416,68 @@ test('workspace locks synchronously block a bound target until every owner relea
   workspace.bindCloud({ ...baseSession, sessionId: 'other-session' });
   assert.equal(workspace.composerTarget().kind, 'cloud-blocked');
   workspace.dispose();
+});
+
+test('execution lock freezes Local/Cloud switching without changing workspace visibility', () => {
+  const doc = new TestDocument();
+  const parent = doc.createElement();
+  const localRoot = doc.createElement();
+  const cloudRoot = doc.createElement();
+  parent.append(localRoot);
+  const cloudWorkspace: CloudWorkspace = {
+    root: cloudRoot as unknown as HTMLElement,
+    setContext() {},
+    getState: () => ({
+      kind: 'unavailable',
+      reason: 'session-not-running',
+      message: 'idle',
+    }),
+    subscribe: () => () => {},
+    dispose() {},
+  };
+  const cloud = {
+    getSnapshot: () => snapshot({ kind: 'idle' }),
+    subscribe: () => () => {},
+  } as Pick<CloudController, 'getSnapshot' | 'subscribe'>;
+  const workspace = createWorkspaceController({
+    localRoot: localRoot as unknown as HTMLElement,
+    cloudWorkspace,
+    cloud,
+  });
+  workspace.select('cloud');
+  assert.equal(workspace.composerTarget().kind, 'cloud-start-ready');
+  assert.equal(workspace.workspaceView(), 'local');
+  workspace.lockExecution();
+  workspace.select('local');
+  assert.equal(workspace.mode(), 'cloud');
+  assert.equal(workspace.executionLocked(), true);
+  assert.equal(workspace.composerTarget().kind, 'cloud-start-ready');
+  workspace.dispose();
+});
+
+test('composer Cloud switch stays hidden until an empty supported document chat can start', () => {
+  const idle = snapshot({ kind: 'idle' });
+  assert.equal(shouldShowCloudComposerSwitch(idle, {
+    emptyThread: true,
+    hasSupportedDocument: true,
+  }), true);
+  assert.equal(shouldShowCloudComposerSwitch(idle, {
+    emptyThread: false,
+    hasSupportedDocument: true,
+  }), false);
+  assert.equal(shouldShowCloudComposerSwitch(idle, {
+    emptyThread: true,
+    hasSupportedDocument: false,
+  }), false);
+  assert.equal(shouldShowCloudComposerSwitch({ ...idle, available: false }, {
+    emptyThread: true,
+    hasSupportedDocument: true,
+  }), false);
+  assert.equal(shouldShowCloudComposerSwitch(idle, {
+    emptyThread: true,
+    hasSupportedDocument: true,
+    browserPaired: false,
+  }), false);
 });
 
 test('injected cloud dependencies are never disposed by the sidebar owner', () => {

@@ -8,9 +8,20 @@ import type {
 } from './types.ts';
 
 export type WorkspaceMode = 'local' | 'cloud';
+export type WorkspaceView = 'local' | 'cloud';
 
-export function canSelectCloudWorkspace(mode: WorkspaceMode, localTurnRunning: boolean): boolean {
+export function canSelectCloudWorkspace(
+  mode: WorkspaceMode,
+  localTurnRunning: boolean,
+  options: { locked?: boolean; emptyThread?: boolean } = {},
+): boolean {
+  if (options.locked) return false;
+  if (options.emptyThread === false && mode === 'local') return false;
   return mode === 'cloud' || !localTurnRunning;
+}
+
+export function canSelectLocalWorkspace(locked: boolean): boolean {
+  return !locked;
 }
 
 export function shouldShowCloudWorkspaceSwitch(
@@ -24,6 +35,19 @@ export function shouldShowCloudWorkspaceSwitch(
       ? session.documentId === scope.documentId
       : session.threadId === scope.threadId
   ));
+}
+
+export function shouldShowCloudComposerSwitch(
+  snapshot: CloudSnapshot,
+  options: {
+    emptyThread: boolean;
+    hasSupportedDocument: boolean;
+    browserPaired?: boolean;
+  },
+): boolean {
+  if (!options.emptyThread || !options.hasSupportedDocument || !snapshot.available) return false;
+  if (options.browserPaired === false) return false;
+  return true;
 }
 
 export type WorkspaceExecutionLock =
@@ -41,10 +65,11 @@ export interface CloudWorkspaceBinding {
 export type ComposerTarget =
   | { kind: 'local-ready' }
   | { kind: 'local-blocked'; reason: 'cloud-lease'; message: string }
+  | { kind: 'cloud-start-ready' }
   | { kind: 'cloud-ready'; sessionId: string; threadId: string; documentId: string | null; expectedVersion: number }
   | {
       kind: 'cloud-blocked';
-      reason: 'no-session' | 'not-accepting-messages' | 'timeline-unavailable';
+      reason: 'not-accepting-messages' | 'timeline-unavailable';
       message: string;
     }
   | { kind: 'workspace-blocked'; reason: WorkspaceExecutionLock; message: string };
@@ -67,6 +92,11 @@ export interface CloudWorkspace {
 export interface WorkspaceController {
   mode(): WorkspaceMode;
   select(mode: WorkspaceMode): void;
+  lockExecution(): void;
+  unlockExecution(): void;
+  executionLocked(): boolean;
+  workspaceView(): WorkspaceView;
+  setWorkspaceView(view: WorkspaceView): void;
   bindCloud(binding: CloudWorkspaceBinding | null): void;
   cloudBinding(): CloudWorkspaceBinding | null;
   lock(reason: WorkspaceExecutionLock): { release(): void };
@@ -87,6 +117,7 @@ export function disposeCloudDependencies(
 
 export type ComposerExecution =
   | { kind: 'local' }
+  | { kind: 'cloud-start' }
   | {
       kind: 'cloud';
       sessionId: string;
@@ -100,6 +131,8 @@ export function composerExecution(target: ComposerTarget): ComposerExecution {
   switch (target.kind) {
     case 'local-ready':
       return { kind: 'local' };
+    case 'cloud-start-ready':
+      return { kind: 'cloud-start' };
     case 'cloud-ready':
       return {
         kind: 'cloud',
@@ -127,6 +160,8 @@ export function deriveComposerTarget(
         ? 'Cloud 작업을 연결하는 중입니다.'
         : lock === 'cloud-message'
           ? 'Cloud 메시지를 보내는 중입니다.'
+        : lock === 'cloud-transfer'
+          ? 'Cloud를 시작하는 중입니다.'
         : '문서 권한을 전환하는 중입니다.',
     };
   }
@@ -139,11 +174,33 @@ export function deriveComposerTarget(
           message: 'Cloud 작업이 문서를 사용 중입니다. Cloud로 전환하거나 이 기기에서 이어받으세요.',
         };
   }
-  if (snapshot.session.kind === 'idle') {
+  if (!cloudBinding) {
+    if (snapshot.session.kind === 'transferring' || snapshot.session.kind === 'queued'
+      || snapshot.session.kind === 'waiting-local-turn') {
+      return {
+        kind: 'workspace-blocked',
+        reason: 'cloud-transfer',
+        message: 'Cloud를 시작하는 중입니다.',
+      };
+    }
+    if (snapshot.session.kind === 'idle' || snapshot.session.kind === 'running') {
+      return { kind: 'cloud-start-ready' };
+    }
     return {
       kind: 'cloud-blocked',
-      reason: 'no-session',
-      message: '선택된 Cloud 작업이 없습니다.',
+      reason: 'not-accepting-messages',
+      message: '현재 Cloud 작업은 새 메시지를 받을 수 없습니다.',
+    };
+  }
+  if (snapshot.session.kind === 'idle') {
+    return { kind: 'cloud-start-ready' };
+  }
+  if (snapshot.session.kind === 'transferring' || snapshot.session.kind === 'queued'
+    || snapshot.session.kind === 'waiting-local-turn') {
+    return {
+      kind: 'workspace-blocked',
+      reason: 'cloud-transfer',
+      message: 'Cloud를 시작하는 중입니다.',
     };
   }
   if (snapshot.session.kind === 'running') {
@@ -208,6 +265,8 @@ export function createWorkspaceController({
 }): WorkspaceController {
   mountWorkspaceStack(localRoot, cloudWorkspace.root);
   let selectedMode = initialMode;
+  let view: WorkspaceView = 'local';
+  let executionLocked = false;
   let mountedCloud: CloudWorkspaceBinding | null = null;
   let disposed = false;
   const locks: Array<{ token: symbol; reason: WorkspaceExecutionLock }> = [];
@@ -217,10 +276,10 @@ export function createWorkspaceController({
   const apply = (): ComposerTarget => {
     const snapshot = cloud.getSnapshot();
     const target = deriveComposerTarget(selectedMode, snapshot, mountedCloud, locks.at(-1)?.reason ?? null);
-    setRootVisible(localRoot, selectedMode === 'local');
-    setRootVisible(cloudWorkspace.root, selectedMode === 'cloud');
-    cloudWorkspace.setContext({ visible: selectedMode === 'cloud', session: snapshot.session });
-    const notification = JSON.stringify([selectedMode, target]);
+    setRootVisible(localRoot, view === 'local');
+    setRootVisible(cloudWorkspace.root, view === 'cloud');
+    cloudWorkspace.setContext({ visible: view === 'cloud', session: snapshot.session });
+    const notification = JSON.stringify([selectedMode, view, target, executionLocked]);
     if (notification !== lastNotification) {
       lastNotification = notification;
       for (const listener of listeners) listener(selectedMode, target);
@@ -237,7 +296,25 @@ export function createWorkspaceController({
     mode: () => selectedMode,
     select(mode) {
       if (disposed || mode === selectedMode) return;
+      if (executionLocked && mode !== selectedMode) return;
       selectedMode = mode;
+      apply();
+    },
+    lockExecution() {
+      if (disposed) return;
+      executionLocked = true;
+      apply();
+    },
+    unlockExecution() {
+      if (disposed) return;
+      executionLocked = false;
+      apply();
+    },
+    executionLocked: () => executionLocked,
+    workspaceView: () => view,
+    setWorkspaceView(next) {
+      if (disposed || next === view) return;
+      view = next;
       apply();
     },
     bindCloud(binding) {
@@ -286,6 +363,8 @@ export function createWorkspaceController({
       unsubscribeCloud();
       locks.length = 0;
       mountedCloud = null;
+      executionLocked = false;
+      view = 'local';
       listeners.clear();
       cloudWorkspace.dispose();
     },

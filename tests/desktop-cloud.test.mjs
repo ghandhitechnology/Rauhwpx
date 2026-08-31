@@ -108,11 +108,37 @@ function portableTimeline(overrides = {}) {
       agent: 'codex',
       model: 'gpt-5.6',
       effort: 'high',
-      messages: [],
+      messages: [{ role: 'user', text: 'Continue this document', messageId: 'msg-start' }],
       ...overrides,
     },
   };
 }
+
+function cloudStartFields(overrides = {}) {
+  const text = overrides.initialMessage?.text ?? 'Continue this document';
+  const messageId = overrides.initialMessage?.id ?? 'msg-start';
+  return {
+    startId: overrides.startId ?? 'startid01',
+    initialMessage: {
+      id: messageId,
+      text,
+      attachmentReferenceIds: overrides.initialMessage?.attachmentReferenceIds ?? [],
+    },
+    timeline: overrides.timeline ?? portableTimeline({
+      messages: [{ role: 'user', text, messageId }],
+    }),
+  };
+}
+
+test('cloud start requires an explicit first-message goal and stable start id', () => {
+  assert.equal(coordinatorTest.goalFromTransfer({
+    initialMessage: { id: 'msg-start', text: '  표 제목을 고쳐줘  ' },
+  }), '표 제목을 고쳐줘');
+  assert.throws(
+    () => coordinatorTest.goalFromTransfer({ timeline: portableTimeline() }),
+    (error) => error.code === 'INITIAL_MESSAGE_REQUIRED',
+  );
+});
 
 test('transfer recovery retries only explicit transport and server failures', () => {
   assert.equal(coordinatorTest.nonRetryableTransferError(new Error('local payload is corrupt')), true);
@@ -2119,11 +2145,11 @@ test('AUTH_REQUIRED fails the transfer once instead of retrying recovery', async
   t.after(() => coordinator.stop());
   await assert.rejects(
     coordinator.transfer({
+      ...cloudStartFields({ startId: 'startauth' }),
       agent: 'codex',
       threadId: 'thread-auth',
       documentId: 'document-auth',
       document: { fileName: 'document.hwpx', bytes: Buffer.from('document') },
-      timeline: portableTimeline(),
       limits: { maxDurationMs: 15 * 60_000, maxTurns: 8 },
     }, { originSessionId: 'desktop-auth' }),
     (error) => error.code === 'AUTH_REQUIRED',
@@ -2158,29 +2184,36 @@ test('concurrent requests cannot stage duplicate document transfers', async (t) 
     recoveryDir: path.join(directory, 'recovery'),
   });
   const payload = {
+    ...cloudStartFields({ startId: 'startdup1' }),
     agent: 'codex',
     threadId: 'thread-duplicate',
     documentId: 'document-duplicate',
     document: { fileName: 'duplicate.hwpx', bytes: Buffer.from('document') },
-    timeline: portableTimeline(),
   };
   const first = coordinator.transfer(payload, { originSessionId: 'desktop-duplicate' });
   while ((await store.list()).length === 0) await new Promise((resolve) => setImmediate(resolve));
+  const retrySameStart = coordinator.transfer(payload, { originSessionId: 'desktop-duplicate' });
   await assert.rejects(
-    coordinator.transfer(payload, { originSessionId: 'desktop-duplicate' }),
+    coordinator.transfer({
+      ...payload,
+      ...cloudStartFields({ startId: 'startdup2' }),
+    }, { originSessionId: 'desktop-duplicate' }),
     (error) => error.code === 'TRANSFER_ALREADY_ACTIVE',
   );
   assert.equal((await store.list()).length, 1);
   const otherDocument = coordinator.transfer({
     ...payload,
+    ...cloudStartFields({ startId: 'startdup3' }),
     threadId: 'thread-other-document',
     documentId: 'document-other',
   }, { originSessionId: 'desktop-duplicate' });
   while ((await store.list()).length < 2) await new Promise((resolve) => setImmediate(resolve));
   const stopped = assert.rejects(first, /stopped/);
+  const retryStopped = assert.rejects(retrySameStart, /stopped/);
   const otherStopped = assert.rejects(otherDocument, /stopped/);
   await coordinator.stop();
   await stopped;
+  await retryStopped;
   await otherStopped;
 });
 
@@ -2214,11 +2247,11 @@ test('missing cloud configuration fails once instead of entering transfer recove
   t.after(() => coordinator.stop());
   await assert.rejects(
     coordinator.transfer({
+      ...cloudStartFields({ startId: 'startnone' }),
       agent: 'codex',
       threadId: 'thread-unconfigured',
       documentId: 'document-unconfigured',
       document: { fileName: 'document.hwpx', bytes: Buffer.from('document') },
-      timeline: portableTimeline(),
       limits: { maxDurationMs: 15 * 60_000, maxTurns: 8 },
     }, { originSessionId: 'desktop-unconfigured' }),
     (error) => error.code === 'CLOUD_NOT_CONFIGURED',

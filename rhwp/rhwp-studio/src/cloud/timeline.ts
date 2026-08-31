@@ -45,6 +45,25 @@ export function parseCloudTimeline(value: unknown): PortableCloudTimelineV1 | nu
   };
 }
 
+export function latestUserMessage(thread: Pick<ChatThread, 'messages'>): ThreadMessage | null {
+  for (let index = thread.messages.length - 1; index >= 0; index -= 1) {
+    const message = thread.messages[index];
+    if (message?.role === 'user') return message;
+  }
+  return null;
+}
+
+export function initialMessageMatchesTimeline(
+  timeline: PortableCloudTimelineV1,
+  messageId: string,
+): boolean {
+  const matches = timeline.thread.messages.filter((message) => (
+    message.role === 'user' && message.messageId === messageId
+  ));
+  const latest = latestUserMessage(timeline.thread);
+  return matches.length === 1 && latest?.messageId === messageId;
+}
+
 export function importCloudTimeline(
   value: unknown,
   local: Pick<ChatThread, 'id' | 'docKey' | 'documentId'>,

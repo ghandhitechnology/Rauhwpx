@@ -156,6 +156,11 @@ export interface ChatThread {
   plans?: StructuredPlan[];
   /** Draft state only. Provider authority remains in the live hub session. */
   pendingUserQuestion?: PendingUserQuestionDraftSnapshot;
+  /** Chat execution mode. Existing records default to local. */
+  executionMode?: 'local' | 'cloud';
+  cloudSessionId?: string;
+  cloudStartId?: string;
+  firstMessageDelivery?: 'starting' | 'accepted' | 'failed';
   messages: ThreadMessage[];
 }
 
@@ -655,6 +660,18 @@ function normalizeStoredThread(thread: StoredChatThread): ChatThread {
     ...(latestPlan ? { latestPlan } : {}),
     ...(plans.length ? { plans } : {}),
     ...(pendingUserQuestion && !pendingAlreadyArchived ? { pendingUserQuestion } : {}),
+    ...(thread.executionMode === 'cloud' ? { executionMode: 'cloud' as const } : {}),
+    ...(typeof thread.cloudSessionId === 'string' && thread.cloudSessionId
+      ? { cloudSessionId: thread.cloudSessionId }
+      : {}),
+    ...(typeof thread.cloudStartId === 'string' && thread.cloudStartId
+      ? { cloudStartId: thread.cloudStartId }
+      : {}),
+    ...(thread.firstMessageDelivery === 'starting'
+      || thread.firstMessageDelivery === 'accepted'
+      || thread.firstMessageDelivery === 'failed'
+      ? { firstMessageDelivery: thread.firstMessageDelivery }
+      : {}),
   };
 }
 

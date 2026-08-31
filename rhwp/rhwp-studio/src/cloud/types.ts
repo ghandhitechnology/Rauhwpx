@@ -266,7 +266,14 @@ export interface CloudTransferReference {
   bytes: Uint8Array;
 }
 
+export interface CloudInitialMessage {
+  id: string;
+  text: string;
+  attachmentReferenceIds: string[];
+}
+
 export interface CloudTransferRequest {
+  startId: string;
   threadId: string;
   documentId: string | null;
   documentName: string;
@@ -276,6 +283,7 @@ export interface CloudTransferRequest {
   workflow: AgentWorkflow;
   permissionProfile: Extract<PermissionProfile, 'unrestricted'>;
   timeline: PortableCloudTimelineV1;
+  initialMessage: CloudInitialMessage;
   document: CloudDocumentPayload;
   references: CloudTransferReference[];
   limits: {

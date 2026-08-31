@@ -34,7 +34,7 @@ const TRANSITIONS = Object.freeze({
   downloaded: new Set(),
   cancelled: new Set(),
   expired: new Set(),
-  failed: new Set(),
+  failed: new Set(['uploading', 'preparing']),
 });
 
 export function sha256Hex(bytes) {
@@ -227,6 +227,7 @@ export class CloudHandoffStore {
     limits,
     resources = [],
     destination = null,
+    startId = null,
   }) {
     await this.load();
     const bytes = Buffer.from(documentBytes ?? []);
@@ -243,7 +244,10 @@ export class CloudHandoffStore {
       + resourcePayloads.reduce((total, resource) => total + resource.bytes.length, 0);
     if (totalSize > 512 * 1024 * 1024) throw new Error('Cloud transfer exceeds 512 MiB');
     const now = new Date().toISOString();
-    const id = randomUUID();
+    const requestedId = typeof startId === 'string' ? startId.trim() : '';
+    const id = /^[A-Za-z0-9_-]{8,128}$/.test(requestedId) ? requestedId : randomUUID();
+    const existing = this.#records.get(id);
+    if (existing) return existing;
     const payloadDirectory = path.join(this.#payloadRoot, id);
     await fs.mkdir(payloadDirectory, { recursive: true, mode: 0o700 });
     const documentStagingPath = path.join(payloadDirectory, 'document.bin');
