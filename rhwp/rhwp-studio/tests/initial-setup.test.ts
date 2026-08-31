@@ -234,6 +234,12 @@ test('Rau 로그인·민트 실패는 같은 화면의 BYOK 경로로 접는다'
   assert.match(setup, /event\.type === 'agent-setup-error'/);
   assert.match(setup, /isRauFirstRunFailure\(event\)/);
   assert.match(setup, /closeAgentSetup\?\.\(\)/);
+  assert.doesNotMatch(setup, /if \(!already\) closeAgentSetup/);
+  assert.match(setup, /closingSetupForRecovery/);
+  assert.match(
+    setup,
+    /if \(!closingSetupForRecovery\) \{\s*\n\s*closingSetupForRecovery = true;\s*\n\s*try \{\s*\n\s*closeAgentSetup\?\.\(\)/,
+  );
   assert.match(setup, /if \(rauFailureActive\) \{\s*\n\s*skipToEditor\(\)/);
   assert.match(setup, /dataset\.recoveryOption = rauFailureActive && isByokAgent\(agent\)/);
   assert.match(setup, /dataset\.byok = 'true'/);
