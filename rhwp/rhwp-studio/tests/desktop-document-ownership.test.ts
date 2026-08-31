@@ -35,6 +35,7 @@ import {
   NativeFileHandleRegistry,
   nativePathOwnershipKey,
   readPortableHistoryBytes,
+  rewriteIcaclsSavedAcl,
   runNativeMetadataCommand,
   validateNativeDocumentBytes,
   validateNativeDocumentPath,
@@ -1038,7 +1039,9 @@ test('successful native saves advance the disk fingerprint for the next save', a
   });
 });
 
-test('POSIX atomic replacement preserves the destination mode bits', async () => {
+test('POSIX atomic replacement preserves the destination mode bits', {
+  skip: process.platform === 'win32',
+}, async () => {
   await withTemporaryDirectory(async (directory) => {
     const target = join(directory, 'report.hwp');
     await writeFs(target, 'previous');
@@ -1050,7 +1053,9 @@ test('POSIX atomic replacement preserves the destination mode bits', async () =>
   });
 });
 
-test('macOS replacement copies ACLs and extended attributes before writing the temp file', async () => {
+test('macOS replacement copies ACLs and extended attributes before writing the temp file', {
+  skip: process.platform === 'win32',
+}, async () => {
   await withTemporaryDirectory(async (directory) => {
     const target = join(directory, 'report.hwp');
     await writeFs(target, 'previous');
@@ -1115,23 +1120,60 @@ test('macOS metadata-copy failure leaves the destination and removes the temp fi
   });
 });
 
+test('icacls save files are rewritten to the temp destination name', () => {
+  const saved = Buffer.concat([
+    Buffer.from([0xff, 0xfe]),
+    Buffer.from('report.hwp\r\nD:P(A;;FA;;;BA)\r\n', 'utf16le'),
+  ]);
+  const rewritten = rewriteIcaclsSavedAcl(saved, 'report.hwp.rauhwpx-1.tmp');
+  assert.equal(rewritten[0], 0xff);
+  assert.equal(rewritten[1], 0xfe);
+  assert.equal(
+    rewritten.subarray(2).toString('utf16le'),
+    'report.hwp.rauhwpx-1.tmp\r\nD:P(A;;FA;;;BA)\r\n',
+  );
+  assert.throws(
+    () => rewriteIcaclsSavedAcl(saved, 'evil\r\nD:P(A;;FA;;;WD)'),
+    { code: 'NATIVE_FILE_METADATA_COPY_FAILED' },
+  );
+});
+
 test('Windows replacement copies only the source DACL before compare and rename', async () => {
   await withTemporaryDirectory(async (directory) => {
     const target = join(directory, 'report.hwp');
     await writeFs(target, 'previous');
     const events: string[] = [];
-    let commandCall: { command: string; args: string[]; options: { env: Record<string, string> } } | null = null;
+    const commandCalls: Array<{ command: string; args: string[]; options: { env: Record<string, string> } }> = [];
     await writeNativeFileAtomically(target, new Uint8Array([7, 8]), {
       platform: 'win32',
       windowsSystemRoot: 'C:\\Windows',
+      windowsProcessEnv: {
+        GITHUB_TOKEN: 'must-not-leak',
+        RHWP_AGENT_TOKEN: 'must-not-leak',
+        PATH: 'C:\\evil',
+        TEMP: 'C:\\Users\\runner\\AppData\\Local\\Temp',
+        USERPROFILE: 'C:\\Users\\runner',
+        ComSpec: 'C:\\Windows\\System32\\cmd.exe',
+        PATHEXT: '.COM;.EXE;.BAT;.CMD',
+      },
       expectedFingerprint: TEST_NATIVE_FINGERPRINT,
       fingerprintImpl: async () => {
         events.push('fingerprint');
         return TEST_NATIVE_FINGERPRINT;
       },
       runCommandImpl: async (command: string, args: string[], options: { env: Record<string, string> }) => {
-        events.push('dacl');
-        commandCall = { command, args, options };
+        commandCalls.push({ command, args, options });
+        if (args.includes('/save')) {
+          const aclFile = args[2];
+          const tempPath = aclFile.replace(/\.rauhwpx-dacl$/, '');
+          const probe = await openFs(tempPath, 'r+');
+          await probe.close();
+          events.push('dacl');
+          await writeFs(aclFile, Buffer.concat([
+            Buffer.from([0xff, 0xfe]),
+            Buffer.from(`${basename(target)}\r\nD:P(A;;FA;;;BA)\r\n`, 'utf16le'),
+          ]));
+        }
       },
       renameImpl: async (from: string, to: string) => {
         events.push('rename-aside');
@@ -1145,24 +1187,34 @@ test('Windows replacement copies only the source DACL before compare and rename'
       },
     });
     assert.deepEqual(events, ['dacl', 'rename-aside', 'fingerprint', 'publish']);
-    assert.equal(
-      commandCall?.command,
-      'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
-    );
-    assert.equal(commandCall?.options.env.RAUHWPX_METADATA_SOURCE, target);
-    assert.match(commandCall?.options.env.RAUHWPX_METADATA_TARGET ?? '', /\.rauhwpx-.*\.tmp$/);
-    assert.deepEqual(Object.keys(commandCall?.options.env ?? {}).sort(), [
-      'RAUHWPX_METADATA_SOURCE',
-      'RAUHWPX_METADATA_TARGET',
+    assert.equal(commandCalls.length, 2);
+    assert.equal(commandCalls[0].command, 'C:\\Windows\\System32\\icacls.exe');
+    assert.equal(commandCalls[1].command, 'C:\\Windows\\System32\\icacls.exe');
+    assert.equal(commandCalls[0].args[0], target);
+    assert.equal(commandCalls[0].args[1], '/save');
+    assert.match(commandCalls[0].args[2], /\.rauhwpx-.*\.tmp\.rauhwpx-dacl$/);
+    assert.equal(commandCalls[0].args[3], '/q');
+    assert.equal(commandCalls[1].args[1], '/restore');
+    assert.equal(commandCalls[1].args[2], commandCalls[0].args[2]);
+    assert.equal(commandCalls[1].args[3], '/q');
+    assert.doesNotMatch(commandCalls.map((call) => call.args.join(' ')).join(' '), /setowner|\/S\b|powershell/i);
+    const env = commandCalls[0].options.env;
+    assert.equal(env.SystemRoot, 'C:\\Windows');
+    assert.equal(env.WINDIR, 'C:\\Windows');
+    assert.equal(env.SystemDrive, 'C:');
+    assert.equal(env.PATH, 'C:\\Windows\\System32');
+    assert.equal(env.GITHUB_TOKEN, undefined);
+    assert.equal(env.RHWP_AGENT_TOKEN, undefined);
+    assert.equal(env.TEMP, undefined);
+    assert.equal(env.USERPROFILE, undefined);
+    assert.deepEqual(Object.keys(env).sort(), [
+      'ComSpec',
+      'PATH',
+      'PATHEXT',
+      'SystemDrive',
       'SystemRoot',
       'WINDIR',
     ]);
-    const encoded = commandCall?.args.at(-1) ?? '';
-    const script = Buffer.from(encoded, 'base64').toString('utf16le');
-    assert.match(script, /AccessControlSections\]::Access/);
-    assert.match(script, /Get-Acl -LiteralPath/);
-    assert.match(script, /Set-Acl -LiteralPath/);
-    assert.doesNotMatch(script, /AccessControlSections\]::(?:Owner|Audit|Group)/);
   });
 });
 
@@ -1214,8 +1266,8 @@ test('a hung Windows metadata command is tree-killed and awaited before rejectio
 
   await assert.rejects(
     runNativeMetadataCommand(
-      'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
-      ['-EncodedCommand', 'ignored'],
+      'C:\\Windows\\System32\\icacls.exe',
+      ['C:\\doc.hwp', '/save', 'C:\\doc.rauhwpx-dacl', '/q'],
       {
         platform: 'win32',
         env: { SystemRoot: 'C:\\Windows', WINDIR: 'C:\\Windows' },

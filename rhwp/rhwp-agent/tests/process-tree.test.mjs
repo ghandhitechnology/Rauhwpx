@@ -147,7 +147,7 @@ test('Windows termination invokes one trusted taskkill command with argv only', 
   timers.fire();
 
   assert.deepEqual(calls.map(({ command, args }) => [command, args]), [
-    [WINDOWS_TASKKILL, ['/PID', '9876', '/T']],
+    [WINDOWS_TASKKILL, ['/PID', '9876', '/T', '/F']],
   ]);
   assert.ok(calls.every(({ options }) => (
     options.shell === false
@@ -157,7 +157,7 @@ test('Windows termination invokes one trusted taskkill command with argv only', 
   )));
 });
 
-test('Windows leader exit after graceful taskkill starts blocks PID-based escalation', async () => {
+test('Windows leader exit after taskkill starts blocks PID-based escalation', async () => {
   const child = Object.assign(new EventEmitter(), { pid: 9877, exitCode: null, signalCode: null });
   const calls = [];
   const taskkills = [];
@@ -180,7 +180,7 @@ test('Windows leader exit after graceful taskkill starts blocks PID-based escala
   timers.fire();
 
   assert.deepEqual(calls, [
-    [WINDOWS_TASKKILL, ['/PID', '9877', '/T']],
+    [WINDOWS_TASKKILL, ['/PID', '9877', '/T', '/F']],
   ]);
   assert.equal(await cleanup, null);
 });

@@ -227,7 +227,7 @@ test('Windows result handoff starts taskkill while the retained Python leader is
   assert.deepEqual(helperSpawn.options.stdio, ['pipe', 'pipe', 'pipe']);
   assert.deepEqual(taskkillCalls, [[
     'C:\\Windows\\System32\\taskkill.exe',
-    ['/PID', '4242', '/T'],
+    ['/PID', '4242', '/T', '/F'],
   ]]);
 });
 
