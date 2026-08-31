@@ -172,7 +172,7 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
     const action = el('button', 'rhwp-setup-card-action', agent === 'rau' ? 'Rau로 시작' : '설정');
     action.type = 'button';
     action.addEventListener('click', () => {
-      if (agent === 'rau' && accountStatus?.signedIn === true) {
+      if (agent === 'rau' && isProviderConfigured('rau', setupStatuses)) {
         goNext();
         return;
       }
@@ -224,11 +224,7 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
   overlay.appendChild(dialog);
 
   function configuredAgents(): AgentName[] {
-    return PROVIDER_ORDER.filter((agent) => (
-      agent === 'rau' && accountStatus?.signedIn === true
-        ? true
-        : isProviderConfigured(agent, setupStatuses)
-    ));
+    return PROVIDER_ORDER.filter((agent) => isProviderConfigured(agent, setupStatuses));
   }
 
   function configuredCount(): number {
@@ -259,6 +255,7 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
         ? rauSignInFeedback(
           accountStatus,
           connectActionLabel(agent, configured),
+          configured,
         )
         : null;
       card.root.dataset.configured = configured ? 'true' : 'false';

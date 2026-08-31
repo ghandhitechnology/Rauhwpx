@@ -245,7 +245,18 @@ test('Rau 카드가 generic account snapshot의 로그인 진행과 완료를 �
     state: 'signed-in',
     signedIn: true,
     account: { email: 'andy@example.com' },
-  }, 'Rau로 시작'), {
+  }, 'Rau로 시작', false), {
+    state: 'signed-in',
+    label: 'Rau 연결 마침',
+    ariaLabel: 'Rau 제공자 연결 마침',
+    title: 'Rau 제공자 연결 마침',
+  });
+  assert.deepEqual(rauSignInFeedback({
+    ...base,
+    state: 'signed-in',
+    signedIn: true,
+    account: { email: 'andy@example.com' },
+  }, 'Rau로 시작', true), {
     state: 'signed-in',
     label: '로그인됨',
     ariaLabel: '로그인됨. 다음 단계로 계속',
@@ -259,7 +270,8 @@ test('Rau 카드가 generic account snapshot의 로그인 진행과 완료를 �
   assert.match(setup, /event\.type === 'account-status'/);
   assert.match(setup, /event\.type === 'account-login-progress'/);
   assert.match(setup, /event\.type === 'account-error'/);
-  assert.match(setup, /accountStatus\?\.signedIn === true[\s\S]*goNext\(\)/);
+  assert.doesNotMatch(setup, /accountStatus\?\.signedIn === true[\s\S]{0,80}goNext\(\)/);
+  assert.match(setup, /isProviderConfigured\('rau', setupStatuses\)[\s\S]{0,80}goNext\(\)/);
   assert.match(setup, /requestAccountStatus\(\)/);
   assert.match(css, /data-account-state='signed-in'[\s\S]*background: #b7c9ad/);
   assert.doesNotMatch(setup, /Raucloud|Railway|quota|allowance|크레딧|한도|60분|\$5/);

@@ -79,8 +79,17 @@ export interface RauSignInFeedback {
 export function rauSignInFeedback(
   account: AccountSessionStatus | null,
   idleLabel: string,
+  providerConfigured = false,
 ): RauSignInFeedback {
   if (account?.signedIn === true) {
+    if (!providerConfigured) {
+      return {
+        state: 'signed-in',
+        label: 'Rau 연결 마침',
+        ariaLabel: 'Rau 제공자 연결 마침',
+        title: 'Rau 제공자 연결 마침',
+      };
+    }
     return {
       state: 'signed-in',
       label: '로그인됨',
