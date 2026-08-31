@@ -33,6 +33,17 @@ export async function retryLockedOperation(operation, {
   throw lastError;
 }
 
+async function targetIsDirectory(targetPath, fsApi) {
+  const lstat = typeof fsApi.lstat === 'function' ? fsApi.lstat.bind(fsApi) : fs.lstat;
+  try {
+    const stats = await lstat(targetPath);
+    return typeof stats?.isDirectory === 'function' ? stats.isDirectory() : false;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
 /** Replace a file without relying on Windows rename-over-existing behavior. */
 export async function replaceFileAtomically(
   tempPath,
@@ -40,6 +51,14 @@ export async function replaceFileAtomically(
   { platform = process.platform, fsApi = fs } = {},
 ) {
   if (platform !== 'win32') return fsApi.rename(tempPath, targetPath);
+  // The two-step Windows replace moves the live target aside. POSIX
+  // rename(file, dir) fails; without this check a directory named like the
+  // target would be renamed to `.previous-write` and the write would publish.
+  if (await targetIsDirectory(targetPath, fsApi)) {
+    const error = new Error(`Refusing to replace directory ${targetPath}`);
+    error.code = 'EISDIR';
+    throw error;
+  }
   const previousPath = `${targetPath}.previous-write`;
   await recoverInterruptedFileReplacement(targetPath, { platform, fsApi });
   await retryLockedOperation(() => fsApi.rm(previousPath, { force: true }), { platform });

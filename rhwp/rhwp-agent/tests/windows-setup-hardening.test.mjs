@@ -70,6 +70,23 @@ test('Windows file locks are retried and then reported with a stable error code'
   );
 });
 
+test('Windows file replacement refuses to move a directory target aside', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-file-replace-dir-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const target = path.join(root, 'state.json');
+  const temp = path.join(root, 'state.tmp');
+  await fs.mkdir(target);
+  await fs.writeFile(path.join(target, 'inside.txt'), 'keep');
+  await fs.writeFile(temp, 'new');
+
+  await assert.rejects(
+    replaceFileAtomically(temp, target, { platform: 'win32' }),
+    { code: 'EISDIR' },
+  );
+  assert.equal(await fs.readFile(path.join(target, 'inside.txt'), 'utf8'), 'keep');
+  await assert.rejects(fs.access(`${target}.previous-write`), { code: 'ENOENT' });
+});
+
 test('a stale Windows backup cleanup cannot turn a committed replacement into failure', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-file-replace-cleanup-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

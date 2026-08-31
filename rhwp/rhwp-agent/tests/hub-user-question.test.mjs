@@ -8,6 +8,8 @@ import { createInterface } from 'node:readline';
 import test from 'node:test';
 import WebSocket from 'ws';
 
+import { ALIVE_PI_FIXTURE_SOURCE, writeFakeCliBin } from './fake-cli-bin.mjs';
+
 const TOKEN = 'hub-user-question-test-token';
 const LAUNCH_ID = 'hub-user-question-test-launch';
 
@@ -134,16 +136,7 @@ function prepareFakePi(root) {
   writeFileSync(path.join(agentDir, 'models.json'), JSON.stringify({
     providers: { openrouter: { apiKey: 'test-placeholder-key' } },
   }));
-  const fake = path.join(binDir, process.platform === 'win32' ? 'pi.cmd' : 'pi');
-  if (process.platform === 'win32') {
-    writeFileSync(fake, '@echo off\r\nnode -e "setInterval(() =^> {}, 1000)"\r\n');
-  } else {
-    writeFileSync(
-      fake,
-      `#!/bin/sh\nexec "${process.execPath}" -e 'setInterval(() => {}, 1000)'\n`,
-      { mode: 0o755 },
-    );
-  }
+  writeFakeCliBin(binDir, 'pi', ALIVE_PI_FIXTURE_SOURCE);
 }
 
 async function startHub(t, {
@@ -180,7 +173,31 @@ async function startHub(t, {
       "const fs = require('node:fs');",
       "if (process.argv.includes('--version')) { console.log('2026.08.11-e2e'); process.exit(0); }",
       "if (process.argv.includes('status')) { console.log('Not logged in'); process.exit(1); }",
-      "if (process.argv[2] === 'acp') process.exit(1);",
+      // Refuse ACP over JSON-RPC while staying alive so Windows can taskkill a
+      // live leader before legacy fallback. process.exit(1) loses tree identity.
+      "if (process.argv.includes('acp')) {",
+      "  process.stderr.write('ACP unavailable in fixture\\n');",
+      "  let buf = '';",
+      "  process.stdin.setEncoding('utf8');",
+      "  process.stdin.on('data', (chunk) => {",
+      "    buf += chunk;",
+      '    let idx;',
+      "    while ((idx = buf.indexOf('\\n')) !== -1) {",
+      '      const line = buf.slice(0, idx);',
+      '      buf = buf.slice(idx + 1);',
+      '      let msg;',
+      '      try { msg = JSON.parse(line); } catch { continue; }',
+      '      if (msg && msg.id !== undefined) {',
+      '        process.stdout.write(JSON.stringify({',
+      "          jsonrpc: '2.0', id: msg.id,",
+      "          error: { code: -32000, message: 'ACP unavailable in fixture' },",
+      "        }) + '\\n');",
+      '      }',
+      '    }',
+      '  });',
+      '  setInterval(() => {}, 1000);',
+      '  return;',
+      '}',
       `process.stdout.write(${JSON.stringify(`${JSON.stringify(init)}\n`)});`,
       `fs.writeFileSync(${JSON.stringify(cursorLegacyReadyPath)}, '');`,
       ...(emitCursorQuestion && gateCursorQuestion
