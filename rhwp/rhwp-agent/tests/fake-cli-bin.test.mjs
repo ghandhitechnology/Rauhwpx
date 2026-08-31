@@ -20,7 +20,7 @@ function collectProcess(child) {
   child.stderr?.on('data', (chunk) => { stderr += chunk; });
   return new Promise((resolve, reject) => {
     child.once('error', reject);
-    child.once('exit', (code) => resolve({ code, stdout, stderr }));
+    child.once('close', (code) => resolve({ code, stdout, stderr }));
   });
 }
 
