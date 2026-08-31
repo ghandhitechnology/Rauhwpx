@@ -249,7 +249,7 @@ test('account replacement switches the proxy credential and revokes the previous
     method: 'POST',
     body: { model: 'z-ai/glm-5.3-flash', messages: [] },
   });
-  assert.equal(upstream.at(-1).authorization, 'Bearer sk-or-v1-rau-user_a');
+  assert.match(upstream.at(-1).authorization, /^Bearer sk-or-v1-rau-user_a-/);
 
   const second = await credits.createDeviceSession({ replaceAccessToken: tokenA });
   await credits.completeLogin('account-b', second.id);
@@ -264,7 +264,7 @@ test('account replacement switches the proxy credential and revokes the previous
     method: 'POST',
     body: { model: 'qwen/qwen3.8-flash', messages: [] },
   });
-  assert.equal(upstream.at(-1).authorization, 'Bearer sk-or-v1-rau-user_b');
+  assert.match(upstream.at(-1).authorization, /^Bearer sk-or-v1-rau-user_b-/);
 });
 
 test('logout revokes the Rau token and the proxy denies arbitrary models and management APIs', async () => {

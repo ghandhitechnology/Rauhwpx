@@ -116,7 +116,7 @@ test('different WorkOS identities for one verified email share one Cloud account
     cloudWorkerSecret: WORKER_SECRET,
     store,
     authenticateWorkos: async (code) => ({
-      id: code === 'second' ? 'workos_b' : 'workos_a',
+      id: code === 'second' ? 'user_workos_b' : 'user_workos_a',
       email: 'same@example.com',
     }),
     createOpenRouterKey: async () => ({ key: 'sk-or-v1-shared-cloud', id: 'or-shared-cloud' }),
@@ -158,7 +158,7 @@ test('shared transactional store preserves the one-worker invariant across servi
     sessionSecret: 'shared-transaction-test-secret',
     cloudWorkerSecret: WORKER_SECRET,
     store,
-    authenticateWorkos: async () => ({ id: 'shared_user', email: 'shared@example.com' }),
+    authenticateWorkos: async () => ({ id: 'user_shared', email: 'shared@example.com' }),
     createOpenRouterKey: async () => ({ key: 'sk-or-v1-shared-transaction', id: 'or-shared-transaction' }),
   });
   const firstService = makeService();

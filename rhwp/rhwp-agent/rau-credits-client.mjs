@@ -281,9 +281,6 @@ export function createRauCreditsClient({
           if (typeof next.accessToken === 'string' && next.accessToken) {
             return { key: next.accessToken, email: typeof next.email === 'string' ? next.email : null };
           }
-          if (typeof next.apiKey === 'string' && next.apiKey) {
-            return { key: next.apiKey, email: typeof next.email === 'string' ? next.email : null };
-          }
           throw creditsError(
             'RAU_LOGIN_SERVER_INCOMPATIBLE',
             'Rau 로그인 서버 업데이트가 필요해요. 잠시 후 다시 시도해 주세요.',

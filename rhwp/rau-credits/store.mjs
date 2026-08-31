@@ -40,6 +40,7 @@ export function assertStoreStateFits(next) {
 
 export function createMemoryStore(initial = emptyState()) {
   let state = structuredClone(initial);
+  let mutationTail = Promise.resolve();
   return {
     async load() {
       return structuredClone(state);
@@ -47,6 +48,18 @@ export function createMemoryStore(initial = emptyState()) {
     async save(next) {
       serializeState(next);
       state = structuredClone(next);
+    },
+    async mutate(task) {
+      const run = async () => {
+        const next = structuredClone(state);
+        const result = await task(next);
+        serializeState(next);
+        state = structuredClone(next);
+        return result;
+      };
+      const queued = mutationTail.then(run, run);
+      mutationTail = queued.then(() => undefined, () => undefined);
+      return queued;
     },
   };
 }
