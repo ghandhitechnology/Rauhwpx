@@ -856,9 +856,7 @@ export class CanvasView {
     callback: (element: HTMLElement, pageIdx: number) => void,
   ): void {
     this.scrollContent
-      .querySelectorAll<HTMLElement>(
-        '[data-rhwp-overlay-page], [data-rhwp-grid-page], [data-rhwp-hf-edit-page]',
-      )
+      .querySelectorAll<HTMLElement>('[data-rhwp-overlay-page], [data-rhwp-grid-page], [data-rhwp-hf-edit-page]')
       .forEach((element) => {
         const rawPage = element.dataset.rhwpOverlayPage
           ?? element.dataset.rhwpGridPage
