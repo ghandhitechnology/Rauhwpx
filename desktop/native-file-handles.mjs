@@ -27,14 +27,37 @@ export const NATIVE_FILE_WRITE_BUSY_CODE = 'NATIVE_FILE_WRITE_BUSY';
 
 const WINDOWS_DACL_SCRIPT = [
   "$ErrorActionPreference = 'Stop'",
+  "$ConfirmPreference = 'None'",
+  "$ProgressPreference = 'SilentlyContinue'",
   '$sections = [System.Security.AccessControl.AccessControlSections]::Access',
   '$sourceAcl = Get-Acl -LiteralPath $env:RAUHWPX_METADATA_SOURCE',
   '$targetAcl = Get-Acl -LiteralPath $env:RAUHWPX_METADATA_TARGET',
   '$sourceDacl = $sourceAcl.GetSecurityDescriptorSddlForm($sections)',
   '$targetAcl.SetSecurityDescriptorSddlForm($sourceDacl, $sections)',
-  'Set-Acl -LiteralPath $env:RAUHWPX_METADATA_TARGET -AclObject $targetAcl',
+  'Set-Acl -LiteralPath $env:RAUHWPX_METADATA_TARGET -AclObject $targetAcl -Confirm:$false',
 ].join('\n');
 const WINDOWS_DACL_ENCODED_COMMAND = Buffer.from(WINDOWS_DACL_SCRIPT, 'utf16le').toString('base64');
+// CLR/PowerShell startup reads these even with -NoProfile. Do not inherit PATH
+// or PSModulePath: a user-writable entry could load a hostile module.
+const WINDOWS_METADATA_INHERITED_ENV_KEYS = Object.freeze([
+  'TEMP',
+  'TMP',
+  'USERNAME',
+  'USERDOMAIN',
+  'USERPROFILE',
+  'HOMEDRIVE',
+  'HOMEPATH',
+  'APPDATA',
+  'LOCALAPPDATA',
+  'OS',
+  'PROCESSOR_ARCHITECTURE',
+  'PROCESSOR_ARCHITEW6432',
+  'NUMBER_OF_PROCESSORS',
+  'PUBLIC',
+  'ProgramData',
+  'ProgramFiles',
+  'ProgramFiles(x86)',
+]);
 
 function startsWithBytes(bytes, signature) {
   return signature.every((value, index) => bytes[index] === value);
@@ -276,11 +299,41 @@ export function runNativeMetadataCommand(command, args, {
   });
 }
 
+function windowsMetadataCommandEnv(systemRoot, sourcePath, targetPath, sourceEnv = process.env) {
+  const system32 = win32.join(systemRoot, 'System32');
+  const powershellHome = win32.join(system32, 'WindowsPowerShell', 'v1.0');
+  const env = {
+    SystemRoot: systemRoot,
+    WINDIR: systemRoot,
+    ComSpec: win32.join(system32, 'cmd.exe'),
+    PATH: [system32, powershellHome].join(';'),
+    PATHEXT: '.COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC',
+    PSModulePath: win32.join(powershellHome, 'Modules'),
+    RAUHWPX_METADATA_SOURCE: sourcePath,
+    RAUHWPX_METADATA_TARGET: targetPath,
+  };
+  if (systemRoot.length >= 2 && systemRoot[1] === ':') {
+    env.SystemDrive = systemRoot.slice(0, 2);
+  }
+  if (typeof sourceEnv?.PATHEXT === 'string' && sourceEnv.PATHEXT) {
+    env.PATHEXT = sourceEnv.PATHEXT;
+  }
+  if (typeof sourceEnv?.ComSpec === 'string' && win32.isAbsolute(sourceEnv.ComSpec)) {
+    env.ComSpec = sourceEnv.ComSpec;
+  }
+  for (const key of WINDOWS_METADATA_INHERITED_ENV_KEYS) {
+    const value = sourceEnv?.[key];
+    if (typeof value === 'string' && value) env[key] = value;
+  }
+  return env;
+}
+
 async function copyWindowsDacl(
   sourcePath,
   temporaryPath,
   runCommandImpl,
   systemRoot = process.env.SystemRoot ?? process.env.WINDIR,
+  sourceEnv = process.env,
 ) {
   if (typeof systemRoot !== 'string' || !win32.isAbsolute(systemRoot)) {
     const error = new Error('Windows system root is unavailable for DACL preservation');
@@ -289,12 +342,7 @@ async function copyWindowsDacl(
   }
   const options = {
     platform: 'win32',
-    env: {
-      SystemRoot: systemRoot,
-      WINDIR: systemRoot,
-      RAUHWPX_METADATA_SOURCE: sourcePath,
-      RAUHWPX_METADATA_TARGET: temporaryPath,
-    },
+    env: windowsMetadataCommandEnv(systemRoot, sourcePath, temporaryPath, sourceEnv),
   };
   const args = [
     '-NoLogo',
@@ -575,6 +623,7 @@ export async function writeNativeFileAtomically(
     fingerprintImpl = fingerprintNativeFile,
     runCommandImpl = runNativeMetadataCommand,
     windowsSystemRoot = process.env.SystemRoot ?? process.env.WINDIR,
+    windowsProcessEnv = process.env,
     expectedFingerprint,
   } = {},
 ) {
@@ -625,7 +674,13 @@ export async function writeNativeFileAtomically(
     if (sourceInfo && platform === 'win32') {
       // Copy only the DACL. Keeping the temp file's owner and audit sections
       // avoids privilege escalation while preserving the destination rules.
-      await copyWindowsDacl(filePath, temporaryPath, runCommandImpl, windowsSystemRoot);
+      await copyWindowsDacl(
+        filePath,
+        temporaryPath,
+        runCommandImpl,
+        windowsSystemRoot,
+        windowsProcessEnv,
+      );
     }
 
     await temporaryFile.sync();

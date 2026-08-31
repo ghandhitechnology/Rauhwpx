@@ -1038,7 +1038,9 @@ test('successful native saves advance the disk fingerprint for the next save', a
   });
 });
 
-test('POSIX atomic replacement preserves the destination mode bits', async () => {
+test('POSIX atomic replacement preserves the destination mode bits', {
+  skip: process.platform === 'win32',
+}, async () => {
   await withTemporaryDirectory(async (directory) => {
     const target = join(directory, 'report.hwp');
     await writeFs(target, 'previous');
@@ -1050,7 +1052,9 @@ test('POSIX atomic replacement preserves the destination mode bits', async () =>
   });
 });
 
-test('macOS replacement copies ACLs and extended attributes before writing the temp file', async () => {
+test('macOS replacement copies ACLs and extended attributes before writing the temp file', {
+  skip: process.platform === 'win32',
+}, async () => {
   await withTemporaryDirectory(async (directory) => {
     const target = join(directory, 'report.hwp');
     await writeFs(target, 'previous');
@@ -1124,6 +1128,18 @@ test('Windows replacement copies only the source DACL before compare and rename'
     await writeNativeFileAtomically(target, new Uint8Array([7, 8]), {
       platform: 'win32',
       windowsSystemRoot: 'C:\\Windows',
+      windowsProcessEnv: {
+        GITHUB_TOKEN: 'must-not-leak',
+        RHWP_AGENT_TOKEN: 'must-not-leak',
+        PATH: 'C:\\evil',
+        PSModulePath: 'C:\\Users\\runner\\Documents\\WindowsPowerShell\\Modules',
+        TEMP: 'C:\\Users\\runner\\AppData\\Local\\Temp',
+        TMP: 'C:\\Users\\runner\\AppData\\Local\\Temp',
+        USERPROFILE: 'C:\\Users\\runner',
+        USERNAME: 'runner',
+        ComSpec: 'C:\\Windows\\System32\\cmd.exe',
+        PATHEXT: '.COM;.EXE;.BAT;.CMD',
+      },
       expectedFingerprint: TEST_NATIVE_FINGERPRINT,
       fingerprintImpl: async () => {
         events.push('fingerprint');
@@ -1151,10 +1167,34 @@ test('Windows replacement copies only the source DACL before compare and rename'
     );
     assert.equal(commandCall?.options.env.RAUHWPX_METADATA_SOURCE, target);
     assert.match(commandCall?.options.env.RAUHWPX_METADATA_TARGET ?? '', /\.rauhwpx-.*\.tmp$/);
+    assert.equal(commandCall?.options.env.SystemRoot, 'C:\\Windows');
+    assert.equal(commandCall?.options.env.WINDIR, 'C:\\Windows');
+    assert.equal(commandCall?.options.env.SystemDrive, 'C:');
+    assert.equal(
+      commandCall?.options.env.PATH,
+      'C:\\Windows\\System32;C:\\Windows\\System32\\WindowsPowerShell\\v1.0',
+    );
+    assert.equal(
+      commandCall?.options.env.PSModulePath,
+      'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules',
+    );
+    assert.equal(commandCall?.options.env.TEMP, 'C:\\Users\\runner\\AppData\\Local\\Temp');
+    assert.equal(commandCall?.options.env.USERPROFILE, 'C:\\Users\\runner');
+    assert.equal(commandCall?.options.env.GITHUB_TOKEN, undefined);
+    assert.equal(commandCall?.options.env.RHWP_AGENT_TOKEN, undefined);
     assert.deepEqual(Object.keys(commandCall?.options.env ?? {}).sort(), [
+      'ComSpec',
+      'PATH',
+      'PATHEXT',
+      'PSModulePath',
       'RAUHWPX_METADATA_SOURCE',
       'RAUHWPX_METADATA_TARGET',
+      'SystemDrive',
       'SystemRoot',
+      'TEMP',
+      'TMP',
+      'USERNAME',
+      'USERPROFILE',
       'WINDIR',
     ]);
     const encoded = commandCall?.args.at(-1) ?? '';
@@ -1162,6 +1202,8 @@ test('Windows replacement copies only the source DACL before compare and rename'
     assert.match(script, /AccessControlSections\]::Access/);
     assert.match(script, /Get-Acl -LiteralPath/);
     assert.match(script, /Set-Acl -LiteralPath/);
+    assert.match(script, /Confirm:\$false/);
+    assert.match(script, /ConfirmPreference = 'None'/);
     assert.doesNotMatch(script, /AccessControlSections\]::(?:Owner|Audit|Group)/);
   });
 });
