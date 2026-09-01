@@ -11,19 +11,27 @@
 use rhwp::model::control::Control;
 use rhwp::wasm_api::HwpDocument;
 
-fn table_of(doc: &HwpDocument, para_idx: usize) -> &rhwp::model::table::Table {
-    doc.document().sections[0].paragraphs[para_idx]
-        .controls
-        .iter()
-        .find_map(|control| match control {
-            Control::Table(table) => Some(table.as_ref()),
-            _ => None,
-        })
-        .expect("표 컨트롤")
+fn find_first_table(doc: &rhwp::model::document::Document) -> (usize, usize) {
+    let section = doc.sections.first().expect("구역");
+    for (pi, para) in section.paragraphs.iter().enumerate() {
+        for (ci, ctrl) in para.controls.iter().enumerate() {
+            if matches!(ctrl, Control::Table(_)) {
+                return (pi, ci);
+            }
+        }
+    }
+    panic!("생성한 표를 찾지 못함");
 }
 
-fn cell_index(doc: &HwpDocument, para_idx: usize, row: u16, col: u16) -> usize {
-    table_of(doc, para_idx)
+fn table_of(doc: &HwpDocument, para_idx: usize, ctrl_idx: usize) -> &rhwp::model::table::Table {
+    match &doc.document().sections[0].paragraphs[para_idx].controls[ctrl_idx] {
+        Control::Table(table) => table.as_ref(),
+        other => panic!("표가 아님: {:?}", std::mem::discriminant(other)),
+    }
+}
+
+fn cell_index(doc: &HwpDocument, para_idx: usize, ctrl_idx: usize, row: u16, col: u16) -> usize {
+    table_of(doc, para_idx, ctrl_idx)
         .cells
         .iter()
         .enumerate()
@@ -32,33 +40,28 @@ fn cell_index(doc: &HwpDocument, para_idx: usize, row: u16, col: u16) -> usize {
         .expect("셀 인덱스")
 }
 
-fn table_para_idx(created: &str) -> usize {
-    let parsed: serde_json::Value = serde_json::from_str(created).expect("createTable JSON");
-    parsed["paraIdx"].as_u64().expect("paraIdx") as usize
-}
-
-fn blank_table(rows: u16, cols: u16) -> (HwpDocument, usize) {
+fn blank_table(rows: u16, cols: u16) -> (HwpDocument, usize, usize) {
     let mut doc = HwpDocument::create_empty();
     doc.create_blank_document_native().expect("빈 문서 생성");
-    let created = doc
-        .create_table_native(0, 0, 0, rows, cols)
+    doc.create_table_native(0, 0, 0, rows, cols)
         .expect("표 생성");
-    (doc, table_para_idx(&created))
+    let (para_idx, ctrl_idx) = find_first_table(doc.document());
+    (doc, para_idx, ctrl_idx)
 }
 
 #[test]
 fn uniform_result_with_vertical_merge_keeps_base_grid() {
-    let (mut doc, para_idx) = blank_table(3, 2);
-    doc.merge_table_cells_native(0, para_idx, 0, 0, 0, 1, 0)
+    let (mut doc, para_idx, ctrl_idx) = blank_table(3, 2);
+    doc.merge_table_cells_native(0, para_idx, ctrl_idx, 0, 0, 1, 0)
         .expect("세로 병합 (rows0-1, col0)");
 
-    let merged_idx = cell_index(&doc, para_idx, 0, 0);
-    let r0c1 = cell_index(&doc, para_idx, 0, 1);
-    let r1c1 = cell_index(&doc, para_idx, 1, 1);
-    let r2c0 = cell_index(&doc, para_idx, 2, 0);
-    let r2c1 = cell_index(&doc, para_idx, 2, 1);
+    let merged_idx = cell_index(&doc, para_idx, ctrl_idx, 0, 0);
+    let r0c1 = cell_index(&doc, para_idx, ctrl_idx, 0, 1);
+    let r1c1 = cell_index(&doc, para_idx, ctrl_idx, 1, 1);
+    let r2c0 = cell_index(&doc, para_idx, ctrl_idx, 2, 0);
+    let r2c1 = cell_index(&doc, para_idx, ctrl_idx, 2, 1);
     let (base_w0, base_w1) = {
-        let table = table_of(&doc, para_idx);
+        let table = table_of(&doc, para_idx, ctrl_idx);
         (table.cells[merged_idx].width, table.cells[r0c1].width)
     };
 
@@ -67,10 +70,10 @@ fn uniform_result_with_vertical_merge_keeps_base_grid() {
     let payload = format!(
         r#"[{{"cellIdx":{merged_idx},"widthDelta":{delta}}},{{"cellIdx":{r0c1},"widthDelta":{neg}}},{{"cellIdx":{r1c1},"widthDelta":{neg}}},{{"cellIdx":{r2c0},"widthDelta":{delta}}},{{"cellIdx":{r2c1},"widthDelta":{neg}}}]"#
     );
-    doc.resize_table_cells(0, para_idx as u32, 0, &payload)
+    doc.resize_table_cells(0, para_idx as u32, ctrl_idx as u32, &payload)
         .expect("경계 드래그 적용");
 
-    let table = table_of(&doc, para_idx);
+    let table = table_of(&doc, para_idx, ctrl_idx);
     assert!(
         table.local_resize_rows.is_empty(),
         "전 행 균일 결과는 행 단위 resize 마킹 대상이 아니다: {:?}",
@@ -103,18 +106,18 @@ fn divergent_row_still_marks_local_resize() {
     // 대조군: 결과가 실제로 갈라지면(선택 행만 이동) 종전과 같이 그 행을
     // local_resize 로 마킹한다. 병합 없는 3x2 표에서 row1 만 +d/-d 를 받으면
     // row1 의 폭 벡터가 base grid 와 달라진다.
-    let (mut doc, para_idx) = blank_table(3, 2);
+    let (mut doc, para_idx, ctrl_idx) = blank_table(3, 2);
 
-    let r1c0 = cell_index(&doc, para_idx, 1, 0);
-    let r1c1 = cell_index(&doc, para_idx, 1, 1);
+    let r1c0 = cell_index(&doc, para_idx, ctrl_idx, 1, 0);
+    let r1c1 = cell_index(&doc, para_idx, ctrl_idx, 1, 1);
 
     let payload = format!(
         r#"[{{"cellIdx":{r1c0},"widthDelta":900}},{{"cellIdx":{r1c1},"widthDelta":-900}}]"#
     );
-    doc.resize_table_cells(0, para_idx as u32, 0, &payload)
+    doc.resize_table_cells(0, para_idx as u32, ctrl_idx as u32, &payload)
         .expect("행 한정 드래그 적용");
 
-    let table = table_of(&doc, para_idx);
+    let table = table_of(&doc, para_idx, ctrl_idx);
     assert_eq!(
         table.local_resize_rows,
         vec![1],
