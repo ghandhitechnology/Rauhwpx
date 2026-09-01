@@ -520,7 +520,7 @@ export function renderPictureObjectSelection(this: any): void {
 export function exitPictureObjectSelectionIfNeeded(this: any): void {
   if (this.cursor.isInPictureObjectSelection()) {
     this.cursor.exitPictureObjectSelection();
-    this.pictureObjectRenderer?.clear();
+    clearPictureSelectionRender.call(this);
     this.eventBus.emit('picture-object-selection-changed', false);
   }
 }

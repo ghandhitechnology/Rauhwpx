@@ -21,6 +21,7 @@ import {
 } from '@/view/canvaskit/image-header';
 import { emitHeaderFooterModeChanged } from './header-footer-mode';
 import { scrollByPageStep, type PageScrollDirection } from '@/view/page-scroll';
+import { caretRectForPageScroll as resolveCaretRectForPageScroll } from '@/view/page-scroll-caret';
 
 const RHWP_CLIPBOARD_MARKER_RE = /<!--\s*rhwp-studio-clipboard:([A-Za-z0-9._:-]+)\s*-->/;
 const PAGINATION_BOUNDARY_KEYS = new Set([
@@ -533,8 +534,8 @@ const chordMapG: Record<string, string> = {
  * 원래 쪽으로 되튀어, 사용자 눈에는 이동이 취소된 것처럼 보인다.
  *
  * 캐럿이 없거나(문서 미배치) 캐럿 소유자가 본문이 아닌 하위 모드(머리말/꼬리말·각주·
- * 개체/셀 선택·서식 모드)일 때는 화면만 옮긴다 — 그 모드들의 캐럿은 본문 좌표계로
- * hit-test 할 수 없고, 옮기면 편집 문맥이 바뀌어 버린다.
+ * 글상자·개체/셀 선택·서식 모드)일 때는 화면만 옮긴다 — 그 모드들의 캐럿은 본문
+ * 좌표계로 hit-test 할 수 없고, 옮기면 편집 문맥이 바뀌어 버린다.
  *
  * @returns 실제로 스크롤이 일어났으면 true.
  */
@@ -543,7 +544,7 @@ export function scrollByPageKey(
   direction: PageScrollDirection,
   extendSelection: boolean,
 ): boolean {
-  const beforeRect: CursorRect | null = caretRectForPageScroll.call(this);
+  const beforeRect: CursorRect | null = caretRectForPageScroll(this);
   const result = scrollByPageStep(this.virtualScroll, this.viewportManager, direction);
   if (!result.moved) return false;
   if (beforeRect) {
@@ -559,13 +560,8 @@ export function scrollByPageKey(
 }
 
 /** 화면과 함께 옮겨도 되는 캐럿이면 그 rect 를, 아니면 null 을 준다. */
-function caretRectForPageScroll(this: any): CursorRect | null {
-  const cursor = this.cursor;
-  if (this.isFormMode?.()) return null;
-  if (cursor.isInHeaderFooter?.() || cursor.isInFootnote?.()) return null;
-  if (cursor.isInPictureObjectSelection?.() || cursor.isInTableObjectSelection?.()) return null;
-  if (cursor.isInBlockSelectionMode?.() || cursor.isInCellSelectionMode?.()) return null;
-  return cursor.getRect?.() ?? null;
+function caretRectForPageScroll(self: any): CursorRect | null {
+  return resolveCaretRectForPageScroll(self.cursor, self.isFormMode?.() === true);
 }
 
 /**

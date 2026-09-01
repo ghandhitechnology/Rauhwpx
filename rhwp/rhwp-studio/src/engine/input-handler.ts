@@ -707,7 +707,7 @@ export class InputHandler {
       if (selected) {
         this.renderTableObjectSelection();
       } else {
-        this.tableObjectRenderer?.clear();
+        this.clearTableObjectSelectionRender();
       }
     });
 

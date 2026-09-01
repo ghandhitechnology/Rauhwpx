@@ -366,7 +366,16 @@ export class CanvasView {
   private recalcLayout(): void {
     const zoom = this.viewportManager.getZoom();
     const viewport = this.viewportManager.getViewportSize();
-    this.virtualScroll.setPageDimensions(this.pages, zoom, viewport.width);
+    // 쪽 이동/맞쪽 배치는 아직 이식하지 않아 세로는 항상 vertical 이다.
+    // viewport.height 는 가로 줄 레이아웃 슬롯을 채워 둔다.
+    this.virtualScroll.setPageDimensions(
+      this.pages,
+      zoom,
+      viewport.width,
+      undefined,
+      'vertical',
+      viewport.height,
+    );
     this.scrollContent.style.height = `${this.virtualScroll.getTotalHeight()}px`;
     this.scrollContent.style.width = `${this.virtualScroll.getTotalWidth()}px`;
     this.layoutViewportSize = viewport;
