@@ -266,7 +266,7 @@ test('Rauhwpx 계정은 Cloud와 분리된 일반 브릿지와 설정 카드로 
   assert.match(accountCard, /'로그인'/);
   assert.match(accountCard, /'로그인 취소'/);
   assert.doesNotMatch(accountCard, /cloud|quota|allowance|크레딧|한도/i);
-  assert.match(settings, /connectionContent\.append\(accountSection\.root, connection\.root, usageSection\.root\)/);
+  assert.match(settings, /connectionContent\.append\(accountSection\.root, connection\.root, browserbaseSection\.root, usageSection\.root\)/);
   assert.match(settings, /bridge\.requestAccountStatus\(\)/);
   assert.match(settings, /bridge\.loginAccount\(\)/);
   assert.match(settings, /bridge\.cancelAccountLogin\(accountAuthRunId\)/);
