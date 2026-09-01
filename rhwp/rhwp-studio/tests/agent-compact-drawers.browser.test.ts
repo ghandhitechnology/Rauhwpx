@@ -34,6 +34,19 @@ test('compact fullscreen sidebars remain temporary overlays', { timeout: 20_000 
         .ag-root { --ag-rail-w: 280px; position: relative !important; width: 900px; height: 700px; }
         .ag-stage { height: 100%; }
         .ag-composer { height: 120px; }
+        /* Linux CI Chrome reports hover:none / pointer:none, so the production
+           @media (hover: hover) and (pointer: fine) rule never shows the edge
+           target. Keep it hittable here; the stylesheet contract is tested
+           separately. */
+        .ag-fullscreen.ag-workspace-compact .ag-compact-rail-hover-target {
+          position: absolute;
+          top: 48px;
+          bottom: 0;
+          left: 0;
+          z-index: 13;
+          display: block;
+          width: 24px;
+        }
       </style>
       <main class="ag-root ag-fullscreen ag-workspace-compact ag-rail-collapsed">
         <div class="ag-stage">

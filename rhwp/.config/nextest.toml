@@ -1,0 +1,4 @@
+[[profile.default.overrides]]
+filter = 'test(inflated_row_count_does_not_slow_down_parsing)'
+threads-required = "num-test-threads"
+priority = 100

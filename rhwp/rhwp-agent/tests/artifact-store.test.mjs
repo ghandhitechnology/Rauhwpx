@@ -163,26 +163,54 @@ test('serializes file reads and HWPX expansion across concurrent inspections', a
   const releases = [];
   let activeReads = 0;
   let maximumActiveReads = 0;
+  let readerArrived = Promise.resolve();
+  let notifyReaderArrived = () => {};
+  const armReaderWait = () => {
+    readerArrived = new Promise((resolve) => {
+      notifyReaderArrived = resolve;
+    });
+  };
   const store = new ArtifactStore({
     rootDir: root,
     readExactFileImpl: async () => {
       activeReads += 1;
       maximumActiveReads = Math.max(maximumActiveReads, activeReads);
-      await new Promise((resolve) => releases.push(resolve));
+      const gate = new Promise((resolve) => releases.push(resolve));
+      notifyReaderArrived();
+      await gate;
       activeReads -= 1;
       return Buffer.from(CFB);
     },
   });
   const waitForRelease = async () => {
-    for (let attempt = 0; attempt < 100 && releases.length === 0; attempt += 1) {
-      await new Promise((resolve) => setImmediate(resolve));
+    if (releases.length === 0) {
+      let timeoutId;
+      try {
+        await Promise.race([
+          readerArrived,
+          new Promise((_, reject) => {
+            timeoutId = setTimeout(() => {
+              reject(new assert.AssertionError({
+                message: 'exactly one inspection should reach the allocating reader',
+                actual: releases.length,
+                expected: 1,
+                operator: 'strictEqual',
+              }));
+            }, 5000);
+          }),
+        ]);
+      } finally {
+        clearTimeout(timeoutId);
+      }
     }
     assert.equal(releases.length, 1, 'exactly one inspection should reach the allocating reader');
   };
 
+  armReaderWait();
   const inspections = paths.map((filePath) => store.inspectFile(filePath));
   for (let completed = 0; completed < inspections.length; completed += 1) {
     await waitForRelease();
+    armReaderWait();
     releases.shift()();
   }
   await Promise.all(inspections);

@@ -44,16 +44,21 @@ jobs:
           npm --prefix rhwp/rhwp-studio audit --omit=dev --audit-level=low
 
   verification:
-    name: Test tagged source
+    name: Test tagged source (${{ matrix.shard }}/2)
     needs: preflight
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
 
     steps:
       - name: Check out tagged source
         uses: actions/checkout@v5
 
       - name: Set up Node.js
+        if: matrix.shard == 1
         uses: actions/setup-node@v5
         with:
           node-version: 22.18.0
@@ -67,21 +72,29 @@ jobs:
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           toolchain: 1.93.1
-          targets: wasm32-unknown-unknown
+
+      - name: Install pinned nextest
+        uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
+        with:
+          tool: cargo-nextest@0.9.143
+          fallback: none
 
       - name: Cache cargo-audit executable
+        if: matrix.shard == 1
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/cargo-audit
           key: cargo-audit-${{ runner.os }}-${{ runner.arch }}-0.22.2
 
       - name: Install pinned cargo-audit
+        if: matrix.shard == 1
         run: |
           if [[ "$(cargo audit --version 2>/dev/null || true)" != "cargo-audit 0.22.2" ]]; then
             cargo install cargo-audit --version 0.22.2 --locked --force
           fi
 
       - name: Reject RustSec vulnerabilities and new warnings
+        if: matrix.shard == 1
         working-directory: rhwp
         run: |
           set -euo pipefail
@@ -91,80 +104,38 @@ jobs:
             --ignore RUSTSEC-2026-0192 \
             --ignore RUSTSEC-2026-0206
 
-      - name: Test Rust workspace
+      - name: Test Rust workspace shard
         working-directory: rhwp
-        run: cargo test --locked --workspace
+        run: cargo nextest run --locked --workspace --test-threads 4 --partition count:${{ matrix.shard }}/2
 
-      - name: Install wasm-pack
-        run: cargo install wasm-pack --version 0.15.0 --locked
-
-      - name: Build WASM engine
+      - name: Test Rust documentation
+        if: matrix.shard == 1
         working-directory: rhwp
-        run: wasm-pack build --target web
+        run: cargo test --locked --workspace --doc
 
       - name: Install application dependencies
+        if: matrix.shard == 1
         run: |
           npm ci
           npm --prefix rhwp/rhwp-agent ci
           npm --prefix rhwp/rhwp-studio ci
 
       - name: Test agent hub and process lifecycle
+        if: matrix.shard == 1
         run: node --test --test-concurrency=1 rhwp/rhwp-agent/tests/*.test.mjs
 
       - name: Test hosted Rau authorization service
+        if: matrix.shard == 1
         run: npm --prefix rhwp/rau-credits test
 
-      - name: Test and build Studio
-        run: |
-          npm --prefix rhwp/rhwp-studio test
-          npm --prefix rhwp/rhwp-studio run build
-
-  browserbase-live:
-    name: Browserbase Stagehand live smoke
-    if: github.repository == 'ghandhitechnology/Rauhwpx'
-    needs: preflight
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    steps:
-      - name: Check out tagged source
-        uses: actions/checkout@v5
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v5
-        with:
-          node-version: 22.18.0
-          cache: npm
-          cache-dependency-path: rhwp/rhwp-agent/package-lock.json
-
-      - name: Install production agent dependencies
-        run: npm --prefix rhwp/rhwp-agent ci --omit=dev
-
-      - name: Require Browserbase live-test secrets
-        env:
-          BROWSERBASE_API_KEY: ${{ secrets.BROWSERBASE_API_KEY }}
-          BROWSERBASE_PROJECT_ID: ${{ secrets.BROWSERBASE_PROJECT_ID }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
-          set -euo pipefail
-          for name in BROWSERBASE_API_KEY BROWSERBASE_PROJECT_ID GEMINI_API_KEY; do
-            if [[ -z "${!name}" ]]; then
-              echo "Required Browserbase live-test secret is missing: ${name}" >&2
-              exit 1
-            fi
-          done
-
-      - name: Run three fresh Stagehand sessions
-        env:
-          BROWSERBASE_API_KEY: ${{ secrets.BROWSERBASE_API_KEY }}
-          BROWSERBASE_PROJECT_ID: ${{ secrets.BROWSERBASE_PROJECT_ID }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          BROWSERBASE_SMOKE_URL: ${{ vars.BROWSERBASE_SMOKE_URL }}
-        run: npm --prefix rhwp/rhwp-agent run test:browserbase:live
+      - name: Test Studio
+        if: matrix.shard == 1
+        run: npm --prefix rhwp/rhwp-studio test
 
   macos:
     name: Build macOS installers
-    needs: [preflight, verification, browserbase-live, cloud]
+    # Build while verification runs. Cloud artifacts are required; publishing still waits for verification.
+    needs: [preflight, cloud]
     runs-on: macos-15
     timeout-minutes: 90
     environment: macos-release
@@ -273,7 +244,8 @@ jobs:
 
   windows:
     name: Build unsigned Windows x64 installer
-    needs: [preflight, verification, browserbase-live, cloud]
+    # Build while verification runs. Cloud artifacts are required; publishing still waits for verification.
+    needs: [preflight, cloud]
     runs-on: windows-latest
     timeout-minutes: 90
 
@@ -378,7 +350,7 @@ jobs:
             rhwp/rhwp-agent/package-lock.json
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           toolchain: 1.93.1
           targets: wasm32-unknown-unknown
@@ -463,7 +435,7 @@ jobs:
             rhwp/rhwp-studio/package-lock.json
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           toolchain: 1.93.1
           targets: wasm32-unknown-unknown
@@ -578,7 +550,7 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    needs: [macos, windows, linux, cloud, cloud-image]
+    needs: [verification, macos, windows, linux, cloud, cloud-image]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

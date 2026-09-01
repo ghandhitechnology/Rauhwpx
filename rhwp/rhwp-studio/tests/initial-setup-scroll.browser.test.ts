@@ -12,6 +12,50 @@ const BROWSER_CANDIDATES = [
   '/usr/bin/chromium',
 ].filter((candidate): candidate is string => Boolean(candidate));
 
+type SetupScrollMetrics = {
+  dialogOverflow: boolean;
+  providersOverflow: boolean;
+  overlayOverflow: boolean;
+  dialogScrollTop: number;
+  providersScrollTop: number;
+  overlayScrollTop: number;
+  dialogScrollbarWidth: number;
+  providersScrollbarWidth: number;
+  overlayScrollbarWidth: number;
+  dialogBehavior: string;
+};
+
+function readSetupScrollMetrics(): SetupScrollMetrics {
+  const measure = (selector: string) => {
+    const element = document.querySelector(selector);
+    if (!(element instanceof HTMLElement)) {
+      return { overflow: false, scrollTop: 0, scrollbarWidth: 0 };
+    }
+    return {
+      overflow: element.scrollHeight > element.clientHeight,
+      scrollTop: element.scrollTop,
+      scrollbarWidth: element.offsetWidth - element.clientWidth,
+    };
+  };
+  const overlay = measure('.rhwp-setup-overlay');
+  const dialog = measure('.rhwp-setup-dialog');
+  const providers = measure('.rhwp-setup-providers');
+  const dialogElement = document.querySelector('.rhwp-setup-dialog');
+  return {
+    dialogOverflow: dialog.overflow,
+    providersOverflow: providers.overflow,
+    overlayOverflow: overlay.overflow,
+    dialogScrollTop: dialog.scrollTop,
+    providersScrollTop: providers.scrollTop,
+    overlayScrollTop: overlay.scrollTop,
+    dialogScrollbarWidth: dialog.scrollbarWidth,
+    providersScrollbarWidth: providers.scrollbarWidth,
+    overlayScrollbarWidth: overlay.scrollbarWidth,
+    dialogBehavior:
+      dialogElement instanceof HTMLElement ? getComputedStyle(dialogElement).scrollBehavior : '',
+  };
+}
+
 test('provider setup remains scrollable without showing a scrollbar', { timeout: 20_000 }, async (context) => {
   const executablePath = BROWSER_CANDIDATES.find(existsSync);
   if (!executablePath) {
@@ -23,7 +67,7 @@ test('provider setup remains scrollable without showing a scrollbar', { timeout:
   const browser = await puppeteer.launch({ executablePath, headless: true });
   try {
     const page = await browser.newPage();
-    await page.setViewport({ width: 1440, height: 900 });
+    await page.setViewport({ width: 1440, height: 640 });
     await page.setContent(`
       <style>${css}</style>
       <div class="rhwp-setup-overlay rhwp-setup-open">
@@ -46,25 +90,32 @@ test('provider setup remains scrollable without showing a scrollbar', { timeout:
       </div>
     `);
 
-    const before = await page.$eval('.rhwp-setup-dialog', (dialog) => ({
-      clientHeight: dialog.clientHeight,
-      scrollHeight: dialog.scrollHeight,
-      scrollTop: dialog.scrollTop,
-    }));
-    assert.ok(before.scrollHeight > before.clientHeight, 'fixture must overflow the setup dialog');
+    const before = await page.evaluate(readSetupScrollMetrics);
+    assert.ok(
+      before.providersOverflow || before.dialogOverflow || before.overlayOverflow,
+      'fixture must overflow the provider pane, dialog, or overlay',
+    );
 
     await page.hover('.rhwp-setup-card');
     await page.mouse.wheel({ deltaY: 800 });
-    await new Promise((resolve) => setTimeout(resolve, 100));
 
-    const after = await page.$eval('.rhwp-setup-dialog', (dialog) => ({
-      scrollTop: dialog.scrollTop,
-      scrollbarWidth: dialog.offsetWidth - dialog.clientWidth,
-      behavior: getComputedStyle(dialog).scrollBehavior,
-    }));
-    assert.ok(after.scrollTop > 0, 'wheel input should reveal the lower provider cards and footer');
-    assert.equal(after.scrollbarWidth, 0);
-    assert.equal(after.behavior, 'smooth');
+    let after = await page.evaluate(readSetupScrollMetrics);
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (after.providersScrollTop > 0 || after.dialogScrollTop > 0 || after.overlayScrollTop > 0) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      after = await page.evaluate(readSetupScrollMetrics);
+    }
+
+    assert.ok(
+      after.providersScrollTop > 0 || after.dialogScrollTop > 0 || after.overlayScrollTop > 0,
+      'wheel input should reveal the lower provider cards and footer',
+    );
+    assert.equal(after.dialogScrollbarWidth, 0);
+    assert.equal(after.providersScrollbarWidth, 0);
+    assert.equal(after.overlayScrollbarWidth, 0);
+    assert.equal(after.dialogBehavior, 'smooth');
   } finally {
     await browser.close();
   }

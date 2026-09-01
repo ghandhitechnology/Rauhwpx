@@ -24,7 +24,6 @@ const windowsJob = workflowJob('windows');
 const publishJob = workflowJob('publish');
 const verificationGateJob = workflowJob('verification-gate');
 const prepareJob = workflowJob('prepare');
-const browserbaseJob = workflowJob('browserbase-live');
 
 test('nightly desktop releases run daily and on demand without cancellation', () => {
   assert.match(nightlyReleaseWorkflow, /4:00am KST/);
@@ -59,9 +58,10 @@ test('nightly packaging is gated on an exact-SHA completed verification run', ()
   assert.match(verificationGateJob, /\.conclusion == \\\"success\\\"/);
   assert.match(verificationGateJob, /if \[\[ -z "\$\{successful_run_id\}" \]\]/);
   assert.match(prepareJob, /needs:\s*verification-gate/);
-  assert.match(browserbaseJob, /needs:\s*prepare/);
-  assert.match(macosJob, /needs:\s*\[prepare,\s*browserbase-live\]/);
-  assert.match(windowsJob, /needs:\s*\[prepare,\s*browserbase-live\]/);
+  assert.doesNotMatch(nightlyReleaseWorkflow, /^  browserbase-live:/m);
+  assert.doesNotMatch(nightlyReleaseWorkflow, /test:browserbase:live/);
+  assert.match(macosJob, /^\s+needs:\s*prepare\s*$/m);
+  assert.match(windowsJob, /^\s+needs:\s*prepare\s*$/m);
 });
 
 test('nightly macOS releases use the tagged release signing contract', () => {

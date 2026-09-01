@@ -1,7 +1,7 @@
 {
   "name": "rauhwpx",
   "productName": "Rauhwpx",
-  "version": "1.1.0",
+  "version": "1.2.2",
   "description": "HWP/HWPX editor with a local Claude/Codex agent sidebar.",
   "author": "Hataewook",
   "license": "MIT",
@@ -62,14 +62,16 @@
       "!rhwp/rhwp-agent/tests/**",
       "!rhwp/rhwp-agent/README.md",
       "!rhwp/rhwp-agent/package-lock.json",
-      "!rhwp/rhwp-agent/tsconfig.agents.json"
+      "!rhwp/rhwp-agent/tsconfig.agents.json",
+      "rhwp/rau-credits/catalog.mjs"
     ],
     "asarUnpack": [
       "rhwp/rhwp-agent/**",
       "desktop/bin/**",
       "cloud/install/install.sh",
       "cloud/install/install-macos.sh",
-      "cloud/release/rauhwpx-cloud-bootstrap-linux-*.tar.gz"
+      "cloud/release/rauhwpx-cloud-bootstrap-linux-*.tar.gz",
+      "rhwp/rau-credits/catalog.mjs"
     ],
     "extraResources": [
       {
