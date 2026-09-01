@@ -43,15 +43,20 @@ test('pull-request workflows never receive Browserbase live credentials', () => 
   }
 });
 
-test('nightly and tagged releases require three fresh Browserbase sessions', () => {
+test('nightly and tagged releases do not gate packaging on Browserbase live smoke', () => {
   for (const path of ['.github/workflows/nightly-release.yml', '.github/workflows/release.yml']) {
     const workflow = read(path);
-    assert.match(workflow, /name: Browserbase Stagehand live smoke/);
-    assert.match(workflow, /name: Require Browserbase live-test secrets/);
-    assert.match(workflow, /name: Run three fresh Stagehand sessions/);
-    assert.match(workflow, /test:browserbase:live/);
+    assert.doesNotMatch(workflow, /^  browserbase-live:/m);
+    assert.doesNotMatch(workflow, /name: Browserbase Stagehand live smoke/);
+    assert.doesNotMatch(workflow, /test:browserbase:live/);
+    assert.doesNotMatch(workflow, /BROWSERBASE_API_KEY|BROWSERBASE_PROJECT_ID|GEMINI_API_KEY/);
+    assert.doesNotMatch(workflow, /^\s*if:\s*false\s*$/m);
     assert.doesNotMatch(workflow, /^\s*pull_request:\s*$/m);
   }
+
+  const release = read('.github/workflows/release.yml');
+  assert.match(release, /^  macos:\n[\s\S]*?^    needs: \[preflight, verification\]$/m);
+  assert.match(release, /^  windows:\n[\s\S]*?^    needs: \[preflight, verification\]$/m);
 
   const smoke = read('rhwp/rhwp-agent/tests/browserbase-live-smoke.mjs');
   assert.match(smoke, /for \(let cycle = 1; cycle <= 3; cycle \+= 1\)/);
@@ -92,9 +97,8 @@ test('nightly packaging requires a successful completed verification for the exa
   assert.match(workflow, /\.status == \\\"completed\\\"/);
   assert.match(workflow, /\.conclusion == \\\"success\\\"/);
   assert.match(workflow, /^  prepare:\n[\s\S]*?^    needs: verification-gate$/m);
-  assert.match(workflow, /^  browserbase-live:\n[\s\S]*?^    needs: prepare$/m);
-  assert.match(workflow, /^  macos:\n[\s\S]*?^    needs: \[prepare, browserbase-live\]$/m);
-  assert.match(workflow, /^  windows:\n[\s\S]*?^    needs: \[prepare, browserbase-live\]$/m);
+  assert.match(workflow, /^  macos:\n[\s\S]*?^    needs: prepare$/m);
+  assert.match(workflow, /^  windows:\n[\s\S]*?^    needs: prepare$/m);
 });
 
 test('third-party Rust toolchain actions are pinned to immutable commits', () => {
