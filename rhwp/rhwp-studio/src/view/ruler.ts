@@ -73,7 +73,7 @@ export class Ruler {
     this.unsubscribers.push(
       eventBus.on('viewport-scroll', () => this.scheduleUpdate()),
       eventBus.on('zoom-changed', () => this.scheduleUpdate()),
-      eventBus.on('viewport-resize', () => { this.resize(); this.scheduleUpdate(); }),
+      eventBus.on('viewport-resize', () => this.scheduleUpdate()),
       eventBus.on('document-changed', () => this.scheduleUpdate()),
       eventBus.on('document-view-changed', () => this.scheduleUpdate()),
       eventBus.on('theme-changed', () => this.scheduleUpdate()),
@@ -117,23 +117,31 @@ export class Ruler {
     };
   }
 
+  /** paint 직전에만 크기를 맞춘다. 같은 width/height 대입도 bitmap을 지우므로 생략한다. */
+  private syncCanvasSize(dpr: number): void {
+    // 두 축을 먼저 측정한 뒤 쓴다. 이벤트 인수 대신 갱신 시점의 실제 컨테이너 크기를 쓴다.
+    const hW = this.container.clientWidth;
+    const vH = this.container.clientHeight;
+    const hWidth = Math.round(hW * dpr);
+    const vHeight = Math.round(vH * dpr);
+    const thickness = Math.round(RULER_SIZE * dpr);
+    if (this.hCanvas.width !== hWidth) this.hCanvas.width = hWidth;
+    if (this.hCanvas.height !== thickness) this.hCanvas.height = thickness;
+    if (this.vCanvas.width !== thickness) this.vCanvas.width = thickness;
+    if (this.vCanvas.height !== vHeight) this.vCanvas.height = vHeight;
+
+    const hCssWidth = `${hW}px`;
+    const vCssHeight = `${vH}px`;
+    const cssThickness = `${RULER_SIZE}px`;
+    if (this.hCanvas.style.width !== hCssWidth) this.hCanvas.style.width = hCssWidth;
+    if (this.hCanvas.style.height !== cssThickness) this.hCanvas.style.height = cssThickness;
+    if (this.vCanvas.style.width !== cssThickness) this.vCanvas.style.width = cssThickness;
+    if (this.vCanvas.style.height !== vCssHeight) this.vCanvas.style.height = vCssHeight;
+  }
+
   /** Canvas 물리 크기를 컨테이너에 맞춰 설정 */
   resize(): void {
-    const dpr = window.devicePixelRatio || 1;
-
-    // 가로 눈금자: 너비 = scroll-container 너비, 높이 = RULER_SIZE
-    const hW = this.container.clientWidth;
-    this.hCanvas.width = Math.round(hW * dpr);
-    this.hCanvas.height = Math.round(RULER_SIZE * dpr);
-    this.hCanvas.style.width = `${hW}px`;
-    this.hCanvas.style.height = `${RULER_SIZE}px`;
-
-    // 세로 눈금자: 너비 = RULER_SIZE, 높이 = scroll-container 높이
-    const vH = this.container.clientHeight;
-    this.vCanvas.width = Math.round(RULER_SIZE * dpr);
-    this.vCanvas.height = Math.round(vH * dpr);
-    this.vCanvas.style.width = `${RULER_SIZE}px`;
-    this.vCanvas.style.height = `${vH}px`;
+    this.syncCanvasSize(window.devicePixelRatio || 1);
   }
 
   /** requestAnimationFrame으로 스로틀링하여 그리기 예약 */
@@ -145,8 +153,10 @@ export class Ruler {
     });
   }
 
-  /** 가로/세로 눈금자를 모두 다시 그린다 */
+  /** 크기 변경과 두 축 paint 사이에 프레임을 넘기지 않는다 (#6187). */
   update(): void {
+    const dpr = window.devicePixelRatio || 1;
+    this.syncCanvasSize(dpr);
     this.drawHorizontal();
     this.drawVertical();
   }
