@@ -67,7 +67,12 @@ jobs:
         uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           toolchain: 1.93.1
-          targets: wasm32-unknown-unknown
+
+      - name: Install pinned nextest
+        uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
+        with:
+          tool: cargo-nextest@0.9.143
+          fallback: none
 
       - name: Cache cargo-audit executable
         uses: actions/cache@v4
@@ -91,16 +96,11 @@ jobs:
             --ignore RUSTSEC-2026-0192 \
             --ignore RUSTSEC-2026-0206
 
-      - name: Test Rust workspace
+      - name: Test Rust workspace in parallel
         working-directory: rhwp
-        run: cargo test --locked --workspace
-
-      - name: Install wasm-pack
-        run: cargo install wasm-pack --version 0.15.0 --locked
-
-      - name: Build WASM engine
-        working-directory: rhwp
-        run: wasm-pack build --target web
+        run: |
+          cargo nextest run --locked --workspace --test-threads 4
+          cargo test --locked --workspace --doc
 
       - name: Install application dependencies
         run: |
@@ -114,14 +114,13 @@ jobs:
       - name: Test hosted Rau authorization service
         run: npm --prefix rhwp/rau-credits test
 
-      - name: Test and build Studio
-        run: |
-          npm --prefix rhwp/rhwp-studio test
-          npm --prefix rhwp/rhwp-studio run build
+      - name: Test Studio
+        run: npm --prefix rhwp/rhwp-studio test
 
   macos:
     name: Build macOS installers
-    needs: [preflight, verification]
+    # Build while verification runs. Publishing still waits for both jobs.
+    needs: preflight
     runs-on: macos-15
     timeout-minutes: 90
     environment: macos-release
@@ -223,7 +222,8 @@ jobs:
 
   windows:
     name: Build unsigned Windows x64 installer
-    needs: [preflight, verification]
+    # Build while verification runs. Publishing still waits for both jobs.
+    needs: preflight
     runs-on: windows-latest
     timeout-minutes: 90
 
@@ -294,7 +294,7 @@ jobs:
 
   publish:
     name: Publish GitHub Release
-    needs: [macos, windows]
+    needs: [verification, macos, windows]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

@@ -29,6 +29,12 @@ jobs:
           toolchain: 1.93.1
           targets: wasm32-unknown-unknown
 
+      - name: Install pinned nextest
+        uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
+        with:
+          tool: cargo-nextest@0.9.143
+          fallback: none
+
       - name: Cache cargo-audit executable
         uses: actions/cache@v4
         with:
@@ -51,9 +57,11 @@ jobs:
             --ignore RUSTSEC-2026-0192 \
             --ignore RUSTSEC-2026-0206
 
-      - name: Test Rust workspace
+      - name: Test Rust workspace in parallel
         working-directory: rhwp
-        run: cargo test --locked --workspace
+        run: |
+          cargo nextest run --locked --workspace --test-threads 4
+          cargo test --locked --workspace --doc
 
       - name: Install wasm-pack
         run: cargo install wasm-pack --version 0.15.0 --locked
