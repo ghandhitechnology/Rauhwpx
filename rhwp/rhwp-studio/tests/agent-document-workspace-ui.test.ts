@@ -60,9 +60,18 @@ test('focus mode environment panel is persistent, informative, and opens changes
   assert.match(source, /environmentChangesSection\.appendChild\(environmentChanges\)/);
   assert.match(source, /environmentPanel\.append\([\s\S]*environmentPlanSection,[\s\S]*environmentChangesSection/);
   assert.match(source, /workspaceTrailing\.append\(workspaceAgentContext, environmentWrap, workspaceSettingsBtn, workspaceExitBtn\)/);
-  assert.match(source, /environmentToggle\.addEventListener\('click',[\s\S]*setEnvironmentPanelOpen\(!environmentPanelOpen\)/);
-  assert.match(source, /environmentChanges\.addEventListener\('click',[\s\S]*setReviewColCollapsed\(false\);[\s\S]*setEnvironmentPanelOpen\(false\)/);
-  assert.match(source, /environmentPlan\.addEventListener\('click',[\s\S]*setPlanColCollapsed\(false\);[\s\S]*setEnvironmentPanelOpen\(false\)/);
+  assert.match(
+    source,
+    /environmentToggle\.addEventListener\('click',[\s\S]*const nextOpen = !environmentPanelOpen;[\s\S]*setEnvironmentPanelOpen\(nextOpen, \{ persist: !isCompactWorkspace\(\) \}\)/,
+  );
+  assert.match(
+    source,
+    /environmentChanges\.addEventListener\('click',[\s\S]*setReviewColCollapsed\(false\);[\s\S]*setEnvironmentPanelOpen\(false, \{ persist: !isCompactWorkspace\(\) \}\)/,
+  );
+  assert.match(
+    source,
+    /environmentPlan\.addEventListener\('click',[\s\S]*setPlanColCollapsed\(false\);[\s\S]*setEnvironmentPanelOpen\(false, \{ persist: !isCompactWorkspace\(\) \}\)/,
+  );
   assert.match(source, /updateEnvironmentFilename\(currentDocumentName\)/);
   assert.match(source, /파일 첨부나 대화 브랜치 기능이 생기면/);
   assert.doesNotMatch(source, /environmentPanel[\s\S]{0,120}pointerdown/);

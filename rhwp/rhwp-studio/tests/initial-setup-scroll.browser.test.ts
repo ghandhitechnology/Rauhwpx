@@ -23,7 +23,7 @@ test('provider setup remains scrollable without showing a scrollbar', { timeout:
   const browser = await puppeteer.launch({ executablePath, headless: true });
   try {
     const page = await browser.newPage();
-    await page.setViewport({ width: 1440, height: 900 });
+    await page.setViewport({ width: 1440, height: 640 });
     await page.setContent(`
       <style>${css}</style>
       <div class="rhwp-setup-overlay rhwp-setup-open">
