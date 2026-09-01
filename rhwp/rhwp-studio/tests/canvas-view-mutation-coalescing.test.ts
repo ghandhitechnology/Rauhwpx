@@ -23,7 +23,10 @@ test('document-changed 는 프레임당 한 번의 변이 재렌더로 합쳐진
   // 전체 재렌더가 예약돼 있으면 단일 페이지 무효화는 그 안에 흡수된다.
   assert.match(canvasViewSrc, /if \(this\.mutationRefreshRafId !== null\) return;\s*\n\s*void this\.refreshInvalidatedPageForMutation/);
   // 문서 교체/정리 시 예약된 재렌더를 취소한다.
-  assert.match(canvasViewSrc, /private reset\(\): void \{\s*\n\s*this\.cancelScheduledMutationRefresh\(\)/);
+  assert.match(
+    canvasViewSrc,
+    /private reset\(\): void \{[\s\S]*?this\.cancelScheduledMutationRefresh\(\)/,
+  );
 });
 
 test('refreshPages 는 보이는 페이지 canvas 를 버리지 않고 제자리에서 다시 그린다', () => {

@@ -48,6 +48,8 @@ import { DeferredPaginationRunner } from './deferred-pagination-runner';
 import { ImeSession } from './ime-session';
 import { CaretLayoutReveal } from './caret-layout-reveal';
 import { emitHeaderFooterModeChanged } from './header-footer-mode';
+import { clearObjectEditingPage } from './object-selection-page';
+import { showInitialCaretAndPublishFocus } from './initial-caret-focus';
 import {
   editableTargetFromPosition,
   positionsShareEditableContainer,
@@ -3696,7 +3698,11 @@ export class InputHandler {
     const cursorRect = this.cursor.getRect();
     if (cursorRect) {
       const adjustedCursorRect = this.adjustExitedFieldEndCaretRect(cursorRect);
-      this.eventBus.emit('cursor-rect-updated', { x: adjustedCursorRect.x, y: adjustedCursorRect.y });
+      this.eventBus.emit('cursor-rect-updated', {
+        pageIndex: adjustedCursorRect.pageIndex,
+        x: adjustedCursorRect.x,
+        y: adjustedCursorRect.y,
+      });
     }
   }
 
@@ -3869,7 +3875,11 @@ export class InputHandler {
 
     const cursorRect = this.cursor.getRect();
     if (cursorRect) {
-      this.eventBus.emit('cursor-rect-updated', { x: cursorRect.x, y: cursorRect.y });
+      this.eventBus.emit('cursor-rect-updated', {
+        pageIndex: cursorRect.pageIndex,
+        x: cursorRect.x,
+        y: cursorRect.y,
+      });
     }
   }
 
@@ -4073,11 +4083,16 @@ export class InputHandler {
   }
 
   /** 표 객체 선택 시 외곽선 + 핸들을 렌더링한다 */
+  private clearTableObjectSelectionRender(): void {
+    this.tableObjectRenderer?.clear();
+    clearObjectEditingPage(this.eventBus);
+  }
+
   private renderTableObjectSelection(): void {
     if (!this.tableObjectRenderer) return;
     const ref = this.cursor.getSelectedTableRef();
     if (!ref) {
-      this.tableObjectRenderer.clear();
+      this.clearTableObjectSelectionRender();
       return;
     }
     try {
@@ -4094,7 +4109,7 @@ export class InputHandler {
         cellBboxes = this.wasm.getTableCellBboxes(ref.sec, ref.ppi, ref.ci, pageHint);
       }
       if (cellBboxes.length === 0) {
-        this.tableObjectRenderer.clear();
+        this.clearTableObjectSelectionRender();
         return;
       }
       // 페이지별 그룹화
@@ -4116,9 +4131,13 @@ export class InputHandler {
         pageBboxes.push({ pageIndex, x: minX, y: minY, width: maxX - minX, height: maxY - minY });
       }
       this.tableObjectRenderer.renderMultiPage(pageBboxes, zoom);
+      const selectedPage = pageHint !== undefined && byPage.has(pageHint)
+        ? pageHint
+        : pageBboxes[0].pageIndex;
+      this.eventBus.emit('editing-page-changed', selectedPage);
     } catch (e) {
       console.warn('[InputHandler] renderTableObjectSelection 실패:', e);
-      this.tableObjectRenderer.clear();
+      this.clearTableObjectSelectionRender();
     }
   }
 
@@ -4291,9 +4310,15 @@ export class InputHandler {
       this.active = true;
 
       const rect = this.cursor.getRect();
-      if (rect) {
-        this.caret.show(rect, this.viewportManager.getZoom());
-      }
+      // 문서 초기화 직후에도 실제 캐럿 쪽을 편집 focus로 확정한다. 이 발행이 없으면
+      // CanvasView는 첫 쪽을 viewport fallback으로만 알고, 줌으로 배치가 바뀔 때
+      // 눈금자 대상도 뷰포트 중심의 다른 쪽으로 이동한다.
+      showInitialCaretAndPublishFocus(
+        rect,
+        this.viewportManager.getZoom(),
+        this.caret,
+        this.eventBus,
+      );
       this.emitCursorFormatState();
       this.focusTextarea();
     } catch (e) {
@@ -4302,9 +4327,12 @@ export class InputHandler {
       this.cursor.moveTo({ sectionIndex: 0, paragraphIndex: 0, charOffset: 0 });
       this.active = true;
       const rect = this.cursor.getRect();
-      if (rect) {
-        this.caret.show(rect, this.viewportManager.getZoom());
-      }
+      showInitialCaretAndPublishFocus(
+        rect,
+        this.viewportManager.getZoom(),
+        this.caret,
+        this.eventBus,
+      );
       this.focusTextarea();
     }
   }
