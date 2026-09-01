@@ -88,6 +88,7 @@ e2e 스크립트의 **단일 권위 목록**이다. 파일 추가/변경/폐기 
 | `scenario-runner.mjs` | 유틸 | active | 시나리오 실행기 + 렌더 트리 측정기 + 규칙 검증기 | — | 수동 |  |
 | `shape-inline.test.mjs` | 상시 | active | 도형 인라인 컨트롤 — 커서 이동 및 텍스트 삽입 | — | 수동 |  |
 | `shift-end.test.mjs` | 상시 | active | shift-return.hwp Shift+End 블록 선택 | shift-return.hwp | 수동 |  |
+| `table-border-hover-resize-issue4117.test.mjs` | 상시 | active | #4117 셀 선택 없이 표 경계 hover→리사이즈 — hover choke point 캐시 1회 조회 | — | 수동 |  |
 | `table-picture-resize-1282.test.mjs` | 상시 | active | E2E 테스트 (Issue #1282): 회전된 표 셀 내부 picture 리사이즈. | ta-pic-001-r-쪽영역안제한.hwp, ta-pic-001-r-쪽영역안제한 | 수동 |  |
 | `tac-inline-create.test.mjs` | 상시 | active | 빈 문서에서 인라인 TAC 표 직접 생성 (Issue #32) | — | 수동 |  |
 | `tac-inline-table.test.mjs` | 상시 | active | 인라인 TAC 표 배치 검증 (Issue #31) | tac-case-001.hwp | 수동 |  |
