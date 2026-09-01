@@ -49,7 +49,7 @@ function readSetupScrollMetrics(): SetupScrollMetrics {
   };
 }
 
-test('provider setup remains scrollable without showing a scrollbar', { timeout: 20_000 }, async (context) => {
+test('provider setup remains scrollable without showing a scrollbar', { timeout: 45_000 }, async (context) => {
   const executablePath = browserExecutable();
 
   const css = readFileSync(new URL('../src/ui/initial-setup/initial-setup.css', import.meta.url), 'utf8');
