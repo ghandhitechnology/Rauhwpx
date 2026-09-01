@@ -160,6 +160,7 @@ jobs:
           BROWSERBASE_PROJECT_ID: ${{ secrets.BROWSERBASE_PROJECT_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           BROWSERBASE_SMOKE_URL: ${{ vars.BROWSERBASE_SMOKE_URL }}
+          BROWSERBASE_MODEL_NAME: ${{ vars.BROWSERBASE_MODEL_NAME }}
         run: npm --prefix rhwp/rhwp-agent run test:browserbase:live
 
   macos:
