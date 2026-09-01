@@ -44,16 +44,21 @@ jobs:
           npm --prefix rhwp/rhwp-studio audit --omit=dev --audit-level=low
 
   verification:
-    name: Test tagged source
+    name: Test tagged source (${{ matrix.shard }}/4)
     needs: preflight
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
 
     steps:
       - name: Check out tagged source
         uses: actions/checkout@v5
 
       - name: Set up Node.js
+        if: matrix.shard == 1
         uses: actions/setup-node@v5
         with:
           node-version: 22.18.0
@@ -75,18 +80,21 @@ jobs:
           fallback: none
 
       - name: Cache cargo-audit executable
+        if: matrix.shard == 1
         uses: actions/cache@v4
         with:
           path: ~/.cargo/bin/cargo-audit
           key: cargo-audit-${{ runner.os }}-${{ runner.arch }}-0.22.2
 
       - name: Install pinned cargo-audit
+        if: matrix.shard == 1
         run: |
           if [[ "$(cargo audit --version 2>/dev/null || true)" != "cargo-audit 0.22.2" ]]; then
             cargo install cargo-audit --version 0.22.2 --locked --force
           fi
 
       - name: Reject RustSec vulnerabilities and new warnings
+        if: matrix.shard == 1
         working-directory: rhwp
         run: |
           set -euo pipefail
@@ -96,25 +104,32 @@ jobs:
             --ignore RUSTSEC-2026-0192 \
             --ignore RUSTSEC-2026-0206
 
-      - name: Test Rust workspace in parallel
+      - name: Test Rust workspace shard
         working-directory: rhwp
-        run: |
-          cargo nextest run --locked --workspace --test-threads 4
-          cargo test --locked --workspace --doc
+        run: cargo nextest run --locked --workspace --test-threads 4 --partition count:${{ matrix.shard }}/4
+
+      - name: Test Rust documentation
+        if: matrix.shard == 1
+        working-directory: rhwp
+        run: cargo test --locked --workspace --doc
 
       - name: Install application dependencies
+        if: matrix.shard == 1
         run: |
           npm ci
           npm --prefix rhwp/rhwp-agent ci
           npm --prefix rhwp/rhwp-studio ci
 
       - name: Test agent hub and process lifecycle
+        if: matrix.shard == 1
         run: node --test --test-concurrency=1 rhwp/rhwp-agent/tests/*.test.mjs
 
       - name: Test hosted Rau authorization service
+        if: matrix.shard == 1
         run: npm --prefix rhwp/rau-credits test
 
       - name: Test Studio
+        if: matrix.shard == 1
         run: npm --prefix rhwp/rhwp-studio test
 
   macos:

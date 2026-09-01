@@ -132,6 +132,24 @@ test('full Rust verification runs concurrently without dropping doctests', () =>
   }
 });
 
+test('tagged Rust verification is sharded and isolates its timing guard', () => {
+  const workflow = read('.github/workflows/release.yml');
+  assert.match(
+    workflow,
+    /^    strategy:\n      fail-fast: false\n      matrix:\n        shard: \[1, 2, 3, 4\]$/m,
+  );
+  assert.match(
+    workflow,
+    /cargo nextest run --locked --workspace --test-threads 4 --partition count:\$\{\{ matrix\.shard \}\}\/4/,
+  );
+  assert.match(workflow, /name: Test Rust documentation\n\s+if: matrix\.shard == 1/);
+  assert.match(workflow, /name: Install application dependencies\n\s+if: matrix\.shard == 1/);
+
+  const nextest = read('rhwp/.config/nextest.toml');
+  assert.match(nextest, /test\(inflated_row_count_does_not_slow_down_parsing\)/);
+  assert.match(nextest, /threads-required = "num-test-threads"/);
+});
+
 test('the SHA-pinned fuzz action explicitly selects the nightly toolchain', () => {
   const workflow = read('.github/workflows/nightly.yml');
   assert.match(
