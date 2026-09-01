@@ -65,19 +65,27 @@ await runTest('가로 병합 행 경계 드래그 — 걸친 모든 열이 보�
     };
     const sc = ih.container.querySelector('#scroll-content');
     const rect = sc.getBoundingClientRect();
+    const zoom = ih.viewportManager.getZoom();
+    const pageLeft = ih.virtualScroll.getPageLeftResolved(0, sc.clientWidth);
+    const pageOffset = ih.virtualScroll.getPageOffset(0);
+    const toClient = (x, y) => ({
+      x: rect.left + pageLeft + x * zoom,
+      y: rect.top + pageOffset + y * zoom,
+    });
     const snapshot = () => (wasm.getTableCellBboxes(0, paraIdx, controlIdx, 0) || [])
       .map(b => ({ cellIdx: b.cellIdx, row: b.row, col: b.col, colSpan: b.colSpan, y: b.y, h: b.h }))
       .sort((a, b) => a.cellIdx - b.cellIdx);
     const before = snapshot();
 
-    // 좌표는 렌더 배율·스크롤에 좌우되므로 실제 hitTest 로 프로브해 찾는다
+    // 페이지 원점·줌을 반영한 화면 좌표로 프로브한다 (issue4117 e2e 와 동일)
     const hit = (x, y) => ih.hitTestCellRowCol(me('mousemove', x, y, 0));
     const c02full = (wasm.getTableCellBboxes(0, paraIdx, controlIdx, 0) || []).find(b => b.row === 0 && b.col === 2);
     if (!c02full) return { error: '(0,2) bbox 없음' };
-    const colX = rect.left + c02full.x + c02full.w / 2;
-    const estY = rect.top + c02full.y + c02full.h / 2;
+    const est = toClient(c02full.x + c02full.w / 2, c02full.y + c02full.h / 2);
+    const colX = est.x;
+    const estY = est.y;
     let lastR0 = null; let firstR1 = null;
-    for (let y = estY - 20; y <= estY + c02full.h + 60; y += 1) {
+    for (let y = estY - 20; y <= estY + c02full.h * zoom + 60; y += 1) {
       const h = hit(colX, y);
       if (h && h.row === 0 && h.col === 2) lastR0 = y;
       if (h && h.row === 1) { firstR1 = y; break; }

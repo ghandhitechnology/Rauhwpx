@@ -70,6 +70,13 @@ await runTest('병합 셀 경계 드래그 — 하위 행 선택에서도 경계
     };
     const sc = ih.container.querySelector('#scroll-content');
     const rect = sc.getBoundingClientRect();
+    const zoom = ih.viewportManager.getZoom();
+    const pageLeft = ih.virtualScroll.getPageLeftResolved(0, sc.clientWidth);
+    const pageOffset = ih.virtualScroll.getPageOffset(0);
+    const toClient = (x, y) => ({
+      x: rect.left + pageLeft + x * zoom,
+      y: rect.top + pageOffset + y * zoom,
+    });
     const snapshot = () => (wasm.getTableCellBboxes(0, paraIdx, controlIdx, 0) || [])
       .map(b => ({ cellIdx: b.cellIdx, row: b.row, col: b.col, rowSpan: b.rowSpan, x: b.x, y: b.y, w: b.w, h: b.h }))
       .sort((a, b) => a.cellIdx - b.cellIdx);
@@ -78,20 +85,19 @@ await runTest('병합 셀 경계 드래그 — 하위 행 선택에서도 경계
     const row2c0 = before.find(b => b.row === 2 && b.col === 0);
     if (!merged || !row2c0) return { error: '병합 셀/row2col0 bbox 없음' };
 
-    // 좌표는 렌더 배율·스크롤에 좌우되므로 실제 hitTest 로 프로브해 찾는다
+    // 페이지 원점·줌을 반영한 화면 좌표로 프로브한다 (issue4117 e2e 와 동일)
     const hit = (x, y) => ih.hitTestCellRowCol(me('mousemove', x, y, 0));
-    const estX = rect.left + row2c0.x + row2c0.w / 2;
-    const estY = rect.top + row2c0.y + row2c0.h / 2;
+    const est = toClient(row2c0.x + row2c0.w / 2, row2c0.y + row2c0.h / 2);
     let yRow2 = null;
     for (let dy = 0; dy <= 40 && yRow2 === null; dy += 2) {
       for (const s of dy === 0 ? [0] : [-1, 1]) {
-        const h = hit(estX, estY + s * dy);
-        if (h && h.row === 2 && h.col === 0) { yRow2 = estY + s * dy; break; }
+        const h = hit(est.x, est.y + s * dy);
+        if (h && h.row === 2 && h.col === 0) { yRow2 = est.y + s * dy; break; }
       }
     }
     if (yRow2 === null) return { error: 'row2 y 프로브 실패' };
     let lastC0 = null; let firstC1 = null;
-    for (let x = estX; x <= estX + row2c0.w + 60; x += 1) {
+    for (let x = est.x; x <= est.x + row2c0.w * zoom + 60; x += 1) {
       const h = hit(x, yRow2);
       if (h && h.row === 2 && h.col === 0) lastC0 = x;
       if (h && h.col === 1) { firstC1 = x; break; }
