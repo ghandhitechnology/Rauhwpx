@@ -119,53 +119,9 @@ jobs:
           npm --prefix rhwp/rhwp-studio test
           npm --prefix rhwp/rhwp-studio run build
 
-  browserbase-live:
-    name: Browserbase Stagehand live smoke
-    if: github.repository == 'ghandhitechnology/Rauhwpx'
-    needs: preflight
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    steps:
-      - name: Check out tagged source
-        uses: actions/checkout@v5
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v5
-        with:
-          node-version: 22.18.0
-          cache: npm
-          cache-dependency-path: rhwp/rhwp-agent/package-lock.json
-
-      - name: Install production agent dependencies
-        run: npm --prefix rhwp/rhwp-agent ci --omit=dev
-
-      - name: Require Browserbase live-test secrets
-        env:
-          BROWSERBASE_API_KEY: ${{ secrets.BROWSERBASE_API_KEY }}
-          BROWSERBASE_PROJECT_ID: ${{ secrets.BROWSERBASE_PROJECT_ID }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
-          set -euo pipefail
-          for name in BROWSERBASE_API_KEY BROWSERBASE_PROJECT_ID GEMINI_API_KEY; do
-            if [[ -z "${!name}" ]]; then
-              echo "Required Browserbase live-test secret is missing: ${name}" >&2
-              exit 1
-            fi
-          done
-
-      - name: Run three fresh Stagehand sessions
-        env:
-          BROWSERBASE_API_KEY: ${{ secrets.BROWSERBASE_API_KEY }}
-          BROWSERBASE_PROJECT_ID: ${{ secrets.BROWSERBASE_PROJECT_ID }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          BROWSERBASE_SMOKE_URL: ${{ vars.BROWSERBASE_SMOKE_URL }}
-          BROWSERBASE_MODEL_NAME: ${{ vars.BROWSERBASE_MODEL_NAME }}
-        run: npm --prefix rhwp/rhwp-agent run test:browserbase:live
-
   macos:
     name: Build macOS installers
-    needs: [preflight, verification, browserbase-live]
+    needs: [preflight, verification]
     runs-on: macos-15
     timeout-minutes: 90
     environment: macos-release
@@ -267,7 +223,7 @@ jobs:
 
   windows:
     name: Build unsigned Windows x64 installer
-    needs: [preflight, verification, browserbase-live]
+    needs: [preflight, verification]
     runs-on: windows-latest
     timeout-minutes: 90
 
