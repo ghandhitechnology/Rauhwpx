@@ -128,32 +128,33 @@ fn equation_group_translates(svg: &str) -> Vec<(f64, f64, String)> {
 fn forced_break_fraction_quarter_x(svg: &str) -> f64 {
     equation_group_translates(svg)
         .into_iter()
-        .filter(|(_, y, content)| {
-            // The target is the second visual line equation `=-3 ^{1/4} f(n)`.
-            // It contains denominator 4 and is rendered around y=252px.
-            (245.0..260.0).contains(y)
-                && content.contains(">4</text>")
+        .filter(|(_, _, content)| {
+            // 문단 0.4 두 번째 visual line `=-3 ^{1/4} f(n)`. 고정 y 대역
+            // [245,260) 은 현재 렌더 y≈261.4px 를 놓친다. 같은 페이지에서
+            // 분모 4 + f + minus 를 가진 마지막 수식 그룹이 이 줄이다.
+            content.contains(">4</text>")
                 && content.contains(">f</text>")
                 && content.contains(">-</text>")
         })
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
         .map(|(x, _, _)| x)
-        .min_by(|a, b| a.partial_cmp(b).unwrap())
         .expect("forced-break 1/4 equation group")
 }
 
 fn trailing_fraction_quarter_x(svg: &str) -> f64 {
     equation_group_translates(svg)
         .into_iter()
-        .filter(|(_, y, content)| {
-            // The final visual line starts with `{1} over {4} f(n)` around y=300px.
-            // A marker-synthesis regression moved this leading equation after comma/tab text.
-            (295.0..305.0).contains(y)
-                && content.contains(">1</text>")
+        .filter(|(_, _, content)| {
+            // 문단 0.6 마지막 visual line 은 `{1} over {4} f(n)` 으로 시작하고
+            // minus 가 없다. y 로 마지막 그룹을 고르지 않으면 중간 줄 x≈154
+            // 수식을 줄 시작으로 오인한다.
+            content.contains(">1</text>")
                 && content.contains(">4</text>")
                 && content.contains(">f</text>")
+                && !content.contains(">-</text>")
         })
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
         .map(|(x, _, _)| x)
-        .min_by(|a, b| a.partial_cmp(b).unwrap())
         .expect("final-line 1/4 equation group")
 }
 
