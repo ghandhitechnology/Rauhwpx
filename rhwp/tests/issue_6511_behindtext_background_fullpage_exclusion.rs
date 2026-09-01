@@ -24,6 +24,7 @@ use rhwp::{parse_document, serialize_document, DocumentCore};
 const FULLPAGE_H: u32 = 60000;
 const FULLPAGE_W: u32 = 40000;
 
+/// 비-TAC 전면 그림 한 장. wrap 만 바꿔 #1995 후보 여부를 가른다.
 fn fullpage_picture(wrap: TextWrap) -> Control {
     let mut pic = Picture::default();
     pic.common.treat_as_char = false;
@@ -33,6 +34,7 @@ fn fullpage_picture(wrap: TextWrap) -> Control {
     Control::Picture(Box::new(pic))
 }
 
+/// A4 빈 문단에 전면 그림을 wrap 순서대로 실은 합성 문서.
 fn doc_with_fullpage_pictures(wraps: &[TextWrap]) -> Document {
     let host = Paragraph {
         text: String::new(),
