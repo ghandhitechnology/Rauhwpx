@@ -137,6 +137,12 @@ const EXEMPT: &[(&str, &str, Exempt, &str)] = &[
     ),
     (
         "commands/clipboard.rs",
+        "copy_selection_across_sections_native",
+        Exempt::SessionState,
+        "복사 — 여러 구역 본문 선택을 `self.clipboard` 에만 기록.",
+    ),
+    (
+        "commands/clipboard.rs",
         "copy_control_native",
         Exempt::SessionState,
         "복사 — `self.clipboard` / `self.paste_cascade_count` 만 변경.",
@@ -161,6 +167,18 @@ const EXEMPT: &[(&str, &str, Exempt, &str)] = &[
     ),
     (
         "commands/document.rs",
+        "share_snapshot_native",
+        Exempt::SessionState,
+        "기존 스냅샷 Arc 를 새 ID 로 공유. 원본 IR 무변경.",
+    ),
+    (
+        "commands/document.rs",
+        "refresh_layout_native",
+        Exempt::SessionState,
+        "문서 IR 은 건드리지 않고 조판 캐시만 재구축. 직렬화 비대상.",
+    ),
+    (
+        "commands/document.rs",
         "discard_snapshot_native",
         Exempt::SessionState,
         "`snapshot_store` 에서 항목 제거.",
@@ -172,10 +190,22 @@ const EXEMPT: &[(&str, &str, Exempt, &str)] = &[
         "순수 조회. `&mut` 는 가변 접근자(`get_cell_paragraph_mut_by_path`) 재사용 때문.",
     ),
     (
+        "commands/formatting.rs",
+        "get_cell_para_properties_at_by_path",
+        Exempt::SessionState,
+        "순수 조회. `&mut` 는 가변 접근자(`get_cell_paragraph_mut_by_path`) 재사용 때문.",
+    ),
+    (
         "commands/header_footer_ops.rs",
         "toggle_hide_header_footer_native",
         Exempt::SessionState,
         "세션 집합 `hidden_header_footer` + 렌더 트리 캐시만 변경. 직렬화 비대상.",
+    ),
+    (
+        "commands/header_footer_ops.rs",
+        "copy_selection_in_header_footer_native",
+        Exempt::SessionState,
+        "복사 — 머리말/꼬리말 선택을 `self.clipboard` 에만 기록.",
     ),
     (
         "commands/table_ops.rs",
@@ -226,6 +256,18 @@ const EXEMPT: &[(&str, &str, Exempt, &str)] = &[
         Exempt::WholeDocument,
         "스냅샷 문서로 통째 복원. 스냅샷은 저장 시점의 패스스루 상태를 그대로 담고 있다.",
     ),
+    (
+        "commands/document.rs",
+        "replace_content_from_bytes_native",
+        Exempt::WholeDocument,
+        "파싱한 문서로 통째 교체. 패스스루는 새 IR 과 함께 재설정된다.",
+    ),
+    (
+        "commands/document_transfer.rs",
+        "paste_document_block_native",
+        Exempt::WholeDocument,
+        "스테이징 clone 에 삽입한 뒤 `set_document` 로 통째 교체. 패스스루는 새 IR 을 따른다.",
+    ),
     // ── 무효화 대신 원본 스트림 직접 수술 ──────────────────────────────────
     (
         "commands/document.rs",
@@ -268,16 +310,9 @@ const EXEMPT: &[(&str, &str, Exempt, &str)] = &[
     // ── 위임 ───────────────────────────────────────────────────────────────
     (
         "commands/document.rs",
-        "export_hwp_with_adapter",
-        Exempt::DelegatesTo("convert_if_hwpx_source"),
-        "저장 직전 어댑터 변환. IR 변경은 전부 어댑터 안에서 일어나며 그쪽이 \
-         `raw_stream_dirty` 를 세운다.",
-    ),
-    (
-        "commands/document.rs",
         "serialize_hwp_with_verify",
-        Exempt::DelegatesTo("export_hwp_with_adapter"),
-        "export 후 재로드 검증만 수행. 자체 IR 변경 없음.",
+        Exempt::SessionState,
+        "저장 검증용 clone/재로드만 수행. 라이브 IR 과 패스스루는 바꾸지 않는다.",
     ),
     (
         "commands/table_ops.rs",
@@ -356,6 +391,78 @@ const EXEMPT: &[(&str, &str, Exempt, &str)] = &[
         "replace_one_native",
         Exempt::DelegatesTo("delete_text_native"),
         "검색 후 삭제 + 삽입 조합. 두 뮤테이터가 각각 무효화한다.",
+    ),
+    (
+        "commands/formatting.rs",
+        "apply_char_format_native",
+        Exempt::DelegatesTo("apply_char_format_mutate_and_reflow"),
+        "본문 글자 서식 래퍼 — 실제 변이·무효화는 mutate_and_reflow 가 수행.",
+    ),
+    (
+        "commands/formatting.rs",
+        "apply_char_format_across_sections_native",
+        Exempt::DelegatesTo("apply_char_format_mutate_and_reflow"),
+        "구역 루프 래퍼 — 문단별 변이·무효화는 mutate_and_reflow 가 수행.",
+    ),
+    (
+        "commands/formatting.rs",
+        "apply_para_format_native",
+        Exempt::DelegatesTo("apply_para_format_mutate_and_reflow"),
+        "본문 문단 서식 래퍼 — 실제 변이·무효화는 mutate_and_reflow 가 수행.",
+    ),
+    (
+        "commands/formatting.rs",
+        "apply_para_format_across_sections_native",
+        Exempt::DelegatesTo("apply_para_format_mutate_and_reflow"),
+        "구역 루프 래퍼 — 문단별 변이·무효화는 mutate_and_reflow 가 수행.",
+    ),
+    (
+        "commands/object_ops/equation.rs",
+        "insert_equation_in_cell_native",
+        Exempt::DelegatesTo("reflow_cell_after_equation_edit"),
+        "셀 수식 삽입 후 재조판 헬퍼가 `raw_stream` 을 비운다.",
+    ),
+    (
+        "commands/object_ops/equation.rs",
+        "delete_equation_control_in_cell_native",
+        Exempt::DelegatesTo("reflow_cell_after_equation_edit"),
+        "셀 수식 삭제 후 재조판 헬퍼가 `raw_stream` 을 비운다.",
+    ),
+    (
+        "commands/object_ops/shape.rs",
+        "change_shape_z_order_native",
+        Exempt::DelegatesTo("change_object_z_order_native"),
+        "기존 호출자 별칭 — 실제 변이·무효화는 change_object_z_order_native.",
+    ),
+    (
+        "commands/text_editing.rs",
+        "delete_range_across_sections_native",
+        Exempt::DelegatesTo("delete_range_native"),
+        "구역별 조각을 delete_range_native 에 위임. 그쪽이 무효화한다.",
+    ),
+    (
+        "commands/text_editing.rs",
+        "split_paragraph_native",
+        Exempt::DelegatesTo("split_paragraph_with_intent_native"),
+        "Enter 분할 래퍼 — 실제 분할·무효화는 intent 헬퍼가 수행.",
+    ),
+    (
+        "commands/text_editing.rs",
+        "split_paragraph_logical_native",
+        Exempt::DelegatesTo("split_paragraph_with_intent_native"),
+        "논리 분할 래퍼 — 실제 분할·무효화는 intent 헬퍼가 수행.",
+    ),
+    (
+        "commands/text_editing.rs",
+        "split_paragraph_in_cell_native",
+        Exempt::DelegatesTo("split_paragraph_in_cell_with_intent_native"),
+        "셀 분할 래퍼 — 실제 분할·무효화는 intent 헬퍼가 수행.",
+    ),
+    (
+        "commands/text_editing.rs",
+        "split_paragraph_in_cell_logical_native",
+        Exempt::DelegatesTo("split_paragraph_in_cell_with_intent_native"),
+        "셀 논리 분할 래퍼 — 실제 분할·무효화는 intent 헬퍼가 수행.",
     ),
     // ── 판정 보류 ──────────────────────────────────────────────────────────
     (
