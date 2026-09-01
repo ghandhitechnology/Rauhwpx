@@ -1,7 +1,7 @@
 {
   "name": "rauhwpx",
   "productName": "Rauhwpx",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "HWP/HWPX editor with a local Claude/Codex agent sidebar.",
   "author": "Hataewook",
   "private": true,
@@ -50,10 +50,12 @@
       "!rhwp/rhwp-agent/tests/**",
       "!rhwp/rhwp-agent/README.md",
       "!rhwp/rhwp-agent/package-lock.json",
-      "!rhwp/rhwp-agent/tsconfig.agents.json"
+      "!rhwp/rhwp-agent/tsconfig.agents.json",
+      "rhwp/rau-credits/catalog.mjs"
     ],
     "asarUnpack": [
-      "rhwp/rhwp-agent/**"
+      "rhwp/rhwp-agent/**",
+      "rhwp/rau-credits/catalog.mjs"
     ],
     "extraResources": [
       {

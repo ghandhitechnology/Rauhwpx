@@ -3,13 +3,24 @@ import { join, resolve } from 'node:path';
 import { listPackage } from '@electron/asar';
 
 import { normalizeArchivePath } from './desktop-package-paths.mjs';
+import { smokePackagedAgentHub } from './packaged-agent-hub-smoke.mjs';
 
 const releaseDir = resolve(process.argv[2] ?? 'release');
 const resourcesDir = process.platform === 'darwin'
   ? join(releaseDir, 'mac-arm64', 'Rauhwpx.app', 'Contents', 'Resources')
   : join(releaseDir, 'win-unpacked', 'resources');
 const unpackedAgent = join(resourcesDir, 'app.asar.unpacked', 'rhwp', 'rhwp-agent');
+const unpackedCreditsCatalog = join(
+  resourcesDir,
+  'app.asar.unpacked',
+  'rhwp',
+  'rau-credits',
+  'catalog.mjs',
+);
 const extractor = join(resourcesDir, 'bin', process.platform === 'win32' ? 'rhwp.exe' : 'rhwp');
+const desktopExecutable = process.platform === 'darwin'
+  ? join(releaseDir, 'mac-arm64', 'Rauhwpx.app', 'Contents', 'MacOS', 'Rauhwpx')
+  : join(releaseDir, 'win-unpacked', 'Rauhwpx.exe');
 
 const archive = join(resourcesDir, 'app.asar');
 const required = [
@@ -24,7 +35,9 @@ const required = [
   join(unpackedAgent, 'node_modules', '@browserbasehq', 'stagehand', 'package.json'),
   join(unpackedAgent, 'node_modules', '@browserbasehq', 'stagehand', 'dist', 'assets', 'stagehand-extension.zip'),
   join(unpackedAgent, 'node_modules', 'ws', 'package.json'),
+  unpackedCreditsCatalog,
   extractor,
+  desktopExecutable,
 ];
 for (const path of required) {
   if (!existsSync(path)) throw new Error(`Packaged file is missing: ${path}`);
@@ -78,4 +91,9 @@ if (process.platform !== 'win32' && (statSync(extractor).mode & 0o111) === 0) {
   throw new Error(`Packaged document extractor is not executable: ${extractor}`);
 }
 
-console.log(`Verified desktop package resources at ${resourcesDir}`);
+const hub = await smokePackagedAgentHub({
+  executable: desktopExecutable,
+  agentDir: unpackedAgent,
+});
+
+console.log(`Verified desktop package resources and Agent Hub session ${hub.sessionId} at ${resourcesDir}`);
