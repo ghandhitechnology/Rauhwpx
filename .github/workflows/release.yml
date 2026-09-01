@@ -44,14 +44,14 @@ jobs:
           npm --prefix rhwp/rhwp-studio audit --omit=dev --audit-level=low
 
   verification:
-    name: Test tagged source (${{ matrix.shard }}/4)
+    name: Test tagged source (${{ matrix.shard }}/2)
     needs: preflight
     runs-on: ubuntu-latest
     timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2]
 
     steps:
       - name: Check out tagged source
@@ -106,7 +106,7 @@ jobs:
 
       - name: Test Rust workspace shard
         working-directory: rhwp
-        run: cargo nextest run --locked --workspace --test-threads 4 --partition count:${{ matrix.shard }}/4
+        run: cargo nextest run --locked --workspace --test-threads 4 --partition count:${{ matrix.shard }}/2
 
       - name: Test Rust documentation
         if: matrix.shard == 1
