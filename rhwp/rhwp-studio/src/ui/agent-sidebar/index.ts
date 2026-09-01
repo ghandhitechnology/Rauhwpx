@@ -1548,13 +1548,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     const context = getDocumentContext?.();
     const format = context?.sourceFormat ?? null;
     const supported = format === 'hwp' || format === 'hwpx' || format === 'hml';
+    const cloudProfile = cloudController.getSnapshot().profile;
     return shouldShowCloudComposerSwitch(cloudController.getSnapshot(), {
       emptyThread: currentThread.messages.length === 0 && currentThread.firstMessageDelivery == null,
       hasSupportedDocument: Boolean(context?.documentName && supported),
       browserPaired: isDesktopApp()
         ? undefined
-        : cloudController.getSnapshot().profile.kind === 'configured'
-          && cloudController.getSnapshot().profile.connection === 'ready',
+        : cloudProfile.kind === 'configured' && cloudProfile.connection === 'ready',
     });
   }
 
@@ -1771,7 +1771,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     onBeginAuthorityTransition: () => beginAuthorityTransition('authority-transition'),
     onCloudBinding: (binding) => {
       workspace.bindCloud(binding);
-      if (currentThread.id === binding.threadId) {
+      if (binding && currentThread.id === binding.threadId) {
         currentThread.cloudSessionId = binding.sessionId;
         persistCurrentThread();
       }

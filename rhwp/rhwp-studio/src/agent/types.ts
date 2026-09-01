@@ -383,8 +383,6 @@ export interface AgentSetupAuthStart {
   expiresAt?: string | null;
 }
 
-}
-
 /** Global Rauhwpx account. It is independent from whether the Rau provider is installed. */
 export interface RauAccountSnapshot {
   signedIn: boolean;

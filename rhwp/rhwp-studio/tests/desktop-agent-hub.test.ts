@@ -707,6 +707,7 @@ test('stopHubByPort retains quarantine after cleanup-unproven even when the lead
       port: 5175,
       runDir: dir,
       fetchImpl: async () => ({ ok: false, json: async () => null }),
+      processAlive: () => true,
     });
     assert.equal(laterStart.error, 'hub-cleanup-unproven');
     assert.equal(laterStart.pid, 4242);
@@ -754,6 +755,7 @@ test('startDetachedHub does not bypass a quarantined detached pid record', async
       port: 5175,
       runDir: dir,
       fetchImpl: async () => ({ ok: false, json: async () => null }),
+      processAlive: () => true,
     });
     assert.deepEqual(result, {
       started: false,
@@ -763,6 +765,55 @@ test('startDetachedHub does not bypass a quarantined detached pid record', async
       error: 'hub-cleanup-unproven',
     });
     assert.equal(readPidFile(paths.pid), 4244);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('startDetachedHub recovers a dead pid record with fresh owned roots', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rhwp-start-dead-record-'));
+  const paths = hubRunPaths(dir);
+  writePidFile(paths.pid, 4245);
+  try {
+    const result = await startDetachedHub({
+      port: 5175,
+      runDir: dir,
+      scriptPath: join(dir, 'missing-server.mjs'),
+      fetchImpl: async () => ({ ok: false, json: async () => null }),
+      processAlive: () => false,
+      exists: () => false,
+      log: { warn() {} },
+    });
+    assert.deepEqual(result, {
+      started: false,
+      ready: false,
+      pid: null,
+      log: paths.log,
+    });
+    assert.equal(readPidFile(paths.pid), null);
+    assert.match(agentHubSource, /join\(paths\.dir, 'launches', launchId\)/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('startDetachedHub retains a dead pid quarantine for caller-managed roots', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rhwp-start-external-roots-'));
+  const paths = hubRunPaths(dir);
+  writePidFile(paths.pid, 4246);
+  try {
+    const result = await startDetachedHub({
+      port: 5175,
+      runDir: dir,
+      env: {
+        RHWP_WORK_DIR: join(dir, 'external-work'),
+        RHWP_RUNTIME_DIR: join(dir, 'external-runtime'),
+      },
+      fetchImpl: async () => ({ ok: false, json: async () => null }),
+      processAlive: () => false,
+    });
+    assert.equal(result.error, 'hub-cleanup-unproven');
+    assert.equal(readPidFile(paths.pid), 4246);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

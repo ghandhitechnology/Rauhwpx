@@ -93,6 +93,21 @@ export const ENGINE_EDIT_CAPABILITIES = [
     "signature": "applyCharFormatInFootnote(sec: number, para: number, control: number, notePara: number, start: number, end: number, props: string)"
   },
   {
+    "method": "applyCharFormatInHeaderFooter",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "isHeader",
+      "applyTo",
+      "startHfParaIdx",
+      "startOffset",
+      "endHfParaIdx",
+      "endOffset",
+      "propsJson"
+    ],
+    "signature": "applyCharFormatInHeaderFooter(sec: number, isHeader: boolean, applyTo: number, startHfParaIdx: number, startOffset: number, endHfParaIdx: number, endOffset: number, propsJson: string,)"
+  },
+  {
     "method": "applyCharFormatInHf",
     "kind": "document",
     "parameters": [
@@ -1199,6 +1214,21 @@ export const ENGINE_EDIT_CAPABILITIES = [
       "caseSensitive"
     ],
     "signature": "replaceOne(query: string, newText: string, caseSensitive: boolean)"
+  },
+  {
+    "method": "replaceRangeInHeaderFooter",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "isHeader",
+      "applyTo",
+      "startHfParaIdx",
+      "startOffset",
+      "endHfParaIdx",
+      "endOffset",
+      "replacementText"
+    ],
+    "signature": "replaceRangeInHeaderFooter(sec: number, isHeader: boolean, applyTo: number, startHfParaIdx: number, startOffset: number, endHfParaIdx: number, endOffset: number, replacementText: string,)"
   },
   {
     "method": "replaceText",

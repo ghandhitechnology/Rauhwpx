@@ -66,9 +66,10 @@ export function cloudDocumentOwner(
   documentId: string | null,
 ): CloudDocumentOwner | null {
   if (!documentId) return null;
-  const sessions = snapshot.session.kind === 'idle'
+  const activeSession = snapshot.session;
+  const sessions = activeSession.kind === 'idle'
     ? snapshot.sessions
-    : [snapshot.session, ...snapshot.sessions.filter((session) => session.sessionId !== snapshot.session.sessionId)];
+    : [activeSession, ...snapshot.sessions.filter((session) => session.sessionId !== activeSession.sessionId)];
   const owned = sessions.find((session) => (
     session.documentId === documentId
     && session.kind !== 'completed'
@@ -76,8 +77,9 @@ export function cloudDocumentOwner(
     && session.kind !== 'cancelled'
   ));
   if (owned) return { sessionId: owned.sessionId, threadId: owned.threadId };
-  if (snapshot.lease.owner === 'cloud') {
-    const leased = sessions.find((session) => session.sessionId === snapshot.lease.sessionId);
+  const lease = snapshot.lease;
+  if (lease.owner === 'cloud') {
+    const leased = sessions.find((session) => session.sessionId === lease.sessionId);
     if (leased?.documentId === documentId) {
       return { sessionId: leased.sessionId, threadId: leased.threadId };
     }
