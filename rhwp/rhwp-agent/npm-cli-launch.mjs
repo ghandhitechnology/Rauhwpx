@@ -11,7 +11,7 @@ export const WINDOWS_CMD_LINE_LIMIT = 8191;
 
 const BATCH_EXT = /\.(?:cmd|bat)$/i;
 /** npm/pnpm/yarn cmd-shim: node (or %_prog%) plus a quoted JS entry, forwarding %*. */
-const NODE_SHIM_INVOCATION = /(?:^|[\s&])(?:node(?:\.exe)?|"[^"\r\n]*node(?:\.exe)?"|"%_prog%")[ \t]+"([^"\r\n]+\.(?:cjs|mjs|js))"[ \t]+%\*/gi;
+const NODE_SHIM_INVOCATION = /(?:^|[\s&])(?:node(?:\.exe)?|"(?:[^"\r\n]*[/\\])?node(?:\.exe)?"|"%_prog%")[ \t]+"([^"\r\n]+\.(?:cjs|mjs|js))"[ \t]+%\*/gi;
 const NODE_BIN = /^(?:node|node\.exe)$/i;
 
 /**

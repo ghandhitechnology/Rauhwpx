@@ -126,6 +126,22 @@ test('pnpm-style %~dp0 shim resolves the JS entry', (t) => {
   assert.equal(parseNpmCmdShimScript(cmdPath, readFileSync(cmdPath, 'utf8')), scriptPath);
 });
 
+test('parser does not unwrap a .cmd that invokes notnode.exe', (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-cmd-notnode-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scriptPath = path.join(root, 'entry.js');
+  writeFileSync(scriptPath, 'console.log("not node")\n');
+  const cmdPath = path.join(root, 'wrapper.cmd');
+  writeFileSync(
+    cmdPath,
+    `@ECHO OFF\r\n"C:\\tools\\notnode.exe" "%~dp0\\entry.js" %*\r\n`,
+  );
+  assert.equal(parseNpmCmdShimScript(cmdPath, readFileSync(cmdPath, 'utf8')), null);
+  const launch = resolveNpmCliLaunch(cmdPath, { platform: 'win32', nodeCommand: process.execPath });
+  assert.equal(launch.command, cmdPath);
+  assert.deepEqual(launch.leadingArgs, []);
+});
+
 test('parser does not unwrap a .cmd that only quotes a .js path', (t) => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-cmd-quoted-js-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
