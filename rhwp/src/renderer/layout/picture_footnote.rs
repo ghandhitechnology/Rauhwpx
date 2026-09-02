@@ -25,6 +25,52 @@ use crate::model::shape::{
 };
 use crate::model::style::Alignment;
 
+/// 캡션 문단 높이를 px 로 계산한다. 측정·렌더가 같은 식을 쓰도록
+/// `LayoutEngine::calculate_caption_height` 와 TAC 개체 상자(#6575)가 공유한다.
+pub(crate) fn caption_height_px(caption: &Option<Caption>, dpi: f64) -> f64 {
+    let caption = match caption {
+        Some(c) => c,
+        None => return 0.0,
+    };
+
+    if caption.paragraphs.is_empty() {
+        return 0.0;
+    }
+
+    let mut line_seg_height = 0.0f64;
+    let mut composed_height = 0.0f64;
+    for para in &caption.paragraphs {
+        if let (Some(first), Some(last)) = (para.line_segs.first(), para.line_segs.last()) {
+            let para_top = first.vertical_pos.min(0);
+            let para_bottom = last.vertical_pos + last.line_height;
+            line_seg_height = line_seg_height.max(hwpunit_to_px(para_bottom - para_top, dpi));
+        }
+
+        let composed = compose_paragraph(para);
+        if composed.lines.is_empty() {
+            composed_height += hwpunit_to_px(400, dpi); // 기본 줄 높이
+        } else {
+            for (i, line) in composed.lines.iter().enumerate() {
+                let line_h = hwpunit_to_px(line.line_height, dpi);
+                // 마지막 줄의 trailing line_spacing 은 개체 상자에 넣지 않는다.
+                // Hangul 저장 lineseg / `height_measurer::measure_caption` /
+                // 업스트림 `composer::caption_height_px` 와 같은 계약이다.
+                // `layout_caption` 이 문단 커서에 trailing ls 를 더하는 것은
+                // 캡션 *다음* 흐름이며, TAC 호스트 줄의 객체 상자(그림+간격+캡션)와
+                // 다른 축이다. 여기 포함하면 표·부동 그림 캡션 예약이 전역으로 커진다.
+                let spacing = if i < composed.lines.len() - 1 {
+                    hwpunit_to_px(line.line_spacing, dpi)
+                } else {
+                    0.0
+                };
+                composed_height += line_h + spacing;
+            }
+        }
+    }
+
+    line_seg_height.max(composed_height)
+}
+
 impl LayoutEngine {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn layout_picture(
@@ -636,42 +682,7 @@ impl LayoutEngine {
         caption: &Option<Caption>,
         _styles: &ResolvedStyleSet,
     ) -> f64 {
-        let caption = match caption {
-            Some(c) => c,
-            None => return 0.0,
-        };
-
-        if caption.paragraphs.is_empty() {
-            return 0.0;
-        }
-
-        let mut line_seg_height = 0.0f64;
-        let mut composed_height = 0.0f64;
-        for para in &caption.paragraphs {
-            if let (Some(first), Some(last)) = (para.line_segs.first(), para.line_segs.last()) {
-                let para_top = first.vertical_pos.min(0);
-                let para_bottom = last.vertical_pos + last.line_height;
-                line_seg_height =
-                    line_seg_height.max(hwpunit_to_px(para_bottom - para_top, self.dpi));
-            }
-
-            let composed = compose_paragraph(para);
-            if composed.lines.is_empty() {
-                composed_height += hwpunit_to_px(400, self.dpi); // 기본 줄 높이
-            } else {
-                for (i, line) in composed.lines.iter().enumerate() {
-                    let line_h = hwpunit_to_px(line.line_height, self.dpi);
-                    let spacing = if i < composed.lines.len() - 1 {
-                        hwpunit_to_px(line.line_spacing, self.dpi)
-                    } else {
-                        0.0 // 마지막 줄은 line_spacing 제외
-                    };
-                    composed_height += line_h + spacing;
-                }
-            }
-        }
-
-        line_seg_height.max(composed_height)
+        caption_height_px(caption, self.dpi)
     }
 
     /// 캡션을 레이아웃한다.
