@@ -52,10 +52,16 @@ pub(crate) fn caption_height_px(caption: &Option<Caption>, dpi: f64) -> f64 {
         } else {
             for (i, line) in composed.lines.iter().enumerate() {
                 let line_h = hwpunit_to_px(line.line_height, dpi);
+                // 마지막 줄의 trailing line_spacing 은 개체 상자에 넣지 않는다.
+                // Hangul 저장 lineseg / `height_measurer::measure_caption` /
+                // 업스트림 `composer::caption_height_px` 와 같은 계약이다.
+                // `layout_caption` 이 문단 커서에 trailing ls 를 더하는 것은
+                // 캡션 *다음* 흐름이며, TAC 호스트 줄의 객체 상자(그림+간격+캡션)와
+                // 다른 축이다. 여기 포함하면 표·부동 그림 캡션 예약이 전역으로 커진다.
                 let spacing = if i < composed.lines.len() - 1 {
                     hwpunit_to_px(line.line_spacing, dpi)
                 } else {
-                    0.0 // 마지막 줄은 line_spacing 제외
+                    0.0
                 };
                 composed_height += line_h + spacing;
             }

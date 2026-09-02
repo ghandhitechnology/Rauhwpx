@@ -608,6 +608,34 @@ mod tac_object_box_height_tests {
         let img_y = inline_picture_baseline_y(y, baseline, box_h);
         assert!((img_y - y).abs() < 0.01, "img_y={img_y:.2} y={y:.2}");
     }
+
+    #[test]
+    fn last_caption_line_spacing_is_not_part_of_the_object_box() {
+        // Hangul 저장 lineseg / measure_caption 과 같이 마지막 줄 trailing ls 는
+        // 개체 상자에 넣지 않는다. layout_caption 의 문단 커서 전진과 다른 축.
+        let pic_h = 205.7;
+        let caption = Caption {
+            direction: CaptionDirection::Bottom,
+            spacing: 850,
+            paragraphs: vec![Paragraph {
+                line_segs: vec![LineSeg {
+                    line_height: 2000,
+                    text_height: 2000,
+                    baseline_distance: 2000,
+                    line_spacing: 780,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let box_h = tac_object_box_height_px(pic_h, &Some(caption), 96.0);
+        let expected = pic_h + hwpunit_to_px(850, 96.0) + hwpunit_to_px(2000, 96.0);
+        assert!(
+            (box_h - expected).abs() < 0.01,
+            "box_h={box_h:.2} expected={expected:.2} (trailing ls 780HU 미포함)"
+        );
+    }
 }
 
 fn is_caption_cell_context(cell_ctx: Option<&CellContext>) -> bool {
