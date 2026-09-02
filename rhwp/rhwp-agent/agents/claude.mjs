@@ -428,6 +428,7 @@ export function createClaudeSession(opts, {
     return resolveNpmCliLaunch(opts.claudeBin ?? 'claude', {
       platform,
       nodeCommand,
+      env: claudeProcessEnv(opts, opts.providerEnv ?? process.env),
     });
   }
 
@@ -902,15 +903,17 @@ export function createClaudeSession(opts, {
     let query;
     try {
       const launch = claudeCliLaunch();
+      const options = buildClaudeSdkOptions({
+        ...opts,
+        ...(launch.leadingArgs[0] ? { claudeBin: launch.leadingArgs[0] } : {}),
+        requestUserInput(request, signal) {
+          return requestSdkUserInput(owner, request, signal);
+        },
+      }, sessionId, resume, owner.abortController);
+      options.env = { ...options.env, ...launch.env };
       query = queryAgent({
         prompt: owner.queue,
-        options: buildClaudeSdkOptions({
-          ...opts,
-          ...(launch.leadingArgs[0] ? { claudeBin: launch.leadingArgs[0] } : {}),
-          requestUserInput(request, signal) {
-            return requestSdkUserInput(owner, request, signal);
-          },
-        }, sessionId, resume, owner.abortController),
+        options,
       });
     } catch (error) {
       owner.active = false;

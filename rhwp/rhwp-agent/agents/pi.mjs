@@ -546,11 +546,14 @@ export function createPiSession(opts, {
 
       let proc;
       try {
-        const launched = applyNpmCliLaunch(opts.piBin ?? 'pi', argv, { platform, nodeCommand });
+        const spawnEnv = buildPiEnv(opts);
+        const launched = applyNpmCliLaunch(opts.piBin ?? 'pi', argv, {
+          platform, nodeCommand, env: spawnEnv,
+        });
         proc = spawnProcess(launched.command, launched.argv, {
           ...processTreeSpawnOptions(),
           cwd: opts.rootDir,
-          env: { ...buildPiEnv(opts), ...launched.env },
+          env: { ...spawnEnv, ...launched.env },
           // stdin 은 반드시 닫아야 한다: json 모드는 열린 stdin 을 계속 기다린다.
           stdio: ['ignore', 'pipe', 'pipe'],
         });

@@ -126,6 +126,57 @@ test('pnpm-style %~dp0 shim resolves the JS entry', (t) => {
   assert.equal(parseNpmCmdShimScript(cmdPath, readFileSync(cmdPath, 'utf8')), scriptPath);
 });
 
+test('parser does not unwrap a .cmd that only quotes a .js path', (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-cmd-quoted-js-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const scriptPath = path.join(root, 'helper.js');
+  writeFileSync(scriptPath, 'console.log("data")\n');
+  const cmdPath = path.join(root, 'wrapper.cmd');
+  writeFileSync(cmdPath, [
+    '@ECHO OFF',
+    `echo using "%~dp0\\helper.js" as data`,
+    'copy "%~dp0\\helper.js" "%TEMP%\\out.js"',
+    '',
+  ].join('\r\n'));
+  assert.equal(parseNpmCmdShimScript(cmdPath, readFileSync(cmdPath, 'utf8')), null);
+  const launch = resolveNpmCliLaunch(cmdPath, { platform: 'win32', nodeCommand: process.execPath });
+  assert.equal(launch.command, cmdPath);
+  assert.deepEqual(launch.leadingArgs, []);
+  assert.deepEqual(launch.env, {});
+});
+
+test('parser does not unwrap a node shim whose JS entry is missing', (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-cmd-missing-js-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const cmdPath = path.join(root, 'claude.cmd');
+  writeFileSync(cmdPath, `@ECHO OFF\r\n"%_prog%" "%~dp0\\missing-cli.js" %*\r\n`);
+  assert.equal(parseNpmCmdShimScript(cmdPath, readFileSync(cmdPath, 'utf8')), null);
+  const launch = resolveNpmCliLaunch(cmdPath, { platform: 'win32', nodeCommand: process.execPath });
+  assert.equal(launch.command, cmdPath);
+  assert.deepEqual(launch.leadingArgs, []);
+});
+
+test('Windows PATH lookup uses the provided env, not process.env', (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-cmd-path-env-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const { cmdPath, scriptPath } = writeNpmCmdShim(root, 'claude', 'cli.js');
+  const seen = [];
+  const launch = resolveNpmCliLaunch('claude', {
+    platform: 'win32',
+    nodeCommand: process.execPath,
+    env: { PATH: 'C:\\custom\\bin' },
+    whichSync(command, options) {
+      seen.push({ command, options });
+      return command === 'claude' ? cmdPath : null;
+    },
+  });
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].command, 'claude');
+  assert.equal(seen[0].options.path, 'C:\\custom\\bin');
+  assert.equal(launch.command, process.execPath);
+  assert.deepEqual(launch.leadingArgs, [scriptPath]);
+});
+
 test('Unix launches stay on the original binary', () => {
   const launch = resolveNpmCliLaunch('claude', { platform: 'linux', nodeCommand: '/usr/bin/node' });
   assert.deepEqual(launch, { command: 'claude', leadingArgs: [], env: {} });
@@ -242,4 +293,58 @@ test('createClaudeSession unwraps a Windows .cmd bin before spawn', async (t) =>
   assert.equal(spawns[0].argv.includes('--append-system-prompt'), true);
   assert.equal(/\.(?:cmd|bat)$/i.test(spawns[0].command), false);
   assert.equal(events.some((event) => event.type === 'turn-start'), true);
+});
+
+async function waitUntil(predicate, message = 'condition did not settle') {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (predicate()) return;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.fail(message);
+}
+
+test('native Claude SDK launch unwraps Windows .cmd and merges Electron env', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-claude-sdk-unwrap-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const { cmdPath, scriptPath } = writeNpmCmdShim(root, 'claude', 'cli.js');
+  const electronBin = path.join(root, 'Rauhwpx.exe');
+  const events = [];
+  const sdkOptions = [];
+  const session = createClaudeSession({
+    ...claudeOpts,
+    claudeBin: cmdPath,
+    agentRole: 'chat',
+    requestUserInput: async () => ({ status: 'cancelled', reason: 'user-stop' }),
+    onEvent: (event) => events.push(event),
+  }, {
+    platform: 'win32',
+    nodeCommand: electronBin,
+    queryAgent({ prompt, options }) {
+      sdkOptions.push(options);
+      const query = (async function* () {
+        for await (const _message of prompt) {
+          yield {
+            type: 'system',
+            subtype: 'init',
+            session_id: options.sessionId ?? options.resume,
+            model: 'claude-test',
+          };
+          yield { type: 'result', subtype: 'success', is_error: false, stop_reason: 'end_turn', result: 'done' };
+        }
+      })();
+      query.close = () => {};
+      return query;
+    },
+    spawnProcess() { throw new Error('legacy transport should not spawn'); },
+    terminateProcess() { return true; },
+    waitForExit: async () => true,
+    closeGraceMs: 1,
+  });
+  t.after(() => session.dispose());
+  session.sendUserMessage('review');
+  await waitUntil(() => events.some((event) => event.type === 'turn-end'));
+  assert.equal(sdkOptions.length, 1);
+  assert.equal(sdkOptions[0].pathToClaudeCodeExecutable, scriptPath);
+  assert.equal(sdkOptions[0].env.ELECTRON_RUN_AS_NODE, '1');
+  assert.equal(/\.(?:cmd|bat)$/i.test(sdkOptions[0].pathToClaudeCodeExecutable), false);
 });

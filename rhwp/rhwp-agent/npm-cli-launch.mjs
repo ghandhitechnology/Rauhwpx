@@ -10,7 +10,8 @@ const escape = require('cross-spawn/lib/util/escape');
 export const WINDOWS_CMD_LINE_LIMIT = 8191;
 
 const BATCH_EXT = /\.(?:cmd|bat)$/i;
-const QUOTED_JS = /["']([^"']+\.(?:cjs|mjs|js))["']/gi;
+/** npm/pnpm/yarn cmd-shim: node (or %_prog%) plus a quoted JS entry, forwarding %*. */
+const NODE_SHIM_INVOCATION = /(?:^|[\s&])(?:node(?:\.exe)?|"[^"\r\n]*node(?:\.exe)?"|"%_prog%")[ \t]+"([^"\r\n]+\.(?:cjs|mjs|js))"[ \t]+%\*/gi;
 const NODE_BIN = /^(?:node|node\.exe)$/i;
 
 /**
@@ -48,6 +49,8 @@ function expandCmdVars(raw, cmdFile) {
 
 /**
  * npm/pnpm/yarn 이 쓰는 Windows `.cmd` 심에서 Node 엔트리 스크립트 경로를 꺼낸다.
+ * node/`%_prog%` 가 `%*` 를 넘기는 호출만 인정하고, 그 스크립트가 실제로 있을 때만
+ * 경로를 돌려준다. 그 외 배치 파일은 null — 호출자가 원래 `.cmd` 를 유지한다.
  *
  * @param {string} cmdPath
  * @param {string} contents
@@ -56,12 +59,11 @@ function expandCmdVars(raw, cmdFile) {
  */
 export function parseNpmCmdShimScript(cmdPath, contents, deps = {}) {
   const existsSync = deps.existsSync ?? fsExistsSync;
-  const candidates = [];
-  for (const match of String(contents).matchAll(QUOTED_JS)) {
+  for (const match of String(contents).matchAll(NODE_SHIM_INVOCATION)) {
     const resolved = path.resolve(expandCmdVars(match[1], cmdPath));
-    if (resolved !== path.resolve(cmdPath)) candidates.push(resolved);
+    if (resolved !== path.resolve(cmdPath) && existsSync(resolved)) return resolved;
   }
-  return candidates.find((candidate) => existsSync(candidate)) ?? candidates.at(-1) ?? null;
+  return null;
 }
 
 function resolveWindowsCommand(command, deps = {}) {

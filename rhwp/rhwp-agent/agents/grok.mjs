@@ -1321,15 +1321,16 @@ export function createGrokSession(opts, {
     try {
       prepareNativeHome();
       writeFileSync(promptPath, text, 'utf8');
+      const spawnEnv = buildGrokEnv(opts);
       const launched = applyNpmCliLaunch(
         opts.grokBin ?? 'grok',
         buildGrokArgv(opts, sessionId, resume, promptPath),
-        { platform, nodeCommand },
+        { platform, nodeCommand, env: spawnEnv },
       );
       proc = spawnProcess(launched.command, launched.argv, {
         ...processTreeSpawnOptions(),
         cwd: opts.rootDir,
-        env: { ...buildGrokEnv(opts), ...launched.env },
+        env: { ...spawnEnv, ...launched.env },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch (e) {

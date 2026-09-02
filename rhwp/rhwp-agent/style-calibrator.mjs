@@ -252,16 +252,18 @@ function runCli(command, args, stdin, cwd, timeoutMs, unavailableCode, deps = {}
   return new Promise((resolve, reject) => {
     const spawnProcess = deps.spawnProcess ?? spawn;
     const terminateProcess = deps.terminateProcess ?? terminateProcessTree;
+    const spawnEnv = isolatedProcessEnv(deps);
     const launched = applyNpmCliLaunch(command, args, {
       platform: deps.platform,
       nodeCommand: deps.nodeCommand,
+      env: spawnEnv,
     });
     let child;
     try {
       child = spawnProcess(launched.command, launched.argv, {
         ...processTreeSpawnOptions(),
         cwd,
-        env: { ...isolatedProcessEnv(deps), ...launched.env },
+        env: { ...spawnEnv, ...launched.env },
         stdio: ['pipe', 'pipe', 'pipe'],
       });
     } catch (error) {
