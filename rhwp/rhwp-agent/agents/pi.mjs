@@ -15,6 +15,7 @@ import {
   truncate,
   validateExecutionMode,
 } from './backend.mjs';
+import { applyNpmCliLaunch } from '../npm-cli-launch.mjs';
 import {
   PROCESS_TREE_CLEANUP_OUTCOME,
   processTreeCleanupOutcome,
@@ -349,6 +350,7 @@ export function createPiSession(opts, {
   waitForExit = waitForProcessTreeExit,
   closeGraceMs = 2_000,
   platform = process.platform,
+  nodeCommand = process.execPath,
 } = {}) {
   const onEvent = opts.onEvent;
 
@@ -544,10 +546,14 @@ export function createPiSession(opts, {
 
       let proc;
       try {
-        proc = spawnProcess(opts.piBin ?? 'pi', argv, {
+        const spawnEnv = buildPiEnv(opts);
+        const launched = applyNpmCliLaunch(opts.piBin ?? 'pi', argv, {
+          platform, nodeCommand, env: spawnEnv,
+        });
+        proc = spawnProcess(launched.command, launched.argv, {
           ...processTreeSpawnOptions(),
           cwd: opts.rootDir,
-          env: buildPiEnv(opts),
+          env: { ...spawnEnv, ...launched.env },
           // stdin 은 반드시 닫아야 한다: json 모드는 열린 stdin 을 계속 기다린다.
           stdio: ['ignore', 'pipe', 'pipe'],
         });

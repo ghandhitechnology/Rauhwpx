@@ -64,9 +64,12 @@ const CLAUDE_INPUT = {
 };
 
 async function waitUntil(predicate, message = 'condition did not settle') {
-  for (let attempt = 0; attempt < 100; attempt++) {
+  const deadline = Date.now() + 1_000;
+  while (Date.now() < deadline) {
     if (predicate()) return;
-    await new Promise((resolve) => setImmediate(resolve));
+    // Pump timers, not only immediates: Windows timer resolution can make a
+    // 20ms closeGrace and a 30ms sleep fire in the same tick.
+    await new Promise((resolve) => setTimeout(resolve, 10));
   }
   assert.fail(message);
 }
@@ -395,7 +398,7 @@ test('a never-settling Claude SDK query quarantines restart and credential clean
     spawnProcess() { throw new Error('legacy transport should not spawn'); },
   });
   session.sendUserMessage('finish one turn then hang');
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  await waitUntil(() => events.at(-1)?.type === 'turn-end');
   assert.equal(events.at(-1)?.type, 'turn-end');
   assert.equal(events.at(-1)?.stopReason, 'failed');
 
@@ -450,7 +453,7 @@ test('Claude does not announce a queued turn when interrupted SDK cleanup times 
   await waitUntil(() => events.some((event) => event.type === 'session-info'));
   session.interrupt();
   session.sendUserMessage('turn B must remain unannounced');
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  await waitUntil(() => events.filter((event) => event.type === 'turn-end').length === 2);
 
   assert.equal(queryCalls, 1);
   assert.equal(events.filter((event) => event.type === 'turn-start').length, 1);

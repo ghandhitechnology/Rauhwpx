@@ -55,8 +55,9 @@ test('nightly and tagged releases do not gate packaging on Browserbase live smok
   }
 
   const release = read('.github/workflows/release.yml');
-  assert.match(release, /^  macos:\n[\s\S]*?^    needs: \[preflight, verification\]$/m);
-  assert.match(release, /^  windows:\n[\s\S]*?^    needs: \[preflight, verification\]$/m);
+  assert.match(release, /^  macos:\n[\s\S]*?^    needs: preflight$/m);
+  assert.match(release, /^  windows:\n[\s\S]*?^    needs: preflight$/m);
+  assert.match(release, /^  publish:\n[\s\S]*?^    needs: \[verification, macos, windows\]$/m);
 
   const smoke = read('rhwp/rhwp-agent/tests/browserbase-live-smoke.mjs');
   assert.match(smoke, /for \(let cycle = 1; cycle <= 3; cycle \+= 1\)/);
@@ -116,6 +117,37 @@ test('third-party Rust toolchain actions are pinned to immutable commits', () =>
     assert.ok(references.length > 0, `${path} must install Rust through the pinned action`);
     for (const [, reference] of references) assert.match(reference, /^[0-9a-f]{40}$/);
   }
+});
+
+test('full Rust verification runs concurrently without dropping doctests', () => {
+  for (const path of ['.github/workflows/nightly.yml', '.github/workflows/release.yml']) {
+    const workflow = read(path);
+    assert.match(
+      workflow,
+      /uses: taiki-e\/install-action@[0-9a-f]{40}[^\n]*\n\s+with:\n\s+tool: cargo-nextest@0\.9\.143\n\s+fallback: none/,
+    );
+    assert.match(workflow, /cargo nextest run --locked --workspace --test-threads 4/);
+    assert.match(workflow, /cargo test --locked --workspace --doc/);
+    assert.doesNotMatch(workflow, /run: cargo test --locked --workspace\s*$/m);
+  }
+});
+
+test('tagged Rust verification is sharded and isolates its timing guard', () => {
+  const workflow = read('.github/workflows/release.yml');
+  assert.match(
+    workflow,
+    /^    strategy:\n      fail-fast: false\n      matrix:\n        shard: \[1, 2\]$/m,
+  );
+  assert.match(
+    workflow,
+    /cargo nextest run --locked --workspace --test-threads 4 --partition count:\$\{\{ matrix\.shard \}\}\/2/,
+  );
+  assert.match(workflow, /name: Test Rust documentation\n\s+if: matrix\.shard == 1/);
+  assert.match(workflow, /name: Install application dependencies\n\s+if: matrix\.shard == 1/);
+
+  const nextest = read('rhwp/.config/nextest.toml');
+  assert.match(nextest, /test\(inflated_row_count_does_not_slow_down_parsing\)/);
+  assert.match(nextest, /threads-required = "num-test-threads"/);
 });
 
 test('the SHA-pinned fuzz action explicitly selects the nightly toolchain', () => {

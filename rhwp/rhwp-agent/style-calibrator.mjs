@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { openRouterReady } from './agents/title.mjs';
+import { applyNpmCliLaunch } from './npm-cli-launch.mjs';
 import {
   isolatedProcessEnv,
   PROCESS_TREE_CLEANUP_OUTCOME,
@@ -251,12 +252,18 @@ function runCli(command, args, stdin, cwd, timeoutMs, unavailableCode, deps = {}
   return new Promise((resolve, reject) => {
     const spawnProcess = deps.spawnProcess ?? spawn;
     const terminateProcess = deps.terminateProcess ?? terminateProcessTree;
+    const spawnEnv = isolatedProcessEnv(deps);
+    const launched = applyNpmCliLaunch(command, args, {
+      platform: deps.platform,
+      nodeCommand: deps.nodeCommand,
+      env: spawnEnv,
+    });
     let child;
     try {
-      child = spawnProcess(command, args, {
+      child = spawnProcess(launched.command, launched.argv, {
         ...processTreeSpawnOptions(),
         cwd,
-        env: isolatedProcessEnv(deps),
+        env: { ...spawnEnv, ...launched.env },
         stdio: ['pipe', 'pipe', 'pipe'],
       });
     } catch (error) {
