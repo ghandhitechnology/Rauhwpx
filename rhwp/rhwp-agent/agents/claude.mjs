@@ -12,6 +12,7 @@ import {
   flushCredentialMirrorSync,
   prepareCredentialMirrorSync,
 } from '../credential-mirror.mjs';
+import { resolveNpmCliLaunch } from '../npm-cli-launch.mjs';
 import {
   createLineReader,
   isPlanningRestricted,
@@ -343,6 +344,8 @@ export function createClaudeSession(opts, {
   queryAgent = queryClaude,
   closeGraceMs = 2_000,
   flushCredentialMirrors = flushClaudeCredentialMirrors,
+  platform = process.platform,
+  nodeCommand = process.execPath,
 } = {}) {
   let sessionId = crypto.randomUUID();
   const onEvent = opts.onEvent;
@@ -419,6 +422,13 @@ export function createClaudeSession(opts, {
 
   function buildArgv(resume) {
     return buildClaudeArgv(opts, sessionId, resume);
+  }
+
+  function claudeCliLaunch() {
+    return resolveNpmCliLaunch(opts.claudeBin ?? 'claude', {
+      platform,
+      nodeCommand,
+    });
   }
 
   function clearSettleTimer() {
@@ -891,10 +901,12 @@ export function createClaudeSession(opts, {
     sdkOwner = owner;
     let query;
     try {
+      const launch = claudeCliLaunch();
       query = queryAgent({
         prompt: owner.queue,
         options: buildClaudeSdkOptions({
           ...opts,
+          ...(launch.leadingArgs[0] ? { claudeBin: launch.leadingArgs[0] } : {}),
           requestUserInput(request, signal) {
             return requestSdkUserInput(owner, request, signal);
           },
@@ -1018,10 +1030,11 @@ export function createClaudeSession(opts, {
     sessionIdConsumed = true;
     // 새 프로세스 = usage 누적 카운터 리셋 — 차분 기준선도 함께 리셋한다.
     usageBaseline = new Map();
-    const proc = spawnProcess(opts.claudeBin ?? 'claude', buildArgv(resume), {
+    const launch = claudeCliLaunch();
+    const proc = spawnProcess(launch.command, [...launch.leadingArgs, ...buildArgv(resume)], {
       ...processTreeSpawnOptions(),
       cwd: opts.rootDir,
-      env: claudeProcessEnv(opts, opts.providerEnv ?? process.env),
+      env: { ...claudeProcessEnv(opts, opts.providerEnv ?? process.env), ...launch.env },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     child = proc;
