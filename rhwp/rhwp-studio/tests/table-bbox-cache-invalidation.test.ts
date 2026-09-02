@@ -43,10 +43,11 @@ test('편집 후 처리에서 표 리사이즈 런타임 캐시를 무효화한�
   assert.match(body, /this\.protectedCellHitCache = null/, 'protectedCellHitCache 무효화 유지');
 });
 
-test('무효화 루틴이 두 캐시 필드를 모두 비운다', () => {
+test('무효화 루틴이 두 캐시 필드와 실패 메모를 모두 비운다', () => {
   const body = methodBody('clearTableResizeRuntimeCache');
   assert.match(body, /this\.cachedTableRef = null/, 'cachedTableRef 를 비워야 함');
   assert.match(body, /this\.cachedCellBboxes = null/, 'cachedCellBboxes 를 비워야 함');
+  assert.match(body, /this\.tableBboxFetchFailures\.clear\(\)/, '실패 메모도 함께 비워야 함');
 });
 
 test('undo/redo 도 같은 루틴을 계속 사용한다', () => {
