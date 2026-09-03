@@ -349,16 +349,12 @@ impl DocumentCore {
         ))
     }
 
-    /// 소유 문단이 실재하는지 확인하고 리셋 판별용 저장 흐름 end 를 돌려준다.
-    /// 변경 전에 호출해 소유자 경로가 깨진 필드를 반쯤 적용한 채 성공으로 보고하지 않는다.
     fn field_owner_flow_end(&self, location: &FieldLocation) -> Result<Option<i32>, HwpError> {
         let owner = para_at_location(self, location)
             .ok_or_else(|| HwpError::InvalidField("필드 소유 문단 경로 없음".into()))?;
         Ok(crate::renderer::composer::paragraph_flow_end(owner))
     }
 
-    /// 소유자 종류별 필드 텍스트 치환: 가상 셀 필드(`ctrl_id == 0`)는 셀 첫 문단을,
-    /// 누름틀은 `field_ranges` 구간을 바꾼다.
     fn replace_field_text(&mut self, fi: &FieldInfo, value: &str) -> Result<(), HwpError> {
         if fi.field.ctrl_id == 0 {
             self.set_cell_field_text(&fi.location, value)
@@ -560,10 +556,6 @@ impl DocumentCore {
         Ok(())
     }
 
-    /// 필드 편집 뒤 소유 문단을 재조판하고 구역 compose·페이지네이션·캐시를 갱신한다.
-    ///
-    /// `reflow_cell_paragraph_by_path` 는 경로 해석에 실패하면 조용히 반환하므로, 재조판
-    /// 뒤 소유 문단의 LineSeg 가 비어 있으면 성공으로 보고하지 않는다.
     fn refresh_field_layout(
         &mut self,
         location: &FieldLocation,
@@ -1883,7 +1875,6 @@ mod tests {
         assert_eq!(updated.char_offsets, vec![0, 1]);
     }
 
-    /// 이름 붙은 셀 하나를 가진 표를 본문에 둔 코어. raw_stream 은 무효화 관측용.
     fn core_with_named_cell(paragraphs: Vec<Paragraph>) -> DocumentCore {
         let table = Table {
             cells: vec![Cell {

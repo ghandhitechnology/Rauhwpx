@@ -2,9 +2,6 @@
 //!
 //! 재현: field-01.hwp의 빈 ClickHere range에 값을 삽입한 뒤 HWP로 직렬화하면
 //! `char_count`, `char_offsets`, `field_ranges`가 함께 갱신되어야 한다.
-//!
-//! 필드 소유자(본문 문단·표 셀·글상자·가상 셀)마다 편집 직후 소유 문단의 LineSeg 가
-//! 실체화되고, 저장·재로드 뒤에도 값·글자 모양 경계·줄 배치가 유지되어야 한다.
 
 use std::fs;
 use std::path::Path;
@@ -16,10 +13,7 @@ use rhwp::model::paragraph::{LineSeg, Paragraph};
 
 #[derive(Clone, Copy)]
 enum LineSegRoundtrip {
-    /// 저장된 LineSeg(HWP5, linesegarray 를 가진 HWPX)는 줄 수·시작·vpos 가 그대로 돌아와야 한다.
     Persist,
-    /// 저장 LineSeg 가 없던 HWPX 문단은 편집이 합성(bit 31) 줄을 만들고, 재로드 뒤에도
-    /// 저장 증거로 승격되지 않아야 한다.
     RecomputeSyntheticHwpx,
 }
 
