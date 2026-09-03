@@ -580,63 +580,66 @@ impl DocumentCore {
                 } => (*control_index, 0, *para_index),
             })
             .collect();
-        match (path.first(), path.last()) {
-            (None, _) | (_, None) => {
-                self.reflow_paragraph(section_idx, location.para_index);
-                let hwp3_layout = self.document.layout_profile().hwp3_layout();
-                crate::renderer::composer::recalculate_section_vpos(
-                    &mut self.document.sections[section_idx].paragraphs,
-                    location.para_index,
-                    None,
-                    stored_end,
-                    &self.styles,
-                    self.dpi,
-                    hwp3_layout,
-                );
-                if self.document.sections[section_idx].paragraphs[location.para_index]
-                    .line_segs
-                    .is_empty()
-                {
-                    return Err(HwpError::InvalidField(
-                        "필드 소유 본문 문단 재조판 결과가 비어 있음".into(),
-                    ));
+        let layout_result: Result<(), HwpError> = (|| {
+            match (path.first(), path.last()) {
+                (None, _) | (_, None) => {
+                    self.reflow_paragraph(section_idx, location.para_index);
+                    let hwp3_layout = self.document.layout_profile().hwp3_layout();
+                    crate::renderer::composer::recalculate_section_vpos(
+                        &mut self.document.sections[section_idx].paragraphs,
+                        location.para_index,
+                        None,
+                        stored_end,
+                        &self.styles,
+                        self.dpi,
+                        hwp3_layout,
+                    );
+                    if self.document.sections[section_idx].paragraphs[location.para_index]
+                        .line_segs
+                        .is_empty()
+                    {
+                        return Err(HwpError::InvalidField(
+                            "필드 소유 본문 문단 재조판 결과가 비어 있음".into(),
+                        ));
+                    }
+                    if self.composed[section_idx].len() > location.para_index {
+                        self.recompose_paragraph(section_idx, location.para_index);
+                    } else {
+                        self.recompose_section(section_idx);
+                    }
                 }
-                if self.composed[section_idx].len() > location.para_index {
-                    self.recompose_paragraph(section_idx, location.para_index);
-                } else {
+                (Some(&(outer_control, _, _)), Some(&(_, _, target_para))) => {
+                    self.mark_cell_control_dirty(section_idx, location.para_index, outer_control);
+                    self.reflow_cell_paragraph_by_path(
+                        section_idx,
+                        location.para_index,
+                        &path,
+                        target_para,
+                    );
+                    self.recalculate_cell_paragraph_vpos_by_path(
+                        section_idx,
+                        location.para_index,
+                        &path,
+                        target_para,
+                        None,
+                    );
+                    if self
+                        .get_cell_paragraph_mut_by_path(section_idx, location.para_index, &path)?
+                        .line_segs
+                        .is_empty()
+                    {
+                        return Err(HwpError::InvalidField(
+                            "필드 소유 중첩 문단 재조판 결과가 비어 있음".into(),
+                        ));
+                    }
                     self.recompose_section(section_idx);
                 }
             }
-            (Some(&(outer_control, _, _)), Some(&(_, _, target_para))) => {
-                self.mark_cell_control_dirty(section_idx, location.para_index, outer_control);
-                self.reflow_cell_paragraph_by_path(
-                    section_idx,
-                    location.para_index,
-                    &path,
-                    target_para,
-                );
-                self.recalculate_cell_paragraph_vpos_by_path(
-                    section_idx,
-                    location.para_index,
-                    &path,
-                    target_para,
-                    None,
-                );
-                if self
-                    .get_cell_paragraph_mut_by_path(section_idx, location.para_index, &path)?
-                    .line_segs
-                    .is_empty()
-                {
-                    return Err(HwpError::InvalidField(
-                        "필드 소유 중첩 문단 재조판 결과가 비어 있음".into(),
-                    ));
-                }
-                self.recompose_section(section_idx);
-            }
-        }
+            Ok(())
+        })();
         self.paginate_if_needed();
         self.invalidate_page_tree_cache();
-        Ok(())
+        layout_result
     }
 
     /// FieldLocation에 해당하는 Paragraph의 가변 참조를 반환한다.
@@ -1948,6 +1951,33 @@ mod tests {
         assert!(
             core.document.sections[0].raw_stream.is_some(),
             "실패한 설정은 문서를 바꾸지 않아야 한다"
+        );
+    }
+
+    #[test]
+    fn nested_reflow_failure_still_invalidates_page_tree_cache() {
+        let mut core = core_with_named_cell(vec![Paragraph {
+            text: "기존값".into(),
+            char_count: 4,
+            char_offsets: vec![0, 1, 2],
+            ..Default::default()
+        }]);
+        core.page_tree_cache.borrow_mut().push(None);
+        let location = FieldLocation {
+            section_index: 0,
+            para_index: 0,
+            nested_path: vec![NestedEntry::TableCell {
+                control_index: 0,
+                cell_index: 0,
+                para_index: 99,
+            }],
+        };
+
+        let err = core.refresh_field_layout(&location, None);
+        assert!(err.is_err());
+        assert!(
+            core.page_tree_cache.borrow().is_empty(),
+            "reflow 실패도 페이지 트리 캐시를 버려야 한다"
         );
     }
 }
