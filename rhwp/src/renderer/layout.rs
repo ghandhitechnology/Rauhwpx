@@ -9086,18 +9086,10 @@ impl LayoutEngine {
                             use crate::model::shape::CaptionDirection;
                             let caption_spacing = hwpunit_to_px(caption.spacing as i32, self.dpi);
                             let caption_h = self.calculate_caption_height(&pic.caption, styles);
-                            // 캡션은 실제로 그려진 그림 상자 바로 아래에 붙는다.
-                            // `effective_pic_y` 는 emit 된 ImageNode 의 상단이므로 상자 바닥은
-                            // 그 높이를 더한 값이다. 종전에는 상단에 `max(baseline, 높이)` 를
-                            // 더했는데, 저장 줄이 그림+캡션을 통째로 예약해 baseline 이 그림보다
-                            // 큰 줄에서는 (baseline − 그림 높이)만큼 캡션이 내려가 줄을 넘고,
-                            // 그 아래 내용이 전부 밀렸다 (156489219 5쪽: 캡션 +25.5pt, 뒤따르는
-                            // 표·그림 +17.9pt). 보통 줄은 baseline < 그림 높이라 두 식이 같다.
-                            let image_bottom = effective_pic_y + effective_pic_h;
                             let cap_y = match caption.direction {
-                                CaptionDirection::Bottom => image_bottom + caption_spacing,
+                                CaptionDirection::Bottom => pic_content_bottom + caption_spacing,
                                 CaptionDirection::Top => effective_pic_y,
-                                _ => image_bottom + caption_spacing,
+                                _ => pic_content_bottom + caption_spacing,
                             };
                             if caption.direction == CaptionDirection::Top {
                                 let dy = caption_h + caption_spacing;
