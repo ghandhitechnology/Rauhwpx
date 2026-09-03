@@ -9086,21 +9086,19 @@ impl LayoutEngine {
                             use crate::model::shape::CaptionDirection;
                             let caption_spacing = hwpunit_to_px(caption.spacing as i32, self.dpi);
                             let caption_h = self.calculate_caption_height(&pic.caption, styles);
-                            // [Task #864 Stage E v2] paragraph_layout 가 inline TAC image 를
-                            // baseline-aligned (y = pic_y + baseline - pic_h) 위치에 emit
-                            // 함. caption 은 image 바로 아래 (image_bottom = pic_y + baseline)
-                            // 에 위치해야 함. 기존 pic_y + pic_h 사용 시 image 영역 안에
-                            // 그려져 가려짐.
-                            let baseline_px = para
-                                .line_segs
-                                .first()
-                                .map(|ls| hwpunit_to_px(ls.baseline_distance, self.dpi))
-                                .unwrap_or(effective_pic_h);
-                            let image_bottom = effective_pic_y + baseline_px.max(effective_pic_h);
                             let cap_y = match caption.direction {
-                                CaptionDirection::Bottom => image_bottom + caption_spacing,
+                                CaptionDirection::Bottom => pic_content_bottom + caption_spacing,
                                 CaptionDirection::Top => effective_pic_y,
-                                _ => image_bottom + caption_spacing,
+                                CaptionDirection::Left | CaptionDirection::Right => {
+                                    let baseline_px = para
+                                        .line_segs
+                                        .first()
+                                        .map(|ls| hwpunit_to_px(ls.baseline_distance, self.dpi))
+                                        .unwrap_or(effective_pic_h);
+                                    effective_pic_y
+                                        + baseline_px.max(effective_pic_h)
+                                        + caption_spacing
+                                }
                             };
                             if caption.direction == CaptionDirection::Top {
                                 let dy = caption_h + caption_spacing;
