@@ -22,14 +22,14 @@ fn hu_px(hu: f64) -> f64 {
     hu * 96.0 / 7200.0
 }
 
-fn walk_image(node: &RenderNode, image: &mut Option<(f64, f64)>) {
+fn walk_image(node: &RenderNode, images: &mut Vec<(f64, f64)>) {
     if matches!(node.node_type, RenderNodeType::Image(_))
         && (node.bbox.width - TARGET_WIDTH_PX).abs() < 1.0
     {
-        *image = Some((node.bbox.y, node.bbox.y + node.bbox.height));
+        images.push((node.bbox.y, node.bbox.y + node.bbox.height));
     }
     for child in &node.children {
-        walk_image(child, image);
+        walk_image(child, images);
     }
 }
 
@@ -61,9 +61,14 @@ fn bottom_caption_of_tac_picture_starts_right_below_the_drawn_picture() {
     let core = DocumentCore::from_bytes(&std::fs::read(path).expect("read sample")).expect("open");
     let tree = core.build_page_render_tree(0).expect("page 1 render tree");
 
-    let mut image = None;
-    walk_image(&tree.root, &mut image);
-    let (img_y, img_bottom) = image.expect("폭 557.25px TAC 그림이 있어야 한다");
+    let mut images = Vec::new();
+    walk_image(&tree.root, &mut images);
+    assert_eq!(
+        images.len(),
+        1,
+        "폭 {TARGET_WIDTH_PX}px 의 TAC 그림은 정확히 하나여야 한다: {images:?}"
+    );
+    let (img_y, img_bottom) = images[0];
 
     let mut caption_ys = Vec::new();
     let mut caption_bottoms = Vec::new();

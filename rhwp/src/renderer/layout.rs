@@ -9089,7 +9089,16 @@ impl LayoutEngine {
                             let cap_y = match caption.direction {
                                 CaptionDirection::Bottom => pic_content_bottom + caption_spacing,
                                 CaptionDirection::Top => effective_pic_y,
-                                _ => pic_content_bottom + caption_spacing,
+                                CaptionDirection::Left | CaptionDirection::Right => {
+                                    let baseline_px = para
+                                        .line_segs
+                                        .first()
+                                        .map(|ls| hwpunit_to_px(ls.baseline_distance, self.dpi))
+                                        .unwrap_or(effective_pic_h);
+                                    effective_pic_y
+                                        + baseline_px.max(effective_pic_h)
+                                        + caption_spacing
+                                }
                             };
                             if caption.direction == CaptionDirection::Top {
                                 let dy = caption_h + caption_spacing;
