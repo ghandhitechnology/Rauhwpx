@@ -8,10 +8,24 @@ try {
   const started = await runtime.start();
   console.log(JSON.stringify({ event: 'cloud.started', ...started }));
 } catch (error) {
+  let cleanupError = null;
+  try {
+    await runtime.stop();
+  } catch (failure) {
+    cleanupError = failure;
+  }
   console.error(JSON.stringify({
     event: 'cloud.start_failed',
     message: error.message,
     code: error.code,
+    details: error.details,
+    ...(cleanupError ? {
+      cleanup: {
+        message: cleanupError.message,
+        code: cleanupError.code,
+        details: cleanupError.details,
+      },
+    } : {}),
   }));
   process.exit(1);
 }
