@@ -35,19 +35,6 @@
   gap: 8px;
 }
 
-.ag-unique-install-count {
-  margin: 0;
-  font-size: 32px;
-  font-weight: 700;
-  letter-spacing: -0.03em;
-  line-height: 1.1;
-  color: var(--ag-text);
-}
-
-.ag-unique-install-url {
-  word-break: break-all;
-}
-
 /* ── 행 (허브 · 프로바이더) ─────────────────────────── */
 
 .ag-settings-row {

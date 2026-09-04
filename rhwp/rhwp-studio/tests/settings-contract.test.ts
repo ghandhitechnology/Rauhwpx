@@ -48,8 +48,8 @@ test('초안 정규화는 표시 범위와 조판 부호 불변식을 지킨다'
   assert.equal(normalized.view.showControlCodes, true);
 });
 
-test('설정 목적지는 제품 탭을 포함하며 그 외 값은 버린다', () => {
-  assert.equal(isSettingsDestination('product'), true);
+test('설정 목적지는 편집·AI·연결만 받고 그 외 값은 버린다', () => {
+  assert.equal(isSettingsDestination('product'), false);
   assert.equal(isSettingsDestination('editing'), true);
   assert.equal(isSettingsDestination('about'), false);
 });
