@@ -399,6 +399,16 @@ try {
   await page.waitForFunction(() => document.querySelector('#cloud-workspace')?.getAttribute('aria-hidden') === 'false');
   await page.waitForFunction(() => document.querySelector('.ag-messages')?.textContent?.includes('Cloud transcript A mounted'));
   await page.waitForFunction(() => window.__cloudWorkspaceHarness.calls.some((call) => call.method === 'cloudOpenDisplay'));
+  await page.waitForFunction(() => document.querySelector('#cloud-workspace')?.dataset.displayState === 'connecting');
+  assert.deepEqual(await page.$eval('.cloud-workspace-empty', (node) => ({
+    hidden: node.hidden,
+    title: node.querySelector('.cloud-workspace-empty-title')?.textContent,
+    detail: node.querySelector('.cloud-workspace-empty-detail')?.textContent,
+  })), {
+    hidden: false,
+    title: '실시간 문서 화면을 여는 중입니다',
+    detail: '첫 화면이 오면 에이전트가 문서를 고치는 과정을 바로 볼 수 있습니다.',
+  });
   await page.evaluate(() => window.__cloudWorkspaceHarness.deliverFrame());
   await page.waitForFunction(() => {
     const image = document.querySelector('.cloud-workspace-image');
@@ -408,6 +418,8 @@ try {
   const cloudVisual = await page.evaluate(() => ({
     state: document.querySelector('#cloud-workspace')?.dataset.displayState,
     status: document.querySelector('.cloud-workspace-status')?.textContent,
+    panelStatus: document.querySelector('.ag-cloud-panel-status')?.textContent,
+    liveDocument: document.querySelector('.ag-cloud-panel-live-title')?.textContent,
     editorHidden: document.querySelector('#editor-area')?.getAttribute('aria-hidden'),
     editorInert: document.querySelector('#editor-area')?.inert,
     editorVisibility: document.querySelector('#editor-area')?.style.visibility,
@@ -420,7 +432,9 @@ try {
   }));
   assert.deepEqual(cloudVisual, {
     state: 'live',
-    status: 'Cloud 화면 연결됨 · 클릭하여 제어',
+    status: '실시간 문서 화면이 연결됐습니다. 클릭해서 직접 제어하세요.',
+    panelStatus: '문서를 편집하고 있습니다.',
+    liveDocument: '실시간 문서 화면',
     editorHidden: 'true',
     editorInert: true,
     editorVisibility: 'hidden',
@@ -428,6 +442,13 @@ try {
     cloudInert: false,
     imageSize: [64, 40],
   });
+  assert.equal(await page.$eval('.cloud-workspace-empty', (node) => node.hidden), true);
+  await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'reduce' }]);
+  assert.equal(
+    await page.$eval('.cloud-workspace-status-signal', (node) => getComputedStyle(node).animationName),
+    'none',
+  );
+  await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'no-preference' }]);
   await page.click('.cloud-workspace-canvas');
   await page.keyboard.type('A');
   await page.waitForFunction(() => window.__cloudWorkspaceHarness.calls

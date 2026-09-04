@@ -8,6 +8,8 @@ const cloudUi = readFileSync(new URL('../src/ui/agent-sidebar/cloud-ui.ts', impo
 const cloudCss = readFileSync(new URL('../src/ui/agent-sidebar/cloud-ui.css', import.meta.url), 'utf8');
 const onboarding = readFileSync(new URL('../src/ui/agent-sidebar/cloud-onboarding.ts', import.meta.url), 'utf8');
 const onboardingCss = readFileSync(new URL('../src/ui/agent-sidebar/cloud-onboarding.css', import.meta.url), 'utf8');
+const cloudWorkspace = readFileSync(new URL('../src/ui/cloud-workspace.ts', import.meta.url), 'utf8');
+const cloudWorkspaceCss = readFileSync(new URL('../src/styles/cloud-workspace.css', import.meta.url), 'utf8');
 const main = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
 const desktop = readFileSync(new URL('../src/desktop-integration.ts', import.meta.url), 'utf8');
 const cloudStart = readFileSync(new URL('../src/cloud/cloud-start.ts', import.meta.url), 'utf8');
@@ -62,6 +64,21 @@ test('cloud action is available in sidebar and fullscreen headers', () => {
   assert.match(onboarding, /document\.body\.appendChild\(overlay\)/);
   assert.match(sidebar, /stage\.appendChild\(cloudUi\.statusPanel\)/);
   assert.match(cloudCss, /\.ag-cloud-btn\[hidden\],[\s\S]*\.ag-workspace-cloud-btn\[hidden\][\s\S]*display:\s*none/);
+});
+
+test('cloud onboarding leads with the live document and supports keyboard and reduced-motion use', () => {
+  assert.match(onboarding, /ag-cloud-setup-live-document/);
+  assert.match(onboarding, /에이전트가 편집하는 문서를 그대로 봅니다/);
+  assert.match(onboarding, /ag-cloud-setup-progress-step/);
+  assert.match(onboarding, /\['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'\]/);
+  assert.match(onboarding, /requestedFocusMode/);
+  assert.match(onboardingCss, /\.ag-cloud-setup-live:empty/);
+  assert.match(onboardingCss, /\.ag-cloud-setup-option:focus-visible/);
+  assert.match(onboardingCss, /prefers-reduced-motion:\s*reduce[\s\S]*ag-cloud-setup-live-caret/);
+  assert.match(cloudWorkspace, /cloud-workspace-empty/);
+  assert.match(cloudWorkspace, /실시간 문서 화면이 연결됐습니다\. 클릭해서 직접 제어하세요\./);
+  assert.match(cloudWorkspaceCss, /prefers-reduced-motion:\s*reduce[\s\S]*cloud-workspace-status-signal/);
+  assert.doesNotMatch(`${onboarding}\n${cloudUi}\n${cloudWorkspace}`, /·/);
 });
 
 test('Raucloud stays visible but locks account-scoped starts without locking self-hosted', () => {
