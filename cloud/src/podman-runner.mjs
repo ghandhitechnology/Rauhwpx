@@ -56,6 +56,11 @@ function invalidInventory() {
   return new CloudError('PODMAN_RESPONSE_INVALID', 'Podman returned an invalid container inventory', 503);
 }
 
+function missingContainer(error) {
+  return error?.code === 'PODMAN_FAILED'
+    && /(?:no such|unknown) container|container .* not found/i.test(String(error.message ?? ''));
+}
+
 function parseInventory(output) {
   let entries;
   try {
@@ -172,13 +177,31 @@ export class PodmanRunner {
   async stop(sandboxId) {
     if (!sandboxId) return;
     await command(this.spawnProcess, 'podman', [...this.#globalArgs(), ...this.#runtimeArgs(), 'rm', '--force', sandboxId]).catch((error) => {
-      if (error.code !== 'PODMAN_FAILED') throw error;
+      if (!missingContainer(error)) throw error;
     });
   }
 
   /** Graceful shutdown must not leave worker containers behind. */
   async stopAll() {
-    const sandboxes = await this.list({ all: true }).catch(() => []);
-    await Promise.allSettled(sandboxes.map((sandbox) => this.stop(sandbox.sandboxId)));
+    const sandboxes = await this.list({ all: true });
+    const results = await Promise.allSettled(sandboxes.map((sandbox) => this.stop(sandbox.sandboxId)));
+    const failures = results.flatMap((result, index) => (
+      result.status === 'rejected'
+        ? [{ sandboxId: sandboxes[index].sandboxId, error: result.reason }]
+        : []
+    ));
+    if (failures.length) {
+      throw Object.assign(
+        new AggregateError(
+          failures.map(({ error }) => error),
+          `Podman failed to stop ${failures.length} worker container${failures.length === 1 ? '' : 's'}`,
+        ),
+        {
+          code: 'PODMAN_STOP_FAILED',
+          status: 503,
+          details: { sandboxIds: failures.map(({ sandboxId }) => sandboxId) },
+        },
+      );
+    }
   }
 }

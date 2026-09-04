@@ -31,6 +31,9 @@ export class Scheduler {
     this.lastMaintenanceAt = 0;
     this.timer = null;
     this.ticking = null;
+    this.starting = null;
+    this.stopping = null;
+    this.generation = 0;
   }
 
   async recover() {
@@ -90,8 +93,12 @@ export class Scheduler {
       }
     }
     for (const sandbox of sandboxes) {
-      const session = this.sessionStore.database.prepare('SELECT status FROM sessions WHERE id = ?').get(sandbox.sessionId);
-      if (session?.status === 'running' && liveIds.has(sandbox.sandboxId)) continue;
+      const session = this.sessionStore.database.prepare(
+        'SELECT status, sandbox_id FROM sessions WHERE id = ?',
+      ).get(sandbox.sessionId);
+      if (session?.status === 'running'
+        && session.sandbox_id === sandbox.sandboxId
+        && liveIds.has(sandbox.sandboxId)) continue;
       await this.runner.stop(sandbox.sandboxId);
       this.sessionStore.clearSandbox(sandbox.sessionId, sandbox.sandboxId);
       this.logger?.info('sandbox.stopped', { sandboxId: sandbox.sandboxId }, sandbox.sessionId);
@@ -123,17 +130,32 @@ export class Scheduler {
         });
         continue;
       }
+      let sandboxId = null;
+      let attached = false;
       try {
         const workerToken = `ra_wt_${randomBytes(32).toString('base64url')}`;
         this.sessionStore.prepareWorker(session.id, workerToken);
-        const sandboxId = await this.runner.start(session, {
+        sandboxId = await this.runner.start(session, {
           workerToken,
           controlEndpoint: this.controlEndpoint,
           controlSocket: this.controlEndpoint?.socketPath,
         });
         this.sessionStore.attachSandbox(session.id, sandboxId);
+        attached = true;
         this.logger?.info('sandbox.started', { sandboxId }, session.id);
       } catch (error) {
+        if (sandboxId && !attached) {
+          await this.runner.stop(sandboxId).then(
+            () => this.logger?.info('sandbox.start_rolled_back', { sandboxId }, session.id),
+            (cleanupError) => {
+              this.logger?.error('sandbox.start_rollback_failed', {
+                sandboxId,
+                code: cleanupError.code,
+                message: cleanupError.message,
+              }, session.id);
+            },
+          );
+        }
         this.logger?.error('sandbox.start_failed', { code: error.code, message: error.message }, session.id);
         this.sessionStore.suspend(session.id, { code: 'WORKER_START_FAILED', message: error.message });
       }
@@ -142,19 +164,46 @@ export class Scheduler {
 
   async start() {
     if (this.timer) return;
-    await this.recover();
-    await this.tick();
-    this.timer = setInterval(() => {
-      void this.tick().catch((error) => {
-        this.logger?.error('scheduler.tick_failed', { code: error.code, message: error.message });
-      });
-    }, this.intervalMs);
-    this.timer.unref();
+    if (this.starting) return this.starting;
+    if (this.stopping) {
+      await this.stopping;
+      return this.start();
+    }
+    const generation = ++this.generation;
+    let starting;
+    starting = (async () => {
+      await this.recover();
+      if (generation !== this.generation) return;
+      await this.tick();
+      if (generation !== this.generation) return;
+      this.timer = setInterval(() => {
+        if (generation !== this.generation) return;
+        void this.tick().catch((error) => {
+          this.logger?.error('scheduler.tick_failed', { code: error.code, message: error.message });
+        });
+      }, this.intervalMs);
+      this.timer.unref();
+    })().finally(() => {
+      if (this.starting === starting) this.starting = null;
+    });
+    this.starting = starting;
+    return starting;
   }
 
   async stop() {
+    if (this.stopping) return this.stopping;
+    this.generation += 1;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
-    await this.ticking;
+    const pending = [this.starting, this.ticking].filter(Boolean);
+    let stopping;
+    stopping = Promise.allSettled(pending).then(() => {
+      if (this.timer) clearInterval(this.timer);
+      this.timer = null;
+    }).finally(() => {
+      if (this.stopping === stopping) this.stopping = null;
+    });
+    this.stopping = stopping;
+    return stopping;
   }
 }

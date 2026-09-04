@@ -28,7 +28,13 @@ function shutdown(signal) {
   stop(signal).then(
     () => process.exit(0),
     (error) => {
-      console.error(JSON.stringify({ event: 'cloud.stop_failed', signal, message: error.message }));
+      console.error(JSON.stringify({
+        event: 'cloud.stop_failed',
+        signal,
+        message: error.message,
+        code: error.code,
+        details: error.details,
+      }));
       process.exit(1);
     },
   );

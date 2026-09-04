@@ -20,16 +20,36 @@ import { ProviderCliManager } from './provider-cli.mjs';
 
 function listen(server, target, host) {
   return new Promise((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(target, host, () => {
-      server.off('error', reject);
-      resolve();
-    });
+    const cleanup = () => server.off('error', onError);
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    server.once('error', onError);
+    try {
+      server.listen(target, host, () => {
+        cleanup();
+        resolve();
+      });
+    } catch (error) {
+      cleanup();
+      reject(error);
+    }
   });
 }
 
 function close(server) {
-  return new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  if (!server.listening) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+    // Cloud event streams and partial HTTP requests can otherwise keep
+    // shutdown open forever. No request may survive control-plane shutdown.
+    server.closeAllConnections?.();
+  });
+}
+
+function runtimeLifecycleError(message, code) {
+  return Object.assign(new Error(message), { code, retryable: false });
 }
 
 export function createCloudRuntime(config, dependencies = {}) {
@@ -110,6 +130,59 @@ export function createCloudRuntime(config, dependencies = {}) {
   workerServer.requestTimeout = 30_000;
   workerServer.headersTimeout = 10_000;
 
+  let lifecycle = 'idle';
+  let startPromise = null;
+  let stopPromise = null;
+  let startResult = null;
+  let databaseClosed = false;
+
+  const assertStarting = () => {
+    if (lifecycle !== 'starting') {
+      throw runtimeLifecycleError('Cloud runtime stopped during startup', 'RUNTIME_STOPPING');
+    }
+  };
+
+  const removeWorkerSocket = () => {
+    if (config.workerControlMode === 'socket' && existsSync(config.workerControlSocket)) {
+      unlinkSync(config.workerControlSocket);
+    }
+  };
+
+  const reportCleanupFailure = (event, step, error) => {
+    try {
+      logger.error(event, {
+        step, code: error?.code, message: error?.message ?? String(error), details: error?.details,
+      });
+    } catch {
+      // Cleanup cannot depend on the durable logger remaining writable.
+    }
+  };
+
+  const rollbackStart = async () => {
+    const rollbackStep = async (step, action) => {
+      try { await action(); } catch (error) {
+        reportCleanupFailure('runtime.start_rollback_failed', step, error);
+      }
+    };
+    // Stop new public work before draining schedulers and workers.
+    await rollbackStep('public_server', () => close(publicServer));
+    await rollbackStep('scheduler', () => scheduler.stop());
+    // Revoke worker processes before removing their authenticated control path.
+    await rollbackStep('workers', async () => runner.stopAll?.());
+    await rollbackStep('display', async () => displayFrameStore.closeAll());
+    await rollbackStep('worker_server', () => close(workerServer));
+    await rollbackStep('worker_socket', async () => removeWorkerSocket());
+  };
+
+  const stopStep = async (failures, step, operation) => {
+    try {
+      await operation();
+    } catch (error) {
+      failures.push({ step, error });
+      reportCleanupFailure('runtime.stop_step_failed', step, error);
+    }
+  };
+
   return {
     database,
     identity,
@@ -123,61 +196,108 @@ export function createCloudRuntime(config, dependencies = {}) {
     publicServer,
     workerServer,
     async start() {
-      try {
-        auth.prune();
-        logger.prune();
-        await blobStore.pruneStaleUploads();
-        if (config.workerControlMode === 'socket') {
-          if (existsSync(config.workerControlSocket)) unlinkSync(config.workerControlSocket);
-          await listen(workerServer, config.workerControlSocket);
-          await chmod(config.workerControlSocket, 0o600);
-          // local 실행에서는 워커가 다른 uid이므로 소켓 소유자를 워커로 옮긴다. 인증은 세션별 워커 토큰이 한다.
-          if (config.runner === 'local' && config.workerUid !== null) {
-            await chmod(config.workerControlDirectory, 0o711);
-            await chown(config.workerControlSocket, config.workerUid, config.workerGid ?? config.workerUid);
-          }
-          scheduler.controlEndpoint = { socketPath: config.workerControlSocket };
-        } else {
-          await listen(workerServer, 0, '127.0.0.1');
-          const address = workerServer.address();
-          if (!address || typeof address === 'string') throw new Error('Worker control endpoint did not bind to TCP');
-          scheduler.controlEndpoint = {
-            baseUrl: `http://host.containers.internal:${address.port}`,
-            hostUrl: `http://127.0.0.1:${address.port}`,
-          };
-          await runner.probeControl?.(scheduler.controlEndpoint);
-        }
-        await listen(publicServer, config.port, config.host);
-        await providerManager.probeAll(config.startupProviders);
-        await scheduler.start();
-        return {
-          endpoint: `http://${config.host}:${config.port}${config.basePath}`,
-          workerControlSocket: scheduler.controlEndpoint.socketPath ?? null,
-          workerControlUrl: scheduler.controlEndpoint.hostUrl ?? null,
-          serverPublicKey: identity.serverPublicKey,
-        };
-      } catch (error) {
-        displayFrameStore.closeAll();
-        await Promise.allSettled([
-          ...(publicServer.listening ? [close(publicServer)] : []),
-          ...(workerServer.listening ? [close(workerServer)] : []),
-        ]);
-        if (config.workerControlMode === 'socket' && existsSync(config.workerControlSocket)) unlinkSync(config.workerControlSocket);
-        throw error;
+      if (lifecycle === 'running') return startResult;
+      if (stopPromise || lifecycle === 'stopping' || lifecycle === 'stopped') {
+        throw runtimeLifecycleError('Cloud runtime cannot start after shutdown begins', 'RUNTIME_STOPPED');
       }
+      if (startPromise) return startPromise;
+      lifecycle = 'starting';
+      let operation;
+      operation = (async () => {
+        try {
+          auth.prune();
+          logger.prune();
+          await blobStore.pruneStaleUploads();
+          assertStarting();
+          if (config.workerControlMode === 'socket') {
+            removeWorkerSocket();
+            await listen(workerServer, config.workerControlSocket);
+            assertStarting();
+            await chmod(config.workerControlSocket, 0o600);
+            assertStarting();
+            // local 실행에서는 워커가 다른 uid이므로 소켓 소유자를 워커로 옮긴다. 인증은 세션별 워커 토큰이 한다.
+            if (config.runner === 'local' && config.workerUid !== null) {
+              await chmod(config.workerControlDirectory, 0o711);
+              assertStarting();
+              await chown(config.workerControlSocket, config.workerUid, config.workerGid ?? config.workerUid);
+              assertStarting();
+            }
+            scheduler.controlEndpoint = { socketPath: config.workerControlSocket };
+          } else {
+            await listen(workerServer, 0, '127.0.0.1');
+            assertStarting();
+            const address = workerServer.address();
+            if (!address || typeof address === 'string') throw new Error('Worker control endpoint did not bind to TCP');
+            scheduler.controlEndpoint = {
+              baseUrl: `http://host.containers.internal:${address.port}`,
+              hostUrl: `http://127.0.0.1:${address.port}`,
+            };
+            await runner.probeControl?.(scheduler.controlEndpoint);
+            assertStarting();
+          }
+          await listen(publicServer, config.port, config.host);
+          assertStarting();
+          await providerManager.probeAll(config.startupProviders);
+          assertStarting();
+          await scheduler.start();
+          assertStarting();
+          startResult = {
+            endpoint: `http://${config.host}:${config.port}${config.basePath}`,
+            workerControlSocket: scheduler.controlEndpoint.socketPath ?? null,
+            workerControlUrl: scheduler.controlEndpoint.hostUrl ?? null,
+            serverPublicKey: identity.serverPublicKey,
+          };
+          lifecycle = 'running';
+          return startResult;
+        } catch (error) {
+          if (lifecycle === 'starting') {
+            await rollbackStart();
+            if (lifecycle === 'starting') lifecycle = 'idle';
+          }
+          throw error;
+        } finally {
+          if (startPromise === operation) startPromise = null;
+        }
+      })();
+      startPromise = operation;
+      return operation;
     },
     async stop() {
-      await scheduler.stop();
-      await raucloudLease.release('CONTROL_PLANE_SHUTDOWN').catch((error) => {
-        logger.error('raucloud.release_failed', { code: error.code, message: error.message });
-      });
-      // Kill every worker before the control socket disappears so detached
-      // workers cannot survive a restart and double-execute their session.
-      await runner.stopAll?.();
-      displayFrameStore.closeAll();
-      await Promise.allSettled([close(publicServer), close(workerServer)]);
-      if (config.workerControlMode === 'socket' && existsSync(config.workerControlSocket)) unlinkSync(config.workerControlSocket);
-      database.close();
+      if (stopPromise) return stopPromise;
+      lifecycle = 'stopping';
+      const pendingStart = startPromise;
+      stopPromise = (async () => {
+        await pendingStart?.catch(() => {});
+        const failures = [];
+        // Reject new control requests first. Keep the worker endpoint open
+        // until every sandbox has stopped or reported a cleanup failure.
+        await stopStep(failures, 'public_server', () => close(publicServer));
+        await stopStep(failures, 'scheduler', () => scheduler.stop());
+        // Kill every worker before the control socket disappears so detached
+        // workers cannot survive a restart and double-execute their session.
+        await stopStep(failures, 'workers', async () => runner.stopAll?.());
+        await stopStep(failures, 'raucloud_lease', () => raucloudLease.release('CONTROL_PLANE_SHUTDOWN'));
+        await stopStep(failures, 'display', async () => displayFrameStore.closeAll());
+        await stopStep(failures, 'worker_server', () => close(workerServer));
+        await stopStep(failures, 'worker_socket', async () => removeWorkerSocket());
+        if (!databaseClosed) {
+          databaseClosed = true;
+          await stopStep(failures, 'database', async () => database.close());
+        }
+        lifecycle = 'stopped';
+        startResult = null;
+        if (failures.length) {
+          throw Object.assign(
+            new AggregateError(failures.map(({ error }) => error), 'Cloud runtime shutdown failed'),
+            {
+              code: 'RUNTIME_STOP_FAILED',
+              retryable: false,
+              details: { failedSteps: failures.map(({ step }) => step) },
+            },
+          );
+        }
+      })();
+      return stopPromise;
     },
   };
 }

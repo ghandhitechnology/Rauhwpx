@@ -252,6 +252,95 @@ test('Podman list propagates command, JSON, shape, and output-limit failures', a
   }
 });
 
+test('Podman shutdown ignores only missing containers and reports other removal failures', async () => {
+  const close = (child, code, stderr = '') => queueMicrotask(() => {
+    child.stderr.write(stderr);
+    child.stdout.end();
+    child.stderr.end();
+    child.emit('close', code);
+  });
+  const spawnWithError = (stderr) => () => {
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.stdin = new PassThrough();
+    child.kill = () => {};
+    close(child, 125, stderr);
+    return child;
+  };
+
+  const missing = new PodmanRunner({}, {
+    spawnProcess: spawnWithError('Error: no such container: already-removed'),
+  });
+  await missing.stop('already-removed');
+
+  const denied = new PodmanRunner({}, {
+    spawnProcess: spawnWithError('Error: permission denied'),
+  });
+  await assert.rejects(denied.stop('still-running'), { code: 'PODMAN_FAILED' });
+});
+
+test('Podman stopAll propagates inventory failure instead of claiming cleanup', async () => {
+  const spawnProcess = () => {
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.stdin = new PassThrough();
+    child.kill = () => {};
+    queueMicrotask(() => {
+      child.stderr.end('Podman service unavailable');
+      child.stdout.end();
+      child.emit('close', 125);
+    });
+    return child;
+  };
+  const runner = new PodmanRunner({}, { spawnProcess });
+  await assert.rejects(runner.stopAll(), { code: 'PODMAN_FAILED' });
+});
+
+test('Podman stopAll attempts every container and aggregates failed removals', async () => {
+  const firstId = 'a'.repeat(64);
+  const secondId = 'b'.repeat(64);
+  const removals = [];
+  const spawnProcess = (_executable, args) => {
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.stdin = new PassThrough();
+    child.kill = () => {};
+    queueMicrotask(() => {
+      if (args.includes('ps')) {
+        child.stdout.end(JSON.stringify([
+          { Id: firstId, Labels: { 'com.rauhwpx.session': 'session-first' }, State: 'running' },
+          { Id: secondId, Labels: { 'com.rauhwpx.session': 'session-second' }, State: 'running' },
+        ]));
+        child.stderr.end();
+        child.emit('close', 0);
+        return;
+      }
+      const sandboxId = args.at(-1);
+      removals.push(sandboxId);
+      child.stdout.end();
+      if (sandboxId === firstId) {
+        child.stderr.end('Error: permission denied');
+        child.emit('close', 125);
+      } else {
+        child.stderr.end();
+        child.emit('close', 0);
+      }
+    });
+    return child;
+  };
+  const runner = new PodmanRunner({}, { spawnProcess });
+  await assert.rejects(runner.stopAll(), (error) => {
+    assert.equal(error.code, 'PODMAN_STOP_FAILED');
+    assert.equal(error.errors.length, 1);
+    assert.deepEqual(error.details, { sandboxIds: [firstId] });
+    return true;
+  });
+  assert.deepEqual(removals.sort(), [firstId, secondId].sort());
+});
+
 test('scheduler inventory failures propagate before session recovery mutates state', async () => {
   const mutations = [];
   const inventoryError = Object.assign(new Error('Podman inventory unavailable'), { code: 'PODMAN_FAILED' });
@@ -285,8 +374,8 @@ test('scheduler does not requeue a running session whose full sandbox ID is stil
       if (sql.includes("SELECT * FROM sessions WHERE status = 'running'")) {
         return { all: () => [{ id: 'session-live', sandbox_id: fullSandboxId }] };
       }
-      if (sql.includes('SELECT status FROM sessions WHERE id = ?')) {
-        return { get: () => ({ status: 'running' }) };
+      if (sql.includes('SELECT status, sandbox_id FROM sessions WHERE id = ?')) {
+        return { get: () => ({ status: 'running', sandbox_id: fullSandboxId }) };
       }
       if (sql.includes("SELECT COUNT(*) AS count FROM sessions WHERE status = 'running'")) {
         return { get: () => ({ count: 1 }) };
@@ -309,6 +398,118 @@ test('scheduler does not requeue a running session whose full sandbox ID is stil
   assert.equal(listCalls, 1);
   assert.deepEqual(requeues, []);
   assert.deepEqual(stops, []);
+});
+
+function idleSchedulerStore() {
+  return {
+    database: {
+      prepare(sql) {
+        if (sql.includes("SELECT * FROM sessions WHERE status = 'running'")) return { all: () => [] };
+        if (sql.includes("SELECT COUNT(*) AS count FROM sessions WHERE status = 'running'")) {
+          return { get: () => ({ count: 0 }) };
+        }
+        throw new Error(`Unexpected scheduler query: ${sql}`);
+      },
+    },
+    recoverInterruptedSessions() {},
+    expireRetainedSessions: async () => {},
+    requestIdleSleeps() {},
+    claimNextSession: () => null,
+  };
+}
+
+test('scheduler startup is single-flight and stop cancels a startup still in recovery', async () => {
+  const recovery = Promise.withResolvers();
+  let listCalls = 0;
+  const runner = {
+    list: async () => {
+      listCalls += 1;
+      if (listCalls === 1) return recovery.promise;
+      return [];
+    },
+  };
+  const scheduler = new Scheduler(idleSchedulerStore(), runner, { intervalMs: 60_000 });
+  const first = scheduler.start();
+  const second = scheduler.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(listCalls, 1, 'concurrent starts must share recovery');
+
+  let stopped = false;
+  const stopping = scheduler.stop().then(() => { stopped = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(stopped, false, 'stop must wait for admitted startup work');
+  recovery.resolve([]);
+  await Promise.all([first, second, stopping]);
+
+  assert.equal(listCalls, 1, 'cancelled startup must not run its initial tick');
+  assert.equal(scheduler.timer, null);
+});
+
+test('scheduler removes a duplicate sandbox even when it has the active session label', async () => {
+  const stopped = [];
+  const cleared = [];
+  const sessionStore = {
+    database: {
+      prepare(sql) {
+        if (sql.includes("SELECT * FROM sessions WHERE status = 'running'")) {
+          return { all: () => [{ id: 'session-duplicate', sandbox_id: 'sandbox-current' }] };
+        }
+        if (sql.includes('SELECT status, sandbox_id FROM sessions WHERE id = ?')) {
+          return { get: () => ({ status: 'running', sandbox_id: 'sandbox-current' }) };
+        }
+        if (sql.includes("SELECT COUNT(*) AS count FROM sessions WHERE status = 'running'")) {
+          return { get: () => ({ count: 1 }) };
+        }
+        throw new Error(`Unexpected scheduler query: ${sql}`);
+      },
+    },
+    expireRetainedSessions: async () => {},
+    requestIdleSleeps() {},
+    clearSandbox: (...args) => cleared.push(args),
+  };
+  const runner = {
+    list: async () => [
+      { sandboxId: 'sandbox-current', sessionId: 'session-duplicate', running: true },
+      { sandboxId: 'sandbox-stale', sessionId: 'session-duplicate', running: true },
+    ],
+    stop: async (sandboxId) => { stopped.push(sandboxId); },
+  };
+  await new Scheduler(sessionStore, runner, { maxRunningSessions: 1 }).tick();
+  assert.deepEqual(stopped, ['sandbox-stale']);
+  assert.deepEqual(cleared, [['session-duplicate', 'sandbox-stale']]);
+});
+
+test('scheduler stops a worker that loses the session before sandbox attachment', async () => {
+  const stopped = [];
+  let capacityChecks = 0;
+  const sessionStore = {
+    database: {
+      prepare(sql) {
+        if (sql.includes("SELECT * FROM sessions WHERE status = 'running'")) return { all: () => [] };
+        if (sql.includes("SELECT COUNT(*) AS count FROM sessions WHERE status = 'running'")) {
+          return { get: () => ({ count: capacityChecks++ === 0 ? 0 : 1 }) };
+        }
+        throw new Error(`Unexpected scheduler query: ${sql}`);
+      },
+    },
+    expireRetainedSessions: async () => {},
+    requestIdleSleeps() {},
+    claimNextSession: () => ({ id: 'session-cancelled-during-start', provider: 'codex' }),
+    providerStatus: () => ({ available: true, authenticated: true }),
+    prepareWorker() {},
+    attachSandbox() {
+      throw Object.assign(new Error('Session was cancelled'), { code: 'INVALID_SESSION_STATE' });
+    },
+    suspend() {},
+  };
+  const runner = {
+    list: async () => [],
+    start: async () => 'sandbox-cancelled-during-start',
+    stop: async (sandboxId) => { stopped.push(sandboxId); },
+  };
+  const logger = { info() {}, error() {} };
+  await new Scheduler(sessionStore, runner, { logger, maxRunningSessions: 1 }).tick();
+  assert.deepEqual(stopped, ['sandbox-cancelled-during-start']);
 });
 
 test('scheduler starts up to the configured cap and suspends failed sandboxes durably', async (t) => {
