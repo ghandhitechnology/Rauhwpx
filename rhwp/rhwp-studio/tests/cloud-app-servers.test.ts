@@ -394,6 +394,8 @@ test('the dialog offers both servers and only restorable sandbox actions', () =>
   assert.match(onboarding, /controller\.selectServerMode\(mode\)/);
   assert.match(onboarding, /controller\.spawnSandbox\(providerId\)/);
   assert.match(onboarding, /controller\.teardownSandbox\(\)/);
+  assert.match(onboarding, /destructiveActions\.request\(\{/);
+  assert.match(onboarding, /run: teardownSandbox/);
   assert.match(onboarding, /controller\.sandboxStatus\(\)/);
   assert.doesNotMatch(onboarding, /controller\.takeoverSandbox\(\)/);
   assert.match(onboarding, /서버 강제 종료로 끊을 수 있습니다/);
@@ -408,6 +410,8 @@ test('the dialog offers both servers and only restorable sandbox actions', () =>
   assert.match(onboarding, /return raucloudSetupElapsed\(startedAt\)/);
   assert.match(onboarding, /진행 보기/);
   assert.match(onboarding, /Raucloud를 종료하고 있습니다/);
+  assert.match(cloudUi, /action: 'recreate'[\s\S]*run: recreateLink/);
+  assert.match(cloudUi, /action: 'delete'[\s\S]*run: forceQuitAccount/);
   assert.match(onboarding, /Raucloud, \$\{snapshot\.profile\.name\}/);
   assert.match(onboardingCss, /\.ag-cloud-setup-option\.ag-selected/);
   assert.match(cloudUi, /appHosted/);

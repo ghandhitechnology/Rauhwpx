@@ -358,6 +358,112 @@
   color: var(--ag-err);
 }
 
+.ag-cloud-destructive-overlay {
+  position: fixed;
+  z-index: 1400;
+  inset: 0;
+  display: grid;
+  box-sizing: border-box;
+  place-items: center;
+  padding: 18px;
+  background: color-mix(in srgb, #101318 64%, transparent);
+  backdrop-filter: blur(6px);
+}
+
+.ag-cloud-destructive-dialog {
+  display: grid;
+  box-sizing: border-box;
+  width: min(500px, 100%);
+  gap: 12px;
+  padding: 22px;
+  border: 1px solid color-mix(in srgb, var(--ui-danger) 38%, var(--n-hairline-strong));
+  border-radius: calc(var(--n-radius-panel) + 4px);
+  background: var(--n-surface);
+  color: var(--n-text);
+  font: var(--font-weight-regular, 400) var(--font-size-md, 13px)/1.55 var(--font-family-ui, sans-serif);
+  box-shadow: var(--n-elev-3);
+  animation: ag-cloud-confirm-enter 160ms ease-out both;
+}
+
+.ag-cloud-destructive-eyebrow {
+  color: var(--ui-danger);
+  font-size: var(--font-size-xs, 10px);
+  font-weight: 750;
+  letter-spacing: 0.08em;
+}
+
+.ag-cloud-destructive-dialog h2 {
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.3;
+}
+
+.ag-cloud-destructive-impact {
+  display: grid;
+  gap: 8px;
+  color: var(--n-text-secondary);
+}
+
+.ag-cloud-destructive-impact p {
+  margin: 0;
+  color: var(--n-text);
+  font-weight: 700;
+}
+
+.ag-cloud-destructive-impact ul {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 20px;
+}
+
+.ag-cloud-destructive-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.ag-cloud-destructive-button {
+  min-height: 36px;
+  padding: 0 13px;
+  border: 1px solid var(--n-hairline-strong);
+  border-radius: var(--n-radius-field);
+  background: var(--n-surface-raised);
+  color: var(--n-text-secondary);
+  font: inherit;
+  font-size: var(--font-size-sm, 11px);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.ag-cloud-destructive-button:hover:not(:disabled) {
+  background: var(--n-fill-hover);
+  color: var(--n-text);
+}
+
+.ag-cloud-destructive-button.ag-confirm {
+  border-color: var(--ui-danger-strong);
+  background: var(--ui-danger-strong);
+  color: var(--n-surface);
+}
+
+.ag-cloud-destructive-button.ag-confirm:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--ui-danger-strong) 86%, black);
+  color: var(--n-surface);
+}
+
+.ag-cloud-destructive-button:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.ag-cloud-destructive-button:disabled {
+  opacity: 0.58;
+  cursor: wait;
+}
+
 .ag-cloud-conflict {
   padding: 9px;
   border: 1px solid color-mix(in srgb, var(--ui-warning-border, #d9a441) 55%, var(--ag-border));
@@ -561,13 +667,23 @@
   100% { background-position: -100% 0; }
 }
 
+@keyframes ag-cloud-confirm-enter {
+  from { opacity: 0; transform: translateY(6px) scale(0.99); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
 @media (prefers-reduced-motion: reduce) {
+  .ag-cloud-destructive-dialog,
   .ag-cloud-btn .ag-icon,
   .ag-workspace-cloud-btn .ag-icon,
   .ag-cloud-panel-live-signal,
   .ag-cloud-recovery-pulse,
   .ag-cloud-recovery-strip-pulse {
     animation: none !important;
+  }
+
+  .ag-cloud-destructive-dialog {
+    transform: none;
   }
 
   .ag-cloud-progress-fill {
@@ -593,9 +709,32 @@
     min-height: 34px;
     flex: 1 1 calc(50% - 3px);
   }
+
+  .ag-cloud-destructive-dialog {
+    padding: 18px;
+  }
+
+  .ag-cloud-destructive-actions {
+    flex-direction: column;
+  }
+
+  .ag-cloud-destructive-button {
+    width: 100%;
+  }
 }
 
 @media (forced-colors: active) {
+  .ag-cloud-destructive-dialog,
+  .ag-cloud-destructive-button {
+    border-color: CanvasText;
+  }
+
+  .ag-cloud-destructive-button.ag-confirm {
+    border-color: Highlight;
+    background: Highlight;
+    color: HighlightText;
+  }
+
   .ag-cloud-panel-live-signal {
     background: CanvasText;
   }

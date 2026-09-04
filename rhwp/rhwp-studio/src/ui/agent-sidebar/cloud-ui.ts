@@ -37,6 +37,7 @@ import {
   runCloudSessionSelection,
 } from '../../cloud/session-binding.ts';
 import { createCheckpointMirror } from '../../cloud/checkpoint-mirror.ts';
+import { createCloudServerDestructiveActionGate } from './cloud-destructive-confirmation.ts';
 import { createCloudOnboarding } from './cloud-onboarding.ts';
 import { createIcon } from './icons.ts';
 
@@ -233,6 +234,9 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     apply: deps.onCheckpoint,
   });
   let checkpointProfileEpoch = snapshot.profileEpoch;
+  const destructiveActions = createCloudServerDestructiveActionGate({
+    onError: (error) => deps.onError(error instanceof Error ? error.message : String(error)),
+  });
 
   const sidebarButton = el('button', 'ag-header-icon-btn ag-cloud-btn') as HTMLButtonElement;
   sidebarButton.type = 'button';
@@ -328,6 +332,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       renderButtons();
       deps.onComposerSetupChange?.(active);
     },
+    destructiveActions,
   });
   const settingsElement = onboarding.settingsElement;
 
@@ -580,11 +585,26 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     });
   }
 
-  function forceQuitAccount(): void {
-    void operation(async () => {
+  async function forceQuitAccount(): Promise<void> {
+    await operation(async () => {
       snapshot = await deps.controller.forceQuitAccount();
       selectedSessionId = snapshot.session.kind === 'idle' ? null : snapshot.session.sessionId;
       if (snapshot.session.kind === 'idle') clearCloudBinding();
+    });
+  }
+
+  function requestForceQuitAccount(event: MouseEvent): void {
+    if (busy || !shouldOfferAccountForceQuit(snapshot)) return;
+    const confirmedSnapshot = snapshot;
+    void destructiveActions.request({
+      action: 'delete',
+      trigger: event.currentTarget as HTMLElement,
+      fallbackFocus: statusPanel,
+      isCurrent: () => snapshot === confirmedSnapshot
+        && !busy
+        && shouldOfferAccountForceQuit(snapshot),
+      run: forceQuitAccount,
+      onStale: () => deps.onError('Cloud 상태가 바뀌었습니다. 최신 상태를 확인한 뒤 다시 시도하세요.'),
     });
   }
 
@@ -594,17 +614,37 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     });
   }
 
-  function recreateLink(): void {
-    void operation(async () => {
+  async function recreateLink(): Promise<void> {
+    await operation(async () => {
       snapshot = await deps.controller.recreateLink();
       selectedSessionId = snapshot.session.kind === 'idle' ? null : snapshot.session.sessionId;
       if (snapshot.session.kind === 'idle') clearCloudBinding();
     });
   }
 
+  function requestRecreateLink(event: MouseEvent): void {
+    const link = inferCloudLink(snapshot);
+    if (busy || link.kind !== 'failed' || !link.canRecreate) return;
+    const confirmedSnapshot = snapshot;
+    void destructiveActions.request({
+      action: 'recreate',
+      trigger: event.currentTarget as HTMLElement,
+      fallbackFocus: statusPanel,
+      isCurrent: () => {
+        const currentLink = inferCloudLink(snapshot);
+        return snapshot === confirmedSnapshot
+          && !busy
+          && currentLink.kind === 'failed'
+          && currentLink.canRecreate;
+      },
+      run: recreateLink,
+      onStale: () => deps.onError('Cloud 상태가 바뀌었습니다. 최신 상태를 확인한 뒤 다시 시도하세요.'),
+    });
+  }
+
   function appendForceQuit(): void {
     if (!shouldOfferAccountForceQuit(snapshot)) return;
-    panelActions.append(action('서버 강제 종료', forceQuitAccount, 'ag-danger'));
+    panelActions.append(action('서버 강제 종료', requestForceQuitAccount, 'ag-danger'));
   }
 
   async function download(): Promise<void> {
@@ -914,14 +954,14 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       recoveryDetail.textContent = link.error ?? 'Cloud 서버에 닿지 않습니다.';
       recoveryActions.append(action('다시 연결', reconnectLink, 'ag-primary'));
       if (link.canRecreate) {
-        recoveryActions.append(action('서버 다시 만들기', recreateLink));
+        recoveryActions.append(action('서버 다시 만들기', requestRecreateLink, 'ag-danger'));
       }
     }
     const stripTitle = el('span', 'ag-cloud-recovery-strip-title', recoveryTitle.textContent);
     recoveryStrip.append(el('span', 'ag-cloud-recovery-strip-pulse'), stripTitle);
     if (link.kind === 'failed') {
       recoveryStrip.append(action('다시 연결', reconnectLink, 'ag-primary'));
-      if (link.canRecreate) recoveryStrip.append(action('서버 다시 만들기', recreateLink));
+      if (link.canRecreate) recoveryStrip.append(action('서버 다시 만들기', requestRecreateLink, 'ag-danger'));
     }
   }
 
@@ -1226,6 +1266,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       onboarding.handleAccountEvent(event);
     },
     dispose() {
+      destructiveActions.dispose();
       pendingTakeover?.state.transition.release();
       pendingTakeover = null;
       pendingResultReplace?.state.transition.release();

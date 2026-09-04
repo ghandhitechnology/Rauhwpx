@@ -7,6 +7,10 @@ const sidebarCss = readFileSync(new URL('../src/ui/agent-sidebar/agent-sidebar.c
 const cloudUi = readFileSync(new URL('../src/ui/agent-sidebar/cloud-ui.ts', import.meta.url), 'utf8');
 const cloudCss = readFileSync(new URL('../src/ui/agent-sidebar/cloud-ui.css', import.meta.url), 'utf8');
 const onboarding = readFileSync(new URL('../src/ui/agent-sidebar/cloud-onboarding.ts', import.meta.url), 'utf8');
+const destructiveConfirmation = readFileSync(
+  new URL('../src/ui/agent-sidebar/cloud-destructive-confirmation.ts', import.meta.url),
+  'utf8',
+);
 const onboardingCss = readFileSync(new URL('../src/ui/agent-sidebar/cloud-onboarding.css', import.meta.url), 'utf8');
 const cloudWorkspace = readFileSync(new URL('../src/ui/cloud-workspace.ts', import.meta.url), 'utf8');
 const cloudWorkspaceCss = readFileSync(new URL('../src/styles/cloud-workspace.css', import.meta.url), 'utf8');
@@ -196,7 +200,7 @@ test('delayed selected timelines can establish a missing cloud binding', () => {
   assert.match(cloudUi, /if \(pendingSessionSelections > 0 && !profileChanged\) return;[\s\S]*snapshot = next/);
 });
 
-test('follow-up Cloud sends use the live session and can force-quit leftover account servers', () => {
+test('follow-up Cloud sends use the live session and gate account-wide server destruction', () => {
   assert.match(cloudUi, /session\.kind === 'running'/);
   assert.doesNotMatch(
     cloudUi.match(/function matchesTarget\([\s\S]*?\n  \}/)?.[0] ?? '',
@@ -204,8 +208,36 @@ test('follow-up Cloud sends use the live session and can force-quit leftover acc
   );
   assert.match(cloudUi, /서버 강제 종료/);
   assert.match(cloudUi, /forceQuitAccount/);
+  assert.match(cloudUi, /requestForceQuitAccount/);
+  assert.match(cloudUi, /run: forceQuitAccount/);
   assert.match(sidebar, /thread\.cloudSessionId[\s\S]*bindSelectedTimeline/);
   assert.match(onboarding, /서버 강제 종료로 끊을 수 있습니다/);
+});
+
+test('all app-hosted teardown paths share a fail-closed accessible confirmation', () => {
+  assert.match(destructiveConfirmation, /role', 'alertdialog'/);
+  assert.match(destructiveConfirmation, /aria-modal', 'true'/);
+  assert.match(destructiveConfirmation, /cancelButton\.focus\(\)/);
+  assert.match(destructiveConfirmation, /event\.key === 'Escape'/);
+  assert.match(destructiveConfirmation, /finish\(document\.activeElement === confirmButton\)/);
+  assert.match(destructiveConfirmation, /실행 중인 모든 Cloud 작업과 진행 중인 이어받기 및 전송이 즉시 끝납니다/);
+  assert.match(destructiveConfirmation, /아직 이 기기에 저장되지 않은 원격 문서 변경 내용은 복구할 수 없습니다/);
+  assert.match(destructiveConfirmation, /모든 Cloud 작업을 끝내고 서버 삭제/);
+  assert.match(destructiveConfirmation, /모든 Cloud 작업을 끝내고 서버 다시 만들기/);
+  assert.match(destructiveConfirmation, /if \(settled\) return/);
+  assert.match(destructiveConfirmation, /generation !== requestGeneration/);
+  assert.match(destructiveConfirmation, /current = request\.isCurrent\(\)/);
+  assert.match(cloudUi, /requestRecreateLink/);
+  assert.match(cloudUi, /run: recreateLink/);
+  assert.equal(
+    [...onboarding.matchAll(/addEventListener\('click', requestSandboxTeardown\)/g)].length,
+    3,
+  );
+  assert.doesNotMatch(onboarding, /addEventListener\('click',[\s\S]{0,80}teardownSandbox\(\)/);
+  assert.doesNotMatch(`${cloudUi}\n${onboarding}\n${destructiveConfirmation}`, /(?:window|globalThis)\.confirm\(/);
+  assert.match(cloudCss, /\.ag-cloud-destructive-button:focus-visible/);
+  assert.match(cloudCss, /prefers-reduced-motion:\s*reduce[\s\S]*ag-cloud-destructive-dialog/);
+  assert.match(cloudCss, /forced-colors:\s*active[\s\S]*ag-cloud-destructive-button\.ag-confirm/);
 });
 
 test('a dead Cloud stream shows reconnect and recreate instead of a stale running panel', () => {

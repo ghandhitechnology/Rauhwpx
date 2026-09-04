@@ -20,6 +20,7 @@ import {
   type CloudSetupStage,
   type CloudSetupState,
 } from './cloud-onboarding-state.ts';
+import type { CloudServerDestructiveActionGate } from './cloud-destructive-confirmation.ts';
 import { createIcon } from './icons.ts';
 
 export interface CloudOnboardingDeps {
@@ -29,6 +30,7 @@ export interface CloudOnboardingDeps {
   onRequestTransfer(): void;
   onCloseSettings(): void;
   onSetupStateChange(active: boolean): void;
+  destructiveActions: CloudServerDestructiveActionGate;
 }
 
 export interface CloudOnboarding {
@@ -674,6 +676,27 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     }
   }
 
+  function requestSandboxTeardown(event: MouseEvent): void {
+    if (!visible || mutationLocked || !state
+      || (state.kind !== 'sandbox-ready' && state.kind !== 'sandbox-failed')) return;
+    const confirmedSnapshot = snapshot;
+    const confirmedState = state;
+    void deps.destructiveActions.request({
+      action: 'delete',
+      trigger: event.currentTarget as HTMLElement,
+      fallbackFocus: dialog,
+      isCurrent: () => !disposed
+        && visible
+        && !mutationLocked
+        && snapshot === confirmedSnapshot
+        && state === confirmedState,
+      run: teardownSandbox,
+      onStale: () => {
+        if (!disposed) liveStatus.textContent = 'Cloud 상태가 바뀌었습니다. 최신 상태를 확인한 뒤 다시 시도하세요.';
+      },
+    });
+  }
+
   /** 공급자에게 직접 물어 화면을 되살린다. 실패 화면에 갇힌 사용자가 앱을 다시 시작하지 않아도 되게 한다. */
   async function refreshSandbox(): Promise<void> {
     if (!state || (state.kind !== 'sandbox-ready' && state.kind !== 'sandbox-failed')) return;
@@ -884,7 +907,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       if (phase === 'teardown') {
         footer.append(refresh);
         const teardown = button('다시 종료', 'danger');
-        teardown.addEventListener('click', () => { void teardownSandbox(); });
+        teardown.addEventListener('click', requestSandboxTeardown);
         footer.append(teardown);
         const backToChoice = button('서버 다시 선택', 'primary');
         backToChoice.addEventListener('click', () => setState({ kind: 'choose', draft, intent, mode: 'app-hosted' }));
@@ -896,7 +919,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
         if (live) {
           footer.append(refresh);
           const teardown = button('서버 종료', 'danger');
-          teardown.addEventListener('click', () => { void teardownSandbox(); });
+          teardown.addEventListener('click', requestSandboxTeardown);
           footer.append(teardown);
         }
         const retry = button('다시 시도', 'primary');
@@ -917,7 +940,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       const refresh = button('상태 확인');
       refresh.addEventListener('click', () => { void refreshSandbox(); });
       const teardown = button('서버 종료', 'danger');
-      teardown.addEventListener('click', () => { void teardownSandbox(); });
+      teardown.addEventListener('click', requestSandboxTeardown);
       footer.append(refresh);
       const primary = button(intent === 'transfer' ? 'Cloud 작업 시작' : '완료', 'primary');
       if (intent === 'transfer' && appHostedLock) {
