@@ -149,6 +149,11 @@ test('stop fences startup before the scheduler can reopen work', async (t) => {
   await new Promise((resolve) => setImmediate(resolve));
   try {
     assert.equal(stopSettled, false, 'shutdown must drain startup before closing shared state');
+    assert.equal(
+      runtime.publicServer.listening,
+      false,
+      'public admission must close before shutdown waits for a blocked startup',
+    );
     assert.equal((await lateStart)?.code, 'RUNTIME_STOPPED');
   } finally {
     probe.resolve();
@@ -188,6 +193,48 @@ test('failed startup rolls back workers and can retry without closing the databa
   assert.equal(calls.probeAll, 2);
   assert.equal(calls.schedulerStart, 1);
   await runtime.stop();
+  assert.equal(calls.databaseClose, 1);
+});
+
+test('failed startup cleanup quarantines the runtime until stop retries cleanup', async (t) => {
+  let probes = 0;
+  let stopAttempts = 0;
+  const { runtime, calls } = await fixture(t, {
+    providerManager: {
+      async probeAll() {
+        probes += 1;
+        throw Object.assign(new Error('provider probe failed'), { code: 'PROVIDER_PROBE_FAILED' });
+      },
+    },
+    runner: {
+      async stopAll() {
+        stopAttempts += 1;
+        if (stopAttempts === 1) {
+          throw Object.assign(new Error('worker cleanup failed'), { code: 'WORKER_STOP_FAILED' });
+        }
+      },
+    },
+  });
+
+  await assert.rejects(runtime.start(), (error) => {
+    assert.equal(error.code, 'RUNTIME_START_ROLLBACK_FAILED');
+    assert.equal(error.retryable, false);
+    assert.equal(error.cause.code, 'PROVIDER_PROBE_FAILED');
+    assert.deepEqual(error.details, {
+      startupCode: 'PROVIDER_PROBE_FAILED',
+      failedSteps: ['workers'],
+    });
+    assert.equal(error.errors.length, 2);
+    return true;
+  });
+  await assert.rejects(runtime.start(), { code: 'RUNTIME_CLEANUP_REQUIRED' });
+  assert.equal(probes, 1, 'quarantined startup must not probe or reopen services');
+  assert.equal(runtime.publicServer.listening, false);
+  assert.equal(runtime.workerServer.listening, false);
+  assert.deepEqual(calls.errors.map(({ data }) => data.step), ['workers']);
+
+  await runtime.stop();
+  assert.equal(stopAttempts, 2, 'stop must retry the failed worker cleanup');
   assert.equal(calls.databaseClose, 1);
 });
 

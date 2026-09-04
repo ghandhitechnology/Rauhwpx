@@ -445,6 +445,93 @@ test('scheduler startup is single-flight and stop cancels a startup still in rec
   assert.equal(scheduler.timer, null);
 });
 
+test('scheduler stop fences an active tick before it can claim or start work', async () => {
+  const inventory = Promise.withResolvers();
+  const inventoryEntered = Promise.withResolvers();
+  let claims = 0;
+  let starts = 0;
+  const sessionStore = idleSchedulerStore();
+  sessionStore.claimNextSession = () => {
+    claims += 1;
+    return claims === 1 ? { id: 'session-after-stop', provider: 'codex' } : null;
+  };
+  sessionStore.providerStatus = () => ({ available: true, authenticated: true });
+  sessionStore.prepareWorker = () => {};
+  sessionStore.attachSandbox = () => {};
+  sessionStore.suspend = () => {};
+  sessionStore.requeueInterruptedSession = () => {};
+  const runner = {
+    async list() {
+      inventoryEntered.resolve();
+      return inventory.promise;
+    },
+    async start() {
+      starts += 1;
+      return 'sandbox-after-stop';
+    },
+    async stop() {},
+  };
+  const scheduler = new Scheduler(sessionStore, runner, { maxRunningSessions: 1 });
+
+  const ticking = scheduler.tick();
+  await inventoryEntered.promise;
+  const stopping = scheduler.stop();
+  inventory.resolve([]);
+  await Promise.all([ticking, stopping]);
+
+  assert.equal(claims, 0);
+  assert.equal(starts, 0);
+  assert.equal(scheduler.timer, null);
+});
+
+test('scheduler stop revokes and removes a sandbox that finishes starting late', async () => {
+  const sandbox = Promise.withResolvers();
+  const startEntered = Promise.withResolvers();
+  let claimed = false;
+  const requeues = [];
+  const attaches = [];
+  const stops = [];
+  const sessionStore = idleSchedulerStore();
+  sessionStore.database = {
+    prepare(sql) {
+      if (sql.includes("SELECT * FROM sessions WHERE status = 'running'")) return { all: () => [] };
+      if (sql.includes("SELECT COUNT(*) AS count FROM sessions WHERE status = 'running'")) {
+        return { get: () => ({ count: claimed ? 1 : 0 }) };
+      }
+      throw new Error(`Unexpected scheduler query: ${sql}`);
+    },
+  };
+  sessionStore.claimNextSession = () => {
+    if (claimed) return null;
+    claimed = true;
+    return { id: 'session-late-start', provider: 'codex' };
+  };
+  sessionStore.providerStatus = () => ({ available: true, authenticated: true });
+  sessionStore.prepareWorker = () => {};
+  sessionStore.attachSandbox = (...args) => attaches.push(args);
+  sessionStore.suspend = () => {};
+  sessionStore.requeueInterruptedSession = (...args) => requeues.push(args);
+  const runner = {
+    async list() { return []; },
+    async start() {
+      startEntered.resolve();
+      return sandbox.promise;
+    },
+    async stop(sandboxId) { stops.push(sandboxId); },
+  };
+  const scheduler = new Scheduler(sessionStore, runner, { maxRunningSessions: 1 });
+
+  const ticking = scheduler.tick();
+  await startEntered.promise;
+  const stopping = scheduler.stop();
+  assert.deepEqual(requeues, [['session-late-start', 'scheduler_stopped']]);
+  sandbox.resolve('sandbox-late-start');
+  await Promise.all([ticking, stopping]);
+
+  assert.deepEqual(attaches, []);
+  assert.deepEqual(stops, ['sandbox-late-start']);
+});
+
 test('scheduler removes a duplicate sandbox even when it has the active session label', async () => {
   const stopped = [];
   const cleared = [];

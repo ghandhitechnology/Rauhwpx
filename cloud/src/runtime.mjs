@@ -159,8 +159,10 @@ export function createCloudRuntime(config, dependencies = {}) {
   };
 
   const rollbackStart = async () => {
+    const failures = [];
     const rollbackStep = async (step, action) => {
       try { await action(); } catch (error) {
+        failures.push({ step, error });
         reportCleanupFailure('runtime.start_rollback_failed', step, error);
       }
     };
@@ -172,6 +174,7 @@ export function createCloudRuntime(config, dependencies = {}) {
     await rollbackStep('display', async () => displayFrameStore.closeAll());
     await rollbackStep('worker_server', () => close(workerServer));
     await rollbackStep('worker_socket', async () => removeWorkerSocket());
+    return failures;
   };
 
   const stopStep = async (failures, step, operation) => {
@@ -197,6 +200,12 @@ export function createCloudRuntime(config, dependencies = {}) {
     workerServer,
     async start() {
       if (lifecycle === 'running') return startResult;
+      if (lifecycle === 'cleanup_failed') {
+        throw runtimeLifecycleError(
+          'Cloud runtime startup cleanup must finish before another start',
+          'RUNTIME_CLEANUP_REQUIRED',
+        );
+      }
       if (stopPromise || lifecycle === 'stopping' || lifecycle === 'stopped') {
         throw runtimeLifecycleError('Cloud runtime cannot start after shutdown begins', 'RUNTIME_STOPPED');
       }
@@ -235,11 +244,13 @@ export function createCloudRuntime(config, dependencies = {}) {
             await runner.probeControl?.(scheduler.controlEndpoint);
             assertStarting();
           }
-          await listen(publicServer, config.port, config.host);
-          assertStarting();
           await providerManager.probeAll(config.startupProviders);
           assertStarting();
           await scheduler.start();
+          assertStarting();
+          // Public traffic is the final startup step. Provider and scheduler
+          // recovery must finish before clients can mutate durable state.
+          await listen(publicServer, config.port, config.host);
           assertStarting();
           startResult = {
             endpoint: `http://${config.host}:${config.port}${config.basePath}`,
@@ -250,11 +261,33 @@ export function createCloudRuntime(config, dependencies = {}) {
           lifecycle = 'running';
           return startResult;
         } catch (error) {
+          let startError = error;
           if (lifecycle === 'starting') {
-            await rollbackStart();
-            if (lifecycle === 'starting') lifecycle = 'idle';
+            const failures = await rollbackStart();
+            if (lifecycle === 'starting') {
+              if (failures.length) {
+                lifecycle = 'cleanup_failed';
+                startError = Object.assign(
+                  new AggregateError(
+                    [error, ...failures.map(({ error: cleanupError }) => cleanupError)],
+                    'Cloud runtime startup failed and cleanup was incomplete',
+                    { cause: error },
+                  ),
+                  {
+                    code: 'RUNTIME_START_ROLLBACK_FAILED',
+                    retryable: false,
+                    details: {
+                      startupCode: error?.code ?? null,
+                      failedSteps: failures.map(({ step }) => step),
+                    },
+                  },
+                );
+              } else {
+                lifecycle = 'idle';
+              }
+            }
           }
-          throw error;
+          throw startError;
         } finally {
           if (startPromise === operation) startPromise = null;
         }
@@ -264,14 +297,20 @@ export function createCloudRuntime(config, dependencies = {}) {
     },
     async stop() {
       if (stopPromise) return stopPromise;
+      // Fence request handling synchronously, before waiting for any startup
+      // probe or scheduler recovery that may still be in flight.
       lifecycle = 'stopping';
       const pendingStart = startPromise;
       stopPromise = (async () => {
-        await pendingStart?.catch(() => {});
         const failures = [];
         // Reject new control requests first. Keep the worker endpoint open
         // until every sandbox has stopped or reported a cleanup failure.
         await stopStep(failures, 'public_server', () => close(publicServer));
+        await pendingStart?.catch(() => {});
+        // `stop()` can race the narrow window between server.listen() and the
+        // listening flag becoming observable. Close again after startup settles
+        // so a late bind cannot survive the admission fence above.
+        await stopStep(failures, 'public_server_after_start', () => close(publicServer));
         await stopStep(failures, 'scheduler', () => scheduler.stop());
         // Kill every worker before the control socket disappears so detached
         // workers cannot survive a restart and double-execute their session.
