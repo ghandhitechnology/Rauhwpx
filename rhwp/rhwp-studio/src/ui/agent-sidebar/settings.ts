@@ -342,6 +342,8 @@ export interface SettingsPanelDeps {
     code: string;
     message: string;
   }) => void;
+  cloudSettings?: HTMLElement;
+  refreshCloudSettings?: () => void;
 }
 
 export interface SettingsPanel {
@@ -372,6 +374,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     openCalibration,
     reconnectSession,
     onAgentSetupAbandoned,
+    cloudSettings,
+    refreshCloudSettings,
   } = deps;
 
   let disposed = false;
@@ -1366,6 +1370,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   const connectionContent = el('div', 'ag-settings-destination-content');
   connectionContent.append(accountSection.root, connection.root, usageSection.root);
+  if (cloudSettings) connectionContent.insertBefore(cloudSettings, usageSection.root);
   panes.get('connections')?.appendChild(connectionContent);
 
   const productSection = createSection('고유 설치');
@@ -3314,6 +3319,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       void refreshPiStatus();
       void refreshSetupStatuses();
       void refreshTemplates();
+      refreshCloudSettings?.();
     },
     close(): void {
       if (editingSettings.isDirty()) editingSettings.cancel();

@@ -1,9 +1,11 @@
 import { readFile } from 'node:fs/promises';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 import { decryptSecret, encryptSecret } from './crypto.mjs';
-import { RAU_CREDIT_LIMIT_USD } from './catalog.mjs';
+import { createRaucloudBroker } from './cloud-broker.mjs';
+import { RAU_CREDIT_LIMIT_USD, RAU_MODEL_IDS } from './catalog.mjs';
 import {
   renderCodePage,
   renderConfirmPage,
@@ -41,7 +43,11 @@ const MANUAL_CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 const WORKOS_AUTHORIZE = 'https://api.workos.com/user_management/authorize';
 const WORKOS_AUTHENTICATE = 'https://api.workos.com/user_management/authenticate';
 const WORKOS_MAGIC_AUTH = 'https://api.workos.com/user_management/magic_auth';
+const OPENROUTER_API = 'https://openrouter.ai/api/v1';
 const OPENROUTER_KEYS = 'https://openrouter.ai/api/v1/keys';
+const RAU_MODELS = new Set(RAU_MODEL_IDS);
+const ACCESS_TOKEN_PREFIX = 'rau_v1_';
+const PROXY_BODY_BYTES = 24 * 1024 * 1024;
 const WORKOS_PROVIDERS = new Set(['GoogleOAuth', 'GitHubOAuth']);
 const RAU_ICON_PATH = fileURLToPath(new URL('./public/rau.png', import.meta.url));
 const OPENROUTER_MINT_NOT_DISPATCHED = Symbol('openrouter-mint-not-dispatched');
@@ -51,6 +57,28 @@ function creditsError(code, message) {
   const error = new Error(message);
   error.code = code;
   return error;
+}
+
+function accessTokenHash(token) {
+  return createHash('sha256').update(String(token ?? ''), 'utf8').digest('hex');
+}
+
+function newAccessToken() {
+  return `${ACCESS_TOKEN_PREFIX}${randomBytes(32).toString('base64url')}`;
+}
+
+function ensureState(state) {
+  state.users ??= {};
+  state.sessions ??= {};
+  state.emailIndex ??= {};
+  state.accessTokens ??= {};
+  state.accountSessions ??= {};
+  return state;
+}
+
+function bearerToken(req) {
+  const match = String(req.headers.authorization ?? '').match(/^Bearer\s+(.+)$/i);
+  return match?.[1]?.trim() ?? '';
 }
 
 /**
@@ -296,8 +324,13 @@ export function createCreditsService({
   sendMagicAuth = null,
   createOpenRouterKey = null,
   reconcileOpenRouterKey = null,
+  inspectOpenRouterKey = null,
+  deleteOpenRouterKey = null,
   maxLiveSessions = 2000,
   minDeviceProtocol = 1,
+  cloudWorkerSecret = '',
+  cloudProvisioner = null,
+  cloudProvisionerRequired = false,
 } = {}) {
   if (!origin) throw new Error('origin is required');
   if (!sessionSecret) throw new Error('sessionSecret is required');
@@ -337,8 +370,11 @@ export function createCreditsService({
   }
 
   function mutate(task) {
+    if (typeof store.mutate === 'function') {
+      return store.mutate((state) => task(ensureState(state)));
+    }
     return serializeMutation(async () => {
-      const state = await store.load();
+      const state = ensureState(await store.load());
       const result = await task(state);
       await store.save(state);
       return result;
@@ -348,7 +384,11 @@ export function createCreditsService({
   function pruneSessions(state) {
     const cutoff = now() - SESSION_TTL_MS;
     for (const [id, session] of Object.entries(state.sessions)) {
-      if (session.createdAt < cutoff) delete state.sessions[id];
+      if (session.createdAt >= cutoff) continue;
+      if (session.status === 'ready' && session.accessHash) {
+        delete state.accessTokens[session.accessHash];
+      }
+      delete state.sessions[id];
     }
   }
 
@@ -521,8 +561,36 @@ export function createCreditsService({
   const resolveUser = authenticateWorkos ?? defaultAuthenticate;
   const resolveMagicUser = authenticateMagic ?? defaultAuthenticateMagic;
   const sendMagic = sendMagicAuth ?? defaultSendMagic;
+  async function defaultInspectKey({ key }) {
+    const { response, body } = await upstreamJson(`${OPENROUTER_API}/key`, {
+      headers: { Authorization: `Bearer ${key}`, Accept: 'application/json' },
+    });
+    const limit = Number(body?.data?.limit);
+    const usage = Number(body?.data?.usage);
+    if (!response.ok || !Number.isFinite(limit) || !Number.isFinite(usage)) {
+      throw creditsError('OPENROUTER_KEY_INSPECT_FAILED', '기존 체험 키 잔액을 확인하지 못했어요');
+    }
+    return { limit, usage };
+  }
+
+  async function defaultDeleteKey({ id }) {
+    const { response } = await upstreamJson(`${OPENROUTER_KEYS}/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${openRouterProvisioningKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: '{}',
+    });
+    if (!response.ok && response.status !== 404) {
+      throw creditsError('OPENROUTER_KEY_DELETE_FAILED', '기존 체험 키를 폐기하지 못했어요');
+    }
+  }
+
   const mintKey = createOpenRouterKey ?? defaultCreateKey;
   const reconcileKey = reconcileOpenRouterKey ?? defaultReconcileKey;
+  const inspectKey = inspectOpenRouterKey ?? defaultInspectKey;
+  const deleteKey = deleteOpenRouterKey ?? defaultDeleteKey;
 
   function assertFinalKeyRecordFits(state, ownerId, workosUserId, normalizedEmail, createdAt) {
     const projected = structuredClone(state);
@@ -555,9 +623,7 @@ export function createCreditsService({
   async function keyForUserWithinMutation(workosUserId, email = null) {
     workosUserId = validatedWorkosUserId(workosUserId);
     const normalizedEmail = validatedAccountEmail(email);
-    const state = await store.load();
-    state.users ??= {};
-    state.sessions ??= {};
+    const state = ensureState(await store.load());
     if (typeof state.users !== 'object' || Array.isArray(state.users)
       || typeof state.sessions !== 'object' || Array.isArray(state.sessions)) {
       throw creditsError('TRIAL_KEY_UNREADABLE', '저장된 체험 키 정보를 읽을 수 없어요');
@@ -590,15 +656,17 @@ export function createCreditsService({
       }
     }
     if (existingKey) {
+      const accountId = existing.accountId ?? existingId;
+      existing.accountId = accountId;
       if (existingId !== workosUserId) {
-        state.users[workosUserId] = { ...state.users[existingId] };
+        state.users[workosUserId] = { ...state.users[existingId], accountId };
       }
       if (normalizedEmail) {
         state.emailIndex ??= {};
-        state.emailIndex[normalizedEmail] = workosUserId;
+        state.emailIndex[normalizedEmail] = accountId;
       }
       await store.save(state);
-      return existingKey;
+      return { key: existingKey, accountId };
     }
 
     if (existing && !existing.provisioning) {
@@ -711,20 +779,26 @@ export function createCreditsService({
     const record = {
       keyCiphertext: encryptSecret(sessionSecret, mintedKey),
       openrouterKeyId: mintedId,
+      credentialVersion: 2,
+      accountId: ownerId,
+      carriedUsageUsd: 0,
       createdAt: recordCreatedAt,
     };
     state.users[ownerId] = record;
     if (ownerId !== workosUserId) state.users[workosUserId] = { ...record };
     if (normalizedEmail) {
       state.emailIndex ??= {};
-      state.emailIndex[normalizedEmail] = workosUserId;
+      state.emailIndex[normalizedEmail] = ownerId;
     }
     await store.save(state);
-    return mintedKey;
+    return { key: mintedKey, accountId: ownerId };
   }
 
   function keyForUser(workosUserId, email = null) {
-    return serializeMutation(() => keyForUserWithinMutation(workosUserId, email));
+    return serializeMutation(async () => {
+      const account = await keyForUserWithinMutation(workosUserId, email);
+      return account.key;
+    });
   }
 
   function isV1Session(session) {
@@ -757,9 +831,8 @@ export function createCreditsService({
   async function finishDeviceLogin(deviceId, userId, email = null) {
     userId = validatedWorkosUserId(userId);
     const requestedEmail = validatedAccountEmail(email);
-    return serializeMutation(async () => {
-      let state = await store.load();
-      let current = assertPendingV1Session(state.sessions[deviceId]);
+    const accountEmail = await mutate((state) => {
+      const current = assertPendingV1Session(state.sessions[deviceId]);
       const claim = current.completionClaim;
       if (claim !== undefined && (
         !claim || typeof claim !== 'object'
@@ -771,24 +844,27 @@ export function createCreditsService({
           '이미 다른 계정으로 처리 중인 로그인 세션이에요',
         );
       }
-      const accountEmail = claim?.email != null
+      const nextEmail = claim?.email != null
         ? validatedAccountEmail(claim.email)
         : requestedEmail;
       if (claim === undefined) {
         current.completionClaim = {
           workosUserId: userId,
-          email: accountEmail,
+          email: nextEmail,
           claimedAt: now(),
         };
         // Bind the session before any paid provider mutation. The same
         // principal can resume a durable provisioning intent after failure,
         // while a different principal cannot consume the session.
-        await store.save(state);
       }
+      return nextEmail;
+    });
 
-      const apiKey = await keyForUserWithinMutation(userId, accountEmail);
-      state = await store.load();
-      current = assertPendingV1Session(state.sessions[deviceId]);
+    const account = await keyForUserWithinMutation(userId, accountEmail);
+    const accessToken = newAccessToken();
+    const accessHash = accessTokenHash(accessToken);
+    await mutate((state) => {
+      const current = assertPendingV1Session(state.sessions[deviceId]);
       if (current.completionClaim?.workosUserId !== userId) {
         throw creditsError(
           'DEVICE_SESSION_INVALID',
@@ -798,11 +874,20 @@ export function createCreditsService({
       current.status = 'ready';
       current.workosUserId = userId;
       current.email = accountEmail;
-      current.apiKeyCiphertext = encryptSecret(sessionSecret, apiKey);
+      current.apiKeyCiphertext = encryptSecret(sessionSecret, account.key);
+      current.accessHash = accessHash;
+      current.accessTokenCiphertext = encryptSecret(sessionSecret, accessToken);
+      state.accessTokens[accessHash] = {
+        workosUserId: userId,
+        accountId: account.accountId,
+        createdAt: now(),
+      };
+      if (current.replaceAccessHash && current.replaceAccessHash !== accessHash) {
+        delete state.accessTokens[current.replaceAccessHash];
+      }
       delete current.completionClaim;
-      await store.save(state);
-      return { deviceId, workosUserId: userId, email: accountEmail };
     });
+    return { deviceId, workosUserId: userId, email: accountEmail };
   }
 
   function assertLiveV2Session(session) {
@@ -905,6 +990,52 @@ export function createCreditsService({
     return { protocol: 1, deviceId: rawState };
   }
 
+  async function accessRecord(token) {
+    const trimmed = String(token ?? '').trim();
+    if (!trimmed.startsWith(ACCESS_TOKEN_PREFIX)) {
+      throw creditsError('RAU_ACCESS_INVALID', 'Rau 로그인이 만료되었어요. 다시 로그인해 주세요');
+    }
+    const state = ensureState(await store.load());
+    const grant = state.accessTokens[accessTokenHash(trimmed)];
+    const user = grant ? state.users[grant.workosUserId] : null;
+    if (!grant || !user?.keyCiphertext) {
+      throw creditsError('RAU_ACCESS_INVALID', 'Rau 로그인이 만료되었어요. 다시 로그인해 주세요');
+    }
+    let apiKey;
+    try {
+      apiKey = decryptSecret(sessionSecret, user.keyCiphertext);
+    } catch {
+      throw creditsError('RAU_ACCESS_INVALID', 'Rau 계정 키를 갱신해야 해요. 다시 로그인해 주세요');
+    }
+    return { grant, user, apiKey };
+  }
+
+  const cloudBroker = createRaucloudBroker({
+    store,
+    mutate,
+    now,
+    workerSecret: cloudWorkerSecret,
+    provisioner: cloudProvisioner,
+    provisionerRequired: cloudProvisionerRequired,
+    authenticateAccessToken: async (token, deviceId = null) => {
+      const tokenDigest = accountTokenDigest(token);
+      return mutate((state) => {
+        const records = pruneAccountSessions(state);
+        const current = records[tokenDigest];
+        if (!current || current.status !== 'active') {
+          throw creditsError('ACCOUNT_SESSION_UNAUTHORIZED', '계정 로그인이 필요해요');
+        }
+        if (deviceId) {
+          if (current.cloudDeviceId && current.cloudDeviceId !== deviceId) {
+            throw creditsError('CLOUD_DEVICE_MISMATCH', 'This account session is already bound to another Cloud device');
+          }
+          current.cloudDeviceId ??= deviceId;
+        }
+        return validatedWorkosUserId(current.workosUserId);
+      });
+    },
+  });
+
   return {
     origin,
     redirectUri,
@@ -953,14 +1084,24 @@ export function createCreditsService({
       return { id, protocol, pairingCode: protocol === 2 ? session.pairingCode : null };
     },
 
-    async createDeviceSession() {
+    async createDeviceSession({ replaceAccessToken = null } = {}) {
       const id = randomBytes(24).toString('base64url');
+      const replacement = String(replaceAccessToken ?? '').trim();
       await mutate((state) => {
         pruneSessions(state);
         if (liveSessionCount(state) >= maxLiveSessions) {
           throw creditsError('RATE_LIMITED', '로그인 요청이 너무 많아요. 잠시 후 다시 시도해 주세요');
         }
-        state.sessions[id] = { protocol: 1, status: 'pending', createdAt: now() };
+        const replaceAccessHash = replacement.startsWith(ACCESS_TOKEN_PREFIX)
+          && state.accessTokens[accessTokenHash(replacement)]
+          ? accessTokenHash(replacement)
+          : null;
+        state.sessions[id] = {
+          protocol: 1,
+          status: 'pending',
+          createdAt: now(),
+          ...(replaceAccessHash ? { replaceAccessHash } : {}),
+        };
       });
       return { id, loginUrl: this.loginUrl(id) };
     },
@@ -1363,18 +1504,18 @@ export function createCreditsService({
       if (now() - session.createdAt > SESSION_TTL_MS) return { status: 'expired' };
       if (session.status === 'pending') return { status: 'pending' };
       if (session.status === 'redeemed') return { status: 'redeemed' };
-      const ciphertext = session.apiKeyCiphertext;
-      const apiKey = typeof ciphertext === 'string'
+      const ciphertext = session.accessTokenCiphertext;
+      const accessToken = typeof ciphertext === 'string'
         ? decryptSecret(sessionSecret, ciphertext)
-        : session.apiKey;
-      if (session.status !== 'ready' || typeof apiKey !== 'string' || !apiKey) {
+        : session.accessToken;
+      if (session.status !== 'ready' || typeof accessToken !== 'string' || !accessToken) {
         throw creditsError('DEVICE_SESSION_INVALID', '로그인 세션을 확인할 수 없어요');
       }
       // 이메일은 로그인한 계정을 카드에 보여 주는 용도 — redeem 응답에 한 번만 실린다.
       const accountEmail = typeof session.email === 'string' && session.email.includes('@')
         ? session.email
         : null;
-      return { status: 'ready', apiKey, ...(accountEmail ? { email: accountEmail } : {}) };
+      return { status: 'ready', accessToken, ...(accountEmail ? { email: accountEmail } : {}) };
     },
 
     async acknowledgeDeviceSession(id) {
@@ -1389,9 +1530,104 @@ export function createCreditsService({
         session.redeemedAt = now();
         delete session.apiKey;
         delete session.apiKeyCiphertext;
+        delete session.accessToken;
+        delete session.accessTokenCiphertext;
         return { status: 'redeemed' };
       });
     },
+
+    async migrateLegacyKeys() {
+      const snapshot = ensureState(await store.load());
+      const legacy = new Map();
+      for (const [userId, user] of Object.entries(snapshot.users)) {
+        if (user?.credentialVersion === 2 || !user?.keyCiphertext || !user?.openrouterKeyId) continue;
+        if (!legacy.has(user.openrouterKeyId)) legacy.set(user.openrouterKeyId, { userId, user });
+      }
+      let migrated = 0;
+      for (const [oldKeyId, { userId, user }] of legacy) {
+        const oldKey = decryptSecret(sessionSecret, user.keyCiphertext);
+        const balance = await inspectKey({ key: oldKey });
+        const priorLimit = Math.min(RAU_CREDIT_LIMIT_USD, Math.max(0, balance.limit));
+        const carriedUsageUsd = Math.min(priorLimit, Math.max(0, balance.usage));
+        const remaining = Math.max(0, priorLimit - carriedUsageUsd);
+        const replacement = await mintKey({
+          name: `rau-${userId.slice(0, 12)}-proxy`,
+          limit: remaining,
+        });
+        if (!replacement?.key || !replacement?.id) {
+          throw creditsError('OPENROUTER_PROVISION_FAILED', '교체용 체험 키를 만들지 못했어요');
+        }
+        await deleteKey({ id: oldKeyId });
+        await mutate((state) => {
+          for (const record of Object.values(state.users)) {
+            if (record?.openrouterKeyId !== oldKeyId) continue;
+            record.keyCiphertext = encryptSecret(sessionSecret, replacement.key);
+            record.openrouterKeyId = replacement.id;
+            record.credentialVersion = 2;
+            record.carriedUsageUsd = carriedUsageUsd;
+          }
+        });
+        migrated += 1;
+      }
+      return { migrated };
+    },
+
+    async revokeAccessToken(token, { deviceId = null } = {}) {
+      const trimmed = String(token ?? '').trim();
+      if (!trimmed) return { revoked: false };
+      if (deviceId) await cloudBroker.logoutCloudDevice(trimmed, deviceId);
+      return mutate((state) => {
+        const hash = accessTokenHash(trimmed);
+        const revoked = Object.hasOwn(state.accessTokens, hash);
+        delete state.accessTokens[hash];
+        return { revoked };
+      });
+    },
+
+    async proxyOpenRouter(token, { pathname, method, body = null, signal = undefined } = {}) {
+      const route = String(pathname ?? '');
+      const verb = String(method ?? 'GET').toUpperCase();
+      const allowedRead = verb === 'GET' && (route === '/key' || route === '/credits');
+      const allowedChat = verb === 'POST' && route === '/chat/completions';
+      if (!allowedRead && !allowedChat) {
+        throw creditsError('RAU_PROXY_FORBIDDEN', '이 Rau API 작업은 허용되지 않아요');
+      }
+      if (allowedChat) {
+        const model = typeof body?.model === 'string' ? body.model : '';
+        if (!RAU_MODELS.has(model)) {
+          throw creditsError('RAU_MODEL_FORBIDDEN', '이 모델은 Rau 체험에서 사용할 수 없어요');
+        }
+      }
+      const { user, apiKey } = await accessRecord(token);
+      const upstream = await fetchImpl(`${OPENROUTER_API}${route}`, {
+        method: verb,
+        signal,
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          'X-Title': 'Rauhwpx',
+        },
+        body: allowedChat ? JSON.stringify(body) : undefined,
+      });
+      const carriedUsageUsd = Number(user.carriedUsageUsd) || 0;
+      if (route !== '/key' || !upstream.ok || carriedUsageUsd <= 0) return upstream;
+      const payload = await upstream.json().catch(() => null);
+      if (!payload?.data) return new Response(JSON.stringify(payload ?? {}), {
+        status: upstream.status,
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const currentUsage = Number(payload.data.usage) || 0;
+      payload.data.limit = RAU_CREDIT_LIMIT_USD;
+      payload.data.usage = Math.min(RAU_CREDIT_LIMIT_USD, carriedUsageUsd + currentUsage);
+      payload.data.limit_remaining = Math.max(0, RAU_CREDIT_LIMIT_USD - payload.data.usage);
+      return new Response(JSON.stringify(payload), {
+        status: upstream.status,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    },
+
+    ...cloudBroker,
   };
 }
 
@@ -1408,12 +1644,12 @@ async function readForm(req) {
   return new URLSearchParams(Buffer.concat(chunks).toString('utf8'));
 }
 
-async function readJson(req) {
+async function readJson(req, maxBytes = MAX_JSON_BODY_BYTES) {
   const chunks = [];
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > MAX_JSON_BODY_BYTES) {
+    if (size > maxBytes) {
       throw creditsError('BODY_TOO_LARGE', '요청 본문이 너무 커요');
     }
     chunks.push(chunk);
@@ -1466,11 +1702,25 @@ function htmlErrorStatus(error) {
   if (error?.code === 'ACCOUNT_SESSION_UNAUTHORIZED') return 401;
   if (error?.code === 'ACCOUNT_SESSION_INVALID') return 401;
   if (error?.code === 'DEVICE_SESSION_INVALID' || error?.code === 'DEVICE_SESSION_EXPIRED') return 400;
-  if (error?.code === 'RATE_LIMITED' || error?.code === 'DEVICE_PROOF_LOCKED') return 429;
+  if (error?.code === 'RAU_ACCESS_INVALID' || error?.code === 'CLOUD_WORKER_UNAUTHORIZED') return 401;
+  if (error?.code === 'RAU_PROXY_FORBIDDEN' || error?.code === 'RAU_MODEL_FORBIDDEN'
+    || error?.code === 'CLOUD_DEVICE_MISMATCH') return 403;
+  if (error?.code === 'CLOUD_RUN_NOT_FOUND') return 404;
+  if (error?.code === 'RATE_LIMITED' || error?.code === 'DEVICE_PROOF_LOCKED'
+    || error?.code === 'CLOUD_QUOTA_EXHAUSTED'
+    || error?.code === 'CLOUD_COLD_START_RATE_LIMITED'
+    || error?.code === 'CLOUD_TIMEZONE_CHANGE_RATE_LIMITED') return 429;
   if (error?.code === 'BODY_TOO_LARGE') return 413;
   if (error?.code === 'UNIQUE_INSTALLS_CAPACITY_EXCEEDED') return 503;
   if (error?.code === 'ERR_INVALID_URL' || error?.code === 'REQUEST_TARGET_INVALID') return 400;
   if (error?.code === 'TRIAL_KEY_UNREADABLE') return 409;
+  if (error?.code === 'CLOUD_UNAVAILABLE' || error?.code === 'CLOUD_PROVISION_FAILED') return 503;
+  if (error?.code?.startsWith?.('CLOUD_OWNED_')
+    || error?.code === 'CLOUD_RUN_ALREADY_ACTIVE'
+    || error?.code === 'CLOUD_TEARDOWN_PENDING'
+    || error?.code === 'CLOUD_TAKEOVER_NOT_READY'
+    || error?.code === 'CLOUD_RUN_STATE_INVALID') return 409;
+  if (error?.code?.startsWith?.('CLOUD_')) return 400;
   if (error?.code?.endsWith('_INVALID') || error?.code === 'DEVICE_PROOF_EXPIRED') return 400;
   return 500;
 }
@@ -1573,6 +1823,112 @@ export function creditsRequestListener(service, {
         send(200, await uniqueInstalls.record(await readJson(req)));
         return;
       }
+      if (req.method === 'GET' && url.pathname === '/v1/account') {
+        send(200, await service.getAccount(bearerToken(req)));
+        return;
+      }
+      if (req.method === 'PATCH' && (url.pathname === '/v1/account' || url.pathname === '/v1/account/timezone')) {
+        const body = await readJson(req);
+        send(200, await service.setAccountTimezone(bearerToken(req), body.timezone));
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/v1/cloud/status') {
+        send(200, await service.getCloudStatus(bearerToken(req), {
+          deviceId: url.searchParams.get('deviceId') ?? '',
+          timezone: url.searchParams.get('timezone'),
+          runId: url.searchParams.get('runId'),
+        }));
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/v1/cloud/runs') {
+        const body = await readJson(req);
+        send(201, await service.createCloudRun(bearerToken(req), {
+          ...body,
+          idempotencyKey: body.idempotencyKey ?? req.headers['idempotency-key'],
+        }));
+        return;
+      }
+      const takeover = url.pathname.match(/^\/v1\/cloud\/runs\/([^/]+)\/takeover$/);
+      if (req.method === 'POST' && takeover) {
+        const body = await readJson(req);
+        send(201, await service.takeoverCloudRun(
+          bearerToken(req),
+          decodeURIComponent(takeover[1]),
+          { ...body, idempotencyKey: body.idempotencyKey ?? req.headers['idempotency-key'] },
+        ));
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/v1/cloud/force-quit') {
+        const body = await readJson(req);
+        send(200, await service.forceQuitAccountCloud(bearerToken(req), body));
+        return;
+      }
+      const stop = url.pathname.match(/^\/v1\/cloud\/runs\/([^/]+)\/stop$/);
+      if (req.method === 'POST' && stop) {
+        const body = await readJson(req);
+        send(200, await service.stopCloudRun(bearerToken(req), decodeURIComponent(stop[1]), body));
+        return;
+      }
+      const internal = url.pathname.match(/^\/v1\/internal\/cloud\/runs\/([^/]+)\/(allocation|heartbeat|checkpoint|complete|release)$/);
+      if (req.method === 'POST' && internal) {
+        const body = await readJson(req);
+        const secret = bearerToken(req);
+        const runId = decodeURIComponent(internal[1]);
+        const action = internal[2];
+        let result;
+        if (action === 'allocation') result = await service.confirmCloudAllocation(secret, runId);
+        if (action === 'heartbeat') result = await service.heartbeatCloudRun(secret, runId);
+        if (action === 'checkpoint') result = await service.checkpointCloudRun(secret, runId, body.checkpointId);
+        if (action === 'complete') result = await service.completeCloudRun(secret, runId, body);
+        if (action === 'release') result = await service.releaseCloudRun(secret, runId, body);
+        send(200, result);
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/v1/internal/cloud/lease') {
+        send(200, await service.getCloudLease(bearerToken(req)));
+        return;
+      }
+      const proxy = url.pathname.match(/^\/v1\/openrouter(\/.*)$/);
+      if (proxy) {
+        const token = bearerToken(req);
+        const fingerprint = accessTokenHash(token).slice(0, 24);
+        if (!limiter.check(`proxy:${fingerprint}:${ip}`, 180, MINUTE)) {
+          send(429, { error: 'RATE_LIMITED', message: 'Rau 요청이 너무 많아요. 잠시 후 다시 시도해 주세요' });
+          return;
+        }
+        const body = req.method === 'POST' ? await readJson(req, PROXY_BODY_BYTES) : null;
+        const proxyAbort = new AbortController();
+        const abortProxy = () => {
+          if (!res.writableEnded) proxyAbort.abort();
+        };
+        req.once('aborted', abortProxy);
+        res.once('close', abortProxy);
+        const upstream = await service.proxyOpenRouter(token, {
+          pathname: proxy[1],
+          method: req.method,
+          body,
+          signal: proxyAbort.signal,
+        });
+        const headers = {};
+        for (const name of ['content-type', 'cache-control', 'x-request-id']) {
+          const value = upstream.headers?.get?.(name);
+          if (value) headers[name] = value;
+        }
+        res.writeHead(upstream.status, headers);
+        if (!upstream.body) {
+          res.end();
+          return;
+        }
+        const bodyStream = Readable.fromWeb(upstream.body);
+        bodyStream.once('error', () => res.destroy());
+        bodyStream.pipe(res);
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/v1/access/revoke') {
+        const body = await readJson(req);
+        send(200, await service.revokeAccessToken(bearerToken(req), { deviceId: body.deviceId ?? null }));
+        return;
+      }
       if (url.pathname === '/v2/account-session') {
         if (!limiter.check(`account:${ip}`, 60, MINUTE)) {
           req.resume?.();
@@ -1595,7 +1951,7 @@ export function creditsRequestListener(service, {
           return;
         }
       }
-      if (url.pathname.startsWith('/v1/') && service.minDeviceProtocol >= 2) {
+      if (url.pathname.startsWith('/v1/device-sessions') && service.minDeviceProtocol >= 2) {
         send(426, {
           error: 'RAU_CLIENT_UPDATE_REQUIRED',
           message: 'Rau 로그인을 계속하려면 Rauhwpx를 업데이트해 주세요',
@@ -1607,7 +1963,7 @@ export function creditsRequestListener(service, {
           send(429, { error: 'RATE_LIMITED', message: '로그인 요청이 너무 많아요. 잠시 후 다시 시도해 주세요' });
           return;
         }
-        send(200, await service.createDeviceSession());
+        send(200, await service.createDeviceSession({ replaceAccessToken: bearerToken(req) || null }));
         return;
       }
       const redeem = url.pathname.match(/^\/v1\/device-sessions\/([^/]+)$/);
@@ -1839,6 +2195,7 @@ export function creditsRequestListener(service, {
         send(htmlErrorStatus(error), {
           error: error?.code ?? 'RAU_CREDITS_FAILED',
           message: error?.message ?? String(error),
+          ...(error?.details === undefined ? {} : { details: error.details }),
         });
         return;
       }

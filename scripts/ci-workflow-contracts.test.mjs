@@ -55,9 +55,9 @@ test('nightly and tagged releases do not gate packaging on Browserbase live smok
   }
 
   const release = read('.github/workflows/release.yml');
-  assert.match(release, /^  macos:\n[\s\S]*?^    needs: preflight$/m);
-  assert.match(release, /^  windows:\n[\s\S]*?^    needs: preflight$/m);
-  assert.match(release, /^  publish:\n[\s\S]*?^    needs: \[verification, macos, windows\]$/m);
+  assert.match(release, /^  macos:\n[\s\S]*?^    needs: \[preflight, cloud\]$/m);
+  assert.match(release, /^  windows:\n[\s\S]*?^    needs: \[preflight, cloud\]$/m);
+  assert.match(release, /^  publish:\n[\s\S]*?^    needs: \[verification, macos, windows, linux, cloud, cloud-image\]$/m);
 
   const smoke = read('rhwp/rhwp-agent/tests/browserbase-live-smoke.mjs');
   assert.match(smoke, /for \(let cycle = 1; cycle <= 3; cycle \+= 1\)/);
