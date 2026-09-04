@@ -1,0 +1,33 @@
+{
+  "name": "Rauhwpx Cloud development",
+  "user": "node",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "install": "bash .cursor/install.sh",
+  "start": "true",
+  "terminals": [
+    {
+      "name": "agent-hub",
+      "command": "bash .cursor/run-agent-hub.sh",
+      "description": "Starts the authenticated Rauhwpx agent hub on loopback port 5175."
+    },
+    {
+      "name": "studio-dev",
+      "command": "bash .cursor/run-studio.sh",
+      "description": "Waits for the agent hub, then starts the Studio Vite server on port 7700."
+    }
+  ],
+  "ports": [
+    {
+      "name": "Rauhwpx Studio",
+      "port": 7700
+    },
+    {
+      "name": "Rauhwpx agent hub",
+      "port": 5175
+    }
+  ],
+  "chromeExecutablePath": "/usr/bin/chromium",
+  "enable_testing": true
+}

@@ -574,7 +574,7 @@ try {
       checked: node.getAttribute('aria-checked'),
     }))),
     [
-      { mode: 'app-hosted', heading: 'Raucloud', note: 'Railway 사용 가능', checked: 'true' },
+      { mode: 'app-hosted', heading: 'Raucloud', note: '이 기기에서 바로 시작할 수 있습니다', checked: 'true' },
       { mode: 'self-hosted', heading: '내 서버 사용', note: 'SSH와 비밀번호 없는 sudo가 필요합니다', checked: 'false' },
     ],
   );
@@ -835,7 +835,7 @@ try {
   );
   await chooseMode(page, 'app-hosted');
   await waitForTitle(page, 'Raucloud를 사용할 수 없습니다');
-  assert.match(await page.$eval('.ag-cloud-setup-callout strong', (node) => node.textContent), /Railway 설정 필요/);
+  assert.match(await page.$eval('.ag-cloud-setup-callout strong', (node) => node.textContent), /Raucloud 설정 필요/);
   assert.match(await page.$eval('.ag-cloud-setup-callout p', (node) => node.textContent), /RAILWAY_TOKEN, RAILWAY_PROJECT_ID/);
   assert.equal(await page.evaluate(() => window.__cloudHarness.calls.some((call) => call.method === 'cloudSpawnSandbox')), false);
   await clickButton(page, '내 서버 사용');
@@ -860,7 +860,7 @@ try {
   );
   await clickButton(page, '계속');
   await waitForTitle(page, 'Raucloud 사용');
-  assert.match(await page.$eval('.ag-cloud-setup-callout strong', (node) => node.textContent), /Railway/);
+  assert.match(await page.$eval('.ag-cloud-setup-callout strong', (node) => node.textContent), /Raucloud/);
   await clickButton(page, '뒤로');
   await waitForTitle(page, 'Cloud 서버 선택');
   await clickButton(page, '계속');

@@ -34,6 +34,7 @@
     "test:cloud": "node --test tests/desktop-cloud.test.mjs tests/desktop-cloud-display.test.mjs tests/desktop-cloud-protocol.test.mjs tests/desktop-cloud-client-reliability.test.mjs tests/desktop-cloud-connection-reliability.test.mjs tests/desktop-cloud-handoff-reliability.test.mjs tests/desktop-cloud-provisioner-recovery.test.mjs tests/desktop-provider-auth.test.mjs tests/desktop-app-servers.test.mjs tests/desktop-app-server-live.test.mjs tests/desktop-cloud-broker.test.mjs && npm --prefix cloud test",
     "check:cloud": "node --check desktop/cloud-*.mjs desktop/fs-replace.mjs && npm --prefix cloud run check",
     "check:raucloud-branding": "node scripts/check-raucloud-branding.mjs",
+    "check:cursor-environment": "node scripts/check-cursor-environment.mjs",
     "verify:package": "node scripts/verify-desktop-package.mjs"
   },
   "dependencies": {

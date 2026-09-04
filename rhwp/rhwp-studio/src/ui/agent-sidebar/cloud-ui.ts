@@ -137,6 +137,7 @@ function activityLabel(activity: string, server: string): string {
     case 'planning': return '작업 순서를 정하고 있습니다.';
     case 'testing': return '결과를 확인하고 있습니다.';
     case 'working':
+    case '클라우드 에이전트가 문서에서 작업 중입니다.':
     case 'cloud agent is working.':
     case 'cloud agent is working': return `${server}에서 문서를 편집하고 있습니다.`;
     default: return value || `${server}에서 문서를 편집하고 있습니다.`;
@@ -235,16 +236,16 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
 
   const sidebarButton = el('button', 'ag-header-icon-btn ag-cloud-btn') as HTMLButtonElement;
   sidebarButton.type = 'button';
-  sidebarButton.setAttribute('aria-label', '클라우드 상태');
+  sidebarButton.setAttribute('aria-label', 'Cloud 상태');
   sidebarButton.setAttribute('aria-controls', 'ag-cloud-panel');
   sidebarButton.setAttribute('aria-expanded', 'false');
-  sidebarButton.title = '클라우드 상태';
+  sidebarButton.title = 'Cloud 상태';
   const sidebarButtonLabel = el('span', 'ag-cloud-btn-label', 'Cloud');
   sidebarButton.append(createIcon('cloud'), sidebarButtonLabel);
 
   const workspaceButton = el('button', 'ag-workspace-cloud-btn') as HTMLButtonElement;
   workspaceButton.type = 'button';
-  workspaceButton.setAttribute('aria-label', '클라우드 상태');
+  workspaceButton.setAttribute('aria-label', 'Cloud 상태');
   workspaceButton.setAttribute('aria-controls', 'ag-cloud-panel');
   workspaceButton.setAttribute('aria-expanded', 'false');
   const workspaceButtonLabel = el('span', 'ag-workspace-cloud-label', 'Cloud');
@@ -263,13 +264,13 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   panelTitle.id = 'ag-cloud-panel-title';
   const panelClose = el('button', 'ag-cloud-panel-close') as HTMLButtonElement;
   panelClose.type = 'button';
-  panelClose.setAttribute('aria-label', '클라우드 상태 닫기');
+  panelClose.setAttribute('aria-label', 'Cloud 상태 닫기');
   panelClose.appendChild(createIcon('close'));
   panelHeading.append(panelKicker, panelTitle);
   panelHead.append(panelHeading, panelClose);
   const panelBody = el('div', 'ag-cloud-panel-body');
   const sessionPicker = el('label', 'ag-cloud-session-picker');
-  const sessionPickerLabel = el('span', 'ag-cloud-session-picker-label', '클라우드 작업');
+  const sessionPickerLabel = el('span', 'ag-cloud-session-picker-label', 'Cloud 작업');
   const sessionSelect = el('select', 'ag-cloud-session-select') as HTMLSelectElement;
   sessionPicker.append(sessionPickerLabel, sessionSelect);
   const recovery = el('div', 'ag-cloud-recovery');
@@ -695,7 +696,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       return;
     }
     if (localTurnPending) {
-      panelStatus.textContent = '현재 응답이 끝나면 클라우드로 옮깁니다.';
+      panelStatus.textContent = '현재 응답이 끝나면 Cloud로 옮깁니다.';
       panelDetail.textContent = '앱을 닫으면 전송 확인이 끝날 때까지 기다립니다.';
       panelActions.append(action('전송 예약 취소', deps.onCancelPendingTransfer));
       appendForceQuit();
@@ -778,7 +779,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
             ? plan['summary']
             : typeof wait.payload['prompt'] === 'string'
               ? wait.payload['prompt']
-              : '결정 전까지 클라우드 대화는 안전하게 열린 상태로 유지됩니다.';
+              : '결정 전까지 Cloud 대화는 안전하게 열린 상태로 유지됩니다.';
           if (wait.kind === 'plan-approval' || wait.kind === 'question') {
             const feedback = el('textarea', 'ag-cloud-wait-feedback') as HTMLTextAreaElement;
             feedback.rows = 3;
@@ -838,7 +839,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
         panelDetail.textContent = '도구 호출이 끝나는 안전한 경계에서 멈춥니다.';
         break;
       case 'suspended':
-        panelStatus.textContent = '클라우드 작업이 멈췄습니다.';
+        panelStatus.textContent = 'Cloud 작업이 멈췄습니다.';
         panelDetail.textContent = session.reason;
         if (session.resumable) panelActions.append(action('다시 시작', () => command('resume'), 'ag-primary'));
         panelActions.append(action('이 기기에서 이어받기', () => command('takeover')));
@@ -850,7 +851,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
         panelActions.append(action('안전한 경계에서 이어받기', () => command('takeover'), 'ag-primary'));
         break;
       case 'completed':
-        panelStatus.textContent = downloadedResult ? '결과 미리보기가 준비되었습니다.' : '클라우드 작업이 끝났습니다.';
+        panelStatus.textContent = downloadedResult ? '결과 미리보기가 준비되었습니다.' : 'Cloud 작업이 끝났습니다.';
         panelDetail.textContent = `${session.result.fileName}, ${formatBytes(session.result.byteLength)}`;
         if (!downloadedResult) {
           if (!session.result.availableOnThisDevice) {
@@ -862,7 +863,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
         }
         if (downloadedResult.conflict === 'external-change') {
           panelConflict.hidden = false;
-          panelConflict.textContent = `원본 파일이 바뀌었습니다. 원본과 ${downloadedResult.preservedCopyName ?? '클라우드 결과 사본'}을 모두 보관합니다.`;
+          panelConflict.textContent = `원본 파일이 바뀌었습니다. 원본과 ${downloadedResult.preservedCopyName ?? 'Cloud 결과 사본'}을 모두 보관합니다.`;
           panelActions.append(action('두 파일 보관', () => resolveResult('keep-both'), 'ag-primary'));
         } else {
           panelActions.append(
@@ -879,7 +880,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
         panelActions.append(action('기록 지우기', dismissSession));
         break;
       case 'cancelled':
-        panelStatus.textContent = '클라우드 작업을 취소했습니다.';
+        panelStatus.textContent = 'Cloud 작업을 취소했습니다.';
         panelDetail.textContent = '문서 편집 권한이 이 기기로 돌아왔습니다.';
         panelActions.append(action('기록 지우기', dismissSession));
         break;
@@ -978,12 +979,12 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
           : link.kind === 'failed'
             ? '연결이 끊겼습니다'
       : running
-        ? '클라우드에서 작업 중'
+        ? 'Cloud에서 작업 중'
         : active
-          ? '클라우드 상태'
+          ? 'Cloud 상태'
           : lock
             ? 'Raucloud 사용 제한'
-            : '클라우드 상태';
+            : 'Cloud 상태';
     sidebarButton.setAttribute('aria-label', label);
     sidebarButton.title = label;
     workspaceButton.setAttribute('aria-label', label);
@@ -1181,7 +1182,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     async setWorkflow(workflow, target) {
       const session = snapshot.session;
       if (!matchesTarget(target)) {
-        throw new Error('클라우드 에이전트가 실행 중이 아닙니다.');
+        throw new Error('Cloud 에이전트가 실행 중이 아닙니다.');
       }
       snapshot = await deps.controller.command({
         sessionId: target.sessionId,
@@ -1192,7 +1193,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       render();
       if (snapshot.session.kind !== 'running' || snapshot.session.sessionId !== target.sessionId
         || snapshot.session.threadId !== target.threadId || snapshot.session.documentId !== target.documentId) {
-        throw new Error('클라우드 에이전트가 실행 중이 아닙니다.');
+        throw new Error('Cloud 에이전트가 실행 중이 아닙니다.');
       }
       return { ...target, expectedVersion: snapshot.session.version };
     },
