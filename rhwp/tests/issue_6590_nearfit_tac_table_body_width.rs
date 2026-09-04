@@ -1,14 +1,3 @@
-//! [#6590] 최상위 글자처럼(TAC) 표의 선언 폭이 본문 폭을 근소 초과하면
-//! 표를 본문 폭으로 비례 축소해 그린다.
-//!
-//! `samples/basic/BlogForm_BookReview.hwp` 는 본문 폭 35149HU(468.7px) 문서에
-//! 선언 폭 35719HU(476.3px) 짜리 4행 TAC 표를 담는다(초과 570HU). host 문단의
-//! 저장 lineseg `segment_width` 는 35148HU 로 본문 폭과 같다. 한/글이 이 표를
-//! 본문 폭 줄박스에 실었다는 직접 증거다.
-//!
-//! 종전에는 선언 폭을 그대로 써서 표 우단이 본문 우단을 7.6px 넘었다.
-//!
-//! Ported from edwardkim/rhwp #6591 / #6590.
 #![cfg(not(target_arch = "wasm32"))]
 
 use std::path::Path;
@@ -53,7 +42,6 @@ fn nearfit_tac_table_is_scaled_into_body_width() {
     );
 }
 
-/// 축소는 near-fit 에만 적용된다. 표가 본문 폭 안에 있으면 폭을 건드리지 않는다.
 #[test]
 fn table_within_body_width_keeps_declared_width() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(SAMPLE);
