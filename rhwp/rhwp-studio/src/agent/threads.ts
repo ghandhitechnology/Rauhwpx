@@ -33,9 +33,35 @@ interface ThreadMessageBase {
   /** 호출 당시 선택된 아이콘. 이후 skill 설정이 바뀌어도 기록 모양을 유지한다. */
   skillIcon?: ProductSkillIcon;
   messageId?: string;
+  /** Cloud messages stay visible while waiting for the next remote turn boundary. */
+  delivery?: 'queued-cloud' | 'accepted-cloud';
   attachments?: ThreadAttachment[];
   /** 인라인 프롬프트로 보낸 메시지에 붙는 문서 선택 컨텍스트 (표시용). */
   selection?: { label: string; excerpt: string };
+}
+
+export interface ThreadToolRecord {
+  callId: string;
+  tool: string;
+  argsJson: string;
+  status: 'running' | 'completed' | 'failed' | 'stopped';
+  resultPreview: string;
+  elapsedMs: number | null;
+}
+
+export interface ThreadTaskRecord {
+  taskId: string;
+  taskKind: 'agent' | 'workflow';
+  title: string;
+  role: string;
+  workflowName: string;
+  status: 'running' | 'completed' | 'failed' | 'stopped';
+  activity: string;
+  summary: string;
+  totalTokens: number | null;
+  toolUses: number | null;
+  durationMs: number | null;
+  tools: ThreadToolRecord[];
 }
 
 export interface PendingUserQuestionDraftSnapshot {
@@ -67,6 +93,24 @@ export type ThreadMessage =
       planId: string;
       /** The plan has left the approval surface and started execution. */
       planState?: 'executed';
+    })
+  | (ThreadMessageBase & {
+      role: 'assistant';
+      kind: 'activity';
+      activityId: string;
+      status: 'running' | 'completed' | 'failed' | 'stopped';
+      startedAt: number;
+      completedAt: number | null;
+      tools: ThreadToolRecord[];
+      planId?: never;
+    })
+  | (ThreadMessageBase & {
+      role: 'assistant';
+      kind: 'tasks';
+      taskGroupId: string;
+      status: 'running' | 'completed' | 'failed' | 'stopped';
+      tasks: ThreadTaskRecord[];
+      planId?: never;
     })
   | (ThreadMessageBase & {
       role: 'user' | 'assistant' | 'system';
@@ -112,6 +156,11 @@ export interface ChatThread {
   plans?: StructuredPlan[];
   /** Draft state only. Provider authority remains in the live hub session. */
   pendingUserQuestion?: PendingUserQuestionDraftSnapshot;
+  /** Chat execution mode. Existing records default to local. */
+  executionMode?: 'local' | 'cloud';
+  cloudSessionId?: string;
+  cloudStartId?: string;
+  firstMessageDelivery?: 'starting' | 'accepted' | 'failed';
   messages: ThreadMessage[];
 }
 
@@ -240,6 +289,64 @@ function isStoredChatThread(v: unknown): v is StoredChatThread {
     && typeof t.effort === 'string'
     && Array.isArray(t.messages)
   );
+}
+
+function parseAgentName(value: unknown): AgentName | undefined {
+  return value === 'claude' || value === 'codex' || value === 'pi'
+    || value === 'grok' || value === 'cursor' || value === 'rau'
+    ? value
+    : undefined;
+}
+
+function parseTimelineStatus(value: unknown): 'running' | 'completed' | 'failed' | 'stopped' {
+  return value === 'completed' || value === 'failed' || value === 'stopped' ? value : 'running';
+}
+
+function parseFiniteNonNegative(value: unknown): number | null {
+  if (value === null) return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+function parseThreadTool(value: unknown): ThreadToolRecord | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const tool = value as Record<string, unknown>;
+  if (typeof tool.callId !== 'string' || !tool.callId
+    || typeof tool.tool !== 'string' || !tool.tool
+    || typeof tool.argsJson !== 'string') return null;
+  return {
+    callId: tool.callId,
+    tool: tool.tool,
+    argsJson: tool.argsJson,
+    status: parseTimelineStatus(tool.status),
+    resultPreview: typeof tool.resultPreview === 'string' ? tool.resultPreview : '',
+    elapsedMs: parseFiniteNonNegative(tool.elapsedMs),
+  };
+}
+
+function parseThreadTask(value: unknown): ThreadTaskRecord | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const task = value as Record<string, unknown>;
+  if (typeof task.taskId !== 'string' || !task.taskId
+    || (task.taskKind !== 'agent' && task.taskKind !== 'workflow')
+    || typeof task.title !== 'string') return null;
+  return {
+    taskId: task.taskId,
+    taskKind: task.taskKind,
+    title: task.title,
+    role: typeof task.role === 'string' ? task.role : '',
+    workflowName: typeof task.workflowName === 'string' ? task.workflowName : '',
+    status: parseTimelineStatus(task.status),
+    activity: typeof task.activity === 'string' ? task.activity : '',
+    summary: typeof task.summary === 'string' ? task.summary : '',
+    totalTokens: parseFiniteNonNegative(task.totalTokens),
+    toolUses: parseFiniteNonNegative(task.toolUses),
+    durationMs: parseFiniteNonNegative(task.durationMs),
+    tools: Array.isArray(task.tools) ? task.tools.flatMap((tool) => {
+      const parsed = parseThreadTool(tool);
+      return parsed ? [parsed] : [];
+    }) : [],
+  };
 }
 
 function isAgentName(value: unknown): value is AgentName {
@@ -446,10 +553,14 @@ function normalizeStoredThread(thread: StoredChatThread): ChatThread {
         }];
       })
       : undefined;
-    const agent: AgentName | undefined = isAgentName(message.agent) ? message.agent : undefined;
+    const agent = parseAgentName(message.agent);
     const skillIcon: ProductSkillIcon | undefined = message.skillIcon === 'pencil'
       || message.skillIcon === 'bot' || message.skillIcon === 'system'
       ? message.skillIcon
+      : undefined;
+    const delivery: ThreadMessageBase['delivery'] = message.delivery === 'queued-cloud'
+      || message.delivery === 'accepted-cloud'
+      ? message.delivery
       : undefined;
     const metadata = {
       ...(agent ? { agent } : {}),
@@ -458,6 +569,7 @@ function normalizeStoredThread(thread: StoredChatThread): ChatThread {
         : {}),
       ...(skillIcon ? { skillIcon } : {}),
       ...(typeof message.messageId === 'string' ? { messageId: message.messageId } : {}),
+      ...(delivery ? { delivery } : {}),
       ...(attachments?.length ? { attachments } : {}),
     };
     if (message.kind === 'user-question') {
@@ -484,6 +596,40 @@ function normalizeStoredThread(thread: StoredChatThread): ChatThread {
         kind: 'plan',
         planId: message.planId,
         ...(message.planState === 'executed' ? { planState: 'executed' as const } : {}),
+        ...metadata,
+      }];
+    }
+    if (message.kind === 'activity') {
+      if (message.role !== 'assistant' || typeof message.activityId !== 'string' || !message.activityId) return [];
+      const tools = Array.isArray(message.tools) ? message.tools.flatMap((tool) => {
+        const parsed = parseThreadTool(tool);
+        return parsed ? [parsed] : [];
+      }) : [];
+      return [{
+        role: 'assistant',
+        text: message.text,
+        kind: 'activity',
+        activityId: message.activityId,
+        status: parseTimelineStatus(message.status),
+        startedAt: parseFiniteNonNegative(message.startedAt) ?? 0,
+        completedAt: parseFiniteNonNegative(message.completedAt),
+        tools,
+        ...metadata,
+      }];
+    }
+    if (message.kind === 'tasks') {
+      if (message.role !== 'assistant' || typeof message.taskGroupId !== 'string' || !message.taskGroupId) return [];
+      const tasks = Array.isArray(message.tasks) ? message.tasks.flatMap((task) => {
+        const parsed = parseThreadTask(task);
+        return parsed ? [parsed] : [];
+      }) : [];
+      return [{
+        role: 'assistant',
+        text: message.text,
+        kind: 'tasks',
+        taskGroupId: message.taskGroupId,
+        status: parseTimelineStatus(message.status),
+        tasks,
         ...metadata,
       }];
     }
@@ -514,7 +660,23 @@ function normalizeStoredThread(thread: StoredChatThread): ChatThread {
     ...(latestPlan ? { latestPlan } : {}),
     ...(plans.length ? { plans } : {}),
     ...(pendingUserQuestion && !pendingAlreadyArchived ? { pendingUserQuestion } : {}),
+    ...(thread.executionMode === 'cloud' ? { executionMode: 'cloud' as const } : {}),
+    ...(typeof thread.cloudSessionId === 'string' && thread.cloudSessionId
+      ? { cloudSessionId: thread.cloudSessionId }
+      : {}),
+    ...(typeof thread.cloudStartId === 'string' && thread.cloudStartId
+      ? { cloudStartId: thread.cloudStartId }
+      : {}),
+    ...(thread.firstMessageDelivery === 'starting'
+      || thread.firstMessageDelivery === 'accepted'
+      || thread.firstMessageDelivery === 'failed'
+      ? { firstMessageDelivery: thread.firstMessageDelivery }
+      : {}),
   };
+}
+
+export function parseChatThread(value: unknown): ChatThread | null {
+  return isStoredChatThread(value) ? normalizeStoredThread(value) : null;
 }
 
 function cloneThread(thread: ChatThread) {
@@ -910,6 +1072,9 @@ export function serializeThreadMessagesForProviderHistory(
     }
     if ((message.role !== 'user' && message.role !== 'assistant')
       || message.kind === 'progress'
+      || message.kind === 'plan'
+      || message.kind === 'activity'
+      || message.kind === 'tasks'
       || (!message.text.trim() && !(message.role === 'user' && message.skillName))) return [];
     return [{
       role: message.role,

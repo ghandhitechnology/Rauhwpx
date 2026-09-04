@@ -12,6 +12,18 @@ import type {
   SaveFilePickerOptionsLike,
 } from './command/file-system-access.ts';
 import { FALLBACK_DOCUMENT_FILE_NAME } from './core/document-names.ts';
+import type {
+  CloudCommandRequest,
+  CloudDisplayEvent,
+  CloudDisplayInputEvent,
+  CloudProfileDraft,
+  CloudResultAction,
+  CloudServerMode,
+  CloudSessionScope,
+  CloudTransferIntentRequest,
+  CloudTransferRequest,
+  CloudTransferReference,
+} from './cloud/types.ts';
 import {
   EXACT_LOCAL_DOCUMENT_MAX_BYTES,
   MIB,
@@ -135,6 +147,43 @@ export interface RhwpDesktopApi {
     bytes: Uint8Array;
     readOnly?: boolean;
   }) => void) => void;
+  /** Cloud methods are optional so the browser build and older desktop preloads stay usable. */
+  cloudGetState?: (payload: CloudSessionScope) => Promise<unknown>;
+  cloudSaveProfile?: (payload: { profile: CloudProfileDraft }) => Promise<unknown>;
+  cloudTestProfile?: (payload: { profile?: CloudProfileDraft }) => Promise<unknown>;
+  cloudProvision?: (payload: {
+    installChannel: 'stable' | 'prerelease';
+    profile?: CloudProfileDraft;
+  }) => Promise<unknown>;
+  cloudPair?: (payload: { code: string; profile?: CloudProfileDraft }) => Promise<unknown>;
+  cloudSelectServerMode?: (payload: { mode: CloudServerMode }) => Promise<unknown>;
+  cloudSpawnSandbox?: (payload: { providerId?: string }) => Promise<unknown>;
+  cloudSandboxStatus?: () => Promise<unknown>;
+  cloudTeardownSandbox?: (payload: { force?: boolean }) => Promise<unknown>;
+  cloudForceQuitAccount?: () => Promise<unknown>;
+  cloudReconnectLink?: () => Promise<unknown>;
+  cloudRecreateLink?: () => Promise<unknown>;
+  /** Checkpoints the prior controller and explicitly transfers the account-global worker lease. */
+  cloudTakeoverSandbox?: () => Promise<unknown>;
+  /** Blocks new Raucloud input, checkpoints the controlling turn, then releases the worker. */
+  cloudAccountLogout?: () => Promise<unknown>;
+  cloudTransfer?: (payload: CloudTransferRequest) => Promise<unknown>;
+  cloudSetTransferIntent?: (payload: CloudTransferIntentRequest) => Promise<unknown>;
+  cloudReadReference?: (payload: Pick<CloudTransferReference, 'id' | 'scope' | 'scopeId'>) => Promise<unknown>;
+  cloudCommand?: (payload: CloudCommandRequest) => Promise<unknown>;
+  cloudDismissSession?: (payload: { sessionId: string }) => Promise<unknown>;
+  cloudCompleteTakeover?: (payload: { sessionId: string; operationId: string }) => Promise<unknown>;
+  cloudDownloadResult?: (payload: { sessionId: string }) => Promise<unknown>;
+  cloudDownloadCheckpoint?: (payload: { sessionId: string; operationId?: string }) => Promise<unknown>;
+  cloudOpenDisplay?: (payload: { sessionId: string }) => Promise<unknown>;
+  cloudCloseDisplay?: (payload: { connectionId: string }) => Promise<unknown>;
+  cloudDisplayInput?: (payload: { connectionId: string; event: CloudDisplayInputEvent }) => Promise<unknown>;
+  cloudResolveResult?: (payload: { sessionId: string; action: CloudResultAction }) => Promise<unknown>;
+  onCloudEvent?: (callback: (event: unknown) => void) => (() => void) | void;
+  onCloudDisplayEvent?: (callback: (event: {
+    connectionId: string;
+    event: CloudDisplayEvent;
+  }) => void) => (() => void) | void;
   onPastePlainText?: (callback: (text: string) => void) => void;
 }
 
