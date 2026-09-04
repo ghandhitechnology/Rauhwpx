@@ -764,7 +764,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
           mode === 'app-hosted',
           provider
             ? provider.configured
-              ? appHostedLock ?? `${provider.displayName} 사용 가능`
+              ? appHostedLock ?? '이 기기에서 바로 시작할 수 있습니다'
               : '이 빌드에서는 아직 사용할 수 없습니다'
             : '이 빌드에는 포함되지 않았습니다',
           Boolean(raucloudHardLock(snapshot)),
@@ -823,7 +823,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       title.textContent = 'Raucloud 사용';
       body.append(
         description('Rauhwpx가 새 샌드박스를 만들고 이 기기에 연결합니다.'),
-        callout('cloud', provider.displayName, '현재 문서와 대화 기록을 샌드박스로 전송합니다. 서버를 종료하면 샌드박스도 삭제됩니다.'),
+        callout('cloud', 'Raucloud', '현재 문서와 대화 기록을 샌드박스로 전송합니다. 서버를 종료하면 샌드박스도 삭제됩니다.'),
       );
       back.addEventListener('click', () => setState({ kind: 'choose', draft, intent, mode: 'app-hosted' }));
       const primary = button('서버 만들기', 'primary');
@@ -838,7 +838,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
         description('이 빌드에는 Raucloud 설정이 없습니다. 내 서버를 연결하면 지금 바로 사용할 수 있습니다.'),
         callout(
           'cloud',
-          provider ? `${provider.displayName} 설정 필요` : 'Raucloud 없음',
+          provider ? 'Raucloud 설정 필요' : 'Raucloud 없음',
           provider?.missingConfig.length
             ? `운영자가 ${provider.missingConfig.join(', ')}을 설정해야 합니다.`
             : '앱을 업데이트하거나 내 서버를 사용하세요.',
