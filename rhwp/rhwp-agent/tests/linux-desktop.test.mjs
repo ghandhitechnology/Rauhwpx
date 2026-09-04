@@ -148,6 +148,12 @@ test('Linux secret vault accepts secure keyrings and locks down persisted cipher
         filePath,
         safeStorage: fakeSafeStorage(backend),
         platform: 'linux',
+        // Windows cannot fsync a directory handle. This test simulates Linux
+        // keyring selection on every CI host, so leave only that host-specific
+        // durability syscall out of the simulation.
+        fileOperations: process.platform === 'win32'
+          ? { syncDirectory: async () => {} }
+          : {},
       });
       await vault.set('rhwp.test', `secret-${backend}`);
       assert.equal(await vault.get('rhwp.test'), `secret-${backend}`);
