@@ -305,26 +305,23 @@ impl DocumentCore {
         field_id: u32,
         value: &str,
     ) -> Result<String, HwpError> {
-        // 먼저 필드 위치 찾기
         let fields = self.collect_all_fields();
         let fi = fields
             .iter()
             .find(|f| f.field.field_id == field_id)
             .ok_or_else(|| HwpError::InvalidField(format!("필드 ID {} 없음", field_id)))?;
 
-        let location = fi.location.clone();
-        let fri = fi.field_range_index;
-        let old_value = fi.value.clone();
-        let stored_end = para_at_location(self, &location)
-            .and_then(crate::renderer::composer::paragraph_flow_end);
-
-        self.set_field_text_at(&location, fri, value)?;
-        self.refresh_field_layout(&location, stored_end);
+        let stored_end = self.field_owner_flow_end(&fi.location)?;
+        self.replace_field_text(fi, value)?;
+        if let Some(sec) = self.document.sections.get_mut(fi.location.section_index) {
+            sec.raw_stream = None;
+        }
+        self.refresh_field_layout(&fi.location, stored_end)?;
 
         Ok(format!(
             "{{\"ok\":true,\"fieldId\":{},\"oldValue\":{},\"newValue\":{}}}",
             field_id,
-            json_escape(&old_value),
+            json_escape(&fi.value),
             json_escape(value),
         ))
     }
@@ -337,36 +334,33 @@ impl DocumentCore {
             .find(|f| f.field.field_name().map(|n| n == name).unwrap_or(false))
             .ok_or_else(|| HwpError::InvalidField(format!("필드 이름 '{}' 없음", name)))?;
 
-        let field_id = fi.field.field_id;
-        let location = fi.location.clone();
-        let fri = fi.field_range_index;
-        let old_value = fi.value.clone();
-        let is_cell_field = fi.field.ctrl_id == 0; // 가상 셀 필드
-        let stored_end = para_at_location(self, &location)
-            .and_then(crate::renderer::composer::paragraph_flow_end);
-
-        let section_index = location.section_index;
-
-        if is_cell_field {
-            // 셀 필드: 셀의 첫 문단 텍스트를 직접 교체
-            self.set_cell_field_text(&location, value)?;
-        } else {
-            // ClickHere 필드: field_ranges 기반 교체
-            self.set_field_text_at(&location, fri, value)?;
-        }
-
-        // raw_stream 무효화
-        if let Some(sec) = self.document.sections.get_mut(section_index) {
+        let stored_end = self.field_owner_flow_end(&fi.location)?;
+        self.replace_field_text(fi, value)?;
+        if let Some(sec) = self.document.sections.get_mut(fi.location.section_index) {
             sec.raw_stream = None;
         }
-        self.refresh_field_layout(&location, stored_end);
+        self.refresh_field_layout(&fi.location, stored_end)?;
 
         Ok(format!(
             "{{\"ok\":true,\"fieldId\":{},\"oldValue\":{},\"newValue\":{}}}",
-            field_id,
-            json_escape(&old_value),
+            fi.field.field_id,
+            json_escape(&fi.value),
             json_escape(value),
         ))
+    }
+
+    fn field_owner_flow_end(&self, location: &FieldLocation) -> Result<Option<i32>, HwpError> {
+        let owner = para_at_location(self, location)
+            .ok_or_else(|| HwpError::InvalidField("필드 소유 문단 경로 없음".into()))?;
+        Ok(crate::renderer::composer::paragraph_flow_end(owner))
+    }
+
+    fn replace_field_text(&mut self, fi: &FieldInfo, value: &str) -> Result<(), HwpError> {
+        if fi.field.ctrl_id == 0 {
+            self.set_cell_field_text(&fi.location, value)
+        } else {
+            self.set_field_text_at(&fi.location, fi.field_range_index, value)
+        }
     }
 
     /// 셀 필드의 텍스트를 교체한다 (셀의 첫 문단 텍스트를 value로 대체).
@@ -486,16 +480,20 @@ impl DocumentCore {
                             last_idx, cell_index
                         ))
                     })?;
-                    if let Some(cell_para) = cell.paragraphs.first_mut() {
-                        let old_len = cell_para.text.chars().count();
-                        if old_len > 0 {
-                            cell_para.delete_text_at(0, old_len);
-                        }
-                        if !value.is_empty() {
-                            cell_para.insert_text_at(0, value);
-                        }
-                        rebuild_char_offsets(cell_para);
+                    let cell_para = cell.paragraphs.first_mut().ok_or_else(|| {
+                        HwpError::InvalidField(format!(
+                            "경로[{}]: 셀 필드에 편집할 문단 없음",
+                            last_idx
+                        ))
+                    })?;
+                    let old_len = cell_para.text.chars().count();
+                    if old_len > 0 {
+                        cell_para.delete_text_at(0, old_len);
                     }
+                    if !value.is_empty() {
+                        cell_para.insert_text_at(0, value);
+                    }
+                    rebuild_char_offsets(cell_para);
                     Ok(())
                 } else {
                     Err(HwpError::InvalidField(format!(
@@ -558,65 +556,90 @@ impl DocumentCore {
         Ok(())
     }
 
-    fn refresh_field_layout(&mut self, location: &FieldLocation, stored_end: Option<i32>) {
+    fn refresh_field_layout(
+        &mut self,
+        location: &FieldLocation,
+        stored_end: Option<i32>,
+    ) -> Result<(), HwpError> {
         let section_idx = location.section_index;
         if self.composed.len() <= section_idx {
             self.composed.resize_with(section_idx + 1, Vec::new);
         }
-        if location.nested_path.is_empty() {
-            self.reflow_paragraph(section_idx, location.para_index);
-            let hwp3_layout = self.document.layout_profile().hwp3_layout();
-            crate::renderer::composer::recalculate_section_vpos(
-                &mut self.document.sections[section_idx].paragraphs,
-                location.para_index,
-                None,
-                stored_end,
-                &self.styles,
-                self.dpi,
-                hwp3_layout,
-            );
-            if self.composed[section_idx].len() > location.para_index {
-                self.recompose_paragraph(section_idx, location.para_index);
-            } else {
-                self.recompose_section(section_idx);
+        let path: Vec<(usize, usize, usize)> = location
+            .nested_path
+            .iter()
+            .map(|entry| match entry {
+                NestedEntry::TableCell {
+                    control_index,
+                    cell_index,
+                    para_index,
+                } => (*control_index, *cell_index, *para_index),
+                NestedEntry::TextBox {
+                    control_index,
+                    para_index,
+                } => (*control_index, 0, *para_index),
+            })
+            .collect();
+        let layout_result: Result<(), HwpError> = (|| {
+            match (path.first(), path.last()) {
+                (None, _) | (_, None) => {
+                    self.reflow_paragraph(section_idx, location.para_index);
+                    let hwp3_layout = self.document.layout_profile().hwp3_layout();
+                    crate::renderer::composer::recalculate_section_vpos(
+                        &mut self.document.sections[section_idx].paragraphs,
+                        location.para_index,
+                        None,
+                        stored_end,
+                        &self.styles,
+                        self.dpi,
+                        hwp3_layout,
+                    );
+                    if self.document.sections[section_idx].paragraphs[location.para_index]
+                        .line_segs
+                        .is_empty()
+                    {
+                        return Err(HwpError::InvalidField(
+                            "필드 소유 본문 문단 재조판 결과가 비어 있음".into(),
+                        ));
+                    }
+                    if self.composed[section_idx].len() > location.para_index {
+                        self.recompose_paragraph(section_idx, location.para_index);
+                    } else {
+                        self.recompose_section(section_idx);
+                    }
+                }
+                (Some(&(outer_control, _, _)), Some(&(_, _, target_para))) => {
+                    self.mark_cell_control_dirty(section_idx, location.para_index, outer_control);
+                    self.reflow_cell_paragraph_by_path(
+                        section_idx,
+                        location.para_index,
+                        &path,
+                        target_para,
+                    );
+                    self.recalculate_cell_paragraph_vpos_by_path(
+                        section_idx,
+                        location.para_index,
+                        &path,
+                        target_para,
+                        None,
+                    );
+                    if self
+                        .get_cell_paragraph_mut_by_path(section_idx, location.para_index, &path)?
+                        .line_segs
+                        .is_empty()
+                    {
+                        return Err(HwpError::InvalidField(
+                            "필드 소유 중첩 문단 재조판 결과가 비어 있음".into(),
+                        ));
+                    }
+                    self.recompose_section(section_idx);
+                }
             }
-        } else {
-            let path: Vec<(usize, usize, usize)> = location
-                .nested_path
-                .iter()
-                .map(|entry| match entry {
-                    NestedEntry::TableCell {
-                        control_index,
-                        cell_index,
-                        para_index,
-                    } => (*control_index, *cell_index, *para_index),
-                    NestedEntry::TextBox {
-                        control_index,
-                        para_index,
-                    } => (*control_index, 0, *para_index),
-                })
-                .collect();
-            let target_para = path.last().map(|entry| entry.2).unwrap_or(0);
-            if let Some((outer_control, _, _)) = path.first().copied() {
-                self.mark_cell_control_dirty(section_idx, location.para_index, outer_control);
-            }
-            self.reflow_cell_paragraph_by_path(
-                section_idx,
-                location.para_index,
-                &path,
-                target_para,
-            );
-            self.recalculate_cell_paragraph_vpos_by_path(
-                section_idx,
-                location.para_index,
-                &path,
-                target_para,
-                None,
-            );
-            self.recompose_section(section_idx);
-        }
+            Ok(())
+        })();
         self.paginate_if_needed();
         self.invalidate_page_tree_cache();
+        layout_result
     }
 
     /// FieldLocation에 해당하는 Paragraph의 가변 참조를 반환한다.
@@ -737,7 +760,7 @@ impl DocumentCore {
         if let Some(section) = self.document.sections.get_mut(section_idx) {
             section.raw_stream = None;
         }
-        self.refresh_field_layout(&location, stored_end);
+        self.refresh_field_layout(&location, stored_end)?;
         Ok(r#"{"ok":true}"#.to_string())
     }
 
@@ -816,7 +839,7 @@ impl DocumentCore {
         if let Some(section) = self.document.sections.get_mut(section_idx) {
             section.raw_stream = None;
         }
-        self.refresh_field_layout(&location, stored_end);
+        self.refresh_field_layout(&location, stored_end)?;
         Ok(r#"{"ok":true}"#.to_string())
     }
 
@@ -1853,5 +1876,108 @@ mod tests {
         assert_eq!(updated.text, "새값");
         assert_eq!(updated.char_count, 3);
         assert_eq!(updated.char_offsets, vec![0, 1]);
+    }
+
+    fn core_with_named_cell(paragraphs: Vec<Paragraph>) -> DocumentCore {
+        let table = Table {
+            cells: vec![Cell {
+                width: 6000,
+                field_name: Some("셀필드".into()),
+                paragraphs,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut core = DocumentCore::new_empty();
+        core.document.sections.push(Section {
+            paragraphs: vec![Paragraph {
+                controls: vec![Control::Table(Box::new(table))],
+                ..Default::default()
+            }],
+            raw_stream: Some(vec![0xAB; 64]),
+            ..Default::default()
+        });
+        core.composed = vec![Vec::new()];
+        core.dirty_sections = vec![true];
+        core.dirty_paragraphs = vec![None];
+        core
+    }
+
+    fn virtual_cell_field(core: &DocumentCore) -> FieldInfo {
+        core.collect_all_fields()
+            .into_iter()
+            .find(|f| f.field.ctrl_id == 0)
+            .expect("named cell should surface as a virtual field")
+    }
+
+    #[test]
+    fn setting_virtual_cell_field_by_id_edits_cell_and_materializes_line_segs() {
+        let mut core = core_with_named_cell(vec![Paragraph {
+            text: "기존값".into(),
+            char_count: 4,
+            char_offsets: vec![0, 1, 2],
+            ..Default::default()
+        }]);
+        let field = virtual_cell_field(&core);
+
+        let result = core
+            .set_field_value_by_id(field.field.field_id, "새값")
+            .unwrap();
+
+        assert!(result.contains("\"oldValue\":\"기존값\",\"newValue\":\"새값\""));
+        assert!(core.document.sections[0].raw_stream.is_none());
+        let Control::Table(table) = &core.document.sections[0].paragraphs[0].controls[0] else {
+            panic!("expected table control");
+        };
+        let updated = &table.cells[0].paragraphs[0];
+        assert_eq!(updated.text, "새값");
+        assert_eq!(updated.char_offsets, vec![0, 1]);
+        assert!(!updated.line_segs.is_empty());
+    }
+
+    #[test]
+    fn virtual_cell_field_without_paragraph_is_rejected() {
+        let mut core = core_with_named_cell(Vec::new());
+        let field = virtual_cell_field(&core);
+
+        assert!(matches!(
+            core.set_cell_field_text(&field.location, "새값"),
+            Err(HwpError::InvalidField(_))
+        ));
+        assert!(matches!(
+            core.set_field_value_by_id(field.field.field_id, "새값"),
+            Err(HwpError::InvalidField(_))
+        ));
+        assert!(
+            core.document.sections[0].raw_stream.is_some(),
+            "실패한 설정은 문서를 바꾸지 않아야 한다"
+        );
+    }
+
+    #[test]
+    fn nested_reflow_failure_still_invalidates_page_tree_cache() {
+        let mut core = core_with_named_cell(vec![Paragraph {
+            text: "기존값".into(),
+            char_count: 4,
+            char_offsets: vec![0, 1, 2],
+            ..Default::default()
+        }]);
+        core.page_tree_cache.borrow_mut().push(None);
+        let location = FieldLocation {
+            section_index: 0,
+            para_index: 0,
+            nested_path: vec![NestedEntry::TableCell {
+                control_index: 0,
+                cell_index: 0,
+                para_index: 99,
+            }],
+        };
+
+        let err = core.refresh_field_layout(&location, None);
+        assert!(err.is_err());
+        assert!(
+            core.page_tree_cache.borrow().is_empty(),
+            "reflow 실패도 페이지 트리 캐시를 버려야 한다"
+        );
     }
 }
