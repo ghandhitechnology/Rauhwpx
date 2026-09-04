@@ -25,7 +25,9 @@ use crate::document_core::queries::rendering::is_projected_cell_stack_picture_pa
 use crate::model::bin_data::BinDataContent;
 use crate::model::control::Control;
 use crate::model::paragraph::{LineSeg, Paragraph};
-use crate::model::shape::{HorzAlign, HorzRelTo, ShapeObject, TextWrap, VertRelTo};
+use crate::model::shape::{
+    Caption, CaptionDirection, HorzAlign, HorzRelTo, ShapeObject, TextWrap, VertRelTo,
+};
 use crate::model::style::{Alignment, HeadType, LineSpacingType, Numbering, UnderlineType};
 
 const CAPTION_CELL_SENTINEL: usize = 65534;
@@ -542,6 +544,100 @@ mod empty_cell_tac_picture_baseline_tests {
     }
 }
 
+#[cfg(test)]
+mod tac_object_box_height_tests {
+    use super::{hwpunit_to_px, inline_picture_baseline_y, tac_object_box_height_px};
+    use crate::model::paragraph::{LineSeg, Paragraph};
+    use crate::model::shape::{Caption, CaptionDirection};
+
+    fn caption_with(direction: CaptionDirection, spacing: i16, line_height: i32) -> Caption {
+        Caption {
+            direction,
+            spacing,
+            paragraphs: vec![Paragraph {
+                line_segs: vec![LineSeg {
+                    line_height,
+                    text_height: line_height,
+                    baseline_distance: line_height,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn no_caption_or_side_caption_keeps_picture_height() {
+        let pic_h = 205.7;
+        assert!((tac_object_box_height_px(pic_h, &None, 96.0) - pic_h).abs() < 1e-9);
+
+        let left = caption_with(CaptionDirection::Left, 850, 2000);
+        assert!((tac_object_box_height_px(pic_h, &Some(left), 96.0) - pic_h).abs() < 1e-9);
+
+        let empty = Caption {
+            direction: CaptionDirection::Bottom,
+            spacing: 850,
+            paragraphs: vec![],
+            ..Default::default()
+        };
+        assert!((tac_object_box_height_px(pic_h, &Some(empty), 96.0) - pic_h).abs() < 1e-9);
+    }
+
+    #[test]
+    fn top_bottom_caption_adds_spacing_and_caption_height() {
+        let pic_h = 205.7;
+        let caption = caption_with(CaptionDirection::Bottom, 850, 2000);
+        let box_h = tac_object_box_height_px(pic_h, &Some(caption), 96.0);
+        let expected = pic_h + hwpunit_to_px(850, 96.0) + hwpunit_to_px(2000, 96.0);
+        assert!(
+            (box_h - expected).abs() < 0.01,
+            "box_h={box_h:.2} expected={expected:.2}"
+        );
+        assert!(box_h > pic_h);
+    }
+
+    #[test]
+    fn captioned_box_taller_than_baseline_clamps_to_line_top() {
+        let y = 233.7;
+        let baseline = 240.7;
+        let pic_h = 205.7;
+        let caption = caption_with(CaptionDirection::Bottom, 850, 4900);
+        let box_h = tac_object_box_height_px(pic_h, &Some(caption), 96.0);
+        assert!(box_h > baseline);
+        let img_y = inline_picture_baseline_y(y, baseline, box_h);
+        assert!((img_y - y).abs() < 0.01, "img_y={img_y:.2} y={y:.2}");
+    }
+
+    #[test]
+    fn last_caption_line_spacing_is_not_part_of_the_object_box() {
+        // Hangul 저장 lineseg / measure_caption 과 같이 마지막 줄 trailing ls 는
+        // 개체 상자에 넣지 않는다. layout_caption 의 문단 커서 전진과 다른 축.
+        let pic_h = 205.7;
+        let caption = Caption {
+            direction: CaptionDirection::Bottom,
+            spacing: 850,
+            paragraphs: vec![Paragraph {
+                line_segs: vec![LineSeg {
+                    line_height: 2000,
+                    text_height: 2000,
+                    baseline_distance: 2000,
+                    line_spacing: 780,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let box_h = tac_object_box_height_px(pic_h, &Some(caption), 96.0);
+        let expected = pic_h + hwpunit_to_px(850, 96.0) + hwpunit_to_px(2000, 96.0);
+        assert!(
+            (box_h - expected).abs() < 0.01,
+            "box_h={box_h:.2} expected={expected:.2} (trailing ls 780HU 미포함)"
+        );
+    }
+}
+
 fn is_caption_cell_context(cell_ctx: Option<&CellContext>) -> bool {
     cell_ctx
         .and_then(|ctx| ctx.path.last())
@@ -577,6 +673,42 @@ fn empty_cell_tac_picture_line_uses_stored_baseline(
 
 fn inline_picture_baseline_y(line_y: f64, baseline: f64, picture_height: f64) -> f64 {
     (line_y + baseline - picture_height).max(line_y)
+}
+
+/// [#6575] TAC 개체를 baseline 에 앉힐 때 쓰는 **개체 상자 전체 높이**(px).
+///
+/// 종전에는 그림 높이만으로 `y + baseline - pic_h` 를 잡았다. 그런데 위/아래 캡션이
+/// 붙은 그림은 저장 줄이 **그림 + 캡션 간격 + 캡션**을 통째로 예약하므로, 그림만
+/// 바닥맞춤하면 캡션 높이만큼 아래로 내려간다.
+///
+/// 실측 `156489219` 5쪽 `pi=43`(한글 2024 오라클):
+///
+/// ```text
+/// y=233.7  baseline=240.7  pic_h=205.7  raw_lh=283.1  caption=Bottom(spacing 850, 3문단)
+///   종전:  233.7 + 240.7 - 205.7            = 268.7   (한/글 233.7 대비 +35.0px)
+///   상자:  (233.7 + 240.7 - 283.1).max(233.7) = 233.7  ✔
+/// ```
+///
+/// 상자가 baseline 보다 크면 기존 `.max(y)` 클램프가 그대로 줄 상단을 준다 — 한컴이
+/// 이런 줄에서 개체를 줄 상단에 붙이는 동작과 같은 답이다.
+///
+/// 좌/우 캡션은 폭을 늘릴 뿐 높이를 늘리지 않으므로 세로 방향(Top/Bottom)만 센다.
+fn tac_object_box_height_px(object_h: f64, caption: &Option<Caption>, dpi: f64) -> f64 {
+    let Some(cap) = caption else {
+        return object_h;
+    };
+    if !matches!(
+        cap.direction,
+        CaptionDirection::Top | CaptionDirection::Bottom
+    ) || cap.paragraphs.is_empty()
+    {
+        return object_h;
+    }
+    let caption_h = super::picture_footnote::caption_height_px(caption, dpi);
+    if caption_h <= 0.0 {
+        return object_h;
+    }
+    object_h + hwpunit_to_px(i32::from(cap.spacing), dpi) + caption_h
 }
 
 /// HWP5 원본 LineSeg가 저장한 column-relative 줄 시작점을 일반 본문 줄에 적용한다.
@@ -2554,7 +2686,8 @@ impl LayoutEngine {
                             if raw_lh + 4.0 >= pic_h {
                                 *reserved_tac_picture_height = Some(pic_h);
                             }
-                            let img_y = (y + baseline - pic_h).max(y);
+                            let box_h = tac_object_box_height_px(pic_h, &pic.caption, self.dpi);
+                            let img_y = (y + baseline - box_h).max(y);
                             let bin_data_id = pic.image_attr.bin_data_id;
                             let image_data =
                                 find_bin_data(bdc, bin_data_id).map(|c| c.data.load_shared());
@@ -5387,7 +5520,10 @@ impl LayoutEngine {
                                 let base_img_y = if label_extra > 0.0 {
                                     y + label_extra
                                 } else {
-                                    (y + baseline - pic_h).max(y)
+                                    // [#6575] 같은 계약의 형제 경로 — 상자 전체로 맞춘다.
+                                    let box_h =
+                                        tac_object_box_height_px(pic_h, &pic.caption, self.dpi);
+                                    (y + baseline - box_h).max(y)
                                 };
                                 let img_y = base_img_y + sibling_reserved_px;
                                 let bin_data_id = pic.image_attr.bin_data_id;
@@ -6539,7 +6675,9 @@ impl LayoutEngine {
                             let base_img_y = if label_extra > 0.0 {
                                 vars.y + label_extra
                             } else {
-                                inline_picture_baseline_y(vars.y, vars.baseline, pic_h)
+                                // [#6575] baseline 정렬 대상은 그림이 아니라 개체 상자 전체다.
+                                let box_h = tac_object_box_height_px(pic_h, &pic.caption, self.dpi);
+                                inline_picture_baseline_y(vars.y, vars.baseline, box_h)
                             };
                             let img_y = base_img_y + sibling_reserved_px;
                             let bin_data_id = pic.image_attr.bin_data_id;

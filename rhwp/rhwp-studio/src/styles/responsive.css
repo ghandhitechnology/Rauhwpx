@@ -5,6 +5,10 @@
      모바일:   ~767px
      태블릿:   768px ~ 1023px
      데스크톱: 1024px~
+
+   눈금자는 편집 화면의 모든 너비·높이에서 20px grid 슬롯을 유지한다 (#6187).
+   인쇄에서만 눈금자를 숨긴다. 핀 드래그는 이 포크에 없어 입력 정책은
+   표시 계약과 별개다. resize 중 bitmap 갱신·그리기 순서는 ruler.ts 책임이다.
    ================================================================ */
 
 /* ─── 좁은 데스크톱 이하 (~1279px) ───────────────────── */
@@ -29,19 +33,6 @@
   }
   .tb-btn .tb-label {
     display: none;
-  }
-
-  /* 눈금자 숨김: grid 대신 display로 처리하여 iOS WebKit 호환 */
-  #ruler-corner, #h-ruler, #v-ruler {
-    display: none;
-  }
-  #editor-area {
-    display: flex;
-    flex-direction: column;
-  }
-  #scroll-container {
-    flex: 1;
-    min-height: 0;
   }
 }
 
@@ -309,16 +300,8 @@
 
   .sb-sep { display: none; }
 
-  /* ── 편집 영역: 전체 화면 (grid→flex 전환으로 iOS 호환) ── */
-  #editor-area {
-    display: flex;
-    flex-direction: column;
-  }
-  #ruler-corner, #h-ruler, #v-ruler {
-    display: none;
-  }
+  /* ── 편집 영역: 문서의 기본 터치 스크롤·확대만 허용한다. 눈금자 grid는 유지. ── */
   #scroll-container {
-    flex: 1;
     min-height: 0;
     touch-action: pan-x pan-y pinch-zoom;
     -webkit-overflow-scrolling: touch;
@@ -440,14 +423,10 @@
 
 /* ─── 가상 키보드 대응 ───────────────────────────────── */
 @media (max-height: 500px) and (max-width: 767px) {
-  /* 키보드가 올라온 상태: 도구 영역 최소화 */
+  /* 키보드가 올라온 상태: 도구 영역 최소화. 눈금자 20px grid는 유지한다. */
   #menu-bar { display: none; }
   #style-bar { display: none; }
   #status-bar { display: none; }
-  #editor-area {
-    display: flex;
-    flex-direction: column;
-  }
 }
 
 /* ─── 인쇄 ──────────────────────────────────────────── */

@@ -1123,6 +1123,26 @@ fn non_tac_picture_or_shape_common(ctrl: &Control) -> Option<&crate::model::shap
     }
 }
 
+/// [#6511] #1995 낱장 배치는 본문 흐름에 참여하는 비-TAC 그림만 후보로 센다.
+/// 글뒤로/글앞으로(BehindText/InFrontOfText) 그림은 흐름 공간을 소비하지 않아
+/// 한 쪽에 몇 장이든 공존할 수 있다(#703 표와 같은 불변식). 전면 크기라도
+/// 스캔 이미지가 아니라 배경/워터마크이므로 낱장 배치 후보에서 제외한다.
+fn flow_noninline_picture(ctrl: &Control) -> Option<&crate::model::image::Picture> {
+    match ctrl {
+        Control::Picture(pic)
+            if !pic.common.treat_as_char
+                && !matches!(
+                    pic.common.text_wrap,
+                    crate::model::shape::TextWrap::BehindText
+                        | crate::model::shape::TextWrap::InFrontOfText
+                ) =>
+        {
+            Some(pic)
+        }
+        _ => None,
+    }
+}
+
 fn para_has_non_tac_picture_or_shape(para: &Paragraph) -> bool {
     para.controls
         .iter()
@@ -5050,17 +5070,16 @@ impl TypesetEngine {
             // 각각 한 페이지에 단독 배치해야 한다. 미수정 시 96장이 한 앵커에 스택되어
             // 문서가 과소 페이지가 된다(오라클 268 vs rhwp 174). 한 문단에 본문높이의
             // 60% 이상인 non-TAC 그림이 2장 이상일 때만 발동(정상 단일 그림 문단 불변).
+            // 글뒤로/글앞으로 그림은 후보에서 제외한다(#6511, `flow_noninline_picture`).
             let fullpage_img_body_h = st.base_available_height();
             let fullpage_img_ctrls: Vec<usize> = if fullpage_img_body_h > 0.0 && !has_table {
                 para.controls
                     .iter()
                     .enumerate()
-                    .filter_map(|(ci, c)| match c {
-                        Control::Picture(pic) if !pic.common.treat_as_char => {
-                            let h = hwpunit_to_px(pic.common.height as i32, self.dpi);
-                            (h >= fullpage_img_body_h * 0.6).then_some(ci)
-                        }
-                        _ => None,
+                    .filter_map(|(ci, c)| {
+                        let pic = flow_noninline_picture(c)?;
+                        let h = hwpunit_to_px(pic.common.height as i32, self.dpi);
+                        (h >= fullpage_img_body_h * 0.6).then_some(ci)
                     })
                     .collect()
             } else {

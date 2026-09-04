@@ -24,11 +24,6 @@ import {
   type EditorSettingsRuntime,
   type SettingsDestination,
 } from './settings-contract.ts';
-import {
-  formatUniqueInstallCount,
-  loadUniqueInstallSnapshot,
-  uniqueInstallPublicUrl,
-} from '../../unique-installs.ts';
 import { AGENT_LABEL, createProviderIcon, PROVIDER_ORDER } from './providers.ts';
 import {
   formatResetAt,
@@ -486,7 +481,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     { id: 'editing', label: '편집' },
     { id: 'ai', label: 'AI 설정' },
     { id: 'connections', label: 'AI 연결' },
-    { id: 'product', label: '제품' },
   ];
   for (const destination of destinations) {
     const button = el('button', 'ag-settings-nav-button', destination.label);
@@ -1373,37 +1367,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   if (cloudSettings) connectionContent.insertBefore(cloudSettings, usageSection.root);
   panes.get('connections')?.appendChild(connectionContent);
 
-  const productSection = createSection('고유 설치');
-  const productCount = el('p', 'ag-unique-install-count', '집계를 불러오는 중…');
-  productCount.setAttribute('data-testid', 'unique-install-count');
-  const productNote = el(
-    'p',
-    'ag-settings-note',
-    '공식 macOS arm64·Windows x64 데스크톱 앱을 설치한 뒤 그 기기에서 처음 연 횟수입니다. 자동 업데이트와 GitHub 다운로드 수는 넣지 않습니다. 데스크톱 앱이 보낸 첫 실행 보고이며 기기 증명(attestation)은 아닙니다.',
-  );
-  const productPrivacy = el(
-    'p',
-    'ag-settings-note',
-    '첫 실행 때 익명 설치 식별자, 앱 버전, OS, 아키텍처만 보냅니다. 이름, 이메일, 호스트 이름, 문서 경로는 보내지 않으며 IP는 신원으로 저장하지 않습니다. 전송에 실패해도 앱은 그대로 실행됩니다.',
-  );
-  const productUrl = el('p', 'ag-settings-note ag-unique-install-url', uniqueInstallPublicUrl());
-  productSection.body.append(productCount, productNote, productPrivacy, productUrl);
-  const productContent = el('div', 'ag-settings-destination-content');
-  productContent.append(productSection.root);
-  panes.get('product')?.appendChild(productContent);
-
-  async function refreshUniqueInstalls(): Promise<void> {
-    const snapshot = await loadUniqueInstallSnapshot();
-    productUrl.textContent = uniqueInstallPublicUrl(snapshot);
-    if (snapshot.uniqueInstalls == null) {
-      productCount.textContent = snapshot.unavailable
-        ? '집계를 불러오지 못했습니다'
-        : '공개 주소에서 확인하세요';
-      return;
-    }
-    productCount.textContent = formatUniqueInstallCount(snapshot.uniqueInstalls);
-  }
-
   aiApply.addEventListener('click', () => void applyAiDraft());
   aiCancel.addEventListener('click', cancelAiDraft);
   for (const [destination, button] of navButtons) {
@@ -1442,7 +1405,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       case 'ai':
         return isAiDirty();
       case 'connections':
-      case 'product':
         return false;
       default: {
         const _exhaustive: never = currentDestination;
@@ -1646,7 +1608,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
           cancelAiDraft();
           return true;
         case 'connections':
-        case 'product':
           return true;
         default: {
           const _exhaustive: never = currentDestination;
@@ -1660,7 +1621,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       case 'ai':
         return applyAiDraft();
       case 'connections':
-      case 'product':
         return true;
       default: {
         const _exhaustive: never = currentDestination;
@@ -1673,7 +1633,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     if (destination === currentDestination) return;
     if (!await resolveDirtyExit()) return;
     selectDestination(destination);
-    if (destination === 'product') void refreshUniqueInstalls();
     navButtons.get(destination)?.focus();
   }
 
@@ -3303,7 +3262,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       editingSettings.open();
       if (destination) selectDestination(destination);
       else selectDestination(lastDestination);
-      void refreshUniqueInstalls();
       syncPrefsInputs();
       renderCurrentSelection();
       renderConnection();

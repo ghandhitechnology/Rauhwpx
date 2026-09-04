@@ -3,6 +3,11 @@ import { WasmBridge } from '@/core/wasm-bridge';
 import type { ParaProperties } from '@/core/types';
 import { VirtualScroll } from './virtual-scroll';
 import { ViewportManager } from './viewport-manager';
+import {
+  hasRulerEditingContext,
+  resolveRulerPageIndex,
+  type ActivePageSnapshot,
+} from './active-page.ts';
 
 /** 1mm = 96 / 25.4 px (at 96dpi, zoom=1) */
 const PX_PER_MM = 96 / 25.4;
@@ -48,6 +53,11 @@ export class Ruler {
   /** 커서의 x 좌표 (px, zoom=1, 페이지 좌표 기준) — 다단에서 현재 단 결정용 */
   private cursorColumnX = 0;
 
+  /** CanvasView가 캐럿·개체·viewport를 함께 해석한 현재 활성 페이지. focus가 없을 때만 fallback이다. */
+  private activePageSnapshot: ActivePageSnapshot | null = null;
+  /** 마지막 캐럿·클릭·개체 선택 페이지. 순수 스크롤로는 바뀌지 않는다. */
+  private focusedPageIndex: number | null = null;
+
   constructor(
     private hCanvas: HTMLCanvasElement,
     private vCanvas: HTMLCanvasElement,
@@ -63,7 +73,7 @@ export class Ruler {
     this.unsubscribers.push(
       eventBus.on('viewport-scroll', () => this.scheduleUpdate()),
       eventBus.on('zoom-changed', () => this.scheduleUpdate()),
-      eventBus.on('viewport-resize', () => { this.resize(); this.scheduleUpdate(); }),
+      eventBus.on('viewport-resize', () => this.scheduleUpdate()),
       eventBus.on('document-changed', () => this.scheduleUpdate()),
       eventBus.on('document-view-changed', () => this.scheduleUpdate()),
       eventBus.on('theme-changed', () => this.scheduleUpdate()),
@@ -74,6 +84,23 @@ export class Ruler {
           this.cursorColumnX = rect.x;
           this.scheduleUpdate();
         }
+      }),
+      eventBus.on('active-page-changed', (payload) => {
+        const value = payload as Partial<ActivePageSnapshot> | null;
+        this.activePageSnapshot = value
+          && Number.isInteger(value.pageIndex)
+          && (value.source === 'editing' || value.source === 'viewport')
+          ? { pageIndex: value.pageIndex as number, source: value.source }
+          : null;
+        this.scheduleUpdate();
+      }),
+      eventBus.on('focused-page-changed', (payload) => {
+        this.focusedPageIndex = typeof payload === 'number'
+          && Number.isInteger(payload)
+          && payload >= 0
+          ? payload
+          : null;
+        this.scheduleUpdate();
       }),
     );
 
@@ -90,23 +117,31 @@ export class Ruler {
     };
   }
 
+  /** paint 직전에만 크기를 맞춘다. 같은 width/height 대입도 bitmap을 지우므로 생략한다. */
+  private syncCanvasSize(dpr: number): void {
+    // 두 축을 먼저 측정한 뒤 쓴다. 이벤트 인수 대신 갱신 시점의 실제 컨테이너 크기를 쓴다.
+    const hW = this.container.clientWidth;
+    const vH = this.container.clientHeight;
+    const hWidth = Math.round(hW * dpr);
+    const vHeight = Math.round(vH * dpr);
+    const thickness = Math.round(RULER_SIZE * dpr);
+    if (this.hCanvas.width !== hWidth) this.hCanvas.width = hWidth;
+    if (this.hCanvas.height !== thickness) this.hCanvas.height = thickness;
+    if (this.vCanvas.width !== thickness) this.vCanvas.width = thickness;
+    if (this.vCanvas.height !== vHeight) this.vCanvas.height = vHeight;
+
+    const hCssWidth = `${hW}px`;
+    const vCssHeight = `${vH}px`;
+    const cssThickness = `${RULER_SIZE}px`;
+    if (this.hCanvas.style.width !== hCssWidth) this.hCanvas.style.width = hCssWidth;
+    if (this.hCanvas.style.height !== cssThickness) this.hCanvas.style.height = cssThickness;
+    if (this.vCanvas.style.width !== cssThickness) this.vCanvas.style.width = cssThickness;
+    if (this.vCanvas.style.height !== vCssHeight) this.vCanvas.style.height = vCssHeight;
+  }
+
   /** Canvas 물리 크기를 컨테이너에 맞춰 설정 */
   resize(): void {
-    const dpr = window.devicePixelRatio || 1;
-
-    // 가로 눈금자: 너비 = scroll-container 너비, 높이 = RULER_SIZE
-    const hW = this.container.clientWidth;
-    this.hCanvas.width = Math.round(hW * dpr);
-    this.hCanvas.height = Math.round(RULER_SIZE * dpr);
-    this.hCanvas.style.width = `${hW}px`;
-    this.hCanvas.style.height = `${RULER_SIZE}px`;
-
-    // 세로 눈금자: 너비 = RULER_SIZE, 높이 = scroll-container 높이
-    const vH = this.container.clientHeight;
-    this.vCanvas.width = Math.round(RULER_SIZE * dpr);
-    this.vCanvas.height = Math.round(vH * dpr);
-    this.vCanvas.style.width = `${RULER_SIZE}px`;
-    this.vCanvas.style.height = `${vH}px`;
+    this.syncCanvasSize(window.devicePixelRatio || 1);
   }
 
   /** requestAnimationFrame으로 스로틀링하여 그리기 예약 */
@@ -118,18 +153,30 @@ export class Ruler {
     });
   }
 
-  /** 가로/세로 눈금자를 모두 다시 그린다 */
+  /** 크기 변경과 두 축 paint 사이에 프레임을 넘기지 않는다 (#6187). */
   update(): void {
+    const dpr = window.devicePixelRatio || 1;
+    this.syncCanvasSize(dpr);
     this.drawHorizontal();
     this.drawVertical();
   }
 
   /** 페이지 좌측 화면 좌표를 계산한다 (scroll-container 뷰포트 기준). */
-  private getPageScreenLeft(scrollX: number): number {
+  private getPageScreenLeft(pageIdx: number, scrollX: number): number {
     return this.virtualScroll.getPageLeftResolved(
-      0,
+      pageIdx,
       this.virtualScroll.getTotalWidth(),
     ) - scrollX;
+  }
+
+  /** 마지막 편집 focus를 사용한다. focus가 없을 때만 viewport 활성 페이지로 초기화한다. */
+  private rulerPageIndex(): number | null {
+    return resolveRulerPageIndex({
+      documentPageCount: this.wasm.pageCount,
+      layoutPageCount: this.virtualScroll.pageCount,
+      focusedPageIndex: this.focusedPageIndex,
+      activePageIndex: this.activePageSnapshot?.pageIndex ?? null,
+    });
   }
 
   /** 커서가 위치한 문단 속성이 변경되었을 때 호출 */
@@ -199,30 +246,32 @@ export class Ruler {
     ctx.fillStyle = palette.bgMargin;
     ctx.fillRect(0, 0, canvasW, canvasH);
 
-    if (this.wasm.pageCount === 0) {
+    const pageIdx = this.rulerPageIndex();
+    if (pageIdx === null) {
       ctx.restore();
       return;
     }
 
     const zoom = this.viewportManager.getZoom();
     const scrollX = this.viewportManager.getScrollX();
-    const pageInfo = this.wasm.getPageInfo(0);
+    const pageInfo = this.wasm.getPageInfo(pageIdx);
 
     // 페이지 화면 좌표 (편집 용지와 정확히 일치)
-    const pageScreenLeft = this.getPageScreenLeft(scrollX);
+    const pageScreenLeft = this.getPageScreenLeft(pageIdx, scrollX);
     const pageDisplayWidth = pageInfo.width * zoom;
+    const editingContext = hasRulerEditingContext(pageIdx, this.focusedPageIndex);
 
     // 본문 영역 배경
     const bodyLeftPx = pageScreenLeft + pageInfo.marginLeft * zoom;
     const bodyRightPx = pageScreenLeft + pageDisplayWidth - pageInfo.marginRight * zoom;
 
-    if (this.inCell) {
+    if (editingContext && this.inCell) {
       // 셀 모드: 셀 영역만 본문 톤, 나머지는 여백 톤
       const cellLeftPx = pageScreenLeft + this.cellX * zoom;
       const cellRightPx = pageScreenLeft + (this.cellX + this.cellWidth) * zoom;
       ctx.fillStyle = palette.bgBody;
       ctx.fillRect(cellLeftPx, 0, cellRightPx - cellLeftPx, canvasH);
-    } else if (pageInfo.columns && pageInfo.columns.length > 1) {
+    } else if (editingContext && pageInfo.columns && pageInfo.columns.length > 1) {
       // 다단 모드: 현재 커서가 위치한 단만 본문 톤으로 표시
       const cursorX = this.cursorColumnX;
       let activeCol = 0;
@@ -280,8 +329,9 @@ export class Ruler {
       ctx.stroke();
     }
 
-    // 문단 들여쓰기 마커 (▽ 첫 줄, △ 나머지 줄, △ 오른쪽)
-    if (this.hasParaInfo) {
+    // viewport fallback에서는 화면 밖 캐럿의 문단·셀·다단 정보를 다른 페이지 속성처럼
+    // 보이지 않는다. 쪽 여백 눈금은 페이지 소유이므로 계속 표시한다.
+    if (this.hasParaInfo && editingContext) {
       ctx.fillStyle = palette.marker;
 
       // 셀 안이면 셀 경계, 다단이면 현재 단 경계, 아니면 본문 영역 기준
@@ -331,7 +381,7 @@ export class Ruler {
     ctx.restore();
   }
 
-  /** 세로 눈금자 그리기 — 보이는 모든 페이지의 눈금을 각각 표시 */
+  /** 세로 눈금자 그리기 — 활성 페이지 한 쪽의 눈금만 표시 */
   private drawVertical(): void {
     const ctx = this.vCtx;
     if (!ctx) return;
@@ -347,7 +397,8 @@ export class Ruler {
     ctx.fillStyle = palette.bgMargin;
     ctx.fillRect(0, 0, canvasW, canvasH);
 
-    if (this.wasm.pageCount === 0) {
+    const pageIdx = this.rulerPageIndex();
+    if (pageIdx === null) {
       ctx.restore();
       return;
     }
@@ -356,60 +407,54 @@ export class Ruler {
     const scrollY = this.viewportManager.getScrollY();
     const mmPx = PX_PER_MM * zoom;
 
-    // 보이는 페이지 범위에서만 그리기
-    const vpHeight = canvasH;
-    const visiblePages = this.virtualScroll.getVisiblePages(scrollY, vpHeight);
+    // 페이지 상단의 화면 좌표 (scroll-container 뷰포트 기준)
+    const pageScreenTop = this.virtualScroll.getPageOffset(pageIdx) - scrollY;
+    const pageInfo = this.wasm.getPageInfo(pageIdx);
 
-    for (const pageIdx of visiblePages) {
-      // 페이지 상단의 화면 좌표 (scroll-container 뷰포트 기준)
-      const pageScreenTop = this.virtualScroll.getPageOffset(pageIdx) - scrollY;
-      const pageInfo = this.wasm.getPageInfo(pageIdx);
+    // 본문 영역 배경
+    const bodyTopPx = pageScreenTop + (pageInfo.marginHeader + pageInfo.marginTop) * zoom;
+    const bodyBottomPx = pageScreenTop + pageInfo.height * zoom - (pageInfo.marginFooter + pageInfo.marginBottom) * zoom;
+    ctx.fillStyle = palette.bgBody;
+    ctx.fillRect(0, bodyTopPx, canvasW, bodyBottomPx - bodyTopPx);
 
-      // 본문 영역 배경
-      const bodyTopPx = pageScreenTop + (pageInfo.marginHeader + pageInfo.marginTop) * zoom;
-      const bodyBottomPx = pageScreenTop + pageInfo.height * zoom - (pageInfo.marginFooter + pageInfo.marginBottom) * zoom;
-      ctx.fillStyle = palette.bgBody;
-      ctx.fillRect(0, bodyTopPx, canvasW, bodyBottomPx - bodyTopPx);
+    // mm 눈금 그리기
+    const pageHeightMm = Math.ceil(pageInfo.height / PX_PER_MM);
 
-      // mm 눈금 그리기
-      const pageHeightMm = Math.ceil(pageInfo.height / PX_PER_MM);
+    ctx.strokeStyle = palette.tick;
+    ctx.fillStyle = palette.text;
+    ctx.lineWidth = 0.5;
+    ctx.font = '9px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
 
-      ctx.strokeStyle = palette.tick;
-      ctx.fillStyle = palette.text;
-      ctx.lineWidth = 0.5;
-      ctx.font = '9px sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
+    for (let mm = 0; mm <= pageHeightMm; mm++) {
+      const y = pageScreenTop + mm * mmPx;
 
-      for (let mm = 0; mm <= pageHeightMm; mm++) {
-        const y = pageScreenTop + mm * mmPx;
+      // 화면 밖 스킵
+      if (y < -10 || y > canvasH + 10) continue;
 
-        // 화면 밖 스킵
-        if (y < -10 || y > canvasH + 10) continue;
-
-        let tickW: number;
-        if (mm % 10 === 0) {
-          tickW = 10;
-          // 10mm 단위 숫자 (cm 단위, 세로 텍스트)
-          const cm = mm / 10;
-          if (cm > 0) {
-            ctx.save();
-            ctx.translate(canvasW / 2 - 2, y);
-            ctx.rotate(-Math.PI / 2);
-            ctx.fillText(`${cm}`, 0, 0);
-            ctx.restore();
-          }
-        } else if (mm % 5 === 0) {
-          tickW = 6;
-        } else {
-          tickW = 3;
+      let tickW: number;
+      if (mm % 10 === 0) {
+        tickW = 10;
+        // 10mm 단위 숫자 (cm 단위, 세로 텍스트)
+        const cm = mm / 10;
+        if (cm > 0) {
+          ctx.save();
+          ctx.translate(canvasW / 2 - 2, y);
+          ctx.rotate(-Math.PI / 2);
+          ctx.fillText(`${cm}`, 0, 0);
+          ctx.restore();
         }
-
-        ctx.beginPath();
-        ctx.moveTo(canvasW, y);
-        ctx.lineTo(canvasW - tickW, y);
-        ctx.stroke();
+      } else if (mm % 5 === 0) {
+        tickW = 6;
+      } else {
+        tickW = 3;
       }
+
+      ctx.beginPath();
+      ctx.moveTo(canvasW, y);
+      ctx.lineTo(canvasW - tickW, y);
+      ctx.stroke();
     }
 
     ctx.restore();

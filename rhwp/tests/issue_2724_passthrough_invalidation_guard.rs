@@ -363,12 +363,6 @@ const EXEMPT: &[(&str, &str, Exempt, &str)] = &[
         "페이지네이션 지연 플래그만 다른 래퍼 — 본체는 `_impl`.",
     ),
     (
-        "queries/field_query.rs",
-        "set_field_value_by_id",
-        Exempt::DelegatesTo("set_field_text_at"),
-        "필드 위치를 조회한 뒤 텍스트 치환 헬퍼에 위임.",
-    ),
-    (
         "queries/rendering.rs",
         "set_section_def_native",
         Exempt::DelegatesTo("apply_section_def_json"),
@@ -500,7 +494,7 @@ const INVALIDATION_LEDGER: &[(&str, usize)] = &[
     ("converters/hwpx_to_hwp.rs", 3),
     ("html_table_import.rs", 2),
     ("queries/bookmark_query.rs", 3),
-    ("queries/field_query.rs", 7),
+    ("queries/field_query.rs", 8),
     ("queries/form_query.rs", 2),
     ("queries/rendering.rs", 3),
     ("queries/search_query.rs", 1),

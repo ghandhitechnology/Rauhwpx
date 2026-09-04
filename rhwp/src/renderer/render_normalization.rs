@@ -72,6 +72,8 @@ impl RenderNormalizationOverlay {
 
     pub fn from_document_reusing(document: &Document, previous: &Self) -> Self {
         let mut overlay = Self::default();
+        let hwp5_stored_pagination_layout = document.layout_profile().native_hwp5_layout()
+            || document.layout_profile().hwp5_origin_hwpx();
         for (section_index, section) in document.sections.iter().enumerate() {
             for (parent_paragraph_index, paragraph) in section.paragraphs.iter().enumerate() {
                 for (control_index, control) in paragraph.controls.iter().enumerate() {
@@ -79,6 +81,35 @@ impl RenderNormalizationOverlay {
                         continue;
                     };
                     let path = RenderPath::top_level(section_index, parent_paragraph_index);
+                    if hwp5_stored_pagination_layout && table.common.treat_as_char {
+                        let page_def = &section.section_def.page_def;
+                        let body_width = page_def
+                            .width
+                            .saturating_sub(page_def.margin_left)
+                            .saturating_sub(page_def.margin_right);
+                        let source_width = table.common.width;
+                        if body_width > 0
+                            && source_width > body_width
+                            && f64::from(body_width) >= f64::from(source_width) * 0.9
+                        {
+                            let mut top_path = path.clone();
+                            top_path.target_control_index = Some(control_index);
+                            let table_pointer = table.as_ref() as *const Table as usize;
+                            let projection = Arc::new(NestedTableWidthProjection {
+                                path: top_path.clone(),
+                                source_width,
+                                effective_width: body_width,
+                                width_scale: f64::from(body_width) / f64::from(source_width),
+                                table_pointer,
+                            });
+                            overlay
+                                .nested_table_widths_by_pointer
+                                .insert(table_pointer, Arc::clone(&projection));
+                            overlay
+                                .nested_table_widths_by_path
+                                .insert(top_path, projection);
+                        }
+                    }
                     overlay.collect_nested_tables(table, path, control_index, previous);
                 }
             }
