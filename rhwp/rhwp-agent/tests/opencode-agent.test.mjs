@@ -132,15 +132,16 @@ test('OpenCode environment isolates every XDG state root and ignores inherited c
     OPENCODE_PERMISSION: '{"*":"allow"}',
     OPENCODE_DISABLE_PROJECT_CONFIG: '1',
   });
+  const home = path.resolve(baseOpts.isolatedHome);
   assert.equal(env.PATH, '/managed/bin');
-  assert.equal(env.HOME, '/tmp/rhwp-opencode-home');
-  assert.equal(env.USERPROFILE, '/tmp/rhwp-opencode-home');
-  assert.equal(env.XDG_CONFIG_HOME, '/tmp/rhwp-opencode-home/.config');
-  assert.equal(env.XDG_DATA_HOME, '/tmp/rhwp-opencode-home/.local/share');
-  assert.equal(env.XDG_CACHE_HOME, '/tmp/rhwp-opencode-home/.cache');
-  assert.equal(env.XDG_STATE_HOME, '/tmp/rhwp-opencode-home/.local/state');
+  assert.equal(env.HOME, home);
+  assert.equal(env.USERPROFILE, home);
+  assert.equal(env.XDG_CONFIG_HOME, path.join(home, '.config'));
+  assert.equal(env.XDG_DATA_HOME, path.join(home, '.local', 'share'));
+  assert.equal(env.XDG_CACHE_HOME, path.join(home, '.cache'));
+  assert.equal(env.XDG_STATE_HOME, path.join(home, '.local', 'state'));
   assert.equal(env.OPENCODE_CONFIG, undefined);
-  assert.equal(env.OPENCODE_CONFIG_DIR, '/tmp/rhwp-opencode-home/.config/opencode');
+  assert.equal(env.OPENCODE_CONFIG_DIR, path.join(home, '.config', 'opencode'));
   assert.equal(env.OPENCODE_DB, undefined);
   assert.equal(env.OPENCODE_AUTH_CONTENT, undefined);
   assert.equal(env.OPENCODE_API_KEY, undefined);

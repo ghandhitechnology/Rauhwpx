@@ -532,7 +532,6 @@ test('OpenCode reuses host auth while model discovery stays configuration-isolat
   const manager = await createCliSetupManager({
     rootDir,
     homeDir: profile,
-    platform: 'linux',
     spawnProcess,
     baseEnv: {
       PATH: '/usr/bin',
@@ -764,7 +763,24 @@ test('OpenCode installs from the official npm package', async (t) => {
   assert.deepEqual(calls[0].argv, [
     'install', '--prefix', prefixDir, '--no-fund', '--no-audit', 'opencode-ai',
   ]);
-  assert.equal(manager.binPath('opencode'), path.join(prefixDir, 'node_modules', '.bin', 'opencode'));
+  assert.equal(
+    manager.binPath('opencode'),
+    path.join(prefixDir, 'node_modules', '.bin', process.platform === 'win32' ? 'opencode.cmd' : 'opencode'),
+  );
+});
+
+test('OpenCode managed install path uses the npm .cmd shim on Windows', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-opencode-winbin-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const manager = await createCliSetupManager({
+    rootDir,
+    platform: 'win32',
+    baseEnv: { PATH: '/usr/bin' },
+  }).init();
+  assert.equal(
+    manager.binPath('opencode'),
+    path.join(rootDir, 'prefix', 'node_modules', '.bin', 'opencode.cmd'),
+  );
 });
 
 test('installing OpenCode invalidates a cached empty model catalog', async (t) => {
