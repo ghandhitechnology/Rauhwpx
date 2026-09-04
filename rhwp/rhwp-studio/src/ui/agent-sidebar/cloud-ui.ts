@@ -130,6 +130,19 @@ function sessionKindLabel(kind: CloudSnapshot['session']['kind']): string {
   }
 }
 
+function activityLabel(activity: string, server: string): string {
+  const value = activity.trim();
+  switch (value.toLowerCase()) {
+    case 'editing': return '문서를 편집하고 있습니다.';
+    case 'planning': return '작업 순서를 정하고 있습니다.';
+    case 'testing': return '결과를 확인하고 있습니다.';
+    case 'working':
+    case 'cloud agent is working.':
+    case 'cloud agent is working': return `${server}에서 문서를 편집하고 있습니다.`;
+    default: return value || `${server}에서 문서를 편집하고 있습니다.`;
+  }
+}
+
 export interface CloudAgentUiDeps {
   controller: CloudController;
   loginAccount?: () => Promise<{ authUrl: string } | null>;
@@ -244,13 +257,16 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   statusPanel.setAttribute('aria-modal', 'false');
   statusPanel.setAttribute('aria-labelledby', 'ag-cloud-panel-title');
   const panelHead = el('header', 'ag-cloud-panel-head');
-  const panelTitle = el('h2', 'ag-cloud-panel-title', 'Cloud agent');
+  const panelHeading = el('div', 'ag-cloud-panel-heading');
+  const panelKicker = el('span', 'ag-cloud-panel-kicker', '실시간 문서');
+  const panelTitle = el('h2', 'ag-cloud-panel-title', 'Cloud 작업');
   panelTitle.id = 'ag-cloud-panel-title';
   const panelClose = el('button', 'ag-cloud-panel-close') as HTMLButtonElement;
   panelClose.type = 'button';
   panelClose.setAttribute('aria-label', '클라우드 상태 닫기');
   panelClose.appendChild(createIcon('close'));
-  panelHead.append(panelTitle, panelClose);
+  panelHeading.append(panelKicker, panelTitle);
+  panelHead.append(panelHeading, panelClose);
   const panelBody = el('div', 'ag-cloud-panel-body');
   const sessionPicker = el('label', 'ag-cloud-session-picker');
   const sessionPickerLabel = el('span', 'ag-cloud-session-picker-label', '클라우드 작업');
@@ -269,6 +285,15 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   panelStatus.setAttribute('role', 'status');
   panelStatus.setAttribute('aria-live', 'polite');
   const panelDetail = el('p', 'ag-cloud-panel-detail');
+  const panelLive = el('div', 'ag-cloud-panel-live');
+  panelLive.hidden = true;
+  const panelLiveSignal = el('span', 'ag-cloud-panel-live-signal');
+  panelLiveSignal.setAttribute('aria-hidden', 'true');
+  const panelLiveCopy = el('div', 'ag-cloud-panel-live-copy');
+  const panelLiveTitle = el('strong', 'ag-cloud-panel-live-title');
+  const panelLiveDetail = el('p', 'ag-cloud-panel-live-detail');
+  panelLiveCopy.append(panelLiveTitle, panelLiveDetail);
+  panelLive.append(panelLiveSignal, panelLiveCopy);
   const progress = el('div', 'ag-cloud-progress');
   progress.setAttribute('role', 'progressbar');
   progress.setAttribute('aria-valuemin', '0');
@@ -279,7 +304,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   const panelConflict = el('div', 'ag-cloud-conflict');
   panelConflict.hidden = true;
   const panelActions = el('div', 'ag-cloud-panel-actions');
-  panelBody.append(recovery, sessionPicker, panelStatus, panelDetail, progress, panelConflict, panelActions);
+  panelBody.append(recovery, sessionPicker, panelStatus, panelDetail, panelLive, progress, panelConflict, panelActions);
   statusPanel.append(panelHead, panelBody);
 
   const queueStrip = el('div', 'ag-cloud-queue-strip');
@@ -644,13 +669,14 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     sessionSelect.replaceChildren(...snapshot.sessions.map((session) => {
       const option = document.createElement('option');
       option.value = session.sessionId;
-      option.textContent = `${session.documentName} · ${sessionKindLabel(session.kind)}`;
+      option.textContent = `${session.documentName}, ${sessionKindLabel(session.kind)}`;
       return option;
     }));
     if (activeSessionId && snapshot.sessions.some((session) => session.sessionId === activeSessionId)) {
       sessionSelect.value = activeSessionId;
     }
     panelActions.replaceChildren();
+    panelLive.hidden = true;
     progress.hidden = true;
     panelConflict.hidden = true;
     const session = snapshot.session;
@@ -700,10 +726,10 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
             ? appHosted ? 'Raucloud 상태를 확인해야 합니다.' : 'VPS 연결을 확인해야 합니다.'
             : 'Cloud 서버를 선택해야 합니다.';
         panelDetail.textContent = snapshot.profile.kind !== 'configured'
-          ? 'Raucloud를 쓰거나 내 서버를 연결하세요.'
+          ? '서버를 연결하면 앱을 닫아도 작업이 계속됩니다.'
           : snapshot.profile.mode === 'app-hosted'
-            ? `${snapshot.profile.name} · ${snapshot.profile.sandbox.host || snapshot.profile.sandbox.sandboxId}`
-            : `${snapshot.profile.profile.name} · ${snapshot.profile.profile.host}`;
+            ? `${snapshot.profile.name}, ${snapshot.profile.sandbox.host || snapshot.profile.sandbox.sandboxId}`
+            : `${snapshot.profile.profile.name}, ${snapshot.profile.profile.host}`;
         panelActions.append(action('Cloud 설정', () => {
           const focusTrigger = panelTrigger ?? sidebarButton;
           closePanel();
@@ -733,6 +759,11 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
         panelActions.append(action('취소', () => command('cancel')));
         break;
       case 'running':
+        panelLive.hidden = false;
+        panelLiveTitle.textContent = session.wait ? '문서 화면 연결 유지 중' : '실시간 문서 화면';
+        panelLiveDetail.textContent = session.wait
+          ? '답변을 보내기 전에도 마지막 문서 화면을 볼 수 있습니다.'
+          : 'Cloud 작업 영역에서 편집 과정을 보거나 화면을 직접 제어하세요.';
         if (session.wait) {
           const wait = session.wait;
           const plan = wait.payload['plan'] && typeof wait.payload['plan'] === 'object'
@@ -781,8 +812,8 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
           ? '다음 메시지를 기다리고 있습니다.'
           : session.phase === 'redirecting'
             ? '안전한 경계에서 방향을 바꾸는 중입니다.'
-            : session.currentActivity || `${serverLabel(snapshot)}에서 작업 중입니다.`;
-        panelDetail.textContent = `${session.turn}/${session.turnLimit}턴 · ${formatDuration(session.elapsedMs)} / ${formatDuration(session.timeLimitMs)}`;
+            : activityLabel(session.currentActivity, serverLabel(snapshot));
+        panelDetail.textContent = `턴 ${session.turn}/${session.turnLimit}, 경과 ${formatDuration(session.elapsedMs)}, 제한 ${formatDuration(session.timeLimitMs)}`;
         if (session.phase === 'working') {
           const redirect = el('textarea', 'ag-cloud-wait-feedback') as HTMLTextAreaElement;
           redirect.rows = 2;
@@ -820,7 +851,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
         break;
       case 'completed':
         panelStatus.textContent = downloadedResult ? '결과 미리보기가 준비되었습니다.' : '클라우드 작업이 끝났습니다.';
-        panelDetail.textContent = `${session.result.fileName} · ${formatBytes(session.result.byteLength)}`;
+        panelDetail.textContent = `${session.result.fileName}, ${formatBytes(session.result.byteLength)}`;
         if (!downloadedResult) {
           if (!session.result.availableOnThisDevice) {
             panelDetail.textContent = '결과는 작업을 시작한 기기에서만 다운로드할 수 있습니다.';

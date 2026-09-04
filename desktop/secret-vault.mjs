@@ -69,6 +69,10 @@ export function createSecretVault({
   const operations = {
     rename: fileOperations.rename ?? fs.rename,
     rm: fileOperations.rm ?? fs.rm,
+    syncDirectory: fileOperations.syncDirectory ?? (async (directory) => {
+      const handle = await fs.open(directory, 'r');
+      try { await handle.sync(); } finally { await handle.close(); }
+    }),
   };
   let loadPromise = null;
   let entries = {};
@@ -212,8 +216,7 @@ export function createSecretVault({
         await retryWindows(() => operations.rm(staleBackup, { force: true }), platform).catch(() => {});
       }
       if (platform !== 'win32') {
-        const parent = await fs.open(path.dirname(filePath), 'r');
-        try { await parent.sync(); } finally { await parent.close(); }
+        await operations.syncDirectory(path.dirname(filePath));
       }
     } catch (error) {
       await operations.rm(temp, { force: true }).catch(() => {});

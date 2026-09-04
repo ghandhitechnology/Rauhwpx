@@ -835,9 +835,12 @@ export async function startDetachedHub({
   log = console,
   readyTimeoutMs = DEFAULT_READY_TIMEOUT_MS,
   expectedProtocol,
+  processAlive = isProcessAlive,
 } = {}) {
   const paths = hubRunPaths(runDir);
   const token = env.RHWP_AGENT_TOKEN ?? env.RHWP_AGENT_DEV_TOKEN ?? 'dev';
+  const ownsWorkDir = !env.RHWP_WORK_DIR;
+  const ownsRuntimeDir = !env.RHWP_RUNTIME_DIR;
   const health = await readHubHealth(port, { fetchImpl, token });
   if (health?.ok) {
     const compatible = expectedProtocol === undefined
@@ -873,24 +876,36 @@ export async function startDetachedHub({
     }
   }
 
-  // A stale PID file cannot prove process identity or descendant cleanup. It is
-  // deliberately retained when an authenticated shutdown was not proven, so a
-  // later `start` must not bypass the quarantine and reuse the same work roots.
+  // A stale PID file cannot prove process identity or descendant cleanup.
+  // Keep the quarantine while the leader may still be alive or the caller
+  // supplied roots that a replacement launch would have to reuse.
   const recordedPid = readPidFile(paths.pid);
   if (recordedPid !== null) {
-    return {
-      started: false,
-      ready: false,
-      pid: recordedPid,
-      log: paths.log,
-      error: 'hub-cleanup-unproven',
-    };
+    const canUseFreshRoots = ownsWorkDir && ownsRuntimeDir && !processAlive(recordedPid);
+    if (!canUseFreshRoots) {
+      return {
+        started: false,
+        ready: false,
+        pid: recordedPid,
+        log: paths.log,
+        error: 'hub-cleanup-unproven',
+      };
+    }
+    // The old leader is gone, but detached descendants may still own its
+    // files. A new launch gets different roots, so clearing this dead record
+    // cannot make the two process trees share cleanup state.
+    removePidFile(paths.pid);
+    log.warn?.(`[rauhwpx] recovering from dead detached agent hub pid ${recordedPid}`);
   }
   // Junk or an already-removed record carries no process identity.
   if (paths.pid) removePidFile(paths.pid);
 
-  const ownsWorkDir = !env.RHWP_WORK_DIR;
-  const ownsRuntimeDir = !env.RHWP_RUNTIME_DIR;
+  const launchId = env.RHWP_LAUNCH_ID || randomBytes(16).toString('hex');
+  // Keep the directory key independent from caller-controlled identity data.
+  // A fresh key also prevents an old descendant and its replacement from
+  // sharing files even when callers deliberately reuse a launch ID.
+  const launchRootKey = randomBytes(16).toString('hex');
+  const launchRoot = join(paths.dir, 'launches', launchRootKey);
   const launch = resolveHubLaunch({
     packaged: false,
     execPath,
@@ -900,8 +915,9 @@ export async function startDetachedHub({
     env: {
       ...env,
       RHWP_AGENT_PORT: String(port),
-      RHWP_WORK_DIR: env.RHWP_WORK_DIR ?? join(paths.dir, 'hub-work'),
-      RHWP_RUNTIME_DIR: env.RHWP_RUNTIME_DIR ?? join(paths.dir, 'hub-runtime'),
+      RHWP_LAUNCH_ID: launchId,
+      RHWP_WORK_DIR: env.RHWP_WORK_DIR ?? join(launchRoot, 'work'),
+      RHWP_RUNTIME_DIR: env.RHWP_RUNTIME_DIR ?? join(launchRoot, 'runtime'),
       ...(ownsWorkDir ? { RHWP_OWN_WORK_DIR: '1' } : {}),
       ...(ownsRuntimeDir ? { RHWP_OWN_RUNTIME_DIR: '1' } : {}),
     },

@@ -44,12 +44,12 @@ function terminalSessionId(session: CloudSessionState): string | null {
 
 function unavailableStatus(event: Extract<CloudDisplayEvent, { kind: 'unavailable' }>): string {
   switch (event.reason) {
-    case 'server-unsupported': return '이 Cloud 서버는 화면 미리보기를 지원하지 않습니다.';
-    case 'client-unsupported': return '이 앱 버전은 Cloud 화면 미리보기를 지원하지 않습니다.';
+    case 'server-unsupported': return '이 Cloud 서버는 실시간 문서 화면을 지원하지 않습니다.';
+    case 'client-unsupported': return '이 앱 버전은 실시간 문서 화면을 지원하지 않습니다.';
     case 'stream-unavailable': return event.retryable
-      ? 'Cloud 화면을 준비하는 중입니다.'
-      : 'Cloud 화면을 사용할 수 없습니다.';
-    default: return 'Cloud 작업 화면이 아직 시작되지 않았습니다.';
+      ? 'Cloud 문서 화면을 준비하는 중입니다.'
+      : 'Cloud 문서 화면을 열 수 없습니다.';
+    default: return 'Cloud 작업이 시작되면 문서 화면이 열립니다.';
   }
 }
 
@@ -69,7 +69,7 @@ export function createCloudWorkspace({
 }): CloudWorkspace {
   const root = doc.createElement('section');
   root.id = 'cloud-workspace';
-  root.setAttribute('aria-label', 'Cloud 문서 화면');
+  root.setAttribute('aria-label', 'Cloud 에이전트의 실시간 문서 화면');
 
   const toolbar = doc.createElement('div');
   toolbar.className = 'cloud-workspace-toolbar';
@@ -77,6 +77,12 @@ export function createCloudWorkspace({
   status.className = 'cloud-workspace-status';
   status.setAttribute('role', 'status');
   status.setAttribute('aria-live', 'polite');
+  const statusSignal = doc.createElement('span');
+  statusSignal.className = 'cloud-workspace-status-signal';
+  statusSignal.setAttribute('aria-hidden', 'true');
+  const statusText = doc.createElement('span');
+  statusText.className = 'cloud-workspace-status-text';
+  status.append(statusSignal, statusText);
   const controls = doc.createElement('div');
   controls.className = 'cloud-workspace-zoom';
   const zoomOut = doc.createElement('button');
@@ -98,13 +104,40 @@ export function createCloudWorkspace({
 
   const viewport = doc.createElement('div');
   viewport.className = 'cloud-workspace-viewport';
+  const empty = doc.createElement('div');
+  empty.className = 'cloud-workspace-empty';
+  const emptyVisual = doc.createElement('div');
+  emptyVisual.className = 'cloud-workspace-empty-visual';
+  emptyVisual.setAttribute('aria-hidden', 'true');
+  const emptyLive = doc.createElement('span');
+  emptyLive.className = 'cloud-workspace-empty-live';
+  emptyLive.textContent = '실시간 문서';
+  const emptyPage = doc.createElement('span');
+  emptyPage.className = 'cloud-workspace-empty-page';
+  for (const className of ['cloud-workspace-empty-line cloud-workspace-empty-line-title', 'cloud-workspace-empty-line', 'cloud-workspace-empty-line cloud-workspace-empty-line-short']) {
+    const line = doc.createElement('span');
+    line.className = className;
+    emptyPage.appendChild(line);
+  }
+  const emptyCaret = doc.createElement('span');
+  emptyCaret.className = 'cloud-workspace-empty-caret';
+  emptyPage.appendChild(emptyCaret);
+  emptyVisual.append(emptyLive, emptyPage);
+  const emptyCopy = doc.createElement('div');
+  emptyCopy.className = 'cloud-workspace-empty-copy';
+  const emptyTitle = doc.createElement('h2');
+  emptyTitle.className = 'cloud-workspace-empty-title';
+  const emptyDetail = doc.createElement('p');
+  emptyDetail.className = 'cloud-workspace-empty-detail';
+  emptyCopy.append(emptyTitle, emptyDetail);
+  empty.append(emptyVisual, emptyCopy);
   const canvas = doc.createElement('div');
   canvas.className = 'cloud-workspace-canvas';
   canvas.setAttribute('role', 'application');
-  canvas.setAttribute('aria-label', 'Cloud 문서 원격 제어 화면');
+  canvas.setAttribute('aria-label', 'Cloud 문서 실시간 원격 제어');
   const image = doc.createElement('img');
   image.className = 'cloud-workspace-image';
-  image.alt = 'Cloud 문서 화면 미리보기';
+  image.alt = 'Cloud 에이전트가 편집 중인 문서 화면';
   image.draggable = false;
   const inputSink = doc.createElement('textarea');
   inputSink.className = 'cloud-workspace-input';
@@ -113,7 +146,7 @@ export function createCloudWorkspace({
   inputSink.autocomplete = 'off';
   inputSink.spellcheck = false;
   canvas.append(image, inputSink);
-  viewport.appendChild(canvas);
+  viewport.append(empty, canvas);
   root.append(toolbar, viewport);
 
   const decode = decodeFrame ?? (async (url: string) => {
@@ -165,10 +198,41 @@ export function createCloudWorkspace({
     zoomIn.disabled = zoom >= MAX_ZOOM;
   };
 
+  const renderEmptyState = (next: CloudDisplayState): void => {
+    empty.hidden = next.kind === 'live' || lastFrame !== null;
+    if (empty.hidden) return;
+    switch (next.kind) {
+      case 'connecting':
+        emptyTitle.textContent = '실시간 문서 화면을 여는 중입니다';
+        emptyDetail.textContent = '첫 화면이 오면 에이전트가 문서를 고치는 과정을 바로 볼 수 있습니다.';
+        break;
+      case 'stalled':
+        emptyTitle.textContent = '문서 화면에 다시 연결하는 중입니다';
+        emptyDetail.textContent = '에이전트 작업은 Cloud에서 계속됩니다.';
+        break;
+      case 'ended':
+        emptyTitle.textContent = 'Cloud 작업이 끝났습니다';
+        emptyDetail.textContent = 'Cloud 상태에서 결과 문서를 확인하세요.';
+        break;
+      case 'unavailable':
+        if (next.reason === 'session-not-running') {
+          emptyTitle.textContent = 'Cloud 작업을 시작하면 문서 화면이 열립니다';
+          emptyDetail.textContent = '편집 과정을 실시간으로 보고, 필요하면 화면을 직접 제어할 수 있습니다.';
+        } else {
+          emptyTitle.textContent = '실시간 문서 화면을 열 수 없습니다';
+          emptyDetail.textContent = 'Cloud 상태에서 연결을 확인하거나 이 기기에서 작업을 이어받으세요.';
+        }
+        break;
+      case 'live':
+        break;
+    }
+  };
+
   const publish = (next: CloudDisplayState, text: string): void => {
     state = next;
     root.dataset.displayState = next.kind;
-    status.textContent = text;
+    statusText.textContent = text;
+    renderEmptyState(next);
     for (const listener of listeners) listener(next);
   };
 
@@ -178,9 +242,9 @@ export function createCloudWorkspace({
       || error instanceof DOMException && error.name === 'AbortError') return;
     controlling = false;
     root.dataset.cloudControl = code === 'DISPLAY_CONTROL_CONFLICT' ? 'conflict' : 'error';
-    status.textContent = code === 'DISPLAY_CONTROL_CONFLICT'
-      ? '다른 창에서 이 Cloud 화면을 제어하고 있습니다.'
-      : 'Cloud 입력을 전달하지 못했습니다. 다시 클릭해 주세요.';
+    statusText.textContent = code === 'DISPLAY_CONTROL_CONFLICT'
+      ? '다른 창에서 이 문서 화면을 제어하고 있습니다.'
+      : 'Cloud에 입력을 보내지 못했습니다. 화면을 다시 클릭해 주세요.';
   };
 
   const sendInput = (event: CloudDisplayInputEvent): Promise<void> => {
@@ -194,7 +258,7 @@ export function createCloudWorkspace({
       if (!controlling) {
         controlling = true;
         root.dataset.cloudControl = 'active';
-        status.textContent = 'Cloud 화면 연결됨 · 원격 제어 중';
+        statusText.textContent = '실시간 문서 화면이 연결됐습니다. 직접 제어 중입니다.';
       }
     }, (error) => {
       reportInputError(error);
@@ -353,7 +417,9 @@ export function createCloudWorkspace({
     renderZoom();
     publish(
       { kind: 'live', sessionId: candidate.sessionId, frame: candidate.frame },
-      controlling ? 'Cloud 화면 연결됨 · 원격 제어 중' : 'Cloud 화면 연결됨 · 클릭하여 제어',
+      controlling
+        ? '실시간 문서 화면이 연결됐습니다. 직접 제어 중입니다.'
+        : '실시간 문서 화면이 연결됐습니다. 클릭해서 직접 제어하세요.',
     );
     if (previousUrl) objectUrls.revoke(previousUrl);
   };
@@ -403,17 +469,17 @@ export function createCloudWorkspace({
     }
     switch (event.state) {
       case 'connecting':
-        publish({ kind: 'connecting', sessionId }, 'Cloud 화면에 연결하는 중…');
+        publish({ kind: 'connecting', sessionId }, 'Cloud 문서 화면에 연결하는 중입니다.');
         break;
       case 'connected':
         if (retainedFrame(sessionId)) {
-          publish({ kind: 'live', sessionId, frame: retainedFrame(sessionId)! }, 'Cloud 화면 연결됨');
+          publish({ kind: 'live', sessionId, frame: retainedFrame(sessionId)! }, '실시간 문서 화면이 연결됐습니다.');
         } else {
-          publish({ kind: 'connecting', sessionId }, 'Cloud 화면 연결됨 · 첫 화면 기다리는 중');
+          publish({ kind: 'connecting', sessionId }, 'Cloud에 연결했습니다. 첫 문서 화면을 기다리는 중입니다.');
         }
         break;
       case 'reconnecting':
-        publish({ kind: 'stalled', sessionId, lastFrame: retainedFrame(sessionId) }, '연결이 잠시 끊겼습니다. 다시 연결하는 중…');
+        publish({ kind: 'stalled', sessionId, lastFrame: retainedFrame(sessionId) }, '연결이 끊겼습니다. 문서 화면에 다시 연결하는 중입니다.');
         break;
       case 'failed':
         openingSessionId = null;
@@ -427,7 +493,7 @@ export function createCloudWorkspace({
     const openGeneration = ++generation;
     openingSessionId = sessionId;
     closeConnection();
-    publish({ kind: 'connecting', sessionId }, 'Cloud 화면에 연결하는 중…');
+    publish({ kind: 'connecting', sessionId }, 'Cloud 문서 화면에 연결하는 중입니다.');
     void display.openDisplay(sessionId, (event) => acceptEvent(openGeneration, sessionId, event)).then(
       (opened) => {
         if (disposed || !visible || openGeneration !== generation || openingSessionId !== sessionId) {
@@ -535,6 +601,8 @@ export function createCloudWorkspace({
     for (const key of pressedKeys) void sendInput({ kind: 'key', action: 'up', key }).catch(() => {});
     pressedKeys.clear();
   });
+  statusText.textContent = '표시할 Cloud 작업이 없습니다.';
+  renderEmptyState(state);
   renderZoom();
 
   return {

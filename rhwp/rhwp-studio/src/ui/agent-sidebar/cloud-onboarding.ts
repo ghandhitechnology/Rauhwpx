@@ -53,6 +53,8 @@ function el<K extends keyof HTMLElementTagNameMap>(
 
 type DraftlessKind = 'connected' | 'sandbox-ready' | 'sandbox-tearing-down';
 
+const SETUP_STEPS = ['서버 선택', '환경 연결', '준비 완료'] as const;
+
 function hasDraft(state: CloudSetupState): state is Exclude<CloudSetupState, { kind: DraftlessKind }> {
   return state.kind !== 'connected' && state.kind !== 'sandbox-ready' && state.kind !== 'sandbox-tearing-down';
 }
@@ -99,6 +101,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
   let operationEpoch = 0;
   let inertedElements: Array<[HTMLElement, boolean]> = [];
   let requestedFocusField: CloudProfileField | 'auth' | 'transport' | null = null;
+  let requestedFocusMode: CloudServerMode | null = null;
   let cachedKeyPath = '';
   let cachedHttpsEndpoint = '';
   let mutationLocked = false;
@@ -117,7 +120,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
   dialog.tabIndex = -1;
   const header = el('header', 'ag-cloud-setup-header');
   const titleWrap = el('div', 'ag-cloud-setup-heading');
-  const eyebrow = el('span', 'ag-cloud-setup-eyebrow', 'PRIVATE CLOUD');
+  const eyebrow = el('span', 'ag-cloud-setup-eyebrow', 'CLOUD WORKSPACE');
   const title = el('h2', 'ag-cloud-setup-title');
   title.id = 'ag-cloud-setup-title';
   titleWrap.append(eyebrow, title);
@@ -160,7 +163,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
   function setState(next: CloudSetupState, announcement = ''): void {
     state = next;
     deps.onSetupStateChange(operationActive(next));
-    if (announcement) liveStatus.textContent = announcement;
+    liveStatus.textContent = announcement;
     renderDialog();
     syncSetupProgressTimer();
   }
@@ -172,9 +175,8 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
   function updateSetupProgress(): void {
     if (state?.kind !== 'sandbox-provisioning') return;
     const message = setupProgressText(state.startedAt);
-    liveStatus.textContent = message;
     const wait = body.querySelector<HTMLElement>('.ag-cloud-setup-wait');
-    if (wait) wait.textContent = message;
+    if (wait) wait.textContent = `경과 ${message}`;
     renderSettings();
   }
 
@@ -264,6 +266,46 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     copy.append(el('strong', '', heading), el('p', '', text));
     node.append(iconNode, copy);
     return node;
+  }
+
+  function setupProgress(): HTMLElement {
+    const complete = state?.kind === 'connected' || state?.kind === 'sandbox-ready';
+    const current = state?.kind === 'choose' ? 0 : complete ? 2 : 1;
+    const progress = el('ol', 'ag-cloud-setup-progress');
+    progress.setAttribute('aria-label', 'Cloud 설정 진행');
+    SETUP_STEPS.forEach((label, index) => {
+      const item = el('li', 'ag-cloud-setup-progress-step');
+      const stepState = index < current ? 'complete' : index === current ? 'current' : 'upcoming';
+      item.dataset.state = stepState;
+      if (stepState === 'current') item.setAttribute('aria-current', 'step');
+      const marker = el('span', 'ag-cloud-setup-progress-marker', stepState === 'complete' ? '✓' : String(index + 1));
+      marker.setAttribute('aria-hidden', 'true');
+      item.append(marker, el('span', 'ag-cloud-setup-progress-label', label));
+      progress.appendChild(item);
+    });
+    return progress;
+  }
+
+  function liveDocumentPreview(): HTMLElement {
+    const root = el('section', 'ag-cloud-setup-live-document');
+    const visual = el('div', 'ag-cloud-setup-live-visual');
+    visual.setAttribute('aria-hidden', 'true');
+    const liveBadge = el('span', 'ag-cloud-setup-live-badge', '실시간');
+    const page = el('span', 'ag-cloud-setup-live-page');
+    page.append(
+      el('span', 'ag-cloud-setup-live-line ag-cloud-setup-live-line-title'),
+      el('span', 'ag-cloud-setup-live-line'),
+      el('span', 'ag-cloud-setup-live-line ag-cloud-setup-live-line-short'),
+      el('span', 'ag-cloud-setup-live-caret'),
+    );
+    visual.append(liveBadge, page);
+    const copy = el('div', 'ag-cloud-setup-live-copy');
+    copy.append(
+      el('strong', '', '에이전트가 편집하는 문서를 그대로 봅니다'),
+      el('p', '', 'Cloud 작업 화면에서 문서가 바뀌는 과정을 보고, 필요하면 화면을 직접 제어할 수 있습니다.'),
+    );
+    root.append(visual, copy);
+    return root;
   }
 
   function inputField(
@@ -667,10 +709,12 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     option.disabled = disabled;
     option.setAttribute('aria-disabled', String(disabled));
     if (selected) option.classList.add('ag-selected');
+    const marker = el('span', 'ag-cloud-setup-option-marker');
+    marker.setAttribute('aria-hidden', 'true');
     const copy = el('div', 'ag-cloud-setup-option-copy');
     copy.append(el('strong', '', heading), el('p', '', text));
     if (note) copy.appendChild(el('span', 'ag-cloud-setup-option-note', note));
-    option.append(copy);
+    option.append(marker, copy);
     option.addEventListener('click', () => {
       if (!disabled) void selectMode(mode);
     });
@@ -692,12 +736,22 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     cancel.addEventListener('click', () => close());
     closeButton.onclick = () => close();
 
+    const showSetupProgress = state.intent === 'transfer'
+      || snapshot.profile.kind === 'unconfigured';
+    if (showSetupProgress && state.kind !== 'sandbox-tearing-down'
+      && !(state.kind === 'sandbox-failed' && state.phase === 'teardown')) {
+      body.appendChild(setupProgress());
+    }
+
     if (state.kind === 'choose') {
       const { draft, intent, mode } = state;
       const provider = appServerProvider(snapshot);
       const appHostedLock = raucloudLock(snapshot);
       title.textContent = 'Cloud 서버 선택';
-      body.append(description('에이전트가 앱을 닫아도 계속 작업할 서버를 고르세요. 나중에 바꿀 수 있습니다.'));
+      body.append(
+        description('앱을 닫은 뒤에도 작업할 위치를 고르세요. 어느 쪽이든 문서 화면을 실시간으로 볼 수 있습니다.'),
+        liveDocumentPreview(),
+      );
       if (state.notice) body.append(callout('cloud', '남은 서버를 확인하세요', state.notice));
       const options = el('div', 'ag-cloud-setup-options');
       options.setAttribute('role', 'radiogroup');
@@ -706,7 +760,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
         serverOption(
           'app-hosted',
           'Raucloud',
-          'Rauhwpx가 샌드박스를 만들고 이 기기에 연결합니다.',
+          '새 샌드박스를 만들고 자동으로 연결합니다. 별도 서버가 필요하지 않습니다.',
           mode === 'app-hosted',
           provider
             ? provider.configured
@@ -718,11 +772,29 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
         serverOption(
           'self-hosted',
           '내 서버 사용',
-          '보유한 Ubuntu 또는 Debian VPS에 개인 Cloud 환경을 설치합니다.',
+          '내 Mac mini, Ubuntu 또는 Debian 서버에 Cloud 환경을 설치합니다.',
           mode === 'self-hosted',
           'SSH와 비밀번호 없는 sudo가 필요합니다',
         ),
       );
+      const radios = [...options.querySelectorAll<HTMLButtonElement>('.ag-cloud-setup-option:not(:disabled)')];
+      const selectedRadio = radios.find((item) => item.getAttribute('aria-checked') === 'true') ?? radios[0];
+      for (const radio of radios) radio.tabIndex = radio === selectedRadio ? 0 : -1;
+      options.addEventListener('keydown', (event) => {
+        if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+        const currentIndex = radios.indexOf(document.activeElement as HTMLButtonElement);
+        if (currentIndex < 0 || radios.length < 2) return;
+        event.preventDefault();
+        const backwards = event.key === 'ArrowLeft' || event.key === 'ArrowUp';
+        const nextIndex = event.key === 'Home'
+          ? 0
+          : event.key === 'End'
+            ? radios.length - 1
+            : (currentIndex + (backwards ? -1 : 1) + radios.length) % radios.length;
+        const next = radios[nextIndex];
+        requestedFocusMode = next.dataset.serverMode as CloudServerMode;
+        next.click();
+      });
       body.appendChild(options);
       const loginRequired = mode === 'app-hosted' && needsRaucloudLogin(snapshot);
       const hardLock = mode === 'app-hosted' ? raucloudHardLock(snapshot) : null;
@@ -750,8 +822,8 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       const appHostedLock = raucloudLock(snapshot);
       title.textContent = 'Raucloud 사용';
       body.append(
-        description('Rauhwpx가 샌드박스를 만들고 이 기기에 연결합니다.'),
-        callout('cloud', provider.displayName, '파일과 작업 상태를 샌드박스로 전송합니다. 서버를 종료하면 샌드박스도 삭제됩니다.'),
+        description('Rauhwpx가 새 샌드박스를 만들고 이 기기에 연결합니다.'),
+        callout('cloud', provider.displayName, '현재 문서와 대화 기록을 샌드박스로 전송합니다. 서버를 종료하면 샌드박스도 삭제됩니다.'),
       );
       back.addEventListener('click', () => setState({ kind: 'choose', draft, intent, mode: 'app-hosted' }));
       const primary = button('서버 만들기', 'primary');
@@ -779,9 +851,9 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     } else if (state.kind === 'sandbox-provisioning') {
       title.textContent = 'Raucloud 준비 중';
       body.append(
-        description(`샌드박스를 기기에 연결하고 있습니다. 서버 생성과 첫 시작에는 최대 ${RAUCLOUD_SETUP_WAIT_MINUTES}분이 걸릴 수 있습니다.`),
+        description(`서버를 만들고 실시간 문서 화면까지 연결하고 있습니다. 첫 시작에는 최대 ${RAUCLOUD_SETUP_WAIT_MINUTES}분이 걸릴 수 있습니다.`),
         el('div', 'ag-cloud-setup-indeterminate'),
-        el('p', 'ag-cloud-setup-wait', setupProgressText(state.startedAt)),
+        el('p', 'ag-cloud-setup-wait', `경과 ${setupProgressText(state.startedAt)}`),
       );
       const working = button('준비 중...', 'primary');
       working.disabled = true;
@@ -837,7 +909,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       title.textContent = 'Raucloud가 준비되었습니다';
       body.append(
         callout('check', name, sandbox.host || sandbox.sandboxId),
-        description('이제 작업을 Cloud로 보내면 앱을 닫아도 앱 샌드박스에서 에이전트가 계속 작업합니다.'),
+        description('Cloud 작업을 시작하면 문서 화면이 실시간으로 열립니다. 앱을 닫아도 에이전트는 계속 작업합니다.'),
       );
       if (snapshot.server.message) {
         body.appendChild(callout('cloud', '서버 상태', snapshot.server.message));
@@ -847,7 +919,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       const teardown = button('서버 종료', 'danger');
       teardown.addEventListener('click', () => { void teardownSandbox(); });
       footer.append(refresh);
-      const primary = button(intent === 'transfer' ? 'Cloud로 계속' : '완료', 'primary');
+      const primary = button(intent === 'transfer' ? 'Cloud 작업 시작' : '완료', 'primary');
       if (intent === 'transfer' && appHostedLock) {
         primary.disabled = true;
         primary.textContent = '새 작업을 시작할 수 없음';
@@ -865,8 +937,8 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       const { draft, intent } = state;
       title.textContent = '내 VPS에서 Cloud 시작하기';
       body.append(
-        description('Rauhwpx가 원격 Mac mini 또는 Linux VPS에 개인 Cloud 환경을 설치합니다. 일반 SSH, Tailscale, 공개 HTTPS를 지원하며 앱을 닫아도 에이전트는 계속 작업합니다.'),
-        callout('cloud', '내 서버에서만 실행', '문서와 작업 상태는 사용자가 선택한 VPS로 전송됩니다.'),
+        description('원격 Mac mini, Ubuntu 또는 Debian 서버에 개인 Cloud 환경을 설치합니다. 연결이 끝나면 앱을 닫아도 작업이 계속됩니다.'),
+        callout('cloud', '문서는 내 서버에만 전송됩니다', 'Rauhwpx가 현재 문서와 대화 기록을 사용자가 선택한 서버로 보냅니다.'),
       );
       const requirements = el('div', 'ag-cloud-setup-requirements');
       requirements.append(el('strong', '', '준비할 것'));
@@ -954,7 +1026,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       footer.append(back, cancel, primary);
     } else if (state.kind === 'installing') {
       const stageCopy: Record<CloudSetupStage, [string, string]> = {
-        installing: ['Cloud 환경 설치 중', 'VPS에 서비스를 설치하고 연결을 확인하고 있습니다. 이 창을 숨겨도 설치는 계속됩니다.'],
+        installing: ['Cloud 환경 설치 중', 'SSH 연결은 끝났습니다. 서비스를 설치한 뒤 실시간 문서 화면까지 확인합니다. 이 창을 숨겨도 설치는 계속됩니다.'],
       };
       const [heading, detail] = stageCopy[state.stage];
       title.textContent = heading;
@@ -1002,9 +1074,9 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       title.textContent = 'Cloud가 준비되었습니다';
       body.append(
         callout('check', state.profile.name, state.profile.host),
-        description(`${state.profile.transport.kind === 'tailscale' ? 'Tailscale로 연결되었습니다.' : state.profile.transport.kind === 'ssh-tunnel' ? '안전한 SSH 터널로 연결되었습니다.' : '공개 HTTPS 주소로 연결되었습니다.'} 이제 작업을 Cloud로 보내면 앱을 닫아도 원격 호스트에서 에이전트가 계속 작업합니다.`),
+        description(`${state.profile.transport.kind === 'tailscale' ? 'Tailscale로 연결했습니다.' : state.profile.transport.kind === 'ssh-tunnel' ? 'SSH 터널로 연결했습니다.' : '공개 HTTPS 주소로 연결했습니다.'} Cloud 작업을 시작하면 문서 화면이 실시간으로 열리고, 앱을 닫아도 에이전트는 계속 작업합니다.`),
       );
-      const primary = button(state.intent === 'transfer' ? 'Cloud로 계속' : '완료', 'primary');
+      const primary = button(state.intent === 'transfer' ? 'Cloud 작업 시작' : '완료', 'primary');
       if (state.intent === 'manage') {
         const { profile, intent } = state;
         const edit = button('연결 정보 수정');
@@ -1028,7 +1100,14 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
         ? dialog.querySelector<HTMLElement>(`[data-cloud-field="${requestedFocusField}"]`)
         : null;
       requestedFocusField = null;
-      const preferred = requested ?? dialog.querySelector<HTMLElement>('.ag-cloud-setup-autofocus');
+      const requestedMode = requestedFocusMode
+        ? dialog.querySelector<HTMLElement>(`[data-server-mode="${requestedFocusMode}"]`)
+        : null;
+      requestedFocusMode = null;
+      const preferred = requested
+        ?? requestedMode
+        ?? dialog.querySelector<HTMLElement>('.ag-cloud-setup-autofocus')
+        ?? dialog.querySelector<HTMLElement>('[role="radio"][aria-checked="true"]:not(:disabled)');
       if (preferred) preferred.focus();
       else if (!dialog.contains(document.activeElement)) dialog.focus();
     });
@@ -1058,8 +1137,8 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       settingsDetail.textContent = provider?.configured
         ? appHostedLock
           ? `${appHostedLock} 내 서버는 로그인 없이 연결할 수 있습니다.`
-          : 'Raucloud 또는 내 서버에서 에이전트를 계속 실행합니다.'
-        : '내 VPS에서 에이전트를 계속 실행합니다.';
+          : '작업은 계속되고 문서 화면은 실시간으로 열립니다.'
+        : '내 서버에서 작업을 계속하고 문서 화면을 실시간으로 봅니다.';
       return;
     }
     const labels = {
@@ -1084,8 +1163,8 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
         ? sandboxLabel
         : labels[snapshot.profile.connection];
     settingsDetail.textContent = snapshot.profile.mode === 'app-hosted'
-      ? appHostedLock ?? `Raucloud · ${snapshot.profile.name}${snapshot.profile.sandbox.host ? `, ${snapshot.profile.sandbox.host}` : ''}`
-      : `내 서버 · ${snapshot.profile.profile.name}, ${snapshot.profile.profile.host}`;
+      ? appHostedLock ?? `Raucloud, ${snapshot.profile.name}${snapshot.profile.sandbox.host ? `, ${snapshot.profile.sandbox.host}` : ''}`
+      : `내 서버, ${snapshot.profile.profile.name}, ${snapshot.profile.profile.host}`;
     settingsAction.textContent = '관리';
   }
 

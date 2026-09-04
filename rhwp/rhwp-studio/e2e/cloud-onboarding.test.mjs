@@ -183,7 +183,9 @@ async function openCloud(page) {
 async function manageCloud(page) {
   await clickStable(page, '#agent-sidebar .ag-settings-btn');
   await page.waitForFunction(() => document.querySelector('#agent-sidebar')?.classList.contains('ag-settings-open'));
-  await clickStable(page, '#ag-settings-tab-connections');
+  await page.waitForFunction(() => !document.body.classList.contains('ag-sidebar-animating'));
+  await page.focus('#ag-settings-tab-connections');
+  await page.keyboard.press('Enter');
   await page.waitForFunction(
     () => document.querySelector('#ag-settings-tab-connections')?.getAttribute('aria-selected') === 'true',
     { timeout: 15_000 },
@@ -540,10 +542,30 @@ try {
 
   assert.deepEqual(await settingsCard(page), {
     status: '설정되지 않음',
-    detail: 'Raucloud 또는 내 서버에서 에이전트를 계속 실행합니다.',
+    detail: '작업은 계속되고 문서 화면은 실시간으로 열립니다.',
     action: '설정',
   });
   await openChoice(page);
+  assert.deepEqual(
+    await page.$$eval('.ag-cloud-setup-progress-step', (nodes) => nodes.map((node) => ({
+      label: node.textContent?.trim(),
+      state: node.dataset.state,
+      current: node.getAttribute('aria-current'),
+    }))),
+    [
+      { label: '1서버 선택', state: 'current', current: 'step' },
+      { label: '2환경 연결', state: 'upcoming', current: null },
+      { label: '3준비 완료', state: 'upcoming', current: null },
+    ],
+  );
+  assert.equal(
+    await page.$eval('.ag-cloud-setup-live-copy strong', (node) => node.textContent?.trim()),
+    '에이전트가 편집하는 문서를 그대로 봅니다',
+  );
+  if (process.env.CLOUD_ONBOARDING_SCREENSHOT) {
+    await delay(250);
+    await page.screenshot({ path: process.env.CLOUD_ONBOARDING_SCREENSHOT, fullPage: true });
+  }
   assert.deepEqual(
     await page.$$eval('.ag-cloud-setup-option', (nodes) => nodes.map((node) => ({
       mode: node.dataset.serverMode,
@@ -557,6 +579,19 @@ try {
     ],
   );
   assert.equal(await page.$eval('.ag-cloud-setup-options', (node) => node.getAttribute('role')), 'radiogroup');
+  await page.focus('.ag-cloud-setup-option[data-server-mode="app-hosted"]');
+  await page.keyboard.press('ArrowRight');
+  await page.waitForFunction(() => document.querySelector('.ag-cloud-setup-option[data-server-mode="self-hosted"]')?.getAttribute('aria-checked') === 'true');
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.serverMode), 'self-hosted');
+  await page.keyboard.press('Home');
+  await page.waitForFunction(() => document.querySelector('.ag-cloud-setup-option[data-server-mode="app-hosted"]')?.getAttribute('aria-checked') === 'true');
+  assert.equal(await page.evaluate(() => document.activeElement?.dataset.serverMode), 'app-hosted');
+  await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'reduce' }]);
+  assert.deepEqual(await page.evaluate(() => ({
+    dialog: getComputedStyle(document.querySelector('.ag-cloud-setup-dialog')).animationName,
+    caret: getComputedStyle(document.querySelector('.ag-cloud-setup-live-caret')).animationName,
+  })), { dialog: 'none', caret: 'none' });
+  await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'no-preference' }]);
   await page.evaluate(() => window.__cloudHarness.clearCalls());
   await clickStable(page, '.ag-cloud-setup-option[data-server-mode="self-hosted"]');
   await page.waitForFunction(() => document.querySelector('.ag-cloud-setup-option[data-server-mode="self-hosted"]')?.getAttribute('aria-checked') === 'true');
@@ -579,7 +614,7 @@ try {
   );
   await chooseMode(page, 'self-hosted');
   await waitForTitle(page, '내 VPS에서 Cloud 시작하기');
-  assert.match(await page.$eval('.ag-cloud-setup-description', (node) => node.textContent), /앱을 닫아도 에이전트는 계속 작업/);
+  assert.match(await page.$eval('.ag-cloud-setup-description', (node) => node.textContent), /앱을 닫아도 작업이 계속/);
   assert.equal(await page.$$eval('.ag-cloud-setup-requirements li', (nodes) => nodes.length), 3);
   console.log('  PASS intro explains the private VPS journey');
 
@@ -849,7 +884,11 @@ try {
   await clickButton(page, '다시 시도');
   await waitForTitle(page, 'Raucloud 준비 중');
   assert.match(await page.$eval('.ag-cloud-setup-description', (node) => node.textContent), /최대 30분이 걸릴 수 있습니다/);
-  assert.match(await page.$eval('.ag-cloud-setup-wait', (node) => node.textContent), /^(?:\d+분 )?\d+초$/);
+  assert.match(await page.$eval('.ag-cloud-setup-wait', (node) => node.textContent), /^경과 (?:\d+분 )?\d+초$/);
+  assert.deepEqual(await page.$eval('.ag-cloud-setup-live', (node) => ({
+    text: node.textContent?.trim(),
+    visible: getComputedStyle(node).display !== 'none',
+  })), { text: 'Raucloud를 준비하고 있습니다.', visible: true });
   assert.deepEqual(
     await page.$$eval('.ag-cloud-setup-footer button', (nodes) => nodes.map((node) => ({
       label: node.textContent.trim(), disabled: node.disabled,
@@ -877,7 +916,7 @@ try {
   assert.match(await page.$eval('.ag-cloud-setup-callout p', (node) => node.textContent), /rauhwpx-1\.up\.railway\.app/);
   assert.deepEqual(await settingsCard(page), {
     status: '연결됨',
-    detail: 'Raucloud · Raucloud 1, rauhwpx-1.up.railway.app',
+    detail: 'Raucloud, Raucloud 1, rauhwpx-1.up.railway.app',
     action: '관리',
   });
   await clickStable(page, '.ag-cloud-setup-close');
@@ -912,7 +951,7 @@ try {
   await waitForTitle(page, 'Cloud 서버 선택');
   assert.deepEqual(await settingsCard(page), {
     status: '설정되지 않음',
-    detail: 'Raucloud 또는 내 서버에서 에이전트를 계속 실행합니다.',
+    detail: '작업은 계속되고 문서 화면은 실시간으로 열립니다.',
     action: '설정',
   });
   await clickButton(page, '취소');

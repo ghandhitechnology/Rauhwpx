@@ -19,6 +19,7 @@ class TestElement {
   src = '';
   draggable = false;
   disabled = false;
+  hidden = false;
   scrollLeft = 0;
   scrollTop = 0;
   dataset: Record<string, string> = {};
@@ -220,6 +221,40 @@ test('cloud workspace opens only while visible, replaces sessions, and suppresse
     message: 'late',
   });
   assert.equal(workspace.getState().kind, 'live');
+});
+
+test('cloud workspace explains the live document before the first frame and clears the empty state after it arrives', async () => {
+  const doc = new TestDocument();
+  let listener: ((event: CloudDisplayEvent) => void) | null = null;
+  const workspace = createCloudWorkspace({
+    display: {
+      async openDisplay(sessionId: string, next: (event: CloudDisplayEvent) => void) {
+        listener = next;
+        return connection(sessionId, []);
+      },
+    } as Pick<CloudController, 'openDisplay'>,
+    doc: doc as unknown as Document,
+    objectUrls: { create: () => 'blob:live-document', revoke: () => {} },
+    decodeFrame: async () => ({ width: 1280, height: 800 }),
+  });
+  const root = workspace.root as unknown as TestElement;
+  const empty = find(root, (node) => node.className === 'cloud-workspace-empty');
+  const emptyTitle = find(root, (node) => node.className === 'cloud-workspace-empty-title');
+  const emptyDetail = find(root, (node) => node.className === 'cloud-workspace-empty-detail');
+  const status = find(root, (node) => node.className === 'cloud-workspace-status-text');
+
+  assert.equal(empty.hidden, false);
+  assert.equal(emptyTitle.textContent, 'Cloud 작업을 시작하면 문서 화면이 열립니다');
+  workspace.setContext({ visible: true, session: running() });
+  await flushMicrotasks();
+  assert.equal(empty.hidden, false);
+  assert.equal(emptyTitle.textContent, '실시간 문서 화면을 여는 중입니다');
+  assert.match(emptyDetail.textContent, /문서를 고치는 과정/);
+
+  listener!(frame());
+  await flushMicrotasks();
+  assert.equal(empty.hidden, true);
+  assert.equal(status.textContent, '실시간 문서 화면이 연결됐습니다. 클릭해서 직접 제어하세요.');
 });
 
 test('cloud workspace maps pointer, wheel, shortcuts, and text into ordered remote input', async () => {
