@@ -404,11 +404,11 @@ test('the dialog offers both servers and only restorable sandbox actions', () =>
   assert.match(onboarding, /운영자가 \$\{provider\.missingConfig\.join\(', '\)\}/);
   assert.match(onboarding, /state\.kind !== 'sandbox-intro' && state\.kind !== 'sandbox-failed'/);
   assert.match(onboarding, /kind: 'sandbox-provisioning'/);
-  assert.match(onboarding, /샌드박스를 기기에 연결하고 있습니다\. 서버 생성과 첫 시작에는 최대 \$\{RAUCLOUD_SETUP_WAIT_MINUTES\}분이 걸릴 수 있습니다/);
+  assert.match(onboarding, /서버를 만들고 실시간 문서 화면까지 연결하고 있습니다\. 첫 시작에는 최대 \$\{RAUCLOUD_SETUP_WAIT_MINUTES\}분이 걸릴 수 있습니다/);
   assert.match(onboarding, /return raucloudSetupElapsed\(startedAt\)/);
   assert.match(onboarding, /진행 보기/);
   assert.match(onboarding, /Raucloud를 종료하고 있습니다/);
-  assert.match(onboarding, /Raucloud · /);
+  assert.match(onboarding, /Raucloud, \$\{snapshot\.profile\.name\}/);
   assert.match(onboardingCss, /\.ag-cloud-setup-option\.ag-selected/);
   assert.match(cloudUi, /appHosted/);
   assert.match(cloudUi, /setupActive\n\s+\? '준비 중'\n\s+: link\.kind === 'reconnecting'/);
