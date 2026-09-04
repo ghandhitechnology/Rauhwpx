@@ -13,6 +13,7 @@ const PROBE_COMMANDS = /** @type {const} */ ({
   codex: 'codex',
   grok: 'grok',
   cursor: 'cursor-agent',
+  opencode: 'opencode',
 });
 const CLI_AGENTS = /** @type {const} */ (Object.keys(PROBE_COMMANDS));
 const PROBE_TIMEOUT_MS = 5_000;
@@ -62,7 +63,7 @@ function firstLine(text) {
  *
  * @param {{ spawnProcess?: typeof spawn, timeoutMs?: number, cacheTtlMs?: number,
  *           now?: () => number, piBin?: () => string|null,
- *           cliBin?: (agent: 'claude'|'codex'|'grok'|'cursor') => string|null,
+ *           cliBin?: (agent: 'claude'|'codex'|'grok'|'cursor'|'opencode') => string|null,
  *           probeEnv?: (agent: string) => NodeJS.ProcessEnv|undefined }} [deps]
  */
 export function createProviderHealth({
@@ -75,9 +76,9 @@ export function createProviderHealth({
   probeEnv = () => undefined,
   platform = process.platform,
 } = {}) {
-  /** @type {{ result: { claude: ProviderHealth, codex: ProviderHealth, grok: ProviderHealth, cursor: ProviderHealth, pi: ProviderHealth }, checkedAt: number } | null} */
+  /** @type {{ result: { claude: ProviderHealth, codex: ProviderHealth, grok: ProviderHealth, cursor: ProviderHealth, opencode: ProviderHealth, pi: ProviderHealth, rau: ProviderHealth }, checkedAt: number } | null} */
   let cache = null;
-  /** @type {Promise<{ claude: ProviderHealth, codex: ProviderHealth, grok: ProviderHealth, cursor: ProviderHealth, pi: ProviderHealth }> | null} */
+  /** @type {Promise<{ claude: ProviderHealth, codex: ProviderHealth, grok: ProviderHealth, cursor: ProviderHealth, opencode: ProviderHealth, pi: ProviderHealth, rau: ProviderHealth }> | null} */
   let inFlight = null;
 
   /**
@@ -236,7 +237,7 @@ export function createProviderHealth({
     },
     /**
      * @param {boolean} [refresh] true 면 캐시를 무시하고 다시 프로브한다.
-     * @returns {Promise<{ claude: ProviderHealth, codex: ProviderHealth, grok: ProviderHealth, cursor: ProviderHealth, pi: ProviderHealth, rau: ProviderHealth }>}
+     * @returns {Promise<{ claude: ProviderHealth, codex: ProviderHealth, grok: ProviderHealth, cursor: ProviderHealth, opencode: ProviderHealth, pi: ProviderHealth, rau: ProviderHealth }>}
      */
     check(refresh = false) {
       if (!refresh && cache && now() - cache.checkedAt < cacheTtlMs) {

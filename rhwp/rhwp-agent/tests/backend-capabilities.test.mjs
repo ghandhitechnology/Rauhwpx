@@ -36,8 +36,10 @@ import { buildCursorCliConfig } from '../agents/cursor.mjs';
 import { buildGrokArgv } from '../agents/grok.mjs';
 import { buildPiArgv, buildPiEnv } from '../agents/pi.mjs';
 import {
+  isOpenCodeModelId,
   mcpCapabilityEnv,
   mcpRuntimeFor,
+  normalizeUsageTokens,
   parallelWorkBriefFor,
   providerInteractionMode,
   providerToolNoteFor,
@@ -45,6 +47,14 @@ import {
   systemBriefFor,
   validateExecutionMode,
 } from '../agents/backend.mjs';
+
+test('OpenCode model ids preserve provider-defined catalog names without accepting unsafe lines', () => {
+  assert.equal(isOpenCodeModelId('openrouter/~anthropic/claude-fable-latest'), true);
+  assert.equal(isOpenCodeModelId('opencode/big-pickle'), true);
+  assert.equal(isOpenCodeModelId('missing-provider-separator'), false);
+  assert.equal(isOpenCodeModelId('openrouter/model\nnext'), false);
+  assert.equal(isOpenCodeModelId(`openrouter/${'x'.repeat(300)}`), false);
+});
 
 const testHome = mkdtempSync(path.join(os.tmpdir(), 'rhwp-backend-test-'));
 test.after(() => rmSync(testHome, { recursive: true, force: true }));
@@ -555,6 +565,12 @@ test('parallel-work guidance is tuned to each provider surface', () => {
   assert.match(cursor, /transcript arrives only when it finishes/);
   assert.match(cursor, /tightly bounded objective/, '전사 재생 상한을 고려한 목표 경계');
 
+  const opencode = parallelWorkBriefFor('opencode');
+  assert.match(opencode, /use the Task tool/);
+  assert.match(opencode, /general subagent/);
+  assert.match(opencode, /explore subagent/);
+  assert.match(opencode, /Collect every Task result/);
+
   const codex = parallelWorkBriefFor('codex');
   assert.match(codex, /wait_agent until every agent/);
   assert.match(codex, /Never call wait_agent for an MCP-managed background job such as delegate_copy_layout/);
@@ -569,6 +585,7 @@ test('provider tool notes correct activated skill text per collaboration surface
     ['codex', /never call wait_agent or list_agents for one/],
     ['grok', /never collect them with get_command_or_subagent_output/],
     ['cursor', /there is no polling tool/],
+    ['opencode', /collaboration tool is Task/],
     ['pi', /never call subagent_wait or subagent_list for one/],
   ]) {
     const note = providerToolNoteFor(agent);
@@ -577,6 +594,20 @@ test('provider tool notes correct activated skill text per collaboration surface
     assert.match(note, /hub will start a new turn carrying/, agent);
   }
   assert.equal(providerToolNoteFor('mystery'), '', '알 수 없는 provider 는 주석을 붙이지 않는다');
+});
+
+test('OpenCode cached token fields normalize to the common usage shape', () => {
+  assert.deepEqual(normalizeUsageTokens({
+    inputTokens: 12,
+    outputTokens: 3,
+    cachedReadTokens: 40,
+    cachedWriteTokens: 5,
+  }), {
+    inputTokens: 12,
+    outputTokens: 3,
+    cacheReadTokens: 40,
+    cacheCreationTokens: 5,
+  });
 });
 
 test('every write-capable brief directs batched writes through apply_edits', () => {

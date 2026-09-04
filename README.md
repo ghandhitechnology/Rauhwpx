@@ -23,7 +23,7 @@
 
 ## What this is
 
-Korean office work runs on HWP/HWPX, and no AI tool can actually open those files and work inside them. Rauhwpx is a real HWP editor — parsing, layout, rendering and editing all written in Rust and compiled to WASM — with a Claude, Codex or Pi CLI wired directly into the open document through MCP.
+Korean office work runs on HWP/HWPX, and no AI tool can actually open those files and work inside them. Rauhwpx is a real HWP editor — parsing, layout, rendering and editing all written in Rust and compiled to WASM — with Claude, Codex, Pi, Grok, Cursor, and OpenCode wired directly into the open document through MCP.
 
 The agent reads structure, text ranges, tables, fields and rendered pages, then makes edits you can see and undo. Nothing leaves the machine: the document lives in the browser engine, and the agent hub is a localhost router with no document logic.
 
@@ -59,7 +59,7 @@ keeps an openable recovery copy and reports its exact path.
 
 Testers can download the current pre-release from the [nightly tag](https://github.com/ghandhitechnology/Rauhwpx/releases/tag/nightly).
 
-You supply your own agent CLI. Claude, Codex and Pi can each be installed and signed in from **Settings → Connection** inside the app.
+Connect a provider from **Settings → Connection**. Claude, Codex, Pi, Grok, Cursor, and OpenCode can be installed there, and the app offers each provider's supported sign-in method. OpenCode can also reuse credentials created by `opencode auth login`.
 
 ## Development
 

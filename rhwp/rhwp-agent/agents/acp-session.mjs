@@ -49,7 +49,7 @@ export function createBoundedNdjsonTransform(maxFrameBytes = MAX_PROVIDER_FRAME_
  * @property {string} command
  * @property {string[]} args
  * @property {string} cwd
- * @property {NodeJS.ProcessEnv} [env]
+ * @property {NodeJS.ProcessEnv|(() => NodeJS.ProcessEnv)} [env]
  * @property {string|null} [authMethodId]
  * @property {any[]} [mcpServers]
  * @property {string|null} [resumeSessionId]
@@ -136,6 +136,14 @@ function matchConfigValue(option, requested) {
   if (exact) return String(exact.value);
   const byName = configValues(option).find((entry) => String(entry?.name ?? '').toLowerCase() === wanted);
   return byName ? String(byName.value) : null;
+}
+
+function matchConfigAliases(option, requested) {
+  for (const alias of Array.isArray(requested) ? requested : []) {
+    const value = matchConfigValue(option, alias);
+    if (value) return value;
+  }
+  return null;
 }
 
 function findConfig(options, category, id) {
@@ -419,7 +427,7 @@ export function createPersistentAcpSession({
     const child = spawnProcess(command, args, {
       ...processTreeSpawnOptions(),
       cwd,
-      env,
+      env: typeof env === 'function' ? env() : env,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     proc = child;
@@ -542,9 +550,9 @@ export function createPersistentAcpSession({
     if (Array.isArray(response?.configOptions) && setupResponse) setupResponse.configOptions = response.configOptions;
   }
 
-  /** @param {{modeAliases?:string[], requireModeMatch?:boolean, model?:string|null, effort?:string|null}} [selection] */
+  /** @param {{modeAliases?:string[], requireModeMatch?:boolean, model?:string|null, requireModelMatch?:boolean, effort?:string|null}} [selection] */
   async function configure({
-    modeAliases = [], requireModeMatch = false, model = null, effort = null,
+    modeAliases = [], requireModeMatch = false, model = null, requireModelMatch = false, effort = null,
   } = {}) {
     if (hadUnprovenCleanup) {
       throw new Error(`${clientName} ACP process-tree cleanup remains unconfirmed`);
@@ -552,22 +560,46 @@ export function createPersistentAcpSession({
     await start();
     const agentContext = context;
     if (!agentContext) throw new Error(`${clientName} ACP session is not started`);
-    const modes = setupResponse?.modes;
-    const target = selectAcpMode(modes, modeAliases, { required: requireModeMatch, clientName });
-    if (target?.id && target.id !== modes.currentModeId) {
-      await agentContext.request(methods.agent.session.setMode, { sessionId, modeId: target.id });
-      modes.currentModeId = target.id;
+    let configs = setupResponse?.configOptions;
+    const modeOption = findConfig(configs, 'mode', 'mode');
+    if (modeOption) {
+      const modeValue = matchConfigAliases(modeOption, modeAliases);
+      if (!modeValue && requireModeMatch) {
+        const requested = modeAliases.length ? modeAliases.join(', ') : 'unspecified';
+        throw new Error(`${clientName} ACP does not advertise required mode (${requested})`);
+      }
+      if (modeValue && modeValue !== modeOption.currentValue) {
+        await setConfig(modeOption.id, modeValue);
+        modeOption.currentValue = modeValue;
+        configs = setupResponse?.configOptions ?? configs;
+      }
+    } else {
+      const modes = setupResponse?.modes;
+      const target = selectAcpMode(modes, modeAliases, { required: requireModeMatch, clientName });
+      if (target?.id && target.id !== modes.currentModeId) {
+        await agentContext.request(methods.agent.session.setMode, { sessionId, modeId: target.id });
+        modes.currentModeId = target.id;
+      }
     }
-    const configs = setupResponse?.configOptions;
+    const requestedModel = String(model ?? '').trim();
     if (!setModelMethod) {
       const modelOption = findConfig(configs, 'model', 'model');
       const modelValue = matchConfigValue(modelOption, model);
-      if (modelValue && modelValue !== modelOption.currentValue) await setConfig(modelOption.id, modelValue);
+      if (requestedModel && !modelValue && requireModelMatch) {
+        throw new Error(`${clientName} ACP does not advertise required model (${requestedModel})`);
+      }
+      if (modelValue && modelValue !== modelOption.currentValue) {
+        await setConfig(modelOption.id, modelValue);
+        modelOption.currentValue = modelValue;
+        configs = setupResponse?.configOptions ?? configs;
+      }
     }
     const effortOption = findConfig(configs, 'thought_level', 'reasoning');
     const effortValue = matchConfigValue(effortOption, effort);
-    if (effortValue && effortValue !== effortOption.currentValue) await setConfig(effortOption.id, effortValue);
-    const requestedModel = String(model ?? '').trim();
+    if (effortValue && effortValue !== effortOption.currentValue) {
+      await setConfig(effortOption.id, effortValue);
+      effortOption.currentValue = effortValue;
+    }
     if (setModelMethod && requestedModel && (
       selectedModel?.generation !== connectionGeneration
       || selectedModel.model !== requestedModel

@@ -12,7 +12,7 @@ import {
   saveAgentPrefs,
   trySaveAgentPrefs,
 } from '../src/agent/agent-prefs.ts';
-import { setCursorModels, setPiModels } from '../src/agent/models.ts';
+import { setCursorModels, setOpenCodeModels, setPiModels } from '../src/agent/models.ts';
 import type { PiModelConfig } from '../src/agent/types.ts';
 
 /** localStorage 대역 — 테스트는 브라우저 없이 돌아간다. */
@@ -220,6 +220,39 @@ test('cursor 기본값은 auto 로 접히고 추론 강도는 비어 있다', ()
     assert.equal(unknown.defaultModel, 'auto');
   } finally {
     setCursorModels([]);
+  }
+});
+
+test('opencode 기본값과 동적 provider/model 선택은 저장되고 추론 강도는 비어 있다', () => {
+  setOpenCodeModels([]);
+  try {
+    const fallback = normalizeAgentPrefs({ defaultAgent: 'opencode' });
+    assert.equal(fallback.defaultAgent, 'opencode');
+    assert.equal(fallback.defaultModel, 'opencode/big-pickle');
+    assert.equal(fallback.defaultEffort, '');
+
+    const pending = normalizeAgentPrefs({
+      defaultAgent: 'opencode',
+      defaultModel: 'anthropic/claude-sonnet-4-5',
+      defaultEffort: 'high',
+    });
+    assert.equal(pending.defaultModel, 'anthropic/claude-sonnet-4-5');
+    assert.equal(pending.defaultEffort, '');
+
+    setOpenCodeModels(['anthropic/claude-sonnet-4-5']);
+    const storage = makeStorage();
+    const saved = saveAgentPrefs({
+      defaultAgent: 'opencode',
+      defaultModel: 'anthropic/claude-sonnet-4-5',
+    }, storage);
+    assert.equal(saved.defaultAgent, 'opencode');
+    assert.equal(saved.defaultModel, 'anthropic/claude-sonnet-4-5');
+    assert.deepEqual(loadAgentPrefs(storage), saved);
+
+    const unknown = normalizeAgentPrefs({ defaultAgent: 'opencode', defaultModel: 'unknown/model' });
+    assert.equal(unknown.defaultModel, 'anthropic/claude-sonnet-4-5');
+  } finally {
+    setOpenCodeModels([]);
   }
 });
 

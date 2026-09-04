@@ -388,6 +388,7 @@ function replaceSource(handle, bytes, platform, { renameFile = renameSync } = {}
 export function flushCredentialMirrorSync(handle, {
   platform = process.platform,
   renameFile = renameSync,
+  validateTarget = /** @type {((content: Buffer) => boolean) | null} */ (null),
 } = {}) {
   if (!handle || handle.mode !== 'copy') return { copied: false, conflict: false };
   const verified = readJournal(handle.journalPath);
@@ -415,6 +416,11 @@ export function flushCredentialMirrorSync(handle, {
   }
   if (targetBytes === null) {
     if (!plainFile(verified.source)) return finishTerminalConflict(verified, null);
+    removeMirrorArtifacts(verified);
+    return { copied: false, conflict: false };
+  }
+  if (typeof validateTarget === 'function' && validateTarget(targetBytes) !== true) {
+    rmSync(verified.target, { force: true });
     removeMirrorArtifacts(verified);
     return { copied: false, conflict: false };
   }
@@ -466,6 +472,7 @@ export function recoverCredentialMirrorsSync(source, {
   currentPid = process.pid,
   isAlive = processAlive,
   platform = process.platform,
+  validateTarget = /** @type {((content: Buffer) => boolean) | null} */ (null),
 } = {}) {
   const resolvedSource = path.resolve(source);
   let names;
@@ -482,7 +489,7 @@ export function recoverCredentialMirrorsSync(source, {
     const handle = readJournal(path.join(path.dirname(resolvedSource), name));
     if (!handle || handle.source !== resolvedSource) continue;
     if (handle.pid === currentPid || isAlive(handle.pid)) continue;
-    results.push(flushCredentialMirrorSync(handle, { platform }));
+    results.push(flushCredentialMirrorSync(handle, { platform, validateTarget }));
   }
   return results;
 }
@@ -497,11 +504,16 @@ export function prepareCredentialMirrorSync(source, target, {
   now = Date.now,
   symlink = symlinkSync,
   copyOnly = false,
+  validateSource = /** @type {((content: Buffer) => boolean) | null} */ (null),
 } = {}) {
   if (!source) return null;
   const resolvedSource = path.resolve(source);
   const resolvedTarget = path.resolve(target);
-  recoverCredentialMirrorsSync(resolvedSource, { currentPid: pid, platform });
+  recoverCredentialMirrorsSync(resolvedSource, {
+    currentPid: pid,
+    platform,
+    validateTarget: validateSource,
+  });
   if (!plainFile(resolvedSource)) return null;
 
   const journalPath = journalPathFor(resolvedSource, resolvedTarget);
@@ -539,6 +551,7 @@ export function prepareCredentialMirrorSync(source, target, {
 
   const sourceBytes = readCredential(resolvedSource);
   if (sourceBytes === null) return null;
+  if (typeof validateSource === 'function' && validateSource(sourceBytes) !== true) return null;
   const id = mirrorId(resolvedTarget);
   const retentionMarker = retentionMarkerFor(resolvedTarget, id);
   const journal = {

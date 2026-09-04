@@ -65,14 +65,14 @@ type RauAuthFeedback = 'idle' | 'success';
 
 /**
  * 요금제 셀렉트를 갖는 프로바이더 — 구독 한도가 있는 둘뿐이다.
- * pi 는 OpenRouter 잔액을, grok · cursor 는 API 사용량만 쓴다.
+ * pi는 OpenRouter 잔액을, grok · cursor · opencode는 API 사용량만 쓴다.
  */
 type PlanAgent = 'claude' | 'codex';
 
 const PLAN_AGENTS: readonly PlanAgent[] = ['claude', 'codex'];
 
 /** 요금제도 잔액도 없는 프로바이더 — 기록된 토큰만 보여준다. */
-const API_USAGE_AGENTS: readonly AgentName[] = ['grok', 'cursor'];
+const API_USAGE_AGENTS: readonly AgentName[] = ['grok', 'cursor', 'opencode'];
 
 /** 설치 안내 — cursor 는 npm 이 아니라 공식 설치 스크립트로 받는다. */
 const SETUP_INSTALL_NOTE: Record<AgentName, string> = {
@@ -82,6 +82,7 @@ const SETUP_INSTALL_NOTE: Record<AgentName, string> = {
   pi: 'Pi 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다.',
   grok: 'Grok CLI와 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다.',
   cursor: 'Cursor CLI를 공식 설치 스크립트로 앱 전용 폴더에 설치합니다.',
+  opencode: 'OpenCode CLI를 앱 전용 폴더에 설치합니다.',
 };
 
 /** API 키 입력칸 힌트 — 키 접두사가 있는 프로바이더만 형태를 보여준다. */
@@ -92,6 +93,7 @@ const API_KEY_PLACEHOLDER: Record<AgentName, string> = {
   pi: 'sk-or-…',
   grok: 'xai-…',
   cursor: 'API 키',
+  opencode: 'API 키',
 };
 
 const CONN_LABEL: Record<ConnectionState, string> = {
@@ -353,7 +355,7 @@ export interface SettingsPanel {
   /** 첫 실행 마법사 카드에서도 같은 설치/로그인 모달을 연다. */
   openAgentSetup(agent: AgentName): void;
   /**
-   * 모달을 연 뒤 허브 상태에 따라 설치 또는 대표 OAuth 를 바로 시작한다.
+   * 모달을 연 뒤 허브 상태에 따라 설치 또는 대표 인증 경로를 바로 시작한다.
    * 이미 로그인된 프로바이더는 완료 화면만 보여 준다.
    */
   beginAgentConnect(agent: AgentName): void;
@@ -603,7 +605,9 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const refreshBtn = el('button', 'ag-settings-btn');
   refreshBtn.type = 'button';
   refreshBtn.append(createIcon('refresh'), el('span', '', '상태 새로고침'));
-  refreshBtn.addEventListener('click', () => void refreshProviders(true));
+  refreshBtn.addEventListener('click', () => {
+    void Promise.all([refreshProviders(true), refreshSetupStatuses(true)]);
+  });
   const restartBtn = el('button', 'ag-settings-btn', '세션 다시 시작');
   restartBtn.type = 'button';
   restartBtn.addEventListener('click', () => {
@@ -764,6 +768,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   const setupAuthPane = el('div', 'ag-agent-setup-pane');
   const setupAuthHeading = el('h3', 'ag-agent-setup-section-title', '로그인 방법');
+  const setupAuthNote = el('p', 'ag-agent-setup-copy');
+  setupAuthNote.hidden = true;
   const setupOauth = el('button', 'ag-agent-auth-card');
   setupOauth.type = 'button';
   setupOauth.append(el('strong', '', '브라우저로 로그인'), el('span', '', '구독 계정 또는 웹 계정 연결'));
@@ -819,6 +825,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   setupCodeBox.append(setupCodeNote, setupCode.field, setupCodeSubmit);
   setupAuthPane.append(
     setupAuthHeading,
+    setupAuthNote,
     setupOauth,
     setupApiToggle,
     setupKeyBox,
@@ -1321,7 +1328,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   piUsageBlock.append(piUsageHead, piUsageDay, piUsageWeek, piUsageModels, piUsageUpdated);
   usageSection.body.appendChild(piUsageBlock);
 
-  // grok · cursor 는 요금제도 잔액도 없다 — 허브가 기록한 세션 · 오늘 · 주간 토큰을 그대로 보여준다.
+  // grok · cursor · opencode는 요금제도 잔액도 없다. 기록한 토큰을 그대로 보여준다.
   const apiUsageBlocks = new Map<
     AgentName,
     {
@@ -1811,7 +1818,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     fillSelectGrouped(modelField.select, modelGroupsForAgent(prefsDraft.defaultAgent));
     modelField.select.value = resolveModelForAgent(prefsDraft.defaultAgent, prefsDraft.defaultModel);
     const effortOptions = effortsForAgent(prefsDraft.defaultAgent, prefsDraft.defaultModel);
-    // 추론 강도가 없는 프로바이더(cursor 등)에서는 줄 자체를 접는다.
+    // 추론 강도가 없는 프로바이더(cursor, opencode 등)에서는 줄 자체를 접는다.
     effortField.field.hidden = effortOptions.length === 0;
     fillSelect(effortField.select, [...effortOptions].reverse());
     effortField.select.value = resolveEffortForAgent(
@@ -1955,10 +1962,21 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       const health = providers?.[agent] ?? null;
       const detected = health?.available === true || setup?.available === true;
       const configured = setup?.connected === true || setup?.setupComplete === true;
-      row.setup.textContent = (agent === 'rau' ? configured : detected || configured) ? '재설정' : '설정';
+      const openCodeReady = configured || (detected && setup?.authenticated === true);
+      const ready = agent === 'rau'
+        ? configured
+        : agent === 'opencode'
+          ? openCodeReady
+          : detected || configured;
+      row.setup.textContent = ready ? '재설정' : '설정';
       row.detail.classList.toggle('ag-update-required', setup?.updateRequired === true);
       if (setup?.updateRequired) {
         row.detail.textContent = '업데이트 필요';
+        continue;
+      }
+      if (agent === 'opencode' && detected && !openCodeReady) {
+        row.dot.dataset.state = 'disconnected';
+        row.detail.textContent = '로그인 필요';
         continue;
       }
       if (!health) {
@@ -2073,7 +2091,10 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   function isAgentLoggedIn(agent: AgentName): boolean {
     if (agent === 'pi' && piStatus?.setupComplete === true) return true;
     const status = setupStatuses?.[agent];
-    return status?.connected === true || status?.setupComplete === true || status?.authenticated === true;
+    const available = providers?.[agent]?.available === true || status?.available === true;
+    return status?.connected === true
+      || status?.setupComplete === true
+      || (available && status?.authenticated === true);
   }
 
   function isAgentInstalled(agent: AgentName): boolean {
@@ -2105,17 +2126,25 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     if (connectionState !== 'connected') return;
     if (isAgentLoggedIn(agent)) return;
     if (isAgentInstalled(agent) || (agent === 'pi' && piStatus?.installed === true)) {
-      setupReauth = true;
-      await startSetupAuth('oauth');
+      await startPreferredSetupAuth(agent);
       return;
     }
     await installSelectedAgent();
     if (disposed || setupAgent !== agent) return;
     if (isAgentLoggedIn(agent)) return;
     if (isAgentInstalled(agent) || (agent === 'pi' && piStatus?.installed === true)) {
-      setupReauth = true;
-      await startSetupAuth('oauth');
+      await startPreferredSetupAuth(agent);
     }
+  }
+
+  async function startPreferredSetupAuth(agent: AgentName): Promise<void> {
+    setupReauth = true;
+    if (agent === 'opencode') {
+      renderAgentSetup();
+      setupKey.input.focus();
+      return;
+    }
+    await startSetupAuth('oauth');
   }
 
   function beginAgentConnect(agent: AgentName): void {
@@ -2262,11 +2291,24 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     // Rau 런타임 설치 여부는 로그인 상태가 아니다. 로그아웃 뒤 남은 바이너리 때문에
     // 연결된 화면으로 돌아가지 않도록 허브가 확인한 키 상태만 신뢰한다.
     const configured = status?.connected === true || status?.setupComplete === true;
-    const connected = agent === 'rau' ? configured : detected || configured;
+    // OpenCode도 바이너리 감지만으로 실행할 수 없다. API 키나 사용자의
+    // `opencode auth login`을 허브가 확인한 뒤에만 완료 화면으로 보낸다.
+    const connected = agent === 'rau'
+      ? configured
+      : agent === 'opencode'
+        ? configured || (available && status?.authenticated === true)
+        : detected || configured;
     setupHeroIcon.replaceChildren(createProviderIcon(agent));
     setupHeroTitle.textContent = AGENT_LABEL[agent];
     setupInstallNote.textContent = SETUP_INSTALL_NOTE[agent];
     setupKey.input.placeholder = API_KEY_PLACEHOLDER[agent];
+    const apiKeyOnly = agent === 'opencode';
+    setupAuthHeading.textContent = apiKeyOnly ? 'OpenCode API 키' : '로그인 방법';
+    setupAuthNote.hidden = !apiKeyOnly;
+    setupAuthNote.textContent = apiKeyOnly
+      ? '터미널에서 opencode auth login을 마친 뒤 상태를 새로고침하면 기존 로그인을 감지합니다. 이 화면에서는 OpenCode API 키를 연결할 수 있습니다.'
+      : '';
+    setupOauth.hidden = apiKeyOnly;
     const oauthTitle = setupOauth.querySelector('strong');
     const oauthDetail = setupOauth.querySelector('span');
     if (agent === 'rau') {
@@ -2279,19 +2321,23 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     } else {
       if (oauthTitle) oauthTitle.textContent = '브라우저로 로그인';
       if (oauthDetail) oauthDetail.textContent = '구독 계정 또는 웹 계정 연결';
-      setupApiToggle.hidden = false;
+      setupApiToggle.hidden = apiKeyOnly;
+      if (apiKeyOnly) setupKeyBox.hidden = false;
       setupInstallPane.hidden = available;
       setupAuthPane.hidden = !available || (connected && !setupReauth);
     }
     setupDonePane.hidden = !connected || setupReauth;
     setupDonePane.classList.toggle('ag-agent-setup-rau-actions', agent === 'rau' && connected && !setupReauth);
     setupDoneClose.textContent = agent === 'rau' && rauAuthFeedback === 'success' ? '계속' : '완료';
+    setupDoneChange.textContent = apiKeyOnly ? 'API 키 변경' : '로그인 방식 변경';
     setupDoneChange.hidden = agent === 'rau';
     setupDoneDisconnect.hidden = agent !== 'rau' || !connected || setupReauth;
     setupDoneDetail.textContent = status?.authMethod === 'api-key' && status.keyTail
       ? `API 키 ****${status.keyTail}`
       : status?.authenticated
-        ? `${AGENT_LABEL[agent]} 웹 계정으로 로그인했습니다.`
+        ? agent === 'opencode'
+          ? 'OpenCode CLI 자격 증명을 확인했습니다.'
+          : `${AGENT_LABEL[agent]} 웹 계정으로 로그인했습니다.`
         : `${AGENT_LABEL[agent]} CLI 연결이 확인되었습니다.`;
     setupRauAuthFeedback.hidden = agent !== 'rau' || rauAuthFeedback !== 'success';
     renderRauAccount();
@@ -2333,8 +2379,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       : '브라우저에서 이 코드를 확인해 주세요.';
   }
 
-  async function refreshSetupStatuses(): Promise<void> {
-    const statuses = await bridge.requestAgentSetupStatus();
+  async function refreshSetupStatuses(refresh = false): Promise<void> {
+    const statuses = await bridge.requestAgentSetupStatus(refresh);
     if (disposed || !statuses) return;
     setupStatuses = statuses;
     renderProviders();
@@ -2390,6 +2436,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   async function startSetupAuth(method: AgentAuthMethod): Promise<void> {
     if (!setupAgent || setupBusy) return;
+    if (setupAgent === 'opencode' && method === 'oauth') return;
     const keyInput = setupAgent === 'pi' ? piKeyInput.input : setupKey.input;
     const key = method === 'api-key' ? keyInput.value.trim() : '';
     if (method === 'api-key' && !key) return;

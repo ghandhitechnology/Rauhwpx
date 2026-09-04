@@ -12,6 +12,7 @@ import {
   MAX_USAGE_MODEL_CHARS,
   MAX_USAGE_MODELS,
   MAX_USAGE_TOKEN_COUNT,
+  OPENCODE_PLANS,
   PI_PLANS,
   createUsageStore,
   defaultUsageRoot,
@@ -64,7 +65,7 @@ test('summary aggregates rolling windows, weights and percents', async () => {
   const store = await createUsageStore({ rootDir, now: time.now }).init();
 
   const empty = store.summary();
-  assert.deepEqual(empty.plans, { claude: 'pro', codex: 'plus', pi: 'api', grok: 'api', cursor: 'api', rau: 'api' });
+  assert.deepEqual(empty.plans, { claude: 'pro', codex: 'plus', pi: 'api', grok: 'api', cursor: 'api', opencode: 'api', rau: 'api' });
   assert.equal(empty.providers.claude.updatedAt, null);
   assert.equal(empty.providers.claude.session.turns, 0);
   assert.equal(empty.providers.claude.session.percent, 0);
@@ -154,12 +155,12 @@ test('plans are validated, persisted and reloaded', async () => {
   await store.setPlan('codex', 'pro');
 
   const saved = JSON.parse(await fs.readFile(path.join(rootDir, 'plans.json'), 'utf8'));
-  assert.deepEqual(saved, { claude: 'max20x', codex: 'pro', pi: 'api', grok: 'api', cursor: 'api', rau: 'api' });
+  assert.deepEqual(saved, { claude: 'max20x', codex: 'pro', pi: 'api', grok: 'api', cursor: 'api', opencode: 'api', rau: 'api' });
   const stat = await fs.stat(path.join(rootDir, 'plans.json'));
   assert.equal(stat.mode & 0o777, process.platform === 'win32' ? 0o666 : 0o600);
 
   const reloaded = await createUsageStore({ rootDir, now: time.now }).init();
-  assert.deepEqual(reloaded.plans(), { claude: 'max20x', codex: 'pro', pi: 'api', grok: 'api', cursor: 'api', rau: 'api' });
+  assert.deepEqual(reloaded.plans(), { claude: 'max20x', codex: 'pro', pi: 'api', grok: 'api', cursor: 'api', opencode: 'api', rau: 'api' });
   assert.deepEqual(reloaded.summary().providers.claude.limit, CLAUDE_PLANS.max20x);
 
   await store.flush();
@@ -392,22 +393,28 @@ test('pi records OpenRouter cost alongside tokens and replays it', async () => {
   await fs.rm(rootDir, { recursive: true, force: true });
 });
 
-test('grok and cursor record turns under the api-only plan', async () => {
+test('grok, cursor and opencode record turns under the api-only plan', async () => {
   const rootDir = await tmpRoot();
   const time = clock();
   const store = await createUsageStore({ rootDir, now: time.now }).init();
 
   store.record({ agent: 'grok', model: 'grok-4.6', inputTokens: 120, outputTokens: 40 });
   store.record({ agent: 'cursor', model: 'auto', inputTokens: 30, outputTokens: 10 });
+  store.record({ agent: 'opencode', model: 'anthropic/claude-sonnet-4', inputTokens: 50, outputTokens: 20 });
 
   const usage = store.summary();
   assert.deepEqual(usage.providers.grok.limit, GROK_PLANS.api);
   assert.deepEqual(usage.providers.cursor.limit, CURSOR_PLANS.api);
+  assert.deepEqual(usage.providers.opencode.limit, OPENCODE_PLANS.api);
   assert.equal(usage.providers.grok.session.percent, null);
   assert.equal(usage.providers.grok.session.weightedTokens, 160);
   assert.equal(usage.providers.cursor.byModel.auto.turns, 1);
+  assert.equal(usage.providers.opencode.session.percent, null);
+  assert.equal(usage.providers.opencode.session.weightedTokens, 70);
+  assert.equal(usage.providers.opencode.byModel['anthropic/claude-sonnet-4'].turns, 1);
   await assert.rejects(() => store.setPlan('grok', 'pro'), (error) => error.code === 'INVALID_PLAN');
   await assert.rejects(() => store.setPlan('cursor', 'plus'), (error) => error.code === 'INVALID_PLAN');
+  await assert.rejects(() => store.setPlan('opencode', 'pro'), (error) => error.code === 'INVALID_PLAN');
 
   await store.flush();
   await fs.rm(rootDir, { recursive: true, force: true });

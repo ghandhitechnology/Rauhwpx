@@ -49,6 +49,62 @@ test('API key setup no longer requires the desktop secret vault', async () => {
   assert.doesNotMatch(source, /SECRET_STORE_UNAVAILABLE/);
 });
 
+test('OpenCode health probes cannot inherit host config, state, auth, or permissions', async () => {
+  const source = await readSource('server.mjs');
+  const start = source.indexOf('const providerHealth = createProviderHealth({');
+  const end = source.indexOf('const usageStore =', start);
+  assert.notEqual(start, -1);
+  assert.ok(end > start);
+  const probeSetup = source.slice(start, end);
+  assert.match(probeSetup, /if \(agent === 'opencode'\)/);
+  assert.match(probeSetup, /OPENCODE_CONFIG_CONTENT: '\{\}'/);
+  assert.match(probeSetup, /delete env\.OPENCODE_CONFIG/);
+  assert.match(probeSetup, /delete env\.OPENCODE_DB/);
+  assert.match(probeSetup, /delete env\.OPENCODE_AUTH_CONTENT/);
+  assert.match(probeSetup, /delete env\.OPENCODE_PERMISSION/);
+});
+
+test('OpenCode setup status propagates auth and models into session selection', async () => {
+  const source = await readSource('server.mjs');
+  const statusStart = source.indexOf('async function agentSetupStatuses(');
+  const statusEnd = source.indexOf('let harnessUpdateTimer', statusStart);
+  assert.notEqual(statusStart, -1);
+  assert.ok(statusEnd > statusStart);
+  const status = source.slice(statusStart, statusEnd);
+  assert.match(status, /cliSetup\.status\('opencode'\)/);
+  assert.match(status, /cliSetup\.openCodeAuthPath\(\)/);
+  assert.match(status, /const opencode = withDetectedHarness\(openCodeSetup, health\.opencode\)/);
+  assert.match(status, /const previousOpenCodeAuthPath = sourceOpenCodeAuthPath/);
+  assert.match(status, /sourceOpenCodeAuthPath = openCodeAuthPathProbe \?\? undefined/);
+  assert.match(status, /const openCodeBecameAuthenticated = !openCodeWasAuthenticated && opencode\.authenticated/);
+  assert.match(status, /const openCodeCredentialsChanged = openCodeWasAuthenticated !== opencode\.authenticated\s*\|\| previousOpenCodeAuthPath !== sourceOpenCodeAuthPath/);
+  assert.match(status, /if \(openCodeCredentialsChanged\) refreshSessionCredentials\('opencode'\)/);
+  assert.match(status, /openCodeModelsSoon\(refresh\)/);
+  assert.match(status, /await openCodeModelsSoon\(true\)/);
+  assert.match(status, /openCodeModelIds = opencode\.authenticated \? \(refreshedOpenCodeModels \?\? openCodeModelIds\) : \[\]/);
+  assert.match(status, /opencode\.models = \[\.\.\.openCodeModelIds\]/);
+  assert.match(status, /\{ claude, codex, grok, cursor, opencode, pi:/);
+
+  const resolveStart = source.indexOf('function resolveModel(agent, requested)');
+  const resolveEnd = source.indexOf('function resolveEffort(', resolveStart);
+  assert.notEqual(resolveStart, -1);
+  assert.ok(resolveEnd > resolveStart);
+  const resolver = source.slice(resolveStart, resolveEnd);
+  assert.match(resolver, /if \(agent === 'opencode'\)/);
+  assert.match(resolver, /openCodeModelIds\.includes\(requested\)/);
+  assert.match(resolver, /process\.env\.RHWP_OPENCODE_MODEL/);
+  assert.match(resolver, /return openCodeModelIds\[0\]/);
+
+  const auth = agentSetupAuthHandler(source);
+  assert.match(auth, /if \(agent === 'opencode'\) sourceOpenCodeAuthPath = \(await cliSetup\.openCodeAuthPath\(\)\) \?\? undefined/);
+  assert.equal(source.match(/openCodeAuthPath: \(\) => sourceOpenCodeAuthPath/g)?.length, 2);
+  assert.equal(source.match(/openCodeProviderEnv: \(\) => cliSetup\.envFor\('opencode'\)/g)?.length, 2);
+  assert.doesNotMatch(source, /prepareOpenCodeHome/);
+  assert.match(source, /record\.agentSession\?\.backend\.refreshCredentials\?\.\(\)/);
+  assert.match(source, /job\.backend\?\.refreshCredentials\?\.\(\)/);
+  assert.match(source, /agentSetupStatuses\(record\.sessionId, msg\.refresh === true\)/);
+});
+
 test('Pi API-key frames preserve strict string validation at the manager boundary', async () => {
   const source = await readSource('server.mjs');
   assert.doesNotMatch(source, /piManager\.setApiKey\(String\(msg\.key/);

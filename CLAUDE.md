@@ -6,7 +6,7 @@ All code lives under `rhwp/` — run every command below from that directory unl
 
 ## What this is
 
-**rhwp** is a viewer/editor for the Korean HWP/HWPX document formats, written in Rust and compiled to WebAssembly, plus a web editor (`rhwp-studio`) with an AI agent sidebar (`rhwp-agent`) that lets a local Claude/Codex CLI read and edit the open document via MCP tools.
+**rhwp** is a viewer/editor for the Korean HWP/HWPX document formats, written in Rust and compiled to WebAssembly, plus a web editor (`rhwp-studio`) with an AI agent sidebar (`rhwp-agent`) that lets Claude, Codex, Pi, Grok, Cursor, and OpenCode read and edit the open document via MCP tools.
 
 ## Commands
 
@@ -58,7 +58,7 @@ TypeScript, no UI framework. `engine/` wraps the wasm module; `core/`, `view/`, 
 
 ### rhwp-agent (`rhwp-agent/`)
 
-Thin local Node router — no document logic. `server.mjs` is a WS hub (`/studio`, `/mcp`, `/healthz`); `agents/claude.mjs`, `agents/codex.mjs`, `agents/grok.mjs`, `agents/pi.mjs`, and `agents/cursor.mjs` spawn their CLIs; shared system briefs live in `agents/backend.mjs`. Each CLI spawns `mcp-stdio.mjs` as its MCP server, which forwards tool calls over WS to the hub and on to the studio tab. MCP tools are named `mcp__rhwp__<name>` and defined in `rhwp-agent/tools.mjs` (tests pin the count): semantic document reads/writes, an `apply_edits` batch write (1–32 edits under one expectedRevision, atomic rollback), and registry-generated `get_engine_edit_capabilities` / `apply_engine_edits` for complete autonomous engine mutation coverage, plus reference, planning, download, and browser tools. **Revision contract**: every read returns a `revision`, every write requires `expectedRevision`; mismatch → `REVISION_MISMATCH` with the current revision and recovery guidance; saving does not bump the revision. Coordinates are body-text based `sectionIdx`/`paraIdx`/`charOffset`, 0-based.
+Thin local Node router — no document logic. `server.mjs` is a WS hub (`/studio`, `/mcp`, `/healthz`); `agents/claude.mjs`, `agents/codex.mjs`, `agents/grok.mjs`, `agents/pi.mjs`, `agents/cursor.mjs`, and `agents/opencode.mjs` spawn their CLIs; shared system briefs live in `agents/backend.mjs`. Each CLI spawns `mcp-stdio.mjs` as its MCP server, which forwards tool calls over WS to the hub and on to the studio tab. MCP tools are named `mcp__rhwp__<name>` and defined in `rhwp-agent/tools.mjs` (tests pin the count): semantic document reads/writes, an `apply_edits` batch write (1–32 edits under one expectedRevision, atomic rollback), and registry-generated `get_engine_edit_capabilities` / `apply_engine_edits` for complete autonomous engine mutation coverage, plus reference, planning, download, and browser tools. **Revision contract**: every read returns a `revision`, every write requires `expectedRevision`; mismatch → `REVISION_MISMATCH` with the current revision and recovery guidance; saving does not bump the revision. Coordinates are body-text based `sectionIdx`/`paraIdx`/`charOffset`, 0-based.
 
 ### Other deliverables
 

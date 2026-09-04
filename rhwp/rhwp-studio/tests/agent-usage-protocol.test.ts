@@ -114,28 +114,34 @@ test('사용량·프로바이더 타입과 SidebarEvent 항목이 types.ts 에 �
   assert.match(types, /\| \{ type: 'usage-report'; usage: UsageSummary \}/);
 });
 
-test('프로바이더 상태·사용량 정규화는 여섯 프로바이더를 모두 채운다', () => {
-  for (const agent of ['rau', 'claude', 'codex', 'pi', 'grok', 'cursor']) {
+test('프로바이더 상태·사용량 정규화는 일곱 프로바이더를 모두 채운다', () => {
+  for (const agent of ['rau', 'claude', 'codex', 'pi', 'grok', 'cursor', 'opencode']) {
     assert.match(bridge, new RegExp(`${agent}: readProviderHealth\\(src\\['${agent}'\\]\\)`));
     assert.match(bridge, new RegExp(`${agent}: readProviderUsage\\(providers\\['${agent}'\\]\\)`));
     assert.match(bridge, new RegExp(`${agent}: readAgentSetupStatus\\(src\\['${agent}'\\], '${agent}'\\)`));
   }
-  // grok · cursor 는 사용량 기반 API 한 가지뿐이다.
+  // grok · cursor · opencode는 사용량 기반 API 한 가지뿐이다.
   assert.match(bridge, /grok: typeof plans\['grok'\] === 'string' \? plans\['grok'\] : 'api'/);
   assert.match(bridge, /cursor: typeof plans\['cursor'\] === 'string' \? plans\['cursor'\] : 'api'/);
+  assert.match(bridge, /opencode: typeof plans\['opencode'\] === 'string' \? plans\['opencode'\] : 'api'/);
   assert.match(types, /export type ApiOnlyUsagePlan = 'api';/);
   assert.match(types, /plans: Record<AgentName, string>;/);
   assert.match(types, /const USAGE_PLAN_GUARDS: Record<AgentName, \(value: unknown\) => boolean>/);
 });
 
-test('cursor 모델 목록은 agent-setup-status 를 타고 레지스트리로 들어간다', () => {
-  assert.match(types, /export type AgentName = 'claude' \| 'codex' \| 'pi' \| 'grok' \| 'cursor' \| 'rau';/);
+test('cursor와 opencode 모델 목록은 agent-setup-status를 타고 레지스트리로 들어간다', () => {
+  assert.match(types, /export type AgentName = 'claude' \| 'codex' \| 'pi' \| 'grok' \| 'cursor' \| 'opencode' \| 'rau';/);
   assert.match(types, /models\?: readonly string\[\];/);
   assert.match(bridge, /setCursorModels as setCursorModelRegistry/);
+  assert.match(bridge, /setOpenCodeModels as setOpenCodeModelRegistry/);
   assert.match(bridge, /if \(statuses\.cursor\.models\) setCursorModelRegistry\(statuses\.cursor\.models\);/);
+  assert.match(bridge, /if \(statuses\.opencode\.models\) setOpenCodeModelRegistry\(statuses\.opencode\.models\);/);
   // 레지스트리 갱신은 이벤트 발행보다 먼저 일어나야 한다.
   const handler = bridge.slice(bridge.indexOf("case 'agent-setup-status':"));
   assert.ok(
     handler.indexOf('setCursorModelRegistry') < handler.indexOf("this.emit({ type: 'agent-setup-status'"),
+  );
+  assert.ok(
+    handler.indexOf('setOpenCodeModelRegistry') < handler.indexOf("this.emit({ type: 'agent-setup-status'"),
   );
 });

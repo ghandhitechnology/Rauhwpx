@@ -27,6 +27,11 @@ import {
   flushCursorCredentialMirrors,
   prepareCursorHome,
 } from './agents/cursor.mjs';
+import {
+  createOpenCodeSession,
+  flushOpenCodeCredentialMirror,
+} from './agents/opencode.mjs';
+import { isOpenCodeModelId } from './agents/backend.mjs';
 import { generateChatTitle } from './agents/title.mjs';
 import {
   CHECKPOINT_TITLE_OVERALL_TIMEOUT_MS,
@@ -294,23 +299,28 @@ function claudeRuntimeEnv(isolatedHome) {
 // 설치 스크립트 등 무관한 자식 프로세스까지 상속받는 누수 지점이 된다.
 // 키는 auxSpawnProcess 가 해당 CLI 자식에게만 env 로 얹어 준다.
 process.env.PATH = `${cliSetup.binDir}${path.delimiter}${process.env.PATH ?? ''}`;
-const [initialClaudeSetup, initialCodexSetup, initialGrokSetup, initialCursorSetup] = await Promise.all([
+const [initialClaudeSetup, initialCodexSetup, initialGrokSetup, initialCursorSetup, initialOpenCodeSetup] = await Promise.all([
   cliSetup.status('claude'),
   cliSetup.status('codex'),
   cliSetup.status('grok'),
   cliSetup.status('cursor'),
+  cliSetup.status('opencode'),
 ]);
 let cliSetupStatus = {
   claude: initialClaudeSetup,
   codex: initialCodexSetup,
   grok: initialGrokSetup,
   cursor: initialCursorSetup,
+  opencode: initialOpenCodeSetup,
 };
 // grok 세션 시딩용 auth.json 원본 — 발견 순서는 cli-setup-manager 와 같다
 // (env GROK_HOME → ~/.grok → 관리형 홈, 심볼릭 링크 원본은 제외).
 let sourceGrokAuthPath = (await cliSetup.grokAuthPath()) ?? undefined;
+let sourceOpenCodeAuthPath = (await cliSetup.openCodeAuthPath()) ?? undefined;
 /** cursor-agent 가 보고한 모델 id 목록 — 인증된 setup-status 갱신 때 채워진다. */
 let cursorModelIds = [];
+/** OpenCode가 보고한 provider/model 목록. */
+let openCodeModelIds = [];
 /** pi 상태는 동기 경로(resolveModel/startSession)에서도 필요해 캐시해 둔다. */
 let piStatus = await piManager.status();
 let rauStatus = await rauManager.status();
@@ -325,7 +335,7 @@ if (piStatus.installed || rauStatus.installed) {
 const providerHealth = createProviderHealth({
   piBin: () => (piStatus.installed ? piManager.piBin : null),
   cliBin: (agent) => (cliSetupStatus[agent]?.installed ? cliSetup.binPath(agent) : null),
-  // Version probes can write provider config. Keep both Cursor and Claude in
+  // Version probes can write provider config. Keep Cursor, Claude, and OpenCode in
   // app-owned probe homes instead of inheriting a live profile override.
   probeEnv: (agent) => {
     if (agent === 'cursor') {
@@ -338,6 +348,31 @@ const providerHealth = createProviderHealth({
     if (agent === 'claude') {
       const probeHome = path.join(cliSetup.rootDir, 'claude-probe');
       return claudeRuntimeEnv(probeHome);
+    }
+    if (agent === 'opencode') {
+      const probeHome = cliSetup.openCodeProbeHomeDir;
+      const env = {
+        ...cliSetup.envFor('opencode'),
+        HOME: probeHome,
+        USERPROFILE: probeHome,
+        XDG_CONFIG_HOME: path.join(probeHome, '.config'),
+        XDG_DATA_HOME: path.join(probeHome, '.local', 'share'),
+        XDG_CACHE_HOME: path.join(probeHome, '.cache'),
+        XDG_STATE_HOME: path.join(probeHome, '.local', 'state'),
+        OPENCODE_CONFIG_DIR: path.join(probeHome, '.config', 'opencode'),
+        OPENCODE_CONFIG_CONTENT: '{}',
+        OPENCODE_DISABLE_PROJECT_CONFIG: '1',
+        OPENCODE_DISABLE_EXTERNAL_SKILLS: '1',
+        OPENCODE_DISABLE_CLAUDE_CODE: '1',
+        OPENCODE_DISABLE_DEFAULT_PLUGINS: '1',
+        OPENCODE_DISABLE_AUTOUPDATE: '1',
+        OPENCODE_DISABLE_LSP_DOWNLOAD: '1',
+      };
+      delete env.OPENCODE_CONFIG;
+      delete env.OPENCODE_DB;
+      delete env.OPENCODE_AUTH_CONTENT;
+      delete env.OPENCODE_PERMISSION;
+      return env;
     }
     return undefined;
   },
@@ -554,6 +589,12 @@ function refreshSessionCredentials(agent) {
     if (agent === 'claude') prepareClaudeHome(record.isolatedHome, sourceClaudeAuth);
     if (agent === 'grok') prepareGrokHome(record.grokHome, sourceGrokAuthPath);
     if (agent === 'cursor') prepareCursorHome(record.cursorHome, cliSetup.cursorSourceDir);
+    if (agent === 'opencode') {
+      record.agentSession?.backend.refreshCredentials?.();
+      for (const job of record.templateJobs.values()) {
+        job.backend?.refreshCredentials?.();
+      }
+    }
   }
 }
 
@@ -565,6 +606,7 @@ function flushProviderCredentialHomes(homes) {
     ['codex', () => flushCodexCredentialMirror(homes.codexHome)],
     ['grok', () => flushGrokCredentialMirror(homes.grokHome)],
     ['cursor', () => flushCursorCredentialMirrors(homes.cursorHome)],
+    ['opencode', () => flushOpenCodeCredentialMirror(homes.isolatedHome)],
   ];
   let settled = true;
   for (const [agent, flush] of flushes) {
@@ -579,7 +621,7 @@ function flushProviderCredentialHomes(homes) {
 }
 
 /** CLI 설치·인증을 cli-setup-manager 가 관리하는 에이전트들. */
-const CLI_SETUP_AGENTS = ['claude', 'codex', 'grok', 'cursor'];
+const CLI_SETUP_AGENTS = ['claude', 'codex', 'grok', 'cursor', 'opencode'];
 const KNOWN_AGENTS = new Set([...CLI_SETUP_AGENTS, 'pi', 'rau']);
 const OPENROUTER_AGENTS = new Set(['pi', 'rau']);
 const AGENT_INSTRUCTION_DRAFT_TTL_MS = 5 * 60 * 1000;
@@ -587,7 +629,13 @@ const AGENT_INSTRUCTION_DRAFT_TTL_MS = 5 * 60 * 1000;
 const CLAUDE_MODELS = new Set(['opus', 'fable', 'sonnet', 'haiku']);
 const CODEX_MODELS = new Set(['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol']);
 const GROK_MODELS = new Set(['grok-4.6', 'grok-4.5']);
-const DEFAULT_MODEL = { claude: 'sonnet', codex: 'gpt-5.6-sol', grok: 'grok-4.6', cursor: 'auto' };
+const DEFAULT_MODEL = {
+  claude: 'sonnet',
+  codex: 'gpt-5.6-sol',
+  grok: 'grok-4.6',
+  cursor: 'auto',
+  opencode: 'opencode/big-pickle',
+};
 const CLAUDE_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 const CLAUDE_EFFORTS_HAIKU = new Set(['low', 'medium', 'high']);
 const CODEX_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
@@ -602,6 +650,7 @@ const SESSION_FACTORIES = {
   rau: createPiSession,
   grok: createGrokSession,
   cursor: createCursorSession,
+  opencode: createOpenCodeSession,
 };
 
 function openRouterManager(agent) {
@@ -701,8 +750,8 @@ const CURSOR_MODELS_SOFT_DEADLINE_MS = 2_500;
  * 이번 응답은 직전 목록으로 넘어간다 — 뒤늦게 도착한 결과는 cursorModels 의 TTL
  * 캐시에 남아 다음 집계에서 즉시 쓰인다.
  */
-function cursorModelsSoon() {
-  const probe = cliSetup.cursorModels().catch(() => null);
+function cursorModelsSoon(refresh = false) {
+  const probe = cliSetup.cursorModels({ refresh }).catch(() => null);
   const deadline = new Promise((resolve) => {
     const timer = setTimeout(() => resolve(null), CURSOR_MODELS_SOFT_DEADLINE_MS);
     timer.unref?.();
@@ -710,16 +759,40 @@ function cursorModelsSoon() {
   return Promise.race([probe, deadline]);
 }
 
-async function agentSetupStatuses(ownerSessionId = null) {
+function openCodeModelsSoon(refresh = false) {
+  const probe = cliSetup.openCodeModels({ refresh }).catch(() => null);
+  const deadline = new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(null), CURSOR_MODELS_SOFT_DEADLINE_MS);
+    timer.unref?.();
+  });
+  return Promise.race([probe, deadline]);
+}
+
+async function agentSetupStatuses(ownerSessionId = null, refresh = false) {
+  const openCodeWasAuthenticated = cliSetupStatus.opencode?.authenticated === true;
+  const previousOpenCodeAuthPath = sourceOpenCodeAuthPath;
   // cursor 프로브(status + --list-models)는 CLI 를 스폰해 초 단위로 걸린다 —
   // 클로드/코덱스 설정 UI 가 그만큼 늦지 않도록 전부 병렬로 돌린다.
-  const [claudeSetup, codexSetup, grokSetup, cursorSetup, health, cursorModelProbe] = await Promise.all([
+  const [
+    claudeSetup,
+    codexSetup,
+    grokSetup,
+    cursorSetup,
+    openCodeSetup,
+    health,
+    cursorModelProbe,
+    openCodeModelProbe,
+    openCodeAuthPathProbe,
+  ] = await Promise.all([
     cliSetup.status('claude'),
     cliSetup.status('codex'),
     cliSetup.status('grok'),
     cliSetup.status('cursor'),
+    cliSetup.status('opencode'),
     providerHealth.check(),
-    cursorModelsSoon(),
+    cursorModelsSoon(refresh),
+    openCodeModelsSoon(refresh),
+    cliSetup.openCodeAuthPath(),
   ]);
   const withDetectedHarness = (status, provider) => {
     const available = provider?.available === true;
@@ -736,12 +809,23 @@ async function agentSetupStatuses(ownerSessionId = null) {
   const codex = withDetectedHarness(codexSetup, health.codex);
   const grok = withDetectedHarness(grokSetup, health.grok);
   const cursor = withDetectedHarness(cursorSetup, health.cursor);
+  const opencode = withDetectedHarness(openCodeSetup, health.opencode);
+  sourceOpenCodeAuthPath = openCodeAuthPathProbe ?? undefined;
+  const openCodeBecameAuthenticated = !openCodeWasAuthenticated && opencode.authenticated;
+  const openCodeCredentialsChanged = openCodeWasAuthenticated !== opencode.authenticated
+    || previousOpenCodeAuthPath !== sourceOpenCodeAuthPath;
+  if (openCodeCredentialsChanged) refreshSessionCredentials('opencode');
   // cursor 모델 목록은 인증된 CLI 에서만 나온다 — 실패해도 상태 응답은 막지 않는다.
   cursorModelIds = cursor.authenticated ? (cursorModelProbe ?? cursorModelIds) : [];
   cursor.models = [...cursorModelIds];
-  cliSetupStatus = { claude, codex, grok, cursor };
+  const refreshedOpenCodeModels = openCodeBecameAuthenticated && !openCodeModelProbe?.length
+    ? await openCodeModelsSoon(true)
+    : openCodeModelProbe;
+  openCodeModelIds = opencode.authenticated ? (refreshedOpenCodeModels ?? openCodeModelIds) : [];
+  opencode.models = [...openCodeModelIds];
+  cliSetupStatus = { claude, codex, grok, cursor, opencode };
   return withAuthRunStatus(
-    { claude, codex, grok, cursor, pi: piAgentSetupStatus(), rau: rauAgentSetupStatus() },
+    { claude, codex, grok, cursor, opencode, pi: piAgentSetupStatus(), rau: rauAgentSetupStatus() },
     typeof ownerSessionId === 'string' ? ownerSessionId : null,
   );
 }
@@ -773,6 +857,7 @@ async function runAutomaticHarnessUpdates() {
     codex: cliSetupStatus.codex?.version ?? null,
     grok: cliSetupStatus.grok?.version ?? null,
     cursor: cliSetupStatus.cursor?.version ?? null,
+    opencode: cliSetupStatus.opencode?.version ?? null,
     pi: piStatus.version ?? null,
   };
   try {
@@ -780,6 +865,7 @@ async function runAutomaticHarnessUpdates() {
     cliSetupStatus.codex = await cliSetup.automaticUpdate('codex', { canActivate });
     cliSetupStatus.grok = await cliSetup.automaticUpdate('grok', { canActivate });
     cliSetupStatus.cursor = await cliSetup.automaticUpdate('cursor', { canActivate });
+    cliSetupStatus.opencode = await cliSetup.automaticUpdate('opencode', { canActivate });
     piStatus = await mutateSharedNpmPrefix(() => piManager.automaticUpdate({ canActivate }));
     const statuses = await agentSetupStatuses();
     if (Object.values(statuses).some((status) => status.updateRequired)) {
@@ -790,6 +876,7 @@ async function runAutomaticHarnessUpdates() {
       || before.codex !== statuses.codex.version
       || before.grok !== statuses.grok.version
       || before.cursor !== statuses.cursor.version
+      || before.opencode !== statuses.opencode.version
       || before.pi !== statuses.pi.version;
     if (changed) {
       const providers = await providerHealth.check(true);
@@ -1068,6 +1155,21 @@ function resolveModel(agent, requested) {
     }
     return DEFAULT_MODEL.cursor;
   }
+  if (agent === 'opencode') {
+    if (isOpenCodeModelId(requested)
+      && (openCodeModelIds.length === 0 || openCodeModelIds.includes(requested))) {
+      return requested;
+    }
+    const configured = process.env.RHWP_OPENCODE_MODEL;
+    if (isOpenCodeModelId(configured)
+      && (openCodeModelIds.length === 0 || openCodeModelIds.includes(configured))) {
+      return configured;
+    }
+    if (openCodeModelIds.length > 0 && !openCodeModelIds.includes(DEFAULT_MODEL.opencode)) {
+      return openCodeModelIds[0];
+    }
+    return DEFAULT_MODEL.opencode;
+  }
   const tables = { claude: CLAUDE_MODELS, codex: CODEX_MODELS, grok: GROK_MODELS };
   const allowed = tables[agent];
   if (!allowed) throw unknownAgentError(agent);
@@ -1091,8 +1193,8 @@ function resolveEffort(agent, model, requested) {
     const preferred = piModelConfig(model, agent)?.defaultEffort;
     return efforts.includes(preferred) ? preferred : efforts[0];
   }
-  // cursor CLI 에는 reasoning effort 선택이 없다.
-  if (agent === 'cursor') return null;
+  // Cursor와 OpenCode ACP에는 공통 reasoning effort 선택이 없다.
+  if (agent === 'cursor' || agent === 'opencode') return null;
   const tables = {
     codex: CODEX_EFFORTS,
     grok: GROK_EFFORTS,
@@ -2199,13 +2301,18 @@ async function launchTemplateJob(record, job) {
     grokHome,
     grokAuthPath: sourceGrokAuthPath,
     cursorSourceDir: cliSetup.cursorSourceDir,
+    openCodeAuthPath: () => sourceOpenCodeAuthPath,
     codexBin: cliSetupStatus.codex?.installed ? cliSetup.binPath('codex') : 'codex',
     claudeBin: cliSetupStatus.claude?.installed ? cliSetup.binPath('claude') : 'claude',
     grokBin: cliSetupStatus.grok?.installed ? cliSetup.binPath('grok') : 'grok',
     cursorBin: cliSetupStatus.cursor?.installed ? cliSetup.binPath('cursor') : 'cursor-agent',
+    openCodeBin: cliSetupStatus.opencode?.installed ? cliSetup.binPath('opencode') : 'opencode',
     providerEnv: job.agent === 'claude'
       ? claudeRuntimeEnv(isolatedHome)
-      : (CLI_SETUP_AGENTS.includes(job.agent) ? cliSetup.envFor(job.agent) : {}),
+      : job.agent === 'opencode'
+        ? {}
+        : (CLI_SETUP_AGENTS.includes(job.agent) ? cliSetup.envFor(job.agent) : {}),
+    ...(job.agent === 'opencode' ? { openCodeProviderEnv: () => cliSetup.envFor('opencode') } : {}),
     onEvent: makeTemplateWorkerEventHandler(record, job),
     workflow: 'direct',
     phase: 'implementing',
@@ -2739,13 +2846,18 @@ async function startSession(
     grokHome: record.grokHome,
     grokAuthPath: sourceGrokAuthPath,
     cursorSourceDir: cliSetup.cursorSourceDir,
+    openCodeAuthPath: () => sourceOpenCodeAuthPath,
     codexBin: cliSetupStatus.codex?.installed ? cliSetup.binPath('codex') : 'codex',
     claudeBin: cliSetupStatus.claude?.installed ? cliSetup.binPath('claude') : 'claude',
     grokBin: cliSetupStatus.grok?.installed ? cliSetup.binPath('grok') : 'grok',
     cursorBin: cliSetupStatus.cursor?.installed ? cliSetup.binPath('cursor') : 'cursor-agent',
+    openCodeBin: cliSetupStatus.opencode?.installed ? cliSetup.binPath('opencode') : 'opencode',
     providerEnv: agent === 'claude'
       ? claudeRuntimeEnv(record.isolatedHome)
-      : (CLI_SETUP_AGENTS.includes(agent) ? cliSetup.envFor(agent) : {}),
+      : agent === 'opencode'
+        ? {}
+        : (CLI_SETUP_AGENTS.includes(agent) ? cliSetup.envFor(agent) : {}),
+    ...(agent === 'opencode' ? { openCodeProviderEnv: () => cliSetup.envFor('opencode') } : {}),
     onEvent: makeBackendEventHandler(record, generation),
     requestUserInput: (request, signal) => requestUserQuestion(record, request, {
       source: 'native',
@@ -3665,7 +3777,7 @@ async function handleStudioMessage(record, sock, msg) {
     }
     case 'agent-setup-status-request': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
-      void agentSetupStatuses(record.sessionId)
+      void agentSetupStatuses(record.sessionId, msg.refresh === true)
         .then((statuses) => replyToStudio(record, sock, { v: 1, type: 'agent-setup-status', requestId, statuses }))
         .catch((e) => sendAgentSetupError(record, sock, requestId, null, e));
       return;
@@ -3904,6 +4016,7 @@ async function handleStudioMessage(record, sock, msg) {
             cliSetupStatus[agent] = status;
             if (agent === 'codex') sourceCodexAuthPath = await findSourceCodexAuthPath();
             if (agent === 'grok') sourceGrokAuthPath = (await cliSetup.grokAuthPath()) ?? undefined;
+            if (agent === 'opencode') sourceOpenCodeAuthPath = (await cliSetup.openCodeAuthPath()) ?? undefined;
             refreshSessionCredentials(agent);
           });
       }
@@ -6062,7 +6175,7 @@ httpServer.listen(REQUESTED_PORT, '127.0.0.1', () => {
   hubPort = address.port;
   process.stdout.write(`RHWP_HUB_READY ${JSON.stringify({ port: hubPort, pid: process.pid, launchId: LAUNCH_ID })}\n`);
   log(`rhwp-agent hub listening on ws://127.0.0.1:${hubPort} (protocol v${PROTOCOL_VERSION})`);
-  log('claude/codex/pi/grok/cursor can be installed and authenticated from Studio settings');
+  log('claude/codex/pi/grok/cursor/opencode can be installed and authenticated from Studio settings');
   scheduleHarnessUpdates(HARNESS_UPDATE_INITIAL_DELAY_MS);
 });
 

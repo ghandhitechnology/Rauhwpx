@@ -36,7 +36,7 @@ export type AgentPrefsSaveResult =
 
 function isAgentName(value: unknown): value is AgentName {
   return value === 'claude' || value === 'codex' || value === 'pi'
-    || value === 'grok' || value === 'cursor' || value === 'rau';
+    || value === 'grok' || value === 'cursor' || value === 'opencode' || value === 'rau';
 }
 
 /** 첫 실행·빈 프로필의 기본 프로바이더. 저장된 Codex/BYOK 선택은 건드리지 않는다. */

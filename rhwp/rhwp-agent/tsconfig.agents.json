@@ -16,6 +16,7 @@
   "files": [
     "agents/backend.mjs",
     "agents/grok.mjs",
-    "agents/cursor.mjs"
+    "agents/cursor.mjs",
+    "agents/opencode.mjs"
   ]
 }

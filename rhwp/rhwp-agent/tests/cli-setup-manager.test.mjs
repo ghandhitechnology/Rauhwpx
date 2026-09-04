@@ -12,6 +12,7 @@ import {
   defaultCliSetupRoot,
   defaultCursorConfigDir,
   defaultCursorHomeDir,
+  defaultOpenCodeAuthPath,
 } from '../cli-setup-manager.mjs';
 import { replaceFileAtomically } from '../harness-update.mjs';
 import { API_KEY_MAX_BYTES, AUTH_CODE_MAX_BYTES } from '../input-bounds.mjs';
@@ -106,6 +107,21 @@ test('CLI setup root follows the app data directory on each platform', () => {
     path.win32.join('D:\\Profiles\\tester', 'AppData', 'Roaming', 'rhwp', 'cli'),
   );
   assert.equal(defaultCliSetupRoot({}, 'linux', '/home/tester'), '/home/tester/.local/share/rhwp/cli');
+});
+
+test('OpenCode auth follows XDG data with a home fallback', () => {
+  assert.equal(
+    defaultOpenCodeAuthPath({ XDG_DATA_HOME: '/var/app-data' }, 'linux', '/home/tester'),
+    '/var/app-data/opencode/auth.json',
+  );
+  assert.equal(
+    defaultOpenCodeAuthPath({}, 'darwin', '/Users/tester'),
+    '/Users/tester/.local/share/opencode/auth.json',
+  );
+  assert.equal(
+    defaultOpenCodeAuthPath({}, 'win32', 'C:\\Users\\tester'),
+    path.win32.join('C:\\Users\\tester', '.local', 'share', 'opencode', 'auth.json'),
+  );
 });
 
 test('Windows startup recovers setup config, fallback secrets, and managed Grok auth', async (t) => {
@@ -492,6 +508,304 @@ test('an existing global harness can be reauthenticated without an app-managed i
   assert.equal(calls.some((call) => call.argv.includes('--with-api-key')), false);
 
   await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('OpenCode reuses host auth while model discovery stays configuration-isolated', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-opencode-'));
+  const profile = path.join(rootDir, 'profile');
+  const authFile = path.join(profile, '.local', 'share', 'opencode', 'auth.json');
+  await fs.mkdir(path.dirname(authFile), { recursive: true });
+  await fs.writeFile(authFile, JSON.stringify({ opencode: { type: 'api', key: 'private-value' } }));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const calls = [];
+  const spawnProcess = (command, argv, options) => {
+    const proc = new FakeProcess();
+    calls.push({ command, argv, options });
+    queueMicrotask(() => {
+      if (argv[0] === 'models') {
+        proc.stdout.emit('data', 'opencode/big-pickle\nanthropic/claude-sonnet-4-5\nopenrouter/~anthropic/claude-fable-latest\nstatus text\nopencode/big-pickle\n');
+      }
+      proc.emit('close', 0, null);
+    });
+    return proc;
+  };
+  const manager = await createCliSetupManager({
+    rootDir,
+    homeDir: profile,
+    platform: 'linux',
+    spawnProcess,
+    baseEnv: {
+      PATH: '/usr/bin',
+      HOME: profile,
+      LANG: 'ko_KR.UTF-8',
+      HTTPS_PROXY: 'http://proxy.test:8443',
+      NO_PROXY: '127.0.0.1,localhost',
+      NODE_EXTRA_CA_CERTS: '/etc/test-ca.pem',
+      OPENCODE_API_KEY: 'ambient-open-code-key',
+      OPENROUTER_API_KEY: 'ambient-openrouter-key',
+      GOOGLE_GENERATIVE_AI_API_KEY: 'ambient-google-key',
+      GROQ_API_KEY: 'ambient-groq-key',
+      AWS_ACCESS_KEY_ID: 'ambient-aws-id',
+      AWS_SECRET_ACCESS_KEY: 'ambient-aws-secret',
+      AZURE_OPENAI_API_KEY: 'ambient-azure-key',
+      GITHUB_TOKEN: 'ambient-github-token',
+      OPENCODE_CONFIG: '/unsafe/host-config.json',
+      OPENCODE_CONFIG_DIR: '/unsafe/host-config',
+      OPENCODE_CONFIG_CONTENT: '{"plugin":["unsafe"]}',
+      OPENCODE_DB: '/unsafe/host.db',
+      OPENCODE_PERMISSION: 'allow',
+    },
+  }).init();
+
+  const status = await manager.status('opencode');
+  assert.equal(status.authenticated, true);
+  assert.equal(status.authMethod, 'oauth');
+  assert.equal(await manager.openCodeAuthPath(), authFile);
+  assert.deepEqual(await manager.openCodeModels(), [
+    'opencode/big-pickle',
+    'anthropic/claude-sonnet-4-5',
+    'openrouter/~anthropic/claude-fable-latest',
+  ]);
+  assert.deepEqual(await manager.openCodeModels(), [
+    'opencode/big-pickle',
+    'anthropic/claude-sonnet-4-5',
+    'openrouter/~anthropic/claude-fable-latest',
+  ]);
+
+  const modelCall = calls.find((call) => call.argv[0] === 'models');
+  assert.equal(modelCall.command, 'opencode');
+  assert.deepEqual(modelCall.argv, ['models']);
+  assert.equal(modelCall.options.env.HOME, manager.openCodeProbeHomeDir);
+  assert.equal(modelCall.options.env.XDG_DATA_HOME, path.join(manager.openCodeProbeHomeDir, '.local', 'share'));
+  assert.equal(modelCall.options.env.OPENCODE_CONFIG_CONTENT, '{}');
+  assert.equal(modelCall.options.env.OPENCODE_CONFIG, undefined);
+  assert.equal(modelCall.options.env.OPENCODE_DB, undefined);
+  assert.equal(modelCall.options.env.OPENCODE_PERMISSION, undefined);
+  assert.equal(modelCall.options.env.OPENCODE_API_KEY, undefined);
+  assert.equal(modelCall.options.env.OPENROUTER_API_KEY, undefined);
+  assert.equal(modelCall.options.env.GOOGLE_GENERATIVE_AI_API_KEY, undefined);
+  assert.equal(modelCall.options.env.GROQ_API_KEY, undefined);
+  assert.equal(modelCall.options.env.AWS_ACCESS_KEY_ID, undefined);
+  assert.equal(modelCall.options.env.AWS_SECRET_ACCESS_KEY, undefined);
+  assert.equal(modelCall.options.env.AZURE_OPENAI_API_KEY, undefined);
+  assert.equal(modelCall.options.env.GITHUB_TOKEN, undefined);
+  assert.equal(modelCall.options.env.LANG, 'ko_KR.UTF-8');
+  assert.equal(modelCall.options.env.HTTPS_PROXY, 'http://proxy.test:8443');
+  assert.equal(modelCall.options.env.NO_PROXY, '127.0.0.1,localhost');
+  assert.equal(modelCall.options.env.NODE_EXTRA_CA_CERTS, '/etc/test-ca.pem');
+  assert.equal(modelCall.options.env.OPENCODE_DISABLE_PROJECT_CONFIG, '1');
+  assert.equal(modelCall.options.env.OPENCODE_DISABLE_DEFAULT_PLUGINS, '1');
+  assert.match(modelCall.options.env.OPENCODE_AUTH_CONTENT, /private-value/);
+  assert.equal(calls.filter((call) => call.argv[0] === 'models').length, 1);
+});
+
+test('OpenCode rejects malformed and remote-config host auth before reuse', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-opencode-invalid-auth-'));
+  const profile = path.join(rootDir, 'profile');
+  const authFile = path.join(profile, '.local', 'share', 'opencode', 'auth.json');
+  await fs.mkdir(path.dirname(authFile), { recursive: true });
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const manager = await createCliSetupManager({
+    rootDir,
+    homeDir: profile,
+    baseEnv: { PATH: '/usr/bin', HOME: profile },
+  }).init();
+
+  const rejected = [
+    { junk: true },
+    { opencode: { type: 'api', key: '' } },
+    { opencode: { type: 'oauth', access: 'access', refresh: '', expires: 0 } },
+    { opencode: { type: 'oauth', access: 'access', refresh: 'refresh', expires: -1 } },
+    { opencode: { type: 'wellknown', key: 'key', token: 'token' } },
+    {
+      opencode: { type: 'api', key: 'valid-key' },
+      remote: { type: 'wellknown', key: 'key', token: 'token' },
+    },
+  ];
+  for (const auth of rejected) {
+    await fs.writeFile(authFile, JSON.stringify(auth));
+    assert.equal(await manager.openCodeAuthPath(), null);
+    assert.equal((await manager.status('opencode')).authenticated, false);
+  }
+
+  await fs.writeFile(authFile, JSON.stringify({
+    anthropic: { type: 'oauth', access: 'access', refresh: 'refresh', expires: 0 },
+  }));
+  assert.equal(await manager.openCodeAuthPath(), authFile);
+  assert.equal((await manager.status('opencode')).authenticated, true);
+});
+
+test('a successful OpenCode API login invalidates the pre-login model cache', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-opencode-models-login-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  let authenticated = false;
+  let modelCalls = 0;
+  const spawnProcess = (_command, argv) => {
+    const proc = new FakeProcess();
+    queueMicrotask(() => {
+      if (argv[0] === 'models') {
+        modelCalls += 1;
+        if (!authenticated) {
+          proc.stderr.emit('data', 'authentication required\n');
+          proc.emit('close', 1, null);
+          return;
+        }
+        proc.stdout.emit('data', 'anthropic/claude-sonnet-4-5\nopencode/big-pickle\n');
+      }
+      proc.emit('close', 0, null);
+    });
+    return proc;
+  };
+  const manager = await createCliSetupManager({
+    rootDir,
+    spawnProcess,
+    secretStore: createMemorySecretStore(),
+    baseEnv: { PATH: '/usr/bin' },
+    homeDir: path.join(rootDir, 'no-home'),
+  }).init();
+
+  assert.deepEqual(await manager.openCodeModels(), []);
+  authenticated = true;
+  assert.deepEqual(await manager.openCodeModels(), [], 'the failed probe remains cached before login');
+
+  await manager.authenticate('opencode', 'api-key', 'open-code-secret');
+  assert.deepEqual(await manager.openCodeModels(), [
+    'anthropic/claude-sonnet-4-5',
+    'opencode/big-pickle',
+  ]);
+  assert.equal(modelCalls, 2);
+});
+
+test('an explicit OpenCode refresh bypasses a failed pre-login model cache', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-opencode-models-refresh-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  let authenticated = false;
+  let modelCalls = 0;
+  const modelArgv = [];
+  const manager = await createCliSetupManager({
+    rootDir,
+    homeDir: path.join(rootDir, 'profile'),
+    baseEnv: { PATH: '/usr/bin' },
+    spawnProcess: (_command, argv) => {
+      const proc = new FakeProcess();
+      queueMicrotask(() => {
+        if (argv[0] === 'models') {
+          modelCalls += 1;
+          modelArgv.push([...argv]);
+          if (!authenticated) {
+            proc.emit('close', 1, null);
+            return;
+          }
+          proc.stdout.emit('data', 'opencode/big-pickle\n');
+        }
+        proc.emit('close', 0, null);
+      });
+      return proc;
+    },
+  }).init();
+
+  assert.deepEqual(await manager.openCodeModels(), []);
+  authenticated = true;
+  assert.deepEqual(await manager.openCodeModels(), []);
+  assert.deepEqual(await manager.openCodeModels({ refresh: true }), ['opencode/big-pickle']);
+  assert.equal(modelCalls, 2);
+  assert.deepEqual(modelArgv, [['models'], ['models', '--refresh']]);
+});
+
+test('OpenCode API-key setup is app-scoped and OAuth points to the provider login', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-opencode-key-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const secretStore = createMemorySecretStore();
+  let spawnCount = 0;
+  const manager = await createCliSetupManager({
+    rootDir,
+    secretStore,
+    baseEnv: { PATH: '/usr/bin', OPENAI_API_KEY: 'must-not-leak' },
+    spawnProcess: () => {
+      spawnCount += 1;
+      const proc = new FakeProcess();
+      queueMicrotask(() => proc.emit('close', 1, null));
+      return proc;
+    },
+  }).init();
+
+  const status = await manager.authenticate('opencode', 'api-key', 'open-code-secret');
+  assert.equal(status.authenticated, true);
+  assert.equal(status.authMethod, 'api-key');
+  assert.equal(status.keyTail, 'cret');
+  assert.equal(manager.envFor('opencode').OPENCODE_API_KEY, 'open-code-secret');
+  assert.equal(manager.envFor('opencode').OPENAI_API_KEY, undefined);
+  assert.equal(manager.envFor('codex').OPENCODE_API_KEY, undefined);
+  assert.equal(await secretStore.get('rhwp.opencode.api-key'), 'open-code-secret');
+  assert.doesNotMatch(await fs.readFile(path.join(rootDir, 'config.json'), 'utf8'), /open-code-secret/);
+
+  await assert.rejects(
+    manager.authenticate('opencode', 'oauth'),
+    { code: 'AGENT_AUTH_OAUTH_UNSUPPORTED' },
+  );
+  assert.equal(spawnCount, 0);
+});
+
+test('OpenCode installs from the official npm package', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-opencode-install-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const prefixDir = path.join(rootDir, 'prefix');
+  const { calls, spawnProcess } = fakeSpawner(prefixDir);
+  const manager = await createCliSetupManager({
+    rootDir,
+    spawnProcess,
+    npmCommand: 'npm',
+    baseEnv: { PATH: '/usr/bin' },
+  }).init();
+
+  const status = await manager.install('opencode');
+  assert.equal(status.installed, true);
+  assert.equal(status.version, '1.2.3');
+  assert.deepEqual(calls[0].argv, [
+    'install', '--prefix', prefixDir, '--no-fund', '--no-audit', 'opencode-ai',
+  ]);
+  assert.equal(manager.binPath('opencode'), path.join(prefixDir, 'node_modules', '.bin', 'opencode'));
+});
+
+test('installing OpenCode invalidates a cached empty model catalog', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-opencode-install-models-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const prefixDir = path.join(rootDir, 'prefix');
+  let installed = false;
+  let modelCalls = 0;
+  const spawnProcess = (command, argv) => {
+    const proc = new FakeProcess();
+    queueMicrotask(() => {
+      if (argv[0] === 'models') {
+        modelCalls += 1;
+        if (installed) proc.stdout.emit('data', 'anthropic/claude-sonnet-4-5\n');
+        proc.emit('close', installed ? 0 : 1, null);
+        return;
+      }
+      if (command === 'npm') {
+        const packageDir = path.join(prefixDir, 'node_modules', 'opencode-ai');
+        mkdirSync(packageDir, { recursive: true });
+        writeFileSync(path.join(packageDir, 'package.json'), JSON.stringify({
+          name: 'opencode-ai', version: '1.2.3',
+        }));
+        installed = true;
+      }
+      proc.emit('close', 0, null);
+    });
+    return proc;
+  };
+  const manager = await createCliSetupManager({
+    rootDir,
+    spawnProcess,
+    npmCommand: 'npm',
+    baseEnv: { PATH: '/usr/bin' },
+    homeDir: path.join(rootDir, 'profile'),
+  }).init();
+
+  assert.deepEqual(await manager.openCodeModels(), []);
+  await manager.install('opencode');
+  assert.deepEqual(await manager.openCodeModels(), ['anthropic/claude-sonnet-4-5']);
+  assert.equal(modelCalls, 2);
 });
 
 test('Codex OAuth uses device auth on every platform, never a localhost callback', async () => {

@@ -1,6 +1,6 @@
 # 기여하기
 
-Rauhwpx는 HWP/HWPX 편집기입니다. WebAssembly로 컴파일된 Rust 엔진, `rhwp-studio` 웹 편집기, Claude/Codex/Pi용 로컬 `rhwp-agent` 허브, Electron 데스크톱 셸로 구성됩니다. [edwardkim/rhwp](https://github.com/edwardkim/rhwp)의 포크입니다.
+Rauhwpx는 HWP/HWPX 편집기입니다. WebAssembly로 컴파일된 Rust 엔진, `rhwp-studio` 웹 편집기, Claude, Codex, Pi, Grok, Cursor, OpenCode용 로컬 `rhwp-agent` 허브, Electron 데스크톱 셸로 구성됩니다. [edwardkim/rhwp](https://github.com/edwardkim/rhwp)의 포크입니다.
 
 대부분의 코드는 `rhwp/`에 있습니다. 일반적인 기여는 엔진 충실도, 편집기 동작, 에이전트 브리지, 데스크톱 패키징, 문서입니다. 라운드트립 충실도는 핵심 계약입니다. 통합 테스트는 `rhwp/samples/`의 실제 문서(HWP/HWPX 약 430개)를 로드합니다.
 
