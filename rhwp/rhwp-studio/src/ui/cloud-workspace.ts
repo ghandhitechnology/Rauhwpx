@@ -114,7 +114,14 @@ export function createCloudWorkspace({
   inputSink.spellcheck = false;
   canvas.append(image, inputSink);
   viewport.appendChild(canvas);
-  root.append(toolbar, viewport);
+  const recoveredInput = doc.createElement('textarea');
+  recoveredInput.hidden = true;
+  recoveredInput.value = '';
+  const recoveryNotes = new Map<string, string>();
+  recoveredInput.readOnly = true;
+  recoveredInput.setAttribute('aria-label', '전달 여부를 확인하지 못한 입력, 복사해서 보관하세요');
+  recoveredInput.style.cssText = 'width:100%;min-height:64px;box-sizing:border-box;resize:vertical';
+  root.append(toolbar, recoveredInput, viewport);
 
   const decode = decodeFrame ?? (async (url: string) => {
     const candidate = doc.createElement('img');
@@ -218,7 +225,18 @@ export function createCloudWorkspace({
     let chunk = '';
     let chunkBytes = 0;
     const flush = (): void => {
-      if (chunk) void sendInput({ kind: 'text', text: chunk }).catch(() => {});
+      if (chunk) {
+        const attempted = chunk;
+        const attemptedSession = contextSessionId;
+        void sendInput({ kind: 'text', text: attempted }).catch(() => {
+          if (!attemptedSession) return;
+          recoveryNotes.set(attemptedSession, (recoveryNotes.get(attemptedSession) ?? '') + attempted);
+          if (contextSessionId !== attemptedSession) return;
+          recoveredInput.hidden = false;
+          recoveredInput.value = recoveryNotes.get(attemptedSession)!;
+          status.textContent = '입력 적용 여부를 확인하지 못했습니다. 아래 텍스트를 복사하고 문서와 비교해 주세요.';
+        });
+      }
       chunk = '';
       chunkBytes = 0;
     };
@@ -407,7 +425,7 @@ export function createCloudWorkspace({
         break;
       case 'connected':
         if (retainedFrame(sessionId)) {
-          publish({ kind: 'live', sessionId, frame: retainedFrame(sessionId)! }, 'Cloud 화면 연결됨');
+          publish({ kind: 'stalled', sessionId, lastFrame: retainedFrame(sessionId) }, 'Cloud 연결 복구됨 · 최신 화면 기다리는 중');
         } else {
           publish({ kind: 'connecting', sessionId }, 'Cloud 화면 연결됨 · 첫 화면 기다리는 중');
         }
@@ -500,8 +518,8 @@ export function createCloudWorkspace({
     const point = displayPoint(event);
     if (!point) return;
     event.preventDefault();
-    const deltaX = Math.max(-32_768, Math.min(32_768, Math.round(event.deltaX)));
-    const deltaY = Math.max(-32_768, Math.min(32_768, Math.round(event.deltaY)));
+    const deltaX = Math.max(-32_768, Math.min(32_768, Math.round(event.deltaX * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? viewport.clientWidth : 1))));
+    const deltaY = Math.max(-32_768, Math.min(32_768, Math.round(event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? viewport.clientHeight : 1))));
     void sendInput({ kind: 'wheel', ...point, deltaX, deltaY }).catch(() => {});
   }, { passive: false });
   inputSink.addEventListener('keydown', (event) => {
@@ -549,6 +567,8 @@ export function createCloudWorkspace({
         openingSessionId = null;
         closeConnection();
         clearFrame();
+        recoveredInput.value = nextContextSessionId ? recoveryNotes.get(nextContextSessionId) ?? '' : '';
+        recoveredInput.hidden = !recoveredInput.value;
         contextSessionId = nextContextSessionId;
       }
       if (!nextVisible) {

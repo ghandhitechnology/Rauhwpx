@@ -270,3 +270,29 @@ test('metadata subscriptions replay only the latest frame and cleanup is idempot
   store.closeAll();
   assert.deepEqual(store.snapshot(), { sessions: 0, streams: [] });
 });
+
+test('input batches are atomic and return application receipts with idempotent replay', async () => {
+  const store = new DisplayFrameStore();
+  const stream = store.openStream({ sessionId: 'session-a', workerId: 'worker-a', width: 1280, height: 800 });
+  store.setInterest('session-a', stream.streamId, 'device-a', 'viewer-a', true);
+  const args = ['session-a', stream.streamId, 'device-a', 'viewer-a'];
+  assert.throws(() => store.sendInputs(...args, [
+    { sequence: 1, event: { kind: 'text', text: 'accepted only with whole batch' } },
+    { sequence: 2, event: { kind: 'invalid' } },
+  ]));
+  const events = [
+    { sequence: 1, event: { kind: 'text', text: 'saved once' } },
+    { sequence: 2, event: { kind: 'key', action: 'up', key: 'Shift' } },
+  ];
+  store.sendInputs(...args, events);
+  const demand = await store.waitForDemand('session-a', 'worker-a', stream.streamId, 0);
+  assert.equal(demand.inputEvents.length, 2);
+  const pending = store.waitForInputs(...args, [1, 2]);
+  store.acknowledgeInputs('session-a', 'worker-a', stream.streamId, demand.inputEvents.map((entry, index) => ({ version: entry.version, ok: index === 0, error: 'key failed' })));
+  assert.deepEqual(await pending, [{ sequence: 1, applied: true }, { sequence: 2, applied: false, error: 'key failed' }]);
+  store.sendInputs(...args, events);
+  const sealed = store.sealInput('session-a', 'worker-a', stream.streamId, 0);
+  assert.equal(sealed.inputEvents.length, 2);
+  assert.throws(() => store.sendInputs(...args, [{ sequence: 3, event: { kind: 'text', text: 'too late' } }]), { code: 'DISPLAY_INPUT_SEALED' });
+  store.closeAll();
+});

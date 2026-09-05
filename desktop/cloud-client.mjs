@@ -1,5 +1,6 @@
 import { createHash, createPublicKey, randomBytes, randomUUID, verify } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
+import { readStreamChunk } from './cloud-stream-reader.mjs';
 import {
   CLOUD_SERVER_MODES,
   normalizeCloudEndpoint,
@@ -1145,6 +1146,22 @@ export class CloudClient {
     return parseDisplayInterest(result, { streamId, active });
   }
 
+  async sendDisplayInputs(sessionId, streamId, viewerId, events, options = {}) {
+    const result = await this.#request(`/v1/sessions/${encodeURIComponent(sessionId)}/display/input`, {
+      method: 'POST', body: { streamId, viewerId, events }, signal: options.signal,
+      timeoutMs: 3_500, retryAttempts: 1,
+    });
+    if (result?.streamId !== streamId || result?.viewerId !== viewerId
+      || !Array.isArray(result.results) || result.results.length !== events.length
+      || result.results.some((receipt, index) => receipt.sequence !== events[index].sequence || typeof receipt.applied !== 'boolean')) {
+      throw new CloudHttpError('Cloud input acknowledgement is invalid', { code: 'DISPLAY_INPUT_INVALID', retryable: false });
+    }
+    const failed = result.results.find((receipt) => !receipt.applied);
+    if (failed) throw new CloudHttpError(failed.error || 'Cloud input could not be applied', {
+      code: 'DISPLAY_INPUT_FAILED', details: result.results, retryable: false,
+    });
+  }
+
   async sendDisplayInput(sessionId, streamId, viewerId, sequence, event, options = {}) {
     const result = await this.#request(`/v1/sessions/${encodeURIComponent(sessionId)}/display/input`, {
       method: 'POST',
@@ -1167,6 +1184,7 @@ export class CloudClient {
   async readDisplayFrames(sessionId, capability, after = 0, {
     signal,
     onMetadata = () => {},
+    onFrame,
     nonStreamTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
   } = {}) {
     if (capability?.kind !== 'available' || capability.sessionId !== sessionId) {
@@ -1175,7 +1193,8 @@ export class CloudClient {
       });
     }
     const pathname = `/v1/sessions/${encodeURIComponent(sessionId)}/display/frames`
-      + `?streamId=${encodeURIComponent(capability.streamId)}&after=${encodeURIComponent(after)}`;
+      + `?streamId=${encodeURIComponent(capability.streamId)}&after=${encodeURIComponent(after)}`
+      + (onFrame ? '&inline=1' : '');
     const response = await this.#rawRequest(pathname, {
       headers: { accept: 'text/event-stream' },
       signal,
@@ -1204,7 +1223,7 @@ export class CloudClient {
     let lastSequence = after;
     try {
       for (;;) {
-        const { done, value } = await reader.read();
+        const { done, value } = await readStreamChunk(reader);
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
         if (buffer.length > MAX_JSON_BYTES) {
@@ -1222,13 +1241,28 @@ export class CloudClient {
               code: 'SSE_PAYLOAD_INVALID', retryable: false,
             });
           }
+          const encoded = data?.payload?.bytesBase64;
+          if (encoded !== undefined) {
+            if (typeof onFrame !== 'function' || typeof encoded !== 'string'
+              || encoded.length > Math.ceil(MAX_DISPLAY_FRAME_BYTES / 3) * 4) {
+              throw new CloudHttpError('Cloud inline frame is invalid', { code: 'DISPLAY_FRAME_INTEGRITY_FAILED' });
+            }
+            delete data.payload.bytesBase64;
+          }
           const metadata = parseDisplayFrameEnvelope(data, capability, verifiedSequence, frame.event);
           if (verifiedSequence <= lastSequence) continue;
           lastSequence = verifiedSequence;
-          await onMetadata(metadata);
+          if (encoded !== undefined) {
+            const bytes = Buffer.from(encoded, 'base64');
+            if (bytes.length !== metadata.byteLength || bytes.toString('base64') !== encoded || digest(bytes) !== metadata.sha256) {
+              throw new CloudHttpError('Cloud inline frame failed integrity verification', { code: 'DISPLAY_FRAME_INTEGRITY_FAILED' });
+            }
+            await onFrame({ kind: 'frame', ...metadata, bytes: new Uint8Array(bytes) });
+          } else await onMetadata(metadata);
         }
       }
     } finally {
+      void reader.cancel().catch(() => {});
       reader.releaseLock();
     }
     return lastSequence;
@@ -1431,7 +1465,7 @@ export class CloudClient {
     let lastSequence = after;
     try {
       for (;;) {
-        const { done, value } = await reader.read();
+        const { done, value } = await readStreamChunk(reader);
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
         if (buffer.length > MAX_JSON_BYTES) throw new CloudHttpError('Cloud event frame is too large');
@@ -1453,6 +1487,7 @@ export class CloudClient {
         }
       }
     } finally {
+      void reader.cancel().catch(() => {});
       reader.releaseLock();
     }
     return lastSequence;
@@ -1470,7 +1505,11 @@ export class CloudClient {
       try {
         await onReconnect();
         if (signal?.aborted) break;
-        sequence = await this.readEvents(sessionId, sequence, { signal, onEvent });
+        sequence = await this.readEvents(sessionId, sequence, { signal, onEvent: async (event) => {
+          await onEvent(event);
+          sequence = event.sequence;
+          failures = 0;
+        } });
         failures = 0;
       } catch (error) {
         if (signal?.aborted || error?.name === 'AbortError') break;
@@ -1697,7 +1736,8 @@ export class CloudClient {
     } : null;
     if (proofContext) headers['x-rauhwpx-request-nonce'] = proofContext.nonce;
     const timeoutMs = options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
-    const controller = timeoutMs > 0 ? new AbortController() : null;
+    const requestTimeoutMs = options.stream === true && timeoutMs === 0 ? 15_000 : timeoutMs;
+    const controller = requestTimeoutMs > 0 ? new AbortController() : null;
     const abort = controller ? () => controller.abort(options.signal?.reason) : null;
     if (abort) {
       options.signal?.addEventListener('abort', abort, { once: true });
@@ -1708,11 +1748,11 @@ export class CloudClient {
       retryable: true,
     });
     let timedOut = false;
-    const timeout = timeoutMs > 0
+    const timeout = requestTimeoutMs > 0
       ? setTimeout(() => {
         timedOut = true;
         controller.abort(timeoutError);
-      }, timeoutMs)
+      }, requestTimeoutMs)
       : null;
     let response;
     try {
@@ -1720,10 +1760,10 @@ export class CloudClient {
         method,
         headers,
         body,
-        // Streaming requests have no request timeout. Passing the caller's
-        // signal directly keeps cancellation attached after headers arrive and
-        // throughout a blocked response-body read without a relay to clean up.
-        signal: controller?.signal ?? options.signal,
+        // The timer bounds header arrival. The combined signal retains caller
+        // cancellation for the body after that timer and the relay are removed.
+        signal: controller && options.signal ? AbortSignal.any([controller.signal, options.signal])
+          : controller?.signal ?? options.signal,
         cache: 'no-store',
       });
       const expectedDigest = proofContext ? verifyResponseProof(profile, response, proofContext) : null;

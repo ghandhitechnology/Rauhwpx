@@ -896,3 +896,22 @@ function clientTestParseCapability(value) {
 function clientTestParseMetadata(value) {
   return parseDisplayFrameMetadata(value, validDisplayCapability());
 }
+
+test('signed inline JPEG frames need no follow-up GET and reject mismatched bytes', async () => {
+  const bytes = Buffer.from('inline-frame');
+  let calls = 0;
+  const client = await clientWith((url, options) => {
+    calls++;
+    assert.match(url, /inline=1/);
+    return signedSse(url, options, { sessionId: SESSION_ID, type: 'display.frame', seq: 1, payload: { ...metadata(1, STREAM_ID, bytes), bytesBase64: bytes.toString('base64') } });
+  });
+  const frames = [];
+  await client.readDisplayFrames(SESSION_ID, capability(), 0, { onFrame: (frame) => frames.push(frame), onMetadata: () => assert.fail('inline bytes must bypass downloads') });
+  assert.equal(calls, 1);
+  assert.equal(frames.length, 1);
+  assert.deepEqual(Buffer.from(frames[0].bytes), bytes);
+  const corrupt = await clientWith((url, options) => signedSse(url, options, {
+    sessionId: SESSION_ID, type: 'display.frame', seq: 1, payload: { ...metadata(1, STREAM_ID, bytes), bytesBase64: Buffer.from('other-frame!').toString('base64') },
+  }));
+  await assert.rejects(corrupt.readDisplayFrames(SESSION_ID, capability(), 0, { onFrame: () => assert.fail('corrupt frame delivered') }));
+});

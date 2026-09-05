@@ -804,6 +804,13 @@ export async function createStudioHarness({
           });
         }
       },
+      async documentRevision() {
+        assertBrowserHealthy();
+        return withTimeout(
+          page.evaluate((secret) => window.rauhwpxCloudRuntime.status(secret).documentRevision, bootstrap),
+          5_000, 'DOCUMENT_STATUS_TIMEOUT', 'Cloud document status timed out',
+        );
+      },
       async interact(input) {
         assertBrowserHealthy();
         if (input?.kind === 'pointer') {

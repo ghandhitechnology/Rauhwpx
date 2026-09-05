@@ -250,7 +250,9 @@ export function createCloudHttpHandler({
         const authenticatedWorkerId = workerIdentity(session);
         if (request.method === 'POST' && action === '/heartbeat') {
           const ok = sessionStore.heartbeat(sessionId);
-          const lease = await raucloudLease?.heartbeat?.();
+          // Broker latency must not hold the local worker heartbeat open.
+          void raucloudLease?.heartbeat?.().catch((error) => logger?.error('broker.heartbeat_failed', { message: error.message }));
+          const lease = raucloudLease?.status?.();
           json(response, 200, { ok, ...(lease?.mustStop === undefined ? {} : { mustStop: lease.mustStop }) });
           return;
         }
@@ -266,6 +268,17 @@ export function createCloudHttpHandler({
             width,
             height,
           }));
+          return;
+        }
+        const workerInput = action.match(/^\/display\/streams\/([^/]+)\/(input-ack|input-seal)$/);
+        if (request.method === 'POST' && workerInput) {
+          if (!displayFrameStore) throw new CloudError('DISPLAY_UNSUPPORTED', 'Display input is not supported', 501);
+          const body = await readJson(request);
+          const streamId = decodeURIComponent(workerInput[1]);
+          const result = workerInput[2] === 'input-ack'
+            ? displayFrameStore.acknowledgeInputs(sessionId, authenticatedWorkerId, streamId, body.results)
+            : displayFrameStore.sealInput(sessionId, authenticatedWorkerId, streamId, positiveSequence(body.after, 'after'));
+          json(response, 200, result);
           return;
         }
         const workerDemand = action.match(/^\/display\/streams\/([^/]+)\/demand$/);
@@ -320,13 +333,20 @@ export function createCloudHttpHandler({
         }
         if (request.method === 'POST' && action === '/events') {
           const body = await readJson(request);
-          if (typeof body.type !== 'string' || !/^[a-z][a-z0-9._-]{0,63}$/.test(body.type)) {
-            throw new CloudError('INVALID_REQUEST', 'event type is invalid');
+          const events = body.events ?? [body];
+          if (!Array.isArray(events) || events.length < 1 || events.length > 32) {
+            throw new CloudError('INVALID_REQUEST', 'Worker event batch must contain 1 to 32 events');
           }
-          if (Buffer.byteLength(JSON.stringify(body.payload ?? {})) > MAX_EVENT_PAYLOAD_BYTES) {
-            throw new CloudError('EVENT_TOO_LARGE', 'Worker event payload exceeds 64 KiB', 413);
+          for (const event of events) {
+            if (typeof event?.type !== 'string' || !/^[a-z][a-z0-9._-]{0,63}$/.test(event.type)) {
+              throw new CloudError('INVALID_REQUEST', 'event type is invalid');
+            }
+            if (Buffer.byteLength(JSON.stringify(event.payload ?? {})) > MAX_EVENT_PAYLOAD_BYTES) {
+              throw new CloudError('EVENT_TOO_LARGE', 'Worker event payload exceeds 64 KiB', 413);
+            }
           }
-          json(response, 201, sessionStore.appendEvent(sessionId, body.type, body.payload ?? {}));
+          const saved = sessionStore.appendEvents(sessionId, events);
+          json(response, 201, body.events ? { events: saved } : saved[0]);
           return;
         }
         if (request.method === 'GET' && action === '/messages') {
@@ -465,7 +485,10 @@ export function createCloudHttpHandler({
             outcome: body.outcome,
             boundaryOperationId: body.boundaryOperationId ?? null,
           });
-          await raucloudLease?.complete?.(body.boundaryOperationId ?? null);
+          if (raucloudLease?.queueCompletion) {
+            raucloudLease.queueCompletion(body.boundaryOperationId ?? null);
+            void raucloudLease.heartbeat().catch((error) => logger?.error('broker.completion_failed', { message: error.message }));
+          } else await raucloudLease?.complete?.(body.boundaryOperationId ?? null);
           json(response, 200, result);
           return;
         }
@@ -614,17 +637,32 @@ export function createCloudHttpHandler({
         const body = await readJson(request);
         if (typeof body.streamId !== 'string' || body.streamId.length < 1 || body.streamId.length > 256
           || typeof body.viewerId !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(body.viewerId)
-          || !Number.isSafeInteger(body.sequence) || body.sequence < 1) {
+          || body.events === undefined && (!Number.isSafeInteger(body.sequence) || body.sequence < 1)) {
           throw new CloudError('INVALID_REQUEST', 'Display input requires a valid stream, viewer, and sequence');
         }
-        json(response, 202, displayFrameStore.sendInput(
+        if (body.events !== undefined) {
+          const receipts = displayFrameStore.sendInputs(sessionId, body.streamId, device.id, body.viewerId, body.events);
+          raucloudLease?.noteActivity?.();
+          const controller = new AbortController();
+          const abort = () => controller.abort();
+          response.once('close', abort);
+          try {
+            const results = await displayFrameStore.waitForInputs(sessionId, body.streamId, device.id, body.viewerId,
+              receipts.map((receipt) => receipt.sequence), { signal: controller.signal });
+            if (!response.destroyed) json(response, 200, { streamId: body.streamId, viewerId: body.viewerId, results });
+          } finally { response.off('close', abort); }
+          return;
+        }
+        const receipt = displayFrameStore.sendInput(
           sessionId,
           body.streamId,
           device.id,
           body.viewerId,
           body.sequence,
           body.event,
-        ));
+        );
+        raucloudLease?.noteActivity?.();
+        json(response, 202, receipt);
         return;
       }
       const displayWatchRoute = pathname.match(/^\/v1\/sessions\/([^/]+)\/display\/frames$/);
@@ -654,11 +692,21 @@ export function createCloudHttpHandler({
             pending = metadata;
             return;
           }
+          let payload = metadata;
+          if (requestUrl.searchParams.get('inline') === '1') {
+            try {
+              const frame = displayFrameStore.getFrame(sessionId, streamId, metadata.sequence);
+              payload = { ...metadata, bytesBase64: frame.bytes.toString('base64') };
+            } catch (error) {
+              if (error.code === 'DISPLAY_FRAME_NOT_FOUND') return;
+              throw error;
+            }
+          }
           const event = {
             sessionId,
             seq: metadata.sequence,
             type: 'display.frame',
-            payload: metadata,
+            payload,
             createdAt: Date.parse(metadata.capturedAt),
           };
           blocked = !response.write(signedSseFrame(response[responseProof], event));

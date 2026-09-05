@@ -111,10 +111,11 @@ export class WorkerClient {
   control() { return this.json('GET', '/control'); }
   pauseAck() { return this.json('POST', '/pause-ack', {}); }
   sleepAck() { return this.json('POST', '/sleep-ack', {}); }
-  heartbeat() { return this.json('POST', '/heartbeat', {}); }
+  heartbeat() { return this.json('POST', '/heartbeat', {}, { timeoutMs: 5_000 }); }
   event(type, payload) { return this.json('POST', '/events', { type, payload }); }
+  events(events) { return this.json('POST', '/events', { events }, { timeoutMs: 3_000 }); }
   checkpoint(checkpoint) { return this.json('POST', '/checkpoints', checkpoint); }
-  commitBoundary(boundary) { return this.json('POST', '/boundary', boundary); }
+  commitBoundary(boundary) { return this.retryJson('POST', '/boundary', boundary); }
   beginTurn(turn) { return this.json('POST', '/turn-start', turn); }
   completeTurn(turn = {}) { return this.json('POST', '/turn-complete', turn); }
   createWait(wait, options = {}) { return this.json('POST', '/waits', wait, options); }
@@ -155,6 +156,14 @@ export class WorkerClient {
 
   closeFrameStream(streamId) {
     return this.json('DELETE', `/display/streams/${encodeURIComponent(streamId)}`);
+  }
+
+  acknowledgeFrameInputs(streamId, results) {
+    return this.json('POST', `/display/streams/${encodeURIComponent(streamId)}/input-ack`, { results }, { timeoutMs: 5_000 });
+  }
+
+  sealFrameInput(streamId, after) {
+    return this.json('POST', `/display/streams/${encodeURIComponent(streamId)}/input-seal`, { after }, { timeoutMs: 5_000 });
   }
 
   async download(blobId, destination) {

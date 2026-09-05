@@ -326,6 +326,7 @@ export interface CloudDisplayAvailableCapability {
   maxFps: 12;
   inputProtocol: 'rauhwpx-input-v1';
   maxInputEventsPerSecond: 60;
+  inputBatchSize?: 32;
 }
 
 export interface CloudDisplayUnavailableCapability {

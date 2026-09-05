@@ -1,3 +1,4 @@
+import { CloudInputQueue } from '../../../../desktop/cloud-input-queue.mjs';
 import type {
   CloudDisplayAvailableCapability,
   CloudDisplayCapability,
@@ -21,9 +22,11 @@ export interface CloudDisplayTransport {
     sessionId: string,
     capability: CloudDisplayAvailableCapability,
     after: number,
-    options: { signal: AbortSignal; onMetadata: (metadata: CloudDisplayFrameMetadata) => void },
+    options: { signal: AbortSignal; onMetadata: (metadata: CloudDisplayFrameMetadata) => void; onFrame?: (frame: CloudDisplayFrame) => void },
   ): Promise<number>;
   frame(metadata: CloudDisplayFrameMetadata, options: { signal: AbortSignal }): Promise<CloudDisplayFrame>;
+  inputs?(sessionId: string, streamId: string, viewerId: string,
+    events: Array<{ sequence: number; event: CloudDisplayInputEvent }>, options: { signal: AbortSignal }): Promise<void>;
   input(
     sessionId: string,
     streamId: string,
@@ -140,7 +143,7 @@ class VerifiedDisplayConnection implements CloudDisplayConnection {
   #downloading: Promise<void> | null = null;
   #lastSequence = 0;
   #inputSequence = 0;
-  #inputChain: Promise<void> = Promise.resolve();
+  #inputQueue: CloudInputQueue;
 
   constructor(
     transport: CloudDisplayTransport,
@@ -154,7 +157,18 @@ class VerifiedDisplayConnection implements CloudDisplayConnection {
     this.#interestRenewMs = Math.max(1, Number(options.interestRenewMs) || 12_000);
     this.#retryBaseMs = Math.max(0, Number(options.retryBaseMs) || 250);
     this.#retryMaxMs = Math.max(this.#retryBaseMs, Number(options.retryMaxMs) || 5_000);
-    this.#maxReconnectAttempts = Math.max(1, Number(options.maxReconnectAttempts) || 12);
+    this.#maxReconnectAttempts = Math.max(1, Number(options.maxReconnectAttempts) || Infinity);
+    this.#inputQueue = new CloudInputQueue(async (streamId, events) => {
+      if (this.#closed || this.#controller.signal.aborted) throw this.#controller.signal.reason;
+      if (this.#capability?.kind !== 'available' || this.#capability.streamId !== streamId) {
+        throw Object.assign(new Error('Cloud display stream was replaced'), { code: 'DISPLAY_STREAM_REPLACED' });
+      }
+      const signal = this.#phase?.controller.signal ?? this.#controller.signal;
+      if (this.#capability.inputBatchSize && this.#transport.inputs) {
+        await this.#transport.inputs(this.#sessionId, streamId, this.#viewerId,
+          events.map((event) => ({ sequence: ++this.#inputSequence, event })), { signal });
+      } else await this.#transport.input(this.#sessionId, streamId, this.#viewerId, ++this.#inputSequence, events[0], { signal });
+    }, () => this.#capability?.kind === 'available' && this.#capability.inputBatchSize && this.#transport.inputs ? 32 : 1);
     this.#removeExternalAbort = relayAbort(options.signal, this.#controller);
   }
 
@@ -195,29 +209,12 @@ class VerifiedDisplayConnection implements CloudDisplayConnection {
 
   sendInput(event: CloudDisplayInputEvent): Promise<void> {
     const capability = this.#capability;
-    if (this.#closed || capability?.kind !== 'available') {
+    if (this.#closed || !this.#phase || this.#phase.controller.signal.aborted || capability?.kind !== 'available') {
       return Promise.reject(Object.assign(new Error('Cloud display input is unavailable'), {
         code: 'DISPLAY_INPUT_UNAVAILABLE',
       }));
     }
-    const streamId = capability.streamId;
-    const sequence = ++this.#inputSequence;
-    const operation = this.#inputChain.then(async () => {
-      if (this.#closed || this.#controller.signal.aborted) throw this.#controller.signal.reason;
-      if (this.#capability?.kind !== 'available' || this.#capability.streamId !== streamId) {
-        throw Object.assign(new Error('Cloud display stream was replaced'), { code: 'DISPLAY_STREAM_REPLACED' });
-      }
-      await this.#transport.input(
-        this.#sessionId,
-        streamId,
-        this.#viewerId,
-        sequence,
-        event,
-        { signal: this.#controller.signal },
-      );
-    });
-    this.#inputChain = operation.catch(() => {});
-    return operation;
+    return this.#inputQueue.enqueue(capability.streamId, event);
   }
 
   async #close(): Promise<void> {
@@ -226,7 +223,7 @@ class VerifiedDisplayConnection implements CloudDisplayConnection {
     this.#controller.abort();
     this.#phase?.controller.abort();
     this.#pending = null;
-    await Promise.allSettled([this.#loop, this.#downloading, this.#inputChain].filter(Boolean) as Promise<void>[]);
+    await Promise.allSettled([this.#loop, this.#downloading, this.#inputQueue.close()].filter(Boolean) as Promise<void>[]);
     await this.#releaseInterest();
   }
 
@@ -328,11 +325,19 @@ class VerifiedDisplayConnection implements CloudDisplayConnection {
       const frames = this.#transport.frames(this.#sessionId, capability, this.#lastSequence, {
         signal: controller.signal,
         onMetadata: (metadata) => this.#queueMetadata(metadata, phase),
+        onFrame: (frame) => {
+          if (this.#closed || this.#phase !== phase || frame.sessionId !== this.#sessionId
+            || frame.streamId !== capability.streamId || frame.sequence <= this.#lastSequence) return;
+          this.#lastSequence = frame.sequence;
+          phase.markHealthy();
+          this.#emit(frame);
+        },
       });
       const renew = this.#renewInterest(capability, controller.signal);
       await Promise.race([frames, renew, failure]);
     } finally {
       controller.abort();
+      this.#inputQueue.reset();
       removeAbort();
       if (this.#phase === phase) this.#phase = null;
       await this.#downloading?.catch(() => {});

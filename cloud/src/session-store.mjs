@@ -394,6 +394,15 @@ export class SessionStore {
     return event;
   }
 
+  appendEvents(sessionId, entries) {
+    let events;
+    transaction(this.database, () => {
+      events = entries.map(({ type, payload }) => this.#appendEventInTransaction(sessionId, type, payload ?? {}));
+    });
+    for (const event of events) this.#notify(event);
+    return events;
+  }
+
   executeCommand(device, sessionId, command) {
     let event = null;
     const response = transaction(this.database, () => {

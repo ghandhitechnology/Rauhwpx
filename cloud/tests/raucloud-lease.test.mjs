@@ -10,11 +10,12 @@ function response(body, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 }
 
-function controller(handler) {
+function controller(handler, options = {}) {
   const calls = [];
   return {
     calls,
     lease: new RaucloudLeaseController({
+      ...options,
       baseUrl: 'https://broker.example',
       runId: 'run-1',
       workerToken: TOKEN,
@@ -75,16 +76,20 @@ test('grace blocks new input immediately while allowing the running turn until m
   assert.equal(lease.mustStop, false);
 });
 
-test('three broker failures fail closed and tell the worker to stop', async () => {
+test('brief broker outages preserve the worker, but the bounded grace expires', async () => {
+  let now = 0;
   const { lease } = controller((url) => {
     if (url.pathname.endsWith('/lease')) return response({ runId: 'run-1', status: 'ready' });
     if (url.pathname.endsWith('/allocation')) return response({ quota: { remainingMs: 60_000 } });
     throw new Error('offline');
-  });
+  }, { now: () => now });
   await lease.beforeTurnStart();
-  await assert.rejects(lease.heartbeat(), { code: 'RAUCLOUD_BROKER_UNREACHABLE' });
-  await assert.rejects(lease.heartbeat(), { code: 'RAUCLOUD_BROKER_UNREACHABLE' });
-  assert.deepEqual(await lease.heartbeat(), { mustStop: true, degraded: true });
+  for (let index = 0; index < 4; index++) {
+    assert.deepEqual(await lease.heartbeat(), { mustStop: false, degraded: true });
+    now += 15_000;
+  }
+  now = 90_000;
+  assert.deepEqual(lease.status(), { mustStop: true, degraded: true });
   await assert.rejects(lease.assertCommandAllowed('session.resume'), { code: 'RAUCLOUD_INPUT_BLOCKED' });
 });
 
@@ -172,4 +177,61 @@ test('Raucloud lease configuration is all-or-nothing and self-hosted remains emp
   });
   assert.equal(legacy.raucloudBrokerUrl, 'https://legacy-broker.example');
   assert.equal(legacy.raucloudRunId, 'run-legacy');
+});
+
+test('editing activity is coalesced into one warm renewal per local heartbeat', async () => {
+  let now = 0;
+  const { lease, calls } = controller((url) => {
+    if (url.pathname.endsWith('/lease')) return response({ runId: 'run-1', status: 'ready' });
+    if (url.pathname.endsWith('/allocation')) return response({ run: { status: 'active' } });
+    if (url.pathname.endsWith('/complete') || url.pathname.endsWith('/activity')) return response({ run: { status: 'ready' }, worker: { status: 'warm' } });
+    assert.fail(url.pathname);
+  }, { now: () => now });
+  await lease.beforeTurnStart();
+  await lease.complete('checkpoint-1');
+  for (let index = 0; index < 100; index++) { now++; lease.noteActivity(); }
+  await lease.heartbeat();
+  await lease.heartbeat();
+  assert.equal(calls.filter(({ url }) => url.pathname.endsWith('/activity')).length, 1);
+  now++;
+  lease.noteActivity();
+  await lease.heartbeat();
+  assert.equal(calls.filter(({ url }) => url.pathname.endsWith('/activity')).length, 2);
+  assert.equal(lease.mustStop, false);
+});
+
+test('turn completion survives a broker outage and a local controller restart', async () => {
+  let saved = null;
+  let offline = true;
+  const reportStore = { load: () => saved, save: (value) => { saved = structuredClone(value); }, clear: () => { saved = null; } };
+  const handler = (url) => {
+    if (url.pathname.endsWith('/lease')) return response({ runId: 'run-1', status: 'ready' });
+    if (url.pathname.endsWith('/allocation')) return response({ run: { status: 'active' } });
+    if (url.pathname.endsWith('/complete')) {
+      if (offline) throw new Error('broker offline');
+      return response({ run: { status: 'ready' }, worker: { status: 'warm' } });
+    }
+    assert.fail(url.pathname);
+  };
+  const first = controller(handler, { reportStore }).lease;
+  await first.beforeTurnStart();
+  assert.deepEqual(await first.complete('durable-checkpoint'), { pending: true, degraded: true });
+  assert.deepEqual(saved, { runId: 'run-1', checkpointId: 'durable-checkpoint' });
+  const restarted = controller(handler, { reportStore });
+  offline = false;
+  await restarted.lease.heartbeat();
+  assert.equal(saved, null);
+  assert.equal(restarted.lease.active, false);
+  assert.equal(restarted.lease.mustStop, false);
+  assert.equal(restarted.calls.length, 1);
+});
+
+test('explicit broker revocation stops immediately without waiting for outage grace', async () => {
+  const { lease } = controller((url) => {
+    if (url.pathname.endsWith('/lease')) return response({ runId: 'run-1', status: 'ready' });
+    if (url.pathname.endsWith('/allocation')) return response({ run: { status: 'active' } });
+    return response({ error: { code: 'WORKER_UNAUTHORIZED', message: 'revoked' } }, 403);
+  });
+  await lease.beforeTurnStart();
+  assert.equal((await lease.heartbeat()).mustStop, true);
 });

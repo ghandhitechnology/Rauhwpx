@@ -17,11 +17,22 @@ async function jsonBody(response) {
 }
 
 export class RaucloudLeaseController {
-  constructor({ baseUrl = '', runId = '', workerToken = '', fetchImpl = globalThis.fetch } = {}) {
+  constructor({ baseUrl = '', runId = '', workerToken = '', fetchImpl = globalThis.fetch,
+    now = Date.now, brokerGraceMs = 90_000, reportStore = null } = {}) {
     this.baseUrl = String(baseUrl).replace(/\/+$/, '');
     this.runId = String(runId);
     this.workerToken = String(workerToken);
     this.fetch = fetchImpl;
+    this.now = now;
+    this.brokerGraceMs = brokerGraceMs;
+    this.lastBrokerSuccessAt = now();
+    this.lastDiscoveryAt = null;
+    this.discoveryRequest = null;
+    this.activityAt = null;
+    this.reportedActivityAt = null;
+    this.reportStore = reportStore;
+    this.pendingCompletion = reportStore?.load?.() ?? null;
+    this.completionRequest = null;
     this.enabled = Boolean(this.baseUrl && this.runId && this.workerToken);
     this.active = false;
     this.terminal = false;
@@ -31,6 +42,7 @@ export class RaucloudLeaseController {
     this.allocation = null;
     this.heartbeatRequest = null;
     this.failures = 0;
+    this.brokerFailureSince = null;
     this.graceTimer = null;
   }
 
@@ -41,7 +53,7 @@ export class RaucloudLeaseController {
         method,
         headers: { authorization: `Bearer ${this.workerToken}`, 'content-type': 'application/json', accept: 'application/json' },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        signal: AbortSignal.timeout(30_000),
+        signal: AbortSignal.timeout(10_000),
       });
     } catch (error) {
       throw raucloudError('RAUCLOUD_BROKER_UNREACHABLE', 'Raucloud broker is unreachable', error);
@@ -55,8 +67,12 @@ export class RaucloudLeaseController {
         response.status,
       );
     }
+    this.lastBrokerSuccessAt = this.now();
+    this.failures = 0;
+    this.brokerFailureSince = null;
     const graceActive = payload.quota?.grace?.active === true;
-    if (payload.run?.inputBlocked === true || Number(payload.quota?.remainingMs) <= 0 || graceActive) {
+    if (payload.run?.inputBlocked === true
+      || payload.quota?.remainingMs != null && Number(payload.quota.remainingMs) <= 0 || graceActive) {
       this.inputBlocked = true;
     }
     if (payload.mustStop === true) {
@@ -76,7 +92,7 @@ export class RaucloudLeaseController {
     this.graceTimer = setTimeout(() => {
       this.mustStop = true;
       this.inputBlocked = true;
-    }, Math.max(0, deadline - Date.now()));
+    }, Math.max(0, deadline - this.now()));
     this.graceTimer.unref?.();
   }
 
@@ -86,6 +102,7 @@ export class RaucloudLeaseController {
     this.inputBlocked = true;
     if (this.graceTimer) clearTimeout(this.graceTimer);
     this.graceTimer = null;
+    this.lastDiscoveryAt = null;
   }
 
   #request(action, body = {}) {
@@ -97,7 +114,14 @@ export class RaucloudLeaseController {
 
   async discover() {
     if (!this.enabled) return { raucloud: false };
+    if (this.discoveryRequest) return this.discoveryRequest;
+    this.discoveryRequest = this.#discover().finally(() => { this.discoveryRequest = null; });
+    return this.discoveryRequest;
+  }
+
+  async #discover() {
     const payload = await this.#fetch('/v1/internal/cloud/lease');
+    this.lastDiscoveryAt = this.now();
     const nextRunId = String(payload.runId ?? payload.run?.id ?? '').trim();
     if (!nextRunId) throw raucloudError('RAUCLOUD_BROKER_INVALID', 'Raucloud broker did not identify the current lease');
     if (nextRunId !== this.runId) {
@@ -120,7 +144,11 @@ export class RaucloudLeaseController {
 
   async assertCommandAllowed(type) {
     if (!this.enabled || !BLOCKED_COMMANDS.has(type)) return;
-    await this.discover();
+    if (this.lastDiscoveryAt === null || this.now() - this.lastDiscoveryAt >= 15_000) {
+      try { await this.discover(); } catch (error) {
+        if (!this.#transient(error) || this.now() - this.lastBrokerSuccessAt >= this.brokerGraceMs) throw error;
+      }
+    }
     if (this.inputBlocked) {
       throw raucloudError('RAUCLOUD_INPUT_BLOCKED', 'Raucloud is finishing the current turn; new input is blocked', undefined, 409);
     }
@@ -128,7 +156,8 @@ export class RaucloudLeaseController {
 
   async beforeTurnStart() {
     if (!this.enabled) return Promise.resolve({ raucloud: false });
-    await this.discover();
+    await this.#flushCompletion();
+    if (this.lastDiscoveryAt === null || this.now() - this.lastDiscoveryAt >= 15_000) await this.discover();
     if (this.terminal || this.inputBlocked) {
       throw raucloudError('RAUCLOUD_INPUT_BLOCKED', 'Raucloud cannot start another turn', undefined, 409);
     }
@@ -138,28 +167,60 @@ export class RaucloudLeaseController {
         this.failures = 0;
         return payload;
       }, (error) => {
-        this.inputBlocked = true;
+        this.allocation = null;
+        if (!this.#transient(error)) this.inputBlocked = true;
         throw error;
       });
     }
     return this.allocation;
   }
 
+  noteActivity() {
+    if (this.enabled && !this.terminal && !this.mustStop) this.activityAt = this.now();
+  }
+
+  status() {
+    if (this.enabled && this.brokerFailureSince !== null
+      && this.now() - this.brokerFailureSince >= this.brokerGraceMs) {
+      this.mustStop = true;
+      this.inputBlocked = true;
+    }
+    return { mustStop: this.mustStop, degraded: this.failures > 0 };
+  }
+
+  #transient(error) {
+    return error.code === 'RAUCLOUD_BROKER_UNREACHABLE' || error.status === 408
+      || error.status === 429 || error.status >= 500;
+  }
+
   heartbeat() {
-    if (!this.enabled || !this.active || this.terminal) return Promise.resolve({ mustStop: this.mustStop });
+    this.status();
+    if (!this.enabled || this.terminal) return Promise.resolve({ mustStop: this.mustStop });
     if (this.mustStop) return Promise.resolve({ mustStop: true });
     if (this.heartbeatRequest) return this.heartbeatRequest;
-    this.heartbeatRequest = this.#request('heartbeat').then((payload) => {
+    this.heartbeatRequest = (async () => {
+      await this.#flushCompletion();
+      if (this.active) return this.#request('heartbeat');
+      const activityAt = this.activityAt;
+      if (activityAt !== null && activityAt !== this.reportedActivityAt) {
+        const payload = await this.#request('activity');
+        this.reportedActivityAt = activityAt;
+        return payload;
+      }
+      return { mustStop: this.mustStop };
+    })().then((payload) => {
       this.failures = 0;
+      this.brokerFailureSince = null;
       return payload;
     }, (error) => {
       this.failures += 1;
-      if (this.failures >= 3) {
+      this.brokerFailureSince ??= this.now();
+      if (!this.#transient(error) || this.now() - this.brokerFailureSince >= this.brokerGraceMs) {
         this.inputBlocked = true;
         this.mustStop = true;
         return { mustStop: true, degraded: true };
       }
-      throw error;
+      return { mustStop: false, degraded: true };
     }).finally(() => { this.heartbeatRequest = null; });
     return this.heartbeatRequest;
   }
@@ -176,9 +237,37 @@ export class RaucloudLeaseController {
     return payload;
   }
 
+  queueCompletion(checkpointId = this.latestCheckpointId) {
+    if (!this.enabled || !this.active || this.terminal) return false;
+    const pending = { runId: this.runId, checkpointId };
+    this.reportStore?.save?.(pending);
+    this.pendingCompletion = pending;
+    return true;
+  }
+
   async complete(checkpointId = this.latestCheckpointId) {
-    if (!this.enabled || !this.active || this.terminal) return { raucloud: this.enabled, skipped: true };
-    const payload = await this.#request('complete', { ...(checkpointId ? { checkpointId } : {}) });
+    if (!this.queueCompletion(checkpointId)) return { raucloud: this.enabled, skipped: true };
+    try { return await this.#flushCompletion(); } catch (error) {
+      if (!this.#transient(error)) throw error;
+      this.failures += 1;
+      return { pending: true, degraded: true };
+    }
+  }
+
+  async #flushCompletion() {
+    if (this.completionRequest) return this.completionRequest;
+    this.completionRequest = this.#sendCompletion().finally(() => { this.completionRequest = null; });
+    return this.completionRequest;
+  }
+
+  async #sendCompletion() {
+    const pending = this.pendingCompletion;
+    if (!pending) return { skipped: true };
+    const payload = await this.#fetch(`/v1/internal/cloud/runs/${encodeURIComponent(pending.runId)}/complete`, {
+      method: 'POST', body: { ...(pending.checkpointId ? { checkpointId: pending.checkpointId } : {}) },
+    });
+    this.reportStore?.clear?.();
+    this.pendingCompletion = null;
     const reusable = ['ready', 'warm'].includes(payload.run?.status) || payload.worker?.status === 'warm';
     if (reusable && !this.inputBlocked && payload.mustStop !== true && payload.run?.inputBlocked !== true) {
       this.active = false;

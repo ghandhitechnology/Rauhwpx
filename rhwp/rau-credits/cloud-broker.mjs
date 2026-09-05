@@ -991,6 +991,27 @@ export function createRaucloudBroker({
       });
     },
 
+    async touchCloudWorkspace(secret, runId) {
+      return mutate((state) => {
+        const at = now();
+        const cloud = ensureRaucloudState(state);
+        const run = cloud.runs[validId(runId, 'runId')];
+        assertWorkerSecret(secret, run);
+        if (!run) throw cloudError('CLOUD_RUN_NOT_FOUND', 'Raucloud run not found');
+        const account = ensureAccount(state, run.accountId, at);
+        if (account.worker?.runId !== run.id || !['ready', 'active'].includes(run.status)
+          || !['warm', 'ready', 'active'].includes(account.worker.status)
+          || run.inputBlocked || run.logoutRequestedAt != null) {
+          throw cloudError('CLOUD_RUN_STATE_INVALID', 'Raucloud workspace is no longer active');
+        }
+        run.lastWorkspaceActivityAt = at;
+        if (['warm', 'ready'].includes(account.worker.status)) {
+          account.worker.warmUntil = at + CLOUD_WARM_IDLE_MS;
+        }
+        return { run: publicRun(run), worker: publicWorker(account.worker), mustStop: false };
+      });
+    },
+
     async heartbeatCloudRun(secret, runId) {
       const result = await mutate((state) => {
         const at = now();
@@ -1048,6 +1069,9 @@ export function createRaucloudBroker({
         assertWorkerSecret(secret, run);
         if (!run) throw cloudError('CLOUD_RUN_NOT_FOUND', 'Raucloud run not found');
         const account = ensureAccount(state, run.accountId, at);
+        if (run.status === 'ready' && checkpointId && run.checkpointId === checkpointId) {
+          return { run: publicRun(run), quota: publicQuota(account, run, at), worker: publicWorker(account.worker), mustStop: false };
+        }
         if (run.status !== 'active') throw cloudError('CLOUD_RUN_STATE_INVALID', 'Raucloud run is not active');
         const charge = chargeRun(account, run, at);
         run.lastTurnCompletedAt = at;

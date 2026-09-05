@@ -197,10 +197,10 @@ RFB, noVNC, public WebSocket upgrades, reusable viewer secrets, and a desktop lo
 
 ## Tradeoffs accepted
 
-- We accept a 12 fps JPEG workspace rather than video encoding in exchange for low interaction latency, latest-wins backpressure, and one bounded transport on every current client path.
+- The workspace captures JPEGs at up to 12 fps. Input-to-visible latency depends on network transit, remote input application, capture timing, and decode; production latency has not been established.
 - We accept a blocked Local composer during a cloud lease in exchange for one transcript writer and one document writer.
 - We accept no frame history in exchange for fixed memory and zero long-session disk growth.
-- We accept one image request per changed frame in exchange for small signed metadata events and independent binary verification.
+- Updated clients request signed frame metadata and JPEG bytes together on SSE. Older clients retain the metadata-plus-image-request path. Input batches carry up to 32 ordered events and return worker application receipts.
 
 ## Locked decisions, 2026-08-30
 

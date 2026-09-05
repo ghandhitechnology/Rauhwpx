@@ -17,22 +17,26 @@ if (!sessionId || !token || (!socketPath && !baseUrl)) throw new Error('Worker i
 
 const client = new WorkerClient({ socketPath, baseUrl, token, sessionId });
 // After four silent heartbeats the control plane considers this worker lost;
-// a clean crash with a stderr trace beats a zombie still holding its tokens.
+// Request a stop at a safe boundary so the runtime can save before exiting.
 let heartbeatFailures = 0;
+let heartbeatBusy = false;
+let stopRequested = false;
 const heartbeat = setInterval(() => {
+  if (heartbeatBusy) return;
+  heartbeatBusy = true;
   client.heartbeat().then((lease) => {
     heartbeatFailures = 0;
     if (lease?.mustStop === true) {
       console.error('[worker] Raucloud lease ended; stopping');
-      process.exit(1);
+      stopRequested = true;
     }
   }, () => {
     heartbeatFailures += 1;
     if (heartbeatFailures >= 4) {
       console.error(`[worker] control plane unreachable after ${heartbeatFailures} heartbeats; stopping`);
-      process.exit(1);
+      stopRequested = true;
     }
-  });
+  }).finally(() => { heartbeatBusy = false; });
 }, 15_000);
 heartbeat.unref();
 
@@ -92,16 +96,17 @@ try {
       client,
       sessionDisplay,
       displayMode,
-      onStudioReady: (harness) => {
+      shouldStop: () => stopRequested,
+      onStudioReady: async (harness) => {
+        await sessionFramePublisher.start();
         sessionFramePublisher.setInputHandler((input) => harness.interact(input));
         sessionFramePublisher.markReady();
       },
       onStudioUnavailable: () => {
-        sessionFramePublisher.setInputHandler(null);
-        return sessionFramePublisher.markUnavailable();
+        return sessionFramePublisher.stop({ drainInput: true });
       },
     });
-    if (outcome?.paused !== true && outcome?.suspended !== true && outcome?.takenOver !== true) {
+    if (outcome?.paused !== true && outcome?.suspended !== true && outcome?.takenOver !== true && outcome?.sleeping !== true) {
       if (!outcome?.timelinePath) throw new Error('Document runtime did not return timelinePath');
       if (!outcome?.resultPath) throw new Error('Document runtime did not return resultPath');
       const result = await client.upload(outcome.resultPath, {

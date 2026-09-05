@@ -499,6 +499,7 @@ test('runSession detects display loss while client.wait is blocked and cleans up
       assert.equal(displayEnv.DISPLAY, ':80');
       return {
         start: async () => {},
+        documentRevision: async () => 0,
         assertHealthy: async () => {},
         runTurn: async () => ({
           type: 'turn-end', agent: 'codex', stopReason: 'end_turn',
@@ -912,6 +913,7 @@ test('safe pause then no-message resume publishes the existing stable result wit
     return boundaryReceipt(boundary);
   };
   const harness = ({ onEvent, exportCalls }) => ({
+    documentRevision: async () => 1,
     start: async () => {},
     runTurn: async () => {
       const event = { type: 'turn-end', agent: 'codex', stopReason: 'end_turn' };
@@ -1256,4 +1258,98 @@ test('atomic finish claim catches takeover and pause requests that race the cont
       assert.match(calls.at(-2)[1].operationId, /^turn_1_[a-f0-9]{24}$/);
     }
   }
+});
+
+for (const action of ['end', 'idle-end', 'takeover', 'lease-stop']) {
+  test(`manual edits after the agent turn survive ${action}, including input drained during handoff`, async (t) => {
+    const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'raucloud-manual-save-'));
+    t.after(() => fs.rm(workspace, { recursive: true, force: true }));
+    const document = path.join(workspace, 'document.hwp');
+    const timeline = path.join(workspace, 'timeline.json');
+    await fs.writeFile(document, 'original');
+    await fs.writeFile(timeline, JSON.stringify(portableTimeline()));
+    let content = 'agent edit';
+    let documentRevision = 1;
+    let stop = false;
+    let quiesced = false;
+    const checkpoints = new Map();
+    const boundaries = [];
+    let acknowledged = false;
+    let finishClaims = 0;
+    const result = await runSession({
+      workspace, credentials: {}, shouldStop: () => stop,
+      manifest: {
+        sessionId: 'manual-save', provider: 'codex', persistent: true, goal: 'Edit',
+        resources: [{ kind: 'document', name: 'document.hwp', filename: document }, { kind: 'timeline', name: 'timeline.json', filename: timeline }],
+        limits: { maxDurationSeconds: 900, maxTurns: 10 },
+      },
+      onStudioUnavailable: async () => { quiesced = true; content += ' plus queued input'; documentRevision++; },
+      client: {
+        event: async () => {}, beginTurn: async () => {},
+        upload: async (filename) => {
+          const bytes = await fs.readFile(filename);
+          const id = createHash('sha256').update(bytes).digest('hex');
+          checkpoints.set(id, bytes.toString());
+          return { id, size: bytes.length };
+        },
+        commitBoundary: async (boundary) => { boundaries.push(boundary); return boundary; },
+        completeTurn: async () => {
+          content = 'manual edit after turn'; documentRevision++; stop = action === 'lease-stop';
+          return { status: 'running' };
+        },
+        control: async () => ({}),
+        finishClaim: async () => {
+          if (action === 'idle-end' && ++finishClaims === 1) return { waiting: true };
+          if (action === 'idle-end') assert.equal(checkpoints.get(boundaries.at(-1).checkpoint.blobId), 'manual edit after turn');
+          return action === 'takeover' ? { takeoverRequested: true } : { ready: true, messages: [] };
+        },
+        takeoverReady: async ({ operationId }) => { assert.equal(operationId, boundaries.at(-1).operationId); },
+        takeoverAck: async () => { acknowledged = true; },
+        suspend: async () => { acknowledged = true; },
+      },
+      createHarness: async () => ({
+        start: async () => {}, close: async () => {}, documentRevision: async () => documentRevision,
+        runTurn: async () => ({ stopReason: 'end_turn' }),
+        exportDocument: async (_format, filename) => {
+          await fs.writeFile(filename, content);
+          return { sha256: createHash('sha256').update(content).digest('hex'), size: Buffer.byteLength(content), documentRevision };
+        },
+      }),
+    });
+    assert.equal(quiesced, true);
+    assert.equal(checkpoints.get(boundaries.at(-1).checkpoint.blobId), 'manual edit after turn plus queued input');
+    assert.equal(boundaries.at(-1).kind, 'operation');
+    if (action.endsWith('end')) assert.equal(await fs.readFile(result.resultPath, 'utf8'), 'manual edit after turn plus queued input');
+    else assert.equal(acknowledged, true);
+  });
+}
+
+test('recovered persistent sessions open Studio before waiting for another agent message', async (t) => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'raucloud-idle-restore-'));
+  t.after(() => fs.rm(workspace, { recursive: true, force: true }));
+  const document = path.join(workspace, 'document.hwp');
+  const timeline = path.join(workspace, 'input-timeline.json');
+  await fs.writeFile(document, 'restored document');
+  await fs.writeFile(timeline, JSON.stringify(portableTimeline()));
+  let ready = false;
+  let claims = 0;
+  const result = await runSession({
+    workspace, credentials: {}, onStudioReady: async () => { ready = true; },
+    manifest: {
+      sessionId: 'idle-restore', provider: 'codex', goal: 'Edit', persistent: true,
+      latestCheckpoint: { kind: 'turn', stable: true, filename: document, operationId: 'restored-turn', turnNumber: 1, revision: 1 },
+      resources: [{ kind: 'document', name: 'document.hwp', filename: document }, { kind: 'timeline', name: 'timeline.json', filename: timeline }],
+      limits: { maxDurationSeconds: 900, maxTurns: 10, turnsUsed: 1 },
+    },
+    client: { event: async () => {}, finishClaim: async () => {
+      assert.equal(ready, true);
+      return ++claims === 1 ? { waiting: true } : { ready: true, messages: [] };
+    } },
+    createHarness: async () => ({ start: async () => {}, close: async () => {}, documentRevision: async () => 1,
+      runTurn: async () => assert.fail('No agent message was submitted'),
+      exportDocument: async () => assert.fail('Unchanged recovered document should not be exported'),
+    }),
+  });
+  assert.equal(claims, 2);
+  assert.equal(await fs.readFile(result.resultPath, 'utf8'), 'restored document');
 });

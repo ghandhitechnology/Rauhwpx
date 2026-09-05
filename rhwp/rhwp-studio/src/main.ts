@@ -446,6 +446,9 @@ function installCloudDocumentRuntimeApi(agentBridge: AgentBridge): void {
     if (events.length > 2_000) events.splice(0, events.length - 2_000);
   });
 
+  let documentRevision = 0;
+  eventBus.on('document-mutated', () => { documentRevision += 1; });
+  eventBus.on('document-changed', () => { documentRevision += 1; });
   const api = Object.freeze({
     status(secret: unknown) {
       requireSecret(secret);
@@ -454,6 +457,7 @@ function installCloudDocumentRuntimeApi(agentBridge: AgentBridge): void {
         activeAgent: agentBridge.getActiveAgent(),
         turnRunning: agentBridge.isTurnRunning(),
         documentLoaded: wasm.hasLoadedDocument(),
+        documentRevision,
         latestEventSeq: eventSequence,
       };
     },
@@ -565,11 +569,13 @@ function installCloudDocumentRuntimeApi(agentBridge: AgentBridge): void {
       }
       exportedFormat = format;
       exportedBytes = exportDocumentForFormat(wasm, format);
+      const exportedRevision = documentRevision;
       return {
         format,
         size: exportedBytes.byteLength,
         fileName: wasm.fileName,
         sha256: await bytesToSha256(exportedBytes),
+        documentRevision: exportedRevision,
       };
     },
     readExportChunk(secret: unknown, offset: unknown, length: unknown) {
@@ -696,7 +702,7 @@ async function applyCloudTakeover(takeover: CloudTakeoverPayload): Promise<{
 async function persistCloudCheckpoint(checkpoint: CloudCheckpointPayload): Promise<void> {
   if (!activeDocumentId || wasm.pageCount === 0) return;
   const currentHandle = wasm.currentFileHandle;
-  if (checkpoint.kind === 'turn' && checkpointMatchesActiveDocument(checkpoint, activeDocumentId)) {
+  if (['turn', 'operation'].includes(checkpoint.kind) && checkpointMatchesActiveDocument(checkpoint, activeDocumentId)) {
     try {
       const outcome = await persistCheckpointToBrowserOrigin({
         handle: currentHandle,

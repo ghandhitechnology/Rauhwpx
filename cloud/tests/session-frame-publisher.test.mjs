@@ -151,7 +151,7 @@ test('SessionFramePublisher applies ordered remote input before advancing demand
   await publisher.start();
   publisher.markReady();
   await waitFor(() => client.waiting.length === 1, 'next demand after input');
-  assert.deepEqual(applied, events.map((entry) => entry.event));
+  assert.deepEqual(applied, [...events.map((entry) => entry.event), { kind: 'reset' }]);
   assert.equal(publisher.demandVersion, 3);
   assert.equal(failures.some((event) => event.type === 'display-input-failed'), true);
   await publisher.stop();
@@ -270,7 +270,7 @@ test('SessionFramePublisher retries one static frame with the same sequence befo
   await publisher.stop();
 });
 
-test('SessionFramePublisher retains a failed current frame and only the newest pending change', async (t) => {
+test('SessionFramePublisher abandons a failed stale frame when a newer frame is pending', async (t) => {
   const client = fakeClient([{ version: 1, interested: true, closed: false }]);
   const child = fakeChild();
   const first = deferred();
@@ -293,10 +293,9 @@ test('SessionFramePublisher retains a failed current frame and only the newest p
   await waitFor(() => attempts.length === 1, 'current upload');
   child.stdout.emit('data', Buffer.concat([jpeg('older-pending'), jpeg('newest-pending')]));
   first.reject(Object.assign(new Error('connection reset'), { code: 'ECONNRESET' }));
-  await waitFor(() => attempts.length === 3, 'retry and newest pending upload');
-  assert.deepEqual(attempts.map(({ sequence }) => sequence), [1, 1, 2]);
+  await waitFor(() => attempts.length === 2, 'newest pending upload');
+  assert.deepEqual(attempts.map(({ sequence }) => sequence), [1, 2]);
   assert.deepEqual(attempts.map(({ bytes }) => bytes), [
-    jpeg('static-current'),
     jpeg('static-current'),
     jpeg('newest-pending'),
   ]);
@@ -681,4 +680,43 @@ test('SessionFramePublisher cancels publication backoff when demand disappears',
   assert.equal(attempts, 1);
   assert.equal(publisher.snapshot().pending, false);
   await publisher.stop();
+});
+
+test('a lost input acknowledgement retries the receipt without applying text twice', async () => {
+  const inputs = [{ version: 2, sequence: 1, event: { kind: 'text', text: 'only once' } }];
+  const demand = { version: 2, interested: false, inputEvents: inputs, closed: false };
+  const client = fakeClient([demand, demand]);
+  let acknowledgements = 0;
+  client.acknowledgeFrameInputs = async (_stream, results) => {
+    assert.deepEqual(results, [{ version: 2, ok: true }]);
+    if (++acknowledgements === 1) throw Object.assign(new Error('lost receipt'), { code: 'ECONNRESET' });
+  };
+  const applied = [];
+  const publisher = new SessionFramePublisher({ client, sessionDisplay, retryBaseMs: 1 });
+  publisher.setInputHandler(async (event) => { applied.push(event); });
+  await publisher.start();
+  publisher.markReady();
+  await waitFor(() => publisher.demandVersion === 2);
+  assert.equal(acknowledgements, 2);
+  assert.deepEqual(applied, [inputs[0].event]);
+  await publisher.stop();
+});
+
+test('stopping seals input and drains accepted edits before closing the stream', async () => {
+  const client = fakeClient([{ version: 1, interested: false, closed: false }]);
+  const order = [];
+  client.sealFrameInput = async (_stream, after) => {
+    order.push('seal');
+    assert.equal(after, 1);
+    return { version: 2, inputEvents: [{ version: 2, sequence: 1, event: { kind: 'text', text: 'final edit' } }] };
+  };
+  client.acknowledgeFrameInputs = async () => { order.push('ack'); };
+  client.closeFrameStream = async () => { order.push('close'); };
+  const publisher = new SessionFramePublisher({ client, sessionDisplay });
+  publisher.setInputHandler(async (event) => { order.push(event.text); });
+  await publisher.start();
+  publisher.markReady();
+  await waitFor(() => publisher.demandVersion === 1);
+  await publisher.stop({ drainInput: true });
+  assert.deepEqual(order, ['seal', 'final edit', 'ack', 'close']);
 });

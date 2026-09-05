@@ -1,3 +1,4 @@
+import { readStreamChunk } from '../../../../desktop/cloud-stream-reader.mjs';
 import type {
   CloudCommandRequest,
   CloudFollowupAttachment,
@@ -779,6 +780,12 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
     retried?: boolean;
     signal?: AbortSignal;
   } = {}) => {
+    const timeout = new AbortController();
+    const timer = setTimeout(() => timeout.abort(Object.assign(new Error('Cloud request timed out'), {
+      code: 'ETIMEDOUT', retryable: true,
+    })), stream ? 15_000 : 30_000);
+    signal = signal ? AbortSignal.any([signal, timeout.signal]) : timeout.signal;
+    try {
     if (!selectedProfile) throw new Error('Cloud 서버를 먼저 연결해 주세요.');
     const generation = profileGeneration;
     const authenticated = auth
@@ -844,6 +851,7 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
     }
     if (stream) throw cloudError('Cloud 스트림 응답 형식이 잘못됐습니다.', 'SSE_PROOF_INVALID');
     return { response, bytes, parsed, context };
+    } finally { clearTimeout(timer); }
   };
 
   const requestJson = async (pathname: string, options: Parameters<typeof request>[1] = {}) => (
@@ -1226,8 +1234,9 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
           const reader = stream.response.body.getReader();
           const decoder = new TextDecoder();
           let buffer = '';
+          try {
           for (;;) {
-            const { done, value } = await reader.read();
+            const { done, value } = await readStreamChunk(reader);
             requireCurrentWatcher(controller, selectedProfile, generation);
             if (done) break;
             buffer += decoder.decode(value, { stream: true });
@@ -1282,6 +1291,7 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
               eventSequences.set(sessionId, sequence);
             }
           }
+          } finally { void reader.cancel().catch(() => {}); reader.releaseLock(); }
           failures = 0;
           if (link.kind !== 'ready' || connection === 'error') {
             link = { kind: 'ready', error: null, attempt: 0, canRecreate: false };

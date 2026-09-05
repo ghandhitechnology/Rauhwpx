@@ -86,6 +86,7 @@ export class SessionFramePublisher {
     this.captureFailures = 0;
     this.generation = 0;
     this.inputHandler = null;
+    this.appliedInputs = new Map();
   }
 
   snapshot() {
@@ -131,13 +132,13 @@ export class SessionFramePublisher {
     return this.snapshot();
   }
 
-  async stop() {
+  async stop({ drainInput = false } = {}) {
     if (this.stopPromise) return this.stopPromise;
-    this.stopPromise = this.#stop();
+    this.stopPromise = this.#stop(drainInput).catch((error) => { this.stopPromise = null; throw error; });
     return this.stopPromise;
   }
 
-  async #stop() {
+  async #stop(drainInput) {
     this.stopping = true;
     this.ready = false;
     this.interested = false;
@@ -149,6 +150,11 @@ export class SessionFramePublisher {
     await this.loop?.catch(() => {});
     this.current = null;
     const streamId = this.streamId;
+    if (drainInput && streamId && this.inputHandler && this.client.sealFrameInput) {
+      const demand = await this.client.sealFrameInput(streamId, this.demandVersion);
+      await this.#applyInputs(demand.inputEvents ?? [], streamId);
+      this.demandVersion = demand.version;
+    }
     this.streamId = null;
     if (streamId) await this.client.closeFrameStream(streamId).catch((error) => this.#fail(error));
     this.status = 'stopped';
@@ -232,13 +238,7 @@ export class SessionFramePublisher {
             await this.#backoff(1, this.controller.signal);
             continue;
           }
-          for (const input of inputEvents) {
-            try {
-              await this.inputHandler(input.event);
-            } catch (error) {
-              this.onEvent({ type: 'display-input-failed', error: String(error?.message ?? error) });
-            }
-          }
+          await this.#applyInputs(inputEvents, demandStreamId);
         }
         this.demandVersion = demand.version;
         this.interested = demand.interested === true;
@@ -273,11 +273,36 @@ export class SessionFramePublisher {
     this.streamId = null;
     this.sequence = 0;
     this.demandVersion = 0;
+    this.appliedInputs.clear();
     this.lastPublishedDigest = null;
     this.interested = false;
     this.demandController?.abort();
     this.status = 'connecting';
     await this.#stopCapture();
+  }
+
+  async #applyInputs(inputs, streamId) {
+    const results = [];
+    let failed = false;
+    for (const input of inputs) {
+      let result = this.appliedInputs.get(input.version);
+      if (!result) {
+        try {
+          if (failed) throw new Error("Skipped after an earlier input failed");
+          await this.inputHandler(input.event);
+          result = { version: input.version, ok: true };
+        } catch (error) {
+          result = { version: input.version, ok: false, error: String(error?.message ?? error).slice(0, 256) };
+          this.onEvent({ type: 'display-input-failed', sequence: input.sequence, error: result.error });
+          if (!failed) await this.inputHandler({ kind: 'reset' }).catch(() => {});
+        }
+        this.appliedInputs.set(input.version, result);
+      }
+      failed ||= !result.ok;
+      results.push(result);
+    }
+    if (results.length && this.client.acknowledgeFrameInputs) await this.client.acknowledgeFrameInputs(streamId, results);
+    for (const input of inputs) this.appliedInputs.delete(input.version);
   }
 
   #stopForError(error) {
@@ -540,6 +565,11 @@ export class SessionFramePublisher {
           return;
         }
         this.#fail(error);
+        if (this.pending) {
+          this.current = this.pending;
+          this.pending = null;
+          return;
+        }
         await this.#backoff(failures += 1, signal);
       }
     }

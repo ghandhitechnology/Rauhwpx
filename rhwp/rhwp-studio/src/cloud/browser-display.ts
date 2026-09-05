@@ -1,4 +1,5 @@
 import { openDisplayConnection, type CloudDisplayConnectionOptions } from './display-connection.ts';
+import { readStreamChunk } from '../../../../desktop/cloud-stream-reader.mjs';
 import {
   CLOUD_DISPLAY_MAX_FRAME_BYTES,
   CLOUD_DISPLAY_MAX_FPS,
@@ -9,6 +10,7 @@ import type {
   CloudDisplayAvailableCapability,
   CloudDisplayConnection,
   CloudDisplayEvent,
+  CloudDisplayFrame,
   CloudDisplayFrameMetadata,
   CloudDisplayInputEvent,
 } from './types.ts';
@@ -150,11 +152,13 @@ export function createBrowserDisplayManager({
     after: number,
     signal: AbortSignal,
     onMetadata: (metadata: CloudDisplayFrameMetadata) => void,
+    onFrame?: (frame: CloudDisplayFrame) => void,
   ): Promise<number> => {
     const selectedProfile = profile();
     if (!selectedProfile) throw cloudError('Cloud 페어링이 필요합니다.', 'PAIRING_REQUIRED');
     const pathname = `/v1/sessions/${encodeURIComponent(sessionId)}/display/frames`
-      + `?streamId=${encodeURIComponent(displayCapability.streamId)}&after=${encodeURIComponent(after)}`;
+      + `?streamId=${encodeURIComponent(displayCapability.streamId)}&after=${encodeURIComponent(after)}`
+      + (onFrame ? '&inline=1' : '');
     const stream = await request(pathname, {
       headers: { Accept: 'text/event-stream' },
       stream: true,
@@ -172,10 +176,10 @@ export function createBrowserDisplayManager({
     let sequence = after;
     try {
       for (;;) {
-        const { done, value } = await reader.read();
+        const { done, value } = await readStreamChunk(reader);
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
-        if (buffer.length > DISPLAY_JSON_BYTES) {
+        if (buffer.length > 2 * 1024 * 1024) {
           throw cloudError('Cloud 디스플레이 이벤트가 너무 큽니다.', 'SSE_PAYLOAD_INVALID');
         }
         const parsed = parseSse(buffer);
@@ -186,14 +190,31 @@ export function createBrowserDisplayManager({
           try { payload = JSON.parse(frame.data); } catch {
             throw cloudError('Cloud 디스플레이 이벤트가 잘못됐습니다.', 'SSE_PAYLOAD_INVALID');
           }
+          const envelope = payload as { payload?: Record<string, unknown> };
+          const encoded = envelope?.payload?.bytesBase64;
+          if (encoded !== undefined) {
+            if (!onFrame || typeof encoded !== 'string' || encoded.length > Math.ceil(CLOUD_DISPLAY_MAX_FRAME_BYTES / 3) * 4) {
+              throw cloudError('Cloud 화면 데이터가 잘못됐습니다.', 'DISPLAY_FRAME_INTEGRITY_FAILED');
+            }
+            delete envelope.payload!.bytesBase64;
+          }
           const metadata = parseCloudDisplayFrameEnvelope(payload, displayCapability, verified, frame.event);
           if (!metadata) throw cloudError('Cloud 디스플레이 이벤트가 잘못됐습니다.', 'SSE_PAYLOAD_INVALID');
           if (verified <= sequence) continue;
           sequence = verified;
-          onMetadata(metadata);
+          if (typeof encoded === 'string' && onFrame) {
+            let binary: string;
+            try { binary = atob(encoded); } catch { throw cloudError('Cloud 화면 데이터가 잘못됐습니다.', 'DISPLAY_FRAME_INTEGRITY_FAILED'); }
+            const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+            if (btoa(binary) !== encoded || bytes.byteLength !== metadata.byteLength || await sha256(bytes) !== metadata.sha256) {
+              throw cloudError('Cloud 화면 검증에 실패했습니다.', 'DISPLAY_FRAME_INTEGRITY_FAILED');
+            }
+            onFrame({ kind: 'frame', ...metadata, bytes });
+          } else onMetadata(metadata);
         }
       }
     } finally {
+      void reader.cancel().catch(() => {});
       reader.releaseLock();
     }
     return sequence;
@@ -266,12 +287,25 @@ export function createBrowserDisplayManager({
           interest(id, streamId, viewerId, activeInterest, input.signal)
         ),
         frames: (id, displayCapability, after, input) => frames(
-          id, displayCapability, after, input.signal, input.onMetadata,
+          id, displayCapability, after, input.signal, input.onMetadata, input.onFrame,
         ),
         frame: (metadata, input) => frame(metadata, input.signal),
         input: (id, streamId, viewerId, sequence, event, inputOptions) => (
           input(id, streamId, viewerId, sequence, event, inputOptions.signal)
         ),
+        inputs: async (id, streamId, viewerId, events, { signal }) => {
+          const result = await request(`/v1/sessions/${encodeURIComponent(id)}/display/input`, {
+            method: 'POST', body: { streamId, viewerId, events }, maxBytes: DISPLAY_JSON_BYTES,
+            signal: AbortSignal.any([signal, AbortSignal.timeout(3500)]),
+          });
+          const value = result.parsed as { streamId?: string; viewerId?: string; results?: Array<{ sequence: number; applied: boolean; error?: string }> };
+          if (value?.streamId !== streamId || value?.viewerId !== viewerId || !Array.isArray(value.results)
+            || value.results.length !== events.length || value.results.some((item, index) => item.sequence !== events[index].sequence || typeof item.applied !== 'boolean')) {
+            throw cloudError('Cloud 입력 확인 응답이 잘못됐습니다.', 'DISPLAY_INPUT_INVALID');
+          }
+          const failed = value.results.find((item) => !item.applied);
+          if (failed) throw cloudError(failed.error || 'Cloud 입력을 적용하지 못했습니다.', 'DISPLAY_INPUT_FAILED');
+        },
       }, sessionId, (event: CloudDisplayEvent) => {
         if (active === entry && !entry.controller.signal.aborted) {
           listener?.({ connectionId: entry.connectionId, event });

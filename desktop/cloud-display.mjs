@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
+import { CloudInputQueue } from './cloud-input-queue.mjs';
 
 export const DISPLAY_FRAME_PROTOCOL = 'rauhwpx-frame-v1';
 export const DISPLAY_INPUT_PROTOCOL = 'rauhwpx-input-v1';
@@ -88,7 +89,8 @@ export function parseDisplayCapability(value, expectedSessionId) {
       || raw.reason !== undefined || raw.message !== undefined || raw.retryable !== undefined
       || raw.maxFrameBytes !== MAX_DISPLAY_FRAME_BYTES || raw.maxFps !== MAX_DISPLAY_FPS
       || raw.inputProtocol !== DISPLAY_INPUT_PROTOCOL
-      || raw.maxInputEventsPerSecond !== MAX_DISPLAY_INPUT_EVENTS_PER_SECOND) {
+      || raw.maxInputEventsPerSecond !== MAX_DISPLAY_INPUT_EVENTS_PER_SECOND
+      || raw.inputBatchSize !== undefined && raw.inputBatchSize !== 32) {
       throw displayError('Cloud display capability is invalid', 'DISPLAY_CAPABILITY_INVALID');
     }
     return Object.freeze({
@@ -102,6 +104,7 @@ export function parseDisplayCapability(value, expectedSessionId) {
       maxFps: MAX_DISPLAY_FPS,
       inputProtocol: DISPLAY_INPUT_PROTOCOL,
       maxInputEventsPerSecond: MAX_DISPLAY_INPUT_EVENTS_PER_SECOND,
+      ...(raw.inputBatchSize === 32 ? { inputBatchSize: 32 } : {}),
     });
   }
   if (raw.kind !== 'unavailable' || raw.protocol !== undefined || raw.streamId !== undefined
@@ -215,7 +218,7 @@ class CloudDisplayConnectionImpl {
   #downloading = null;
   #lastSequence = 0;
   #inputSequence = 0;
-  #inputChain = Promise.resolve();
+  #inputQueue;
   #interestRenewMs;
   #retryBaseMs;
   #retryMaxMs;
@@ -228,7 +231,21 @@ class CloudDisplayConnectionImpl {
     this.#interestRenewMs = Math.max(1, Number(options.interestRenewMs) || 12_000);
     this.#retryBaseMs = Math.max(0, Number(options.retryBaseMs) || 250);
     this.#retryMaxMs = Math.max(this.#retryBaseMs, Number(options.retryMaxMs) || 5_000);
-    this.#maxReconnectAttempts = Math.max(1, Number(options.maxReconnectAttempts) || 12);
+    this.#maxReconnectAttempts = Math.max(1, Number(options.maxReconnectAttempts) || Infinity);
+    this.#inputQueue = new CloudInputQueue(async (streamId, events) => {
+      if (this.#closed || this.#controller.signal.aborted) throw abortReason(this.#controller.signal);
+      if (this.#capability?.kind !== 'available' || this.#capability.streamId !== streamId) {
+        throw displayError('Cloud display stream was replaced', 'DISPLAY_STREAM_REPLACED');
+      }
+      const signal = this.#phase?.controller.signal ?? this.#controller.signal;
+      if (this.#capability.inputBatchSize && typeof this.#client.sendDisplayInputs === 'function') {
+        const batch = events.map((event) => ({ sequence: ++this.#inputSequence, event }));
+        await this.#client.sendDisplayInputs(this.#sessionId, streamId, this.#viewerId, batch, { signal });
+      } else {
+        await this.#client.sendDisplayInput(this.#sessionId, streamId, this.#viewerId,
+          ++this.#inputSequence, events[0], { signal, timeoutMs: 3_000 });
+      }
+    }, () => this.#capability?.inputBatchSize && typeof this.#client.sendDisplayInputs === 'function' ? 32 : 1);
     this.#removeExternalAbort = relayAbort(options.signal, this.#controller);
   }
 
@@ -273,27 +290,10 @@ class CloudDisplayConnectionImpl {
 
   sendInput(event) {
     const capability = this.#capability;
-    if (this.#closed || capability?.kind !== 'available') {
+    if (this.#closed || !this.#phase || this.#phase.controller.signal.aborted || capability?.kind !== 'available') {
       return Promise.reject(displayError('Cloud display input is unavailable', 'DISPLAY_INPUT_UNAVAILABLE'));
     }
-    const streamId = capability.streamId;
-    const sequence = ++this.#inputSequence;
-    const operation = this.#inputChain.then(async () => {
-      if (this.#closed || this.#controller.signal.aborted) throw abortReason(this.#controller.signal);
-      if (this.#capability?.kind !== 'available' || this.#capability.streamId !== streamId) {
-        throw displayError('Cloud display stream was replaced', 'DISPLAY_STREAM_REPLACED');
-      }
-      await this.#client.sendDisplayInput(
-        this.#sessionId,
-        streamId,
-        this.#viewerId,
-        sequence,
-        event,
-        { signal: this.#controller.signal },
-      );
-    });
-    this.#inputChain = operation.catch(() => {});
-    return operation;
+    return this.#inputQueue.enqueue(capability.streamId, event);
   }
 
   async #close() {
@@ -302,7 +302,7 @@ class CloudDisplayConnectionImpl {
     this.#controller.abort();
     this.#phase?.controller.abort();
     this.#pending = null;
-    await Promise.allSettled([this.#loop, this.#downloading, this.#inputChain].filter(Boolean));
+    await Promise.allSettled([this.#loop, this.#downloading, this.#inputQueue.close()].filter(Boolean));
     await this.#releaseInterest();
   }
 
@@ -405,11 +405,19 @@ class CloudDisplayConnectionImpl {
       const watch = this.#client.readDisplayFrames(this.#sessionId, capability, this.#lastSequence, {
         signal: controller.signal,
         onMetadata: (metadata) => this.#queueMetadata(metadata, phase),
+        onFrame: (frame) => {
+          if (this.#closed || this.#phase !== phase || frame.sessionId !== this.#sessionId
+            || frame.streamId !== capability.streamId || frame.sequence <= this.#lastSequence) return;
+          this.#lastSequence = frame.sequence;
+          phase.markHealthy();
+          this.#emit(frame);
+        },
       });
       const renew = this.#renewInterest(capability, controller.signal);
       await Promise.race([watch, renew, failure]);
     } finally {
       controller.abort();
+      this.#inputQueue.reset();
       removeAbort();
       if (this.#phase === phase) this.#phase = null;
       await this.#downloading?.catch(() => {});

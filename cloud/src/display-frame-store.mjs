@@ -192,6 +192,8 @@ export class DisplayFrameStore {
       viewers: new Map(),
       controllerKey: null,
       inputEvents: [],
+      inputSealed: false,
+      inputWaiters: new Set(),
       subscribers: new Set(),
       waiters: new Set(),
       demandVersion: 1,
@@ -303,6 +305,8 @@ export class DisplayFrameStore {
         expiresAt,
         lastInput: current?.lastInput ?? null,
         inputTimes: current?.inputTimes ?? [],
+        receipts: current?.receipts ?? new Map(),
+        lastBatch: current?.lastBatch ?? null,
       });
       stream.graceUntil = 0;
     } else {
@@ -318,7 +322,7 @@ export class DisplayFrameStore {
     };
   }
 
-  sendInput(sessionId, streamId, deviceId, viewerId, sequence, value) {
+  sendInput(sessionId, streamId, deviceId, viewerId, sequence, value, notify = true) {
     identifier(deviceId, 'deviceId');
     identifier(viewerId, 'viewerId');
     if (!Number.isSafeInteger(sequence) || sequence < 1) {
@@ -326,6 +330,7 @@ export class DisplayFrameStore {
     }
     const stream = this.#stream(sessionId, streamId);
     this.#sweep(stream);
+    if (stream.inputSealed) throw displayError('DISPLAY_INPUT_SEALED', 'Cloud document is being saved for handoff', 409);
     const viewerKey = JSON.stringify([deviceId, viewerId]);
     const viewer = stream.viewers.get(viewerKey);
     if (!viewer || viewer.expiresAt <= this.now()) {
@@ -361,12 +366,89 @@ export class DisplayFrameStore {
     viewer.inputTimes.push(now);
     stream.demandVersion += 1;
     const acceptedAt = new Date(now).toISOString();
-    const queued = Object.freeze({ version: stream.demandVersion, sequence, event });
+    const queued = Object.freeze(Object.defineProperty({ version: stream.demandVersion, sequence, event }, 'viewerKey', { value: viewerKey }));
     stream.inputEvents.push(queued);
     const receipt = Object.freeze({ streamId, viewerId, sequence, accepted: true, acceptedAt });
     viewer.lastInput = { sequence, digest, receipt };
-    this.#notifyDemand(stream);
+    if (notify) this.#notifyDemand(stream);
     return receipt;
+  }
+
+  sendInputs(sessionId, streamId, deviceId, viewerId, events) {
+    if (!Array.isArray(events) || events.length < 1 || events.length > 32) {
+      throw displayError('DISPLAY_INPUT_INVALID', 'Input batch must contain 1 to 32 events');
+    }
+    const stream = this.#stream(sessionId, streamId);
+    this.#sweep(stream);
+    const key = JSON.stringify([deviceId, viewerId]);
+    const viewer = stream.viewers.get(key);
+    if (!viewer) throw displayError('DISPLAY_INTEREST_REQUIRED', 'Active display interest is required for input', 409);
+    const digest = createHash('sha256').update(JSON.stringify(events)).digest('hex');
+    if (viewer.lastBatch?.digest === digest) return viewer.lastBatch.receipts;
+    if (events.some((item, index) => !item || !Number.isSafeInteger(item.sequence)
+      || index > 0 && item.sequence !== events[index - 1].sequence + 1)) {
+      throw displayError('DISPLAY_INPUT_SEQUENCE_INVALID', 'Input batch sequences must be consecutive');
+    }
+    const previous = { inputEvents: [...stream.inputEvents], controllerKey: stream.controllerKey,
+      demandVersion: stream.demandVersion, lastInput: viewer.lastInput, inputTimes: [...viewer.inputTimes] };
+    try {
+      const receipts = events.map(({ sequence, event }) => this.sendInput(sessionId, streamId, deviceId, viewerId, sequence, event, false));
+      viewer.lastBatch = { digest, receipts };
+      this.#notifyDemand(stream);
+      return receipts;
+    } catch (error) {
+      Object.assign(stream, { inputEvents: previous.inputEvents, controllerKey: previous.controllerKey, demandVersion: previous.demandVersion });
+      viewer.lastInput = previous.lastInput;
+      viewer.inputTimes = previous.inputTimes;
+      throw error;
+    }
+  }
+
+  acknowledgeInputs(sessionId, workerId, streamId, results) {
+    const stream = this.#ownedStream(sessionId, workerId, streamId);
+    if (!Array.isArray(results) || results.length > MAX_QUEUED_INPUT_EVENTS) {
+      throw displayError('DISPLAY_INPUT_INVALID', 'Input acknowledgements are invalid');
+    }
+    for (const result of results) {
+      if (!Number.isSafeInteger(result?.version) || typeof result.ok !== 'boolean') {
+        throw displayError('DISPLAY_INPUT_INVALID', 'Input acknowledgement is invalid');
+      }
+      const input = stream.inputEvents.find((candidate) => candidate.version === result.version);
+      if (!input?.viewerKey) continue;
+      const viewer = stream.viewers.get(input.viewerKey);
+      if (!viewer) continue;
+      viewer.receipts.set(input.sequence, { sequence: input.sequence, applied: result.ok,
+        ...(result.ok ? {} : { error: String(result.error ?? 'Remote input failed').slice(0, 256) }) });
+      while (viewer.receipts.size > MAX_QUEUED_INPUT_EVENTS) viewer.receipts.delete(viewer.receipts.keys().next().value);
+    }
+    for (const notify of [...stream.inputWaiters]) notify();
+    return { acknowledged: true };
+  }
+
+  waitForInputs(sessionId, streamId, deviceId, viewerId, sequences, { signal, timeoutMs = 2500 } = {}) {
+    const stream = this.#stream(sessionId, streamId);
+    const key = JSON.stringify([deviceId, viewerId]);
+    if (stream.inputWaiters.size >= 32) throw displayError('DISPLAY_INPUT_BACKLOG', 'Too many input confirmations are pending', 429);
+    return new Promise((resolve, reject) => {
+      let timer;
+      const cleanup = () => { clearTimeout(timer); stream.inputWaiters.delete(check); signal?.removeEventListener('abort', abort); };
+      const abort = () => { cleanup(); reject(displayError('DISPLAY_INPUT_UNCONFIRMED', 'Cloud input delivery could not be confirmed', 408)); };
+      const check = () => {
+        if (stream.closed || !stream.viewers.has(key)) { abort(); return; }
+        const results = sequences.map((sequence) => stream.viewers.get(key).receipts.get(sequence));
+        if (results.every(Boolean)) { cleanup(); resolve(results); }
+      };
+      timer = setTimeout(abort, timeoutMs);
+      stream.inputWaiters.add(check);
+      signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) abort(); else check();
+    });
+  }
+
+  sealInput(sessionId, workerId, streamId, after) {
+    const stream = this.#ownedStream(sessionId, workerId, streamId);
+    stream.inputSealed = true;
+    return this.#demand(stream, false, after);
   }
 
   waitForDemand(sessionId, workerId, streamId, after = 0, {
@@ -454,6 +536,7 @@ export class DisplayFrameStore {
       maxFps: MAX_DISPLAY_FPS,
       inputProtocol: DISPLAY_INPUT_PROTOCOL,
       maxInputEventsPerSecond: MAX_DISPLAY_INPUT_EVENTS_PER_SECOND,
+      inputBatchSize: 32,
     });
   }
 
@@ -560,6 +643,7 @@ export class DisplayFrameStore {
   #close(stream) {
     if (stream.closed) return;
     stream.closed = true;
+    for (const notify of [...stream.inputWaiters]) notify();
     if (this.streams.get(stream.sessionId) === stream) this.streams.delete(stream.sessionId);
     clearTimeout(stream.expiryTimer);
     stream.frames.length = 0;

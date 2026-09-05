@@ -1869,7 +1869,7 @@ export function creditsRequestListener(service, {
         send(200, await service.stopCloudRun(bearerToken(req), decodeURIComponent(stop[1]), body));
         return;
       }
-      const internal = url.pathname.match(/^\/v1\/internal\/cloud\/runs\/([^/]+)\/(allocation|heartbeat|checkpoint|complete|release)$/);
+      const internal = url.pathname.match(/^\/v1\/internal\/cloud\/runs\/([^/]+)\/(allocation|activity|heartbeat|checkpoint|complete|release)$/);
       if (req.method === 'POST' && internal) {
         const body = await readJson(req);
         const secret = bearerToken(req);
@@ -1877,6 +1877,7 @@ export function creditsRequestListener(service, {
         const action = internal[2];
         let result;
         if (action === 'allocation') result = await service.confirmCloudAllocation(secret, runId);
+        if (action === 'activity') result = await service.touchCloudWorkspace(secret, runId);
         if (action === 'heartbeat') result = await service.heartbeatCloudRun(secret, runId);
         if (action === 'checkpoint') result = await service.checkpointCloudRun(secret, runId, body.checkpointId);
         if (action === 'complete') result = await service.completeCloudRun(secret, runId, body);

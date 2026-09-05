@@ -377,12 +377,10 @@ test('a persisted turn-boundary receipt retries after restart without duplicatin
     client: {
       loadProfile: async () => null,
       isPaired: async () => false,
-      downloadCheckpoint: async () => { throw new Error('temporary download failure'); },
+      downloadCheckpoint: async () => { firstFailure.resolve(); throw new Error('temporary download failure'); },
       watchSession: async (_sessionId, _after, { onReconnect, onEvent }) => {
         await onReconnect();
-        await onEvent({ sequence: 6, type: 'boundary.committed', payload: boundary }).catch(() => {
-          firstFailure.resolve();
-        });
+        await onEvent({ sequence: 6, type: 'boundary.committed', payload: boundary });
       },
     },
     store: firstStore,
@@ -439,6 +437,10 @@ test('a persisted turn-boundary receipt retries after restart without duplicatin
   });
   await second.start();
   await restarted.promise;
+  for (let index = 0; index < 200; index++) {
+    if (!(await secondStore.get(created.id)).pendingTurnBoundary) break;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
   record = await secondStore.get(created.id);
   assert.equal(record.pendingTurnBoundary, null);
   assert.equal(record.lastSyncedBoundaryOperation, boundary.operationId);
@@ -3244,4 +3246,58 @@ test('AUTH_REQUIRED fails the transfer once instead of retrying five times', asy
   assert.match(record.error, /must be authenticated on this VPS/);
   assert.doesNotMatch(record.error, /failed 5 times/);
   assert.equal(transfers, 1);
+});
+
+test('slow checkpoint mirroring lets later events through and preserves the newer pending revision', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'raucloud-async-checkpoint-'));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const original = Buffer.from('original');
+  const originPath = path.join(directory, 'document.hwpx');
+  await writeFile(originPath, original);
+  const created = await store.create({
+    sessionId: 'desktop-async', threadId: 'thread-async', documentId: 'document-async', originPath,
+    documentName: 'document.hwpx', documentBytes: original, timeline: null, provider: 'codex', limits: { maxTurns: 10 },
+  });
+  await store.transition(created.id, 'uploading');
+  await store.transition(created.id, 'committing');
+  await store.transition(created.id, 'running', { cloudSessionId: 'cloud-async', serverVersion: 1 });
+  const ready = Promise.withResolvers();
+  const started = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  let deliver;
+  const downloads = [];
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => null, isPaired: async () => false,
+      watchSession: async (_id, _after, { signal, onEvent }) => {
+        deliver = onEvent;
+        ready.resolve();
+        if (!signal.aborted) await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+      },
+      downloadCheckpoint: async (_id, { operationId }) => {
+        downloads.push(operationId);
+        if (operationId === 'revision-1') { started.resolve(); await release.promise; }
+        const bytes = Buffer.from(operationId);
+        return { bytes, sha256: createHash('sha256').update(bytes).digest('hex'), size: bytes.length,
+          boundaryOperation: operationId, revision: operationId === 'revision-1' ? 1 : 2, turn: 0 };
+      },
+    }, store, provisioner: {}, recoveryDir: path.join(directory, 'recovery'),
+  });
+  t.after(async () => { release.resolve(); await coordinator.stop(); await store.flush(); await rm(directory, { recursive: true, force: true }); });
+  await coordinator.start();
+  await ready.promise;
+  await deliver({ sequence: 2, type: 'boundary.committed', payload: { kind: 'operation', operationId: 'revision-1', turnNumber: 0, revision: 1 } });
+  await started.promise;
+  await deliver({ sequence: 3, type: 'boundary.committed', payload: { kind: 'operation', operationId: 'revision-2', turnNumber: 0, revision: 2 } });
+  await deliver({ sequence: 4, type: 'agent.event', payload: { text: 'arrives during download' } });
+  assert.equal((await store.get(created.id)).lastEventSequence, 4);
+  assert.equal((await store.get(created.id)).pendingTurnBoundary.operationId, 'revision-2');
+  release.resolve();
+  for (let index = 0; index < 200; index++) {
+    if ((await store.get(created.id)).lastSyncedBoundaryOperation === 'revision-2') break;
+    await delay(5);
+  }
+  assert.equal((await store.get(created.id)).pendingTurnBoundary, null);
+  assert.equal(await readFile(originPath, 'utf8'), 'revision-2');
+  assert.deepEqual(downloads, ['revision-1', 'revision-2']);
 });

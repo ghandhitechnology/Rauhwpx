@@ -619,6 +619,7 @@ test('worker API accepts only the session worker token', async (t) => {
 });
 
 test('an authenticated worker frame reaches paired devices with signed transient responses', async (t) => {
+  let activities = 0;
   const {
     base,
     workerBase,
@@ -627,7 +628,7 @@ test('an authenticated worker frame reaches paired devices with signed transient
     sessionStore,
     identity,
     database,
-  } = await fixture(t, { withWorkerControl: true });
+  } = await fixture(t, { withWorkerControl: true, raucloudLease: { noteActivity() { activities++; } } });
   const origin = await pairOverHttp(auth, base);
   const second = auth.redeemPairingCode({
     code: auth.createPairingCode().code,
@@ -704,6 +705,7 @@ test('an authenticated worker frame reaches paired devices with signed transient
     maxFps: 12,
     inputProtocol: 'rauhwpx-input-v1',
     maxInputEventsPerSecond: 60,
+    inputBatchSize: 32,
   });
   const capabilityNonce = proofNonce();
   const publicCapability = await publicFetch(`${base}/v1/sessions/${created.id}/display`, {
@@ -716,6 +718,7 @@ test('an authenticated worker frame reaches paired devices with signed transient
     pathAndQuery: `/rauhwpx-cloud/v1/sessions/${created.id}/display`,
   });
 
+  await worker.events([{ type: 'agent.event', payload: { text: 'first' } }, { type: 'agent.event', payload: { text: 'second' } }]);
   const durableEventCount = database.prepare(
     'SELECT COUNT(*) AS count FROM session_events WHERE session_id = ?',
   ).get(created.id).count;
@@ -831,6 +834,29 @@ test('an authenticated worker frame reaches paired devices with signed transient
   });
   assert.equal(secondRelease.status, 200);
   assert.equal((await finalDemand).interested, false);
+  displayFrameStore.setInterest(created.id, capability.streamId, second.device.id, 'viewer-batch', true);
+  const batchRequest = publicFetch(`${base}/v1/sessions/${created.id}/display/input`, {
+    method: 'POST', headers: { Authorization: `Bearer ${second.accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ streamId: capability.streamId, viewerId: 'viewer-batch', events: [
+      { sequence: 1, event: { kind: 'text', text: 'batch edit' } },
+      { sequence: 2, event: { kind: 'key', action: 'up', key: 'Shift' } },
+    ] }),
+  });
+  let batchDemand;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    batchDemand = await worker.frameDemand(capability.streamId, { after: 0 });
+    if (batchDemand.inputEvents.some((entry) => entry.event.text === 'batch edit')) break;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  await worker.acknowledgeFrameInputs(capability.streamId, batchDemand.inputEvents.map((entry) => ({ version: entry.version, ok: true })));
+  const batchResponse = await batchRequest;
+  assert.equal(batchResponse.status, 200);
+  assert.deepEqual((await batchResponse.json()).results, [{ sequence: 1, applied: true }, { sequence: 2, applied: true }]);
+  assert.equal(activities, 2);
+  const sealed = await worker.sealFrameInput(capability.streamId, batchDemand.version);
+  assert.equal(sealed.inputEvents.length, 0);
+  displayFrameStore.setInterest(created.id, capability.streamId, second.device.id, 'viewer-batch', false);
+
 
   const frameBytes = jpeg(1280, 800, 'paired-device-jpeg');
   const metadata = await worker.publishFrame(capability.streamId, {
@@ -848,7 +874,7 @@ test('an authenticated worker frame reaches paired devices with signed transient
   displayFrameStore.maxViewersPerStream = 1;
   const watchController = new AbortController();
   const watchNonce = proofNonce();
-  const watchPath = `/v1/sessions/${created.id}/display/frames?streamId=${encodeURIComponent(capability.streamId)}&after=0`;
+  const watchPath = `/v1/sessions/${created.id}/display/frames?streamId=${encodeURIComponent(capability.streamId)}&after=0&inline=1`;
   const watch = await publicFetch(`${base}${watchPath}`, {
     headers: { Authorization: `Bearer ${second.accessToken}` },
     proofNonce: watchNonce,
@@ -883,7 +909,7 @@ test('an authenticated worker frame reaches paired devices with signed transient
   }));
   const frameEvent = JSON.parse(fields.data);
   assert.equal(frameEvent.type, 'display.frame');
-  assert.deepEqual(frameEvent.payload, metadata);
+  assert.deepEqual(frameEvent.payload, { ...metadata, bytesBase64: frameBytes.toString('base64') });
   const eventDigest = createHash('sha256').update(fields.data).digest('hex');
   assert.equal(fields['rauhwpx-sha256'], eventDigest);
   assert.equal(verify(

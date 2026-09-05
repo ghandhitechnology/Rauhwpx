@@ -252,6 +252,7 @@ export class CloudCoordinator extends EventEmitter {
   #remoteSessions = new Map();
   #remoteWatchSequence = new Map();
   #timelinePending = new Map();
+  #artifactSyncs = new Map();
   #transferAdmissionChain = Promise.resolve();
   #snapshotChain = Promise.resolve();
   #profileChangeChain = Promise.resolve();
@@ -854,8 +855,9 @@ export class CloudCoordinator extends EventEmitter {
   #armLinkWatchdog() {
     if (this.#linkWatchdog || this.#stopped) return;
     this.#linkWatchdog = setInterval(() => {
-      if (this.#stopped || this.#link.kind !== 'ready' || this.#linkProbeBusy) return;
+      if (this.#stopped || this.#link.kind === 'recreating' || this.#linkProbeBusy || this.#linkHealPromise) return;
       if (!this.#hasLiveWatchedSession()) return;
+      if (this.#link.kind !== 'ready') { this.#scheduleLinkHeal(); return; }
       void this.#probeLiveLink();
     }, 20_000);
     this.#linkWatchdog.unref?.();
@@ -936,13 +938,8 @@ export class CloudCoordinator extends EventEmitter {
         profileMessage: error.message,
       });
       this.#emit({ type: 'cloud-link-failed', snapshot, error: error.message });
-      if (canRecreate && this.#link.attempt >= 2) {
-        this.#profileOperationContext.exit(() => {
-          void this.recreateCloud().catch((healError) => {
-            this.#emit({ type: 'cloud-link-heal-failed', error: healError.message });
-          });
-        });
-      }
+      // A failed probe does not prove the workspace has been lost. Keep its
+      // identity and handoffs intact; recreation is an explicit user action.
       return snapshot;
     }
   }
@@ -2502,20 +2499,7 @@ export class CloudCoordinator extends EventEmitter {
     const controller = new AbortController();
     this.#watchers.set(watcherKey, controller);
     this.#armLinkWatchdog();
-    const onReconnect = () => this.#profileOperationContext.exit(() => this.#withProfileOperation(async () => {
-      this.#assertProfileEpoch(profileEpoch);
-      try {
-        await this.#retryPendingTurnBoundary(sessionId, handoffId);
-      } catch (error) {
-        this.#emit({
-          type: 'turn-autosync-error',
-          sessionId,
-          operationId: (await this.#store.get(handoffId))?.pendingTurnBoundary?.operationId,
-          error: error.message,
-        });
-        throw error;
-      }
-    }, { expectedEpoch: profileEpoch }));
+    const onReconnect = () => { this.#scheduleArtifactSync(sessionId, handoffId, profileEpoch); };
     const onEvent = (event) => this.#profileOperationContext.exit(() => this.#withProfileOperation(async () => {
       this.#assertProfileEpoch(profileEpoch);
       const source = event.session ?? event.payload?.session ?? event.payload ?? event;
@@ -2554,9 +2538,9 @@ export class CloudCoordinator extends EventEmitter {
           ? null
           : source.currentWait ?? current.currentWait ?? null;
       let pendingTurnBoundary = current.pendingTurnBoundary ?? null;
-      if (event.type === 'boundary.committed' && source.kind === 'turn') {
+      if (event.type === 'boundary.committed' && ['turn', 'operation'].includes(source.kind)) {
         if (typeof source.operationId !== 'string' || !source.operationId
-          || !Number.isSafeInteger(source.turnNumber) || source.turnNumber < 1
+          || !Number.isSafeInteger(source.turnNumber) || source.turnNumber < 0
           || !Number.isSafeInteger(source.revision) || source.revision < 1) {
           throw new Error('Cloud turn boundary is invalid');
         }
@@ -2600,42 +2584,9 @@ export class CloudCoordinator extends EventEmitter {
         event,
         handoff: updated,
       });
-      if (updated?.pendingTurnBoundary) {
-        try {
-          await this.#retryPendingTurnBoundary(sessionId, handoffId);
-        } catch (error) {
-          this.#emit({
-            type: 'turn-autosync-error',
-            sessionId,
-            operationId: updated.pendingTurnBoundary.operationId,
-            error: error.message,
-          });
-          throw error;
-        }
-      }
-      // Apply and publish the durable state first. A slow timeline download
-      // must never leave a completed session displayed as still running.
-      if (event.type === 'timeline.updated') this.#timelinePending.set(sessionId, true);
-      const owesTimelineSync = event.type === 'timeline.updated' || this.#timelinePending.get(sessionId) !== false;
-      if ((event.type === 'timeline.updated' || state === 'completed') && owesTimelineSync) {
-        try {
-          await this.#syncLocalTimeline(sessionId, handoffId);
-          this.#timelinePending.set(sessionId, false);
-        } catch (error) {
-          this.#timelinePending.set(sessionId, true);
-          this.#emit({ type: 'timeline-sync-error', sessionId, error: error.message });
-        }
-      }
-      if (state === 'completed') {
-        try {
-          const remote = await this.#client.session(sessionId);
-          this.#assertProfileEpoch(profileEpoch);
-          if (remote.persistent === true && remote.endRequested === true) {
-            await this.#archiveEndedConversation(sessionId, profileEpoch);
-          }
-        } catch (error) {
-          this.#emit({ type: 'conversation-archive-error', sessionId, error: error.message });
-        }
+      if (event.type === 'timeline.updated' || state === 'completed') this.#timelinePending.set(sessionId, true);
+      if (updated?.pendingTurnBoundary || this.#timelinePending.get(sessionId) || state === 'completed') {
+        this.#scheduleArtifactSync(sessionId, handoffId, profileEpoch);
       }
       if (['downloaded', 'cancelled', 'expired', 'failed'].includes(updated?.state)) controller.abort();
     }, { expectedEpoch: profileEpoch }));
@@ -3193,6 +3144,46 @@ export class CloudCoordinator extends EventEmitter {
     return { operationId: boundary.operationId, document, timeline: timeline.timeline };
   }
 
+  #scheduleArtifactSync(sessionId, handoffId, profileEpoch) {
+    if (this.#stopped || profileEpoch !== this.#profileEpoch) return;
+    const key = `${profileEpoch}:${sessionId}`;
+    const existing = this.#artifactSyncs.get(key);
+    if (existing) { existing.again = true; return; }
+    const state = { again: true, failed: false };
+    this.#artifactSyncs.set(key, state);
+    this.#profileOperationContext.exit(() => {
+      void this.#withProfileOperation(async () => {
+        while (state.again && !this.#stopped) {
+          state.again = false;
+          if (handoffId) await this.#retryPendingTurnBoundary(sessionId, handoffId);
+          if (this.#timelinePending.get(sessionId)) {
+            this.#timelinePending.set(sessionId, false);
+            try {
+              if (handoffId) await this.#syncLocalTimeline(sessionId, handoffId);
+              else await this.#syncRemoteTimeline(sessionId, profileEpoch);
+            }
+            catch (error) { this.#timelinePending.set(sessionId, true); throw error; }
+          }
+          const current = handoffId ? await this.#store.get(handoffId) : null;
+          if (current?.state === 'completed') {
+            const remote = await this.#client.session(sessionId);
+            if (remote.persistent === true && remote.endRequested === true) {
+              await this.#archiveEndedConversation(sessionId, profileEpoch);
+            }
+          }
+        }
+      }, { expectedEpoch: profileEpoch }).catch((error) => {
+        state.failed = true;
+        if (error?.code === 'PROFILE_CHANGED' || this.#stopped) return;
+        this.#emit({ type: 'turn-autosync-error', sessionId, error: error.message });
+        this.#scheduleWatchRestart(() => this.#scheduleArtifactSync(sessionId, handoffId, profileEpoch));
+      }).finally(() => {
+        this.#artifactSyncs.delete(key);
+        if (state.again && !state.failed) this.#scheduleArtifactSync(sessionId, handoffId, profileEpoch);
+      });
+    });
+  }
+
   async #syncLocalTimeline(sessionId, handoffId) {
     const downloaded = await this.#client.downloadTimeline(sessionId);
     await this.#store.patch(handoffId, {
@@ -3205,7 +3196,7 @@ export class CloudCoordinator extends EventEmitter {
 
   async #syncTurnBoundary(sessionId, handoffId, boundary) {
     if (typeof boundary?.operationId !== 'string' || !boundary.operationId
-      || !Number.isSafeInteger(boundary.turnNumber) || boundary.turnNumber < 1
+      || !Number.isSafeInteger(boundary.turnNumber) || boundary.turnNumber < 0
       || !Number.isSafeInteger(boundary.revision) || boundary.revision < 1) {
       throw new Error('Cloud turn boundary is invalid');
     }
@@ -3243,7 +3234,8 @@ export class CloudCoordinator extends EventEmitter {
         resolutionId: boundary.operationId,
       });
     }
-    const archives = Array.isArray(current.turnArchives) ? current.turnArchives : [];
+    const latest = await this.#store.get(handoffId);
+    const archives = Array.isArray(latest?.turnArchives) ? latest.turnArchives : [];
     const turnArchives = [
       ...archives.filter((entry) => entry?.operationId !== boundary.operationId),
       {
@@ -3260,7 +3252,8 @@ export class CloudCoordinator extends EventEmitter {
       lastSyncedBoundaryOperation: boundary.operationId,
       lastSyncedTurn: boundary.turnNumber,
       lastSyncedRevision: boundary.revision,
-      pendingTurnBoundary: null,
+      pendingTurnBoundary: latest?.pendingTurnBoundary?.operationId === boundary.operationId
+        ? null : latest?.pendingTurnBoundary ?? null,
       turnArchives,
       ...(resolution?.action === 'replace' ? {
         documentDigest: checkpoint.sha256,
@@ -3427,16 +3420,9 @@ export class CloudCoordinator extends EventEmitter {
         sessionId,
         event,
       });
-      if (event.type === 'timeline.updated') this.#timelinePending.set(sessionId, true);
-      const owesTimelineSync = event.type === 'timeline.updated' || this.#timelinePending.get(sessionId) !== false;
-      if ((event.type === 'timeline.updated' || session.status === 'completed') && owesTimelineSync) {
-        try {
-          await this.#syncRemoteTimeline(sessionId, profileEpoch);
-          this.#timelinePending.set(sessionId, false);
-        } catch (error) {
-          this.#timelinePending.set(sessionId, true);
-          this.#emit({ type: 'timeline-sync-error', sessionId, error: error.message });
-        }
+      if (event.type === 'timeline.updated' || session.status === 'completed') {
+        this.#timelinePending.set(sessionId, true);
+        this.#scheduleArtifactSync(sessionId, null, profileEpoch);
       }
       if (['purged', 'cancelled', 'failed'].includes(session.status)) controller.abort();
     }, { expectedEpoch: profileEpoch }));

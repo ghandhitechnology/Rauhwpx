@@ -74,7 +74,7 @@ async function uploadTimeline(client, timelinePath, recorder) {
   return client.upload(timelinePath, { name: 'timeline.json', kind: 'timeline' });
 }
 
-async function stableCheckpoint({ client, harness, workspace, format, extension, turnNumber, revision, kind }) {
+async function stableCheckpoint({ client, harness, workspace, format, extension, turnNumber, revision, kind, previousDigest }) {
   const directory = path.join(workspace, 'checkpoints');
   await fs.mkdir(directory, { recursive: true, mode: 0o700 });
   const checkpointPath = path.join(
@@ -82,6 +82,10 @@ async function stableCheckpoint({ client, harness, workspace, format, extension,
     `${kind}-${String(turnNumber).padStart(4, '0')}-r${String(revision).padStart(6, '0')}${extension}`,
   );
   const receipt = await harness.exportDocument(format, checkpointPath);
+  if (previousDigest && receipt.sha256 === previousDigest) {
+    await fs.rm(checkpointPath, { force: true });
+    return { unchanged: true, receipt };
+  }
   const uploaded = await client.upload(checkpointPath, {
     name: path.basename(checkpointPath),
     kind: 'document',
@@ -114,18 +118,40 @@ async function commitStableBoundary({ client, checkpoint, timeline, turnNumber, 
   return boundary;
 }
 
-let forwardFailures = 0;
-
-async function forwardEvent(client, event) {
-  const type = event?.type === 'agent' ? 'agent.event' : String(event?.type ?? 'runtime.event')
-    .toLowerCase().replace(/[^a-z0-9._-]/g, '-').slice(0, 64);
-  await client.event(type || 'runtime.event', event).catch((error) => {
-    // Live activity is lossy by design, but repeated drops still leave a trace.
-    forwardFailures += 1;
-    if (forwardFailures === 1 || forwardFailures % 100 === 0) {
-      console.warn(`[worker] event forwarding failed ${forwardFailures} times: ${error?.message ?? error}`);
-    }
-  });
+// Durable history lives in the timeline. Live forwarding is bounded and lossy.
+function eventForwarder(client) {
+  const queue = [];
+  let sending = null;
+  let dropped = 0;
+  const flush = () => {
+    if (sending) return sending;
+    sending = Promise.resolve().then(async () => {
+      while (queue.length) {
+        const batch = queue.splice(0, 15);
+        try {
+          if (client.events) await client.events(batch);
+          else for (const event of batch) await client.event(event.type, event.payload);
+        } catch (error) {
+          console.warn(`[worker] live event batch dropped: ${error?.message ?? error}`);
+        }
+      }
+    }).finally(() => { sending = null; if (queue.length) return flush(); });
+    return sending;
+  };
+  return {
+    enqueue(event) {
+      const type = event?.type === 'agent' ? 'agent.event' : String(event?.type ?? 'runtime.event')
+        .toLowerCase().replace(/[^a-z0-9._-]/g, '-').slice(0, 64);
+      if (Buffer.byteLength(JSON.stringify(event)) > 64 * 1024) return;
+      if (queue.length >= 128) {
+        queue.shift();
+        if (++dropped === 1 || dropped % 100 === 0) console.warn(`[worker] live event queue dropped ${dropped} events`);
+      }
+      queue.push({ type: type || 'runtime.event', payload: event });
+      void flush();
+    },
+    flush,
+  };
 }
 
 function resultName(documentName, extension) {
@@ -149,6 +175,7 @@ export async function runSession({
   displayMode = createSessionDisplayMode(sessionDisplay),
   onStudioReady = () => {},
   onStudioUnavailable = () => {},
+  shouldStop = () => false,
 }) {
   if (!manifest || typeof manifest !== 'object' || !manifest.sessionId || !manifest.provider) {
     throw runtimeError('MANIFEST_INVALID', 'Cloud worker manifest identity is incomplete');
@@ -174,6 +201,7 @@ export async function runSession({
     }));
   const timeline = readTimeline(await readJsonBounded(timelineResource.filename), manifest);
   const recorder = new TimelineRecorder(timeline);
+  const liveEvents = eventForwarder(client);
   const timelinePath = path.join(workspace, 'timeline.json');
   const deadline = Date.now() + Math.max(60_000, Number(manifest.limits?.maxDurationSeconds) * 1_000 || 8 * 60 * 60 * 1_000);
   const maxTurns = Math.max(1, Number(manifest.limits?.maxTurns) || 100);
@@ -184,12 +212,47 @@ export async function runSession({
   let revision = Math.max(0, Number(stableRecovery?.revision) || 0);
   let activeWorkflow = manifest.executionConfig?.workflow === 'plan' ? 'plan' : 'direct';
   let latestCheckpoint = null;
+  let savedDocumentRevision = null;
+  let lastAutosaveCheck = 0;
+  let saveChain = Promise.resolve();
   let harness;
   let studioUnavailable = false;
   const clearStudioReadiness = async () => {
     if (studioUnavailable) return;
+    await onStudioUnavailable();
     studioUnavailable = true;
-    try { await onStudioUnavailable(); } catch { /* Worker teardown remains authoritative. */ }
+  };
+  const saveBoundary = (kind, boundaryTurn = Math.max(0, turnNumber), force = false) => {
+    const save = saveChain.then(async () => {
+      if (!harness) return latestCheckpoint?.boundary ?? stableRecovery;
+      const currentRevision = await harness.documentRevision?.();
+      if (!force && Number.isSafeInteger(currentRevision) && currentRevision === savedDocumentRevision) {
+        return latestCheckpoint?.boundary ?? stableRecovery;
+      }
+      const checkpoint = await stableCheckpoint({
+        client, harness, workspace, format: fileType.format, extension: fileType.extension,
+        turnNumber: boundaryTurn, revision: ++revision, kind,
+        previousDigest: force ? null : latestCheckpoint?.receipt.sha256 ?? stableRecovery?.blobId,
+      });
+      if (checkpoint.unchanged) {
+        revision -= 1;
+        savedDocumentRevision = checkpoint.receipt.documentRevision ?? currentRevision ?? null;
+        return latestCheckpoint?.boundary ?? stableRecovery;
+      }
+      const timelineUpload = await uploadTimeline(client, timelinePath, recorder);
+      const boundary = await commitStableBoundary({
+        client, checkpoint, timeline: timelineUpload, turnNumber: boundaryTurn, revision, kind,
+      });
+      latestCheckpoint = { ...checkpoint, boundary };
+      savedDocumentRevision = checkpoint.receipt.documentRevision ?? currentRevision ?? null;
+      return boundary;
+    });
+    saveChain = save.catch(() => {});
+    return save;
+  };
+  const flushWorkspace = async () => {
+    await clearStudioReadiness();
+    return saveBoundary('operation');
   };
   let assertRuntimeHealthy = async () => {};
   await client.event('runtime.started', {
@@ -250,6 +313,8 @@ export async function runSession({
     let messages = [];
     let finishReady = false;
     const acknowledgeTakeover = async (operationId) => {
+      const flushed = await flushWorkspace();
+      operationId = flushed?.operationId ?? operationId;
       if (typeof client.takeoverAck !== 'function') {
         throw runtimeError('TAKEOVER_PROTOCOL_UNAVAILABLE', 'Worker takeover acknowledgement is unavailable');
       }
@@ -263,6 +328,7 @@ export async function runSession({
       return { takenOver: true, timelinePath };
     };
     const acknowledgePause = async () => {
+      await flushWorkspace();
       if (typeof client.pauseAck !== 'function') {
         throw runtimeError('PAUSE_PROTOCOL_UNAVAILABLE', 'Worker pause acknowledgement is unavailable');
       }
@@ -273,15 +339,27 @@ export async function runSession({
       return { paused: true, timelinePath };
     };
     const acknowledgeSleep = async () => {
+      await flushWorkspace();
       if (typeof client.sleepAck !== 'function') {
         throw runtimeError('SLEEP_PROTOCOL_UNAVAILABLE', 'Worker sleep acknowledgement is unavailable');
       }
       await client.event('runtime.sleeping', { turnNumber });
       const acknowledged = await client.sleepAck();
-      if (acknowledged?.status === 'running') return { sleepCancelled: true };
+      if (acknowledged?.status === 'running') {
+        // A returning viewer cancelled sleep after input was drained. Reopen
+        // the same document with a fresh display stream.
+        studioUnavailable = false;
+        if (harness) await onStudioReady(harness);
+        return { sleepCancelled: true };
+      }
       return { sleeping: true, timelinePath };
     };
     const claimFinish = async () => {
+      if (shouldStop()) {
+        await flushWorkspace();
+        await client.suspend('LEASE_ENDED', 'Cloud lease ended after saving the document');
+        return { outcome: { suspended: true, timelinePath } };
+      }
       if (typeof client.finishClaim !== 'function') {
         throw runtimeError('FINISH_PROTOCOL_UNAVAILABLE', 'Worker atomic finish claim is unavailable');
       }
@@ -309,6 +387,10 @@ export async function runSession({
       let current = decision;
       while (current?.waiting === true && Date.now() < deadline) {
         await assertRuntimeHealthy();
+        if (harness && Date.now() - lastAutosaveCheck >= 2_000) {
+          lastAutosaveCheck = Date.now();
+          await saveBoundary('operation');
+        }
         await delay(250);
         current = await claimFinish();
       }
@@ -334,7 +416,7 @@ export async function runSession({
       return await publishRecovery(stableRecovery?.filename ?? origin.filename);
     }
 
-    if (stableRecovery) {
+    if (stableRecovery && !manifest.persistent) {
       // Resolve the atomic message/control gate before starting Chromium. Most
       // pause/resume recoveries have no new work and can publish the exact
       // durable boundary without loading the document runtime at all.
@@ -348,7 +430,7 @@ export async function runSession({
         );
       }
       messages = decision.messages;
-    } else {
+    } else if (!stableRecovery) {
       messages = [{ id: null, content: initialGoal, initial: true }];
     }
 
@@ -365,7 +447,7 @@ export async function runSession({
       onEvent: async (event) => {
         if (event?.type?.startsWith?.('environment.')) recorder.recordEnvironmentEvent(event);
         recorder.consume(event);
-        await forwardEvent(client, event);
+        liveEvents.enqueue(event);
       },
     });
     if (sessionDisplay?.snapshot) {
@@ -375,9 +457,16 @@ export async function runSession({
       });
     }
     await harness.start({ history: recorder.history({ excludeTrailingUserText: stableRecovery ? null : initialGoal }) });
+    savedDocumentRevision = await harness.documentRevision?.() ?? null;
     await assertRuntimeHealthy();
     await onStudioReady(harness);
     await harness.setWorkflow?.(activeWorkflow);
+    if (stableRecovery && manifest.persistent) {
+      const decision = await awaitConversationInput(await claimFinish());
+      if (decision.outcome) return decision.outcome;
+      finishReady = decision.ready === true;
+      messages = decision.messages ?? [];
+    }
 
     const materializeAttachments = async (message) => {
       if (!Array.isArray(message.attachments) || message.attachments.length === 0) return [];
@@ -431,36 +520,15 @@ export async function runSession({
           });
         }
         await client.event('turn.dispatched', { turnNumber: nextTurnNumber, messageId: message.id ?? null });
-        const checkpointBoundary = async (kind) => {
-          revision += 1;
-          const checkpoint = await stableCheckpoint({
-            client,
-            harness,
-            workspace,
-            format: fileType.format,
-            extension: fileType.extension,
-            turnNumber: nextTurnNumber,
-            revision,
-            kind,
-          });
-          const timelineUpload = await uploadTimeline(client, timelinePath, recorder);
-          const boundary = await commitStableBoundary({
-            client,
-            checkpoint,
-            timeline: timelineUpload,
-            turnNumber: nextTurnNumber,
-            revision,
-            kind,
-          });
-          latestCheckpoint = { ...checkpoint, boundary };
-          return boundary;
-        };
+        const checkpointBoundary = (kind) => saveBoundary(kind, nextTurnNumber, kind === 'turn');
         const runProvider = (resume = null) => harness.runTurn(
           resume ? '' : composeTurnPrompt(content, references),
           {
             timeoutMs: Math.max(1_000, deadline - Date.now()),
             resume,
-            readControl: typeof client.control === 'function' ? () => client.control() : null,
+            readControl: typeof client.control === 'function' ? async () => (
+              shouldStop() ? { redirectRequested: true } : client.control()
+            ) : null,
             onSafeBoundary: () => checkpointBoundary('operation'),
           },
         );
@@ -478,6 +546,15 @@ export async function runSession({
           let waitState = wait;
           while (waitState?.status === 'pending' && Date.now() < deadline) {
             await assertRuntimeHealthy();
+            if (shouldStop()) {
+              await flushWorkspace();
+              await client.suspend('LEASE_ENDED', 'Cloud lease ended after saving the document');
+              return { suspended: true, timelinePath };
+            }
+            if (Date.now() - lastAutosaveCheck >= 2_000) {
+              lastAutosaveCheck = Date.now();
+              await saveBoundary('operation', nextTurnNumber);
+            }
             await delay(250);
             waitState = await waitForHealthyOperation((signal) => client.wait(wait.id, { signal }));
           }
@@ -520,9 +597,15 @@ export async function runSession({
         }
         turnNumber = nextTurnNumber;
         const boundary = await checkpointBoundary('turn');
+        if (shouldStop()) {
+          await flushWorkspace();
+          await client.suspend('LEASE_ENDED', 'Cloud lease ended after saving the document');
+          return { suspended: true, timelinePath };
+        }
+        if (turnNumber >= maxTurns) await flushWorkspace();
         const completed = await client.completeTurn({
           outcome: redirected ? 'redirected' : endedDuringWait ? 'stopped' : 'completed',
-          boundaryOperationId: boundary.operationId,
+          boundaryOperationId: latestCheckpoint?.boundary.operationId ?? boundary.operationId,
         });
         if (completed?.status === 'suspended') {
           return { suspended: true, timelinePath };
@@ -549,6 +632,7 @@ export async function runSession({
     if (turnNumber >= maxTurns && !latestCheckpoint && !stableRecovery) {
       throw runtimeError('TURN_LIMIT', 'Cloud session reached its turn limit before producing a checkpoint');
     }
+    if (harness) await flushWorkspace();
     if (!latestCheckpoint && stableRecovery) {
       return await publishRecovery(stableRecovery.filename);
     }
@@ -585,7 +669,9 @@ export async function runSession({
     await assertRuntimeHealthy();
     throw error;
   } finally {
-    await clearStudioReadiness();
-    await harness?.close().catch(() => {});
+    try { await clearStudioReadiness(); } finally {
+      await liveEvents.flush();
+      await harness?.close().catch(() => {});
+    }
   }
 }

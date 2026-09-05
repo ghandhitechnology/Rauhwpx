@@ -725,3 +725,30 @@ test('cloud workspace keeps the last good frame when decoded dimensions mismatch
   assert.deepEqual(revoked, ['blob:geometry-2']);
   workspace.dispose();
 });
+
+test('cloud workspace preserves unconfirmed composed text for deliberate recovery', async () => {
+  const workspace = createCloudWorkspace({
+    display: {
+      async openDisplay(sessionId: string) {
+        const opened = connection(sessionId, []);
+        opened.sendInput = async () => { throw Object.assign(new Error('receipt lost'), { code: 'DISPLAY_INPUT_UNCONFIRMED' }); };
+        return opened;
+      },
+    } as Pick<CloudController, 'openDisplay'>,
+    doc: new TestDocument() as unknown as Document,
+    objectUrls: { create: () => 'blob:input', revoke: () => {} },
+    decodeFrame: async () => ({ width: 1280, height: 800 }),
+  });
+  const root = workspace.root as unknown as TestElement;
+  workspace.setContext({ visible: true, session: running() });
+  await flushMicrotasks();
+  const sink = find(root, (node) => node.className === 'cloud-workspace-input');
+  Object.assign(sink, { value: '한글 입력' });
+  sink.dispatch('input', { isComposing: false });
+  await flushMicrotasks();
+  const recovered = find(root, (node) => node.getAttribute('aria-label')?.startsWith('전달 여부') === true) as unknown as HTMLTextAreaElement;
+  assert.equal(recovered.hidden, false);
+  assert.equal(recovered.value, '한글 입력');
+  assert.equal(recovered.readOnly, true);
+  workspace.dispose();
+});

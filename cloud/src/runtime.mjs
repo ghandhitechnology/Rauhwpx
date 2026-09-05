@@ -81,7 +81,17 @@ export function createCloudRuntime(config, dependencies = {}) {
     },
   });
   const providerCli = dependencies.providerCli ?? new ProviderCliManager(config, providerManager, vault);
-  const raucloudLease = dependencies.raucloudLease ?? raucloudLeaseFromConfig(config);
+  database.exec('CREATE TABLE IF NOT EXISTS cloud_lease_reports (id INTEGER PRIMARY KEY CHECK (id = 1), payload TEXT NOT NULL)');
+  const raucloudLease = dependencies.raucloudLease ?? raucloudLeaseFromConfig(config, {
+    reportStore: {
+      load: () => {
+        const row = database.prepare('SELECT payload FROM cloud_lease_reports WHERE id = 1').get();
+        return row ? JSON.parse(row.payload) : null;
+      },
+      save: (report) => database.prepare('INSERT OR REPLACE INTO cloud_lease_reports VALUES (1, ?)').run(JSON.stringify(report)),
+      clear: () => database.prepare('DELETE FROM cloud_lease_reports WHERE id = 1').run(),
+    },
+  });
   const seedProvider = dependencies.seedProvider ?? ((input) => providerCli.seed(input.provider, input));
   const services = {
     auth,
