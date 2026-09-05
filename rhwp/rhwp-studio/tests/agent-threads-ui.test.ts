@@ -29,7 +29,7 @@ test('reasoning and model tweaks do not lock or rebuild the composer', () => {
     /if \(selectedAgent !== prevAgent \|\| selectedModel !== prevModel \|\| selectedEffort !== prevEffort\)/,
   );
   // 보내기 아이콘은 라벨이 바뀔 때만 갈아끼운다 — 매 chat-started 마다 깜빡이지 않게.
-  assert.match(source, /if \(send\.getAttribute\('aria-label'\) !== sendLabel\)/);
+  assert.match(source, /if \(send\.dataset\.icon !== sendIcon\)/);
   // 계획 상태가 그대로면 검토 칸을 비웠다 다시 그리지 않는다.
   assert.match(
     source,

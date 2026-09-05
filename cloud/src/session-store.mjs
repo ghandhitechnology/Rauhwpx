@@ -380,7 +380,9 @@ export class SessionStore {
     this.database.prepare('UPDATE sessions SET next_event_seq = next_event_seq + 1 WHERE id = ?').run(sessionId);
     const createdAt = this.now();
     const stateVersion = session.state_version;
-    const eventPayload = { ...payload, stateVersion };
+    const eventPayload = { ...payload, stateVersion,
+      ...(payload.status ? { configurationEditable: providerConfigurationEditable(this.getSessionRow(sessionId)) } : {}),
+    };
     this.database.prepare(`
       INSERT INTO session_events(session_id, seq, type, payload_json, created_at) VALUES (?, ?, ?, ?, ?)
     `).run(sessionId, seq, type, JSON.stringify(eventPayload), createdAt);
@@ -455,9 +457,7 @@ export class SessionStore {
         expiresAt,
         session.id,
       );
-      const event = this.#appendEventInTransaction(session.id, type, { status, ...payload,
-        configurationEditable: providerConfigurationEditable(this.getSessionRow(session.id)),
-      });
+      const event = this.#appendEventInTransaction(session.id, type, { status, ...payload });
       return { response: { session: this.getSession(session.id), eventSeq: event.seq }, event };
     };
     if (command.type === 'session.activate') {
@@ -1348,7 +1348,6 @@ export class SessionStore {
       `).run(sessionId);
       event = this.#appendEventInTransaction(sessionId, 'session.suspended', {
         status: 'suspended', reason, safeBoundary: true, turnRecovery,
-        configurationEditable: providerConfigurationEditable(this.getSessionRow(sessionId)),
       });
       return this.getSession(sessionId);
     });
@@ -1376,7 +1375,6 @@ export class SessionStore {
       this.database.prepare('DELETE FROM session_runtime_leases WHERE session_id = ?').run(sessionId);
       event = this.#appendEventInTransaction(sessionId, 'runtime.sleeping', {
         status: 'suspended', executionPhase: 'sleeping', reason, safeBoundary: true,
-        configurationEditable: providerConfigurationEditable(this.getSessionRow(sessionId)),
       });
       return this.getSession(sessionId);
     });

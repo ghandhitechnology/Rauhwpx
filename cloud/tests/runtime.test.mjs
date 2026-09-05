@@ -1444,6 +1444,8 @@ for (const resting of ['paused', 'sleeping', 'queued']) {
     }
     const before = sessions.getSession(session.id);
     assert.equal(before.configurationEditable, true);
+    const stateEvents = sessions.listEvents(session.id).filter((event) => event.payload.status);
+    assert.equal(stateEvents.at(-1).payload.configurationEditable, true);
     const configured = sessions.executeCommand(origin.device, session.id, parseCommand({
       commandId: 'configure_inactive', type: 'conversation.configure', payload: {
         expectedVersion: before.stateVersion, provider: 'claude', model: 'haiku', effort: 'low',
