@@ -41,6 +41,7 @@ export const AGENT_MODELS: Record<StaticAgentName, readonly AgentModelOption[]> 
     { id: 'haiku', label: 'Haiku 4.5' },
   ],
   codex: [
+    { id: 'gpt-6-astra', label: 'Astra' },
     { id: 'gpt-5.6-sol', label: 'Sol' },
     { id: 'gpt-5.6-terra', label: 'Terra' },
     { id: 'gpt-5.6-luna', label: 'Luna' },
@@ -72,7 +73,7 @@ const CLAUDE_EFFORTS_COMPACT: readonly AgentEffortOption[] = [
   { id: 'low', label: 'Low' },
 ];
 
-/** Codex `model_reasoning_effort` (강함 → 약함). gpt-5.6 는 max 까지 받는다. */
+/** Codex `model_reasoning_effort` (강함 → 약함). GPT-6 Astra와 GPT-5.6은 max까지 지원한다. */
 const CODEX_EFFORTS: readonly AgentEffortOption[] = [
   { id: 'max', label: 'Max' },
   { id: 'xhigh', label: 'Extra high' },

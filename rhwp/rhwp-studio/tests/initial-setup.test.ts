@@ -95,7 +95,7 @@ test('?initial-setup=1 이면 끝난 뒤에도 다시 연다', () => {
 
 test('카드 모델 목록은 정적·동적 카탈로그를 짧게 보여 준다', () => {
   assert.deepEqual(previewModelLabels('claude'), AGENT_MODELS.claude.map((model) => model.label));
-  assert.deepEqual(previewModelLabels('codex'), ['Sol', 'Terra', 'Luna']);
+  assert.deepEqual(previewModelLabels('codex'), ['Astra', 'Sol', 'Terra', 'Luna']);
   assert.deepEqual(previewModelLabels('grok'), ['Grok 4.6', 'Grok 4.5']);
   assert.deepEqual(previewModelLabels('pi'), ['OpenRouter에서 고름', '최대 3개']);
   assert.deepEqual(previewModelLabels('cursor'), ['Auto', '구독 · API 모델']);

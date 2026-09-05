@@ -26,7 +26,7 @@ test('claude and codex expose distinct model catalogs', () => {
   const claude = modelsForAgent('claude').map((m) => m.id);
   const codex = modelsForAgent('codex').map((m) => m.id);
   assert.deepEqual(claude, ['fable', 'opus', 'sonnet', 'haiku']);
-  assert.deepEqual(codex, ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']);
+  assert.deepEqual(codex, ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']);
 });
 
 test('resolveModelForAgent falls back to provider default when model does not fit', () => {
@@ -34,6 +34,7 @@ test('resolveModelForAgent falls back to provider default when model does not fi
   assert.equal(resolveModelForAgent('codex', 'sonnet'), defaultModelForAgent('codex'));
   assert.equal(resolveModelForAgent('claude', 'fable'), 'fable');
   assert.equal(resolveModelForAgent('codex', 'gpt-5.6-luna'), 'gpt-5.6-luna');
+  assert.equal(resolveModelForAgent('codex', 'gpt-6-astra'), 'gpt-6-astra');
 });
 
 test('isModelForAgent and labels stay provider-scoped', () => {
@@ -41,6 +42,7 @@ test('isModelForAgent and labels stay provider-scoped', () => {
   assert.equal(isModelForAgent('claude', 'gpt-5.6-sol'), false);
   assert.equal(labelForModel('claude', 'haiku'), 'Haiku 4.5');
   assert.equal(labelForModel('codex', 'gpt-5.6-terra'), 'Terra');
+  assert.equal(labelForModel('codex', 'gpt-6-astra'), 'Astra');
 });
 
 test('effort catalogs follow provider capabilities', () => {
