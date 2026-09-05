@@ -259,6 +259,7 @@ export interface CloudTakeoverPayload {
 
 export interface CloudDocumentPayload {
   originSha256?: string | null;
+  restartToken?: string;
   bytes: Uint8Array;
   fileName: string;
   sha256: string;

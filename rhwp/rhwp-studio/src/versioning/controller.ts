@@ -394,7 +394,7 @@ export class DocumentVersionController implements VersionManagerController {
   }
 
   /** Persist the exact handoff without committing or replacing the local working tree. */
-  async prepareCloudBranch(startId: string, bytes: Uint8Array, fileName: string): Promise<Uint8Array> {
+  async prepareCloudBranch(startId: string, bytes: Uint8Array, fileName: string, sourceStartId?: string): Promise<Uint8Array> {
     return this.#enqueue(async () => {
       await this.#refreshData(false);
       if (!this.#repository) await this.#enableVersioning();
@@ -409,13 +409,18 @@ export class DocumentVersionController implements VersionManagerController {
         if (!blob) throw new VersionError('CORRUPT_BLOB', 'Cloud 시작 문서를 찾을 수 없습니다.');
         return blob.bytes;
       }
+      const sourceBranch = sourceStartId
+        ? await this.#store.getBranch(repository.id, this.#cloudBranchName(sourceStartId))
+        : null;
+      this.#assertWorkspaceToken(workspace);
+      if (sourceStartId && !sourceBranch) return bytes;
       const capture = await this.#captureIncoming(bytes, fileName);
       this.#assertWorkspaceToken(workspace);
       const name = this.#cloudBranchName(startId);
       let branch = await this.#store.getBranch(repository.id, name);
       if (!branch) {
         const created = await this.#store.createBranch({
-          repositoryId: repository.id, name, target: this.#requireActiveBranch().target,
+          repositoryId: repository.id, name, target: sourceBranch?.target ?? this.#requireActiveBranch().target,
           expectedRepositoryRevision: repository.revision,
         });
         this.#repository = created.repository;

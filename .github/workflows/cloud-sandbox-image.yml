@@ -94,7 +94,8 @@ jobs:
           trap cleanup EXIT
           healthy=0
           for attempt in $(seq 1 60); do
-            if curl --fail --silent http://127.0.0.1:17740/rauhwpx-cloud/v1/health >/dev/null; then
+            if curl --fail --silent --max-time 2 http://127.0.0.1:17740/rauhwpx-cloud/v1/health >/dev/null \
+              && podman logs "$sandbox_id" 2>&1 | grep '"event":"cloud.started"' >/dev/null; then
               healthy=1
               break
             fi
@@ -107,7 +108,6 @@ jobs:
             podman logs "$sandbox_id"
             exit 1
           fi
-          podman logs "$sandbox_id" | grep -q '"event":"cloud.started"'
 
       - name: Publish edge and immutable images
         env:

@@ -34,7 +34,10 @@ The focus-mode button shows a placeholder because this preview covers the sideba
 | `?scenario=error` | A failed turn |
 | `?cloud=1` | Cloud workspace with local disconnect, reconnect, restart, and shutdown fixtures |
 | `?page=settings` | Production settings panel |
+| `?cloud=1&dashboard=1&page=settings&destination=cloud` | Cloud dashboard with explicit sample quota, seven daily observations, and provider sessions |
+| `?cloud=1&dashboard=1&page=settings&destination=cloud&fullscreen=1` | Full-screen production Cloud settings |
 | `?page=versions` | Production version graph |
+| `?page=versions&history=branches` | Branching and merging history with colored graph lanes |
 | `?services=setup&page=settings` | Uninstalled/unconfigured service fixtures |
 | `?initial-setup=1` | Production first-run setup wizard |
 | `?theme=dark&width=360` | Dark theme and narrow sidebar |
@@ -50,6 +53,12 @@ a message. Select **클라우드** again to show the document preview. **Disconn
 Cloud** pauses the connection while retaining the last frame; the production
 Cloud controls reconnect, rebuild from the same conversation, or stop the worker.
 The fixture records transfers and session scope in `window.sidebarPreview.cloud`.
+
+The Cloud settings dashboard's **크게 보기** button opens the production full-screen
+settings layout. The ordinary chat focus button still uses the preview placeholder.
+Dashboard fixtures expose quota exhaustion, sign-out, self-hosted and unavailable
+states through the typed `setDashboardState` method. Sample history is isolated to
+the preview account and only seeded with `dashboard=1`.
 
 ## Behavior and placeholders
 
@@ -87,6 +96,20 @@ origin and is unaffected.
 `vite.sidebar.config.ts` is independent of the application's Vite config. Keep it
 free of the agent-hub and PWA plugins and imports of the application entry point.
 The shared desktop module's optional PWA import resolves to a preview-only no-op.
+
+The version graph uses compact rows. Dates appear on hover or keyboard focus;
+selecting a commit keeps its details and restore actions below the scrolling list.
+The branch buttons switch the active branch, and new preview commits update the
+same graph layout used by the application.
+
+For LAN or Tailscale access, bind the preview explicitly:
+
+```sh
+npm --prefix rhwp/rhwp-studio run dev:sidebar -- --host 0.0.0.0
+```
+
+Open the host's IP address on port 7715. The preview bootstrap supports HTTP
+origins where the browser does not expose `crypto.randomUUID()`.
 
 ## Verification
 

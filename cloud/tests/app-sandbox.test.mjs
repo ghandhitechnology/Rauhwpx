@@ -281,7 +281,10 @@ test('local runner reaps a detached process group when its worker exits spontane
       stdio: 'ignore',
     });
     grandchild.unref();
-    await fs.writeFile(path.join(process.env.RAUHWpx_WORKSPACE, 'grandchild.pid'), String(grandchild.pid));
+    // Publish the complete PID; a newly created empty file parses as PID 0.
+    const pidPath = path.join(process.env.RAUHWpx_WORKSPACE, 'grandchild.pid');
+    await fs.writeFile(pidPath + '.tmp', String(grandchild.pid));
+    await fs.rename(pidPath + '.tmp', pidPath);
     await new Promise((resolve) => setTimeout(resolve, 200));
     process.exit(7);
   `);
@@ -308,7 +311,7 @@ test('local runner reaps a detached process group when its worker exits spontane
   await waitFor(async () => {
     try {
       grandchildPid = Number(await fs.readFile(path.join(workspace, 'grandchild.pid'), 'utf8'));
-      return Number.isSafeInteger(grandchildPid);
+      return Number.isSafeInteger(grandchildPid) && grandchildPid > 0;
     } catch {
       return false;
     }

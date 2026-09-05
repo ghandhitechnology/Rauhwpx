@@ -521,11 +521,22 @@ export async function runSession({
         await materializeAttachments(message);
         recorder.acceptUserMessage(content, { messageId: message.id ?? null, initial: message.initial === true });
         if (manifest.persistent && typeof client.beginTurn === 'function') {
-          await client.beginTurn({
-            turnNumber: nextTurnNumber,
-            messageId: message.id ?? null,
-            mode: activeWorkflow,
-          });
+          try {
+            await client.beginTurn({
+              turnNumber: nextTurnNumber,
+              messageId: message.id ?? null,
+              mode: activeWorkflow,
+            });
+          } catch (error) {
+            if (error?.code !== 'INVALID_SESSION_STATE' || typeof client.control !== 'function') throw error;
+            const control = await waitForHealthyOperation((signal) => client.control({ signal }));
+            if (!control.endRequested && !control.pauseRequested && !control.takeoverRequested && !control.sleepRequested) throw error;
+            // A control can close the turn gate while Studio starts or this
+            // request is in flight. Save without inventing a completed turn,
+            // then let the atomic finish claim acknowledge the winning control.
+            await saveBoundary('operation', turnNumber, true);
+            break;
+          }
         }
         await client.event('turn.dispatched', { turnNumber: nextTurnNumber, messageId: message.id ?? null });
         const checkpointBoundary = (kind) => saveBoundary(kind, nextTurnNumber, kind === 'turn');

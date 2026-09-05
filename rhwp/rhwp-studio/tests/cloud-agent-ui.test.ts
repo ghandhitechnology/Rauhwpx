@@ -19,7 +19,7 @@ test('empty-thread composer exposes a Local/Cloud switch and starts Cloud on fir
   assert.match(sidebar, /CLOUD_UNSAVED_MESSAGE/);
   assert.match(cloudStart, /클라우드 사용 전 문서를 저장해주세요/);
   assert.match(sidebar, /execution\.kind === 'cloud-start'/);
-  assert.match(sidebar, /if \(currentDocumentId\) void deleteCloudComposerDraft/);
+  assert.match(sidebar, /if \(currentDocumentId && !input\.value && !referenceLibrary\.hasDrafts\(\)\) void deleteCloudComposerDraft/);
   assert.match(sidebarCss, /\.ag-composer-mode-row/);
   assert.match(sidebarCss, /\.ag-cloud-start-placeholder/);
   assert.doesNotMatch(sidebar, /클라우드로 계속/);
@@ -104,7 +104,7 @@ test('cloud lease tracks conversation ownership while queued messages cross at a
   assert.match(main, /syncDocumentReadOnly/);
   assert.match(main, /cloudAuthorityTransitionCount > 0/);
   assert.match(main, /inputHandler\?\.setReadOnly\(documentReadOnly\)/);
-  assert.match(main, /inputHandler\?\.setUserEditingLocked\(lease\.active\)/);
+  assert.match(main, /inputHandler\?\.setUserEditingLocked\(agentUserEditingLocked\(\)\)/);
   assert.doesNotMatch(
     main.match(/function syncDocumentReadOnly\(\): void \{[\s\S]*?\n\}/)?.[0] ?? '',
     /planModeAllowsUserEditing/,

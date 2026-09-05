@@ -352,6 +352,45 @@ test('successive cloud turns merge into the active local branch and older signal
   } finally { await page.close(); }
 });
 
+test('a restarted Cloud session inherits its source branch and preserves newer local commits', { timeout: 45_000 }, async () => {
+  const page = await browser!.newPage();
+  try {
+    await openCloudDocument(page, 'hwp', 'restart');
+    const lineage = await page.evaluate(async () => {
+      const cloud = (window as any).__cloud;
+      const { controller, store, checkpoint, startId } = cloud;
+      await controller.checkpoint('Local changes after Cloud started');
+      const state = controller.getState();
+      const source = state.branches.find((branch: any) => branch.name.startsWith('Cloud '));
+      const local = state.branches.find((branch: any) => branch.isActive);
+      const restartId = `${startId}-restart`;
+      await controller.prepareCloudBranch(restartId, checkpoint.bytes, checkpoint.fileName, startId);
+      const repository = await store.findRepositoryByDocumentId(state.documentId);
+      const anchor = await store.getCommit(`cloud-base:${repository.id}:${restartId}`);
+      const { WasmBridge } = await import('/src/core/wasm-bridge.ts');
+      const { captureVersionSnapshot } = await import('/src/versioning/snapshot.ts');
+      const remote = new WasmBridge();
+      await remote.initialize();
+      remote.loadDocument(checkpoint.bytes, checkpoint.fileName);
+      remote.insertText(0, 0, remote.getParagraphLength(0, 0), ':RESTARTED');
+      const bytes = captureVersionSnapshot(remote).bytes;
+      remote.releaseDocument();
+      const sha256 = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes.slice().buffer))]
+        .map((byte) => byte.toString(16).padStart(2, '0')).join('');
+      (window as any).__cloudMerge = controller.mergeCloudCheckpoint(restartId, {
+        ...checkpoint, bytes, byteLength: bytes.length, sha256, sessionId: 'restarted-session',
+      }).then((value: boolean) => { (window as any).__cloudOutcome = value; });
+      return { parents: anchor.parents, sourceHead: source.headId, localHead: local.headId };
+    });
+    assert.deepEqual(lineage.parents, [lineage.sourceHead]);
+    assert.notEqual(lineage.sourceHead, lineage.localHead);
+    await finishReview(page);
+    const final = await page.evaluate(() => (window as any).__cloud.inspect());
+    assert.match(final.text, /LOCAL:/);
+    assert.match(final.text, /:CLOUD:RESTARTED/);
+  } finally { await page.close(); }
+});
+
 test('stash application rolls the editor back on a failed transaction and can be retried', { timeout: 45_000 }, async () => {
   const page = await browser!.newPage();
   try {

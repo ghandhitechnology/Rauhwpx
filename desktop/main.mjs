@@ -1332,7 +1332,9 @@ ipcMain.handle('cloud:transfer', async (event, payload) => {
   if (payload?.permissionProfile !== 'unrestricted') {
     throw new Error('Cloud agents require Full access');
   }
-  if (session.cloudLocked) throw new Error('This document is already owned by a cloud session');
+  // Recovery retries are checked against their durable handoff token below;
+  // an accepted retry can return its existing lease without another upload.
+  if (session.cloudLocked && !payload?.document?.restartToken) throw new Error('This document is already owned by a cloud session');
   if (session.cloudTransferPromise) return scopedCloudSnapshot(session, await session.cloudTransferPromise);
   const lease = documentLeases.leaseForSession(session.sessionId);
   const transfer = requireCloudCoordinator().transfer(payload, {
@@ -1401,6 +1403,15 @@ ipcMain.handle('cloud:download-result', async (event, payload) => {
       previewOpened: Boolean(preview),
       conflict,
     };
+  });
+});
+ipcMain.handle('cloud:prepare-restart-document', async (event, payload) => {
+  const session = sessionForEvent(event);
+  const sessionId = String(payload?.sessionId ?? '');
+  if (!/^[A-Za-z0-9_-]{8,128}$/.test(sessionId)) throw new Error('Invalid cloud session id');
+  return requireCloudCoordinator().prepareRestartDocument({ sessionId }, {
+    originSessionId: session.sessionId,
+    originPath: documentLeases.leaseForSession(session.sessionId)?.canonicalPath ?? null,
   });
 });
 ipcMain.handle('cloud:download-checkpoint', async (event, payload) => {

@@ -2017,6 +2017,18 @@ export class CloudCoordinator extends EventEmitter {
 
   async #transfer(payload, { originSessionId, originPath = null, originDigest = null } = {}, profileEpoch) {
     const bytes = Buffer.from(payload?.document?.bytes ?? []);
+    let restartHandoff = null;
+    if (payload?.document?.restartToken != null) {
+      restartHandoff = (await this.#store.list()).find((record) => record.restartRecovery?.token === payload.document.restartToken);
+      const prepared = restartHandoff?.restartRecovery;
+      if (!prepared || prepared.originSessionId !== originSessionId && (!originPath || prepared.originPath !== originPath)
+        || prepared.documentId !== payload.documentId || prepared.threadId !== payload.threadId
+        || prepared.originPath !== originPath || prepared.sha256 !== sha256Hex(bytes)
+        || prepared.startId && prepared.startId !== payload.startId) {
+        throw transferError('준비한 Cloud 복구 문서가 현재 대화와 일치하지 않습니다. 다시 복구를 준비해 주세요.', 'RESTART_DOCUMENT_INVALID');
+      }
+      originDigest = prepared.originDigest;
+    }
     const goal = goalFromTransfer(payload);
     const startId = typeof payload?.startId === 'string' ? payload.startId.trim() : '';
     if (!/^[A-Za-z0-9_-]{8,128}$/.test(startId)) {
@@ -2057,6 +2069,19 @@ export class CloudCoordinator extends EventEmitter {
       },
       resources: payload?.references,
     });
+    if (restartHandoff && (record.documentDigest !== sha256Hex(bytes)
+      || record.originDocumentId !== payload.documentId || record.threadId !== payload.threadId)) {
+      throw transferError('복구 시작 ID가 다른 전송에 사용됐습니다.', 'RESTART_DOCUMENT_INVALID');
+    }
+    if (restartHandoff && !restartHandoff.restartRecovery.startId) {
+      await this.#store.patch(restartHandoff.id, {
+        restartRecovery: { ...restartHandoff.restartRecovery, startId: record.id },
+      });
+    }
+    if (restartHandoff && record.cloudSessionId
+      && ['queued', 'running', 'suspended', 'completed', 'downloading', 'downloaded'].includes(record.state)) {
+      return this.snapshot({ selectedSessionId: record.cloudSessionId });
+    }
     const inflight = this.#transferPromises.get(record.id);
     if (inflight) {
       await inflight;
@@ -2457,6 +2482,62 @@ export class CloudCoordinator extends EventEmitter {
     }
   }
 
+  prepareRestartDocument({ sessionId }, { originSessionId = null, originPath = null } = {}) {
+    return this.#withProfileOperation(async (profileEpoch) => {
+      let handoff = await this.#handoffForSession(sessionId, profileEpoch);
+      const unavailable = () => transferError(
+        '최신 Cloud 문서 보관본을 확인할 수 없습니다. 기존 서버에 다시 연결해 문서를 복구한 뒤 서버를 다시 만들어 주세요.',
+        'RESTART_CHECKPOINT_UNAVAILABLE',
+      );
+      if (!handoff && originPath) {
+        handoff = (await this.#store.list()).find((record) => record.cloudSessionId === sessionId
+          && record.state === 'cancelled' && record.restartRecovery && record.originPath === originPath);
+      }
+      if (!handoff || originSessionId && handoff.originSessionId !== originSessionId
+        && (!originPath || handoff.originPath !== originPath)) throw unavailable();
+      const candidates = [
+        ...(handoff.turnArchives ?? []),
+        ...(handoff.lastPublishedArchive ? [handoff.lastPublishedArchive] : []),
+        ...(handoff.takeoverRecoveryPath && handoff.takeoverBoundary ? [{
+          path: handoff.takeoverRecoveryPath, sha256: handoff.takeoverDigest, size: handoff.takeoverSize,
+          revision: handoff.takeoverBoundary.revision, turn: handoff.takeoverBoundary.turnNumber,
+          operationId: handoff.takeoverBoundary.operationId,
+        }] : []),
+      ].sort((left, right) => right.revision - left.revision || right.turn - left.turn);
+      const latest = candidates[0];
+      if (!latest || !Number.isSafeInteger(latest.revision) || latest.revision < 1
+        || !Number.isSafeInteger(latest.size) || latest.size < 1 || latest.size > 128 * 1024 * 1024
+        || typeof latest.path !== 'string' || !/^[a-f0-9]{64}$/.test(latest.sha256)
+        || Math.max(handoff.lastSyncedRevision ?? 0, handoff.lastPublishedRevision ?? 0,
+          handoff.pendingTurnBoundary?.revision ?? 0) > latest.revision
+        || handoff.pendingTurnBoundary && handoff.pendingTurnBoundary.revision === latest.revision
+          && handoff.pendingTurnBoundary.operationId !== latest.operationId
+        || (handoff.pendingOriginPublications ?? []).some((operationId) => operationId !== latest.operationId)) {
+        throw unavailable();
+      }
+      const archivePath = path.resolve(latest.path);
+      if (!archivePath.startsWith(`${path.resolve(this.#recoveryDir)}${path.sep}`)) throw unavailable();
+      const bytes = await readFile(archivePath).catch(() => { throw unavailable(); });
+      if (bytes.length !== latest.size || sha256Hex(bytes) !== latest.sha256) throw unavailable();
+      this.#assertProfileEpoch(profileEpoch);
+      const restartToken = handoff.restartRecovery?.sha256 === latest.sha256
+        ? handoff.restartRecovery.token : randomUUID();
+      const originDigest = Object.hasOwn(handoff, 'originDigest') ? handoff.originDigest : handoff.documentDigest;
+      await this.#store.patch(handoff.id, { restartRecovery: {
+        token: restartToken,
+        originSessionId: handoff.originSessionId, originPath: handoff.originPath,
+        documentId: handoff.originDocumentId, threadId: handoff.threadId,
+        sha256: latest.sha256, originDigest,
+        ...(handoff.restartRecovery?.token === restartToken && handoff.restartRecovery.startId
+          ? { startId: handoff.restartRecovery.startId } : {}),
+      } });
+      return {
+        bytes: new Uint8Array(bytes), fileName: handoff.documentName, sha256: latest.sha256,
+        originSha256: originDigest, restartToken, revision: latest.revision, turn: latest.turn,
+      };
+    });
+  }
+
   downloadCheckpoint(input) {
     return this.#withProfileOperation((profileEpoch) => this.#downloadCheckpoint(input, profileEpoch));
   }
@@ -2528,6 +2609,10 @@ export class CloudCoordinator extends EventEmitter {
       lastPublishedBoundaryOperation: checkpoint.operationId,
       lastPublishedRevision: checkpoint.revision,
       lastPublicationOutcome: publication,
+      lastPublishedArchive: {
+        path: archivePath, sha256: checkpoint.sha256, size: checkpoint.byteLength,
+        revision: checkpoint.revision, turn: checkpoint.turn, operationId: checkpoint.operationId,
+      },
       ...(publication === 'written' ? { originDigest: checkpoint.sha256, externalConflict: false } : {}),
       ...(publication === 'conflict' ? { externalConflict: true } : {}),
     });

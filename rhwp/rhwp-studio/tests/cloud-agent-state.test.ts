@@ -381,6 +381,22 @@ test('controller dispatches only current-profile events from desktop batches', (
   controller.dispose();
 });
 
+test('controller preserves verified restart bytes, origin digest and recovery token', async () => {
+  const document = { bytes: new Uint8Array([4, 5, 6]), fileName: 'cloud-edits.hwpx',
+    sha256: 'a'.repeat(64), originSha256: 'b'.repeat(64), restartToken: 'opaque-recovery-token' };
+  const controller = createCloudController({
+    cloudPrepareRestartDocument: async ({ sessionId }) => {
+      assert.equal(sessionId, 'old-cloud-session');
+      return document;
+    },
+  });
+  assert.deepEqual(await controller.prepareRestartDocument('old-cloud-session'), document);
+  controller.dispose();
+  const unsupported = createCloudController({});
+  await assert.rejects(unsupported.prepareRestartDocument('old-cloud-session'), /업데이트/);
+  unsupported.dispose();
+});
+
 test('controller rejects malformed and contradictory result resolutions', async () => {
   const malformed = createCloudController({
     cloudResolveResult: async () => ({

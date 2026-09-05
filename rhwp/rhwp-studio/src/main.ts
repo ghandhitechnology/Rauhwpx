@@ -140,9 +140,11 @@ import {
   openPortableHistoryBundle,
 } from './versioning/index.ts';
 import type { AgentEditingLease } from './agent/types.ts';
+import { agentLeaseBlocksUserEditing } from './agent/editing-lease.ts';
 import type { EmbedRendererRuntimeRequestV1 } from '@/embed/rpc-router';
 import type {
   CloudCheckpointPayload,
+  CloudDocumentPayload,
   CloudDownloadResult,
   CloudResultResolution,
   CloudTakeoverPayload,
@@ -289,9 +291,9 @@ function getContext(): EditorContext {
     canGroupSelectedObjects: canGroupTopLevelBodyObjects(selectedObjects),
     canUngroupSelectedObject: canUngroupTopLevelBodyObject(selectedObject),
     inField: inputHandler?.isInField() ?? false,
-    isEditable: !documentReadOnly && !agentEditingLease.active && (!isFormMode || canEditFormField),
+    isEditable: !documentReadOnly && !agentUserEditingLocked() && (!isFormMode || canEditFormField),
     readOnly: documentReadOnly,
-    userEditingLocked: agentEditingLease.active,
+    userEditingLocked: agentUserEditingLocked(),
     editMode,
     isFormMode,
     canEditFormField,
@@ -348,7 +350,7 @@ function syncDocumentReadOnly(): void {
     || cloudAuthorityTransitionCount > 0;
   document.documentElement.dataset.documentReadOnly = documentReadOnly ? 'true' : 'false';
   inputHandler?.setReadOnly(documentReadOnly);
-  toolbar?.setEnabled(wasm.pageCount > 0 && !documentReadOnly && !agentEditingLease.active);
+  toolbar?.setEnabled(wasm.pageCount > 0 && !documentReadOnly && !agentUserEditingLocked());
   eventBus.emit('command-state-changed');
 }
 
@@ -367,8 +369,8 @@ function setAgentEditingLease(lease: AgentEditingLease): void {
     statusLabel.textContent = `${AGENT_LABEL[lease.agent]}가 문서를 편집 중이에요`;
     if (lease.waitingForUser) statusLabel.textContent = `${AGENT_LABEL[lease.agent]}가 답변을 기다리고 있어요`;
   }
-  inputHandler?.setUserEditingLocked(lease.active);
-  toolbar?.setEnabled(wasm.pageCount > 0 && !documentReadOnly && !lease.active);
+  inputHandler?.setUserEditingLocked(agentUserEditingLocked());
+  toolbar?.setEnabled(wasm.pageCount > 0 && !documentReadOnly && !agentUserEditingLocked());
   eventBus.emit('command-state-changed');
 }
 
@@ -379,9 +381,19 @@ function bytesToSha256(bytes: Uint8Array): Promise<string> {
     [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join(''));
 }
 
-async function prepareCloudTransferDocument(startId: string) {
+async function prepareCloudTransferDocument(startId: string, restart?: { document: CloudDocumentPayload; sourceStartId?: string }) {
   if (!wasm.hasLoadedDocument()) return null;
   if (wasm.isNewDocument) return null;
+  if (restart) {
+    // Older sessions may have no local history. They can still recover and
+    // download copies, but must not invent an ancestor from current local edits.
+    if (!restart.sourceStartId) return restart.document;
+    if (!versionControllerRef) throw new Error('문서 버전 기록을 준비하는 중입니다.');
+    const bytes = await versionControllerRef.prepareCloudBranch(
+      startId, restart.document.bytes, restart.document.fileName, restart.sourceStartId,
+    );
+    return { ...restart.document, bytes, sha256: await bytesToSha256(bytes) };
+  }
   const sourceFormat = wasm.getSourceFormat();
   if (sourceFormat !== 'hwp' && sourceFormat !== 'hwpx' && sourceFormat !== 'hml') {
     throw new Error(`클라우드에서 지원하지 않는 문서 형식입니다: ${sourceFormat}`);
@@ -414,6 +426,10 @@ async function prepareCloudTransferDocument(startId: string) {
  * bootstrap secret. Normal web and desktop builds therefore expose nothing.
  */
 let cloudDocumentPublishingEnabled = false;
+
+function agentUserEditingLocked(): boolean {
+  return agentLeaseBlocksUserEditing(agentEditingLease, cloudDocumentPublishingEnabled);
+}
 
 function installCloudDocumentRuntimeApi(agentBridge: AgentBridge): boolean {
   const cloudBuild = (import.meta as ImportMeta & { env?: Record<string, string | undefined> })
@@ -1036,7 +1052,7 @@ async function initialize(): Promise<void> {
     );
     inputHandler.setEditMode(editMode);
     inputHandler.setReadOnly(documentReadOnly);
-    inputHandler.setUserEditingLocked(agentEditingLease.active);
+    inputHandler.setUserEditingLocked(agentUserEditingLocked());
 
     toolbar = new Toolbar(document.getElementById('style-bar')!, wasm, eventBus, dispatcher);
     toolbar.setEnabled(false);
@@ -1768,7 +1784,7 @@ async function initializeDocument(
     await canvasView?.loadDocument();
     prepareCanvasKitLocalFonts(docInfo.fontsUsed);
     await updateLoadProgress(90, '도구 모음 준비 중...');
-    toolbar?.setEnabled(!documentReadOnly && !agentEditingLease.active);
+    toolbar?.setEnabled(!documentReadOnly && !agentUserEditingLocked());
     toolbar?.initFontDropdown(docInfo.fontsUsed);
     toolbar?.initStyleDropdown();
     await updateLoadProgress(94, '문서 검증 및 글꼴 확인 중...');

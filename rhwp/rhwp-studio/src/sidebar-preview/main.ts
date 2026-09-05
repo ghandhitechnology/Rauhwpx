@@ -10,8 +10,10 @@ import { showToast } from '../ui/toast.ts';
 import { userSettings } from '../core/user-settings.ts';
 import { completeInitialSetup } from '../ui/initial-setup/state.ts';
 import { createMockCloud } from './mock-cloud.ts';
+import { listThreads, getThread, waitForThreadsPersistence } from '../agent/threads.ts';
 import { createCloudWorkspace } from '../ui/cloud-workspace.ts';
 import { createWorkspaceController } from '../cloud/workspace.ts';
+import { isSettingsDestination } from '../ui/agent-sidebar/settings-contract.ts';
 
 const params = new URLSearchParams(location.search);
 const status = document.querySelector<HTMLOutputElement>('#preview-status')!;
@@ -22,7 +24,7 @@ const report = (message: string) => {
 const mock = createMockBridge(report);
 if (params.get('services') === 'setup') mock.setServices(false);
 const eventBus = new EventBus();
-const versions = createMockVersions(report);
+const versions = createMockVersions(report, params.get('history') === 'branches');
 let documentId: string | null = 'preview-proposal';
 let documentName: string | null = '사업 제안서.hwpx';
 
@@ -41,7 +43,7 @@ if (!localStorage.getItem('sidebar-preview-seeded')) {
   localStorage.setItem('sidebar-preview-seeded', '1');
 }
 applyTheme();
-const cloud = params.get('cloud') === '1' ? createMockCloud() : null;
+const cloud = params.get('cloud') === '1' ? createMockCloud({ dashboard: params.get('dashboard') === '1' }) : null;
 const workspace = cloud ? createWorkspaceController({
   localRoot: document.getElementById('editor-area')!,
   cloudWorkspace: createCloudWorkspace({ display: cloud.controller }), cloud: cloud.controller,
@@ -60,7 +62,7 @@ const sidebar = initAgentSidebar({
       status.value = 'Cloud 변경 병합 미리보기';
       return true;
     },
-    prepareCloudTransfer: async () => ({ fileName: documentName!, bytes: new Uint8Array([1, 2, 3]),
+    prepareCloudTransfer: async (_startId, restart) => restart?.document ?? ({ fileName: documentName!, bytes: new Uint8Array([1, 2, 3]),
       byteLength: 3, sha256: 'a'.repeat(64) }),
   } : {}),
   getDocumentContext: () => ({
@@ -194,11 +196,14 @@ document.addEventListener(
 if (params.get('controls') === '0')
   document.querySelector('#preview-controls')!.setAttribute('hidden', '');
 if (params.get('page') === 'settings')
-  eventBus.emit('settings:open', { destination: 'editing' });
+  eventBus.emit('settings:open', { destination: isSettingsDestination(params.get('destination')) ? params.get('destination')! : 'editing' });
+if (params.get('fullscreen') === '1')
+  sidebar.root.querySelector('.ag-settings-page')?.dispatchEvent(new CustomEvent('ag-settings-expand-request', { bubbles: true }));
 if (params.get('page') === 'versions') sidebar.openVersions();
 
 // Typed hooks for browser checks and custom scenario scripts.
-const preview = { ...mock, sidebar, versions, eventBus, cloud, workspace };
+const preview = { ...mock, sidebar, versions, eventBus, cloud, workspace,
+  threadStore: { listThreads, getThread, waitForThreadsPersistence } };
 Object.assign(window, { sidebarPreview: preview });
 window.addEventListener('pagehide', () => {
   sidebar.dispose();

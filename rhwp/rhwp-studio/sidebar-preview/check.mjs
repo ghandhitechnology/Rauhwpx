@@ -24,7 +24,7 @@ await writeFile(sampleFile, '문서 디자인을 위한 샘플 참고자료입�
 // Own server + fresh browser profile: checks do not need or alter a running app/preview.
 const server = await createServer({
   configFile: resolve(studio, 'vite.sidebar.config.ts'),
-  server: { port: 0, open: false },
+  server: { port: 0, open: false, hmr: false },
   logLevel: 'error',
 });
 await server.listen();
@@ -43,6 +43,8 @@ try {
     errors.push(message),
   );
   await page.evaluateOnNewDocument(() => {
+    // Exercise the same missing API as an HTTP LAN/Tailscale origin.
+    Object.defineProperty(crypto, 'randomUUID', { value: undefined, writable: true, configurable: true });
     window.addEventListener('error', (event) =>
       window.reportSidebarRuntimeError(event.message),
     );
@@ -131,6 +133,116 @@ try {
   }
   await step('Cloud disconnect, reconnect, rebuild, and shutdown recovery',
     () => checkCloudRecovery(page, origin, artifacts));
+  await step('Cloud dashboard, usage gaps, conversations, configuration and responsive settings', async () => {
+    await open('cloud=1&dashboard=1&page=settings&destination=cloud&controls=0');
+    await page.waitForSelector('.ag-cd-quota .ag-cd-stat-value');
+    assert.equal(await page.$eval('.ag-cd-quota .ag-cd-stat-value', (node) => node.textContent), '84분');
+    assert.deepEqual(await page.$$eval('.ag-cd-stat-label', (nodes) => nodes.map((node) => node.textContent)), ['오늘 남은 Raucloud 시간', '연결된 Cloud 박스']);
+    assert.doesNotMatch(await page.$eval('.ag-cd-stats', (node) => node.textContent), /세션 실행 중|앱당 서버/);
+    assert.match(await page.$eval('.ag-cd-quota .ag-cd-reset', (node) => node.textContent), /(?:\d+시간(?: \d+분)?|\d+분) 후 초기화|1분 이내 초기화/);
+    assert.equal(await page.$eval('.ag-cd-pixel-cloud', (node) => node.complete && node.naturalWidth > 0), true);
+    assert.equal(await page.$$eval('.ag-cd-point', (nodes) => nodes.length), 7);
+    await page.click('[data-destination="connections"][role="tab"]');
+    assert.equal(await page.$eval('.ag-cloud-dashboard', (node) => node.checkVisibility()), false);
+    await page.click('[data-destination="cloud"][role="tab"]');
+    await clickText('.ag-cd-button', '30일');
+    assert.match(await page.$eval('.ag-cd-usage-total', (node) => node.textContent), /30일 중 7일 기록/);
+    assert.equal(await page.$$eval('.ag-cd-point', (nodes) => nodes.length), 7, 'missing days must not become zero points');
+    await page.click('.ag-cd-data summary');
+    assert.equal(await page.$$eval('.ag-cd-data tbody tr', (nodes) => nodes.length), 30);
+    await page.click('.ag-cd-data summary');
+    await page.click('.ag-cd-segment button');
+    assert.equal(await page.$$eval('.ag-cd-chat', (nodes) => nodes.length), 4);
+    await page.evaluate(() => window.sidebarPreview.cloud.publish());
+    assert.equal(await page.$eval('.ag-cd-segment button[aria-pressed="true"]', (node) => node === document.activeElement), true, 'snapshot refresh preserves range focus');
+    await page.click('.ag-cloud-settings-action');
+    await page.waitForSelector('.ag-cloud-setup-overlay:not([hidden])');
+    await page.click('.ag-cloud-setup-close');
+    await page.$eval('#ag-settings-pane-cloud', (node) => node.scrollTo({ top: 0 }));
+    await screenshot('cloud-dashboard-sidebar');
+    await page.setViewport({ width: 1440, height: 1000, deviceScaleFactor: 1 });
+    await page.click('.ag-cd-expand');
+    await page.waitForSelector('.ag-fullscreen.ag-settings-open #ag-settings-pane-cloud:not([hidden])');
+    assert.equal(await page.$eval('.ag-cd-grid', (node) => getComputedStyle(node).gridTemplateColumns.split(' ').length), 2);
+    await screenshot('cloud-dashboard-fullscreen');
+    await page.evaluate(() => window.sidebarPreview.cloud.blockRefresh(true));
+    const refreshCount = await page.evaluate(() => window.sidebarPreview.cloud.calls.refresh);
+    await clickText('.ag-cd-button', '새로고침');
+    assert.equal(await page.$eval('.ag-cd-refresh', (node) => node.disabled), true);
+    await page.evaluate(() => document.querySelector('.ag-cd-refresh').click());
+    assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.refresh), refreshCount + 1);
+    const countdowns = await page.evaluate(() => {
+      const originalNow = Date.now;
+      const resetAt = Date.parse(window.sidebarPreview.cloud.controller.getSnapshot().account.quota.resetAt);
+      try {
+        return [5_400_000, 3_600_000, 60_000, 0, -60_000].map((remainingMs) => {
+          Date.now = () => resetAt - remainingMs;
+          // Returning to the tab must update the clock even while a refresh is blocked.
+          document.dispatchEvent(new Event('visibilitychange'));
+          return {
+            eta: document.querySelector('.ag-cd-reset').textContent,
+            quota: document.querySelector('.ag-cd-quota .ag-cd-stat-value').textContent,
+            meterHidden: document.querySelector('.ag-cd-meter').hidden,
+          };
+        });
+      } finally {
+        Date.now = originalNow;
+        document.dispatchEvent(new Event('visibilitychange'));
+      }
+    });
+    assert.deepEqual(countdowns, [
+      { eta: '1시간 30분 후 초기화', quota: '84분', meterHidden: false },
+      { eta: '1시간 후 초기화', quota: '84분', meterHidden: false },
+      { eta: '1분 이내 초기화', quota: '84분', meterHidden: false },
+      { eta: '초기화 확인 중', quota: '—분', meterHidden: true },
+      { eta: '초기화 확인 중', quota: '—분', meterHidden: true },
+    ]);
+    assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.refresh), refreshCount + 1, 'countdown does not depend on a new server response');
+    await page.evaluate(() => window.sidebarPreview.cloud.blockRefresh(false));
+    await page.waitForFunction(() => !document.querySelector('.ag-cd-refresh').disabled);
+    await page.evaluate(() => window.sidebarPreview.cloud.setRefreshFailure(true));
+    await clickText('.ag-cd-button', '새로고침');
+    await page.waitForSelector('.ag-cd-feedback[data-kind="error"]');
+    assert.match(await page.$eval('.ag-cd-quota .ag-cd-stat-value', (node) => node.textContent), /—/);
+    await page.evaluate(() => window.sidebarPreview.cloud.setRefreshFailure(false));
+    await clickText('.ag-cd-button', '새로고침');
+    await page.waitForSelector('.ag-cd-feedback[data-kind="success"]');
+    await page.evaluate(() => window.sidebarPreview.cloud.setLink('failed'));
+    await page.waitForSelector('.ag-cd-status[data-state="failed"]');
+    assert.match(await page.$eval('.ag-cloud-settings-status', (node) => node.textContent), /문제/);
+    await page.select('#theme', 'dark');
+    await page.$eval('#ag-settings-pane-cloud', (node) => node.scrollTo({ top: 270 }));
+    await screenshot('cloud-dashboard-disconnected');
+    await page.click('.ag-cd-reconnect');
+    await page.waitForSelector('.ag-cd-status[data-state="ready"]');
+    await page.evaluate(() => window.sidebarPreview.cloud.setDashboardState('exhausted'));
+    assert.equal(await page.$eval('.ag-cd-quota .ag-cd-stat-value', (node) => node.textContent), '0분');
+    assert.equal(await page.$eval('.ag-cd-quota', (node) => node.dataset.low), 'true');
+    await page.evaluate(() => window.sidebarPreview.cloud.setDashboardState('self-hosted'));
+    assert.match(await page.$eval('.ag-cd-server', (node) => node.textContent), /SSH 터널/);
+    assert.match(await page.$eval('.ag-cd-config', (node) => node.textContent), /내 서버는 Raucloud 한도 제외/);
+    assert.doesNotMatch(await page.$eval('.ag-cd-server', (node) => node.textContent), /시간을 모두 사용/);
+    await page.evaluate(() => window.sidebarPreview.cloud.setDashboardState('unknown'));
+    assert.equal(await page.$eval('.ag-cd-status', (node) => node.dataset.state), 'unknown');
+    await page.evaluate(() => window.sidebarPreview.cloud.setDashboardState('logged-out'));
+    assert.equal(await page.$$eval('.ag-cd-point', (nodes) => nodes.length), 0, 'sign-out hides the previous account history');
+    assert.match(await page.$eval('.ag-cd-quota', (node) => node.textContent), /로그인하면/);
+    assert.equal(await page.$eval('.ag-cd-reset', (node) => node.checkVisibility()), false, 'unknown reset time has no countdown');
+    await page.click('.ag-cd-setup');
+    await page.waitForSelector('.ag-cloud-setup-overlay:not([hidden])');
+    await page.click('.ag-cloud-setup-close');
+    await page.evaluate(() => window.sidebarPreview.cloud.setDashboardState('unavailable'));
+    assert.equal(await page.$eval('.ag-cd-refresh', (node) => node.disabled), true);
+    await page.setViewport({ width: 1280, height: 900, deviceScaleFactor: 1 });
+    await open('cloud=1&dashboard=1&page=settings&destination=cloud&width=280&theme=dark&controls=0');
+    const overflow = await page.$eval('#ag-settings-pane-cloud', (node) => node.scrollWidth > node.clientWidth);
+    assert.equal(overflow, false, 'minimum-width dashboard must not scroll horizontally');
+    const clipped = await page.$$eval('.ag-cd-button, .ag-settings-nav-button', (nodes) => nodes.filter((node) => node.checkVisibility() && node.scrollWidth > node.clientWidth + 1).map((node) => node.textContent));
+    assert.deepEqual(clipped, []);
+    await page.click('[data-destination="cloud"][role="tab"]');
+    await page.keyboard.press('ArrowLeft');
+    assert.equal(await page.$eval('[data-destination="connections"][role="tab"]', (node) => node.getAttribute('aria-selected')), 'true');
+  });
   await step(
     'Production shell, light/dark themes, resize and collapse',
     async () => {
@@ -521,6 +633,47 @@ try {
       });
     },
   );
+  await step('Branch commits keep their graph lane and move the branch label', async () => {
+    await open('page=versions&history=branches&theme=dark&width=480');
+    await screenshot('versions-dark');
+    assert.equal(await page.$$eval('.ag-version-meta, .ag-version-time', (items) => items.length), 0);
+    const initialRowHeight = await page.$eval('.ag-version-row', (row) => row.getBoundingClientRect().height);
+    await page.hover('.ag-version-row');
+    await page.waitForSelector('.ag-version-date-tooltip.ag-visible', { visible: true });
+    assert.match(await page.$eval('.ag-version-date-tooltip', (tip) => tip.textContent), /월/);
+    assert.equal(await page.$eval('.ag-version-row', (row) => row.getBoundingClientRect().height), initialRowHeight);
+    await screenshot('versions-date-hover');
+    await page.focus('.ag-version-row');
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => !document.querySelector('.ag-version-date-tooltip').classList.contains('ag-visible'));
+    assert(await page.$eval('.ag-root', (root) => root.classList.contains('ag-versions-open')));
+    await page.click('[aria-label="이 커밋에서 브랜치 만들기"]');
+    await page.waitForSelector('.ag-version-prompt-input', { visible: true });
+    await page.type('.ag-version-prompt-input', '새-디자인');
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => window.sidebarPreview.versions.getState().activeBranch === '새-디자인');
+    await page.click('[aria-label="새 커밋 만들기"]');
+    await page.waitForSelector('.ag-version-prompt-input', { visible: true });
+    await page.type('.ag-version-prompt-input', '새 브랜치에서 만든 커밋');
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => window.sidebarPreview.versions.getState().commits[0].title === '새 브랜치에서 만든 커밋');
+    const result = await page.evaluate(() => {
+      const state = window.sidebarPreview.versions.getState();
+      const head = state.commits[0];
+      const branch = state.branches.find((item) => item.name === '새-디자인');
+      const main = state.commits.find((item) => item.id === state.branches.find((branch) => branch.isDefault).headId);
+      const row = document.querySelector(`[data-commit-id="${head.id}"]`);
+      return { branchAtHead: branch.headId === head.id, parent: head.parentIds[0],
+        separateLane: head.lane !== main.lane, label: row.innerText.includes('새-디자인'),
+        current: head.isHead, selected: row.getAttribute('aria-selected') };
+    });
+    assert.deepEqual(result, { branchAtHead: true, parent: 'e8f21a0', separateLane: true, label: true, current: true, selected: 'true' });
+    await screenshot('versions-branch-commit');
+    await open('page=versions&history=branches&width=360');
+    await screenshot('versions-light-narrow');
+    assert(await page.$eval('.ag-versions-page', (el) => el.scrollWidth <= el.clientWidth), 'Narrow panel overflows');
+    await open('width=480');
+  });
   await step(
     'Document context, reset, clean canvas, and backend isolation',
     async () => {

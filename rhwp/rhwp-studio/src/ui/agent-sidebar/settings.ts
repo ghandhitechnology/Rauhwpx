@@ -483,6 +483,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     { id: 'editing', label: '편집' },
     { id: 'ai', label: 'AI 설정' },
     { id: 'connections', label: 'AI 연결' },
+    { id: 'cloud', label: 'Cloud 연결' },
   ];
   for (const destination of destinations) {
     const button = el('button', 'ag-settings-nav-button', destination.label);
@@ -1371,8 +1372,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   const connectionContent = el('div', 'ag-settings-destination-content');
   connectionContent.append(accountSection.root, connection.root, usageSection.root);
-  if (cloudSettings) connectionContent.insertBefore(cloudSettings, usageSection.root);
   panes.get('connections')?.appendChild(connectionContent);
+  if (cloudSettings) panes.get('cloud')?.appendChild(cloudSettings);
 
   aiApply.addEventListener('click', () => void applyAiDraft());
   aiCancel.addEventListener('click', cancelAiDraft);
@@ -1412,6 +1413,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       case 'ai':
         return isAiDirty();
       case 'connections':
+      case 'cloud':
         return false;
       default: {
         const _exhaustive: never = currentDestination;
@@ -1615,6 +1617,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
           cancelAiDraft();
           return true;
         case 'connections':
+        case 'cloud':
           return true;
         default: {
           const _exhaustive: never = currentDestination;
@@ -1628,6 +1631,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       case 'ai':
         return applyAiDraft();
       case 'connections':
+      case 'cloud':
         return true;
       default: {
         const _exhaustive: never = currentDestination;
