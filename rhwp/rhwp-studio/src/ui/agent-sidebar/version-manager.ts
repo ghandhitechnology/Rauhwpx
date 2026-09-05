@@ -453,6 +453,15 @@ export function createVersionManagerPage(controller: VersionManagerController): 
   mergeButton.dataset.versionMutation = 'true';
   mergeButton.dataset.versionAction = 'merge';
   toolbar.append(mergeButton, branchButton, checkpointButton);
+  const createBranchButton = el('button', 'ag-versions-primary ag-versions-create-branch', '+ 브랜치');
+  createBranchButton.type = 'button';
+  createBranchButton.setAttribute('aria-label', '새 브랜치 만들기');
+  createBranchButton.dataset.versionMutation = 'true';
+  createBranchButton.addEventListener('click', () => void (async () => {
+    const name = await askName('새 브랜치 이름');
+    if (name) await perform(() => controller.createBranch(name));
+  })());
+  toolbar.prepend(createBranchButton);
 
   const body = el('div', 'ag-versions-body');
   const historyPanel = el('div', 'ag-versions-panel ag-versions-history');
@@ -626,6 +635,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
   function renderTabs(): void {
     hideDateTooltip();
     branchStrip.hidden = tab !== 'history';
+    createBranchButton.hidden = tab !== 'branches';
     for (const [id, button] of tabButtons) {
       const selected = id === tab;
       button.classList.toggle('ag-active', selected);
@@ -831,15 +841,6 @@ export function createVersionManagerPage(controller: VersionManagerController): 
 
   function renderBranches(): void {
     branchesPanel.replaceChildren();
-    const create = el('button', 'ag-versions-primary ag-versions-create-branch', '+ 브랜치');
-    create.type = 'button';
-    create.setAttribute('aria-label', '새 브랜치 만들기');
-    create.dataset.versionMutation = 'true';
-    create.addEventListener('click', () => void (async () => {
-      const name = await askName('새 브랜치 이름');
-      if (name) await perform(() => controller.createBranch(name));
-    })());
-    branchesPanel.appendChild(create);
     const list = el('div', 'ag-versions-ref-list');
     for (const branch of current.branches) {
       const row = el('article', 'ag-versions-ref-row');

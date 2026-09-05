@@ -218,6 +218,7 @@
 }
 
 .ag-versions-create-branch {
+  margin-right: auto;
   min-height: 28px;
 }
 
@@ -401,6 +402,7 @@
 }
 
 .ag-versions-toolbar > button {
+  white-space: nowrap;
   flex-shrink: 0;
 }
 

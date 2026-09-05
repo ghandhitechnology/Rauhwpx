@@ -352,6 +352,22 @@ test('quick branch buttons switch once and respect mutation locks', async () => 
     assert(await page.$$eval('.ag-versions-branch-chip', (buttons) => buttons.every((button) => (button as HTMLButtonElement).disabled)));
     await page.click('[data-tab="branches"]');
     assert(await page.$eval('.ag-versions-branch-strip', (strip) => (strip as HTMLElement).hidden));
+    for (const width of [280, 480, 900]) {
+      await page.setViewport({ width, height: 820 });
+      const buttons = await page.$$eval('.ag-versions-toolbar > button', (nodes) => nodes
+        .filter((node) => !(node as HTMLButtonElement).hidden)
+        .map((node) => {
+          const rect = node.getBoundingClientRect();
+          return { center: rect.y + rect.height / 2, left: rect.left, right: rect.right };
+        }));
+      assert.equal(buttons.length, 4);
+      assert(buttons.every((button) => Math.abs(button.center - buttons[0].center) < 1), `${width}px single action row`);
+      assert(buttons.every((button) => button.left >= 0 && button.right <= width), `${width}px actions fit`);
+    }
+    assert(await page.$eval('.ag-versions-create-branch', (button) => (button as HTMLButtonElement).disabled));
+    await page.click('[data-tab="history"]');
+    assert(await page.$eval('.ag-versions-create-branch', (button) => (button as HTMLButtonElement).hidden));
+
   } finally {
     await page.close();
   }
