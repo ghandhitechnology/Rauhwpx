@@ -105,8 +105,8 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
   meter.setAttribute('aria-label', '오늘 남은 Raucloud 시간');
   const fill = el('div', 'ag-cd-meter-fill');
   meter.append(fill);
-  quota.card.append(meter);
-  const claude = stat('Claude 사용 대화');
+  const resetEta = el('p', 'ag-cd-reset');
+  quota.card.append(meter, resetEta);
   const boxes = stat('연결된 Cloud 박스');
 
   const grid = el('div', 'ag-cd-grid');
@@ -211,8 +211,45 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
   refresh.addEventListener('click', () => void run('refresh'));
   reconnect.addEventListener('click', () => void run('reconnect'));
   const refreshTimer = window.setInterval(() => {
-    if (element.checkVisibility() && document.visibilityState === 'visible') void run('refresh', true);
+    if (element.checkVisibility() && document.visibilityState === 'visible') {
+      renderQuota();
+      void run('refresh', true);
+    }
   }, 30_000);
+  function onVisibilityChange() {
+    if (document.visibilityState === 'visible') renderQuota();
+  }
+  document.addEventListener('visibilitychange', onVisibilityChange);
+
+  function renderQuota() {
+    if (!snapshot) return;
+    const account = snapshot.account;
+    const allowance = account?.signedIn ? account.quota : null;
+    const resetAt = allowance ? Date.parse(allowance.resetAt) : NaN;
+    const remainingMs = resetAt - Date.now();
+    const fresh = !refreshError && allowance && remainingMs > 0;
+    quota.value.replaceChildren(document.createTextNode(fresh ? minutes(allowance.remainingMs) : '—'), el('span', 'ag-cd-stat-unit', '분'));
+    quota.detail.textContent = fresh ? `${minutes(allowance.dailyLimitMs)}분 중 ${minutes(allowance.usedMs)}분 사용`
+      : allowance ? '사용량을 새로고침해 주세요.' : account?.signedIn ? '아직 사용 한도를 확인하지 못했습니다.' : '로그인하면 남은 시간을 볼 수 있습니다.';
+    quota.detail.title = account ? `사용량 확인: ${formatTime(account.updatedAt)}` : '';
+    resetEta.hidden = !Number.isFinite(resetAt);
+    const totalMinutes = Math.ceil(remainingMs / 60_000);
+    const hours = Math.floor(totalMinutes / 60);
+    const mins = totalMinutes % 60;
+    const duration = [hours > 0 ? `${hours}시간` : '', mins > 0 ? `${mins}분` : ''].filter(Boolean).join(' ');
+    resetEta.textContent = remainingMs <= 0 ? '초기화 확인 중'
+      : remainingMs <= 60_000 ? '1분 이내 초기화' : `${duration} 후 초기화`;
+    resetEta.title = allowance ? `${formatTime(allowance.resetAt, allowance.timeZone)} · ${allowance.timeZone}` : '';
+    meter.hidden = !fresh;
+    if (fresh) {
+      const remaining = Math.min(Math.max(0, allowance.remainingMs), allowance.dailyLimitMs);
+      meter.setAttribute('aria-valuemin', '0');
+      meter.setAttribute('aria-valuemax', String(allowance.dailyLimitMs / 60_000));
+      meter.setAttribute('aria-valuenow', String(remaining / 60_000));
+      fill.style.width = `${allowance.dailyLimitMs > 0 ? remaining / allowance.dailyLimitMs * 100 : 0}%`;
+      quota.card.dataset.low = String(remaining / allowance.dailyLimitMs <= 0.15);
+    }
+  }
 
   function renderChart() {
     if (!snapshot) return;
@@ -327,25 +364,10 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
 
     const account = snapshot.account;
     const allowance = account?.signedIn ? account.quota : null;
-    const fresh = !refreshError && allowance && Date.parse(allowance.resetAt) > Date.now();
-    quota.value.replaceChildren(document.createTextNode(fresh ? minutes(allowance.remainingMs) : '—'), el('span', 'ag-cd-stat-unit', '분'));
-    quota.detail.textContent = fresh ? `${minutes(allowance.dailyLimitMs)}분 중 ${minutes(allowance.usedMs)}분 사용`
-      : allowance ? '사용량을 새로고침해 주세요.' : account?.signedIn ? '아직 사용 한도를 확인하지 못했습니다.' : '로그인하면 남은 시간을 볼 수 있습니다.';
-    quota.detail.title = account ? `사용량 확인: ${formatTime(account.updatedAt)}` : '';
-    meter.hidden = !fresh;
-    if (fresh) {
-      const remaining = Math.min(Math.max(0, allowance.remainingMs), allowance.dailyLimitMs);
-      meter.setAttribute('aria-valuemin', '0');
-      meter.setAttribute('aria-valuemax', String(allowance.dailyLimitMs / 60_000));
-      meter.setAttribute('aria-valuenow', String(remaining / 60_000));
-      fill.style.width = `${allowance.dailyLimitMs > 0 ? remaining / allowance.dailyLimitMs * 100 : 0}%`;
-      quota.card.dataset.low = String(remaining / allowance.dailyLimitMs <= 0.15);
-    }
-    const sessions = cloudDashboardSessions(snapshot);
-    claude.value.textContent = String(sessions.claudeChats);
-    claude.detail.textContent = `서버에 남은 ${sessions.chats}개 대화 중${sessions.unknownChats ? ` · 모델 미확인 ${sessions.unknownChats}개` : ''}`;
+    renderQuota();
     boxes.value.replaceChildren(document.createTextNode(ready ? '1' : '0'), el('span', 'ag-cd-stat-unit', `/ ${configured ? '1' : '0'}`));
-    boxes.detail.textContent = configured ? `${sessions.active}개 세션 실행 중 · 앱당 서버 1대 연결` : 'Raucloud 또는 내 서버를 연결하세요.';
+    boxes.detail.hidden = configured;
+    boxes.detail.textContent = configured ? '' : 'Raucloud 또는 내 서버를 연결하세요.';
 
     serverBadge.textContent = ready ? '연결됨' : state === 'pending' ? '확인 중' : state === 'unknown' ? '확인 필요' : configured ? '연결 끊김' : '미연결';
     serverBadge.dataset.state = state;
@@ -375,6 +397,10 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
   return {
     element,
     sync(next: CloudSnapshot) { if (!disposed) { snapshot = next; refreshError = false; render(); } },
-    dispose() { disposed = true; window.clearInterval(refreshTimer); },
+    dispose() {
+      disposed = true;
+      window.clearInterval(refreshTimer);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    },
   };
 }

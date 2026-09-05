@@ -135,6 +135,9 @@ try {
     await open('cloud=1&dashboard=1&page=settings&destination=cloud&controls=0');
     await page.waitForSelector('.ag-cd-quota .ag-cd-stat-value');
     assert.equal(await page.$eval('.ag-cd-quota .ag-cd-stat-value', (node) => node.textContent), '84분');
+    assert.deepEqual(await page.$$eval('.ag-cd-stat-label', (nodes) => nodes.map((node) => node.textContent)), ['오늘 남은 Raucloud 시간', '연결된 Cloud 박스']);
+    assert.doesNotMatch(await page.$eval('.ag-cd-stats', (node) => node.textContent), /세션 실행 중|앱당 서버/);
+    assert.match(await page.$eval('.ag-cd-quota .ag-cd-reset', (node) => node.textContent), /(?:\d+시간(?: \d+분)?|\d+분) 후 초기화|1분 이내 초기화/);
     assert.equal(await page.$eval('.ag-cd-pixel-cloud', (node) => node.complete && node.naturalWidth > 0), true);
     assert.equal(await page.$$eval('.ag-cd-point', (nodes) => nodes.length), 7);
     await page.click('[data-destination="connections"][role="tab"]');
@@ -168,6 +171,33 @@ try {
     assert.equal(await page.$eval('.ag-cd-refresh', (node) => node.disabled), true);
     await page.evaluate(() => document.querySelector('.ag-cd-refresh').click());
     assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.refresh), refreshCount + 1);
+    const countdowns = await page.evaluate(() => {
+      const originalNow = Date.now;
+      const resetAt = Date.parse(window.sidebarPreview.cloud.controller.getSnapshot().account.quota.resetAt);
+      try {
+        return [5_400_000, 3_600_000, 60_000, 0, -60_000].map((remainingMs) => {
+          Date.now = () => resetAt - remainingMs;
+          // Returning to the tab must update the clock even while a refresh is blocked.
+          document.dispatchEvent(new Event('visibilitychange'));
+          return {
+            eta: document.querySelector('.ag-cd-reset').textContent,
+            quota: document.querySelector('.ag-cd-quota .ag-cd-stat-value').textContent,
+            meterHidden: document.querySelector('.ag-cd-meter').hidden,
+          };
+        });
+      } finally {
+        Date.now = originalNow;
+        document.dispatchEvent(new Event('visibilitychange'));
+      }
+    });
+    assert.deepEqual(countdowns, [
+      { eta: '1시간 30분 후 초기화', quota: '84분', meterHidden: false },
+      { eta: '1시간 후 초기화', quota: '84분', meterHidden: false },
+      { eta: '1분 이내 초기화', quota: '84분', meterHidden: false },
+      { eta: '초기화 확인 중', quota: '—분', meterHidden: true },
+      { eta: '초기화 확인 중', quota: '—분', meterHidden: true },
+    ]);
+    assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.refresh), refreshCount + 1, 'countdown does not depend on a new server response');
     await page.evaluate(() => window.sidebarPreview.cloud.blockRefresh(false));
     await page.waitForFunction(() => !document.querySelector('.ag-cd-refresh').disabled);
     await page.evaluate(() => window.sidebarPreview.cloud.setRefreshFailure(true));
@@ -197,6 +227,7 @@ try {
     await page.evaluate(() => window.sidebarPreview.cloud.setDashboardState('logged-out'));
     assert.equal(await page.$$eval('.ag-cd-point', (nodes) => nodes.length), 0, 'sign-out hides the previous account history');
     assert.match(await page.$eval('.ag-cd-quota', (node) => node.textContent), /로그인하면/);
+    assert.equal(await page.$eval('.ag-cd-reset', (node) => node.checkVisibility()), false, 'unknown reset time has no countdown');
     await page.click('.ag-cd-setup');
     await page.waitForSelector('.ag-cloud-setup-overlay:not([hidden])');
     await page.click('.ag-cloud-setup-close');

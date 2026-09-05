@@ -31,7 +31,7 @@
 .ag-cd-feedback { padding: 10px 12px; margin: 0 0 16px; border: 1px solid var(--ag-border); border-radius: 8px; background: var(--cd-tint); overflow-wrap: anywhere; }
 .ag-cd-feedback[data-kind='error'] { background: color-mix(in srgb, #c77958 10%, var(--ag-bg)); }
 .ag-cd-feedback[hidden], .ag-cd-meter[hidden], .ag-cd-reconnect[hidden], .ag-cd-setup[hidden] { display: none; }
-.ag-cd-stats { display: grid; grid-template-columns: 1.3fr 1fr 1fr; gap: 12px; margin-bottom: 18px; }
+.ag-cd-stats { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 16px; margin-bottom: 18px; }
 .ag-cd-stat { padding: 18px 20px; border: 1px solid var(--ag-border); border-radius: 12px; background: var(--ag-bg-2); min-width: 0; }
 .ag-cd-quota { background: var(--cd-tint); border-color: color-mix(in srgb, var(--cd-accent) 28%, var(--ag-border)); }
 .ag-cd-stat-label { margin: 0 0 8px; font-size: 11px; font-weight: 550; color: var(--ag-text-secondary); }
@@ -40,6 +40,7 @@
 .ag-cd-stat-unit { padding-left: 6px; font-size: 14px; color: var(--ag-text-secondary); font-weight: 400; letter-spacing: 0; }
 .ag-cd-meter { height: 4px; border-radius: 4px; margin-top: 12px; overflow: hidden; background: color-mix(in srgb, var(--cd-accent) 16%, var(--ag-bg)); }
 .ag-cd-meter-fill { height: 100%; background: var(--cd-accent); border-radius: inherit; }
+.ag-cd-reset { margin: 10px 0 0; color: var(--cd-accent); font-size: 11px; font-variant-numeric: tabular-nums; }
 .ag-cd-quota[data-low='true'] .ag-cd-stat-value { color: #c77958; }
 .ag-cd-quota[data-low='true'] .ag-cd-meter-fill { background: #c77958; }
 .ag-cd-grid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 16px; align-items: start; }
@@ -101,8 +102,7 @@
   .ag-cd-subtitle { font-size: 11px; }
   .ag-cd-expand { margin-left: auto; }
   .ag-cd-grid { grid-template-columns: minmax(0, 1fr); gap: 14px; }
-  .ag-cd-stats { grid-template-columns: 1fr 1fr; gap: 10px; }
-  .ag-cd-quota { grid-column: 1 / -1; }
+  .ag-cd-stats { grid-template-columns: minmax(0, 1fr); gap: 10px; }
   .ag-cd-stat { padding: 16px; }
   .ag-cd-stat-value { font-size: 32px; }
   .ag-cd-quota .ag-cd-stat-value { font-size: 42px; }
