@@ -320,8 +320,8 @@ export interface WritingStyleUpload {
 
 /* ── 프로바이더 상태 · 사용량 (프로토콜 v2 추가분) ──────────
    허브가 로컬 CLI의 설치 여부를 프로브해 provider-status 로,
-   턴마다 기록한 토큰 사용량을 usage-report 로 보낸다. CLIProxyAPI 가 연결되어
-   있으면 5시간·주간 percent 는 공식 요금제 값이다. 두 메시지는 요청
+   턴마다 기록한 토큰 사용량을 usage-report 로 보낸다. limits에는 로컬 CLI의
+   로그인 계정에서 읽은 5시간·주간 한도가 담긴다. 두 메시지는 요청
    응답으로도 오고(requestId), 연결 직후·턴 종료 후 밀어주기도 한다. */
 
 /** 로컬 CLI 한 벌의 실행 가능 여부. */
@@ -480,10 +480,40 @@ export interface ProviderUsage {
   source?: UsageSource;
 }
 
+export interface ProviderQuota {
+  status: 'ok' | 'unavailable' | 'error';
+  session: CliproxyWindow;
+  week: CliproxyWindow;
+  updatedAt: number | null;
+  error: string | null;
+  accountKey: string | null;
+  planType: string | null;
+  resetCredits: { availableCount: number; nextExpiresAt: number | null } | null;
+}
+
+export type CodexResetOutcome = 'reset' | 'nothingToReset' | 'noCredit' | 'alreadyRedeemed';
+export interface CodexResetResult {
+  outcome: CodexResetOutcome;
+  usage: UsageSummary;
+}
+
+export interface RemoteBalance {
+  windows?: Array<{ label: string; remainingPercent: number; resetsAt: number | null }>;
+  status: 'ok' | 'unavailable' | 'error';
+  balanceUsd: number | null;
+  totalCreditsUsd: number | null;
+  totalUsageUsd: number | null;
+  updatedAt: number | null;
+  source: string | null;
+  error: string | null;
+}
+
 export interface UsageSummary {
   plans: Record<AgentName, string>;
   providers: Record<AgentName, ProviderUsage>;
   cliproxy?: CliproxyStatus;
+  limits?: { claude: ProviderQuota; codex: ProviderQuota };
+  balances?: Partial<Record<'openrouter' | 'grok' | 'opencode', RemoteBalance>>;
   /** pi(OpenRouter) 가 설정돼 있을 때만 온다. */
   openrouter?: OpenRouterCredits;
   /** Rau 체험 키 잔액. */
@@ -528,6 +558,30 @@ export interface PiStatus {
   latestVersion: string | null;
   updateRequired: boolean;
   error: string | null;
+}
+
+/** 자격 증명 한 필드의 출처 — 앱에서 입력했는지, 허브 환경 변수에서 왔는지. */
+export type BrowserbaseCredentialSource = 'studio' | 'env' | null;
+
+/** 허브가 보는 Browserbase 설정 상태. 키 본문은 오지 않고 끝 네 글자만 온다. */
+export interface BrowserbaseStatus {
+  configured: boolean;
+  /** 아직 비어 있는 환경 변수 이름들. */
+  missing: string[];
+  keySource: BrowserbaseCredentialSource;
+  keyTail: string | null;
+  projectId: string | null;
+  projectSource: BrowserbaseCredentialSource;
+  geminiSource: BrowserbaseCredentialSource;
+  /** 지금 떠 있는 원격 브라우저 — main 과 서브에이전트 id. */
+  browsers: Array<{ id: string; connected: boolean }>;
+}
+
+/** 설정 탭에서 입력해 허브로 보내는 Browserbase 덮어쓰기 — 앱을 쓰는 동안만 산다. */
+export interface BrowserbaseOverride {
+  apiKey: string;
+  projectId?: string;
+  geminiApiKey?: string;
 }
 
 /** OpenRouter 잔액 — pi 사용량 카드에 표시. */
@@ -790,6 +844,8 @@ export type SidebarEvent =
     }
   | { type: 'pi-catalog'; requestId: string; models: PiCatalogModel[] }
   | { type: 'pi-error'; requestId: string; code: string; message: string }
+  | { type: 'browserbase-status'; status: BrowserbaseStatus }
+  | { type: 'browserbase-error'; requestId: string; code: string; message: string }
   | {
       type: 'title-result';
       requestId: string;

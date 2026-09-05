@@ -1784,15 +1784,6 @@ fn inline_control_metrics_hwp(ctrl: &Control) -> Option<InlineControlMetricsHwp>
     }
 }
 
-fn non_equation_inline_control_height_hwp(para: &Paragraph) -> Option<i32> {
-    para.controls
-        .iter()
-        .filter(|control| !matches!(control, Control::Equation(_)))
-        .filter_map(inline_control_metrics_hwp)
-        .map(|metrics| metrics.height)
-        .max()
-}
-
 fn apply_inline_control_line_metrics(seg: &mut LineSeg, metrics: InlineControlMetricsHwp) {
     let current_ascent = seg.baseline_distance.clamp(0, seg.line_height.max(0));
     let current_descent = (seg.line_height - current_ascent).max(0);
@@ -1827,7 +1818,7 @@ fn apply_inline_control_metrics_to_text_lines(
 
     let positions = para.control_text_positions();
     for (control_index, control) in para.controls.iter().enumerate() {
-        if !matches!(control, Control::Equation(_)) {
+        if matches!(control, Control::Form(_)) {
             continue;
         }
         let Some(metrics) = inline_control_metrics_hwp(control) else {
@@ -1837,7 +1828,16 @@ fn apply_inline_control_metrics_to_text_lines(
             .get(control_index)
             .copied()
             .unwrap_or_else(|| para.text.chars().count());
-        let line_index = line_index_for_text_position(line_breaks, position);
+        // Pictures can occupy a line with no text, immediately before a text
+        // line with the same start index. That first line owns the object slot.
+        let line_index = if matches!(control, Control::Equation(_)) {
+            line_index_for_text_position(line_breaks, position)
+        } else {
+            line_breaks
+                .iter()
+                .position(|line| line.start_idx == position && line.end_idx == position)
+                .unwrap_or_else(|| line_index_for_text_position(line_breaks, position))
+        };
         if let Some(line_seg) = line_segs.get_mut(line_index) {
             apply_inline_control_line_metrics(line_seg, metrics);
         }
@@ -2438,6 +2438,46 @@ mod inline_control_wrap_tests {
         }))
     }
 
+    #[test]
+    fn wrapped_picture_reserves_height_only_on_its_own_line() {
+        let mut para = Paragraph {
+            text: "aaaa bbbb cccc dddd".to_string(),
+            char_offsets: (0..19u32).map(|i| if i < 10 { i } else { i + 8 }).collect(),
+            char_shapes: vec![CharShapeRef {
+                start_pos: 0,
+                char_shape_id: 0,
+            }],
+            controls: vec![Control::Picture(Box::new(crate::model::image::Picture {
+                common: CommonObjAttr {
+                    treat_as_char: true,
+                    width: 7000,
+                    height: 5000,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }))],
+            line_segs: vec![LineSeg::default()],
+            char_count: 28,
+            ..Default::default()
+        };
+        reflow_line_segs(&mut para, 100.0, &styles_16px(), 96.0);
+        assert!(para.line_segs.len() >= 3);
+        assert_eq!(
+            para.line_segs[0].line_height, 1200,
+            "text above the picture must retain text height"
+        );
+        assert!(
+            para.line_segs[1].line_height >= 5000,
+            "picture line must reserve its full height"
+        );
+        assert!(
+            para.line_segs[2..]
+                .iter()
+                .all(|line| line.line_height == 1200),
+            "text after the picture must retain text height"
+        );
+    }
+
     /// 줄이 거의 찬 텍스트에 넓은 인라인 수식이 삽입되면 수식 폭을 예약해
     /// 뒤따르는 텍스트가 다음 줄로 밀려나야 한다 (컬럼 밖 overflow 방지).
     #[test]
@@ -2796,21 +2836,8 @@ pub(crate) fn reflow_line_segs(
         new_line_segs.push(make_line_seg(0, 12.0));
     }
 
-    // 기존 비수식 TAC 개체의 첫 줄 보정은 유지한다. 수식만은 실제 anchor가
-    // 속한 줄에 painter와 동일한 EqEdit ascent/descent를 적용해야 tall
-    // operator/fraction이 인접 줄을 덮지 않고 주변 텍스트와 한 baseline에 놓인다.
-    if let Some(height_hwp) = non_equation_inline_control_height_hwp(para) {
-        if let Some(first_line) = new_line_segs.first_mut() {
-            apply_inline_control_line_metrics(
-                first_line,
-                InlineControlMetricsHwp {
-                    width: 0,
-                    height: height_hwp,
-                    baseline: (height_hwp as f64 * 0.85).round() as i32,
-                },
-            );
-        }
-    }
+    // Reserve each object's height on its actual line. Applying the largest
+    // picture to the first line creates a blank band above wrapped pictures.
     apply_inline_control_metrics_to_text_lines(para, &line_breaks, &mut new_line_segs);
 
     // 어울림 배제 계획이 있으면 줄별 wrap zone 을 seg 에 기록한다 — 채움(2차

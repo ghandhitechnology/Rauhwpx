@@ -54,6 +54,17 @@ fn cell_para_line_anchor_y(
     }
 }
 
+pub(crate) fn para_relative_float_table_lead(table: &crate::model::table::Table, dpi: f64) -> f64 {
+    if !is_para_topbottom_float(&table.common) {
+        return 0.0;
+    }
+    let offset = signed_hwpunit(table.common.vertical_offset);
+    if offset <= 0 {
+        return 0.0;
+    }
+    hwpunit_to_px(offset, dpi)
+}
+
 /// A caption followed by a paragraph-anchored picture is one local content
 /// stack.  Some producers save every LINE_SEG in that stack with the same
 /// positive cell-local origin.  Treating that origin as editable top spacing
@@ -839,6 +850,11 @@ struct HorizontalCellVars {
 }
 
 impl LayoutEngine {
+    pub(super) fn preserve_first_cell_spacing_before(&self) -> bool {
+        let profile = self.profile.get();
+        profile.hwpx_stored_layout() || profile.hwp5_origin_hwpx()
+    }
+
     /// 셀 안 비-TAC 자리차지 개체가 표 흐름에 요구하는 세로 범위.
     ///
     /// 한컴의 `쪽 영역 안으로 제한`은 세로 기준이 문단일 때 개체를 쪽 영역 안에
@@ -2360,7 +2376,7 @@ impl LayoutEngine {
         styles: &ResolvedStyleSet,
     ) -> f64 {
         let is_last_para = pidx + 1 == total_para_count;
-        let spacing_before = if pidx > 0 {
+        let spacing_before = if pidx > 0 || self.preserve_first_cell_spacing_before() {
             para_style.map(|s| s.spacing_before).unwrap_or(0.0)
         } else {
             0.0
@@ -2716,12 +2732,12 @@ impl LayoutEngine {
             let horz_rel_to = table.common.horz_rel_to;
             let horz_align = table.common.horz_align;
             let h_offset = hwpunit_to_px(table.common.horizontal_offset as i32, self.dpi);
-            // Hancom-authored HWPX stores a flow-with-text TopAndBottom table's position for the
+            // Hancom HWPX stores a paragraph-relative TopAndBottom table's position for the
             // outer margin box, not the painted border box.  Keep the reference/alignment math on
             // that box, then inset the visible table border.  This is paint geometry only; the
             // empty-host float lane continues to reserve the already-stored margin-box advance.
-            let uses_hwpx_outer_margin_box = self.profile.get().hwpx_stored_layout()
-                && table.common.flow_with_text
+            let uses_hwpx_outer_margin_box = (self.profile.get().hwpx_stored_layout()
+                || self.profile.get().hwp5_origin_hwpx())
                 && is_para_topbottom_float(&table.common);
             let uses_native_outer_margin_x = native_single_cell_para_float_uses_outer_margin_x(
                 table,
@@ -2867,12 +2883,18 @@ impl LayoutEngine {
             let vert_align = table.common.vert_align;
             // [Task #898] Paper-relative 표는 v_offset 이 외곽 박스 (outer_margin 포함) 기준이므로
             // 가시 표 상단 = v_offset + outer_margin_top. 한컴 PDF (exam_math.hwp 바탕쪽 쪽번호 박스) 정합.
-            let om_top_px = if matches!(vert_rel_to, crate::model::shape::VertRelTo::Paper) {
+            // Mac Hancom also insets paragraph-relative HWPX tables when
+            // flowWithText is off. It constrains page flow, not margin ownership.
+            let uses_outer_margin_box = matches!(vert_rel_to, VertRelTo::Paper)
+                || ((self.profile.get().hwpx_stored_layout()
+                    || self.profile.get().hwp5_origin_hwpx())
+                    && is_para_topbottom_float(&table.common));
+            let om_top_px = if uses_outer_margin_box {
                 hwpunit_to_px(table.outer_margin_top as i32, self.dpi)
             } else {
                 0.0
             };
-            let om_bottom_px = if matches!(vert_rel_to, crate::model::shape::VertRelTo::Paper) {
+            let om_bottom_px = if uses_outer_margin_box {
                 hwpunit_to_px(table.outer_margin_bottom as i32, self.dpi)
             } else {
                 0.0
@@ -3012,6 +3034,7 @@ impl LayoutEngine {
             .enumerate()
         {
             let visible_text_before_para = has_preceding_visible_text;
+            let mut drew_block_host_para_text = false;
             let cell_context = if let Some(ref ctx) = enclosing_cell_ctx {
                 let mut new_ctx = ctx.clone();
                 if let Some(last) = new_ctx.path.last_mut() {
@@ -3061,13 +3084,25 @@ impl LayoutEngine {
                             .get(para.para_shape_id as usize)
                             .map(|s| s.spacing_before)
                             .unwrap_or(0.0);
+                        // A first HWPX cell line may still have vpos=0 after an
+                        // edit. Its paragraph margin is not a page-top margin
+                        // to suppress. Positive stored anchors already covering
+                        // that margin must not receive it a second time.
+                        let mut anchor_vpos = first_seg
+                            .vertical_pos
+                            .saturating_sub(caption_stack_vpos_origin);
+                        if cp_idx == 0
+                            && self.preserve_first_cell_spacing_before()
+                            && caption_stack_vpos_origin == 0
+                        {
+                            anchor_vpos = anchor_vpos
+                                .max(crate::renderer::px_to_hwpunit(spacing_before, self.dpi));
+                        }
                         let anchored_y = cell_para_line_anchor_y(
                             text_y_start,
                             content_cell_y,
                             pad_top,
-                            first_seg
-                                .vertical_pos
-                                .saturating_sub(caption_stack_vpos_origin),
+                            anchor_vpos,
                             self.dpi,
                             use_top_vpos_anchor,
                         );
@@ -3198,10 +3233,63 @@ impl LayoutEngine {
                     has_preceding_visible_text = true;
                 }
             } else {
-                // has_table_ctrl: 표가 포함된 문단
-                // LINE_SEG vpos가 문단 위치를 정확히 지정하므로,
-                // 추가 spacing 없이 para_y를 그대로 사용.
-                // (leading spacing은 LINE_SEG vpos에 이미 반영되어 있음)
+                let has_visible_text = composed
+                    .lines
+                    .iter()
+                    .any(|line| line.runs.iter().any(|run| !run.text.trim().is_empty()));
+                if has_visible_text {
+                    let is_last_para = cp_idx + 1 == composed_paras.len();
+                    let end_line = if row_filter.is_some() {
+                        let cell_bottom = cell_y + cell_h;
+                        let mut sim_y = para_y;
+                        let mut fit = composed.lines.len();
+                        for (li, line) in composed.lines.iter().enumerate() {
+                            let lh = hwpunit_to_px(line.line_height, self.dpi);
+                            if sim_y + lh > cell_bottom + 0.5 {
+                                fit = li;
+                                break;
+                            }
+                            sim_y += lh + hwpunit_to_px(line.line_spacing, self.dpi);
+                        }
+                        fit
+                    } else {
+                        composed.lines.len()
+                    };
+                    let numbered_comp = if end_line > 0 {
+                        self.apply_paragraph_numbering(
+                            Some(composed),
+                            para,
+                            styles,
+                            outline_numbering_id,
+                        )
+                    } else {
+                        None
+                    };
+                    let composed_for_layout = numbered_comp.as_ref().unwrap_or(composed);
+                    let _ = self.layout_composed_paragraph(
+                        tree,
+                        cell_node,
+                        composed_for_layout,
+                        styles,
+                        &inner_area,
+                        para_y,
+                        0,
+                        end_line,
+                        section_index,
+                        cp_idx,
+                        cell_context.clone(),
+                        !use_top_vpos_anchor || caption_stack_vpos_origin > 0,
+                        is_last_para,
+                        0.0,
+                        None,
+                        Some(para),
+                        Some(bin_data_content),
+                        None,
+                    );
+                    has_preceding_text = true;
+                    has_preceding_visible_text = true;
+                    drew_block_host_para_text = true;
+                }
             }
 
             let para_alignment = styles
@@ -3281,6 +3369,13 @@ impl LayoutEngine {
                                         .iter()
                                         .find(|&&(_, _, ci)| ci == ctrl_idx)
                                         .map(|&(abs_pos, _, _)| {
+                                            if let Some(host) =
+                                                super::paragraph_layout::empty_tac_host_before_text(
+                                                    composed, abs_pos,
+                                                )
+                                            {
+                                                return host;
+                                            }
                                             composed
                                                 .lines
                                                 .iter()
@@ -3931,6 +4026,8 @@ impl LayoutEngine {
                         } else {
                             inner_area.y
                         };
+                        let nested_y =
+                            nested_y + para_relative_float_table_lead(nested_table, self.dpi);
                         let nested_ctx = cell_context.as_ref().map(|ctx| {
                             let mut new_ctx = ctx.clone();
                             new_ctx.path.push(CellPathEntry {
@@ -4073,8 +4170,9 @@ impl LayoutEngine {
                             } else {
                                 0.0
                             };
-                            // TAC 표 앞 텍스트 렌더링 (문단부호 등 표시용)
-                            if tac_text_offset > 0.0 {
+                            // TAC 표 앞 텍스트 렌더링 (문단부호 등 표시용).
+                            // Skip when the block-table ELSE already drew the host para.
+                            if tac_text_offset > 0.0 && !drew_block_host_para_text {
                                 let line_h = composed
                                     .lines
                                     .first()
@@ -4868,6 +4966,7 @@ impl LayoutEngine {
     ) -> f64 {
         let measurer = super::super::height_measurer::HeightMeasurer::new(self.dpi)
             .with_hwp3_variant(self.profile.get().hwp3_layout())
+            .with_hwpx_cell_spacing(self.preserve_first_cell_spacing_before())
             .with_render_normalization(self.render_normalization_overlay());
         measurer.cell_controls_height(&cell.paragraphs, styles, 0, 0.0)
     }
@@ -4946,7 +5045,7 @@ impl LayoutEngine {
             let comp = compose_paragraph(p);
             let para_style = styles.para_styles.get(p.para_shape_id as usize);
             let is_last_para = pidx + 1 == cell_para_count;
-            let spacing_before = if pidx > 0 {
+            let spacing_before = if pidx > 0 || self.preserve_first_cell_spacing_before() {
                 para_style.map(|s| s.spacing_before).unwrap_or(0.0)
             } else {
                 0.0
@@ -5144,9 +5243,10 @@ impl LayoutEngine {
 
             let para_style = styles.para_styles.get(para.para_shape_id as usize);
             let is_last_para = pi + 1 == total_paras;
-            // MeasuredCell 규칙: 첫 문단은 spacing_before 없음, 마지막 문단은 spacing_after 없음
+            // HWPX retains first-paragraph leading space. Native stored layout
+            // keeps its first-vpos clamp; final trailing space is omitted.
             let raw_spacing_before = para_style.map(|s| s.spacing_before).unwrap_or(0.0);
-            let spacing_before = if pi > 0 {
+            let spacing_before = if pi > 0 || self.preserve_first_cell_spacing_before() {
                 raw_spacing_before
             } else if raw_spacing_before > 0.0 {
                 let first_vpos = para
@@ -6042,15 +6142,7 @@ impl LayoutEngine {
             let para_uses_synthetic_line_segs =
                 !p.line_segs.is_empty() && p.line_segs.iter().all(|seg| line_seg_is_synthetic(seg));
             let raw_spacing_before = para_style.map(|s| s.spacing_before).unwrap_or(0.0);
-            let spacing_before = if pi > 0 {
-                raw_spacing_before
-            } else if self.profile.get().hwpx_stored_layout()
-                && is_block_rowbreak
-                && para_uses_synthetic_line_segs
-            {
-                // HWPX 에서 lineSegArray 가 누락된 표 셀 문단은 reflow 로 합성되지만,
-                // ParaShape 의 spacing_before 는 여전히 문서 속성이다. 저장 HWP 는
-                // 첫 줄 vpos 에 이 값을 반영하므로 row cut 측정도 같은 값을 사용한다.
+            let spacing_before = if pi > 0 || self.preserve_first_cell_spacing_before() {
                 raw_spacing_before
             } else if raw_spacing_before > 0.0 {
                 let first_vpos = p
@@ -6399,7 +6491,14 @@ impl LayoutEngine {
                     .iter()
                     .map(|ctrl| {
                         if let Control::Table(t) = ctrl {
+                            // Last-para only: earlier paras already paid this lead as the gap
+                            // to the next para.
                             self.calc_nested_table_height(t, styles)
+                                + if is_last_para {
+                                    para_relative_float_table_lead(t, self.dpi)
+                                } else {
+                                    0.0
+                                }
                         } else {
                             0.0
                         }
@@ -6605,6 +6704,11 @@ impl LayoutEngine {
                     .map(|ctrl| {
                         if let Control::Table(t) = ctrl {
                             self.calc_nested_table_height(t, styles)
+                                + if is_last_para {
+                                    para_relative_float_table_lead(t, self.dpi)
+                                } else {
+                                    0.0
+                                }
                         } else {
                             0.0
                         }
@@ -8709,7 +8813,7 @@ impl LayoutEngine {
             let para_style = styles.para_styles.get(para.para_shape_id as usize);
             let is_last_para = pi + 1 == para_count;
             let line_count = comp.lines.len();
-            let spacing_before = if pi > 0 {
+            let spacing_before = if pi > 0 || self.preserve_first_cell_spacing_before() {
                 para_style.map(|s| s.spacing_before).unwrap_or(0.0)
             } else {
                 0.0
@@ -8818,8 +8922,13 @@ impl LayoutEngine {
             }
 
             let is_visible_first = Some(pi) == first_visible_pi;
-            // spacing_before: 렌더링되는 첫 문단에서는 적용하지 않음
-            if start == 0 && !is_visible_first {
+            // Include the HWPX cell's leading space only in its first fragment.
+            if start == 0
+                && (!is_visible_first
+                    || (pi == 0
+                        && self.preserve_first_cell_spacing_before()
+                        && content_offset == 0.0))
+            {
                 total += spacing_before;
             }
             for li in start..end {
@@ -9693,6 +9802,93 @@ mod row_cut_tests {
             (reserved_height - table_height).abs() < 0.001,
             "moving the painted frame must not increase the empty-host lane reservation"
         );
+    }
+
+    #[test]
+    fn hwpx_unrestricted_topbottom_table_paints_inside_outer_margin_box() {
+        // Mac Hancom 12.30.0/6446: the generated cell image fixtures use
+        // flowWithText=0, but the border still starts inside the 283 HU margin.
+        let eng = LayoutEngine::new(DEFAULT_DPI);
+        eng.set_layout_profile(crate::model::provenance::LayoutCompatibilityProfile::new(
+            false, false, true, false, false,
+        ));
+        let table = Table {
+            common: CommonObjAttr {
+                text_wrap: TextWrap::TopAndBottom,
+                vert_rel_to: VertRelTo::Para,
+                horz_rel_to: HorzRelTo::Para,
+                vert_align: VertAlign::Top,
+                horz_align: HorzAlign::Left,
+                flow_with_text: false,
+                ..Default::default()
+            },
+            outer_margin_left: 283,
+            outer_margin_right: 283,
+            outer_margin_top: 283,
+            outer_margin_bottom: 283,
+            ..Default::default()
+        };
+        let area = LayoutRect {
+            x: 100.0,
+            y: 120.0,
+            width: 500.0,
+            height: 800.0,
+        };
+        let margin = hwpunit_to_px(283, DEFAULT_DPI);
+        let x = eng.compute_table_x_position(
+            &table,
+            400.0,
+            &area,
+            0,
+            crate::model::style::Alignment::Left,
+            0.0,
+            0.0,
+            None,
+            None,
+        );
+        let y = eng.compute_table_y_position(
+            &table,
+            50.0,
+            area.y,
+            &area,
+            0,
+            0.0,
+            0.0,
+            Some(area.y),
+            false,
+        );
+        assert!((x - area.x - margin).abs() < 0.001, "x={x}");
+        assert!((y - area.y - margin).abs() < 0.001, "y={y}");
+
+        // Rau's blank template originates in HWP5. Its exported HWPX keeps
+        // that lineage for line metrics, but Hancom still uses HWPX margins.
+        eng.set_layout_profile(crate::model::provenance::LayoutCompatibilityProfile::new(
+            false, false, false, true, false,
+        ));
+        let x = eng.compute_table_x_position(
+            &table,
+            400.0,
+            &area,
+            0,
+            crate::model::style::Alignment::Left,
+            0.0,
+            0.0,
+            None,
+            None,
+        );
+        let y = eng.compute_table_y_position(
+            &table,
+            50.0,
+            area.y,
+            &area,
+            0,
+            0.0,
+            0.0,
+            Some(area.y),
+            false,
+        );
+        assert!((x - area.x - margin).abs() < 0.001, "converted HWPX x={x}");
+        assert!((y - area.y - margin).abs() < 0.001, "converted HWPX y={y}");
     }
 
     #[test]

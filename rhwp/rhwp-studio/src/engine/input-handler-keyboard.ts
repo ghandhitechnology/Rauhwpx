@@ -22,6 +22,7 @@ import {
 import { emitHeaderFooterModeChanged } from './header-footer-mode';
 import { scrollByPageStep, type PageScrollDirection } from '@/view/page-scroll';
 import { caretRectForPageScroll as resolveCaretRectForPageScroll } from '@/view/page-scroll-caret';
+import { inlinePictureInsertionTarget } from './inline-picture-target';
 
 const RHWP_CLIPBOARD_MARKER_RE = /<!--\s*rhwp-studio-clipboard:([A-Za-z0-9._:-]+)\s*-->/;
 const PAGINATION_BOUNDARY_KEYS = new Set([
@@ -2185,28 +2186,32 @@ async function pasteImageFile(this: any, file: File, hasSelection: boolean): Pro
 
     const natW = img.naturalWidth;
     const natH = img.naturalHeight;
+    const selection = hasSelection ? this.cursor.getSelectionOrdered() : null;
+    const insertAt = selection?.start ?? this.cursor.getPosition();
 
     // 스냅샷으로 삽입 (Undo 지원)
     this.executeOperation({ kind: 'snapshot', operationType: 'pasteImage', operation: (wasm: WasmBridge) => {
-      if (hasSelection) this.deleteSelection();
-      const p = this.cursor.getPosition();
-      // 표 셀 안 paste (#1151): floating picture 분기 — parentParaIndex + cellPath 전달.
-      const inCell = (p.cellPath?.length ?? 0) > 0 && p.parentParaIndex !== undefined;
-      const paraForCall = inCell ? p.parentParaIndex! : p.paragraphIndex;
-      const cellPathJson = inCell ? JSON.stringify(p.cellPath) : '';
+      const p = selection
+        ? deleteSelectionImmediate(wasm, selection.start, selection.end)
+        : insertAt;
+      // New-table and legacy navigation positions may have only flat cell
+      // coordinates. Resolve those as well as full nested paths before calling
+      // the core; a missing path must never redirect a cell paste into the body.
+      const target = inlinePictureInsertionTarget(p);
       const result = wasm.insertPicture(
-        p.sectionIndex, paraForCall, p.charOffset,
-        cellPathJson, data, wHwp, hHwp, natW, natH, ext, '',
+        p.sectionIndex, target.paragraphIndex, p.charOffset,
+        target.cellPathJson, data, wHwp, hHwp, natW, natH, ext, '',
+        undefined, undefined, 'inline',
       );
       if (result.ok) {
         return {
-          sectionIndex: p.sectionIndex,
-          paragraphIndex: result.paraIdx + 1,
-          charOffset: 0,
+          ...target.position,
+          charOffset: result.logicalOffset ?? p.charOffset + 1,
         } as DocumentPosition;
       }
-      return p;
+      throw new Error('그림을 삽입할 수 없습니다.');
     }});
+    this.cursor.clearSelection();
   } catch (err) {
     console.warn('[InputHandler] 클립보드 이미지 삽입 실패:', err);
   }

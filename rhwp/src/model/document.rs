@@ -152,6 +152,9 @@ pub struct DocProperties {
 /// 문서 정보 (DocInfo 스트림의 ID 매핑 데이터)
 #[derive(Debug, Clone, Default)]
 pub struct DocInfo {
+    /// Runtime style-resolution input, never written to HWP/HWPX. Kept with
+    /// font tables so all edit-time style rebuilds use the same metrics.
+    pub font_metrics_policy: crate::model::provenance::FontMetricsPolicy,
     /// 바이너리 데이터 목록
     pub bin_data_list: Vec<BinData>,
     /// 글꼴 목록 (언어별: 한글, 영어, 한자, 일어, 기타, 기호, 사용자)

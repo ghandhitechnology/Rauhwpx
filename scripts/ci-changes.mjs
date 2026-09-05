@@ -16,10 +16,10 @@ export function selectChecks(paths) {
       enable('engine', 'browser');
       if (/^rhwp\/src\/(?:main\.rs|atomic_file\.rs)/.test(file)) enable('packages');
     } else if (/^rhwp\/(?:Cargo\.(?:toml|lock)|\.cargo\/|\.config\/|build\.rs)/.test(file)) {
-      enable('engine', 'rustAudit', 'browser', 'packages');
+      enable('engine', 'rustAudit', 'browser');
+      if (file !== 'rhwp/Cargo.lock') enable('packages');
     } else if (/^rhwp\/rhwp-agent\//.test(file)) {
       enable('app', 'sessions');
-      if (!/^rhwp\/rhwp-agent\/tests\//.test(file)) enable('packages');
       if (/package(?:-lock)?\.json$/.test(file)) enable('npm');
     } else if (/^rhwp\/rhwp-studio\//.test(file)) {
       enable('app', 'browser');
@@ -30,7 +30,8 @@ export function selectChecks(paths) {
     } else if (/^rhwp\/(?:rau-credits|rhwp-shared|rhwp-chrome|rhwp-firefox|rhwp-safari)\//.test(file)) {
       enable('app');
       if (/package(?:-lock)?\.json$/.test(file)) enable('npm');
-      if (file.startsWith('rhwp/rhwp-shared/') || file === 'rhwp/rau-credits/catalog.mjs') enable('browser', 'packages');
+      if (file.startsWith('rhwp/rhwp-shared/')) enable('browser');
+      if (file === 'rhwp/rau-credits/catalog.mjs') enable('browser', 'packages');
     } else if (/^build\//.test(file)) {
       enable('packages');
     } else {

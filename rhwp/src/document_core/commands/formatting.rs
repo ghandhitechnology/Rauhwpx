@@ -15,6 +15,7 @@ use crate::renderer::style_resolver::{resolve_styles, ResolvedStyleSet};
 
 pub(crate) fn char_shape_mods_affect_text_flow(mods: &crate::model::style::CharShapeMods) -> bool {
     mods.base_size.is_some()
+        || mods.font_id.is_some()
         || mods.font_ids.is_some()
         || mods.ratios.is_some()
         || mods.spacings.is_some()
@@ -2465,6 +2466,22 @@ mod tests {
             ..Default::default()
         };
         assert!(char_shape_mods_affect_text_flow(&mods));
+    }
+
+    #[test]
+    fn scalar_and_per_language_font_changes_require_text_reflow() {
+        for mods in [
+            CharShapeMods {
+                font_id: Some(1),
+                ..Default::default()
+            },
+            CharShapeMods {
+                font_ids: Some([1; 7]),
+                ..Default::default()
+            },
+        ] {
+            assert!(char_shape_mods_affect_text_flow(&mods));
+        }
     }
 
     #[test]

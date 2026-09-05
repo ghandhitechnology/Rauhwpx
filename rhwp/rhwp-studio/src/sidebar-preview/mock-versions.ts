@@ -275,14 +275,6 @@ export function createMockVersions(
       state.aiTitlesEnabled = enabled;
       changed();
     },
-    collectGarbage: async () => {
-      state.storageBytes = state.commits.reduce(
-        (sum, item) => sum + item.byteLength,
-        0,
-      );
-      changed();
-      report('Sample history storage cleaned');
-    },
     dispose: () => listeners.clear(),
   };
 }

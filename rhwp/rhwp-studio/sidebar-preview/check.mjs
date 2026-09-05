@@ -495,6 +495,36 @@ try {
     'Settings, fake account login/logout, templates, and writing style',
     async () => {
       await open('page=settings');
+      await clickText('.ag-settings-nav-button', 'AI 연결');
+      await page.waitForSelector('.ag-settings-quota-fill[data-health="low"]', { visible: true });
+      assert.match(await page.$eval('.ag-settings-balance-card[data-provider="openrouter"] .ag-settings-balance-amount', (el) => el.textContent), /\$18\.50/);
+      assert.equal(await page.$eval('.ag-settings-balance-card[data-provider="openrouter"] [role="meter"]', (el) => el.getAttribute('aria-valuenow')), '92.5');
+      assert.equal(await page.$$eval('.ag-settings-balance-card[data-provider="grok"] [role="meter"]', (els) => els.length), 0);
+      assert.equal(await page.$$eval('.ag-settings-balance-card[data-provider="opencode"] .ag-settings-balance-amount', (els) => els.length), 0);
+      assert.match(await page.$eval('.ag-settings-balance-card[data-provider="opencode"]', (el) => el.textContent), /잔액 정보를 사용할 수 없어요/);
+      assert.equal(await page.$eval('.ag-settings-quota-card[data-provider="codex"] [role="meter"]', (el) => el.getAttribute('aria-valuenow')), '8');
+      assert.equal(await page.$eval('.ag-settings-usage-disclosure', el => el.open), false);
+      await page.click('.ag-settings-usage-disclosure > summary');
+      await page.click('.ag-settings-usage-block[data-agent="codex"] .ag-settings-usage-toggle');
+      assert.equal(await page.$eval('.ag-settings-usage-block[data-agent="codex"] .ag-settings-usage-expanded', el => el.hidden), false);
+      await screenshot('local-usage-table');
+      await page.click('.ag-settings-usage-block[data-agent="codex"] .ag-settings-usage-toggle');
+      assert.equal(await page.$eval('.ag-settings-usage-block[data-agent="codex"] .ag-settings-usage-expanded', el => el.hidden), true);
+      await page.click('.ag-settings-usage-disclosure > summary');
+      await page.click('[data-action="request-reset"]');
+      await page.waitForSelector('[data-action="confirm-reset"]', { visible: true });
+      assert.match(await page.$eval('.ag-provider-quotas', (el) => el.textContent), /보관한 리셋 2개/);
+      await page.click('[data-action="confirm-reset"]');
+      assert.equal(await page.$eval('[data-action="confirm-reset"]', (el) => el.disabled), true);
+      assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('rhwp-codex-pending-reset')).account), 'preview-codex');
+      await page.waitForFunction(() => document.querySelector('.ag-provider-quotas').textContent.includes('한도를 리셋했어요.'));
+      assert.match(await page.$eval('.ag-provider-quotas', (el) => el.textContent), /보관한 리셋 1개/);
+      assert.equal(await page.evaluate(() => localStorage.getItem('rhwp-codex-pending-reset')), null);
+      assert.equal(await page.$eval('.ag-settings-quota-card[data-provider="codex"] [role="meter"]', (el) => el.getAttribute('aria-valuenow')), '100');
+      await screenshot('usage');
+      await page.click('[data-action="refresh-usage"]');
+      assert.equal(await page.$eval('[data-action="refresh-usage"]', (el) => el.disabled), true);
+      await page.waitForFunction(() => !document.querySelector('[data-action="refresh-usage"]').disabled);
       await screenshot('settings');
       await clickText('.ag-settings-nav-button', 'AI 연결');
       await page.waitForFunction(() =>
@@ -568,12 +598,58 @@ try {
       });
     },
   );
+  await step('Provider quota failure and exhausted reset credit', async () => {
+    await open('page=settings&quota=pro');
+    await clickText('.ag-settings-nav-button', 'AI 연결');
+    await page.waitForSelector('.ag-settings-quota-card[data-provider="codex"]');
+    assert.equal(await page.$$eval('.ag-settings-quota-card[data-provider="codex"] [role="meter"]', (meters) => meters.length), 1);
+    assert.doesNotMatch(await page.$eval('.ag-settings-quota-card[data-provider="codex"]', (el) => el.textContent), /5시간/);
+    assert.match(await page.$eval('.ag-settings-quota-card[data-provider="claude"]', (el) => el.textContent), /5시간/);
+    await open('page=settings&quota=error');
+    await clickText('.ag-settings-nav-button', 'AI 연결');
+    await page.waitForSelector('.ag-settings-quota-card[data-state="error"]');
+    assert.match(await page.$eval('.ag-provider-quotas', (el) => el.textContent), /제공자가 응답하지 않아요/);
+    assert.equal(await page.$eval('.ag-settings-quota-card[data-provider="codex"] [role="meter"]', (el) => el.hasAttribute('aria-valuenow')), false);
+    assert.equal(await page.$('[data-action="request-reset"]'), null);
+    await open('page=settings&quota=refresh-error');
+    await clickText('.ag-settings-nav-button', 'AI 연결');
+    await page.waitForFunction(() => !document.querySelector('[data-action="refresh-usage"]').disabled);
+    await page.click('[data-action="refresh-usage"]');
+    await page.waitForFunction(() => document.querySelector('.ag-settings-body').textContent.includes('연결이 일시적으로 끊겼어요.'));
+    await page.click('[data-action="refresh-usage"]');
+    await page.waitForFunction(() => !document.querySelector('[data-action="refresh-usage"]').disabled);
+    assert.equal(await page.$eval('.ag-settings-body', (el) => el.textContent.includes('연결이 일시적으로 끊겼어요.')), false);
+    await open('page=settings&quota=empty');
+    await clickText('.ag-settings-nav-button', 'AI 연결');
+    await page.waitForSelector('[data-action="request-reset"]');
+    assert.equal(await page.$eval('[data-action="request-reset"]', (el) => el.disabled), true);
+    await page.evaluate(() => localStorage.setItem('rhwp-codex-pending-reset', JSON.stringify({
+      key: 'reset-interrupted-request-123456', account: 'preview-codex',
+    })));
+    await open('page=settings&quota=empty');
+    await clickText('.ag-settings-nav-button', 'AI 연결');
+    await page.waitForSelector('[data-action="confirm-reset"]');
+    assert.equal(await page.$eval('[data-action="confirm-reset"]', (el) => el.disabled), false,
+      'An interrupted reset can be checked again after reload even with zero credits');
+    await page.click('[data-action="confirm-reset"]');
+    await page.waitForFunction(() => document.querySelector('.ag-provider-quotas').textContent.includes('사용할 리셋 크레딧이 없어요.'));
+    assert.equal(await page.evaluate(() => localStorage.getItem('rhwp-codex-pending-reset')), null);
+  });
   await step(
     'Unconfigured provider installation and local OAuth placeholder',
     async () => {
       await open('services=setup&page=settings');
       await clickText('.ag-settings-nav-button', 'AI 연결');
-      await page.click('.ag-settings-provider-row[data-agent="codex"] button');
+      const codexRow = '.ag-settings-provider-row[data-agent="codex"]';
+      await page.click(`${codexRow} summary`);
+      assert.equal(await page.$eval(codexRow, el => el.open), true);
+      await page.click('.ag-settings-provider-row[data-agent="claude"] summary');
+      await page.waitForFunction(() => !document.querySelector('.ag-settings-provider-row[data-agent="codex"]').open);
+      await page.focus(`${codexRow} summary`);
+      await page.keyboard.press('Enter');
+      await page.waitForFunction(() => document.querySelector('.ag-settings-provider-row[data-agent="codex"]').open);
+      await screenshot('connection-accordion');
+      await page.click(`${codexRow} .ag-provider-setup-btn`);
       await page.waitForSelector(
         '.ag-agent-setup-overlay[aria-hidden="false"]',
       );

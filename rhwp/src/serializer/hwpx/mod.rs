@@ -24,6 +24,7 @@ pub mod shape;
 pub mod static_assets;
 pub mod table;
 pub mod utils;
+mod version_metadata;
 pub mod writer;
 
 use std::collections::HashSet;
@@ -67,14 +68,13 @@ pub fn serialize_hwpx(doc: &Document) -> Result<Vec<u8>, SerializeError> {
     // 1. mimetype (반드시 최초 엔트리, STORED, extra field 없음)
     z.write_stored("mimetype", b"application/hwp+zip")?;
 
-    // 2. version.xml — 원본 보존 우선 (없으면 하드코딩 상수).
-    //    하드코딩 상수는 Windows/특정 빌드 고정값이라 한컴 변환본의 실제 플랫폼
-    //    버전을 덮어쓴다. 원본 보조 엔트리가 있으면 그대로 출력한다.
-    z.write_deflated(
-        "version.xml",
+    // HwpUnitChar switches require XML >= 1.4. Preserve producer/platform
+    // metadata, but do not label regenerated modern units as legacy XML.
+    let version_xml = version_metadata::for_regenerated_hwpx(
         doc.hwpx_aux_entry("version.xml")
             .unwrap_or_else(|| VERSION_XML.as_bytes()),
-    )?;
+    );
+    z.write_deflated("version.xml", version_xml.as_ref())?;
 
     // 3. Contents/header.xml — Stage 1 동적 생성 (IR 기반)
     let header_limit = z.remaining_entry_limit("Contents/header.xml")?;
@@ -399,6 +399,45 @@ mod tests {
         let mut got = Vec::new();
         std::io::Read::read_to_end(&mut entry, &mut got).expect("read");
         assert_eq!(got, static_assets::VERSION_XML.as_bytes());
+    }
+
+    #[test]
+    fn regenerated_legacy_package_declares_modern_units_without_changing_spacing() {
+        const SOURCE: &[u8] = include_bytes!(
+            "../../../tests/fixtures/editing_parity/mac-hancom-12.30.0/body-paragraph-spacing/edited.hwpx"
+        );
+        let original_version = zip_entry(SOURCE, "version.xml");
+        let expected_version = std::str::from_utf8(&original_version)
+            .unwrap()
+            .replace("xmlVersion=\"1.2\"", "xmlVersion=\"1.4\"");
+        assert_ne!(original_version, expected_version.as_bytes());
+        let original = parse_hwpx(SOURCE).unwrap();
+        let shape_id = original.sections[0].paragraphs[1].para_shape_id as usize;
+        let spacing = |doc: &Document| {
+            let shape = &doc.doc_info.para_shapes[shape_id];
+            (shape.spacing_before, shape.spacing_after)
+        };
+        // This legacy package displays 3/1.5 pt in Hancom, despite case
+        // values 600/300. Preserve that interpretation when upgrading XML.
+        assert_eq!(spacing(&original), (600, 300));
+        let mut document = original.clone();
+        for _ in 0..3 {
+            let saved = serialize_hwpx(&document).unwrap();
+            assert_eq!(
+                zip_entry(&saved, "version.xml"),
+                expected_version.as_bytes()
+            );
+            document = parse_hwpx(&saved).unwrap();
+            assert_eq!(spacing(&document), spacing(&original));
+            assert_eq!(
+                document.doc_info.hwpml_version,
+                original.doc_info.hwpml_version
+            );
+        }
+        assert_eq!(
+            original.hwpx_aux_entry("version.xml").unwrap(),
+            original_version
+        );
     }
 
     fn zip_entry(bytes: &[u8], path: &str) -> Vec<u8> {

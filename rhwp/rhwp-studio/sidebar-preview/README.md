@@ -39,6 +39,9 @@ The focus-mode button shows a placeholder because this preview covers the sideba
 | `?page=versions` | Production version graph |
 | `?page=versions&history=branches` | Branching and merging history with colored graph lanes |
 | `?services=setup&page=settings` | Uninstalled/unconfigured service fixtures |
+| `?page=settings&quota=error` | Provider quota errors and unknown health bars in AI 연결 |
+| `?page=settings&quota=empty` | Exhausted Codex quota and zero banked resets |
+| `?page=settings&quota=refresh-error` | Manual refresh fails once, then succeeds on retry |
 | `?initial-setup=1` | Production first-run setup wizard |
 | `?theme=dark&width=360` | Dark theme and narrow sidebar |
 | `?controls=0` | Hide preview controls for clean captures |
@@ -65,6 +68,19 @@ the preview account and only seeded with `dashboard=1`.
 
 ## Behavior and placeholders
 
+### Live account usage audit
+
+Start a development agent hub from this checkout on an unused port, then enable the optional local transport:
+
+```sh
+RHWP_AGENT_PORT=5178 npm start
+RHWP_SIDEBAR_LIVE_HUB=http://127.0.0.1:5178 npm run dev:sidebar
+```
+
+Open `http://127.0.0.1:7715/?page=settings&usage=live` and select **AI 연결**. Usage, token history, and banked reset actions use the real hub; chat, document, and provider setup controls remain fixtures. Confirming a banked reset spends a real reset. The default URL continues to use samples. If the hub uses a custom development token, set `RHWP_SIDEBAR_HUB_TOKEN` on the preview server; hub credentials stay server-side.
+
+The optional transport accepts only same-origin usage reads and Codex reset requests on loopback. It registers its own hub session and deletes that session when the preview server closes.
+
 | Surface | Preview behavior |
 | --- | --- |
 | Chat | Real composer, provider/model/effort pickers, permissions, streaming Markdown, stop, tool details, question responses, and thread library |
@@ -73,7 +89,7 @@ the preview account and only seeded with `dashboard=1`.
 | Templates | Upload metadata, rename, replace, delete, and select via `/templates`; document parsing is simulated |
 | References | File picker/drop/paste UI, staged message attachments, scoped lists, filename search, and deletion; extraction returns sample metadata/snippets |
 | Settings | Real editing preferences, draft/apply/cancel, themes, model defaults, app instructions, and sample writing-style calibration |
-| Connections | Sample account login/logout, provider install/login, usage plans, model catalogs, and usage-link state; no keys are used or stored by mocks |
+| Connections | Sample account login/logout, provider install/login, direct quota health bars, manual refresh, Codex banked reset confirmation, and model catalogs; provider credentials are never used by mocks |
 | Versions | Graph, commit titles, checkpoints, restore/adopt metadata, branches, tags, shelves, and sample merges |
 | External/document actions | Local notice for browser/cloud pages, linked documents, full-workspace focus mode, and document comparisons |
 

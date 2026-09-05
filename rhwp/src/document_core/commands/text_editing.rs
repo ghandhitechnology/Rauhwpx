@@ -1913,7 +1913,7 @@ impl DocumentCore {
     /// [#2755] path 의 CellPathEntry 사슬을 따라 **최내곽** 셀의 폭·좌우 패딩(HWPUNIT)을
     /// 해석한다. 마지막 엔트리를 제외한 각 엔트리에서 다음 중첩 컨트롤을 담은 컨테이너
     /// 문단(`cell_para_idx`)으로 하강한다 — `get_cell_paragraphs_mut_by_path` 의 불변 짝이다.
-    fn resolve_innermost_cell_metrics(
+    pub(crate) fn resolve_innermost_cell_metrics(
         &self,
         section_idx: usize,
         parent_para_idx: usize,
@@ -4394,11 +4394,20 @@ impl DocumentCore {
             rebuild_char_offsets(cell_para);
         }
 
+        self.reflow_cell_paragraph_by_path(section_idx, parent_para_idx, path, cell_para_idx);
+        self.recalculate_cell_paragraph_vpos_by_path(
+            section_idx,
+            parent_para_idx,
+            path,
+            cell_para_idx,
+            None,
+        );
+
         // 최외곽 표 dirty 마킹
         let outer_ctrl = path[0].0;
         self.mark_cell_control_dirty(section_idx, parent_para_idx, outer_ctrl);
 
-        // 리플로우 (최외곽 표 기준 — 중첩 표 셀 폭은 별도 계산이 필요하나 우선 section dirty로 처리)
+        // Invalidate pagination after reflowing the innermost cell.
         self.document.sections[section_idx].raw_stream = None;
         self.mark_section_dirty(section_idx);
         self.paginate_if_needed();
@@ -5241,6 +5250,23 @@ mod tests {
     }
 
     /// [#2755] 깊이 2 — `delete_range_in_cell_by_path` 가 최내곽 셀을 재래핑한다.
+    #[test]
+    fn insert_text_in_nested_cell_by_path_reflows_inner_cell() {
+        let (mut core, path) = core_with_nested_narrow_cell("A", &[0]);
+        core.insert_text_in_cell_by_path(0, 0, &path, 1, &"A".repeat(39))
+            .unwrap();
+        let paras = core.get_cell_paragraphs_mut_by_path(0, 0, &path).unwrap();
+        assert_eq!(paras[0].text.chars().count(), 40);
+        assert!(
+            paras[0].line_segs.len() > 1,
+            "insertion must rewrap to the inner cell width"
+        );
+        assert!(paras[0]
+            .line_segs
+            .windows(2)
+            .all(|pair| pair[1].vertical_pos > pair[0].vertical_pos));
+    }
+
     #[test]
     fn delete_range_in_nested_cell_by_path_reflows_inner_cell() {
         let text = "A".repeat(40);

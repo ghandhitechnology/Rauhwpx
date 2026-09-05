@@ -59,10 +59,11 @@ import {
 import { DownloadManager } from './download-manager.mjs';
 import { DocumentSnapshotManager } from './document-snapshot-manager.mjs';
 import { ArtifactStore } from './artifact-store.mjs';
-import { BrowserbaseSession } from './browserbase-session.mjs';
+import { BrowserbaseFleet, normalizeBrowserbaseOverride, validateBrowserbaseCredentials } from './browserbase-session.mjs';
 import { createProviderHealth } from './provider-health.mjs';
 import { createUsageStore } from './usage-store.mjs';
-import { createCliproxyClient } from './cliproxy.mjs';
+import { createProviderLimitsClient } from './provider-limits.mjs';
+import { createProviderBalancesClient } from './provider-balances.mjs';
 import {
   createPiManager,
   defaultPiRoot,
@@ -327,6 +328,7 @@ let piStatus = await piManager.status();
 let rauStatus = await rauManager.status();
 /** OpenRouter 잔액. 키가 있을 때만 채워지고 사용량 리포트에 얹힌다. */
 let openRouterCredits = null;
+let openRouterCreditsKey = null;
 let rauCreditsBalance = null;
 if (piStatus.installed || rauStatus.installed) {
   // 저장소가 갱신되면 확장/스킬도 따라와야 한다 — 실패해도 허브는 그대로 뜬다.
@@ -379,7 +381,24 @@ const providerHealth = createProviderHealth({
   },
 });
 const usageStore = await createUsageStore().init();
-const cliproxy = await createCliproxyClient({ rootDir: usageStore.rootDir }).init();
+const providerLimits = createProviderLimitsClient({
+  homeDir: HOST_PROFILE_HOME,
+  resetLedgerPath: path.join(usageStore.rootDir, 'codex-reset-ledger.json'),
+  getProviderEnv: (agent) => cliSetup.envFor(agent),
+  getAuthMethod: (agent) => cliSetupStatus[agent]?.authMethod,
+  getCodexBin: () => cliSetupStatus.codex?.installed ? cliSetup.binPath('codex') : 'codex',
+});
+const providerBalances = createProviderBalancesClient({
+  getGrokAuthPath: () => cliSetup.grokAuthPath(),
+  getOpenCodeAuthPath: () => cliSetup.openCodeAuthPath(),
+  getProviderEnv: (agent) => ({
+    ...cliSetup.envFor(agent),
+    ...(agent === 'grok' ? {
+      XAI_MANAGEMENT_API_KEY: process.env.XAI_MANAGEMENT_API_KEY,
+      XAI_TEAM_ID: process.env.XAI_TEAM_ID,
+    } : {}),
+  }),
+});
 const referenceStore = await new ReferenceStore({ projectRoot: ROOT }).init();
 const templateStore = await new TemplateStore().init();
 // .hwp/.hwpx/.hml 텍스트 추출은 rhwp 바이너리에 기댄다 — 없으면 첫 업로드가 아니라 기동 시점에 알린다.
@@ -460,7 +479,7 @@ const sessions = new HubSessionRegistry({
       copyLayoutStorageUncertain: false,
       pendingTemplateCompletions: [],
       pendingDocumentSaved: null,
-      browserbaseSession: new BrowserbaseSession({ log }),
+      browserbaseSession: new BrowserbaseFleet({ log }),
       downloadManager,
       documentSnapshotManager,
       artifactStore: new ArtifactStore({ rootDir: workDir, trustedReadRoots: hubReadOnlyRoots }),
@@ -1649,8 +1668,25 @@ function replyToStudio(record, sock, obj) {
 }
 
 function usageSnapshot() {
-  const usage = cliproxy.applyToSummary(usageStore.summary());
-  if (openRouterCredits) usage.openrouter = openRouterCredits;
+  const usage = usageStore.summary();
+  usage.limits = providerLimits.snapshot();
+  const currentKey = piManager.apiKey();
+  const keyId = currentKey ? crypto.createHash('sha256').update(currentKey).digest('hex') : null;
+  const credits = keyId && keyId === openRouterCreditsKey ? openRouterCredits : null;
+  if (credits) usage.openrouter = credits;
+  usage.balances = {
+    ...providerBalances.snapshot(),
+    openrouter: {
+      status: credits ? (credits.error ? 'error' : 'ok') : 'unavailable',
+      balanceUsd: credits && !credits.error ? credits.balanceUsd : null,
+      totalCreditsUsd: credits && !credits.error ? credits.totalCreditsUsd : null,
+      totalUsageUsd: credits && !credits.error ? credits.totalUsageUsd : null,
+      updatedAt: credits && !credits.error ? credits.checkedAt : null,
+      source: credits?.scope === 'key' ? 'OpenRouter 키 한도' : 'OpenRouter 크레딧',
+      error: credits?.error ? 'OpenRouter 잔액을 조회하지 못했어요. 키와 조회 권한을 확인해 주세요.'
+        : !credits ? (currentKey ? '잔액을 새로고침해 주세요.' : 'Pi에서 OpenRouter 계정을 연결해 주세요.') : null,
+    },
+  };
   if (rauCreditsBalance) usage.rau = rauCreditsBalance;
   return usage;
 }
@@ -1667,13 +1703,20 @@ function emptyCreditsError(error) {
 
 /** 잔액 조회는 5분 캐시된다 — refresh 일 때만 실제로 다시 부른다. */
 async function refreshOpenRouterCredits(refresh = false) {
-  if (!piStatus.keyConfigured) {
+  const key = piManager.apiKey();
+  if (!key) {
     openRouterCredits = null;
+    openRouterCreditsKey = null;
   } else {
+    let result;
     try {
-      openRouterCredits = await piManager.credits(refresh === true);
+      result = await piManager.credits(refresh === true);
     } catch (error) {
-      openRouterCredits = emptyCreditsError(error);
+      result = emptyCreditsError(error);
+    }
+    if (piManager.apiKey() === key) {
+      openRouterCredits = result;
+      openRouterCreditsKey = crypto.createHash('sha256').update(key).digest('hex');
     }
   }
   if (!rauStatus.keyConfigured) {
@@ -1688,8 +1731,11 @@ async function refreshOpenRouterCredits(refresh = false) {
 }
 
 async function usageSnapshotRefreshing(refresh = false) {
-  if (cliproxy.configured()) await cliproxy.refresh(refresh === true);
-  await refreshOpenRouterCredits(refresh);
+  await Promise.all([
+    providerLimits.refresh(refresh === true),
+    providerBalances.refresh(refresh === true),
+    refreshOpenRouterCredits(refresh),
+  ]);
   return usageSnapshot();
 }
 
@@ -2478,7 +2524,11 @@ function makeBackendEventHandler(record, generation) {
       ? { ...evt, turnId: providerTurnId }
       : evt;
     if (evt.type === 'turn-start') record.missedTurnEnd = null;
-    if (evt.type === 'turn-end') settleAgentTurn(record, activeSession, evt);
+    if (evt.type === 'turn-end') {
+      settleAgentTurn(record, activeSession, evt);
+      // 서브에이전트 브라우저는 턴과 함께 끝난다 — 메인 브라우저만 다음 턴까지 산다.
+      record.browserbaseSession.cleanupExtras('turn ended');
+    }
     const delivered = sendJson(record.studioSocket, { v: 1, type: 'agent-event', event: studioEvent });
     if (evt.type === 'turn-end' && !delivered) record.missedTurnEnd = studioEvent;
     if (evt.type === 'turn-end') {
@@ -2951,6 +3001,40 @@ function sendPiError(record, sock, requestId, error, fallbackCode) {
     code: error?.code ?? fallbackCode,
     message: String(error?.message ?? error),
   });
+}
+
+function sendBrowserbaseError(record, sock, requestId, error) {
+  replyToStudio(record, sock, {
+    v: 1,
+    type: 'browserbase-error',
+    requestId,
+    code: error?.code ?? 'BROWSERBASE_CREDENTIALS_REJECTED',
+    message: String(error?.message ?? error),
+  });
+}
+
+/**
+ * 스튜디오가 입력한 Browserbase 자격 증명 — 앱이 도는 동안만 환경 변수를 덮고 디스크에는
+ * 남기지 않는다. 키가 들어오면 Browserbase API 에 먼저 확인하고, 프로젝트 id 가 비어
+ * 있으면 그 계정의 프로젝트를 골라 채운다 (환경 변수의 프로젝트 id 는 다른 계정일 수
+ * 있어 섞지 않는다). 턴이 도는 중이면 떠 있는 브라우저는 두고 다음 호출부터 새 키를 쓴다.
+ */
+async function applyBrowserbaseOverride(record, msg) {
+  const revision = record.browserbaseSession.beginCredentialChange();
+  const override = normalizeBrowserbaseOverride({
+    apiKey: msg.apiKey,
+    projectId: msg.projectId,
+    geminiApiKey: msg.geminiApiKey,
+  });
+  if (override?.apiKey) {
+    const verified = await validateBrowserbaseCredentials({ apiKey: override.apiKey, projectId: override.projectId ?? null });
+    override.projectId = verified.projectId;
+  }
+  return record.browserbaseSession.applyVerifiedOverride(
+    override,
+    { restart: record.agentSession?.status !== 'running' },
+    revision,
+  );
 }
 
 function providerModeRequest(activeSession, phase) {
@@ -4033,6 +4117,20 @@ async function handleStudioMessage(record, sock, msg) {
             if (agent === 'grok') sourceGrokAuthPath = (await cliSetup.grokAuthPath()) ?? undefined;
             if (agent === 'opencode') sourceOpenCodeAuthPath = (await cliSetup.openCodeAuthPath()) ?? undefined;
             refreshSessionCredentials(agent);
+            if (agent === 'grok' || agent === 'opencode') {
+              providerBalances.invalidate();
+              broadcastToStudios({ v: 1, type: 'usage-report', usage: usageSnapshot() });
+              void providerBalances.refresh(true).then(() => {
+                broadcastToStudios({ v: 1, type: 'usage-report', usage: usageSnapshot() });
+              }).catch(() => log('provider balance refresh after sign-in failed'));
+            }
+            if (agent === 'claude' || agent === 'codex') {
+              providerLimits.invalidate();
+              broadcastToStudios({ v: 1, type: 'usage-report', usage: usageSnapshot() });
+              void providerLimits.refresh(true).then(() => {
+                broadcastToStudios({ v: 1, type: 'usage-report', usage: usageSnapshot() });
+              }).catch(() => log('provider usage refresh after sign-in failed'));
+            }
           });
       }
       void run.then(async () => {
@@ -4109,8 +4207,23 @@ async function handleStudioMessage(record, sock, msg) {
         .then((usage) => replyToStudio(record, sock, { v: 1, type: 'usage-report', requestId, usage }))
         .catch((e) => replyToStudio(record, sock, {
           v: 1, type: 'usage-error', requestId,
-          code: e?.code ?? 'CLIPROXY_FAILED', message: String(e?.message ?? e),
+          code: e?.code ?? 'USAGE_FETCH_FAILED', message: String(e?.message ?? e),
         }));
+      return;
+    }
+    case 'codex-reset-consume': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      void providerLimits.consumeCodexReset({
+        idempotencyKey: msg.idempotencyKey, accountKey: msg.accountKey,
+      }).then(({ outcome }) => {
+        const usage = usageSnapshot();
+        replyToStudio(record, sock, { v: 1, type: 'codex-reset-result', requestId, outcome, usage });
+        broadcastToStudios({ v: 1, type: 'usage-report', usage });
+      }).catch((error) => replyToStudio(record, sock, {
+        v: 1, type: 'codex-reset-error', requestId,
+        code: error?.code ?? 'CODEX_RESET_FAILED',
+        message: error?.message ?? '초기화에 실패했어요.',
+      }));
       return;
     }
     case 'usage-plan-set': {
@@ -4123,6 +4236,26 @@ async function handleStudioMessage(record, sock, msg) {
           v: 1, type: 'usage-error', requestId,
           code: e?.code ?? 'INVALID_PLAN', message: String(e?.message ?? e),
         }));
+      return;
+    }
+    case 'browserbase-status-request': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      replyToStudio(record, sock, { v: 1, type: 'browserbase-status', requestId, status: record.browserbaseSession.status() });
+      return;
+    }
+    case 'browserbase-credentials-set': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      void applyBrowserbaseOverride(record, msg)
+        .then((status) => replyToStudio(record, sock, { v: 1, type: 'browserbase-status', requestId, status }))
+        .catch((e) => sendBrowserbaseError(record, sock, requestId, e));
+      return;
+    }
+    case 'browserbase-credentials-clear': {
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      record.browserbaseSession.beginCredentialChange();
+      void record.browserbaseSession.setOverride(null, { restart: record.agentSession?.status !== 'running' })
+        .then((status) => replyToStudio(record, sock, { v: 1, type: 'browserbase-status', requestId, status }))
+        .catch((e) => sendBrowserbaseError(record, sock, requestId, e));
       return;
     }
     case 'pi-status-request': {
@@ -4183,34 +4316,6 @@ async function handleStudioMessage(record, sock, msg) {
           replyToStudio(record, sock, { v: 1, type: 'pi-status', requestId, status });
         })
         .catch((e) => sendPiError(record, sock, requestId, e, 'PI_MODELS_INVALID'));
-      return;
-    }
-    case 'cliproxy-connect': {
-      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
-      void cliproxy.connect({ url: msg.url, key: msg.key })
-        .then((status) => replyToStudio(record, sock, {
-          v: 1, type: 'usage-report', requestId, usage: cliproxy.applyToSummary(usageStore.summary()),
-        }))
-        .catch((e) => {
-          const usage = cliproxy.applyToSummary(usageStore.summary());
-          usage.cliproxy = {
-            ...usage.cliproxy,
-            configured: false,
-            connected: false,
-            error: String(e?.message ?? e),
-          };
-          replyToStudio(record, sock, { v: 1, type: 'usage-report', requestId, usage });
-        });
-      return;
-    }
-    case 'cliproxy-disconnect': {
-      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
-      void cliproxy.disconnect()
-        .then(() => replyToStudio(record, sock, { v: 1, type: 'usage-report', requestId, usage: usageSnapshot() }))
-        .catch((e) => replyToStudio(record, sock, {
-          v: 1, type: 'usage-error', requestId,
-          code: e?.code ?? 'CLIPROXY_DISCONNECT_FAILED', message: String(e?.message ?? e),
-        }));
       return;
     }
     case 'writing-style-status-request': {
@@ -5148,7 +5253,8 @@ function handleMcpMessage(record, sock, msg) {
       }
       if (definition.category === 'browser') {
         const sidecarTool = tool.replace(/^browserbase_/, '');
-        void record.browserbaseSession.call(record.agentSession.chatId, sidecarTool, args)
+        const { browserId, ...sidecarArgs } = args;
+        void record.browserbaseSession.call(record.agentSession.chatId, browserId, sidecarTool, sidecarArgs)
           .then(sendResult)
           .catch((error) => {
             if (error?.processCleanupUncertain) {
@@ -6127,11 +6233,6 @@ httpServer.on('upgrade', (req, socket, head) => {
       if (piStatus.keyConfigured && !openRouterCredits) {
         void refreshOpenRouterCredits(false)
           .then(() => replyToStudio(record, ws, { v: 1, type: 'usage-report', usage: usageSnapshot() }));
-      }
-      if (cliproxy.configured()) {
-        void cliproxy.refresh(false).then((status) => {
-          if (status.connected || status.error) replyToStudio(record, ws, { v: 1, type: 'usage-report', usage: usageSnapshot() });
-        });
       }
       log(`studio connected (session=${record.sessionId})`);
       return;

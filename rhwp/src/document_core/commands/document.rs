@@ -548,6 +548,18 @@ impl DocumentCore {
         Self::from_bytes_with_policy(data, crate::parser::limits::InputPolicy::Untrusted)
     }
 
+    /// Choose metrics before import-time reconstruction of missing line data.
+    pub fn from_bytes_with_font_metrics(
+        data: &[u8],
+        font_metrics: crate::model::provenance::FontMetricsPolicy,
+    ) -> Result<DocumentCore, HwpError> {
+        Self::from_bytes_with_policies(
+            data,
+            crate::parser::limits::InputPolicy::Untrusted,
+            font_metrics,
+        )
+    }
+
     /// Open one exact local file approved for this attempt by a native picker.
     pub fn from_local_file_bytes(data: &[u8]) -> Result<DocumentCore, HwpError> {
         Self::from_bytes_with_policy(data, crate::parser::limits::InputPolicy::LocalFileOnce)
@@ -562,10 +574,19 @@ impl DocumentCore {
         data: &[u8],
         policy: crate::parser::limits::InputPolicy,
     ) -> Result<DocumentCore, HwpError> {
+        Self::from_bytes_with_policies(data, policy, Default::default())
+    }
+
+    pub(crate) fn from_bytes_with_policies(
+        data: &[u8],
+        policy: crate::parser::limits::InputPolicy,
+        font_metrics: crate::model::provenance::FontMetricsPolicy,
+    ) -> Result<DocumentCore, HwpError> {
         let source_format = crate::parser::detect_format(data);
         let parsed = crate::parser::parse_document_with_metadata_policy(data, policy)
             .map_err(|e| HwpError::InvalidFile(e.to_string()))?;
         let mut document = parsed.document;
+        document.doc_info.font_metrics_policy = font_metrics;
         let hml_metadata = parsed.hml_metadata;
 
         // [#2279 실험 전용] 본문 저장 lineseg 전면 무시 → fresh 재계산.
@@ -709,7 +730,11 @@ impl DocumentCore {
         data: &[u8],
         policy: crate::parser::limits::InputPolicy,
     ) -> Result<String, HwpError> {
-        let mut replacement = DocumentCore::from_bytes_with_policy(data, policy)?;
+        let mut replacement = DocumentCore::from_bytes_with_policies(
+            data,
+            policy,
+            self.document.doc_info.font_metrics_policy,
+        )?;
         replacement.convert_to_editable_native()?;
 
         self.document = replacement.document;
@@ -2250,6 +2275,17 @@ impl DocumentCore {
         Ok(self.store_snapshot(snapshot))
     }
 
+    /// Select session font metrics without rewriting stored document properties.
+    pub fn set_font_metrics_policy_native(
+        &mut self,
+        policy: crate::model::provenance::FontMetricsPolicy,
+    ) {
+        if self.document.doc_info.font_metrics_policy != policy {
+            self.document.doc_info.font_metrics_policy = policy;
+            self.refresh_layout_native();
+        }
+    }
+
     /// 현재 Document IR은 건드리지 않고, 그로부터 파생된 모든 조판 캐시를 다시 만든다.
     ///
     /// 여러 저수준 편집을 연달아 수행하는 호출자는 각 단계의 증분 캐시를 최종 결과로
@@ -2370,6 +2406,7 @@ impl DocumentCore {
             .collect();
         let mut current_sections = std::mem::take(&mut self.document.sections);
         let mut restored = snapshot.document_shell.clone();
+        restored.doc_info.font_metrics_policy = self.document.doc_info.font_metrics_policy;
         restored.sections.reserve(snapshot.sections.len());
         for (section_idx, snapshot_section) in snapshot.sections.iter().enumerate() {
             if same_section_count && current_revisions[section_idx] == snapshot_section.revision {
@@ -2419,6 +2456,27 @@ impl DocumentCore {
         if same_section_count {
             self.styles = resolve_styles(&self.document.doc_info, self.dpi);
             for &section_idx in &changed_sections {
+                // Snapshot tables are usually clean, but the cached measurements
+                // belong to the document we just replaced. Recomposition alone
+                // does not invalidate those table entries. Keep unaffected
+                // paragraphs reusable while remeasuring every restored owner.
+                let changed = selectively_changed_paragraphs[section_idx].as_ref();
+                for (paragraph_idx, para) in self.document.sections[section_idx]
+                    .paragraphs
+                    .iter_mut()
+                    .enumerate()
+                {
+                    if changed.is_some_and(|indices| {
+                        !indices.is_empty() && !indices.contains(&paragraph_idx)
+                    }) {
+                        continue;
+                    }
+                    for control in &mut para.controls {
+                        if let Control::Table(table) = control {
+                            table.dirty = true;
+                        }
+                    }
+                }
                 match &selectively_changed_paragraphs[section_idx] {
                     Some(paragraphs) if !paragraphs.is_empty() => {
                         for &paragraph_idx in paragraphs {
@@ -2792,6 +2850,75 @@ mod replace_content_tests {
     const HML: &[u8] = include_bytes!("../../../samples/hml/formatting_table.hml");
     const HWP: &[u8] = include_bytes!("../../../saved/blank2010.hwp");
     const HWPX: &[u8] = include_bytes!("../../../saved/blank_hwpx.hwpx");
+
+    #[test]
+    fn missing_cell_lines_use_selected_font_metrics_during_import_and_replacement() {
+        use crate::model::provenance::FontMetricsPolicy;
+        const SOURCE: &[u8] = include_bytes!(
+            "../../../tests/fixtures/editing_parity/mac-hancom-12.30.0/cell-mixed-text/source.hwpx"
+        );
+        let mut document = crate::parser::hwpx::parse_hwpx(SOURCE).unwrap();
+        document
+            .hwpx_aux_entries
+            .retain(|(path, _)| path != crate::model::document::HWP5_ORIGIN_HWPX_MARKER_PATH);
+        let table = document.sections[0].paragraphs[0]
+            .controls
+            .iter_mut()
+            .find_map(|control| {
+                if let Control::Table(table) = control {
+                    Some(table)
+                } else {
+                    None
+                }
+            })
+            .unwrap();
+        table.cells[0].paragraphs[0].line_segs.clear();
+        let bytes = crate::serializer::hwpx::serialize_hwpx(&document).unwrap();
+        let starts = |core: &DocumentCore| -> Vec<u32> {
+            let table = core.document.sections[0].paragraphs[0]
+                .controls
+                .iter()
+                .find_map(|control| {
+                    if let Control::Table(table) = control {
+                        Some(table)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap();
+            table.cells[0].paragraphs[0]
+                .line_segs
+                .iter()
+                .map(|line| line.text_start)
+                .collect()
+        };
+        let selected =
+            DocumentCore::from_bytes_with_font_metrics(&bytes, FontMetricsPolicy::HcrDeclared)
+                .unwrap();
+        let mut late = DocumentCore::from_bytes(&bytes).unwrap();
+        assert_ne!(
+            starts(&selected),
+            starts(&late),
+            "fixture must distinguish the two fonts' wrapping"
+        );
+        let wrong_starts = starts(&late);
+        late.set_font_metrics_policy_native(FontMetricsPolicy::HcrDeclared);
+        assert_eq!(
+            starts(&late),
+            wrong_starts,
+            "setting metrics after reconstruction cannot repair its stored breaks"
+        );
+        late.replace_content_from_bytes_native(&bytes).unwrap();
+        assert_eq!(
+            starts(&late),
+            starts(&selected),
+            "replacement must select metrics before reconstruction too"
+        );
+        assert_eq!(
+            late.get_page_text_layout_native(0).unwrap(),
+            selected.get_page_text_layout_native(0).unwrap()
+        );
+    }
 
     fn serialized_document(core: &DocumentCore) -> Vec<u8> {
         core.export_hwp_native().expect("document should serialize")

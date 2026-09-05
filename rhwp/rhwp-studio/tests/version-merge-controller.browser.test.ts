@@ -98,6 +98,7 @@ test('dirty merge entry commits only after the user chooses the current branch',
       };
       let userEditingLocked = false;
       const inputHandler = {
+        canRedo: () => false,
         prepareSnapshotCapacity: () => undefined,
         replaceContentFromBytes: (bytes: Uint8Array) => {
           wasm.loadDocument(bytes, 'shift-return.hwp');

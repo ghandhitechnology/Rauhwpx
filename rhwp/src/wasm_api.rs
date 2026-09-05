@@ -413,6 +413,37 @@ fn source_format_name(format: crate::parser::FileFormat) -> &'static str {
     }
 }
 
+fn parse_font_metrics_policy(
+    policy: &str,
+) -> Result<crate::model::provenance::FontMetricsPolicy, crate::error::HwpError> {
+    use crate::model::provenance::FontMetricsPolicy;
+    match policy {
+        "hancom-windows" => Ok(FontMetricsPolicy::HancomWindows),
+        "hcr-declared" => Ok(FontMetricsPolicy::HcrDeclared),
+        _ => Err(crate::error::HwpError::RenderError(
+            "Unknown font metrics policy".into(),
+        )),
+    }
+}
+
+fn open_with_hwpx_font_metrics(
+    data: &[u8],
+    input_policy: crate::parser::limits::InputPolicy,
+    font_policy: &str,
+) -> Result<HwpDocument, crate::error::HwpError> {
+    let requested = parse_font_metrics_policy(font_policy)?;
+    let effective = if matches!(
+        crate::parser::detect_format(data),
+        crate::parser::FileFormat::Hwpx
+    ) {
+        requested
+    } else {
+        Default::default()
+    };
+    DocumentCore::from_bytes_with_policies(data, input_policy, effective)
+        .map(|core| HwpDocument { core })
+}
+
 fn format_hml_export_error(error: &crate::serializer::hml::HmlExportError) -> String {
     use std::fmt::Write;
 
@@ -437,6 +468,21 @@ impl HwpDocument {
             .map_err(|e| e.into())
     }
 
+    /// Select HWPX font metrics before parsing constructs missing line data.
+    /// Other input formats retain their existing measurement policy.
+    #[wasm_bindgen(js_name = fromBytesWithFontMetrics)]
+    pub fn from_bytes_with_font_metrics(
+        data: &[u8],
+        font_policy: &str,
+    ) -> Result<HwpDocument, JsValue> {
+        open_with_hwpx_font_metrics(
+            data,
+            crate::parser::limits::InputPolicy::Untrusted,
+            font_policy,
+        )
+        .map_err(|error| error.into())
+    }
+
     /// Open bytes from one exact local file approved by the native host.
     /// The host must consume its approval after this call.
     #[wasm_bindgen(js_name = fromTrustedLocalFileBytes)]
@@ -444,6 +490,20 @@ impl HwpDocument {
         DocumentCore::from_local_file_bytes(data)
             .map(|core| HwpDocument { core })
             .map_err(|error| error.into())
+    }
+
+    /// Same one-file authorization contract as fromTrustedLocalFileBytes.
+    #[wasm_bindgen(js_name = fromTrustedLocalFileBytesWithFontMetrics)]
+    pub fn from_trusted_local_file_bytes_with_font_metrics(
+        data: &[u8],
+        font_policy: &str,
+    ) -> Result<HwpDocument, JsValue> {
+        open_with_hwpx_font_metrics(
+            data,
+            crate::parser::limits::InputPolicy::LocalFileOnce,
+            font_policy,
+        )
+        .map_err(|error| error.into())
     }
 
     /// 현재 파일/편집 세션 정체성을 유지한 채 문서 내용만 교체한다.
@@ -960,6 +1020,24 @@ impl HwpDocument {
     #[wasm_bindgen(js_name = setDpi)]
     pub fn set_dpi(&mut self, dpi: f64) {
         self.core.set_dpi(dpi);
+    }
+
+    /// Session-only font measurement. HCR declared metrics match the captured
+    /// Mac Hancom environment; the default retains Windows substitution rules.
+    #[wasm_bindgen(js_name = setFontMetricsPolicy)]
+    pub fn set_font_metrics_policy(&mut self, policy: &str) -> Result<(), JsValue> {
+        let policy = parse_font_metrics_policy(policy).map_err(JsValue::from)?;
+        self.core.set_font_metrics_policy_native(policy);
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = getFontMetricsPolicy)]
+    pub fn get_font_metrics_policy(&self) -> String {
+        match self.core.document.doc_info.font_metrics_policy {
+            crate::model::provenance::FontMetricsPolicy::HancomWindows => "hancom-windows",
+            crate::model::provenance::FontMetricsPolicy::HcrDeclared => "hcr-declared",
+        }
+        .to_string()
     }
 
     /// 파일 이름을 설정한다 (머리말/꼬리말 필드 치환용).
@@ -3543,16 +3621,17 @@ impl HwpDocument {
 
     /// 커서 위치에 그림을 삽입한다 (확장, options object — #1413).
     ///
-    /// positional `insertPicture` 와 동일 동작의 얇은 어댑터. 이미지 바이너리는 별도
+    /// placement 생략 시 positional `insertPicture` 와 동일 동작. 이미지 바이너리는 별도
     /// `image_data` 인자(Uint8Array)로 받고, 나머지는 JSON options 로 받는다. 필드 추가/
     /// 순서 변경 시 호출부 영향이 작다.
     ///
     /// options JSON 키 (positional 과 동일 의미, camelCase):
     /// `{ sectionIdx, paraIdx, charOffset?, cellPath?: string, width, height,
     ///    naturalWidthPx, naturalHeightPx, extension?, description?,
-    ///    paperOffsetXHu?: number|null, paperOffsetYHu?: number|null }`
-    /// - `cellPath` 는 cell_path_json 문자열(빈 문자열/`"[]"` 이면 본문 inline).
-    /// - 반환값은 `insertPicture` 와 동일.
+    ///    paperOffsetXHu?: number|null, paperOffsetYHu?: number|null,
+    ///    placement?: "inline"|"floating" }`
+    /// - `cellPath` 는 cell_path_json 문자열(빈 문자열/`"[]"` 이면 본문).
+    /// - `placement: "inline"`은 해당 문단에 삽입하고 전체 cellPath 주소도 반환한다.
     #[wasm_bindgen(js_name = insertPictureEx)]
     pub fn insert_picture_ex(
         &mut self,
@@ -3573,6 +3652,11 @@ impl HwpDocument {
         // paperOffset 은 키 부재 시 None(셀 좌상단 default) — positional 의 Option 동작과 동일.
         let paper_offset_x_hu = json_i32(options_json, "paperOffsetXHu");
         let paper_offset_y_hu = json_i32(options_json, "paperOffsetYHu");
+        let inline = match json_str(options_json, "placement").as_deref() {
+            None | Some("floating") => false,
+            Some("inline") => true,
+            Some(_) => return Err(JsValue::from_str("Unknown picture placement")),
+        };
 
         let cell_path: Vec<(usize, usize, usize)> =
             if cell_path_json.is_empty() || cell_path_json == "[]" {
@@ -3580,7 +3664,7 @@ impl HwpDocument {
             } else {
                 DocumentCore::parse_cell_path(&cell_path_json).map_err(JsValue::from)?
             };
-        self.insert_picture_native(
+        self.insert_picture_with_placement_native(
             section_idx as usize,
             para_idx as usize,
             char_offset as usize,
@@ -3594,6 +3678,7 @@ impl HwpDocument {
             &description,
             paper_offset_x_hu,
             paper_offset_y_hu,
+            inline,
         )
         .map_err(|e| e.into())
     }

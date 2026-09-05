@@ -192,6 +192,14 @@ export const IMPLEMENTATION_PLAN_SHAPE = Object.freeze({
  * 전체 도구 정의 목록. 순서가 MCP 클라이언트에 노출되는 순서다.
  * @type {Array<{ name: string, description: string, shape: Record<string, any>, validate?: (args: any) => void }>}
  */
+/**
+ * Browserbase 브라우저 선택자. 생략하면 공유 메인 브라우저, 서브에이전트는 저마다의
+ * id 를 붙여 격리된 브라우저를 받는다 (browserbase-session.mjs 의 BROWSER_ID_PATTERN 과 동일).
+ */
+const BROWSER_ID_ARG = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/, 'browserId: letters, digits, - or _ (max 40)')
+  .optional()
+  .describe('Which browser to use. Omit for the shared main browser; subagents pass their own short id (for example their task name) and reuse it on every call.');
+
 const BASE_TOOL_DEFINITIONS = [
   {
     name: 'read_agent_instructions',
@@ -1053,33 +1061,36 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'browserbase_start',
-    description: 'Create or reuse the hub-owned Browserbase session for this chat.',
-    shape: {},
+    description: 'Create or reuse a hub-owned Browserbase browser for this chat. Omit browserId for the shared main browser (the orchestrator\'s). Subagents must pass their own browserId so each gets an isolated browser; at most 4 browsers are open per chat, and subagent browsers close automatically when the turn ends.',
+    shape: { browserId: BROWSER_ID_ARG },
   },
   {
     name: 'browserbase_end',
-    description: 'End the hub-owned Browserbase browser session for this chat.',
-    shape: {},
+    description: 'End a hub-owned Browserbase browser for this chat (the main browser when browserId is omitted).',
+    shape: { browserId: BROWSER_ID_ARG },
   },
   {
     name: 'browserbase_navigate',
-    description: 'Navigate the shared Browserbase session to an HTTP(S) URL.',
-    shape: { url: z.string().url().max(8_000).refine((value) => /^https?:\/\//i.test(value), 'url must use http or https') },
+    description: 'Navigate a Browserbase browser to an HTTP(S) URL.',
+    shape: {
+      url: z.string().url().max(8_000).refine((value) => /^https?:\/\//i.test(value), 'url must use http or https'),
+      browserId: BROWSER_ID_ARG,
+    },
   },
   {
     name: 'browserbase_act',
-    description: 'Perform a natural-language action in the shared Browserbase session without per-action confirmation.',
-    shape: { action: z.string().min(1).max(5_000) },
+    description: 'Perform a natural-language action in a Browserbase browser without per-action confirmation.',
+    shape: { action: z.string().min(1).max(5_000), browserId: BROWSER_ID_ARG },
   },
   {
     name: 'browserbase_observe',
-    description: 'Observe actionable elements in the shared Browserbase session.',
-    shape: { instruction: z.string().min(1).max(5_000) },
+    description: 'Observe actionable elements in a Browserbase browser.',
+    shape: { instruction: z.string().min(1).max(5_000), browserId: BROWSER_ID_ARG },
   },
   {
     name: 'browserbase_extract',
-    description: 'Extract structured information from the current page in the shared Browserbase session. Text output is truncated at 50KB.',
-    shape: { instruction: z.string().min(1).max(5_000).optional() },
+    description: 'Extract structured information from the current page of a Browserbase browser. Text output is truncated at 50KB.',
+    shape: { instruction: z.string().min(1).max(5_000).optional(), browserId: BROWSER_ID_ARG },
   },
 ];
 

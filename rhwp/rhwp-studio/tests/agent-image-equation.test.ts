@@ -39,10 +39,11 @@ function makeEnv() {
     insertPicture: (
       _s: number, paraIdx: number, _off: number, cellPath: string, data: Uint8Array,
       w: number, h: number, nw: number, nh: number, ext: string, desc: string,
+      _x?: number, _y?: number, placement?: 'inline' | 'floating',
     ) => {
-      record('insertPicture', paraIdx, cellPath, data.length, w, h, nw, nh, ext, desc);
+      record('insertPicture', paraIdx, cellPath, data.length, w, h, nw, nh, ext, desc, placement);
       const controlIdx = pics.length;
-      pics.push({ paraIdx, controlIdx, widthHu: w, heightHu: h, ext, props: {} });
+      pics.push({ paraIdx, controlIdx, widthHu: w, heightHu: h, ext, props: { treatAsChar: placement === 'inline' } });
       return { ok: true, paraIdx, controlIdx };
     },
     setPictureProperties: (_s: number, para: number, ci: number, props: Record<string, unknown>) => {
@@ -189,6 +190,8 @@ test('insert_image: 자연 크기가 본문 폭을 넘으면 비율 유지로 �
   assert.ok(Math.abs(r.image.widthMm - 150) < 1);
   const ins = calls.find((c) => c.m === 'insertPicture')!;
   assert.equal(ins.a[1], ''); // 본문 삽입 (cellPath 없음)
+  assert.equal(ins.a[9], 'inline');
+  assert.equal(calls.filter(c => c.m === 'setPictureProperties').length, 0);
 });
 
 test('insert_image: widthMm 지정 시 비율로 heightHu 산출', async () => {
