@@ -1005,15 +1005,6 @@ export class NativeFileHandleRegistry {
     return this.create(sessionId, filePath, { allowMissing: true });
   }
 
-  // The last accepted load/save fingerprint, never a fresh read of an external edit.
-  originDigestForSessionPath(sessionId, canonicalPath) {
-    if (typeof canonicalPath !== 'string' || !canonicalPath) return null;
-    const entry = this.#byPath.get(this.#ownershipKey(canonicalPath));
-    if (!entry || entry.sessionId !== sessionId || entry.diskFingerprint?.state !== 'file') return null;
-    const digest = entry.diskFingerprint.digest;
-    return /^sha256:[0-9a-f]{64}$/.test(digest) ? digest.slice(7) : null;
-  }
-
   async ownerForPath(filePath) {
     const canonicalPath = await this.#canonicalize(filePath);
     return this.#byPath.get(this.#ownershipKey(canonicalPath))?.sessionId ?? null;

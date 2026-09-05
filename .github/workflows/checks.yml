@@ -63,99 +63,6 @@ jobs:
           platform: ${{ matrix.platform }}
 
 
-  cloud-contracts:
-    name: Cloud transfer contracts
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.app == 'true' || needs.changes.outputs.browser == 'true' || needs.changes.outputs.packages == 'true') }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v5
-        with:
-          persist-credentials: false
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v5
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            cloud/package-lock.json
-
-      - name: Install cloud contract dependencies
-        run: |
-          npm ci
-          npm --prefix cloud ci
-
-      - name: Install live display test dependency
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends x11-apps
-
-      - name: Test desktop and sandbox cloud contracts
-        run: npm run test:cloud
-
-
-  linux-packaging:
-    name: Linux package (${{ matrix.arch }})
-    needs: changes
-    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.packages == 'true') }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            arch: x64
-          - runner: ubuntu-24.04-arm
-            arch: arm64
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
-
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v5
-        with:
-          persist-credentials: false
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v5
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            rhwp/rhwp-studio/package-lock.json
-            rhwp/rhwp-agent/package-lock.json
-
-      - uses: ./.github/actions/setup-rust
-        with:
-          wasm: 'true'
-          cache: package
-
-      - name: Install package dependencies
-        run: npm run setup
-
-      - name: Build AppImage and Debian package
-        run: npm run dist:linux:${{ matrix.arch }}
-
-      - name: Verify Linux artifacts
-        env:
-          EXPECTED_ARCH: ${{ matrix.arch }}
-        run: |
-          set -euo pipefail
-          if [ "${EXPECTED_ARCH}" = arm64 ]; then
-            test -f release/Rauhwpx-*-arm64.AppImage
-            test -f release/Rauhwpx-*-arm64.deb
-            test -f release/latest-linux-arm64.yml
-          else
-            test -f release/Rauhwpx-*-x86_64.AppImage
-            test -f release/Rauhwpx-*-amd64.deb
-            test -f release/latest-linux.yml
-          fi
-
   session-tests:
     name: Session tests (${{ matrix.os }})
     needs: changes
@@ -275,11 +182,6 @@ jobs:
         run: npm --prefix rhwp/rhwp-studio run build
       - name: Test browser integration
         run: npm --prefix rhwp/rhwp-studio run test:browser
-      - name: Test Cloud onboarding, conversation handoff, and display interaction
-        run: |
-          npm --prefix rhwp/rhwp-studio run e2e:cloud-onboarding
-          npm --prefix rhwp/rhwp-studio run e2e:cloud-workspace
-          npm --prefix rhwp/rhwp-studio run e2e:cloud-display
 
   production-dependencies:
     needs: changes
@@ -300,9 +202,6 @@ jobs:
             /scripts/audit-production.mjs
             /rhwp/rhwp-agent/package*.json
             /rhwp/rhwp-studio/package*.json
-            /cloud/package*.json
-            /cloud/install/provider-runtime/package*.json
-            /rhwp/rau-credits/package*.json
 
       - name: Set up Node.js
         uses: actions/setup-node@v5

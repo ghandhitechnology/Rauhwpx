@@ -21,7 +21,7 @@ export class SessionManager {
     this.#createId = createId;
   }
 
-  addWindow(window, launch = {}) {
+  addWindow(window) {
     const sessionId = this.#createId();
     const sender = window?.webContents;
     const senderId = sender?.id;
@@ -33,10 +33,6 @@ export class SessionManager {
       window,
       sender,
       senderId,
-      launch: {
-        openFiles: [...(launch.openFiles ?? [])],
-        source: launch.source ?? 'launch',
-      },
     };
     this.#sessions.set(sessionId, session);
     this.#senderSessions.set(senderId, session);

@@ -4,7 +4,7 @@ import test from 'node:test';
 
 import { CommandDispatcher } from '../src/command/dispatcher.ts';
 import { EventBus } from '../src/core/event-bus.ts';
-import { agentLeaseBlocksUserEditing, deriveAgentEditingLease, planModeAllowsUserEditing } from '../src/agent/editing-lease.ts';
+import { deriveAgentEditingLease, planModeAllowsUserEditing } from '../src/agent/editing-lease.ts';
 
 const source = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8');
 const bridge = source('../src/agent/bridge.ts');
@@ -156,8 +156,8 @@ test('planning saves after a user edit notify the hub mid-plan', () => {
 test('entering plan mode unlocks the lease immediately and holds messages until the hub finishes', () => {
   assert.match(bridge, /this\.beginWorkflowSwitch\(workflow\);[\s\S]*type: 'chat-workflow-set'/);
   assert.match(bridge, /this\.workflowSwitchPending = true;[\s\S]*this\.resetWorkflowState\(workflow\)/);
-  assert.match(bridge, /if \(this\.pendingChatStart \|\| this\.workflowSwitchPending \|\| this\.activeAgent === null \|\| this\.queuedMessages\.length > 0\)/);
-  assert.match(bridge, /if \(this\.workflowSwitchPending \|\| this\.pendingChatStart\) return;/);
+  assert.match(bridge, /if \(this\.workflowSwitchPending \|\| this\.activeAgent === null \|\| this\.queuedMessages\.length > 0\)/);
+  assert.match(bridge, /if \(this\.workflowSwitchPending\) return;/);
   assert.match(bridge, /case 'workflow-changed':[\s\S]*this\.finishWorkflowSwitch\(\);[\s\S]*this\.flushQueuedMessages\(\)/);
   assert.match(bridge, /BACKEND_SWITCH_FAILED[\s\S]*INVALID_WORKFLOW[\s\S]*WORKFLOW_ERROR[\s\S]*this\.revertWorkflowSwitch\(\)/);
   assert.match(bridge, /planModeAllowsUserEditing\(msg\.workflow, msg\.phase\)[\s\S]*this\.workflow = msg\.workflow;[\s\S]*this\.phase = msg\.phase/);
@@ -199,19 +199,4 @@ test('editing frame reflects the active agent and has responsive reduced-motion 
   assert.match(css, /animation:\s*agent-editing-sweep/);
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*#agent-editing-frame[\s\S]*animation: none/);
   assert.match(css, /@media \(max-width: 1023px\)[\s\S]*#agent-editing-status/);
-});
-
-
-test('authenticated worker editing is separate from the provider replacement lease', () => {
-  const lease = deriveAgentEditingLease({ turnRunning: true, activeToolRequests: 2,
-    agent: 'codex', workflow: 'direct', phase: 'direct' });
-  assert.equal(lease.active, true);
-  assert.equal(agentLeaseBlocksUserEditing(lease), true);
-  assert.equal(agentLeaseBlocksUserEditing(lease, true), false);
-  assert.equal(lease.active, true);
-  assert.match(main, /agentLeaseBlocksUserEditing\(agentEditingLease, cloudDocumentPublishingEnabled\)/);
-  assert.match(main, /if \(!cloudBuild \|\| !loopback[\s\S]*return false;\s*cloudDocumentPublishingEnabled = true/);
-  assert.match(main, /isEditable: !documentReadOnly && !agentUserEditingLocked\(\)/);
-  assert.match(main, /inputHandler\?\.setUserEditingLocked\(agentUserEditingLocked\(\)\)/);
-  assert.match(main, /canReplaceCurrentDocument[\s\S]*if \(agentEditingLease\.active\)/);
 });

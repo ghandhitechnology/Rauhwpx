@@ -770,19 +770,3 @@ test('workflow and every presented plan persist as history without approval auth
   assert.equal('capabilityEpoch' in stored[0]!, false);
   assert.equal('approved' in stored[0]!, false);
 });
-
-
-test('same-millisecond thread updates keep the later restart state newer', (t) => {
-  mem.clear();
-  t.mock.method(Date, 'now', () => 2000);
-  const thread = createEmptyThread({ agent: 'codex', model: 'gpt-5.6-sol', effort: 'high', docKey: 'restart.hwpx' });
-  thread.messages.push({ role: 'user', text: 'Continue the archived edit.' });
-  thread.cloudRestartSourceSessionId = 'old-session';
-  upsertThread(thread);
-  const prepared = getThread(thread.id)!;
-  delete thread.cloudRestartSourceSessionId;
-  upsertThread(thread);
-  const accepted = getThread(thread.id)!;
-  assert.ok(accepted.updatedAt > prepared.updatedAt);
-  assert.equal(accepted.cloudRestartSourceSessionId, undefined);
-});
