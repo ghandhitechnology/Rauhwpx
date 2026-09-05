@@ -5,6 +5,7 @@ import type {
   CloudDisplayEvent,
   CloudDisplayFrame,
   CloudDisplayInputEvent,
+  CloudLinkState,
   CloudSessionState,
 } from '../cloud/types.ts';
 
@@ -111,6 +112,7 @@ export function createCloudWorkspace({
   image.className = 'cloud-workspace-image';
   image.alt = 'Cloud 문서 화면 미리보기';
   image.draggable = false;
+  image.hidden = true;
   const inputSink = doc.createElement('textarea');
   inputSink.className = 'cloud-workspace-input';
   inputSink.setAttribute('aria-label', 'Cloud 문서 키보드 입력');
@@ -119,6 +121,11 @@ export function createCloudWorkspace({
   inputSink.spellcheck = false;
   canvas.append(image, inputSink);
   viewport.appendChild(canvas);
+  const connectionNotice = doc.createElement('div');
+  connectionNotice.className = 'cloud-workspace-connection-notice';
+  connectionNotice.setAttribute('role', 'status');
+  connectionNotice.setAttribute('aria-live', 'polite');
+  connectionNotice.hidden = true;
   const recoveredInput = doc.createElement('textarea');
   recoveredInput.hidden = true;
   recoveredInput.value = '';
@@ -126,7 +133,7 @@ export function createCloudWorkspace({
   recoveredInput.readOnly = true;
   recoveredInput.setAttribute('aria-label', '전달 여부를 확인하지 못한 입력, 복사해서 보관하세요');
   recoveredInput.style.cssText = 'width:100%;min-height:64px;box-sizing:border-box;resize:vertical';
-  root.append(toolbar, recoveredInput, viewport);
+  root.append(toolbar, recoveredInput, viewport, connectionNotice);
 
   const decode = decodeFrame ?? (async (url: string) => {
     const candidate = doc.createElement('img');
@@ -155,6 +162,9 @@ export function createCloudWorkspace({
   let currentSessionId: string | null = null;
   let openingSessionId: string | null = null;
   let generation = 0;
+  let profileEpoch = 0;
+  let linkKind: CloudLinkState['kind'] = 'ready';
+  let failedSessionId: string | null = null;
   let activeDecode: DecodeCandidate | null = null;
   let pendingDecode: DecodeCandidate | null = null;
   let disposed = false;
@@ -192,7 +202,11 @@ export function createCloudWorkspace({
   const publish = (next: CloudDisplayState, text: string): void => {
     state = next;
     root.dataset.displayState = next.kind;
-    status.textContent = text;
+    const paused = next.kind === 'stalled' || next.kind === 'unavailable';
+    const toolbarText = paused && lastFrame ? '마지막 수신 화면' : text;
+    if (status.textContent !== toolbarText) status.textContent = toolbarText;
+    connectionNotice.hidden = !paused;
+    if (paused && connectionNotice.textContent !== text) connectionNotice.textContent = text;
     for (const listener of listeners) listener(next);
   };
 
@@ -209,7 +223,8 @@ export function createCloudWorkspace({
 
   const sendInput = (event: CloudDisplayInputEvent): Promise<void> => {
     const target = connection;
-    if (!target || target.capability.kind !== 'available' || currentSessionId !== contextSessionId) {
+    if (linkKind !== 'ready' || state.kind === 'stalled' || state.kind === 'unavailable' || state.kind === 'ended'
+      || !target || target.capability.kind !== 'available' || currentSessionId !== contextSessionId) {
       return Promise.reject(Object.assign(new Error('Cloud display input is unavailable'), {
         code: 'DISPLAY_INPUT_UNAVAILABLE',
       }));
@@ -333,6 +348,7 @@ export function createCloudWorkspace({
     lastFrame = null;
     if (frameUrl) objectUrls.revoke(frameUrl);
     frameUrl = null;
+    image.hidden = true;
     image.removeAttribute('src');
     canvas.style.width = '';
     canvas.style.height = '';
@@ -388,6 +404,7 @@ export function createCloudWorkspace({
     frameUrl = candidate.url;
     lastFrame = candidate.frame;
     image.src = candidate.url;
+    image.hidden = false;
     renderZoom();
     publish(
       { kind: 'live', sessionId: candidate.sessionId, frame: candidate.frame },
@@ -436,12 +453,14 @@ export function createCloudWorkspace({
       return;
     }
     if (event.kind === 'unavailable') {
-      publish({ kind: 'unavailable', reason: event.reason, message: event.message }, unavailableStatus(event));
+      const retained = retainedFrame(sessionId);
+      publish(retained ? { kind: 'stalled', sessionId, lastFrame: retained }
+        : { kind: 'unavailable', reason: event.reason, message: event.message }, unavailableStatus(event));
       return;
     }
     switch (event.state) {
       case 'connecting':
-        publish({ kind: 'connecting', sessionId }, 'Cloud 화면에 연결하는 중…');
+        if (!retainedFrame(sessionId)) publish({ kind: 'connecting', sessionId }, 'Cloud 화면에 연결하는 중…');
         break;
       case 'connected':
         if (retainedFrame(sessionId)) {
@@ -454,9 +473,10 @@ export function createCloudWorkspace({
         publish({ kind: 'stalled', sessionId, lastFrame: retainedFrame(sessionId) }, '연결이 잠시 끊겼습니다. 다시 연결하는 중…');
         break;
       case 'failed':
+        failedSessionId = sessionId;
         openingSessionId = null;
         closeConnection();
-        publish({ kind: 'unavailable', reason: 'stream-unavailable', message: event.message }, 'Cloud 화면을 표시할 수 없습니다.');
+        publish({ kind: 'stalled', sessionId, lastFrame: retainedFrame(sessionId) }, '화면 연결이 멈췄습니다. Cloud에서 다시 연결해 주세요.');
         break;
     }
   };
@@ -465,7 +485,10 @@ export function createCloudWorkspace({
     const openGeneration = ++generation;
     openingSessionId = sessionId;
     closeConnection();
-    publish({ kind: 'connecting', sessionId }, 'Cloud 화면에 연결하는 중…');
+    failedSessionId = null;
+    publish(retainedFrame(sessionId)
+      ? { kind: 'stalled', sessionId, lastFrame: retainedFrame(sessionId) }
+      : { kind: 'connecting', sessionId }, 'Cloud 화면에 연결하는 중…');
     void display.openDisplay(sessionId, (event) => acceptEvent(openGeneration, sessionId, event)).then(
       (opened) => {
         if (disposed || !visible || openGeneration !== generation || openingSessionId !== sessionId) {
@@ -481,9 +504,13 @@ export function createCloudWorkspace({
       (error) => {
         if (disposed || !visible || openGeneration !== generation || openingSessionId !== sessionId) return;
         openingSessionId = null;
+        failedSessionId = sessionId;
         closeConnection();
         const message = error instanceof Error ? error.message : String(error);
-        publish({ kind: 'unavailable', reason: 'stream-unavailable', message }, 'Cloud 화면을 표시할 수 없습니다.');
+        publish(retainedFrame(sessionId)
+          ? { kind: 'stalled', sessionId, lastFrame: retainedFrame(sessionId) }
+          : { kind: 'unavailable', reason: 'stream-unavailable', message },
+        '화면 연결이 멈췄습니다. Cloud에서 다시 연결해 주세요.');
       },
     );
   };
@@ -610,16 +637,28 @@ export function createCloudWorkspace({
 
   return {
     root,
-    setContext({ visible: nextVisible, session }: { visible: boolean; session: CloudSessionState }) {
+    setContext({ visible: nextVisible, session, link, profileEpoch: nextEpoch = 0 }) {
       if (disposed) return;
+      const nextLinkKind = link?.kind ?? 'ready';
+      const recovered = nextLinkKind === 'ready' && linkKind !== 'ready';
+      if (recovered || nextEpoch !== profileEpoch) {
+        generation += 1;
+        openingSessionId = null;
+        failedSessionId = null;
+        closeConnection();
+        cancelDecodes();
+      }
+      profileEpoch = nextEpoch;
+      linkKind = nextLinkKind;
       const nextSessionId = displaySessionId(session);
       const nextContextSessionId = sessionId(session);
       const terminalId = terminalSessionId(session);
-      if (nextContextSessionId !== contextSessionId) {
+      if (nextContextSessionId !== contextSessionId && !(linkKind === 'recreating' && !nextContextSessionId)) {
         generation += 1;
         openingSessionId = null;
         closeConnection();
         clearFrame();
+        failedSessionId = null;
         recoveredInput.value = nextContextSessionId ? recoveryNotes.get(nextContextSessionId) ?? '' : '';
         recoveredInput.hidden = !recoveredInput.value;
         contextSessionId = nextContextSessionId;
@@ -633,7 +672,21 @@ export function createCloudWorkspace({
         return;
       }
       visible = true;
+      if (linkKind !== 'ready') {
+        if (openingSessionId || connection) {
+          generation += 1;
+          openingSessionId = null;
+          closeConnection();
+          cancelDecodes();
+        }
+        publish({ kind: 'stalled', sessionId: nextContextSessionId ?? '', lastFrame },
+          linkKind === 'recreating' ? '새 서버가 준비되면 화면을 다시 표시합니다.'
+            : linkKind === 'reconnecting' ? '연결 중입니다. 마지막 화면을 표시하고 있습니다.'
+            : '연결이 끊겨 마지막 화면을 표시하고 있습니다.');
+        return;
+      }
       if (!nextSessionId) {
+        failedSessionId = null;
         openingSessionId = null;
         generation += 1;
         closeConnection();
@@ -654,6 +707,7 @@ export function createCloudWorkspace({
         }
         return;
       }
+      if (failedSessionId === nextSessionId) return;
       if (openingSessionId === nextSessionId && (currentSessionId === nextSessionId || !connection)) return;
       open(nextSessionId);
     },

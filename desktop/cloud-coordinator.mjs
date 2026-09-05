@@ -251,6 +251,12 @@ export class CloudCoordinator extends EventEmitter {
   #takeoverPromises = new Map();
   #endArchivePromises = new Map();
   #displayConnections = new Set();
+  #displayOpeningControllers = new Set();
+  #displayClosePromises = new Set();
+  #reconnectPromise = null;
+  #reconnectController = null;
+  #recreatePromise = null;
+  #forceQuitPromise = null;
   #remoteSessions = new Map();
   #remoteWatchSequence = new Map();
   #timelinePending = new Map();
@@ -414,6 +420,7 @@ export class CloudCoordinator extends EventEmitter {
 
   async stop() {
     this.#stopped = true;
+    this.#cancelConnectionWork();
     this.#disarmLinkWatchdog();
     const pending = [
       ...this.#transferOperations,
@@ -422,6 +429,7 @@ export class CloudCoordinator extends EventEmitter {
       ...this.#profileOperations,
       ...this.#profileOperationWaiters,
       ...this.#profileWriters,
+      ...this.#displayClosePromises,
       this.#transferAdmissionChain,
       this.#profileChangeChain,
       this.#spawnPromise,
@@ -529,6 +537,9 @@ export class CloudCoordinator extends EventEmitter {
       return Promise.reject(transferError('Cloud coordinator is stopped', 'COORDINATOR_STOPPED'));
     }
 
+    // Display startup can retry for the entire outage. Abort it before waiting
+    // for readers, otherwise shutdown can never acquire the writer lock.
+    this.#cancelConnectionWork();
     this.#pendingProfileChanges += 1;
     const precedingWriter = this.#profileChangeChain;
     const admittedReaders = [...this.#profileOperations];
@@ -564,6 +575,13 @@ export class CloudCoordinator extends EventEmitter {
     this.#takeoverControllers.clear();
     this.#takeoverPromises.clear();
     await Promise.allSettled([...this.#displayConnections].map((connection) => connection.close()));
+    await Promise.allSettled([...this.#displayClosePromises]);
+  }
+
+  #cancelConnectionWork() {
+    this.#reconnectController?.abort();
+    for (const controller of this.#displayOpeningControllers) controller.abort();
+    for (const connection of this.#displayConnections) void connection.close().catch(() => {});
   }
 
   async #changeProfile(operation) {
@@ -613,14 +631,32 @@ export class CloudCoordinator extends EventEmitter {
         async close() {},
       };
     }
-    const connection = await this.#client.openDisplay(sessionId, listener, options);
+    const controller = new AbortController();
+    this.#displayOpeningControllers.add(controller);
+    let connection;
     try {
+      connection = await this.#client.openDisplay(sessionId, (event) => {
+        try { listener?.(event); } catch { /* Display listeners are isolated. */ }
+        if (event?.kind === 'connection' && event.state === 'reconnecting'
+          && profileEpoch === this.#profileEpoch && !controller.signal.aborted) {
+          this.#noteBrokenLink(event.message);
+        }
+      }, {
+        ...options,
+        signal: options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal,
+      });
+    } finally {
+      this.#displayOpeningControllers.delete(controller);
+    }
+    try {
+      controller.signal.throwIfAborted();
       this.#assertProfileEpoch(profileEpoch);
     } catch (error) {
       await connection.close().catch(() => {});
       throw error;
     }
     let closed = false;
+    let closePromise = null;
     const tracked = {
       get capability() { return connection.capability; },
       sendInput: (event) => this.#withProfileOperation(async () => {
@@ -632,11 +668,15 @@ export class CloudCoordinator extends EventEmitter {
         await connection.sendInput(event);
         this.#assertProfileEpoch(profileEpoch);
       }, { expectedEpoch: profileEpoch }),
-      close: async () => {
-        if (closed) return;
+      close: () => {
+        if (closePromise) return closePromise;
         closed = true;
         this.#displayConnections.delete(tracked);
-        await connection.close();
+        closePromise = Promise.resolve().then(() => connection.close()).finally(() => {
+          this.#displayClosePromises.delete(closePromise);
+        });
+        this.#displayClosePromises.add(closePromise);
+        return closePromise;
       },
     };
     this.#displayConnections.add(tracked);
@@ -663,12 +703,15 @@ export class CloudCoordinator extends EventEmitter {
   async #buildSnapshot({
     selectedSessionId = null,
     originSessionId = null,
+    threadId = null,
     documentId = null,
     profileConnection = null,
     profileMessage = null,
     extra = {},
   } = {}, profileEpoch) {
-    await this.#refreshAccountStatus();
+    // Account refresh is independent of the current document and must not hold
+    // every state broadcast behind an unreachable broker.
+    void this.#refreshAccountStatus();
     const profile = await this.#client.loadProfile().catch(() => null);
     const paired = profile ? await this.#client.isPaired().catch(() => false) : false;
     const records = await this.#store.list();
@@ -677,17 +720,21 @@ export class CloudCoordinator extends EventEmitter {
       !record.resolvedAt && destinationMatchesProfile(record.destination, profile)
     ));
     const byCreation = (left, right) => String(right.createdAt ?? '').localeCompare(String(left.createdAt ?? ''));
-    const scoped = Boolean(originSessionId || documentId);
+    const scoped = Boolean(originSessionId || documentId || threadId);
     const scopedRecords = visibleRecords.filter((record) => (
       documentId
         ? record.originDocumentId === documentId
-        : Boolean(originSessionId && record.originSessionId === originSessionId)
+        : originSessionId ? record.originSessionId === originSessionId
+          : Boolean(threadId && record.threadId === threadId)
     )).sort(byCreation);
     const scopedLeaseRecord = scopedRecords.find((record) => (
       LIVE_HANDOFF_STATES.includes(record.state) || record.takeoverReady === true
     )) ?? null;
-    const localMatch = scopedLeaseRecord
-      ?? scopedRecords[0]
+    const conversationRecords = threadId
+      ? scopedRecords.filter((record) => record.threadId === threadId)
+      : scopedRecords;
+    const localMatch = conversationRecords.find((record) => LIVE_HANDOFF_STATES.includes(record.state))
+      ?? conversationRecords[0]
       ?? null;
     const requestedRecord = visibleRecords.find((record) => (
       record.cloudSessionId === selectedSessionId || record.id === selectedSessionId
@@ -701,12 +748,14 @@ export class CloudCoordinator extends EventEmitter {
       ?? (!selectedSessionId && !scoped ? [...visibleRecords].sort(byCreation)[0] : null)
       ?? null;
     const remoteMatch = [...this.#remoteSessions.values()].find((session) => (
-      documentId && session.clientContext?.documentId === documentId
+      threadId ? session.clientContext?.threadId === threadId
+        && (!documentId || session.clientContext?.documentId === documentId)
+        : documentId && session.clientContext?.documentId === documentId
     ));
     const remote = requestedRemote
       ?? remoteMatch
-      ?? (!selected ? [...this.#remoteSessions.values()].find((session) => !['purged', 'cancelled', 'failed'].includes(session.status)) : null)
-      ?? (!selected ? [...this.#remoteSessions.values()][0] : null)
+      ?? (!selected && !scoped ? [...this.#remoteSessions.values()].find((session) => !['purged', 'cancelled', 'failed'].includes(session.status)) : null)
+      ?? (!selected && !scoped ? [...this.#remoteSessions.values()][0] : null)
       ?? null;
     const remoteOwnsLease = (session) => session && (
       session.takeoverReady === true
@@ -815,25 +864,31 @@ export class CloudCoordinator extends EventEmitter {
       kind: this.#link.kind,
       error: this.#link.error,
       attempt: this.#link.attempt,
-      canRecreate: profile?.mode === 'app-hosted',
+      canRecreate: this.#canRecreateProfile(profile),
     };
   }
 
   #canRecreateProfile(profile) {
-    return profile?.mode === 'app-hosted';
+    return profile?.mode === 'app-hosted' || !profile && this.#preferredMode === 'app-hosted';
   }
 
-  reconnectCloud() {
-    return this.#withProfileOperation((profileEpoch) => this.#reconnectCloud(profileEpoch));
+  reconnectCloud(options = {}) {
+    if (this.#reconnectPromise) return this.#reconnectPromise;
+    const operation = this.#withProfileOperation((profileEpoch) => this.#reconnectCloud(profileEpoch, options));
+    this.#reconnectPromise = operation.finally(() => { this.#reconnectPromise = null; });
+    return this.#reconnectPromise;
   }
 
   recreateCloud() {
-    return this.#withProfileWriter(() => this.#recreateCloud());
+    if (this.#recreatePromise) return this.#recreatePromise;
+    this.#recreatePromise = this.#withProfileWriter(() => this.#recreateCloud())
+      .finally(() => { this.#recreatePromise = null; });
+    return this.#recreatePromise;
   }
 
   #noteBrokenLink(message) {
     if (this.#stopped) return;
-    if (this.#link.kind === 'reconnecting' || this.#link.kind === 'recreating') return;
+    if (this.#link.kind !== 'ready' || this.#pendingProfileChanges) return;
     this.#link = {
       kind: 'reconnecting',
       error: message ?? null,
@@ -859,8 +914,14 @@ export class CloudCoordinator extends EventEmitter {
     if (this.#linkWatchdog || this.#stopped) return;
     this.#linkWatchdog = setInterval(() => {
       if (this.#stopped || this.#link.kind === 'recreating' || this.#linkProbeBusy || this.#linkHealPromise) return;
-      if (!this.#hasLiveWatchedSession()) return;
-      if (this.#link.kind !== 'ready') { this.#scheduleLinkHeal(); return; }
+      if (this.#pendingProfileChanges) return;
+      if (this.#link.kind === 'failed') {
+        // Retry quietly after longer outages. Keep the recovery controls stable
+        // until a successful probe can actually restore the same workspace.
+        void this.reconnectCloud({ background: true }).catch(() => {});
+        return;
+      }
+      if (!this.#hasLiveWatchedSession() || this.#link.kind !== 'ready') return;
       void this.#probeLiveLink();
     }, 20_000);
     this.#linkWatchdog.unref?.();
@@ -893,13 +954,16 @@ export class CloudCoordinator extends EventEmitter {
     }
   }
 
-  async #reconnectCloud(profileEpoch) {
+  async #reconnectCloud(profileEpoch, { background = false } = {}) {
     this.#assertProfileEpoch(profileEpoch);
     if (this.#link.kind === 'recreating') return this.snapshot();
     const profile = await this.#client.loadProfile().catch(() => null);
     this.#assertProfileEpoch(profileEpoch);
+    if (this.#pendingProfileChanges && this.#profileOperationContext.getStore()?.ownership !== 'writer') {
+      throw new DOMException('Cloud reconnect was superseded', 'AbortError');
+    }
     const canRecreate = this.#canRecreateProfile(profile);
-    if (this.#link.kind !== 'reconnecting') {
+    if (this.#link.kind !== 'reconnecting' && !(background && this.#link.kind === 'failed')) {
       this.#link = {
         kind: 'reconnecting',
         error: null,
@@ -919,10 +983,33 @@ export class CloudCoordinator extends EventEmitter {
       };
       return this.snapshot({ profileConnection: 'error', profileMessage: this.#link.error });
     }
+    const controller = new AbortController();
+    this.#reconnectController = controller;
     try {
-      await this.#waitForProfileHealth(profile, { attempts: 3 });
+      await this.#waitForProfileHealth(profile, { attempts: 2, timeoutMs: 2_000, signal: controller.signal });
       this.#assertProfileEpoch(profileEpoch);
       this.#abortSessionWatchers();
+      // Reconcile the remote session list as well as health. A successful
+      // health probe alone does not restore the conversation after a restart.
+      if (typeof this.#client.sessions === 'function') {
+        const knownSessions = (await this.#store.list()).filter((record) => record.cloudSessionId
+          && ['queued', 'running', 'suspended'].includes(record.state)
+          && destinationMatchesProfile(record.destination, profile)).map((record) => record.cloudSessionId);
+        for (const session of this.#remoteSessions.values()) {
+          if (['queued', 'running', 'suspended'].includes(session.status)) knownSessions.push(session.id ?? session.sessionId);
+        }
+        const sessions = await this.#client.sessions({ timeoutMs: 2_000, retryAttempts: 1, signal: controller.signal });
+        controller.signal.throwIfAborted();
+        const present = new Set(sessions.map((session) => session.id ?? session.sessionId));
+        if (knownSessions.some((id) => !present.has(id))) {
+          throw transferError('Cloud 서버에서 이전 작업을 찾지 못했습니다. 서버를 다시 만들어 이 대화에서 이어가세요.', 'SESSION_NOT_FOUND');
+        }
+        const previous = this.#remoteSessions;
+        this.#remoteSessions = new Map(sessions.map((session) => {
+          const id = session.id ?? session.sessionId;
+          return [id, { ...previous.get(id), ...session }];
+        }));
+      }
       await this.#resumeRecoveriesForCurrentProfile();
       this.#assertProfileEpoch(profileEpoch);
       this.#link = { kind: 'ready', error: null, attempt: 0, canRecreate };
@@ -930,6 +1017,8 @@ export class CloudCoordinator extends EventEmitter {
       this.#emit({ type: 'cloud-link-ready', snapshot });
       return snapshot;
     } catch (error) {
+      if (controller.signal.aborted || this.#stopped || profileEpoch !== this.#profileEpoch) throw error;
+      this.#abortSessionWatchers();
       this.#link = {
         kind: 'failed',
         error: error.message,
@@ -944,6 +1033,8 @@ export class CloudCoordinator extends EventEmitter {
       // A failed probe does not prove the workspace has been lost. Keep its
       // identity and handoffs intact; recreation is an explicit user action.
       return snapshot;
+    } finally {
+      if (this.#reconnectController === controller) this.#reconnectController = null;
     }
   }
 
@@ -960,8 +1051,8 @@ export class CloudCoordinator extends EventEmitter {
       canRecreate: true,
     };
     this.#emit({ type: 'cloud-link-recreating' });
-    await this.#forceQuitAccountCloud();
     try {
+      await this.#forceQuitAccountCloud();
       await this.spawnAppServer({});
       this.#link = { kind: 'ready', error: null, attempt: 0, canRecreate: true };
       const snapshot = await this.snapshot();
@@ -988,12 +1079,13 @@ export class CloudCoordinator extends EventEmitter {
   }
 
   async #refresh(options, profileEpoch) {
-    await this.#refreshAccountStatus({ force: true });
+    void this.#refreshAccountStatus();
     const profile = await this.#client.loadProfile().catch(() => null);
     this.#assertProfileEpoch(profileEpoch);
+    if (this.#link.kind !== 'ready') return this.snapshot(options);
     if (profile && await this.#client.isPaired().catch(() => false)) {
       try {
-        const sessions = await this.#client.sessions();
+        const sessions = await this.#client.sessions({ timeoutMs: 2_000, retryAttempts: 1 });
         this.#assertProfileEpoch(profileEpoch);
         const deviceId = await this.#client.deviceId();
         const hydratedSessions = await Promise.all(sessions.map(async (session) => this.#hydrateRemoteTakeover({
@@ -1036,11 +1128,13 @@ export class CloudCoordinator extends EventEmitter {
         }
         const remote = this.#remoteSessions.get(options.selectedSessionId)
           ?? [...this.#remoteSessions.values()].find((session) => (
-            options.documentId && session.clientContext?.documentId === options.documentId
+            options.threadId ? session.clientContext?.threadId === options.threadId
+              : options.documentId && session.clientContext?.documentId === options.documentId
           ));
         if (remote) await this.#syncRemoteTimeline(remote.id ?? remote.sessionId, profileEpoch).catch(() => {});
       } catch (error) {
         if (error?.code === 'PROFILE_CHANGED') throw error;
+        this.#noteBrokenLink(error.message);
         return this.snapshot({ ...options, profileConnection: 'error', profileMessage: error.message });
       }
     }
@@ -1065,13 +1159,13 @@ export class CloudCoordinator extends EventEmitter {
     this.#setSandboxLifecycle('idle');
   }
 
-  async #waitForProfileHealth(profile, { attempts = 12, signal } = {}) {
+  async #waitForProfileHealth(profile, { attempts = 12, signal, timeoutMs = 10_000 } = {}) {
     let lastError = null;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       try {
         const health = await this.#client.health(profile, {
           signal,
-          timeoutMs: 10_000,
+          timeoutMs,
           retryAttempts: 1,
         });
         if (health?.ok !== true) {
@@ -1323,6 +1417,9 @@ export class CloudCoordinator extends EventEmitter {
       return Promise.reject(transferError('Cloud coordinator is stopped', 'COORDINATOR_STOPPED'));
     }
     if (this.#spawnPromise) return this.#spawnPromise;
+    if (this.#recreatePromise && this.#profileOperationContext.getStore()?.ownership !== 'writer') {
+      return Promise.reject(new AppServerError('The Cloud server is restarting.', { code: 'SANDBOX_BUSY' }));
+    }
     if (this.#teardownPromise) {
       return Promise.reject(new AppServerError('An app sandbox is being torn down. Try again once it finishes.', {
         code: 'SANDBOX_BUSY',
@@ -1658,15 +1755,23 @@ export class CloudCoordinator extends EventEmitter {
   }
 
   forceQuitAccountCloud(options = {}) {
-    return this.#withProfileWriter(() => this.#forceQuitAccountCloud(options));
+    if (this.#forceQuitPromise) return this.#forceQuitPromise;
+    this.#spawnController?.abort(new DOMException('Cloud startup was stopped', 'AbortError'));
+    this.#forceQuitPromise = this.#withProfileWriter(() => this.#forceQuitAccountCloud(options))
+      .finally(() => { this.#forceQuitPromise = null; });
+    return this.#forceQuitPromise;
   }
 
   async #forceQuitAccountCloud() {
     this.#abortSessionWatchers();
+    const profile = await this.#client.loadProfile().catch(() => null);
+    let accountStopped = false;
     const provider = this.#managedAccountProvider();
     if (provider && typeof provider.forceQuitAccount === 'function') {
       try {
         const result = await provider.forceQuitAccount();
+        accountStopped = result?.lifecycle === 'idle'
+          || ['stopped', 'deleted', 'released', 'idle'].includes(result?.status);
         if (result?.account) {
           this.#accountSnapshot = result.account;
           this.#accountStatusAt = Date.now();
@@ -1675,12 +1780,19 @@ export class CloudCoordinator extends EventEmitter {
         this.#emit({ type: 'force-quit-broker-failed', error: error.message });
       }
     }
-    await this.#endLiveCloudSessions({ timeoutMs: 4_000 });
+    if (!accountStopped || profile?.mode !== 'app-hosted') {
+      await this.#endLiveCloudSessions({ timeoutMs: 2_000 });
+    }
     await this.#abandonLiveHandoffs();
-    const profile = await this.#client.loadProfile().catch(() => null);
     if (profile?.mode === 'app-hosted') {
       try {
-        await this.#teardownAppServer({ force: true });
+        if (accountStopped) {
+          // The broker already stopped this account's worker. Do not wait for
+          // sessions on that dead worker or issue a second teardown request.
+          await this.#changeProfile(() => this.#client.forgetProfile());
+          this.#raucloudStatus = null;
+          this.#setSandboxLifecycle('idle');
+        } else await this.#teardownAppServer({ force: true });
       } catch (error) {
         this.#emit({ type: 'force-quit-teardown-failed', error: error.message });
         try {
@@ -1692,7 +1804,9 @@ export class CloudCoordinator extends EventEmitter {
         }
       }
     }
-    await this.#refreshAccountStatus({ force: true }).catch(() => {});
+    // The stopped worker is already reconciled. Account polling must not delay
+    // the shutdown response or the next spawn behind an unavailable broker.
+    void this.#refreshAccountStatus({ force: true }).catch(() => {});
     if (this.#link.kind !== 'recreating') {
       this.#link = { kind: 'ready', error: null, attempt: 0, canRecreate: false };
     }
@@ -2716,13 +2830,13 @@ export class CloudCoordinator extends EventEmitter {
         if (error?.code !== 'PROFILE_CHANGED' && !controller.signal.aborted) {
           this.#emit({ type: 'session-stream-error', sessionId, error: error.message });
           restartWatch = this.#streamShouldRestart(error);
-          if (restartWatch) this.#noteBrokenLink(error.message);
+          if (restartWatch || error?.status === 404 || error?.code === 'SESSION_NOT_FOUND') this.#noteBrokenLink(error.message);
         }
       })
         .finally(() => {
           if (this.#watchers.get(watcherKey) === controller) this.#watchers.delete(watcherKey);
           if (profileEpoch === this.#profileEpoch) this.#timelinePending.delete(sessionId);
-          if (restartWatch && !this.#stopped && profileEpoch === this.#profileEpoch) {
+          if (restartWatch && this.#link.kind === 'ready' && !this.#stopped && profileEpoch === this.#profileEpoch) {
             this.#scheduleWatchRestart(async () => {
               if (this.#stopped || profileEpoch !== this.#profileEpoch) return;
               const latest = await this.#store.get(handoffId);
@@ -3546,13 +3660,13 @@ export class CloudCoordinator extends EventEmitter {
         if (error?.code !== 'PROFILE_CHANGED' && !controller.signal.aborted) {
           this.#emit({ type: 'remote-session-stream-error', sessionId, error: error.message });
           restartWatch = this.#streamShouldRestart(error);
-          if (restartWatch) this.#noteBrokenLink(error.message);
+          if (restartWatch || error?.status === 404 || error?.code === 'SESSION_NOT_FOUND') this.#noteBrokenLink(error.message);
         }
       })
         .finally(() => {
           if (this.#watchers.get(watcherKey) === controller) this.#watchers.delete(watcherKey);
           if (profileEpoch === this.#profileEpoch) this.#timelinePending.delete(sessionId);
-          if (restartWatch && !this.#stopped && profileEpoch === this.#profileEpoch) {
+          if (restartWatch && this.#link.kind === 'ready' && !this.#stopped && profileEpoch === this.#profileEpoch) {
             this.#scheduleWatchRestart(() => this.#watchRemote(sessionId, profileEpoch));
           }
         });

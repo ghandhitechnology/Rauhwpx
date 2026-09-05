@@ -278,7 +278,11 @@ class CloudDisplayConnectionImpl {
     }
     if (this.#capability.kind === 'unavailable') this.#emit(this.#capability);
     else this.#emitConnected(this.#capability);
-    this.#loop = this.#run(this.#capability).finally(async () => {
+    this.#loop = this.#run(this.#capability).catch((error) => {
+      // Aborting during retry backoff rejects outside the stream's catch.
+      // The background loop always needs a rejection handler, even before close.
+      if (!this.#closed && !this.#controller.signal.aborted) this.#emitFailure(error);
+    }).finally(async () => {
       this.#loop = null;
       if (!this.#closed) await this.#releaseInterest();
     });

@@ -15,6 +15,7 @@
 }
 
 #cloud-workspace {
+  position: relative;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -103,6 +104,8 @@
   outline-offset: 2px;
 }
 
+.cloud-workspace-image[hidden] { display: none; }
+
 .cloud-workspace-image {
   display: block;
   width: 100%;
@@ -110,6 +113,36 @@
   object-fit: fill;
   pointer-events: none;
   user-select: none;
+}
+
+.cloud-workspace-connection-notice {
+  position: absolute;
+  z-index: 2;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: calc(100% - 32px);
+  box-sizing: border-box;
+  padding: 12px 18px;
+  border: 1px solid var(--ui-border);
+  border-radius: 12px;
+  background: var(--ui-surface);
+  color: var(--ui-text-secondary);
+  box-shadow: var(--shadow-light);
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+}
+
+.cloud-workspace-connection-notice[hidden] { display: none; }
+
+#cloud-workspace[data-display-state='stalled'] .cloud-workspace-image,
+#cloud-workspace[data-display-state='unavailable'] .cloud-workspace-image {
+  opacity: 0.6;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .cloud-workspace-image { transition: opacity 180ms ease; }
 }
 
 .cloud-workspace-input {
