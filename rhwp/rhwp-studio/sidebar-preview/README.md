@@ -34,6 +34,7 @@ The focus-mode button shows a placeholder because this preview covers the sideba
 | `?scenario=error` | A failed turn |
 | `?page=settings` | Production settings panel |
 | `?page=versions` | Production version graph |
+| `?page=versions&history=branches` | Branching and merging history with colored graph lanes |
 | `?services=setup&page=settings` | Uninstalled/unconfigured service fixtures |
 | `?initial-setup=1` | Production first-run setup wizard |
 | `?theme=dark&width=360` | Dark theme and narrow sidebar |
@@ -80,6 +81,20 @@ origin and is unaffected.
 `vite.sidebar.config.ts` is independent of the application's Vite config. Keep it
 free of the agent-hub and PWA plugins and imports of the application entry point.
 The shared desktop module's optional PWA import resolves to a preview-only no-op.
+
+The version graph uses compact rows. Dates appear on hover or keyboard focus;
+selecting a commit keeps its details and restore actions below the scrolling list.
+The branch buttons switch the active branch, and new preview commits update the
+same graph layout used by the application.
+
+For LAN or Tailscale access, bind the preview explicitly:
+
+```sh
+npm --prefix rhwp/rhwp-studio run dev:sidebar -- --host 0.0.0.0
+```
+
+Open the host's IP address on port 7715. The preview bootstrap supports HTTP
+origins where the browser does not expose `crypto.randomUUID()`.
 
 ## Verification
 

@@ -23,7 +23,7 @@ await writeFile(sampleFile, '문서 디자인을 위한 샘플 참고자료입�
 // Own server + fresh browser profile: checks do not need or alter a running app/preview.
 const server = await createServer({
   configFile: resolve(studio, 'vite.sidebar.config.ts'),
-  server: { port: 0, open: false },
+  server: { port: 0, open: false, hmr: false },
   logLevel: 'error',
 });
 await server.listen();
@@ -42,6 +42,8 @@ try {
     errors.push(message),
   );
   await page.evaluateOnNewDocument(() => {
+    // Exercise the same missing API as an HTTP LAN/Tailscale origin.
+    Object.defineProperty(crypto, 'randomUUID', { value: undefined, writable: true, configurable: true });
     window.addEventListener('error', (event) =>
       window.reportSidebarRuntimeError(event.message),
     );
@@ -488,6 +490,47 @@ try {
       });
     },
   );
+  await step('Branch commits keep their graph lane and move the branch label', async () => {
+    await open('page=versions&history=branches&theme=dark&width=480');
+    await screenshot('versions-dark');
+    assert.equal(await page.$$eval('.ag-version-meta, .ag-version-time', (items) => items.length), 0);
+    const initialRowHeight = await page.$eval('.ag-version-row', (row) => row.getBoundingClientRect().height);
+    await page.hover('.ag-version-row');
+    await page.waitForSelector('.ag-version-date-tooltip.ag-visible', { visible: true });
+    assert.match(await page.$eval('.ag-version-date-tooltip', (tip) => tip.textContent), /월/);
+    assert.equal(await page.$eval('.ag-version-row', (row) => row.getBoundingClientRect().height), initialRowHeight);
+    await screenshot('versions-date-hover');
+    await page.focus('.ag-version-row');
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => !document.querySelector('.ag-version-date-tooltip').classList.contains('ag-visible'));
+    assert(await page.$eval('.ag-root', (root) => root.classList.contains('ag-versions-open')));
+    await page.click('[aria-label="이 커밋에서 브랜치 만들기"]');
+    await page.waitForSelector('.ag-version-prompt-input', { visible: true });
+    await page.type('.ag-version-prompt-input', '새-디자인');
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => window.sidebarPreview.versions.getState().activeBranch === '새-디자인');
+    await page.click('[aria-label="새 커밋 만들기"]');
+    await page.waitForSelector('.ag-version-prompt-input', { visible: true });
+    await page.type('.ag-version-prompt-input', '새 브랜치에서 만든 커밋');
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => window.sidebarPreview.versions.getState().commits[0].title === '새 브랜치에서 만든 커밋');
+    const result = await page.evaluate(() => {
+      const state = window.sidebarPreview.versions.getState();
+      const head = state.commits[0];
+      const branch = state.branches.find((item) => item.name === '새-디자인');
+      const main = state.commits.find((item) => item.id === state.branches.find((branch) => branch.isDefault).headId);
+      const row = document.querySelector(`[data-commit-id="${head.id}"]`);
+      return { branchAtHead: branch.headId === head.id, parent: head.parentIds[0],
+        separateLane: head.lane !== main.lane, label: row.innerText.includes('새-디자인'),
+        current: head.isHead, selected: row.getAttribute('aria-selected') };
+    });
+    assert.deepEqual(result, { branchAtHead: true, parent: 'e8f21a0', separateLane: true, label: true, current: true, selected: 'true' });
+    await screenshot('versions-branch-commit');
+    await open('page=versions&history=branches&width=360');
+    await screenshot('versions-light-narrow');
+    assert(await page.$eval('.ag-versions-page', (el) => el.scrollWidth <= el.clientWidth), 'Narrow panel overflows');
+    await open('width=480');
+  });
   await step(
     'Document context, reset, clean canvas, and backend isolation',
     async () => {

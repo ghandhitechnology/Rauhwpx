@@ -239,15 +239,6 @@ function formatTime(value: number): string {
   }).format(new Date(value));
 }
 
-function formatGraphTime(value: number): string {
-  const date = new Date(value);
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  const hour = String(date.getHours()).padStart(2, '0');
-  const minute = String(date.getMinutes()).padStart(2, '0');
-  return `${month}/${day} ${hour}:${minute}`;
-}
-
 function validRefName(value: string): boolean {
   return /^[\p{L}\p{N}][\p{L}\p{N}._-]{0,62}$/u.test(value)
     && !value.includes('..')
@@ -282,23 +273,22 @@ function invalidatesCompletedComparisons(
   return changed.length === 0 || changed.some((key) => !PASSIVE_COMPARISON_FIELDS.has(key));
 }
 
-const VERSION_GRAPH_ROW_HEIGHT = 44;
-const VERSION_LANE_COLORS = ['#d7dae0', '#63d7b0', '#f2b866', '#8e9dff', '#d77ac8', '#63bde8'];
+const VERSION_GRAPH_ROW_HEIGHT = 30;
+const VERSION_LANE_COLORS = ['#379cff', '#e7ae45', '#cb79d7', '#53bdab', '#8e9dff', '#ed8592'];
 
 function laneColor(lane: number): string {
   return VERSION_LANE_COLORS[lane % VERSION_LANE_COLORS.length];
 }
 
 function laneGeometry(laneCount: number): { gap: number; width: number } {
-  const width = 156;
-  const gap = laneCount === 1 ? 0 : Math.min(27, (width - 20) / (laneCount - 1));
+  const width = Math.min(110, 24 + (laneCount - 1) * 17);
+  const gap = laneCount === 1 ? 0 : (width - 24) / (laneCount - 1);
   return { gap, width };
 }
 
 function laneGraph(
   commit: VersionCommitView,
   laneCount: number,
-  refs: HTMLElement | null,
 ): HTMLElement {
   const ns = 'http://www.w3.org/2000/svg';
   const height = VERSION_GRAPH_ROW_HEIGHT;
@@ -310,8 +300,8 @@ function laneGraph(
   graph.style.setProperty('--ag-version-graph-width', `${width}px`);
   const svg = document.createElementNS(ns, 'svg');
   svg.classList.add('ag-versions-lanes');
-  svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
-  svg.setAttribute('width', String(width));
+  svg.setAttribute('viewBox', `0 0 ${width + 18} ${height}`);
+  svg.setAttribute('width', String(width + 18));
   svg.setAttribute('height', String(height));
   svg.setAttribute('aria-hidden', 'true');
   svg.style.setProperty('--ag-version-lane', String(commit.lane));
@@ -338,7 +328,7 @@ function laneGraph(
     appendPath(
       fromX === toX
         ? `M${fromX} 0V${height}`
-        : `M${fromX} 0L${fromX} ${centerY - 5}L${toX} ${centerY + 5}L${toX} ${height}`,
+        : `M${fromX} 0C${fromX} ${centerY} ${toX} ${centerY} ${toX} ${height}`,
       toLane,
       'rail',
     );
@@ -353,31 +343,39 @@ function laneGraph(
     appendPath(
       parentX === x
         ? `M${x} ${centerY}V${height}`
-        : `M${x} ${centerY}L${x} ${centerY + 5}L${parentX} ${centerY + 10}L${parentX} ${height}`,
+        : `M${x} ${centerY}C${x} ${height} ${parentX} ${centerY} ${parentX} ${height}`,
       parentLane,
       'edge',
     );
   }
 
+  const connector = document.createElementNS(ns, 'path');
+  connector.setAttribute('d', `M${width + 1} ${centerY}H${x + 7}`);
+  connector.classList.add('ag-version-node-connector');
+  connector.style.setProperty('--ag-version-lane-color', laneColor(commit.lane));
+  svg.appendChild(connector);
+  const arrow = document.createElementNS(ns, 'path');
+  arrow.setAttribute('d', `M${width + 6} ${centerY - 3}L${width + 12} ${centerY}L${width + 6} ${centerY + 3}Z`);
+  arrow.classList.add('ag-version-connector-arrow');
+  arrow.style.setProperty('--ag-version-lane-color', laneColor(commit.lane));
+  svg.appendChild(arrow);
+  const halo = document.createElementNS(ns, 'circle');
+  halo.setAttribute('cx', String(x));
+  halo.setAttribute('cy', String(centerY));
+  halo.setAttribute('r', '6.5');
+  halo.classList.add('ag-version-node-halo');
+  halo.style.setProperty('--ag-version-lane-color', laneColor(commit.lane));
+  svg.appendChild(halo);
   const node = document.createElementNS(ns, 'circle');
   node.setAttribute('cx', String(x));
   node.setAttribute('cy', String(centerY));
-  node.setAttribute('r', commit.isHead ? '4.5' : '3.75');
+  node.setAttribute('r', commit.isHead ? '4' : '3.25');
   node.classList.add('ag-version-node');
   node.style.setProperty('--ag-version-lane-color', laneColor(commit.lane));
   if (commit.isHead) node.classList.add('ag-head');
+  if (commit.parentIds.length > 1) node.classList.add('ag-merge-node');
   svg.appendChild(node);
   graph.appendChild(svg);
-  if (refs && refs.childElementCount > 0) {
-    refs.classList.add('ag-version-graph-refs');
-    refs.style.setProperty('--ag-version-lane-color', laneColor(commit.lane));
-    if (commit.lane < laneCount / 2) {
-      refs.style.left = `calc(${(x / width) * 100}% + 8px)`;
-    } else {
-      refs.style.right = `calc(${((width - x) / width) * 100}% + 8px)`;
-    }
-    graph.appendChild(refs);
-  }
   return graph;
 }
 
@@ -443,21 +441,18 @@ export function createVersionManagerPage(controller: VersionManagerController): 
   }
 
   const toolbar = el('div', 'ag-versions-toolbar');
-  const activeBranch = el('button', 'ag-versions-branch-pill');
-  activeBranch.type = 'button';
-  activeBranch.setAttribute('aria-label', '현재 브랜치 보기');
-  activeBranch.append(el('span', 'ag-versions-head-marker', 'HEAD>'), el('span', 'ag-versions-branch-name', 'main'));
   const checkpointButton = el('button', 'ag-versions-primary', '+ 커밋');
   checkpointButton.type = 'button';
   checkpointButton.setAttribute('aria-label', '새 커밋 만들기');
-  const branchButton = el('button', 'ag-versions-secondary', '여기서 브랜치');
+  const branchButton = el('button', 'ag-versions-secondary', '분기');
   branchButton.type = 'button';
   branchButton.dataset.versionMutation = 'true';
   branchButton.setAttribute('aria-label', '이 커밋에서 브랜치 만들기');
   const mergeButton = el('button', 'ag-versions-secondary', '병합');
   mergeButton.type = 'button';
   mergeButton.dataset.versionMutation = 'true';
-  toolbar.append(activeBranch, mergeButton, branchButton, checkpointButton);
+  mergeButton.dataset.versionAction = 'merge';
+  toolbar.append(mergeButton, branchButton, checkpointButton);
 
   const body = el('div', 'ag-versions-body');
   const historyPanel = el('div', 'ag-versions-panel ag-versions-history');
@@ -466,9 +461,43 @@ export function createVersionManagerPage(controller: VersionManagerController): 
   graph.setAttribute('role', 'listbox');
   graph.setAttribute('aria-label', '커밋 기록');
   const inspector = el('aside', 'ag-versions-inspector');
+  const dateTooltip = el('div', 'ag-version-date-tooltip');
+  dateTooltip.setAttribute('role', 'tooltip');
+  let dateTooltipHideTimer: ReturnType<typeof setTimeout> | null = null;
+  function cancelDateTooltipHide(): void {
+    if (dateTooltipHideTimer !== null) clearTimeout(dateTooltipHideTimer);
+    dateTooltipHideTimer = null;
+  }
+  function scheduleDateTooltipHide(): void {
+    cancelDateTooltipHide();
+    dateTooltipHideTimer = setTimeout(hideDateTooltip, 100);
+  }
+  dateTooltip.addEventListener('pointerenter', cancelDateTooltipHide);
+  dateTooltip.addEventListener('pointerleave', hideDateTooltip);
+  function hideDateTooltip(): void {
+    cancelDateTooltipHide();
+    dateTooltip.classList.remove('ag-visible');
+  }
+  function showDateTooltip(row: HTMLElement, commit: VersionCommitView): void {
+    cancelDateTooltipHide();
+    dateTooltip.textContent = formatTime(commit.createdAt);
+    if (!dateTooltip.isConnected) document.body.appendChild(dateTooltip);
+    const rect = row.getBoundingClientRect();
+    const width = dateTooltip.offsetWidth;
+    const height = dateTooltip.offsetHeight;
+    dateTooltip.style.left = `${Math.max(8, Math.min(rect.right - width - 8, window.innerWidth - width - 8))}px`;
+    dateTooltip.style.top = `${rect.bottom + height + 8 < window.innerHeight ? rect.bottom + 4 : rect.top - height - 4}px`;
+    dateTooltip.classList.add('ag-visible');
+  }
+  graph.addEventListener('scroll', hideDateTooltip, { passive: true });
+  window.addEventListener('resize', hideDateTooltip);
   const loadMoreButton = el('button', 'ag-versions-load-more', '이전 기록 더 보기');
   loadMoreButton.type = 'button';
-  historyPanel.append(graph, loadMoreButton, inspector);
+  const branchStrip = el('div', 'ag-versions-branch-strip');
+  branchStrip.setAttribute('aria-label', '브랜치 전환');
+  const graphCaption = el('div', 'ag-versions-graph-caption');
+  toolbar.prepend(branchStrip);
+  historyPanel.append(graphCaption, graph, loadMoreButton, inspector);
 
   const branchesPanel = el('div', 'ag-versions-panel ag-versions-branches');
   branchesPanel.setAttribute('role', 'tabpanel');
@@ -575,10 +604,6 @@ export function createVersionManagerPage(controller: VersionManagerController): 
     const branchBlockedReason = blockedReason ?? (branchNeedsSelection ? '선택된 커밋이 없습니다.' : null);
     branchButton.disabled = branchBlockedReason !== null;
     branchButton.title = branchBlockedReason ?? '';
-    // This control only navigates to the branch browser. It remains available
-    // while an agent turn blocks mutations so browsing never gets locked out.
-    activeBranch.disabled = !versioningAvailable;
-    activeBranch.title = versioningAvailable ? '' : (blockedReason ?? '');
     for (const button of page.querySelectorAll<HTMLButtonElement>('[data-version-mutation]')) {
       const prerequisiteDisabled = button.dataset.versionPrerequisiteDisabled === 'true';
       button.disabled = blocked || prerequisiteDisabled;
@@ -599,6 +624,8 @@ export function createVersionManagerPage(controller: VersionManagerController): 
   }
 
   function renderTabs(): void {
+    hideDateTooltip();
+    branchStrip.hidden = tab !== 'history';
     for (const [id, button] of tabButtons) {
       const selected = id === tab;
       button.classList.toggle('ag-active', selected);
@@ -632,7 +659,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
       refs.appendChild(el(
         'span',
         `ag-version-ref ag-branch-ref${active ? ' ag-active-ref' : ''}`,
-        active ? `HEAD> ${branch}` : branch,
+        active ? `● ${branch}` : branch,
       ));
     }
     for (const tag of commit.tagLabels) {
@@ -648,6 +675,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
       inspector.appendChild(el('p', 'ag-versions-placeholder', '커밋을 선택하면 세부 정보와 복원 작업을 볼 수 있습니다.'));
       return;
     }
+    inspector.style.setProperty('--ag-version-lane-color', laneColor(selected.lane));
     inspector.append(
       el('span', 'ag-versions-inspector-kicker', `${selected.shortId} · ${reasonLabel(selected.reason)}`),
       el('h3', 'ag-versions-inspector-title', selected.title),
@@ -721,12 +749,31 @@ export function createVersionManagerPage(controller: VersionManagerController): 
       row.classList.toggle('ag-selected', selected);
       row.setAttribute('aria-selected', String(selected));
       row.tabIndex = selected ? 0 : -1;
-      if (selected && focus) row.focus();
+      if (selected && focus) { row.focus(); row.scrollIntoView({ block: 'nearest' }); }
     }
     renderInspector();
   }
 
   function renderHistory(): void {
+    hideDateTooltip();
+    branchStrip.replaceChildren();
+    for (const branch of current.branches) {
+      const tip = current.commits.find((commit) => commit.id === branch.headId);
+      const chip = el('button', `ag-versions-branch-chip${branch.isActive ? ' ag-current' : ''}`);
+      chip.type = 'button';
+      chip.dataset.versionMutation = 'true';
+      chip.style.setProperty('--ag-version-lane-color', laneColor(tip?.lane ?? 0));
+      chip.setAttribute('aria-pressed', String(branch.isActive));
+      chip.title = branch.isActive ? `${branch.name} · 작업 중` : branch.name;
+      chip.setAttribute('aria-label', `${branch.name} 브랜치로 전환`);
+      chip.appendChild(el('span', 'ag-versions-chip-name', `⑂ ${branch.name}`));
+      if (branch.isActive) chip.appendChild(el('span', 'ag-versions-chip-state', '작업 중'));
+      chip.addEventListener('click', () => {
+        if (!branch.isActive) void perform(() => controller.switchBranch(branch.name));
+      });
+      branchStrip.appendChild(chip);
+    }
+    graphCaption.replaceChildren(el('span', '', `커밋 ${current.commits.length}`), el('span', '', `${current.branches.length}개 브랜치`));
     graph.replaceChildren();
     const laneCount = Math.max(1, ...current.commits.map((commit) => commit.laneCount));
     if (!selectedCommitId || !current.commits.some((commit) => commit.id === selectedCommitId)) {
@@ -739,6 +786,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
       const row = el('button', 'ag-version-row');
       row.type = 'button';
       row.dataset.commitId = commit.id;
+      row.style.setProperty('--ag-version-lane-color', laneColor(commit.lane));
       row.setAttribute('role', 'option');
       const accessibleRefs = [
         ...commit.branchLabels.map((branch) => (
@@ -754,15 +802,19 @@ export function createVersionManagerPage(controller: VersionManagerController): 
       row.tabIndex = commit.id === selectedCommitId ? 0 : -1;
       const copy = el('span', 'ag-version-copy');
       const heading = el('span', 'ag-version-heading');
-      heading.appendChild(el('strong', 'ag-version-title', commit.title));
+      heading.appendChild(el('span', 'ag-version-title', commit.title));
       const refs = commitRefs(commit);
-      const inlineRefs = laneCount <= 6 && refs.childElementCount === 1;
-      if (!inlineRefs) heading.appendChild(refs);
-      copy.append(
-        heading,
-        el('span', 'ag-version-meta', `${commit.shortId}  ${formatGraphTime(commit.createdAt)}`),
-      );
-      row.append(laneGraph(commit, laneCount, inlineRefs ? refs : null), copy);
+      heading.appendChild(refs);
+      copy.appendChild(heading);
+      const chevron = el('span', 'ag-version-chevron');
+      chevron.setAttribute('aria-hidden', 'true');
+      row.append(laneGraph(commit, laneCount), chevron, copy);
+      row.addEventListener('pointerenter', () => showDateTooltip(row, commit));
+      row.addEventListener('pointerleave', scheduleDateTooltipHide);
+      row.addEventListener('focus', () => {
+        if (row.matches(':focus-visible')) showDateTooltip(row, commit);
+      });
+      row.addEventListener('blur', hideDateTooltip);
       row.addEventListener('click', () => selectCommit(commit.id));
       row.addEventListener('dblclick', () => void perform(async () => {
         await controller.compare(commit.id);
@@ -972,9 +1024,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
     renderMutationState();
     if (!current.documentId || !current.saved || !current.enabled) return;
     const targetBranch = current.activeBranch ?? 'main';
-    activeBranch.querySelector('.ag-versions-branch-name')!.textContent = targetBranch;
-    activeBranch.setAttribute('aria-label', `현재 브랜치 ${targetBranch} 보기`);
-    mergeButton.textContent = `병합: … → ${targetBranch}`;
+    mergeButton.textContent = '병합';
     const mergeDirection = `다른 브랜치 → ${targetBranch}`;
     const mergeLabel = `병합: ${mergeDirection}`;
     mergeButton.dataset.versionTitle = mergeLabel;
@@ -1055,16 +1105,13 @@ export function createVersionManagerPage(controller: VersionManagerController): 
         });
     if (source) await perform(() => controller.startMerge(source));
   })());
-  activeBranch.addEventListener('click', () => {
-    tab = 'branches';
-    renderTabs();
-  });
   loadMoreButton.addEventListener('click', () => void perform(() => controller.loadMore()));
   aiToggle.addEventListener('change', () => controller.setAiTitlesEnabled(aiToggle.checked));
   page.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') return;
     event.preventDefault();
     event.stopPropagation();
+    if (dateTooltip.classList.contains('ag-visible')) { hideDateTooltip(); return; }
     page.dispatchEvent(new CustomEvent('ag-versions-close'));
   });
 
@@ -1086,10 +1133,14 @@ export function createVersionManagerPage(controller: VersionManagerController): 
       closeButton.focus();
     },
     close(): void {
+      hideDateTooltip();
       active = false;
       activeTextPrompt?.cancel();
     },
     dispose(): void {
+      hideDateTooltip();
+      dateTooltip.remove();
+      window.removeEventListener('resize', hideDateTooltip);
       active = false;
       activeTextPrompt?.cancel();
       unsubscribe();
