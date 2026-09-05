@@ -174,6 +174,8 @@ fn paragraph_and_table_paste_preserves_surrounding_text_and_remains_editable() {
                 }
             })
             .expect("pasted table");
+        assert!(table.common.treat_as_char, "HTML 표는 본문 흐름에 배치돼야 한다");
+        assert!(table.common.width > 0 && table.common.height > 0);
         assert_eq!(table.cells.len(), 2);
         assert_eq!(table.cells[0].paragraphs[0].text, "Cell A");
         assert_eq!(table.cells[1].paragraphs[0].text, "Cell B");
