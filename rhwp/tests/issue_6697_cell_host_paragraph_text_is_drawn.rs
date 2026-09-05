@@ -16,7 +16,7 @@ use rhwp::model::style::{CharShape, ParaShape};
 use rhwp::model::table::{Cell, Table};
 use rhwp::renderer::render_tree::{RenderNode, RenderNodeType};
 
-fn nested_table() -> Table {
+fn nested_table(attr: u32) -> Table {
     let mut table = Table {
         row_count: 1,
         col_count: 1,
@@ -33,6 +33,7 @@ fn nested_table() -> Table {
         }],
         ..Default::default()
     };
+    table.attr = attr;
     table.common.treat_as_char = false;
     table.common.text_wrap = TextWrap::TopAndBottom;
     table.common.vert_rel_to = VertRelTo::Para;
@@ -44,7 +45,7 @@ fn nested_table() -> Table {
     table
 }
 
-fn host_para() -> Paragraph {
+fn host_para(attr: u32) -> Paragraph {
     Paragraph {
         text: "캡션".to_string(),
         char_count: 2,
@@ -61,12 +62,12 @@ fn host_para() -> Paragraph {
             tag: LineSeg::TAG_SINGLE_SEGMENT_LINE,
             ..Default::default()
         }],
-        controls: vec![Control::Table(Box::new(nested_table()))],
+        controls: vec![Control::Table(Box::new(nested_table(attr)))],
         ..Default::default()
     }
 }
 
-fn outer_table() -> Table {
+fn outer_table(attr: u32) -> Table {
     let mut table = Table {
         row_count: 1,
         col_count: 1,
@@ -78,7 +79,7 @@ fn outer_table() -> Table {
             width: 20_000,
             height: 16_000,
             apply_inner_margin: true,
-            paragraphs: vec![host_para()],
+            paragraphs: vec![host_para(attr)],
             ..Default::default()
         }],
         ..Default::default()
@@ -92,7 +93,7 @@ fn outer_table() -> Table {
     table
 }
 
-fn document() -> Document {
+fn document(attr: u32) -> Document {
     let host = Paragraph {
         char_count: 1,
         line_segs: vec![LineSeg {
@@ -101,7 +102,7 @@ fn document() -> Document {
             tag: LineSeg::TAG_SINGLE_SEGMENT_LINE,
             ..Default::default()
         }],
-        controls: vec![Control::Table(Box::new(outer_table()))],
+        controls: vec![Control::Table(Box::new(outer_table(attr)))],
         ..Default::default()
     };
     let mut section = Section::default();
@@ -130,17 +131,31 @@ fn flatten_text_runs(node: &RenderNode, out: &mut String) {
     }
 }
 
-#[test]
-fn cell_host_paragraph_text_is_drawn() {
+fn flattened_page_text(attr: u32) -> String {
     let mut core = DocumentCore::new_empty();
-    core.set_document(document());
+    core.set_document(document(attr));
     let tree = core.build_page_render_tree(0).expect("page 1 render tree");
-
     let mut text = String::new();
     flatten_text_runs(&tree.root, &mut text);
-    let flattened: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
-    assert!(
-        flattened.contains("캡션"),
-        "host cell paragraph text must be drawn; flattened={flattened:?}"
+    text.chars().filter(|ch| !ch.is_whitespace()).collect()
+}
+
+#[test]
+fn cell_host_paragraph_text_is_drawn() {
+    let flattened = flattened_page_text(0);
+    assert_eq!(
+        flattened.matches("캡션").count(),
+        1,
+        "host cell paragraph text must be drawn once; flattened={flattened:?}"
+    );
+}
+
+#[test]
+fn cell_host_paragraph_text_is_not_drawn_twice_when_attr_bit0_is_set() {
+    let flattened = flattened_page_text(0x01);
+    assert_eq!(
+        flattened.matches("캡션").count(),
+        1,
+        "attr bit0 plus composed host draw must not duplicate the caption; flattened={flattened:?}"
     );
 }

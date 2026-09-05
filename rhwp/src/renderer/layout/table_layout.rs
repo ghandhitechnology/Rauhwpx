@@ -3023,6 +3023,7 @@ impl LayoutEngine {
             .enumerate()
         {
             let visible_text_before_para = has_preceding_visible_text;
+            let mut drew_block_host_para_text = false;
             let cell_context = if let Some(ref ctx) = enclosing_cell_ctx {
                 let mut new_ctx = ctx.clone();
                 if let Some(last) = new_ctx.path.last_mut() {
@@ -3264,6 +3265,7 @@ impl LayoutEngine {
                     );
                     has_preceding_text = true;
                     has_preceding_visible_text = true;
+                    drew_block_host_para_text = true;
                 }
             }
 
@@ -4138,8 +4140,9 @@ impl LayoutEngine {
                             } else {
                                 0.0
                             };
-                            // TAC 표 앞 텍스트 렌더링 (문단부호 등 표시용)
-                            if tac_text_offset > 0.0 {
+                            // TAC 표 앞 텍스트 렌더링 (문단부호 등 표시용).
+                            // Skip when the block-table ELSE already drew the host para.
+                            if tac_text_offset > 0.0 && !drew_block_host_para_text {
                                 let line_h = composed
                                     .lines
                                     .first()
