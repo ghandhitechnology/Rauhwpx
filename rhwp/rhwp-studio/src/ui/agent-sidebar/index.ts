@@ -649,6 +649,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   /** 지금 노란 불이 붙어 있는 스레드 — 턴이 끝나면 초록 점으로 넘긴다. */
   let runStatusThreadId: string | null = null;
   let workflowTransitionPending = false;
+  let cloudConfigurationPending = false;
   let cloudTransferPending = false;
   let cloudTransferIntent: CloudSessionScope | null = null;
   let cloudTransferIntentPromise: Promise<void> | null = null;
@@ -821,6 +822,48 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     bridge.startChat(selectedAgent, selectedModel, selectedEffort, force, permissionProfile, chatWorkflow,
       currentThread.id, currentThread.documentId, currentThread.docKey, history);
     if (force) updateComposer();
+  }
+
+  function syncCloudProviderSelection(): void {
+    if (workspace.mode() !== 'cloud' || cloudConfigurationPending) return;
+    const session = cloudController.getSnapshot().session;
+    if (session.kind === 'idle' || session.threadId !== currentThread.id || !session.selection) return;
+    const { agent, model, effort } = session.selection;
+    if (selectedAgent === agent && selectedModel === model && selectedEffort === effort) return;
+    selectedModel = model;
+    selectedEffort = effort;
+    selectedServiceTier = resolveServiceTier(agent, null);
+    setSelectedAgent(agent);
+    rebuildLlmMenu();
+    rebuildEffortMenu();
+    persistCurrentThread();
+  }
+
+  function changeCurrentProviderSettings(): void {
+    const execution = composerExecution(workspace.composerTarget());
+    if (execution.kind === 'local') {
+      startCurrentBridgeChat();
+      return;
+    }
+    if (execution.kind === 'cloud-start') {
+      persistCurrentThread();
+      return;
+    }
+    if (execution.kind !== 'cloud') return;
+    const selection = { agent: selectedAgent, model: selectedModel, effort: selectedEffort };
+    cloudConfigurationPending = true;
+    const lock = workspace.lock('cloud-message');
+    updateComposer();
+    void cloudUi.configure(selection, execution).catch(async (error) => {
+      // Refresh after conflicts or an uncertain response instead of resending a write.
+      await cloudUi.refreshLeaseScope().catch(() => {});
+      systemMessage(`모델 설정을 바꾸지 못했습니다: ${error instanceof Error ? error.message : String(error)}`);
+    }).finally(() => {
+      cloudConfigurationPending = false;
+      lock.release();
+      syncCloudProviderSelection();
+      updateComposer();
+    });
   }
 
   // ── DOM 구성 ──────────────────────────────────────────
@@ -1032,7 +1075,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   const providerItems = new Map<AgentName, HTMLButtonElement>();
 
   function selectAgent(agent: AgentName): void {
-    if (isControlLocked()) return;
+    if (isSelectionLocked()) return;
+    if (workspace.mode() === 'cloud' && !isCloudSupportedAgent(agent)) return;
     setSelectedAgent(agent);
     selectedModel = resolveModelForAgent(agent, selectedModel);
     selectedEffort = resolveEffortForAgent(agent, selectedEffort, selectedModel);
@@ -1040,7 +1084,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     rebuildLlmMenu();
     rebuildEffortMenu();
     updateWorkspaceAgentContext();
-    startCurrentBridgeChat();
+    changeCurrentProviderSettings();
     refreshSidebarWidthMin();
     providerTrigger.focus();
   }
@@ -1065,10 +1109,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   }
 
   function syncProviderMenu(): void {
+    for (const agent of ['rau', 'opencode'] as const) {
+      const item = providerItems.get(agent);
+      if (item) item.hidden = workspace.mode() === 'cloud';
+    }
     const pi = providerItems.get('pi');
     if (pi) pi.hidden = !piSetupComplete && selectedAgent !== 'pi';
     const rau = providerItems.get('rau');
-    if (rau) rau.hidden = !rauSetupComplete && selectedAgent !== 'rau';
+    if (rau) rau.hidden = workspace.mode() === 'cloud' || (!rauSetupComplete && selectedAgent !== 'rau');
   }
 
   function rauCreditsEmpty(): boolean {
@@ -1080,11 +1128,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   providerTrigger.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (isControlLocked()) return;
+    if (isSelectionLocked()) return;
     setConfigPanelOpen(!configPanelOpen);
   });
   providerTrigger.addEventListener('keydown', (e) => {
-    if (isControlLocked()) return;
+    if (isSelectionLocked()) return;
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       setConfigPanelOpen(true);
@@ -1133,7 +1181,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   let llmItems = new Map<string, HTMLButtonElement>();
 
   function selectModel(modelId: string): void {
-    if (isControlLocked()) return;
+    if (isSelectionLocked()) return;
     selectedModel = resolveModelForAgent(selectedAgent, modelId);
     selectedEffort = resolveEffortForAgent(selectedAgent, selectedEffort, selectedModel);
     llmName.textContent = labelForModel(selectedAgent, selectedModel);
@@ -1144,7 +1192,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }
     rebuildEffortMenu();
     updateWorkspaceAgentContext();
-    startCurrentBridgeChat();
+    changeCurrentProviderSettings();
     refreshSidebarWidthMin();
     llmTrigger.focus();
   }
@@ -1173,11 +1221,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   llmTrigger.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (isControlLocked()) return;
+    if (isSelectionLocked()) return;
     setConfigPanelOpen(!configPanelOpen);
   });
   llmTrigger.addEventListener('keydown', (e) => {
-    if (isControlLocked()) return;
+    if (isSelectionLocked()) return;
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       setConfigPanelOpen(true);
@@ -1241,11 +1289,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   effortGroup.append(el('span', 'ag-config-label', '추론'), effortSlider.root);
 
   function selectEffort(effortId: string): void {
-    if (isControlLocked()) return;
+    if (isSelectionLocked()) return;
     selectedEffort = resolveEffortForAgent(selectedAgent, effortId, selectedModel);
     effortName.textContent = labelForEffort(selectedAgent, selectedEffort, selectedModel);
     effortSlider.setValue(selectedEffort);
-    startCurrentBridgeChat();
+    changeCurrentProviderSettings();
     updateWorkspaceAgentContext();
     refreshSidebarWidthMin();
   }
@@ -1264,11 +1312,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   effortTrigger.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (isControlLocked()) return;
+    if (isSelectionLocked()) return;
     setConfigPanelOpen(!configPanelOpen);
   });
   effortTrigger.addEventListener('keydown', (e) => {
-    if (isControlLocked()) return;
+    if (isSelectionLocked()) return;
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       setConfigPanelOpen(true);
@@ -6052,6 +6100,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   }
 
   function updateComposer(): void {
+    syncCloudProviderSelection();
+    syncProviderMenu();
     // 다른 문서의 채팅 열람 중에는 연결/작업 상태와 무관하게 잠긴다.
     const execution = composerExecution(workspace.composerTarget());
     composerTargetMessage.hidden = execution.kind !== 'blocked';
@@ -6142,15 +6192,16 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       || mergeResolverLocked;
     // 실행 중이거나 작업 방식/계획→실행 전환 중에는 모드·모델·권한을 잠근다.
     const controlsLocked = isControlLocked();
-    providerTrigger.disabled = controlsLocked;
-    llmTrigger.disabled = controlsLocked;
-    effortTrigger.disabled = controlsLocked;
-    effortSlider.setDisabled(controlsLocked);
+    const selectionLocked = isSelectionLocked();
+    providerTrigger.disabled = selectionLocked;
+    llmTrigger.disabled = selectionLocked;
+    effortTrigger.disabled = selectionLocked;
+    effortSlider.setDisabled(selectionLocked);
     permissionBtn.disabled = controlsLocked || connState !== 'connected';
     // 턴 실행·첨부·모드 전환 중에는 설정 패널을 접는다. 모델/추론 강도를 바꾸는
     // 순간 채팅을 다시 여는 잠금(chatStartPending)은 패널을 유지한다 — 바깥을
     // 누르기 전까지는 그대로 두고 이어서 고를 수 있게.
-    if (controlsLocked && chatStartPendingThreadId === null) setConfigPanelOpen(false);
+    if (selectionLocked && chatStartPendingThreadId === null) setConfigPanelOpen(false);
     updateWorkflowControl();
   }
 
@@ -7046,6 +7097,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         dropRunStatusIfIdle();
         break;
       case 'chat-started': {
+        if (workspace.mode() === 'cloud') break;
         if (e.threadId && e.threadId !== currentThread.id) break;
         chatStartPendingThreadId = null;
         const prevAgent = selectedAgent;
@@ -7086,6 +7138,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         void referenceLibrary.refresh();
         // 새 채팅(welcome)·재시작 시 작업 방식과 계획 단계를 서버와 다시 맞춘다.
         syncPlanningFromBridge();
+        persistCurrentThread();
         const liveQuestion = bridge.getPendingUserQuestion();
         if (liveQuestion?.threadId === currentThread.id) {
           const stored = currentThread.pendingUserQuestion
@@ -7428,6 +7481,18 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   // ── 계획 모드 ────────────────────────────────────────
 
   /** 실행 중이거나 첨부를 커밋하거나 전환 중에는 모드·모델·권한을 바꿀 수 없다. */
+  function isSelectionLocked(): boolean {
+    if (mergeResolverLocked || readOnlyDocLabel !== null || attachmentsSending || cloudConfigurationPending) return true;
+    const execution = composerExecution(workspace.composerTarget());
+    if (execution.kind === 'local') return isControlLocked();
+    if (execution.kind === 'cloud-start') return false;
+    if (execution.kind !== 'cloud') return true;
+    const session = cloudController.getSnapshot().session;
+    return session.kind !== 'running' || session.threadId !== currentThread.id
+      || session.phase !== 'waiting' || session.wait !== null
+      || !session.selection || session.configurationPending === true;
+  }
+
   function isControlLocked(): boolean {
     if (mergeResolverLocked || composerExecution(workspace.composerTarget()).kind !== 'local') return true;
     return turnRunning || attachmentsSending || chatStartPendingThreadId !== null

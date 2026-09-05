@@ -21,6 +21,7 @@ export const COMMAND_TYPES = Object.freeze([
   'turn.redirect',
   'wait.resolve',
   'conversation.workflow',
+  'conversation.configure',
   'message.queue',
 ]);
 
@@ -153,7 +154,7 @@ export function parseSessionCreate(value) {
       }
       return {
         model: string(executionConfig.model, 'executionConfig.model', { min: 1, max: 256 }),
-        effort: string(executionConfig.effort, 'executionConfig.effort', { min: 1, max: 64 }),
+        effort: string(executionConfig.effort, 'executionConfig.effort', { min: 0, max: 64 }),
         workflow,
         permissionProfile,
       };
@@ -180,6 +181,30 @@ export function parseSessionCreate(value) {
         : integer(limits.maxTurns, 'limits.maxTurns', { min: 1, max: 500 }),
     },
   };
+}
+
+/** Validate a complete selection before touching a live worker. */
+export function parseProviderSelection(value) {
+  const input = object(value, 'selection');
+  const provider = string(input.provider, 'provider', { max: 32 });
+  if (!PROVIDERS.includes(provider)) throw new CloudError('INVALID_PROVIDER', 'Provider is not supported');
+  const model = string(input.model, 'model', { max: 256, pattern: /^[a-zA-Z0-9][a-zA-Z0-9._:/-]*$/ });
+  const models = {
+    claude: ['opus', 'fable', 'sonnet', 'haiku'],
+    codex: ['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-6-astra'],
+    grok: ['grok-4.6', 'grok-4.5'],
+  };
+  if (models[provider] && !models[provider].includes(model)) {
+    throw new CloudError('INVALID_MODEL', 'Model is not supported by this provider');
+  }
+  const effort = string(input.effort, 'effort', { min: 0, max: 64 });
+  const efforts = provider === 'cursor' ? ['']
+    : provider === 'pi' ? ['', 'low', 'medium', 'high']
+      : provider === 'grok' ? ['low', 'medium', 'high', 'xhigh']
+        : provider === 'claude' && model === 'haiku' ? ['low', 'medium', 'high']
+          : ['low', 'medium', 'high', 'xhigh', 'max'];
+  if (!efforts.includes(effort)) throw new CloudError('INVALID_EFFORT', 'Reasoning effort is not supported by this model');
+  return { provider, model, effort };
 }
 
 export function parseCommand(value) {
@@ -236,6 +261,8 @@ export function publicSession(row) {
     clientContext: row.client_thread_id
       ? { threadId: row.client_thread_id, documentId: row.client_document_id }
       : null,
+    configurationSupported: true,
+    configurationPending: Boolean(row.configuration_restart_requested_at),
     executionConfig: row.execution_config_json ? JSON.parse(row.execution_config_json) : null,
     originDocument: {
       name: row.origin_name,

@@ -341,20 +341,21 @@ export function createMockBridge(report: (message: string) => void) {
       provider,
       model,
       effort,
-      _force,
+      force,
       profile,
       mode,
       id,
       documentId,
       documentName,
     ) => {
+      const continuing = !force && id === threadId && (mode ?? 'direct') === workflow.workflow;
       const startGeneration = ++generation;
       completeQuestion({ status: 'expired', reason: 'request-invalidated' });
       setRunning(false);
       agent = provider;
       threadId = id ?? threadId;
       permission = profile ?? permission;
-      workflow = {
+      workflow = continuing ? workflow : {
         workflow: mode ?? 'direct',
         phase:
           mode === 'plan'

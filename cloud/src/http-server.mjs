@@ -378,6 +378,12 @@ export function createCloudHttpHandler({
           }));
           return;
         }
+        if (request.method === 'POST' && action === '/configuration-restart-ack') {
+          const result = sessionStore.acknowledgeConfigurationRestart(sessionId);
+          await raucloudLease?.checkpoint?.();
+          json(response, 200, result);
+          return;
+        }
         if (request.method === 'POST' && action === '/pause-ack') {
           const result = sessionStore.acknowledgePause(sessionId);
           await raucloudLease?.checkpoint?.();

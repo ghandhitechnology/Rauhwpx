@@ -1270,7 +1270,7 @@ test('atomic finish claim catches takeover and pause requests that race the cont
   }
 });
 
-for (const action of ['end', 'idle-end', 'takeover', 'lease-stop']) {
+for (const action of ['end', 'idle-end', 'takeover', 'lease-stop', 'configure']) {
   test(`manual edits after the agent turn survive ${action}, including input drained during handoff`, async (t) => {
     const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'raucloud-manual-save-'));
     t.after(() => fs.rm(workspace, { recursive: true, force: true }));
@@ -1311,10 +1311,15 @@ for (const action of ['end', 'idle-end', 'takeover', 'lease-stop']) {
         finishClaim: async () => {
           if (action === 'idle-end' && ++finishClaims === 1) return { waiting: true };
           if (action === 'idle-end') assert.equal(checkpoints.get(boundaries.at(-1).checkpoint.blobId), 'manual edit after turn');
-          return action === 'takeover' ? { takeoverRequested: true } : { ready: true, messages: [] };
+          return action === 'configure' ? { configurationRestartRequested: true }
+            : action === 'takeover' ? { takeoverRequested: true } : { ready: true, messages: [] };
         },
         takeoverReady: async ({ operationId }) => { assert.equal(operationId, boundaries.at(-1).operationId); },
         takeoverAck: async () => { acknowledged = true; },
+        configurationRestartAck: async () => {
+          assert.equal(checkpoints.get(boundaries.at(-1).checkpoint.blobId), 'manual edit after turn plus queued input');
+          acknowledged = true;
+        },
         suspend: async () => { acknowledged = true; },
       },
       createHarness: async () => ({

@@ -176,6 +176,10 @@ export interface CloudAgentUi {
   refreshLeaseScope(): Promise<boolean>;
   bindSelectedTimeline(): Promise<boolean>;
   matchesTarget(target: CloudCommandTarget): boolean;
+  configure(
+    selection: import('../../cloud/types.ts').CloudProviderSelection,
+    target: CloudCommandTarget,
+  ): Promise<void>;
   setWorkflow(
     workflow: AgentWorkflow,
     target: CloudCommandTarget,
@@ -1181,6 +1185,16 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       return selectAndBind(selectedSessionId ?? activeSessionId, false);
     },
     matchesTarget,
+    async configure(selection, target) {
+      if (!matchesTarget(target)) throw new Error('선택한 Cloud 대화가 바뀌었습니다.');
+      snapshot = await deps.controller.command({
+        sessionId: target.sessionId,
+        command: 'configure',
+        expectedVersion: target.expectedVersion,
+        payload: { provider: selection.agent, model: selection.model, effort: selection.effort },
+      });
+      render();
+    },
     async setWorkflow(workflow, target) {
       const session = snapshot.session;
       if (!matchesTarget(target)) {

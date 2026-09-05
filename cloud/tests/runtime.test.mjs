@@ -47,7 +47,7 @@ test('database migrates with WAL, FULL sync, and foreign keys', async (t) => {
     journalMode: 'wal',
     synchronous: 2,
     foreignKeys: 1,
-    migrationVersion: 13,
+    migrationVersion: 14,
   });
 });
 
@@ -93,7 +93,7 @@ test('existing version-one state upgrades without losing resources or event sequ
 
   const upgraded = openDatabase(filename);
   t.after(() => upgraded.close());
-  assert.equal(databasePragmas(upgraded).migrationVersion, 13);
+  assert.equal(databasePragmas(upgraded).migrationVersion, 14);
   assert.equal(upgraded.prepare(`SELECT next_event_seq FROM sessions WHERE id = 'session'`).get().next_event_seq, 8);
   assert.equal(upgraded.prepare(`SELECT name FROM session_resources WHERE session_id = 'session'`).get().name, 'doc.hwp');
   assert.deepEqual(upgraded.prepare(`
@@ -1157,4 +1157,92 @@ test('question workflow migration preserves active turns and pending decisions w
   assert.equal(sessions.waitState(session.id, wait.id).payload.planId, 'existing-plan');
   sessions.completeTurn(session.id, { outcome: 'stopped' });
   assert.equal(sessions.beginTurn(session.id, { turnNumber: 2, mode: 'question' }).mode, 'question');
+});
+
+
+test('provider changes checkpoint and restart the same room without losing queued messages or history', async (t) => {
+  let now = 1_800_000_000_000;
+  const { sessions, blobs, database, origin, session } = await persistentRoomFixture(t, { now: () => now });
+  sessions.beginTurn(session.id, { turnNumber: 1 });
+  sessions.completeTurn(session.id);
+  sessions.claimFinish(session.id);
+  const originalVersion = sessions.getSession(session.id).stateVersion;
+  sessions.setProviderStatus('claude', { available: true, authenticated: true });
+  const command = parseCommand({
+    commandId: 'configure_claude_high', type: 'conversation.configure',
+    payload: { expectedVersion: originalVersion, provider: 'claude', model: 'sonnet', effort: 'high' },
+  });
+  const selected = sessions.executeCommand(origin.device, session.id, command);
+  assert.equal(selected.session.provider, 'claude');
+  assert.equal(selected.session.configurationPending, true);
+  assert.deepEqual(selected.session.executionConfig, {
+    model: 'sonnet', effort: 'high', workflow: 'direct', permissionProfile: 'unrestricted',
+  });
+  assert.deepEqual(sessions.executeCommand(origin.device, session.id, command), selected);
+  assert.throws(() => sessions.executeCommand(origin.device, session.id, {
+    ...command, commandId: 'configure_stale_device',
+  }), { code: 'STATE_VERSION_CONFLICT' });
+  sessions.executeCommand(origin.device, session.id, parseCommand({
+    commandId: 'queue_after_configuration', type: 'message.queue', payload: { messageId: 'after-switch', content: 'Continue our earlier discussion' },
+  }));
+  assert.deepEqual(sessions.claimFinish(session.id), { ready: false, messages: [], configurationRestartRequested: true });
+  assert.throws(() => sessions.beginTurn(session.id, { turnNumber: 2, messageId: 'after-switch' }), { code: 'INVALID_SESSION_STATE' });
+  assert.throws(() => sessions.acknowledgeConfigurationRestart(session.id), { code: 'CHECKPOINT_REQUIRED' });
+  now++;
+  const edited = await upload(blobs, origin.device.id, Buffer.from('latest manual edits'), { kind: 'result', sessionId: session.id });
+  const transcript = await upload(blobs, origin.device.id, Buffer.from('earlier conversation'), { kind: 'timeline', name: 'timeline.json', sessionId: session.id });
+  await sessions.commitBoundary(session.id, {
+    operationId: 'configure_boundary_1', turnNumber: 1, revision: 1, kind: 'operation',
+    checkpoint: { blobId: edited.id, size: edited.size }, timeline: { blobId: transcript.id, size: transcript.size },
+  });
+  const restarted = sessions.acknowledgeConfigurationRestart(session.id);
+  assert.equal(restarted.status, 'queued');
+  assert.equal(restarted.id, session.id);
+  assert.equal(restarted.turnsUsed, 1);
+  assert.deepEqual(restarted.clientContext, session.clientContext);
+  assert.equal(sessions.claimNextSession().provider, 'claude');
+  const manifest = sessions.workerManifest(session.id);
+  assert.equal(manifest.latestCheckpoint.blobId, edited.id);
+  assert.equal(manifest.resources.find((item) => item.kind === 'timeline').blobId, transcript.id);
+  assert.equal(manifest.executionConfig.model, 'sonnet');
+  const next = sessions.claimFinish(session.id).messages[0];
+  assert.equal(next.id, 'after-switch');
+  sessions.beginTurn(session.id, { turnNumber: 2, messageId: next.id });
+  sessions.completeTurn(session.id);
+  assert.equal(database.prepare('SELECT status FROM session_messages WHERE id = ?').get(next.id).status, 'consumed');
+});
+
+test('provider configuration rejects busy, unconnected, invalid and overlapping choices before changing state', async (t) => {
+  const { sessions, origin, session } = await persistentRoomFixture(t);
+  let seq = 0;
+  const configure = (selection) => sessions.executeCommand(origin.device, session.id, parseCommand({
+    commandId: `configuration_case_${++seq}`, type: 'conversation.configure',
+    payload: { expectedVersion: sessions.getSession(session.id).stateVersion, provider: 'codex', model: 'gpt-5.6-sol', effort: 'high', ...selection },
+  }));
+  sessions.beginTurn(session.id, { turnNumber: 1 });
+  assert.throws(() => configure({}), { code: 'INVALID_SESSION_STATE' });
+  sessions.createWait(session.id, { turnNumber: 1, kind: 'question', payload: { question: 'Continue?' } });
+  assert.throws(() => configure({}), { code: 'INVALID_SESSION_STATE' });
+  sessions.completeTurn(session.id, { outcome: 'stopped' });
+  sessions.claimFinish(session.id);
+  const before = sessions.getSession(session.id);
+  for (const [selection, code] of [
+    [{ provider: 'unknown' }, 'INVALID_PROVIDER'],
+    [{ provider: 'claude', model: 'sonnet' }, 'PROVIDER_UNAVAILABLE'],
+    [{ model: 'sonnet' }, 'INVALID_MODEL'],
+    [{ effort: 'ultra' }, 'INVALID_EFFORT'],
+    [{ model: '--unsafe-option' }, 'INVALID_REQUEST'],
+    [{ provider: 'cursor', model: 'auto', effort: 'high' }, 'INVALID_EFFORT'],
+    [{ provider: 'claude', model: 'haiku', effort: 'max' }, 'INVALID_EFFORT'],
+  ]) {
+    assert.throws(() => configure(selection), { code });
+    assert.deepEqual(sessions.getSession(session.id), before);
+  }
+  configure({ model: 'gpt-5.6-luna', effort: 'low' });
+  assert.throws(() => configure({ model: 'gpt-6-astra', effort: 'max' }), { code: 'INVALID_SESSION_STATE' });
+  // A crash between acceptance and the save/ack path still starts the chosen provider.
+  sessions.requeueInterruptedSession(session.id);
+  sessions.claimNextSession();
+  assert.equal(sessions.getSession(session.id).configurationPending, false);
+  assert.equal(sessions.workerManifest(session.id).executionConfig.model, 'gpt-5.6-luna');
 });

@@ -1880,6 +1880,10 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   cursor: pointer;
 }
 
+.ag-config-panel .ag-model-item[hidden] {
+  display: none;
+}
+
 .ag-provider-item::before {
   display: none;
 }

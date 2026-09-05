@@ -17,8 +17,8 @@ test('reasoning and model tweaks do not lock or rebuild the composer', () => {
   // 추론 강도/모델만 바꿀 때는 입력칸을 '채팅을 여는 중'으로 잠그지 않는다.
   assert.match(source, /if \(force\) chatStartPendingThreadId = currentThread\.id;/);
   assert.match(source, /if \(force\) updateComposer\(\);/);
-  assert.match(source, /function selectEffort[\s\S]*startCurrentBridgeChat\(\);/);
-  assert.match(source, /function selectModel[\s\S]*startCurrentBridgeChat\(\);/);
+  assert.match(source, /function selectEffort[\s\S]*changeCurrentProviderSettings\(\);/);
+  assert.match(source, /function selectModel[\s\S]*changeCurrentProviderSettings\(\);/);
   // 서버가 같은 선택을 메아리치면 열린 피커 메뉴를 다시 그리지 않는다.
   assert.match(
     source,

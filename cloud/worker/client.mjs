@@ -109,6 +109,7 @@ export class WorkerClient {
   credentials() { return this.json('GET', '/credentials'); }
   messages() { return this.json('GET', '/messages'); }
   control(options = {}) { return this.json('GET', '/control', undefined, options); }
+  configurationRestartAck() { return this.json('POST', '/configuration-restart-ack', {}); }
   pauseAck() { return this.json('POST', '/pause-ack', {}); }
   sleepAck() { return this.json('POST', '/sleep-ack', {}); }
   heartbeat() { return this.json('POST', '/heartbeat', {}, { timeoutMs: 5_000 }); }

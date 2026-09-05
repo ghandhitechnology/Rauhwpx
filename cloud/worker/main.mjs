@@ -106,7 +106,7 @@ try {
         return sessionFramePublisher.stop({ drainInput: true });
       },
     });
-    if (outcome?.paused !== true && outcome?.suspended !== true && outcome?.takenOver !== true && outcome?.sleeping !== true) {
+    if (outcome?.paused !== true && outcome?.suspended !== true && outcome?.takenOver !== true && outcome?.sleeping !== true && outcome?.reconfigured !== true) {
       if (!outcome?.timelinePath) throw new Error('Document runtime did not return timelinePath');
       if (!outcome?.resultPath) throw new Error('Document runtime did not return resultPath');
       const result = await client.upload(outcome.resultPath, {

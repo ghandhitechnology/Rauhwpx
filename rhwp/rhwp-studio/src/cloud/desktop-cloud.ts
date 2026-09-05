@@ -342,7 +342,16 @@ function parseSessionBase(state: Record<string, unknown>): CloudSessionBase | nu
       ? state.documentId
       : undefined;
   if (!sessionId || !threadId || !documentName || version === null || documentId === undefined) return null;
+  const selection = record(state.selection);
+  const validSelection = selection && ['claude', 'codex', 'pi', 'grok', 'cursor'].includes(String(selection.agent))
+    && typeof selection.model === 'string' && typeof selection.effort === 'string';
   return {
+    ...(validSelection ? { selection: {
+      agent: selection.agent as import('../agent/types.ts').AgentName,
+      model: selection.model as string,
+      effort: selection.effort as string,
+    } } : {}),
+    ...(typeof state.configurationPending === 'boolean' ? { configurationPending: state.configurationPending } : {}),
     sessionId,
     version,
     threadId,
