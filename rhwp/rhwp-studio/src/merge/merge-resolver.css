@@ -7,17 +7,17 @@ html.desktop-mac body.merge-resolver-open #menu-bar::after {
 }
 
 .merge-resolver-window {
-  --merge-border: color-mix(in srgb, currentcolor 18%, transparent);
-  --merge-muted: color-mix(in srgb, currentcolor 66%, transparent);
-  --merge-surface: var(--bg-color, #fff);
-  --merge-panel: color-mix(in srgb, var(--merge-surface) 94%, currentcolor 6%);
+  --merge-border: var(--color-border, #d9dce1);
+  --merge-muted: var(--color-text-secondary, #666);
+  --merge-surface: var(--color-surface, #fff);
+  --merge-panel: var(--color-surface-raised, #f5f5f5);
 
   position: fixed;
   inset: 0;
   z-index: 10000;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
-  color: var(--text-color, #1f2937);
+  color: var(--color-text, #1f2937);
   background: var(--merge-surface);
   font: 13px/1.4 system-ui, sans-serif;
 }
@@ -100,16 +100,16 @@ html.desktop-mac .merge-resolver-header button {
 }
 .merge-conflict-item:hover,
 .merge-conflict-item.is-selected { background: color-mix(in srgb, #2563eb 11%, transparent); }
-.merge-conflict-item.is-selected { border-left-color: #2563eb; }
-.merge-conflict-item.is-resolved .merge-conflict-state { color: #16803c; }
+.merge-conflict-item.is-selected { border-left-color: var(--ui-link, #2563eb); }
+.merge-conflict-item.is-resolved .merge-conflict-state { color: var(--merge-success, #16803c); }
 .merge-conflict-kind { align-self: start; padding: 1px 5px; border-radius: 999px; background: var(--merge-border); font-size: 10px; text-transform: uppercase; }
 .merge-conflict-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.merge-conflict-state { grid-column: 2; color: #b45309; font-size: 11px; }
+.merge-conflict-state { grid-column: 2; color: var(--ui-warning-text, #b45309); font-size: 11px; }
 
 .merge-preview-area { display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; }
 .merge-preview-tabs { display: none; border-bottom: 1px solid var(--merge-border); }
 .merge-preview-tab { flex: 1; padding: 8px; border: 0; border-bottom: 2px solid transparent; color: inherit; background: transparent; }
-.merge-preview-tab[aria-selected="true"] { border-bottom-color: #2563eb; color: #2563eb; font-weight: 700; }
+.merge-preview-tab[aria-selected="true"] { border-bottom-color: var(--ui-link, #2563eb); color: var(--ui-link, #2563eb); font-weight: 700; }
 .merge-preview-grid { min-height: 0; display: grid; grid-template: repeat(2, minmax(0, 1fr)) / repeat(2, minmax(0, 1fr)); }
 .merge-preview-pane { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr); border: solid var(--merge-border); border-width: 0 1px 1px 0; overflow: hidden; }
 .merge-preview-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; background: var(--merge-panel); }
@@ -117,8 +117,8 @@ html.desktop-mac .merge-resolver-header button {
 .merge-preview-page-navigation { display: flex; align-items: center; gap: 4px; }
 .merge-preview-page-navigation input { width: 44px; padding: 2px 3px; border: 1px solid var(--merge-border); border-radius: 4px; background: var(--merge-surface); color: inherit; }
 .merge-preview-status { min-height: 20px; padding: 2px 8px; overflow: hidden; color: var(--merge-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.merge-preview-canvas-wrap { position: relative; min-height: 0; overflow: auto; padding: 8px; background: #d4d7dc; }
-.merge-preview-canvas { display: block; margin: 0 auto; background: #fff; box-shadow: 0 1px 5px #0003; }
+.merge-preview-canvas-wrap { position: relative; min-height: 0; overflow: auto; padding: 8px; background: var(--doc-workspace, #d4d7dc); }
+.merge-preview-canvas { display: block; margin: 0 auto; background: var(--doc-paper, #fff); box-shadow: 0 1px 5px var(--doc-shadow, #0003); }
 .merge-preview-marker { position: absolute; border: 2px solid #dc2626; border-radius: 2px; background: #ef444433; pointer-events: none; }
 
 .merge-editor-heading { padding-bottom: 10px; border-bottom: 1px solid var(--merge-border); }
@@ -132,10 +132,10 @@ html.desktop-mac .merge-resolver-header button {
 .merge-resolution-controls { display: grid; gap: 6px; }
 .merge-resolution-button { padding: 7px 9px; border: 1px solid var(--merge-border); border-radius: 5px; color: inherit; background: var(--merge-surface); text-align: left; cursor: pointer; }
 .merge-resolution-button:hover,
-.merge-resolution-button.is-selected { border-color: #2563eb; background: color-mix(in srgb, #2563eb 10%, transparent); }
+.merge-resolution-button.is-selected { border-color: var(--ui-link, #2563eb); background: color-mix(in srgb, #2563eb 10%, transparent); }
 .merge-manual-editor { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--merge-border); }
 .merge-manual-editor h3 { margin: 0; font-size: 13px; }
-.merge-manual-error { min-height: 18px; margin: 3px 0; color: #b91c1c; }
+.merge-manual-error { min-height: 18px; margin: 3px 0; color: var(--ui-danger, #b91c1c); }
 .merge-structured-fields,
 .merge-image-source { display: grid; gap: 7px; margin: 9px 0 12px; padding: 9px; border: 1px solid var(--merge-border); border-radius: 5px; }
 .merge-structured-fields legend,
@@ -159,7 +159,7 @@ html.desktop-mac .merge-resolver-header button {
 .merge-image-source { grid-template-columns: 1fr 1fr; }
 .merge-image-source legend,
 .merge-image-source .merge-upload-field { grid-column: 1 / -1; }
-.merge-manual-unavailable { margin-top: 14px; padding: 9px; border: 1px solid #b4530966; border-radius: 5px; color: #92400e; background: #f59e0b14; }
+.merge-manual-unavailable { margin-top: 14px; padding: 9px; border: 1px solid var(--ui-warning-border, #b4530966); border-radius: 5px; color: var(--ui-warning-text, #92400e); background: var(--ui-warning-bg, #f59e0b14); }
 .merge-clean-message { padding: 12px; color: var(--merge-muted); }
 
 .merge-resolver-footer { display: grid; grid-template-columns: minmax(210px, 1fr) auto minmax(280px, 1.2fr) auto; }
@@ -182,7 +182,7 @@ html.desktop-mac .merge-resolver-header button {
 .merge-primary-button { padding: 8px 13px; border-color: #1d4ed8; color: #fff; background: #2563eb; font-weight: 700; }
 .merge-secondary-button,
 .merge-danger-button { padding: 7px 10px; }
-.merge-danger-button { color: #b91c1c; }
+.merge-danger-button { color: var(--ui-danger, #b91c1c); }
 .merge-small-button { padding: 4px 6px; font-size: 11px; }
 .merge-inline-button { padding: 2px 5px; font-size: 10px; }
 .merge-icon-button { min-width: 26px; min-height: 26px; }
@@ -199,7 +199,7 @@ html.desktop-mac .merge-resolver-header button {
   padding: 7px 11px;
   border: 1px solid color-mix(in srgb, #2563eb 48%, var(--merge-border));
   border-radius: 5px;
-  color: var(--text-color, #1f2937);
+  color: var(--color-text, #1f2937);
   background: color-mix(in srgb, var(--merge-surface) 92%, #2563eb 8%);
   box-shadow: 0 8px 24px #0002;
   font-weight: 650;
@@ -209,12 +209,12 @@ html.desktop-mac .merge-resolver-header button {
 .merge-action-status:empty { display: none; }
 .merge-action-status[data-kind="error"] {
   border-color: color-mix(in srgb, #dc2626 55%, var(--merge-border));
-  color: #991b1b;
+  color: var(--ui-danger, #991b1b);
   background: color-mix(in srgb, var(--merge-surface) 92%, #dc2626 8%);
 }
 
 .merge-confirm-overlay { position: fixed; inset: 0; z-index: 10010; display: grid; place-items: center; padding: 24px; background: #0008; }
-.merge-confirm-dialog { width: min(420px, 100%); padding: 20px; border-radius: 10px; color: var(--text-color, #1f2937); background: var(--bg-color, #fff); box-shadow: 0 20px 60px #0005; }
+.merge-confirm-dialog { width: min(420px, 100%); padding: 20px; border-radius: 10px; color: var(--color-text, #1f2937); background: var(--color-surface, #fff); box-shadow: 0 20px 60px #0005; }
 .merge-confirm-dialog h2 { margin-top: 0; }
 .merge-confirm-dialog .merge-source-select { width: 100%; }
 .merge-confirm-actions { justify-content: flex-end; margin-top: 18px; }
@@ -253,3 +253,13 @@ html.desktop-mac .merge-resolver-header button {
 }
 
 .merge-choice-preview { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; margin-top: 4px; color: var(--merge-muted); font-size: 12px; white-space: normal; overflow-wrap: anywhere; }
+
+:root[data-theme-effective="dark"] .merge-resolver-window {
+  --merge-success: #74d99b;
+}
+
+.merge-resolver-window :focus-visible,
+.merge-confirm-overlay :focus-visible {
+  outline: 2px solid var(--focus-ring, #4a90d9);
+  outline-offset: 2px;
+}

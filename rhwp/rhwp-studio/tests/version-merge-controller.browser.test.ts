@@ -262,6 +262,32 @@ test('clean fast-forward is reviewed and keeps the source branch by default', { 
       Object.assign(window, { __mergeController: controller, __mergeStore: store, __mergeWasm: wasm });
     });
     await page.waitForSelector('.merge-resolver-window');
+    // 실제 테마 토큰으로 열린 병합 창과 입력, 미리보기 배경을 확인한다.
+    await page.evaluate(async () => { await import('/src/styles/base.css'); });
+    for (const mode of ['dark', 'light', 'system'] as const) {
+      await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: 'dark' }]);
+      const colors = await page.evaluate(async (mode) => {
+        const { setThemeMode } = await import('/src/core/theme.ts');
+        setThemeMode(mode);
+        const root = document.documentElement;
+        const style = (selector: string) => getComputedStyle(document.querySelector(selector)!);
+        return {
+          effective: root.dataset.themeEffective,
+          background: style('.merge-resolver-window').backgroundColor,
+          foreground: style('.merge-resolver-window').color,
+          input: style('.merge-title-input').backgroundColor,
+          workspace: style('.merge-preview-canvas-wrap').backgroundColor,
+          paper: style('.merge-preview-canvas').backgroundColor,
+        };
+      }, mode);
+      const dark = mode !== 'light';
+      assert.equal(colors.effective, dark ? 'dark' : 'light');
+      assert.equal(colors.background, dark ? 'rgb(30, 30, 32)' : 'rgb(255, 255, 255)');
+      assert.equal(colors.input, colors.background);
+      assert.notEqual(colors.foreground, colors.background);
+      assert.equal(colors.workspace, dark ? 'rgb(15, 15, 17)' : 'rgb(228, 228, 234)');
+      assert.equal(colors.paper, 'rgb(255, 255, 255)');
+    }
     assert.equal(await page.$eval('.merge-mode-select', (select) => (select as HTMLSelectElement).value), 'fast-forward');
     try {
       await page.waitForFunction(() => {
