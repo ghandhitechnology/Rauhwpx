@@ -1851,11 +1851,15 @@ export class CloudCoordinator extends EventEmitter {
         const existing = (await this.#store.list()).find((record) => record.id === input.startId);
         if (existing) return existing;
       }
-      const duplicate = (await this.#store.list({ activeOnly: true })).find((record) => (
-        input.documentId
+      const duplicate = (await this.#store.list({ activeOnly: true })).find((record) => {
+        // Completed results remain recoverable when their server is replaced.
+        // They must not reserve the document on the replacement server.
+        if (record.state === 'completed' && record.destination && readiness?.profile
+          && !destinationMatchesProfile(record.destination, readiness.profile)) return false;
+        return input.documentId
           ? record.originDocumentId === input.documentId
-          : Boolean(input.sessionId && record.originSessionId === input.sessionId)
-      ));
+          : Boolean(input.sessionId && record.originSessionId === input.sessionId);
+      });
       if (duplicate && duplicate.id !== input.startId) {
         throw transferError('This document already has an active cloud transfer', 'TRANSFER_ALREADY_ACTIVE');
       }

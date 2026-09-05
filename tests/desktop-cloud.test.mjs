@@ -2217,6 +2217,39 @@ test('concurrent requests cannot stage duplicate document transfers', async (t) 
   await otherStopped;
 });
 
+test('a completed recovery on a replaced server does not block a new document transfer', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-replaced-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  let profile = { endpoint: 'https://old.example/rauhwpx-cloud', mode: 'app-hosted', serverPublicKey: SERVER_KEY,
+    sandbox: { providerId: 'railway', sandboxId: 'old-sandbox' } };
+  const old = await store.create({
+    sessionId: 'desktop-origin', documentId: 'same-document', threadId: 'old-thread',
+    documentName: 'document.hwpx', documentBytes: Buffer.from('original'),
+    destination: coordinatorTest.destinationFromReadiness({ profile }),
+  });
+  await store.transition(old.id, 'completed');
+  const coordinator = new CloudCoordinator({
+    client: {
+      assertTransferReady: async () => ({ profile }), loadProfile: async () => profile, isPaired: async () => true,
+      transfer: async () => { throw new CloudHttpError('Test reached the new server', { status: 409, code: 'AUTH_REQUIRED' }); },
+    },
+    store, provisioner: {}, recoveryDir: path.join(directory, 'recovery'),
+  });
+  t.after(() => coordinator.stop());
+  const payload = {
+    ...cloudStartFields({ startId: 'replaced1' }), agent: 'codex', threadId: 'new-thread', documentId: 'same-document',
+    document: { fileName: 'document.hwpx', bytes: Buffer.from('original') },
+  };
+  await assert.rejects(coordinator.transfer(payload, { originSessionId: 'desktop-origin' }),
+    (error) => error.code === 'TRANSFER_ALREADY_ACTIVE');
+  profile = { ...profile, endpoint: 'https://new.example/rauhwpx-cloud', sandbox: { ...profile.sandbox, sandboxId: 'new-sandbox' } };
+  await assert.rejects(coordinator.transfer(payload, { originSessionId: 'desktop-origin' }),
+    (error) => error.code === 'AUTH_REQUIRED');
+  assert.equal((await store.get(old.id)).state, 'completed', 'keep the old recovery record');
+  assert.equal((await store.list()).length, 2);
+});
+
 test('missing cloud configuration fails once instead of entering transfer recovery', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-unconfigured-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
