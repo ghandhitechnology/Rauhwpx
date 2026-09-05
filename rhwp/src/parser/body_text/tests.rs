@@ -767,3 +767,13 @@ fn hwp5_base_master_does_not_set_replace_base() {
     assert!(pages[0].overlap);
     assert!(!pages[0].replace_base);
 }
+
+#[test]
+fn trailing_hwp5_master_is_extension_even_without_legacy_flag() {
+    let records = vec![raw_list_header(1, list_header_data(1000, 2000, 0x0004))];
+    let pages = parse_master_pages_from_raw_at_location(&records, true);
+    assert_eq!(pages.len(), 1);
+    assert_eq!(pages[0].ext_flags, 0x0004);
+    assert!(pages[0].is_extension);
+    assert!(pages[0].replace_base);
+}
