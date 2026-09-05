@@ -1,7 +1,8 @@
 import {
-  IDB_OPERATION_TIMEOUT_MS,
   openIndexedDatabase,
-  withTimeout,
+  requestResult,
+  transactionDone,
+  withDatabase,
 } from '../core/idb-open.ts';
 import { isAgentWorkflow, isStructuredPlan } from './types.ts';
 import type {
@@ -529,29 +530,9 @@ function openDb() {
   });
 }
 
-async function runWithDb<T>(operation: (db: IDBDatabase) => Promise<T>) {
-  const db = await openDb();
-  if (!db) throw new Error(`${DB_NAME} unavailable`);
-  try {
-    return await withTimeout(operation(db), IDB_OPERATION_TIMEOUT_MS, DB_NAME);
-  } finally {
-    db.close();
-  }
-}
-
-function transactionDone(tx: IDBTransaction) {
-  return new Promise<void>((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error);
-  });
-}
-
-function requestResult<T>(request: IDBRequest<T>) {
-  return new Promise<T>((resolve, reject) => {
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
+function runWithDb<T>(operation: (db: IDBDatabase) => Promise<T>) {
+  return withDatabase(openDb, DB_NAME, operation, (error) =>
+    Promise.reject(error ?? new Error(`${DB_NAME} unavailable`)));
 }
 
 function emitChanged() {
