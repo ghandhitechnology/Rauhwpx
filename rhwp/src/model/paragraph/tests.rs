@@ -10,6 +10,70 @@ fn test_paragraph_default() {
     assert!(para.controls.is_empty());
 }
 
+fn non_bmp_picture_paragraph() -> Paragraph {
+    Paragraph {
+        text: "A😀𠀀B.".to_string(),
+        char_count: 16, // Seven UTF-16 text units, picture slot, paragraph end.
+        char_offsets: vec![8, 9, 11, 13, 14],
+        controls: vec![make_picture_control()],
+        char_shapes: vec![CharShapeRef { start_pos: 0, char_shape_id: 0 }],
+        ..Paragraph::new_empty()
+    }
+}
+
+#[test]
+fn non_bmp_insert_delete_preserves_utf16_count_and_picture_slot() {
+    let mut para = non_bmp_picture_paragraph();
+    assert_eq!(para.delete_text_at(1, 2), 2, "deletion count stays in Unicode characters");
+    assert_eq!(para.text, "AB.");
+    assert_eq!(para.char_count, 12, "remove four UTF-16 units, retain picture and end");
+    assert_eq!(para.char_offsets, vec![8, 9, 10]);
+    para.insert_text_at(1, "😀𠀀");
+    assert_eq!(para.text, "A😀𠀀B.");
+    assert_eq!(para.char_count, 16, "insert four UTF-16 units");
+    assert_eq!(para.char_offsets, vec![8, 9, 11, 13, 14]);
+    assert_eq!(para.control_text_positions(), vec![0]);
+}
+
+#[test]
+fn non_bmp_split_merge_counts_utf16_units_on_both_sides_of_picture() {
+    for split in 0..=6 {
+        let mut para = non_bmp_picture_paragraph();
+        let tail = para.split_at(split);
+        for part in [&para, &tail] {
+            assert_eq!(part.char_count, part.text.encode_utf16().count() as u32
+                + part.controls.len() as u32 * 8 + 1, "split {split}: UTF-16 count");
+        }
+        assert_eq!(para.char_count + tail.char_count, 17, "one additional paragraph end");
+        para.merge_from(&tail);
+        assert_eq!(para.text, "A😀𠀀B.", "split {split}: text");
+        assert_eq!(para.char_count, 16, "split {split}: merged UTF-16 count");
+        assert_eq!(para.char_offsets, vec![8, 9, 11, 13, 14], "split {split}: restored offsets");
+        assert_eq!(para.control_text_positions(), vec![0]);
+    }
+}
+
+#[test]
+fn split_merge_between_consecutive_pictures_preserves_each_control_slot() {
+    for split in 0..=6 {
+        let mut para = Paragraph {
+            text: "A😀B.".to_string(),
+            char_count: 22,
+            char_offsets: vec![0, 1, 19, 20],
+            controls: vec![make_picture_control(), make_picture_control()],
+            char_shapes: vec![CharShapeRef { start_pos: 0, char_shape_id: 0 }],
+            ..Paragraph::new_empty()
+        };
+        let tail = para.split_at(split);
+        assert_eq!(para.char_count + tail.char_count, 23, "split {split}: one extra end marker");
+        para.merge_from(&tail);
+        assert_eq!(para.char_count, 22, "split {split}: UTF-16 count");
+        assert_eq!(para.text, "A😀B.");
+        assert_eq!(para.char_offsets, vec![0, 1, 19, 20], "split {split}: both picture slots");
+        assert_eq!(para.control_text_positions(), vec![2, 2]);
+    }
+}
+
 #[test]
 fn test_line_seg_flags() {
     let seg = LineSeg {

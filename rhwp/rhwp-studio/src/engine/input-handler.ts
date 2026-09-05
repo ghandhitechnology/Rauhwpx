@@ -852,7 +852,7 @@ export class InputHandler {
     this.container.style.cursor = 'crosshair';
   }
 
-  /** 외부 파일 드롭 그림 삽입: 한컴처럼 원본 크기, 글자처럼 취급으로 바로 넣는다. */
+  /** 외부 파일 드롭 그림 삽입: 본문은 한컴처럼 원본 크기·글자처럼 취급으로 넣고, 표 셀 위는 floating sibling (#1151) 로 넣는다. */
   insertDroppedImageAtClientPoint(
     data: Uint8Array,
     ext: string,
@@ -916,6 +916,7 @@ export class InputHandler {
           desc,
           undefined,
           undefined,
+          'inline',
         );
         if (!result.ok) {
           insertError = (result as any).error || '삽입 위치 또는 이미지 정보를 확인할 수 없습니다.';
@@ -925,7 +926,7 @@ export class InputHandler {
         const logicalOffset = typeof result.logicalOffset === 'number'
           ? result.logicalOffset
           : hit.charOffset + 1;
-        const cursorAfter: DocumentPosition = inTextBox
+        const cursorAfter: DocumentPosition = inCell || inTextBox
           ? { ...hit, charOffset: logicalOffset }
           : {
               sectionIndex: sec,
@@ -941,7 +942,8 @@ export class InputHandler {
             result.controlIdx,
             { treatAsChar: true },
           );
-        } else {
+        } else if (!inCell) {
+          // 본문 드롭: 글자처럼 취급 (기존 동작).
           wasm.setPictureProperties(
             sec,
             result.paraIdx ?? paraIdx,
@@ -949,6 +951,8 @@ export class InputHandler {
             { treatAsChar: true },
           );
         }
+        // 셀 floating sibling (#1151): tac=false, wrap=Square 유지 —
+        // treatAsChar 강제 시 셀 위 그림이 페이지 레이아웃에서 사라진다.
         this.cursor.clearSelection();
         return cursorAfter;
       }});

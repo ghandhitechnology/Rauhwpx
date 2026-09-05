@@ -530,6 +530,30 @@ export interface PiStatus {
   error: string | null;
 }
 
+/** 자격 증명 한 필드의 출처 — 앱에서 입력했는지, 허브 환경 변수에서 왔는지. */
+export type BrowserbaseCredentialSource = 'studio' | 'env' | null;
+
+/** 허브가 보는 Browserbase 설정 상태. 키 본문은 오지 않고 끝 네 글자만 온다. */
+export interface BrowserbaseStatus {
+  configured: boolean;
+  /** 아직 비어 있는 환경 변수 이름들. */
+  missing: string[];
+  keySource: BrowserbaseCredentialSource;
+  keyTail: string | null;
+  projectId: string | null;
+  projectSource: BrowserbaseCredentialSource;
+  geminiSource: BrowserbaseCredentialSource;
+  /** 지금 떠 있는 원격 브라우저 — main 과 서브에이전트 id. */
+  browsers: Array<{ id: string; connected: boolean }>;
+}
+
+/** 설정 탭에서 입력해 허브로 보내는 Browserbase 덮어쓰기 — 앱을 쓰는 동안만 산다. */
+export interface BrowserbaseOverride {
+  apiKey: string;
+  projectId?: string;
+  geminiApiKey?: string;
+}
+
 /** OpenRouter 잔액 — pi 사용량 카드에 표시. */
 export interface OpenRouterCredits {
   balanceUsd: number;
@@ -790,6 +814,8 @@ export type SidebarEvent =
     }
   | { type: 'pi-catalog'; requestId: string; models: PiCatalogModel[] }
   | { type: 'pi-error'; requestId: string; code: string; message: string }
+  | { type: 'browserbase-status'; status: BrowserbaseStatus }
+  | { type: 'browserbase-error'; requestId: string; code: string; message: string }
   | {
       type: 'title-result';
       requestId: string;

@@ -6052,6 +6052,8 @@ fn merge_doc_info(
         };
     }
     Ok(DocInfo {
+        // Rendering environment belongs to the current session, not the merge.
+        font_metrics_policy: c.font_metrics_policy,
         // BinData declarations and payloads are merged together by
         // merge_bin_data_resources so slot identity cannot drift from bytes.
         bin_data_list: Vec::new(),

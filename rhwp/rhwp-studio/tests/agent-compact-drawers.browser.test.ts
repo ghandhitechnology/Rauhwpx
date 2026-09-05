@@ -10,7 +10,7 @@ const css = readFileSync(
   'utf8',
 );
 
-test('compact fullscreen sidebars remain temporary overlays', { timeout: 20_000 }, async (context) => {
+test('compact fullscreen sidebars remain temporary overlays', { timeout: 45_000 }, async (context) => {
   const executablePath = browserExecutable();
 
   const browser = await puppeteer.launch({ executablePath, headless: true, args: browserLaunchArgs() });

@@ -832,9 +832,10 @@ export const ENGINE_EDIT_CAPABILITIES = [
       "extension",
       "description",
       "paperOffsetXHu",
-      "paperOffsetYHu"
+      "paperOffsetYHu",
+      "placement"
     ],
-    "signature": "insertPicture(sec: number, paraIdx: number, charOffset: number, cellPathJson: string, imageData: Uint8Array, width: number, height: number, naturalWidthPx: number, naturalHeightPx: number, extension: string, description: string = '', paperOffsetXHu?: number, paperOffsetYHu?: number)"
+    "signature": "insertPicture(sec: number, paraIdx: number, charOffset: number, cellPathJson: string, imageData: Uint8Array, width: number, height: number, naturalWidthPx: number, naturalHeightPx: number, extension: string, description: string = '', paperOffsetXHu?: number, paperOffsetYHu?: number, placement?: 'inline' | 'floating')"
   },
   {
     "method": "insertTableColumn",

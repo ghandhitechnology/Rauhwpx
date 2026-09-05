@@ -3284,6 +3284,7 @@ impl DocumentCore {
         let hwp3_origin_flow_spacing_before = uses_hwp3_origin_flow_spacing_before(&self.document);
         let measurer = HeightMeasurer::new(self.dpi)
             .with_hwp3_variant(profile.hwp3_layout())
+            .with_hwpx_cell_spacing(profile.hwpx_stored_layout() || profile.hwp5_origin_hwpx())
             .with_hwp3_origin_flow_spacing_before(hwp3_origin_flow_spacing_before)
             .with_render_normalization(std::sync::Arc::clone(&self.render_normalization.overlay));
         let column_def = Self::find_initial_column_def(paragraphs);
@@ -3619,6 +3620,7 @@ impl DocumentCore {
         let profile = self.document.layout_profile();
         let measurer = HeightMeasurer::new(self.dpi)
             .with_hwp3_variant(profile.hwp3_layout())
+            .with_hwpx_cell_spacing(profile.hwpx_stored_layout() || profile.hwp5_origin_hwpx())
             .with_hwp3_origin_flow_spacing_before(hwp3_origin_flow_spacing_before)
             .with_render_normalization(std::sync::Arc::clone(&self.render_normalization.overlay));
 
@@ -4360,9 +4362,33 @@ impl DocumentCore {
         }
     }
 
+    fn previous_cell_metric_styles(
+        &self,
+    ) -> Option<crate::renderer::style_resolver::ResolvedStyleSet> {
+        use crate::model::provenance::FontMetricsPolicy;
+        if !self.document.layout_profile().hwp5_origin_hwpx()
+            || self.document.doc_info.font_metrics_policy != FontMetricsPolicy::HcrDeclared
+        {
+            return None;
+        }
+        let mut styles = self.styles.clone();
+        for style in &mut styles.char_styles {
+            style.font_metrics_policy = FontMetricsPolicy::HancomWindows;
+        }
+        Some(styles)
+    }
+
     /// [#2004] 부동 전면 이미지 스택 섹션의 정규화본(그림 tac=true 재분류 + 재구성)을 재계산.
     /// 원본 `document`/`composed` 는 무손상(save 무결). paginate 시작 시 호출.
     pub(crate) fn compute_render_normalized(&mut self) {
+        // Rau's HWP5-origin exports can retain wrapping computed with the old
+        // Windows substitution. The projection requires an exact reproduction
+        // with those metrics and unchanged line geometry with current metrics.
+        // Native HWP and documents without that exporter lineage stay untouched.
+        let previous_metric_styles = self.previous_cell_metric_styles();
+        let can_project_body_spacing =
+            matches!(self.source_format, crate::parser::FileFormat::Hwpx)
+                && self.document.layout_profile().hwp5_origin_hwpx();
         let sec_count = self.document.sections.len();
         self.render_normalization
             .section_revisions
@@ -4405,11 +4431,39 @@ impl DocumentCore {
                     _ => false,
                 })
             });
-            if matches.is_empty() && !has_cell_stack {
+            let metric_projection = previous_metric_styles.as_ref().and_then(|previous_styles| {
+                let mut paragraphs = section.paragraphs.clone();
+                crate::renderer::composer::repair_metric_stale_cell_lines(
+                    &mut paragraphs,
+                    previous_styles,
+                    &self.styles,
+                    self.dpi,
+                )
+                .then_some(paragraphs)
+            });
+            let body_projection = can_project_body_spacing
+                .then(|| {
+                    crate::renderer::composer::doubled_body_spacing_projection(
+                        &section.paragraphs,
+                        &self.styles,
+                        self.dpi,
+                    )
+                })
+                .flatten();
+            let body_spacing_projected = body_projection.is_some();
+            if matches.is_empty()
+                && !has_cell_stack
+                && metric_projection.is_none()
+                && !body_spacing_projected
+            {
                 out.push(None);
                 continue;
             }
-            let mut np = section.paragraphs.clone();
+            // Body projection excludes table controls, so the two corrections
+            // cannot compete for the same section.
+            let mut np = body_projection
+                .or(metric_projection)
+                .unwrap_or_else(|| section.paragraphs.clone());
             if has_cell_stack {
                 for p in np.iter_mut() {
                     reclassify_cell_floating_stacks(p, min_height_hu);
@@ -4460,6 +4514,7 @@ impl DocumentCore {
                 .collect();
             out.push(Some(super::super::RenderNormalizedSection {
                 source_revision,
+                body_spacing_projected,
                 paragraphs: std::sync::Arc::new(np),
                 composed: std::sync::Arc::new(nc),
             }));
@@ -4480,7 +4535,26 @@ impl DocumentCore {
         section_idx: usize,
         para_idx: usize,
     ) {
-        let source_para = self.document.sections[section_idx].paragraphs[para_idx].clone();
+        if self
+            .render_normalization
+            .sections
+            .get(section_idx)
+            .and_then(|section| section.as_ref())
+            .is_some_and(|section| section.body_spacing_projected)
+        {
+            self.render_normalization.sections[section_idx] = None;
+            self.compute_render_normalized();
+            return;
+        }
+        let mut source_para = self.document.sections[section_idx].paragraphs[para_idx].clone();
+        if let Some(previous_styles) = self.previous_cell_metric_styles() {
+            crate::renderer::composer::repair_metric_stale_cell_lines(
+                std::slice::from_mut(&mut source_para),
+                &previous_styles,
+                &self.styles,
+                self.dpi,
+            );
+        }
         let source_composed = self.composed[section_idx][para_idx].clone();
         let Some(Some(section)) = self.render_normalization.sections.get_mut(section_idx) else {
             return;
