@@ -75,6 +75,14 @@ Open http://127.0.0.1:7700. Studio starts its own authenticated agent hub on an 
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for native builds, focused tests and prerequisites. Maintainers can find signing and publishing instructions in [docs/releasing.md](docs/releasing.md).
 
+### Sidebar design preview
+
+Run `npm --prefix rhwp/rhwp-studio ci` once, then `npm run dev:sidebar` and open
+http://127.0.0.1:7715. This mounts the production sidebar with local service fixtures;
+Node is the only runtime prerequisite. `npm run test:sidebar` checks its interactions
+in headless Chrome and saves sidebar screenshots. See the
+[preview guide](rhwp/rhwp-studio/sidebar-preview/README.md) for scenarios and design editing.
+
 ## Layout
 
 | Path | What |

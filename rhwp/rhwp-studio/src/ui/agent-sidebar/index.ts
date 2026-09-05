@@ -1,7 +1,7 @@
 /**
  * AI 에이전트 사이드바 (ag- 접두어).
  *
- * AgentBridge 의 SidebarEvent 스트림을 렌더링하고, 대기 중인 에이전트
+ * SidebarBridge 의 SidebarEvent 스트림을 렌더링하고, 대기 중인 에이전트
  * 편집(change-set)의 승인/거절 UI 를 제공한다. 패널은 body 에 고정
  * 마운트하되, 펼침 시 body.ag-sidebar-open 으로 #editor-area 를 밀어
  * 눈금자·용지가 가려지지 않고 남은 폭 기준으로 다시 가운데 정렬되게 한다.
@@ -9,7 +9,7 @@
 import './agent-sidebar.css';
 
 import type { EventBus } from '../../core/event-bus.ts';
-import type { AgentBridge } from '../../agent/bridge.ts';
+import type { SidebarBridge } from '../../agent/bridge.ts';
 import type {
   AgentName,
   AgentPhase,
@@ -123,7 +123,7 @@ import { createUserQuestionController } from './user-question-controller.ts';
 import './sidebar-button-modern.css';
 
 export interface AgentSidebarDeps {
-  bridge: AgentBridge;
+  bridge: SidebarBridge;
   /** inset 전환 후 용지 가운데 정렬을 요청할 때 사용 */
   eventBus?: EventBus;
   editorSettingsRuntime?: EditorSettingsRuntime;
@@ -1685,10 +1685,16 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     subtree: true,
     characterData: true,
   });
+  let messagesResizeFrame: number | null = null;
   const messagesResizeObserver = typeof ResizeObserver === 'function'
     ? new ResizeObserver(() => {
-        syncConversationSpacer();
-        if (followConversation) scrollConversationToEnd();
+        // 계획 패널 전환 중 관찰한 레이아웃을 같은 전달 주기에서 다시 바꾸지 않는다.
+        if (messagesResizeFrame !== null) return;
+        messagesResizeFrame = window.requestAnimationFrame(() => {
+          messagesResizeFrame = null;
+          syncConversationSpacer();
+          if (followConversation) scrollConversationToEnd();
+        });
       })
     : null;
   messagesResizeObserver?.observe(messages);
@@ -6580,6 +6586,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       contextUnsubs.forEach((unsub) => unsub());
       messagesMutationObserver?.disconnect();
       messagesResizeObserver?.disconnect();
+      if (messagesResizeFrame !== null) window.cancelAnimationFrame(messagesResizeFrame);
       dockResizeObserver?.disconnect();
       rootResizeObserver?.disconnect();
       messages.removeEventListener('scroll', onMessagesScroll);

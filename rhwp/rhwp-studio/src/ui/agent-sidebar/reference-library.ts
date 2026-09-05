@@ -1,6 +1,6 @@
 import './reference-library.css';
 
-import type { AgentBridge } from '../../agent/bridge.ts';
+import type { SidebarBridge } from '../../agent/bridge.ts';
 import type {
   ReferenceFile,
   ReferenceScope,
@@ -61,7 +61,7 @@ export interface ReferenceLibraryContext {
 }
 
 export interface ReferenceLibraryOptions {
-  bridge: AgentBridge;
+  bridge: SidebarBridge;
   getContext(): ReferenceLibraryContext;
   onOpenChange?(open: boolean): void;
   onDraftStateChange?(): void;
@@ -75,7 +75,7 @@ export interface ReferenceLibraryUi {
   quickUploads: HTMLElement;
   isOpen(): boolean;
   setOpen(open: boolean, scope?: ReferenceScope): void;
-  setConnectionState(state: ReturnType<AgentBridge['getConnectionState']>): void;
+  setConnectionState(state: ReturnType<SidebarBridge['getConnectionState']>): void;
   contextChanged(): void;
   hasDrafts(): boolean;
   hasBlockingDrafts(): boolean;
