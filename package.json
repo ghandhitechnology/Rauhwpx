@@ -31,7 +31,10 @@
     "package:win": "electron-builder --win --publish never",
     "test:ci": "node --test scripts/*.test.mjs",
     "audit:production": "node scripts/audit-production.mjs",
-    "dev:studio": "npm --prefix rhwp/rhwp-studio run dev"
+    "dev:studio": "npm --prefix rhwp/rhwp-studio run dev",
+    "dev:sidebar": "npm --prefix rhwp/rhwp-studio run dev:sidebar",
+    "test:sidebar": "npm --prefix rhwp/rhwp-studio run test:sidebar",
+    "build:sidebar": "npm --prefix rhwp/rhwp-studio run build:sidebar"
   },
   "dependencies": {
     "electron-updater": "^6.8.9"

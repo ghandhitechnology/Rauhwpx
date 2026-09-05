@@ -5,3 +5,6 @@ build/icon.iconset/
 .DS_Store
 .run/
 
+
+rhwp/rhwp-studio/dist-sidebar/
+rhwp/rhwp-studio/sidebar-preview/artifacts/

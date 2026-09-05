@@ -1,0 +1,67 @@
+/* Only the preview workbench is styled here. Sidebar styles come from production. */
+#editor-area {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+}
+#preview-controls {
+  position: fixed;
+  top: 24px;
+  left: 24px;
+  width: 250px;
+  z-index: 1;
+  display: grid;
+  gap: 10px;
+  color: var(--ui-text);
+  font: 13px/1.5 var(--ui-font);
+}
+#preview-controls[hidden] {
+  display: none;
+}
+#preview-controls strong {
+  font-size: 17px;
+}
+#preview-controls p {
+  margin: 0 0 8px;
+  color: var(--ui-text-secondary);
+}
+#preview-controls label {
+  display: grid;
+  gap: 4px;
+}
+#preview-controls select,
+#preview-controls > button {
+  border: 1px solid var(--ui-border);
+  border-radius: 7px;
+  padding: 7px 10px;
+  background: var(--ui-surface-raised);
+  color: var(--ui-text);
+  font: inherit;
+}
+#preview-controls > button {
+  cursor: pointer;
+  text-align: left;
+}
+#preview-controls > button:hover {
+  background: var(--ui-hover);
+}
+#preview-controls output,
+#preview-controls small {
+  color: var(--ui-text-secondary);
+  overflow-wrap: anywhere;
+}
+#preview-controls #icon-toolbar {
+  position: static;
+  height: auto;
+  min-height: 0;
+  border: 0;
+  background: none;
+  padding: 0;
+}
+@media (max-width: 720px) {
+  #preview-controls {
+    left: 8px;
+    top: 8px;
+    width: max(100px, calc(100vw - var(--ag-sidebar-width) - 24px));
+  }
+}
