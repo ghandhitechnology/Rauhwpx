@@ -1301,6 +1301,29 @@ for (const messageId of [null, 'unfinished_followup']) {
   });
 }
 
+test('merge recovery selects the last completed turn while a later operation is still in progress', async (t) => {
+  const { blobs, auth, sessions } = await fixture(t);
+  const origin = await pairedDevice(auth);
+  sessions.setProviderStatus('codex', { available: true, version: '1' });
+  const document = await upload(blobs, origin.device.id, Buffer.from('origin'));
+  const timeline = await upload(blobs, origin.device.id, Buffer.from('{"turn":0}'), { name: 'timeline.json', kind: 'timeline' });
+  const input = parseSessionCreate({ sessionId: 'session_merge_turn_filter', provider: 'codex', goal: 'Merge finished turns',
+    originDocument: { blobId: document.id, name: 'document.hwpx', size: document.size }, timeline: { blobId: timeline.id, size: timeline.size } });
+  sessions.createSession(origin.device, input);
+  sessions.executeCommand(origin.device, input.sessionId, parseCommand({ commandId: 'activate_merge_turn_filter', type: 'session.activate', payload: { expectedVersion: 1 } }));
+  sessions.claimNextSession();
+  sessions.prepareWorker(input.sessionId, 'ra_wt_merge_turn_filter');
+  for (const [revision, kind] of [[1, 'turn'], [2, 'operation']]) {
+    const checkpoint = await upload(blobs, origin.device.id, Buffer.from(`revision ${revision}`));
+    await sessions.commitBoundary(input.sessionId, { operationId: `merge-revision-${revision}`, turnNumber: revision, revision, kind,
+      checkpoint: { blobId: checkpoint.id, size: checkpoint.size }, timeline: { blobId: timeline.id, size: timeline.size } });
+  }
+  assert.equal(sessions.latestStableCheckpoint(input.sessionId).revision, 2);
+  assert.equal(sessions.latestStableCheckpoint(input.sessionId, null, 'turn').operationId, 'merge-revision-1');
+  assert.throws(() => sessions.latestStableCheckpoint(input.sessionId, 'merge-revision-2', 'turn'), { code: 'CHECKPOINT_NOT_FOUND' });
+  assert.throws(() => sessions.latestStableCheckpoint(input.sessionId, null, 'untrusted'), { code: 'INVALID_CHECKPOINT_KIND' });
+});
+
 for (const control of ['end', 'pause', 'redirect']) {
   for (const stage of ['Studio startup', 'turn-start request']) {
     test(`${control} during ${stage} resolves through the durable control gate`, async (t) => {

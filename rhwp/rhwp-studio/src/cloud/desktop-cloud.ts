@@ -63,7 +63,7 @@ export interface CloudDesktopApi {
   cloudDismissSession?: (payload: { sessionId: string }) => Promise<unknown>;
   cloudCompleteTakeover?: (payload: { sessionId: string; operationId: string }) => Promise<unknown>;
   cloudDownloadResult?: (payload: { sessionId: string }) => Promise<unknown>;
-  cloudDownloadCheckpoint?: (payload: { sessionId: string; operationId?: string }) => Promise<unknown>;
+  cloudDownloadCheckpoint?: (payload: { sessionId: string; operationId?: string; kind?: 'turn' }) => Promise<unknown>;
   cloudPrepareRestartDocument?: (payload: { sessionId: string }) => Promise<unknown>;
   cloudPublishCheckpoint?: (payload: { sessionId: string; operationId?: string }) => Promise<unknown>;
   cloudOpenDisplay?: (payload: { sessionId: string }) => Promise<unknown>;
@@ -98,7 +98,7 @@ export interface CloudController {
   dismissSession(sessionId: string): Promise<CloudSnapshot>;
   completeTakeover(sessionId: string, operationId: string): Promise<CloudSnapshot>;
   downloadResult(sessionId: string): Promise<CloudDownloadResult>;
-  downloadCheckpoint(sessionId: string, operationId?: string): Promise<CloudCheckpointPayload>;
+  downloadCheckpoint(sessionId: string, operationId?: string, kind?: 'turn'): Promise<CloudCheckpointPayload>;
   prepareRestartDocument(sessionId: string): Promise<CloudDocumentPayload>;
   publishCheckpoint(sessionId: string, operationId?: string): Promise<CloudCheckpointPayload>;
   openDisplay(sessionId: string, listener: (event: CloudDisplayEvent) => void): Promise<CloudDisplayConnection>;
@@ -531,6 +531,7 @@ export function parseCloudSnapshot(value: unknown): CloudSnapshot | null {
     ? {
         owner: 'cloud' as const,
         sessionId: string(leaseRaw.sessionId),
+        ...(string(leaseRaw.threadId).trim() ? { threadId: string(leaseRaw.threadId) } : {}),
         acquiredAt: strictIso(leaseRaw.acquiredAt)!,
       }
     : leaseRaw.owner === 'local'
@@ -931,11 +932,11 @@ export function createCloudController(
       return { bytes: result.bytes, fileName: string(result.fileName), sha256: string(result.sha256),
         originSha256: result.originSha256 as string | null, restartToken: string(result.restartToken) };
     },
-    async downloadCheckpoint(sessionId, operationId) {
+    async downloadCheckpoint(sessionId, operationId, kind) {
       const profileEpoch = snapshot.profileEpoch;
       const fn = resolvedApi?.cloudDownloadCheckpoint;
       if (typeof fn !== 'function') throw new Error('이 앱 빌드는 클라우드 문서 미러를 지원하지 않습니다.');
-      const result = parseCloudCheckpoint(await fn({ sessionId, ...(operationId ? { operationId } : {}) }));
+      const result = parseCloudCheckpoint(await fn({ sessionId, ...(operationId ? { operationId } : {}), ...(kind ? { kind } : {}) }));
       if (profileEpoch !== snapshot.profileEpoch) {
         throw Object.assign(new Error('Cloud 프로필이 작업 중 변경됐습니다.'), { code: 'PROFILE_CHANGED' });
       }

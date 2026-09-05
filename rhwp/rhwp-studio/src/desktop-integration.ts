@@ -174,7 +174,7 @@ export interface RhwpDesktopApi {
   cloudDismissSession?: (payload: { sessionId: string }) => Promise<unknown>;
   cloudCompleteTakeover?: (payload: { sessionId: string; operationId: string }) => Promise<unknown>;
   cloudDownloadResult?: (payload: { sessionId: string }) => Promise<unknown>;
-  cloudDownloadCheckpoint?: (payload: { sessionId: string; operationId?: string }) => Promise<unknown>;
+  cloudDownloadCheckpoint?: (payload: { sessionId: string; operationId?: string; kind?: 'turn' }) => Promise<unknown>;
   cloudPrepareRestartDocument?: (payload: { sessionId: string }) => Promise<unknown>;
   cloudOpenDisplay?: (payload: { sessionId: string }) => Promise<unknown>;
   cloudCloseDisplay?: (payload: { connectionId: string }) => Promise<unknown>;

@@ -515,35 +515,17 @@ test('manual editor resolutions participate in resolver Undo/Redo and validation
   });
 });
 
-test('default source branch still prompts, disables delete, and dismissal keeps it', async (context) => {
+test('default source stays selected in collapsed merge options and cannot be deleted', async (context) => {
   const result = await withPage(context, (page) => page.evaluate(async () => {
     const { MergeResolverWindow } = await import('/src/merge/merge-resolver-window.ts');
     const resolver = new MergeResolverWindow();
-    const resolverRoot = document.createElement('div');
-    document.body.appendChild(resolverRoot);
-    Object.assign(resolver as any, {
-      root: resolverRoot,
-      options: { sourceBranch: 'main', canDeleteSource: false },
-    });
-    const disposition = (resolver as any).requestSourceDisposition() as Promise<'keep' | 'delete'>;
-    const overlay = document.querySelector<HTMLElement>('.merge-confirm-overlay')!;
-    const select = overlay.querySelector<HTMLSelectElement>('.merge-source-select')!;
-    const deleteOption = select.querySelector<HTMLOptionElement>('option[value="delete"]')!;
-    const copy = overlay.querySelector('p')!.textContent;
-    overlay.click();
-    return {
-      disposition: await disposition,
-      deleteDisabled: deleteOption.disabled,
-      copy,
-      overlayRemoved: !document.querySelector('.merge-confirm-overlay'),
-    };
+    Object.assign(resolver as any, { options: { sourceBranch: 'main', currentBranch: 'feature', mode: 'diverged', canDeleteSource: false } });
+    const footer = (resolver as any).buildFooter() as HTMLElement;
+    const select = footer.querySelector<HTMLSelectElement>('.merge-source-select')!;
+    return { selected: select.value, deleteDisabled: select.querySelector<HTMLOptionElement>('option[value="delete"]')!.disabled,
+      optionsOpen: footer.querySelector<HTMLDetailsElement>('.merge-options')!.open };
   }));
-  assert.deepEqual(result, {
-    disposition: 'keep',
-    deleteDisabled: true,
-    copy: '병합을 적용했습니다. “main” 브랜치는 기본 브랜치이므로 유지됩니다.',
-    overlayRemoved: true,
-  });
+  assert.deepEqual(result, { selected: 'keep', deleteDisabled: true, optionsOpen: false });
 });
 
 test('resolver desktop controls click, report failures, retry, and fit macOS chrome', async (context) => {
@@ -649,8 +631,8 @@ test('resolver desktop controls click, report failures, retry, and fit macOS chr
       assert.equal(geometry.noHorizontalOverflow, true, `${viewport.width}px resolver overflow`);
       assert.equal(geometry.headingClearsTrafficLights, true, `${viewport.width}px traffic-light overlap`);
       assert.equal(geometry.controlsInside, true, `${viewport.width}px control outside viewport`);
-      assert.deepEqual(geometry.hitTargets, [true, true, true]);
-      await page.click('.merge-close-button');
+      assert.deepEqual(geometry.hitTargets, [true, true]);
+      await page.click('.merge-resolver-header-actions .merge-secondary-button');
       await page.waitForSelector('.merge-resolver-window', { hidden: true });
     }
 
@@ -665,6 +647,7 @@ test('resolver desktop controls click, report failures, retry, and fit macOS chr
       window.confirm = () => true;
     });
     await page.waitForSelector('.merge-resolver-window');
+    await page.click('.merge-options > summary');
     await page.click('.merge-resolver-footer .merge-danger-button');
     await page.waitForSelector('.merge-resolver-window', { hidden: true });
 
@@ -690,10 +673,7 @@ test('resolver desktop controls click, report failures, retry, and fit macOS chr
     await page.click('.merge-resolver-footer .merge-primary-button');
     await page.waitForFunction(() => (window as any).__mergeResolverHarness.events.completeAttempts === 2);
     await page.evaluate(() => (window as any).__mergeResolverHarness.releaseComplete());
-    await page.waitForSelector('.merge-confirm-overlay');
-    assert.equal(await page.$eval('.merge-confirm-dialog h2', (node) => node.textContent), '소스 브랜치');
-    assert.equal(await page.$('.merge-action-status:not(:empty)'), null);
-    await page.click('.merge-confirm-dialog .merge-secondary-button');
+
     await page.waitForSelector('.merge-resolver-window', { hidden: true });
 
     const events = await page.evaluate(() => (window as any).__mergeResolverHarness.events);

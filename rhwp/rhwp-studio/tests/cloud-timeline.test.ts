@@ -100,12 +100,14 @@ test('timeline parser rejects incompatible envelopes', () => {
 
 
 test('restart source survives local thread storage but stays out of transferred timelines', () => {
-  const local = { ...thread(), cloudStartId: 'stable-restart-id', cloudRestartSourceSessionId: 'archived-session' };
+  const local = { ...thread(), cloudStartId: 'stable-restart-id', cloudRestartSourceSessionId: 'archived-session', cloudRestartSourceStartId: 'original-start' };
   const restored = parseChatThread(JSON.parse(JSON.stringify(local)));
   assert.equal(restored?.cloudRestartSourceSessionId, 'archived-session');
+  assert.equal(restored?.cloudRestartSourceStartId, 'original-start');
   assert.equal(restored?.cloudStartId, 'stable-restart-id');
   const portable = exportCloudTimeline(restored!);
   assert.equal(portable.thread.cloudRestartSourceSessionId, undefined);
+  assert.equal(portable.thread.cloudRestartSourceStartId, undefined);
   assert.equal(portable.thread.cloudStartId, 'stable-restart-id');
   assert.equal(local.cloudRestartSourceSessionId, 'archived-session');
 });

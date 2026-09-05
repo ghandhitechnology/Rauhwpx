@@ -1,5 +1,6 @@
 import { createCloudController, type CloudDesktopApi } from '../cloud/desktop-cloud.ts';
-import type { CloudLinkKind, CloudSessionScope, CloudSnapshot, CloudTransferRequest } from '../cloud/types.ts';
+import type { CloudLinkKind, CloudSessionScope, CloudSnapshot, CloudTransferRequest, CloudCheckpointPayload } from '../cloud/types.ts';
+import type { AgentStreamEvent } from '../agent/types.ts';
 import { recordCloudUsage } from '../cloud/usage-history.ts';
 
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -13,10 +14,13 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
   let recoveryGeneration = 0;
   let releaseRefresh: (() => void) | null = null;
   let refreshBlocked = false;
+  let sequence = 0;
+  const checkpoints = new Map<string, CloudCheckpointPayload>();
+  const merges: Array<{ startId: string; checkpoint: CloudCheckpointPayload }> = [];
+  const calls = { merges, downloads: 0, refresh: 0, referenceReads: 0, prepareRestart: 0, reconnect: 0, recreate: 0, stop: 0, display: 0, inputs: 0, transfers: [] as CloudTransferRequest[] };
   let refreshFails = false;
   let restartArchiveAvailable = true;
   let rejectRestartTransfer = false;
-  const calls = { refresh: 0, referenceReads: 0, prepareRestart: 0, reconnect: 0, recreate: 0, stop: 0, display: 0, inputs: 0, transfers: [] as CloudTransferRequest[] };
   const sandbox = { providerId: 'raucloud', sandboxId: 'preview-worker', displayName: 'Raucloud',
     region: 'preview', host: 'preview.invalid', createdAt: new Date().toISOString() };
   const state: CloudSnapshot = {
@@ -66,6 +70,11 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
     });
   }
   function publish() { listener?.({ snapshot: snapshot() }); }
+  function emitAgentEvent(event: AgentStreamEvent) {
+    if (state.session.kind === 'idle') return;
+    listener?.({ sessionId: state.session.sessionId,
+      event: { type: 'agent.event', seq: ++sequence, payload: { type: 'agent', event } } });
+  }
   function setLink(kind: CloudLinkKind) {
     state.link = { kind, error: kind === 'failed' ? 'ECONNRESET from preview fixture' : null,
       attempt: kind === 'ready' ? 0 : 1, canRecreate: true };
@@ -86,6 +95,12 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
       if (refreshFails) throw new Error('Preview connection unavailable');
       return snapshot();
     },
+    async cloudDownloadCheckpoint({ sessionId, operationId }) {
+      calls.downloads++;
+      const checkpoint = checkpoints.get(sessionId);
+      if (!checkpoint || (operationId && checkpoint.operationId !== operationId)) throw new Error('완료된 턴이 없습니다.');
+      return structuredClone(checkpoint);
+    },
     cloudSetTransferIntent: async () => snapshot(),
     async cloudTransfer(request) {
       if (request.document.restartToken && rejectRestartTransfer) throw new Error('Preview restart transfer interrupted.');
@@ -97,7 +112,7 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
         currentActivity: '문서 검토 중', phase: 'waiting', wait: null };
       state.sessions = [state.session];
       scope = { threadId: request.threadId, documentId: request.documentId, selectedSessionId: state.session.sessionId };
-      state.lease = { owner: 'cloud', sessionId: state.session.sessionId, acquiredAt: new Date().toISOString() };
+      state.lease = { owner: 'cloud', sessionId: state.session.sessionId, threadId: request.threadId, acquiredAt: new Date().toISOString() };
       publish();
       return snapshot();
     },
@@ -177,6 +192,30 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
   };
   return {
     controller: createCloudController(api), calls, setLink,
+    emitAgentEvent,
+    finishReply(text: string) {
+      if (!state.timeline) throw new Error('Start a Cloud conversation first');
+      state.timeline.thread.messages.push({ role: 'assistant', text, agent: state.timeline.thread.agent });
+      state.timeline.thread.updatedAt = Date.now();
+      state.timeline.exportedAt = new Date().toISOString();
+      emitAgentEvent({ type: 'text-delta', agent: state.timeline.thread.agent, text });
+      emitAgentEvent({ type: 'turn-end', agent: state.timeline.thread.agent, stopReason: 'completed' });
+      publish();
+    },
+    commitTurn() {
+      const session = state.session;
+      if (session.kind !== 'running') throw new Error('Start a Cloud conversation first');
+      session.turn++;
+      session.phase = 'waiting';
+      const operationId = `preview-turn-${session.turn}`;
+      checkpoints.set(session.sessionId, { sessionId: session.sessionId, documentId: session.documentId,
+        fileName: '사업 제안서.hwpx', kind: 'turn', revision: session.turn, turn: session.turn, operationId,
+        bytes: new Uint8Array([1, 2, 3]), byteLength: 3, sha256: 'a'.repeat(64) });
+      state.sessions = state.sessions.map((item) => item.sessionId === session.sessionId ? session : item);
+      listener?.({ sessionId: session.sessionId,
+        event: { type: 'boundary.committed', payload: { kind: 'turn', operationId } } });
+      publish();
+    },
     getScope: () => scope,
     requireReference(id: string | null) {
       const message = state.timeline?.thread.messages.find((item) => item.role === 'user');

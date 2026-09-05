@@ -1128,12 +1128,10 @@ ipcMain.handle('desktop:native-file-source-path', (event, handleId) => {
 });
 ipcMain.handle('desktop:native-file-validate-save', (event, handleId, identity) => {
   const session = sessionForEvent(event);
-  if (session.cloudLocked) throw new Error('The cloud agent currently owns this document');
   return nativeFiles.validateSave(session.sessionId, handleId, identity, documentLeases);
 });
 ipcMain.handle('desktop:native-file-write', (event, handleId, bytes, identity) => {
   const session = sessionForEvent(event);
-  if (session.cloudLocked) throw new Error('The cloud agent currently owns this document');
   return nativeFiles.write(session.sessionId, handleId, bytes, identity, documentLeases);
 });
 ipcMain.handle('desktop:native-file-is-same', (event, firstHandleId, secondHandleId) => {
@@ -1424,7 +1422,9 @@ ipcMain.handle('cloud:download-checkpoint', async (event, payload) => {
   if (operationId !== null && !/^[A-Za-z0-9._:-]{1,160}$/.test(operationId)) {
     throw new Error('Invalid cloud checkpoint operation id');
   }
-  return requireCloudCoordinator().downloadCheckpoint({ sessionId, operationId });
+  const kind = payload?.kind ?? null;
+  if (kind !== null && kind !== 'turn') throw new Error('Invalid cloud checkpoint kind');
+  return requireCloudCoordinator().downloadCheckpoint({ sessionId, operationId, ...(kind ? { kind } : {}) });
 });
 ipcMain.handle('cloud:publish-checkpoint', async (event, payload) => {
   const session = sessionForEvent(event);

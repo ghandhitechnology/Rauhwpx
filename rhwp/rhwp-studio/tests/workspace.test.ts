@@ -153,6 +153,30 @@ function snapshot(session: CloudSessionState, cloudLease = false): CloudSnapshot
   };
 }
 
+test('a new local conversation can run beside the cloud owner of the same document', () => {
+  const running = sessions.find((session) => session.kind === 'running')!;
+  const state = snapshot(running, true);
+  const localScope = { threadId: 'parallel-local-thread', documentId: baseSession.documentId };
+  assert.deepEqual(deriveComposerTarget('local', state, null, null, localScope), { kind: 'local-ready' });
+  assert.equal(deriveComposerTarget('local', state, null, null, baseSession).kind, 'local-blocked');
+  assert.equal(state.lease.owner, 'cloud');
+  assert.equal(state.session, running);
+  assert.equal(deriveComposerTarget('local', state, null, 'authority-transition', localScope).kind, 'workspace-blocked');
+});
+
+test('local conversation stays usable when the cloud thread is hidden or reconnecting', () => {
+  const state = snapshot({ kind: 'idle' }, true);
+  state.lease = { owner: 'cloud', sessionId: baseSession.sessionId, threadId: baseSession.threadId,
+    acquiredAt: '2026-08-30T00:00:00.000Z' };
+  const localScope = { threadId: 'parallel-local-thread', documentId: baseSession.documentId };
+  for (const kind of ['ready', 'reconnecting', 'failed', 'recreating'] as const) {
+    state.link = { kind, error: null, attempt: 0, canRecreate: true };
+    assert.deepEqual(deriveComposerTarget('local', state, null, null, localScope), { kind: 'local-ready' });
+  }
+  delete state.lease.threadId;
+  assert.equal(deriveComposerTarget('local', state, null, null, localScope).kind, 'local-blocked');
+});
+
 test('cloud workspace switch stays hidden for logged-out documents without a cloud session', () => {
   const scope = { threadId: baseSession.threadId, documentId: baseSession.documentId };
   const loggedOut = {

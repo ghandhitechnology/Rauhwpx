@@ -832,19 +832,21 @@ export class CloudCoordinator extends EventEmitter {
         ...(this.#raucloudStatus ? { raucloud: this.#raucloudStatus } : {}),
       },
       lease: scopedLeaseRecord
-        ? { owner: 'cloud', sessionId: scopedLeaseRecord.cloudSessionId ?? scopedLeaseRecord.id, acquiredAt: scopedLeaseRecord.createdAt }
+        ? { owner: 'cloud', sessionId: scopedLeaseRecord.cloudSessionId ?? scopedLeaseRecord.id, threadId: scopedLeaseRecord.threadId, acquiredAt: scopedLeaseRecord.createdAt }
         : scopedLeaseRemote
           ? {
               owner: 'cloud',
               sessionId: scopedLeaseRemote.id ?? scopedLeaseRemote.sessionId,
+              threadId: scopedLeaseRemote.clientContext?.threadId,
               acquiredAt: asIso(scopedLeaseRemote.startedAt, now),
             }
           : unscopedLeaseRecord
-            ? { owner: 'cloud', sessionId: unscopedLeaseRecord.cloudSessionId ?? unscopedLeaseRecord.id, acquiredAt: unscopedLeaseRecord.createdAt }
+            ? { owner: 'cloud', sessionId: unscopedLeaseRecord.cloudSessionId ?? unscopedLeaseRecord.id, threadId: unscopedLeaseRecord.threadId, acquiredAt: unscopedLeaseRecord.createdAt }
             : unscopedLeaseRemote
               ? {
                   owner: 'cloud',
                   sessionId: unscopedLeaseRemote.id ?? unscopedLeaseRemote.sessionId,
+                  threadId: unscopedLeaseRemote.clientContext?.threadId,
                   acquiredAt: asIso(unscopedLeaseRemote.startedAt, now),
                 }
               : { owner: 'local' },
@@ -2540,9 +2542,9 @@ export class CloudCoordinator extends EventEmitter {
     return this.#withProfileOperation((profileEpoch) => this.#downloadCheckpoint(input, profileEpoch));
   }
 
-  async #downloadCheckpoint({ sessionId, operationId = null }, profileEpoch) {
+  async #downloadCheckpoint({ sessionId, operationId = null, kind = null }, profileEpoch) {
     const [checkpoint, handoff] = await Promise.all([
-      this.#client.downloadCheckpoint(sessionId, { operationId }),
+      this.#client.downloadCheckpoint(sessionId, { operationId, ...(kind ? { kind } : {}) }),
       this.#handoffForSession(sessionId, profileEpoch),
     ]);
     this.#assertProfileEpoch(profileEpoch);
@@ -3494,7 +3496,16 @@ export class CloudCoordinator extends EventEmitter {
           if (handoffId) {
             const pending = (await this.#store.get(handoffId))?.pendingOriginPublications ?? [];
             for (const operationId of pending) {
-              await this.publishCheckpoint({ sessionId, operationId });
+              // A worker can announce completed work, but local edits now live on
+              // an independent branch. Archive it for user-initiated merge only.
+              const checkpoint = await this.#downloadCheckpoint({ sessionId, operationId }, profileEpoch);
+              const archivePath = path.join(this.#recoveryDir, 'merge',
+                String(handoffId).replace(/[^A-Za-z0-9_-]/g, '_'),
+                `revision-${checkpoint.revision}${path.extname(checkpoint.fileName) || '.hwpx'}`);
+              await writeVerifiedRecoveryFile({
+                filePath: archivePath, bytes: checkpoint.bytes, expectedDigest: checkpoint.sha256,
+              });
+              this.#assertProfileEpoch(profileEpoch);
               await this.#store.patch(handoffId, (latest) => ({
                 pendingOriginPublications: (latest.pendingOriginPublications ?? []).filter((id) => id !== operationId),
               }));

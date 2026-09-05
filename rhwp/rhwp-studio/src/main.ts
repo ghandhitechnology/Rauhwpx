@@ -144,6 +144,7 @@ import { agentLeaseBlocksUserEditing } from './agent/editing-lease.ts';
 import type { EmbedRendererRuntimeRequestV1 } from '@/embed/rpc-router';
 import type {
   CloudCheckpointPayload,
+  CloudDocumentPayload,
   CloudDownloadResult,
   CloudResultResolution,
   CloudTakeoverPayload,
@@ -239,7 +240,6 @@ let editMode: EditorEditMode = 'normal';
 let documentReadOnly = new URLSearchParams(window.location.search).get('templatePreview') === '1';
 let agentEditingLease: AgentEditingLease = { active: false, agent: 'codex' };
 let previewDocumentReadOnly = documentReadOnly;
-let cloudDocumentLeaseSessionId: string | null = null;
 let cloudAuthorityTransitionCount = 0;
 let rendererRuntimeRequest: EmbedRendererRuntimeRequestV1 | null = null;
 let renderBackendFallbackReason: RenderBackendFallbackReason | null = null;
@@ -324,8 +324,7 @@ function setDocumentReadOnly(readOnly: boolean): void {
   syncDocumentReadOnly();
 }
 
-function setCloudDocumentLease(cloudOwned: boolean, sessionId: string | null): void {
-  cloudDocumentLeaseSessionId = cloudOwned ? sessionId : null;
+function setCloudDocumentLease(cloudOwned: boolean): void {
   document.documentElement.dataset.cloudLease = cloudOwned ? 'cloud' : 'local';
   syncDocumentReadOnly();
 }
@@ -348,7 +347,6 @@ function beginCloudAuthorityTransition(): { release(): void } {
 
 function syncDocumentReadOnly(): void {
   documentReadOnly = previewDocumentReadOnly
-    || cloudDocumentLeaseSessionId !== null
     || cloudAuthorityTransitionCount > 0;
   document.documentElement.dataset.documentReadOnly = documentReadOnly ? 'true' : 'false';
   inputHandler?.setReadOnly(documentReadOnly);
@@ -383,15 +381,27 @@ function bytesToSha256(bytes: Uint8Array): Promise<string> {
     [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join(''));
 }
 
-async function prepareCloudTransferDocument() {
+async function prepareCloudTransferDocument(startId: string, restart?: { document: CloudDocumentPayload; sourceStartId?: string }) {
   if (!wasm.hasLoadedDocument()) return null;
   if (wasm.isNewDocument) return null;
+  if (restart) {
+    // Older sessions may have no local history. They can still recover and
+    // download copies, but must not invent an ancestor from current local edits.
+    if (!restart.sourceStartId) return restart.document;
+    if (!versionControllerRef) throw new Error('문서 버전 기록을 준비하는 중입니다.');
+    const bytes = await versionControllerRef.prepareCloudBranch(
+      startId, restart.document.bytes, restart.document.fileName, restart.sourceStartId,
+    );
+    return { ...restart.document, bytes, sha256: await bytesToSha256(bytes) };
+  }
   const sourceFormat = wasm.getSourceFormat();
   if (sourceFormat !== 'hwp' && sourceFormat !== 'hwpx' && sourceFormat !== 'hml') {
     throw new Error(`클라우드에서 지원하지 않는 문서 형식입니다: ${sourceFormat}`);
   }
   const format = sourceFormat;
-  const bytes = exportDocumentForFormat(wasm, format);
+  let bytes = exportDocumentForFormat(wasm, format);
+  if (!versionControllerRef) throw new Error('문서 버전 기록을 준비하는 중입니다.');
+  bytes = await versionControllerRef.prepareCloudBranch(startId, bytes, wasm.fileName);
   // The Cloud snapshot may include unsaved edits. Keep the current saved origin
   // digest separate so later publication can still detect external file changes.
   const originSha256 = await captureCloudOriginSha256({
@@ -1197,6 +1207,7 @@ async function initialize(): Promise<void> {
         getInputHandler: () => inputHandler,
         getDocumentId: () => activeDocumentId,
         agentBridge,
+        autoEnable: () => !cloudRuntime && userSettings.getUseHancomGit(),
       });
       versionControllerRef = versionController;
       // The outer client owns the conversation. A worker needs the bridge and editor,
@@ -1237,6 +1248,7 @@ async function initialize(): Promise<void> {
           setCloudDocumentLease,
           applyCloudResult,
           publishCloudCheckpoint,
+          mergeCloudCheckpoint: (startId, checkpoint) => versionController.mergeCloudCheckpoint(startId, checkpoint),
           applyCloudTakeover,
         });
         disposeAgentSidebar = () => {
@@ -1815,6 +1827,12 @@ async function initializeDocument(
 
     // #2527: 자동 보정을 하지 않으므로 로드 직후 문서는 항상 clean.
     documentState.markClean('document-initialized');
+    try {
+      await versionControllerRef?.documentLoaded();
+    } catch (error) {
+      console.warn('[Hancom Git] Could not initialize document history', error);
+      showToast({ message: '문서는 열렸지만 버전 기록을 준비하지 못했습니다.', durationMs: 4500 });
+    }
   } catch (error) {
     console.error('[initDoc] 오류:', error);
     if (window.innerWidth < 768) alert(`초기화 오류: ${error}`);

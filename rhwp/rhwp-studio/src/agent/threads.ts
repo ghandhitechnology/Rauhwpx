@@ -161,6 +161,7 @@ export interface ChatThread {
   cloudSessionId?: string;
   cloudStartId?: string;
   cloudRestartSourceSessionId?: string;
+  cloudRestartSourceStartId?: string;
   firstMessageDelivery?: 'starting' | 'accepted' | 'failed';
   messages: ThreadMessage[];
 }
@@ -664,6 +665,9 @@ function normalizeStoredThread(thread: StoredChatThread): ChatThread {
       : {}),
     ...(typeof thread.cloudRestartSourceSessionId === 'string' && thread.cloudRestartSourceSessionId
       ? { cloudRestartSourceSessionId: thread.cloudRestartSourceSessionId }
+      : {}),
+    ...(typeof thread.cloudRestartSourceStartId === 'string' && thread.cloudRestartSourceStartId
+      ? { cloudRestartSourceStartId: thread.cloudRestartSourceStartId }
       : {}),
     ...(typeof thread.cloudStartId === 'string' && thread.cloudStartId
       ? { cloudStartId: thread.cloudStartId }

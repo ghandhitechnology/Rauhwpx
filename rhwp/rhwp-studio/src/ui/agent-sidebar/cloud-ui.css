@@ -538,3 +538,7 @@
     display: none;
   }
 }
+
+.ag-cloud-merge-button { border: 1px solid var(--ag-border); border-radius: 7px; padding: 6px 10px; background: var(--ag-accent, #2563eb); color: white; font: inherit; font-size: 12px; cursor: pointer; }
+.ag-cloud-merge-button[hidden] { display: none; }
+.ag-cloud-merge-button:disabled { opacity: .55; cursor: default; }

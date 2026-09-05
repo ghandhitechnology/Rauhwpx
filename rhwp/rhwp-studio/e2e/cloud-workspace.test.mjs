@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
@@ -78,6 +79,7 @@ function installDesktopCloudMock() {
   let transferFailures = 0;
   let idle = false;
   let transferredTimeline = null;
+  let mergeCheckpoint = null;
   const selections = new Map();
   let configurationFailure = false;
   let heldConfiguration = null;
@@ -208,6 +210,11 @@ function installDesktopCloudMock() {
       cloudListener?.({ snapshot: snapshot() });
     },
     getEditorScope() { return structuredClone(editorScope); },
+    completeTurn(checkpoint) {
+      mergeCheckpoint = checkpoint;
+      cloudListener?.({ sessionId: checkpoint.sessionId, event: { type: 'boundary.committed',
+        payload: { kind: 'turn', operationId: checkpoint.operationId } } });
+    },
     activateLease() {
       leaseOwned = true;
       cloudListener?.({ snapshot: snapshot() });
@@ -299,6 +306,7 @@ function installDesktopCloudMock() {
     },
     async cloudDownloadCheckpoint(payload) {
       record('cloudDownloadCheckpoint', payload);
+      if (mergeCheckpoint && payload.sessionId === mergeCheckpoint.sessionId) return structuredClone(mergeCheckpoint);
       const bytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
       return {
         sessionId: activeSessionId,
@@ -532,30 +540,13 @@ try {
     .filter((call) => call.method === 'cloudPublishCheckpoint').length), 0);
   await page.$eval('.ag-workspace-cloud-btn', (node) => node.click());
   await page.waitForFunction(() => !document.querySelector('#ag-cloud-panel')?.hidden);
-  await page.evaluate(() => {
-    window.__cloudWorkspaceHarness.failNextPublication();
-    [...document.querySelectorAll('#ag-cloud-panel button')].find((button) => button.textContent === '원본에 반영').click();
-  });
-  await page.waitForFunction(() => window.__cloudWorkspaceHarness.calls
-    .filter((call) => call.method === 'cloudPublishCheckpoint').length === 1);
-  await page.waitForFunction(() => [...document.querySelectorAll('#ag-cloud-panel button')]
-    .some((button) => button.textContent === '원본에 반영' && !button.disabled));
-  await delay(100);
-  assert.equal(await page.evaluate(() => window.__cloudWorkspaceHarness.calls
-    .filter((call) => call.method === 'cloudPublishCheckpoint').length), 1, 'a failed write must not retry itself');
+  // A session predating local branch capture must never replace the origin.
   await page.evaluate(() => [...document.querySelectorAll('#ag-cloud-panel button')]
-    .find((button) => button.textContent === '원본에 반영').click());
-  await page.waitForFunction(() => window.__cloudWorkspaceHarness.calls
-    .filter((call) => call.method === 'cloudPublishCheckpoint').length === 2);
-  await page.waitForFunction(() => document.body.textContent.includes('Cloud 버전을 원본에 반영했습니다.'));
-  await page.waitForFunction(() => [...document.querySelectorAll('#ag-cloud-panel button')]
-    .some((button) => button.textContent === '원본에 반영' && !button.disabled));
-  assert.equal(await page.evaluate(() => document.querySelector('#cloud-workspace').inert), false);
+    .find((button) => button.textContent === 'Cloud 변경 병합').click());
+  await page.waitForFunction(() => document.body.textContent.includes('Cloud 시작 대화를 불러온 뒤'));
   assert.equal(await page.evaluate(() => window.__cloudWorkspaceHarness.calls
-    .filter((call) => call.method === 'cloudCloseDisplay' || call.method === 'cloudCommand').length), 0);
-  if (process.env.CLOUD_PUBLICATION_SCREENSHOT) {
-    await page.screenshot({ path: process.env.CLOUD_PUBLICATION_SCREENSHOT, fullPage: true });
-  }
+    .filter((call) => call.method === 'cloudPublishCheckpoint').length), 0);
+  assert.equal(await page.evaluate(() => window.__inputHandler.isReadOnly()), false);
   await page.$eval('.ag-cloud-panel-close', (node) => node.click());
 
   await page.select('.ag-cloud-session-select', 'session-cloud-b');
@@ -806,7 +797,13 @@ try {
   await page.evaluate(() => window.__cloudWorkspaceHarness.failNextTransfer());
   await page.$eval('.ag-cloud-handoff', (node) => { node.click(); node.click(); });
   await page.waitForFunction(() => window.__cloudWorkspaceHarness.calls
-    .filter((call) => call.method === 'cloudTransfer').length === 1);
+    .filter((call) => call.method === 'cloudTransfer').length === 1, { timeout: 10_000 }).catch(async (error) => {
+      throw new Error(`Cloud handoff failed: ${JSON.stringify(await page.evaluate(() => ({
+        messages: document.querySelector('.ag-messages')?.textContent,
+        version: window.__versionController.getState(),
+        dirty: window.__documentState.isDirty(),
+      })))}`, { cause: error });
+    });
   await page.waitForSelector('.ag-cloud-start-retry');
   await page.waitForFunction(() => document.documentElement.dataset.documentReadOnly === 'false');
   assert.deepEqual(await page.evaluate(() => ({
@@ -846,7 +843,7 @@ try {
   assert.notEqual(handoff.initialMessage.id, 'local-history-1');
   assert.equal(handoff.draft, '');
   assert.equal(handoff.text, beforeHandoff);
-  assert.equal(handoff.readOnly, 'true');
+  assert.equal(handoff.readOnly, 'false');
   assert.equal(handoff.dirty, true, 'handoff must not mark unsaved edits as saved');
   assert.deepEqual(await page.evaluate(async () => {
     await window.__autosaveManager.flushNow('cloud-owned-regression');
@@ -899,6 +896,114 @@ try {
   assert.ok(followups.every((request) => request.sessionId === 'session-editor-a'));
   assert.equal(await page.evaluate(() => Array.from(window.__wasm.exportHwp()).join(",")), beforeHandoff);
   console.log('PASS existing conversation handoff, double-click protection, read-only question workflow, multi-turn cloud messages, and unchanged local document');
+  // Edit through the real local input while the Cloud conversation remains selected.
+  await page.click('[data-document-view="local"]');
+  await page.evaluate(() => window.__inputHandler.moveCursorTo({ sectionIndex: 0, paragraphIndex: 0, charOffset: 0 }));
+  await page.keyboard.type('LOCAL_DURING_CLOUD ');
+  await page.waitForFunction(async () => {
+    const { captureVersionSnapshot } = await import('/src/versioning/snapshot.ts');
+    return captureVersionSnapshot(window.__wasm).compareSnapshot.paragraphs.some((p) => p.text.includes('LOCAL_DURING_CLOUD'));
+  });
+  assert.equal(await page.$eval('.ag-composer-mode-switch', (node) => node.dataset.mode), 'cloud');
+  const savedHead = await page.evaluate(() => window.__versionController.getState().branches.find((branch) => branch.isActive).headId);
+  await page.evaluate(() => {
+    window.__wasm.currentFileHandle.createWritable = async () => {
+      let content;
+      return {
+        write: async (bytes) => { content = bytes; },
+        close: async () => {
+          window.__handoffOrigin.file = new File([content], 'form-002.hwpx');
+          window.__handoffOrigin.writes++;
+        },
+        abort: async () => {},
+      };
+    };
+  });
+  await page.keyboard.down('Control');
+  await page.keyboard.press('s');
+  await page.keyboard.up('Control');
+  await page.waitForFunction(() => window.__handoffOrigin.writes === 1 && !window.__documentState.isDirty());
+  await page.evaluate(() => window.__versionController.whenIdle());
+  assert.deepEqual(await page.evaluate(() => {
+    const state = window.__versionController.getState();
+    return { dirty: state.dirty, head: state.branches.find((branch) => branch.isActive).headId };
+  }), { dirty: true, head: savedHead });
+
+  await page.evaluate(async () => {
+    const { WasmBridge } = await import('/src/core/wasm-bridge.ts');
+    const handoff = window.__cloudWorkspaceHarness.calls.find((call) => call.method === 'cloudTransfer').payload;
+    const remote = new WasmBridge();
+    await remote.initialize();
+    remote.loadDocument(handoff.document.bytes, handoff.document.fileName);
+    remote.insertText(0, 0, remote.getParagraphLength(0, 0), ' CLOUD_FINISHED');
+    const bytes = remote.exportHwpx();
+    remote.releaseDocument();
+    const sha256 = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes.slice().buffer))]
+      .map((byte) => byte.toString(16).padStart(2, '0')).join('');
+    window.__cloudWorkspaceHarness.completeTurn({ bytes, byteLength: bytes.length, sha256,
+      fileName: handoff.document.fileName, sessionId: 'session-editor-a', documentId: handoff.documentId,
+      kind: 'turn', revision: 2, turn: 2, operationId: 'completed-e2e-turn-2' });
+  });
+  await page.waitForFunction(() => document.querySelector('.ag-cloud-merge-button')?.dataset.revision === '2');
+  const downloads = path.join(tempDir, 'downloads');
+  fs.mkdirSync(downloads);
+  const downloadClient = await browser.target().createCDPSession();
+  await downloadClient.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: downloads, eventsEnabled: true });
+  const downloadComplete = new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('Cloud copy download timed out')), 10_000);
+    downloadClient.on('Browser.downloadProgress', (event) => {
+      if (event.state === 'completed') { clearTimeout(timeout); resolve(); }
+      if (event.state === 'canceled') { clearTimeout(timeout); reject(new Error('Cloud copy download canceled')); }
+    });
+  });
+  await page.click('.ag-cloud-btn');
+  await page.click('.ag-cloud-checkpoint-copy');
+  await downloadComplete;
+  await downloadClient.detach();
+  const copied = fs.readdirSync(downloads);
+  assert.deepEqual(copied, ['form-002-cloud-2.hwpx']);
+  assert.equal(createHash('sha256').update(fs.readFileSync(path.join(downloads, copied[0]))).digest('hex'),
+    await page.evaluate(async () => (await window.rhwpDesktop.cloudDownloadCheckpoint({ sessionId: 'session-editor-a', operationId: 'completed-e2e-turn-2' })).sha256));
+  assert.equal(await page.evaluate(() => window.__handoffOrigin.writes), 1);
+  await page.click('.ag-cloud-panel-close');
+  // Dismiss the expected earlier transfer-failure toast before inspecting review controls.
+  await page.$$eval('#rhwp-toast-container button[aria-label="닫기"]', (buttons) => buttons.forEach((button) => button.click()));
+  await page.click('.ag-cloud-merge-button');
+  await page.waitForSelector('.version-merge-preparation');
+  await page.click('.version-merge-preparation input[value="commit"]');
+  await page.click('.version-merge-preparation button[type="submit"]');
+  await page.waitForSelector('.merge-resolver-window');
+  if (process.env.CLOUD_MERGE_SCREENSHOT) await page.screenshot({ path: process.env.CLOUD_MERGE_SCREENSHOT, fullPage: true });
+  // The shared unsaved handoff and table layout can both require review.
+  while (await page.$('.merge-conflict-item:not(.is-resolved)')) {
+    await page.click('.merge-conflict-item:not(.is-resolved)');
+    await page.evaluate(() => {
+      const choices = [...document.querySelectorAll('.merge-resolution-button')];
+      const both = choices.find((button) => button.textContent.startsWith('둘 다 유지: 현재 변경 먼저'));
+      (both ?? choices.find((button) => button.textContent.startsWith('현재 변경 사용'))).click();
+    });
+  }
+  await page.waitForFunction(() => !document.querySelector('.merge-resolver-footer .merge-primary-button').disabled, { timeout: 5000 }).catch(async (error) => {
+    throw new Error(`Merge review: ${JSON.stringify(await page.evaluate(() => ({
+      status: document.querySelector('.merge-validation-label')?.textContent,
+      editor: document.querySelector('.merge-conflict-editor')?.textContent,
+      conflicts: document.querySelector('.merge-conflict-list')?.textContent,
+    })))}`, { cause: error });
+  });
+  if (process.env.CLOUD_MERGE_SCREENSHOT) await page.screenshot({ path: process.env.CLOUD_MERGE_SCREENSHOT, fullPage: true });
+  await page.click('.merge-resolver-footer .merge-primary-button');
+  await page.waitForSelector('.merge-resolver-window', { hidden: true });
+  const mergedText = await page.evaluate(async () => {
+    const { captureVersionSnapshot } = await import('/src/versioning/snapshot.ts');
+    return captureVersionSnapshot(window.__wasm).compareSnapshot.paragraphs.map((p) => p.text).join('\n');
+  });
+  assert.match(mergedText, /LOCAL_DURING_CLOUD/);
+  assert.match(mergedText, /CLOUD_FINISHED/);
+  assert.match(mergedText, /UNSAVED_CLOUD_HANDOFF/);
+  assert.equal(await page.evaluate(() => window.__handoffOrigin.writes), 1);
+  assert.equal(await page.evaluate(() => window.__cloudWorkspaceHarness.calls.filter((call) => call.method === 'cloudPublishCheckpoint').length), 0);
+  console.log('PASS live local typing during Cloud execution and completed-turn branch merge preserves both edits');
+  const localBeforeWorker = await page.evaluate(() => Array.from(window.__wasm.exportHwp()).join(','));
   // An authenticated worker exposes the editor and bridge without a second chat UI.
   const workerPage = await browser.newPage();
   const bootstrap = 'cloud-workspace-bootstrap-'.padEnd(43, 'x');
@@ -1068,7 +1173,7 @@ try {
     }
     assert.equal(rolledBack.includes(agentMarker), false, 'failed/interrupted agent insertion is removed');
   }
-  assert.equal(await page.evaluate(() => Array.from(window.__wasm.exportHwp()).join(',')), beforeHandoff,
+  assert.equal(await page.evaluate(() => Array.from(window.__wasm.exportHwp()).join(',')), localBeforeWorker,
     'concurrent edits stay in the worker document and leave the original local document unchanged');
   console.log('PASS active worker turn accepts Korean input, rejects stale agent writes, and preserves both edits through commit/export');
   if (process.env.CLOUD_WORKER_SCREENSHOT) {

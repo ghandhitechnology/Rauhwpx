@@ -191,15 +191,15 @@ test('한컴용 Git 설정은 기본으로 꺼져 있고 rhwp-settings에 저장
   const changes: boolean[] = [];
   const unsubscribe = userSettings.subscribeUseHancomGit((enabled) => changes.push(enabled));
   try {
-    assert.equal(userSettings.getUseHancomGit(), false);
-    userSettings.setUseHancomGit(true);
     assert.equal(userSettings.getUseHancomGit(), true);
-    assert.deepEqual(changes, [true]);
+    userSettings.setUseHancomGit(false);
+    assert.equal(userSettings.getUseHancomGit(), false);
+    assert.deepEqual(changes, [false]);
     const stored = JSON.parse(store.get('rhwp-settings') ?? '{}');
-    assert.equal(stored.versionControl.useHancomGit, true);
+    assert.equal(stored.versionControl.useHancomGit, false);
   } finally {
     unsubscribe();
-    userSettings.setUseHancomGit(false);
+    userSettings.setUseHancomGit(true);
     (globalThis as { localStorage?: Storage }).localStorage = originalStorage;
   }
 });

@@ -1403,8 +1403,11 @@ export class CloudClient {
   }
 
   async downloadCheckpoint(sessionId, options = {}) {
-    const { operationId = null, ...requestOptions } = options;
-    const query = operationId ? `?operationId=${encodeURIComponent(operationId)}` : '';
+    const { operationId = null, kind = null, ...requestOptions } = options;
+    const params = new URLSearchParams();
+    if (operationId) params.set('operationId', operationId);
+    if (kind) params.set('kind', kind);
+    const query = params.size ? `?${params}` : '';
     const response = await this.#rawRequest(`/v1/sessions/${encodeURIComponent(sessionId)}/checkpoint${query}`, {
       ...requestOptions,
       maxResponseBytes: MAX_RESULT_BYTES,

@@ -219,33 +219,37 @@ html.desktop-mac .merge-resolver-header button {
 .merge-confirm-dialog .merge-source-select { width: 100%; }
 .merge-confirm-actions { justify-content: flex-end; margin-top: 18px; }
 
-@media (max-width: 1180px) {
-  .merge-resolver-body { grid-template-columns: minmax(220px, 26vw) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(220px, 38vh); }
-  .merge-conflict-editor { grid-column: 1 / -1; border-top: 1px solid var(--merge-border); border-left: 0; }
-  .merge-preview-tabs { display: flex; }
-  .merge-preview-grid { display: block; }
-  .merge-preview-pane { display: none; height: 100%; border: 0; }
-  .merge-preview-pane.is-active { display: grid; }
-  .merge-resolver-footer { grid-template-columns: 1fr auto; }
-  .merge-completion-meta { grid-column: 1 / -1; grid-row: 1; }
-}
-
+.merge-resolver-body { overflow: hidden; grid-template-columns: minmax(260px, 310px) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+.merge-resolution-sidebar { display: grid; grid-template-rows: minmax(120px, 38%) minmax(0, 1fr); min-height: 0; overflow: hidden; border-right: 1px solid var(--merge-border); }
+.merge-conflict-editor { border-left: 0; border-top: 1px solid var(--merge-border); }
+.merge-resolver-window.is-clean .merge-resolution-sidebar { display: none; }
+.merge-resolver-window.is-clean .merge-resolver-body { grid-template-columns: minmax(0, 1fr); }
+.merge-preview-tabs { display: flex; }
+.merge-preview-grid { display: block; }
+.merge-preview-pane { display: none; height: 100%; border: 0; }
+.merge-preview-pane.is-active { display: grid; }
+.merge-resolver-header, .merge-resolver-footer { min-height: 44px; padding: 8px 14px; gap: 12px; }
+.merge-resolver-heading h1 { font-size: 16px; }
+.merge-resolver-footer { grid-template-columns: minmax(160px, 1fr) auto auto auto; }
+.merge-options { position: relative; }
+.merge-options > summary, .merge-value-details > summary, .merge-manual-details > summary, .merge-conflict-tools > summary { cursor: pointer; padding: 7px 0; color: var(--merge-muted); }
+.merge-completion-meta { position: absolute; bottom: calc(100% + 14px); right: 0; width: min(310px, calc(100vw - 40px)); display: grid; gap: 12px; padding: 16px; border: 1px solid var(--merge-border); border-radius: 8px; background: var(--merge-surface); box-shadow: 0 8px 30px #0003; z-index: 5; }
+.merge-title-input { min-width: 0; width: 100%; box-sizing: border-box; }
+.merge-value-details, .merge-manual-details { margin-top: 12px; }
+.merge-validation-label { overflow-wrap: anywhere; }
 @media (max-width: 760px) {
-  .merge-resolver-header { padding: 8px; }
-  .merge-resolver-body {
-    grid-template-columns: 1fr;
-    grid-template-rows: minmax(110px, 28%) minmax(160px, 1fr) minmax(130px, 34%);
-    overflow: hidden;
-  }
-  .merge-conflict-sidebar { border-right: 0; border-bottom: 1px solid var(--merge-border); }
-  .merge-conflict-editor { grid-column: auto; }
-  .merge-resolver-footer { max-height: 34vh; overflow: auto; padding: 8px; }
-  .merge-completion-meta { display: grid; }
-  .merge-title-input { min-width: 0; }
-  .merge-validation-status { grid-template-columns: 70px minmax(0, 1fr); }
-  .merge-validation-status progress { width: 70px; }
+  .merge-resolver-body { grid-template-columns: 1fr; grid-template-rows: minmax(180px, 43%) minmax(0, 1fr); }
+  .merge-resolution-sidebar { grid-template-columns: minmax(125px, 38%) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
+  .merge-conflict-editor { border-top: 0; border-left: 1px solid var(--merge-border); }
+  .merge-resolver-window.is-clean .merge-resolver-body { grid-template-rows: minmax(0, 1fr); }
+  .merge-resolver-footer { grid-template-columns: 1fr auto auto; gap: 8px; }
+  .merge-validation-status { grid-column: 1 / -1; }
+  .merge-history-actions { margin-right: auto; }
+  .merge-resolver-heading h1 { font-size: 14px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .merge-resolver-window * { scroll-behavior: auto !important; transition: none !important; }
 }
+
+.merge-choice-preview { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; margin-top: 4px; color: var(--merge-muted); font-size: 12px; white-space: normal; overflow-wrap: anywhere; }

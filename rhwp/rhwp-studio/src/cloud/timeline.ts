@@ -19,7 +19,7 @@ function cloneMessages(messages: readonly ThreadMessage[]): ThreadMessage[] {
 }
 
 export function exportCloudTimeline(thread: ChatThread, exportedAt = new Date().toISOString()): PortableCloudTimelineV1 {
-  const { cloudRestartSourceSessionId: _restartSource, ...portableThread } = thread;
+  const { cloudRestartSourceSessionId: _restartSource, cloudRestartSourceStartId: _restartStart, ...portableThread } = thread;
   return {
     schema: CLOUD_TIMELINE_SCHEMA,
     version: CLOUD_TIMELINE_VERSION,
@@ -71,7 +71,7 @@ export function importCloudTimeline(
 ): ChatThread | null {
   const timeline = parseCloudTimeline(value);
   if (!timeline) return null;
-  const { cloudRestartSourceSessionId: _restartSource, ...portableThread } = timeline.thread;
+  const { cloudRestartSourceSessionId: _restartSource, cloudRestartSourceStartId: _restartStart, ...portableThread } = timeline.thread;
   return {
     ...portableThread,
     id: local.id,

@@ -257,13 +257,15 @@ fn merged_order(
     let b = f(base);
     let c = f(cur);
     let i = f(inc);
-    if c == i {
+    // Conflict resolution may retain a node absent from one side. A shortcut
+    // can use that side's order only when it includes every retained node.
+    if c == i && c.len() == alive.len() {
         return Ok(c);
     }
-    if c == b {
+    if c == b && i.len() == alive.len() {
         return Ok(i);
     }
-    if i == b {
+    if i == b && c.len() == alive.len() {
         return Ok(c);
     }
     let nodes = alive.iter().cloned().collect::<Vec<_>>();
@@ -282,7 +284,7 @@ fn merged_order(
                 (_, Some(x), Some(y)) if x == y => Some(x),
                 (Some(x), Some(y), Some(z)) if y == x => Some(z),
                 (Some(x), Some(y), Some(z)) if z == x => Some(y),
-                (None, Some(x), None) | (None, None, Some(x)) => Some(x),
+                (_, Some(x), None) | (_, None, Some(x)) => Some(x),
                 (None, Some(_), Some(_)) => return Err(()),
                 _ => None,
             };
@@ -8654,6 +8656,33 @@ mod tests {
         );
         assert_eq!(a.result["x"][0], json!({"id":"a","x":1,"y":2}));
         assert_eq!(a.conflicts[0].reason, MergeConflictReason::DeleteVersusEdit)
+    }
+    #[test]
+    fn paragraph_delete_edit_resolution_retains_incoming_and_local_insertions() {
+        let paragraph = |id: u32, text: &str| {
+            let mut p = Paragraph::default();
+            p.text = text.into();
+            p.raw_header_extra.resize(10, 0);
+            p.raw_header_extra[6..10].copy_from_slice(&id.to_le_bytes());
+            p
+        };
+        let base = vec![paragraph(1, "original"), paragraph(3, "anchor")];
+        let current = vec![paragraph(2, "local insertion"), paragraph(3, "anchor")];
+        let incoming = vec![paragraph(1, "cloud edit"), paragraph(3, "anchor")];
+        let path = vec!["paragraphs".into()];
+        let mut analysis = Ctx::new(MergeOptions::default());
+        merge_paras(&path, &base, &current, &incoming, None, &mut analysis).unwrap();
+        assert_eq!(analysis.conflicts.len(), 1);
+        assert_eq!(analysis.conflicts[0].reason, MergeConflictReason::DeleteVersusEdit);
+        let resolutions = BTreeMap::from([
+            (analysis.conflicts[0].id.clone(), MergeResolution::Incoming),
+        ]);
+        let mut materialized = Ctx::new(MergeOptions::default());
+        let result = merge_paras(&path, &base, &current, &incoming, Some(&resolutions), &mut materialized).unwrap();
+        assert_eq!(
+            result.iter().map(|p| p.text.as_str()).collect::<Vec<_>>(),
+            vec!["local insertion", "cloud edit", "anchor"],
+        );
     }
     #[test]
     fn incompatible_moves_preserve_clean_node_edits_during_resolution() {

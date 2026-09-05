@@ -2,7 +2,7 @@ import type { PortableCloudTimelineV1 } from './timeline.ts';
 import type { CloudSessionState } from './types.ts';
 import type { CloudWorkspaceBinding } from './workspace.ts';
 
-export function cloudBoundaryOperation(raw: unknown): {
+export function cloudBoundaryOperation(raw: unknown, expectedKind?: 'turn'): {
   sessionId: string;
   operationId: string;
 } | null {
@@ -13,13 +13,14 @@ export function cloudBoundaryOperation(raw: unknown): {
   const event = host.event as Record<string, unknown>;
   if (event.type !== 'boundary.committed'
     || !event.payload || typeof event.payload !== 'object' || Array.isArray(event.payload)) return null;
+  if (expectedKind && (event.payload as Record<string, unknown>).kind !== expectedKind) return null;
   const operationId = (event.payload as Record<string, unknown>).operationId;
   return typeof operationId === 'string' && operationId
     ? { sessionId: host.sessionId, operationId }
     : null;
 }
 
-/** Only the worker's durable publication request authorizes an origin write. */
+/** A durable worker delivery signal; clients archive it for user-initiated merge. */
 export function cloudPublicationOperation(raw: unknown): { sessionId: string; operationId: string } | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const host = raw as Record<string, unknown>;

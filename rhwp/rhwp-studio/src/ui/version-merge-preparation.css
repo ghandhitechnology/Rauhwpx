@@ -1,0 +1,21 @@
+.version-merge-preparation {
+  width: min(440px, calc(100vw - 32px));
+  box-sizing: border-box;
+  border: 1px solid var(--border-color, #d9dce1);
+  border-radius: 14px;
+  padding: 24px;
+  background: var(--bg-color, #fff);
+  color: var(--text-color, #222);
+  box-shadow: 0 20px 80px #0003;
+  font: 14px/1.5 system-ui, sans-serif;
+}
+.version-merge-preparation::backdrop { background: #0005; }
+.version-merge-preparation h2 { margin: 0; font-size: 18px; }
+.version-merge-preparation p { margin: 8px 0 18px; }
+.version-merge-preparation label { display: flex; align-items: flex-start; gap: 8px; padding: 10px 0; cursor: pointer; }
+.version-merge-preparation small { display: block; color: var(--text-secondary, #666); margin-top: 3px; }
+.version-merge-preparation input[type=radio] { margin-top: 4px; }
+.version-merge-preparation .version-merge-branch-name { box-sizing: border-box; width: 100%; padding: 8px; }
+.version-merge-preparation footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
+.version-merge-preparation button { font: inherit; padding: 7px 16px; border: 1px solid #ccd0d5; border-radius: 7px; cursor: pointer; }
+.version-merge-preparation button[type=submit] { background: #2563eb; border-color: #2563eb; color: #fff; }
