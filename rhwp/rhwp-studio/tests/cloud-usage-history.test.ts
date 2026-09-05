@@ -71,14 +71,12 @@ test('history retains only 31 days and accepts newer corrected totals', () => {
   assert.equal(readCloudUsage(snapshot.account, store).at(-1)?.usedMs, 200);
 });
 
-test('chat counts deduplicate sessions by thread and do not guess unknown providers', () => {
+test('dashboard sessions include every provider and deduplicate the current session', () => {
   const snapshot = fixture();
   const session = { kind: 'running', sessionId: 'a', threadId: 'chat', selection: { agent: 'claude' } };
-  snapshot.sessions = [session, { ...session, sessionId: 'b' }, { ...session, sessionId: 'c', threadId: 'unknown', selection: undefined }] as CloudSnapshot['sessions'];
+  snapshot.sessions = [session, { ...session, sessionId: 'b', selection: { agent: 'codex' } }, { ...session, sessionId: 'c', threadId: 'unknown', selection: undefined }] as CloudSnapshot['sessions'];
   snapshot.session = snapshot.sessions[0];
   const result = cloudDashboardSessions(snapshot);
-  assert.equal(result.entries.length, 3);
-  assert.equal(result.chats, 2);
-  assert.equal(result.claudeChats, 1);
-  assert.equal(result.unknownChats, 1);
+  assert.deepEqual(result.map((entry) => entry.sessionId), ['a', 'b', 'c']);
+  assert.deepEqual(result.map((entry) => entry.selection?.agent), ['claude', 'codex', undefined]);
 });

@@ -131,7 +131,7 @@ try {
   }
   await step('Cloud disconnect, reconnect, rebuild, and shutdown recovery',
     () => checkCloudRecovery(page, origin, artifacts));
-  await step('Cloud dashboard, usage gaps, filters, configuration and responsive settings', async () => {
+  await step('Cloud dashboard, usage gaps, conversations, configuration and responsive settings', async () => {
     await open('cloud=1&dashboard=1&page=settings&destination=cloud&controls=0');
     await page.waitForSelector('.ag-cd-quota .ag-cd-stat-value');
     assert.equal(await page.$eval('.ag-cd-quota .ag-cd-stat-value', (node) => node.textContent), '84분');
@@ -149,12 +149,10 @@ try {
     await page.click('.ag-cd-data summary');
     assert.equal(await page.$$eval('.ag-cd-data tbody tr', (nodes) => nodes.length), 30);
     await page.click('.ag-cd-data summary');
-    await clickText('.ag-cd-button', '7일');
-    await page.click('.ag-cd-chats button');
-    assert.equal(await page.$$eval('.ag-cd-chat', (nodes) => nodes.length), 3);
+    await page.click('.ag-cd-segment button');
+    assert.equal(await page.$$eval('.ag-cd-chat', (nodes) => nodes.length), 4);
     await page.evaluate(() => window.sidebarPreview.cloud.publish());
-    assert.equal(await page.$eval('.ag-cd-chats button', (node) => node === document.activeElement), true, 'snapshot refresh preserves filter focus');
-    await page.click('.ag-cd-chats button');
+    assert.equal(await page.$eval('.ag-cd-segment button[aria-pressed="true"]', (node) => node === document.activeElement), true, 'snapshot refresh preserves range focus');
     await page.click('.ag-cloud-settings-action');
     await page.waitForSelector('.ag-cloud-setup-overlay:not([hidden])');
     await page.click('.ag-cloud-setup-close');

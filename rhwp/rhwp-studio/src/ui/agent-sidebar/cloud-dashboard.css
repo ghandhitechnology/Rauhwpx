@@ -79,13 +79,12 @@
 .ag-cd-reconnect { margin-top: 12px; }
 .ag-cd-chat-list { list-style: none; margin: 10px 0 0; padding: 0; max-height: 248px; overflow-y: auto; }
 .ag-cd-chat { display: flex; align-items: center; gap: 10px; padding: 12px 0; border-top: 1px solid var(--ag-border); }
-.ag-cd-chat-mark { display: grid; place-items: center; width: 30px; height: 30px; flex: 0 0 30px; background: var(--ag-hover); border-radius: 7px; font-size: 17px; }
-.ag-cd-chat-mark[data-provider='claude'] { color: #c77958; background: color-mix(in srgb, #c77958 12%, var(--ag-bg)); }
+.ag-cd-chat-mark { display: grid; place-items: center; width: 30px; height: 30px; flex: 0 0 30px; background: var(--ag-hover); border-radius: 7px; color: var(--ag-text-secondary); }
+.ag-cd-chat-mark .ag-icon { width: 16px; height: 16px; }
 .ag-cd-chat-copy { display: grid; gap: 3px; min-width: 0; flex: 1; }
 .ag-cd-chat-copy strong { font-size: 11px; font-weight: 550; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
 .ag-cd-chat-copy .ag-cd-muted { font-size: 10px; }
 .ag-cd-empty { padding: 24px 8px; color: var(--ag-text-secondary); font-size: 11px; text-align: center; }
-.ag-cd-chats .ag-cd-button[aria-pressed='true'] { background: var(--cd-tint); border-color: var(--cd-accent); }
 .ag-cd-config .ag-cloud-settings { margin: 18px 0 12px; }
 .ag-cd-config .ag-settings-section-title { display: none; }
 .ag-cd-config .ag-cloud-settings-card { background: var(--ag-bg); }

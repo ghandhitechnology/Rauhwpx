@@ -70,12 +70,5 @@ export function cloudUsageSeries(days: CloudUsageDay[], count: 7 | 30, now: Date
 export function cloudDashboardSessions(snapshot: CloudSnapshot) {
   const sessions = new Map(snapshot.sessions.map((session) => [session.sessionId, session]));
   if (snapshot.session.kind !== 'idle') sessions.set(snapshot.session.sessionId, snapshot.session);
-  const entries = [...sessions.values()];
-  return {
-    entries,
-    chats: new Set(entries.map((session) => session.threadId)).size,
-    claudeChats: new Set(entries.filter((session) => session.selection?.agent === 'claude').map((session) => session.threadId)).size,
-    unknownChats: new Set(entries.filter((session) => !session.selection).map((session) => session.threadId)).size,
-    active: entries.filter((session) => ['running', 'queued', 'transferring', 'pausing', 'taking-over'].includes(session.kind)).length,
-  };
+  return [...sessions.values()];
 }

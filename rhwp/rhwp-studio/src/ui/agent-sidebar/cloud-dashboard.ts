@@ -51,7 +51,6 @@ const sessionLabels: Record<CloudSnapshot['session']['kind'], string> = {
 export function createCloudDashboard(deps: CloudDashboardDeps) {
   let snapshot: CloudSnapshot | null = null;
   let range: 7 | 30 = 7;
-  let claudeOnly = false;
   let pending = false;
   let refreshError = false;
   let disposed = false;
@@ -156,14 +155,6 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
   server.root.append(serverIdentity, serverFacts, serverNote, reconnect);
 
   const chats = panel('Cloud 대화', 'ag-cd-chats');
-  const filter = button('Claude만 보기');
-  filter.setAttribute('aria-pressed', 'false');
-  filter.addEventListener('click', () => {
-    claudeOnly = !claudeOnly;
-    filter.setAttribute('aria-pressed', String(claudeOnly));
-    renderSessions();
-  });
-  chats.head.append(filter);
   const chatList = el('ul', 'ag-cd-chat-list');
   chats.root.append(chatList);
 
@@ -313,18 +304,17 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
 
   function renderSessions() {
     if (!snapshot) return;
-    const summary = cloudDashboardSessions(snapshot);
-    const entries = summary.entries.filter((entry) => !claudeOnly || entry.selection?.agent === 'claude');
-    const signature = JSON.stringify([claudeOnly, entries]);
+    const entries = cloudDashboardSessions(snapshot);
+    const signature = JSON.stringify(entries);
     if (signature === sessionsSignature) return;
     sessionsSignature = signature;
     chatList.replaceChildren();
-    if (!entries.length) chatList.append(el('li', 'ag-cd-empty', claudeOnly ? 'Claude를 선택한 대화가 없습니다.' : '아직 Cloud 대화가 없습니다. 채팅에서 클라우드를 선택해 시작하세요.'));
+    if (!entries.length) chatList.append(el('li', 'ag-cd-empty', '아직 Cloud 대화가 없습니다. 채팅에서 클라우드를 선택해 시작하세요.'));
     entries.forEach((entry) => {
       const item = el('li', 'ag-cd-chat');
       const provider = entry.selection?.agent;
-      const mark = el('span', 'ag-cd-chat-mark', provider === 'claude' ? '✳' : provider ? AGENT_LABEL[provider].slice(0, 1) : '?');
-      mark.dataset.provider = provider ?? 'unknown';
+      const mark = el('span', 'ag-cd-chat-mark');
+      mark.append(createIcon('document'));
       mark.setAttribute('aria-hidden', 'true');
       const copy = el('div', 'ag-cd-chat-copy');
       copy.append(el('strong', '', entry.documentName || '이름 없는 문서'),

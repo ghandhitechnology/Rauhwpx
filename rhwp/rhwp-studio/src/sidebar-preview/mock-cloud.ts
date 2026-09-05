@@ -53,7 +53,7 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
     state.sessions = names.map((documentName, index) => ({ kind: 'suspended',
       sessionId: `dashboard-session-${index}`, threadId: `dashboard-chat-${index}`, documentId: `dashboard-doc-${index}`,
       documentName, version: 1, reason: '사용자가 일시 정지했습니다.', resumable: true,
-      selection: { agent: index === 2 ? 'codex' : 'claude', model: index === 2 ? 'gpt-5.4' : 'claude-sonnet-4-6', effort: 'high' } }));
+      selection: { agent: index % 2 === 0 ? 'codex' : 'claude', model: index % 2 === 0 ? 'gpt-5.4' : 'claude-sonnet-4-6', effort: 'high' } }));
   }
   function snapshot(): CloudSnapshot {
     state.revision++;
