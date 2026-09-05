@@ -80,6 +80,7 @@ function installDesktopCloudMock() {
   let transferredTimeline = null;
   const selections = new Map();
   let configurationFailure = false;
+  let heldConfiguration = null;
 
   const binding = (sessionId) => sessionId === editorSessionId
     ? {
@@ -191,6 +192,12 @@ function installDesktopCloudMock() {
     editorSessionId,
     selectedSessionId,
     failNextConfiguration() { configurationFailure = true; },
+    holdNextConfiguration() {
+      let release;
+      const promise = new Promise((resolve) => { release = resolve; });
+      heldConfiguration = { promise, release };
+    },
+    releaseConfiguration() { heldConfiguration?.release(); heldConfiguration = null; },
     failNextPublication() { publicationFailures += 1; },
     failNextTransfer() { transferFailures += 1; },
     resetIdle() {
@@ -283,6 +290,7 @@ function installDesktopCloudMock() {
     async cloudCommand(payload) {
       record('cloudCommand', payload);
       if (payload.command === 'configure') {
+        if (heldConfiguration) await heldConfiguration.promise;
         if (configurationFailure) { configurationFailure = false; throw new Error('Provider is not connected on Cloud'); }
         selections.set(payload.sessionId, { agent: payload.payload.provider, model: payload.payload.model, effort: payload.payload.effort });
       }
@@ -577,11 +585,29 @@ try {
   assert.equal(queued.expectedVersion, 13);
   assert.equal(queued.message, 'queue through selected cloud session');
 
-  // Settings target the mounted Cloud room and survive older timeline snapshots.
+  // Settings target the mounted Cloud room and preserve its unsent draft/history.
+  const beforeSettings = await page.evaluate(() => {
+    const input = document.querySelector('.ag-input');
+    input.value = 'Keep this unsent draft while changing providers.';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    return document.querySelector('.ag-messages').textContent;
+  });
   await page.click('[aria-label="프로바이더 선택"]');
   await page.waitForSelector('.ag-config-panel.ag-open');
   assert.equal(await page.$eval('.ag-provider-item[data-agent="opencode"]', (node) => node.checkVisibility()), false);
+  // Even a synthetic click on hidden local-only providers must stop before effects.
+  await page.$eval('.ag-provider-item[data-agent="opencode"]', (node) => node.click());
+  await page.$eval('.ag-provider-item[data-agent="rau"]', (node) => node.click());
+  assert.equal(await page.evaluate(() => window.__cloudWorkspaceHarness.calls
+    .filter((call) => call.method === 'cloudCommand' && call.payload.command === 'configure').length), 0);
+  await page.evaluate(() => window.__cloudWorkspaceHarness.holdNextConfiguration());
   await page.$eval('.ag-provider-item[data-agent="claude"]', (node) => node.click());
+  await page.waitForFunction(() => document.querySelector('[aria-label="프로바이더 선택"]').disabled);
+  assert.equal(await page.$eval('.ag-input', (node) => node.value), 'Keep this unsent draft while changing providers.');
+  await page.$eval('.ag-provider-item[data-agent="grok"]', (node) => node.click());
+  assert.equal(await page.evaluate(() => window.__cloudWorkspaceHarness.calls
+    .filter((call) => call.method === 'cloudCommand' && call.payload.command === 'configure').length), 1);
+  await page.evaluate(() => window.__cloudWorkspaceHarness.releaseConfiguration());
   await page.waitForFunction(() => document.querySelector('.ag-root').dataset.agent === 'claude'
     && !document.querySelector('[aria-label="프로바이더 선택"]').disabled);
   await page.click('[aria-label="모델 선택"]');
@@ -598,6 +624,13 @@ try {
   assert.equal(configured.length, 3);
   assert.ok(configured.every((call) => call.sessionId === 'session-cloud-b' && call.expectedVersion === 13));
   assert.deepEqual(configured.at(-1).payload, { provider: 'claude', model: 'haiku', effort: 'low' });
+  assert.equal(await page.$eval('.ag-input', (node) => node.value), 'Keep this unsent draft while changing providers.');
+  assert.equal(await page.$eval('.ag-messages', (node) => node.textContent), beforeSettings);
+  assert.deepEqual(await page.evaluate(async () => {
+    const { getThread } = await import('/src/agent/threads.ts');
+    const thread = getThread('thread-cloud-b');
+    return { agent: thread.agent, model: thread.model, effort: thread.effort };
+  }), { agent: 'claude', model: 'haiku', effort: 'low' }, 'confirmed settings must be saved with the existing conversation');
   await page.evaluate(() => window.__cloudWorkspaceHarness.failNextConfiguration());
   await page.click('[aria-label="프로바이더 선택"]');
   await page.$eval('.ag-provider-item[data-agent="grok"]', (node) => node.click());
@@ -605,6 +638,8 @@ try {
   assert.equal(await page.$eval('.ag-root', (node) => node.dataset.agent), 'claude');
   assert.equal(await page.$eval('.ag-llm-name', (node) => node.textContent), 'Haiku 4.5');
   assert.equal(await page.$eval('.ag-effort-name', (node) => node.textContent), 'Low');
+  assert.equal(await page.$eval('[aria-label="프로바이더 선택"]', (node) => node.disabled), false);
+  assert.equal(await page.$eval('.ag-input', (node) => node.value), 'Keep this unsent draft while changing providers.');
   await page.click('[aria-label="모델 선택"]');
   if (process.env.CLOUD_CONFIGURATION_SCREENSHOT) {
     await page.$eval('.ag-config-panel', async (node) => {

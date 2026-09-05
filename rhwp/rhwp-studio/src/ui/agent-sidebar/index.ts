@@ -829,7 +829,12 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     const session = cloudController.getSnapshot().session;
     if (session.kind === 'idle' || session.threadId !== currentThread.id || !session.selection) return;
     const { agent, model, effort } = session.selection;
-    if (selectedAgent === agent && selectedModel === model && selectedEffort === effort) return;
+    if (selectedAgent === agent && selectedModel === model && selectedEffort === effort) {
+      if (currentThread.agent !== agent || currentThread.model !== model || currentThread.effort !== effort) {
+        persistCurrentThread();
+      }
+      return;
+    }
     selectedModel = model;
     selectedEffort = effort;
     selectedServiceTier = resolveServiceTier(agent, null);

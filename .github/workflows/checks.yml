@@ -275,10 +275,11 @@ jobs:
         run: npm --prefix rhwp/rhwp-studio run build
       - name: Test browser integration
         run: npm --prefix rhwp/rhwp-studio run test:browser
-      - name: Test Cloud onboarding and conversation handoff
+      - name: Test Cloud onboarding, conversation handoff, and display interaction
         run: |
           npm --prefix rhwp/rhwp-studio run e2e:cloud-onboarding
           npm --prefix rhwp/rhwp-studio run e2e:cloud-workspace
+          npm --prefix rhwp/rhwp-studio run e2e:cloud-display
 
   production-dependencies:
     needs: changes

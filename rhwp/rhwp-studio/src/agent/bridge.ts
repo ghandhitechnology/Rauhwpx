@@ -232,6 +232,7 @@ export interface AgentBridge {
   /** 현재 막힌 프로바이더 요청에 답한다. 재연결 재시도에도 같은 응답 ID를 쓴다. */
   answerUserQuestion(interactionId: string, answers: Record<string, UserQuestionAnswer>): string;
   interrupt(): void;
+  interruptIfIdle(): boolean;
   onEvent(cb: (e: SidebarEvent) => void): () => void;
   dispose(): void;
 }
@@ -1120,6 +1121,7 @@ export class AgentBridgeImpl implements AgentBridge {
   private turnRunning = false;
   /** Hub-issued identity for the one root provider turn allowed to mutate. */
   private activeProviderTurnId: string | null = null;
+  private interruptedProviderTurnId: string | null = null;
   private editingAgent: AgentName = 'codex';
   private activeToolRequests = 0;
   private activeToolRequestControllers = new Map<number, {
@@ -2482,6 +2484,7 @@ export class AgentBridgeImpl implements AgentBridge {
       : null;
     const belongsToActiveTurn = () => !turnBound || (
       providerTurnId !== null && providerTurnId === this.activeProviderTurnId
+        && providerTurnId !== this.interruptedProviderTurnId
     );
     if (!belongsToActiveTurn()) {
       this.sendToolResponse({
@@ -3251,7 +3254,15 @@ export class AgentBridgeImpl implements AgentBridge {
     return responseId;
   }
 
+  interruptIfIdle(): boolean {
+    if (!this.turnRunning || this.activeToolRequests > 0) return false;
+    this.interrupt();
+    return true;
+  }
+
   interrupt(): void {
+    // Fence requests already in transit before the hub acknowledges the stop.
+    this.interruptedProviderTurnId = this.activeProviderTurnId;
     this.abortProviderToolRequests(this.activeProviderTurnId ?? undefined);
     const pendingQuestion = this.pendingUserQuestion;
     if (pendingQuestion) {

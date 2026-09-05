@@ -250,9 +250,9 @@ export async function runSession({
     saveChain = save.catch(() => {});
     return save;
   };
-  const flushWorkspace = async () => {
+  const flushWorkspace = async (boundaryTurn) => {
     await clearStudioReadiness();
-    return saveBoundary('operation');
+    return saveBoundary('operation', boundaryTurn);
   };
   let assertRuntimeHealthy = async () => {};
   await client.event('runtime.started', {
@@ -327,8 +327,8 @@ export async function runSession({
       await client.takeoverAck();
       return { takenOver: true, timelinePath };
     };
-    const acknowledgePause = async () => {
-      await flushWorkspace();
+    const acknowledgePause = async (boundaryTurn) => {
+      await flushWorkspace(boundaryTurn);
       if (typeof client.pauseAck !== 'function') {
         throw runtimeError('PAUSE_PROTOCOL_UNAVAILABLE', 'Worker pause acknowledgement is unavailable');
       }
@@ -544,16 +544,26 @@ export async function runSession({
           },
         );
         let outcome = await runProvider();
-        let endedDuringWait = false;
+        let stopped = outcome?.stopped === true;
         while (outcome?.wait) {
           if (typeof client.createWait !== 'function' || typeof client.wait !== 'function') {
             throw runtimeError('WAIT_PROTOCOL_UNAVAILABLE', 'Worker durable wait protocol is unavailable');
           }
-          const wait = await waitForHealthyOperation((signal) => client.createWait({
-            turnNumber: nextTurnNumber,
-            kind: outcome.wait.kind,
-            payload: outcome.wait.payload,
-          }, { signal }));
+          let wait;
+          try {
+            wait = await waitForHealthyOperation((signal) => client.createWait({
+              turnNumber: nextTurnNumber,
+              kind: outcome.wait.kind,
+              payload: outcome.wait.payload,
+            }, { signal }));
+          } catch (error) {
+            // End can close the wait gate between plan-ready and this request.
+            // Finish at the saved boundary instead of reporting a provider failure.
+            const control = typeof client.control === 'function'
+              ? await waitForHealthyOperation((signal) => client.control({ signal })) : {};
+            if (!control.redirectRequested && !control.pauseRequested && !control.takeoverRequested && !control.endRequested) throw error;
+            wait = { status: 'cancelled', redirectRequested: control.redirectRequested === true };
+          }
           let waitState = wait;
           while (waitState?.status === 'pending' && Date.now() < deadline) {
             await assertRuntimeHealthy();
@@ -580,7 +590,7 @@ export async function runSession({
           if (Date.now() >= deadline) throw runtimeError('DURATION_LIMIT', 'Cloud session reached its duration limit');
           const resolution = waitState?.resolution;
           if (waitState?.status === 'cancelled' || resolution?.action === 'cancel') {
-            endedDuringWait = waitState?.redirectRequested !== true;
+            stopped = waitState?.redirectRequested !== true;
             outcome = { stopReason: 'interrupted', redirected: waitState?.redirectRequested === true };
             break;
           }
@@ -609,10 +619,19 @@ export async function runSession({
             throw runtimeError('WAIT_RESOLUTION_INVALID', 'Durable wait returned an unsupported resolution');
           }
         }
+        stopped ||= outcome?.stopped === true;
         const redirected = outcome?.redirected === true;
         if (outcome?.errorMessage
-          || (!endedDuringWait && !redirected && !['end_turn', 'completed', 'success'].includes(outcome?.stopReason))) {
+          || (!stopped && !redirected && !['end_turn', 'completed', 'success'].includes(outcome?.stopReason))) {
           throw runtimeError('PROVIDER_TURN_FAILED', outcome?.errorMessage || `Provider stopped with ${outcome?.stopReason ?? 'unknown reason'}`);
+        }
+        if (stopped && typeof client.control === 'function') {
+          const control = await client.control();
+          // Pause preserves the unfinished message. A terminal turn boundary
+          // would mark it completed during recovery and abandon it on Resume.
+          if (control.pauseRequested && !control.takeoverRequested && !control.endRequested) {
+            return await acknowledgePause(nextTurnNumber);
+          }
         }
         turnNumber = nextTurnNumber;
         const boundary = await checkpointBoundary('turn');
@@ -622,7 +641,7 @@ export async function runSession({
           return { suspended: true, timelinePath };
         }
         if (turnNumber >= maxTurns) await flushWorkspace();
-        if (publishAfterTurn && !redirected && !endedDuringWait) {
+        if (publishAfterTurn && !redirected && !stopped) {
           await client.event('document.publish_requested', {
             operationId: boundary.operationId,
             turnNumber,
@@ -630,7 +649,7 @@ export async function runSession({
           });
         }
         const completed = await client.completeTurn({
-          outcome: redirected ? 'redirected' : endedDuringWait ? 'stopped' : 'completed',
+          outcome: redirected ? 'redirected' : stopped ? 'stopped' : 'completed',
           boundaryOperationId: boundary.operationId,
         }, { retry: manifest.persistent === true });
         if (completed?.status === 'suspended') {

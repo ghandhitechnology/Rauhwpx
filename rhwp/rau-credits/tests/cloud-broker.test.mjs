@@ -131,3 +131,33 @@ test('a receipt arriving after the allocation lease expires is cleaned up instea
   assert.equal(state.raucloud.accounts['account-1'].worker, null);
   assert.deepEqual(deleted, ['service-1']);
 });
+
+test('orphan scan retains an allocation created after its initial state snapshot', async () => {
+  let inspect;
+  let release;
+  const entered = new Promise((resolve) => { inspect = resolve; });
+  const continueScan = new Promise((resolve) => { release = resolve; });
+  let guard;
+  const setup = fixture({ provisioner: {
+    serviceName: ({ runId }) => `rauhwpx-raucloud-${runId}`,
+    provision: async () => ({ remote: REMOTE, receipt: RECEIPT }),
+    teardown: async () => {},
+    reconcileRaucloud: async (options) => {
+      assert.deepEqual(options.keepServiceNames, []);
+      guard = options.shouldKeepService;
+      inspect();
+      await continueScan;
+      return { found: 0, removed: 0 };
+    },
+  } });
+  const reconcile = setup.broker.reconcileCloudUsage();
+  await entered;
+  try {
+    const created = await setup.create();
+    assert.equal(await guard({ name: `rauhwpx-raucloud-${created.run.id}` }), true);
+    assert.equal(await guard({ name: 'rauhwpx-raucloud-orphan' }), false);
+  } finally {
+    release();
+    await reconcile;
+  }
+});

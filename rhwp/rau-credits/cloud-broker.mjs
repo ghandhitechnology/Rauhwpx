@@ -592,14 +592,22 @@ export function createRaucloudBroker({
     if (typeof provisioner?.reconcileRaucloud !== 'function' || typeof provisioner?.serviceName !== 'function') {
       return { enabled: false, found: 0, removed: 0 };
     }
-    const cloud = ensureRaucloudState(await store.load());
-    const keepServiceNames = Object.values(cloud.runs)
-      .filter((run) => ['allocating', 'ready', 'active', 'checkpointing'].includes(run?.status))
-      .flatMap((run) => [
-        provisioner.serviceName({ accountId: run.accountId, runId: run.id }),
-        provisioner.legacyServiceName?.({ accountId: run.accountId, runId: run.id }),
-      ].filter(Boolean));
-    return provisioner.reconcileRaucloud({ keepServiceNames, limit: 100 });
+    const retainedNames = async () => {
+      const cloud = ensureRaucloudState(await store.load());
+      return Object.values(cloud.runs)
+        .filter((run) => ['allocating', 'ready', 'active', 'checkpointing'].includes(run?.status))
+        .flatMap((run) => [
+          provisioner.serviceName({ accountId: run.accountId, runId: run.id }),
+          provisioner.legacyServiceName?.({ accountId: run.accountId, runId: run.id }),
+        ].filter(Boolean));
+    };
+    return provisioner.reconcileRaucloud({
+      keepServiceNames: await retainedNames(),
+      // Provisioning records its intent before creating a service. Refresh that
+      // intent after inventory so an allocation started during the scan survives.
+      shouldKeepService: async (service) => (await retainedNames()).includes(service.name),
+      limit: 100,
+    });
   }
 
   async function provisionCreatedRun(userId, runId, deviceId, workerToken) {

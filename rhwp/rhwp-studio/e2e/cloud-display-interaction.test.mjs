@@ -34,8 +34,10 @@ let browser;
 let workerBrowser;
 let queue;
 try {
-  browser = await puppeteer.launch({ executablePath, headless: true, protocolTimeout:10000 });
-  workerBrowser = await puppeteer.launch({ executablePath, headless:true, protocolTimeout:10000 });
+  const launchOptions = { executablePath, headless: true, protocolTimeout: 10000,
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu'] };
+  browser = await puppeteer.launch(launchOptions);
+  workerBrowser = await puppeteer.launch(launchOptions);
   const remote = await workerBrowser.newPage();
   await remote.setViewport({ width: 1280, height: 800, deviceScaleFactor: 1 });
   await remote.setContent(`<!doctype html><style>
@@ -99,6 +101,7 @@ try {
           finally { window.pendingInputs--; }
         }, async close() {} };
     } } });
+    window.__displayTestWorkspace = workspace;
     document.querySelector('main').append(workspace.root);
     workspace.setContext({ visible:true, session:{ kind:'running', sessionId:'test-session' } });
     await Promise.resolve();
@@ -195,8 +198,47 @@ try {
   await settle();
   assert.match(await remote.$eval('textarea', (node) => node.value), /replaced/);
   assert.equal(pressed.displayPressedButtons.size, 0);
+  // Capture can be lost without pointerup, for example when another control takes it.
+  // The remote browser must release the drag using the last valid document point.
+  await page.$eval('.cloud-workspace-canvas', (node) => {
+    node.addEventListener('pointerdown', (event) => { window.lastPointerId = event.pointerId; });
+  });
+  await page.mouse.move(start.x, start.y);
+  await page.mouse.down();
+  await page.mouse.move(end.x, end.y);
+  await page.$eval('.cloud-workspace-canvas', (node) => node.releasePointerCapture(window.lastPointerId));
+  await page.mouse.move(end.x, end.y);
+  await settle();
+  assert.equal(pressed.displayPressedButtons.size, 0, 'lost pointer capture releases the remote drag');
+  await page.mouse.up();
+  await settle();
+  // Chromium's actual composition events stay bound to the original document.
+  // This exercises browser IME plumbing without changing the host OS input method.
+  const cdp = await page.createCDPSession();
+  await remote.$eval('textarea', (node) => { node.value = ''; node.focus(); });
+  await page.focus('.cloud-workspace-input');
+  await cdp.send('Input.imeSetComposition', { text: '정', selectionStart: 1, selectionEnd: 1 });
+  await cdp.send('Input.insertText', { text: '정상 입력' });
+  await settle();
+  assert.equal(await remote.$eval('textarea', (node) => node.value), '정상 입력',
+    'Chromium compositionend commits Korean exactly once without a later non-composing input');
+  const committedBefore = await remote.$eval('textarea', (node) => node.value);
+  await cdp.send('Input.imeSetComposition', { text: '한', selectionStart: 1, selectionEnd: 1 });
+  await page.evaluate(() => window.__displayTestWorkspace.setContext({
+    visible: true, session: { kind: 'running', sessionId: 'other-session' },
+  }));
+  await cdp.send('Input.insertText', { text: '한글' });
+  await settle();
+  assert.equal(await remote.$eval('textarea', (node) => node.value), committedBefore,
+    'composition started in the old session cannot edit the new document');
+  await page.evaluate(() => window.__displayTestWorkspace.setContext({
+    visible: true, session: { kind: 'running', sessionId: 'test-session' },
+  }));
+  assert.equal(await page.$eval('textarea[readonly]', (node) => node.value), '한글');
+  assert.equal(await page.$eval('textarea[readonly]', (node) => node.hidden), false);
+  await cdp.detach();
   assert.deepEqual(errors, []);
-  console.log(`PASS ${totalClicks} remote target clicks, centered fit at four viewport sizes and DPR 1/2, sidebar resize/collapse, scrolling at 100%, double click, drag selection, typing; 80ms simulated latency`);
+  console.log(`PASS ${totalClicks} remote target clicks, centered fit at four viewport sizes and DPR 1/2, sidebar resize/collapse, scrolling at 100%, double click, drag selection, lost capture release, typing, Korean IME commit and cross-session recovery; 80ms simulated latency`);
   console.log(`Screenshots: ${artifacts}`);
 } finally {
   await queue?.close();

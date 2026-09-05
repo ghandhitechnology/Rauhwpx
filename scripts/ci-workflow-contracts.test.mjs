@@ -100,6 +100,7 @@ test('consolidated checks retain Cloud contracts, browser handoff, and Linux pac
   const browserCommands = checks.jobs.browser.steps.map((step) => step.run ?? '').join('\n');
   assert.match(browserCommands, /e2e:cloud-onboarding/);
   assert.match(browserCommands, /e2e:cloud-workspace/);
+  assert.match(browserCommands, /e2e:cloud-display/);
   assert.deepEqual(checks.jobs['linux-packaging'].strategy.matrix.include.map((entry) => entry.arch), ['x64', 'arm64']);
 });
 

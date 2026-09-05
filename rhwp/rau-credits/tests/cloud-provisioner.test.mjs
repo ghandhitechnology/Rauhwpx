@@ -168,3 +168,27 @@ test('oversized streamed provider responses are cancelled before buffering unbou
   assert.equal(cancelled, true);
   assert.equal(setup.calls.includes('RaucloudServiceDelete'), true);
 });
+
+test('orphan cleanup refreshes retained allocations after remote inventory', async () => {
+  const setup = fixture();
+  await setup.provision();
+  const checked = [];
+  const result = await setup.provisioner.reconcileRaucloud({
+    keepServiceNames: [],
+    shouldKeepService: async (service) => { checked.push(service.id); return true; },
+  });
+  assert.deepEqual(checked, ['service-1']);
+  assert.equal(result.removed, 0);
+  assert.equal(setup.calls.includes('RaucloudServiceDelete'), false);
+});
+
+test('orphan cleanup retains services if checking current allocation ownership fails', async () => {
+  const setup = fixture();
+  await setup.provision();
+  const result = await setup.provisioner.reconcileRaucloud({
+    shouldKeepService: async () => { throw new Error('State store temporarily unavailable'); },
+  });
+  assert.equal(result.removed, 0);
+  assert.equal(result.failed.length, 1);
+  assert.equal(setup.calls.includes('RaucloudServiceDelete'), false);
+});

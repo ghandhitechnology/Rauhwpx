@@ -2129,6 +2129,18 @@ export class CloudCoordinator extends EventEmitter {
         this.#assertProfileEpoch(profileEpoch);
       }
     }
+    const messageDigest = queuedMessageId ? sha256Hex(Buffer.from(JSON.stringify({
+      type: serverCommand, content: message, attachments: uploadedAttachments,
+    }))) : null;
+    const previousMessage = localHandoff?.queuedMessages?.find((entry) => entry.id === queuedMessageId);
+    if (previousMessage && (previousMessage.text !== message
+      || previousMessage.messageDigest && previousMessage.messageDigest !== messageDigest)) {
+      throw transferError('Cloud message id was reused for different content', 'MESSAGE_ID_CONFLICT');
+    }
+    if (previousMessage && (previousMessage.serverQueued === true || previousMessage.state === 'accepted')) {
+      return this.snapshot({ selectedSessionId: sessionId,
+        extra: { commandResult: { messageId: queuedMessageId, status: previousMessage.state } } });
+    }
     if (command === 'cancel' && localHandoff
       && ['preparing', 'uploading', 'committing'].includes(localHandoff.state)) {
       await this.#store.patch(localHandoff.id, { cancelRequested: true, error: null });
@@ -2150,6 +2162,7 @@ export class CloudCoordinator extends EventEmitter {
             {
               id: queuedMessageId,
               text: message,
+              messageDigest,
               queuedAt: new Date().toISOString(),
               state: 'queued',
             },
@@ -2171,13 +2184,15 @@ export class CloudCoordinator extends EventEmitter {
       if (localHandoff && queuedMessageId) {
         const updated = await this.#store.patch(localHandoff.id, (latest) => ({
           queuedMessages: (latest.queuedMessages ?? []).filter((entry) => (
-            entry.id !== queuedMessageId || entry.state === 'accepted'
+            entry.id !== queuedMessageId || entry.state === 'accepted' || entry.serverQueued === true
           )),
         }));
-        if (updated.queuedMessages.some((entry) => entry.id === queuedMessageId && entry.state === 'accepted')) {
+        const acknowledged = updated.queuedMessages.find((entry) => entry.id === queuedMessageId
+          && (entry.state === 'accepted' || entry.serverQueued === true));
+        if (acknowledged) {
           const snapshot = await this.snapshot({
             selectedSessionId: sessionId,
-            extra: { commandResult: { messageId: queuedMessageId, status: 'accepted' } },
+            extra: { commandResult: { messageId: queuedMessageId, status: acknowledged.state } },
           });
           this.#emit({ type: 'command-completed', command, snapshot });
           return snapshot;
@@ -2683,9 +2698,12 @@ export class CloudCoordinator extends EventEmitter {
           configurationPending: source.configurationPending ?? current.configurationPending,
           executionPhase: source.executionPhase ?? current.executionPhase ?? null,
           currentWait,
-          ...(event.type === 'message.accepted' ? {
+          ...(['message.queued', 'message.accepted'].includes(event.type) ? {
             queuedMessages: (latest.queuedMessages ?? []).map((message) => (
-              message.id === source.messageId ? { ...message, state: 'accepted' } : message
+              message.id === source.messageId ? {
+                ...message, serverQueued: true,
+                state: event.type === 'message.accepted' ? 'accepted' : message.state,
+              } : message
             )),
           } : {}),
           pendingTurnBoundary: latest.pendingTurnBoundary ?? null,

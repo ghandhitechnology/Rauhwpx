@@ -1744,3 +1744,97 @@ test('browser dirty transfer keeps uploaded snapshot separate from its verified 
     assert.equal(storage.getItem(key), originSha256 ?? null, 'unknown baseline must not authorize origin replacement');
   }
 });
+
+for (const receipt of ['queued', 'accepted', 'wrong-session']) {
+  test(`browser keeps only scoped signed ${receipt} receipt after a lost queue response`, async (t) => {
+    const identity = serverIdentity();
+    const storage = new MemoryStorage();
+    const endpoint = 'https://message-receipt.example.test';
+    const profile = storedBrowserProfile(endpoint, identity.key);
+    storeBrowserCredentials(storage, profile, {
+      accessToken: 'receipt-access', refreshToken: 'receipt-refresh', accessExpiresAt: Date.now() + 600_000,
+    });
+    const sessionId = 'receipt-room';
+    const session = { id: sessionId, status: 'running', persistent: true, roomStatus: 'active',
+      stateVersion: 1, executionPhase: 'working', originDocument: { name: 'receipt.hwpx' },
+      clientContext: { threadId: 'receipt-thread', documentId: 'receipt-doc' } };
+    const otherSession = { ...session, id: 'other-receipt-room',
+      clientContext: { threadId: 'other-thread', documentId: 'other-doc' } };
+    const streamReady = Promise.withResolvers<{ request: Request; resolve(response: Response): void }>();
+    const receiptSeen = Promise.withResolvers<void>();
+    let stopping = false;
+    let commandCalls = 0;
+    let responseLost = true;
+    const api = createBrowserCloudApi({ storage, fetchImpl: async (input, init) => {
+      const request = new Request(input, init);
+      const path = new URL(request.url).pathname;
+      if (path.endsWith('/v1/health')) return signedJson(request, identity, {
+        ok: true, version: '1.1.0', protocolVersion: 1, serverPublicKey: identity.key,
+      });
+      if (path.endsWith('/v1/sessions')) return signedJson(request, identity, { sessions: stopping ? [] : [session, otherSession] });
+      if (path.endsWith('/timeline')) return signedJson(request, identity, {
+        schema: 'rauhwpx.cloud.timeline', version: 1, exportedAt: new Date().toISOString(),
+        thread: { id: 'receipt-thread', messages: [] },
+      });
+      if (path.endsWith('/events')) return new Promise<Response>((resolve, reject) => {
+        streamReady.resolve({ request, resolve });
+        request.signal.addEventListener('abort', () => reject(request.signal.reason), { once: true });
+        if (request.signal.aborted) reject(request.signal.reason);
+      });
+      if (path.endsWith('/commands')) {
+        const body = await request.json();
+        commandCalls++;
+        if (responseLost) {
+          const stream = await streamReady.promise;
+          stream.resolve(signedSse(stream.request, identity, {
+            sessionId: receipt === 'wrong-session' ? 'unrelated-room' : sessionId,
+            seq: 1, type: `message.${receipt === 'accepted' ? 'accepted' : 'queued'}`,
+            payload: { messageId: body.payload.messageId },
+          }));
+          await receiptSeen.promise;
+          throw Object.assign(new Error('queue response lost'), { code: 'ETIMEDOUT' });
+        }
+        return signedJson(request, identity, { messageId: body.payload.messageId, status: 'queued' });
+      }
+      throw new Error(`Unexpected request ${path}`);
+    } });
+    assert.ok(api);
+    t.after(async () => {
+      stopping = true;
+      await api.cloudSaveProfile({ profile: storedBrowserProfile('https://receipt-stopped.example.test', identity.key) });
+    });
+    api.onCloudEvent((event: any) => {
+      if (event.event?.type === 'message.queued' || event.event?.type === 'message.accepted') receiptSeen.resolve();
+    });
+    const scope = { threadId: 'receipt-thread', documentId: 'receipt-doc', selectedSessionId: sessionId };
+    await api.cloudGetState(scope);
+    const input = { sessionId, command: 'queue-message' as const, expectedVersion: 1,
+      message: 'Continue from this draft', messageId: 'message-receipt' };
+    if (receipt === 'wrong-session') {
+      await assert.rejects(api.cloudCommand(input), /queue response lost/);
+      assert.deepEqual((await api.cloudGetState(scope)).queuedMessages, []);
+    } else {
+      const accepted = await api.cloudCommand(input);
+      assert.deepEqual((accepted.queuedMessages as any[]).map(({ id, state }) => ({ id, state })), [
+        { id: input.messageId, state: receipt },
+      ]);
+      await api.cloudCommand(input);
+      assert.equal(commandCalls, 1, 'acknowledged retry must not requeue the message');
+      await assert.rejects(api.cloudCommand({ ...input, message: 'Changed payload' }), { code: 'MESSAGE_ID_CONFLICT' });
+      assert.equal(commandCalls, 1);
+      responseLost = false;
+      const later = await api.cloudCommand({ ...input, messageId: 'newer-message', message: 'Then refine the wording' });
+      assert.deepEqual((later.queuedMessages as any[]).map((entry) => entry.id), ['message-receipt', 'newer-message']);
+      await api.cloudCommand({ ...input, sessionId: otherSession.id, message: 'Other room content' });
+      const other = await api.cloudGetState({ threadId: 'other-thread', documentId: 'other-doc', selectedSessionId: otherSession.id });
+      assert.deepEqual((other.queuedMessages as any[]).map(({ id, text }) => ({ id, text })), [
+        { id: input.messageId, text: 'Other room content' },
+      ]);
+      const original = await api.cloudGetState(scope);
+      assert.deepEqual((original.queuedMessages as any[]).map(({ id, text }) => ({ id, text })), [
+        { id: input.messageId, text: input.message },
+        { id: 'newer-message', text: 'Then refine the wording' },
+      ]);
+    }
+  });
+}

@@ -553,6 +553,10 @@ try {
   );
   console.log(`Sidebar checks passed. Screenshots: ${artifacts}`);
 } finally {
+  const browserProcess = browser?.process();
   await browser?.close();
+  // Detached Chrome helpers can retain inherited output pipes after its exit.
+  browserProcess?.stdout?.destroy();
+  browserProcess?.stderr?.destroy();
   await server.close();
 }

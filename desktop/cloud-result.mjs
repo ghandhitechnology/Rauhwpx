@@ -1,8 +1,11 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { constants as fsConstants, promises as fs } from 'node:fs';
 import path from 'node:path';
 import { cloudConflictPath } from './cloud-handoff.mjs';
-import { replaceFile as replaceFileWindowsSafe } from './fs-replace.mjs';
+import {
+  fingerprintNativeFile, writeNativeFileAtomically,
+  NATIVE_FILE_CONFLICT_CODE, NATIVE_FILE_ATOMIC_UNSUPPORTED_CODE, NATIVE_FILE_RECOVERY_REQUIRED_CODE,
+} from './native-file-handles.mjs';
 
 function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
@@ -36,33 +39,25 @@ async function exclusiveCopy(bytes, requestedPath) {
 }
 
 async function replaceFile(targetPath, bytes, platform, expectedDigest = null) {
-  const temp = path.join(path.dirname(targetPath), `.${path.basename(targetPath)}.cloud-${randomUUID()}.tmp`);
-  const originalMode = await fs.stat(targetPath).then((details) => details.mode & 0o777, () => null);
-  await fs.writeFile(temp, bytes, { mode: 0o600 });
-  const verified = await fs.readFile(temp);
-  if (verified.length !== bytes.length || sha256(verified) !== sha256(bytes)) {
-    await fs.rm(temp, { force: true });
-    throw new Error('Replacement file failed verification');
-  }
-  // Preparing and verifying the replacement can take long enough for another
-  // editor to save. Check again before replacing the origin.
-  if (expectedDigest !== null) {
-    const current = await fs.readFile(targetPath).catch((error) => {
-      if (error?.code === 'ENOENT') return null;
-      throw error;
+  try {
+    const expectedFingerprint = await fingerprintNativeFile(targetPath);
+    if (expectedFingerprint.state !== 'file' || expectedFingerprint.digest !== `sha256:${expectedDigest}`) return false;
+    // Comparing before rename alone loses saves made after that comparison.
+    // The native writer verifies the file moved aside, then publishes exclusively
+    // while the target is absent, preserving concurrent saves and deletions.
+    await writeNativeFileAtomically(targetPath, bytes, {
+      platform, expectedFingerprint, openImpl: fs.open, renameImpl: fs.rename,
     });
-    if (!current || sha256(current) !== expectedDigest) {
-      await fs.rm(temp, { force: true });
-      return false;
-    }
-  }
-  if (platform !== 'win32') {
-    await fs.rename(temp, targetPath);
-    if (originalMode !== null) await fs.chmod(targetPath, originalMode);
     return true;
+  } catch (error) {
+    if (error?.code === NATIVE_FILE_CONFLICT_CODE || error?.code === NATIVE_FILE_ATOMIC_UNSUPPORTED_CODE) return false;
+    // Another writer can recreate the origin after rename-aside. The native
+    // writer retains the displaced file; preserve this newer origin and the
+    // cloud result as separate files rather than trying to restore over it.
+    if (error?.code === NATIVE_FILE_RECOVERY_REQUIRED_CODE && error.cause?.code === NATIVE_FILE_CONFLICT_CODE
+      && await fs.lstat(targetPath).then((info) => info.isFile(), () => false)) return false;
+    throw error;
   }
-  await replaceFileWindowsSafe(temp, targetPath, platform);
-  return true;
 }
 
 export async function applyCloudRecovery({

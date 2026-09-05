@@ -519,7 +519,8 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
   let eventListener: ((event: unknown) => void) | null = null;
   const watchers = new Map<string, AbortController>();
   const eventSequences = new Map<string, number>();
-  const queuedMessages = new Map<string, { id: string; text: string; queuedAt: string; state: 'queued' | 'accepted' }>();
+  const queuedMessages = new Map<string, { id: string; sessionId: string; payloadHash: string; text: string; queuedAt: string; state: 'queued' | 'accepted'; serverQueued?: boolean }>();
+  const queuedMessageKey = (sessionId: string, messageId: string) => JSON.stringify([sessionId, messageId]);
   const dismissed = new Set<string>();
   const archivedSessions = new Map<string, Record<string, unknown>>();
   const completedTakeovers = new Set<string>();
@@ -667,7 +668,8 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
         : { owner: 'local' },
       session: selected ?? { kind: 'idle' },
       sessions: candidates,
-      queuedMessages: [...queuedMessages.values()],
+      queuedMessages: [...queuedMessages.values()].filter((entry) => entry.sessionId === selected?.sessionId)
+        .map(({ id, text, queuedAt, state }) => ({ id, text, queuedAt, state })),
       timeline: selected ? timelines.get(selected.sessionId) ?? null : null,
       updatedAt: new Date().toISOString(),
       ...extra,
@@ -1267,8 +1269,12 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
               if (sequence <= (eventSequences.get(sessionId) ?? 0)) continue;
               const event = JSON.parse(frame.data) as Record<string, unknown>;
               const messageId = String(record(event.payload)?.messageId ?? '');
-              if (event.type === 'message.accepted' && messageId && queuedMessages.has(messageId)) {
-                queuedMessages.set(messageId, { ...queuedMessages.get(messageId)!, state: 'accepted' });
+              const queuedKey = queuedMessageKey(sessionId, messageId);
+              const queued = queuedMessages.get(queuedKey);
+              if (['message.queued', 'message.accepted'].includes(String(event.type))
+                && event.sessionId === sessionId && messageId && queued) {
+                queuedMessages.set(queuedKey, { ...queued, serverQueued: true,
+                  state: event.type === 'message.accepted' ? 'accepted' : queued.state });
               }
               if (event.type !== 'agent.event') await fetchRemoteSessions(controller);
               requireCurrentWatcher(controller, selectedProfile, generation);
@@ -1653,8 +1659,16 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
           }
           : { expectedVersion: input.expectedVersion }),
       };
+      const queuedKey = queuedMessageKey(input.sessionId, messageId);
       if (input.command === 'queue-message' && input.message) {
-        queuedMessages.set(messageId, { id: messageId, text: input.message, queuedAt: new Date().toISOString(), state: 'queued' });
+        const payloadHash = await sha256(utf8(JSON.stringify(payload)));
+        const previous = queuedMessages.get(queuedKey);
+        if (previous && previous.payloadHash !== payloadHash) {
+          throw cloudError('Cloud 메시지 ID가 다른 내용에 다시 사용됐습니다.', 'MESSAGE_ID_CONFLICT');
+        }
+        if (previous?.serverQueued || previous?.state === 'accepted') return snapshot();
+        if (!previous) queuedMessages.set(queuedKey, { id: messageId, sessionId: input.sessionId, payloadHash,
+          text: input.message, queuedAt: new Date().toISOString(), state: 'queued' });
       }
       const commandId = input.command === 'queue-message'
         ? `message_${await sha256(utf8(`${input.sessionId}\0${messageId}`))}`
@@ -1766,8 +1780,17 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
           method: 'POST', body: { commandId, type: serverType, payload }, selectedProfile,
         });
       } catch (error) {
-        if (input.command === 'queue-message') queuedMessages.delete(messageId);
+        requireCurrentProfile(selectedProfile, generation);
+        if (input.command === 'queue-message') {
+          const acknowledged = queuedMessages.get(queuedKey);
+          if (acknowledged?.serverQueued || acknowledged?.state === 'accepted') return snapshot();
+          queuedMessages.delete(queuedKey);
+        }
         throw error;
+      }
+      if (input.command === 'queue-message' && result.messageId === messageId && result.status === 'queued') {
+        const queued = queuedMessages.get(queuedKey);
+        if (queued) queuedMessages.set(queuedKey, { ...queued, serverQueued: true });
       }
       const updated = record(result.session);
       if (updated) remoteSessions = [updated, ...remoteSessions.filter((session) => session.id !== input.sessionId)];

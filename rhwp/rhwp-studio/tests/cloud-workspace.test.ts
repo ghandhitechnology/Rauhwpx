@@ -832,3 +832,141 @@ test('cloud workspace queues the final drag movement before release during a slo
   await new Promise((resolve) => setTimeout(resolve, 60));
   assert.equal(inputs.length, 4, 'disposing cancels pending hover input');
 });
+
+
+test('coalesced movement keeps its order before modifiers, text, and blur releases', async () => {
+  const inputs: any[] = [];
+  const workspace = createCloudWorkspace({
+    display: { async openDisplay(sessionId: string) {
+      return { ...connection(sessionId, []), async sendInput(event: unknown) { inputs.push(event); } };
+    } } as Pick<CloudController, 'openDisplay'>,
+    doc: new TestDocument() as unknown as Document,
+  });
+  workspace.setContext({ visible: true, session: running() });
+  await flushMicrotasks();
+  const root = workspace.root as unknown as TestElement;
+  const canvas = find(root, (node) => node.className === 'cloud-workspace-canvas');
+  const sink = find(root, (node) => node.className === 'cloud-workspace-input');
+  const move = (clientX: number) => canvas.dispatch('pointermove', { clientX, clientY: 20, pointerId: 1 });
+  const key = { key: 'Shift', preventDefault() {} };
+  move(20);
+  sink.dispatch('keydown', key);
+  move(40);
+  sink.dispatch('keyup', key);
+  move(60);
+  Object.assign(sink, { value: '한글' });
+  sink.dispatch('input', { isComposing: false });
+  sink.dispatch('keydown', key);
+  move(80);
+  sink.dispatch('blur', {});
+  assert.deepEqual(inputs.map((event) => event.kind === 'pointer' ? event.x : event.kind === 'key' ? event.action : event.text),
+    [20, 'down', 40, 'up', 60, '한글', 'down', 80, 'up']);
+  workspace.dispose();
+});
+
+for (const outcome of ['success', 'failure'] as const) {
+  test(`a late old-connection ${outcome} cannot change a reconnected viewer's control state`, async () => {
+    const oldInput = deferred<void>();
+    let opens = 0;
+    const workspace = createCloudWorkspace({
+      display: { async openDisplay(sessionId: string) {
+        const first = ++opens === 1;
+        return { ...connection(sessionId, []), sendInput() { return first ? oldInput.promise : Promise.resolve(); } };
+      } } as Pick<CloudController, 'openDisplay'>,
+      doc: new TestDocument() as unknown as Document,
+    });
+    workspace.setContext({ visible: true, session: running() });
+    await flushMicrotasks();
+    const root = workspace.root as unknown as TestElement;
+    const canvas = find(root, (node) => node.className === 'cloud-workspace-canvas');
+    canvas.dispatch('pointerdown', { clientX: 20, clientY: 20, button: 0, pointerId: 1, preventDefault() {} });
+    workspace.setContext({ visible: false, session: running() });
+    workspace.setContext({ visible: true, session: running() });
+    await flushMicrotasks();
+    const status = find(root, (node) => node.className === 'cloud-workspace-status');
+    const before = status.textContent;
+    if (outcome === 'success') oldInput.resolve();
+    else oldInput.reject(new Error('old request lost'));
+    await flushMicrotasks();
+    assert.equal(root.dataset.cloudControl, 'inactive');
+    assert.equal(status.textContent, before);
+    workspace.dispose();
+  });
+}
+
+
+test('losing pointer capture releases a remote drag at its last position exactly once', async () => {
+  const inputs: any[] = [];
+  const workspace = createCloudWorkspace({
+    display: { async openDisplay(sessionId: string) {
+      return { ...connection(sessionId, []), async sendInput(event: unknown) { inputs.push(event); } };
+    } } as Pick<CloudController, 'openDisplay'>,
+    doc: new TestDocument() as unknown as Document,
+  });
+  workspace.setContext({ visible: true, session: running() });
+  await flushMicrotasks();
+  const canvas = find(workspace.root as unknown as TestElement, (node) => node.className === 'cloud-workspace-canvas');
+  canvas.dispatch('pointerdown', { clientX: 20, clientY: 20, button: 0, pointerId: 1, preventDefault() {} });
+  canvas.dispatch('pointermove', { clientX: 150, clientY: 40, pointerId: 1 });
+  canvas.dispatch('lostpointercapture', { clientX: 0, clientY: 0, pointerId: 1 });
+  canvas.dispatch('lostpointercapture', { clientX: 0, clientY: 0, pointerId: 1 });
+  assert.deepEqual(inputs.map(({ action, x, y }) => [action, x, y]), [
+    ['down', 20, 20], ['move', 150, 40], ['up', 150, 40],
+  ]);
+  workspace.dispose();
+});
+
+
+test('IME composition started in one session cannot send its commit to another session', async () => {
+  const inputs: unknown[] = [];
+  const workspace = createCloudWorkspace({
+    display: { async openDisplay(sessionId: string) {
+      return { ...connection(sessionId, []), async sendInput(event: unknown) { inputs.push({ sessionId, event }); } };
+    } } as Pick<CloudController, 'openDisplay'>,
+    doc: new TestDocument() as unknown as Document,
+  });
+  workspace.setContext({ visible: true, session: running('session-a') });
+  await flushMicrotasks();
+  const root = workspace.root as unknown as TestElement;
+  const sink = find(root, (node) => node.className === 'cloud-workspace-input');
+  sink.dispatch('compositionstart', {});
+  Object.assign(sink, { value: '한' });
+  sink.dispatch('input', { isComposing: true });
+  workspace.setContext({ visible: true, session: running('session-b') });
+  await flushMicrotasks();
+  Object.assign(sink, { value: '한글' });
+  sink.dispatch('compositionend', {});
+  sink.dispatch('input', { isComposing: false });
+  await flushMicrotasks();
+  assert.deepEqual(inputs, [], 'the new document must not receive a previous document composition');
+  const recovery = find(root, (node) => node.getAttribute('aria-label') === '전달 여부를 확인하지 못한 입력, 복사해서 보관하세요');
+  assert.equal((recovery as unknown as HTMLTextAreaElement).hidden, true);
+  workspace.setContext({ visible: true, session: running('session-a') });
+  assert.equal((recovery as unknown as HTMLTextAreaElement).value, '한글');
+  assert.equal((recovery as unknown as HTMLTextAreaElement).hidden, false);
+  workspace.dispose();
+});
+
+
+test('Chromium compositionend commits once even without a final non-composing input', async () => {
+  const inputs: unknown[] = [];
+  const workspace = createCloudWorkspace({
+    display: { async openDisplay(sessionId: string) {
+      return { ...connection(sessionId, []), async sendInput(event: unknown) { inputs.push(event); } };
+    } } as Pick<CloudController, 'openDisplay'>,
+    doc: new TestDocument() as unknown as Document,
+  });
+  workspace.setContext({ visible: true, session: running() });
+  await flushMicrotasks();
+  const sink = find(workspace.root as unknown as TestElement, (node) => node.className === 'cloud-workspace-input');
+  for (const inputBeforeEnd of [false, true]) {
+    sink.dispatch('compositionstart', {});
+    Object.assign(sink, { value: '한글' });
+    sink.dispatch('input', { isComposing: true });
+    if (inputBeforeEnd) sink.dispatch('input', { isComposing: false });
+    sink.dispatch('compositionend', { data: '한글' });
+    sink.dispatch('input', { isComposing: false });
+  }
+  assert.deepEqual(inputs, [{ kind: 'text', text: '한글' }, { kind: 'text', text: '한글' }]);
+  workspace.dispose();
+});

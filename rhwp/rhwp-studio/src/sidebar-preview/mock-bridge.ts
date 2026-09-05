@@ -898,6 +898,11 @@ export function createMockBridge(report: (message: string) => void) {
         });
         finish();
       }),
+    interruptIfIdle: () => {
+      if (!running) return false;
+      bridge.interrupt();
+      return true;
+    },
     interrupt: () => {
       generation++;
       completeQuestion({ status: 'cancelled', reason: 'user-stop' });

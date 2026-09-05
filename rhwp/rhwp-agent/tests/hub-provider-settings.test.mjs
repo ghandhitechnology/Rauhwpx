@@ -33,7 +33,7 @@ async function connect(url) {
   };
 }
 
-async function fixture(t) {
+async function fixture(t, { holdStartupDelayMs = 0 } = {}) {
   const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-provider-settings-'));
   const piRoot = path.join(root, 'pi');
   const packageDir = path.join(piRoot, 'prefix/node_modules/@earendil-works/pi-coding-agent');
@@ -52,7 +52,15 @@ async function fixture(t) {
     if (process.argv.includes('--version')) { console.log('0.0.0-test'); process.exit(0); }
     const args = process.argv;
     const prompt = args.at(-1);
-    if (prompt.endsWith('HOLD')) setInterval(() => {}, 1000);
+    const userPrompt = prompt.split('<user_request>').at(-1).split('</user_request>')[0].trim();
+    if (userPrompt === 'HOLD') {
+      const emit = (text) => console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: text } }));
+      setTimeout(() => {
+        emit('HOLD_READY');
+        let tick = 0;
+        setInterval(() => emit('HOLD_TICK:' + (++tick)), 25);
+      }, ${holdStartupDelayMs});
+    }
     else {
       const selected = { model: args[args.indexOf('--model') + 1], effort: args.includes('--thinking') ? args[args.indexOf('--thinking') + 1] : null, prompt };
       console.log(JSON.stringify({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: JSON.stringify(selected) } }));
@@ -100,7 +108,7 @@ async function fixture(t) {
     await studio.next((frame) => frame.type === 'agent-event' && frame.event.type === 'turn-end');
     return JSON.parse(delta.event.text);
   };
-  return { studio, start, turn, url, port: ready.port, sessionId };
+  return { studio, start, turn, url, port: ready.port, sessionId, diagnostics: () => errors.slice(-4000) };
 }
 
 test('live hub applies model/effort/provider changes after a turn and preserves the thread on reconnect', { timeout: 40_000 }, async (t) => {
@@ -141,10 +149,10 @@ test('live hub applies model/effort/provider changes after a turn and preserves 
 });
 
 test('busy and invalid provider changes leave the active turn intact', { timeout: 40_000 }, async (t) => {
-  const { studio, start } = await fixture(t);
+  const { studio, start, diagnostics } = await fixture(t, { holdStartupDelayMs: 250 });
   await start();
   studio.send({ type: 'chat-user-message', text: 'HOLD', threadId: 'thread-settings', documentId: 'document-settings' });
-  await studio.next((frame) => frame.type === 'agent-event' && frame.event.type === 'turn-start');
+  const active = await studio.next((frame) => frame.type === 'agent-event' && frame.event.type === 'turn-start');
   const busy = await start({ effort: 'high' });
   assert.equal(busy.code, 'AGENT_BUSY');
   assert.equal(busy.session.status, 'running');
@@ -152,9 +160,35 @@ test('busy and invalid provider changes leave the active turn intact', { timeout
   const invalid = await start({ agent: 'invalid' });
   assert.equal(invalid.code, 'INVALID_REQUEST');
   assert.equal(invalid.session.status, 'running');
-  assert.equal(studio.frames.some((frame) => frame.type === 'agent-event' && frame.event.type === 'turn-end'), false);
+  const diagnostic = () => JSON.stringify({
+    frames: studio.frames.filter((frame) => frame.type === 'agent-event').slice(-8).map((frame) => ({
+      ...frame, event: { ...frame.event, ...(frame.event.text ? { text: frame.event.text.slice(-800) } : {}) },
+    })), stderr: diagnostics(),
+  });
+  // turn-start precedes spawning the CLI. Prove both startup rejection and
+  // rejection against an actually running process, not merely hub status.
+  const ready = await studio.next((frame) => frame.type === 'agent-event'
+    && (frame.event.type === 'turn-end' || frame.event.type === 'error' || frame.event.text === 'HOLD_READY'));
+  assert.equal(ready.event.text, 'HOLD_READY', `HOLD fixture failed to start: ${JSON.stringify(ready)} ${diagnostic()}`);
+  const runningBusy = await start({ effort: 'high' });
+  assert.equal(runningBusy.code, 'AGENT_BUSY');
+  assert.equal(runningBusy.session.turnId, active.event.turnId);
+  const runningInvalid = await start({ agent: 'invalid' });
+  assert.equal(runningInvalid.code, 'INVALID_REQUEST');
+  assert.equal(runningInvalid.session.turnId, active.event.turnId);
+  // Require a heartbeat produced after both rejections, not one buffered earlier.
+  for (let index = studio.frames.length - 1; index >= 0; index--) {
+    if (studio.frames[index].event?.text?.startsWith('HOLD_TICK:')) studio.frames.splice(index, 1);
+  }
+  const alive = await studio.next((frame) => frame.type === 'agent-event'
+    && (frame.event.type === 'turn-end' || frame.event.type === 'error' || frame.event.text?.startsWith('HOLD_TICK:')));
+  assert.match(alive.event.text ?? '', /^HOLD_TICK:/, `HOLD process stopped: ${JSON.stringify(alive)} ${diagnostic()}`);
+  assert.deepEqual(studio.frames.filter((frame) => frame.type === 'agent-event' && frame.event.type === 'turn-end'), [],
+    `Active provider ended after rejected settings: ${diagnostic()}`);
   studio.send({ type: 'chat-interrupt' });
-  await studio.next((frame) => frame.type === 'agent-event' && frame.event.type === 'turn-end');
+  const stopped = await studio.next((frame) => frame.type === 'agent-event' && frame.event.type === 'turn-end');
+  assert.equal(stopped.event.turnId, active.event.turnId);
+  assert.equal(stopped.event.stopReason, 'interrupted');
   assert.equal((await start({ effort: 'high' })).effort, 'high');
 });
 

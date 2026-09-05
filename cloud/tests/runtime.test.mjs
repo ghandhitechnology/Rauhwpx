@@ -1246,3 +1246,56 @@ test('provider configuration rejects busy, unconnected, invalid and overlapping 
   assert.equal(sessions.getSession(session.id).configurationPending, false);
   assert.equal(sessions.workerManifest(session.id).executionConfig.model, 'gpt-5.6-luna');
 });
+
+test('End on the final allowed turn publishes instead of stranding the ending room at its turn limit', async (t) => {
+  const { sessions, blobs, origin, session, database } = await persistentRoomFixture(t);
+  database.prepare('UPDATE sessions SET max_turns = 1 WHERE id = ?').run(session.id);
+  sessions.beginTurn(session.id, { turnNumber: 1 });
+  sessions.executeCommand(origin.device, session.id, parseCommand({
+    commandId: 'end_final_turn', type: 'session.end', payload: { expectedVersion: sessions.getSession(session.id).stateVersion },
+  }));
+  assert.equal(sessions.completeTurn(session.id, { outcome: 'stopped' }).status, 'running');
+  assert.equal(sessions.claimFinish(session.id).ready, true);
+  const result = await upload(blobs, origin.device.id, Buffer.from('last allowed turn checkpoint'));
+  const completed = sessions.publishResult(session.id, { blobId: result.id, size: result.size });
+  assert.equal(completed.status, 'completed');
+  assert.equal(completed.roomStatus, 'archived');
+});
+
+for (const messageId of [null, 'unfinished_followup']) {
+  test(`active pause preserves ${messageId ? 'the follow-up' : 'the initial goal'} for Resume`, async (t) => {
+    const { sessions, blobs, origin, session, database } = await persistentRoomFixture(t);
+    if (messageId) {
+      sessions.executeCommand(origin.device, session.id, parseCommand({
+        commandId: 'queue_unfinished', type: 'message.queue', payload: { messageId, content: 'Finish the footer' },
+      }));
+      sessions.claimFinish(session.id);
+    }
+    sessions.beginTurn(session.id, { turnNumber: 1, messageId });
+    const wait = sessions.createWait(session.id, { turnNumber: 1, kind: 'question', payload: { question: 'Which date?' } });
+    const checkpoint = await upload(blobs, origin.device.id, Buffer.from('partial edit before pause'));
+    const timeline = await upload(blobs, origin.device.id, Buffer.from('{"history":"unfinished"}'), { name: 'timeline.json', kind: 'timeline' });
+    await sessions.commitBoundary(session.id, {
+      operationId: 'paused_operation', turnNumber: 1, revision: 1, kind: 'operation',
+      checkpoint: { blobId: checkpoint.id, size: checkpoint.size }, timeline: { blobId: timeline.id, size: timeline.size },
+    });
+    const command = (type) => sessions.executeCommand(origin.device, session.id, parseCommand({
+      commandId: type.replace('.', '_'), type, payload: { expectedVersion: sessions.getSession(session.id).stateVersion },
+    }));
+    command('session.pause');
+    sessions.acknowledgePause(session.id);
+    assert.equal(sessions.waitState(session.id, wait.id).status, 'cancelled');
+    assert.equal(database.prepare('SELECT status FROM session_turns WHERE session_id = ?').get(session.id).status, 'queued');
+    command('session.resume');
+    sessions.claimNextSession();
+    const manifest = sessions.workerManifest(session.id);
+    assert.equal(manifest.latestCheckpoint.blobId, checkpoint.id);
+    assert.equal(manifest.latestCheckpoint.kind, 'operation');
+    assert.equal(manifest.limits.turnsUsed, 0);
+    const pending = sessions.claimFinish(session.id).messages;
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].id, messageId);
+    assert.equal(pending[0].content, messageId ? 'Finish the footer' : 'Finish the original task');
+    assert.equal(sessions.beginTurn(session.id, { turnNumber: 1, messageId }).status, 'running');
+  });
+}

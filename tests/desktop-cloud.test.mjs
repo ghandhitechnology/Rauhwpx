@@ -862,7 +862,7 @@ test('result resolution replaces unchanged origins and preserves conflicts', asy
     originalPath: windowsOriginal,
     originalDigest: sha256Hex(original),
     action: 'replace',
-    platform: 'win32',
+    platform: process.platform,
   });
   assert.deepEqual(await readFile(windowsOriginal), cloud);
   assert.deepEqual(await readFile(userBackup), Buffer.from('user-owned-backup'));
@@ -876,16 +876,22 @@ test(`publication preserves an origin ${externalAction} during replacement prepa
   const recoveryPath = path.join(directory, 'recovery.hwpx');
   await writeFile(originalPath, 'original');
   await writeFile(recoveryPath, 'cloud-result');
-  const actualRead = fs.readFile;
+  const actualOpen = fs.open;
   let changed = false;
-  t.mock.method(fs, 'readFile', async (filePath, ...options) => {
-    const bytes = await actualRead(filePath, ...options);
-    if (!changed && String(filePath).endsWith('.tmp')) {
-      changed = true;
-      if (externalAction === 'save') await writeFile(originalPath, 'external edit');
-      else await rm(originalPath);
+  t.mock.method(fs, 'open', async (filePath, ...options) => {
+    const handle = await actualOpen(filePath, ...options);
+    if (String(filePath).endsWith('.tmp')) {
+      const actualSync = handle.sync.bind(handle);
+      t.mock.method(handle, 'sync', async () => {
+        if (!changed) {
+          changed = true;
+          if (externalAction === 'save') await writeFile(originalPath, 'external edit');
+          else await rm(originalPath);
+        }
+        await actualSync();
+      });
     }
-    return bytes;
+    return handle;
   });
   const result = await applyCloudRecovery({
     recoveryPath, originalPath,
@@ -902,6 +908,69 @@ test(`publication preserves an origin ${externalAction} during replacement prepa
   assert.equal((await readdir(directory)).some((name) => name.endsWith('.tmp')), false);
 });
 }
+
+for (const externalAction of ['save', 'delete']) {
+test(`publication preserves an origin ${externalAction} at the final rename boundary`, async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-rename-race-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const originalPath = path.join(directory, 'report.hwpx');
+  const recoveryPath = path.join(directory, 'recovery.hwpx');
+  await writeFile(originalPath, 'original');
+  await writeFile(recoveryPath, 'cloud-result');
+  const actualRename = fs.rename;
+  let changed = false;
+  t.mock.method(fs, 'rename', async (from, to) => {
+    if (!changed && (from === originalPath || to === originalPath && String(from).endsWith('.tmp'))) {
+      changed = true;
+      if (externalAction === 'save') await writeFile(originalPath, 'external latest');
+      else await rm(originalPath);
+    }
+    return actualRename(from, to);
+  });
+  const result = await applyCloudRecovery({
+    recoveryPath, originalPath,
+    originalDigest: sha256Hex(Buffer.from('original')),
+    resultDigest: sha256Hex(Buffer.from('cloud-result')),
+    action: 'replace', resolutionId: 'rename-boundary-race',
+  });
+  assert.equal(changed, true);
+  assert.equal(result.conflict, true);
+  assert.equal(result.action, 'keep-both');
+  assert.equal(await readFile(result.path, 'utf8'), 'cloud-result');
+  if (externalAction === 'save') assert.equal(await readFile(originalPath, 'utf8'), 'external latest');
+  else await assert.rejects(readFile(originalPath), { code: 'ENOENT' });
+  assert.equal((await readdir(directory)).some((name) => name.endsWith('.tmp')), false);
+});
+}
+
+test('publication preserves a new destination created after the origin moves aside', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-exclusive-race-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const originalPath = path.join(directory, 'report.hwpx');
+  const recoveryPath = path.join(directory, 'recovery.hwpx');
+  await writeFile(originalPath, 'original');
+  await writeFile(recoveryPath, 'cloud-result');
+  const actualRename = fs.rename;
+  let displaced;
+  t.mock.method(fs, 'rename', async (from, to) => {
+    await actualRename(from, to);
+    if (from === originalPath) {
+      displaced = to;
+      await writeFile(originalPath, 'new external generation');
+    }
+  });
+  const result = await applyCloudRecovery({
+    recoveryPath, originalPath,
+    originalDigest: sha256Hex(Buffer.from('original')),
+    resultDigest: sha256Hex(Buffer.from('cloud-result')),
+    action: 'replace', resolutionId: 'exclusive-publication-race',
+  });
+  assert.equal(result.conflict, true);
+  assert.equal(result.action, 'keep-both');
+  assert.equal(await readFile(originalPath, 'utf8'), 'new external generation');
+  assert.equal(await readFile(result.path, 'utf8'), 'cloud-result');
+  assert.equal(await readFile(displaced, 'utf8'), 'original');
+});
 
 test('client rotates tokens, verifies server pin, and parses SSE frames', async () => {
   const profile = normalizeCloudProfile({

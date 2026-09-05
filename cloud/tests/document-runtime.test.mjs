@@ -1370,55 +1370,62 @@ test('recovered persistent sessions open Studio before waiting for another agent
 });
 
 for (const controlName of ['pauseRequested', 'takeoverRequested', 'redirectRequested', 'endRequested']) {
-  test(`${controlName} interrupts a durable wait without requiring a user answer`, async (t) => {
-    const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'raucloud-wait-control-'));
-    t.after(() => fs.rm(workspace, { recursive: true, force: true }));
-    const document = path.join(workspace, 'document.hwp');
-    const timeline = path.join(workspace, 'input-timeline.json');
-    await fs.writeFile(document, 'stable edit');
-    await fs.writeFile(timeline, JSON.stringify(portableTimeline()));
-    const completions = [];
-    let acknowledged = false;
-    const result = await runSession({
-      workspace, credentials: {},
-      manifest: {
-        sessionId: 'wait-control', provider: 'codex', persistent: true, goal: 'Edit',
-        resources: [{ kind: 'document', name: 'document.hwp', filename: document }, { kind: 'timeline', name: 'timeline.json', filename: timeline }],
-        limits: { maxDurationSeconds: 900, maxTurns: 10 },
-      },
-      client: {
-        event: async () => {}, beginTurn: async () => {},
-        upload: async (filename) => {
-          const bytes = await fs.readFile(filename);
-          return { id: createHash('sha256').update(bytes).digest('hex'), size: bytes.length };
+  for (const stage of ['durable wait', 'provider turn', 'wait creation race']) {
+    test(`${controlName} checkpoints and acknowledges an interrupted ${stage}`, async (t) => {
+      const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'raucloud-wait-control-'));
+      t.after(() => fs.rm(workspace, { recursive: true, force: true }));
+      const document = path.join(workspace, 'document.hwp');
+      const timeline = path.join(workspace, 'input-timeline.json');
+      await fs.writeFile(document, 'stable edit');
+      await fs.writeFile(timeline, JSON.stringify(portableTimeline()));
+      const completions = [];
+      let acknowledged = false;
+      const result = await runSession({
+        workspace, credentials: {},
+        manifest: {
+          sessionId: 'wait-control', provider: 'codex', persistent: true, goal: 'Edit',
+          resources: [{ kind: 'document', name: 'document.hwp', filename: document }, { kind: 'timeline', name: 'timeline.json', filename: timeline }],
+          limits: { maxDurationSeconds: 900, maxTurns: 10 },
         },
-        commitBoundary: async (boundary) => boundary,
-        createWait: async () => ({ id: 'wait-1', status: 'pending' }),
-        wait: async () => assert.fail('A pending safe-boundary control must not wait for a decision'),
-        control: async () => ({ [controlName]: true }),
-        completeTurn: async (completion) => { completions.push(completion); return { status: 'running' }; },
-        finishClaim: async () => ({ ready: true, messages: [] }),
-        takeoverReady: async () => {},
-        takeoverAck: async () => { acknowledged = true; },
-        pauseAck: async () => { acknowledged = true; },
-      },
-      createHarness: async () => ({
-        start: async () => {}, close: async () => {},
-        runTurn: async () => ({ wait: { kind: 'question', payload: { question: 'Which title?' } } }),
-        exportDocument: async (_format, filename) => {
-          const bytes = Buffer.from('stable edit');
-          await fs.writeFile(filename, bytes);
-          return { sha256: createHash('sha256').update(bytes).digest('hex'), size: bytes.length };
+        client: {
+          event: async () => {}, beginTurn: async () => {},
+          upload: async (filename) => {
+            const bytes = await fs.readFile(filename);
+            return { id: createHash('sha256').update(bytes).digest('hex'), size: bytes.length };
+          },
+          commitBoundary: async (boundary) => boundary,
+          createWait: async () => {
+            if (stage === 'wait creation race') throw Object.assign(new Error('Conversation cannot enter a user wait'), { code: 'INVALID_SESSION_STATE' });
+            return { id: 'wait-1', status: 'pending' };
+          },
+          wait: async () => assert.fail('A pending safe-boundary control must not wait for a decision'),
+          control: async () => ({ [controlName]: true }),
+          completeTurn: async (completion) => { completions.push(completion); return { status: 'running' }; },
+          finishClaim: async () => ({ ready: true, messages: [] }),
+          takeoverReady: async () => {},
+          takeoverAck: async () => { acknowledged = true; },
+          pauseAck: async () => { acknowledged = true; },
         },
-      }),
+        createHarness: async () => ({
+          start: async () => {}, close: async () => {},
+          runTurn: async () => stage !== 'provider turn'
+            ? { wait: { kind: 'question', payload: { question: 'Which title?' } } }
+            : { stopReason: 'interrupted', redirected: controlName === 'redirectRequested', stopped: controlName !== 'redirectRequested' },
+          exportDocument: async (_format, filename) => {
+            const bytes = Buffer.from('stable edit');
+            await fs.writeFile(filename, bytes);
+            return { sha256: createHash('sha256').update(bytes).digest('hex'), size: bytes.length };
+          },
+        }),
+      });
+      assert.equal(completions.length, controlName === 'pauseRequested' ? 0 : 1);
+      if (completions.length) assert.equal(completions[0].outcome, controlName === 'redirectRequested' ? 'redirected' : 'stopped');
+      if (controlName === 'pauseRequested') assert.equal(result.paused, true);
+      if (controlName === 'takeoverRequested') assert.equal(result.takenOver, true);
+      if (['pauseRequested', 'takeoverRequested'].includes(controlName)) assert.equal(acknowledged, true);
+      else assert.equal(await fs.readFile(result.resultPath, 'utf8'), 'stable edit');
     });
-    assert.equal(completions.length, 1);
-    assert.equal(completions[0].outcome, controlName === 'redirectRequested' ? 'redirected' : 'stopped');
-    if (controlName === 'pauseRequested') assert.equal(result.paused, true);
-    if (controlName === 'takeoverRequested') assert.equal(result.takenOver, true);
-    if (['pauseRequested', 'takeoverRequested'].includes(controlName)) assert.equal(acknowledged, true);
-    else assert.equal(await fs.readFile(result.resultPath, 'utf8'), 'stable edit');
-  });
+  }
 }
 
 test('question workflow reaches Studio and the durable turn without becoming an editing turn', async (t) => {

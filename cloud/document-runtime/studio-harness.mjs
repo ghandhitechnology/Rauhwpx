@@ -530,6 +530,100 @@ export async function launchChromium(puppeteer, options) {
   );
 }
 
+// The production event loop is independent of provider startup so control and
+// event-ordering regressions can be exercised without launching a provider.
+export async function observeStudioTurn({
+  page, bootstrap, execution, hub, hubError = () => '', onEvent,
+  onSafeBoundary = null, readControl = null, eventSequence = 0,
+  onSequence = () => {}, sentAt = Date.now(), timeoutMs,
+}) {
+  let sawStart = false;
+  let planId = null;
+  let presentedPlan = null;
+  let implementationStarted = execution.workflow !== 'plan';
+  let interruptRequested = null;
+  const activeRootTools = new Map();
+  const interruptAtSafeBoundary = async () => {
+    if (interruptRequested || typeof readControl !== 'function' || activeRootTools.size > 0) return;
+    const control = await readControl();
+    if (!control?.redirectRequested && !control?.pauseRequested && !control?.takeoverRequested && !control?.endRequested) return;
+    const receipt = await withTimeout(
+      page.evaluate(
+        (secret, after) => window.rauhwpxCloudRuntime.interruptIfIdle(secret, after),
+        bootstrap, eventSequence,
+      ),
+      30_000,
+      'TURN_INTERRUPT_TIMEOUT',
+      'Cloud Studio control interrupt timed out',
+    );
+    if (receipt?.interrupted === true) interruptRequested = control;
+  };
+  while (Date.now() - sentAt < timeoutMs) {
+    const entries = await withTimeout(
+      page.evaluate(
+        (secret, after) => window.rauhwpxCloudRuntime.drainEvents(secret, after),
+        bootstrap,
+        eventSequence,
+      ),
+      30_000,
+      'EVENT_DRAIN_TIMEOUT',
+      'Cloud Studio event drain timed out',
+    );
+    for (const entry of entries) {
+      eventSequence = Math.max(eventSequence, Number(entry.seq) || 0);
+      onSequence(eventSequence);
+      await onEvent(entry.event);
+      if (entry.event?.type === 'plan-ready') {
+        planId = String(entry.event.plan?.planId ?? entry.event.planId ?? '') || null;
+        presentedPlan = entry.event.plan ?? null;
+      }
+      if (entry.event?.type === 'implementation-started') implementationStarted = true;
+      if (entry.event?.type === 'hub-error') {
+        throw runtimeError(String(entry.event.code || 'AGENT_HUB_ERROR'), String(entry.event.message || 'Agent hub failed'));
+      }
+      const agentEvent = entry.event?.type === 'agent' ? entry.event.event : null;
+      if (agentEvent?.type === 'turn-start') sawStart = true;
+      if (agentEvent?.type === 'tool-call' && !agentEvent.parentTaskId) {
+        activeRootTools.set(agentEvent.callId, agentEvent.tool);
+      }
+      if (agentEvent?.type === 'tool-result' && !agentEvent.parentTaskId) {
+        const tool = activeRootTools.get(agentEvent.callId);
+        activeRootTools.delete(agentEvent.callId);
+        if (agentEvent.ok === true && typeof onSafeBoundary === 'function') {
+          await onSafeBoundary({ ...agentEvent, tool });
+        }
+      }
+      if (agentEvent?.type === 'turn-end' && sawStart) {
+        if (interruptRequested && agentEvent.stopReason === 'interrupted') {
+          return {
+            ...agentEvent,
+            redirected: interruptRequested.redirectRequested === true,
+            stopped: interruptRequested.redirectRequested !== true,
+          };
+        }
+        if (agentEvent.errorMessage || !['end_turn', 'completed', 'success'].includes(agentEvent.stopReason)) return agentEvent;
+        if (execution.workflow === 'plan' && !implementationStarted) {
+          if (!planId) throw runtimeError('PLAN_NOT_PRESENTED', 'Planning workflow ended without a structured implementation plan');
+          return {
+            ...agentEvent,
+            wait: {
+              kind: 'plan-approval',
+              payload: { planId, plan: presentedPlan },
+            },
+          };
+        }
+        return agentEvent;
+      }
+    }
+    await interruptAtSafeBoundary();
+    if (hub.exitCode !== null || hub.signalCode) {
+      throw runtimeError('AGENT_HUB_FAILED', `Rauhwpx agent hub exited during the turn: ${hubError().trim().slice(-2_000)}`);
+    }
+    await delay(200);
+  }
+  throw runtimeError('TURN_TIMEOUT', 'Cloud provider turn exceeded the session deadline');
+}
+
 export async function createStudioHarness({
   manifest,
   workspace,
@@ -811,80 +905,11 @@ export async function createStudioHarness({
             'Cloud Studio did not accept the user message',
           );
         }
-        let sawStart = false;
-        let planId = null;
-        let presentedPlan = null;
-        let implementationStarted = execution.workflow !== 'plan';
-        let interruptRequested = false;
-        const activeRootTools = new Map();
-        const interruptAtSafeBoundary = async () => {
-          if (interruptRequested || typeof readControl !== 'function' || activeRootTools.size > 0) return;
-          const control = await readControl();
-          if (control?.redirectRequested !== true) return;
-          interruptRequested = true;
-          await withTimeout(
-            page.evaluate((secret) => window.rauhwpxCloudRuntime.interrupt(secret), bootstrap),
-            30_000,
-            'TURN_INTERRUPT_TIMEOUT',
-            'Cloud Studio redirect interrupt timed out',
-          );
-        };
-        while (Date.now() - sentAt < timeoutMs) {
-          const entries = await withTimeout(
-            page.evaluate(
-              (secret, after) => window.rauhwpxCloudRuntime.drainEvents(secret, after),
-              bootstrap,
-              eventSequence,
-            ),
-            30_000,
-            'EVENT_DRAIN_TIMEOUT',
-            'Cloud Studio event drain timed out',
-          );
-          for (const entry of entries) {
-            eventSequence = Math.max(eventSequence, Number(entry.seq) || 0);
-            await onEvent(entry.event);
-            if (entry.event?.type === 'plan-ready') {
-              planId = String(entry.event.plan?.planId ?? entry.event.planId ?? '') || null;
-              presentedPlan = entry.event.plan ?? null;
-            }
-            if (entry.event?.type === 'implementation-started') implementationStarted = true;
-            if (entry.event?.type === 'hub-error') {
-              throw runtimeError(String(entry.event.code || 'AGENT_HUB_ERROR'), String(entry.event.message || 'Agent hub failed'));
-            }
-            const agentEvent = entry.event?.type === 'agent' ? entry.event.event : null;
-            if (agentEvent?.type === 'turn-start') sawStart = true;
-            if (agentEvent?.type === 'tool-call' && !agentEvent.parentTaskId) {
-              activeRootTools.set(agentEvent.callId, agentEvent.tool);
-            }
-            if (agentEvent?.type === 'tool-result' && !agentEvent.parentTaskId) {
-              const tool = activeRootTools.get(agentEvent.callId);
-              activeRootTools.delete(agentEvent.callId);
-              if (agentEvent.ok === true && typeof onSafeBoundary === 'function') {
-                await onSafeBoundary({ ...agentEvent, tool });
-              }
-              await interruptAtSafeBoundary();
-            }
-            if (agentEvent?.type === 'turn-end' && sawStart) {
-              if (execution.workflow === 'plan' && !implementationStarted) {
-                if (!planId) throw runtimeError('PLAN_NOT_PRESENTED', 'Planning workflow ended without a structured implementation plan');
-                return {
-                  ...agentEvent,
-                  wait: {
-                    kind: 'plan-approval',
-                    payload: { planId, plan: presentedPlan },
-                  },
-                };
-              }
-              return { ...agentEvent, redirected: interruptRequested && agentEvent.stopReason === 'interrupted' };
-            }
-          }
-          await interruptAtSafeBoundary();
-          if (hub.exitCode !== null || hub.signalCode) {
-            throw runtimeError('AGENT_HUB_FAILED', `Rauhwpx agent hub exited during the turn: ${hubErrorTail.trim().slice(-2_000)}`);
-          }
-          await delay(200);
-        }
-        throw runtimeError('TURN_TIMEOUT', 'Cloud provider turn exceeded the session deadline');
+        return observeStudioTurn({
+          page, bootstrap, execution, hub, hubError: () => hubErrorTail,
+          onEvent, onSafeBoundary, readControl, eventSequence, sentAt, timeoutMs,
+          onSequence: (sequence) => { eventSequence = sequence; },
+        });
       },
       async setWorkflow(workflow) {
         assertBrowserHealthy();

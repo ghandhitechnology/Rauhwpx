@@ -1333,13 +1333,20 @@ export class SessionStore {
       if (row.takeover_requested_at) throw new CloudError('TAKEOVER_PENDING', 'Takeover superseded the pause request', 409);
       const now = this.now();
       const reason = { code: 'USER_PAUSED', message: 'Paused at a stable worker boundary' };
+      const turnRecovery = this.#recoverInterruptedTurnInTransaction(row, now);
       this.database.prepare(`
         UPDATE sessions SET status = 'suspended', pause_requested_at = NULL, state_version = state_version + 1,
           suspended_reason = ?, expires_at = ?, finishing_at = NULL, sandbox_id = NULL, worker_token_hash = NULL,
-          worker_heartbeat_at = NULL, updated_at = ? WHERE id = ?
+          worker_heartbeat_at = NULL, current_turn_id = NULL, current_wait_id = NULL,
+          execution_phase = CASE WHEN protocol_version = 2 THEN 'waiting' ELSE execution_phase END,
+          updated_at = ? WHERE id = ?
       `).run(JSON.stringify(reason), now + SUSPENDED_RETENTION_MS, now, sessionId);
+      this.database.prepare(`
+        UPDATE session_messages SET status = 'queued', delivered_at = NULL
+        WHERE session_id = ? AND status = 'delivered'
+      `).run(sessionId);
       event = this.#appendEventInTransaction(sessionId, 'session.suspended', {
-        status: 'suspended', reason, safeBoundary: true,
+        status: 'suspended', reason, safeBoundary: true, turnRecovery,
       });
       return this.getSession(sessionId);
     });
@@ -1681,7 +1688,7 @@ export class SessionStore {
       }
       if (row.status !== 'running') throw new CloudError('INVALID_SESSION_STATE', 'Session is not running', 409);
       const turnsUsed = row.turns_used + 1;
-      const controlPending = Boolean(row.pause_requested_at || row.takeover_requested_at);
+      const controlPending = Boolean(row.pause_requested_at || row.takeover_requested_at || row.end_requested_at);
       const exhausted = turnsUsed >= row.max_turns && !controlPending;
       const status = exhausted ? 'suspended' : 'running';
       const reason = exhausted ? { code: 'TURN_LIMIT', message: 'Turn limit reached' } : null;

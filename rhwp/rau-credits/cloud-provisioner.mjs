@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 
 export const RAILWAY_API_URL = 'https://backboard.railway.com/graphql/v2';
-export const RAILWAY_DEFAULT_IMAGE = 'ghcr.io/ghandhitechnology/rauhwpx-cloud:1.1.0-edge.15';
+export const RAILWAY_DEFAULT_IMAGE = 'ghcr.io/ghandhitechnology/rauhwpx-cloud:1.1.0-edge.16';
 export const RAUCLOUD_BASE_PATH = '/rauhwpx-cloud';
 export const RAUCLOUD_PORT = 7740;
 
@@ -382,7 +382,7 @@ export function createRailwayCloudProvisioner({
       return { removed: true };
     },
 
-    async reconcileRaucloud({ keepServiceNames = [], limit = 100 } = {}) {
+    async reconcileRaucloud({ keepServiceNames = [], shouldKeepService = null, limit = 100 } = {}) {
       const keep = new Set(keepServiceNames.map((name) => clean(name, 160)).filter(Boolean));
       const orphans = (await projectServices())
         .filter((service) => {
@@ -395,6 +395,7 @@ export function createRailwayCloudProvisioner({
       let removed = 0;
       for (const service of orphans) {
         try {
+          if (shouldKeepService && await shouldKeepService(service)) continue;
           await this.teardown({
             providerId: 'railway',
             serviceId: service.id,

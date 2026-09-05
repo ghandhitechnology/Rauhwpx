@@ -163,8 +163,9 @@ export function createCloudWorkspace({
   let controlling = false;
   let pendingMove: Extract<CloudDisplayInputEvent, { kind: 'pointer'; action: 'move' }> | null = null;
   let moveTimer: ReturnType<typeof setTimeout> | null = null;
+  let compositionOwner: { sessionId: string | null; generation: number } | null = null;
   const pressedKeys = new Set<string>();
-  type PointerPress = { button: 'left' | 'middle' | 'right' | 'back' | 'forward'; clickCount: number; x: number; y: number; time: number; dragged: boolean };
+  type PointerPress = { button: 'left' | 'middle' | 'right' | 'back' | 'forward'; clickCount: number; x: number; y: number; time: number; dragged: boolean; point: { x: number; y: number } };
   const pressedPointers = new Map<number, PointerPress>();
   let lastClick: PointerPress | null = null;
   const listeners = new Set<(value: CloudDisplayState) => void>();
@@ -209,19 +210,21 @@ export function createCloudWorkspace({
 
   const sendInput = (event: CloudDisplayInputEvent): Promise<void> => {
     const target = connection;
+    const inputGeneration = generation;
     if (!target || target.capability.kind !== 'available' || currentSessionId !== contextSessionId) {
       return Promise.reject(Object.assign(new Error('Cloud display input is unavailable'), {
         code: 'DISPLAY_INPUT_UNAVAILABLE',
       }));
     }
     return target.sendInput(event).then(() => {
+      if (disposed || connection !== target || inputGeneration !== generation) return;
       if (!controlling) {
         controlling = true;
         root.dataset.cloudControl = 'active';
         status.textContent = 'Cloud 화면 연결됨 · 원격 제어 중';
       }
     }, (error) => {
-      reportInputError(error);
+      if (!disposed && connection === target && inputGeneration === generation) reportInputError(error);
       throw error;
     });
   };
@@ -237,7 +240,21 @@ export function createCloudWorkspace({
     void sendInput(event).catch(() => {});
   };
 
-  const sendText = (text: string): void => {
+  const recoverText = (text: string, sessionId: string | null): void => {
+    if (!sessionId) return;
+    recoveryNotes.set(sessionId, (recoveryNotes.get(sessionId) ?? '') + text);
+    if (contextSessionId !== sessionId) return;
+    recoveredInput.hidden = false;
+    recoveredInput.value = recoveryNotes.get(sessionId)!;
+    status.textContent = '입력 적용 여부를 확인하지 못했습니다. 아래 텍스트를 복사하고 문서와 비교해 주세요.';
+  };
+
+  const sendText = (text: string, owner: typeof compositionOwner = null): void => {
+    if (owner && (owner.sessionId !== contextSessionId || owner.generation !== generation)) {
+      recoverText(text, owner.sessionId);
+      return;
+    }
+    flushMove();
     const encoder = new TextEncoder();
     let chunk = '';
     let chunkBytes = 0;
@@ -246,12 +263,7 @@ export function createCloudWorkspace({
         const attempted = chunk;
         const attemptedSession = contextSessionId;
         void sendInput({ kind: 'text', text: attempted }).catch(() => {
-          if (!attemptedSession) return;
-          recoveryNotes.set(attemptedSession, (recoveryNotes.get(attemptedSession) ?? '') + attempted);
-          if (contextSessionId !== attemptedSession) return;
-          recoveredInput.hidden = false;
-          recoveredInput.value = recoveryNotes.get(attemptedSession)!;
-          status.textContent = '입력 적용 여부를 확인하지 못했습니다. 아래 텍스트를 복사하고 문서와 비교해 주세요.';
+          recoverText(attempted, attemptedSession);
         });
       }
       chunk = '';
@@ -514,6 +526,7 @@ export function createCloudWorkspace({
     if (press && Math.hypot(event.clientX - press.x, event.clientY - press.y) > 5) press.dragged = true;
     const point = displayPoint(event);
     if (!point) return;
+    if (press) press.point = point;
     pendingMove = { kind: 'pointer', action: 'move', ...point };
     // Leave room under the server's 60 events/second limit for clicks and keys.
     if (!moveTimer) moveTimer = setTimeout(flushMove, 50);
@@ -531,7 +544,7 @@ export function createCloudWorkspace({
       && time - lastClick.time <= 500 && Math.hypot(event.clientX - lastClick.x, event.clientY - lastClick.y) <= 5;
     const clickCount = event.detail > 0 ? Math.min(3, event.detail)
       : repeated ? lastClick!.clickCount % 3 + 1 : 1;
-    pressedPointers.set(event.pointerId, { button, clickCount, x: event.clientX, y: event.clientY, time, dragged: false });
+    pressedPointers.set(event.pointerId, { button, clickCount, x: event.clientX, y: event.clientY, time, dragged: false, point });
     lastClick = null;
     pendingMove = null;
     if (moveTimer) clearTimeout(moveTimer);
@@ -541,8 +554,8 @@ export function createCloudWorkspace({
   canvas.addEventListener('pointerup', (event) => {
     const point = displayPoint(event);
     const press = pressedPointers.get(event.pointerId);
-    const button = press?.button ?? pointerButton(event.button);
-    if (!point || !button) return;
+    if (!point || !press) return;
+    const button = press.button;
     event.preventDefault();
     flushMove();
     void sendInput({ kind: 'pointer', action: 'up', ...point, button, clickCount: press?.clickCount ?? 1 }).catch(() => {});
@@ -552,15 +565,16 @@ export function createCloudWorkspace({
     pressedPointers.delete(event.pointerId);
     canvas.releasePointerCapture?.(event.pointerId);
   });
-  canvas.addEventListener('pointercancel', (event) => {
-    const point = displayPoint(event);
+  const cancelPointer = (event: PointerEvent): void => {
     const press = pressedPointers.get(event.pointerId);
-    if (!point || !press) return;
+    if (!press) return;
     flushMove();
     pressedPointers.delete(event.pointerId);
     lastClick = null;
-    void sendInput({ kind: 'pointer', action: 'up', ...point, button: press.button, clickCount: press.clickCount }).catch(() => {});
-  });
+    void sendInput({ kind: 'pointer', action: 'up', ...press.point, button: press.button, clickCount: press.clickCount }).catch(() => {});
+  };
+  canvas.addEventListener('pointercancel', cancelPointer);
+  canvas.addEventListener('lostpointercapture', cancelPointer);
   canvas.addEventListener('contextmenu', (event) => event.preventDefault());
   canvas.addEventListener('wheel', (event) => {
     const point = displayPoint(event);
@@ -581,19 +595,37 @@ export function createCloudWorkspace({
       && !event.isComposing;
     if (localText) return;
     event.preventDefault();
+    flushMove();
     pressedKeys.add(event.key);
     void sendInput({ kind: 'key', action: 'down', key: event.key }).catch(() => {});
   });
   inputSink.addEventListener('keyup', (event) => {
     if (!pressedKeys.delete(event.key)) return;
     event.preventDefault();
+    flushMove();
     void sendInput({ kind: 'key', action: 'up', key: event.key }).catch(() => {});
   });
-  inputSink.addEventListener('input', (event) => {
-    if (event.isComposing) return;
+  inputSink.addEventListener('compositionstart', () => {
+    compositionOwner = { sessionId: contextSessionId, generation };
+  });
+  const commitInputText = (): void => {
     const text = inputSink.value;
     inputSink.value = '';
-    if (text) sendText(text);
+    const owner = compositionOwner;
+    compositionOwner = null;
+    if (text) sendText(text, owner);
+  };
+  inputSink.addEventListener('compositionend', () => {
+    // Chromium can finish with only composing input events. Other browsers may
+    // already have emitted the final input, which clears this owner and value.
+    if (compositionOwner) commitInputText();
+  });
+  inputSink.addEventListener('input', (event) => {
+    if (event.isComposing) {
+      compositionOwner ??= { sessionId: contextSessionId, generation };
+      return;
+    }
+    commitInputText();
   });
   inputSink.addEventListener('paste', (event) => {
     const text = event.clipboardData?.getData('text/plain') ?? '';
@@ -603,6 +635,7 @@ export function createCloudWorkspace({
     sendText(text);
   });
   inputSink.addEventListener('blur', () => {
+    flushMove();
     for (const key of pressedKeys) void sendInput({ kind: 'key', action: 'up', key }).catch(() => {});
     pressedKeys.clear();
   });

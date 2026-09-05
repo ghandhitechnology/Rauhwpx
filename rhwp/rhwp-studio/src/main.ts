@@ -565,10 +565,15 @@ function installCloudDocumentRuntimeApi(agentBridge: AgentBridge): boolean {
       agentBridge.setWorkflow(workflow);
       return { workflow };
     },
-    interrupt(secret: unknown) {
+    interruptIfIdle(secret: unknown, lastObservedSequence: unknown) {
       requireSecret(secret);
-      agentBridge.interrupt();
-      return { interrupted: true };
+      // No await between checking the event cursor, checking live tool requests,
+      // and fencing the provider turn. Events received after the worker's last
+      // drain must be handled before it can interrupt at a safe boundary.
+      if (!Number.isSafeInteger(lastObservedSequence) || lastObservedSequence !== eventSequence) {
+        return { interrupted: false };
+      }
+      return { interrupted: agentBridge.interruptIfIdle() };
     },
     drainEvents(secret: unknown, afterSequence: unknown) {
       requireSecret(secret);

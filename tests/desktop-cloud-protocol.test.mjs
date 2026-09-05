@@ -572,8 +572,9 @@ test('command response advances state before its matching SSE event arrives', as
   assert.equal(record.serverVersion, 3);
 });
 
+for (const receiptState of ['queued', 'accepted']) {
 for (const lostReceipt of [false, true]) {
-test(`queued message remains accepted when SSE wins ${lostReceipt ? 'a lost' : 'the'} command response race`, async (t) => {
+test(`queued message remains ${receiptState} when its SSE receipt wins ${lostReceipt ? 'a lost' : 'the'} command response race`, async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-message-race-'));
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
   const created = await store.create({
@@ -585,6 +586,7 @@ test(`queued message remains accepted when SSE wins ${lostReceipt ? 'a lost' : '
   await store.transition(created.id, 'committing');
   await store.transition(created.id, 'running', { cloudSessionId: 'cloud-1', serverVersion: 2 });
 
+  let commandCalls = 0;
   let deliverEvent;
   let watcherReadyResolve;
   const watcherReady = new Promise((resolve) => { watcherReadyResolve = resolve; });
@@ -598,12 +600,13 @@ test(`queued message remains accepted when SSE wins ${lostReceipt ? 'a lost' : '
         await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
       },
       command: async (_sessionId, type, payload, commandId) => {
+        commandCalls++;
         assert.equal(type, 'message.queue');
         assert.equal(payload.messageId, 'message-1');
         assert.match(commandId, /^message_[a-f0-9]{64}$/);
         await deliverEvent({
           sequence: 7,
-          type: 'message.accepted',
+          type: `message.${receiptState}`,
           payload: { status: 'running', stateVersion: 2, messageId: 'message-1' },
         });
         if (lostReceipt) throw Object.assign(new Error('command receipt lost'), { code: 'ETIMEDOUT' });
@@ -627,12 +630,19 @@ test(`queued message remains accepted when SSE wins ${lostReceipt ? 'a lost' : '
     message: 'Use the revised totals', messageId: 'message-1',
   });
   assert.deepEqual(snapshot.queuedMessages.map(({ id, state }) => ({ id, state })), [
-    { id: 'message-1', state: 'accepted' },
+    { id: 'message-1', state: receiptState },
   ]);
   const record = await store.get(created.id);
   assert.equal(record.lastEventSequence, 7);
-  assert.equal(record.queuedMessages[0].state, 'accepted');
+  assert.equal(record.queuedMessages[0].state, receiptState);
+  await coordinator.command({ sessionId: 'cloud-1', command: 'queue-message', expectedVersion: 3,
+    message: 'Use the revised totals', messageId: 'message-1' });
+  assert.equal(commandCalls, 1, 'a verified queue receipt prevents an unnecessary retry');
+  await assert.rejects(coordinator.command({ sessionId: 'cloud-1', command: 'queue-message',
+    message: 'Different content', messageId: 'message-1' }), { code: 'MESSAGE_ID_CONFLICT' });
 });
+}
+
 }
 
 for (const explicitIds of [false, true]) {
@@ -3274,6 +3284,94 @@ test('a PUT-only sandbox falls through from seed to transfer-time auth import', 
       files: { '.codex/auth.json': '{"token":"oauth"}' },
     }],
   ]);
+});
+
+test('provider configuration holds its server lease through auth import and preserves dirty document identity', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-configure-'));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const profileA = normalizeCloudProfile({
+    endpoint: 'https://configure-a.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'configure-a.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const originPath = path.join(directory, 'source.hwpx');
+  await writeFile(originPath, 'saved origin');
+  const created = await store.create({
+    sessionId: 'desktop-configuration', threadId: 'thread-configuration', documentId: 'document-configuration',
+    documentName: 'source.hwpx', documentBytes: Buffer.from('unsaved document changes'),
+    originPath, originDigest: createDigest(Buffer.from('saved origin')), timeline: null,
+    provider: 'codex', executionConfig: { model: 'gpt-5.6', effort: 'high', workflow: 'direct' },
+    limits: { maxTurns: 100 }, destination: {
+      endpoint: profileA.endpoint, serverPublicKey: SERVER_KEY, mode: profileA.mode,
+      sandboxId: null, sandboxProvider: null,
+    },
+  });
+  await store.transition(created.id, 'uploading');
+  await store.transition(created.id, 'committing');
+  await store.transition(created.id, 'running', { cloudSessionId: 'configuration-room', serverVersion: 2 });
+  const authEntered = Promise.withResolvers();
+  const releaseAuth = Promise.withResolvers();
+  let activeProfile = profileA;
+  const calls = [];
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => activeProfile,
+      isPaired: async () => true,
+      putProviderAuth: async (provider, auth) => {
+        calls.push(['auth', activeProfile.endpoint, provider, auth]);
+        authEntered.resolve();
+        await releaseAuth.promise;
+      },
+      command: async (sessionId, command, payload) => {
+        calls.push(['command', activeProfile.endpoint, sessionId, command, payload]);
+        return { session: { id: sessionId, status: 'running', stateVersion: 3, provider: 'claude',
+          configurationSupported: true, configurationPending: true,
+          executionConfig: { model: 'sonnet', effort: 'high', workflow: 'direct' } } };
+      },
+      saveProfile: async (profile) => { activeProfile = profile; },
+      saveServerMode: async () => 'self-hosted',
+      sessions: async () => [],
+    },
+    store, provisioner: {}, recoveryDir: path.join(directory, 'recovery'),
+    collectImportedAuth: async () => ({ secrets: { ANTHROPIC_API_KEY: 'test-provider-key' }, files: {} }),
+  });
+  t.after(async () => {
+    releaseAuth.resolve();
+    await coordinator.stop();
+    await store.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
+  const configuring = coordinator.command({ sessionId: 'configuration-room', command: 'configure',
+    expectedVersion: 2, payload: { provider: 'claude', model: 'sonnet', effort: 'high' } });
+  await authEntered.promise;
+  let switched = false;
+  const switching = coordinator.saveProfile({ profile: {
+    name: 'Server B', host: 'configure-b.example.ts.net', sshUser: 'cloud', sshPort: 22,
+    auth: { kind: 'ssh-agent' },
+    transport: { kind: 'https', endpoint: 'https://configure-b.example.ts.net/rauhwpx-cloud' },
+    serverPublicKey: SERVER_KEY,
+  } }).then((snapshot) => { switched = true; return snapshot; });
+  await delay(5);
+  assert.equal(switched, false);
+  assert.equal(activeProfile.endpoint, profileA.endpoint);
+  releaseAuth.resolve();
+  const configured = await configuring;
+  assert.equal(configured.profileEpoch, 0);
+  assert.equal(configured.session.selection.agent, 'claude');
+  assert.equal(configured.session.configurationPending, true);
+  assert.equal((await switching).profileEpoch, 1);
+  assert.deepEqual(calls, [
+    ['auth', profileA.endpoint, 'claude', { secrets: { ANTHROPIC_API_KEY: 'test-provider-key' }, files: {} }],
+    ['command', profileA.endpoint, 'configuration-room', 'conversation.configure',
+      { provider: 'claude', model: 'sonnet', effort: 'high', expectedVersion: 2 }],
+  ]);
+  const updated = await store.get(created.id);
+  assert.equal(updated.provider, 'claude');
+  assert.equal(updated.executionConfig.model, 'sonnet');
+  assert.equal(updated.originDigest, created.originDigest);
+  assert.equal(updated.documentDigest, created.documentDigest);
+  assert.notEqual(updated.originDigest, updated.documentDigest);
+  assert.equal(await readFile(originPath, 'utf8'), 'saved origin');
 });
 
 test('AUTH_REQUIRED fails the transfer once instead of retrying five times', async (t) => {
