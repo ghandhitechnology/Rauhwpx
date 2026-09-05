@@ -159,7 +159,8 @@ impl DocumentCore {
 
             // 선택적 재구성: 원본 문단 재구성 + 삽입 문단 composed 추가
             self.recompose_paragraph(section_idx, para_idx);
-            for i in (para_idx + 1..=last_para_idx).rev() {
+            // composed도 문서와 같은 순서로 늘려야 삽입 인덱스와 후속 문단이 맞는다.
+            for i in para_idx + 1..=last_para_idx {
                 self.insert_composed_paragraph(section_idx, i);
             }
             self.paginate_if_needed();
