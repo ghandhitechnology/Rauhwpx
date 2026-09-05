@@ -54,6 +54,17 @@ fn cell_para_line_anchor_y(
     }
 }
 
+pub(crate) fn para_relative_float_table_lead(table: &crate::model::table::Table, dpi: f64) -> f64 {
+    if !is_para_topbottom_float(&table.common) {
+        return 0.0;
+    }
+    let offset = signed_hwpunit(table.common.vertical_offset);
+    if offset <= 0 {
+        return 0.0;
+    }
+    hwpunit_to_px(offset, dpi)
+}
+
 /// A caption followed by a paragraph-anchored picture is one local content
 /// stack.  Some producers save every LINE_SEG in that stack with the same
 /// positive cell-local origin.  Treating that origin as editable top spacing
@@ -3012,6 +3023,7 @@ impl LayoutEngine {
             .enumerate()
         {
             let visible_text_before_para = has_preceding_visible_text;
+            let mut drew_block_host_para_text = false;
             let cell_context = if let Some(ref ctx) = enclosing_cell_ctx {
                 let mut new_ctx = ctx.clone();
                 if let Some(last) = new_ctx.path.last_mut() {
@@ -3198,10 +3210,63 @@ impl LayoutEngine {
                     has_preceding_visible_text = true;
                 }
             } else {
-                // has_table_ctrl: 표가 포함된 문단
-                // LINE_SEG vpos가 문단 위치를 정확히 지정하므로,
-                // 추가 spacing 없이 para_y를 그대로 사용.
-                // (leading spacing은 LINE_SEG vpos에 이미 반영되어 있음)
+                let has_visible_text = composed
+                    .lines
+                    .iter()
+                    .any(|line| line.runs.iter().any(|run| !run.text.trim().is_empty()));
+                if has_visible_text {
+                    let is_last_para = cp_idx + 1 == composed_paras.len();
+                    let end_line = if row_filter.is_some() {
+                        let cell_bottom = cell_y + cell_h;
+                        let mut sim_y = para_y;
+                        let mut fit = composed.lines.len();
+                        for (li, line) in composed.lines.iter().enumerate() {
+                            let lh = hwpunit_to_px(line.line_height, self.dpi);
+                            if sim_y + lh > cell_bottom + 0.5 {
+                                fit = li;
+                                break;
+                            }
+                            sim_y += lh + hwpunit_to_px(line.line_spacing, self.dpi);
+                        }
+                        fit
+                    } else {
+                        composed.lines.len()
+                    };
+                    let numbered_comp = if end_line > 0 {
+                        self.apply_paragraph_numbering(
+                            Some(composed),
+                            para,
+                            styles,
+                            outline_numbering_id,
+                        )
+                    } else {
+                        None
+                    };
+                    let composed_for_layout = numbered_comp.as_ref().unwrap_or(composed);
+                    let _ = self.layout_composed_paragraph(
+                        tree,
+                        cell_node,
+                        composed_for_layout,
+                        styles,
+                        &inner_area,
+                        para_y,
+                        0,
+                        end_line,
+                        section_index,
+                        cp_idx,
+                        cell_context.clone(),
+                        !use_top_vpos_anchor || caption_stack_vpos_origin > 0,
+                        is_last_para,
+                        0.0,
+                        None,
+                        Some(para),
+                        Some(bin_data_content),
+                        None,
+                    );
+                    has_preceding_text = true;
+                    has_preceding_visible_text = true;
+                    drew_block_host_para_text = true;
+                }
             }
 
             let para_alignment = styles
@@ -3931,6 +3996,8 @@ impl LayoutEngine {
                         } else {
                             inner_area.y
                         };
+                        let nested_y =
+                            nested_y + para_relative_float_table_lead(nested_table, self.dpi);
                         let nested_ctx = cell_context.as_ref().map(|ctx| {
                             let mut new_ctx = ctx.clone();
                             new_ctx.path.push(CellPathEntry {
@@ -4073,8 +4140,9 @@ impl LayoutEngine {
                             } else {
                                 0.0
                             };
-                            // TAC 표 앞 텍스트 렌더링 (문단부호 등 표시용)
-                            if tac_text_offset > 0.0 {
+                            // TAC 표 앞 텍스트 렌더링 (문단부호 등 표시용).
+                            // Skip when the block-table ELSE already drew the host para.
+                            if tac_text_offset > 0.0 && !drew_block_host_para_text {
                                 let line_h = composed
                                     .lines
                                     .first()
@@ -6399,7 +6467,14 @@ impl LayoutEngine {
                     .iter()
                     .map(|ctrl| {
                         if let Control::Table(t) = ctrl {
+                            // Last-para only: earlier paras already paid this lead as the gap
+                            // to the next para.
                             self.calc_nested_table_height(t, styles)
+                                + if is_last_para {
+                                    para_relative_float_table_lead(t, self.dpi)
+                                } else {
+                                    0.0
+                                }
                         } else {
                             0.0
                         }
@@ -6605,6 +6680,11 @@ impl LayoutEngine {
                     .map(|ctrl| {
                         if let Control::Table(t) = ctrl {
                             self.calc_nested_table_height(t, styles)
+                                + if is_last_para {
+                                    para_relative_float_table_lead(t, self.dpi)
+                                } else {
+                                    0.0
+                                }
                         } else {
                             0.0
                         }
