@@ -69,9 +69,8 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
   cloud.height = 80;
   artwork.append(cloud);
   const heading = el('div', 'ag-cd-heading');
-  heading.append(el('span', 'ag-cd-eyebrow', 'YOUR LITTLE CORNER OF THE CLOUD'),
-    el('h2', 'ag-cd-title', 'Cloud Connections'),
-    el('p', 'ag-cd-subtitle', '남은 시간부터 연결된 서버까지, 한눈에 확인하세요.'));
+  heading.append(el('h2', 'ag-cd-title', 'Cloud Connections'),
+    el('p', 'ag-cd-subtitle', 'Raucloud 사용 시간은 모든 기기에서 공유합니다.'));
   const expand = button('크게 보기', 'ag-cd-expand');
   expand.prepend(createIcon('expand'));
   expand.addEventListener('click', () => element.dispatchEvent(new CustomEvent('ag-settings-expand-request', { bubbles: true })));
@@ -157,7 +156,7 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
   const reconnect = button('다시 연결', 'ag-cd-reconnect');
   server.root.append(serverIdentity, serverFacts, serverNote, reconnect);
 
-  const chats = panel('Cloud에서 사용한 대화', 'ag-cd-chats');
+  const chats = panel('Cloud 대화', 'ag-cd-chats');
   const filter = button('Claude만 보기');
   filter.setAttribute('aria-pressed', 'false');
   filter.addEventListener('click', () => {
@@ -166,14 +165,14 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
     renderSessions();
   });
   chats.head.append(filter);
-  const chatScope = el('p', 'ag-cd-muted', '현재 서버에 남아 있는 대화와 마지막으로 선택된 모델입니다.');
+  const chatScope = el('p', 'ag-cd-muted', '현재 서버에 남은 대화와 마지막으로 고른 모델입니다.');
   const chatList = el('ul', 'ag-cd-chat-list');
   chats.root.append(chatScope, chatList);
 
-  const config = panel('구성 및 사용 한도', 'ag-cd-config');
+  const config = panel('서버 설정과 사용 한도', 'ag-cd-config');
   const configFacts = el('dl', 'ag-cd-facts');
   config.root.append(configFacts, deps.configuration,
-    el('p', 'ag-cd-muted', '서버 관리에서 연결 방식과 인증을 설정할 수 있습니다.'));
+    el('p', 'ag-cd-muted', '관리 버튼에서 연결 방식과 인증을 설정하세요.'));
   content.append(header, toolbar, feedback, stats, grid);
   element.append(content);
 
@@ -187,7 +186,7 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
     if (!quiet) {
       feedback.hidden = false;
       delete feedback.dataset.kind;
-      feedback.textContent = kind === 'refresh' ? '사용량과 연결 상태를 확인하고 있습니다.' : '서버에 다시 연결하고 있습니다.';
+      feedback.textContent = kind === 'refresh' ? '사용량과 연결 상태 확인 중…' : '서버에 다시 연결 중…';
     }
     render();
     try {
@@ -196,13 +195,13 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
       snapshot = next;
       refreshError = false;
       feedback.hidden = quiet;
-      feedback.textContent = kind === 'refresh' ? '연결 상태와 서버에서 제공한 사용량을 불러왔습니다.' : '연결 상태를 다시 확인했습니다.';
+      feedback.textContent = kind === 'refresh' ? '서버 상태와 사용량을 불러왔습니다.' : '연결 상태를 확인했습니다.';
       feedback.dataset.kind = 'success';
     } catch {
       if (disposed) return;
       refreshError = true;
       feedback.hidden = false;
-      feedback.textContent = '서버에 연결하지 못했습니다. 마지막으로 확인한 정보를 표시합니다. 다시 시도해 주세요.';
+      feedback.textContent = '서버에 연결하지 못했습니다. 마지막으로 확인한 정보입니다.';
       feedback.dataset.kind = 'error';
     } finally {
       pending = false;
@@ -262,7 +261,7 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
       plot.append(label);
     });
     chart.replaceChildren(plot);
-    if (!known.length) chart.append(el('p', 'ag-cd-chart-empty', '사용량이 확인되면 여기에 기록됩니다.'));
+    if (!known.length) chart.append(el('p', 'ag-cd-chart-empty', '아직 사용 기록이 없습니다.'));
     chartNote.textContent = `단위: 분 · ${timeZone}. 이 기기에서 마지막으로 확인한 계정 사용량입니다. 빈 날짜는 기록이 없습니다.`;
     const thead = el('thead');
     const tr = el('tr');
@@ -286,7 +285,7 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
     if (signature === sessionsSignature) return;
     sessionsSignature = signature;
     chatList.replaceChildren();
-    if (!entries.length) chatList.append(el('li', 'ag-cd-empty', claudeOnly ? 'Claude로 선택된 Cloud 대화가 없습니다.' : '아직 Cloud 대화가 없습니다. 채팅에서 클라우드를 선택해 시작하세요.'));
+    if (!entries.length) chatList.append(el('li', 'ag-cd-empty', claudeOnly ? 'Claude를 선택한 대화가 없습니다.' : '아직 Cloud 대화가 없습니다. 채팅에서 클라우드를 선택해 시작하세요.'));
     entries.forEach((entry) => {
       const item = el('li', 'ag-cd-chat');
       const provider = entry.selection?.agent;
@@ -331,7 +330,7 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
     const fresh = !refreshError && allowance && Date.parse(allowance.resetAt) > Date.now();
     quota.value.replaceChildren(document.createTextNode(fresh ? minutes(allowance.remainingMs) : '—'), el('span', 'ag-cd-stat-unit', '분'));
     quota.detail.textContent = fresh ? `${minutes(allowance.dailyLimitMs)}분 중 ${minutes(allowance.usedMs)}분 사용`
-      : allowance ? '사용량을 새로고침해 주세요.' : account?.signedIn ? '사용 한도를 아직 확인하지 못했습니다.' : '로그인하면 Raucloud 한도를 확인할 수 있습니다.';
+      : allowance ? '사용량을 새로고침해 주세요.' : account?.signedIn ? '아직 사용 한도를 확인하지 못했습니다.' : '로그인하면 남은 시간을 볼 수 있습니다.';
     quota.detail.title = account ? `사용량 확인: ${formatTime(account.updatedAt)}` : '';
     meter.hidden = !fresh;
     if (fresh) {
@@ -346,12 +345,12 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
     claude.value.textContent = String(sessions.claudeChats);
     claude.detail.textContent = `서버에 남은 ${sessions.chats}개 대화 중${sessions.unknownChats ? ` · 모델 미확인 ${sessions.unknownChats}개` : ''}`;
     boxes.value.replaceChildren(document.createTextNode(ready ? '1' : '0'), el('span', 'ag-cd-stat-unit', `/ ${configured ? '1' : '0'}`));
-    boxes.detail.textContent = configured ? `${sessions.active}개 세션 활성 · 앱당 서버 1대 연결` : 'Raucloud 또는 내 서버를 연결하세요.';
+    boxes.detail.textContent = configured ? `${sessions.active}개 세션 실행 중 · 앱당 서버 1대 연결` : 'Raucloud 또는 내 서버를 연결하세요.';
 
     serverBadge.textContent = ready ? '연결됨' : state === 'pending' ? '확인 중' : state === 'unknown' ? '확인 필요' : configured ? '연결 끊김' : '미연결';
     serverBadge.dataset.state = state;
     serverName.textContent = configured ? profile.mode === 'app-hosted' ? profile.name : profile.profile.name : '내 Cloud 박스';
-    serverHost.textContent = configured ? profile.mode === 'app-hosted' ? profile.sandbox.host : profile.profile.host : '서버를 설정하면 연결 상태가 표시됩니다.';
+    serverHost.textContent = configured ? profile.mode === 'app-hosted' ? profile.sandbox.host : profile.profile.host : '연결 설정에서 서버를 추가하세요.';
     facts(serverFacts, [
       ['서버 유형', configured ? profile.mode === 'app-hosted' ? 'Raucloud' : '내 서버' : '미설정'],
       ['리전 / 연결', configured ? profile.mode === 'app-hosted' ? profile.sandbox.region || '정보 없음' : profile.profile.transport.kind === 'ssh-tunnel' ? 'SSH 터널' : profile.profile.transport.kind === 'tailscale' ? 'Tailscale' : 'HTTPS' : '—'],
@@ -362,7 +361,7 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
       : gate?.kind === 'exhausted' ? '오늘의 Raucloud 시간을 모두 사용했습니다. 초기화 후 다시 시작할 수 있습니다.'
       : gate?.kind === 'unavailable' ? gate.reason
       : gate?.kind === 'logged-out' ? 'Raucloud를 사용하려면 Rauhwpx 계정으로 로그인하세요.'
-      : state === 'failed' ? '서버 응답이 없습니다. 다시 연결하거나 서버 관리에서 구성을 확인하세요.'
+      : state === 'failed' ? '서버가 응답하지 않습니다. 다시 연결하거나 서버 설정을 확인하세요.'
       : ready ? '채팅과 문서 작업에 사용할 수 있습니다.' : '서버 관리에서 연결을 설정하세요.';
     facts(configFacts, [
       ['한도 초기화', allowance ? `${formatTime(allowance.resetAt, allowance.timeZone)} · ${allowance.timeZone}` : '사용량 확인 후 표시'],

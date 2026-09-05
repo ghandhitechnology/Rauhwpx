@@ -12,8 +12,7 @@
 .ag-cd-artwork { display: grid; flex: 0 0 112px; height: 100px; place-items: center; background: var(--cd-tint); border: 1px solid color-mix(in srgb, var(--cd-accent) 20%, var(--ag-border)); border-radius: 20px; }
 .ag-cd-pixel-cloud { width: 104px; height: 80px; image-rendering: pixelated; }
 .ag-cd-heading { flex: 1; min-width: 0; }
-.ag-cd-eyebrow { color: var(--cd-accent); font: 9px/1.4 ui-monospace, monospace; letter-spacing: .13em; }
-.ag-cd-title { margin: 5px 0 6px; font-size: clamp(22px, 3cqi, 30px); font-weight: 720; letter-spacing: -.045em; line-height: 1.2; }
+.ag-cd-title { margin: 0 0 6px; font-size: clamp(22px, 3cqi, 30px); font-weight: 720; letter-spacing: -.045em; line-height: 1.2; }
 .ag-cd-subtitle, .ag-cd-muted { margin: 0; color: var(--ag-text-secondary); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
 .ag-cd-subtitle { font-size: 12px; }
 .ag-cd-button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 30px; padding: 4px 9px; border: 1px solid var(--ag-border); border-radius: 6px; background: var(--ag-bg); color: var(--ag-text-secondary); font: inherit; font-size: 11px; white-space: nowrap; cursor: pointer; }
@@ -99,7 +98,6 @@
   .ag-cd-header { flex-wrap: wrap; gap: 14px; margin-bottom: 18px; }
   .ag-cd-artwork { flex-basis: 80px; height: 76px; border-radius: 14px; }
   .ag-cd-pixel-cloud { width: 78px; height: 60px; }
-  .ag-cd-eyebrow { font-size: 8px; letter-spacing: .06em; }
   .ag-cd-subtitle { font-size: 11px; }
   .ag-cd-expand { margin-left: auto; }
   .ag-cd-grid { grid-template-columns: minmax(0, 1fr); gap: 14px; }
@@ -118,7 +116,6 @@
   .ag-cd-pixel-cloud { width: 62px; height: 48px; }
   .ag-cd-title { font-size: 20px; }
   .ag-cd-heading { flex: 1 1 calc(100% - 80px); }
-  .ag-cd-eyebrow { display: none; }
   .ag-cd-updated { flex-basis: 100%; margin-left: 0; order: 3; }
   .ag-cd-toolbar > .ag-cd-button { margin-left: auto; }
   .ag-cd-stat { padding: 12px; }
