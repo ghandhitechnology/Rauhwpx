@@ -315,11 +315,11 @@ test('later credential set wins when an older validation finishes last', async (
 
 test('hub set and clear bump the fleet credential revision', () => {
   const server = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
-  assert.match(server, /const revision = record\.browserbase\.beginCredentialChange\(\);/);
-  assert.match(server, /return record\.browserbase\.applyVerifiedOverride\(/);
+  assert.match(server, /const revision = record\.browserbaseSession\.beginCredentialChange\(\);/);
+  assert.match(server, /return record\.browserbaseSession\.applyVerifiedOverride\(/);
   assert.match(
     server,
-    /case 'browserbase-credentials-clear': \{[\s\S]*?record\.browserbase\.beginCredentialChange\(\);[\s\S]*?setOverride\(null/,
+    /case 'browserbase-credentials-clear': \{[\s\S]*?record\.browserbaseSession\.beginCredentialChange\(\);[\s\S]*?setOverride\(null/,
   );
 });
 
