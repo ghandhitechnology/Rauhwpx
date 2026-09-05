@@ -38,11 +38,14 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   await page.click('.ag-cloud-merge-button');
   await page.waitForFunction(() => window.sidebarPreview.cloud.calls.merges.length === 1);
   assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.merges[0].checkpoint.operationId), 'preview-turn-1');
+  assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.merges[0].startId), original.startId);
   assert.equal(await page.evaluate(() => window.sidebarPreview.workspace.mode()), 'cloud');
   await page.waitForFunction(() => document.querySelector('.ag-cloud-merge-button').hidden);
   await page.click('[data-document-view="cloud"]');
   await page.waitForFunction(() => document.querySelector('#cloud-workspace').dataset.displayState === 'live');
   original.frame = await page.$eval('.cloud-workspace-image', (node) => node.src);
+  await page.evaluate(() => window.sidebarPreview.cloud.commitTurn());
+  await page.waitForFunction(() => document.querySelector('.ag-cloud-merge-button').dataset.revision === '2');
   await page.click('#cloud-disconnect');
   await page.waitForFunction(() => document.querySelector('#cloud-workspace').dataset.displayState === 'stalled');
   assert.equal(await page.$eval('.cloud-workspace-image', (node) => node.src), original.frame);
@@ -166,6 +169,8 @@ export async function checkCloudRecovery(page, origin, artifacts) {
     message.text === '이 제안서의 예산 표를 검토해 주세요.').length, 1);
   await page.waitForFunction(() => document.querySelector('#cloud-workspace').dataset.displayState === 'live');
   await page.screenshot({ path: resolve(artifacts, 'cloud-restarted.png') });
+  // A replacement profile discards old merge offers instead of rebinding them.
+  assert.equal(await page.$eval('.ag-cloud-merge-button', (button) => button.hidden), true);
 
   await page.evaluate(() => window.sidebarPreview.cloud.requireReference(null));
 
@@ -219,7 +224,7 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   assert.equal(await page.$eval('.ag-messages', (node) => node.innerText.includes('문서를 검토했습니다')), true);
   await page.screenshot({ path: resolve(artifacts, 'parallel-local-chat.png') });
   await page.evaluate(() => window.sidebarPreview.cloud.setLink('ready'));
-  await page.click('.ag-header .ag-threads-btn');
+  await page.evaluate(() => document.querySelector('.ag-header .ag-threads-btn').click());
   await page.waitForFunction(() => [...document.querySelectorAll('.ag-threads-item')]
     .some((node) => node.checkVisibility() && node.querySelector('.ag-thread-mode')?.textContent === 'Cloud'));
   assert.equal(await page.evaluate(() => {
@@ -237,7 +242,7 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   assert.equal(await page.$eval('.ag-messages', (node) => node.innerText.includes('로컬에서 소개 문단')), false);
   assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.transfers.length), 3);
   // Returning to the local thread restores its own history without a transfer.
-  await page.click('.ag-header .ag-threads-btn');
+  await page.evaluate(() => document.querySelector('.ag-header .ag-threads-btn').click());
   await page.screenshot({ path: resolve(artifacts, 'parallel-chat-list.png') });
   await page.evaluate(() => [...document.querySelectorAll('.ag-threads-item')]
     .find((node) => node.checkVisibility() && node.querySelector('.ag-thread-mode')?.textContent === 'Local').click());
@@ -249,7 +254,7 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   assert.equal(await page.$eval('.ag-messages', (node) => node.innerText.includes('Cloud에서 예산 검토')), false);
   assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.stop), 1);
   assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.transfers.length), 3);
-  await page.click('.ag-header .ag-threads-btn');
+  await page.evaluate(() => document.querySelector('.ag-header .ag-threads-btn').click());
   await page.evaluate(() => [...document.querySelectorAll('.ag-threads-item')]
     .find((node) => node.checkVisibility() && node.querySelector('.ag-thread-mode')?.textContent === 'Cloud').click());
   await page.waitForFunction(() => window.sidebarPreview.cloud.controller.getSnapshot().session.kind === 'running'

@@ -155,7 +155,7 @@ export interface CloudAgentUiDeps {
   onTimeline(binding: CloudWorkspaceBinding, timeline: PortableCloudTimelineV1): boolean;
   onAgentEvent(binding: CloudWorkspaceBinding, event: AgentStreamEvent): void;
   onCheckpointPublished(checkpoint: CloudCheckpointPayload): void | Promise<void>;
-  getCloudStartId?(threadId: string): string | undefined;
+  getCloudStartId?(threadId: string, sessionId: string): string | undefined;
   onMergeCheckpoint?(startId: string, checkpoint: CloudCheckpointPayload): Promise<boolean>;
   onResultResolved(result: CloudDownloadResult, resolution: CloudResultResolution): void | Promise<void>;
   onBeforeTakeover(): Promise<boolean>;
@@ -234,7 +234,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   let panelTrigger: HTMLButtonElement | null = null;
   let setupActive = false;
   const liveSequence = new Map<string, number>();
-  type MergeOffer = Pick<CloudCheckpointPayload, 'sessionId' | 'documentId' | 'revision' | 'turn' | 'operationId'>;
+  type MergeOffer = Pick<CloudCheckpointPayload, 'sessionId' | 'documentId' | 'revision' | 'turn' | 'operationId'> & { startId?: string };
   const mergeOffers = new Map<string, MergeOffer>();
   const reviewedRevisions = new Map<string, number>();
   const mergeButton = el('button', 'ag-cloud-merge-button') as HTMLButtonElement;
@@ -247,7 +247,8 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       if (checkpoint.kind !== 'turn') return;
       const { sessionId, documentId, revision, turn, operationId } = checkpoint;
       if (revision > (mergeOffers.get(sessionId)?.revision ?? -1)) {
-        mergeOffers.set(sessionId, { sessionId, documentId, revision, turn, operationId });
+        mergeOffers.set(sessionId, { sessionId, documentId, revision, turn, operationId,
+          startId: mergeOffers.get(sessionId)?.startId ?? mergeStartId(sessionId) });
       }
       renderMergeButton();
     },
@@ -748,6 +749,15 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     });
   }
 
+  function mergeStartId(sessionId: string): string | undefined {
+    const session = snapshot.sessions.find((item) => item.sessionId === sessionId);
+    if (!session) return undefined;
+    return deps.getCloudStartId?.(session.threadId, sessionId)
+      ?? (snapshot.session.kind !== 'idle' && snapshot.session.sessionId === sessionId
+        && snapshot.timeline?.thread.id === session.threadId
+        ? snapshot.timeline.thread.cloudStartId : undefined);
+  }
+
   function currentMergeOffer(): MergeOffer | undefined {
     const scope = deps.getScope();
     const matching = [...mergeOffers.values()].filter((offer) => offer.documentId === scope.documentId
@@ -770,9 +780,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     if (!offer || !deps.onMergeCheckpoint || busy) return;
     const profileEpoch = snapshot.profileEpoch;
     const documentId = deps.getScope().documentId;
-    const session = snapshot.sessions.find((item) => item.sessionId === offer.sessionId);
-    const startId = session && ((snapshot.timeline?.thread.id === session.threadId
-      ? snapshot.timeline.thread.cloudStartId : undefined) ?? deps.getCloudStartId?.(session.threadId));
+    const startId = offer.startId ?? mergeStartId(offer.sessionId);
     if (!startId) return deps.onError('Cloud 시작 대화를 불러온 뒤 다시 병합하세요.');
     await operation(async () => {
       const checkpoint = await deps.controller.downloadCheckpoint(offer.sessionId, offer.operationId);

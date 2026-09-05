@@ -1989,7 +1989,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       handleAgentEvent(event);
     },
     onCheckpointPublished: (checkpoint) => deps.publishCloudCheckpoint?.(checkpoint),
-    getCloudStartId: (threadId) => (threadId === currentThread.id ? currentThread : getThread(threadId))?.cloudStartId,
+    getCloudStartId: (threadId, sessionId) => {
+      const thread = threadId === currentThread.id ? currentThread : getThread(threadId);
+      if (thread?.cloudRestartSourceSessionId === sessionId) return thread.cloudRestartSourceStartId;
+      return thread?.cloudSessionId === sessionId ? thread.cloudStartId : undefined;
+    },
     onMergeCheckpoint: deps.mergeCloudCheckpoint ? async (startId, checkpoint) => {
       workspace.setWorkspaceView('local');
       return deps.mergeCloudCheckpoint!(startId, checkpoint);

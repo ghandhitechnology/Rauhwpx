@@ -87,7 +87,7 @@ test('cloud transfer includes portable timeline, exact document bytes and refere
   assert.match(cloudStart, /permissionProfile: 'unrestricted'/);
   const transfer = sidebar.match(/async function transferCurrentSession\([\s\S]*?\n  function ensureCloudTransferIntent/)?.[0] ?? '';
   assert.doesNotMatch(transfer, /setPermissionProfile\('unrestricted'\)/);
-  const prepare = main.match(/async function prepareCloudTransferDocument\(startId: string\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+  const prepare = main.match(/async function prepareCloudTransferDocument\([\s\S]*?\n\}/)?.[0] ?? '';
   assert.doesNotMatch(prepare, /saveCurrentDocument/);
   assert.match(prepare, /if \(wasm\.isNewDocument\) return null/);
   assert.doesNotMatch(prepare, /documentState\.isDirty/);
