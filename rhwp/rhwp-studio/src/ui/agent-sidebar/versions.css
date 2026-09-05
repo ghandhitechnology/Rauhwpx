@@ -820,7 +820,7 @@
   padding: 1px 6px;
   max-width: 86px;
   background: color-mix(in srgb, var(--ag-version-lane-color) 12%, transparent);
-  border-radius: 4px;
+  border-radius: 8px;
   border: 1px solid color-mix(in srgb, currentColor 15%, transparent);
   line-height: 12px;
 }
