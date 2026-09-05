@@ -113,7 +113,7 @@ AI requests send prompts and any document content read by the agent to your sele
 | `RHWP_AGENT_PORT` | `5175` | Hub port (binds to 127.0.0.1 only) |
 | `RHWP_AGENT_TOKEN` | `dev` | Shared token for WS connections (`?token=`) |
 | `RHWP_CLAUDE_MODEL` | `sonnet` | Model for Claude sessions |
-| `RHWP_CODEX_MODEL` | `gpt-5.6-sol` | Model for Codex sessions |
+| `RHWP_CODEX_MODEL` | `gpt-5.6-sol` | Model for Codex sessions, including `gpt-6-astra` |
 | `RHWP_SKILLS_DIR` | OS application-data directory | Product-only user skill directory override |
 | `RHWP_USAGE_DIR` | OS application-data directory | Token-usage log and plan directory override |
 | `RHWP_CLIPROXY_URL` | `http://127.0.0.1:8317` | CLIProxyAPI base URL for official plan usage |

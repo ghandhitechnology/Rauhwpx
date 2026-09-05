@@ -585,7 +585,7 @@ const OPENROUTER_AGENTS = new Set(['pi', 'rau']);
 const AGENT_INSTRUCTION_DRAFT_TTL_MS = 5 * 60 * 1000;
 
 const CLAUDE_MODELS = new Set(['opus', 'fable', 'sonnet', 'haiku']);
-const CODEX_MODELS = new Set(['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol']);
+const CODEX_MODELS = new Set(['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-6-astra']);
 const GROK_MODELS = new Set(['grok-4.6', 'grok-4.5']);
 const DEFAULT_MODEL = { claude: 'sonnet', codex: 'gpt-5.6-sol', grok: 'grok-4.6', cursor: 'auto' };
 const CLAUDE_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
