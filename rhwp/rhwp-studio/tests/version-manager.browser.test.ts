@@ -165,6 +165,10 @@ async function openPage(): Promise<Page> {
     };
     const manager = createVersionManagerPage(controller);
     document.documentElement.style.background = '#19191d';
+    document.documentElement.dataset.themeEffective = 'dark';
+    document.documentElement.style.setProperty('--ag-text', '#eeeeef');
+    document.documentElement.style.setProperty('--ag-muted', '#9696a1');
+    document.documentElement.style.setProperty('--ag-bg', '#111214');
     document.body.style.margin = '0';
     manager.element.style.width = '100vw';
     manager.element.style.height = '800px';
@@ -190,7 +194,7 @@ async function openPage(): Promise<Page> {
 test('closing the page cancels an open merge prompt before it can start work', async () => {
   const page = await openPage();
   try {
-    await page.click('.ag-versions-toolbar [data-version-mutation]');
+    await page.click('.ag-versions-toolbar [data-version-action="merge"]');
     await page.waitForSelector('.ag-version-prompt-overlay');
     await page.evaluate(() => (window as any).__versionManagerHarness.close());
     assert.equal(await page.$('.ag-version-prompt-overlay'), null);
@@ -209,9 +213,10 @@ test('branch graph stays operable, directional, locked, and responsive', async (
       await page.$eval('[data-commit-id="merge5"]', (node) => node.getAttribute('aria-label') ?? ''),
       /HEAD feature/,
     );
-    assert.equal(await page.$eval('.ag-versions-branch-pill', (node) => node.getAttribute('aria-label')), '현재 브랜치 feature 보기');
-    const toolbarMerge = '.ag-versions-toolbar [data-version-mutation]';
-    assert.equal(await page.$eval(toolbarMerge, (node) => node.textContent), '병합: … → feature');
+    assert.equal(await page.$('.ag-versions-branch-pill'), null);
+    assert.equal(await page.$eval('[aria-label="feature 브랜치로 전환"]', (node) => node.getAttribute('aria-pressed')), 'true');
+    const toolbarMerge = '.ag-versions-toolbar [data-version-action="merge"]';
+    assert.equal(await page.$eval(toolbarMerge, (node) => node.textContent), '병합');
     assert.equal(await page.$eval(toolbarMerge, (node) => node.getAttribute('title')), '병합: 다른 브랜치 → feature');
     assert.equal(await page.$eval(toolbarMerge, (node) => node.getAttribute('aria-label')), '병합: 다른 브랜치 → feature');
     await page.click(toolbarMerge);
@@ -250,7 +255,7 @@ test('branch graph stays operable, directional, locked, and responsive', async (
       buttons.length > 0 && buttons.every((button) => (button as HTMLButtonElement).disabled)
     ));
     assert.equal(locked, true);
-    assert.equal(await page.$eval('.ag-versions-branch-pill', (node) => (node as HTMLButtonElement).disabled), false);
+    assert.equal(await page.$eval('[data-tab="history"]', (node) => (node as HTMLButtonElement).disabled), false);
     await page.evaluate(() => (window as any).__versionManagerHarness.setBlocked(null));
     await page.click('[data-tab="history"]');
 
@@ -260,9 +265,9 @@ test('branch graph stays operable, directional, locked, and responsive', async (
         const panel = document.querySelector<HTMLElement>('.ag-versions-page')!;
         const rows = [...document.querySelectorAll<HTMLElement>('.ag-version-row')];
         const panelRect = panel.getBoundingClientRect();
-        const mainRef = [...document.querySelectorAll<HTMLElement>('.ag-version-graph-refs .ag-version-ref')]
+        const mainRef = [...document.querySelectorAll<HTMLElement>('.ag-version-heading .ag-version-ref')]
           .find((ref) => ref.textContent === 'main');
-        const mainGraph = mainRef?.closest<HTMLElement>('.ag-version-lane-graph');
+        const mainGraph = mainRef?.closest<HTMLElement>('.ag-version-heading');
         const refRect = mainRef?.getBoundingClientRect();
         const graphRect = mainGraph?.getBoundingClientRect();
         return {
@@ -284,7 +289,7 @@ test('branch graph stays operable, directional, locked, and responsive', async (
       assert.equal(geometry.documentOverflow, false, `${width}px document overflow`);
       assert.equal(geometry.panelOverflow, false, `${width}px panel overflow`);
       assert.equal(geometry.rowsInside, true, `${width}px row overflow`);
-      assert.deepEqual([...new Set(geometry.rowHeights)], [44]);
+      assert.deepEqual([...new Set(geometry.rowHeights)], [30]);
       assert.equal(geometry.mainLabelVisible, true, `${width}px main label is clipped`);
       assert.equal(geometry.laneCount, 7);
 
@@ -330,6 +335,130 @@ test('creating a commit selects the new commit and shows its options', async () 
       'Newest manual commit',
     );
     assert.ok(await page.$('.ag-versions-inspector-actions'));
+  } finally {
+    await page.close();
+  }
+});
+
+test('quick branch buttons switch once and respect mutation locks', async () => {
+  const page = await openPage();
+  try {
+    await page.click('[aria-label="feature 브랜치로 전환"]');
+    assert.deepEqual(await page.evaluate(() => (window as any).__versionManagerHarness.calls), []);
+    await page.click('[aria-label="docs 브랜치로 전환"]');
+    await page.waitForFunction(() => (window as any).__versionManagerHarness.calls.length === 1);
+    assert.deepEqual(await page.evaluate(() => (window as any).__versionManagerHarness.calls), [['switch', 'docs']]);
+    await page.evaluate(() => (window as any).__versionManagerHarness.setBlocked('작업 중'));
+    assert(await page.$$eval('.ag-versions-branch-chip', (buttons) => buttons.every((button) => (button as HTMLButtonElement).disabled)));
+    await page.click('[data-tab="branches"]');
+    assert(await page.$eval('.ag-versions-branch-strip', (strip) => (strip as HTMLElement).hidden));
+    for (const width of [280, 480, 900]) {
+      await page.setViewport({ width, height: 820 });
+      const buttons = await page.$$eval('.ag-versions-toolbar > button', (nodes) => nodes
+        .filter((node) => !(node as HTMLButtonElement).hidden)
+        .map((node) => {
+          const rect = node.getBoundingClientRect();
+          return { center: rect.y + rect.height / 2, left: rect.left, right: rect.right };
+        }));
+      assert.equal(buttons.length, 4);
+      assert(buttons.every((button) => Math.abs(button.center - buttons[0].center) < 1), `${width}px single action row`);
+      assert(buttons.every((button) => button.left >= 0 && button.right <= width), `${width}px actions fit`);
+    }
+    await page.click('[data-tab="shelves"]');
+    for (const width of [280, 480, 900]) {
+      await page.setViewport({ width, height: 820 });
+      const buttons = await page.$$eval('.ag-versions-toolbar > button', (nodes) => nodes
+        .filter((node) => !(node as HTMLButtonElement).hidden)
+        .map((node) => {
+          const rect = node.getBoundingClientRect();
+          return { center: rect.y + rect.height / 2, left: rect.left, right: rect.right };
+        }));
+      assert.equal(buttons.length, 4);
+      assert(buttons.every((button) => Math.abs(button.center - buttons[0].center) < 1), `${width}px single shelf action row`);
+      assert(buttons.every((button) => button.left >= 0 && button.right <= width), `${width}px shelf actions fit`);
+    }
+    assert(await page.$eval('.ag-versions-create-shelf', (button) => (button as HTMLButtonElement).disabled));
+    assert(await page.$eval('.ag-versions-create-branch', (button) => (button as HTMLButtonElement).disabled));
+    await page.click('[data-tab="history"]');
+    assert(await page.$eval('.ag-versions-create-branch', (button) => (button as HTMLButtonElement).hidden));
+    assert(await page.$eval('.ag-versions-create-shelf', (button) => (button as HTMLButtonElement).hidden));
+
+  } finally {
+    await page.close();
+  }
+});
+
+test('shared actions stay fixed across tab switches', async () => {
+  const page = await openPage();
+  try {
+    for (const width of [280, 480, 900]) {
+      await page.setViewport({ width, height: 820 });
+      let baseline: unknown;
+      for (const tab of ['history', 'branches', 'shelves', 'history']) {
+        await page.click(`[data-tab="${tab}"]`);
+        const positions = await page.$$eval('.ag-versions-toolbar > button:not(.ag-versions-create-branch):not(.ag-versions-create-shelf)', (buttons) => buttons.map((button) => {
+          const { x, y, width, height } = button.getBoundingClientRect();
+          return { x, y, width, height };
+        }));
+        baseline ??= positions;
+        assert.deepEqual(positions, baseline, `${width}px ${tab} action positions`);
+      }
+    }
+  } finally {
+    await page.close();
+  }
+});
+
+test('dotted connectors follow their own node and end before a solid arrow', async () => {
+  const page = await openPage();
+  try {
+    assert.equal(await page.$('.ag-version-meta'), null);
+    for (const width of [280, 480, 900]) {
+      await page.setViewport({ width, height: 820 });
+      const rows = await page.$$eval('.ag-version-row', (elements) => elements.map((row) => {
+        const node = row.querySelector<SVGCircleElement>('.ag-version-node')!;
+        const connector = row.querySelector<SVGPathElement>('.ag-version-node-connector')!;
+        const arrow = row.querySelector<SVGPathElement>('.ag-version-connector-arrow')!;
+        const start = connector.getPointAtLength(0);
+        const end = connector.getPointAtLength(connector.getTotalLength());
+        const arrowBox = arrow.getBBox();
+        const nodeRect = node.getBoundingClientRect();
+        const arrowRect = arrow.getBoundingClientRect();
+        return {
+          sameCenter: Math.abs(nodeRect.y + nodeRect.height / 2 - arrowRect.y - arrowRect.height / 2) < .5,
+          followsOwnNode: end.x > node.cx.baseVal.value && end.x - node.cx.baseVal.value < 10,
+          gapBeforeArrow: arrowBox.x > start.x,
+          filled: getComputedStyle(arrow).fill !== 'none',
+          dotted: getComputedStyle(connector).strokeDasharray !== 'none',
+        };
+      }));
+      assert(rows.every((row) => Object.values(row).every(Boolean)), `${width}px connector geometry`);
+    }
+  } finally {
+    await page.close();
+  }
+});
+
+test('dates appear on hover and focus without changing row height, and clean up on close', async () => {
+  const page = await openPage();
+  try {
+    const height = await page.$eval('.ag-version-row', (row) => row.getBoundingClientRect().height);
+    await page.hover('[data-commit-id="merge5"]');
+    await page.waitForSelector('.ag-version-date-tooltip.ag-visible', { visible: true });
+    await page.hover('.ag-version-date-tooltip');
+    assert(await page.$eval('.ag-version-date-tooltip', (tip) => tip.classList.contains('ag-visible')));
+    assert.equal(await page.$eval('.ag-version-row', (row) => row.getBoundingClientRect().height), height);
+    await page.focus('[data-commit-id="merge5"]');
+    await page.keyboard.press('ArrowDown');
+    await page.waitForSelector('.ag-version-date-tooltip.ag-visible', { visible: true });
+    await page.keyboard.press('Escape');
+    assert.equal(await page.$('.ag-version-date-tooltip.ag-visible'), null);
+    await page.hover('[data-commit-id="main3"]');
+    await page.waitForSelector('.ag-version-date-tooltip.ag-visible', { visible: true });
+    await page.evaluate(() => (window as any).__versionManagerHarness.close());
+    assert.equal(await page.$('.ag-version-date-tooltip.ag-visible'), null);
+    await page.evaluate(() => (window as any).__versionManagerHarness.dispose());
+    assert.equal(await page.$('.ag-version-date-tooltip'), null);
   } finally {
     await page.close();
   }

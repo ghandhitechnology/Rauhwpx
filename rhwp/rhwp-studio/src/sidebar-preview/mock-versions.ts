@@ -3,10 +3,13 @@ import type {
   VersionManagerController,
   VersionManagerState,
 } from '../ui/agent-sidebar/version-manager.ts';
+import { layoutCommitGraph, orderBranchHeadFrontier, type GraphCommit } from '../versioning/graph-layout.ts';
+import { commitId } from '../versioning/types.ts';
 import { timestamp } from './fixtures.ts';
 
 export function createMockVersions(
   report: (message: string) => void,
+  branchedHistory = false,
 ): VersionManagerController {
   const listeners = new Set<(state: VersionManagerState) => void>();
   const commit = (
@@ -84,7 +87,55 @@ export function createMockVersions(
     storageQuotaBytes: 100000000,
     aiTitlesEnabled: true,
   };
+  if (branchedHistory) {
+    state.commits = [
+      commit('e8f21a0', '표지의 타이포그래피와 여백 조정', ['d7e10b2'], false),
+      commit('f9a32b1', '검토 의견을 반영한 최종 제안서', ['c6d09a1', 'b5c98f0'], true),
+      commit('d7e10b2', '새로운 표지 레이아웃 시도', ['c6d09a1'], false),
+      commit('c6d09a1', '추진 일정과 마일스톤 정리', ['a4b87e9'], false),
+      commit('b5c98f0', '예산 항목과 산출 근거 보완', ['a4b87e9'], false),
+      commit('a4b87e9', '사업 목표와 기대 효과 구체화', ['93a76d8'], false),
+      commit('93a76d8', '주요 지표를 표로 정리', ['82b65c7'], false),
+      commit('82b65c7', '시장 분석과 참고 자료 추가', ['71c54b6'], false),
+      commit('71c54b6', '문서 구조와 목차 정리', ['60d43a5'], false),
+      commit('60d43a5', '사업 개요 초안 작성', ['50e32a4'], false),
+      commit('50e32a4', '새 문서 만들기', [], false),
+    ];
+    state.commits.forEach((item, index) => { item.createdAt = Date.now() - index * 28 * 60_000; });
+    state.commits[1].reason = 'merge';
+    state.commits[1].tagLabels = ['검토완료'];
+    state.branches = [
+      { name: 'main', headId: 'f9a32b1', isActive: false, isDefault: true, updatedAt: Date.now() },
+      { name: '표지-디자인', headId: 'e8f21a0', isActive: true, isDefault: false, updatedAt: Date.now() },
+      { name: '예산-검토', headId: 'b5c98f0', isActive: false, isDefault: false, updatedAt: Date.now() },
+    ];
+    state.activeBranch = '표지-디자인';
+  }
   function changed() {
+    const frontier = orderBranchHeadFrontier(
+      state.branches.map((branch) => ({ name: branch.name, target: commitId(branch.headId) })),
+      state.branches.find((branch) => branch.isDefault)?.name ?? null,
+      null,
+    );
+    const rows = layoutCommitGraph(state.commits.map((item, index): GraphCommit => {
+      const parents = item.parentIds.map(commitId);
+      if (parents.length > 2) throw new Error('A preview commit can have at most two parents.');
+      return {
+        id: commitId(item.id),
+        parents: parents.length === 2 ? [parents[0], parents[1]] : parents.length === 1 ? [parents[0]] : [],
+        ordinal: state.commits.length - index,
+      };
+    }), [], frontier);
+    const byId = new Map(rows.map((row) => [row.commitId, row]));
+    for (const item of state.commits) {
+      const row = byId.get(commitId(item.id))!;
+      Object.assign(item, {
+        lane: row.lane, laneCount: row.laneCount, startsLane: row.startsLane,
+        lanesBefore: [...row.lanesBefore], lanesAfter: [...row.lanesAfter],
+        activeLanesBefore: [...row.activeLanesBefore], parentLanes: row.edges.map((edge) => edge.toLane),
+      });
+    }
+
     for (const item of state.commits) {
       item.branchLabels = state.branches
         .filter((branch) => branch.headId === item.id)
@@ -94,12 +145,13 @@ export function createMockVersions(
     }
     listeners.forEach((listener) => listener(state));
   }
-  function checkpoint(title = '문서 변경 사항을 저장했습니다.') {
+  function checkpoint(title = '문서 변경 사항을 저장했습니다.', additionalParents: string[] = []) {
     const active = state.branches.find((branch) => branch.isActive)!;
-    const next = commit(crypto.randomUUID(), title, [active.headId], true);
+    const next = commit(crypto.randomUUID(), title, [active.headId, ...additionalParents], true);
     next.createdAt = Date.now();
     state.commits.unshift(next);
     active.headId = next.id;
+    active.updatedAt = next.createdAt;
     state.dirty = false;
     changed();
   }
@@ -110,6 +162,7 @@ export function createMockVersions(
     });
     changed();
   }
+  changed();
   return {
     getState: () => state,
     refresh: async () => changed(),
@@ -156,7 +209,7 @@ export function createMockVersions(
         isDefault: false,
         updatedAt: Date.now(),
       });
-      changed();
+      switchBranch(name);
     },
     switchBranch: async (name) => switchBranch(name),
     renameBranch: async (name, nextName) => {
@@ -184,7 +237,7 @@ export function createMockVersions(
     },
     resumeMerge: async (id) => {
       const draft = state.mergeDrafts.find((item) => item.id === id)!;
-      checkpoint(`${draft.sourceBranch} 가지를 병합했습니다.`);
+      checkpoint(`${draft.sourceBranch} 가지를 병합했습니다.`, [state.branches.find((branch) => branch.name === draft.sourceBranch)!.headId]);
       state.mergeDrafts = state.mergeDrafts.filter((item) => item.id !== id);
       changed();
     },

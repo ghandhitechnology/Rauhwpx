@@ -18,7 +18,7 @@ const report = (message: string) => {
 const mock = createMockBridge(report);
 if (params.get('services') === 'setup') mock.setServices(false);
 const eventBus = new EventBus();
-const versions = createMockVersions(report);
+const versions = createMockVersions(report, params.get('history') === 'branches');
 let documentId: string | null = 'preview-proposal';
 let documentName: string | null = '사업 제안서.hwpx';
 
