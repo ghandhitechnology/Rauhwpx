@@ -61,7 +61,7 @@ import { CommandPalette } from '@/ui/command-palette';
 import { showHmlImportWarning } from '@/ui/hml-import-warning';
 import { showLocalFontsModalIfNeeded } from '@/ui/local-fonts-modal';
 import { showToast } from '@/ui/toast';
-import { resolveDocumentPreflight, type DocumentPreflightIdentity, type OpenDocumentBytesEvent, type VerifiedDocumentGrant } from '@/recent/document-preflight';
+import { documentSourceDigest, resolveDocumentPreflight, type DocumentPreflightIdentity, type OpenDocumentBytesEvent, type VerifiedDocumentGrant } from '@/recent/document-preflight';
 import { addRecentDoc, listRecentDocs } from '@/recent/recent-store';
 import { showDropConfirmDialog } from '@/ui/drop-confirm-dialog';
 import { initRhwpDev } from '@/core/rhwp-dev';
@@ -148,6 +148,7 @@ import type {
   CloudTakeoverPayload,
 } from './cloud/types.ts';
 import {
+  captureCloudOriginSha256,
   checkpointMatchesActiveDocument,
   persistCheckpointToBrowserOrigin,
 } from './cloud/checkpoint-origin.ts';
@@ -383,17 +384,26 @@ function bytesToSha256(bytes: Uint8Array): Promise<string> {
 
 async function prepareCloudTransferDocument() {
   if (!wasm.hasLoadedDocument()) return null;
-  if (documentState.isDirty() || wasm.isNewDocument) return null;
+  if (wasm.isNewDocument) return null;
   const sourceFormat = wasm.getSourceFormat();
   if (sourceFormat !== 'hwp' && sourceFormat !== 'hwpx' && sourceFormat !== 'hml') {
     throw new Error(`클라우드에서 지원하지 않는 문서 형식입니다: ${sourceFormat}`);
   }
   const format = sourceFormat;
   const bytes = exportDocumentForFormat(wasm, format);
+  // The Cloud snapshot may include unsaved edits. Keep the current saved origin
+  // digest separate so later publication can still detect external file changes.
+  const originSha256 = await captureCloudOriginSha256({
+    handle: wasm.currentFileHandle,
+    loadedDigest: wasm.documentDigest,
+    sourceDigest: documentSourceDigest,
+    digest: bytesToSha256,
+  });
   return {
     bytes,
     fileName: wasm.fileName,
     sha256: await bytesToSha256(bytes),
+    ...(originSha256 !== undefined ? { originSha256 } : {}),
   };
 }
 
@@ -406,7 +416,7 @@ async function prepareCloudTransferDocument() {
  */
 let cloudDocumentPublishingEnabled = false;
 
-function installCloudDocumentRuntimeApi(agentBridge: AgentBridge): void {
+function installCloudDocumentRuntimeApi(agentBridge: AgentBridge): boolean {
   const cloudBuild = (import.meta as ImportMeta & { env?: Record<string, string | undefined> })
     .env?.['VITE_RHWP_CLOUD_RUNTIME'] === '1';
   const loopback = window.location.hostname === '127.0.0.1'
@@ -415,7 +425,7 @@ function installCloudDocumentRuntimeApi(agentBridge: AgentBridge): void {
     || window.location.hostname === '::1';
   const params = new URLSearchParams(window.location.search);
   const bootstrap = params.get('bootstrap') ?? '';
-  if (!cloudBuild || !loopback || params.get('cloudRuntime') !== '1' || bootstrap.length < 43) return;
+  if (!cloudBuild || !loopback || params.get('cloudRuntime') !== '1' || bootstrap.length < 43) return false;
   cloudDocumentPublishingEnabled = true;
 
   let eventSequence = 0;
@@ -611,6 +621,8 @@ function installCloudDocumentRuntimeApi(agentBridge: AgentBridge): void {
     configurable: false,
     writable: false,
   });
+  document.documentElement.dataset.cloudDocumentRuntime = 'true';
+  return true;
 }
 
 async function applyCloudResult(result: CloudDownloadResult, resolution: CloudResultResolution): Promise<{
@@ -1167,7 +1179,7 @@ async function initialize(): Promise<void> {
       });
       agentBridgeRef = agentBridge;
       agentBridge.onEditingLeaseChange(setAgentEditingLease);
-      installCloudDocumentRuntimeApi(agentBridge);
+      const cloudRuntime = installCloudDocumentRuntimeApi(agentBridge);
       const versionController = new DocumentVersionController({
         wasm,
         eventBus,
@@ -1177,57 +1189,61 @@ async function initialize(): Promise<void> {
         agentBridge,
       });
       versionControllerRef = versionController;
-      const agentSidebar = initAgentSidebar({
-        bridge: agentBridge,
-        eventBus,
-        editorSettingsRuntime: {
-          preview: applyEditorSettingsPreview,
-          committed: commitEditorSettingsRuntime,
-        },
-        versionController,
-        openClassicVersionControl: () => openClassicDocumentHistory(commandServices),
-        getDocumentContext: () => {
-          const documentName = wasm.pageCount > 0 ? wasm.fileName : null;
-          let selectionLabel: string | null = null;
-          if (inputHandler?.getSelectedPictureRef()) {
-            selectionLabel = '개체 선택됨';
-          } else if (inputHandler?.hasSelection()) {
-            selectionLabel = '텍스트 선택됨';
-          }
-          return {
-            documentId: activeDocumentId,
-            documentName,
-            selectionLabel,
-            isDirty: documentState.isDirty(),
-            isNewDocument: wasm.isNewDocument,
-            sourceFormat: wasm.getSourceFormat(),
-          };
-        },
-        moveToLibraryDocument: (target) => {
-          void runLibraryMove(commandServices, target, () => activeDocumentId);
-        },
-        prepareCloudTransfer: prepareCloudTransferDocument,
-        beginCloudAuthorityTransition,
-        prepareCloudTakeover: () => confirmSaveBeforeReplacingDocument(commandServices),
-        setCloudDocumentLease,
-        applyCloudResult,
-        publishCloudCheckpoint,
-        applyCloudTakeover,
-      });
-      disposeAgentSidebar = () => {
-        agentSidebar.dispose();
-        disposeAgentSidebar = () => {};
-      };
-      awaitPendingCloudTransferForClose = agentSidebar.awaitPendingCloudTransferForClose;
-      agentSidebarReady = true;
-      initInlinePrompt({
-        wasm,
-        eventBus,
-        inputHandler,
-        canvasView,
-        bridge: agentBridge,
-        submit: agentSidebar.sendInlinePrompt,
-      });
+      // The outer client owns the conversation. A worker needs the bridge and editor,
+      // but must not open another composer or start a default-provider chat.
+      if (!cloudRuntime) {
+        const agentSidebar = initAgentSidebar({
+          bridge: agentBridge,
+          eventBus,
+          editorSettingsRuntime: {
+            preview: applyEditorSettingsPreview,
+            committed: commitEditorSettingsRuntime,
+          },
+          versionController,
+          openClassicVersionControl: () => openClassicDocumentHistory(commandServices),
+          getDocumentContext: () => {
+            const documentName = wasm.pageCount > 0 ? wasm.fileName : null;
+            let selectionLabel: string | null = null;
+            if (inputHandler?.getSelectedPictureRef()) {
+              selectionLabel = '개체 선택됨';
+            } else if (inputHandler?.hasSelection()) {
+              selectionLabel = '텍스트 선택됨';
+            }
+            return {
+              documentId: activeDocumentId,
+              documentName,
+              selectionLabel,
+              isDirty: documentState.isDirty(),
+              isNewDocument: wasm.isNewDocument,
+              sourceFormat: wasm.getSourceFormat(),
+            };
+          },
+          moveToLibraryDocument: (target) => {
+            void runLibraryMove(commandServices, target, () => activeDocumentId);
+          },
+          prepareCloudTransfer: prepareCloudTransferDocument,
+          beginCloudAuthorityTransition,
+          prepareCloudTakeover: () => confirmSaveBeforeReplacingDocument(commandServices),
+          setCloudDocumentLease,
+          applyCloudResult,
+          publishCloudCheckpoint,
+          applyCloudTakeover,
+        });
+        disposeAgentSidebar = () => {
+          agentSidebar.dispose();
+          disposeAgentSidebar = () => {};
+        };
+        awaitPendingCloudTransferForClose = agentSidebar.awaitPendingCloudTransferForClose;
+        agentSidebarReady = true;
+        initInlinePrompt({
+          wasm,
+          eventBus,
+          inputHandler,
+          canvasView,
+          bridge: agentBridge,
+          submit: agentSidebar.sendInlinePrompt,
+        });
+      }
       if (import.meta.env.DEV) {
         (window as any).__agentBridge = agentBridge;
         (window as any).__versionController = versionController;

@@ -54,3 +54,26 @@ export async function persistCheckpointToBrowserOrigin({
   if (savedDigest !== sha256) throw new Error('브라우저 원본 저장 검증에 실패했습니다.');
   return 'written';
 }
+
+
+/** Only a saved origin matching the loaded document may authorize later replacement. */
+export async function captureCloudOriginSha256({
+  handle,
+  loadedDigest,
+  sourceDigest,
+  digest,
+}: {
+  handle: Pick<WritableOriginHandle, 'getFile'> | null;
+  loadedDigest: string | null;
+  sourceDigest(bytes: Uint8Array): string;
+  digest(bytes: Uint8Array): Promise<string>;
+}): Promise<string | null | undefined> {
+  if (!handle) return undefined;
+  try {
+    const bytes = new Uint8Array(await (await handle.getFile()).arrayBuffer());
+    if (!loadedDigest || sourceDigest(bytes) !== loadedDigest) return null;
+    return await digest(bytes);
+  } catch {
+    return null;
+  }
+}

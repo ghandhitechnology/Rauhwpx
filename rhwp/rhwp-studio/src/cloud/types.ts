@@ -250,6 +250,7 @@ export interface CloudTakeoverPayload {
 }
 
 export interface CloudDocumentPayload {
+  originSha256?: string | null;
   bytes: Uint8Array;
   fileName: string;
   sha256: string;
@@ -328,6 +329,7 @@ export interface CloudDisplayAvailableCapability {
   maxFps: 12;
   inputProtocol: 'rauhwpx-input-v1';
   maxInputEventsPerSecond: 60;
+  supportsClickCount?: boolean;
   inputBatchSize?: 32;
 }
 
@@ -403,7 +405,7 @@ export type CloudDisplayEvent =
 
 export type CloudDisplayInputEvent =
   | { kind: 'pointer'; action: 'move'; x: number; y: number }
-  | { kind: 'pointer'; action: 'down' | 'up'; x: number; y: number; button: 'left' | 'middle' | 'right' | 'back' | 'forward' }
+  | { kind: 'pointer'; action: 'down' | 'up'; x: number; y: number; button: 'left' | 'middle' | 'right' | 'back' | 'forward'; clickCount?: number }
   | { kind: 'wheel'; x: number; y: number; deltaX: number; deltaY: number }
   | { kind: 'key'; action: 'down' | 'up'; key: string }
   | { kind: 'text'; text: string };

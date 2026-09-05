@@ -30,7 +30,7 @@ Sessions are staged until `session.activate` commits the handoff. Persistent roo
 
 ## Conversation handoff and publication
 
-After Cloud is configured and paired, **Cloud로 보내기** sends the current document snapshot, conversation history, references, and composer message to Cloud. An empty composer supplies a continuation request. If a local turn is running, the handoff waits for its safe boundary. Follow-up messages use the same conversation; completing a turn does not require taking over or publishing the document.
+After Cloud is configured and paired, **Cloud로 보내기** sends the current document snapshot, conversation history, references, and composer message to Cloud. An empty composer supplies a continuation request. A previously saved document may include unsaved draft edits; transfer does not save or clear that local draft. If a local turn is running, the handoff waits for its safe boundary. Follow-up messages use the same conversation; completing a turn does not require taking over or publishing the document.
 
 The Cloud workspace edits a separate draft. Stable checkpoints and timelines are archived for recovery; they never automatically replace the origin file. The desktop retains the origin's native document lease while the Cloud authority lease keeps that document read-only in the local editor. The interactive Cloud workspace remains separate from the origin.
 

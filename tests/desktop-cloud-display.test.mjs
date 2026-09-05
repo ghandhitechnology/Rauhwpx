@@ -1,3 +1,4 @@
+import { acceptEdge13Pointer } from './fixtures/edge13-display-pointer.mjs';
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
@@ -914,4 +915,36 @@ test('signed inline JPEG frames need no follow-up GET and reject mismatched byte
     sessionId: SESSION_ID, type: 'display.frame', seq: 1, payload: { ...metadata(1, STREAM_ID, bytes), bytesBase64: Buffer.from('other-frame!').toString('base64') },
   }));
   await assert.rejects(corrupt.readDisplayFrames(SESSION_ID, capability(), 0, { onFrame: () => assert.fail('corrupt frame delivered') }));
+});
+
+
+test('desktop display negotiates click counts before single or batched input reaches edge13', async () => {
+  for (const supportsClickCount of [undefined, false, true]) {
+    for (const batched of [false, true]) {
+      const selected = parseDisplayCapability({ ...capability(),
+        ...(supportsClickCount === undefined ? {} : { supportsClickCount }),
+        ...(batched ? { inputBatchSize: 32 } : {}),
+      }, SESSION_ID);
+      const received = [];
+      const receive = (event) => {
+        if (supportsClickCount !== true) acceptEdge13Pointer(event);
+        received.push(event);
+      };
+      const connection = await openCloudDisplay({
+        displayCapability: async () => selected,
+        setDisplayInterest: async () => {},
+        readDisplayFrames: async (_session, _capability, _after, { signal }) => untilAbort(signal),
+        sendDisplayInput: async (_session, _stream, _viewer, _sequence, event) => receive(event),
+        sendDisplayInputs: async (_session, _stream, _viewer, events) => events.forEach(({ event }) => receive(event)),
+      }, SESSION_ID, () => {});
+      try {
+        const events = ['down', 'up'].map((action) => ({ kind: 'pointer', action, x: 20, y: 20, button: 'left', clickCount: 2 }));
+        assert.throws(() => acceptEdge13Pointer(events[0]), { code: 'DISPLAY_INPUT_INVALID' });
+        await Promise.all(events.map((event) => connection.sendInput(event)));
+        assert.deepEqual(received, events.map((event) => supportsClickCount === true ? event : acceptEdge13Pointer(
+          Object.fromEntries(Object.entries(event).filter(([key]) => key !== 'clickCount')))));
+      } finally { await connection.close(); }
+    }
+  }
+  assert.throws(() => parseDisplayCapability({ ...capability(), supportsClickCount: 'true' }, SESSION_ID), { code: 'DISPLAY_CAPABILITY_INVALID' });
 });

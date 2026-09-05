@@ -8,6 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
 import puppeteer from 'puppeteer-core';
+import { applyDisplayInput } from '../../../cloud/document-runtime/studio-harness.mjs';
 
 const studioRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const chromePath = [
@@ -74,6 +75,7 @@ function installDesktopCloudMock() {
   let displayListener = null;
   let leaseOwned = false;
   let publicationFailures = 0;
+  let transferFailures = 0;
   let idle = false;
   let transferredTimeline = null;
 
@@ -185,6 +187,7 @@ function installDesktopCloudMock() {
     editorSessionId,
     selectedSessionId,
     failNextPublication() { publicationFailures += 1; },
+    failNextTransfer() { transferFailures += 1; },
     resetIdle() {
       idle = true;
       leaseOwned = false;
@@ -262,6 +265,10 @@ function installDesktopCloudMock() {
     async cloudTransfer(payload) {
       record('cloudTransfer', payload);
       await new Promise((resolve) => setTimeout(resolve, 100));
+      if (transferFailures > 0) {
+        transferFailures -= 1;
+        throw new Error('Cloud upload is temporarily unavailable');
+      }
       editorScope = { threadId: payload.threadId, documentId: payload.documentId };
       transferredTimeline = structuredClone(payload.timeline);
       idle = false;
@@ -348,7 +355,7 @@ const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rauhwpx-cloud-workspace-'
 const vite = spawn(
   process.execPath,
   [path.join(studioRoot, 'node_modules', 'vite', 'bin', 'vite.js'), '--host', '0.0.0.0', '--port', String(port), '--strictPort'],
-  { cwd: studioRoot, env: { ...process.env, BROWSER: 'none' }, stdio: ['ignore', 'ignore', 'ignore'] },
+  { cwd: studioRoot, env: { ...process.env, BROWSER: 'none', VITE_RHWP_CLOUD_RUNTIME: '1' }, stdio: ['ignore', 'ignore', 'ignore'] },
 );
 let browser;
 
@@ -470,10 +477,36 @@ try {
     .filter((call) => call.method === 'cloudDisplayInput')
     .map((call) => call.payload.event));
   assert.deepEqual(remoteInput.filter((event) => event.action !== 'move').slice(0, 3), [
-    { kind: 'pointer', action: 'down', x: 32, y: 20, button: 'left' },
-    { kind: 'pointer', action: 'up', x: 32, y: 20, button: 'left' },
+    { kind: 'pointer', action: 'down', x: 32, y: 20, button: 'left', clickCount: 1 },
+    { kind: 'pointer', action: 'up', x: 32, y: 20, button: 'left', clickCount: 1 },
     { kind: 'text', text: 'A' },
   ]);
+  // Real Chromium PointerEvent.detail is zero. Exercise the viewer's fallback tracker,
+  // then replay its exact payloads through the production remote dispatcher.
+  await delay(550);
+  const beforeClicks = await page.evaluate(() => window.__cloudWorkspaceHarness.calls.length);
+  await page.click('.cloud-workspace-canvas');
+  await page.click('.cloud-workspace-canvas');
+  await page.waitForFunction((start) => window.__cloudWorkspaceHarness.calls.slice(start)
+    .filter((call) => call.method === 'cloudDisplayInput' && call.payload.event.action === 'up').length === 2, {}, beforeClicks);
+  const clickInputs = await page.evaluate((start) => window.__cloudWorkspaceHarness.calls.slice(start)
+    .filter((call) => call.method === 'cloudDisplayInput').map((call) => call.payload.event), beforeClicks);
+  assert.deepEqual(clickInputs.filter((event) => event.action === 'down').map((event) => event.clickCount), [1, 2]);
+  assert.deepEqual(clickInputs.filter((event) => event.action === 'up').map((event) => event.clickCount), [1, 2]);
+  const remotePage = await browser.newPage();
+  try {
+    await remotePage.setContent('<button style="position:absolute;left:0;top:0;width:100px;height:100px">Remote editor target</button>');
+    await remotePage.evaluate(() => {
+      window.remoteDoubleClicks = [];
+      document.querySelector('button').addEventListener('dblclick', (event) => window.remoteDoubleClicks.push(event.detail));
+    });
+    const pressed = { displayPressedKeys: new Set(), displayPressedButtons: new Set() };
+    for (const input of clickInputs) await applyDisplayInput(remotePage, input, pressed);
+    assert.deepEqual(await remotePage.evaluate(() => window.remoteDoubleClicks), [2]);
+  } finally {
+    await remotePage.close();
+    await page.bringToFront();
+  }
   if (process.env.CLOUD_WORKSPACE_SCREENSHOT) {
     await page.screenshot({ path: process.env.CLOUD_WORKSPACE_SCREENSHOT, fullPage: true });
   }
@@ -663,8 +696,22 @@ try {
   await page.evaluate(() => [...document.querySelectorAll('.ag-threads-item')]
     .find((node) => node.textContent.includes('Local handoff regression')).click());
   await page.waitForFunction(() => document.querySelector('.ag-cloud-handoff')?.hidden === false);
-  const beforeHandoff = await page.evaluate(() => {
+  const beforeHandoff = await page.evaluate(async () => {
     const input = document.querySelector('.ag-composer textarea');
+    const originBytes = await (await fetch('/samples/hwpx/form-002.hwpx')).arrayBuffer();
+    const origin = new File([originBytes], 'form-002.hwpx');
+    window.__handoffOrigin = { file: origin, writes: 0 };
+    window.__wasm.currentFileHandle = {
+      kind: 'file', name: origin.name,
+      getFile: async () => window.__handoffOrigin.file,
+      queryPermission: async () => 'granted',
+      createWritable: async () => {
+        window.__handoffOrigin.writes += 1;
+        throw new Error('Cloud handoff must not write the local origin');
+      },
+    };
+    window.__wasm.insertText(0, 0, 0, 'UNSAVED_CLOUD_HANDOFF ');
+    window.__eventBus.emit('document-mutated', 'cloud-handoff-e2e');
     input.value = 'Use the wording we agreed on in the cloud.';
     input.dispatchEvent(new Event('input', { bubbles: true }));
     return Array.from(window.__wasm.exportHwp()).join(",");
@@ -674,19 +721,37 @@ try {
   assert.equal(await page.evaluate(() => window.__cloudWorkspaceHarness.calls
     .filter((call) => call.method === 'cloudTransfer').length), 0);
   await page.$eval('[data-workspace-mode="local"]', (node) => node.click());
+  await page.evaluate(() => window.__cloudWorkspaceHarness.failNextTransfer());
   await page.$eval('.ag-cloud-handoff', (node) => { node.click(); node.click(); });
   await page.waitForFunction(() => window.__cloudWorkspaceHarness.calls
     .filter((call) => call.method === 'cloudTransfer').length === 1);
+  await page.waitForSelector('.ag-cloud-start-retry');
+  await page.waitForFunction(() => document.documentElement.dataset.documentReadOnly === 'false');
+  assert.deepEqual(await page.evaluate(() => ({
+    editable: !window.__inputHandler.isReadOnly(),
+    dirty: window.__documentState.isDirty(),
+    originWrites: window.__handoffOrigin.writes,
+    text: Array.from(window.__wasm.exportHwp()).join(','),
+  })), { editable: true, dirty: true, originWrites: 0, text: beforeHandoff });
+  await page.$eval('.ag-cloud-start-retry', (node) => node.click());
+  await page.waitForFunction(() => window.__cloudWorkspaceHarness.calls
+    .filter((call) => call.method === 'cloudTransfer').length === 2);
   await page.waitForFunction(() => !document.querySelector('.ag-composer textarea')?.disabled);
   const handoff = await page.evaluate(() => {
     const request = window.__cloudWorkspaceHarness.calls.find((call) => call.method === 'cloudTransfer').payload;
     return {
-      history: request.timeline.thread.messages.map((message) => message.text),
+      history: request.timeline.thread.messages.filter((message) => message.role !== 'system').map((message) => message.text),
       workflow: request.workflow,
       initialMessage: request.initialMessage,
       draft: document.querySelector('.ag-composer textarea').value,
       text: Array.from(window.__wasm.exportHwp()).join(","),
       readOnly: document.documentElement.dataset.documentReadOnly,
+      dirty: window.__documentState.isDirty(),
+      snapshotMatchesDirtyEditor: Array.from(request.document.bytes).join(',') === Array.from(window.__wasm.exportHwpx()).join(','),
+      transferredFileName: request.document.fileName,
+      originWrites: window.__handoffOrigin.writes,
+      originSha256: request.document.originSha256,
+      snapshotSha256: request.document.sha256,
     };
   });
   assert.deepEqual(handoff.history, [
@@ -700,6 +765,21 @@ try {
   assert.equal(handoff.draft, '');
   assert.equal(handoff.text, beforeHandoff);
   assert.equal(handoff.readOnly, 'true');
+  assert.equal(handoff.dirty, true, 'handoff must not mark unsaved edits as saved');
+  assert.deepEqual(await page.evaluate(async () => {
+    await window.__autosaveManager.flushNow('cloud-owned-regression');
+    return { writes: window.__handoffOrigin.writes, dirty: window.__documentState.isDirty() };
+  }), { writes: 0, dirty: true }, 'recovery autosave must not write the Cloud-owned origin or clear dirty state');
+  assert.equal(handoff.snapshotMatchesDirtyEditor, true);
+  assert.equal(handoff.transferredFileName, 'form-002.hwpx');
+  assert.equal(handoff.originWrites, 0);
+  assert.match(handoff.originSha256, /^[a-f0-9]{64}$/);
+  assert.notEqual(handoff.originSha256, handoff.snapshotSha256);
+  assert.equal(await page.evaluate(async () => {
+    const originBytes = new Uint8Array(await window.__handoffOrigin.file.arrayBuffer());
+    const snapshot = window.__cloudWorkspaceHarness.calls.find((call) => call.method === 'cloudTransfer').payload.document.bytes;
+    return Array.from(originBytes).join(',') !== Array.from(snapshot).join(',');
+  }), true, 'the original saved bytes must remain separate from the dirty Cloud snapshot');
   // Slash-menu selection must change the Cloud workflow without requiring a local provider connection.
   for (const workflow of ['build', 'question']) {
     await page.$eval('.ag-composer textarea', (node, workflow) => {
@@ -737,6 +817,60 @@ try {
   assert.ok(followups.every((request) => request.sessionId === 'session-editor-a'));
   assert.equal(await page.evaluate(() => Array.from(window.__wasm.exportHwp()).join(",")), beforeHandoff);
   console.log('PASS existing conversation handoff, double-click protection, read-only question workflow, multi-turn cloud messages, and unchanged local document');
+  // An authenticated worker exposes the editor and bridge without a second chat UI.
+  const workerPage = await browser.newPage();
+  const bootstrap = 'cloud-workspace-bootstrap-'.padEnd(43, 'x');
+  await workerPage.setViewport({ width: 1280, height: 800 });
+  await workerPage.goto(`${viteUrl}/?cloudRuntime=1&bootstrap=${bootstrap}`, { waitUntil: 'domcontentloaded' });
+  await workerPage.waitForFunction(() => Boolean(window.rauhwpxCloudRuntime && window.__agentBridge && window.__canvasView));
+  await workerPage.evaluate(async () => {
+    const response = await fetch('/samples/hwpx/form-002.hwpx');
+    await new Promise((resolve, reject) => {
+      const requestId = 'worker-layout-document';
+      const off = window.__eventBus.on('open-document-bytes:done', (result) => {
+        if (result.requestId !== requestId) return;
+        off();
+        if (result.ok) resolve();
+        else reject(new Error(result.error));
+      });
+      void response.arrayBuffer().then((buffer) => window.__eventBus.emit('open-document-bytes', {
+        bytes: new Uint8Array(buffer), fileName: 'form-002.hwpx',
+        requestId, suppressDialogs: true, skipUnsavedGuard: true,
+      }));
+    });
+  });
+  const workerState = await workerPage.evaluate((bootstrap) => {
+    const runtime = window.rauhwpxCloudRuntime;
+    let startRequest = null;
+    window.__agentBridge.startChat = (...args) => { startRequest = args; };
+    runtime.startChat(bootstrap, {
+      agent: 'codex', model: 'gpt-6-astra', effort: 'high', workflow: 'question',
+      permissionProfile: 'unrestricted', threadId: 'worker-editor-thread',
+      history: [{ role: 'user', content: 'Preserve the conversation history.' }],
+    });
+    return {
+      status: runtime.status(bootstrap),
+      sidebar: Boolean(document.querySelector('#agent-sidebar')),
+      setup: Boolean(document.querySelector('.ag-cloud-setup-overlay')),
+      sidebarInset: document.body.classList.contains('ag-sidebar-open'),
+      editorRight: document.querySelector('#editor-area').getBoundingClientRect().right,
+      width: window.innerWidth,
+      startRequest,
+    };
+  }, bootstrap);
+  assert.equal(workerState.status.documentLoaded, true);
+  assert.equal(workerState.sidebar, false);
+  assert.equal(workerState.setup, false);
+  assert.equal(workerState.sidebarInset, false);
+  assert.equal(workerState.editorRight, workerState.width);
+  assert.equal(workerState.startRequest[0], 'codex');
+  assert.equal(workerState.startRequest[5], 'question');
+  assert.deepEqual(workerState.startRequest[9], [{ role: 'user', content: 'Preserve the conversation history.' }]);
+  if (process.env.CLOUD_WORKER_SCREENSHOT) {
+    await workerPage.screenshot({ path: process.env.CLOUD_WORKER_SCREENSHOT, fullPage: true });
+  }
+  await workerPage.close();
+  console.log('PASS authenticated worker keeps the editor and provider bridge without duplicate chat or onboarding');
   assert.deepEqual(pageErrors, []);
   console.log(JSON.stringify({ initial, cloudVisual, restored, closeCalls }, null, 2));
 } finally {

@@ -158,7 +158,9 @@ export function createCloudWorkspace({
   let pendingMove: Extract<CloudDisplayInputEvent, { kind: 'pointer'; action: 'move' }> | null = null;
   let moveSending = false;
   const pressedKeys = new Set<string>();
-  const pressedPointers = new Map<number, 'left' | 'middle' | 'right' | 'back' | 'forward'>();
+  type PointerPress = { button: 'left' | 'middle' | 'right' | 'back' | 'forward'; clickCount: number; x: number; y: number; time: number; dragged: boolean };
+  const pressedPointers = new Map<number, PointerPress>();
+  let lastClick: PointerPress | null = null;
   const listeners = new Set<(value: CloudDisplayState) => void>();
 
   const renderZoom = (): void => {
@@ -305,6 +307,7 @@ export function createCloudWorkspace({
     pendingMove = null;
     pressedKeys.clear();
     pressedPointers.clear();
+    lastClick = null;
     if (active) void active.close().catch(() => {});
   };
 
@@ -481,6 +484,8 @@ export function createCloudWorkspace({
   });
 
   canvas.addEventListener('pointermove', (event) => {
+    const press = pressedPointers.get(event.pointerId);
+    if (press && Math.hypot(event.clientX - press.x, event.clientY - press.y) > 5) press.dragged = true;
     const point = displayPoint(event);
     if (!point) return;
     pendingMove = { kind: 'pointer', action: 'move', ...point };
@@ -493,25 +498,37 @@ export function createCloudWorkspace({
     event.preventDefault();
     inputSink.focus({ preventScroll: true });
     canvas.setPointerCapture?.(event.pointerId);
-    pressedPointers.set(event.pointerId, button);
+    // PointerEvent.detail is zero in Chromium, so count clicks before network batching.
+    const time = Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now();
+    const repeated = lastClick && lastClick.button === button && time >= lastClick.time
+      && time - lastClick.time <= 500 && Math.hypot(event.clientX - lastClick.x, event.clientY - lastClick.y) <= 5;
+    const clickCount = event.detail > 0 ? Math.min(3, event.detail)
+      : repeated ? lastClick!.clickCount % 3 + 1 : 1;
+    pressedPointers.set(event.pointerId, { button, clickCount, x: event.clientX, y: event.clientY, time, dragged: false });
+    lastClick = null;
     pendingMove = null;
-    void sendInput({ kind: 'pointer', action: 'down', ...point, button }).catch(() => {});
+    void sendInput({ kind: 'pointer', action: 'down', ...point, button, clickCount }).catch(() => {});
   });
   canvas.addEventListener('pointerup', (event) => {
     const point = displayPoint(event);
-    const button = pressedPointers.get(event.pointerId) ?? pointerButton(event.button);
+    const press = pressedPointers.get(event.pointerId);
+    const button = press?.button ?? pointerButton(event.button);
     if (!point || !button) return;
     event.preventDefault();
-    void sendInput({ kind: 'pointer', action: 'up', ...point, button }).catch(() => {});
+    void sendInput({ kind: 'pointer', action: 'up', ...point, button, clickCount: press?.clickCount ?? 1 }).catch(() => {});
+    const time = Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now();
+    lastClick = press && !press.dragged && time - press.time <= 500
+      && Math.hypot(event.clientX - press.x, event.clientY - press.y) <= 5 ? press : null;
     pressedPointers.delete(event.pointerId);
     canvas.releasePointerCapture?.(event.pointerId);
   });
   canvas.addEventListener('pointercancel', (event) => {
     const point = displayPoint(event);
-    const button = pressedPointers.get(event.pointerId);
-    if (!point || !button) return;
+    const press = pressedPointers.get(event.pointerId);
+    if (!point || !press) return;
     pressedPointers.delete(event.pointerId);
-    void sendInput({ kind: 'pointer', action: 'up', ...point, button }).catch(() => {});
+    lastClick = null;
+    void sendInput({ kind: 'pointer', action: 'up', ...point, button: press.button, clickCount: press.clickCount }).catch(() => {});
   });
   canvas.addEventListener('contextmenu', (event) => event.preventDefault());
   canvas.addEventListener('wheel', (event) => {
@@ -523,7 +540,11 @@ export function createCloudWorkspace({
     void sendInput({ kind: 'wheel', ...point, deltaX, deltaY }).catch(() => {});
   }, { passive: false });
   inputSink.addEventListener('keydown', (event) => {
-    if (event.isComposing || event.key === 'Dead' || event.key === 'Process') return;
+    // The local textarea owns IME mode changes; only committed text goes to Chromium.
+    if (event.isComposing || ['Dead', 'Process', 'Compose', 'HangulMode', 'HanjaMode',
+      'KanjiMode', 'Hiragana', 'Katakana', 'HiraganaKatakana', 'Zenkaku', 'Hankaku',
+      'ZenkakuHankaku', 'Eisu', 'EisuShift', 'Alphanumeric', 'ModeChange',
+      'Convert', 'NonConvert', 'JunjaMode', 'FinalMode'].includes(event.key)) return;
     const localText = event.key.length === 1 && !event.ctrlKey && !event.metaKey && !event.altKey
       && !event.isComposing;
     if (localText) return;

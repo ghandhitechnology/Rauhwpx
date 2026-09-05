@@ -1339,6 +1339,7 @@ ipcMain.handle('cloud:transfer', async (event, payload) => {
   const transfer = requireCloudCoordinator().transfer(payload, {
     originSessionId: session.sessionId,
     originPath: lease?.canonicalPath ?? null,
+    originDigest: nativeFiles.originDigestForSessionPath(session.sessionId, lease?.canonicalPath),
   });
   session.cloudTransferPromise = transfer;
   try {
@@ -1384,7 +1385,7 @@ ipcMain.handle('cloud:download-result', async (event, payload) => {
     if (handoff?.originPath && handoff.documentDigest) {
       try {
         const current = await readFile(handoff.originPath);
-        if (createHash('sha256').update(current).digest('hex') !== handoff.documentDigest) {
+        if (createHash('sha256').update(current).digest('hex') !== (Object.hasOwn(handoff, 'originDigest') ? handoff.originDigest : handoff.documentDigest)) {
           conflict = 'external-change';
         }
       } catch {
@@ -1476,7 +1477,7 @@ ipcMain.handle('cloud:resolve-result', async (event, payload = {}) => {
       recoveryPath: handoff.recoveryPath,
       resultDigest: handoff.resultDigest,
       originalPath: handoff.originPath,
-      originalDigest: handoff.documentDigest,
+      originalDigest: Object.hasOwn(handoff, 'originDigest') ? handoff.originDigest : handoff.documentDigest,
       action,
       resolutionId: handoff.id,
     });

@@ -1,3 +1,4 @@
+import { acceptEdge13Pointer } from '../../../tests/fixtures/edge13-display-pointer.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
@@ -403,4 +404,40 @@ test('CloudController disposal closes owned resources exactly once', async () =>
     displayUnsubscribes: 1,
     closes: 1,
   });
+});
+
+
+test('browser display negotiates click counts before single or batched input reaches edge13', async () => {
+  for (const supportsClickCount of [undefined, false, true]) {
+    for (const batched of [false, true]) {
+      const selected = parseCloudDisplayCapability({ ...capability(),
+        ...(supportsClickCount === undefined ? {} : { supportsClickCount }),
+        ...(batched ? { inputBatchSize: 32 } : {}),
+      })!;
+      const received: unknown[] = [];
+      const receive = (event: unknown) => {
+        if (supportsClickCount !== true) acceptEdge13Pointer(event);
+        received.push(event);
+      };
+      const connection = await openDisplayConnection({
+        capability: async () => selected,
+        interest: async () => {},
+        frames: async (_session, _capability, _after, { signal }) => {
+          await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
+          return 0;
+        },
+        frame: async () => { throw new Error('unused'); },
+        input: async (_session, _stream, _viewer, _sequence, event) => receive(event),
+        inputs: async (_session, _stream, _viewer, events) => events.forEach(({ event }) => receive(event)),
+      }, sessionId, () => {});
+      try {
+        const events = (['down', 'up'] as const).map((action) => ({ kind: 'pointer' as const, action, x: 20, y: 20, button: 'left' as const, clickCount: 2 }));
+        assert.throws(() => acceptEdge13Pointer(events[0]), { code: 'DISPLAY_INPUT_INVALID' });
+        await Promise.all(events.map((event) => connection.sendInput(event)));
+        assert.deepEqual(received, events.map((event) => supportsClickCount === true ? event : acceptEdge13Pointer(
+          Object.fromEntries(Object.entries(event).filter(([key]) => key !== 'clickCount')))));
+      } finally { await connection.close(); }
+    }
+  }
+  assert.equal(parseCloudDisplayCapability({ ...capability(), supportsClickCount: 'true' }), null);
 });

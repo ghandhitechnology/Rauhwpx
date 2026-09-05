@@ -89,7 +89,8 @@ test('cloud transfer includes portable timeline, exact document bytes and refere
   assert.doesNotMatch(transfer, /setPermissionProfile\('unrestricted'\)/);
   const prepare = main.match(/async function prepareCloudTransferDocument\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
   assert.doesNotMatch(prepare, /saveCurrentDocument/);
-  assert.match(prepare, /documentState\.isDirty\(\) \|\| wasm\.isNewDocument/);
+  assert.match(prepare, /if \(wasm\.isNewDocument\) return null/);
+  assert.doesNotMatch(prepare, /documentState\.isDirty/);
   assert.match(main, /exportDocumentForFormat\(wasm, format\)/);
   assert.match(main, /isNewDocument: wasm\.isNewDocument/);
 });

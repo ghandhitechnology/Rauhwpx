@@ -56,7 +56,7 @@ function snapshot(session: CloudSessionState, extras: Partial<CloudSnapshot> = {
   };
 }
 
-test('unsaved and unsupported documents reject Cloud start without locking the chat', () => {
+test('never-saved and unsupported documents reject Cloud start but dirty saved snapshots can transfer', () => {
   assert.deepEqual(validateCloudStartDocument({
     hasDocument: true,
     isNew: true,
@@ -68,7 +68,7 @@ test('unsaved and unsupported documents reject Cloud start without locking the c
     isNew: false,
     isDirty: true,
     format: 'hwpx',
-  }), { ok: false, reason: 'unsaved', message: CLOUD_UNSAVED_MESSAGE });
+  }), { ok: true, format: 'hwpx' });
   assert.equal(validateCloudStartDocument({
     hasDocument: true,
     isNew: false,

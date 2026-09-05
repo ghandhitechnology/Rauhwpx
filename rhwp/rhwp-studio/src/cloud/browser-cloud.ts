@@ -1588,7 +1588,10 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
         bytes: input.document.bytes, timeline: input.timeline, createdAt: new Date().toISOString(),
       });
       requireCurrentProfile(selectedProfile, generation);
-      storage.setItem(originSyncKey(selectedProfile, sessionId), input.document.sha256);
+      const savedOriginDigest = input.document.originSha256;
+      if (typeof savedOriginDigest === 'string' && /^[a-f0-9]{64}$/.test(savedOriginDigest)) {
+        storage.setItem(originSyncKey(selectedProfile, sessionId), savedOriginDigest);
+      } else storage.removeItem(originSyncKey(selectedProfile, sessionId));
       const activated = await requestJson(`/v1/sessions/${encodeURIComponent(sessionId)}/commands`, {
         method: 'POST',
         selectedProfile,

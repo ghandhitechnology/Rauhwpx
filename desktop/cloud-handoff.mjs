@@ -218,6 +218,7 @@ export class CloudHandoffStore {
     threadId,
     documentId,
     originPath,
+    originDigest,
     documentName,
     documentBytes,
     timeline,
@@ -285,6 +286,8 @@ export class CloudHandoffStore {
       cloudSessionId: null,
       documentName: String(documentName ?? 'document.hwpx'),
       documentDigest: sha256Hex(bytes),
+      originDigest: originDigest === undefined ? sha256Hex(bytes)
+        : typeof originDigest === 'string' && /^[a-f0-9]{64}$/.test(originDigest) ? originDigest : null,
       documentSize: bytes.length,
       documentStagingPath,
       provider: String(provider ?? ''),

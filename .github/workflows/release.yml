@@ -356,6 +356,11 @@ jobs:
           if (config.runner !== "local") throw new Error("sandbox image must use the local runner");
           if (config.workerUid !== 1001) throw new Error("sandbox image must drop workers to uid 1001");
           console.log(JSON.stringify({ runner: config.runner, workerUid: config.workerUid }));'
+          podman run --rm --user 1001:1001 \
+            --env HOME=/tmp --env RAUHWpx_XVFB_CAPTURE_PROOF=1 \
+            --volume "$PWD/cloud/tests:/app/tests:ro" \
+            --entrypoint node rauhwpx-cloud-sandbox-release \
+            --test /app/tests/xvfb-studio-capture-proof.test.mjs
 
       - name: Publish app sandbox architecture image
         env:

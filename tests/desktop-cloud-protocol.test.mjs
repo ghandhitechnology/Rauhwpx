@@ -1,3 +1,4 @@
+import { NativeFileHandleRegistry } from '../desktop/native-file-handles.mjs';
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -371,7 +372,8 @@ test('each stable turn archives exact bytes without overwriting the origin or en
   assert.equal(published.publication, 'written');
   assert.equal(await readFile(originPath, 'utf8'), edited.toString());
   assert.equal((await store.get(created.id)).state, 'running');
-  assert.equal((await store.get(created.id)).documentDigest, editedDigest);
+  assert.equal((await store.get(created.id)).originDigest, editedDigest);
+  assert.equal((await store.get(created.id)).documentDigest, createHash('sha256').update(original).digest('hex'));
   const repeated = await coordinator.publishCheckpoint({ sessionId: 'cloud-autosync', operationId: 'turn_1_stable' });
   assert.equal(repeated.publication, 'unchanged');
 });
@@ -3379,16 +3381,17 @@ test('slow checkpoint mirroring lets later events through and preserves the newe
   assert.deepEqual(downloads, ['revision-1', 'revision-2']);
 });
 
-async function publicationFixture(t) {
+async function publicationFixture(t, { snapshot = 'original', originDigest } = {}) {
   const directory = await mkdtemp(path.join(tmpdir(), 'raucloud-publication-'));
   const originPath = path.join(directory, 'original.hwpx');
   await writeFile(originPath, 'original');
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
   const created = await store.create({
     sessionId: 'desktop-publish', threadId: 'thread-publish', documentId: 'document-publish',
-    originPath, documentName: 'original.hwpx', documentBytes: Buffer.from('original'),
+    originPath, originDigest, documentName: 'original.hwpx', documentBytes: Buffer.from(snapshot),
     timeline: null, provider: 'codex', limits: { maxTurns: 10 },
   });
+  const staged = await store.readPayload(created.id);
   await store.transition(created.id, 'uploading');
   await store.transition(created.id, 'committing');
   await store.transition(created.id, 'running', { cloudSessionId: 'cloud-publish', serverVersion: 1 });
@@ -3421,7 +3424,7 @@ async function publicationFixture(t) {
     }
     assert.fail('publication did not settle');
   };
-  return { coordinator, store, id: created.id, originPath, deliver, waitFor };
+  return { coordinator, store, id: created.id, originPath, deliver, waitFor, staged };
 }
 
 test('an explicit agent publication updates once and later turns keep the cloud conversation running', async (t) => {
@@ -3451,4 +3454,46 @@ test('publication preserves an externally edited origin without ending or taking
   assert.equal((await fixture.store.get(fixture.id)).state, 'running');
   const again = await fixture.coordinator.publishCheckpoint({ sessionId: 'cloud-publish', operationId: 'turn-1' });
   assert.equal(again.publication, 'conflict');
+});
+
+
+test('dirty snapshot publication uses the saved origin baseline and retains its snapshot digest', async (t) => {
+  const originDigest = createHash('sha256').update('original').digest('hex');
+  const fixture = await publicationFixture(t, { snapshot: 'unsaved local draft', originDigest });
+  const before = await fixture.store.get(fixture.id);
+  assert.notEqual(before.documentDigest, before.originDigest);
+  assert.equal(await readFile(fixture.originPath, 'utf8'), 'original');
+  const published = await fixture.coordinator.publishCheckpoint({ sessionId: 'cloud-publish', operationId: 'turn-1' });
+  assert.equal(published.publication, 'written');
+  assert.equal(await readFile(fixture.originPath, 'utf8'), 'cloud revision 1');
+  assert.equal((await fixture.store.get(fixture.id)).documentDigest, before.documentDigest);
+  assert.equal(Buffer.from(fixture.staged.documentBytes).toString(), 'unsaved local draft');
+  await writeFile(fixture.originPath, 'external after publication');
+  assert.equal((await fixture.coordinator.publishCheckpoint({ sessionId: 'cloud-publish', operationId: 'turn-2' })).publication, 'conflict');
+  assert.equal(await readFile(fixture.originPath, 'utf8'), 'external after publication');
+});
+
+test('unknown origin baseline preserves external bytes even when the dirty snapshot differs', async (t) => {
+  const fixture = await publicationFixture(t, { snapshot: 'unsaved local draft', originDigest: null });
+  await writeFile(fixture.originPath, 'external before handoff');
+  const published = await fixture.coordinator.publishCheckpoint({ sessionId: 'cloud-publish', operationId: 'turn-1' });
+  assert.equal(published.publication, 'conflict');
+  assert.equal(await readFile(fixture.originPath, 'utf8'), 'external before handoff');
+});
+
+
+test('native cloud origin baseline remains the accepted file fingerprint after an external edit', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'cloud-origin-fingerprint-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const originPath = path.join(directory, 'origin.hwpx');
+  await writeFile(originPath, 'loaded origin');
+  const registry = new NativeFileHandleRegistry();
+  const opened = await registry.create('owner', originPath);
+  const canonicalPath = registry.sourcePathForSender('owner', opened.descriptor.handleId);
+  const expected = createHash('sha256').update('loaded origin').digest('hex');
+  assert.equal(registry.originDigestForSessionPath('owner', canonicalPath), expected);
+  await writeFile(originPath, 'external before cloud');
+  assert.equal(registry.originDigestForSessionPath('owner', canonicalPath), expected);
+  assert.equal(registry.originDigestForSessionPath('other-window', canonicalPath), null);
+  assert.equal(registry.originDigestForSessionPath('owner', null), null);
 });

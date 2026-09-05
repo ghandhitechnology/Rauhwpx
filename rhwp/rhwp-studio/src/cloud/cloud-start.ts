@@ -51,7 +51,7 @@ export function validateCloudStartDocument(state: CloudStartDocumentState): Clou
   if (!state.hasDocument) {
     return { ok: false, reason: 'missing', message: '먼저 클라우드에서 작업할 문서를 여세요.' };
   }
-  if (state.isNew || state.isDirty) {
+  if (state.isNew) {
     return { ok: false, reason: 'unsaved', message: CLOUD_UNSAVED_MESSAGE };
   }
   if (!isCloudSupportedFormat(state.format)) {

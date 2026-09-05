@@ -1884,7 +1884,7 @@ export class CloudCoordinator extends EventEmitter {
     return operation.finally(() => this.#transferOperations.delete(operation));
   }
 
-  async #transfer(payload, { originSessionId, originPath = null } = {}, profileEpoch) {
+  async #transfer(payload, { originSessionId, originPath = null, originDigest = null } = {}, profileEpoch) {
     const bytes = Buffer.from(payload?.document?.bytes ?? []);
     const goal = goalFromTransfer(payload);
     const startId = typeof payload?.startId === 'string' ? payload.startId.trim() : '';
@@ -1908,6 +1908,7 @@ export class CloudCoordinator extends EventEmitter {
       threadId: payload?.threadId,
       documentId: payload?.documentId,
       originPath,
+      originDigest,
       documentName: payload?.document?.fileName ?? payload?.documentName,
       documentBytes: bytes,
       timeline: payload?.timeline,
@@ -2319,7 +2320,7 @@ export class CloudCoordinator extends EventEmitter {
       kind: checkpoint.boundaryKind,
       ...(handoff ? {
         originOnThisDevice: true,
-        expectedOriginSha256: handoff.documentDigest,
+        expectedOriginSha256: Object.hasOwn(handoff, 'originDigest') ? handoff.originDigest : handoff.documentDigest,
       } : {}),
     };
   }
@@ -2357,7 +2358,7 @@ export class CloudCoordinator extends EventEmitter {
       recoveryPath: archivePath,
       resultDigest: checkpoint.sha256,
       originalPath: handoff.originPath,
-      originalDigest: handoff.documentDigest,
+      originalDigest: Object.hasOwn(handoff, 'originDigest') ? handoff.originDigest : handoff.documentDigest,
       action: 'replace',
       resolutionId: checkpoint.operationId,
     }) : null;
@@ -2367,7 +2368,7 @@ export class CloudCoordinator extends EventEmitter {
       lastPublishedBoundaryOperation: checkpoint.operationId,
       lastPublishedRevision: checkpoint.revision,
       lastPublicationOutcome: publication,
-      ...(publication === 'written' ? { documentDigest: checkpoint.sha256, externalConflict: false } : {}),
+      ...(publication === 'written' ? { originDigest: checkpoint.sha256, externalConflict: false } : {}),
       ...(publication === 'conflict' ? { externalConflict: true } : {}),
     });
     this.#emit({ type: 'checkpoint-published', sessionId, operationId: checkpoint.operationId, publication, handoff: updated });

@@ -296,3 +296,24 @@ test('input batches are atomic and return application receipts with idempotent r
   assert.throws(() => store.sendInputs(...args, [{ sequence: 3, event: { kind: 'text', text: 'too late' } }]), { code: 'DISPLAY_INPUT_SEALED' });
   store.closeAll();
 });
+
+
+test('pointer click counts survive transport and reject out-of-range or misplaced counts', async () => {
+  const store = new DisplayFrameStore();
+  const stream = store.openStream({ sessionId: 'clicks', workerId: 'worker', width: 1280, height: 800 });
+  store.setInterest('clicks', stream.streamId, 'device', 'viewer', true);
+  assert.equal(stream.supportsClickCount, true);
+  const args = ['clicks', stream.streamId, 'device', 'viewer'];
+  const pointer = { kind: 'pointer', action: 'down', x: 20, y: 20, button: 'left' };
+  for (const clickCount of [0, -1, 4, 1.5, '2', null]) {
+    assert.throws(() => store.sendInput(...args, 1, { ...pointer, clickCount }), { code: 'DISPLAY_INPUT_INVALID' });
+  }
+  assert.throws(() => store.sendInput(...args, 1, { kind: 'pointer', action: 'move', x: 20, y: 20, clickCount: 2 }), { code: 'DISPLAY_INPUT_INVALID' });
+  const events = [pointer, { ...pointer, action: 'up' }, { ...pointer, clickCount: 2 },
+    { kind: 'pointer', action: 'move', x: 21, y: 20 }, { ...pointer, action: 'up', clickCount: 2 },
+    { ...pointer, clickCount: 3 }];
+  store.sendInputs(...args, events.map((event, index) => ({ sequence: index + 1, event })));
+  const demand = await store.waitForDemand('clicks', 'worker', stream.streamId, 0);
+  assert.deepEqual(demand.inputEvents.map((entry) => entry.event), events);
+  store.closeAll();
+});

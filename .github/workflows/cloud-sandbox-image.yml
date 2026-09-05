@@ -41,14 +41,11 @@ jobs:
             cloud/install/provider-runtime/package-lock.json
             rhwp/rhwp-studio/package-lock.json
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - name: Set up cached Rust and WASM tools
+        uses: ./.github/actions/setup-rust
         with:
-          toolchain: 1.93.1
-          targets: wasm32-unknown-unknown
-
-      - name: Install wasm-pack
-        run: cargo install wasm-pack --version 0.15.0 --locked
+          wasm: 'true'
+          cache: package
 
       - name: Build cloud runtime assets
         run: |

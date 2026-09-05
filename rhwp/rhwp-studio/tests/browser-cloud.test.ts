@@ -1700,3 +1700,47 @@ test('browser question starts and workflow changes require an explicit supported
     });
   }
 });
+
+
+test('browser dirty transfer keeps uploaded snapshot separate from its verified saved origin baseline', async () => {
+  for (const originSha256 of ['b'.repeat(64), null, undefined]) {
+    const identity = serverIdentity();
+    const storage = new MemoryStorage();
+    const profile = storedBrowserProfile('https://dirty-origin.example.test', identity.key);
+    storeBrowserCredentials(storage, profile, {
+      accessToken: 'origin-access', refreshToken: 'origin-refresh', accessExpiresAt: Date.now() + 600_000,
+    });
+    const sessionId = 'dirty-browser-start';
+    const key = browserCloudTest.originSyncKey(profile, sessionId);
+    storage.setItem(key, 'c'.repeat(64));
+    const snapshotBytes = new TextEncoder().encode('unsaved local draft');
+    const snapshotDigest = createHash('sha256').update(snapshotBytes).digest('hex');
+    let uploaded: any;
+    let created: any;
+    const api = createBrowserCloudApi({ storage, fetchImpl: async (input, init) => {
+      const request = new Request(input, init);
+      const path = new URL(request.url).pathname;
+      if (path.endsWith('/v1/health')) return signedJson(request, identity, { conversationProtocolVersion: 2 });
+      const body = await request.json();
+      if (path.endsWith('/v1/uploads/init')) {
+        if (body.kind === 'document') uploaded = body;
+        return signedJson(request, identity, { blobExists: true });
+      }
+      if (path.endsWith('/v1/sessions')) { created = body; return signedJson(request, identity, { id: sessionId, stateVersion: 1 }); }
+      if (path.endsWith('/commands')) throw new Error('activation captured');
+      throw new Error(`Unexpected request ${path}`);
+    } });
+    assert.ok(api);
+    await assert.rejects(api.cloudTransfer({
+      startId: sessionId, threadId: 'dirty-thread', documentId: 'dirty-doc', documentName: 'dirty.hwpx',
+      agent: 'codex', model: 'gpt-6-astra', effort: 'high', workflow: 'direct', permissionProfile: 'unrestricted',
+      timeline: { schema: 'rauhwpx.cloud.timeline', version: 1, exportedAt: new Date().toISOString(), thread: { id: 'dirty-thread', messages: [] } } as any,
+      initialMessage: { id: 'dirty-message', text: 'Continue this draft', attachmentReferenceIds: [] },
+      document: { bytes: snapshotBytes, fileName: 'dirty.hwpx', sha256: snapshotDigest, originSha256 },
+      references: [], limits: { maxDurationMs: 60_000, maxTurns: 10 },
+    }), /activation captured/);
+    assert.equal(uploaded.sha256, snapshotDigest);
+    assert.equal(created.originDocument.blobId, snapshotDigest);
+    assert.equal(storage.getItem(key), originSha256 ?? null, 'unknown baseline must not authorize origin replacement');
+  }
+});

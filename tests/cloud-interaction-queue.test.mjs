@@ -12,10 +12,10 @@ test('input batches coalesce text and scroll without crossing key or pointer tra
     { kind: 'key', action: 'up', key: 'Shift' },
     { kind: 'wheel', x: 1, y: 2, deltaX: 0, deltaY: 10 },
     { kind: 'wheel', x: 1, y: 2, deltaX: 0, deltaY: 20 },
-    { kind: 'pointer', action: 'down', x: 1, y: 2, button: 'left' },
+    { kind: 'pointer', action: 'down', x: 1, y: 2, button: 'left', clickCount: 2 },
     { kind: 'pointer', action: 'move', x: 3, y: 4 },
     { kind: 'pointer', action: 'move', x: 5, y: 6 },
-    { kind: 'pointer', action: 'up', x: 5, y: 6, button: 'left' },
+    { kind: 'pointer', action: 'up', x: 5, y: 6, button: 'left', clickCount: 2 },
   ];
   await Promise.all(events.map((event) => queue.enqueue('stream', event)));
   assert.deepEqual(batches, [[events[0], { kind: 'text', text: '가나다' }, events[3],

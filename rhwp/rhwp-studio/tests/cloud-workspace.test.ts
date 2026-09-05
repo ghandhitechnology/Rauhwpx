@@ -262,13 +262,59 @@ test('cloud workspace maps pointer, wheel, shortcuts, and text into ordered remo
   sink.dispatch('input', { isComposing: false });
   await flushMicrotasks();
   assert.deepEqual(inputs, [
-    { kind: 'pointer', action: 'down', x: 640, y: 400, button: 'left' },
-    { kind: 'pointer', action: 'up', x: 640, y: 400, button: 'left' },
+    { kind: 'pointer', action: 'down', x: 640, y: 400, button: 'left', clickCount: 1 },
+    { kind: 'pointer', action: 'up', x: 640, y: 400, button: 'left', clickCount: 1 },
     { kind: 'wheel', x: 640, y: 400, deltaX: 3, deltaY: -9 },
     { kind: 'key', action: 'down', key: 'Control' },
     { kind: 'key', action: 'up', key: 'Control' },
     { kind: 'text', text: '한글' },
   ]);
+  workspace.dispose();
+});
+
+test('cloud workspace counts zero-detail clicks across moves and leaves IME mode keys local', async () => {
+  const inputs: any[] = [];
+  const workspace = createCloudWorkspace({
+    display: { async openDisplay(sessionId: string) {
+      return { ...connection(sessionId, []), async sendInput(event: unknown) { inputs.push(event); } };
+    } } as Pick<CloudController, 'openDisplay'>,
+    doc: new TestDocument() as unknown as Document,
+  });
+  workspace.setContext({ visible: true, session: running() });
+  await flushMicrotasks();
+  const root = workspace.root as unknown as TestElement;
+  const canvas = find(root, (node) => node.className === 'cloud-workspace-canvas');
+  const sink = find(root, (node) => node.className === 'cloud-workspace-input');
+  const pointer = (timeStamp: number, clientX = 20) => ({
+    clientX, clientY: 20, timeStamp, detail: 0, button: 0, pointerId: 1, preventDefault() {},
+  });
+  for (const time of [100, 200, 300, 400, 1000]) {
+    canvas.dispatch('pointerdown', pointer(time));
+    canvas.dispatch('pointermove', pointer(time + 1, 21));
+    canvas.dispatch('pointerup', pointer(time + 2, 21));
+  }
+  // A drag must not make the next click a double click.
+  canvas.dispatch('pointerdown', pointer(1100));
+  canvas.dispatch('pointermove', pointer(1101, 80));
+  canvas.dispatch('pointerup', pointer(1102));
+  canvas.dispatch('pointerdown', pointer(1200));
+  canvas.dispatch('pointerup', pointer(1201));
+  for (const key of ['HangulMode', 'HanjaMode', 'Compose', 'Convert', 'NonConvert']) {
+    const event = { key, preventDefault() { assert.fail('local IME controls must keep their default action'); } };
+    sink.dispatch('keydown', event);
+    sink.dispatch('keyup', event);
+  }
+  for (const key of ['AltGraph', 'F13', 'MediaPlayPause', 'ArrowLeft']) {
+    sink.dispatch('keydown', { key, preventDefault() {} });
+    sink.dispatch('keyup', { key, preventDefault() {} });
+  }
+  Object.assign(sink, { value: '한글' });
+  sink.dispatch('input', { isComposing: false });
+  await flushMicrotasks();
+  assert.deepEqual(inputs.filter((event) => event.kind === 'pointer' && event.action === 'down').map((event) => event.clickCount), [1, 2, 3, 1, 1, 2, 1]);
+  assert.deepEqual(inputs.filter((event) => event.kind === 'pointer' && event.action === 'up').map((event) => event.clickCount), [1, 2, 3, 1, 1, 2, 1]);
+  assert.deepEqual(inputs.filter((event) => event.kind === 'key' && event.action === 'down').map((event) => event.key), ['AltGraph', 'F13', 'MediaPlayPause', 'ArrowLeft']);
+  assert.deepEqual(inputs.at(-1), { kind: 'text', text: '한글' });
   workspace.dispose();
 });
 

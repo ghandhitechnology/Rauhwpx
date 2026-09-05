@@ -127,12 +127,13 @@ test('only release and image publishing receive write permissions', () => {
 });
 
 test('cloud image publication requires real headed display and input verification', () => {
-  const steps = workflows['cloud-sandbox-image.yml'].jobs.publish.steps;
-  const proofIndex = steps.findIndex((step) => step.run?.includes('RAUHWpx_XVFB_CAPTURE_PROOF=1'));
-  const publishIndex = steps.findIndex((step) => step.run?.includes('podman push'));
-  assert.ok(proofIndex >= 0 && proofIndex < publishIndex);
-  assert.match(steps[proofIndex].run, /--user 1001:1001/);
-  assert.match(steps[proofIndex].run, /--test \/app\/tests\/xvfb-studio-capture-proof\.test\.mjs/);
+  for (const steps of [workflows['cloud-sandbox-image.yml'].jobs.publish.steps, workflows['release.yml'].jobs.cloud.steps]) {
+    const proofIndex = steps.findIndex((step) => step.run?.includes('RAUHWpx_XVFB_CAPTURE_PROOF=1'));
+    const publishIndex = steps.findIndex((step) => step.run?.includes('podman push'));
+    assert.ok(proofIndex >= 0 && proofIndex < publishIndex);
+    assert.match(steps[proofIndex].run, /--user 1001:1001/);
+    assert.match(steps[proofIndex].run, /--test \/app\/tests\/xvfb-studio-capture-proof\.test\.mjs/);
+  }
 });
 
 test('third-party Rust toolchain and installer actions are immutable', () => {

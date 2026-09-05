@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import {
+  captureCloudOriginSha256,
   checkpointMatchesActiveDocument,
   persistCheckpointToBrowserOrigin,
 } from '../src/cloud/checkpoint-origin.ts';
@@ -113,4 +114,28 @@ test('browser origin persistence distinguishes stable archive-only outcomes from
   await assert.rejects(persistCheckpointToBrowserOrigin({
     handle: failingHandle, bytes, sha256: 'new', expectedSha256: 'old', digest,
   }), /disk unavailable/);
+});
+
+
+test('dirty handoff captures only an unchanged saved origin and never authorizes changed or unreadable files', async () => {
+  const saved = new Uint8Array([1, 2, 3]);
+  let disk = saved;
+  let reads = 0;
+  let digests = 0;
+  const sourceDigest = (bytes: Uint8Array) => `source:${[...bytes].join(',')}`;
+  const options = {
+    handle: { getFile: async () => { reads += 1; return { arrayBuffer: async () => disk.slice().buffer }; } },
+    loadedDigest: sourceDigest(saved),
+    sourceDigest,
+    digest: async () => { digests += 1; return 'saved-origin-sha256'; },
+  };
+  assert.equal(await captureCloudOriginSha256(options), 'saved-origin-sha256');
+  disk = new Uint8Array([4, 5, 6]);
+  assert.equal(await captureCloudOriginSha256(options), null);
+  assert.equal(digests, 1, 'changed disk bytes must not establish a new trusted baseline');
+  assert.equal(await captureCloudOriginSha256({ ...options, loadedDigest: null }), null);
+  assert.equal(await captureCloudOriginSha256({ ...options, handle: { getFile: async () => { throw new Error('moved'); } } }), null);
+  const previousReads = reads;
+  assert.equal(await captureCloudOriginSha256({ ...options, handle: null }), undefined);
+  assert.equal(reads, previousReads);
 });

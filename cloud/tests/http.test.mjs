@@ -708,6 +708,7 @@ test('an authenticated worker frame reaches paired devices with signed transient
     inputProtocol: 'rauhwpx-input-v1',
     maxInputEventsPerSecond: 60,
     inputBatchSize: 32,
+    supportsClickCount: true,
   });
   const capabilityNonce = proofNonce();
   const publicCapability = await publicFetch(`${base}/v1/sessions/${created.id}/display`, {

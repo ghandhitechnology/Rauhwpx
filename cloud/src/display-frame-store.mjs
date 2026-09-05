@@ -62,11 +62,15 @@ function displayInput(value, stream) {
       }
       return Object.freeze({ kind: 'pointer', action: 'move', x, y });
     }
-    if (!exactKeys(value, ['kind', 'action', 'x', 'y', 'button'])
+    const hasClickCount = Object.hasOwn(value, 'clickCount');
+    if (!exactKeys(value, ['kind', 'action', 'x', 'y', 'button', ...(hasClickCount ? ['clickCount'] : [])])
+      || hasClickCount && (!Number.isSafeInteger(value.clickCount) || value.clickCount < 1 || value.clickCount > 3)
       || !['left', 'middle', 'right', 'back', 'forward'].includes(value.button)) {
       throw displayError('DISPLAY_INPUT_INVALID', 'Pointer button fields are invalid');
     }
-    return Object.freeze({ kind: 'pointer', action: value.action, x, y, button: value.button });
+    return Object.freeze({ kind: 'pointer', action: value.action, x, y, button: value.button,
+      ...(hasClickCount ? { clickCount: value.clickCount } : {}),
+    });
   }
   if (value.kind === 'wheel') {
     if (!exactKeys(value, ['kind', 'x', 'y', 'deltaX', 'deltaY'])
@@ -537,6 +541,7 @@ export class DisplayFrameStore {
       inputProtocol: DISPLAY_INPUT_PROTOCOL,
       maxInputEventsPerSecond: MAX_DISPLAY_INPUT_EVENTS_PER_SECOND,
       inputBatchSize: 32,
+      supportsClickCount: true,
     });
   }
 

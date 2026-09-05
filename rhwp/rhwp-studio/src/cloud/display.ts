@@ -79,6 +79,7 @@ export function parseCloudDisplayCapability(value: unknown): CloudDisplayCapabil
       || raw.maxFrameBytes !== CLOUD_DISPLAY_MAX_FRAME_BYTES || raw.maxFps !== CLOUD_DISPLAY_MAX_FPS
       || raw.inputProtocol !== CLOUD_DISPLAY_INPUT_PROTOCOL
       || raw.maxInputEventsPerSecond !== CLOUD_DISPLAY_MAX_INPUT_EVENTS_PER_SECOND
+      || raw.supportsClickCount !== undefined && typeof raw.supportsClickCount !== 'boolean'
       || raw.inputBatchSize !== undefined && raw.inputBatchSize !== 32) return null;
     return {
       kind: 'available',
@@ -91,11 +92,13 @@ export function parseCloudDisplayCapability(value: unknown): CloudDisplayCapabil
       maxFps: CLOUD_DISPLAY_MAX_FPS,
       inputProtocol: CLOUD_DISPLAY_INPUT_PROTOCOL,
       maxInputEventsPerSecond: CLOUD_DISPLAY_MAX_INPUT_EVENTS_PER_SECOND,
+      ...(raw.supportsClickCount === true ? { supportsClickCount: true } : {}),
       ...(raw.inputBatchSize === 32 ? { inputBatchSize: 32 as const } : {}),
     };
   }
   if (raw.kind !== 'unavailable' || raw.protocol !== undefined || raw.streamId !== undefined
     || raw.width !== undefined || raw.height !== undefined || raw.maxFrameBytes !== undefined || raw.maxFps !== undefined
+    || raw.supportsClickCount !== undefined
     || raw.inputProtocol !== undefined || raw.maxInputEventsPerSecond !== undefined
     || !UNAVAILABLE_REASONS.has(raw.reason as CloudDisplayUnavailableReason)
     || typeof raw.message !== 'string' || !raw.message || typeof raw.retryable !== 'boolean') return null;

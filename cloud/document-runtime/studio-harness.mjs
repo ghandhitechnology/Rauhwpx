@@ -142,7 +142,13 @@ export async function startStudioServer({ studioRoot, resources, bootstrap }) {
         response.end();
         return;
       }
-      const bytes = await fs.readFile(filename);
+      let bytes = await fs.readFile(filename);
+      if (!resourceMatch && filename === path.join(resolvedRoot, 'index.html')) {
+        // Translate overlays cover editor controls in the remotely captured browser.
+        // Scope this to the cloud editor shell; document/reference bytes stay exact.
+        bytes = Buffer.from(bytes.toString('utf8').replace(/<head(?:\s[^>]*)?>/i,
+          (head) => `${head}<meta name="google" content="notranslate">`));
+      }
       response.writeHead(200, {
         'Content-Type': mimeType(filename),
         'Content-Length': bytes.length,
@@ -433,10 +439,10 @@ export async function applyDisplayInput(page, input, {
   if (input?.kind === 'pointer') {
     await page.mouse.move(input.x, input.y);
     if (input.action === 'down') {
-      await page.mouse.down({ button: input.button });
+      await page.mouse.down({ button: input.button, clickCount: input.clickCount ?? 1 });
       displayPressedButtons.add(input.button);
     } else if (input.action === 'up') {
-      await page.mouse.up({ button: input.button });
+      await page.mouse.up({ button: input.button, clickCount: input.clickCount ?? 1 });
       displayPressedButtons.delete(input.button);
     }
     return;

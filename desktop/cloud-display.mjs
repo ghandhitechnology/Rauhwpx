@@ -90,6 +90,7 @@ export function parseDisplayCapability(value, expectedSessionId) {
       || raw.maxFrameBytes !== MAX_DISPLAY_FRAME_BYTES || raw.maxFps !== MAX_DISPLAY_FPS
       || raw.inputProtocol !== DISPLAY_INPUT_PROTOCOL
       || raw.maxInputEventsPerSecond !== MAX_DISPLAY_INPUT_EVENTS_PER_SECOND
+      || raw.supportsClickCount !== undefined && typeof raw.supportsClickCount !== 'boolean'
       || raw.inputBatchSize !== undefined && raw.inputBatchSize !== 32) {
       throw displayError('Cloud display capability is invalid', 'DISPLAY_CAPABILITY_INVALID');
     }
@@ -104,12 +105,14 @@ export function parseDisplayCapability(value, expectedSessionId) {
       maxFps: MAX_DISPLAY_FPS,
       inputProtocol: DISPLAY_INPUT_PROTOCOL,
       maxInputEventsPerSecond: MAX_DISPLAY_INPUT_EVENTS_PER_SECOND,
+      ...(raw.supportsClickCount === true ? { supportsClickCount: true } : {}),
       ...(raw.inputBatchSize === 32 ? { inputBatchSize: 32 } : {}),
     });
   }
   if (raw.kind !== 'unavailable' || raw.protocol !== undefined || raw.streamId !== undefined
     || raw.width !== undefined || raw.height !== undefined
     || raw.maxFrameBytes !== undefined || raw.maxFps !== undefined
+    || raw.supportsClickCount !== undefined
     || raw.inputProtocol !== undefined || raw.maxInputEventsPerSecond !== undefined
     || !DISPLAY_REASONS.has(raw.reason)
     || typeof raw.message !== 'string' || !raw.message || typeof raw.retryable !== 'boolean') {
@@ -292,6 +295,11 @@ class CloudDisplayConnectionImpl {
     const capability = this.#capability;
     if (this.#closed || !this.#phase || this.#phase.controller.signal.aborted || capability?.kind !== 'available') {
       return Promise.reject(displayError('Cloud display input is unavailable', 'DISPLAY_INPUT_UNAVAILABLE'));
+    }
+    // Existing workers use exact pointer fields and reject even clickCount: 1.
+    if (capability.supportsClickCount !== true && event.kind === 'pointer' && 'clickCount' in event) {
+      const { clickCount: _clickCount, ...legacyEvent } = event;
+      return this.#inputQueue.enqueue(capability.streamId, legacyEvent);
     }
     return this.#inputQueue.enqueue(capability.streamId, event);
   }

@@ -214,6 +214,11 @@ class VerifiedDisplayConnection implements CloudDisplayConnection {
         code: 'DISPLAY_INPUT_UNAVAILABLE',
       }));
     }
+    // Existing workers use exact pointer fields and reject even clickCount: 1.
+    if (capability.supportsClickCount !== true && event.kind === 'pointer' && 'clickCount' in event) {
+      const { clickCount: _clickCount, ...legacyEvent } = event;
+      return this.#inputQueue.enqueue(capability.streamId, legacyEvent);
+    }
     return this.#inputQueue.enqueue(capability.streamId, event);
   }
 

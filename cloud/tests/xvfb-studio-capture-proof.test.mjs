@@ -193,6 +193,16 @@ test('real Xvfb captures aligned Studio pixels and applies Korean keyboard input
   await dispatch({ kind: 'key', action: 'up', key: 'End' });
   await dispatch({ kind: 'text', text: ' 끝' });
   assert.equal(await page.$eval('textarea', (node) => node.value), `${text} 끝`);
+  await page.evaluate(() => {
+    globalThis.remoteClicks = [];
+    document.querySelector('textarea').addEventListener('dblclick', (event) => globalThis.remoteClicks.push(event.detail));
+  });
+  for (const clickCount of [1, 2]) {
+    await dispatch({ kind: 'pointer', action: 'down', button: 'left', x: 100, y: 390, clickCount });
+    await dispatch({ kind: 'pointer', action: 'move', x: 101, y: 390 });
+    await dispatch({ kind: 'pointer', action: 'up', button: 'left', x: 101, y: 390, clickCount });
+  }
+  assert.deepEqual(await page.evaluate(() => globalThis.remoteClicks), [2], 'remote double click must reach the visible editor');
   assert.equal(pressed.displayPressedKeys.size, 0);
   assert.equal(pressed.displayPressedButtons.size, 0);
 });
