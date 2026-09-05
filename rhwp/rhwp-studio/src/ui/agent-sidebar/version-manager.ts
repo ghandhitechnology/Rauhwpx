@@ -734,7 +734,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
     })());
     actions.append(compare, restore);
     if (!selected.isHead) {
-      const adopt = el('button', 'ag-versions-secondary', '이 버전으로 이동');
+      const adopt = el('button', 'ag-versions-secondary', '병합');
       adopt.type = 'button';
       adopt.dataset.versionMutation = 'true';
       adopt.dataset.versionPrerequisiteDisabled = String(!comparedCommits.has(selected.id));
