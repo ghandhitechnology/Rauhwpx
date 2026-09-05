@@ -606,8 +606,7 @@ pub(crate) fn parse_hwpx_validated(data: &[u8]) -> Result<Document, HwpxError> {
     // 메타데이터로 진짜 변환본과 네이티브를 구별할 판별자가 없어(조사 확정), 파싱 시점의 HWP3
     // tolerance 부여를 제거한다.
     let hwpml_version = header::parse_hwpx_hwpml_version(&header_xml);
-    // Preserve the source declaration. The serializer may raise the emitted
-    // version when its regenerated HwpUnitChar representation requires it.
+    // 원본 선언을 그대로 보존한다. HwpUnitChar 단위 승격은 version.xml 쪽에서만 한다.
     doc_info.hwpml_version = hwpml_version.clone();
 
     // BinData 목록을 DocInfo에 등록

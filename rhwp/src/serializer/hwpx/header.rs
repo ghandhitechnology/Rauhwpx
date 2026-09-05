@@ -46,9 +46,14 @@ pub(crate) fn write_header_limited(
     // doc_properties.section_count 는 파서가 갱신하지 않아 stale(1)일 수 있어, 그대로
     // 쓰면 secCnt < 실제 섹션 수가 되어 한글이 뒤 구역을 로드하지 않고 페이지가 붕괴한다.
     let sec_cnt = doc.sections.len().max(1).to_string();
-    // Match the minimum schema needed by regenerated HwpUnitChar switches.
-    let hwpml_version =
-        super::version_metadata::emitted_xml_version(doc.doc_info.hwpml_version.as_deref());
+    // 원본 보존값(문서별 상이, 1.2~1.5)을 그대로 재방출한다. 한글은 HwpUnitChar 단위
+    // 해석을 version.xml 의 xmlVersion 으로만 결정하므로(header-1-5-only 프로브),
+    // hh:head version 은 올리지 않는다. 없을 때만 version.xml 기본값과 맞춘다.
+    let hwpml_version = doc
+        .doc_info
+        .hwpml_version
+        .as_deref()
+        .unwrap_or(super::version_metadata::MIN_XML_VERSION);
     start_tag_attrs(
         &mut w,
         "hh:head",
@@ -1470,7 +1475,7 @@ mod tests {
         );
         assert!(
             xml.contains(r#"version="1.4""#),
-            "modern units require XML 1.4"
+            "hwpml_version 미지정 시 version.xml 기본값(1.4)과 맞춘다"
         );
     }
 

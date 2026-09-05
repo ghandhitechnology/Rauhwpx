@@ -429,7 +429,10 @@ mod tests {
             );
             document = parse_hwpx(&saved).unwrap();
             assert_eq!(spacing(&document), spacing(&original));
-            assert_eq!(document.doc_info.hwpml_version.as_deref(), Some("1.4"));
+            assert_eq!(
+                document.doc_info.hwpml_version,
+                original.doc_info.hwpml_version
+            );
         }
         assert_eq!(
             original.hwpx_aux_entry("version.xml").unwrap(),
