@@ -8,7 +8,7 @@ import type {
   CloudSessionState,
 } from '../cloud/types.ts';
 
-const MIN_ZOOM = 0.5;
+const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 2;
 const ZOOM_STEP = 0.25;
 
@@ -93,7 +93,12 @@ export function createCloudWorkspace({
   zoomIn.dataset.cloudZoom = 'in';
   zoomIn.setAttribute('aria-label', 'Cloud 화면 확대');
   zoomIn.textContent = '+';
-  controls.append(zoomOut, zoomReset, zoomIn);
+  const zoomFit = doc.createElement('button');
+  zoomFit.type = 'button';
+  zoomFit.dataset.cloudZoom = 'fit';
+  zoomFit.setAttribute('aria-label', 'Cloud 화면에 맞추기');
+  zoomFit.textContent = '맞춤';
+  controls.append(zoomOut, zoomReset, zoomIn, zoomFit);
   toolbar.append(status, controls);
 
   const viewport = doc.createElement('div');
@@ -154,9 +159,10 @@ export function createCloudWorkspace({
   let pendingDecode: DecodeCandidate | null = null;
   let disposed = false;
   let zoom = 1;
+  let fitToViewport = true;
   let controlling = false;
   let pendingMove: Extract<CloudDisplayInputEvent, { kind: 'pointer'; action: 'move' }> | null = null;
-  let moveSending = false;
+  let moveTimer: ReturnType<typeof setTimeout> | null = null;
   const pressedKeys = new Set<string>();
   type PointerPress = { button: 'left' | 'middle' | 'right' | 'back' | 'forward'; clickCount: number; x: number; y: number; time: number; dragged: boolean };
   const pressedPointers = new Map<number, PointerPress>();
@@ -164,11 +170,20 @@ export function createCloudWorkspace({
   const listeners = new Set<(value: CloudDisplayState) => void>();
 
   const renderZoom = (): void => {
+    if (fitToViewport && lastFrame && viewport.clientWidth > 0 && viewport.clientHeight > 0) {
+      const style = doc.defaultView?.getComputedStyle(viewport);
+      const width = viewport.clientWidth - (parseFloat(style?.paddingLeft ?? '') || 0)
+        - (parseFloat(style?.paddingRight ?? '') || 0);
+      const height = viewport.clientHeight - (parseFloat(style?.paddingTop ?? '') || 0)
+        - (parseFloat(style?.paddingBottom ?? '') || 0);
+      zoom = Math.max(0.01, Math.min(1, width / lastFrame.width, height / lastFrame.height));
+    }
     root.dataset.zoom = String(zoom);
+    zoomFit.setAttribute('aria-pressed', String(fitToViewport));
     zoomReset.textContent = `${Math.round(zoom * 100)}%`;
     if (lastFrame) {
-      canvas.style.width = `${Math.round(lastFrame.width * zoom)}px`;
-      canvas.style.height = `${Math.round(lastFrame.height * zoom)}px`;
+      canvas.style.width = `${Math.floor(lastFrame.width * zoom)}px`;
+      canvas.style.height = `${Math.floor(lastFrame.height * zoom)}px`;
     }
     zoomOut.disabled = zoom <= MIN_ZOOM;
     zoomIn.disabled = zoom >= MAX_ZOOM;
@@ -212,14 +227,14 @@ export function createCloudWorkspace({
   };
 
   const flushMove = (): void => {
-    if (moveSending || !pendingMove) return;
+    if (moveTimer) clearTimeout(moveTimer);
+    moveTimer = null;
+    if (!pendingMove) return;
     const event = pendingMove;
     pendingMove = null;
-    moveSending = true;
-    void sendInput(event).catch(() => {}).finally(() => {
-      moveSending = false;
-      flushMove();
-    });
+    // The transport queue owns network ordering. Never wait for a round trip here:
+    // doing so lets pointerup overtake the final movement of a drag.
+    void sendInput(event).catch(() => {});
   };
 
   const sendText = (text: string): void => {
@@ -305,6 +320,8 @@ export function createCloudWorkspace({
     controlling = false;
     root.dataset.cloudControl = 'inactive';
     pendingMove = null;
+    if (moveTimer) clearTimeout(moveTimer);
+    moveTimer = null;
     pressedKeys.clear();
     pressedPointers.clear();
     lastClick = null;
@@ -472,6 +489,7 @@ export function createCloudWorkspace({
   };
 
   const setZoom = (next: number): void => {
+    fitToViewport = false;
     zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, next));
     renderZoom();
   };
@@ -482,6 +500,14 @@ export function createCloudWorkspace({
     viewport.scrollLeft = 0;
     viewport.scrollTop = 0;
   });
+  zoomFit.addEventListener('click', () => {
+    fitToViewport = true;
+    viewport.scrollLeft = 0;
+    viewport.scrollTop = 0;
+    renderZoom();
+  });
+  const resizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => renderZoom());
+  resizeObserver?.observe(viewport);
 
   canvas.addEventListener('pointermove', (event) => {
     const press = pressedPointers.get(event.pointerId);
@@ -489,7 +515,8 @@ export function createCloudWorkspace({
     const point = displayPoint(event);
     if (!point) return;
     pendingMove = { kind: 'pointer', action: 'move', ...point };
-    flushMove();
+    // Leave room under the server's 60 events/second limit for clicks and keys.
+    if (!moveTimer) moveTimer = setTimeout(flushMove, 50);
   });
   canvas.addEventListener('pointerdown', (event) => {
     const point = displayPoint(event);
@@ -507,6 +534,8 @@ export function createCloudWorkspace({
     pressedPointers.set(event.pointerId, { button, clickCount, x: event.clientX, y: event.clientY, time, dragged: false });
     lastClick = null;
     pendingMove = null;
+    if (moveTimer) clearTimeout(moveTimer);
+    moveTimer = null;
     void sendInput({ kind: 'pointer', action: 'down', ...point, button, clickCount }).catch(() => {});
   });
   canvas.addEventListener('pointerup', (event) => {
@@ -515,6 +544,7 @@ export function createCloudWorkspace({
     const button = press?.button ?? pointerButton(event.button);
     if (!point || !button) return;
     event.preventDefault();
+    flushMove();
     void sendInput({ kind: 'pointer', action: 'up', ...point, button, clickCount: press?.clickCount ?? 1 }).catch(() => {});
     const time = Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now();
     lastClick = press && !press.dragged && time - press.time <= 500
@@ -526,6 +556,7 @@ export function createCloudWorkspace({
     const point = displayPoint(event);
     const press = pressedPointers.get(event.pointerId);
     if (!point || !press) return;
+    flushMove();
     pressedPointers.delete(event.pointerId);
     lastClick = null;
     void sendInput({ kind: 'pointer', action: 'up', ...point, button: press.button, clickCount: press.clickCount }).catch(() => {});
@@ -535,6 +566,7 @@ export function createCloudWorkspace({
     const point = displayPoint(event);
     if (!point) return;
     event.preventDefault();
+    flushMove();
     const deltaX = Math.max(-32_768, Math.min(32_768, Math.round(event.deltaX * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? viewport.clientWidth : 1))));
     const deltaY = Math.max(-32_768, Math.min(32_768, Math.round(event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? viewport.clientHeight : 1))));
     void sendInput({ kind: 'wheel', ...point, deltaX, deltaY }).catch(() => {});
@@ -640,6 +672,7 @@ export function createCloudWorkspace({
       generation += 1;
       closeConnection();
       listeners.clear();
+      resizeObserver?.disconnect();
       clearFrame();
     },
   };

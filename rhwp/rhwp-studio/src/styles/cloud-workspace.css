@@ -69,21 +69,26 @@
 }
 
 .cloud-workspace-zoom button:last-child { border-right: 0; }
+.cloud-workspace-zoom button[aria-pressed="true"] { background: var(--ui-hover); color: var(--ui-text); }
 .cloud-workspace-zoom button:hover:not(:disabled) { background: var(--ui-hover); color: var(--ui-text); }
 .cloud-workspace-zoom button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
 .cloud-workspace-zoom button:disabled { opacity: 0.42; cursor: default; }
 
 .cloud-workspace-viewport {
   position: relative;
+  display: flex;
   flex: 1;
+  min-width: 0;
+  min-height: 0;
   overflow: auto;
-  padding: 28px;
+  padding: 12px;
   background: var(--doc-workspace);
   overscroll-behavior: contain;
 }
 
 .cloud-workspace-canvas {
   position: relative;
+  flex: 0 0 auto;
   min-width: 1px;
   min-height: 1px;
   margin: auto;
