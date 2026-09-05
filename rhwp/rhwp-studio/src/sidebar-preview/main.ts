@@ -55,6 +55,11 @@ const sidebar = initAgentSidebar({
     setCloudDocumentLease: (owned) => {
       document.documentElement.dataset.cloudLease = owned ? 'cloud' : 'local';
     },
+    mergeCloudCheckpoint: async (startId, checkpoint) => {
+      cloud.calls.merges.push({ startId, checkpoint });
+      status.value = 'Cloud 변경 병합 미리보기';
+      return true;
+    },
     prepareCloudTransfer: async () => ({ fileName: documentName!, bytes: new Uint8Array([1, 2, 3]),
       byteLength: 3, sha256: 'a'.repeat(64) }),
   } : {}),

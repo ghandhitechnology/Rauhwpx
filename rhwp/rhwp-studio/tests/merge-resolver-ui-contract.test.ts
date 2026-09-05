@@ -29,18 +29,17 @@ test('resolver contract includes keyboard, accessibility, validation and explici
   assert.match(source, /mergePathLabel\(conflict\.path/);
 });
 
-test('completion applies before prompting and retries only source finalization', () => {
+test('completion keeps the source by default and retries only source finalization', () => {
   const start = source.indexOf('private async confirmCompletion');
-  const end = source.indexOf('private requestSourceDisposition', start);
+  const end = source.indexOf('private updatedDraft', start);
   const completion = source.slice(start, end);
   const ensureApplied = completion.indexOf('this.completion.ensureApplied');
-  const requestSourceDisposition = completion.indexOf('requestSourceDisposition()');
+  const requestSourceDisposition = completion.indexOf('const sourceDisposition =');
   assert.notEqual(ensureApplied, -1);
   assert.ok(ensureApplied < requestSourceDisposition);
-  assert.ok(completion.indexOf('requestSourceDisposition()') < completion.indexOf('finalizeSourceDisposition'));
+  assert.ok(completion.indexOf('const sourceDisposition =') < completion.indexOf('finalizeSourceDisposition'));
   assert.match(completion, /this\.completion\.finalize/);
   assert.match(source, /적용한 병합을 안전하게 마무리/);
-  assert.match(source, /finish\('keep'\)/);
-  assert.match(source, /resolverRoot\.inert = true/);
-  assert.match(source, /resolverRoot\.inert = false/);
+  assert.match(completion, /sourceSelect\?\.value === 'delete' \? 'delete' : 'keep'/);
+  assert.doesNotMatch(completion, /requestSourceDisposition/);
 });

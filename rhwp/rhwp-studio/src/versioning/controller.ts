@@ -455,10 +455,13 @@ export class DocumentVersionController implements VersionManagerController {
         this.#assertWorkspaceToken(workspace);
         await this.#appendBranchSnapshot(branch, capture, `Cloud · ${checkpoint.turn}턴`, 'agent', id);
       }
-      return name;
+      const latest = await this.#store.getBranch(repository.id, name);
+      const relation = await this.#store.getMergeRelation(repository.id, this.#requireActiveBranch().target, latest!.target);
+      return { name, integrated: relation.relation === 'already-integrated' };
     });
+    if (source.integrated) return true;
     this.#mergeCompletion = null;
-    await this.startMerge(source);
+    await this.startMerge(source.name);
     return this.#mergeCompletion ? await this.#mergeCompletion : false;
   }
 
@@ -889,45 +892,35 @@ export class DocumentVersionController implements VersionManagerController {
     await this.#enqueue(async () => {
       await this.#refreshData(false);
       await this.#guardMutation(true);
-      await this.#checkpointDirty('pre-restore');
+      if (!await this.#prepareMergeWorkingTree()) return;
       const workspace = this.#captureWorkspaceToken();
       const repository = this.#requireRepository();
       const shelf = await this.#store.getShelf(shelfId(id));
-      if (!shelf || shelf.repositoryId !== repository.id) throw new VersionError('SHELF_NOT_FOUND', 'Shelf was not found');
-      const blob = await this.#store.getBlob(shelf.blobId);
+      if (!shelf || shelf.repositoryId !== repository.id) throw new VersionError('SHELF_NOT_FOUND', '보관한 변경을 찾을 수 없습니다.');
+      const [blob, compared] = await Promise.all([
+        this.#store.getBlob(shelf.blobId), this.#store.getCompareSnapshot(shelf.compareSnapshotId),
+      ]);
       this.#assertWorkspaceToken(workspace);
-      if (!blob) throw new VersionError('CORRUPT_BLOB', 'Shelf bytes are missing');
-      const handler = this.#requireInputHandler();
-      const original = captureVersionSnapshot(this.#wasm);
-      const wasDirty = this.#documentState.isDirty();
-      handler.prepareSnapshotCapacity(remove ? 4 : 2);
-      try {
-        handler.replaceContentFromBytes(blob.bytes);
-      } catch (error) {
-        throw new VersionError('RESTORE_PARSE_FAILED', 'Shelf bytes could not be applied', {
-          cause: error instanceof Error ? error : undefined,
+      if (!blob || !compared) throw new VersionError('CORRUPT_BLOB', '보관한 문서를 찾을 수 없습니다.');
+      const name = branchName(`보관 ${hashBytes(new TextEncoder().encode(id)).slice(7, 23)}`);
+      const sourceId = commitId(`shelf:${repository.id}:${id}`);
+      let branch = await this.#store.getBranch(repository.id, name);
+      if (!branch) {
+        const existing = await this.#store.getCommit(sourceId);
+        const created = await this.#store.createBranch({
+          repositoryId: repository.id, name, target: existing?.id ?? shelf.baseCommitId,
+          expectedRepositoryRevision: repository.revision,
         });
+        this.#repository = created.repository;
+        branch = created.branch;
       }
-      this.#setDirtyForFingerprint(shelf.contentFingerprint, 'version-shelf-apply');
-      if (remove) {
-        const replacementWorkspace = this.#captureWorkspaceToken();
-        let persisted = false;
-        try {
-          const updated = await this.#store.deleteShelf({
-            repositoryId: repository.id,
-            shelfId: shelf.id,
-            expectedRepositoryRevision: repository.revision,
-          });
-          persisted = true;
-          if (this.#isWorkspaceTokenCurrent(replacementWorkspace, { editor: false, repository: false })) {
-            this.#repository = updated;
-          }
-        } catch (error) {
-          if (!persisted) this.#rollbackReplacement(handler, original, wasDirty, replacementWorkspace);
-          throw error;
-        }
+      if (branch.target !== sourceId) {
+        await this.#appendBranchSnapshot(branch, {
+          bytes: blob.bytes, fingerprint: shelf.contentFingerprint, compareSnapshot: compared.snapshot,
+        }, shelf.title, 'manual', sourceId);
       }
-      await this.#refreshData(true);
+      await this.#refreshData(false);
+      await this.#openMergeResolver(name, undefined, { id: shelf.id, remove });
     });
   }
 
@@ -1161,6 +1154,7 @@ export class DocumentVersionController implements VersionManagerController {
   async #openMergeResolver(
     sourceName: BranchName,
     previousDraft?: VersionMergeDraft,
+    shelfApply = previousDraft?.shelfApply,
   ): Promise<void> {
     const workspace = this.#captureWorkspaceToken();
     const repository = this.#requireRepository();
@@ -1247,6 +1241,7 @@ export class DocumentVersionController implements VersionManagerController {
     );
     const now = Date.now();
     const draft: VersionMergeDraft = {
+      ...(shelfApply ? { shelfApply } : {}),
       id: previousDraft?.id ?? createMergeDraftId(),
       repositoryId: repository.id,
       targetBranch: targetBranch.name,
@@ -1343,13 +1338,13 @@ export class DocumentVersionController implements VersionManagerController {
         sourceBranch: sourceBranch.name,
         currentBranch: targetBranch.name,
         mode: storedDraft.mode,
-        title: `${sourceBranch.name} → ${targetBranch.name} 병합`,
+        title: shelfApply ? '보관한 변경 적용' : `${sourceBranch.name} → ${targetBranch.name} 병합`,
         documents: {
           base: { bytes: baseBytes, fileName: this.#wasm.fileName, label: '기준' },
           current: { bytes: current.blob.bytes, fileName: this.#wasm.fileName, label: '현재' },
           incoming: { bytes: incoming.blob.bytes, fileName: this.#wasm.fileName, label: '가져올 변경' },
         },
-        canDeleteSource: sourceBranch.name !== repository.defaultBranch,
+        canDeleteSource: !shelfApply && sourceBranch.name !== repository.defaultBranch && !sourceBranch.name.startsWith('Cloud '),
         materialize: ({ analysis: nextAnalysis, resolutions: nextResolutions, signal }) => (
           materialize(nextAnalysis, nextResolutions, signal)
         ),
@@ -1502,6 +1497,42 @@ export class DocumentVersionController implements VersionManagerController {
       request.materialized.document.bytes,
       request.materialized.document.fileName,
     );
+    if (completionDraft.shelfApply) {
+      const workspace = this.#captureWorkspaceToken();
+      if (this.#activeBranch !== targetBranch.name) throw new VersionError('STALE_WORKSPACE', '현재 브랜치가 달라졌습니다.');
+      const handler = this.#requireInputHandler();
+      const original = captureVersionSnapshot(this.#wasm);
+      const head = await this.#requireCommit(targetBranch.target);
+      this.#assertWorkspaceToken(workspace);
+      if (original.fingerprint !== head.contentFingerprint) {
+        throw new VersionError('STALE_WORKSPACE', '보관한 변경을 검토하는 동안 문서가 바뀌었습니다.');
+      }
+      const wasDirty = this.#documentState.isDirty();
+      handler.prepareSnapshotCapacity(4);
+      const updated = await commitCompositeMerge({
+        applyEditor: () => handler.replaceContentFromBytes(captured.bytes),
+        commitRefs: () => this.#store.completeShelfMerge({
+          repositoryId: repository.id, expectedRepositoryRevision: repository.revision, draftId: completionDraft.id,
+        }),
+        rollbackEditor: () => {
+          reconcileCompositeEditor({
+            undoAppliedMerge: () => handler.performUndo(true),
+            discardMergeRedo: () => handler.discardRedoHistory(),
+            matchesExpectedDocument: () => fingerprintVersionContent(this.#wasm) === original.fingerprint,
+            replaceWithExpectedDocument: () => { handler.replaceContentFromBytes(original.bytes); },
+            discardFallbackUndo: () => handler.discardLatestUndoHistory(),
+          });
+          if (wasDirty) this.#documentState.markDirty('version-shelf-rollback');
+          else this.#documentState.markClean('version-shelf-rollback');
+        },
+      });
+      this.#repository = updated;
+      this.#setDirtyForFingerprint(captured.fingerprint, 'version-shelf-apply');
+      await this.#refreshData(true);
+      const receipt = {} as MergeAppliedReceipt;
+      this.#pendingMergeFinalizers.set(receipt, async () => {});
+      return receipt;
+    }
     const mergeManifestEntries = request.mode === 'fast-forward'
       ? null
       : await this.#mergeWorker.buildDocumentManifest(captured.bytes);

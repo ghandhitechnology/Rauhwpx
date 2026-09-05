@@ -1503,13 +1503,15 @@ export class SessionStore {
     return timeline;
   }
 
-  latestStableCheckpoint(sessionId, operationId = null) {
+  latestStableCheckpoint(sessionId, operationId = null, kind = null) {
+    if (kind !== null && kind !== 'turn') throw new CloudError('INVALID_CHECKPOINT_KIND', 'Unsupported checkpoint kind', 400);
     const session = this.getSessionRow(sessionId);
     const selectedOperation = session.frozen_checkpoint_operation_id ?? operationId;
     const frozenClause = selectedOperation ? 'AND c.operation_id = ?' : '';
     const parameters = selectedOperation
       ? [sessionId, selectedOperation]
       : [sessionId];
+    if (kind) parameters.push(kind);
     const checkpoint = this.database.prepare(`
       SELECT c.operation_id AS operationId, c.turn_number AS turnNumber, c.revision,
         c.boundary_kind AS kind, c.blob_sha256 AS blobId, b.size,
@@ -1519,7 +1521,8 @@ export class SessionStore {
       JOIN sessions s ON s.id = c.session_id
       WHERE c.session_id = ? AND c.stable = 1
       ${frozenClause}
-      ORDER BY c.created_at DESC, c.revision DESC LIMIT 1
+      ${kind ? 'AND c.boundary_kind = ?' : ''}
+      ORDER BY c.revision DESC, c.created_at DESC LIMIT 1
     `).get(...parameters);
     if (!checkpoint) throw new CloudError('CHECKPOINT_NOT_FOUND', 'A stable checkpoint was not found', 404);
     const extension = path.extname(checkpoint.originName).slice(0, 16) || '.bin';

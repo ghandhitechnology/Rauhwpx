@@ -1,5 +1,5 @@
 import { createCloudController, type CloudDesktopApi } from '../cloud/desktop-cloud.ts';
-import type { CloudLinkKind, CloudSessionScope, CloudSnapshot, CloudTransferRequest } from '../cloud/types.ts';
+import type { CloudLinkKind, CloudSessionScope, CloudSnapshot, CloudTransferRequest, CloudCheckpointPayload } from '../cloud/types.ts';
 import type { AgentStreamEvent } from '../agent/types.ts';
 
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -14,7 +14,9 @@ export function createMockCloud() {
   let releaseRefresh: (() => void) | null = null;
   let refreshBlocked = false;
   let sequence = 0;
-  const calls = { reconnect: 0, recreate: 0, stop: 0, display: 0, inputs: 0, transfers: [] as CloudTransferRequest[] };
+  const checkpoints = new Map<string, CloudCheckpointPayload>();
+  const merges: Array<{ startId: string; checkpoint: CloudCheckpointPayload }> = [];
+  const calls = { merges, downloads: 0, reconnect: 0, recreate: 0, stop: 0, display: 0, inputs: 0, transfers: [] as CloudTransferRequest[] };
   const sandbox = { providerId: 'raucloud', sandboxId: 'preview-worker', displayName: 'Raucloud',
     region: 'preview', host: 'preview.invalid', createdAt: new Date().toISOString() };
   const state: CloudSnapshot = {
@@ -62,6 +64,12 @@ export function createMockCloud() {
       scope = next;
       if (refreshBlocked) await new Promise<void>((resolve) => { releaseRefresh = resolve; });
       return snapshot();
+    },
+    async cloudDownloadCheckpoint({ sessionId, operationId }) {
+      calls.downloads++;
+      const checkpoint = checkpoints.get(sessionId);
+      if (!checkpoint || (operationId && checkpoint.operationId !== operationId)) throw new Error('완료된 턴이 없습니다.');
+      return structuredClone(checkpoint);
     },
     cloudSetTransferIntent: async () => snapshot(),
     async cloudTransfer(request) {
@@ -143,6 +151,20 @@ export function createMockCloud() {
       state.timeline.exportedAt = new Date().toISOString();
       emitAgentEvent({ type: 'text-delta', agent: state.timeline.thread.agent, text });
       emitAgentEvent({ type: 'turn-end', agent: state.timeline.thread.agent, stopReason: 'completed' });
+      publish();
+    },
+    commitTurn() {
+      const session = state.session;
+      if (session.kind !== 'running') throw new Error('Start a Cloud conversation first');
+      session.turn++;
+      session.phase = 'waiting';
+      const operationId = `preview-turn-${session.turn}`;
+      checkpoints.set(session.sessionId, { sessionId: session.sessionId, documentId: session.documentId,
+        fileName: '사업 제안서.hwpx', kind: 'turn', revision: session.turn, turn: session.turn, operationId,
+        bytes: new Uint8Array([1, 2, 3]), byteLength: 3, sha256: 'a'.repeat(64) });
+      state.sessions = state.sessions.map((item) => item.sessionId === session.sessionId ? session : item);
+      listener?.({ sessionId: session.sessionId,
+        event: { type: 'boundary.committed', payload: { kind: 'turn', operationId } } });
       publish();
     },
     getScope: () => scope,

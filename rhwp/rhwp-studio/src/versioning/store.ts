@@ -1930,6 +1930,46 @@ export class VersionGraphStore {
     }));
   }
 
+  /** Consume a reviewed stash merge atomically; the target HEAD stays unchanged. */
+  async completeShelfMerge(input: {
+    repositoryId: RepositoryId;
+    expectedRepositoryRevision: number;
+    draftId: MergeDraftId;
+  }): Promise<VersionRepository> {
+    return this.#serialize(input.repositoryId, () => this.#transaction('readwrite', async (tx) => {
+      const repository = await tx.get('repositories', input.repositoryId);
+      if (!repository) missing('REPOSITORY_NOT_FOUND', 'Version repository was not found');
+      assertRepositoryRevision(repository, input.expectedRepositoryRevision);
+      const draft = await tx.get('mergeDrafts', input.draftId);
+      if (!draft?.shelfApply || draft.repositoryId !== repository.id) {
+        missing('MERGE_DRAFT_NOT_FOUND', 'Stash merge draft was not found');
+      }
+      const shelf = await tx.get('shelves', draft.shelfApply.id);
+      if (!shelf || shelf.repositoryId !== repository.id) missing('SHELF_NOT_FOUND', 'Stash was not found');
+      const targetRow = await tx.get('refs', refKey(repository.id, 'branch', draft.targetBranch));
+      const sourceKey = refKey(repository.id, 'branch', draft.sourceBranch);
+      const sourceRow = await tx.get('refs', sourceKey);
+      if (!targetRow || targetRow.kind !== 'branch' || !sourceRow || sourceRow.kind !== 'branch') {
+        missing('REF_NOT_FOUND', 'Stash merge branch was not found');
+      }
+      const target = fromRefRow(targetRow) as BranchRef;
+      const source = fromRefRow(sourceRow) as BranchRef;
+      assertDraftMatchesRefs(draft, target, source);
+      const sourceCommit = await tx.get('commits', source.target);
+      if (source.target !== `shelf:${repository.id}:${shelf.id}` || sourceCommit?.blobId !== shelf.blobId
+        || sourceCommit.parents.length !== 1 || sourceCommit.parents[0] !== shelf.baseCommitId
+        || source.name === target.name || isDefaultBranch(repository, source.name)) {
+        stale('Stash source changed before it could be applied');
+      }
+      if (draft.shelfApply.remove) await tx.delete('shelves', shelf.id);
+      await tx.delete('refs', sourceKey);
+      await deleteMergeDrafts(tx, repository.id, (item) => draftNamesBranch(item, source.name));
+      const updated = nextRepositoryRevision(repository);
+      await tx.put('repositories', updated);
+      return updated;
+    }));
+  }
+
   /** Creates a two-parent merge checkpoint and updates all related refs in one IDB transaction. */
   async completeMergeCheckpoint(input: CompleteMergeCheckpointInput): Promise<{
     repository: VersionRepository;

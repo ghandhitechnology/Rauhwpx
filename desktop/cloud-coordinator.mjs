@@ -2461,9 +2461,9 @@ export class CloudCoordinator extends EventEmitter {
     return this.#withProfileOperation((profileEpoch) => this.#downloadCheckpoint(input, profileEpoch));
   }
 
-  async #downloadCheckpoint({ sessionId, operationId = null }, profileEpoch) {
+  async #downloadCheckpoint({ sessionId, operationId = null, kind = null }, profileEpoch) {
     const [checkpoint, handoff] = await Promise.all([
-      this.#client.downloadCheckpoint(sessionId, { operationId }),
+      this.#client.downloadCheckpoint(sessionId, { operationId, ...(kind ? { kind } : {}) }),
       this.#handoffForSession(sessionId, profileEpoch),
     ]);
     this.#assertProfileEpoch(profileEpoch);

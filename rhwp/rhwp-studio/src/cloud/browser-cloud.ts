@@ -1034,10 +1034,14 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
     selectedProfile = profile,
     signal?: AbortSignal,
     assertCurrent?: () => void,
+    kind?: 'turn',
   ) => {
     if (!selectedProfile) throw new Error('Cloud 서버를 먼저 연결해 주세요.');
     const generation = profileGeneration;
-    const query = operationId ? `?operationId=${encodeURIComponent(operationId)}` : '';
+    const params = new URLSearchParams();
+    if (operationId) params.set('operationId', operationId);
+    if (kind) params.set('kind', kind);
+    const query = params.size ? `?${params}` : '';
     const result = await request(`/v1/sessions/${encodeURIComponent(sessionId)}/checkpoint${query}`, {
       maxBytes: MAX_DOCUMENT_BYTES,
       selectedProfile,
@@ -1764,8 +1768,8 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
       if (updated) remoteSessions = [updated, ...remoteSessions.filter((session) => session.id !== input.sessionId)];
       return snapshot();
     }),
-    cloudDownloadCheckpoint: (payload: { sessionId: string; operationId?: string }) => readProfile(
-      () => downloadCheckpoint(payload.sessionId, payload.operationId),
+    cloudDownloadCheckpoint: (payload: { sessionId: string; operationId?: string; kind?: 'turn' }) => readProfile(
+      () => downloadCheckpoint(payload.sessionId, payload.operationId, profile, undefined, undefined, payload.kind),
     ),
     cloudPublishCheckpoint: (payload: { sessionId: string; operationId?: string }) => readProfile(
       () => downloadCheckpoint(payload.sessionId, payload.operationId),

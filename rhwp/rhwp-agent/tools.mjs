@@ -359,7 +359,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'publish_cloud_document',
-    description: 'Explicitly request that the current Cloud document be written back to its original file on the originating device after this turn succeeds. The Cloud conversation stays open. Use when the user asks to save or apply the Cloud version, or when your task requires delivering the finished document; do not call after routine interactions. Changes to the original outside Cloud are preserved as a conflict. Available only inside a Cloud worker; returns a queued request, not a completed local write.',
+    description: 'Announce a completed Cloud document for the user to merge into their local branch after this turn succeeds. The Cloud conversation stays open and local edits remain independent. The client archives the completed checkpoint and offers a merge button; it does not overwrite the original file. Use when delivering a finished document. Available only inside a Cloud worker; returns a queued delivery request.',
     shape: {},
   },
   {

@@ -188,7 +188,7 @@ test('저장 설정은 짧은 라벨만 보이고 PDF 안내는 기본값을 쓴
 });
 
 test('한컴용 Git 토글은 기본 이력과 Git 버전 관리 진입을 전환한다', () => {
-  assert.match(settings, /createToggleRow\('한컴용 Git 사용하기 \(beta\)'\)/);
+  assert.match(settings, /createToggleRow\('한컴용 Git 사용하기'\)/);
   assert.match(settings, /userSettings\.setUseHancomGit\(hancomGit\.input\.checked\)/);
   assert.match(settings, /instructionsSection\.body\.append\([\s\S]*hancomGit\.root/);
   assert.match(editingSettings, /userSettings\.tryApplyEditorScalarSettings\(next\)/);

@@ -40,7 +40,7 @@ function cloudStartTransfer(extra = {}) {
 
 test('desktop checkpoint IPC preserves the immutable boundary operation id', async () => {
   const source = await readFile(new URL('../desktop/main.mjs', import.meta.url), 'utf8');
-  assert.match(source, /cloud:download-checkpoint[\s\S]*?\^\[A-Za-z0-9\._:-\]\{1,160\}\$[\s\S]*?downloadCheckpoint\(\{ sessionId, operationId \}\)/);
+  assert.match(source, /cloud:download-checkpoint[\s\S]*?\^\[A-Za-z0-9\._:-\]\{1,160\}\$[\s\S]*?downloadCheckpoint\(\{ sessionId, operationId, \.\.\.\(kind \? \{ kind \} : \{\}\) \}\)/);
 });
 
 test('desktop takeover completion IPC passes through the applied operation id', async () => {
@@ -3525,15 +3525,16 @@ async function publicationFixture(t, { snapshot = 'original', originDigest } = {
   return { coordinator, store, id: created.id, originPath, deliver, waitFor, staged };
 }
 
-test('an explicit agent publication updates once and later turns keep the cloud conversation running', async (t) => {
+test('agent delivery requests archive completed work without overwriting local edits', async (t) => {
   const fixture = await publicationFixture(t);
   await fixture.deliver({ sequence: 1, type: 'document.publish_requested', payload: { operationId: 'turn-1' } });
-  await fixture.waitFor((record) => record.lastPublishedRevision === 1 && record.pendingOriginPublications.length === 0);
-  assert.equal(await readFile(fixture.originPath, 'utf8'), 'cloud revision 1');
+  await fixture.waitFor((record) => record.pendingOriginPublications.length === 0);
+  assert.equal(await readFile(fixture.originPath, 'utf8'), 'original');
+  assert.equal(await readFile(path.join(path.dirname(fixture.originPath), 'recovery', 'merge', fixture.id, 'revision-1.hwpx'), 'utf8'), 'cloud revision 1');
   await fixture.deliver({ sequence: 2, type: 'boundary.committed', payload: { kind: 'turn', operationId: 'turn-2', revision: 2, turnNumber: 2 } });
   const archived = await fixture.waitFor((record) => record.lastSyncedRevision === 2);
   assert.equal(archived.state, 'running');
-  assert.equal(await readFile(fixture.originPath, 'utf8'), 'cloud revision 1');
+  assert.equal(await readFile(fixture.originPath, 'utf8'), 'original');
   await fixture.coordinator.publishCheckpoint({ sessionId: 'cloud-publish', operationId: 'turn-2' });
   await fixture.deliver({ sequence: 3, type: 'document.publish_requested', payload: { operationId: 'turn-1' } });
   const replayed = await fixture.waitFor((record) => record.pendingOriginPublications.length === 0);

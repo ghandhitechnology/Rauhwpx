@@ -799,7 +799,7 @@ export function createCloudHttpHandler({
         }
         if (request.method === 'GET' && sessionRoute[2] === '/checkpoint') {
           const operationId = requestUrl.searchParams.get('operationId');
-          const checkpoint = sessionStore.latestStableCheckpoint(sessionId, operationId || null);
+          const checkpoint = sessionStore.latestStableCheckpoint(sessionId, operationId || null, requestUrl.searchParams.get('kind'));
           const { blob, stream } = blobStore.openReadStream(checkpoint.blobId);
           response.writeHead(200, {
             'Content-Type': 'application/octet-stream',

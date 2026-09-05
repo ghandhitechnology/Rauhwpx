@@ -87,7 +87,7 @@ test('cloud transfer includes portable timeline, exact document bytes and refere
   assert.match(cloudStart, /permissionProfile: 'unrestricted'/);
   const transfer = sidebar.match(/async function transferCurrentSession\([\s\S]*?\n  function ensureCloudTransferIntent/)?.[0] ?? '';
   assert.doesNotMatch(transfer, /setPermissionProfile\('unrestricted'\)/);
-  const prepare = main.match(/async function prepareCloudTransferDocument\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+  const prepare = main.match(/async function prepareCloudTransferDocument\(startId: string\) \{[\s\S]*?\n\}/)?.[0] ?? '';
   assert.doesNotMatch(prepare, /saveCurrentDocument/);
   assert.match(prepare, /if \(wasm\.isNewDocument\) return null/);
   assert.doesNotMatch(prepare, /documentState\.isDirty/);
@@ -95,7 +95,7 @@ test('cloud transfer includes portable timeline, exact document bytes and refere
   assert.match(main, /isNewDocument: wasm\.isNewDocument/);
 });
 
-test('cloud lease locks local editing and queued messages cross only at a remote boundary', () => {
+test('cloud lease tracks conversation ownership while queued messages cross at a remote boundary', () => {
   assert.match(cloudUi, /isCloudConversation: \(\) => cloudOwnsConversation\(snapshot\)/);
   assert.match(cloudUi, /async queueMessage\(text, messageId, attachments = \[\], target\)/);
   assert.match(cloudUi, /command: 'queue-message'/);

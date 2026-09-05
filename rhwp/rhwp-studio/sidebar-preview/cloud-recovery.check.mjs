@@ -28,6 +28,19 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   await page.click('[data-document-view="cloud"]');
   await page.waitForFunction(() => document.querySelector('#cloud-workspace').dataset.displayState === 'live');
 
+  // Text completion alone must not offer a partially persisted document.
+  await page.evaluate(() => window.sidebarPreview.cloud.finishReply('검토를 마쳤습니다.'));
+  assert.equal(await page.$eval('.ag-cloud-merge-button', (button) => button.hidden), true);
+  await page.evaluate(() => window.sidebarPreview.cloud.commitTurn());
+  await page.waitForFunction(() => !document.querySelector('.ag-cloud-merge-button').hidden);
+  await page.click('[data-document-view="local"]');
+  await page.click('.ag-cloud-merge-button');
+  await page.waitForFunction(() => window.sidebarPreview.cloud.calls.merges.length === 1);
+  assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.merges[0].checkpoint.operationId), 'preview-turn-1');
+  assert.equal(await page.evaluate(() => window.sidebarPreview.workspace.mode()), 'cloud');
+  await page.waitForFunction(() => document.querySelector('.ag-cloud-merge-button').hidden);
+  await page.click('[data-document-view="cloud"]');
+  await page.waitForFunction(() => document.querySelector('#cloud-workspace').dataset.displayState === 'live');
   original.frame = await page.$eval('.cloud-workspace-image', (node) => node.src);
   await page.click('#cloud-disconnect');
   await page.waitForFunction(() => document.querySelector('#cloud-workspace').dataset.displayState === 'stalled');

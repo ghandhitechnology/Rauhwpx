@@ -1413,7 +1413,9 @@ ipcMain.handle('cloud:download-checkpoint', async (event, payload) => {
   if (operationId !== null && !/^[A-Za-z0-9._:-]{1,160}$/.test(operationId)) {
     throw new Error('Invalid cloud checkpoint operation id');
   }
-  return requireCloudCoordinator().downloadCheckpoint({ sessionId, operationId });
+  const kind = payload?.kind ?? null;
+  if (kind !== null && kind !== 'turn') throw new Error('Invalid cloud checkpoint kind');
+  return requireCloudCoordinator().downloadCheckpoint({ sessionId, operationId, ...(kind ? { kind } : {}) });
 });
 ipcMain.handle('cloud:publish-checkpoint', async (event, payload) => {
   const session = sessionForEvent(event);

@@ -92,8 +92,9 @@ test('shelves use HEAD divergence and protect current work before applying', () 
   assert.match(create, /deleteShelf\(/);
 
   const apply = method('async applyShelf(', 'async deleteShelf(');
-  assert.ok(apply.indexOf("#checkpointDirty('pre-restore')") < apply.indexOf('replaceContentFromBytes'));
-  assert.match(apply, /if \(!persisted\) this\.#rollbackReplacement/);
+  assert.ok(apply.indexOf('#prepareMergeWorkingTree()') < apply.indexOf('#openMergeResolver('));
+  assert.match(apply, /target: existing\?\.id \?\? shelf\.baseCommitId/);
+  assert.doesNotMatch(apply, /replaceContentFromBytes/);
 });
 
 test('branch transitions defer ref and dirty state callbacks until after history afterEdit', () => {

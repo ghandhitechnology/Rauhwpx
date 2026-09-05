@@ -237,7 +237,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   mergeButton.hidden = true;
   mergeButton.addEventListener('click', () => { void mergeCheckpoint(); });
   const checkpointMirror = createCheckpointMirror({
-    download: (sessionId, operationId) => deps.controller.downloadCheckpoint(sessionId, operationId),
+    download: (sessionId, operationId) => deps.controller.downloadCheckpoint(sessionId, operationId, !operationId && deps.onMergeCheckpoint ? 'turn' : undefined),
     apply: (checkpoint) => {
       if (checkpoint.kind !== 'turn') return;
       const { sessionId, documentId, revision, turn, operationId } = checkpoint;
@@ -746,8 +746,8 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     const profileEpoch = snapshot.profileEpoch;
     const documentId = deps.getScope().documentId;
     const session = snapshot.sessions.find((item) => item.sessionId === offer.sessionId);
-    const startId = session && (snapshot.timeline?.thread.id === session.threadId
-      ? snapshot.timeline.thread.cloudStartId : deps.getCloudStartId?.(session.threadId));
+    const startId = session && ((snapshot.timeline?.thread.id === session.threadId
+      ? snapshot.timeline.thread.cloudStartId : undefined) ?? deps.getCloudStartId?.(session.threadId));
     if (!startId) return deps.onError('Cloud 시작 대화를 불러온 뒤 다시 병합하세요.');
     await operation(async () => {
       const checkpoint = await deps.controller.downloadCheckpoint(offer.sessionId, offer.operationId);
@@ -1262,7 +1262,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       });
       return;
     }
-    const boundary = cloudBoundaryOperation(raw);
+    const boundary = cloudBoundaryOperation(raw, deps.onMergeCheckpoint ? 'turn' : undefined);
     if (boundary) {
       mirrorCheckpoint(boundary.sessionId, boundary.operationId);
       return;
