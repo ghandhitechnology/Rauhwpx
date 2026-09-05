@@ -414,7 +414,7 @@ export type CloudDisplayEvent =
 
 export type CloudDisplayInputEvent =
   | { kind: 'pointer'; action: 'move'; x: number; y: number }
-  | { kind: 'pointer'; action: 'down' | 'up'; x: number; y: number; button: 'left' | 'middle' | 'right' | 'back' | 'forward'; clickCount?: number }
+  | { kind: 'pointer'; action: 'down' | 'up' | 'click'; x: number; y: number; button: 'left' | 'middle' | 'right' | 'back' | 'forward'; clickCount?: number }
   | { kind: 'wheel'; x: number; y: number; deltaX: number; deltaY: number }
   | { kind: 'key'; action: 'down' | 'up'; key: string }
   | { kind: 'text'; text: string };

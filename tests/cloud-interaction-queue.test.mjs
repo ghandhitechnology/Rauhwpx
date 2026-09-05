@@ -82,3 +82,41 @@ test('silent streams are cancelled, while heartbeat bytes satisfy liveness', asy
   assert.deepEqual(await readStreamChunk({ read: async () => ({ done: false, value: Buffer.from(': keepalive\n\n') }) }, 10),
     { done: false, value: Buffer.from(': keepalive\n\n') });
 });
+
+test('a complete click stays together at a batch boundary and uses the existing wire protocol', async () => {
+  const batches = [];
+  const gate = Promise.withResolvers();
+  const started = Promise.withResolvers();
+  const queue = new CloudInputQueue(async (_stream, events) => {
+    batches.push(events);
+    if (batches.length === 1) { started.resolve(); await gate.promise; }
+  }, () => 32);
+  const first = queue.enqueue('stream', { kind: 'text', text: 'busy' });
+  await started.promise;
+  const pending = Array.from({ length: 31 }, (_, i) => queue.enqueue('stream', {
+    kind: 'key', action: i % 2 ? 'up' : 'down', key: 'Shift',
+  }));
+  const click = { kind: 'pointer', action: 'click', x: 230, y: 140, button: 'left', clickCount: 2 };
+  pending.push(queue.enqueue('stream', click));
+  pending.push(queue.enqueue('stream', { kind: 'text', text: 'after click' }));
+  gate.resolve();
+  await Promise.all([first, ...pending]);
+  assert.equal(batches[1].length, 31);
+  assert.deepEqual(batches[2], [
+    { ...click, action: 'down' }, { ...click, action: 'up' }, { kind: 'text', text: 'after click' },
+  ]);
+  await queue.close();
+});
+
+test('a click failure is reported once and is never retried', async () => {
+  let calls = 0;
+  const queue = new CloudInputQueue(async (_stream, events) => {
+    calls++;
+    assert.deepEqual(events.map(event => event.action), ['down', 'up']);
+    throw new Error('receipt lost');
+  }, () => 32);
+  await assert.rejects(queue.enqueue('stream', { kind: 'pointer', action: 'click',
+    x: 1, y: 2, button: 'left', clickCount: 1 }), /receipt lost/);
+  await queue.close();
+  assert.equal(calls, 1);
+});

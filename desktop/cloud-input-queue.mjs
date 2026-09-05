@@ -43,7 +43,7 @@ export class CloudInputQueue {
         last.settle.push({ resolve, reject });
       } else this.pending.push({ streamId, event, createdAt: this.now(), settle: [{ resolve, reject }] });
     });
-    this.schedule();
+    this.schedule(event.kind === 'pointer' && event.action === 'click');
     return promise;
   }
 
@@ -60,9 +60,11 @@ export class CloudInputQueue {
     await this.sending;
   }
 
-  schedule() {
-    if (this.closed || this.sending || this.timer || !this.pending.length) return;
-    this.timer = setTimeout(() => { this.timer = null; this.flush(); }, 8);
+  schedule(urgent = false) {
+    if (this.closed || this.sending || !this.pending.length) return;
+    if (urgent && this.timer) { clearTimeout(this.timer); this.timer = null; }
+    if (this.timer) return;
+    this.timer = setTimeout(() => { this.timer = null; this.flush(); }, urgent ? 0 : 8);
   }
 
   flush() {
@@ -74,10 +76,24 @@ export class CloudInputQueue {
     const streamId = this.pending[0].streamId;
     let count = 0;
     const maximum = Math.max(1, Math.min(32, this.batchSize()));
-    while (count < maximum && this.pending[count]?.streamId === streamId) count++;
+    let size = 0;
+    while (this.pending[count]?.streamId === streamId) {
+      const event = this.pending[count].event;
+      const cost = event.kind === 'pointer' && event.action === 'click' ? 2 : 1;
+      if (size + cost > maximum) break;
+      size += cost;
+      count++;
+    }
+    if (!count) {
+      this.reset(inputError('Cloud server does not support click batches', 'DISPLAY_INPUT_UNAVAILABLE'));
+      return;
+    }
     const batch = this.pending.splice(0, count);
     const generation = this.generation;
-    this.sending = Promise.resolve().then(() => this.send(streamId, batch.map((entry) => entry.event)))
+    this.sending = Promise.resolve().then(() => this.send(streamId, batch.flatMap(({ event }) => event.kind === 'pointer' && event.action === 'click'
+      // A click is local shorthand. Existing servers receive their normal wire
+      // protocol, with both transitions in one ordered, acknowledged request.
+      ? [{ ...event, action: 'down' }, { ...event, action: 'up' }] : [event])))
       .then(() => {
         for (const entry of batch) for (const waiter of entry.settle) waiter.resolve();
       }, (error) => {
