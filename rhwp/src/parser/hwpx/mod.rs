@@ -728,7 +728,7 @@ pub(crate) fn parse_hwpx_validated(data: &[u8]) -> Result<Document, HwpxError> {
         .iter()
         .zip(bin_data_ids.ordered.iter().copied())
     {
-        // [Task #873] isEmbeded="0" (외부 file 참조) 는 ZIP 영역 영역 부재. skip.
+        // isEmbeded="0"은 ZIP에 포함되지 않은 외부 파일 참조다.
         // populate_link_image_paths + populate_external_images_from_dir 가 후처리.
         //
         // Issue #1283: 일부 HWPX는 ZIP 내부 OLE(`BinData/*.ole`)에도 isEmbeded="0"을
@@ -805,9 +805,8 @@ pub(crate) fn parse_hwpx_validated(data: &[u8]) -> Result<Document, HwpxError> {
         },
     };
 
-    // [Task #873] BinData Link 타입 의 외부 file path 영역 영역 Picture.external_path 영역
-    // 전달. 이후 model::document::populate_external_images_from_dir (Task #741) 가 같은
-    // dir 영역 basename 매칭 영역 image 영역 자동 load. HWP5 parser 와 동일 처리.
+    // BinData Link의 외부 파일 경로를 Picture.external_path로 전달한다.
+    // 이후 populate_external_images_from_dir가 문서 폴더에서 파일명이 일치하는 그림을 읽는다.
     populate_hwpx_link_image_paths(&mut doc);
 
     Ok(doc)

@@ -21,7 +21,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-MM_TO_PX = 96.0 / 25.4
+from hangul_row_heights import MM_TO_PX, rhwp_cut_rows
+
 HU_TO_PX = 96.0 / 7200.0
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -126,25 +127,11 @@ def col0_segments(
     return segs
 
 
-def rhwp_cut_rows(src: Path, exe: str, pi: int | None = None) -> list[float] | None:
-    import os
-
-    env = dict(os.environ, RHWP_TABLE_DRIFT="1")
-    r = subprocess.run([exe, "dump-pages", str(src)], capture_output=True, text=True,
-                       encoding="utf-8", errors="replace", env=env, timeout=180)
-    pat = (rf"TABLE_CUT_DRIFT: pi={pi} .*?cut_rows=\[([^\]]*)\]" if pi is not None
-           else r"cut_rows=\[([^\]]*)\]")
-    m = re.search(pat, r.stdout + r.stderr)
-    if not m:
-        return None
-    return [float(x) for x in m.group(1).split(",") if x.strip()]
-
-
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("src", type=Path)
-    ap.add_argument("--exe", default="C:/Users/planet/rhwp/target/release/rhwp.exe"
-                    if sys.platform == "win32" else "target/release/rhwp")
+    ap.add_argument("--exe", default=str(Path(__file__).resolve().parents[1] / "target" / "release"
+                    / ("rhwp.exe" if sys.platform == "win32" else "rhwp")))
     ap.add_argument("--table-index", type=int, default=0)
     ap.add_argument("--col", type=int, default=0)
     ap.add_argument("--pi", type=int, default=None)

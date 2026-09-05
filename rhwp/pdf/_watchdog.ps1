@@ -1,4 +1,4 @@
-$log = 'C:\Users\planet\rhwp\pdf\_convert.log'
+$log = Join-Path $PSScriptRoot '_convert.log'
 $idleLimit = 60  # seconds without log update before kill
 
 while ($true) {

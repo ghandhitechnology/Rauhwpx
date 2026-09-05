@@ -3,16 +3,14 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createServer } from 'vite';
+import { createTestModuleServer } from './support/module-server.ts';
 import { functionBodyFrom } from './support/source-guard.ts';
 
 const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const src = (rel: string): string => readFileSync(join(rootDir, rel), 'utf8');
 
 test('#4121 HF anchor는 본문·각주와 독립된 target 소유 범위를 만든다', async () => {
-  const vite = await createServer({
-    root: rootDir, appType: 'custom', logLevel: 'silent', server: { middlewareMode: true },
-  });
+  const vite = await createTestModuleServer(rootDir);
   try {
     const { CursorState } = await vite.ssrLoadModule('/src/engine/cursor.ts');
     const wasm = {
@@ -44,9 +42,7 @@ test('#4121 HF anchor는 본문·각주와 독립된 target 소유 범위를 만
 });
 
 test('#4121 HF 역방향 범위는 문단·문자 사전식으로 정렬된다', async () => {
-  const vite = await createServer({
-    root: rootDir, appType: 'custom', logLevel: 'silent', server: { middlewareMode: true },
-  });
+  const vite = await createTestModuleServer(rootDir);
   try {
     const { CursorState } = await vite.ssrLoadModule('/src/engine/cursor.ts');
     const wasm = {
@@ -72,9 +68,7 @@ test('#4121 HF 역방향 범위는 문단·문자 사전식으로 정렬된다',
 });
 
 test('#4121 HF 위아래 이동은 같은 resolved target의 시각 줄만 따른다', async () => {
-  const vite = await createServer({
-    root: rootDir, appType: 'custom', logLevel: 'silent', server: { middlewareMode: true },
-  });
+  const vite = await createTestModuleServer(rootDir);
   try {
     const { CursorState } = await vite.ssrLoadModule('/src/engine/cursor.ts');
     const wasm = {
@@ -102,9 +96,7 @@ test('#4121 HF 위아래 이동은 같은 resolved target의 시각 줄만 따�
 });
 
 test('#4121 HF 단어·문단·target 경계 이동은 HF 좌표계를 유지한다', async () => {
-  const vite = await createServer({
-    root: rootDir, appType: 'custom', logLevel: 'silent', server: { middlewareMode: true },
-  });
+  const vite = await createTestModuleServer(rootDir);
   try {
     const { CursorState } = await vite.ssrLoadModule('/src/engine/cursor.ts');
     const texts = ['alpha beta', '둘째 문단'];
@@ -139,9 +131,7 @@ test('#4121 HF 단어·문단·target 경계 이동은 HF 좌표계를 유지한
 });
 
 test('#4121 macOS HF Option+Shift·Command+Shift 탐색은 실제 선택 범위를 만든다', async () => {
-  const vite = await createServer({
-    root: rootDir, appType: 'custom', logLevel: 'silent', server: { middlewareMode: true },
-  });
+  const vite = await createTestModuleServer(rootDir);
   try {
     const { CursorState } = await vite.ssrLoadModule('/src/engine/cursor.ts');
     const { onKeyDown } = await vite.ssrLoadModule('/src/engine/input-handler-keyboard.ts');
@@ -202,9 +192,7 @@ test('#4121 macOS HF Option+Shift·Command+Shift 탐색은 실제 선택 범위�
 });
 
 test('#4121 HF 모두 선택은 메뉴와 Ctrl/Cmd+A 모두 현재 정의만 대상으로 한다', async () => {
-  const vite = await createServer({
-    root: rootDir, appType: 'custom', logLevel: 'silent', server: { middlewareMode: true },
-  });
+  const vite = await createTestModuleServer(rootDir);
   try {
     const { CursorState } = await vite.ssrLoadModule('/src/engine/cursor.ts');
     const { handleSelectAll, onKeyDown } = await vite.ssrLoadModule('/src/engine/input-handler-keyboard.ts');

@@ -1,5 +1,5 @@
+import { browserExecutable, browserLaunchArgs, requireWasmPackage } from './browser-support.ts';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
@@ -8,32 +8,16 @@ import test from 'node:test';
 import puppeteer, { type Browser } from 'puppeteer-core';
 import { createServer, type ViteDevServer } from 'vite';
 
-const BROWSER_CANDIDATES = [
-  process.env.PUPPETEER_EXECUTABLE_PATH,
-  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-  '/Applications/Chromium.app/Contents/MacOS/Chromium',
-  '/usr/bin/google-chrome',
-  '/usr/bin/chromium',
-  '/usr/bin/chromium-browser',
-].filter((candidate): candidate is string => Boolean(candidate));
-
-const executablePath = BROWSER_CANDIDATES.find(existsSync);
+const executablePath = browserExecutable();
 const studioRoot = fileURLToPath(new URL('../', import.meta.url));
 const rhwpRoot = resolve(studioRoot, '..');
 const wasmPackageRoot = process.env.RHWP_WASM_PACKAGE_DIR ?? resolve(rhwpRoot, 'pkg');
-const wasmPackageAvailable = existsSync(resolve(wasmPackageRoot, 'rhwp.js'))
-  && existsSync(resolve(wasmPackageRoot, 'rhwp_bg.wasm'));
-const browserSkipReason = !executablePath
-  ? 'Chrome 또는 Chromium을 찾을 수 없습니다'
-  : !wasmPackageAvailable
-    ? '실제 WASM 브라우저 테스트는 생성된 rhwp/pkg/rhwp.js와 rhwp/pkg/rhwp_bg.wasm이 필요합니다. npm test 전에 WASM 패키지를 빌드하세요'
-    : null;
+requireWasmPackage(wasmPackageRoot);
 let server: ViteDevServer | null = null;
 let browser: Browser | null = null;
 let baseUrl = '';
 
 test.before(async () => {
-  if (browserSkipReason) return;
   server = await createServer({
     root: studioRoot,
     configFile: false,
@@ -79,9 +63,7 @@ test.before(async () => {
   browser = await puppeteer.launch({
     executablePath,
     headless: true,
-    args: process.env.CI || process.env.DEPOT_JOB_URL
-      ? ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
-      : [],
+    args: browserLaunchArgs(),
   });
 });
 
@@ -90,11 +72,8 @@ test.after(async () => {
   await server?.close();
 });
 
-test('dirty merge entry creates a real pre-merge checkpoint before already-integrated exit', { timeout: 30_000, skip: browserSkipReason ?? false }, async (context) => {
-  if (!browser) {
-    context.skip(browserSkipReason ?? 'Chrome 또는 Chromium을 찾을 수 없습니다');
-    return;
-  }
+test('dirty merge entry creates a real pre-merge checkpoint before already-integrated exit', { timeout: 30_000 }, async (context) => {
+  assert.ok(browser, 'Browser setup did not complete');
   const page = await browser.newPage();
   try {
     await page.goto(`${baseUrl}/tests/fixtures/version-store-idb.html`);
@@ -185,11 +164,8 @@ test('dirty merge entry creates a real pre-merge checkpoint before already-integ
   }
 });
 
-test('clean fast-forward is reviewed and keeps the source branch by default', { timeout: 30_000, skip: browserSkipReason ?? false }, async (context) => {
-  if (!browser) {
-    context.skip(browserSkipReason ?? 'Chrome 또는 Chromium을 찾을 수 없습니다');
-    return;
-  }
+test('clean fast-forward is reviewed and keeps the source branch by default', { timeout: 30_000 }, async (context) => {
+  assert.ok(browser, 'Browser setup did not complete');
   const page = await browser.newPage();
   try {
     await page.goto(`${baseUrl}/tests/fixtures/version-store-idb.html`);
@@ -322,11 +298,8 @@ test('clean fast-forward is reviewed and keeps the source branch by default', { 
   }
 });
 
-test('diverged clean merge creates ordered parents and Undo/Redo moves bytes with refs', { timeout: 45_000, skip: browserSkipReason ?? false }, async (context) => {
-  if (!browser) {
-    context.skip(browserSkipReason ?? 'Chrome 또는 Chromium을 찾을 수 없습니다');
-    return;
-  }
+test('diverged clean merge creates ordered parents and Undo/Redo moves bytes with refs', { timeout: 45_000 }, async (context) => {
+  assert.ok(browser, 'Browser setup did not complete');
   const page = await browser.newPage();
   try {
     await page.goto(`${baseUrl}/tests/fixtures/version-store-idb.html`);
@@ -571,11 +544,8 @@ test('diverged clean merge creates ordered parents and Undo/Redo moves bytes wit
   }
 });
 
-test('HWPX branch transitions stay clean and do not create phantom checkpoints', { timeout: 45_000, skip: browserSkipReason ?? false }, async (context) => {
-  if (!browser) {
-    context.skip(browserSkipReason ?? 'Chrome 또는 Chromium을 찾을 수 없습니다');
-    return;
-  }
+test('HWPX branch transitions stay clean and do not create phantom checkpoints', { timeout: 45_000 }, async (context) => {
+  assert.ok(browser, 'Browser setup did not complete');
   const page = await browser.newPage();
   try {
     await page.goto(`${baseUrl}/tests/fixtures/version-store-idb.html`);
@@ -645,11 +615,8 @@ test('HWPX branch transitions stay clean and do not create phantom checkpoints',
   }
 });
 
-test('HWPX controller durably completes clean and conflicted merges with composite Undo/Redo', { timeout: 120_000, skip: browserSkipReason ?? false }, async (context) => {
-  if (!browser) {
-    context.skip(browserSkipReason ?? 'Chrome 또는 Chromium을 찾을 수 없습니다');
-    return;
-  }
+test('HWPX controller durably completes clean and conflicted merges with composite Undo/Redo', { timeout: 120_000 }, async (context) => {
+  assert.ok(browser, 'Browser setup did not complete');
   const page = await browser.newPage();
   try {
     await page.goto(`${baseUrl}/tests/fixtures/version-store-idb.html`);
@@ -938,11 +905,8 @@ test('HWPX controller durably completes clean and conflicted merges with composi
   }
 });
 
-test('real resolver completes clean and conflicted HWP/HWPX worker merges', { timeout: 90_000, skip: browserSkipReason ?? false }, async (context) => {
-  if (!browser) {
-    context.skip(browserSkipReason ?? 'Chrome 또는 Chromium을 찾을 수 없습니다');
-    return;
-  }
+test('real resolver completes clean and conflicted HWP/HWPX worker merges', { timeout: 90_000 }, async (context) => {
+  assert.ok(browser, 'Browser setup did not complete');
   const page = await browser.newPage();
   try {
     await page.goto(`${baseUrl}/tests/fixtures/version-store-idb.html`);

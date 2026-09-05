@@ -532,13 +532,9 @@ fn count_shape(shape: &ShapeObject, counts: &mut HwpStructureCounts, losses: &mu
 }
 
 impl DocumentCore {
-    /// [Task #741 후속] 외부 file path 그림 영역 의 binary 영역 영역 base_dir 영역 영역 자동 load.
-    ///
-    /// HWP3 파일 영역 image 영역 영역 영역 영역 절대 경로 (예: "D:\\Work\\...\\rdb02.gif") 영역
-    /// 저장 영역. 본 환경 영역 영역 영역 path 영역 영역 access 부재 영역 영역 영역, basename
-    /// 영역 영역 추출 → `base_dir` 영역 영역 영역 file 영역 load → renderer 영역 영역 표시.
-    ///
-    /// 반환: load 영역 image 영역.
+    /// `base_dir`에서 파일명이 일치하는 외부 그림을 읽고 페이지 캐시를 갱신한다.
+    /// 원본 절대 경로를 사용할 수 없는 HWP3 문서도 같은 폴더의 그림을 표시할 수 있다.
+    /// 반환값은 읽어 들인 그림 수다.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn populate_external_images_from_dir(&mut self, base_dir: &std::path::Path) -> usize {
         let loaded = self.document.populate_external_images_from_dir(base_dir);
@@ -2084,8 +2080,7 @@ impl DocumentCore {
         &self.document
     }
 
-    /// [Task #741 후속] 문서의 IR mutable 참조를 반환한다.
-    /// WASM 영역 영역 외부 image inject 영역 의 영역 영역 영역.
+    /// 문서 IR의 가변 참조를 반환한다. WASM 외부 그림 주입에서도 사용한다.
     pub fn document_mut(&mut self) -> &mut Document {
         &mut self.document
     }

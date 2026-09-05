@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-SRC = Path(r"C:\Users\planet\rhwp\output\poc\task2150\ls_ladder3.hwpx")
+SRC = Path(__file__).resolve().parents[1] / "output/poc/task2150/ls_ladder3.hwpx"
 MM_TO_PX = 96.0 / 25.4
 PAD_PX = 2 * 141 / 7200 * 96
 FS_PX = 13.333

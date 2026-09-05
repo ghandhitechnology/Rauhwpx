@@ -8,6 +8,7 @@ rhwp−한글 Δ를 산출한다. bbox 퍼짐/페이지 경계 차이와 무관�
 
 usage: python subpixel_align_harness.py <rhwp_exe> <doc.hwpx> <hancom.pdf> [--max N]
 """
+from pathlib import Path
 import difflib
 import os
 import re
@@ -19,7 +20,7 @@ import fitz
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-FONTS = r"C:\Users\planet\rhwp\ttfs"
+FONTS = str(Path(__file__).resolve().parents[2] / "ttfs")
 
 
 def norm_text(t):

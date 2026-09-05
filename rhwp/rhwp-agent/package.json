@@ -12,7 +12,8 @@
     "status": "node ctl.mjs status",
     "test": "node --test tests/*.test.mjs",
     "test:browserbase:live": "node tests/browserbase-live-smoke.mjs",
-    "typecheck": "../rhwp-studio/node_modules/.bin/tsc -p tsconfig.agents.json"
+    "typecheck": "npm run typecheck:acp",
+    "typecheck:acp": "tsc -p tsconfig.agents.json"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.4.0",
@@ -33,5 +34,9 @@
     "@xmldom/xmldom": "0.8.15",
     "fast-uri": "3.1.7",
     "qs": "6.16.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "typescript": "^7.0.2"
   }
 }

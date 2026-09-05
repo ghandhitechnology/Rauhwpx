@@ -1,16 +1,9 @@
+import { browserExecutable, browserLaunchArgs } from './browser-support.ts';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import puppeteer from 'puppeteer-core';
-
-const BROWSER_CANDIDATES = [
-  process.env.PUPPETEER_EXECUTABLE_PATH,
-  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-  '/Applications/Chromium.app/Contents/MacOS/Chromium',
-  '/usr/bin/google-chrome',
-  '/usr/bin/chromium',
-].filter((candidate): candidate is string => Boolean(candidate));
 
 const css = readFileSync(
   new URL('../src/ui/agent-sidebar/agent-sidebar.css', import.meta.url),
@@ -18,13 +11,9 @@ const css = readFileSync(
 );
 
 test('compact fullscreen sidebars remain temporary overlays', { timeout: 20_000 }, async (context) => {
-  const executablePath = BROWSER_CANDIDATES.find(existsSync);
-  if (!executablePath) {
-    context.skip('Chrome or Chromium is unavailable');
-    return;
-  }
+  const executablePath = browserExecutable();
 
-  const browser = await puppeteer.launch({ executablePath, headless: true });
+  const browser = await puppeteer.launch({ executablePath, headless: true, args: browserLaunchArgs() });
   try {
     const page = await browser.newPage();
     await page.setViewport({ width: 900, height: 700 });

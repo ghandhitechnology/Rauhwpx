@@ -1,114 +1,78 @@
 # 기여하기
 
-Rauhwpx는 HWP/HWPX 편집기입니다. WebAssembly로 컴파일된 Rust 엔진, `rhwp-studio` 웹 편집기, Claude/Codex/Pi용 로컬 `rhwp-agent` 허브, Electron 데스크톱 셸로 구성됩니다. [edwardkim/rhwp](https://github.com/edwardkim/rhwp)의 포크입니다.
+Rauhwpx는 Rust 문서 엔진, Studio 웹 편집기, 로컬 에이전트 허브와 Electron 앱으로 구성됩니다. [edwardkim/rhwp](https://github.com/edwardkim/rhwp)의 포크이며, 엔진과 패키지 경로에는 `rhwp` 이름을 유지합니다. 문서 호환성을 검증하는 `rhwp/samples/`와 PDF 기준 자료는 보존하세요.
 
-대부분의 코드는 `rhwp/`에 있습니다. 일반적인 기여는 엔진 충실도, 편집기 동작, 에이전트 브리지, 데스크톱 패키징, 문서입니다. 라운드트립 충실도는 핵심 계약입니다. 통합 테스트는 `rhwp/samples/`의 실제 문서(HWP/HWPX 약 430개)를 로드합니다.
+## 처음 설정하기
 
-## 로컬 설정
+- Node 22.18 이상과 npm이 필요합니다.
+- Rust는 rustup으로 설치하세요. `rhwp/rust-toolchain.toml`이 엔진 툴체인과 WASM 타깃을 지정합니다.
+- wasm-pack 0.15.0을 설치하세요. `cargo install wasm-pack --version 0.15.0 --locked`
+- 네이티브 데스크톱 빌드에는 플랫폼 컴파일러가 필요합니다. macOS는 Xcode Command Line Tools, Windows는 Visual Studio Build Tools의 C++ 도구를 사용합니다.
 
-필요한 것:
-
-- rustup으로 설치한 Rust. `rhwp/rust-toolchain.toml`이 1.93.1과 clippy, rustfmt, `wasm32-unknown-unknown`을 고정합니다.
-- [wasm-pack](https://rustwasm.github.io/wasm-pack/) 0.15.0. CI는 `cargo install wasm-pack --version 0.15.0 --locked`로 설치합니다.
-- Node 20 이상. `rhwp-agent` 문서는 Node ≥ 20을 적습니다. GitHub Actions는 Node 22를 사용합니다.
-
-Studio는 Vite의 `@wasm` 별칭으로 `rhwp/pkg/`에서 엔진을 로드하므로, 편집기를 시작하기 전에 WASM을 빌드하세요.
+깨끗한 체크아웃에서 저장소 루트 기준으로 실행합니다.
 
 ```sh
-cd rhwp && wasm-pack build --target web
-cd rhwp-studio && npm install && npm run dev
+npm run setup
+npm run build:wasm
+npm run dev:studio
 ```
 
-Studio는 http://127.0.0.1:7700에서 접속을 받습니다. 이 모드에서는 임시 포트에 자체 인증 허브를 띄우므로, 병렬 worktree가 충돌하지 않습니다.
+`setup`은 루트, Studio와 에이전트 의존성을 설치합니다. 의존성이 바뀌었을 때 다시 실행하세요. 일반 빌드는 설치를 반복하지 않습니다. Studio는 `rhwp/pkg/`의 WASM을 사용하며 http://127.0.0.1:7700에서 실행됩니다. 인증된 에이전트 허브도 임시 포트에 함께 띄웁니다.
 
-독립 허브를 http://127.0.0.1:5175에서 쓰려면 저장소 루트에서:
+개발 서버가 실행 중인 상태에서 다른 터미널에 `npm run dev:desktop`을 실행하면 Electron이 연결됩니다. 네이티브 빌드와 실행은 다음과 같습니다.
 
 ```sh
-npm start          # detaches when /healthz is ready; logs to .run/rhwp-agent.log
-npm run status
-npm stop
-npm run start:fg   # foreground
+npm run build:desktop
+npm run desktop
 ```
 
-Studio가 떠 있으면 저장소 루트에서 `npm run dev:desktop`으로 Electron 셸을 그 서버에 붙입니다.
+`desktop`은 기존 빌드를 실행합니다. 처음부터 의존성을 다시 설치하고 빌드하려면 `npm run build:clean`을 사용하세요. `package:mac`과 `package:win`은 기존 빌드를 패키징하고, `dist:mac`과 `dist:win`은 빌드와 패키징을 함께 합니다.
 
-에이전트 설정과 문제 해결: [rhwp/rhwp-agent/README.md](rhwp/rhwp-agent/README.md).
+독립 허브 작업에는 루트의 `npm start`, `npm run status`, `npm stop`, `npm run start:fg`를 사용합니다. 이 허브는 http://127.0.0.1:5175를 사용하며 로그는 `.run/rhwp-agent.log`에 남깁니다. Studio 개발 모드에는 별도 허브가 필요하지 않습니다.
 
-## 테스트, 린트, 빌드
+제공자 설정은 [에이전트 문서](rhwp/rhwp-agent/README.md), 서명과 배포는 [릴리스 문서](docs/releasing.md)를 참고하세요.
 
-바꾼 내용에 맞는 검사를 실행하세요. 전체 `cargo test`와 모든 `e2e:*` 스크립트는 규모가 큽니다.
+## 변경에 맞는 검사
 
-### Rust 엔진 (`rhwp/`)
+문서만 바꾸거나 앱을 실행하기 위해 전체 smoke/E2E 검사를 돌릴 필요는 없습니다. 동작을 바꾸면 해당 회귀 테스트를 실행하고, 결과를 PR에 기록하세요.
+
+### Rust 엔진
+
+`rhwp/`에서 실행합니다. 전체 테스트를 돌리기 전에 바꾼 기능을 검증하는 테스트 파일이나 함수로 범위를 좁힐 수 있습니다.
 
 ```sh
-cargo test
-cargo clippy
-cargo fmt
+cargo test --locked --test <test_file_stem>
+cargo test --locked --test <test_file_stem> <test_function>
+cargo fmt --check
+cargo clippy --locked
 ```
 
-통합 테스트 파일 하나 또는 함수 하나:
+`tests/`의 실제 이름을 사용하세요. 전체 엔진 검증 명령은 [.github/workflows/nightly.yml](.github/workflows/nightly.yml)에 있습니다. WASM을 다시 빌드하려면 저장소 루트에서 `npm run build:wasm`을 실행하세요.
+
+### Studio와 에이전트
+
+저장소 루트에서 실행합니다.
 
 ```sh
-cargo test --test issue_1234_some_name
-cargo test --test issue_1234_some_name test_fn_name
+npm --prefix rhwp/rhwp-studio test
+npm --prefix rhwp/rhwp-studio run build
+npm --prefix rhwp/rhwp-agent test
+npm --prefix rhwp/rhwp-agent run typecheck:acp
 ```
 
-이 테스트는 `rhwp/tests/`에 있고, 대부분 이름이 `issue_NNNN_*` 또는 `pr_NNNN_*`입니다. Nightly CI는 `cargo test --locked --workspace`를 실행합니다.
+Studio의 기본 테스트는 브라우저를 실행하지 않습니다. 브라우저 통합 테스트는 WASM과 Chrome을 준비한 뒤 `npm --prefix rhwp/rhwp-studio run test:browser`로 실행하세요. 브라우저 경로는 `PUPPETEER_EXECUTABLE_PATH`로 지정할 수 있습니다. [테스트 안내](rhwp/rhwp-studio/tests/README.md)에 세부 조건이 있습니다.
 
-`Cargo.toml`은 단계적 리팩터를 앞두고 구조적 Clippy 린트를 의도적으로 많이 허용합니다. 관련 없는 PR에서 그 allow를 정리하지 마세요. 전용 툴링 이슈 없이 린트 표를 더 엄격하게 만들지 마세요.
+에이전트의 타입 검사는 공유 backend 계약과 Grok/Cursor ACP 모듈 및 그 의존성을 대상으로 합니다. Claude/Codex/Pi 제공자와 HTTP/WebSocket 허브는 검사 범위에 포함되지 않습니다.
 
-`rhwp/rustfmt.toml`은 `max_width = 100`과 Unix 개행을 사용합니다. 포맷 정책 변경은 별도 툴링 이슈로 올리세요.
+E2E 목록과 참조 검사는 Python 3가 필요합니다. 문서 조작 E2E와 수동 진단은 [E2E 안내](rhwp/rhwp-studio/e2e/README.md)를 참고하세요. `e2e:list`는 스크립트를 찾고 `e2e:check`는 실행 참조를 확인합니다. Browserbase 라이브 검사는 해당 통합을 바꿀 때 수동 실행하며 외부 서비스 계정이 필요합니다.
 
-WASM 빌드 (`rhwp/pkg/`에 기록):
-
-```sh
-wasm-pack build --target web
-```
-
-PDF와 PNG 내보내기는 네이티브 전용입니다. `native-skia` 기능이 Skia 백엔드를 켭니다.
-
-### Studio (`rhwp/rhwp-studio/`)
-
-```sh
-npm test          # Node test runner; also runs ../npm/editor/tests
-npm run build     # generate:agent-edit-capabilities, then tsc, then Vite
-```
-
-별도의 typecheck 스크립트는 없습니다. `npm run build`가 `tsc`를 실행합니다.
-
-E2E 스크립트는 `npm run e2e:<name>`입니다 (puppeteer-core, 보통 `--mode=headless`). 변경에 해당하는 것을 실행하세요. `npm run e2e:manifest-check`는 e2e 매니페스트를 검사합니다.
-
-### 에이전트 허브 (`rhwp/rhwp-agent/`)
-
-```sh
-npm test
-npm run typecheck
-```
-
-`typecheck`는 Studio의 `tsc`를 사용합니다. 먼저 studio 의존성을 설치하세요.
-
-### CI가 실제로 실행하는 것
-
-모든 풀 리퀘스트와 `main` 또는 `feat/**`로의 푸시는 [Desktop session checks](.github/workflows/desktop-sessions.yml)를 실행합니다. WASM 빌드, 데스크톱과 허브 엔트리 파일에 대한 `node --check`, 이어서 `rhwp-agent`와 `rhwp-studio` 유닛 테스트입니다.
-
-[Nightly verification](.github/workflows/nightly.yml)은 `cargo test --locked --workspace`와 studio의 `npm run build`를 추가합니다.
-
-Clippy, rustfmt, e2e 스위트는 PR 워크플로에 없습니다. 해당 영역을 건드리면 로컬에서 실행하세요.
+CI는 변경 경로에 따라 작업을 선택합니다. 실제 명령과 조건은 [.github/workflows/](.github/workflows/)에 있습니다. 패키지 검증은 설치 파일을 만들 때 실행하며, nightly는 더 넓은 엔진 검증을 수행합니다.
 
 ## 풀 리퀘스트
 
-`main`을 대상으로 PR을 여세요. 이 저장소에는 이슈나 PR 템플릿이 없습니다.
+작업 브랜치는 `fix/`, `hotfix/`, `feat/`, `release/` 중 하나의 접두사를 사용하고 `main`을 대상으로 PR을 여세요. [AGENTS.md](AGENTS.md)의 PR 설명 형식에 따라 문제, 해결 방법, 검사 결과와 위험을 적습니다. UI가 바뀌면 가능한 경우 화면 증거를 첨부하세요.
 
-기존 브랜치는 `feat/`와 `fix/` 접두사를 씁니다. `feat/**`로의 푸시도 desktop-session 워크플로를 실행합니다. 문서화된 명명 정책이 아니라 관찰된 관행입니다.
-
-[AGENTS.md](AGENTS.md)가 여기서 쓰는 PR 설명 형식입니다: title, summary, problem, solution, diff overview, testing, risk and rollout, UI가 바뀌면 visual evidence. 실행하지 않은 테스트를 실행했다고 쓰지 마세요.
-
-## 코드 스타일과 에이전트 참고
-
-- 편집하는 파일에 맞추세요. 엔진의 주석, 커밋 메시지, CLI 출력은 한국어인 경우가 많습니다.
-- Studio는 TypeScript이고 UI 프레임워크가 없습니다. [DESIGN.md](DESIGN.md)가 비주얼 시스템입니다. 일회성 CSS 색 대신 `--n-*` 토큰을 바꾸세요.
-- Studio가 이미 한국어인 곳에서는 제품 언어도 한국어 우선입니다. [PRODUCT.md](PRODUCT.md)를 보세요.
-- [CLAUDE.md](CLAUDE.md)에 코딩 에이전트가 쓰는 명령 목록과 아키텍처 맵이 있습니다.
+파일의 기존 스타일과 제품 언어를 따르세요. Studio는 TypeScript를 사용하며 UI 프레임워크가 없습니다. 디자인 지침은 [DESIGN.md](DESIGN.md), 제품 방향은 [PRODUCT.md](PRODUCT.md)에 있습니다. 코딩 에이전트용 구조 안내는 [CLAUDE.md](CLAUDE.md)를 참고하세요.
 
 ## 라이선스
 

@@ -15,7 +15,7 @@
  * 실행:
  *   cd rhwp-studio
  *   npx vite --host 0.0.0.0 --port 7700 &
- *   node e2e/grid-mode-click-coord.test.mjs --mode=headless
+ *   node e2e/probe-grid-mode-click-coord.mjs --mode=headless
  */
 import { runTest, loadHwpFile, screenshot, assert } from './helpers.mjs';
 
