@@ -122,71 +122,133 @@
   padding: 13px;
 }
 
-.ag-cloud-panel[data-link='reconnecting'],
-.ag-cloud-panel[data-link='recreating'] {
-  border-color: color-mix(in srgb, var(--ui-warning-border, #d9a441) 55%, var(--ag-border-strong));
-}
-
-.ag-cloud-panel[data-link='failed'] {
-  border-color: color-mix(in srgb, var(--ag-err) 45%, var(--ag-border-strong));
-}
-
+/* Cloud 복구 배너 — 상태가 곧 표면이다. 실패 red, 재연결 amber, 재생성 accent. */
 .ag-cloud-recovery {
   display: grid;
-  gap: 7px;
-  padding: 10px 11px;
-  border: 1px solid var(--ag-border);
+  grid-template-columns: 28px 1fr;
+  column-gap: 12px;
+  row-gap: 12px;
+  padding: 12px 14px;
   border-radius: var(--ag-r-field);
-  background: var(--ag-surface-subtle);
+  background: color-mix(in srgb, var(--ag-err) 5%, var(--ag-bg));
+  word-break: keep-all;
 }
 
 .ag-cloud-recovery[hidden] {
   display: none;
 }
 
-.ag-cloud-recovery[data-kind='reconnecting'],
+.ag-cloud-recovery[data-kind='reconnecting'] {
+  background: color-mix(in srgb, var(--ui-warning-border, #d9a441) 5%, var(--ag-bg));
+}
+
 .ag-cloud-recovery[data-kind='recreating'] {
-  border-color: color-mix(in srgb, var(--ui-warning-border, #d9a441) 50%, var(--ag-border));
+  background: color-mix(in srgb, var(--accent-primary) 5%, var(--ag-bg));
 }
 
-.ag-cloud-recovery[data-kind='failed'] {
-  border-color: color-mix(in srgb, var(--ag-err) 40%, var(--ag-border));
+.ag-cloud-recovery-chip {
+  display: grid;
+  grid-row: 1;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--ag-err) 12%, transparent);
+  color: var(--ag-err);
 }
 
-.ag-cloud-recovery-pulse {
+.ag-cloud-recovery[data-kind='reconnecting'] .ag-cloud-recovery-chip {
+  background: color-mix(in srgb, var(--ui-warning-border, #d9a441) 12%, transparent);
+  color: var(--ui-warning-border, #d9a441);
+}
+
+.ag-cloud-recovery[data-kind='recreating'] .ag-cloud-recovery-chip {
+  background: color-mix(in srgb, var(--accent-primary) 12%, transparent);
+  color: var(--accent-primary);
+}
+
+.ag-cloud-recovery-chip .ag-icon {
   display: block;
-  height: 3px;
-  border-radius: 999px;
-  background: linear-gradient(
-    90deg,
-    transparent 0%,
-    var(--accent-primary) 45%,
-    transparent 100%
-  );
-  background-size: 220% 100%;
-  opacity: 0;
 }
 
-.ag-cloud-recovery[data-kind='reconnecting'] .ag-cloud-recovery-pulse,
-.ag-cloud-recovery[data-kind='recreating'] .ag-cloud-recovery-pulse {
-  opacity: 1;
-  animation: ag-cloud-sweep 1.4s linear infinite;
+/* 상태별로 자기 아이콘만 보인다 */
+.ag-cloud-recovery-chip .ag-cloud-recovery-icon-work {
+  display: none;
+}
+
+.ag-cloud-recovery[data-kind='reconnecting'] .ag-cloud-recovery-icon-work,
+.ag-cloud-recovery[data-kind='recreating'] .ag-cloud-recovery-icon-work {
+  display: block;
+}
+
+.ag-cloud-recovery[data-kind='reconnecting'] .ag-cloud-recovery-icon-off,
+.ag-cloud-recovery[data-kind='recreating'] .ag-cloud-recovery-icon-off {
+  display: none;
+}
+
+/* 호만 돌리고 구름은 그대로 둔다 */
+.ag-cloud-recovery-icon-arc {
+  transform-box: view-box;
+  transform-origin: 6.4px 6px;
+  animation: ag-cloud-arc-spin 1.1s linear infinite;
+}
+
+@keyframes ag-cloud-arc-spin {
+  to { transform: rotate(360deg); }
+}
+
+.ag-cloud-recovery-copy {
+  grid-row: 1;
+  min-width: 0;
 }
 
 .ag-cloud-recovery-title {
   font-weight: 650;
+  line-height: 1.35;
 }
 
 .ag-cloud-recovery-detail {
-  margin: 0;
+  margin: 3px 0 0;
   color: var(--ag-text-muted);
   font-size: var(--font-size-sm, 11px);
+  line-height: 1.45;
 }
 
 .ag-cloud-recovery-actions {
+  grid-column: 1 / -1;
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 8px;
+}
+
+/* 배너 안의 버튼 — 주요 동작은 위험색 외곽선, 나머지는 조용한 텍스트 */
+.ag-cloud-recovery .ag-cloud-action {
+  height: 26px;
+  padding: 0 11px;
+  border: 1px solid color-mix(in srgb, var(--ag-err) 38%, transparent);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ag-err);
+}
+
+.ag-cloud-recovery .ag-cloud-action:hover {
+  background: color-mix(in srgb, var(--ag-err) 10%, transparent);
+  border-color: color-mix(in srgb, var(--ag-err) 55%, transparent);
+}
+
+.ag-cloud-recovery .ag-cloud-action:active {
+  background: color-mix(in srgb, var(--ag-err) 16%, transparent);
+}
+
+.ag-cloud-recovery .ag-cloud-action:not(.ag-primary) {
+  border-color: transparent;
+  color: var(--ag-text-muted);
+}
+
+.ag-cloud-recovery .ag-cloud-action:not(.ag-primary):hover {
+  background: transparent;
+  border-color: transparent;
+  color: var(--ag-text);
 }
 
 .ag-cloud-session-picker {
@@ -483,7 +545,7 @@
 @media (prefers-reduced-motion: reduce) {
   .ag-cloud-btn .ag-icon,
   .ag-workspace-cloud-btn .ag-icon,
-  .ag-cloud-recovery-pulse,
+  .ag-cloud-recovery-icon-arc,
   .ag-cloud-recovery-strip-pulse {
     animation: none !important;
   }

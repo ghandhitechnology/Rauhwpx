@@ -40,7 +40,7 @@ import {
 import { createCheckpointMirror } from '../../cloud/checkpoint-mirror.ts';
 import { createCheckpointPublisher } from '../../cloud/checkpoint-publisher.ts';
 import { createCloudOnboarding } from './cloud-onboarding.ts';
-import { createIcon } from './icons.ts';
+import { createCloudSyncIcon, createIcon } from './icons.ts';
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -266,11 +266,18 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   recovery.hidden = true;
   recovery.setAttribute('role', 'status');
   recovery.setAttribute('aria-live', 'polite');
-  const recoveryPulse = el('span', 'ag-cloud-recovery-pulse');
+  const recoveryChip = el('span', 'ag-cloud-recovery-chip');
+  recoveryChip.setAttribute('aria-hidden', 'true');
+  recoveryChip.append(
+    createIcon('cloudOff', 'ag-cloud-recovery-icon-off'),
+    createCloudSyncIcon('ag-cloud-recovery-icon-work'),
+  );
+  const recoveryCopy = el('div', 'ag-cloud-recovery-copy');
   const recoveryTitle = el('div', 'ag-cloud-recovery-title');
   const recoveryDetail = el('p', 'ag-cloud-recovery-detail');
+  recoveryCopy.append(recoveryTitle, recoveryDetail);
   const recoveryActions = el('div', 'ag-cloud-recovery-actions');
-  recovery.append(recoveryPulse, recoveryTitle, recoveryDetail, recoveryActions);
+  recovery.append(recoveryChip, recoveryCopy, recoveryActions);
   const panelStatus = el('div', 'ag-cloud-panel-status');
   panelStatus.setAttribute('role', 'status');
   panelStatus.setAttribute('aria-live', 'polite');
