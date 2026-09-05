@@ -32,6 +32,8 @@ const STROKE_PATHS = {
   /* 시계 방향으로 도는 화살 — 다시 확인 */
   refresh: 'M9.3 6a3.3 3.3 0 1 1-1.05-2.4M9.5 2.1v1.9H7.6',
   cloud: 'M3.4 9.2h5.1a2 2 0 0 0 .1-4 3 3 0 0 0-5.8.6A1.7 1.7 0 0 0 3.4 9.2z',
+  /* 끊긴 구름 — 구름 위를 대각선으로 지르는 사선 */
+  cloudOff: 'M3.4 9.2h5.1a2 2 0 0 0 .1-4 3 3 0 0 0-5.8.6A1.7 1.7 0 0 0 3.4 9.2zM2.4 2.4l7.2 7.2',
   paperclip: 'M4.1 6.2 7.3 3a1.7 1.7 0 0 1 2.4 2.4L5.8 9.3A2.5 2.5 0 0 1 2.3 5.8l4-4M4.7 7.5 8 4.2',
   references: 'M3 2.2h4.1L9 4.1v5.7H3zM7.1 2.2v1.9H9M4.4 6h3.2M4.4 7.7h2.3',
   search: 'M5.3 2.5a2.8 2.8 0 1 0 0 5.6 2.8 2.8 0 0 0 0-5.6M7.3 7.3l2.2 2.2',
@@ -86,8 +88,40 @@ export function createIcon(name: SidebarIconName, className = ''): SVGSVGElement
   return svg;
 }
 
-/** 실행 중지 버튼용 채워진 사각형. 스트로크 아이콘과 달리 면으로 읽혀야 한다. */
-export function createStopIcon(className = ''): SVGSVGElement {
+/**
+ * 다시 맺는 중/재생성 중 배너용 구름+회전 호. 구름은 흐리게, 호만 돌린다.
+ * 회전 대상 호에 ag-cloud-recovery-icon-arc 클래스를 단다.
+ */
+export function createCloudSyncIcon(className = ''): SVGSVGElement {
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('class', className ? `ag-icon ${className}` : 'ag-icon');
+  svg.setAttribute('viewBox', '0 0 12 12');
+  svg.setAttribute('width', '12');
+  svg.setAttribute('height', '12');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('focusable', 'false');
+
+  const cloud = document.createElementNS(NS, 'path');
+  cloud.setAttribute('d', 'M3.83 5.4a2.25 2.25 0 0 1 2.1-1.8c1.05 0 1.95.75 2.18 1.73.9.15 1.58.9 1.58 1.8a1.8 1.8 0 0 1-1.8 1.8H4.2a1.95 1.95 0 0 1-1.95-1.95c0-.75.45-1.43 1.13-1.65');
+  cloud.setAttribute('opacity', '0.45');
+
+  const arc = document.createElementNS(NS, 'path');
+  arc.setAttribute('class', 'ag-cloud-recovery-icon-arc');
+  arc.setAttribute('d', 'M9.38 4.65a2.25 2.25 0 0 0-1.58-1.2');
+
+  for (const part of [cloud, arc]) {
+    part.setAttribute('fill', 'none');
+    part.setAttribute('stroke', 'currentColor');
+    part.setAttribute('stroke-width', '1.25');
+    part.setAttribute('stroke-linecap', 'round');
+    part.setAttribute('stroke-linejoin', 'round');
+  }
+
+  svg.append(cloud, arc);
+  return svg;
+}
+
+/** 실행 중지 버튼용 채워진 사각형. 스트로크 아이콘과 달리 면으로 읽혀야 한다. */export function createStopIcon(className = ''): SVGSVGElement {
   const svg = document.createElementNS(NS, 'svg');
   svg.setAttribute('class', className ? `ag-icon ${className}` : 'ag-icon');
   svg.setAttribute('viewBox', '0 0 12 12');
