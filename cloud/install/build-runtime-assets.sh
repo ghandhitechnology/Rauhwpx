@@ -24,8 +24,9 @@ trap 'rm -rf "$STAGING"' EXIT
 }
 
 VITE_RHWP_CLOUD_RUNTIME=1 npm --prefix "$STUDIO_ROOT" run build
-mkdir -p "$STAGING/studio" "$STAGING/rhwp-agent" "$STAGING/bin"
+mkdir -p "$STAGING/studio" "$STAGING/rhwp-agent" "$STAGING/rau-credits" "$STAGING/bin"
 cp -a "$STUDIO_ROOT/dist/." "$STAGING/studio/"
+cp "$REPOSITORY_ROOT/rhwp/rau-credits/catalog.mjs" "$STAGING/rau-credits/catalog.mjs"
 install -m 0755 "$NATIVE_RHWP" "$STAGING/bin/rhwp"
 tar -C "$AGENT_ROOT" \
   --exclude='./node_modules' \

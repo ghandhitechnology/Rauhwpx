@@ -20,6 +20,7 @@ const studioRoot = path.resolve(await firstExisting([
 const agentRoot = path.resolve(await firstExisting([
   process.env.RAUHWpx_AGENT_ROOT,
   '/app/rhwp-agent',
+  path.join(repositoryRoot, 'cloud', 'runtime-assets', 'rhwp-agent'),
   path.join(repositoryRoot, 'rhwp', 'rhwp-agent'),
 ]));
 const chromiumPath = await firstExisting([
