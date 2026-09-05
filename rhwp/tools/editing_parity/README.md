@@ -1,7 +1,5 @@
 # Editing parity corpus
 
-See [Formatting parity implementation](IMPLEMENTATION.md) for the current image-editing work, reproducible fixtures, verification evidence and remaining official-reference checks.
-
 This directory pins the first official editing-parity corpus. `corpus.json` contains 50 ordered `EditingParityCase` records spanning 695 oracle pages. Every record names one source document, one oracle PDF, their SHA-256 digests, the PDF page count, provenance, and feature tags.
 
 ## Validate
@@ -41,51 +39,6 @@ python3 rhwp/tools/editing_parity/batch_visual_compare.py \
   --min-page-pixel-match 80 \
   --min-page-ink-match 5
 ```
-
-## Independent edit comparison
-
-Behavioral checks for formatting selections across pictures run separately from official PDF comparisons:
-
-```sh
-cargo test --manifest-path rhwp/Cargo.toml --no-default-features --test editing_parity_image_formatting
-cargo test --manifest-path rhwp/Cargo.toml --no-default-features --test editing_parity_word_spacing
-```
-
-These check body/cell font changes, selected-range preservation, existing mixed styles, supplementary Unicode text, per-run undo/redo and three HWPX reopens. Visible-text equality catches characters lost by the live renderer even if the document still stores them. These are local editing invariants, not independently captured Hancom formatting references.
-
-The word-spacing checks compare visible glyph positions when trailing spaces span different font sizes. They also verify natural spacing on short final lines and explicit line breaks, with and without an image, in body paragraphs and cells through three reopens. Deliberate justification remains intact.
-
-The [independent Mac captures](../../tests/fixtures/editing_parity/mac-hancom-12.30.0-independent/README.md) cover body paragraph spacing, an empty table cell, mixed body text, mixed cell text and cell paragraph spacing, five of six diagnostic recipes. Hancom performed the same operations from the same pre-edit sources. This is separate from opening Rau-edited files in Hancom.
-
-Run these commands from the repository root, choosing unused output paths. The first mode checks Rau's edit against Hancom's independent PDF. It requires byte-identical shared source and captured Rau output.
-
-```sh
-cd rhwp
-cargo run --example editing_parity_fixtures --no-default-features -- \
-  output/editing-parity/independent-parallel-new --hcr-declared
-cd ..
-uv run --with pymupdf python rhwp/tools/editing_parity/compare_independent_edits.py \
-  rhwp/output/editing-parity/independent-parallel-new \
-  --reference-directory rhwp/tests/fixtures/editing_parity/mac-hancom-12.30.0-independent \
-  --output rhwp/output/editing-parity/independent-parallel-new/comparison.json
-```
-
-The second mode renders Hancom's independently saved HWPX in Rau and compares it with the same native PDF.
-
-```sh
-cd rhwp
-cargo run --example editing_parity_fixtures --no-default-features -- \
-  output/editing-parity/independent-import-new --hcr-declared \
-  --reference-inputs=tests/fixtures/editing_parity/mac-hancom-12.30.0-independent
-cd ..
-uv run --with pymupdf python rhwp/tools/editing_parity/compare_independent_edits.py \
-  rhwp/output/editing-parity/independent-import-new \
-  --reference-directory rhwp/tests/fixtures/editing_parity/mac-hancom-12.30.0-independent \
-  --mode hancom-import \
-  --output rhwp/output/editing-parity/independent-import-new/comparison.json
-```
-
-Both modes validate immutable capture hashes, covered recipe properties and three actual reopened layouts. They gate page count, non-whitespace line breaks, text line starts/baselines and image bounds at 0.5 pt. All three cell cases check every cell against native PDF border geometry and preserve source text, cell margins, alignment and unedited paragraph properties. The cell-spacing recipe allows only A1's requested 6/3 pt paragraph spacing with 160 percent line spacing. The three text-bearing image cases verify the image's exact Unicode insertion offset and all 55 visible glyph origins. Unsupported SVG text shapes are rejected instead of estimating their advances. Whitespace positions and glyph outlines remain outside these checks. Reports list uncaptured recipes and never claim full formatting parity. A changed input requires a new reviewed capture, not a digest update to the existing reference.
 
 ## Immutable oracle rules
 
