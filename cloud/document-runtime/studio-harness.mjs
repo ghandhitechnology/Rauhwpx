@@ -6,6 +6,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { childProcessEnvironment, normalizeDisplayGeometry } from './session-display.mjs';
+import { documentShell } from './document-shell.mjs';
 
 const MAX_EXPORT_BYTES = 64 * 1024 * 1024;
 const EXPORT_CHUNK_BYTES = 1024 * 1024;
@@ -120,6 +121,7 @@ export async function startStudioServer({ studioRoot, resources, bootstrap }) {
         let relative;
         try {
           relative = decodeURIComponent(url.pathname).replace(/^\/+/, '') || 'index.html';
+          if (relative === 'document.html') relative = 'index.html';
         } catch {
           response.writeHead(400);
           response.end();
@@ -144,10 +146,7 @@ export async function startStudioServer({ studioRoot, resources, bootstrap }) {
       }
       let bytes = await fs.readFile(filename);
       if (!resourceMatch && filename === path.join(resolvedRoot, 'index.html')) {
-        // Translate overlays cover editor controls in the remotely captured browser.
-        // Scope this to the cloud editor shell; document/reference bytes stay exact.
-        bytes = Buffer.from(bytes.toString('utf8').replace(/<head(?:\s[^>]*)?>/i,
-          (head) => `${head}<meta name="google" content="notranslate">`));
+        bytes = Buffer.from(documentShell(bytes.toString('utf8')));
       }
       response.writeHead(200, {
         'Content-Type': mimeType(filename),
@@ -778,7 +777,7 @@ export async function createStudioHarness({
       referenceToken: capabilities.reference,
       templateToken: capabilities.template,
     });
-    const appUrl = new URL('/', origin);
+    const appUrl = new URL('/document.html', origin);
     appUrl.searchParams.set('cloudRuntime', '1');
     appUrl.searchParams.set('bootstrap', bootstrap);
     await page.goto(appUrl.toString(), { waitUntil: 'domcontentloaded', timeout: 60_000 });
