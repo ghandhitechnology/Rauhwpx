@@ -74,6 +74,23 @@ CI는 변경 경로에 따라 작업을 선택합니다. 실제 명령과 조건
 
 파일의 기존 스타일과 제품 언어를 따르세요. Studio는 TypeScript를 사용하며 UI 프레임워크가 없습니다. 디자인 지침은 [DESIGN.md](DESIGN.md), 제품 방향은 [PRODUCT.md](PRODUCT.md)에 있습니다. 코딩 에이전트용 구조 안내는 [CLAUDE.md](CLAUDE.md)를 참고하세요.
 
+## 문서
+
+한 파일은 한 가지 일만 합니다. 숫자를 문서에 적지 말고 코드와 검사에 맡기세요.
+
+| 파일 | 역할 |
+| --- | --- |
+| [README.md](README.md) | 제품 소개, 설치, 릴리스 (영어) |
+| [README.ko.md](README.ko.md) | 제품 소개, 설치, 릴리스 (한국어) |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | 로컬 설정, 검사, PR |
+| [PRODUCT.md](PRODUCT.md) | 제품 기록 |
+| [DESIGN.md](DESIGN.md) | 스튜디오 시각 시스템 |
+| [CLAUDE.md](CLAUDE.md) | 에이전트용 명령과 아키텍처 |
+| [rhwp/README.md](rhwp/README.md) | 엔진 트리 |
+| [rhwp/rhwp-agent/README.md](rhwp/rhwp-agent/README.md) | 허브 실행과 환경 변수 |
+
+게시용 문서의 상대 링크는 `node scripts/check-publish-docs.mjs`가 검사합니다. 하드코딩된 MCP 도구 개수는 현재 개수와 같아도 실패합니다. 도구 목록의 원본은 `rhwp/rhwp-agent/tools.mjs`입니다.
+
 ## 라이선스
 
 [MIT](rhwp/LICENSE). 한글, 한컴, HWP, HWPX는 Hancom 상표입니다. 이 프로젝트는 Hancom과 무관합니다.

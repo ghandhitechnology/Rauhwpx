@@ -15,6 +15,7 @@
     "stop": "node rhwp/rhwp-agent/ctl.mjs stop",
     "restart": "node rhwp/rhwp-agent/ctl.mjs restart",
     "status": "node rhwp/rhwp-agent/ctl.mjs status",
+    "check:docs": "node scripts/check-publish-docs.mjs && node --test scripts/check-publish-docs.test.mjs",
     "dev:desktop": "wait-on http://127.0.0.1:7700 && cross-env RHWP_DEV_URL=http://127.0.0.1:7700 electron .",
     "build:wasm": "cd rhwp && wasm-pack build --target web",
     "build:native": "cd rhwp && cargo build --locked --release --bin rhwp",
