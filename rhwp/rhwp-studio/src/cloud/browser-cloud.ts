@@ -620,6 +620,8 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
   };
   const matchesScope = (session: Record<string, unknown>) => {
     const context = record(session.clientContext);
+    if (scope.threadId) return context?.threadId === scope.threadId
+      && (!scope.documentId || context?.documentId === scope.documentId);
     return scope.documentId
       ? context?.documentId === scope.documentId
       : Boolean(scope.threadId && context?.threadId === scope.threadId);
@@ -635,7 +637,8 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
       : candidates.find((session) => !['completed', 'failed', 'cancelled'].includes(session.kind)) ?? candidates[0];
     const scoped = Boolean(scope.threadId || scope.documentId);
     const scopedActive = remoteSessions
-      .filter((session) => !dismissed.has(String(session.id ?? '')) && matchesScope(session))
+      .filter((session) => !dismissed.has(String(session.id ?? '')) && (scope.documentId
+        ? record(session.clientContext)?.documentId === scope.documentId : matchesScope(session)))
       .map((session) => publicSession(session, ownDeviceId()))
       .find((session) => !['completed', 'failed', 'cancelled'].includes(session.kind));
     const unscopedActive = selected && !['completed', 'failed', 'cancelled'].includes(selected.kind)
@@ -879,10 +882,10 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
     (await request(pathname, options)).parsed as Record<string, unknown>
   );
 
-  const health = async (draft: CloudProfileDraft): Promise<BrowserHealth> => {
+  const health = async (draft: CloudProfileDraft, signal = AbortSignal.timeout(10_000)): Promise<BrowserHealth> => {
     const endpoint = exactEndpoint(draft);
     const url = new URL(`${endpoint}/v1/health`);
-    const response = await fetchImpl(url, { cache: 'no-store' });
+    const response = await fetchImpl(url, { cache: 'no-store', signal });
     const raw = await response.json() as Record<string, unknown>;
     if (!response.ok || raw.protocolVersion !== 1 || !validServerPublicKey(raw.serverPublicKey)) {
       throw new Error('지원하는 Rauhwpx Cloud 서버가 아닙니다.');
@@ -898,14 +901,14 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
     };
   };
 
-  const fetchRemoteSessions = async (watcher?: AbortController): Promise<void> => {
+  const fetchRemoteSessions = async (watcher?: AbortController, signal = watcher?.signal): Promise<void> => {
     if (!profile || !tokens?.refreshToken) return;
     const selectedProfile = profile;
     const generation = profileGeneration;
     const assertCurrent = () => watcher
       ? requireCurrentWatcher(watcher, selectedProfile, generation)
       : requireCurrentProfile(selectedProfile, generation);
-    const payload = await requestJson('/v1/sessions', { selectedProfile, signal: watcher?.signal });
+    const payload = await requestJson('/v1/sessions', { selectedProfile, signal });
     assertCurrent();
     const fetched = Array.isArray(payload.sessions)
       ? payload.sessions.filter((entry): entry is Record<string, unknown> => Boolean(record(entry)))
@@ -916,7 +919,7 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
       if (session.takeoverReady === true) {
         const takeover = await requestJson(`/v1/sessions/${encodeURIComponent(sessionId)}/takeover`, {
           selectedProfile,
-          signal: watcher?.signal,
+          signal,
         });
         assertCurrent();
         const boundary = record(takeover.boundary);
@@ -1353,13 +1356,13 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
     }
   };
 
-  const refresh = async (nextScope = scope) => {
+  const refresh = async (nextScope = scope, signal?: AbortSignal) => {
     const selectedProfile = profile;
     const generation = profileGeneration;
     scope = nextScope;
     if (selectedProfile && tokens?.refreshToken) {
       try {
-        await fetchRemoteSessions();
+        await fetchRemoteSessions(undefined, signal);
         const selected = scope.selectedSessionId
           ? remoteSessions.find((session) => session.id === scope.selectedSessionId)
           : remoteSessions.find((session) => matchesScope(session));
@@ -1367,7 +1370,7 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
         if (selectedId && !timelines.has(selectedId)) {
           let downloaded = null;
           try {
-            downloaded = await downloadTimeline(selectedId, selectedProfile);
+            downloaded = await downloadTimeline(selectedId, selectedProfile, signal);
           } catch (error) {
             if ((error as BrowserCloudError).code === 'PROFILE_CHANGED') throw error;
           }
@@ -1385,6 +1388,39 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
     }
     return snapshot();
   };
+
+  const reconnectLink = () => readProfile(async () => {
+    const selectedProfile = profile;
+    const generation = profileGeneration;
+    if (!selectedProfile) throw cloudError('Cloud 페어링이 필요합니다.', 'PAIRING_REQUIRED');
+    if (link.kind !== 'reconnecting' && link.kind !== 'recreating') {
+      link = { kind: 'reconnecting', error: null, attempt: link.attempt + 1, canRecreate: false };
+    }
+    connection = 'testing';
+    connectionMessage = null;
+    try {
+      emit({ type: 'cloud-link-reconnecting' }, generation);
+      await health(selectedProfile, AbortSignal.timeout(2_000));
+      requireCurrentProfile(selectedProfile, generation);
+      connection = 'ready';
+      connectionMessage = null;
+      link = { kind: 'ready', error: null, attempt: 0, canRecreate: false };
+      stopWatchers();
+      const refreshed = await refresh(scope, AbortSignal.timeout(4_000));
+      requireCurrentProfile(selectedProfile, generation);
+      if (refreshed.profile.kind === 'configured' && refreshed.profile.connection === 'error') throw new Error(connectionMessage ?? 'Cloud 연결을 확인하지 못했습니다.');
+      resumeActiveWatchers();
+      emit({ type: 'cloud-link-ready' }, generation);
+      return snapshot();
+    } catch (error) {
+      requireCurrentProfile(selectedProfile, generation);
+      connection = 'error';
+      connectionMessage = error instanceof Error ? error.message : String(error);
+      link = { kind: 'failed', error: connectionMessage, attempt: link.attempt, canRecreate: false };
+      emit({ type: 'cloud-link-failed' }, generation);
+      return snapshot();
+    }
+  });
 
   return {
     cloudGetState: (payload: CloudSessionScope) => readProfile(() => refresh(payload)),
@@ -1432,77 +1468,8 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
     cloudSpawnSandbox: () => readProfile(async () => { throw new Error('브라우저 PWA에서는 Raucloud를 만들 수 없습니다.'); }),
     cloudSandboxStatus: () => readProfile(() => refresh()),
     cloudTeardownSandbox: () => readProfile(async () => ({ snapshot: snapshot(), removed: false, unmanaged: true })),
-    cloudReconnectLink: () => readProfile(async () => {
-      const selectedProfile = profile;
-      const generation = profileGeneration;
-      if (!selectedProfile) throw cloudError('Cloud 페어링이 필요합니다.', 'PAIRING_REQUIRED');
-      if (link.kind !== 'reconnecting' && link.kind !== 'recreating') {
-        link = { kind: 'reconnecting', error: null, attempt: link.attempt + 1, canRecreate: false };
-      }
-      connection = 'testing';
-      connectionMessage = null;
-      try {
-        await health(selectedProfile);
-        requireCurrentProfile(selectedProfile, generation);
-        connection = 'ready';
-        connectionMessage = null;
-        link = { kind: 'ready', error: null, attempt: 0, canRecreate: false };
-        resumeActiveWatchers();
-        return snapshot();
-      } catch (error) {
-        requireCurrentProfile(selectedProfile, generation);
-        connection = 'error';
-        connectionMessage = error instanceof Error ? error.message : String(error);
-        link = { kind: 'failed', error: connectionMessage, attempt: link.attempt, canRecreate: false };
-        return snapshot();
-      }
-    }),
-    cloudRecreateLink: () => readProfile(async () => {
-      const selectedProfile = profile;
-      const generation = profileGeneration;
-      if (!selectedProfile || !tokens) return snapshot();
-      link = { kind: 'recreating', error: null, attempt: link.attempt + 1, canRecreate: false };
-      const live = remoteSessions.filter((session) => (
-        !['completed', 'failed', 'cancelled', 'purged'].includes(String(session.status ?? ''))
-      ));
-      for (const session of live) {
-        const sessionId = String(session.id ?? '');
-        if (!sessionId) continue;
-        try {
-          await requestJson(`/v1/sessions/${encodeURIComponent(sessionId)}/commands`, {
-            method: 'POST',
-            selectedProfile,
-            body: {
-              commandId: `force_quit_${sessionId}`,
-              type: 'session.end',
-              payload: { expectedVersion: Number(session.stateVersion) || 1 },
-            },
-          });
-        } catch (error) {
-          if ((error as BrowserCloudError).code === 'PROFILE_CHANGED') throw error;
-        }
-        requireCurrentProfile(selectedProfile, generation);
-      }
-      await fetchRemoteSessions().catch((error) => {
-        if ((error as BrowserCloudError).code === 'PROFILE_CHANGED') throw error;
-      });
-      requireCurrentProfile(selectedProfile, generation);
-      try {
-        await health(selectedProfile);
-        requireCurrentProfile(selectedProfile, generation);
-        connection = 'ready';
-        connectionMessage = null;
-        link = { kind: 'ready', error: null, attempt: 0, canRecreate: false };
-        resumeActiveWatchers();
-        return snapshot();
-      } catch (error) {
-        requireCurrentProfile(selectedProfile, generation);
-        connection = 'error';
-        connectionMessage = error instanceof Error ? error.message : String(error);
-        link = { kind: 'failed', error: connectionMessage, attempt: link.attempt, canRecreate: false };
-        return snapshot();
-      }
-    }),
+    cloudReconnectLink: reconnectLink,
+    cloudRecreateLink: reconnectLink,
     cloudForceQuitAccount: () => readProfile(async () => {
       const selectedProfile = profile;
       const generation = profileGeneration;

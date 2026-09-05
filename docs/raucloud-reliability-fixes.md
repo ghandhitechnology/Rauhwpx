@@ -53,12 +53,13 @@ These source-level hosted checks preceded the immutable `edge.15` image verifica
 
 ## Follow-up audit
 
-The viewer fitting and in-conversation provider settings changes were integrated before the next audit. Further regressions exposed and fixed these boundary cases:
+The viewer fitting, in-conversation provider settings, and disconnect recovery changes were integrated before the next audit. Further regressions exposed and fixed these boundary cases:
 
 - Pointer movement now stays ordered with keys and text. Lost pointer capture releases the remote drag once; stale connection responses cannot update a newer viewer. Chromium IME commits are delivered once and remain bound to the conversation where composition began.
 - The worker checks its event cursor and active tools atomically before interruption. Late requests from the interrupted turn are rejected. Pause checkpoints an unfinished turn without consuming it, so Resume continues the original goal and queued messages. Early planning interruption and End at the turn limit retain a valid result path.
 - Signed queue receipts preserve a send after a lost HTTP response in both desktop and browser clients. Publication uses the guarded native file writer to preserve saves or deletions made at the final replacement boundary.
 - Confirmed provider settings persist with the existing conversation, including when they match the optimistic UI selection. Failed changes restore the selection and keep the unsent draft.
+- Reconnection retains the conversation identity and offers recovery controls after an outage. Remote input pauses while disconnected, and restarting or stopping Cloud cancels pending connection work.
 - Orphan cleanup rechecks durable allocation ownership immediately before deletion, protecting allocations created during the inventory scan.
 
 The matching worker image is `1.1.0-edge.16`. The PR verification record identifies its source, immutable digest, hosted control checks, and final repository CI results. The browser interaction proof is included in CI and covers screen fitting, pointer targeting, dragging, typing, and Chromium composition events.

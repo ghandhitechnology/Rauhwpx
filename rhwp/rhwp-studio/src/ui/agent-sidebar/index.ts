@@ -1886,6 +1886,19 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       return started?.authUrl ? { authUrl: started.authUrl } : null;
     },
     onRequestTransfer: () => openCloudWorkspace(),
+    onRestartConversation: async (binding) => {
+      if (currentThread.id !== binding.threadId || currentDocumentId !== binding.documentId) {
+        throw new Error('서버가 준비되었습니다. 작업을 시작한 대화에서 이어서 보내 주세요.');
+      }
+      workspace.unlockExecution();
+      workspace.select('cloud');
+      await startCloudFromFirstMessage({
+        startId: createCloudStartId(),
+        messageId: createCloudStartId(),
+        text: '이전 대화와 저장된 문서를 바탕으로 중단된 작업을 이어서 진행해 주세요.',
+      });
+      await cloudTransferCloseWaiter?.promise;
+    },
     onCancelPendingTransfer: () => cancelPendingCloudTransfer(),
     getScope: () => editorCloudScope.current(),
     onWorkspaceSwitchVisibilityChange: (visible) => {
@@ -2409,7 +2422,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         : '첨부한 파일을 확인해 주세요.';
     }
     if (cloudWorkflow) chatWorkflow = cloudWorkflow;
-    const startId = existing?.startId ?? currentThread.cloudStartId ?? createCloudStartId();
+    // Only a retry of the same submission reuses its id. A new worker must
+    // receive a new transfer while retaining this thread's full timeline.
+    const startId = existing?.startId ?? createCloudStartId();
     const existingUser = [...currentThread.messages].reverse().find((message) => message.role === 'user');
     const messageId = existing?.messageId ?? createCloudStartId();
     const submittedDraft = input.value;
@@ -5943,10 +5958,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     currentThread.documentId = currentDocumentId ?? currentThread.documentId;
     currentThread.docKey = currentDocKey ?? currentThread.docKey;
     persistCurrentThread();
-    applyThreadExecution(currentThread);
     localThreadId = currentThread.id;
     localThreadSnapshot = structuredClone(currentThread);
     editorCloudScope.bind({ threadId: currentThread.id, documentId: currentDocumentId });
+    applyThreadExecution(currentThread);
     const selectedThreadId = currentThread.id;
     const scopeRefresh = cloudUi.refreshLeaseScope();
     exitReadOnlyMode();
@@ -6109,7 +6124,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     syncProviderMenu();
     // 다른 문서의 채팅 열람 중에는 연결/작업 상태와 무관하게 잠긴다.
     const execution = composerExecution(workspace.composerTarget());
-    composerTargetMessage.hidden = execution.kind !== 'blocked';
+    const connectionNoticeVisible = workspace.composerTarget().kind === 'cloud-blocked'
+      && !cloudUi.recoveryStrip.hidden;
+    composerTargetMessage.hidden = execution.kind !== 'blocked' || connectionNoticeVisible;
     composerTargetMessage.textContent = execution.kind === 'blocked' ? execution.message : '';
     if (mergeResolverLocked) {
       input.disabled = true;
@@ -6125,7 +6142,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       input.disabled = true;
       send.disabled = true;
       composerSkillClear.disabled = true;
-      input.placeholder = execution.message;
+      input.placeholder = connectionNoticeVisible ? '연결 후 메시지를 보낼 수 있습니다' : execution.message;
     } else if (execution.kind === 'cloud-start') {
       input.disabled = attachmentsSending;
       send.disabled = activeComposerSkill !== null || attachmentsSending || referenceLibrary.hasBlockingDrafts();

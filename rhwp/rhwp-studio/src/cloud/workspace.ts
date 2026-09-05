@@ -2,6 +2,7 @@ import type { CloudController } from './desktop-cloud.ts';
 import { inferCloudLink } from './link.ts';
 import type {
   CloudDisplayFrame,
+  CloudLinkState,
   CloudDisplayUnavailableReason,
   CloudSessionScope,
   CloudSessionState,
@@ -83,7 +84,7 @@ export type CloudDisplayState =
 
 export interface CloudWorkspace {
   readonly root: HTMLElement;
-  setContext(context: { visible: boolean; session: CloudSessionState }): void;
+  setContext(context: { visible: boolean; session: CloudSessionState; link?: CloudLinkState; profileEpoch?: number }): void;
   getState(): CloudDisplayState;
   subscribe(listener: (state: CloudDisplayState) => void): () => void;
   dispose(): void;
@@ -204,6 +205,13 @@ export function deriveComposerTarget(
           message: 'Cloud 작업이 문서를 사용 중입니다. Cloud로 전환하거나 이 기기에서 이어받으세요.',
         };
   }
+  if (inferCloudLink(snapshot).kind !== 'ready') {
+    return {
+      kind: 'cloud-blocked',
+      reason: 'not-accepting-messages',
+      message: 'Cloud 연결을 복구하면 이 대화에서 계속할 수 있습니다.',
+    };
+  }
   const live = liveCloudHandle(snapshot.session);
   if (!cloudBinding) {
     if (snapshot.session.kind === 'transferring' || snapshot.session.kind === 'queued'
@@ -306,7 +314,10 @@ export function createWorkspaceController({
     const target = deriveComposerTarget(selectedMode, snapshot, mountedCloud, locks.at(-1)?.reason ?? null);
     setRootVisible(localRoot, view === 'local');
     setRootVisible(cloudWorkspace.root, view === 'cloud');
-    cloudWorkspace.setContext({ visible: view === 'cloud', session: snapshot.session });
+    cloudWorkspace.setContext({
+      visible: view === 'cloud', session: snapshot.session,
+      link: inferCloudLink(snapshot), profileEpoch: snapshot.profileEpoch,
+    });
     const notification = JSON.stringify([selectedMode, view, target, executionLocked]);
     if (notification !== lastNotification) {
       lastNotification = notification;

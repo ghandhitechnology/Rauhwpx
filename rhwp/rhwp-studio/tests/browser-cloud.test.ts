@@ -1433,6 +1433,44 @@ test('browser same-server re-pair increments the profile epoch', async () => {
   assert.equal(repaired.profileEpoch, 1);
 });
 
+test('browser reconnect deadline cancels takeover receipt hydration', async (t) => {
+  const identity = serverIdentity();
+  const endpoint = 'https://reconnect.example.test/rauhwpx-cloud';
+  const storage = new MemoryStorage();
+  storeBrowserCredentials(storage, storedBrowserProfile(endpoint, identity.key), {
+    accessToken: 'reconnect-access', refreshToken: 'reconnect-refresh',
+    accessExpiresAt: Date.now() + 60_000,
+  });
+  const deadline = new AbortController();
+  const originalTimeout = AbortSignal.timeout.bind(AbortSignal);
+  t.mock.method(AbortSignal, 'timeout', (milliseconds: number) => milliseconds === 4_000
+    ? deadline.signal : originalTimeout(milliseconds));
+  let hydrationAborted = false;
+  const api = createBrowserCloudApi({ storage, fetchImpl: async (input, init) => {
+    const request = new Request(input, init);
+    const url = new URL(request.url);
+    if (url.pathname.endsWith('/v1/health')) {
+      return new Response(JSON.stringify({ ok: true, protocolVersion: 1, serverPublicKey: identity.key }),
+        { headers: { 'content-type': 'application/json' } });
+    }
+    if (url.pathname.endsWith('/v1/sessions')) {
+      return signedJson(request, identity, { sessions: [{
+        id: 'reconnect-takeover', status: 'cancelled', takeoverReady: true,
+      }] });
+    }
+    if (url.pathname.endsWith('/reconnect-takeover/takeover')) {
+      deadline.abort(new DOMException('Reconnect deadline expired', 'TimeoutError'));
+      hydrationAborted = request.signal.aborted;
+      throw deadline.signal.reason;
+    }
+    throw new Error(`Unexpected request ${request.method} ${url}`);
+  } });
+  assert.ok(api);
+  const snapshot = await api.cloudReconnectLink();
+  assert.equal(hydrationAborted, true);
+  assert.equal(snapshot.link?.kind, 'failed');
+});
+
 test('browser cancelled takeover-ready sessions keep their lease until local completion', async () => {
   const identity = serverIdentity();
   const endpoint = 'https://takeover.example.test/rauhwpx-cloud';

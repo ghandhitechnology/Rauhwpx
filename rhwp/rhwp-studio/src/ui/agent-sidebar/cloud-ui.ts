@@ -136,6 +136,7 @@ export interface CloudAgentUiDeps {
   controller: CloudController;
   loginAccount?: () => Promise<{ authUrl: string } | null>;
   onRequestTransfer(): void;
+  onRestartConversation?(binding: CloudWorkspaceBinding): Promise<void>;
   onCancelPendingTransfer(): void;
   getScope(): CloudSessionScope;
   onWorkspaceSwitchVisibilityChange(visible: boolean): void;
@@ -201,6 +202,9 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   let panelOpen = false;
   let localTurnPending = false;
   let busy = false;
+  let recoveryBusy: 'reconnecting' | 'recreating' | 'stopping' | null = null;
+  let recoveryRenderKey = '';
+  let panelRenderKey = '';
   let workspaceLocked = false;
   let downloadedResult: CloudDownloadResult | null = null;
   let pendingTakeover: {
@@ -214,6 +218,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   } | null = null;
   let appliedTimelineKey = '';
   let selectedSessionId: string | null = null;
+  let selectionScope = deps.getScope();
   let mountedBinding: CloudWorkspaceBinding | null = null;
   let pendingSessionSelections = 0;
   const selectionFence = createSessionSelectionFence();
@@ -326,6 +331,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     busy = next;
     statusPanel.setAttribute('aria-busy', String(next));
     sessionSelect.disabled = next || workspaceLocked || authorityTransitionActive();
+    render();
   }
 
   function authorityTransitionActive(): boolean {
@@ -342,14 +348,25 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   }
 
   function selectedScope(): CloudSessionScope {
+    const scope = deps.getScope();
+    if (selectionScope.threadId !== scope.threadId || selectionScope.documentId !== scope.documentId) {
+      selectedSessionId = null;
+      selectionScope = scope;
+    }
     return {
-      ...deps.getScope(),
+      ...scope,
       ...(selectedSessionId ? { selectedSessionId } : {}),
     };
   }
 
+  function bindingMatchesScope(binding: CloudWorkspaceBinding | null): boolean {
+    const scope = deps.getScope();
+    return Boolean(binding && binding.threadId === scope.threadId
+      && binding.documentId === scope.documentId);
+  }
+
   async function operation(run: () => Promise<unknown>): Promise<void> {
-    if (busy) return;
+    if (busy || recoveryBusy) return;
     setBusy(true);
     try {
       await run();
@@ -394,6 +411,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   }
 
   async function selectAndBind(sessionId: string | null, rollbackOnFailure: boolean): Promise<boolean> {
+    selectedScope();
     const previous = {
       selectedSessionId,
       snapshot,
@@ -413,7 +431,9 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
         select: () => {
           selectedSessionId = sessionId;
         },
-        refresh: () => deps.controller.refresh(selectedScope()),
+        refresh: () => deps.controller.refresh({
+          ...deps.getScope(), ...(sessionId ? { selectedSessionId: sessionId } : {}),
+        }),
         mount: (next) => {
           const selected = next.session.kind === 'idle' ? null : next.session.sessionId;
           if (sessionId && selected !== sessionId) {
@@ -470,6 +490,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   function action(label: string, run: (event: MouseEvent) => void, tone = ''): HTMLButtonElement {
     const item = el('button', `ag-cloud-action ${tone}`.trim(), label) as HTMLButtonElement;
     item.type = 'button';
+    item.disabled = busy || recoveryBusy !== null;
     item.addEventListener('click', (event) => run(event));
     return item;
   }
@@ -572,7 +593,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   }
 
   function forceQuitAccount(): void {
-    void operation(async () => {
+    void recoveryOperation('stopping', async () => {
       snapshot = await deps.controller.forceQuitAccount();
       selectedSessionId = snapshot.session.kind === 'idle' ? null : snapshot.session.sessionId;
       if (snapshot.session.kind === 'idle') clearCloudBinding();
@@ -580,22 +601,52 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   }
 
   function reconnectLink(): void {
-    void operation(async () => {
+    void recoveryOperation('reconnecting', async () => {
       snapshot = await deps.controller.reconnectLink();
+      if (inferCloudLink(snapshot).kind === 'ready' && deps.isCloudMode()
+        && (!bindingMatchesScope(snapshotBinding()) || !mountSnapshotTimeline())) {
+        snapshot = await deps.controller.refresh(selectedScope());
+        mountSnapshotTimeline();
+      }
     });
   }
 
   function recreateLink(): void {
-    void operation(async () => {
+    const binding = mountedBinding ?? (snapshot.session.kind === 'idle' ? null : {
+      sessionId: snapshot.session.sessionId,
+      threadId: snapshot.session.threadId,
+      documentId: snapshot.session.documentId,
+    });
+    void recoveryOperation('recreating', async () => {
       snapshot = await deps.controller.recreateLink();
       selectedSessionId = snapshot.session.kind === 'idle' ? null : snapshot.session.sessionId;
-      if (snapshot.session.kind === 'idle') clearCloudBinding();
+      if (inferCloudLink(snapshot).kind === 'ready' && snapshot.session.kind === 'idle' && binding) {
+        await deps.onRestartConversation?.(binding);
+      }
     });
+  }
+
+  async function recoveryOperation(kind: NonNullable<typeof recoveryBusy>, run: () => Promise<void>): Promise<void> {
+    if (authorityTransitionActive() || recoveryBusy === 'stopping' || recoveryBusy === 'recreating') return;
+    if (recoveryBusy === kind) return;
+    // Stop/rebuild can interrupt a reconnect; they must not share its UI lock.
+    recoveryBusy = kind;
+    render();
+    try {
+      await run();
+    } catch (error) {
+      if (recoveryBusy === kind) deps.onError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (recoveryBusy === kind) recoveryBusy = null;
+      render();
+    }
   }
 
   function appendForceQuit(): void {
     if (!shouldOfferAccountForceQuit(snapshot)) return;
-    panelActions.append(action('서버 강제 종료', forceQuitAccount, 'ag-danger'));
+    const button = action(recoveryBusy === 'stopping' ? '종료 중…' : '서버 강제 종료', forceQuitAccount, 'ag-danger');
+    button.disabled = authorityTransitionActive() || recoveryBusy === 'stopping' || recoveryBusy === 'recreating';
+    panelActions.append(button);
   }
 
   async function download(): Promise<void> {
@@ -661,9 +712,17 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   }
 
   function renderPanel(): void {
+    const link = inferCloudLink(snapshot);
+    // Keep focused/pressed buttons mounted across status and timeline updates.
+    const renderKey = JSON.stringify([link.kind === 'ready' ? snapshot.session : null,
+      link.kind === 'ready' ? snapshot.sessions : null, snapshot.profile, snapshot.server,
+      snapshot.account, link.kind, busy, recoveryBusy, Boolean(pendingTakeover), Boolean(pendingResultReplace),
+      Boolean(downloadedResult), localTurnPending]);
+    if (renderKey === panelRenderKey) return;
+    panelRenderKey = renderKey;
     const activeSessionId = snapshot.session.kind === 'idle' ? null : snapshot.session.sessionId;
     if (!selectedSessionId && activeSessionId) selectedSessionId = activeSessionId;
-    sessionPicker.hidden = snapshot.sessions.length <= 1;
+    sessionPicker.hidden = snapshot.sessions.length <= 1 || cloudLinkNeedsAttention(link);
     sessionSelect.replaceChildren(...snapshot.sessions.map((session) => {
       const option = document.createElement('option');
       option.value = session.sessionId;
@@ -677,6 +736,12 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     progress.hidden = true;
     panelConflict.hidden = true;
     const session = snapshot.session;
+    if (cloudLinkNeedsAttention(link)) {
+      panelStatus.textContent = '';
+      panelDetail.textContent = '';
+      appendForceQuit();
+      return;
+    }
     if (pendingResultReplace) {
       panelStatus.textContent = 'Cloud 결과 반영을 다시 시도할 수 있습니다.';
       panelDetail.textContent = pendingResultReplace.result.fileName;
@@ -885,6 +950,9 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
 
   function renderRecovery(): void {
     const link = inferCloudLink(snapshot);
+    const renderKey = JSON.stringify([link.kind, link.canRecreate, busy, recoveryBusy, authorityTransitionActive()]);
+    if (renderKey === recoveryRenderKey) return;
+    recoveryRenderKey = renderKey;
     const needsAttention = cloudLinkNeedsAttention(link);
     statusPanel.dataset.link = link.kind;
     recovery.hidden = !needsAttention;
@@ -899,24 +967,39 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       return;
     }
     if (link.kind === 'reconnecting') {
-      recoveryTitle.textContent = '연결을 다시 맺는 중입니다.';
-      recoveryDetail.textContent = link.error ?? '서버에 다시 닿는 중입니다.';
+      recoveryTitle.textContent = 'Cloud에 다시 연결하는 중';
+      recoveryDetail.textContent = '연결되면 이 대화에서 계속할 수 있습니다.';
     } else if (link.kind === 'recreating') {
-      recoveryTitle.textContent = '서버를 다시 만들고 있습니다.';
-      recoveryDetail.textContent = '이전 작업을 끊고 새 서버를 켭니다.';
+      recoveryTitle.textContent = '새 Cloud 서버를 준비하는 중';
+      recoveryDetail.textContent = '현재 대화와 저장된 문서를 새 서버로 옮깁니다.';
     } else {
-      recoveryTitle.textContent = '연결이 끊겼습니다.';
-      recoveryDetail.textContent = link.error ?? 'Cloud 서버에 닿지 않습니다.';
+      recoveryTitle.textContent = 'Cloud 연결이 끊겼습니다';
+      recoveryDetail.textContent = link.canRecreate
+        ? '대화 기록은 남아 있습니다. 다시 연결하거나 새 서버에서 이어가세요.'
+        : '대화 기록은 남아 있습니다. 서버가 켜져 있는지 확인한 뒤 다시 연결하세요.';
       recoveryActions.append(action('다시 연결', reconnectLink, 'ag-primary'));
       if (link.canRecreate) {
         recoveryActions.append(action('서버 다시 만들기', recreateLink));
       }
     }
     const stripTitle = el('span', 'ag-cloud-recovery-strip-title', recoveryTitle.textContent);
-    recoveryStrip.append(el('span', 'ag-cloud-recovery-strip-pulse'), stripTitle);
+    const stripIndicator = el('span', 'ag-cloud-recovery-strip-pulse');
+    stripIndicator.setAttribute('aria-hidden', 'true');
+    const stripActions = el('div', 'ag-cloud-recovery-strip-actions');
+    recoveryStrip.append(stripIndicator, stripTitle, stripActions);
     if (link.kind === 'failed') {
-      recoveryStrip.append(action('다시 연결', reconnectLink, 'ag-primary'));
-      if (link.canRecreate) recoveryStrip.append(action('서버 다시 만들기', recreateLink));
+      stripActions.append(action('다시 연결', reconnectLink, 'ag-primary'));
+      if (link.canRecreate) stripActions.append(action('서버 다시 만들기', recreateLink));
+    }
+    if (link.kind === 'reconnecting' && link.canRecreate) {
+      recoveryActions.append(action('서버 다시 만들기', recreateLink));
+      stripActions.append(action('서버 다시 만들기', recreateLink));
+    }
+    for (const container of [recoveryActions, recoveryStrip]) {
+      for (const button of container.querySelectorAll<HTMLButtonElement>('button')) {
+        button.disabled = authorityTransitionActive() || recoveryBusy === 'stopping' || recoveryBusy === 'recreating'
+          || button.textContent === '다시 연결' && recoveryBusy === 'reconnecting';
+      }
     }
   }
 
@@ -997,7 +1080,10 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       const timelineKey = binding
         ? `${binding.sessionId}:${snapshot.timeline.exportedAt}:${snapshot.timeline.thread.updatedAt}`
         : '';
-      if (binding && snapshot.timeline.thread.id === binding.threadId
+      const scope = deps.getScope();
+      const explicitlyMounted = mountedBinding?.sessionId === binding?.sessionId
+        && selectionScope.threadId === scope.threadId && selectionScope.documentId === scope.documentId;
+      if (binding && (bindingMatchesScope(binding) || explicitlyMounted) && snapshot.timeline.thread.id === binding.threadId
         && timelineKey !== appliedTimelineKey
         && deps.onTimeline(binding, snapshot.timeline)) {
         mountedBinding = binding;
@@ -1005,7 +1091,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
         deps.onCloudBinding(binding);
       }
     }
-    if (snapshot.session.kind === 'running' && snapshot.session.turn > 0
+    if (inferCloudLink(snapshot).kind === 'ready' && snapshot.session.kind === 'running' && snapshot.session.turn > 0
       && !checkpointMirror.hasPending(snapshot.session.sessionId)
       && !checkpointMirror.hasRevision(snapshot.session.sessionId)) {
       mirrorCheckpoint(snapshot.session.sessionId, 'reconnect');
@@ -1044,9 +1130,10 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       onboarding.open('manage', trigger);
       return;
     }
-    void deps.controller.refresh(selectedScope()).then(() => {
-      if (panelOpen) closePanel(true); else openPanel(trigger);
-    }).catch((error) => deps.onError(error instanceof Error ? error.message : String(error)));
+    if (panelOpen) closePanel(true); else openPanel(trigger);
+    void deps.controller.refresh(selectedScope()).catch((error) => {
+      if (inferCloudLink(snapshot).kind === 'ready') deps.onError(error instanceof Error ? error.message : String(error));
+    });
   }
 
   sidebarButton.addEventListener('click', activate);
@@ -1165,6 +1252,10 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       sessionSelect.disabled = busy || locked || authorityTransitionActive();
     },
     async refreshLeaseScope() {
+      const scope = deps.getScope();
+      const changed = selectionScope.threadId !== scope.threadId || selectionScope.documentId !== scope.documentId;
+      selectedScope();
+      if (changed) clearCloudBinding();
       const lock = deps.onWorkspaceLock('session-selection');
       const isCurrent = selectionFence.begin();
       try {
@@ -1181,8 +1272,9 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       }
     },
     bindSelectedTimeline() {
-      const activeSessionId = snapshot.session.kind === 'idle' ? null : snapshot.session.sessionId;
-      return selectAndBind(selectedSessionId ?? activeSessionId, false);
+      const selected = selectedScope().selectedSessionId;
+      const active = snapshot.sessions.find((session) => bindingMatchesScope(session));
+      return selectAndBind(selected ?? active?.sessionId ?? null, false);
     },
     matchesTarget,
     async configure(selection, target) {

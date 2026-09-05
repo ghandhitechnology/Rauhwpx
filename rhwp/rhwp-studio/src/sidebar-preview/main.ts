@@ -1,3 +1,4 @@
+import './browser-compat.ts';
 import '../style.css';
 import './preview.css';
 import { initAgentSidebar } from '../ui/agent-sidebar/index.ts';
@@ -8,6 +9,9 @@ import { createMockVersions } from './mock-versions.ts';
 import { showToast } from '../ui/toast.ts';
 import { userSettings } from '../core/user-settings.ts';
 import { completeInitialSetup } from '../ui/initial-setup/state.ts';
+import { createMockCloud } from './mock-cloud.ts';
+import { createCloudWorkspace } from '../ui/cloud-workspace.ts';
+import { createWorkspaceController } from '../cloud/workspace.ts';
 
 const params = new URLSearchParams(location.search);
 const status = document.querySelector<HTMLOutputElement>('#preview-status')!;
@@ -37,13 +41,25 @@ if (!localStorage.getItem('sidebar-preview-seeded')) {
   localStorage.setItem('sidebar-preview-seeded', '1');
 }
 applyTheme();
+const cloud = params.get('cloud') === '1' ? createMockCloud() : null;
+const workspace = cloud ? createWorkspaceController({
+  localRoot: document.getElementById('editor-area')!,
+  cloudWorkspace: createCloudWorkspace({ display: cloud.controller }), cloud: cloud.controller,
+}) : null;
+document.body.classList.toggle('preview-cloud', Boolean(cloud));
 const sidebar = initAgentSidebar({
   bridge: mock.bridge,
   eventBus,
+  ...(cloud && workspace ? {
+    cloudController: cloud.controller, workspace,
+    prepareCloudTransfer: async () => ({ fileName: documentName!, bytes: new Uint8Array([1, 2, 3]),
+      byteLength: 3, sha256: 'a'.repeat(64) }),
+  } : {}),
   getDocumentContext: () => ({
     documentId,
     documentName,
     selectionLabel: null,
+    sourceFormat: 'hwpx', isNewDocument: false,
   }),
   moveToLibraryDocument: (target) => {
     documentId = target.documentId;
@@ -64,6 +80,10 @@ const sidebar = initAgentSidebar({
 });
 sidebar.root.querySelector<HTMLButtonElement>('.ag-threads-new')!.click();
 mock.boot();
+const cloudControls = document.querySelector<HTMLElement>('#cloud-preview-controls')!;
+cloudControls.hidden = !cloud;
+document.querySelector('#cloud-disconnect')!.addEventListener('click', () => cloud?.setLink('failed'));
+document.querySelector('#cloud-restore')!.addEventListener('click', () => cloud?.setLink('ready'));
 
 const scenarioSelect = document.querySelector<HTMLSelectElement>('#scenario')!;
 for (const name of scenarios)
@@ -170,10 +190,12 @@ if (params.get('page') === 'settings')
 if (params.get('page') === 'versions') sidebar.openVersions();
 
 // Typed hooks for browser checks and custom scenario scripts.
-const preview = { ...mock, sidebar, versions, eventBus };
+const preview = { ...mock, sidebar, versions, eventBus, cloud, workspace };
 Object.assign(window, { sidebarPreview: preview });
 window.addEventListener('pagehide', () => {
   sidebar.dispose();
+  workspace?.dispose();
+  cloud?.controller.dispose();
   mock.bridge.dispose();
   versions.dispose?.();
 });
