@@ -984,6 +984,7 @@ test('browser selection changes the viewed session without releasing the scoped 
   assert.deepEqual(snapshot.lease, {
     owner: 'cloud',
     sessionId: 'session-a',
+    threadId: 'thread-a',
     acquiredAt: (snapshot.lease as { acquiredAt: string }).acquiredAt,
   });
 
@@ -995,6 +996,9 @@ test('browser selection changes the viewed session without releasing the scoped 
   });
   assert.equal((snapshot.session as { kind: string }).kind, 'failed');
   assert.equal((snapshot.lease as { sessionId: string }).sessionId, 'session-a');
+  snapshot = await api.cloudGetState({ threadId: 'parallel-local', documentId: 'document-a' });
+  assert.equal((snapshot.session as { kind: string }).kind, 'idle');
+  assert.equal((snapshot.lease as { threadId: string }).threadId, 'thread-a');
 });
 
 test('browser stable document scope never falls back to a matching legacy thread', async () => {

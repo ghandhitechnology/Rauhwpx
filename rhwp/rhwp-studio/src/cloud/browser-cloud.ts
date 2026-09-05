@@ -666,6 +666,7 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
         ? {
           owner: 'cloud',
           sessionId: leaseSession.sessionId,
+          threadId: leaseSession.threadId,
           acquiredAt: 'startedAt' in leaseSession ? String(leaseSession.startedAt) : new Date().toISOString(),
         }
         : { owner: 'local' },

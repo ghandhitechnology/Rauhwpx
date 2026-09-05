@@ -527,6 +527,7 @@ export function parseCloudSnapshot(value: unknown): CloudSnapshot | null {
     ? {
         owner: 'cloud' as const,
         sessionId: string(leaseRaw.sessionId),
+        ...(string(leaseRaw.threadId).trim() ? { threadId: string(leaseRaw.threadId) } : {}),
         acquiredAt: strictIso(leaseRaw.acquiredAt)!,
       }
     : leaseRaw.owner === 'local'

@@ -1,5 +1,6 @@
 import type { CloudController } from './desktop-cloud.ts';
 import { inferCloudLink } from './link.ts';
+import { cloudLeaseBlocksLocal, type CloudEditorScope } from './editor-scope.ts';
 import type {
   CloudDisplayFrame,
   CloudLinkState,
@@ -99,6 +100,7 @@ export interface WorkspaceController {
   workspaceView(): WorkspaceView;
   setWorkspaceView(view: WorkspaceView): void;
   bindCloud(binding: CloudWorkspaceBinding | null): void;
+  bindLocal(scope: CloudEditorScope): void;
   cloudBinding(): CloudWorkspaceBinding | null;
   lock(reason: WorkspaceExecutionLock): { release(): void };
   composerTarget(): ComposerTarget;
@@ -175,6 +177,7 @@ export function deriveComposerTarget(
   snapshot: ReturnType<CloudController['getSnapshot']>,
   cloudBinding: CloudWorkspaceBinding | null = null,
   lock: WorkspaceExecutionLock | null = null,
+  localScope: CloudEditorScope | null = null,
 ): ComposerTarget {
   if (lock) {
     return {
@@ -189,7 +192,7 @@ export function deriveComposerTarget(
         : '문서 권한을 전환하는 중입니다.',
     };
   }
-  if (inferCloudLink(snapshot).kind === 'recreating') {
+  if (mode === 'cloud' && inferCloudLink(snapshot).kind === 'recreating') {
     return {
       kind: 'workspace-blocked',
       reason: 'cloud-transfer',
@@ -197,7 +200,7 @@ export function deriveComposerTarget(
     };
   }
   if (mode === 'local') {
-    return snapshot.lease.owner === 'local'
+    return !cloudLeaseBlocksLocal(snapshot, localScope)
       ? { kind: 'local-ready' }
       : {
           kind: 'local-blocked',
@@ -303,6 +306,7 @@ export function createWorkspaceController({
   let view: WorkspaceView = 'local';
   let executionLocked = false;
   let mountedCloud: CloudWorkspaceBinding | null = null;
+  let localScope: CloudEditorScope | null = null;
   let localScrollPosition: { left: number; top: number } | null = null;
   let disposed = false;
   const locks: Array<{ token: symbol; reason: WorkspaceExecutionLock }> = [];
@@ -311,7 +315,7 @@ export function createWorkspaceController({
 
   const apply = (): ComposerTarget => {
     const snapshot = cloud.getSnapshot();
-    const target = deriveComposerTarget(selectedMode, snapshot, mountedCloud, locks.at(-1)?.reason ?? null);
+    const target = deriveComposerTarget(selectedMode, snapshot, mountedCloud, locks.at(-1)?.reason ?? null, localScope);
     setRootVisible(localRoot, view === 'local');
     setRootVisible(cloudWorkspace.root, view === 'cloud');
     cloudWorkspace.setContext({
@@ -376,6 +380,11 @@ export function createWorkspaceController({
       apply();
     },
     cloudBinding: () => mountedCloud,
+    bindLocal(scope) {
+      if (disposed) return;
+      localScope = { ...scope };
+      apply();
+    },
     lock(reason) {
       if (disposed) return { release() {} };
       const entry = { token: Symbol(reason), reason };
@@ -397,6 +406,7 @@ export function createWorkspaceController({
       cloud.getSnapshot(),
       mountedCloud,
       locks.at(-1)?.reason ?? null,
+      localScope,
     ),
     subscribe(listener) {
       if (disposed) return () => {};
@@ -406,6 +416,7 @@ export function createWorkspaceController({
         cloud.getSnapshot(),
         mountedCloud,
         locks.at(-1)?.reason ?? null,
+        localScope,
       ));
       return () => listeners.delete(listener);
     },

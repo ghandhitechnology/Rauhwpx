@@ -650,6 +650,7 @@ test('desktop selected session never changes the lease for the scoped document',
   assert.deepEqual(snapshot.lease, {
     owner: 'cloud',
     sessionId: 'cloud-a',
+    threadId: 'thread-a',
     acquiredAt: base.createdAt,
   });
 

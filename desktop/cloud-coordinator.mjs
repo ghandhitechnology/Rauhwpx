@@ -832,19 +832,21 @@ export class CloudCoordinator extends EventEmitter {
         ...(this.#raucloudStatus ? { raucloud: this.#raucloudStatus } : {}),
       },
       lease: scopedLeaseRecord
-        ? { owner: 'cloud', sessionId: scopedLeaseRecord.cloudSessionId ?? scopedLeaseRecord.id, acquiredAt: scopedLeaseRecord.createdAt }
+        ? { owner: 'cloud', sessionId: scopedLeaseRecord.cloudSessionId ?? scopedLeaseRecord.id, threadId: scopedLeaseRecord.threadId, acquiredAt: scopedLeaseRecord.createdAt }
         : scopedLeaseRemote
           ? {
               owner: 'cloud',
               sessionId: scopedLeaseRemote.id ?? scopedLeaseRemote.sessionId,
+              threadId: scopedLeaseRemote.clientContext?.threadId,
               acquiredAt: asIso(scopedLeaseRemote.startedAt, now),
             }
           : unscopedLeaseRecord
-            ? { owner: 'cloud', sessionId: unscopedLeaseRecord.cloudSessionId ?? unscopedLeaseRecord.id, acquiredAt: unscopedLeaseRecord.createdAt }
+            ? { owner: 'cloud', sessionId: unscopedLeaseRecord.cloudSessionId ?? unscopedLeaseRecord.id, threadId: unscopedLeaseRecord.threadId, acquiredAt: unscopedLeaseRecord.createdAt }
             : unscopedLeaseRemote
               ? {
                   owner: 'cloud',
                   sessionId: unscopedLeaseRemote.id ?? unscopedLeaseRemote.sessionId,
+                  threadId: unscopedLeaseRemote.clientContext?.threadId,
                   acquiredAt: asIso(unscopedLeaseRemote.startedAt, now),
                 }
               : { owner: 'local' },

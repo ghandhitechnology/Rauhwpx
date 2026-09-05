@@ -208,7 +208,7 @@ export type CloudSessionState =
 
 export type CloudDocumentLease =
   | { owner: 'local' }
-  | { owner: 'cloud'; sessionId: string; acquiredAt: string };
+  | { owner: 'cloud'; sessionId: string; threadId?: string; acquiredAt: string };
 
 export interface CloudResultSummary {
   fileName: string;
