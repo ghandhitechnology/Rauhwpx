@@ -638,10 +638,11 @@ try {
     });
     await (await page.$('#agent-sidebar')).screenshot({ path: process.env.CLOUD_CONFIGURATION_SCREENSHOT });
   }
-  await page.click('.ag-input');
+  await page.click('[aria-label="모델 선택"]');
+  await page.waitForFunction(() => document.querySelector('.ag-config-panel').hidden);
 
   const scrollBeforeReturn = await page.$eval('#scroll-container', (node) => node.scrollLeft);
-  await page.click('[data-workspace-mode="local"]');
+  await page.click('[data-document-view="local"]');
   await page.waitForFunction(() => window.__cloudWorkspaceHarness.calls
     .filter((call) => call.method === 'cloudCloseDisplay').length === 2);
   const restored = await page.evaluate(() => {
@@ -651,8 +652,8 @@ try {
       .map((call) => call.payload);
     const initialLeaseScope = leaseScopes[0];
     const commandCount = window.__cloudWorkspaceHarness.calls.filter((call) => call.method === 'cloudCommand').length;
-    identity.input.value = 'blocked local draft';
-    identity.composer.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    identity.input.value = 'Keep cloud draft while editing locally.';
+    identity.input.dispatchEvent(new Event('input', { bubbles: true }));
     return {
       sameEditor: identity.editor === document.querySelector('#editor-area'),
       sameScroll: identity.scroll === document.querySelector('#scroll-container'),
@@ -671,7 +672,7 @@ try {
       targetMessage: document.querySelector('.ag-composer-target-message')?.textContent,
       targetMessageHidden: document.querySelector('.ag-composer-target-message')?.hidden,
       commandCount,
-      commandCountAfterBlockedSubmit: window.__cloudWorkspaceHarness.calls
+      commandCountAfterViewSwitch: window.__cloudWorkspaceHarness.calls
         .filter((call) => call.method === 'cloudCommand').length,
       editorHidden: identity.editor.getAttribute('aria-hidden'),
       cloudHidden: document.querySelector('#cloud-workspace')?.getAttribute('aria-hidden'),
@@ -700,20 +701,20 @@ try {
     sameInput: true,
     scrollLeft: scrollBeforeReturn,
     scrollTop: 91,
-    draft: 'blocked local draft',
-    placeholder: 'Cloud 작업이 문서를 사용 중입니다. Cloud로 전환하거나 이 기기에서 이어받으세요.',
-    targetMessage: 'Cloud 작업이 문서를 사용 중입니다. Cloud로 전환하거나 이 기기에서 이어받으세요.',
-    targetMessageHidden: false,
+    draft: 'Keep cloud draft while editing locally.',
+    placeholder: '다음 Cloud 턴에 전달할 메시지',
+    targetMessage: '',
+    targetMessageHidden: true,
     commandCount: 5,
-    commandCountAfterBlockedSubmit: 5,
+    commandCountAfterViewSwitch: 5,
     editorHidden: 'false',
     cloudHidden: 'true',
     editorInert: false,
     cloudInert: true,
     cloudVisibility: 'hidden',
     cloudPointerEvents: 'none',
-    editorThreadARestored: true,
-    selectedCloudBRestoredLocally: false,
+    editorThreadARestored: false,
+    selectedCloudBRestoredLocally: true,
     cloudTranscriptNeverOwnedLease: true,
   });
 
@@ -768,7 +769,7 @@ try {
     .filter((call) => call.method === 'cloudTransfer').length), 0);
   await page.evaluate(() => [...document.querySelectorAll('.ag-threads-item')]
     .find((node) => node.textContent.includes('Local handoff regression')).click());
-  await page.waitForFunction(() => document.querySelector('.ag-cloud-handoff')?.hidden === false);
+  await page.waitForFunction(() => document.querySelector('.ag-messages').textContent.includes('We can revise the heading after agreeing on the wording.'));
   const beforeHandoff = await page.evaluate(async () => {
     const input = document.querySelector('.ag-composer textarea');
     const originBytes = await (await fetch('/samples/hwpx/form-002.hwpx')).arrayBuffer();
@@ -795,7 +796,8 @@ try {
     .filter((call) => call.method === 'cloudTransfer').length), 0);
   await page.$eval('[data-workspace-mode="local"]', (node) => node.click());
   await page.evaluate(() => window.__cloudWorkspaceHarness.failNextTransfer());
-  await page.$eval('.ag-cloud-handoff', (node) => { node.click(); node.click(); });
+  await page.$eval('[data-workspace-mode="cloud"]', (node) => node.click());
+  await page.$eval('.ag-composer', (node) => { node.requestSubmit(); node.requestSubmit(); });
   await page.waitForFunction(() => window.__cloudWorkspaceHarness.calls
     .filter((call) => call.method === 'cloudTransfer').length === 1, { timeout: 10_000 }).catch(async (error) => {
       throw new Error(`Cloud handoff failed: ${JSON.stringify(await page.evaluate(() => ({
