@@ -222,3 +222,40 @@ test('credential startup restores an interrupted win32 persistence backup', asyn
   const recovered = createSecretVault({ filePath, safeStorage, platform: 'win32' });
   assert.equal(await recovered.get('cloud-token'), 'secret');
 });
+
+test('state-changing stream events preserve messages queued while the transition awaits storage', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'rauhwpx-handoff-event-race-'));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  t.after(async () => { await store.flush(); await rm(directory, { recursive: true, force: true }); });
+  const created = await store.create({
+    sessionId: 'desktop-session', documentId: 'document-1', documentName: 'source.hwpx',
+    documentBytes: Buffer.from('document'), provider: 'codex', limits: { maxTurns: 100 },
+  });
+  await store.transition(created.id, 'uploading');
+  await store.transition(created.id, 'committing');
+  await store.transition(created.id, 'queued');
+  await store.patch(created.id, { queuedMessages: [{ id: 'first', state: 'queued' }] });
+  let releaseTransition;
+  let transitionBlocked;
+  const blocked = new Promise((resolve) => { transitionBlocked = resolve; });
+  const gate = new Promise((resolve) => { releaseTransition = resolve; });
+  const load = store.load.bind(store);
+  let loads = 0;
+  store.load = async () => {
+    await load();
+    if (++loads === 2) { transitionBlocked(); await gate; }
+  };
+  const event = store.applyEvent(created.id, {
+    sequence: 2, state: 'running',
+    patch: (latest) => ({ queuedMessages: latest.queuedMessages.map((message) => (
+      message.id === 'first' ? { ...message, state: 'accepted' } : message
+    )) }),
+  });
+  await blocked;
+  await store.patch(created.id, (latest) => ({ queuedMessages: [...latest.queuedMessages, { id: 'second', state: 'queued' }] }));
+  releaseTransition();
+  await event;
+  const final = await store.get(created.id);
+  assert.equal(final.state, 'running');
+  assert.deepEqual(final.queuedMessages, [{ id: 'first', state: 'accepted' }, { id: 'second', state: 'queued' }]);
+});

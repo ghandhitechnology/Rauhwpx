@@ -108,7 +108,7 @@ export class WorkerClient {
   manifest() { return this.json('GET', '/manifest'); }
   credentials() { return this.json('GET', '/credentials'); }
   messages() { return this.json('GET', '/messages'); }
-  control() { return this.json('GET', '/control'); }
+  control(options = {}) { return this.json('GET', '/control', undefined, options); }
   pauseAck() { return this.json('POST', '/pause-ack', {}); }
   sleepAck() { return this.json('POST', '/sleep-ack', {}); }
   heartbeat() { return this.json('POST', '/heartbeat', {}, { timeoutMs: 5_000 }); }
@@ -116,8 +116,12 @@ export class WorkerClient {
   events(events) { return this.json('POST', '/events', { events }, { timeoutMs: 3_000 }); }
   checkpoint(checkpoint) { return this.json('POST', '/checkpoints', checkpoint); }
   commitBoundary(boundary) { return this.retryJson('POST', '/boundary', boundary); }
-  beginTurn(turn) { return this.json('POST', '/turn-start', turn); }
-  completeTurn(turn = {}) { return this.json('POST', '/turn-complete', turn); }
+  beginTurn(turn) { return this.retryJson('POST', '/turn-start', turn); }
+  completeTurn(turn = {}, { retry = false } = {}) {
+    return retry && turn.boundaryOperationId
+      ? this.retryJson('POST', '/turn-complete', turn)
+      : this.json('POST', '/turn-complete', turn);
+  }
   createWait(wait, options = {}) { return this.json('POST', '/waits', wait, options); }
   wait(waitId, options = {}) { return this.json('GET', `/waits/${encodeURIComponent(waitId)}`, undefined, options); }
   finishClaim(options = {}) { return this.json('POST', '/finish-claim', {}, options); }

@@ -1362,3 +1362,100 @@ test('recovered persistent sessions open Studio before waiting for another agent
   assert.equal(claims, 2);
   assert.equal(await fs.readFile(result.resultPath, 'utf8'), 'restored document');
 });
+
+for (const controlName of ['pauseRequested', 'takeoverRequested', 'redirectRequested', 'endRequested']) {
+  test(`${controlName} interrupts a durable wait without requiring a user answer`, async (t) => {
+    const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'raucloud-wait-control-'));
+    t.after(() => fs.rm(workspace, { recursive: true, force: true }));
+    const document = path.join(workspace, 'document.hwp');
+    const timeline = path.join(workspace, 'input-timeline.json');
+    await fs.writeFile(document, 'stable edit');
+    await fs.writeFile(timeline, JSON.stringify(portableTimeline()));
+    const completions = [];
+    let acknowledged = false;
+    const result = await runSession({
+      workspace, credentials: {},
+      manifest: {
+        sessionId: 'wait-control', provider: 'codex', persistent: true, goal: 'Edit',
+        resources: [{ kind: 'document', name: 'document.hwp', filename: document }, { kind: 'timeline', name: 'timeline.json', filename: timeline }],
+        limits: { maxDurationSeconds: 900, maxTurns: 10 },
+      },
+      client: {
+        event: async () => {}, beginTurn: async () => {},
+        upload: async (filename) => {
+          const bytes = await fs.readFile(filename);
+          return { id: createHash('sha256').update(bytes).digest('hex'), size: bytes.length };
+        },
+        commitBoundary: async (boundary) => boundary,
+        createWait: async () => ({ id: 'wait-1', status: 'pending' }),
+        wait: async () => assert.fail('A pending safe-boundary control must not wait for a decision'),
+        control: async () => ({ [controlName]: true }),
+        completeTurn: async (completion) => { completions.push(completion); return { status: 'running' }; },
+        finishClaim: async () => ({ ready: true, messages: [] }),
+        takeoverReady: async () => {},
+        takeoverAck: async () => { acknowledged = true; },
+        pauseAck: async () => { acknowledged = true; },
+      },
+      createHarness: async () => ({
+        start: async () => {}, close: async () => {},
+        runTurn: async () => ({ wait: { kind: 'question', payload: { question: 'Which title?' } } }),
+        exportDocument: async (_format, filename) => {
+          const bytes = Buffer.from('stable edit');
+          await fs.writeFile(filename, bytes);
+          return { sha256: createHash('sha256').update(bytes).digest('hex'), size: bytes.length };
+        },
+      }),
+    });
+    assert.equal(completions.length, 1);
+    assert.equal(completions[0].outcome, controlName === 'redirectRequested' ? 'redirected' : 'stopped');
+    if (controlName === 'pauseRequested') assert.equal(result.paused, true);
+    if (controlName === 'takeoverRequested') assert.equal(result.takenOver, true);
+    if (['pauseRequested', 'takeoverRequested'].includes(controlName)) assert.equal(acknowledged, true);
+    else assert.equal(await fs.readFile(result.resultPath, 'utf8'), 'stable edit');
+  });
+}
+
+test('question workflow reaches Studio and the durable turn without becoming an editing turn', async (t) => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'raucloud-question-mode-'));
+  t.after(() => fs.rm(workspace, { recursive: true, force: true }));
+  const document = path.join(workspace, 'document.hwp');
+  const timeline = path.join(workspace, 'input-timeline.json');
+  await fs.writeFile(document, 'unchanged document');
+  await fs.writeFile(timeline, JSON.stringify(portableTimeline()));
+  const workflows = [];
+  const turns = [];
+  await runSession({
+    workspace, credentials: {},
+    manifest: {
+      sessionId: 'question-mode', provider: 'codex', persistent: true, goal: 'Explain the heading',
+      executionConfig: { workflow: 'question' },
+      resources: [{ kind: 'document', name: 'document.hwp', filename: document }, { kind: 'timeline', name: 'timeline.json', filename: timeline }],
+      limits: { maxDurationSeconds: 900, maxTurns: 10 },
+    },
+    client: {
+      event: async () => {}, beginTurn: async (turn) => { turns.push(turn); },
+      upload: async (filename) => {
+        const bytes = await fs.readFile(filename);
+        return { id: createHash('sha256').update(bytes).digest('hex'), size: bytes.length };
+      },
+      commitBoundary: async (boundary) => boundary,
+      completeTurn: async () => ({ status: 'running' }),
+      finishClaim: async () => ({ ready: true, messages: [] }),
+    },
+    createHarness: async ({ timeline: history }) => {
+      assert.equal(history.thread.workflow, 'question');
+      return {
+        start: async () => {}, close: async () => {}, setWorkflow: async (mode) => { workflows.push(mode); },
+        runTurn: async () => ({ stopReason: 'end_turn' }),
+        exportDocument: async (_format, filename) => {
+          const bytes = await fs.readFile(document);
+          await fs.writeFile(filename, bytes);
+          return { sha256: createHash('sha256').update(bytes).digest('hex'), size: bytes.length };
+        },
+      };
+    },
+  });
+  assert.ok(workflows.length > 0);
+  assert.ok(workflows.every((mode) => mode === 'question'));
+  assert.equal(turns[0].mode, 'question');
+});

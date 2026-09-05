@@ -8,6 +8,7 @@ export class CloudInputQueue {
   timer = null;
   sending = null;
   closed = false;
+  generation = 0;
 
   constructor(send, batchSize, now = Date.now) {
     this.send = send;
@@ -47,6 +48,7 @@ export class CloudInputQueue {
   }
 
   reset(error = inputError('Cloud input connection changed', 'DISPLAY_INPUT_UNAVAILABLE')) {
+    this.generation++;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     for (const item of this.pending.splice(0)) for (const waiter of item.settle) waiter.reject(error);
@@ -74,13 +76,14 @@ export class CloudInputQueue {
     const maximum = Math.max(1, Math.min(32, this.batchSize()));
     while (count < maximum && this.pending[count]?.streamId === streamId) count++;
     const batch = this.pending.splice(0, count);
+    const generation = this.generation;
     this.sending = Promise.resolve().then(() => this.send(streamId, batch.map((entry) => entry.event)))
       .then(() => {
         for (const entry of batch) for (const waiter of entry.settle) waiter.resolve();
       }, (error) => {
         for (const entry of batch) for (const waiter of entry.settle) waiter.reject(error);
         // Never replay later clicks or key transitions after an ambiguous failure.
-        this.reset(error);
+        if (generation === this.generation) this.reset(error);
       }).finally(() => { this.sending = null; this.schedule(); });
   }
 }

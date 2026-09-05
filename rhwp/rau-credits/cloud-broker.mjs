@@ -344,6 +344,18 @@ function takeoverRun(cloud, account) {
 
 function reconcileAccount(state, account, at) {
   const cloud = ensureRaucloudState(state);
+  const running = account.worker ? cloud.runs[account.worker.runId] : null;
+  // Meter the old window before advancing it. Otherwise a status request just
+  // after midnight bills the previous day's unaccounted time to the new day.
+  if (running?.status === 'active') {
+    const charge = chargeRun(account, running, at);
+    if (charge.mustStop) {
+      running.status = 'stopped';
+      running.stopReason = 'grace_fuse';
+      running.completedAt = running.lastAccountedAt;
+      reserveTeardown(account, running, at);
+    }
+  }
   advanceQuota(account, at);
   const worker = account.worker;
   if (!worker) return;
@@ -600,29 +612,38 @@ export function createRaucloudBroker({
         workerToken,
         onRemoteCreated: async (candidate) => {
           const remote = sanitizeRemote(candidate);
-          await mutate((state) => {
+          const retained = await mutate((state) => {
             const cloud = ensureRaucloudState(state);
             const run = cloud.runs[runId];
             if (!run) throw cloudError('CLOUD_RUN_NOT_FOUND', 'Raucloud run not found');
+            const at = now();
+            const account = ensureAccount(state, userId, at);
+            reconcileAccount(state, account, at);
             run.remote = remote;
-            const account = ensureAccount(state, userId, now());
-            if (account.worker?.runId === runId) account.worker.remote = remote;
+            if (run.status !== 'allocating' || account.worker?.runId !== runId) {
+              reserveTeardown(account, run, at);
+              return false;
+            }
+            account.worker.remote = remote;
+            return true;
           });
+          if (!retained) throw cloudError('CLOUD_RUN_STATE_INVALID', 'Raucloud allocation was cancelled');
         },
       });
       const remote = sanitizeRemote(spawned.remote);
       const receipt = sanitizeReceipt(spawned.receipt);
-      await mutate((state) => {
+      const retained = await mutate((state) => {
         const at = now();
         const cloud = ensureRaucloudState(state);
         const run = cloud.runs[runId];
         const account = ensureAccount(state, userId, at);
+        reconcileAccount(state, account, at);
         if (!run || run.status !== 'allocating' || account.worker?.runId !== runId) {
           if (run) {
             run.remote = remote;
             run.teardownRequestedAt = at;
           }
-          throw cloudError('CLOUD_RUN_STATE_INVALID', 'Raucloud allocation was cancelled');
+          return false;
         }
         run.remote = remote;
         run.receipt = receipt;
@@ -631,7 +652,9 @@ export function createRaucloudBroker({
         account.worker.receipt = receipt;
         account.worker.status = 'ready';
         account.worker.warmUntil = at + CLOUD_WARM_IDLE_MS;
+        return true;
       });
+      if (!retained) throw cloudError('CLOUD_RUN_STATE_INVALID', 'Raucloud allocation was cancelled');
     } catch (error) {
       await mutate((state) => {
         const run = ensureRaucloudState(state).runs[runId];
@@ -683,7 +706,7 @@ export function createRaucloudBroker({
           if (at < availableAt) {
             throw cloudError('CLOUD_TIMEZONE_CHANGE_RATE_LIMITED', 'Timezone can be changed once every 30 days', { availableAt });
           }
-          advanceQuota(account, at);
+          reconcileAccount(state, account, at);
           account.pendingTimezone = { timezone: selected, effectiveAt: account.quota.window.endAt };
           account.timezoneChangedAt = at;
         }
@@ -1124,11 +1147,11 @@ export function createRaucloudBroker({
         let active = 0;
         let stopped = 0;
         for (const account of Object.values(cloud.accounts)) {
-          advanceQuota(account, at);
           const run = activeRun(cloud, account);
           if (run?.status === 'active') {
             active += 1;
             const charge = chargeRun(account, run, at);
+            advanceQuota(account, at);
             run.lastHeartbeatAt = at;
             if (charge.mustStop) {
               run.status = 'stopped';

@@ -488,7 +488,7 @@ export class SessionStore {
       if (session.takeover_requested_at) throw new CloudError('TAKEOVER_PENDING', 'Takeover superseded the end request', 409);
       const cancelledMessages = this.database.prepare(`
         SELECT id, device_id FROM session_messages
-        WHERE session_id = ? AND status = 'queued' ORDER BY created_at, id
+        WHERE session_id = ? AND status = 'queued' ORDER BY queue_sequence
       `).all(session.id);
       this.database.prepare(`
         UPDATE session_messages SET status = 'cancelled' WHERE session_id = ? AND status = 'queued'
@@ -579,14 +579,14 @@ export class SessionStore {
         throw new CloudError('TURN_LIMIT', 'Session has reached its turn limit', 409);
       }
       const content = command.payload.content;
-      if (typeof content !== 'string' || content.length < 1 || content.length > 64 * 1024) {
+      if (typeof content !== 'string' || content.trim().length < 1 || content.length > 64 * 1024) {
         throw new CloudError('INVALID_REQUEST', 'payload.content is invalid');
       }
       const messageId = command.payload.messageId ?? randomUUID();
       this.database.prepare(`
-        INSERT INTO session_messages(id, session_id, device_id, content, status, created_at)
-        VALUES (?, ?, ?, ?, 'queued', ?)
-      `).run(messageId, session.id, device.id, content, now);
+        INSERT INTO session_messages(id, session_id, device_id, content, status, created_at, queue_sequence)
+        VALUES (?, ?, ?, ?, 'queued', ?, ?)
+      `).run(messageId, session.id, device.id, content, now, session.next_event_seq);
       const attachments = this.#attachMessageVersionsInTransaction(
         device, session.id, messageId, command.payload.attachments,
       );
@@ -604,14 +604,14 @@ export class SessionStore {
         throw new CloudError('CONTROL_PENDING', 'Another safe-boundary control is already pending', 409);
       }
       const content = command.payload.content;
-      if (typeof content !== 'string' || content.length < 1 || content.length > 64 * 1024) {
+      if (typeof content !== 'string' || content.trim().length < 1 || content.length > 64 * 1024) {
         throw new CloudError('INVALID_REQUEST', 'payload.content is invalid');
       }
       const messageId = command.payload.messageId ?? randomUUID();
       this.database.prepare(`
-        INSERT INTO session_messages(id, session_id, device_id, content, status, created_at)
-        VALUES (?, ?, ?, ?, 'queued', ?)
-      `).run(messageId, session.id, device.id, content, now);
+        INSERT INTO session_messages(id, session_id, device_id, content, status, created_at, queue_sequence)
+        VALUES (?, ?, ?, ?, 'queued', ?, ?)
+      `).run(messageId, session.id, device.id, content, now, session.next_event_seq);
       const attachments = this.#attachMessageVersionsInTransaction(
         device, session.id, messageId, command.payload.attachments,
       );
@@ -687,7 +687,7 @@ export class SessionStore {
         || session.execution_phase === 'awaiting-question-answer'
         || session.execution_phase === 'awaiting-external-effect-approval';
       if (session.protocol_version !== ROOM_PROTOCOL_VERSION || session.room_status !== 'active'
-        || session.status !== 'running' || !switchable || !['direct', 'plan'].includes(workflow)) {
+        || session.status !== 'running' || !switchable || !['direct', 'plan', 'question'].includes(workflow)) {
         throw new CloudError('INVALID_SESSION_STATE', 'Conversation workflow cannot change right now', 409);
       }
       const executionConfig = session.execution_config_json ? JSON.parse(session.execution_config_json) : {};
@@ -903,7 +903,7 @@ export class SessionStore {
 
   beginTurn(sessionId, { turnNumber, messageId = null, mode = 'direct' }) {
     if (!Number.isSafeInteger(turnNumber) || turnNumber < 1 || turnNumber > 1_000_000
-      || !['direct', 'plan'].includes(mode)
+      || !['direct', 'plan', 'question'].includes(mode)
       || (messageId !== null && (typeof messageId !== 'string' || !messageId))) {
       throw new CloudError('INVALID_REQUEST', 'Turn identity or mode is invalid');
     }
@@ -1166,14 +1166,20 @@ export class SessionStore {
       if (row.sleep_requested_at) {
         return { ready: false, messages: [], sleepRequested: true };
       }
-      const workflow = row.execution_config_json
-        ? (JSON.parse(row.execution_config_json).workflow === 'plan' ? 'plan' : 'direct')
-        : 'direct';
+      const configuredWorkflow = row.execution_config_json ? JSON.parse(row.execution_config_json).workflow : null;
+      const workflow = ['plan', 'question'].includes(configuredWorkflow) ? configuredWorkflow : 'direct';
       if (row.protocol_version === ROOM_PROTOCOL_VERSION && row.room_status === 'active'
         && !row.end_requested_at) {
+        const initial = this.database.prepare(`
+          SELECT 1 FROM session_turns
+          WHERE session_id = ? AND message_id IS NULL AND status = 'queued'
+        `).get(sessionId);
+        if (initial) {
+          return { ready: false, workflow, messages: [{ id: null, content: row.goal, initial: true }] };
+        }
         const queued = this.database.prepare(`
           SELECT id, device_id, content, created_at FROM session_messages
-          WHERE session_id = ? AND status = 'queued' ORDER BY created_at, id
+          WHERE session_id = ? AND status = 'queued' ORDER BY queue_sequence
           LIMIT 1
         `).all(sessionId);
         if (queued.length) {
@@ -1220,7 +1226,7 @@ export class SessionStore {
       if (row.finishing_at) return { ready: true, messages: [] };
       const queued = this.database.prepare(`
         SELECT id, device_id, content, created_at FROM session_messages
-        WHERE session_id = ? AND status = 'queued' ORDER BY created_at, id
+        WHERE session_id = ? AND status = 'queued' ORDER BY queue_sequence
       `).all(sessionId);
       if (queued.length) {
         const now = this.now();
@@ -1340,7 +1346,7 @@ export class SessionStore {
     const messages = transaction(this.database, () => {
       const messages = this.database.prepare(`
         SELECT id, device_id, content, created_at FROM session_messages
-        WHERE session_id = ? AND status = 'queued' ORDER BY created_at, id
+        WHERE session_id = ? AND status = 'queued' ORDER BY queue_sequence
       `).all(sessionId);
       for (const message of messages) {
         this.database.prepare(`
@@ -1602,6 +1608,16 @@ export class SessionStore {
     let event;
     const result = transaction(this.database, () => {
       const row = this.getSessionRow(sessionId);
+      if (row.protocol_version === ROOM_PROTOCOL_VERSION && boundaryOperationId) {
+        const completed = this.database.prepare(`
+          SELECT outcome FROM session_turns
+          WHERE session_id = ? AND stable_boundary_operation_id = ? AND completed_at IS NOT NULL
+        `).get(sessionId, boundaryOperationId);
+        if (completed) {
+          if (completed.outcome !== outcome) throw new CloudError('TURN_IDENTITY_CONFLICT', 'Turn completion outcome changed', 409);
+          return this.getSession(sessionId);
+        }
+      }
       if (row.status !== 'running') throw new CloudError('INVALID_SESSION_STATE', 'Session is not running', 409);
       const turnsUsed = row.turns_used + 1;
       const controlPending = Boolean(row.pause_requested_at || row.takeover_requested_at);
@@ -1611,14 +1627,19 @@ export class SessionStore {
       const now = this.now();
       let completedMessageId = null;
       if (row.protocol_version === ROOM_PROTOCOL_VERSION && row.current_turn_id) {
+        this.database.prepare(`
+          UPDATE session_waits SET status = 'cancelled', resolved_at = ?
+          WHERE turn_id = ? AND status = 'pending'
+        `).run(now, row.current_turn_id);
         const currentTurn = this.database.prepare(`
-          SELECT message_id AS messageId FROM session_turns WHERE id = ? AND session_id = ?
+          SELECT message_id AS messageId, turn_number AS turnNumber FROM session_turns WHERE id = ? AND session_id = ?
         `).get(row.current_turn_id, sessionId);
         completedMessageId = currentTurn?.messageId ?? null;
         if (boundaryOperationId) {
           const boundary = this.database.prepare(`
             SELECT 1 FROM session_checkpoints WHERE session_id = ? AND operation_id = ? AND stable = 1
-          `).get(sessionId, boundaryOperationId);
+              AND turn_number = ? AND boundary_kind = 'turn'
+          `).get(sessionId, boundaryOperationId, currentTurn.turnNumber);
           if (!boundary) throw new CloudError('BOUNDARY_NOT_FOUND', 'Turn boundary is not durable', 409);
         }
         this.database.prepare(`

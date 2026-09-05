@@ -570,7 +570,8 @@ test('command response advances state before its matching SSE event arrives', as
   assert.equal(record.serverVersion, 3);
 });
 
-test('queued message remains accepted when SSE wins the command response race', async (t) => {
+for (const lostReceipt of [false, true]) {
+test(`queued message remains accepted when SSE wins ${lostReceipt ? 'a lost' : 'the'} command response race`, async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-message-race-'));
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
   const created = await store.create({
@@ -603,6 +604,7 @@ test('queued message remains accepted when SSE wins the command response race', 
           type: 'message.accepted',
           payload: { status: 'running', stateVersion: 2, messageId: 'message-1' },
         });
+        if (lostReceipt) throw Object.assign(new Error('command receipt lost'), { code: 'ETIMEDOUT' });
         return { messageId: 'message-1', status: 'queued', eventSeq: 6 };
       },
     },
@@ -629,6 +631,51 @@ test('queued message remains accepted when SSE wins the command response race', 
   assert.equal(record.lastEventSequence, 7);
   assert.equal(record.queuedMessages[0].state, 'accepted');
 });
+}
+
+for (const explicitIds of [false, true]) {
+test(`simultaneous follow-ups retain both durable messages with ${explicitIds ? 'explicit' : 'generated'} ids`, async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-concurrent-messages-'));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const created = await store.create({
+    sessionId: 'desktop-concurrent', threadId: 'thread-concurrent', documentId: 'document-concurrent',
+    documentName: 'source.hwpx', documentBytes: Buffer.from('document'), timeline: null,
+    provider: 'codex', limits: { maxTurns: 100 },
+  });
+  await store.transition(created.id, 'uploading');
+  await store.transition(created.id, 'committing');
+  await store.transition(created.id, 'running', { cloudSessionId: 'cloud-concurrent', serverVersion: 2 });
+  const received = [];
+  const bothSubmitted = Promise.withResolvers();
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => null, isPaired: async () => false,
+      command: async (_sessionId, _type, payload, commandId) => {
+        received.push({ ...payload, commandId });
+        if (received.length === 2) bothSubmitted.resolve();
+        await bothSubmitted.promise;
+        return { messageId: payload.messageId, status: 'queued' };
+      },
+    }, store, provisioner: {},
+  });
+  t.after(async () => {
+    await coordinator.stop();
+    await store.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
+  t.mock.method(Date, 'now', () => 1234567890);
+  await Promise.all(['first', 'second'].map((message) => coordinator.command({
+    sessionId: 'cloud-concurrent', command: 'queue-message', message,
+    ...(explicitIds ? { messageId: `message-${message}` } : {}),
+  })));
+  const messages = (await store.get(created.id)).queuedMessages;
+  assert.deepEqual(messages.map((message) => message.text).sort(), ['first', 'second']);
+  assert.equal(new Set(received.map((message) => message.messageId)).size, 2);
+  assert.equal(new Set(received.map((message) => message.commandId)).size, 2);
+  const reloaded = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  assert.deepEqual((await reloaded.get(created.id)).queuedMessages, messages);
+});
+}
 
 test('rejected queue command removes exactly its staged durable message', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-message-rejected-'));

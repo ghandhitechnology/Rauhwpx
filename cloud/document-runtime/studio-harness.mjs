@@ -834,7 +834,7 @@ export async function createStudioHarness({
       },
       async setWorkflow(workflow) {
         assertBrowserHealthy();
-        if (workflow !== 'direct' && workflow !== 'plan') {
+        if (!['direct', 'plan', 'question'].includes(workflow)) {
           throw runtimeError('WORKFLOW_INVALID', 'Cloud conversation workflow is invalid');
         }
         if (execution.workflow === workflow) return;

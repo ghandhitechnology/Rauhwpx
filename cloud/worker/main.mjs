@@ -52,8 +52,8 @@ try {
   const inputDirectory = path.join(workspace, 'input');
   await fs.mkdir(inputDirectory, { recursive: true, mode: 0o700 });
   const localResources = [];
-  for (const resource of manifest.resources) {
-    const filename = path.join(inputDirectory, `${resource.kind}-${safeName(resource.name)}`);
+  for (const [index, resource] of manifest.resources.entries()) {
+    const filename = path.join(inputDirectory, `${index}-${resource.kind}-${safeName(resource.name)}`);
     await client.download(resource.blobId, filename);
     localResources.push({ ...resource, filename });
   }

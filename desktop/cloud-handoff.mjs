@@ -313,19 +313,28 @@ export class CloudHandoffStore {
     return record;
   }
 
-  async transition(id, nextState, patch = {}) {
+  async transition(id, nextState, patch = {}, { sequence = null } = {}) {
     await this.load();
-    const current = this.#records.get(id);
+    const terminal = TERMINAL_STATES.has(nextState);
+    let current = this.#records.get(id);
     if (!current) throw new Error('Cloud handoff does not exist');
-    if (current.state === nextState) return current;
-    if (!TRANSITIONS[current.state]?.has(nextState)) {
+    if (sequence !== null && sequence <= current.lastEventSequence) return current;
+    if (current.state === nextState && sequence === null) return current;
+    if (current.state !== nextState && !TRANSITIONS[current.state]?.has(nextState)) {
       throw new Error(`Invalid cloud handoff transition: ${current.state} -> ${nextState}`);
     }
-    const terminal = TERMINAL_STATES.has(nextState);
-    if (terminal) await fs.rm(path.join(this.#payloadRoot, id), { recursive: true, force: true });
+    if (terminal) {
+      await fs.rm(path.join(this.#payloadRoot, id), { recursive: true, force: true });
+      current = this.#records.get(id);
+      if (!current) throw new Error('Cloud handoff does not exist');
+      if (sequence !== null && sequence <= current.lastEventSequence) return current;
+      if (current.state !== nextState && !TRANSITIONS[current.state]?.has(nextState)) {
+        throw new Error(`Invalid cloud handoff transition: ${current.state} -> ${nextState}`);
+      }
+    }
     const next = Object.freeze({
       ...current,
-      ...safeRecord(patch),
+      ...safeRecord(typeof patch === 'function' ? patch(current) : patch),
       ...(terminal ? {
         documentStagingPath: null,
         resources: (current.resources ?? []).map(({ stagingPath: _stagingPath, ...resource }) => resource),
@@ -349,11 +358,14 @@ export class CloudHandoffStore {
     const sequence = Number(event?.sequence);
     if (!Number.isSafeInteger(sequence) || sequence <= current.lastEventSequence) return current;
     const eventState = String(event?.state ?? current.state);
-    const patch = { lastEventSequence: sequence, ...(safeRecord(event?.patch)) };
+    const patchFor = (latest) => ({
+      lastEventSequence: sequence,
+      ...safeRecord(typeof event?.patch === 'function' ? event.patch(latest) : event?.patch),
+    });
     if (eventState === current.state) {
       const next = Object.freeze({
         ...current,
-        ...patch,
+        ...patchFor(current),
         id: current.id,
         state: current.state,
         revision: current.revision + 1,
@@ -365,7 +377,7 @@ export class CloudHandoffStore {
       this.#schedulePersist();
       return next;
     }
-    return this.transition(id, eventState, patch);
+    return this.transition(id, eventState, patchFor, { sequence });
   }
 
   async get(id) {
@@ -471,9 +483,11 @@ export class CloudHandoffStore {
     await this.load();
     const current = this.#records.get(id);
     if (!current) throw new Error('Cloud handoff does not exist');
+    // Evaluate collection updates against the current record, without an await
+    // between reading it and installing the update.
     const next = Object.freeze({
       ...current,
-      ...safeRecord(patch),
+      ...safeRecord(typeof patch === 'function' ? patch(current) : patch),
       id: current.id,
       version: current.version,
       state: current.state,

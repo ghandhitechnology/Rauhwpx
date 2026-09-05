@@ -211,7 +211,9 @@ export function createSecretVault({
         // backup, so antivirus locks during cleanup must not fail the committed write.
         await retryWindows(() => operations.rm(staleBackup, { force: true }), platform).catch(() => {});
       }
-      if (platform !== 'win32') {
+      // The policy platform can be overridden in cross-platform contract tests;
+      // Windows still cannot fsync a directory on the actual host filesystem.
+      if (platform !== 'win32' && process.platform !== 'win32') {
         const parent = await fs.open(path.dirname(filePath), 'r');
         try { await parent.sync(); } finally { await parent.close(); }
       }

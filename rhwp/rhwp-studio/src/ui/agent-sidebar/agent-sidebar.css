@@ -3697,6 +3697,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   letter-spacing: -0.01em;
 }
 
+.ag-cloud-handoff[hidden],
 .ag-cloud-mode-badge[hidden] {
   display: none;
 }
@@ -7206,4 +7207,21 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
     transition-duration: .01ms !important;
     animation-duration: .01ms !important;
   }
+}
+
+.ag-cloud-handoff {
+  margin-left: auto;
+  padding: 4px 8px;
+  border: 1px solid var(--ag-border);
+  border-radius: 6px;
+  background: var(--ag-bg-2);
+  color: var(--ag-text);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.ag-cloud-handoff:disabled {
+  opacity: 0.5;
+  cursor: default;
 }

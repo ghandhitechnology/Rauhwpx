@@ -66,7 +66,27 @@ async function boundedJson(response) {
   if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
     throw provisionerError('PROVIDER_RESPONSE_INVALID', 'Railway returned an oversized response');
   }
-  const bytes = Buffer.from(await response.arrayBuffer());
+  let bytes;
+  if (response.body?.getReader) {
+    const reader = response.body.getReader();
+    const chunks = [];
+    let size = 0;
+    try {
+      for (;;) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        size += chunk.value.byteLength;
+        if (size > MAX_RESPONSE_BYTES) {
+          void reader.cancel().catch(() => {});
+          throw provisionerError('PROVIDER_RESPONSE_INVALID', 'Railway returned an oversized response');
+        }
+        chunks.push(Buffer.from(chunk.value));
+      }
+      bytes = Buffer.concat(chunks, size);
+    } finally {
+      reader.releaseLock();
+    }
+  } else bytes = Buffer.from(await response.arrayBuffer());
   if (bytes.length > MAX_RESPONSE_BYTES) {
     throw provisionerError('PROVIDER_RESPONSE_INVALID', 'Railway returned an oversized response');
   }
@@ -101,77 +121,129 @@ export function createRailwayCloudProvisioner({
   fetchImpl = globalThis.fetch,
   now = Date.now,
   sleep = (ms) => delay(ms),
+  requestTimeoutMs = 30_000,
+  deploymentTimeoutMs = DEPLOY_TIMEOUT_MS,
+  healthTimeoutMs = HEALTH_TIMEOUT_MS,
 } = {}) {
   if (!railwayCloudConfigured(config)) return null;
   if (typeof fetchImpl !== 'function') throw new Error('Railway Cloud provisioner requires fetch');
 
-  async function graphql(query, variables, { timeoutMs = 30_000, allowNotFound = false } = {}) {
+  async function request(url, options, consume, timeoutMs = requestTimeoutMs) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
     let response;
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        const error = provisionerError('PROVIDER_UNREACHABLE', 'Cloud provider request timed out');
+        controller.abort(error);
+        void response?.body?.cancel?.().catch(() => {});
+        reject(error);
+      }, Math.max(1, timeoutMs));
+    });
     try {
-      response = await fetchImpl(config.apiUrl, {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${config.token}`,
-          'content-type': 'application/json',
-          accept: 'application/json',
-        },
-        body: JSON.stringify({ query, variables }),
-        signal: controller.signal,
-      });
+      return await Promise.race([
+        (async () => {
+          response = await fetchImpl(url, { ...options, signal: controller.signal });
+          return consume(response);
+        })(),
+        timeout,
+      ]);
     } catch (error) {
-      throw provisionerError('PROVIDER_UNREACHABLE', 'Railway is temporarily unreachable', error);
+      if (String(error?.code ?? '').startsWith('PROVIDER_')) throw error;
+      throw provisionerError('PROVIDER_UNREACHABLE', 'Cloud provider is temporarily unreachable', error);
     } finally {
       clearTimeout(timer);
     }
-    if (response.status === 401 || response.status === 403) {
-      throw provisionerError('PROVIDER_UNAUTHORIZED', 'Railway rejected the broker credential');
+  }
+
+  async function graphql(query, variables, { timeoutMs = requestTimeoutMs, allowNotFound = false } = {}) {
+    const readOnly = /^\s*query\b/.test(query);
+    const deadline = now() + timeoutMs;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await request(config.apiUrl, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${config.token}`,
+            'content-type': 'application/json',
+            accept: 'application/json',
+          },
+          body: JSON.stringify({ query, variables }),
+        }, async (response) => {
+          if (response.status === 401 || response.status === 403) {
+            void response.body?.cancel?.().catch(() => {});
+            throw provisionerError('PROVIDER_UNAUTHORIZED', 'Railway rejected the broker credential');
+          }
+          if ([408, 429].includes(response.status) || response.status >= 500) {
+            void response.body?.cancel?.().catch(() => {});
+            throw provisionerError('PROVIDER_UNREACHABLE', `Railway is temporarily unavailable (HTTP ${response.status})`);
+          }
+          const payload = await boundedJson(response);
+          if (payload.errors?.length) {
+            const message = clean(payload.errors[0]?.message, 1000) || 'Railway rejected the request';
+            if (allowNotFound && /not found|does not exist/i.test(message)) return null;
+            throw provisionerError('PROVIDER_REJECTED', message);
+          }
+          if (!response.ok || !payload.data) {
+            throw provisionerError('PROVIDER_REJECTED', `Railway failed with HTTP ${response.status}`);
+          }
+          return payload.data;
+        }, Math.max(1, deadline - now()));
+      } catch (error) {
+        const remaining = deadline - now();
+        if (!readOnly || error.code !== 'PROVIDER_UNREACHABLE' || attempt >= 2 || remaining <= 0) throw error;
+        await sleep(Math.min(250 * (attempt + 1), remaining));
+        if (now() >= deadline) throw error;
+      }
     }
-    const payload = await boundedJson(response);
-    if (payload.errors?.length) {
-      const message = clean(payload.errors[0]?.message, 1000) || 'Railway rejected the request';
-      if (allowNotFound && /not found|does not exist/i.test(message)) return null;
-      throw provisionerError('PROVIDER_REJECTED', message);
-    }
-    if (!response.ok || !payload.data) {
-      throw provisionerError('PROVIDER_REJECTED', `Railway failed with HTTP ${response.status}`);
-    }
-    return payload.data;
   }
 
   async function waitForDeployment(remote) {
-    const deadline = now() + DEPLOY_TIMEOUT_MS;
+    const deadline = now() + deploymentTimeoutMs;
     while (now() < deadline) {
-      const data = await graphql(LATEST_DEPLOYMENT, {
-        projectId: remote.projectId,
-        environmentId: remote.environmentId,
-        serviceId: remote.serviceId,
-      });
+      let data;
+      try {
+        data = await graphql(LATEST_DEPLOYMENT, {
+          projectId: remote.projectId,
+          environmentId: remote.environmentId,
+          serviceId: remote.serviceId,
+        }, { timeoutMs: Math.min(requestTimeoutMs, deadline - now()) });
+      } catch (error) {
+        if (error.code !== 'PROVIDER_UNREACHABLE') throw error;
+        await sleep(Math.min(2_000, Math.max(0, deadline - now())));
+        continue;
+      }
       const status = clean(data.deployments?.edges?.[0]?.node?.status, 64).toUpperCase();
       if (status === 'SUCCESS' || status === 'SLEEPING') return;
       if (status === 'FAILED' || status === 'CRASHED') {
         throw provisionerError('SANDBOX_DEPLOY_FAILED', `Railway deployment ended in ${status}`);
       }
-      await sleep(2_000);
+      await sleep(Math.min(2_000, Math.max(0, deadline - now())));
     }
     throw provisionerError('SANDBOX_DEPLOY_TIMEOUT', 'Railway deployment did not become ready in time');
   }
 
   async function waitForReceipt(endpoint, bootstrapToken, deviceName) {
-    const deadline = now() + HEALTH_TIMEOUT_MS;
+    const deadline = now() + healthTimeoutMs;
     let publicKey = '';
     while (now() < deadline) {
       try {
-        const health = await fetchImpl(`${endpoint}/v1/health`, { headers: { accept: 'application/json' } });
-        const body = await boundedJson(health);
-        publicKey = clean(body.serverPublicKey, 512);
-        if (health.ok && /^ed25519:[A-Za-z0-9_-]{40,}$/.test(publicKey)) break;
+        const candidate = await request(`${endpoint}/v1/health`, {
+          headers: { accept: 'application/json' },
+        }, async (health) => {
+          const body = await boundedJson(health);
+          const key = clean(body.serverPublicKey, 512);
+          return health.ok && body.ok === true && /^ed25519:[A-Za-z0-9_-]{40,}$/.test(key) ? key : '';
+        }, Math.min(requestTimeoutMs, deadline - now()));
+        if (candidate && now() < deadline) {
+          publicKey = candidate;
+          break;
+        }
       } catch {}
-      await sleep(1_500);
+      await sleep(Math.min(1_500, Math.max(0, deadline - now())));
     }
     if (!publicKey) throw provisionerError('SANDBOX_UNHEALTHY', 'Raucloud worker did not answer its health check');
-    const paired = await fetchImpl(`${endpoint}/v1/pairing/bootstrap`, {
+    const body = await request(`${endpoint}/v1/pairing/bootstrap`, {
       method: 'POST',
       headers: {
         authorization: `Bearer ${bootstrapToken}`,
@@ -180,10 +252,9 @@ export function createRailwayCloudProvisioner({
         'x-rauhwpx-request-nonce': randomBytes(24).toString('base64url'),
       },
       body: JSON.stringify({ deviceName: String(deviceName ?? '').slice(0, 120) }),
-    });
-    const body = await boundedJson(paired);
+    }, async (paired) => ({ ...(await boundedJson(paired)), responseOk: paired.ok }));
     const pairingCode = clean(body.code, 64);
-    if (!paired.ok || !/^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/.test(pairingCode)
+    if (!body.responseOk || !/^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/.test(pairingCode)
       || clean(body.serverPublicKey, 512) !== publicKey) {
       throw provisionerError('BOOTSTRAP_RECEIPT_INVALID', 'Raucloud worker returned an invalid pairing receipt');
     }
@@ -240,7 +311,11 @@ export function createRailwayCloudProvisioner({
       let created;
       try {
         created = await graphql(SERVICE_CREATE, { input: createInput });
+        if (!clean(created.serviceCreate?.id, 160)) {
+          throw provisionerError('PROVIDER_RESPONSE_INVALID', 'Railway did not return a service id');
+        }
       } catch (createError) {
+        if (!['PROVIDER_UNREACHABLE', 'PROVIDER_RESPONSE_INVALID'].includes(createError.code)) throw createError;
         // Never replay an ambiguous create. Railway may have accepted it before
         // the response was lost; reconcile the deterministic name instead.
         let recovered = null;

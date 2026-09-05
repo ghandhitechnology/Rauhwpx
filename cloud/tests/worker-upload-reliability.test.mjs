@@ -207,3 +207,24 @@ test('worker upload reconciles a commit made by the final allowed chunk attempt'
   assert.equal(chunkCalls, 5);
   assert.equal(initCalls, 6, 'one final init proves the exhausted chunk actually committed');
 });
+
+test('persistent turn completion retries its exact boundary after a lost response', async (t) => {
+  const requests = [];
+  const server = http.createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    requests.push(JSON.parse(Buffer.concat(chunks)));
+    if (requests.length === 1) { request.socket.destroy(); return; }
+    response.setHeader('content-type', 'application/json');
+    response.end(JSON.stringify({ status: 'running', turnsUsed: 1 }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  });
+  const client = new WorkerClient({ baseUrl: `http://127.0.0.1:${server.address().port}`, token: 'worker', sessionId: 'room' });
+  const completion = { outcome: 'completed', boundaryOperationId: 'turn-1-digest' };
+  assert.deepEqual(await client.completeTurn(completion, { retry: true }), { status: 'running', turnsUsed: 1 });
+  assert.deepEqual(requests, [completion, completion]);
+});

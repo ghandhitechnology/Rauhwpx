@@ -50,6 +50,31 @@ test('obsolete queued input expires before transmission', async () => {
   await queue.close();
 });
 
+test('an old connection failure does not discard input entered after reconnecting', async () => {
+  const oldRequest = Promise.withResolvers();
+  const started = Promise.withResolvers();
+  const batches = [];
+  const queue = new CloudInputQueue(async (stream, events) => {
+    batches.push({ stream, events });
+    if (stream === 'old-stream') {
+      started.resolve();
+      await oldRequest.promise;
+    }
+  }, () => 32);
+  const original = queue.enqueue('old-stream', { kind: 'text', text: 'old' });
+  const originalRejected = assert.rejects(original, /old connection closed/);
+  await started.promise;
+  queue.reset();
+  const current = queue.enqueue('new-stream', { kind: 'text', text: 'new' });
+  oldRequest.reject(new Error('old connection closed'));
+  await Promise.all([originalRejected, current]);
+  assert.deepEqual(batches, [
+    { stream: 'old-stream', events: [{ kind: 'text', text: 'old' }] },
+    { stream: 'new-stream', events: [{ kind: 'text', text: 'new' }] },
+  ]);
+  await queue.close();
+});
+
 test('silent streams are cancelled, while heartbeat bytes satisfy liveness', async () => {
   let cancelled = false;
   await assert.rejects(readStreamChunk({ read: () => new Promise(() => {}), cancel: async () => { cancelled = true; } }, 10), { code: 'ETIMEDOUT' });

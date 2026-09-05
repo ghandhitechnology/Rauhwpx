@@ -17,7 +17,6 @@ export function canSelectCloudWorkspace(
   options: { locked?: boolean; emptyThread?: boolean } = {},
 ): boolean {
   if (options.locked) return false;
-  if (options.emptyThread === false && mode === 'local') return false;
   return mode === 'cloud' || !localTurnRunning;
 }
 
@@ -46,7 +45,7 @@ export function shouldShowCloudComposerSwitch(
     browserPaired?: boolean;
   },
 ): boolean {
-  if (!options.emptyThread || !options.hasSupportedDocument || !snapshot.available) return false;
+  if (!options.hasSupportedDocument || !snapshot.available) return false;
   if (options.browserPaired === false) return false;
   return true;
 }

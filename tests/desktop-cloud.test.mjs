@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { EventEmitter } from 'node:events';
+import { promises as fs } from 'node:fs';
 import { access, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { PassThrough } from 'node:stream';
@@ -866,6 +867,41 @@ test('result resolution replaces unchanged origins and preserves conflicts', asy
   assert.deepEqual(await readFile(windowsOriginal), cloud);
   assert.deepEqual(await readFile(userBackup), Buffer.from('user-owned-backup'));
 });
+
+for (const externalAction of ['save', 'delete']) {
+test(`publication preserves an origin ${externalAction} during replacement preparation`, async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-publish-race-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const originalPath = path.join(directory, 'report.hwpx');
+  const recoveryPath = path.join(directory, 'recovery.hwpx');
+  await writeFile(originalPath, 'original');
+  await writeFile(recoveryPath, 'cloud-result');
+  const actualRead = fs.readFile;
+  let changed = false;
+  t.mock.method(fs, 'readFile', async (filePath, ...options) => {
+    const bytes = await actualRead(filePath, ...options);
+    if (!changed && String(filePath).endsWith('.tmp')) {
+      changed = true;
+      if (externalAction === 'save') await writeFile(originalPath, 'external edit');
+      else await rm(originalPath);
+    }
+    return bytes;
+  });
+  const result = await applyCloudRecovery({
+    recoveryPath, originalPath,
+    originalDigest: sha256Hex(Buffer.from('original')),
+    resultDigest: sha256Hex(Buffer.from('cloud-result')),
+    action: 'replace', resolutionId: 'publication-race',
+  });
+  assert.equal(changed, true);
+  assert.equal(result.conflict, true);
+  assert.equal(result.action, 'keep-both');
+  assert.equal(await readFile(result.path, 'utf8'), 'cloud-result');
+  if (externalAction === 'save') assert.equal(await readFile(originalPath, 'utf8'), 'external edit');
+  else await assert.rejects(readFile(originalPath), { code: 'ENOENT' });
+  assert.equal((await readdir(directory)).some((name) => name.endsWith('.tmp')), false);
+});
+}
 
 test('client rotates tokens, verifies server pin, and parses SSE frames', async () => {
   const profile = normalizeCloudProfile({

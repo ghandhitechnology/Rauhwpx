@@ -210,7 +210,7 @@ export async function runSession({
     : 0;
   let turnNumber = Math.max(0, Number(manifest.limits?.turnsUsed) || 0, recoveredCompletedTurn);
   let revision = Math.max(0, Number(stableRecovery?.revision) || 0);
-  let activeWorkflow = manifest.executionConfig?.workflow === 'plan' ? 'plan' : 'direct';
+  let activeWorkflow = ['plan', 'question'].includes(manifest.executionConfig?.workflow) ? manifest.executionConfig.workflow : 'direct';
   let latestCheckpoint = null;
   let savedDocumentRevision = null;
   let lastAutosaveCheck = 0;
@@ -364,7 +364,7 @@ export async function runSession({
         throw runtimeError('FINISH_PROTOCOL_UNAVAILABLE', 'Worker atomic finish claim is unavailable');
       }
       const claim = await waitForHealthyOperation((signal) => client.finishClaim({ signal }));
-      if (claim?.workflow === 'direct' || claim?.workflow === 'plan') activeWorkflow = claim.workflow;
+      if (['direct', 'plan', 'question'].includes(claim?.workflow)) activeWorkflow = claim.workflow;
       if (claim?.takeoverRequested === true) {
         return { outcome: await acknowledgeTakeover(latestCheckpoint?.boundary?.operationId ?? stableRecovery?.operationId) };
       }
@@ -555,6 +555,14 @@ export async function runSession({
               await client.suspend('LEASE_ENDED', 'Cloud lease ended after saving the document');
               return { suspended: true, timelinePath };
             }
+            // Waiting providers are already at a safe boundary. Continue to
+            // honor controls without requiring the user to answer the wait.
+            const control = typeof client.control === 'function'
+              ? await waitForHealthyOperation((signal) => client.control({ signal })) : {};
+            if (control.redirectRequested || control.pauseRequested || control.takeoverRequested || control.endRequested) {
+              waitState = { status: 'cancelled', redirectRequested: control.redirectRequested === true };
+              break;
+            }
             if (Date.now() - lastAutosaveCheck >= 2_000) {
               lastAutosaveCheck = Date.now();
               await saveBoundary('operation', nextTurnNumber);
@@ -565,8 +573,8 @@ export async function runSession({
           if (Date.now() >= deadline) throw runtimeError('DURATION_LIMIT', 'Cloud session reached its duration limit');
           const resolution = waitState?.resolution;
           if (waitState?.status === 'cancelled' || resolution?.action === 'cancel') {
-            endedDuringWait = true;
-            outcome = { stopReason: 'interrupted', redirected: false };
+            endedDuringWait = waitState?.redirectRequested !== true;
+            outcome = { stopReason: 'interrupted', redirected: waitState?.redirectRequested === true };
             break;
           }
           const waitKind = String(outcome.wait.kind ?? '');
@@ -616,8 +624,8 @@ export async function runSession({
         }
         const completed = await client.completeTurn({
           outcome: redirected ? 'redirected' : endedDuringWait ? 'stopped' : 'completed',
-          boundaryOperationId: latestCheckpoint?.boundary.operationId ?? boundary.operationId,
-        });
+          boundaryOperationId: boundary.operationId,
+        }, { retry: manifest.persistent === true });
         if (completed?.status === 'suspended') {
           return { suspended: true, timelinePath };
         }

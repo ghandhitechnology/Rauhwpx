@@ -508,7 +508,7 @@ function installCloudDocumentRuntimeApi(agentBridge: AgentBridge): void {
         && agent !== 'grok' && agent !== 'cursor') throw new Error('Cloud runtime provider is unsupported');
       const threadId = String(input?.threadId ?? '');
       if (!threadId || threadId.length > 256) throw new Error('Cloud runtime thread id is invalid');
-      const workflow = input?.workflow === 'plan' ? 'plan' : 'direct';
+      const workflow = input?.workflow === 'plan' || input?.workflow === 'question' ? input.workflow : 'direct';
       if (input?.permissionProfile !== 'unrestricted') {
         throw new Error('Cloud runtime requires the unrestricted permission profile');
       }
@@ -551,7 +551,7 @@ function installCloudDocumentRuntimeApi(agentBridge: AgentBridge): void {
     },
     setWorkflow(secret: unknown, workflow: unknown) {
       requireSecret(secret);
-      if (workflow !== 'direct' && workflow !== 'plan') throw new Error('Cloud runtime workflow is invalid');
+      if (workflow !== 'direct' && workflow !== 'plan' && workflow !== 'question') throw new Error('Cloud runtime workflow is invalid');
       agentBridge.setWorkflow(workflow);
       return { workflow };
     },
@@ -2189,6 +2189,10 @@ async function createNewDocument(): Promise<void> {
 }
 
 async function canReplaceCurrentDocument(skipUnsavedGuard?: boolean): Promise<boolean> {
+  if (cloudAuthorityTransitionCount > 0 && skipUnsavedGuard !== true) {
+    showToast({ message: 'Cloud 전송과 문서 권한 전환이 끝난 뒤 문서를 바꿀 수 있습니다.', durationMs: 2600 });
+    return false;
+  }
   if (agentEditingLease.active) {
     showToast({ message: '에이전트가 편집을 마친 뒤 문서를 바꿀 수 있습니다.', durationMs: 2600 });
     return false;

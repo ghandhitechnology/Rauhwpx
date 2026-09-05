@@ -55,7 +55,7 @@ export function readTimeline(value, manifest, now = Date.now) {
     messages: [],
   };
   thread.agent = provider;
-  thread.workflow = execution?.workflow === 'plan' ? 'plan' : 'direct';
+  thread.workflow = ['plan', 'question'].includes(execution?.workflow) ? execution.workflow : 'direct';
   thread.updatedAt = Math.max(Number(thread.updatedAt) || 0, timestamp);
   thread.model = typeof execution?.model === 'string' && execution.model
     ? execution.model

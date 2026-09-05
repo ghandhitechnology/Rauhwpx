@@ -35,7 +35,7 @@ async function exclusiveCopy(bytes, requestedPath) {
   throw new Error('Could not find an unused name for the cloud result');
 }
 
-async function replaceFile(targetPath, bytes, platform) {
+async function replaceFile(targetPath, bytes, platform, expectedDigest = null) {
   const temp = path.join(path.dirname(targetPath), `.${path.basename(targetPath)}.cloud-${randomUUID()}.tmp`);
   const originalMode = await fs.stat(targetPath).then((details) => details.mode & 0o777, () => null);
   await fs.writeFile(temp, bytes, { mode: 0o600 });
@@ -44,12 +44,25 @@ async function replaceFile(targetPath, bytes, platform) {
     await fs.rm(temp, { force: true });
     throw new Error('Replacement file failed verification');
   }
+  // Preparing and verifying the replacement can take long enough for another
+  // editor to save. Check again before replacing the origin.
+  if (expectedDigest !== null) {
+    const current = await fs.readFile(targetPath).catch((error) => {
+      if (error?.code === 'ENOENT') return null;
+      throw error;
+    });
+    if (!current || sha256(current) !== expectedDigest) {
+      await fs.rm(temp, { force: true });
+      return false;
+    }
+  }
   if (platform !== 'win32') {
     await fs.rename(temp, targetPath);
     if (originalMode !== null) await fs.chmod(targetPath, originalMode);
-    return;
+    return true;
   }
   await replaceFileWindowsSafe(temp, targetPath, platform);
+  return true;
 }
 
 export async function applyCloudRecovery({
@@ -89,9 +102,12 @@ export async function applyCloudRecovery({
 
   let destination;
   if (effectiveAction === 'replace') {
-    if (!alreadyApplied) await replaceFile(originalPath, bytes, platform);
-    destination = originalPath;
-  } else {
+    if (!alreadyApplied && !await replaceFile(originalPath, bytes, platform, originalDigest)) {
+      effectiveAction = 'keep-both';
+      conflict = true;
+    } else destination = originalPath;
+  }
+  if (effectiveAction === 'keep-both') {
     let requestedPath = cloudConflictPath(originalPath, now);
     if (typeof resolutionId === 'string' && resolutionId) {
       const parsed = path.parse(originalPath);

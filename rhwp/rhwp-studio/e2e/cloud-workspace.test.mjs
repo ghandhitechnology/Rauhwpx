@@ -74,6 +74,8 @@ function installDesktopCloudMock() {
   let displayListener = null;
   let leaseOwned = false;
   let publicationFailures = 0;
+  let idle = false;
+  let transferredTimeline = null;
 
   const binding = (sessionId) => sessionId === editorSessionId
     ? {
@@ -137,10 +139,10 @@ function installDesktopCloudMock() {
             acquiredAt: '2026-08-30T00:00:00.000Z',
           }
         : { owner: 'local' },
-      session: session(activeSessionId),
-      sessions: [session(editorSessionId), session(selectedSessionId)],
+      session: idle ? { kind: 'idle' } : session(activeSessionId),
+      sessions: idle ? [] : [session(editorSessionId), session(selectedSessionId)],
       queuedMessages: [],
-      timeline: {
+      timeline: idle ? null : transferredTimeline ?? {
         schema: 'rauhwpx.cloud.timeline',
         version: 1,
         exportedAt: '2026-08-30T00:00:00.000Z',
@@ -183,6 +185,14 @@ function installDesktopCloudMock() {
     editorSessionId,
     selectedSessionId,
     failNextPublication() { publicationFailures += 1; },
+    resetIdle() {
+      idle = true;
+      leaseOwned = false;
+      transferredTimeline = null;
+      activeSessionId = editorSessionId;
+      cloudListener?.({ snapshot: snapshot() });
+    },
+    getEditorScope() { return structuredClone(editorScope); },
     activateLease() {
       leaseOwned = true;
       cloudListener?.({ snapshot: snapshot() });
@@ -243,6 +253,19 @@ function installDesktopCloudMock() {
       record('cloudGetState', payload);
       editorScope = { threadId: payload.threadId, documentId: payload.documentId };
       if (payload.selectedSessionId) activeSessionId = payload.selectedSessionId;
+      return { snapshot: snapshot() };
+    },
+    async cloudSetTransferIntent(payload) {
+      record('cloudSetTransferIntent', payload);
+      return { snapshot: snapshot() };
+    },
+    async cloudTransfer(payload) {
+      record('cloudTransfer', payload);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      editorScope = { threadId: payload.threadId, documentId: payload.documentId };
+      transferredTimeline = structuredClone(payload.timeline);
+      idle = false;
+      leaseOwned = true;
       return { snapshot: snapshot() };
     },
     async cloudCommand(payload) {
@@ -597,6 +620,113 @@ try {
     method: 'cloudCloseDisplay',
     payload: { connectionId: 'display-session-cloud-b' },
   }]);
+  // Restore a real saved local conversation, then hand it off through the composer.
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => Boolean(window.__wasm && window.__canvasView && window.__agentBridge));
+  await page.evaluate(async () => {
+    window.__cloudWorkspaceHarness.resetIdle();
+    const response = await fetch('/samples/hwpx/form-002.hwpx');
+    window.__eventBus.emit('open-document-bytes', {
+      bytes: new Uint8Array(await response.arrayBuffer()), fileName: 'form-002.hwpx',
+      suppressDialogs: true, skipUnsavedGuard: true,
+    });
+  });
+  await page.waitForFunction(() => Boolean(window.__cloudWorkspaceHarness.getEditorScope()?.documentId));
+  await page.evaluate(async () => {
+    const { createEmptyThread, upsertThread } = await import('/src/agent/threads.ts');
+    const scope = window.__cloudWorkspaceHarness.getEditorScope();
+    const thread = createEmptyThread({
+      agent: 'codex', model: 'gpt-5.6', effort: 'high', serviceTier: 'standard',
+      docKey: 'form-002.hwpx', documentId: scope.documentId,
+    });
+    thread.title = 'Local handoff regression';
+    thread.workflow = 'question';
+    thread.messages = [
+      { role: 'user', text: 'Keep the document unchanged while we discuss.', messageId: 'local-history-1' },
+      { role: 'assistant', text: 'We can revise the heading after agreeing on the wording.', agent: 'codex' },
+    ];
+    upsertThread(thread);
+  });
+  await page.$eval('#agent-sidebar .ag-threads-btn', (node) => node.click());
+  await page.waitForFunction(() => [...document.querySelectorAll('.ag-threads-item')]
+    .some((node) => node.textContent.includes('Local handoff regression')));
+  await page.evaluate(() => [...document.querySelectorAll('.ag-threads-item')]
+    .find((node) => node.textContent.includes('Local handoff regression')).click());
+  await page.waitForFunction(() => document.querySelector('.ag-cloud-handoff')?.hidden === false);
+  const beforeHandoff = await page.evaluate(() => {
+    const input = document.querySelector('.ag-composer textarea');
+    input.value = 'Use the wording we agreed on in the cloud.';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    return Array.from(window.__wasm.exportHwp()).join(",");
+  });
+  // Selecting an execution location must preserve the draft without starting work.
+  await page.$eval('[data-workspace-mode="cloud"]', (node) => node.click());
+  assert.equal(await page.evaluate(() => window.__cloudWorkspaceHarness.calls
+    .filter((call) => call.method === 'cloudTransfer').length), 0);
+  await page.$eval('[data-workspace-mode="local"]', (node) => node.click());
+  await page.$eval('.ag-cloud-handoff', (node) => { node.click(); node.click(); });
+  await page.waitForFunction(() => window.__cloudWorkspaceHarness.calls
+    .filter((call) => call.method === 'cloudTransfer').length === 1);
+  await page.waitForFunction(() => !document.querySelector('.ag-composer textarea')?.disabled);
+  const handoff = await page.evaluate(() => {
+    const request = window.__cloudWorkspaceHarness.calls.find((call) => call.method === 'cloudTransfer').payload;
+    return {
+      history: request.timeline.thread.messages.map((message) => message.text),
+      workflow: request.workflow,
+      initialMessage: request.initialMessage,
+      draft: document.querySelector('.ag-composer textarea').value,
+      text: Array.from(window.__wasm.exportHwp()).join(","),
+      readOnly: document.documentElement.dataset.documentReadOnly,
+    };
+  });
+  assert.deepEqual(handoff.history, [
+    'Keep the document unchanged while we discuss.',
+    'We can revise the heading after agreeing on the wording.',
+    'Use the wording we agreed on in the cloud.',
+  ]);
+  assert.equal(handoff.workflow, 'question');
+  assert.equal(handoff.initialMessage.text, handoff.history.at(-1));
+  assert.notEqual(handoff.initialMessage.id, 'local-history-1');
+  assert.equal(handoff.draft, '');
+  assert.equal(handoff.text, beforeHandoff);
+  assert.equal(handoff.readOnly, 'true');
+  // Slash-menu selection must change the Cloud workflow without requiring a local provider connection.
+  for (const workflow of ['build', 'question']) {
+    await page.$eval('.ag-composer textarea', (node, workflow) => {
+      node.value = `/${workflow}`;
+      node.dispatchEvent(new Event('input', { bubbles: true }));
+      node.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+    }, workflow);
+    await page.waitForFunction((expected) => {
+      const input = document.querySelector('.ag-composer textarea');
+      return input && !input.disabled && document.querySelector('#agent-sidebar').dataset.workflow === expected;
+    }, {}, workflow === 'build' ? 'direct' : workflow);
+  }
+  assert.deepEqual(await page.evaluate(() => window.__cloudWorkspaceHarness.calls
+    .filter((call) => call.method === 'cloudCommand' && call.payload.command === 'workflow')
+    .map((call) => call.payload.payload.workflow)), ['direct', 'question']);
+  const priorCommands = await page.evaluate(() => window.__cloudWorkspaceHarness.calls
+    .filter((call) => call.method === 'cloudCommand' && call.payload.command === 'queue-message').length);
+  for (const text of ['Keep the original formatting.', 'Also revise the second heading.']) {
+    await page.$eval('.ag-composer textarea', (node, text) => {
+      node.value = text;
+      node.closest('form').requestSubmit();
+    }, text);
+    await page.waitForFunction(() => {
+      const input = document.querySelector('.ag-composer textarea');
+      return input && !input.disabled && input.value === '';
+    });
+  }
+  const followups = await page.evaluate((priorCommands) => window.__cloudWorkspaceHarness.calls
+    .filter((call) => call.method === 'cloudCommand' && call.payload.command === 'queue-message')
+    .slice(priorCommands).map((call) => call.payload), priorCommands);
+  assert.deepEqual(followups.map((request) => request.message), [
+    'Keep the original formatting.', 'Also revise the second heading.',
+  ]);
+  assert.equal(new Set(followups.map((request) => request.messageId)).size, 2);
+  assert.ok(followups.every((request) => request.sessionId === 'session-editor-a'));
+  assert.equal(await page.evaluate(() => Array.from(window.__wasm.exportHwp()).join(",")), beforeHandoff);
+  console.log('PASS existing conversation handoff, double-click protection, read-only question workflow, multi-turn cloud messages, and unchanged local document');
   assert.deepEqual(pageErrors, []);
   console.log(JSON.stringify({ initial, cloudVisual, restored, closeCalls }, null, 2));
 } finally {

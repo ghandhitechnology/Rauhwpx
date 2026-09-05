@@ -43,7 +43,7 @@ export const TRANSFER_LIMITS = Object.freeze({
   chunkBytes: 4 * 1024 ** 2,
 });
 
-export const EXECUTION_WORKFLOWS = Object.freeze(['direct', 'plan']);
+export const EXECUTION_WORKFLOWS = Object.freeze(['direct', 'plan', 'question']);
 
 export class CloudError extends Error {
   constructor(code, message, status = 400, details = undefined) {

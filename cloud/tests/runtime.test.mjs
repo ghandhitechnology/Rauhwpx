@@ -47,7 +47,7 @@ test('database migrates with WAL, FULL sync, and foreign keys', async (t) => {
     journalMode: 'wal',
     synchronous: 2,
     foreignKeys: 1,
-    migrationVersion: 11,
+    migrationVersion: 13,
   });
 });
 
@@ -83,13 +83,22 @@ test('existing version-one state upgrades without losing resources or event sequ
     INSERT INTO session_events(session_id, seq, type, payload_json, created_at)
     VALUES ('session', 7, 'legacy.event', '{}', 1)
   `).run();
+  for (const id of ['z-first', 'a-second']) {
+    legacy.prepare(`
+      INSERT INTO session_messages(id, session_id, device_id, content, status, created_at)
+      VALUES (?, 'session', 'device', ?, 'queued', 1)
+    `).run(id, id);
+  }
   legacy.close();
 
   const upgraded = openDatabase(filename);
   t.after(() => upgraded.close());
-  assert.equal(databasePragmas(upgraded).migrationVersion, 11);
+  assert.equal(databasePragmas(upgraded).migrationVersion, 13);
   assert.equal(upgraded.prepare(`SELECT next_event_seq FROM sessions WHERE id = 'session'`).get().next_event_seq, 8);
   assert.equal(upgraded.prepare(`SELECT name FROM session_resources WHERE session_id = 'session'`).get().name, 'doc.hwp');
+  assert.deepEqual(upgraded.prepare(`
+    SELECT id FROM session_messages WHERE session_id = 'session' ORDER BY queue_sequence
+  `).all().map(({ id }) => id), ['z-first', 'a-second']);
   assert.equal(upgraded.prepare(`SELECT COUNT(*) AS count FROM pragma_table_info('sessions') WHERE name IN ('execution_config_json', 'pause_requested_at', 'finishing_at')`).get().count, 3);
   assert.equal(upgraded.prepare(`SELECT COUNT(*) AS count FROM pragma_table_info('access_tokens') WHERE name = 'generation'`).get().count, 1);
   assert.equal(upgraded.prepare(`SELECT COUNT(*) AS count FROM pragma_table_info('refresh_tokens') WHERE name = 'activated_at'`).get().count, 1);
@@ -1019,4 +1028,133 @@ test('session runtime invalidation clears transient display state across worker 
   });
   sessions.publishResult('session_display_complete', { blobId: result.id, size: result.size });
   assert.equal(frames.capability('session_display_complete'), null);
+});
+
+async function persistentRoomFixture(t, options = {}) {
+  const fixtureState = await fixture(t, options);
+  const { auth, blobs, sessions } = fixtureState;
+  const origin = await pairedDevice(auth);
+  sessions.setProviderStatus('codex', { available: true, version: '1' });
+  const document = await upload(blobs, origin.device.id, Buffer.from('queue regression document'));
+  const session = sessions.createSession(origin.device, parseSessionCreate({
+    sessionId: 'session_queue_regression', provider: 'codex', goal: 'Finish the original task', persistent: true,
+    clientContext: { threadId: 'queue-thread', documentId: 'queue-document' },
+    originDocument: { blobId: document.id, name: 'document.hwpx', size: document.size },
+  }));
+  sessions.executeCommand(origin.device, session.id, parseCommand({
+    commandId: 'activate_queue_regression', type: 'session.activate', payload: { expectedVersion: session.stateVersion },
+  }));
+  sessions.claimNextSession();
+  return { ...fixtureState, origin, session };
+}
+
+test('queued messages retain acceptance order when clocks tie or move backwards', async (t) => {
+  let now = 1_800_000_000_000;
+  const { sessions, origin, session } = await persistentRoomFixture(t, { now: () => now });
+  for (const messageId of ['z-first', 'a-second', 'b-third']) {
+    sessions.executeCommand(origin.device, session.id, parseCommand({
+      commandId: `queue_${messageId}`, type: 'message.queue', payload: { messageId, content: messageId },
+    }));
+    if (messageId === 'a-second') now -= 1_000;
+  }
+  for (const expected of ['z-first', 'a-second', 'b-third']) {
+    assert.equal(sessions.claimFinish(session.id).messages[0].id, expected);
+    sessions.completeTurn(session.id);
+  }
+  assert.equal(sessions.claimFinish(session.id).waiting, true);
+});
+
+test('an interrupted initial turn remains runnable before queued follow-ups', async (t) => {
+  const { sessions, blobs, origin, session } = await persistentRoomFixture(t);
+  sessions.beginTurn(session.id, { turnNumber: 1 });
+  const checkpoint = await upload(blobs, origin.device.id, Buffer.from('first operation saved'));
+  const timeline = await upload(blobs, origin.device.id, Buffer.from('{"history":"partial first turn"}'), {
+    name: 'timeline.json', kind: 'timeline',
+  });
+  await sessions.commitBoundary(session.id, {
+    operationId: 'initial_operation', turnNumber: 1, revision: 1, kind: 'operation',
+    checkpoint: { blobId: checkpoint.id, size: checkpoint.size }, timeline: { blobId: timeline.id, size: timeline.size },
+  });
+  sessions.executeCommand(origin.device, session.id, parseCommand({
+    commandId: 'queue_after_initial', type: 'message.queue', payload: { content: 'Then edit the footer' },
+  }));
+  sessions.requeueInterruptedSession(session.id, 'worker_crash');
+  sessions.claimNextSession();
+  assert.equal(sessions.workerManifest(session.id).latestCheckpoint.kind, 'operation');
+  assert.deepEqual(sessions.claimFinish(session.id).messages, [{
+    id: null, content: 'Finish the original task', initial: true,
+  }]);
+  sessions.beginTurn(session.id, { turnNumber: 1 });
+  sessions.completeTurn(session.id);
+  assert.equal(sessions.claimFinish(session.id).messages[0].content, 'Then edit the footer');
+});
+
+test('stopping a waiting turn cancels its durable decision and rejects blank inputs', async (t) => {
+  const { sessions, origin, session } = await persistentRoomFixture(t);
+  sessions.beginTurn(session.id, { turnNumber: 1 });
+  const wait = sessions.createWait(session.id, { turnNumber: 1, kind: 'question', payload: { question: 'Which title?' } });
+  sessions.completeTurn(session.id, { outcome: 'redirected' });
+  assert.equal(sessions.waitState(session.id, wait.id).status, 'cancelled');
+  for (const type of ['message.queue', 'turn.redirect']) {
+    assert.throws(() => sessions.executeCommand(origin.device, session.id, parseCommand({
+      commandId: `blank_${type}`, type, payload: { content: ' \n\t ' },
+    })), { code: 'INVALID_REQUEST' });
+  }
+});
+
+test('retrying a committed turn completion does not consume another turn', async (t) => {
+  const { sessions, blobs, origin, session } = await persistentRoomFixture(t);
+  sessions.beginTurn(session.id, { turnNumber: 1 });
+  const checkpoint = await upload(blobs, origin.device.id, Buffer.from('completed turn document'));
+  const timeline = await upload(blobs, origin.device.id, Buffer.from('{"history":"completed turn"}'), {
+    name: 'timeline.json', kind: 'timeline',
+  });
+  await sessions.commitBoundary(session.id, {
+    operationId: 'completed_turn_boundary', turnNumber: 1, revision: 1, kind: 'turn',
+    checkpoint: { blobId: checkpoint.id, size: checkpoint.size }, timeline: { blobId: timeline.id, size: timeline.size },
+  });
+  const completion = { outcome: 'completed', boundaryOperationId: 'completed_turn_boundary' };
+  const first = sessions.completeTurn(session.id, completion);
+  assert.deepEqual(sessions.completeTurn(session.id, completion), first);
+  assert.equal(sessions.getSession(session.id).turnsUsed, 1);
+  assert.throws(() => sessions.completeTurn(session.id, { ...completion, outcome: 'redirected' }), {
+    code: 'TURN_IDENTITY_CONFLICT',
+  });
+});
+
+test('question workflows remain read-only mode through creation, dispatch, and durable turns', async (t) => {
+  const { sessions, session, origin } = await persistentRoomFixture(t);
+  const createdInput = parseSessionCreate({
+    sessionId: 'question_protocol', provider: 'codex', goal: 'Explain the document', persistent: true,
+    clientContext: { threadId: 'question-thread', documentId: 'question-document' },
+    originDocument: { blobId: session.originDocument.sha256, name: 'document.hwpx', size: session.originDocument.size },
+    executionConfig: { model: 'gpt-5.6-sol', effort: 'high', permissionProfile: 'unrestricted', workflow: 'question' },
+  });
+  assert.equal(createdInput.executionConfig.workflow, 'question');
+  sessions.claimFinish(session.id);
+  sessions.executeCommand(origin.device, session.id, parseCommand({
+    commandId: 'switch_to_question', type: 'conversation.workflow',
+    payload: { expectedVersion: sessions.getSession(session.id).stateVersion, workflow: 'question' },
+  }));
+  assert.equal(sessions.workerManifest(session.id).executionConfig.workflow, 'question');
+  assert.equal(sessions.claimFinish(session.id).workflow, 'question');
+  assert.equal(sessions.beginTurn(session.id, { turnNumber: 1, mode: 'question' }).mode, 'question');
+  const wait = sessions.createWait(session.id, { turnNumber: 1, kind: 'question', payload: { question: 'Which section?' } });
+  assert.equal(sessions.waitState(session.id, wait.id).status, 'pending');
+});
+
+test('question workflow migration preserves active turns and pending decisions with foreign keys enabled', async (t) => {
+  const { sessions, session, database } = await persistentRoomFixture(t);
+  const turn = sessions.beginTurn(session.id, { turnNumber: 1, mode: 'plan' });
+  const wait = sessions.createWait(session.id, { turnNumber: 1, kind: 'plan-approval', payload: { planId: 'existing-plan' } });
+  const migration = await fs.readFile(path.resolve(import.meta.dirname, '../migrations/013_question_workflow.sql'), 'utf8');
+  database.exec('BEGIN IMMEDIATE');
+  database.exec(migration);
+  database.exec('COMMIT');
+  assert.deepEqual(database.prepare('PRAGMA foreign_key_check').all(), []);
+  assert.equal(sessions.getSession(session.id).currentTurnId, turn.id);
+  assert.equal(sessions.waitState(session.id, wait.id).status, 'pending');
+  assert.equal(sessions.waitState(session.id, wait.id).payload.planId, 'existing-plan');
+  sessions.completeTurn(session.id, { outcome: 'stopped' });
+  assert.equal(sessions.beginTurn(session.id, { turnNumber: 2, mode: 'question' }).mode, 'question');
 });

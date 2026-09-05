@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { readFile, rm } from 'node:fs/promises';
 import { hostname } from 'node:os';
@@ -2065,7 +2066,7 @@ export class CloudCoordinator extends EventEmitter {
 
   async #command({ sessionId, command, expectedVersion, payload = {}, message, messageId, attachments = [] }, profileEpoch) {
     const queuedMessageId = (command === 'queue-message' || command === 'redirect') && message
-      ? String(messageId ?? `message-${Date.now()}`)
+      ? String(messageId ?? `message-${randomUUID()}`)
       : null;
     if (!Array.isArray(attachments) || attachments.length > 10
       || (attachments.length > 0 && !['queue-message', 'redirect'].includes(command))) {
@@ -2116,10 +2117,9 @@ export class CloudCoordinator extends EventEmitter {
     }
     let takeover = null;
     if (localHandoff && queuedMessageId) {
-      const latest = await this.#store.get(localHandoff.id);
-      if (!(latest.queuedMessages ?? []).some((entry) => entry.id === queuedMessageId)) {
-        await this.#store.patch(localHandoff.id, {
-          queuedMessages: [
+      await this.#store.patch(localHandoff.id, (latest) => ({
+        queuedMessages: (latest.queuedMessages ?? []).some((entry) => entry.id === queuedMessageId)
+          ? latest.queuedMessages : [
             ...(latest.queuedMessages ?? []),
             {
               id: queuedMessageId,
@@ -2128,8 +2128,7 @@ export class CloudCoordinator extends EventEmitter {
               state: 'queued',
             },
           ],
-        });
-      }
+      }));
     }
     let result;
     try {
@@ -2144,10 +2143,19 @@ export class CloudCoordinator extends EventEmitter {
       this.#assertProfileEpoch(profileEpoch);
     } catch (error) {
       if (localHandoff && queuedMessageId) {
-        const latest = await this.#store.get(localHandoff.id);
-        await this.#store.patch(localHandoff.id, {
-          queuedMessages: (latest.queuedMessages ?? []).filter((entry) => entry.id !== queuedMessageId),
-        });
+        const updated = await this.#store.patch(localHandoff.id, (latest) => ({
+          queuedMessages: (latest.queuedMessages ?? []).filter((entry) => (
+            entry.id !== queuedMessageId || entry.state === 'accepted'
+          )),
+        }));
+        if (updated.queuedMessages.some((entry) => entry.id === queuedMessageId && entry.state === 'accepted')) {
+          const snapshot = await this.snapshot({
+            selectedSessionId: sessionId,
+            extra: { commandResult: { messageId: queuedMessageId, status: 'accepted' } },
+          });
+          this.#emit({ type: 'command-completed', command, snapshot });
+          return snapshot;
+        }
       }
       throw error;
     }
@@ -2569,11 +2577,6 @@ export class CloudCoordinator extends EventEmitter {
       const state = serverState === 'purged'
         ? (['downloading', 'downloaded'].includes(current.state) ? current.state : 'expired')
         : cloudState(serverState, current.state);
-      const queuedMessages = event.type === 'message.accepted'
-        ? (current.queuedMessages ?? []).map((message) => (
-            message.id === source.messageId ? { ...message, state: 'accepted' } : message
-          ))
-        : current.queuedMessages;
       const pauseRequested = event.type === 'session.pause_requested'
         ? true
         : state !== 'running'
@@ -2620,13 +2623,16 @@ export class CloudCoordinator extends EventEmitter {
         if (!pendingOriginPublications.includes(source.operationId)) {
           pendingOriginPublications = [...pendingOriginPublications, source.operationId];
           // Persist the explicit request before advancing the event cursor.
-          current = await this.#store.patch(handoffId, { pendingOriginPublications });
+          current = await this.#store.patch(handoffId, (latest) => ({
+            pendingOriginPublications: (latest.pendingOriginPublications ?? []).includes(source.operationId)
+              ? latest.pendingOriginPublications : [...(latest.pendingOriginPublications ?? []), source.operationId],
+          }));
         }
       }
       const updated = await this.#store.applyEvent(handoffId, {
         sequence: event.sequence,
         state,
-        patch: {
+        patch: (latest) => ({
           serverVersion: source.stateVersion ?? source.version ?? current.serverVersion,
           statusMessage: source.statusMessage ?? source.message ?? source.reason?.message ?? null,
           suspendedCode: source.suspendedReason?.code ?? source.reason?.code ?? current.suspendedCode,
@@ -2643,10 +2649,14 @@ export class CloudCoordinator extends EventEmitter {
           takeoverBoundary: source.boundary ?? current.takeoverBoundary,
           executionPhase: source.executionPhase ?? current.executionPhase ?? null,
           currentWait,
-          queuedMessages,
-          pendingTurnBoundary,
-          pendingOriginPublications,
-        },
+          ...(event.type === 'message.accepted' ? {
+            queuedMessages: (latest.queuedMessages ?? []).map((message) => (
+              message.id === source.messageId ? { ...message, state: 'accepted' } : message
+            )),
+          } : {}),
+          pendingTurnBoundary: latest.pendingTurnBoundary ?? null,
+          pendingOriginPublications: latest.pendingOriginPublications ?? [],
+        }),
       });
       this.#assertProfileEpoch(profileEpoch);
       this.#emit({
@@ -3232,10 +3242,9 @@ export class CloudCoordinator extends EventEmitter {
             const pending = (await this.#store.get(handoffId))?.pendingOriginPublications ?? [];
             for (const operationId of pending) {
               await this.publishCheckpoint({ sessionId, operationId });
-              const latest = await this.#store.get(handoffId);
-              await this.#store.patch(handoffId, {
-                pendingOriginPublications: (latest?.pendingOriginPublications ?? []).filter((id) => id !== operationId),
-              });
+              await this.#store.patch(handoffId, (latest) => ({
+                pendingOriginPublications: (latest.pendingOriginPublications ?? []).filter((id) => id !== operationId),
+              }));
             }
           }
           if (this.#timelinePending.get(sessionId)) {
@@ -3305,29 +3314,29 @@ export class CloudCoordinator extends EventEmitter {
       bytes: checkpoint.bytes,
       expectedDigest: checkpoint.sha256,
     });
-    const latest = await this.#store.get(handoffId);
-    const archives = Array.isArray(latest?.turnArchives) ? latest.turnArchives : [];
-    const turnArchives = [
-      ...archives.filter((entry) => entry?.operationId !== boundary.operationId),
-      {
-        operationId: boundary.operationId,
-        turn: boundary.turnNumber,
-        revision: boundary.revision,
-        path: archivePath,
-        sha256: checkpoint.sha256,
-        size: checkpoint.size,
-        syncedAt: new Date().toISOString(),
-      },
-    ].sort((left, right) => left.turn - right.turn);
-    const patch = {
-      lastSyncedBoundaryOperation: boundary.operationId,
-      lastSyncedTurn: boundary.turnNumber,
-      lastSyncedRevision: boundary.revision,
-      pendingTurnBoundary: latest?.pendingTurnBoundary?.operationId === boundary.operationId
-        ? null : latest?.pendingTurnBoundary ?? null,
-      turnArchives,
-    };
-    const updated = await this.#store.patch(handoffId, patch);
+    const updated = await this.#store.patch(handoffId, (latest) => {
+      const archives = Array.isArray(latest?.turnArchives) ? latest.turnArchives : [];
+      const turnArchives = [
+        ...archives.filter((entry) => entry?.operationId !== boundary.operationId),
+        {
+          operationId: boundary.operationId,
+          turn: boundary.turnNumber,
+          revision: boundary.revision,
+          path: archivePath,
+          sha256: checkpoint.sha256,
+          size: checkpoint.size,
+          syncedAt: new Date().toISOString(),
+        },
+      ].sort((left, right) => left.turn - right.turn);
+      return {
+        lastSyncedBoundaryOperation: boundary.operationId,
+        lastSyncedTurn: boundary.turnNumber,
+        lastSyncedRevision: boundary.revision,
+        pendingTurnBoundary: latest?.pendingTurnBoundary?.operationId === boundary.operationId
+          ? null : latest?.pendingTurnBoundary ?? null,
+        turnArchives,
+      };
+    });
     this.#emit({
       type: 'turn-autosynced',
       sessionId,
@@ -3347,7 +3356,9 @@ export class CloudCoordinator extends EventEmitter {
     const pending = current?.pendingTurnBoundary;
     if (!pending) return current;
     if (current.lastSyncedBoundaryOperation === pending.operationId) {
-      return this.#store.patch(handoffId, { pendingTurnBoundary: null });
+      return this.#store.patch(handoffId, (latest) => ({
+        pendingTurnBoundary: latest.pendingTurnBoundary?.operationId === pending.operationId ? null : latest.pendingTurnBoundary,
+      }));
     }
     return this.#syncTurnBoundary(sessionId, handoffId, pending);
   }

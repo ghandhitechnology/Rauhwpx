@@ -326,7 +326,7 @@ test('an active Local turn cannot expose a Cloud composer target before authorit
   assert.equal(mode, 'cloud');
 
   assert.equal(canSelectCloudWorkspace('local', false, { locked: true }), false);
-  assert.equal(canSelectCloudWorkspace('local', false, { emptyThread: false }), false);
+  assert.equal(canSelectCloudWorkspace('local', false, { emptyThread: false }), true);
   assert.equal(canSelectLocalWorkspace(true), false);
   assert.equal(canSelectLocalWorkspace(false), true);
 });
@@ -524,7 +524,7 @@ test('account force-quit is offered for leftover runs and active-elsewhere locks
   assert.equal(shouldOfferAccountForceQuit(snapshot(sessions.find((session) => session.kind === 'running')!)), true);
 });
 
-test('composer Cloud switch stays hidden until an empty supported document chat can start', () => {
+test('composer Cloud switch supports handing off existing document conversations', () => {
   const idle = snapshot({ kind: 'idle' });
   assert.equal(shouldShowCloudComposerSwitch(idle, {
     emptyThread: true,
@@ -533,7 +533,7 @@ test('composer Cloud switch stays hidden until an empty supported document chat 
   assert.equal(shouldShowCloudComposerSwitch(idle, {
     emptyThread: false,
     hasSupportedDocument: true,
-  }), false);
+  }), true);
   assert.equal(shouldShowCloudComposerSwitch(idle, {
     emptyThread: true,
     hasSupportedDocument: false,

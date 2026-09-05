@@ -1,7 +1,7 @@
 import './cloud-ui.css';
 
 import type { PortableCloudTimelineV1 } from '../../cloud/timeline.ts';
-import type { AgentStreamEvent } from '../../agent/types.ts';
+import type { AgentStreamEvent, AgentWorkflow } from '../../agent/types.ts';
 import type { CloudController } from '../../cloud/desktop-cloud.ts';
 import { browserCloudSupported } from '../../cloud/browser-cloud.ts';
 import type {
@@ -177,7 +177,7 @@ export interface CloudAgentUi {
   bindSelectedTimeline(): Promise<boolean>;
   matchesTarget(target: CloudCommandTarget): boolean;
   setWorkflow(
-    workflow: 'direct' | 'plan',
+    workflow: AgentWorkflow,
     target: CloudCommandTarget,
   ): Promise<CloudCommandTarget>;
   queueMessage(
