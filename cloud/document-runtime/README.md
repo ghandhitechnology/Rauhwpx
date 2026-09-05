@@ -20,6 +20,13 @@ The harness registers each Studio session through the hub's owner endpoint and s
 
 ## Session display
 
+The worker opens `/document.html`, a document-only shell served by the harness.
+It reuses the existing Studio build, WASM, fonts, and images without rebuilding
+them. The shell keeps the initialization nodes required by the shared editor,
+but hides application chrome before first paint and gives the document the full
+viewport. This also applies to `/` and `/index.html` on the worker's loopback
+server. Normal Studio builds and authenticated resource downloads are unchanged.
+
 Each cloud session attempts one virtual desktop startup (`SessionDisplay` in `session-display.mjs`). The worker fixes the browser mode from that result before launching Studio. A ready display launches headed Chromium at the display's exact dimensions with its `DISPLAY` / `XAUTHORITY`; an unavailable display launches headless Chromium and never opens a frame capability for that harness.
 
 The live Studio viewer is demand-driven. Its frame stream may open before Studio, but ffmpeg starts only after the document and chat runtime are ready; viewer demand before then remains waiting. ffmpeg stays in the worker process group. Graceful teardown signals the direct child with `SIGTERM`, then `SIGKILL`; abrupt worker teardown is owned by LocalRunner or Podman.

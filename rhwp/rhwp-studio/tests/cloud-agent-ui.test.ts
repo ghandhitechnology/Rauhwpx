@@ -12,15 +12,16 @@ const main = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
 const desktop = readFileSync(new URL('../src/desktop-integration.ts', import.meta.url), 'utf8');
 const cloudStart = readFileSync(new URL('../src/cloud/cloud-start.ts', import.meta.url), 'utf8');
 
-test('empty-thread composer exposes a Local/Cloud switch and starts Cloud on first Send', () => {
-  assert.match(sidebar, /ag-composer-mode-row/);
-  assert.match(sidebar, /ag-cloud-mode-badge/);
+test('composer supports Local/Cloud selection after setup and starts Cloud on first Send', () => {
+  assert.match(sidebar, /cloudUi\.optionsElement\.append/);
+  assert.doesNotMatch(sidebar, /ag-cloud-mode-badge|ag-composer-mode-row/);
+  assert.match(sidebar, /cloudSend/);
   assert.match(sidebar, /function startCloudFromFirstMessage/);
   assert.match(sidebar, /CLOUD_UNSAVED_MESSAGE/);
   assert.match(cloudStart, /클라우드 사용 전 문서를 저장해주세요/);
   assert.match(sidebar, /execution\.kind === 'cloud-start'/);
   assert.match(sidebar, /if \(currentDocumentId && !input\.value && !referenceLibrary\.hasDrafts\(\)\) void deleteCloudComposerDraft/);
-  assert.match(sidebarCss, /\.ag-composer-mode-row/);
+  assert.match(sidebarCss, /\.ag-send-cloud/);
   assert.match(sidebarCss, /\.ag-cloud-start-placeholder/);
   assert.doesNotMatch(sidebar, /클라우드로 계속/);
 });

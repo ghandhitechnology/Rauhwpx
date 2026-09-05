@@ -204,7 +204,7 @@ test('cloud workspace switch stays hidden for logged-out documents without a clo
   assert.equal(shouldShowCloudWorkspaceSwitch(otherDocument, scope), false);
 });
 
-test('cloud workspace switch appears for signed-in users and stays hidden until account status is known', () => {
+test('cloud workspace switch stays hidden for signed-in users without a document cloud session', () => {
   const scope = { threadId: baseSession.threadId, documentId: baseSession.documentId };
   const signedIn = {
     ...snapshot({ kind: 'idle' }),
@@ -216,7 +216,7 @@ test('cloud workspace switch appears for signed-in users and stays hidden until 
       updatedAt: '2026-08-30T00:00:00.000Z',
     },
   };
-  assert.equal(shouldShowCloudWorkspaceSwitch(signedIn, scope), true);
+  assert.equal(shouldShowCloudWorkspaceSwitch(signedIn, scope), false);
   assert.equal(shouldShowCloudWorkspaceSwitch(snapshot({ kind: 'idle' }), scope), false);
   assert.equal(shouldShowCloudWorkspaceSwitch({ ...signedIn, available: false }, scope), false);
 });

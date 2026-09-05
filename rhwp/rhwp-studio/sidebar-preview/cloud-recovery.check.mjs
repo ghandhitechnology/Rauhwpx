@@ -6,13 +6,40 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   await page.waitForFunction(() => window.sidebarPreview?.cloud && !document.querySelector('.ag-input').disabled);
   await page.click('[aria-label="프로바이더 선택"]');
   await page.click('.ag-provider-item[data-agent="codex"]');
-  await page.evaluate(() => [...document.querySelectorAll('.ag-workspace-mode-option')].find((node) => node.textContent === '클라우드').click());
+  assert.equal(await page.$eval('.ag-composer-mode-switch', (node) => node.hidden), true);
+  assert.equal(await page.$('.ag-cloud-handoff'), null);
+  assert.equal(await page.$('.ag-new-local-chat'), null);
+  assert.equal(await page.$('.ag-composer-mode-row'), null);
+  assert.equal(await page.$('.ag-cloud-mode-badge'), null);
+  const composerHeight = await page.$eval('.ag-composer', (node) => node.getBoundingClientRect().height);
+  await page.screenshot({ path: resolve(artifacts, 'cloud-composer-before-setup.png') });
+  await page.click('.ag-cloud-btn');
+  await page.waitForSelector('.ag-cloud-setup-footer .ag-primary', { visible: true });
+  await page.click('.ag-cloud-setup-footer .ag-primary');
+  await page.waitForFunction(() => window.sidebarPreview.workspace.mode() === 'cloud');
+  assert.equal(await page.$eval('.ag-composer-mode-switch', (node) => node.hidden), false);
+  assert.equal(await page.$eval('.ag-send', (node) => node.dataset.icon), 'cloudSend');
+  assert.equal(await page.$eval('.ag-composer', (node) => node.getBoundingClientRect().height), composerHeight);
+  await page.click('.ag-cloud-btn');
+  await page.waitForSelector('.ag-cloud-panel:not([hidden])', { visible: true });
+  await page.click('[data-workspace-mode="local"]');
+  await page.waitForFunction(() => document.querySelector('.ag-send').dataset.icon === 'send');
+  await page.click('[data-workspace-mode="cloud"]');
+  await page.waitForFunction(() => document.querySelector('.ag-send').dataset.icon === 'cloudSend');
+  await page.screenshot({ path: resolve(artifacts, 'cloud-floating-options.png') });
+  await page.click('.ag-cloud-panel-close');
+  await page.select('#theme', 'dark');
+  await page.click('.ag-input');
+  await page.screenshot({ path: resolve(artifacts, 'cloud-send-dark.png') });
+  await page.select('#theme', 'light');
+
   await page.type('.ag-input', '이 제안서의 예산 표를 검토해 주세요.');
   await page.click('.ag-send');
   await page.waitForFunction(() => window.sidebarPreview.cloud.calls.transfers.length === 1
     && window.sidebarPreview.cloud.controller.getSnapshot().session.kind === 'running'
     && !document.querySelector('.ag-input').disabled);
-  await page.evaluate(() => [...document.querySelectorAll('.ag-workspace-mode-option')].find((node) => node.textContent === '클라우드').click());
+  assert.equal(await page.$eval('.ag-cloud-panel', (node) => node.hidden), true);
+  await page.click('[data-document-view="cloud"]');
   await page.waitForFunction(() => document.querySelector('#cloud-workspace').dataset.displayState === 'live');
   const original = await page.evaluate(() => {
     const cloud = window.sidebarPreview.cloud;
@@ -20,6 +47,18 @@ export async function checkCloudRecovery(page, origin, artifacts) {
     return { ...session, startId: cloud.calls.transfers[0].startId,
       frame: document.querySelector('.cloud-workspace-image').src };
   });
+  assert.equal(await page.$('.cloud-workspace-toolbar'), null);
+  assert.equal(await page.$eval('.cloud-workspace-zoom', (node) => {
+    const root = node.closest('#cloud-workspace').getBoundingClientRect();
+    const viewport = node.closest('#cloud-workspace').querySelector('.cloud-workspace-viewport').getBoundingClientRect();
+    const rect = node.getBoundingClientRect();
+    return getComputedStyle(node).position === 'absolute' && Math.abs(viewport.top - root.top) < 1
+      && rect.right <= root.right && rect.top >= root.top;
+  }), true);
+  await page.click('[data-cloud-zoom="in"]');
+  await page.click('[data-cloud-zoom="out"]');
+  await page.click('[data-cloud-zoom="reset"]');
+  await page.click('[data-cloud-zoom="fit"]');
   await page.screenshot({ path: resolve(artifacts, 'cloud-live.png') });
   await page.click('[data-document-view="local"]');
   assert.equal(await page.evaluate(() => window.sidebarPreview.workspace.workspaceView()), 'local');
@@ -70,6 +109,13 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   await page.click('.ag-input');
   await page.evaluate(() => window.sidebarPreview.cloud.commitTurn());
   await page.waitForFunction(() => !document.querySelector('.ag-cloud-merge-button').hidden);
+  assert.equal(await page.$eval('.ag-cloud-panel', (node) => node.hidden), true);
+  assert.equal(await page.$eval('.ag-composer', (node) => node.getBoundingClientRect().height), composerHeight);
+  assert.equal(await page.$eval('.ag-cloud-document-controls', (node) => {
+    const composer = node.closest('.ag-composer').getBoundingClientRect();
+    const rect = node.getBoundingClientRect();
+    return rect.bottom < composer.top && rect.left >= composer.left && rect.right <= composer.right;
+  }), true);
   await page.screenshot({ path: resolve(artifacts, 'cloud-merge-ready.png') });
   await page.click('[data-document-view="local"]');
   await page.click('.ag-cloud-merge-button');
@@ -105,6 +151,14 @@ export async function checkCloudRecovery(page, origin, artifacts) {
       const rect = button.getBoundingClientRect();
       return rect.left >= bounds.left && rect.right <= bounds.right && rect.height >= 32
         && button.scrollWidth <= button.clientWidth + 1;
+    });
+  }), true);
+  assert.equal(await page.$eval('.ag-cloud-document-controls', (node) => {
+    const bounds = node.getBoundingClientRect();
+    return [...node.querySelectorAll('button')].filter((button) => button.checkVisibility()).every((button) => {
+      const rect = button.getBoundingClientRect();
+      return rect.left >= bounds.left && rect.right <= bounds.right && rect.top >= bounds.top
+        && rect.bottom <= bounds.bottom && button.scrollWidth <= button.clientWidth + 1;
     });
   }), true);
   await page.screenshot({ path: resolve(artifacts, 'cloud-disconnected-narrow-dark.png') });
@@ -230,10 +284,12 @@ export async function checkCloudRecovery(page, origin, artifacts) {
 
   // A fresh local chat keeps the Cloud lease and conversation running, while
   // the local composer and retained editor copy become usable.
-  await page.click('.ag-cloud-panel-close');
+  await page.evaluate(() => document.querySelector('.ag-cloud-panel-close').click());
   await page.screenshot({ path: resolve(artifacts, 'cloud-new-local-chat.png') });
   await page.evaluate(() => window.sidebarPreview.cloud.blockRefresh(true));
-  await page.click('.ag-new-local-chat');
+  await page.evaluate(() => document.querySelector('.ag-header .ag-threads-btn').click());
+  await page.waitForSelector('.ag-threads-new', { visible: true });
+  await page.evaluate(() => document.querySelector('.ag-threads-new').click());
   await page.waitForFunction(() => !document.querySelector('.ag-input').disabled
     && window.sidebarPreview.workspace.mode() === 'local', { timeout: 1000 });
   assert.equal(await page.evaluate(() => document.documentElement.dataset.cloudLease), 'local');
@@ -333,6 +389,22 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   assert.equal(reopened.documentText, 'Archived Cloud edits after the original transfer.');
   assert.equal(reopened.transfer.timeline.thread.messages.filter((message) => message.messageId === pendingRestart.cloudStartId).length, 1);
   assert.equal(reopened.threads.find((thread) => thread.id === pendingRestart.id).cloudRestartSourceSessionId, undefined);
+  // Existing local conversations hand off through the document Cloud setup action.
+  await page.goto(`${origin}/?cloud=1&reset=1`, { waitUntil: 'networkidle0' });
+  await page.waitForFunction(() => window.sidebarPreview?.cloud && !document.querySelector('.ag-input').disabled);
+  await page.click('[aria-label="프로바이더 선택"]');
+  await page.click('.ag-provider-item[data-agent="codex"]');
+  await page.type('.ag-input', '문서의 소개 문단을 검토해 주세요.');
+  await page.click('.ag-send');
+  await page.waitForFunction(() => window.sidebarPreview.bridge.isTurnRunning());
+  await page.waitForFunction(() => !window.sidebarPreview.bridge.isTurnRunning());
+  assert.equal(await page.$eval('.ag-composer-mode-switch', (node) => node.hidden), true);
+  await page.click('.ag-cloud-btn');
+  await page.waitForSelector('.ag-cloud-setup-footer .ag-primary', { visible: true });
+  await page.click('.ag-cloud-setup-footer .ag-primary');
+  await page.waitForFunction(() => window.sidebarPreview.cloud.calls.transfers.length === 1);
+  assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.transfers[0].timeline.thread.messages
+    .some((message) => message.text === '문서의 소개 문단을 검토해 주세요.')), true);
   console.log(`Cloud panel opened in ${Math.round(panelMs)}ms; fixture reconnect restored the preview in ${Math.round(reconnectMs)}ms`);
   await page.goto(`${origin}/?width=480`, { waitUntil: 'networkidle0' });
 }

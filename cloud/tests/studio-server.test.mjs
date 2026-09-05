@@ -5,11 +5,14 @@ import path from 'node:path';
 import test from 'node:test';
 import { startStudioServer } from '../document-runtime/studio-harness.mjs';
 
-test('cloud editor disables Translate only in its root HTML and preserves reference bytes', async (t) => {
+test('cloud document shell reuses built assets and preserves reference bytes', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'cloud-studio-shell-'));
-  const html = '<!doctype html><html lang="ko"><head><title>문서</title></head><body>내용</body></html>';
+  const html = '<!doctype html><html lang="ko"><head><title>문서</title><script type="module" src="/assets/editor.js"></script></head><body>내용</body></html>';
   await fs.writeFile(path.join(root, 'index.html'), html);
   await fs.writeFile(path.join(root, 'reference.html'), html);
+  await fs.mkdir(path.join(root, 'assets'));
+  const asset = 'export const engine = "shared build";';
+  await fs.writeFile(path.join(root, 'assets', 'editor.js'), asset);
   const { server, origin } = await startStudioServer({
     studioRoot: root, bootstrap: 'test-bootstrap',
     resources: new Map([['document', path.join(root, 'index.html')]]),
@@ -18,16 +21,20 @@ test('cloud editor disables Translate only in its root HTML and preserves refere
     await new Promise((resolve) => server.close(resolve));
     await fs.rm(root, { recursive: true, force: true });
   });
-  for (const route of ['/', '/index.html']) {
+  for (const route of ['/', '/index.html', '/document.html']) {
     const response = await fetch(`${origin}${route}`);
     const served = await response.text();
     assert.match(served, /<head><meta name="google" content="notranslate">/);
+    assert.match(served, /<style id="cloud-document-shell">/);
+    assert.match(served, /src="\/assets\/editor.js"/);
+    assert.match(served, /#editor-area > :not\(#scroll-container\)/);
     assert.equal(Number(response.headers.get('content-length')), Buffer.byteLength(served));
     const head = await fetch(`${origin}${route}`, { method: 'HEAD' });
     assert.equal(head.headers.get('content-length'), response.headers.get('content-length'));
     assert.equal(await head.text(), '');
   }
   assert.equal(await (await fetch(`${origin}/reference.html`)).text(), html);
+  assert.equal(await (await fetch(`${origin}/assets/editor.js`)).text(), asset);
   assert.equal(await (await fetch(`${origin}/_runtime/resource/document?bootstrap=test-bootstrap`)).text(), html);
   assert.equal(await fs.readFile(path.join(root, 'index.html'), 'utf8'), html);
 });
