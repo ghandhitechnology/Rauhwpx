@@ -2,7 +2,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 
 export const CLOUD_DAILY_LIMIT_MS = 60 * 60 * 1000;
 export const CLOUD_GRACE_LIMIT_MS = 30 * 60 * 1000;
-export const CLOUD_WARM_IDLE_MS = 5 * 60 * 1000;
+export const CLOUD_WARM_IDLE_MS = 20 * 60 * 1000;
 export const CLOUD_HEARTBEAT_LEASE_MS = 90 * 1000;
 export const CLOUD_ALLOCATION_LEASE_MS = 30 * 60 * 1000;
 export const CLOUD_TIMEZONE_CHANGE_MS = 30 * 24 * 60 * 60 * 1000;
