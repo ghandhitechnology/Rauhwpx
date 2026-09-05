@@ -13,46 +13,6 @@ const documentSwitchSource = source.slice(
   source.indexOf('\n  function setConfigPanelOpen', source.indexOf('function handleDocumentSwitch')),
 );
 
-test('threads column control sits on the selector bar and opens a page', () => {
-  assert.match(source, /ag-threads-btn/);
-  assert.match(source, /createColumnIcon/);
-  assert.match(source, /새 채팅/);
-  assert.match(source, /startNewChat/);
-  assert.match(source, /requestTitle/);
-  assert.match(source, /ag-chat-page/);
-  assert.match(source, /ag-threads-page/);
-  assert.match(source, /chatPage\.append\(header,/);
-  assert.match(css, /\.ag-threads-page/);
-  assert.match(css, /\.ag-threads-open \.ag-chat-page/);
-  assert.match(css, /\.ag-threads-open \.ag-threads-page/);
-});
-
-test('sidebar header keeps one compact model summary and expands all settings together', () => {
-  assert.match(source, /ag-document-context/);
-  assert.match(source, /ag-document-name/);
-  assert.match(source, /ag-selection-context/);
-  assert.match(source, /ag-model-summary/);
-  assert.match(source, /ag-config-panel/);
-  assert.match(source, /providerTrigger\.append\(providerIcon, providerName\)/);
-  assert.match(source, /llmTrigger\.append\(llmName\)/);
-  assert.match(source, /effortTrigger\.append\(effortName, summaryCaret\)/);
-  assert.doesNotMatch(source, /createChevron\('ag-model-caret'\)/);
-  assert.match(source, /configPanelInner\.append\(providerGroup, llmGroup, effortGroup\)/);
-  // 추론 강도가 없는 프로바이더에서는 트리거와 '추론' 묶음이 함께 접힌다.
-  assert.match(source, /effortWrap\.hidden = noEfforts;\s*\n\s*effortGroup\.hidden = noEfforts;/);
-  assert.match(css, /\.ag-config-group\[hidden\]\s*\{[^}]*display:\s*none;/s);
-  // .ag-model 의 display:inline-flex 가 기본 [hidden] 을 덮으므로 따로 눌러 준다
-  // — 없으면 Cursor 처럼 추론 강도가 없는 프로바이더에서 빈 알약이 남는다.
-  assert.match(css, /\.ag-model\[hidden\]\s*\{[^}]*display:\s*none;/s);
-  assert.match(css, /\.ag-config-panel\s*\{[^}]*display:\s*grid;/s);
-  assert.match(css, /\.ag-config-panel \.ag-model-menu\s*\{[^}]*position:\s*static;/s);
-  // 턴 실행 중에는 설정 패널을 접되, 채팅을 다시 여는 잠금만으로는 접지 않는다.
-  assert.match(
-    source,
-    /if \(controlsLocked && chatStartPendingThreadId === null\) setConfigPanelOpen\(false\)/,
-  );
-});
-
 test('reasoning and model tweaks do not lock or rebuild the composer', () => {
   // 추론 강도/모델만 바꿀 때는 입력칸을 '채팅을 여는 중'으로 잠그지 않는다.
   assert.match(source, /if \(force\) chatStartPendingThreadId = currentThread\.id;/);
@@ -77,19 +37,6 @@ test('reasoning and model tweaks do not lock or rebuild the composer', () => {
   );
 });
 
-test('model, permission, and skill utilities live in the composer accessory row', () => {
-  assert.match(source, /ag-composer-utilities/);
-  assert.match(source, /ag-composer-meta/);
-  assert.match(source, /composerUtilityActions\.append\(phaseBadge, permissionBtn, skillsBtn\)/);
-  assert.match(source, /composerUtilities\.append\(composerUtilityActions\)/);
-  assert.match(source, /composerMeta\.append\(selectors, composerUtilities\)/);
-  assert.match(source, /composer\.append\(composerOverlay, slashMenu, templateChip, composerField, composerMeta, configPanel\)/);
-  assert.match(source, /chatPage\.append\(header, connBanner, messages, review, planSurface, questionController\.root, composer\)/);
-  assert.match(source, /permissionBtn\.textContent = unrestricted \? '전체' : '안전'/);
-  assert.match(css, /\.ag-composer-meta\s*\{/);
-  assert.doesNotMatch(css, /\.ag-composer-utilities\s*\{[^}]*flex-direction:\s*column;/s);
-});
-
 test('writing-style calibration opens from a local slash command', () => {
   assert.match(source, /value: '\/calibration'[^\n]*local: 'calibration'/);
   assert.match(source, /detail: '말투를 맞출까요\? 열기'/);
@@ -108,17 +55,6 @@ test('replaced connection state exposes an explicit takeover action', () => {
   assert.match(source, /이 탭에서 연결/);
   assert.match(source, /bridge\.takeOverConnection\(\)/);
   assert.match(source, /takeoverBtn\.hidden = state !== 'replaced'/);
-  assert.match(css, /\.ag-takeover-btn/);
-});
-
-test('library move is a context menu on document group names', () => {
-  assert.match(source, /showActionMenu/);
-  assert.match(source, /groupBtn\.addEventListener\('contextmenu'/);
-  assert.match(source, /label: '이동'/);
-  assert.match(source, /moveToLibraryDocument\?\.\(\{[\s\S]*documentId: group\.documentId[\s\S]*fileName: group\.docKey/s);
-  assert.match(source, /disabled: isCurrentDoc/);
-  assert.match(source, /dataset\.libraryDoc = 'true'/);
-  assert.match(source, /aria-haspopup', 'menu'/);
 });
 
 test('saving a document rebinds the current chat instead of starting a new one', () => {

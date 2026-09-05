@@ -1,6 +1,6 @@
-# rhwp-agent — AI agent bridge
+# Rauhwpx agent hub
 
-Local bridge that lets Claude, Codex, Pi, Grok, Cursor, and OpenCode agents read and edit the HWP/HWPX
+Local hub that lets a supported AI provider read and edit the HWP/HWPX
 document open in rhwp-studio via MCP tools. The hub owns chat workflow state,
 local downloads, and a Browserbase sidecar; live-document logic still runs in
 the browser (studio).
@@ -16,8 +16,8 @@ mcp-stdio.mjs ──────┴── ws://127.0.0.1:5175/mcp┘        ├�
 
 ## Requirements
 
-- Node ≥ 22.18
-- rhwp-studio dev server (step 2 below)
+- Node 22.18 or newer
+- The dependency setup and WASM build in [CONTRIBUTING.md](../../CONTRIBUTING.md)
 
 Claude, Codex, Pi, Grok, Cursor, and OpenCode can be installed from Studio **Settings → Connection**.
 Each provider setup opens as a modal and shows its supported authentication methods. OpenCode accepts an API key in Studio and detects credentials created by `opencode auth login`.
@@ -25,29 +25,19 @@ OpenCode runs through its native ACP subprocess. Rauhwpx discovers the live `pro
 
 ## Run
 
-Paths are relative to the repository root.
+Run these commands from the repository root after completing setup:
 
-1. **Start the hub**
+```sh
+npm run dev:studio
+```
 
-   ```sh
-   npm start       # from the repository root; returns when healthz is ready
-   # check: curl http://127.0.0.1:5175/healthz
-   # stop:  npm stop
-   ```
+Studio runs at http://127.0.0.1:7700 and starts its own authenticated hub on an ephemeral port. You do not need a separate hub for this development mode.
 
-   The hub detaches, so the terminal is free. Logs: `.run/rhwp-agent.log`.
-   Foreground (old behavior): `npm run start:fg`, or `cd rhwp-agent && npm start`.
-   From the studio directory: `cd rhwp-studio && npm run agent` (foreground).
+For standalone hub development, `npm start` at the root starts a background hub at http://127.0.0.1:5175 and logs to `.run/rhwp-agent.log`. Use `npm run status`, `npm stop` or `npm run start:fg` to manage it. Running `npm start` inside `rhwp/rhwp-agent/` runs the hub in the foreground.
 
-2. **Start the studio dev server**
+AI requests send prompts and any document content read by the agent to your selected provider. Browserbase and web tools use external services.
 
-   ```sh
-   cd rhwp-studio
-   npm install     # first time only
-   npm run dev     # http://127.0.0.1:7700
-   ```
-
-3. **Use it in the browser**
+1. **Use it in the browser**
 
    - Open http://127.0.0.1:7700 and load a document.
    - The header of the right-hand "AI agent" sidebar shows the connection state
@@ -60,29 +50,29 @@ Paths are relative to the repository root.
    - Pick a connected provider, type an instruction, press Enter
      (Shift+Enter for a newline; "Stop" interrupts a running turn).
 
-4. **Agent activity in the chat log** — document tools, reads, commands, file
+2. **Agent activity in the chat log** — document tools, reads, commands, file
    changes, and web operations appear as expandable rows: spinner while
    running, then ✓/✕, with the tool name, arguments, and result preview.
 
-5. **Autonomous document edits** — semantic edits remain visible as tinted live
-   changes while the agent verifies its work, then commit only after an explicitly
-   successful turn as one undo step. Failed, interrupted, and unknown outcomes roll
+3. **Autonomous document edits** — semantic edits remain visible as tinted live
+   changes while the agent verifies its work. Safe mode holds successful edits
+   for review; Full access commits them as one undo step. Failed, interrupted, and unknown outcomes roll
    staged edits back. Raw engine batches commit atomically as one undo step and restore
    the exact snapshot on failure.
 
-6. **Core tools and permissions** — provider backends can use project files,
+4. **Core tools and permissions** — provider backends can use project files,
    shell commands, and web search/fetch in addition to the rhwp document tools.
-   New chats start in **Safe** mode. Live-document MCP writes still work
-   autonomously with editor undo history; file and shell tools stay inside the project.
+   New chats start in **Safe** mode. Staged document edits wait for review;
+   file and shell tools stay inside the project.
    The permission button can switch an idle chat to **Full access** after a
    warning; the provider session resumes with the new boundary. Full access
    can reach files anywhere on the laptop.
 
-7. **Product skills** — type `/` to browse enabled rhwp skills, `/skills` to
+5. **Product skills** — type `/` to browse enabled rhwp skills, `/skills` to
    open the library, or `/skill-create` for the guided creator. These skills
    are shared by all providers but isolated from their global skill folders.
 
-8. **Workflow is separate from permission** — `direct` preserves the existing
+6. **Workflow is separate from permission** — `direct` preserves the existing
    behavior. `plan` progresses through `planning` → `awaiting-approval` →
    `switching` → `implementing`. While planning, provider file tools are
    read-only but live web research, provider subagents, Browserbase, and the
@@ -90,7 +80,7 @@ Paths are relative to the repository root.
    filesystem permission choice. The hub blocks document writes before an
    approved plan regardless of that permission choice.
 
-9. **Subagents and Claude workflows** — Claude sessions expose the native
+7. **Subagents and Claude workflows** — Claude sessions expose the native
    `Agent` and `Workflow` tools in every mode (tool restrictions inherit into
    subagents, so planning stays read-only), plus two rhwp agent types:
    `doc-editor` (owns one paragraph range) and `doc-researcher` (read-only).
@@ -102,7 +92,7 @@ Paths are relative to the repository root.
    events. Studio renders these as fleet cards and auto-rebases disjoint
    parallel document writes (`rebasedParaShift`).
 
-10. **Per-provider capability tuning** — each backend carries briefs and
+8. **Per-provider capability tuning** — each backend carries briefs and
    permissions shaped to its own CLI traits. Grok runs subagent fleets only in
    Full access (its `dontAsk` mode auto-cancels headless spawns), so Safe-mode
    grok works sequentially with a blanket shell deny. Autonomous copy-layout
@@ -386,7 +376,7 @@ must start fresh and observe before retrying. Missing credentials return
 `BROWSERBASE_NOT_CONFIGURED` with the exact variables to set. Browser actions
 do not require per-action confirmation. Development requires Node 22.18 or newer;
 packaged apps run the sidecar through the bundled Electron Node runtime.
-Run `npm run test:browserbase:live` with all three credentials before a release.
+Run `npm run test:browserbase:live` with all three credentials when changing the Browserbase integration. This manual check uses the live service and is not a release gate.
 It creates three fresh sessions and exercises navigation, action, observation,
 instructed extraction, and snapshot extraction against an HTTPS smoke page.
 

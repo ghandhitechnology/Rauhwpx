@@ -3,6 +3,7 @@
 
 지표: tools/task2279/visual_evidence.py 와 동일 (96dpi gray, 임계 이진화 일치율 + IoU).
 """
+import argparse
 import subprocess
 import sys
 from pathlib import Path
@@ -12,7 +13,7 @@ import numpy as np
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-FONTS = Path(r"C:\Users\planet\rhwp\ttfs")
+FONTS = Path(__file__).resolve().parents[2] / "ttfs"
 
 
 def render(exe: str, doc: Path, out_pdf: Path):
@@ -44,10 +45,16 @@ def compare(ref, img):
 
 
 def main():
-    base_exe, head_exe, out_dir = sys.argv[1], sys.argv[2], Path(sys.argv[3])
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("base_exe")
+    ap.add_argument("head_exe")
+    ap.add_argument("out_dir", type=Path)
+    ap.add_argument("--corpus", type=Path, required=True, help="Corpus samples directory")
+    args = ap.parse_args()
+    base_exe, head_exe, out_dir = args.base_exe, args.head_exe, args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
-    hwpdocs = Path(r"C:\Users\planet\hwpdocs\samples")
-    poc = Path(r"C:\Users\planet\rhwp\output\poc\task2246")
+    hwpdocs = args.corpus
+    poc = Path(__file__).resolve().parents[2] / "output/poc/task2246"
     pairs = [
         (hwpdocs / "문화본부 문화예술과" / "36398599_결재문서본문_「동대문구 찾아가는 전통시장」 ’25년 민간축제 정산 결과 보고.hwpx",
          poc / "36398599_h.pdf"),

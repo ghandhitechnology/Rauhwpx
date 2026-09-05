@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
-ROOT = Path(r"C:\Users\planet\rhwp")
+ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "output/poc/task2668"
 WORKER = str(OUT / "fn_geom_worker.py")
 TIMEOUT = 900

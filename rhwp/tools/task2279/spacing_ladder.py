@@ -6,13 +6,14 @@
   - 폰트크기 비례(fs-비례): 0.01/% (em 단위)
   - 글자폭 비례: 0.01×base_em×ratio/%
 """
+from pathlib import Path
 import os
 import sys
 import time
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-OUT_DIR = r"C:\Users\planet\rhwp\output\poc\task2279_advance"
+OUT_DIR = str(Path(__file__).resolve().parents[2] / "output/poc/task2279_advance")
 PDF = os.path.join(OUT_DIR, "spacing_ladder.pdf")
 HWPX = os.path.join(OUT_DIR, "spacing_ladder.hwpx")
 

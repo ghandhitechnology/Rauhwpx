@@ -21,7 +21,7 @@
  * 실행:
  *   cd rhwp-studio
  *   npx vite --host 0.0.0.0 --port 7700 &
- *   node e2e/body-outside-click-fallback.test.mjs --mode=headless
+ *   node e2e/probe-body-outside-click-fallback.mjs --mode=headless
  */
 import { runTest, loadHwpFile, screenshot } from './helpers.mjs';
 

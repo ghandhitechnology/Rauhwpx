@@ -1,55 +1,23 @@
-<p align="center">
-  <img src="assets/logo/logo-256.png" alt="rhwp logo" width="128" />
-</p>
+# Rauhwpx engine and editor
 
-<h1 align="center">rhwp</h1>
+This directory contains the Rust HWP/HWPX engine, the Studio web editor and the local agent hub. Rauhwpx is a fork of [Edward Kim's rhwp](https://github.com/edwardkim/rhwp); the crate and directory names retain that history.
 
-<p align="center">
-  An HWP/HWPX editor with an AI agent sidebar for Claude, Codex, Pi, Grok, Cursor, and OpenCode.
-</p>
+The engine parses, lays out, renders and edits documents. Studio runs the engine through WebAssembly. The native CLI supports document inspection, conversion and export. Real-document regressions live in `samples/` and `tests/`.
 
-## AI agent sidebar
+The agent sidebar uses MCP tools to read and edit the open document. Editing runs locally; AI requests send prompts and the content the agent reads to the selected provider. The Node hub owns provider sessions, permissions, workflow state, downloads and tool routing. Browserbase is an optional external browser service.
 
-`rhwp-studio`, the web editor in this repo, includes a chat sidebar that puts a supported local agent to work on the document you have open:
+## Development
 
-- **Reads the document** through MCP tools — structure, outline, text ranges, selection, fields, search, footnotes, bookmarks, list/format inspection, page rendering, and the live engine edit catalog.
-- **Edits the full engine surface** — semantic tools cover common work, while atomic engine batches expose every classified mutation, including shapes, objects, styles, layout, notes, fields/forms, and advanced tables.
-- **Commits autonomously with undo** — verified semantic edits commit when the turn succeeds; raw engine batches commit atomically. Failed batches restore the exact prior snapshot.
+Follow the clean-checkout setup in [CONTRIBUTING.md](../CONTRIBUTING.md). It installs root, Studio and agent dependencies and builds the required WASM engine. Development requires Node 22.18 or newer, Rust via rustup and wasm-pack 0.15.0.
 
-Everything runs locally: a small Node WebSocket hub (`rhwp-agent/`) bridges the agent CLIs and the browser tab.
+From the repository root, after setup:
 
-```
-provider CLI ──spawn──► mcp-stdio.mjs ──ws──► rhwp-agent hub ◄──ws── rhwp-studio sidebar
-                        (MCP server)         (127.0.0.1:5175)        (chat UI + tool executor)
+```sh
+npm run build:wasm
+npm run dev:studio
 ```
 
-## Quick start
-
-Requirements: Node ≥ 22.18 and the rhwp-studio dependencies installed in step 2. Provider CLIs can be installed and configured later from **Settings → Connection**.
-
-1. **Start the agent hub**
-
-   ```sh
-   npm start       # from the Rauhwpx repo root; background, no attached terminal
-   ```
-
-   Or inside this tree: `cd rhwp-agent && npm start` (foreground).
-
-2. **Start the editor**
-
-   ```sh
-   cd rhwp-studio
-   npm install     # first time only
-   npm run dev     # http://127.0.0.1:7700
-   ```
-
-3. **Open a document and chat** — open http://127.0.0.1:7700, load an HWP or HWPX file, pick a connected provider in the right-hand sidebar, and type an instruction (Enter sends, Shift+Enter adds a line). Tool calls appear inline; successful edits commit automatically and remain undoable.
-
-Configuration, the full tool list, and troubleshooting: [rhwp-agent/README.md](rhwp-agent/README.md).
-
-## The engine underneath
-
-The sidebar is built on **rhwp**, an open-source viewer/editor for the Korean HWP/HWPX document formats, written in Rust and compiled to WebAssembly. All document logic — parsing (HWP 5.0, HWPX, HML), layout, rendering (Canvas2D/CanvasKit), and editing — runs in the browser on the WASM engine; `rhwp-agent` is only a thin local router. The Rust core also provides a CLI for document inspection and SVG/PNG/PDF export.
+Studio starts an authenticated hub automatically. See [rhwp-agent/README.md](rhwp-agent/README.md) for provider configuration, standalone hub work and tool details.
 
 ## License
 

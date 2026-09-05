@@ -16,7 +16,7 @@ from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-ROOT = Path(r"C:\Users\planet\rhwp")
+ROOT = Path(__file__).resolve().parents[1]
 SKEL = ROOT / "samples" / "tac-host-spacing.hwpx"
 OUT_DIR = ROOT / "output" / "poc" / "task2156"
 OUT = OUT_DIR / "width_ladder.hwpx"

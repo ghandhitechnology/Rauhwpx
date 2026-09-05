@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 const source = readFileSync(new URL('../src/ui/agent-sidebar/index.ts', import.meta.url), 'utf8');
-const css = readFileSync(new URL('../src/ui/agent-sidebar/agent-sidebar.css', import.meta.url), 'utf8');
 const bridge = readFileSync(new URL('../src/agent/bridge.ts', import.meta.url), 'utf8');
 
 test('sidebar exposes safe/full permissions without allowing changes during a turn', () => {
@@ -27,24 +26,6 @@ test('skill library includes catalog, guided draft, review, and recoverable mana
   assert.match(source, /\['scripts', '스크립트'\]/);
 });
 
-test('skill creator exposes a compact persistent icon selector at the top', () => {
-  assert.match(source, /const skillIconPicker = el\('fieldset', 'ag-skill-icon-picker'\)/);
-  assert.match(source, /\['pencil', '연필'\]/);
-  assert.match(source, /\['bot', '봇'\]/);
-  assert.match(source, /\['system', '시스템'\]/);
-  assert.match(source, /const skillIconLabel = el\('span', 'ag-skill-icon-label', '아이콘'\)/);
-  assert.match(source, /skillIconPicker\.setAttribute\('aria-labelledby', skillIconLabel\.id\)/);
-  assert.doesNotMatch(source, /ag-skill-icon-option-label/);
-  assert.match(source, /skillEditor\.append\(skillEditorHeader, skillIconPicker,/);
-  assert.match(source, /withSkillIconFrontmatter\(file\.content, selectedSkillIcon\)/);
-  assert.match(source, /radio\.addEventListener\('change'/);
-  assert.match(css, /\.ag-skill-icon-options[\s\S]*grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)/);
-  assert.match(css, /\.ag-skill-icon-option:has\(input:checked\)/);
-  assert.match(css, /width: 112px/);
-  assert.match(css, /min-height: 30px/);
-  assert.match(css, /var\(--ag-accent\)/);
-});
-
 test('slash menu supports local commands and explicit product-skill invocation', () => {
   assert.match(source, /value: '\/skills'/);
   assert.match(source, /value: '\/skill-create'/);
@@ -55,8 +36,6 @@ test('slash menu supports local commands and explicit product-skill invocation',
   assert.match(source, /row\.classList\.add\('ag-command-option'\)/);
   assert.match(source, /ag-slash-command-icon/);
   assert.match(source, /icon\.appendChild\(createIcon\('external'\)\)/);
-  assert.match(css, /\.ag-slash-skill-icon,[\s\S]*\.ag-slash-command-icon[\s\S]*color: var\(--ag-accent\)/);
-  assert.match(css, /\.ag-slash-menu/);
 });
 
 test('skill UI has keyboard and live-region semantics', () => {

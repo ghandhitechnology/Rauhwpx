@@ -1,5 +1,5 @@
+import { browserExecutable, browserLaunchArgs } from './browser-support.ts';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import test from 'node:test';
@@ -7,22 +7,13 @@ import test from 'node:test';
 import puppeteer, { type Browser, type Page } from 'puppeteer-core';
 import { createServer, type ViteDevServer } from 'vite';
 
-const BROWSER_CANDIDATES = [
-  process.env.PUPPETEER_EXECUTABLE_PATH,
-  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-  '/Applications/Chromium.app/Contents/MacOS/Chromium',
-  '/usr/bin/google-chrome',
-  '/usr/bin/chromium',
-].filter((candidate): candidate is string => Boolean(candidate));
-
-const executablePath = BROWSER_CANDIDATES.find(existsSync);
+const executablePath = browserExecutable();
 const studioRoot = fileURLToPath(new URL('../', import.meta.url));
 let server: ViteDevServer | null = null;
 let browser: Browser | null = null;
 let baseUrl = '';
 
 test.before(async () => {
-  if (!executablePath) return;
   server = await createServer({
     root: studioRoot,
     configFile: false,
@@ -42,9 +33,7 @@ test.before(async () => {
   browser = await puppeteer.launch({
     executablePath,
     headless: true,
-    args: process.env.CI || process.env.DEPOT_JOB_URL
-      ? ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
-      : [],
+    args: browserLaunchArgs(),
   });
 });
 
@@ -53,11 +42,8 @@ test.after(async () => {
   await server?.close();
 });
 
-async function openPage(context: test.TestContext): Promise<Page | null> {
-  if (!browser) {
-    context.skip('Chrome or Chromium is unavailable');
-    return null;
-  }
+async function openPage(): Promise<Page> {
+  assert.ok(browser, 'Browser setup did not complete');
   const page = await browser.newPage();
   await page.setViewport({ width: 900, height: 820, deviceScaleFactor: 1 });
   await page.emulateMediaFeatures([{ name: 'prefers-reduced-motion', value: 'reduce' }]);
@@ -201,9 +187,8 @@ async function openPage(context: test.TestContext): Promise<Page | null> {
   return page;
 }
 
-test('closing the page cancels an open merge prompt before it can start work', async (context) => {
-  const page = await openPage(context);
-  if (!page) return;
+test('closing the page cancels an open merge prompt before it can start work', async () => {
+  const page = await openPage();
   try {
     await page.click('.ag-versions-toolbar [data-version-mutation]');
     await page.waitForSelector('.ag-version-prompt-overlay');
@@ -215,9 +200,8 @@ test('closing the page cancels an open merge prompt before it can start work', a
   }
 });
 
-test('branch graph stays operable, directional, locked, and responsive', async (context) => {
-  const page = await openPage(context);
-  if (!page) return;
+test('branch graph stays operable, directional, locked, and responsive', async () => {
+  const page = await openPage();
   try {
     assert.equal(await page.$eval('[data-tab="history"]', (node) => node.textContent), '그래프');
     assert.equal(await page.$eval('[data-commit-id="merge5"]', (node) => node.getAttribute('aria-selected')), 'true');
@@ -323,9 +307,8 @@ test('branch graph stays operable, directional, locked, and responsive', async (
   }
 });
 
-test('creating a commit selects the new commit and shows its options', async (context) => {
-  const page = await openPage(context);
-  if (!page) return;
+test('creating a commit selects the new commit and shows its options', async () => {
+  const page = await openPage();
   try {
     await page.click('[data-commit-id="docs3"]');
     assert.equal(

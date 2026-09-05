@@ -1,5 +1,5 @@
 {
-  "//": "JSDoc 타입 표면만 검사한다 — 스폰 하니스 3개로 범위를 좁힌다. tsc 는 rhwp-studio 의 devDependency 를 쓴다.",
+  "//": "Checks the shared backend event/lifecycle contract and Grok, Cursor, and OpenCode ACP adapters with their local imports. Other provider SDKs and server.mjs are outside this JSDoc boundary.",
   "compilerOptions": {
     "noEmit": true,
     "allowJs": true,
@@ -8,15 +8,20 @@
     "target": "es2022",
     "module": "nodenext",
     "moduleResolution": "nodenext",
-    "types": ["node"],
+    "types": [
+      "node"
+    ],
     "strict": true,
     "noImplicitAny": false,
     "useUnknownInCatchVariables": false
   },
-  "files": [
+  "include": [
     "agents/backend.mjs",
     "agents/grok.mjs",
     "agents/cursor.mjs",
+    "agents/acp-session.mjs",
+    "agents/grok-session-tail.mjs",
+    "agents/provider-user-input.mjs",
     "agents/opencode.mjs"
   ]
 }

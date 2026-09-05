@@ -2,11 +2,11 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-All code lives under `rhwp/` — run every command below from that directory unless noted. Code comments, commit messages, and CLI output are largely in Korean; follow that convention when editing existing files.
+Most engine and editor code lives under `rhwp/`; the Electron shell and repository build commands are at the root. Follow [CONTRIBUTING.md](CONTRIBUTING.md) for setup and focused checks. Code comments, commit messages, and CLI output are largely in Korean; follow that convention when editing existing files.
 
 ## What this is
 
-**rhwp** is a viewer/editor for the Korean HWP/HWPX document formats, written in Rust and compiled to WebAssembly, plus a web editor (`rhwp-studio`) with an AI agent sidebar (`rhwp-agent`) that lets Claude, Codex, Pi, Grok, Cursor, and OpenCode read and edit the open document via MCP tools.
+**Rauhwpx** is a viewer/editor for the Korean HWP/HWPX document formats, written in Rust and compiled to WebAssembly, plus a web editor (`rhwp-studio`) with an AI agent sidebar (`rhwp-agent`) that lets Claude, Codex, Pi, Grok, Cursor, and OpenCode read and edit the open document via MCP tools.
 
 ## Commands
 
@@ -15,7 +15,7 @@ All code lives under `rhwp/` — run every command below from that directory unl
 - Toolchain is pinned by `rust-toolchain.toml` (1.93.1, includes `wasm32-unknown-unknown`).
 - Build: `cargo build`
 - All tests: `cargo test`
-- Single integration test file: `cargo test --test issue_1234_some_name` (tests live in `tests/`, mostly named `issue_NNNN_*` / `pr_NNNN_*` after tracker issues; they load fixtures from `samples/`, ~430 real HWP/HWPX files)
+- Single integration test file: `cargo test --test issue_1234_some_name` (tests live in `tests/`, mostly named `issue_NNNN_*` / `pr_NNNN_*` after tracker issues; they load fixtures from `samples/`)
 - Single test function: `cargo test --test issue_1234_some_name test_fn_name`
 - Lint/format: `cargo clippy`, `cargo fmt` (max_width 100). Clippy policy: `Cargo.toml` deliberately `allow`s many structural lints pending a phased refactor (task 142) — do not "fix" those lints in unrelated changes, and don't tighten the lint table without a dedicated tooling issue.
 - WASM build (produces `pkg/`, consumed by studio): `wasm-pack build --target web` (wasm-pack 0.15.0 is the pinned version; `scripts/prepare-npm.sh` afterwards only for npm publishing)
@@ -25,18 +25,20 @@ All code lives under `rhwp/` — run every command below from that directory unl
 ### rhwp-studio (web editor, from `rhwp/rhwp-studio/`)
 
 - Dev server: `npm run dev` → http://127.0.0.1:7700 (loads the engine from `../pkg/` via the `@wasm` Vite alias — build wasm first)
-- Unit tests: `npm test` (Node test runner; also runs `../npm/editor/tests`)
+- Unit tests: `npm test` runs fast Node tests and `../npm/editor/tests`. Browser integrations run separately with `npm run test:browser`; see `tests/README.md`.
 - Type-check + build: `npm run build`
-- E2E: `npm run e2e:<name>` scripts (puppeteer-core, mostly `--mode=headless`), e.g. `npm run e2e:undo`, `npm run e2e:render-diff`. Manifest check: `npm run e2e:manifest-check`.
+- E2E: `npm run e2e:<name>` scripts (puppeteer-core, mostly `--mode=headless`), e.g. `npm run e2e:undo`, `npm run e2e:render-diff`. Discover scripts with `npm run e2e:list`; validate references with `npm run e2e:check`. See `e2e/README.md`.
 - Rust hot-patching dev loop (Dioxus subsecond): `npm run subsecond:serve` + `npm run dev:subsecond`
 
 ### rhwp-agent (AI sidebar hub, from `rhwp/rhwp-agent/`)
 
-- `npm start` → background WS hub on 127.0.0.1:5175 (`npm stop` to quit; `npm run start:fg` for a foreground process). Then `cd rhwp-studio && npm run dev` and use the sidebar in the browser.
+- `npm start` in this directory runs the hub in the foreground. At the repository root, `npm start` starts a background hub on 127.0.0.1:5175; `npm stop` stops it and `npm run start:fg` runs it in the foreground.
+- Studio development starts its own hub automatically. It does not need a separate `npm start`.
+- `npm run typecheck:acp` checks the shared backend contract, Grok/Cursor/OpenCode ACP modules and their imports. Claude/Codex/Pi and the HTTP/WebSocket hub are outside that checked boundary.
 
 ### Verification tools
 
-`tools/` holds Python harnesses used by fidelity/regression work (e.g. `verify_hwpx.py`, `roundtrip_fidelity_harness.py`, `render_page_gate.py`); `scripts/` has frontend asset/metric checks (`frontend-*.test.mjs`, `renderer_baseline.py`).
+`tools/` holds Python harnesses used by fidelity/regression work (e.g. `verify_hwpx.py`, `roundtrip_fidelity_harness.py`, `render_page_gate.py`); `scripts/` has CI helpers and `renderer_baseline.py`.
 
 ## Architecture
 
@@ -54,11 +56,11 @@ Pipeline: **parser → model → document_core → renderer → serializer**, ex
 
 ### rhwp-studio (`rhwp-studio/src/`)
 
-TypeScript, no UI framework. `engine/` wraps the wasm module; `core/`, `view/`, `command/`, `history/` (undo), `ui/` (dialogs, command palette, `agent-sidebar/`), `hwpctl/`, `embed/`. The `agent/` directory is the studio side of the AI bridge: `bridge.ts` (WS client), `tool-executor.ts` (implements the studio side of the MCP tools against the engine, including the apply_edits batch path), `pending-edits.ts` + `pending-overlay.ts` (verified semantic staging — in **안전 (safe)** profile successful turns hold staged edits for user review; in **전체 접근 (unrestricted)** successful turns auto-commit as a single undo step; failed turns restore in both), plus the registry-generated atomic engine-edit path for every classified mutator.
+TypeScript, no UI framework. `engine/` wraps the wasm module; `core/`, `view/`, `command/`, `history/` (undo), `ui/` (dialogs, command palette, `agent-sidebar/`), `hwpctl/`, `embed/`. The `agent/` directory is the studio side of the AI bridge: `bridge.ts` (WS client), `tool-executor.ts` (implements the studio side of the MCP tools against the engine, including the apply_edits batch path), `pending-edits.ts` + `pending-overlay.ts` (verified semantic staging — in **안전 (safe)** profile successful turns hold staged edits for user review; in **전체 접근 (unrestricted)** successful turns auto-commit as a single undo step; failed turns restore in both), plus registry-generated atomic engine edits for operations in the current capability catalog.
 
 ### rhwp-agent (`rhwp-agent/`)
 
-Thin local Node router — no document logic. `server.mjs` is a WS hub (`/studio`, `/mcp`, `/healthz`); `agents/claude.mjs`, `agents/codex.mjs`, `agents/grok.mjs`, `agents/pi.mjs`, `agents/cursor.mjs`, and `agents/opencode.mjs` spawn their CLIs; shared system briefs live in `agents/backend.mjs`. Each CLI spawns `mcp-stdio.mjs` as its MCP server, which forwards tool calls over WS to the hub and on to the studio tab. MCP tools are named `mcp__rhwp__<name>` and defined in `rhwp-agent/tools.mjs` (tests pin the count): semantic document reads/writes, an `apply_edits` batch write (1–32 edits under one expectedRevision, atomic rollback), and registry-generated `get_engine_edit_capabilities` / `apply_engine_edits` for complete autonomous engine mutation coverage, plus reference, planning, download, and browser tools. **Revision contract**: every read returns a `revision`, every write requires `expectedRevision`; mismatch → `REVISION_MISMATCH` with the current revision and recovery guidance; saving does not bump the revision. Coordinates are body-text based `sectionIdx`/`paraIdx`/`charOffset`, 0-based.
+Local Node hub for provider sessions, authentication, permissions, workflow state, downloads and tool routing. Live-document editing runs in Studio. `server.mjs` is a WS hub (`/studio`, `/mcp`, `/healthz`); `agents/claude.mjs`, `agents/codex.mjs`, `agents/grok.mjs`, `agents/pi.mjs`, `agents/cursor.mjs`, and `agents/opencode.mjs` spawn their CLIs; shared system briefs live in `agents/backend.mjs`. Each CLI spawns `mcp-stdio.mjs` as its MCP server, which forwards tool calls over WS to the hub and on to the studio tab. MCP tools are named `mcp__rhwp__<name>` and defined in `rhwp-agent/tools.mjs`: semantic document reads/writes, an `apply_edits` batch write (1–32 edits under one expectedRevision, atomic rollback), and registry-generated `get_engine_edit_capabilities` / `apply_engine_edits` for engine operations listed in the capability catalog, plus reference, planning, download, and browser tools. **Revision contract**: every read returns a `revision`, every write requires `expectedRevision`; mismatch → `REVISION_MISMATCH` with the current revision and recovery guidance; saving does not bump the revision. Coordinates are body-text based `sectionIdx`/`paraIdx`/`charOffset`, 0-based.
 
 ### Other deliverables
 

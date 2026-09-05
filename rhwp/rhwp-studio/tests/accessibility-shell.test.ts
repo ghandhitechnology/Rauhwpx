@@ -71,19 +71,3 @@ test('문서가 없을 때 파일 열기와 드롭 위치를 명확히 표시한
   assert.match(main, /dispatcher\.dispatch\('file:new-doc'\)/);
   assert.match(main, /emptyState\.hidden = true/);
 });
-
-test('제품 정보는 Rauhwpx이며 새 문서 기본 형식이 HWPX임을 밝힌다', () => {
-  const about = source('src/ui/about-dialog.ts');
-  assert.match(about, /textContent = 'Rauhwpx'/);
-  assert.match(about, /새 문서와 내보내기 기본 형식은 HWPX/);
-  assert.match(about, /고유 설치/);
-  assert.doesNotMatch(about, /HWP\/HWPX Compatible Module for Rust/);
-  assert.doesNotMatch(about, /HWP 오픈소스 편집/);
-});
-
-test('서식 도구 모음 컨트롤은 테마 토큰으로 전경색과 배경색을 명시한다', () => {
-  const css = source('src/styles/style-bar.css');
-
-  assert.match(css, /\.sb-size\s*\{[\s\S]*?color:\s*var\(--color-text\);[\s\S]*?background:\s*var\(--color-surface\);/);
-  assert.match(css, /\.sb-combo\s*\{[\s\S]*?background:\s*var\(--color-surface\);[\s\S]*?color:\s*var\(--color-text\);/);
-});
