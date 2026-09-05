@@ -11,17 +11,6 @@ import {
 
 const serverSource = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
 
-test('chat startup leaves tool profiles derived from mutable execution mode', () => {
-  const start = serverSource.lastIndexOf('  const opts = {');
-  const end = serverSource.indexOf('  const createBackend = SESSION_FACTORIES[agent];', start);
-  assert.ok(start >= 0 && end > start);
-  const chatOptions = serverSource.slice(start, end);
-  assert.match(chatOptions, /capabilityEpoch: planning\.capabilityEpoch/);
-  assert.doesNotMatch(chatOptions, /\b(?:toolProfile|mcpEnvironment)\s*:/);
-  assert.match(serverSource, /toolProfile: 'copy-layout-worker'/,
-    'background workers retain their explicit restricted profile');
-});
-
 function plan() {
   return {
     goal: 'Implement feature',
@@ -92,7 +81,7 @@ test('hub applies planning state before Codex restart and serializes later studi
 test('a new Plan chat proves provider planning readiness before chat-started', () => {
   assert.match(
     serverSource,
-    /record\.agentSession = \{[\s\S]*if \(workflow === 'plan'\) \{[\s\S]*requireWorkflowSwitchBackend\(record\.agentSession\);[\s\S]*await backend\.setExecutionMode\(providerModeRequest\(record\.agentSession, planning\.phase\)\);/,
+    /record\.agentSession = \{[\s\S]*if \(workflow === 'plan'\) \{[\s\S]*requireWorkflowSwitchBackend\(record\.agentSession\);[\s\S]*await record\.agentSession\.backend\.setExecutionMode\(providerModeRequest\(record\.agentSession, 'planning'\)\);/,
   );
   assert.ok(
     serverSource.indexOf("if (workflow === 'plan')") < serverSource.indexOf("type: 'chat-started'"),

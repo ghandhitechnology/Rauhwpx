@@ -36,7 +36,6 @@ export interface AgentToolExecutorDeps {
   loadTemplateBytes?: (template: DocumentTemplate) => Promise<Uint8Array>;
   getDocumentSourcePath?: () => Promise<string | null>;
   isReadOnly?: () => boolean;
-  canPublishCloudDocument?: () => boolean;
 }
 
 const DOC_NOT_LOADED_MESSAGE = '문서가 로드되지 않았습니다';
@@ -57,7 +56,6 @@ const PENDING_NOTE = 'staged now as live preview; when the turn ends it is auto-
 
 /** Every Studio tool that can create or stage a document mutation. */
 export const DOCUMENT_WRITE_TOOLS: ReadonlySet<string> = new Set([
-  'publish_cloud_document',
   'apply_edits',
   'insert_text',
   'delete_range',
@@ -398,7 +396,7 @@ export class AgentToolExecutor {
           'This published template preview is read-only and cannot accept document-write tools.',
         );
       }
-      const requestedMode: TurnWriteMode = !isDocumentWriteTool(tool) || tool === 'publish_cloud_document'
+      const requestedMode: TurnWriteMode = !isDocumentWriteTool(tool)
         ? 'none'
         : RAW_ENGINE_WRITE_TOOLS.has(tool) ? 'raw' : 'semantic';
       if (requestedMode !== 'none'
@@ -446,16 +444,6 @@ export class AgentToolExecutor {
       case 'get_fields': return this.getFields();
       case 'get_document_info': return this.getDocumentInfo();
       case 'materialize_document_snapshot': return this.materializeDocumentSnapshot();
-      case 'publish_cloud_document': {
-        this.requireDocLoaded();
-        if (!this.deps.canPublishCloudDocument?.()) {
-          throw new AgentToolError('CLOUD_RUNTIME_REQUIRED', 'Document publication is available only inside a Cloud conversation.');
-        }
-        if (capability?.permissionProfile === 'safe') {
-          throw new AgentToolError('SAFE_MODE_PUBLISH', 'Cloud publication requires the unrestricted permission profile.');
-        }
-        return { revision: this.revision, requested: true, publishAfterSuccessfulTurn: true };
-      }
       case 'find_text': return this.findText(args);
       case 'render_page': return this.renderPage(args);
       case 'get_para_format': return this.getParaFormat(args);

@@ -50,7 +50,7 @@ test('bridge exposes plan commands and emits every server lifecycle event', () =
 });
 
 test('bridge reconnect keeps explicit workflow and re-synchronizes server authority', () => {
-  assert.match(bridgeSource, /type: 'chat-start',[\s\S]*\.\.\.pending/);
+  assert.match(bridgeSource, /workflow: pending\.workflow/);
   assert.match(bridgeSource, /this\.syncWorkflowState\(session, this\.workflow, this\.phase\)/);
   assert.match(bridgeSource, /this\.syncWorkflowState\(msg, fallbackWorkflow, fallbackPhase\)/);
   assert.match(bridgeSource, /if \(this\.workflow === 'plan' \|\| this\.workflow === 'question' \|\| this\.workflowSwitchPending\)/);
@@ -69,7 +69,7 @@ test('a failed replacement cannot dispatch into the disposed previous session', 
   );
   assert.match(
     bridgeSource,
-    /this\.rememberPendingChatStart\(\);[\s\S]*const pending = this\.pendingChatStart;[\s\S]*type: 'chat-start',[\s\S]*\.\.\.pending/,
+    /this\.rememberPendingChatStart\(\);[\s\S]*const pending = this\.pendingChatStart;[\s\S]*agent: pending\.agent,[\s\S]*workflow: pending\.workflow/,
   );
 });
 
@@ -81,13 +81,13 @@ test('connected first message records pendingChatStart so reconnect can retry th
   );
   assert.match(sendUserSource, /this\.rememberPendingChatStart\(\);/);
   assert.match(sendUserSource, /this\.pendingChatStart = \{/);
-  assert.match(sendUserSource, /if \(!this\.workflowSwitchPending\) this\.sendPendingChatStart\(\)/);
+  assert.match(sendUserSource, /if \(pending && this\.state === 'connected' && !this\.workflowSwitchPending\) \{[\s\S]*type: 'chat-start'/);
   assert.doesNotMatch(sendUserSource, /\} else \{\s*this\.pendingChatStart = \{/);
 });
 
 test('new chat defaults direct while an explicit plan start is carried on the wire', () => {
   assert.match(bridgeSource, /workflow: AgentWorkflow = 'direct'/);
-  assert.match(bridgeSource, /type: 'chat-start',[\s\S]*?\.\.\.pending/);
+  assert.match(bridgeSource, /type: 'chat-start' as const,[\s\S]*?workflow,/);
   const startChatOffset = bridgeSource.indexOf('\n  startChat(\n');
   const startChatSource = bridgeSource.slice(
     startChatOffset,

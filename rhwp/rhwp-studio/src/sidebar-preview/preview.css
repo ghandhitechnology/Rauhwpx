@@ -1,8 +1,4 @@
 /* Only the preview workbench is styled here. Sidebar styles come from production. */
-.preview-cloud #workspace-stack { position: fixed; inset: 0; }
-.preview-cloud #cloud-workspace { padding-left: 225px; }
-.preview-cloud #preview-controls { width: 180px; }
-#cloud-preview-controls[hidden] { display: none; }
 #editor-area {
   position: fixed;
   inset: 0;

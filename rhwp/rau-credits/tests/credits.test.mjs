@@ -110,58 +110,6 @@ test('encrypt round-trips the OpenRouter secret', () => {
   assert.equal(decryptSecret('session', packed), 'sk-or-v1-secret');
 });
 
-test('legacy desktop-delivered keys rotate on startup without resetting spent credits', async () => {
-  const store = createMemoryStore({
-    users: {
-      user_legacy: {
-        keyCiphertext: encryptSecret('test-secret-for-rau-credits', 'sk-or-v1-old-exposed'),
-        openrouterKeyId: 'old-hash',
-        createdAt: 1,
-      },
-    },
-    sessions: {},
-    accessTokens: {},
-  });
-  const minted = [];
-  const deleted = [];
-  const credits = createCreditsService({
-    origin: 'https://credits.rau.test',
-    sessionSecret: 'test-secret-for-rau-credits',
-    store,
-    authenticateWorkos: async () => ({ id: 'user_legacy', email: 'legacy@example.com' }),
-    inspectOpenRouterKey: async ({ key }) => {
-      assert.equal(key, 'sk-or-v1-old-exposed');
-      return { limit: 5, usage: 2 };
-    },
-    createOpenRouterKey: async ({ limit }) => {
-      minted.push(limit);
-      return { key: 'sk-or-v1-server-only', id: 'new-hash' };
-    },
-    deleteOpenRouterKey: async ({ id }) => { deleted.push(id); },
-    fetchImpl: async () => new Response(JSON.stringify({ data: { limit: 3, usage: 1 } }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    }),
-  });
-
-  assert.deepEqual(await credits.migrateLegacyKeys(), { migrated: 1 });
-  assert.deepEqual(minted, [3]);
-  assert.deepEqual(deleted, ['old-hash']);
-  const migrated = (await store.load()).users.user_legacy;
-  assert.equal(migrated.credentialVersion, 2);
-  assert.equal(migrated.carriedUsageUsd, 2);
-  assert.equal(decryptSecret('test-secret-for-rau-credits', migrated.keyCiphertext), 'sk-or-v1-server-only');
-
-  const login = await credits.createDeviceSession();
-  await credits.completeLogin('legacy', login.id);
-  const token = (await credits.redeemDeviceSession(login.id)).accessToken;
-  const keyStatus = await credits.proxyOpenRouter(token, { pathname: '/key', method: 'GET' });
-  const visible = await keyStatus.json();
-  assert.equal(visible.data.limit, 5);
-  assert.equal(visible.data.usage, 3);
-  assert.equal(visible.data.limit_remaining, 2);
-});
-
 test('rate limiter refuses a new key when cleanup cannot free capacity', () => {
   let clock = 1_000;
   const limiter = createRateLimiter({ now: () => clock, maxKeys: 2 });
@@ -174,7 +122,7 @@ test('rate limiter refuses a new key when cleanup cannot free capacity', () => {
   assert.equal(limiter.check('third', 5, 1_000), true);
 });
 
-test('first login keeps the $5 key server-side and delivers a distinct Rau token', async () => {
+test('first login mints a $5 key, delivers it until acknowledged, and reuses it', async () => {
   const minted = [];
   const credits = createCreditsService({
     origin: 'https://credits.rau.test',
@@ -192,24 +140,22 @@ test('first login keeps the $5 key server-side and delivers a distinct Rau token
   await credits.completeLogin('code-1', first.id);
   const redeemed = await credits.redeemDeviceSession(first.id);
   assert.equal(redeemed.status, 'ready');
-  assert.match(redeemed.accessToken, /^rau_v1_/);
-  assert.doesNotMatch(JSON.stringify(redeemed), /sk-or-v1-shared/);
+  assert.equal(redeemed.apiKey, 'sk-or-v1-shared');
   assert.equal(minted.length, 1);
 
   const repeated = await credits.redeemDeviceSession(first.id);
   assert.equal(repeated.status, 'ready');
-  assert.equal(repeated.accessToken, redeemed.accessToken);
+  assert.equal(repeated.apiKey, 'sk-or-v1-shared');
 
   await credits.acknowledgeDeviceSession(first.id);
   const already = await credits.redeemDeviceSession(first.id);
   assert.equal(already.status, 'redeemed');
-  assert.equal(already.accessToken, undefined);
+  assert.equal(already.apiKey, undefined);
 
   const second = await credits.createDeviceSession();
   await credits.completeLogin('code-2', second.id);
   const again = await credits.redeemDeviceSession(second.id);
-  assert.match(again.accessToken, /^rau_v1_/);
-  assert.notEqual(again.accessToken, redeemed.accessToken);
+  assert.equal(again.apiKey, 'sk-or-v1-shared');
   assert.equal(minted.length, 1, 'the same WorkOS user must not mint another $5');
 });
 
@@ -237,92 +183,11 @@ test('the same email through a second WorkOS identity reuses the first $5 key', 
   await credits.completeMagicLogin(magic.id, 'andy@example.com', '123456');
 
   assert.equal(minted.length, 1, 'the same mailbox must not mint a second $5');
-  assert.match((await credits.redeemDeviceSession(magic.id)).accessToken, /^rau_v1_/);
+  assert.equal((await credits.redeemDeviceSession(magic.id)).apiKey, 'sk-or-v1-shared-1');
 
   const repeatedMagic = await credits.createDeviceSession();
   await credits.completeMagicLogin(repeatedMagic.id, 'invalid-email', '123456');
   assert.equal(minted.length, 1, 'the linked WorkOS identity must reuse the key without an email');
-});
-
-test('account replacement switches the proxy credential and revokes the previous account token', async () => {
-  const upstream = [];
-  const credits = createCreditsService({
-    origin: 'https://credits.rau.test',
-    sessionSecret: 'test-secret-for-rau-credits',
-    store: createMemoryStore(),
-    authenticateWorkos: async (code) => ({
-      id: code === 'account-b' ? 'user_b' : 'user_a',
-      email: code === 'account-b' ? 'b@example.com' : 'a@example.com',
-    }),
-    createOpenRouterKey: async ({ name }) => ({ key: `sk-or-v1-${name}`, id: `hash-${name}` }),
-    fetchImpl: async (url, init = {}) => {
-      upstream.push({ url: String(url), authorization: init.headers.Authorization, body: JSON.parse(init.body) });
-      return new Response(JSON.stringify({ choices: [{ message: { content: 'ok' } }] }), {
-        status: 200,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    },
-  });
-
-  const first = await credits.createDeviceSession();
-  await credits.completeLogin('account-a', first.id);
-  const tokenA = (await credits.redeemDeviceSession(first.id)).accessToken;
-  await credits.proxyOpenRouter(tokenA, {
-    pathname: '/chat/completions',
-    method: 'POST',
-    body: { model: 'z-ai/glm-5.3-flash', messages: [] },
-  });
-  assert.match(upstream.at(-1).authorization, /^Bearer sk-or-v1-rau-user_a-/);
-
-  const second = await credits.createDeviceSession({ replaceAccessToken: tokenA });
-  await credits.completeLogin('account-b', second.id);
-  const tokenB = (await credits.redeemDeviceSession(second.id)).accessToken;
-  assert.notEqual(tokenB, tokenA);
-  await assert.rejects(
-    () => credits.proxyOpenRouter(tokenA, { pathname: '/key', method: 'GET' }),
-    { code: 'RAU_ACCESS_INVALID' },
-  );
-  await credits.proxyOpenRouter(tokenB, {
-    pathname: '/chat/completions',
-    method: 'POST',
-    body: { model: 'qwen/qwen3.8-flash', messages: [] },
-  });
-  assert.match(upstream.at(-1).authorization, /^Bearer sk-or-v1-rau-user_b-/);
-});
-
-test('logout revokes the Rau token and the proxy denies arbitrary models and management APIs', async () => {
-  let upstreamCalls = 0;
-  const credits = service({
-    fetchImpl: async () => {
-      upstreamCalls += 1;
-      return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
-    },
-  });
-  const session = await credits.createDeviceSession();
-  await credits.completeLogin('ok-code', session.id);
-  const token = (await credits.redeemDeviceSession(session.id)).accessToken;
-
-  await assert.rejects(
-    () => credits.proxyOpenRouter(token, {
-      pathname: '/chat/completions',
-      method: 'POST',
-      body: { model: 'openai/gpt-5', messages: [] },
-    }),
-    { code: 'RAU_MODEL_FORBIDDEN' },
-  );
-  await assert.rejects(
-    () => credits.proxyOpenRouter(token, { pathname: '/keys', method: 'GET' }),
-    { code: 'RAU_PROXY_FORBIDDEN' },
-  );
-  assert.equal(upstreamCalls, 0);
-
-  assert.deepEqual(await credits.revokeAccessToken(token), { revoked: true });
-  assert.deepEqual(await credits.revokeAccessToken(token), { revoked: false });
-  await assert.rejects(
-    () => credits.proxyOpenRouter(token, { pathname: '/key', method: 'GET' }),
-    { code: 'RAU_ACCESS_INVALID' },
-  );
-  assert.equal(upstreamCalls, 0);
 });
 
 test('a pending session past the TTL cannot be completed into a minted key', async () => {
@@ -347,21 +212,6 @@ test('a pending session past the TTL cannot be completed into a minted key', asy
     (error) => error.code === 'DEVICE_SESSION_EXPIRED',
   );
   assert.equal(minted.length, 0);
-});
-
-test('an unacknowledged token is revoked when its device session expires', async () => {
-  let t = 1_700_000_000_000;
-  const credits = service({ now: () => t });
-  const session = await credits.createDeviceSession();
-  await credits.completeLogin('ok-code', session.id);
-  const token = (await credits.redeemDeviceSession(session.id)).accessToken;
-
-  t += credits.sessionTtlMs + 1;
-  await credits.createDeviceSession();
-  await assert.rejects(
-    () => credits.proxyOpenRouter(token, { pathname: '/key', method: 'GET' }),
-    { code: 'RAU_ACCESS_INVALID' },
-  );
 });
 
 test('live device sessions are capped so floods cannot grow the store', async () => {
@@ -470,7 +320,7 @@ test('a durable provisioning intent reconciles an orphan before minting a replac
   assert.deepEqual(events.slice(0, 2), [`mint:${pending.name}`, `reconcile:${pending.name}`]);
   assert.equal(events.length, 3);
   assert.notEqual(events[2], `mint:${pending.name}`);
-  assert.match((await recovered.redeemDeviceSession(session.id)).accessToken, /^rau_v1_/);
+  assert.equal((await recovered.redeemDeviceSession(session.id)).apiKey, 'sk-or-v1-replacement');
 });
 
 test('a prepared provisioning intent resumes without reconciliation', async () => {
@@ -504,7 +354,7 @@ test('a prepared provisioning intent resumes without reconciliation', async () =
   });
 
   await credits.completeLogin('ok-code', 'device');
-  assert.match((await credits.redeemDeviceSession('device')).accessToken, /^rau_v1_/);
+  assert.equal((await credits.redeemDeviceSession('device')).apiKey, 'sk-or-v1-prepared');
 });
 
 test('a definitely undispatched mint restores prepared state and retries the same intent', async () => {
@@ -538,7 +388,7 @@ test('a definitely undispatched mint restores prepared state and retries the sam
 
   await credits.completeLogin('ok-code', session.id);
   assert.deepEqual(names, [names[0], names[0]], 'the retry reuses the durable intent name');
-  assert.match((await credits.redeemDeviceSession(session.id)).accessToken, /^rau_v1_/);
+  assert.equal((await credits.redeemDeviceSession(session.id)).apiKey, 'sk-or-v1-retried-once');
 });
 
 test('an ambiguous mint failure stays submitting when reconciliation finds nothing', async () => {
@@ -736,7 +586,7 @@ test('default orphan reconciliation deletes the exact OpenRouter key before prov
     'POST /api/v1/keys',
   ]);
   assert.match(calls[0].search, /include_disabled=true/);
-  assert.match((await credits.redeemDeviceSession('device')).accessToken, /^rau_v1_/);
+  assert.equal((await credits.redeemDeviceSession('device')).apiKey, 'sk-or-v1-after-reconcile');
 });
 
 test('file store atomically round-trips state and rejects oversized snapshots', async (t) => {
@@ -816,7 +666,6 @@ test('file store rejects when the directory entry cannot be synced', async (t) =
     () => store.save({ users: {}, sessions: {} }),
     (error) => error === failure,
   );
-
 });
 
 test('concurrent session creation cannot overwrite another session', async () => {
@@ -1359,7 +1208,7 @@ test('createOpenRouterKey receives the $5 limit contract through the default pro
   assert.equal(calls[0].body.limit_reset, null);
 });
 
-test('HTTP POST creates a session, GET delivers only a Rau token, and acknowledgement consumes it', async () => {
+test('HTTP POST creates a session, GET delivers the key, and acknowledgement consumes it', async () => {
   const credits = service();
   const server = http.createServer(creditsRequestListener(credits));
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -1378,12 +1227,11 @@ test('HTTP POST creates a session, GET delivers only a Rau token, and acknowledg
     const ready = await fetch(`http://127.0.0.1:${port}/v1/device-sessions/${created.id}`)
       .then((res) => res.json());
     assert.equal(ready.status, 'ready');
-    assert.match(ready.accessToken, /^rau_v1_/);
-    assert.doesNotMatch(JSON.stringify(ready), /sk-or-v1-/);
+    assert.equal(ready.apiKey, 'sk-or-v1-minted-1');
 
     const repeated = await fetch(`http://127.0.0.1:${port}/v1/device-sessions/${created.id}`)
       .then((res) => res.json());
-    assert.equal(repeated.accessToken, ready.accessToken);
+    assert.equal(repeated.apiKey, 'sk-or-v1-minted-1');
 
     const acknowledged = await fetch(
       `http://127.0.0.1:${port}/v1/device-sessions/${created.id}/acknowledge`,
@@ -1394,43 +1242,7 @@ test('HTTP POST creates a session, GET delivers only a Rau token, and acknowledg
     const redeemed = await fetch(`http://127.0.0.1:${port}/v1/device-sessions/${created.id}`)
       .then((res) => res.json());
     assert.equal(redeemed.status, 'redeemed');
-    assert.equal(redeemed.accessToken, undefined);
-  } finally {
-    await new Promise((resolve) => server.close(resolve));
-  }
-});
-
-test('HTTP proxy forwards a streamed response through a bearer-scoped service call', async () => {
-  const calls = [];
-  const server = http.createServer(creditsRequestListener({
-    async proxyOpenRouter(token, input) {
-      calls.push({ token, pathname: input.pathname, method: input.method, body: input.body });
-      return new Response('data: {"ok":true}\n\n', {
-        status: 200,
-        headers: { 'Content-Type': 'text/event-stream' },
-      });
-    },
-  }));
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  const { port } = server.address();
-  try {
-    const response = await fetch(`http://127.0.0.1:${port}/v1/openrouter/chat/completions`, {
-      method: 'POST',
-      headers: {
-        Authorization: 'Bearer rau_v1_http',
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ model: 'z-ai/glm-5.3-flash', stream: true }),
-    });
-    assert.equal(response.status, 200);
-    assert.equal(response.headers.get('content-type'), 'text/event-stream');
-    assert.equal(await response.text(), 'data: {"ok":true}\n\n');
-    assert.deepEqual(calls, [{
-      token: 'rau_v1_http',
-      pathname: '/chat/completions',
-      method: 'POST',
-      body: { model: 'z-ai/glm-5.3-flash', stream: true },
-    }]);
+    assert.equal(redeemed.apiKey, undefined);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

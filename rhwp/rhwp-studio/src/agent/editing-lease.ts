@@ -30,9 +30,3 @@ export function deriveAgentEditingLease(activity: AgentEditingActivity): AgentEd
     ...(activity.waitingForUser === true ? { waitingForUser: true } : {}),
   };
 }
-
-
-/** A worker shares one live document; the busy lease still guards replacement. */
-export function agentLeaseBlocksUserEditing(lease: AgentEditingLease, concurrentWorkerEditing = false): boolean {
-  return lease.active && !concurrentWorkerEditing;
-}

@@ -5,11 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import {
-  configuredStudioOrigins,
-  createReferenceHttpHandler,
-  isAllowedStudioOrigin,
-} from '../reference-http.mjs';
+import { createReferenceHttpHandler } from '../reference-http.mjs';
 import { ReferenceStore } from '../reference-store.mjs';
 
 const SESSION_SCOPES = [
@@ -82,14 +78,6 @@ test('raw upload/list/search/delete API is bearer-authenticated and CORS-safe', 
   assert.equal(searched.results.length, 1, 'legacy frontend limit query should be accepted');
   assert.equal(searched.results[0].fileId, created.id);
 
-  const exported = await fetch(`${base}/reference-files/${created.id}?scope=chat&scopeId=chat-a`, { headers });
-  assert.equal(exported.status, 200);
-  assert.equal(exported.headers.get('x-content-sha256'), created.sha256);
-  assert.equal(exported.headers.get('access-control-allow-origin'), origin);
-  assert.equal(await exported.text(), '라온 프로젝트 일정과 배포 품질 검증');
-  const wrongScope = await fetch(`${base}/reference-files/${created.id}?scope=chat&scopeId=chat-b`, { headers });
-  assert.equal(wrongScope.status, 404);
-
   const removed = await fetch(`${base}/reference-files/${created.id}?scope=chat&scopeId=chat-a`, { method: 'DELETE', headers });
   assert.equal(removed.status, 200);
   assert.equal((await removed.json()).status, 'deleted');
@@ -144,23 +132,6 @@ test('the exact packaged origin is CORS-echoed', async (t) => {
   });
   assert.equal(response.status, 200);
   assert.equal(response.headers.get('access-control-allow-origin'), origin);
-});
-
-test('an operator can allow one exact Tailscale HTTPS Studio origin', () => {
-  const allowed = configuredStudioOrigins([
-    'https://pyus-mac-mini.tailde5380.ts.net:8443',
-    ' https://studio.example.com/ ',
-    'http://remote.example.com',
-    'https://studio.example.com/path',
-    'https://user:secret@studio.example.com',
-  ].join(','));
-  assert.deepEqual([...allowed], [
-    'https://pyus-mac-mini.tailde5380.ts.net:8443',
-    'https://studio.example.com',
-  ]);
-  assert.equal(isAllowedStudioOrigin('https://pyus-mac-mini.tailde5380.ts.net:8443', allowed), true);
-  assert.equal(isAllowedStudioOrigin('https://other.tailde5380.ts.net:8443', allowed), false);
-  assert.equal(isAllowedStudioOrigin('https://pyus-mac-mini.tailde5380.ts.net', allowed), false);
 });
 
 test('non-loopback browser origins are denied with a top-level error message', async (t) => {

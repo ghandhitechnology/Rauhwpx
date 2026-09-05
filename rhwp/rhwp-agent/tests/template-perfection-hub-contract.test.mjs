@@ -163,7 +163,7 @@ test('provider replacement and stop fail closed on an unconfirmed process tree',
   );
   assert.match(
     server,
-    /const cleaned = await disposeSession\(record\);[\s\S]*throw cleaned \? error : agentProcessCleanupUncertain\(error\)/,
+    /const cleaned = await disposeSession\(record\);[\s\S]*const reported = cleaned \? e : agentProcessCleanupUncertain\(e\)/,
   );
   assert.match(
     server,
