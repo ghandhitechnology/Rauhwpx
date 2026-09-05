@@ -172,3 +172,16 @@ body.ag-sidebar-resizing #cloud-workspace {
     margin-right: 0;
   }
 }
+
+/* Local receipt of a press is visible before the network responds. */
+.cloud-workspace-click-feedback {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--focus-ring);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--focus-ring) 18%, transparent);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+.cloud-workspace-click-feedback[hidden] { display: none; }

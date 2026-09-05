@@ -69,8 +69,11 @@ try {
   const errors = [];
   page.on('pageerror', (error) => errors.push(error.message));
   const pressed = { displayPressedKeys: new Set(), displayPressedButtons: new Set() };
+  const inputBatches = [];
+  let latencyMs = 80;
   queue = new CloudInputQueue(async (_streamId, events) => {
-    await delay(80);
+    inputBatches.push(events);
+    await delay(latencyMs);
     for (const event of events) await applyDisplayInput(remote, event, pressed);
   }, () => 32);
   await page.exposeFunction('remoteInput', (event) => queue.enqueue('test-stream', event));
@@ -94,7 +97,7 @@ try {
     let listener;
     const workspace = createCloudWorkspace({ display: { async openDisplay(_sessionId, onEvent) {
       listener = onEvent;
-      return { capability: { kind:'available', width:1280, height:800 },
+      return { capability: { kind:'available', width:1280, height:800, inputBatchSize:32 },
         async sendInput(event) {
           window.pendingInputs++;
           try { await window.remoteInput(event); } catch (error) { window.inputErrors.push(String(error)); throw error; }
@@ -155,6 +158,32 @@ try {
     totalClicks += expected.length;
     if (width === 1280 || width === 390) await page.screenshot({ path:resolve(artifacts, `fit-${width}.png`) });
   }
+  // A human press lasts longer than the old 8ms batching window. Both edges
+  // must still use one request, even when the round trip exceeds the hold time.
+  await page.setViewport({ width:390, height:700, deviceScaleFactor:2 });
+  await checkFit();
+  latencyMs = 250;
+  const jitterTarget = await point(16, 16);
+  await remote.evaluate(() => { window.hits = []; });
+  inputBatches.length = 0;
+  await page.mouse.move(jitterTarget.x, jitterTarget.y);
+  await settle();
+  inputBatches.length = 0;
+  await page.mouse.down();
+  assert.equal(await page.$eval('.cloud-workspace-click-feedback', node => node.hidden), false);
+  await delay(70);
+  // Four CSS pixels can leave a tiny fitted target, but are still hand jitter.
+  await page.mouse.move(jitterTarget.x + 4, jitterTarget.y);
+  await page.mouse.up();
+  await page.screenshot({ path:resolve(artifacts, 'click-pending.png') });
+  await settle();
+  assert.deepEqual(await remote.evaluate(() => window.hits), ['target-0']);
+  assert.equal(inputBatches.length, 1, 'one round trip for a human click');
+  assert.deepEqual(inputBatches[0].map(event => event.action), ['down', 'up']);
+  assert.deepEqual(inputBatches[0][0], { ...inputBatches[0][1], action:'down' });
+  assert.equal(await page.$eval('.cloud-workspace-click-feedback', node => node.hidden), true);
+  latencyMs = 80;
+  console.log('PASS one-request human click with 4px hand jitter at 390px/DPR 2 and 250ms latency');
   await page.setViewport({ width:1280, height:900 });
   await page.evaluate(() => document.documentElement.style.setProperty('--ag-sidebar-width', '560px'));
   await checkFit();

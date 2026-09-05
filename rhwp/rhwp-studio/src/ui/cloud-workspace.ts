@@ -12,6 +12,8 @@ import type {
 const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 2;
 const ZOOM_STEP = 0.25;
+const POINTER_HOLD_MS = 160;
+const POINTER_DRAG_SLOP = 5;
 
 type ObjectUrls = {
   create(blob: Blob): string;
@@ -118,7 +120,11 @@ export function createCloudWorkspace({
   inputSink.autocapitalize = 'off';
   inputSink.autocomplete = 'off';
   inputSink.spellcheck = false;
-  canvas.append(image, inputSink);
+  const clickFeedback = doc.createElement('div');
+  clickFeedback.className = 'cloud-workspace-click-feedback';
+  clickFeedback.setAttribute('aria-hidden', 'true');
+  clickFeedback.hidden = true;
+  canvas.append(image, inputSink, clickFeedback);
   viewport.appendChild(canvas);
   const connectionNotice = doc.createElement('div');
   connectionNotice.className = 'cloud-workspace-connection-notice';
@@ -170,13 +176,26 @@ export function createCloudWorkspace({
   let zoom = 1;
   let fitToViewport = true;
   let controlling = false;
+  let inputErrorText: string | null = null;
   let pendingMove: Extract<CloudDisplayInputEvent, { kind: 'pointer'; action: 'move' }> | null = null;
   let moveTimer: ReturnType<typeof setTimeout> | null = null;
   let compositionOwner: { sessionId: string | null; generation: number } | null = null;
   const pressedKeys = new Set<string>();
-  type PointerPress = { button: 'left' | 'middle' | 'right' | 'back' | 'forward'; clickCount: number; x: number; y: number; time: number; dragged: boolean; point: { x: number; y: number } };
+  type PointerPress = {
+    button: 'left' | 'middle' | 'right' | 'back' | 'forward';
+    clickCount: number;
+    x: number;
+    y: number;
+    time: number;
+    dragged: boolean;
+    started: boolean;
+    timer: ReturnType<typeof setTimeout> | null;
+    origin: { x: number; y: number };
+    point: { x: number; y: number };
+  };
   const pressedPointers = new Map<number, PointerPress>();
   let lastClick: PointerPress | null = null;
+  let feedbackId = 0;
   const listeners = new Set<(value: CloudDisplayState) => void>();
 
   const renderZoom = (): void => {
@@ -203,10 +222,11 @@ export function createCloudWorkspace({
     state = next;
     root.dataset.displayState = next.kind;
     const paused = next.kind === 'stalled' || next.kind === 'unavailable';
-    const toolbarText = paused && lastFrame ? '마지막 수신 화면' : text;
+    const toolbarText = paused && lastFrame ? '마지막 수신 화면' : inputErrorText ?? text;
     if (status.textContent !== toolbarText) status.textContent = toolbarText;
-    connectionNotice.hidden = !paused;
-    if (paused && connectionNotice.textContent !== text) connectionNotice.textContent = text;
+    connectionNotice.hidden = !paused && !inputErrorText;
+    const noticeText = paused ? text : inputErrorText;
+    if (noticeText && connectionNotice.textContent !== noticeText) connectionNotice.textContent = noticeText;
     for (const listener of listeners) listener(next);
   };
 
@@ -218,7 +238,10 @@ export function createCloudWorkspace({
     root.dataset.cloudControl = code === 'DISPLAY_CONTROL_CONFLICT' ? 'conflict' : 'error';
     status.textContent = code === 'DISPLAY_CONTROL_CONFLICT'
       ? '다른 창에서 이 Cloud 화면을 제어하고 있습니다.'
-      : 'Cloud 입력을 전달하지 못했습니다. 다시 클릭해 주세요.';
+      : 'Cloud 입력을 전달하지 못했습니다. 화면을 확인한 뒤 다시 시도해 주세요.';
+    inputErrorText = status.textContent;
+    connectionNotice.textContent = inputErrorText;
+    connectionNotice.hidden = false;
   };
 
   const sendInput = (event: CloudDisplayInputEvent): Promise<void> => {
@@ -232,6 +255,8 @@ export function createCloudWorkspace({
     }
     return target.sendInput(event).then(() => {
       if (disposed || connection !== target || inputGeneration !== generation) return;
+      inputErrorText = null;
+      if (state.kind === 'live') connectionNotice.hidden = true;
       if (!controlling) {
         controlling = true;
         root.dataset.cloudControl = 'active';
@@ -243,7 +268,23 @@ export function createCloudWorkspace({
     });
   };
 
+  const startPress = (press: PointerPress): void => {
+    if (press.timer) clearTimeout(press.timer);
+    press.timer = null;
+    if (press.started) return;
+    press.started = true;
+    void sendInput({ kind: 'pointer', action: 'down', ...press.origin,
+      button: press.button, clickCount: press.clickCount }).catch(() => {});
+  };
+
+  const finishClickFeedback = (attempt: number, operation: Promise<void>): void => {
+    const hide = (): void => { if (attempt === feedbackId) clickFeedback.hidden = true; };
+    void operation.then(hide, hide);
+  };
+
   const flushMove = (): void => {
+    // Keys, text and scroll must never overtake a locally buffered press.
+    for (const press of pressedPointers.values()) startPress(press);
     if (moveTimer) clearTimeout(moveTimer);
     moveTimer = null;
     if (!pendingMove) return;
@@ -344,12 +385,16 @@ export function createCloudWorkspace({
     connection = null;
     currentSessionId = null;
     controlling = false;
+    inputErrorText = null;
     root.dataset.cloudControl = 'inactive';
     pendingMove = null;
     if (moveTimer) clearTimeout(moveTimer);
     moveTimer = null;
     pressedKeys.clear();
+    for (const press of pressedPointers.values()) if (press.timer) clearTimeout(press.timer);
     pressedPointers.clear();
+    feedbackId++;
+    clickFeedback.hidden = true;
     lastClick = null;
     if (active) void active.close().catch(() => {});
   };
@@ -549,10 +594,18 @@ export function createCloudWorkspace({
 
   canvas.addEventListener('pointermove', (event) => {
     const press = pressedPointers.get(event.pointerId);
-    if (press && Math.hypot(event.clientX - press.x, event.clientY - press.y) > 5) press.dragged = true;
+    // Merely passing over a preview must not acquire the server's control lease.
+    if (!press && !controlling) return;
     const point = displayPoint(event);
     if (!point) return;
-    if (press) press.point = point;
+    if (press) {
+      press.point = point;
+      if (Math.hypot(event.clientX - press.x, event.clientY - press.y) > POINTER_DRAG_SLOP) {
+        press.dragged = true;
+        startPress(press);
+      }
+      if (!press.started) return;
+    }
     pendingMove = { kind: 'pointer', action: 'move', ...point };
     // Leave room under the server's 60 events/second limit for clicks and keys.
     if (!moveTimer) moveTimer = setTimeout(flushMove, 50);
@@ -562,42 +615,68 @@ export function createCloudWorkspace({
     const button = pointerButton(event.button);
     if (!point || !button) return;
     event.preventDefault();
+    // Finish an earlier press before starting another pointer.
+    for (const press of pressedPointers.values()) startPress(press);
     inputSink.focus({ preventScroll: true });
     canvas.setPointerCapture?.(event.pointerId);
-    // PointerEvent.detail is zero in Chromium, so count clicks before network batching.
     const time = Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now();
     const repeated = lastClick && lastClick.button === button && time >= lastClick.time
-      && time - lastClick.time <= 500 && Math.hypot(event.clientX - lastClick.x, event.clientY - lastClick.y) <= 5;
+      && time - lastClick.time <= 500 && Math.hypot(event.clientX - lastClick.x, event.clientY - lastClick.y) <= POINTER_DRAG_SLOP;
     const clickCount = event.detail > 0 ? Math.min(3, event.detail)
       : repeated ? lastClick!.clickCount % 3 + 1 : 1;
-    pressedPointers.set(event.pointerId, { button, clickCount, x: event.clientX, y: event.clientY, time, dragged: false, point });
+    const press: PointerPress = { button, clickCount, x: event.clientX, y: event.clientY, time,
+      dragged: false, started: false, timer: null, origin: point, point };
+    const canBatchClick = connection?.capability.kind === 'available'
+      && connection.capability.inputBatchSize === 32 && pressedPointers.size === 0;
+    pressedPointers.set(event.pointerId, press);
     lastClick = null;
     pendingMove = null;
     if (moveTimer) clearTimeout(moveTimer);
     moveTimer = null;
-    void sendInput({ kind: 'pointer', action: 'down', ...point, button, clickCount }).catch(() => {});
+    feedbackId++;
+    const bounds = canvas.getBoundingClientRect();
+    clickFeedback.style.left = `${(event.clientX - bounds.left) / bounds.width * 100}%`;
+    clickFeedback.style.top = `${(event.clientY - bounds.top) / bounds.height * 100}%`;
+    clickFeedback.hidden = false;
+    // Short clicks travel together on release. Movement or holding the button
+    // promotes this to a normal streamed drag without waiting for a round trip.
+    if (canBatchClick) press.timer = setTimeout(() => startPress(press), POINTER_HOLD_MS);
+    else startPress(press);
   });
   canvas.addEventListener('pointerup', (event) => {
     const point = displayPoint(event);
     const press = pressedPointers.get(event.pointerId);
-    if (!point || !press) return;
-    const button = press.button;
+    if (!point || !press || pointerButton(event.button) !== press.button) return;
     event.preventDefault();
-    flushMove();
-    void sendInput({ kind: 'pointer', action: 'up', ...point, button, clickCount: press?.clickCount ?? 1 }).catch(() => {});
+    if (press.timer) clearTimeout(press.timer);
+    press.timer = null;
+    // A release can move even without an intervening pointermove event.
+    if (Math.hypot(event.clientX - press.x, event.clientY - press.y) > POINTER_DRAG_SLOP) {
+      press.dragged = true;
+      startPress(press);
+    }
+    if (press.started) flushMove();
+    const operation = sendInput({ kind: 'pointer', action: press.started ? 'up' : 'click',
+      ...(press.started ? point : press.origin), button: press.button, clickCount: press.clickCount });
+    finishClickFeedback(feedbackId, operation);
     const time = Number.isFinite(event.timeStamp) ? event.timeStamp : performance.now();
-    lastClick = press && !press.dragged && time - press.time <= 500
-      && Math.hypot(event.clientX - press.x, event.clientY - press.y) <= 5 ? press : null;
+    lastClick = !press.dragged && time - press.time <= 500 ? press : null;
     pressedPointers.delete(event.pointerId);
     canvas.releasePointerCapture?.(event.pointerId);
   });
   const cancelPointer = (event: PointerEvent): void => {
     const press = pressedPointers.get(event.pointerId);
     if (!press) return;
-    flushMove();
+    if (press.timer) clearTimeout(press.timer);
     pressedPointers.delete(event.pointerId);
     lastClick = null;
-    void sendInput({ kind: 'pointer', action: 'up', ...press.point, button: press.button, clickCount: press.clickCount }).catch(() => {});
+    // A cancelled local click never reached the remote page. Do not turn it into
+    // a click or an unmatched release. Streamed drags still need their release.
+    if (press.started) {
+      flushMove();
+      finishClickFeedback(feedbackId, sendInput({ kind: 'pointer', action: 'up',
+        ...press.point, button: press.button, clickCount: press.clickCount }));
+    } else clickFeedback.hidden = true;
   };
   canvas.addEventListener('pointercancel', cancelPointer);
   canvas.addEventListener('lostpointercapture', cancelPointer);

@@ -414,6 +414,7 @@ export type CloudDisplayEvent =
 
 export type CloudDisplayInputEvent =
   | { kind: 'pointer'; action: 'move'; x: number; y: number }
+  // 'click' is client-only shorthand, expanded into one down/up batch before transport.
   | { kind: 'pointer'; action: 'down' | 'up' | 'click'; x: number; y: number; button: 'left' | 'middle' | 'right' | 'back' | 'forward'; clickCount?: number }
   | { kind: 'wheel'; x: number; y: number; deltaX: number; deltaY: number }
   | { kind: 'key'; action: 'down' | 'up'; key: string }

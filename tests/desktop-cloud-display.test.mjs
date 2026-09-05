@@ -943,6 +943,13 @@ test('desktop display negotiates click counts before single or batched input rea
         await Promise.all(events.map((event) => connection.sendInput(event)));
         assert.deepEqual(received, events.map((event) => supportsClickCount === true ? event : acceptEdge13Pointer(
           Object.fromEntries(Object.entries(event).filter(([key]) => key !== 'clickCount')))));
+        if (batched) {
+          received.length = 0;
+          await connection.sendInput({ ...events[0], action: 'click' });
+          assert.deepEqual(received, events.map((event) => supportsClickCount === true ? event : acceptEdge13Pointer(
+            Object.fromEntries(Object.entries(event).filter(([key]) => key !== 'clickCount')))),
+          'local click shorthand expands before either old or new servers see it');
+        }
       } finally { await connection.close(); }
     }
   }

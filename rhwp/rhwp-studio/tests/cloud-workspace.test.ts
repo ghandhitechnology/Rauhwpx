@@ -873,15 +873,15 @@ test('cloud workspace queues the final drag movement before release during a slo
   canvas.dispatch('pointermove', pointer(100));
   canvas.dispatch('pointerup', pointer(100));
   assert.deepEqual(inputs.map(({ action, x }) => [action, x]), [
-    ['move', 20], ['down', 20], ['move', 100], ['up', 100],
+    ['down', 20], ['move', 100], ['up', 100],
   ], 'a release must not overtake the final drag position even before the request resolves');
   slowRequest.resolve();
   await new Promise((resolve) => setTimeout(resolve, 60));
-  assert.equal(inputs.length, 4, 'no delayed movement may arrive after release');
+  assert.equal(inputs.length, 3, 'no delayed movement may arrive after release');
   canvas.dispatch('pointermove', pointer(200));
   workspace.dispose();
   await new Promise((resolve) => setTimeout(resolve, 60));
-  assert.equal(inputs.length, 4, 'disposing cancels pending hover input');
+  assert.equal(inputs.length, 3, 'disposing cancels pending hover input');
 });
 
 
@@ -900,6 +900,11 @@ test('coalesced movement keeps its order before modifiers, text, and blur releas
   const sink = find(root, (node) => node.className === 'cloud-workspace-input');
   const move = (clientX: number) => canvas.dispatch('pointermove', { clientX, clientY: 20, pointerId: 1 });
   const key = { key: 'Shift', preventDefault() {} };
+  // Hover input begins only after an intentional action acquires control.
+  sink.dispatch('keydown', key);
+  sink.dispatch('keyup', key);
+  await flushMicrotasks();
+  inputs.length = 0;
   move(20);
   sink.dispatch('keydown', key);
   move(40);
@@ -1020,4 +1025,122 @@ test('Chromium compositionend commits once even without a final non-composing in
   }
   assert.deepEqual(inputs, [{ kind: 'text', text: '한글' }, { kind: 'text', text: '한글' }]);
   workspace.dispose();
+});
+
+async function clickFixture(send?: (event: any) => Promise<void>) {
+  const inputs: any[] = [];
+  let emit!: (event: CloudDisplayEvent) => void;
+  const workspace = createCloudWorkspace({
+    display: { async openDisplay(sessionId: string, listener: (event: CloudDisplayEvent) => void) {
+      emit = listener;
+      const active = connection(sessionId, []);
+      if (active.capability.kind === 'available') active.capability.inputBatchSize = 32;
+      return { ...active, async sendInput(event: any) { inputs.push(event); await send?.(event); } };
+    } } as Pick<CloudController, 'openDisplay'>,
+    decodeFrame: async () => ({ width: 1280, height: 800 }),
+    objectUrls: { create: () => 'blob:test-frame', revoke() {} },
+    doc: new TestDocument() as unknown as Document,
+  });
+  workspace.setContext({ visible: true, session: running() });
+  await flushMicrotasks();
+  const root = workspace.root as unknown as TestElement;
+  const canvas = find(root, node => node.className === 'cloud-workspace-canvas');
+  const sink = find(root, node => node.className === 'cloud-workspace-input');
+  const feedback = find(root, node => node.className === 'cloud-workspace-click-feedback') as TestElement & { hidden: boolean };
+  const pointer = (extra = {}) => ({ clientX: 320, clientY: 200, button: 0, pointerId: 1,
+    timeStamp: 100, preventDefault() {}, ...extra });
+  return { workspace, root, canvas, sink, feedback, inputs, pointer, emit };
+}
+
+test('short clicks absorb hand jitter and show feedback before the remote acknowledgement', async () => {
+  const ack = deferred<void>();
+  const f = await clickFixture(() => ack.promise);
+  f.canvas.dispatch('pointermove', f.pointer());
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.deepEqual(f.inputs, [], 'hover cannot claim control');
+  f.canvas.dispatch('pointerdown', f.pointer());
+  assert.equal(f.feedback.hidden, false, 'feedback needs no network round trip');
+  assert.deepEqual(f.inputs, [], 'hold the press locally until intent is known');
+  f.canvas.dispatch('pointermove', f.pointer({ clientX: 322 }));
+  f.canvas.dispatch('pointerup', f.pointer({ clientX: 322, timeStamp: 180 }));
+  assert.deepEqual(f.inputs, [{ kind: 'pointer', action: 'click', x: 320, y: 200, button: 'left', clickCount: 1 }]);
+  assert.equal(f.feedback.hidden, false);
+  ack.resolve();
+  await flushMicrotasks();
+  assert.equal(f.feedback.hidden, true);
+  f.workspace.dispose();
+});
+
+test('movement promotes a buffered click to an ordered drag at the original press point', async () => {
+  const f = await clickFixture();
+  f.canvas.dispatch('pointerdown', f.pointer());
+  f.canvas.dispatch('pointermove', f.pointer({ clientX: 380 }));
+  f.canvas.dispatch('pointerup', f.pointer({ clientX: 420 }));
+  assert.deepEqual(f.inputs.map(({ action, x }) => [action, x]), [
+    ['down', 320], ['move', 380], ['up', 420],
+  ]);
+  f.workspace.dispose();
+});
+
+test('holding a button streams its press and cancellation releases it once', async () => {
+  const f = await clickFixture();
+  f.canvas.dispatch('pointerdown', f.pointer());
+  await new Promise(resolve => setTimeout(resolve, 180));
+  assert.deepEqual(f.inputs.map(({ action }) => action), ['down']);
+  f.canvas.dispatch('pointercancel', f.pointer());
+  f.canvas.dispatch('lostpointercapture', f.pointer());
+  assert.deepEqual(f.inputs.map(({ action }) => action), ['down', 'up']);
+  f.workspace.dispose();
+});
+
+test('cancel, hide and session replacement discard unsent clicks and their hold timers', async () => {
+  for (const operation of ['cancel', 'hide', 'replace', 'dispose']) {
+    const f = await clickFixture();
+    f.canvas.dispatch('pointerdown', f.pointer());
+    if (operation === 'cancel') f.canvas.dispatch('pointercancel', f.pointer());
+    if (operation === 'hide') f.workspace.setContext({ visible: false, session: running() });
+    if (operation === 'replace') f.workspace.setContext({ visible: true, session: running('different') });
+    if (operation === 'dispose') f.workspace.dispose();
+    await new Promise(resolve => setTimeout(resolve, 180));
+    assert.deepEqual(f.inputs, [], operation);
+    assert.equal(f.feedback.hidden, true);
+    f.workspace.dispose();
+  }
+});
+
+test('keyboard input cannot overtake a buffered press', async () => {
+  const f = await clickFixture();
+  f.canvas.dispatch('pointerdown', f.pointer());
+  f.sink.dispatch('keydown', { key: 'Shift', preventDefault() {} });
+  f.canvas.dispatch('pointerup', f.pointer());
+  assert.deepEqual(f.inputs.map(({ kind, action }) => [kind, action]), [
+    ['pointer', 'down'], ['key', 'down'], ['pointer', 'up'],
+  ]);
+  f.workspace.dispose();
+});
+
+test('input failures are visible beside the preview and do not pretend the click succeeded', async () => {
+  let occupied = true;
+  const f = await clickFixture(async () => {
+    if (occupied) throw Object.assign(new Error('occupied'), { code: 'DISPLAY_CONTROL_CONFLICT' });
+  });
+  f.canvas.dispatch('pointerdown', f.pointer());
+  f.canvas.dispatch('pointerup', f.pointer());
+  await flushMicrotasks();
+  const notice = find(f.root, node => node.className === 'cloud-workspace-connection-notice') as TestElement & { hidden: boolean };
+  assert.equal(notice.hidden, false);
+  assert.match(notice.textContent, /다른 창/);
+  assert.equal(f.root.dataset.cloudControl, 'conflict');
+  assert.equal(f.feedback.hidden, true);
+  f.emit(frame(baseSession.sessionId, 1));
+  await flushMicrotasks();
+  assert.equal(notice.hidden, false, 'incoming frames must not erase an input failure');
+  assert.match(notice.textContent, /다른 창/);
+  occupied = false;
+  f.canvas.dispatch('pointerdown', f.pointer());
+  f.canvas.dispatch('pointerup', f.pointer());
+  await flushMicrotasks();
+  assert.equal(notice.hidden, true);
+  assert.equal(f.root.dataset.cloudControl, 'active');
+  f.workspace.dispose();
 });

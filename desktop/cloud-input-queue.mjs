@@ -100,6 +100,11 @@ export class CloudInputQueue {
         for (const entry of batch) for (const waiter of entry.settle) waiter.reject(error);
         // Never replay later clicks or key transitions after an ambiguous failure.
         if (generation === this.generation) this.reset(error);
-      }).finally(() => { this.sending = null; this.schedule(); });
+      }).finally(() => {
+        this.sending = null;
+        // Input collected during the round trip is already batched. Drain it
+        // immediately instead of adding another artificial coalescing delay.
+        this.flush();
+      });
   }
 }
