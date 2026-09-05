@@ -11,6 +11,7 @@ import type {
   CloudCommandRequest,
   CloudConversationWait,
   CloudCheckpointPayload,
+  CloudDocumentPayload,
   CloudDownloadResult,
   CloudConnectionState,
   CloudDisplayCapability,
@@ -63,6 +64,7 @@ export interface CloudDesktopApi {
   cloudCompleteTakeover?: (payload: { sessionId: string; operationId: string }) => Promise<unknown>;
   cloudDownloadResult?: (payload: { sessionId: string }) => Promise<unknown>;
   cloudDownloadCheckpoint?: (payload: { sessionId: string; operationId?: string }) => Promise<unknown>;
+  cloudPrepareRestartDocument?: (payload: { sessionId: string }) => Promise<unknown>;
   cloudPublishCheckpoint?: (payload: { sessionId: string; operationId?: string }) => Promise<unknown>;
   cloudOpenDisplay?: (payload: { sessionId: string }) => Promise<unknown>;
   cloudCloseDisplay?: (payload: { connectionId: string }) => Promise<unknown>;
@@ -97,6 +99,7 @@ export interface CloudController {
   completeTakeover(sessionId: string, operationId: string): Promise<CloudSnapshot>;
   downloadResult(sessionId: string): Promise<CloudDownloadResult>;
   downloadCheckpoint(sessionId: string, operationId?: string): Promise<CloudCheckpointPayload>;
+  prepareRestartDocument(sessionId: string): Promise<CloudDocumentPayload>;
   publishCheckpoint(sessionId: string, operationId?: string): Promise<CloudCheckpointPayload>;
   openDisplay(sessionId: string, listener: (event: CloudDisplayEvent) => void): Promise<CloudDisplayConnection>;
   resolveResult(sessionId: string, action: CloudResultAction): Promise<CloudResultResolution>;
@@ -910,6 +913,23 @@ export function createCloudController(
       }
       if (!result) throw new Error('다운로드한 클라우드 결과가 올바르지 않습니다.');
       return result;
+    },
+    async prepareRestartDocument(sessionId) {
+      const profileEpoch = snapshot.profileEpoch;
+      const fn = resolvedApi?.cloudPrepareRestartDocument;
+      if (typeof fn !== 'function') throw new Error('최신 Cloud 문서 보관본을 복구하려면 앱을 업데이트해 주세요.');
+      const result = record(await fn({ sessionId }));
+      if (profileEpoch !== snapshot.profileEpoch) {
+        throw Object.assign(new Error('Cloud 프로필이 작업 중 변경됐습니다.'), { code: 'PROFILE_CHANGED' });
+      }
+      if (!result || !(result.bytes instanceof Uint8Array) || !result.bytes.byteLength
+        || !string(result.fileName) || !/^[a-f0-9]{64}$/.test(string(result.sha256))
+        || !string(result.restartToken)
+        || result.originSha256 !== null && !/^[a-f0-9]{64}$/.test(string(result.originSha256))) {
+        throw new Error('Cloud 복구 문서 보관본을 확인할 수 없습니다.');
+      }
+      return { bytes: result.bytes, fileName: string(result.fileName), sha256: string(result.sha256),
+        originSha256: result.originSha256 as string | null, restartToken: string(result.restartToken) };
     },
     async downloadCheckpoint(sessionId, operationId) {
       const profileEpoch = snapshot.profileEpoch;

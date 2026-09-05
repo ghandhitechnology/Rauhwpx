@@ -1470,6 +1470,9 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
     cloudTeardownSandbox: () => readProfile(async () => ({ snapshot: snapshot(), removed: false, unmanaged: true })),
     cloudReconnectLink: reconnectLink,
     cloudRecreateLink: reconnectLink,
+    cloudPrepareRestartDocument: () => readProfile(async () => {
+      throw cloudError('브라우저에서는 서버를 다시 만들 수 없습니다. 기존 Cloud 서버에 다시 연결해 주세요.', 'CLOUD_RESTART_UNSUPPORTED');
+    }),
     cloudForceQuitAccount: () => readProfile(async () => {
       const selectedProfile = profile;
       const generation = profileGeneration;

@@ -367,6 +367,9 @@ test('each stable turn archives exact bytes without overwriting the origin or en
   assert.equal(record.turnArchives.length, 1);
   assert.equal(record.turnArchives[0].operationId, 'turn_1_stable');
   assert.equal(await readFile(record.turnArchives[0].path, 'utf8'), edited.toString());
+  const restartDocument = await coordinator.prepareRestartDocument({ sessionId: 'cloud-autosync' });
+  assert.deepEqual(Buffer.from(restartDocument.bytes), edited);
+  assert.equal(restartDocument.originSha256, createDigest(original));
 
   const published = await coordinator.publishCheckpoint({ sessionId: 'cloud-autosync', operationId: 'turn_1_stable' });
   assert.equal(published.publication, 'written');
@@ -376,6 +379,154 @@ test('each stable turn archives exact bytes without overwriting the origin or en
   assert.equal((await store.get(created.id)).documentDigest, createHash('sha256').update(original).digest('hex'));
   const repeated = await coordinator.publishCheckpoint({ sessionId: 'cloud-autosync', operationId: 'turn_1_stable' });
   assert.equal(repeated.publication, 'unchanged');
+});
+
+test('recreation resumes archived unsaved cloud edits and retains the trusted origin after an external save', { timeout: 5_000 }, async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-restart-document-'));
+  const originPath = path.join(directory, 'source.hwpx');
+  const original = Buffer.from('saved original document');
+  const localSnapshot = Buffer.from('unsaved local document at transfer');
+  const cloudEdited = Buffer.from('아직 원본에 저장하지 않은 최신 Cloud 편집');
+  const external = Buffer.from('external application saved different bytes');
+  await writeFile(originPath, original);
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const sandbox = { providerId: 'raucloud', sandboxId: 'old-worker', host: 'old.example.test',
+    region: 'test', createdAt: new Date().toISOString() };
+  let activeProfile = normalizeCloudProfile({ mode: 'app-hosted', endpoint: 'https://old.example.test',
+    serverPublicKey: SERVER_KEY, sandbox });
+  const created = await store.create({
+    sessionId: 'desktop-restart', threadId: 'thread-restart', documentId: 'document-restart',
+    originPath, originDigest: createDigest(original), documentName: 'source.hwpx', documentBytes: localSnapshot,
+    timeline: null, provider: 'codex', limits: { maxTurns: 100 },
+    destination: { endpoint: activeProfile.endpoint, serverPublicKey: SERVER_KEY, mode: 'app-hosted',
+      sandboxId: sandbox.sandboxId, sandboxProvider: sandbox.providerId },
+  });
+  await store.transition(created.id, 'uploading');
+  await store.transition(created.id, 'committing');
+  await store.transition(created.id, 'running', { cloudSessionId: 'old-cloud-session', serverVersion: 2 });
+  let uploaded;
+  let uploads = 0;
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => activeProfile, isPaired: async () => true,
+      saveServerMode: async (mode) => mode,
+      forgetProfile: async () => { activeProfile = null; },
+      activateProfile: async (profile) => { activeProfile = profile; },
+      redeemPairingCode: async () => ({ credentials: { device: {} } }),
+      health: async () => ({ ok: true, serverPublicKey: SERVER_KEY }),
+      assertTransferReady: async () => ({ profile: activeProfile }),
+      downloadCheckpoint: async (_sessionId, { operationId }) => ({
+        bytes: cloudEdited, sha256: createDigest(cloudEdited), size: cloudEdited.length,
+        name: 'source.hwpx', boundaryOperation: operationId, revision: 4, turn: 1,
+      }),
+      watchSession: async (sessionId, _after, { signal, onEvent }) => {
+        if (sessionId === 'old-cloud-session') await onEvent({ sequence: 3, type: 'boundary.committed',
+          payload: { kind: 'operation', operationId: 'unsaved-cloud-edit', turnNumber: 1, revision: 4 } });
+        if (!signal.aborted) await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+      },
+      transfer: async ({ sessionId, documentBytes }) => {
+        uploaded = documentBytes;
+        uploads++;
+        return { id: sessionId, status: 'queued', stateVersion: 2 };
+      },
+    },
+    store, recoveryDir: path.join(directory, 'recovery'),
+    appServers: [{ id: 'raucloud', displayName: 'Raucloud', configuration: () => ({ configured: true }),
+      accountStatus: async () => null, status: async () => ({ lifecycle: 'ready' }), teardown: async () => {},
+      forceQuitAccount: async () => ({ lifecycle: 'idle' }),
+      spawn: async () => ({ sandbox: { ...sandbox, sandboxId: 'new-worker', host: 'new.example.test' },
+        receipt: { endpoint: 'https://new.example.test', serverPublicKey: SERVER_KEY, pairingCode: 'ABCD' } }),
+    }],
+  });
+  t.after(async () => { await coordinator.stop(); await store.flush(); await rm(directory, { recursive: true, force: true }); });
+  await coordinator.start();
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if ((await store.get(created.id)).lastSyncedRevision === 4) break;
+    await delay(5);
+  }
+  await writeFile(originPath, external);
+  const prepared = await coordinator.prepareRestartDocument({ sessionId: 'old-cloud-session' }, { originSessionId: 'desktop-restart' });
+  assert.deepEqual(Buffer.from(prepared.bytes), cloudEdited);
+  assert.equal(prepared.originSha256, createDigest(original));
+  assert.equal(prepared.revision, 4);
+  assert.equal((await coordinator.recreateCloud()).link.kind, 'ready');
+  assert.equal(activeProfile.endpoint, 'https://new.example.test');
+  // Reopen after the old worker was removed, before any replacement transfer.
+  await coordinator.stop();
+  const reopenedStore = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const reopened = new CloudCoordinator({
+    client: {
+      loadProfile: async () => activeProfile, isPaired: async () => true,
+      assertTransferReady: async () => ({ profile: activeProfile }),
+      watchSession: async (_sessionId, _after, { signal }) => {
+        if (!signal.aborted) await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+      },
+      transfer: async ({ sessionId, documentBytes }) => {
+        uploaded = documentBytes;
+        uploads++;
+        return { id: sessionId, status: 'queued', stateVersion: 2 };
+      },
+      downloadCheckpoint: async (_sessionId, { operationId }) => ({
+        bytes: cloudEdited, sha256: createDigest(cloudEdited), size: cloudEdited.length,
+        name: 'source.hwpx', boundaryOperation: operationId, revision: 4, turn: 1,
+      }),
+    }, store: reopenedStore, recoveryDir: path.join(directory, 'recovery'),
+  });
+  t.after(async () => { await reopened.stop(); await reopenedStore.flush(); });
+  await assert.rejects(reopened.prepareRestartDocument({ sessionId: 'old-cloud-session' }, {
+    originSessionId: 'new-desktop-session', originPath: path.join(directory, 'another.hwpx'),
+  }), { code: 'RESTART_CHECKPOINT_UNAVAILABLE' });
+  const restored = await reopened.prepareRestartDocument({ sessionId: 'old-cloud-session' }, {
+    originSessionId: 'new-desktop-session', originPath,
+  });
+  assert.equal(restored.restartToken, prepared.restartToken);
+  assert.deepEqual(Buffer.from(restored.bytes), cloudEdited);
+  const request = cloudStartTransfer({ startId: 'restart01', threadId: 'thread-restart', documentId: 'document-restart',
+    document: { ...restored, originSha256: createDigest(external) }, agent: 'codex', references: [] });
+  const origin = { originSessionId: 'new-desktop-session', originPath, originDigest: createDigest(external) };
+  await assert.rejects(reopened.transfer({ ...request,
+    document: { ...request.document, bytes: localSnapshot } }, origin), { code: 'RESTART_DOCUMENT_INVALID' });
+  await assert.rejects(reopened.transfer({ ...request, documentId: 'another-document' }, origin), { code: 'RESTART_DOCUMENT_INVALID' });
+  await reopened.transfer(request, origin);
+  assert.deepEqual(uploaded, cloudEdited);
+  assert.equal((await reopened.transfer(request, origin)).session.sessionId, 'restart01');
+  assert.equal(uploads, 1, 'retry after acceptance reuses the uploaded replacement session');
+  await assert.rejects(reopened.transfer({ ...request, startId: 'restart02' }, origin), { code: 'RESTART_DOCUMENT_INVALID' });
+  const restarted = await reopenedStore.get('restart01');
+  assert.equal(restarted.originDigest, createDigest(original));
+  assert.equal(restarted.documentDigest, createDigest(cloudEdited));
+  const published = await reopened.publishCheckpoint({ sessionId: 'restart01', operationId: 'continued-cloud-edit' });
+  assert.equal(published.publication, 'conflict');
+  assert.deepEqual(await readFile(originPath), external);
+  assert.equal((await reopenedStore.get('restart01')).originDigest, createDigest(original));
+});
+
+test('restart rejects missing, corrupt, or superseded archives before changing the handoff', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-restart-invalid-'));
+  const recoveryDir = path.join(directory, 'recovery');
+  await mkdir(recoveryDir);
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const created = await store.create({ sessionId: 'desktop-restart', threadId: 'thread-restart',
+    documentId: 'document-restart', documentName: 'source.hwpx', documentBytes: Buffer.from('local source'),
+    timeline: null, provider: 'codex', limits: { maxTurns: 100 } });
+  await store.transition(created.id, 'uploading');
+  await store.transition(created.id, 'committing');
+  await store.transition(created.id, 'running', { cloudSessionId: 'cloud-restart-invalid' });
+  const coordinator = new CloudCoordinator({ client: { loadProfile: async () => null }, store, recoveryDir });
+  t.after(async () => { await coordinator.stop(); await store.flush(); await rm(directory, { recursive: true, force: true }); });
+  const prepare = () => coordinator.prepareRestartDocument({ sessionId: 'cloud-restart-invalid' });
+  await assert.rejects(prepare(), { code: 'RESTART_CHECKPOINT_UNAVAILABLE' });
+  const bytes = Buffer.from('verified cloud bytes');
+  const archive = { operationId: 'saved-operation', revision: 2, turn: 1, path: path.join(recoveryDir, 'archive.hwpx'),
+    sha256: createDigest(bytes), size: bytes.length };
+  await store.patch(created.id, { turnArchives: [archive], lastSyncedRevision: 2 });
+  await assert.rejects(prepare(), { code: 'RESTART_CHECKPOINT_UNAVAILABLE' });
+  await writeFile(archive.path, 'corrupt archive');
+  await assert.rejects(prepare(), { code: 'RESTART_CHECKPOINT_UNAVAILABLE' });
+  await writeFile(archive.path, bytes);
+  await store.patch(created.id, { pendingTurnBoundary: { operationId: 'newer-operation', revision: 3, turnNumber: 1 } });
+  await assert.rejects(prepare(), { code: 'RESTART_CHECKPOINT_UNAVAILABLE' });
+  assert.equal((await store.get(created.id)).state, 'running');
 });
 
 test('a persisted turn-boundary receipt retries after restart without writing the origin', async (t) => {

@@ -65,6 +65,7 @@ import {
   serializeThreadMessagesForProviderHistory,
   pendingUserQuestionMatchesInteraction,
   subscribeThreadChanges,
+  waitForThreadsPersistence,
   threadMatchesDocument,
   upsertThread,
   type ChatThread,
@@ -1886,16 +1887,32 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       return started?.authUrl ? { authUrl: started.authUrl } : null;
     },
     onRequestTransfer: () => openCloudWorkspace(),
-    onRestartConversation: async (binding) => {
+    onRestartPrepared: async (binding) => {
+      currentThread.cloudRestartSourceSessionId = binding.sessionId;
+      currentThread.cloudStartId = createCloudStartId();
+      persistCurrentThread();
+      await waitForThreadsPersistence();
+    },
+    onPrepareRestartConversation: async (binding) => {
+      if (currentThread.id !== binding.threadId || currentDocumentId !== binding.documentId) {
+        throw new Error('작업을 시작한 문서와 대화에서 서버를 다시 만들어 주세요.');
+      }
+      return collectCloudReferences();
+    },
+    onRestartConversation: async (binding, document, references) => {
       if (currentThread.id !== binding.threadId || currentDocumentId !== binding.documentId) {
         throw new Error('서버가 준비되었습니다. 작업을 시작한 대화에서 이어서 보내 주세요.');
       }
       workspace.unlockExecution();
       workspace.select('cloud');
+      const startId = currentThread.cloudStartId!;
+      pendingCloudStartAttachments.set(startId, references);
       await startCloudFromFirstMessage({
-        startId: createCloudStartId(),
-        messageId: createCloudStartId(),
+        startId,
+        messageId: startId,
         text: '이전 대화와 저장된 문서를 바탕으로 중단된 작업을 이어서 진행해 주세요.',
+        preserveDraft: true,
+        document,
       });
       await cloudTransferCloseWaiter?.promise;
     },
@@ -2037,6 +2054,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   const unsubscribeHancomGitVisibility = userSettings.subscribeUseHancomGit(applyHancomGitVisibility);
 
   const pendingCloudStartAttachments = new Map<string, CloudTransferReference[]>();
+  const pendingCloudRestartDocuments = new Map<string, CloudDocumentPayload>();
 
   async function collectCloudReferences(
     extras: CloudTransferReference[] = [],
@@ -2121,6 +2139,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (!imported) return false;
     imported.executionMode = 'cloud';
     if (currentThread.id === imported.id) {
+      imported.cloudRestartSourceSessionId = currentThread.cloudRestartSourceSessionId;
       imported.cloudStartId = currentThread.cloudStartId ?? imported.cloudStartId;
       imported.cloudSessionId = currentThread.cloudSessionId ?? imported.cloudSessionId;
       imported.firstMessageDelivery = currentThread.firstMessageDelivery === 'starting'
@@ -2203,7 +2222,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     attachmentReferenceIds: string[];
   }, extras: CloudTransferReference[] = []): Promise<void> {
     const transferThread = currentThread;
-    const document = await deps.prepareCloudTransfer?.();
+    const document = pendingCloudRestartDocuments.get(startId)
+      ?? (transferThread.cloudRestartSourceSessionId
+        ? await cloudController.prepareRestartDocument(transferThread.cloudRestartSourceSessionId)
+        : await deps.prepareCloudTransfer?.());
     if (!document) throw new Error(CLOUD_UNSAVED_MESSAGE);
     flushAssistantBuffer();
     persistCurrentThread();
@@ -2223,7 +2245,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (!await cloudUi.bindSelectedTimeline()) {
       throw new Error('Cloud 대화를 전송된 작업에 연결하지 못했습니다.');
     }
-    if (currentDocumentId) void deleteCloudComposerDraft(currentDocumentId);
+    pendingCloudRestartDocuments.delete(startId);
+    delete currentThread.cloudRestartSourceSessionId;
+    persistCurrentThread();
+    if (currentDocumentId && !input.value && !referenceLibrary.hasDrafts()) void deleteCloudComposerDraft(currentDocumentId);
   }
 
   function ensureCloudTransferIntent(): Promise<void> {
@@ -2357,9 +2382,21 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     messageId: string;
     text: string;
     retry?: boolean;
+    preserveDraft?: boolean;
+    document?: CloudDocumentPayload;
   }): Promise<void> {
+    const preserveDraft = Boolean(currentThread.cloudRestartSourceSessionId) || existing?.preserveDraft === true
+      || Boolean(existing?.retry && pendingCloudRestartDocuments.has(existing.startId));
     if (readOnlyDocLabel !== null || mergeResolverLocked || attachmentsSending
       || workspace.composerTarget().kind === 'workspace-blocked') return;
+    if (!existing && currentThread.cloudRestartSourceSessionId) {
+      const startId = currentThread.cloudStartId ?? createCloudStartId();
+      const message = currentThread.messages.find((item) => item.role === 'user' && item.messageId === startId);
+      await startCloudFromFirstMessage({ startId, messageId: startId,
+        text: message?.text ?? '이전 대화와 저장된 문서를 바탕으로 중단된 작업을 이어서 진행해 주세요.',
+        retry: Boolean(message), preserveDraft: true });
+      return;
+    }
     if (!existing && (currentThread.firstMessageDelivery === 'starting'
       || currentThread.firstMessageDelivery === 'failed')) {
       const startId = currentThread.cloudStartId;
@@ -2394,7 +2431,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       systemMessage(documentCheck.message);
       return;
     }
-    if (activeComposerSkill) {
+    if (activeComposerSkill && !preserveDraft) {
       systemMessage('Cloud에서는 로컬 스킬을 사용할 수 없습니다. 스킬을 해제한 뒤 다시 보내 주세요.');
       return;
     }
@@ -2408,8 +2445,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       return;
     }
     let text = existing?.text ?? input.value.trim();
-    const hasDrafts = referenceLibrary.hasDrafts();
-    if (referenceLibrary.hasBlockingDrafts()) return;
+    const hasDrafts = !preserveDraft && referenceLibrary.hasDrafts();
+    if (!preserveDraft && referenceLibrary.hasBlockingDrafts()) return;
     const workflowInvocation = text.match(/^\/(plan|question|build)(?:\s+([\s\S]*))?$/i);
     const cloudWorkflow = workflowInvocation?.[1]?.toLowerCase() === 'plan' ? 'plan'
       : workflowInvocation?.[1]?.toLowerCase() === 'question' ? 'question'
@@ -2425,6 +2462,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     // Only a retry of the same submission reuses its id. A new worker must
     // receive a new transfer while retaining this thread's full timeline.
     const startId = existing?.startId ?? createCloudStartId();
+    if (existing?.document) pendingCloudRestartDocuments.set(startId, existing.document);
     const existingUser = [...currentThread.messages].reverse().find((message) => message.role === 'user');
     const messageId = existing?.messageId ?? createCloudStartId();
     const submittedDraft = input.value;
@@ -2465,7 +2503,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
           appendConversation(userBubble);
           scrollConversationToMessage(userBubble, { smooth: true });
         }
-        if (input.value === submittedDraft) input.value = '';
+        if (!preserveDraft && input.value === submittedDraft) input.value = '';
         resizeComposerInput();
       }
       currentThread.executionMode = 'cloud';
@@ -5826,7 +5864,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       workspace.select('cloud');
       workspace.lockExecution();
       syncCloudStartPlaceholder();
-      if (thread.cloudSessionId) void cloudUi.bindSelectedTimeline();
+      if (thread.cloudSessionId && !thread.cloudRestartSourceSessionId) void cloudUi.bindSelectedTimeline();
       return;
     }
     workspace.unlockExecution();
@@ -5838,6 +5876,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   function recoverCloudStartIfNeeded(): void {
     if (currentThread.executionMode !== 'cloud') return;
     applyThreadExecution(currentThread);
+    if (currentThread.cloudRestartSourceSessionId) {
+      void startCloudFromFirstMessage();
+      return;
+    }
     if (currentThread.firstMessageDelivery === 'accepted' && currentThread.cloudSessionId) {
       void cloudUi.bindSelectedTimeline();
       return;
@@ -5978,7 +6020,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }
     void scopeRefresh.then((refreshed) => {
       if (!refreshed || root.dataset.disposed === 'true' || currentThread.id !== selectedThreadId) return;
-      if (composerExecution(workspace.composerTarget()).kind === 'local') startCurrentBridgeChat(true);
+      if (currentThread.cloudRestartSourceSessionId) void startCloudFromFirstMessage();
+      else if (composerExecution(workspace.composerTarget()).kind === 'local') startCurrentBridgeChat(true);
       else updateComposer();
     });
     setThreadsPanelOpen(false);

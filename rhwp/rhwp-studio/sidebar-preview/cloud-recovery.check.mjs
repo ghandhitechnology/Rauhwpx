@@ -84,8 +84,31 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.controller.getSnapshot().session.sessionId), original.sessionId);
 
   // Explicit rebuilding must transfer this same transcript with a fresh id.
+  await page.type('.ag-input', 'Keep this unsent draft through server rebuilding.');
+  await page.evaluate(() => window.sidebarPreview.cloud.requireReference('reference-missing'));
   await page.click('#cloud-disconnect');
+  // Missing required references must stop before archive preparation or recreation.
+  await page.evaluate(() => [...document.querySelectorAll('.ag-cloud-recovery-actions button')]
+    .find((node) => node.textContent === '서버 다시 만들기').click());
+  await page.waitForFunction(() => document.querySelector('.ag-messages').innerText.includes('reference-missing 참고자료를 찾지 못해'));
+  assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.prepareRestart), 0);
+  assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.recreate), 0);
+  await page.evaluate(() => { window.sidebarPreview.cloud.setLink('ready'); window.sidebarPreview.cloud.requireReference('reference-sample'); });
+  await page.click('#cloud-disconnect');
+  // An unavailable archive must stop before the destructive recreation.
   await page.evaluate(() => {
+    window.sidebarPreview.cloud.setRestartArchiveAvailable(false);
+    [...document.querySelectorAll('.ag-cloud-recovery-actions button')]
+      .find((node) => node.textContent === '서버 다시 만들기').click();
+  });
+  await page.waitForFunction(() => document.querySelector('.ag-messages').innerText.includes('최신 Cloud 문서 보관본을 확인할 수 없습니다.')
+    && [...document.querySelectorAll('.ag-cloud-recovery-actions button')]
+      .some((node) => node.textContent === '서버 다시 만들기' && !node.disabled));
+  assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.recreate), 0);
+  assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.transfers.length), 1);
+  assert.equal(await page.$eval('.ag-input', (node) => node.value), 'Keep this unsent draft through server rebuilding.');
+  await page.evaluate(() => {
+    window.sidebarPreview.cloud.setRestartArchiveAvailable(true);
     const button = [...document.querySelectorAll('.ag-cloud-recovery-actions button')]
       .find((node) => node.textContent === '서버 다시 만들기');
     button.click(); button.click();
@@ -99,6 +122,20 @@ export async function checkCloudRecovery(page, origin, artifacts) {
       recreateCalls: cloud.calls.recreate };
   });
   assert.equal(restarted.recreateCalls, 1);
+  const restartDocument = await page.evaluate(() => {
+    const document = window.sidebarPreview.cloud.calls.transfers[1].document;
+    return { text: new TextDecoder().decode(document.bytes), originSha256: document.originSha256,
+      restartToken: document.restartToken };
+  });
+  assert.equal(restartDocument.text, 'Archived Cloud edits after the original transfer.');
+  assert.equal(restartDocument.originSha256, null);
+  assert.equal(restartDocument.restartToken, `preview-restart-${original.sessionId}`);
+  assert.equal(restarted.transfer.references.length, 1);
+  assert.equal(restarted.transfer.references[0].id, 'reference-sample');
+  assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.transfers[1].references[0].bytes.every((byte) => byte === 7)), true);
+  assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.referenceReads), 2);
+  assert.equal(await page.$eval('.ag-input', (node) => node.value), 'Keep this unsent draft through server rebuilding.');
+  await page.$eval('.ag-input', (node) => { node.value = ''; node.dispatchEvent(new Event('input', { bubbles: true })); });
   assert.notEqual(restarted.transfer.startId, original.startId);
   assert.notEqual(restarted.session.sessionId, original.sessionId);
   assert.equal(restarted.transfer.threadId, original.threadId);
@@ -107,6 +144,8 @@ export async function checkCloudRecovery(page, origin, artifacts) {
     message.text === '이 제안서의 예산 표를 검토해 주세요.').length, 1);
   await page.waitForFunction(() => document.querySelector('#cloud-workspace').dataset.displayState === 'live');
   await page.screenshot({ path: resolve(artifacts, 'cloud-restarted.png') });
+
+  await page.evaluate(() => window.sidebarPreview.cloud.requireReference(null));
 
   // Stop while a reconnect is in flight, then start again in the same chat.
   await page.click('#cloud-disconnect');
@@ -127,14 +166,21 @@ export async function checkCloudRecovery(page, origin, artifacts) {
 
   // Changing chats clears the old explicit selection without releasing the
   // document lease. Opening the original chat restores its existing session.
-  await page.click('.ag-cloud-panel-close');
-  await page.click('.ag-header .ag-threads-btn');
+  await page.evaluate(() => document.querySelector('.ag-cloud-panel-close').click());
+  await page.waitForSelector('.ag-cloud-panel[hidden]');
+  await page.evaluate(() => document.querySelector('.ag-header .ag-threads-btn').click());
+  await page.waitForFunction(() => {
+    const node = document.querySelector('.ag-threads-new');
+    const rect = node.getBoundingClientRect();
+    return node.checkVisibility() && node.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2));
+  });
   await page.click('.ag-threads-new');
   await page.waitForFunction(() => window.sidebarPreview.cloud.controller.getSnapshot().session.kind === 'idle');
   assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.getScope().selectedSessionId), undefined);
   assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.controller.getSnapshot().lease.owner), 'cloud');
   assert.equal(await page.$eval('.ag-messages', (node) => node.innerText.includes('예산 표를 검토')), false);
-  await page.click('.ag-header .ag-threads-btn');
+  await page.evaluate(() => document.querySelector('.ag-header .ag-threads-btn').click());
+  await page.waitForFunction(() => [...document.querySelectorAll('.ag-threads-item')].some((node) => node.checkVisibility()));
   assert.equal(await page.evaluate(() => {
     const item = [...document.querySelectorAll('.ag-threads-item')].find((node) => node.checkVisibility());
     item?.click();
@@ -145,6 +191,43 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.controller.getSnapshot().session.threadId), original.threadId);
   assert.equal(await page.$eval('.ag-messages', (node) => node.innerText.includes('예산 표를 검토')), true);
   assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.transfers.length), 3);
+  // Reopen after the old server is gone but its replacement transfer failed.
+  await page.evaluate(() => window.sidebarPreview.cloud.rejectRestartTransfer(true));
+  await page.click('#cloud-disconnect');
+  await page.evaluate(() => document.querySelector('.ag-cloud-btn').click());
+  await page.evaluate(() => [...document.querySelectorAll('.ag-cloud-recovery-actions button')]
+    .find((node) => node.textContent === '서버 다시 만들기').click());
+  await page.waitForFunction(() => document.querySelector('.ag-messages').innerText.includes('Preview restart transfer interrupted.'));
+  const pendingRestart = await page.evaluate(async () => {
+    const { listThreads, waitForThreadsPersistence } = window.sidebarPreview.threadStore;
+    await waitForThreadsPersistence();
+    return listThreads().find((thread) => thread.cloudRestartSourceSessionId);
+  });
+  assert.ok(pendingRestart.cloudStartId);
+  await page.goto(`${origin}/?cloud=1&theme=light`, { waitUntil: 'networkidle0' });
+  await page.evaluate(() => document.querySelector('.ag-header .ag-threads-btn').click());
+  await page.waitForFunction(() => [...document.querySelectorAll('.ag-threads-item')].some((node) => node.checkVisibility()));
+  await page.evaluate(() => [...document.querySelectorAll('.ag-threads-item')].find((node) => node.checkVisibility()).click());
+  await page.waitForFunction(() => window.sidebarPreview.cloud.calls.transfers.length === 1
+    && window.sidebarPreview.cloud.controller.getSnapshot().session.kind === 'running'
+    && !document.querySelector('.ag-input').disabled);
+  await page.waitForFunction(async (threadId) => {
+    const { getThread } = window.sidebarPreview.threadStore;
+    const thread = getThread(threadId);
+    return Boolean(thread) && !thread.cloudRestartSourceSessionId;
+  }, {}, pendingRestart.id);
+  const reopened = await page.evaluate(async () => {
+    const { listThreads, waitForThreadsPersistence } = window.sidebarPreview.threadStore;
+    await waitForThreadsPersistence();
+    return { transfer: window.sidebarPreview.cloud.calls.transfers[0],
+      documentText: new TextDecoder().decode(window.sidebarPreview.cloud.calls.transfers[0].document.bytes),
+      threads: listThreads() };
+  });
+  assert.equal(reopened.transfer.startId, pendingRestart.cloudStartId);
+  assert.equal(reopened.transfer.threadId, pendingRestart.id);
+  assert.equal(reopened.documentText, 'Archived Cloud edits after the original transfer.');
+  assert.equal(reopened.transfer.timeline.thread.messages.filter((message) => message.messageId === pendingRestart.cloudStartId).length, 1);
+  assert.equal(reopened.threads.find((thread) => thread.id === pendingRestart.id).cloudRestartSourceSessionId, undefined);
   console.log(`Cloud panel opened in ${Math.round(panelMs)}ms; fixture reconnect restored the preview in ${Math.round(reconnectMs)}ms`);
   await page.goto(`${origin}/?width=480`, { waitUntil: 'networkidle0' });
 }
