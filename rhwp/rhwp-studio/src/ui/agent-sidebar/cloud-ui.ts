@@ -334,6 +334,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     configuration: onboarding.settingsElement,
     refresh: () => deps.controller.refresh(selectedScope()),
     reconnect: () => deps.controller.reconnectLink(),
+    configure: (trigger) => onboarding.open('manage', trigger),
     mutationLocked: () => busy || authorityTransitionActive() || workspaceLocked,
   });
   const settingsElement = dashboard.element;

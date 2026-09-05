@@ -31,7 +31,7 @@
 .ag-cd-updated { margin-left: auto; color: var(--ag-text-muted); font-size: 10px; }
 .ag-cd-feedback { padding: 10px 12px; margin: 0 0 16px; border: 1px solid var(--ag-border); border-radius: 8px; background: var(--cd-tint); overflow-wrap: anywhere; }
 .ag-cd-feedback[data-kind='error'] { background: color-mix(in srgb, #c77958 10%, var(--ag-bg)); }
-.ag-cd-feedback[hidden], .ag-cd-meter[hidden], .ag-cd-reconnect[hidden] { display: none; }
+.ag-cd-feedback[hidden], .ag-cd-meter[hidden], .ag-cd-reconnect[hidden], .ag-cd-setup[hidden] { display: none; }
 .ag-cd-stats { display: grid; grid-template-columns: 1.3fr 1fr 1fr; gap: 12px; margin-bottom: 18px; }
 .ag-cd-stat { padding: 18px 20px; border: 1px solid var(--ag-border); border-radius: 12px; background: var(--ag-bg-2); min-width: 0; }
 .ag-cd-quota { background: var(--cd-tint); border-color: color-mix(in srgb, var(--cd-accent) 28%, var(--ag-border)); }
@@ -90,6 +90,9 @@
 .ag-cd-config .ag-cloud-settings { margin: 18px 0 12px; }
 .ag-cd-config .ag-settings-section-title { display: none; }
 .ag-cd-config .ag-cloud-settings-card { background: var(--ag-bg); }
+.ag-cd-config .ag-cloud-settings-action { flex: 0 0 auto; min-width: 44px; white-space: nowrap; }
+.ag-cd-server { align-self: stretch; display: flex; flex-direction: column; }
+.ag-cd-server > .ag-cd-muted { margin-top: auto; }
 
 @container (max-width: 720px) {
   .ag-cd-content { padding: 20px 16px 40px; }

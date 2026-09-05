@@ -9,6 +9,7 @@ interface CloudDashboardDeps {
   configuration: HTMLElement;
   refresh(): Promise<CloudSnapshot>;
   reconnect(): Promise<CloudSnapshot>;
+  configure(trigger: HTMLElement): void;
   mutationLocked(): boolean;
 }
 
@@ -79,9 +80,13 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
   const toolbar = el('div', 'ag-cd-toolbar');
   const status = el('span', 'ag-cd-status');
   const updated = el('span', 'ag-cd-updated');
-  const refresh = button('새로고침');
+  const refresh = button('새로고침', 'ag-cd-refresh');
+  const setup = button('연결 설정', 'ag-cd-setup');
+  setup.addEventListener('click', () => {
+    if (!pending && snapshot?.available && !deps.mutationLocked()) deps.configure(setup);
+  });
   refresh.prepend(createIcon('refresh'));
-  toolbar.append(status, updated, refresh);
+  toolbar.append(status, updated, setup, refresh);
   const feedback = el('p', 'ag-cd-feedback');
   feedback.hidden = true;
   feedback.setAttribute('role', 'status');
@@ -95,7 +100,7 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
     stats.append(card);
     return { card, value, detail };
   }
-  const quota = stat('오늘 남은 시간', 'ag-cd-quota');
+  const quota = stat('오늘 남은 Raucloud 시간', 'ag-cd-quota');
   const meter = el('div', 'ag-cd-meter');
   meter.setAttribute('role', 'meter');
   meter.setAttribute('aria-label', '오늘 남은 Raucloud 시간');
@@ -114,7 +119,7 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
     grid.append(root);
     return { root, head };
   }
-  const usage = panel('Cloud 사용량', 'ag-cd-usage');
+  const usage = panel('Raucloud 사용량', 'ag-cd-usage');
   const ranges = el('div', 'ag-cd-segment');
   ranges.setAttribute('role', 'group');
   ranges.setAttribute('aria-label', '사용량 조회 기간');
@@ -315,6 +320,8 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
     status.dataset.state = state;
     updated.textContent = `확인 ${formatTime(snapshot.updatedAt)}`;
     refresh.disabled = pending || !snapshot.available;
+    setup.hidden = configured || !snapshot.available;
+    setup.disabled = pending || deps.mutationLocked();
     refresh.setAttribute('aria-busy', String(pending));
     reconnect.hidden = !configured || ready || !snapshot.available;
     reconnect.disabled = pending || deps.mutationLocked() || state === 'pending';
@@ -350,9 +357,11 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
       ['리전 / 연결', configured ? profile.mode === 'app-hosted' ? profile.sandbox.region || '정보 없음' : profile.profile.transport.kind === 'ssh-tunnel' ? 'SSH 터널' : profile.profile.transport.kind === 'tailscale' ? 'Tailscale' : 'HTTPS' : '—'],
       ['Cloud 버전', configured ? profile.serviceVersion ?? '확인 필요' : '—'],
     ]);
-    const gate = account?.raucloud;
+    const gate = configured && profile.mode === 'self-hosted' ? null : account?.raucloud;
     serverNote.textContent = gate?.kind === 'active-elsewhere' ? `${gate.deviceName || '다른 기기'}에서 Raucloud를 사용 중입니다. 서버 관리에서 확인하세요.`
       : gate?.kind === 'exhausted' ? '오늘의 Raucloud 시간을 모두 사용했습니다. 초기화 후 다시 시작할 수 있습니다.'
+      : gate?.kind === 'unavailable' ? gate.reason
+      : gate?.kind === 'logged-out' ? 'Raucloud를 사용하려면 Rauhwpx 계정으로 로그인하세요.'
       : state === 'failed' ? '서버 응답이 없습니다. 다시 연결하거나 서버 관리에서 구성을 확인하세요.'
       : ready ? '채팅과 문서 작업에 사용할 수 있습니다.' : '서버 관리에서 연결을 설정하세요.';
     facts(configFacts, [
