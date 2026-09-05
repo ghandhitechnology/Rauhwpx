@@ -161,7 +161,6 @@ async function openPage(): Promise<Page> {
       deleteShelf: noOp,
       compareLegacy: noOp,
       setAiTitlesEnabled: () => undefined,
-      collectGarbage: noOp,
     };
     const manager = createVersionManagerPage(controller);
     document.documentElement.style.background = '#19191d';

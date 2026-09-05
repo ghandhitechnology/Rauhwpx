@@ -932,22 +932,6 @@ export class DocumentVersionController implements VersionManagerController {
     this.#emit();
   }
 
-  async collectGarbage(): Promise<void> {
-    await this.#enqueue(async () => {
-      await this.#refreshData(false);
-      await this.#guardMutation();
-      // A composite merge Redo may be the only remaining owner of its merge
-      // commit after Undo. Do not collect that commit out from under history.
-      if (this.#getInputHandler()?.canRedo()) {
-        throw new VersionError('VERSION_STORE_FAILED', 'Redo or replace pending editor history before garbage collection');
-      }
-      const workspace = this.#captureWorkspaceToken();
-      const repository = this.#requireRepository();
-      await this.#store.collectGarbage(repository.id, repository.revision);
-      await this.#refreshData(true);
-    });
-  }
-
   async createPortableHistoryBundle(): Promise<PortableHistoryArchive> {
     return this.#enqueue(async () => {
       await this.#refreshData(false);
@@ -2174,6 +2158,7 @@ export class DocumentVersionController implements VersionManagerController {
     options.onPersisted?.();
     if (!this.#isWorkspaceTokenCurrent(workspace, { editor: false })) return result.commit;
     this.#repository = result.repository;
+    await this.#collectGarbage(result.repository);
     await this.#refreshData(true);
     if (!message) {
       this.#requestGeneratedTitle(
@@ -2195,6 +2180,13 @@ export class DocumentVersionController implements VersionManagerController {
       return;
     }
     await this.#createCheckpoint({ reason }, capture);
+  }
+
+  async #collectGarbage(repository: VersionRepository): Promise<void> {
+    // A composite merge Redo may be the only remaining owner of its merge
+    // commit after Undo. Do not collect that commit out from under history.
+    if (this.#getInputHandler()?.canRedo()) return;
+    await this.#store.collectGarbage(repository.id, repository.revision);
   }
 
   #requestGeneratedTitle(commit: VersionCommit, summary: CheckpointTitleSummary): void {
