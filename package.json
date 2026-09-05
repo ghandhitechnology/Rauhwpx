@@ -43,7 +43,11 @@
     "package:linux:x64": "electron-builder --linux AppImage deb --x64 --publish never",
     "dist:linux:x64": "npm run build:desktop && npm run package:linux:x64 --",
     "package:linux:arm64": "electron-builder --linux AppImage deb --arm64 --publish never",
-    "dist:linux:arm64": "npm run build:desktop && npm run package:linux:arm64 --"
+    "dist:linux:arm64": "npm run build:desktop && npm run package:linux:arm64 --",
+    "dev:sidebar": "npm --prefix rhwp/rhwp-studio run dev:sidebar",
+    "test:sidebar": "npm --prefix rhwp/rhwp-studio run test:sidebar",
+    "build:sidebar": "npm --prefix rhwp/rhwp-studio run build:sidebar"
+
   },
   "dependencies": {
     "electron-updater": "^6.8.9"

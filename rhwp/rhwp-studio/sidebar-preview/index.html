@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sidebar preview · Rauhwpx</title>
+  </head>
+  <body>
+    <div id="editor-area" aria-hidden="true"></div>
+    <aside id="preview-controls" aria-label="Preview controls" lang="en">
+      <strong>Sidebar preview</strong>
+      <p>Live production UI. Local sample data.</p>
+      <label
+        >Next reply
+        <select id="scenario"></select
+      ></label>
+      <button id="play">Play sample conversation</button>
+      <label
+        >Connection
+        <select id="connection">
+          <option>connected</option>
+          <option>connecting</option>
+          <option>disconnected</option>
+          <option>replaced</option>
+        </select></label
+      >
+      <label
+        >Services
+        <select id="services">
+          <option value="ready">Configured</option>
+          <option value="setup">Needs setup</option>
+        </select></label
+      >
+      <label
+        >Theme
+        <select id="theme">
+          <option>light</option>
+          <option>dark</option>
+          <option>system</option>
+        </select></label
+      >
+      <label
+        >Document
+        <select id="document">
+          <option value="proposal">사업 제안서.hwpx</option>
+          <option value="notes">회의록.hwpx</option>
+          <option value="empty">No document</option>
+        </select></label
+      >
+      <button id="settings">Settings</button>
+      <button id="versions">Version history</button>
+      <button id="reset">Reset preview data</button>
+      <div id="icon-toolbar"></div>
+      <output id="preview-status" aria-live="polite">Ready</output>
+      <small
+        >Drag the sidebar edge to resize. Add ?controls=0 for a clean
+        canvas.</small
+      >
+    </aside>
+    <script type="module" src="/src/sidebar-preview/bootstrap.ts"></script>
+  </body>
+</html>

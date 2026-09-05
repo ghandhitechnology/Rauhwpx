@@ -12,3 +12,7 @@ cloud/.linux-target.*/
 !.env.example
 .rauhwpx-live-*.json
 .rauhwpx-live-*.bin
+
+
+rhwp/rhwp-studio/dist-sidebar/
+rhwp/rhwp-studio/sidebar-preview/artifacts/

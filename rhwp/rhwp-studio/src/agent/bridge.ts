@@ -124,6 +124,11 @@ export interface ChatHistoryEntry {
   text: string;
 }
 
+/** Frontend consumers only need the pending-edit review surface. */
+export type SidebarBridge = Omit<AgentBridge, 'pendingEdits'> & {
+  readonly pendingEdits: Pick<PendingEditManager, 'getChangeSets' | 'onChange' | 'approve' | 'reject'>;
+};
+
 export interface AgentBridge {
   readonly pendingEdits: PendingEditManager;
   getConnectionState(): 'connecting' | 'connected' | 'disconnected' | 'replaced';

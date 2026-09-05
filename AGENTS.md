@@ -8,6 +8,15 @@
 
 - You are working on the user's local laptop. Avoid computer-use automation unless the user asks for it, and prefer sandbox-supported browsers.
 
+# Sidebar Design Preview
+
+- Use `npm run dev:sidebar` and open `http://127.0.0.1:7715` for sidebar design work and frontend interaction checks. On a fresh checkout, first run `npm --prefix rhwp/rhwp-studio ci`. The preview needs no full application, WASM build, agent hub, or cloud credentials.
+- The preview mounts the production sidebar from `rhwp/rhwp-studio/src/ui/agent-sidebar/`. Make shipping UI changes there so the application and preview stay in sync; keep temporary experiments in `src/sidebar-preview/preview.css` or an isolated worktree.
+- Use the preview controls for sample chat, plans, questions, change review, subagents, connection failures, and provider setup. Backend and document-engine actions use local fixtures and placeholders.
+- Maintain the typed mocks in `rhwp/rhwp-studio/src/sidebar-preview/` when service interfaces change. Preserve the independent Vite configuration and frontend-only behavior.
+- For sidebar behavior changes, run `npm run test:sidebar`; it uses a fresh headless browser and saves screenshots in `rhwp/rhwp-studio/sidebar-preview/artifacts/`. `npm run build:sidebar` checks the standalone build. Simply starting the preview does not require rerunning these checks.
+- See [the preview guide](rhwp/rhwp-studio/sidebar-preview/README.md) for URL scenarios, storage reset, browser prerequisites, and extension instructions.
+
 # Pull Requests
 
 Pull requests should give reviewers enough context to understand the problem, evaluate the approach, and verify the result without reconstructing the work from the diff.

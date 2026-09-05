@@ -51,7 +51,10 @@
     "e2e:render-diff:ci": "node e2e/run-render-diff.mjs",
     "test:browser": "node scripts/run-tests.mjs browser",
     "e2e:list": "python3 ../scripts/check_e2e_manifest.py --list",
-    "e2e:check": "python3 ../scripts/check_e2e_manifest.py"
+    "e2e:check": "python3 ../scripts/check_e2e_manifest.py",
+    "dev:sidebar": "vite --config vite.sidebar.config.ts",
+    "build:sidebar": "vite build --config vite.sidebar.config.ts",
+    "test:sidebar": "node sidebar-preview/check.mjs"
   },
   "devDependencies": {
     "@types/chrome": "^0.2.2",

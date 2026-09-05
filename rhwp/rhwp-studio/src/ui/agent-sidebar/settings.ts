@@ -32,7 +32,7 @@ import {
   formatUsageAge,
   formatUsageReset,
 } from './usage-format.ts';
-import type { AgentBridge } from '../../agent/bridge.ts';
+import type { SidebarBridge } from '../../agent/bridge.ts';
 import type { EventBus } from '../../core/event-bus.ts';
 import type {
   AgentName,
@@ -315,7 +315,7 @@ interface PiDraftModel {
 }
 
 export interface SettingsPanelDeps {
-  bridge: AgentBridge;
+  bridge: SidebarBridge;
   eventBus?: EventBus;
   editorRuntime: EditorSettingsRuntime;
   /** 지금 대화가 쓰고 있는 조합 — 기본값과 다를 수 있다. */

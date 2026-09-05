@@ -1,6 +1,6 @@
 import './writing-style-calibration.css';
 
-import type { AgentBridge } from '../../agent/bridge.ts';
+import type { SidebarBridge } from '../../agent/bridge.ts';
 import { loadAgentPrefs } from '../../agent/agent-prefs.ts';
 import {
   defaultModelForAgent,
@@ -273,7 +273,7 @@ export interface WritingStyleCalibrationUi {
 }
 
 export function createWritingStyleCalibration(
-  bridge: AgentBridge,
+  bridge: SidebarBridge,
   options?: { onDismiss?: (result: { completed: boolean }) => void },
 ): WritingStyleCalibrationUi {
   const prefs = loadAgentPrefs();
