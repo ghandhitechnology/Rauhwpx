@@ -26,7 +26,26 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   assert.equal(await page.$eval('.cloud-workspace-image', (node) => node.src), original.frame);
   assert.equal(await page.$eval('.ag-input', (node) => node.disabled), true);
   assert.equal(await page.$eval('.ag-messages', (node) => node.innerText.includes('ECONNRESET')), false);
+  assert.equal(await page.$eval('.ag-composer-target-message', (node) => node.hidden), true);
   await page.screenshot({ path: resolve(artifacts, 'cloud-disconnected.png') });
+
+  // The recovery title and both actions must remain readable at minimum width.
+  await page.select('#theme', 'dark');
+  await page.focus('.ag-resize-handle');
+  await page.keyboard.press('Home');
+  await page.waitForFunction(() => {
+    const handle = document.querySelector('.ag-resize-handle');
+    return handle.getAttribute('aria-valuenow') === handle.getAttribute('aria-valuemin');
+  });
+  assert.equal(await page.$eval('.ag-cloud-recovery-strip', (strip) => {
+    const bounds = strip.getBoundingClientRect();
+    return [...strip.querySelectorAll('button')].every((button) => {
+      const rect = button.getBoundingClientRect();
+      return rect.left >= bounds.left && rect.right <= bounds.right && rect.height >= 32
+        && button.scrollWidth <= button.clientWidth + 1;
+    });
+  }), true);
+  await page.screenshot({ path: resolve(artifacts, 'cloud-disconnected-narrow-dark.png') });
 
   // A blocked refresh must not prevent opening or closing the status panel.
   await page.evaluate(() => window.sidebarPreview.cloud.blockRefresh(true));
@@ -36,6 +55,13 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   const panelMs = performance.now() - openedAt;
   assert.ok(panelMs < 1000);
   await page.evaluate(() => window.sidebarPreview.cloud.blockRefresh(false));
+  assert.equal(await page.$eval('.ag-cloud-panel', (panel) => {
+    const root = panel.closest('.ag-root').getBoundingClientRect();
+    const rect = panel.getBoundingClientRect();
+    return rect.left >= root.left && rect.right <= root.right;
+  }), true);
+  await page.screenshot({ path: resolve(artifacts, 'cloud-recovery-panel-narrow-dark.png') });
+  await page.select('#theme', 'light');
 
   // Background snapshots must not replace a focused/pressed recovery button.
   assert.equal(await page.evaluate(() => {
@@ -120,4 +146,5 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   assert.equal(await page.$eval('.ag-messages', (node) => node.innerText.includes('예산 표를 검토')), true);
   assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.transfers.length), 3);
   console.log(`Cloud panel opened in ${Math.round(panelMs)}ms; fixture reconnect restored the preview in ${Math.round(reconnectMs)}ms`);
+  await page.goto(`${origin}/?width=480`, { waitUntil: 'networkidle0' });
 }

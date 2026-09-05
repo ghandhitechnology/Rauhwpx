@@ -74,7 +74,9 @@ try {
     if (!url.startsWith(origin.replace('http:', 'ws:'))) forbidden.push(url);
   });
   async function open(query = '') {
-    await page.goto(`${origin}/?theme=light&${query}`, {
+    const params = new URLSearchParams(query);
+    if (!params.has('width')) params.set('width', '480');
+    await page.goto(`${origin}/?theme=light&${params}`, {
       waitUntil: 'networkidle0',
     });
     await page.waitForFunction(() => window.sidebarPreview);

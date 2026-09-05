@@ -722,7 +722,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     panelRenderKey = renderKey;
     const activeSessionId = snapshot.session.kind === 'idle' ? null : snapshot.session.sessionId;
     if (!selectedSessionId && activeSessionId) selectedSessionId = activeSessionId;
-    sessionPicker.hidden = snapshot.sessions.length <= 1;
+    sessionPicker.hidden = snapshot.sessions.length <= 1 || cloudLinkNeedsAttention(link);
     sessionSelect.replaceChildren(...snapshot.sessions.map((session) => {
       const option = document.createElement('option');
       option.value = session.sessionId;

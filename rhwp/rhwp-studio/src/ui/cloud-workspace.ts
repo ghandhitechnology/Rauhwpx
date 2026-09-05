@@ -126,7 +126,6 @@ export function createCloudWorkspace({
   connectionNotice.setAttribute('role', 'status');
   connectionNotice.setAttribute('aria-live', 'polite');
   connectionNotice.hidden = true;
-  viewport.appendChild(connectionNotice);
   const recoveredInput = doc.createElement('textarea');
   recoveredInput.hidden = true;
   recoveredInput.value = '';
@@ -134,7 +133,7 @@ export function createCloudWorkspace({
   recoveredInput.readOnly = true;
   recoveredInput.setAttribute('aria-label', '전달 여부를 확인하지 못한 입력, 복사해서 보관하세요');
   recoveredInput.style.cssText = 'width:100%;min-height:64px;box-sizing:border-box;resize:vertical';
-  root.append(toolbar, recoveredInput, viewport);
+  root.append(toolbar, recoveredInput, viewport, connectionNotice);
 
   const decode = decodeFrame ?? (async (url: string) => {
     const candidate = doc.createElement('img');

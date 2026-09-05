@@ -103,7 +103,9 @@ not installed in a standard macOS/Linux location; this also supports Windows pat
 It does not connect to or control your normal browser.
 
 Cloud checks also save full-page `cloud-live.png`, `cloud-disconnected.png`, and
-`cloud-restarted.png`. They cover a blocked status refresh, stable keyboard focus
+`cloud-restarted.png`, plus narrow dark-mode recovery and status-panel captures.
+They check button clipping and panel bounds at the sidebar's minimum width,
+a blocked status refresh, stable keyboard focus
 across repeated snapshots, duplicate recovery clicks, stopping during reconnect,
 fresh transfer IDs after rebuilding, and returning to the original chat after
 switching threads. Timings measure the local fixture, not hosted provisioning.

@@ -231,6 +231,13 @@
   gap: 5px;
 }
 
+.ag-cloud-session-picker[hidden],
+.ag-cloud-panel-status:empty,
+.ag-cloud-panel-detail:empty,
+.ag-cloud-panel-actions:empty {
+  display: none;
+}
+
 .ag-cloud-session-picker-label {
   color: var(--ag-text-muted);
   font-size: var(--font-size-sm, 11px);

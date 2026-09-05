@@ -15,6 +15,7 @@
 }
 
 #cloud-workspace {
+  position: relative;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -115,11 +116,14 @@
 }
 
 .cloud-workspace-connection-notice {
-  position: sticky;
+  position: absolute;
+  z-index: 2;
   bottom: 16px;
-  width: fit-content;
+  left: 50%;
+  transform: translateX(-50%);
+  width: max-content;
   max-width: calc(100% - 32px);
-  margin: 16px auto 0;
+  box-sizing: border-box;
   padding: 12px 18px;
   border: 1px solid var(--ui-border);
   border-radius: 12px;
