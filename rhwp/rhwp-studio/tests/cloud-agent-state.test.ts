@@ -414,3 +414,14 @@ test('controller rejects malformed and contradictory result resolutions', async 
   );
   malformed.dispose();
 });
+
+test('paused provider-setting capability survives snapshot parsing without being invented for old servers', () => {
+  const paused = { ...running(), kind: 'suspended', reason: 'Paused', resumable: true,
+    selection: { agent: 'codex', model: 'gpt-6-astra', effort: 'max' }, configurationPending: false };
+  const legacy = parseCloudSnapshot(state(1, paused));
+  assert.equal(legacy.session.kind, 'suspended');
+  assert.equal(legacy.session.configurationEditable, undefined);
+  const current = parseCloudSnapshot(state(2, { ...paused, configurationEditable: true }));
+  assert.equal(current.session.configurationEditable, true);
+  assert.deepEqual(current.session.selection, paused.selection);
+});

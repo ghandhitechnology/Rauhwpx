@@ -1324,4 +1324,23 @@ test('provider reconfiguration crosses the public/worker API with a fresh checkp
   assert.equal(manifest.executionConfig.model, 'haiku');
   assert.equal(manifest.latestCheckpoint.blobId, checkpoint.id);
   assert.equal(manifest.resources.find((resource) => resource.kind === 'timeline').blobId, timeline.id);
+  sessionStore.executeCommand(origin.device, created.id, {
+    commandId: 'pause_settings_http', type: 'session.pause',
+    payload: { expectedVersion: sessionStore.getSession(created.id).stateVersion },
+  });
+  const paused = await replacement.pauseAck();
+  assert.equal(paused.configurationEditable, true);
+  const inactiveResponse = await publicFetch(`${base}/v1/sessions/${created.id}/commands`, {
+    method: 'POST', headers: { Authorization: `Bearer ${origin.accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ commandId: 'configure_paused_http', type: 'conversation.configure', payload: {
+      expectedVersion: paused.stateVersion, provider: 'codex', model: 'gpt-6-astra', effort: 'max',
+    } }),
+  });
+  assert.equal(inactiveResponse.status, 200);
+  const inactive = (await inactiveResponse.json()).session;
+  assert.equal(inactive.status, 'suspended');
+  assert.equal(inactive.configurationPending, false);
+  assert.equal(inactive.configurationEditable, true);
+  assert.equal(inactive.executionConfig.model, 'gpt-6-astra');
+  assert.equal(sessionStore.workerManifest(created.id).latestCheckpoint.blobId, checkpoint.id);
 });

@@ -412,7 +412,7 @@ test('the dialog offers both servers and only restorable sandbox actions', () =>
   assert.match(onboardingCss, /\.ag-cloud-setup-option\.ag-selected/);
   assert.match(cloudUi, /appHosted/);
   assert.match(cloudUi, /setupActive\n\s+\? '준비 중'\n\s+: link\.kind === 'reconnecting'/);
-  assert.match(cloudUi, /if \(setupActive\) \{\n\s+onboarding\.open\('manage', trigger\)/);
+  assert.match(cloudUi, /if \(setupActive \|\|[\s\S]*?closePanel\(\);\n\s+onboarding\.open\('transfer', trigger\)/);
   assert.match(preload, /cloudSelectServerMode: \(payload\) => ipcRenderer\.invoke\('cloud:select-server-mode', payload\)/);
   assert.match(preload, /cloudSpawnSandbox: \(payload\) => ipcRenderer\.invoke\('cloud:spawn-sandbox', payload\)/);
   assert.match(preload, /cloudSandboxStatus: \(\) => ipcRenderer\.invoke\('cloud:sandbox-status'\)/);

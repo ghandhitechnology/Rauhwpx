@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
 import { transaction } from './database.mjs';
-import { CloudError, DEFAULT_LIMITS, ROOM_PROTOCOL_VERSION, TRANSFER_LIMITS, publicSession, parseProviderSelection } from './protocol.mjs';
+import { CloudError, DEFAULT_LIMITS, ROOM_PROTOCOL_VERSION, TRANSFER_LIMITS, publicSession, parseProviderSelection, providerConfigurationEditable } from './protocol.mjs';
 
 const COMPLETED_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const SUSPENDED_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -380,7 +380,9 @@ export class SessionStore {
     this.database.prepare('UPDATE sessions SET next_event_seq = next_event_seq + 1 WHERE id = ?').run(sessionId);
     const createdAt = this.now();
     const stateVersion = session.state_version;
-    const eventPayload = { ...payload, stateVersion };
+    const eventPayload = { ...payload, stateVersion,
+      ...(payload.status ? { configurationEditable: providerConfigurationEditable(this.getSessionRow(sessionId)) } : {}),
+    };
     this.database.prepare(`
       INSERT INTO session_events(session_id, seq, type, payload_json, created_at) VALUES (?, ?, ?, ?, ?)
     `).run(sessionId, seq, type, JSON.stringify(eventPayload), createdAt);
@@ -682,11 +684,7 @@ export class SessionStore {
     }
     if (command.type === 'conversation.configure') {
       const selection = parseProviderSelection(command.payload);
-      if (session.protocol_version !== ROOM_PROTOCOL_VERSION || session.room_status !== 'active'
-        || session.status !== 'running' || session.execution_phase !== 'idle'
-        || session.current_turn_id || session.current_wait_id || session.pause_requested_at
-        || session.takeover_requested_at || session.end_requested_at || session.sleep_requested_at
-        || session.configuration_restart_requested_at) {
+      if (!providerConfigurationEditable(session)) {
         throw new CloudError('INVALID_SESSION_STATE', 'Provider settings can only change between turns', 409);
       }
       const provider = this.providerStatus(selection.provider);
@@ -699,13 +697,16 @@ export class SessionStore {
       if (session.provider === selection.provider && execution.model === selection.model && execution.effort === selection.effort) {
         return { response: { session: this.getSession(session.id) }, event: null };
       }
+      const restart = session.status === 'running';
       this.database.prepare(`
         UPDATE sessions SET provider = ?, execution_config_json = ?, configuration_restart_requested_at = ?,
-          configuration_restart_after_revision = (SELECT COALESCE(MAX(revision), -1) FROM session_checkpoints WHERE session_id = ?),
+          configuration_restart_after_revision = CASE WHEN ? THEN
+            (SELECT COALESCE(MAX(revision), -1) FROM session_checkpoints WHERE session_id = ?) ELSE NULL END,
           state_version = state_version + 1, updated_at = ? WHERE id = ?
-      `).run(selection.provider, JSON.stringify({ ...execution, model: selection.model, effort: selection.effort }), now, session.id, now, session.id);
+      `).run(selection.provider, JSON.stringify({ ...execution, model: selection.model, effort: selection.effort }),
+        restart ? now : null, Number(restart), session.id, now, session.id);
       const event = this.#appendEventInTransaction(session.id, 'conversation.configuration_changed', {
-        ...selection, configurationSupported: true, configurationPending: true,
+        ...selection, configurationSupported: true, configurationPending: restart, configurationEditable: !restart,
         executionConfig: { ...execution, model: selection.model, effort: selection.effort },
       });
       return { response: { session: this.getSession(session.id), eventSeq: event.seq }, event };

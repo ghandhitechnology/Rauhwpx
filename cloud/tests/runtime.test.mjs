@@ -1419,3 +1419,57 @@ for (const control of ['end', 'pause', 'redirect']) {
     });
   }
 }
+
+for (const resting of ['paused', 'sleeping', 'queued']) {
+  test(`provider settings change while ${resting} without waking the worker or losing the next message`, async (t) => {
+    const { sessions, origin, session } = await persistentRoomFixture(t);
+    sessions.setProviderStatus('claude', { available: true, authenticated: true });
+    sessions.beginTurn(session.id, { turnNumber: 1 });
+    sessions.completeTurn(session.id);
+    sessions.claimFinish(session.id);
+    sessions.executeCommand(origin.device, session.id, parseCommand({
+      commandId: 'inactive_next_message', type: 'message.queue', payload: { messageId: 'inactive-followup', content: 'Continue with the same document' },
+    }));
+    if (resting === 'sleeping') {
+      assert.deepEqual(sessions.requestIdleSleeps(0), [session.id]);
+      sessions.acknowledgeSleep(session.id);
+    } else {
+      sessions.executeCommand(origin.device, session.id, parseCommand({
+        commandId: 'inactive_pause', type: 'session.pause', payload: { expectedVersion: sessions.getSession(session.id).stateVersion },
+      }));
+      sessions.acknowledgePause(session.id);
+      if (resting === 'queued') sessions.executeCommand(origin.device, session.id, parseCommand({
+        commandId: 'inactive_resume', type: 'session.resume', payload: { expectedVersion: sessions.getSession(session.id).stateVersion },
+      }));
+    }
+    const before = sessions.getSession(session.id);
+    assert.equal(before.configurationEditable, true);
+    const stateEvents = sessions.listEvents(session.id).filter((event) => event.payload.status);
+    assert.equal(stateEvents.at(-1).payload.configurationEditable, true);
+    const configured = sessions.executeCommand(origin.device, session.id, parseCommand({
+      commandId: 'configure_inactive', type: 'conversation.configure', payload: {
+        expectedVersion: before.stateVersion, provider: 'claude', model: 'haiku', effort: 'low',
+      },
+    })).session;
+    assert.equal(configured.status, before.status);
+    assert.equal(configured.configurationPending, false);
+    assert.equal(configured.configurationEditable, true);
+    assert.equal(configured.turnsUsed, before.turnsUsed);
+    assert.deepEqual(configured.clientContext, before.clientContext);
+    assert.equal(sessions.getSessionRow(session.id).worker_token_hash, null);
+    if (resting !== 'queued') sessions.executeCommand(origin.device, session.id, parseCommand({
+      commandId: 'resume_after_configuration', type: 'session.resume', payload: { expectedVersion: configured.stateVersion },
+    }));
+    assert.equal(sessions.claimNextSession().provider, 'claude');
+    assert.equal(sessions.workerManifest(session.id).executionConfig.model, 'haiku');
+    const message = sessions.claimFinish(session.id).messages[0];
+    assert.equal(message.id, 'inactive-followup');
+    sessions.beginTurn(session.id, { turnNumber: 2, messageId: message.id });
+    assert.equal(sessions.getSession(session.id).configurationEditable, false);
+    assert.throws(() => sessions.executeCommand(origin.device, session.id, parseCommand({
+      commandId: 'configure_during_followup', type: 'conversation.configure', payload: {
+        expectedVersion: sessions.getSession(session.id).stateVersion, provider: 'claude', model: 'sonnet', effort: 'high',
+      },
+    })), { code: 'INVALID_SESSION_STATE' });
+  });
+}

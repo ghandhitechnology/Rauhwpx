@@ -356,6 +356,7 @@ function parseSessionBase(state: Record<string, unknown>): CloudSessionBase | nu
       effort: selection.effort as string,
     } } : {}),
     ...(typeof state.configurationPending === 'boolean' ? { configurationPending: state.configurationPending } : {}),
+    ...(typeof state.configurationEditable === 'boolean' ? { configurationEditable: state.configurationEditable } : {}),
     sessionId,
     version,
     threadId,
