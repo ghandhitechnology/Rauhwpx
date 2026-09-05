@@ -16,6 +16,8 @@ export async function runSession({ manifest, workspace, credentials, client, ses
 
 Checkpoints are archived automatically after operations and turns. Updating the origin file requires the user's **원본에 반영** action or the agent's `publish_cloud_document` tool. The tool requests publication after its turn succeeds; the runtime emits a durable `document.publish_requested` event pointing to that turn's checkpoint. Interrupted and failed turns do not publish. Publication preserves the active cloud conversation and checks the origin digest before replacing a file; external edits produce a separate recovery copy.
 
+The harness registers each Studio session through the hub's owner endpoint and supplies separate Studio, reference, and template capabilities. Its IPC secret broker stores hub-managed secrets in session-local memory and clears them when the harness closes.
+
 ## Session display
 
 Each cloud session attempts one virtual desktop startup (`SessionDisplay` in `session-display.mjs`). The worker fixes the browser mode from that result before launching Studio. A ready display launches headed Chromium at the display's exact dimensions with its `DISPLAY` / `XAUTHORITY`; an unavailable display launches headless Chromium and never opens a frame capability for that harness.

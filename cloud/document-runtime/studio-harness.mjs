@@ -5,7 +5,6 @@ import http from 'node:http';
 import net from 'node:net';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { pathToFileURL } from 'node:url';
 import { childProcessEnvironment, normalizeDisplayGeometry } from './session-display.mjs';
 
 const MAX_EXPORT_BYTES = 64 * 1024 * 1024;
@@ -195,6 +194,49 @@ async function waitForHub(port, token, child, timeoutMs = 30_000) {
     await delay(200);
   }
   throw runtimeError('AGENT_HUB_TIMEOUT', `Rauhwpx agent hub did not become ready: ${lastError?.message ?? 'timeout'}`);
+}
+
+export async function registerStudioHubSession({ port, token, launchId, sessionId }) {
+  const response = await fetch(`http://127.0.0.1:${port}/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'x-rhwp-launch-id': launchId },
+    signal: AbortSignal.timeout(10_000),
+  });
+  const body = await response.json();
+  if (!response.ok || body?.status !== 'registered' || body?.sessionId !== sessionId
+    || !['studio', 'reference', 'template'].every((key) => typeof body?.capabilities?.[key] === 'string')) {
+    throw runtimeError('AGENT_SESSION_REGISTRATION_FAILED', 'Cloud Studio could not register its agent session');
+  }
+  return body.capabilities;
+}
+
+export function attachSessionSecretBroker(child) {
+  const secrets = new Map();
+  const onMessage = (message) => {
+    if (message?.type !== 'rhwp-secret-request' || typeof message.id !== 'string') return;
+    const response = { type: 'rhwp-secret-response', id: message.id, ok: true };
+    try {
+      if (message.operation === 'reset') {
+        secrets.clear();
+        response.value = true;
+      } else {
+        if (typeof message.key !== 'string' || !/^[A-Za-z0-9._:-]{1,128}$/.test(message.key)) throw new Error('Invalid secret key');
+        if (message.operation === 'get') response.value = secrets.get(message.key) ?? null;
+        else if (message.operation === 'delete') response.value = secrets.delete(message.key);
+        else if (message.operation === 'set' && typeof message.value === 'string' && message.value.length <= 65_536) {
+          secrets.set(message.key, message.value);
+          response.value = true;
+        } else throw new Error('Unsupported secret operation');
+      }
+    } catch (error) {
+      response.ok = false;
+      response.error = error.message;
+      response.code = 'SECRET_STORE_FAILED';
+    }
+    if (child.connected) child.send(response, () => {});
+  };
+  child.on('message', onMessage);
+  return () => { child.off('message', onMessage); secrets.clear(); };
 }
 
 async function preparePiRuntime({ workspace, credentials, model, effort }) {
@@ -454,14 +496,14 @@ export async function createStudioHarness({
   const bootstrap = randomBytes(32).toString('base64url');
   const hubToken = randomBytes(32).toString('base64url');
   const studioSessionId = `cloud-${manifest.sessionId}`;
-  const { issueScopedHubToken } = await import(pathToFileURL(path.join(agentRoot, 'hub-session-registry.mjs')).href);
-  const studioToken = issueScopedHubToken(hubToken, studioSessionId);
+  const launchId = `cloud-${manifest.sessionId}`;
   const hubPort = await findPort();
   const resourceFiles = new Map([['document', document.filename]]);
   references.forEach((reference, index) => resourceFiles.set(`reference-${index}`, reference.filename));
   let dynamicReferenceSequence = references.length;
   const { server: studioServer, origin } = await startStudioServer({ studioRoot, resources: resourceFiles, bootstrap });
   let hub = null;
+  let disposeSecretBroker = () => {};
   let browser = null;
   let page = null;
   let eventSequence = 0;
@@ -485,6 +527,8 @@ export async function createStudioHarness({
       RHWP_AGENT_MODE: 'production',
       RHWP_AGENT_PORT: String(hubPort),
       RHWP_AGENT_TOKEN: hubToken,
+      RHWP_LAUNCH_ID: launchId,
+      RHWP_SECRET_BROKER: 'ipc',
       RHWP_BIN: rhwpBin,
       RHWP_WORK_DIR: path.join(workspace, 'agent-work'),
       RHWP_RUNTIME_DIR: agentRoot,
@@ -517,12 +561,19 @@ export async function createStudioHarness({
     hub = spawn(process.execPath, [path.join(agentRoot, 'server.mjs')], {
       cwd: agentRoot,
       env,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
     });
+    disposeSecretBroker = attachSessionSecretBroker(hub);
     let hubErrorTail = '';
     hub.stderr?.on('data', (chunk) => { hubErrorTail = `${hubErrorTail}${chunk}`.slice(-8_000); });
     hub.stdout?.resume();
-    await waitForHub(hubPort, hubToken, hub);
+    try {
+      await waitForHub(hubPort, hubToken, hub);
+    } catch (error) {
+      throw runtimeError(error.code ?? 'AGENT_HUB_FAILED', `${error.message}: ${hubErrorTail.replaceAll(hubToken, '[redacted]').trim().slice(-2_000)}`);
+    }
+    const capabilities = await registerStudioHubSession({ port: hubPort, token: hubToken, launchId, sessionId: studioSessionId });
+    const studioToken = capabilities.studio;
 
     const headed = Boolean(liveDisplayEnvironment(displayEnv));
     browser = await launchChromium(puppeteer, { chromiumPath, displayEnv, displayGeometry });
@@ -552,6 +603,8 @@ export async function createStudioHarness({
         .replace(/([?&](?:token|bootstrap)=)[^&\s'\"]+/gi, '$1[redacted]')
         .replaceAll(hubToken, '[redacted]')
         .replaceAll(studioToken, '[redacted]')
+        .replaceAll(capabilities.reference, '[redacted]')
+        .replaceAll(capabilities.template, '[redacted]')
         .replaceAll(bootstrap, '[redacted]');
       pageErrorTail = `${pageErrorTail}\n${redacted}`.slice(-4_000);
     };
@@ -570,10 +623,12 @@ export async function createStudioHarness({
         writable: false,
       });
     }, {
-      launchId: `cloud-${manifest.sessionId}`,
+      launchId,
       sessionId: studioSessionId,
       hubUrl: `ws://127.0.0.1:${hubPort}`,
       hubToken: studioToken,
+      referenceToken: capabilities.reference,
+      templateToken: capabilities.template,
     });
     const appUrl = new URL('/', origin);
     appUrl.searchParams.set('cloudRuntime', '1');
@@ -906,6 +961,7 @@ export async function createStudioHarness({
         await browser?.close().catch(() => {});
         browser = null;
         await stopProcess(hub);
+        disposeSecretBroker();
         hub = null;
         await new Promise((resolve) => studioServer.close(resolve));
       },
@@ -913,6 +969,7 @@ export async function createStudioHarness({
   } catch (error) {
     await browser?.close().catch(() => {});
     await stopProcess(hub);
+    disposeSecretBroker();
     await new Promise((resolve) => studioServer.close(resolve));
     throw error;
   }
