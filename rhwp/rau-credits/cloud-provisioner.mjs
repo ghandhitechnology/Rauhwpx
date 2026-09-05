@@ -64,6 +64,7 @@ export function railwayCloudConfigured(config) {
 async function boundedJson(response) {
   const declared = Number(response.headers?.get?.('content-length'));
   if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
+    void response.body?.cancel?.().catch(() => {});
     throw provisionerError('PROVIDER_RESPONSE_INVALID', 'Railway returned an oversized response');
   }
   let bytes;
@@ -144,6 +145,10 @@ export function createRailwayCloudProvisioner({
       return await Promise.race([
         (async () => {
           response = await fetchImpl(url, { ...options, signal: controller.signal });
+          if (controller.signal.aborted) {
+            void response.body?.cancel?.().catch(() => {});
+            throw controller.signal.reason;
+          }
           return consume(response);
         })(),
         timeout,
@@ -179,6 +184,9 @@ export function createRailwayCloudProvisioner({
             throw provisionerError('PROVIDER_UNREACHABLE', `Railway is temporarily unavailable (HTTP ${response.status})`);
           }
           const payload = await boundedJson(response);
+          if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+            throw provisionerError('PROVIDER_RESPONSE_INVALID', 'Railway returned an invalid response');
+          }
           if (payload.errors?.length) {
             const message = clean(payload.errors[0]?.message, 1000) || 'Railway rejected the request';
             if (allowNotFound && /not found|does not exist/i.test(message)) return null;

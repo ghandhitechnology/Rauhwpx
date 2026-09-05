@@ -26,6 +26,7 @@ import { AgentTypewriterReveal } from './typewriter-reveal.ts';
 import { deriveAgentEditingLease, planModeAllowsUserEditing } from './editing-lease.ts';
 import {
   setCursorModels as setCursorModelRegistry,
+  setOpenCodeModels as setOpenCodeModelRegistry,
   setPiModels as setPiModelRegistry,
 } from './models.ts';
 import {
@@ -140,7 +141,7 @@ export interface AgentBridge {
   reconnectNow(): Promise<void>;
   /** 로컬 CLI 설치 상태. refresh=true 면 허브가 새로 프로브한다. */
   requestProviderStatus(refresh?: boolean): Promise<ProviderStatusMap | null>;
-  requestAgentSetupStatus(): Promise<AgentSetupStatusMap | null>;
+  requestAgentSetupStatus(refresh?: boolean): Promise<AgentSetupStatusMap | null>;
   requestAccountStatus(): Promise<AccountSessionStatus | null>;
   loginAccount(): Promise<AccountLoginStart | null>;
   submitAccountAuthCode(authRunId: string, code: string): void;
@@ -291,7 +292,8 @@ const STUDIO_INSTANCE_ID = globalThis.crypto?.randomUUID?.()
   ?? `studio-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
 function isAgentName(v: unknown): v is AgentName {
-  return v === 'claude' || v === 'codex' || v === 'pi' || v === 'grok' || v === 'cursor' || v === 'rau';
+  return v === 'claude' || v === 'codex' || v === 'pi' || v === 'grok'
+    || v === 'cursor' || v === 'opencode' || v === 'rau';
 }
 
 function isBoundedText(value: unknown, max: number): value is string {
@@ -712,7 +714,7 @@ function readProviderHealth(value: unknown): ProviderHealth {
   };
 }
 
-/** 허브가 보낸 provider-status 를 항상 다섯 프로바이더가 있는 형태로 정규화한다. */
+/** 허브가 보낸 provider-status 를 항상 모든 프로바이더가 있는 형태로 정규화한다. */
 function readProviderStatus(value: unknown): ProviderStatusMap {
   const src = (value ?? {}) as Record<string, unknown>;
   return {
@@ -722,6 +724,7 @@ function readProviderStatus(value: unknown): ProviderStatusMap {
     pi: readProviderHealth(src['pi']),
     grok: readProviderHealth(src['grok']),
     cursor: readProviderHealth(src['cursor']),
+    opencode: readProviderHealth(src['opencode']),
   };
 }
 
@@ -753,7 +756,7 @@ function readAgentSetupStatus(value: unknown, agent: AgentName): AgentSetupStatu
     latestVersion: typeof src['latestVersion'] === 'string' ? src['latestVersion'] : null,
     updateRequired: src['updateRequired'] === true,
     error: typeof src['error'] === 'string' ? src['error'] : null,
-    // cursor 만 CLI 가 알려 주는 모델 목록을 함께 싣는다.
+    // Cursor와 OpenCode는 CLI가 알려 주는 모델 목록을 함께 싣는다.
     ...(isStringArray(src['models']) ? { models: src['models'] } : {}),
   };
 }
@@ -767,6 +770,7 @@ function readAgentSetupStatuses(value: unknown): AgentSetupStatusMap {
     pi: readAgentSetupStatus(src['pi'], 'pi'),
     grok: readAgentSetupStatus(src['grok'], 'grok'),
     cursor: readAgentSetupStatus(src['cursor'], 'cursor'),
+    opencode: readAgentSetupStatus(src['opencode'], 'opencode'),
   };
 }
 
@@ -930,6 +934,7 @@ function readUsageSummary(value: unknown): UsageSummary | null {
       pi: typeof plans['pi'] === 'string' ? plans['pi'] : 'api',
       grok: typeof plans['grok'] === 'string' ? plans['grok'] : 'api',
       cursor: typeof plans['cursor'] === 'string' ? plans['cursor'] : 'api',
+      opencode: typeof plans['opencode'] === 'string' ? plans['opencode'] : 'api',
       rau: typeof plans['rau'] === 'string' ? plans['rau'] : 'api',
     },
     providers: {
@@ -938,6 +943,7 @@ function readUsageSummary(value: unknown): UsageSummary | null {
       pi: readProviderUsage(providers['pi']),
       grok: readProviderUsage(providers['grok']),
       cursor: readProviderUsage(providers['cursor']),
+      opencode: readProviderUsage(providers['opencode']),
       rau: readProviderUsage(providers['rau']),
     },
     cliproxy: readCliproxyStatus(src['cliproxy']),
@@ -2162,9 +2168,10 @@ export class AgentBridgeImpl implements AgentBridge {
       }
       case 'agent-setup-status': {
         const statuses = readAgentSetupStatuses(msg.statuses);
-        // cursor 모델 레지스트리를 이벤트 발행 전에 갱신해, 리스너가
-        // modelsForAgent('cursor') 를 즉시 최신 상태로 읽을 수 있게 한다.
+        // 동적 모델 레지스트리를 이벤트 발행 전에 갱신해, 리스너가 목록을
+        // 즉시 최신 상태로 읽을 수 있게 한다.
         if (statuses.cursor.models) setCursorModelRegistry(statuses.cursor.models);
+        if (statuses.opencode.models) setOpenCodeModelRegistry(statuses.opencode.models);
         if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, statuses);
         this.emit({ type: 'agent-setup-status', statuses });
         break;
@@ -3319,8 +3326,12 @@ export class AgentBridgeImpl implements AgentBridge {
     );
   }
 
-  requestAgentSetupStatus(): Promise<AgentSetupStatusMap | null> {
-    return this.request<AgentSetupStatusMap>({ type: 'agent-setup-status-request' }, 'agent-setup-status', 30_000);
+  requestAgentSetupStatus(refresh = false): Promise<AgentSetupStatusMap | null> {
+    return this.request<AgentSetupStatusMap>(
+      { type: 'agent-setup-status-request', ...(refresh ? { refresh: true } : {}) },
+      'agent-setup-status',
+      30_000,
+    );
   }
 
   requestAccountStatus(): Promise<AccountSessionStatus | null> {

@@ -28,6 +28,13 @@ test('catalog exposes Codex, Claude, Rau, and only the Pi models the user config
   assert.deepEqual(catalog.providers.find((provider) => provider.id === 'pi').models.map((model) => model.id), ['openai/gpt-5.4']);
   assert.deepEqual(catalog.defaultSelection, { agent: 'claude', model: 'sonnet', effort: 'high' });
 });
+test('Astra calibration selection survives catalog reload with max effort', () => {
+  const selection = { agent: 'codex', model: 'gpt-6-astra', effort: 'max' };
+  const options = { health: { codex: { available: true } } };
+  assert.deepEqual(resolveWritingStyleSelection(selection, options), selection);
+  assert.deepEqual(buildWritingStyleCatalog({ ...options, currentSelection: selection }).defaultSelection, selection);
+});
+
 test('calibration selection rejects unavailable providers and stale models without fallback', () => {
   assert.throws(
     () => resolveWritingStyleSelection({ agent: 'codex', model: 'gpt-5.6-sol' }, { health, piStatus }),

@@ -11,11 +11,11 @@ const rootPackage = JSON.parse(
   readFileSync(new URL('../../../package.json', import.meta.url), 'utf8'),
 );
 const desktopChecks = readFileSync(
-  new URL('../../../.github/workflows/desktop-sessions.yml', import.meta.url),
+  new URL('../../../.github/workflows/checks.yml', import.meta.url),
   'utf8',
 );
-const depotDesktopChecks = readFileSync(
-  new URL('../../../.depot/workflows/desktop-sessions.yml', import.meta.url),
+const rustSetup = readFileSync(
+  new URL('../../../.github/actions/setup-rust/action.yml', import.meta.url),
   'utf8',
 );
 const releaseWorkflow = readFileSync(
@@ -54,8 +54,10 @@ test('Linux packages cover AppImage and deb on x64 and arm64', () => {
   assert.match(rootPackage.homepage ?? '', /^https:\/\//);
   assert.match(rootPackage.build?.linux?.maintainer ?? '', /<[^>]+@[^>]+>/);
   assert.equal(rootPackage.desktopName, 'rauhwpx.desktop');
-  assert.match(rootPackage.scripts?.['dist:linux:x64'] ?? '', /--x64/);
-  assert.match(rootPackage.scripts?.['dist:linux:arm64'] ?? '', /--arm64/);
+  assert.match(rootPackage.scripts?.['package:linux:x64'] ?? '', /--x64/);
+  assert.match(rootPackage.scripts?.['package:linux:arm64'] ?? '', /--arm64/);
+  assert.match(rootPackage.scripts?.['dist:linux:x64'] ?? '', /package:linux:x64/);
+  assert.match(rootPackage.scripts?.['dist:linux:arm64'] ?? '', /package:linux:arm64/);
   assert.match(rootPackage.scripts?.['dist:linux:x64'] ?? '', /build:desktop/);
   assert.match(rootPackage.scripts?.['dist:linux:arm64'] ?? '', /build:desktop/);
   assert.match(rootPackage.scripts?.['build:desktop'] ?? '', /build:native/);
@@ -78,12 +80,11 @@ test('Linux packages register every supported document extension', () => {
   assert.equal(extensions.includes('hml'), true);
 });
 
-test('Desktop session checks build WASM so browser merge tests can run', () => {
-  for (const workflow of [desktopChecks, depotDesktopChecks]) {
-    assert.match(workflow, /toolchain:\s*1\.93\.1/);
-    assert.match(workflow, /wasm-pack --version 0\.15\.0/);
-    assert.match(workflow, /wasm-pack build --target web/);
-  }
+test('Repository browser checks build WASM with the shared pinned toolchain', () => {
+  assert.match(rustSetup, /toolchain:\s*1\.93\.1/);
+  assert.match(rustSetup, /wasm-pack --version 0\.15\.0/);
+  assert.match(desktopChecks, /name: Build WASM engine\s+run: npm run build:wasm/);
+  assert.match(rootPackage.scripts['build:wasm'], /wasm-pack build --target web/);
 });
 
 test('Linux checks and releases run on native Ubuntu x64 and arm64 runners', () => {

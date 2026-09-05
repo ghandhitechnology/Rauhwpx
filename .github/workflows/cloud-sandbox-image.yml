@@ -13,7 +13,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 concurrency:
   group: cloud-sandbox-image-${{ github.ref }}
@@ -21,12 +20,16 @@ concurrency:
 
 jobs:
   publish:
+    permissions:
+      packages: write
     name: Build and publish Railway sandbox image
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - name: Check out tagged source
         uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@v5
@@ -39,7 +42,7 @@ jobs:
             rhwp/rhwp-studio/package-lock.json
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           toolchain: 1.93.1
           targets: wasm32-unknown-unknown

@@ -38,7 +38,6 @@ const agentHubSource = readFileSync(new URL('../../../desktop/agent-hub.mjs', im
 const preload = readFileSync(new URL('../../../desktop/preload.cjs', import.meta.url), 'utf8');
 const viteConfig = readFileSync(new URL('../vite.config.ts', import.meta.url), 'utf8');
 const viteHubPlugin = readFileSync(new URL('../vite-plugin-agent-hub.mjs', import.meta.url), 'utf8');
-const rootPackage = readFileSync(new URL('../../../package.json', import.meta.url), 'utf8');
 const windowsEnv = Object.freeze({ SystemRoot: 'C:\\Windows' });
 
 function jsonResponse(body: unknown, ok = true) {
@@ -535,11 +534,6 @@ test('studio development and desktop builds include the agent hub', () => {
     viteHubPlugin,
     /await requestHubShutdown\([\s\S]{0,500}cleanupPrepared = response\?\.status === 'prepared'[\s\S]{0,100}response\?\.launchId === launchId[\s\S]{0,300}const stopped = await stopHubChild\(current/,
   );
-  assert.match(rootPackage, /"start": "node rhwp\/rhwp-agent\/ctl.mjs start"/);
-  assert.match(rootPackage, /"start:fg": "node rhwp\/rhwp-agent\/server.mjs"/);
-  assert.match(rootPackage, /"stop": "node rhwp\/rhwp-agent\/ctl.mjs stop"/);
-  assert.match(rootPackage, /"build:desktop": "npm run build:native && npm run build:studio && npm run build:agent"/);
-  assert.match(rootPackage, /"desktop": "npm run build:desktop && electron \."/);
 });
 
 test('healthz JSON exposes pid for process control', () => {

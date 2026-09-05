@@ -3648,13 +3648,9 @@ impl HwpDocument {
             .unwrap_or_else(|_| "[]".to_string())
     }
 
-    /// [Task #741 후속] 외부 file path 그림 영역 영역 영역 영역 basename 목록 영역 반환.
-    ///
-    /// HWP3 파일 영역 image 영역 영역 절대 경로 영역 저장 영역. WASM 환경 영역 영역 file
-    /// system access 부재 영역, JS 영역 영역 영역 영역 fetch 영역 영역 영역 file 영역 load
-    /// 영역 후 `injectExternalImage` 영역 영역 영역 inject 영역.
-    ///
-    /// 반환: JSON 배열 `["oracle.gif", "rdb02.gif", ...]` (중복 제거)
+    /// 아직 읽지 않은 외부 그림의 파일명을 중복 없는 JSON 배열로 반환한다.
+    /// WASM은 파일 시스템에 직접 접근할 수 없으므로 JS에서 그림을 읽고
+    /// `injectExternalImage`로 전달한다.
     #[wasm_bindgen(js_name = getExternalImageBasenames)]
     pub fn get_external_image_basenames(&self) -> String {
         use std::collections::BTreeSet;
@@ -3669,16 +3665,11 @@ impl HwpDocument {
         serde_json::to_string(&arr).unwrap_or_else(|_| "[]".to_string())
     }
 
-    /// [Task #741 후속] 외부 file path 그림 영역 영역 binary data 영역 inject.
+    /// JS에서 읽은 외부 그림 데이터를 문서에 추가한다.
     ///
-    /// JS 영역 영역 영역 fetch 영역 영역 영역 file 영역 load 영역 후 본 메서드 영역 호출 영역
-    /// IR 영역 영역 영역 image binary 영역 영역 → renderer 영역 영역 표시.
-    ///
-    /// `basename`: 영역 영역 file 영역 영역 (예: "oracle.gif")
-    /// `data`: 영역 영역 binary 영역
-    /// `display_path`: dialog 영역 영역 영역 영역 표시 영역 영역 path. 빈 문자열 ("") 영역
-    ///                 영역 영역 fallback 영역 영역 `/samples/<basename>` 영역 사용. 한컴 viewer
-    ///                 정합 영역 영역 OS 영역 절대 경로 영역 영역 (예: "/Users/.../samples/rdb02.gif")
+    /// `basename`은 경로를 제외한 파일명이고 `data`는 그림 바이트다.
+    /// `display_path`는 그림 대화상자에 표시할 경로다. 빈 문자열이면
+    /// `/samples/<basename>`을 사용한다.
     #[wasm_bindgen(js_name = injectExternalImage)]
     pub fn inject_external_image(
         &mut self,
@@ -3691,7 +3682,7 @@ impl HwpDocument {
         use std::collections::BTreeSet;
 
         let mut injected: u32 = 0;
-        // 영역 외부 image 영역 영역 영역 영역 basename 매칭 영역 영역 id 수집
+        // 파일명이 일치하는 외부 그림의 저장소 ID를 모은다.
         let mut targets: BTreeSet<u16> = BTreeSet::new();
         for section in &self.document().sections {
             for para in &section.paragraphs {

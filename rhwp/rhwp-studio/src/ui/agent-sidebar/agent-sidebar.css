@@ -95,12 +95,14 @@ body.ag-sidebar-animating .ag-root {
      와 같은 밝기대(대비 5.4:1)에 둔다 — 더 어두우면 채움 버튼 글자가 뭉갠다. */
   --ag-grok: #758ca3;
   --ag-cursor: #7f7ca4;
+  --ag-opencode: #a19b98;
   --ag-rau-wash: rgba(141, 134, 128, 0.10);
   --ag-claude-wash: rgba(196, 120, 90, 0.10);
   --ag-codex-wash: rgba(91, 143, 212, 0.10);
   --ag-pi-wash: rgba(74, 154, 134, 0.10);
   --ag-grok-wash: rgba(117, 140, 163, 0.10);
   --ag-cursor-wash: rgba(127, 124, 164, 0.10);
+  --ag-opencode-wash: rgba(161, 155, 152, 0.10);
   --ag-accent: var(--ag-claude);
   --ag-accent-strong: color-mix(in srgb, var(--ag-accent) 86%, var(--ag-text));
   --ag-on-accent: #111214;
@@ -184,6 +186,10 @@ body.ag-sidebar-animating .ag-root {
   --ag-accent: var(--ag-cursor);
 }
 
+.ag-root[data-agent='opencode'] {
+  --ag-accent: var(--ag-opencode);
+}
+
 .ag-root.ag-collapsed {
   transform: translateX(100%);
   box-shadow: none;
@@ -259,12 +265,14 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   --ag-pi: #6cc0aa;
   --ag-grok: #8fa8c0;
   --ag-cursor: #a9a5d1;
+  --ag-opencode: #cfcecd;
   --ag-rau-wash: rgba(212, 205, 196, 0.16);
   --ag-claude-wash: rgba(212, 145, 116, 0.16);
   --ag-codex-wash: rgba(122, 168, 224, 0.16);
   --ag-pi-wash: rgba(108, 192, 170, 0.16);
   --ag-grok-wash: rgba(143, 168, 192, 0.16);
   --ag-cursor-wash: rgba(169, 165, 209, 0.16);
+  --ag-opencode-wash: rgba(207, 206, 205, 0.16);
   --ag-ok: #5cbb7f;
   --ag-err: #ff6b60;
   --ag-run: #f0c24b;
@@ -1545,6 +1553,10 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   box-shadow: 0 0 0 3px var(--ag-cursor-wash);
 }
 
+.ag-root[data-agent='opencode'] .ag-thread-rename-input:focus {
+  box-shadow: 0 0 0 3px var(--ag-opencode-wash);
+}
+
 .ag-threads-empty {
   padding: 18px 8px;
   color: var(--ag-text-muted);
@@ -1638,7 +1650,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   mask-image: url('/icons/rau.png');
 }
 
-/* π · Grok · Cursor 는 우리가 그린 단색 글리프 — 같은 마스크 계약을 탄다. */
+/* 단색 글리프는 같은 마스크 계약을 탄다. */
 .ag-provider-icon-mask[data-agent='pi'] {
   -webkit-mask-image: url('/icons/provider-pi.svg');
   mask-image: url('/icons/provider-pi.svg');
@@ -1652,6 +1664,11 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 .ag-provider-icon-mask[data-agent='cursor'] {
   -webkit-mask-image: url('/icons/provider-cursor.svg');
   mask-image: url('/icons/provider-cursor.svg');
+}
+
+.ag-provider-icon-mask[data-agent='opencode'] {
+  -webkit-mask-image: url('/icons/provider-opencode.svg');
+  mask-image: url('/icons/provider-opencode.svg');
 }
 
 .ag-root[data-agent='rau'] .ag-provider .ag-provider-icon-mask {
@@ -1672,6 +1689,10 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 
 .ag-root[data-agent='cursor'] .ag-provider .ag-provider-icon-mask {
   color: var(--ag-cursor);
+}
+
+.ag-root[data-agent='opencode'] .ag-provider .ag-provider-icon-mask {
+  color: var(--ag-opencode);
 }
 
 /* 줄어들더라도 최소 몇 글자는 남겨 무엇을 고르는 칸인지 읽히게 한다. */
@@ -1704,6 +1725,10 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 
 .ag-root[data-agent='cursor'] .ag-provider .ag-model-name {
   color: var(--ag-cursor);
+}
+
+.ag-root[data-agent='opencode'] .ag-provider .ag-model-name {
+  color: var(--ag-opencode);
 }
 
 .ag-llm-trigger {
@@ -1881,6 +1906,10 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 
 .ag-provider-item[data-agent='cursor'] .ag-provider-icon-mask {
   color: var(--ag-cursor);
+}
+
+.ag-provider-item[data-agent='opencode'] .ag-provider-icon-mask {
+  color: var(--ag-opencode);
 }
 
 .ag-model-item:hover,
@@ -2694,7 +2723,8 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 .ag-review-card.ag-claude,
 .ag-review-card.ag-codex,
 .ag-review-card.ag-grok,
-.ag-review-card.ag-cursor {
+.ag-review-card.ag-cursor,
+.ag-review-card.ag-opencode {
   box-shadow: var(--n-elev-1);
 }
 
@@ -3166,7 +3196,8 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 .ag-plan-card.ag-codex,
 .ag-plan-card.ag-pi,
 .ag-plan-card.ag-grok,
-.ag-plan-card.ag-cursor { box-shadow: none; }
+.ag-plan-card.ag-cursor,
+.ag-plan-card.ag-opencode { box-shadow: none; }
 
 .ag-plan-head {
   flex: 0 0 auto;
@@ -3911,6 +3942,10 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   box-shadow: var(--n-elev-2), 0 0 0 3px var(--ag-cursor-wash);
 }
 
+.ag-root[data-agent='opencode'] .ag-composer:focus-within {
+  box-shadow: var(--n-elev-2), 0 0 0 3px var(--ag-opencode-wash);
+}
+
 .ag-composer-meta {
   display: flex;
   flex-wrap: nowrap;
@@ -4111,6 +4146,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 .ag-skill-token[data-agent='pi'] { --ag-skill-color: var(--ag-pi); }
 .ag-skill-token[data-agent='grok'] { --ag-skill-color: var(--ag-grok); }
 .ag-skill-token[data-agent='cursor'] { --ag-skill-color: var(--ag-cursor); }
+.ag-skill-token[data-agent='opencode'] { --ag-skill-color: var(--ag-opencode); }
 
 .ag-skill-token-icon {
   display: grid;
@@ -5721,7 +5757,8 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 .ag-fullscreen .ag-review-card.ag-claude,
 .ag-fullscreen .ag-review-card.ag-codex,
 .ag-fullscreen .ag-review-card.ag-grok,
-.ag-fullscreen .ag-review-card.ag-cursor {
+.ag-fullscreen .ag-review-card.ag-cursor,
+.ag-fullscreen .ag-review-card.ag-opencode {
   box-shadow: none;
 }
 
@@ -6791,6 +6828,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 .ag-fleet.ag-pi { --ag-accent: var(--ag-pi); }
 .ag-fleet.ag-grok { --ag-accent: var(--ag-grok); }
 .ag-fleet.ag-cursor { --ag-accent: var(--ag-cursor); }
+.ag-fleet.ag-opencode { --ag-accent: var(--ag-opencode); }
 
 .ag-fleet-head > .ag-fleet-spin {
   grid-column: 1;

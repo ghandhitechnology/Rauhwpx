@@ -230,9 +230,106 @@ test('persistent ACP initializes once, serves extension requests, streams update
   assert.deepEqual(updates.map((update) => update.content.text), ['turn-1', 'turn-2']);
 });
 
+test('persistent ACP selects providers that advertise mode through configOptions', async () => {
+  const calls = [];
+  let proc;
+  const options = [
+    {
+      id: 'mode', name: 'Session Mode', category: 'mode', type: 'select', currentValue: 'build',
+      options: [{ value: 'build', name: 'Build' }, { value: 'plan', name: 'Plan' }],
+    },
+    {
+      id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: 'openai/default',
+      options: [
+        { value: 'openai/default', name: 'OpenAI/Default' },
+        { value: 'anthropic/claude-sonnet', name: 'Anthropic/Claude Sonnet' },
+      ],
+    },
+    {
+      id: 'effort', name: 'Effort', category: 'thought_level', type: 'select', currentValue: 'low',
+      options: [{ value: 'low', name: 'Low' }],
+    },
+  ];
+  const send = (id, result) => proc.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id, result })}\n`);
+  const transport = createPersistentAcpSession({
+    clientName: 'rhwp-opencode-test',
+    command: '/fake/opencode',
+    args: ['acp', '--pure'],
+    cwd: '/tmp/project',
+    isolatePrompts: false,
+  }, {
+    spawnProcess() {
+      proc = new FakeAcpProcess();
+      let buffer = '';
+      proc.stdin.on('data', (chunk) => {
+        buffer += String(chunk);
+        for (;;) {
+          const newline = buffer.indexOf('\n');
+          if (newline < 0) break;
+          const line = buffer.slice(0, newline);
+          buffer = buffer.slice(newline + 1);
+          if (!line) continue;
+          const frame = JSON.parse(line);
+          calls.push(frame);
+          if (frame.method === 'initialize') {
+            send(frame.id, { protocolVersion: 1, agentCapabilities: {} });
+          } else if (frame.method === 'session/new') {
+            send(frame.id, { sessionId: 'opencode-session', configOptions: structuredClone(options) });
+          } else if (frame.method === 'session/set_config_option') {
+            const selected = options.find((option) => option.id === frame.params.configId);
+            selected.currentValue = frame.params.value;
+            if (frame.params.configId === 'model') {
+              options.find((option) => option.id === 'effort').options = [
+                { value: 'low', name: 'Low' }, { value: 'high', name: 'High' },
+              ];
+            }
+            send(frame.id, { configOptions: structuredClone(options) });
+          }
+        }
+      });
+      return proc;
+    },
+    terminateProcess: async (child) => {
+      child.exitCode = 0;
+      child.stdout.end();
+      child.stderr.end();
+      child.stdin.end();
+      child.emit('exit', 0, null);
+      child.emit('close', 0, null);
+      return true;
+    },
+  });
+
+  await transport.configure({
+    modeAliases: ['plan'], requireModeMatch: true,
+    model: 'anthropic/claude-sonnet', requireModelMatch: true, effort: 'high',
+  });
+  await transport.configure({ modeAliases: ['plan'], requireModeMatch: true });
+  await assert.rejects(
+    transport.configure({ modeAliases: ['review'], requireModeMatch: true }),
+    /rhwp-opencode-test ACP does not advertise required mode \(review\)/,
+  );
+  await assert.rejects(
+    transport.configure({ model: 'unlisted/misreported', requireModelMatch: true }),
+    /rhwp-opencode-test ACP does not advertise required model \(unlisted\/misreported\)/,
+  );
+  await transport.dispose();
+
+  const selections = calls
+    .filter((frame) => frame.method === 'session/set_config_option')
+    .map((frame) => [frame.params.configId, frame.params.value]);
+  assert.deepEqual(selections, [
+    ['mode', 'plan'],
+    ['model', 'anthropic/claude-sonnet'],
+    ['effort', 'high'],
+  ]);
+  assert.equal(calls.some((frame) => frame.method === 'session/set_mode'), false);
+});
+
 test('isolated ACP prompts wait for tree proof and resume the session in a fresh process', async () => {
   const calls = [];
   let spawns = 0;
+  let envCalls = 0;
   let releaseFirstCleanup;
   let markFirstCleanupStarted;
   const firstCleanupStarted = new Promise((resolve) => { markFirstCleanupStarted = resolve; });
@@ -250,10 +347,11 @@ test('isolated ACP prompts wait for tree proof and resume the session in a fresh
     command: '/fake/acp',
     args: ['stdio'],
     cwd: '/tmp/project',
-    env: { PATH: '/usr/bin' },
+    env: () => ({ PATH: '/usr/bin', ACP_ENV_GENERATION: String(++envCalls) }),
   }, {
-    spawnProcess() {
+    spawnProcess(_command, _args, options) {
       const generation = ++spawns;
+      assert.equal(options.env.ACP_ENV_GENERATION, String(generation));
       const child = new FakeAcpProcess();
       child.generation = generation;
       let buffer = '';
@@ -307,6 +405,7 @@ test('isolated ACP prompts wait for tree proof and resume the session in a fresh
 
   assert.equal((await transport.prompt('second')).stopReason, 'end_turn');
   assert.equal(spawns, 2);
+  assert.equal(envCalls, 2, 'the launch environment is rebuilt for every isolated child');
   assert.deepEqual(
     calls.filter((frame) => frame.method === 'session/new' || frame.method === 'session/load')
       .map((frame) => [frame.generation, frame.method, frame.params.sessionId ?? null]),

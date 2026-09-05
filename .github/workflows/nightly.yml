@@ -1,4 +1,4 @@
-name: Nightly verification
+name: Nightly verification and release
 
 on:
   schedule:
@@ -11,7 +11,7 @@ permissions:
 
 concurrency:
   group: nightly-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   engine:
@@ -22,12 +22,13 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v5
-
-      - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
-          toolchain: 1.93.1
-          targets: wasm32-unknown-unknown
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          wasm: 'true'
+          cache: verification
 
       - name: Install pinned nextest
         uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
@@ -63,14 +64,22 @@ jobs:
           cargo nextest run --locked --workspace --test-threads 4
           cargo test --locked --workspace --doc
 
-      - name: Install wasm-pack
-        run: cargo install wasm-pack --version 0.15.0 --locked
-
       - name: Build WASM engine
         working-directory: rhwp
         run: wasm-pack build --target web
+      - name: Share tested WASM build
+        uses: actions/upload-artifact@v4
+        with:
+          name: tested-wasm
+          path: rhwp/pkg
+          if-no-files-found: error
+          retention-days: 1
 
   app:
+    needs: engine
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      PUPPETEER_EXECUTABLE_PATH: /usr/bin/google-chrome
     name: Desktop, agent, and Studio checks
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -78,6 +87,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
         uses: actions/setup-node@v5
@@ -89,31 +100,32 @@ jobs:
             rhwp/rhwp-studio/package-lock.json
             rhwp/rhwp-agent/package-lock.json
 
-      - name: Install pinned Rust toolchain
-        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - name: Use tested WASM build
+        uses: actions/download-artifact@v4
         with:
-          toolchain: 1.93.1
-          targets: wasm32-unknown-unknown
-
-      - name: Install wasm-pack
-        run: cargo install wasm-pack --version 0.15.0 --locked
-
-      - name: Build WASM engine
-        working-directory: rhwp
-        run: wasm-pack build --target web
+          name: tested-wasm
+          path: rhwp/pkg
 
       - name: Install dependencies
-        run: |
-          npm ci
-          npm --prefix rhwp/rhwp-agent ci
-          npm --prefix rhwp/rhwp-studio ci
+        run: npm run setup
 
-      - name: Reject vulnerable production dependency trees
+      - name: Audit high and critical production advisories
+        run: npm run audit:production
+
+      - name: Report all production advisories for triage
+        if: always()
+        run: node scripts/audit-production.mjs --report
+
+      - name: Check repository tooling and provider adapter types
         run: |
-          set -euo pipefail
-          npm audit --omit=dev --audit-level=low
-          npm --prefix rhwp/rhwp-agent audit --omit=dev --audit-level=low
-          npm --prefix rhwp/rhwp-studio audit --omit=dev --audit-level=low
+          npm run test:ci
+          npm --prefix rhwp/rhwp-agent run typecheck
+          npm --prefix rhwp/rhwp-studio run e2e:check
+
+      - name: Test browser integration
+        run: |
+          "$PUPPETEER_EXECUTABLE_PATH" --version
+          npm --prefix rhwp/rhwp-studio run test:browser
 
       - name: Check desktop and hub syntax
         run: |
@@ -128,7 +140,7 @@ jobs:
       - name: Test hosted Rau authorization service
         run: npm --prefix rhwp/rau-credits test
 
-      - name: Test Studio session persistence and desktop contracts
+      - name: Test Studio
         run: npm --prefix rhwp/rhwp-studio test
 
       - name: Build Studio
@@ -142,6 +154,8 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - name: Install nightly Rust toolchain
         uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # nightly
@@ -166,3 +180,199 @@ jobs:
               -rss_limit_mb=2048 \
               -timeout=30
           done
+
+  prepare:
+    name: Prepare nightly identity
+    needs: [engine, app, hostile-input-smoke]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
+      date: ${{ steps.identity.outputs.date }}
+      sha: ${{ steps.identity.outputs.sha }}
+      short_sha: ${{ steps.identity.outputs.short_sha }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22.18.0
+
+      - name: Compute nightly identity and notes
+        id: identity
+        run: |
+          set -euo pipefail
+          base_version="$(jq -r .version package.json)"
+          date="$(date -u +%F)"
+          compact_date="${date//-/}"
+          sha="${GITHUB_SHA}"
+          short_sha="${sha:0:7}"
+          version="${base_version}-nightly.${compact_date}.${short_sha}"
+
+          {
+            echo "version=${version}"
+            echo "date=${date}"
+            echo "sha=${sha}"
+            echo "short_sha=${short_sha}"
+          } >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "VERSION=${version}"
+            echo "DATE=${date}"
+            echo "SHA=${sha}"
+            echo "SHORT_SHA=${short_sha}"
+          } > nightly-identity.env
+
+          {
+            echo "# Rauhwpx nightly pre-release"
+            echo
+            echo "- UTC date: ${date}"
+            echo "- Full SHA: ${sha}"
+            echo "- Short SHA: ${short_sha}"
+            echo "- Version: ${version}"
+            echo
+            echo "## Changelog"
+            echo
+            changelog=""
+            if git rev-parse --verify --quiet refs/tags/nightly >/dev/null &&
+              git merge-base --is-ancestor nightly HEAD; then
+              changelog="$(git log nightly..HEAD --pretty=format:'- %s (%h)')"
+            else
+              changelog="$(git log -20 --pretty=format:'- %s (%h)')"
+            fi
+            if [[ -n "${changelog}" ]]; then
+              printf '%s\n' "${changelog}"
+            else
+              echo "- No commits since the previous nightly."
+            fi
+          } > nightly-notes.md
+
+      - name: Upload nightly identity
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-identity
+          if-no-files-found: error
+          path: |
+            nightly-identity.env
+            nightly-notes.md
+
+  macos:
+    name: Build macOS installers
+    needs: prepare
+    runs-on: macos-15
+    timeout-minutes: 120
+    environment: macos-release
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: ./.github/actions/package-desktop
+        with:
+          platform: macos
+          artifact: macos-nightly
+          version: ${{ needs.prepare.outputs.version }}
+          signed: 'true'
+          certificate: ${{ secrets.MACOS_CERTIFICATE }}
+          certificate-password: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          apple-id: ${{ secrets.APPLE_ID }}
+          apple-team-id: ${{ secrets.APPLE_TEAM_ID }}
+          apple-password: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+
+  windows:
+    name: Build Windows installers
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: ./.github/actions/package-desktop
+        with:
+          platform: windows
+          artifact: windows-nightly
+          version: ${{ needs.prepare.outputs.version }}
+
+  publish:
+    name: Publish nightly GitHub Release
+    if: github.ref == 'refs/heads/main'
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: '*-nightly'
+          path: release
+          merge-multiple: true
+
+      - name: Download nightly identity
+        uses: actions/download-artifact@v4
+        with:
+          name: nightly-identity
+          path: release
+
+      - name: Generate checksums
+        run: |
+          cd release
+          sha256sum ./*.dmg ./*.zip ./*.exe > SHA256SUMS.txt
+
+      - name: Publish nightly GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          source release/nightly-identity.env
+          extras=()
+          if [ -f release/latest-mac.yml ]; then extras+=(release/latest-mac.yml); fi
+          if [ -f release/latest.yml ]; then extras+=(release/latest.yml); fi
+          for blockmap in release/*.zip.blockmap; do
+            if [ -f "${blockmap}" ]; then extras+=("${blockmap}"); fi
+          done
+
+          lookup_error="release/nightly-release-lookup.err"
+          if existing_release_id="$(
+            gh api "repos/${GITHUB_REPOSITORY}/releases/tags/nightly" --jq '.id' \
+              2>"${lookup_error}"
+          )"; then
+            rm -f "${lookup_error}"
+          elif grep -q 'HTTP 404' "${lookup_error}"; then
+            existing_release_id=""
+            rm -f "${lookup_error}"
+          else
+            cat "${lookup_error}" >&2
+            exit 1
+          fi
+          if [[ -n "${existing_release_id}" ]]; then
+            gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/${existing_release_id}"
+          fi
+          git tag -f nightly "$GITHUB_SHA"
+          git push origin refs/tags/nightly --force
+          gh release create nightly \
+            release/*.dmg \
+            release/*.zip \
+            release/*.exe \
+            release/*.exe.blockmap \
+            release/SHA256SUMS.txt \
+            "${extras[@]}" \
+            --prerelease \
+            --latest=false \
+            --target "$GITHUB_SHA" \
+            --title "Rauhwpx nightly ${DATE} (${SHORT_SHA})" \
+            --notes-file release/nightly-notes.md

@@ -14,6 +14,7 @@ export const AGENT_LABEL: Record<AgentName, string> = {
   pi: 'Pi',
   grok: 'Grok',
   cursor: 'Cursor',
+  opencode: 'OpenCode',
 };
 
 /** 프로바이더가 서는 정식 순서 — 연결 목록과 입력기 피커가 같이 쓴다. */
@@ -24,6 +25,7 @@ export const PROVIDER_ORDER = [
   'pi',
   'grok',
   'cursor',
+  'opencode',
 ] as const satisfies readonly AgentName[];
 
 /* 새 프로바이더가 순서에서 빠지면 여기서 컴파일이 깨진다. */
@@ -32,7 +34,14 @@ const providerOrderIsComplete: ProviderOrderGap extends never ? true : ProviderO
 void providerOrderIsComplete;
 
 /** 단색 로고는 마스크로 그린다 — currentColor 를 타고 테마에 맞는다. */
-export const MASK_ICON_AGENTS: readonly AgentName[] = ['rau', 'codex', 'pi', 'grok', 'cursor'];
+export const MASK_ICON_AGENTS: readonly AgentName[] = [
+  'rau',
+  'codex',
+  'pi',
+  'grok',
+  'cursor',
+  'opencode',
+];
 
 export const PROVIDER_ICON_SRC: Partial<Record<AgentName, string>> = {
   claude: '/icons/provider-claude.png',

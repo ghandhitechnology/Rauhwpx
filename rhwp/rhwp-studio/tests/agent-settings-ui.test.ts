@@ -30,6 +30,7 @@ const editingSettings = readSource('../src/ui/agent-sidebar/settings-editing.ts'
 const settingsCss = readSource('../src/ui/agent-sidebar/settings.css');
 const css = readSource('../src/ui/agent-sidebar/agent-sidebar.css');
 const buttonCss = readSource('../src/ui/agent-sidebar/sidebar-button-modern.css');
+const openCodeIcon = readSource('../public/icons/provider-opencode.svg');
 const icons = readSource('../src/ui/agent-sidebar/icons.ts');
 const editCommandsSource = readSource('../src/command/commands/edit.ts');
 const toolCommandsSource = readSource('../src/command/commands/tool.ts');
@@ -282,10 +283,11 @@ test('각 프로바이더 설정은 별도 시작 화면 없이 설정 모달에
   assert.match(settings, /'브라우저로 로그인'/);
   assert.match(settings, /'API 키 입력'/);
   assert.match(settings, /const detected = health\?\.available === true \|\| setup\?\.available === true/);
-  assert.match(settings, /row\.setup\.textContent = \(agent === 'rau' \? configured : detected \|\| configured\) \? '재설정' : '설정'/);
+  assert.match(settings, /const openCodeReady = configured \|\| \(detected && setup\?\.authenticated === true\)/);
+  assert.match(settings, /row\.setup\.textContent = ready \? '재설정' : '설정'/);
   assert.match(settings, /const detected = providers\?\.\[agent\]\?\.available === true/);
   assert.match(settings, /const available = detected \|\| status\?\.available === true \|\| status\?\.installed === true/);
-  assert.match(settings, /const connected = agent === 'rau' \? configured : detected \|\| configured/);
+  assert.match(settings, /const connected = agent === 'rau'[\s\S]*agent === 'opencode'[\s\S]*available && status\?\.authenticated === true[\s\S]*detected \|\| configured/);
   assert.match(settings, /CLI 연결이 확인되었습니다/);
   assert.doesNotMatch(settings, /필요한 CLI와 인증을 한 번에 설정합니다/);
   assert.match(settings, /piOauth\.addEventListener\('click', \(\) => void startSetupAuth\('oauth'\)\)/);
@@ -523,12 +525,13 @@ test('사이드바 버튼은 마지막에 불러온 얇고 반듯한 스타일�
   assert.match(buttonCss, /\.ag-root \.ag-send \{[\s\S]*height: var\(--ag-button-height\)/);
 });
 
-test('Grok · Cursor 는 프로바이더 목록 · 라벨 · 아이콘 · 강조색을 모두 갖춘다', () => {
-  // 연결 목록과 입력기 피커는 여섯 프로바이더를 같은 순서로 세운다.
-  assert.deepEqual([...PROVIDER_ORDER], ['rau', 'claude', 'codex', 'pi', 'grok', 'cursor']);
+test('Grok · Cursor · OpenCode는 프로바이더 목록 · 라벨 · 아이콘 · 강조색을 모두 갖춘다', () => {
+  // 연결 목록과 입력기 피커는 일곱 프로바이더를 같은 순서로 세운다.
+  assert.deepEqual([...PROVIDER_ORDER], ['rau', 'claude', 'codex', 'pi', 'grok', 'cursor', 'opencode']);
   assert.equal(AGENT_LABEL.rau, 'Rau');
   assert.equal(AGENT_LABEL.grok, 'Grok');
   assert.equal(AGENT_LABEL.cursor, 'Cursor');
+  assert.equal(AGENT_LABEL.opencode, 'OpenCode');
   // 두 화면 모두 표를 다시 베끼지 않고 공용 모듈에서 가져다 쓴다.
   for (const consumer of [settings, source]) {
     assert.match(consumer, /import \{ AGENT_LABEL, createProviderIcon, PROVIDER_ORDER \} from '\.\/providers\.ts'/);
@@ -539,28 +542,36 @@ test('Grok · Cursor 는 프로바이더 목록 · 라벨 · 아이콘 · 강조
   // cursor 표기는 언제나 "Cursor" 다.
   assert.doesNotMatch(settings, /'Cursor Agent'|'cursor-agent'/);
   // 단색 로고는 마스크로 그리므로 마스크 목록과 CSS 규칙이 함께 있어야 한다.
-  assert.deepEqual([...MASK_ICON_AGENTS], ['rau', 'codex', 'pi', 'grok', 'cursor']);
+  assert.deepEqual([...MASK_ICON_AGENTS], ['rau', 'codex', 'pi', 'grok', 'cursor', 'opencode']);
   // 마스크가 아닌 프로바이더만 이미지 경로를 갖는다.
   assert.equal(PROVIDER_ICON_SRC.claude, '/icons/provider-claude.png');
   assert.equal(PROVIDER_ICON_SRC.grok, undefined);
   assert.equal(PROVIDER_ICON_SRC.cursor, undefined);
+  assert.equal(PROVIDER_ICON_SRC.opencode, undefined);
   assert.match(css, /\.ag-provider-icon-mask\[data-agent='rau'\][\s\S]*?rau\.png/);
   assert.match(css, /\.ag-provider-icon-mask\[data-agent='grok'\][\s\S]*?provider-grok\.svg/);
   assert.match(css, /\.ag-provider-icon-mask\[data-agent='cursor'\][\s\S]*?provider-cursor\.svg/);
+  assert.match(css, /\.ag-provider-icon-mask\[data-agent='opencode'\][\s\S]*?provider-opencode\.svg/);
+  assert.match(openCodeIcon, /^<svg[^>]+viewBox="0 0 512 512"/);
+  assert.match(openCodeIcon, /fill-rule="evenodd"/);
+  assert.doesNotMatch(openCodeIcon, /(?:href|src)=["']https?:|data:/);
   // 강조색은 라이트/다크 팔레트에 모두 있고 data-agent 로 갈린다.
   assert.equal((css.match(/--ag-rau:/g) ?? []).length, 2);
   assert.equal((css.match(/--ag-grok:/g) ?? []).length, 2);
   assert.equal((css.match(/--ag-cursor:/g) ?? []).length, 2);
+  assert.equal((css.match(/--ag-opencode:/g) ?? []).length, 2);
   assert.equal((css.match(/--ag-rau-wash:/g) ?? []).length, 2);
   assert.equal((css.match(/--ag-grok-wash:/g) ?? []).length, 2);
   assert.equal((css.match(/--ag-cursor-wash:/g) ?? []).length, 2);
+  assert.equal((css.match(/--ag-opencode-wash:/g) ?? []).length, 2);
   assert.match(css, /\.ag-root\[data-agent='grok'\] \{\s*--ag-accent: var\(--ag-grok\);/);
   assert.match(css, /\.ag-root\[data-agent='cursor'\] \{\s*--ag-accent: var\(--ag-cursor\);/);
-  assert.match(css, /\.ag-plan-card\.ag-grok,\n\.ag-plan-card\.ag-cursor/);
-  assert.match(css, /\.ag-review-card\.ag-grok,\n\.ag-review-card\.ag-cursor/);
+  assert.match(css, /\.ag-root\[data-agent='opencode'\] \{\s*--ag-accent: var\(--ag-opencode\);/);
+  assert.match(css, /\.ag-plan-card\.ag-grok,\n\.ag-plan-card\.ag-cursor,\n\.ag-plan-card\.ag-opencode/);
+  assert.match(css, /\.ag-review-card\.ag-grok,\n\.ag-review-card\.ag-cursor,\n\.ag-review-card\.ag-opencode/);
 });
 
-test('기본 제공자 선택은 다섯 프로바이더를 그대로 저장한다', () => {
+test('기본 제공자 선택은 일곱 프로바이더를 그대로 저장한다', () => {
   // 예전 코드는 모르는 값을 claude 로 접어 Grok/Cursor 선택을 삼켰다.
   assert.match(settings, /const agent = PROVIDER_ORDER\.find\(\(name\) => name === value\) \?\? 'claude'/);
   assert.doesNotMatch(settings, /value === 'codex' \|\| value === 'pi' \? value : 'claude'/);
@@ -569,8 +580,8 @@ test('기본 제공자 선택은 다섯 프로바이더를 그대로 저장한�
   assert.match(settings, /const PLAN_AGENTS: readonly PlanAgent\[\] = \['claude', 'codex'\]/);
 });
 
-test('grok · cursor 사용량도 세션 · 오늘 · 주간 토큰으로 보인다', () => {
-  assert.match(settings, /const API_USAGE_AGENTS: readonly AgentName\[\] = \['grok', 'cursor'\]/);
+test('grok · cursor · opencode 사용량도 세션 · 오늘 · 주간 토큰으로 보인다', () => {
+  assert.match(settings, /const API_USAGE_AGENTS: readonly AgentName\[\] = \['grok', 'cursor', 'opencode'\]/);
   assert.match(settings, /function renderApiUsage\(\): void/);
   assert.match(settings, /renderPiUsage\(\);\s*\n\s*renderApiUsage\(\);/);
   assert.match(settings, /formatUsageWindow\('Session', providerUsage\.session\)/);
@@ -648,9 +659,9 @@ test('Rau 재설정은 압축 동작만 두고 OAuth 완료를 잠깐 알린다'
 test('Rau 로그아웃 뒤 설치된 런타임을 연결 상태로 오인하지 않는다', () => {
   assert.match(
     settings,
-    /const configured = status\?\.connected === true \|\| status\?\.setupComplete === true;\s*\n\s*const connected = agent === 'rau' \? configured : detected \|\| configured/,
+    /const configured = status\?\.connected === true \|\| status\?\.setupComplete === true;\s*\n[\s\S]*const connected = agent === 'rau'\s*\? configured/,
   );
-  assert.match(settings, /row\.setup\.textContent = \(agent === 'rau' \? configured : detected \|\| configured\) \? '재설정' : '설정'/);
+  assert.match(settings, /const ready = agent === 'rau'[\s\S]*agent === 'opencode'[\s\S]*openCodeReady[\s\S]*detected \|\| configured/);
   assert.match(settings, /if \(agent === 'rau' && !configured\) \{[\s\S]*row\.detail\.textContent = detected \? '로그인 필요'/);
   assert.match(settings, /const statuses = await bridge\.disconnectAgent\('rau'\)/);
   assert.match(settings, /if \(statuses\) setupStatuses = statuses;[\s\S]*renderAgentSetup\(\);/);
@@ -664,9 +675,52 @@ test('설정 모달은 프로바이더별 설치 안내와 API 키 힌트를 갖
   assert.match(settings, /rau: '브라우저로 로그인하면 \$5 체험 크레딧이 바로 연결됩니다\.'/);
   assert.match(settings, /cursor: 'Cursor CLI를 공식 설치 스크립트로 앱 전용 폴더에 설치합니다\.'/);
   assert.match(settings, /grok: 'Grok CLI와 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다\.'/);
+  assert.match(settings, /opencode: 'OpenCode CLI를 앱 전용 폴더에 설치합니다\.'/);
   assert.match(settings, /const API_KEY_PLACEHOLDER: Record<AgentName, string>/);
   assert.match(settings, /grok: 'xai-…'/);
   assert.match(settings, /cursor: 'API 키'/);
+  assert.match(settings, /opencode: 'API 키'/);
   assert.match(settings, /setupInstallNote\.textContent = SETUP_INSTALL_NOTE\[agent\]/);
   assert.match(settings, /setupKey\.input\.placeholder = API_KEY_PLACEHOLDER\[agent\]/);
+});
+
+test('OpenCode 설정은 OAuth 대신 API 키만 받고 터미널 로그인을 새로고침으로 감지한다', () => {
+  assert.match(settings, /const apiKeyOnly = agent === 'opencode'/);
+  assert.match(settings, /setupOauth\.hidden = apiKeyOnly/);
+  assert.match(settings, /setupApiToggle\.hidden = apiKeyOnly/);
+  assert.match(settings, /if \(apiKeyOnly\) setupKeyBox\.hidden = false/);
+  assert.match(settingsCss, /\.ag-agent-auth-card\[hidden\] \{\s*display: none;/);
+  assert.match(settings, /터미널에서 opencode auth login을 마친 뒤 상태를 새로고침하면 기존 로그인을 감지합니다\./);
+  assert.match(settings, /이 화면에서는 OpenCode API 키를 연결할 수 있습니다\./);
+  assert.match(
+    settings,
+    /refreshBtn\.addEventListener\('click',[\s\S]{0,160}Promise\.all\(\[refreshProviders\(true\), refreshSetupStatuses\(true\)\]\)/,
+  );
+  assert.match(bridgeSource, /requestAgentSetupStatus\(refresh = false\)/);
+  assert.match(bridgeSource, /type: 'agent-setup-status-request', \.\.\.\(refresh \? \{ refresh: true \} : \{\}\)/);
+  assert.match(settings, /setupDoneChange\.textContent = apiKeyOnly \? 'API 키 변경' : '로그인 방식 변경'/);
+  assert.match(settings, /agent === 'opencode'[\s\S]{0,80}'OpenCode CLI 자격 증명을 확인했습니다\.'/);
+  assert.match(
+    settings,
+    /if \(agent === 'opencode' && detected && !openCodeReady\) \{\s*row\.dot\.dataset\.state = 'disconnected';\s*row\.detail\.textContent = '로그인 필요'/,
+  );
+  // 설치 여부와 인증 여부를 분리해, CLI만 설치된 상태를 연결 완료로 보지 않는다.
+  assert.match(
+    settings,
+    /const connected = agent === 'rau'\s*\? configured\s*: agent === 'opencode'\s*\? configured \|\| \(available && status\?\.authenticated === true\)\s*: detected \|\| configured/,
+  );
+  assert.match(
+    settings,
+    /const available = providers\?\.\[agent\]\?\.available === true \|\| status\?\.available === true;[\s\S]*\|\| \(available && status\?\.authenticated === true\)/,
+  );
+  // 첫 실행 카드의 자동 연결도 OpenCode에서는 키 입력만 열며 OAuth를 시작하지 않는다.
+  assert.match(
+    settings,
+    /async function startPreferredSetupAuth\(agent: AgentName\): Promise<void> \{\s*setupReauth = true;\s*if \(agent === 'opencode'\) \{\s*renderAgentSetup\(\);\s*setupKey\.input\.focus\(\);\s*return;\s*\}\s*await startSetupAuth\('oauth'\);/,
+  );
+  // 숨김 상태가 깨져도 브리지로 잘못된 OpenCode OAuth 요청을 보내지 않는다.
+  assert.match(
+    settings,
+    /async function startSetupAuth\(method: AgentAuthMethod\): Promise<void> \{\s*if \(!setupAgent \|\| setupBusy\) return;\s*if \(setupAgent === 'opencode' && method === 'oauth'\) return;/,
+  );
 });

@@ -21,7 +21,8 @@ export interface AgentModelGroup {
 
 /**
  * 정적 카탈로그를 갖는 프로바이더 (pi 는 동적 레지스트리 — 아래 참조).
- * cursor 는 'auto' 한 줄을 씨앗으로 갖고, CLI 가 알려 주는 목록을 그 뒤에 잇는다.
+ * cursor와 opencode는 각각 한 줄의 폴백을 씨앗으로 갖고, CLI가 알려 주는
+ * 목록을 그 뒤에 잇는다.
  */
 type StaticAgentName = Exclude<AgentName, 'pi'>;
 
@@ -40,6 +41,7 @@ export const AGENT_MODELS: Record<StaticAgentName, readonly AgentModelOption[]> 
     { id: 'haiku', label: 'Haiku 4.5' },
   ],
   codex: [
+    { id: 'gpt-6-astra', label: 'Astra' },
     { id: 'gpt-5.6-sol', label: 'Sol' },
     { id: 'gpt-5.6-terra', label: 'Terra' },
     { id: 'gpt-5.6-luna', label: 'Luna' },
@@ -50,6 +52,9 @@ export const AGENT_MODELS: Record<StaticAgentName, readonly AgentModelOption[]> 
   ],
   cursor: [
     { id: 'auto', label: 'Auto' },
+  ],
+  opencode: [
+    { id: 'opencode/big-pickle', label: 'Big Pickle' },
   ],
 } as const;
 
@@ -68,7 +73,7 @@ const CLAUDE_EFFORTS_COMPACT: readonly AgentEffortOption[] = [
   { id: 'low', label: 'Low' },
 ];
 
-/** Codex `model_reasoning_effort` (강함 → 약함). gpt-5.6 는 max 까지 받는다. */
+/** Codex `model_reasoning_effort` (강함 → 약함). GPT-6 Astra와 GPT-5.6은 max까지 지원한다. */
 const CODEX_EFFORTS: readonly AgentEffortOption[] = [
   { id: 'max', label: 'Max' },
   { id: 'xhigh', label: 'Extra high' },
@@ -101,15 +106,17 @@ export const DEFAULT_AGENT_MODEL: Record<StaticAgentName, string> = {
   codex: 'gpt-5.6-sol',
   grok: 'grok-4.6',
   cursor: 'auto',
+  opencode: 'opencode/big-pickle',
 };
 
-/** cursor 는 추론 강도 옵션이 없다 — effortsForAgent 가 빈 목록을 준다. */
+/** cursor와 opencode는 추론 강도 옵션이 없다. */
 export const DEFAULT_AGENT_EFFORT: Record<StaticAgentName, string> = {
   rau: 'medium',
   claude: 'high',
   codex: 'medium',
   grok: 'high',
   cursor: '',
+  opencode: '',
 };
 
 /*
@@ -163,6 +170,42 @@ function cursorModelOptions(): readonly AgentModelOption[] {
 }
 
 /*
+ * OpenCode는 연결된 제공자에 따라 카탈로그가 달라진다. 허브가 `opencode models`
+ * 결과를 agent-setup-status의 statuses.opencode.models로 보내면 이 레지스트리를
+ * 갱신한다. 모든 id는 `provider/model` 형태 그대로 보존해 같은 모델 이름을 가진
+ * 서로 다른 제공자를 구분한다.
+ */
+let openCodeModelRegistry: readonly string[] = [];
+
+function isProviderQualifiedModelId(id: string): boolean {
+  return /^[^/\s]+\/\S+$/.test(id);
+}
+
+/** 허브의 `agent-setup-status` 를 받을 때마다 브리지가 호출한다. */
+export function setOpenCodeModels(ids: readonly string[]): void {
+  const seen = new Set<string>();
+  openCodeModelRegistry = ids.flatMap((raw) => {
+    const id = raw.trim();
+    if (!isProviderQualifiedModelId(id) || seen.has(id)) return [];
+    seen.add(id);
+    return [id];
+  });
+}
+
+export function openCodeModels(): readonly string[] {
+  return openCodeModelRegistry;
+}
+
+/** CLI 목록이 오기 전에는 Big Pickle을 쓰고, 이후에는 실제 목록만 보여 준다. */
+function openCodeModelOptions(): readonly AgentModelOption[] {
+  if (openCodeModelRegistry.length === 0) return AGENT_MODELS.opencode;
+  return openCodeModelRegistry.map((id) => ({
+    id,
+    label: AGENT_MODELS.opencode.find((model) => model.id === id)?.label ?? id,
+  }));
+}
+
+/*
  * Cursor 모델은 과금 풀이 둘이다 — auto·composer(·cheetah)·grok 계열은 Cursor
  * 구독의 포함 사용량에서 차감되고, 나머지 프런티어 모델은 토큰당 API 사용량으로
  * 따로 과금된다. CLI 의 --list-models 출력엔 이 구분이 없어서 여기서 나눈다.
@@ -171,8 +214,21 @@ const CURSOR_PLAN_MODEL_PATTERN = /^(?:auto$|composer|cheetah|grok)/;
 const CURSOR_PLAN_GROUP_LABEL = '구독 사용량';
 const CURSOR_API_GROUP_LABEL = 'API 사용량';
 
-/** 과금 풀 기준 그룹 목록. cursor 외 프로바이더는 머리글 없는 단일 그룹이다. */
+/** OpenCode의 provider/model 목록을 provider별 optgroup으로 묶는다. */
+function openCodeModelGroups(): readonly AgentModelGroup[] {
+  const byProvider = new Map<string, AgentModelOption[]>();
+  for (const option of openCodeModelOptions()) {
+    const provider = option.id.slice(0, option.id.indexOf('/'));
+    const group = byProvider.get(provider) ?? [];
+    group.push(option);
+    byProvider.set(provider, group);
+  }
+  return [...byProvider].map(([label, options]) => ({ label, options }));
+}
+
+/** provider/과금 풀 기준 그룹 목록. 그 외 프로바이더는 머리글 없는 단일 그룹이다. */
 export function modelGroupsForAgent(agent: AgentName): readonly AgentModelGroup[] {
+  if (agent === 'opencode') return openCodeModelGroups();
   if (agent !== 'cursor') return [{ label: null, options: modelsForAgent(agent) }];
   const options = cursorModelOptions();
   // CLI 목록 도착 전엔 씨앗(auto)뿐이라 머리글 없이 한 그룹으로 둔다.
@@ -189,6 +245,7 @@ export function modelGroupsForAgent(agent: AgentName): readonly AgentModelGroup[
 function dynamicCatalogPending(agent: AgentName): boolean {
   if (agent === 'pi') return piModelRegistry.length === 0;
   if (agent === 'cursor') return cursorModelRegistry.length === 0;
+  if (agent === 'opencode') return openCodeModelRegistry.length === 0;
   return false;
 }
 
@@ -205,17 +262,25 @@ function isModelOfOtherAgent(agent: AgentName, model: string): boolean {
 export function modelsForAgent(agent: AgentName): readonly AgentModelOption[] {
   if (agent === 'pi') return piModelRegistry.map((m) => ({ id: m.id, label: m.name }));
   if (agent === 'cursor') return cursorModelOptions();
+  if (agent === 'opencode') return openCodeModelOptions();
   return AGENT_MODELS[agent];
 }
 
 export function defaultModelForAgent(agent: AgentName): string {
   if (agent === 'pi') return piModelRegistry[0]?.id ?? '';
+  if (agent === 'opencode') {
+    const fallback = DEFAULT_AGENT_MODEL.opencode;
+    return openCodeModelRegistry.includes(fallback)
+      ? fallback
+      : openCodeModelRegistry[0] ?? fallback;
+  }
   return DEFAULT_AGENT_MODEL[agent];
 }
 
 export function isModelForAgent(agent: AgentName, model: string): boolean {
   if (agent === 'pi') return piModelRegistry.some((m) => m.id === model);
   if (agent === 'cursor') return cursorModelOptions().some((m) => m.id === model);
+  if (agent === 'opencode') return openCodeModelOptions().some((m) => m.id === model);
   return AGENT_MODELS[agent].some((m) => m.id === model);
 }
 
@@ -224,6 +289,9 @@ const RAU_IMAGE_MODELS = new Set(['qwen/qwen3.8-flash']);
 export function modelSupportsImages(agent: AgentName, model?: string | null): boolean {
   if (agent === 'pi') return findPiModel(resolveModelForAgent('pi', model))?.supportsImages === true;
   if (agent === 'rau') return RAU_IMAGE_MODELS.has(resolveModelForAgent('rau', model));
+  // OpenCode 모델 목록에는 입력 모달리티가 없다. 실제 라우팅된 모델이 거부할 수
+  // 있으므로 capability 메타데이터가 오기 전에는 첨부를 보수적으로 막는다.
+  if (agent === 'opencode') return false;
   return true;
 }
 
@@ -236,17 +304,17 @@ export function resolveModelForAgent(agent: AgentName, model?: string | null): s
     return defaultModelForAgent('pi');
   }
   if (model && isModelForAgent(agent, model)) return model;
-  // cursor 목록이 아직 없으면(설정 상태 도착 전) 저장된 모델을 지킨다.
-  // 다만 다른 프로바이더의 모델 id 는 유예 대상이 아니다 — Claude/sonnet 에서
-  // Cursor 로 갈아탈 때 'sonnet' 이 그대로 남아 `--model sonnet` 으로 실행되고
-  // 스레드에까지 저장되던 문제를 막기 위해 기본값('auto')으로 접는다.
-  if (model && dynamicCatalogPending(agent) && !isModelOfOtherAgent(agent, model)) return model;
+  // 동적 목록이 아직 없으면(설정 상태 도착 전) 저장된 모델을 지킨다. 다만 다른
+  // 프로바이더 모델은 유예하지 않는다. OpenCode 값은 provider/model 형태여야 한다.
+  const looksNative = agent !== 'opencode' || (model != null && isProviderQualifiedModelId(model));
+  if (model && looksNative && dynamicCatalogPending(agent) && !isModelOfOtherAgent(agent, model)) return model;
   return defaultModelForAgent(agent);
 }
 
 export function labelForModel(agent: AgentName, modelId: string): string {
   if (agent === 'pi') return findPiModel(modelId)?.name ?? modelId;
   if (agent === 'cursor') return cursorModelOptions().find((m) => m.id === modelId)?.label ?? modelId;
+  if (agent === 'opencode') return openCodeModelOptions().find((m) => m.id === modelId)?.label ?? modelId;
   return AGENT_MODELS[agent].find((m) => m.id === modelId)?.label ?? modelId;
 }
 
@@ -266,8 +334,9 @@ export function effortsForAgent(
         .filter((id) => allowed.has(id))
         .map((id) => ({ id, label: PI_EFFORT_LABELS[id] ?? id }));
     }
-    // cursor-agent 는 추론 강도 플래그가 없다 — UI 가 선택기를 숨긴다.
+    // cursor-agent와 opencode는 추론 강도 플래그를 받지 않는다.
     case 'cursor':
+    case 'opencode':
       return [];
     case 'grok':
       return GROK_EFFORTS;
@@ -312,7 +381,7 @@ export function resolveEffortForAgent(
 ): string {
   // pi 레지스트리가 비어 있는 동안은(모델이 아직 없으니 effort 도 검증 불가)
   // 저장된 값을 지킨다 — pi-status 도착 전에 설정 화면이 초기화되지 않게.
-  // cursor 는 어떤 모델이든 effort 자체가 없어 이 유예가 필요 없다.
+  // cursor와 opencode는 어떤 모델이든 effort 자체가 없어 이 유예가 필요 없다.
   if (agent === 'pi' && dynamicCatalogPending('pi')) return effort ?? '';
   if (effort && isEffortForAgent(agent, effort, model)) return effort;
   return defaultEffortForAgent(agent, model);

@@ -12,6 +12,13 @@ import type {
 
 export const CLOUD_UNSAVED_MESSAGE = '클라우드 사용 전 문서를 저장해주세요';
 
+export const CLOUD_SUPPORTED_AGENTS = ['claude', 'codex', 'pi', 'grok', 'cursor'] as const;
+
+export function isCloudSupportedAgent(agent: AgentName): boolean {
+  return CLOUD_SUPPORTED_AGENTS.some((supported) => supported === agent);
+}
+
+
 export const CLOUD_SUPPORTED_FORMATS = ['hwp', 'hwpx', 'hml'] as const;
 export type CloudSupportedFormat = (typeof CLOUD_SUPPORTED_FORMATS)[number];
 
@@ -128,6 +135,9 @@ export function buildCloudStartTransfer(input: {
   effort: string;
   workflow: AgentWorkflow;
 }): CloudTransferRequest {
+  if (!isCloudSupportedAgent(input.agent)) {
+    throw new Error(`Cloud does not support the ${input.agent} provider. Choose Claude, Codex, pi, Grok, or Cursor.`);
+  }
   const timeline = exportCloudTimeline(input.thread);
   if (!initialMessageMatchesTimeline(timeline, input.initialMessage.id)) {
     throw new Error('첫 메시지가 대화에 한 번만 기록되지 않았습니다.');

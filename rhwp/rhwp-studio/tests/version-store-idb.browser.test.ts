@@ -1,26 +1,15 @@
+import { fileURLToPath } from 'node:url';
+import { browserExecutable, browserLaunchArgs } from './browser-support.ts';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
 import test from 'node:test';
 
 import puppeteer from 'puppeteer-core';
 import { createServer } from 'vite';
 
-const BROWSER_CANDIDATES = [
-  process.env.PUPPETEER_EXECUTABLE_PATH,
-  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-  '/Applications/Chromium.app/Contents/MacOS/Chromium',
-  '/usr/bin/google-chrome',
-  '/usr/bin/chromium',
-].filter((candidate): candidate is string => Boolean(candidate));
-
 test('browser IndexedDB reuses its connection and reads repository indexes without store scans', { timeout: 30_000 }, async (context) => {
-  const executablePath = BROWSER_CANDIDATES.find(existsSync);
-  if (!executablePath) {
-    context.skip('Chrome or Chromium is unavailable');
-    return;
-  }
+  const executablePath = browserExecutable();
 
-  const root = new URL('../', import.meta.url).pathname;
+  const root = fileURLToPath(new URL('../', import.meta.url));
   const server = await createServer({
     root,
     configFile: false,
@@ -35,9 +24,7 @@ test('browser IndexedDB reuses its connection and reads repository indexes witho
     browser = await puppeteer.launch({
       executablePath,
       headless: true,
-      args: process.env.CI || process.env.DEPOT_JOB_URL
-        ? ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
-        : [],
+      args: browserLaunchArgs(),
     });
     const page = await browser.newPage();
     await page.goto(`http://127.0.0.1:${address.port}/tests/fixtures/version-store-idb.html`);

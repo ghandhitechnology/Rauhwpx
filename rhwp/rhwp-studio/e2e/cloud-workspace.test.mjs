@@ -645,11 +645,21 @@ try {
       { role: 'user', text: 'Keep the document unchanged while we discuss.', messageId: 'local-history-1' },
       { role: 'assistant', text: 'We can revise the heading after agreeing on the wording.', agent: 'codex' },
     ];
+    upsertThread({ ...thread, id: `${thread.id}-opencode`, title: 'Local OpenCode regression',
+      agent: 'opencode', model: 'opencode/big-pickle' });
     upsertThread(thread);
   });
   await page.$eval('#agent-sidebar .ag-threads-btn', (node) => node.click());
   await page.waitForFunction(() => [...document.querySelectorAll('.ag-threads-item')]
     .some((node) => node.textContent.includes('Local handoff regression')));
+  await page.evaluate(() => [...document.querySelectorAll('.ag-threads-item')]
+    .find((node) => node.textContent.includes('Local OpenCode regression')).click());
+  await page.waitForFunction(() => !document.querySelector('[data-workspace-mode="cloud"]').disabled);
+  await page.$eval('[data-workspace-mode="cloud"]', (node) => node.click());
+  await page.waitForFunction(() => document.querySelector('.ag-messages').textContent.includes('OpenCode는 아직 Cloud에서 사용할 수 없습니다'));
+  assert.equal(await page.$eval('[data-workspace-mode="local"]', (node) => node.getAttribute('aria-pressed')), 'true');
+  assert.equal(await page.evaluate(() => window.__cloudWorkspaceHarness.calls
+    .filter((call) => call.method === 'cloudTransfer').length), 0);
   await page.evaluate(() => [...document.querySelectorAll('.ag-threads-item')]
     .find((node) => node.textContent.includes('Local handoff regression')).click());
   await page.waitForFunction(() => document.querySelector('.ag-cloud-handoff')?.hidden === false);

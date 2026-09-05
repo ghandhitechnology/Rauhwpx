@@ -14,7 +14,7 @@ import type { DocumentDirtyState } from '../core/document-dirty-state.ts';
 
 export const AGENT_PROTOCOL_VERSION = 5;
 
-export type AgentName = 'claude' | 'codex' | 'pi' | 'grok' | 'cursor' | 'rau';
+export type AgentName = 'claude' | 'codex' | 'pi' | 'grok' | 'cursor' | 'opencode' | 'rau';
 
 /** 활성 턴에서 파생되는 사용자 편집 잠금 상태. */
 export interface AgentEditingLease {
@@ -319,7 +319,7 @@ export interface WritingStyleUpload {
 }
 
 /* ── 프로바이더 상태 · 사용량 (프로토콜 v2 추가분) ──────────
-   허브가 로컬 CLI(claude/codex)의 설치 여부를 프로브해 provider-status 로,
+   허브가 로컬 CLI의 설치 여부를 프로브해 provider-status 로,
    턴마다 기록한 토큰 사용량을 usage-report 로 보낸다. CLIProxyAPI 가 연결되어
    있으면 5시간·주간 percent 는 공식 요금제 값이다. 두 메시지는 요청
    응답으로도 오고(requestId), 연결 직후·턴 종료 후 밀어주기도 한다. */
@@ -367,8 +367,8 @@ export interface AgentSetupStatus {
   updateRequired: boolean;
   error: string | null;
   /**
-   * CLI 가 직접 알려 주는 모델 목록 — 지금은 cursor 만 보낸다
-   * (`cursor-agent --list-models`). 로그인 전이거나 조회에 실패하면 빈 배열.
+   * CLI 가 직접 알려 주는 모델 목록. Cursor와 OpenCode가 사용한다.
+   * 로그인 전이거나 조회에 실패하면 빈 배열.
    */
   models?: readonly string[];
 }
@@ -415,7 +415,7 @@ export interface AccountLoginStart {
 /** 요금제 — 한도 계산의 기준이 되므로 프로바이더별로 값이 다르다. */
 export type ClaudeUsagePlan = 'pro' | 'max5x' | 'max20x' | 'api';
 export type CodexUsagePlan = 'plus' | 'pro' | 'api';
-/** pi · grok · cursor 는 사용량 기반 API 한 가지뿐이다. */
+/** pi · grok · cursor · opencode 는 사용량 기반 API 한 가지뿐이다. */
 export type ApiOnlyUsagePlan = 'api';
 export type UsagePlan = ClaudeUsagePlan | CodexUsagePlan | ApiOnlyUsagePlan;
 
@@ -593,6 +593,7 @@ const USAGE_PLAN_GUARDS: Record<AgentName, (value: unknown) => boolean> = {
   pi: isApiOnlyUsagePlan,
   grok: isApiOnlyUsagePlan,
   cursor: isApiOnlyUsagePlan,
+  opencode: isApiOnlyUsagePlan,
   rau: isApiOnlyUsagePlan,
 };
 

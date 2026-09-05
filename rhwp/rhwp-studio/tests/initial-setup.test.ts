@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { AGENT_MODELS } from '../src/agent/models.ts';
+import { AGENT_MODELS, setOpenCodeModels } from '../src/agent/models.ts';
 import type { AccountSessionStatus, AgentName, AgentSetupStatus } from '../src/agent/types.ts';
 import { PROVIDER_ORDER } from '../src/ui/agent-sidebar/providers.ts';
 import {
@@ -93,35 +93,45 @@ test('?initial-setup=1 이면 끝난 뒤에도 다시 연다', () => {
   assert.equal(shouldSuppressInitialSetup(), typeof navigator !== 'undefined' && navigator.webdriver === true);
 });
 
-test('카드 모델 목록은 정적 카탈로그를 짧게 보여 준다', () => {
+test('카드 모델 목록은 정적·동적 카탈로그를 짧게 보여 준다', () => {
   assert.deepEqual(previewModelLabels('claude'), AGENT_MODELS.claude.map((model) => model.label));
-  assert.deepEqual(previewModelLabels('codex'), ['Sol', 'Terra', 'Luna']);
+  assert.deepEqual(previewModelLabels('codex'), ['Astra', 'Sol', 'Terra', 'Luna']);
   assert.deepEqual(previewModelLabels('grok'), ['Grok 4.6', 'Grok 4.5']);
   assert.deepEqual(previewModelLabels('pi'), ['OpenRouter에서 고름', '최대 3개']);
   assert.deepEqual(previewModelLabels('cursor'), ['Auto', '구독 · API 모델']);
+  assert.deepEqual(previewModelLabels('opencode'), ['Big Pickle', '연결 후 모델 자동 검색']);
+  setOpenCodeModels(['anthropic/claude-sonnet-4-5']);
+  try {
+    assert.deepEqual(previewModelLabels('opencode'), ['anthropic/claude-sonnet-4-5']);
+  } finally {
+    setOpenCodeModels([]);
+  }
   assert.deepEqual(previewModelLabels('rau'), ['GLM 5.3 Flash', 'DeepSeek V4 Flash', 'Qwen 3.8 Flash', 'Solar Pro 4']);
   assert.equal(SUGGESTED_AGENT, 'rau');
   assert.equal(PROVIDER_ORDER[0], 'rau');
-  assert.deepEqual([...BYOK_AGENTS], ['claude', 'codex', 'pi', 'grok', 'cursor']);
+  assert.deepEqual([...BYOK_AGENTS], ['claude', 'codex', 'pi', 'grok', 'cursor', 'opencode']);
+  assert.equal(PROVIDER_VENDOR.opencode, 'Anomaly');
   for (const agent of PROVIDER_ORDER) {
     assert.ok(PROVIDER_VENDOR[agent]);
   }
 });
 
-test('연결됨은 available 만으로 치지 않는다', () => {
+test('연결됨은 실행 가능한 CLI와 인증을 둘 다 확인한다', () => {
   const statuses = {
     claude: status({ agent: 'claude', available: true }),
     codex: status({ agent: 'codex', connected: true }),
     pi: status({ agent: 'pi', setupComplete: true }),
     grok: status({ agent: 'grok', authenticated: true }),
-    cursor: status({ agent: 'cursor' }),
+    cursor: status({ agent: 'cursor', available: true, authenticated: true }),
+    opencode: status({ agent: 'opencode', authenticated: true }),
     rau: status({ agent: 'rau' }),
   };
   assert.equal(isProviderConfigured('claude', statuses), false);
   assert.equal(isProviderConfigured('codex', statuses), true);
   assert.equal(isProviderConfigured('pi', statuses), true);
-  assert.equal(isProviderConfigured('grok', statuses), true);
-  assert.equal(isProviderConfigured('cursor', statuses), false);
+  assert.equal(isProviderConfigured('grok', statuses), false, '인증만 있고 CLI가 없으면 준비된 상태가 아니다');
+  assert.equal(isProviderConfigured('cursor', statuses), true);
+  assert.equal(isProviderConfigured('opencode', statuses), false, 'OpenCode 자격 증명만 있어도 연결 완료로 치지 않는다');
 });
 
 test('사이드바가 첫 실행 마법사를 설정 모달·보정 창에 붙인다', () => {
@@ -176,8 +186,11 @@ test('사이드바가 첫 실행 마법사를 설정 모달·보정 창에 붙�
   assert.match(setup, /shouldForceRauFailurePreview\(\)/);
   assert.match(setup, /notifySetupAbandoned/);
 
-  assert.match(css, /grid-template-columns: repeat\(3, minmax\(0, 1fr\)\)/);
-  assert.match(css, /\.rhwp-setup-card:nth-child\(6\)/);
+  assert.match(css, /grid-template-columns: repeat\(4, minmax\(0, 1fr\)\)/);
+  assert.match(css, /\.rhwp-setup-card:nth-child\(7\)/);
+  assert.match(css, /@media \(max-width: 1100px\)[\s\S]*repeat\(3, minmax\(0, 1fr\)\)/);
+  assert.match(css, /@media \(max-width: 860px\)[\s\S]*repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(css, /@media \(max-width: 720px\)[\s\S]*grid-template-columns: 1fr/);
   assert.match(css, /\.rhwp-setup-card\[data-agent='rau'\] \{\s*border-color: #ffffff/);
   assert.match(css, /\.rhwp-setup-card\[data-agent='rau'\]\[data-suggested='true'\]::before \{\s*content: none/);
   assert.match(css, /rhwp-setup-cal\[hidden\]/);
@@ -193,6 +206,7 @@ test('사이드바가 첫 실행 마법사를 설정 모달·보정 창에 붙�
   assert.match(css, /url\('\/icons\/provider-pi\.svg'\)/);
   assert.match(css, /url\('\/icons\/provider-grok\.svg'\)/);
   assert.match(css, /url\('\/icons\/provider-cursor\.svg'\)/);
+  assert.match(css, /url\('\/icons\/provider-opencode\.svg'\)/);
   assert.doesNotMatch(css, /transition: all/);
   assert.doesNotMatch(css, /\d+ms ease(?:;|,)/);
   assert.match(css, /\.rhwp-setup-recovery\[hidden\]/);
@@ -209,8 +223,8 @@ test('Rau 로그인·민트 실패는 같은 화면의 BYOK 경로로 접는다'
   assert.equal(isRauFirstRunFailure({ agent: 'rau', code: 'DEVICE_PROOF_INVALID' }), false);
   assert.equal(isRauFirstRunFailure({ agent: 'codex', code: 'AGENT_SETUP_FAILED' }), false);
   assert.equal(isRauFirstRunFailure({ agent: null, code: 'RAU_CREDITS_TIMEOUT' }), false);
-  assert.deepEqual([...BYOK_AGENTS], ['claude', 'codex', 'pi', 'grok', 'cursor']);
-  assert.match(RAU_FAILURE_FORWARD_COPY.body, /Claude, Codex, Pi, Grok, Cursor/);
+  assert.deepEqual([...BYOK_AGENTS], ['claude', 'codex', 'pi', 'grok', 'cursor', 'opencode']);
+  assert.match(RAU_FAILURE_FORWARD_COPY.body, /Claude, Codex, Pi, Grok, Cursor, OpenCode/);
   assert.match(RAU_FAILURE_FORWARD_COPY.body, /모델 없이 편집기로 바로 가세요/);
   assert.match(RAU_FAILURE_FORWARD_COPY.body, /문서는 그대로 열고 저장할 수 있습니다/);
   assert.equal(RAU_FAILURE_FORWARD_COPY.skip, '편집기로 계속');

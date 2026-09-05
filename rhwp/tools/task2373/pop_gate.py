@@ -9,7 +9,7 @@ import csv, subprocess, sys, re
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
-ROOT = Path(r"C:\Users\planet\rhwp")
+ROOT = Path(__file__).resolve().parents[2]
 R16 = ROOT / "output/poc/survey10k_r16_20260719"
 EXE = sys.argv[1] if len(sys.argv) > 1 else str(ROOT / "target/release/rhwp.exe")
 OUT = Path(sys.argv[2]) if len(sys.argv) > 2 else R16.parent / "task2373" / "pop_gate.tsv"

@@ -284,7 +284,7 @@ function isStoredChatThread(v: unknown): v is StoredChatThread {
     && typeof t.createdAt === 'number'
     && typeof t.updatedAt === 'number'
     && (t.agent === 'claude' || t.agent === 'codex' || t.agent === 'pi'
-      || t.agent === 'grok' || t.agent === 'cursor' || t.agent === 'rau')
+      || t.agent === 'grok' || t.agent === 'cursor' || t.agent === 'opencode' || t.agent === 'rau')
     && typeof t.model === 'string'
     && typeof t.effort === 'string'
     && Array.isArray(t.messages)
@@ -292,10 +292,7 @@ function isStoredChatThread(v: unknown): v is StoredChatThread {
 }
 
 function parseAgentName(value: unknown): AgentName | undefined {
-  return value === 'claude' || value === 'codex' || value === 'pi'
-    || value === 'grok' || value === 'cursor' || value === 'rau'
-    ? value
-    : undefined;
+  return isAgentName(value) ? value : undefined;
 }
 
 function parseTimelineStatus(value: unknown): 'running' | 'completed' | 'failed' | 'stopped' {
@@ -351,7 +348,7 @@ function parseThreadTask(value: unknown): ThreadTaskRecord | null {
 
 function isAgentName(value: unknown): value is AgentName {
   return value === 'claude' || value === 'codex' || value === 'pi'
-    || value === 'grok' || value === 'cursor' || value === 'rau';
+    || value === 'grok' || value === 'cursor' || value === 'opencode' || value === 'rau';
 }
 
 function nonEmptyString(value: unknown): string | null {

@@ -56,6 +56,7 @@ test('probes report versions from the first stdout line', async () => {
     codex: 'codex-cli 0.9.3',
     grok: 'grok 1.0.5 (5115b46bc909)',
     'cursor-agent': '2026.08.11-e8db854',
+    opencode: '1.0.185',
   };
   const { spawns, spawnProcess } = fakeSpawner((command, proc) => {
     proc.succeed(versions[command]);
@@ -68,6 +69,7 @@ test('probes report versions from the first stdout line', async () => {
     ['codex', '--version'],
     ['grok', '--version'],
     ['cursor-agent', '--version'],
+    ['opencode', '--version'],
   ]);
   assert.equal(result.claude.available, true);
   assert.equal(result.claude.version, '2.1.0 (Claude Code)');
@@ -79,6 +81,8 @@ test('probes report versions from the first stdout line', async () => {
   assert.equal(result.grok.version, 'grok 1.0.5 (5115b46bc909)');
   assert.equal(result.cursor.available, true);
   assert.equal(result.cursor.version, '2026.08.11-e8db854');
+  assert.equal(result.opencode.available, true);
+  assert.equal(result.opencode.version, '1.0.185');
 });
 
 test('the cursor probe runs with the injected probe environment', async () => {
@@ -161,20 +165,20 @@ test('results are cached for the ttl and refresh forces a re-probe', async () =>
 
   assert.equal(health.cached(), null);
   const first = await health.check();
-  assert.equal(spawns.length, 4);
+  assert.equal(spawns.length, 5);
   assert.equal(health.cached(), first);
 
   clock += 59_000;
   assert.equal(await health.check(), first);
-  assert.equal(spawns.length, 4);
+  assert.equal(spawns.length, 5);
 
   const refreshed = await health.check(true);
   assert.notEqual(refreshed, first);
-  assert.equal(spawns.length, 8);
+  assert.equal(spawns.length, 10);
 
   clock += 61_000;
   await health.check();
-  assert.equal(spawns.length, 12);
+  assert.equal(spawns.length, 15);
 });
 
 test('concurrent checks share a single in-flight probe', async () => {
@@ -182,7 +186,7 @@ test('concurrent checks share a single in-flight probe', async () => {
   const health = createProviderHealth({ spawnProcess });
 
   const [a, b, c] = await Promise.all([health.check(), health.check(), health.check()]);
-  assert.equal(spawns.length, 4);
+  assert.equal(spawns.length, 5);
   assert.equal(a, b);
   assert.equal(b, c);
 });
@@ -191,7 +195,7 @@ test('pi reports 설치되지 않았어요 until a bin path exists', async () =>
   const { spawns, spawnProcess } = fakeSpawner((command, proc) => proc.succeed(`${command} 1.0`));
   const result = await createProviderHealth({ spawnProcess }).check();
 
-  assert.equal(spawns.length, 4, 'pi 미설치면 프로브를 걸지 않는다');
+  assert.equal(spawns.length, 5, 'pi 미설치면 프로브를 걸지 않는다');
   assert.equal(result.pi.available, false);
   assert.equal(result.pi.version, null);
   assert.equal(result.pi.error, '설치되지 않았어요');
@@ -206,7 +210,7 @@ test('an installed pi is probed through its own bin path', async () => {
   });
   const result = await createProviderHealth({ spawnProcess, piBin: () => piBin }).check();
 
-  assert.deepEqual(spawns.map((s) => s.command), ['claude', 'codex', 'grok', 'cursor-agent', piBin]);
+  assert.deepEqual(spawns.map((s) => s.command), ['claude', 'codex', 'grok', 'cursor-agent', 'opencode', piBin]);
   assert.equal(result.pi.available, true);
   assert.equal(result.pi.version, 'pi 0.84.1');
   assert.equal(result.pi.error, null);

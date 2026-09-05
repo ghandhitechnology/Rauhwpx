@@ -7,25 +7,24 @@
 
 주의(resave-anchor-oracle 기법 함정): 쪽 경계에서 vpos 리셋 — 음수 스텝은 무효(SKIP).
 """
+from pathlib import Path
+import argparse
 import os, re, sys, time, zipfile
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-OUT_DIR = r"C:\Users\planet\rhwp\output\poc\task2373\resaved"
-DOCS = [
-    r"C:\Users\planet\hwpdocs\samples\노원소방서 현장대응단\36399374_결재문서본문_노원소방서 사고조사팀 간소화 운영 결과.hwpx",
-    r"C:\Users\planet\hwpdocs\samples\미래공간기획관 도시활력담당관\36392557_결재문서본문_창동역·가산디지털단지역 펀스테이션기본 및 실시설계 용역 추진계획.hwpx",
-]
-SAMPLE_LIST = r"C:\Users\planet\rhwp\output\poc\survey10k_r16_20260719\sample10000.txt"
+OUT_DIR = str(Path(__file__).resolve().parents[2] / "output/poc/task2373/resaved")
 CAUSAL_PREFIXES = [
     "156534231", "156586235", "156602253", "156603956", "156620256",
     "156639641", "156676971", "156731730", "156768311", "82948_",
 ]
 
 
-def collect_docs():
-    docs = list(DOCS)
-    with open(SAMPLE_LIST, encoding="utf-8") as fh:
+def collect_docs(docs, sample_list):
+    docs = list(docs)
+    if sample_list is None:
+        return docs
+    with open(sample_list, encoding="utf-8") as fh:
         for l in fh:
             l = l.strip()
             name = os.path.basename(l)
@@ -109,7 +108,16 @@ def steps(secs, sec_idx, pi):
 
 
 def main():
-    docs = collect_docs()
+    global OUT_DIR
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("docs", nargs="*", help="Original HWP/HWPX documents")
+    ap.add_argument("--sample-list", type=Path, help="Corpus list; selects the historical causal prefixes")
+    ap.add_argument("--out-dir", type=Path, default=Path(OUT_DIR))
+    args = ap.parse_args()
+    if not args.docs and not args.sample_list:
+        ap.error("provide documents or --sample-list")
+    OUT_DIR = args.out_dir
+    docs = collect_docs(args.docs, args.sample_list)
     print(f"resave {len(docs)}건")
     saved = resave_all(docs)
     print("\n=== ladder 대조 (HWPUNIT; step = 다음 문단 vpos − 현 문단 vpos) ===")

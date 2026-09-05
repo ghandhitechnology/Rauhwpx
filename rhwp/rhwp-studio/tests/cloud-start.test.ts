@@ -9,6 +9,7 @@ import {
   cloudStartPhaseFromSession,
   cloudStartPhaseLabel,
   goalFromInitialMessage,
+  isCloudSupportedAgent,
   validateCloudStartDocument,
 } from '../src/cloud/cloud-start.ts';
 import { exportCloudTimeline, initialMessageMatchesTimeline } from '../src/cloud/timeline.ts';
@@ -172,4 +173,30 @@ test('startup phases map onto one placeholder label', () => {
     position: 1,
     message: 'queued',
   }), 'queued');
+});
+
+
+test('Cloud provider support rejects local-only providers before transfer and preserves Astra selection', () => {
+  for (const agent of ['claude', 'codex', 'pi', 'grok', 'cursor'] as const) {
+    assert.equal(isCloudSupportedAgent(agent), true);
+  }
+  const input = {
+    startId: 'start-astra',
+    thread: thread(),
+    initialMessage: { id: 'msg-1', text: '표 제목을 고쳐줘', attachmentReferenceIds: [] },
+    document: { bytes: new Uint8Array([1]), fileName: 'memo.hwpx', sha256: 'a'.repeat(64) },
+    references: [],
+    agent: 'codex' as const,
+    model: 'gpt-6-astra',
+    effort: 'max',
+    workflow: 'question' as const,
+  };
+  const transfer = buildCloudStartTransfer(input);
+  assert.equal(transfer.model, 'gpt-6-astra');
+  assert.equal(transfer.effort, 'max');
+  assert.equal(transfer.workflow, 'question');
+  for (const agent of ['opencode', 'rau'] as const) {
+    assert.equal(isCloudSupportedAgent(agent), false);
+    assert.throws(() => buildCloudStartTransfer({ ...input, agent }), /Cloud does not support/);
+  }
 });
