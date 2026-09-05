@@ -232,18 +232,21 @@ test('저장된 grok 기본값은 다시 읽어도 살아남는다', () => {
   assert.deepEqual(loadAgentPrefs(storage), saved);
 });
 
-test('이미 고른 Codex 기본값은 첫 실행이 끝나도 그대로 둔다', () => {
-  const storage = makeStorage({
-    defaultAgent: 'codex',
-    defaultModel: 'gpt-5.6-terra',
-    defaultEffort: 'high',
+for (const model of ['gpt-5.6-terra', 'gpt-6-astra']) {
+  test(`saved Codex ${model} survives first-run setup and reload`, () => {
+    const storage = makeStorage({
+      defaultAgent: 'codex',
+      defaultModel: model,
+      defaultEffort: 'high',
+    });
+    assert.equal(hasExplicitDefaultAgent(storage), true);
+    const kept = applyFirstRunDefaultAgent(['rau'], storage);
+    assert.equal(kept.defaultAgent, 'codex');
+    assert.equal(kept.defaultModel, model);
+    assert.equal(loadAgentPrefs(storage).defaultAgent, 'codex');
+    assert.equal(loadAgentPrefs(storage).defaultModel, model);
   });
-  assert.equal(hasExplicitDefaultAgent(storage), true);
-  const kept = applyFirstRunDefaultAgent(['rau'], storage);
-  assert.equal(kept.defaultAgent, 'codex');
-  assert.equal(kept.defaultModel, 'gpt-5.6-terra');
-  assert.equal(loadAgentPrefs(storage).defaultAgent, 'codex');
-});
+}
 
 test('첫 실행을 마친 빈 프로필은 Rau 가 기본값이 된다', () => {
   const storage = makeStorage();

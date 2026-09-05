@@ -1,6 +1,7 @@
 import { StyleCalibrationError } from './style-calibrator.mjs';
 
 const CODEX_MODELS = Object.freeze([
+  { id: 'gpt-6-astra', name: 'GPT-6 Astra', efforts: ['low', 'medium', 'high', 'xhigh', 'max'], defaultEffort: 'medium' },
   { id: 'gpt-5.6-luna', name: 'GPT-5.6 Luna', efforts: ['low', 'medium', 'high'], defaultEffort: 'medium' },
   { id: 'gpt-5.6-terra', name: 'GPT-5.6 Terra', efforts: ['low', 'medium', 'high'], defaultEffort: 'medium' },
   { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', efforts: ['low', 'medium', 'high'], defaultEffort: 'medium' },
