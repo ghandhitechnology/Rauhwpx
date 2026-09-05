@@ -242,6 +242,18 @@ export function parseDownloadConfirmation(value) {
   };
 }
 
+/** A stopped worker can take new settings without starting another turn. */
+export function providerConfigurationEditable(row) {
+  if (row.protocol_version !== ROOM_PROTOCOL_VERSION || row.room_status !== 'active'
+    || row.current_turn_id || row.current_wait_id || row.pause_requested_at
+    || row.takeover_requested_at || row.end_requested_at || row.sleep_requested_at
+    || row.finishing_at || row.configuration_restart_requested_at) return false;
+  if (row.status === 'running') return row.execution_phase === 'idle';
+  if (row.worker_token_hash || row.sandbox_id) return false;
+  return row.status === 'queued'
+    || (row.status === 'suspended' && ['idle', 'waiting', 'sleeping'].includes(row.execution_phase));
+}
+
 export function publicSession(row) {
   return {
     id: row.id,
@@ -262,6 +274,7 @@ export function publicSession(row) {
       ? { threadId: row.client_thread_id, documentId: row.client_document_id }
       : null,
     configurationSupported: true,
+    configurationEditable: providerConfigurationEditable(row),
     configurationPending: Boolean(row.configuration_restart_requested_at),
     executionConfig: row.execution_config_json ? JSON.parse(row.execution_config_json) : null,
     originDocument: {
