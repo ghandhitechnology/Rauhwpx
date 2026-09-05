@@ -113,6 +113,8 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
   let setupStatuses: AgentSetupStatusMap | null = null;
   let accountStatus: AccountSessionStatus | null = null;
   let rauFailureActive = false;
+  // 설정 모달을 닫을 때 발생하는 취소 이벤트의 재진입만 막는다.
+  let closingSetupForRecovery = false;
   let lastFocus: HTMLElement | null = null;
 
   const overlay = el('div', 'rhwp-setup-overlay');
@@ -328,9 +330,15 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
   function enterRauFailureRecovery(): void {
     if (disposed || !overlay.isConnected) return;
     if (stage !== 'providers') showStage('providers');
-    const already = rauFailureActive;
     rauFailureActive = true;
-    if (!already) closeAgentSetup?.();
+    if (!closingSetupForRecovery) {
+      closingSetupForRecovery = true;
+      try {
+        closeAgentSetup?.();
+      } finally {
+        closingSetupForRecovery = false;
+      }
+    }
     renderCards();
     window.requestAnimationFrame(() => skip.focus());
   }
