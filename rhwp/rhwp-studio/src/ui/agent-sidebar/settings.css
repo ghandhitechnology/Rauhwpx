@@ -1897,8 +1897,10 @@
 
   .ag-settings-nav-button {
     flex: 1 1 0;
+    min-width: 0;
     min-height: 34px;
-    padding: 0 8px;
+    padding: 0 4px;
+    font-size: 11px;
     text-align: center;
   }
 

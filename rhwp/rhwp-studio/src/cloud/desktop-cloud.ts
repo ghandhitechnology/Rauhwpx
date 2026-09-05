@@ -6,6 +6,7 @@ import {
   parseCloudDisplayEvent,
 } from './display.ts';
 import { parseCloudTimeline } from './timeline.ts';
+import { recordCloudUsage } from './usage-history.ts';
 import type {
   CloudCommandRequest,
   CloudConversationWait,
@@ -754,6 +755,7 @@ export function createCloudController(
       pendingDisplayEvents.clear();
     }
     snapshot = next;
+    if (!disposed) recordCloudUsage(snapshot);
     if (!disposed) for (const listener of listeners) listener(snapshot);
     return snapshot;
   };

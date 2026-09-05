@@ -183,9 +183,9 @@ async function openCloud(page) {
 async function manageCloud(page) {
   await clickStable(page, '#agent-sidebar .ag-settings-btn');
   await page.waitForFunction(() => document.querySelector('#agent-sidebar')?.classList.contains('ag-settings-open'));
-  await clickStable(page, '#ag-settings-tab-connections');
+  await clickStable(page, '#ag-settings-tab-cloud');
   await page.waitForFunction(
-    () => document.querySelector('#ag-settings-tab-connections')?.getAttribute('aria-selected') === 'true',
+    () => document.querySelector('#ag-settings-tab-cloud')?.getAttribute('aria-selected') === 'true',
     { timeout: 15_000 },
   );
   await clickStable(page, '.ag-cloud-settings-action');
