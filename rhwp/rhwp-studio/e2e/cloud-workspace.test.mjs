@@ -472,7 +472,7 @@ try {
   await page.click('.cloud-workspace-canvas');
   await page.keyboard.type('A');
   await page.waitForFunction(() => window.__cloudWorkspaceHarness.calls
-    .filter((call) => call.method === 'cloudDisplayInput').length >= 4);
+    .filter((call) => call.method === 'cloudDisplayInput' && call.payload.event.action !== 'move').length >= 3);
   const remoteInput = await page.evaluate(() => window.__cloudWorkspaceHarness.calls
     .filter((call) => call.method === 'cloudDisplayInput')
     .map((call) => call.payload.event));

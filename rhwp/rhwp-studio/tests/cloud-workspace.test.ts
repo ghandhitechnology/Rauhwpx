@@ -798,3 +798,37 @@ test('cloud workspace preserves unconfirmed composed text for deliberate recover
   assert.equal(recovered.readOnly, true);
   workspace.dispose();
 });
+
+test('cloud workspace queues the final drag movement before release during a slow request', async () => {
+  const inputs: any[] = [];
+  const slowRequest = deferred<void>();
+  const workspace = createCloudWorkspace({
+    display: { async openDisplay(sessionId: string) {
+      return { ...connection(sessionId, []), sendInput(event: unknown) {
+        inputs.push(event);
+        return slowRequest.promise;
+      } };
+    } } as Pick<CloudController, 'openDisplay'>,
+    doc: new TestDocument() as unknown as Document,
+  });
+  workspace.setContext({ visible: true, session: running() });
+  await flushMicrotasks();
+  const canvas = find(workspace.root as unknown as TestElement, (node) => node.className === 'cloud-workspace-canvas');
+  const pointer = (clientX: number) => ({ clientX, clientY: 20, button: 0, pointerId: 1, preventDefault() {} });
+  canvas.dispatch('pointermove', pointer(20));
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  canvas.dispatch('pointerdown', pointer(20));
+  canvas.dispatch('pointermove', pointer(60));
+  canvas.dispatch('pointermove', pointer(100));
+  canvas.dispatch('pointerup', pointer(100));
+  assert.deepEqual(inputs.map(({ action, x }) => [action, x]), [
+    ['move', 20], ['down', 20], ['move', 100], ['up', 100],
+  ], 'a release must not overtake the final drag position even before the request resolves');
+  slowRequest.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(inputs.length, 4, 'no delayed movement may arrive after release');
+  canvas.dispatch('pointermove', pointer(200));
+  workspace.dispose();
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(inputs.length, 4, 'disposing cancels pending hover input');
+});
