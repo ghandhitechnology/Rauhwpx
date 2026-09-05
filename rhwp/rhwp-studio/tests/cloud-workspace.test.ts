@@ -485,7 +485,7 @@ test('cloud workspace preserves local zoom and scroll, closes terminal sessions,
   assert.deepEqual(unrelatedState, { chat: 'still-live', document: 'unchanged' });
 });
 
-test('cloud workspace demands display only while running and reopens after lifecycle and connection failures', async () => {
+test('cloud workspace retries failed opens only after explicit recovery or a lifecycle change', async () => {
   const doc = new TestDocument();
   const opened: string[] = [];
   const closed: string[] = [];
@@ -516,6 +516,10 @@ test('cloud workspace demands display only while running and reopens after lifec
   assert.equal(workspace.getState().kind, 'unavailable');
   workspace.setContext({ visible: true, session: running() });
   await Promise.resolve();
+  assert.deepEqual(opened, [baseSession.sessionId], 'ordinary snapshots must not restart a failed display');
+  workspace.setContext({ visible: true, session: running(), link: { kind: 'reconnecting', error: null, attempt: 1, canRecreate: true } });
+  workspace.setContext({ visible: true, session: running(), link: { kind: 'ready', error: null, attempt: 0, canRecreate: true } });
+  await Promise.resolve();
   assert.deepEqual(opened, [baseSession.sessionId, baseSession.sessionId]);
 
   workspace.setContext({ visible: true, session: suspended() });
@@ -532,10 +536,57 @@ test('cloud workspace demands display only while running and reopens after lifec
     code: 'DISPLAY_FAILED',
     message: 'terminal display failure',
   });
-  assert.equal(workspace.getState().kind, 'unavailable');
+  assert.equal(workspace.getState().kind, 'stalled');
   workspace.setContext({ visible: true, session: running() });
   await Promise.resolve();
+  assert.equal(opened.length, 3);
+  workspace.setContext({ visible: true, session: running(), profileEpoch: 1 });
+  await Promise.resolve();
   assert.equal(opened.length, 4);
+});
+
+test('disconnect keeps the last frame and disables input until the same session has recovered', async () => {
+  const callbacks: Array<(event: CloudDisplayEvent) => void> = [];
+  const inputs: unknown[] = [];
+  const revoked: string[] = [];
+  const workspace = createCloudWorkspace({
+    display: { async openDisplay(id, listener) {
+      callbacks.push(listener);
+      return { ...connection(id, []), sendInput: async (event) => { inputs.push(event); } };
+    } },
+    doc: new TestDocument() as unknown as Document,
+    objectUrls: { create: () => `blob:frame-${callbacks.length}`, revoke: (url) => revoked.push(url) },
+    decodeFrame: async () => ({ width: 1280, height: 800 }),
+  });
+  const root = workspace.root as unknown as TestElement;
+  const image = find(root, (node) => node.className === 'cloud-workspace-image');
+  workspace.setContext({ visible: true, session: running() });
+  await flushMicrotasks();
+  callbacks[0]!(frame());
+  await flushMicrotasks();
+  assert.equal(image.src, 'blob:frame-1');
+  for (let index = 0; index < 20; index++) workspace.setContext({ visible: true, session: running(),
+    link: { kind: 'failed', error: `transport error ${index}`, attempt: index, canRecreate: true } });
+  assert.equal(image.src, 'blob:frame-1');
+  assert.equal(callbacks.length, 1);
+  assert.deepEqual(revoked, []);
+  const sink = find(root, (node) => node.className === 'cloud-workspace-input');
+  sink.dispatch('keydown', { key: 'Enter', preventDefault() {} });
+  await flushMicrotasks();
+  assert.deepEqual(inputs, []);
+  workspace.setContext({ visible: true, session: running(), link: { kind: 'ready', error: null, attempt: 0, canRecreate: true } });
+  await flushMicrotasks();
+  assert.equal(callbacks.length, 2);
+  assert.equal(image.src, 'blob:frame-1');
+  callbacks[0]!(frame(baseSession.sessionId, 99));
+  assert.equal(image.src, 'blob:frame-1', 'late frames from the old connection are ignored');
+  callbacks[1]!(frame(baseSession.sessionId, 2));
+  await flushMicrotasks();
+  assert.equal(workspace.getState().kind, 'live');
+  sink.dispatch('keydown', { key: 'Enter', preventDefault() {} });
+  await flushMicrotasks();
+  assert.equal(inputs.length, 1);
+  workspace.dispose();
 });
 
 test('cloud workspace decodes one frame at a time and A/B/C commits only C', async () => {

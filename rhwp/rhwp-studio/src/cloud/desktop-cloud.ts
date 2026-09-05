@@ -720,13 +720,14 @@ function unwrapSnapshot(value: unknown): CloudSnapshot | null {
 }
 
 export function createCloudController(
-  api: CloudAwareDesktopApi | undefined = (globalThis as { rhwpDesktop?: CloudAwareDesktopApi }).rhwpDesktop,
+  api: CloudDesktopApi | undefined = (globalThis as { rhwpDesktop?: CloudAwareDesktopApi }).rhwpDesktop,
   browser: { readReference?: (reference: Pick<CloudTransferReference, 'id' | 'scope' | 'scopeId'>) => Promise<Uint8Array> } = {},
 ): CloudController {
   const resolvedApi: CloudDesktopApi | undefined = api
     ?? (browserCloudSupported() ? createBrowserCloudApi(browser) : undefined);
   let snapshot = unavailableSnapshot();
   let disposed = false;
+  let activeScope: CloudSessionScope = { threadId: '', documentId: null };
   const listeners = new Set<(state: CloudSnapshot) => void>();
   const eventListeners = new Set<(event: unknown) => void>();
   type ActiveDisplay = {
@@ -739,13 +740,14 @@ export function createCloudController(
   let activeDisplay: ActiveDisplay | null = null;
   let openingDisplays = 0;
   const pendingDisplayEvents = new Map<string, unknown[]>();
+  const recoveryCalls = new Map<string, Promise<CloudSnapshot>>();
 
   const publish = (next: CloudSnapshot): CloudSnapshot => {
     if (next.profileEpoch < snapshot.profileEpoch) return snapshot;
     if (next.profileEpoch === snapshot.profileEpoch && next.revision < snapshot.revision) return snapshot;
     if (next.profileEpoch > snapshot.profileEpoch) {
       displayGeneration += 1;
-      if (activeDisplay) void closeDisplay(activeDisplay);
+      if (activeDisplay) void closeDisplay(activeDisplay).catch(() => {});
       pendingDisplayEvents.clear();
     }
     snapshot = next;
@@ -766,6 +768,25 @@ export function createCloudController(
     const fn = resolvedApi?.[method];
     if (typeof fn !== 'function') throw new Error('이 앱 빌드는 클라우드 에이전트를 지원하지 않습니다.');
     return accept(await (fn as (arg?: unknown) => Promise<unknown>)(payload));
+  };
+
+  const recover = (kind: 'reconnecting' | 'recreating', run: () => Promise<CloudSnapshot>): Promise<CloudSnapshot> => {
+    const pending = recoveryCalls.get(kind);
+    if (pending) return pending;
+    const epoch = snapshot.profileEpoch;
+    publish({ ...snapshot, link: {
+      kind, error: null, attempt: (snapshot.link?.attempt ?? 0) + 1,
+      canRecreate: snapshot.link?.canRecreate ?? (snapshot.profile.kind === 'configured' && snapshot.profile.mode === 'app-hosted'),
+    } });
+    const operation = run().catch((error) => {
+      if (snapshot.profileEpoch === epoch && snapshot.link?.kind === kind) {
+        publish({ ...snapshot, link: { ...snapshot.link, kind: 'failed',
+          error: error instanceof Error ? error.message : String(error) } });
+      }
+      throw error;
+    }).finally(() => { recoveryCalls.delete(kind); });
+    recoveryCalls.set(kind, operation);
+    return operation;
   };
 
   const unsubscribeHost = resolvedApi?.onCloudEvent?.((event) => {
@@ -835,7 +856,7 @@ export function createCloudController(
 
   return {
     getSnapshot: () => snapshot,
-    refresh: (scope) => call('cloudGetState', scope),
+    refresh: (scope) => { activeScope = scope; return call('cloudGetState', scope); },
     saveProfile: (profile) => call('cloudSaveProfile', { profile }),
     testProfile: (profile) => call('cloudTestProfile', profile ? { profile } : {}),
     provision: (installChannel = 'stable', profile) => call('cloudProvision', {
@@ -848,18 +869,18 @@ export function createCloudController(
     sandboxStatus: () => call('cloudSandboxStatus'),
     teardownSandbox: (options = {}) => call('cloudTeardownSandbox', { force: options.force === true }),
     forceQuitAccount: () => call('cloudForceQuitAccount'),
-    async reconnectLink() {
+    reconnectLink: () => recover('reconnecting', async () => {
       if (typeof resolvedApi?.cloudReconnectLink === 'function') return call('cloudReconnectLink');
-      return call('cloudGetState');
-    },
-    async recreateLink() {
+      return call('cloudGetState', activeScope);
+    }),
+    recreateLink: () => recover('recreating', async () => {
       if (typeof resolvedApi?.cloudRecreateLink === 'function') return call('cloudRecreateLink');
-      await call('cloudForceQuitAccount').catch(() => snapshot);
       if (snapshot.profile.kind === 'configured' && snapshot.profile.mode === 'app-hosted') {
+        await call('cloudForceQuitAccount');
         return call('cloudSpawnSandbox');
       }
-      return call('cloudGetState');
-    },
+      return call('cloudGetState', activeScope);
+    }),
     takeoverSandbox: () => call('cloudTakeoverSandbox'),
     transfer: (request) => call('cloudTransfer', request),
     setTransferIntent: (request) => call('cloudSetTransferIntent', request),
@@ -1010,7 +1031,7 @@ export function createCloudController(
       if (disposed) return;
       disposed = true;
       displayGeneration += 1;
-      if (activeDisplay) void closeDisplay(activeDisplay);
+      if (activeDisplay) void closeDisplay(activeDisplay).catch(() => {});
       listeners.clear();
       eventListeners.clear();
       pendingDisplayEvents.clear();

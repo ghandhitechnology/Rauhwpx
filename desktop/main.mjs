@@ -509,6 +509,7 @@ async function scopedCloudSnapshot(session, operation = null, { refresh = false 
   const scope = session.cloudScope ?? { threadId: '', documentId: null };
   const options = {
     originSessionId: session.sessionId,
+    threadId: scope.threadId,
     documentId: scope.documentId,
     selectedSessionId: scope.selectedSessionId,
   };

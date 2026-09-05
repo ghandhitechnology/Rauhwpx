@@ -194,7 +194,9 @@ class VerifiedDisplayConnection implements CloudDisplayConnection {
     }
     if (this.#capability.kind === 'unavailable') this.#emit(this.#capability);
     else this.#emitConnected(this.#capability);
-    this.#loop = this.#run(this.#capability).finally(async () => {
+    this.#loop = this.#run(this.#capability).catch((error: DisplayError) => {
+      if (!this.#closed && !this.#controller.signal.aborted) this.#emitFailure(error);
+    }).finally(async () => {
       this.#loop = null;
       if (!this.#closed) await this.#releaseInterest();
     });

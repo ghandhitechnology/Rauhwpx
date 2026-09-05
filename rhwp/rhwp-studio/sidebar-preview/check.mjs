@@ -4,6 +4,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { createServer } from 'vite';
 import puppeteer from 'puppeteer-core';
+import { checkCloudRecovery } from './cloud-recovery.check.mjs';
 
 const studio = resolve(import.meta.dirname, '..');
 const artifacts = resolve(import.meta.dirname, 'artifacts');
@@ -126,6 +127,8 @@ try {
       throw new Error(`${name}: ${error.message}`, { cause: error });
     }
   }
+  await step('Cloud disconnect, reconnect, rebuild, and shutdown recovery',
+    () => checkCloudRecovery(page, origin, artifacts));
   await step(
     'Production shell, light/dark themes, resize and collapse',
     async () => {

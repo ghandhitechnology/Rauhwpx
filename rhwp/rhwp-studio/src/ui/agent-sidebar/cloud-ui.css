@@ -37,8 +37,7 @@
 
 .ag-cloud-btn[data-state='failed'] .ag-icon,
 .ag-workspace-cloud-btn[data-state='failed'] .ag-icon {
-  color: var(--ag-err);
-  animation: ag-cloud-lost 0.9s ease-out 1;
+  color: var(--ui-warning-border, #d9a441);
 }
 
 .ag-cloud-btn[data-state='transferring'] .ag-icon,
@@ -82,7 +81,7 @@
   z-index: 80;
   top: 58px;
   right: 10px;
-  width: min(390px, calc(100vw - 20px));
+  width: min(390px, calc(100% - 20px));
   border: 1px solid var(--ag-border-strong);
   border-radius: var(--ag-r-card);
   background: var(--ag-bg);
@@ -122,7 +121,7 @@
   padding: 13px;
 }
 
-/* Cloud 복구 배너 — 상태가 곧 표면이다. 실패 red, 재연결 amber, 재생성 accent. */
+/* Keep recovery neutral. Red is reserved for destructive actions. */
 .ag-cloud-recovery {
   display: grid;
   grid-template-columns: 28px 1fr;
@@ -130,7 +129,7 @@
   row-gap: 12px;
   padding: 12px 14px;
   border-radius: var(--ag-r-field);
-  background: color-mix(in srgb, var(--ag-err) 5%, var(--ag-bg));
+  background: var(--ag-bg-2);
   word-break: keep-all;
 }
 
@@ -153,8 +152,8 @@
   height: 28px;
   place-items: center;
   border-radius: 8px;
-  background: color-mix(in srgb, var(--ag-err) 12%, transparent);
-  color: var(--ag-err);
+  background: color-mix(in srgb, var(--ui-warning-border, #d9a441) 12%, transparent);
+  color: var(--ui-warning-border, #d9a441);
 }
 
 .ag-cloud-recovery[data-kind='reconnecting'] .ag-cloud-recovery-chip {
@@ -204,14 +203,14 @@
 
 .ag-cloud-recovery-title {
   font-weight: 650;
-  line-height: 1.35;
+  line-height: 1.5;
 }
 
 .ag-cloud-recovery-detail {
   margin: 3px 0 0;
   color: var(--ag-text-muted);
   font-size: var(--font-size-sm, 11px);
-  line-height: 1.45;
+  line-height: 1.6;
 }
 
 .ag-cloud-recovery-actions {
@@ -221,34 +220,10 @@
   gap: 8px;
 }
 
-/* 배너 안의 버튼 — 주요 동작은 위험색 외곽선, 나머지는 조용한 텍스트 */
 .ag-cloud-recovery .ag-cloud-action {
-  height: 26px;
+  min-height: 32px;
   padding: 0 11px;
-  border: 1px solid color-mix(in srgb, var(--ag-err) 38%, transparent);
   border-radius: 8px;
-  background: transparent;
-  color: var(--ag-err);
-}
-
-.ag-cloud-recovery .ag-cloud-action:hover {
-  background: color-mix(in srgb, var(--ag-err) 10%, transparent);
-  border-color: color-mix(in srgb, var(--ag-err) 55%, transparent);
-}
-
-.ag-cloud-recovery .ag-cloud-action:active {
-  background: color-mix(in srgb, var(--ag-err) 16%, transparent);
-}
-
-.ag-cloud-recovery .ag-cloud-action:not(.ag-primary) {
-  border-color: transparent;
-  color: var(--ag-text-muted);
-}
-
-.ag-cloud-recovery .ag-cloud-action:not(.ag-primary):hover {
-  background: transparent;
-  border-color: transparent;
-  color: var(--ag-text);
 }
 
 .ag-cloud-session-picker {
@@ -318,7 +293,7 @@
 }
 
 .ag-cloud-action {
-  height: 30px;
+  min-height: 32px;
   padding: 0 10px;
   border: 1px solid var(--ag-border-strong);
   border-radius: var(--ag-r-chip);
@@ -327,7 +302,16 @@
   font: inherit;
   font-size: var(--font-size-sm, 11px);
   cursor: pointer;
+  white-space: nowrap;
 }
+
+.ag-cloud-action:hover:not(:disabled) { filter: brightness(0.96); }
+.ag-cloud-action:focus-visible,
+.ag-cloud-panel-close:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+.ag-cloud-action:disabled { opacity: 0.5; cursor: default; }
 
 .ag-cloud-action.ag-primary {
   border-color: var(--accent-primary);
@@ -382,13 +366,14 @@
 }
 
 .ag-cloud-recovery-strip {
-  display: flex;
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr);
   min-width: 0;
   align-items: center;
-  gap: 8px;
-  overflow: hidden;
-  padding: 6px 9px;
-  border: 1px solid color-mix(in srgb, var(--ui-warning-border, #d9a441) 45%, var(--ag-border));
+  column-gap: 9px;
+  row-gap: 10px;
+  padding: 11px 12px;
+  border: 1px solid var(--ag-border);
   border-radius: var(--ag-r-field);
   background: var(--ag-surface-subtle);
   color: var(--ag-text);
@@ -399,35 +384,35 @@
   display: none;
 }
 
-.ag-cloud-recovery-strip[data-kind='failed'] {
-  border-color: color-mix(in srgb, var(--ag-err) 40%, var(--ag-border));
+.ag-cloud-recovery-strip-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
+.ag-cloud-recovery-strip-actions:empty { display: none; }
+.ag-cloud-recovery-strip-actions .ag-cloud-action { flex: 1 1 112px; }
+
 .ag-cloud-recovery-strip-pulse {
-  flex: 0 0 18px;
-  height: 3px;
+  width: 7px;
+  height: 7px;
   border-radius: 999px;
-  background: linear-gradient(
-    90deg,
-    transparent 0%,
-    var(--accent-primary) 45%,
-    transparent 100%
-  );
-  background-size: 220% 100%;
+  background: var(--ui-warning-border, #d9a441);
 }
 
 .ag-cloud-recovery-strip[data-kind='reconnecting'] .ag-cloud-recovery-strip-pulse,
 .ag-cloud-recovery-strip[data-kind='recreating'] .ag-cloud-recovery-strip-pulse {
-  animation: ag-cloud-sweep 1.4s linear infinite;
+  background: var(--accent-primary);
+  animation: ag-cloud-breathe 1.8s ease-in-out infinite;
 }
 
 .ag-cloud-recovery-strip-title {
-  flex: 1 1 auto;
   min-width: 0;
-  overflow: hidden;
   font-weight: 650;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.5;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
 }
 
 .ag-msg-delivery {
@@ -522,24 +507,13 @@
 }
 
 @keyframes ag-cloud-reconnect {
-  0%, 100% { opacity: 0.45; transform: translateY(0); }
-  50% { opacity: 1; transform: translateY(-1px); }
+  0%, 100% { opacity: 0.65; }
+  50% { opacity: 1; }
 }
 
 @keyframes ag-cloud-recreate {
   0%, 100% { opacity: 0.55; transform: scale(0.92); }
   50% { opacity: 1; transform: scale(1); }
-}
-
-@keyframes ag-cloud-lost {
-  0% { opacity: 0.3; }
-  35% { opacity: 1; }
-  100% { opacity: 0.85; }
-}
-
-@keyframes ag-cloud-sweep {
-  0% { background-position: 100% 0; }
-  100% { background-position: -100% 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {
