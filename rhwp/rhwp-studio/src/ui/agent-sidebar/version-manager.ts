@@ -100,7 +100,6 @@ export interface VersionManagerController {
   deleteShelf(id: string): Promise<void>;
   compareLegacy(id: string): Promise<void>;
   setAiTitlesEnabled(enabled: boolean): void;
-  collectGarbage(): Promise<void>;
   dispose?(): void;
 }
 
