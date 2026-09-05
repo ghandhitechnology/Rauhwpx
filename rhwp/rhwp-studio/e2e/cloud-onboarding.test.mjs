@@ -143,7 +143,10 @@ async function waitForTitle(page, title) {
 
 async function openSetup(page) {
   await clickStable(page, '#agent-sidebar .ag-cloud-btn');
-  await page.waitForSelector('.ag-cloud-panel:not([hidden])');
+  await page.waitForFunction(() =>
+    document.querySelector('.ag-cloud-setup-overlay')?.hidden === false
+      || document.querySelector('.ag-cloud-panel')?.hidden === false);
+  if (await page.$eval('.ag-cloud-setup-overlay', (node) => !node.hidden)) return;
   const actions = await page.$$('.ag-cloud-panel-actions button');
   const setup = await (async () => {
     for (const action of actions) {
@@ -669,12 +672,12 @@ try {
   await clickButton(page, 'Cloud 환경 설치');
   await waitForTitle(page, 'Cloud 환경 설치 중');
   await waitForTitle(page, 'Cloud가 준비되었습니다');
-  const connectedPrimary = await buttonByText(page, '완료');
+  const connectedPrimary = await buttonByText(page, 'Cloud로 계속');
   await connectedPrimary.focus();
   await connectedPrimary.dispose();
   await page.evaluate(() => window.__cloudHarness.publishSnapshot());
   await delay(50);
-  assert.equal(await page.evaluate(() => document.activeElement?.textContent?.trim()), '완료');
+  assert.equal(await page.evaluate(() => document.activeElement?.textContent?.trim()), 'Cloud로 계속');
   const installCalls = await page.evaluate(() => window.__cloudHarness.calls.map((call) => call.method));
   assert.equal(installCalls.includes('cloudSaveProfile'), false);
   assert.ok(installCalls.includes('cloudProvision'));
@@ -693,7 +696,7 @@ try {
       },
     },
   );
-  await clickButton(page, '완료');
+  await clickButton(page, 'Cloud로 계속');
   await page.waitForSelector('.ag-cloud-setup-overlay[hidden]');
   console.log('  PASS transactional provisioning receives the draft and the connected CTA exits setup');
 
@@ -780,7 +783,7 @@ try {
   );
   console.log('  PASS existing environments validate identity and activate transactionally');
 
-  await clickButton(page, '완료');
+  await clickButton(page, 'Cloud로 계속');
   await page.waitForSelector('.ag-cloud-setup-overlay[hidden]');
   await page.evaluate(() => {
     window.__cloudHarness.setUnconfigured();
