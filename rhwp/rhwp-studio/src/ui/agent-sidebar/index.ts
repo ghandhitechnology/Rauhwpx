@@ -3189,6 +3189,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     refreshCloudSettings: () => cloudUi.openSettings(),
   });
   const settingsPage = settingsPanel.element;
+  settingsPage.addEventListener('ag-settings-expand-request', () => {
+    void (async () => {
+      if (!await settingsPanel.requestClose()) return;
+      setFullscreen(true);
+      setSettingsPanelOpen(true, 'cloud');
+    })();
+  });
   initialSetup = maybeStartInitialSetup({
     openAgentSetup: (agent) => settingsPanel.openAgentSetup(agent),
     beginAgentConnect: (agent) => settingsPanel.beginAgentConnect(agent),

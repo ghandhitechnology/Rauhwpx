@@ -40,6 +40,7 @@ import {
 import { createCheckpointMirror } from '../../cloud/checkpoint-mirror.ts';
 import { createCheckpointPublisher } from '../../cloud/checkpoint-publisher.ts';
 import { createCloudOnboarding } from './cloud-onboarding.ts';
+import { createCloudDashboard } from './cloud-dashboard.ts';
 import { createCloudSyncIcon, createIcon } from './icons.ts';
 
 function el<K extends keyof HTMLElementTagNameMap>(
@@ -325,7 +326,14 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       deps.onComposerSetupChange?.(active);
     },
   });
-  const settingsElement = onboarding.settingsElement;
+  const dashboard = createCloudDashboard({
+    configuration: onboarding.settingsElement,
+    refresh: () => deps.controller.refresh(selectedScope()),
+    reconnect: () => deps.controller.reconnectLink(),
+    mutationLocked: () => busy || authorityTransitionActive() || workspaceLocked,
+  });
+  const settingsElement = dashboard.element;
+  const unsubscribeDashboard = deps.controller.subscribe((next) => dashboard.sync(next));
 
   function setBusy(next: boolean): void {
     busy = next;
@@ -1341,7 +1349,9 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       checkpointMirror.dispose();
       checkpointPublisher.dispose();
       unsubscribe();
+      unsubscribeDashboard();
       unsubscribeEvents();
+      dashboard.dispose();
       onboarding.dispose();
       closePanel();
     },

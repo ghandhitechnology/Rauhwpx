@@ -12,6 +12,7 @@ import { completeInitialSetup } from '../ui/initial-setup/state.ts';
 import { createMockCloud } from './mock-cloud.ts';
 import { createCloudWorkspace } from '../ui/cloud-workspace.ts';
 import { createWorkspaceController } from '../cloud/workspace.ts';
+import { isSettingsDestination } from '../ui/agent-sidebar/settings-contract.ts';
 
 const params = new URLSearchParams(location.search);
 const status = document.querySelector<HTMLOutputElement>('#preview-status')!;
@@ -41,7 +42,7 @@ if (!localStorage.getItem('sidebar-preview-seeded')) {
   localStorage.setItem('sidebar-preview-seeded', '1');
 }
 applyTheme();
-const cloud = params.get('cloud') === '1' ? createMockCloud() : null;
+const cloud = params.get('cloud') === '1' ? createMockCloud({ dashboard: params.get('dashboard') === '1' }) : null;
 const workspace = cloud ? createWorkspaceController({
   localRoot: document.getElementById('editor-area')!,
   cloudWorkspace: createCloudWorkspace({ display: cloud.controller }), cloud: cloud.controller,
@@ -186,7 +187,9 @@ document.addEventListener(
 if (params.get('controls') === '0')
   document.querySelector('#preview-controls')!.setAttribute('hidden', '');
 if (params.get('page') === 'settings')
-  eventBus.emit('settings:open', { destination: 'editing' });
+  eventBus.emit('settings:open', { destination: isSettingsDestination(params.get('destination')) ? params.get('destination')! : 'editing' });
+if (params.get('fullscreen') === '1')
+  sidebar.root.querySelector('.ag-settings-page')?.dispatchEvent(new CustomEvent('ag-settings-expand-request', { bubbles: true }));
 if (params.get('page') === 'versions') sidebar.openVersions();
 
 // Typed hooks for browser checks and custom scenario scripts.

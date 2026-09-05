@@ -2,6 +2,7 @@ import './cloud-onboarding.css';
 
 import type { CloudController } from '../../cloud/desktop-cloud.ts';
 import type { CloudProfileDraft, CloudServerMode, CloudSnapshot } from '../../cloud/types.ts';
+import { inferCloudLink } from '../../cloud/link.ts';
 import {
   appServerProvider,
   createCloudSetupState,
@@ -1068,6 +1069,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       error: '연결에 문제가 있습니다',
       unknown: '연결 상태 확인 필요',
     } as const;
+    const link = inferCloudLink(snapshot);
     const lifecycleLabels = {
       provisioning: '서버 준비 중',
       'tearing-down': '서버 종료 중',
@@ -1080,6 +1082,8 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       : null;
     settingsStatus.textContent = appHostedLock
       ? 'Raucloud 사용 제한'
+      : link.kind !== 'ready'
+        ? link.kind === 'failed' ? '연결에 문제가 있습니다' : '다시 연결 중'
       : snapshot.profile.mode === 'app-hosted' && sandboxLabel
         ? sandboxLabel
         : labels[snapshot.profile.connection];
