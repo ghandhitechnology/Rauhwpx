@@ -10,6 +10,9 @@ test('cloud document shell reuses built assets and preserves reference bytes', a
   const html = '<!doctype html><html lang="ko"><head><title>문서</title><script type="module" src="/assets/editor.js"></script></head><body>내용</body></html>';
   await fs.writeFile(path.join(root, 'index.html'), html);
   await fs.writeFile(path.join(root, 'reference.html'), html);
+  await fs.mkdir(path.join(root, 'assets'));
+  const asset = 'export const engine = "shared build";';
+  await fs.writeFile(path.join(root, 'assets', 'editor.js'), asset);
   const { server, origin } = await startStudioServer({
     studioRoot: root, bootstrap: 'test-bootstrap',
     resources: new Map([['document', path.join(root, 'index.html')]]),
@@ -31,6 +34,7 @@ test('cloud document shell reuses built assets and preserves reference bytes', a
     assert.equal(await head.text(), '');
   }
   assert.equal(await (await fetch(`${origin}/reference.html`)).text(), html);
+  assert.equal(await (await fetch(`${origin}/assets/editor.js`)).text(), asset);
   assert.equal(await (await fetch(`${origin}/_runtime/resource/document?bootstrap=test-bootstrap`)).text(), html);
   assert.equal(await fs.readFile(path.join(root, 'index.html'), 'utf8'), html);
 });
