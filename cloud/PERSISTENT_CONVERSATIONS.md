@@ -33,13 +33,18 @@ The implementation keeps these boundaries:
   handoff is retained in Hancom Git and later checkpoints descend from that Cloud
   branch. Local file saves leave edits uncommitted. Before merging, the user can
   stash them or commit them on the current or a separate branch.
+- Cloud status also offers a verified copy of the completed document. This keeps
+  results accessible for older sessions without a local handoff baseline and for
+  document formats that the branch merge engine cannot materialize.
 - `publish_cloud_document` announces a delivery and archives the stable checkpoint.
   It never authorizes an automatic origin-file write. The user reviews the branch
   merge and saves the local document. Legacy explicit publication APIs remain for
   older clients; worker events no longer invoke them automatically.
 - Desktop retains the native origin document lease throughout Cloud work so
   explicit publication can validate the file identity and path. The separate
-  Cloud authority lease blocks local editor mutations until authority returns.
+  Cloud authority lease tracks the remote conversation; it does not block edits
+  or saves to the local working tree. Native saves still validate the local file
+  identity and document lease.
 - Paired devices may view and send. Only the origin device may replace the
   original path; another device can take over only as a verified copy.
 - At most two runtimes are warm server-wide and at most one is warm for a

@@ -114,7 +114,7 @@ async function openCloudDocument(page: import('puppeteer-core').Page, format: 'h
         isTurnRunning: () => false, onEvent: () => () => {}, requestCheckpointTitle: async () => null },
     };
     let controller = new DocumentVersionController(deps);
-    await controller.refresh();
+    await controller.documentLoaded();
     const initial = controller.getState();
     const handoff = await controller.prepareCloudBranch(startId, snapshots.captureVersionSnapshot(wasm).bytes, fileName);
     const headBefore = controller.getState().branches.find((item) => item.isActive)!.headId;
@@ -265,7 +265,10 @@ test('committing local edits on the current branch opens real conflicts and reje
     await page.click('.version-merge-preparation input[value="commit"]');
     await page.click('.version-merge-preparation button[type="submit"]');
     await page.waitForSelector('.merge-conflict-item');
+    if (process.env.CLOUD_MERGE_CONFLICT_SCREENSHOT) await page.screenshot({ path: process.env.CLOUD_MERGE_CONFLICT_SCREENSHOT });
     assert.equal(await page.$eval('.merge-resolver-footer .merge-primary-button', (button) => (button as HTMLButtonElement).disabled), true);
+    await page.click('.merge-resolution-button:nth-child(3)');
+    assert.equal(await page.$$eval('.merge-resolution-button[aria-pressed="true"]', (buttons) => buttons.length), 1);
     await page.click('.merge-conflict-tools > summary');
     await page.click('.merge-bulk-actions button:nth-child(2)');
     await finishReview(page);
@@ -279,5 +282,107 @@ test('committing local edits on the current branch opens real conflicts and reje
     assert.ok(result.conflicts > 0);
     assert.match(result.text, /:CLOUD/);
     assert.doesNotMatch(result.text, /LOCAL:/);
+  } finally { await page.close(); }
+});
+
+test('successive cloud turns merge into the active local branch and older signals leave uncommitted edits intact', { timeout: 60_000 }, async () => {
+  const page = await browser!.newPage();
+  try {
+    await openCloudDocument(page, 'hwpx', 'repeat');
+    const mainHead = await page.evaluate(async () => {
+      const { controller } = (window as any).__cloud;
+      await controller.createBranch('검토');
+      return controller.getState().branches.find((branch: any) => branch.name === 'main').headId;
+    });
+    await page.evaluate(() => (window as any).__cloud.begin());
+    await finishReview(page);
+    const first = await page.evaluate(async () => {
+      const cloud = (window as any).__cloud;
+      cloud.wasm.insertText(0, 1, 0, 'AFTER_MERGE:');
+      cloud.dirty.markDirty('test');
+      cloud.eventBus.emit('document-mutated');
+      const before = cloud.inspect();
+      const applied = await cloud.controller.mergeCloudCheckpoint(cloud.startId, cloud.checkpoint);
+      return { before, after: cloud.inspect(), applied };
+    });
+    assert.equal(first.applied, true);
+    assert.equal(first.after.text, first.before.text);
+    assert.equal(first.after.state.dirty, true);
+    assert.equal(first.after.state.activeBranch, '검토');
+    await page.evaluate(async () => {
+      const cloud = (window as any).__cloud;
+      const { WasmBridge } = await import('/src/core/wasm-bridge.ts');
+      const remote = new WasmBridge();
+      await remote.initialize();
+      remote.loadDocument(cloud.checkpoint.bytes, cloud.checkpoint.fileName);
+      remote.insertText(0, 0, remote.getParagraphLength(0, 0), ':NEXT');
+      const bytes = remote.exportHwpx();
+      remote.releaseDocument();
+      cloud.firstCheckpoint = { ...cloud.checkpoint };
+      const sha256 = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes.slice().buffer))]
+        .map((byte) => byte.toString(16).padStart(2, '0')).join('');
+      Object.assign(cloud.checkpoint, { bytes, sha256, byteLength: bytes.length, revision: 2, turn: 2, operationId: 'turn-2' });
+      cloud.begin();
+    });
+    await page.waitForSelector('.version-merge-preparation');
+    await page.click('.version-merge-preparation [data-choice="cancel"]');
+    await page.waitForFunction(() => (window as any).__cloudOutcome === false);
+    // Turn 2 is imported but unmerged. Replaying turn 1 cannot open a review of turn 2.
+    const old = await page.evaluate(async () => {
+      const cloud = (window as any).__cloud;
+      const applied = await cloud.controller.mergeCloudCheckpoint(cloud.startId, cloud.firstCheckpoint);
+      return { applied, text: cloud.inspect().text, reviewOpen: Boolean(document.querySelector('.merge-resolver-window')) };
+    });
+    assert.equal(old.applied, true);
+    assert.equal(old.reviewOpen, false);
+    assert.equal(old.text, first.after.text);
+    await page.evaluate(() => (window as any).__cloud.begin());
+    await page.waitForSelector('.version-merge-preparation');
+    await page.click('.version-merge-preparation input[value="commit"]');
+    await page.click('.version-merge-preparation button[type="submit"]');
+    await page.waitForSelector('.merge-resolver-window');
+    assert.equal(await page.$('.merge-conflict-item'), null, 'inherited paragraph identities must survive the first merge');
+    await finishReview(page);
+    const final = await page.evaluate(() => (window as any).__cloud.inspect());
+    assert.equal(final.state.activeBranch, '검토');
+    assert.equal(final.state.branches.find((branch: any) => branch.name === 'main').headId, mainHead);
+    assert.match(final.text, /AFTER_MERGE:/);
+    assert.match(final.text, /LOCAL:/);
+    assert.match(final.text, /:CLOUD:NEXT/);
+  } finally { await page.close(); }
+});
+
+test('stash application rolls the editor back on a failed transaction and can be retried', { timeout: 45_000 }, async () => {
+  const page = await browser!.newPage();
+  try {
+    await openCloudDocument(page, 'hwp', 'stash-failure');
+    await page.evaluate(() => (window as any).__cloud.begin());
+    await page.waitForSelector('.version-merge-preparation');
+    await page.click('.version-merge-preparation button[type="submit"]');
+    await finishReview(page);
+    const merged = await page.evaluate(() => (window as any).__cloud.inspect());
+    await page.evaluate(async () => {
+      const { controller, store } = (window as any).__cloud;
+      const complete = store.completeShelfMerge.bind(store);
+      let fail = true;
+      store.completeShelfMerge = (input: unknown) => {
+        if (fail) { fail = false; throw new Error('Test storage failure'); }
+        return complete(input);
+      };
+      await controller.applyShelf(controller.getState().shelves[0].id, true);
+    });
+    await page.waitForFunction(() => !document.querySelector<HTMLButtonElement>('.merge-resolver-footer .merge-primary-button')?.disabled);
+    await page.click('.merge-resolver-footer .merge-primary-button');
+    await page.waitForSelector('.merge-action-status[data-kind="error"]');
+    const failed = await page.evaluate(() => (window as any).__cloud.inspect());
+    assert.equal(failed.text, merged.text);
+    assert.equal(failed.state.shelves.length, 1);
+    assert.equal(failed.state.branches.find((item: any) => item.isActive).headId, merged.state.branches.find((item: any) => item.isActive).headId);
+    await finishReview(page);
+    const applied = await page.evaluate(() => (window as any).__cloud.inspect());
+    assert.match(applied.text, /LOCAL:/);
+    assert.match(applied.text, /:CLOUD/);
+    assert.equal(applied.state.shelves.length, 0);
+    assert.equal(applied.state.dirty, true);
   } finally { await page.close(); }
 });

@@ -1128,12 +1128,10 @@ ipcMain.handle('desktop:native-file-source-path', (event, handleId) => {
 });
 ipcMain.handle('desktop:native-file-validate-save', (event, handleId, identity) => {
   const session = sessionForEvent(event);
-  if (session.cloudLocked) throw new Error('The cloud agent currently owns this document');
   return nativeFiles.validateSave(session.sessionId, handleId, identity, documentLeases);
 });
 ipcMain.handle('desktop:native-file-write', (event, handleId, bytes, identity) => {
   const session = sessionForEvent(event);
-  if (session.cloudLocked) throw new Error('The cloud agent currently owns this document');
   return nativeFiles.write(session.sessionId, handleId, bytes, identity, documentLeases);
 });
 ipcMain.handle('desktop:native-file-is-same', (event, firstHandleId, secondHandleId) => {

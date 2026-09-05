@@ -33,6 +33,7 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   assert.equal(await page.$eval('.ag-cloud-merge-button', (button) => button.hidden), true);
   await page.evaluate(() => window.sidebarPreview.cloud.commitTurn());
   await page.waitForFunction(() => !document.querySelector('.ag-cloud-merge-button').hidden);
+  await page.screenshot({ path: resolve(artifacts, 'cloud-merge-ready.png') });
   await page.click('[data-document-view="local"]');
   await page.click('.ag-cloud-merge-button');
   await page.waitForFunction(() => window.sidebarPreview.cloud.calls.merges.length === 1);

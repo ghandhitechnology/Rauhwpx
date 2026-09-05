@@ -55,7 +55,7 @@ test('workspace tokens bind async content reads and compares to one document rev
 
 test('versioning cannot adopt an unsaved document as its disk baseline', () => {
   const enable = method('async enable(): Promise<void>', 'async checkpoint(');
-  assert.match(enable, /if \(this\.#documentState\.isDirty\(\)\) \{/);
+  assert.match(enable, /if \(this\.#documentState\.isDirty\(\) && !baseline\) \{/);
   assert.match(enable, /new VersionError\('SAVE_REQUIRED'/);
   assert.ok(enable.indexOf('documentState.isDirty()') < enable.indexOf('createRepository({'));
 });

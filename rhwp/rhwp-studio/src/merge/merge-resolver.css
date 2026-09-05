@@ -251,3 +251,5 @@ html.desktop-mac .merge-resolver-header button {
 @media (prefers-reduced-motion: reduce) {
   .merge-resolver-window * { scroll-behavior: auto !important; transition: none !important; }
 }
+
+.merge-choice-preview { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; margin-top: 4px; color: var(--merge-muted); font-size: 12px; white-space: normal; overflow-wrap: anywhere; }

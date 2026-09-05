@@ -762,6 +762,30 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     });
   }
 
+  function downloadCheckpointCopy(): void {
+    const offer = currentMergeOffer();
+    if (!offer || busy) return;
+    const profileEpoch = snapshot.profileEpoch;
+    const documentId = deps.getScope().documentId;
+    void operation(async () => {
+      const checkpoint = await deps.controller.downloadCheckpoint(offer.sessionId, offer.operationId);
+      if (snapshot.profileEpoch !== profileEpoch || deps.getScope().documentId !== documentId) return;
+      const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', checkpoint.bytes.slice().buffer))]
+        .map((byte) => byte.toString(16).padStart(2, '0')).join('');
+      if (snapshot.profileEpoch !== profileEpoch || deps.getScope().documentId !== documentId) return;
+      if (checkpoint.sessionId !== offer.sessionId || checkpoint.documentId !== documentId
+        || checkpoint.kind !== 'turn' || checkpoint.revision !== offer.revision
+        || checkpoint.operationId !== offer.operationId || checkpoint.sha256 !== digest
+        || checkpoint.byteLength !== checkpoint.bytes.length) throw new Error('Cloud 사본 검증에 실패했습니다. 다시 다운로드하세요.');
+      const link = document.createElement('a');
+      const url = URL.createObjectURL(new Blob([checkpoint.bytes.slice().buffer], { type: 'application/octet-stream' }));
+      link.href = url;
+      link.download = checkpoint.fileName.split(/[\\/]/).at(-1)!.replace(/(\.[^.]+)$/, `-cloud-${checkpoint.turn}$1`);
+      link.click();
+      window.setTimeout(() => URL.revokeObjectURL(url), 30_000);
+    });
+  }
+
   function publishCheckpoint(): void {
     if (deps.onMergeCheckpoint) { void mergeCheckpoint(); return; }
     const session = snapshot.session;
@@ -775,7 +799,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     const renderKey = JSON.stringify([link.kind === 'ready' ? snapshot.session : null,
       link.kind === 'ready' ? snapshot.sessions : null, snapshot.profile, snapshot.server,
       snapshot.account, link.kind, busy, recoveryBusy, Boolean(pendingTakeover), Boolean(pendingResultReplace),
-      Boolean(downloadedResult), localTurnPending]);
+      Boolean(downloadedResult), localTurnPending, currentMergeOffer()]);
     if (renderKey === panelRenderKey) return;
     panelRenderKey = renderKey;
     const activeSessionId = snapshot.session.kind === 'idle' ? null : snapshot.session.sessionId;
@@ -929,7 +953,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
             ? '안전한 경계에서 방향을 바꾸는 중입니다.'
             : session.currentActivity || `${serverLabel(snapshot)}에서 작업 중입니다.`;
         panelDetail.textContent = `${session.turn}/${session.turnLimit}턴 · ${formatDuration(session.elapsedMs)} / ${formatDuration(session.timeLimitMs)}`;
-        if (session.phase === 'waiting' && session.turn > 0) {
+        if (session.phase === 'waiting' && session.turn > 0 && (!deps.onMergeCheckpoint || currentMergeOffer())) {
           panelActions.append(action(deps.onMergeCheckpoint ? 'Cloud 변경 병합' : '원본에 반영', publishCheckpoint, 'ag-primary'));
         }
         if (session.phase === 'working') {
@@ -958,7 +982,9 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       case 'suspended':
         panelStatus.textContent = '클라우드 작업이 멈췄습니다.';
         panelDetail.textContent = session.reason;
-        panelActions.append(action(deps.onMergeCheckpoint ? 'Cloud 변경 병합' : '원본에 반영', publishCheckpoint));
+        if (!deps.onMergeCheckpoint || currentMergeOffer()) {
+          panelActions.append(action(deps.onMergeCheckpoint ? 'Cloud 변경 병합' : '원본에 반영', publishCheckpoint));
+        }
         if (session.resumable) panelActions.append(action('다시 시작', () => command('resume'), 'ag-primary'));
         panelActions.append(action('이 기기에서 이어받기', () => command('takeover')));
         panelActions.append(action('대화 끝내기', () => command('end'), 'ag-danger'));
@@ -1008,6 +1034,9 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
         panelDetail.textContent = '문서 편집 권한이 이 기기로 돌아왔습니다.';
         panelActions.append(action('기록 지우기', dismissSession));
         break;
+    }
+    if (deps.onMergeCheckpoint && currentMergeOffer()) {
+      panelActions.append(action('완료 문서 사본 저장', downloadCheckpointCopy, 'ag-cloud-checkpoint-copy'));
     }
     appendForceQuit();
   }

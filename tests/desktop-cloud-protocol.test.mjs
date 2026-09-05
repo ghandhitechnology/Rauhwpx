@@ -3596,3 +3596,16 @@ test('native cloud origin baseline remains the accepted file fingerprint after a
   assert.equal(registry.originDigestForSessionPath('other-window', canonicalPath), null);
   assert.equal(registry.originDigestForSessionPath('owner', null), null);
 });
+
+test('local saves retain native identity validation while Cloud owns its separate copy', async () => {
+  const source = await readFile(new URL('../desktop/main.mjs', import.meta.url), 'utf8');
+  for (const [start, end, operation] of [
+    ['desktop:native-file-validate-save', 'desktop:native-file-write', 'validateSave'],
+    ['desktop:native-file-write', 'desktop:native-file-is-same', 'write'],
+  ]) {
+    const block = source.slice(source.indexOf(`ipcMain.handle('${start}'`), source.indexOf(`ipcMain.handle('${end}'`));
+    assert.doesNotMatch(block, /cloudLocked/);
+    assert.ok(block.includes(`nativeFiles.${operation}(session.sessionId,`));
+    assert.ok(block.includes('documentLeases)'));
+  }
+});

@@ -246,6 +246,7 @@ export class DocumentVersionController implements VersionManagerController {
   readonly #mergeResolver = new MergeResolverWindow();
   #state = emptyState();
   #repository: VersionRepository | null = null;
+  #savedBaseline: { documentId: string; capture: CapturedVersionSnapshot } | null = null;
   #refs: VersionRef[] = [];
   #commits: VersionCommit[] = [];
   #shelves: VersionShelf[] = [];
@@ -257,7 +258,6 @@ export class DocumentVersionController implements VersionManagerController {
   #semanticDirtyRevision = -1;
   #refreshEpoch = 0;
   #operation = Promise.resolve();
-  #suppressApprovalCheckpoint = 0;
   #mergeResolverActive = false;
   #mergeCompletion: Promise<boolean> | null = null;
   #mergeLockedHandler: InputHandler | null = null;
@@ -295,6 +295,7 @@ export class DocumentVersionController implements VersionManagerController {
         // A file save updates disk state; only an explicit commit advances HEAD.
         const id = this.#getDocumentId();
         const capture = this.#wasm.hasLoadedDocument() ? captureVersionSnapshot(this.#wasm) : null;
+        if (id && capture) this.#savedBaseline = { documentId: id, capture };
         void this.#enqueue(async () => {
           if (!capture || id !== this.#getDocumentId()) return;
           await this.#refreshData(false);
@@ -319,6 +320,16 @@ export class DocumentVersionController implements VersionManagerController {
     return () => this.#listeners.delete(listener);
   }
 
+  async documentLoaded(): Promise<void> {
+    const id = this.#getDocumentId();
+    if (id && !this.#wasm.isNewDocument && !this.#documentState.isDirty()) {
+      this.#savedBaseline = { documentId: id, capture: captureVersionSnapshot(this.#wasm) };
+    } else {
+      this.#savedBaseline = null;
+    }
+    await this.refresh();
+  }
+
   async refresh(): Promise<void> {
     await this.#enqueue(() => this.#refreshData(true));
   }
@@ -338,21 +349,22 @@ export class DocumentVersionController implements VersionManagerController {
   async #enableVersioning(): Promise<void> {
       this.#guardSaved();
       await this.#guardMutation();
-      if (this.#documentState.isDirty()) {
+      const baseline = this.#savedBaseline?.documentId === this.#getDocumentId() ? this.#savedBaseline.capture : null;
+      if (this.#documentState.isDirty() && !baseline) {
         throw new VersionError('SAVE_REQUIRED', 'Save the document before enabling version history');
       }
       const id = this.#getDocumentId();
       if (!id) throw new VersionError('SAVE_REQUIRED', 'A saved document ID is required');
       const workspace = this.#captureWorkspaceToken();
       const existing = await this.#store.findRepositoryByDocumentId(documentId(id));
-      this.#assertWorkspaceToken(workspace);
+      this.#assertWorkspaceToken(workspace, { editor: false });
       if (existing) {
         await this.#refreshData(true);
         return;
       }
-      const capture = captureVersionSnapshot(this.#wasm);
+      const capture = baseline ?? captureVersionSnapshot(this.#wasm);
       const mergeManifestEntries = await this.#mergeWorker.buildDocumentManifest(capture.bytes);
-      this.#assertWorkspaceToken(workspace);
+      this.#assertWorkspaceToken(workspace, { editor: false });
       const analysis = analyzeVersionDiff(null, capture.compareSnapshot);
       const createdAt = Date.now();
       const result = await this.#store.createRepository({
@@ -433,7 +445,7 @@ export class DocumentVersionController implements VersionManagerController {
       const anchor = await this.#store.getCommit(commitId(`cloud-base:${repository.id}:${startId}`));
       const branch = await this.#store.getBranch(repository.id, name);
       if (!anchor || !branch) {
-        throw new Error('이 기기에 Cloud 시작 기록이 없습니다. 시작한 기기에서 문서를 열어 병합하세요.');
+        throw new Error('이 기기에 병합에 필요한 Cloud 시작 기록이 없습니다. Cloud 상태에서 완료 문서를 사본으로 저장할 수 있습니다.');
       }
       if (branch.name === this.#requireActiveBranch().name) {
         throw new Error('Cloud 결과를 받을 로컬 브랜치를 먼저 선택하세요.');
@@ -443,6 +455,12 @@ export class DocumentVersionController implements VersionManagerController {
       if (existing) {
         if (existing.blobId !== hashBytes(checkpoint.bytes)) {
           throw new VersionError('CORRUPT_BLOB', '같은 Cloud 버전의 문서 내용이 달라졌습니다.');
+        }
+        if (existing.id !== branch.target) {
+          const relation = await this.#store.getMergeRelation(repository.id, this.#requireActiveBranch().target, existing.id);
+          this.#assertWorkspaceToken(workspace);
+          if (relation.relation === 'already-integrated') return { name, integrated: true };
+          throw new VersionError('STALE_WORKSPACE', '더 최신 Cloud 변경을 이미 가져왔습니다. 최신 작업을 선택하세요.');
         }
       } else {
         // Pin the source head. An old or replayed boundary must never move it backwards.
@@ -470,7 +488,6 @@ export class DocumentVersionController implements VersionManagerController {
   }
 
   async #captureIncoming(bytes: Uint8Array, fileName: string): Promise<CapturedVersionSnapshot> {
-    mergeDocumentFormat(bytes);
     const parsed = new WasmBridge();
     await parsed.initialize();
     try {
@@ -1137,17 +1154,12 @@ export class DocumentVersionController implements VersionManagerController {
       throw new VersionError('STALE_WORKSPACE', 'The active document changed during version review');
     }
     if (choice === 'cancel') throw new VersionError('PENDING_AGENT_REVIEW', 'The version action was cancelled');
-    this.#suppressApprovalCheckpoint += 1;
-    try {
-      if (choice === 'approve') {
-        if (!sets().every((set) => this.#agentBridge.pendingEdits.approve(set.id))) {
-          throw new VersionError('PENDING_AGENT_REVIEW', 'Some agent edits could not be approved');
-        }
-      } else {
-        for (const set of sets()) this.#agentBridge.pendingEdits.reject(set.id);
+    if (choice === 'approve') {
+      if (!sets().every((set) => this.#agentBridge.pendingEdits.approve(set.id))) {
+        throw new VersionError('PENDING_AGENT_REVIEW', 'Some agent edits could not be approved');
       }
-    } finally {
-      this.#suppressApprovalCheckpoint -= 1;
+    } else {
+      for (const set of sets()) this.#agentBridge.pendingEdits.reject(set.id);
     }
   }
 
@@ -1944,7 +1956,8 @@ export class DocumentVersionController implements VersionManagerController {
     const repository = await this.#store.findRepositoryByDocumentId(documentId(id));
     if (epoch !== this.#refreshEpoch || this.#getDocumentId() !== id) return;
     this.#repository = repository;
-    if (!repository && this.#autoEnable() && !this.#documentState.isDirty()
+    if (repository) this.#savedBaseline = null;
+    if (!repository && this.#autoEnable() && (!this.#documentState.isDirty() || this.#savedBaseline?.documentId === id)
       && !this.#agentBridge.isTurnRunning()) {
       await this.#enableVersioning();
       return;

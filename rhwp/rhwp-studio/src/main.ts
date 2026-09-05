@@ -238,7 +238,6 @@ let editMode: EditorEditMode = 'normal';
 let documentReadOnly = new URLSearchParams(window.location.search).get('templatePreview') === '1';
 let agentEditingLease: AgentEditingLease = { active: false, agent: 'codex' };
 let previewDocumentReadOnly = documentReadOnly;
-let cloudDocumentLeaseSessionId: string | null = null;
 let cloudAuthorityTransitionCount = 0;
 let rendererRuntimeRequest: EmbedRendererRuntimeRequestV1 | null = null;
 let renderBackendFallbackReason: RenderBackendFallbackReason | null = null;
@@ -323,8 +322,7 @@ function setDocumentReadOnly(readOnly: boolean): void {
   syncDocumentReadOnly();
 }
 
-function setCloudDocumentLease(cloudOwned: boolean, sessionId: string | null): void {
-  cloudDocumentLeaseSessionId = cloudOwned ? sessionId : null;
+function setCloudDocumentLease(cloudOwned: boolean): void {
   document.documentElement.dataset.cloudLease = cloudOwned ? 'cloud' : 'local';
   syncDocumentReadOnly();
 }
@@ -1813,6 +1811,12 @@ async function initializeDocument(
 
     // #2527: 자동 보정을 하지 않으므로 로드 직후 문서는 항상 clean.
     documentState.markClean('document-initialized');
+    try {
+      await versionControllerRef?.documentLoaded();
+    } catch (error) {
+      console.warn('[Hancom Git] Could not initialize document history', error);
+      showToast({ message: '문서는 열렸지만 버전 기록을 준비하지 못했습니다.', durationMs: 4500 });
+    }
   } catch (error) {
     console.error('[initDoc] 오류:', error);
     if (window.innerWidth < 768) alert(`초기화 오류: ${error}`);

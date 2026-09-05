@@ -121,6 +121,7 @@ export class MergeResolverWindow {
       options.draft.history,
       options.draft.historyIndex,
     );
+    this.activePreview = this.state.unresolvedCount > 0 ? 'current' : 'result';
     this.previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     this.completionPromise = new Promise((resolve) => { this.resolveCompletion = resolve; });
     this.build();
@@ -467,7 +468,16 @@ export class MergeResolverWindow {
     const addResolution = (label: string, resolution: MergeResolution): void => {
       const button = element('button', 'merge-resolution-button', label);
       button.type = 'button';
-      button.classList.toggle('is-selected', this.state!.get(conflict.id)?.kind === resolution.kind);
+      const selected = this.state!.get(conflict.id);
+      const matches = selected?.kind === resolution.kind
+        && (selected.kind !== 'both' || (resolution.kind === 'both' && selected.order === resolution.order));
+      button.classList.toggle('is-selected', matches);
+      button.setAttribute('aria-pressed', String(matches));
+      const value = resolution.kind === 'current' ? conflict.current : resolution.kind === 'incoming' ? conflict.incoming : null;
+      if (typeof value === 'string' && value.trim()) {
+        const preview = value.replace(/\s+/g, ' ').trim();
+        button.append(element('small', 'merge-choice-preview', preview.length > 160 ? `${preview.slice(0, 160)}…` : preview));
+      }
       button.addEventListener('click', () => this.resolveConflict(conflict.id, resolution));
       controls.appendChild(button);
     };
@@ -535,6 +545,7 @@ export class MergeResolverWindow {
   private afterResolutionChange(announcement: string): void {
     this.validation = null;
     this.materialized = null;
+    if (this.state?.unresolvedCount === 0) this.activatePreview('result');
     this.renderConflictList();
     if (this.selectedConflictId) this.selectConflict(this.selectedConflictId);
     this.announce(announcement);
