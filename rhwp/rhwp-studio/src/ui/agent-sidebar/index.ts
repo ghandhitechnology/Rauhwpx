@@ -193,7 +193,7 @@ export interface AgentSidebarDeps {
     documentId: string;
     fileName: string;
   } | null>;
-  persistCloudCheckpoint?: (checkpoint: CloudCheckpointPayload) => void | Promise<void>;
+  publishCloudCheckpoint?: (checkpoint: CloudCheckpointPayload) => void | Promise<void>;
   prepareCloudTakeover?: () => Promise<boolean>;
   applyCloudTakeover?: (takeover: CloudTakeoverPayload) => Promise<{
     documentId: string;
@@ -1847,7 +1847,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         || mounted?.sessionId !== binding.sessionId || mounted.threadId !== binding.threadId) return;
       handleAgentEvent(event);
     },
-    onCheckpoint: (checkpoint) => deps.persistCloudCheckpoint?.(checkpoint),
+    onCheckpointPublished: (checkpoint) => deps.publishCloudCheckpoint?.(checkpoint),
     onResultResolved: async (result, resolution) => {
       if (resolution.action !== 'replace') {
         await deps.applyCloudResult?.(result, resolution);

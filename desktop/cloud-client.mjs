@@ -833,6 +833,14 @@ export class CloudClient {
     if (!document.length) throw new Error('A saved document is required for cloud transfer');
     if (document.length > MAX_RESULT_BYTES) throw new Error('Document exceeds the 64 MiB cloud limit');
     if (!validPortableTimeline(timeline)) throw new Error('Portable cloud timeline is invalid');
+    if (persistent) {
+      const health = await this.health(null, { signal });
+      if (health.conversationProtocolVersion !== 2) {
+        throw new CloudHttpError('Update the Cloud server before starting a persistent conversation.', {
+          code: 'CLOUD_RUNTIME_OUTDATED', retryable: false,
+        });
+      }
+    }
     if (providerAuth && (Object.keys(providerAuth.secrets ?? {}).length || Object.keys(providerAuth.files ?? {}).length)) {
       const imported = await this.putProviderAuth(provider, providerAuth, { signal });
       if (imported === null) {

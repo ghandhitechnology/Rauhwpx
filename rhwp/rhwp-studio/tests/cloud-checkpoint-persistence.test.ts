@@ -18,28 +18,28 @@ function sourceBetween(startMarker: string, endMarker: string): string {
   return main.slice(start, end);
 }
 
-test('ordinary cloud checkpoints persist verified origin state without replacing editor authority', () => {
+test('explicit cloud publication writes verified origin state without replacing editor authority', () => {
   const persistence = sourceBetween(
-    'async function persistCloudCheckpoint',
+    'async function publishCloudCheckpoint',
     '\n/** 렌더러 초기화 후에 생성되는 에이전트 브리지',
   );
   assert.match(persistence, /browserOriginSyncDigest/);
   assert.match(persistence, /setBrowserOriginSyncDigest/);
   assert.match(persistence, /persistCheckpointToBrowserOrigin/);
   assert.match(checkpointOrigin, /handle\.createWritable/);
-  assert.match(persistence, /throw error/);
+  assert.match(persistence, /checkpoint\.publication/);
   assert.doesNotMatch(persistence, /inputHandler\?\.deactivate/);
   assert.doesNotMatch(persistence, /wasm\.loadDocument/);
   assert.doesNotMatch(persistence, /canvasView\.loadDocument/);
   assert.doesNotMatch(persistence, /initializeDocument/);
   assert.doesNotMatch(persistence, /setCloudDocumentLease/);
   assert.doesNotMatch(persistence, /open-document-bytes/);
-  assert.match(sidebar, /onCheckpoint: \(checkpoint\) => deps\.persistCloudCheckpoint\?\.\(checkpoint\)/);
+  assert.match(sidebar, /onCheckpointPublished: \(checkpoint\) => deps\.publishCloudCheckpoint\?\.\(checkpoint\)/);
 });
 
 test('takeover and explicit result replacement retain their editor authority paths', () => {
   const result = sourceBetween('function applyCloudResult', '\nasync function applyCloudTakeover');
-  const takeover = sourceBetween('async function applyCloudTakeover', '\nasync function persistCloudCheckpoint');
+  const takeover = sourceBetween('async function applyCloudTakeover', '\nasync function publishCloudCheckpoint');
   assert.match(result, /open-document-bytes/);
   assert.match(result, /resolution\.action !== 'replace'/);
   assert.match(takeover, /open-document-bytes/);

@@ -358,6 +358,11 @@ const BASE_TOOL_DEFINITIONS = [
     shape: {},
   },
   {
+    name: 'publish_cloud_document',
+    description: 'Explicitly request that the current Cloud document be written back to its original file on the originating device after this turn succeeds. The Cloud conversation stays open. Use when the user asks to save or apply the Cloud version, or when your task requires delivering the finished document; do not call after routine interactions. Changes to the original outside Cloud are preserved as a conflict. Available only inside a Cloud worker; returns a queued request, not a completed local write.',
+    shape: {},
+  },
+  {
     name: 'find_text',
     description: `Search the document body AND table cell text for a string; returns matches with exact addresses (sectionIdx, paraIdx, charOffset, length) plus surrounding context. Matches inside a table cell carry a cell object — pass it verbatim as the cell parameter of read/write tools (paraIdx of such a match is the paragraph index inside the cell). A match never spans paragraphs: the query only matches text within a single paragraph. Use this to locate precise offsets before editing. ${REVISION_NOTE}`,
     shape: {
@@ -1101,6 +1106,7 @@ export const TOOL_CLASSIFICATIONS = Object.freeze({
   get_fields: 'document-read',
   get_document_info: 'document-read',
   materialize_document_snapshot: 'document-read',
+  publish_cloud_document: 'document-write',
   find_text: 'document-read',
   render_page: 'document-read',
   get_para_format: 'document-read',

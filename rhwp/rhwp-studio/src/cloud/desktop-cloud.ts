@@ -62,6 +62,7 @@ export interface CloudDesktopApi {
   cloudCompleteTakeover?: (payload: { sessionId: string; operationId: string }) => Promise<unknown>;
   cloudDownloadResult?: (payload: { sessionId: string }) => Promise<unknown>;
   cloudDownloadCheckpoint?: (payload: { sessionId: string; operationId?: string }) => Promise<unknown>;
+  cloudPublishCheckpoint?: (payload: { sessionId: string; operationId?: string }) => Promise<unknown>;
   cloudOpenDisplay?: (payload: { sessionId: string }) => Promise<unknown>;
   cloudCloseDisplay?: (payload: { connectionId: string }) => Promise<unknown>;
   cloudDisplayInput?: (payload: { connectionId: string; event: CloudDisplayInputEvent }) => Promise<unknown>;
@@ -95,6 +96,7 @@ export interface CloudController {
   completeTakeover(sessionId: string, operationId: string): Promise<CloudSnapshot>;
   downloadResult(sessionId: string): Promise<CloudDownloadResult>;
   downloadCheckpoint(sessionId: string, operationId?: string): Promise<CloudCheckpointPayload>;
+  publishCheckpoint(sessionId: string, operationId?: string): Promise<CloudCheckpointPayload>;
   openDisplay(sessionId: string, listener: (event: CloudDisplayEvent) => void): Promise<CloudDisplayConnection>;
   resolveResult(sessionId: string, action: CloudResultAction): Promise<CloudResultResolution>;
   subscribe(listener: (snapshot: CloudSnapshot) => void): () => void;
@@ -668,6 +670,10 @@ export function parseCloudCheckpoint(value: unknown): CloudCheckpointPayload | n
     sessionId, documentId, kind, fileName, sha256, operationId, byteLength, revision, turn, bytes: result.bytes,
     ...(originOnThisDevice ? { originOnThisDevice: true } : {}),
     ...(expectedOriginSha256 ? { expectedOriginSha256 } : {}),
+    ...(['written', 'unchanged', 'conflict', 'archive-only'].includes(string(result.publication)) ? {
+      publication: result.publication as CloudCheckpointPayload['publication'],
+      preservedCopyName: typeof result.preservedCopyName === 'string' ? result.preservedCopyName : null,
+    } : {}),
   };
 }
 
@@ -882,6 +888,17 @@ export function createCloudController(
         throw Object.assign(new Error('Cloud 프로필이 작업 중 변경됐습니다.'), { code: 'PROFILE_CHANGED' });
       }
       if (!result) throw new Error('다운로드한 클라우드 체크포인트가 올바르지 않습니다.');
+      return result;
+    },
+    async publishCheckpoint(sessionId, operationId) {
+      const profileEpoch = snapshot.profileEpoch;
+      const fn = resolvedApi?.cloudPublishCheckpoint;
+      if (typeof fn !== 'function') throw new Error('이 앱 빌드는 Cloud 원본 반영을 지원하지 않습니다.');
+      const result = parseCloudCheckpoint(await fn({ sessionId, ...(operationId ? { operationId } : {}) }));
+      if (profileEpoch !== snapshot.profileEpoch) {
+        throw Object.assign(new Error('Cloud 프로필이 작업 중 변경됐습니다.'), { code: 'PROFILE_CHANGED' });
+      }
+      if (!result) throw new Error('Cloud 원본 반영 결과가 올바르지 않습니다.');
       return result;
     },
     async openDisplay(sessionId, listener) {

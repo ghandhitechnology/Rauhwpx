@@ -537,10 +537,11 @@ test('persistent runSession stays warm between turns and finishes only after End
   const addedReferences = [];
   const turnModes = [];
   const workflowChanges = [];
+  const publications = [];
   let finishClaims = 0;
   let harnessCreates = 0;
   const client = {
-    event: async () => {},
+    event: async (type, payload) => { if (type === 'document.publish_requested') publications.push(payload); },
     upload: async (filename) => {
       const bytes = await fs.readFile(filename);
       return { id: createHash('sha256').update(bytes).digest('hex'), size: bytes.length };
@@ -576,9 +577,14 @@ test('persistent runSession stays warm between turns and finishes only after End
         start: async () => {},
         setWorkflow: async (workflow) => { workflowChanges.push(workflow); },
         addReferences: async (references) => { addedReferences.push(...references); },
-        runTurn: async (prompt) => {
+        runTurn: async (prompt, { onSafeBoundary }) => {
           prompts.push(prompt);
           await onEvent({ type: 'agent', event: { type: 'turn-start', agent: 'codex' } });
+          assert.equal(publications.length, 0, 'ordinary turns must not publish the origin');
+          if (prompts.length === 2) {
+            await onSafeBoundary({ tool: 'publish_cloud_document', ok: true });
+            assert.equal(publications.length, 0, 'publication waits for successful turn completion');
+          }
           const end = { type: 'turn-end', agent: 'codex', stopReason: 'end_turn' };
           await onEvent({ type: 'agent', event: end });
           return end;
@@ -613,6 +619,9 @@ test('persistent runSession stays warm between turns and finishes only after End
   assert.deepEqual(turnModes, ['direct', 'plan']);
   assert.equal(workflowChanges.at(-1), 'plan');
   assert.equal(finishClaims, 4);
+  assert.equal(publications.length, 1);
+  assert.equal(publications[0].turnNumber, 2);
+  assert.match(publications[0].operationId, /^turn_/);
   assert.equal(await fs.readFile(result.resultPath, 'utf8'), 'PERSISTENT-TURN-2');
 });
 

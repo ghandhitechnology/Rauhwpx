@@ -253,6 +253,7 @@ export class CloudCoordinator extends EventEmitter {
   #remoteWatchSequence = new Map();
   #timelinePending = new Map();
   #artifactSyncs = new Map();
+  #publicationChains = new Map();
   #transferAdmissionChain = Promise.resolve();
   #snapshotChain = Promise.resolve();
   #profileChangeChain = Promise.resolve();
@@ -2311,6 +2312,60 @@ export class CloudCoordinator extends EventEmitter {
     };
   }
 
+  publishCheckpoint(input) {
+    return this.#withProfileOperation((profileEpoch) => {
+      const key = `${profileEpoch}:${input.sessionId}`;
+      const previous = this.#publicationChains.get(key) ?? Promise.resolve();
+      const publication = previous.catch(() => {}).then(() => this.#publishCheckpoint(input, profileEpoch));
+      this.#publicationChains.set(key, publication);
+      return publication.finally(() => {
+        if (this.#publicationChains.get(key) === publication) this.#publicationChains.delete(key);
+      });
+    });
+  }
+
+  async #publishCheckpoint({ sessionId, operationId = null }, profileEpoch) {
+    const checkpoint = await this.#downloadCheckpoint({ sessionId, operationId }, profileEpoch);
+    const handoff = await this.#handoffForSession(sessionId, profileEpoch);
+    if (!handoff) throw new Error('Open the origin document on its origin device before publishing it');
+    if (operationId && checkpoint.operationId !== operationId) {
+      throw new Error('Downloaded checkpoint does not match the requested publication');
+    }
+    if (checkpoint.revision <= (handoff.lastPublishedRevision ?? -1)) {
+      return { ...checkpoint, publication: handoff.lastPublicationOutcome === 'conflict' ? 'conflict' : 'unchanged' };
+    }
+    const archivePath = path.join(
+      this.#recoveryDir, 'publications',
+      String(handoff.id).replace(/[^A-Za-z0-9_-]/g, '_'),
+      `revision-${checkpoint.revision}${path.extname(handoff.documentName) || '.hwpx'}`,
+    );
+    await writeVerifiedRecoveryFile({ filePath: archivePath, bytes: checkpoint.bytes, expectedDigest: checkpoint.sha256 });
+    this.#assertProfileEpoch(profileEpoch);
+    const resolution = handoff.originPath ? await applyCloudRecovery({
+      recoveryPath: archivePath,
+      resultDigest: checkpoint.sha256,
+      originalPath: handoff.originPath,
+      originalDigest: handoff.documentDigest,
+      action: 'replace',
+      resolutionId: checkpoint.operationId,
+    }) : null;
+    const publication = resolution?.conflict ? 'conflict'
+      : resolution?.action === 'replace' ? 'written' : 'archive-only';
+    const updated = await this.#store.patch(handoff.id, {
+      lastPublishedBoundaryOperation: checkpoint.operationId,
+      lastPublishedRevision: checkpoint.revision,
+      lastPublicationOutcome: publication,
+      ...(publication === 'written' ? { documentDigest: checkpoint.sha256, externalConflict: false } : {}),
+      ...(publication === 'conflict' ? { externalConflict: true } : {}),
+    });
+    this.#emit({ type: 'checkpoint-published', sessionId, operationId: checkpoint.operationId, publication, handoff: updated });
+    return {
+      ...checkpoint,
+      publication,
+      preservedCopyName: resolution?.conflict && resolution.path ? path.basename(resolution.path) : null,
+    };
+  }
+
   completeTakeover(input) {
     return this.#withProfileOperation((profileEpoch) => this.#completeTakeover(input, profileEpoch));
   }
@@ -2553,6 +2608,17 @@ export class CloudCoordinator extends EventEmitter {
           current = await this.#store.patch(handoffId, { pendingTurnBoundary });
         }
       }
+      let pendingOriginPublications = current.pendingOriginPublications ?? [];
+      if (event.type === 'document.publish_requested') {
+        if (typeof source.operationId !== 'string' || !/^[A-Za-z0-9._:-]{1,160}$/.test(source.operationId)) {
+          throw new Error('Cloud publication operation is invalid');
+        }
+        if (!pendingOriginPublications.includes(source.operationId)) {
+          pendingOriginPublications = [...pendingOriginPublications, source.operationId];
+          // Persist the explicit request before advancing the event cursor.
+          current = await this.#store.patch(handoffId, { pendingOriginPublications });
+        }
+      }
       const updated = await this.#store.applyEvent(handoffId, {
         sequence: event.sequence,
         state,
@@ -2575,6 +2641,7 @@ export class CloudCoordinator extends EventEmitter {
           currentWait,
           queuedMessages,
           pendingTurnBoundary,
+          pendingOriginPublications,
         },
       });
       this.#assertProfileEpoch(profileEpoch);
@@ -2585,7 +2652,8 @@ export class CloudCoordinator extends EventEmitter {
         handoff: updated,
       });
       if (event.type === 'timeline.updated' || state === 'completed') this.#timelinePending.set(sessionId, true);
-      if (updated?.pendingTurnBoundary || this.#timelinePending.get(sessionId) || state === 'completed') {
+      if (updated?.pendingTurnBoundary || updated?.pendingOriginPublications?.length
+        || this.#timelinePending.get(sessionId) || state === 'completed') {
         this.#scheduleArtifactSync(sessionId, handoffId, profileEpoch);
       }
       if (['downloaded', 'cancelled', 'expired', 'failed'].includes(updated?.state)) controller.abort();
@@ -3156,6 +3224,16 @@ export class CloudCoordinator extends EventEmitter {
         while (state.again && !this.#stopped) {
           state.again = false;
           if (handoffId) await this.#retryPendingTurnBoundary(sessionId, handoffId);
+          if (handoffId) {
+            const pending = (await this.#store.get(handoffId))?.pendingOriginPublications ?? [];
+            for (const operationId of pending) {
+              await this.publishCheckpoint({ sessionId, operationId });
+              const latest = await this.#store.get(handoffId);
+              await this.#store.patch(handoffId, {
+                pendingOriginPublications: (latest?.pendingOriginPublications ?? []).filter((id) => id !== operationId),
+              });
+            }
+          }
           if (this.#timelinePending.get(sessionId)) {
             this.#timelinePending.set(sessionId, false);
             try {
@@ -3223,17 +3301,6 @@ export class CloudCoordinator extends EventEmitter {
       bytes: checkpoint.bytes,
       expectedDigest: checkpoint.sha256,
     });
-    let resolution = null;
-    if (current.originPath) {
-      resolution = await applyCloudRecovery({
-        recoveryPath: archivePath,
-        resultDigest: checkpoint.sha256,
-        originalPath: current.originPath,
-        originalDigest: current.documentDigest,
-        action: 'replace',
-        resolutionId: boundary.operationId,
-      });
-    }
     const latest = await this.#store.get(handoffId);
     const archives = Array.isArray(latest?.turnArchives) ? latest.turnArchives : [];
     const turnArchives = [
@@ -3255,14 +3322,6 @@ export class CloudCoordinator extends EventEmitter {
       pendingTurnBoundary: latest?.pendingTurnBoundary?.operationId === boundary.operationId
         ? null : latest?.pendingTurnBoundary ?? null,
       turnArchives,
-      ...(resolution?.action === 'replace' ? {
-        documentDigest: checkpoint.sha256,
-        externalConflict: false,
-      } : {}),
-      ...(resolution?.conflict ? {
-        externalConflict: true,
-        resolvedPath: resolution.path,
-      } : {}),
     };
     const updated = await this.#store.patch(handoffId, patch);
     this.#emit({
@@ -3272,8 +3331,8 @@ export class CloudCoordinator extends EventEmitter {
       turn: boundary.turnNumber,
       revision: boundary.revision,
       archivePath,
-      originAction: resolution?.action ?? 'archive-only',
-      conflict: resolution?.conflict === true,
+      originAction: 'archive-only',
+      conflict: false,
       handoff: updated,
     });
     return updated;

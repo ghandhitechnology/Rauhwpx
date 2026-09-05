@@ -1193,6 +1193,7 @@ export class AgentBridgeImpl implements AgentBridge {
       loadTemplateBytes: (template) => this.downloadTemplateBytes(template),
       getDocumentSourcePath: () => getNativeFileSourcePath(deps.wasm.currentFileHandle),
       isReadOnly: deps.isReadOnly,
+      canPublishCloudDocument: deps.canPublishCloudDocument,
     });
 
     this.options = opts;

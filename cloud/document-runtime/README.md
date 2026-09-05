@@ -14,6 +14,8 @@ export async function runSession({ manifest, workspace, credentials, client, ses
 
 `manifest.resources` contains digest-verified local files. `client` records replayable events, checkpoints, turn boundaries, queued messages, suspension, and the final result. The returned timeline must contain the complete portable timeline after the final turn. The worker publishes it before completing the result. Studio owns document semantics and provider CLI execution.
 
+Checkpoints are archived automatically after operations and turns. Updating the origin file requires the user's **원본에 반영** action or the agent's `publish_cloud_document` tool. The tool requests publication after its turn succeeds; the runtime emits a durable `document.publish_requested` event pointing to that turn's checkpoint. Interrupted and failed turns do not publish. Publication preserves the active cloud conversation and checks the origin digest before replacing a file; external edits produce a separate recovery copy.
+
 ## Session display
 
 Each cloud session attempts one virtual desktop startup (`SessionDisplay` in `session-display.mjs`). The worker fixes the browser mode from that result before launching Studio. A ready display launches headed Chromium at the display's exact dimensions with its `DISPLAY` / `XAUTHORITY`; an unavailable display launches headless Chromium and never opens a frame capability for that harness.

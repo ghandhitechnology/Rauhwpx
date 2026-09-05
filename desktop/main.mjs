@@ -1413,6 +1413,24 @@ ipcMain.handle('cloud:download-checkpoint', async (event, payload) => {
   }
   return requireCloudCoordinator().downloadCheckpoint({ sessionId, operationId });
 });
+ipcMain.handle('cloud:publish-checkpoint', async (event, payload) => {
+  const session = sessionForEvent(event);
+  const sessionId = String(payload?.sessionId ?? '');
+  if (!/^[A-Za-z0-9_-]{8,128}$/.test(sessionId)) throw new Error('Invalid cloud session id');
+  const operationId = payload?.operationId == null ? null : String(payload.operationId);
+  if (operationId !== null && !/^[A-Za-z0-9._:-]{1,160}$/.test(operationId)) {
+    throw new Error('Invalid cloud checkpoint operation id');
+  }
+  const coordinator = requireCloudCoordinator();
+  return coordinator.withActiveHandoff(sessionId, async (handoff) => {
+    const lease = documentLeases.leaseForSession(session.sessionId);
+    if (!handoff || !lease || lease.identity.documentId !== handoff.originDocumentId
+      || lease.canonicalPath !== handoff.originPath) {
+      throw new Error('Open the origin document on its origin device before publishing it');
+    }
+    return coordinator.publishCheckpoint({ sessionId, operationId });
+  });
+});
 ipcMain.handle('cloud:display-open', async (event, payload = {}) => {
   sessionForEvent(event);
   const sessionId = String(payload?.sessionId ?? '');

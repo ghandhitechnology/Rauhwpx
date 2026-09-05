@@ -707,7 +707,7 @@ export async function createStudioHarness({
         let presentedPlan = null;
         let implementationStarted = execution.workflow !== 'plan';
         let interruptRequested = false;
-        const activeRootTools = new Set();
+        const activeRootTools = new Map();
         const interruptAtSafeBoundary = async () => {
           if (interruptRequested || typeof readControl !== 'function' || activeRootTools.size > 0) return;
           const control = await readControl();
@@ -745,12 +745,13 @@ export async function createStudioHarness({
             const agentEvent = entry.event?.type === 'agent' ? entry.event.event : null;
             if (agentEvent?.type === 'turn-start') sawStart = true;
             if (agentEvent?.type === 'tool-call' && !agentEvent.parentTaskId) {
-              activeRootTools.add(agentEvent.callId);
+              activeRootTools.set(agentEvent.callId, agentEvent.tool);
             }
             if (agentEvent?.type === 'tool-result' && !agentEvent.parentTaskId) {
+              const tool = activeRootTools.get(agentEvent.callId);
               activeRootTools.delete(agentEvent.callId);
               if (agentEvent.ok === true && typeof onSafeBoundary === 'function') {
-                await onSafeBoundary(agentEvent);
+                await onSafeBoundary({ ...agentEvent, tool });
               }
               await interruptAtSafeBoundary();
             }

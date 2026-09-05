@@ -19,6 +19,20 @@ export function cloudBoundaryOperation(raw: unknown): {
     : null;
 }
 
+/** Only the worker's durable publication request authorizes an origin write. */
+export function cloudPublicationOperation(raw: unknown): { sessionId: string; operationId: string } | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const host = raw as Record<string, unknown>;
+  if (typeof host.sessionId !== 'string' || !host.sessionId) return null;
+  if (!host.event || typeof host.event !== 'object' || Array.isArray(host.event)) return null;
+  const event = host.event as Record<string, unknown>;
+  if (event.type !== 'document.publish_requested' || !event.payload
+    || typeof event.payload !== 'object' || Array.isArray(event.payload)) return null;
+  const operationId = (event.payload as Record<string, unknown>).operationId;
+  return typeof operationId === 'string' && /^[A-Za-z0-9._:-]{1,160}$/.test(operationId)
+    ? { sessionId: host.sessionId, operationId } : null;
+}
+
 export function cloudTimelineBinding(
   session: CloudSessionState,
   timeline: PortableCloudTimelineV1 | null,

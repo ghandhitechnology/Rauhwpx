@@ -509,6 +509,7 @@ export async function runSession({
         const content = String(message.content ?? '').trim();
         if (!content) continue;
         const nextTurnNumber = turnNumber + 1;
+        let publishAfterTurn = false;
         await harness.setWorkflow?.(activeWorkflow);
         await materializeAttachments(message);
         recorder.acceptUserMessage(content, { messageId: message.id ?? null, initial: message.initial === true });
@@ -529,7 +530,10 @@ export async function runSession({
             readControl: typeof client.control === 'function' ? async () => (
               shouldStop() ? { redirectRequested: true } : client.control()
             ) : null,
-            onSafeBoundary: () => checkpointBoundary('operation'),
+            onSafeBoundary: async (event) => {
+              if (event?.tool === 'publish_cloud_document') publishAfterTurn = true;
+              return checkpointBoundary('operation');
+            },
           },
         );
         let outcome = await runProvider();
@@ -603,6 +607,13 @@ export async function runSession({
           return { suspended: true, timelinePath };
         }
         if (turnNumber >= maxTurns) await flushWorkspace();
+        if (publishAfterTurn && !redirected && !endedDuringWait) {
+          await client.event('document.publish_requested', {
+            operationId: boundary.operationId,
+            turnNumber,
+            revision: boundary.revision,
+          });
+        }
         const completed = await client.completeTurn({
           outcome: redirected ? 'redirected' : endedDuringWait ? 'stopped' : 'completed',
           boundaryOperationId: latestCheckpoint?.boundary.operationId ?? boundary.operationId,

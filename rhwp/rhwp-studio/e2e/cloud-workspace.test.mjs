@@ -73,6 +73,7 @@ function installDesktopCloudMock() {
   let cloudListener = null;
   let displayListener = null;
   let leaseOwned = false;
+  let publicationFailures = 0;
 
   const binding = (sessionId) => sessionId === editorSessionId
     ? {
@@ -96,7 +97,7 @@ function installDesktopCloudMock() {
     elapsedMs: 2_000,
     timeLimitMs: 120_000,
     currentActivity: 'editing',
-    phase: 'working',
+    phase: 'waiting',
     wait: null,
   });
   const snapshot = () => {
@@ -181,6 +182,7 @@ function installDesktopCloudMock() {
     calls,
     editorSessionId,
     selectedSessionId,
+    failNextPublication() { publicationFailures += 1; },
     activateLease() {
       leaseOwned = true;
       cloudListener?.({ snapshot: snapshot() });
@@ -253,6 +255,7 @@ function installDesktopCloudMock() {
       const bytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04]);
       return {
         sessionId: activeSessionId,
+        documentId: binding(activeSessionId).documentId,
         kind: 'turn',
         fileName: 'workspace-e2e.hwpx',
         sha256: 'b'.repeat(64),
@@ -262,6 +265,14 @@ function installDesktopCloudMock() {
         turn: 1,
         bytes,
       };
+    },
+    async cloudPublishCheckpoint(payload) {
+      record('cloudPublishCheckpoint', payload);
+      if (publicationFailures > 0) {
+        publicationFailures -= 1;
+        throw new Error('원본 파일을 저장할 수 없습니다.');
+      }
+      return { ...(await window.rhwpDesktop.cloudDownloadCheckpoint(payload)), publication: 'written' };
     },
     async cloudOpenDisplay(payload) {
       record('cloudOpenDisplay', payload);
@@ -443,6 +454,36 @@ try {
   if (process.env.CLOUD_WORKSPACE_SCREENSHOT) {
     await page.screenshot({ path: process.env.CLOUD_WORKSPACE_SCREENSHOT, fullPage: true });
   }
+
+  assert.equal(await page.evaluate(() => window.__cloudWorkspaceHarness.calls
+    .filter((call) => call.method === 'cloudPublishCheckpoint').length), 0);
+  await page.$eval('.ag-workspace-cloud-btn', (node) => node.click());
+  await page.waitForFunction(() => !document.querySelector('#ag-cloud-panel')?.hidden);
+  await page.evaluate(() => {
+    window.__cloudWorkspaceHarness.failNextPublication();
+    [...document.querySelectorAll('#ag-cloud-panel button')].find((button) => button.textContent === '원본에 반영').click();
+  });
+  await page.waitForFunction(() => window.__cloudWorkspaceHarness.calls
+    .filter((call) => call.method === 'cloudPublishCheckpoint').length === 1);
+  await page.waitForFunction(() => [...document.querySelectorAll('#ag-cloud-panel button')]
+    .some((button) => button.textContent === '원본에 반영' && !button.disabled));
+  await delay(100);
+  assert.equal(await page.evaluate(() => window.__cloudWorkspaceHarness.calls
+    .filter((call) => call.method === 'cloudPublishCheckpoint').length), 1, 'a failed write must not retry itself');
+  await page.evaluate(() => [...document.querySelectorAll('#ag-cloud-panel button')]
+    .find((button) => button.textContent === '원본에 반영').click());
+  await page.waitForFunction(() => window.__cloudWorkspaceHarness.calls
+    .filter((call) => call.method === 'cloudPublishCheckpoint').length === 2);
+  await page.waitForFunction(() => document.body.textContent.includes('Cloud 버전을 원본에 반영했습니다.'));
+  await page.waitForFunction(() => [...document.querySelectorAll('#ag-cloud-panel button')]
+    .some((button) => button.textContent === '원본에 반영' && !button.disabled));
+  assert.equal(await page.evaluate(() => document.querySelector('#cloud-workspace').inert), false);
+  assert.equal(await page.evaluate(() => window.__cloudWorkspaceHarness.calls
+    .filter((call) => call.method === 'cloudCloseDisplay' || call.method === 'cloudCommand').length), 0);
+  if (process.env.CLOUD_PUBLICATION_SCREENSHOT) {
+    await page.screenshot({ path: process.env.CLOUD_PUBLICATION_SCREENSHOT, fullPage: true });
+  }
+  await page.$eval('.ag-cloud-panel-close', (node) => node.click());
 
   await page.select('.ag-cloud-session-select', 'session-cloud-b');
   await page.waitForFunction(() => document.querySelector('.ag-messages')?.textContent?.includes('Cloud transcript B mounted'));

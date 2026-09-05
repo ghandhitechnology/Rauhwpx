@@ -31,12 +31,14 @@ import type {
 } from '../../cloud/authority-transition.ts';
 import {
   cloudBoundaryOperation,
+  cloudPublicationOperation,
   cloudEventMatchesBinding,
   cloudTimelineBinding,
   createSessionSelectionFence,
   runCloudSessionSelection,
 } from '../../cloud/session-binding.ts';
 import { createCheckpointMirror } from '../../cloud/checkpoint-mirror.ts';
+import { createCheckpointPublisher } from '../../cloud/checkpoint-publisher.ts';
 import { createCloudOnboarding } from './cloud-onboarding.ts';
 import { createIcon } from './icons.ts';
 
@@ -145,7 +147,7 @@ export interface CloudAgentUiDeps {
   onCloudBinding(binding: CloudWorkspaceBinding | null): void;
   onTimeline(binding: CloudWorkspaceBinding, timeline: PortableCloudTimelineV1): boolean;
   onAgentEvent(binding: CloudWorkspaceBinding, event: AgentStreamEvent): void;
-  onCheckpoint(checkpoint: CloudCheckpointPayload): void | Promise<void>;
+  onCheckpointPublished(checkpoint: CloudCheckpointPayload): void | Promise<void>;
   onResultResolved(result: CloudDownloadResult, resolution: CloudResultResolution): void | Promise<void>;
   onBeforeTakeover(): Promise<boolean>;
   onTakeover(takeover: CloudTakeoverPayload): Promise<{ documentId: string; fileName: string } | null>;
@@ -216,7 +218,11 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   const liveSequence = new Map<string, number>();
   const checkpointMirror = createCheckpointMirror({
     download: (sessionId, operationId) => deps.controller.downloadCheckpoint(sessionId, operationId),
-    apply: deps.onCheckpoint,
+    apply: () => {},
+  });
+  const checkpointPublisher = createCheckpointPublisher({
+    publish: (sessionId, operationId) => deps.controller.publishCheckpoint(sessionId, operationId),
+    apply: deps.onCheckpointPublished,
   });
   let checkpointProfileEpoch = snapshot.profileEpoch;
 
@@ -637,6 +643,12 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     });
   }
 
+  function publishCheckpoint(): void {
+    const session = snapshot.session;
+    if (session.kind === 'idle') return;
+    void operation(() => checkpointPublisher.publish(session.sessionId));
+  }
+
   function renderPanel(): void {
     const activeSessionId = snapshot.session.kind === 'idle' ? null : snapshot.session.sessionId;
     if (!selectedSessionId && activeSessionId) selectedSessionId = activeSessionId;
@@ -783,6 +795,9 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
             ? '안전한 경계에서 방향을 바꾸는 중입니다.'
             : session.currentActivity || `${serverLabel(snapshot)}에서 작업 중입니다.`;
         panelDetail.textContent = `${session.turn}/${session.turnLimit}턴 · ${formatDuration(session.elapsedMs)} / ${formatDuration(session.timeLimitMs)}`;
+        if (session.phase === 'waiting' && session.turn > 0) {
+          panelActions.append(action('원본에 반영', publishCheckpoint, 'ag-primary'));
+        }
         if (session.phase === 'working') {
           const redirect = el('textarea', 'ag-cloud-wait-feedback') as HTMLTextAreaElement;
           redirect.rows = 2;
@@ -809,6 +824,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       case 'suspended':
         panelStatus.textContent = '클라우드 작업이 멈췄습니다.';
         panelDetail.textContent = session.reason;
+        panelActions.append(action('원본에 반영', publishCheckpoint));
         if (session.resumable) panelActions.append(action('다시 시작', () => command('resume'), 'ag-primary'));
         panelActions.append(action('이 기기에서 이어받기', () => command('takeover')));
         panelActions.append(action('대화 끝내기', () => command('end'), 'ag-danger'));
@@ -1044,6 +1060,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     if (profileChanged) {
       checkpointProfileEpoch = next.profileEpoch;
       checkpointMirror.reset();
+      checkpointPublisher.reset();
       selectionFence.invalidate();
       liveSequence.clear();
       const previousId = snapshot.session.kind === 'idle' ? null : snapshot.session.sessionId;
@@ -1063,6 +1080,16 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     render();
   });
   const unsubscribeEvents = deps.controller.subscribeEvents((raw) => {
+    const publication = cloudPublicationOperation(raw);
+    if (publication) {
+      const session = snapshot.sessions.find((entry) => entry.sessionId === publication.sessionId);
+      if (!session || session.documentId !== deps.getScope().documentId) return;
+      void checkpointPublisher.publish(publication.sessionId, publication.operationId).catch((error) => {
+        if (error instanceof DOMException && error.name === 'AbortError') return;
+        deps.onError(error instanceof Error ? error.message : String(error));
+      });
+      return;
+    }
     const boundary = cloudBoundaryOperation(raw);
     if (boundary) {
       mirrorCheckpoint(boundary.sessionId, boundary.operationId);
@@ -1199,6 +1226,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       pendingResultReplace?.state.transition.release();
       pendingResultReplace = null;
       checkpointMirror.dispose();
+      checkpointPublisher.dispose();
       unsubscribe();
       unsubscribeEvents();
       onboarding.dispose();

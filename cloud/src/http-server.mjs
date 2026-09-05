@@ -5,6 +5,7 @@ import {
   CloudError,
   DEFAULT_LIMITS,
   PROTOCOL_VERSION,
+  ROOM_PROTOCOL_VERSION,
   TRANSFER_LIMITS,
   parseCommand,
   parseDownloadConfirmation,
@@ -214,6 +215,7 @@ export function createCloudHttpHandler({
           ok: true,
           version: SERVICE_VERSION,
           protocolVersion: PROTOCOL_VERSION,
+          conversationProtocolVersion: ROOM_PROTOCOL_VERSION,
           serverPublicKey: identity.serverPublicKey,
           serverId: identity.serverId,
         });

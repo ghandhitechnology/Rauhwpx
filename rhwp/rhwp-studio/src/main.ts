@@ -1,7 +1,7 @@
 import { WasmBridge, type PreparedWasmDocument } from '@/core/wasm-bridge';
 import { FALLBACK_DOCUMENT_FILE_NAME } from '@/core/document-names';
 import type { DocumentInfo } from '@/core/types';
-import { browserOriginSyncDigest, setBrowserOriginSyncDigest } from '@/cloud/browser-cloud';
+import { browserOriginSyncDigest, browserOriginPublishedRevision, setBrowserOriginSyncDigest } from '@/cloud/browser-cloud';
 import { EventBus } from '@/core/event-bus';
 import { assertRemoteDocumentBytes } from '@/core/document-signature';
 import { consumeExactLocalFileRead } from '@/core/local-file-grant';
@@ -404,6 +404,8 @@ async function prepareCloudTransferDocument() {
  * requires loopback origin, an explicit query flag, and a per-session 256-bit
  * bootstrap secret. Normal web and desktop builds therefore expose nothing.
  */
+let cloudDocumentPublishingEnabled = false;
+
 function installCloudDocumentRuntimeApi(agentBridge: AgentBridge): void {
   const cloudBuild = (import.meta as ImportMeta & { env?: Record<string, string | undefined> })
     .env?.['VITE_RHWP_CLOUD_RUNTIME'] === '1';
@@ -414,6 +416,7 @@ function installCloudDocumentRuntimeApi(agentBridge: AgentBridge): void {
   const params = new URLSearchParams(window.location.search);
   const bootstrap = params.get('bootstrap') ?? '';
   if (!cloudBuild || !loopback || params.get('cloudRuntime') !== '1' || bootstrap.length < 43) return;
+  cloudDocumentPublishingEnabled = true;
 
   let eventSequence = 0;
   let exportedBytes: Uint8Array | null = null;
@@ -699,41 +702,36 @@ async function applyCloudTakeover(takeover: CloudTakeoverPayload): Promise<{
   return { documentId: activeDocumentId, fileName: takeover.document.fileName };
 }
 
-async function persistCloudCheckpoint(checkpoint: CloudCheckpointPayload): Promise<void> {
-  if (!activeDocumentId || wasm.pageCount === 0) return;
-  const currentHandle = wasm.currentFileHandle;
-  if (['turn', 'operation'].includes(checkpoint.kind) && checkpointMatchesActiveDocument(checkpoint, activeDocumentId)) {
-    try {
-      const outcome = await persistCheckpointToBrowserOrigin({
-        handle: currentHandle,
-        bytes: checkpoint.bytes,
-        sha256: checkpoint.sha256,
-        expectedSha256: browserOriginSyncDigest(checkpoint.sessionId)
-          ?? checkpoint.expectedOriginSha256
-          ?? null,
-        digest: bytesToSha256,
-      });
-      if (outcome === 'unchanged' || outcome === 'written') {
-        setBrowserOriginSyncDigest(checkpoint.sessionId, checkpoint.sha256);
-      } else if (outcome === 'conflict') {
-        showToast({
-          message: '원본이 다른 곳에서 변경되어 덮어쓰지 않았습니다. Cloud 버전은 로컬 보관함에 유지됩니다.',
-          durationMs: 5000,
-        });
-      } else if (outcome === 'permission-denied') {
-        showToast({
-          message: '브라우저 원본 쓰기 권한이 없어 Cloud 버전을 로컬 보관함에 저장했습니다.',
-          durationMs: 4500,
-        });
-      }
-    } catch (error) {
-      showToast({
-        message: `Cloud 원본 자동 저장에 실패했습니다: ${error instanceof Error ? error.message : String(error)}`,
-        durationMs: 5000,
-      });
-      throw error;
+async function publishCloudCheckpoint(checkpoint: CloudCheckpointPayload): Promise<void> {
+  let outcome = checkpoint.publication;
+  if (!outcome) {
+    if (!activeDocumentId || wasm.pageCount === 0
+      || !checkpointMatchesActiveDocument(checkpoint, activeDocumentId)) {
+      throw new Error('원본 문서를 연 기기에서 Cloud 버전을 반영해 주세요.');
+    }
+    const lastPublishedRevision = browserOriginPublishedRevision(checkpoint.sessionId);
+    if (lastPublishedRevision !== null && checkpoint.revision <= lastPublishedRevision) return;
+    const saved = await persistCheckpointToBrowserOrigin({
+      handle: wasm.currentFileHandle,
+      bytes: checkpoint.bytes,
+      sha256: checkpoint.sha256,
+      expectedSha256: browserOriginSyncDigest(checkpoint.sessionId) ?? checkpoint.expectedOriginSha256 ?? null,
+      digest: bytesToSha256,
+    });
+    if (saved === 'permission-denied') {
+      throw new Error('원본 파일의 쓰기 권한을 허용한 뒤 다시 반영해 주세요.');
+    }
+    outcome = saved;
+    if (outcome === 'unchanged' || outcome === 'written') {
+      setBrowserOriginSyncDigest(checkpoint.sessionId, checkpoint.sha256, checkpoint.revision);
     }
   }
+  const message = outcome === 'conflict'
+    ? '원본이 다른 곳에서 변경되었습니다. Cloud 버전은 별도 사본으로 보관했습니다.'
+    : outcome === 'archive-only'
+      ? 'Cloud 버전을 보관했습니다. 원본 파일을 열어 반영해 주세요.'
+      : 'Cloud 버전을 원본에 반영했습니다.';
+  showToast({ message, durationMs: 4000 });
 }
 
 /** 렌더러 초기화 후에 생성되는 에이전트 브리지 — 저장 가드가 대기 편집을 조회한다. */
@@ -1159,6 +1157,7 @@ async function initialize(): Promise<void> {
     // 선택(opt-in) 기능이므로 여기서 실패해도 렌더러 초기화를 실패로 만들지 않는다.
     try {
       const agentBridge = initAgentBridge({
+        canPublishCloudDocument: () => cloudDocumentPublishingEnabled,
         wasm,
         eventBus,
         inputHandler,
@@ -1212,7 +1211,7 @@ async function initialize(): Promise<void> {
         prepareCloudTakeover: () => confirmSaveBeforeReplacingDocument(commandServices),
         setCloudDocumentLease,
         applyCloudResult,
-        persistCloudCheckpoint,
+        publishCloudCheckpoint,
         applyCloudTakeover,
       });
       disposeAgentSidebar = () => {

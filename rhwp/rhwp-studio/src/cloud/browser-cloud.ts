@@ -379,11 +379,24 @@ export function browserOriginSyncDigest(sessionId: string): string | null {
   return value && /^[a-f0-9]{64}$/.test(value) ? value : null;
 }
 
-export function setBrowserOriginSyncDigest(sessionId: string, digest: string): void {
+export function browserOriginPublishedRevision(sessionId: string): number | null {
+  const storage = safeStorage();
+  const profile = storage ? storedProfile(storage) : null;
+  const raw = storage && profile ? storage.getItem(`${originSyncKey(profile, sessionId)}.revision`) : null;
+  const revision = raw === null ? NaN : Number(raw);
+  return Number.isSafeInteger(revision) && revision >= 0 ? revision : null;
+}
+
+export function setBrowserOriginSyncDigest(sessionId: string, digest: string, revision?: number): void {
   if (!/^[a-f0-9]{64}$/.test(digest)) return;
   const storage = safeStorage();
   const profile = storage ? storedProfile(storage) : null;
-  if (storage && profile) storage.setItem(originSyncKey(profile, sessionId), digest);
+  if (storage && profile) {
+    storage.setItem(originSyncKey(profile, sessionId), digest);
+    if (Number.isSafeInteger(revision) && Number(revision) >= 0) {
+      storage.setItem(`${originSyncKey(profile, sessionId)}.revision`, String(revision));
+    }
+  }
 }
 
 export const __test = { serverNamespace, archiveId, originSyncKey, takeoverCompleteKey };
@@ -1049,7 +1062,7 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
       originOnThisDevice: String(remote?.originDeviceId ?? '') === ownDeviceId(),
       expectedOriginSha256: storage.getItem(originSyncKey(selectedProfile, sessionId)) ?? undefined,
     };
-    if (boundaryKind === 'turn') {
+    if (boundaryKind === 'turn' || boundaryKind === 'operation') {
       await putArchive({
         id: archiveId(selectedProfile, sessionId, boundaryOperation),
         sessionId,
@@ -1518,6 +1531,12 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
       if (!profile || !tokens) throw new Error('Cloud 페어링이 필요합니다.');
       const selectedProfile = profile;
       const generation = profileGeneration;
+      const health = await requestJson('/v1/health', { selectedProfile });
+      if (health.conversationProtocolVersion !== 2) {
+        throw Object.assign(new Error('Cloud 서버를 업데이트한 뒤 대화를 시작해 주세요.'), {
+          code: 'CLOUD_RUNTIME_OUTDATED', retryable: false,
+        });
+      }
       const startId = typeof input.startId === 'string' ? input.startId.trim() : '';
       const sessionId = /^[A-Za-z0-9_-]{8,128}$/.test(startId) ? startId : randomId('pwa_');
       const existing = remoteSessions.find((session) => session.id === sessionId);
@@ -1732,6 +1751,9 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
       return snapshot();
     }),
     cloudDownloadCheckpoint: (payload: { sessionId: string; operationId?: string }) => readProfile(
+      () => downloadCheckpoint(payload.sessionId, payload.operationId),
+    ),
+    cloudPublishCheckpoint: (payload: { sessionId: string; operationId?: string }) => readProfile(
       () => downloadCheckpoint(payload.sessionId, payload.operationId),
     ),
     cloudOpenDisplay: (payload: { sessionId: string }) => readProfile(() => displayManager.open(payload)),

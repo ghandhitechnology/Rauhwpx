@@ -69,6 +69,27 @@ test('desktop result download holds one coordinator profile lease through previe
 const SERVER_IDENTITY = generateKeyPairSync('ed25519');
 const SERVER_KEY = `ed25519:${SERVER_IDENTITY.publicKey.export({ type: 'spki', format: 'der' }).toString('base64url')}`;
 
+test('persistent transfer rejects a one-turn worker before uploading or activating a session', async () => {
+  const requests = [];
+  const profile = normalizeCloudProfile({
+    endpoint: 'https://cloud.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'cloud.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const client = new CloudClient({
+    vault: memoryVault({ 'cloud.profile': JSON.stringify(profile) }),
+    fetchImpl: signedFetch(async (url) => {
+      requests.push(new URL(url).pathname);
+      return jsonResponse({ ok: true, protocolVersion: 1 });
+    }),
+  });
+  await assert.rejects(client.transfer({
+    sessionId: 'persistent-start', provider: 'codex', persistent: true,
+    documentName: 'source.hwpx', documentBytes: Buffer.from('document'), timeline: cloudStartTransfer().timeline,
+  }), { code: 'CLOUD_RUNTIME_OUTDATED', retryable: false });
+  assert.deepEqual(requests, ['/rauhwpx-cloud/v1/health']);
+});
+
 function signedFetch(handler, identity = SERVER_IDENTITY) {
   const serverKey = `ed25519:${identity.publicKey.export({ type: 'spki', format: 'der' }).toString('base64url')}`;
   return async (url, options = {}) => {
@@ -271,7 +292,7 @@ test('backend SSE payload advances the durable desktop handoff', async (t) => {
   assert.equal(record.completedAt, completedAt);
 });
 
-test('each stable turn archives exact bytes and atomically advances an unchanged origin', async (t) => {
+test('each stable turn archives exact bytes without overwriting the origin or ending the conversation', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-turn-autosync-'));
   const originPath = path.join(directory, 'source.hwpx');
   const original = Buffer.from('original document');
@@ -339,14 +360,23 @@ test('each stable turn archives exact bytes and atomically advances an unchanged
     if (record.lastSyncedBoundaryOperation === 'turn_1_stable') break;
     await delay(10);
   }
-  assert.equal(await readFile(originPath, 'utf8'), edited.toString());
-  assert.equal(record.documentDigest, editedDigest);
+  assert.equal(await readFile(originPath, 'utf8'), original.toString());
+  assert.equal(record.documentDigest, createHash('sha256').update(original).digest('hex'));
+  assert.equal(record.state, 'running');
   assert.equal(record.turnArchives.length, 1);
   assert.equal(record.turnArchives[0].operationId, 'turn_1_stable');
   assert.equal(await readFile(record.turnArchives[0].path, 'utf8'), edited.toString());
+
+  const published = await coordinator.publishCheckpoint({ sessionId: 'cloud-autosync', operationId: 'turn_1_stable' });
+  assert.equal(published.publication, 'written');
+  assert.equal(await readFile(originPath, 'utf8'), edited.toString());
+  assert.equal((await store.get(created.id)).state, 'running');
+  assert.equal((await store.get(created.id)).documentDigest, editedDigest);
+  const repeated = await coordinator.publishCheckpoint({ sessionId: 'cloud-autosync', operationId: 'turn_1_stable' });
+  assert.equal(repeated.publication, 'unchanged');
 });
 
-test('a persisted turn-boundary receipt retries after restart without duplicating origin sync', async (t) => {
+test('a persisted turn-boundary receipt retries after restart without writing the origin', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-turn-receipt-'));
   const storePath = path.join(directory, 'handoffs.json');
   const originPath = path.join(directory, 'source.hwpx');
@@ -445,7 +475,7 @@ test('a persisted turn-boundary receipt retries after restart without duplicatin
   assert.equal(record.pendingTurnBoundary, null);
   assert.equal(record.lastSyncedBoundaryOperation, boundary.operationId);
   assert.equal(record.turnArchives.length, 1);
-  assert.equal(await readFile(originPath, 'utf8'), edited.toString());
+  assert.equal(await readFile(originPath, 'utf8'), original.toString());
   assert.equal(await readFile(record.turnArchives[0].path, 'utf8'), edited.toString());
   assert.equal(successfulDownloads, 1);
 });
@@ -3298,6 +3328,80 @@ test('slow checkpoint mirroring lets later events through and preserves the newe
     await delay(5);
   }
   assert.equal((await store.get(created.id)).pendingTurnBoundary, null);
-  assert.equal(await readFile(originPath, 'utf8'), 'revision-2');
+  assert.equal(await readFile(originPath, 'utf8'), original.toString());
   assert.deepEqual(downloads, ['revision-1', 'revision-2']);
+});
+
+async function publicationFixture(t) {
+  const directory = await mkdtemp(path.join(tmpdir(), 'raucloud-publication-'));
+  const originPath = path.join(directory, 'original.hwpx');
+  await writeFile(originPath, 'original');
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const created = await store.create({
+    sessionId: 'desktop-publish', threadId: 'thread-publish', documentId: 'document-publish',
+    originPath, documentName: 'original.hwpx', documentBytes: Buffer.from('original'),
+    timeline: null, provider: 'codex', limits: { maxTurns: 10 },
+  });
+  await store.transition(created.id, 'uploading');
+  await store.transition(created.id, 'committing');
+  await store.transition(created.id, 'running', { cloudSessionId: 'cloud-publish', serverVersion: 1 });
+  const ready = Promise.withResolvers();
+  let deliver;
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => null, isPaired: async () => false,
+      downloadCheckpoint: async (_id, { operationId }) => {
+        const revision = operationId === 'turn-1' ? 1 : 2;
+        const bytes = Buffer.from(`cloud revision ${revision}`);
+        return { bytes, size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'),
+          name: 'original.hwpx', boundaryOperation: operationId ?? 'turn-2', boundaryKind: 'turn', revision, turn: revision };
+      },
+      watchSession: async (_id, _after, { onEvent, signal }) => {
+        deliver = onEvent;
+        ready.resolve();
+        if (!signal.aborted) await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+      },
+    }, store, provisioner: {}, recoveryDir: path.join(directory, 'recovery'),
+  });
+  t.after(async () => { await coordinator.stop(); await store.flush(); await rm(directory, { recursive: true, force: true }); });
+  await coordinator.start();
+  await ready.promise;
+  const waitFor = async (predicate) => {
+    for (let i = 0; i < 100; i++) {
+      const record = await store.get(created.id);
+      if (predicate(record)) return record;
+      await delay(5);
+    }
+    assert.fail('publication did not settle');
+  };
+  return { coordinator, store, id: created.id, originPath, deliver, waitFor };
+}
+
+test('an explicit agent publication updates once and later turns keep the cloud conversation running', async (t) => {
+  const fixture = await publicationFixture(t);
+  await fixture.deliver({ sequence: 1, type: 'document.publish_requested', payload: { operationId: 'turn-1' } });
+  await fixture.waitFor((record) => record.lastPublishedRevision === 1 && record.pendingOriginPublications.length === 0);
+  assert.equal(await readFile(fixture.originPath, 'utf8'), 'cloud revision 1');
+  await fixture.deliver({ sequence: 2, type: 'boundary.committed', payload: { kind: 'turn', operationId: 'turn-2', revision: 2, turnNumber: 2 } });
+  const archived = await fixture.waitFor((record) => record.lastSyncedRevision === 2);
+  assert.equal(archived.state, 'running');
+  assert.equal(await readFile(fixture.originPath, 'utf8'), 'cloud revision 1');
+  await fixture.coordinator.publishCheckpoint({ sessionId: 'cloud-publish', operationId: 'turn-2' });
+  await fixture.deliver({ sequence: 3, type: 'document.publish_requested', payload: { operationId: 'turn-1' } });
+  const replayed = await fixture.waitFor((record) => record.pendingOriginPublications.length === 0);
+  assert.equal(replayed.lastPublishedRevision, 2);
+  assert.equal(replayed.state, 'running');
+  assert.equal(await readFile(fixture.originPath, 'utf8'), 'cloud revision 2');
+});
+
+test('publication preserves an externally edited origin without ending or taking over the cloud session', async (t) => {
+  const fixture = await publicationFixture(t);
+  await writeFile(fixture.originPath, 'external edit');
+  const published = await fixture.coordinator.publishCheckpoint({ sessionId: 'cloud-publish', operationId: 'turn-1' });
+  assert.equal(published.publication, 'conflict');
+  assert.equal(await readFile(fixture.originPath, 'utf8'), 'external edit');
+  assert.equal(await readFile(path.join(path.dirname(fixture.originPath), published.preservedCopyName), 'utf8'), 'cloud revision 1');
+  assert.equal((await fixture.store.get(fixture.id)).state, 'running');
+  const again = await fixture.coordinator.publishCheckpoint({ sessionId: 'cloud-publish', operationId: 'turn-1' });
+  assert.equal(again.publication, 'conflict');
 });

@@ -191,6 +191,11 @@ async function waitFor(predicate, message, timeoutMs = 5_000) {
 }
 
 test('local runner isolates each session workspace and cleans it up on stop', async (t) => {
+  const kill = process.kill.bind(process);
+  t.mock.method(process, 'kill', (pid, signal) => {
+    if (pid !== -4242) return kill(pid, signal);
+    throw Object.assign(new Error('Fake child has no process group'), { code: 'ESRCH' });
+  });
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-local-runner-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
   const config = {

@@ -259,6 +259,8 @@ export interface CloudCheckpointPayload extends CloudDocumentPayload {
   sessionId: string;
   documentId: string | null;
   kind: 'handoff' | 'operation' | 'turn';
+  publication?: 'written' | 'unchanged' | 'conflict' | 'archive-only';
+  preservedCopyName?: string | null;
   originOnThisDevice?: boolean;
   expectedOriginSha256?: string;
   byteLength: number;
