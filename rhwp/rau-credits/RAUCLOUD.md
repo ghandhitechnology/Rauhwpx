@@ -30,7 +30,7 @@ Only the broker reconciler uses `CLOUD_WORKER_SECRET`. Do not add it to a user w
 - 60 billed minutes per account-local quota window. A positive balance can start a turn.
 - A turn that reaches zero may run for 30 more minutes to finish its current response. That extra time is deducted from the next quota window. Midnight does not extend the 30-minute deadline.
 - Three confirmed cold starts per rolling 15 minutes and 12 per account-local window. Idempotent retries and warm reuse do not count.
-- Ready and warm workers expire after five unbilled minutes. If deletion fails, the account remains in `tearing_down`. New allocation stays blocked until a reconciler confirms deletion.
+- Ready and warm workers expire after 20 unbilled idle minutes. Accepted workspace activity renews the 20-minute window. If deletion fails, the account remains in `tearing_down`. New allocation stays blocked until a reconciler confirms deletion.
 - An allocating worker may take up to 30 minutes before the broker expires its reservation. This covers Railway deployment and worker-health deadlines without holding the public create request open.
 - An account may change its timezone once every 30 days. The change takes effect at the current quota window's end, so changing timezone cannot trigger an early reset.
 - The service stores checkpoint IDs, not checkpoint files. Cross-worker takeover and 30-day retention require encrypted artifact storage, restore verification before teardown, and expired-file deletion.

@@ -77,6 +77,45 @@ test('provisioning and warm idle are unbilled, and repeated allocation requests 
 const REMOTE = { providerId: 'railway', serviceId: 'service-1', projectId: 'project-1', environmentId: 'environment-1' };
 const RECEIPT = { endpoint: 'https://worker.up.railway.app/rauhwpx-cloud', serverPublicKey: `ed25519:${'A'.repeat(43)}`, pairingCode: 'ABCD-EFGH-JKLM' };
 
+for (const workerStatus of ['ready', 'warm']) {
+  for (const renew of [false, true]) {
+    test(`${workerStatus} worker expires after 20 unbilled idle minutes${renew ? ' from workspace activity' : ''}`, async () => {
+      const at = Date.parse('2026-09-05T10:00:00Z');
+      const deleted = [];
+      const setup = fixture({ at, provisioner: {
+        provision: async () => ({ remote: REMOTE, receipt: RECEIPT }),
+        teardown: async (remote) => { deleted.push(remote.serviceId); return { removed: true }; },
+      } });
+      const created = await setup.create();
+      await setup.waitFor((state) => state.raucloud.accounts['account-1'].worker?.status === 'ready');
+      if (workerStatus === 'warm') {
+        await setup.broker.confirmCloudAllocation('worker-secret', created.run.id);
+        await setup.broker.completeCloudRun('worker-secret', created.run.id);
+      }
+      assert.equal((await setup.status(created.run.id)).worker.warmUntil, at + 20 * 60_000);
+
+      if (renew) {
+        setup.advance(10 * 60_000);
+        const touched = await setup.broker.touchCloudWorkspace('worker-secret', created.run.id);
+        assert.equal(touched.worker.warmUntil, at + 30 * 60_000);
+      }
+      setup.advance(20 * 60_000 - 1);
+      await setup.broker.reconcileCloudUsage();
+      const retained = await setup.status(created.run.id);
+      assert.equal(retained.worker.status, workerStatus);
+      assert.equal(retained.quota.usedMs, 0);
+      assert.deepEqual(deleted, []);
+
+      setup.advance(1);
+      await setup.broker.reconcileCloudUsage();
+      const expired = await setup.status(created.run.id);
+      assert.equal(expired.worker, null);
+      assert.equal(expired.quota.usedMs, 0);
+      assert.deepEqual(deleted, ['service-1']);
+    });
+  }
+}
+
 for (const cancellation of ['force-quit', 'allocation-expired']) {
   test(`${cancellation} stops a late remote callback before further provisioning`, async () => {
     const createdRemote = Promise.withResolvers();
