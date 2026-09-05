@@ -1,6 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { BrowserbaseSession } from '../browserbase-session.mjs';
+import { readFileSync } from 'node:fs';
+import {
+  BrowserbaseSession,
+  BrowserbaseFleet,
+  MAIN_BROWSER_ID,
+  credentialFingerprint,
+  normalizeBrowserbaseOverride,
+  resolveBrowserbaseCredentials,
+  validateBrowserbaseCredentials,
+} from '../browserbase-session.mjs';
 
 test('Browserbase serializes actions that share a remote session', async () => {
   const browser = new BrowserbaseSession({ env: {} });
@@ -58,6 +67,309 @@ test('Browserbase fails before sidecar startup with actionable missing credentia
       && /BROWSERBASE_PROJECT_ID/.test(error.message)
       && /GEMINI_API_KEY/.test(error.message),
   );
+});
+
+// ── 자격 증명 해석 · 검증 · 브라우저 묶음 ─────────────────────────────
+const FULL_ENV = { BROWSERBASE_API_KEY: 'bb_env_1234', BROWSERBASE_PROJECT_ID: 'proj-env', GEMINI_API_KEY: 'gem-env' };
+
+/** 사이드카 대신 쓰는 가짜 세션 — 호출만 기록한다. */
+function fakeSession(calls, options) {
+  return {
+    label: options.label,
+    client: null,
+    getCredentials: options.credentials,
+    async call(chatId, name, args) {
+      this.client = name === 'end' ? null : {};
+      calls.push({ browser: options.label, chatId, name, args, key: options.credentials().apiKey.value });
+      return { mcpContent: [{ type: 'text', text: 'ok' }] };
+    },
+    async cleanup(reason) {
+      this.client = null;
+      calls.push({ browser: options.label, name: 'cleanup', reason });
+    },
+  };
+}
+
+test('studio override wins per field and falls back to the environment elsewhere', () => {
+  const resolved = resolveBrowserbaseCredentials({ env: FULL_ENV, override: { apiKey: ' bb_studio_9999 ', projectId: '' } });
+  assert.deepEqual(resolved.apiKey, { value: 'bb_studio_9999', source: 'studio' });
+  assert.deepEqual(resolved.projectId, { value: 'proj-env', source: 'env' });
+  assert.deepEqual(resolved.geminiApiKey, { value: 'gem-env', source: 'env' });
+  assert.equal(normalizeBrowserbaseOverride({ apiKey: '  ', projectId: '' }), null);
+  assert.deepEqual(normalizeBrowserbaseOverride({ apiKey: 'k', geminiApiKey: 'g', extra: 'x' }), { apiKey: 'k', geminiApiKey: 'g' });
+  assert.throws(() => normalizeBrowserbaseOverride({ apiKey: 'bad\nkey' }), (error) => error.code === 'BROWSERBASE_INVALID_CREDENTIALS');
+});
+
+test('fleet status exposes sources and key tail but never the key itself', async () => {
+  const fleet = new BrowserbaseFleet({ env: FULL_ENV, createSession: (options) => fakeSession([], options) });
+  let status = fleet.status();
+  assert.equal(status.configured, true);
+  assert.equal(status.keySource, 'env');
+  assert.equal(status.keyTail, '1234');
+  assert.equal(status.projectId, 'proj-env');
+  status = await fleet.setOverride({ apiKey: 'bb_studio_9999', projectId: 'proj-studio' });
+  assert.equal(status.keySource, 'studio');
+  assert.equal(status.keyTail, '9999');
+  assert.equal(status.projectSource, 'studio');
+  assert.equal(status.geminiSource, 'env');
+  assert.doesNotMatch(JSON.stringify(status), /bb_studio_9999|bb_env_1234/);
+  status = await fleet.setOverride(null);
+  assert.equal(status.keySource, 'env');
+  const bare = new BrowserbaseFleet({ env: {} }).status();
+  assert.equal(bare.configured, false);
+  assert.deepEqual(bare.missing, ['BROWSERBASE_API_KEY', 'BROWSERBASE_PROJECT_ID', 'GEMINI_API_KEY']);
+});
+
+function apiResponse(status, body) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    async text() { return typeof body === 'string' ? body : JSON.stringify(body); },
+  };
+}
+
+test('validateBrowserbaseCredentials discovers a project when only the key is supplied', async () => {
+  const seen = [];
+  const fetchImpl = async (url, init) => {
+    seen.push({ url, key: init.headers['X-BB-API-Key'] });
+    if (init.headers['X-BB-API-Key'] !== 'good') return apiResponse(401, { message: 'Unauthorized' });
+    return apiResponse(200, [{ id: 'proj-a', name: 'A' }, { id: 'proj-b', name: 'B' }]);
+  };
+  const picked = await validateBrowserbaseCredentials({ apiKey: 'good' }, { fetchImpl });
+  assert.equal(picked.projectId, 'proj-a');
+  assert.equal(picked.projects.length, 2);
+  assert.equal(seen[0].url, 'https://api.browserbase.com/v1/projects');
+  await assert.rejects(
+    validateBrowserbaseCredentials({ apiKey: 'bad' }, { fetchImpl }),
+    (error) => error.code === 'BROWSERBASE_KEY_INVALID',
+  );
+});
+
+test('validateBrowserbaseCredentials checks an explicit project directly', async () => {
+  const seen = [];
+  const fetchImpl = async (url) => {
+    seen.push(url);
+    if (url.endsWith('/proj-b')) return apiResponse(200, { id: 'proj-b', name: 'B' });
+    return apiResponse(404, { message: 'Not Found' });
+  };
+  const explicit = await validateBrowserbaseCredentials({ apiKey: 'good', projectId: 'proj-b' }, { fetchImpl });
+  assert.equal(explicit.projectName, 'B');
+  assert.equal(seen[0], 'https://api.browserbase.com/v1/projects/proj-b');
+  await assert.rejects(
+    validateBrowserbaseCredentials({ apiKey: 'good', projectId: 'proj-zzz' }, { fetchImpl }),
+    (error) => error.code === 'BROWSERBASE_PROJECT_NOT_FOUND',
+  );
+});
+
+test('validateBrowserbaseCredentials handles discovery variants and actionable API failures', async () => {
+  const wrapped = await validateBrowserbaseCredentials(
+    { apiKey: 'good' },
+    { fetchImpl: async () => apiResponse(200, { data: [{ id: 'proj-a', name: 'A' }] }) },
+  );
+  assert.equal(wrapped.projectId, 'proj-a');
+  await assert.rejects(
+    validateBrowserbaseCredentials({ apiKey: 'good' }, { fetchImpl: async () => apiResponse(404, 'Not Found') }),
+    (error) => error.code === 'BROWSERBASE_PROJECT_REQUIRED' && /Project ID/.test(error.message),
+  );
+  await assert.rejects(
+    validateBrowserbaseCredentials({ apiKey: 'good' }, { fetchImpl: async () => apiResponse(200, { unexpected: true }) }),
+    (error) => error.code === 'BROWSERBASE_API_ERROR' && /malformed project list/.test(error.message),
+  );
+  await assert.rejects(
+    validateBrowserbaseCredentials(
+      { apiKey: 'super-secret' },
+      { fetchImpl: async () => apiResponse(429, { message: 'limit for super-secret reached' }) },
+    ),
+    (error) => error.code === 'BROWSERBASE_API_ERROR'
+      && /429/.test(error.message)
+      && /\[redacted\]/.test(error.message)
+      && !/super-secret/.test(error.message),
+  );
+  await assert.rejects(
+    validateBrowserbaseCredentials({ apiKey: 'good' }, { fetchImpl: async () => { throw new Error('ECONNREFUSED'); } }),
+    (error) => error.code === 'BROWSERBASE_UNREACHABLE' && /ECONNREFUSED/.test(error.message),
+  );
+  await assert.rejects(
+    validateBrowserbaseCredentials(
+      { apiKey: 'good' },
+      {
+        timeoutMs: 5,
+        fetchImpl: async (_url, init) => ({
+          ok: true,
+          status: 200,
+          text: () => new Promise((_, reject) => {
+            init.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')), { once: true });
+          }),
+        }),
+      },
+    ),
+    (error) => error.code === 'BROWSERBASE_UNREACHABLE' && /timed out after 5ms/.test(error.message),
+  );
+});
+
+test('fleet isolates browsers by browserId, caps them, and drops subagent browsers on end or turn end', async () => {
+  const calls = [];
+  const fleet = new BrowserbaseFleet({ env: FULL_ENV, maxBrowsers: 3, createSession: (options) => fakeSession(calls, options) });
+  await fleet.call('chat-a', undefined, 'start', {});
+  await fleet.call('chat-a', 'researcher-1', 'navigate', { url: 'https://example.test' });
+  await fleet.call('chat-a', 'researcher-2', 'start', {});
+  assert.deepEqual(calls.map((c) => c.browser), [MAIN_BROWSER_ID, 'researcher-1', 'researcher-2']);
+  assert.deepEqual(fleet.status().browsers.map((b) => b.id), ['main', 'researcher-1', 'researcher-2']);
+  await assert.rejects(fleet.call('chat-a', 'researcher-3', 'start', {}), (error) => error.code === 'BROWSERBASE_BROWSER_LIMIT');
+  await assert.rejects(fleet.call('chat-a', 'bad id!', 'start', {}), (error) => error.code === 'BROWSERBASE_INVALID_BROWSER_ID');
+  await fleet.call('chat-a', 'researcher-2', 'end', {});
+  assert.deepEqual(fleet.status().browsers.map((b) => b.id), ['main', 'researcher-1']);
+  await fleet.call('chat-a', undefined, 'end', {});
+  assert.ok(fleet.status().browsers.some((b) => b.id === 'main'), 'main browser slot survives end');
+  await fleet.cleanupExtras('turn ended');
+  assert.deepEqual(fleet.status().browsers.map((b) => b.id), ['main']);
+  assert.ok(calls.some((c) => c.browser === 'researcher-1' && c.name === 'cleanup' && c.reason === 'turn ended'));
+  // 채팅이 바뀌면 묶음 전체가 닫힌다.
+  await fleet.call('chat-b', undefined, 'start', {});
+  assert.ok(calls.some((c) => c.browser === 'main' && c.name === 'cleanup' && c.reason === 'chat changed'));
+});
+
+test('failed subagent end stays tracked so cleanupExtras can still close it', async () => {
+  const calls = [];
+  const fleet = new BrowserbaseFleet({
+    env: FULL_ENV,
+    createSession: (options) => {
+      const session = fakeSession(calls, options);
+      const original = session.call.bind(session);
+      session.call = async (chatId, name, args) => {
+        if (name === 'end') throw Object.assign(new Error('end failed'), { code: 'BROWSERBASE_TOOL_FAILED' });
+        return original(chatId, name, args);
+      };
+      return session;
+    },
+  });
+  await fleet.call('chat-a', undefined, 'start', {});
+  await fleet.call('chat-a', 'researcher-1', 'navigate', { url: 'https://example.test' });
+  await assert.rejects(
+    fleet.call('chat-a', 'researcher-1', 'end', {}),
+    (error) => error.code === 'BROWSERBASE_TOOL_FAILED',
+  );
+  assert.deepEqual(fleet.status().browsers.map((b) => b.id), ['main', 'researcher-1']);
+  await fleet.cleanupExtras('turn ended');
+  assert.deepEqual(fleet.status().browsers.map((b) => b.id), ['main']);
+  assert.ok(calls.some((c) => c.browser === 'researcher-1' && c.name === 'cleanup' && c.reason === 'turn ended'));
+});
+
+test('failed first subagent call does not consume a fleet slot', async () => {
+  const calls = [];
+  const failIds = new Set(['researcher-1', 'researcher-2', 'researcher-3']);
+  const fleet = new BrowserbaseFleet({
+    env: FULL_ENV,
+    maxBrowsers: 4,
+    createSession: (options) => {
+      const session = fakeSession(calls, options);
+      const original = session.call.bind(session);
+      session.call = async (chatId, name, args) => {
+        if (failIds.has(options.label)) {
+          throw Object.assign(new Error('start failed'), { code: 'BROWSERBASE_START_FAILED' });
+        }
+        return original(chatId, name, args);
+      };
+      return session;
+    },
+  });
+  await fleet.call('chat-a', undefined, 'start', {});
+  await assert.rejects(
+    fleet.call('chat-a', 'researcher-1', 'start', {}),
+    (error) => error.code === 'BROWSERBASE_START_FAILED',
+  );
+  await assert.rejects(
+    fleet.call('chat-a', 'researcher-2', 'start', {}),
+    (error) => error.code === 'BROWSERBASE_START_FAILED',
+  );
+  await assert.rejects(
+    fleet.call('chat-a', 'researcher-3', 'start', {}),
+    (error) => error.code === 'BROWSERBASE_START_FAILED',
+  );
+  assert.deepEqual(fleet.status().browsers.map((b) => b.id), ['main']);
+  await fleet.call('chat-a', 'researcher-4', 'start', {});
+  assert.deepEqual(fleet.status().browsers.map((b) => b.id), ['main', 'researcher-4']);
+});
+
+test('stale credential set is dropped after a later clear', async () => {
+  const fleet = new BrowserbaseFleet({ env: FULL_ENV, createSession: (options) => fakeSession([], options) });
+  const stale = fleet.beginCredentialChange();
+  fleet.beginCredentialChange();
+  await fleet.setOverride(null);
+  const status = await fleet.applyVerifiedOverride({ apiKey: 'bb_stale_0001' }, {}, stale);
+  assert.equal(status.keySource, 'env');
+  assert.equal(status.keyTail, '1234');
+  assert.doesNotMatch(JSON.stringify(status), /bb_stale_0001/);
+});
+
+test('later credential set wins when an older validation finishes last', async () => {
+  const fleet = new BrowserbaseFleet({ env: FULL_ENV, createSession: (options) => fakeSession([], options) });
+  const first = fleet.beginCredentialChange();
+  const second = fleet.beginCredentialChange();
+  await fleet.applyVerifiedOverride({ apiKey: 'bb_old_1111' }, {}, first);
+  assert.equal(fleet.status().keySource, 'env');
+  const status = await fleet.applyVerifiedOverride({ apiKey: 'bb_new_2222' }, {}, second);
+  assert.equal(status.keySource, 'studio');
+  assert.equal(status.keyTail, '2222');
+});
+
+test('hub set and clear bump the fleet credential revision', () => {
+  const server = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
+  assert.match(server, /const revision = record\.browserbaseSession\.beginCredentialChange\(\);/);
+  assert.match(server, /return record\.browserbaseSession\.applyVerifiedOverride\(/);
+  assert.match(
+    server,
+    /case 'browserbase-credentials-clear': \{[\s\S]*?record\.browserbaseSession\.beginCredentialChange\(\);[\s\S]*?setOverride\(null/,
+  );
+});
+
+test('fleet override restarts live browsers and every browser launches with the new key', async () => {
+  const calls = [];
+  const fleet = new BrowserbaseFleet({ env: FULL_ENV, createSession: (options) => fakeSession(calls, options) });
+  await fleet.call('chat-a', undefined, 'start', {});
+  assert.equal(calls.at(-1).key, 'bb_env_1234');
+  await fleet.setOverride({ apiKey: 'bb_studio_9999' });
+  assert.ok(calls.some((c) => c.name === 'cleanup' && c.reason === 'credentials changed'));
+  await fleet.call('chat-a', 'helper', 'start', {});
+  assert.equal(calls.at(-1).key, 'bb_studio_9999');
+  // 턴 중에는(restart=false) 떠 있는 브라우저를 끊지 않는다.
+  const before = calls.length;
+  await fleet.setOverride(null, { restart: false });
+  assert.equal(calls.length, before);
+  assert.equal(fleet.status().keySource, 'env');
+});
+
+test('session relaunches after the sidecar exits and after credentials change', async () => {
+  let key = 'one';
+  const browser = new BrowserbaseSession({
+    env: {},
+    credentials: () => resolveBrowserbaseCredentials({ env: { BROWSERBASE_API_KEY: key, BROWSERBASE_PROJECT_ID: 'p', GEMINI_API_KEY: 'g' } }),
+  });
+  const client = { async callTool() { return { content: [] }; }, async close() {} };
+  browser.client = client;
+  browser.transport = { async close() {} };
+  browser.liveFingerprint = 'studio:stale';
+  let relaunched = 0;
+  browser.ensureConnected = async () => {
+    if (browser.client) return browser.client;
+    relaunched += 1;
+    browser.client = client;
+    browser.liveFingerprint = credentialFingerprint(browser.getCredentials());
+    return client;
+  };
+  browser.chatId = 'chat-a';
+  await browser.call('chat-a', 'act', { action: 'x' });
+  assert.equal(relaunched, 1, 'stale fingerprint forces a relaunch before the call');
+  await browser.call('chat-a', 'act', { action: 'y' });
+  assert.equal(relaunched, 1, 'matching fingerprint reuses the sidecar');
+  browser.onSidecarClosed(client, 'crashed');
+  assert.equal(browser.client, null);
+  await browser.call('chat-a', 'act', { action: 'z' });
+  assert.equal(relaunched, 2, 'a dead sidecar relaunches on the next call');
+  key = 'two';
+  await browser.call('chat-a', 'act', { action: 'w' });
+  assert.equal(relaunched, 3, 'changed credentials relaunch before the call');
+  browser.clearIdleTimer();
 });
 
 test('Browserbase launches the in-repo sidecar with a 512 MiB heap and Electron Node mode', async () => {

@@ -56,6 +56,10 @@ Unknown slash text is sent as a normal message. `//` sends a message that starts
 
 ## Environment variables
 
+`browserbase_*` tools run one Stagehand sidecar per browser. Every tool takes an optional `browserId`. Omit it for the shared `main` browser. Subagents pass their own id and get an isolated browser. `BrowserbaseFleet` in `rhwp/rhwp-agent/browserbase-session.mjs` keeps at most 4 browsers per chat and returns `BROWSERBASE_BROWSER_LIMIT` beyond that. Call `browserbase_end` to free a slot. Subagent browsers close when the turn ends. The main browser survives provider restarts and closes on chat stop, hub shutdown, or 15 minutes idle. If a sidecar process dies, the call that hit it returns `BROWSERBASE_SIDECAR_EXITED` and the next call relaunches it.
+
+Browserbase credentials come from the variables below or from Studio **Settings → 원격 브라우저**. `browserbase-credentials-set {apiKey, projectId?, geminiApiKey?}` validates the key against the Browserbase API and picks the project id from the account when omitted. Validation failures are `BROWSERBASE_KEY_INVALID`, `BROWSERBASE_UNREACHABLE`, `BROWSERBASE_PROJECT_NOT_FOUND`, and `BROWSERBASE_NO_PROJECT`. The override lives in hub memory per field and never on disk. `browserbase-credentials-clear` returns to the variables. `browserbase-status-request` reports the source of each field, the key tail, the project id, and open browsers. Studio keeps the override in `sessionStorage` and re-sends it on every reconnect. The hub holds the fleet on `record.browserbaseSession`. A credential change restarts the sidecars when no turn is running. During a turn, open browsers stay and the next call uses the new key.
+
 | Variable | Default | Description |
 | --- | --- | --- |
 | `RHWP_AGENT_PORT` | `5175` | Hub port, bound to 127.0.0.1 |
