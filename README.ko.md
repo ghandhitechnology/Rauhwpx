@@ -37,6 +37,8 @@ Windows 설치 파일은 현재 서명되지 않아 SmartScreen 경고가 나타
 
 **안전** 권한에서는 성공한 편집이 검토 대기 상태로 남습니다. **전체 접근**에서는 성공한 편집이 자동으로 확정됩니다. 확정된 변경은 편집기의 실행 취소로 되돌릴 수 있지만, 두 권한의 차이를 알고 선택해 주세요.
 
+MCP 도구 목록은 [`rhwp/rhwp-agent/tools.mjs`](rhwp/rhwp-agent/tools.mjs)에 있습니다. [`rhwp/rhwp-agent/tests/tools.test.mjs`](rhwp/rhwp-agent/tests/tools.test.mjs)가 개수를 고정합니다.
+
 ### 참고 자료를 곁에 두고 작업하기
 
 HWP/HWPX 문서, PDF, DOCX, 텍스트 파일 등을 참고 자료로 붙여 놓고 내용을 찾아보거나 문서 작성에 활용할 수 있습니다. 자료는 대화별·문서별·공통 범위로 관리합니다. PDF와 DOCX는 참고용이며, 이 형식들을 한글 문서처럼 직접 편집하는 기능과는 다릅니다.
