@@ -52,6 +52,9 @@ const sidebar = initAgentSidebar({
   eventBus,
   ...(cloud && workspace ? {
     cloudController: cloud.controller, workspace,
+    setCloudDocumentLease: (owned) => {
+      document.documentElement.dataset.cloudLease = owned ? 'cloud' : 'local';
+    },
     prepareCloudTransfer: async () => ({ fileName: documentName!, bytes: new Uint8Array([1, 2, 3]),
       byteLength: 3, sha256: 'a'.repeat(64) }),
   } : {}),

@@ -125,25 +125,66 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   assert.equal(await page.evaluate(() => new Set(window.sidebarPreview.cloud.calls.transfers.map((item) => item.startId)).size), 3);
   assert.equal(await page.evaluate(() => new Set(window.sidebarPreview.cloud.calls.transfers.map((item) => item.threadId)).size), 1);
 
-  // Changing chats clears the old explicit selection without releasing the
-  // document lease. Opening the original chat restores its existing session.
+  // A fresh local chat keeps the Cloud lease and conversation running, while
+  // the local composer and retained editor copy become usable.
   await page.click('.ag-cloud-panel-close');
-  await page.click('.ag-header .ag-threads-btn');
-  await page.click('.ag-threads-new');
-  await page.waitForFunction(() => window.sidebarPreview.cloud.controller.getSnapshot().session.kind === 'idle');
+  await page.screenshot({ path: resolve(artifacts, 'cloud-new-local-chat.png') });
+  await page.evaluate(() => window.sidebarPreview.cloud.blockRefresh(true));
+  await page.click('.ag-new-local-chat');
+  await page.waitForFunction(() => !document.querySelector('.ag-input').disabled
+    && window.sidebarPreview.workspace.mode() === 'local', { timeout: 1000 });
+  assert.equal(await page.evaluate(() => document.documentElement.dataset.cloudLease), 'local');
+  await page.evaluate(() => window.sidebarPreview.cloud.blockRefresh(false));
+  await page.waitForFunction(() => window.sidebarPreview.cloud.controller.getSnapshot().session.kind === 'idle'
+    && !document.querySelector('.ag-input').disabled);
   assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.getScope().selectedSessionId), undefined);
   assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.controller.getSnapshot().lease.owner), 'cloud');
+  assert.equal(await page.evaluate(() => document.documentElement.dataset.cloudLease), 'local');
+  assert.equal(await page.evaluate(() => window.sidebarPreview.workspace.workspaceView()), 'local');
+  const localThreadId = await page.evaluate(() => window.sidebarPreview.cloud.getScope().threadId);
+  assert.notEqual(localThreadId, original.threadId);
   assert.equal(await page.$eval('.ag-messages', (node) => node.innerText.includes('예산 표를 검토')), false);
+  await page.type('.ag-input', '로컬에서 소개 문단을 작성해 주세요.');
+  await page.click('.ag-send');
+  await page.waitForFunction(() => window.sidebarPreview.bridge.isTurnRunning());
+  await page.evaluate(() => {
+    window.sidebarPreview.cloud.finishReply('Cloud에서 예산 검토를 마쳤습니다.');
+    window.sidebarPreview.cloud.setLink('failed');
+  });
+  assert.equal(await page.$eval('.ag-input', (node) => node.disabled), false);
+  assert.equal(await page.$eval('.ag-send', (node) => node.getAttribute('aria-label')), '중지');
+  assert.equal(await page.$eval('.ag-messages', (node) => node.innerText.includes('Cloud에서 예산 검토')), false);
+  await page.waitForFunction(() => !window.sidebarPreview.bridge.isTurnRunning());
+  assert.equal(await page.$eval('.ag-messages', (node) => node.innerText.includes('문서를 검토했습니다')), true);
+  await page.screenshot({ path: resolve(artifacts, 'parallel-local-chat.png') });
+  await page.evaluate(() => window.sidebarPreview.cloud.setLink('ready'));
   await page.click('.ag-header .ag-threads-btn');
   assert.equal(await page.evaluate(() => {
-    const item = [...document.querySelectorAll('.ag-threads-item')].find((node) => node.checkVisibility());
+    const item = [...document.querySelectorAll('.ag-threads-item')].find((node) => node.checkVisibility()
+      && node.querySelector('.ag-thread-mode')?.textContent === 'Cloud');
     item?.click();
     return Boolean(item);
   }), true);
   await page.waitForFunction(() => window.sidebarPreview.cloud.controller.getSnapshot().session.kind === 'running'
     && !document.querySelector('.ag-input').disabled);
   assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.controller.getSnapshot().session.threadId), original.threadId);
+  assert.equal(await page.evaluate(() => window.sidebarPreview.workspace.workspaceView()), 'cloud');
   assert.equal(await page.$eval('.ag-messages', (node) => node.innerText.includes('예산 표를 검토')), true);
+  assert.equal(await page.$eval('.ag-messages', (node) => node.innerText.includes('Cloud에서 예산 검토를 마쳤습니다.')), true);
+  assert.equal(await page.$eval('.ag-messages', (node) => node.innerText.includes('로컬에서 소개 문단')), false);
+  assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.transfers.length), 3);
+  // Returning to the local thread restores its own history without a transfer.
+  await page.click('.ag-header .ag-threads-btn');
+  await page.screenshot({ path: resolve(artifacts, 'parallel-chat-list.png') });
+  await page.evaluate(() => [...document.querySelectorAll('.ag-threads-item')]
+    .find((node) => node.checkVisibility() && node.querySelector('.ag-thread-mode')?.textContent === 'Local').click());
+  await page.waitForFunction(() => !document.querySelector('.ag-input').disabled
+    && window.sidebarPreview.workspace.mode() === 'local');
+  assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.getScope().threadId), localThreadId);
+  assert.equal(await page.evaluate(() => window.sidebarPreview.workspace.workspaceView()), 'local');
+  assert.equal(await page.$eval('.ag-messages', (node) => node.innerText.includes('로컬에서 소개 문단')), true);
+  assert.equal(await page.$eval('.ag-messages', (node) => node.innerText.includes('Cloud에서 예산 검토')), false);
+  assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.stop), 1);
   assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.transfers.length), 3);
   console.log(`Cloud panel opened in ${Math.round(panelMs)}ms; fixture reconnect restored the preview in ${Math.round(reconnectMs)}ms`);
   await page.goto(`${origin}/?width=480`, { waitUntil: 'networkidle0' });

@@ -1387,6 +1387,12 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   font-weight: 600;
 }
 
+.ag-thread-mode {
+  flex: 0 0 auto;
+  color: var(--ag-text-secondary);
+  font-size: 10px;
+}
+
 /* ── 채팅 실행 상태 점 ─────────────────────────────────
    여러 탭에서 도는 채팅을 한 목록에서 알아본다 — 노란 불은 지금
    일하는 채팅, 초록 점은 끝나서 볼거리가 생긴 채팅. */
@@ -3733,6 +3739,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 
 .ag-cloud-handoff[hidden],
+.ag-new-local-chat[hidden],
 .ag-cloud-mode-badge[hidden] {
   display: none;
 }
@@ -7251,7 +7258,8 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   }
 }
 
-.ag-cloud-handoff {
+.ag-cloud-handoff,
+.ag-new-local-chat {
   margin-left: auto;
   padding: 4px 8px;
   border: 1px solid var(--ag-border);
@@ -7263,7 +7271,8 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   cursor: pointer;
 }
 
-.ag-cloud-handoff:disabled {
+.ag-cloud-handoff:disabled,
+.ag-new-local-chat:disabled {
   opacity: 0.5;
   cursor: default;
 }

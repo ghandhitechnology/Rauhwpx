@@ -15,6 +15,7 @@ import type {
   CloudTakeoverPayload,
 } from '../../cloud/types.ts';
 import { cloudLinkNeedsAttention, inferCloudLink } from '../../cloud/link.ts';
+import { cloudLeaseBlocksLocal } from '../../cloud/editor-scope.ts';
 import {
   shouldOfferAccountForceQuit,
   shouldShowCloudWorkspaceSwitch,
@@ -1074,7 +1075,8 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     renderPanel();
     renderRecovery();
     renderQueue();
-    deps.onLeaseChange(snapshot.lease.owner === 'cloud', snapshot.lease.owner === 'cloud' ? snapshot.lease.sessionId : null);
+    const blocksLocal = cloudLeaseBlocksLocal(snapshot, deps.getScope());
+    deps.onLeaseChange(blocksLocal, blocksLocal && snapshot.lease.owner === 'cloud' ? snapshot.lease.sessionId : null);
     if (deps.isCloudMode() && snapshot.timeline) {
       const binding = snapshotBinding();
       const timelineKey = binding
@@ -1256,7 +1258,10 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       const changed = selectionScope.threadId !== scope.threadId || selectionScope.documentId !== scope.documentId;
       selectedScope();
       if (changed) clearCloudBinding();
-      const lock = deps.onWorkspaceLock('session-selection');
+      // Local conversations do not wait for a remote session lookup. Recompute
+      // the retained editor's lock immediately from the known lease owner.
+      const lock = deps.isCloudMode() ? deps.onWorkspaceLock('session-selection') : { release() {} };
+      if (changed) render();
       const isCurrent = selectionFence.begin();
       try {
         const next = await deps.controller.refresh(selectedScope());

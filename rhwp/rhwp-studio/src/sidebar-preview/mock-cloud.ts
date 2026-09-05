@@ -1,5 +1,6 @@
 import { createCloudController, type CloudDesktopApi } from '../cloud/desktop-cloud.ts';
 import type { CloudLinkKind, CloudSessionScope, CloudSnapshot, CloudTransferRequest } from '../cloud/types.ts';
+import type { AgentStreamEvent } from '../agent/types.ts';
 
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -12,6 +13,7 @@ export function createMockCloud() {
   let recoveryGeneration = 0;
   let releaseRefresh: (() => void) | null = null;
   let refreshBlocked = false;
+  let sequence = 0;
   const calls = { reconnect: 0, recreate: 0, stop: 0, display: 0, inputs: 0, transfers: [] as CloudTransferRequest[] };
   const sandbox = { providerId: 'raucloud', sandboxId: 'preview-worker', displayName: 'Raucloud',
     region: 'preview', host: 'preview.invalid', createdAt: new Date().toISOString() };
@@ -38,6 +40,11 @@ export function createMockCloud() {
     });
   }
   function publish() { listener?.({ snapshot: snapshot() }); }
+  function emitAgentEvent(event: AgentStreamEvent) {
+    if (state.session.kind === 'idle') return;
+    listener?.({ sessionId: state.session.sessionId,
+      event: { type: 'agent.event', seq: ++sequence, payload: { type: 'agent', event } } });
+  }
   function setLink(kind: CloudLinkKind) {
     state.link = { kind, error: kind === 'failed' ? 'ECONNRESET from preview fixture' : null,
       attempt: kind === 'ready' ? 0 : 1, canRecreate: true };
@@ -66,7 +73,7 @@ export function createMockCloud() {
         currentActivity: '문서 검토 중', phase: 'waiting', wait: null };
       state.sessions = [state.session];
       scope = { threadId: request.threadId, documentId: request.documentId, selectedSessionId: state.session.sessionId };
-      state.lease = { owner: 'cloud', sessionId: state.session.sessionId, acquiredAt: new Date().toISOString() };
+      state.lease = { owner: 'cloud', sessionId: state.session.sessionId, threadId: request.threadId, acquiredAt: new Date().toISOString() };
       publish();
       return snapshot();
     },
@@ -128,6 +135,16 @@ export function createMockCloud() {
   };
   return {
     controller: createCloudController(api), calls, setLink,
+    emitAgentEvent,
+    finishReply(text: string) {
+      if (!state.timeline) throw new Error('Start a Cloud conversation first');
+      state.timeline.thread.messages.push({ role: 'assistant', text, agent: state.timeline.thread.agent });
+      state.timeline.thread.updatedAt = Date.now();
+      state.timeline.exportedAt = new Date().toISOString();
+      emitAgentEvent({ type: 'text-delta', agent: state.timeline.thread.agent, text });
+      emitAgentEvent({ type: 'turn-end', agent: state.timeline.thread.agent, stopReason: 'completed' });
+      publish();
+    },
     getScope: () => scope,
     blockRefresh(blocked: boolean) {
       refreshBlocked = blocked;
