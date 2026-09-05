@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import yaml from 'js-yaml';
 import { changedPaths, selectChecks } from './ci-changes.mjs';
 
@@ -136,6 +139,48 @@ test('cloud image publication requires real headed display and input verificatio
     assert.match(steps[proofIndex].run, /--test \/app\/tests\/xvfb-studio-capture-proof\.test\.mjs/);
   }
 });
+
+for (const ready of [true, false]) {
+  test(`cloud image startup ${ready ? 'waits for initialization after HTTP becomes healthy' : 'fails when initialization never finishes'}`, {
+    skip: process.platform === 'win32',
+  }, (t) => {
+    const directory = mkdtempSync(path.join(tmpdir(), 'cloud-image-startup-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const counter = path.join(directory, 'log-reads');
+    writeFileSync(counter, '0');
+    const run = workflows['cloud-sandbox-image.yml'].jobs.publish.steps
+      .find((step) => step.name === 'Build and smoke-test sandbox image').run;
+    const startup = run.slice(run.indexOf('healthy=0'));
+    // Run the actual workflow loop against a server whose HTTP listener opens
+    // before provider probing and scheduler initialization finish.
+    const result = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', `
+      curl() { return 0; }
+      sleep() { return 0; }
+      podman() {
+        case "$1" in
+          logs)
+            local count
+            read -r count < "$RAU_IMAGE_PROBE_COUNT_FILE" || true
+            count=$((count + 1))
+            printf '%s\\n' "$count" > "$RAU_IMAGE_PROBE_COUNT_FILE"
+            if [[ "$RAU_IMAGE_PROBE_READY" == 1 && "$count" -ge 3 ]]; then
+              printf '%s\\n' '{"event":"cloud.started"}'
+            fi
+            ;;
+          inspect) printf '%s\\n' true ;;
+          *) return 2 ;;
+        esac
+      }
+      sandbox_id=fixture
+      ${startup}
+    `], { encoding: 'utf8', timeout: 5_000, env: {
+      ...process.env, RAU_IMAGE_PROBE_COUNT_FILE: counter, RAU_IMAGE_PROBE_READY: ready ? '1' : '0',
+    } });
+    assert.ifError(result.error);
+    assert.equal(result.status, ready ? 0 : 1, result.stderr);
+    assert.ok(Number(readFileSync(counter, 'utf8')) >= (ready ? 3 : 60));
+  });
+}
 
 test('third-party Rust toolchain and installer actions are immutable', () => {
   const actions = ['setup-rust', 'package-desktop'].map((name) => readYaml(`.github/actions/${name}/action.yml`));
