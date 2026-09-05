@@ -2386,7 +2386,13 @@ export class SnapshotCommand implements EditCommand {
       }
       this.afterId = wasm.saveSnapshot();
     } catch (e) {
-      this.discard(wasm); // before/after id 를 null-safe 로 해제
+      // A failed paste may already have deleted the selection. Restore the
+      // document before releasing its snapshot, including after-save failures.
+      try {
+        if (this.beforeId !== null) wasm.restoreSnapshot(this.beforeId);
+      } finally {
+        this.discard(wasm);
+      }
       throw e;
     }
 

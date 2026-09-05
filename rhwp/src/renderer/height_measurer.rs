@@ -324,6 +324,7 @@ pub struct MeasuredSection {
 /// 높이 측정 엔진
 pub struct HeightMeasurer {
     dpi: f64,
+    preserve_first_cell_spacing_before: bool,
     is_hwp3_variant: bool,
     use_hwp3_origin_flow_spacing_before: bool,
     render_normalization:
@@ -334,6 +335,7 @@ impl HeightMeasurer {
     pub fn new(dpi: f64) -> Self {
         Self {
             dpi,
+            preserve_first_cell_spacing_before: false,
             is_hwp3_variant: false,
             use_hwp3_origin_flow_spacing_before: false,
             render_normalization: std::sync::Arc::new(
@@ -345,6 +347,13 @@ impl HeightMeasurer {
     pub fn with_hwp3_variant(mut self, enabled: bool) -> Self {
         self.is_hwp3_variant = enabled;
         self.use_hwp3_origin_flow_spacing_before = enabled;
+        self
+    }
+
+    /// HWPX cell paragraphs retain their leading paragraph margin, including
+    /// the first paragraph. Native HWP measurement keeps its existing rules.
+    pub fn with_hwpx_cell_spacing(mut self, enabled: bool) -> Self {
+        self.preserve_first_cell_spacing_before = enabled;
         self
     }
 
@@ -1109,7 +1118,7 @@ impl HeightMeasurer {
                             );
                             let para_style = styles.para_styles.get(p.para_shape_id as usize);
                             let is_last_para = pidx + 1 == cell_para_count;
-                            let spacing_before = if pidx > 0 {
+                            let spacing_before = if pidx > 0 || self.preserve_first_cell_spacing_before {
                                 para_style.map(|s| s.spacing_before).unwrap_or(0.0)
                             } else {
                                 0.0
@@ -1658,7 +1667,7 @@ impl HeightMeasurer {
                             );
                             let para_style = styles.para_styles.get(p.para_shape_id as usize);
                             let is_last_para = pidx + 1 == cell_para_count;
-                            let spacing_before = if pidx > 0 {
+                            let spacing_before = if pidx > 0 || self.preserve_first_cell_spacing_before {
                                 para_style.map(|s| s.spacing_before).unwrap_or(0.0)
                             } else {
                                 0.0
@@ -2059,9 +2068,9 @@ impl HeightMeasurer {
                         let comp = compose_paragraph(p);
                         let para_style = styles.para_styles.get(p.para_shape_id as usize);
                         let is_last_para = pi + 1 == para_count;
-                        // compute_cell_line_ranges와 동일 규칙:
-                        // 첫 문단은 spacing_before 없음, 마지막 문단은 spacing_after 없음
-                        let spacing_before = if pi > 0 {
+                        // Match cell split measurement. HWPX retains the first
+                        // paragraph's leading space; final trailing space is omitted.
+                        let spacing_before = if pi > 0 || self.preserve_first_cell_spacing_before {
                             para_style.map(|s| s.spacing_before).unwrap_or(0.0)
                         } else {
                             0.0
@@ -3143,6 +3152,48 @@ mod tests {
             assert!(
                 (cut - measured).abs() < 0.001,
                 "tac={treat_as_char} break={page_break:?}: cut={cut} measured={measured}",
+            );
+        }
+    }
+
+    #[test]
+    fn hwpx_first_cell_spacing_is_counted_in_row_height_and_split_units() {
+        use crate::model::provenance::LayoutCompatibilityProfile;
+        use crate::renderer::style_resolver::ResolvedParaStyle;
+        let styles = ResolvedStyleSet {
+            para_styles: vec![ResolvedParaStyle {
+                spacing_before: 8.0,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        for (tac, page_break) in [
+            (true, TablePageBreak::None),
+            (true, TablePageBreak::RowBreak),
+            (true, TablePageBreak::CellBreak),
+            (false, TablePageBreak::CellBreak),
+        ] {
+            let table = stored_two_paragraph_table(tac, page_break);
+            let native = HeightMeasurer::with_default_dpi().measure_table(&table, 0, 0, &styles);
+            let hwpx = HeightMeasurer::with_default_dpi()
+                .with_hwpx_cell_spacing(true)
+                .measure_table(&table, 0, 0, &styles);
+            assert!((hwpx.row_heights[0] - native.row_heights[0] - 8.0).abs() < 0.001);
+            assert!(
+                (hwpx.cells[0].total_content_height - native.cells[0].total_content_height - 8.0)
+                    .abs()
+                    < 0.001
+            );
+            let native_layout = LayoutEngine::new(DEFAULT_DPI);
+            let hwpx_layout = LayoutEngine::new(DEFAULT_DPI);
+            hwpx_layout.set_layout_profile(LayoutCompatibilityProfile::new(
+                false, false, true, false, false,
+            ));
+            let native_cut = native_layout.row_cut_content_height(&table, 0, &[], &[], &styles);
+            let hwpx_cut = hwpx_layout.row_cut_content_height(&table, 0, &[], &[], &styles);
+            assert!(
+                (hwpx_cut - native_cut - 8.0).abs() < 0.001,
+                "tac={tac} break={page_break:?}: native={native_cut} hwpx={hwpx_cut}"
             );
         }
     }

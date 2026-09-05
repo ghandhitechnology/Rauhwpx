@@ -578,13 +578,21 @@ pub(crate) fn parse_hwpx_validated(data: &[u8]) -> Result<Document, HwpxError> {
 
     // 3. header.xml → DocInfo, DocProperties
     let header_xml = reader.read_file("Contents/header.xml")?;
-    let (original_doc_info, doc_properties) = header::parse_hwpx_header(&header_xml)?;
+    let margin_units = header::ParagraphMarginUnits::from_package_version(
+        hwpx_aux_entries
+            .iter()
+            .find(|(path, _)| path == "version.xml")
+            .map(|(_, bytes)| bytes.as_slice()),
+    );
+    let (original_doc_info, doc_properties) =
+        header::parse_hwpx_header_with_margin_units(&header_xml, margin_units)?;
     let remapped_header_xml =
         rewrite_binary_item_id_refs(&header_xml, &bin_data_ids.by_manifest_id)?;
     let mut doc_info = if matches!(&remapped_header_xml, Cow::Borrowed(_)) {
         original_doc_info
     } else {
-        let (mut remapped_doc_info, _) = header::parse_hwpx_header(&remapped_header_xml)?;
+        let (mut remapped_doc_info, _) =
+            header::parse_hwpx_header_with_margin_units(&remapped_header_xml, margin_units)?;
         restore_font_manifest_refs(&mut remapped_doc_info, &original_doc_info);
         remapped_doc_info
     };
@@ -598,7 +606,7 @@ pub(crate) fn parse_hwpx_validated(data: &[u8]) -> Result<Document, HwpxError> {
     // 메타데이터로 진짜 변환본과 네이티브를 구별할 판별자가 없어(조사 확정), 파싱 시점의 HWP3
     // tolerance 부여를 제거한다.
     let hwpml_version = header::parse_hwpx_hwpml_version(&header_xml);
-    // 무손실: 원본 HWPML 버전을 보존해 직렬화 때 그대로 재방출(하드코딩 금지).
+    // 원본 선언을 그대로 보존한다. HwpUnitChar 단위 승격은 version.xml 쪽에서만 한다.
     doc_info.hwpml_version = hwpml_version.clone();
 
     // BinData 목록을 DocInfo에 등록

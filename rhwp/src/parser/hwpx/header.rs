@@ -93,6 +93,62 @@ pub fn parse_hwpx_hwpml_version(xml: &str) -> Option<String> {
 
 /// header.xml을 파싱하여 DocInfo와 DocProperties를 생성한다.
 pub fn parse_hwpx_header(xml: &str) -> Result<(DocInfo, DocProperties), HwpxError> {
+    parse_hwpx_header_with_margin_units(xml, ParagraphMarginUnits::EffectiveHwpUnit)
+}
+
+/// The package XML version, not hh:head@version, selects Hancom's margin
+/// interpretation. The IR always stores doubled effective HWPUNIT values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ParagraphMarginUnits {
+    EffectiveHwpUnit,
+    LegacyDoubled,
+}
+
+impl ParagraphMarginUnits {
+    pub(super) fn from_package_version(bytes: Option<&[u8]>) -> Self {
+        let Some(xml) = bytes.and_then(|bytes| std::str::from_utf8(bytes).ok()) else {
+            return Self::EffectiveHwpUnit;
+        };
+        let mut reader = Reader::from_str(xml);
+        loop {
+            match reader.read_event() {
+                Ok(Event::Start(root) | Event::Empty(root)) => {
+                    if root.local_name().as_ref() != b"HCFVersion" {
+                        return Self::EffectiveHwpUnit;
+                    }
+                    for attribute in root.attributes().flatten() {
+                        if attribute.key.as_ref() == b"xmlVersion" {
+                            let value = attr_str(&attribute);
+                            let version = value.split_once('.').and_then(|(major, minor)| {
+                                Some((major.parse::<u32>().ok()?, minor.parse::<u32>().ok()?))
+                            });
+                            return if matches!(version, Some((1, 0..=3))) {
+                                Self::LegacyDoubled
+                            } else {
+                                Self::EffectiveHwpUnit
+                            };
+                        }
+                    }
+                    return Self::EffectiveHwpUnit;
+                }
+                Ok(Event::Decl(_) | Event::Comment(_) | Event::PI(_) | Event::Text(_)) => {}
+                _ => return Self::EffectiveHwpUnit,
+            }
+        }
+    }
+
+    fn case_value_to_ir(self, value: i32) -> i32 {
+        match self {
+            Self::EffectiveHwpUnit => value.saturating_mul(2),
+            Self::LegacyDoubled => value,
+        }
+    }
+}
+
+pub(super) fn parse_hwpx_header_with_margin_units(
+    xml: &str,
+    margin_units: ParagraphMarginUnits,
+) -> Result<(DocInfo, DocProperties), HwpxError> {
     let mut doc_info = DocInfo::default();
     let mut doc_props = DocProperties::default();
 
@@ -137,7 +193,7 @@ pub fn parse_hwpx_header(xml: &str) -> Result<(DocInfo, DocProperties), HwpxErro
                         parse_char_shape(e, &mut reader, &mut doc_info)?;
                     }
                     b"paraPr" => {
-                        parse_para_shape(e, &mut reader, &mut doc_info)?;
+                        parse_para_shape(e, &mut reader, &mut doc_info, margin_units)?;
                     }
                     b"style" => parse_style(e, &mut doc_info),
                     b"borderFill" => {
@@ -865,6 +921,7 @@ fn parse_para_shape(
     e: &quick_xml::events::BytesStart,
     reader: &mut Reader<&[u8]>,
     doc_info: &mut DocInfo,
+    margin_units: ParagraphMarginUnits,
 ) -> Result<(), HwpxError> {
     let mut ps = ParaShape::default();
     // OWPML ParaShapeType의 snapToGrid 기본값은 true.
@@ -912,7 +969,7 @@ fn parse_para_shape(
                         ParaShapeChildKind::Switch => {
                             // <switch>/<case>/<default> 네임스페이스 분기 처리
                             // HwpUnitChar case를 우선 적용, 없으면 default 사용
-                            parse_para_shape_switch(reader, &mut ps)?;
+                            parse_para_shape_switch(reader, &mut ps, margin_units)?;
                         }
                         ParaShapeChildKind::Other => {}
                     }
@@ -1185,6 +1242,7 @@ fn parse_para_shape_margin_children(
 fn parse_para_shape_switch(
     reader: &mut Reader<&[u8]>,
     ps: &mut ParaShape,
+    margin_units: ParagraphMarginUnits,
 ) -> Result<(), HwpxError> {
     let mut buf = Vec::new();
     let mut in_hwpunitchar_case = false;
@@ -1233,9 +1291,10 @@ fn parse_para_shape_switch(
                                 if attr.key.as_ref() == b"value" {
                                     let val = parse_i32(&attr);
                                     if in_hwpunitchar_case {
-                                        // HwpUnitChar 값은 실제 HWPUNIT(1× 스케일)이므로
-                                        // HWP 바이너리와 동일한 2× 스케일로 변환
-                                        let val2x = val * 2;
+                                        // XML <1.4 already uses doubled margin units,
+                                        // even inside an HwpUnitChar case. Newer
+                                        // packages use effective HWPUNIT values.
+                                        let val2x = margin_units.case_value_to_ir(val);
                                         match tag_name {
                                             b"left" => ps.margin_left = val2x,
                                             b"right" => ps.margin_right = val2x,
@@ -2253,6 +2312,94 @@ fn parse_border_width(attr: &quick_xml::events::attributes::Attribute) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_version_selects_margin_units_without_using_header_version() {
+        for version in ["1.0", "1.1", "1.2", "1.3"] {
+            let xml = format!("<hv:HCFVersion xmlVersion='{version}'/>");
+            assert_eq!(
+                ParagraphMarginUnits::from_package_version(Some(xml.as_bytes())),
+                ParagraphMarginUnits::LegacyDoubled
+            );
+        }
+        for xml in [
+            "<hv:HCFVersion xmlVersion='1.4'/>",
+            "<hv:HCFVersion xmlVersion='1.5'/>",
+            "<hv:HCFVersion xmlVersion='1.10'/>",
+            "<hv:HCFVersion xmlVersion='unknown'/>",
+            "<hh:head version='1.2'/>",
+            "<custom><hv:HCFVersion xmlVersion='1.2'/></custom>",
+            "<!-- xmlVersion='1.2' --><hv:HCFVersion/>",
+        ] {
+            assert_eq!(
+                ParagraphMarginUnits::from_package_version(Some(xml.as_bytes())),
+                ParagraphMarginUnits::EffectiveHwpUnit
+            );
+        }
+        assert_eq!(
+            ParagraphMarginUnits::from_package_version(None),
+            ParagraphMarginUnits::EffectiveHwpUnit
+        );
+    }
+
+    #[test]
+    fn legacy_case_margin_units_do_not_change_default_or_line_spacing_units() {
+        let xml = r#"<hh:head><hh:paraPr id="0"><hp:switch>
+          <hp:case hp:required-namespace="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar">
+            <hh:margin><hc:intent value="-200"/><hc:left value="400"/><hc:right value="800"/><hc:prev value="600"/><hc:next value="300"/></hh:margin>
+            <hh:lineSpacing type="FIXED" value="1000"/>
+          </hp:case><hp:default><hh:margin><hc:prev value="1200"/><hc:next value="600"/></hh:margin></hp:default>
+        </hp:switch></hh:paraPr></hh:head>"#;
+        let (legacy, _) =
+            parse_hwpx_header_with_margin_units(xml, ParagraphMarginUnits::LegacyDoubled).unwrap();
+        let (modern, _) = parse_hwpx_header(xml).unwrap();
+        let fields = |shape: &ParaShape| {
+            (
+                shape.indent,
+                shape.margin_left,
+                shape.margin_right,
+                shape.spacing_before,
+                shape.spacing_after,
+            )
+        };
+        assert_eq!(fields(&legacy.para_shapes[0]), (-200, 400, 800, 600, 300));
+        assert_eq!(fields(&modern.para_shapes[0]), (-400, 800, 1600, 1200, 600));
+        assert_eq!(
+            legacy.para_shapes[0].line_spacing,
+            modern.para_shapes[0].line_spacing
+        );
+        let default_only = r#"<hh:head><hh:paraPr id="0"><hp:switch><hp:default><hh:margin><hc:prev value="1200"/><hc:next value="600"/></hh:margin></hp:default></hp:switch></hh:paraPr></hh:head>"#;
+        let (legacy, _) =
+            parse_hwpx_header_with_margin_units(default_only, ParagraphMarginUnits::LegacyDoubled)
+                .unwrap();
+        let (modern, _) = parse_hwpx_header(default_only).unwrap();
+        assert_eq!(
+            fields(&legacy.para_shapes[0]),
+            fields(&modern.para_shapes[0])
+        );
+    }
+
+    #[test]
+    fn pinned_hancom_version_probes_import_observed_spacing_and_keep_it_on_save() {
+        let sources: &[(&[u8], (i32, i32))] = &[
+            (include_bytes!("../../../tests/fixtures/editing_parity/mac-hancom-12.30.0/body-paragraph-spacing/edited.hwpx"), (600, 300)),
+            (include_bytes!("../../../tests/fixtures/editing_parity/mac-hancom-12.30.0-spacing-versions/header-1-5-only.hwpx"), (600, 300)),
+            (include_bytes!("../../../tests/fixtures/editing_parity/mac-hancom-12.30.0-spacing-versions/package-xml-1-3-only.hwpx"), (600, 300)),
+            (include_bytes!("../../../tests/fixtures/editing_parity/mac-hancom-12.30.0-spacing-versions/package-xml-1-4-only.hwpx"), (1200, 600)),
+            (include_bytes!("../../../tests/fixtures/editing_parity/mac-hancom-12.30.0-spacing-versions/package-xml-1-5-only.hwpx"), (1200, 600)),
+            (include_bytes!("../../../tests/fixtures/editing_parity/mac-hancom-12.30.0-spacing-versions/hancom-spacing-6-3.hwpx"), (1200, 600)),
+        ];
+        for (bytes, expected) in sources {
+            let mut document = crate::parser::hwpx::parse_hwpx(bytes).unwrap();
+            for _ in 0..4 {
+                let shape = &document.doc_info.para_shapes
+                    [document.sections[0].paragraphs[1].para_shape_id as usize];
+                assert_eq!((shape.spacing_before, shape.spacing_after), *expected);
+                let saved = crate::serializer::hwpx::serialize_hwpx(&document).unwrap();
+                document = crate::parser::hwpx::parse_hwpx(&saved).unwrap();
+            }
+        }
+    }
 
     #[test]
     fn parse_memo_line_type_dot_is_distinct_from_solid() {

@@ -263,6 +263,7 @@ export const tableCommands: CommandDef[] = [
                 controlIndex: result.controlIdx,
                 cellIndex: 0,
                 cellParaIndex: 0,
+                cellPath: [{ controlIndex: result.controlIdx, cellIndex: 0, cellParaIndex: 0 }],
               };
             }
             return pos;

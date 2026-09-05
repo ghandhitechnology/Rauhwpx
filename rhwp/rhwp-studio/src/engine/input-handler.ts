@@ -916,6 +916,7 @@ export class InputHandler {
           desc,
           undefined,
           undefined,
+          'inline',
         );
         if (!result.ok) {
           insertError = (result as any).error || '삽입 위치 또는 이미지 정보를 확인할 수 없습니다.';
@@ -925,7 +926,7 @@ export class InputHandler {
         const logicalOffset = typeof result.logicalOffset === 'number'
           ? result.logicalOffset
           : hit.charOffset + 1;
-        const cursorAfter: DocumentPosition = inTextBox
+        const cursorAfter: DocumentPosition = inCell || inTextBox
           ? { ...hit, charOffset: logicalOffset }
           : {
               sectionIndex: sec,

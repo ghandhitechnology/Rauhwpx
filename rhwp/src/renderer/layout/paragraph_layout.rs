@@ -956,6 +956,21 @@ struct LineWidthEst {
     /// 추정에 포함된 tac 개체 폭 합
     included_tac_width: f64,
 }
+/// A control-only line and its following text line can have the same text
+/// index: the object consumes HWP control units, but no text characters.
+/// Keep that object's width and paint position on the reserved empty line.
+pub(super) fn empty_tac_host_before_text(
+    comp: &ComposedParagraph,
+    position: usize,
+) -> Option<usize> {
+    comp.lines.windows(2).position(|pair| {
+        pair[0].char_start == position
+            && pair[0].runs.is_empty()
+            && pair[1].char_start == position
+            && !pair[1].runs.is_empty()
+    })
+}
+
 fn tac_offsets_for_line(
     comp: &ComposedParagraph,
     tac_offsets_px: &[(usize, f64, usize)],
@@ -969,7 +984,10 @@ fn tac_offsets_for_line(
     tac_offsets_px
         .iter()
         .copied()
-        .filter(|(pos, _, _)| char_pos_in_line(*pos, start, end))
+        .filter(|(pos, _, _)| match empty_tac_host_before_text(comp, *pos) {
+            Some(host) => host == line_idx,
+            None => char_pos_in_line(*pos, start, end),
+        })
         .collect()
 }
 
@@ -1452,21 +1470,28 @@ fn compute_line_extra_spacing(
             .filter(|c| **c == ' ')
             .count();
         let leader_dashes = count_dash_leaders(&all_chars[..visible_count]);
-        if interior_spaces > 0 {
-            // 후행 공백 폭 계산
-            let trailing_width = if trailing_spaces > 0 {
-                if let Some(last_run) = comp_line.runs.last() {
+        // A selection can leave trailing spaces in several font/style runs.
+        // Measure each in its own style, including for a single visible word.
+        let measure_trailing_spaces = |extra_word: f64, extra_char: f64| -> f64 {
+            let mut width = 0.0;
+            for run in comp_line.runs.iter().rev() {
+                let count = run.text.chars().rev().take_while(|ch| *ch == ' ').count();
+                if count > 0 {
                     let mut ts =
-                        resolved_to_text_style(styles, last_run.char_style_id, last_run.lang_index);
+                        resolved_to_text_style(styles, run.char_style_id, run.lang_index);
                     ts.default_tab_width = tab_width;
-                    let trailing_str: String = " ".repeat(trailing_spaces);
-                    estimate_text_width(&trailing_str, &ts)
-                } else {
-                    0.0
+                    ts.extra_word_spacing = extra_word;
+                    ts.extra_char_spacing = extra_char;
+                    width += estimate_text_width(&" ".repeat(count), &ts);
                 }
-            } else {
-                0.0
-            };
+                if count < run.text.chars().count() {
+                    break;
+                }
+            }
+            width
+        };
+        if interior_spaces > 0 {
+            let trailing_width = measure_trailing_spaces(0.0, 0.0);
             let split_ink_overhang = if alignment == Alignment::Split {
                 trailing_glyph_ink_overhang()
             } else {
@@ -1518,20 +1543,7 @@ fn compute_line_extra_spacing(
                             ts.extra_char_spacing = ecs;
                             measured += estimate_text_width(&r.text, &ts);
                         }
-                        if trailing_spaces > 0 {
-                            if let Some(last_run) = comp_line.runs.last() {
-                                let mut ts = resolved_to_text_style(
-                                    styles,
-                                    last_run.char_style_id,
-                                    last_run.lang_index,
-                                );
-                                ts.default_tab_width = tab_width;
-                                ts.extra_word_spacing = ews;
-                                ts.extra_char_spacing = ecs;
-                                measured -= estimate_text_width(&" ".repeat(trailing_spaces), &ts);
-                            }
-                        }
-                        measured
+                        measured - measure_trailing_spaces(ews, ecs)
                     };
                     for _ in 0..3 {
                         let delta = available_width - measure_with(ecs);
@@ -1546,17 +1558,22 @@ fn compute_line_extra_spacing(
                 };
                 (ews, ecs, 0.0)
             }
-        } else if total_char_count > 1 {
-            // 양쪽 정렬이지만 공백 없음 (일본어/숫자 등):
-            let slack = available_width - total_text_width;
+        } else if total_char_count.saturating_sub(trailing_spaces) > 1 {
+            // A wrapped word may still have a trailing space. It must neither
+            // consume visible line width nor receive a share of justification.
+            // Keep inline-object width in the budget, but distribute only over
+            // the characters that are painted, in both body and cell paragraphs.
+            let visible_char_count = total_char_count - trailing_spaces;
+            let visible_width = total_text_width - measure_trailing_spaces(0.0, 0.0);
+            let slack = available_width - visible_width;
             if leader_dashes > 0 && slack > 0.0 {
                 (0.0, 0.0, slack / leader_dashes as f64)
             } else if suppress_cell_overflow_spacing && slack < 0.0 {
                 // 셀의 좁은 내부 폭은 줄바꿈 기준일 뿐, 숫자/문자를 수평 압축하지 않는다.
                 (0.0, 0.0, 0.0)
             } else {
-                let raw = slack / total_char_count as f64;
-                let avg_char_w = total_text_width / total_char_count as f64;
+                let raw = slack / visible_char_count as f64;
+                let avg_char_w = visible_width / visible_char_count as f64;
                 let min_sp = -avg_char_w * 0.5;
                 (0.0, raw.max(min_sp), 0.0)
             }
@@ -3226,7 +3243,10 @@ impl LayoutEngine {
         let keep_continuation_spacing_before =
             self.keep_continuation_column_top_spacing_before.get();
         if start_line == 0 && spacing_before > 0.0 {
-            if !is_column_top || keep_continuation_spacing_before {
+            if !is_column_top
+                || keep_continuation_spacing_before
+                || (cell_ctx.is_some() && self.preserve_first_cell_spacing_before())
+            {
                 y += spacing_before;
             } else if para_index == 0 && !suppress_column_top_vpos_fallback {
                 let vpos0_px = para
@@ -5135,7 +5155,8 @@ impl LayoutEngine {
             let run_tacs: Vec<(usize, f64, usize)> = tac_offsets_px
                 .iter()
                 .filter(|(pos, _, _)| {
-                    *pos >= run_char_pos
+                    empty_tac_host_before_text(composed, *pos).is_none_or(|host| host == line_idx)
+                        && *pos >= run_char_pos
                         && (*pos < run_char_end || (allow_end_tac && *pos == run_char_end))
                 })
                 .map(|(pos, w, ci)| (pos - run_char_pos, *w, *ci))
@@ -7239,6 +7260,90 @@ mod issue_2809_split_alignment_tests {
     }
 
     #[test]
+    fn justify_trailing_spaces_use_each_runs_font_metrics_in_body_and_cells() {
+        let styles = ResolvedStyleSet {
+            char_styles: vec![
+                ResolvedCharStyle {
+                    font_size: 12.0,
+                    ..Default::default()
+                },
+                ResolvedCharStyle {
+                    font_size: 36.0,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let mut line = split_label_line();
+        line.runs = vec![
+            ComposedTextRun {
+                text: "그림 앞 문장입니다.   ".into(),
+                ..Default::default()
+            },
+            ComposedTextRun {
+                text: " ".into(),
+                char_style_id: 1,
+                ..Default::default()
+            },
+        ];
+        let visible_width = estimate_text_width(
+            "그림 앞 문장입니다.",
+            &resolved_to_text_style(&styles, 0, 0),
+        );
+        let total_width: f64 = line
+            .runs
+            .iter()
+            .map(|run| {
+                estimate_text_width(
+                    &run.text,
+                    &resolved_to_text_style(&styles, run.char_style_id, run.lang_index),
+                )
+            })
+            .sum();
+        for in_cell in [false, true] {
+            let (word, character, dash) = compute_line_extra_spacing(
+                &line,
+                &styles,
+                Alignment::Justify,
+                in_cell,
+                true,
+                false,
+                false,
+                false,
+                line.runs.iter().map(|r| r.text.chars().count()).sum(),
+                total_width,
+                visible_width + 8.0,
+                40.0,
+            );
+            assert!((word - 4.0).abs() < 0.001,
+                "in_cell={in_cell}: only the 8px of visible slack belongs to the two word gaps, got {word}");
+            assert_eq!((character, dash), (0.0, 0.0));
+        }
+    }
+
+    #[test]
+    fn justify_one_word_ignores_trailing_spaces_in_body_and_cells() {
+        let styles = ResolvedStyleSet::default();
+        let mut line = split_label_line();
+        line.runs[0].text = "그림 ".into();
+        let style = resolved_to_text_style(&styles, 0, 0);
+        let visible = estimate_text_width("그림", &style);
+        let total = estimate_text_width("그림 ", &style);
+        for in_cell in [false, true] {
+            for object_width in [0.0, 240.0] {
+                let (word, character, dash) = compute_line_extra_spacing(
+                    &line, &styles, Alignment::Justify, in_cell, true,
+                    false, false, false, 3, total + object_width,
+                    visible + object_width + 4.0, 40.0,
+                );
+                assert!((character - 2.0).abs() < 0.001,
+                    "in_cell={in_cell}, object_width={object_width}: expected 2px per visible character, got {character}");
+                assert_eq!((word, dash), (0.0, 0.0));
+            }
+        }
+    }
+
+    #[test]
     fn split_reserves_last_glyph_ink_when_letter_spacing_is_negative() {
         let line = split_label_line();
         let styles = ResolvedStyleSet {
@@ -7282,7 +7387,7 @@ mod issue_2809_split_alignment_tests {
 
 #[cfg(test)]
 mod trailing_tac_width_tests {
-    use super::tac_offsets_for_line_width;
+    use super::{empty_tac_host_before_text, tac_offsets_for_line, tac_offsets_for_line_width};
     use crate::renderer::composer::{ComposedLine, ComposedParagraph, ComposedTextRun};
 
     fn line(text: &str, char_start: usize, has_line_break: bool) -> ComposedLine {
@@ -7337,6 +7442,37 @@ mod trailing_tac_width_tests {
 
         assert_eq!(tac_offsets_for_line_width(&comp, &offsets, 0), offsets);
         assert!(tac_offsets_for_line_width(&comp, &offsets, 1).is_empty());
+    }
+
+    #[test]
+    fn control_only_line_owns_picture_width_not_following_text() {
+        let mut picture_line = line("", 1, false);
+        picture_line.runs.clear();
+        let comp = composed(vec![line("A", 0, false), picture_line, line("B", 1, false)]);
+        let offsets = [(1, 266.1, 0)];
+
+        assert_eq!(empty_tac_host_before_text(&comp, 1), Some(1));
+        for index in 0..3 {
+            let expected = if index == 1 {
+                offsets.to_vec()
+            } else {
+                Vec::new()
+            };
+            assert_eq!(tac_offsets_for_line(&comp, &offsets, index), expected);
+            assert_eq!(tac_offsets_for_line_width(&comp, &offsets, index), expected);
+        }
+    }
+
+    #[test]
+    fn unrelated_empty_line_does_not_capture_picture() {
+        let mut empty_line = line("", 0, false);
+        empty_line.runs.clear();
+        let comp = composed(vec![empty_line, line("B", 1, false)]);
+        let offsets = [(1, 100.0, 0)];
+
+        assert_eq!(empty_tac_host_before_text(&comp, 1), None);
+        assert!(tac_offsets_for_line_width(&comp, &offsets, 0).is_empty());
+        assert_eq!(tac_offsets_for_line_width(&comp, &offsets, 1), offsets);
     }
 }
 
