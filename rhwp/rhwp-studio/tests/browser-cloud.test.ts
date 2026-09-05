@@ -1636,3 +1636,67 @@ test('browser takeover reuses its frozen receipt after a partial artifact failur
   assert.equal(takeoverCommands, 1);
   assert.equal(checkpointDownloads, 3);
 });
+
+
+test('browser question starts and workflow changes require an explicit supportedWorkflows array', async (t) => {
+  for (const capability of [undefined, null, 'question', { question: true }, ['direct', 'plan'], ['direct', 'plan', 'question']]) {
+    await t.test(JSON.stringify(capability) ?? 'absent', async () => {
+      const identity = serverIdentity();
+      const endpoint = 'https://question-capability.example.test';
+      const storage = new MemoryStorage();
+      storeBrowserCredentials(storage, storedBrowserProfile(endpoint, identity.key), {
+        accessToken: 'question-access', refreshToken: 'question-refresh', accessExpiresAt: Date.now() + 600_000,
+      });
+      const writes: Array<{ path: string; body: any }> = [];
+      const api = createBrowserCloudApi({
+        storage,
+        fetchImpl: async (input, init) => {
+          const request = new Request(input, init);
+          const path = new URL(request.url).pathname;
+          if (path.endsWith('/v1/health')) {
+            return signedJson(request, identity, {
+              conversationProtocolVersion: 2,
+              ...(capability === undefined ? {} : { supportedWorkflows: capability }),
+            });
+          }
+          const body = await request.json();
+          writes.push({ path, body });
+          if (path.endsWith('/v1/uploads/init')) return signedJson(request, identity, { blobExists: true });
+          if (path.endsWith('/commands')) return signedJson(request, identity, { accepted: true });
+          if (path.endsWith('/v1/sessions')) throw new Error('creation captured');
+          throw new Error(`Unexpected request: ${path}`);
+        },
+      });
+      assert.ok(api);
+      const acceptsQuestion = Array.isArray(capability) && capability.includes('question');
+      const transfer = {
+        startId: 'question-browser-start', threadId: 'question-thread', documentId: 'question-doc',
+        documentName: 'question.hwpx', agent: 'codex' as const, model: 'gpt-6-astra', effort: 'high',
+        workflow: 'question' as const, permissionProfile: 'unrestricted' as const,
+        timeline: { schema: 'rauhwpx.cloud.timeline' as const, version: 1 as const,
+          exportedAt: new Date().toISOString(), thread: { id: 'question-thread', messages: [] } } as any,
+        initialMessage: { id: 'question-message', text: 'Discuss this document without editing.', attachmentReferenceIds: [] },
+        document: { bytes: new Uint8Array([1, 2, 3]), fileName: 'question.hwpx', sha256: 'a'.repeat(64) },
+        references: [], limits: { maxDurationMs: 60_000, maxTurns: 10 },
+      };
+      const command = { sessionId: 'question-browser-start', command: 'workflow' as const,
+        expectedVersion: 1, payload: { workflow: 'question' },
+        attachments: [{ id: 'question-attachment', name: 'note.txt', mimeType: 'text/plain', size: 1, bytes: new Uint8Array([1]) }],
+      };
+      if (!acceptsQuestion) {
+        for (const operation of [() => api.cloudTransfer(transfer), () => api.cloudCommand(command)]) {
+          await assert.rejects(operation(), (error: any) => error.code === 'CLOUD_RUNTIME_OUTDATED' && error.retryable === false);
+          assert.deepEqual(writes, [], 'unsupported question mode must reject before uploads or commands');
+        }
+      } else {
+        await assert.rejects(api.cloudTransfer(transfer), /creation captured/);
+        assert.equal(writes.find((write) => write.path.endsWith('/v1/sessions'))?.body.executionConfig.workflow, 'question');
+        await api.cloudCommand(command);
+        assert.equal(writes.find((write) => write.path.endsWith('/commands'))?.body.payload.workflow, 'question');
+      }
+      writes.length = 0;
+      await api.cloudCommand({ sessionId: 'question-browser-start', command: 'workflow', expectedVersion: 1, payload: { workflow: 'plan' } });
+      assert.equal(writes.at(-1)?.body.payload.workflow, 'plan', 'older servers must retain plan mode compatibility');
+    });
+  }
+});

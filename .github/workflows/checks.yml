@@ -299,6 +299,9 @@ jobs:
             /scripts/audit-production.mjs
             /rhwp/rhwp-agent/package*.json
             /rhwp/rhwp-studio/package*.json
+            /cloud/package*.json
+            /cloud/install/provider-runtime/package*.json
+            /rhwp/rau-credits/package*.json
 
       - name: Set up Node.js
         uses: actions/setup-node@v5

@@ -1537,6 +1537,12 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
           code: 'CLOUD_RUNTIME_OUTDATED', retryable: false,
         });
       }
+      if (input.workflow === 'question'
+        && (!Array.isArray(health.supportedWorkflows) || !health.supportedWorkflows.includes('question'))) {
+        throw Object.assign(new Error('질문 모드를 사용하려면 Cloud 서버를 업데이트해 주세요.'), {
+          code: 'CLOUD_RUNTIME_OUTDATED', retryable: false,
+        });
+      }
       const startId = typeof input.startId === 'string' ? input.startId.trim() : '';
       const sessionId = /^[A-Za-z0-9_-]{8,128}$/.test(startId) ? startId : randomId('pwa_');
       const existing = remoteSessions.find((session) => session.id === sessionId);
@@ -1565,7 +1571,7 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
           executionConfig: {
             model: input.model,
             effort: input.effort,
-            workflow: input.workflow === 'plan' ? 'plan' : 'direct',
+            workflow: input.workflow === 'plan' || input.workflow === 'question' ? input.workflow : 'direct',
             permissionProfile: 'unrestricted',
           },
           goal,
@@ -1603,6 +1609,14 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
       const selectedProfile = profile;
       if (!selectedProfile) throw new Error('Cloud 서버를 먼저 연결해 주세요.');
       const generation = profileGeneration;
+      if (input.command === 'workflow' && input.payload?.workflow === 'question') {
+        const health = await requestJson('/v1/health', { selectedProfile });
+        if (!Array.isArray(health.supportedWorkflows) || !health.supportedWorkflows.includes('question')) {
+          throw Object.assign(new Error('질문 모드를 사용하려면 Cloud 서버를 업데이트해 주세요.'), {
+            code: 'CLOUD_RUNTIME_OUTDATED', retryable: false,
+          });
+        }
+      }
       const serverType = COMMAND_TYPES[input.command];
       const attachments = [];
       for (const attachment of input.attachments ?? []) {

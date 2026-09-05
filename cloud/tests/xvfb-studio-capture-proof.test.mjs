@@ -6,7 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { createSessionDisplay } from '../document-runtime/session-display.mjs';
-import { launchChromium } from '../document-runtime/studio-harness.mjs';
+import { applyDisplayInput, launchChromium } from '../document-runtime/studio-harness.mjs';
 import { DisplayFrameStore } from '../src/display-frame-store.mjs';
 
 function commandAvailable(command, args = ['--version'], pattern = null) {
@@ -110,10 +110,11 @@ function meanAbsoluteDifference(first, second) {
   return difference / first.length;
 }
 
-test('real Xvfb captures a headed Chromium surface through the Studio launch path', {
-  skip: skipReason,
+test('real Xvfb captures aligned Studio pixels and applies Korean keyboard input', {
+  skip: !enabled ? skipReason : false,
   timeout: 45_000,
 }, async (t) => {
+  assert.equal(skipReason, false, `Capture proof prerequisites missing: ${skipReason}`);
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-xvfb-capture-proof-'));
   const geometry = { width: 960, height: 640 };
   const display = createSessionDisplay({ workspace, ...geometry });
@@ -144,8 +145,9 @@ test('real Xvfb captures a headed Chromium surface through the Studio launch pat
       main { padding: 72px; border-right: 18px solid #e84b32; }
       h1 { max-width: 600px; margin: 0; font-size: 94px; line-height: .9; letter-spacing: -6px; }
       aside { background: repeating-linear-gradient(135deg, #123b35 0 32px, #d8b84c 32px 64px); }
+      textarea { position: absolute; left: 72px; top: 360px; width: 420px; height: 70px; border: 4px solid #ff00ff; background: white; font-size: 18px; }
     </style>
-    <main><h1>Studio capture proof</h1></main><aside></aside>`, { waitUntil: 'load' });
+    <main><h1>Studio capture proof</h1><textarea aria-label="Cloud document input"></textarea></main><aside></aside>`, { waitUntil: 'load' });
   await page.bringToFront();
   await new Promise((resolve) => setTimeout(resolve, 500));
 
@@ -174,4 +176,23 @@ test('real Xvfb captures a headed Chromium surface through the Studio launch pat
   assert.equal(captured.length, geometry.width * geometry.height * 3);
   assert.ok(variance(captured) > 500, 'captured surface must contain nontrivial visual variance');
   assert.ok(meanAbsoluteDifference(baseline, captured) > 20, 'captured surface must differ from blank Xvfb');
+
+  const viewport = await page.evaluate(() => ({ width: innerWidth, height: innerHeight, scale: devicePixelRatio }));
+  assert.deepEqual(viewport, { ...geometry, scale: 1 }, 'screen pixels and viewport coordinates must match');
+  const border = (362 * geometry.width + 80) * 3;
+  assert.ok(captured[border] > 180 && captured[border + 1] < 90 && captured[border + 2] > 180,
+    'the input border must occupy its expected Xvfb screen coordinates, without browser chrome offsets');
+  const pressed = { displayPressedKeys: new Set(), displayPressedButtons: new Set() };
+  const dispatch = (input) => applyDisplayInput(page, input, pressed);
+  await dispatch({ kind: 'pointer', action: 'down', button: 'left', x: 100, y: 390 });
+  await dispatch({ kind: 'pointer', action: 'up', button: 'left', x: 100, y: 390 });
+  assert.equal(await page.evaluate(() => document.activeElement?.tagName), 'TEXTAREA', 'clicks must hit the visible input');
+  const text = '구름 공동편집 검증 PR188_MANUAL_KOREAN';
+  await dispatch({ kind: 'text', text });
+  await dispatch({ kind: 'key', action: 'down', key: 'End' });
+  await dispatch({ kind: 'key', action: 'up', key: 'End' });
+  await dispatch({ kind: 'text', text: ' 끝' });
+  assert.equal(await page.$eval('textarea', (node) => node.value), `${text} 끝`);
+  assert.equal(pressed.displayPressedKeys.size, 0);
+  assert.equal(pressed.displayPressedButtons.size, 0);
 });

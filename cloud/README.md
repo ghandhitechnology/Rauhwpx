@@ -1,6 +1,6 @@
 # Rauhwpx cloud service
 
-This package is the durable single-user control plane for cloud document agents. It requires Node.js 24 or newer, SQLite through `node:sqlite`, rootless Podman, and either Tailscale Serve or a user-managed HTTPS reverse proxy.
+This package is the durable single-user control plane for cloud document agents. It requires Node.js 24.7 or newer, SQLite through `node:sqlite`, rootless Podman, and either Tailscale Serve or a user-managed HTTPS reverse proxy.
 
 ## Public API
 
@@ -8,7 +8,7 @@ All routes use protocol version 1. Every `/v1` response includes `X-Rauhwpx-Serv
 
 Access-controlled routes use opaque Bearer access tokens. Access tokens expire after 15 minutes. Refresh tokens rotate and expire after 30 days. The immediately previous rotation may be retried for 30 seconds, including after a service restart, until the successor is used. Other reuse revokes its family.
 
-- `GET /v1/health` returns service version, protocol version, server ID, and pinned Ed25519 application key.
+- `GET /v1/health` returns service version, transport `protocolVersion`, `conversationProtocolVersion`, `supportedWorkflows`, server ID, and pinned Ed25519 application key.
 - `POST /v1/pairing/redeem` exchanges a one-time 10-minute code for a device and token pair.
 - `POST /v1/pairing/bootstrap` issues a one-time code to the holder of `RAUHWpx_BOOTSTRAP_TOKEN`. It answers only while no device is paired and only when the token is configured. App-provided sandboxes use it instead of SSH.
 - `POST /v1/token/refresh` rotates a refresh token.
@@ -28,6 +28,16 @@ Access-controlled routes use opaque Bearer access tokens. Access tokens expire a
 
 Sessions are staged until `session.activate` commits the handoff. Persistent rooms also support `session.end`, `turn.redirect`, `wait.resolve`, `conversation.workflow`, and immutable attachment versions on `message.queue`. A running takeover stays pending until the worker atomically commits matching checkpoint and timeline blobs and acknowledges the boundary. The durable `session.takeover_ready` event and takeover endpoint identify both blobs, their shared operation, revision, and turn. Every event contains the authoritative `stateVersion` in its envelope and payload.
 
+## Conversation handoff and publication
+
+After Cloud is configured and paired, **Cloud로 보내기** sends the current document snapshot, conversation history, references, and composer message to Cloud. An empty composer supplies a continuation request. If a local turn is running, the handoff waits for its safe boundary. Follow-up messages use the same conversation; completing a turn does not require taking over or publishing the document.
+
+The Cloud workspace edits a separate draft. Stable checkpoints and timelines are archived for recovery; they never automatically replace the origin file. The desktop retains the origin's native document lease while the Cloud authority lease keeps that document read-only in the local editor. The interactive Cloud workspace remains separate from the origin.
+
+Publication is explicit: the user chooses **원본에 반영**, or the agent calls `publish_cloud_document`. The tool queues publication after a successful turn and stable checkpoint; it does not report that the local file has already been written. Publication checks the origin digest before replacement. An external save is preserved, with the Cloud version kept as a separate copy on desktop. Publishing leaves the Cloud conversation open for more turns.
+
+The HTTP transport remains protocol 1; persistent conversations require `conversationProtocolVersion: 2`. Desktop and PWA clients reject an older server before starting a persistent handoff. Desktop and PWA clients also require `supportedWorkflows` to be an array containing `question` before starting or switching to question mode. Direct, plan, and question workflows require matching control-plane and worker implementations; a compatible transport version alone does not establish workflow support. See [persistent conversation behavior](PERSISTENT_CONVERSATIONS.md).
+
 ## Browser PWA access
 
 The Studio PWA uses the same paired-device API over pinned HTTPS. Configure an
@@ -40,11 +50,11 @@ RAUHWpx_BROWSER_ORIGINS=https://studio.example.com,https://office.example.com
 Only exact HTTPS origins are accepted; wildcards, paths, credentials, and HTTP
 origins fail service startup. The server grants only the Cloud methods and
 headers needed by the browser client. The PWA verifies every response and SSE
-frame with WebCrypto against the paired Ed25519 key, archives baseline and
-stable-turn bytes in IndexedDB, and keeps the cloud-owned document mirror
-read-only. When the origin file handle still has write permission, each stable
-turn replaces it only if its digest matches the last synchronized digest;
-otherwise the origin is left untouched and the Cloud version stays archived.
+frame with WebCrypto against the paired Ed25519 key and archives baseline and
+stable-turn bytes in IndexedDB. Archiving does not write the origin. An explicit
+publication may update a retained origin file handle only while write permission
+is granted and its digest matches the expected origin digest. Otherwise the
+origin remains untouched and the Cloud version stays archived.
 A browser cannot install a VPS or import a desktop provider login; pair it to
 an existing HTTPS/Tailscale server whose provider is already ready.
 
@@ -91,20 +101,20 @@ podman push ghcr.io/ghandhitechnology/rauhwpx-cloud:stable
 
 Run `bash cloud/install/build-runtime-assets.sh` first because the image copies the built Studio runtime, agent hub, and `rhwp` binary from `cloud/runtime-assets`.
 
-The desktop build reads its provider configuration from the environment. Tokens never live in the repository.
+App-hosted Raucloud normally reads its Railway configuration on the hosted credits broker. The direct Railway provider can also use local environment configuration. Tokens never belong in the repository or Studio renderer.
 
 | Variable | Required | Meaning |
 | --- | --- | --- |
 | `RAUHWpx_RAILWAY_TOKEN` | yes | Railway API token that owns the sandbox project |
 | `RAUHWpx_RAILWAY_PROJECT_ID` | yes | Project that receives sandbox services |
 | `RAUHWpx_RAILWAY_ENVIRONMENT_ID` | yes | Environment inside that project |
-| `RAUHWpx_RAILWAY_IMAGE` | no | Sandbox image, defaults to `ghcr.io/ghandhitechnology/rauhwpx-cloud:1.1.0-edge.13` |
+| `RAUHWpx_RAILWAY_IMAGE` | no | Sandbox image, defaults to `ghcr.io/ghandhitechnology/rauhwpx-cloud:1.1.0-edge.14` |
 | `RAUHWpx_RAILWAY_REGION` | no | Railway region for the sandbox instance |
 | `RAUHWpx_RAILWAY_API_URL` | no | Alternate GraphQL endpoint for testing |
 
-Without all three required values the app still shows the app-provided option, names the missing variables, and refuses to start a spawn. Nothing pretends to succeed.
+The broker requires all three connection values before it advertises allocation as available. Desktop sign-in and pairing do not supply Railway infrastructure credentials.
 
-Each spawn generates a fresh 32-byte bootstrap token, sets it as a service variable, waits for the deployment and the health route, then redeems one pairing code through `POST /v1/pairing/bootstrap`. The desktop pins the server key returned by the health route and rejects a mismatch. A spawn that fails at any step deletes the service before reporting the error, so a failed attempt leaves no paid resource behind. Teardown refuses while cloud work is live unless the caller forces it, deletes the service, and forgets the stored profile and tokens.
+Each spawn generates a fresh 32-byte bootstrap token, sets it as a service variable, waits for the deployment and the health route, then redeems one pairing code through `POST /v1/pairing/bootstrap`. The desktop pins the server key returned by the health route and rejects a mismatch. A failed allocation attempts teardown and retains a durable cleanup request when deletion cannot be confirmed. An ambiguous create response is reconciled by the deterministic service name rather than replayed; read-only provider queries may retry transient failures. Teardown refuses while cloud work is live unless the caller forces it, deletes the service, and forgets the stored profile and tokens.
 
 Provider credentials cannot be entered interactively in a sandbox. The entrypoint installs the CLI named by `RAUHWpx_SANDBOX_PROVIDER` and seeds any of `RAUHWpx_PROVIDER_KEY_CLAUDE`, `RAUHWpx_PROVIDER_KEY_CODEX`, `RAUHWpx_PROVIDER_KEY_GROK`, `RAUHWpx_PROVIDER_KEY_PI`, and `RAUHWpx_PROVIDER_KEY_CURSOR` through `provider login <name> --api-key-stdin`, so keys never appear in a process argument list.
 

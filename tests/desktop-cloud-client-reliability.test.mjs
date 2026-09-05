@@ -558,3 +558,43 @@ test('a transport failure does not blindly replay session creation', async () =>
 
   assert.equal(sessionCreateCalls, 1);
 });
+
+for (const supportedWorkflows of [undefined, null, 'question', {}, [], ['direct', 'plan']]) {
+  test(`question transfers and workflow changes reject unsupported capabilities ${JSON.stringify(supportedWorkflows)}`, async () => {
+    const requests = [];
+    const client = new CloudClient({
+      vault: memoryVault(),
+      fetchImpl: async (url) => {
+        requests.push(new URL(url).pathname);
+        assert.ok(url.endsWith('/v1/health'));
+        return jsonResponse({ ok: true, protocolVersion: 1, conversationProtocolVersion: 2, supportedWorkflows });
+      },
+    });
+    await assert.rejects(client.transfer({
+      sessionId: 'question-start', provider: 'codex', persistent: true,
+      executionConfig: { workflow: 'question' }, documentName: 'source.hwpx',
+      documentBytes: Buffer.from('document'), timeline: portableTimeline(),
+    }), { code: 'CLOUD_RUNTIME_OUTDATED', retryable: false });
+    await assert.rejects(client.command('question-start', 'conversation.workflow', { workflow: 'question' }), {
+      code: 'CLOUD_RUNTIME_OUTDATED', retryable: false,
+    });
+    assert.equal(requests.length, 2);
+  });
+}
+
+test('question workflow changes reach workers that explicitly support read-only question turns', async () => {
+  let commands = 0;
+  const client = new CloudClient({
+    vault: memoryVault(),
+    fetchImpl: async (url, options) => {
+      if (url.endsWith('/v1/health')) return jsonResponse({ ok: true, protocolVersion: 1, supportedWorkflows: ['direct', 'plan', 'question'] });
+      if (url.endsWith('/v1/token/refresh')) return tokenResponse();
+      commands++;
+      assert.equal(JSON.parse(options.body).payload.workflow, 'question');
+      return jsonResponse({ session: { executionConfig: { workflow: 'question' } } });
+    },
+  });
+  const result = await client.command('room', 'conversation.workflow', { workflow: 'question' });
+  assert.equal(commands, 1);
+  assert.equal(result.session.executionConfig.workflow, 'question');
+});

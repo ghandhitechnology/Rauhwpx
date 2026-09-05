@@ -82,6 +82,11 @@ jobs:
               env HOME=/tmp/smoke-home TMPDIR=/tmp/smoke-tmp \
               node /app/document-runtime/smoke.mjs
           '
+          podman run --rm --user 1001:1001 \
+            --env HOME=/tmp --env RAUHWpx_XVFB_CAPTURE_PROOF=1 \
+            --volume "$PWD/cloud/tests:/app/tests:ro" \
+            --entrypoint node rauhwpx-cloud-sandbox-edge \
+            --test /app/tests/xvfb-studio-capture-proof.test.mjs
           sandbox_id=$(podman run --detach --memory=768m \
             --publish 127.0.0.1:17740:7740 \
             --env RAUHWpx_BOOTSTRAP_TOKEN=0123456789abcdefghijklmnopqrstuvwxyz_ABCD \

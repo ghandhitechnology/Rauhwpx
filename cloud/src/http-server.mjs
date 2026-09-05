@@ -4,6 +4,7 @@ import { URL } from 'node:url';
 import {
   CloudError,
   DEFAULT_LIMITS,
+  EXECUTION_WORKFLOWS,
   PROTOCOL_VERSION,
   ROOM_PROTOCOL_VERSION,
   TRANSFER_LIMITS,
@@ -216,6 +217,7 @@ export function createCloudHttpHandler({
           version: SERVICE_VERSION,
           protocolVersion: PROTOCOL_VERSION,
           conversationProtocolVersion: ROOM_PROTOCOL_VERSION,
+          supportedWorkflows: EXECUTION_WORKFLOWS,
           serverPublicKey: identity.serverPublicKey,
           serverId: identity.serverId,
         });

@@ -224,6 +224,7 @@ test('public API pins every response, supports the Tailscale path, and rejects w
     version: cloudVersion,
     protocolVersion: 1,
     conversationProtocolVersion: 2,
+    supportedWorkflows: ['direct', 'plan', 'question'],
     serverPublicKey: identity.serverPublicKey,
     serverId: identity.serverId,
   });

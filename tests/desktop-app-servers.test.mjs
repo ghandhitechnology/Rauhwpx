@@ -198,7 +198,7 @@ test('the Railway provider refuses to pretend when it has no configuration', asy
   });
   assert.equal(env.token, 'railway-token');
   assert.equal(env.apiUrl, 'https://backboard.railway.com/graphql/v2');
-  assert.equal(env.image, 'ghcr.io/ghandhitechnology/rauhwpx-cloud:1.1.0-edge.13');
+  assert.equal(env.image, 'ghcr.io/ghandhitechnology/rauhwpx-cloud:1.1.0-edge.14');
 });
 
 test('the Railway provider creates a reachable sandbox and returns a pairing receipt', async () => {

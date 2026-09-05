@@ -427,6 +427,49 @@ function liveDisplayEnvironment(displayEnv) {
     && displayEnv.XAUTHORITY;
 }
 
+export async function applyDisplayInput(page, input, {
+  displayPressedKeys = new Set(), displayPressedButtons = new Set(),
+} = {}) {
+  if (input?.kind === 'pointer') {
+    await page.mouse.move(input.x, input.y);
+    if (input.action === 'down') {
+      await page.mouse.down({ button: input.button });
+      displayPressedButtons.add(input.button);
+    } else if (input.action === 'up') {
+      await page.mouse.up({ button: input.button });
+      displayPressedButtons.delete(input.button);
+    }
+    return;
+  }
+  if (input?.kind === 'wheel') {
+    await page.mouse.move(input.x, input.y);
+    await page.mouse.wheel({ deltaX: input.deltaX, deltaY: input.deltaY });
+    return;
+  }
+  if (input?.kind === 'key') {
+    if (input.action === 'down') {
+      await page.keyboard.down(input.key);
+      displayPressedKeys.add(input.key);
+    } else {
+      await page.keyboard.up(input.key);
+      displayPressedKeys.delete(input.key);
+    }
+    return;
+  }
+  if (input?.kind === 'text') {
+    await page.keyboard.sendCharacter(input.text);
+    return;
+  }
+  if (input?.kind === 'reset') {
+    for (const key of displayPressedKeys) await page.keyboard.up(key).catch(() => {});
+    for (const button of displayPressedButtons) await page.mouse.up({ button }).catch(() => {});
+    displayPressedKeys.clear();
+    displayPressedButtons.clear();
+    return;
+  }
+  throw runtimeError('DISPLAY_INPUT_INVALID', 'Cloud display input event is invalid');
+}
+
 export function chromiumLaunchOptions({
   chromiumPath,
   displayEnv = null,
@@ -445,7 +488,10 @@ export function chromiumLaunchOptions({
     headless: !headed,
     pipe,
     dumpio: process.env.RAUHWpx_CHROMIUM_DUMPIO === '1',
-    defaultViewport: { width, height, deviceScaleFactor: 1 },
+    // Xvfb frames and pointer coordinates share physical screen pixels.
+    // Kiosk must use its actual viewport; emulation can hide browser chrome offsets.
+    defaultViewport: headed ? null : { width, height, deviceScaleFactor: 1 },
+    ...(headed ? { ignoreDefaultArgs: ['--enable-automation'] } : {}),
     env,
     args: headed
       ? [
@@ -454,6 +500,8 @@ export function chromiumLaunchOptions({
         '--window-position=0,0',
         `--window-size=${width},${height}`,
         '--kiosk',
+        '--force-device-scale-factor=1',
+        '--disable-features=Translate,TranslateUI',
       ]
       : [...CHROMIUM_ARGS],
   };
@@ -869,44 +917,7 @@ export async function createStudioHarness({
       },
       async interact(input) {
         assertBrowserHealthy();
-        if (input?.kind === 'pointer') {
-          await page.mouse.move(input.x, input.y);
-          if (input.action === 'down') {
-            await page.mouse.down({ button: input.button });
-            displayPressedButtons.add(input.button);
-          } else if (input.action === 'up') {
-            await page.mouse.up({ button: input.button });
-            displayPressedButtons.delete(input.button);
-          }
-          return;
-        }
-        if (input?.kind === 'wheel') {
-          await page.mouse.move(input.x, input.y);
-          await page.mouse.wheel({ deltaX: input.deltaX, deltaY: input.deltaY });
-          return;
-        }
-        if (input?.kind === 'key') {
-          if (input.action === 'down') {
-            await page.keyboard.down(input.key);
-            displayPressedKeys.add(input.key);
-          } else {
-            await page.keyboard.up(input.key);
-            displayPressedKeys.delete(input.key);
-          }
-          return;
-        }
-        if (input?.kind === 'text') {
-          await page.keyboard.insertText(input.text);
-          return;
-        }
-        if (input?.kind === 'reset') {
-          for (const key of displayPressedKeys) await page.keyboard.up(key).catch(() => {});
-          for (const button of displayPressedButtons) await page.mouse.up({ button }).catch(() => {});
-          displayPressedKeys.clear();
-          displayPressedButtons.clear();
-          return;
-        }
-        throw runtimeError('DISPLAY_INPUT_INVALID', 'Cloud display input event is invalid');
+        return applyDisplayInput(page, input, { displayPressedKeys, displayPressedButtons });
       },
       async exportDocument(format, destination) {
         assertBrowserHealthy();

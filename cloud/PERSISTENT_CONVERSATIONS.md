@@ -1,15 +1,21 @@
 # Persistent cloud conversations
 
-Status: implemented on `feat/persistent-cloud-agent-chat`.
+Behavior and compatibility contract for persistent Cloud conversations.
 
 ## Outcome
 
 A document and chat thread own one cloud conversation until the user explicitly
-ends it. The cloud runtime is the only document writer. Desktop and PWA clients
-show the same read-only document mirror, receive assistant and tool activity as
-it happens, and may enqueue another turn from the existing Studio composer.
+ends it. The Cloud runtime owns a draft separate from the local origin. Desktop
+and PWA clients receive assistant and tool activity and enqueue another turn
+from the existing Studio composer. The Cloud viewer accepts user editing input;
+checkpoint archives provide recovery without changing the origin.
 
-The feature is complete only when all of these predicates hold:
+After setup, the existing conversation's **Cloud로 보내기** button transfers its
+history, document snapshot, references, and composer text in one action. An empty
+composer supplies a continuation request. An active local turn reaches a safe
+boundary before transfer starts.
+
+The implementation keeps these boundaries:
 
 - A completed provider turn leaves the conversation open and accepting input.
 - A message accepted during a running turn executes exactly once in immutable
@@ -21,10 +27,15 @@ The feature is complete only when all of these predicates hold:
 - Plan approval, missing user decisions, external side effects, and destructive
   work outside the cloud draft are durable wait states. They do not end the
   conversation or become ordinary messages accidentally.
-- Every terminal turn has one stable document/timeline boundary. The origin
-  device archives one local version for it and replaces the origin only if the
-  origin digest still matches the last synchronized digest. A conflict keeps
-  both files.
+- Stable document/timeline boundaries are archived for recovery. Neither turn
+  completion nor checkpoint mirroring automatically overwrites the origin.
+- Only explicit user publication or `publish_cloud_document` requests writeback.
+  The tool waits for a successful turn boundary. Publication checks the expected
+  origin digest, preserves external edits, and keeps the conversation open.
+  Desktop conflicts create a separate Cloud copy; PWA conflicts remain archived.
+- Desktop retains the native origin document lease throughout Cloud work so
+  explicit publication can validate the file identity and path. The separate
+  Cloud authority lease blocks local editor mutations until authority returns.
 - Paired devices may view and send. Only the origin device may replace the
   original path; another device can take over only as a verified copy.
 - At most two runtimes are warm server-wide and at most one is warm for a
@@ -43,7 +54,7 @@ admission, a provider turn, and a user wait. These are independent axes.
 type RoomStatus = 'active' | 'ending' | 'archived' | 'purged';
 
 type AdmissionStatus =
-  | 'staged' | 'queued' | 'running' | 'sleeping'
+  | 'staged' | 'queued' | 'running'
   | 'suspended' | 'completed' | 'cancelled' | 'failed' | 'purged';
 
 type ExecutionPhase =
@@ -77,8 +88,9 @@ runtime leases provide the new semantics without invalidating v1 sessions.
 - A successful document tool is a safe operation boundary only after its
   snapshot receipt is durable. A redirect latch blocks the next write, waits
   for that receipt, interrupts the provider, and seals the partial turn.
-- Stable turn checkpoints are immutable. Offline clients archive all missing
-  stable turns and apply only the newest checkpoint to the origin.
+- Stable checkpoints are immutable. Reconnecting clients recover durable pending
+  boundaries and verified checkpoint bytes. Recovery never implies publication;
+  the origin changes only through an explicit publication or result action.
 
 ## Event contract
 
@@ -109,11 +121,19 @@ Add:
 - normalized turn, wait, attachment, presence, and runtime-lease records;
 - safe redirect and document-operation boundary receipts;
 - live event reduction and read-only document mirroring;
-- per-turn origin autosync/archive;
+- stable checkpoint archives and explicit, digest-checked origin publication;
 - a browser-safe signed transport plus File System Access/OPFS adapters.
 
-Existing v1 sessions finish under v1 semantics. A v2 room never downgrades to a
-v1 writer after emitting v2-only mutation semantics.
+The HTTP transport remains `protocolVersion: 1`. Persistent rooms require the
+separate health field `conversationProtocolVersion: 2`; clients reject older
+servers before uploading a new persistent handoff. Desktop and PWA question-mode
+starts and switches also require `supportedWorkflows` to be an array containing
+`question`. Ship the
+matching control plane and worker runtime together; the service version string
+or transport version alone is not a workflow capability check.
+
+Existing v1 sessions retain their original lifecycle. New persistent rooms do
+not fall back to a v1 writer when the server lacks room support.
 
 ## Implemented delivery
 
@@ -121,14 +141,14 @@ v1 writer after emitting v2-only mutation semantics.
    turns, live event projection, explicit End, and compatibility tests.
 2. Safe interaction: document-operation checkpoints, redirect latch, durable
    plan/question/effect waits, immutable follow-up attachments, and rollback.
-3. Client continuity: desktop mirror and per-turn autosync, presence/sleep/wake,
-   cross-device copy takeover, PWA signed transport, IndexedDB turn archive,
-   and digest-gated File System Access origin synchronization.
+3. Client continuity: stable checkpoint archives, presence/sleep/wake,
+   cross-device copy takeover, PWA signed transport, IndexedDB storage,
+   and explicit digest-checked origin publication.
 
 The full-file preview fallback ships before any mutation-patch codec. CRDT/OT,
-client-side tool replay, and rendered-page screenshots are deliberately out of
-scope because cloud is the single writer and the document engine is the source
-of semantic truth.
+and client-side tool replay are outside this implementation. The interactive
+remote viewer uses rendered frames; full document snapshots remain the recovery
+format.
 
 ## Verification gates
 
@@ -137,7 +157,7 @@ of semantic truth.
 - Plan/question/effect wait replay and stale-resolution rejection.
 - Attachment-version immutability.
 - Two-global/one-document runtime-lease admission and fake-clock sleep.
-- Stable-turn archive, origin replacement, external-change keep-both, and
-  non-origin takeover-as-copy.
+- Stable-turn archive without origin mutation; explicit user and agent publication;
+  external-change keep-both; and non-origin takeover-as-copy.
 - Desktop and PWA event-gap recovery to a verified stable checkpoint.
 - Migration fixtures covering every existing v1 lifecycle state.

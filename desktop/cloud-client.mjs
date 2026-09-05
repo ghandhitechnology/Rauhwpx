@@ -833,10 +833,15 @@ export class CloudClient {
     if (!document.length) throw new Error('A saved document is required for cloud transfer');
     if (document.length > MAX_RESULT_BYTES) throw new Error('Document exceeds the 64 MiB cloud limit');
     if (!validPortableTimeline(timeline)) throw new Error('Portable cloud timeline is invalid');
-    if (persistent) {
+    if (persistent || executionConfig?.workflow === 'question') {
       const health = await this.health(null, { signal });
-      if (health.conversationProtocolVersion !== 2) {
+      if (persistent && health.conversationProtocolVersion !== 2) {
         throw new CloudHttpError('Update the Cloud server before starting a persistent conversation.', {
+          code: 'CLOUD_RUNTIME_OUTDATED', retryable: false,
+        });
+      }
+      if (executionConfig?.workflow === 'question' && (!Array.isArray(health.supportedWorkflows) || !health.supportedWorkflows.includes('question'))) {
+        throw new CloudHttpError('Update the Cloud server before starting a question conversation.', {
           code: 'CLOUD_RUNTIME_OUTDATED', retryable: false,
         });
       }
@@ -1433,6 +1438,14 @@ export class CloudClient {
   }
 
   async command(sessionId, type, payload = {}, commandId = randomUUID(), options = {}) {
+    if (type === 'conversation.workflow' && payload.workflow === 'question') {
+      const health = await this.health(null, { signal: options.signal });
+      if (!Array.isArray(health.supportedWorkflows) || !health.supportedWorkflows.includes('question')) {
+        throw new CloudHttpError('Update the Cloud server before switching to question mode.', {
+          code: 'CLOUD_RUNTIME_OUTDATED', retryable: false,
+        });
+      }
+    }
     return this.#request(`/v1/sessions/${encodeURIComponent(sessionId)}/commands`, {
       method: 'POST',
       signal: options.signal,

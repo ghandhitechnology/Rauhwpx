@@ -152,7 +152,8 @@ test('Chromium uses the live Xvfb display and geometry, with a headless no-displ
   assert.equal(headed.env.RAUHWpx_WORKER_TOKEN, undefined);
   assert.equal(headed.env.RAUHWpx_CONTROL_SOCKET, undefined);
   assert.equal(headed.env.CONTROL_PLANE_SECRET, undefined);
-  assert.deepEqual(headed.defaultViewport, { width: 1440, height: 900, deviceScaleFactor: 1 });
+  assert.equal(headed.defaultViewport, null);
+  assert.deepEqual(headed.ignoreDefaultArgs, ['--enable-automation']);
   for (const argument of [
     '--no-sandbox',
     '--disable-setuid-sandbox',
