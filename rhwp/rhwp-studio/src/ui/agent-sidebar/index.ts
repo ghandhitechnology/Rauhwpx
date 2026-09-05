@@ -187,7 +187,8 @@ export interface AgentSidebarDeps {
   }) => void;
   cloudController?: CloudController;
   workspace?: WorkspaceController;
-  prepareCloudTransfer?: () => Promise<CloudDocumentPayload | null>;
+  prepareCloudTransfer?: (startId: string) => Promise<CloudDocumentPayload | null>;
+  mergeCloudCheckpoint?: (startId: string, checkpoint: CloudCheckpointPayload) => Promise<boolean>;
   beginCloudAuthorityTransition?: () => { release(): void };
   setCloudDocumentLease?: (cloudOwned: boolean, sessionId: string | null) => void;
   applyCloudResult?: (result: CloudDownloadResult, resolution: CloudResultResolution) => Promise<{
@@ -1604,6 +1605,21 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   workspaceDocumentContext.append(workspaceDocumentName, workspaceSelectionContext);
   workspaceLeading.append(workspaceSettingsBack, workspaceThreadsBtn, workspaceDocumentContext);
 
+  const documentViewSwitch = el('div', 'ag-workspace-mode-switch ag-document-view-switch');
+  documentViewSwitch.setAttribute('role', 'group');
+  documentViewSwitch.setAttribute('aria-label', '보고 있는 문서');
+  const localDocumentButton = el('button', 'ag-workspace-mode-option', '내 문서');
+  const cloudDocumentButton = el('button', 'ag-workspace-mode-option', 'Cloud 문서');
+  for (const [button, view] of [[localDocumentButton, 'local'], [cloudDocumentButton, 'cloud']] as const) {
+    button.type = 'button';
+    button.dataset.documentView = view;
+    button.addEventListener('click', () => workspace.setWorkspaceView(view));
+    documentViewSwitch.append(button);
+  }
+  localDocumentButton.title = 'Cloud 작업을 계속하면서 내 문서를 편집합니다';
+  cloudDocumentButton.title = 'Cloud 에이전트가 작업 중인 문서를 봅니다';
+
+
   const workspaceTitle = el('div', 'ag-workspace-title', '대화');
 
   const workspaceModeSwitch = el('div', 'ag-workspace-mode-switch ag-composer-mode-switch');
@@ -1635,6 +1651,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     cloudModeButton.setAttribute('aria-pressed', mode === 'cloud' ? 'true' : 'false');
     workspaceModeSwitch.dataset.mode = mode;
     workspaceModeSwitch.dataset.target = target.kind;
+    const cloudSnapshot = cloudController.getSnapshot();
+    documentViewSwitch.hidden = !cloudSnapshot.sessions.some((session) =>
+      session.documentId === currentDocumentId);
+    localDocumentButton.setAttribute('aria-pressed', String(workspace.workspaceView() === 'local'));
+    cloudDocumentButton.setAttribute('aria-pressed', String(workspace.workspaceView() === 'cloud'));
     const locked = workspace.executionLocked();
     workspaceModeSwitch.hidden = locked
       || (!cloudWorkspaceSwitchVisible && !shouldShowComposerCloudSwitch());
@@ -1950,6 +1971,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       handleAgentEvent(event);
     },
     onCheckpointPublished: (checkpoint) => deps.publishCloudCheckpoint?.(checkpoint),
+    getCloudStartId: (threadId) => (threadId === currentThread.id ? currentThread : getThread(threadId))?.cloudStartId,
+    onMergeCheckpoint: deps.mergeCloudCheckpoint ? async (startId, checkpoint) => {
+      workspace.setWorkspaceView('local');
+      return deps.mergeCloudCheckpoint!(startId, checkpoint);
+    } : undefined,
     onResultResolved: async (result, resolution) => {
       if (resolution.action !== 'replace') {
         await deps.applyCloudResult?.(result, resolution);
@@ -2214,7 +2240,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     attachmentReferenceIds: string[];
   }, extras: CloudTransferReference[] = []): Promise<void> {
     const transferThread = currentThread;
-    const document = await deps.prepareCloudTransfer?.();
+    const document = await deps.prepareCloudTransfer?.(startId);
     if (!document) throw new Error(CLOUD_UNSAVED_MESSAGE);
     flushAssistantBuffer();
     persistCurrentThread();
@@ -2776,6 +2802,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   templateChipClear.appendChild(createIcon('close'));
   templateChip.append(el('span', 'ag-template-chip-label', '템플릿'), templateChipName, templateChipClear);
   composer.append(composerOverlay, slashMenu, templateChip, composerField, composerMeta, configPanel);
+  const documentControls = el('div', 'ag-document-controls');
+  documentControls.append(documentViewSwitch, cloudUi.mergeButton);
+  composer.insertBefore(documentControls, composerField);
   const composerModeRow = el('div', 'ag-composer-mode-row');
   composerModeRow.append(workspaceModeSwitch, cloudModeBadge, cloudHandoffButton, newLocalChatButton);
   composer.insertBefore(composerTargetMessage, composerField);

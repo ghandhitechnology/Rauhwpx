@@ -1071,7 +1071,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const instructionsReload = el('button', 'ag-settings-btn', '다시 불러오기');
   instructionsReload.type = 'button';
   instructionsActions.append(instructionsReload);
-  const hancomGit = createToggleRow('한컴용 Git 사용하기 (beta)');
+  const hancomGit = createToggleRow('한컴용 Git 사용하기');
   hancomGit.input.checked = userSettings.getUseHancomGit();
   hancomGit.input.addEventListener('change', () => {
     userSettings.setUseHancomGit(hancomGit.input.checked);

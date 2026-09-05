@@ -21,6 +21,14 @@ export async function checkCloudRecovery(page, origin, artifacts) {
       frame: document.querySelector('.cloud-workspace-image').src };
   });
   await page.screenshot({ path: resolve(artifacts, 'cloud-live.png') });
+  await page.click('[data-document-view="local"]');
+  assert.equal(await page.evaluate(() => window.sidebarPreview.workspace.workspaceView()), 'local');
+  assert.equal(await page.evaluate(() => window.sidebarPreview.workspace.mode()), 'cloud');
+  assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.controller.getSnapshot().session.sessionId), original.sessionId);
+  await page.click('[data-document-view="cloud"]');
+  await page.waitForFunction(() => document.querySelector('#cloud-workspace').dataset.displayState === 'live');
+
+  original.frame = await page.$eval('.cloud-workspace-image', (node) => node.src);
   await page.click('#cloud-disconnect');
   await page.waitForFunction(() => document.querySelector('#cloud-workspace').dataset.displayState === 'stalled');
   assert.equal(await page.$eval('.cloud-workspace-image', (node) => node.src), original.frame);

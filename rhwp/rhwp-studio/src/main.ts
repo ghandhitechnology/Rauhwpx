@@ -347,7 +347,6 @@ function beginCloudAuthorityTransition(): { release(): void } {
 
 function syncDocumentReadOnly(): void {
   documentReadOnly = previewDocumentReadOnly
-    || cloudDocumentLeaseSessionId !== null
     || cloudAuthorityTransitionCount > 0;
   document.documentElement.dataset.documentReadOnly = documentReadOnly ? 'true' : 'false';
   inputHandler?.setReadOnly(documentReadOnly);
@@ -382,7 +381,7 @@ function bytesToSha256(bytes: Uint8Array): Promise<string> {
     [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join(''));
 }
 
-async function prepareCloudTransferDocument() {
+async function prepareCloudTransferDocument(startId: string) {
   if (!wasm.hasLoadedDocument()) return null;
   if (wasm.isNewDocument) return null;
   const sourceFormat = wasm.getSourceFormat();
@@ -390,7 +389,9 @@ async function prepareCloudTransferDocument() {
     throw new Error(`클라우드에서 지원하지 않는 문서 형식입니다: ${sourceFormat}`);
   }
   const format = sourceFormat;
-  const bytes = exportDocumentForFormat(wasm, format);
+  let bytes = exportDocumentForFormat(wasm, format);
+  if (!versionControllerRef) throw new Error('문서 버전 기록을 준비하는 중입니다.');
+  bytes = await versionControllerRef.prepareCloudBranch(startId, bytes, wasm.fileName);
   // The Cloud snapshot may include unsaved edits. Keep the current saved origin
   // digest separate so later publication can still detect external file changes.
   const originSha256 = await captureCloudOriginSha256({
@@ -1192,6 +1193,7 @@ async function initialize(): Promise<void> {
         getInputHandler: () => inputHandler,
         getDocumentId: () => activeDocumentId,
         agentBridge,
+        autoEnable: () => !cloudRuntime && userSettings.getUseHancomGit(),
       });
       versionControllerRef = versionController;
       // The outer client owns the conversation. A worker needs the bridge and editor,
@@ -1232,6 +1234,7 @@ async function initialize(): Promise<void> {
           setCloudDocumentLease,
           applyCloudResult,
           publishCloudCheckpoint,
+          mergeCloudCheckpoint: (startId, checkpoint) => versionController.mergeCloudCheckpoint(startId, checkpoint),
           applyCloudTakeover,
         });
         disposeAgentSidebar = () => {

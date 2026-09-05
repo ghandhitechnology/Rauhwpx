@@ -1,5 +1,6 @@
+import type { CloudCheckpointPayload } from '../cloud/types.ts';
 import type { AgentBridge } from '../agent/bridge.ts';
-import type { CheckpointTitleSummary, PendingEditsChangeEvent, SidebarEvent } from '../agent/types.ts';
+import type { CheckpointTitleSummary } from '../agent/types.ts';
 import { CompareSessionStore } from '../compare/session.ts';
 import { compareDocuments, compareSnapshots } from '../compare/diff-engine.ts';
 import type { EventBus } from '../core/event-bus.ts';
@@ -18,6 +19,7 @@ import {
 import { MERGE_ANALYSIS_VERSION, MERGE_MANIFEST_VERSION } from '../merge/manifest.ts';
 import { getHistoryPayload, listHistoryMeta } from '../history/idb-store.ts';
 import { showPendingAgentEditsDialog } from '../ui/pending-agent-edits-dialog.ts';
+import { prepareUncommittedMerge } from '../ui/version-merge-preparation.ts';
 import { CompareResultWindow } from '../ui/compare-result-window.ts';
 import type {
   LegacyVersionView,
@@ -53,7 +55,7 @@ import {
   type VersionBlob,
   type MergeResolution,
 } from './index.ts';
-import { hashBytes } from './hash.ts';
+import { hashBytes, fingerprintBytes } from './hash.ts';
 import {
   commitCompositeMerge,
   reconcileCompositeEditor,
@@ -83,6 +85,7 @@ interface VersionControllerDeps {
   getInputHandler: () => InputHandler | null;
   getDocumentId: () => string | null;
   agentBridge: AgentBridge;
+  autoEnable?: () => boolean;
 }
 
 interface CreateCheckpointOptions {
@@ -101,11 +104,6 @@ interface WorkspaceToken {
   editorRevision: number;
   repositoryId: string | null;
   repositoryRevision: number | null;
-}
-
-interface DeferredSavedSnapshot {
-  workspace: WorkspaceToken;
-  snapshot: CapturedVersionSnapshot;
 }
 
 function emptyState(): VersionManagerState {
@@ -190,14 +188,6 @@ export function persistActiveBranch(id: string, branch: string): void {
   }
 }
 
-function successfulTurn(event: SidebarEvent): boolean {
-  if (event.type !== 'agent' || event.event.type !== 'turn-end') return false;
-  if (event.event.errorMessage) return false;
-  return event.event.stopReason === 'end_turn'
-    || event.event.stopReason === 'completed'
-    || event.event.stopReason === 'success';
-}
-
 function tagForMessage(message: string, refs: readonly VersionRef[]): string {
   const base = message.normalize('NFC').trim().replace(/[\u0000-\u001f\u007f/\\]/g, ' ').slice(0, 64).trim()
     || timestampTitle();
@@ -246,6 +236,7 @@ export class DocumentVersionController implements VersionManagerController {
   readonly #getInputHandler: () => InputHandler | null;
   readonly #getDocumentId: () => string | null;
   readonly #agentBridge: AgentBridge;
+  readonly #autoEnable: () => boolean;
   readonly #ownsStore: boolean;
   readonly #listeners = new Set<(state: VersionManagerState) => void>();
   readonly #unsubscribers: Array<() => void> = [];
@@ -264,12 +255,11 @@ export class DocumentVersionController implements VersionManagerController {
   #editorRevision = 0;
   #semanticDirty = false;
   #semanticDirtyRevision = -1;
-  #deferredSavedSnapshot: DeferredSavedSnapshot | null = null;
   #refreshEpoch = 0;
   #operation = Promise.resolve();
-  #pendingApprovalTimer: number | null = null;
   #suppressApprovalCheckpoint = 0;
   #mergeResolverActive = false;
+  #mergeCompletion: Promise<boolean> | null = null;
   #mergeLockedHandler: InputHandler | null = null;
   #mergePreviousUserEditingLocked = false;
   readonly #pendingMergeFinalizers = new WeakMap<
@@ -286,6 +276,7 @@ export class DocumentVersionController implements VersionManagerController {
     this.#getInputHandler = deps.getInputHandler;
     this.#getDocumentId = deps.getDocumentId;
     this.#agentBridge = deps.agentBridge;
+    this.#autoEnable = deps.autoEnable ?? (() => false);
     this.#compareStore = new CompareSessionStore(this.#eventBus);
 
     const documentChanged = () => {
@@ -301,50 +292,21 @@ export class DocumentVersionController implements VersionManagerController {
         void this.refresh();
       }),
       this.#eventBus.on('document-saved', () => {
-        if (this.#agentBridge.isTurnRunning()) {
-          try {
-            const workspace = this.#captureWorkspaceToken();
-            if (!workspace.repositoryId) throw new VersionError('VERSIONING_DISABLED', 'Versioning is not enabled');
-            this.#deferredSavedSnapshot = {
-              workspace,
-              snapshot: captureVersionSnapshot(this.#wasm),
-            };
-          } catch {
-            this.#deferredSavedSnapshot = null;
-          }
-          return;
-        }
+        // A file save updates disk state; only an explicit commit advances HEAD.
+        const id = this.#getDocumentId();
+        const capture = this.#wasm.hasLoadedDocument() ? captureVersionSnapshot(this.#wasm) : null;
         void this.#enqueue(async () => {
+          if (!capture || id !== this.#getDocumentId()) return;
           await this.#refreshData(false);
-          this.#deferredSavedSnapshot = null;
-          if (!this.#repository) return;
-          await this.#createCheckpoint({ reason: 'save', lastSaved: true });
-        });
+          if (!this.#repository || id !== this.#getDocumentId()) return;
+          this.#repository = await this.#store.markSaved(
+            this.#repository.id, capture.fingerprint, this.#repository.revision,
+          );
+          await this.#refreshData(false);
+        }).catch((error) => console.warn('Version save state could not be updated', error));
       }),
-      this.#agentBridge.onEvent((event) => {
-        const turnEnded = event.type === 'agent' && event.event.type === 'turn-end';
-        if (turnEnded) {
-          void this.#enqueue(async () => {
-            await this.#refreshData(false);
-            await this.#flushDeferredSave();
-            if (
-              this.#repository
-              && successfulTurn(event)
-              && this.#agentBridge.getPermissionProfile() === 'unrestricted'
-            ) await this.#createCheckpoint({
-              reason: 'agent',
-              author: { kind: 'agent', label: this.#agentBridge.getActiveAgent() ?? '에이전트' },
-            });
-          });
-        }
-        this.#syncTransientState();
-      }),
-      this.#agentBridge.pendingEdits.onChange((event: PendingEditsChangeEvent) => {
-        this.#syncTransientState();
-        if (event.type !== 'approved' || this.#suppressApprovalCheckpoint > 0) return;
-        if (this.#pendingApprovalTimer !== null) window.clearTimeout(this.#pendingApprovalTimer);
-        this.#pendingApprovalTimer = window.setTimeout(() => this.#queueApprovalCheckpoint(), 80);
-      }),
+      this.#agentBridge.onEvent(() => this.#syncTransientState()),
+      this.#agentBridge.pendingEdits.onChange(() => this.#syncTransientState()),
     );
   }
 
@@ -362,7 +324,6 @@ export class DocumentVersionController implements VersionManagerController {
   }
 
   async whenIdle(): Promise<void> {
-    if (this.#pendingApprovalTimer !== null) this.#queueApprovalCheckpoint();
     let pending: Promise<void>;
     do {
       pending = this.#operation;
@@ -370,20 +331,11 @@ export class DocumentVersionController implements VersionManagerController {
     } while (pending !== this.#operation);
   }
 
-  #queueApprovalCheckpoint(): void {
-    if (this.#pendingApprovalTimer !== null) window.clearTimeout(this.#pendingApprovalTimer);
-    this.#pendingApprovalTimer = null;
-    void this.#enqueue(async () => {
-      await this.#refreshData(false);
-      if (this.#repository) await this.#createCheckpoint({
-        reason: 'agent',
-        author: { kind: 'agent', label: this.#agentBridge.getActiveAgent() ?? '에이전트' },
-      });
-    });
+  async enable(): Promise<void> {
+    await this.#enqueue(() => this.#enableVersioning());
   }
 
-  async enable(): Promise<void> {
-    await this.#enqueue(async () => {
+  async #enableVersioning(): Promise<void> {
       this.#guardSaved();
       await this.#guardMutation();
       if (this.#documentState.isDirty()) {
@@ -427,7 +379,105 @@ export class DocumentVersionController implements VersionManagerController {
       persistActiveBranch(id, result.branch.name);
       await this.#refreshData(true);
       this.#requestGeneratedTitle(result.commit, analysis.titleSummary);
+  }
+
+  /** Persist the exact handoff without committing or replacing the local working tree. */
+  async prepareCloudBranch(startId: string, bytes: Uint8Array, fileName: string): Promise<Uint8Array> {
+    return this.#enqueue(async () => {
+      await this.#refreshData(false);
+      if (!this.#repository) await this.#enableVersioning();
+      await this.#guardMutation();
+      const workspace = this.#captureWorkspaceToken();
+      const repository = this.#requireRepository();
+      const anchorId = commitId(`cloud-base:${repository.id}:${startId}`);
+      const existing = await this.#store.getCommit(anchorId);
+      if (existing) {
+        const blob = await this.#store.getBlob(existing.blobId);
+        this.#assertWorkspaceToken(workspace);
+        if (!blob) throw new VersionError('CORRUPT_BLOB', 'Cloud 시작 문서를 찾을 수 없습니다.');
+        return blob.bytes;
+      }
+      const capture = await this.#captureIncoming(bytes, fileName);
+      this.#assertWorkspaceToken(workspace);
+      const name = this.#cloudBranchName(startId);
+      let branch = await this.#store.getBranch(repository.id, name);
+      if (!branch) {
+        const created = await this.#store.createBranch({
+          repositoryId: repository.id, name, target: this.#requireActiveBranch().target,
+          expectedRepositoryRevision: repository.revision,
+        });
+        this.#repository = created.repository;
+        branch = created.branch;
+      }
+      await this.#appendBranchSnapshot(branch, capture, 'Cloud 시작 문서', 'agent', anchorId);
+      return bytes;
     });
+  }
+
+  async mergeCloudCheckpoint(startId: string, checkpoint: CloudCheckpointPayload): Promise<boolean> {
+    const source = await this.#enqueue(async () => {
+      await this.#refreshData(false);
+      await this.#guardMutation(true);
+      const workspace = this.#captureWorkspaceToken();
+      const repository = this.#requireRepository();
+      if (checkpoint.documentId !== workspace.documentId || checkpoint.kind !== 'turn'
+        || !Number.isSafeInteger(checkpoint.revision) || checkpoint.revision < 1) {
+        throw new Error('이 문서의 완료된 Cloud 작업만 병합할 수 있습니다.');
+      }
+      const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', checkpoint.bytes.slice().buffer))]
+        .map((byte) => byte.toString(16).padStart(2, '0')).join('');
+      if (digest !== checkpoint.sha256 || checkpoint.bytes.length !== checkpoint.byteLength) {
+        throw new VersionError('CORRUPT_BLOB', 'Cloud 문서 검증에 실패했습니다. 다시 다운로드하세요.');
+      }
+      const name = this.#cloudBranchName(startId);
+      const anchor = await this.#store.getCommit(commitId(`cloud-base:${repository.id}:${startId}`));
+      const branch = await this.#store.getBranch(repository.id, name);
+      if (!anchor || !branch) {
+        throw new Error('이 기기에 Cloud 시작 기록이 없습니다. 시작한 기기에서 문서를 열어 병합하세요.');
+      }
+      if (branch.name === this.#requireActiveBranch().name) {
+        throw new Error('Cloud 결과를 받을 로컬 브랜치를 먼저 선택하세요.');
+      }
+      const id = commitId(`cloud:${repository.id}:${checkpoint.sessionId}:${checkpoint.revision}`);
+      const existing = await this.#store.getCommit(id);
+      if (existing) {
+        if (existing.blobId !== hashBytes(checkpoint.bytes)) {
+          throw new VersionError('CORRUPT_BLOB', '같은 Cloud 버전의 문서 내용이 달라졌습니다.');
+        }
+      } else {
+        // Pin the source head. An old or replayed boundary must never move it backwards.
+        const head = await this.#requireCommit(branch.target);
+        const prefix = `cloud:${repository.id}:${checkpoint.sessionId}:`;
+        if (head.id.startsWith(prefix) && Number(head.id.slice(prefix.length)) >= checkpoint.revision) {
+          throw new VersionError('STALE_WORKSPACE', '더 최신 Cloud 변경을 이미 가져왔습니다.');
+        }
+        const capture = await this.#captureIncoming(checkpoint.bytes, checkpoint.fileName);
+        this.#assertWorkspaceToken(workspace);
+        await this.#appendBranchSnapshot(branch, capture, `Cloud · ${checkpoint.turn}턴`, 'agent', id);
+      }
+      return name;
+    });
+    this.#mergeCompletion = null;
+    await this.startMerge(source);
+    return this.#mergeCompletion ? await this.#mergeCompletion : false;
+  }
+
+  #cloudBranchName(startId: string): BranchName {
+    return branchName(`Cloud ${hashBytes(new TextEncoder().encode(startId)).slice(7, 23)}`);
+  }
+
+  async #captureIncoming(bytes: Uint8Array, fileName: string): Promise<CapturedVersionSnapshot> {
+    mergeDocumentFormat(bytes);
+    const parsed = new WasmBridge();
+    await parsed.initialize();
+    try {
+      parsed.loadDocument(bytes, fileName);
+      const snapshot = captureVersionSnapshot(parsed);
+      // Keep authenticated transfer bytes, even when the parser normalizes an export.
+      return { ...snapshot, bytes, fingerprint: fingerprintBytes(bytes) };
+    } finally {
+      parsed.releaseDocument();
+    }
   }
 
   async checkpoint(message?: string): Promise<void> {
@@ -732,7 +782,7 @@ export class DocumentVersionController implements VersionManagerController {
     await this.#enqueue(async () => {
       await this.#refreshData(false);
       await this.#guardMutation(true);
-      await this.#checkpointDirty('pre-merge');
+      if (!await this.#prepareMergeWorkingTree()) return;
       await this.#refreshData(false);
       await this.#openMergeResolver(branchName(sourceBranch));
     });
@@ -750,7 +800,7 @@ export class DocumentVersionController implements VersionManagerController {
       if (draft.targetBranch !== this.#requireActiveBranch().name) {
         throw new VersionError('STALE_WORKSPACE', `병합을 이어가려면 먼저 ${draft.targetBranch} 브랜치로 전환하세요.`);
       }
-      await this.#checkpointDirty('pre-merge');
+      if (!await this.#prepareMergeWorkingTree()) return;
       await this.#refreshData(false);
       await this.#openMergeResolver(draft.sourceBranch, draft);
     });
@@ -787,7 +837,10 @@ export class DocumentVersionController implements VersionManagerController {
   }
 
   async createShelf(title?: string): Promise<void> {
-    await this.#enqueue(async () => {
+    await this.#enqueue(() => this.#createShelf(title));
+  }
+
+  async #createShelf(title?: string): Promise<void> {
       await this.#refreshData(false);
       await this.#guardMutation(true);
       const workspace = this.#captureWorkspaceToken();
@@ -830,7 +883,6 @@ export class DocumentVersionController implements VersionManagerController {
       this.#repository = result.repository;
       this.#setDirtyForFingerprint(head.contentFingerprint, 'version-shelf', head.contentFingerprint);
       await this.#refreshData(true);
-    });
   }
 
   async applyShelf(id: string, remove: boolean): Promise<void> {
@@ -1011,7 +1063,6 @@ export class DocumentVersionController implements VersionManagerController {
   }
 
   dispose(): void {
-    if (this.#pendingApprovalTimer !== null) window.clearTimeout(this.#pendingApprovalTimer);
     for (const unsubscribe of this.#unsubscribers) unsubscribe();
     this.#listeners.clear();
     this.#compareWindow.hide();
@@ -1283,6 +1334,9 @@ export class DocumentVersionController implements VersionManagerController {
     };
     this.#setMergeResolverLock(true);
     try {
+      let applied = false;
+      let resolveCompletion!: (applied: boolean) => void;
+      this.#mergeCompletion = new Promise<boolean>((resolve) => { resolveCompletion = resolve; });
       this.#mergeResolver.open({
         draft: storedDraft,
         analysis,
@@ -1349,9 +1403,9 @@ export class DocumentVersionController implements VersionManagerController {
         },
         complete: (request) => this.#enqueue(() => this.#completeMerge(request)),
         finalizeSourceDisposition: (receipt, disposition) => this.#enqueue(
-          () => this.#finalizeMergeSource(receipt, disposition),
+          async () => { await this.#finalizeMergeSource(receipt, disposition); applied = true; },
         ),
-        onClosed: () => this.#setMergeResolverLock(false),
+        onClosed: () => { this.#setMergeResolverLock(false); resolveCompletion(applied); },
       });
     } catch (error) {
       this.#setMergeResolverLock(false);
@@ -1838,22 +1892,6 @@ export class DocumentVersionController implements VersionManagerController {
     }
   }
 
-  async #flushDeferredSave(): Promise<void> {
-    const deferred = this.#deferredSavedSnapshot;
-    const repository = this.#repository;
-    if (!deferred) return;
-    if (
-      !repository
-      || this.#getDocumentId() !== deferred.workspace.documentId
-      || repository.id !== deferred.workspace.repositoryId
-    ) {
-      this.#deferredSavedSnapshot = null;
-      return;
-    }
-    await this.#createCheckpoint({ reason: 'save', lastSaved: true }, deferred.snapshot);
-    this.#deferredSavedSnapshot = null;
-  }
-
   async #refreshData(includeLegacy: boolean): Promise<void> {
     const epoch = ++this.#refreshEpoch;
     const id = this.#getDocumentId();
@@ -1875,6 +1913,11 @@ export class DocumentVersionController implements VersionManagerController {
     const repository = await this.#store.findRepositoryByDocumentId(documentId(id));
     if (epoch !== this.#refreshEpoch || this.#getDocumentId() !== id) return;
     this.#repository = repository;
+    if (!repository && this.#autoEnable() && !this.#documentState.isDirty()
+      && !this.#agentBridge.isTurnRunning()) {
+      await this.#enableVersioning();
+      return;
+    }
     if (!repository) {
       this.#refs = [];
       this.#commits = [];
@@ -2181,6 +2224,76 @@ export class DocumentVersionController implements VersionManagerController {
         analysis.titleSummary,
       );
     }
+    return result.commit;
+  }
+
+  async #prepareMergeWorkingTree(): Promise<boolean> {
+    const workspace = this.#captureWorkspaceToken();
+    const branch = this.#requireActiveBranch();
+    const capture = captureVersionSnapshot(this.#wasm);
+    const head = await this.#requireCommit(branch.target);
+    this.#assertWorkspaceToken(workspace);
+    if (capture.fingerprint === head.contentFingerprint) return true;
+    this.#setMergeResolverLock(true);
+    let choice: Awaited<ReturnType<typeof prepareUncommittedMerge>>;
+    try {
+      choice = await prepareUncommittedMerge(branch.name);
+      this.#assertWorkspaceToken(workspace);
+    } finally {
+      this.#setMergeResolverLock(false);
+    }
+    if (choice.kind === 'cancel') return false;
+    if (choice.kind === 'stash') {
+      await this.#createShelf('병합 전 내 변경');
+    } else if (choice.kind === 'commit') {
+      await this.#createCheckpoint({ reason: 'manual', message: '병합 전 내 변경' }, capture);
+    } else if (choice.kind === 'branch') {
+      const repository = this.#requireRepository();
+      const blob = await this.#store.getBlob(head.blobId);
+      if (!blob) throw new VersionError('CORRUPT_BLOB', '현재 브랜치 문서를 찾을 수 없습니다.');
+      const handler = this.#requireInputHandler();
+      handler.prepareSnapshotCapacity(2);
+      this.#assertWorkspaceToken(workspace);
+      const created = await this.#store.createBranch({
+        repositoryId: repository.id,
+        name: branchName(choice.name),
+        target: head.id,
+        expectedRepositoryRevision: repository.revision,
+      });
+      this.#repository = created.repository;
+      await this.#appendBranchSnapshot(created.branch, capture, '내 변경', 'manual');
+      // The new branch owns the edits. Keep the original target selected.
+      this.#assertWorkspaceToken(workspace, { repository: false });
+      handler.replaceContentFromBytes(blob.bytes);
+      this.#setDirtyForFingerprint(head.contentFingerprint, 'version-merge-prepare', head.contentFingerprint);
+      await this.#refreshData(true);
+    }
+    return true;
+  }
+
+  async #appendBranchSnapshot(
+    branch: BranchRef,
+    capture: CapturedVersionSnapshot,
+    title: string,
+    reason: 'manual' | 'agent',
+    id?: CommitId,
+  ): Promise<VersionCommit> {
+    const workspace = this.#captureWorkspaceToken();
+    const repository = this.#requireRepository();
+    await this.#ensureFullMergeManifest(repository.id, branch.target, new Map());
+    const mergeManifestEntries = await this.#mergeWorker.buildDocumentManifest(capture.bytes);
+    this.#assertWorkspaceToken(workspace);
+    const result = await this.#store.createCheckpoint({
+      id, repositoryId: repository.id, branch: branch.name,
+      expectedRepositoryRevision: repository.revision,
+      expectedBranchRevision: branch.revision, expectedHead: branch.target,
+      reason, bytes: capture.bytes, compareSnapshot: capture.compareSnapshot,
+      contentFingerprint: capture.fingerprint, mergeManifestEntries,
+      title, titleOrigin: 'manual', titleRevision: 0,
+      author: reason === 'agent' ? { kind: 'agent', label: 'Cloud' } : { kind: 'user', label: '사용자' },
+    });
+    this.#repository = result.repository;
+    await this.#refreshData(true);
     return result.commit;
   }
 

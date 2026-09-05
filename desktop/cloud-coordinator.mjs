@@ -3411,7 +3411,16 @@ export class CloudCoordinator extends EventEmitter {
           if (handoffId) {
             const pending = (await this.#store.get(handoffId))?.pendingOriginPublications ?? [];
             for (const operationId of pending) {
-              await this.publishCheckpoint({ sessionId, operationId });
+              // A worker can announce completed work, but local edits now live on
+              // an independent branch. Archive it for user-initiated merge only.
+              const checkpoint = await this.#downloadCheckpoint({ sessionId, operationId }, profileEpoch);
+              const archivePath = path.join(this.#recoveryDir, 'merge',
+                String(handoffId).replace(/[^A-Za-z0-9_-]/g, '_'),
+                `revision-${checkpoint.revision}${path.extname(checkpoint.fileName) || '.hwpx'}`);
+              await writeVerifiedRecoveryFile({
+                filePath: archivePath, bytes: checkpoint.bytes, expectedDigest: checkpoint.sha256,
+              });
+              this.#assertProfileEpoch(profileEpoch);
               await this.#store.patch(handoffId, (latest) => ({
                 pendingOriginPublications: (latest.pendingOriginPublications ?? []).filter((id) => id !== operationId),
               }));
