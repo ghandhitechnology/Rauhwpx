@@ -580,7 +580,8 @@
 
 .ag-agent-setup-pane[hidden],
 .ag-agent-key-box[hidden],
-.ag-agent-setup-progress[hidden] {
+.ag-agent-setup-progress[hidden],
+.ag-agent-auth-card[hidden] {
   display: none;
 }
 

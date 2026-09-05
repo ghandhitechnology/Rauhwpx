@@ -30,9 +30,21 @@ export function redactDiagnosticText(value, secrets = []) {
 }
 
 /**
+ * OpenCode model identifiers are provider-qualified, but the model portion is
+ * provider-defined. Keep the transport boundary bounded and single-line so
+ * future catalog forms are not rejected by an unnecessarily narrow parser.
+ */
+export function isOpenCodeModelId(value) {
+  if (typeof value !== 'string' || value.length > 256) return false;
+  if (/\s|[\u0000-\u001f\u007f]/u.test(value)) return false;
+  const separator = value.indexOf('/');
+  return separator > 0 && separator < value.length - 1;
+}
+
+/**
  * Shared helpers for agent CLI backends.
  *
- * @typedef {'claude' | 'codex' | 'pi' | 'grok' | 'cursor' | 'rau'} AgentName
+ * @typedef {'claude' | 'codex' | 'pi' | 'grok' | 'cursor' | 'opencode' | 'rau'} AgentName
  *
  * parentTaskId: 서브에이전트/워크플로가 낸 이벤트를 스폰한 task 카드에 귀속시키는
  * 선택 필드. 하니스가 CLI 의 parent 식별자(claude: parent_tool_use_id)를 taskId 로
@@ -102,11 +114,14 @@ export function redactDiagnosticText(value, secrets = []) {
  * @property {string} [grokAuthPath]
  * @property {string} [cursorBin]
  * @property {string} [cursorSourceDir]
+ * @property {string} [openCodeBin]
+ * @property {string|(() => string|null|undefined)} [openCodeAuthPath]
  * @property {string} [piBin]
  * @property {string} [piRoot]
  * @property {string} [openRouterApiKey]
  * @property {boolean} [reasoning]
  * @property {Record<string, string>} [providerEnv]
+ * @property {() => Record<string, string>} [openCodeProviderEnv]
  * @property {string} [model]
  * @property {string} [effort]
  * @property {'standard'|'fast'} [serviceTier]
@@ -256,9 +271,21 @@ export function normalizeUsageTokens(raw) {
   const usage = {
     inputTokens: usageCount(raw.input_tokens, raw.inputTokens),
     outputTokens: usageCount(raw.output_tokens, raw.outputTokens),
-    cacheReadTokens: usageCount(raw.cache_read_input_tokens, raw.cacheReadInputTokens, raw.cached_input_tokens, raw.cacheReadTokens),
+    cacheReadTokens: usageCount(
+      raw.cache_read_input_tokens,
+      raw.cacheReadInputTokens,
+      raw.cached_input_tokens,
+      raw.cacheReadTokens,
+      raw.cachedReadTokens,
+    ),
     // cursor 는 캐시 생성분을 cacheWriteTokens 로 보고한다.
-    cacheCreationTokens: usageCount(raw.cache_creation_input_tokens, raw.cacheCreationInputTokens, raw.cacheCreationTokens, raw.cacheWriteTokens),
+    cacheCreationTokens: usageCount(
+      raw.cache_creation_input_tokens,
+      raw.cacheCreationInputTokens,
+      raw.cacheCreationTokens,
+      raw.cacheWriteTokens,
+      raw.cachedWriteTokens,
+    ),
   };
   const total = usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheCreationTokens;
   return total > 0 ? usage : null;
@@ -380,6 +407,12 @@ ${PARALLEL_WORK_SHARED}
 ${PARALLEL_WORK_SHARED}
 - Child activity is not streamed: each subagent's transcript arrives only when it finishes, and long transcripts are replayed in a bounded window. Give every subagent a tightly bounded objective so nothing important is cut.`;
   }
+  if (agentName === 'opencode') {
+    return `PARALLEL WORK:
+- For large document tasks, use the Task tool. Use a general subagent for a tightly bounded editing or implementation task and an explore subagent for read-only research. Give each editing subagent ONE contiguous paragraph range and a standalone goal. Each subagent re-reads its own region before writing.
+${PARALLEL_WORK_SHARED}
+- Collect every Task result before summarizing the turn. Background hub jobs such as delegate_copy_layout are not Task subagents: end your turn and let the hub start a new turn carrying their completion.`;
+  }
   return PARALLEL_WORK_BRIEF;
 }
 
@@ -413,6 +446,7 @@ export function providerToolNoteFor(agentName = 'claude') {
     codex: 'Your collaboration tools are spawn_agent/wait_agent, and they manage collaboration agents only. Background hub jobs such as delegate_copy_layout are not collaboration agents: never call wait_agent or list_agents for one — end your turn and the hub will start a new turn carrying its completion.',
     grok: 'Your collaboration tools are spawn_subagent/get_command_or_subagent_output, available only under full access. Background hub jobs such as delegate_copy_layout are not your subagents: never collect them with get_command_or_subagent_output — end your turn and the hub will start a new turn carrying their completion.',
     cursor: 'Subagents run as native task calls whose transcripts arrive when each finishes; there is no polling tool. Background hub jobs such as delegate_copy_layout are not Task subagents: end your turn and the hub will start a new turn carrying their completion.',
+    opencode: 'Your collaboration tool is Task. Its result returns to the owning turn when the subagent finishes. Background hub jobs such as delegate_copy_layout are not Task subagents: end your turn and the hub will start a new turn carrying their completion.',
     pi: 'Your collaboration tools are subagent_spawn/subagent_wait/subagent_check/subagent_list/subagent_cancel, and they manage Pi children only. Background hub jobs such as delegate_copy_layout are not collaboration agents: never call subagent_wait or subagent_list for one — end your turn and the hub will start a new turn carrying its completion.',
   };
   return notes[agentName] ?? '';

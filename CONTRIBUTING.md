@@ -62,7 +62,7 @@ npm --prefix rhwp/rhwp-agent run typecheck:acp
 
 Studio의 기본 테스트는 브라우저를 실행하지 않습니다. 브라우저 통합 테스트는 WASM과 Chrome을 준비한 뒤 `npm --prefix rhwp/rhwp-studio run test:browser`로 실행하세요. 브라우저 경로는 `PUPPETEER_EXECUTABLE_PATH`로 지정할 수 있습니다. [테스트 안내](rhwp/rhwp-studio/tests/README.md)에 세부 조건이 있습니다.
 
-에이전트의 타입 검사는 공유 backend 계약과 Grok/Cursor ACP 모듈 및 그 의존성을 대상으로 합니다. Claude/Codex/Pi 제공자와 HTTP/WebSocket 허브는 검사 범위에 포함되지 않습니다.
+에이전트의 타입 검사는 공유 backend 계약과 Grok/Cursor/OpenCode ACP 모듈 및 그 의존성을 대상으로 합니다. Claude/Codex/Pi 제공자와 HTTP/WebSocket 허브는 검사 범위에 포함되지 않습니다.
 
 E2E 목록과 참조 검사는 Python 3가 필요합니다. 문서 조작 E2E와 수동 진단은 [E2E 안내](rhwp/rhwp-studio/e2e/README.md)를 참고하세요. `e2e:list`는 스크립트를 찾고 `e2e:check`는 실행 참조를 확인합니다. Browserbase 라이브 검사는 해당 통합을 바꿀 때 수동 실행하며 외부 서비스 계정이 필요합니다.
 

@@ -8,6 +8,11 @@ const piExtension = readFileSync(new URL('../pi/extension/rhwp.ts', import.meta.
 const runner = readFileSync(new URL('../copy-layout-runner.mjs', import.meta.url), 'utf8');
 
 test('hub launches the copy-layout worker as a real isolated provider session', () => {
+  const launchStart = server.indexOf('async function launchTemplateJob(');
+  const launchEnd = server.indexOf('\nfunction createTemplateJob(', launchStart);
+  assert.notEqual(launchStart, -1);
+  assert.ok(launchEnd > launchStart);
+  const launch = server.slice(launchStart, launchEnd);
   assert.match(server, /const createBackend = SESSION_FACTORIES\[job\.agent\]/);
   assert.match(server, /job\.backend = createBackend\(opts\)/);
   assert.match(server, /toolProfile: 'copy-layout-worker'/);
@@ -26,6 +31,11 @@ test('hub launches the copy-layout worker as a real isolated provider session', 
   assert.match(server, /prepareClaudeHome\(isolatedHome/);
   assert.match(server, /prepareGrokHome\(grokHome/);
   assert.match(server, /prepareCursorHome\(cursorHome/);
+  assert.doesNotMatch(launch, /prepareOpenCodeHome\(/);
+  assert.match(launch, /openCodeAuthPath: \(\) => sourceOpenCodeAuthPath/);
+  assert.match(launch, /openCodeProviderEnv: \(\) => cliSetup\.envFor\('opencode'\)/);
+  assert.match(launch, /openCodeBin: cliSetupStatus\.opencode\?\.installed \? cliSetup\.binPath\('opencode'\) : 'opencode'/);
+  assert.match(server, /\['opencode', \(\) => flushOpenCodeCredentialMirror\(homes\.isolatedHome\)\]/);
   assert.match(mcp, /url\.searchParams\.set\('role', AGENT_ROLE\)/);
   assert.match(mcp, /url\.searchParams\.set\('workerJobId', COPY_LAYOUT_JOB_ID\)/);
   assert.match(piExtension, /RHWP_AGENT_ROLE/);

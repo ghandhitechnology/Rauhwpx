@@ -426,6 +426,25 @@ test('persisted Rau chats keep the provider on the thread and messages', () => {
   assert.equal(restored?.messages[0]?.agent, 'rau');
 });
 
+test('persisted OpenCode chats keep their provider-qualified model', () => {
+  mem.clear();
+  storage.setItem('rhwp-agent-threads', JSON.stringify([{
+    id: 'opencode-thread',
+    title: 'OpenCode 대화',
+    titleRequested: false,
+    createdAt: 1,
+    updatedAt: 2,
+    agent: 'opencode',
+    model: 'anthropic/claude-sonnet-4-5',
+    effort: '',
+    messages: [{ role: 'assistant', text: 'OpenCode 답변', agent: 'opencode' }],
+  }]));
+  const restored = getThread('opencode-thread');
+  assert.equal(restored?.agent, 'opencode');
+  assert.equal(restored?.model, 'anthropic/claude-sonnet-4-5');
+  assert.equal(restored?.messages[0]?.agent, 'opencode');
+});
+
 test('legacy threads default to the standard service tier', () => {
   mem.clear();
   storage.setItem('rhwp-agent-threads', JSON.stringify([{

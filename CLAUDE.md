@@ -6,7 +6,7 @@ Most engine and editor code lives under `rhwp/`; the Electron shell and reposito
 
 ## What this is
 
-**Rauhwpx** is a viewer/editor for the Korean HWP/HWPX document formats, written in Rust and compiled to WebAssembly, plus a web editor (`rhwp-studio`) with an AI agent sidebar (`rhwp-agent`) that lets a local Claude/Codex CLI read and edit the open document via MCP tools.
+**Rauhwpx** is a viewer/editor for the Korean HWP/HWPX document formats, written in Rust and compiled to WebAssembly, plus a web editor (`rhwp-studio`) with an AI agent sidebar (`rhwp-agent`) that lets Claude, Codex, Pi, Grok, Cursor, and OpenCode read and edit the open document via MCP tools.
 
 ## Commands
 
@@ -34,7 +34,7 @@ Most engine and editor code lives under `rhwp/`; the Electron shell and reposito
 
 - `npm start` in this directory runs the hub in the foreground. At the repository root, `npm start` starts a background hub on 127.0.0.1:5175; `npm stop` stops it and `npm run start:fg` runs it in the foreground.
 - Studio development starts its own hub automatically. It does not need a separate `npm start`.
-- `npm run typecheck:acp` checks the shared backend contract, Grok/Cursor ACP modules and their imports. Claude/Codex/Pi and the HTTP/WebSocket hub are outside that checked boundary.
+- `npm run typecheck:acp` checks the shared backend contract, Grok/Cursor/OpenCode ACP modules and their imports. Claude/Codex/Pi and the HTTP/WebSocket hub are outside that checked boundary.
 
 ### Verification tools
 
@@ -60,7 +60,7 @@ TypeScript, no UI framework. `engine/` wraps the wasm module; `core/`, `view/`, 
 
 ### rhwp-agent (`rhwp-agent/`)
 
-Local Node hub for provider sessions, authentication, permissions, workflow state, downloads and tool routing. Live-document editing runs in Studio. `server.mjs` is a WS hub (`/studio`, `/mcp`, `/healthz`); `agents/claude.mjs`, `agents/codex.mjs`, `agents/grok.mjs`, `agents/pi.mjs`, and `agents/cursor.mjs` spawn their CLIs; shared system briefs live in `agents/backend.mjs`. Each CLI spawns `mcp-stdio.mjs` as its MCP server, which forwards tool calls over WS to the hub and on to the studio tab. MCP tools are named `mcp__rhwp__<name>` and defined in `rhwp-agent/tools.mjs`: semantic document reads/writes, an `apply_edits` batch write (1–32 edits under one expectedRevision, atomic rollback), and registry-generated `get_engine_edit_capabilities` / `apply_engine_edits` for engine operations listed in the capability catalog, plus reference, planning, download, and browser tools. **Revision contract**: every read returns a `revision`, every write requires `expectedRevision`; mismatch → `REVISION_MISMATCH` with the current revision and recovery guidance; saving does not bump the revision. Coordinates are body-text based `sectionIdx`/`paraIdx`/`charOffset`, 0-based.
+Local Node hub for provider sessions, authentication, permissions, workflow state, downloads and tool routing. Live-document editing runs in Studio. `server.mjs` is a WS hub (`/studio`, `/mcp`, `/healthz`); `agents/claude.mjs`, `agents/codex.mjs`, `agents/grok.mjs`, `agents/pi.mjs`, `agents/cursor.mjs`, and `agents/opencode.mjs` spawn their CLIs; shared system briefs live in `agents/backend.mjs`. Each CLI spawns `mcp-stdio.mjs` as its MCP server, which forwards tool calls over WS to the hub and on to the studio tab. MCP tools are named `mcp__rhwp__<name>` and defined in `rhwp-agent/tools.mjs`: semantic document reads/writes, an `apply_edits` batch write (1–32 edits under one expectedRevision, atomic rollback), and registry-generated `get_engine_edit_capabilities` / `apply_engine_edits` for engine operations listed in the capability catalog, plus reference, planning, download, and browser tools. **Revision contract**: every read returns a `revision`, every write requires `expectedRevision`; mismatch → `REVISION_MISMATCH` with the current revision and recovery guidance; saving does not bump the revision. Coordinates are body-text based `sectionIdx`/`paraIdx`/`charOffset`, 0-based.
 
 ### Other deliverables
 

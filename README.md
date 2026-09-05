@@ -59,7 +59,7 @@ keeps an openable recovery copy and reports its exact path.
 
 Testers can download the current pre-release from the [nightly tag](https://github.com/ghandhitechnology/Rauhwpx/releases/tag/nightly).
 
-You supply your own agent CLI. Claude, Codex and Pi can each be installed and signed in from **Settings → Connection** inside the app.
+Connect a provider from **Settings → Connection**. Claude, Codex, Pi, Grok, Cursor, and OpenCode can be installed there, and the app offers each provider's supported sign-in method. OpenCode can also reuse credentials created by `opencode auth login`.
 
 ## Development
 

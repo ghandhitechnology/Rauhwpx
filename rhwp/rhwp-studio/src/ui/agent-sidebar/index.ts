@@ -910,7 +910,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   const header = el('header', 'ag-header');
   const selectors = el('div', 'ag-selectors');
 
-  // ── 프로바이더 피커 (Claude / Codex / Pi / Grok / Cursor) ──
+  // ── 프로바이더 피커 ───────────────────────────────────
   const providerWrap = el('div', 'ag-model ag-provider');
   const providerTrigger = el('button', 'ag-model-trigger');
   providerTrigger.type = 'button';
@@ -1048,7 +1048,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     llmMenu.replaceChildren();
     llmItems = new Map();
     for (const group of modelGroupsForAgent(selectedAgent)) {
-      // cursor 의 과금 풀 구분 — 구독 사용량 차감 모델과 API 과금 모델을 가른다.
+      // 라벨이 있는 모델 묶음은 머리글과 함께 그린다.
       if (group.label) llmMenu.appendChild(el('span', 'ag-llm-group-label', group.label));
       for (const opt of group.options) {
         const item = el('button', 'ag-model-item ag-llm-item', opt.label);
@@ -1123,7 +1123,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   effortTrigger.append(effortName, summaryCaret);
 
   // 설정 패널의 '추론' 묶음 — 슬라이더는 이 안에 들어가므로 강도 옵션이 없는
-  // 프로바이더(cursor)에서는 트리거뿐 아니라 이 묶음도 함께 접어야 빈 칸이 남지 않는다.
+  // 프로바이더(cursor, opencode 등)에서는 트리거뿐 아니라 이 묶음도 함께 접어야 빈 칸이 남지 않는다.
   const effortGroup = el('div', 'ag-config-group');
   const effortSlider = createEffortSlider({
     ariaLabel: '추론 강도',
@@ -1147,7 +1147,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   function rebuildEffortMenu(): void {
     const options = effortsForAgent(selectedAgent, selectedModel);
-    // 추론 강도를 받지 않는 모델(pi 의 비추론 모델, cursor 전체)에서는
+    // 추론 강도를 받지 않는 모델(pi의 비추론 모델, cursor/opencode 전체)에서는
     // 트리거와 설정 패널의 '추론' 묶음을 함께 접는다.
     const noEfforts = options.length === 0;
     effortWrap.hidden = noEfforts;
@@ -5787,10 +5787,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
           lastUsage = { ...lastUsage, rau: undefined };
         }
         syncProviderMenu();
-        // 브리지가 cursor 모델 레지스트리를 먼저 갱신했다 — 목록과 선택값을 다시 읽는다.
-        if (selectedAgent === 'cursor') {
-          selectedModel = resolveModelForAgent('cursor', selectedModel);
-          selectedEffort = resolveEffortForAgent('cursor', selectedEffort, selectedModel);
+        // 브리지가 동적 모델 레지스트리를 먼저 갱신했다. 현재 선택도 새 목록으로 접는다.
+        if (selectedAgent === 'cursor' || selectedAgent === 'opencode') {
+          selectedModel = resolveModelForAgent(selectedAgent, selectedModel);
+          selectedEffort = resolveEffortForAgent(selectedAgent, selectedEffort, selectedModel);
           rebuildLlmMenu();
           rebuildEffortMenu();
           refreshSidebarWidthMin();

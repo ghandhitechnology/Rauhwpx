@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 
-import { redactDiagnosticText } from './agents/backend.mjs';
+import { isOpenCodeModelId, redactDiagnosticText } from './agents/backend.mjs';
 import { readUtf8FileBounded } from './bounded-file.mjs';
 import {
   fetchLatestPackage,
@@ -26,6 +26,8 @@ import {
   textFitsByteLimit,
 } from './input-bounds.mjs';
 import { readResponseTextBounded } from './response-bounds.mjs';
+import { openCodeRuntimeEnv } from './opencode-env.mjs';
+import { isReusableOpenCodeAuthContent } from './opencode-auth.mjs';
 import {
   processTreeSpawnOptions,
   terminateAndWaitForProcessTreeExit,
@@ -60,6 +62,10 @@ const CLI_CONFIG = {
     package: '@xai-official/grok', bin: 'grok', kind: 'npm',
     secretId: 'rhwp.grok.api-key', keyEnv: 'XAI_API_KEY',
   },
+  opencode: {
+    package: 'opencode-ai', bin: 'opencode', kind: 'npm',
+    secretId: 'rhwp.opencode.api-key', keyEnv: 'OPENCODE_API_KEY',
+  },
   cursor: {
     bin: 'cursor-agent', kind: 'script',
     secretId: 'rhwp.cursor.api-key', keyEnv: 'CURSOR_API_KEY',
@@ -72,6 +78,8 @@ const REGISTRY_TIMEOUT_MS = 10_000;
 const PROGRESS_INTERVAL_MS = 160;
 const CURSOR_MODELS_TIMEOUT_MS = 15_000;
 const CURSOR_MODELS_TTL_MS = 10 * 60 * 1000;
+const OPENCODE_MODELS_TIMEOUT_MS = 20_000;
+const OPENCODE_MODELS_TTL_MS = 10 * 60 * 1000;
 const CURSOR_INSTALL_COMMAND = 'curl -fsS https://cursor.com/install | bash';
 const KEY_CHECK_TIMEOUT_MS = 10_000;
 const OAUTH_CREDENTIAL_SNAPSHOT_MAX_BYTES = 1024 * 1024;
@@ -256,6 +264,18 @@ export function defaultCursorConfigDir(
   return platformPath.join(defaultCursorHomeDir(env, platform, home), '.cursor');
 }
 
+export function defaultOpenCodeAuthPath(
+  env = process.env,
+  platform = process.platform,
+  home = os.homedir(),
+) {
+  const platformPath = platform === 'win32' ? path.win32 : path.posix;
+  const dataHome = typeof env.XDG_DATA_HOME === 'string' && env.XDG_DATA_HOME.trim()
+    ? platformPath.resolve(env.XDG_DATA_HOME)
+    : platformPath.join(platformPath.resolve(home), '.local', 'share');
+  return platformPath.join(dataHome, 'opencode', 'auth.json');
+}
+
 /**
  * 설정 카드로 그대로 중계되는 진행 이벤트. install 은 phase/percent 계열을,
  * authenticate 는 로그인 URL 과 기기 코드를 채운다.
@@ -271,7 +291,7 @@ export function defaultCursorConfigDir(
  */
 
 /**
- * App-managed CLI installers (Codex/Claude/Grok/Cursor) plus their local authentication state.
+ * App-managed CLI installers (Codex/Claude/Grok/Cursor/OpenCode) plus their local authentication state.
  *
  * @param {{ rootDir?: string, spawnProcess?: typeof spawn, npmCommand?: string | null,
  *           nodeCommand?: string, platform?: NodeJS.Platform, baseEnv?: NodeJS.ProcessEnv,
@@ -322,6 +342,9 @@ export function createCliSetupManager({
   const managedCursorBinFile = platform === 'win32' ? null : cursorBinFile;
   /** 세션 시딩용 영속 `.cursor` 디렉터리 (auth 토큰 등이 산다). */
   const cursorSourceDir = defaultCursorConfigDir(baseEnv, platform, cursorHomeDir);
+  /** OpenCode probes must not inherit the user's config, plugins, or project rules. */
+  const openCodeProbeHomeDir = path.join(rootDir, 'opencode-probe-home');
+  const openCodeSourceAuthFile = defaultOpenCodeAuthPath(baseEnv, platform, homeDir);
   // rootDir is always native to the host performing filesystem I/O. Tests may
   // inject another target platform, but applying that platform's path dialect
   // here would turn an absolute temp path into a relative filename on the host.
@@ -355,6 +378,7 @@ export function createCliSetupManager({
     ['codex', { latestVersion: null, updateRequired: false, error: null }],
     ['grok', { latestVersion: null, updateRequired: false, error: null }],
     ['cursor', { latestVersion: null, updateRequired: false, error: null }],
+    ['opencode', { latestVersion: null, updateRequired: false, error: null }],
   ]);
   const npmLaunch = bundledNpmLaunch({ nodeCommand, npmCommand });
   /** 공용 prefix 를 건드리는 작업(설치·자동 업데이트)의 직렬화 큐. */
@@ -362,9 +386,11 @@ export function createCliSetupManager({
   let authPersistenceChain = Promise.resolve();
   let loaded = false;
   /** 에이전트별 저장 API 키 (보안 저장소에서 로드). */
-  const apiKeys = { claude: null, codex: null, grok: null, cursor: null };
+  const apiKeys = { claude: null, codex: null, grok: null, cursor: null, opencode: null };
   let cursorModelsCache = { models: [], fetchedAt: 0 };
   let cursorModelsInFlight = null;
+  let openCodeModelsCache = { models: [], fetchedAt: 0 };
+  let openCodeModelsInFlight = null;
   let oauthSnapshotSeq = 0;
   let secretStoreError = null;
   let secretFileFailure = null;
@@ -376,6 +402,8 @@ export function createCliSetupManager({
     grokKeyTail: null,
     cursorAuthMethod: null,
     cursorKeyTail: null,
+    opencodeAuthMethod: null,
+    opencodeKeyTail: null,
   };
 
   function assertAgent(agent) {
@@ -541,6 +569,8 @@ export function createCliSetupManager({
     config.grokKeyTail = typeof raw?.grokKeyTail === 'string' ? raw.grokKeyTail : null;
     config.cursorAuthMethod = readAuthMethod(raw, 'cursorAuthMethod');
     config.cursorKeyTail = typeof raw?.cursorKeyTail === 'string' ? raw.cursorKeyTail : null;
+    config.opencodeAuthMethod = readAuthMethod(raw, 'opencodeAuthMethod');
+    config.opencodeKeyTail = typeof raw?.opencodeKeyTail === 'string' ? raw.opencodeKeyTail : null;
     const agents = Object.keys(CLI_CONFIG);
     let fileSecrets = {};
     try {
@@ -821,7 +851,13 @@ export function createCliSetupManager({
   function envFor(agent) {
     const item = assertAgent(agent);
     const delimiter = platform === 'win32' ? ';' : path.delimiter;
-    const env = { ...baseEnv, PATH: `${binDir}${delimiter}${baseEnv.PATH ?? ''}` };
+    const sourceEnv = agent === 'opencode'
+      ? openCodeRuntimeEnv(baseEnv, apiKeys.opencode)
+      : { ...baseEnv };
+    const env = {
+      ...sourceEnv,
+      PATH: sourceEnv.PATH ? `${binDir}${delimiter}${sourceEnv.PATH}` : binDir,
+    };
     // 허브가 관리하는 키는 자기 프로바이더의 자식에게만 간다 — 허브 프로세스 환경에
     // 올라온 다른 프로바이더의 키는 여기서 지운다.
     for (const [name, other] of Object.entries(CLI_CONFIG)) {
@@ -845,6 +881,57 @@ export function createCliSetupManager({
       ...(platform === 'win32' ? { USERPROFILE: cursorHomeDir } : {}),
     };
     delete env.CURSOR_CONFIG_DIR;
+    return { ...env, ...extra };
+  }
+
+  /** Read a host OpenCode credential without following links or accepting malformed state. */
+  async function openCodeAuthContent() {
+    try {
+      const raw = await readUtf8FileBounded(openCodeSourceAuthFile, {
+        maxBytes: OAUTH_CREDENTIAL_SNAPSHOT_MAX_BYTES,
+        label: 'OpenCode auth',
+        platform,
+      });
+      if (!isReusableOpenCodeAuthContent(raw)) return null;
+      return raw;
+    } catch {
+      return null;
+    }
+  }
+
+  async function openCodeAuthPath() {
+    return await openCodeAuthContent() ? openCodeSourceAuthFile : null;
+  }
+
+  /** Fully isolate model probes from the user's OpenCode config and project plugins. */
+  async function openCodeProbeEnv(extra = {}) {
+    const configHome = path.join(openCodeProbeHomeDir, '.config');
+    const dataHome = path.join(openCodeProbeHomeDir, '.local', 'share');
+    const cacheHome = path.join(openCodeProbeHomeDir, '.cache');
+    const stateHome = path.join(openCodeProbeHomeDir, '.local', 'state');
+    const authContent = await openCodeAuthContent();
+    const env = {
+      ...envFor('opencode'),
+      HOME: openCodeProbeHomeDir,
+      USERPROFILE: openCodeProbeHomeDir,
+      XDG_CONFIG_HOME: configHome,
+      XDG_DATA_HOME: dataHome,
+      XDG_CACHE_HOME: cacheHome,
+      XDG_STATE_HOME: stateHome,
+      OPENCODE_CONFIG_DIR: path.join(configHome, 'opencode'),
+      OPENCODE_CONFIG_CONTENT: '{}',
+      OPENCODE_DISABLE_PROJECT_CONFIG: '1',
+      OPENCODE_DISABLE_EXTERNAL_SKILLS: '1',
+      OPENCODE_DISABLE_CLAUDE_CODE: '1',
+      OPENCODE_DISABLE_DEFAULT_PLUGINS: '1',
+      OPENCODE_DISABLE_AUTOUPDATE: '1',
+      OPENCODE_DISABLE_LSP_DOWNLOAD: '1',
+    };
+    delete env.OPENCODE_CONFIG;
+    delete env.OPENCODE_DB;
+    delete env.OPENCODE_AUTH_CONTENT;
+    delete env.OPENCODE_PERMISSION;
+    if (authContent) env.OPENCODE_AUTH_CONTENT = authContent;
     return { ...env, ...extra };
   }
 
@@ -1042,6 +1129,14 @@ export function createCliSetupManager({
         return { authenticated: false, authMethod: null, keyTail: null };
       }
     }
+    if (agent === 'opencode') {
+      const authenticated = Boolean(await openCodeAuthPath());
+      return {
+        authenticated,
+        authMethod: authenticated ? (config.opencodeAuthMethod ?? 'oauth') : null,
+        keyTail: null,
+      };
+    }
     const version = await installedVersion(agent);
     const command = version ? binPath(agent) : item.bin;
     try {
@@ -1129,6 +1224,7 @@ export function createCliSetupManager({
     emit('verifying', 92, `${item.bin} CLI 확인 중`);
     const version = await installedVersion(agent);
     if (!version) throw setupError('AGENT_INSTALL_FAILED', `${item.bin} 설치본을 확인하지 못했어요.`);
+    if (agent === 'opencode') resetOpenCodeModelsCache();
     const update = updateInfo.get(agent);
     if (update?.latestVersion === version) update.updateRequired = false;
     emit('done', 100, version);
@@ -1282,6 +1378,7 @@ export function createCliSetupManager({
       });
       update.updateRequired = false;
       update.error = null;
+      if (agent === 'opencode') resetOpenCodeModelsCache();
     } catch (error) {
       // 자동 갱신 실패는 작업을 끊지 않는다. 기존 prefix 를 유지하고 상태 카드로만 알린다.
       update.updateRequired = true;
@@ -1418,6 +1515,9 @@ export function createCliSetupManager({
       cursorModelsCache: agent === 'cursor'
         ? { models: [...cursorModelsCache.models], fetchedAt: cursorModelsCache.fetchedAt }
         : null,
+      openCodeModelsCache: agent === 'opencode'
+        ? { models: [...openCodeModelsCache.models], fetchedAt: openCodeModelsCache.fetchedAt }
+        : null,
     };
   }
 
@@ -1427,6 +1527,7 @@ export function createCliSetupManager({
     config[`${agent}AuthMethod`] = previous.authMethod;
     if (agent !== 'claude') config[`${agent}KeyTail`] = previous.keyTail;
     if (previous.cursorModelsCache) cursorModelsCache = previous.cursorModelsCache;
+    if (previous.openCodeModelsCache) openCodeModelsCache = previous.openCodeModelsCache;
   }
 
   async function restoreAuthSecret(item, previous) {
@@ -1590,6 +1691,7 @@ export function createCliSetupManager({
         // claude 는 기존 설정 파일 스키마를 유지한다 — keyTail 을 저장하지 않는다.
         if (agent !== 'claude') config[keyTailKey] = keyTail(value);
         if (agent === 'cursor') resetCursorModelsCache();
+        if (agent === 'opencode') resetOpenCodeModelsCache();
 
         throwIfAuthCancelled(signal);
         await persist();
@@ -1653,6 +1755,7 @@ export function createCliSetupManager({
         config[`${agent}AuthMethod`] = 'oauth';
         if (agent !== 'claude') config[`${agent}KeyTail`] = null;
         if (agent === 'cursor') resetCursorModelsCache();
+        if (agent === 'opencode') resetOpenCodeModelsCache();
 
         // Config is the durable commit marker. Keep the API secret until that
         // marker exists, so a crash before it can restore the old credential
@@ -1753,6 +1856,12 @@ export function createCliSetupManager({
         throw setupError(
           'AGENT_AUTH_OAUTH_UNSUPPORTED',
           'macOS에서는 Claude OAuth 로그인을 안전하게 격리할 수 없어요. Claude API 키를 사용해 주세요.',
+        );
+      }
+      if (method === 'oauth' && agent === 'opencode') {
+        throw setupError(
+          'AGENT_AUTH_OAUTH_UNSUPPORTED',
+          'OpenCode 로그인은 터미널에서 `opencode auth login`을 실행한 뒤 다시 확인해 주세요. OpenCode API 키는 이 화면에서 바로 저장할 수 있어요.',
         );
       }
       const managedVersion = await installedVersion(agent);
@@ -1986,6 +2095,60 @@ export function createCliSetupManager({
     }
   }
 
+  function resetOpenCodeModelsCache() {
+    openCodeModelsCache = { models: openCodeModelsCache.models, fetchedAt: 0 };
+  }
+
+  /** Return OpenCode's provider-qualified catalog without loading host or project config. */
+  async function openCodeModels({ refresh = false } = {}) {
+    let nowMs = Date.now();
+    if (!refresh && openCodeModelsCache.fetchedAt
+      && nowMs - openCodeModelsCache.fetchedAt < OPENCODE_MODELS_TTL_MS) {
+      return [...openCodeModelsCache.models];
+    }
+    if (openCodeModelsInFlight) {
+      const active = openCodeModelsInFlight;
+      if (!refresh) return active;
+      await active.catch(() => []);
+      if (openCodeModelsInFlight && openCodeModelsInFlight !== active) {
+        return openCodeModelsInFlight;
+      }
+      nowMs = Date.now();
+    }
+    openCodeModelsInFlight = fetchOpenCodeModels(nowMs, refresh)
+      .finally(() => { openCodeModelsInFlight = null; });
+    return openCodeModelsInFlight;
+  }
+
+  async function fetchOpenCodeModels(nowMs, refresh = false) {
+    const rememberFailure = () => {
+      openCodeModelsCache = { models: openCodeModelsCache.models, fetchedAt: nowMs };
+      return [...openCodeModelsCache.models];
+    };
+    try {
+      await fs.mkdir(openCodeProbeHomeDir, { recursive: true, mode: 0o700 });
+      const managedVersion = await installedVersion('opencode');
+      const command = managedVersion ? binPath('opencode') : CLI_CONFIG.opencode.bin;
+      const result = await run(command, refresh ? ['models', '--refresh'] : ['models'], {
+        timeoutMs: OPENCODE_MODELS_TIMEOUT_MS,
+        env: await openCodeProbeEnv(),
+        maxStdoutBytes: STRUCTURED_STDOUT_LIMIT_BYTES,
+        maxStderrBytes: STRUCTURED_STDERR_LIMIT_BYTES,
+      });
+      if (result.code !== 0) return rememberFailure();
+      const models = [...new Set(
+        stripTerminalEscapes(result.stdout)
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter((line) => isOpenCodeModelId(line)),
+      )];
+      openCodeModelsCache = { models, fetchedAt: nowMs };
+      return [...models];
+    } catch {
+      return rememberFailure();
+    }
+  }
+
   return {
     rootDir,
     prefixDir,
@@ -1993,12 +2156,16 @@ export function createCliSetupManager({
     grokHomeDir,
     cursorHomeDir,
     cursorSourceDir,
+    openCodeProbeHomeDir,
+    openCodeSourceAuthFile,
     codexOAuthStagingDir,
     claudeOAuthStagingDir,
     binPath,
     envFor,
     grokAuthPath,
     cursorModels,
+    openCodeAuthPath,
+    openCodeModels,
     async init() {
       await fs.mkdir(rootDir, { recursive: true }).catch(() => {});
       await recoverInterruptedFileReplacement(configPath, { platform });
