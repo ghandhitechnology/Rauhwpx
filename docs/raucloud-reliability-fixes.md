@@ -47,7 +47,7 @@ The input fixes were also applied to the disposable worker for immediate Linux v
 
 After installing the rebuilt worker Studio, a seventh real Codex turn edited the document successfully and retained the Korean paragraph. [Before](evidence/pr188-cloud-before.jpg) and [after](evidence/pr188-cloud-after.jpg) screenshots show the worker-only editor layout change. The Linux proof also passes double-click delivery through the production input dispatcher.
 
-The updated final-source `edge.14` image still needs its live verification. These results do not claim deployment of the updated production broker.
+The updated final-source `edge.15` image still needs its live verification. These results do not claim deployment of the updated production broker.
 
 The [regression probes](diagnostics/raucloud-reliability-probes.mjs) use real queue, broker, display-store, and runtime code with a fake network delay, provisioner, clock, and document engine:
 
