@@ -7,7 +7,7 @@ import {
   importCloudTimeline,
   parseCloudTimeline,
 } from '../src/cloud/timeline.ts';
-import type { ChatThread } from '../src/agent/threads.ts';
+import { parseChatThread, type ChatThread } from '../src/agent/threads.ts';
 
 function thread(): ChatThread {
   return {
@@ -96,4 +96,16 @@ test('timeline parser rejects incompatible envelopes', () => {
   assert.equal(parseCloudTimeline({ ...exported, version: 2 }), null);
   assert.equal(parseCloudTimeline({ ...exported, schema: 'other.timeline' }), null);
   assert.equal(parseCloudTimeline({ ...exported, exportedAt: 'not-a-date' }), null);
+});
+
+
+test('restart source survives local thread storage but stays out of transferred timelines', () => {
+  const local = { ...thread(), cloudStartId: 'stable-restart-id', cloudRestartSourceSessionId: 'archived-session' };
+  const restored = parseChatThread(JSON.parse(JSON.stringify(local)));
+  assert.equal(restored?.cloudRestartSourceSessionId, 'archived-session');
+  assert.equal(restored?.cloudStartId, 'stable-restart-id');
+  const portable = exportCloudTimeline(restored!);
+  assert.equal(portable.thread.cloudRestartSourceSessionId, undefined);
+  assert.equal(portable.thread.cloudStartId, 'stable-restart-id');
+  assert.equal(local.cloudRestartSourceSessionId, 'archived-session');
 });

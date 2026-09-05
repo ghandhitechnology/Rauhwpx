@@ -90,6 +90,7 @@ contextBridge.exposeInMainWorld('rhwpDesktop', {
   cloudCompleteTakeover: (payload) => ipcRenderer.invoke('cloud:complete-takeover', payload),
   cloudDownloadResult: (payload) => ipcRenderer.invoke('cloud:download-result', payload),
   cloudDownloadCheckpoint: (payload) => ipcRenderer.invoke('cloud:download-checkpoint', payload),
+  cloudPrepareRestartDocument: (payload) => ipcRenderer.invoke('cloud:prepare-restart-document', payload),
   cloudPublishCheckpoint: (payload) => ipcRenderer.invoke('cloud:publish-checkpoint', payload),
   cloudOpenDisplay: (payload) => ipcRenderer.invoke('cloud:display-open', payload),
   cloudCloseDisplay: (payload) => ipcRenderer.invoke('cloud:display-close', payload),

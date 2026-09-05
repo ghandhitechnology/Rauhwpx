@@ -12,7 +12,9 @@ export function createMockCloud() {
   let recoveryGeneration = 0;
   let releaseRefresh: (() => void) | null = null;
   let refreshBlocked = false;
-  const calls = { reconnect: 0, recreate: 0, stop: 0, display: 0, inputs: 0, transfers: [] as CloudTransferRequest[] };
+  let restartArchiveAvailable = true;
+  let rejectRestartTransfer = false;
+  const calls = { referenceReads: 0, prepareRestart: 0, reconnect: 0, recreate: 0, stop: 0, display: 0, inputs: 0, transfers: [] as CloudTransferRequest[] };
   const sandbox = { providerId: 'raucloud', sandboxId: 'preview-worker', displayName: 'Raucloud',
     region: 'preview', host: 'preview.invalid', createdAt: new Date().toISOString() };
   const state: CloudSnapshot = {
@@ -58,6 +60,7 @@ export function createMockCloud() {
     },
     cloudSetTransferIntent: async () => snapshot(),
     async cloudTransfer(request) {
+      if (request.document.restartToken && rejectRestartTransfer) throw new Error('Preview restart transfer interrupted.');
       calls.transfers.push(structuredClone(request));
       state.timeline = structuredClone(request.timeline);
       state.session = { kind: 'running', sessionId: `preview-session-${++sessionNumber}`, version: 1,
@@ -78,6 +81,24 @@ export function createMockCloud() {
       if (generation !== recoveryGeneration) throw new DOMException('Cancelled', 'AbortError');
       setLink('ready');
       return snapshot();
+    },
+    async cloudReadReference() {
+      calls.referenceReads++;
+      return { bytes: new Uint8Array(42800).fill(7) };
+    },
+    async cloudPrepareRestartDocument({ sessionId }) {
+      calls.prepareRestart++;
+      if (!restartArchiveAvailable) throw new Error('최신 Cloud 문서 보관본을 확인할 수 없습니다.');
+      const transfer = calls.transfers.at(-1) ?? JSON.parse(sessionStorage.getItem('preview-cloud-restart-transfer') ?? 'null');
+      if (!transfer) {
+        throw new Error('Cloud 복구 세션을 찾을 수 없습니다.');
+      }
+      sessionStorage.setItem('preview-cloud-restart-transfer', JSON.stringify(transfer));
+      const bytes = new TextEncoder().encode('Archived Cloud edits after the original transfer.');
+      const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
+      return { bytes, fileName: transfer.document.fileName,
+        sha256: Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join(''),
+        originSha256: transfer.document.originSha256 ?? null, restartToken: `preview-restart-${sessionId}` };
     },
     async cloudRecreateLink() {
       calls.recreate++;
@@ -129,6 +150,16 @@ export function createMockCloud() {
   return {
     controller: createCloudController(api), calls, setLink,
     getScope: () => scope,
+    requireReference(id: string | null) {
+      const message = state.timeline?.thread.messages.find((item) => item.role === 'user');
+      if (!message || !state.timeline) return;
+      message.attachments = id ? [{ stageId: id, fileId: id, name: '브랜드 가이드.pdf', mimeType: 'application/pdf', size: 42800, status: 'ready' }] : [];
+      state.timeline.exportedAt = new Date().toISOString();
+      state.timeline.thread.updatedAt = Date.now();
+      publish();
+    },
+    setRestartArchiveAvailable(available: boolean) { restartArchiveAvailable = available; },
+    rejectRestartTransfer(reject: boolean) { rejectRestartTransfer = reject; },
     blockRefresh(blocked: boolean) {
       refreshBlocked = blocked;
       if (!blocked) { releaseRefresh?.(); releaseRefresh = null; }

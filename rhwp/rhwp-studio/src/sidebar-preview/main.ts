@@ -10,6 +10,7 @@ import { showToast } from '../ui/toast.ts';
 import { userSettings } from '../core/user-settings.ts';
 import { completeInitialSetup } from '../ui/initial-setup/state.ts';
 import { createMockCloud } from './mock-cloud.ts';
+import { listThreads, getThread, waitForThreadsPersistence } from '../agent/threads.ts';
 import { createCloudWorkspace } from '../ui/cloud-workspace.ts';
 import { createWorkspaceController } from '../cloud/workspace.ts';
 
@@ -190,7 +191,8 @@ if (params.get('page') === 'settings')
 if (params.get('page') === 'versions') sidebar.openVersions();
 
 // Typed hooks for browser checks and custom scenario scripts.
-const preview = { ...mock, sidebar, versions, eventBus, cloud, workspace };
+const preview = { ...mock, sidebar, versions, eventBus, cloud, workspace,
+  threadStore: { listThreads, getThread, waitForThreadsPersistence } };
 Object.assign(window, { sidebarPreview: preview });
 window.addEventListener('pagehide', () => {
   sidebar.dispose();

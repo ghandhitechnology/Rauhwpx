@@ -6,6 +6,7 @@ import type { CloudController } from '../../cloud/desktop-cloud.ts';
 import { browserCloudSupported } from '../../cloud/browser-cloud.ts';
 import type {
   CloudDownloadResult,
+  CloudDocumentPayload,
   CloudFollowupAttachment,
   CloudCheckpointPayload,
   CloudResultAction,
@@ -13,6 +14,7 @@ import type {
   CloudSessionScope,
   CloudSnapshot,
   CloudTakeoverPayload,
+  CloudTransferReference,
 } from '../../cloud/types.ts';
 import { cloudLinkNeedsAttention, inferCloudLink } from '../../cloud/link.ts';
 import {
@@ -136,7 +138,9 @@ export interface CloudAgentUiDeps {
   controller: CloudController;
   loginAccount?: () => Promise<{ authUrl: string } | null>;
   onRequestTransfer(): void;
-  onRestartConversation?(binding: CloudWorkspaceBinding): Promise<void>;
+  onRestartPrepared?(binding: CloudWorkspaceBinding): Promise<void>;
+  onPrepareRestartConversation?(binding: CloudWorkspaceBinding): Promise<CloudTransferReference[]>;
+  onRestartConversation?(binding: CloudWorkspaceBinding, document: CloudDocumentPayload, references: CloudTransferReference[]): Promise<void>;
   onCancelPendingTransfer(): void;
   getScope(): CloudSessionScope;
   onWorkspaceSwitchVisibilityChange(visible: boolean): void;
@@ -618,10 +622,22 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       documentId: snapshot.session.documentId,
     });
     void recoveryOperation('recreating', async () => {
+      if (binding && !bindingMatchesScope(binding)) {
+        throw new Error('작업을 시작한 문서와 대화에서 서버를 다시 만들어 주세요.');
+      }
+      const references = binding ? await deps.onPrepareRestartConversation?.(binding) ?? [] : [];
+      const document = binding ? await deps.controller.prepareRestartDocument(binding.sessionId) : null;
+      if (binding && !bindingMatchesScope(binding)) {
+        throw new Error('작업을 시작한 문서와 대화에서 서버를 다시 만들어 주세요.');
+      }
+      if (binding) {
+        await deps.onRestartPrepared?.(binding);
+        if (!bindingMatchesScope(binding)) throw new Error('작업을 시작한 문서와 대화에서 서버를 다시 만들어 주세요.');
+      }
       snapshot = await deps.controller.recreateLink();
       selectedSessionId = snapshot.session.kind === 'idle' ? null : snapshot.session.sessionId;
-      if (inferCloudLink(snapshot).kind === 'ready' && snapshot.session.kind === 'idle' && binding) {
-        await deps.onRestartConversation?.(binding);
+      if (inferCloudLink(snapshot).kind === 'ready' && snapshot.session.kind === 'idle' && binding && document) {
+        await deps.onRestartConversation?.(binding, document, references);
       }
     });
   }
@@ -739,6 +755,13 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     if (cloudLinkNeedsAttention(link)) {
       panelStatus.textContent = '';
       panelDetail.textContent = '';
+      if (session.kind === 'idle') {
+        panelActions.append(action('Cloud 설정', () => {
+          const focusTrigger = panelTrigger ?? sidebarButton;
+          closePanel();
+          onboarding.open('manage', focusTrigger);
+        }));
+      }
       appendForceQuit();
       return;
     }

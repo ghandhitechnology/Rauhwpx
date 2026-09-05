@@ -160,6 +160,7 @@ export interface ChatThread {
   executionMode?: 'local' | 'cloud';
   cloudSessionId?: string;
   cloudStartId?: string;
+  cloudRestartSourceSessionId?: string;
   firstMessageDelivery?: 'starting' | 'accepted' | 'failed';
   messages: ThreadMessage[];
 }
@@ -660,6 +661,9 @@ function normalizeStoredThread(thread: StoredChatThread): ChatThread {
     ...(thread.executionMode === 'cloud' ? { executionMode: 'cloud' as const } : {}),
     ...(typeof thread.cloudSessionId === 'string' && thread.cloudSessionId
       ? { cloudSessionId: thread.cloudSessionId }
+      : {}),
+    ...(typeof thread.cloudRestartSourceSessionId === 'string' && thread.cloudRestartSourceSessionId
+      ? { cloudRestartSourceSessionId: thread.cloudRestartSourceSessionId }
       : {}),
     ...(typeof thread.cloudStartId === 'string' && thread.cloudStartId
       ? { cloudStartId: thread.cloudStartId }
@@ -1199,10 +1203,13 @@ export function upsertThread(thread: ChatThread): void {
     removeThread(thread.id);
     return;
   }
+  const previousUpdatedAt = (idbAvailable()
+    ? cache.get(thread.id)
+    : readLegacyThreads().find((item) => item.id === thread.id))?.updatedAt ?? 0;
   const capped: ChatThread = {
     ...thread,
     messages: thread.messages.slice(-MAX_MESSAGES_PER_THREAD),
-    updatedAt: Date.now(),
+    updatedAt: Math.max(Date.now(), thread.updatedAt + 1, previousUpdatedAt + 1),
     title: thread.title.trim() || fallbackTitle(thread.messages),
     titleRequested: Boolean(thread.titleRequested),
     workflow: isAgentWorkflow(thread.workflow) ? thread.workflow : 'direct',
