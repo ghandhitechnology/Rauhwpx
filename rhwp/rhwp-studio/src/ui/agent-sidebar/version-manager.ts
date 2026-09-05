@@ -714,7 +714,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
       comparedCommits.add(selected.id);
       renderInspector();
     }));
-    const restore = el('button', 'ag-versions-primary', '이 버전 복원');
+    const restore = el('button', 'ag-versions-secondary', '복원');
     restore.type = 'button';
     restore.dataset.versionMutation = 'true';
     restore.dataset.versionPrerequisiteDisabled = String(!comparedCommits.has(selected.id));
@@ -734,7 +734,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
     })());
     actions.append(compare, restore);
     if (!selected.isHead) {
-      const adopt = el('button', 'ag-versions-secondary', '땡겨오기');
+      const adopt = el('button', 'ag-versions-primary', '땡겨오기');
       adopt.type = 'button';
       adopt.dataset.versionMutation = 'true';
       adopt.dataset.versionPrerequisiteDisabled = String(!comparedCommits.has(selected.id));
