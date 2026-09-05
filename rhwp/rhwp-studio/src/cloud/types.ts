@@ -134,6 +134,7 @@ export interface CloudProviderSelection {
 export interface CloudSessionBase {
   selection?: CloudProviderSelection;
   configurationPending?: boolean;
+  configurationEditable?: boolean;
   sessionId: string;
   version: number;
   threadId: string;

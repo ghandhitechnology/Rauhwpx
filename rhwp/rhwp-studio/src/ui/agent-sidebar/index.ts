@@ -140,6 +140,7 @@ import type {
   CloudTakeoverPayload,
   CloudTransferReference,
 } from '../../cloud/types.ts';
+import { cloudProviderSettingsTarget } from '../../cloud/provider-settings.ts';
 import { createCloudAgentUi } from './cloud-ui.ts';
 import { createCloudWorkspace } from '../cloud-workspace.ts';
 import {
@@ -857,12 +858,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       persistCurrentThread();
       return;
     }
-    if (execution.kind !== 'cloud') return;
+    const target = cloudProviderSettingsTarget(cloudController.getSnapshot(), workspace.cloudBinding(),
+      currentThread.id, workspace.composerTarget());
+    if (!target) return;
     const selection = { agent: selectedAgent, model: selectedModel, effort: selectedEffort };
     cloudConfigurationPending = true;
     const lock = workspace.lock('cloud-message');
     updateComposer();
-    void cloudUi.configure(selection, execution).catch(async (error) => {
+    void cloudUi.configure(selection, target).catch(async (error) => {
       // Refresh after conflicts or an uncertain response instead of resending a write.
       await cloudUi.refreshLeaseScope().catch(() => {});
       systemMessage(`모델 설정을 바꾸지 못했습니다: ${error instanceof Error ? error.message : String(error)}`);
@@ -6328,6 +6331,15 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     llmTrigger.disabled = selectionLocked;
     effortTrigger.disabled = selectionLocked;
     effortSlider.setDisabled(selectionLocked);
+    const settingsSession = cloudController.getSnapshot().session;
+    const selectionHint = selectionLocked
+      ? cloudConfigurationPending || settingsSession.kind !== 'idle' && settingsSession.configurationPending
+        ? '모델 설정을 적용하는 중입니다'
+        : '연결된 대화에서 턴과 대기 중인 작업이 끝난 뒤 설정을 바꿀 수 있습니다'
+      : '프로바이더 · 모델 · 추론 강도 변경 (다음 턴부터 적용)';
+    providerTrigger.title = selectionHint;
+    llmTrigger.title = selectionHint;
+    effortTrigger.title = selectionHint;
     permissionBtn.disabled = controlsLocked || connState !== 'connected';
     // 턴 실행·첨부·모드 전환 중에는 설정 패널을 접는다. 모델/추론 강도를 바꾸는
     // 순간 채팅을 다시 여는 잠금(chatStartPending)은 패널을 유지한다 — 바깥을
@@ -7619,11 +7631,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     const execution = composerExecution(workspace.composerTarget());
     if (execution.kind === 'local') return isControlLocked();
     if (execution.kind === 'cloud-start') return false;
-    if (execution.kind !== 'cloud') return true;
-    const session = cloudController.getSnapshot().session;
-    return session.kind !== 'running' || session.threadId !== currentThread.id
-      || session.phase !== 'waiting' || session.wait !== null
-      || !session.selection || session.configurationPending === true;
+    return !cloudProviderSettingsTarget(cloudController.getSnapshot(), workspace.cloudBinding(),
+      currentThread.id, workspace.composerTarget());
   }
 
   function isControlLocked(): boolean {

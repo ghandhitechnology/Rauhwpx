@@ -1116,6 +1116,7 @@ export class CloudCoordinator extends EventEmitter {
                 executionConfig: session.executionConfig,
                 configurationSupported: true,
                 configurationPending: session.configurationPending === true,
+                configurationEditable: session.configurationEditable === true,
                 serverVersion: session.stateVersion,
                 executionPhase: session.executionPhase,
                 currentWait: session.currentWait ?? null,
@@ -2158,6 +2159,7 @@ export class CloudCoordinator extends EventEmitter {
         serverVersion: session.stateVersion ?? session.version ?? 1,
         configurationSupported: session.configurationSupported === true,
         configurationPending: session.configurationPending === true,
+        configurationEditable: session.configurationEditable === true,
       });
       await this.#store.clearPayload(record.id).catch((error) => {
         this.#emit({ type: 'payload-cleanup-failed', handoffId: record.id, error: error.message });
@@ -2357,6 +2359,7 @@ export class CloudCoordinator extends EventEmitter {
           executionConfig: result.session.executionConfig ?? handoff.executionConfig,
           configurationSupported: result.session.configurationSupported === true,
           configurationPending: result.session.configurationPending === true,
+          configurationEditable: result.session.configurationEditable === true,
           executionPhase: result.session.executionPhase ?? handoff.executionPhase ?? null,
           currentWait: result.session.currentWait ?? null,
           ...(typeof result.session.takeoverRequested === 'boolean'
@@ -2897,6 +2900,7 @@ export class CloudCoordinator extends EventEmitter {
           executionConfig: source.executionConfig ?? current.executionConfig,
           configurationSupported: source.configurationSupported ?? current.configurationSupported,
           configurationPending: source.configurationPending ?? current.configurationPending,
+          configurationEditable: source.configurationEditable ?? current.configurationEditable,
           executionPhase: source.executionPhase ?? current.executionPhase ?? null,
           currentWait,
           ...(['message.queued', 'message.accepted'].includes(event.type) ? {
@@ -3122,6 +3126,7 @@ export class CloudCoordinator extends EventEmitter {
         serverVersion: session.stateVersion ?? session.version ?? 1,
         configurationSupported: session.configurationSupported === true,
         configurationPending: session.configurationPending === true,
+        configurationEditable: session.configurationEditable === true,
         error: null,
         errorCode: null,
         retryable: null,
@@ -3802,6 +3807,7 @@ export class CloudCoordinator extends EventEmitter {
       ...(session.configurationSupported && session.executionConfig ? {
         selection: { agent: session.provider, model: session.executionConfig.model, effort: session.executionConfig.effort },
         configurationPending: session.configurationPending === true,
+        configurationEditable: session.configurationEditable === true,
       } : {}),
       sessionId: session.id ?? session.sessionId,
       version: session.stateVersion ?? session.version ?? 1,
@@ -3875,6 +3881,7 @@ export class CloudCoordinator extends EventEmitter {
       ...(record.configurationSupported && record.executionConfig ? {
         selection: { agent: record.provider, model: record.executionConfig.model, effort: record.executionConfig.effort },
         configurationPending: record.configurationPending === true,
+        configurationEditable: record.configurationEditable === true,
       } : {}),
       sessionId: record.cloudSessionId ?? record.id,
       version: record.serverVersion ?? record.revision,

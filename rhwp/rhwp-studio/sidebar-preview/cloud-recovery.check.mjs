@@ -31,6 +31,43 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   // Text completion alone must not offer a partially persisted document.
   await page.evaluate(() => window.sidebarPreview.cloud.finishReply('검토를 마쳤습니다.'));
   assert.equal(await page.$eval('.ag-cloud-merge-button', (button) => button.hidden), true);
+  // The production selectors remain available after initialization, including
+  // when the message composer is closed for a paused conversation.
+  const providerButton = '[aria-label="프로바이더 선택"]';
+  await page.waitForFunction(() => !document.querySelector('[aria-label="프로바이더 선택"]').disabled);
+  await page.click(providerButton);
+  await page.$eval('.ag-provider-item[data-agent="claude"]', (button) => button.click());
+  await page.waitForFunction(() => window.sidebarPreview.cloud.controller.getSnapshot().session.selection.agent === 'claude'
+    && !document.querySelector('[aria-label="프로바이더 선택"]').disabled);
+  await page.click('[aria-label="모델 선택"]');
+  await page.$eval('.ag-llm-item[data-model="haiku"]', (button) => button.click());
+  await page.waitForFunction(() => window.sidebarPreview.cloud.controller.getSnapshot().session.selection.model === 'haiku'
+    && !document.querySelector('[aria-label="추론 강도 선택"]').disabled);
+  await page.click('[aria-label="추론 강도 선택"]');
+  await page.focus('.ag-eslider');
+  await page.keyboard.press('Home');
+  await page.waitForFunction(() => window.sidebarPreview.cloud.controller.getSnapshot().session.selection.effort === 'low'
+    && !document.querySelector('[aria-label="프로바이더 선택"]').disabled);
+  const selectionCommands = await page.evaluate(() => window.sidebarPreview.cloud.calls.commands.length);
+  await page.evaluate(() => window.sidebarPreview.cloud.setConversationPhase('working'));
+  await page.waitForFunction(() => document.querySelector('[aria-label="프로바이더 선택"]').disabled);
+  await page.$eval('.ag-provider-item[data-agent="codex"]', (button) => button.click());
+  assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.commands.length), selectionCommands);
+  await page.evaluate(() => window.sidebarPreview.cloud.setConversationPhase('suspended'));
+  await page.waitForFunction(() => !document.querySelector('[aria-label="프로바이더 선택"]').disabled);
+  assert.equal(await page.$eval('.ag-input', (input) => input.disabled), true);
+  await page.click(providerButton);
+  await page.$eval('.ag-provider-item[data-agent="codex"]', (button) => button.click());
+  await page.waitForFunction(() => window.sidebarPreview.cloud.controller.getSnapshot().session.selection.agent === 'codex'
+    && !document.querySelector('[aria-label="프로바이더 선택"]').disabled);
+  assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.controller.getSnapshot().session.kind), 'suspended');
+  await page.click('[aria-label="모델 선택"]');
+  await page.$eval('.ag-llm-item[data-model="gpt-6-astra"]', (button) => button.click());
+  await page.waitForFunction(() => window.sidebarPreview.cloud.controller.getSnapshot().session.selection.model === 'gpt-6-astra'
+    && !document.querySelector('[aria-label="모델 선택"]').disabled);
+  assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.transfers.length), 1);
+  await page.evaluate(() => window.sidebarPreview.cloud.setConversationPhase('waiting'));
+  await page.click('.ag-input');
   await page.evaluate(() => window.sidebarPreview.cloud.commitTurn());
   await page.waitForFunction(() => !document.querySelector('.ag-cloud-merge-button').hidden);
   await page.screenshot({ path: resolve(artifacts, 'cloud-merge-ready.png') });

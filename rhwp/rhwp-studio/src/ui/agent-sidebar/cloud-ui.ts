@@ -1,4 +1,5 @@
 import './cloud-ui.css';
+import { canChangeCloudProviderSettings } from '../../cloud/provider-settings.ts';
 
 import type { PortableCloudTimelineV1 } from '../../cloud/timeline.ts';
 import type { AgentStreamEvent, AgentWorkflow } from '../../agent/types.ts';
@@ -1425,7 +1426,10 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     },
     matchesTarget,
     async configure(selection, target) {
-      if (!matchesTarget(target)) throw new Error('선택한 Cloud 대화가 바뀌었습니다.');
+      const session = snapshot.session;
+      if (!deps.isCloudMode() || session.kind === 'idle' || !canChangeCloudProviderSettings(session)
+        || session.sessionId !== target.sessionId || session.threadId !== target.threadId
+        || session.documentId !== target.documentId) throw new Error('선택한 Cloud 대화가 바뀌었습니다.');
       snapshot = await deps.controller.command({
         sessionId: target.sessionId,
         command: 'configure',

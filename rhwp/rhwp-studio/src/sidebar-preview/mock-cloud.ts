@@ -1,5 +1,5 @@
 import { createCloudController, type CloudDesktopApi } from '../cloud/desktop-cloud.ts';
-import type { CloudLinkKind, CloudSessionScope, CloudSnapshot, CloudTransferRequest, CloudCheckpointPayload } from '../cloud/types.ts';
+import type { CloudSessionState, CloudLinkKind, CloudSessionScope, CloudSnapshot, CloudTransferRequest, CloudCheckpointPayload, CloudCommandRequest } from '../cloud/types.ts';
 import type { AgentStreamEvent } from '../agent/types.ts';
 import { recordCloudUsage } from '../cloud/usage-history.ts';
 
@@ -17,7 +17,7 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
   let sequence = 0;
   const checkpoints = new Map<string, CloudCheckpointPayload>();
   const merges: Array<{ startId: string; checkpoint: CloudCheckpointPayload }> = [];
-  const calls = { merges, downloads: 0, refresh: 0, referenceReads: 0, prepareRestart: 0, reconnect: 0, recreate: 0, stop: 0, display: 0, inputs: 0, transfers: [] as CloudTransferRequest[] };
+  const calls = { commands: [] as CloudCommandRequest[], merges, downloads: 0, refresh: 0, referenceReads: 0, prepareRestart: 0, reconnect: 0, recreate: 0, stop: 0, display: 0, inputs: 0, transfers: [] as CloudTransferRequest[] };
   let refreshFails = false;
   let restartArchiveAvailable = true;
   let rejectRestartTransfer = false;
@@ -109,7 +109,9 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
       state.session = { kind: 'running', sessionId: `preview-session-${++sessionNumber}`, version: 1,
         threadId: request.threadId, documentId: request.documentId, documentName: request.documentName,
         startedAt: new Date().toISOString(), turn: 0, turnLimit: 100, elapsedMs: 0, timeLimitMs: 3600000,
-        currentActivity: '문서 검토 중', phase: 'waiting', wait: null };
+        currentActivity: '문서 검토 중', phase: 'waiting', wait: null,
+        selection: { agent: request.timeline.thread.agent, model: request.timeline.thread.model, effort: request.timeline.thread.effort },
+        configurationPending: false, configurationEditable: true };
       state.sessions = [state.session];
       scope = { threadId: request.threadId, documentId: request.documentId, selectedSessionId: state.session.sessionId };
       state.lease = { owner: 'cloud', sessionId: state.session.sessionId, threadId: request.threadId, acquiredAt: new Date().toISOString() };
@@ -161,7 +163,22 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
     },
     cloudSpawnSandbox: async () => snapshot(),
     cloudSandboxStatus: async () => snapshot(),
-    cloudCommand: async () => snapshot(),
+    async cloudCommand(request) {
+      calls.commands.push(structuredClone(request));
+      if (request.command === 'configure') {
+        const session = state.session;
+        if (session.kind === 'idle' || request.sessionId !== session.sessionId
+          || request.expectedVersion !== session.version || session.configurationEditable !== true) {
+          throw new Error('Provider settings can only change between turns');
+        }
+        const payload = request.payload!;
+        session.selection = { agent: payload.provider as import('../agent/types.ts').AgentName,
+          model: String(payload.model), effort: String(payload.effort) };
+        session.version++;
+        publish();
+      }
+      return snapshot();
+    },
     async cloudOpenDisplay({ sessionId }) {
       calls.display++;
       const connectionId = `display-${calls.display}`;
@@ -214,6 +231,20 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
       state.sessions = state.sessions.map((item) => item.sessionId === session.sessionId ? session : item);
       listener?.({ sessionId: session.sessionId,
         event: { type: 'boundary.committed', payload: { kind: 'turn', operationId } } });
+      publish();
+    },
+    setConversationPhase(phase: 'working' | 'waiting' | 'suspended') {
+      const session = state.session;
+      if (session.kind === 'idle') throw new Error('Start a Cloud conversation first');
+      const base = { sessionId: session.sessionId, threadId: session.threadId, documentId: session.documentId,
+        documentName: session.documentName, version: session.version + 1, selection: session.selection,
+        configurationPending: false, configurationEditable: phase !== 'working' };
+      const next: Exclude<CloudSessionState, { kind: 'idle' }> = phase === 'suspended'
+        ? { ...base, kind: 'suspended', reason: '사용자가 일시 정지했습니다.', resumable: true }
+        : { ...base, kind: 'running', phase, wait: null, currentActivity: '문서 검토',
+            startedAt: new Date().toISOString(), turn: checkpoints.get(session.sessionId)?.turn ?? 0, turnLimit: 100, elapsedMs: 0, timeLimitMs: 3600000 };
+      state.session = next;
+      state.sessions = state.sessions.map((item) => item.sessionId === session.sessionId ? next : item);
       publish();
     },
     getScope: () => scope,

@@ -421,6 +421,7 @@ function publicSession(session: Record<string, unknown>, ownDeviceId: string | n
     ...(session.configurationSupported === true && execution ? {
       selection: { agent: session.provider, model: execution.model, effort: execution.effort },
       configurationPending: session.configurationPending === true,
+      configurationEditable: session.configurationEditable === true,
     } : {}),
     sessionId: String(session.id ?? ''),
     version: Math.max(0, Number(session.stateVersion) || 0),
