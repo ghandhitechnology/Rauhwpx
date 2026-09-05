@@ -522,7 +522,7 @@
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
-  border-radius: 8px;
+  border-radius: 2px;
   font-size: 9px;
 }
 
@@ -820,7 +820,7 @@
   padding: 1px 6px;
   max-width: 86px;
   background: color-mix(in srgb, var(--ag-version-lane-color) 12%, transparent);
-  border-radius: 8px;
+  border-radius: 2px;
   border: 1px solid color-mix(in srgb, currentColor 15%, transparent);
   line-height: 12px;
 }
@@ -844,7 +844,7 @@
   color: var(--ag-text);
   cursor: pointer;
   text-align: left;
-  border-radius: 8px;
+  border-radius: 2px;
 }
 
 .ag-versions-branch-chip:hover {
