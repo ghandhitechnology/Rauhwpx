@@ -1820,6 +1820,26 @@ export class ReferenceStore {
       .map(publicFile);
   }
 
+  async readFile({ fileId, scope, scopeId }) {
+    const scoped = normalizeReferenceScope(scope, scopeId);
+    const record = this.metadata.files.find((file) => (
+      file.id === fileId
+      && file.scope === scoped.scope
+      && file.scopeId === scoped.scopeId
+      && file.status === 'ready'
+    ));
+    if (!record) throw new ReferenceStoreError('REFERENCE_NOT_FOUND', 'Reference file was not found in this scope');
+    const blobPath = this.#blobPath(record.sha256);
+    if (!await pathIsPlainFile(blobPath)) {
+      throw new ReferenceStoreError('REFERENCE_BLOB_MISSING', 'Reference file data is missing');
+    }
+    const bytes = await fs.readFile(blobPath);
+    if (bytes.length !== record.size || crypto.createHash('sha256').update(bytes).digest('hex') !== record.sha256) {
+      throw new ReferenceStoreError('REFERENCE_STORE_CORRUPT', 'Reference file data failed integrity verification');
+    }
+    return { ...publicFile(record), bytes };
+  }
+
   async #deletePhysicalObject(sha256) {
     const physical = this.physicalObjects.get(sha256) ?? { blobBytes: 0, objectBytes: 0 };
     this.physicalObjects.delete(sha256);

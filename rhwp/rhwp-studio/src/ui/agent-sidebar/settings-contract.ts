@@ -1,6 +1,6 @@
 import type { EditorScalarSettings } from '../../core/user-settings.ts';
 
-export const SETTINGS_DESTINATIONS = ['editing', 'ai', 'connections'] as const;
+export const SETTINGS_DESTINATIONS = ['editing', 'ai', 'connections', 'cloud'] as const;
 export type SettingsDestination = (typeof SETTINGS_DESTINATIONS)[number];
 
 export function isSettingsDestination(value: unknown): value is SettingsDestination {

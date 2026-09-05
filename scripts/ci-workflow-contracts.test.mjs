@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import yaml from 'js-yaml';
 import { changedPaths, selectChecks } from './ci-changes.mjs';
 
@@ -92,12 +95,31 @@ test('releases depend on verification within the same workflow run', () => {
   assert.ok(ancestors(workflows['release.yml'], 'publish').has('verification'));
 });
 
-test('only publishing receives repository write permissions', () => {
+test('consolidated checks retain Cloud contracts, browser handoff, and Linux packages', () => {
+  const checks = workflows['checks.yml'];
+  const cloudSteps = checks.jobs['cloud-contracts'].steps;
+  assert.equal(cloudSteps.find((step) => step.uses?.startsWith('actions/setup-node@')).with['node-version'], 24);
+  assert.ok(cloudSteps.some((step) => step.run?.includes('npm run test:cloud')));
+  const browserCommands = checks.jobs.browser.steps.map((step) => step.run ?? '').join('\n');
+  assert.match(browserCommands, /e2e:cloud-onboarding/);
+  assert.match(browserCommands, /e2e:cloud-workspace/);
+  assert.match(browserCommands, /e2e:cloud-display/);
+  assert.deepEqual(checks.jobs['linux-packaging'].strategy.matrix.include.map((entry) => entry.arch), ['x64', 'arm64']);
+});
+
+test('only release and image publishing receive write permissions', () => {
   for (const [filename, workflow] of Object.entries(workflows)) {
     assert.deepEqual(workflow.permissions, { contents: 'read' }, filename);
     for (const [id, job] of Object.entries(workflow.jobs)) {
       for (const [scope, access] of Object.entries(job.permissions ?? {})) {
-        if (access === 'write') assert.equal(`${id}/${scope}`, 'publish/contents');
+        if (access === 'write') {
+          const allowed = scope === 'contents' && id === 'publish'
+            || scope === 'packages' && (
+              filename === 'cloud-sandbox-image.yml' && id === 'publish'
+              || filename === 'release.yml' && ['cloud', 'cloud-image'].includes(id)
+            ) || filename === 'release.yml' && id === 'cloud' && scope === 'id-token';
+          assert.ok(allowed, `${filename}/${id}/${scope}`);
+        }
       }
       if (id !== 'publish') {
         for (const step of job.steps ?? []) {
@@ -107,6 +129,58 @@ test('only publishing receives repository write permissions', () => {
     }
   }
 });
+
+test('cloud image publication requires real headed display and input verification', () => {
+  for (const steps of [workflows['cloud-sandbox-image.yml'].jobs.publish.steps, workflows['release.yml'].jobs.cloud.steps]) {
+    const proofIndex = steps.findIndex((step) => step.run?.includes('RAUHWpx_XVFB_CAPTURE_PROOF=1'));
+    const publishIndex = steps.findIndex((step) => step.run?.includes('podman push'));
+    assert.ok(proofIndex >= 0 && proofIndex < publishIndex);
+    assert.match(steps[proofIndex].run, /--user 1001:1001/);
+    assert.match(steps[proofIndex].run, /--test \/app\/tests\/xvfb-studio-capture-proof\.test\.mjs/);
+  }
+});
+
+for (const ready of [true, false]) {
+  test(`cloud image startup ${ready ? 'waits for initialization after HTTP becomes healthy' : 'fails when initialization never finishes'}`, {
+    skip: process.platform === 'win32',
+  }, (t) => {
+    const directory = mkdtempSync(path.join(tmpdir(), 'cloud-image-startup-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const counter = path.join(directory, 'log-reads');
+    writeFileSync(counter, '0');
+    const run = workflows['cloud-sandbox-image.yml'].jobs.publish.steps
+      .find((step) => step.name === 'Build and smoke-test sandbox image').run;
+    const startup = run.slice(run.indexOf('healthy=0'));
+    // Run the actual workflow loop against a server whose HTTP listener opens
+    // before provider probing and scheduler initialization finish.
+    const result = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', `
+      curl() { return 0; }
+      sleep() { return 0; }
+      podman() {
+        case "$1" in
+          logs)
+            local count
+            read -r count < "$RAU_IMAGE_PROBE_COUNT_FILE" || true
+            count=$((count + 1))
+            printf '%s\\n' "$count" > "$RAU_IMAGE_PROBE_COUNT_FILE"
+            if [[ "$RAU_IMAGE_PROBE_READY" == 1 && "$count" -ge 3 ]]; then
+              printf '%s\\n' '{"event":"cloud.started"}'
+            fi
+            ;;
+          inspect) printf '%s\\n' true ;;
+          *) return 2 ;;
+        esac
+      }
+      sandbox_id=fixture
+      ${startup}
+    `], { encoding: 'utf8', timeout: 5_000, env: {
+      ...process.env, RAU_IMAGE_PROBE_COUNT_FILE: counter, RAU_IMAGE_PROBE_READY: ready ? '1' : '0',
+    } });
+    assert.ifError(result.error);
+    assert.equal(result.status, ready ? 0 : 1, result.stderr);
+    assert.ok(Number(readFileSync(counter, 'utf8')) >= (ready ? 3 : 60));
+  });
+}
 
 test('third-party Rust toolchain and installer actions are immutable', () => {
   const actions = ['setup-rust', 'package-desktop'].map((name) => readYaml(`.github/actions/${name}/action.yml`));

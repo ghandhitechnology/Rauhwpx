@@ -1,0 +1,540 @@
+.ag-cloud-btn {
+  width: auto;
+  min-width: 30px;
+  gap: 5px;
+  padding: 0 7px;
+}
+
+/* The button layout rules override the browser's lower-priority [hidden]
+   default unless unsupported web builds hide these explicitly. */
+.ag-cloud-btn[hidden],
+.ag-workspace-cloud-btn[hidden] {
+  display: none;
+}
+
+.ag-cloud-btn-label {
+  font-size: var(--font-size-sm, 11px);
+  font-weight: 650;
+}
+
+.ag-cloud-btn[data-state='running'] .ag-icon,
+.ag-workspace-cloud-btn[data-state='running'] .ag-icon {
+  color: var(--ag-ok);
+  animation: ag-cloud-breathe 1.8s ease-in-out infinite;
+}
+
+.ag-cloud-btn[data-state='reconnecting'] .ag-icon,
+.ag-workspace-cloud-btn[data-state='reconnecting'] .ag-icon {
+  color: var(--ui-warning-border, #d9a441);
+  animation: ag-cloud-reconnect 1.1s ease-in-out infinite;
+}
+
+.ag-cloud-btn[data-state='recreating'] .ag-icon,
+.ag-workspace-cloud-btn[data-state='recreating'] .ag-icon {
+  color: var(--accent-primary);
+  animation: ag-cloud-recreate 1.4s ease-in-out infinite;
+}
+
+.ag-cloud-btn[data-state='failed'] .ag-icon,
+.ag-workspace-cloud-btn[data-state='failed'] .ag-icon {
+  color: var(--ui-warning-border, #d9a441);
+}
+
+.ag-cloud-btn[data-state='transferring'] .ag-icon,
+.ag-cloud-btn[data-state='waiting'] .ag-icon,
+.ag-cloud-btn[data-state='setup'] .ag-icon,
+.ag-workspace-cloud-btn[data-state='transferring'] .ag-icon,
+.ag-workspace-cloud-btn[data-state='waiting'] .ag-icon,
+.ag-workspace-cloud-btn[data-state='setup'] .ag-icon {
+  color: var(--ui-warning-border, #d9a441);
+}
+
+.ag-cloud-btn[data-state='setup'] .ag-icon,
+.ag-workspace-cloud-btn[data-state='setup'] .ag-icon {
+  animation: ag-cloud-breathe 1.4s ease-in-out infinite;
+}
+
+.ag-workspace-cloud-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-chip);
+  background: transparent;
+  color: var(--ag-text-muted);
+  font: inherit;
+  font-size: var(--font-size-sm, 11px);
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.ag-workspace-cloud-btn:hover,
+.ag-workspace-cloud-btn.ag-active {
+  background: var(--ag-hover);
+  color: var(--ag-text);
+}
+
+.ag-cloud-panel {
+  position: absolute;
+  z-index: 80;
+  top: 58px;
+  right: 10px;
+  width: min(390px, calc(100% - 20px));
+  border: 1px solid var(--ag-border-strong);
+  border-radius: var(--ag-r-card);
+  background: var(--ag-bg);
+  color: var(--ag-text);
+  box-shadow: var(--n-elev-3);
+}
+
+.ag-cloud-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 42px;
+  padding: 0 10px 0 13px;
+  border-bottom: 1px solid var(--ag-border);
+}
+
+.ag-cloud-panel-title {
+  margin: 0;
+  font-size: var(--font-size-md, 13px);
+}
+
+.ag-cloud-panel-close {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 0;
+  border-radius: var(--ag-r-chip);
+  background: transparent;
+  color: var(--ag-text-muted);
+  cursor: pointer;
+}
+
+.ag-cloud-panel-body {
+  display: grid;
+  gap: 10px;
+  padding: 13px;
+}
+
+/* Keep recovery neutral. Red is reserved for destructive actions. */
+.ag-cloud-recovery {
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  column-gap: 12px;
+  row-gap: 12px;
+  padding: 12px 14px;
+  border-radius: var(--ag-r-field);
+  background: var(--ag-bg-2);
+  word-break: keep-all;
+}
+
+.ag-cloud-recovery[hidden] {
+  display: none;
+}
+
+.ag-cloud-recovery[data-kind='reconnecting'] {
+  background: color-mix(in srgb, var(--ui-warning-border, #d9a441) 5%, var(--ag-bg));
+}
+
+.ag-cloud-recovery[data-kind='recreating'] {
+  background: color-mix(in srgb, var(--accent-primary) 5%, var(--ag-bg));
+}
+
+.ag-cloud-recovery-chip {
+  display: grid;
+  grid-row: 1;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--ui-warning-border, #d9a441) 12%, transparent);
+  color: var(--ui-warning-border, #d9a441);
+}
+
+.ag-cloud-recovery[data-kind='reconnecting'] .ag-cloud-recovery-chip {
+  background: color-mix(in srgb, var(--ui-warning-border, #d9a441) 12%, transparent);
+  color: var(--ui-warning-border, #d9a441);
+}
+
+.ag-cloud-recovery[data-kind='recreating'] .ag-cloud-recovery-chip {
+  background: color-mix(in srgb, var(--accent-primary) 12%, transparent);
+  color: var(--accent-primary);
+}
+
+.ag-cloud-recovery-chip .ag-icon {
+  display: block;
+}
+
+/* 상태별로 자기 아이콘만 보인다 */
+.ag-cloud-recovery-chip .ag-cloud-recovery-icon-work {
+  display: none;
+}
+
+.ag-cloud-recovery[data-kind='reconnecting'] .ag-cloud-recovery-icon-work,
+.ag-cloud-recovery[data-kind='recreating'] .ag-cloud-recovery-icon-work {
+  display: block;
+}
+
+.ag-cloud-recovery[data-kind='reconnecting'] .ag-cloud-recovery-icon-off,
+.ag-cloud-recovery[data-kind='recreating'] .ag-cloud-recovery-icon-off {
+  display: none;
+}
+
+/* 호만 돌리고 구름은 그대로 둔다 */
+.ag-cloud-recovery-icon-arc {
+  transform-box: view-box;
+  transform-origin: 6.4px 6px;
+  animation: ag-cloud-arc-spin 1.1s linear infinite;
+}
+
+@keyframes ag-cloud-arc-spin {
+  to { transform: rotate(360deg); }
+}
+
+.ag-cloud-recovery-copy {
+  grid-row: 1;
+  min-width: 0;
+}
+
+.ag-cloud-recovery-title {
+  font-weight: 650;
+  line-height: 1.5;
+}
+
+.ag-cloud-recovery-detail {
+  margin: 3px 0 0;
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-sm, 11px);
+  line-height: 1.6;
+}
+
+.ag-cloud-recovery-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ag-cloud-recovery .ag-cloud-action {
+  min-height: 32px;
+  padding: 0 11px;
+  border-radius: 8px;
+}
+
+.ag-cloud-session-picker {
+  display: grid;
+  gap: 5px;
+}
+
+.ag-cloud-session-picker[hidden],
+.ag-cloud-panel-status:empty,
+.ag-cloud-panel-detail:empty,
+.ag-cloud-panel-actions:empty {
+  display: none;
+}
+
+.ag-cloud-session-picker-label {
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-sm, 11px);
+  font-weight: 650;
+}
+
+.ag-cloud-session-select {
+  width: 100%;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--ag-border-strong);
+  border-radius: var(--ag-r-chip);
+  background: var(--ag-bg-2);
+  color: var(--ag-text);
+  font: inherit;
+}
+
+.ag-cloud-panel-status {
+  font-weight: 650;
+}
+
+.ag-cloud-panel-detail {
+  margin: 0;
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-sm, 11px);
+}
+
+.ag-cloud-progress {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--ag-surface-subtle);
+}
+
+.ag-cloud-progress-fill {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: var(--accent-primary);
+  transition: width 160ms ease;
+}
+
+.ag-cloud-panel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ag-cloud-wait-feedback {
+  flex: 1 0 100%;
+  min-height: 64px;
+  resize: vertical;
+  padding: 8px 9px;
+  border: 1px solid var(--ag-border-strong);
+  border-radius: var(--ag-r-field);
+  background: var(--ag-bg-2);
+  color: var(--ag-text-primary);
+  font: inherit;
+  font-size: var(--font-size-sm, 11px);
+}
+
+.ag-cloud-action {
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--ag-border-strong);
+  border-radius: var(--ag-r-chip);
+  background: var(--ag-bg-2);
+  color: var(--ag-text-secondary);
+  font: inherit;
+  font-size: var(--font-size-sm, 11px);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ag-cloud-action:hover:not(:disabled) { filter: brightness(0.96); }
+.ag-cloud-action:focus-visible,
+.ag-cloud-panel-close:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+.ag-cloud-action:disabled { opacity: 0.5; cursor: default; }
+
+.ag-cloud-action.ag-primary {
+  border-color: var(--accent-primary);
+  background: var(--accent-primary);
+  color: var(--n-on-accent);
+}
+
+.ag-cloud-action.ag-danger {
+  color: var(--ag-err);
+}
+
+.ag-cloud-conflict {
+  padding: 9px;
+  border: 1px solid color-mix(in srgb, var(--ui-warning-border, #d9a441) 55%, var(--ag-border));
+  border-radius: var(--ag-r-field);
+  background: color-mix(in srgb, var(--ui-warning-border, #d9a441) 10%, transparent);
+  color: var(--ag-text-secondary);
+  font-size: var(--font-size-sm, 11px);
+}
+
+.ag-cloud-queue-strip {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  padding: 6px 9px;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-field);
+  background: var(--ag-surface-subtle);
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-sm, 11px);
+}
+
+.ag-cloud-queue-strip[hidden] {
+  display: none;
+}
+
+.ag-cloud-queue-label {
+  flex: 0 0 auto;
+  font-weight: 650;
+  color: var(--ag-text-secondary);
+}
+
+.ag-cloud-queue-message {
+  overflow: hidden;
+  padding: 2px 6px;
+  border-radius: var(--ag-r-chip);
+  background: var(--ag-bg);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-cloud-recovery-strip {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr);
+  min-width: 0;
+  align-items: center;
+  column-gap: 9px;
+  row-gap: 10px;
+  padding: 11px 12px;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-field);
+  background: var(--ag-surface-subtle);
+  color: var(--ag-text);
+  font-size: var(--font-size-sm, 11px);
+}
+
+.ag-cloud-recovery-strip[hidden] {
+  display: none;
+}
+
+.ag-cloud-recovery-strip-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ag-cloud-recovery-strip-actions:empty { display: none; }
+.ag-cloud-recovery-strip-actions .ag-cloud-action { flex: 1 1 112px; }
+
+.ag-cloud-recovery-strip-pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--ui-warning-border, #d9a441);
+}
+
+.ag-cloud-recovery-strip[data-kind='reconnecting'] .ag-cloud-recovery-strip-pulse,
+.ag-cloud-recovery-strip[data-kind='recreating'] .ag-cloud-recovery-strip-pulse {
+  background: var(--accent-primary);
+  animation: ag-cloud-breathe 1.8s ease-in-out infinite;
+}
+
+.ag-cloud-recovery-strip-title {
+  min-width: 0;
+  font-weight: 650;
+  line-height: 1.5;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
+
+.ag-msg-delivery {
+  display: inline-flex;
+  margin-top: 5px;
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-xs, 10px);
+}
+
+.ag-msg-delivery.ag-accepted-cloud {
+  color: var(--ag-ok);
+}
+
+.ag-restored-task-group {
+  overflow: hidden;
+  border: 1px solid var(--ag-border);
+  border-radius: var(--ag-r-card);
+  background: var(--ag-surface-subtle);
+}
+
+.ag-restored-task-heading {
+  display: flex;
+  width: 100%;
+  min-height: 34px;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 9px;
+  border: 0;
+  background: transparent;
+  color: var(--ag-text-secondary);
+  font: inherit;
+  font-size: var(--font-size-sm, 11px);
+  font-weight: 650;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ag-restored-task-heading > span:nth-child(2) {
+  min-width: 0;
+  flex: 1;
+}
+
+.ag-restored-task-body {
+  display: grid;
+  gap: 7px;
+  padding: 0 8px 8px;
+}
+
+.ag-restored-task-body[hidden] {
+  display: none;
+}
+
+.ag-restored-task {
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border-radius: var(--ag-r-field);
+  background: var(--ag-bg);
+}
+
+.ag-restored-task-title {
+  color: var(--ag-text);
+  font-size: var(--font-size-sm, 11px);
+}
+
+.ag-restored-task-meta {
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-xs, 10px);
+}
+
+.ag-restored-task-summary {
+  margin: 0;
+  color: var(--ag-text-secondary);
+  font-size: var(--font-size-sm, 11px);
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.ag-restored-task-tools {
+  display: grid;
+  gap: 4px;
+  margin-top: 3px;
+}
+
+.ag-restored-task.ag-failed .ag-restored-task-title {
+  color: var(--ag-err);
+}
+
+@keyframes ag-cloud-breathe {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1; }
+}
+
+@keyframes ag-cloud-reconnect {
+  0%, 100% { opacity: 0.65; }
+  50% { opacity: 1; }
+}
+
+@keyframes ag-cloud-recreate {
+  0%, 100% { opacity: 0.55; transform: scale(0.92); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ag-cloud-btn .ag-icon,
+  .ag-workspace-cloud-btn .ag-icon,
+  .ag-cloud-recovery-icon-arc,
+  .ag-cloud-recovery-strip-pulse {
+    animation: none !important;
+  }
+}
+
+@media (max-width: 720px) {
+  .ag-cloud-btn-label,
+  .ag-workspace-cloud-label {
+    display: none;
+  }
+}

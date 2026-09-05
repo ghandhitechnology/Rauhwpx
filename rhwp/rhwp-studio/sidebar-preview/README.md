@@ -32,7 +32,10 @@ The focus-mode button shows a placeholder because this preview covers the sideba
 | `?scenario=review` | Streaming reply followed by accept/reject changes |
 | `?scenario=fleet` | Tool activity and a subagent task |
 | `?scenario=error` | A failed turn |
+| `?cloud=1` | Cloud workspace with local disconnect, reconnect, restart, and shutdown fixtures |
 | `?page=settings` | Production settings panel |
+| `?cloud=1&dashboard=1&page=settings&destination=cloud` | Cloud dashboard with explicit sample quota, seven daily observations, and provider sessions |
+| `?cloud=1&dashboard=1&page=settings&destination=cloud&fullscreen=1` | Full-screen production Cloud settings |
 | `?page=versions` | Production version graph |
 | `?page=versions&history=branches` | Branching and merging history with colored graph lanes |
 | `?services=setup&page=settings` | Uninstalled/unconfigured service fixtures |
@@ -44,6 +47,18 @@ The focus-mode button shows a placeholder because this preview covers the sideba
 Parameters can be combined. Select **Next reply**, then type a message or press
 **Play sample conversation**. Connection and service controls expose disconnected,
 reconnecting, replaced-session, and setup screens without waiting for real failures.
+
+For Cloud recovery, open `?cloud=1`, choose **Codex**, select **클라우드**, and send
+a message. Select **클라우드** again to show the document preview. **Disconnect
+Cloud** pauses the connection while retaining the last frame; the production
+Cloud controls reconnect, rebuild from the same conversation, or stop the worker.
+The fixture records transfers and session scope in `window.sidebarPreview.cloud`.
+
+The Cloud settings dashboard's **크게 보기** button opens the production full-screen
+settings layout. The ordinary chat focus button still uses the preview placeholder.
+Dashboard fixtures expose quota exhaustion, sign-out, self-hosted and unavailable
+states through the typed `setDashboardState` method. Sample history is isolated to
+the preview account and only seeded with `dashboard=1`.
 
 ## Behavior and placeholders
 
@@ -109,6 +124,14 @@ checks request isolation, and writes **sidebar-only PNGs** to
 `sidebar-preview/artifacts/` (Git-ignored). Set `CHROME_PATH` if Chrome/Chromium is
 not installed in a standard macOS/Linux location; this also supports Windows paths.
 It does not connect to or control your normal browser.
+
+Cloud checks also save full-page `cloud-live.png`, `cloud-disconnected.png`, and
+`cloud-restarted.png`, plus narrow dark-mode recovery and status-panel captures.
+They check button clipping and panel bounds at the sidebar's minimum width,
+a blocked status refresh, stable keyboard focus
+across repeated snapshots, duplicate recovery clicks, stopping during reconnect,
+fresh transfer IDs after rebuilding, and returning to the original chat after
+switching threads. Timings measure the local fixture, not hosted provisioning.
 
 The static build goes to `rhwp/rhwp-studio/dist-sidebar/`, separately from the
 application build. For the repository-wide TypeScript check, run Studio's normal

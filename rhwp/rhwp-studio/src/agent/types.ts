@@ -806,6 +806,7 @@ export interface AgentBridgeDeps {
   canvasView: CanvasView;
   documentState: DocumentDirtyState;
   isReadOnly?: () => boolean;
+  canPublishCloudDocument?: () => boolean;
 }
 
 export interface AgentBridgeOptions {

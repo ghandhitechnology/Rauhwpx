@@ -35,6 +35,85 @@
   gap: 8px;
 }
 
+/* Global account and Raucloud allowance stay visible even when signed out. */
+.ag-settings-account-card {
+  display: grid;
+  gap: 16px;
+  padding: 18px;
+  border: 1px solid var(--ag-border, #d9d9dc);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--ag-surface) 96%, var(--ag-text));
+}
+
+.ag-settings-account-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.ag-settings-account-identity {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.ag-settings-account-name,
+.ag-settings-account-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-settings-account-name {
+  color: var(--ag-text, #17171a);
+  font-size: 14px;
+}
+
+.ag-settings-account-detail,
+.ag-settings-account-foot,
+.ag-settings-account-status {
+  margin: 0;
+  color: var(--ag-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.ag-settings-account-actions {
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+.ag-settings-cloud-quota {
+  display: grid;
+  gap: 8px;
+}
+
+.ag-settings-cloud-quota .ag-settings-meter-fill {
+  width: 0;
+  background: #6e7786;
+}
+
+.ag-settings-account-card[data-state='subtle'] .ag-settings-meter-fill {
+  background: #9b814f;
+}
+
+.ag-settings-account-card[data-state='warning'] .ag-settings-meter-fill {
+  background: #b45d4d;
+}
+
+.ag-settings-account-card[data-state='warning'] .ag-settings-meter-value {
+  color: #a74d3f;
+}
+
+.ag-settings-account-card[data-state='logged-out'] .ag-settings-meter-track {
+  opacity: 0.48;
+}
+
+.ag-settings-account-status[hidden] {
+  display: none;
+}
+
 /* ── 행 (허브 · 프로바이더) ─────────────────────────── */
 
 .ag-settings-row {
@@ -1818,8 +1897,10 @@
 
   .ag-settings-nav-button {
     flex: 1 1 0;
+    min-width: 0;
     min-height: 34px;
-    padding: 0 8px;
+    padding: 0 4px;
+    font-size: 11px;
     text-align: center;
   }
 
