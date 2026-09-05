@@ -7,6 +7,11 @@ on:
         description: Optional immutable GHCR tag for this build
         required: false
         type: string
+      document_shell_only:
+        description: Reuse the published engine and assets; update only the document shell
+        required: false
+        default: false
+        type: boolean
   push:
     tags:
       - 'cloud-sandbox-v*'
@@ -42,18 +47,24 @@ jobs:
             rhwp/rhwp-studio/package-lock.json
 
       - name: Set up cached Rust and WASM tools
+        if: ${{ !inputs.document_shell_only }}
         uses: ./.github/actions/setup-rust
         with:
           wasm: 'true'
           cache: package
 
       - name: Build cloud runtime assets
+        if: ${{ !inputs.document_shell_only }}
         run: |
           wasm-pack build rhwp --target web
           cargo build --manifest-path rhwp/Cargo.toml --release --locked --bin rhwp
           npm --prefix cloud ci
           npm --prefix rhwp/rhwp-studio ci
           bash cloud/install/build-runtime-assets.sh
+
+      - name: Install Cloud test dependencies for document shell update
+        if: ${{ inputs.document_shell_only }}
+        run: npm --prefix cloud ci
 
       - name: Install live display test dependency
         run: |
@@ -64,8 +75,14 @@ jobs:
         run: npm --prefix cloud test
 
       - name: Build and smoke-test sandbox image
+        env:
+          DOCUMENT_SHELL_ONLY: ${{ inputs.document_shell_only }}
         run: |
-          podman build --tag rauhwpx-cloud-sandbox-edge --file cloud/install/Containerfile.sandbox cloud
+          containerfile=cloud/install/Containerfile.sandbox
+          if [[ "$DOCUMENT_SHELL_ONLY" == "true" ]]; then
+            containerfile=cloud/install/Containerfile.document-shell
+          fi
+          podman build --tag rauhwpx-cloud-sandbox-edge --file "$containerfile" cloud
           podman run --rm --entrypoint node rauhwpx-cloud-sandbox-edge \
             --input-type=module -e 'import { parseConfig } from "/app/src/config.mjs";
           const config = parseConfig(process.env);
@@ -79,6 +96,11 @@ jobs:
               env HOME=/tmp/smoke-home TMPDIR=/tmp/smoke-tmp \
               node /app/document-runtime/smoke.mjs
           '
+          podman run --rm --user 1001:1001 \
+            --env HOME=/tmp --env RAUHWpx_DOCUMENT_SHELL_PROOF=1 \
+            --volume "$PWD/cloud/tests:/app/tests:ro" \
+            --entrypoint node rauhwpx-cloud-sandbox-edge \
+            --test /app/tests/document-shell.browser.test.mjs
           podman run --rm --user 1001:1001 \
             --env HOME=/tmp --env RAUHWpx_XVFB_CAPTURE_PROOF=1 \
             --volume "$PWD/cloud/tests:/app/tests:ro" \

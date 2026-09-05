@@ -1,0 +1,5 @@
+# Update only the document presentation and its launcher. Reuse the already
+# published Studio, WASM, native engine, fonts, and provider installations.
+FROM ghcr.io/ghandhitechnology/rauhwpx-cloud:1.1.0-edge.17
+COPY document-runtime/document-shell.mjs /app/document-runtime/document-shell.mjs
+COPY document-runtime/studio-harness.mjs /app/document-runtime/studio-harness.mjs

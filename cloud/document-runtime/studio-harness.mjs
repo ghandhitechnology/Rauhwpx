@@ -6,7 +6,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { childProcessEnvironment, normalizeDisplayGeometry } from './session-display.mjs';
-import { documentShell } from './document-shell.mjs';
+import { documentShell, verifyDocumentShell } from './document-shell.mjs';
 
 const MAX_EXPORT_BYTES = 64 * 1024 * 1024;
 const EXPORT_CHUNK_BYTES = 1024 * 1024;
@@ -811,6 +811,7 @@ export async function createStudioHarness({
       'DOCUMENT_LOAD_TIMEOUT',
       'Cloud Studio document load timed out',
     );
+    await verifyDocumentShell(page);
     assertBrowserHealthy();
     const displayPressedKeys = new Set();
     const displayPressedButtons = new Set();

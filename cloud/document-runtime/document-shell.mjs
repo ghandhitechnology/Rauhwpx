@@ -15,3 +15,27 @@ body > :not(#studio-root):not(script):not(style),
 #scroll-container::-webkit-scrollbar { display: none; }
 </style></head>`);
 }
+
+// Run in Chromium before the worker advertises its display as ready. A missing
+// shell must fail startup instead of silently streaming the entire application.
+export async function verifyDocumentShell(page) {
+  const layout = await page.evaluate(() => {
+    const visible = (element) => element.getClientRects().length > 0
+      && getComputedStyle(element).visibility !== 'hidden';
+    const viewport = document.querySelector('#scroll-container')?.getBoundingClientRect();
+    return {
+      installed: Boolean(document.querySelector('#cloud-document-shell')),
+      fillsWindow: Boolean(viewport && viewport.x === 0 && viewport.y === 0
+        && viewport.width === innerWidth && viewport.height === innerHeight),
+      chrome: [...document.querySelectorAll(
+        '#studio-header, #status-bar, #h-ruler, #v-ruler, #ruler-corner, .ag-root, #document-empty-state',
+      )].filter(visible).map((element) => element.id || element.className),
+    };
+  });
+  if (!layout.installed || !layout.fillsWindow || layout.chrome.length > 0) {
+    throw Object.assign(new Error(`Cloud document-only layout is missing or obscured: ${JSON.stringify(layout)}`), {
+      code: 'STUDIO_DOCUMENT_LAYOUT_INVALID',
+    });
+  }
+  return layout;
+}
