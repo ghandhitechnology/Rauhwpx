@@ -388,6 +388,27 @@ test('quick branch buttons switch once and respect mutation locks', async () => 
   }
 });
 
+test('shared actions stay fixed across tab switches', async () => {
+  const page = await openPage();
+  try {
+    for (const width of [280, 480, 900]) {
+      await page.setViewport({ width, height: 820 });
+      let baseline: unknown;
+      for (const tab of ['history', 'branches', 'shelves', 'history']) {
+        await page.click(`[data-tab="${tab}"]`);
+        const positions = await page.$$eval('.ag-versions-toolbar > button:not(.ag-versions-create-branch):not(.ag-versions-create-shelf)', (buttons) => buttons.map((button) => {
+          const { x, y, width, height } = button.getBoundingClientRect();
+          return { x, y, width, height };
+        }));
+        baseline ??= positions;
+        assert.deepEqual(positions, baseline, `${width}px ${tab} action positions`);
+      }
+    }
+  } finally {
+    await page.close();
+  }
+});
+
 test('dotted connectors follow their own node and end before a solid arrow', async () => {
   const page = await openPage();
   try {
