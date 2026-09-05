@@ -1,0 +1,433 @@
+{
+  "schemaVersion": 1,
+  "comparison": "rau-export-opened-in-hancom",
+  "fullParityVerified": false,
+  "independentEditReproduction": "pending",
+  "positionTolerancePt": 0.5,
+  "limitations": [
+    "Initial single-image horizontal-text diagnostic recipes only",
+    "Whitespace placement and individual glyph positions are not gated",
+    "PDF producer metadata alone does not prove Hancom provenance; retain the capture record"
+  ],
+  "cases": [
+    {
+      "id": "body-mixed-text",
+      "status": "fail",
+      "samePageCount": true,
+      "sourceSha256": "3e8831613bf0c6b62a1dbc19c6b748da702236cb99740a952e217297d89e8f3c",
+      "pdfSha256": "1ea8015870ea93fdb1a562d619553ccc688f6d78a69a3349aa8ae8b18883049a",
+      "pdfMetadata": {
+        "format": "PDF 1.3",
+        "title": "",
+        "author": "",
+        "subject": "",
+        "keywords": "",
+        "creator": "",
+        "producer": "macOS 버전 26.4(빌드 25E246) Quartz PDFContext",
+        "creationDate": "D:20260905023525Z00'00'",
+        "modDate": "D:20260905023525Z00'00'",
+        "trapped": "",
+        "encryption": null
+      },
+      "pages": [
+        {
+          "page": 1,
+          "passesCheckedGeometry": false,
+          "sameNonWhitespaceLineBreaks": true,
+          "imageDelta": {
+            "dxPt": -1.297192382812483,
+            "dyPt": 0.010961914062491473,
+            "dwPt": -0.007293701171875,
+            "dhPt": -0.003662109375
+          },
+          "lineStartDeltas": [
+            {
+              "text": "그림앞의글입니다.Pictureandtextsharethis",
+              "dxPt": 0.04000183105468125,
+              "dyPt": 0.09998779296873295
+            },
+            {
+              "text": "paragraph.그림뒤에도글이이어집니다.",
+              "dxPt": 0.04000183105468125,
+              "dyPt": 0.06000976562503979
+            }
+          ],
+          "rauLines": [
+            {
+              "text": "그림앞의글입니다.Pictureandtextsharethis",
+              "x": 85.04,
+              "y": 175.70000000000002
+            },
+            {
+              "text": "paragraph.그림뒤에도글이이어집니다.",
+              "x": 85.04,
+              "y": 203.69999999999996
+            }
+          ],
+          "hancomLines": [
+            {
+              "text": "그림앞의글입니다.Pictureandtextsharethis",
+              "x": 85.08000183105469,
+              "y": 175.79998779296875
+            },
+            {
+              "text": "paragraph.그림뒤에도글이이어집니다.",
+              "x": 85.08000183105469,
+              "y": 203.760009765625
+            }
+          ],
+          "pdfFonts": [
+            "AAAAAB+HCRBatang",
+            "AAAAAC+HCRBatang"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "body-paragraph-spacing",
+      "status": "fail",
+      "samePageCount": true,
+      "sourceSha256": "577a973b10231db6b712d347a5210f200961bfe6faff191cecd3b5ecb13ece92",
+      "pdfSha256": "247e3b41ca58d32afdf66b11dd3571a85d654b02093e3089920815a0215a26a0",
+      "pdfMetadata": {
+        "format": "PDF 1.3",
+        "title": "",
+        "author": "",
+        "subject": "",
+        "keywords": "",
+        "creator": "",
+        "producer": "macOS 버전 26.4(빌드 25E246) Quartz PDFContext",
+        "creationDate": "D:20260905024021Z00'00'",
+        "modDate": "D:20260905024021Z00'00'",
+        "trapped": "",
+        "encryption": null
+      },
+      "pages": [
+        {
+          "page": 1,
+          "passesCheckedGeometry": false,
+          "sameNonWhitespaceLineBreaks": true,
+          "imageDelta": {
+            "dxPt": 0.026538085937502842,
+            "dyPt": -3.0048095703124886,
+            "dwPt": -0.007293701171875,
+            "dhPt": -0.003662109375
+          },
+          "lineStartDeltas": [
+            {
+              "text": "그림위문단입니다.",
+              "dxPt": 0.04000183105468125,
+              "dyPt": 0.06000976562499716
+            },
+            {
+              "text": "그림아래문단입니다.",
+              "dxPt": 0.04000183105468125,
+              "dyPt": -4.419970703125017
+            }
+          ],
+          "rauLines": [
+            {
+              "text": "그림위문단입니다.",
+              "x": 85.04,
+              "y": 107.7
+            },
+            {
+              "text": "그림아래문단입니다.",
+              "x": 85.04,
+              "y": 228.70000000000002
+            }
+          ],
+          "hancomLines": [
+            {
+              "text": "그림위문단입니다.",
+              "x": 85.08000183105469,
+              "y": 107.760009765625
+            },
+            {
+              "text": "그림아래문단입니다.",
+              "x": 85.08000183105469,
+              "y": 224.280029296875
+            }
+          ],
+          "pdfFonts": [
+            "AAAAAB+HCRBatang",
+            "AAAAAC+HCRBatang"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cell-mixed-text",
+      "status": "fail",
+      "samePageCount": true,
+      "sourceSha256": "0b196e6cc0b4dab700f0cfdf2b1bb93253b2019e54ec1cc667b78bcad6732af4",
+      "pdfSha256": "b46b0893172b18dda340e1ee515bebe5310d93bf2b7e8532bfc41c31ae85dd8f",
+      "pdfMetadata": {
+        "format": "PDF 1.3",
+        "title": "",
+        "author": "",
+        "subject": "",
+        "keywords": "",
+        "creator": "",
+        "producer": "macOS 버전 26.4(빌드 25E246) Quartz PDFContext",
+        "creationDate": "D:20260905023404Z00'00'",
+        "modDate": "D:20260905023404Z00'00'",
+        "trapped": "",
+        "encryption": null
+      },
+      "pages": [
+        {
+          "page": 1,
+          "passesCheckedGeometry": false,
+          "sameNonWhitespaceLineBreaks": false,
+          "imageDelta": {
+            "dxPt": 2.8462234497070398,
+            "dyPt": 2.89013671875,
+            "dwPt": -0.00730133056640625,
+            "dhPt": -0.003662109375
+          },
+          "lineStartDeltas": null,
+          "rauLines": [
+            {
+              "text": "그림앞의글입니다",
+              "x": 90.14,
+              "y": 109.11000000000001
+            },
+            {
+              "text": ".",
+              "x": 270.14,
+              "y": 193.11
+            },
+            {
+              "text": "Pictureandtextsharethisparagraph.그",
+              "x": 90.14,
+              "y": 221.11
+            },
+            {
+              "text": "림뒤에도글이이어집니다.",
+              "x": 90.14,
+              "y": 237.10999999999999
+            }
+          ],
+          "hancomLines": [
+            {
+              "text": "그림앞의글입니다",
+              "x": 93.0,
+              "y": 111.96002197265625
+            },
+            {
+              "text": ".",
+              "x": 273.0,
+              "y": 195.96002197265625
+            },
+            {
+              "text": "Pictureandtextsharethisparagraph.",
+              "x": 93.0,
+              "y": 224.03997802734375
+            },
+            {
+              "text": "그림뒤에도글이이어집니다.",
+              "x": 93.0,
+              "y": 240.0
+            }
+          ],
+          "pdfFonts": [
+            "AAAAAB+HCRBatang",
+            "AAAAAC+HCRBatang"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cell-empty",
+      "status": "fail",
+      "samePageCount": true,
+      "sourceSha256": "40f288da09f013e1e8540c07db784811adb09845641d6c5e43b60440c48617e3",
+      "pdfSha256": "62fb080c36efd757ba7ffc643dec83d10a4a3201987ee42d82af67c588f26247",
+      "pdfMetadata": {
+        "format": "PDF 1.3",
+        "title": "",
+        "author": "",
+        "subject": "",
+        "keywords": "",
+        "creator": "",
+        "producer": "macOS 버전 26.4(빌드 25E246) Quartz PDFContext",
+        "creationDate": "D:20260905024122Z00'00'",
+        "modDate": "D:20260905024122Z00'00'",
+        "trapped": "",
+        "encryption": null
+      },
+      "pages": [
+        {
+          "page": 1,
+          "passesCheckedGeometry": false,
+          "sameNonWhitespaceLineBreaks": true,
+          "imageDelta": {
+            "dxPt": 2.8462234497070398,
+            "dyPt": 2.8607910156250114,
+            "dwPt": -0.00730133056640625,
+            "dhPt": -0.003662109375
+          },
+          "lineStartDeltas": [],
+          "rauLines": [],
+          "hancomLines": [],
+          "pdfFonts": []
+        }
+      ]
+    },
+    {
+      "id": "cell-fit-width",
+      "status": "fail",
+      "samePageCount": true,
+      "sourceSha256": "a5bd522a68bf0481e8e4ec3f097ec3d89055156851019a919d654ba0d245219a",
+      "pdfSha256": "beeb2adca92ef9a837cc5d01c3797371529379e17125662d8acf80d2c39df09e",
+      "pdfMetadata": {
+        "format": "PDF 1.3",
+        "title": "",
+        "author": "",
+        "subject": "",
+        "keywords": "",
+        "creator": "",
+        "producer": "macOS 버전 26.4(빌드 25E246) Quartz PDFContext",
+        "creationDate": "D:20260905023047Z00'00'",
+        "modDate": "D:20260905023047Z00'00'",
+        "trapped": "",
+        "encryption": null
+      },
+      "pages": [
+        {
+          "page": 1,
+          "passesCheckedGeometry": false,
+          "sameNonWhitespaceLineBreaks": false,
+          "imageDelta": {
+            "dxPt": 2.8462234497070398,
+            "dyPt": 2.8607910156250114,
+            "dwPt": -0.023097229003923303,
+            "dhPt": 0.010937500000011369
+          },
+          "lineStartDeltas": null,
+          "rauLines": [
+            {
+              "text": "그림앞의글입니다.Pictureandtext",
+              "x": 90.14,
+              "y": 214.9
+            },
+            {
+              "text": "sharethisparagraph.그림뒤에도글이이",
+              "x": 90.14,
+              "y": 230.9
+            },
+            {
+              "text": "어집니다.",
+              "x": 90.14,
+              "y": 246.89999999999998
+            }
+          ],
+          "hancomLines": [
+            {
+              "text": "그림앞의글입니다.Pictureandtext",
+              "x": 93.0,
+              "y": 217.79998779296875
+            },
+            {
+              "text": "sharethisparagraph.그림뒤에도글이",
+              "x": 93.0,
+              "y": 233.760009765625
+            },
+            {
+              "text": "이어집니다.",
+              "x": 93.0,
+              "y": 249.719970703125
+            }
+          ],
+          "pdfFonts": [
+            "AAAAAB+HCRBatang",
+            "AAAAAC+HCRBatang"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cell-paragraph-spacing",
+      "status": "fail",
+      "samePageCount": true,
+      "sourceSha256": "4c79a9b9aa9594a84a784766d169eb1ecd5181d1267d07342ad152698cadb738",
+      "pdfSha256": "b79d9660cb057e0de23f538fabb6d10c408875e5903110bcc52e980e051e058e",
+      "pdfMetadata": {
+        "format": "PDF 1.3",
+        "title": "",
+        "author": "",
+        "subject": "",
+        "keywords": "",
+        "creator": "",
+        "producer": "macOS 버전 26.4(빌드 25E246) Quartz PDFContext",
+        "creationDate": "D:20260905024221Z00'00'",
+        "modDate": "D:20260905024221Z00'00'",
+        "trapped": "",
+        "encryption": null
+      },
+      "pages": [
+        {
+          "page": 1,
+          "passesCheckedGeometry": false,
+          "sameNonWhitespaceLineBreaks": false,
+          "imageDelta": {
+            "dxPt": 2.8462234497070398,
+            "dyPt": 5.860668945312511,
+            "dwPt": -0.00730133056640625,
+            "dhPt": -0.003662109375
+          },
+          "lineStartDeltas": null,
+          "rauLines": [
+            {
+              "text": "그림",
+              "x": 270.14,
+              "y": 177.11
+            },
+            {
+              "text": "앞의글입니다.Pictureandtextshare",
+              "x": 90.14,
+              "y": 205.10999999999999
+            },
+            {
+              "text": "thisparagraph.그림뒤에도글이이어집니",
+              "x": 90.14,
+              "y": 221.10999999999999
+            },
+            {
+              "text": "다.",
+              "x": 90.14,
+              "y": 237.10999999999993
+            }
+          ],
+          "hancomLines": [
+            {
+              "text": "그림",
+              "x": 273.0,
+              "y": 183.0
+            },
+            {
+              "text": "앞의글입니다.Pictureandtextshare",
+              "x": 93.0,
+              "y": 210.96002197265625
+            },
+            {
+              "text": "thisparagraph.그림뒤에도글이이어집",
+              "x": 93.0,
+              "y": 227.03997802734375
+            },
+            {
+              "text": "니다.",
+              "x": 93.0,
+              "y": 243.0
+            }
+          ],
+          "pdfFonts": [
+            "AAAAAB+HCRBatang",
+            "AAAAAC+HCRBatang"
+          ]
+        }
+      ]
+    }
+  ]
+}

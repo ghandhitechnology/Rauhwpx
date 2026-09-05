@@ -18,6 +18,7 @@ pub const LANG_COUNT: usize = 7;
 /// 해소된 글자 스타일 (CharShape + FontFace → 렌더링용)
 #[derive(Debug, Clone)]
 pub struct ResolvedCharStyle {
+    pub font_metrics_policy: crate::model::provenance::FontMetricsPolicy,
     /// 글꼴 이름 (한국어 = 기본값, font_families[0]과 동일)
     pub font_family: String,
     /// 7개 언어 카테고리별 글꼴 이름
@@ -81,6 +82,7 @@ pub struct ResolvedCharStyle {
 impl Default for ResolvedCharStyle {
     fn default() -> Self {
         Self {
+            font_metrics_policy: Default::default(),
             font_family: String::new(),
             font_families: Vec::new(),
             font_size: 12.0,
@@ -361,6 +363,7 @@ fn resolve_single_char_style(cs: &CharShape, doc_info: &DocInfo, dpi: f64) -> Re
     let ratio = ratios[0];
 
     ResolvedCharStyle {
+        font_metrics_policy: doc_info.font_metrics_policy,
         font_family,
         font_families,
         font_size,

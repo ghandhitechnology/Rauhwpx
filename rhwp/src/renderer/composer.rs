@@ -12,6 +12,11 @@ use crate::model::document::Section;
 use crate::model::paragraph::{CharShapeRef, LineSeg, Paragraph};
 use unicode_segmentation::UnicodeSegmentation;
 
+mod stale_metrics;
+mod stale_spacing;
+pub(crate) use stale_spacing::doubled_body_spacing_projection;
+pub(crate) use stale_metrics::repair_metric_stale_cell_lines;
+
 /// 글자겹침(CharOverlap) 렌더링 정보
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CharOverlapInfo {

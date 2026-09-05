@@ -1,0 +1,155 @@
+{
+  "schemaVersion": 1,
+  "capturedOn": "2026-09-05",
+  "captureMethod": "Observed Mac Hancom UI: open exact Rau edited HWPX copy, select named document through Window menu where needed, File > Save as PDF, verify filename and saved PDF",
+  "application": {
+    "bundleId": "com.hancom.office.hwp12.mac.general",
+    "version": "12.30.0",
+    "build": "6446"
+  },
+  "os": {
+    "name": "macOS",
+    "version": "26.4",
+    "build": "25E246"
+  },
+  "exportSettings": {
+    "menu": "파일 > PDF로 저장하기...",
+    "pageSizePt": [
+      595,
+      842
+    ],
+    "pageCount": 1,
+    "producer": "macOS 버전 26.4(빌드 25E246) Quartz PDFContext",
+    "additionalOptionsShown": false
+  },
+  "fonts": {
+    "pdfFace": "HCRBatang",
+    "installedFile": "Hancom Office HWP.app/Contents/Resources/Hnc/Shared/TTF/Install/HANBatang.ttf",
+    "installedFileSha256": "c5d544769d832477d48b7318222b9c3c2eced25455f7ba9acb23060dcecac104",
+    "note": "Bundled font recorded; PDF subset names are in initial-comparison.json. Empty-cell case has no text."
+  },
+  "independentEditReproduction": "pending",
+  "fullParityVerified": false,
+  "cases": [
+    {
+      "id": "body-mixed-text",
+      "recipe": {
+        "fitCellContentWidth": false,
+        "image": "grid.png",
+        "logicalOffset": 10,
+        "paragraphFormatHu": null,
+        "placement": "inline",
+        "requestedHeightHu": 9000,
+        "requestedWidthHu": 18000,
+        "target": "first body paragraph"
+      },
+      "filesSha256": {
+        "source.hwpx": "9d88454e8f84acf015e0d56e4e62d37166cf949b74ae5d8f8a3e94749648ae74",
+        "edited.hwpx": "5309d3b0eac9d5b57c837a7a391f3e0c3a254265453bc5d06c0d692bb21accab",
+        "hancom-opened-rau.pdf": "21a174b004c76dd5cfb8bc1363ddc19b20750df1211b3d2407c2a2fcbc36d8de"
+      }
+    },
+    {
+      "id": "body-paragraph-spacing",
+      "recipe": {
+        "fitCellContentWidth": false,
+        "image": "grid.png",
+        "logicalOffset": 0,
+        "paragraphFormatHu": {
+          "lineSpacing": 160,
+          "spacingAfter": 600,
+          "spacingBefore": 1200
+        },
+        "placement": "inline",
+        "requestedHeightHu": 9000,
+        "requestedWidthHu": 18000,
+        "target": "second body paragraph"
+      },
+      "filesSha256": {
+        "source.hwpx": "965d11c33797c8b5116bf2cd57bdba1173ded7d5fa8196757cf4b2c7a3af0d84",
+        "edited.hwpx": "3582dd109c50f89e58eecc65c2e598348264ae1cf56b528d96fe259f908998a5",
+        "hancom-opened-rau.pdf": "60bf6d5ae77d43eaa3ddb736522629736fa394c87aa21831786863135bb32ad9"
+      }
+    },
+    {
+      "id": "cell-mixed-text",
+      "recipe": {
+        "fitCellContentWidth": true,
+        "image": "grid.png",
+        "logicalOffset": 10,
+        "paragraphFormatHu": null,
+        "placement": "inline",
+        "requestedHeightHu": 9000,
+        "requestedWidthHu": 18000,
+        "target": "first cell, first paragraph"
+      },
+      "filesSha256": {
+        "source.hwpx": "2d18f5d5ba11a4f346dd075aed9e96456d92c80b82df62e3c6b094d0a4f89da4",
+        "edited.hwpx": "b12e7544011590d334888fa0c076590b76730818227a06a5370ae21eff69c491",
+        "hancom-opened-rau.pdf": "619d834bbf42c09605ecfce2409549043f09194b31769caaf913f7cecd6d2318"
+      }
+    },
+    {
+      "id": "cell-empty",
+      "recipe": {
+        "fitCellContentWidth": true,
+        "image": "grid.png",
+        "logicalOffset": 0,
+        "paragraphFormatHu": null,
+        "placement": "inline",
+        "requestedHeightHu": 9000,
+        "requestedWidthHu": 18000,
+        "target": "first cell, first paragraph"
+      },
+      "filesSha256": {
+        "source.hwpx": "2ca58472a64996e5568eb9bde7d0b6835a9227784e442b2ae6309d011ae7ddc1",
+        "edited.hwpx": "9de348c1583c9ba70a725da47f480b3c5a940c6e0981b96b3a0f5ee9e46b28f5",
+        "hancom-opened-rau.pdf": "5e0eb6b53c5758813547b4ef8463e993067a67ec86d8e7fd4171e63d181eea51"
+      }
+    },
+    {
+      "id": "cell-fit-width",
+      "recipe": {
+        "fitCellContentWidth": true,
+        "image": "grid.png",
+        "logicalOffset": 0,
+        "paragraphFormatHu": null,
+        "placement": "inline",
+        "requestedHeightHu": 30000,
+        "requestedWidthHu": 60000,
+        "target": "first cell, first paragraph"
+      },
+      "filesSha256": {
+        "source.hwpx": "2d18f5d5ba11a4f346dd075aed9e96456d92c80b82df62e3c6b094d0a4f89da4",
+        "edited.hwpx": "6b71c5d22a2f478d19f7f28d168e412f57735bb02e6abd3385cad30df65ea4d1",
+        "hancom-opened-rau.pdf": "65dc61e7fa3f7a2b4d916da87cb8a619306fcaab7ebb91f5543bf10d02e03bec"
+      }
+    },
+    {
+      "id": "cell-paragraph-spacing",
+      "recipe": {
+        "fitCellContentWidth": true,
+        "image": "grid.png",
+        "logicalOffset": 0,
+        "paragraphFormatHu": {
+          "lineSpacing": 160,
+          "spacingAfter": 600,
+          "spacingBefore": 1200
+        },
+        "placement": "inline",
+        "requestedHeightHu": 9000,
+        "requestedWidthHu": 18000,
+        "target": "first cell, first paragraph"
+      },
+      "filesSha256": {
+        "source.hwpx": "2d18f5d5ba11a4f346dd075aed9e96456d92c80b82df62e3c6b094d0a4f89da4",
+        "edited.hwpx": "ed2415b7da4e88db9fa71ac36f5d22eb7f017783890c6d30fefce44a43edd8e2",
+        "hancom-opened-rau.pdf": "092e1d77f2238bd64c03e1bdd491d25f8292072d2a0f089a70a59c1ef95edcaa"
+      }
+    }
+  ],
+  "inputXmlVersion": "1.4",
+  "fontMetricsPolicy": "HcrDeclared",
+  "visualReview": "All six one-page PDFs rendered with pdftoppm at 96 dpi and visually inspected on 2026-09-05. Numeric parity comparison is separate.",
+  "gridSha256": "876cc884e7e6201baf2d34a842bb912cb140c3451eb8c5c99751998b3cc1c984"
+}

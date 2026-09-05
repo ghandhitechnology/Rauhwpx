@@ -5,6 +5,16 @@
 //! 필드 대신 [`LayoutCompatibilityProfile`] 질의를 사용한다 (Stage 1 은 기존
 //! 분기의 1:1 기계 대응만, 시멘틱 변경 없음).
 
+/// Runtime font measurement policy, independent of the source format.
+/// Not serialized into document files. The default preserves the Windows
+/// reference corpus; Mac Hancom uses the declared HCR font metrics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+pub enum FontMetricsPolicy {
+    #[default]
+    HancomWindows,
+    HcrDeclared,
+}
+
 /// 파싱된 문서의 원본 컨테이너 포맷.
 ///
 /// `parser::FileFormat` 의 감지 전용 항목(DRM/Empty/Unknown)은 파싱된

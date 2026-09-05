@@ -1105,8 +1105,7 @@ export function finishImagePlacement(this: any, e: MouseEvent): void {
 
   const sec = hit.sectionIndex;
   // 표 셀/글상자 안 클릭: cellPath 와 parentParaIndex (= 소유 본문 paragraph) 를 사용한다.
-  // 표 셀은 기존 #1151 경로처럼 parent paragraph sibling floating 으로 삽입되고,
-  // 글상자는 #1322 보강 경로에서 text_box 내부 paragraph control 로 삽입된다.
+  // Cell images belong to the addressed paragraph and move with its content.
   const isTextBoxHit = hit.isTextBox === true;
   const inCell = (hit.cellPath?.length ?? 0) > 0 && hit.parentParaIndex !== undefined && !isTextBoxHit;
   const inTextBox = isTextBoxHit && (hit.cellPath?.length ?? 0) > 0 && hit.parentParaIndex !== undefined;
@@ -1206,12 +1205,15 @@ export function finishImagePlacement(this: any, e: MouseEvent): void {
         wHwp, hHwp, imgData.naturalWidth, imgData.naturalHeight,
         imgData.ext, desc,
         paperOffsetXHu, paperOffsetYHu,
+        inCell ? 'inline' : 'floating',
       );
       if (!result.ok) {
         insertFailedMsg = (result as any).error || '삽입 위치 또는 이미지 정보를 확인할 수 없습니다.';
         console.warn('[InputHandler] 그림 삽입 실패:', result);
       }
-      return this.cursor.getPosition();
+      return result.ok && inCell
+        ? { ...hit, charOffset: result.logicalOffset ?? hit.charOffset + 1 }
+        : this.cursor.getPosition();
     }});
     if (insertFailedMsg) {
       showToast({

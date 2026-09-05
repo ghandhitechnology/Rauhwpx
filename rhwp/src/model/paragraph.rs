@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 /// 문단 (HWPTAG_PARA_HEADER + 하위 레코드)
 #[derive(Debug, Default, Clone)]
 pub struct Paragraph {
-    /// 문자 수 (제어 문자 포함)
+    /// UTF-16 코드 유닛 수 (제어 문자와 문단 끝 마커 포함).
     pub char_count: u32,
     /// 컨트롤 마스크
     pub control_mask: u32,
@@ -685,8 +685,9 @@ impl Paragraph {
             }
         }
 
-        // 6. char_count 갱신
-        self.char_count += new_chars.len() as u32;
+        // The paragraph header and stored line/style positions use UTF-16
+        // units. Selection offsets and the return value remain codepoints.
+        self.char_count += utf16_delta;
 
         effective_char_offset
     }
@@ -794,8 +795,8 @@ impl Paragraph {
         self.field_ranges
             .retain(|fr| fr.start_char_idx <= fr.end_char_idx);
 
-        // 6. char_count 갱신
-        self.char_count -= actual_count as u32;
+        // Match the UTF-16 delta used for offsets, including surrogate pairs.
+        self.char_count -= utf16_delta;
 
         actual_count
     }
@@ -838,7 +839,7 @@ impl Paragraph {
         let text_chars: Vec<char> = self.text.chars().collect();
 
         // 분할 지점의 UTF-16 위치
-        let utf16_split: u32 = if split_pos < self.char_offsets.len() {
+        let mut utf16_split: u32 = if split_pos < self.char_offsets.len() {
             self.char_offsets[split_pos]
         } else if !self.char_offsets.is_empty() {
             let last = self.char_offsets.len() - 1;
@@ -846,6 +847,29 @@ impl Paragraph {
         } else {
             split_pos as u32
         };
+        // At an object boundary, the next text offset lies AFTER the object's
+        // eight-unit slot. If the object moves to the new paragraph, split
+        // before that slot so its leading gap survives Enter and merge undo.
+        if split_pos < self.char_offsets.len() {
+            let text_positions = self.control_text_positions();
+            let moved_at_boundary = self
+                .controls
+                .iter()
+                .enumerate()
+                .filter(|(ci, control)| {
+                    Self::is_split_positioned_control(control)
+                        && text_positions.get(*ci) == Some(&split_pos)
+                        && control_positions.get(*ci).copied().unwrap_or(usize::MAX) >= char_offset
+                })
+                .count() as u32;
+            let preceding_text_end = if split_pos == 0 {
+                0
+            } else {
+                self.char_offsets[split_pos - 1] + Self::char_utf16_len(text_chars[split_pos - 1])
+            };
+            let encoded_slots = utf16_split.saturating_sub(preceding_text_end) / 8;
+            utf16_split -= moved_at_boundary.min(encoded_slots) * 8;
+        }
 
         // === 새 문단 구성 ===
 
@@ -1077,11 +1101,11 @@ impl Paragraph {
 
         // 6. char_count 갱신
         //    원본 문단에 남은 controls는 각각 8 code unit을 차지하므로 반영 필요
-        let new_text_char_count = new_text.chars().count() as u32;
+        let new_text_char_count = new_text.encode_utf16().count() as u32;
         let ctrl_code_units: u32 =
             (self.controls.len() + self.field_ranges.len() + self.orphan_field_ends.len()) as u32
                 * 8;
-        self.char_count = split_pos as u32 + ctrl_code_units + 1; // +1 for paragraph end marker
+        self.char_count = self.text.encode_utf16().count() as u32 + ctrl_code_units + 1;
         let new_char_count = new_text_char_count
             + (new_controls.len() + new_field_ranges.len() + new_orphan_field_ends.len()) as u32
                 * 8
@@ -1343,7 +1367,7 @@ impl Paragraph {
         // 6. char_count 갱신: 텍스트 + 컨트롤(각 8 code unit) + 문단끝(1)
         //    split_at의 ctrl_code_units 계산과 정합. HWPX 직렬화가 char_count에서
         //    컨트롤 수를 역산하므로 컨트롤 유닛 포함 필수.
-        self.char_count = (self_text_len + other.text.chars().count()) as u32
+        self.char_count = self.text.encode_utf16().count() as u32
             + (self.controls.len() + self.field_ranges.len() + self.orphan_field_ends.len()) as u32
                 * 8
             + 1;

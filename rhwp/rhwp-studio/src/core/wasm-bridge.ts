@@ -4,6 +4,7 @@ import { blake3 } from '@noble/hashes/blake3.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
 import type { DocumentInfo, PageInfo, PageDef, SectionDef, PageBorderFillSettings, EndnoteShapeSettings, NoteEditInfo, CursorRect, HitTestResult, BodyFootnoteMarkerHit, FootnoteAtCursorResult, DeleteFootnoteResult, LineInfo, TableDimensions, CellInfo, CellBbox, CellProperties, TableProperties, DocumentPosition, MoveVerticalResult, SelectionRect, CharProperties, ParaProperties, CellPathEntry, CellPathLike, NavContextEntry, FieldInfoResult, BookmarkInfo, LayerRenderProfile, PageLayerTree, CanvasKitDocumentPreflight } from './types';
 import { parseCanvasKitDocumentPreflight } from './canvaskit-document-preflight';
+import { fontMetricsPolicyForEnvironment } from './font-metrics-policy';
 import {
   normalizeHmlSaveState,
   parseHmlSaveState,
@@ -396,7 +397,8 @@ export class WasmBridge {
   }
 
   loadDocument(data: Uint8Array, fileName?: string): DocumentInfo {
-    return this.loadDocumentFromFactory(data, fileName, (bytes) => new HwpDocument(bytes));
+    return this.loadDocumentFromFactory(data, fileName,
+      (bytes) => HwpDocument.fromBytesWithFontMetrics(bytes, this.requestedHwpxFontMetrics()));
   }
 
   /**
@@ -409,7 +411,7 @@ export class WasmBridge {
     const nextDocumentDigest = `blake3:${bytesToHex(blake3(data))}`;
     let nextDoc: HwpDocument | null = null;
     try {
-      nextDoc = new HwpDocument(data);
+      nextDoc = HwpDocument.fromBytesWithFontMetrics(data, this.requestedHwpxFontMetrics());
       nextDoc.convertToEditable();
       this.ensureParagraphStableIdsFor(nextDoc);
       nextDoc.setFileName(nextFileName);
@@ -456,13 +458,10 @@ export class WasmBridge {
 
   /** Parse one exact handle read with the larger local-file envelope. */
   loadTrustedLocalFileOnce(data: Uint8Array, fileName?: string): DocumentInfo {
-    const constructor = HwpDocument as unknown as typeof HwpDocument & {
-      fromTrustedLocalFileBytes(bytes: Uint8Array): HwpDocument;
-    };
     return this.loadDocumentFromFactory(
       data,
       fileName,
-      (bytes) => constructor.fromTrustedLocalFileBytes(bytes),
+      (bytes) => HwpDocument.fromTrustedLocalFileBytesWithFontMetrics(bytes, this.requestedHwpxFontMetrics()),
     );
   }
 
@@ -520,6 +519,16 @@ export class WasmBridge {
     this.ensureParagraphStableIds();
     void this.populateExternalImagesFromDevServer(doc, generation);
     return JSON.parse(raw) as DocumentInfo;
+  }
+
+  private requestedHwpxFontMetrics(): string {
+    const platform = typeof navigator === 'undefined' ? '' : navigator.platform;
+    // The WASM factory detects the real format and limits this choice to HWPX.
+    return fontMetricsPolicyForEnvironment(platform, 'hwpx');
+  }
+
+  getFontMetricsPolicy(): string {
+    return this.doc?.getFontMetricsPolicy() ?? 'hancom-windows';
   }
 
   /** [Task #741 후속] 외부 file path 그림을 dev 서버에서 fetch + inject. */
@@ -581,21 +590,21 @@ export class WasmBridge {
   }
 
   createNewDocument(): DocumentInfo {
-    if (!this.doc) {
-      // 아직 WASM 객체가 없으면 더미로 생성 (createEmpty → 즉시 교체)
-      this.doc = HwpDocument.createEmpty();
-    }
-    const info: DocumentInfo = JSON.parse(this.doc.createBlankDocument());
-    this.documentGeneration++;
-    this.ensureParagraphStableIds();
-    this._fileName = NEW_DOCUMENT_FILE_NAME;
-    this._currentFileHandle = null;
-    this.doc.setFileName(this._fileName);
+    // Studio saves new documents as HWPX. Convert the bundled HWP template
+    // before editing so table margins cannot change on the first HWPX reopen.
+    // Keep the core's native HWP constructor unchanged for HWP consumers.
+    const template = HwpDocument.createEmpty();
+    let bytes: Uint8Array;
     try {
-      this._documentDigest = `blake3:${bytesToHex(blake3(this.doc.exportHwp()))}`;
-    } catch {
-      this._documentDigest = null;
+      template.createBlankDocument();
+      bytes = template.exportHwpx();
+    } finally {
+      template.free();
     }
+    // Parse successfully before replacing the active document. Adoption also
+    // clears its file handle and establishes the new HWPX source digest.
+    const prepared = this.prepareDocument(bytes, NEW_DOCUMENT_FILE_NAME);
+    const info = this.adoptPreparedDocument(prepared);
     console.log(`[WasmBridge] 새 문서 생성: ${info.pageCount}페이지`);
     return info;
   }
@@ -1946,8 +1955,16 @@ export class WasmBridge {
                 extension: string, description: string = '',
                 // [Task #1151 v8 결함 C] 사용자 클릭/드래그 paper-relative 좌표 (HU).
                 // 셀 floating 분기에서 사용. undefined 면 셀 좌상단 default (기존 동작).
-                paperOffsetXHu?: number, paperOffsetYHu?: number): { ok: boolean; paraIdx: number; controlIdx: number; logicalOffset?: number } {
+                paperOffsetXHu?: number, paperOffsetYHu?: number,
+                placement?: 'inline' | 'floating'): { ok: boolean; paraIdx: number; controlIdx: number; logicalOffset?: number; sectionIdx?: number; cellPath?: CellPathEntry[] } {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    if (placement !== undefined) {
+      return JSON.parse(this.doc.insertPictureEx(JSON.stringify({
+        sectionIdx: sec, paraIdx, charOffset, cellPath: cellPathJson,
+        width, height, naturalWidthPx, naturalHeightPx, extension, description,
+        paperOffsetXHu, paperOffsetYHu, placement,
+      }), imageData));
+    }
     return JSON.parse((this.doc as any).insertPicture(
       sec, paraIdx, charOffset, cellPathJson, imageData,
       width, height, naturalWidthPx, naturalHeightPx, extension, description,

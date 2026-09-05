@@ -1,0 +1,23 @@
+{
+  "observedDate": "2026-09-05",
+  "application": "Mac Hancom 12.30.0 build 6446",
+  "input": "body-paragraph-spacing/edited.hwpx",
+  "inputSha256": "577a973b10231db6b712d347a5210f200961bfe6faff191cecd3b5ecb13ece92",
+  "paragraph": "Second body paragraph, containing only the inline grid image",
+  "method": "Placed the caret immediately after the image, opened 서식 > 문단 모양..., and read the 기본 tab visually. Cancelled the dialog without applying or saving changes.",
+  "hancomDialog": {
+    "spacingBeforePt": 3.0,
+    "spacingAfterPt": 1.5,
+    "lineSpacingPercent": 160
+  },
+  "inputXml": {
+    "hwpUnitCharCase": { "prev": 600, "next": 300, "unit": "HWPUNIT" },
+    "default": { "prev": 1200, "next": 600, "unit": "HWPUNIT" }
+  },
+  "rauResolved": { "spacingBeforePt": 6.0, "spacingAfterPt": 3.0 },
+  "limitations": [
+    "Visual dialog observation for one Rau-authored document, not an independent Hancom editing oracle.",
+    "Does not establish the interpretation of every margin, input format or Hancom version.",
+    "Desktop screenshot is not included because it also shows unrelated user windows."
+  ]
+}

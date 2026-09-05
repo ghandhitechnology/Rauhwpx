@@ -119,6 +119,8 @@ pub(crate) fn clamp_tab_leader_end_x(
 /// 텍스트 렌더링 스타일
 #[derive(Debug, Clone, Serialize)]
 pub struct TextStyle {
+    /// Font substitution policy shared by wrapping and glyph positioning.
+    pub font_metrics_policy: crate::model::provenance::FontMetricsPolicy,
     /// 글꼴 이름
     pub font_family: String,
     /// 글꼴 크기 (px)
@@ -241,6 +243,7 @@ impl TextStyle {
 impl Default for TextStyle {
     fn default() -> Self {
         Self {
+            font_metrics_policy: Default::default(),
             font_family: String::new(),
             font_size: 0.0,
             color: 0,

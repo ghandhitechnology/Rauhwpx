@@ -1417,7 +1417,7 @@ impl DocumentCore {
 
     /// 커서 위치에 그림을 삽입한다 (네이티브).
     ///
-    /// - `cell_path` 가 비어있으면 본문 paragraph 에 inline (treat_as_char=true) 삽입.
+    /// - 빈 `cell_path`는 본문 floating 삽입이다. Inline 삽입은 명시적 placement API를 쓴다.
     /// - `cell_path` 가 있으면 표 셀 영역에 floating picture (tac=false, wrap=Square,
     ///   Page-relative offset) 로 삽입한다. 셀 자체는 비어있는 채로 유지되어 cursor
     ///   클릭이 정상 동작 (#1151). 한컴 2022 의 셀 이미지 삽입 패턴과 동일
@@ -1443,6 +1443,44 @@ impl DocumentCore {
         description: &str,
         paper_offset_x_hu: Option<i32>,
         paper_offset_y_hu: Option<i32>,
+    ) -> Result<String, HwpError> {
+        self.insert_picture_with_placement_native(
+            section_idx,
+            para_idx,
+            char_offset,
+            cell_path,
+            image_data,
+            width,
+            height,
+            natural_width_px,
+            natural_height_px,
+            extension,
+            description,
+            paper_offset_x_hu,
+            paper_offset_y_hu,
+            false,
+        )
+    }
+
+    /// Explicit inline insertion stores the picture in the addressed paragraph,
+    /// including nested cells. The positional API retains its floating behavior.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_picture_with_placement_native(
+        &mut self,
+        section_idx: usize,
+        para_idx: usize,
+        char_offset: usize,
+        cell_path: &[(usize, usize, usize)],
+        image_data: &[u8],
+        mut width: u32,
+        mut height: u32,
+        natural_width_px: u32,
+        natural_height_px: u32,
+        extension: &str,
+        description: &str,
+        paper_offset_x_hu: Option<i32>,
+        paper_offset_y_hu: Option<i32>,
+        inline: bool,
     ) -> Result<String, HwpError> {
         use crate::model::image::{CropInfo, ImageAttr, ImageEffect, Picture};
         use crate::model::paragraph::{CharShapeRef, LineSeg};
@@ -1483,6 +1521,44 @@ impl DocumentCore {
             false
         };
 
+        // Validate the paragraph and size before allocating image resources.
+        if inline {
+            if width == 0 || height == 0 || natural_width_px == 0 || natural_height_px == 0 {
+                return Err(HwpError::RenderError(
+                    "그림 크기는 0보다 커야 합니다".into(),
+                ));
+            }
+            let para = if cell_path.is_empty() {
+                &self.document.sections[section_idx].paragraphs[para_idx]
+            } else {
+                self.resolve_paragraph_by_path(section_idx, para_idx, cell_path)?
+            };
+            if char_offset > crate::document_core::helpers::logical_paragraph_length(para) {
+                return Err(HwpError::RenderError(
+                    "그림 삽입 위치가 문단 범위를 벗어났습니다".into(),
+                ));
+            }
+            if !cell_path.is_empty() {
+                let (cell_width, left, right) = self
+                    .resolve_innermost_cell_metrics(section_idx, para_idx, cell_path)
+                    .ok_or_else(|| {
+                        HwpError::RenderError("그림을 넣을 셀 폭을 찾지 못했습니다".into())
+                    })?;
+                let style = self.styles.para_styles.get(para.para_shape_id as usize);
+                let margins_hu = style
+                    .map(|s| (s.margin_left + s.margin_right) * 7200.0 / self.dpi)
+                    .unwrap_or(0.0);
+                let available = (cell_width as f64 - left as f64 - right as f64 - margins_hu)
+                    .floor()
+                    .max(1.0) as u32;
+                if width > available {
+                    height =
+                        ((height as f64 * available as f64 / width as f64).round() as u32).max(1);
+                    width = available;
+                }
+            }
+        }
+
         // --- 1·2. BinData 등록 (콘텐츠 + 메타데이터) ---
         // [Task #2230] 그림 지정(assign_picture_image_native)과 규칙 공유를 위해
         // register_embedded_bin_data 로 추출.
@@ -1515,6 +1591,94 @@ impl DocumentCore {
             transparency: 0,
             external_path: None,
         };
+        if inline {
+            let pic = Picture {
+                common: CommonObjAttr {
+                    ctrl_id: 0x67736F20,
+                    attr: 1 | (2 << 3) | (3 << 8) | (4 << 15) | (2 << 18),
+                    treat_as_char: true,
+                    vert_rel_to: VertRelTo::Para,
+                    horz_rel_to: HorzRelTo::Para,
+                    width,
+                    height,
+                    description: description.to_string(),
+                    ..Default::default()
+                },
+                shape_attr,
+                border_x: bx,
+                border_y: by,
+                crop,
+                image_attr,
+                ..Default::default()
+            };
+            let section = &mut self.document.sections[section_idx];
+            section.raw_stream = None;
+            let para = Self::resolve_cell_paragraph_mut(section, para_idx, cell_path)?;
+            let positions = crate::document_core::helpers::find_logical_control_positions(para);
+            let occupies_slot = |ctrl: &Control| {
+                crate::document_core::helpers::is_treat_as_char_object_control(ctrl)
+                    || matches!(ctrl, Control::Footnote(_) | Control::Endnote(_))
+            };
+            let preceding = para
+                .controls
+                .iter()
+                .enumerate()
+                .filter(|(i, ctrl)| occupies_slot(ctrl) && positions[*i] < char_offset)
+                .count();
+            let text_offset = char_offset - preceding;
+            let insert_idx = para
+                .controls
+                .iter()
+                .enumerate()
+                .find(|(i, ctrl)| occupies_slot(ctrl) && positions[*i] >= char_offset)
+                .map(|(i, _)| i)
+                .unwrap_or(para.controls.len());
+            para.shift_for_inline_control_insert(text_offset);
+            para.ctrl_data_records
+                .resize_with(para.controls.len(), || None);
+            para.controls
+                .insert(insert_idx, Control::Picture(Box::new(pic)));
+            para.ctrl_data_records.insert(insert_idx, None);
+            para.char_count += 8;
+            para.control_mask |= 1 << 11;
+            para.has_para_text = true;
+
+            if let Some(&(outer_ctrl, _, _)) = cell_path.first() {
+                self.reflow_cell_paragraph_by_path(
+                    section_idx,
+                    para_idx,
+                    cell_path,
+                    cell_path.last().unwrap().2,
+                );
+                self.recalculate_cell_paragraph_vpos_by_path(
+                    section_idx,
+                    para_idx,
+                    cell_path,
+                    cell_path.last().unwrap().2,
+                    None,
+                );
+                self.mark_cell_control_dirty(section_idx, para_idx, outer_ctrl);
+            } else {
+                self.reflow_body_para_and_recalc_flow(section_idx, para_idx);
+                self.recompose_section(section_idx);
+            }
+            self.mark_section_dirty(section_idx);
+            self.paginate_if_needed();
+            self.invalidate_page_tree_cache();
+            self.event_log.push(DocumentEvent::PictureInserted {
+                section: section_idx,
+                para: para_idx,
+            });
+            let address_path: Vec<_> = cell_path.iter().map(|&(control, cell, para)| {
+                serde_json::json!({ "controlIndex": control, "cellIndex": cell, "cellParaIndex": para })
+            }).collect();
+            return Ok(serde_json::json!({
+                "ok": true, "sectionIdx": section_idx, "paraIdx": para_idx,
+                "cellPath": address_path, "controlIdx": insert_idx,
+                "logicalOffset": char_offset + 1,
+            })
+            .to_string());
+        }
         if !cell_path.is_empty() {
             if cell_path_is_textbox {
                 // === 글상자 내부 picture 분기 (#1322 maintainer fix) ===
@@ -1813,6 +1977,288 @@ mod issue_1151_cell_picture_insert_tests {
             collect_picture_transparencies_from_paragraphs(&section.paragraphs, &mut values);
         }
         values
+    }
+
+    fn inline_fixture(nested: bool) -> (DocumentCore, Vec<(usize, usize, usize)>) {
+        use crate::model::table::{Cell, Table};
+        let mut core = DocumentCore::new_empty();
+        core.create_blank_document_native().unwrap();
+        core.document.sections[0].paragraphs = vec![Paragraph::new_empty()];
+        let mut para = Paragraph::new_empty();
+        para.insert_text_at(0, "가나다라");
+        let table = Table {
+            row_count: 1,
+            col_count: 1,
+            cells: vec![Cell {
+                width: 6000,
+                height: 1200,
+                col_span: 1,
+                row_span: 1,
+                paragraphs: vec![para],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let table = if nested {
+            Table {
+                row_count: 1,
+                col_count: 1,
+                cells: vec![Cell {
+                    width: 12000,
+                    height: 2400,
+                    col_span: 1,
+                    row_span: 1,
+                    paragraphs: vec![Paragraph {
+                        controls: vec![Control::Table(Box::new(table))],
+                        ..Paragraph::new_empty()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }
+        } else {
+            table
+        };
+        core.document.sections[0].paragraphs[0]
+            .controls
+            .push(Control::Table(Box::new(table)));
+        let path = if nested {
+            vec![(0, 0, 0), (0, 0, 0)]
+        } else {
+            vec![(0, 0, 0)]
+        };
+        (core, path)
+    }
+
+    #[test]
+    fn inline_picture_cell_ownership_size_and_position_survive_three_hwpx_saves() {
+        for nested in [false, true] {
+            let (mut core, mut path) = inline_fixture(nested);
+            core.insert_picture_with_placement_native(
+                0,
+                0,
+                2,
+                &path,
+                &minimal_png(),
+                12000,
+                6000,
+                160,
+                80,
+                "png",
+                "inline fixture",
+                None,
+                None,
+                true,
+            )
+            .unwrap();
+            for cycle in 0..=3 {
+                let para = core.resolve_paragraph_by_path(0, 0, &path).unwrap();
+                assert_eq!(para.text, "가나다라", "cycle {cycle}");
+                assert_eq!(
+                    crate::document_core::helpers::find_logical_control_positions(para),
+                    vec![2]
+                );
+                let Control::Picture(pic) = &para.controls[0] else {
+                    panic!("cell picture missing")
+                };
+                assert!(pic.common.treat_as_char);
+                assert_eq!((pic.common.width, pic.common.height), (6000, 3000));
+                assert!(!core.document.sections[0].paragraphs[0]
+                    .controls
+                    .iter()
+                    .any(|c| matches!(c, Control::Picture(_))));
+                if cycle < 3 {
+                    let bytes = core.export_hwpx_native().unwrap();
+                    core.set_document(crate::parser::hwpx::parse_hwpx(&bytes).unwrap());
+                    path[0].0 = core.document.sections[0].paragraphs[0]
+                        .controls
+                        .iter()
+                        .position(|c| matches!(c, Control::Table(_)))
+                        .unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inline_picture_preserves_text_styles_and_adjacent_image_order() {
+        use crate::model::paragraph::CharShapeRef;
+        let (mut core, path) = inline_fixture(false);
+        let para =
+            DocumentCore::resolve_cell_paragraph_mut(&mut core.document.sections[0], 0, &path)
+                .unwrap();
+        para.char_shapes = vec![
+            CharShapeRef {
+                start_pos: 0,
+                char_shape_id: 0,
+            },
+            CharShapeRef {
+                start_pos: 2,
+                char_shape_id: 1,
+            },
+        ];
+        for (offset, description) in [(2, "first"), (3, "second"), (2, "before")] {
+            core.insert_picture_with_placement_native(
+                0,
+                0,
+                offset,
+                &path,
+                &minimal_png(),
+                600,
+                300,
+                8,
+                4,
+                "png",
+                description,
+                None,
+                None,
+                true,
+            )
+            .unwrap();
+        }
+        let para = core.resolve_paragraph_by_path(0, 0, &path).unwrap();
+        assert_eq!(para.text, "가나다라");
+        assert_eq!(para.char_shapes[1].start_pos, 26);
+        assert_eq!(
+            crate::document_core::helpers::find_logical_control_positions(para),
+            vec![2, 3, 4]
+        );
+        let descriptions: Vec<_> = para
+            .controls
+            .iter()
+            .map(|ctrl| match ctrl {
+                Control::Picture(pic) => pic.common.description.as_str(),
+                _ => panic!("not a picture"),
+            })
+            .collect();
+        assert_eq!(descriptions, ["before", "first", "second"]);
+    }
+
+    #[test]
+    fn inline_picture_rejects_invalid_target_without_allocating_resources() {
+        let (mut core, path) = inline_fixture(false);
+        let before = core.document.bin_data_content.len();
+        assert!(core
+            .insert_picture_with_placement_native(
+                0,
+                0,
+                100,
+                &path,
+                &minimal_png(),
+                600,
+                300,
+                8,
+                4,
+                "png",
+                "",
+                None,
+                None,
+                true,
+            )
+            .is_err());
+        assert_eq!(core.document.bin_data_content.len(), before);
+        assert!(core
+            .resolve_paragraph_by_path(0, 0, &path)
+            .unwrap()
+            .controls
+            .is_empty());
+    }
+
+    #[test]
+    fn inline_picture_in_empty_body_is_rendered() {
+        use crate::renderer::render_tree::{RenderNode, RenderNodeType};
+        fn images(node: &RenderNode) -> usize {
+            usize::from(matches!(node.node_type, RenderNodeType::Image(_)))
+                + node.children.iter().map(images).sum::<usize>()
+        }
+        let mut core = DocumentCore::new_empty();
+        core.create_blank_document_native().unwrap();
+        core.insert_picture_with_placement_native(
+            0,
+            0,
+            0,
+            &[],
+            &minimal_png(),
+            600,
+            600,
+            8,
+            8,
+            "png",
+            "",
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+        let tree = core.build_page_tree_cached(0).unwrap();
+        assert_eq!(
+            images(&tree.root),
+            1,
+            "paragraph: {:?}",
+            core.document.sections[0].paragraphs[0]
+        );
+    }
+
+    #[test]
+    fn inline_picture_filling_cell_width_precedes_following_text() {
+        use crate::renderer::render_tree::{RenderNode, RenderNodeType};
+        fn collect(node: &RenderNode, images: &mut Vec<(f64, f64)>, text: &mut Vec<f64>) {
+            match &node.node_type {
+                RenderNodeType::Image(_) => images.push((node.bbox.y, node.bbox.height)),
+                RenderNodeType::TextRun(run) if !run.text.trim().is_empty() => {
+                    text.push(node.bbox.y)
+                }
+                _ => {}
+            }
+            for child in &node.children {
+                collect(child, images, text);
+            }
+        }
+        let mut core = DocumentCore::new_empty();
+        core.create_blank_document_native().unwrap();
+        let table: serde_json::Value =
+            serde_json::from_str(&core.create_table_native(0, 0, 0, 1, 2).unwrap()).unwrap();
+        let parent = table["paraIdx"].as_u64().unwrap() as usize;
+        let path = vec![(table["controlIdx"].as_u64().unwrap() as usize, 0, 0)];
+        core.insert_text_in_cell_by_path(
+            0,
+            parent,
+            &path,
+            0,
+            "Text must follow the full-width picture.",
+        )
+        .unwrap();
+        core.insert_picture_with_placement_native(
+            0,
+            parent,
+            0,
+            &path,
+            &minimal_png(),
+            60000,
+            30000,
+            800,
+            400,
+            "png",
+            "",
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+        for cycle in 0..=1 {
+            let tree = core.build_page_tree_cached(0).unwrap();
+            let (mut images, mut text) = (Vec::new(), Vec::new());
+            collect(&tree.root, &mut images, &mut text);
+            assert_eq!(images.len(), 1);
+            assert!(!text.is_empty());
+            assert!(
+                text.iter().all(|y| *y >= images[0].0 + images[0].1 - 0.5),
+                "cycle {cycle}: image {images:?}, text {text:?}"
+            );
+            if cycle == 0 {
+                core = DocumentCore::from_bytes(&core.export_hwpx_native().unwrap()).unwrap();
+            }
+        }
     }
 
     fn collect_picture_transparencies_from_paragraphs(

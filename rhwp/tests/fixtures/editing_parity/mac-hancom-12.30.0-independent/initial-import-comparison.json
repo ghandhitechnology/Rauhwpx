@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "comparison": "independent-hancom-edit",
+  "mode": "hancom-import",
+  "fullParityVerified": false,
+  "positionTolerancePt": 0.5,
+  "capturedRecipeCount": 1,
+  "pendingRecipes": [
+    "body-mixed-text",
+    "cell-empty",
+    "cell-fit-width",
+    "cell-mixed-text",
+    "cell-paragraph-spacing"
+  ],
+  "limitations": [
+    "Only captured recipes are checked",
+    "Recipe checks cover text, image bytes, size, inline placement and paragraph spacing, not every XML property",
+    "Whitespace and individual glyph positions are not gated"
+  ],
+  "cases": [
+    {
+      "id": "body-paragraph-spacing",
+      "status": "pass",
+      "samePageCount": true,
+      "sameNonWhitespaceLineBreaks": true,
+      "imageDeltasPt": {
+        "x": 0.026538085937502842,
+        "y": -0.004931640624988631,
+        "w": -0.007293701171875,
+        "h": -0.003662109375
+      },
+      "lineStartDeltas": [
+        {
+          "text": "그림위문단입니다.",
+          "dxPt": 0.04000183105468125,
+          "dyPt": 0.06000976562499716
+        },
+        {
+          "text": "그림아래문단입니다.",
+          "dxPt": 0.04000183105468125,
+          "dyPt": 0.019970703124982947
+        }
+      ],
+      "rauLines": [
+        {
+          "text": "그림위문단입니다.",
+          "x": 85.04,
+          "y": 107.7
+        },
+        {
+          "text": "그림아래문단입니다.",
+          "x": 85.04,
+          "y": 228.70000000000002
+        }
+      ],
+      "hancomLines": [
+        {
+          "text": "그림위문단입니다.",
+          "x": 85.08000183105469,
+          "y": 107.760009765625
+        },
+        {
+          "text": "그림아래문단입니다.",
+          "x": 85.08000183105469,
+          "y": 228.719970703125
+        }
+      ],
+      "capturedFilesSha256": {
+        "source.hwpx": "965d11c33797c8b5116bf2cd57bdba1173ded7d5fa8196757cf4b2c7a3af0d84",
+        "rau-edited.hwpx": "3582dd109c50f89e58eecc65c2e598348264ae1cf56b528d96fe259f908998a5",
+        "edited.hwpx": "c1905b06f0fc2a843dec287be73eefdd207da7e8ccfa2eacf00e7b90b7ae7856",
+        "hancom-independent.pdf": "3a1bef009b1916b2a99517f6fb8c073818c89c1bb5a43e84df0f9d3eda2a94d0"
+      }
+    }
+  ]
+}

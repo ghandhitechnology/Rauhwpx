@@ -125,6 +125,9 @@ pub struct DeferredPaginationStepResult {
 
 pub(crate) struct RenderNormalizedSection {
     pub(crate) source_revision: u64,
+    /// Body spacing depends on neighboring paragraphs, so single-paragraph
+    /// refresh must recalculate this projection for the whole section.
+    pub(crate) body_spacing_projected: bool,
     pub(crate) paragraphs: Arc<Vec<Paragraph>>,
     pub(crate) composed: Arc<Vec<ComposedParagraph>>,
 }

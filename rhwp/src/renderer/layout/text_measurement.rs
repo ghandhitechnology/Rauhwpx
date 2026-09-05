@@ -3,6 +3,7 @@
 use super::super::font_metrics_data;
 use super::super::style_resolver::ResolvedStyleSet;
 use super::super::{hwpunit_to_px, TabLeaderInfo, TabStop, TextStyle};
+use crate::model::provenance::FontMetricsPolicy;
 use crate::model::style::UnderlineType;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -496,12 +497,13 @@ impl TextMeasurer for EmbeddedTextMeasurer {
                 .flatten()
             {
                 w
-            } else if let Some(w) = measure_char_width_embedded(
+            } else if let Some(w) = measure_char_width_with_policy(
                 &style.font_family,
                 style.bold,
                 style.italic,
                 c,
                 font_size,
+                style.font_metrics_policy,
             ) {
                 w
             } else if cluster_len[i] > 1 || is_cjk_char(c) || is_fullwidth_symbol(c) {
@@ -684,7 +686,15 @@ impl TextMeasurer for EmbeddedTextMeasurer {
             }
             total += char_width(i);
         }
-        total.round()
+        // Keep Mac measurements at the same precision as glyph positions and
+        // the WASM measurer. Rounding a run and its trailing space separately
+        // changes justification slack and accumulates across word boundaries.
+        // The default Windows reference corpus retains its historical rounding.
+        if style.font_metrics_policy == FontMetricsPolicy::HcrDeclared {
+            total
+        } else {
+            total.round()
+        }
     }
 
     fn compute_char_positions(&self, text: &str, style: &TextStyle) -> Vec<f64> {
@@ -697,12 +707,13 @@ impl TextMeasurer for EmbeddedTextMeasurer {
                 .flatten()
             {
                 w
-            } else if let Some(w) = measure_char_width_embedded(
+            } else if let Some(w) = measure_char_width_with_policy(
                 &style.font_family,
                 style.bold,
                 style.italic,
                 c,
                 font_size,
+                style.font_metrics_policy,
             ) {
                 w
             } else if cluster_len[i] > 1 || is_cjk_char(c) || is_fullwidth_symbol(c) {
@@ -986,9 +997,11 @@ mod wasm_internals {
         c: char,
         hangul_width_hwp: i32,
         font_size: f64,
+        policy: super::FontMetricsPolicy,
     ) -> f64 {
         // 1차: 내장 메트릭 (JS 브릿지 호출 불필요)
-        if let Some(w) = super::measure_char_width_embedded(font_family, bold, italic, c, font_size)
+        if let Some(w) =
+            super::measure_char_width_with_policy(font_family, bold, italic, c, font_size, policy)
         {
             return w;
         }
@@ -1106,6 +1119,7 @@ impl TextMeasurer for WasmTextMeasurer {
                     c,
                     hangul_hwp,
                     font_size,
+                    style.font_metrics_policy,
                 )
             };
             // Task #352: dash leader 좁은 base 0.3 em + extra_dash_advance.
@@ -1283,6 +1297,7 @@ impl TextMeasurer for WasmTextMeasurer {
                     c,
                     hangul_hwp,
                     font_size,
+                    style.font_metrics_policy,
                 )
             }
         };
@@ -1432,6 +1447,7 @@ pub(crate) fn resolved_to_text_style(
 ) -> TextStyle {
     if let Some(cs) = styles.char_styles.get(char_style_id as usize) {
         TextStyle {
+            font_metrics_policy: cs.font_metrics_policy,
             font_family: cs.font_family_for_lang(lang_index).to_string(),
             font_size: cs.font_size,
             color: cs.text_color,
@@ -1631,11 +1647,31 @@ fn measure_char_width_embedded(
     c: char,
     font_size: f64,
 ) -> Option<f64> {
+    measure_char_width_with_policy(
+        font_family,
+        bold,
+        italic,
+        c,
+        font_size,
+        FontMetricsPolicy::HancomWindows,
+    )
+}
+
+fn measure_char_width_with_policy(
+    font_family: &str,
+    bold: bool,
+    italic: bool,
+    c: char,
+    font_size: f64,
+    policy: FontMetricsPolicy,
+) -> Option<f64> {
     // CSS font-family 체인에서 첫 번째 폰트명으로 메트릭 조회
     let primary_name = font_family.split(',').next().unwrap_or(font_family).trim();
     // [#2156] 함초롬바탕 비한글 문자 — Haansoft Batang 메트릭 대체 (한글 동작).
-    if let Some(r) = haansoft_latin_override(primary_name, c) {
-        return Some(quantize_hwp_px(r * font_size));
+    if policy == FontMetricsPolicy::HancomWindows {
+        if let Some(r) = haansoft_latin_override(primary_name, c) {
+            return Some(quantize_hwp_px(r * font_size));
+        }
     }
     if let Some(w) = kopub_char_width(primary_name, c, font_size) {
         return Some(w);
@@ -1644,7 +1680,14 @@ fn measure_char_width_embedded(
         Some(metric) if c == ' ' || metric.metric.get_width(c).is_some() => metric,
         _ => {
             let (_, fallback_chain) = font_family.split_once(',')?;
-            return measure_char_width_embedded(fallback_chain, bold, italic, c, font_size);
+            return measure_char_width_with_policy(
+                fallback_chain,
+                bold,
+                italic,
+                c,
+                font_size,
+                policy,
+            );
         }
     };
     // HWP 반각 처리: space 및 한컴이 반각으로 처리하는 구두점/기호
@@ -1688,7 +1731,22 @@ fn measure_char_width_embedded(
     };
     // em 단위 → px: w / em_size * font_size, 그 후 HWP 양자화
     let em = mm.metric.em_size as f64;
-    let mut actual_px = w as f64 * font_size / em;
+    let actual_px = w as f64 * font_size / em;
+
+    // Mac Hancom's HCR Batang Hangul runs use integer 600-DPI advances.
+    // The independent mixed-body PDF uses an 83-unit em for 10 pt and an
+    // 81-unit syllable advance: 9.72 pt, not the nominal 9.70 pt. The same
+    // advance occurs in the body-spacing and mixed-cell captures. Applying
+    // HWPUNIT truncation alone accumulates visible drift within long words.
+    // Keep this scoped to the observed font/script and Mac policy. Latin
+    // shaping, spaces, other fonts and Windows measurements are unchanged.
+    if policy == FontMetricsPolicy::HcrDeclared
+        && mm.metric.name == "HCR Batang"
+        && ('\u{AC00}'..='\u{D7A3}').contains(&c)
+    {
+        let device_em = (font_size * 600.0 / 96.0).round();
+        return Some((w as f64 * device_em / em).round() * 96.0 / 600.0);
+    }
 
     // Bold 폴백: Regular 메트릭으로 폴백된 경우
     // 한컴은 faux bold(합성 Bold) 시 렌더링만 획을 두껍게 하고,
@@ -1743,9 +1801,14 @@ pub(crate) fn estimate_text_width_unrounded(text: &str, style: &TextStyle) -> f6
             .flatten()
         {
             w
-        } else if let Some(w) =
-            measure_char_width_embedded(&style.font_family, style.bold, style.italic, c, font_size)
-        {
+        } else if let Some(w) = measure_char_width_with_policy(
+            &style.font_family,
+            style.bold,
+            style.italic,
+            c,
+            font_size,
+            style.font_metrics_policy,
+        ) {
             w
         } else if cluster_len[i] > 1 || is_cjk_char(c) || is_fullwidth_symbol(c) {
             font_size
@@ -2097,6 +2160,111 @@ mod tests {
     }
 
     // ── #2156 함초롬바탕 라틴 메트릭 대체 ──
+
+    #[test]
+    fn declared_hcr_metrics_do_not_use_windows_latin_substitution() {
+        let style = TextStyle {
+            font_family: "함초롬바탕".into(),
+            font_size: 40.0 / 3.0,
+            font_metrics_policy: FontMetricsPolicy::HcrDeclared,
+            ..Default::default()
+        };
+        // HCRBatang in the captured Mac PDF uses P=0.603em, a=0.569em,
+        // period=0.320em. The Windows substitute has different advances.
+        let expected: f64 = [603.0, 569.0, 320.0]
+            .into_iter()
+            .map(|w| quantize_hwp_px(w * style.font_size / 1000.0))
+            .sum();
+        let positions = EmbeddedTextMeasurer.compute_char_positions("Pa.", &style);
+        assert!(
+            (positions.last().unwrap() - expected).abs() < 0.001,
+            "positions={positions:?}; expected={expected}"
+        );
+        assert!((estimate_text_width_unrounded("Pa.", &style) - expected).abs() < 0.001);
+        let windows = TextStyle {
+            font_metrics_policy: FontMetricsPolicy::HancomWindows,
+            ..style.clone()
+        };
+        assert!((estimate_text_width_unrounded("Pa.", &windows) - expected).abs() > 0.5);
+    }
+
+    #[test]
+    fn mac_hcr_hangul_uses_captured_device_advances_in_all_measurement_paths() {
+        for family in ["함초롬바탕", "HCR Batang", "Missing font, HCR Batang"] {
+            let style = TextStyle {
+                font_family: family.into(),
+                font_size: 40.0 / 3.0,
+                font_metrics_policy: FontMetricsPolicy::HcrDeclared,
+                ..Default::default()
+            };
+            // Consecutive glyph origins in the immutable independent PDF:
+            // 226.919998, 236.639969, 246.359924, 256.079895, 265.799866 pt.
+            let positions = EmbeddedTextMeasurer.compute_char_positions("이어집니다", &style);
+            for (index, x) in positions.iter().enumerate() {
+                assert!((x * 0.75 - index as f64 * 9.72).abs() < 1e-9);
+            }
+            let expected = 5.0 * 9.72 / 0.75;
+            assert!((estimate_text_width_unrounded("이어집니다", &style) - expected).abs() < 1e-9);
+            assert!(
+                (EmbeddedTextMeasurer.estimate_text_width("이어집니다", &style) - expected).abs()
+                    < 1e-9
+            );
+            let windows = TextStyle {
+                font_metrics_policy: FontMetricsPolicy::HancomWindows,
+                ..style
+            };
+            let positions = EmbeddedTextMeasurer.compute_char_positions("이어집니다", &windows);
+            assert!((positions[5] * 0.75 - 5.0 * 9.70).abs() < 1e-9);
+        }
+        for family in ["HCR Dotum", "Haansoft Batang", "Noto Serif KR"] {
+            let style = TextStyle {
+                font_family: family.into(),
+                font_size: 40.0 / 3.0,
+                font_metrics_policy: FontMetricsPolicy::HcrDeclared,
+                ..Default::default()
+            };
+            let windows = TextStyle {
+                font_metrics_policy: FontMetricsPolicy::HancomWindows,
+                ..style.clone()
+            };
+            assert_eq!(
+                EmbeddedTextMeasurer.compute_char_positions("이어집니다", &style),
+                EmbeddedTextMeasurer.compute_char_positions("이어집니다", &windows),
+            );
+        }
+    }
+
+    #[test]
+    fn mac_run_width_preserves_fractional_advances_for_justification() {
+        let style = TextStyle {
+            font_family: "함초롬바탕".into(),
+            font_size: 40.0 / 3.0,
+            font_metrics_policy: FontMetricsPolicy::HcrDeclared,
+            ..Default::default()
+        };
+        for text in [" ", "Picture and text share this paragraph. ", "paragraph."] {
+            let positions = EmbeddedTextMeasurer.compute_char_positions(text, &style);
+            let raw = *positions.last().unwrap();
+            assert!((EmbeddedTextMeasurer.estimate_text_width(text, &style) - raw).abs() < 1e-9);
+            let windows = TextStyle {
+                font_metrics_policy: FontMetricsPolicy::HancomWindows,
+                ..style.clone()
+            };
+            let win_positions = EmbeddedTextMeasurer.compute_char_positions(text, &windows);
+            assert_eq!(
+                EmbeddedTextMeasurer.estimate_text_width(text, &windows),
+                win_positions.last().unwrap().round()
+            );
+        }
+        let text = "Picture and text share this paragraph. ";
+        let visible = text.trim_end();
+        let full_width = EmbeddedTextMeasurer.estimate_text_width(text, &style);
+        let trailing_width = EmbeddedTextMeasurer.estimate_text_width(" ", &style);
+        let visible_width = EmbeddedTextMeasurer.estimate_text_width(visible, &style);
+        assert!((full_width - trailing_width - visible_width).abs() < 1e-9);
+        // The old two roundings lost enough width to fail the captured glyph gate.
+        assert!((full_width.round() - trailing_width.round() - visible_width).abs() > 0.5);
+    }
 
     /// 한글은 함초롬바탕(HCR Batang) 문서의 비한글 문자(라틴·숫자·구두점·U+00B7)를
     /// Haansoft Batang(한컴바탕) 메트릭으로 렌더한다 — 문자폭 사다리 통제

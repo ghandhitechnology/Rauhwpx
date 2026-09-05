@@ -1325,12 +1325,11 @@ export class PendingEditManager {
           obj.sectionIdx, obj.paraIdx, obj.charOffset, '',
           obj.bytes, obj.widthHu, obj.heightHu,
           obj.naturalWidthPx, obj.naturalHeightPx, obj.extension, obj.description,
+          undefined, undefined, 'inline',
         );
         if (!res.ok) throw new AgentToolError('RPC_ERROR', 'insertPicture failed');
         obj.anchor = { paraIdx: res.paraIdx, controlIdx: res.controlIdx, charOffset: obj.charOffset };
         this.shiftControlIdxRefs(obj.sectionIdx, res.paraIdx, res.controlIdx, 1, obj);
-        // 본문 삽입은 floating 으로 생성된다 → 즉시 inline 전환 (studio drop 경로와 동일)
-        wasm.setPictureProperties(obj.sectionIdx, res.paraIdx, res.controlIdx, { treatAsChar: true });
         return;
       }
       case 'insertEquation': {
