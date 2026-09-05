@@ -176,6 +176,7 @@ export interface CloudAgentUi {
   workspaceButton: HTMLButtonElement;
   mergeButton: HTMLButtonElement;
   statusPanel: HTMLElement;
+  optionsElement: HTMLElement;
   queueStrip: HTMLElement;
   recoveryStrip: HTMLElement;
   settingsElement: HTMLElement;
@@ -207,6 +208,7 @@ export interface CloudAgentUi {
 }
 
 export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
+  const cloudSetupScopes = new Set<string>();
   let snapshot = deps.controller.getSnapshot();
   let panelOpen = false;
   let localTurnPending = false;
@@ -324,8 +326,9 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   progress.appendChild(progressFill);
   const panelConflict = el('div', 'ag-cloud-conflict');
   panelConflict.hidden = true;
+  const optionsElement = el('div', 'ag-cloud-options');
   const panelActions = el('div', 'ag-cloud-panel-actions');
-  panelBody.append(recovery, sessionPicker, panelStatus, panelDetail, progress, panelConflict, panelActions);
+  panelBody.append(optionsElement, recovery, sessionPicker, panelStatus, panelDetail, progress, panelConflict, panelActions);
   statusPanel.append(panelHead, panelBody);
 
   const queueStrip = el('div', 'ag-cloud-queue-strip');
@@ -1149,9 +1152,15 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     }
   }
 
+  function cloudSetupScopeKey(): string {
+    const scope = selectedScope();
+    return scope.documentId ?? scope.threadId;
+  }
+
   function renderButtons(): void {
     deps.onWorkspaceSwitchVisibilityChange(
-      shouldShowCloudWorkspaceSwitch(snapshot, selectedScope()),
+      snapshot.available && (cloudSetupScopes.has(cloudSetupScopeKey())
+        || shouldShowCloudWorkspaceSwitch(snapshot, selectedScope())),
     );
     sidebarButton.hidden = !snapshot.available;
     workspaceButton.hidden = !snapshot.available;
@@ -1266,8 +1275,13 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
 
   function activate(event: MouseEvent): void {
     const trigger = event.currentTarget as HTMLButtonElement;
-    if (setupActive) {
-      onboarding.open('manage', trigger);
+    const setupRequested = cloudSetupScopes.has(cloudSetupScopeKey());
+    const profileReady = snapshot.profile.kind === 'configured' && snapshot.profile.connection === 'ready';
+    cloudSetupScopes.add(cloudSetupScopeKey());
+    renderButtons();
+    if (setupActive || (snapshot.session.kind === 'idle' && (!setupRequested || !profileReady))) {
+      closePanel();
+      onboarding.open('transfer', trigger);
       return;
     }
     if (panelOpen) closePanel(true); else openPanel(trigger);
@@ -1382,6 +1396,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     workspaceButton,
     mergeButton,
     statusPanel,
+    optionsElement,
     queueStrip,
     recoveryStrip,
     settingsElement,

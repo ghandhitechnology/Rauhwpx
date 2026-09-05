@@ -1633,17 +1633,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   cloudModeButton.type = 'button';
   cloudModeButton.dataset.workspaceMode = 'cloud';
   workspaceModeSwitch.append(localModeButton, cloudModeButton);
-  const cloudModeBadge = el('span', 'ag-cloud-mode-badge', '클라우드');
-  cloudModeBadge.hidden = true;
-  const cloudHandoffButton = el('button', 'ag-cloud-handoff', 'Cloud로 보내기');
-  cloudHandoffButton.type = 'button';
-  cloudHandoffButton.title = '현재 대화와 입력한 메시지를 Cloud로 보내 계속 작업합니다';
-  cloudHandoffButton.hidden = true;
-  const newLocalChatButton = el('button', 'ag-new-local-chat', '새 로컬 채팅');
-  newLocalChatButton.type = 'button';
-  newLocalChatButton.title = 'Cloud 대화를 유지하고 이 문서로 새 로컬 채팅을 시작합니다';
-  newLocalChatButton.hidden = true;
-  newLocalChatButton.addEventListener('click', () => startNewChat());
   let pendingCloudSetup = false;
   let cloudWorkspaceSwitchVisible = false;
 
@@ -1659,13 +1648,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     cloudDocumentButton.setAttribute('aria-pressed', String(workspace.workspaceView() === 'cloud'));
     const locked = workspace.executionLocked();
     workspaceModeSwitch.hidden = locked
-      || (!cloudWorkspaceSwitchVisible && !shouldShowComposerCloudSwitch());
-    cloudModeBadge.hidden = !locked;
-    newLocalChatButton.hidden = currentThread.executionMode !== 'cloud';
-    newLocalChatButton.disabled = target.kind === 'workspace-blocked';
-    cloudHandoffButton.hidden = mode !== 'local' || locked || readOnlyDocLabel !== null
-      || currentThread.messages.length === 0 || !shouldShowComposerCloudSwitch()
-      || cloudController.getSnapshot().session.kind !== 'idle';
+      || !cloudWorkspaceSwitchVisible || !shouldShowComposerCloudSwitch();
   }
 
   function shouldShowComposerCloudSwitch(): boolean {
@@ -1692,8 +1675,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     });
     localModeButton.disabled = transitionLocked || !canSelectLocalWorkspace(workspace.executionLocked());
     cloudModeButton.disabled = transitionLocked || localTurnBlocksCloud;
-    cloudHandoffButton.disabled = cloudModeButton.disabled || attachmentsSending
-      || activeComposerSkill !== null;
     localModeButton.setAttribute('aria-disabled', String(localModeButton.disabled));
     cloudModeButton.setAttribute('aria-disabled', String(cloudModeButton.disabled));
     cloudModeButton.setAttribute(
@@ -1804,14 +1785,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   localModeButton.addEventListener('click', restoreLocalWorkspace);
   cloudModeButton.addEventListener('click', openCloudWorkspace);
-  cloudHandoffButton.addEventListener('click', () => {
-    if (cloudHandoffButton.disabled || cloudHandoffButton.hidden) return;
-    if (!input.value.trim() && !referenceLibrary.hasDrafts()) {
-      input.value = '현재 대화와 계획을 바탕으로 클라우드에서 이어서 진행해 주세요.';
-      resizeComposerInput();
-    }
-    void startCloudFromFirstMessage();
-  });
   syncWorkspaceMode(workspace.mode(), workspace.composerTarget());
 
   const workspaceTrailing = el('div', 'ag-workspace-trailing');
@@ -1915,7 +1888,16 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       const started = await bridge.loginAccount();
       return started?.authUrl ? { authUrl: started.authUrl } : null;
     },
-    onRequestTransfer: () => openCloudWorkspace(),
+    onRequestTransfer: () => {
+      openCloudWorkspace();
+      if (workspace.mode() !== 'cloud' || bridge.isTurnRunning()
+        || activeComposerSkill !== null || currentThread.messages.length === 0) return;
+      if (!input.value.trim() && !referenceLibrary.hasDrafts()) {
+        input.value = '현재 대화와 계획을 바탕으로 클라우드에서 이어서 진행해 주세요.';
+        resizeComposerInput();
+      }
+      void startCloudFromFirstMessage();
+    },
     onRestartPrepared: async (binding) => {
       currentThread.cloudRestartSourceStartId ??= currentThread.cloudStartId;
       currentThread.cloudRestartSourceSessionId = binding.sessionId;
@@ -2849,15 +2831,17 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   templateChipClear.appendChild(createIcon('close'));
   templateChip.append(el('span', 'ag-template-chip-label', '템플릿'), templateChipName, templateChipClear);
   composer.append(composerOverlay, slashMenu, templateChip, composerField, composerMeta, configPanel);
-  const documentControls = el('div', 'ag-document-controls');
-  documentControls.append(documentViewSwitch, cloudUi.mergeButton);
-  composer.insertBefore(documentControls, composerField);
-  const composerModeRow = el('div', 'ag-composer-mode-row');
-  composerModeRow.append(workspaceModeSwitch, cloudModeBadge, cloudHandoffButton, newLocalChatButton);
+  const cloudExecutionOptions = el('div', 'ag-cloud-option-row');
+  cloudExecutionOptions.append(el('span', 'ag-cloud-option-label', '실행 위치'), workspaceModeSwitch);
+  cloudUi.optionsElement.append(cloudExecutionOptions);
+  const cloudDocumentControls = el('div', 'ag-cloud-document-controls');
+  cloudDocumentControls.setAttribute('role', 'group');
+  cloudDocumentControls.setAttribute('aria-label', 'Cloud 문서 보기 및 병합');
+  cloudDocumentControls.append(documentViewSwitch, cloudUi.mergeButton);
+  composer.appendChild(cloudDocumentControls);
   composer.insertBefore(composerTargetMessage, composerField);
   composer.insertBefore(cloudUi.queueStrip, composerField);
   composer.insertBefore(cloudUi.recoveryStrip, composerField);
-  composer.insertBefore(composerModeRow, composerField);
   // 편대 도크는 입력기 위에 뜨는 오버레이라서 입력기의 자식으로 붙는다 —
   // 사이드바·전체 화면 어디로 옮겨져도 입력기를 따라간다.
   composer.appendChild(fleetView.root);
@@ -2917,6 +2901,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     })
     : null;
   dockResizeObserver?.observe(fleetView.root);
+  const cloudControlsResizeObserver = typeof ResizeObserver === 'function'
+    ? new ResizeObserver((entries) => {
+      const height = entries[0]?.contentRect.height ?? 0;
+      composer.style.setProperty('--ag-cloud-controls-h', height > 0 ? `${Math.ceil(height) + 8}px` : '0px');
+    })
+    : null;
+  cloudControlsResizeObserver?.observe(cloudDocumentControls);
   // 사이드바에서는 변경 검토와 계획을 분리한다. 계획은 입력기 바로 위에
   // 머물러 접었을 때 작은 진행 표시로 이어지고, 변경 검토는 가려지지 않는다.
   chatPage.append(header, connBanner, messages, review, planSurface, questionController.root, composer);
@@ -6306,13 +6297,19 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     const questionPending = questionController.hasPending();
     const questionUsesComposer = questionController.usesComposerForOther();
     const localTurnRunning = execution.kind === 'local' && turnRunning;
-    const sendLabel = questionPending && questionUsesComposer ? '답변 계속' : localTurnRunning ? '중지' : '보내기';
-    if (send.getAttribute('aria-label') !== sendLabel) {
-      send.replaceChildren(localTurnRunning && !(questionPending && questionUsesComposer) ? createStopIcon() : createIcon('send'));
-      send.setAttribute('aria-label', sendLabel);
-      send.title = sendLabel;
+    const stopping = localTurnRunning && !(questionPending && questionUsesComposer);
+    const cloudSend = workspace.mode() === 'cloud' && !stopping;
+    const sendLabel = questionPending && questionUsesComposer ? '답변 계속'
+      : stopping ? '중지' : cloudSend ? 'Cloud로 보내기' : '보내기';
+    const sendIcon = stopping ? 'stop' : cloudSend ? 'cloudSend' : 'send';
+    if (send.dataset.icon !== sendIcon) {
+      send.replaceChildren(stopping ? createStopIcon() : createIcon(cloudSend ? 'cloudSend' : 'send'));
+      send.dataset.icon = sendIcon;
     }
-    send.classList.toggle('ag-stop', localTurnRunning && !(questionPending && questionUsesComposer));
+    send.setAttribute('aria-label', sendLabel);
+    send.title = sendLabel;
+    send.classList.toggle('ag-stop', stopping);
+    send.classList.toggle('ag-send-cloud', cloudSend);
     // 실행 중에는 Enter 가 전송이 아니므로 힌트를 숨긴다.
     sendHint.hidden = (localTurnRunning && !(questionPending && questionUsesComposer)) || attachmentsSending || chatStartPendingThreadId !== null
       || workflowTransitionPending || planActionPending
@@ -8333,6 +8330,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       messagesResizeObserver?.disconnect();
       if (messagesResizeFrame !== null) window.cancelAnimationFrame(messagesResizeFrame);
       dockResizeObserver?.disconnect();
+      cloudControlsResizeObserver?.disconnect();
       rootResizeObserver?.disconnect();
       messages.removeEventListener('scroll', onMessagesScroll);
       messages.removeEventListener('wheel', onMessagesWheel);

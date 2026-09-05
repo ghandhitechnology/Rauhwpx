@@ -3714,36 +3714,6 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   display: none;
 }
 
-.ag-composer-mode-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0 4px 6px;
-}
-
-.ag-composer-mode-switch {
-  flex: 0 0 auto;
-}
-
-.ag-cloud-mode-badge {
-  display: inline-flex;
-  min-height: 24px;
-  align-items: center;
-  padding: 0 8px;
-  border-radius: 6px;
-  background: var(--ag-bg-2);
-  color: var(--ag-text-secondary);
-  font-size: 10px;
-  font-weight: 650;
-  letter-spacing: -0.01em;
-}
-
-.ag-cloud-handoff[hidden],
-.ag-new-local-chat[hidden],
-.ag-cloud-mode-badge[hidden] {
-  display: none;
-}
-
 .ag-cloud-start-placeholder {
   color: var(--ag-text-secondary);
 }
@@ -3778,7 +3748,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   position: absolute;
   z-index: 3;
   right: 2px;
-  bottom: calc(100% + 5px + var(--ag-fleet-dock-h, 0px));
+  bottom: calc(100% + 5px + var(--ag-fleet-dock-h, 0px) + var(--ag-cloud-controls-h, 0px));
   left: 2px;
   display: flex;
   min-width: 0;
@@ -4326,6 +4296,11 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 .ag-send .ag-icon {
   width: 14px;
   height: 14px;
+}
+
+.ag-send.ag-send-cloud .ag-icon {
+  width: 20px;
+  height: 20px;
 }
 
 .ag-send:hover:not(:disabled) {
@@ -7258,25 +7233,58 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   }
 }
 
-.ag-cloud-handoff,
-.ag-new-local-chat {
-  margin-left: auto;
-  padding: 4px 8px;
+.ag-document-view-switch[hidden] { display: none; }
+
+.ag-cloud-document-controls {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px + var(--ag-fleet-dock-h, 0px));
+  left: 0;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.ag-cloud-document-controls:not(:has(> :not([hidden]))) {
+  display: none;
+}
+
+.ag-cloud-document-controls > :not([hidden]) {
+  pointer-events: auto;
+  background: var(--ag-bg);
   border: 1px solid var(--ag-border);
-  border-radius: 6px;
-  background: var(--ag-bg-2);
+  border-radius: 9px;
+  box-shadow: var(--n-elev-2);
+}
+
+.ag-cloud-document-controls .ag-workspace-mode-option {
+  min-height: 28px;
+}
+
+.ag-cloud-document-controls .ag-cloud-merge-button {
+  min-height: 34px;
+  max-width: 100%;
+  padding: 6px 10px;
   color: var(--ag-text);
   font: inherit;
   font-size: 11px;
   cursor: pointer;
 }
 
-.ag-cloud-handoff:disabled,
-.ag-new-local-chat:disabled {
-  opacity: 0.5;
+.ag-cloud-document-controls .ag-cloud-merge-button:hover:not(:disabled) {
+  background: var(--ag-hover);
+}
+
+.ag-cloud-document-controls .ag-cloud-merge-button:disabled {
+  color: var(--ag-text-muted);
   cursor: default;
 }
 
-.ag-document-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 0 4px 6px; }
-.ag-document-controls:not(:has(> :not([hidden]))) { display: none; }
-.ag-document-view-switch[hidden] { display: none; }
+.ag-cloud-document-controls .ag-cloud-merge-button:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}

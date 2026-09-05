@@ -72,14 +72,14 @@ export function createCloudWorkspace({
   root.id = 'cloud-workspace';
   root.setAttribute('aria-label', 'Cloud 문서 화면');
 
-  const toolbar = doc.createElement('div');
-  toolbar.className = 'cloud-workspace-toolbar';
   const status = doc.createElement('div');
   status.className = 'cloud-workspace-status';
   status.setAttribute('role', 'status');
   status.setAttribute('aria-live', 'polite');
   const controls = doc.createElement('div');
   controls.className = 'cloud-workspace-zoom';
+  controls.setAttribute('role', 'group');
+  controls.setAttribute('aria-label', 'Cloud 화면 배율');
   const zoomOut = doc.createElement('button');
   zoomOut.type = 'button';
   zoomOut.dataset.cloudZoom = 'out';
@@ -100,7 +100,6 @@ export function createCloudWorkspace({
   zoomFit.setAttribute('aria-label', 'Cloud 화면에 맞추기');
   zoomFit.textContent = '맞춤';
   controls.append(zoomOut, zoomReset, zoomIn, zoomFit);
-  toolbar.append(status, controls);
 
   const viewport = doc.createElement('div');
   viewport.className = 'cloud-workspace-viewport';
@@ -133,7 +132,7 @@ export function createCloudWorkspace({
   recoveredInput.readOnly = true;
   recoveredInput.setAttribute('aria-label', '전달 여부를 확인하지 못한 입력, 복사해서 보관하세요');
   recoveredInput.style.cssText = 'width:100%;min-height:64px;box-sizing:border-box;resize:vertical';
-  root.append(toolbar, recoveredInput, viewport, connectionNotice);
+  root.append(status, controls, recoveredInput, viewport, connectionNotice);
 
   const decode = decodeFrame ?? (async (url: string) => {
     const candidate = doc.createElement('img');

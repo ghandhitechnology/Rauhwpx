@@ -31,7 +31,6 @@ export function shouldShowCloudWorkspaceSwitch(
   scope: Pick<CloudSessionScope, 'threadId' | 'documentId'>,
 ): boolean {
   if (!snapshot.available) return false;
-  if (snapshot.account?.signedIn === true) return true;
   return snapshot.sessions.some((session) => (
     scope.documentId
       ? session.documentId === scope.documentId
