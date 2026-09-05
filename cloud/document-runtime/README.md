@@ -27,6 +27,18 @@ but hides application chrome before first paint and gives the document the full
 viewport. This also applies to `/` and `/index.html` on the worker's loopback
 server. Normal Studio builds and authenticated resource downloads are unchanged.
 
+Railway runs the image selected by the desktop or hosted provisioner, not the
+current Git branch. Both defaults must point to a published image containing the
+shell. `1.1.0-edge.18-document-only` adds the shell to `1.1.0-edge.17` without
+rebuilding its engines or Studio assets. The image workflow's
+`document_shell_only` input uses `Containerfile.document-shell` and verifies the
+real document layout before publication. A worker also checks the layout before
+making its display ready.
+
+Existing sandboxes keep their original image. After updating the app or hosted
+broker, start a new Cloud instance to use the new default. An explicit
+`RAUHWpx_RAILWAY_IMAGE` override must also select an image with the shell.
+
 Each cloud session attempts one virtual desktop startup (`SessionDisplay` in `session-display.mjs`). The worker fixes the browser mode from that result before launching Studio. A ready display launches headed Chromium at the display's exact dimensions with its `DISPLAY` / `XAUTHORITY`; an unavailable display launches headless Chromium and never opens a frame capability for that harness.
 
 The live Studio viewer is demand-driven. Its frame stream may open before Studio, but ffmpeg starts only after the document and chat runtime are ready; viewer demand before then remains waiting. ffmpeg stays in the worker process group. Graceful teardown signals the direct child with `SIGTERM`, then `SIGKILL`; abrupt worker teardown is owned by LocalRunner or Podman.

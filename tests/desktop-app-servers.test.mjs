@@ -7,6 +7,7 @@ import { CloudCoordinator } from '../desktop/cloud-coordinator.mjs';
 import { sha256Hex } from '../desktop/cloud-handoff.mjs';
 import { cloudProfileWithoutSecrets, normalizeCloudProfile } from '../desktop/cloud-profile.mjs';
 import { createRailwayServerProvider, railwayConfigFromEnv } from '../desktop/cloud-railway.mjs';
+import { railwayCloudConfigFromEnv } from '../rhwp/rau-credits/cloud-provisioner.mjs';
 
 const SERVER_IDENTITY = generateKeyPairSync('ed25519');
 const SERVER_KEY = `ed25519:${SERVER_IDENTITY.publicKey.export({ type: 'spki', format: 'der' }).toString('base64url')}`;
@@ -198,7 +199,8 @@ test('the Railway provider refuses to pretend when it has no configuration', asy
   });
   assert.equal(env.token, 'railway-token');
   assert.equal(env.apiUrl, 'https://backboard.railway.com/graphql/v2');
-  assert.equal(env.image, 'ghcr.io/ghandhitechnology/rauhwpx-cloud:1.1.0-edge.17');
+  assert.equal(env.image, 'ghcr.io/ghandhitechnology/rauhwpx-cloud:1.1.0-edge.18-document-only');
+  assert.equal(railwayCloudConfigFromEnv({}).image, env.image, 'hosted and desktop provisioners must select the same verified image');
 });
 
 test('the Railway provider creates a reachable sandbox and returns a pairing receipt', async () => {
