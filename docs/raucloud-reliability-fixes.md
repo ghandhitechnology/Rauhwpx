@@ -47,7 +47,9 @@ The input fixes were also applied to the disposable worker for immediate Linux v
 
 After installing the rebuilt worker Studio, a seventh real Codex turn edited the document successfully and retained the Korean paragraph. [Before](evidence/pr188-cloud-before.jpg) and [after](evidence/pr188-cloud-after.jpg) screenshots show the worker-only editor layout change. The Linux proof also passes double-click delivery through the production input dispatcher.
 
-The updated final-source `edge.15` image still needs its live verification. These results do not claim deployment of the updated production broker.
+An eighth turn verified automatic sleep/wake: reconnecting the desktop conversation woke the sleeping worker, completed the follow-up, and preserved both the cloud checkpoint and local origin byte-for-byte.
+
+These source-level hosted checks preceded the immutable `edge.15` image verification. The [PR verification record](https://github.com/ghandhitechnology/Rauhwpx/pull/188) records final image and CI results. These results do not claim deployment of the updated production broker.
 
 The [regression probes](diagnostics/raucloud-reliability-probes.mjs) use real queue, broker, display-store, and runtime code with a fake network delay, provisioner, clock, and document engine:
 
@@ -65,4 +67,4 @@ Deploy the broker activity endpoint and metering/recovery fixes, then the cloud 
 
 This remains a remote JPEG workspace capped at 12 fps. The changes remove avoidable request delays but cannot remove network transit or capture delay. Adaptive video transport and a local renderer with remote document synchronization are separate architectural work. No production input-to-visible latency distribution or hosted soak test has been measured here.
 
-Remaining live checks include the final-source image, automatic sleep/wake, broker outages, and long document exports. Korean committed text was tested through the production input protocol; an OS-level IME composition session was not measured. A long-session document check and input-to-visible p50/p95/p99 measurements are still needed; the six-turn run does not establish production latency or soak reliability.
+Remaining live checks include broker outages and long document exports. Korean committed text was tested through the production input protocol; an OS-level IME composition session was not measured. A long-session document check and input-to-visible p50/p95/p99 measurements are still needed; the hosted runs do not establish production latency or soak reliability.
