@@ -17,11 +17,14 @@ for (const [description, files, expected] of [
   ['engine changes', ['rhwp/src/parser/hwp.rs'], ['browser', 'engine']],
   ['corpus changes', ['rhwp/samples/report.hwpx', 'rhwp/pdf/reference.pdf'], ['browser', 'engine']],
   ['native executable', ['rhwp/src/main.rs'], ['browser', 'engine', 'packages']],
-  ['agent instructions', ['rhwp/rhwp-agent/skills/review/SKILL.md'], ['app', 'packages', 'sessions']],
-  ['agent lockfile', ['rhwp/rhwp-agent/package-lock.json'], ['app', 'npm', 'packages', 'sessions']],
+  ['Cargo manifest', ['rhwp/Cargo.toml'], ['browser', 'engine', 'packages', 'rustAudit']],
+  ['desktop shell', ['desktop/main.mjs'], ['app', 'packages', 'sessions']],
+  ['agent hub source', ['rhwp/rhwp-agent/server.mjs'], ['app', 'sessions']],
+  ['agent lockfile', ['rhwp/rhwp-agent/package-lock.json'], ['app', 'npm', 'sessions']],
+  ['shared package', ['rhwp/rhwp-shared/package.json'], ['app', 'browser', 'npm']],
   ['Studio unit tests', ['rhwp/rhwp-studio/tests/save.test.ts'], ['app', 'browser']],
   ['desktop session tests', ['rhwp/rhwp-studio/tests/desktop-shell.test.ts'], ['app', 'browser', 'sessions']],
-  ['Rust dependencies', ['rhwp/Cargo.lock'], ['browser', 'engine', 'packages', 'rustAudit']],
+  ['Rust lockfile', ['rhwp/Cargo.lock'], ['browser', 'engine', 'rustAudit']],
 ]) {
   test(`change selection covers ${description}`, () => assert.deepEqual(enabled(files), expected));
 }
