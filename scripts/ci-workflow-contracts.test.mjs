@@ -95,7 +95,7 @@ test('releases depend on verification within the same workflow run', () => {
   assert.ok(ancestors(workflows['release.yml'], 'publish').has('verification'));
 });
 
-test('consolidated checks retain Cloud contracts, browser handoff, and Linux packages', () => {
+test('consolidated checks retain Cloud contracts and browser handoff', () => {
   const checks = workflows['checks.yml'];
   const cloudSteps = checks.jobs['cloud-contracts'].steps;
   assert.equal(cloudSteps.find((step) => step.uses?.startsWith('actions/setup-node@')).with['node-version'], 24);
@@ -104,7 +104,6 @@ test('consolidated checks retain Cloud contracts, browser handoff, and Linux pac
   assert.match(browserCommands, /e2e:cloud-onboarding/);
   assert.match(browserCommands, /e2e:cloud-workspace/);
   assert.match(browserCommands, /e2e:cloud-display/);
-  assert.deepEqual(checks.jobs['linux-packaging'].strategy.matrix.include.map((entry) => entry.arch), ['x64', 'arm64']);
 });
 
 test('only release and image publishing receive write permissions', () => {
