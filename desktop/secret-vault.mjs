@@ -2,6 +2,12 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
 const KEY_RE = /^[a-z0-9][a-z0-9._-]{0,79}$/i;
+const LINUX_SECURE_STORAGE_BACKENDS = new Set([
+  'gnome_libsecret',
+  'kwallet',
+  'kwallet5',
+  'kwallet6',
+]);
 const LOCK_CODES = new Set(['EPERM', 'EBUSY', 'ENOTEMPTY', 'EACCES']);
 const MAX_VAULT_BYTES = 8 * 1024 * 1024;
 const MAX_SECRET_ENTRIES = 256;
@@ -70,6 +76,13 @@ export function createSecretVault({
   let corruptError = null;
   const previousWritePath = `${filePath}.previous-write`;
 
+  async function ensureVaultDirectory() {
+    await fs.mkdir(path.dirname(filePath), {
+      recursive: true,
+      ...(platform === 'win32' ? {} : { mode: 0o700 }),
+    });
+  }
+
   async function readVault(vaultPath) {
     let handle;
     let bytes;
@@ -114,8 +127,11 @@ export function createSecretVault({
     if (!safeStorage || !(await safeStorage.isAsyncEncryptionAvailable())) {
       throw new Error('Secure OS credential storage is unavailable.');
     }
-    if (platform === 'linux' && safeStorage.getSelectedStorageBackend?.() === 'basic_text') {
-      throw new Error('A system keyring is required to store API keys securely.');
+    if (platform === 'linux') {
+      const backend = safeStorage.getSelectedStorageBackend?.();
+      if (!LINUX_SECURE_STORAGE_BACKENDS.has(backend)) {
+        throw new Error('A Secret Service or KWallet system keyring is required to store API keys securely.');
+      }
     }
   }
 
@@ -145,7 +161,7 @@ export function createSecretVault({
               }
               throw backupError;
             }
-            await fs.mkdir(path.dirname(filePath), { recursive: true });
+            await ensureVaultDirectory();
             await retryWindows(() => operations.rename(previousWritePath, filePath), platform);
           }
         } catch (error) {
@@ -172,7 +188,7 @@ export function createSecretVault({
     ))) {
       throw new Error('Secure secret storage exceeds its entry or value limit.');
     }
-    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await ensureVaultDirectory();
     const temp = `${filePath}.tmp-${process.pid}-${Date.now()}`;
     const serialized = `${JSON.stringify({ version: 1, secrets: nextEntries }, null, 2)}\n`;
     if (Buffer.byteLength(serialized, 'utf8') > MAX_VAULT_BYTES) {
@@ -195,7 +211,9 @@ export function createSecretVault({
         // backup, so antivirus locks during cleanup must not fail the committed write.
         await retryWindows(() => operations.rm(staleBackup, { force: true }), platform).catch(() => {});
       }
-      if (platform !== 'win32') {
+      // The policy platform can be overridden in cross-platform contract tests;
+      // Windows still cannot fsync a directory on the actual host filesystem.
+      if (platform !== 'win32' && process.platform !== 'win32') {
         const parent = await fs.open(path.dirname(filePath), 'r');
         try { await parent.sync(); } finally { await parent.close(); }
       }

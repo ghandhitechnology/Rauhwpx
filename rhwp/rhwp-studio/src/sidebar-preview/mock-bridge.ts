@@ -341,20 +341,21 @@ export function createMockBridge(report: (message: string) => void) {
       provider,
       model,
       effort,
-      _force,
+      force,
       profile,
       mode,
       id,
       documentId,
       documentName,
     ) => {
+      const continuing = !force && id === threadId && (mode ?? 'direct') === workflow.workflow;
       const startGeneration = ++generation;
       completeQuestion({ status: 'expired', reason: 'request-invalidated' });
       setRunning(false);
       agent = provider;
       threadId = id ?? threadId;
       permission = profile ?? permission;
-      workflow = {
+      workflow = continuing ? workflow : {
         workflow: mode ?? 'direct',
         phase:
           mode === 'plan'
@@ -635,6 +636,13 @@ export function createMockBridge(report: (message: string) => void) {
           file.scope === scope &&
           (scope === 'global' || file.scopeId === scopeId),
       ),
+    downloadReference: async (file) => {
+      const reference = references.find((item) =>
+        item.id === file.id && item.scope === file.scope && item.scopeId === file.scopeId,
+      );
+      if (!reference) throw new Error('미리보기 참고자료를 찾을 수 없습니다.');
+      return new TextEncoder().encode(`${reference.name}의 샘플 참고자료입니다.`);
+    },
     searchReferences: async (query, scope, scopeId) =>
       references
         .filter(
@@ -890,6 +898,11 @@ export function createMockBridge(report: (message: string) => void) {
         });
         finish();
       }),
+    interruptIfIdle: () => {
+      if (!running) return false;
+      bridge.interrupt();
+      return true;
+    },
     interrupt: () => {
       generation++;
       completeQuestion({ status: 'cancelled', reason: 'user-stop' });

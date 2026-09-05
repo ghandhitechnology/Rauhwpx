@@ -1,0 +1,59 @@
+FROM node:24-bookworm-slim@sha256:3638d9a6fe4030bd716be989438248074489337ba3275657f93595428be4fc03
+
+ARG CHROMIUM_VERSION=152.0.7977.75-1~deb12u1
+ARG FFMPEG_VERSION=7:5.1.9-0+deb12u1
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    chromium="$CHROMIUM_VERSION" \
+    curl \
+    ffmpeg="$FFMPEG_VERSION" \
+    fonts-noto-cjk \
+    matchbox-window-manager \
+    x11-apps \
+    x11-utils \
+    xauth \
+    xvfb \
+  && ffmpeg -hide_banner -devices 2>&1 | grep -q 'x11grab' \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/rauhwpx-provider-cli
+COPY install/provider-runtime/package.json install/provider-runtime/package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund \
+  && ./node_modules/.bin/claude --version \
+  && ./node_modules/.bin/codex --version \
+  && ./node_modules/.bin/grok --version \
+  && ./node_modules/.bin/pi --version
+
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+
+COPY runtime-assets/rhwp-agent/package.json runtime-assets/rhwp-agent/package-lock.json /app/rhwp-agent/
+RUN npm --prefix /app/rhwp-agent ci --omit=dev --ignore-scripts --no-audit --no-fund
+COPY runtime-assets/studio /app/studio
+COPY runtime-assets/rhwp-agent /app/rhwp-agent
+COPY runtime-assets/rau-credits /app/rau-credits
+COPY runtime-assets/bin/rhwp /app/bin/rhwp
+COPY worker /app/worker
+COPY document-runtime /app/document-runtime
+
+RUN mkdir -p /run/rauhwpx /workspace /provider-auth \
+  && chmod 0755 /app/bin/rhwp \
+  && /app/bin/rhwp --version \
+  && chown -R 1000:1000 /run/rauhwpx /workspace /provider-auth
+
+ENV HOME=/workspace/home \
+    CODEX_HOME=/workspace/home/.codex \
+    GROK_HOME=/workspace/home/.grok \
+    PI_CODING_AGENT_DIR=/workspace/home/.pi/agent \
+    PATH=/workspace/home/.local/bin:/app/bin:/opt/rauhwpx-provider-cli/node_modules/.bin:/usr/local/bin:/usr/bin:/bin \
+    RAUHWpx_PROVIDER_CLI_PREFIX=/opt/rauhwpx-provider-cli \
+    PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
+    RAUHWpx_STUDIO_DIST=/app/studio \
+    RAUHWpx_AGENT_ROOT=/app/rhwp-agent \
+    RAUHWpx_PI_PREFIX=/opt/rauhwpx-provider-cli \
+    RHWP_BIN=/app/bin/rhwp
+
+USER 1000:1000
+CMD ["node", "/app/worker/main.mjs"]

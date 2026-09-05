@@ -46,6 +46,7 @@ import { AgentInstructionsStore } from './agent-instructions.mjs';
 import { calibrateWritingStyle } from './style-calibrator.mjs';
 import { buildWritingStyleCatalog, resolveWritingStyleSelection } from './writing-style-catalog.mjs';
 import { filterToolDefinitions, TOOL_DEFINITIONS } from './tools.mjs';
+import { takeEnvironmentScreenshot } from './environment-screenshot.mjs';
 import { replayMissedTurnEnd } from './turn-outcome-replay.mjs';
 import {
   PlanningState,
@@ -2810,6 +2811,12 @@ async function startSession(
     currentSession.documentName = documentName;
     return currentSession;
   }
+  // A settings change must never interrupt a turn or its pending question.
+  if (!force && currentSession?.status === 'running') {
+    throw workflowError('AGENT_BUSY', 'Provider settings can only change between turns.');
+  }
+  const continuing = !force && currentSession
+    && currentSession.threadId === threadId && currentSession.documentId === documentId;
   if (!await disposeSession(record)) throw agentProcessCleanupUncertain();
   const sessionReferenceScopes = referenceScopesForSession({ threadId, documentId });
   await referenceStore.activateScopes(sessionReferenceScopes);
@@ -2818,6 +2825,10 @@ async function startSession(
     initialCapabilityEpoch: record.nextCapabilityEpoch++,
     allocateEpoch: () => record.nextCapabilityEpoch++,
   });
+  if (continuing && currentSession.planning.workflow === workflow) {
+    planning.phase = currentSession.planning.phase;
+    planning.latestPlan = currentSession.planning.latestPlan;
+  }
   const generation = ++record.sessionGeneration;
   const providerRole = 'chat';
   const providerCapabilityResource = mcpProviderResource({
@@ -2868,8 +2879,8 @@ async function startSession(
     workflow,
     phase: workflow === 'direct' ? 'implementing' : planning.phase,
     capabilityEpoch: planning.capabilityEpoch,
-    toolProfile: planning.mcpEnvironment().RHWP_TOOL_PROFILE,
-    mcpEnvironment: planning.mcpEnvironment(),
+    // Chat tool profiles follow the current workflow/phase after each provider
+    // restart. A fixed toolProfile would keep approved plans read-only.
     // pi · rau 전용 — 설치 경로와 영속 루트, 그리고 선택한 모델의 추론 지원 여부.
     piBin: (agent === 'rau' ? rauManager : piManager).piBin,
     piRoot: agent === 'rau' ? rauManager.rootDir : piManager.rootDir,
@@ -2900,17 +2911,22 @@ async function startSession(
     // Legacy download/browser code uses chatId. It is now the stable Studio
     // thread identity rather than an unrelated hub-generated UUID.
     chatId: threadId,
-    activeTemplateId: null,
-    lastDocumentInfo: null,
+    activeTemplateId: continuing ? currentSession.activeTemplateId : null,
+    lastDocumentInfo: continuing ? currentSession.lastDocumentInfo : null,
     bootstrapHistory: normalizeChatHistory(requestedHistory),
     planning,
     workflowTransition: Promise.resolve(),
     pendingTransitions: 0,
     releaseReferenceScopes: referenceStore.retainScopes(sessionReferenceScopes),
   };
-  if (workflow === 'plan') {
-    requireWorkflowSwitchBackend(record.agentSession);
-    await record.agentSession.backend.setExecutionMode(providerModeRequest(record.agentSession, 'planning'));
+  try {
+    if (workflow === 'plan') {
+      requireWorkflowSwitchBackend(record.agentSession);
+      await backend.setExecutionMode(providerModeRequest(record.agentSession, planning.phase));
+    }
+  } catch (error) {
+    const cleaned = await disposeSession(record);
+    throw cleaned ? error : agentProcessCleanupUncertain(error);
   }
   queueMicrotask(() => drainTemplateCompletion(record));
   queueMicrotask(() => drainPlanningDocumentSaved(record));
@@ -3179,29 +3195,34 @@ async function handleStudioMessage(record, sock, msg) {
       if (record.agentSession?.workflowTransition) {
         await record.agentSession.workflowTransition;
       }
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      const rejectStart = (error, fallbackCode = 'INVALID_REQUEST') => sendJson(sock, {
+        v: 1, type: 'chat-error', requestId, session: sessionInfo(record),
+        code: error?.code ?? fallbackCode, message: String(error?.message ?? error),
+      });
       const agent = msg.agent;
       if (!KNOWN_AGENTS.has(agent)) {
-        sendJson(sock, { v: 1, type: 'chat-error', code: 'INVALID_REQUEST', message: `unknown agent: ${String(agent)}` });
+        rejectStart(new Error(`unknown agent: ${String(agent)}`));
         return;
       }
       // 설정이 끝나지 않은 pi/rau 로는 세션을 열지 않는다 — 살아 있는 세션도 건드리지 않는다.
       if (agent === 'pi' && !piStatus.setupComplete) {
         sendJson(sock, {
-          v: 1, type: 'chat-error', code: 'PI_NOT_CONFIGURED',
+          v: 1, type: 'chat-error', requestId, session: sessionInfo(record), code: 'PI_NOT_CONFIGURED',
           message: 'Pi 설정을 먼저 끝내 주세요 (설치 · OpenRouter 키 · 모델 선택).',
         });
         return;
       }
       if (agent === 'rau' && !rauStatus.setupComplete) {
         sendJson(sock, {
-          v: 1, type: 'chat-error', code: 'RAU_NOT_CONFIGURED',
+          v: 1, type: 'chat-error', requestId, session: sessionInfo(record), code: 'RAU_NOT_CONFIGURED',
           message: 'Rau 연결을 먼저 끝내 주세요.',
         });
         return;
       }
       if (agent === 'rau' && rauTrialEmpty()) {
         sendJson(sock, {
-          v: 1, type: 'chat-error', code: 'RAU_CREDITS_EMPTY',
+          v: 1, type: 'chat-error', requestId, session: sessionInfo(record), code: 'RAU_CREDITS_EMPTY',
           message: 'Rau 체험 크레딧이 다 됐어요. 다른 모델을 연결해 주세요.',
         });
         return;
@@ -3224,6 +3245,7 @@ async function handleStudioMessage(record, sock, msg) {
         sendJson(sock, {
           v: 1,
           type: 'chat-started',
+          requestId,
           agent: s.agent,
           model: s.model,
           effort: s.effort,
@@ -3236,14 +3258,7 @@ async function handleStudioMessage(record, sock, msg) {
           ...s.planning.snapshot(),
         });
       } catch (e) {
-        const cleaned = await disposeSession(record);
-        const reported = cleaned ? e : agentProcessCleanupUncertain(e);
-        sendJson(sock, {
-          v: 1,
-          type: 'chat-error',
-          code: reported?.code ?? 'AGENT_SPAWN_FAILED',
-          message: String(reported?.message ?? reported),
-        });
+        rejectStart(e, 'AGENT_SPAWN_FAILED');
       }
       return;
     }
@@ -5061,6 +5076,12 @@ function handleMcpMessage(record, sock, msg) {
         void record.downloadManager.download({ sessionId: record.agentSession.chatId, ...args })
           .then(sendResult)
           .catch((error) => sendError(error, 'DOWNLOAD_FAILED'));
+        return;
+      }
+      if (tool === 'environment_screenshot') {
+        void takeEnvironmentScreenshot({ workDir: record.workDir })
+          .then((result) => sendResult(result))
+          .catch((error) => sendError(error, error?.code || 'SCREENSHOT_FAILED'));
         return;
       }
       if (tool === 'publish_artifact') {

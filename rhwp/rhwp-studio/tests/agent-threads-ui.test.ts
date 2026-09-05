@@ -17,8 +17,8 @@ test('reasoning and model tweaks do not lock or rebuild the composer', () => {
   // 추론 강도/모델만 바꿀 때는 입력칸을 '채팅을 여는 중'으로 잠그지 않는다.
   assert.match(source, /if \(force\) chatStartPendingThreadId = currentThread\.id;/);
   assert.match(source, /if \(force\) updateComposer\(\);/);
-  assert.match(source, /function selectEffort[\s\S]*startCurrentBridgeChat\(\);/);
-  assert.match(source, /function selectModel[\s\S]*startCurrentBridgeChat\(\);/);
+  assert.match(source, /function selectEffort[\s\S]*changeCurrentProviderSettings\(\);/);
+  assert.match(source, /function selectModel[\s\S]*changeCurrentProviderSettings\(\);/);
   // 서버가 같은 선택을 메아리치면 열린 피커 메뉴를 다시 그리지 않는다.
   assert.match(
     source,
@@ -70,7 +70,8 @@ test('past chats on the active file reopen as writable and adopt stable document
   assert.match(source, /threadMatchesDocument\(\s*loaded,\s*currentDocumentId,\s*currentDocKey/);
   assert.match(source, /currentThread\.documentId = currentDocumentId \?\? currentThread\.documentId/);
   assert.match(source, /currentThread\.docKey = currentDocKey \?\? currentThread\.docKey/);
-  assert.match(source, /persistCurrentThread\(\);\s*exitReadOnlyMode\(\);[\s\S]*if \(liveQuestion\)[\s\S]*startCurrentBridgeChat\(true\)/);
+  assert.match(source, /persistCurrentThread\(\);[\s\S]*localThreadId = currentThread\.id;[\s\S]*editorCloudScope\.bind\([\s\S]*const scopeRefresh = cloudUi\.refreshLeaseScope\(\);\s*exitReadOnlyMode\(\);[\s\S]*if \(liveQuestion\)[\s\S]*void scopeRefresh\.then/);
+  assert.match(source, /currentThread\.id !== selectedThreadId[\s\S]*composerExecution\(workspace\.composerTarget\(\)\)\.kind === 'local'[\s\S]*startCurrentBridgeChat\(true\)/);
   assert.match(source, /const history = serializeThreadMessagesForProviderHistory\(currentThread\.messages\)/);
   assert.match(source, /currentThread\.id, currentThread\.documentId, currentThread\.docKey, history/);
   assert.match(serverSource, /bootstrapHistory: normalizeChatHistory\(requestedHistory\)/);
@@ -87,11 +88,11 @@ test('rapid past-chat switches cannot activate a stale provider session', () => 
 });
 
 test('changing files ends the open chat and starts a fresh chat for the next file', () => {
-  assert.match(documentSwitchSource, /startNewChat\(\{ silent: true \}\)/);
+  assert.match(documentSwitchSource, /startNewChat\(\{ silent: true, documentSwitch: true \}\)/);
+  assert.match(source, /function startNewChat[\s\S]*workspace\.select\('local'\);[\s\S]*localThreadSnapshot = structuredClone\(nextThread\);[\s\S]*editorCloudScope\.bind\([\s\S]*cloudUi\.refreshLeaseScope\(\)/);
   assert.match(documentSwitchSource, /rebuildThreadsList\(\);/);
   assert.doesNotMatch(documentSwitchSource, /if \(threadsListVisible\(\)\) rebuildThreadsList/);
   assert.doesNotMatch(documentSwitchSource, /currentThreadMatches/);
-  assert.doesNotMatch(documentSwitchSource, /currentThread\.messages\.length/);
   assert.match(source, /if \(currentThread\.messages\.length === 0\) \{\s*removeThread\(currentThread\.id\);/);
   assert.match(source, /if \(previousThreadWasEmpty\) \{\s*planArchives\.delete\(previousThreadId\);\s*threadWorkflows\.delete\(previousThreadId\);/);
   assert.match(

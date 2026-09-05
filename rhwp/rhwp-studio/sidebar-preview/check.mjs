@@ -4,6 +4,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { createServer } from 'vite';
 import puppeteer from 'puppeteer-core';
+import { checkCloudRecovery } from './cloud-recovery.check.mjs';
 
 const studio = resolve(import.meta.dirname, '..');
 const artifacts = resolve(import.meta.dirname, 'artifacts');
@@ -75,7 +76,9 @@ try {
     if (!url.startsWith(origin.replace('http:', 'ws:'))) forbidden.push(url);
   });
   async function open(query = '') {
-    await page.goto(`${origin}/?theme=light&${query}`, {
+    const params = new URLSearchParams(query);
+    if (!params.has('width')) params.set('width', '480');
+    await page.goto(`${origin}/?theme=light&${params}`, {
       waitUntil: 'networkidle0',
     });
     await page.waitForFunction(() => window.sidebarPreview);
@@ -128,6 +131,118 @@ try {
       throw new Error(`${name}: ${error.message}`, { cause: error });
     }
   }
+  await step('Cloud disconnect, reconnect, rebuild, and shutdown recovery',
+    () => checkCloudRecovery(page, origin, artifacts));
+  await step('Cloud dashboard, usage gaps, conversations, configuration and responsive settings', async () => {
+    await open('cloud=1&dashboard=1&page=settings&destination=cloud&controls=0');
+    await page.waitForSelector('.ag-cd-quota .ag-cd-stat-value');
+    assert.equal(await page.$eval('.ag-cd-quota .ag-cd-stat-value', (node) => node.textContent), '84분');
+    assert.deepEqual(await page.$$eval('.ag-cd-stat-label', (nodes) => nodes.map((node) => node.textContent)), ['오늘 남은 Raucloud 시간', '연결된 Cloud 박스']);
+    assert.doesNotMatch(await page.$eval('.ag-cd-stats', (node) => node.textContent), /세션 실행 중|앱당 서버/);
+    assert.match(await page.$eval('.ag-cd-quota .ag-cd-reset', (node) => node.textContent), /(?:\d+시간(?: \d+분)?|\d+분) 후 초기화|1분 이내 초기화/);
+    assert.equal(await page.$eval('.ag-cd-pixel-cloud', (node) => node.complete && node.naturalWidth > 0), true);
+    assert.equal(await page.$$eval('.ag-cd-point', (nodes) => nodes.length), 7);
+    await page.click('[data-destination="connections"][role="tab"]');
+    assert.equal(await page.$eval('.ag-cloud-dashboard', (node) => node.checkVisibility()), false);
+    await page.click('[data-destination="cloud"][role="tab"]');
+    await clickText('.ag-cd-button', '30일');
+    assert.match(await page.$eval('.ag-cd-usage-total', (node) => node.textContent), /30일 중 7일 기록/);
+    assert.equal(await page.$$eval('.ag-cd-point', (nodes) => nodes.length), 7, 'missing days must not become zero points');
+    await page.click('.ag-cd-data summary');
+    assert.equal(await page.$$eval('.ag-cd-data tbody tr', (nodes) => nodes.length), 30);
+    await page.click('.ag-cd-data summary');
+    await page.click('.ag-cd-segment button');
+    assert.equal(await page.$$eval('.ag-cd-chat', (nodes) => nodes.length), 4);
+    await page.evaluate(() => window.sidebarPreview.cloud.publish());
+    assert.equal(await page.$eval('.ag-cd-segment button[aria-pressed="true"]', (node) => node === document.activeElement), true, 'snapshot refresh preserves range focus');
+    await page.click('.ag-cloud-settings-action');
+    await page.waitForSelector('.ag-cloud-setup-overlay:not([hidden])');
+    await page.click('.ag-cloud-setup-close');
+    await page.$eval('#ag-settings-pane-cloud', (node) => node.scrollTo({ top: 0 }));
+    await screenshot('cloud-dashboard-sidebar');
+    await page.setViewport({ width: 1440, height: 1000, deviceScaleFactor: 1 });
+    await page.click('.ag-cd-expand');
+    await page.waitForSelector('.ag-fullscreen.ag-settings-open #ag-settings-pane-cloud:not([hidden])');
+    assert.equal(await page.$eval('.ag-cd-grid', (node) => getComputedStyle(node).gridTemplateColumns.split(' ').length), 2);
+    await screenshot('cloud-dashboard-fullscreen');
+    await page.evaluate(() => window.sidebarPreview.cloud.blockRefresh(true));
+    const refreshCount = await page.evaluate(() => window.sidebarPreview.cloud.calls.refresh);
+    await clickText('.ag-cd-button', '새로고침');
+    assert.equal(await page.$eval('.ag-cd-refresh', (node) => node.disabled), true);
+    await page.evaluate(() => document.querySelector('.ag-cd-refresh').click());
+    assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.refresh), refreshCount + 1);
+    const countdowns = await page.evaluate(() => {
+      const originalNow = Date.now;
+      const resetAt = Date.parse(window.sidebarPreview.cloud.controller.getSnapshot().account.quota.resetAt);
+      try {
+        return [5_400_000, 3_600_000, 60_000, 0, -60_000].map((remainingMs) => {
+          Date.now = () => resetAt - remainingMs;
+          // Returning to the tab must update the clock even while a refresh is blocked.
+          document.dispatchEvent(new Event('visibilitychange'));
+          return {
+            eta: document.querySelector('.ag-cd-reset').textContent,
+            quota: document.querySelector('.ag-cd-quota .ag-cd-stat-value').textContent,
+            meterHidden: document.querySelector('.ag-cd-meter').hidden,
+          };
+        });
+      } finally {
+        Date.now = originalNow;
+        document.dispatchEvent(new Event('visibilitychange'));
+      }
+    });
+    assert.deepEqual(countdowns, [
+      { eta: '1시간 30분 후 초기화', quota: '84분', meterHidden: false },
+      { eta: '1시간 후 초기화', quota: '84분', meterHidden: false },
+      { eta: '1분 이내 초기화', quota: '84분', meterHidden: false },
+      { eta: '초기화 확인 중', quota: '—분', meterHidden: true },
+      { eta: '초기화 확인 중', quota: '—분', meterHidden: true },
+    ]);
+    assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.refresh), refreshCount + 1, 'countdown does not depend on a new server response');
+    await page.evaluate(() => window.sidebarPreview.cloud.blockRefresh(false));
+    await page.waitForFunction(() => !document.querySelector('.ag-cd-refresh').disabled);
+    await page.evaluate(() => window.sidebarPreview.cloud.setRefreshFailure(true));
+    await clickText('.ag-cd-button', '새로고침');
+    await page.waitForSelector('.ag-cd-feedback[data-kind="error"]');
+    assert.match(await page.$eval('.ag-cd-quota .ag-cd-stat-value', (node) => node.textContent), /—/);
+    await page.evaluate(() => window.sidebarPreview.cloud.setRefreshFailure(false));
+    await clickText('.ag-cd-button', '새로고침');
+    await page.waitForSelector('.ag-cd-feedback[data-kind="success"]');
+    await page.evaluate(() => window.sidebarPreview.cloud.setLink('failed'));
+    await page.waitForSelector('.ag-cd-status[data-state="failed"]');
+    assert.match(await page.$eval('.ag-cloud-settings-status', (node) => node.textContent), /문제/);
+    await page.select('#theme', 'dark');
+    await page.$eval('#ag-settings-pane-cloud', (node) => node.scrollTo({ top: 270 }));
+    await screenshot('cloud-dashboard-disconnected');
+    await page.click('.ag-cd-reconnect');
+    await page.waitForSelector('.ag-cd-status[data-state="ready"]');
+    await page.evaluate(() => window.sidebarPreview.cloud.setDashboardState('exhausted'));
+    assert.equal(await page.$eval('.ag-cd-quota .ag-cd-stat-value', (node) => node.textContent), '0분');
+    assert.equal(await page.$eval('.ag-cd-quota', (node) => node.dataset.low), 'true');
+    await page.evaluate(() => window.sidebarPreview.cloud.setDashboardState('self-hosted'));
+    assert.match(await page.$eval('.ag-cd-server', (node) => node.textContent), /SSH 터널/);
+    assert.match(await page.$eval('.ag-cd-config', (node) => node.textContent), /내 서버는 Raucloud 한도 제외/);
+    assert.doesNotMatch(await page.$eval('.ag-cd-server', (node) => node.textContent), /시간을 모두 사용/);
+    await page.evaluate(() => window.sidebarPreview.cloud.setDashboardState('unknown'));
+    assert.equal(await page.$eval('.ag-cd-status', (node) => node.dataset.state), 'unknown');
+    await page.evaluate(() => window.sidebarPreview.cloud.setDashboardState('logged-out'));
+    assert.equal(await page.$$eval('.ag-cd-point', (nodes) => nodes.length), 0, 'sign-out hides the previous account history');
+    assert.match(await page.$eval('.ag-cd-quota', (node) => node.textContent), /로그인하면/);
+    assert.equal(await page.$eval('.ag-cd-reset', (node) => node.checkVisibility()), false, 'unknown reset time has no countdown');
+    await page.click('.ag-cd-setup');
+    await page.waitForSelector('.ag-cloud-setup-overlay:not([hidden])');
+    await page.click('.ag-cloud-setup-close');
+    await page.evaluate(() => window.sidebarPreview.cloud.setDashboardState('unavailable'));
+    assert.equal(await page.$eval('.ag-cd-refresh', (node) => node.disabled), true);
+    await page.setViewport({ width: 1280, height: 900, deviceScaleFactor: 1 });
+    await open('cloud=1&dashboard=1&page=settings&destination=cloud&width=280&theme=dark&controls=0');
+    const overflow = await page.$eval('#ag-settings-pane-cloud', (node) => node.scrollWidth > node.clientWidth);
+    assert.equal(overflow, false, 'minimum-width dashboard must not scroll horizontally');
+    const clipped = await page.$$eval('.ag-cd-button, .ag-settings-nav-button', (nodes) => nodes.filter((node) => node.checkVisibility() && node.scrollWidth > node.clientWidth + 1).map((node) => node.textContent));
+    assert.deepEqual(clipped, []);
+    await page.click('[data-destination="cloud"][role="tab"]');
+    await page.keyboard.press('ArrowLeft');
+    assert.equal(await page.$eval('[data-destination="connections"][role="tab"]', (node) => node.getAttribute('aria-selected')), 'true');
+  });
   await step(
     'Production shell, light/dark themes, resize and collapse',
     async () => {
@@ -203,6 +318,34 @@ try {
       );
     },
   );
+  await step('Provider, model and effort changes after the first reply', async () => {
+    await play('chat');
+    const messageCount = await page.$$eval('.ag-msg-user', (nodes) => nodes.length);
+    await page.click('[aria-label="프로바이더 선택"]');
+    await page.waitForSelector('.ag-config-panel.ag-open');
+    await page.click('.ag-provider-item[data-agent="codex"]');
+    await page.click('.ag-llm-item[data-model="gpt-5.6-luna"]');
+    await page.click('.ag-llm-item[data-model="gpt-6-astra"]');
+    await page.focus('.ag-eslider');
+    await page.keyboard.press('End');
+    await page.waitForFunction(() => document.querySelector('.ag-effort-name').textContent === 'Max');
+    assert.equal(await page.$eval('.ag-llm-name', (node) => node.textContent), 'Astra');
+    assert.equal(await page.$$eval('.ag-msg-user', (nodes) => nodes.length), messageCount);
+    await screenshot('provider-settings-after-reply');
+    await page.click('.ag-provider-item[data-agent="cursor"]');
+    assert.equal(await page.$eval('.ag-effort', (node) => node.hidden), true);
+    await page.click('.ag-provider-item[data-agent="claude"]');
+    await page.click('.ag-llm-item[data-model="haiku"]');
+    assert.equal(await page.$eval('.ag-eslider', (node) => node.getAttribute('aria-valuemax')), '2');
+    await page.click('.ag-input');
+    await page.type('.ag-input', 'Continue the same conversation after changing the model.');
+    await page.click('.ag-send');
+    await page.waitForFunction(() => window.sidebarPreview.bridge.isTurnRunning());
+    assert.equal(await page.$eval('[aria-label="프로바이더 선택"]', (node) => node.disabled), true);
+    await page.waitForFunction(() => !window.sidebarPreview.bridge.isTurnRunning());
+    assert.equal(await page.$eval('[aria-label="프로바이더 선택"]', (node) => node.disabled), false);
+    assert.equal(await page.$$eval('.ag-msg-user', (nodes) => nodes.length), messageCount + 1);
+  });
   await step(
     'Plan approval and document change acceptance/rejection',
     async () => {
@@ -568,6 +711,10 @@ try {
   );
   console.log(`Sidebar checks passed. Screenshots: ${artifacts}`);
 } finally {
+  const browserProcess = browser?.process();
   await browser?.close();
+  // Detached Chrome helpers can retain inherited output pipes after its exit.
+  browserProcess?.stdout?.destroy();
+  browserProcess?.stderr?.destroy();
   await server.close();
 }
