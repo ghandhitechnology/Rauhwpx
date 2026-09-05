@@ -16,16 +16,22 @@
     "restart": "node rhwp/rhwp-agent/ctl.mjs restart",
     "status": "node rhwp/rhwp-agent/ctl.mjs status",
     "dev:desktop": "wait-on http://127.0.0.1:7700 && cross-env RHWP_DEV_URL=http://127.0.0.1:7700 electron .",
-    "build:wasm": "wasm-pack build rhwp --target web",
-    "build:native": "cargo build --locked --release --manifest-path rhwp/Cargo.toml --bin rhwp",
-    "build:studio:app": "npm --prefix rhwp/rhwp-studio ci && npm --prefix rhwp/rhwp-studio run build",
+    "build:wasm": "cd rhwp && wasm-pack build --target web",
+    "build:native": "cd rhwp && cargo build --locked --release --bin rhwp",
+    "build:studio:app": "npm --prefix rhwp/rhwp-studio run build",
     "build:studio": "npm run build:wasm && npm run build:studio:app",
-    "build:agent": "npm --prefix rhwp/rhwp-agent ci --omit=dev",
-    "build:desktop": "npm run build:native && npm run build:studio && npm run build:agent",
-    "desktop": "npm run build:desktop && electron .",
-    "dist:mac": "npm run build:desktop && electron-builder --mac dmg zip --arm64 --publish never",
-    "dist:win": "npm run build:desktop && electron-builder --win --publish never",
-    "verify:package": "node scripts/verify-desktop-package.mjs"
+    "build:desktop": "npm run build:native && npm run build:studio",
+    "desktop": "electron .",
+    "dist:mac": "npm run build:desktop && npm run package:mac --",
+    "dist:win": "npm run build:desktop && npm run package:win --",
+    "verify:package": "node scripts/verify-desktop-package.mjs",
+    "setup": "npm ci && npm --prefix rhwp/rhwp-studio ci && npm --prefix rhwp/rhwp-agent ci",
+    "build:clean": "npm run setup && npm run build:desktop",
+    "package:mac": "electron-builder --mac dmg zip --arm64 --publish never",
+    "package:win": "electron-builder --win --publish never",
+    "test:ci": "node --test scripts/*.test.mjs",
+    "audit:production": "node scripts/audit-production.mjs",
+    "dev:studio": "npm --prefix rhwp/rhwp-studio run dev"
   },
   "dependencies": {
     "electron-updater": "^6.8.9"
@@ -35,7 +41,8 @@
     "cross-env": "^10.1.0",
     "electron": "^43.3.0",
     "electron-builder": "^26.15.3",
-    "wait-on": "^9.1.0"
+    "wait-on": "^9.1.0",
+    "js-yaml": "^4.3.1"
   },
   "build": {
     "appId": "com.hataewook.rauhwpx",
@@ -51,6 +58,9 @@
       "!rhwp/rhwp-agent/README.md",
       "!rhwp/rhwp-agent/package-lock.json",
       "!rhwp/rhwp-agent/tsconfig.agents.json",
+      "!rhwp/rhwp-agent/node_modules/.bin/tsc{,.cmd,.ps1}",
+      "!rhwp/rhwp-agent/node_modules/typescript/**",
+      "!rhwp/rhwp-agent/node_modules/@typescript/typescript-*/**",
       "rhwp/rau-credits/catalog.mjs"
     ],
     "asarUnpack": [

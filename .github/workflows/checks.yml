@@ -1,0 +1,330 @@
+name: Repository checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Select affected checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      packages: ${{ steps.changes.outputs.packages }}
+      sessions: ${{ steps.changes.outputs.sessions }}
+      app: ${{ steps.changes.outputs.app }}
+      browser: ${{ steps.changes.outputs.browser }}
+      npm: ${{ steps.changes.outputs.npm }}
+      rustAudit: ${{ steps.changes.outputs.rustAudit }}
+      engine: ${{ steps.changes.outputs.engine }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          sparse-checkout: scripts
+      - id: changes
+        run: node scripts/ci-changes.mjs
+
+  package:
+    name: ${{ matrix.label }}
+    needs: changes
+    # Expand the matrix even for docs so every protected check name is reported.
+    if: ${{ !cancelled() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            label: macOS ARM64 package
+            platform: macos
+          - os: windows-latest
+            label: Windows x64 package
+            platform: windows
+    runs-on: ${{ needs.changes.outputs.packages == 'false' && 'ubuntu-latest' || matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+        if: needs.changes.outputs.packages != 'false'
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/package-desktop
+        if: needs.changes.outputs.packages != 'false'
+        with:
+          platform: ${{ matrix.platform }}
+
+
+  session-tests:
+    name: Session tests (${{ matrix.os }})
+    needs: changes
+    # Expand the matrix even for docs so every protected check name is reported.
+    if: ${{ !cancelled() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            architecture: arm64
+          - os: windows-latest
+            architecture: x64
+    runs-on: ${{ needs.changes.outputs.sessions == 'false' && 'ubuntu-latest' || matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        if: needs.changes.outputs.sessions != 'false'
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        if: needs.changes.outputs.sessions != 'false'
+        with:
+          node-version: 22.18.0
+          cache: npm
+          cache-dependency-path: rhwp/rhwp-agent/package-lock.json
+      - name: Assert runner architecture
+        if: needs.changes.outputs.sessions != 'false'
+        shell: bash
+        env:
+          EXPECTED_NODE_ARCH: ${{ matrix.architecture }}
+        run: node -e "if (process.arch !== process.env.EXPECTED_NODE_ARCH) throw new Error('Unexpected architecture ' + process.arch)"
+      - name: Install agent dependencies
+        if: needs.changes.outputs.sessions != 'false'
+        run: npm --prefix rhwp/rhwp-agent ci
+      - name: Test platform launch, file replacement, and desktop sessions
+        if: needs.changes.outputs.sessions != 'false'
+        shell: bash
+        run: >-
+          node --test --test-concurrency=1
+          rhwp/rhwp-agent/tests/windows-cli-launch.test.mjs
+          rhwp/rhwp-agent/tests/windows-setup-hardening.test.mjs
+          rhwp/rhwp-studio/tests/desktop-agent-hub.test.ts
+          rhwp/rhwp-studio/tests/desktop-shell.test.ts
+
+
+  app:
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    name: Auth and resource boundary regressions
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.app == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.18.0
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            rhwp/rhwp-studio/package-lock.json
+            rhwp/rhwp-agent/package-lock.json
+      - name: Install dependencies
+        run: npm run setup
+      - name: Test repository tooling
+        run: npm run test:ci
+      - name: Check provider adapter types
+        run: npm --prefix rhwp/rhwp-agent run typecheck
+      - name: Test agent, auth, and resource boundaries
+        run: node --test --test-concurrency=1 rhwp/rhwp-agent/tests/*.test.mjs
+      - name: Test hosted authorization service
+        run: npm --prefix rhwp/rau-credits test
+      - name: Test Studio
+        run: npm --prefix rhwp/rhwp-studio test
+      - name: Check E2E entry points
+        run: npm --prefix rhwp/rhwp-studio run e2e:check
+      - name: Test browser extension security boundaries
+        run: >-
+          node --test
+          rhwp/rhwp-shared/security/*.test.js
+          rhwp/rhwp-chrome/sw/fetch-security.test.mjs
+          rhwp/rhwp-firefox/sw/fetch-security.test.mjs
+          rhwp/rhwp-safari/src/fetch-security.test.mjs
+
+  browser:
+    name: Studio browser integration
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.browser == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      PUPPETEER_EXECUTABLE_PATH: /usr/bin/google-chrome
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.18.0
+          cache: npm
+          cache-dependency-path: rhwp/rhwp-studio/package-lock.json
+      - uses: ./.github/actions/setup-rust
+        with:
+          wasm: 'true'
+          cache: wasm
+      - name: Build WASM engine
+        run: npm run build:wasm
+      - name: Install Studio dependencies
+        run: npm --prefix rhwp/rhwp-studio ci
+      - name: Verify provisioned browser
+        run: '"$PUPPETEER_EXECUTABLE_PATH" --version'
+      - name: Build and typecheck Studio
+        run: npm --prefix rhwp/rhwp-studio run build
+      - name: Test browser integration
+        run: npm --prefix rhwp/rhwp-studio run test:browser
+
+  production-dependencies:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.npm == 'true') }}
+    name: Production dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /package.json
+            /package-lock.json
+            /scripts/audit-production.mjs
+            /rhwp/rhwp-agent/package*.json
+            /rhwp/rhwp-studio/package*.json
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22.18.0
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            rhwp/rhwp-agent/package-lock.json
+            rhwp/rhwp-studio/package-lock.json
+
+      - name: Audit high and critical production advisories
+        run: node scripts/audit-production.mjs
+
+  rust-dependencies:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rustAudit == 'true') }}
+    name: Rust production dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache: audit
+
+      - name: Cache cargo-audit executable
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}-${{ runner.arch }}-0.22.2
+
+      - name: Install pinned cargo-audit
+        run: |
+          if [[ "$(cargo audit --version 2>/dev/null || true)" != "cargo-audit 0.22.2" ]]; then
+            cargo install cargo-audit --version 0.22.2 --locked --force
+          fi
+
+      - name: Reject RustSec vulnerabilities and new warnings
+        working-directory: rhwp
+        run: |
+          set -euo pipefail
+          # Print accepted existing warnings, then fail if RustSec adds a new warning.
+          cargo audit
+          cargo audit --no-fetch -D warnings \
+            --ignore RUSTSEC-2026-0192 \
+            --ignore RUSTSEC-2026-0206
+
+  parser-boundaries:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.engine == 'true') }}
+    name: Hostile document input boundaries
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache: parser
+
+      - name: Test parser allocation and archive limits
+        working-directory: rhwp
+        run: |
+          set -euo pipefail
+          cargo_test_output="$(mktemp)"
+          trap 'rm -f "${cargo_test_output}"' EXIT
+          cargo test --locked --lib parser:: 2>&1 | tee "${cargo_test_output}"
+          if ! grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "${cargo_test_output}"; then
+            echo 'The parser filter did not run any tests.' >&2
+            exit 1
+          fi
+
+      - name: Test bounded local-file ingestion
+        working-directory: rhwp
+        run: |
+          set -euo pipefail
+          cargo_test_output="$(mktemp)"
+          trap 'rm -f "${cargo_test_output}"' EXIT
+          cargo test --locked --bin rhwp cli_reader_rejects_oversized_files_before_unbounded_reading -- --nocapture 2>&1 | tee "${cargo_test_output}"
+          if ! grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "${cargo_test_output}"; then
+            echo 'The bounded-ingestion filter did not run any tests.' >&2
+            exit 1
+          fi
+
+      - name: Test hostile HML resource identifiers
+        working-directory: rhwp
+        run: |
+          set -euo pipefail
+          cargo_test_output="$(mktemp)"
+          trap 'rm -f "${cargo_test_output}"' EXIT
+          cargo test --locked --test issue_2743_hml_resource_id_limit -- --nocapture 2>&1 | tee "${cargo_test_output}"
+          if ! grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "${cargo_test_output}"; then
+            echo 'The hostile-HML test target did not run any tests.' >&2
+            exit 1
+          fi
+
+  ir-field-sweep:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.engine == 'true') }}
+    name: Full IR field round-trip sweep
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache: roundtrip
+
+      - name: Run the full 803-lane release-profile gate
+        working-directory: rhwp
+        run: cargo test --locked --profile release-test --test ir_field_sweep_baseline -- --nocapture

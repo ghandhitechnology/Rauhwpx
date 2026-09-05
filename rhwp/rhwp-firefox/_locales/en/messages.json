@@ -1,18 +1,18 @@
 {
   "extName": {
-    "message": "rhwp - HWP Document Viewer & Editor"
+    "message": "Rauhwpx - HWP Document Viewer & Editor"
   },
   "extDescription": {
     "message": "Open and edit HWP/HWPX files directly in your browser. No installation, no ads, free."
   },
   "actionTitle": {
-    "message": "rhwp - HWP Viewer"
+    "message": "Rauhwpx - HWP Viewer"
   },
   "contextMenuOpen": {
-    "message": "Open with rhwp"
+    "message": "Open with Rauhwpx"
   },
   "badgeTooltip": {
-    "message": "Open with rhwp"
+    "message": "Open with Rauhwpx"
   },
   "badgeTooltipWithInfo": {
     "message": "$TITLE$ ($PAGES$ pages) $SIZE$",
@@ -23,7 +23,7 @@
     }
   },
   "optionsTitle": {
-    "message": "rhwp Settings"
+    "message": "Rauhwpx Settings"
   },
   "optionsAutoOpen": {
     "message": "Automatically open HWP/HWPX files in viewer when downloaded"

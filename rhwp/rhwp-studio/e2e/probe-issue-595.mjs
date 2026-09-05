@@ -10,10 +10,10 @@
  * 실행:
  *   cd rhwp-studio
  *   npx vite --host 0.0.0.0 --port 7700 &
- *   node e2e/issue-595.test.mjs --mode=headless
+ *   node e2e/probe-issue-595.mjs --mode=headless
  *
  * 또는:
- *   node e2e/issue-595.test.mjs --mode=host
+ *   node e2e/probe-issue-595.mjs --mode=host
  */
 import { runTest, loadHwpFile, screenshot } from './helpers.mjs';
 

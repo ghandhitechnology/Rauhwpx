@@ -1,16 +1,9 @@
+import { browserExecutable, browserLaunchArgs } from './browser-support.ts';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import puppeteer from 'puppeteer-core';
-
-const BROWSER_CANDIDATES = [
-  process.env.PUPPETEER_EXECUTABLE_PATH,
-  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-  '/Applications/Chromium.app/Contents/MacOS/Chromium',
-  '/usr/bin/google-chrome',
-  '/usr/bin/chromium',
-].filter((candidate): candidate is string => Boolean(candidate));
 
 type SetupScrollMetrics = {
   dialogOverflow: boolean;
@@ -57,14 +50,10 @@ function readSetupScrollMetrics(): SetupScrollMetrics {
 }
 
 test('provider setup remains scrollable without showing a scrollbar', { timeout: 20_000 }, async (context) => {
-  const executablePath = BROWSER_CANDIDATES.find(existsSync);
-  if (!executablePath) {
-    context.skip('Chrome or Chromium is unavailable');
-    return;
-  }
+  const executablePath = browserExecutable();
 
   const css = readFileSync(new URL('../src/ui/initial-setup/initial-setup.css', import.meta.url), 'utf8');
-  const browser = await puppeteer.launch({ executablePath, headless: true });
+  const browser = await puppeteer.launch({ executablePath, headless: true, args: browserLaunchArgs() });
   try {
     const page = await browser.newPage();
     await page.setViewport({ width: 1440, height: 640 });

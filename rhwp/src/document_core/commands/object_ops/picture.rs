@@ -371,7 +371,7 @@ impl DocumentCore {
         };
         // description 내 JSON 제어 문자 이스케이프
         let desc_escaped = crate::document_core::helpers::json_escape(&c.description);
-        // [Task #741 후속] 외부 file path (HWP3 외부 그림) 영역 영역 dialog 표시 영역
+        // 그림 대화상자에 HWP3 외부 그림 경로를 표시한다.
         let external_path_field = match &pic.image_attr.external_path {
             Some(p) => format!(
                 ",\"externalPath\":\"{}\"",

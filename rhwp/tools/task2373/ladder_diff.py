@@ -6,11 +6,13 @@
 tac-host 발동 pi 의 스텝 차이(fresh − stored)가 host_px(≈font_size*75HU@96dpi)와
 일치하면 '한글이 host 줄박스를 실제 가산하는 문서'(가산군).
 """
+from pathlib import Path
+import argparse
 import os, re, subprocess, sys
 
 sys.stdout.reconfigure(encoding="utf-8")
-EXE = r"C:\Users\planet\rhwp\target\debug\rhwp.exe"
-RES = r"C:\Users\planet\rhwp\output\poc\task2373\resaved"
+EXE = str(Path(__file__).resolve().parents[2] / "target/debug/rhwp.exe")
+RES = str(Path(__file__).resolve().parents[2] / "output/poc/task2373/resaved")
 
 VP_RE = re.compile(r"(FullParagraph|PartialParagraph|Table|PartialTable)\s+pi=(\d+)\b.*?vpos=(-?\d+)")
 
@@ -47,22 +49,26 @@ def step(lad, pi):
 
 
 def main():
+    global EXE, RES
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--source-dir", type=Path, action="append", default=[], help="Search directory for original documents; repeat as needed")
+    ap.add_argument("--sample-list", type=Path, help="Text file listing original document paths")
+    ap.add_argument("--exe", default=EXE)
+    ap.add_argument("--resaved-dir", type=Path, default=Path(RES))
+    args = ap.parse_args()
+    if not args.source_dir and not args.sample_list:
+        ap.error("provide --source-dir or --sample-list")
+    EXE, RES = args.exe, args.resaved_dir
+    originals = {}
+    for directory in args.source_dir:
+        originals.update((p.name, str(p)) for p in directory.rglob("*") if p.is_file())
+    if args.sample_list:
+        originals.update((Path(line.strip()).name, line.strip())
+                         for line in args.sample_list.read_text(encoding="utf-8").splitlines() if line.strip())
     for fn in sorted(os.listdir(RES)):
         dst = os.path.join(RES, fn)
         stem = fn[3:]
-        # 원본 경로 복원
-        src = None
-        for root in (r"C:\Users\planet\hwpdocs\samples\노원소방서 현장대응단",
-                     r"C:\Users\planet\hwpdocs\samples\미래공간기획관 도시활력담당관"):
-            c = os.path.join(root, stem)
-            if os.path.exists(c):
-                src = c; break
-        if src is None:
-            with open(r"C:\Users\planet\rhwp\output\poc\survey10k_r16_20260719\sample10000.txt", encoding="utf-8") as fh:
-                for l in fh:
-                    l = l.strip()
-                    if os.path.basename(l) == stem:
-                        src = l; break
+        src = originals.get(stem)
         if src is None:
             print(f"!! 원본 미발견 {stem}"); continue
         lo, lr = ladder(src), ladder(dst)

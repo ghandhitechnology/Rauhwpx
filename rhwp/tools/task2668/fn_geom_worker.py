@@ -14,7 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(r"C:\Users\planet\rhwp")
+ROOT = Path(__file__).resolve().parents[2]
 EXE = str(ROOT / "target/debug/rhwp.exe")
 PT2PX = 4.0 / 3.0
 PAGENUM = re.compile(r"^[\s\-–—()<>[\]]*\d{1,4}[\s\-–—()<>[\]]*$")

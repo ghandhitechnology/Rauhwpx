@@ -1,26 +1,15 @@
+import { fileURLToPath } from 'node:url';
+import { browserExecutable, browserLaunchArgs } from './browser-support.ts';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
 import test from 'node:test';
 
 import puppeteer from 'puppeteer-core';
 import { createServer } from 'vite';
 
-const BROWSER_CANDIDATES = [
-  process.env.PUPPETEER_EXECUTABLE_PATH,
-  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-  '/Applications/Chromium.app/Contents/MacOS/Chromium',
-  '/usr/bin/google-chrome',
-  '/usr/bin/chromium',
-].filter((candidate): candidate is string => Boolean(candidate));
-
 test('narrow formatting ribbon stacks groups without overlap or clipping', { timeout: 30_000 }, async (context) => {
-  const executablePath = BROWSER_CANDIDATES.find(existsSync);
-  if (!executablePath) {
-    context.skip('Chrome or Chromium is unavailable');
-    return;
-  }
+  const executablePath = browserExecutable();
 
-  const root = new URL('../', import.meta.url).pathname;
+  const root = fileURLToPath(new URL('../', import.meta.url));
   const server = await createServer({
     root,
     configFile: false,
@@ -32,7 +21,7 @@ test('narrow formatting ribbon stacks groups without overlap or clipping', { tim
     await server.listen();
     const address = server.httpServer?.address();
     assert.ok(address && typeof address !== 'string');
-    browser = await puppeteer.launch({ executablePath, headless: true });
+    browser = await puppeteer.launch({ executablePath, headless: true, args: browserLaunchArgs() });
     const page = await browser.newPage();
     await page.setViewport({ width: 900, height: 700 });
     await page.goto(`http://127.0.0.1:${address.port}/`, { waitUntil: 'domcontentloaded' });

@@ -19,9 +19,9 @@ import numpy as np
 
 sys.stdout.reconfigure(encoding="utf-8")
 
-DOC = Path(r"C:\Users\planet\rhwp\samples\86712_regulatory_analysis.hwp")
-REF = Path(r"C:\Users\planet\rhwp\pdf\issue1921\86712_regulatory_analysis-2024.pdf")
-FONTS = Path(r"C:\Users\planet\rhwp\ttfs")
+DOC = Path(__file__).resolve().parents[2] / "samples/86712_regulatory_analysis.hwp"
+REF = Path(__file__).resolve().parents[2] / "pdf/issue1921/86712_regulatory_analysis-2024.pdf"
+FONTS = Path(__file__).resolve().parents[2] / "ttfs"
 
 
 def render(exe: str, out_pdf: Path):

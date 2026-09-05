@@ -48,6 +48,8 @@ const forbidden = [
   join(unpackedAgent, 'package-lock.json'),
   join(unpackedAgent, 'tsconfig.agents.json'),
   join(unpackedAgent, 'tests'),
+  join(unpackedAgent, 'node_modules', 'typescript'),
+  join(unpackedAgent, 'node_modules', '@typescript'),
 ];
 for (const path of forbidden) {
   if (existsSync(path)) throw new Error(`Development-only file was packaged: ${path}`);

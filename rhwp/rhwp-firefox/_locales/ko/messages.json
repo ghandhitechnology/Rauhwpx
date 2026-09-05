@@ -1,18 +1,18 @@
 {
   "extName": {
-    "message": "rhwp - HWP 문서 뷰어 & 에디터"
+    "message": "Rauhwpx - HWP 문서 뷰어 & 에디터"
   },
   "extDescription": {
     "message": "브라우저에서 HWP/HWPX 파일을 바로 열고 편집할 수 있는 확장 프로그램. 설치 없이, 광고 없이, 무료로."
   },
   "actionTitle": {
-    "message": "rhwp - HWP 뷰어"
+    "message": "Rauhwpx - HWP 뷰어"
   },
   "contextMenuOpen": {
-    "message": "rhwp로 열기"
+    "message": "Rauhwpx로 열기"
   },
   "badgeTooltip": {
-    "message": "rhwp로 열기"
+    "message": "Rauhwpx로 열기"
   },
   "badgeTooltipWithInfo": {
     "message": "$TITLE$ ($PAGES$쪽) $SIZE$",
@@ -23,7 +23,7 @@
     }
   },
   "optionsTitle": {
-    "message": "rhwp 설정"
+    "message": "Rauhwpx 설정"
   },
   "optionsAutoOpen": {
     "message": "HWP/HWPX 다운로드 시 자동으로 뷰어에서 열기"

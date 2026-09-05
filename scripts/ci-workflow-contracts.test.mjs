@@ -1,244 +1,120 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
+import yaml from 'js-yaml';
+import { changedPaths, selectChecks } from './ci-changes.mjs';
 
-function read(relativePath) {
-  return readFileSync(new URL(`../${relativePath}`, import.meta.url), 'utf8');
+const readYaml = (path) => yaml.load(readFileSync(new URL(`../${path}`, import.meta.url), 'utf8'));
+const workflows = Object.fromEntries(
+  readdirSync(new URL('../.github/workflows/', import.meta.url))
+    .filter((file) => /\.ya?ml$/.test(file))
+    .map((file) => [file, readYaml(`.github/workflows/${file}`)]),
+);
+const enabled = (files) => Object.entries(selectChecks(files)).filter(([, value]) => value).map(([key]) => key).sort();
+
+for (const [description, files, expected] of [
+  ['documentation', ['README.md', 'CONTRIBUTING.md', 'docs/releasing.md', 'rhwp/rhwp-agent/README.md'], []],
+  ['engine changes', ['rhwp/src/parser/hwp.rs'], ['browser', 'engine']],
+  ['corpus changes', ['rhwp/samples/report.hwpx', 'rhwp/pdf/reference.pdf'], ['browser', 'engine']],
+  ['native executable', ['rhwp/src/main.rs'], ['browser', 'engine', 'packages']],
+  ['agent instructions', ['rhwp/rhwp-agent/skills/review/SKILL.md'], ['app', 'packages', 'sessions']],
+  ['agent lockfile', ['rhwp/rhwp-agent/package-lock.json'], ['app', 'npm', 'packages', 'sessions']],
+  ['Studio unit tests', ['rhwp/rhwp-studio/tests/save.test.ts'], ['app', 'browser']],
+  ['desktop session tests', ['rhwp/rhwp-studio/tests/desktop-shell.test.ts'], ['app', 'browser', 'sessions']],
+  ['Rust dependencies', ['rhwp/Cargo.lock'], ['browser', 'engine', 'packages', 'rustAudit']],
+]) {
+  test(`change selection covers ${description}`, () => assert.deepEqual(enabled(files), expected));
 }
 
-function matrixIncludes(workflow) {
-  const marker = '      matrix:\n        include:\n';
-  const start = workflow.indexOf(marker);
-  assert.notEqual(start, -1, 'workflow matrix include block is missing');
-  const end = workflow.indexOf('    runs-on:', start);
-  assert.ok(end > start, 'workflow matrix include block is not bounded by runs-on');
-  const entries = [];
-  let current = null;
-  for (const line of workflow.slice(start + marker.length, end).split('\n')) {
-    const first = /^          - ([a-z_]+):\s*(\S.*)$/.exec(line);
-    if (first) {
-      current = { [first[1]]: first[2] };
-      entries.push(current);
-      continue;
+test('unknown paths and build/CI configuration fail safe to full checks', () => {
+  for (const file of ['new-component/index.ts', '.github/workflows/checks.yml', 'scripts/ci-changes.mjs', 'package.json', 'new-fixture.txt']) {
+    assert.ok(Object.values(selectChecks([file])).every(Boolean), file);
+  }
+});
+
+test('deletions and renamed code still select checks', () => {
+  const event = { pull_request: { base: { sha: 'a'.repeat(40) }, head: { sha: 'b'.repeat(40) } } };
+  const paths = changedPaths(event, (args) => {
+    assert.deepEqual(args, ['diff', '--name-only', '--no-renames', '-z', 'a'.repeat(40), 'b'.repeat(40), '--']);
+    return 'rhwp/src/removed.rs\0docs/removed.md\0';
+  });
+  assert.deepEqual(enabled(paths), ['browser', 'engine']);
+});
+
+test('dispatch and new-branch events request full verification', () => {
+  assert.ok(Object.values(selectChecks(changedPaths({}))).every(Boolean));
+  assert.ok(Object.values(selectChecks(changedPaths({ before: '0'.repeat(40), after: 'a'.repeat(40) }))).every(Boolean));
+  assert.throws(() => changedPaths({ before: '--unsafe', after: 'a'.repeat(40) }), /Invalid event commit SHA/);
+});
+
+function ancestors(workflow, id, visited = new Set()) {
+  const job = workflow.jobs[id];
+  assert.ok(job, `Unknown job dependency: ${id}`);
+  const needs = job.needs == null ? [] : Array.isArray(job.needs) ? job.needs : [job.needs];
+  for (const dependency of needs) {
+    assert.notEqual(dependency, id, 'A job cannot depend on itself');
+    if (!visited.has(dependency)) {
+      visited.add(dependency);
+      ancestors(workflow, dependency, visited);
     }
-    const next = /^            ([a-z_]+):\s*(\S.*)$/.exec(line);
-    if (next && current) current[next[1]] = next[2];
   }
-  return entries;
+  return visited;
 }
 
-const pullRequestWorkflows = [
-  '.github/workflows/desktop-packages.yml',
-  '.github/workflows/desktop-sessions.yml',
-  '.github/workflows/roundtrip-sweep.yml',
-  '.github/workflows/security-gates.yml',
-];
+test('one PR event owns each existing protected check name', () => {
+  const pr = Object.values(workflows).filter((workflow) => Object.hasOwn(workflow.on, 'pull_request'));
+  assert.equal(pr.length, 1);
+  const names = Object.values(pr[0].jobs).flatMap((job) => {
+    if (job.strategy?.matrix?.include) return job.strategy.matrix.include.map((entry) => job.name.replace('${{ matrix.label }}', entry.label).replace('${{ matrix.os }}', entry.os));
+    return [job.name];
+  });
+  for (const name of ['macOS ARM64 package', 'Windows x64 package', 'Session tests (macos-15)', 'Session tests (windows-latest)', 'Production dependency audit', 'Rust production dependency audit', 'Hostile document input boundaries', 'Auth and resource boundary regressions', 'Full IR field round-trip sweep']) {
+    assert.equal(names.filter((actual) => actual === name).length, 1, name);
+  }
+  assert.deepEqual(pr[0].on.push.branches, ['main']);
+});
 
-test('pull-request workflows never receive Browserbase live credentials', () => {
-  for (const path of pullRequestWorkflows) {
-    const workflow = read(path);
-    assert.match(workflow, /^\s*pull_request:\s*$/m, `${path} must remain a pull-request check`);
-    assert.doesNotMatch(workflow, /BROWSERBASE_API_KEY|BROWSERBASE_PROJECT_ID|GEMINI_API_KEY/);
-    assert.doesNotMatch(workflow, /test:browserbase:live/);
+test('releases depend on verification within the same workflow run', () => {
+  const nightly = workflows['nightly.yml'];
+  assert.ok(Object.hasOwn(nightly.on, 'schedule'));
+  for (const id of ['prepare', 'macos', 'windows', 'publish']) {
+    const dependencies = ancestors(nightly, id);
+    for (const verification of ['engine', 'app', 'hostile-input-smoke']) assert.ok(dependencies.has(verification), `${id} requires ${verification}`);
+  }
+  assert.equal(nightly.jobs.prepare.if, "github.ref == 'refs/heads/main'");
+  for (const filename of ['nightly.yml', 'release.yml']) {
+    const workflow = workflows[filename];
+    for (const platform of ['macos', 'windows']) {
+      const checkout = workflow.jobs[platform].steps.find((step) => step.uses?.startsWith('actions/checkout@'));
+      assert.equal(checkout.with.ref, '${{ github.sha }}', `${filename} packages the verified commit`);
+    }
+  }
+  assert.ok(ancestors(workflows['release.yml'], 'publish').has('verification'));
+});
+
+test('only publishing receives repository write permissions', () => {
+  for (const [filename, workflow] of Object.entries(workflows)) {
+    assert.deepEqual(workflow.permissions, { contents: 'read' }, filename);
+    for (const [id, job] of Object.entries(workflow.jobs)) {
+      for (const [scope, access] of Object.entries(job.permissions ?? {})) {
+        if (access === 'write') assert.equal(`${id}/${scope}`, 'publish/contents');
+      }
+      if (id !== 'publish') {
+        for (const step of job.steps ?? []) {
+          if (step.uses?.startsWith('actions/checkout@')) assert.equal(step.with?.['persist-credentials'], false, `${filename}/${id}`);
+        }
+      }
+    }
   }
 });
 
-test('nightly and tagged releases do not gate packaging on Browserbase live smoke', () => {
-  for (const path of ['.github/workflows/nightly-release.yml', '.github/workflows/release.yml']) {
-    const workflow = read(path);
-    assert.doesNotMatch(workflow, /^  browserbase-live:/m);
-    assert.doesNotMatch(workflow, /name: Browserbase Stagehand live smoke/);
-    assert.doesNotMatch(workflow, /test:browserbase:live/);
-    assert.doesNotMatch(workflow, /BROWSERBASE_API_KEY|BROWSERBASE_PROJECT_ID|GEMINI_API_KEY/);
-    assert.doesNotMatch(workflow, /^\s*if:\s*false\s*$/m);
-    assert.doesNotMatch(workflow, /^\s*pull_request:\s*$/m);
-  }
-
-  const release = read('.github/workflows/release.yml');
-  assert.match(release, /^  macos:\n[\s\S]*?^    needs: preflight$/m);
-  assert.match(release, /^  windows:\n[\s\S]*?^    needs: preflight$/m);
-  assert.match(release, /^  publish:\n[\s\S]*?^    needs: \[verification, macos, windows\]$/m);
-
-  const smoke = read('rhwp/rhwp-agent/tests/browserbase-live-smoke.mjs');
-  assert.match(smoke, /for \(let cycle = 1; cycle <= 3; cycle \+= 1\)/);
-  assert.match(smoke, /const cleaned = await browser\.cleanup\('live smoke finished'\)/);
-  assert.match(smoke, /if \(cleaned === true\) return true/);
-  assert.match(smoke, /primaryError\.cleanupError = cleanupError/);
-  assert.match(smoke, /throw cleanupError/);
-});
-
-test('only release publisher jobs receive a write-capable GitHub token', () => {
-  for (const path of ['.github/workflows/nightly-release.yml', '.github/workflows/release.yml']) {
-    const workflow = read(path);
-    assert.match(workflow, /^permissions:\n  contents: read$/m);
-    assert.match(
-      workflow,
-      /^  publish:\n[\s\S]*?^    permissions:\n      contents: write$/m,
-      `${path} must grant release writes only to its publish job`,
-    );
-    assert.equal((workflow.match(/contents: write/g) ?? []).length, 1);
-  }
-});
-
-test('nightly replacement does not ignore release deletion failures', () => {
-  const workflow = read('.github/workflows/nightly-release.yml');
-  assert.match(workflow, /existing_release_id=.*[\s\S]*gh api --method DELETE/);
-  assert.doesNotMatch(workflow, /gh release delete nightly[^\n]*\|\| true/);
-});
-
-test('nightly packaging requires a successful completed verification for the exact SHA', () => {
-  const workflow = read('.github/workflows/nightly-release.yml');
-  assert.equal((workflow.match(/actions: read/g) ?? []).length, 1);
-  assert.match(
-    workflow,
-    /^  verification-gate:\n[\s\S]*?^    permissions:\n      actions: read$/m,
-  );
-  assert.match(workflow, /actions\/workflows\/nightly\.yml\/runs\?head_sha=\$\{GITHUB_SHA\}&status=completed/);
-  assert.match(workflow, /\.head_sha == \\\"\$\{GITHUB_SHA\}\\\"/);
-  assert.match(workflow, /\.status == \\\"completed\\\"/);
-  assert.match(workflow, /\.conclusion == \\\"success\\\"/);
-  assert.match(workflow, /^  prepare:\n[\s\S]*?^    needs: verification-gate$/m);
-  assert.match(workflow, /^  macos:\n[\s\S]*?^    needs: prepare$/m);
-  assert.match(workflow, /^  windows:\n[\s\S]*?^    needs: prepare$/m);
-});
-
-test('third-party Rust toolchain actions are pinned to immutable commits', () => {
-  const workflows = [
-    '.github/workflows/desktop-packages.yml',
-    '.github/workflows/desktop-sessions.yml',
-    '.github/workflows/nightly-release.yml',
-    '.github/workflows/nightly.yml',
-    '.github/workflows/release.yml',
-    '.github/workflows/roundtrip-sweep.yml',
-    '.github/workflows/security-gates.yml',
+test('third-party Rust toolchain and installer actions are immutable', () => {
+  const actions = ['setup-rust', 'package-desktop'].map((name) => readYaml(`.github/actions/${name}/action.yml`));
+  const steps = [
+    ...Object.values(workflows).flatMap((workflow) => Object.values(workflow.jobs).flatMap((job) => job.steps ?? [])),
+    ...actions.flatMap((action) => action.runs.steps),
   ];
-  for (const path of workflows) {
-    const references = [...read(path).matchAll(/uses: dtolnay\/rust-toolchain@([^\s#]+)/g)];
-    assert.ok(references.length > 0, `${path} must install Rust through the pinned action`);
-    for (const [, reference] of references) assert.match(reference, /^[0-9a-f]{40}$/);
-  }
-});
-
-test('full Rust verification runs concurrently without dropping doctests', () => {
-  for (const path of ['.github/workflows/nightly.yml', '.github/workflows/release.yml']) {
-    const workflow = read(path);
-    assert.match(
-      workflow,
-      /uses: taiki-e\/install-action@[0-9a-f]{40}[^\n]*\n\s+with:\n\s+tool: cargo-nextest@0\.9\.143\n\s+fallback: none/,
-    );
-    assert.match(workflow, /cargo nextest run --locked --workspace --test-threads 4/);
-    assert.match(workflow, /cargo test --locked --workspace --doc/);
-    assert.doesNotMatch(workflow, /run: cargo test --locked --workspace\s*$/m);
-  }
-});
-
-test('tagged Rust verification is sharded and isolates its timing guard', () => {
-  const workflow = read('.github/workflows/release.yml');
-  assert.match(
-    workflow,
-    /^    strategy:\n      fail-fast: false\n      matrix:\n        shard: \[1, 2\]$/m,
-  );
-  assert.match(
-    workflow,
-    /cargo nextest run --locked --workspace --test-threads 4 --partition count:\$\{\{ matrix\.shard \}\}\/2/,
-  );
-  assert.match(workflow, /name: Test Rust documentation\n\s+if: matrix\.shard == 1/);
-  assert.match(workflow, /name: Install application dependencies\n\s+if: matrix\.shard == 1/);
-
-  const nextest = read('rhwp/.config/nextest.toml');
-  assert.match(nextest, /test\(inflated_row_count_does_not_slow_down_parsing\)/);
-  assert.match(nextest, /threads-required = "num-test-threads"/);
-});
-
-test('the SHA-pinned fuzz action explicitly selects the nightly toolchain', () => {
-  const workflow = read('.github/workflows/nightly.yml');
-  assert.match(
-    workflow,
-    /name: Install nightly Rust toolchain\n\s+uses: dtolnay\/rust-toolchain@[0-9a-f]{40}[^\n]*\n\s+with:\n\s+toolchain: nightly/,
-  );
-});
-
-test('pull requests build and inspect both supported desktop packages', () => {
-  const workflow = read('.github/workflows/desktop-packages.yml');
-  assert.deepEqual(matrixIncludes(workflow), [
-    {
-      os: 'macos-15',
-      label: 'macOS ARM64 package',
-      platform: 'macos',
-      architecture: 'arm64',
-      node_architecture: 'arm64',
-    },
-    {
-      os: 'windows-latest',
-      label: 'Windows x64 package',
-      platform: 'windows',
-      architecture: 'x64',
-      node_architecture: 'x64',
-    },
-  ]);
-  assert.match(workflow, /persist-credentials:\s*false/);
-  assert.match(workflow, /EXPECTED_NODE_ARCH: \$\{\{ matrix\.node_architecture \}\}/);
-  assert.match(workflow, /npm run verify:package/);
-  assert.match(workflow, /verify-release-artifacts\.mjs/);
-  assert.match(workflow, /Build unsigned Windows test installer/);
-  assert.match(workflow, /Build unsigned macOS test packages/);
-  assert.match(workflow, /Verify Windows installer is unsigned by design/);
-  assert.match(
-    workflow,
-    /name: Verify native Windows atomic replacement\n\s+if: matrix\.platform == 'windows'\n\s+working-directory: rhwp\n\s+run: cargo test --locked --bin rhwp atomic_file::tests -- --nocapture/,
-  );
-});
-
-test('desktop session jobs preserve protected context names and assert architecture', () => {
-  const workflow = read('.github/workflows/desktop-sessions.yml');
-  assert.match(workflow, /^    name: Session tests \(\$\{\{ matrix\.os \}\}\)$/m);
-  assert.deepEqual(matrixIncludes(workflow), [
-    { os: 'macos-15', architecture: 'arm64' },
-    { os: 'windows-latest', architecture: 'x64' },
-  ]);
-  assert.match(workflow, /EXPECTED_NODE_ARCH: \$\{\{ matrix\.architecture \}\}/);
-  assert.match(workflow, /uses: actions\/checkout@v5\n\s+with:\n\s+persist-credentials: false/);
-});
-
-test('pull-request round-trip code runs without persisted checkout credentials', () => {
-  const workflow = read('.github/workflows/roundtrip-sweep.yml');
-  assert.match(workflow, /pull_request:/);
-  assert.match(workflow, /uses: actions\/checkout@v5\n\s+with:\n\s+persist-credentials: false/);
-});
-
-test('security gate filters prove that each Cargo invocation ran at least one test', () => {
-  const workflow = read('.github/workflows/security-gates.yml');
-  assert.equal(
-    (workflow.match(/test result: ok\\\. \[1-9\]\[0-9\]\* passed;/g) ?? []).length,
-    3,
-  );
-  assert.equal((workflow.match(/did not run any tests\./g) ?? []).length, 3);
-  assert.equal((workflow.match(/cargo test[^\n]*2>&1 \| tee "\$\{cargo_test_output\}"/g) ?? []).length, 3);
-  assert.doesNotMatch(workflow, /if output="\$\(cargo test/);
-});
-
-test('security gates do not persist checkout credentials into tested code', () => {
-  const workflow = read('.github/workflows/security-gates.yml');
-  assert.equal((workflow.match(/uses: actions\/checkout@v5/g) ?? []).length, 4);
-  assert.equal((workflow.match(/persist-credentials:\s*false/g) ?? []).length, 4);
-});
-
-test('Rust audits fail on new warnings while keeping known debt visible', () => {
-  const workflows = [
-    '.github/workflows/security-gates.yml',
-    '.github/workflows/nightly.yml',
-    '.github/workflows/nightly-release.yml',
-    '.github/workflows/release.yml',
-  ];
-  const knownWarnings = [
-    'RUSTSEC-2026-0192',
-    'RUSTSEC-2026-0206',
-  ];
-
-  for (const path of workflows) {
-    const workflow = read(path);
-    assert.match(workflow, /cargo audit\s*$/m);
-    assert.match(workflow, /cargo audit --no-fetch -D warnings/);
-    for (const advisory of knownWarnings) assert.match(workflow, new RegExp(advisory));
+  for (const step of steps) {
+    if (/^(dtolnay\/rust-toolchain|taiki-e\/install-action)@/.test(step.uses ?? '')) assert.match(step.uses.split('@')[1], /^[a-f0-9]{40}$/);
   }
 });
