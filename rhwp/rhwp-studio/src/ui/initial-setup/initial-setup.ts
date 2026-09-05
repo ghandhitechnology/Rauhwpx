@@ -113,7 +113,7 @@ export function createInitialSetup(deps: InitialSetupDeps): InitialSetupUi {
   let setupStatuses: AgentSetupStatusMap | null = null;
   let accountStatus: AccountSessionStatus | null = null;
   let rauFailureActive = false;
-  // 설정 모달을 닫을 때 발생하는 취소 이벤트의 재진입만 막는다.
+  /** closeAgentSetup 이 abandoned 로 다시 들어오면 모달을 닫지 않는다. 재시도 실패는 다시 닫는다. */
   let closingSetupForRecovery = false;
   let lastFocus: HTMLElement | null = null;
 

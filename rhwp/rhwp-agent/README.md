@@ -108,11 +108,11 @@ AI requests send prompts and any document content read by the agent to your sele
    real collaboration/polling surface, so skill text stays provider-neutral.
 
 ## Environment variables
+`RHWP_STUDIO_ORIGINS` (default empty) is a comma-separated list of exact HTTPS Studio origins allowed for operator-run remote previews.
 
 | Variable | Default | Description |
 |---|---|---|
 | `RHWP_AGENT_PORT` | `5175` | Hub port (binds to 127.0.0.1 only) |
-| `RHWP_STUDIO_ORIGINS` | empty | Comma-separated exact HTTPS Studio origins allowed for operator-run remote previews |
 | `RHWP_AGENT_TOKEN` | `dev` | Shared token for WS connections (`?token=`) |
 | `RHWP_CLAUDE_MODEL` | `sonnet` | Model for Claude sessions |
 | `RHWP_CODEX_MODEL` | `gpt-5.6-sol` | Model for Codex sessions |

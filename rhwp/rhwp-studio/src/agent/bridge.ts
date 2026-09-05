@@ -1446,6 +1446,7 @@ export class AgentBridgeImpl implements AgentBridge {
       if (this.disposed || this.ws !== ws) return;
       this.clearConnectTimer();
       this.reconnectAttempt = 0;
+      this.chatStartSent = false;
       this.setState('connected');
       // 끊긴 사이에 끝난 도구 결과를 먼저 흘려보낸다 — 허브의 인플라이트 호출이
       // 30초 타임아웃까지 가지 않고 이 응답으로 마무리된다.
@@ -1457,8 +1458,9 @@ export class AgentBridgeImpl implements AgentBridge {
         this.pendingInterrupt = false;
       }
       this.flushPendingQuestionAnswer();
-      this.chatStartSent = false;
-      this.sendPendingChatStart();
+      if (this.pendingChatStart !== null) {
+        this.sendPendingChatStart();
+      }
     };
     ws.onmessage = (ev) => {
       if (this.disposed || this.ws !== ws) return;
