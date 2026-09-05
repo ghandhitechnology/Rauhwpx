@@ -1472,3 +1472,37 @@ test('question workflow reaches Studio and the durable turn without becoming an 
   assert.ok(workflows.every((mode) => mode === 'question'));
   assert.equal(turns[0].mode, 'question');
 });
+
+for (const [code, control] of [
+  ['INVALID_SESSION_STATE', {}],
+  ['TURN_ALREADY_RUNNING', { endRequested: true }],
+]) {
+  test(`a turn-start ${code} without a matching control conflict remains an error`, async (t) => {
+    const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'raucloud-turn-start-error-'));
+    t.after(() => fs.rm(workspace, { recursive: true, force: true }));
+    const document = path.join(workspace, 'document.hwp');
+    const timeline = path.join(workspace, 'input-timeline.json');
+    await fs.writeFile(document, 'unchanged document');
+    await fs.writeFile(timeline, JSON.stringify(portableTimeline()));
+    const failure = Object.assign(new Error('Turn could not start'), { code });
+    await assert.rejects(runSession({
+      workspace, credentials: {},
+      manifest: {
+        sessionId: 'turn-start-error', provider: 'codex', persistent: true, goal: 'Edit',
+        resources: [{ kind: 'document', name: 'document.hwp', filename: document }, { kind: 'timeline', name: 'timeline.json', filename: timeline }],
+        limits: { maxDurationSeconds: 900, maxTurns: 1 },
+      },
+      client: {
+        event: async () => {},
+        beginTurn: async () => { throw failure; },
+        control: async () => control,
+        finishClaim: async () => assert.fail('Unrelated turn failures must not be treated as completion'),
+      },
+      createHarness: async () => ({
+        start: async () => {}, close: async () => {},
+        runTurn: async () => assert.fail('A refused turn must not dispatch a provider'),
+        exportDocument: async () => assert.fail('An unrelated failure must not publish a result'),
+      }),
+    }), (error) => error === failure);
+  });
+}

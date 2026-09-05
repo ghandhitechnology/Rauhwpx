@@ -12,6 +12,7 @@ import { databasePragmas, openDatabase } from '../src/database.mjs';
 import { DisplayFrameStore } from '../src/display-frame-store.mjs';
 import { parseCommand, parseSessionCreate, parseUploadInit } from '../src/protocol.mjs';
 import { SessionStore } from '../src/session-store.mjs';
+import { runSession } from '../document-runtime/run.mjs';
 
 async function fixture(t, { now = () => Date.now(), chunkBytes = 8 } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-cloud-'));
@@ -1298,4 +1299,100 @@ for (const messageId of [null, 'unfinished_followup']) {
     assert.equal(pending[0].content, messageId ? 'Finish the footer' : 'Finish the original task');
     assert.equal(sessions.beginTurn(session.id, { turnNumber: 1, messageId }).status, 'running');
   });
+}
+
+for (const control of ['end', 'pause', 'redirect']) {
+  for (const stage of ['Studio startup', 'turn-start request']) {
+    test(`${control} during ${stage} resolves through the durable control gate`, async (t) => {
+      const { root, sessions, blobs, origin, session, database } = await persistentRoomFixture(t);
+      database.prepare('UPDATE sessions SET max_turns = ? WHERE id = ?').run(control === 'redirect' ? 3 : 1, session.id);
+      const workspace = path.join(root, 'runtime');
+      await fs.mkdir(workspace);
+      const documentPath = path.join(workspace, 'document.hwpx');
+      const timelinePath = path.join(workspace, 'input-timeline.json');
+      await fs.writeFile(documentPath, 'document before startup control');
+      await fs.writeFile(timelinePath, '{}');
+      const manifest = {
+        ...sessions.workerManifest(session.id),
+        resources: [
+          { kind: 'document', name: 'document.hwpx', filename: documentPath },
+          { kind: 'timeline', name: 'timeline.json', filename: timelinePath },
+        ],
+      };
+      assert.equal(manifest.endRequested, false, 'the runtime starts with the pre-control manifest');
+      let requested = false;
+      let providerCalls = 0;
+      let documentBytes = 'document before startup control';
+      const command = (type, payload = {}) => sessions.executeCommand(origin.device, session.id, parseCommand({
+        commandId: `${type.replace('.', '_')}_${sessions.getSession(session.id).stateVersion}`,
+        type, payload: { expectedVersion: sessions.getSession(session.id).stateVersion, ...payload },
+      }));
+      const requestControl = () => {
+        if (requested) return;
+        requested = true;
+        command(control === 'redirect' ? 'turn.redirect' : `session.${control}`, control === 'redirect'
+          ? { messageId: 'startup-redirect', content: 'Use the replacement instruction' } : {});
+      };
+      const result = await runSession({
+        manifest, workspace, credentials: {},
+        client: {
+          event: async () => {},
+          beginTurn: async (turn) => {
+            if (stage === 'turn-start request') requestControl();
+            return sessions.beginTurn(session.id, turn);
+          },
+          control: async () => sessions.workerControl(session.id),
+          completeTurn: async (completion) => sessions.completeTurn(session.id, completion),
+          finishClaim: async () => sessions.claimFinish(session.id),
+          pauseAck: async () => sessions.acknowledgePause(session.id),
+          upload: async (filename, options) => upload(blobs, origin.device.id, await fs.readFile(filename), options),
+          commitBoundary: async (boundary) => sessions.commitBoundary(session.id, boundary),
+        },
+        createHarness: async () => ({
+          start: async () => { if (stage === 'Studio startup') requestControl(); },
+          close: async () => {},
+          documentRevision: async () => 0,
+          runTurn: async (prompt, { readControl }) => {
+            providerCalls += 1;
+            assert.notEqual(control, 'end', 'End must not dispatch a provider after turn-start is refused');
+            const pending = await readControl();
+            if (pending.pauseRequested) return { stopReason: 'interrupted', stopped: true };
+            if (pending.redirectRequested) return { stopReason: 'interrupted', redirected: true };
+            assert.match(prompt, /Use the replacement instruction/);
+            documentBytes = 'document from replacement instruction';
+            command('session.end');
+            return { stopReason: 'end_turn' };
+          },
+          exportDocument: async (_format, filename) => {
+            const bytes = Buffer.from(documentBytes);
+            await fs.writeFile(filename, bytes);
+            return { sha256: createHash('sha256').update(bytes).digest('hex'), size: bytes.length };
+          },
+        }),
+      });
+      assert.equal(requested, true);
+      const turns = database.prepare(`
+        SELECT status, outcome FROM session_turns WHERE session_id = ? ORDER BY turn_number
+      `).all(session.id);
+      if (control === 'pause') {
+        assert.equal(result.paused, true);
+        assert.equal(providerCalls, 1);
+        assert.equal(sessions.getSession(session.id).turnsUsed, 0);
+        assert.deepEqual(turns.map(({ status }) => status), ['queued']);
+        command('session.resume');
+        sessions.claimNextSession();
+        assert.equal(sessions.claimFinish(session.id).messages[0].content, manifest.goal);
+      } else {
+        assert.equal(await fs.readFile(result.resultPath, 'utf8'), documentBytes);
+        const resultBlob = await upload(blobs, origin.device.id, await fs.readFile(result.resultPath));
+        const completed = sessions.publishResult(session.id, { blobId: resultBlob.id, size: resultBlob.size });
+        assert.equal(completed.status, 'completed');
+        assert.equal(completed.roomStatus, 'archived');
+        assert.equal(completed.turnsUsed, control === 'end' ? 0 : 2);
+        assert.equal(providerCalls, control === 'end' ? 0 : 2);
+        assert.deepEqual(turns.map(({ outcome }) => outcome), control === 'end' ? [] : ['redirected', 'completed']);
+        if (control === 'end') assert.equal(sessions.latestStableBoundary(session.id).turnNumber, 0);
+      }
+    });
+  }
 }

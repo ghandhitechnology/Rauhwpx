@@ -104,7 +104,7 @@ test('cloud lease locks local editing and queued messages cross only at a remote
   assert.match(main, /syncDocumentReadOnly/);
   assert.match(main, /cloudAuthorityTransitionCount > 0/);
   assert.match(main, /inputHandler\?\.setReadOnly\(documentReadOnly\)/);
-  assert.match(main, /inputHandler\?\.setUserEditingLocked\(lease\.active\)/);
+  assert.match(main, /inputHandler\?\.setUserEditingLocked\(agentUserEditingLocked\(\)\)/);
   assert.doesNotMatch(
     main.match(/function syncDocumentReadOnly\(\): void \{[\s\S]*?\n\}/)?.[0] ?? '',
     /planModeAllowsUserEditing/,

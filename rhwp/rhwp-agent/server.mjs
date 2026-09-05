@@ -2879,8 +2879,8 @@ async function startSession(
     workflow,
     phase: workflow === 'direct' ? 'implementing' : planning.phase,
     capabilityEpoch: planning.capabilityEpoch,
-    toolProfile: planning.mcpEnvironment().RHWP_TOOL_PROFILE,
-    mcpEnvironment: planning.mcpEnvironment(),
+    // Chat tool profiles follow the current workflow/phase after each provider
+    // restart. A fixed toolProfile would keep approved plans read-only.
     // pi · rau 전용 — 설치 경로와 영속 루트, 그리고 선택한 모델의 추론 지원 여부.
     piBin: (agent === 'rau' ? rauManager : piManager).piBin,
     piRoot: agent === 'rau' ? rauManager.rootDir : piManager.rootDir,

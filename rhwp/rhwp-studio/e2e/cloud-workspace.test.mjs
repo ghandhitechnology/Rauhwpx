@@ -948,6 +948,129 @@ try {
   assert.equal(workerState.startRequest[0], 'codex');
   assert.equal(workerState.startRequest[5], 'question');
   assert.deepEqual(workerState.startRequest[9], [{ role: 'user', content: 'Preserve the conversation history.' }]);
+  // The authenticated worker accepts native user input while the provider owns
+  // its turn. Both actors share the real WASM document and revision guard.
+  const alongsideBefore = await workerPage.evaluate(async () => {
+    const bridge = window.__agentBridge;
+    bridge.permissionProfile = 'unrestricted';
+    bridge.workflow = 'direct';
+    bridge.phase = 'direct';
+    bridge.handleAgentEvent({ type: 'turn-start', agent: 'codex', turnId: 'alongside-test' });
+    const structure = await bridge.executor.execute('get_structure', {}, 'codex');
+    return { revision: structure.revision, lease: bridge.getEditingLease(),
+      inputLocked: window.__inputHandler.isUserEditingLocked() };
+  });
+  assert.equal(alongsideBefore.lease.active, true, 'provider retains its busy/document-replacement lease');
+  assert.equal(alongsideBefore.inputLocked, false, 'native worker input remains editable during the turn');
+  const alongsidePressed = { displayPressedKeys: new Set(), displayPressedButtons: new Set() };
+  await workerPage.evaluate(() => window.__inputHandler.focus());
+  for (const input of [
+    { kind: 'key', action: 'down', key: 'Control' },
+    { kind: 'key', action: 'down', key: 'End' },
+    { kind: 'key', action: 'up', key: 'End' },
+    { kind: 'key', action: 'up', key: 'Control' },
+    { kind: 'key', action: 'down', key: 'Enter' },
+    { kind: 'key', action: 'up', key: 'Enter' },
+    { kind: 'text', text: '함께 편집 PR188_ALONGSIDE_USER' },
+  ]) await applyDisplayInput(workerPage, input, alongsidePressed);
+  const alongsideResult = await workerPage.evaluate(async ({ revision, bootstrap }) => {
+    const bridge = window.__agentBridge;
+    const wasm = window.__wasm;
+    const readText = () => Array.from({ length: wasm.getSectionCount() }, (_, sectionIdx) =>
+      Array.from({ length: wasm.getParagraphCount(sectionIdx) }, (_, paraIdx) =>
+        wasm.getTextRange(sectionIdx, paraIdx, 0, 100000)).join('\n')).join('\n');
+    const afterUser = await bridge.executor.execute('get_structure', {}, 'codex');
+    let staleCode = null;
+    try {
+      await bridge.executor.execute('insert_text', { expectedRevision: revision,
+        sectionIdx: 0, paraIdx: 0, charOffset: 0, text: 'STALE_AGENT_WRITE' }, 'codex');
+    } catch (error) { staleCode = error.code; }
+    const section = afterUser.sections.at(-1);
+    const paraIdx = section.paragraphCount - 1;
+    await bridge.executor.execute('insert_text', { expectedRevision: afterUser.revision,
+      sectionIdx: afterUser.sections.length - 1, paraIdx,
+      charOffset: section.paragraphs[paraIdx]?.length ?? 0, text: '\nPR188_ALONGSIDE_AGENT' }, 'codex');
+    await bridge.executor.execute('verify_changes', { includeImage: false }, 'codex');
+    const during = readText();
+    bridge.handleAgentEvent({ type: 'turn-end', agent: 'codex', turnId: 'alongside-test', stopReason: 'completed' });
+    const committed = readText();
+    const exported = await window.rauhwpxCloudRuntime.prepareExport(bootstrap, 'hwpx');
+    const bytes = new Uint8Array(exported.size);
+    for (let offset = 0; offset < exported.size;) {
+      const chunk = window.rauhwpxCloudRuntime.readExportChunk(bootstrap, offset, 1024 * 1024);
+      bytes.set(Uint8Array.from(atob(chunk.dataBase64), (char) => char.charCodeAt(0)), offset);
+      offset += chunk.size;
+    }
+    await new Promise((resolve, reject) => {
+      const requestId = 'worker-concurrent-export-reopen';
+      const off = window.__eventBus.on('open-document-bytes:done', (result) => {
+        if (result.requestId !== requestId) return;
+        off();
+        if (result.ok) resolve(); else reject(new Error(result.error));
+      });
+      window.__eventBus.emit('open-document-bytes', { bytes, fileName: 'worker-concurrent.hwpx',
+        requestId, suppressDialogs: true, skipUnsavedGuard: true });
+    });
+    return { userRevision: afterUser.revision, staleCode, during, committed, reopened: readText(),
+      exportSize: exported.size, lease: bridge.getEditingLease() };
+  }, { revision: alongsideBefore.revision, bootstrap });
+  assert.ok(alongsideResult.userRevision > alongsideBefore.revision, 'native edit advances the shared revision');
+  assert.equal(alongsideResult.staleCode, 'REVISION_MISMATCH');
+  for (const text of [alongsideResult.during, alongsideResult.committed, alongsideResult.reopened]) {
+    for (const marker of ['함께 편집 PR188_ALONGSIDE_USER', 'PR188_ALONGSIDE_AGENT']) {
+      assert.equal(text.split(marker).length - 1, 1, `exactly one ${marker}`);
+    }
+    assert.equal(text.includes('STALE_AGENT_WRITE'), false);
+  }
+  assert.ok(alongsideResult.exportSize > 0);
+  assert.equal(alongsideResult.lease.active, false);
+  // Failed and interrupted turns roll back only their own staged insertion.
+  // Cover native edits both before and after that insertion.
+  for (const [userFirst, stopReason] of [[true, 'error'], [false, 'cancelled']]) {
+    const suffix = userFirst ? 'BEFORE' : 'AFTER';
+    const userMarker = `사용자 유지 PR188_ROLLBACK_USER_${suffix}`;
+    const agentMarker = `PR188_ROLLBACK_AGENT_${suffix}`;
+    await workerPage.evaluate((turnId) => {
+      window.__agentBridge.handleAgentEvent({ type: 'turn-start', agent: 'codex', turnId });
+    }, `rollback-${suffix}`);
+    const userInput = async () => {
+      await workerPage.evaluate(() => window.__inputHandler.focus());
+      for (const input of [
+        { kind: 'key', action: 'down', key: 'Control' },
+        { kind: 'key', action: 'down', key: 'End' },
+        { kind: 'key', action: 'up', key: 'End' },
+        { kind: 'key', action: 'up', key: 'Control' },
+        { kind: 'key', action: 'down', key: 'Enter' },
+        { kind: 'key', action: 'up', key: 'Enter' },
+        { kind: 'text', text: userMarker },
+      ]) await applyDisplayInput(workerPage, input, alongsidePressed);
+    };
+    if (userFirst) await userInput();
+    await workerPage.evaluate(async (marker) => {
+      const executor = window.__agentBridge.executor;
+      const structure = await executor.execute('get_structure', {}, 'codex');
+      const section = structure.sections.at(-1);
+      const paraIdx = section.paragraphCount - 1;
+      await executor.execute('insert_text', { expectedRevision: structure.revision,
+        sectionIdx: structure.sections.length - 1, paraIdx,
+        charOffset: section.paragraphs[paraIdx]?.length ?? 0, text: `\n${marker}` }, 'codex');
+    }, agentMarker);
+    if (!userFirst) await userInput();
+    const rolledBack = await workerPage.evaluate(({ turnId, stopReason }) => {
+      window.__agentBridge.handleAgentEvent({ type: 'turn-end', agent: 'codex', turnId, stopReason });
+      const wasm = window.__wasm;
+      return Array.from({ length: wasm.getSectionCount() }, (_, sectionIdx) =>
+        Array.from({ length: wasm.getParagraphCount(sectionIdx) }, (_, paraIdx) =>
+          wasm.getTextRange(sectionIdx, paraIdx, 0, 100000)).join('\n')).join('\n');
+    }, { turnId: `rollback-${suffix}`, stopReason });
+    for (const marker of ['함께 편집 PR188_ALONGSIDE_USER', 'PR188_ALONGSIDE_AGENT', userMarker]) {
+      assert.equal(rolledBack.split(marker).length - 1, 1, `rollback preserves ${marker}`);
+    }
+    assert.equal(rolledBack.includes(agentMarker), false, 'failed/interrupted agent insertion is removed');
+  }
+  assert.equal(await page.evaluate(() => Array.from(window.__wasm.exportHwp()).join(',')), beforeHandoff,
+    'concurrent edits stay in the worker document and leave the original local document unchanged');
+  console.log('PASS active worker turn accepts Korean input, rejects stale agent writes, and preserves both edits through commit/export');
   if (process.env.CLOUD_WORKER_SCREENSHOT) {
     await workerPage.screenshot({ path: process.env.CLOUD_WORKER_SCREENSHOT, fullPage: true });
   }

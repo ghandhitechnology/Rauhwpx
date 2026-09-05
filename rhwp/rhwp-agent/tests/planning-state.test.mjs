@@ -11,6 +11,17 @@ import {
 
 const serverSource = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
 
+test('chat startup leaves tool profiles derived from mutable execution mode', () => {
+  const start = serverSource.lastIndexOf('  const opts = {');
+  const end = serverSource.indexOf('  const createBackend = SESSION_FACTORIES[agent];', start);
+  assert.ok(start >= 0 && end > start);
+  const chatOptions = serverSource.slice(start, end);
+  assert.match(chatOptions, /capabilityEpoch: planning\.capabilityEpoch/);
+  assert.doesNotMatch(chatOptions, /\b(?:toolProfile|mcpEnvironment)\s*:/);
+  assert.match(serverSource, /toolProfile: 'copy-layout-worker'/,
+    'background workers retain their explicit restricted profile');
+});
+
 function plan() {
   return {
     goal: 'Implement feature',
