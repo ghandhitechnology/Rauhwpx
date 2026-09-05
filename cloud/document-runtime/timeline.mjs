@@ -60,7 +60,7 @@ export function readTimeline(value, manifest, now = Date.now) {
   thread.model = typeof execution?.model === 'string' && execution.model
     ? execution.model
     : (thread.model || DEFAULT_MODEL[provider] || '');
-  thread.effort = typeof execution?.effort === 'string' && execution.effort
+  thread.effort = typeof execution?.effort === 'string'
     ? execution.effort
     : (thread.effort || (provider === 'cursor' ? '' : 'high'));
   if (provider === 'pi' && !thread.model) {

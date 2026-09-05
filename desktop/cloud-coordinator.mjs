@@ -229,6 +229,7 @@ const CLIENT_TO_SERVER_COMMAND = Object.freeze({
   'resolve-wait': 'wait.resolve',
   redirect: 'turn.redirect',
   workflow: 'conversation.workflow',
+  configure: 'conversation.configure',
   'queue-message': 'message.queue',
 });
 
@@ -1014,6 +1015,20 @@ export class CloudCoordinator extends EventEmitter {
         for (const session of sessions) {
           const sessionId = session.id ?? session.sessionId;
           const local = localBySession.get(sessionId);
+          if (local && session.configurationSupported && session.executionConfig) {
+            await this.#store.patch(local.id, (latest) => (
+              (session.stateVersion ?? 0) < (latest.serverVersion ?? 0) ? {} : {
+                provider: session.provider,
+                executionConfig: session.executionConfig,
+                configurationSupported: true,
+                configurationPending: session.configurationPending === true,
+                serverVersion: session.stateVersion,
+                executionPhase: session.executionPhase,
+                currentWait: session.currentWait ?? null,
+              }
+            ));
+            this.#assertProfileEpoch(profileEpoch);
+          }
           if (sessionId && ['staged', 'queued', 'running', 'suspended', 'completed'].includes(session.status)) {
             if (local) this.#watch(local.id, sessionId, local.lastEventSequence, profileEpoch);
             else this.#watchRemote(sessionId, profileEpoch);
@@ -2000,6 +2015,8 @@ export class CloudCoordinator extends EventEmitter {
       const updated = await this.#store.transition(record.id, state, {
         cloudSessionId: session.id ?? session.sessionId,
         serverVersion: session.stateVersion ?? session.version ?? 1,
+        configurationSupported: session.configurationSupported === true,
+        configurationPending: session.configurationPending === true,
       });
       await this.#store.clearPayload(record.id).catch((error) => {
         this.#emit({ type: 'payload-cleanup-failed', handoffId: record.id, error: error.message });
@@ -2104,6 +2121,14 @@ export class CloudCoordinator extends EventEmitter {
     const serverCommand = CLIENT_TO_SERVER_COMMAND[command];
     if (!serverCommand) throw new Error('Unsupported cloud command');
     const localHandoff = await this.#handoffForSession(sessionId, profileEpoch);
+    if (command === 'configure' && payload.provider !== (localHandoff?.provider ?? this.#remoteSessions.get(sessionId)?.provider)) {
+      const auth = await this.#providerAuthFor(payload.provider);
+      this.#assertProfileEpoch(profileEpoch);
+      if (auth && (Object.keys(auth.secrets ?? {}).length || Object.keys(auth.files ?? {}).length)) {
+        await this.#client.putProviderAuth(payload.provider, auth);
+        this.#assertProfileEpoch(profileEpoch);
+      }
+    }
     if (command === 'cancel' && localHandoff
       && ['preparing', 'uploading', 'committing'].includes(localHandoff.state)) {
       await this.#store.patch(localHandoff.id, { cancelRequested: true, error: null });
@@ -2172,6 +2197,10 @@ export class CloudCoordinator extends EventEmitter {
           serverVersion: result.session.stateVersion ?? result.session.version ?? handoff.serverVersion,
           statusMessage: result.session.suspendedReason?.message ?? null,
           pauseRequested: result.session.pauseRequested === true,
+          provider: result.session.provider ?? handoff.provider,
+          executionConfig: result.session.executionConfig ?? handoff.executionConfig,
+          configurationSupported: result.session.configurationSupported === true,
+          configurationPending: result.session.configurationPending === true,
           executionPhase: result.session.executionPhase ?? handoff.executionPhase ?? null,
           currentWait: result.session.currentWait ?? null,
           ...(typeof result.session.takeoverRequested === 'boolean'
@@ -2648,6 +2677,10 @@ export class CloudCoordinator extends EventEmitter {
           takeoverRequested,
           takeoverReady,
           takeoverBoundary: source.boundary ?? current.takeoverBoundary,
+          provider: source.provider ?? current.provider,
+          executionConfig: source.executionConfig ?? current.executionConfig,
+          configurationSupported: source.configurationSupported ?? current.configurationSupported,
+          configurationPending: source.configurationPending ?? current.configurationPending,
           executionPhase: source.executionPhase ?? current.executionPhase ?? null,
           currentWait,
           ...(event.type === 'message.accepted' ? {
@@ -2868,6 +2901,8 @@ export class CloudCoordinator extends EventEmitter {
       const updated = await this.#store.transition(record.id, state, {
         cloudSessionId: session.id ?? session.sessionId ?? record.id,
         serverVersion: session.stateVersion ?? session.version ?? 1,
+        configurationSupported: session.configurationSupported === true,
+        configurationPending: session.configurationPending === true,
         error: null,
         errorCode: null,
         retryable: null,
@@ -3536,6 +3571,10 @@ export class CloudCoordinator extends EventEmitter {
   #publicRemoteSession(session) {
     if (!session) return { kind: 'idle' };
     const base = {
+      ...(session.configurationSupported && session.executionConfig ? {
+        selection: { agent: session.provider, model: session.executionConfig.model, effort: session.executionConfig.effort },
+        configurationPending: session.configurationPending === true,
+      } : {}),
       sessionId: session.id ?? session.sessionId,
       version: session.stateVersion ?? session.version ?? 1,
       threadId: session.clientContext?.threadId ?? 'remote-cloud-thread',
@@ -3605,6 +3644,10 @@ export class CloudCoordinator extends EventEmitter {
   #publicSession(record) {
     if (!record) return { kind: 'idle' };
     const base = {
+      ...(record.configurationSupported && record.executionConfig ? {
+        selection: { agent: record.provider, model: record.executionConfig.model, effort: record.executionConfig.effort },
+        configurationPending: record.configurationPending === true,
+      } : {}),
       sessionId: record.cloudSessionId ?? record.id,
       version: record.serverVersion ?? record.revision,
       threadId: record.threadId || 'cloud-thread',

@@ -43,6 +43,7 @@ const COMMAND_TYPES: Record<CloudCommandRequest['command'], string> = {
   'resolve-wait': 'wait.resolve',
   redirect: 'turn.redirect',
   workflow: 'conversation.workflow',
+  configure: 'conversation.configure',
   'queue-message': 'message.queue',
 };
 
@@ -415,7 +416,12 @@ function publicSession(session: Record<string, unknown>, ownDeviceId: string | n
   const result = record(session.result);
   const reason = record(session.suspendedReason);
   const wait = record(session.currentWait);
+  const execution = record(session.executionConfig);
   const base = {
+    ...(session.configurationSupported === true && execution ? {
+      selection: { agent: session.provider, model: execution.model, effort: execution.effort },
+      configurationPending: session.configurationPending === true,
+    } : {}),
     sessionId: String(session.id ?? ''),
     version: Math.max(0, Number(session.stateVersion) || 0),
     threadId: String(context?.threadId ?? 'cloud-thread'),

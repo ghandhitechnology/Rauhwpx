@@ -78,6 +78,8 @@ function installDesktopCloudMock() {
   let transferFailures = 0;
   let idle = false;
   let transferredTimeline = null;
+  const selections = new Map();
+  let configurationFailure = false;
 
   const binding = (sessionId) => sessionId === editorSessionId
     ? {
@@ -103,6 +105,8 @@ function installDesktopCloudMock() {
     currentActivity: 'editing',
     phase: 'waiting',
     wait: null,
+    selection: selections.get(sessionId) ?? { agent: 'codex', model: 'gpt-5.6-sol', effort: 'high' },
+    configurationPending: false,
   });
   const snapshot = () => {
     const activeBinding = binding(activeSessionId);
@@ -186,6 +190,7 @@ function installDesktopCloudMock() {
     calls,
     editorSessionId,
     selectedSessionId,
+    failNextConfiguration() { configurationFailure = true; },
     failNextPublication() { publicationFailures += 1; },
     failNextTransfer() { transferFailures += 1; },
     resetIdle() {
@@ -277,6 +282,10 @@ function installDesktopCloudMock() {
     },
     async cloudCommand(payload) {
       record('cloudCommand', payload);
+      if (payload.command === 'configure') {
+        if (configurationFailure) { configurationFailure = false; throw new Error('Provider is not connected on Cloud'); }
+        selections.set(payload.sessionId, { agent: payload.payload.provider, model: payload.payload.model, effort: payload.payload.effort });
+      }
       activeSessionId = payload.sessionId;
       return { snapshot: snapshot() };
     },
@@ -568,6 +577,44 @@ try {
   assert.equal(queued.expectedVersion, 13);
   assert.equal(queued.message, 'queue through selected cloud session');
 
+  // Settings target the mounted Cloud room and survive older timeline snapshots.
+  await page.click('[aria-label="프로바이더 선택"]');
+  await page.waitForSelector('.ag-config-panel.ag-open');
+  assert.equal(await page.$eval('.ag-provider-item[data-agent="opencode"]', (node) => node.checkVisibility()), false);
+  await page.$eval('.ag-provider-item[data-agent="claude"]', (node) => node.click());
+  await page.waitForFunction(() => document.querySelector('.ag-root').dataset.agent === 'claude'
+    && !document.querySelector('[aria-label="프로바이더 선택"]').disabled);
+  await page.click('[aria-label="모델 선택"]');
+  await page.$eval('.ag-llm-item[data-model="haiku"]', (node) => node.click());
+  await page.waitForFunction(() => document.querySelector('.ag-llm-name').textContent === 'Haiku 4.5'
+    && !document.querySelector('[aria-label="모델 선택"]').disabled);
+  await page.click('[aria-label="추론 강도 선택"]');
+  await page.focus('.ag-eslider');
+  await page.keyboard.press('Home');
+  await page.waitForFunction(() => document.querySelector('.ag-effort-name').textContent === 'Low'
+    && !document.querySelector('[aria-label="추론 강도 선택"]').disabled);
+  const configured = await page.evaluate(() => window.__cloudWorkspaceHarness.calls
+    .filter((call) => call.method === 'cloudCommand' && call.payload.command === 'configure').map((call) => call.payload));
+  assert.equal(configured.length, 3);
+  assert.ok(configured.every((call) => call.sessionId === 'session-cloud-b' && call.expectedVersion === 13));
+  assert.deepEqual(configured.at(-1).payload, { provider: 'claude', model: 'haiku', effort: 'low' });
+  await page.evaluate(() => window.__cloudWorkspaceHarness.failNextConfiguration());
+  await page.click('[aria-label="프로바이더 선택"]');
+  await page.$eval('.ag-provider-item[data-agent="grok"]', (node) => node.click());
+  await page.waitForFunction(() => document.querySelector('.ag-messages').textContent.includes('Provider is not connected on Cloud'));
+  assert.equal(await page.$eval('.ag-root', (node) => node.dataset.agent), 'claude');
+  assert.equal(await page.$eval('.ag-llm-name', (node) => node.textContent), 'Haiku 4.5');
+  assert.equal(await page.$eval('.ag-effort-name', (node) => node.textContent), 'Low');
+  await page.click('[aria-label="모델 선택"]');
+  if (process.env.CLOUD_CONFIGURATION_SCREENSHOT) {
+    await page.$eval('.ag-config-panel', async (node) => {
+      await Promise.all(node.getAnimations({ subtree: true }).map((animation) => animation.finished.catch(() => {})));
+    });
+    await (await page.$('#agent-sidebar')).screenshot({ path: process.env.CLOUD_CONFIGURATION_SCREENSHOT });
+  }
+  await page.click('.ag-input');
+
+  const scrollBeforeReturn = await page.$eval('#scroll-container', (node) => node.scrollLeft);
   await page.click('[data-workspace-mode="local"]');
   await page.waitForFunction(() => window.__cloudWorkspaceHarness.calls
     .filter((call) => call.method === 'cloudCloseDisplay').length === 2);
@@ -625,14 +672,14 @@ try {
     sameTranscript: true,
     sameComposer: true,
     sameInput: true,
-    scrollLeft: 73,
+    scrollLeft: scrollBeforeReturn,
     scrollTop: 91,
     draft: 'blocked local draft',
     placeholder: 'Cloud 작업이 문서를 사용 중입니다. Cloud로 전환하거나 이 기기에서 이어받으세요.',
     targetMessage: 'Cloud 작업이 문서를 사용 중입니다. Cloud로 전환하거나 이 기기에서 이어받으세요.',
     targetMessageHidden: false,
-    commandCount: 1,
-    commandCountAfterBlockedSubmit: 1,
+    commandCount: 5,
+    commandCountAfterBlockedSubmit: 5,
     editorHidden: 'false',
     cloudHidden: 'true',
     editorInert: false,

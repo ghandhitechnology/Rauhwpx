@@ -156,8 +156,8 @@ test('planning saves after a user edit notify the hub mid-plan', () => {
 test('entering plan mode unlocks the lease immediately and holds messages until the hub finishes', () => {
   assert.match(bridge, /this\.beginWorkflowSwitch\(workflow\);[\s\S]*type: 'chat-workflow-set'/);
   assert.match(bridge, /this\.workflowSwitchPending = true;[\s\S]*this\.resetWorkflowState\(workflow\)/);
-  assert.match(bridge, /if \(this\.workflowSwitchPending \|\| this\.activeAgent === null \|\| this\.queuedMessages\.length > 0\)/);
-  assert.match(bridge, /if \(this\.workflowSwitchPending\) return;/);
+  assert.match(bridge, /if \(this\.pendingChatStart \|\| this\.workflowSwitchPending \|\| this\.activeAgent === null \|\| this\.queuedMessages\.length > 0\)/);
+  assert.match(bridge, /if \(this\.workflowSwitchPending \|\| this\.pendingChatStart\) return;/);
   assert.match(bridge, /case 'workflow-changed':[\s\S]*this\.finishWorkflowSwitch\(\);[\s\S]*this\.flushQueuedMessages\(\)/);
   assert.match(bridge, /BACKEND_SWITCH_FAILED[\s\S]*INVALID_WORKFLOW[\s\S]*WORKFLOW_ERROR[\s\S]*this\.revertWorkflowSwitch\(\)/);
   assert.match(bridge, /planModeAllowsUserEditing\(msg\.workflow, msg\.phase\)[\s\S]*this\.workflow = msg\.workflow;[\s\S]*this\.phase = msg\.phase/);

@@ -1269,3 +1269,59 @@ test('a paired device can seed provider credentials for every agent', async (t) 
   assert.equal(missing.status, 400);
   assert.equal((await missing.json()).error.code, 'PROVIDER_KEY_REQUIRED');
 });
+
+test('provider reconfiguration crosses the public/worker API with a fresh checkpoint and token fencing', async (t) => {
+  const { base, workerBase, auth, sessionStore } = await fixture(t, { withWorkerControl: true });
+  const origin = await pairOverHttp(auth, base);
+  for (const provider of ['codex', 'claude']) {
+    sessionStore.setProviderStatus(provider, { available: true, authenticated: true, version: 'test' });
+  }
+  const document = await uploadOverHttp(base, origin.accessToken, Buffer.from('document before switching'), {
+    name: 'switch.hwpx', kind: 'document',
+  });
+  const created = sessionStore.createSession(origin.device, {
+    sessionId: 'session_settings_http', provider: 'codex', persistent: true, goal: 'Remember the conversation',
+    clientContext: { threadId: 'settings-thread', documentId: 'settings-document' },
+    executionConfig: { model: 'gpt-5.6-luna', effort: 'low', workflow: 'direct', permissionProfile: 'unrestricted' },
+    originDocument: { blobId: document.id, size: document.size, name: 'switch.hwpx' },
+    resources: [], timeline: null, limits: { maxDurationSeconds: 3600, maxTurns: 10 },
+  });
+  sessionStore.executeCommand(origin.device, created.id, {
+    commandId: 'activate_settings_http', type: 'session.activate', payload: { expectedVersion: created.stateVersion },
+  });
+  sessionStore.claimNextSession();
+  sessionStore.prepareWorker(created.id, 'settings-worker-old');
+  const worker = new WorkerClient({ baseUrl: workerBase, token: 'settings-worker-old', sessionId: created.id });
+  await worker.beginTurn({ turnNumber: 1 });
+  await worker.completeTurn();
+  assert.equal((await worker.finishClaim()).waiting, true);
+  const response = await publicFetch(`${base}/v1/sessions/${created.id}/commands`, {
+    method: 'POST', headers: { Authorization: `Bearer ${origin.accessToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ commandId: 'configure_settings_http', type: 'conversation.configure', payload: {
+      expectedVersion: sessionStore.getSession(created.id).stateVersion, provider: 'claude', model: 'haiku', effort: 'low',
+    } }),
+  });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).session.configurationPending, true);
+  assert.equal((await worker.finishClaim()).configurationRestartRequested, true);
+  await assert.rejects(worker.configurationRestartAck(), { code: 'CHECKPOINT_REQUIRED' });
+  const checkpointPath = path.join(os.tmpdir(), `settings-checkpoint-${created.id}-${Date.now()}.hwpx`);
+  const timelinePath = `${checkpointPath}.json`;
+  t.after(() => Promise.all([fs.rm(checkpointPath, { force: true }), fs.rm(timelinePath, { force: true })]));
+  await fs.writeFile(checkpointPath, 'latest manual edits');
+  await fs.writeFile(timelinePath, JSON.stringify({ remembered: 'conversation' }));
+  const checkpoint = await worker.upload(checkpointPath, { name: 'switch.hwpx', kind: 'document' });
+  const timeline = await worker.upload(timelinePath, { name: 'timeline.json', kind: 'timeline' });
+  await worker.commitBoundary({ operationId: 'configuration_http_boundary', turnNumber: 1, revision: 1, kind: 'operation',
+    checkpoint: { blobId: checkpoint.id, size: checkpoint.size }, timeline: { blobId: timeline.id, size: timeline.size } });
+  assert.equal((await worker.configurationRestartAck()).status, 'queued');
+  await assert.rejects(worker.manifest(), { code: 'WORKER_UNAUTHORIZED' });
+  assert.equal(sessionStore.claimNextSession().id, created.id);
+  sessionStore.prepareWorker(created.id, 'settings-worker-new');
+  const replacement = new WorkerClient({ baseUrl: workerBase, token: 'settings-worker-new', sessionId: created.id });
+  const manifest = await replacement.manifest();
+  assert.equal(manifest.provider, 'claude');
+  assert.equal(manifest.executionConfig.model, 'haiku');
+  assert.equal(manifest.latestCheckpoint.blobId, checkpoint.id);
+  assert.equal(manifest.resources.find((resource) => resource.kind === 'timeline').blobId, timeline.id);
+});

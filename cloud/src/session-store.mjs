@@ -2,7 +2,7 @@ import { EventEmitter } from 'node:events';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
 import { transaction } from './database.mjs';
-import { CloudError, DEFAULT_LIMITS, ROOM_PROTOCOL_VERSION, TRANSFER_LIMITS, publicSession } from './protocol.mjs';
+import { CloudError, DEFAULT_LIMITS, ROOM_PROTOCOL_VERSION, TRANSFER_LIMITS, publicSession, parseProviderSelection } from './protocol.mjs';
 
 const COMPLETED_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 const SUSPENDED_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -680,6 +680,36 @@ export class SessionStore {
       });
       return { response: { session: this.getSession(session.id), waitId, eventSeq: event.seq }, event };
     }
+    if (command.type === 'conversation.configure') {
+      const selection = parseProviderSelection(command.payload);
+      if (session.protocol_version !== ROOM_PROTOCOL_VERSION || session.room_status !== 'active'
+        || session.status !== 'running' || session.execution_phase !== 'idle'
+        || session.current_turn_id || session.current_wait_id || session.pause_requested_at
+        || session.takeover_requested_at || session.end_requested_at || session.sleep_requested_at
+        || session.configuration_restart_requested_at) {
+        throw new CloudError('INVALID_SESSION_STATE', 'Provider settings can only change between turns', 409);
+      }
+      const provider = this.providerStatus(selection.provider);
+      if (!provider.available || !provider.authenticated) {
+        throw new CloudError(provider.available ? 'AUTH_REQUIRED' : 'PROVIDER_UNAVAILABLE',
+          provider.errorMessage || 'Connect the selected provider on Cloud first', 409);
+      }
+      const execution = { workflow: 'direct', permissionProfile: 'unrestricted',
+        ...(session.execution_config_json ? JSON.parse(session.execution_config_json) : {}) };
+      if (session.provider === selection.provider && execution.model === selection.model && execution.effort === selection.effort) {
+        return { response: { session: this.getSession(session.id) }, event: null };
+      }
+      this.database.prepare(`
+        UPDATE sessions SET provider = ?, execution_config_json = ?, configuration_restart_requested_at = ?,
+          configuration_restart_after_revision = (SELECT COALESCE(MAX(revision), -1) FROM session_checkpoints WHERE session_id = ?),
+          state_version = state_version + 1, updated_at = ? WHERE id = ?
+      `).run(selection.provider, JSON.stringify({ ...execution, model: selection.model, effort: selection.effort }), now, session.id, now, session.id);
+      const event = this.#appendEventInTransaction(session.id, 'conversation.configuration_changed', {
+        ...selection, configurationSupported: true, configurationPending: true,
+        executionConfig: { ...execution, model: selection.model, effort: selection.effort },
+      });
+      return { response: { session: this.getSession(session.id), eventSeq: event.seq }, event };
+    }
     if (command.type === 'conversation.workflow') {
       const workflow = command.payload.workflow;
       const switchable = session.execution_phase === 'idle'
@@ -687,7 +717,7 @@ export class SessionStore {
         || session.execution_phase === 'awaiting-question-answer'
         || session.execution_phase === 'awaiting-external-effect-approval';
       if (session.protocol_version !== ROOM_PROTOCOL_VERSION || session.room_status !== 'active'
-        || session.status !== 'running' || !switchable || !['direct', 'plan', 'question'].includes(workflow)) {
+        || session.status !== 'running' || session.configuration_restart_requested_at || !switchable || !['direct', 'plan', 'question'].includes(workflow)) {
         throw new CloudError('INVALID_SESSION_STATE', 'Conversation workflow cannot change right now', 409);
       }
       const executionConfig = session.execution_config_json ? JSON.parse(session.execution_config_json) : {};
@@ -732,7 +762,7 @@ export class SessionStore {
       if (!row) return null;
       const now = this.now();
       const updated = this.database.prepare(`
-        UPDATE sessions SET status = 'running', state_version = state_version + 1,
+        UPDATE sessions SET status = 'running', configuration_restart_requested_at = NULL, configuration_restart_after_revision = NULL, state_version = state_version + 1,
           execution_phase = CASE WHEN protocol_version = 2 THEN 'working' ELSE execution_phase END,
           started_at = COALESCE(started_at, ?), worker_heartbeat_at = ?, updated_at = ?
         WHERE id = ? AND status = 'queued'
@@ -745,7 +775,7 @@ export class SessionStore {
           ON CONFLICT(session_id) DO UPDATE SET generation = generation + 1, status = 'warm', updated_at = excluded.updated_at
         `).run(row.id, row.client_document_id, now, now);
       }
-      event = this.#appendEventInTransaction(row.id, 'session.running', { status: 'running' });
+      event = this.#appendEventInTransaction(row.id, 'session.running', { status: 'running', configurationPending: false });
       return this.getSession(row.id);
     });
     if (event) this.#notify(event);
@@ -911,7 +941,7 @@ export class SessionStore {
     const turn = transaction(this.database, () => {
       const session = this.getSessionRow(sessionId);
       if (session.protocol_version !== ROOM_PROTOCOL_VERSION || session.status !== 'running'
-        || session.room_status !== 'active' || session.end_requested_at) {
+        || session.room_status !== 'active' || session.end_requested_at || session.configuration_restart_requested_at) {
         throw new CloudError('INVALID_SESSION_STATE', 'Conversation cannot start another turn', 409);
       }
       const existing = this.database.prepare(`
@@ -1166,6 +1196,9 @@ export class SessionStore {
       if (row.sleep_requested_at) {
         return { ready: false, messages: [], sleepRequested: true };
       }
+      if (row.configuration_restart_requested_at) {
+        return { ready: false, messages: [], configurationRestartRequested: true };
+      }
       const configuredWorkflow = row.execution_config_json ? JSON.parse(row.execution_config_json).workflow : null;
       const workflow = ['plan', 'question'].includes(configuredWorkflow) ? configuredWorkflow : 'direct';
       if (row.protocol_version === ROOM_PROTOCOL_VERSION && row.room_status === 'active'
@@ -1259,6 +1292,34 @@ export class SessionStore {
     });
     for (const event of events) this.#notify(event);
     return result;
+  }
+
+  acknowledgeConfigurationRestart(sessionId) {
+    let event;
+    const session = transaction(this.database, () => {
+      const row = this.getSessionRow(sessionId);
+      if (row.status !== 'running' || !row.configuration_restart_requested_at
+        || row.current_turn_id || row.current_wait_id) {
+        throw new CloudError('CONFIGURATION_NOT_PENDING', 'No idle provider change is pending', 409);
+      }
+      if (this.latestStableCheckpoint(sessionId).revision <= row.configuration_restart_after_revision) {
+        throw new CloudError('CHECKPOINT_REQUIRED', 'Save the Cloud document before changing providers', 409);
+      }
+      const now = this.now();
+      this.database.prepare(`
+        UPDATE sessions SET status = 'queued', configuration_restart_requested_at = NULL, configuration_restart_after_revision = NULL,
+          state_version = state_version + 1, sandbox_id = NULL, worker_token_hash = NULL,
+          worker_heartbeat_at = NULL, updated_at = ? WHERE id = ?
+      `).run(now, sessionId);
+      this.database.prepare('DELETE FROM session_runtime_leases WHERE session_id = ?').run(sessionId);
+      event = this.#appendEventInTransaction(sessionId, 'conversation.configuration_restarting', {
+        status: 'queued', safeBoundary: true, configurationPending: false,
+      });
+      return this.getSession(sessionId);
+    });
+    if (event) this.#notify(event);
+    this.#invalidateRuntime(sessionId);
+    return session;
   }
 
   acknowledgePause(sessionId) {

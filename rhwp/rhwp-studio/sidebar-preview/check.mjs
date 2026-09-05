@@ -201,6 +201,34 @@ try {
       );
     },
   );
+  await step('Provider, model and effort changes after the first reply', async () => {
+    await play('chat');
+    const messageCount = await page.$$eval('.ag-msg-user', (nodes) => nodes.length);
+    await page.click('[aria-label="프로바이더 선택"]');
+    await page.waitForSelector('.ag-config-panel.ag-open');
+    await page.click('.ag-provider-item[data-agent="codex"]');
+    await page.click('.ag-llm-item[data-model="gpt-5.6-luna"]');
+    await page.click('.ag-llm-item[data-model="gpt-6-astra"]');
+    await page.focus('.ag-eslider');
+    await page.keyboard.press('End');
+    await page.waitForFunction(() => document.querySelector('.ag-effort-name').textContent === 'Max');
+    assert.equal(await page.$eval('.ag-llm-name', (node) => node.textContent), 'Astra');
+    assert.equal(await page.$$eval('.ag-msg-user', (nodes) => nodes.length), messageCount);
+    await screenshot('provider-settings-after-reply');
+    await page.click('.ag-provider-item[data-agent="cursor"]');
+    assert.equal(await page.$eval('.ag-effort', (node) => node.hidden), true);
+    await page.click('.ag-provider-item[data-agent="claude"]');
+    await page.click('.ag-llm-item[data-model="haiku"]');
+    assert.equal(await page.$eval('.ag-eslider', (node) => node.getAttribute('aria-valuemax')), '2');
+    await page.click('.ag-input');
+    await page.type('.ag-input', 'Continue the same conversation after changing the model.');
+    await page.click('.ag-send');
+    await page.waitForFunction(() => window.sidebarPreview.bridge.isTurnRunning());
+    assert.equal(await page.$eval('[aria-label="프로바이더 선택"]', (node) => node.disabled), true);
+    await page.waitForFunction(() => !window.sidebarPreview.bridge.isTurnRunning());
+    assert.equal(await page.$eval('[aria-label="프로바이더 선택"]', (node) => node.disabled), false);
+    assert.equal(await page.$$eval('.ag-msg-user', (nodes) => nodes.length), messageCount + 1);
+  });
   await step(
     'Plan approval and document change acceptance/rejection',
     async () => {

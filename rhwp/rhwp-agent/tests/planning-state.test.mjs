@@ -81,7 +81,7 @@ test('hub applies planning state before Codex restart and serializes later studi
 test('a new Plan chat proves provider planning readiness before chat-started', () => {
   assert.match(
     serverSource,
-    /record\.agentSession = \{[\s\S]*if \(workflow === 'plan'\) \{[\s\S]*requireWorkflowSwitchBackend\(record\.agentSession\);[\s\S]*await record\.agentSession\.backend\.setExecutionMode\(providerModeRequest\(record\.agentSession, 'planning'\)\);/,
+    /record\.agentSession = \{[\s\S]*if \(workflow === 'plan'\) \{[\s\S]*requireWorkflowSwitchBackend\(record\.agentSession\);[\s\S]*await backend\.setExecutionMode\(providerModeRequest\(record\.agentSession, planning\.phase\)\);/,
   );
   assert.ok(
     serverSource.indexOf("if (workflow === 'plan')") < serverSource.indexOf("type: 'chat-started'"),

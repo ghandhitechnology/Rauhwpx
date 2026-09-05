@@ -125,7 +125,15 @@ export interface CloudQueuedMessage {
   state: 'queued' | 'accepted';
 }
 
+export interface CloudProviderSelection {
+  agent: AgentName;
+  model: string;
+  effort: string;
+}
+
 export interface CloudSessionBase {
+  selection?: CloudProviderSelection;
+  configurationPending?: boolean;
   sessionId: string;
   version: number;
   threadId: string;
@@ -430,6 +438,7 @@ export type CloudCommand =
   | 'resolve-wait'
   | 'redirect'
   | 'workflow'
+  | 'configure'
   | 'queue-message';
 
 export interface CloudFollowupAttachment {

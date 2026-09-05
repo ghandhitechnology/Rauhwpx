@@ -376,6 +376,13 @@ export async function runSession({
         if (sleep.sleepCancelled) return { ready: false, waiting: true, messages: [] };
         return { outcome: sleep };
       }
+      if (claim?.configurationRestartRequested === true) {
+        await clearStudioReadiness();
+        await saveBoundary('operation', turnNumber, true);
+        await liveEvents.flush();
+        await client.configurationRestartAck();
+        return { outcome: { reconfigured: true, timelinePath } };
+      }
       if (claim?.ready === true) return { ready: true, messages: [] };
       if (claim?.waiting === true) return { ready: false, waiting: true, messages: [] };
       if (!Array.isArray(claim?.messages) || claim.messages.length === 0) {
