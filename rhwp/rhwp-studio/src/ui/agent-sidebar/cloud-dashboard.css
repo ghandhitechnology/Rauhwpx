@@ -59,7 +59,6 @@
 .ag-cd-line { stroke: var(--cd-accent); }
 .ag-cd-point { fill: var(--ag-bg-2); stroke: var(--cd-accent); stroke-width: 2; }
 .ag-cd-chart-empty { position: absolute; inset: 20% 8% 30% 12%; display: grid; place-items: center; margin: 0; color: var(--ag-text-secondary); font-size: 11px; text-align: center; background: color-mix(in srgb, var(--ag-bg-2) 85%, transparent); }
-.ag-cd-chart-note { font-size: 10px; }
 .ag-cd-data { margin-top: 10px; font-size: 10px; color: var(--ag-text-secondary); }
 .ag-cd-data summary { cursor: pointer; width: fit-content; }
 .ag-cd-data table { width: 100%; margin-top: 10px; border-collapse: collapse; font-variant-numeric: tabular-nums; }

@@ -131,14 +131,13 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
   usage.head.append(ranges);
   const usageTotal = el('div', 'ag-cd-usage-total');
   const chart = el('div', 'ag-cd-chart');
-  const chartNote = el('p', 'ag-cd-muted ag-cd-chart-note');
   const dataDetails = el('details', 'ag-cd-data');
   dataDetails.append(el('summary', '', '일별 기록 보기'));
   const dataTable = el('table');
   const caption = el('caption', '', '이 기기에서 확인한 계정 사용량');
   dataTable.append(caption);
   dataDetails.append(dataTable);
-  usage.root.append(usageTotal, chart, chartNote, dataDetails);
+  usage.root.append(usageTotal, chart, dataDetails);
 
   const server = panel('Cloud 서버 연결', 'ag-cd-server');
   const serverBadge = el('span', 'ag-cd-tag');
@@ -165,9 +164,8 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
     renderSessions();
   });
   chats.head.append(filter);
-  const chatScope = el('p', 'ag-cd-muted', '현재 서버에 남은 대화와 마지막으로 고른 모델입니다.');
   const chatList = el('ul', 'ag-cd-chat-list');
-  chats.root.append(chatScope, chatList);
+  chats.root.append(chatList);
 
   const config = panel('서버 설정과 사용 한도', 'ag-cd-config');
   const configFacts = el('dl', 'ag-cd-facts');
@@ -299,7 +297,6 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
     });
     chart.replaceChildren(plot);
     if (!known.length) chart.append(el('p', 'ag-cd-chart-empty', '아직 사용 기록이 없습니다.'));
-    chartNote.textContent = `단위: 분 · ${timeZone}. 이 기기에서 마지막으로 확인한 계정 사용량입니다. 빈 날짜는 기록이 없습니다.`;
     const thead = el('thead');
     const tr = el('tr');
     ['날짜', '사용 시간', '마지막 확인'].forEach((label) => { const th = el('th', '', label); th.scope = 'col'; tr.append(th); });
@@ -384,7 +381,8 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
       : gate?.kind === 'unavailable' ? gate.reason
       : gate?.kind === 'logged-out' ? 'Raucloud를 사용하려면 Rauhwpx 계정으로 로그인하세요.'
       : state === 'failed' ? '서버가 응답하지 않습니다. 다시 연결하거나 서버 설정을 확인하세요.'
-      : ready ? '채팅과 문서 작업에 사용할 수 있습니다.' : '서버 관리에서 연결을 설정하세요.';
+      : ready ? '' : '서버 관리에서 연결을 설정하세요.';
+    serverNote.hidden = !serverNote.textContent;
     facts(configFacts, [
       ['한도 초기화', allowance ? `${formatTime(allowance.resetAt, allowance.timeZone)} · ${allowance.timeZone}` : '사용량 확인 후 표시'],
       ['오늘 서버 시작', allowance ? `${allowance.coldStarts.usedToday} / ${allowance.coldStarts.dailyLimit}회` : '—'],
