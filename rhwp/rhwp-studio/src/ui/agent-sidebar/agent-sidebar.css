@@ -7278,5 +7278,5 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 }
 
 .ag-document-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 0 4px 6px; }
-.ag-document-controls:has(> :only-child[hidden]) { display: none; }
+.ag-document-controls:not(:has(> :not([hidden]))) { display: none; }
 .ag-document-view-switch[hidden] { display: none; }

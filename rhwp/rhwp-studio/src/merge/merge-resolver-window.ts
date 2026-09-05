@@ -623,6 +623,8 @@ export class MergeResolverWindow {
     if (!this.completion.hasPending || !application) {
       const title = this.titleInput?.value.trim() ?? '';
       if (!title) {
+        const options = this.titleInput?.closest('details');
+        if (options) options.open = true;
         this.titleInput?.focus();
         this.showActionStatus('병합을 완료하려면 커밋 메시지를 입력하세요.', 'error');
         this.announce('병합을 완료하려면 커밋 메시지를 입력하세요.');
