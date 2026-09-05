@@ -462,6 +462,19 @@ export function createVersionManagerPage(controller: VersionManagerController): 
     if (name) await perform(() => controller.createBranch(name));
   })());
   toolbar.prepend(createBranchButton);
+  const shelf = el('button', 'ag-versions-primary ag-versions-create-shelf', '현재 변경 보관');
+  shelf.type = 'button';
+  shelf.dataset.versionMutation = 'true';
+  shelf.dataset.versionPrerequisiteTitle = '보관할 변경 내용이 없습니다.';
+  shelf.addEventListener('click', () => void (async () => {
+    const title = await promptVersionText({
+      title: '현재 변경 보관',
+      label: '보관 이름 (선택)',
+      optional: true,
+    });
+    if (title !== null) await perform(() => controller.createShelf(title || undefined));
+  })());
+  toolbar.prepend(shelf);
 
   const body = el('div', 'ag-versions-body');
   const historyPanel = el('div', 'ag-versions-panel ag-versions-history');
@@ -636,6 +649,7 @@ export function createVersionManagerPage(controller: VersionManagerController): 
     hideDateTooltip();
     branchStrip.hidden = tab !== 'history';
     createBranchButton.hidden = tab !== 'branches';
+    shelf.hidden = tab !== 'shelves';
     for (const [id, button] of tabButtons) {
       const selected = id === tab;
       button.classList.toggle('ag-active', selected);
@@ -937,21 +951,8 @@ export function createVersionManagerPage(controller: VersionManagerController): 
 
   function renderShelves(): void {
     shelvesPanel.replaceChildren();
-    const shelf = el('button', 'ag-versions-primary', '현재 변경 보관');
-    shelf.type = 'button';
-    shelf.dataset.versionMutation = 'true';
     shelf.dataset.versionPrerequisiteDisabled = String(!current.dirty);
-    shelf.dataset.versionPrerequisiteTitle = '보관할 변경 내용이 없습니다.';
     shelf.disabled = !current.dirty;
-    shelf.addEventListener('click', () => void (async () => {
-      const title = await promptVersionText({
-        title: '현재 변경 보관',
-        label: '보관 이름 (선택)',
-        optional: true,
-      });
-      if (title !== null) await perform(() => controller.createShelf(title || undefined));
-    })());
-    shelvesPanel.appendChild(shelf);
     const list = el('div', 'ag-versions-card-list');
     if (current.shelves.length === 0) list.appendChild(el('p', 'ag-versions-placeholder', '보관한 변경이 없습니다.'));
     for (const item of current.shelves) {

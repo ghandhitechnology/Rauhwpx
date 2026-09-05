@@ -217,7 +217,8 @@
   margin: 0;
 }
 
-.ag-versions-create-branch {
+.ag-versions-create-branch,
+.ag-versions-create-shelf {
   margin-right: auto;
   min-height: 28px;
 }
