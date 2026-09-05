@@ -1176,6 +1176,7 @@ export class AgentBridgeImpl implements AgentBridge {
   constructor(deps: AgentBridgeDeps, opts?: AgentBridgeOptions) {
     this.revision = new RevisionTracker(deps.eventBus);
     this.overlay = new PendingOverlayRenderer({
+      getCaretPosition: () => deps.inputHandler.getCursorPosition(),
       canvasView: deps.canvasView,
       wasm: deps.wasm,
       eventBus: deps.eventBus,
