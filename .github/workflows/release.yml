@@ -60,17 +60,12 @@ jobs:
         run: node scripts/audit-production.mjs
 
   verification:
-    env:
-      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
-    name: Test tagged source (${{ matrix.shard }}/2)
+    name: Verify release contracts
     needs: preflight
     runs-on: ubuntu-latest
-    timeout-minutes: 180
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2]
-
+    timeout-minutes: 15
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
     steps:
       - name: Check out tagged source
         uses: actions/checkout@v5
@@ -78,92 +73,22 @@ jobs:
           persist-credentials: false
 
       - name: Set up Node.js
-        if: matrix.shard == 1
         uses: actions/setup-node@v5
         with:
           node-version: 22.18.0
           cache: npm
-          cache-dependency-path: |
-            package-lock.json
-            rhwp/rhwp-studio/package-lock.json
-            rhwp/rhwp-agent/package-lock.json
+          cache-dependency-path: package-lock.json
 
-      - uses: ./.github/actions/setup-rust
-        with:
-          wasm: ${{ matrix.shard == 1 && 'true' || 'false' }}
-          cache: verification-${{ matrix.shard }}
+      - name: Install release tooling dependencies
+        run: npm ci
 
-      - name: Install pinned nextest
-        uses: taiki-e/install-action@1ed6d7be6168f6c9046541087ff549b6bc581fdf # v2.87.2
-        with:
-          tool: cargo-nextest@0.9.143
-          fallback: none
+      # The pull request verifies application behavior. The release additionally
+      # checks its packaging contracts; cloud and desktop jobs verify built assets.
+      - name: Check release tooling and packaging contracts
+        run: npm run test:ci
 
-      - name: Cache cargo-audit executable
-        if: matrix.shard == 1
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/cargo-audit
-          key: cargo-audit-${{ runner.os }}-${{ runner.arch }}-0.22.2
-
-      - name: Install pinned cargo-audit
-        if: matrix.shard == 1
-        run: |
-          if [[ "$(cargo audit --version 2>/dev/null || true)" != "cargo-audit 0.22.2" ]]; then
-            cargo install cargo-audit --version 0.22.2 --locked --force
-          fi
-
-      - name: Reject RustSec vulnerabilities and new warnings
-        if: matrix.shard == 1
-        working-directory: rhwp
-        run: |
-          set -euo pipefail
-          # Print accepted existing warnings, then fail if RustSec adds a new warning.
-          cargo audit
-          cargo audit --no-fetch -D warnings \
-            --ignore RUSTSEC-2026-0192 \
-            --ignore RUSTSEC-2026-0206
-
-      - name: Test Rust workspace shard
-        working-directory: rhwp
-        run: cargo nextest run --locked --workspace --test-threads 4 --partition count:${{ matrix.shard }}/2
-
-      - name: Test Rust documentation
-        if: matrix.shard == 1
-        working-directory: rhwp
-        run: cargo test --locked --workspace --doc
-
-      - name: Install application dependencies
-        if: matrix.shard == 1
-        run: npm run setup
-      - name: Build WASM engine
-        if: matrix.shard == 1
-        run: npm run build:wasm
-      - name: Check repository tooling and provider adapter types
-        if: matrix.shard == 1
-        run: |
-          npm run test:ci
-          npm --prefix rhwp/rhwp-agent run typecheck
-          npm --prefix rhwp/rhwp-studio run e2e:check
-      - name: Test browser integration
-        if: matrix.shard == 1
-        env:
-          PUPPETEER_EXECUTABLE_PATH: /usr/bin/google-chrome
-        run: |
-          "$PUPPETEER_EXECUTABLE_PATH" --version
-          npm --prefix rhwp/rhwp-studio run test:browser
-
-      - name: Test agent hub and process lifecycle
-        if: matrix.shard == 1
-        run: node --test --test-concurrency=1 rhwp/rhwp-agent/tests/*.test.mjs
-
-      - name: Test hosted Rau authorization service
-        if: matrix.shard == 1
-        run: npm --prefix rhwp/rau-credits test
-
-      - name: Test Studio
-        if: matrix.shard == 1
-        run: npm --prefix rhwp/rhwp-studio test
+      - name: Check published documentation
+        run: npm run check:docs
 
   macos:
     name: Build macOS installers
