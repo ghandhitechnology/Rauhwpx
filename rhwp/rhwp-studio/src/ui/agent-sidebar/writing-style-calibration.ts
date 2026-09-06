@@ -98,21 +98,51 @@ function createCheckIcon(): SVGSVGElement {
 }
 
 function createPixelFlag(language: WritingStyleLanguage): SVGSVGElement {
-  const flag = svg('ag-calibration-flag', '0 0 24 16');
+  const width = language === 'ko' ? 72 : 96;
+  const flag = svg('ag-calibration-flag', `0 0 ${width} 48`);
   flag.setAttribute('shape-rendering', 'crispEdges');
-  addSvgShape(flag, 'rect', { x: '0', y: '0', width: '24', height: '16', fill: '#ffffff' });
+  addSvgShape(flag, 'rect', { width: String(width), height: '48', fill: '#fff' });
   if (language === 'en') {
-    addSvgShape(flag, 'rect', { x: '10', y: '0', width: '4', height: '16', fill: '#c8102e' });
-    addSvgShape(flag, 'rect', { x: '0', y: '6', width: '24', height: '4', fill: '#c8102e' });
+    for (const x of [0, 72]) {
+      addSvgShape(flag, 'rect', { x: String(x), width: '24', height: '48', fill: '#d80621' });
+    }
+    // 계단형 윤곽으로 그린 단풍잎과 줄기.
+    addSvgShape(flag, 'path', {
+      d: 'M48 6h2v4h2v4h2v-2h3v9h2v-3h4v3h4v4h-3v3h-3v3h-4v3h2v3h-9v6h-4v-6h-9v-3h2v-3h-4v-3h-3v-3h-3v-4h4v-3h4v3h2v-9h3v2h2v-4h2V6z',
+      fill: '#d80621',
+    });
   } else {
-    addSvgShape(flag, 'rect', { x: '9', y: '5', width: '6', height: '3', fill: '#cd2e3a' });
-    addSvgShape(flag, 'rect', { x: '9', y: '8', width: '6', height: '3', fill: '#0047a0' });
-    addSvgShape(flag, 'rect', { x: '3', y: '3', width: '4', height: '1', fill: '#111111' });
-    addSvgShape(flag, 'rect', { x: '17', y: '12', width: '4', height: '1', fill: '#111111' });
-    addSvgShape(flag, 'rect', { x: '17', y: '3', width: '4', height: '1', fill: '#111111' });
-    addSvgShape(flag, 'rect', { x: '3', y: '12', width: '4', height: '1', fill: '#111111' });
+    // 건(☰), 감(☵), 리(☲), 곤(☷): 각 괘의 세 효와 끊어진 획을 보존합니다.
+    const trigrams = [
+      { x: 16, y: 11, angle: -Math.PI / 4, broken: [false, false, false] },
+      { x: 56, y: 11, angle: Math.PI / 4, broken: [true, false, true] },
+      { x: 16, y: 37, angle: Math.PI / 4, broken: [false, true, false] },
+      { x: 56, y: 37, angle: -Math.PI / 4, broken: [true, true, true] },
+    ];
+    for (let y = 0; y < 48; y++) {
+      for (let x = 0; x < 72; x++) {
+        const dx = x + 0.5 - 36;
+        const dy = y + 0.5 - 24;
+        let fill = '';
+        if (dx * dx + dy * dy <= 144) {
+          const redLobe = (dx + 6) ** 2 + dy ** 2 <= 36;
+          const blueLobe = (dx - 6) ** 2 + dy ** 2 <= 36;
+          fill = (dy < 0 && !blueLobe) || redLobe ? '#cd2e3a' : '#0047a0';
+        }
+        for (const trigram of trigrams) {
+          const tx = x + 0.5 - trigram.x;
+          const ty = y + 0.5 - trigram.y;
+          const u = tx * Math.cos(trigram.angle) + ty * Math.sin(trigram.angle);
+          const v = -tx * Math.sin(trigram.angle) + ty * Math.cos(trigram.angle);
+          if (Math.abs(u) >= 6) continue;
+          for (let line = 0; line < 3; line++) {
+            if (Math.abs(v - (line - 1) * 4) < 1 && (!trigram.broken[line] || Math.abs(u) >= 1.5)) fill = '#111';
+          }
+        }
+        if (fill) addSvgShape(flag, 'rect', { x: String(x), y: String(y), width: '1', height: '1', fill });
+      }
+    }
   }
-  addSvgShape(flag, 'rect', { x: '.5', y: '.5', width: '23', height: '15', fill: 'none', stroke: 'rgba(0,0,0,.18)', 'stroke-width': '1' });
   return flag;
 }
 
