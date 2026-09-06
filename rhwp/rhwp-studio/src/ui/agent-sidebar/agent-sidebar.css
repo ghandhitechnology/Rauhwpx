@@ -6668,6 +6668,8 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   animation: ag-dock-arrive 220ms var(--ag-motion-out) both;
 }
 
+.ag-fleet-dock-pill[hidden] { display: none; }
+
 .ag-fleet-dock-pill:hover {
   color: var(--ag-text);
   background: var(--ag-hover);
@@ -6742,6 +6744,8 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 }
 
 .ag-fleet-popup {
+  box-sizing: border-box;
+  width: 100%;
   pointer-events: auto;
   display: flex;
   min-width: 0;
@@ -6757,7 +6761,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   border-radius: var(--ag-r-field);
   background: color-mix(in srgb, var(--ag-bg) 88%, transparent);
   box-shadow: var(--n-elev-2);
-  animation: ag-dock-arrive 240ms var(--ag-motion-out) both;
+  animation: none;
 }
 
 .ag-fleet-popup[hidden] {

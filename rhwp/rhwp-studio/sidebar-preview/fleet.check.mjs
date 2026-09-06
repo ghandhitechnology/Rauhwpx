@@ -6,6 +6,13 @@ export async function checkFleetPreview(page, origin) {
     await page.waitForSelector('.ag-fleet-task');
     assert.equal(await page.$eval('.ag-fleet-dock-pill', el => el.getAttribute('aria-expanded')), 'false');
     await page.click('.ag-fleet-dock-pill');
+    assert.equal(await page.$eval('.ag-fleet-dock-pill', el => el.checkVisibility()), false);
+    await page.keyboard.press('Escape');
+    assert.equal(await page.$eval('.ag-fleet-dock-pill', el => el === document.activeElement && el.checkVisibility()), true);
+    await page.click('.ag-fleet-dock-pill');
+    await page.click('.ag-fleet-toggle');
+    assert.equal(await page.$eval('.ag-fleet-popup', el => el.hidden), true);
+    await page.click('.ag-fleet-dock-pill');
     assert.equal(await page.$$eval('.ag-fleet-task', rows => rows.length), 3);
     assert.equal(await page.$$eval('.ag-fleet-task.ag-open', rows => rows.length), 0);
     assert(await page.$eval('.ag-fleet-head', el => el.getBoundingClientRect().height < 50));
