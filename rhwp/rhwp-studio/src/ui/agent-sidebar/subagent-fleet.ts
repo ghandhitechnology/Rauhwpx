@@ -335,7 +335,7 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
     // 카드 머리와 같은 수를 쓴다 — 알약과 카드가 다른 숫자를 말하면 오류처럼 보인다.
     // 아직 도는 행은 카드 안에서 휠이 가리킨다.
     const head = workflowsOnly ? '워크플로' : `서브에이전트 ${total}`;
-    return { state, label: `${head} · ${tail}` };
+    return { state, label: live > 0 && !workflowsOnly ? head : `${head} · ${tail}` };
   }
 
   function updateDock(): void {
@@ -694,7 +694,7 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
       return `워크플로 · ${name} · ${tail}`;
     }
     const prefix = card.tasks.some((task) => task.background) ? '백그라운드 작업' : '서브에이전트';
-    return `${prefix} ${card.tasks.length} · ${tail}`;
+    return live ? `${prefix} ${card.tasks.length}` : `${prefix} ${card.tasks.length} · ${tail}`;
   }
 
   function refreshCard(card: CardEntry): void {
