@@ -189,10 +189,10 @@ test('한 턴의 서브에이전트는 도크 팝업에 모이고 턴이 끝나�
   assert.equal(hosted.length, 1, '에이전트 묶음은 카드 하나를 쓴다');
   const card = hosted[0];
   assert.equal(all(card, 'ag-fleet-row').length, 2);
-  assert.equal(one(card, 'ag-fleet-label').textContent, '서브에이전트 2 · 작업 중');
+  assert.equal(one(card, 'ag-fleet-label').textContent, '서브에이전트 2');
   assert.ok(one(card, 'ag-fleet-dot').className.includes('ag-run'));
   // 알약은 남은 작업 수를 말하고 픽셀 휠을 싣는다.
-  assert.equal(one(view.root, 'ag-fleet-dock-label').textContent, '서브에이전트 2 · 작업 중');
+  assert.equal(one(view.root, 'ag-fleet-dock-label').textContent, '서브에이전트 2');
   assert.equal(all(pill(view), 'ag-pixel-bit').length, 8);
   assert.ok(pill(view).className.includes('ag-live'));
   assert.equal((view.root as unknown as FakeNode).hidden, false);
@@ -201,9 +201,9 @@ test('한 턴의 서브에이전트는 도크 팝업에 모이고 턴이 끝나�
 
   view.taskEnd({ type: 'task-end', agent: 'claude', taskId: 't1', status: 'completed' } as never);
   // 하나가 남아 도는 동안 카드는 계속 작업 중이다.
-  assert.equal(one(card, 'ag-fleet-label').textContent, '서브에이전트 2 · 작업 중');
+  assert.equal(one(card, 'ag-fleet-label').textContent, '서브에이전트 2');
   // 알약은 카드 머리와 같은 수를 말한다 — 남은 수가 아니라 전체다.
-  assert.equal(one(view.root, 'ag-fleet-dock-label').textContent, '서브에이전트 2 · 작업 중');
+  assert.equal(one(view.root, 'ag-fleet-dock-label').textContent, '서브에이전트 2');
   assert.equal(popup(view).hidden, false);
 
   view.taskEnd({ type: 'task-end', agent: 'claude', taskId: 't2', status: 'failed' } as never);
@@ -274,7 +274,7 @@ test('다 끝난 묶음 뒤에 같은 턴의 새 서브에이전트가 오면 �
   assert.equal(all(hosted[1], 'ag-fleet-row').length, 1);
   assert.equal(slots.length, 2, '새 카드도 자기 슬롯을 예약한다');
   assert.equal(popup(view).hidden, true, '새 묶음도 자동으로 펼치지 않는다');
-  assert.equal(one(view.root, 'ag-fleet-dock-label').textContent, '서브에이전트 2 · 작업 중');
+  assert.equal(one(view.root, 'ag-fleet-dock-label').textContent, '서브에이전트 2');
 
   view.sweep();
   // 두 카드가 각자의 슬롯으로, 태어난 순서대로 정착한다.
@@ -295,7 +295,7 @@ test('워크플로는 자기 카드에 단계 레일과 멤버 행을 그린다'
   assert.equal(one(view.root, 'ag-fleet-dock-label').textContent, '워크플로 · 작업 중');
   view.taskStart(taskStart('a1') as never);
   assert.equal(hostedCards(view).length, 2, '워크플로는 서브에이전트 묶음과 카드를 나눠 쓴다');
-  assert.equal(one(view.root, 'ag-fleet-dock-label').textContent, '서브에이전트 2 · 작업 중');
+  assert.equal(one(view.root, 'ag-fleet-dock-label').textContent, '서브에이전트 2');
 
   const card = hostedCards(view)[0];
   view.taskProgress({
@@ -329,7 +329,7 @@ test('워크플로는 자기 카드에 단계 레일과 멤버 행을 그린다'
   view.taskEnd({ type: 'task-end', agent: 'claude', taskId: 'w1', status: 'completed' } as never);
   assert.equal(one(card, 'ag-fleet-label').textContent, '워크플로 · 초안 파이프라인 · 1 오류');
   // a1 이 아직 돌고 있으니 알약의 시제는 작업 중이다 — 멤버 실패는 정착한 뒤에 오른다.
-  assert.equal(one(view.root, 'ag-fleet-dock-label').textContent, '서브에이전트 2 · 작업 중');
+  assert.equal(one(view.root, 'ag-fleet-dock-label').textContent, '서브에이전트 2');
   view.taskEnd({ type: 'task-end', agent: 'claude', taskId: 'a1', status: 'completed' } as never);
   assert.equal(one(view.root, 'ag-fleet-dock-label').textContent, '서브에이전트 2 · 1 오류');
   view.reset();
@@ -458,7 +458,7 @@ test('독립 백그라운드 provider task 는 owning turn 과 다음 turn 을 �
   const card = hostedCards(view)[0];
   assert.equal(hostedCards(view).length, 1, 'owning turn 종료 뒤에도 도크에서 실행 중이다');
   assert.equal(settledCards(conversation).length, 0);
-  assert.equal(one(card, 'ag-fleet-label').textContent, '백그라운드 작업 1 · 작업 중');
+  assert.equal(one(card, 'ag-fleet-label').textContent, '백그라운드 작업 1');
   assert.equal(all(card, 'ag-fleet-row').length, 1, 'single worker is represented by the task row only');
   assert.equal(all(card, 'ag-fleet-member').length, 0);
   assert.equal(one(card, 'ag-fleet-role').hidden, true, 'redundant dedicated-worker badge is omitted');
