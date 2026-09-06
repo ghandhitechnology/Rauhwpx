@@ -19,6 +19,8 @@ git push origin "v$(node -p "require('./package.json').version")"
 
 [release.yml](../.github/workflows/release.yml) verifies the tagged source and publishes after all desktop and cloud builds succeed. The GitHub release contains installers, update metadata, SHA-256 checksums, signed cloud runtime archives and their bootstrap bundles. Each desktop package bundles both cloud runtime architectures for VPS setup.
 
+Run the full engine, browser, and agent suites through pull-request CI before merging. Tagged releases run repository and release contract checks, Cloud runtime tests and container smoke tests, and installer verification. They do not repeat the full Rust workspace test build or the application integration suites.
+
 Cloud builds push `<version>-amd64` and `<version>-arm64` image tags to GHCR. After tagged-source verification, the workflow combines those exact tags into the `<version>` and `stable` multi-architecture images. It also retains `stable-amd64` and `stable-arm64` aliases. Both manifests use versioned architecture tags so overlapping releases cannot mix their images. Desktop and hosted provisioning pin the versioned image; `RAUHWpx_RAILWAY_IMAGE` can override it.
 
 ## Nightly
