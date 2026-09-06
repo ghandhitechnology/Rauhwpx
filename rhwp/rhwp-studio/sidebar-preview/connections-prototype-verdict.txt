@@ -1,0 +1,3 @@
+Connection design prototype archive
+
+Compared A (compact expandable list) and B (provider picker with shared inspector). Andy selected A; production implementation is in the parent commit. Both prototypes use sample data. Run npm run dev:sidebar and open /?prototype=connections&variant=A&page=settings (or variant=B).

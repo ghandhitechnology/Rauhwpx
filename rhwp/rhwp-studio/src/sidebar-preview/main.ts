@@ -182,3 +182,8 @@ window.addEventListener('pagehide', () => {
   mock.bridge.dispose();
   versions.dispose?.();
 });
+
+if (import.meta.env.DEV && params.get('prototype') === 'connections') {
+  eventBus.emit('settings:open', { destination: 'connections' });
+  void import('./connections.prototype.ts').then(({ mountConnectionsPrototype }) => mountConnectionsPrototype());
+}
