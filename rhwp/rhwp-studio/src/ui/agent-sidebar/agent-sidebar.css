@@ -6771,6 +6771,73 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   flex: 0 0 auto;
 }
 
+/* 선택한 에이전트가 팝업 전체를 사용하며 목록 복귀 버튼만 남긴다. */
+.ag-fleet-back { display: none; }
+
+.ag-fleet-popup:has(.ag-fleet-row.ag-open) {
+  height: min(320px, 40vh);
+  overflow: hidden;
+}
+
+.ag-fleet-popup:has(.ag-fleet-row.ag-open) > .ag-fleet:not(:has(.ag-open)),
+.ag-fleet-popup:has(.ag-open) .ag-fleet-toggle,
+.ag-fleet-popup:has(.ag-open) .ag-fleet-rail,
+.ag-fleet-popup:has(.ag-open) .ag-fleet-row:not(.ag-open) {
+  display: none;
+}
+
+.ag-fleet-popup > .ag-fleet:has(.ag-open) {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  border: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ag-fleet-popup:has(.ag-open) .ag-fleet-collapse,
+.ag-fleet-popup:has(.ag-open) .ag-fleet-body,
+.ag-fleet-popup:has(.ag-open) .ag-fleet-rows,
+.ag-fleet-popup .ag-fleet-row.ag-open {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  padding: 0;
+  border: 0;
+}
+
+.ag-fleet-popup .ag-open > .ag-fleet-back {
+  display: block;
+  flex: 0 0 auto;
+  padding: 8px;
+  border: 0;
+  background: transparent;
+  color: var(--ag-text-secondary);
+  font: inherit;
+  font-size: var(--font-size-sm, 11px);
+  text-align: left;
+  cursor: pointer;
+}
+
+.ag-fleet-back:hover { background: var(--ag-hover); }
+.ag-fleet-back:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+
+.ag-fleet-popup .ag-open > .ag-fleet-head { flex: 0 0 auto; }
+.ag-fleet-popup .ag-open > .ag-fleet-head .ag-fleet-row-chevron { visibility: hidden; }
+
+.ag-fleet-popup .ag-open > .ag-fleet-reveal {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.ag-fleet-popup .ag-open .ag-fleet-detail {
+  flex: 1;
+  max-height: none;
+  margin: 0;
+}
+
 /* ── 픽셀 휠 ─────────────────────────────────────────
    부드러운 회전이 아니라 step 타이밍으로 칸을 건너뛰는 8픽셀 짜리 바퀴다.
    비트 하나가 12% 씩 이동하고, 나머지는 단계별로 어두워진다. */

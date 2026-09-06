@@ -632,3 +632,22 @@ test('텍스트만 있는 작업도 펼쳐지고 선택한 미리보기만 실�
   assert.equal(second.getAttribute('aria-expanded'), 'false');
   view.reset();
 });
+
+
+test('선택한 미리보기는 새 출력의 끝으로 스크롤하고 목록으로 돌아간다', () => {
+  const { view } = mountFleet();
+  view.beginTurn();
+  view.taskStart(taskStart('scroll') as never);
+  const row = one(hostedCards(view)[0], 'ag-fleet-row');
+  const detail = one(row, 'ag-fleet-detail') as unknown as HTMLElement;
+  Object.assign(detail, { scrollHeight: 1200, clientHeight: 240, scrollTop: 0 });
+  one(row, 'ag-fleet-head').click();
+  assert.equal(detail.scrollTop, 1200);
+  detail.scrollTop = 0;
+  view.routeTextDelta({ type: 'text-delta', agent: 'claude', parentTaskId: 'scroll', text: '새 출력' } as never);
+  assert.equal(detail.scrollTop, 1200);
+  one(row, 'ag-fleet-back').click();
+  assert.equal(one(row, 'ag-fleet-head').getAttribute('aria-expanded'), 'false');
+  assert.equal((one(row, 'ag-fleet-reveal') as unknown as HTMLElement).inert, true);
+  view.reset();
+});

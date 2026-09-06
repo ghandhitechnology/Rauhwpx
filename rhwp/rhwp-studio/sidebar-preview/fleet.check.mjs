@@ -13,7 +13,16 @@ export async function checkFleetPreview(page, origin) {
     await page.waitForFunction(() => document.querySelector('.ag-fleet-task.ag-open .ag-fleet-preview').textContent.includes('문서의 문장'));
     const before = await page.$eval('.ag-fleet-task.ag-open .ag-fleet-preview', el => el.textContent);
     await page.waitForFunction(text => document.querySelector('.ag-fleet-task.ag-open .ag-fleet-preview').textContent !== text, {}, before);
-    // Keyboard selection switches the preview; hidden tool buttons remain inert.
+    assert.equal(await page.$eval('.ag-fleet-task:nth-child(2)', el => el.checkVisibility()), false);
+    assert(await page.$eval('.ag-fleet-task.ag-open .ag-fleet-detail', el => el.clientHeight > 180));
+    await page.$eval('.ag-fleet-task.ag-open .ag-fleet-preview', el => { el.textContent += '\n'.repeat(80) + '스크롤 확인'; });
+    await page.$eval('.ag-fleet-task.ag-open .ag-fleet-detail', el => { el.scrollTop = 0; });
+    await page.waitForFunction(() => {
+      const el = document.querySelector('.ag-fleet-task.ag-open .ag-fleet-detail');
+      return el.scrollHeight - el.clientHeight - el.scrollTop < 2;
+    });
+    await page.click('.ag-fleet-task.ag-open .ag-fleet-back');
+    // Return to the list before selecting another agent by keyboard.
     await page.focus('.ag-fleet-task:nth-child(2) .ag-fleet-head');
     await page.keyboard.press('Enter');
     assert.equal(await page.$$eval('.ag-fleet-task.ag-open', rows => rows.length), 1);
@@ -22,6 +31,7 @@ export async function checkFleetPreview(page, origin) {
     assert.match(await page.$eval('.ag-fleet-task.ag-open .ag-tool-result', el => el.textContent), /표 3개/);
     assert(await page.$eval('.ag-fleet-popup', el => el.scrollWidth <= el.clientWidth + 1));
     await page.keyboard.press('Enter');
+    await page.click('.ag-fleet-task.ag-open .ag-fleet-back');
     await page.click('.ag-fleet-task:nth-child(3) .ag-fleet-head');
     assert.match(await page.$eval('.ag-fleet-task.ag-open .ag-fleet-preview', el => el.textContent), /접근할 수 없어/);
   }
