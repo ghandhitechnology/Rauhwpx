@@ -44,6 +44,7 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   await page.screenshot({ path: resolve(artifacts, 'cloud-send-dark.png') });
   await page.select('#theme', 'light');
 
+  assert.equal(await page.evaluate(() => window.sidebarPreview.workspace.workspaceView()), 'local');
   await page.type('.ag-input', '이 제안서의 예산 표를 검토해 주세요.');
   await page.click('.ag-send');
   await page.waitForFunction(() => window.sidebarPreview.cloud.calls.transfers.length === 1
@@ -53,8 +54,39 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   assert.deepEqual(await page.$$eval('.ag-header .ag-execution-location-option', (nodes) => nodes.filter((node) => node.checkVisibility()).map((node) => ({ mode: node.dataset.workspaceMode, labelHidden: node.querySelector('span').hidden }))), [{ mode: 'cloud', labelHidden: true }]);
   await page.click('.ag-header [aria-label="Cloud 설정"]');
   await page.waitForSelector('.ag-cloud-setup-overlay:not([hidden])', { visible: true });
+  assert.equal(await page.$('.ag-cloud-setup-eyebrow'), null);
+  assert.equal(await page.$eval('.ag-cloud-setup-dialog', (dialog) => {
+    const popup = dialog.getBoundingClientRect();
+    const composer = document.querySelector('.ag-composer').getBoundingClientRect();
+    return popup.left >= composer.left && popup.right <= composer.right
+      && popup.bottom <= composer.bottom && popup.top >= 0
+      && dialog.closest('.ag-cloud-setup-anchored') !== null;
+  }), true, 'Cloud settings open as a popup anchored inside the composer');
+  const setupComposerHeight = await page.$eval('.ag-composer', (node) => node.getBoundingClientRect().height);
+  await page.screenshot({ path: resolve(artifacts, 'cloud-settings-composer-popup.png') });
   await page.click('.ag-cloud-setup-close');
-  await page.click('[data-document-view="cloud"]');
+  assert.equal(await page.$eval('.ag-composer', (node) => node.getBoundingClientRect().height), setupComposerHeight,
+    'Cloud settings never expand the composer');
+  await page.click('.ag-header [aria-label="Cloud 설정"]');
+  await page.waitForSelector('.ag-cloud-setup-overlay:not([hidden])', { visible: true });
+  await page.keyboard.press('Escape');
+  assert.equal(await page.$eval('.ag-cloud-setup-overlay', (node) => node.hidden), true);
+  assert.equal(await page.$eval('.ag-header [aria-label="Cloud 설정"]', (node) => node === document.activeElement), true);
+  const fullViewport = page.viewport();
+  await page.setViewport({ ...fullViewport, height: 260 });
+  await page.click('.ag-header [aria-label="Cloud 설정"]');
+  await page.waitForSelector('.ag-cloud-setup-overlay:not([hidden])', { visible: true });
+  assert.equal(await page.$eval('.ag-cloud-setup-dialog', (dialog) => {
+    const bounds = dialog.getBoundingClientRect();
+    const body = dialog.querySelector('.ag-cloud-setup-body');
+    return bounds.top >= 0 && bounds.bottom <= window.innerHeight
+      && getComputedStyle(body).overflowY === 'auto' && body.clientHeight > 0
+      && body.scrollHeight > body.clientHeight;
+  }), true, 'short windows keep the popup on screen with a scrollable body');
+  await page.screenshot({ path: resolve(artifacts, 'cloud-settings-short-window.png') });
+  await page.keyboard.press('Escape');
+  await page.setViewport(fullViewport);
+  assert.equal(await page.evaluate(() => window.sidebarPreview.workspace.workspaceView()), 'cloud', 'first Cloud send opens the Cloud document');
   await page.waitForFunction(() => document.querySelector('#cloud-workspace').dataset.displayState === 'live');
   const original = await page.evaluate(() => {
     const cloud = window.sidebarPreview.cloud;
@@ -80,6 +112,14 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   assert.equal(await page.evaluate(() => window.sidebarPreview.workspace.mode()), 'cloud');
   assert.equal(await page.$eval('.ag-header .ag-execution-location', (node) => node.dataset.mode), 'cloud');
   assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.controller.getSnapshot().session.sessionId), original.sessionId);
+  await page.type('.ag-input', '예산 표의 합계도 확인해 주세요.');
+  await page.click('.ag-send');
+  await page.waitForFunction(() => window.sidebarPreview.workspace.workspaceView() === 'cloud'
+    && document.querySelector('.ag-input').value === '');
+  assert.equal(await page.$eval('[data-document-view="cloud"]', (button) => button.getAttribute('aria-pressed')), 'true');
+  await page.click('[data-document-view="local"]');
+  await page.evaluate(() => window.sidebarPreview.cloud.publish());
+  assert.equal(await page.evaluate(() => window.sidebarPreview.workspace.workspaceView()), 'local', 'Cloud updates preserve a later manual switch to My document');
   await page.click('[data-document-view="cloud"]');
   await page.waitForFunction(() => document.querySelector('#cloud-workspace').dataset.displayState === 'live');
 
@@ -185,10 +225,11 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   }), true);
   await page.screenshot({ path: resolve(artifacts, 'cloud-disconnected-narrow-dark.png') });
 
+  assert.equal(await page.$('.ag-cloud-status-details'), null, 'recovery has no separate server status button');
   // A blocked refresh must not prevent opening or closing the status panel.
   await page.evaluate(() => window.sidebarPreview.cloud.blockRefresh(true));
   const openedAt = performance.now();
-  await page.click('.ag-cloud-status-details');
+  await page.click('.ag-cloud-recovery-strip-title');
   await page.waitForSelector('.ag-cloud-panel:not([hidden])', { timeout: 1000 });
   const panelMs = performance.now() - openedAt;
   assert.ok(panelMs < 1000);
@@ -388,7 +429,7 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   // Reopen after the old server is gone but its replacement transfer failed.
   await page.evaluate(() => window.sidebarPreview.cloud.rejectRestartTransfer(true));
   await page.click('#cloud-disconnect');
-  await page.evaluate(() => document.querySelector('.ag-cloud-status-details').click());
+  await page.evaluate(() => document.querySelector('.ag-cloud-recovery-strip-title').click());
   await page.evaluate(() => [...document.querySelectorAll('.ag-cloud-recovery-actions button')]
     .find((node) => node.textContent === '서버 다시 만들기').click());
   await page.waitForFunction(() => document.querySelector('.ag-messages').innerText.includes('Preview restart transfer interrupted.'));

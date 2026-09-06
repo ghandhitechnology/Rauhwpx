@@ -1119,13 +1119,15 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
         recoveryActions.append(action('서버 다시 만들기', recreateLink));
       }
     }
-    const stripTitle = el('span', 'ag-cloud-recovery-strip-title', recoveryTitle.textContent);
+    const stripTitle = el('button', 'ag-cloud-recovery-strip-title', recoveryTitle.textContent) as HTMLButtonElement;
+    stripTitle.type = 'button';
+    stripTitle.setAttribute('aria-haspopup', 'dialog');
+    stripTitle.setAttribute('aria-controls', statusPanel.id);
+    stripTitle.addEventListener('click', () => openPanel(stripTitle));
     const stripIndicator = el('span', 'ag-cloud-recovery-strip-pulse');
     stripIndicator.setAttribute('aria-hidden', 'true');
     const stripActions = el('div', 'ag-cloud-recovery-strip-actions');
     recoveryStrip.append(stripIndicator, stripTitle, stripActions);
-    const statusDetails = action('Cloud 상태', () => openPanel(statusDetails), 'ag-cloud-status-details');
-    stripActions.append(statusDetails);
     if (link.kind === 'failed') {
       stripActions.append(action('다시 연결', reconnectLink, 'ag-primary'));
       if (link.canRecreate) stripActions.append(action('서버 다시 만들기', recreateLink));
@@ -1416,6 +1418,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     setWorkspaceLocked(locked) {
       workspaceLocked = locked;
       sessionSelect.disabled = busy || locked || authorityTransitionActive();
+      renderMergeButton();
       renderRecovery();
       renderQueue();
     },

@@ -29,15 +29,36 @@ server. Normal Studio builds and authenticated resource downloads are unchanged.
 
 Railway runs the image selected by the desktop or hosted provisioner, not the
 current Git branch. Both defaults must point to a published image containing the
-shell. `1.1.0-edge.18-document-only` adds the shell to `1.1.0-edge.17` without
+shell. `1.1.0-edge.19-document-input` adds the corrected shell to `1.1.0-edge.17` without
 rebuilding its engines or Studio assets. The image workflow's
 `document_shell_only` input uses `Containerfile.document-shell` and verifies the
-real document layout before publication. A worker also checks the layout before
-making its display ready.
+real document layout before publication. The editor's transparent keyboard/IME
+input must remain focusable beside the scroll container. A worker checks focus,
+pointer access, and layout before making its display ready. The original
+`edge.18-document-only` shell hides that input and must be replaced by a build
+containing the input fix.
 
 Existing sandboxes keep their original image. After updating the app or hosted
 broker, start a new Cloud instance to use the new default. An explicit
 `RAUHWpx_RAILWAY_IMAGE` override must also select an image with the shell.
+
+To verify the production viewer against a real document locally, build with
+`VITE_RHWP_CLOUD_RUNTIME=1 npm --prefix rhwp/rhwp-studio run build`, then run
+`npm --prefix rhwp/rhwp-studio run e2e:cloud-document`. This sends actual pointer
+and keyboard events through the viewer input queue to a separate browser running
+the published document shell. It checks Korean text at three viewport sizes and
+preserves every edit through HWPX export/reopen. Screenshots and the edited HWPX
+are saved under `rhwp/rhwp-studio/sidebar-preview/artifacts/cloud-document/`.
+
+The `edge.19-document-input` release passed the [Linux image checks](https://github.com/ghandhitechnology/Rauhwpx/actions/runs/34014062384)
+and a separate Railway verification on 2026-09-06. The hosted check used
+`docs/diagnostics/cloud-hosted-document-proof.mjs`, native Xvfb capture, and the
+image's bundled HWP sample. A native click focused the editor, Korean input
+advanced its revision from 0 to 4, and the exported HWPX contained the text exactly
+once. The [captured hosted screen](../../docs/evidence/cloud-document-hosted-after.jpg)
+shows the edited document without application chrome or a warning. The temporary
+verification service was removed. The production broker now explicitly selects
+this image through `RAUHWpx_RAILWAY_IMAGE`.
 
 Each cloud session attempts one virtual desktop startup (`SessionDisplay` in `session-display.mjs`). The worker fixes the browser mode from that result before launching Studio. A ready display launches headed Chromium at the display's exact dimensions with its `DISPLAY` / `XAUTHORITY`; an unavailable display launches headless Chromium and never opens a frame capability for that harness.
 
