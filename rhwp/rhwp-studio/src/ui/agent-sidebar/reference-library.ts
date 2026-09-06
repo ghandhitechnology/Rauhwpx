@@ -236,6 +236,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     add.disabled = !connected || targetFor(activeScope, context) === null;
     if (!connected) add.title = '에이전트 서버가 연결되면 파일을 추가할 수 있습니다.';
     else add.removeAttribute('title');
+    scopeHint.hidden = activeScope === 'chat';
     if (activeScope === 'document' && !context.documentId) {
       scopeHint.textContent = '문서를 열면 해당 문서의 모든 채팅에서 쓸 참고자료를 추가할 수 있습니다.';
     } else if (activeScope === 'document') {
@@ -243,7 +244,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     } else if (activeScope === 'global') {
       scopeHint.textContent = '모든 문서와 모든 채팅에서 항상 검색합니다.';
     } else {
-      scopeHint.textContent = '현재 채팅에서만 검색합니다.';
+      scopeHint.textContent = '';
     }
   }
 
