@@ -4134,6 +4134,7 @@ async function handleStudioMessage(record, sock, msg) {
           .then((status) => { piStatus = status; });
       } else {
         run = cliSetup.authenticate(agent, method, msg.key, progress, {
+          terminal: msg.terminal === true,
           signal: abort.signal,
           onCommitted: commitAuthRun,
         })
@@ -4158,7 +4159,7 @@ async function handleStudioMessage(record, sock, msg) {
       try {
         const run = authRuns.requireOwned({ agent: msg.agent, runId: msg.authRunId,
           ownerSessionId: record.sessionId });
-        if (msg.agent !== 'opencode' || run.method !== 'oauth') throw new Error('진행 중인 OpenCode 로그인이 없어요.');
+        if (!CLI_SETUP_AGENTS.includes(msg.agent) || run.method !== 'oauth') throw new Error('진행 중인 CLI 로그인이 없어요.');
         if (msg.type === 'agent-setup-terminal-resume') {
           const data = cliSetup.terminalSnapshot(msg.agent);
           if (data !== null) sendAuthRunFrame(run, { type: 'agent-setup-terminal', data, ready: true, reset: true });
