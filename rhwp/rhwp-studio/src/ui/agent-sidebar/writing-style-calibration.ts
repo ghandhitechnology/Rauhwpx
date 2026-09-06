@@ -101,7 +101,8 @@ function createPixelFlag(language: WritingStyleLanguage): SVGSVGElement {
   const width = language === 'ko' ? 72 : 96;
   const flag = svg('ag-calibration-flag', `0 0 ${width} 48`);
   flag.setAttribute('shape-rendering', 'crispEdges');
-  addSvgShape(flag, 'rect', { width: String(width), height: '48', fill: '#fff' });
+  flag.dataset.language = language;
+  addSvgShape(flag, 'rect', { width: String(width), height: '48', fill: '#f1faf8' });
   if (language === 'en') {
     for (const x of [0, 72]) {
       addSvgShape(flag, 'rect', { x: String(x), width: '24', height: '48', fill: '#d80621' });
@@ -143,6 +144,14 @@ function createPixelFlag(language: WritingStyleLanguage): SVGSVGElement {
       }
     }
   }
+  // 구름 픽셀 아트처럼 밝은 윗면과 차분한 아래쪽 테두리를 더합니다.
+  addSvgShape(flag, 'path', {
+    d: `M0 0h${width}v1H1v46H0z`, fill: '#fff', opacity: '.55',
+  });
+  addSvgShape(flag, 'path', {
+    d: `M1 47h${width - 2}v1H1zM${width - 1} 1h1v47h-1z`,
+    fill: '#31585e', opacity: '.22',
+  });
   return flag;
 }
 
