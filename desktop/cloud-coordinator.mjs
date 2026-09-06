@@ -287,6 +287,7 @@ export class CloudCoordinator extends EventEmitter {
   #preferredMode = null;
   #stopped = false;
   #link = { kind: 'ready', error: null, attempt: 0, canRecreate: false };
+  #linkNeedsAction = false;
   #linkHealPromise = null;
   #linkWatchdog = null;
   #linkProbeBusy = false;
@@ -606,6 +607,7 @@ export class CloudCoordinator extends EventEmitter {
       this.#remoteSessions.clear();
       this.#remoteWatchSequence.clear();
       this.#timelinePending.clear();
+      this.#linkNeedsAction = false;
       return result;
     } finally {
       await this.#resumeRecoveriesForCurrentProfile().catch((error) => {
@@ -884,6 +886,8 @@ export class CloudCoordinator extends EventEmitter {
   }
 
   reconnectCloud(options = {}) {
+    if (options.background && this.#linkNeedsAction) return this.snapshot();
+    if (!options.background) this.#linkNeedsAction = false;
     if (this.#reconnectPromise) return this.#reconnectPromise;
     const operation = this.#withProfileOperation((profileEpoch) => this.#reconnectCloud(profileEpoch, options));
     this.#reconnectPromise = operation.finally(() => { this.#reconnectPromise = null; });
@@ -927,6 +931,7 @@ export class CloudCoordinator extends EventEmitter {
       if (this.#stopped || this.#link.kind === 'recreating' || this.#linkProbeBusy || this.#linkHealPromise) return;
       if (this.#pendingProfileChanges) return;
       if (this.#link.kind === 'failed') {
+        if (this.#linkNeedsAction) return;
         // Retry quietly after longer outages. Keep the recovery controls stable
         // until a successful probe can actually restore the same workspace.
         void this.reconnectCloud({ background: true }).catch(() => {});
@@ -1023,6 +1028,7 @@ export class CloudCoordinator extends EventEmitter {
       }
       await this.#resumeRecoveriesForCurrentProfile();
       this.#assertProfileEpoch(profileEpoch);
+      if (this.#linkNeedsAction) return this.snapshot({ profileConnection: 'error', profileMessage: this.#link.error });
       this.#link = { kind: 'ready', error: null, attempt: 0, canRecreate };
       const snapshot = await this.snapshot({ profileConnection: 'ready', profileMessage: null });
       this.#emit({ type: 'cloud-link-ready', snapshot });
@@ -1030,6 +1036,9 @@ export class CloudCoordinator extends EventEmitter {
     } catch (error) {
       if (controller.signal.aborted || this.#stopped || profileEpoch !== this.#profileEpoch) throw error;
       this.#abortSessionWatchers();
+      if (!this.#streamShouldRestart(error) && error?.status !== 404 && error?.code !== 'SESSION_NOT_FOUND') {
+        this.#linkNeedsAction = true;
+      }
       this.#link = {
         kind: 'failed',
         error: error.message,
@@ -1848,9 +1857,16 @@ export class CloudCoordinator extends EventEmitter {
   }
 
   #streamShouldRestart(error) {
-    if (!error || error.status === 404) return false;
+    if (!error || error.retryable === false || [401, 403, 404].includes(error.status)) return false;
     return !['PROFILE_CHANGED', 'SESSION_NOT_FOUND', 'SSE_PROOF_INVALID', 'SSE_PAYLOAD_INVALID']
       .includes(error.code);
+  }
+
+  #noteTerminalStreamFailure(error) {
+    this.#linkNeedsAction = true;
+    this.#link = { ...this.#link, kind: 'failed', error: error.message };
+    this.#abortSessionWatchers();
+    this.#emit({ type: 'cloud-link-failed', error: error.message });
   }
 
   async #endLiveCloudSessions({ timeoutMs = 4_000 } = {}) {
@@ -2946,9 +2962,10 @@ export class CloudCoordinator extends EventEmitter {
         onEvent,
       }).catch((error) => {
         if (error?.code !== 'PROFILE_CHANGED' && !controller.signal.aborted) {
-          this.#emit({ type: 'session-stream-error', sessionId, error: error.message });
           restartWatch = this.#streamShouldRestart(error);
+          this.#emit({ type: 'session-stream-error', sessionId, error: error.message, code: error.code, retryable: restartWatch });
           if (restartWatch || error?.status === 404 || error?.code === 'SESSION_NOT_FOUND') this.#noteBrokenLink(error.message);
+          else this.#noteTerminalStreamFailure(error);
         }
       })
         .finally(() => {
@@ -3786,9 +3803,10 @@ export class CloudCoordinator extends EventEmitter {
         onEvent,
       }).catch((error) => {
         if (error?.code !== 'PROFILE_CHANGED' && !controller.signal.aborted) {
-          this.#emit({ type: 'remote-session-stream-error', sessionId, error: error.message });
           restartWatch = this.#streamShouldRestart(error);
+          this.#emit({ type: 'remote-session-stream-error', sessionId, error: error.message, code: error.code, retryable: restartWatch });
           if (restartWatch || error?.status === 404 || error?.code === 'SESSION_NOT_FOUND') this.#noteBrokenLink(error.message);
+          else this.#noteTerminalStreamFailure(error);
         }
       })
         .finally(() => {

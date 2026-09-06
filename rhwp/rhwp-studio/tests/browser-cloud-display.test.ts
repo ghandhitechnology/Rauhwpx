@@ -54,11 +54,13 @@ function displayFixture({
   oversizedCapability = false,
   oversizedInterest = false,
   failSecondHealth = false,
+  inlineFrameCount = 0,
+  oversizedEvent = false,
 } = {}) {
   const identity = generateKeyPairSync('ed25519');
   const serverPublicKey = `ed25519:${identity.publicKey.export({ type: 'spki', format: 'der' }).toString('base64url')}`;
   const endpoint = 'https://cloud.example.test/rauhwpx-cloud';
-  const frameBytes = Buffer.from([0xff, 0xd8, 1, 0xff, 0xd9]);
+  const frameBytes = inlineFrameCount ? Buffer.alloc(524288, 1) : Buffer.from([0xff, 0xd8, 1, 0xff, 0xd9]);
   const frameDigest = digest(frameBytes);
   const interests: Array<{ streamId: string; viewerId: string; active: boolean }> = [];
   const inputs: Array<{ streamId: string; viewerId: string; sequence: number; event: unknown }> = [];
@@ -191,30 +193,35 @@ function displayFixture({
       }
       const requestedStreamId = url.searchParams.get('streamId') ?? streamId;
       const nonce = request.headers.get('x-rauhwpx-request-nonce') ?? '';
-      const metadata = {
-        streamId: requestedStreamId,
-        sequence: 1,
-        capturedAt: '2026-08-30T00:00:01.000Z',
-        width: 1280,
-        height: 800,
-        mimeType: 'image/jpeg',
-        byteLength: frameBytes.length,
-        sha256: frameDigest,
-        framePath: `/v1/sessions/${sessionId}/display/frames/${requestedStreamId}/1`,
-      };
-      const data = JSON.stringify({ sessionId, seq: 1, type: 'display.frame', payload: metadata });
-      const eventDigest = digest(Buffer.from(data));
-      const canonicalEvent = `RAUHWpx-sse-event-v1\n${nonce}\nGET\n${url.pathname}${url.search}\n200\n1\ndisplay.frame\n${eventDigest}`;
-      const eventSignature = sign(null, Buffer.from(canonicalEvent), identity.privateKey).toString('base64url');
-      const frame = new TextEncoder().encode([
-        'id: 1',
-        'event: display.frame',
-        `rauhwpx-sha256: ${eventDigest}`,
-        `rauhwpx-signature: ${tamper ? `${eventSignature[0] === 'A' ? 'B' : 'A'}${eventSignature.slice(1)}` : eventSignature}`,
-        `data: ${data}`,
-        '',
-        '',
-      ].join('\n'));
+      const frame = Buffer.concat(Array.from({ length: inlineFrameCount || 1 }, (_, index) => {
+        const sequence = index + 1;
+        const metadata = {
+          streamId: requestedStreamId,
+          sequence,
+          capturedAt: '2026-08-30T00:00:01.000Z',
+          width: 1280,
+          height: 800,
+          mimeType: 'image/jpeg',
+          byteLength: frameBytes.length,
+          sha256: frameDigest,
+          framePath: `/v1/sessions/${sessionId}/display/frames/${requestedStreamId}/${sequence}`,
+          ...(inlineFrameCount ? { bytesBase64: frameBytes.toString('base64') } : {}),
+        };
+        const data = JSON.stringify({ sessionId, seq: sequence, type: 'display.frame', payload: metadata });
+        const eventDigest = digest(Buffer.from(data));
+        const canonicalEvent = `RAUHWpx-sse-event-v1\n${nonce}\nGET\n${url.pathname}${url.search}\n200\n${sequence}\ndisplay.frame\n${eventDigest}`;
+        const eventSignature = sign(null, Buffer.from(canonicalEvent), identity.privateKey).toString('base64url');
+        return new TextEncoder().encode([
+          ...(oversizedEvent ? [`:${'x'.repeat(2 * 1024 * 1024)}`] : []),
+          `id: ${sequence}`,
+          'event: display.frame',
+          `rauhwpx-sha256: ${eventDigest}`,
+          `rauhwpx-signature: ${tamper ? `${eventSignature[0] === 'A' ? 'B' : 'A'}${eventSignature.slice(1)}` : eventSignature}`,
+          `data: ${data}`,
+          '',
+          '',
+        ].join('\n'));
+      }));
       const protocolDigest = digest(Buffer.from('rauhwpx-sse-v1'));
       const canonicalResponse = `RAUHWpx-response-v1\n${nonce}\nGET\n${url.pathname}${url.search}\n200\n${protocolDigest}`;
       const body = new ReadableStream<Uint8Array>({
@@ -550,4 +557,39 @@ test('browser storage authority changes close an active display from the stale t
   assert.equal(fixture.interests.at(-1)?.active, false);
   assert.equal(fixture.streamAborted(), true);
   await api.cloudCloseDisplay({ connectionId: opened.connectionId });
+});
+
+
+test('browser display accepts buffered inline frames larger than the per-event limit together', async () => {
+  const fixture = displayFixture({ inlineFrameCount: 4 });
+  const api = await pairedApi(fixture);
+  const events: Array<{ event?: { kind: string; sequence?: number; bytes?: Uint8Array } }> = [];
+  const unsubscribe = api.onCloudDisplayEvent((event) => events.push(event as typeof events[number]));
+  const opened = await api.cloudOpenDisplay({ sessionId });
+  try {
+    await waitFor(() => events.find(({ event }) => event?.kind === 'frame' && event.sequence === 4), 'four buffered inline frames');
+    assert.deepEqual(events.filter(({ event }) => event?.kind === 'frame').map(({ event }) => event?.sequence), [1, 2, 3, 4]);
+    assert.equal(events.filter(({ event }) => event?.kind === 'frame').every(({ event }) => event?.bytes?.byteLength === 524288), true);
+    assert.equal(fixture.streamCalls(), 1);
+  } finally {
+    await api.cloudCloseDisplay({ connectionId: opened.connectionId });
+    unsubscribe();
+  }
+});
+
+
+test('browser display still rejects oversized individual events with ignored comment fields', async () => {
+  const fixture = displayFixture({ oversizedEvent: true });
+  const api = await pairedApi(fixture);
+  const events: Array<{ event?: { kind: string; code?: string } }> = [];
+  const unsubscribe = api.onCloudDisplayEvent((event) => events.push(event as typeof events[number]));
+  const opened = await api.cloudOpenDisplay({ sessionId });
+  try {
+    await waitFor(() => events.find(({ event }) => event?.code === 'SSE_PAYLOAD_INVALID'), 'oversized event failure');
+    assert.equal(events.some(({ event }) => event?.kind === 'frame'), false);
+    assert.equal(fixture.streamCalls(), 1);
+  } finally {
+    await api.cloudCloseDisplay({ connectionId: opened.connectionId });
+    unsubscribe();
+  }
 });

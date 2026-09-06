@@ -8,6 +8,7 @@ import puppeteer from 'puppeteer-core';
 import { checkSetupTerminal } from './setup-terminal.check.mjs';
 import { checkFleetPreview } from './fleet.check.mjs';
 import { checkCloudRecovery } from './cloud-recovery.check.mjs';
+import { checkCloudStream } from './cloud-stream.check.mjs';
 
 const studio = resolve(import.meta.dirname, '..');
 const artifacts = resolve(import.meta.dirname, 'artifacts');
@@ -136,6 +137,8 @@ try {
   }
   await step('Cloud disconnect, reconnect, rebuild, and shutdown recovery',
     () => checkCloudRecovery(page, origin, artifacts));
+  await step('Cloud streamed text survives delayed timelines and terminal errors do not reconnect',
+    () => checkCloudStream(page, origin, artifacts));
   await step('Cloud dashboard, usage gaps, conversations, configuration and responsive settings', async () => {
     await open('cloud=1&dashboard=1&page=settings&destination=cloud&controls=0');
     await page.waitForSelector('.ag-cd-quota .ag-cd-stat-value');

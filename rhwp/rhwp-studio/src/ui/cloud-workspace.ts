@@ -508,6 +508,8 @@ export function createCloudWorkspace({
       decodeAndCommitFrame(eventGeneration, sessionId, event);
       return;
     }
+    // A frame from the previous connection must not restore live controls.
+    cancelDecodes();
     if (event.kind === 'unavailable') {
       const retained = retainedFrame(sessionId);
       publish(retained ? { kind: 'stalled', sessionId, lastFrame: retained }
@@ -792,8 +794,9 @@ export function createCloudWorkspace({
         }
         publish({ kind: 'stalled', sessionId: nextContextSessionId ?? '', lastFrame },
           linkKind === 'recreating' ? '새 서버가 준비되면 화면을 다시 표시합니다.'
-            : linkKind === 'reconnecting' ? '연결 중입니다. 마지막 화면을 표시하고 있습니다.'
-            : '연결이 끊겨 마지막 화면을 표시하고 있습니다.');
+            : linkKind === 'reconnecting'
+              ? lastFrame ? '연결 중입니다. 마지막 화면을 표시하고 있습니다.' : 'Cloud 화면에 다시 연결하고 있습니다.'
+              : lastFrame ? '연결이 끊겨 마지막 화면을 표시하고 있습니다.' : 'Cloud 화면을 불러오지 못했습니다.');
         return;
       }
       if (!nextSessionId) {

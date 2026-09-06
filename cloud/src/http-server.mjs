@@ -731,6 +731,9 @@ export function createCloudHttpHandler({
           'X-Rauhwpx-Stream-Protocol': SSE_STREAM_PROTOCOL,
           ...responseProofHeaders(response[responseProof], 200, SSE_STREAM_DIGEST),
         });
+        // An idle stream has no replay to flush these headers. Send them now
+        // so clients can finish connecting before the 15-second heartbeat.
+        response.flushHeaders();
         headersReady = true;
         if (closed) {
           response.end();
@@ -834,6 +837,7 @@ export function createCloudHttpHandler({
             'X-Rauhwpx-Stream-Protocol': SSE_STREAM_PROTOCOL,
             ...responseProofHeaders(response[responseProof], 200, SSE_STREAM_DIGEST),
           });
+          response.flushHeaders();
           let cursor = after;
           let following = false;
           const pending = [];

@@ -208,3 +208,16 @@ test('a delayed selected timeline establishes the missing binding and routes onl
   assert.equal(cloudEventMatchesBinding(bindingB, 'session-b', 'thread-b'), true);
   assert.equal(cloudEventMatchesBinding(bindingB, 'session-a', 'thread-a'), false);
 });
+
+test('a failed selection restores the previous workspace and releases its execution lock', async () => {
+  const events: string[] = [];
+  await assert.rejects(runCloudSessionSelection({
+    acquire: () => ({ release: () => events.push('release') }),
+    begin: createSessionSelectionFence().begin,
+    select: () => { throw new Error('selection failed'); },
+    refresh: async () => { events.push('refresh'); },
+    mount: () => true,
+    rollback: () => { events.push('rollback'); },
+  }), /selection failed/);
+  assert.deepEqual(events, ['rollback', 'release']);
+});

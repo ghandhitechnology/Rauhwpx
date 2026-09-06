@@ -1144,3 +1144,139 @@ test('input failures are visible beside the preview and do not pretend the click
   assert.equal(f.root.dataset.cloudControl, 'active');
   f.workspace.dispose();
 });
+
+test('cloud workspace restores live input when reconnect replays the unchanged frame', async () => {
+  let listener!: (event: CloudDisplayEvent) => void;
+  const inputs: unknown[] = [];
+  let urlSequence = 0;
+  const workspace = createCloudWorkspace({
+    display: {
+      async openDisplay(sessionId: string, next: (event: CloudDisplayEvent) => void) {
+        listener = next;
+        return { ...connection(sessionId, []), async sendInput(event: unknown) { inputs.push(event); } };
+      },
+    } as Pick<CloudController, 'openDisplay'>,
+    doc: new TestDocument() as unknown as Document,
+    objectUrls: { create: () => `blob:replay-${++urlSequence}`, revoke() {} },
+    decodeFrame: async () => ({ width: 1280, height: 800 }),
+  });
+  try {
+    workspace.setContext({ visible: true, session: running() });
+    await flushMicrotasks();
+    listener(frame(undefined, 7));
+    await flushMicrotasks();
+    assert.equal(workspace.getState().kind, 'live');
+    listener({
+      kind: 'connection', state: 'reconnecting', sessionId: baseSession.sessionId,
+      streamId: frame().streamId, retryable: true, attempt: 1, message: 'Connection dropped',
+    });
+    assert.equal(workspace.getState().kind, 'stalled');
+    listener(frame(undefined, 7));
+    await flushMicrotasks();
+    const state = workspace.getState();
+    assert.equal(state.kind, 'live');
+    assert.equal(state.kind === 'live' && state.frame.sequence, 7);
+    const root = workspace.root as unknown as TestElement;
+    const image = find(root, (node) => node.className === 'cloud-workspace-image');
+    assert.equal(image.src, 'blob:replay-2');
+    const sink = find(root, (node) => node.className === 'cloud-workspace-input');
+    Object.assign(sink, { value: 'resumed input' });
+    sink.dispatch('input', { isComposing: false });
+    await flushMicrotasks();
+    assert.deepEqual(inputs, [{ kind: 'text', text: 'resumed input' }]);
+  } finally { workspace.dispose(); }
+});
+
+test('cloud workspace discards decoding frames when the display connection changes', async (t) => {
+  const available = connection(baseSession.sessionId, []).capability;
+  assert.ok(available.kind === 'available');
+  const transitions: CloudDisplayEvent[] = [
+    {
+      kind: 'connection', state: 'reconnecting', sessionId: baseSession.sessionId,
+      streamId: frame().streamId, retryable: true, attempt: 1, message: 'Connection dropped',
+    },
+    {
+      kind: 'unavailable', sessionId: baseSession.sessionId,
+      reason: 'stream-unavailable', retryable: true, message: 'Display restarting',
+    },
+    {
+      kind: 'connection', state: 'connected', sessionId: baseSession.sessionId,
+      streamId: 'replacement-stream', retryable: true,
+      capability: { ...available, streamId: 'replacement-stream' },
+    },
+  ];
+  for (const transition of transitions) await t.test(
+    transition.kind === 'connection' ? transition.state : transition.kind,
+    async () => {
+      let listener!: (event: CloudDisplayEvent) => void;
+      const decodes = new Map<string, ReturnType<typeof deferred<{ width: number; height: number }>>>();
+      const revoked: string[] = [];
+      let urlSequence = 0;
+      const workspace = createCloudWorkspace({
+        display: {
+          async openDisplay(sessionId: string, next: (event: CloudDisplayEvent) => void) {
+            listener = next;
+            return connection(sessionId, []);
+          },
+        } as Pick<CloudController, 'openDisplay'>,
+        doc: new TestDocument() as unknown as Document,
+        objectUrls: { create: () => `blob:transition-${++urlSequence}`, revoke: (url) => revoked.push(url) },
+        decodeFrame: (url) => {
+          const decoding = deferred<{ width: number; height: number }>();
+          decodes.set(url, decoding);
+          return decoding.promise;
+        },
+      });
+      try {
+        workspace.setContext({ visible: true, session: running() });
+        await flushMicrotasks();
+        listener(frame(undefined, 1));
+        decodes.get('blob:transition-1')!.resolve({ width: 1280, height: 800 });
+        await flushMicrotasks();
+        listener(frame(undefined, 2));
+        listener(frame(undefined, 3));
+        listener(transition);
+        decodes.get('blob:transition-2')!.resolve({ width: 1280, height: 800 });
+        await flushMicrotasks();
+        decodes.get('blob:transition-3')?.resolve({ width: 1280, height: 800 });
+        await flushMicrotasks();
+        const image = find(workspace.root as unknown as TestElement, (node) => node.className === 'cloud-workspace-image');
+        assert.equal(image.src, 'blob:transition-1');
+        assert.equal(workspace.getState().kind, 'stalled');
+        assert.equal(decodes.has('blob:transition-3'), false);
+        assert.deepEqual(revoked, ['blob:transition-2', 'blob:transition-3']);
+      } finally { workspace.dispose(); }
+    },
+  );
+});
+
+test('cloud workspace connection notices mention a retained image only after receiving a frame', async () => {
+  let listener!: (event: CloudDisplayEvent) => void;
+  const workspace = createCloudWorkspace({
+    display: {
+      async openDisplay(sessionId: string, next: (event: CloudDisplayEvent) => void) {
+        listener = next;
+        return connection(sessionId, []);
+      },
+    } as Pick<CloudController, 'openDisplay'>,
+    doc: new TestDocument() as unknown as Document,
+    objectUrls: { create: () => 'blob:retained', revoke() {} },
+    decodeFrame: async () => ({ width: 1280, height: 800 }),
+  });
+  const notice = find(workspace.root as unknown as TestElement, (node) => node.className === 'cloud-workspace-connection-notice');
+  try {
+    for (const kind of ['failed', 'reconnecting'] as const) {
+      workspace.setContext({ visible: true, session: running(), link: { kind, error: null, attempt: 1, canRecreate: true } });
+      assert.doesNotMatch(notice.textContent, /마지막 화면/);
+      assert.match(notice.textContent, kind === 'failed' ? /불러오지 못했습니다/ : /다시 연결하고 있습니다/);
+    }
+    workspace.setContext({ visible: true, session: running() });
+    await flushMicrotasks();
+    listener(frame());
+    await flushMicrotasks();
+    for (const kind of ['failed', 'reconnecting'] as const) {
+      workspace.setContext({ visible: true, session: running(), link: { kind, error: null, attempt: 1, canRecreate: true } });
+      assert.match(notice.textContent, /마지막 화면/);
+    }
+  } finally { workspace.dispose(); }
+});

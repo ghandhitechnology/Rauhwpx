@@ -922,9 +922,10 @@ test('browser watcher cannot emit a profile A event after profile B activates', 
   });
   await archiveReadStarted.promise;
   await api.cloudSaveProfile({ profile: storedBrowserProfile(endpointB, identityB.key) });
+  const eventsBeforeLateRead = [...events];
   releaseArchiveRead.resolve();
   await new Promise((resolve) => setTimeout(resolve, 30));
-  assert.deepEqual(events, []);
+  assert.deepEqual(events, eventsBeforeLateRead, 'late profile A work cannot emit after profile B activates');
 });
 
 test('browser selection changes the viewed session without releasing the scoped document lease', async () => {
@@ -1878,5 +1879,269 @@ for (const receipt of ['queued', 'accepted', 'wrong-session']) {
         { id: 'newer-message', text: 'Then refine the wording' },
       ]);
     }
+  });
+}
+
+for (const firstFailure of ['network', 'closed-stream']) {
+  test(`browser reports ${firstFailure} immediately and restores readiness on an open stream`, { timeout: 5_000 }, async (t) => {
+    const identity = serverIdentity();
+    const storage = new MemoryStorage();
+    storeBrowserCredentials(storage, storedBrowserProfile('https://stream-recovery.example.test', identity.key), {
+      accessToken: 'stream-access', refreshToken: 'stream-refresh', accessExpiresAt: Date.now() + 600_000,
+    });
+    const session = { id: 'recovery-room', status: 'running', stateVersion: 1,
+      clientContext: { threadId: 'recovery-thread', documentId: 'recovery-doc' } };
+    const failed = Promise.withResolvers<any>();
+    const recovered = Promise.withResolvers<any>();
+    let streamCalls = 0;
+    let closed = false;
+    const api = createBrowserCloudApi({ storage, fetchImpl: async (input, init) => {
+      const request = new Request(input, init);
+      const path = new URL(request.url).pathname;
+      if (path.endsWith('/v1/sessions')) return signedJson(request, identity, { sessions: [session] });
+      if (path.endsWith('/timeline')) return signedJson(request, identity, { thread: { id: 'recovery-thread' } });
+      if (path.endsWith('/events')) {
+        streamCalls += 1;
+        if (streamCalls === 1 && firstFailure === 'network') throw new TypeError('Network unavailable');
+        const signed = signedSse(request, identity, { type: 'agent.event', sessionId: session.id });
+        if (streamCalls === 1) return new Response('', { headers: signed.headers });
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            request.signal.addEventListener('abort', () => { closed = true; controller.close(); }, { once: true });
+          },
+        });
+        return new Response(body, { headers: signed.headers });
+      }
+      throw new Error(`Unexpected request ${path}`);
+    } });
+    assert.ok(api);
+    const unsubscribe = api.onCloudEvent((event: any) => {
+      if (event.type === 'remote-session-stream-error') failed.resolve(event.snapshot);
+      if (event.type === 'cloud-link-ready') recovered.resolve(event.snapshot);
+    });
+    t.after(unsubscribe);
+    await api.cloudGetState({ threadId: 'recovery-thread', documentId: 'recovery-doc' });
+    const outage = await failed.promise;
+    assert.equal(outage.link.kind, 'reconnecting');
+    assert.equal(outage.profile.connection, 'error');
+    assert.equal(streamCalls, 1, 'a disconnected stream must wait before retrying');
+    const live = await recovered.promise;
+    assert.equal(live.link.kind, 'ready');
+    assert.equal(live.profile.connection, 'ready');
+    assert.equal(streamCalls, 2);
+    assert.equal(closed, false, 'readiness must recover while the SSE connection remains open');
+  });
+}
+
+for (const retry of [false, true]) {
+  test(`browser ${retry ? 'retries and publishes a failed' : 'publishes a downloaded'} timeline without another streamed event`, { timeout: 5_000 }, async (t) => {
+    const identity = serverIdentity();
+    const storage = new MemoryStorage();
+    storeBrowserCredentials(storage, storedBrowserProfile('https://timeline-refresh.example.test', identity.key), {
+      accessToken: 'timeline-access', refreshToken: 'timeline-refresh', accessExpiresAt: Date.now() + 600_000,
+    });
+    const session = { id: 'timeline-room', status: 'running', stateVersion: 1,
+      clientContext: { threadId: 'timeline-thread', documentId: 'timeline-doc' } };
+    const refreshed = Promise.withResolvers<any>();
+    let timelineCalls = 0;
+    const latest = { thread: { id: 'timeline-thread', messages: [{ role: 'assistant', text: 'Saved cloud edit' }] } };
+    const api = createBrowserCloudApi({ storage, fetchImpl: async (input, init) => {
+      const request = new Request(input, init);
+      const path = new URL(request.url).pathname;
+      if (path.endsWith('/v1/sessions')) return signedJson(request, identity, { sessions: [session] });
+      if (path.endsWith('/timeline')) {
+        timelineCalls += 1;
+        if (retry && timelineCalls === 2) throw new TypeError('Timeline connection dropped');
+        return signedJson(request, identity,
+          timelineCalls === 1 ? { thread: { id: 'timeline-thread', messages: [] } } : latest);
+      }
+      if (path.endsWith('/events')) {
+        const signed = signedSse(request, identity, { type: 'timeline.updated', sessionId: session.id });
+        const frame = new Uint8Array(await signed.arrayBuffer());
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(frame);
+            request.signal.addEventListener('abort', () => controller.close(), { once: true });
+          },
+        });
+        return new Response(body, { headers: signed.headers });
+      }
+      throw new Error(`Unexpected request ${path}`);
+    } });
+    assert.ok(api);
+    t.after(api.onCloudEvent((event: any) => {
+      if (event.snapshot?.timeline?.thread.messages?.length) refreshed.resolve(event.snapshot);
+    }));
+    await api.cloudGetState({ threadId: 'timeline-thread', documentId: 'timeline-doc' });
+    assert.deepEqual((await refreshed.promise).timeline, latest);
+    assert.equal(timelineCalls, retry ? 3 : 2);
+  });
+}
+
+for (const artifact of ['timeline', 'checkpoint', 'status', 'missing-checkpoint']) {
+  test(`browser keeps agent events flowing during a pending ${artifact} request and coalesces later timelines`, { timeout: 5_000 }, async (t) => {
+    const identity = serverIdentity();
+    const storage = new MemoryStorage();
+    storeBrowserCredentials(storage, storedBrowserProfile('https://slow-artifact.example.test', identity.key), {
+      accessToken: 'artifact-access', refreshToken: 'artifact-refresh', accessExpiresAt: Date.now() + 600_000,
+    });
+    const session = { id: 'artifact-room', status: 'running', stateVersion: 1,
+      clientContext: { threadId: 'artifact-thread', documentId: 'artifact-doc' } };
+    const artifactRequested = Promise.withResolvers<{ request: Request; resolve(response: Response): void }>();
+    const agentSeen = Promise.withResolvers<void>();
+    const synchronized = Promise.withResolvers<void>();
+    let timelineCalls = 0;
+    let statusCalls = 0;
+    let blocked = true;
+    const timeline = { thread: { id: 'artifact-thread', messages: [] } };
+    const api = createBrowserCloudApi({ storage, fetchImpl: async (input, init) => {
+      const request = new Request(input, init);
+      const path = new URL(request.url).pathname;
+      if (path.endsWith('/v1/sessions')) {
+        if (++statusCalls === 2 && artifact === 'status') {
+          return new Promise<Response>((resolve) => artifactRequested.resolve({ request, resolve }));
+        }
+        return signedJson(request, identity, { sessions: [session] });
+      }
+      if (path.endsWith('/timeline')) {
+        timelineCalls += 1;
+        if (artifact === 'timeline' && timelineCalls === 2) {
+          return new Promise<Response>((resolve) => artifactRequested.resolve({ request, resolve }));
+        }
+        return signedJson(request, identity, timeline);
+      }
+      if (path.endsWith('/checkpoint')) return new Promise<Response>((resolve) => artifactRequested.resolve({ request, resolve }));
+      if (path.endsWith('/events')) {
+        const events = [
+          artifact === 'timeline' || artifact === 'status'
+            ? { type: 'timeline.updated', sessionId: session.id }
+            : { type: 'boundary.committed', sessionId: session.id, payload: { operationId: 'operation_1' } },
+          { type: 'timeline.updated', sessionId: session.id },
+          { type: 'timeline.updated', sessionId: session.id },
+          { type: 'agent.event', sessionId: session.id, payload: { type: 'text', text: 'Still streaming' } },
+        ];
+        const signed = events.map((event, index) => signedSse(request, identity, event, index + 1));
+        const frames = await Promise.all(signed.map((response) => response.text()));
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(frames.join('')));
+            request.signal.addEventListener('abort', () => controller.close(), { once: true });
+          },
+        }), { headers: signed[0].headers });
+      }
+      throw new Error(`Unexpected request ${path}`);
+    } });
+    assert.ok(api);
+    t.after(api.onCloudEvent((event: any) => {
+      if (event.event?.type === 'agent.event') {
+        assert.equal(blocked, true, 'agent text must arrive before the artifact response');
+        agentSeen.resolve();
+      }
+      if (event.type === 'conversation-timeline-updated' && timelineCalls === (artifact === 'timeline' ? 3 : 2)) {
+        synchronized.resolve();
+      }
+    }));
+    await api.cloudGetState({ threadId: 'artifact-thread', documentId: 'artifact-doc' });
+    const pending = await artifactRequested.promise;
+    await agentSeen.promise;
+    assert.equal(timelineCalls, artifact === 'timeline' ? 2 : 1);
+    blocked = false;
+    pending.resolve(artifact === 'status'
+      ? signedJson(pending.request, identity, { sessions: [session] })
+      : artifact === 'missing-checkpoint'
+        ? signedJson(pending.request, identity, { error: { code: 'CHECKPOINT_NOT_FOUND', message: 'Checkpoint unavailable' } }, 404)
+      : artifact === 'timeline'
+      ? signedJson(pending.request, identity, timeline)
+      : signedBytes(pending.request, identity, new Uint8Array([1, 2, 3]), {
+        'x-boundary-operation': 'operation_1', 'x-boundary-kind': 'operation',
+      }));
+    await synchronized.promise;
+    assert.equal(timelineCalls, artifact === 'timeline' ? 3 : 2, 'pending timeline notifications share one download');
+  });
+}
+
+test('browser aborts background artifact work when its watcher is removed', { timeout: 5_000 }, async () => {
+  const identity = serverIdentity();
+  const storage = new MemoryStorage();
+  storeBrowserCredentials(storage, storedBrowserProfile('https://cancel-artifact.example.test', identity.key), {
+    accessToken: 'artifact-access', refreshToken: 'artifact-refresh', accessExpiresAt: Date.now() + 600_000,
+  });
+  const session = { id: 'artifact-room', status: 'running', stateVersion: 1,
+    clientContext: { threadId: 'artifact-thread', documentId: 'artifact-doc' } };
+  const pending = Promise.withResolvers<Request>();
+  const aborted = Promise.withResolvers<void>();
+  let timelineCalls = 0;
+  const api = createBrowserCloudApi({ storage, fetchImpl: async (input, init) => {
+    const request = new Request(input, init);
+    const path = new URL(request.url).pathname;
+    if (path.endsWith('/v1/sessions')) return signedJson(request, identity, { sessions: [session] });
+    if (path.endsWith('/timeline')) {
+      if (++timelineCalls === 1) return signedJson(request, identity, { thread: { id: 'artifact-thread' } });
+      return new Promise<Response>((_resolve, reject) => {
+        request.signal.addEventListener('abort', () => { aborted.resolve(); reject(request.signal.reason); }, { once: true });
+        pending.resolve(request);
+      });
+    }
+    if (path.endsWith('/events')) {
+      const signed = signedSse(request, identity, { type: 'timeline.updated', sessionId: session.id });
+      const frame = new Uint8Array(await signed.arrayBuffer());
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(frame);
+          request.signal.addEventListener('abort', () => controller.close(), { once: true });
+        },
+      }), { headers: signed.headers });
+    }
+    throw new Error(`Unexpected request ${path}`);
+  } });
+  assert.ok(api);
+  const events: any[] = [];
+  const unsubscribe = api.onCloudEvent((event) => events.push(event));
+  try {
+    await api.cloudGetState({ threadId: 'artifact-thread', documentId: 'artifact-doc' });
+    const request = await pending.promise;
+    unsubscribe();
+    await aborted.promise;
+    assert.equal(request.signal.aborted, true);
+    assert.equal(events.some((event) => event.type === 'conversation-timeline-updated'), false);
+  } finally { unsubscribe(); }
+});
+
+for (const failure of ['revoked', 'invalid-proof']) {
+  test(`browser stops retrying a ${failure} stream and shows a failed connection`, { timeout: 5_000 }, async (t) => {
+    const identity = serverIdentity();
+    const storage = new MemoryStorage();
+    storeBrowserCredentials(storage, storedBrowserProfile('https://permanent-stream.example.test', identity.key), {
+      accessToken: 'permanent-access', refreshToken: 'permanent-refresh', accessExpiresAt: Date.now() + 600_000,
+    });
+    const failed = Promise.withResolvers<any>();
+    let streamCalls = 0;
+    const api = createBrowserCloudApi({ storage, fetchImpl: async (input, init) => {
+      const request = new Request(input, init);
+      const path = new URL(request.url).pathname;
+      if (path.endsWith('/v1/sessions')) return signedJson(request, identity, { sessions: [{
+        id: 'permanent-room', status: 'running', stateVersion: 1,
+        clientContext: { threadId: 'permanent-thread', documentId: 'permanent-doc' },
+      }] });
+      if (path.endsWith('/timeline')) return signedJson(request, identity, { thread: { id: 'permanent-thread' } });
+      if (path.endsWith('/events')) {
+        streamCalls += 1;
+        if (failure === 'revoked') return signedJson(request, identity, {
+          error: { code: 'DEVICE_REVOKED', message: 'Device pairing revoked' },
+        }, 403);
+        const signed = signedSse(request, identity, { type: 'agent.event', sessionId: 'permanent-room' });
+        signed.headers.set('x-rauhwpx-response-signature', 'invalid');
+        return signed;
+      }
+      throw new Error(`Unexpected request ${path}`);
+    } });
+    assert.ok(api);
+    t.after(api.onCloudEvent((event: any) => {
+      if (event.type === 'remote-session-stream-error') failed.resolve(event.snapshot);
+    }));
+    await api.cloudGetState({ threadId: 'permanent-thread', documentId: 'permanent-doc' });
+    assert.equal((await failed.promise).link.kind, 'failed');
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    assert.equal(streamCalls, 1, 'permanent failures must not enter the reconnect loop');
   });
 }

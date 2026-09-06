@@ -14,7 +14,7 @@ const { openCloudDisplay } = await mod('desktop/cloud-display.mjs');
 const { DisplayFrameStore } = await mod('cloud/src/display-frame-store.mjs');
 const { runSession } = await mod('cloud/document-runtime/run.mjs');
 const { TIMELINE_SCHEMA, TIMELINE_VERSION } = await mod('cloud/document-runtime/timeline.mjs');
-const { createRaucloudBroker } = await mod('rhwp/rau-credits/cloud-broker.mjs');
+const { createRaucloudBroker, CLOUD_WARM_IDLE_MS } = await mod('rhwp/rau-credits/cloud-broker.mjs');
 const { createMemoryStore } = await mod('rhwp/rau-credits/store.mjs');
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
 
@@ -88,7 +88,7 @@ assert.equal(frames.snapshot().streams[0].viewers, 1);
 frames.closeAll();
 console.log(JSON.stringify({ probe: 'warm-expiry-during-editing', elapsedSeconds: 1800, acceptedInputs: inputSequence, renewedViewerEverySeconds: 10, deleted }));
 
-now += 301000;
+now += CLOUD_WARM_IDLE_MS + 1000;
 await broker.reconcileCloudUsage();
 assert.deepEqual(deleted, ['audit-service'], 'idle teardown must still work after editing stops');
 

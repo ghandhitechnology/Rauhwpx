@@ -218,6 +218,18 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
       publish();
     },
     emitAgentEvent,
+    publishTimeline(timeline: NonNullable<CloudSnapshot['timeline']>) {
+      state.timeline = structuredClone(timeline);
+      publish();
+    },
+    emitStreamError(retryable: boolean, error = 'Pair this device again') {
+      if (state.session.kind === 'idle') return;
+      if (!retryable) {
+        state.link = { kind: 'failed', error, attempt: 1, canRecreate: true };
+        publish();
+      }
+      listener?.({ type: 'session-stream-error', sessionId: state.session.sessionId, retryable, error });
+    },
     finishReply(text: string) {
       if (!state.timeline) throw new Error('Start a Cloud conversation first');
       state.timeline.thread.messages.push({ role: 'assistant', text, agent: state.timeline.thread.agent });

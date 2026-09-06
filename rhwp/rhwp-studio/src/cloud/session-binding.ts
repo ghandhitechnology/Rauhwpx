@@ -84,7 +84,6 @@ export async function runCloudSessionSelection<T>({
 }): Promise<boolean> {
   const lock = acquire();
   const isCurrent = begin();
-  select();
   let rolledBack = false;
   const rollbackCurrent = async () => {
     if (!rolledBack && isCurrent()) {
@@ -93,6 +92,7 @@ export async function runCloudSessionSelection<T>({
     }
   };
   try {
+    select();
     const value = await refresh();
     if (!isCurrent()) return false;
     const mounted = mount(value);
