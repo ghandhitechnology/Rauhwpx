@@ -6388,6 +6388,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 }
 
 .ag-fleet-row {
+  container: fleet-row / inline-size;
   min-width: 0;
   animation: ag-step-arrive 280ms var(--ag-motion-out) both;
 }
@@ -6514,6 +6515,23 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 창 전체가 아니라 실제 행 너비에 맞춰 근황을 이름 옆으로 옮긴다. */
+@container fleet-row (min-width: 560px) {
+  .ag-fleet-head {
+    grid-template-columns: 12px fit-content(38%) minmax(0, 1fr) auto 11px;
+    grid-template-rows: 20px;
+    column-gap: 10px;
+  }
+
+  .ag-fleet-activity {
+    grid-column: 3;
+    grid-row: 1;
+  }
+
+  .ag-fleet-aside { grid-column: 4; }
+  .ag-fleet-row-chevron { grid-column: 5; }
 }
 
 .ag-fleet-metrics {
