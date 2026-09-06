@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 
 export async function checkFleetPreview(page, origin) {
-  for (const width of [280, 480]) {
+  for (const width of [280, 480, 840]) {
     await page.goto(`${origin}/?scenario=fleet&play=1&hold=1&width=${width}&theme=${width === 280 ? 'light' : 'dark'}`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('.ag-fleet-task');
     assert.equal(await page.$eval('.ag-fleet-dock-pill', el => el.getAttribute('aria-expanded')), 'false');
@@ -16,6 +16,7 @@ export async function checkFleetPreview(page, origin) {
     assert.equal(await page.$$eval('.ag-fleet-task', rows => rows.length), 3);
     assert.equal(await page.$$eval('.ag-fleet-task.ag-open', rows => rows.length), 0);
     assert(await page.$eval('.ag-fleet-head', el => el.getBoundingClientRect().height < 50));
+    assert.equal(await page.$eval('.ag-fleet-activity', el => getComputedStyle(el).gridRowStart), width === 840 ? '1' : '2');
     await page.click('.ag-fleet-task .ag-fleet-head');
     await page.waitForFunction(() => document.querySelector('.ag-fleet-task.ag-open .ag-fleet-preview').textContent.includes('문서의 문장'));
     const before = await page.$eval('.ag-fleet-task.ag-open .ag-fleet-preview', el => el.textContent);
