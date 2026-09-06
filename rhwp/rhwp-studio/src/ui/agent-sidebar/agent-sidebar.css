@@ -7345,3 +7345,53 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
+
+/* 새 대화의 실행 위치 선택과 시작한 대화의 위치 표시. */
+.ag-execution-location {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--ag-border);
+  border-radius: 8px;
+}
+.ag-root .ag-execution-location .ag-execution-location-option {
+  display: inline-flex;
+  width: auto;
+  height: 26px;
+  flex: 0 0 auto;
+  white-space: nowrap;
+  gap: 5px;
+  padding: 0 7px;
+  font: inherit;
+  font-size: 11px;
+}
+.ag-execution-location .ag-execution-location-option[aria-pressed='true'] {
+  color: var(--ag-text);
+  background: var(--ag-hover);
+}
+.ag-execution-location[data-started='true'] {
+  padding: 0;
+  border: 0;
+}
+.ag-root .ag-execution-location[data-started='true'] .ag-execution-location-option {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+}
+.ag-root .ag-execution-location .ag-execution-location-option[hidden],
+.ag-execution-location span[hidden] { display: none; }
+.ag-execution-location-option:disabled { opacity: 0.4; }
+
+
+.ag-provider-item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.ag-provider-item[data-unavailable-reason]::after {
+  content: attr(data-unavailable-reason);
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--ag-text-muted);
+}

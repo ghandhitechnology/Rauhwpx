@@ -1124,6 +1124,8 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     stripIndicator.setAttribute('aria-hidden', 'true');
     const stripActions = el('div', 'ag-cloud-recovery-strip-actions');
     recoveryStrip.append(stripIndicator, stripTitle, stripActions);
+    const statusDetails = action('Cloud 상태', () => openPanel(statusDetails), 'ag-cloud-status-details');
+    stripActions.append(statusDetails);
     if (link.kind === 'failed') {
       stripActions.append(action('다시 연결', reconnectLink, 'ag-primary'));
       if (link.canRecreate) stripActions.append(action('서버 다시 만들기', recreateLink));

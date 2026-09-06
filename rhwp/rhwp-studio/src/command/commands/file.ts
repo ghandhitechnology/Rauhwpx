@@ -39,6 +39,7 @@ import {
 import {
   canUseOpenFilePicker,
   pickOpenFileHandle,
+  pickReadableBrowserDocument,
   readFileFromHandle,
   saveDocumentToFileSystem,
   writeBlobToHandle,
@@ -86,14 +87,14 @@ async function openFileViaPicker(services: CommandServices): Promise<void> {
 
     const windowLike = window as FileSystemWindowLike;
     const desktopHandle = await services.pickOpenHandle?.();
-    const nativeOpenPickerAvailable = desktopHandle !== undefined || canUseOpenFilePicker(windowLike);
-    handle = desktopHandle === undefined
-      ? await pickOpenFileHandle(windowLike)
-      : desktopHandle;
-    if (!handle) {
-      // File System Access API picker가 있었다면 null은 사용자 취소(예: Esc)다.
-      // 이때 숨김 input fallback을 다시 열면 파일 선택창이 곧바로 재오픈된다.
-      if (nativeOpenPickerAvailable) return;
+    handle = desktopHandle;
+    const selected = desktopHandle === undefined
+      ? await pickReadableBrowserDocument(windowLike)
+      : desktopHandle === null
+        ? null
+        : { ...await readFileFromHandle(desktopHandle), handle: desktopHandle };
+    if (selected === null) return;
+    if (selected === undefined) {
       const fileInput = document.getElementById('file-input') as HTMLInputElement | null;
       if (fileInput) {
         fileInput.dataset.skipUnsavedGuard = 'true';
@@ -102,7 +103,8 @@ async function openFileViaPicker(services: CommandServices): Promise<void> {
       return;
     }
 
-    const { bytes, name } = await readFileFromHandle(handle);
+    const { bytes, name } = selected;
+    handle = selected.handle;
     services.eventBus.emit('open-document-bytes', {
       bytes,
       fileName: name,

@@ -278,6 +278,23 @@ export async function pickOpenFileHandle(windowLike: FileSystemWindowLike): Prom
   }
 }
 
+/** undefined는 파일 input fallback, null은 사용자 취소다. */
+export async function pickReadableBrowserDocument(
+  windowLike: FileSystemWindowLike,
+): Promise<(FileHandleReadResult & { handle: FileSystemFileHandleLike }) | null | undefined> {
+  if (!canUseOpenFilePicker(windowLike)) return undefined;
+  try {
+    const handle = await pickOpenFileHandle(windowLike);
+    if (!handle) return null;
+    return { ...await readFileFromHandle(handle), handle };
+  } catch (error) {
+    // API가 노출되어도 내장 브라우저는 picker 또는 handle 읽기를 차단할 수 있다.
+    if (error instanceof DOMException
+      && (error.name === 'NotAllowedError' || error.name === 'SecurityError')) return undefined;
+    throw error;
+  }
+}
+
 export async function readFileFromHandle(handle: FileSystemFileHandleLike): Promise<FileHandleReadResult> {
   const file = await handle.getFile();
   const maxBytes = file.name.toLowerCase().endsWith('.rhwpx')

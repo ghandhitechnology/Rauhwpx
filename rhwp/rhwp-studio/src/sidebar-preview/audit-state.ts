@@ -40,8 +40,7 @@ export async function applyAuditState(preview: SidebarPreview, params: URLSearch
     if (!preview.cloud || !preview.workspace) throw new Error('Cloud fixture is required');
     await click('[aria-label="프로바이더 선택"]');
     await click('.ag-provider-item[data-agent="codex"]');
-    await click('.ag-cloud-btn');
-    await click('.ag-cloud-setup-footer .ag-primary');
+    await click('.ag-header [data-workspace-mode="cloud"]');
     await until(() => preview.workspace?.mode() === 'cloud', 'Cloud execution');
     document.querySelector<HTMLButtonElement>('#play')!.click();
     await until(() => preview.cloud?.controller.getSnapshot().session.kind === 'running', 'Cloud conversation');
@@ -69,7 +68,7 @@ export async function applyAuditState(preview: SidebarPreview, params: URLSearch
     'provider-picker': '[aria-label="프로바이더 선택"]', 'model-picker': '[aria-label="모델 선택"]',
     'effort-picker': '[aria-label="추론 강도 선택"]', permissions: '.ag-permission-btn',
     'provider-setup': `.ag-settings-provider-row[data-agent="${['rau', 'claude', 'pi', 'grok', 'cursor', 'opencode'].includes(params.get('provider') ?? '') ? params.get('provider') : 'codex'}"] button`,
-    'cloud-options': '.ag-cloud-btn', 'cloud-setup': '.ag-cloud-btn',
+    'cloud-options': '.ag-header [data-workspace-mode="cloud"]', 'cloud-setup': '.ag-header [data-workspace-mode="cloud"]',
   };
   if (surface && surfaces[surface]) await click(surfaces[surface]);
   if (params.get('terminal') === '1' && surface === 'provider-setup' && params.get('provider') === 'opencode') {

@@ -6,28 +6,39 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   await page.waitForFunction(() => window.sidebarPreview?.cloud && !document.querySelector('.ag-input').disabled);
   await page.click('[aria-label="프로바이더 선택"]');
   await page.click('.ag-provider-item[data-agent="codex"]');
-  assert.equal(await page.$eval('.ag-composer-mode-switch', (node) => node.hidden), true);
+  assert.equal(await page.$eval('.ag-header .ag-execution-location', (node) => node.dataset.started), 'false');
   assert.equal(await page.$('.ag-cloud-handoff'), null);
   assert.equal(await page.$('.ag-new-local-chat'), null);
   assert.equal(await page.$('.ag-composer-mode-row'), null);
   assert.equal(await page.$('.ag-cloud-mode-badge'), null);
   const composerHeight = await page.$eval('.ag-composer', (node) => node.getBoundingClientRect().height);
   await page.screenshot({ path: resolve(artifacts, 'cloud-composer-before-setup.png') });
-  await page.click('.ag-cloud-btn');
-  await page.waitForSelector('.ag-cloud-setup-footer .ag-primary', { visible: true });
-  await page.click('.ag-cloud-setup-footer .ag-primary');
+  await page.click('.ag-header [data-workspace-mode="cloud"]');
   await page.waitForFunction(() => window.sidebarPreview.workspace.mode() === 'cloud');
-  assert.equal(await page.$eval('.ag-composer-mode-switch', (node) => node.hidden), false);
+  await page.click('[aria-label="프로바이더 선택"]');
+  assert.deepEqual(await page.$eval('.ag-provider-item[data-agent="rau"]', (node) => ({ visible: node.checkVisibility(), disabled: node.disabled })), { visible: true, disabled: true }, 'Rau stays discoverable but unavailable in Cloud');
+  await page.click('[aria-label="프로바이더 선택"]');
+  assert.deepEqual(await page.$$eval('.ag-header .ag-execution-location-option', (nodes) => nodes.filter((node) => node.checkVisibility()).map((node) => node.textContent)), ['Local', 'Cloud']);
+  assert.equal(await page.$eval('.ag-header .ag-execution-location', (root) => {
+    const buttons = [...root.querySelectorAll('button')].filter((button) => button.checkVisibility());
+    const bounds = buttons.map((button) => button.getBoundingClientRect());
+    return bounds[0].right <= bounds[1].left && buttons.every((button, index) =>
+      [...button.children].filter((child) => child.checkVisibility()).every((child) => {
+        const rect = child.getBoundingClientRect();
+        return rect.left >= bounds[index].left && rect.right <= bounds[index].right
+          && rect.top >= bounds[index].top && rect.bottom <= bounds[index].bottom;
+      }));
+  }), true, 'Local/Cloud labels and icons fit their buttons without overlapping');
   assert.equal(await page.$eval('.ag-send', (node) => node.dataset.icon), 'cloudSend');
   assert.equal(await page.$eval('.ag-composer', (node) => node.getBoundingClientRect().height), composerHeight);
-  await page.click('.ag-cloud-btn');
-  await page.waitForSelector('.ag-cloud-panel:not([hidden])', { visible: true });
-  await page.click('[data-workspace-mode="local"]');
+  await page.click('.ag-header [data-workspace-mode="local"]');
   await page.waitForFunction(() => document.querySelector('.ag-send').dataset.icon === 'send');
-  await page.click('[data-workspace-mode="cloud"]');
+  await page.click('[aria-label="프로바이더 선택"]');
+  assert.deepEqual(await page.$eval('.ag-provider-item[data-agent="rau"]', (node) => ({ visible: node.checkVisibility(), disabled: node.disabled })), { visible: true, disabled: false }, 'Rau becomes selectable again in Local');
+  await page.click('[aria-label="프로바이더 선택"]');
+  await page.click('.ag-header [data-workspace-mode="cloud"]');
   await page.waitForFunction(() => document.querySelector('.ag-send').dataset.icon === 'cloudSend');
-  await page.screenshot({ path: resolve(artifacts, 'cloud-floating-options.png') });
-  await page.click('.ag-cloud-panel-close');
+  await page.screenshot({ path: resolve(artifacts, 'cloud-header-toggle.png') });
   await page.select('#theme', 'dark');
   await page.click('.ag-input');
   await page.screenshot({ path: resolve(artifacts, 'cloud-send-dark.png') });
@@ -39,6 +50,10 @@ export async function checkCloudRecovery(page, origin, artifacts) {
     && window.sidebarPreview.cloud.controller.getSnapshot().session.kind === 'running'
     && !document.querySelector('.ag-input').disabled);
   assert.equal(await page.$eval('.ag-cloud-panel', (node) => node.hidden), true);
+  assert.deepEqual(await page.$$eval('.ag-header .ag-execution-location-option', (nodes) => nodes.filter((node) => node.checkVisibility()).map((node) => ({ mode: node.dataset.workspaceMode, labelHidden: node.querySelector('span').hidden }))), [{ mode: 'cloud', labelHidden: true }]);
+  await page.click('.ag-header [aria-label="Cloud 설정"]');
+  await page.waitForSelector('.ag-cloud-setup-overlay:not([hidden])', { visible: true });
+  await page.click('.ag-cloud-setup-close');
   await page.click('[data-document-view="cloud"]');
   await page.waitForFunction(() => document.querySelector('#cloud-workspace').dataset.displayState === 'live');
   const original = await page.evaluate(() => {
@@ -63,6 +78,7 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   await page.click('[data-document-view="local"]');
   assert.equal(await page.evaluate(() => window.sidebarPreview.workspace.workspaceView()), 'local');
   assert.equal(await page.evaluate(() => window.sidebarPreview.workspace.mode()), 'cloud');
+  assert.equal(await page.$eval('.ag-header .ag-execution-location', (node) => node.dataset.mode), 'cloud');
   assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.controller.getSnapshot().session.sessionId), original.sessionId);
   await page.click('[data-document-view="cloud"]');
   await page.waitForFunction(() => document.querySelector('#cloud-workspace').dataset.displayState === 'live');
@@ -172,7 +188,7 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   // A blocked refresh must not prevent opening or closing the status panel.
   await page.evaluate(() => window.sidebarPreview.cloud.blockRefresh(true));
   const openedAt = performance.now();
-  await page.click('.ag-cloud-btn');
+  await page.click('.ag-cloud-status-details');
   await page.waitForSelector('.ag-cloud-panel:not([hidden])', { timeout: 1000 });
   const panelMs = performance.now() - openedAt;
   assert.ok(panelMs < 1000);
@@ -303,6 +319,7 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   await page.evaluate(() => document.querySelector('.ag-threads-new').click());
   await page.waitForFunction(() => !document.querySelector('.ag-input').disabled
     && window.sidebarPreview.workspace.mode() === 'local', { timeout: 1000 });
+  assert.equal(await page.$eval('.ag-header .ag-execution-location', (node) => node.dataset.started), 'false');
   assert.equal(await page.evaluate(() => document.documentElement.dataset.cloudLease), 'local');
   await page.evaluate(() => window.sidebarPreview.cloud.blockRefresh(false));
   await page.waitForFunction(() => window.sidebarPreview.cloud.controller.getSnapshot().session.kind === 'idle'
@@ -371,7 +388,7 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   // Reopen after the old server is gone but its replacement transfer failed.
   await page.evaluate(() => window.sidebarPreview.cloud.rejectRestartTransfer(true));
   await page.click('#cloud-disconnect');
-  await page.evaluate(() => document.querySelector('.ag-cloud-btn').click());
+  await page.evaluate(() => document.querySelector('.ag-cloud-status-details').click());
   await page.evaluate(() => [...document.querySelectorAll('.ag-cloud-recovery-actions button')]
     .find((node) => node.textContent === '서버 다시 만들기').click());
   await page.waitForFunction(() => document.querySelector('.ag-messages').innerText.includes('Preview restart transfer interrupted.'));
@@ -405,7 +422,7 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   assert.equal(reopened.documentText, 'Archived Cloud edits after the original transfer.');
   assert.equal(reopened.transfer.timeline.thread.messages.filter((message) => message.messageId === pendingRestart.cloudStartId).length, 1);
   assert.equal(reopened.threads.find((thread) => thread.id === pendingRestart.id).cloudRestartSourceSessionId, undefined);
-  // Existing local conversations hand off through the document Cloud setup action.
+  // Local sends collapse the selector and keep existing conversations local.
   await page.goto(`${origin}/?cloud=1&reset=1`, { waitUntil: 'networkidle0' });
   await page.waitForFunction(() => window.sidebarPreview?.cloud && !document.querySelector('.ag-input').disabled);
   await page.click('[aria-label="프로바이더 선택"]');
@@ -413,14 +430,10 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   await page.type('.ag-input', '문서의 소개 문단을 검토해 주세요.');
   await page.click('.ag-send');
   await page.waitForFunction(() => window.sidebarPreview.bridge.isTurnRunning());
-  await page.waitForFunction(() => !window.sidebarPreview.bridge.isTurnRunning());
-  assert.equal(await page.$eval('.ag-composer-mode-switch', (node) => node.hidden), true);
-  await page.click('.ag-cloud-btn');
-  await page.waitForSelector('.ag-cloud-setup-footer .ag-primary', { visible: true });
-  await page.click('.ag-cloud-setup-footer .ag-primary');
-  await page.waitForFunction(() => window.sidebarPreview.cloud.calls.transfers.length === 1);
-  assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.transfers[0].timeline.thread.messages
-    .some((message) => message.text === '문서의 소개 문단을 검토해 주세요.')), true);
+  assert.deepEqual(await page.$$eval('.ag-header .ag-execution-location-option', (nodes) => nodes.filter((node) => node.checkVisibility()).map((node) => ({ mode: node.dataset.workspaceMode, labelHidden: node.querySelector('span').hidden }))), [{ mode: 'local', labelHidden: true }]);
+  await page.click('.ag-header [data-workspace-mode="local"]');
+  assert.equal(await page.evaluate(() => window.sidebarPreview.workspace.mode()), 'local');
+  assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.transfers.length), 0);
   console.log(`Cloud panel opened in ${Math.round(panelMs)}ms; fixture reconnect restored the preview in ${Math.round(reconnectMs)}ms`);
   await page.goto(`${origin}/?width=480`, { waitUntil: 'networkidle0' });
 }
