@@ -77,17 +77,6 @@ const PLAN_AGENTS: readonly PlanAgent[] = ['claude', 'codex'];
 /** 요금제도 잔액도 없는 프로바이더 — 기록된 토큰만 보여준다. */
 const API_USAGE_AGENTS: readonly AgentName[] = ['grok', 'cursor', 'opencode'];
 
-/** 설치 안내 — cursor 는 npm 이 아니라 공식 설치 스크립트로 받는다. */
-const SETUP_INSTALL_NOTE: Record<AgentName, string> = {
-  rau: '브라우저로 로그인하면 $5 체험 크레딧이 바로 연결됩니다.',
-  claude: 'Claude CLI와 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다.',
-  codex: 'Codex CLI와 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다.',
-  pi: 'Pi 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다.',
-  grok: 'Grok CLI와 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다.',
-  cursor: 'Cursor CLI를 공식 설치 스크립트로 앱 전용 폴더에 설치합니다.',
-  opencode: 'OpenCode CLI를 앱 전용 폴더에 설치합니다.',
-};
-
 /** API 키 입력칸 힌트 — 키 접두사가 있는 프로바이더만 형태를 보여준다. */
 const API_KEY_PLACEHOLDER: Record<AgentName, string> = {
   rau: '',
@@ -831,10 +820,9 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   setupError.hidden = true;
 
   const setupInstallPane = el('div', 'ag-agent-setup-pane');
-  const setupInstallNote = el('p', 'ag-agent-setup-copy');
   const setupInstall = el('button', 'ag-agent-setup-primary', '설치하고 계속');
   setupInstall.type = 'button';
-  setupInstallPane.append(setupInstallNote, setupInstall);
+  setupInstallPane.append(setupInstall);
 
   const setupAuthPane = el('div', 'ag-agent-setup-pane');
   const setupAuthHeading = el('h3', 'ag-agent-setup-section-title', '로그인 방법');
@@ -2449,7 +2437,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
         : detected || configured;
     setupHeroIcon.replaceChildren(createProviderIcon(agent));
     setupHeroTitle.textContent = AGENT_LABEL[agent];
-    setupInstallNote.textContent = SETUP_INSTALL_NOTE[agent];
     setupKey.input.placeholder = API_KEY_PLACEHOLDER[agent];
     const apiKeyOnly = agent === 'opencode';
     setupAuthHeading.textContent = apiKeyOnly ? 'OpenCode API 키' : '로그인 방법';
