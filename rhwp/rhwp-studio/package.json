@@ -56,7 +56,8 @@
     "e2e:check": "python3 ../scripts/check_e2e_manifest.py",
     "dev:sidebar": "vite --config vite.sidebar.config.ts",
     "build:sidebar": "vite build --config vite.sidebar.config.ts",
-    "test:sidebar": "node sidebar-preview/check.mjs"
+    "test:sidebar": "node sidebar-preview/check.mjs",
+    "test:sidebar:audit": "node sidebar-preview/audit.check.mjs"
   },
   "devDependencies": {
     "@types/chrome": "^0.2.2",
