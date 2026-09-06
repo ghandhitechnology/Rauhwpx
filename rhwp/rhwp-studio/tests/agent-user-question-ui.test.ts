@@ -69,11 +69,9 @@ test('question history separates its label and outcome across the card header', 
   assert.match(css, /\.ag-question-history-status\s*\{[^}]*text-align:\s*right;[^}]*white-space:\s*nowrap;/s);
 });
 
-test('expanded drawer uses the question metadata as its only header', () => {
-  assert.match(controller, /collapsed \? question\.question : question\.header/);
-  assert.doesNotMatch(controller, /collapsed \? question\.question : '에이전트 질문'/);
-  assert.doesNotMatch(controller, /const heading = element\('div', 'ag-question-heading'\)/);
-  assert.match(css, /\.ag-question-disclosure\[aria-expanded='true'\] \.ag-question-disclosure-label/);
+test('question drawer starts with the question instead of a redundant metadata header', () => {
+  assert.match(controller, /const prompt = element\('h3', 'ag-question-prompt', question\.question\)/);
+  assert.doesNotMatch(controller, /ag-question-disclosure|ag-question-mode|ag-question-count/);
 });
 
 test('cards support single, multiple, Other, navigation and atomic submission', () => {
@@ -90,10 +88,8 @@ test('cards support single, multiple, Other, navigation and atomic submission', 
 
 test('keyboard and accessibility behavior is explicit', () => {
   assert.match(controller, /button\.setAttribute\('aria-pressed'/);
-  assert.match(controller, /aria-expanded/);
-  assert.match(controller, /aria-controls/);
   assert.match(controller, /aria-live', 'polite'/);
-  assert.match(controller, /!visible \|\| collapsed/);
+  assert.match(controller, /!visible \|\| submitting/);
   assert.match(controller, /isEditable\(event\.target\)/);
   assert.match(controller, /digit < 1 \|\| digit > 9/);
   assert.match(sidebar, /e\.key === 'Enter' && !e\.shiftKey && !e\.isComposing && questionController\.usesComposerForOther\(\)/);
