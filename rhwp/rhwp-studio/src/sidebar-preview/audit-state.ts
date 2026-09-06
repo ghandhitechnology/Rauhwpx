@@ -70,6 +70,11 @@ export async function applyAuditState(preview: SidebarPreview, params: URLSearch
     'provider-setup': `.ag-settings-provider-row[data-agent="${['rau', 'claude', 'pi', 'grok', 'cursor', 'opencode'].includes(params.get('provider') ?? '') ? params.get('provider') : 'codex'}"] button`,
     'cloud-options': '.ag-header [data-workspace-mode="cloud"]', 'cloud-setup': '.ag-header [data-workspace-mode="cloud"]',
   };
+  if (surface === 'provider-setup') {
+    const rowSelector = surfaces[surface]!.replace(/ button$/, '');
+    const row = await until(() => document.querySelector<HTMLDetailsElement>(rowSelector), 'provider connection');
+    if (!row.open) await click(`${rowSelector} summary`);
+  }
   if (surface && surfaces[surface]) await click(surfaces[surface]);
   if (params.get('terminal') === '1' && surface === 'provider-setup' && params.get('provider') === 'opencode') {
     await click('.ag-agent-setup-pane:not([hidden]) .ag-agent-setup-primary');

@@ -74,7 +74,7 @@ test('헤더에 설정(기어) 버튼이 있다', () => {
   assert.match(source, /settingsBtn\.setAttribute\('aria-label', '설정'\)/);
   assert.match(source, /settingsBtn\.setAttribute\('aria-controls', 'ag-settings-panel'\)/);
   assert.match(source, /settingsBtn\.appendChild\(createIcon\('gear'\)\)/);
-  assert.match(source, /headerActions\.append\(threadsBtn, versionsBtn, settingsBtn\)/);
+  assert.match(source, /headerActions\.append\(versionsBtn, threadsBtn, settingsBtn\)/);
   assert.match(icons, /gear: 'M/);
   assert.match(icons, /refresh: 'M/);
 });
@@ -141,7 +141,7 @@ test('설정 적용 버튼은 카드 없이 콘텐츠 하단에 머문다', () =
 });
 
 test('설정은 편집·AI·연결 목적지와 업무별 묶음을 갖는다', () => {
-  for (const title of ['연결', '기본 설정', '글쓰기 보정', '템플릿', '사용량']) {
+  for (const title of ['연결', '새 대화 기본값', '글쓰기 보정', '템플릿', '사용량']) {
     assert.match(settings, new RegExp(`createSection\\('${title}'\\)`));
   }
   for (const title of ['화면과 보기', '글꼴', '저장과 파일']) {
@@ -214,7 +214,7 @@ test('사이드바 버전 버튼은 한컴 Git 설정을 따르고 상단 메뉴
 test('템플릿 설정은 추가·이름 변경·교체·확인 삭제를 제공한다', () => {
   assert.match(
     settings,
-    /aiContent\.append\(calibration\.root, instructionsSection\.root, defaults\.root, templatesSection\.root, aiFooter\)/,
+    /aiContent\.append\(defaults\.root, calibration\.root, instructionsSection\.root, templatesSection\.root, aiFooter\)/,
   );
   assert.doesNotMatch(editingSettings, /documentResources/);
   assert.match(settings, /requestTemplateName\('템플릿 추가'/);
@@ -276,7 +276,7 @@ test('각 프로바이더 설정은 별도 시작 화면 없이 설정 모달에
   assert.match(settings, /setupDialog\.setAttribute\('role', 'dialog'\)/);
   assert.match(settings, /setupDialog\.setAttribute\('aria-modal', 'true'\)/);
   assert.match(settings, /bridge\.installAgent\(setupAgent\)/);
-  assert.match(settings, /bridge\.authenticateAgent\(setupAgent, method/);
+  assert.match(settings, /bridge\.authenticateAgent\(authenticatingAgent, method/);
   assert.match(settings, /'브라우저로 로그인'/);
   assert.match(settings, /'API 키 입력'/);
   assert.match(settings, /const detected = health\?\.available === true \|\| setup\?\.available === true/);
@@ -285,7 +285,7 @@ test('각 프로바이더 설정은 별도 시작 화면 없이 설정 모달에
   assert.match(settings, /row\.setup\.disabled = !online \|\| \(!setup && !health\)/);
   assert.match(settings, /const detected = providers\?\.\[agent\]\?\.available === true/);
   assert.match(settings, /const available = detected \|\| status\?\.available === true \|\| status\?\.installed === true/);
-  assert.match(settings, /const connected = agent === 'rau'[\s\S]*agent === 'opencode'[\s\S]*available && status\?\.authenticated === true[\s\S]*detected \|\| configured/);
+  assert.match(settings, /const connected = configured \|\| \(available && status\?\.authenticated === true\)/);
   assert.match(settings, /CLI 연결이 확인되었습니다/);
   assert.doesNotMatch(settings, /필요한 CLI와 인증을 한 번에 설정합니다/);
   assert.match(settings, /piOauth\.addEventListener\('click', \(\) => void startSetupAuth\('oauth'\)\)/);
@@ -344,7 +344,7 @@ test('브라우저 로그인은 인증 주소와 기기 코드를 카드 안에 
   assert.match(settings, /setupCodeSubmit\.disabled = connectionState !== 'connected' \|\| !setupCode\.input\.value\.trim\(\);\s*restoreSetupFocus\(\);/);
   assert.match(settings, /renderPi\(\);\s*restoreSetupFocus\(\);/);
   // 상자는 oauth 로그인이 도는 동안에만 선다.
-  assert.match(settings, /const authorizing = setupOauthPending && setupBusy;\s*setupLoginBox\.hidden = !authorizing/);
+  assert.match(settings, /const authorizing = setupOauthPending && setupBusy && !supportsTerminalSetup\(setupAgent\);\s*setupLoginBox\.hidden = !authorizing/);
   assert.match(settings, /if \(ev\.authUrl\) setupAuthUrl = ev\.authUrl;\s*if \(ev\.userCode \|\| ev\.pairingCode\) setupUserCode = ev\.userCode \?\? ev\.pairingCode \?\? null;/);
   assert.match(settings, /if \(method === 'oauth' && started\.authUrl\) setupAuthUrl = started\.authUrl/);
   // 자동 열기 시도는 그대로 남는다.
@@ -352,7 +352,7 @@ test('브라우저 로그인은 인증 주소와 기기 코드를 카드 안에 
   // claude 인증 코드 입력칸은 로그인 상자 아래에 붙는다.
   assert.match(settings, /setupKeyBox,\s*setupLoginBox,\s*setupCodeBox,/);
   // 로그인이 끝나거나 실패하면 주소·코드를 지운다.
-  assert.match(settings, /function clearSetupAuthPrompt\(\): void \{\s*setupOauthPending = false;\s*setupAuthUrl = null;\s*setupUserCode = null;/);
+  assert.match(settings, /function clearSetupAuthPrompt\(\): void \{\s*setupTerminal\.close\(\);\s*setupOauthPending = false;\s*setupAuthUrl = null;\s*setupUserCode = null;/);
   assert.match(settings, /if \(ev\.state === 'done'\) clearSetupAuthPrompt\(\)/);
 });
 
@@ -363,20 +363,20 @@ test('자동 하네스 업데이트 실패는 프로바이더 카드에 조용�
 });
 
 test('AI 기본 설정은 Apply 전까지 초안이고 성공 후 사이드바에 알린다', () => {
-  assert.match(settings, /createSelect\(\s*'기본 제공자'/);
-  assert.match(settings, /createSelect\('기본 모델', \[\]\)/);
+  assert.match(settings, /createSelect\(\s*'제공자'/);
+  assert.match(settings, /createSelect\('모델', \[\]\)/);
   assert.match(settings, /createSelect\('추론 강도', \[\]\)/);
   assert.match(settings, /effortField\.field\.hidden = effortOptions\.length === 0/);
   assert.match(settings, /fillSelect\(effortField\.select, \[\.\.\.effortOptions\]\.reverse\(\)\)/);
   // 줄의 display:flex 가 기본 [hidden] 을 덮으므로 따로 눌러 준다 — 없으면
   // Cursor 처럼 추론 강도가 없는 프로바이더에서 빈 줄이 남는다.
   assert.match(settingsCss, /\.ag-settings-field\[hidden\]\s*\{[^}]*display:\s*none;/s);
-  assert.match(settings, /createSelect\('권한 프로필', PERMISSION_OPTIONS\)/);
+  assert.match(settings, /createSelect\('권한', PERMISSION_OPTIONS\.map\(option => \(\{/);
   assert.match(settings, /const select = el\('select', 'ag-settings-select'\)/);
   assert.match(settings, /prefsDraft = normalizeAgentPrefs\(\{ \.\.\.prefsDraft, \.\.\.partial \}\)/);
   assert.match(settings, /const result = trySaveAgentPrefs\(nextPrefs\)/);
   assert.match(settings, /applyDefaults\(result\.value\)/);
-  assert.match(settings, /'새 대화부터 적용돼요\.'/);
+  assert.match(settings, /aiStatus\.textContent = 'AI 설정을 적용했습니다\.'/);
   assert.match(settings, /nextPrefs\.defaultPermissionProfile === 'unrestricted'[\s\S]*window\.confirm\(UNRESTRICTED_DEFAULT_WARNING\)/);
   assert.match(settings, /saveAgentInstructions\(\)[\s\S]*persistPrefs\(nextPrefs\)/);
   assert.match(settings, /agentField\.select\.disabled = aiPrefsSaving/);
@@ -410,8 +410,9 @@ test('글쓰기 보정 상태와 진입 버튼', () => {
   assert.match(source, /openCalibration: \(\) => writingStyleCalibration\.open\(\)/);
 });
 
-test('현재 대화는 슬래시로 구분하고 Pi 목록 안내는 숫자만 남긴다', () => {
-  assert.match(settings, /현재 대화: \$\{AGENT_LABEL\[current\.agent\]\} \/ \$\{labelForModel\(current\.agent, current\.model\)\} \/ \$\{permission\}/);
+test('Pi 모델 목록은 검색 결과 수와 선택 한도를 표시한다', () => {
+  assert.match(settings, /piCatalogNote\.textContent = `\$\{matches\.length\}개 · 최대 \$\{PI_MODEL_MAX\}개`/);
+  assert.match(settings, /piCatalogNote\.textContent = `\$\{matches\.length\}개 중 \$\{visible\.length\}개`/);
   assert.doesNotMatch(settings, /검색으로 좁혀 보세요/);
 });
 
@@ -632,7 +633,7 @@ test('Rau 재설정은 압축 동작만 두고 OAuth 완료를 잠깐 알린다'
 test('Rau 로그아웃 뒤 설치된 런타임을 연결 상태로 오인하지 않는다', () => {
   assert.match(
     settings,
-    /const configured = status\?\.connected === true \|\| status\?\.setupComplete === true;\s*\n[\s\S]*const connected = agent === 'rau'\s*\? configured/,
+    /const configured = status\?\.connected === true \|\| status\?\.setupComplete === true;\s*\n[\s\S]*const connected = configured \|\| \(available && status\?\.authenticated === true\)/,
   );
   assert.match(settings, /const connected = setup\?\.connected === true \|\| setup\?\.setupComplete === true\s*\|\| \(detected && setup\?\.authenticated === true\)/);
   assert.match(settings, /label = detected \? '로그인 필요' : '연결하기'/);
@@ -643,59 +644,37 @@ test('Rau 로그아웃 뒤 설치된 런타임을 연결 상태로 오인하지 
   assert.match(settings, /function persistPrefs[\s\S]*preserveDraft[\s\S]*previousDraft[\s\S]*applyDefaults\(result\.value\)/);
 });
 
-test('설정 모달은 프로바이더별 설치 안내와 API 키 힌트를 갖는다', () => {
-  assert.match(settings, /const SETUP_INSTALL_NOTE: Record<AgentName, string>/);
-  assert.match(settings, /rau: '브라우저로 로그인하면 \$5 체험 크레딧이 바로 연결됩니다\.'/);
-  assert.match(settings, /cursor: 'Cursor CLI를 공식 설치 스크립트로 앱 전용 폴더에 설치합니다\.'/);
-  assert.match(settings, /grok: 'Grok CLI와 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다\.'/);
-  assert.match(settings, /opencode: 'OpenCode CLI를 앱 전용 폴더에 설치합니다\.'/);
+test('설정 모달은 설치 진행 동작과 프로바이더별 API 키 힌트를 갖는다', () => {
+  assert.match(settings, /const setupInstall = el\('button', 'ag-agent-setup-primary', '설치하고 계속'\)/);
+  assert.match(settings, /setupInstallPane\.hidden = available/);
   assert.match(settings, /const API_KEY_PLACEHOLDER: Record<AgentName, string>/);
   assert.match(settings, /grok: 'xai-…'/);
   assert.match(settings, /cursor: 'API 키'/);
   assert.match(settings, /opencode: 'API 키'/);
-  assert.match(settings, /setupInstallNote\.textContent = SETUP_INSTALL_NOTE\[agent\]/);
   assert.match(settings, /setupKey\.input\.placeholder = API_KEY_PLACEHOLDER\[agent\]/);
 });
 
-test('OpenCode 설정은 OAuth 대신 API 키만 받고 터미널 로그인을 새로고침으로 감지한다', () => {
-  assert.match(settings, /const apiKeyOnly = agent === 'opencode'/);
-  assert.match(settings, /setupOauth\.hidden = apiKeyOnly/);
-  assert.match(settings, /setupApiToggle\.hidden = apiKeyOnly/);
-  assert.match(settings, /if \(apiKeyOnly\) setupKeyBox\.hidden = false/);
+test('OpenCode 설정은 허브의 터미널 로그인 지원 여부를 따르고 인증을 확인한다', () => {
+  assert.match(settings, /setupOauth\.hidden = status\?\.terminalAuthSupported === false/);
   assert.match(settingsCss, /\.ag-agent-auth-card\[hidden\] \{\s*display: none;/);
-  assert.match(settings, /터미널에서 opencode auth login을 마친 뒤 상태를 새로고침하면 기존 로그인을 감지합니다\./);
-  assert.match(settings, /이 화면에서는 OpenCode API 키를 연결할 수 있습니다\./);
   assert.match(
     settings,
     /refreshBtn\.addEventListener\('click',[\s\S]{0,160}Promise\.all\(\[refreshProviders\(true\), refreshSetupStatuses\(true\)\]\)/,
   );
   assert.match(bridgeSource, /requestAgentSetupStatus\(refresh = false\)/);
   assert.match(bridgeSource, /type: 'agent-setup-status-request', \.\.\.\(refresh \? \{ refresh: true \} : \{\}\)/);
-  assert.match(settings, /setupDoneChange\.textContent = apiKeyOnly \? 'API 키 변경' : '로그인 방식 변경'/);
   assert.match(settings, /agent === 'opencode'[\s\S]{0,80}'OpenCode CLI 자격 증명을 확인했습니다\.'/);
+  // 설치 감지만으로 완료하지 않고 허브가 확인한 인증 상태를 요구한다.
+  assert.match(settings, /const connected = configured \|\| \(available && status\?\.authenticated === true\)/);
+  assert.match(settings, /label = detected \? '로그인 필요' : '연결하기'/);
+  // 터미널 로그인을 지원하지 않는 런타임은 API 키 입력으로 이동한다.
   assert.match(
     settings,
-    /label = detected \? '로그인 필요' : '연결하기'/,
+    /async function startPreferredSetupAuth\(agent: AgentName\): Promise<void> \{\s*setupReauth = true;\s*if \(setupStatuses\?\.\[agent\]\?\.terminalAuthSupported === false\) \{\s*setupKeyBox\.hidden = false;\s*renderAgentSetup\(\);\s*setupKey\.input\.focus\(\);\s*return;\s*\}\s*await startSetupAuth\('oauth'\);/,
   );
-  // 설치 여부와 인증 여부를 분리해, CLI만 설치된 상태를 연결 완료로 보지 않는다.
-  assert.match(
-    settings,
-    /const connected = agent === 'rau'\s*\? configured\s*: agent === 'opencode'\s*\? configured \|\| \(available && status\?\.authenticated === true\)\s*: detected \|\| configured/,
-  );
-  assert.match(
-    settings,
-    /const available = providers\?\.\[agent\]\?\.available === true \|\| status\?\.available === true;[\s\S]*\|\| \(available && status\?\.authenticated === true\)/,
-  );
-  // 첫 실행 카드의 자동 연결도 OpenCode에서는 키 입력만 열며 OAuth를 시작하지 않는다.
-  assert.match(
-    settings,
-    /async function startPreferredSetupAuth\(agent: AgentName\): Promise<void> \{\s*setupReauth = true;\s*if \(agent === 'opencode'\) \{\s*renderAgentSetup\(\);\s*setupKey\.input\.focus\(\);\s*return;\s*\}\s*await startSetupAuth\('oauth'\);/,
-  );
-  // 숨김 상태가 깨져도 브리지로 잘못된 OpenCode OAuth 요청을 보내지 않는다.
-  assert.match(
-    settings,
-    /async function startSetupAuth\(method: AgentAuthMethod\): Promise<void> \{\s*if \(!setupAgent \|\| setupBusy\) return;\s*if \(setupAgent === 'opencode' && method === 'oauth'\) return;/,
-  );
+  assert.match(settings, /return agent !== null && !\['rau', 'pi'\]\.includes\(agent\)\s*&& setupStatuses\?\.\[agent\]\?\.terminalAuthSupported !== false/);
+  assert.match(settings, /if \(supportsTerminalSetup\(setupAgent\) && method === 'oauth'\) void setupTerminal\.open\(AGENT_LABEL\[setupAgent\]\)/);
+  assert.match(settings, /case 'agent-setup-terminal':[\s\S]*if \(setupAuthRunId && ev\.authRunId !== setupAuthRunId\) break;/);
 });
 
 test('원격 브라우저 구역은 사용량 아래 서고, 키는 앱 수명 동안만 허브를 덮는다', () => {

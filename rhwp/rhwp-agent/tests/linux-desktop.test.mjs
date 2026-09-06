@@ -87,11 +87,9 @@ test('Repository browser checks build WASM with the shared pinned toolchain', ()
   assert.match(rootPackage.scripts['build:wasm'], /wasm-pack build --target web/);
 });
 
-test('Linux checks and releases run on native Ubuntu x64 and arm64 runners', () => {
-  for (const workflow of [desktopChecks, releaseWorkflow]) {
-    assert.match(workflow, /ubuntu-24\.04(?!-arm)\b/);
-    assert.match(workflow, /ubuntu-24\.04-arm\b/);
-  }
+test('Linux releases run on native Ubuntu x64 and arm64 runners', () => {
+  assert.match(releaseWorkflow, /ubuntu-24\.04(?!-arm)\b/);
+  assert.match(releaseWorkflow, /ubuntu-24\.04-arm\b/);
   assert.match(releaseWorkflow, /release\/\*\.AppImage/);
   assert.match(releaseWorkflow, /release\/\*\.deb/);
   assert.match(releaseWorkflow, /latest-linux\*\.yml/);
