@@ -1014,6 +1014,91 @@ test('account login reuses V2 PKCE while persisting only a token hash', async ()
   );
 });
 
+test('an active account provisions one Rau provider key across repeated and concurrent requests', async () => {
+  let providerMints = 0;
+  const credits = service({
+    authenticateMagic: async (email) => ({ id: 'user_account_provider', email }),
+    createOpenRouterKey: async () => {
+      providerMints += 1;
+      return { key: 'sk-or-v1-account-provider', id: 'account-provider-key' };
+    },
+  });
+  const { redeemed } = await issueAccountSession(credits);
+  await assert.rejects(
+    () => credits.provisionAccountProvider(redeemed.accountToken),
+    { code: 'ACCOUNT_SESSION_UNAUTHORIZED' },
+  );
+  assert.equal(providerMints, 0);
+  await credits.commitAccountSession(redeemed.accountToken);
+  const results = await Promise.all(Array.from({ length: 3 },
+    () => credits.provisionAccountProvider(redeemed.accountToken)));
+  for (const result of results) {
+    assert.deepEqual(result, { apiKey: 'sk-or-v1-account-provider', email: 'andy@example.com' });
+  }
+  assert.equal(providerMints, 1);
+  await credits.revokeAccountSession(redeemed.accountToken);
+  await assert.rejects(
+    () => credits.provisionAccountProvider(redeemed.accountToken),
+    { code: 'ACCOUNT_SESSION_UNAUTHORIZED' },
+  );
+  await assert.rejects(
+    () => credits.provisionAccountProvider(`rau_account_v1_${'x'.repeat(43)}`),
+    { code: 'ACCOUNT_SESSION_UNAUTHORIZED' },
+  );
+  assert.equal(providerMints, 1);
+});
+
+test('account provider provisioning reuses a key from an earlier provider login', async () => {
+  const store = createMemoryStore({
+    users: {
+      user_prior_provider: {
+        keyCiphertext: encryptSecret('test-secret-for-rau-credits', 'sk-or-v1-existing-provider'),
+        openrouterKeyId: 'existing-key',
+        accountId: 'user_prior_provider',
+      },
+    },
+    emailIndex: { 'andy@example.com': 'user_prior_provider' },
+  });
+  let providerMints = 0;
+  const credits = service({
+    store,
+    authenticateMagic: async (email) => ({ id: 'user_new_auth_method', email }),
+    createOpenRouterKey: async () => { providerMints += 1; throw new Error('unexpected mint'); },
+  });
+  const { redeemed } = await issueAccountSession(credits);
+  await credits.commitAccountSession(redeemed.accountToken);
+  assert.deepEqual(await credits.provisionAccountProvider(redeemed.accountToken), {
+    apiKey: 'sk-or-v1-existing-provider', email: 'andy@example.com',
+  });
+  assert.equal(providerMints, 0);
+});
+
+test('account revocation during provider minting stays revoked and prevents credential delivery', async () => {
+  let releaseMint;
+  let signalMintStarted;
+  const mintStarted = new Promise((resolve) => { signalMintStarted = resolve; });
+  const mintReleased = new Promise((resolve) => { releaseMint = resolve; });
+  const credits = service({
+    authenticateMagic: async (email) => ({ id: 'user_revoke_during_mint', email }),
+    createOpenRouterKey: async () => {
+      signalMintStarted();
+      await mintReleased;
+      return { key: 'sk-or-v1-revoked-account', id: 'revoked-account-key' };
+    },
+  });
+  const { redeemed } = await issueAccountSession(credits);
+  await credits.commitAccountSession(redeemed.accountToken);
+  const provisioning = credits.provisionAccountProvider(redeemed.accountToken);
+  await mintStarted;
+  const revocation = credits.revokeAccountSession(redeemed.accountToken);
+  // Give an independently queued store mutation time to commit before the mint.
+  await new Promise((resolve) => setImmediate(resolve));
+  releaseMint();
+  await revocation;
+  await assert.rejects(provisioning, { code: 'ACCOUNT_SESSION_UNAUTHORIZED' });
+  assert.equal((await credits.readAccountSession(redeemed.accountToken)).signedIn, false);
+});
+
 test('account replacement preserves the old session until the new local commit', async () => {
   const store = createMemoryStore();
   const credits = createCreditsService({
@@ -1537,6 +1622,63 @@ test('HTTP account sessions accept credentials only through bearer headers', asy
     assert.equal(revoked.status, 200);
     assert.equal((await revoked.json()).signedIn, false);
     assert.equal((await credits.readAccountSession(accountToken)).signedIn, false);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('HTTP account provider provisioning requires an active bearer and never caches credentials', async () => {
+  const credits = service({
+    authenticateMagic: async (email) => ({ id: 'user_http_provider', email }),
+  });
+  const { redeemed } = await issueAccountSession(credits);
+  const token = redeemed.accountToken;
+  const server = http.createServer(creditsRequestListener(credits));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${server.address().port}/v2/account-session/provider`;
+  try {
+    const queryCredential = await fetch(`${url}?accountToken=${token}`, {
+      method: 'POST', body: JSON.stringify({ accountToken: token }),
+    });
+    assert.equal(queryCredential.status, 401);
+    assert.equal((await queryCredential.text()).includes(token), false);
+    const headers = { Authorization: `Bearer ${token}` };
+    assert.equal((await fetch(url, { method: 'POST', headers })).status, 401);
+    await credits.commitAccountSession(token);
+    const provisioned = await fetch(url, { method: 'POST', headers });
+    assert.equal(provisioned.status, 200);
+    assert.equal(provisioned.headers.get('cache-control'), 'no-store');
+    assert.deepEqual(await provisioned.json(), {
+      apiKey: 'sk-or-v1-minted-1', email: 'andy@example.com',
+    });
+    await credits.revokeAccountSession(token);
+    assert.equal((await fetch(url, { method: 'POST', headers })).status, 401);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('HTTP account provider failures redact upstream secrets and preserve the account session', async () => {
+  const secret = 'sk-or-v1-upstream-secret';
+  const credits = service({
+    authenticateMagic: async (email) => ({ id: 'user_http_provider_failure', email }),
+    createOpenRouterKey: async () => { throw new Error(`upstream leaked ${secret}`); },
+  });
+  const { redeemed } = await issueAccountSession(credits);
+  await credits.commitAccountSession(redeemed.accountToken);
+  const server = http.createServer(creditsRequestListener(credits));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/v2/account-session/provider`, {
+      method: 'POST', headers: { Authorization: `Bearer ${redeemed.accountToken}` },
+    });
+    assert.equal(response.status, 500);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    const body = await response.text();
+    assert.equal(body.includes(secret), false);
+    assert.equal(body.includes(redeemed.accountToken), false);
+    assert.equal(JSON.parse(body).error, 'RAU_PROVIDER_PROVISION_FAILED');
+    assert.equal((await credits.readAccountSession(redeemed.accountToken)).signedIn, true);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

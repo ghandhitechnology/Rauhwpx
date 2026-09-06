@@ -328,6 +328,12 @@ class AgentHubOwner {
     const child = spawnHubProcess(launch, {
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
       onMessage: (message, source) => {
+        if (message?.type === 'rhwp-account-status-changed') {
+          if (source === this.#child) {
+            void cloudCoordinator?.refreshAccountStatus().catch(() => {});
+          }
+          return;
+        }
         if (!secretVault) return;
         void handleSecretRequest(secretVault, message).then((response) => {
           if (response && source.connected) source.send(response);
