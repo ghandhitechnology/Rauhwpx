@@ -118,10 +118,9 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
   dialog.tabIndex = -1;
   const header = el('header', 'ag-cloud-setup-header');
   const titleWrap = el('div', 'ag-cloud-setup-heading');
-  const eyebrow = el('span', 'ag-cloud-setup-eyebrow', 'PRIVATE CLOUD');
   const title = el('h2', 'ag-cloud-setup-title');
   title.id = 'ag-cloud-setup-title';
-  titleWrap.append(eyebrow, title);
+  titleWrap.append(title);
   const closeButton = el('button', 'ag-cloud-setup-close') as HTMLButtonElement;
   closeButton.type = 'button';
   closeButton.setAttribute('aria-label', 'Cloud 설정 닫기');
@@ -1111,7 +1110,25 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     liveStatus.textContent = '';
     renderDialog();
     syncSetupProgressTimer();
+    positionPopup();
   }
+
+  function positionPopup(): void {
+    if (!visible) return;
+    const composer = trigger?.closest('.ag-root')?.querySelector<HTMLElement>('.ag-composer');
+    const anchored = Boolean(composer?.checkVisibility());
+    overlay.classList.toggle('ag-cloud-setup-anchored', anchored);
+    if (!anchored || !composer) return;
+    const bounds = composer.getBoundingClientRect();
+    const width = Math.min(420, bounds.width - 16, window.innerWidth - 24);
+    const left = Math.max(12, Math.min(bounds.right - width - 8, window.innerWidth - width - 12));
+    const bottom = Math.max(12, window.innerHeight - bounds.bottom + 8);
+    dialog.style.setProperty('--cloud-popup-left', `${left}px`);
+    dialog.style.setProperty('--cloud-popup-bottom', `${bottom}px`);
+    dialog.style.setProperty('--cloud-popup-width', `${width}px`);
+    dialog.style.setProperty('--cloud-popup-height', `${Math.max(120, window.innerHeight - bottom - 12)}px`);
+  }
+  window.addEventListener('resize', positionPopup);
 
   dialog.addEventListener('keydown', (event) => {
     if (event.key === 'Escape' && !event.isComposing) {
@@ -1144,8 +1161,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
   overlay.addEventListener('mousedown', (event) => {
     if (event.target !== overlay) return;
     event.preventDefault();
-    const first = dialog.querySelector<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), summary');
-    (first ?? dialog).focus();
+    close();
   });
 
   renderSettings();
@@ -1189,6 +1205,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       close(false);
       setModalIsolation(false);
       document.removeEventListener('focusin', containFocus);
+      window.removeEventListener('resize', positionPopup);
       overlay.remove();
     },
   };

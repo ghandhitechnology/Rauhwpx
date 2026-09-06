@@ -2609,6 +2609,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       currentThread.firstMessageDelivery = 'starting';
       persistCurrentThread();
       workspace.select('cloud');
+      workspace.setWorkspaceView('cloud');
       workspace.lockExecution();
       mountCloudStartPlaceholder(cloudStartPhaseLabel('preparing-document'));
       deps.setCloudDocumentLease?.(true, startId);
@@ -4812,6 +4813,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
             systemMessage('선택한 Cloud 대화가 바뀌어 메시지를 보내지 않았습니다.');
             return;
           }
+          if (currentThread.id === targetThread.id) workspace.setWorkspaceView('cloud');
           if (input.value === submittedDraft) input.value = '';
           resizeComposerInput();
           if (result.committed.inserted && currentThread.id === targetThread.id) {

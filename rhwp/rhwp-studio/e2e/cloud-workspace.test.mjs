@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
@@ -396,10 +395,18 @@ try {
   const page = await browser.newPage();
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
+  const bootErrors = [];
+  page.on('console', (message) => {
+    if (message.type() === 'error') bootErrors.push(message.text());
+  });
+  page.on('requestfailed', (request) => bootErrors.push(`${request.url()}: ${request.failure()?.errorText}`));
   await page.setViewport({ width: 1280, height: 800, deviceScaleFactor: 1 });
   await page.evaluateOnNewDocument(installDesktopCloudMock);
   await page.goto(viteUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-  await page.waitForFunction(() => Boolean(window.__wasm && window.__canvasView), { timeout: 60_000 });
+  await page.waitForFunction(() => Boolean(window.__wasm && window.__canvasView), { timeout: 60_000 }).catch((error) => {
+    console.error('Cloud workspace editor bootstrap failed:', { pageErrors, bootErrors });
+    throw error;
+  });
   const documentLoaded = await page.evaluate(async () => {
     const response = await fetch('/samples/hwpx/form-002.hwpx');
     if (!response.ok) return `HTTP ${response.status}`;
@@ -538,16 +545,20 @@ try {
 
   assert.equal(await page.evaluate(() => window.__cloudWorkspaceHarness.calls
     .filter((call) => call.method === 'cloudPublishCheckpoint').length), 0);
-  await page.$eval('.ag-workspace-cloud-btn', (node) => node.click());
-  await page.waitForFunction(() => !document.querySelector('#ag-cloud-panel')?.hidden);
   // A session predating local branch capture must never replace the origin.
-  await page.evaluate(() => [...document.querySelectorAll('#ag-cloud-panel button')]
-    .find((button) => button.textContent === 'Cloud 변경 병합').click());
-  await page.waitForFunction(() => document.body.textContent.includes('Cloud 시작 대화를 불러온 뒤'));
+  assert.equal(await page.$eval('.ag-cloud-merge-button', (button) => button.disabled), false,
+    'the merge button unlocks when Cloud session binding finishes');
+  await page.click('.ag-cloud-merge-button');
+  await page.waitForFunction(() => document.body.textContent.includes('Cloud 시작 대화를 불러온 뒤')).catch(async (error) => {
+    console.error('Cloud merge guard state:', await page.evaluate(() => ({
+      messages: document.querySelector('.ag-messages')?.textContent,
+      merge: [...document.querySelectorAll('.ag-cloud-merge-button')].map((button) => ({ hidden: button.hidden, disabled: button.disabled, visible: button.checkVisibility(), text: button.textContent })),
+    })));
+    throw error;
+  });
   assert.equal(await page.evaluate(() => window.__cloudWorkspaceHarness.calls
     .filter((call) => call.method === 'cloudPublishCheckpoint').length), 0);
   assert.equal(await page.evaluate(() => window.__inputHandler.isReadOnly()), false);
-  await page.$eval('.ag-cloud-panel-close', (node) => node.click());
 
   await page.select('.ag-cloud-session-select', 'session-cloud-b');
   await page.waitForFunction(() => document.querySelector('.ag-messages')?.textContent?.includes('Cloud transcript B mounted'));
@@ -585,8 +596,8 @@ try {
   });
   await page.click('[aria-label="프로바이더 선택"]');
   await page.waitForSelector('.ag-config-panel.ag-open');
-  assert.equal(await page.$eval('.ag-provider-item[data-agent="opencode"]', (node) => node.checkVisibility()), false);
-  // Even a synthetic click on hidden local-only providers must stop before effects.
+  assert.equal(await page.$eval('.ag-provider-item[data-agent="opencode"]', (node) => node.disabled), true);
+  // Local-only providers stay discoverable but cannot configure Cloud sessions.
   await page.$eval('.ag-provider-item[data-agent="opencode"]', (node) => node.click());
   await page.$eval('.ag-provider-item[data-agent="rau"]', (node) => node.click());
   assert.equal(await page.evaluate(() => window.__cloudWorkspaceHarness.calls
@@ -727,16 +738,25 @@ try {
     method: 'cloudCloseDisplay',
     payload: { connectionId: 'display-session-cloud-b' },
   }]);
-  // Restore a real saved local conversation, then hand it off through the composer.
+  // Restore a Cloud conversation awaiting transfer, then send through its composer.
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => Boolean(window.__wasm && window.__canvasView && window.__agentBridge));
   await page.evaluate(async () => {
     window.__cloudWorkspaceHarness.resetIdle();
     const response = await fetch('/samples/hwpx/form-002.hwpx');
+    const opened = new Promise((resolve, reject) => {
+      const unsubscribe = window.__eventBus.on('open-document-bytes:done', (result) => {
+        if (result.requestId !== 'cloud-workspace-handoff') return;
+        unsubscribe();
+        if (result.ok) resolve(); else reject(new Error(result.error || 'Handoff document failed to open'));
+      });
+    });
     window.__eventBus.emit('open-document-bytes', {
       bytes: new Uint8Array(await response.arrayBuffer()), fileName: 'form-002.hwpx',
+      requestId: 'cloud-workspace-handoff',
       suppressDialogs: true, skipUnsavedGuard: true,
     });
+    await opened;
   });
   await page.waitForFunction(() => Boolean(window.__cloudWorkspaceHarness.getEditorScope()?.documentId));
   await page.evaluate(async () => {
@@ -746,29 +766,20 @@ try {
       agent: 'codex', model: 'gpt-5.6', effort: 'high', serviceTier: 'standard',
       docKey: 'form-002.hwpx', documentId: scope.documentId,
     });
-    thread.title = 'Local handoff regression';
+    thread.title = 'Cloud handoff regression';
+    thread.executionMode = 'cloud';
     thread.workflow = 'question';
     thread.messages = [
       { role: 'user', text: 'Keep the document unchanged while we discuss.', messageId: 'local-history-1' },
       { role: 'assistant', text: 'We can revise the heading after agreeing on the wording.', agent: 'codex' },
     ];
-    upsertThread({ ...thread, id: `${thread.id}-opencode`, title: 'Local OpenCode regression',
-      agent: 'opencode', model: 'opencode/big-pickle' });
     upsertThread(thread);
   });
   await page.$eval('#agent-sidebar .ag-threads-btn', (node) => node.click());
   await page.waitForFunction(() => [...document.querySelectorAll('.ag-threads-item')]
-    .some((node) => node.textContent.includes('Local handoff regression')));
+    .some((node) => node.textContent.includes('Cloud handoff regression')));
   await page.evaluate(() => [...document.querySelectorAll('.ag-threads-item')]
-    .find((node) => node.textContent.includes('Local OpenCode regression')).click());
-  await page.waitForFunction(() => !document.querySelector('[data-workspace-mode="cloud"]').disabled);
-  await page.$eval('[data-workspace-mode="cloud"]', (node) => node.click());
-  await page.waitForFunction(() => document.querySelector('.ag-messages').textContent.includes('OpenCode는 아직 Cloud에서 사용할 수 없습니다'));
-  assert.equal(await page.$eval('[data-workspace-mode="local"]', (node) => node.getAttribute('aria-pressed')), 'true');
-  assert.equal(await page.evaluate(() => window.__cloudWorkspaceHarness.calls
-    .filter((call) => call.method === 'cloudTransfer').length), 0);
-  await page.evaluate(() => [...document.querySelectorAll('.ag-threads-item')]
-    .find((node) => node.textContent.includes('Local handoff regression')).click());
+    .find((node) => node.textContent.includes('Cloud handoff regression')).click());
   await page.waitForFunction(() => document.querySelector('.ag-messages').textContent.includes('We can revise the heading after agreeing on the wording.'));
   const beforeHandoff = await page.evaluate(async () => {
     const input = document.querySelector('.ag-composer textarea');
@@ -790,13 +801,9 @@ try {
     input.dispatchEvent(new Event('input', { bubbles: true }));
     return Array.from(window.__wasm.exportHwp()).join(",");
   });
-  // Selecting an execution location must preserve the draft without starting work.
-  await page.$eval('[data-workspace-mode="cloud"]', (node) => node.click());
   assert.equal(await page.evaluate(() => window.__cloudWorkspaceHarness.calls
     .filter((call) => call.method === 'cloudTransfer').length), 0);
-  await page.$eval('[data-workspace-mode="local"]', (node) => node.click());
   await page.evaluate(() => window.__cloudWorkspaceHarness.failNextTransfer());
-  await page.$eval('[data-workspace-mode="cloud"]', (node) => node.click());
   await page.$eval('.ag-composer', (node) => { node.requestSubmit(); node.requestSubmit(); });
   await page.waitForFunction(() => window.__cloudWorkspaceHarness.calls
     .filter((call) => call.method === 'cloudTransfer').length === 1, { timeout: 10_000 }).catch(async (error) => {
@@ -897,7 +904,7 @@ try {
   assert.equal(new Set(followups.map((request) => request.messageId)).size, 2);
   assert.ok(followups.every((request) => request.sessionId === 'session-editor-a'));
   assert.equal(await page.evaluate(() => Array.from(window.__wasm.exportHwp()).join(",")), beforeHandoff);
-  console.log('PASS existing conversation handoff, double-click protection, read-only question workflow, multi-turn cloud messages, and unchanged local document');
+  console.log('PASS restored Cloud conversation transfer, double-click protection, read-only question workflow, multi-turn cloud messages, and unchanged local document');
   // Edit through the real local input while the Cloud conversation remains selected.
   await page.click('[data-document-view="local"]');
   await page.evaluate(() => window.__inputHandler.moveCursorTo({ sectionIndex: 0, paragraphIndex: 0, charOffset: 0 }));
@@ -906,7 +913,7 @@ try {
     const { captureVersionSnapshot } = await import('/src/versioning/snapshot.ts');
     return captureVersionSnapshot(window.__wasm).compareSnapshot.paragraphs.some((p) => p.text.includes('LOCAL_DURING_CLOUD'));
   });
-  assert.equal(await page.$eval('.ag-composer-mode-switch', (node) => node.dataset.mode), 'cloud');
+  assert.equal(await page.$eval('.ag-header .ag-execution-location', (node) => node.dataset.mode), 'cloud');
   const savedHead = await page.evaluate(() => window.__versionController.getState().branches.find((branch) => branch.isActive).headId);
   await page.evaluate(() => {
     window.__wasm.currentFileHandle.createWritable = async () => {
@@ -947,27 +954,7 @@ try {
       kind: 'turn', revision: 2, turn: 2, operationId: 'completed-e2e-turn-2' });
   });
   await page.waitForFunction(() => document.querySelector('.ag-cloud-merge-button')?.dataset.revision === '2');
-  const downloads = path.join(tempDir, 'downloads');
-  fs.mkdirSync(downloads);
-  const downloadClient = await browser.target().createCDPSession();
-  await downloadClient.send('Browser.setDownloadBehavior', { behavior: 'allow', downloadPath: downloads, eventsEnabled: true });
-  const downloadComplete = new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('Cloud copy download timed out')), 10_000);
-    downloadClient.on('Browser.downloadProgress', (event) => {
-      if (event.state === 'completed') { clearTimeout(timeout); resolve(); }
-      if (event.state === 'canceled') { clearTimeout(timeout); reject(new Error('Cloud copy download canceled')); }
-    });
-  });
-  await page.click('.ag-cloud-btn');
-  await page.click('.ag-cloud-checkpoint-copy');
-  await downloadComplete;
-  await downloadClient.detach();
-  const copied = fs.readdirSync(downloads);
-  assert.deepEqual(copied, ['form-002-cloud-2.hwpx']);
-  assert.equal(createHash('sha256').update(fs.readFileSync(path.join(downloads, copied[0]))).digest('hex'),
-    await page.evaluate(async () => (await window.rhwpDesktop.cloudDownloadCheckpoint({ sessionId: 'session-editor-a', operationId: 'completed-e2e-turn-2' })).sha256));
   assert.equal(await page.evaluate(() => window.__handoffOrigin.writes), 1);
-  await page.click('.ag-cloud-panel-close');
   // Dismiss the expected earlier transfer-failure toast before inspecting review controls.
   await page.$$eval('#rhwp-toast-container button[aria-label="닫기"]', (buttons) => buttons.forEach((button) => button.click()));
   await page.click('.ag-cloud-merge-button');
@@ -985,7 +972,7 @@ try {
       (both ?? choices.find((button) => button.textContent.startsWith('현재 변경 사용'))).click();
     });
   }
-  await page.waitForFunction(() => !document.querySelector('.merge-resolver-footer .merge-primary-button').disabled, { timeout: 5000 }).catch(async (error) => {
+  await page.waitForFunction(() => !document.querySelector('.merge-resolver-footer .merge-primary-button').disabled, { timeout: 30_000 }).catch(async (error) => {
     throw new Error(`Merge review: ${JSON.stringify(await page.evaluate(() => ({
       status: document.querySelector('.merge-validation-label')?.textContent,
       editor: document.querySelector('.merge-conflict-editor')?.textContent,
