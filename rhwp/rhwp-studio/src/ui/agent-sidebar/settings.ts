@@ -2397,6 +2397,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       setupInstallPane.hidden = available;
       setupAuthPane.hidden = !available || (connected && !setupReauth);
     }
+    setupHero.hidden = connected && !setupReauth;
     setupDonePane.hidden = !connected || setupReauth;
     setupDonePane.classList.toggle('ag-agent-setup-rau-actions', agent === 'rau' && connected && !setupReauth);
     setupDoneClose.textContent = agent === 'rau' && rauAuthFeedback === 'success' ? '계속' : '완료';
