@@ -435,7 +435,7 @@ test('the app sandbox image runs the control plane with the local runner and a b
   assert.match(workflow, /sandbox image must use the local runner/);
   assert.match(workflow, /packages: write/);
   assert.match(workflow, /podman push "\$image:stable-\$ASSET_ARCH"/);
-  assert.match(workflow, /podman manifest push --all "\$image:stable"/);
+  assert.match(workflow, /podman manifest push --all "\$image:\$release_version" "docker:\/\/\$image:stable"/);
 
   const edgeWorkflow = await fs.readFile(new URL('../.github/workflows/cloud-sandbox-image.yml', root), 'utf8');
   assert.match(edgeWorkflow, /packages: write/);
