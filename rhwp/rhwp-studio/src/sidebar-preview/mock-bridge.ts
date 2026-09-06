@@ -9,6 +9,7 @@ import {
 } from '../agent/models.ts';
 import { loadAgentPrefs } from '../agent/agent-prefs.ts';
 import { createFixtures, samplePlan, timestamp, agents } from './fixtures.ts';
+import { requestLiveUsage, consumeLiveCodexReset } from './live-usage.ts';
 
 export const scenarios = [
   'chat',
@@ -23,6 +24,21 @@ export type Scenario = (typeof scenarios)[number];
 /** Implements the actual UI contract: new bridge methods produce a type error here. */
 export function createMockBridge(report: (message: string) => void) {
   const data = createFixtures();
+  const liveUsage = new URLSearchParams(location.search).get('usage') === 'live';
+  if (liveUsage) {
+    delete data.usage.limits;
+    delete data.usage.balances;
+    delete data.usage.rau;
+    delete data.usage.openrouter;
+    for (const provider of Object.values(data.usage.providers)) {
+      provider.updatedAt = null;
+      provider.byModel = {};
+      for (const key of ['session', 'day', 'week'] as const) {
+        provider[key] = { turns: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
+          cacheCreationTokens: 0, weightedTokens: 0, percent: null };
+      }
+    }
+  }
   const listeners = new Set<(event: T.SidebarEvent) => void>();
   const pendingListeners = new Set<
     (event: T.PendingEditsChangeEvent) => void
@@ -32,6 +48,7 @@ export function createMockBridge(report: (message: string) => void) {
   let connection: ReturnType<SidebarBridge['getConnectionState']> = 'connected';
   let agent: T.AgentName = loadAgentPrefs().defaultAgent;
   let running = false;
+  let usageRefreshFailed = false;
   let generation = 0;
   let threadId = '';
   let scenario: Scenario = 'chat';
@@ -278,7 +295,38 @@ export function createMockBridge(report: (message: string) => void) {
       setupChanged();
       return data.setups;
     },
-    requestUsage: async () => data.usage,
+    requestBrowserbaseStatus: async () => ({ configured: false, missing: ['BROWSERBASE_API_KEY'], keySource: null, keyTail: null, projectId: null, projectSource: null, geminiSource: null, browsers: [] }),
+    setBrowserbaseCredentials: async () => null,
+    clearBrowserbaseCredentials: async () => null,
+    requestUsage: async (refresh) => {
+      if (liveUsage) {
+        data.usage = await requestLiveUsage(refresh);
+        return data.usage;
+      }
+      await new Promise((resolve) => later(() => resolve(undefined), 120));
+      if (refresh && !usageRefreshFailed && new URLSearchParams(location.search).get('quota') === 'refresh-error') {
+        usageRefreshFailed = true;
+        throw new Error('연결이 일시적으로 끊겼어요.');
+      }
+      return data.usage;
+    },
+    consumeCodexReset: async (_key, accountKey) => {
+      if (liveUsage) {
+        const result = await consumeLiveCodexReset(_key, accountKey);
+        data.usage = result.usage;
+        return result;
+      }
+      report('Codex reset requested');
+      await new Promise((resolve) => later(() => resolve(undefined), 250));
+      const quota = data.usage.limits!.codex;
+      if (accountKey !== quota.accountKey) throw new Error('계정이 변경됐어요.');
+      if (!quota.resetCredits?.availableCount) return { outcome: 'noCredit', usage: data.usage };
+      quota.resetCredits.availableCount -= 1;
+      quota.session.percent = 0;
+      quota.week.percent = 0;
+      quota.updatedAt = Date.now();
+      return { outcome: 'reset', usage: data.usage };
+    },
     setUsagePlan: async (provider, plan) => {
       data.usage.plans[provider] = plan;
       return data.usage;

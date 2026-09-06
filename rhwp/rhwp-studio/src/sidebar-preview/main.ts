@@ -10,6 +10,11 @@ import { userSettings } from '../core/user-settings.ts';
 import { completeInitialSetup } from '../ui/initial-setup/state.ts';
 
 const params = new URLSearchParams(location.search);
+if (params.get('usage') === 'live') {
+  const description = document.querySelector('#preview-controls > p');
+  if (description) description.textContent = 'Live account usage. Sample chat and documents.';
+  document.title = 'Live usage audit · Rauhwpx';
+}
 const status = document.querySelector<HTMLOutputElement>('#preview-status')!;
 const report = (message: string) => {
   status.value = message;
