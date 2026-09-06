@@ -132,7 +132,7 @@ try {
       console.log(`PASS ${name}`);
     } catch (error) {
       await page.screenshot({ path: resolve(artifacts, 'failure.png') });
-      throw new Error(`${name}: ${error.message}`, { cause: error });
+      throw new Error(`${name}: ${error.message}\nRuntime errors: ${JSON.stringify(errors)}\nBlocked requests: ${JSON.stringify(forbidden)}`, { cause: error });
     }
   }
   await step('Cloud disconnect, reconnect, rebuild, and shutdown recovery',

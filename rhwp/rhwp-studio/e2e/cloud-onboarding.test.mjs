@@ -142,23 +142,7 @@ async function waitForTitle(page, title) {
 }
 
 async function openSetup(page) {
-  await clickStable(page, '#agent-sidebar .ag-cloud-btn');
-  await page.waitForFunction(() =>
-    document.querySelector('.ag-cloud-setup-overlay')?.hidden === false
-      || document.querySelector('.ag-cloud-panel')?.hidden === false);
-  if (await page.$eval('.ag-cloud-setup-overlay', (node) => !node.hidden)) return;
-  const actions = await page.$$('.ag-cloud-panel-actions button');
-  const setup = await (async () => {
-    for (const action of actions) {
-      if (await action.evaluate((node) => node.textContent?.trim().startsWith('Cloud 설정'))) return action;
-      await action.dispose();
-    }
-    return null;
-  })();
-  if (!setup) throw new Error('Cloud 상태 패널에서 설정 버튼을 찾지 못했습니다.');
-  await setup.evaluate((node) => node.click());
-  await setup.dispose();
-  await page.waitForSelector('.ag-cloud-setup-overlay:not([hidden])');
+  await manageCloud(page);
 }
 
 async function openChoice(page) {
@@ -184,7 +168,9 @@ async function openCloud(page) {
 }
 
 async function manageCloud(page) {
-  await clickStable(page, '#agent-sidebar .ag-settings-btn');
+  if (!await page.$eval('#agent-sidebar', (node) => node.classList.contains('ag-settings-open'))) {
+    await clickStable(page, '#agent-sidebar .ag-header-icon-btn.ag-settings-btn');
+  }
   await page.waitForFunction(() => document.querySelector('#agent-sidebar')?.classList.contains('ag-settings-open'));
   await clickStable(page, '#ag-settings-tab-cloud');
   await page.waitForFunction(
@@ -529,7 +515,13 @@ try {
   await page.setViewport({ width: 1280, height: 800, deviceScaleFactor: 1 });
   await page.evaluateOnNewDocument(cloudMock);
   await page.goto(viteUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-  await page.waitForSelector('#agent-sidebar .ag-cloud-btn:not([hidden])', { timeout: 60_000 });
+  await page.waitForSelector('#agent-sidebar .ag-header-icon-btn.ag-settings-btn', { timeout: 60_000 }).catch(async (error) => {
+    error.message += `\nPage errors: ${JSON.stringify(pageErrors)}\nCloud state: ${JSON.stringify(await page.evaluate(() => ({
+      button: document.querySelector('.ag-header-icon-btn.ag-settings-btn')?.outerHTML,
+      calls: window.__cloudHarness.calls,
+    })))}`;
+    throw error;
+  });
   assert.equal(
     await page.evaluate(() => window.__cloudHarness.calls.some((call) => call.method === 'onCloudEvent')),
     true,
@@ -590,12 +582,17 @@ try {
   await page.keyboard.press('Tab');
   await page.keyboard.up('Shift');
   assert.equal(await page.evaluate(() => document.activeElement?.textContent?.trim()), 'VPS 연결');
-  await page.evaluate(() => document.querySelector('#agent-sidebar .ag-cloud-btn')?.focus());
+  await page.evaluate(() => document.querySelector('.ag-cloud-settings-action')?.focus());
   assert.equal(await page.evaluate(() => document.querySelector('.ag-cloud-setup-dialog')?.contains(document.activeElement)), true);
-  await page.mouse.click(1100, 700);
-  assert.equal(await page.$eval('.ag-cloud-setup-overlay', (node) => !node.hidden), true);
-  assert.equal(await page.evaluate(() => document.querySelector('.ag-cloud-setup-dialog')?.contains(document.activeElement)), true);
-  console.log('  PASS keyboard and pointer focus stay inside the modal');
+  const dialogBounds = await page.$eval('.ag-cloud-setup-dialog', (node) => {
+    const rect = node.getBoundingClientRect();
+    return { left: rect.left, top: rect.top };
+  });
+  await page.mouse.click(Math.max(0, dialogBounds.left - 8), Math.max(0, dialogBounds.top - 8));
+  await page.waitForSelector('.ag-cloud-setup-overlay[hidden]');
+  assert.equal(await page.evaluate(() => document.activeElement?.classList.contains('ag-cloud-settings-action')), true);
+  await openCloud(page);
+  console.log('  PASS keyboard focus stays inside the modal and backdrop dismissal restores the trigger');
 
   for (const viewport of [
     { width: 375, height: 667 },
@@ -616,7 +613,7 @@ try {
   await waitForTitle(page, 'VPS 연결 정보');
   await clickButton(page, '취소');
   await page.waitForSelector('.ag-cloud-setup-overlay[hidden]');
-  assert.equal(await page.evaluate(() => document.activeElement?.classList.contains('ag-cloud-btn')), true);
+  assert.equal(await page.evaluate(() => document.activeElement?.classList.contains('ag-cloud-settings-action')), true);
   console.log('  PASS back and cancel preserve context and restore focus');
 
   await openCloud(page);
@@ -626,7 +623,7 @@ try {
   assert.equal(await page.$eval('.ag-cloud-setup-overlay', (node) => !node.hidden), true);
   await page.keyboard.press('Escape');
   await page.waitForSelector('.ag-cloud-setup-overlay[hidden]');
-  assert.equal(await page.evaluate(() => document.activeElement?.classList.contains('ag-cloud-btn')), true);
+  assert.equal(await page.evaluate(() => document.activeElement?.classList.contains('ag-cloud-settings-action')), true);
   console.log('  PASS Escape closes the modal and restores focus');
 
   await openCloud(page);
@@ -672,12 +669,12 @@ try {
   await clickButton(page, 'Cloud 환경 설치');
   await waitForTitle(page, 'Cloud 환경 설치 중');
   await waitForTitle(page, 'Cloud가 준비되었습니다');
-  const connectedPrimary = await buttonByText(page, 'Cloud로 계속');
+  const connectedPrimary = await buttonByText(page, '완료');
   await connectedPrimary.focus();
   await connectedPrimary.dispose();
   await page.evaluate(() => window.__cloudHarness.publishSnapshot());
   await delay(50);
-  assert.equal(await page.evaluate(() => document.activeElement?.textContent?.trim()), 'Cloud로 계속');
+  assert.equal(await page.evaluate(() => document.activeElement?.textContent?.trim()), '완료');
   const installCalls = await page.evaluate(() => window.__cloudHarness.calls.map((call) => call.method));
   assert.equal(installCalls.includes('cloudSaveProfile'), false);
   assert.ok(installCalls.includes('cloudProvision'));
@@ -696,7 +693,7 @@ try {
       },
     },
   );
-  await clickButton(page, 'Cloud로 계속');
+  await clickButton(page, '완료');
   await page.waitForSelector('.ag-cloud-setup-overlay[hidden]');
   console.log('  PASS transactional provisioning receives the draft and the connected CTA exits setup');
 
@@ -783,7 +780,7 @@ try {
   );
   console.log('  PASS existing environments validate identity and activate transactionally');
 
-  await clickButton(page, 'Cloud로 계속');
+  await clickButton(page, '완료');
   await page.waitForSelector('.ag-cloud-setup-overlay[hidden]');
   await page.evaluate(() => {
     window.__cloudHarness.setUnconfigured();
@@ -865,11 +862,10 @@ try {
   }));
   await clickButton(page, '숨기기');
   await page.waitForSelector('.ag-cloud-setup-overlay[hidden]');
-  assert.deepEqual(await page.$eval('#agent-sidebar .ag-cloud-btn', (node) => ({
-    label: node.querySelector('.ag-cloud-btn-label')?.textContent?.trim(),
-    state: node.dataset.state,
-  })), { label: '준비 중', state: 'setup' });
-  await clickStable(page, '#agent-sidebar .ag-cloud-btn');
+  const preparingCard = await settingsCard(page);
+  assert.equal(preparingCard.status, '서버 준비 중');
+  assert.equal(preparingCard.action, '진행 보기');
+  await clickStable(page, '.ag-cloud-settings-action');
   await waitForTitle(page, 'Raucloud 준비 중');
   assert.deepEqual(await page.evaluate(() => ({
     refresh: window.__cloudHarness.calls.filter((call) => call.method === 'cloudGetState').length,

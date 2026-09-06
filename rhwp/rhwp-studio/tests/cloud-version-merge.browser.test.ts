@@ -103,6 +103,7 @@ async function openCloudDocument(page: import('puppeteer-core').Page, format: 'h
         eventBus.emit('document-mutated');
       },
       isUserEditingLocked: () => locked,
+      canRedo: () => redo.length > 0,
       setUserEditingLocked: (value: boolean) => { locked = value; },
       performUndo: () => { const bytes = undo.pop(); if (bytes) { redo.push(snapshots.captureVersionSnapshot(wasm).bytes); wasm.loadDocument(bytes, fileName); eventBus.emit('document-mutated'); } },
       discardRedoHistory: () => { redo.length = 0; },

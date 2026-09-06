@@ -5,7 +5,16 @@ export async function checkCliTerminalDefaults(page, origin) {
     await page.goto(`${origin}/?page=settings&destination=connections&surface=provider-setup&provider=${provider}&services=setup`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('.ag-agent-setup-overlay.ag-open');
     await page.$$eval('.ag-agent-setup-primary', buttons => buttons.find(b => b.textContent === '설치하고 계속').click());
-    await page.waitForSelector('.ag-setup-terminal .xterm-helper-textarea');
+    try {
+      await page.waitForSelector('.ag-setup-terminal .xterm-helper-textarea');
+    } catch (error) {
+      const state = await page.evaluate(async (provider) => ({
+        provider,
+        setup: (await window.sidebarPreview.bridge.requestAgentSetupStatus())[provider],
+        dialog: document.querySelector('.ag-agent-setup-dialog')?.innerText,
+      }), provider);
+      throw new Error(`Terminal login did not open: ${JSON.stringify(state)}`, { cause: error });
+    }
     assert.match(await page.$eval('.ag-setup-terminal-header', el => el.textContent.toLowerCase()), new RegExp(provider));
     await page.focus('.ag-setup-terminal .xterm-helper-textarea');
     await page.waitForFunction(() => document.querySelector('.ag-setup-terminal').textContent.includes('Enter'));
