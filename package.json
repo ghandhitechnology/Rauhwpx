@@ -1,7 +1,7 @@
 {
   "name": "rauhwpx",
   "productName": "Rauhwpx",
-  "version": "1.2.2",
+  "version": "2.0.0",
   "description": "HWP/HWPX editor with a local AI agent sidebar.",
   "author": "Hataewook",
   "license": "MIT",
@@ -49,7 +49,6 @@
     "test:sidebar": "npm --prefix rhwp/rhwp-studio run test:sidebar",
     "test:sidebar:audit": "npm --prefix rhwp/rhwp-studio run test:sidebar:audit",
     "build:sidebar": "npm --prefix rhwp/rhwp-studio run build:sidebar"
-
   },
   "dependencies": {
     "electron-updater": "^6.8.9"
