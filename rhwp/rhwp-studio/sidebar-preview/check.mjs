@@ -234,6 +234,16 @@ try {
     assert.equal(await page.$$eval('.ag-cd-point', (nodes) => nodes.length), 0, 'sign-out hides the previous account history');
     assert.match(await page.$eval('.ag-cd-quota', (node) => node.textContent), /로그인하면/);
     assert.equal(await page.$eval('.ag-cd-reset', (node) => node.checkVisibility()), false, 'unknown reset time has no countdown');
+    assert.equal(await page.$eval('.ag-cd-login', (node) => node.checkVisibility()), true, 'signed-out users can log in from Cloud Connections');
+    await page.evaluate(() => {
+      window.previewOriginalOpen = window.open;
+      window.open = (url) => { window.previewLoginUrl = url; return null; };
+    });
+    await page.click('.ag-cd-login');
+    await page.waitForFunction(() => window.previewLoginUrl === 'https://accounts.example.invalid/preview');
+    await page.waitForFunction(() => !document.querySelector('.ag-cd-login').checkVisibility());
+    await page.evaluate(() => { window.open = window.previewOriginalOpen; });
+    await page.evaluate(() => window.sidebarPreview.cloud.setDashboardState('logged-out'));
     await page.click('.ag-cd-setup');
     await page.waitForSelector('.ag-cloud-setup-overlay:not([hidden])');
     await page.click('.ag-cloud-setup-close');

@@ -17,17 +17,20 @@
 }
 
 .ag-cloud-setup-overlay.ag-cloud-setup-anchored {
+  inset: auto;
+  left: var(--cloud-sidebar-left);
+  top: var(--cloud-sidebar-top);
+  width: var(--cloud-sidebar-width);
+  height: var(--cloud-sidebar-height);
+  align-items: center;
   background: transparent;
-  backdrop-filter: none;
-  padding: 0;
+  backdrop-filter: blur(5px);
+  padding: 16px;
 }
 
 .ag-cloud-setup-anchored .ag-cloud-setup-dialog {
-  position: fixed;
-  left: var(--cloud-popup-left);
-  bottom: var(--cloud-popup-bottom);
-  width: var(--cloud-popup-width);
-  max-height: var(--cloud-popup-height);
+  width: min(420px, 100%);
+  max-height: 100%;
 }
 
 .ag-cloud-setup-anchored .ag-cloud-setup-header,

@@ -354,6 +354,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     },
   });
   const dashboard = createCloudDashboard({
+    loginAccount: deps.loginAccount,
     configuration: onboarding.settingsElement,
     refresh: () => deps.controller.refresh(selectedScope()),
     reconnect: () => deps.controller.reconnectLink(),
@@ -1509,6 +1510,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     },
     handleAccountEvent(event) {
       onboarding.handleAccountEvent(event);
+      dashboard.handleAccountEvent(event);
     },
     dispose() {
       pendingTakeover?.state.transition.release();

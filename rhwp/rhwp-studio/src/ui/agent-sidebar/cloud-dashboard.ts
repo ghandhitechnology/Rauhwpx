@@ -10,6 +10,7 @@ interface CloudDashboardDeps {
   refresh(): Promise<CloudSnapshot>;
   reconnect(): Promise<CloudSnapshot>;
   configure(trigger: HTMLElement): void;
+  loginAccount?: () => Promise<{ authUrl: string } | null>;
   mutationLocked(): boolean;
 }
 
@@ -54,6 +55,7 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
   let pending = false;
   let refreshError = false;
   let disposed = false;
+  let loginPending = false;
   let chartSignature = '';
   let sessionsSignature = '';
 
@@ -80,11 +82,33 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
   const updated = el('span', 'ag-cd-updated');
   const refresh = button('새로고침', 'ag-cd-refresh');
   const setup = button('연결 설정', 'ag-cd-setup');
+  const login = button('로그인', 'ag-cd-login');
+  login.hidden = true;
+  login.addEventListener('click', async () => {
+    if (!deps.loginAccount || loginPending || disposed) return;
+    loginPending = true;
+    render();
+    try {
+      const result = await deps.loginAccount();
+      if (disposed) return;
+      if (!result?.authUrl) throw new Error('로그인을 시작하지 못했습니다. 다시 시도해 주세요.');
+      window.open(result.authUrl, '_blank', 'noopener,noreferrer');
+      feedback.textContent = '브라우저에서 로그인을 마쳐 주세요.';
+      delete feedback.dataset.kind;
+    } catch (error) {
+      if (disposed) return;
+      feedback.textContent = error instanceof Error ? error.message : '로그인을 시작하지 못했습니다.';
+      feedback.dataset.kind = 'error';
+    } finally {
+      loginPending = false;
+      if (!disposed) { feedback.hidden = false; render(); }
+    }
+  });
   setup.addEventListener('click', () => {
     if (!pending && snapshot?.available && !deps.mutationLocked()) deps.configure(setup);
   });
   refresh.prepend(createIcon('refresh'));
-  toolbar.append(status, updated, setup, refresh);
+  toolbar.append(status, updated, login, setup, refresh);
   const feedback = el('p', 'ag-cd-feedback');
   feedback.hidden = true;
   feedback.setAttribute('role', 'status');
@@ -213,6 +237,10 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
   function renderQuota() {
     if (!snapshot) return;
     const account = snapshot.account;
+    login.hidden = account?.signedIn === true || !deps.loginAccount;
+    login.disabled = loginPending;
+    login.textContent = loginPending ? '로그인 여는 중…' : '로그인';
+    login.setAttribute('aria-busy', String(loginPending));
     const allowance = account?.signedIn ? account.quota : null;
     const resetAt = allowance ? Date.parse(allowance.resetAt) : NaN;
     const remainingMs = resetAt - Date.now();
@@ -384,6 +412,17 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
 
   return {
     element,
+    handleAccountEvent(event: { signedIn: boolean; error?: string }) {
+      if (disposed) return;
+      if (event.error) {
+        feedback.hidden = false;
+        feedback.textContent = event.error;
+        feedback.dataset.kind = 'error';
+      } else if (event.signedIn) {
+        feedback.hidden = true;
+        void run('refresh', true);
+      }
+    },
     sync(next: CloudSnapshot) { if (!disposed) { snapshot = next; refreshError = false; render(); } },
     dispose() {
       disposed = true;

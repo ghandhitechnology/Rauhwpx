@@ -230,6 +230,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
   function close(restoreFocus = true): void {
     if (!visible) return;
     visible = false;
+    sidebarResizeObserver.disconnect();
     overlay.hidden = true;
     setModalIsolation(false);
     const focusTarget = trigger;
@@ -1096,6 +1097,9 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     if (mutationLocked) return;
     if (!accountAuthPending) justSignedIn = false;
     trigger = nextTrigger;
+    sidebarResizeObserver.disconnect();
+    const sidebar = trigger.closest('.ag-root');
+    if (sidebar) sidebarResizeObserver.observe(sidebar);
     const preservedFailure = preserveOnOpen
       && (state?.kind === 'install-failed' || state?.kind === 'sandbox-failed');
     if (!operationActive(state) && !preservedFailure) {
@@ -1115,19 +1119,17 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
 
   function positionPopup(): void {
     if (!visible) return;
-    const composer = trigger?.closest('.ag-root')?.querySelector<HTMLElement>('.ag-composer');
-    const anchored = Boolean(composer?.checkVisibility());
+    const sidebar = trigger?.closest<HTMLElement>('.ag-root');
+    const anchored = Boolean(sidebar?.checkVisibility());
     overlay.classList.toggle('ag-cloud-setup-anchored', anchored);
-    if (!anchored || !composer) return;
-    const bounds = composer.getBoundingClientRect();
-    const width = Math.min(420, bounds.width - 16, window.innerWidth - 24);
-    const left = Math.max(12, Math.min(bounds.right - width - 8, window.innerWidth - width - 12));
-    const bottom = Math.max(12, window.innerHeight - bounds.bottom + 8);
-    dialog.style.setProperty('--cloud-popup-left', `${left}px`);
-    dialog.style.setProperty('--cloud-popup-bottom', `${bottom}px`);
-    dialog.style.setProperty('--cloud-popup-width', `${width}px`);
-    dialog.style.setProperty('--cloud-popup-height', `${Math.max(120, window.innerHeight - bottom - 12)}px`);
+    if (!anchored || !sidebar) return;
+    const bounds = sidebar.getBoundingClientRect();
+    overlay.style.setProperty('--cloud-sidebar-left', `${bounds.left}px`);
+    overlay.style.setProperty('--cloud-sidebar-top', `${bounds.top}px`);
+    overlay.style.setProperty('--cloud-sidebar-width', `${bounds.width}px`);
+    overlay.style.setProperty('--cloud-sidebar-height', `${bounds.height}px`);
   }
+  const sidebarResizeObserver = new ResizeObserver(positionPopup);
   window.addEventListener('resize', positionPopup);
 
   dialog.addEventListener('keydown', (event) => {
@@ -1206,6 +1208,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       setModalIsolation(false);
       document.removeEventListener('focusin', containFocus);
       window.removeEventListener('resize', positionPopup);
+      sidebarResizeObserver.disconnect();
       overlay.remove();
     },
   };
