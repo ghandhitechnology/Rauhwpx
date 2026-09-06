@@ -1031,7 +1031,9 @@ export function createMockBridge(report: (message: string) => void) {
               (input.append ? data.writing.sourceCount : 0) +
               input.files.length,
             pageEstimate: input.files.length * 3,
-            summary: '간결한 문장과 일관된 용어를 사용하는 문체입니다.',
+            summary: input.language === 'en'
+              ? 'You explain the point plainly, then add context where the reader needs it. The tone is calm and direct.'
+              : '요점을 먼저 전하고, 독자가 궁금해할 부분을 차근차근 풀어 쓰는 편이에요. 차분하고 담백한 말투예요.',
             sources: input.files.map((file) => ({
               name: file.name,
               size: file.size,
