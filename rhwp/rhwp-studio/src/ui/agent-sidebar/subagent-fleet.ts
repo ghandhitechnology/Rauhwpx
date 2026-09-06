@@ -449,13 +449,20 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
     reveal.appendChild(detail);
     toggle.append(dot, spin, name, aside, createChevron('ag-fleet-row-chevron'), status, activity);
     root.classList.add('ag-has-detail');
-    root.append(toggle, reveal);
+    const back = el('button', 'ag-fleet-back', '← 서브에이전트 목록');
+    back.type = 'button';
+    root.append(back, toggle, reveal);
     const row = { root, toggle, dot, title, role, aside, activity, metrics, status, detail, reveal, preview };
     toggle.addEventListener('click', () => {
       const open = selectedRow !== row;
       if (selectedRow) setRowOpen(selectedRow, false);
       selectedRow = open ? row : null;
       if (open) setRowOpen(row, true);
+    });
+    back.addEventListener('click', () => {
+      setRowOpen(row, false);
+      selectedRow = null;
+      row.toggle?.focus?.();
     });
     return row;
   }
@@ -464,13 +471,13 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
     row.root.classList.toggle('ag-open', open);
     row.toggle?.setAttribute('aria-expanded', String(open));
     row.reveal.inert = !open;
+    if (open) row.detail.scrollTop = row.detail.scrollHeight;
   }
 
-  /** 읽던 위치를 보존하고, 끝을 보고 있을 때만 새 출력을 따라간다. */
+  /** 선택한 미리보기는 새 출력이 올 때마다 끝으로 이동한다. */
   function followDetail(row: RowRefs, update: () => void): void {
-    const nearBottom = !(row.detail.scrollHeight - row.detail.scrollTop - row.detail.clientHeight > 32);
     update();
-    if (nearBottom) row.detail.scrollTop = row.detail.scrollHeight;
+    if (selectedRow === row) row.detail.scrollTop = row.detail.scrollHeight;
   }
 
   function applyRowState(row: RowRefs, state: TaskState): void {
