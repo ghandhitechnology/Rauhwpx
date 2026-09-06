@@ -156,7 +156,10 @@ export function rhwpAgentHubPlugin(studioRoot = process.cwd()) {
         ...process.env,
         RHWP_AGENT_PORT: String(requestedPort),
         RHWP_AGENT_TOKEN: token,
-        RHWP_AGENT_MODE: 'production',
+        // Keep scoped-token/origin enforcement without requiring Electron's secret broker.
+        NODE_ENV: 'production',
+        RHWP_AGENT_MODE: 'development',
+        RHWP_SECRET_BROKER: '',
         RHWP_LAUNCH_ID: launchId,
         RHWP_OWNER_PID: String(process.pid),
         RHWP_OWNER_IPC: '1',

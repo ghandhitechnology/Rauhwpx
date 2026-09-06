@@ -76,6 +76,8 @@ body.ag-sidebar-animating .ag-root {
   --ag-bg: var(--n-surface);
   --ag-bg-2: var(--n-surface-sunken);
   --ag-raised: var(--n-surface-raised);
+  --ag-surface: var(--ag-raised);
+  --ag-surface-subtle: var(--ag-bg-2);
   --ag-text: var(--n-text);
   --ag-text-secondary: var(--n-text-secondary);
   --ag-text-muted: var(--n-text-muted);
@@ -421,7 +423,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
 }
 
 .ag-header-icon-btn {
@@ -560,21 +562,22 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 .ag-conn-banner {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 8px 12px;
   flex: 0 0 auto;
   flex-wrap: wrap;
-  margin: 0 12px 8px;
-  padding: 8px 10px;
+  margin: 12px 12px 8px;
+  padding: 10px 12px;
   border: 1px solid color-mix(in srgb, var(--ag-err) 35%, var(--ag-border-strong));
   border-radius: var(--ag-r-field);
-  background: color-mix(in srgb, var(--ag-err) 7%, var(--ag-bg-2));
+  background: var(--ag-raised);
   font-size: var(--font-size-sm, 11px);
+  line-height: 1.5;
   color: var(--ag-text);
 }
 
 .ag-conn-banner.ag-conn-banner-wait {
   border-color: color-mix(in srgb, var(--accent-primary) 35%, var(--ag-border-strong));
-  background: color-mix(in srgb, var(--accent-primary) 7%, var(--ag-bg-2));
+  background: var(--ag-raised);
 }
 
 .ag-conn-banner[hidden] {
@@ -582,12 +585,13 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 
 .ag-conn-banner-text {
-  flex: 1 1 auto;
+  flex: 1 1 180px;
   min-width: 0;
 }
 
 .ag-conn-banner-retry {
   flex: 0 0 auto;
+  margin-left: auto;
   height: 26px;
   padding: 0 9px;
   border: 1px solid var(--accent-primary);
@@ -1385,6 +1389,12 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   font-weight: 600;
 }
 
+.ag-thread-mode {
+  flex: 0 0 auto;
+  color: var(--ag-text-secondary);
+  font-size: 10px;
+}
+
 /* ── 채팅 실행 상태 점 ─────────────────────────────────
    여러 탭에서 도는 채팅을 한 목록에서 알아본다 — 노란 불은 지금
    일하는 채팅, 초록 점은 끝나서 볼거리가 생긴 채팅. */
@@ -1876,6 +1886,10 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   font-weight: 500;
   text-align: left;
   cursor: pointer;
+}
+
+.ag-config-panel .ag-model-item[hidden] {
+  display: none;
 }
 
 .ag-provider-item::before {
@@ -3690,6 +3704,45 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   transition: border-color 140ms ease, box-shadow 140ms ease;
 }
 
+.ag-composer-target-message {
+  margin: 1px 4px 6px;
+  color: var(--ag-text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.ag-composer-target-message[hidden] {
+  display: none;
+}
+
+.ag-cloud-start-placeholder {
+  color: var(--ag-text-secondary);
+}
+
+.ag-cloud-start-phase {
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.ag-cloud-start-retry,
+.ag-cloud-return-owner {
+  margin-top: 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ag-text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.ag-cloud-start-retry:hover,
+.ag-cloud-return-owner:hover {
+  text-decoration: underline;
+}
+
 /* 입력기 위의 진행 정보는 계획/변경 surface의 높이를 만들지 않는다.
    텍스트와 계획 복원 버튼은 한 overlay 행에서 서로의 폭을 예약한다.
    편대 도크가 서 있는 동안에는 --ag-fleet-dock-h 만큼 위로 올라간다. */
@@ -3697,7 +3750,7 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
   position: absolute;
   z-index: 3;
   right: 2px;
-  bottom: calc(100% + 5px + var(--ag-fleet-dock-h, 0px));
+  bottom: calc(100% + 5px + var(--ag-fleet-dock-h, 0px) + var(--ag-cloud-controls-h, 0px));
   left: 2px;
   display: flex;
   min-width: 0;
@@ -4245,6 +4298,11 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 .ag-send .ag-icon {
   width: 14px;
   height: 14px;
+}
+
+.ag-send.ag-send-cloud .ag-icon {
+  width: 20px;
+  height: 20px;
 }
 
 .ag-send:hover:not(:disabled) {
@@ -5304,13 +5362,52 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   letter-spacing: -0.01em;
 }
 
-.ag-workspace-agent-context {
-  overflow: hidden;
-  max-width: 190px;
+.ag-workspace-mode-switch {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 1px;
+  padding: 2px;
+  border: 1px solid var(--ag-border);
+  border-radius: 7px;
+  background: var(--ag-bg-2);
+}
+
+.ag-workspace-mode-switch[hidden] {
+  display: none;
+}
+
+.ag-workspace-mode-option {
+  min-height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
   color: var(--ag-text-muted);
+  font: inherit;
   font-size: 10px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  cursor: pointer;
+}
+
+.ag-workspace-mode-option:hover {
+  color: var(--ag-text);
+}
+
+.ag-workspace-mode-option[aria-pressed='true'] {
+  background: var(--ag-raised);
+  color: var(--ag-text);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 9%);
+}
+
+.ag-workspace-mode-option:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.ag-workspace-agent-context {
+  display: none;
 }
 
 .ag-workspace-exit-btn {
@@ -6005,9 +6102,8 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
    레일과 멤버 행을 가진 자기 카드를 갖는다. 카드는 도구 활동 그룹과
    같은 자리에 흐름대로 놓인다.
 
-   두 가지 규칙이 이 블록을 지탱한다. 행은 3줄 고정 그리드라 토큰·시간이
-   1초마다 갱신돼도 아래 행이 밀리지 않는다. 진행 표시는 도는 것 없이
-   가만한 점 하나이고, 끝났을 때 색과 시제만 바뀐다. */
+   목록은 두 줄 고정 그리드로 유지하고 선택한 행의 실시간 기록만 펼친다.
+   토큰·시간 갱신이 목록 높이를 바꾸지 않으며, 진행 중에는 픽셀 휠을 표시한다. */
 
 .ag-fleet {
   position: relative;
@@ -6294,6 +6390,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 }
 
 .ag-fleet-row {
+  container: fleet-row / inline-size;
   min-width: 0;
   animation: ag-step-arrive 280ms var(--ag-motion-out) both;
 }
@@ -6308,7 +6405,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   box-sizing: border-box;
   width: 100%;
   grid-template-columns: 12px minmax(0, 1fr) auto 11px;
-  grid-template-rows: 16px 14px 13px;
+  grid-template-rows: 16px 14px;
   align-items: center;
   column-gap: 7px;
   row-gap: 1px;
@@ -6422,9 +6519,25 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   white-space: nowrap;
 }
 
+/* 창 전체가 아니라 실제 행 너비에 맞춰 근황을 이름 옆으로 옮긴다. */
+@container fleet-row (min-width: 560px) {
+  .ag-fleet-head {
+    grid-template-columns: 12px fit-content(38%) minmax(0, 1fr) auto 11px;
+    grid-template-rows: 20px;
+    column-gap: 10px;
+  }
+
+  .ag-fleet-activity {
+    grid-column: 3;
+    grid-row: 1;
+  }
+
+  .ag-fleet-aside { grid-column: 4; }
+  .ag-fleet-row-chevron { grid-column: 5; }
+}
+
 .ag-fleet-metrics {
   grid-column: 2 / -1;
-  grid-row: 3;
   min-width: 0;
   overflow: hidden;
   color: var(--ag-text-muted);
@@ -6486,18 +6599,47 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 
 /* ── 행 드릴인: 그 서브에이전트가 부른 도구들 ── */
 
+.ag-fleet-reveal {
+  display: grid;
+  grid-template-rows: 0fr;
+  visibility: hidden;
+  opacity: 0;
+  transition: grid-template-rows 220ms var(--ag-motion-out), opacity 180ms ease, visibility 220ms;
+}
+
+.ag-fleet-row.ag-open > .ag-fleet-reveal {
+  grid-template-rows: 1fr;
+  visibility: visible;
+  opacity: 1;
+}
+
 .ag-fleet-detail {
-  max-height: clamp(96px, 20vh, 168px);
+  min-height: 0;
+  max-height: clamp(112px, 22vh, 184px);
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
   scrollbar-width: thin;
-  padding: 0 6px 6px 20px;
+  margin: 0 6px 0 20px;
+  border-radius: var(--ag-r-chip);
+  background: color-mix(in srgb, var(--ag-hover) 55%, transparent);
 }
 
-.ag-fleet-detail[hidden] {
-  display: none;
+.ag-fleet-detail > .ag-fleet-metrics {
+  display: block;
+  padding: 8px 8px 0;
+}
+
+.ag-fleet-preview {
+  margin: 0;
+  padding: 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  font-size: var(--font-size-sm, 11px);
+  line-height: 1.6;
+  color: var(--ag-text-secondary);
 }
 
 /* ── 편대 도크 (입력기 위 알약 + 팝업) ───────────────────
@@ -6545,6 +6687,8 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   cursor: pointer;
   animation: ag-dock-arrive 220ms var(--ag-motion-out) both;
 }
+
+.ag-fleet-dock-pill[hidden] { display: none; }
 
 .ag-fleet-dock-pill:hover {
   color: var(--ag-text);
@@ -6620,6 +6764,8 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 }
 
 .ag-fleet-popup {
+  box-sizing: border-box;
+  width: 100%;
   pointer-events: auto;
   display: flex;
   min-width: 0;
@@ -6635,7 +6781,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   border-radius: var(--ag-r-field);
   background: color-mix(in srgb, var(--ag-bg) 88%, transparent);
   box-shadow: var(--n-elev-2);
-  animation: ag-dock-arrive 240ms var(--ag-motion-out) both;
+  animation: none;
 }
 
 .ag-fleet-popup[hidden] {
@@ -6647,6 +6793,73 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
    팝업은 넘칠 것이 없다고 보아 스크롤조차 내주지 않는다. */
 .ag-fleet-popup > .ag-fleet {
   flex: 0 0 auto;
+}
+
+/* 선택한 에이전트가 팝업 전체를 사용하며 목록 복귀 버튼만 남긴다. */
+.ag-fleet-back { display: none; }
+
+.ag-fleet-popup:has(.ag-fleet-row.ag-open) {
+  height: min(320px, 40vh);
+  overflow: hidden;
+}
+
+.ag-fleet-popup:has(.ag-fleet-row.ag-open) > .ag-fleet:not(:has(.ag-open)),
+.ag-fleet-popup:has(.ag-open) .ag-fleet-toggle,
+.ag-fleet-popup:has(.ag-open) .ag-fleet-rail,
+.ag-fleet-popup:has(.ag-open) .ag-fleet-row:not(.ag-open) {
+  display: none;
+}
+
+.ag-fleet-popup > .ag-fleet:has(.ag-open) {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  border: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ag-fleet-popup:has(.ag-open) .ag-fleet-collapse,
+.ag-fleet-popup:has(.ag-open) .ag-fleet-body,
+.ag-fleet-popup:has(.ag-open) .ag-fleet-rows,
+.ag-fleet-popup .ag-fleet-row.ag-open {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  padding: 0;
+  border: 0;
+}
+
+.ag-fleet-popup .ag-open > .ag-fleet-back {
+  display: block;
+  flex: 0 0 auto;
+  padding: 8px;
+  border: 0;
+  background: transparent;
+  color: var(--ag-text-secondary);
+  font: inherit;
+  font-size: var(--font-size-sm, 11px);
+  text-align: left;
+  cursor: pointer;
+}
+
+.ag-fleet-back:hover { background: var(--ag-hover); }
+.ag-fleet-back:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; }
+
+.ag-fleet-popup .ag-open > .ag-fleet-head { flex: 0 0 auto; }
+.ag-fleet-popup .ag-open > .ag-fleet-head .ag-fleet-row-chevron { visibility: hidden; }
+
+.ag-fleet-popup .ag-open > .ag-fleet-reveal {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.ag-fleet-popup .ag-open .ag-fleet-detail {
+  flex: 1;
+  max-height: none;
+  margin: 0;
 }
 
 /* ── 픽셀 휠 ─────────────────────────────────────────
@@ -6742,6 +6955,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
     animation: none;
   }
 
+  .ag-fleet-reveal,
   .ag-fleet-collapse,
   .ag-fleet-chevron,
   .ag-fleet-row-chevron {
@@ -6816,68 +7030,6 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   overflow: visible;
 }
 
-.ag-user-question.ag-collapsed {
-  flex-basis: auto;
-}
-
-.ag-question-disclosure {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  min-height: 44px;
-  padding: 10px 14px;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-  text-align: left;
-}
-
-.ag-question-disclosure[aria-expanded='true'] {
-  border-bottom: 1px solid var(--ag-question-border-soft);
-}
-
-.ag-question-disclosure-label {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12.5px;
-  font-weight: 650;
-  line-height: 1.35;
-}
-
-.ag-question-disclosure[aria-expanded='true'] .ag-question-disclosure-label {
-  color: var(--ag-accent);
-  font-size: 11px;
-  font-weight: 750;
-  letter-spacing: .03em;
-}
-
-.ag-question-count {
-  min-width: 34px;
-  color: var(--ag-question-muted);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-  white-space: nowrap;
-}
-
-.ag-question-mode {
-  padding: 2px 7px;
-  border: 1px solid var(--ag-question-border-soft);
-  border-radius: 999px;
-  background: var(--ag-question-raised);
-  color: var(--ag-question-muted);
-  font-size: 10px;
-  font-weight: 650;
-  line-height: 1.4;
-  white-space: nowrap;
-}
-
 .ag-question-body {
   display: grid;
   flex: 1 1 auto;
@@ -6886,7 +7038,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 14px 14px 16px;
+  padding: 20px 14px 16px;
   scrollbar-gutter: stable;
   background: var(--ag-question-body);
 }
@@ -7136,4 +7288,110 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
     transition-duration: .01ms !important;
     animation-duration: .01ms !important;
   }
+}
+
+.ag-document-view-switch[hidden] { display: none; }
+
+.ag-cloud-document-controls {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px + var(--ag-fleet-dock-h, 0px));
+  left: 0;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.ag-cloud-document-controls:not(:has(> :not([hidden]))) {
+  display: none;
+}
+
+.ag-cloud-document-controls > :not([hidden]) {
+  pointer-events: auto;
+  background: var(--ag-bg);
+  border: 1px solid var(--ag-border);
+  border-radius: 9px;
+  box-shadow: var(--n-elev-2);
+}
+
+.ag-cloud-document-controls .ag-workspace-mode-option {
+  min-height: 28px;
+}
+
+.ag-cloud-document-controls .ag-cloud-merge-button {
+  min-height: 34px;
+  max-width: 100%;
+  padding: 6px 10px;
+  color: var(--ag-text);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.ag-cloud-document-controls .ag-cloud-merge-button:hover:not(:disabled) {
+  background: var(--ag-hover);
+}
+
+.ag-cloud-document-controls .ag-cloud-merge-button:disabled {
+  color: var(--ag-text-muted);
+  cursor: default;
+}
+
+.ag-cloud-document-controls .ag-cloud-merge-button:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* 새 대화의 실행 위치 선택과 시작한 대화의 위치 표시. */
+.ag-execution-location {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--ag-border);
+  border-radius: 8px;
+}
+.ag-root .ag-execution-location .ag-execution-location-option {
+  display: inline-flex;
+  width: auto;
+  height: 26px;
+  flex: 0 0 auto;
+  white-space: nowrap;
+  gap: 5px;
+  padding: 0 7px;
+  font: inherit;
+  font-size: 11px;
+}
+.ag-execution-location .ag-execution-location-option[aria-pressed='true'] {
+  color: var(--ag-text);
+  background: var(--ag-hover);
+}
+.ag-execution-location[data-started='true'] {
+  padding: 0;
+  border: 0;
+}
+.ag-root .ag-execution-location[data-started='true'] .ag-execution-location-option {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+}
+.ag-root .ag-execution-location .ag-execution-location-option[hidden],
+.ag-execution-location span[hidden] { display: none; }
+.ag-execution-location-option:disabled { opacity: 0.4; }
+
+
+.ag-provider-item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.ag-provider-item[data-unavailable-reason]::after {
+  content: attr(data-unavailable-reason);
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--ag-text-muted);
 }

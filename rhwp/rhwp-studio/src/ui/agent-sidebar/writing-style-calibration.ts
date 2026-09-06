@@ -8,7 +8,7 @@ import {
   modelsForAgent,
   resolveModelForAgent,
 } from '../../agent/models.ts';
-import { AGENT_LABEL } from './providers.ts';
+import { AGENT_LABEL, PROVIDER_ORDER, createProviderIcon } from './providers.ts';
 import type {
   AgentName,
   PiStatus,
@@ -28,12 +28,7 @@ const MAX_FILES = 20;
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 50 * 1024 * 1024;
 const ACK_TIMEOUT_MS = 10_000;
-/*
- * 보정을 실제로 돌릴 수 있는 프로바이더만 고른다 — 허브의 writing-style-catalog 는
- * codex/claude/pi 만 만들고 style-calibrator 도 그 셋만 받는다. grok/cursor 를
- * 여기에 세우면 영영 '사용 불가' 인 칸이 둘 생기고 쓸 수 있는 셋만 좁아진다.
- */
-const AGENTS: readonly AgentName[] = ['claude', 'codex', 'pi', 'rau'];
+const AGENTS: readonly AgentName[] = PROVIDER_ORDER;
 
 const PROGRESS_STAGES: ReadonlyArray<{
   state: WritingStyleProgressState;
@@ -98,21 +93,60 @@ function createCheckIcon(): SVGSVGElement {
 }
 
 function createPixelFlag(language: WritingStyleLanguage): SVGSVGElement {
-  const flag = svg('ag-calibration-flag', '0 0 24 16');
+  const width = language === 'ko' ? 72 : 96;
+  const flag = svg('ag-calibration-flag', `0 0 ${width} 48`);
   flag.setAttribute('shape-rendering', 'crispEdges');
-  addSvgShape(flag, 'rect', { x: '0', y: '0', width: '24', height: '16', fill: '#ffffff' });
+  flag.dataset.language = language;
+  addSvgShape(flag, 'rect', { width: String(width), height: '48', fill: '#f1faf8' });
   if (language === 'en') {
-    addSvgShape(flag, 'rect', { x: '10', y: '0', width: '4', height: '16', fill: '#c8102e' });
-    addSvgShape(flag, 'rect', { x: '0', y: '6', width: '24', height: '4', fill: '#c8102e' });
+    for (const x of [0, 72]) {
+      addSvgShape(flag, 'rect', { x: String(x), width: '24', height: '48', fill: '#d80621' });
+    }
+    // 계단형 윤곽으로 그린 단풍잎과 줄기.
+    addSvgShape(flag, 'path', {
+      d: 'M48 6h2v4h2v4h2v-2h3v9h2v-3h4v3h4v4h-3v3h-3v3h-4v3h2v3h-9v6h-4v-6h-9v-3h2v-3h-4v-3h-3v-3h-3v-4h4v-3h4v3h2v-9h3v2h2v-4h2V6z',
+      fill: '#d80621',
+    });
   } else {
-    addSvgShape(flag, 'rect', { x: '9', y: '5', width: '6', height: '3', fill: '#cd2e3a' });
-    addSvgShape(flag, 'rect', { x: '9', y: '8', width: '6', height: '3', fill: '#0047a0' });
-    addSvgShape(flag, 'rect', { x: '3', y: '3', width: '4', height: '1', fill: '#111111' });
-    addSvgShape(flag, 'rect', { x: '17', y: '12', width: '4', height: '1', fill: '#111111' });
-    addSvgShape(flag, 'rect', { x: '17', y: '3', width: '4', height: '1', fill: '#111111' });
-    addSvgShape(flag, 'rect', { x: '3', y: '12', width: '4', height: '1', fill: '#111111' });
+    // 건(☰), 감(☵), 리(☲), 곤(☷): 각 괘의 세 효와 끊어진 획을 보존합니다.
+    const trigrams = [
+      { x: 16, y: 11, angle: -Math.PI / 4, broken: [false, false, false] },
+      { x: 56, y: 11, angle: Math.PI / 4, broken: [true, false, true] },
+      { x: 16, y: 37, angle: Math.PI / 4, broken: [false, true, false] },
+      { x: 56, y: 37, angle: -Math.PI / 4, broken: [true, true, true] },
+    ];
+    for (let y = 0; y < 48; y++) {
+      for (let x = 0; x < 72; x++) {
+        const dx = x + 0.5 - 36;
+        const dy = y + 0.5 - 24;
+        let fill = '';
+        if (dx * dx + dy * dy <= 144) {
+          const redLobe = (dx + 6) ** 2 + dy ** 2 <= 36;
+          const blueLobe = (dx - 6) ** 2 + dy ** 2 <= 36;
+          fill = (dy < 0 && !blueLobe) || redLobe ? '#cd2e3a' : '#0047a0';
+        }
+        for (const trigram of trigrams) {
+          const tx = x + 0.5 - trigram.x;
+          const ty = y + 0.5 - trigram.y;
+          const u = tx * Math.cos(trigram.angle) + ty * Math.sin(trigram.angle);
+          const v = -tx * Math.sin(trigram.angle) + ty * Math.cos(trigram.angle);
+          if (Math.abs(u) >= 6) continue;
+          for (let line = 0; line < 3; line++) {
+            if (Math.abs(v - (line - 1) * 4) < 1 && (!trigram.broken[line] || Math.abs(u) >= 1.5)) fill = '#111';
+          }
+        }
+        if (fill) addSvgShape(flag, 'rect', { x: String(x), y: String(y), width: '1', height: '1', fill });
+      }
+    }
   }
-  addSvgShape(flag, 'rect', { x: '.5', y: '.5', width: '23', height: '15', fill: 'none', stroke: 'rgba(0,0,0,.18)', 'stroke-width': '1' });
+  // 구름 픽셀 아트처럼 밝은 윗면과 차분한 아래쪽 테두리를 더합니다.
+  addSvgShape(flag, 'path', {
+    d: `M0 0h${width}v1H1v46H0z`, fill: '#fff', opacity: '.55',
+  });
+  addSvgShape(flag, 'path', {
+    d: `M1 47h${width - 2}v1H1zM${width - 1} 1h1v47h-1z`,
+    fill: '#31585e', opacity: '.22',
+  });
   return flag;
 }
 
@@ -331,22 +365,22 @@ export function createWritingStyleCalibration(
 
   const introTitle = el('h2', 'ag-calibration-title', '말투를 맞출까요?');
   introTitle.id = 'ag-calibration-title';
-  const introStatement = el('p', 'ag-calibration-statement', '당신이 글에서 어떤 사람인지를 배우고, 다음 글부터 그 목소리로 씁니다.');
+  const introStatement = el('p', 'ag-calibration-statement', '당신이 글에서 말투를 학습해서, 따라합니다');
   const introDetail = el('p', 'ag-calibration-detail', '먼저 분석할 글의 주 언어를 선택하세요.');
   const languageGroup = el('div', 'ag-calibration-language-group');
   languageGroup.setAttribute('role', 'radiogroup');
   languageGroup.setAttribute('aria-label', '캘리브레이션 언어');
   const languageButtons = new Map<WritingStyleLanguage, HTMLButtonElement>();
-  for (const [value, label, detail] of [
-    ['ko', '한국어', '한국어로 쓴 글에서 목소리를 읽습니다'],
-    ['en', 'English', 'Read the voice in the English samples'],
+  for (const [value, label] of [
+    ['ko', '한국어'],
+    ['en', 'English'],
   ] as const) {
     const langButton = el('button', 'ag-calibration-language');
     langButton.type = 'button';
     langButton.dataset.language = value;
     langButton.setAttribute('role', 'radio');
     const copy = el('span', 'ag-calibration-language-copy');
-    copy.append(el('strong', '', label), el('span', '', detail));
+    copy.append(el('strong', '', label));
     langButton.append(createPixelFlag(value), copy);
     langButton.addEventListener('click', () => setLanguage(value));
     languageButtons.set(value, langButton);
@@ -390,7 +424,13 @@ export function createWritingStyleCalibration(
   corpusSection.append(corpusHead, corpusList, corpusModes);
 
   const providerFieldset = el('fieldset', 'ag-calibration-provider-fieldset');
-  const providerLegend = el('legend', 'ag-calibration-section-title', '분석 모델');
+  const providerPicker = document.createElement('details');
+  providerPicker.className = 'ag-calibration-provider-picker';
+  const providerSummary = document.createElement('summary');
+  providerSummary.className = 'ag-calibration-provider-summary';
+  const providerSelection = el('span', 'ag-calibration-provider-selection');
+  providerSummary.append(el('span', 'ag-calibration-section-title', '분석 모델'), providerSelection);
+  providerPicker.appendChild(providerSummary);
   const providerGroup = el('div', 'ag-calibration-provider-group');
   providerGroup.setAttribute('role', 'radiogroup');
   providerGroup.setAttribute('aria-label', '분석 프로바이더');
@@ -403,7 +443,7 @@ export function createWritingStyleCalibration(
     button.setAttribute('role', 'radio');
     const name = el('strong', '', AGENT_LABEL[agent]);
     const health = el('span', 'ag-calibration-provider-health', '확인 중');
-    button.append(name, health);
+    button.append(createProviderIcon(agent), name, health);
     button.addEventListener('click', () => selectAgent(agent));
     providerButtons.set(agent, button);
     providerStatusLabels.set(agent, health);
@@ -417,7 +457,8 @@ export function createWritingStyleCalibration(
   const modelHelp = el('p', 'ag-calibration-model-help');
   modelHelp.id = 'ag-calibration-model-help';
   modelHelp.setAttribute('aria-live', 'polite');
-  providerFieldset.append(providerLegend, providerGroup, modelRow, modelHelp);
+  providerPicker.append(providerGroup, modelRow, modelHelp);
+  providerFieldset.append(providerPicker);
 
   const uploadInput = el('input', 'ag-calibration-file-input') as HTMLInputElement;
   uploadInput.type = 'file';
@@ -636,6 +677,11 @@ export function createWritingStyleCalibration(
     renderProviderCatalogue();
   }
 
+  function renderProviderSelection(): void {
+    const label = modelSelect.selectedOptions[0]?.textContent ?? selectedModel;
+    providerSelection.replaceChildren(createProviderIcon(selectedAgent), document.createTextNode(`${AGENT_LABEL[selectedAgent]} · ${label}`));
+  }
+
   function renderProviderCatalogue(): void {
     for (const agent of AGENTS) {
       const button = providerButtons.get(agent)!;
@@ -679,7 +725,9 @@ export function createWritingStyleCalibration(
     }
     const availability = providerAvailability(selectedAgent);
     modelSelect.disabled = !availability.available || options.length === 0 || requestId !== null || submitting;
-    modelHelp.textContent = availability.reason || `${AGENT_LABEL[selectedAgent]}의 ${options.length}개 모델 중 하나를 선택할 수 있습니다.`;
+    modelHelp.textContent = availability.reason;
+    modelHelp.hidden = !availability.reason;
+    renderProviderSelection();
     updateAnalyzeButton();
   }
 
@@ -1004,6 +1052,7 @@ export function createWritingStyleCalibration(
   modelSelect.addEventListener('change', () => {
     selectionTouched = true;
     selectedModel = resolveModelForAgent(selectedAgent, modelSelect.value);
+    renderProviderSelection();
     updateAnalyzeButton();
   });
   instruction.addEventListener('input', () => {

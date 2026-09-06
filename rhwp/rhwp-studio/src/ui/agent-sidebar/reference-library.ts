@@ -77,9 +77,11 @@ export interface ReferenceLibraryUi {
   setOpen(open: boolean, scope?: ReferenceScope): void;
   setConnectionState(state: ReturnType<SidebarBridge['getConnectionState']>): void;
   contextChanged(): void;
+  snapshotDraftFiles(): File[];
   hasDrafts(): boolean;
   hasBlockingDrafts(): boolean;
   takeReadyDrafts(): StagedReference[];
+  takeReadyCloudDrafts(): Promise<Array<StagedReference & { bytes: Uint8Array }>>;
   discardDrafts(): void;
   stageDraftFiles(files: File[]): void;
   hasImageDrafts(): boolean;
@@ -234,6 +236,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     add.disabled = !connected || targetFor(activeScope, context) === null;
     if (!connected) add.title = '에이전트 서버가 연결되면 파일을 추가할 수 있습니다.';
     else add.removeAttribute('title');
+    scopeHint.hidden = activeScope === 'chat';
     if (activeScope === 'document' && !context.documentId) {
       scopeHint.textContent = '문서를 열면 해당 문서의 모든 채팅에서 쓸 참고자료를 추가할 수 있습니다.';
     } else if (activeScope === 'document') {
@@ -241,7 +244,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     } else if (activeScope === 'global') {
       scopeHint.textContent = '모든 문서와 모든 채팅에서 항상 검색합니다.';
     } else {
-      scopeHint.textContent = '현재 채팅에서만 검색합니다.';
+      scopeHint.textContent = '';
     }
   }
 
@@ -660,6 +663,21 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     return batch.map((chip) => chip.staged!);
   }
 
+  async function takeReadyCloudDrafts(): Promise<Array<StagedReference & { bytes: Uint8Array }>> {
+    if (draftUploads.some((chip) => chip.uploadState !== 'ready' || !chip.staged)) return [];
+    const batch = [...draftUploads];
+    const bytes = await Promise.all(batch.map(async (chip) => new Uint8Array(await chip.file.arrayBuffer())));
+    draftUploads.splice(0, batch.length);
+    for (const chip of batch) {
+      releaseChip(chip);
+      if (chip.staged && chip.target) {
+        void bridge.discardStagedReference(chip.target.scopeId, chip.staged.id).catch(() => undefined);
+      }
+    }
+    options.onDraftStateChange?.();
+    return batch.map((chip, index) => ({ ...chip.staged!, bytes: bytes[index] }));
+  }
+
   async function openFile(fileId: string): Promise<void> {
     setOpen(true, 'chat');
     await refreshActiveScope();
@@ -786,9 +804,11 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
       void refreshCounts();
       if (open) void refreshActiveScope();
     },
+    snapshotDraftFiles: () => draftUploads.map((chip) => chip.file),
     hasDrafts: () => draftUploads.length > 0,
     hasBlockingDrafts: () => draftUploads.some((chip) => chip.uploadState !== 'ready'),
     takeReadyDrafts,
+    takeReadyCloudDrafts,
     discardDrafts,
     stageDraftFiles: stageFiles,
     hasImageDrafts: () => draftUploads.some((chip) => isImageFile(chip.file)),

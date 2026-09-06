@@ -1,6 +1,22 @@
 import type * as T from '../agent/types.ts';
 import { defaultModelForAgent, labelForModel } from '../agent/models.ts';
 
+export type BrowserbaseFixtureState = 'connected' | 'setup' | 'error';
+
+export function createBrowserbaseFixture(state: BrowserbaseFixtureState): T.BrowserbaseStatus {
+  const configured = state === 'connected';
+  return {
+    configured,
+    missing: configured ? [] : ['BROWSERBASE_API_KEY', 'BROWSERBASE_PROJECT_ID'],
+    keySource: configured ? 'env' : null,
+    keyTail: configured ? 'demo' : null,
+    projectId: configured ? 'preview-browser-project' : null,
+    projectSource: configured ? 'env' : null,
+    geminiSource: configured ? 'env' : null,
+    browsers: configured ? [{ id: 'main', connected: true }, { id: 'preview-research', connected: false }] : [],
+  };
+}
+
 export const agents: T.AgentName[] = [
   'claude',
   'codex',

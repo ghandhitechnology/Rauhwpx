@@ -86,15 +86,16 @@ test('calibration prompt asks for a person to inhabit, not a writing specificati
   for (const axis of STYLE_AXES) assert.ok(prompt.includes(axis.id), `${axis.id} 축이 프롬프트에 있어야 한다`);
 });
 
-test('measured numbers are handed to the model as settled context', () => {
+test('measurement diagnostics do not become writing targets', () => {
   const checked = validateCalibrationInput({ language: 'ko', files: [upload('sample.txt', 'x')] });
   const metrics = analyzeText(longKoreanSample(), 'ko');
   const prompt = buildCalibrationPrompt({ ...checked, metrics });
-  assert.match(prompt, /These numbers are a fingerprint, not a recipe/);
-  assert.ok(prompt.includes('"sentenceLength"'));
+  assert.match(prompt, /Sample size and reliability are checked separately/);
+  assert.ok(!prompt.includes('"sentenceLength"'));
+  assert.match(prompt, /do not recommend ending quotas/);
 });
 
-test('style.md is rendered by code with portrait, covenant, fingerprint, and habit strength', () => {
+test('style.md keeps voice and factual boundaries without numeric baselines', () => {
   const metrics = analyzeText(longKoreanSample(), 'ko');
   const markdown = renderStyleMarkdown({
     language: 'ko',
@@ -130,11 +131,11 @@ test('style.md is rendered by code with portrait, covenant, fingerprint, and hab
   assert.match(markdown, /숫자에 기대 단정하고/);
   assert.match(markdown, /## 지키는 선/);
   assert.match(markdown, /사실·수치·날짜·고유명사/);
-  assert.match(markdown, /## 지문 \(쓴 뒤에만 본다\)/);
-  assert.match(markdown, /문장 길이 지문: 중앙값/);
+  assert.doesNotMatch(markdown, /## 지문/);
+  assert.doesNotMatch(markdown, /문장 길이 지문: 중앙값/);
   assert.match(markdown, /\*\*분명한 습관\*\*/);
   assert.match(markdown, /뚜렷한 습관이 보이지 않는다/);
-  assert.match(markdown, /표본 신뢰도 high/);
+  assert.doesNotMatch(markdown, /표본 신뢰도 high/);
   assert.doesNotMatch(markdown, /## 작성 지시/);
 });
 
@@ -332,6 +333,22 @@ test('analysis structure validation rejects a partial seven-axis result', () => 
   );
 });
 
+test('older numeric baseline sections stay stored but leave the drafting prompt', async (t) => {
+  for (const [language, heading] of [['ko', '지문 (쓴 뒤에만 본다)'], ['en', 'Fingerprint (check after writing)']]) {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-voice-legacy-'));
+    t.after(() => fs.rm(root, { recursive: true, force: true }));
+    const store = await new WritingStyleStore({ root }).init();
+    await store.save({
+      markdown: `# Voice\n\n${'Keep a calm, considered voice. '.repeat(12)}\n\n## ${heading}\n\nNUMERIC_BASELINE_SENTINEL\n\n## Voice habits\n\nLet the explanation follow the reader's question.`,
+      language, sourceCount: 3, pageEstimate: 14, summary: 'Calm and considered.',
+    });
+    const block = await store.promptBlock();
+    assert.doesNotMatch(block, /NUMERIC_BASELINE_SENTINEL/);
+    assert.match(block, /Let the explanation follow/);
+    assert.match(await fs.readFile(store.profilePath, 'utf8'), /NUMERIC_BASELINE_SENTINEL/);
+  }
+});
+
 test('writing-style store persists the structured profile and injects generative guidance', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-writing-style-test-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -352,7 +369,7 @@ test('writing-style store persists the structured profile and injects generative
   assert.equal((await store.profile()).confidence, 'medium');
   const block = await store.promptBlock();
   assert.match(block, /person to inhabit, not a specification to satisfy/);
-  assert.match(block, /fingerprint you glance at after a paragraph/);
+  assert.match(block, /Ignore any numeric style targets in older profiles/);
   assert.match(block, /Generic polish is the failure mode/);
   assert.match(block, /Precedence/);
   assert.match(block, /Prefer concrete verbs/);

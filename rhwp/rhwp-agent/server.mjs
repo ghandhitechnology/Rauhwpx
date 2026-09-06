@@ -46,6 +46,7 @@ import { AgentInstructionsStore } from './agent-instructions.mjs';
 import { calibrateWritingStyle } from './style-calibrator.mjs';
 import { buildWritingStyleCatalog, resolveWritingStyleSelection } from './writing-style-catalog.mjs';
 import { filterToolDefinitions, TOOL_DEFINITIONS } from './tools.mjs';
+import { takeEnvironmentScreenshot } from './environment-screenshot.mjs';
 import { replayMissedTurnEnd } from './turn-outcome-replay.mjs';
 import {
   PlanningState,
@@ -70,8 +71,9 @@ import {
   RAU_LOCKED_MODELS,
   RAU_SECRET_ID,
 } from './pi-manager.mjs';
-import { createRauCreditsClient, storeRauApiKey } from './rau-credits-client.mjs';
+import { createRauCreditsClient } from './rau-credits-client.mjs';
 import { createAccountSession } from './account-session.mjs';
+import { createRauAccountSession } from './rau-account-session.mjs';
 import { AuthRunRegistry } from './auth-run-registry.mjs';
 import { createCliSetupManager } from './cli-setup-manager.mjs';
 import { createOpenRouter, creditBalanceEmpty } from './openrouter.mjs';
@@ -275,9 +277,19 @@ const rauManager = await createPiManager({
   skipLegacyKey: true,
 }).init();
 const rauCredits = createRauCreditsClient();
-const accountSession = createAccountSession({
+const accountSession = createRauAccountSession({
+  accountSession: createAccountSession({ secretStore, creditsClient: rauCredits }),
   secretStore,
-  creditsClient: rauCredits,
+  rauManager,
+  beforeProviderChange: disposeRauSessions,
+  onProviderChanged(status, { error }) {
+    if (status) rauStatus = status;
+    rauAccountLinkError = error ? 'Rau 연결을 완료하지 못했어요. 다시 연결해 주세요.' : null;
+    void broadcastFreshAgentSetupStatuses().catch(() => {});
+  },
+  installProvider() {
+    void ensureRauInstalled();
+  },
 });
 const authRuns = new AuthRunRegistry();
 let npmPrefixMutationQueue = Promise.resolve();
@@ -325,6 +337,8 @@ let openCodeModelIds = [];
 /** pi 상태는 동기 경로(resolveModel/startSession)에서도 필요해 캐시해 둔다. */
 let piStatus = await piManager.status();
 let rauStatus = await rauManager.status();
+let rauAccountLinkError = null;
+let rauInstallPromise = null;
 /** OpenRouter 잔액. 키가 있을 때만 채워지고 사용량 리포트에 얹힌다. */
 let openRouterCredits = null;
 let openRouterCreditsKey = null;
@@ -708,6 +722,24 @@ async function refreshRauStatus() {
   return rauStatus;
 }
 
+function ensureRauInstalled() {
+  if (rauStatus.installed) return Promise.resolve();
+  if (rauInstallPromise) return rauInstallPromise;
+  rauInstallPromise = mutateSharedNpmPrefix(() => rauManager.install(() => {}))
+    .then(async (status) => {
+      rauStatus = status;
+      piStatus = await piManager.status();
+    })
+    .catch(() => {
+      rauAccountLinkError = 'Rau 설치를 완료하지 못했어요. 다시 설치해 주세요.';
+    })
+    .finally(async () => {
+      rauInstallPromise = null;
+      await broadcastFreshAgentSetupStatuses().catch(() => {});
+    });
+  return rauInstallPromise;
+}
+
 function openRouterAgentSetupStatus(agent) {
   const status = openRouterStatus(agent);
   return {
@@ -736,6 +768,7 @@ function piAgentSetupStatus() {
 function rauAgentSetupStatus() {
   const status = openRouterAgentSetupStatus('rau');
   if (status.authenticated) status.authMethod = 'oauth';
+  if (rauAccountLinkError) status.error = rauAccountLinkError;
   if (rauTrialEmpty()) status.exhausted = true;
   return status;
 }
@@ -1000,12 +1033,37 @@ function decorateAccountStatus(status, ownerSessionId = null) {
 
 async function broadcastAccountStatus() {
   const status = await accountSession.status();
+  if (typeof process.send === 'function' && process.connected) {
+    process.send({ type: 'rhwp-account-status-changed' }, () => {});
+  }
   for (const record of sessions.values()) {
     sendJson(record.studioSocket, {
       v: 1,
       type: 'account-status',
       status: decorateAccountStatus(status, record.sessionId),
     });
+  }
+}
+
+async function disposeRauSessions() {
+  if ([...sessions.values()].some((session) => session.processCleanupUncertain)) {
+    throw agentProcessCleanupUncertain();
+  }
+  const rauSessions = [...sessions.values()]
+    .filter((session) => session.agentSession?.agent === 'rau');
+  const cleaned = await Promise.all(rauSessions.map(disposeSession));
+  if (cleaned.some((stopped) => stopped === false)) throw agentProcessCleanupUncertain();
+}
+
+async function logoutRauAccount() {
+  try {
+    return await accountSession.logout();
+  } finally {
+    if (!rauManager.apiKey()) {
+      await disposeRauSessions();
+    }
+    await broadcastFreshAgentSetupStatuses().catch(() => {});
+    await broadcastAccountStatus().catch(() => {});
   }
 }
 
@@ -1040,6 +1098,11 @@ function beginAccountLogin(record, sock, requestId) {
     if (authRun?.accountLoginId) void accountSession.cancelLogin(authRun.accountLoginId);
   };
   try {
+    if (authRuns.get('rau')) {
+      throw Object.assign(new Error('진행 중인 Rau 로그인을 먼저 마쳐 주세요.'), {
+        code: 'ACCOUNT_AUTH_BUSY',
+      });
+    }
     authRun = authRuns.begin({
       agent: 'account',
       ownerSessionId: record.sessionId,
@@ -1139,6 +1202,7 @@ function beginAccountLogin(record, sock, requestId) {
   })().then(
     async () => {
       authRuns.finish(authRun);
+      await broadcastFreshAgentSetupStatuses().catch(() => {});
       await broadcastAccountStatus().catch((error) => {
         log(`account status refresh failed: ${error?.message ?? error}`);
       });
@@ -2860,6 +2924,12 @@ async function startSession(
     currentSession.documentName = documentName;
     return currentSession;
   }
+  // A settings change must never interrupt a turn or its pending question.
+  if (!force && currentSession?.status === 'running') {
+    throw workflowError('AGENT_BUSY', 'Provider settings can only change between turns.');
+  }
+  const continuing = !force && currentSession
+    && currentSession.threadId === threadId && currentSession.documentId === documentId;
   if (!await disposeSession(record)) throw agentProcessCleanupUncertain();
   const sessionReferenceScopes = referenceScopesForSession({ threadId, documentId });
   await referenceStore.activateScopes(sessionReferenceScopes);
@@ -2868,6 +2938,10 @@ async function startSession(
     initialCapabilityEpoch: record.nextCapabilityEpoch++,
     allocateEpoch: () => record.nextCapabilityEpoch++,
   });
+  if (continuing && currentSession.planning.workflow === workflow) {
+    planning.phase = currentSession.planning.phase;
+    planning.latestPlan = currentSession.planning.latestPlan;
+  }
   const generation = ++record.sessionGeneration;
   const providerRole = 'chat';
   const providerCapabilityResource = mcpProviderResource({
@@ -2918,8 +2992,8 @@ async function startSession(
     workflow,
     phase: workflow === 'direct' ? 'implementing' : planning.phase,
     capabilityEpoch: planning.capabilityEpoch,
-    toolProfile: planning.mcpEnvironment().RHWP_TOOL_PROFILE,
-    mcpEnvironment: planning.mcpEnvironment(),
+    // Chat tool profiles follow the current workflow/phase after each provider
+    // restart. A fixed toolProfile would keep approved plans read-only.
     // pi · rau 전용 — 설치 경로와 영속 루트, 그리고 선택한 모델의 추론 지원 여부.
     piBin: (agent === 'rau' ? rauManager : piManager).piBin,
     piRoot: agent === 'rau' ? rauManager.rootDir : piManager.rootDir,
@@ -2950,17 +3024,22 @@ async function startSession(
     // Legacy download/browser code uses chatId. It is now the stable Studio
     // thread identity rather than an unrelated hub-generated UUID.
     chatId: threadId,
-    activeTemplateId: null,
-    lastDocumentInfo: null,
+    activeTemplateId: continuing ? currentSession.activeTemplateId : null,
+    lastDocumentInfo: continuing ? currentSession.lastDocumentInfo : null,
     bootstrapHistory: normalizeChatHistory(requestedHistory),
     planning,
     workflowTransition: Promise.resolve(),
     pendingTransitions: 0,
     releaseReferenceScopes: referenceStore.retainScopes(sessionReferenceScopes),
   };
-  if (workflow === 'plan') {
-    requireWorkflowSwitchBackend(record.agentSession);
-    await record.agentSession.backend.setExecutionMode(providerModeRequest(record.agentSession, 'planning'));
+  try {
+    if (workflow === 'plan') {
+      requireWorkflowSwitchBackend(record.agentSession);
+      await backend.setExecutionMode(providerModeRequest(record.agentSession, planning.phase));
+    }
+  } catch (error) {
+    const cleaned = await disposeSession(record);
+    throw cleaned ? error : agentProcessCleanupUncertain(error);
   }
   queueMicrotask(() => drainTemplateCompletion(record));
   queueMicrotask(() => drainPlanningDocumentSaved(record));
@@ -3263,29 +3342,34 @@ async function handleStudioMessage(record, sock, msg) {
       if (record.agentSession?.workflowTransition) {
         await record.agentSession.workflowTransition;
       }
+      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
+      const rejectStart = (error, fallbackCode = 'INVALID_REQUEST') => sendJson(sock, {
+        v: 1, type: 'chat-error', requestId, session: sessionInfo(record),
+        code: error?.code ?? fallbackCode, message: String(error?.message ?? error),
+      });
       const agent = msg.agent;
       if (!KNOWN_AGENTS.has(agent)) {
-        sendJson(sock, { v: 1, type: 'chat-error', code: 'INVALID_REQUEST', message: `unknown agent: ${String(agent)}` });
+        rejectStart(new Error(`unknown agent: ${String(agent)}`));
         return;
       }
       // 설정이 끝나지 않은 pi/rau 로는 세션을 열지 않는다 — 살아 있는 세션도 건드리지 않는다.
       if (agent === 'pi' && !piStatus.setupComplete) {
         sendJson(sock, {
-          v: 1, type: 'chat-error', code: 'PI_NOT_CONFIGURED',
+          v: 1, type: 'chat-error', requestId, session: sessionInfo(record), code: 'PI_NOT_CONFIGURED',
           message: 'Pi 설정을 먼저 끝내 주세요 (설치 · OpenRouter 키 · 모델 선택).',
         });
         return;
       }
       if (agent === 'rau' && !rauStatus.setupComplete) {
         sendJson(sock, {
-          v: 1, type: 'chat-error', code: 'RAU_NOT_CONFIGURED',
+          v: 1, type: 'chat-error', requestId, session: sessionInfo(record), code: 'RAU_NOT_CONFIGURED',
           message: 'Rau 연결을 먼저 끝내 주세요.',
         });
         return;
       }
       if (agent === 'rau' && rauTrialEmpty()) {
         sendJson(sock, {
-          v: 1, type: 'chat-error', code: 'RAU_CREDITS_EMPTY',
+          v: 1, type: 'chat-error', requestId, session: sessionInfo(record), code: 'RAU_CREDITS_EMPTY',
           message: 'Rau 체험 크레딧이 다 됐어요. 다른 모델을 연결해 주세요.',
         });
         return;
@@ -3308,6 +3392,7 @@ async function handleStudioMessage(record, sock, msg) {
         sendJson(sock, {
           v: 1,
           type: 'chat-started',
+          requestId,
           agent: s.agent,
           model: s.model,
           effort: s.effort,
@@ -3320,14 +3405,7 @@ async function handleStudioMessage(record, sock, msg) {
           ...s.planning.snapshot(),
         });
       } catch (e) {
-        const cleaned = await disposeSession(record);
-        const reported = cleaned ? e : agentProcessCleanupUncertain(e);
-        sendJson(sock, {
-          v: 1,
-          type: 'chat-error',
-          code: reported?.code ?? 'AGENT_SPAWN_FAILED',
-          message: String(reported?.message ?? reported),
-        });
+        rejectStart(e, 'AGENT_SPAWN_FAILED');
       }
       return;
     }
@@ -3834,7 +3912,7 @@ async function handleStudioMessage(record, sock, msg) {
     }
     case 'account-logout': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
-      if (authRuns.get('account')) {
+      if (authRuns.get('account') || authRuns.get('rau')) {
         replyToStudio(record, sock, {
           v: 1,
           type: 'account-error',
@@ -3844,7 +3922,7 @@ async function handleStudioMessage(record, sock, msg) {
         });
         return;
       }
-      void accountSession.logout()
+      void logoutRauAccount()
         .then(async () => {
           const status = await accountStatusForOwner(record.sessionId);
           replyToStudio(record, sock, { v: 1, type: 'account-status', requestId, status });
@@ -3923,10 +4001,18 @@ async function handleStudioMessage(record, sock, msg) {
         rejectProof?.(agentAuthCancelled());
         rejectProof = null;
         if (agent === 'pi') void piManager.cancelSetup();
-        else if (agent === 'rau') void rauManager.cancelSetup();
+        else if (agent === 'rau') {
+          void rauManager.cancelSetup();
+          if (authRun?.accountLoginId) void accountSession.cancelLogin(authRun.accountLoginId);
+        }
         else if (CLI_SETUP_AGENTS.includes(agent)) void cliSetup.cancel(agent);
       };
       try {
+        if (agent === 'rau' && authRuns.get('account')) {
+          throw Object.assign(new Error('진행 중인 계정 로그인을 먼저 마쳐 주세요.'), {
+            code: 'AGENT_AUTH_BUSY',
+          });
+        }
         authRun = authRuns.begin({
           agent,
           ownerSessionId: record.sessionId,
@@ -3953,6 +4039,13 @@ async function handleStudioMessage(record, sock, msg) {
 
       const progress = (entry) => {
         if (!isLiveAuthRun()) return;
+        if (entry.terminalData !== undefined || entry.terminalReady) {
+          sendAuthRunFrame(authRun, { type: 'agent-setup-terminal',
+            ...(entry.terminalData !== undefined ? { data: entry.terminalData } : {}),
+            ...(entry.terminalReady ? { ready: true } : {}),
+          });
+          return;
+        }
         const replayableUi = {
           ...(entry.authUrl ? { authUrl: entry.authUrl } : {}),
           ...(entry.userCode ? { userCode: entry.userCode } : {}),
@@ -3998,29 +4091,39 @@ async function handleStudioMessage(record, sock, msg) {
 
       if (agent === 'rau' && method === 'oauth') {
         void (async () => {
+          const existing = await accountSession.status({ signal: abort.signal });
+          if (!isLiveAuthRun()) throw agentAuthCancelled();
+          if (existing.signedIn) {
+            started();
+            const linked = await accountSession.synchronizeProvider({ signal: abort.signal });
+            if (!isLiveAuthRun()) throw agentAuthCancelled();
+            commitAuthRun();
+            if (linked.provider?.state === 'error') {
+              sendAuthRunError(authRun, new Error('Rau 연결을 완료하지 못했어요. 다시 연결해 주세요.'));
+            }
+            return;
+          }
           const callbackState = crypto.randomBytes(24).toString('base64url');
-          const redirectUri = `http://127.0.0.1:${hubPort}/oauth/rau/callback`;
-          const session = await rauCredits.createDeviceSessionV2({
+          const session = await accountSession.startLogin({
             signal: abort.signal,
-            redirectUri,
+            redirectUri: `http://127.0.0.1:${hubPort}/oauth/rau/callback`,
             callbackState,
             returnMode: 'hybrid',
             clientVersion: `hub-protocol-${PROTOCOL_VERSION}`,
           });
           if (!isLiveAuthRun()) throw agentAuthCancelled();
-          authRun.deviceSessionId = session.id;
-          authRun.codeVerifier = session.codeVerifier;
+          authRun.accountLoginId = session.loginId;
           authRun.callbackState = callbackState;
           const authDetails = {
-            authUrl: session.loginUrl,
+            authUrl: session.authUrl,
             pairingCode: session.pairingCode,
             expiresAt: session.expiresAt,
           };
           started(authDetails);
           progress({ state: 'authorizing', ...authDetails });
 
-          let redeemed;
-          while (!redeemed) {
+          let completed = false;
+          while (!completed) {
             const proof = await new Promise((resolve, reject) => {
               rejectProof = reject;
               authRun.submitProof = (candidate) => {
@@ -4032,14 +4135,14 @@ async function handleStudioMessage(record, sock, msg) {
             if (!isLiveAuthRun()) throw agentAuthCancelled();
             authRuns.update(authRun, { phase: 'redeeming' });
             try {
-              redeemed = await rauCredits.redeemDeviceSessionV2(
-                session.id,
-                session.codeVerifier,
-                proof,
-                { signal: abort.signal },
-              );
-              if (!isLiveAuthRun()) throw agentAuthCancelled();
-              authRun.acceptedProof = proof;
+              const linked = await accountSession.completeLogin(session.loginId, proof, {
+                signal: abort.signal,
+                onCommitted: commitAuthRun,
+              });
+              completed = true;
+              if (linked.provider?.state === 'error') {
+                sendAuthRunError(authRun, new Error('Rau 연결을 완료하지 못했어요. 다시 연결해 주세요.'));
+              }
             } catch (error) {
               if (error?.code !== 'DEVICE_PROOF_INVALID') throw error;
               if (!isLiveAuthRun()) throw agentAuthCancelled();
@@ -4048,27 +4151,11 @@ async function handleStudioMessage(record, sock, msg) {
               progress({ state: 'authorizing', ...authDetails });
             }
           }
-          rauStatus = await storeRauApiKey(rauManager.setApiKey.bind(rauManager), redeemed.apiKey, {
-            signal: abort.signal,
-            account: redeemed.email,
-            onCommitted: commitAuthRun,
-          });
-          await rauCredits.acknowledgeDeviceSessionV2(
-            session.id,
-            session.codeVerifier,
-            authRun.acceptedProof,
-            { signal: abort.signal },
-          ).catch((error) => {
-            if (error?.code === 'RAU_LOGIN_CANCELLED') throw error;
-            log(`Rau v2 acknowledgement failed after local key storage: ${error?.message ?? error}`);
-          });
-          if (!rauStatus.installed) {
-            rauStatus = await mutateSharedNpmPrefix(() => rauManager.install(progress));
-            piStatus = await piManager.status();
-          }
           await refreshOpenRouterCredits(true);
           sendAuthRunFrame(authRun, { type: 'usage-report', usage: usageSnapshot() });
-        })().then(() => finish(), finish);
+        })().then(() => finish(), finish).finally(() => {
+          void broadcastAccountStatus().catch(() => {});
+        });
         return;
       }
 
@@ -4093,6 +4180,7 @@ async function handleStudioMessage(record, sock, msg) {
           .then((status) => { piStatus = status; });
       } else {
         run = cliSetup.authenticate(agent, method, msg.key, progress, {
+          terminal: msg.terminal === true,
           signal: abort.signal,
           onCommitted: commitAuthRun,
         })
@@ -4123,6 +4211,28 @@ async function handleStudioMessage(record, sock, msg) {
         const providers = await providerHealth.check(true);
         sendAuthRunFrame(authRun, { type: 'provider-status', providers });
       }).then(() => finish(), finish);
+      return;
+    }
+    case 'agent-setup-terminal-resume':
+    case 'agent-setup-terminal-input':
+    case 'agent-setup-terminal-resize': {
+      try {
+        const run = authRuns.requireOwned({ agent: msg.agent, runId: msg.authRunId,
+          ownerSessionId: record.sessionId });
+        if (!CLI_SETUP_AGENTS.includes(msg.agent) || run.method !== 'oauth') throw new Error('진행 중인 CLI 로그인이 없어요.');
+        if (msg.type === 'agent-setup-terminal-resume') {
+          const data = cliSetup.terminalSnapshot(msg.agent);
+          if (data !== null) sendAuthRunFrame(run, { type: 'agent-setup-terminal', data, ready: true, reset: true });
+        } else if (msg.type === 'agent-setup-terminal-input') {
+          if (typeof msg.data !== 'string' || Buffer.byteLength(msg.data) > 4096) throw new Error('입력 크기를 확인해 주세요.');
+          cliSetup.terminalInput(msg.agent, msg.data);
+        } else {
+          if (!Number.isInteger(msg.cols) || !Number.isInteger(msg.rows)) throw new Error('터미널 크기를 확인해 주세요.');
+          cliSetup.terminalResize(msg.agent, msg.cols, msg.rows);
+        }
+      } catch (error) {
+        sendAgentSetupError(record, sock, null, msg.agent, error, 'AGENT_AUTH_FAILED');
+      }
       return;
     }
     case 'agent-setup-auth-code': {
@@ -4172,12 +4282,12 @@ async function handleStudioMessage(record, sock, msg) {
         sendAgentSetupError(record, sock, requestId, msg.agent, new Error('연결 해제 요청을 확인하지 못했어요.'));
         return;
       }
-      const rauSessions = [...sessions.values()]
-        .filter((session) => session.agentSession?.agent === 'rau');
-      void rauManager.clearApiKey()
-        .then(async (status) => {
-          rauStatus = status;
-          await Promise.all(rauSessions.map(disposeSession));
+      if (authRuns.get('account') || authRuns.get('rau')) {
+        sendAgentSetupError(record, sock, requestId, 'rau', new Error('진행 중인 로그인을 먼저 마쳐 주세요.'));
+        return;
+      }
+      void logoutRauAccount()
+        .then(async () => {
           await refreshOpenRouterCredits(true);
           const statuses = await agentSetupStatuses(record.sessionId);
           replyToStudio(record, sock, { v: 1, type: 'agent-setup-status', requestId, statuses });
@@ -5166,6 +5276,12 @@ function handleMcpMessage(record, sock, msg) {
         void record.downloadManager.download({ sessionId: record.agentSession.chatId, ...args })
           .then(sendResult)
           .catch((error) => sendError(error, 'DOWNLOAD_FAILED'));
+        return;
+      }
+      if (tool === 'environment_screenshot') {
+        void takeEnvironmentScreenshot({ workDir: record.workDir })
+          .then((result) => sendResult(result))
+          .catch((error) => sendError(error, error?.code || 'SCREENSHOT_FAILED'));
         return;
       }
       if (tool === 'publish_artifact') {

@@ -15,6 +15,10 @@
     "preview": "vite preview",
     "test": "npm run generate:agent-edit-capabilities && node scripts/run-tests.mjs unit",
     "e2e": "node e2e/text-flow.test.mjs",
+    "e2e:cloud-onboarding": "node e2e/cloud-onboarding.test.mjs",
+    "e2e:cloud-workspace": "node e2e/cloud-workspace.test.mjs",
+    "e2e:cloud-display": "node e2e/cloud-display-interaction.test.mjs",
+    "e2e:cloud-document": "node e2e/cloud-document-editing.test.mjs",
     "e2e:agent-edit-loop": "node e2e/agent-edit-loop.test.mjs --mode=headless",
     "e2e:user-question": "node e2e/user-question-flow.test.mjs --mode=headless",
     "e2e:subagent-fleet": "node e2e/subagent-fleet.test.mjs --mode=headless",
@@ -53,23 +57,27 @@
     "e2e:check": "python3 ../scripts/check_e2e_manifest.py",
     "dev:sidebar": "vite --config vite.sidebar.config.ts",
     "build:sidebar": "vite build --config vite.sidebar.config.ts",
-    "test:sidebar": "node sidebar-preview/check.mjs"
+    "test:sidebar": "node sidebar-preview/check.mjs",
+    "test:sidebar:audit": "node sidebar-preview/audit.check.mjs"
   },
   "devDependencies": {
     "@types/chrome": "^0.2.2",
+    "pixelmatch": "^7.1.0",
+    "pngjs": "^7.0.0",
     "puppeteer-core": "^25.3.0",
     "typescript": "^7.0.2",
     "vite": "^8.1.5",
     "vite-plugin-pwa": "^1.3.0",
-    "workbox-window": "^7.4.1",
-    "pixelmatch": "^7.1.0",
-    "pngjs": "^7.0.0"
+    "workbox-window": "^7.4.1"
   },
   "overrides": {
     "serialize-javascript": "7.0.5"
   },
   "dependencies": {
     "@noble/hashes": "^2.2.0",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/addon-web-links": "0.12.0",
+    "@xterm/xterm": "6.0.0",
     "canvaskit-wasm": "^0.41.1",
     "katex": "^0.16.47"
   }

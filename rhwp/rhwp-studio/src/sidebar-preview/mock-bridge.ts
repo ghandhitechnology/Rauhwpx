@@ -10,9 +10,11 @@ import {
 import { loadAgentPrefs } from '../agent/agent-prefs.ts';
 import { createFixtures, samplePlan, timestamp, agents } from './fixtures.ts';
 import { requestLiveUsage, consumeLiveCodexReset } from './live-usage.ts';
+import { createBrowserbaseFixture, type BrowserbaseFixtureState } from './fixtures.ts';
 
 export const scenarios = [
   'chat',
+  'rich',
   'plan',
   'question',
   'review',
@@ -39,6 +41,8 @@ export function createMockBridge(report: (message: string) => void) {
       }
     }
   }
+  let browserbaseState: BrowserbaseFixtureState = 'connected';
+  let browserbase = createBrowserbaseFixture(browserbaseState);
   const listeners = new Set<(event: T.SidebarEvent) => void>();
   const pendingListeners = new Set<
     (event: T.PendingEditsChangeEvent) => void
@@ -52,6 +56,7 @@ export function createMockBridge(report: (message: string) => void) {
   let generation = 0;
   let threadId = '';
   let scenario: Scenario = 'chat';
+  let holdReply = false;
   let permission: T.PermissionProfile = 'safe';
   let tier: T.ServiceTier = 'standard';
   let workflow: T.AgentWorkflowState = {
@@ -115,6 +120,12 @@ export function createMockBridge(report: (message: string) => void) {
     request((requestId) =>
       emit({ type: 'writing-style-result', requestId, status: data.writing }),
     );
+  let terminalRun: { id: string; agent: T.AgentName; step: number; choice: number } | null = null;
+  const terminalMenu = () => terminalRun?.agent !== 'opencode'
+    ? `\x1b[2J\x1b[H${terminalRun?.agent ?? 'CLI'} 로그인\r\n\r\n브라우저에서 계정을 연결하세요.\r\n미리보기: Enter 키로 계속합니다.`
+    : '\x1b[2J\x1b[H\x1b[36m◆  OpenCode 로그인\x1b[0m\r\n\r\n'
+    + ['OpenCode', 'OpenAI', 'Anthropic'].map((name, index) => `  ${index === terminalRun?.choice ? '❯' : ' '} ${name}`).join('\r\n')
+    + '\r\n\r\n  Enter 키로 선택하세요.';
   const authenticate = (provider: T.AgentName) => {
     if (provider === 'pi') {
       data.pi.keyConfigured = true;
@@ -125,12 +136,20 @@ export function createMockBridge(report: (message: string) => void) {
       connected: true,
       authenticated: true,
       authenticating: false,
+      authOwnedByThisSession: false,
+      authRunId: undefined,
       setupComplete: true,
     });
     setupChanged();
+    if (provider === 'rau') {
+      Object.assign(data.account, { state: 'signed-in', signedIn: true,
+        account: { email: 'designer@example.test' }, authenticating: false });
+      emit({ type: 'account-status', status: data.account });
+    }
     report(`${provider}: connected to a local sample account`);
   };
   const signIn = () => {
+    authenticate('rau');
     Object.assign(data.account, {
       state: 'signed-in',
       signedIn: true,
@@ -196,6 +215,40 @@ export function createMockBridge(report: (message: string) => void) {
     requestProviderStatus: async () => data.providers,
     requestAgentSetupStatus: async () => data.setups,
     requestAccountStatus: async () => data.account,
+    requestBrowserbaseStatus: async () => {
+      if (browserbaseState === 'error') {
+        emit({ type: 'browserbase-error', requestId: 'preview-browserbase-status', code: 'preview-unavailable', message: '미리보기 원격 브라우저 연결을 확인하지 못했어요.' });
+        return null;
+      }
+      const status = structuredClone(browserbase);
+      emit({ type: 'browserbase-status', status });
+      return status;
+    },
+    setBrowserbaseCredentials: async (override) => {
+      if (browserbaseState === 'error' || !override.apiKey.trim()) {
+        emit({ type: 'browserbase-error', requestId: 'preview-browserbase-credentials', code: 'preview-invalid-key', message: '미리보기 키를 확인하지 못했어요.' });
+        return null;
+      }
+      // 입력한 키/프로젝트는 보관하지 않고 샘플 상태만 표시한다.
+      browserbase = {
+        ...createBrowserbaseFixture('connected'),
+        keySource: 'studio',
+        keyTail: 'demo',
+        projectSource: 'studio',
+        geminiSource: override.geminiApiKey?.trim() ? 'studio' : 'env',
+      };
+      browserbaseState = 'connected';
+      const status = structuredClone(browserbase);
+      emit({ type: 'browserbase-status', status });
+      return status;
+    },
+    clearBrowserbaseCredentials: async () => {
+      browserbaseState = 'connected';
+      browserbase = createBrowserbaseFixture('connected');
+      const status = structuredClone(browserbase);
+      emit({ type: 'browserbase-status', status });
+      return status;
+    },
     loginAccount: async () => {
       const authRunId = crypto.randomUUID();
       Object.assign(data.account, {
@@ -209,7 +262,7 @@ export function createMockBridge(report: (message: string) => void) {
       }, 800);
       return {
         authRunId,
-        authUrl: null,
+        authUrl: 'https://accounts.example.invalid/preview',
         pairingCode: 'PREVIEW',
         expiresAt: null,
       };
@@ -223,6 +276,9 @@ export function createMockBridge(report: (message: string) => void) {
       emit({ type: 'account-status', status: data.account });
     },
     logoutAccount: async () => {
+      Object.assign(data.setups.rau, { connected: false, authenticated: false,
+        authenticating: false, setupComplete: false });
+      setupChanged();
       Object.assign(data.account, {
         state: 'signed-out',
         signedIn: false,
@@ -261,6 +317,19 @@ export function createMockBridge(report: (message: string) => void) {
       return data.setups;
     },
     authenticateAgent: async (provider, method) => {
+      if (!['rau', 'pi'].includes(provider) && method === 'oauth') {
+        terminalRun = { id: crypto.randomUUID(), agent: provider, step: 0, choice: 0 };
+        const id = terminalRun.id;
+        Object.assign(data.setups[provider], { authenticating: true, authOwnedByThisSession: true, authRunId: id, authMethod: method });
+        setupChanged();
+        later(() => {
+          if (terminalRun?.id !== id) return;
+          emit({ type: 'agent-setup-terminal', agent: provider, authRunId: id, ready: true });
+          emit({ type: 'agent-setup-terminal', agent: provider, authRunId: id,
+            data: terminalMenu() });
+        }, 150);
+        return { agent: provider, authRunId: id, authUrl: null };
+      }
       Object.assign(data.setups[provider], {
         authenticating: true,
         authMethod: method,
@@ -276,12 +345,38 @@ export function createMockBridge(report: (message: string) => void) {
         pairingCode: 'PREVIEW',
       };
     },
+    resumeSetupTerminal: (agent, authRunId) => {
+      if (agent === terminalRun?.agent && terminalRun?.id === authRunId) emit({ type: 'agent-setup-terminal', agent, authRunId, ready: true });
+    },
+    sendSetupTerminalInput: (provider, authRunId, input) => {
+      if (provider !== terminalRun?.agent || terminalRun?.id !== authRunId) return;
+      if (input.includes('\x03')) { bridge.cancelAgentSetup(provider, authRunId); return; }
+      if (terminalRun.step === 0 && /\x1b\[[AB]/.test(input)) {
+        terminalRun.choice = (terminalRun.choice + (input.includes('\x1b[B') ? 1 : 2)) % 3;
+        emit({ type: 'agent-setup-terminal', agent: provider, authRunId, data: terminalMenu() });
+        return;
+      }
+      if (!input.includes('\r')) return;
+      terminalRun.step += 1;
+      if (terminalRun.step === 1) {
+        emit({ type: 'agent-setup-terminal', agent: provider, authRunId,
+          data: '\x1b[2J\x1b[H브라우저에서 계정 연결을 완료하세요.\r\n\r\n미리보기: Enter 키를 누르면 연결이 완료됩니다.' });
+      } else {
+        terminalRun = null;
+        authenticate(provider);
+      }
+    },
+    resizeSetupTerminal: () => {},
     submitAgentAuthCode: (provider) => authenticate(provider),
     cancelAgentSetup: (provider) => {
+      if (provider === terminalRun?.agent) terminalRun = null;
       data.setups[provider].authenticating = false;
+      data.setups[provider].authOwnedByThisSession = false;
+      delete data.setups[provider].authRunId;
       setupChanged();
     },
     disconnectAgent: async (provider) => {
+      if (provider === 'rau') await bridge.logoutAccount();
       if (provider === 'pi') {
         data.pi.keyConfigured = false;
         data.pi.setupComplete = false;
@@ -295,9 +390,6 @@ export function createMockBridge(report: (message: string) => void) {
       setupChanged();
       return data.setups;
     },
-    requestBrowserbaseStatus: async () => ({ configured: false, missing: ['BROWSERBASE_API_KEY'], keySource: null, keyTail: null, projectId: null, projectSource: null, geminiSource: null, browsers: [] }),
-    setBrowserbaseCredentials: async () => null,
-    clearBrowserbaseCredentials: async () => null,
     requestUsage: async (refresh) => {
       if (liveUsage) {
         data.usage = await requestLiveUsage(refresh);
@@ -389,20 +481,21 @@ export function createMockBridge(report: (message: string) => void) {
       provider,
       model,
       effort,
-      _force,
+      force,
       profile,
       mode,
       id,
       documentId,
       documentName,
     ) => {
+      const continuing = !force && id === threadId && (mode ?? 'direct') === workflow.workflow;
       const startGeneration = ++generation;
       completeQuestion({ status: 'expired', reason: 'request-invalidated' });
       setRunning(false);
       agent = provider;
       threadId = id ?? threadId;
       permission = profile ?? permission;
-      workflow = {
+      workflow = continuing ? workflow : {
         workflow: mode ?? 'direct',
         phase:
           mode === 'plan'
@@ -516,7 +609,7 @@ export function createMockBridge(report: (message: string) => void) {
           tool: 'read_document',
           argsJson: '{"section":0}',
         });
-        if (reply === 'fleet')
+        if (reply === 'fleet') {
           stream({
             type: 'task-start',
             agent,
@@ -525,6 +618,22 @@ export function createMockBridge(report: (message: string) => void) {
             taskKind: 'agent',
             role: '교정',
           });
+          for (const [suffix, title] of [['layout', '표 구조와 문서 서식'], ['facts', '일정과 수치 검증']]) {
+            stream({ type: 'task-start', agent, taskId: `${suffix}-${turnGeneration}`, title, taskKind: 'agent' });
+          }
+          let frame = 0;
+          const activities = ['문서의 문장 구조를 읽고 있습니다.', '반복되는 용어를 비교하고 있습니다.', '긴 문장을 나누고 표현을 정리하고 있습니다.'];
+          const updateFleet = () => {
+            if (generation !== turnGeneration) return;
+            stream({ type: 'text-delta', agent, parentTaskId: `task-${turnGeneration}`, text: activities[frame % activities.length] + '\n' });
+            stream({ type: 'task-progress', agent, taskId: `task-${turnGeneration}`, usage: { totalTokens: 2400 + frame * 120, toolUses: 3 } });
+            frame += 1;
+            if (holdReply) later(updateFleet, 1600);
+          };
+          later(updateFleet, 500);
+          stream({ type: 'tool-call', agent, parentTaskId: `layout-${turnGeneration}`, callId: `layout-read-${turnGeneration}`, tool: 'read_document', argsJson: '{"section":1}' });
+        }
+
         later(() => {
           if (generation !== turnGeneration) return;
           stream({
@@ -539,7 +648,7 @@ export function createMockBridge(report: (message: string) => void) {
             stream({
               type: 'error',
               agent,
-              message: '샘플 연결 오류입니다. 다시 전송해 주세요.',
+              message: '앗, 오류에요! 네트워크 연결을 확인하세요!',
             });
             finish('failed');
             return;
@@ -557,6 +666,9 @@ export function createMockBridge(report: (message: string) => void) {
             return;
           }
           if (reply === 'fleet') {
+            stream({ type: 'tool-result', agent, parentTaskId: `layout-${turnGeneration}`, callId: `layout-read-${turnGeneration}`, ok: true, resultPreview: '표 3개와 문단 12개의 서식을 확인했습니다.' });
+            stream({ type: 'task-end', agent, taskId: `facts-${turnGeneration}`, status: 'failed', summary: '참조 자료에 접근할 수 없어 수치 검증을 마치지 못했습니다.' });
+            stream({ type: 'task-end', agent, taskId: `layout-${turnGeneration}`, status: 'completed', summary: '표 너비와 제목 서식을 확인했습니다.' });
             stream({
               type: 'task-progress',
               agent,
@@ -564,7 +676,7 @@ export function createMockBridge(report: (message: string) => void) {
               activity: '용어와 문장 길이를 검토했습니다.',
               usage: { totalTokens: 2400, toolUses: 3 },
             });
-            stream({
+            if (!holdReply) stream({
               type: 'task-end',
               agent,
               taskId: `task-${turnGeneration}`,
@@ -580,13 +692,18 @@ export function createMockBridge(report: (message: string) => void) {
             '2. 단계별 일정과 담당자를 확인합니다.\n\n',
             '필요한 부분을 선택해 주시면 이어서 다듬겠습니다.',
           ];
+          if (reply === 'rich') chunks.splice(chunks.length - 1, 0,
+            '\n\n## 실행 계획\n\n| 단계 | 담당 | 일정 |\n| --- | --- | --- |\n| 초안 검토 | 기획팀 | 9월 10일 |\n| 예산 승인 | 운영팀 | 9월 15일 |\n\n',
+            '> 승인 전에는 원본 문서를 보존하고 변경 사항을 검토합니다.\n\n',
+            '```json\n{ "status": "review", "sections": 3 }\n```\n\n',
+            '[브랜드 가이드](#preview-reference)를 참고해 **용어**와 *문체*를 통일했습니다.\n\n');
           chunks.forEach((text, index) =>
             later(() => {
               if (generation !== turnGeneration) return;
               stream({ type: 'text-delta', agent, text });
               if (index === chunks.length - 1) {
                 if (reply === 'review') addReview();
-                finish();
+                if (!holdReply) finish();
               }
             }, index * 140),
           );
@@ -683,6 +800,13 @@ export function createMockBridge(report: (message: string) => void) {
           file.scope === scope &&
           (scope === 'global' || file.scopeId === scopeId),
       ),
+    downloadReference: async (file) => {
+      const reference = references.find((item) =>
+        item.id === file.id && item.scope === file.scope && item.scopeId === file.scopeId,
+      );
+      if (!reference) throw new Error('미리보기 참고자료를 찾을 수 없습니다.');
+      return new TextEncoder().encode(`${reference.name}의 샘플 참고자료입니다.`);
+    },
     searchReferences: async (query, scope, scopeId) =>
       references
         .filter(
@@ -904,7 +1028,9 @@ export function createMockBridge(report: (message: string) => void) {
               (input.append ? data.writing.sourceCount : 0) +
               input.files.length,
             pageEstimate: input.files.length * 3,
-            summary: '간결한 문장과 일관된 용어를 사용하는 문체입니다.',
+            summary: input.language === 'en'
+              ? 'You explain the point plainly, then add context where the reader needs it. The tone is calm and direct.'
+              : '요점을 먼저 전하고, 독자가 궁금해할 부분을 차근차근 풀어 쓰는 편이에요. 차분하고 담백한 말투예요.',
             sources: input.files.map((file) => ({
               name: file.name,
               size: file.size,
@@ -938,6 +1064,11 @@ export function createMockBridge(report: (message: string) => void) {
         });
         finish();
       }),
+    interruptIfIdle: () => {
+      if (!running) return false;
+      bridge.interrupt();
+      return true;
+    },
     interrupt: () => {
       generation++;
       completeQuestion({ status: 'cancelled', reason: 'user-stop' });
@@ -1025,9 +1156,18 @@ export function createMockBridge(report: (message: string) => void) {
     bridge,
     setConnection,
     setServices,
+    setBrowserbaseState: (value: BrowserbaseFixtureState) => {
+      browserbaseState = value;
+      browserbase = createBrowserbaseFixture(value);
+      emit({ type: 'browserbase-status', status: structuredClone(browserbase) });
+      if (value === 'error') {
+        emit({ type: 'browserbase-error', requestId: 'preview-browserbase-state', code: 'preview-unavailable', message: '미리보기 원격 브라우저 연결을 확인하지 못했어요.' });
+      }
+    },
     setScenario: (value: Scenario) => {
       scenario = value;
     },
+    setHold: (value: boolean) => { holdReply = value; },
     boot: () => {
       setPiModels(data.pi.models);
       setCursorModels(data.setups.cursor.models ?? []);
@@ -1046,6 +1186,7 @@ export function createMockBridge(report: (message: string) => void) {
       pendingChanges: changes.length,
       references: references.length,
       account: data.account.state,
+      browserbase: browserbaseState,
     }),
   };
 }

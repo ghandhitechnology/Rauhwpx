@@ -72,7 +72,7 @@ test.after(async () => {
   await server?.close();
 });
 
-test('dirty merge entry creates a real pre-merge checkpoint before already-integrated exit', { timeout: 30_000 }, async (context) => {
+test('dirty merge entry commits only after the user chooses the current branch', { timeout: 30_000 }, async (context) => {
   assert.ok(browser, 'Browser setup did not complete');
   const page = await browser.newPage();
   try {
@@ -131,6 +131,13 @@ test('dirty merge entry creates a real pre-merge checkpoint before already-integ
         dirty.markDirty('test');
         eventBus.emit('document-mutated');
         let message = '';
+        const choose = window.setInterval(() => {
+          const option = document.querySelector<HTMLInputElement>('.version-merge-preparation input[value="commit"]');
+          if (!option) return;
+          option.checked = true;
+          document.querySelector<HTMLButtonElement>('.version-merge-preparation button[type="submit"]')!.click();
+          window.clearInterval(choose);
+        }, 10);
         try { await controller.startMerge('source'); } catch (error) {
           message = error instanceof Error ? error.message : String(error);
         }
@@ -158,7 +165,8 @@ test('dirty merge entry creates a real pre-merge checkpoint before already-integ
       }
     });
     assert.equal(result.message, '이미 병합된 브랜치입니다.');
-    assert.ok(result.reasons.includes('pre-merge'));
+    assert.ok(result.reasons.includes('manual'));
+    assert.ok(!result.reasons.includes('pre-merge'));
     assert.notEqual(result.mainHead, result.sourceHead);
   } finally {
     await page.close();
@@ -255,6 +263,32 @@ test('clean fast-forward is reviewed and keeps the source branch by default', { 
       Object.assign(window, { __mergeController: controller, __mergeStore: store, __mergeWasm: wasm });
     });
     await page.waitForSelector('.merge-resolver-window');
+    // 실제 테마 토큰으로 열린 병합 창과 입력, 미리보기 배경을 확인한다.
+    await page.evaluate(async () => { await import('/src/styles/base.css'); });
+    for (const mode of ['dark', 'light', 'system'] as const) {
+      await page.emulateMediaFeatures([{ name: 'prefers-color-scheme', value: 'dark' }]);
+      const colors = await page.evaluate(async (mode) => {
+        const { setThemeMode } = await import('/src/core/theme.ts');
+        setThemeMode(mode);
+        const root = document.documentElement;
+        const style = (selector: string) => getComputedStyle(document.querySelector(selector)!);
+        return {
+          effective: root.dataset.themeEffective,
+          background: style('.merge-resolver-window').backgroundColor,
+          foreground: style('.merge-resolver-window').color,
+          input: style('.merge-title-input').backgroundColor,
+          workspace: style('.merge-preview-canvas-wrap').backgroundColor,
+          paper: style('.merge-preview-canvas').backgroundColor,
+        };
+      }, mode);
+      const dark = mode !== 'light';
+      assert.equal(colors.effective, dark ? 'dark' : 'light');
+      assert.equal(colors.background, dark ? 'rgb(30, 30, 32)' : 'rgb(255, 255, 255)');
+      assert.equal(colors.input, colors.background);
+      assert.notEqual(colors.foreground, colors.background);
+      assert.equal(colors.workspace, dark ? 'rgb(15, 15, 17)' : 'rgb(228, 228, 234)');
+      assert.equal(colors.paper, 'rgb(255, 255, 255)');
+    }
     assert.equal(await page.$eval('.merge-mode-select', (select) => (select as HTMLSelectElement).value), 'fast-forward');
     try {
       await page.waitForFunction(() => {
@@ -271,9 +305,7 @@ test('clean fast-forward is reviewed and keeps the source branch by default', { 
       throw new Error(`Diverged merge did not become completable: ${JSON.stringify(diagnostic)}`, { cause: error });
     }
     await page.click('.merge-resolver-footer .merge-primary-button');
-    await page.waitForSelector('.merge-confirm-overlay');
-    assert.equal(await page.$eval('.merge-source-select', (select) => (select as HTMLSelectElement).value), 'keep');
-    await page.click('.merge-confirm-dialog .merge-secondary-button');
+
     await page.waitForSelector('.merge-resolver-window', { hidden: true });
     const result = await page.evaluate(async () => {
       const controller = (window as any).__mergeController;
@@ -473,8 +505,7 @@ test('diverged clean merge creates ordered parents and Undo/Redo moves bytes wit
       throw new Error(`Diverged merge did not become completable: ${JSON.stringify(diagnostic)}`, { cause: error });
     }
     await page.click('.merge-resolver-footer .merge-primary-button');
-    await page.waitForSelector('.merge-confirm-overlay');
-    await page.click('.merge-confirm-dialog .merge-secondary-button');
+
     await page.waitForSelector('.merge-resolver-window', { hidden: true });
 
     const merged = await page.evaluate(async () => {
@@ -786,6 +817,7 @@ test('HWPX controller durably completes clean and conflicted merges with composi
       const conflictCount = await page.$$eval('.merge-conflict-item', (items) => items.length);
       if (conflicted) {
         assert.ok(conflictCount > 0, 'same-position HWPX edits must require explicit resolution');
+        await page.click('.merge-conflict-tools > summary');
         await page.click('.merge-bulk-actions button:nth-child(2)');
       } else {
         assert.equal(conflictCount, 0, 'disjoint HWPX edits must merge cleanly');
@@ -796,9 +828,7 @@ test('HWPX controller durably completes clean and conflicted merges with composi
         return Boolean(button && !button.disabled);
       }, { timeout: 60_000 });
       await page.click('.merge-resolver-footer .merge-primary-button');
-      await page.waitForSelector('.merge-confirm-overlay');
-      assert.equal(await page.$eval('.merge-source-select', (node) => (node as HTMLSelectElement).value), 'keep');
-      await page.click('.merge-confirm-dialog .merge-secondary-button');
+
       await page.waitForSelector('.merge-resolver-window', { hidden: true });
 
       const merged = await page.evaluate(async () => {
@@ -1037,7 +1067,7 @@ test('real resolver completes clean and conflicted HWP/HWPX worker merges', { ti
             const bodyRect = body.getBoundingClientRect();
             const editorRect = editor.getBoundingClientRect();
             const footerRect = footer.getBoundingClientRect();
-            const actionsFit = [...footer.querySelectorAll<HTMLButtonElement>('button')].every((button) => {
+            const actionsFit = [...footer.querySelectorAll<HTMLButtonElement>('button')].filter((button) => button.checkVisibility()).every((button) => {
               const rect = button.getBoundingClientRect();
               return rect.left >= 0 && rect.right <= innerWidth && rect.top >= 0 && rect.bottom <= innerHeight;
             });
@@ -1068,7 +1098,8 @@ test('real resolver completes clean and conflicted HWP/HWPX worker merges', { ti
             await page.$$eval('.merge-conflict-state', (nodes) => nodes.every((node) => node.textContent === '미해결')),
             true,
           );
-          await page.click('.merge-bulk-actions button:nth-child(2)');
+          await page.click('.merge-conflict-tools > summary');
+        await page.click('.merge-bulk-actions button:nth-child(2)');
         } else {
           assert.equal(setup.conflictCount, 0, `${format} disjoint edits must merge cleanly`);
           assert.match(await page.$eval('.merge-clean-message', (node) => node.textContent ?? ''), /충돌이 없습니다/);
@@ -1078,12 +1109,7 @@ test('real resolver completes clean and conflicted HWP/HWPX worker merges', { ti
           return Boolean(button && !button.disabled);
         }, { timeout: 20_000 });
         await page.click('.merge-resolver-footer .merge-primary-button');
-        await page.waitForSelector('.merge-confirm-overlay');
-        assert.equal(
-          await page.$eval('.merge-source-select option[value="delete"]', (option) => (option as HTMLOptionElement).disabled),
-          true,
-        );
-        await page.click('.merge-confirm-dialog .merge-secondary-button');
+
         await page.waitForSelector('.merge-resolver-window', { hidden: true });
         const result = await page.evaluate(async ({ conflicted }) => {
           const application = (window as any).__resolverApplication;

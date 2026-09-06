@@ -9,7 +9,7 @@
  * 들어가 기록이 된다 — 같은 기록이 두 곳에 펼쳐져 있는 순간은 없다.
  *
  * 설계 규칙
- * - 행 높이는 3줄 그리드로 고정한다. 스트리밍 중에 글자가 바뀌어도 다른 행이
+ * - 목록은 두 줄로 고정하고 세부 기록은 선택한 행 하나만 펼친다. 스트리밍 중에 글자가 바뀌어도 다른 행이
  *   밀리지 않아야 열 개짜리 편대도 흔들리지 않는다.
  * - 진행 중 표현은 픽셀 휠 하나다. 부드럽게 도는 스피너가 아니라 step 타이밍으로
  *   칸을 건너뛰는 8픽셀 짜리 바퀴다. 끝나면 시제와 색만 바뀐다.
@@ -114,7 +114,7 @@ function tailSnippet(buffer: string): string {
 
 interface RowRefs {
   root: HTMLElement;
-  /** task 행에만 있다 — 도구 기록이 생기기 전까지 비활성. */
+  /** 스폰 직후부터 근황을 펼칠 수 있다. */
   toggle: HTMLButtonElement | null;
   dot: HTMLElement;
   title: HTMLElement;
@@ -123,7 +123,9 @@ interface RowRefs {
   activity: HTMLElement;
   metrics: HTMLElement;
   status: HTMLElement;
-  detail: HTMLElement | null;
+  detail: HTMLElement;
+  reveal: HTMLElement;
+  preview: HTMLElement;
 }
 
 interface DetailToolRow {
@@ -277,6 +279,9 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
   dock.append(popup, pill);
 
   let popupOpen = false;
+  let dockTransition: Animation | null = null;
+  let selectedRow: RowRefs | null = null;
+  let nextRowId = 0;
   /** 직전 갱신 때 도크에 살아 있던 task 수 — 0 으로 떨어지는 순간을 잡는다. */
   let lastHostedLive = 0;
   /**
@@ -298,13 +303,35 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
 
   function setPopupOpen(open: boolean): void {
     if (popupOpen === open) return;
+    const restoreFocus = popup.contains?.(doc.activeElement);
+    const before = (popupOpen ? popup : pill).getBoundingClientRect?.();
+    dockTransition?.cancel();
     popupOpen = open;
     popup.hidden = !open;
+    pill.hidden = open;
     pill.setAttribute('aria-expanded', open ? 'true' : 'false');
     deps.onPopupToggle?.(open);
+    const after = (open ? popup : pill).getBoundingClientRect?.();
+    if (before && after && !globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+      dockTransition = dock.animate?.([
+        { width: `${before.width}px`, height: `${before.height}px`, overflow: 'hidden' },
+        { width: `${after.width}px`, height: `${after.height}px`, overflow: 'hidden' },
+      ], { duration: 220, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' }) ?? null;
+    }
+    if (open) {
+      const hosted = [...cards].find(card => card.hosted);
+      const back = popup.querySelector?.<HTMLButtonElement>('.ag-open .ag-fleet-back');
+      (back ?? hosted?.toggle)?.focus?.();
+    } else if (restoreFocus && !dock.hidden) pill.focus?.();
   }
 
   pill.addEventListener('click', () => setPopupOpen(!popupOpen));
+  popup.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    event.stopPropagation();
+    setPopupOpen(false);
+  });
 
   /** 도크 알약의 상태 줄. 살아 있는 동안은 남은 수, 끝나면 전체 수와 결과다. */
   function dockSummary(hosted: CardEntry[]): { state: TaskState; label: string } {
@@ -331,7 +358,7 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
     // 카드 머리와 같은 수를 쓴다 — 알약과 카드가 다른 숫자를 말하면 오류처럼 보인다.
     // 아직 도는 행은 카드 안에서 휠이 가리킨다.
     const head = workflowsOnly ? '워크플로' : `서브에이전트 ${total}`;
-    return { state, label: `${head} · ${tail}` };
+    return { state, label: live > 0 && !workflowsOnly ? head : `${head} · ${tail}` };
   }
 
   function updateDock(): void {
@@ -414,7 +441,7 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
   }
 
   /* ── 행 ────────────────────────────────────────────────
-     3줄 고정 그리드. 1행 점·이름·역할·오른쪽 값, 2행 근황, 3행 계기. */
+     두 줄 고정 목록. 모델·사용량과 실시간 기록은 선택한 행 안에 펼친다. */
 
   function createRow(variant: 'task' | 'member'): RowRefs {
     const root = el('div', `ag-fleet-row ag-fleet-${variant}`);
@@ -432,32 +459,48 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
     const activity = el('span', 'ag-fleet-activity');
     const metrics = el('span', 'ag-fleet-metrics');
 
-    if (variant === 'member') {
-      const head = el('div', 'ag-fleet-head');
-      head.append(dot, spin, name, aside, status, activity, metrics);
-      root.appendChild(head);
-      return {
-        root, toggle: null, dot, title, role, aside, activity, metrics, status, detail: null,
-      };
-    }
-
-    // 드릴인 — 도구 기록이 하나라도 생긴 뒤에야 열 수 있다.
     const toggle = el('button', 'ag-fleet-head');
     toggle.type = 'button';
-    toggle.disabled = true;
     toggle.setAttribute('aria-expanded', 'false');
+    const reveal = el('div', 'ag-fleet-reveal');
+    reveal.id = `ag-fleet-detail-${++nextRowId}`;
+    reveal.inert = true;
+    toggle.setAttribute('aria-controls', reveal.id);
     const detail = el('div', 'ag-fleet-detail');
-    detail.hidden = true;
-    toggle.append(dot, spin, name, aside, createChevron('ag-fleet-row-chevron'), status, activity, metrics);
-    root.append(toggle, detail);
+    const preview = el('pre', 'ag-fleet-preview', '작업을 시작하고 있습니다.');
+    detail.append(metrics, preview);
+    reveal.appendChild(detail);
+    toggle.append(dot, spin, name, aside, createChevron('ag-fleet-row-chevron'), status, activity);
+    root.classList.add('ag-has-detail');
+    const back = el('button', 'ag-fleet-back', '← 서브에이전트 목록');
+    back.type = 'button';
+    root.append(back, toggle, reveal);
+    const row = { root, toggle, dot, title, role, aside, activity, metrics, status, detail, reveal, preview };
     toggle.addEventListener('click', () => {
-      if (toggle.disabled) return;
-      detail.hidden = !detail.hidden;
-      root.classList.toggle('ag-open', !detail.hidden);
-      toggle.setAttribute('aria-expanded', detail.hidden ? 'false' : 'true');
+      const open = selectedRow !== row;
+      if (selectedRow) setRowOpen(selectedRow, false);
+      selectedRow = open ? row : null;
+      if (open) setRowOpen(row, true);
     });
+    back.addEventListener('click', () => {
+      setRowOpen(row, false);
+      selectedRow = null;
+      row.toggle?.focus?.();
+    });
+    return row;
+  }
 
-    return { root, toggle, dot, title, role, aside, activity, metrics, status, detail };
+  function setRowOpen(row: RowRefs, open: boolean): void {
+    row.root.classList.toggle('ag-open', open);
+    row.toggle?.setAttribute('aria-expanded', String(open));
+    row.reveal.inert = !open;
+    if (open) row.detail.scrollTop = row.detail.scrollHeight;
+  }
+
+  /** 선택한 미리보기는 새 출력이 올 때마다 끝으로 이동한다. */
+  function followDetail(row: RowRefs, update: () => void): void {
+    update();
+    if (selectedRow === row) row.detail.scrollTop = row.detail.scrollHeight;
   }
 
   function applyRowState(row: RowRefs, state: TaskState): void {
@@ -469,6 +512,7 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
     );
     setTone(row.dot, STATE_TONE[state]);
     setText(row.status, STATE_TEXT[state]);
+    if (!row.activity.textContent) setText(row.preview, STATE_TEXT[state]);
   }
 
   /** 제목과 뜻이 같은 역할 칩은 같은 말을 두 번 하는 것이라 감춘다. */
@@ -485,6 +529,7 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
 
   function setActivity(row: RowRefs, text: string): void {
     setText(row.activity, truncate(text, 140));
+    followDetail(row, () => setText(row.preview, text));
   }
 
   function renderMetrics(
@@ -529,6 +574,10 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
     root.append(toggle, collapse);
 
     toggle.addEventListener('click', () => {
+      if (card.hosted) {
+        setPopupOpen(false);
+        return;
+      }
       const collapsed = root.classList.toggle('ag-collapsed');
       toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
     });
@@ -558,8 +607,7 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
     };
     cards.add(card);
     popup.appendChild(root);
-    // 새 편대가 태어나면 팝업을 다시 연다 — 사용자가 접었어도 새 묶음은 소식을 알린다.
-    setPopupOpen(true);
+    // 새 작업은 알약만 갱신한다. 목록을 펼칠지는 사용자가 결정한다.
     startTicker(card);
     updateDock();
     return card;
@@ -673,7 +721,7 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
       return `워크플로 · ${name} · ${tail}`;
     }
     const prefix = card.tasks.some((task) => task.background) ? '백그라운드 작업' : '서브에이전트';
-    return `${prefix} ${card.tasks.length} · ${tail}`;
+    return live ? `${prefix} ${card.tasks.length}` : `${prefix} ${card.tasks.length} · ${tail}`;
   }
 
   function refreshCard(card: CardEntry): void {
@@ -809,20 +857,12 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
 
   /* ── 행 안쪽 도구 기록 ──────────────────────────────── */
 
-  function enableDetail(task: TaskEntry): void {
-    const toggle = task.row.toggle;
-    if (!toggle || !toggle.disabled) return;
-    toggle.disabled = false;
-    task.row.root.classList.add('ag-has-detail');
-  }
-
   function addDetailToolRow(
     task: TaskEntry,
     evt: Extract<AgentStreamEvent, { type: 'tool-call' }>,
   ): void {
     const detail = task.row.detail;
     if (!detail) return;
-    enableDetail(task);
 
     const row = el('div', `ag-tool-row ag-${evt.agent}`);
     const head = el('button', 'ag-tool-head');
@@ -847,7 +887,7 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
     });
 
     row.append(head, body);
-    detail.appendChild(row);
+    followDetail(task.row, () => detail.appendChild(row));
     task.detailToolRows.set(evt.callId, {
       status,
       result,
@@ -868,7 +908,7 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
     entry.status.replaceChildren(createIcon(evt.ok ? 'check' : 'close'));
     const ms = nowMs() - entry.startedAt;
     entry.elapsed.textContent = ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
-    entry.result.textContent = evt.resultPreview;
+    followDetail(task.row, () => { entry.result.textContent = evt.resultPreview; });
   }
 
   function sweepDetailToolRows(task: TaskEntry): void {
@@ -894,7 +934,9 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
       task.usage.totalTokens ?? null,
       Math.max(task.toolCount, task.usage.toolUses ?? 0),
     );
-    if (task.activity) setActivity(task.row, task.activity);
+    if (task.activity) setText(task.row.activity, truncate(task.activity, 140));
+    const preview = task.summary || task.textTail || task.activity || STATE_TEXT[task.state];
+    followDetail(task.row, () => setText(task.row.preview, preview));
     if (task.state === 'running') {
       setText(task.row.aside, formatFleetClock(nowMs() - task.startedAt));
     } else if (task.endedAt !== null) {
@@ -996,7 +1038,7 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
       merge('durationMs');
     }
     if (evt.summary && !task.summary) {
-      task.summary = truncate(evt.summary, 140);
+      task.summary = evt.summary.slice(-6000);
       task.activity = task.summary;
     }
     if (task.state === 'running') {
@@ -1032,11 +1074,12 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
     const task = evt.parentTaskId ? tasks.get(evt.parentTaskId) : undefined;
     if (!task) return false;
     if (task.state !== 'running') return true;
-    task.textTail = (task.textTail + evt.text).slice(-600);
+    task.textTail = (task.textTail + evt.text).slice(-6000);
     const snippet = tailSnippet(task.textTail);
     if (snippet) {
       task.activity = snippet;
-      setActivity(task.row, snippet);
+      setText(task.row.activity, snippet);
+      followDetail(task.row, () => setText(task.row.preview, task.textTail));
     }
     return true;
   }
@@ -1080,6 +1123,7 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
       setPopupOpen(false);
     },
     reset(): void {
+      dockTransition?.cancel();
       for (const card of cards) stopTicker(card);
       // 도크에 머물러 있던 카드만 팝업에서 걷어 낸다 — 정착해 흐름으로 간
       // 카드는 대화 기록이므로 여기서 건드리지 않는다.
@@ -1087,6 +1131,7 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
       cards.clear();
       tasks.clear();
       batchCard = null;
+      selectedRow = null;
       setPopupOpen(false);
       updateDock();
     },

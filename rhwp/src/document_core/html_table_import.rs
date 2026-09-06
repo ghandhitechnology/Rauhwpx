@@ -600,7 +600,7 @@ impl DocumentCore {
             page_break: TablePageBreak::None,
             repeat_header: has_header_row,
             caption: None,
-            common: Default::default(),
+            common: crate::parser::control::parse_common_obj_attr(&raw_ctrl_data),
             outer_margin_left: outer_margin,
             outer_margin_right: outer_margin,
             outer_margin_top: outer_margin,

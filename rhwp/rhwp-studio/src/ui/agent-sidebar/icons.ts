@@ -7,9 +7,11 @@ const NS = 'http://www.w3.org/2000/svg';
 
 /** 스트로크로만 그리는 아이콘의 패스 정의. */
 const STROKE_PATHS = {
+  local: 'M1.5 2h9v6h-9zM6 8v2M3.5 10h5',
   check: 'M2.5 6.4 5 8.9l4.5-5.4',
   close: 'M3.2 3.2l5.6 5.6M8.8 3.2l-5.6 5.6',
   send: 'M6 9.5v-7M2.9 5.6 6 2.5l3.1 3.1',
+  cloudSend: 'M6 10.5V6.8M4 6.8H3a1.7 1.7 0 0 1-.2-3.4 2.8 2.8 0 0 1 5.4-.6A2 2 0 0 1 9 6.8H8',
   insert: 'M6 2.6v6.8M2.6 6h6.8',
   delete: 'M2.6 6h6.8',
   replace: 'M2.5 4.3h6.2L6.9 2.6M9.5 7.7H3.3l1.8 1.7',
@@ -31,6 +33,9 @@ const STROKE_PATHS = {
   gear: 'M6 4.2a1.8 1.8 0 1 0 0 3.6 1.8 1.8 0 0 0 0-3.6M6 1.5v1.3M6 9.2v1.3M2.8 6H1.5M10.5 6H9.2M3.72 3.72l-.92-.92M9.2 9.2l-.92-.92M8.28 3.72l.92-.92M2.8 9.2l.92-.92',
   /* 시계 방향으로 도는 화살 — 다시 확인 */
   refresh: 'M9.3 6a3.3 3.3 0 1 1-1.05-2.4M9.5 2.1v1.9H7.6',
+  cloud: 'M3.4 9.2h5.1a2 2 0 0 0 .1-4 3 3 0 0 0-5.8.6A1.7 1.7 0 0 0 3.4 9.2z',
+  /* 끊긴 구름 — 구름 위를 대각선으로 지르는 사선 */
+  cloudOff: 'M3.4 9.2h5.1a2 2 0 0 0 .1-4 3 3 0 0 0-5.8.6A1.7 1.7 0 0 0 3.4 9.2zM2.4 2.4l7.2 7.2',
   paperclip: 'M4.1 6.2 7.3 3a1.7 1.7 0 0 1 2.4 2.4L5.8 9.3A2.5 2.5 0 0 1 2.3 5.8l4-4M4.7 7.5 8 4.2',
   references: 'M3 2.2h4.1L9 4.1v5.7H3zM7.1 2.2v1.9H9M4.4 6h3.2M4.4 7.7h2.3',
   search: 'M5.3 2.5a2.8 2.8 0 1 0 0 5.6 2.8 2.8 0 0 0 0-5.6M7.3 7.3l2.2 2.2',
@@ -85,8 +90,40 @@ export function createIcon(name: SidebarIconName, className = ''): SVGSVGElement
   return svg;
 }
 
-/** 실행 중지 버튼용 채워진 사각형. 스트로크 아이콘과 달리 면으로 읽혀야 한다. */
-export function createStopIcon(className = ''): SVGSVGElement {
+/**
+ * 다시 맺는 중/재생성 중 배너용 구름+회전 호. 구름은 흐리게, 호만 돌린다.
+ * 회전 대상 호에 ag-cloud-recovery-icon-arc 클래스를 단다.
+ */
+export function createCloudSyncIcon(className = ''): SVGSVGElement {
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('class', className ? `ag-icon ${className}` : 'ag-icon');
+  svg.setAttribute('viewBox', '0 0 12 12');
+  svg.setAttribute('width', '12');
+  svg.setAttribute('height', '12');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('focusable', 'false');
+
+  const cloud = document.createElementNS(NS, 'path');
+  cloud.setAttribute('d', 'M3.83 5.4a2.25 2.25 0 0 1 2.1-1.8c1.05 0 1.95.75 2.18 1.73.9.15 1.58.9 1.58 1.8a1.8 1.8 0 0 1-1.8 1.8H4.2a1.95 1.95 0 0 1-1.95-1.95c0-.75.45-1.43 1.13-1.65');
+  cloud.setAttribute('opacity', '0.45');
+
+  const arc = document.createElementNS(NS, 'path');
+  arc.setAttribute('class', 'ag-cloud-recovery-icon-arc');
+  arc.setAttribute('d', 'M9.38 4.65a2.25 2.25 0 0 0-1.58-1.2');
+
+  for (const part of [cloud, arc]) {
+    part.setAttribute('fill', 'none');
+    part.setAttribute('stroke', 'currentColor');
+    part.setAttribute('stroke-width', '1.25');
+    part.setAttribute('stroke-linecap', 'round');
+    part.setAttribute('stroke-linejoin', 'round');
+  }
+
+  svg.append(cloud, arc);
+  return svg;
+}
+
+/** 실행 중지 버튼용 채워진 사각형. 스트로크 아이콘과 달리 면으로 읽혀야 한다. */export function createStopIcon(className = ''): SVGSVGElement {
   const svg = document.createElementNS(NS, 'svg');
   svg.setAttribute('class', className ? `ag-icon ${className}` : 'ag-icon');
   svg.setAttribute('viewBox', '0 0 12 12');

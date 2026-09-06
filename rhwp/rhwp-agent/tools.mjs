@@ -151,6 +151,7 @@ export const TOOL_CATEGORIES = Object.freeze([
   'background-control',
   'background-worker',
   'browser',
+  'environment',
 ]);
 
 /**
@@ -160,11 +161,11 @@ export const TOOL_CATEGORIES = Object.freeze([
  * destructive 로 표시하지 않는다. 그렇게 표시하면 Codex 안전 모드
  * (`workspace-write` + `approval_policy=never`)가 문서 편집 도구를 거절한다.
  *
- * @param {'instruction-read'|'instruction-write'|'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'artifact-write'|'user-interaction'|'planning-control'|'background-control'|'background-worker'|'browser'} category
+ * @param {'instruction-read'|'instruction-write'|'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'artifact-write'|'user-interaction'|'planning-control'|'background-control'|'background-worker'|'browser'|'environment'} category
  */
 export function toolAnnotations(category) {
   return {
-    readOnlyHint: category === 'instruction-read' || category === 'document-read' || category === 'reference-read' || category === 'template-read',
+    readOnlyHint: category === 'instruction-read' || category === 'document-read' || category === 'reference-read' || category === 'template-read' || category === 'environment',
     destructiveHint: category === 'download-write',
     openWorldHint: category === 'browser' || category === 'download-write',
   };
@@ -362,6 +363,11 @@ const BASE_TOOL_DEFINITIONS = [
   {
     name: 'materialize_document_snapshot',
     description: `Materialize the exact current in-memory HWP/HWPX document into this chat's hub-owned read-only input storage and return its absolute path, format, size, checksum, revision, digest, and dirty state. Use this whenever a file-processing workflow needs a local path but get_document_info.sourcePath is null, or when dirty is true and the visible revision must be captured. This does not modify the open document, does not expose or overwrite its native source file, and does not require the user to save first. ${REVISION_NOTE}`,
+    shape: {},
+  },
+  {
+    name: 'publish_cloud_document',
+    description: 'Announce a completed Cloud document for the user to merge into their local branch after this turn succeeds. The Cloud conversation stays open and local edits remain independent. The client archives the completed checkpoint and offers a merge button; it does not overwrite the original file. Use when delivering a finished document. Available only inside a Cloud worker; returns a queued delivery request.',
     shape: {},
   },
   {
@@ -731,6 +737,11 @@ const BASE_TOOL_DEFINITIONS = [
     },
   },
   {
+    name: 'environment_screenshot',
+    description: 'Capture the cloud session virtual desktop (Xvfb) to a PNG under the session work directory and return its absolute imagePath plus an image content block. The path is inside RHWP_IMAGE_ROOTS so insert_image can place it in the open document. Fails with ENVIRONMENT_DISPLAY_UNAVAILABLE when the session has no ready DISPLAY. Prefer this over render_page when the result should show the agent screen rather than a document page.',
+    shape: {},
+  },
+  {
     name: 'insert_equation',
     description: `Insert an equation at (sectionIdx, paraIdx, charOffset), sized automatically and inline with text. Works inside table cells via the cell parameter. WORKFLOW: ALWAYS call preview_equation with the same script first — both tools return widthMm/heightMm/baselineMm metrics and a warnings array; treat ANY warning as an error, fix the script and retry until warnings is empty before inserting (a bad script renders overlapping or broken math). Set fontSizePt from get_char_format of the surrounding text instead of guessing. ${EQUATION_SYNTAX} ${CELL_NOTE} ${WRITE_NOTE} ${OFFSET_CAVEAT}`,
     shape: {
@@ -1083,7 +1094,7 @@ const BASE_TOOL_DEFINITIONS = [
   },
 ];
 
-/** @type {Readonly<Record<string, 'instruction-read'|'instruction-write'|'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'artifact-write'|'user-interaction'|'planning-control'|'background-control'|'background-worker'|'browser'>>} */
+/** @type {Readonly<Record<string, 'instruction-read'|'instruction-write'|'document-read'|'document-write'|'reference-read'|'template-read'|'download-write'|'artifact-write'|'user-interaction'|'planning-control'|'background-control'|'background-worker'|'browser'|'environment'>>} */
 export const TOOL_CLASSIFICATIONS = Object.freeze({
   read_agent_instructions: 'instruction-read',
   update_agent_instructions: 'instruction-write',
@@ -1106,6 +1117,7 @@ export const TOOL_CLASSIFICATIONS = Object.freeze({
   get_fields: 'document-read',
   get_document_info: 'document-read',
   materialize_document_snapshot: 'document-read',
+  publish_cloud_document: 'document-write',
   find_text: 'document-read',
   render_page: 'document-read',
   get_para_format: 'document-read',
@@ -1132,6 +1144,7 @@ export const TOOL_CLASSIFICATIONS = Object.freeze({
   list_numberings: 'document-read',
   apply_style: 'document-write',
   insert_image: 'document-write',
+  environment_screenshot: 'environment',
   insert_equation: 'document-write',
   preview_equation: 'document-read',
   insert_chart: 'document-write',
@@ -1171,11 +1184,11 @@ export const TOOL_DEFINITIONS = Object.freeze(BASE_TOOL_DEFINITIONS.map((definit
 }));
 
 export const TOOL_PROFILES = Object.freeze({
-  direct: Object.freeze(['instruction-read', 'instruction-write', 'document-read', 'document-write', 'reference-read', 'template-read', 'artifact-write', 'user-interaction', 'background-control']),
-  planning: Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'user-interaction', 'planning-control', 'browser']),
-  question: Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'user-interaction', 'browser']),
-  'awaiting-approval': Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'browser']),
-  implementing: Object.freeze(['instruction-read', 'instruction-write', 'document-read', 'document-write', 'reference-read', 'template-read', 'download-write', 'artifact-write', 'user-interaction', 'browser', 'background-control']),
+  direct: Object.freeze(['instruction-read', 'instruction-write', 'document-read', 'document-write', 'reference-read', 'template-read', 'artifact-write', 'user-interaction', 'background-control', 'environment']),
+  planning: Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'user-interaction', 'planning-control', 'browser', 'environment']),
+  question: Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'user-interaction', 'browser', 'environment']),
+  'awaiting-approval': Object.freeze(['instruction-read', 'document-read', 'reference-read', 'template-read', 'download-write', 'browser', 'environment']),
+  implementing: Object.freeze(['instruction-read', 'instruction-write', 'document-read', 'document-write', 'reference-read', 'template-read', 'download-write', 'artifact-write', 'user-interaction', 'browser', 'background-control', 'environment']),
   'copy-layout-worker': Object.freeze([
     'read_product_skill',
     'get_document_info',

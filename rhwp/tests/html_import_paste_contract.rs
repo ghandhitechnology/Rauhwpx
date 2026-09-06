@@ -142,3 +142,77 @@ fn oversized_markup_paste_falls_back_to_capped_paragraphs() {
         .all(|paragraph| paragraph.text.chars().count() <= FLUSH_LINE_CHAR_CAP));
     assert_eq!(paragraphs.last().expect("마지막 문단").text, "가");
 }
+
+#[test]
+fn paragraph_and_table_paste_preserves_surrounding_text_and_remains_editable() {
+    use rhwp::model::control::Control;
+
+    let html = concat!(
+        "<p><strong>HTML verification</strong> with <em>formatting</em>.</p>",
+        "<table><tr><td>Cell A</td><td>Cell B</td></tr></table>",
+        "<p>After table</p>",
+    );
+    for (text, offset) in [("", 0), ("Before", 0), ("BeforeAfter", 6), ("Before", 6)] {
+        let mut core = DocumentCore::new_empty();
+        core.create_blank_document_native().unwrap();
+        core.insert_text_native(0, 0, 0, text).unwrap();
+        core.paste_html_native(0, 0, offset, html).unwrap();
+
+        let paras = paragraphs(&core);
+        let expected_left = &text[..offset];
+        if !expected_left.is_empty() {
+            assert_eq!(paras[0].text, expected_left);
+        }
+        let table = paras
+            .iter()
+            .flat_map(|p| &p.controls)
+            .find_map(|control| {
+                if let Control::Table(table) = control {
+                    Some(table)
+                } else {
+                    None
+                }
+            })
+            .expect("pasted table");
+        assert!(table.common.treat_as_char, "HTML 표는 본문 흐름에 배치돼야 한다");
+        assert!(table.common.width > 0 && table.common.height > 0);
+        assert_eq!(table.cells.len(), 2);
+        assert_eq!(table.cells[0].paragraphs[0].text, "Cell A");
+        assert_eq!(table.cells[1].paragraphs[0].text, "Cell B");
+        let tail = &text[offset..];
+        assert_eq!(
+            paras.last().unwrap().text,
+            if tail.is_empty() { "After table" } else { tail }
+        );
+        assert!(paras
+            .iter()
+            .any(|p| p.text == "HTML verification with formatting."));
+
+        let last = paras.len() - 1;
+        core.insert_text_native(0, last, 0, "Still editable: ")
+            .unwrap();
+        assert!(paragraphs(&core)[last].text.starts_with("Still editable: "));
+        assert!(core.page_count() > 0);
+        let svg = core.render_page_svg_native(0).unwrap();
+        let mut reader = quick_xml::Reader::from_str(&svg);
+        let mut rendered_text = String::new();
+        loop {
+            match reader.read_event().unwrap() {
+                quick_xml::events::Event::Text(text) => {
+                    rendered_text.push_str(text.decode().unwrap().trim())
+                }
+                quick_xml::events::Event::Eof => break,
+                _ => {}
+            }
+        }
+        assert!(rendered_text.contains("CellA"));
+        assert!(rendered_text.contains("Stilleditable"));
+        let bytes = core.export_hwpx_native().unwrap();
+        let reopened = DocumentCore::from_bytes(&bytes).unwrap();
+        assert_eq!(paragraphs(&reopened).len(), paragraphs(&core).len());
+        assert_eq!(
+            paragraphs(&reopened)[last].text,
+            paragraphs(&core)[last].text
+        );
+    }
+}

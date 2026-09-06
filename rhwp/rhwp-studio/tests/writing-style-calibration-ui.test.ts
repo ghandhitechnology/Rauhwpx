@@ -14,16 +14,16 @@ const bridge = readFileSync(new URL('../src/agent/bridge.ts', import.meta.url), 
 const types = readFileSync(new URL('../src/agent/types.ts', import.meta.url), 'utf8');
 
 test('calibration uses the live provider catalog with the shared model registry fallback', () => {
-  // 보정 런타임은 허브 쪽 codex/claude/pi 뿐이다 — grok/cursor 는 목록에 세우지 않는다.
-  assert.match(calibration, /const AGENTS:[^=]+= \['claude', 'codex', 'pi', 'rau'\]/);
-  assert.doesNotMatch(calibration, /const AGENTS:[^=]+= \[[^\]]*'(grok|cursor)'/);
+  // 공용 프로바이더 순서를 사용하고 실제 지원 여부는 허브 카탈로그로 확인한다.
+  assert.match(calibration, /const AGENTS: readonly AgentName\[\] = PROVIDER_ORDER/);
   // 라벨 표는 공용 모듈 하나만 본다 — 화면마다 베끼면 프로바이더가 조용히 빠진다.
-  assert.match(calibration, /import \{ AGENT_LABEL \} from '\.\/providers\.ts'/);
+  assert.match(calibration, /import \{ AGENT_LABEL, PROVIDER_ORDER, createProviderIcon \} from '\.\/providers\.ts'/);
   assert.doesNotMatch(calibration, /const AGENT_LABEL/);
   // 카탈로그에 없는 프로바이더가 기본값으로 저장돼 있어도 쓸 수 있는 쪽으로 옮긴다.
   assert.match(calibration, /if \(calibrationCatalog\) return \{ available: false/);
   assert.match(calibration, /const fallback = AGENTS\.find\(\(agent\) => providerAvailability\(agent\)\.available\)/);
-  assert.match(css, /grid-template-columns: repeat\(2, 1fr\)/);
+  assert.match(calibration, /providerPicker = document\.createElement\('details'\)/);
+  assert.match(calibration, /providerGroup\.setAttribute\('role', 'radiogroup'\)/);
   assert.match(calibration, /bridge\.requestWritingStyleCatalog\(\)/);
   assert.match(calibration, /bridge\.requestProviderStatus\(\)/);
   assert.match(calibration, /bridge\.requestPiStatus\(\)/);

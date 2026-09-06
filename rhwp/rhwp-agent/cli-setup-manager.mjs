@@ -33,6 +33,7 @@ import {
   terminateAndWaitForProcessTreeExit,
   terminateProcessTree,
 } from './process-tree.mjs';
+import { createSetupTerminal } from './setup-terminal.mjs';
 import { setupFailureMessage } from './setup-errors.mjs';
 
 const require = createRequire(import.meta.url);
@@ -295,6 +296,7 @@ export function defaultOpenCodeAuthPath(
  *
  * @param {{ rootDir?: string, spawnProcess?: typeof spawn, npmCommand?: string | null,
  *           nodeCommand?: string, platform?: NodeJS.Platform, baseEnv?: NodeJS.ProcessEnv,
+ *           createTerminal?: typeof createSetupTerminal,
  *           homeDir?: string, fetchImpl?: typeof fetch, secretStore?: object | null,
  *           prepareOAuthCredential?: typeof prepareStagedOAuthCredential,
  *           replaceConfigFile?: typeof replaceFileAtomically,
@@ -305,6 +307,7 @@ export function defaultOpenCodeAuthPath(
 export function createCliSetupManager({
   rootDir = defaultCliSetupRoot(),
   spawnProcess = spawn,
+  createTerminal = createSetupTerminal,
   npmCommand = null,
   nodeCommand = process.execPath,
   platform = process.platform,
@@ -351,6 +354,8 @@ export function createCliSetupManager({
   const cursorOAuthStagingDir = path.join(rootDir, 'cursor-oauth-staging');
   const codexOAuthStagingDir = path.join(rootDir, 'codex-oauth-staging');
   const claudeOAuthStagingDir = path.join(rootDir, 'claude-oauth-staging');
+  const openCodeOAuthStagingDir = path.join(rootDir, 'opencode-oauth-staging');
+  const setupTerminals = new Map();
   const hostProfileHome = platform === 'win32'
     ? platformPath.resolve(baseEnv.USERPROFILE || homeDir)
     : platformPath.resolve(homeDir);
@@ -673,6 +678,7 @@ export function createCliSetupManager({
   }
 
   async function expectedOAuthCredentialPath(agent) {
+    if (agent === 'opencode') return openCodeSourceAuthFile;
     if (agent === 'codex') return codexCredentialFile();
     if (agent === 'claude') return claudeCredentialFile;
     if (agent === 'cursor' && platform === 'win32') {
@@ -1166,6 +1172,7 @@ export function createCliSetupManager({
       agent,
       installed: Boolean(version),
       installing: installs.has(agent),
+      terminalAuthSupported: !(agent === 'claude' && platform === 'darwin'),
       version,
       ...auth,
       authenticating: authRuns.has(agent),
@@ -1835,11 +1842,12 @@ export function createCliSetupManager({
    * @param {'api-key'|'oauth'} method
    * @param {string} [key] api-key 방식에서만 쓴다.
    * @param {(progress: SetupProgress) => void} [onProgress]
-   * @param {{ signal?: AbortSignal, onCommitted?: () => void }} [options]
+   * @param {{ signal?: AbortSignal, onCommitted?: () => void, terminal?: boolean }} [options]
    */
-  async function authenticate(agent, method, key, onProgress, { signal, onCommitted } = {}) {
+  async function authenticate(agent, method, key, onProgress, { signal, onCommitted, terminal = false } = {}) {
     const item = assertAgent(agent);
     throwIfAuthCancelled(signal);
+    if (setupTerminals.has(agent)) throw setupError('AGENT_SETUP_CLEANUP_PENDING', '이전 로그인 종료를 확인하지 못했어요. 앱을 다시 시작해 주세요.');
     if (authRuns.has(agent)) throw setupError('AGENT_AUTH_BUSY', '이미 로그인 작업이 진행 중이에요.');
     // Reject oversized credentials before load() can migrate or rewrite any
     // persisted state, and before a provider request can build a huge header.
@@ -1856,12 +1864,6 @@ export function createCliSetupManager({
         throw setupError(
           'AGENT_AUTH_OAUTH_UNSUPPORTED',
           'macOS에서는 Claude OAuth 로그인을 안전하게 격리할 수 없어요. Claude API 키를 사용해 주세요.',
-        );
-      }
-      if (method === 'oauth' && agent === 'opencode') {
-        throw setupError(
-          'AGENT_AUTH_OAUTH_UNSUPPORTED',
-          'OpenCode 로그인은 터미널에서 `opencode auth login`을 실행한 뒤 다시 확인해 주세요. OpenCode API 키는 이 화면에서 바로 저장할 수 있어요.',
         );
       }
       const managedVersion = await installedVersion(agent);
@@ -1887,6 +1889,13 @@ export function createCliSetupManager({
           credentialTransaction = await prepareOAuthCredential({
             sourceFile: platformPath.join(cursorSourceDir, 'cli-config.json'),
             stagingParent: cursorOAuthStagingDir,
+            platform,
+          });
+        } else if (agent === 'opencode') {
+          credentialTransaction = await prepareOAuthCredential({
+            sourceFile: openCodeSourceAuthFile,
+            stagingParent: openCodeOAuthStagingDir,
+            relativeCredentialPath: path.join('data', 'opencode', 'auth.json'),
             platform,
           });
         } else if (agent === 'codex') {
@@ -1918,6 +1927,19 @@ export function createCliSetupManager({
           return isolated;
         };
         const loginSpec = {
+          opencode: {
+            argv: ['auth', 'login'],
+            env: loginEnv({ ...envFor('opencode'),
+              ...Object.fromEntries(['DISPLAY', 'WAYLAND_DISPLAY', 'DBUS_SESSION_BUS_ADDRESS', 'XDG_RUNTIME_DIR']
+                .filter(key => typeof baseEnv[key] === 'string').map(key => [key, baseEnv[key]])),
+              HOME: credentialTransaction?.homeDir, USERPROFILE: credentialTransaction?.homeDir,
+              XDG_DATA_HOME: path.join(credentialTransaction?.homeDir ?? rootDir, 'data'),
+              XDG_CONFIG_HOME: path.join(credentialTransaction?.homeDir ?? rootDir, 'config'),
+              XDG_CACHE_HOME: path.join(credentialTransaction?.homeDir ?? rootDir, 'cache'),
+              OPENCODE_CONFIG_DIR: path.join(credentialTransaction?.homeDir ?? rootDir, 'config', 'opencode'),
+              OPENCODE_CONFIG_CONTENT: '{}',
+            }),
+          },
           // 기기 인증만 쓴다 — 기본 로그인은 허브 기기의 localhost 콜백 서버를 띄우기
           // 때문에 원격에서 스튜디오를 여는 사용자는 로그인을 끝낼 수 없다.
           codex: {
@@ -1965,7 +1987,18 @@ export function createCliSetupManager({
         if (agent === 'grok') await fs.mkdir(grokHomeDir, { recursive: true });
         if (agent === 'cursor' && platform !== 'win32') await fs.mkdir(cursorHomeDir, { recursive: true });
         throwIfAuthCancelled(signal);
-        const result = await run(command, loginSpec.argv, {
+        const result = (terminal || agent === 'opencode') ? await (async () => {
+          const session = createTerminal({ command, argv: loginSpec.argv, env: loginSpec.env,
+            cwd: credentialTransaction?.homeDir ?? (agent === 'grok' ? grokHomeDir : cursorHomeDir), signal, timeoutMs: AUTH_TIMEOUT_MS,
+            onOutput: terminalData => onProgress?.({ state: 'authorizing', terminalData }),
+          });
+          setupTerminals.set(agent, session);
+          onProgress?.({ state: 'authorizing', terminalReady: true });
+          let cleanupUncertain = false;
+          try { return await session.done; }
+          catch (error) { cleanupUncertain = error?.processCleanupUncertain === true; throw error; }
+          finally { if (!cleanupUncertain) setupTerminals.delete(agent); }
+        })() : await run(command, loginSpec.argv, {
           timeoutMs: AUTH_TIMEOUT_MS,
           operationKey: `auth:${agent}`,
           env: loginSpec.env,
@@ -1999,6 +2032,14 @@ export function createCliSetupManager({
             agent,
             directOAuthRecoveryState,
           );
+        }
+        if (agent === 'opencode') {
+          const credential = await readUtf8FileBounded(credentialTransaction.credentialFile, {
+            maxBytes: 1024 * 1024, label: 'OpenCode login credential', platform,
+          }).catch(() => '');
+          if (!isReusableOpenCodeAuthContent(credential)) {
+            throw setupError('AGENT_AUTH_FAILED', 'OpenCode 로그인을 확인하지 못했어요. 다시 시도하거나 API 키로 연결해 주세요.');
+          }
         }
         credentialCommitAttempted = true;
         await commitOAuth(
@@ -2176,7 +2217,7 @@ export function createCliSetupManager({
       }
       // A hard crash cannot run the transaction finally path. Reap only
       // expired profiles whose recorded owner process is no longer alive.
-      const stagingDirs = [codexOAuthStagingDir];
+      const stagingDirs = [codexOAuthStagingDir, openCodeOAuthStagingDir];
       if (platform !== 'darwin') stagingDirs.push(claudeOAuthStagingDir);
       if (platform === 'win32') stagingDirs.push(cursorOAuthStagingDir);
       await Promise.all(stagingDirs.map(
@@ -2189,8 +2230,12 @@ export function createCliSetupManager({
     install,
     authenticate,
     submitAuthCode,
+    terminalSnapshot(agent) { return setupTerminals.get(agent)?.snapshot() ?? null; },
+    terminalInput(agent, data) { setupTerminals.get(agent)?.write(data); },
+    terminalResize(agent, cols, rows) { setupTerminals.get(agent)?.resize(cols, rows); },
     async cancel(agent) {
       assertAgent(agent);
+      if (setupTerminals.has(agent)) return setupTerminals.get(agent).cancel().catch(() => false);
       if (activeProcesses.has(`auth:${agent}`)) cancelledAuth.add(agent);
       const entries = [`install:${agent}`, `auth:${agent}`]
         .map((key) => [key, activeProcesses.get(key)])

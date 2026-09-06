@@ -338,6 +338,7 @@ export type ProviderStatusMap = Record<AgentName, ProviderHealth>;
 export type AgentAuthMethod = 'oauth' | 'api-key';
 
 export interface AgentSetupStatus {
+  terminalAuthSupported?: boolean;
   agent: AgentName;
   /** App-managed or already present on PATH. */
   available: boolean;
@@ -814,6 +815,7 @@ export type SidebarEvent =
       receivedBytes?: number;
       totalBytes?: number;
     }
+  | { type: 'agent-setup-terminal'; agent: AgentName; authRunId: string; data?: string; ready?: boolean; reset?: boolean }
   | { type: 'agent-setup-error'; agent: AgentName | null; authRunId?: string; code: string; message: string }
   | { type: 'account-status'; status: AccountSessionStatus }
   | {
@@ -862,6 +864,7 @@ export interface AgentBridgeDeps {
   canvasView: CanvasView;
   documentState: DocumentDirtyState;
   isReadOnly?: () => boolean;
+  canPublishCloudDocument?: () => boolean;
 }
 
 export interface AgentBridgeOptions {

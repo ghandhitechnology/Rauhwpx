@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+INSTALL_ROOT='/Library/Application Support/Rauhwpx Cloud'
+ENV_FILE="${INSTALL_ROOT}/cloud.env"
+[[ -r ${ENV_FILE} ]] || {
+  echo "Rauhwpx Cloud is not installed" >&2
+  exit 1
+}
+set -a
+source "${ENV_FILE}"
+set +a
+NODE=$(command -v node)
+COMMAND=("${NODE}" "${INSTALL_ROOT}/current/src/cli.mjs" "$@")
+if [[ ${EUID} -eq 0 ]]; then
+  exec sudo -u "${RAUHWpx_SERVICE_USER}" -H env \
+    HOME="$(dscl . -read "/Users/${RAUHWpx_SERVICE_USER}" NFSHomeDirectory | awk '{print $2}')" \
+    RAUHWpx_DATA_DIR="${RAUHWpx_DATA_DIR}" \
+    RAUHWpx_PROVIDER_CLI_DIR="${RAUHWpx_PROVIDER_CLI_DIR}" \
+    RAUHWpx_WORKER_IMAGE="${RAUHWpx_WORKER_IMAGE}" \
+    RAUHWpx_PODMAN_CONNECTION="${RAUHWpx_PODMAN_CONNECTION}" \
+    PATH="${PATH}" \
+    "${COMMAND[@]}"
+fi
+[[ $(id -un) == "${RAUHWpx_SERVICE_USER}" ]] || {
+  echo "Run this command as ${RAUHWpx_SERVICE_USER} or through sudo" >&2
+  exit 1
+}
+exec "${COMMAND[@]}"

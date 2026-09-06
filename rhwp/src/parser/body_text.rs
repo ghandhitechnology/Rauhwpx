@@ -110,7 +110,7 @@ pub fn parse_body_text_section(data: &[u8]) -> Result<Section, BodyTextError> {
                             data: r.data.clone(),
                         })
                         .collect();
-                    let ext_mps = parse_master_pages_from_raw(&tail);
+                    let ext_mps = parse_master_pages_from_raw_at_location(&tail, true);
                     section.section_def.master_pages.extend(ext_mps);
                     break;
                 }
@@ -630,6 +630,13 @@ fn parse_section_def(ctrl_data: &[u8], child_records: &[Record]) -> SectionDef {
 /// LIST_HEADER(tag 66)가 나타나면 바탕쪽으로 파싱.
 /// 순서: 1번째=양쪽(Both), 2번째=홀수(Odd), 3번째=짝수(Even)
 fn parse_master_pages_from_raw(raw_records: &[RawRecord]) -> Vec<MasterPage> {
+    parse_master_pages_from_raw_at_location(raw_records, false)
+}
+
+fn parse_master_pages_from_raw_at_location(
+    raw_records: &[RawRecord],
+    trailing_extension: bool,
+) -> Vec<MasterPage> {
     let mut master_pages = Vec::new();
 
     // RawRecord를 Record로 변환
@@ -702,7 +709,8 @@ fn parse_master_pages_from_raw(raw_records: &[RawRecord]) -> Vec<MasterPage> {
         // 단독으로는 ext_flags=0x03 같은 케이스(첫 등록 + 확장 표시)를 놓침.
         // 비트 + 휴리스틱 OR 조합으로 보강.
         let overlap = ext_flags & 0x01 != 0;
-        let is_extension = (ext_flags & 0x02 != 0)
+        let is_extension = trailing_extension
+            || (ext_flags & 0x02 != 0)
             || master_pages
                 .iter()
                 .any(|m: &MasterPage| m.apply_to == apply_to);

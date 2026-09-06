@@ -1,3 +1,4 @@
+import { createSetupTerminal } from './setup-terminal.ts';
 /** 설정 허브의 탐색과 AI·연결 목적지를 소유한다. 편집 설정은 전용 모듈이 맡는다. */
 import './settings.css';
 
@@ -72,17 +73,6 @@ const PLAN_AGENTS: readonly PlanAgent[] = ['claude', 'codex'];
 
 /** 요금제도 잔액도 없는 프로바이더 — 기록된 토큰만 보여준다. */
 const API_USAGE_AGENTS: readonly AgentName[] = ['grok', 'cursor', 'opencode'];
-
-/** 설치 안내 — cursor 는 npm 이 아니라 공식 설치 스크립트로 받는다. */
-const SETUP_INSTALL_NOTE: Record<AgentName, string> = {
-  rau: '브라우저로 로그인하면 $5 체험 크레딧이 바로 연결됩니다.',
-  claude: 'Claude CLI와 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다.',
-  codex: 'Codex CLI와 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다.',
-  pi: 'Pi 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다.',
-  grok: 'Grok CLI와 실행에 필요한 패키지를 앱 전용 폴더에 설치합니다.',
-  cursor: 'Cursor CLI를 공식 설치 스크립트로 앱 전용 폴더에 설치합니다.',
-  opencode: 'OpenCode CLI를 앱 전용 폴더에 설치합니다.',
-};
 
 /** API 키 입력칸 힌트 — 키 접두사가 있는 프로바이더만 형태를 보여준다. */
 const API_KEY_PLACEHOLDER: Record<AgentName, string> = {
@@ -329,6 +319,8 @@ export interface SettingsPanelDeps {
     code: string;
     message: string;
   }) => void;
+  cloudSettings?: HTMLElement;
+  refreshCloudSettings?: () => void;
 }
 
 export interface SettingsPanel {
@@ -354,11 +346,12 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     bridge,
     eventBus,
     editorRuntime,
-    getSelection,
     applyDefaults,
     openCalibration,
     reconnectSession,
     onAgentSetupAbandoned,
+    cloudSettings,
+    refreshCloudSettings,
   } = deps;
 
   let disposed = false;
@@ -476,6 +469,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     { id: 'editing', label: '편집' },
     { id: 'ai', label: 'AI 설정' },
     { id: 'connections', label: 'AI 연결' },
+    { id: 'cloud', label: 'Cloud 연결' },
   ];
   for (const destination of destinations) {
     const button = el('button', 'ag-settings-nav-button', destination.label);
@@ -686,17 +680,19 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   // ── Pi 모달 흐름 ──────────────────────────────────────
   // 설치 → 로그인 → 모델 → 요약으로 모습을 바꾸며, 설정 페이지에는 직접 붙지 않는다.
   const piCard = el('div', 'ag-pi-card');
-  const piHead = el('div', 'ag-pi-head');
-  const piHeadName = el('span', 'ag-settings-row-name');
-  piHeadName.append(createProviderIcon('pi'), document.createTextNode('Pi'));
+  const piHead = el('div', 'ag-agent-setup-hero');
+  const piHeadIcon = el('div', 'ag-agent-setup-hero-icon');
+  piHeadIcon.append(createProviderIcon('pi'));
+  const piHeadCopy = el('div', 'ag-agent-setup-hero-copy');
+  const piHeadName = el('strong', 'ag-agent-setup-hero-title', 'Pi');
   const piHeadDetail = el('span', 'ag-settings-row-detail', '확인 중…');
-  piHead.append(piHeadName, piHeadDetail);
+  piHeadCopy.append(piHeadName, piHeadDetail);
+  piHead.append(piHeadIcon, piHeadCopy);
   const piMessageLine = el('p', 'ag-settings-cliproxy-error');
   piMessageLine.hidden = true;
 
   // 1단계 — 설치
   const piInstallStep = el('div', 'ag-pi-step');
-  const piInstallNote = el('p', 'ag-settings-note', 'OpenRouter 모델로 문서를 고치는 Pi 에이전트예요.');
   const piInstallBtn = el('button', 'ag-settings-primary ag-pi-logo-btn');
   piInstallBtn.type = 'button';
   piInstallBtn.append(createProviderIcon('pi'), el('span', '', 'Pi 연결'));
@@ -707,7 +703,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const piProgressFill = el('div', 'ag-settings-meter-fill');
   piProgressTrack.appendChild(piProgressFill);
   piProgressTrack.hidden = true;
-  piInstallStep.append(piInstallNote, piInstallBtn, piProgressTrack, piProgressLine);
+  piInstallStep.append(piInstallBtn, piProgressTrack, piProgressLine);
 
   // 2단계 — OpenRouter 키
   const piKeyStep = el('div', 'ag-pi-step');
@@ -797,10 +793,9 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   setupDialog.tabIndex = -1;
   const setupChrome = el('header', 'ag-agent-setup-chrome');
   const setupTitleWrap = el('div', 'ag-agent-setup-title-wrap');
-  const setupEyebrow = el('span', 'ag-agent-setup-eyebrow', '에이전트 연결');
   const setupTitle = el('h2', 'ag-agent-setup-title');
   setupTitle.id = 'ag-agent-setup-title';
-  setupTitleWrap.append(setupEyebrow, setupTitle);
+  setupTitleWrap.append(setupTitle);
   const setupClose = el('button', 'ag-agent-setup-close');
   setupClose.type = 'button';
   setupClose.setAttribute('aria-label', '설정 닫기');
@@ -827,15 +822,12 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   setupError.hidden = true;
 
   const setupInstallPane = el('div', 'ag-agent-setup-pane');
-  const setupInstallNote = el('p', 'ag-agent-setup-copy');
   const setupInstall = el('button', 'ag-agent-setup-primary', '설치하고 계속');
   setupInstall.type = 'button';
-  setupInstallPane.append(setupInstallNote, setupInstall);
+  setupInstallPane.append(setupInstall);
 
   const setupAuthPane = el('div', 'ag-agent-setup-pane');
   const setupAuthHeading = el('h3', 'ag-agent-setup-section-title', '로그인 방법');
-  const setupAuthNote = el('p', 'ag-agent-setup-copy');
-  setupAuthNote.hidden = true;
   const setupOauth = el('button', 'ag-agent-auth-card');
   setupOauth.type = 'button';
   setupOauth.append(el('strong', '', '브라우저로 로그인'), el('span', '', '구독 계정 또는 웹 계정 연결'));
@@ -891,7 +883,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   setupCodeBox.append(setupCodeNote, setupCode.field, setupCodeSubmit);
   setupAuthPane.append(
     setupAuthHeading,
-    setupAuthNote,
     setupOauth,
     setupApiToggle,
     setupKeyBox,
@@ -949,7 +940,14 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   setupDialog.append(setupChrome, setupBody);
   setupOverlay.appendChild(setupDialog);
 
-  setupInstall.addEventListener('click', () => void installSelectedAgent());
+  setupInstall.addEventListener('click', () => {
+    const agent = setupAgent;
+    void installSelectedAgent().then(() => {
+      if (agent && setupAgent === agent && isAgentInstalled(agent) && !isAgentLoggedIn(agent)) {
+        return startPreferredSetupAuth(agent);
+      }
+    });
+  });
   setupOauth.addEventListener('click', () => void startSetupAuth('oauth'));
   setupApiToggle.addEventListener('click', () => {
     setupKeyBox.hidden = false;
@@ -974,6 +972,12 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   setupUserCodeCopy.addEventListener('click', () => {
     if (setupUserCode) void copySetupText(setupUserCode, setupUserCodeCopy, '코드 복사');
   });
+  const setupTerminal = createSetupTerminal({
+    input: data => { if (supportsTerminalSetup(setupAgent) && setupAuthRunId) bridge.sendSetupTerminalInput(setupAgent, setupAuthRunId, data); },
+    resize: (cols, rows) => { if (supportsTerminalSetup(setupAgent) && setupAuthRunId) bridge.resizeSetupTerminal(setupAgent, setupAuthRunId, cols, rows); },
+    cancel: () => setupLoginCancel.click(),
+  });
+  setupAuthPane.append(setupTerminal.root);
   setupLoginCancel.addEventListener('click', () => {
     if (setupAgent && setupAuthRunId) bridge.cancelAgentSetup(setupAgent, setupAuthRunId);
     setupBusy = false;
@@ -1071,22 +1075,24 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   });
 
   // ── 2. 기본 설정 ──────────────────────────────────────
-  const defaults = createSection('기본 설정');
-  const agentField = createSelect('기본 제공자', selectableAgents().map(
+  const defaults = createSection('새 대화 기본값');
+  defaults.root.classList.add('ag-settings-defaults');
+  const agentField = createSelect('제공자', selectableAgents().map(
     (agent) => ({ id: agent, label: AGENT_LABEL[agent] }),
   ));
-  const modelField = createSelect('기본 모델', []);
+  const modelField = createSelect('모델', []);
   const effortField = createSelect('추론 강도', []);
-  const permissionField = createSelect('권한 프로필', PERMISSION_OPTIONS);
-  const defaultsNote = el('p', 'ag-settings-note', '새 대화부터 적용돼요.');
-  const currentLine = el('p', 'ag-settings-current');
+  const permissionField = createSelect('권한', PERMISSION_OPTIONS.map(option => ({
+    ...option, label: option.id === 'safe' ? '안전 · 검토 후 승인' : '전체 접근',
+  })));
+  for (const option of permissionField.select.options) {
+    option.title = PERMISSION_OPTIONS.find(item => item.id === option.value)?.label ?? '';
+  }
   defaults.body.append(
     agentField.field,
     modelField.field,
     effortField.field,
     permissionField.field,
-    defaultsNote,
-    currentLine,
   );
 
   agentField.select.addEventListener('change', () => {
@@ -1139,7 +1145,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const instructionsReload = el('button', 'ag-settings-btn', '다시 불러오기');
   instructionsReload.type = 'button';
   instructionsActions.append(instructionsReload);
-  const hancomGit = createToggleRow('한컴용 Git 사용하기 (beta)');
+  const hancomGit = createToggleRow('한컴용 Git 사용하기');
   hancomGit.input.checked = userSettings.getUseHancomGit();
   hancomGit.input.addEventListener('change', () => {
     userSettings.setUseHancomGit(hancomGit.input.checked);
@@ -1344,12 +1350,13 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const aiFooter = el('div', 'ag-settings-apply-footer');
   aiFooter.append(aiStatus, aiCancel, aiApply);
   const aiContent = el('div', 'ag-settings-destination-content');
-  aiContent.append(calibration.root, instructionsSection.root, defaults.root, templatesSection.root, aiFooter);
+  aiContent.append(defaults.root, calibration.root, instructionsSection.root, templatesSection.root, aiFooter);
   panes.get('ai')?.appendChild(aiContent);
 
   const connectionContent = el('div', 'ag-settings-destination-content');
   connectionContent.append(accountSection.root, connection.root, quotaSection.root, browserbaseSection.root, usageSection.root);
   panes.get('connections')?.appendChild(connectionContent);
+  if (cloudSettings) panes.get('cloud')?.appendChild(cloudSettings);
 
   aiApply.addEventListener('click', () => void applyAiDraft());
   aiCancel.addEventListener('click', cancelAiDraft);
@@ -1403,6 +1410,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       case 'ai':
         return isAiDirty();
       case 'connections':
+      case 'cloud':
         return false;
       default: {
         const _exhaustive: never = currentDestination;
@@ -1607,6 +1615,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
           cancelAiDraft();
           return true;
         case 'connections':
+        case 'cloud':
           return true;
         default: {
           const _exhaustive: never = currentDestination;
@@ -1620,6 +1629,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       case 'ai':
         return applyAiDraft();
       case 'connections':
+      case 'cloud':
         return true;
       default: {
         const _exhaustive: never = currentDestination;
@@ -1783,13 +1793,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       prefsDraft.defaultModel,
     );
     permissionField.select.value = prefsDraft.defaultPermissionProfile;
-  }
-
-  function renderCurrentSelection(): void {
-    const current = getSelection();
-    const permission = current.permission === 'unrestricted' ? '전체 접근' : '안전';
-    currentLine.textContent =
-      `현재 대화: ${AGENT_LABEL[current.agent]} / ${labelForModel(current.agent, current.model)} / ${permission}`;
   }
 
   function applyAccountLoginStart(started: AccountLoginStart): void {
@@ -2066,6 +2069,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   /** 진행 중인 로그인의 주소·코드를 지운다. */
   function clearSetupAuthPrompt(): void {
+    setupTerminal.close();
     setupOauthPending = false;
     setupAuthUrl = null;
     setupUserCode = null;
@@ -2150,6 +2154,11 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     }, 1600);
   }
 
+  function supportsTerminalSetup(agent: AgentName | null): agent is AgentName {
+    return agent !== null && !['rau', 'pi'].includes(agent)
+      && setupStatuses?.[agent]?.terminalAuthSupported !== false;
+  }
+
   function isAgentLoggedIn(agent: AgentName): boolean {
     if (agent === 'pi' && piStatus?.setupComplete === true) return true;
     const status = setupStatuses?.[agent];
@@ -2201,7 +2210,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   async function startPreferredSetupAuth(agent: AgentName): Promise<void> {
     setupReauth = true;
-    if (agent === 'opencode') {
+    if (setupStatuses?.[agent]?.terminalAuthSupported === false) {
+      setupKeyBox.hidden = false;
       renderAgentSetup();
       setupKey.input.focus();
       return;
@@ -2355,43 +2365,33 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     const configured = status?.connected === true || status?.setupComplete === true;
     // OpenCode도 바이너리 감지만으로 실행할 수 없다. API 키나 사용자의
     // `opencode auth login`을 허브가 확인한 뒤에만 완료 화면으로 보낸다.
-    const connected = agent === 'rau'
-      ? configured
-      : agent === 'opencode'
-        ? configured || (available && status?.authenticated === true)
-        : detected || configured;
+    const connected = configured || (available && status?.authenticated === true);
     setupHeroIcon.replaceChildren(createProviderIcon(agent));
     setupHeroTitle.textContent = AGENT_LABEL[agent];
-    setupInstallNote.textContent = SETUP_INSTALL_NOTE[agent];
     setupKey.input.placeholder = API_KEY_PLACEHOLDER[agent];
-    const apiKeyOnly = agent === 'opencode';
-    setupAuthHeading.textContent = apiKeyOnly ? 'OpenCode API 키' : '로그인 방법';
-    setupAuthNote.hidden = !apiKeyOnly;
-    setupAuthNote.textContent = apiKeyOnly
-      ? '터미널에서 opencode auth login을 마친 뒤 상태를 새로고침하면 기존 로그인을 감지합니다. 이 화면에서는 OpenCode API 키를 연결할 수 있습니다.'
-      : '';
-    setupOauth.hidden = apiKeyOnly;
+    setupAuthHeading.textContent = '로그인 방법';
+    setupOauth.hidden = status?.terminalAuthSupported === false;
     const oauthTitle = setupOauth.querySelector('strong');
     const oauthDetail = setupOauth.querySelector('span');
     if (agent === 'rau') {
       if (oauthTitle) oauthTitle.textContent = 'Rau로 시작';
-      if (oauthDetail) oauthDetail.textContent = '브라우저 로그인 · $5 체험 크레딧';
+      if (oauthDetail) oauthDetail.textContent = '$5 체험 크레딧';
       setupInstallPane.hidden = true;
       setupApiToggle.hidden = true;
       setupKeyBox.hidden = true;
       setupAuthPane.hidden = connected && !setupReauth;
     } else {
-      if (oauthTitle) oauthTitle.textContent = '브라우저로 로그인';
-      if (oauthDetail) oauthDetail.textContent = '구독 계정 또는 웹 계정 연결';
-      setupApiToggle.hidden = apiKeyOnly;
-      if (apiKeyOnly) setupKeyBox.hidden = false;
+      if (oauthTitle) oauthTitle.textContent = supportsTerminalSetup(agent) ? '로그인 시작' : '브라우저로 로그인';
+      if (oauthDetail) oauthDetail.textContent = supportsTerminalSetup(agent) ? '이 창에서 계정 연결' : '구독 계정 또는 웹 계정 연결';
+      setupApiToggle.hidden = false;
       setupInstallPane.hidden = available;
       setupAuthPane.hidden = !available || (connected && !setupReauth);
     }
+    setupHero.hidden = connected && !setupReauth;
     setupDonePane.hidden = !connected || setupReauth;
     setupDonePane.classList.toggle('ag-agent-setup-rau-actions', agent === 'rau' && connected && !setupReauth);
     setupDoneClose.textContent = agent === 'rau' && rauAuthFeedback === 'success' ? '계속' : '완료';
-    setupDoneChange.textContent = apiKeyOnly ? 'API 키 변경' : '로그인 방식 변경';
+    setupDoneChange.textContent = '로그인 방식 변경';
     setupDoneChange.hidden = agent === 'rau';
     setupDoneDisconnect.hidden = agent !== 'rau' || !connected || setupReauth;
     setupDoneDetail.textContent = status?.authMethod === 'api-key' && status.keyTail
@@ -2416,7 +2416,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     setupApiToggle.disabled = setupBusy || authBusyElsewhere || connectionState !== 'connected';
     setupKeySubmit.disabled = setupBusy || !setupKey.input.value.trim();
     renderSetupLoginBox();
-    setupCodeBox.hidden = (agent !== 'claude' && agent !== 'rau') || !setupCodePending || !setupBusy;
+    setupCodeBox.hidden = supportsTerminalSetup(agent) || (agent !== 'claude' && agent !== 'rau') || !setupCodePending || !setupBusy;
     setupCodeNote.textContent = agent === 'rau'
       ? '브라우저에 표시된 12자리 반환 코드를 붙여넣어 주세요.'
       : '브라우저에서 로그인하면 인증 코드가 표시됩니다. 코드를 붙여넣어 주세요.';
@@ -2426,7 +2426,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   /** 브라우저 로그인이 도는 동안만 주소·코드 상자를 세운다. */
   function renderSetupLoginBox(): void {
-    const authorizing = setupOauthPending && setupBusy;
+    const authorizing = setupOauthPending && setupBusy && !supportsTerminalSetup(setupAgent);
     setupLoginBox.hidden = !authorizing;
     setupAuthUrlRow.hidden = !setupAuthUrl;
     if (setupAuthUrl) {
@@ -2498,7 +2498,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   async function startSetupAuth(method: AgentAuthMethod): Promise<void> {
     if (!setupAgent || setupBusy) return;
-    if (setupAgent === 'opencode' && method === 'oauth') return;
     const keyInput = setupAgent === 'pi' ? piKeyInput.input : setupKey.input;
     const key = method === 'api-key' ? keyInput.value.trim() : '';
     if (method === 'api-key' && !key) return;
@@ -2508,11 +2507,16 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     setupMessage = '';
     clearSetupAuthPrompt();
     setupOauthPending = method === 'oauth';
+    if (supportsTerminalSetup(setupAgent) && method === 'oauth') void setupTerminal.open(AGENT_LABEL[setupAgent]);
     resetSetupInstallProgress();
     if (setupAgent === 'pi') piMessage = '';
     renderAgentSetup();
-    const started = await bridge.authenticateAgent(setupAgent, method, key || undefined);
-    if (disposed) return;
+    const authenticatingAgent = setupAgent;
+    const started = await bridge.authenticateAgent(authenticatingAgent, method, key || undefined);
+    if (disposed || setupAgent !== authenticatingAgent || !setupOverlay.isConnected) {
+      if (started?.authRunId) bridge.cancelAgentSetup(authenticatingAgent, started.authRunId);
+      return;
+    }
     if (!started) {
       setupBusy = false;
       setupMessage = '로그인을 시작하지 못했어요.';
@@ -2931,6 +2935,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     const step = piCurrentStep();
     for (const [id, node] of piSteps) node.hidden = id !== step;
     const online = connectionState === 'connected';
+    piHead.hidden = step === 'summary';
     piHeadDetail.textContent = piHeadText();
     piMessageLine.textContent = piMessage;
     piMessageLine.hidden = !piMessage;
@@ -3311,7 +3316,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   syncPrefsInputs();
   renderAccount();
-  renderCurrentSelection();
   renderConnection();
   renderProviders();
   renderAgentInstructions();
@@ -3335,7 +3339,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       if (destination) selectDestination(destination);
       else selectDestination(lastDestination);
       syncPrefsInputs();
-      renderCurrentSelection();
       renderConnection();
       renderBrowserbase();
       if (connectionState === 'connected') void refreshBrowserbase();
@@ -3351,6 +3354,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       void refreshPiStatus();
       void refreshSetupStatuses();
       void refreshTemplates();
+      refreshCloudSettings?.();
     },
     close(): void {
       settingsOpen = false;
@@ -3467,9 +3471,12 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
           setupStatuses = ev.statuses;
           const selectedStatus = setupAgent ? ev.statuses[setupAgent] : null;
           if (setupAgent && selectedStatus?.authOwnedByThisSession && selectedStatus.authRunId) {
+            const resumeTerminal = supportsTerminalSetup(setupAgent) && setupAuthRunId !== selectedStatus.authRunId;
             setupAuthRunId = selectedStatus.authRunId;
             setupBusy = true;
-            setupOauthPending = Boolean(selectedStatus.authUrl || selectedStatus.pairingCode);
+            setupOauthPending = supportsTerminalSetup(setupAgent) || Boolean(selectedStatus.authUrl || selectedStatus.pairingCode);
+            if (supportsTerminalSetup(setupAgent)) void setupTerminal.open(AGENT_LABEL[setupAgent]);
+            if (resumeTerminal) bridge.resumeSetupTerminal(setupAgent, selectedStatus.authRunId);
             setupAuthUrl = selectedStatus.authUrl ?? setupAuthUrl;
             setupUserCode = selectedStatus.pairingCode ?? setupUserCode;
             if (setupAgent === 'rau' || setupAgent === 'claude') setupCodePending = true;
@@ -3501,6 +3508,16 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
           syncPrefsInputs();
           break;
         }
+        case 'agent-setup-terminal':
+          if (!supportsTerminalSetup(setupAgent) || ev.agent !== setupAgent || !setupBusy || !setupOauthPending) break;
+          if (setupAuthRunId && ev.authRunId !== setupAuthRunId) break;
+          setupAuthRunId = ev.authRunId;
+          setupBusy = true;
+          setupOauthPending = true;
+          void setupTerminal.open(AGENT_LABEL[setupAgent]);
+          if (ev.ready) setupTerminal.ready();
+          if (ev.data !== undefined) setupTerminal.write(ev.data, ev.reset);
+          break;
         case 'agent-setup-progress':
           if (setupAgent === ev.agent) {
             if (ev.authRunId && setupAuthRunId && ev.authRunId !== setupAuthRunId) break;
@@ -3603,6 +3620,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       }
     },
     dispose(): void {
+      if (supportsTerminalSetup(setupAgent) && setupAuthRunId) bridge.cancelAgentSetup(setupAgent, setupAuthRunId);
+      setupTerminal.dispose();
       disposed = true;
       settingsOpen = false;
       syncUsagePolling();

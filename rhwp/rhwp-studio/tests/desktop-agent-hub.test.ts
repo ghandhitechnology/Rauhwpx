@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -673,7 +673,7 @@ test('stopHubByPort reports a timeout and retains the pid file while the process
   }
 });
 
-test('stopHubByPort retains quarantine after cleanup-unproven even when the leader exits', async () => {
+test('stopHubByPort retains quarantine after cleanup-unproven for reused roots even when the leader exits', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'rhwp-stop-unproven-'));
   const pidPath = join(dir, 'rhwp-agent.pid');
   let healthReads = 0;
@@ -698,6 +698,8 @@ test('stopHubByPort retains quarantine after cleanup-unproven even when the lead
     assert.deepEqual(result, { stopped: false, ready: false, pid: 4242 });
     assert.equal(readPidFile(pidPath), 4242);
     const laterStart = await startDetachedHub({
+      env: { RHWP_WORK_DIR: join(dir, 'hub-work') },
+      processAlive: () => false,
       port: 5175,
       runDir: dir,
       fetchImpl: async () => ({ ok: false, json: async () => null }),
@@ -747,6 +749,7 @@ test('startDetachedHub does not bypass a quarantined detached pid record', async
     const result = await startDetachedHub({
       port: 5175,
       runDir: dir,
+      processAlive: () => true,
       fetchImpl: async () => ({ ok: false, json: async () => null }),
     });
     assert.deepEqual(result, {
@@ -757,6 +760,93 @@ test('startDetachedHub does not bypass a quarantined detached pid record', async
       error: 'hub-cleanup-unproven',
     });
     assert.equal(readPidFile(paths.pid), 4244);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('startDetachedHub isolates recovered roots and clears inherited ownership for caller roots', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rhwp-start-fresh-roots-'));
+  const paths = hubRunPaths(dir);
+  const capturePath = join(dir, 'launch.json');
+  const scriptPath = join(dir, 'capture.mjs');
+  writeFileSync(scriptPath, `
+    import { writeFileSync } from 'node:fs';
+    writeFileSync(process.env.CAPTURE_PATH, JSON.stringify({
+      pid: process.pid,
+      launchId: process.env.RHWP_LAUNCH_ID,
+      work: process.env.RHWP_WORK_DIR,
+      runtime: process.env.RHWP_RUNTIME_DIR,
+      ownsWork: process.env.RHWP_OWN_WORK_DIR,
+      ownsRuntime: process.env.RHWP_OWN_RUNTIME_DIR,
+    }));
+  `);
+  const launches: Array<{ launchId: string; work: string; runtime: string }> = [];
+  try {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      rmSync(capturePath, { force: true });
+      const callerOwned = attempt === 2;
+      if (callerOwned) removePidFile(paths.pid);
+      else writePidFile(paths.pid, 4245);
+      const callerWork = join(dir, 'caller-work');
+      const callerRuntime = join(dir, 'caller-runtime');
+      const result = await startDetachedHub({
+        runDir: dir,
+        scriptPath,
+        execPath: process.execPath,
+        env: {
+          ...process.env,
+          RHWP_WORK_DIR: callerOwned ? callerWork : '',
+          RHWP_RUNTIME_DIR: callerOwned ? callerRuntime : '',
+          RHWP_OWN_WORK_DIR: '1',
+          RHWP_OWN_RUNTIME_DIR: '1',
+          RHWP_LAUNCH_ID: 'old-launch',
+          CAPTURE_PATH: capturePath,
+        },
+        processAlive: (pid) => isProcessAlive(pid, () => { throw Object.assign(new Error(), { code: 'ESRCH' }); }),
+        fetchImpl: async () => {
+          try { return jsonResponse({ ok: true, ...JSON.parse(readFileSync(capturePath, 'utf8')) }); }
+          catch { return jsonResponse(null, false); }
+        },
+        log: { warn() {} },
+      });
+      assert.equal(result.ready, true);
+      const launch = JSON.parse(readFileSync(capturePath, 'utf8'));
+      assert.notEqual(launch.launchId, 'old-launch');
+      assert.equal(launch.work, callerOwned ? callerWork : join(dir, 'launches', launch.launchId, 'work'));
+      assert.equal(launch.runtime, callerOwned ? callerRuntime : join(dir, 'launches', launch.launchId, 'runtime'));
+      assert.equal(launch.ownsWork, callerOwned ? '0' : '1');
+      assert.equal(launch.ownsRuntime, callerOwned ? '0' : '1');
+      launches.push(launch);
+    }
+    assert.notEqual(launches[0].work, launches[1].work);
+    assert.notEqual(launches[0].runtime, launches[1].runtime);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('startDetachedHub keeps quarantine for unknown process state and caller-owned roots', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'rhwp-start-uncertain-'));
+  const paths = hubRunPaths(dir);
+  try {
+    for (const [code, env] of [
+      ['EPERM', {}],
+      ['EACCES', {}],
+      [undefined, {}],
+      ['ESRCH', { RHWP_WORK_DIR: join(dir, 'work') }],
+      ['ESRCH', { RHWP_RUNTIME_DIR: join(dir, 'runtime') }],
+    ] as const) {
+      writePidFile(paths.pid, 4246);
+      const result = await startDetachedHub({
+        runDir: dir,
+        env,
+        processAlive: (pid) => isProcessAlive(pid, () => { throw Object.assign(new Error(), { code }); }),
+        fetchImpl: async () => jsonResponse(null, false),
+      });
+      assert.equal(result.error, 'hub-cleanup-unproven');
+      assert.equal(readPidFile(paths.pid), 4246);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -63,6 +63,7 @@ Remaining-quota bars refresh while Connections is visible, and each card’s ref
 OpenRouter credit balances, Grok billing, and OpenCode Go usage windows also come from their remote APIs. Unknown values remain unavailable. See [remote provider balances](docs/provider-balances.md) for authentication, supported account types, and endpoint details.
 
 ## Environment variables
+`RHWP_STUDIO_ORIGINS` (default empty) is a comma-separated list of exact HTTPS Studio origins allowed for operator-run remote previews.
 
 `browserbase_*` tools run one Stagehand sidecar per browser. Every tool takes an optional `browserId`. Omit it for the shared `main` browser. Subagents pass their own id and get an isolated browser. `BrowserbaseFleet` in `rhwp/rhwp-agent/browserbase-session.mjs` keeps at most 4 browsers per chat and returns `BROWSERBASE_BROWSER_LIMIT` beyond that. Call `browserbase_end` to free a slot. Subagent browsers close when the turn ends. The main browser survives provider restarts and closes on chat stop, hub shutdown, or 15 minutes idle. If a sidecar process dies, the call that hit it returns `BROWSERBASE_SIDECAR_EXITED` and the next call relaunches it.
 

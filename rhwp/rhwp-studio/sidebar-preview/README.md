@@ -18,6 +18,35 @@ change. The server binds to localhost and reserves this port so the preview's
 browser storage stays separate from Studio. It requires no Rust build, WASM,
 Electron, agent hub, credentials, or cloud connection.
 
+## Live UI audit
+
+Open **http://127.0.0.1:7715/?audit=1** for a searchable checklist of 54 sidebar
+scenarios and 22 production dialog/menu launchers. The **Scenes** tab covers
+responses, rich Markdown, plan approval, questions, edit review, active subagents,
+connection failures, each provider's setup, Browserbase, preferences, history,
+and Cloud usage/recovery states. **Editor dialogs** opens production file,
+table, field, font, grid, and merge-preparation dialogs with sample values.
+
+Use **Previous / Next** and the reviewed checkboxes to track the audit. Checkmarks
+persist in the current browser tab. Theme and sidebar width controls stay above
+the navigation. Scene links preserve both values. **Fixture controls** exposes
+manual playback and service controls. Active-turn fixtures stay running until
+you press Stop; Cloud scenes start their sample conversation automatically.
+
+The document canvas, ribbon, engine-dependent formatting/object dialogs, and
+native file pickers are reviewed in the running Electron app. Changes to the
+shared production components appear in both the app and this preview. Dialog
+callbacks in this preview only report sample results.
+
+If another worktree already owns port 7715, leave it running and use a separate
+port: `npm --prefix rhwp/rhwp-studio run dev:sidebar -- --port 7716`, then open
+`http://127.0.0.1:7716/?audit=1`. Each port has separate browser storage.
+
+Run `npm run test:sidebar:audit` to open every named scene and dialog in a fresh
+headless browser, check navigation/checklist persistence, and verify that no
+external service or WASM requests occur. Representative screenshots are saved
+under `sidebar-preview/artifacts/audit-*.png`.
+
 The left controls belong to the preview. The right panel is the production
 sidebar, starting at its normal 480px width. Drag its left edge to resize it;
 the application's width limits and compact composer behavior still apply.
@@ -32,7 +61,10 @@ The focus-mode button shows a placeholder because this preview covers the sideba
 | `?scenario=review` | Streaming reply followed by accept/reject changes |
 | `?scenario=fleet` | Tool activity and a subagent task |
 | `?scenario=error` | A failed turn |
+| `?cloud=1` | Cloud workspace with local disconnect, reconnect, restart, and shutdown fixtures |
 | `?page=settings` | Production settings panel |
+| `?cloud=1&dashboard=1&page=settings&destination=cloud` | Cloud dashboard with explicit sample quota, seven daily observations, and provider sessions |
+| `?cloud=1&dashboard=1&page=settings&destination=cloud&fullscreen=1` | Full-screen production Cloud settings |
 | `?page=versions` | Production version graph |
 | `?page=versions&history=branches` | Branching and merging history with colored graph lanes |
 | `?services=setup&page=settings` | Uninstalled/unconfigured service fixtures |
@@ -47,6 +79,21 @@ The focus-mode button shows a placeholder because this preview covers the sideba
 Parameters can be combined. Select **Next reply**, then type a message or press
 **Play sample conversation**. Connection and service controls expose disconnected,
 reconnecting, replaced-session, and setup screens without waiting for real failures.
+
+For Cloud recovery, open `?cloud=1`, choose **Codex**, click the document’s Cloud icon,
+and complete setup with **Cloud로 계속** before sending a message. The send button shows a Cloud icon in Cloud mode.
+Click the document’s Cloud icon again for execution options. In Cloud chats,
+**내 문서 / Cloud 문서** floats above the composer for switching document views;
+**Cloud 변경 병합** appears beside it when a completed checkpoint is ready. **Disconnect
+Cloud** pauses the connection while retaining the last frame; the production
+Cloud controls reconnect, rebuild from the same conversation, or stop the worker.
+The fixture records transfers and session scope in `window.sidebarPreview.cloud`.
+
+The Cloud settings dashboard's **크게 보기** button opens the production full-screen
+settings layout. The ordinary chat focus button still uses the preview placeholder.
+Dashboard fixtures expose quota exhaustion, sign-out, self-hosted and unavailable
+states through the typed `setDashboardState` method. Sample history is isolated to
+the preview account and only seeded with `dashboard=1`.
 
 ## Behavior and placeholders
 
@@ -126,6 +173,14 @@ checks request isolation, and writes **sidebar-only PNGs** to
 not installed in a standard macOS/Linux location; this also supports Windows paths.
 It does not connect to or control your normal browser.
 
+Cloud checks also save full-page `cloud-live.png`, `cloud-disconnected.png`, and
+`cloud-restarted.png`, plus narrow dark-mode recovery and status-panel captures.
+They check button clipping and panel bounds at the sidebar's minimum width,
+a blocked status refresh, stable keyboard focus
+across repeated snapshots, duplicate recovery clicks, stopping during reconnect,
+fresh transfer IDs after rebuilding, and returning to the original chat after
+switching threads. Timings measure the local fixture, not hosted provisioning.
+
 The static build goes to `rhwp/rhwp-studio/dist-sidebar/`, separately from the
 application build. For the repository-wide TypeScript check, run Studio's normal
 `tsc` command after generating the application's WASM declarations. A checkout
@@ -135,3 +190,13 @@ the sidebar preview runs and builds independently.
 For a design review, also inspect keyboard focus, scroll behavior with long
 content, and popovers at the sidebar width you plan to ship. Backend correctness
 and document-renderer behavior remain covered by their application tests.
+
+
+### OpenCode login terminal
+
+Open the **OpenCode login terminal** audit scene to review the expanding login panel. The preview uses local terminal output: press Enter twice to finish the sample login, or cancel and choose API-key entry. The app uses the same UI with an owned PTY running `opencode auth login`; completion refreshes provider status automatically. Restart the desktop app after updating the hub to test the real login.
+
+The terminal supports keyboard input, paste, resizing, browser links, cancellation, and restoration after a connection interruption. Raw terminal output is kept only in the owning login's memory, with bounded buffers. Credentials are staged and published through the existing authentication transaction after successful validation.
+
+
+New Claude, Codex, Grok, Cursor, and OpenCode installs continue into the embedded login terminal. The hub advertises platform support; Claude on macOS keeps API-key setup because its Keychain login cannot use the existing isolated credential transaction. Rau and Pi retain their browser account flows. Provider connection status still refreshes automatically after login, and API-key entry remains available as a fallback.

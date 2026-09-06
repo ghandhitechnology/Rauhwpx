@@ -211,6 +211,8 @@ export interface MergeDraftHistoryEntry {
 }
 
 export interface VersionMergeDraft {
+  /** Reapply a stash into the working tree without advancing the target branch. */
+  shelfApply?: { id: ShelfId; remove: boolean };
   id: MergeDraftId;
   repositoryId: RepositoryId;
   targetBranch: BranchName;

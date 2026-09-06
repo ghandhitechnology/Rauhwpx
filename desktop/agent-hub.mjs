@@ -471,13 +471,13 @@ export function removePidFile(pidPath) {
   }
 }
 
-export function isProcessAlive(pid) {
+export function isProcessAlive(pid, probe = process.kill) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
-    process.kill(pid, 0);
+    probe(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    return error?.code !== 'ESRCH';
   }
 }
 
@@ -835,9 +835,12 @@ export async function startDetachedHub({
   log = console,
   readyTimeoutMs = DEFAULT_READY_TIMEOUT_MS,
   expectedProtocol,
+  processAlive = isProcessAlive,
 } = {}) {
   const paths = hubRunPaths(runDir);
   const token = env.RHWP_AGENT_TOKEN ?? env.RHWP_AGENT_DEV_TOKEN ?? 'dev';
+  const ownsWorkDir = !env.RHWP_WORK_DIR;
+  const ownsRuntimeDir = !env.RHWP_RUNTIME_DIR;
   const health = await readHubHealth(port, { fetchImpl, token });
   if (health?.ok) {
     const compatible = expectedProtocol === undefined
@@ -873,24 +876,26 @@ export async function startDetachedHub({
     }
   }
 
-  // A stale PID file cannot prove process identity or descendant cleanup. It is
-  // deliberately retained when an authenticated shutdown was not proven, so a
-  // later `start` must not bypass the quarantine and reuse the same work roots.
+  // Detached descendants may outlive their leader. Recover only when the
+  // leader is gone and fresh owned roots can isolate the replacement.
   const recordedPid = readPidFile(paths.pid);
   if (recordedPid !== null) {
-    return {
-      started: false,
-      ready: false,
-      pid: recordedPid,
-      log: paths.log,
-      error: 'hub-cleanup-unproven',
-    };
+    if (!ownsWorkDir || !ownsRuntimeDir || processAlive(recordedPid) !== false) {
+      return {
+        started: false,
+        ready: false,
+        pid: recordedPid,
+        log: paths.log,
+        error: 'hub-cleanup-unproven',
+      };
+    }
+    log.warn?.(`[rauhwpx] recovering from dead detached agent hub pid ${recordedPid}`);
   }
-  // Junk or an already-removed record carries no process identity.
   if (paths.pid) removePidFile(paths.pid);
 
-  const ownsWorkDir = !env.RHWP_WORK_DIR;
-  const ownsRuntimeDir = !env.RHWP_RUNTIME_DIR;
+  // Never reuse an inherited launch ID: its descendants may still own roots.
+  const launchId = randomBytes(16).toString('hex');
+  const launchRoot = join(paths.dir, 'launches', launchId);
   const launch = resolveHubLaunch({
     packaged: false,
     execPath,
@@ -900,10 +905,11 @@ export async function startDetachedHub({
     env: {
       ...env,
       RHWP_AGENT_PORT: String(port),
-      RHWP_WORK_DIR: env.RHWP_WORK_DIR ?? join(paths.dir, 'hub-work'),
-      RHWP_RUNTIME_DIR: env.RHWP_RUNTIME_DIR ?? join(paths.dir, 'hub-runtime'),
-      ...(ownsWorkDir ? { RHWP_OWN_WORK_DIR: '1' } : {}),
-      ...(ownsRuntimeDir ? { RHWP_OWN_RUNTIME_DIR: '1' } : {}),
+      RHWP_LAUNCH_ID: launchId,
+      RHWP_WORK_DIR: env.RHWP_WORK_DIR || join(launchRoot, 'work'),
+      RHWP_RUNTIME_DIR: env.RHWP_RUNTIME_DIR || join(launchRoot, 'runtime'),
+      RHWP_OWN_WORK_DIR: ownsWorkDir ? '1' : '0',
+      RHWP_OWN_RUNTIME_DIR: ownsRuntimeDir ? '1' : '0',
     },
     extraDirs,
     exists,
