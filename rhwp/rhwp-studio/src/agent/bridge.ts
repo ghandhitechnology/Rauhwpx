@@ -158,6 +158,9 @@ export interface AgentBridge {
   installAgent(agent: AgentName): Promise<AgentSetupStatusMap | null>;
   authenticateAgent(agent: AgentName, method: AgentAuthMethod, key?: string): Promise<AgentSetupAuthStart | null>;
   /** 브라우저 로그인 뒤 받은 인증 코드를 진행 중인 CLI 로그인에 전달한다. */
+  resumeSetupTerminal(agent: AgentName, authRunId: string): void;
+  sendSetupTerminalInput(agent: AgentName, authRunId: string, data: string): void;
+  resizeSetupTerminal(agent: AgentName, authRunId: string, cols: number, rows: number): void;
   submitAgentAuthCode(agent: AgentName, authRunId: string, code: string): void;
   cancelAgentSetup(agent: AgentName, authRunId: string): void;
   /** 이 기기의 Rau 키만 지운다. 호스티드 $5 키는 서버에 남는다. */
@@ -2232,6 +2235,15 @@ export class AgentBridgeImpl implements AgentBridge {
         }
         break;
       }
+      case 'agent-setup-terminal': {
+        if (!isAgentName(msg.agent) || typeof msg.authRunId !== 'string') break;
+        this.emit({ type: 'agent-setup-terminal', agent: msg.agent, authRunId: msg.authRunId,
+          ...(typeof msg.data === 'string' ? { data: msg.data } : {}),
+          ...(msg.ready === true ? { ready: true } : {}),
+          ...(msg.reset === true ? { reset: true } : {}),
+        });
+        break;
+      }
       case 'agent-setup-progress': {
         if (!isAgentName(msg.agent)) break;
         const state = msg.state === 'installing' || msg.state === 'authorizing' || msg.state === 'done'
@@ -3416,6 +3428,18 @@ export class AgentBridgeImpl implements AgentBridge {
       'agent-setup-auth',
       30_000,
     );
+  }
+
+  resumeSetupTerminal(agent: AgentName, authRunId: string): void {
+    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'agent-setup-terminal-resume', agent, authRunId });
+  }
+
+  sendSetupTerminalInput(agent: AgentName, authRunId: string, data: string): void {
+    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'agent-setup-terminal-input', agent, authRunId, data });
+  }
+
+  resizeSetupTerminal(agent: AgentName, authRunId: string, cols: number, rows: number): void {
+    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'agent-setup-terminal-resize', agent, authRunId, cols, rows });
   }
 
   submitAgentAuthCode(agent: AgentName, authRunId: string, code: string): void {

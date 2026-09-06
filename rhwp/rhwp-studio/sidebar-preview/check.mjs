@@ -4,6 +4,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { createServer } from 'vite';
 import puppeteer from 'puppeteer-core';
+import { checkSetupTerminal } from './setup-terminal.check.mjs';
 import { checkFleetPreview } from './fleet.check.mjs';
 import { checkCloudRecovery } from './cloud-recovery.check.mjs';
 
@@ -384,6 +385,7 @@ try {
       document.querySelector('.ag-root').innerText.includes('선택한 문체'),
     );
   });
+  await step('Embedded OpenCode login terminal', () => checkSetupTerminal(page, origin));
   await step('Provider picker only lists connected providers', async () => {
     await open();
     const visible = () => page.$$eval('.ag-provider-item', items => items.filter(item => !item.hidden).map(item => item.dataset.agent));
