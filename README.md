@@ -47,13 +47,13 @@ The live tool list lives in `rhwp/rhwp-agent/tools.mjs`. `rhwp/rhwp-agent/tests/
 
 ## Install
 
-Download a build from [Releases](https://github.com/ghandhitechnology/Rauhwpx/releases): macOS arm64 DMG/ZIP and Windows x64 installer. macOS builds are signed. Windows builds are currently unsigned and can trigger SmartScreen warnings.
+Download a build from [Releases](https://github.com/ghandhitechnology/Rauhwpx/releases): macOS arm64 DMG/ZIP, Windows x64 installer, or Linux x64/arm64 AppImage and Debian package. macOS builds are signed. Windows builds are currently unsigned and can trigger SmartScreen warnings.
 
 Windows installs per user by default. The installer detects an older all-users installation and requests elevation to upgrade it instead of creating a second copy.
 
 Saving over an existing desktop file uses a crash-safe compare-and-swap and requires hard-link support on that volume. FAT/exFAT, some SMB shares, and some cloud-synced volumes may reject the save without changing the original; use a local APFS or NTFS volume, or Save As to a supported destination. On Windows, preserving the original file's access rules also requires the built-in System32 Windows PowerShell. If both publication and rollback fail, Rauhwpx keeps an openable recovery copy and reports its exact path.
 
-Testers can use the [nightly](https://github.com/ghandhitechnology/Rauhwpx/releases/tag/nightly) pre-release. Artifact names use `<version>-nightly.<date>.<sha>`, with a UTC `YYYYMMDD` date and the first seven SHA characters.
+Testers on macOS and Windows can use the [nightly](https://github.com/ghandhitechnology/Rauhwpx/releases/tag/nightly) pre-release. Artifact names use `<version>-nightly.<date>.<sha>`, with a UTC `YYYYMMDD` date and the first seven SHA characters.
 
 Connect a provider from **Settings → Connection**. Claude, Codex, Pi, Grok, Cursor, and OpenCode can be installed there, and the app offers each provider's supported sign-in method. OpenCode can also reuse credentials created by `opencode auth login`.
 

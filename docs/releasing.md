@@ -1,17 +1,25 @@
-# Desktop releases
+# Desktop and cloud releases
 
-Tagged releases and nightly builds publish signed and notarized macOS arm64 DMG/ZIP files and an unsigned Windows x64 NSIS installer. Windows users can see SmartScreen warnings. The workflows do not publish Linux installers.
+Tagged releases publish signed and notarized macOS arm64 DMG/ZIP files, an unsigned Windows x64 NSIS installer, and Linux x64/arm64 AppImage and Debian packages. They also publish signed Linux amd64/arm64 cloud runtimes and cloud sandbox images. Nightly builds publish the macOS and Windows packages. Windows users can see SmartScreen warnings.
 
 ## Tagged release
 
-Set the product version in the root `package.json` and its lockfile, then push the matching `v<version>` tag. The workflow rejects a tag that differs from the package version.
+Set the same release version in the root and `cloud/` package metadata before tagging:
+
+- Update `package.json` and both version fields in `package-lock.json`.
+- Update `cloud/package.json` and both version fields in `cloud/package-lock.json`.
+- Set `RAILWAY_DEFAULT_IMAGE` in both `desktop/cloud-railway.mjs` and `rhwp/rau-credits/cloud-provisioner.mjs` to `ghcr.io/ghandhitechnology/rauhwpx-cloud:<version>`.
+
+Run `node --test scripts/release-cloud-contracts.test.mjs tests/desktop-app-servers.test.mjs` and `npm run check:docs`, commit the changes, then push the matching `v<version>` tag. The workflow rejects mismatched tags, cloud metadata, or default image versions before building.
 
 ```sh
 git tag "v$(node -p "require('./package.json').version")"
 git push origin "v$(node -p "require('./package.json').version")"
 ```
 
-[release.yml](../.github/workflows/release.yml) verifies the tagged source, builds both platforms and publishes only after verification and packaging succeed. It attaches installers, update metadata and SHA-256 checksums to the GitHub release.
+[release.yml](../.github/workflows/release.yml) verifies the tagged source and publishes after all desktop and cloud builds succeed. The GitHub release contains installers, update metadata, SHA-256 checksums, signed cloud runtime archives and their bootstrap bundles. Each desktop package bundles both cloud runtime architectures for VPS setup.
+
+Cloud builds push `<version>-amd64` and `<version>-arm64` image tags to GHCR. After tagged-source verification, the workflow combines those exact tags into the `<version>` and `stable` multi-architecture images. It also retains `stable-amd64` and `stable-arm64` aliases. Both manifests use versioned architecture tags so overlapping releases cannot mix their images. Desktop and hosted provisioning pin the versioned image; `RAUHWpx_RAILWAY_IMAGE` can override it.
 
 ## Nightly
 
@@ -21,7 +29,7 @@ Each successful publication replaces the [nightly pre-release](https://github.co
 
 ## Signing and package checks
 
-Both channels use [.github/actions/package-desktop](../.github/actions/package-desktop/action.yml) for platform setup, builds and verification. macOS jobs use the `macos-release` environment and require these secrets:
+Both channels use [.github/actions/package-desktop](../.github/actions/package-desktop/action.yml) for macOS and Windows setup, builds and verification. Tagged Linux releases build on native x64 and arm64 runners. macOS jobs use the `macos-release` environment and require these secrets:
 
 - `MACOS_CERTIFICATE`
 - `MACOS_CERTIFICATE_PASSWORD`
@@ -35,7 +43,7 @@ Keep packaged runtime checks, artifact architecture checks, Developer ID verific
 
 ## Local builds
 
-Complete [development setup](../CONTRIBUTING.md) first. On the target platform, `npm run dist:mac` or `npm run dist:win` builds and packages the app. The macOS command needs the signing credentials configured for electron-builder.
+Complete [development setup](../CONTRIBUTING.md) first. On the target platform, `npm run dist:mac`, `npm run dist:win`, `npm run dist:linux:x64`, or `npm run dist:linux:arm64` builds and packages the app. The macOS command needs the signing credentials configured for electron-builder.
 
 For repeated packaging with an existing build:
 
@@ -49,4 +57,4 @@ Use `package:win` on Windows. Packaging does not reinstall dependencies or rebui
 
 ## Product and package versions
 
-Desktop, Studio's About dialog, and extension viewer About dialogs display the product version from the root `package.json`. The PWA and extension names use Rauhwpx. Engine crates, extension manifests and published npm packages keep their own versions and identifiers. Those values control package compatibility and store updates; changing the product version does not automatically bump them. Historical `rhwp` paths and upstream attribution remain intact.
+Desktop, Studio's About dialog, and extension viewer About dialogs display the product version from the root `package.json`. The cloud runtime package and default sandbox image must use that same release version. The PWA and extension names use Rauhwpx. Engine crates, extension manifests and published npm packages keep their own versions and identifiers. Those values control package compatibility and store updates; changing the product version does not automatically bump them. Historical `rhwp` paths and upstream attribution remain intact.

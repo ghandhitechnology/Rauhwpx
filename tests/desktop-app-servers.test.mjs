@@ -199,7 +199,7 @@ test('the Railway provider refuses to pretend when it has no configuration', asy
   });
   assert.equal(env.token, 'railway-token');
   assert.equal(env.apiUrl, 'https://backboard.railway.com/graphql/v2');
-  assert.equal(env.image, 'ghcr.io/ghandhitechnology/rauhwpx-cloud:1.1.0-edge.19-document-input');
+  assert.equal(env.image, 'ghcr.io/ghandhitechnology/rauhwpx-cloud:2.0.0');
   assert.equal(railwayCloudConfigFromEnv({}).image, env.image, 'hosted and desktop provisioners must select the same verified image');
 });
 
