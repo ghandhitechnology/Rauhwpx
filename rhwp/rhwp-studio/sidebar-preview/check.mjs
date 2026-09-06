@@ -4,6 +4,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { createServer } from 'vite';
 import puppeteer from 'puppeteer-core';
+import { checkFleetPreview } from './fleet.check.mjs';
 import { checkCloudRecovery } from './cloud-recovery.check.mjs';
 
 const studio = resolve(import.meta.dirname, '..');
@@ -383,11 +384,12 @@ try {
       document.querySelector('.ag-root').innerText.includes('선택한 문체'),
     );
   });
+  await step('Compact live subagent previews', () => checkFleetPreview(page, origin));
   await step('Subagent fleet, failure, and offline recovery', async () => {
     await play('fleet');
-    await page.waitForFunction(() =>
-      document.querySelector('.ag-root').innerText.includes('용어를 통일'),
-    );
+    await page.waitForSelector('.ag-fleet-slot:not([hidden]) .ag-fleet-toggle');
+    await page.click('.ag-fleet-slot:not([hidden]) .ag-fleet-toggle');
+    await page.waitForFunction(() => document.querySelector('.ag-root').innerText.includes('용어를 통일'));
     await screenshot('fleet');
     await play('error');
     await page.waitForFunction(() =>

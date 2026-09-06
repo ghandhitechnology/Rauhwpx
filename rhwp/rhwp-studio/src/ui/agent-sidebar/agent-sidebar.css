@@ -6100,9 +6100,8 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
    레일과 멤버 행을 가진 자기 카드를 갖는다. 카드는 도구 활동 그룹과
    같은 자리에 흐름대로 놓인다.
 
-   두 가지 규칙이 이 블록을 지탱한다. 행은 3줄 고정 그리드라 토큰·시간이
-   1초마다 갱신돼도 아래 행이 밀리지 않는다. 진행 표시는 도는 것 없이
-   가만한 점 하나이고, 끝났을 때 색과 시제만 바뀐다. */
+   목록은 두 줄 고정 그리드로 유지하고 선택한 행의 실시간 기록만 펼친다.
+   토큰·시간 갱신이 목록 높이를 바꾸지 않으며, 진행 중에는 픽셀 휠을 표시한다. */
 
 .ag-fleet {
   position: relative;
@@ -6403,7 +6402,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
   box-sizing: border-box;
   width: 100%;
   grid-template-columns: 12px minmax(0, 1fr) auto 11px;
-  grid-template-rows: 16px 14px 13px;
+  grid-template-rows: 16px 14px;
   align-items: center;
   column-gap: 7px;
   row-gap: 1px;
@@ -6519,7 +6518,6 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 
 .ag-fleet-metrics {
   grid-column: 2 / -1;
-  grid-row: 3;
   min-width: 0;
   overflow: hidden;
   color: var(--ag-text-muted);
@@ -6581,18 +6579,47 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
 
 /* ── 행 드릴인: 그 서브에이전트가 부른 도구들 ── */
 
+.ag-fleet-reveal {
+  display: grid;
+  grid-template-rows: 0fr;
+  visibility: hidden;
+  opacity: 0;
+  transition: grid-template-rows 220ms var(--ag-motion-out), opacity 180ms ease, visibility 220ms;
+}
+
+.ag-fleet-row.ag-open > .ag-fleet-reveal {
+  grid-template-rows: 1fr;
+  visibility: visible;
+  opacity: 1;
+}
+
 .ag-fleet-detail {
-  max-height: clamp(96px, 20vh, 168px);
+  min-height: 0;
+  max-height: clamp(112px, 22vh, 184px);
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
   scrollbar-width: thin;
-  padding: 0 6px 6px 20px;
+  margin: 0 6px 0 20px;
+  border-radius: var(--ag-r-chip);
+  background: color-mix(in srgb, var(--ag-hover) 55%, transparent);
 }
 
-.ag-fleet-detail[hidden] {
-  display: none;
+.ag-fleet-detail > .ag-fleet-metrics {
+  display: block;
+  padding: 8px 8px 0;
+}
+
+.ag-fleet-preview {
+  margin: 0;
+  padding: 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  font-size: var(--font-size-sm, 11px);
+  line-height: 1.6;
+  color: var(--ag-text-secondary);
 }
 
 /* ── 편대 도크 (입력기 위 알약 + 팝업) ───────────────────
@@ -6837,6 +6864,7 @@ html.desktop-mac .ag-fullscreen .ag-environment-panel {
     animation: none;
   }
 
+  .ag-fleet-reveal,
   .ag-fleet-collapse,
   .ag-fleet-chevron,
   .ag-fleet-row-chevron {
