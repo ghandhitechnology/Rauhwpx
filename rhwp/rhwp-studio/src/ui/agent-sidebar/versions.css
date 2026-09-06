@@ -283,10 +283,10 @@
   gap: 8px;
   margin: 10px;
   padding: 12px;
-  border: 1px solid rgba(139, 131, 255, 0.24);
+  border: 1px solid var(--ag-border);
   border-radius: 1px;
   color: var(--ag-muted, #aaaab4);
-  background: rgba(139, 131, 255, 0.07);
+  background: var(--ag-bg-2);
   font-size: 11px;
   line-height: 1.5;
 }
@@ -518,7 +518,7 @@
   padding: 1px 5px;
   border: 1px solid rgba(255, 255, 255, 0.13);
   color: #c7c5ff;
-  background: rgba(139, 131, 255, 0.12);
+  background: var(--ag-bg-2);
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -578,7 +578,7 @@
   color: var(--ag-text);
   background: var(--ag-bg);
   --ag-version-row-height: 30px;
-  --version-accent: #53bdab;
+  --version-accent: var(--ag-text-secondary);
 }
 
 .ag-versions-head {
@@ -848,14 +848,13 @@
 }
 
 .ag-versions-branch-chip:hover {
-  border-color: color-mix(in srgb, var(--ag-version-lane-color) 60%, transparent);
-  background: color-mix(in srgb, var(--ag-version-lane-color) 9%, transparent);
+  border-color: var(--ag-border-strong);
+  background: var(--ag-hover);
 }
 
 .ag-versions-branch-chip.ag-current {
-  border-color: color-mix(in srgb, var(--ag-version-lane-color) 55%, transparent);
-  background: color-mix(in srgb, var(--ag-version-lane-color) 7%, transparent);
-  box-shadow: inset 0 1px color-mix(in srgb, var(--ag-version-lane-color) 16%, transparent);
+  border-color: var(--ag-border-strong);
+  background: var(--ag-bg-2);
 }
 
 .ag-versions-inspector {
@@ -867,7 +866,7 @@
   margin-top: 0;
   padding-block: 10px;
   border-radius: 5px;
-  box-shadow: inset 0 1px color-mix(in srgb, var(--ag-version-lane-color) 22%, transparent);
+  box-shadow: none;
 }
 
 .ag-versions-toolbar > button:hover:not(:disabled) {
