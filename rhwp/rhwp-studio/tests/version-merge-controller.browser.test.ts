@@ -98,6 +98,7 @@ test('dirty merge entry creates a real pre-merge checkpoint before already-integ
       };
       let userEditingLocked = false;
       const inputHandler = {
+        canRedo: () => false,
         prepareSnapshotCapacity: () => undefined,
         replaceContentFromBytes: (bytes: Uint8Array) => {
           wasm.loadDocument(bytes, 'shift-return.hwp');
