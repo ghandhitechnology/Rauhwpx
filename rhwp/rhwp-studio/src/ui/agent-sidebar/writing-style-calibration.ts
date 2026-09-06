@@ -8,7 +8,7 @@ import {
   modelsForAgent,
   resolveModelForAgent,
 } from '../../agent/models.ts';
-import { AGENT_LABEL } from './providers.ts';
+import { AGENT_LABEL, PROVIDER_ORDER, createProviderIcon } from './providers.ts';
 import type {
   AgentName,
   PiStatus,
@@ -28,12 +28,7 @@ const MAX_FILES = 20;
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 50 * 1024 * 1024;
 const ACK_TIMEOUT_MS = 10_000;
-/*
- * 보정을 실제로 돌릴 수 있는 프로바이더만 고른다 — 허브의 writing-style-catalog 는
- * codex/claude/pi 만 만들고 style-calibrator 도 그 셋만 받는다. grok/cursor 를
- * 여기에 세우면 영영 '사용 불가' 인 칸이 둘 생기고 쓸 수 있는 셋만 좁아진다.
- */
-const AGENTS: readonly AgentName[] = ['claude', 'codex', 'pi', 'rau'];
+const AGENTS: readonly AgentName[] = PROVIDER_ORDER;
 
 const PROGRESS_STAGES: ReadonlyArray<{
   state: WritingStyleProgressState;
@@ -429,7 +424,13 @@ export function createWritingStyleCalibration(
   corpusSection.append(corpusHead, corpusList, corpusModes);
 
   const providerFieldset = el('fieldset', 'ag-calibration-provider-fieldset');
-  const providerLegend = el('legend', 'ag-calibration-section-title', '분석 모델');
+  const providerPicker = document.createElement('details');
+  providerPicker.className = 'ag-calibration-provider-picker';
+  const providerSummary = document.createElement('summary');
+  providerSummary.className = 'ag-calibration-provider-summary';
+  const providerSelection = el('span', 'ag-calibration-provider-selection');
+  providerSummary.append(el('span', 'ag-calibration-section-title', '분석 모델'), providerSelection);
+  providerPicker.appendChild(providerSummary);
   const providerGroup = el('div', 'ag-calibration-provider-group');
   providerGroup.setAttribute('role', 'radiogroup');
   providerGroup.setAttribute('aria-label', '분석 프로바이더');
@@ -442,7 +443,7 @@ export function createWritingStyleCalibration(
     button.setAttribute('role', 'radio');
     const name = el('strong', '', AGENT_LABEL[agent]);
     const health = el('span', 'ag-calibration-provider-health', '확인 중');
-    button.append(name, health);
+    button.append(createProviderIcon(agent), name, health);
     button.addEventListener('click', () => selectAgent(agent));
     providerButtons.set(agent, button);
     providerStatusLabels.set(agent, health);
@@ -456,7 +457,8 @@ export function createWritingStyleCalibration(
   const modelHelp = el('p', 'ag-calibration-model-help');
   modelHelp.id = 'ag-calibration-model-help';
   modelHelp.setAttribute('aria-live', 'polite');
-  providerFieldset.append(providerLegend, providerGroup, modelRow, modelHelp);
+  providerPicker.append(providerGroup, modelRow, modelHelp);
+  providerFieldset.append(providerPicker);
 
   const uploadInput = el('input', 'ag-calibration-file-input') as HTMLInputElement;
   uploadInput.type = 'file';
@@ -675,6 +677,11 @@ export function createWritingStyleCalibration(
     renderProviderCatalogue();
   }
 
+  function renderProviderSelection(): void {
+    const label = modelSelect.selectedOptions[0]?.textContent ?? selectedModel;
+    providerSelection.replaceChildren(createProviderIcon(selectedAgent), document.createTextNode(`${AGENT_LABEL[selectedAgent]} · ${label}`));
+  }
+
   function renderProviderCatalogue(): void {
     for (const agent of AGENTS) {
       const button = providerButtons.get(agent)!;
@@ -718,7 +725,9 @@ export function createWritingStyleCalibration(
     }
     const availability = providerAvailability(selectedAgent);
     modelSelect.disabled = !availability.available || options.length === 0 || requestId !== null || submitting;
-    modelHelp.textContent = availability.reason || `${AGENT_LABEL[selectedAgent]}의 ${options.length}개 모델 중 하나를 선택할 수 있습니다.`;
+    modelHelp.textContent = availability.reason;
+    modelHelp.hidden = !availability.reason;
+    renderProviderSelection();
     updateAnalyzeButton();
   }
 
@@ -1043,6 +1052,7 @@ export function createWritingStyleCalibration(
   modelSelect.addEventListener('change', () => {
     selectionTouched = true;
     selectedModel = resolveModelForAgent(selectedAgent, modelSelect.value);
+    renderProviderSelection();
     updateAnalyzeButton();
   });
   instruction.addEventListener('input', () => {
