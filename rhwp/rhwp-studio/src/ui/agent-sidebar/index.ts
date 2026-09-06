@@ -1061,8 +1061,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }
   });
 
-  /* pi · rau 는 설정이 끝나야 입력기 메뉴에 선다 (설정 탭에는 늘 있다). */
-  let piSetupComplete = false;
+  /* 연결된 프로바이더만 입력기 메뉴에 표시한다. 설정 탭에서는 모두 연결할 수 있다. */
+  const connectedProviders = new Set<AgentName>();
   let rauSetupComplete = false;
   let lastUsage: UsageSummary | null = null;
 
@@ -1112,7 +1112,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     providerMenu.appendChild(item);
   }
 
-  /** 메뉴에 실제로 서 있는 항목만 (숨은 pi 는 건너뛴다). */
+  /** 연결된 항목만 키보드 탐색에 포함한다. */
   function visibleProviderItems(): HTMLButtonElement[] {
     return PROVIDER_ORDER
       .map((name) => providerItems.get(name))
@@ -1120,14 +1120,14 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   }
 
   function syncProviderMenu(): void {
-    for (const agent of ['rau', 'opencode'] as const) {
-      const item = providerItems.get(agent);
-      if (item) item.hidden = workspace.mode() === 'cloud';
+    for (const [agent, item] of providerItems) {
+      item.hidden = !connectedProviders.has(agent)
+        || (workspace.mode() === 'cloud' && !isCloudSupportedAgent(agent));
     }
-    const pi = providerItems.get('pi');
-    if (pi) pi.hidden = !piSetupComplete && selectedAgent !== 'pi';
-    const rau = providerItems.get('rau');
-    if (rau) rau.hidden = workspace.mode() === 'cloud' || (!rauSetupComplete && selectedAgent !== 'rau');
+    if (document.activeElement instanceof HTMLElement && document.activeElement.hidden
+      && providerMenu.contains(document.activeElement)) {
+      (visibleProviderItems()[0] ?? providerTrigger).focus();
+    }
   }
 
   function rauCreditsEmpty(): boolean {
@@ -1147,7 +1147,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       setConfigPanelOpen(true);
-      providerItems.get(selectedAgent)?.focus();
+      (visibleProviderItems().find(item => item.dataset.agent === selectedAgent)
+        ?? visibleProviderItems()[0] ?? providerTrigger).focus();
     } else if (e.key === 'Escape') {
       setConfigPanelOpen(false);
     }
@@ -7469,7 +7470,6 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         break;
       case 'pi-status':
         // 브리지가 모델 레지스트리를 먼저 갱신했다 — 라벨과 강도를 다시 읽는다.
-        piSetupComplete = e.status.setupComplete;
         syncProviderMenu();
         if (selectedAgent === 'pi') {
           selectedModel = resolveModelForAgent('pi', selectedModel);
@@ -7480,6 +7480,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         refreshSidebarWidthMin();
         break;
       case 'agent-setup-status':
+        connectedProviders.clear();
+        for (const agent of PROVIDER_ORDER) {
+          if (e.statuses[agent]?.connected) connectedProviders.add(agent);
+        }
         rauSetupComplete = e.statuses.rau?.setupComplete === true;
         if (!rauSetupComplete && lastUsage?.rau) {
           lastUsage = { ...lastUsage, rau: undefined };
