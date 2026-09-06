@@ -1088,13 +1088,11 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   for (const option of permissionField.select.options) {
     option.title = PERMISSION_OPTIONS.find(item => item.id === option.value)?.label ?? '';
   }
-  const defaultsNote = el('p', 'ag-settings-note', '새 대화부터 적용돼요.');
   defaults.body.append(
     agentField.field,
     modelField.field,
     effortField.field,
     permissionField.field,
-    defaultsNote,
   );
 
   agentField.select.addEventListener('change', () => {
