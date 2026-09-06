@@ -370,22 +370,22 @@ export function createWritingStyleCalibration(
 
   const introTitle = el('h2', 'ag-calibration-title', '말투를 맞출까요?');
   introTitle.id = 'ag-calibration-title';
-  const introStatement = el('p', 'ag-calibration-statement', '당신이 글에서 어떤 사람인지를 배우고, 다음 글부터 그 목소리로 씁니다.');
+  const introStatement = el('p', 'ag-calibration-statement', '당신이 글에서 말투를 학습해서, 따라합니다');
   const introDetail = el('p', 'ag-calibration-detail', '먼저 분석할 글의 주 언어를 선택하세요.');
   const languageGroup = el('div', 'ag-calibration-language-group');
   languageGroup.setAttribute('role', 'radiogroup');
   languageGroup.setAttribute('aria-label', '캘리브레이션 언어');
   const languageButtons = new Map<WritingStyleLanguage, HTMLButtonElement>();
-  for (const [value, label, detail] of [
-    ['ko', '한국어', '한국어로 쓴 글에서 목소리를 읽습니다'],
-    ['en', 'English', 'Read the voice in the English samples'],
+  for (const [value, label] of [
+    ['ko', '한국어'],
+    ['en', 'English'],
   ] as const) {
     const langButton = el('button', 'ag-calibration-language');
     langButton.type = 'button';
     langButton.dataset.language = value;
     langButton.setAttribute('role', 'radio');
     const copy = el('span', 'ag-calibration-language-copy');
-    copy.append(el('strong', '', label), el('span', '', detail));
+    copy.append(el('strong', '', label));
     langButton.append(createPixelFlag(value), copy);
     langButton.addEventListener('click', () => setLanguage(value));
     languageButtons.set(value, langButton);
@@ -414,7 +414,7 @@ export function createWritingStyleCalibration(
   corpusModes.setAttribute('role', 'radiogroup');
   corpusModes.setAttribute('aria-label', '기존 보정 자료 처리 방식');
   const corpusModeButtons = new Map<CorpusMode, HTMLButtonElement>();
-  for (const [value, label, detail] of [
+  for (const [value, label] of [
     ['append', '문서 추가', '현재 자료를 유지하고 새 글을 더합니다.'],
     ['replace', '전체 교체', '현재 자료를 빼고 새 글만 다시 분석합니다.'],
   ] as const) {
