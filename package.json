@@ -47,6 +47,7 @@
     "dist:linux:arm64": "npm run build:desktop && npm run package:linux:arm64 --",
     "dev:sidebar": "npm --prefix rhwp/rhwp-studio run dev:sidebar",
     "test:sidebar": "npm --prefix rhwp/rhwp-studio run test:sidebar",
+    "test:sidebar:audit": "npm --prefix rhwp/rhwp-studio run test:sidebar:audit",
     "build:sidebar": "npm --prefix rhwp/rhwp-studio run build:sidebar"
 
   },

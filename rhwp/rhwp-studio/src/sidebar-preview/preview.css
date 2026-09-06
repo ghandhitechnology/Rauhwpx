@@ -69,3 +69,64 @@
     width: max(100px, calc(100vw - var(--ag-sidebar-width) - 24px));
   }
 }
+
+/* Audit navigation frames the shipping components without changing their CSS. */
+.preview-audit #preview-controls {
+  top: 16px;
+  left: 16px;
+  bottom: 16px;
+  width: 280px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 16px;
+  background: var(--ui-surface);
+  border: 1px solid var(--ui-border);
+  border-radius: 12px;
+  scrollbar-width: thin;
+}
+.preview-audit.preview-cloud #cloud-workspace { padding-left: 328px; }
+.audit-heading { margin: 0; font-size: 19px; letter-spacing: -.02em; }
+.audit-progress { font-variant-numeric: tabular-nums; }
+.audit-search, .audit-pagination a, .audit-pagination span, .audit-dialog-group button,
+.audit-controls button, .audit-controls select {
+  box-sizing: border-box;
+  border: 1px solid var(--ui-border);
+  border-radius: 6px;
+  background: var(--ui-surface-raised);
+  color: var(--ui-text);
+  padding: 7px 9px;
+  font: inherit;
+}
+.audit-search { width: 100%; margin-bottom: 10px; }
+.audit-pagination { display: flex; gap: 8px; margin-bottom: 18px; }
+.audit-pagination > * { flex: 1; text-align: center; text-decoration: none; }
+.audit-pagination [aria-disabled] { opacity: .45; }
+.audit-group h3 { margin: 18px 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--ui-text-secondary); }
+.audit-scene { padding: 7px 8px; border-radius: 6px; }
+.audit-scene-current { background: var(--ui-hover); box-shadow: inset 2px 0 var(--ui-text); }
+.audit-scene-link { color: var(--ui-text); text-decoration: none; font-weight: 550; }
+.audit-scene-link:hover { text-decoration: underline; }
+.audit-hint { font-size: 11px; line-height: 1.45; margin: 3px 0 6px !important; }
+.audit-reviewed { display: flex !important; flex-direction: row; align-items: center; font-size: 11px; color: var(--ui-text-secondary); }
+.audit-reviewed input { margin: 0 5px 0 0; }
+.audit-controls, .audit-dialog-group { padding: 12px 0; border-top: 1px solid var(--ui-border); }
+.audit-controls summary, .audit-dialog-group summary { cursor: pointer; font-weight: 600; margin-bottom: 8px; }
+.audit-controls label, .audit-controls button { width: 100%; margin: 4px 0; }
+.audit-dialog-group button { display: block; width: 100%; margin: 5px 0; text-align: left; cursor: pointer; }
+.audit-dialog-group button:hover { background: var(--ui-hover); }
+.audit-dialog-coverage-note { font-size: 11px; line-height: 1.5; }
+#preview-controls :focus-visible { outline: 2px solid var(--ui-text); outline-offset: 3px; }
+@media (max-width: 850px) {
+  .preview-audit #preview-controls { width: max(100px, calc(100vw - var(--ag-sidebar-width) - 48px)); padding: 8px; }
+}
+.audit-group ul { list-style: none; margin: 0; padding: 0; }
+.audit-scene { display: flex; align-items: flex-start; gap: 8px; }
+.audit-scene input.audit-reviewed { display: inline-block !important; flex: none; margin: 4px 0 0; accent-color: var(--ui-text); }
+.audit-scene .audit-hint { display: none; font-weight: 400; }
+.audit-scene-current .audit-hint { display: block; }
+.audit-tabs, .audit-view-controls { display: flex; gap: 8px; }
+.audit-tabs button, .audit-view-controls label { flex: 1; min-width: 0; }
+.audit-tabs button { padding: 8px 4px; border: 1px solid var(--ui-border); border-radius: 6px; color: var(--ui-text-secondary); background: var(--ui-surface); font: inherit; cursor: pointer; }
+.audit-tabs button[aria-pressed="true"] { color: var(--ui-text); background: var(--ui-hover); font-weight: 600; }
+.audit-view-controls select { width: 100%; }
+.preview-audit #preview-controls section[hidden] { display: none; }

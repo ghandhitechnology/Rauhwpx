@@ -10,9 +10,11 @@ import {
 import { loadAgentPrefs } from '../agent/agent-prefs.ts';
 import { createFixtures, samplePlan, timestamp, agents } from './fixtures.ts';
 import { requestLiveUsage, consumeLiveCodexReset } from './live-usage.ts';
+import { createBrowserbaseFixture, type BrowserbaseFixtureState } from './fixtures.ts';
 
 export const scenarios = [
   'chat',
+  'rich',
   'plan',
   'question',
   'review',
@@ -39,6 +41,8 @@ export function createMockBridge(report: (message: string) => void) {
       }
     }
   }
+  let browserbaseState: BrowserbaseFixtureState = 'connected';
+  let browserbase = createBrowserbaseFixture(browserbaseState);
   const listeners = new Set<(event: T.SidebarEvent) => void>();
   const pendingListeners = new Set<
     (event: T.PendingEditsChangeEvent) => void
@@ -52,6 +56,7 @@ export function createMockBridge(report: (message: string) => void) {
   let generation = 0;
   let threadId = '';
   let scenario: Scenario = 'chat';
+  let holdReply = false;
   let permission: T.PermissionProfile = 'safe';
   let tier: T.ServiceTier = 'standard';
   let workflow: T.AgentWorkflowState = {
@@ -128,9 +133,15 @@ export function createMockBridge(report: (message: string) => void) {
       setupComplete: true,
     });
     setupChanged();
+    if (provider === 'rau') {
+      Object.assign(data.account, { state: 'signed-in', signedIn: true,
+        account: { email: 'designer@example.test' }, authenticating: false });
+      emit({ type: 'account-status', status: data.account });
+    }
     report(`${provider}: connected to a local sample account`);
   };
   const signIn = () => {
+    authenticate('rau');
     Object.assign(data.account, {
       state: 'signed-in',
       signedIn: true,
@@ -196,6 +207,40 @@ export function createMockBridge(report: (message: string) => void) {
     requestProviderStatus: async () => data.providers,
     requestAgentSetupStatus: async () => data.setups,
     requestAccountStatus: async () => data.account,
+    requestBrowserbaseStatus: async () => {
+      if (browserbaseState === 'error') {
+        emit({ type: 'browserbase-error', requestId: 'preview-browserbase-status', code: 'preview-unavailable', message: '미리보기 원격 브라우저 연결을 확인하지 못했어요.' });
+        return null;
+      }
+      const status = structuredClone(browserbase);
+      emit({ type: 'browserbase-status', status });
+      return status;
+    },
+    setBrowserbaseCredentials: async (override) => {
+      if (browserbaseState === 'error' || !override.apiKey.trim()) {
+        emit({ type: 'browserbase-error', requestId: 'preview-browserbase-credentials', code: 'preview-invalid-key', message: '미리보기 키를 확인하지 못했어요.' });
+        return null;
+      }
+      // 입력한 키/프로젝트는 보관하지 않고 샘플 상태만 표시한다.
+      browserbase = {
+        ...createBrowserbaseFixture('connected'),
+        keySource: 'studio',
+        keyTail: 'demo',
+        projectSource: 'studio',
+        geminiSource: override.geminiApiKey?.trim() ? 'studio' : 'env',
+      };
+      browserbaseState = 'connected';
+      const status = structuredClone(browserbase);
+      emit({ type: 'browserbase-status', status });
+      return status;
+    },
+    clearBrowserbaseCredentials: async () => {
+      browserbaseState = 'connected';
+      browserbase = createBrowserbaseFixture('connected');
+      const status = structuredClone(browserbase);
+      emit({ type: 'browserbase-status', status });
+      return status;
+    },
     loginAccount: async () => {
       const authRunId = crypto.randomUUID();
       Object.assign(data.account, {
@@ -209,7 +254,7 @@ export function createMockBridge(report: (message: string) => void) {
       }, 800);
       return {
         authRunId,
-        authUrl: null,
+        authUrl: 'https://accounts.example.invalid/preview',
         pairingCode: 'PREVIEW',
         expiresAt: null,
       };
@@ -223,6 +268,9 @@ export function createMockBridge(report: (message: string) => void) {
       emit({ type: 'account-status', status: data.account });
     },
     logoutAccount: async () => {
+      Object.assign(data.setups.rau, { connected: false, authenticated: false,
+        authenticating: false, setupComplete: false });
+      setupChanged();
       Object.assign(data.account, {
         state: 'signed-out',
         signedIn: false,
@@ -282,6 +330,7 @@ export function createMockBridge(report: (message: string) => void) {
       setupChanged();
     },
     disconnectAgent: async (provider) => {
+      if (provider === 'rau') await bridge.logoutAccount();
       if (provider === 'pi') {
         data.pi.keyConfigured = false;
         data.pi.setupComplete = false;
@@ -565,7 +614,7 @@ export function createMockBridge(report: (message: string) => void) {
               activity: '용어와 문장 길이를 검토했습니다.',
               usage: { totalTokens: 2400, toolUses: 3 },
             });
-            stream({
+            if (!holdReply) stream({
               type: 'task-end',
               agent,
               taskId: `task-${turnGeneration}`,
@@ -581,13 +630,18 @@ export function createMockBridge(report: (message: string) => void) {
             '2. 단계별 일정과 담당자를 확인합니다.\n\n',
             '필요한 부분을 선택해 주시면 이어서 다듬겠습니다.',
           ];
+          if (reply === 'rich') chunks.splice(chunks.length - 1, 0,
+            '\n\n## 실행 계획\n\n| 단계 | 담당 | 일정 |\n| --- | --- | --- |\n| 초안 검토 | 기획팀 | 9월 10일 |\n| 예산 승인 | 운영팀 | 9월 15일 |\n\n',
+            '> 승인 전에는 원본 문서를 보존하고 변경 사항을 검토합니다.\n\n',
+            '```json\n{ "status": "review", "sections": 3 }\n```\n\n',
+            '[브랜드 가이드](#preview-reference)를 참고해 **용어**와 *문체*를 통일했습니다.\n\n');
           chunks.forEach((text, index) =>
             later(() => {
               if (generation !== turnGeneration) return;
               stream({ type: 'text-delta', agent, text });
               if (index === chunks.length - 1) {
                 if (reply === 'review') addReview();
-                finish();
+                if (!holdReply) finish();
               }
             }, index * 140),
           );
@@ -1038,9 +1092,18 @@ export function createMockBridge(report: (message: string) => void) {
     bridge,
     setConnection,
     setServices,
+    setBrowserbaseState: (value: BrowserbaseFixtureState) => {
+      browserbaseState = value;
+      browserbase = createBrowserbaseFixture(value);
+      emit({ type: 'browserbase-status', status: structuredClone(browserbase) });
+      if (value === 'error') {
+        emit({ type: 'browserbase-error', requestId: 'preview-browserbase-state', code: 'preview-unavailable', message: '미리보기 원격 브라우저 연결을 확인하지 못했어요.' });
+      }
+    },
     setScenario: (value: Scenario) => {
       scenario = value;
     },
+    setHold: (value: boolean) => { holdReply = value; },
     boot: () => {
       setPiModels(data.pi.models);
       setCursorModels(data.setups.cursor.models ?? []);
@@ -1059,6 +1122,7 @@ export function createMockBridge(report: (message: string) => void) {
       pendingChanges: changes.length,
       references: references.length,
       account: data.account.state,
+      browserbase: browserbaseState,
     }),
   };
 }

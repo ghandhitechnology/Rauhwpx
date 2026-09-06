@@ -18,6 +18,35 @@ change. The server binds to localhost and reserves this port so the preview's
 browser storage stays separate from Studio. It requires no Rust build, WASM,
 Electron, agent hub, credentials, or cloud connection.
 
+## Live UI audit
+
+Open **http://127.0.0.1:7715/?audit=1** for a searchable checklist of 54 sidebar
+scenarios and 22 production dialog/menu launchers. The **Scenes** tab covers
+responses, rich Markdown, plan approval, questions, edit review, active subagents,
+connection failures, each provider's setup, Browserbase, preferences, history,
+and Cloud usage/recovery states. **Editor dialogs** opens production file,
+table, field, font, grid, and merge-preparation dialogs with sample values.
+
+Use **Previous / Next** and the reviewed checkboxes to track the audit. Checkmarks
+persist in the current browser tab. Theme and sidebar width controls stay above
+the navigation. Scene links preserve both values. **Fixture controls** exposes
+manual playback and service controls. Active-turn fixtures stay running until
+you press Stop; Cloud scenes start their sample conversation automatically.
+
+The document canvas, ribbon, engine-dependent formatting/object dialogs, and
+native file pickers are reviewed in the running Electron app. Changes to the
+shared production components appear in both the app and this preview. Dialog
+callbacks in this preview only report sample results.
+
+If another worktree already owns port 7715, leave it running and use a separate
+port: `npm --prefix rhwp/rhwp-studio run dev:sidebar -- --port 7716`, then open
+`http://127.0.0.1:7716/?audit=1`. Each port has separate browser storage.
+
+Run `npm run test:sidebar:audit` to open every named scene and dialog in a fresh
+headless browser, check navigation/checklist persistence, and verify that no
+external service or WASM requests occur. Representative screenshots are saved
+under `sidebar-preview/artifacts/audit-*.png`.
+
 The left controls belong to the preview. The right panel is the production
 sidebar, starting at its normal 480px width. Drag its left edge to resize it;
 the application's width limits and compact composer behavior still apply.

@@ -209,6 +209,14 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
   };
   return {
     controller: createCloudController(api), calls, setLink,
+    setAccount(signedIn: boolean, email: string | null) {
+      state.account = signedIn
+        ? { signedIn: true, account: { id: state.account?.account?.id ?? 'preview', email: email ?? 'designer@example.test' }, quota: state.account?.quota ?? null,
+            raucloud: { kind: 'available' }, updatedAt: new Date().toISOString() }
+        : { signedIn: false, account: null, quota: null,
+            raucloud: { kind: 'logged-out' }, updatedAt: new Date().toISOString() };
+      publish();
+    },
     emitAgentEvent,
     finishReply(text: string) {
       if (!state.timeline) throw new Error('Start a Cloud conversation first');
