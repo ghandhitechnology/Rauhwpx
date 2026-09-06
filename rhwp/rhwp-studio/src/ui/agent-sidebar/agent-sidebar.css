@@ -562,21 +562,22 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 .ag-conn-banner {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 8px 12px;
   flex: 0 0 auto;
   flex-wrap: wrap;
-  margin: 0 12px 8px;
-  padding: 8px 10px;
+  margin: 12px 12px 8px;
+  padding: 10px 12px;
   border: 1px solid color-mix(in srgb, var(--ag-err) 35%, var(--ag-border-strong));
   border-radius: var(--ag-r-field);
-  background: color-mix(in srgb, var(--ag-err) 7%, var(--ag-bg-2));
+  background: var(--ag-raised);
   font-size: var(--font-size-sm, 11px);
+  line-height: 1.5;
   color: var(--ag-text);
 }
 
 .ag-conn-banner.ag-conn-banner-wait {
   border-color: color-mix(in srgb, var(--accent-primary) 35%, var(--ag-border-strong));
-  background: color-mix(in srgb, var(--accent-primary) 7%, var(--ag-bg-2));
+  background: var(--ag-raised);
 }
 
 .ag-conn-banner[hidden] {
@@ -584,12 +585,13 @@ body.ag-sidebar-resizing .ag-resize-handle::after {
 }
 
 .ag-conn-banner-text {
-  flex: 1 1 auto;
+  flex: 1 1 180px;
   min-width: 0;
 }
 
 .ag-conn-banner-retry {
   flex: 0 0 auto;
+  margin-left: auto;
   height: 26px;
   padding: 0 9px;
   border: 1px solid var(--accent-primary);
