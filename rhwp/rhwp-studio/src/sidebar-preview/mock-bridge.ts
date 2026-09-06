@@ -605,7 +605,7 @@ export function createMockBridge(report: (message: string) => void) {
             stream({
               type: 'error',
               agent,
-              message: '샘플 연결 오류입니다. 다시 전송해 주세요.',
+              message: '앗, 오류에요! 네트워크 연결을 확인하세요!',
             });
             finish('failed');
             return;
