@@ -802,10 +802,9 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   setupDialog.tabIndex = -1;
   const setupChrome = el('header', 'ag-agent-setup-chrome');
   const setupTitleWrap = el('div', 'ag-agent-setup-title-wrap');
-  const setupEyebrow = el('span', 'ag-agent-setup-eyebrow', '에이전트 연결');
   const setupTitle = el('h2', 'ag-agent-setup-title');
   setupTitle.id = 'ag-agent-setup-title';
-  setupTitleWrap.append(setupEyebrow, setupTitle);
+  setupTitleWrap.append(setupTitle);
   const setupClose = el('button', 'ag-agent-setup-close');
   setupClose.type = 'button';
   setupClose.setAttribute('aria-label', '설정 닫기');

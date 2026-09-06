@@ -656,14 +656,6 @@
   gap: 3px;
 }
 
-.ag-agent-setup-eyebrow {
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: .12em;
-  text-transform: uppercase;
-  color: var(--ag-text-muted);
-}
-
 .ag-agent-setup-title {
   margin: 0;
   font-size: 18px;
