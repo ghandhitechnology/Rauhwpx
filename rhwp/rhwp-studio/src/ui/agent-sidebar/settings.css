@@ -404,52 +404,44 @@
   color: var(--ag-warning, #d99532);
 }
 
-/* 새 대화 기본값은 하나의 카드 안에서 넓이에 맞춰 배치합니다. */
+/* 새 대화 기본값은 레이블과 선택값을 한 줄에 배치합니다. */
 .ag-settings-destination-content > .ag-settings-section.ag-settings-defaults {
-  padding: 16px;
-  gap: 14px;
-  border: 1px solid var(--ag-border);
-  border-radius: 12px;
-  background: var(--ag-surface);
+  padding: 0;
+  gap: 10px;
 }
 
 .ag-settings-defaults .ag-settings-section-title {
   color: var(--ag-text);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 0;
 }
 
 .ag-settings-defaults .ag-settings-section-body {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
-  gap: 14px 16px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr));
+  gap: 6px 20px;
 }
 
 .ag-settings-defaults .ag-settings-field {
   min-width: 0;
-  flex-direction: column;
-  align-items: stretch;
-  gap: 6px;
+  gap: 8px;
 }
 
 .ag-settings-defaults .ag-settings-field-label {
+  flex: 0 0 50px;
   font-size: 11px;
   color: var(--ag-text-muted);
 }
 
 .ag-settings-defaults .ag-settings-select {
-  flex: none;
-  width: 100%;
+  flex: 1 1 0;
+  width: 0;
   max-width: none;
-  height: 34px;
-  padding: 0 10px;
+  height: 28px;
+  padding: 0 6px;
   border-color: var(--ag-border);
-  border-radius: 8px;
-}
-
-.ag-settings-defaults .ag-settings-note {
-  grid-column: 1 / -1;
+  border-radius: 6px;
 }
 
 /* ── 앱 전용 AGENTS.md ──────────────────────────────── */
