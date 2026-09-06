@@ -414,7 +414,7 @@ export function createWritingStyleCalibration(
   corpusModes.setAttribute('role', 'radiogroup');
   corpusModes.setAttribute('aria-label', '기존 보정 자료 처리 방식');
   const corpusModeButtons = new Map<CorpusMode, HTMLButtonElement>();
-  for (const [value, label] of [
+  for (const [value, label, detail] of [
     ['append', '문서 추가', '현재 자료를 유지하고 새 글을 더합니다.'],
     ['replace', '전체 교체', '현재 자료를 빼고 새 글만 다시 분석합니다.'],
   ] as const) {
