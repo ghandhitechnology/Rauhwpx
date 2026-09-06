@@ -377,8 +377,16 @@
 
 /* 새 대화 기본값은 레이블과 선택값을 한 줄에 배치합니다. */
 .ag-settings-destination-content > .ag-settings-section.ag-settings-defaults {
-  padding: 0;
+  --ag-text: #f5f5f7;
+  --ag-text-muted: #a2a2a8;
+  --ag-border: #282828;
+  --ag-input-bg: #0d0d0d;
+  color-scheme: dark;
+  padding: 10px 12px;
   gap: 10px;
+  border: 1px solid var(--ag-border);
+  border-radius: 10px;
+  background: #000;
 }
 
 .ag-settings-defaults .ag-settings-section-title {
