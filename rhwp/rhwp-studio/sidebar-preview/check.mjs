@@ -384,6 +384,17 @@ try {
       document.querySelector('.ag-root').innerText.includes('선택한 문체'),
     );
   });
+  await step('Provider picker only lists connected providers', async () => {
+    await open();
+    const visible = () => page.$$eval('.ag-provider-item', items => items.filter(item => !item.hidden).map(item => item.dataset.agent));
+    assert.equal((await visible()).length, 7);
+    await page.evaluate(() => window.sidebarPreview.bridge.disconnectAgent('grok'));
+    assert(!(await visible()).includes('grok'));
+    await page.evaluate(() => window.sidebarPreview.bridge.submitAgentAuthCode('grok', 'preview'));
+    assert((await visible()).includes('grok'));
+    await page.evaluate(() => window.sidebarPreview.setServices(false));
+    assert.deepEqual(await visible(), []);
+  });
   await step('Compact live subagent previews', () => checkFleetPreview(page, origin));
   await step('Subagent fleet, failure, and offline recovery', async () => {
     await play('fleet');
