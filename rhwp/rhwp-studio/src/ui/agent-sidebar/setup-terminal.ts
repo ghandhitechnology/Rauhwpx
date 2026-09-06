@@ -40,7 +40,9 @@ export function createSetupTerminal(options: {
   themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme'] });
   themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class', 'data-theme'] });
 
-  async function open() {
+  async function open(provider = 'OpenCode') {
+    title.textContent = `${provider} 로그인`;
+    screen.setAttribute('aria-label', `${provider} 로그인 터미널`);
     root.hidden = false;
     if (terminal) { fit?.(); return; }
     if (loading) return;

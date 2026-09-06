@@ -3292,3 +3292,22 @@ test('Failed OpenCode terminal login preserves existing credentials', async (t) 
   await assert.rejects(manager.authenticate('opencode', 'oauth'), { code: 'AGENT_AUTH_FAILED' });
   assert.equal(await fs.readFile(authFile, 'utf8'), original);
 });
+
+
+test('CLI terminal mode uses each provider login command and preserves failure rollback', async (t) => {
+  for (const [agent, argv] of [['claude', ['auth', 'login']], ['codex', ['login', '--device-auth']], ['grok', ['login']], ['cursor', ['login']]]) {
+    const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-terminal-default-'));
+    t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+    let launched = false;
+    const manager = await createCliSetupManager({ rootDir, homeDir: path.join(rootDir, 'host'), platform: 'linux', baseEnv: { PATH: '/usr/bin' },
+      createTerminal: (spec) => {
+        launched = true;
+        assert.deepEqual(spec.argv, argv);
+        assert.equal(spec.env.CLAUDE_API_KEY, undefined);
+        return { done: Promise.resolve({ code: 1 }), cancel: async () => true };
+      },
+    }).init();
+    await assert.rejects(manager.authenticate(agent, 'oauth', undefined, undefined, { terminal: true }), { code: 'AGENT_AUTH_FAILED' });
+    assert.equal(launched, true, agent);
+  }
+});

@@ -1,3 +1,4 @@
+import { checkCliTerminalDefaults } from './cli-terminal-defaults.check.mjs';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -385,6 +386,7 @@ try {
       document.querySelector('.ag-root').innerText.includes('선택한 문체'),
     );
   });
+  await step('New CLI installs default to terminal login', () => checkCliTerminalDefaults(page, origin));
   await step('Embedded OpenCode login terminal', () => checkSetupTerminal(page, origin));
   await step('Provider picker only lists connected providers', async () => {
     await open();
@@ -674,12 +676,10 @@ try {
           (await window.sidebarPreview.bridge.requestAgentSetupStatus()).codex
             .installed,
       );
-      await clickText('.ag-settings-btn', '로그인 방식 변경');
-      await page.waitForSelector('.ag-agent-auth-card', { visible: true });
-      await (
-        await page.$('.ag-agent-setup-dialog')
-      ).screenshot({ path: resolve(artifacts, 'provider-setup.png') });
-      await page.click('.ag-agent-auth-card');
+      await page.waitForSelector('.ag-setup-terminal .xterm-helper-textarea');
+      await page.focus('.ag-setup-terminal .xterm-helper-textarea');
+      await page.keyboard.press('Enter');
+      await page.keyboard.press('Enter');
       await page.waitForFunction(
         async () =>
           (await window.sidebarPreview.bridge.requestAgentSetupStatus()).codex

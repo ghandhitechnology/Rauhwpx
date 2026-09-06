@@ -355,7 +355,7 @@ export function createCliSetupManager({
   const codexOAuthStagingDir = path.join(rootDir, 'codex-oauth-staging');
   const claudeOAuthStagingDir = path.join(rootDir, 'claude-oauth-staging');
   const openCodeOAuthStagingDir = path.join(rootDir, 'opencode-oauth-staging');
-  let openCodeTerminal = null;
+  const setupTerminals = new Map();
   const hostProfileHome = platform === 'win32'
     ? platformPath.resolve(baseEnv.USERPROFILE || homeDir)
     : platformPath.resolve(homeDir);
@@ -1172,6 +1172,7 @@ export function createCliSetupManager({
       agent,
       installed: Boolean(version),
       installing: installs.has(agent),
+      terminalAuthSupported: !(agent === 'claude' && platform === 'darwin'),
       version,
       ...auth,
       authenticating: authRuns.has(agent),
@@ -1841,12 +1842,12 @@ export function createCliSetupManager({
    * @param {'api-key'|'oauth'} method
    * @param {string} [key] api-key 방식에서만 쓴다.
    * @param {(progress: SetupProgress) => void} [onProgress]
-   * @param {{ signal?: AbortSignal, onCommitted?: () => void }} [options]
+   * @param {{ signal?: AbortSignal, onCommitted?: () => void, terminal?: boolean }} [options]
    */
-  async function authenticate(agent, method, key, onProgress, { signal, onCommitted } = {}) {
+  async function authenticate(agent, method, key, onProgress, { signal, onCommitted, terminal = false } = {}) {
     const item = assertAgent(agent);
     throwIfAuthCancelled(signal);
-    if (agent === 'opencode' && openCodeTerminal) throw setupError('AGENT_SETUP_CLEANUP_PENDING', '이전 로그인 종료를 확인하지 못했어요. 앱을 다시 시작해 주세요.');
+    if (setupTerminals.has(agent)) throw setupError('AGENT_SETUP_CLEANUP_PENDING', '이전 로그인 종료를 확인하지 못했어요. 앱을 다시 시작해 주세요.');
     if (authRuns.has(agent)) throw setupError('AGENT_AUTH_BUSY', '이미 로그인 작업이 진행 중이에요.');
     // Reject oversized credentials before load() can migrate or rewrite any
     // persisted state, and before a provider request can build a huge header.
@@ -1986,16 +1987,17 @@ export function createCliSetupManager({
         if (agent === 'grok') await fs.mkdir(grokHomeDir, { recursive: true });
         if (agent === 'cursor' && platform !== 'win32') await fs.mkdir(cursorHomeDir, { recursive: true });
         throwIfAuthCancelled(signal);
-        const result = agent === 'opencode' ? await (async () => {
-          openCodeTerminal = createTerminal({ command, argv: loginSpec.argv, env: loginSpec.env,
-            cwd: credentialTransaction.homeDir, signal, timeoutMs: AUTH_TIMEOUT_MS,
+        const result = (terminal || agent === 'opencode') ? await (async () => {
+          const session = createTerminal({ command, argv: loginSpec.argv, env: loginSpec.env,
+            cwd: credentialTransaction?.homeDir ?? (agent === 'grok' ? grokHomeDir : cursorHomeDir), signal, timeoutMs: AUTH_TIMEOUT_MS,
             onOutput: terminalData => onProgress?.({ state: 'authorizing', terminalData }),
           });
+          setupTerminals.set(agent, session);
           onProgress?.({ state: 'authorizing', terminalReady: true });
           let cleanupUncertain = false;
-          try { return await openCodeTerminal.done; }
+          try { return await session.done; }
           catch (error) { cleanupUncertain = error?.processCleanupUncertain === true; throw error; }
-          finally { if (!cleanupUncertain) openCodeTerminal = null; }
+          finally { if (!cleanupUncertain) setupTerminals.delete(agent); }
         })() : await run(command, loginSpec.argv, {
           timeoutMs: AUTH_TIMEOUT_MS,
           operationKey: `auth:${agent}`,
@@ -2228,12 +2230,12 @@ export function createCliSetupManager({
     install,
     authenticate,
     submitAuthCode,
-    terminalSnapshot(agent) { return agent === 'opencode' ? openCodeTerminal?.snapshot() ?? null : null; },
-    terminalInput(agent, data) { if (agent === 'opencode') openCodeTerminal?.write(data); },
-    terminalResize(agent, cols, rows) { if (agent === 'opencode') openCodeTerminal?.resize(cols, rows); },
+    terminalSnapshot(agent) { return setupTerminals.get(agent)?.snapshot() ?? null; },
+    terminalInput(agent, data) { setupTerminals.get(agent)?.write(data); },
+    terminalResize(agent, cols, rows) { setupTerminals.get(agent)?.resize(cols, rows); },
     async cancel(agent) {
       assertAgent(agent);
-      if (agent === 'opencode' && openCodeTerminal) return openCodeTerminal.cancel().catch(() => false);
+      if (setupTerminals.has(agent)) return setupTerminals.get(agent).cancel().catch(() => false);
       if (activeProcesses.has(`auth:${agent}`)) cancelledAuth.add(agent);
       const entries = [`install:${agent}`, `auth:${agent}`]
         .map((key) => [key, activeProcesses.get(key)])

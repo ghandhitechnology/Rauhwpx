@@ -197,3 +197,6 @@ and document-renderer behavior remain covered by their application tests.
 Open the **OpenCode login terminal** audit scene to review the expanding login panel. The preview uses local terminal output: press Enter twice to finish the sample login, or cancel and choose API-key entry. The app uses the same UI with an owned PTY running `opencode auth login`; completion refreshes provider status automatically. Restart the desktop app after updating the hub to test the real login.
 
 The terminal supports keyboard input, paste, resizing, browser links, cancellation, and restoration after a connection interruption. Raw terminal output is kept only in the owning login's memory, with bounded buffers. Credentials are staged and published through the existing authentication transaction after successful validation.
+
+
+New Claude, Codex, Grok, Cursor, and OpenCode installs continue into the embedded login terminal. The hub advertises platform support; Claude on macOS keeps API-key setup because its Keychain login cannot use the existing isolated credential transaction. Rau and Pi retain their browser account flows. Provider connection status still refreshes automatically after login, and API-key entry remains available as a fallback.

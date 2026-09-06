@@ -944,7 +944,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   setupInstall.addEventListener('click', () => {
     const agent = setupAgent;
     void installSelectedAgent().then(() => {
-      if (agent === 'opencode' && setupAgent === agent && isAgentInstalled(agent) && !isAgentLoggedIn(agent)) {
+      if (agent && setupAgent === agent && isAgentInstalled(agent) && !isAgentLoggedIn(agent)) {
         return startPreferredSetupAuth(agent);
       }
     });
@@ -974,8 +974,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     if (setupUserCode) void copySetupText(setupUserCode, setupUserCodeCopy, '코드 복사');
   });
   const setupTerminal = createSetupTerminal({
-    input: data => { if (setupAgent === 'opencode' && setupAuthRunId) bridge.sendSetupTerminalInput(setupAgent, setupAuthRunId, data); },
-    resize: (cols, rows) => { if (setupAgent === 'opencode' && setupAuthRunId) bridge.resizeSetupTerminal(setupAgent, setupAuthRunId, cols, rows); },
+    input: data => { if (supportsTerminalSetup(setupAgent) && setupAuthRunId) bridge.sendSetupTerminalInput(setupAgent, setupAuthRunId, data); },
+    resize: (cols, rows) => { if (supportsTerminalSetup(setupAgent) && setupAuthRunId) bridge.resizeSetupTerminal(setupAgent, setupAuthRunId, cols, rows); },
     cancel: () => setupLoginCancel.click(),
   });
   setupAuthPane.append(setupTerminal.root);
@@ -2160,6 +2160,11 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     }, 1600);
   }
 
+  function supportsTerminalSetup(agent: AgentName | null): agent is AgentName {
+    return agent !== null && !['rau', 'pi'].includes(agent)
+      && setupStatuses?.[agent]?.terminalAuthSupported !== false;
+  }
+
   function isAgentLoggedIn(agent: AgentName): boolean {
     if (agent === 'pi' && piStatus?.setupComplete === true) return true;
     const status = setupStatuses?.[agent];
@@ -2211,6 +2216,12 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   async function startPreferredSetupAuth(agent: AgentName): Promise<void> {
     setupReauth = true;
+    if (setupStatuses?.[agent]?.terminalAuthSupported === false) {
+      setupKeyBox.hidden = false;
+      renderAgentSetup();
+      setupKey.input.focus();
+      return;
+    }
     await startSetupAuth('oauth');
   }
 
@@ -2360,16 +2371,12 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     const configured = status?.connected === true || status?.setupComplete === true;
     // OpenCode도 바이너리 감지만으로 실행할 수 없다. API 키나 사용자의
     // `opencode auth login`을 허브가 확인한 뒤에만 완료 화면으로 보낸다.
-    const connected = agent === 'rau'
-      ? configured
-      : agent === 'opencode'
-        ? configured || (available && status?.authenticated === true)
-        : detected || configured;
+    const connected = configured || (available && status?.authenticated === true);
     setupHeroIcon.replaceChildren(createProviderIcon(agent));
     setupHeroTitle.textContent = AGENT_LABEL[agent];
     setupKey.input.placeholder = API_KEY_PLACEHOLDER[agent];
     setupAuthHeading.textContent = '로그인 방법';
-    setupOauth.hidden = false;
+    setupOauth.hidden = status?.terminalAuthSupported === false;
     const oauthTitle = setupOauth.querySelector('strong');
     const oauthDetail = setupOauth.querySelector('span');
     if (agent === 'rau') {
@@ -2380,8 +2387,8 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       setupKeyBox.hidden = true;
       setupAuthPane.hidden = connected && !setupReauth;
     } else {
-      if (oauthTitle) oauthTitle.textContent = agent === 'opencode' ? '로그인 시작' : '브라우저로 로그인';
-      if (oauthDetail) oauthDetail.textContent = agent === 'opencode' ? '이 창에서 계정 연결' : '구독 계정 또는 웹 계정 연결';
+      if (oauthTitle) oauthTitle.textContent = supportsTerminalSetup(agent) ? '로그인 시작' : '브라우저로 로그인';
+      if (oauthDetail) oauthDetail.textContent = supportsTerminalSetup(agent) ? '이 창에서 계정 연결' : '구독 계정 또는 웹 계정 연결';
       setupApiToggle.hidden = false;
       setupInstallPane.hidden = available;
       setupAuthPane.hidden = !available || (connected && !setupReauth);
@@ -2415,7 +2422,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     setupApiToggle.disabled = setupBusy || authBusyElsewhere || connectionState !== 'connected';
     setupKeySubmit.disabled = setupBusy || !setupKey.input.value.trim();
     renderSetupLoginBox();
-    setupCodeBox.hidden = (agent !== 'claude' && agent !== 'rau') || !setupCodePending || !setupBusy;
+    setupCodeBox.hidden = supportsTerminalSetup(agent) || (agent !== 'claude' && agent !== 'rau') || !setupCodePending || !setupBusy;
     setupCodeNote.textContent = agent === 'rau'
       ? '브라우저에 표시된 12자리 반환 코드를 붙여넣어 주세요.'
       : '브라우저에서 로그인하면 인증 코드가 표시됩니다. 코드를 붙여넣어 주세요.';
@@ -2425,7 +2432,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   /** 브라우저 로그인이 도는 동안만 주소·코드 상자를 세운다. */
   function renderSetupLoginBox(): void {
-    const authorizing = setupOauthPending && setupBusy && setupAgent !== 'opencode';
+    const authorizing = setupOauthPending && setupBusy && !supportsTerminalSetup(setupAgent);
     setupLoginBox.hidden = !authorizing;
     setupAuthUrlRow.hidden = !setupAuthUrl;
     if (setupAuthUrl) {
@@ -2506,7 +2513,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     setupMessage = '';
     clearSetupAuthPrompt();
     setupOauthPending = method === 'oauth';
-    if (setupAgent === 'opencode' && method === 'oauth') void setupTerminal.open();
+    if (supportsTerminalSetup(setupAgent) && method === 'oauth') void setupTerminal.open(AGENT_LABEL[setupAgent]);
     resetSetupInstallProgress();
     if (setupAgent === 'pi') piMessage = '';
     renderAgentSetup();
@@ -3472,12 +3479,12 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
           setupStatuses = ev.statuses;
           const selectedStatus = setupAgent ? ev.statuses[setupAgent] : null;
           if (setupAgent && selectedStatus?.authOwnedByThisSession && selectedStatus.authRunId) {
-            const resumeTerminal = setupAgent === 'opencode' && setupAuthRunId !== selectedStatus.authRunId;
+            const resumeTerminal = supportsTerminalSetup(setupAgent) && setupAuthRunId !== selectedStatus.authRunId;
             setupAuthRunId = selectedStatus.authRunId;
             setupBusy = true;
-            setupOauthPending = setupAgent === 'opencode' || Boolean(selectedStatus.authUrl || selectedStatus.pairingCode);
-            if (setupAgent === 'opencode') void setupTerminal.open();
-            if (resumeTerminal) bridge.resumeSetupTerminal('opencode', selectedStatus.authRunId);
+            setupOauthPending = supportsTerminalSetup(setupAgent) || Boolean(selectedStatus.authUrl || selectedStatus.pairingCode);
+            if (supportsTerminalSetup(setupAgent)) void setupTerminal.open(AGENT_LABEL[setupAgent]);
+            if (resumeTerminal) bridge.resumeSetupTerminal(setupAgent, selectedStatus.authRunId);
             setupAuthUrl = selectedStatus.authUrl ?? setupAuthUrl;
             setupUserCode = selectedStatus.pairingCode ?? setupUserCode;
             if (setupAgent === 'rau' || setupAgent === 'claude') setupCodePending = true;
@@ -3510,12 +3517,12 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
           break;
         }
         case 'agent-setup-terminal':
-          if (setupAgent !== 'opencode' || ev.agent !== setupAgent || !setupBusy || !setupOauthPending) break;
+          if (!supportsTerminalSetup(setupAgent) || ev.agent !== setupAgent || !setupBusy || !setupOauthPending) break;
           if (setupAuthRunId && ev.authRunId !== setupAuthRunId) break;
           setupAuthRunId = ev.authRunId;
           setupBusy = true;
           setupOauthPending = true;
-          void setupTerminal.open();
+          void setupTerminal.open(AGENT_LABEL[setupAgent]);
           if (ev.ready) setupTerminal.ready();
           if (ev.data !== undefined) setupTerminal.write(ev.data, ev.reset);
           break;
@@ -3621,7 +3628,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       }
     },
     dispose(): void {
-      if (setupAgent === 'opencode' && setupAuthRunId) bridge.cancelAgentSetup(setupAgent, setupAuthRunId);
+      if (supportsTerminalSetup(setupAgent) && setupAuthRunId) bridge.cancelAgentSetup(setupAgent, setupAuthRunId);
       setupTerminal.dispose();
       disposed = true;
       settingsOpen = false;

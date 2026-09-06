@@ -760,6 +760,7 @@ function readAgentSetupStatus(value: unknown, agent: AgentName): AgentSetupStatu
   return {
     agent,
     available: src['available'] === true,
+    ...(typeof src['terminalAuthSupported'] === 'boolean' ? { terminalAuthSupported: src['terminalAuthSupported'] } : {}),
     connected: src['connected'] === true,
     installed: src['installed'] === true,
     installing: src['installing'] === true,
@@ -3454,7 +3455,7 @@ export class AgentBridgeImpl implements AgentBridge {
 
   authenticateAgent(agent: AgentName, method: AgentAuthMethod, key?: string): Promise<AgentSetupAuthStart | null> {
     return this.request<AgentSetupAuthStart>(
-      { type: 'agent-setup-auth', agent, method, ...(key ? { key } : {}) },
+      { type: 'agent-setup-auth', agent, method, terminal: method === 'oauth' && !['rau', 'pi'].includes(agent), ...(key ? { key } : {}) },
       'agent-setup-auth',
       30_000,
     );

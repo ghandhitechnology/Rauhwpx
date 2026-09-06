@@ -29,13 +29,13 @@ test('terminal frames require the exact owning auth run and enforce input limits
   const source = await readFile(new URL('../server.mjs', import.meta.url), 'utf8');
   const start = source.indexOf("    case 'agent-setup-terminal-resume':");
   const end = source.indexOf("    case 'agent-setup-auth-code':", start);
-  const dispatch = new Function('msg', 'authRuns', 'record', 'sock', 'cliSetup', 'sendAgentSetupError', 'Buffer', 'sendAuthRunFrame',
+  const dispatch = new Function('msg', 'authRuns', 'record', 'sock', 'cliSetup', 'sendAgentSetupError', 'Buffer', 'sendAuthRunFrame', 'CLI_SETUP_AGENTS',
     `switch(msg.type) { ${source.slice(start, end)} }`);
   const registry = new AuthRunRegistry();
   const run = registry.begin({ agent: 'opencode', method: 'oauth', ownerSessionId: 'owner', requestId: 'request', cancel: () => {} });
   const writes = [], errors = [], frames = [];
   const send = (owner, props = {}) => dispatch({ type: 'agent-setup-terminal-input', agent: 'opencode', authRunId: run.runId, data: '\x1b[B', ...props }, registry,
-    { sessionId: owner }, {}, { terminalInput: (...args) => writes.push(args), terminalSnapshot: () => 'private terminal output' }, (...args) => errors.push(args), Buffer, (_run, frame) => frames.push(frame));
+    { sessionId: owner }, {}, { terminalInput: (...args) => writes.push(args), terminalSnapshot: () => 'private terminal output' }, (...args) => errors.push(args), Buffer, (_run, frame) => frames.push(frame), ['claude', 'codex', 'grok', 'cursor', 'opencode']);
   send('other');
   send('owner', { authRunId: 'stale' });
   send('owner', { data: 'x'.repeat(4097) });

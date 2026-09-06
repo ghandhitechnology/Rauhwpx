@@ -338,6 +338,7 @@ export type ProviderStatusMap = Record<AgentName, ProviderHealth>;
 export type AgentAuthMethod = 'oauth' | 'api-key';
 
 export interface AgentSetupStatus {
+  terminalAuthSupported?: boolean;
   agent: AgentName;
   /** App-managed or already present on PATH. */
   available: boolean;
