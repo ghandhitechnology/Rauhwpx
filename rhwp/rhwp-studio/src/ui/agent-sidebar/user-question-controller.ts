@@ -56,7 +56,6 @@ export function createUserQuestionController(options: UserQuestionControllerOpti
     otherTextByQuestionId: {},
     activeQuestionIndex: 0,
   };
-  let collapsed = false;
   let submitting = false;
   let responseId: string | null = null;
   let errorMessage = '';
@@ -209,27 +208,7 @@ export function createUserQuestionController(options: UserQuestionControllerOpti
     }
     root.dataset.inactive = visible ? 'false' : 'true';
     if (!visible) return;
-    root.classList.toggle('ag-collapsed', collapsed);
     const question = currentQuestion()!;
-    const disclosure = element('button', 'ag-question-disclosure');
-    disclosure.type = 'button';
-    disclosure.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-    disclosure.setAttribute('aria-controls', bodyId);
-    disclosure.append(
-      element('span', 'ag-question-disclosure-label', collapsed ? question.question : question.header),
-      ...(!collapsed
-        ? [element('span', 'ag-question-mode', question.mode === 'multiple' ? '복수 선택' : '하나 선택')]
-        : []),
-      element('span', 'ag-question-count', `${draft.activeQuestionIndex + 1} / ${interaction.questions.length}`),
-    );
-    disclosure.addEventListener('click', () => {
-      collapsed = !collapsed;
-      render();
-      announce(collapsed ? '질문을 접었습니다.' : '질문을 펼쳤습니다.');
-    });
-    root.appendChild(disclosure);
-    if (collapsed) return;
-
     const body = element('div', 'ag-question-body');
     body.id = bodyId;
     const prompt = element('h3', 'ag-question-prompt', question.question);
@@ -318,7 +297,6 @@ export function createUserQuestionController(options: UserQuestionControllerOpti
       otherTextByQuestionId: { ...(restored?.otherTextByQuestionId ?? {}) },
       activeQuestionIndex: Math.max(0, Math.min(next.questions.length - 1, restored?.activeQuestionIndex ?? 0)),
     };
-    collapsed = false;
     submitting = false;
     responseId = null;
     errorMessage = '';
@@ -382,7 +360,7 @@ export function createUserQuestionController(options: UserQuestionControllerOpti
   }
 
   function handleNumberKey(event: KeyboardEvent): void {
-    if (!interaction || !visible || collapsed || submitting || isEditable(event.target)) return;
+    if (!interaction || !visible || submitting || isEditable(event.target)) return;
     const digit = Number(event.key);
     if (!Number.isInteger(digit) || digit < 1 || digit > 9) return;
     const question = currentQuestion();
