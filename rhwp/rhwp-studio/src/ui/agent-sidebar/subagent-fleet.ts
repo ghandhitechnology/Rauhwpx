@@ -279,6 +279,7 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
   dock.append(popup, pill);
 
   let popupOpen = false;
+  let dockTransition: Animation | null = null;
   let selectedRow: RowRefs | null = null;
   let nextRowId = 0;
   /** 직전 갱신 때 도크에 살아 있던 task 수 — 0 으로 떨어지는 순간을 잡는다. */
@@ -302,13 +303,35 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
 
   function setPopupOpen(open: boolean): void {
     if (popupOpen === open) return;
+    const restoreFocus = popup.contains?.(doc.activeElement);
+    const before = (popupOpen ? popup : pill).getBoundingClientRect?.();
+    dockTransition?.cancel();
     popupOpen = open;
     popup.hidden = !open;
+    pill.hidden = open;
     pill.setAttribute('aria-expanded', open ? 'true' : 'false');
     deps.onPopupToggle?.(open);
+    const after = (open ? popup : pill).getBoundingClientRect?.();
+    if (before && after && !globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+      dockTransition = dock.animate?.([
+        { width: `${before.width}px`, height: `${before.height}px`, overflow: 'hidden' },
+        { width: `${after.width}px`, height: `${after.height}px`, overflow: 'hidden' },
+      ], { duration: 220, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' }) ?? null;
+    }
+    if (open) {
+      const hosted = [...cards].find(card => card.hosted);
+      const back = popup.querySelector?.<HTMLButtonElement>('.ag-open .ag-fleet-back');
+      (back ?? hosted?.toggle)?.focus?.();
+    } else if (restoreFocus && !dock.hidden) pill.focus?.();
   }
 
   pill.addEventListener('click', () => setPopupOpen(!popupOpen));
+  popup.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    event.stopPropagation();
+    setPopupOpen(false);
+  });
 
   /** 도크 알약의 상태 줄. 살아 있는 동안은 남은 수, 끝나면 전체 수와 결과다. */
   function dockSummary(hosted: CardEntry[]): { state: TaskState; label: string } {
@@ -551,6 +574,10 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
     root.append(toggle, collapse);
 
     toggle.addEventListener('click', () => {
+      if (card.hosted) {
+        setPopupOpen(false);
+        return;
+      }
       const collapsed = root.classList.toggle('ag-collapsed');
       toggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
     });
@@ -1096,6 +1123,7 @@ export function createSubagentFleet(deps: SubagentFleetDeps): SubagentFleetView 
       setPopupOpen(false);
     },
     reset(): void {
+      dockTransition?.cancel();
       for (const card of cards) stopTicker(card);
       // 도크에 머물러 있던 카드만 팝업에서 걷어 낸다 — 정착해 흐름으로 간
       // 카드는 대화 기록이므로 여기서 건드리지 않는다.
