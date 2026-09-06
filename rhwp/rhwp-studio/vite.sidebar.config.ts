@@ -1,9 +1,11 @@
 import { defineConfig } from 'vite';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { liveUsagePlugin } from './sidebar-preview/live-usage-plugin.mjs';
 
 // Deliberately independent of vite.config.ts: no agent hub, WASM, or PWA plugin.
 export default defineConfig({
+  plugins: [liveUsagePlugin()],
   root: resolve(import.meta.dirname, 'sidebar-preview'),
   resolve: {
     alias: {

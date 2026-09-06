@@ -54,6 +54,14 @@ These stay in Studio chat. They are not MCP tools.
 
 Unknown slash text is sent as a normal message. `//` sends a message that starts with `/`.
 
+## Provider usage
+
+**Settings → AI 연결 → 사용량** reads Claude and Codex subscription quotas from the local CLI login. Claude uses its OAuth credentials in Keychain or `CLAUDE_CONFIG_DIR/.credentials.json`. Codex reads `account/rateLimits/read` through a short-lived app-server and supplements missing windows and banked reset balances through the account usage API. `CODEX_HOME` is respected. API-key billing keeps local token records without showing subscription quota estimates.
+
+Remaining-quota bars refresh while Connections is visible, and each card’s refresh icon forces a new read. Codex banked resets require confirmation and bind the request to the displayed account. The hub saves reset request IDs in `codex-reset-ledger.json` under the usage data directory so an interrupted reset can be retried safely. Credentials stay in the hub. CLIProxyAPI configuration is no longer used.
+
+OpenRouter credit balances, Grok billing, and OpenCode Go usage windows also come from their remote APIs. Unknown values remain unavailable. See [remote provider balances](docs/provider-balances.md) for authentication, supported account types, and endpoint details.
+
 ## Environment variables
 
 `browserbase_*` tools run one Stagehand sidecar per browser. Every tool takes an optional `browserId`. Omit it for the shared `main` browser. Subagents pass their own id and get an isolated browser. `BrowserbaseFleet` in `rhwp/rhwp-agent/browserbase-session.mjs` keeps at most 4 browsers per chat and returns `BROWSERBASE_BROWSER_LIMIT` beyond that. Call `browserbase_end` to free a slot. Subagent browsers close when the turn ends. The main browser survives provider restarts and closes on chat stop, hub shutdown, or 15 minutes idle. If a sidecar process dies, the call that hit it returns `BROWSERBASE_SIDECAR_EXITED` and the next call relaunches it.
@@ -69,8 +77,6 @@ Browserbase credentials come from the variables below or from Studio **Settings 
 | `RHWP_OPENCODE_MODEL` | `opencode/big-pickle` | OpenCode `provider/model` fallback before discovery |
 | `RHWP_SKILLS_DIR` | OS application-data directory | Product skill directory |
 | `RHWP_USAGE_DIR` | OS application-data directory | Token-usage log directory |
-| `RHWP_CLIPROXY_URL` | `http://127.0.0.1:8317` | CLIProxyAPI base URL |
-| `RHWP_CLIPROXY_KEY` | | CLIProxyAPI management key |
 | `RHWP_REFERENCES_DIR` | OS application-data directory | Reference file store |
 | `BROWSERBASE_API_KEY` | — | Browserbase API key |
 | `BROWSERBASE_PROJECT_ID` | — | Browserbase project id |
