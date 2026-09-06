@@ -518,7 +518,7 @@ export function createMockBridge(report: (message: string) => void) {
           tool: 'read_document',
           argsJson: '{"section":0}',
         });
-        if (reply === 'fleet')
+        if (reply === 'fleet') {
           stream({
             type: 'task-start',
             agent,
@@ -527,6 +527,22 @@ export function createMockBridge(report: (message: string) => void) {
             taskKind: 'agent',
             role: '교정',
           });
+          for (const [suffix, title] of [['layout', '표 구조와 문서 서식'], ['facts', '일정과 수치 검증']]) {
+            stream({ type: 'task-start', agent, taskId: `${suffix}-${turnGeneration}`, title, taskKind: 'agent' });
+          }
+          let frame = 0;
+          const activities = ['문서의 문장 구조를 읽고 있습니다.', '반복되는 용어를 비교하고 있습니다.', '긴 문장을 나누고 표현을 정리하고 있습니다.'];
+          const updateFleet = () => {
+            if (generation !== turnGeneration) return;
+            stream({ type: 'text-delta', agent, parentTaskId: `task-${turnGeneration}`, text: activities[frame % activities.length] + '\n' });
+            stream({ type: 'task-progress', agent, taskId: `task-${turnGeneration}`, usage: { totalTokens: 2400 + frame * 120, toolUses: 3 } });
+            frame += 1;
+            if (holdReply) later(updateFleet, 1600);
+          };
+          later(updateFleet, 500);
+          stream({ type: 'tool-call', agent, parentTaskId: `layout-${turnGeneration}`, callId: `layout-read-${turnGeneration}`, tool: 'read_document', argsJson: '{"section":1}' });
+        }
+
         later(() => {
           if (generation !== turnGeneration) return;
           stream({
@@ -559,6 +575,9 @@ export function createMockBridge(report: (message: string) => void) {
             return;
           }
           if (reply === 'fleet') {
+            stream({ type: 'tool-result', agent, parentTaskId: `layout-${turnGeneration}`, callId: `layout-read-${turnGeneration}`, ok: true, resultPreview: '표 3개와 문단 12개의 서식을 확인했습니다.' });
+            stream({ type: 'task-end', agent, taskId: `facts-${turnGeneration}`, status: 'failed', summary: '참조 자료에 접근할 수 없어 수치 검증을 마치지 못했습니다.' });
+            stream({ type: 'task-end', agent, taskId: `layout-${turnGeneration}`, status: 'completed', summary: '표 너비와 제목 서식을 확인했습니다.' });
             stream({
               type: 'task-progress',
               agent,
