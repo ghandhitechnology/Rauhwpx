@@ -175,11 +175,10 @@
 .ag-calibration-language {
   display: flex;
   flex-direction: column;
-  min-height: 208px;
   min-width: 0;
   align-items: center;
   gap: 20px;
-  padding: 24px;
+  padding: 24px 24px 12px;
   border: 1px solid var(--n-hairline-strong);
   border-radius: var(--n-radius-field);
   background: var(--n-surface);
