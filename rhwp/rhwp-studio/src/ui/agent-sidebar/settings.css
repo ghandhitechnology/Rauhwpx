@@ -1113,13 +1113,6 @@
   background: var(--ag-bg-2);
 }
 
-.ag-pi-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  justify-content: space-between;
-}
-
 .ag-pi-step {
   display: flex;
   flex-direction: column;
