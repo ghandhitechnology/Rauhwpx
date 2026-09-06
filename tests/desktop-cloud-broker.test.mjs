@@ -640,6 +640,80 @@ test('coordinator snapshots expose a logged-out account gate before any Cloud pr
   await coordinator.stop();
 });
 
+test('account-change refresh bypasses the Cloud status cache for sign-in and sign-out', async () => {
+  let signedIn = false;
+  let reads = 0;
+  const provider = {
+    id: RAUCLOUD_PROVIDER_ID,
+    displayName: 'Raucloud',
+    configuration: () => ({ configured: true, missing: [] }),
+    spawn: async () => {},
+    status: async () => ({ lifecycle: 'idle' }),
+    teardown: async () => ({ removed: true }),
+    accountStatus: async () => {
+      reads += 1;
+      return { signedIn, account: signedIn ? { id: 'user-1' } : null,
+        raucloud: { kind: signedIn ? 'available' : 'logged-out' } };
+    },
+  };
+  const coordinator = new CloudCoordinator({
+    client: { loadServerMode: async () => null, loadProfile: async () => null },
+    store: { load: async () => [], list: async () => [], flush: async () => {} },
+    appServers: [provider],
+  });
+  const events = [];
+  coordinator.on('event', (event) => events.push(event));
+  try {
+    assert.equal((await coordinator.start()).account.signedIn, false);
+    signedIn = true;
+    assert.equal((await coordinator.refreshAccountStatus()).signedIn, true);
+    assert.equal((await coordinator.snapshot()).account.signedIn, true);
+    signedIn = false;
+    assert.equal((await coordinator.refreshAccountStatus()).signedIn, false);
+    assert.equal((await coordinator.snapshot()).account.signedIn, false);
+    assert.equal(reads, 3, 'each account change bypasses the still-fresh 15-second cache');
+    assert.equal(events.filter((event) => event.type === 'account-status-changed').length, 2);
+  } finally {
+    await coordinator.stop();
+  }
+});
+
+test('account-change refresh waits for a stale in-flight read before fetching current identity', async () => {
+  let releaseOldStatus;
+  const oldStatus = new Promise((resolve) => { releaseOldStatus = resolve; });
+  let reads = 0;
+  const provider = {
+    id: RAUCLOUD_PROVIDER_ID,
+    displayName: 'Raucloud',
+    configuration: () => ({ configured: true, missing: [] }),
+    spawn: async () => {},
+    status: async () => ({ lifecycle: 'idle' }),
+    teardown: async () => ({ removed: true }),
+    accountStatus: async () => {
+      reads += 1;
+      return reads === 1 ? oldStatus : { signedIn: true, account: { id: 'new-account' },
+        raucloud: { kind: 'available' } };
+    },
+  };
+  const coordinator = new CloudCoordinator({
+    client: { loadServerMode: async () => null, loadProfile: async () => null },
+    store: { load: async () => [], list: async () => [], flush: async () => {} },
+    appServers: [provider],
+  });
+  const starting = coordinator.start();
+  const refreshing = coordinator.refreshAccountStatus();
+  assert.equal(reads, 1);
+  releaseOldStatus({ signedIn: false, account: null, raucloud: { kind: 'logged-out' } });
+  try {
+    const [, current] = await Promise.all([starting, refreshing]);
+    assert.equal(current.account.id, 'new-account');
+    assert.equal((await coordinator.snapshot()).account.account.id, 'new-account');
+    assert.equal(reads, 2);
+  } finally {
+    await coordinator.stop();
+  }
+});
+
 test('a newly signed-in device can take over without an existing local Cloud profile', async () => {
   let profile = null;
   let paired = false;

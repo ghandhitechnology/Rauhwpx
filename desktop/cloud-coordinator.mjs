@@ -364,6 +364,15 @@ export class CloudCoordinator extends EventEmitter {
     return operation;
   }
 
+  async refreshAccountStatus() {
+    // A read started before the account changed may still report the old identity.
+    // Finish it before forcing a new read, so it cannot overwrite the fresh result.
+    await this.#accountStatusPromise;
+    const account = await this.#refreshAccountStatus({ force: true });
+    this.#emit({ type: 'account-status-changed' });
+    return account;
+  }
+
   async start() {
     this.#stopped = false;
     await this.#refreshAccountStatus({ force: true });

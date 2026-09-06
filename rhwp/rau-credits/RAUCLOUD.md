@@ -2,8 +2,15 @@
 
 The Rau credits service authenticates Raucloud requests and enforces account limits. Desktop Cloud code calls the reusable account-session interface; raw `rau_account_v1_…` credentials remain inside that interface and never reach Studio. The service stores Railway credentials, remote service IDs, worker tokens, quota records, and idempotency keys.
 
+## Shared sign-in
+
+Cloud and Rau provider sign-in both create the same account session. The hub uses `POST /v2/account-session/provider` with that session to connect the account's existing Rau key, then refreshes both status displays. Provider provisioning can be retried without repeating account sign-in. Signing out through account settings or disconnecting Rau clears both local credentials.
+
+Deploy the credits service with this endpoint before releasing the linked desktop flow. Older service versions keep account sign-in working but cannot finish provider linking. Existing account sessions link automatically when restored; legacy provider-only keys require one account sign-in because an OpenRouter key does not authorize a Cloud account. No stored-key or database migration is required.
+
 ## Public API
 
+- `POST /v2/account-session/provider` returns `{ apiKey, email }` to the authenticated hub, reusing the account's trial allocation. The hub stores the key in the encrypted desktop vault; it never sends it to Studio.
 - `GET /v1/account` returns `{ account }`.
 - `PATCH /v1/account/timezone` with `{ "timezone": "Asia/Seoul" }` initializes or schedules the account timezone.
 - `GET /v1/cloud/status?deviceId=…&timezone=…&runId=…` returns `CloudStatusEnvelope`. Omit `deviceId` when Settings only needs account data. Supplying it binds the account session to that device. Supplying `runId` includes that run even after it fails.

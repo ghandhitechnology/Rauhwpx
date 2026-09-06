@@ -70,8 +70,9 @@ import {
   RAU_LOCKED_MODELS,
   RAU_SECRET_ID,
 } from './pi-manager.mjs';
-import { createRauCreditsClient, storeRauApiKey } from './rau-credits-client.mjs';
+import { createRauCreditsClient } from './rau-credits-client.mjs';
 import { createAccountSession } from './account-session.mjs';
+import { createRauAccountSession } from './rau-account-session.mjs';
 import { AuthRunRegistry } from './auth-run-registry.mjs';
 import { createCliSetupManager } from './cli-setup-manager.mjs';
 import { createOpenRouter, creditBalanceEmpty } from './openrouter.mjs';
@@ -275,9 +276,19 @@ const rauManager = await createPiManager({
   skipLegacyKey: true,
 }).init();
 const rauCredits = createRauCreditsClient();
-const accountSession = createAccountSession({
+const accountSession = createRauAccountSession({
+  accountSession: createAccountSession({ secretStore, creditsClient: rauCredits }),
   secretStore,
-  creditsClient: rauCredits,
+  rauManager,
+  beforeProviderChange: disposeRauSessions,
+  onProviderChanged(status, { error }) {
+    if (status) rauStatus = status;
+    rauAccountLinkError = error ? 'Rau 연결을 완료하지 못했어요. 다시 연결해 주세요.' : null;
+    void broadcastFreshAgentSetupStatuses().catch(() => {});
+  },
+  installProvider() {
+    void ensureRauInstalled();
+  },
 });
 const authRuns = new AuthRunRegistry();
 let npmPrefixMutationQueue = Promise.resolve();
@@ -325,6 +336,8 @@ let openCodeModelIds = [];
 /** pi 상태는 동기 경로(resolveModel/startSession)에서도 필요해 캐시해 둔다. */
 let piStatus = await piManager.status();
 let rauStatus = await rauManager.status();
+let rauAccountLinkError = null;
+let rauInstallPromise = null;
 /** OpenRouter 잔액. 키가 있을 때만 채워지고 사용량 리포트에 얹힌다. */
 let openRouterCredits = null;
 let rauCreditsBalance = null;
@@ -690,6 +703,24 @@ async function refreshRauStatus() {
   return rauStatus;
 }
 
+function ensureRauInstalled() {
+  if (rauStatus.installed) return Promise.resolve();
+  if (rauInstallPromise) return rauInstallPromise;
+  rauInstallPromise = mutateSharedNpmPrefix(() => rauManager.install(() => {}))
+    .then(async (status) => {
+      rauStatus = status;
+      piStatus = await piManager.status();
+    })
+    .catch(() => {
+      rauAccountLinkError = 'Rau 설치를 완료하지 못했어요. 다시 설치해 주세요.';
+    })
+    .finally(async () => {
+      rauInstallPromise = null;
+      await broadcastFreshAgentSetupStatuses().catch(() => {});
+    });
+  return rauInstallPromise;
+}
+
 function openRouterAgentSetupStatus(agent) {
   const status = openRouterStatus(agent);
   return {
@@ -718,6 +749,7 @@ function piAgentSetupStatus() {
 function rauAgentSetupStatus() {
   const status = openRouterAgentSetupStatus('rau');
   if (status.authenticated) status.authMethod = 'oauth';
+  if (rauAccountLinkError) status.error = rauAccountLinkError;
   if (rauTrialEmpty()) status.exhausted = true;
   return status;
 }
@@ -982,12 +1014,37 @@ function decorateAccountStatus(status, ownerSessionId = null) {
 
 async function broadcastAccountStatus() {
   const status = await accountSession.status();
+  if (typeof process.send === 'function' && process.connected) {
+    process.send({ type: 'rhwp-account-status-changed' }, () => {});
+  }
   for (const record of sessions.values()) {
     sendJson(record.studioSocket, {
       v: 1,
       type: 'account-status',
       status: decorateAccountStatus(status, record.sessionId),
     });
+  }
+}
+
+async function disposeRauSessions() {
+  if ([...sessions.values()].some((session) => session.processCleanupUncertain)) {
+    throw agentProcessCleanupUncertain();
+  }
+  const rauSessions = [...sessions.values()]
+    .filter((session) => session.agentSession?.agent === 'rau');
+  const cleaned = await Promise.all(rauSessions.map(disposeSession));
+  if (cleaned.some((stopped) => stopped === false)) throw agentProcessCleanupUncertain();
+}
+
+async function logoutRauAccount() {
+  try {
+    return await accountSession.logout();
+  } finally {
+    if (!rauManager.apiKey()) {
+      await disposeRauSessions();
+    }
+    await broadcastFreshAgentSetupStatuses().catch(() => {});
+    await broadcastAccountStatus().catch(() => {});
   }
 }
 
@@ -1022,6 +1079,11 @@ function beginAccountLogin(record, sock, requestId) {
     if (authRun?.accountLoginId) void accountSession.cancelLogin(authRun.accountLoginId);
   };
   try {
+    if (authRuns.get('rau')) {
+      throw Object.assign(new Error('진행 중인 Rau 로그인을 먼저 마쳐 주세요.'), {
+        code: 'ACCOUNT_AUTH_BUSY',
+      });
+    }
     authRun = authRuns.begin({
       agent: 'account',
       ownerSessionId: record.sessionId,
@@ -1121,6 +1183,7 @@ function beginAccountLogin(record, sock, requestId) {
   })().then(
     async () => {
       authRuns.finish(authRun);
+      await broadcastFreshAgentSetupStatuses().catch(() => {});
       await broadcastAccountStatus().catch((error) => {
         log(`account status refresh failed: ${error?.message ?? error}`);
       });
@@ -3803,7 +3866,7 @@ async function handleStudioMessage(record, sock, msg) {
     }
     case 'account-logout': {
       const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
-      if (authRuns.get('account')) {
+      if (authRuns.get('account') || authRuns.get('rau')) {
         replyToStudio(record, sock, {
           v: 1,
           type: 'account-error',
@@ -3813,7 +3876,7 @@ async function handleStudioMessage(record, sock, msg) {
         });
         return;
       }
-      void accountSession.logout()
+      void logoutRauAccount()
         .then(async () => {
           const status = await accountStatusForOwner(record.sessionId);
           replyToStudio(record, sock, { v: 1, type: 'account-status', requestId, status });
@@ -3892,10 +3955,18 @@ async function handleStudioMessage(record, sock, msg) {
         rejectProof?.(agentAuthCancelled());
         rejectProof = null;
         if (agent === 'pi') void piManager.cancelSetup();
-        else if (agent === 'rau') void rauManager.cancelSetup();
+        else if (agent === 'rau') {
+          void rauManager.cancelSetup();
+          if (authRun?.accountLoginId) void accountSession.cancelLogin(authRun.accountLoginId);
+        }
         else if (CLI_SETUP_AGENTS.includes(agent)) void cliSetup.cancel(agent);
       };
       try {
+        if (agent === 'rau' && authRuns.get('account')) {
+          throw Object.assign(new Error('진행 중인 계정 로그인을 먼저 마쳐 주세요.'), {
+            code: 'AGENT_AUTH_BUSY',
+          });
+        }
         authRun = authRuns.begin({
           agent,
           ownerSessionId: record.sessionId,
@@ -3967,29 +4038,39 @@ async function handleStudioMessage(record, sock, msg) {
 
       if (agent === 'rau' && method === 'oauth') {
         void (async () => {
+          const existing = await accountSession.status({ signal: abort.signal });
+          if (!isLiveAuthRun()) throw agentAuthCancelled();
+          if (existing.signedIn) {
+            started();
+            const linked = await accountSession.synchronizeProvider({ signal: abort.signal });
+            if (!isLiveAuthRun()) throw agentAuthCancelled();
+            commitAuthRun();
+            if (linked.provider?.state === 'error') {
+              sendAuthRunError(authRun, new Error('Rau 연결을 완료하지 못했어요. 다시 연결해 주세요.'));
+            }
+            return;
+          }
           const callbackState = crypto.randomBytes(24).toString('base64url');
-          const redirectUri = `http://127.0.0.1:${hubPort}/oauth/rau/callback`;
-          const session = await rauCredits.createDeviceSessionV2({
+          const session = await accountSession.startLogin({
             signal: abort.signal,
-            redirectUri,
+            redirectUri: `http://127.0.0.1:${hubPort}/oauth/rau/callback`,
             callbackState,
             returnMode: 'hybrid',
             clientVersion: `hub-protocol-${PROTOCOL_VERSION}`,
           });
           if (!isLiveAuthRun()) throw agentAuthCancelled();
-          authRun.deviceSessionId = session.id;
-          authRun.codeVerifier = session.codeVerifier;
+          authRun.accountLoginId = session.loginId;
           authRun.callbackState = callbackState;
           const authDetails = {
-            authUrl: session.loginUrl,
+            authUrl: session.authUrl,
             pairingCode: session.pairingCode,
             expiresAt: session.expiresAt,
           };
           started(authDetails);
           progress({ state: 'authorizing', ...authDetails });
 
-          let redeemed;
-          while (!redeemed) {
+          let completed = false;
+          while (!completed) {
             const proof = await new Promise((resolve, reject) => {
               rejectProof = reject;
               authRun.submitProof = (candidate) => {
@@ -4001,14 +4082,14 @@ async function handleStudioMessage(record, sock, msg) {
             if (!isLiveAuthRun()) throw agentAuthCancelled();
             authRuns.update(authRun, { phase: 'redeeming' });
             try {
-              redeemed = await rauCredits.redeemDeviceSessionV2(
-                session.id,
-                session.codeVerifier,
-                proof,
-                { signal: abort.signal },
-              );
-              if (!isLiveAuthRun()) throw agentAuthCancelled();
-              authRun.acceptedProof = proof;
+              const linked = await accountSession.completeLogin(session.loginId, proof, {
+                signal: abort.signal,
+                onCommitted: commitAuthRun,
+              });
+              completed = true;
+              if (linked.provider?.state === 'error') {
+                sendAuthRunError(authRun, new Error('Rau 연결을 완료하지 못했어요. 다시 연결해 주세요.'));
+              }
             } catch (error) {
               if (error?.code !== 'DEVICE_PROOF_INVALID') throw error;
               if (!isLiveAuthRun()) throw agentAuthCancelled();
@@ -4017,27 +4098,11 @@ async function handleStudioMessage(record, sock, msg) {
               progress({ state: 'authorizing', ...authDetails });
             }
           }
-          rauStatus = await storeRauApiKey(rauManager.setApiKey.bind(rauManager), redeemed.apiKey, {
-            signal: abort.signal,
-            account: redeemed.email,
-            onCommitted: commitAuthRun,
-          });
-          await rauCredits.acknowledgeDeviceSessionV2(
-            session.id,
-            session.codeVerifier,
-            authRun.acceptedProof,
-            { signal: abort.signal },
-          ).catch((error) => {
-            if (error?.code === 'RAU_LOGIN_CANCELLED') throw error;
-            log(`Rau v2 acknowledgement failed after local key storage: ${error?.message ?? error}`);
-          });
-          if (!rauStatus.installed) {
-            rauStatus = await mutateSharedNpmPrefix(() => rauManager.install(progress));
-            piStatus = await piManager.status();
-          }
           await refreshOpenRouterCredits(true);
           sendAuthRunFrame(authRun, { type: 'usage-report', usage: usageSnapshot() });
-        })().then(() => finish(), finish);
+        })().then(() => finish(), finish).finally(() => {
+          void broadcastAccountStatus().catch(() => {});
+        });
         return;
       }
 
@@ -4127,12 +4192,12 @@ async function handleStudioMessage(record, sock, msg) {
         sendAgentSetupError(record, sock, requestId, msg.agent, new Error('연결 해제 요청을 확인하지 못했어요.'));
         return;
       }
-      const rauSessions = [...sessions.values()]
-        .filter((session) => session.agentSession?.agent === 'rau');
-      void rauManager.clearApiKey()
-        .then(async (status) => {
-          rauStatus = status;
-          await Promise.all(rauSessions.map(disposeSession));
+      if (authRuns.get('account') || authRuns.get('rau')) {
+        sendAgentSetupError(record, sock, requestId, 'rau', new Error('진행 중인 로그인을 먼저 마쳐 주세요.'));
+        return;
+      }
+      void logoutRauAccount()
+        .then(async () => {
           await refreshOpenRouterCredits(true);
           const statuses = await agentSetupStatuses(record.sessionId);
           replyToStudio(record, sock, { v: 1, type: 'agent-setup-status', requestId, statuses });

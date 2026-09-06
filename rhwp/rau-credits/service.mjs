@@ -371,7 +371,8 @@ export function createCreditsService({
 
   function mutate(task) {
     if (typeof store.mutate === 'function') {
-      return store.mutate((state) => task(ensureState(state)));
+      // Key provisioning performs durable saves under this same queue.
+      return serializeMutation(() => store.mutate((state) => task(ensureState(state))));
     }
     return serializeMutation(async () => {
       const state = ensureState(await store.load());
@@ -1455,6 +1456,20 @@ export function createCreditsService({
       };
     },
 
+    async provisionAccountProvider(token) {
+      const account = await this.authorizeAccountSession(token);
+      let apiKey;
+      try {
+        apiKey = await keyForUser(account.subject, account.email);
+      } catch {
+        // Upstream errors may contain credentials; never forward their payload.
+        throw creditsError('RAU_PROVIDER_PROVISION_FAILED', 'Rau AI 연결을 완료하지 못했어요. 잠시 후 다시 시도해 주세요');
+      }
+      // Revocation while provisioning must prevent delivery of the credential.
+      await serializeMutation(() => this.authorizeAccountSession(token));
+      return { apiKey, email: account.email };
+    },
+
     async sendMagicCode(email) {
       let trimmed;
       try { trimmed = validatedAccountEmail(email); } catch {}
@@ -1928,6 +1943,15 @@ export function creditsRequestListener(service, {
       if (req.method === 'POST' && url.pathname === '/v1/access/revoke') {
         const body = await readJson(req);
         send(200, await service.revokeAccessToken(bearerToken(req), { deviceId: body.deviceId ?? null }));
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/v2/account-session/provider') {
+        req.resume?.();
+        if (!limiter.check(`account-provider:${ip}`, 30, MINUTE)) {
+          send(429, { error: 'RATE_LIMITED', message: '요청이 너무 많아요. 잠시 후 다시 시도해 주세요' });
+          return;
+        }
+        send(200, await service.provisionAccountProvider(requestBearerToken(req)));
         return;
       }
       if (url.pathname === '/v2/account-session') {
