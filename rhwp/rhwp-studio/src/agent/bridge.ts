@@ -21,6 +21,7 @@ import { RevisionTracker } from './revision.ts';
 import { AgentToolExecutor } from './tool-executor.ts';
 import { PendingEditManager } from './pending-edits.ts';
 import { PendingOverlayRenderer } from './pending-overlay.ts';
+import { readProviderQuota, readRemoteBalance } from './provider-quota-protocol.ts';
 import { PendingRequestRegistry } from './pending-requests.ts';
 import { AgentTypewriterReveal } from './typewriter-reveal.ts';
 import { deriveAgentEditingLease, planModeAllowsUserEditing } from './editing-lease.ts';
@@ -74,6 +75,7 @@ import type {
   ProviderHealth,
   ProviderStatusMap,
   ProviderUsage,
+  CodexResetResult,
   ReferenceFile,
   ReferenceScope,
   ReferenceScopeContext,
@@ -157,6 +159,7 @@ export interface AgentBridge {
   disconnectAgent(agent: AgentName): Promise<AgentSetupStatusMap | null>;
   /** 누적 사용량 요약. 응답이 없으면 null. */
   requestUsage(refresh?: boolean): Promise<UsageSummary | null>;
+  consumeCodexReset(idempotencyKey: string, accountKey: string): Promise<CodexResetResult>;
   /** 요금제를 바꾸고 갱신된 요약을 돌려받는다. */
   setUsagePlan(agent: AgentName, plan: string): Promise<UsageSummary | null>;
   /** CLIProxyAPI 관리 API 에 연결해 공식 요금제 사용량을 받는다. */
@@ -956,6 +959,17 @@ function readUsageSummary(value: unknown): UsageSummary | null {
       rau: readProviderUsage(providers['rau']),
     },
     cliproxy: readCliproxyStatus(src['cliproxy']),
+    ...(src['limits'] && typeof src['limits'] === 'object' ? {
+      limits: {
+        claude: readProviderQuota((src['limits'] as Record<string, unknown>)['claude']),
+        codex: readProviderQuota((src['limits'] as Record<string, unknown>)['codex']),
+      },
+    } : {}),
+    ...(src['balances'] && typeof src['balances'] === 'object' ? {
+      balances: Object.fromEntries(['openrouter', 'grok', 'opencode']
+        .filter((provider) => provider in (src['balances'] as Record<string, unknown>))
+        .map((provider) => [provider, readRemoteBalance((src['balances'] as Record<string, unknown>)[provider])])),
+    } : {}),
     ...(openrouter ? { openrouter } : {}),
     ...(rau ? { rau } : {}),
   };
@@ -2308,6 +2322,22 @@ export class AgentBridgeImpl implements AgentBridge {
         if (usage) this.emit({ type: 'usage-report', usage });
         break;
       }
+      case 'codex-reset-result': {
+        const usage = readUsageSummary(msg.usage);
+        const outcome = msg.outcome;
+        if (usage && (outcome === 'reset' || outcome === 'nothingToReset'
+          || outcome === 'noCredit' || outcome === 'alreadyRedeemed')) {
+          if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, { usage, outcome });
+          this.emit({ type: 'usage-report', usage });
+        } else if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, null);
+        break;
+      }
+      case 'codex-reset-error': {
+        if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, {
+          error: typeof msg.message === 'string' ? msg.message : '초기화에 실패했어요.',
+        });
+        break;
+      }
       case 'usage-error':
       case 'provider-error': {
         // 사용량·프로브는 부수 정보다 — 실패는 던지지 않고 "모름(null)" 으로 닫는다.
@@ -3430,8 +3460,17 @@ export class AgentBridgeImpl implements AgentBridge {
     return this.request<UsageSummary>(
       { type: 'usage-request', ...(refresh ? { refresh: true } : {}) },
       'usage',
-      refresh ? 20_000 : REQUEST_TIMEOUT_MS,
+      60_000,
     );
+  }
+
+  async consumeCodexReset(idempotencyKey: string, accountKey: string): Promise<CodexResetResult> {
+    const result = await this.request<CodexResetResult | { error: string }>(
+      { type: 'codex-reset-consume', idempotencyKey, accountKey }, 'codex-reset', 60_000,
+    );
+    if (!result) throw new Error('초기화 결과를 확인하지 못했어요. 새로고침 후 다시 확인해 주세요.');
+    if ('error' in result) throw new Error(result.error);
+    return result;
   }
 
   setUsagePlan(agent: AgentName, plan: string): Promise<UsageSummary | null> {

@@ -71,6 +71,32 @@ export function createFixtures() {
       error: null,
     },
   };
+  const quotaScenario = new URLSearchParams(location.search).get('quota');
+  const now = Date.now();
+  usage.limits = {
+    claude: {
+      status: 'ok', session: { percent: 24, resetsAt: now + 3600000 },
+      week: { percent: 72, resetsAt: now + 86400000 }, updatedAt: now,
+      error: null, accountKey: 'preview-claude', planType: 'Pro', resetCredits: null,
+    },
+    codex: {
+      status: 'ok', session: { percent: 92, resetsAt: now + 7200000 },
+      week: { percent: 42, resetsAt: now + 172800000 }, updatedAt: now,
+      error: null, accountKey: 'preview-codex', planType: 'Plus',
+      resetCredits: { availableCount: 2, nextExpiresAt: now + 604800000 },
+    },
+  };
+  if (quotaScenario === 'error') {
+    usage.limits.claude.status = 'error';
+    usage.limits.claude.error = '제공자가 응답하지 않아요.';
+    usage.limits.claude.updatedAt = now - 600000;
+    usage.limits.codex.status = 'unavailable';
+    usage.limits.codex.session.percent = null;
+    usage.limits.codex.week.percent = null;
+    usage.limits.codex.resetCredits = null;
+  }
+  if (quotaScenario === 'empty') usage.limits.codex.resetCredits!.availableCount = 0;
+  if (quotaScenario === 'pro') usage.limits.codex.planType = 'Pro';
   const pi: T.PiStatus = {
     installed: true,
     installing: false,
@@ -106,6 +132,11 @@ export function createFixtures() {
     totalUsageUsd: 1.5,
     checkedAt: Date.parse(timestamp),
     error: null,
+  };
+  usage.balances = {
+    openrouter: { status: 'ok', balanceUsd: 18.5, totalCreditsUsd: 20, totalUsageUsd: 1.5, updatedAt: now, source: '샘플', error: null },
+    grok: { status: 'ok', balanceUsd: 4.25, totalCreditsUsd: null, totalUsageUsd: null, updatedAt: now, source: '샘플', error: null },
+    opencode: { status: 'unavailable', balanceUsd: null, totalCreditsUsd: null, totalUsageUsd: null, updatedAt: null, source: '샘플', error: '연결된 계정의 잔액 정보를 사용할 수 없어요.' },
   };
   const templates: T.TemplateCatalog = {
     revision: 1,

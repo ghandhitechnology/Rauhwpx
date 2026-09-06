@@ -226,22 +226,19 @@ test('템플릿 설정은 추가·이름 변경·교체·확인 삭제를 제공
   assert.match(settings, /bridge\.deleteTemplate\(id\)/);
 });
 
-test('연결 묶음은 허브 상태와 프로바이더 상태, 세 동작을 갖는다', () => {
+test('연결 묶음은 허브 재연결과 상태 새로고침을 제공하고 불필요한 하단 동작을 숨긴다', () => {
   assert.match(settings, /void bridge\.reconnectNow\(\)/);
   assert.doesNotMatch(settings, /ensureDesktopAgentHub/);
+  assert.match(settings, /hubReconnect\.hidden = connectionState === 'connected'/);
   assert.match(settings, /hubReconnect\.disabled = connectionState === 'connected'/);
-  assert.doesNotMatch(
-    settings,
-    /hubReconnect\.disabled = connectionState === 'connected' \|\| connectionState === 'connecting'/,
-  );
   assert.match(settings, /'상태 새로고침'/);
-  assert.match(settings, /void refreshProviders\(true\)/);
+  assert.match(settings, /Promise\.all\(\[refreshProviders\(true\), refreshSetupStatuses\(true\)\]\)/);
   assert.match(settings, /bridge\.requestProviderStatus\(refresh\)/);
-  assert.match(settings, /el\('button', 'ag-settings-btn', '세션 다시 시작'\)/);
-  assert.match(settings, /reconnectSession\(\)/);
-  // 프로바이더 행은 버전 또는 오류 사유를 그대로 말한다.
-  assert.match(settings, /health\.version \?\? '설치됨'/);
-  assert.match(settings, /health\.error \?\? '실행할 수 없어요'/);
+  assert.doesNotMatch(settings, /el\('button', 'ag-settings-btn', '세션 다시 시작'\)/);
+  assert.doesNotMatch(settings, /reconnectSession\(\)/);
+  // 접힌 행에는 계정을, 펼친 행에는 오류 사유를 표시한다.
+  assert.match(settings, /label = identity \|\| '연결됨'/);
+  assert.match(settings, /message = setup\?\.error \|\| health\?\.error \|\| '연결 상태를 확인해 주세요\.'/);
   assert.match(settingsCss, /\.ag-settings-dot\[data-state='connected'\]/);
 });
 
@@ -266,7 +263,7 @@ test('Rauhwpx 계정은 Cloud와 분리된 일반 브릿지와 설정 카드로 
   assert.match(accountCard, /'로그인'/);
   assert.match(accountCard, /'로그인 취소'/);
   assert.doesNotMatch(accountCard, /cloud|quota|allowance|크레딧|한도/i);
-  assert.match(settings, /connectionContent\.append\(accountSection\.root, connection\.root, browserbaseSection\.root, usageSection\.root\)/);
+  assert.match(settings, /connectionContent\.append\(accountSection\.root, connection\.root, quotaSection\.root, browserbaseSection\.root, usageSection\.root\)/);
   assert.match(settings, /bridge\.requestAccountStatus\(\)/);
   assert.match(settings, /bridge\.loginAccount\(\)/);
   assert.match(settings, /bridge\.cancelAccountLogin\(accountAuthRunId\)/);
@@ -283,8 +280,9 @@ test('각 프로바이더 설정은 별도 시작 화면 없이 설정 모달에
   assert.match(settings, /'브라우저로 로그인'/);
   assert.match(settings, /'API 키 입력'/);
   assert.match(settings, /const detected = health\?\.available === true \|\| setup\?\.available === true/);
-  assert.match(settings, /const openCodeReady = configured \|\| \(detected && setup\?\.authenticated === true\)/);
-  assert.match(settings, /row\.setup\.textContent = ready \? '재설정' : '설정'/);
+  assert.match(settings, /const connected = setup\?\.connected === true \|\| setup\?\.setupComplete === true\s*\|\| \(detected && setup\?\.authenticated === true\)/);
+  assert.match(settings, /row\.setup\.textContent = working \? '진행 상황 보기' : setup\?\.updateRequired \? '업데이트' : connected \? '계정 관리' : '연결하기'/);
+  assert.match(settings, /row\.setup\.disabled = !online \|\| \(!setup && !health\)/);
   assert.match(settings, /const detected = providers\?\.\[agent\]\?\.available === true/);
   assert.match(settings, /const available = detected \|\| status\?\.available === true \|\| status\?\.installed === true/);
   assert.match(settings, /const connected = agent === 'rau'[\s\S]*agent === 'opencode'[\s\S]*available && status\?\.authenticated === true[\s\S]*detected \|\| configured/);
@@ -417,28 +415,16 @@ test('현재 대화는 슬래시로 구분하고 Pi 목록 안내는 숫자만 �
   assert.doesNotMatch(settings, /검색으로 좁혀 보세요/);
 });
 
-test('요금제 선택값은 프로바이더별로 다르고 허브에 저장된다', () => {
-  assert.match(settings, /claude: \[\s*\{ id: 'pro', label: 'Pro' \},\s*\{ id: 'max5x', label: 'Max 5x' \},\s*\{ id: 'max20x', label: 'Max 20x' \},\s*\{ id: 'api', label: 'API' \},\s*\]/);
-  assert.match(settings, /codex: \[\s*\{ id: 'plus', label: 'Plus' \},\s*\{ id: 'pro', label: 'Pro' \},\s*\{ id: 'api', label: 'API' \},\s*\]/);
-  assert.match(settings, /bridge\.setUsagePlan\(agent, plan\.value\)/);
-  assert.match(settings, /usage = summary;\s*renderUsage\(\);/);
+test('구독 한도는 직접 조회하고 로컬 토큰 기록과 분리한다', () => {
+  assert.match(settings, /createProviderQuota/);
+  assert.doesNotMatch(settings, /setUsagePlan|buildMeter|USAGE_PLANS/);
+  assert.match(settings, /formatUsageWindow\('Session'/);
+  assert.match(settings, /formatUsageWindow\('Week'/);
 });
 
-test('사용량 미터는 5시간·주간·오늘·모델별을 보여주고 80%에서 경고로 넘어간다', () => {
-  assert.match(settings, /buildMeter\('5h'/);
-  assert.match(settings, /buildMeter\('Week'/);
-  assert.match(settings, /formatUsageWindow\('Today', providerUsage\.day\)/);
-  assert.match(settings, /'Models'/);
-  assert.match(settings, /const METER_WARN_PERCENT = 80;/);
-  assert.match(settings, /if \(percent >= METER_WARN_PERCENT\) row\.classList\.add\('ag-settings-meter-warn'\)/);
-  // 막대는 100% 를 넘겨도 가득 찬 상태로 멈춘다.
-  assert.match(settings, /Math\.min\(100, Math\.max\(0, percent\)\)/);
-  assert.match(settingsCss, /\.ag-settings-meter-warn \.ag-settings-meter-fill/);
-  assert.match(settingsCss, /color-mix\(in srgb, var\(--ag-err\)/);
-});
-
-test('모든 프로바이더 사용량은 영문 단위와 세로 구분자를 쓴다', () => {
-  assert.match(settings, /return `\$\{label\} \| \$\{window_\.turns\}calls \| \$\{formatCompactTokens/);
+test('프로바이더 사용량 표는 압축된 호출 수와 토큰을 표시한다', () => {
+  assert.match(settings, /return `\$\{prefix\}\$\{window_\.turns\}회 \/ \$\{formatCompactTokens/);
+  assert.match(settings, /const prefix = label === 'Session' \? '세션: ' : ''/);
   const modelRows = settings.match(/function buildModelRows[\s\S]*?return rows;/)?.[0] ?? '';
   assert.doesNotMatch(modelRows, /if \(agent === 'rau'\)/);
   assert.match(settings, /metrics\.join\('\ \| '\)/);
@@ -447,28 +433,15 @@ test('모든 프로바이더 사용량은 영문 단위와 세로 구분자를 �
   }
 });
 
-test('사용량 묶음에서 CLIProxyAPI 를 연결할 수 있다', () => {
-  assert.match(settings, /document\.createTextNode\('CLIProxyAPI'\)/);
-  assert.match(settings, /createTextField\('주소'/);
-  assert.match(settings, /createTextField\('관리 키'/);
-  assert.match(settings, /placeholder: 'http:\/\/127\.0\.0\.1:8317'/);
-  assert.match(settings, /bridge\.connectCliproxy\(cliproxyUrl\.input\.value, cliproxyKey\.input\.value\)/);
-  assert.match(settings, /bridge\.disconnectCliproxy\(\)/);
+test('직접 한도 새로고침은 기존 연결 목적지에 있고 프록시 설정을 제거한다', () => {
+  assert.doesNotMatch(settings, /connectCliproxy|disconnectCliproxy|CLIProxyAPI|remote-management/);
   assert.match(settings, /void refreshUsage\(true\)/);
-  assert.match(settings, /실제 사용량을 보여줘요/);
-  assert.match(settings, /remote-management\.secret-key/);
-  assert.match(settings, /ui\.plan\.hidden = actual/);
-  assert.match(settings, /actual \? 'Actual' : 'Estimated'/);
-  assert.match(settingsCss, /\.ag-settings-input/);
-  assert.match(settingsCss, /\.ag-settings-cliproxy-error/);
-  assert.ok(
-    settings.indexOf('usageSection.body.appendChild(cliproxyCard)')
-      > settings.indexOf('apiUsageBlocks.set(agent'),
-  );
+  assert.match(settings, /currentDestination !== 'connections'/);
+  assert.match(settings, /document.removeEventListener\('visibilitychange', syncUsagePolling\)/);
 });
 
 test('한도가 없으면 누적치만 말한다', () => {
-  assert.match(settings, /\$\{window_\.turns\}calls \| \$\{formatCompactTokens\(window_\.weightedTokens\)\}/);
+  assert.match(settings, /\$\{window_\.turns\}회 \/ \$\{formatCompactTokens\(window_\.weightedTokens\)\}/);
 });
 
 test('앱 전용 지시는 에이전트 변경안을 사용자 승인 전까지 분리한다', () => {
@@ -603,9 +576,9 @@ test('cursor 모델 선택은 구독/API 과금 풀로 나뉘어 보인다', () 
   assert.match(css, /\.ag-llm-group-label \{[\s\S]*?flex-basis: 100%/);
 });
 
-test('Rau 는 목록 맨 앞이고 흰 테두리 · 로그인 전용 설정 · $0 전송 잠금을 갖는다', () => {
+test('Rau 는 목록 맨 앞이고 공통 테두리 · 로그인 전용 설정 · $0 전송 잠금을 갖는다', () => {
   assert.equal(PROVIDER_ORDER[0], 'rau');
-  assert.match(settingsCss, /\.ag-settings-provider-row\[data-agent='rau'\][\s\S]*?border-color:\s*#fff/);
+  assert.match(settingsCss, /\.ag-settings-provider-row\[open\]\s*\{[^}]*border-color:\s*var\(--ag-border\)/);
   assert.match(settings, /if \(agent === 'rau'\) \{\s*\n\s*if \(oauthTitle\) oauthTitle\.textContent = 'Rau로 시작'/);
   assert.match(settings, /setupApiToggle\.hidden = true/);
   assert.match(settings, /setupKeyBox\.hidden = true/);
@@ -628,7 +601,7 @@ test('Rau 설정 카드는 로그인된 계정과 체험 크레딧 잔량 막대
   assert.doesNotMatch(settings, /연결된 키 \*\*\*\*/);
   assert.match(settings, /체험 크레딧을 다 썼어요\. 다른 모델을 연결해 주세요\./);
   // 잔량 막대는 사용량 갱신마다 다시 그린다.
-  assert.match(settings, /renderUsage\(\): void \{\s*\n\s*renderCliproxy\(\);\s*\n\s*renderRauUsage\(\);\s*\n\s*renderRauAccount\(\);/);
+  assert.match(settings, /renderUsage\(\): void \{\s*\n\s*quotaCards.render\(usage\);\s*\n\s*renderRauUsage\(\);\s*\n\s*renderRauAccount\(\);/);
   assert.match(settingsCss, /\.ag-agent-setup-account \{[\s\S]*?border-radius: 12px/);
   assert.match(settingsCss, /\.ag-agent-setup-account-meter \.ag-settings-meter-track \{[\s\S]*?height: 8px/);
 });
@@ -661,8 +634,8 @@ test('Rau 로그아웃 뒤 설치된 런타임을 연결 상태로 오인하지 
     settings,
     /const configured = status\?\.connected === true \|\| status\?\.setupComplete === true;\s*\n[\s\S]*const connected = agent === 'rau'\s*\? configured/,
   );
-  assert.match(settings, /const ready = agent === 'rau'[\s\S]*agent === 'opencode'[\s\S]*openCodeReady[\s\S]*detected \|\| configured/);
-  assert.match(settings, /if \(agent === 'rau' && !configured\) \{[\s\S]*row\.detail\.textContent = detected \? '로그인 필요'/);
+  assert.match(settings, /const connected = setup\?\.connected === true \|\| setup\?\.setupComplete === true\s*\|\| \(detected && setup\?\.authenticated === true\)/);
+  assert.match(settings, /label = detected \? '로그인 필요' : '연결하기'/);
   assert.match(settings, /const statuses = await bridge\.disconnectAgent\('rau'\)/);
   assert.match(settings, /if \(statuses\) setupStatuses = statuses;[\s\S]*renderAgentSetup\(\);/);
   assert.match(settings, /prefs\.defaultAgent === 'rau'[\s\S]*const fallback = selectableAgents\(\)\[0\][\s\S]*persistPrefs\(\{[\s\S]*\.\.\.prefs,[\s\S]*defaultAgent: fallback,[\s\S]*\}, \{ preserveDraft: true \}\)/);
@@ -702,7 +675,7 @@ test('OpenCode 설정은 OAuth 대신 API 키만 받고 터미널 로그인을 �
   assert.match(settings, /agent === 'opencode'[\s\S]{0,80}'OpenCode CLI 자격 증명을 확인했습니다\.'/);
   assert.match(
     settings,
-    /if \(agent === 'opencode' && detected && !openCodeReady\) \{\s*row\.dot\.dataset\.state = 'disconnected';\s*row\.detail\.textContent = '로그인 필요'/,
+    /label = detected \? '로그인 필요' : '연결하기'/,
   );
   // 설치 여부와 인증 여부를 분리해, CLI만 설치된 상태를 연결 완료로 보지 않는다.
   assert.match(
@@ -725,10 +698,10 @@ test('OpenCode 설정은 OAuth 대신 API 키만 받고 터미널 로그인을 �
   );
 });
 
-test('원격 브라우저 구역은 연결 바로 아래 서고, 키는 앱 수명 동안만 허브를 덮는다', () => {
+test('원격 브라우저 구역은 사용량 아래 서고, 키는 앱 수명 동안만 허브를 덮는다', () => {
   const bridge = readSource('../src/agent/bridge.ts');
   assert.match(settings, /createSection\('원격 브라우저'\)/);
-  assert.match(settings, /connectionContent\.append\(accountSection\.root, connection\.root, browserbaseSection\.root, usageSection\.root\)/);
+  assert.match(settings, /connectionContent\.append\(accountSection\.root, connection\.root, quotaSection\.root, browserbaseSection\.root, usageSection\.root\)/);
   // 키 칸은 비밀번호 칸이고 자동완성에 걸리지 않는다.
   assert.match(settings, /createTextField\('Browserbase 키', \{\s*type: 'password',\s*placeholder: 'bb_live_…',\s*autocomplete: 'new-password',\s*\}\)/);
   assert.match(settings, /createTextField\('Gemini 키', \{\s*type: 'password',\s*placeholder: 'AIza…',\s*autocomplete: 'new-password',\s*\}\)/);
