@@ -519,6 +519,85 @@ test('desktop display connection reconnects transient failures and resets sequen
   await connection.close();
 });
 
+for (const inline of [false, true]) {
+  test(`desktop display reconnect replays an unchanged image (${inline ? 'inline' : 'download'})`, async () => {
+    const events = [];
+    const afters = [];
+    const firstFrame = Promise.withResolvers();
+    const connection = await openCloudDisplay({
+      displayCapability: async () => capability(),
+      setDisplayInterest: async () => {},
+      readDisplayFrames: async (_sessionId, _capability, after, { signal, onMetadata, onFrame }) => {
+        afters.push(after);
+        if (after < 7) {
+          if (inline) onFrame({ kind: 'frame', ...metadata(7), bytes: new Uint8Array(1) });
+          else onMetadata(metadata(7));
+        }
+        if (afters.length === 1) {
+          await firstFrame.promise;
+          throw Object.assign(new Error('socket reset'), { code: 'ECONNRESET', retryable: true });
+        }
+        await untilAbort(signal);
+      },
+      downloadDisplayFrame: async (value) => ({ kind: 'frame', ...value, bytes: new Uint8Array(value.byteLength) }),
+    }, SESSION_ID, (event) => {
+      events.push(event);
+      if (event.kind === 'frame') firstFrame.resolve();
+    }, { retryBaseMs: 1, retryMaxMs: 1 });
+    try {
+      await waitFor(() => afters.length === 2, 'reconnected stream');
+      assert.deepEqual(afters, [0, 6]);
+      await waitFor(() => events.filter((event) => event.kind === 'frame').length === 2, 'replayed static image');
+      assert.deepEqual(events.filter((event) => event.kind === 'frame').map((event) => event.sequence), [7, 7]);
+    } finally { await connection.close(); }
+  });
+}
+
+test('desktop display surfaces revoked pairing during capability refresh', async () => {
+  const events = [];
+  let capabilityCalls = 0;
+  let streamCalls = 0;
+  const connection = await openCloudDisplay({
+    displayCapability: async () => {
+      if (++capabilityCalls === 1) return capability();
+      throw Object.assign(new Error('Pair this device again'), { status: 401, code: 'PAIRING_REQUIRED', retryable: false });
+    },
+    setDisplayInterest: async () => {},
+    readDisplayFrames: async () => {
+      streamCalls += 1;
+      throw Object.assign(new Error('socket reset'), { code: 'ECONNRESET', retryable: true });
+    },
+  }, SESSION_ID, (event) => events.push(event), { retryBaseMs: 1, retryMaxMs: 1, maxReconnectAttempts: 3 });
+  try {
+    await waitFor(() => events.some((event) => event.state === 'failed'), 'pairing failure');
+    assert.equal(events.find((event) => event.state === 'failed').code, 'PAIRING_REQUIRED');
+    assert.equal(streamCalls, 1);
+    assert.equal(capabilityCalls, 2);
+  } finally { await connection.close(); }
+});
+
+test('desktop display ignores frame callbacks during failed stream teardown', async () => {
+  const events = [];
+  const connection = await openCloudDisplay({
+    displayCapability: async () => capability(),
+    setDisplayInterest: async () => {},
+    readDisplayFrames: async (_sessionId, _capability, _after, { signal, onMetadata, onFrame }) => {
+      signal.addEventListener('abort', () => {
+        onFrame({ kind: 'frame', ...metadata(2), bytes: new Uint8Array(1) });
+      }, { once: true });
+      onMetadata(metadata(1));
+      await untilAbort(signal);
+    },
+    downloadDisplayFrame: async () => {
+      throw Object.assign(new Error('Frame digest mismatch'), { code: 'DISPLAY_FRAME_INTEGRITY_FAILED', retryable: false });
+    },
+  }, SESSION_ID, (event) => events.push(event));
+  try {
+    await waitFor(() => events.some((event) => event.state === 'failed'), 'integrity failure');
+    assert.equal(events.filter((event) => event.kind === 'frame').length, 0);
+  } finally { await connection.close(); }
+});
+
 test('desktop display resets the cursor when retryable unavailable becomes a new stream', async () => {
   const replacementStream = 'stream-display-02';
   const unavailable = {
@@ -897,6 +976,26 @@ function clientTestParseCapability(value) {
 function clientTestParseMetadata(value) {
   return parseDisplayFrameMetadata(value, validDisplayCapability());
 }
+
+test('signed inline frames survive several complete frames arriving in one network chunk', async () => {
+  const bytes = Buffer.alloc(MAX_DISPLAY_FRAME_BYTES, 0x61);
+  const client = await clientWith(async (url, options) => {
+    const frames = await Promise.all(Array.from({ length: 4 }, (_, index) => signedSse(url, options, {
+      sessionId: SESSION_ID, type: 'display.frame', seq: index + 1,
+      payload: { ...metadata(index + 1, STREAM_ID, bytes), bytesBase64: bytes.toString('base64') },
+    }).text()));
+    return signedResponse(url, options, Buffer.from(frames.join('')), {
+      contentDigest: digest(Buffer.from('rauhwpx-sse-v1')),
+      headers: { 'content-type': 'text/event-stream', 'x-rauhwpx-stream-protocol': 'rauhwpx-sse-v1' },
+    });
+  });
+  const sequences = [];
+  const cursor = await client.readDisplayFrames(SESSION_ID, capability(), 0, {
+    onFrame: (frame) => sequences.push(frame.sequence),
+  });
+  assert.deepEqual(sequences, [1, 2, 3, 4]);
+  assert.equal(cursor, 4);
+});
 
 test('signed inline JPEG frames need no follow-up GET and reject mismatched bytes', async () => {
   const bytes = Buffer.from('inline-frame');

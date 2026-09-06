@@ -62,6 +62,7 @@ type DisplayPhase = {
   capability: CloudDisplayAvailableCapability;
   controller: AbortController;
   failed: boolean;
+  sequence: number;
   markHealthy(): void;
   fail(error: DisplayError, terminal?: boolean): void;
 };
@@ -292,7 +293,7 @@ class VerifiedDisplayConnection implements CloudDisplayConnection {
           capability = next;
         } catch (rawCapabilityError) {
           const capabilityError = rawCapabilityError as DisplayError;
-          if (integrityFailure(capabilityError)) {
+          if (integrityFailure(capabilityError) || !transientFailure(capabilityError)) {
             this.#emitFailure(capabilityError);
             return;
           }
@@ -311,6 +312,8 @@ class VerifiedDisplayConnection implements CloudDisplayConnection {
       capability,
       controller,
       failed: false,
+      // Replay the latest verified frame so an unchanged screen can recover.
+      sequence: Math.max(0, this.#lastSequence - 1),
       markHealthy,
       fail: (error: DisplayError, terminal = false) => {
         if (phase.failed || controller.signal.aborted) return;
@@ -329,13 +332,14 @@ class VerifiedDisplayConnection implements CloudDisplayConnection {
         { signal: controller.signal },
       );
       this.#interestStream = capability.streamId;
-      const frames = this.#transport.frames(this.#sessionId, capability, this.#lastSequence, {
+      const frames = this.#transport.frames(this.#sessionId, capability, phase.sequence, {
         signal: controller.signal,
         onMetadata: (metadata) => this.#queueMetadata(metadata, phase),
         onFrame: (frame) => {
-          if (this.#closed || this.#phase !== phase || frame.sessionId !== this.#sessionId
-            || frame.streamId !== capability.streamId || frame.sequence <= this.#lastSequence) return;
-          this.#lastSequence = frame.sequence;
+          if (this.#closed || phase.failed || phase.controller.signal.aborted || this.#phase !== phase
+            || frame.sessionId !== this.#sessionId
+            || frame.streamId !== capability.streamId || frame.sequence <= phase.sequence) return;
+          phase.sequence = this.#lastSequence = frame.sequence;
           phase.markHealthy();
           this.#emit(frame);
         },
@@ -359,21 +363,23 @@ class VerifiedDisplayConnection implements CloudDisplayConnection {
   }
 
   #queueMetadata(metadata: CloudDisplayFrameMetadata, phase: DisplayPhase): void {
-    if (this.#closed || phase.failed || this.#phase !== phase || metadata.sessionId !== this.#sessionId
-      || metadata.streamId !== phase.capability.streamId || metadata.sequence <= this.#lastSequence) return;
+    if (this.#closed || phase.failed || phase.controller.signal.aborted || this.#phase !== phase
+      || metadata.sessionId !== this.#sessionId
+      || metadata.streamId !== phase.capability.streamId || metadata.sequence <= phase.sequence) return;
     if (!this.#pending || metadata.sequence > this.#pending.sequence) this.#pending = metadata;
     if (!this.#downloading) this.#downloadNext(phase);
   }
 
   #downloadNext(phase: DisplayPhase): void {
     const metadata = this.#pending;
-    if (!metadata || this.#closed || phase.failed || this.#phase !== phase) return;
+    if (!metadata || this.#closed || phase.failed || phase.controller.signal.aborted || this.#phase !== phase) return;
     this.#pending = null;
     const operation = this.#transport.frame(metadata, { signal: phase.controller.signal })
       .then((frame) => {
-        if (this.#closed || this.#phase !== phase || frame.sessionId !== this.#sessionId
-          || frame.streamId !== phase.capability.streamId || frame.sequence <= this.#lastSequence) return;
-        this.#lastSequence = frame.sequence;
+        if (this.#closed || phase.failed || phase.controller.signal.aborted || this.#phase !== phase
+          || frame.sessionId !== this.#sessionId
+          || frame.streamId !== phase.capability.streamId || frame.sequence <= phase.sequence) return;
+        phase.sequence = this.#lastSequence = frame.sequence;
         phase.markHealthy();
         this.#emit(frame);
       })

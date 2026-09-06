@@ -381,7 +381,7 @@ class CloudDisplayConnectionImpl {
           }
           capability = next;
         } catch (capabilityError) {
-          if (isDisplayIntegrityFailure(capabilityError)) {
+          if (isDisplayIntegrityFailure(capabilityError) || !isTransientDisplayFailure(capabilityError)) {
             this.#emitFailure(capabilityError);
             return;
           }
@@ -399,6 +399,9 @@ class CloudDisplayConnectionImpl {
     const phase = {
       capability,
       controller,
+      // Replay the latest image once after reconnecting. An unchanged
+      // document does not produce a newer frame to restore the live view.
+      sequence: Math.max(0, this.#lastSequence - 1),
       failed: false,
       markHealthy,
       fail: (error, terminal = false) => {
@@ -414,12 +417,13 @@ class CloudDisplayConnectionImpl {
         signal: controller.signal,
       });
       this.#activeInterestStream = capability.streamId;
-      const watch = this.#client.readDisplayFrames(this.#sessionId, capability, this.#lastSequence, {
+      const watch = this.#client.readDisplayFrames(this.#sessionId, capability, phase.sequence, {
         signal: controller.signal,
         onMetadata: (metadata) => this.#queueMetadata(metadata, phase),
         onFrame: (frame) => {
-          if (this.#closed || this.#phase !== phase || frame.sessionId !== this.#sessionId
-            || frame.streamId !== capability.streamId || frame.sequence <= this.#lastSequence) return;
+          if (this.#closed || phase.failed || controller.signal.aborted || this.#phase !== phase || frame.sessionId !== this.#sessionId
+            || frame.streamId !== capability.streamId || frame.sequence <= phase.sequence) return;
+          phase.sequence = frame.sequence;
           this.#lastSequence = frame.sequence;
           phase.markHealthy();
           this.#emit(frame);
@@ -450,21 +454,22 @@ class CloudDisplayConnectionImpl {
   }
 
   #queueMetadata(metadata, phase) {
-    if (this.#closed || phase.failed || this.#phase !== phase || metadata.sessionId !== this.#sessionId
-      || metadata.streamId !== phase.capability.streamId || metadata.sequence <= this.#lastSequence) return;
+    if (this.#closed || phase.failed || phase.controller.signal.aborted || this.#phase !== phase || metadata.sessionId !== this.#sessionId
+      || metadata.streamId !== phase.capability.streamId || metadata.sequence <= phase.sequence) return;
     if (!this.#pending || metadata.sequence > this.#pending.sequence) this.#pending = metadata;
     if (!this.#downloading) this.#downloadNext(phase);
   }
 
   #downloadNext(phase) {
     const metadata = this.#pending;
-    if (!metadata || this.#closed || phase.failed || this.#phase !== phase) return;
+    if (!metadata || this.#closed || phase.failed || phase.controller.signal.aborted || this.#phase !== phase) return;
     this.#pending = null;
     const operation = this.#client.downloadDisplayFrame(metadata, { signal: phase.controller.signal })
       .then((frame) => {
-        if (this.#closed || this.#phase !== phase
+        if (this.#closed || phase.failed || phase.controller.signal.aborted || this.#phase !== phase
           || frame.sessionId !== this.#sessionId || frame.streamId !== phase.capability.streamId
-          || frame.sequence <= this.#lastSequence) return;
+          || frame.sequence <= phase.sequence) return;
+        phase.sequence = frame.sequence;
         this.#lastSequence = frame.sequence;
         phase.markHealthy();
         this.#emit(frame);

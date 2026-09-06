@@ -448,3 +448,101 @@ test('browser display negotiates click counts before single or batched input rea
   }
   assert.equal(parseCloudDisplayCapability({ ...capability(), supportsClickCount: 'true' }), null);
 });
+
+test('browser display stops reconnecting when capability refresh loses authorization', async () => {
+  const events: CloudDisplayEvent[] = [];
+  let capabilityCalls = 0;
+  let streamCalls = 0;
+  const connection = await openDisplayConnection({
+    capability: async () => {
+      if (++capabilityCalls === 1) return capability();
+      throw Object.assign(new Error('Pairing was revoked'), { code: 'DEVICE_REVOKED', status: 401 });
+    },
+    interest: async () => {},
+    frames: async () => {
+      streamCalls += 1;
+      throw Object.assign(new Error('Connection dropped'), { code: 'ECONNRESET' });
+    },
+    frame: async () => { throw new Error('unused'); },
+    input: async () => {},
+  }, sessionId, (event) => events.push(event), { retryBaseMs: 1, maxReconnectAttempts: 2 });
+  try {
+    await waitForEvent(events, (event) => event.kind === 'connection' && event.state === 'failed');
+    const failure = events.find((event) => event.kind === 'connection' && event.state === 'failed');
+    assert.equal(failure?.kind === 'connection' && failure.state === 'failed' && failure.code, 'DEVICE_REVOKED');
+    assert.equal(capabilityCalls, 2);
+    assert.equal(streamCalls, 1);
+  } finally { await connection.close(); }
+});
+
+test('browser display rejects late inline frames and metadata during aborted stream cleanup', async () => {
+  const events: CloudDisplayEvent[] = [];
+  const downloads: number[] = [];
+  let streamCalls = 0;
+  const connection = await openDisplayConnection({
+    capability: async () => capability(),
+    interest: async () => {},
+    frames: async (_session, _capability, _after, { signal, onFrame, onMetadata }) => {
+      streamCalls += 1;
+      signal.addEventListener('abort', () => {
+        onFrame?.({ kind: 'frame', ...metadata(), bytes: new Uint8Array(5) });
+        onMetadata({ ...metadata(), sequence: 8 });
+      }, { once: true });
+      throw Object.assign(new Error('Stream proof failed'), { code: 'SSE_PROOF_INVALID' });
+    },
+    frame: async (value) => {
+      downloads.push(value.sequence);
+      return { kind: 'frame', ...value, bytes: new Uint8Array(5) };
+    },
+    input: async () => {},
+  }, sessionId, (event) => events.push(event), { retryBaseMs: 1 });
+  try {
+    await waitForEvent(events, (event) => event.kind === 'connection' && event.state === 'failed');
+    assert.equal(streamCalls, 1);
+    assert.deepEqual(events.filter((event) => event.kind === 'frame'), []);
+    assert.deepEqual(downloads, []);
+  } finally { await connection.close(); }
+});
+
+test('browser display restores an unchanged frame after reconnecting without replaying older frames', async (t) => {
+  for (const inline of [false, true]) await t.test(inline ? 'inline frames' : 'downloaded frames', async () => {
+    const events: CloudDisplayEvent[] = [];
+    const cursors: number[] = [];
+    const firstFrame = Promise.withResolvers<void>();
+    let streamCalls = 0;
+    const connection = await openDisplayConnection({
+      capability: async () => capability(),
+      interest: async () => {},
+      frames: async (_session, _capability, after, { signal, onFrame, onMetadata }) => {
+        cursors.push(after);
+        const call = ++streamCalls;
+        const send = (sequence: number) => {
+          if (sequence <= after) return;
+          const value = { ...metadata(), sequence };
+          if (inline) onFrame?.({ kind: 'frame', ...value, bytes: new Uint8Array(5) });
+          else onMetadata(value);
+        };
+        if (call > 1) send(6);
+        send(7);
+        if (call === 1) {
+          await firstFrame.promise;
+          throw Object.assign(new Error('Connection dropped'), { code: 'ECONNRESET' });
+        }
+        await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
+        return 7;
+      },
+      frame: async (value) => ({ kind: 'frame', ...value, bytes: new Uint8Array(5) }),
+      input: async () => {},
+    }, sessionId, (event) => {
+      events.push(event);
+      if (event.kind === 'frame') firstFrame.resolve();
+    }, { retryBaseMs: 1 });
+    try {
+      await waitForEvent(events, () => events.filter((event) => event.kind === 'frame').length === 2);
+      assert.deepEqual(cursors, [0, 6]);
+      assert.deepEqual(events.filter((event) => event.kind === 'frame').map((event) => event.sequence), [7, 7]);
+      assert.equal(events.some((event) => event.kind === 'connection' && event.state === 'failed'), false);
+      await connection.sendInput({ kind: 'text', text: 'editing after reconnect' });
+    } finally { await connection.close(); }
+  });
+});

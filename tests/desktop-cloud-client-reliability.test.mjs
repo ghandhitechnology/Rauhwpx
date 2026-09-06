@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import test from 'node:test';
 
-import { CloudClient, CloudHttpError } from '../desktop/cloud-client.mjs';
+import { CloudClient, CloudHttpError, __test as clientTest } from '../desktop/cloud-client.mjs';
 import { normalizeCloudProfile } from '../desktop/cloud-profile.mjs';
 
 const PROFILE = normalizeCloudProfile({
@@ -100,6 +100,28 @@ function portableTimeline() {
     },
   };
 }
+
+for (const failure of [
+  new CloudHttpError('Pair this device again', { status: 401, code: 'PAIRING_REQUIRED', retryable: false }),
+  new CloudHttpError('Pairing was revoked', { status: 403, code: 'DEVICE_REVOKED' }),
+  new CloudHttpError('Server signature is invalid', { code: 'SERVER_PROOF_INVALID', retryable: false }),
+  new CloudHttpError('Cloud profile changed', { code: 'PROFILE_CHANGED', retryable: false }),
+]) {
+  test(`event watcher surfaces ${failure.code} without reconnecting`, async () => {
+    const client = new CloudClient({ vault: memoryVault() });
+    let reads = 0;
+    client.readEvents = async () => { reads += 1; throw failure; };
+    await assert.rejects(client.watchSession('session-1', 0, { retryBaseMs: 0 }), (error) => error === failure);
+    assert.equal(reads, 1);
+  });
+}
+
+test('event parser still rejects oversized individual frames and unfinished frames', () => {
+  const oversized = `data: ${'x'.repeat(2 * 1024 * 1024)}`;
+  for (const input of [oversized, `${oversized}\n\n`]) {
+    assert.throws(() => clientTest.sseFrames(input), { code: 'SSE_PAYLOAD_INVALID', retryable: false });
+  }
+});
 
 test('upload reconciles a committed chunk when its response is lost', async () => {
   const payload = Buffer.from('abcdefgh');

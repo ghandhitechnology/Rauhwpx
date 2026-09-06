@@ -1087,15 +1087,15 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
 
   function renderRecovery(): void {
     const link = inferCloudLink(snapshot);
+    const needsAttention = cloudLinkNeedsAttention(link);
+    recoveryStrip.hidden = !needsAttention || !deps.isCloudMode();
     const renderKey = JSON.stringify([link.kind, link.canRecreate, busy, recoveryBusy, authorityTransitionActive()]);
     if (renderKey === recoveryRenderKey) return;
     recoveryRenderKey = renderKey;
-    const needsAttention = cloudLinkNeedsAttention(link);
     statusPanel.dataset.link = link.kind;
     recovery.hidden = !needsAttention;
     recovery.dataset.kind = link.kind;
     recoveryActions.replaceChildren();
-    recoveryStrip.hidden = !needsAttention;
     recoveryStrip.replaceChildren();
     recoveryStrip.dataset.kind = link.kind;
     if (!needsAttention) {
@@ -1142,7 +1142,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
 
   function renderQueue(): void {
     const queued = snapshot.queuedMessages.filter((message) => message.state === 'queued');
-    queueStrip.hidden = queued.length === 0;
+    queueStrip.hidden = queued.length === 0 || !deps.isCloudMode();
     queueStrip.replaceChildren();
     if (!queued.length) return;
     queueStrip.append(el('span', 'ag-cloud-queue-label', `다음 경계에 전달 ${queued.length}`));
@@ -1355,6 +1355,10 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       ? raw as Record<string, unknown>
       : null;
     if (host?.type === 'session-stream-error' || host?.type === 'remote-session-stream-error') {
+      if (host.retryable === false) {
+        deps.onError(typeof host.error === 'string' ? host.error : '클라우드 연결을 확인해 주세요.');
+        return;
+      }
       const link = inferCloudLink(snapshot);
       if (link.kind === 'ready') reconnectLink();
       return;
@@ -1410,6 +1414,8 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     setWorkspaceLocked(locked) {
       workspaceLocked = locked;
       sessionSelect.disabled = busy || locked || authorityTransitionActive();
+      renderRecovery();
+      renderQueue();
     },
     async refreshLeaseScope() {
       const scope = deps.getScope();

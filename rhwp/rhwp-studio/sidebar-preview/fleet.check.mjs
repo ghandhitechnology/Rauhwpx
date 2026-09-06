@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 
 export async function checkFleetPreview(page, origin) {
+  const viewport = page.viewport();
+  // The sidebar is capped at half the viewport; allow the 840px case to fit.
+  await page.setViewport({ ...viewport, width: Math.max(viewport.width, 1680) });
   for (const width of [280, 480, 840]) {
     await page.goto(`${origin}/?scenario=fleet&play=1&hold=1&width=${width}&theme=${width === 280 ? 'light' : 'dark'}`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('.ag-fleet-task');
@@ -43,4 +46,5 @@ export async function checkFleetPreview(page, origin) {
     await page.click('.ag-fleet-task:nth-child(3) .ag-fleet-head');
     assert.match(await page.$eval('.ag-fleet-task.ag-open .ag-fleet-preview', el => el.textContent), /접근할 수 없어/);
   }
+  await page.setViewport(viewport);
 }

@@ -394,6 +394,9 @@ function sseFrames(buffer) {
   let rest = buffer.replace(/\r\n/g, '\n');
   let boundary;
   while ((boundary = rest.indexOf('\n\n')) !== -1) {
+    if (boundary > MAX_JSON_BYTES) {
+      throw new CloudHttpError('Cloud event frame is too large', { code: 'SSE_PAYLOAD_INVALID', retryable: false });
+    }
     const raw = rest.slice(0, boundary);
     rest = rest.slice(boundary + 2);
     let event = 'message';
@@ -413,6 +416,9 @@ function sseFrames(buffer) {
       else if (field === 'data') data.push(value);
     }
     if (data.length) frames.push({ event, id, sha256, signature, data: data.join('\n') });
+  }
+  if (rest.length > MAX_JSON_BYTES) {
+    throw new CloudHttpError('Cloud event frame is too large', { code: 'SSE_PAYLOAD_INVALID', retryable: false });
   }
   return { frames, rest };
 }
@@ -1239,11 +1245,6 @@ export class CloudClient {
         const { done, value } = await readStreamChunk(reader);
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
-        if (buffer.length > MAX_JSON_BYTES) {
-          throw new CloudHttpError('Cloud display event frame is too large', {
-            code: 'SSE_PAYLOAD_INVALID', retryable: false,
-          });
-        }
         const parsed = sseFrames(buffer);
         buffer = parsed.rest;
         for (const frame of parsed.frames) {
@@ -1492,7 +1493,6 @@ export class CloudClient {
         const { done, value } = await readStreamChunk(reader);
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
-        if (buffer.length > MAX_JSON_BYTES) throw new CloudHttpError('Cloud event frame is too large');
         const parsed = sseFrames(buffer);
         buffer = parsed.rest;
         for (const frame of parsed.frames) {
@@ -1537,9 +1537,12 @@ export class CloudClient {
         failures = 0;
       } catch (error) {
         if (signal?.aborted || error?.name === 'AbortError') break;
-        // A missing session or a broken stream proof never recovers by retrying;
-        // surface it instead of looping in silence.
-        if (error?.status === 404
+        // Authentication, identity, and missing-session errors need action;
+        // reconnecting cannot repair them.
+        if (error?.retryable === false
+          || error?.status === 401
+          || error?.status === 403
+          || error?.status === 404
           || error?.code === 'SESSION_NOT_FOUND'
           || error?.code === 'SSE_PROOF_INVALID'
           || error?.code === 'SSE_PAYLOAD_INVALID') {

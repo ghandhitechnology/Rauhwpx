@@ -132,7 +132,13 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   await page.click('#cloud-disconnect');
   await page.waitForFunction(() => document.querySelector('#cloud-workspace').dataset.displayState === 'stalled');
   assert.equal(await page.$eval('.cloud-workspace-image', (node) => node.src), original.frame);
-  assert.equal(await page.$eval('.ag-input', (node) => node.disabled), true);
+  assert.equal(await page.$eval('.ag-input', (node) => node.disabled), false, 'a connection outage still allows drafting');
+  assert.equal(await page.$eval('.ag-send', (node) => node.disabled), true);
+  await page.type('.ag-input', '연결을 기다리며 작성한 메시지');
+  const commandsBeforeOfflineSend = await page.evaluate(() => window.sidebarPreview.cloud.calls.commands.length);
+  await page.keyboard.press('Enter');
+  assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.commands.length), commandsBeforeOfflineSend);
+  assert.equal(await page.$eval('.ag-input', (node) => node.value), '연결을 기다리며 작성한 메시지');
   assert.equal(await page.$eval('.ag-messages', (node) => node.innerText.includes('ECONNRESET')), false);
   assert.equal(await page.$eval('.ag-composer-target-message', (node) => node.hidden), true);
   await page.screenshot({ path: resolve(artifacts, 'cloud-disconnected.png') });
@@ -200,6 +206,10 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.controller.getSnapshot().session.sessionId), original.sessionId);
 
   // Explicit rebuilding must transfer this same transcript with a fresh id.
+  assert.equal(await page.$eval('.ag-input', (node) => node.value), '연결을 기다리며 작성한 메시지');
+  await page.focus('.ag-input');
+  await page.$eval('.ag-input', (node) => node.select());
+  await page.keyboard.press('Backspace');
   await page.type('.ag-input', 'Keep this unsent draft through server rebuilding.');
   await page.evaluate(() => window.sidebarPreview.cloud.requireReference('reference-missing'));
   await page.click('#cloud-disconnect');
@@ -285,6 +295,7 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   // A fresh local chat keeps the Cloud lease and conversation running, while
   // the local composer and retained editor copy become usable.
   await page.evaluate(() => document.querySelector('.ag-cloud-panel-close').click());
+  await page.type('.ag-input', 'Cloud 대화에 남겨 둔 초안');
   await page.screenshot({ path: resolve(artifacts, 'cloud-new-local-chat.png') });
   await page.evaluate(() => window.sidebarPreview.cloud.blockRefresh(true));
   await page.evaluate(() => document.querySelector('.ag-header .ag-threads-btn').click());
@@ -312,9 +323,12 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   });
   assert.equal(await page.$eval('.ag-input', (node) => node.disabled), false);
   assert.equal(await page.$eval('.ag-send', (node) => node.getAttribute('aria-label')), '중지');
+  assert.equal(await page.$eval('.ag-cloud-recovery-strip', (node) => node.hidden), true,
+    'a background Cloud outage does not put recovery actions in the Local composer');
   assert.equal(await page.$eval('.ag-messages', (node) => node.innerText.includes('Cloud에서 예산 검토')), false);
   await page.waitForFunction(() => !window.sidebarPreview.bridge.isTurnRunning());
   assert.equal(await page.$eval('.ag-messages', (node) => node.innerText.includes('문서를 검토했습니다')), true);
+  await page.type('.ag-input', '로컬 대화에 남겨 둔 초안');
   await page.screenshot({ path: resolve(artifacts, 'parallel-local-chat.png') });
   await page.evaluate(() => window.sidebarPreview.cloud.setLink('ready'));
   await page.evaluate(() => document.querySelector('.ag-header .ag-threads-btn').click());
@@ -333,6 +347,7 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   assert.equal(await page.$eval('.ag-messages', (node) => node.innerText.includes('예산 표를 검토')), true);
   assert.equal(await page.$eval('.ag-messages', (node) => node.innerText.includes('Cloud에서 예산 검토를 마쳤습니다.')), true);
   assert.equal(await page.$eval('.ag-messages', (node) => node.innerText.includes('로컬에서 소개 문단')), false);
+  assert.equal(await page.$eval('.ag-input', (node) => node.value), 'Cloud 대화에 남겨 둔 초안');
   assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.transfers.length), 3);
   // Returning to the local thread restores its own history without a transfer.
   await page.evaluate(() => document.querySelector('.ag-header .ag-threads-btn').click());
@@ -345,6 +360,7 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   assert.equal(await page.evaluate(() => window.sidebarPreview.workspace.workspaceView()), 'local');
   assert.equal(await page.$eval('.ag-messages', (node) => node.innerText.includes('로컬에서 소개 문단')), true);
   assert.equal(await page.$eval('.ag-messages', (node) => node.innerText.includes('Cloud에서 예산 검토')), false);
+  assert.equal(await page.$eval('.ag-input', (node) => node.value), '로컬 대화에 남겨 둔 초안');
   assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.stop), 1);
   assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.transfers.length), 3);
   await page.evaluate(() => document.querySelector('.ag-header .ag-threads-btn').click());

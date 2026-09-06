@@ -543,6 +543,46 @@ test('SSE replays more than one page and closes the replay-to-live gap', async (
   await reader.cancel().catch(() => {});
 });
 
+test('idle agent and display streams deliver headers before the first heartbeat', async (t) => {
+  const { base, auth, sessionStore, displayFrameStore } = await fixture(t);
+  const tokens = await pairOverHttp(auth, base);
+  sessionStore.setProviderStatus('codex', { available: true, version: 'codex 1' });
+  const document = await uploadOverHttp(base, tokens.accessToken, Buffer.from('source'), {
+    name: 'source.hwpx', kind: 'document',
+  });
+  const session = sessionStore.createSession(tokens.device, {
+    sessionId: 'session_idle_streams', provider: 'codex', goal: 'Observe',
+    originDocument: { blobId: document.id, size: document.size, name: 'source.hwpx' },
+    resources: [], timeline: null, limits: { maxDurationSeconds: 3600, maxTurns: 10 },
+  });
+  const capability = displayFrameStore.openStream({
+    sessionId: session.id, workerId: 'worker-idle', width: 1280, height: 800,
+  });
+  const after = sessionStore.listEvents(session.id, 0).at(-1).seq;
+  for (const route of [
+    `/v1/sessions/${session.id}/events?after=${after}`,
+    `/v1/sessions/${session.id}/display/frames?streamId=${capability.streamId}&after=0`,
+  ]) {
+    await t.test(route, async () => {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(new Error('Idle stream headers did not arrive')), 500);
+      const started = performance.now();
+      try {
+        const response = await publicFetch(`${base}${route}`, {
+          headers: { Authorization: `Bearer ${tokens.accessToken}` }, signal: controller.signal,
+        });
+        assert.equal(response.status, 200);
+        assert.match(response.headers.get('content-type'), /^text\/event-stream/);
+        t.diagnostic(`${route}: headers received in ${Math.round(performance.now() - started)} ms`);
+        await response.body.cancel();
+      } finally {
+        clearTimeout(timeout);
+        controller.abort();
+      }
+    });
+  }
+});
+
 test('worker API accepts only the session worker token', async (t) => {
   const { base, auth, blobStore, sessionStore } = await fixture(t, { workerOnly: true });
   const pairing = auth.createPairingCode();

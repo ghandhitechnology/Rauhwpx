@@ -114,6 +114,7 @@ import {
   type WorkspaceMode,
 } from '../../cloud/workspace.ts';
 import { exportCloudTimeline, importCloudTimeline, type PortableCloudTimelineV1 } from '../../cloud/timeline.ts';
+import { CloudLiveTimelineGuard } from '../../cloud/live-timeline.ts';
 import { collectUsedCloudReferenceIds } from '../../cloud/references.ts';
 import { createCloudEditorScope } from '../../cloud/editor-scope.ts';
 import { runCloudMessageSubmission } from '../../cloud/message-submission.ts';
@@ -740,6 +741,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   });
   let localThreadId = currentThread.id;
   let localThreadSnapshot = structuredClone(currentThread);
+  const threadComposerDrafts = new Map<string, { text: string; files: File[] }>();
   const editorCloudScope = createCloudEditorScope({
     threadId: currentThread.id,
     documentId: currentDocumentId,
@@ -1691,6 +1693,20 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     syncWorkspaceMode(workspace.mode(), target);
   }
 
+  function rememberThreadComposerDraft(): void {
+    if (readOnlyDocLabel !== null) return;
+    const files = referenceLibrary.snapshotDraftFiles();
+    if (input.value || files.length) threadComposerDrafts.set(currentThread.id, { text: input.value, files });
+    else threadComposerDrafts.delete(currentThread.id);
+  }
+
+  function restoreThreadComposerDraft(): void {
+    const draft = threadComposerDrafts.get(currentThread.id);
+    input.value = draft?.text ?? '';
+    if (draft?.files.length) referenceLibrary.stageDraftFiles(draft.files);
+    resizeComposerInput();
+  }
+
   function persistComposerDraft(): void {
     if (!currentDocumentId || currentThread.messages.length > 0) return;
     if (workspace.mode() !== 'cloud' && !input.value && !referenceLibrary.hasDrafts()) {
@@ -1746,7 +1762,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }
     persistComposerDraft();
     if (currentThread.id !== localThreadId) {
+      rememberThreadComposerDraft();
       currentThread = structuredClone(localThreadSnapshot);
+      referenceLibrary.contextChanged();
+      restoreThreadComposerDraft();
       restorePlanningForThread(currentThread.id, currentThread);
       applyThreadMeta(currentThread);
       renderMessagesFromThread(currentThread);
@@ -1886,6 +1905,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     };
   }
 
+  let cloudTimelineGuard = new CloudLiveTimelineGuard();
+  let cloudTimelineGuardKey = '';
   const cloudUi = createCloudAgentUi({
     controller: cloudController,
     loginAccount: async () => {
@@ -1955,11 +1976,19 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     },
     onTimeline: (binding, timeline) => {
       if (workspace.mode() !== 'cloud') return false;
+      const key = `${cloudController.getSnapshot().profileEpoch}:${binding.sessionId}:${binding.threadId}`;
+      if (key !== cloudTimelineGuardKey || currentThread.id !== binding.threadId
+        || currentThread.executionMode !== 'cloud') {
+        cloudTimelineGuard = new CloudLiveTimelineGuard();
+        cloudTimelineGuardKey = key;
+      }
+      if (!cloudTimelineGuard.canApply(timeline.thread.messages)) return false;
       const applied = applyCloudTimeline(timeline, {
         documentId: binding.documentId,
         fileName: timeline.thread.docKey ?? getDocumentContext?.().documentName ?? 'Cloud document',
       }, binding.threadId);
       if (!applied) return false;
+      cloudTimelineGuard.accept(timeline.thread.messages);
       if (binding.threadId === localThreadId) {
         localThreadSnapshot = structuredClone(currentThread);
       }
@@ -1972,6 +2001,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       const mounted = workspace.cloudBinding();
       if (workspace.mode() !== 'cloud' || currentThread.id !== binding.threadId
         || mounted?.sessionId !== binding.sessionId || mounted.threadId !== binding.threadId) return;
+      cloudTimelineGuard.observe(event);
       handleAgentEvent(event);
     },
     onCheckpointPublished: (checkpoint) => deps.publishCloudCheckpoint?.(checkpoint),
@@ -2177,7 +2207,13 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }
     upsertThread(imported);
     if (!binding && imported.id !== currentThread.id) return false;
+    const changedThread = currentThread.id !== imported.id;
+    if (changedThread) rememberThreadComposerDraft();
     currentThread = imported;
+    if (changedThread) {
+      referenceLibrary.contextChanged();
+      restoreThreadComposerDraft();
+    }
     restorePlanningForThread(currentThread.id, currentThread);
     applyThreadMeta(currentThread);
     renderMessagesFromThread(currentThread);
@@ -5945,6 +5981,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   function startNewChat(opts?: { silent?: boolean; documentSwitch?: boolean }): void {
     if (!opts?.documentSwitch && workspace.composerTarget().kind === 'workspace-blocked') return;
+    rememberThreadComposerDraft();
     setComposerSkill(null);
     if (bridge.isTurnRunning()) bridge.interrupt();
     flushAssistantBuffer();
@@ -6021,6 +6058,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     persistCurrentThread();
     const loaded = getThread(id);
     if (!loaded) return;
+    cloudTimelineGuard = new CloudLiveTimelineGuard();
+    cloudTimelineGuardKey = '';
+    rememberThreadComposerDraft();
     setComposerSkill(null);
     threadWorkflows.set(id, loaded.workflow);
     planArchives.set(id, loaded.plans?.length
@@ -6033,6 +6073,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       titleRequested: Boolean(loaded.titleRequested),
     };
     referenceLibrary.contextChanged();
+    input.value = '';
     applyThreadMeta(currentThread);
     renderMessagesFromThread(currentThread);
     if (!liveQuestion) bridge.stopChat();
@@ -6068,6 +6109,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     const selectedThreadId = currentThread.id;
     const scopeRefresh = cloudUi.refreshLeaseScope();
     exitReadOnlyMode();
+    restoreThreadComposerDraft();
     if (liveQuestion) {
       setThreadsPanelOpen(false);
       return;
@@ -6243,10 +6285,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       composerSkillClear.disabled = true;
       input.placeholder = `"${readOnlyDocLabel}" 문서의 채팅 — 읽기 전용`;
     } else if (execution.kind === 'blocked') {
-      input.disabled = true;
+      input.disabled = !connectionNoticeVisible || attachmentsSending;
       send.disabled = true;
       composerSkillClear.disabled = true;
-      input.placeholder = connectionNoticeVisible ? '연결 후 메시지를 보낼 수 있습니다' : execution.message;
+      input.placeholder = connectionNoticeVisible ? '메시지를 작성해 두세요. 연결 후 보낼 수 있습니다' : execution.message;
     } else if (execution.kind === 'cloud-start') {
       input.disabled = attachmentsSending;
       send.disabled = activeComposerSkill !== null || attachmentsSending || referenceLibrary.hasBlockingDrafts();
@@ -8253,6 +8295,10 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   // 초기 상태 반영
   const unsubscribeWorkspace = workspace.subscribe((mode, target) => {
+    if (mode !== 'cloud') {
+      cloudTimelineGuard = new CloudLiveTimelineGuard();
+      cloudTimelineGuardKey = '';
+    }
     syncWorkspaceMode(mode, target);
     const transitionLocked = target.kind === 'workspace-blocked';
     syncWorkspaceModeAvailability(target);
@@ -8329,6 +8375,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     dispose(): void {
       if (root.dataset.disposed === 'true') return;
       root.dataset.disposed = 'true';
+      threadComposerDrafts.clear();
       cloudTransferCloseWaiter?.reject(new Error('클라우드 전송을 기다리는 동안 사이드바가 닫혔습니다.'));
       cloudTransferCloseWaiter = null;
       questionController.dispose();

@@ -224,6 +224,53 @@ test('desktop event watcher recovers after an extended network outage', async ()
   assert.equal(sequence, 1);
 });
 
+test('coordinator surfaces permanent stream failures without restarting the connection', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'raucloud-permanent-stream-'));
+  const profile = normalizeCloudProfile({
+    endpoint: 'https://permanent-stream.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'permanent-stream.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  let reconnects = 0;
+  let probes = 0;
+  let revoked = true;
+  const events = [];
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => profile, isPaired: async () => true, deviceId: async () => 'viewer',
+      health: async () => { probes++; return { ok: true, serverPublicKey: SERVER_KEY }; },
+      sessions: async () => [{
+        id: 'cloud-permanent-stream', status: 'running', stateVersion: 1,
+        clientContext: { documentId: 'document-1', threadId: 'thread-1' },
+        originDocument: { name: 'source.hwpx' },
+      }],
+      watchSession: async (_id, _after, { signal }) => {
+        if (revoked) throw Object.assign(new Error('Pairing was revoked'), { status: 403, code: 'DEVICE_REVOKED', retryable: false });
+        if (!signal.aborted) await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+      },
+    },
+    store: new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') }),
+    provisioner: {}, recoveryDir: path.join(directory, 'recovery'),
+  });
+  const reconnect = coordinator.reconnectCloud.bind(coordinator);
+  coordinator.reconnectCloud = async () => { reconnects += 1; };
+  coordinator.on('event', (event) => events.push(event));
+  t.after(async () => { await coordinator.stop(); await rm(directory, { recursive: true, force: true }); });
+  await coordinator.refresh();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(events.filter((event) => event.type === 'remote-session-stream-error').length, 1);
+  assert.equal(events.find((event) => event.type === 'remote-session-stream-error').retryable, false);
+  assert.equal(events.find((event) => event.type === 'remote-session-stream-error').code, 'DEVICE_REVOKED');
+  assert.equal(reconnects, 0);
+  assert.equal((await coordinator.snapshot()).link.kind, 'failed');
+  await reconnect({ background: true });
+  assert.equal(probes, 0, 'action-required errors must not heal in the background');
+  assert.equal((await reconnect()).link.kind, 'failed', 'a resumed revoked watcher cannot publish a ready link');
+  revoked = false;
+  assert.equal((await reconnect()).link.kind, 'ready');
+  assert.equal(probes, 2, 'explicit reconnect can recover after pairing is repaired');
+});
+
 test('backend SSE payload advances the durable desktop handoff', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-sse-'));
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });

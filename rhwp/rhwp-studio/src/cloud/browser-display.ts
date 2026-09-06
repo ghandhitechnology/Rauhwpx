@@ -179,7 +179,16 @@ export function createBrowserDisplayManager({
         const { done, value } = await readStreamChunk(reader);
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
-        if (buffer.length > 2 * 1024 * 1024) {
+        // A buffered network read can contain several complete frames.
+        // Bound each raw event, including ignored fields, and its partial tail.
+        let eventStart = 0;
+        for (const boundary of buffer.matchAll(/\r?\n\r?\n/g)) {
+          if (boundary.index - eventStart > 2 * 1024 * 1024) {
+            throw cloudError('Cloud 디스플레이 이벤트가 너무 큽니다.', 'SSE_PAYLOAD_INVALID');
+          }
+          eventStart = boundary.index + boundary[0].length;
+        }
+        if (buffer.length - eventStart > 2 * 1024 * 1024) {
           throw cloudError('Cloud 디스플레이 이벤트가 너무 큽니다.', 'SSE_PAYLOAD_INVALID');
         }
         const parsed = parseSse(buffer);

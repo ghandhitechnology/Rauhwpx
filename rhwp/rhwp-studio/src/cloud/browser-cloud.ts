@@ -123,6 +123,12 @@ function cloudError(message: string, code: string, retryable = false, status = 0
   return Object.assign(new Error(message), { code, retryable, status });
 }
 
+function canRetryCloudFailure(error: unknown): boolean {
+  const failure = error as BrowserCloudError | null;
+  return !(error instanceof SyntaxError) && failure?.retryable !== false
+    && ![401, 403, 404].includes(failure?.status ?? 0);
+}
+
 function sameProfileIdentity(left: BrowserProfile | null, right: BrowserProfile | null): boolean {
   return Boolean(left && right
     && left.endpoint === right.endpoint
@@ -148,6 +154,19 @@ function abortableWait<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T>
         reject(error);
       },
     );
+  });
+}
+
+function waitForStreamRetry(failures: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const finish = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, Math.min(10_000, 250 * 2 ** Math.min(failures, 6)));
+    signal.addEventListener('abort', finish, { once: true });
+    if (signal.aborted) finish();
   });
 }
 
@@ -1005,9 +1024,9 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
       selectedProfile,
       signal,
     });
-    if (!result.bytes || result.bytes.byteLength > MAX_TIMELINE_BYTES) throw new Error('Cloud 타임라인이 잘못됐습니다.');
+    if (!result.bytes || result.bytes.byteLength > MAX_TIMELINE_BYTES) throw cloudError('Cloud 타임라인이 잘못됐습니다.', 'CLOUD_ARTIFACT_INVALID');
     const expected = result.response.headers.get('x-content-sha256');
-    if (!expected || expected !== await sha256(result.bytes)) throw new Error('Cloud 타임라인 무결성 검증에 실패했습니다.');
+    if (!expected || expected !== await sha256(result.bytes)) throw cloudError('Cloud 타임라인 무결성 검증에 실패했습니다.', 'CLOUD_ARTIFACT_INVALID');
     const timeline = JSON.parse(new TextDecoder().decode(result.bytes));
     requireCurrentProfile(selectedProfile, generation);
     assertCurrent?.();
@@ -1049,16 +1068,16 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
       signal,
     });
     if (!result.bytes || !result.bytes.byteLength || result.bytes.byteLength > MAX_DOCUMENT_BYTES) {
-      throw new Error('Cloud 체크포인트 크기가 잘못됐습니다.');
+      throw cloudError('Cloud 체크포인트 크기가 잘못됐습니다.', 'CLOUD_ARTIFACT_INVALID');
     }
     const expected = result.response.headers.get('x-content-sha256') ?? '';
-    if (expected !== await sha256(result.bytes)) throw new Error('Cloud 체크포인트 무결성 검증에 실패했습니다.');
+    if (expected !== await sha256(result.bytes)) throw cloudError('Cloud 체크포인트 무결성 검증에 실패했습니다.', 'CLOUD_ARTIFACT_INVALID');
     requireCurrentProfile(selectedProfile, generation);
     assertCurrent?.();
     const boundaryOperation = result.response.headers.get('x-boundary-operation') ?? '';
     const boundaryKind = result.response.headers.get('x-boundary-kind');
     if (boundaryKind !== 'handoff' && boundaryKind !== 'operation' && boundaryKind !== 'turn') {
-      throw new Error('Cloud 체크포인트 경계 종류가 잘못됐습니다.');
+      throw cloudError('Cloud 체크포인트 경계 종류가 잘못됐습니다.', 'CLOUD_ARTIFACT_INVALID');
     }
     const encodedName = result.response.headers.get('x-document-name') ?? 'cloud-document.hwpx';
     let fileName = encodedName;
@@ -1114,9 +1133,9 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
       selectedProfile,
       signal: watcher?.signal,
     });
-    if (!result.bytes?.byteLength) throw new Error('Cloud 결과가 비어 있습니다.');
+    if (!result.bytes?.byteLength) throw cloudError('Cloud 결과가 비어 있습니다.', 'CLOUD_ARTIFACT_INVALID');
     const digest = result.response.headers.get('x-content-sha256') ?? '';
-    if (digest !== await sha256(result.bytes)) throw new Error('Cloud 결과 무결성 검증에 실패했습니다.');
+    if (digest !== await sha256(result.bytes)) throw cloudError('Cloud 결과 무결성 검증에 실패했습니다.', 'CLOUD_ARTIFACT_INVALID');
     assertCurrent();
     const remote = remoteSessions.find((session) => session.id === sessionId);
     const name = String(record(remote?.originDocument)?.name ?? 'cloud-result.hwpx');
@@ -1249,6 +1268,71 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
     const generation = profileGeneration;
     const selectedProfile = profile;
     watchers.set(sessionId, controller);
+    // Status and artifact requests must not hold up the next signed agent delta.
+    // Pending updates share this watcher's cancellation and profile fence.
+    const pendingArtifacts = new Map<string, Record<string, unknown>>();
+    let artifactSync: Promise<void> | null = null;
+    const syncArtifact = async (event: Record<string, unknown>) => {
+      const assertCurrent = () => requireCurrentWatcher(controller, selectedProfile, generation);
+      assertCurrent();
+      if (event.type === 'session.refresh') {
+        await fetchRemoteSessions(controller);
+        assertCurrent();
+        emit({ type: 'remote-session-reconciled', sessionId }, generation);
+      } else if (event.type === 'boundary.committed') {
+        await downloadCheckpoint(sessionId, String(record(event.payload)?.operationId), selectedProfile,
+          controller.signal, assertCurrent);
+      } else if (event.type === 'timeline.updated') {
+        const downloaded = await downloadTimeline(sessionId, selectedProfile, controller.signal, assertCurrent);
+        assertCurrent();
+        timelines.set(sessionId, downloaded);
+        emit({ type: 'conversation-timeline-updated', sessionId }, generation);
+      } else if (event.type === 'session.completed') {
+        const completed = remoteSessions.find((session) => session.id === sessionId);
+        if (completed && String(completed.originDeviceId ?? '') === ownDeviceId()) {
+          await archiveResult(sessionId, selectedProfile, generation, controller);
+          assertCurrent();
+          emit({ type: 'conversation-result-archived', sessionId }, generation);
+        }
+      }
+    };
+    const startArtifactSync = () => {
+      if (artifactSync || controller.signal.aborted || !pendingArtifacts.size) return;
+      artifactSync = (async () => {
+        while (pendingArtifacts.size && !controller.signal.aborted) {
+          const [key, event] = pendingArtifacts.entries().next().value!;
+          pendingArtifacts.delete(key);
+          let failures = 0;
+          for (;;) {
+            try {
+              await syncArtifact(event);
+              break;
+            } catch (error) {
+              if (controller.signal.aborted || profileWritePending()
+                || (error as BrowserCloudError).code === 'PROFILE_CHANGED') return;
+              emit({ type: 'conversation-artifact-sync-error', sessionId,
+                error: error instanceof Error ? error.message : String(error) }, generation);
+              if (!canRetryCloudFailure(error)) break;
+              await waitForStreamRetry(++failures, controller.signal);
+            }
+          }
+        }
+      })().finally(() => {
+        artifactSync = null;
+        if (profileWritePending()) pendingArtifacts.clear();
+        startArtifactSync();
+      });
+    };
+    const scheduleArtifactSync = (event: Record<string, unknown>) => {
+      if (event.type !== 'agent.event') pendingArtifacts.set('session.refresh', { type: 'session.refresh' });
+      const operationId = record(event.payload)?.operationId;
+      if (event.type === 'boundary.committed' && typeof operationId === 'string' && operationId) {
+        pendingArtifacts.set(`boundary:${operationId}`, event);
+      } else if (event.type === 'timeline.updated' || event.type === 'session.completed') {
+        pendingArtifacts.set(event.type, event);
+      }
+      startArtifactSync();
+    };
     void (async () => {
       let failures = 0;
       while (!controller.signal.aborted && generation === profileGeneration
@@ -1261,6 +1345,12 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
           });
           requireCurrentWatcher(controller, selectedProfile, generation);
           if (!stream.response.body || !stream.context) throw new Error('Cloud 이벤트 스트림을 열지 못했습니다.');
+          if (link.kind !== 'ready' || connection === 'error') {
+            link = { kind: 'ready', error: null, attempt: 0, canRecreate: false };
+            connection = 'ready';
+            connectionMessage = null;
+            emit({ type: 'cloud-link-ready', sessionId }, generation);
+          }
           const reader = stream.response.body.getReader();
           const decoder = new TextDecoder();
           let buffer = '';
@@ -1285,74 +1375,37 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
                 queuedMessages.set(queuedKey, { ...queued, serverQueued: true,
                   state: event.type === 'message.accepted' ? 'accepted' : queued.state });
               }
-              if (event.type !== 'agent.event') await fetchRemoteSessions(controller);
               requireCurrentWatcher(controller, selectedProfile, generation);
               emit({ type: 'remote-session-event', sessionId, event }, generation);
-              if (event.type === 'boundary.committed') {
-                const operationId = String(record(event.payload)?.operationId ?? '');
-                if (operationId) await downloadCheckpoint(
-                  sessionId,
-                  operationId,
-                  selectedProfile,
-                  controller.signal,
-                  () => requireCurrentWatcher(controller, selectedProfile, generation),
-                );
-              }
-              if (event.type === 'timeline.updated') {
-                let downloaded = null;
-                try {
-                  downloaded = await downloadTimeline(
-                    sessionId,
-                    selectedProfile,
-                    controller.signal,
-                    () => requireCurrentWatcher(controller, selectedProfile, generation),
-                  );
-                } catch (error) {
-                  if ((error as BrowserCloudError).code === 'PROFILE_CHANGED') throw error;
-                }
-                requireCurrentWatcher(controller, selectedProfile, generation);
-                if (downloaded) timelines.set(sessionId, downloaded);
-              }
-              if (event.type === 'session.completed') {
-                const completed = remoteSessions.find((session) => session.id === sessionId);
-                if (completed && String(completed.originDeviceId ?? '') === ownDeviceId()) {
-                  await archiveResult(sessionId, selectedProfile, generation, controller);
-                  requireCurrentWatcher(controller, selectedProfile, generation);
-                  emit({ type: 'conversation-result-archived', sessionId }, generation);
-                }
-              }
+              scheduleArtifactSync(event);
               requireCurrentWatcher(controller, selectedProfile, generation);
               eventSequences.set(sessionId, sequence);
+              failures = 0;
+              if (event.sessionId === sessionId
+                && ['session.completed', 'session.failed', 'session.cancelled', 'session.purged'].includes(String(event.type))) return;
             }
           }
           } finally { void reader.cancel().catch(() => {}); reader.releaseLock(); }
-          failures = 0;
-          if (link.kind !== 'ready' || connection === 'error') {
-            link = { kind: 'ready', error: null, attempt: 0, canRecreate: false };
-            connection = 'ready';
-            connectionMessage = null;
-            emit({ type: 'cloud-link-ready', sessionId }, generation);
-          }
+          const session = remoteSessions.find((candidate) => candidate.id === sessionId);
+          if (session && ['completed', 'failed', 'cancelled', 'purged'].includes(String(session.status))) return;
+          throw cloudError('Cloud 이벤트 연결이 끊어졌습니다. 다시 연결하고 있습니다.', 'STREAM_CLOSED', true);
         } catch (error) {
           if (controller.signal.aborted) break;
           if ((error as BrowserCloudError).code === 'PROFILE_CHANGED') break;
           failures += 1;
-          if (failures >= 20) {
-            const message = error instanceof Error ? error.message : String(error);
-            if (link.kind === 'ready') {
-              link = { kind: 'reconnecting', error: message, attempt: link.attempt + 1, canRecreate: false };
-              connection = 'error';
-              connectionMessage = message;
-            }
-            emit({ type: 'remote-session-stream-error', sessionId, error: message }, generation);
-            failures = 0;
-            await new Promise((resolve) => setTimeout(resolve, 5_000));
-            continue;
-          }
-          await new Promise((resolve) => setTimeout(resolve, Math.min(10_000, 250 * 2 ** failures)));
+          const message = error instanceof Error ? error.message : String(error);
+          const retryable = canRetryCloudFailure(error);
+          link = { kind: retryable ? 'reconnecting' : 'failed', error: message,
+            attempt: link.attempt + 1, canRecreate: false };
+          connection = 'error';
+          connectionMessage = message;
+          emit({ type: 'remote-session-stream-error', sessionId, error: message }, generation);
+          if (!retryable) break;
+          await waitForStreamRetry(failures, controller.signal);
         }
       }
-    })().finally(() => {
+    })().finally(async () => {
+      while (artifactSync) await artifactSync;
       if (watchers.get(sessionId) === controller) watchers.delete(sessionId);
     });
   };
