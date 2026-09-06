@@ -346,7 +346,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     bridge,
     eventBus,
     editorRuntime,
-    getSelection,
     applyDefaults,
     openCalibration,
     reconnectSession,
@@ -1076,22 +1075,26 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   });
 
   // ── 2. 기본 설정 ──────────────────────────────────────
-  const defaults = createSection('기본 설정');
-  const agentField = createSelect('기본 제공자', selectableAgents().map(
+  const defaults = createSection('새 대화 기본값');
+  defaults.root.classList.add('ag-settings-defaults');
+  const agentField = createSelect('제공자', selectableAgents().map(
     (agent) => ({ id: agent, label: AGENT_LABEL[agent] }),
   ));
-  const modelField = createSelect('기본 모델', []);
+  const modelField = createSelect('모델', []);
   const effortField = createSelect('추론 강도', []);
-  const permissionField = createSelect('권한 프로필', PERMISSION_OPTIONS);
+  const permissionField = createSelect('권한', PERMISSION_OPTIONS.map(option => ({
+    ...option, label: option.id === 'safe' ? '안전 · 검토 후 승인' : '전체 접근',
+  })));
+  for (const option of permissionField.select.options) {
+    option.title = PERMISSION_OPTIONS.find(item => item.id === option.value)?.label ?? '';
+  }
   const defaultsNote = el('p', 'ag-settings-note', '새 대화부터 적용돼요.');
-  const currentLine = el('p', 'ag-settings-current');
   defaults.body.append(
     agentField.field,
     modelField.field,
     effortField.field,
     permissionField.field,
     defaultsNote,
-    currentLine,
   );
 
   agentField.select.addEventListener('change', () => {
@@ -1349,7 +1352,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const aiFooter = el('div', 'ag-settings-apply-footer');
   aiFooter.append(aiStatus, aiCancel, aiApply);
   const aiContent = el('div', 'ag-settings-destination-content');
-  aiContent.append(calibration.root, instructionsSection.root, defaults.root, templatesSection.root, aiFooter);
+  aiContent.append(defaults.root, calibration.root, instructionsSection.root, templatesSection.root, aiFooter);
   panes.get('ai')?.appendChild(aiContent);
 
   const connectionContent = el('div', 'ag-settings-destination-content');
@@ -1792,13 +1795,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       prefsDraft.defaultModel,
     );
     permissionField.select.value = prefsDraft.defaultPermissionProfile;
-  }
-
-  function renderCurrentSelection(): void {
-    const current = getSelection();
-    const permission = current.permission === 'unrestricted' ? '전체 접근' : '안전';
-    currentLine.textContent =
-      `현재 대화: ${AGENT_LABEL[current.agent]} / ${labelForModel(current.agent, current.model)} / ${permission}`;
   }
 
   function applyAccountLoginStart(started: AccountLoginStart): void {
@@ -3322,7 +3318,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
 
   syncPrefsInputs();
   renderAccount();
-  renderCurrentSelection();
   renderConnection();
   renderProviders();
   renderAgentInstructions();
@@ -3346,7 +3341,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
       if (destination) selectDestination(destination);
       else selectDestination(lastDestination);
       syncPrefsInputs();
-      renderCurrentSelection();
       renderConnection();
       renderBrowserbase();
       if (connectionState === 'connected') void refreshBrowserbase();
