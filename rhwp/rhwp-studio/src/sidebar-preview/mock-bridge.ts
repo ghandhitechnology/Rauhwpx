@@ -390,9 +390,6 @@ export function createMockBridge(report: (message: string) => void) {
       setupChanged();
       return data.setups;
     },
-    requestBrowserbaseStatus: async () => ({ configured: false, missing: ['BROWSERBASE_API_KEY'], keySource: null, keyTail: null, projectId: null, projectSource: null, geminiSource: null, browsers: [] }),
-    setBrowserbaseCredentials: async () => null,
-    clearBrowserbaseCredentials: async () => null,
     requestUsage: async (refresh) => {
       if (liveUsage) {
         data.usage = await requestLiveUsage(refresh);
