@@ -12,8 +12,8 @@ const main = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
 const desktop = readFileSync(new URL('../src/desktop-integration.ts', import.meta.url), 'utf8');
 const cloudStart = readFileSync(new URL('../src/cloud/cloud-start.ts', import.meta.url), 'utf8');
 
-test('composer supports Local/Cloud selection after setup and starts Cloud on first Send', () => {
-  assert.match(sidebar, /cloudUi\.optionsElement\.append/);
+test('header supports Local/Cloud selection and starts Cloud on first Send', () => {
+  assert.match(sidebar, /createExecutionLocation\(executionLocationOptions\)/);
   assert.doesNotMatch(sidebar, /ag-cloud-mode-badge|ag-composer-mode-row/);
   assert.match(sidebar, /cloudSend/);
   assert.match(sidebar, /function startCloudFromFirstMessage/);
@@ -27,8 +27,8 @@ test('composer supports Local/Cloud selection after setup and starts Cloud on fi
 });
 
 test('cloud action is available in sidebar and fullscreen headers', () => {
-  assert.match(sidebar, /headerActions\.insertBefore\(cloudUi\.sidebarButton/);
-  assert.match(sidebar, /workspaceTrailing\.insertBefore\(cloudUi\.workspaceButton/);
+  assert.match(sidebar, /headerActions\.insertBefore\(headerExecutionLocation\.root/);
+  assert.match(sidebar, /workspaceTrailing\.insertBefore\(workspaceExecutionLocation\.root/);
   assert.match(cloudUi, /createIcon\('cloud'\)/);
   assert.match(cloudUi, /ag-cloud-session-select/);
   assert.match(cloudUi, /selectedSessionId/);
@@ -126,7 +126,7 @@ test('cloud lease scope stays bound to the primary editor context', () => {
 });
 
 test('active Local turns keep the Local transcript mounted until authoritative turn-end', () => {
-  const openCloud = sidebar.match(/function openCloudWorkspace\(\): void \{[\s\S]*?\n  \}/)?.[0] ?? '';
+  const openCloud = sidebar.match(/function openCloudWorkspace\([^)]*\): void \{[\s\S]*?\n  \}/)?.[0] ?? '';
   const guard = openCloud.indexOf('canSelectCloudWorkspace(workspace.mode(), bridge.isTurnRunning()');
   assert.ok(guard >= 0);
   assert.ok(guard < openCloud.indexOf("workspace.select('cloud')"));

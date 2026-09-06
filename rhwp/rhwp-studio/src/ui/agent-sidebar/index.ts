@@ -143,6 +143,7 @@ import type {
 } from '../../cloud/types.ts';
 import { cloudProviderSettingsTarget } from '../../cloud/provider-settings.ts';
 import { createCloudAgentUi } from './cloud-ui.ts';
+import { createExecutionLocation } from './execution-location.ts';
 import { createCloudWorkspace } from '../cloud-workspace.ts';
 import {
   createVersionManagerPage,
@@ -1114,19 +1115,25 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     providerMenu.appendChild(item);
   }
 
-  /** 연결된 항목만 키보드 탐색에 포함한다. */
+  /** 현재 실행 위치에서 선택 가능한 연결 항목만 키보드로 탐색한다. */
   function visibleProviderItems(): HTMLButtonElement[] {
     return PROVIDER_ORDER
       .map((name) => providerItems.get(name))
-      .filter((item): item is HTMLButtonElement => !!item && !item.hidden);
+      .filter((item): item is HTMLButtonElement => !!item && !item.hidden && !item.disabled);
   }
 
   function syncProviderMenu(): void {
     for (const [agent, item] of providerItems) {
-      item.hidden = !connectedProviders.has(agent)
-        || (workspace.mode() === 'cloud' && !isCloudSupportedAgent(agent));
+      const cloudUnsupported = workspace.mode() === 'cloud' && !isCloudSupportedAgent(agent);
+      item.hidden = !connectedProviders.has(agent);
+      item.disabled = cloudUnsupported;
+      item.setAttribute('aria-disabled', String(cloudUnsupported));
+      item.title = cloudUnsupported ? 'Cloud에서는 사용할 수 없습니다. Local로 전환해 사용하세요.' : '';
+      if (cloudUnsupported) item.dataset.unavailableReason = 'Cloud 미지원';
+      else delete item.dataset.unavailableReason;
     }
-    if (document.activeElement instanceof HTMLElement && document.activeElement.hidden
+    if (document.activeElement instanceof HTMLButtonElement
+      && (document.activeElement.hidden || document.activeElement.disabled)
       && providerMenu.contains(document.activeElement)) {
       (visibleProviderItems()[0] ?? providerTrigger).focus();
     }
@@ -1421,7 +1428,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     openConfiguredVersionControl();
   });
   // pane 액션은 문서 맥락 주변의 고정된 헤더 위치를 유지한다.
-  headerActions.append(threadsBtn, versionsBtn, settingsBtn);
+  headerActions.append(versionsBtn, threadsBtn, settingsBtn);
 
   selectors.append(providerWrap, llmWrap, effortWrap);
   const modelSummary = el('div', 'ag-model-summary');
@@ -1639,6 +1646,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   cloudModeButton.type = 'button';
   cloudModeButton.dataset.workspaceMode = 'cloud';
   workspaceModeSwitch.append(localModeButton, cloudModeButton);
+  let syncExecutionLocation = (): void => {};
   let pendingCloudSetup = false;
   let cloudWorkspaceSwitchVisible = false;
 
@@ -1691,6 +1699,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       ? '로컬 응답이 끝난 후 클라우드로 전환할 수 있습니다.'
       : '';
     syncWorkspaceMode(workspace.mode(), target);
+    syncExecutionLocation();
   }
 
   function rememberThreadComposerDraft(): void {
@@ -1780,7 +1789,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       : `${AGENT_LABEL[selectedAgent]}는 아직 Cloud에서 사용할 수 없습니다. 로컬에서 계속하거나 Claude, Codex, pi, Grok, Cursor를 선택해 주세요.`;
   }
 
-  function openCloudWorkspace(): void {
+  function openCloudWorkspace(trigger: HTMLElement = cloudModeButton): void {
     const providerMessage = cloudProviderUnavailableMessage();
     if (providerMessage && cloudController.getSnapshot().session.kind === 'idle') {
       systemMessage(providerMessage);
@@ -1799,15 +1808,15 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (snapshot.session.kind === 'running') workspace.setWorkspaceView('cloud');
     if (snapshot.session.kind !== 'idle') void cloudUi.bindSelectedTimeline();
     const profileReady = snapshot.profile.kind === 'configured' && snapshot.profile.connection === 'ready';
-    if (isDesktopApp() && !profileReady) {
+    if (!profileReady) {
       pendingCloudSetup = true;
-      cloudUi.openSetup(cloudModeButton);
+      cloudUi.openSetup(trigger);
     }
     updateComposer();
   }
 
   localModeButton.addEventListener('click', restoreLocalWorkspace);
-  cloudModeButton.addEventListener('click', openCloudWorkspace);
+  cloudModeButton.addEventListener('click', () => openCloudWorkspace());
   syncWorkspaceMode(workspace.mode(), workspace.composerTarget());
 
   const workspaceTrailing = el('div', 'ag-workspace-trailing');
@@ -2099,8 +2108,29 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       showToast({ message, durationMs: 5000 });
     },
   });
-  headerActions.insertBefore(cloudUi.sidebarButton, versionsBtn);
-  workspaceTrailing.insertBefore(cloudUi.workspaceButton, environmentWrap);
+  const executionLocationOptions = {
+    select(mode: WorkspaceMode, trigger: HTMLButtonElement) {
+      if (mode === 'local') restoreLocalWorkspace();
+      else openCloudWorkspace(trigger);
+    },
+    configure(trigger: HTMLButtonElement) { cloudUi.openSetup(trigger); },
+  };
+  const headerExecutionLocation = createExecutionLocation(executionLocationOptions);
+  const workspaceExecutionLocation = createExecutionLocation(executionLocationOptions);
+  headerActions.insertBefore(headerExecutionLocation.root, versionsBtn);
+  workspaceTrailing.insertBefore(workspaceExecutionLocation.root, environmentWrap);
+  syncExecutionLocation = () => {
+    const state = {
+      mode: workspace.mode(),
+      started: workspace.executionLocked() || currentThread.messages.some((message) => message.role === 'user')
+        || currentThread.firstMessageDelivery != null,
+      localDisabled: localModeButton.disabled,
+      cloudDisabled: cloudModeButton.disabled || !cloudController.getSnapshot().available,
+    };
+    headerExecutionLocation.update(state);
+    workspaceExecutionLocation.update(state);
+  };
+  syncExecutionLocation();
 
   function syncWorkspaceSwitchMount(): void {}
 
@@ -2871,9 +2901,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   templateChipClear.appendChild(createIcon('close'));
   templateChip.append(el('span', 'ag-template-chip-label', '템플릿'), templateChipName, templateChipClear);
   composer.append(composerOverlay, slashMenu, templateChip, composerField, composerMeta, configPanel);
-  const cloudExecutionOptions = el('div', 'ag-cloud-option-row');
-  cloudExecutionOptions.append(el('span', 'ag-cloud-option-label', '실행 위치'), workspaceModeSwitch);
-  cloudUi.optionsElement.append(cloudExecutionOptions);
+
   const cloudDocumentControls = el('div', 'ag-cloud-document-controls');
   cloudDocumentControls.setAttribute('role', 'group');
   cloudDocumentControls.setAttribute('aria-label', 'Cloud 문서 보기 및 병합');

@@ -7,6 +7,7 @@ const NS = 'http://www.w3.org/2000/svg';
 
 /** 스트로크로만 그리는 아이콘의 패스 정의. */
 const STROKE_PATHS = {
+  local: 'M1.5 2h9v6h-9zM6 8v2M3.5 10h5',
   check: 'M2.5 6.4 5 8.9l4.5-5.4',
   close: 'M3.2 3.2l5.6 5.6M8.8 3.2l-5.6 5.6',
   send: 'M6 9.5v-7M2.9 5.6 6 2.5l3.1 3.1',
