@@ -2383,7 +2383,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     const oauthDetail = setupOauth.querySelector('span');
     if (agent === 'rau') {
       if (oauthTitle) oauthTitle.textContent = 'Rau로 시작';
-      if (oauthDetail) oauthDetail.textContent = '브라우저 로그인 · $5 체험 크레딧';
+      if (oauthDetail) oauthDetail.textContent = '5$ 체험 크레딧';
       setupInstallPane.hidden = true;
       setupApiToggle.hidden = true;
       setupKeyBox.hidden = true;
