@@ -14,7 +14,7 @@ import {
 } from './process-tree.mjs';
 import { extractReferenceText, markupToText, SUPPORTED_REFERENCE_EXTENSIONS } from './reference-extractor.mjs';
 import {
-  analyzeText, baselineLines, confidenceFor, deriveBands, splitHalfStability,
+  analyzeText, confidenceFor, deriveBands, splitHalfStability,
 } from './style-metrics.mjs';
 import { createTerminalJsonScanner } from './terminal-json-scanner.mjs';
 
@@ -171,14 +171,8 @@ export function buildCalibrationPrompt({ language, files, metrics, inline = fals
     .map((axis) => `- ${axis.id} — ${language === 'ko' ? axis.ko : axis.en}`)
     .join('\n');
   const measured = metrics
-    ? `A deterministic profiler already measured this corpus. These numbers are a fingerprint, not a recipe. Do not restate, recompute, or contradict them, and do not tell a writer to hit them.
-
-\`\`\`json
-${JSON.stringify(metrics, null, 2)}
-\`\`\`
-
-Use them only to notice what the ear already heard, then explain what they cannot: temperament, unevenness, what this person sounds like when they mean it.`
-    : 'No quantitative profile is available for this corpus, so judge the sample scale yourself and keep every claim conservative.';
+    ? 'Sample size and reliability are checked separately by the application. Read the prose itself; do not infer voice from word counts, sentence-length distributions, or punctuation frequencies.'
+    : 'Judge whether the samples support each observation and keep uncertain claims conservative.';
 
   const access = inline
     ? 'The sample text is included at the end of this message.'
@@ -195,24 +189,29 @@ ${measured}
 
 ## What this profile is for
 
-The output is a **person** a drafting agent will inhabit — not a style guide, not a checklist, not a set of sentence recipes. Agents will write new Korean office documents (reports, proposals, official letters, emails, explanatory prose) that should sound as if this author is in the room. The failure mode of a writing specification is that language models follow it perfectly, and the result reads as AI. The success condition is the opposite: a stranger hearing the new prose would believe a particular human wrote it, with that human's temperament, unevenness, and way of caring about a sentence.
+The output is a **person** a drafting agent will inhabit — not a style guide, not a checklist, not a set of sentence recipes. Agents will write new ${targetLanguage} documents (reports, proposals, official letters, emails, explanatory prose) that should sound as if this author is in the room. The failure mode of a writing specification is that language models follow it perfectly, and the result reads as AI. The success condition is the opposite: a stranger hearing the new prose would believe a particular human wrote it, with that human's temperament, unevenness, and way of caring about a sentence.
 
 Do not emit generic good-writing advice. Do not emit anti-AI rules any model already knows ("vary sentence length", "avoid moreover", "prefer concrete nouns"). Those produce a second machine voice. Only habits that are this person's belong here.
 
 ## Soul first
 
-Before you fill any axis, sit with the corpus as a reader, not a linguist.
+Before you fill any axis, read the corpus for meaning, continuity, and the relationship with its reader.
+${language === 'ko'
+  ? 'For Korean, describe the established register, how omitted subjects remain understandable, how endings convey certainty or consideration, and how ideas connect. Preserve consistent 존댓말 or 반말; do not recommend ending quotas or artificial informality.'
+  : 'For English, describe how the writer develops an argument, qualifies a claim, uses idiomatic phrasing, and addresses the reader. Keep regional spelling and contractions grounded in the samples; do not prescribe punctuation bans or sentence-length alternation.'}
 
 Ask, and answer in the \`presence\` object:
-- \`portrait\` — who is speaking, in 3–6 sentences. Close or distant, patient or rushed, warm or dry, amused or weary. What they sound like when they mean it.
+- \`portrait\` — a concise account of the voice on the page. Close or distant, patient or rushed, warm or dry, amused or weary. What they sound like when they mean it.
 - \`temperature\` — the default weather of the prose, with what the ear heard.
 - \`unevenness\` — where they let the seams show. Uneven paragraphs, a repeated word, a thought that ends too soon, a joke that isn't packed for travel.
 - \`stance\` — how they take a position. Blunt, hedged only when it matters, quietly certain, willing to be wrong in public.
 - \`refusals\` — up to 6 things that would immediately not sound like them. A throat-clearing opener, a forced triad, a polished closer, a particular kind of softness or swagger.
 
+Describe unevenness only where it is supported; do not invent rough edges, jokes, or emotion to make a profile feel human. A consistent, polished voice is valid.
+
 Capture on-page temperament. Do not invent off-page biography: no education, job, age, or diagnosis beyond what the prose itself performs.
 
-The measured numbers are a skeleton. Your job is the person wearing it. When a countable habit and a habit that carries the voice disagree, profile the one that carries the voice.
+Describe how the author develops a thought, relates to the reader, and chooses emphasis. When a countable habit and a habit that carries the voice disagree, profile the one that carries the voice. Do not prescribe word counts, sentence-length bands, ending ratios, or a fixed short-long rhythm. Natural variation follows the subject. Correct spelling and consistent formality are not evidence of a robotic voice.
 
 ## Axes
 
@@ -698,16 +697,12 @@ const SECTION = {
     stance: '태도를 취하는 법',
     refusals: '이 사람이 안 하는 일',
     covenant: '지키는 선',
-    baselines: '지문 (쓴 뒤에만 본다)',
-    fingerprint: '아래 숫자는 초고를 쓴 뒤에만 본다. 맞추려고 문장을 늘리거나 자르지 않는다. 문장이 이 폭을 통째로 비우면 목소리를 잃은 것이다.',
     axes: '문장에서 하는 일',
     adaptation: '장르별 조정',
     strict: '분명한 습관',
     advisory: '옅은 습관',
     noEvidence: '원고에서 뚜렷한 습관이 보이지 않는다. 문서와 장르 관행을 따른다.',
     patterns: '귀로 들리는 호흡',
-    confidence: (level, sentences, stability) =>
-      `표본 신뢰도 ${level} — 문장 ${sentences}개, 반쪽 일치도 ${stability}. 신뢰도가 낮으면 지문을 넓게 읽고, 축 메모는 참고로만 쓴다.`,
   },
   en: {
     title: "This person's voice",
@@ -717,16 +712,12 @@ const SECTION = {
     stance: 'How they take a stance',
     refusals: 'What they would not do',
     covenant: 'Fixed boundaries',
-    baselines: 'Fingerprint (check after writing)',
-    fingerprint: 'These numbers are a fingerprint you glance at after drafting. Do not pad or trim sentences to hit them. If a paragraph abandoned this spread, you left the voice.',
     axes: 'How the voice occupies the page',
     adaptation: 'Genre adaptation',
     strict: 'Strong habits',
     advisory: 'Faint habits',
     noEvidence: 'No distinctive habit in the samples. Follow the document and the genre.',
     patterns: 'Cadence the ear would know',
-    confidence: (level, sentences, stability) =>
-      `Sample confidence ${level} — ${sentences} sentences, split-half agreement ${stability}. Lower confidence means a wider fingerprint and axis notes you may drop.`,
   },
 };
 
@@ -745,7 +736,7 @@ function renderPresence(out, presence, t) {
 
 /** style.md 는 코드가 만든다. 측정값과 습관의 강도가 모델 문장에 섞이지 않게 한다. */
 export function renderStyleMarkdown({
-  language, axes, adaptation, bands, metrics, confidence, stability, summary, presence = null,
+  language, axes, adaptation, summary, presence = null,
 }) {
   const lang = language === 'en' ? 'en' : 'ko';
   const t = SECTION[lang];
@@ -754,11 +745,6 @@ export function renderStyleMarkdown({
   renderPresence(out, presence, t);
   out.push(`## ${t.covenant}`, '', COVENANT[lang], '');
 
-  if (bands) {
-    out.push(`## ${t.baselines}`, '', t.fingerprint, '');
-    for (const line of baselineLines(bands, lang)) out.push(`- ${line}`);
-    out.push('', t.confidence(confidence, metrics.sentences, stability), '');
-  }
 
   out.push(`## ${t.axes}`, '');
   for (const axis of axes) {
