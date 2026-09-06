@@ -2187,3 +2187,43 @@
 }
 .ag-settings-balance-amount .ag-settings-row-detail { font-weight: 400; }
 .ag-settings-balance-card .ag-settings-quota-identity { min-width: 0; flex-wrap: wrap; }
+/* 연결 흐름 안에서 펼쳐지는 로그인 터미널. */
+.ag-setup-terminal {
+  overflow: hidden;
+  min-width: 0;
+  border: 1px solid var(--ag-border-strong);
+  border-radius: 12px;
+  background: var(--ag-raised);
+  animation: ag-step-arrive 220ms var(--ag-motion-out) both;
+}
+.ag-setup-terminal[hidden] { display: none; }
+.ag-setup-terminal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  font-weight: 600;
+}
+.ag-setup-terminal-hint {
+  margin: 0;
+  padding: 0 12px 10px;
+  color: var(--ag-text-muted);
+  font-size: 11px;
+}
+.ag-setup-terminal-screen {
+  height: clamp(200px, 36vh, 340px);
+  padding: 10px;
+  background: var(--ag-bg);
+  color: var(--ag-text);
+}
+.ag-setup-terminal-screen .xterm { height: 100%; }
+@media (prefers-reduced-motion: reduce) {
+  .ag-setup-terminal { animation: none; }
+}
+
+.ag-agent-setup-pane:has(.ag-setup-terminal:not([hidden])) > .ag-agent-auth-card,
+.ag-agent-setup-pane:has(.ag-setup-terminal:not([hidden])) > .ag-agent-setup-section-title,
+.ag-agent-setup-pane:has(.ag-setup-terminal:not([hidden])) > .ag-agent-key-box {
+  display: none;
+}

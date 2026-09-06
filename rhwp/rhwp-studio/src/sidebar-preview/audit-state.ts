@@ -72,6 +72,10 @@ export async function applyAuditState(preview: SidebarPreview, params: URLSearch
     'cloud-options': '.ag-cloud-btn', 'cloud-setup': '.ag-cloud-btn',
   };
   if (surface && surfaces[surface]) await click(surfaces[surface]);
+  if (params.get('terminal') === '1' && surface === 'provider-setup' && params.get('provider') === 'opencode') {
+    await click('.ag-agent-setup-pane:not([hidden]) .ag-agent-setup-primary');
+    await until(() => document.querySelector('.ag-setup-terminal:not([hidden]) .xterm'), 'login terminal');
+  }
   const connection = params.get('connection');
   if (connection && ['connected', 'connecting', 'disconnected', 'replaced'].includes(connection)) {
     select('#connection', connection);

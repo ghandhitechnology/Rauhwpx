@@ -4039,6 +4039,13 @@ async function handleStudioMessage(record, sock, msg) {
 
       const progress = (entry) => {
         if (!isLiveAuthRun()) return;
+        if (entry.terminalData !== undefined || entry.terminalReady) {
+          sendAuthRunFrame(authRun, { type: 'agent-setup-terminal',
+            ...(entry.terminalData !== undefined ? { data: entry.terminalData } : {}),
+            ...(entry.terminalReady ? { ready: true } : {}),
+          });
+          return;
+        }
         const replayableUi = {
           ...(entry.authUrl ? { authUrl: entry.authUrl } : {}),
           ...(entry.userCode ? { userCode: entry.userCode } : {}),
@@ -4203,6 +4210,28 @@ async function handleStudioMessage(record, sock, msg) {
         const providers = await providerHealth.check(true);
         sendAuthRunFrame(authRun, { type: 'provider-status', providers });
       }).then(() => finish(), finish);
+      return;
+    }
+    case 'agent-setup-terminal-resume':
+    case 'agent-setup-terminal-input':
+    case 'agent-setup-terminal-resize': {
+      try {
+        const run = authRuns.requireOwned({ agent: msg.agent, runId: msg.authRunId,
+          ownerSessionId: record.sessionId });
+        if (msg.agent !== 'opencode' || run.method !== 'oauth') throw new Error('진행 중인 OpenCode 로그인이 없어요.');
+        if (msg.type === 'agent-setup-terminal-resume') {
+          const data = cliSetup.terminalSnapshot(msg.agent);
+          if (data !== null) sendAuthRunFrame(run, { type: 'agent-setup-terminal', data, ready: true, reset: true });
+        } else if (msg.type === 'agent-setup-terminal-input') {
+          if (typeof msg.data !== 'string' || Buffer.byteLength(msg.data) > 4096) throw new Error('입력 크기를 확인해 주세요.');
+          cliSetup.terminalInput(msg.agent, msg.data);
+        } else {
+          if (!Number.isInteger(msg.cols) || !Number.isInteger(msg.rows)) throw new Error('터미널 크기를 확인해 주세요.');
+          cliSetup.terminalResize(msg.agent, msg.cols, msg.rows);
+        }
+      } catch (error) {
+        sendAgentSetupError(record, sock, null, msg.agent, error, 'AGENT_AUTH_FAILED');
+      }
       return;
     }
     case 'agent-setup-auth-code': {

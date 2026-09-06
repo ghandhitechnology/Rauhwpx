@@ -190,3 +190,10 @@ the sidebar preview runs and builds independently.
 For a design review, also inspect keyboard focus, scroll behavior with long
 content, and popovers at the sidebar width you plan to ship. Backend correctness
 and document-renderer behavior remain covered by their application tests.
+
+
+### OpenCode login terminal
+
+Open the **OpenCode login terminal** audit scene to review the expanding login panel. The preview uses local terminal output: press Enter twice to finish the sample login, or cancel and choose API-key entry. The app uses the same UI with an owned PTY running `opencode auth login`; completion refreshes provider status automatically. Restart the desktop app after updating the hub to test the real login.
+
+The terminal supports keyboard input, paste, resizing, browser links, cancellation, and restoration after a connection interruption. Raw terminal output is kept only in the owning login's memory, with bounded buffers. Credentials are staged and published through the existing authentication transaction after successful validation.

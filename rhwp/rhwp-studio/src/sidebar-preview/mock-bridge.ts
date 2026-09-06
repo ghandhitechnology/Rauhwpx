@@ -120,6 +120,10 @@ export function createMockBridge(report: (message: string) => void) {
     request((requestId) =>
       emit({ type: 'writing-style-result', requestId, status: data.writing }),
     );
+  let terminalRun: { id: string; step: number; choice: number } | null = null;
+  const terminalMenu = () => '\x1b[2J\x1b[H\x1b[36m◆  OpenCode 로그인\x1b[0m\r\n\r\n'
+    + ['OpenCode', 'OpenAI', 'Anthropic'].map((name, index) => `  ${index === terminalRun?.choice ? '❯' : ' '} ${name}`).join('\r\n')
+    + '\r\n\r\n  Enter 키로 선택하세요.';
   const authenticate = (provider: T.AgentName) => {
     if (provider === 'pi') {
       data.pi.keyConfigured = true;
@@ -130,6 +134,8 @@ export function createMockBridge(report: (message: string) => void) {
       connected: true,
       authenticated: true,
       authenticating: false,
+      authOwnedByThisSession: false,
+      authRunId: undefined,
       setupComplete: true,
     });
     setupChanged();
@@ -309,6 +315,19 @@ export function createMockBridge(report: (message: string) => void) {
       return data.setups;
     },
     authenticateAgent: async (provider, method) => {
+      if (provider === 'opencode' && method === 'oauth') {
+        terminalRun = { id: crypto.randomUUID(), step: 0, choice: 0 };
+        const id = terminalRun.id;
+        Object.assign(data.setups.opencode, { authenticating: true, authOwnedByThisSession: true, authRunId: id, authMethod: method });
+        setupChanged();
+        later(() => {
+          if (terminalRun?.id !== id) return;
+          emit({ type: 'agent-setup-terminal', agent: provider, authRunId: id, ready: true });
+          emit({ type: 'agent-setup-terminal', agent: provider, authRunId: id,
+            data: terminalMenu() });
+        }, 150);
+        return { agent: provider, authRunId: id, authUrl: null };
+      }
       Object.assign(data.setups[provider], {
         authenticating: true,
         authMethod: method,
@@ -324,9 +343,34 @@ export function createMockBridge(report: (message: string) => void) {
         pairingCode: 'PREVIEW',
       };
     },
+    resumeSetupTerminal: (agent, authRunId) => {
+      if (agent === 'opencode' && terminalRun?.id === authRunId) emit({ type: 'agent-setup-terminal', agent, authRunId, ready: true });
+    },
+    sendSetupTerminalInput: (provider, authRunId, input) => {
+      if (provider !== 'opencode' || terminalRun?.id !== authRunId) return;
+      if (input.includes('\x03')) { bridge.cancelAgentSetup(provider, authRunId); return; }
+      if (terminalRun.step === 0 && /\x1b\[[AB]/.test(input)) {
+        terminalRun.choice = (terminalRun.choice + (input.includes('\x1b[B') ? 1 : 2)) % 3;
+        emit({ type: 'agent-setup-terminal', agent: provider, authRunId, data: terminalMenu() });
+        return;
+      }
+      if (!input.includes('\r')) return;
+      terminalRun.step += 1;
+      if (terminalRun.step === 1) {
+        emit({ type: 'agent-setup-terminal', agent: provider, authRunId,
+          data: '\x1b[2J\x1b[H브라우저에서 계정 연결을 완료하세요.\r\n\r\n미리보기: Enter 키를 누르면 연결이 완료됩니다.' });
+      } else {
+        terminalRun = null;
+        authenticate(provider);
+      }
+    },
+    resizeSetupTerminal: () => {},
     submitAgentAuthCode: (provider) => authenticate(provider),
     cancelAgentSetup: (provider) => {
+      if (provider === 'opencode') terminalRun = null;
       data.setups[provider].authenticating = false;
+      data.setups[provider].authOwnedByThisSession = false;
+      delete data.setups[provider].authRunId;
       setupChanged();
     },
     disconnectAgent: async (provider) => {
