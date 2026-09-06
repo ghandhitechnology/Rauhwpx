@@ -38,6 +38,24 @@ jobs:
             exit 1
           fi
 
+      - name: Require matching cloud release metadata
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          import { RAILWAY_DEFAULT_IMAGE } from './desktop/cloud-railway.mjs';
+          import { RAILWAY_DEFAULT_IMAGE as HOSTED_RAILWAY_DEFAULT_IMAGE } from './rhwp/rau-credits/cloud-provisioner.mjs';
+          const read = (path) => JSON.parse(readFileSync(path, 'utf8'));
+          const version = read('package.json').version;
+          const cloud = read('cloud/package.json');
+          const lock = read('cloud/package-lock.json');
+          assert.equal(cloud.version, version, 'Cloud and desktop release versions must match');
+          assert.equal(lock.version, version, 'Cloud lockfile version must match');
+          assert.equal(lock.packages[''].version, version, 'Cloud lockfile root version must match');
+          assert.equal(RAILWAY_DEFAULT_IMAGE, `ghcr.io/ghandhitechnology/rauhwpx-cloud:${version}`);
+          assert.equal(HOSTED_RAILWAY_DEFAULT_IMAGE, RAILWAY_DEFAULT_IMAGE, 'Hosted and desktop cloud images must match');
+          NODE
+
       - name: Audit high and critical production advisories
         run: node scripts/audit-production.mjs
 
@@ -370,6 +388,9 @@ jobs:
           set -euo pipefail
           image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/rauhwpx-cloud"
           printf '%s' "$GHCR_TOKEN" | podman login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          release_version="${GITHUB_REF_NAME#v}"
+          podman tag rauhwpx-cloud-sandbox-release "$image:$release_version-$ASSET_ARCH"
+          podman push "$image:$release_version-$ASSET_ARCH"
           podman tag rauhwpx-cloud-sandbox-release "$image:stable-$ASSET_ARCH"
           podman push "$image:stable-$ASSET_ARCH"
 
@@ -414,17 +435,19 @@ jobs:
       contents: read
       packages: write
     steps:
-      - name: Publish stable manifest
+      - name: Publish versioned and stable manifests
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/rauhwpx-cloud"
           printf '%s' "$GHCR_TOKEN" | podman login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-          podman manifest create "$image:stable"
-          podman manifest add "$image:stable" "docker://$image:stable-amd64"
-          podman manifest add "$image:stable" "docker://$image:stable-arm64"
-          podman manifest push --all "$image:stable" "docker://$image:stable"
+          release_version="${GITHUB_REF_NAME#v}"
+          podman manifest create "$image:$release_version"
+          podman manifest add "$image:$release_version" "docker://$image:$release_version-amd64"
+          podman manifest add "$image:$release_version" "docker://$image:$release_version-arm64"
+          podman manifest push --all "$image:$release_version" "docker://$image:$release_version"
+          podman manifest push --all "$image:$release_version" "docker://$image:stable"
 
   publish:
     name: Publish GitHub Release
