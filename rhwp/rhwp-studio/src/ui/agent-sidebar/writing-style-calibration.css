@@ -174,10 +174,12 @@
 
 .ag-calibration-language {
   display: flex;
+  flex-direction: column;
+  min-height: 208px;
   min-width: 0;
   align-items: center;
-  gap: 12px;
-  padding: 14px;
+  gap: 20px;
+  padding: 24px;
   border: 1px solid var(--n-hairline-strong);
   border-radius: var(--n-radius-field);
   background: var(--n-surface);
@@ -198,21 +200,23 @@
 }
 
 .ag-calibration-flag {
-  width: 30px;
-  height: 20px;
+  width: 144px;
+  height: 96px;
   flex: 0 0 auto;
   image-rendering: pixelated;
 }
 
 .ag-calibration-language-copy {
   display: flex;
+  width: 100%;
+  text-align: center;
   min-width: 0;
   flex-direction: column;
   gap: 2px;
 }
 
 .ag-calibration-language-copy strong {
-  font-size: 13px;
+  font-size: 17px;
 }
 
 .ag-calibration-language-copy span {
