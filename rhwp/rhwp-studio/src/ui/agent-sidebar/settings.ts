@@ -680,17 +680,19 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   // ── Pi 모달 흐름 ──────────────────────────────────────
   // 설치 → 로그인 → 모델 → 요약으로 모습을 바꾸며, 설정 페이지에는 직접 붙지 않는다.
   const piCard = el('div', 'ag-pi-card');
-  const piHead = el('div', 'ag-pi-head');
-  const piHeadName = el('span', 'ag-settings-row-name');
-  piHeadName.append(createProviderIcon('pi'), document.createTextNode('Pi'));
+  const piHead = el('div', 'ag-agent-setup-hero');
+  const piHeadIcon = el('div', 'ag-agent-setup-hero-icon');
+  piHeadIcon.append(createProviderIcon('pi'));
+  const piHeadCopy = el('div', 'ag-agent-setup-hero-copy');
+  const piHeadName = el('strong', 'ag-agent-setup-hero-title', 'Pi');
   const piHeadDetail = el('span', 'ag-settings-row-detail', '확인 중…');
-  piHead.append(piHeadName, piHeadDetail);
+  piHeadCopy.append(piHeadName, piHeadDetail);
+  piHead.append(piHeadIcon, piHeadCopy);
   const piMessageLine = el('p', 'ag-settings-cliproxy-error');
   piMessageLine.hidden = true;
 
   // 1단계 — 설치
   const piInstallStep = el('div', 'ag-pi-step');
-  const piInstallNote = el('p', 'ag-settings-note', 'OpenRouter 모델로 문서를 고치는 Pi 에이전트예요.');
   const piInstallBtn = el('button', 'ag-settings-primary ag-pi-logo-btn');
   piInstallBtn.type = 'button';
   piInstallBtn.append(createProviderIcon('pi'), el('span', '', 'Pi 연결'));
@@ -701,7 +703,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   const piProgressFill = el('div', 'ag-settings-meter-fill');
   piProgressTrack.appendChild(piProgressFill);
   piProgressTrack.hidden = true;
-  piInstallStep.append(piInstallNote, piInstallBtn, piProgressTrack, piProgressLine);
+  piInstallStep.append(piInstallBtn, piProgressTrack, piProgressLine);
 
   // 2단계 — OpenRouter 키
   const piKeyStep = el('div', 'ag-pi-step');
@@ -3084,6 +3086,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     const step = piCurrentStep();
     for (const [id, node] of piSteps) node.hidden = id !== step;
     const online = connectionState === 'connected';
+    piHead.hidden = step === 'summary';
     piHeadDetail.textContent = piHeadText();
     piMessageLine.textContent = piMessage;
     piMessageLine.hidden = !piMessage;
