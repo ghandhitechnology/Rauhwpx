@@ -544,8 +544,8 @@
 
 .ag-calibration-dropzone {
   display: flex;
-  min-height: 92px;
-  flex: 0 0 auto;
+  min-height: 140px;
+  flex: 1 0 auto;
   flex-direction: column;
   align-items: center;
   justify-content: center;
