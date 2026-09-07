@@ -270,10 +270,22 @@ function publicError(error, fallback = 'Raucloud is unavailable') {
   });
 }
 
+function validatedTimezone(resolveTimezone) {
+  try {
+    const timezone = String(resolveTimezone()).trim();
+    if (timezone) {
+      new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(0);
+      return timezone;
+    }
+  } catch {}
+  return 'UTC';
+}
+
 export function createRaucloudBrokerClient({
   baseUrl = raucloudBrokerUrl(),
   authorizeOwnedBackend,
   getDeviceIdentity,
+  getTimezone = () => Intl.DateTimeFormat().resolvedOptions().timeZone,
   requestTimeoutMs = DEFAULT_TIMEOUT_MS,
   setupRequestTimeoutMs = SETUP_REQUEST_TIMEOUT_MS,
   sleep = (ms, options) => delay(ms, undefined, options),
@@ -364,8 +376,9 @@ export function createRaucloudBrokerClient({
     baseUrl: normalizedBaseUrl,
     async status({ runId: id = null, signal = null, timeoutMs } = {}) {
       const currentDevice = await device();
+      // The broker initializes fresh accounts from this value and keeps existing account settings.
       return request('/v1/cloud/status', {
-        query: { deviceId: currentDevice.id, ...(id ? { runId: id } : {}) },
+        query: { deviceId: currentDevice.id, timezone: validatedTimezone(getTimezone), ...(id ? { runId: id } : {}) },
         signal,
         ...(timeoutMs == null ? {} : { timeoutMs }),
       });
@@ -377,6 +390,7 @@ export function createRaucloudBrokerClient({
         body: {
           deviceId: currentDevice.id,
           deviceName: currentDevice.name,
+          timezone: validatedTimezone(getTimezone),
           provider,
         },
       });

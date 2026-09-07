@@ -106,16 +106,6 @@ function hasCurrentRhwpClipboardMarker(self: any, html: string): boolean {
   return !!token && token === self.rhwpClipboardToken;
 }
 
-/** Backspace/Delete로 생긴 캐럿 이동에만 짧은 완화를 허용한다. */
-function withEraseCaretMotion(self: any, erase: () => void): void {
-  self.caret.beginEraseMotion();
-  try {
-    erase();
-  } finally {
-    self.caret.endEraseMotion();
-  }
-}
-
 function isNestedCellPosition(pos: DocumentPosition): boolean {
   return pos.parentParaIndex !== undefined && (pos.cellPath?.length ?? 0) > 1;
 }
@@ -656,7 +646,10 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
 
   if (this.readOnly || this.userEditingLocked) {
     const key = e.key.toLowerCase();
-    const primaryShortcut = (e.ctrlKey || e.metaKey) && ['a', 'c', 'f', 'p'].includes(key);
+    const commandId = matchShortcut(e, defaultShortcuts);
+    const primaryShortcut = commandId?.startsWith('view:')
+      || (commandId && ['edit:select-all', 'edit:find', 'file:print'].includes(commandId))
+      || ((e.ctrlKey || e.metaKey) && !e.altKey && (key === 'c' || e.code === 'KeyC'));
     const navigation = ['arrowleft', 'arrowright', 'arrowup', 'arrowdown', 'home', 'end', 'pageup', 'pagedown', 'escape']
       .includes(key);
     if (!primaryShortcut && !navigation) {
@@ -758,7 +751,9 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
   }
 
   // IME 조합 중 처리 (한국어 IME에서 e.key는 항상 'Process'이므로 e.code로 판별)
-  if (e.isComposing || e.keyCode === 229) {
+  const idleImeShortcut = !e.isComposing && !this.isComposing
+    && (e.ctrlKey || e.metaKey || e.altKey) && matchShortcut(e, defaultShortcuts);
+  if (e.isComposing || (e.keyCode === 229 && !idleImeShortcut)) {
     // [PR #786 후속] Ctrl+M chord 1번째/2번째 키는 IME 합성 중에도 활성화.
     // 한글 IME에서는 e.key === 'Process'이므로 e.code (KeyM/KeyN/KeyS/KeyF/KeyK 등)로 판별.
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.code === 'KeyM') {
@@ -912,14 +907,12 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
         this.deleteSelection();
         return;
       }
-      withEraseCaretMotion(this, () => {
-        const pos = this.cursor.getPosition();
-        if (e.key === 'Backspace') {
-          this.handleBackspace(pos, false);
-        } else {
-          this.handleDelete(pos, false);
-        }
-      });
+      const pos = this.cursor.getPosition();
+      if (e.key === 'Backspace') {
+        this.handleBackspace(pos, false);
+      } else {
+        this.handleDelete(pos, false);
+      }
       return;
     }
 
@@ -1503,20 +1496,18 @@ export function onKeyDown(this: any, e: KeyboardEvent): void {
     case 'Delete': {
       e.preventDefault();
       if (this.isFormMode?.() && e.altKey) return;
-      withEraseCaretMotion(this, () => {
-        if (this.cursor.hasSelection()) {
-          this.deleteSelection();
-        } else if (e.altKey) {
-          // Alt/Option+Backspace/Delete: 단어 삭제 (macOS standard)
-          this.cursor.setAnchor();
-          this.cursor.moveToWordBoundary(e.key === 'Backspace' ? -1 : 1);
-          if (this.cursor.hasSelection()) this.deleteSelection();
-        } else if (e.key === 'Backspace') {
-          this.handleBackspace(pos, inCell);
-        } else {
-          this.handleDelete(pos, inCell);
-        }
-      });
+      if (this.cursor.hasSelection()) {
+        this.deleteSelection();
+      } else if (e.altKey) {
+        // Alt/Option+Backspace/Delete: 단어 삭제 (macOS standard)
+        this.cursor.setAnchor();
+        this.cursor.moveToWordBoundary(e.key === 'Backspace' ? -1 : 1);
+        if (this.cursor.hasSelection()) this.deleteSelection();
+      } else if (e.key === 'Backspace') {
+        this.handleBackspace(pos, inCell);
+      } else {
+        this.handleDelete(pos, inCell);
+      }
       break;
     }
     case 'Enter': {
@@ -1703,37 +1694,33 @@ export function handleCtrlKey(this: any, e: KeyboardEvent): void {
     case 'backspace': {
       e.preventDefault();
       if (this.isFormMode?.()) return;
-      withEraseCaretMotion(this, () => {
-        if (this.cursor.hasSelection()) {
-          this.deleteSelection();
-        } else if (e.metaKey && !e.ctrlKey) {
-          // Cmd+Backspace (macOS): 줄 시작까지 삭제
-          this.cursor.setAnchor();
-          this.cursor.moveToLineStart();
-          if (this.cursor.hasSelection()) this.deleteSelection();
-        } else {
-          // Ctrl+Backspace (Win/Linux): 이전 단어 경계까지 삭제
-          this.cursor.setAnchor();
-          this.cursor.moveToWordBoundary(-1);
-          if (this.cursor.hasSelection()) this.deleteSelection();
-        }
-      });
+      if (this.cursor.hasSelection()) {
+        this.deleteSelection();
+      } else if (e.metaKey && !e.ctrlKey) {
+        // Cmd+Backspace (macOS): 줄 시작까지 삭제
+        this.cursor.setAnchor();
+        this.cursor.moveToLineStart();
+        if (this.cursor.hasSelection()) this.deleteSelection();
+      } else {
+        // Ctrl+Backspace (Win/Linux): 이전 단어 경계까지 삭제
+        this.cursor.setAnchor();
+        this.cursor.moveToWordBoundary(-1);
+        if (this.cursor.hasSelection()) this.deleteSelection();
+      }
       break;
     }
     case 'delete': {
       if (!e.ctrlKey) break;
       e.preventDefault();
       if (this.isFormMode?.()) return;
-      withEraseCaretMotion(this, () => {
-        if (this.cursor.hasSelection()) {
-          this.deleteSelection();
-        } else {
-          // Ctrl+Delete (Win/Linux): 다음 단어 경계까지 삭제
-          this.cursor.setAnchor();
-          this.cursor.moveToWordBoundary(1);
-          if (this.cursor.hasSelection()) this.deleteSelection();
-        }
-      });
+      if (this.cursor.hasSelection()) {
+        this.deleteSelection();
+      } else {
+        // Ctrl+Delete (Win/Linux): 다음 단어 경계까지 삭제
+        this.cursor.setAnchor();
+        this.cursor.moveToWordBoundary(1);
+        if (this.cursor.hasSelection()) this.deleteSelection();
+      }
       break;
     }
     case 'home': {

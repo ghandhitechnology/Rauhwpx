@@ -17,7 +17,7 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
   let sequence = 0;
   const checkpoints = new Map<string, CloudCheckpointPayload>();
   const merges: Array<{ startId: string; checkpoint: CloudCheckpointPayload }> = [];
-  const calls = { commands: [] as CloudCommandRequest[], merges, downloads: 0, refresh: 0, referenceReads: 0, prepareRestart: 0, reconnect: 0, recreate: 0, stop: 0, display: 0, inputs: 0, transfers: [] as CloudTransferRequest[] };
+  const calls = { commands: [] as CloudCommandRequest[], merges, downloads: 0, spawn: 0, teardown: 0, refresh: 0, referenceReads: 0, prepareRestart: 0, reconnect: 0, recreate: 0, stop: 0, display: 0, inputs: 0, transfers: [] as CloudTransferRequest[] };
   let refreshFails = false;
   let restartArchiveAvailable = true;
   let rejectRestartTransfer = false;
@@ -161,7 +161,31 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
       setLink('ready');
       return snapshot();
     },
-    cloudSpawnSandbox: async () => snapshot(),
+    async cloudSelectServerMode({ mode }) {
+      state.server.preferredMode = mode;
+      return snapshot();
+    },
+    async cloudSpawnSandbox() {
+      calls.spawn++;
+      state.server.lifecycle = 'provisioning';
+      publish();
+      await wait(300);
+      state.profileEpoch++;
+      state.profile = { kind: 'configured', mode: 'app-hosted', name: 'Raucloud', sandbox,
+        connection: 'ready', message: null, serviceVersion: 'preview' };
+      state.server.mode = 'app-hosted';
+      state.server.lifecycle = 'ready';
+      publish();
+      return snapshot();
+    },
+    async cloudTeardownSandbox() {
+      calls.teardown++;
+      idle();
+      state.profile = { kind: 'unconfigured' };
+      state.server.lifecycle = 'idle';
+      publish();
+      return snapshot();
+    },
     cloudSandboxStatus: async () => snapshot(),
     async cloudCommand(request) {
       calls.commands.push(structuredClone(request));
@@ -301,6 +325,7 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
       } else if (kind === 'unknown' && state.profile.kind === 'configured') {
         state.profile.connection = 'unknown';
       } else if (kind === 'unconfigured') {
+        state.server.lifecycle = 'idle';
         state.profile = { kind: 'unconfigured' };
         state.sessions = [];
       } else if (kind === 'unavailable') {

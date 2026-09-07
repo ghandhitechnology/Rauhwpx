@@ -9,6 +9,7 @@ import {
   RAUCLOUD_PROVIDER_ID,
   RAUCLOUD_SETUP_TIMEOUT_MS,
 } from '../desktop/cloud-broker.mjs';
+import { createRaucloudBroker } from '../rhwp/rau-credits/cloud-broker.mjs';
 import { CloudCoordinator } from '../desktop/cloud-coordinator.mjs';
 
 const TAKEOVER_SERVER_KEY = `ed25519:${generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'der' }).toString('base64url')}`;
@@ -56,6 +57,7 @@ function broker(routes, overrides = {}) {
     baseUrl: 'https://broker.example.test',
     authorizeOwnedBackend: overrides.authorizeOwnedBackend ?? authorizeOwnedBackend,
     getDeviceIdentity: overrides.getDeviceIdentity ?? (async () => ({ id: 'device-desktop-123', name: 'Laptop' })),
+    getTimezone: overrides.getTimezone ?? (() => 'Asia/Seoul'),
     requestTimeoutMs: overrides.requestTimeoutMs ?? 1_000,
     setupRequestTimeoutMs: overrides.setupRequestTimeoutMs ?? overrides.requestTimeoutMs ?? 1_000,
     sleep: async () => {},
@@ -110,6 +112,7 @@ test('Raucloud creates one broker run without Railway credentials or provider se
   assert.deepEqual(calls[0].body, {
     deviceId: 'device-desktop-123',
     deviceName: 'Work laptop',
+    timezone: 'Asia/Seoul',
     provider: 'codex',
   });
   assert.equal(JSON.stringify(calls[0]).includes('must-not-leave-the-device'), false);
@@ -185,6 +188,7 @@ function hangingFetch(routes, overrides = {}) {
     baseUrl: 'https://broker.example.test',
     authorizeOwnedBackend,
     getDeviceIdentity: async () => ({ id: 'device-desktop-123', name: 'Laptop' }),
+    getTimezone: overrides.getTimezone ?? (() => 'Asia/Seoul'),
     requestTimeoutMs: overrides.requestTimeoutMs ?? 20,
     setupRequestTimeoutMs: overrides.setupRequestTimeoutMs ?? 20,
     sleep: async () => {},
@@ -762,3 +766,59 @@ test('a newly signed-in device can take over without an existing local Cloud pro
   assert.equal(snapshot.profile.sandbox.sandboxId, 'run-2');
   await coordinator.stop();
 });
+
+for (const statusFirst of [true, false]) {
+  test(`a fresh desktop account can create its first server ${statusFirst ? 'after status' : 'directly'}`, async () => {
+    let state = { users: { 'new-account': { id: 'new-account', email: 'new@example.test' } } };
+    const service = createRaucloudBroker({
+      store: { load: async () => structuredClone(state) },
+      mutate: async (operation) => {
+        const next = structuredClone(state);
+        const result = await operation(next);
+        state = next;
+        return result;
+      },
+      authenticateAccessToken: async () => 'new-account',
+      workerSecret: 'test-worker-secret',
+    });
+    let timezone = 'Asia/Seoul';
+    const client = createRaucloudBrokerClient({
+      getDeviceIdentity: async () => ({ id: 'new-desktop-device' }),
+      getTimezone: () => timezone,
+      authorizeOwnedBackend: async (request) => {
+        const url = new URL(request.pathname, 'https://broker.example.test');
+        if (request.method === 'GET') {
+          return service.getCloudStatus('test-token', Object.fromEntries(url.searchParams));
+        }
+        return service.createCloudRun('test-token', {
+          ...request.body,
+          idempotencyKey: request.headers['idempotency-key'],
+        });
+      },
+    });
+    // This is the gate which previously disabled the sidebar's Continue button.
+    if (statusFirst) {
+      const status = await createRaucloudBrokerProvider({ client }).accountStatus();
+      assert.equal(status.raucloud.kind, 'available');
+      assert.equal(status.quota.timeZone, 'Asia/Seoul');
+    }
+    const created = await client.createRun();
+    assert.equal(created.run.status, 'allocating');
+    assert.equal(created.quota.timezone, 'Asia/Seoul');
+    timezone = 'America/New_York';
+    assert.equal((await client.status()).quota.timezone, 'Asia/Seoul', 'travel does not replace the saved account timezone');
+  });
+}
+
+for (const getTimezone of [() => '', () => 'invalid/timezone', () => { throw new Error('Intl unavailable'); }]) {
+  test('timezone resolution failures fall back to UTC for status and creation', async () => {
+    const { client, calls } = broker({
+      'GET /v1/cloud/status': {},
+      'POST /v1/cloud/runs': {},
+    }, { getTimezone });
+    await client.status();
+    await client.createRun();
+    assert.equal(calls[0].url.searchParams.get('timezone'), 'UTC');
+    assert.equal(calls[1].body.timezone, 'UTC');
+  });
+}

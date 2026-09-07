@@ -130,6 +130,9 @@ contextBridge.exposeInMainWorld('rhwpDesktop', {
       callback(payload);
     });
   },
+  onEditCommand: (callback) => {
+    ipcRenderer.on('desktop:edit-command', (_event, command) => callback(command));
+  },
   onPastePlainText: (callback) => {
     ipcRenderer.on('desktop:paste-plain-text', (_event, text) => {
       callback(typeof text === 'string' ? text : '');

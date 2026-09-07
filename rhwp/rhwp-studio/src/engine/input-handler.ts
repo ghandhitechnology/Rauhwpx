@@ -643,6 +643,7 @@ export class InputHandler {
     container.addEventListener('dblclick', this.onDblClickBound);
     container.addEventListener('contextmenu', this.onContextMenuBound);
     container.addEventListener('mousemove', this.onMouseMoveBound);
+    this.textarea.dataset.rhwpEditorInput = 'true';
     this.textarea.addEventListener('keydown', this.onKeyDownBound);
     this.textarea.addEventListener('keyup', this.onKeyUpBound);
     this.textarea.addEventListener('input', this.onInputBound);

@@ -11,6 +11,7 @@ import {
   getNativeFileSourcePath,
   installDesktopGeneratedDocumentHandling,
   installDesktopPlainTextPasteHandling,
+  installDesktopEditCommandHandling,
   installWebAppShell,
   isDesktopApp,
   isLegacyPortableHistoryFolderHandle,
@@ -655,4 +656,16 @@ test('데스크톱 셸은 서비스 워커를 끄고 PWA 등록을 건너뛴다'
   assert.deepEqual(unregisters, ['sw']);
 
   installWebAppShell({});
+});
+
+
+test('desktop edit menu routes supported document commands once', () => {
+  let listener: ((command: string) => void) | undefined;
+  const commands: string[] = [];
+  assert.equal(installDesktopEditCommandHandling((command) => commands.push(command), {
+    rhwpDesktop: { onEditCommand: (callback) => { listener = callback; } },
+  }), true);
+  for (const command of ['undo', 'redo', 'select-all', 'delete', 'file:open']) listener?.(command);
+  assert.deepEqual(commands, ['undo', 'redo', 'select-all', 'delete']);
+  assert.equal(installDesktopEditCommandHandling(() => {}, {}), false);
 });
