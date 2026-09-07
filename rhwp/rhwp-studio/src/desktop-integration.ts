@@ -185,6 +185,7 @@ export interface RhwpDesktopApi {
     connectionId: string;
     event: CloudDisplayEvent;
   }) => void) => (() => void) | void;
+  onEditCommand?: (callback: (command: string) => void) => void;
   onPastePlainText?: (callback: (text: string) => void) => void;
 }
 
@@ -947,6 +948,20 @@ export function installDesktopGeneratedDocumentHandling(
   api.onOpenGeneratedDocument(receive);
   void api.getLaunchGeneratedDocument?.().then(receive).catch((error) => {
     console.warn('[rhwp-desktop] 생성 문서 시작 데이터 조회 실패:', error);
+  });
+  return true;
+}
+
+export function installDesktopEditCommandHandling(
+  dispatch: (command: 'undo' | 'redo' | 'select-all' | 'delete') => void,
+  win?: DesktopHost,
+): boolean {
+  const api = desktopHost(win)?.rhwpDesktop;
+  if (!api?.onEditCommand) return false;
+  api.onEditCommand((command) => {
+    if (command === 'undo' || command === 'redo' || command === 'select-all' || command === 'delete') {
+      dispatch(command);
+    }
   });
   return true;
 }

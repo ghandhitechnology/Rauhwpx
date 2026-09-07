@@ -1,7 +1,9 @@
+import { checkCloudSetup } from './cloud-setup.check.mjs';
 import { checkCliTerminalDefaults } from './cli-terminal-defaults.check.mjs';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { createServer } from 'vite';
 import puppeteer from 'puppeteer-core';
@@ -9,6 +11,7 @@ import { checkSetupTerminal } from './setup-terminal.check.mjs';
 import { checkFleetPreview } from './fleet.check.mjs';
 import { checkCloudRecovery } from './cloud-recovery.check.mjs';
 import { checkCloudStream } from './cloud-stream.check.mjs';
+import { browserLaunchArgs } from '../tests/browser-support.ts';
 
 const studio = resolve(import.meta.dirname, '..');
 const artifacts = resolve(import.meta.dirname, 'artifacts');
@@ -26,7 +29,9 @@ await mkdir(artifacts, { recursive: true });
 const sampleFile = resolve(artifacts, 'sample.txt');
 await writeFile(sampleFile, '문서 디자인을 위한 샘플 참고자료입니다.');
 // Own server + fresh browser profile: checks do not need or alter a running app/preview.
+const cacheDir = await mkdtemp(resolve(tmpdir(), 'rauhwpx-sidebar-check-'));
 const server = await createServer({
+  cacheDir,
   configFile: resolve(studio, 'vite.sidebar.config.ts'),
   server: { port: 0, open: false, hmr: false },
   logLevel: 'error',
@@ -35,7 +40,7 @@ await server.listen();
 const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
 let browser;
 try {
-  browser = await puppeteer.launch({ executablePath, headless: true });
+  browser = await puppeteer.launch({ executablePath, headless: true, args: browserLaunchArgs() });
   const page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 900, deviceScaleFactor: 1 });
   await page.emulateMediaFeatures([
@@ -135,6 +140,8 @@ try {
       throw new Error(`${name}: ${error.message}\nRuntime errors: ${JSON.stringify(errors)}\nBlocked requests: ${JSON.stringify(forbidden)}`, { cause: error });
     }
   }
+  await step('First Cloud server creation, cancel, refresh and recreation',
+    () => checkCloudSetup(page, origin, artifacts));
   await step('Cloud disconnect, reconnect, rebuild, and shutdown recovery',
     () => checkCloudRecovery(page, origin, artifacts));
   await step('Cloud streamed text survives delayed timelines and terminal errors do not reconnect',
@@ -821,4 +828,5 @@ try {
   browserProcess?.stdout?.destroy();
   browserProcess?.stderr?.destroy();
   await server.close();
+  await rm(cacheDir, { recursive: true, force: true });
 }

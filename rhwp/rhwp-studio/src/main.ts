@@ -28,6 +28,8 @@ import { withCanvasKitSurfaceBlockers } from '@/core/canvaskit-document-prefligh
 import { loadExtensionViewerSettings, type ExtensionViewerSettings } from '@/core/extension-settings';
 import { CommandRegistry } from '@/command/registry';
 import { CommandDispatcher } from '@/command/dispatcher';
+import { defaultShortcuts, matchShortcut } from '@/command/shortcut-map';
+import { allowsDocumentShortcut, isEditorInput, ownsTextInput } from '@/command/shortcut-target';
 import type { EditorContext, CommandServices, EditorEditMode } from '@/command/types';
 import {
   confirmSaveBeforeReplacingDocument,
@@ -115,6 +117,7 @@ import {
   installDesktopFileHandling,
   installDesktopGeneratedDocumentHandling,
   installDesktopPlainTextPasteHandling,
+  installDesktopEditCommandHandling,
   installDesktopWindowChrome,
   installWebAppShell,
   isLegacyPortableHistoryFolderHandle,
@@ -1151,6 +1154,17 @@ async function initialize(): Promise<void> {
       if (readOnly) setDocumentReadOnly(true);
       eventBus.emit('open-document-bytes', { bytes, fileName });
     });
+    installDesktopEditCommandHandling((command) => {
+      const target = document.activeElement;
+      if (ownsTextInput(target) && !isEditorInput(target)) {
+        document.execCommand(command === 'select-all' ? 'selectAll' : command);
+        return;
+      }
+      if (!allowsDocumentShortcut(target) || !inputHandler?.isActive()) return;
+      inputHandler.finalizeCompositionBeforeCursorMove();
+      inputHandler.focus();
+      dispatcher.dispatch(`edit:${command}`);
+    });
     installDesktopPlainTextPasteHandling((text) => {
       inputHandler?.performPlainTextPaste(text);
     });
@@ -1288,30 +1302,16 @@ async function initialize(): Promise<void> {
  */
 function setupGlobalShortcuts(): void {
   document.addEventListener('keydown', (e) => {
-    // input/textarea 등 편집 가능 요소 내부에서는 무시
-    const target = e.target as HTMLElement;
-    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;
-    // InputHandler가 활성 상태이면 자체 처리에 맡김
-    if (inputHandler?.isActive()) return;
-
-    const ctrlOrMeta = e.ctrlKey || e.metaKey;
-
-    // Alt+N / Alt+ㅜ → 새 문서 (문서 미로드 상태에서도 동작)
-    if (e.altKey && !ctrlOrMeta && !e.shiftKey) {
-      if (e.key === 'n' || e.key === 'N' || e.key === 'ㅜ') {
-        e.preventDefault();
-        dispatcher.dispatch('file:new-doc');
-        return;
-      }
-    }
-    // Ctrl/Cmd+O → 열기 (문서 미로드 상태에서도 동작)
-    if (ctrlOrMeta && !e.altKey && !e.shiftKey) {
-      if (e.key === 'o' || e.key === 'O' || e.key === 'ㅐ') {
-        e.preventDefault();
-        dispatcher.dispatch('file:open');
-        return;
-      }
-    }
+    const target = e.target instanceof Element ? e.target : null;
+    if (e.defaultPrevented || e.isComposing || !allowsDocumentShortcut(target)) return;
+    // 문서 입력은 모드별 처리가 있으므로 같은 키를 두 번 실행하지 않는다.
+    if (isEditorInput(target) && inputHandler?.isActive()) return;
+    const commandId = matchShortcut(e, defaultShortcuts);
+    if (!commandId) return;
+    if (!inputHandler?.isActive() && !['file:new-doc', 'file:open'].includes(commandId)) return;
+    e.preventDefault();
+    if (inputHandler?.isActive()) inputHandler.focus();
+    dispatcher.dispatch(commandId);
   }, false);
 }
 
@@ -1495,20 +1495,6 @@ function setupZoomControls(): void {
       document.getElementById('sb-zoom-fit')!.click();
     } else {
       // 현재 쪽 맞춤/기타 → 100%로 전환
-      vm.setZoom(1.0);
-    }
-  });
-
-  document.addEventListener('keydown', (e) => {
-    if (!e.ctrlKey && !e.metaKey) return;
-    if (e.key === '=' || e.key === '+') {
-      e.preventDefault();
-      vm.smoothZoomBy(0.1);
-    } else if (e.key === '-') {
-      e.preventDefault();
-      vm.smoothZoomBy(-0.1);
-    } else if (e.key === '0') {
-      e.preventDefault();
       vm.setZoom(1.0);
     }
   });

@@ -72,6 +72,7 @@ export const defaultShortcuts: [ShortcutDef, string][] = [
   // 줌
   [{ key: '=', ctrl: true }, 'view:zoom-in'],
   [{ key: '+', ctrl: true }, 'view:zoom-in'],
+  [{ key: '+', ctrl: true, shift: true }, 'view:zoom-in'],
   [{ key: '-', ctrl: true }, 'view:zoom-out'],
   [{ key: '0', ctrl: true }, 'view:zoom-100'],
 
@@ -149,6 +150,7 @@ export function matchShortcut(
   shortcuts: [ShortcutDef, string][],
   platform: PlatformKind = detectPlatformKind(),
 ): string | null {
+  if (e.getModifierState?.('AltGraph')) return null;
   const ctrlOrMeta = e.ctrlKey || e.metaKey;
   const eventKey = e.key.toLowerCase();
   const eventCode = (e.code ?? '').toLowerCase();
@@ -160,7 +162,14 @@ export function matchShortcut(
     if ((def.shift ?? false) !== e.shiftKey) continue;
     if ((def.alt ?? false) !== e.altKey) continue;
     if (eventKey === def.key) return cmdId;
-    if (def.code && eventCode === def.code.toLowerCase()) return cmdId;
+  }
+  // 문자 키 매칭을 우선해 영문 대체 배열을 보존하고, 한글 IME·Option 변환은 물리 키로 복원한다.
+  for (const [def, cmdId] of shortcuts) {
+    if (def.platform && def.platform !== platform) continue;
+    if (!!def.ctrl !== ctrlOrMeta || !!def.shift !== e.shiftKey || !!def.alt !== e.altKey) continue;
+    const code = def.code ?? (/^[a-z]$/.test(def.key) ? `Key${def.key.toUpperCase()}` : undefined);
+    if (code && eventCode === code.toLowerCase()
+      && (def.code || !/^[a-z]$/.test(eventKey) || e.altKey)) return cmdId;
   }
   return null;
 }

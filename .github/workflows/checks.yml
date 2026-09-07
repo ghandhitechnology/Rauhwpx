@@ -232,6 +232,28 @@ jobs:
         run: npm --prefix rhwp/rhwp-studio run build
       - name: Test browser integration
         run: npm --prefix rhwp/rhwp-studio run test:browser
+      - name: Test sidebar server setup and recovery
+        run: npm run test:sidebar
+      - name: Test document shortcuts and deletion
+        working-directory: rhwp/rhwp-studio
+        env:
+          VITE_URL: http://127.0.0.1:7700
+          RHWP_SKIP_AGENT_HUB: '1'
+        run: |
+          node node_modules/vite/bin/vite.js --host 127.0.0.1 --port 7700 --strictPort > "$RUNNER_TEMP/editor-vite.log" 2>&1 &
+          editor_pid=$!
+          trap 'kill "$editor_pid" 2>/dev/null || true' EXIT
+          for attempt in {1..60}; do
+            if curl --fail --silent "$VITE_URL" > /dev/null; then break; fi
+            if ! kill -0 "$editor_pid" 2>/dev/null; then
+              cat "$RUNNER_TEMP/editor-vite.log"
+              exit 1
+            fi
+            sleep 1
+          done
+          curl --fail --silent "$VITE_URL" > /dev/null
+          node e2e/global-shortcut.test.mjs --mode=headless
+          node e2e/deletion-caret.test.mjs --mode=headless
       - name: Test Cloud onboarding, conversation handoff, and display interaction
         run: |
           npm --prefix rhwp/rhwp-studio run e2e:cloud-onboarding

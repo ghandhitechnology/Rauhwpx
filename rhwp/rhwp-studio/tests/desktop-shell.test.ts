@@ -10,6 +10,7 @@ import {
   readGeneratedDocumentResponse,
   resolveGeneratedDocumentArtifact,
 } from '../../../desktop/generated-document-artifact.mjs';
+import { documentEditMenuItem } from '../../../desktop/edit-menu.mjs';
 import { deliverPlainTextPaste } from '../../../desktop/plain-text-paste.mjs';
 import { SessionManager } from '../../../desktop/session-manager.mjs';
 import { safeSuggestedFilename } from '../../../desktop/safe-filename.mjs';
@@ -682,4 +683,15 @@ test('desktop package registers supported document associations without bundling
   assert.match(desktopMain, /RauHWPX history archive/);
   assert.ok(rootPackage.build.asarUnpack.includes('rhwp/rhwp-agent/**'));
   assert.ok(rootPackage.build.files.every((entry: string) => !/runtime|launch-work/.test(entry)));
+});
+
+
+test('desktop edit accelerators send commands to the focused renderer', () => {
+  const events: unknown[] = [];
+  const item = documentEditMenuItem('undo', 'Undo', 'CmdOrCtrl+Z');
+  assert.equal(item.accelerator, 'CmdOrCtrl+Z');
+  item.click(null, { webContents: { send: (...args: unknown[]) => events.push(args) } });
+  item.click(null, null);
+  item.click(null, { isDestroyed: () => true });
+  assert.deepEqual(events, [['desktop:edit-command', 'undo']]);
 });

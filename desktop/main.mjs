@@ -71,6 +71,7 @@ import { CloudApiTransport, SshTunnelManager } from './cloud-ssh-tunnel.mjs';
 import { collectProviderAuth } from './provider-auth.mjs';
 import { applyCloudRecovery } from './cloud-result.mjs';
 import { isNewerStableVersion, selectDebAsset } from './update-policy.mjs';
+import { documentEditMenuItem } from './edit-menu.mjs';
 import { deliverPlainTextPaste } from './plain-text-paste.mjs';
 import {
   hasPendingLaunchCleanupSync,
@@ -797,16 +798,16 @@ function installMenu() {
     {
       label: 'Edit',
       submenu: [
-        { role: 'undo' },
-        { role: 'redo' },
+        documentEditMenuItem('undo', 'Undo', 'CmdOrCtrl+Z'),
+        documentEditMenuItem('redo', 'Redo', isMac ? 'Cmd+Shift+Z' : 'Ctrl+Y'),
         { type: 'separator' },
         { role: 'cut' },
         { role: 'copy' },
         { role: 'paste' },
         pasteWithoutFormatting,
-        { role: 'delete' },
+        documentEditMenuItem('delete', 'Delete'),
         { type: 'separator' },
-        { role: 'selectAll' },
+        documentEditMenuItem('select-all', 'Select All', 'CmdOrCtrl+A'),
       ],
     },
     { role: 'viewMenu' },
