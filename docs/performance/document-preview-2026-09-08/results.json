@@ -1,0 +1,1062 @@
+{
+  "baseline-clean": {
+    "label": "baseline-clean",
+    "commit": "b44bc5ee3ef9dbd71cc52551ed7e2d7ece017d2f",
+    "scenarios": [
+      {
+        "mode": "global",
+        "edits": 48,
+        "bursts": 12,
+        "burstSize": 4,
+        "pageCount": 6,
+        "editMs": 1113.4000000357628,
+        "observationMs": 2341.100000023842,
+        "finalPixelsMatchFreshRender": true,
+        "activeRaf": {
+          "n": 25,
+          "mean": 38.41599999999998,
+          "p50": 33.30000000000018,
+          "p95": 83.40000000000055,
+          "max": 100
+        },
+        "activeFps": 22.45374528399227,
+        "raf": {
+          "n": 99,
+          "mean": 23.337373737373735,
+          "p50": 16.699999999999818,
+          "p95": 66.60000000000036,
+          "max": 133.29999999999927
+        },
+        "fps": 42.84972299168975,
+        "framesOver33ms": 11,
+        "longTasks": {
+          "n": 12,
+          "mean": 79.08333333333333,
+          "p50": 74,
+          "p95": 137,
+          "max": 137
+        },
+        "renderCalls": 16,
+        "renderMs": {
+          "n": 16,
+          "mean": 9.262499995529652,
+          "p50": 8,
+          "p95": 17.19999998807907,
+          "max": 17.19999998807907
+        },
+        "renderedPages": [
+          0,
+          1
+        ],
+        "correct": true,
+        "actualLength": 248,
+        "expectedLength": 248,
+        "canvasCount": 2,
+        "sample": "biz_plan.hwp",
+        "initialPageCount": 6,
+        "errors": []
+      },
+      {
+        "mode": "page-local",
+        "edits": 48,
+        "bursts": 12,
+        "burstSize": 4,
+        "pageCount": 6,
+        "editMs": 1046.3999999761581,
+        "observationMs": 2273.899999976158,
+        "finalPixelsMatchFreshRender": true,
+        "activeRaf": {
+          "n": 19,
+          "mean": 41.30000000125483,
+          "p50": 33.29999999999973,
+          "p95": 100,
+          "max": 100
+        },
+        "activeFps": 18.157492355153774,
+        "raf": {
+          "n": 92,
+          "mean": 24.28913043504176,
+          "p50": 16.699999999999818,
+          "p95": 83.30000000000018,
+          "max": 150
+        },
+        "fps": 41.17067931576945,
+        "framesOver33ms": 10,
+        "longTasks": {
+          "n": 12,
+          "mean": 84.25,
+          "p50": 78,
+          "p95": 143,
+          "max": 143
+        },
+        "renderCalls": 12,
+        "renderMs": {
+          "n": 12,
+          "mean": 6.475000003973643,
+          "p50": 6.199999988079071,
+          "p95": 9,
+          "max": 9
+        },
+        "renderedPages": [
+          0
+        ],
+        "correct": true,
+        "actualLength": 248,
+        "expectedLength": 248,
+        "canvasCount": 2,
+        "sample": "biz_plan.hwp",
+        "initialPageCount": 6,
+        "errors": []
+      },
+      {
+        "mode": "global",
+        "edits": 48,
+        "bursts": 12,
+        "burstSize": 4,
+        "pageCount": 78,
+        "editMs": 19173.399999976158,
+        "observationMs": 20409.19999998808,
+        "finalPixelsMatchFreshRender": true,
+        "activeRaf": {
+          "n": 23,
+          "mean": 751.7260869570401,
+          "p50": 50.099999999998545,
+          "p95": 1716.5,
+          "max": 1816.6000000000022
+        },
+        "activeFps": 1.1995785828297851,
+        "raf": {
+          "n": 93,
+          "mean": 218.88387096787014,
+          "p50": 16.700000000000728,
+          "p95": 1583.300000000001,
+          "max": 1883.2999999999993
+        },
+        "fps": 4.568632652457017,
+        "framesOver33ms": 18,
+        "longTasks": {
+          "n": 12,
+          "mean": 1557,
+          "p50": 1528,
+          "p95": 1875,
+          "max": 1875
+        },
+        "renderCalls": 18,
+        "renderMs": {
+          "n": 18,
+          "mean": 27.788888888226616,
+          "p50": 23.900000035762787,
+          "p95": 42.80000001192093,
+          "max": 42.80000001192093
+        },
+        "renderedPages": [
+          0,
+          1
+        ],
+        "correct": true,
+        "actualLength": 248,
+        "expectedLength": 248,
+        "canvasCount": 2,
+        "sample": "kps-ai.hwp",
+        "initialPageCount": 78,
+        "errors": []
+      },
+      {
+        "mode": "page-local",
+        "edits": 48,
+        "bursts": 12,
+        "burstSize": 4,
+        "pageCount": 78,
+        "editMs": 19168.69999998808,
+        "observationMs": 20391.399999976158,
+        "finalPixelsMatchFreshRender": true,
+        "activeRaf": {
+          "n": 18,
+          "mean": 955.1555555582046,
+          "p50": 1426.7760000476837,
+          "p95": 1900,
+          "max": 1900
+        },
+        "activeFps": 0.9390308158618579,
+        "raf": {
+          "n": 90,
+          "mean": 226.21444444497425,
+          "p50": 16.700000000000728,
+          "p95": 1583.2999999999993,
+          "max": 1983.2999999999993
+        },
+        "fps": 4.4205842047511075,
+        "framesOver33ms": 12,
+        "longTasks": {
+          "n": 12,
+          "mean": 1596.1666666666667,
+          "p50": 1546,
+          "p95": 1992,
+          "max": 1992
+        },
+        "renderCalls": 12,
+        "renderMs": {
+          "n": 12,
+          "mean": 21.54166667163372,
+          "p50": 22.19999998807907,
+          "p95": 28.100000023841858,
+          "max": 28.100000023841858
+        },
+        "renderedPages": [
+          0
+        ],
+        "correct": true,
+        "actualLength": 248,
+        "expectedLength": 248,
+        "canvasCount": 2,
+        "sample": "kps-ai.hwp",
+        "initialPageCount": 78,
+        "errors": []
+      }
+    ],
+    "browser": "Chrome/152.0.7977.76"
+  },
+  "after": {
+    "label": "after",
+    "platform": "darwin arm64",
+    "cpu": "Apple M4",
+    "wasmSha256": "04e75ba6347f7ab064c9ed38c1d0e2698b45e966f564eaae774d074645c94b51",
+    "commit": "8c70904d192fc3e69b404954ccdef2a7cf5777ac",
+    "scenarios": [
+      {
+        "mode": "global",
+        "geometryCalls": {
+          "getCursorRect": 0,
+          "getSelectionRects": 0
+        },
+        "operations": 48,
+        "edits": 48,
+        "bursts": 12,
+        "burstSize": 4,
+        "pageCount": 6,
+        "editMs": 1017.6999999880791,
+        "observationMs": 2232.800000011921,
+        "finalPixelsMatchFreshRender": true,
+        "activeRaf": {
+          "n": 23,
+          "mean": 38.30434782505037,
+          "p50": 33.30000000000018,
+          "p95": 83.40000000000055,
+          "max": 116.70000000000073
+        },
+        "activeFps": 22.599980348107902,
+        "raf": {
+          "n": 97,
+          "mean": 22.82680412346555,
+          "p50": 16.699999999999818,
+          "p95": 66.60000000000036,
+          "max": 116.70000000000073
+        },
+        "fps": 43.8081474126296,
+        "framesOver33ms": 12,
+        "longTasks": {
+          "n": 10,
+          "mean": 81,
+          "p50": 79,
+          "p95": 132,
+          "max": 132
+        },
+        "renderCalls": 13,
+        "renderMs": {
+          "n": 13,
+          "mean": 7.846153850738819,
+          "p50": 6.399999976158142,
+          "p95": 25.400000035762787,
+          "max": 25.400000035762787
+        },
+        "renderedPages": [
+          0,
+          1
+        ],
+        "correct": true,
+        "actualLength": 248,
+        "expectedLength": 248,
+        "canvasCount": 2,
+        "sample": "biz_plan.hwp",
+        "initialPageCount": 6,
+        "errors": []
+      },
+      {
+        "mode": "page-local",
+        "geometryCalls": {
+          "getCursorRect": 0,
+          "getSelectionRects": 0
+        },
+        "operations": 48,
+        "edits": 48,
+        "bursts": 12,
+        "burstSize": 4,
+        "pageCount": 6,
+        "editMs": 1039.699999988079,
+        "observationMs": 2273.699999988079,
+        "finalPixelsMatchFreshRender": true,
+        "activeRaf": {
+          "n": 22,
+          "mean": 40.7772727278146,
+          "p50": 33.40000000000009,
+          "p95": 100,
+          "max": 116.70000000000027
+        },
+        "activeFps": 21.159949985815377,
+        "raf": {
+          "n": 95,
+          "mean": 23.477894736967592,
+          "p50": 16.699999999999818,
+          "p95": 66.69999999999982,
+          "max": 133.30000000000018
+        },
+        "fps": 42.59325681469343,
+        "framesOver33ms": 12,
+        "longTasks": {
+          "n": 10,
+          "mean": 83.2,
+          "p50": 79,
+          "p95": 130,
+          "max": 130
+        },
+        "renderCalls": 12,
+        "renderMs": {
+          "n": 12,
+          "mean": 6.4250000069538755,
+          "p50": 6.599999964237213,
+          "p95": 8.600000023841858,
+          "max": 8.600000023841858
+        },
+        "renderedPages": [
+          0
+        ],
+        "correct": true,
+        "actualLength": 248,
+        "expectedLength": 248,
+        "canvasCount": 2,
+        "sample": "biz_plan.hwp",
+        "initialPageCount": 6,
+        "errors": []
+      },
+      {
+        "mode": "global",
+        "geometryCalls": {
+          "getCursorRect": 0,
+          "getSelectionRects": 0
+        },
+        "operations": 48,
+        "edits": 48,
+        "bursts": 12,
+        "burstSize": 4,
+        "pageCount": 78,
+        "editMs": 18993.19999998808,
+        "observationMs": 20230.5,
+        "finalPixelsMatchFreshRender": true,
+        "activeRaf": {
+          "n": 22,
+          "mean": 777.0227272727273,
+          "p50": 1400,
+          "p95": 1716.5999999999985,
+          "max": 1800
+        },
+        "activeFps": 1.15830928964123,
+        "raf": {
+          "n": 92,
+          "mean": 219.32173913043476,
+          "p50": 16.700000000000728,
+          "p95": 1600,
+          "max": 1899.9000000000015
+        },
+        "fps": 4.5595115375465864,
+        "framesOver33ms": 13,
+        "longTasks": {
+          "n": 13,
+          "mean": 1444.3076923076924,
+          "p50": 1493,
+          "p95": 1882,
+          "max": 1882
+        },
+        "renderCalls": 13,
+        "renderMs": {
+          "n": 13,
+          "mean": 23.592307686805725,
+          "p50": 21.799999952316284,
+          "p95": 56.69999998807907,
+          "max": 56.69999998807907
+        },
+        "renderedPages": [
+          0,
+          1
+        ],
+        "correct": true,
+        "actualLength": 248,
+        "expectedLength": 248,
+        "canvasCount": 2,
+        "sample": "kps-ai.hwp",
+        "initialPageCount": 78,
+        "errors": []
+      },
+      {
+        "mode": "page-local",
+        "geometryCalls": {
+          "getCursorRect": 0,
+          "getSelectionRects": 0
+        },
+        "operations": 48,
+        "edits": 48,
+        "bursts": 12,
+        "burstSize": 4,
+        "pageCount": 78,
+        "editMs": 19058.899999976158,
+        "observationMs": 20293.899999976158,
+        "finalPixelsMatchFreshRender": true,
+        "activeRaf": {
+          "n": 23,
+          "mean": 745.5826086956522,
+          "p50": 33.29999999999927,
+          "p95": 1716.5999999999985,
+          "max": 1799.9000000000015
+        },
+        "activeFps": 1.2067852814185904,
+        "raf": {
+          "n": 95,
+          "mean": 213.14,
+          "p50": 16.700000000000728,
+          "p95": 1583.2000000000007,
+          "max": 1899.7999999999993
+        },
+        "fps": 4.69175190015952,
+        "framesOver33ms": 13,
+        "longTasks": {
+          "n": 12,
+          "mean": 1565.25,
+          "p50": 1549,
+          "p95": 1892,
+          "max": 1892
+        },
+        "renderCalls": 12,
+        "renderMs": {
+          "n": 12,
+          "mean": 21.549999992052715,
+          "p50": 22.5,
+          "p95": 27.19999998807907,
+          "max": 27.19999998807907
+        },
+        "renderedPages": [
+          0
+        ],
+        "correct": true,
+        "actualLength": 248,
+        "expectedLength": 248,
+        "canvasCount": 2,
+        "sample": "kps-ai.hwp",
+        "initialPageCount": 78,
+        "errors": []
+      }
+    ],
+    "browser": "Chrome/152.0.7977.76",
+    "complete": true
+  },
+  "baseline-multi-local": {
+    "label": "baseline-multi-local",
+    "platform": "darwin arm64",
+    "cpu": "Apple M4",
+    "wasmSha256": "04e75ba6347f7ab064c9ed38c1d0e2698b45e966f564eaae774d074645c94b51",
+    "commit": "b44bc5ee3ef9dbd71cc52551ed7e2d7ece017d2f",
+    "scenarios": [
+      {
+        "mode": "multi-local",
+        "geometryCalls": {
+          "getCursorRect": 0,
+          "getSelectionRects": 0
+        },
+        "operations": 1,
+        "edits": 1,
+        "bursts": 1,
+        "burstSize": 1,
+        "pageCount": 6,
+        "editMs": 39.69999998807907,
+        "observationMs": 1266.0999999642372,
+        "finalPixelsMatchFreshRender": false,
+        "activeRaf": {
+          "n": 1,
+          "mean": 2.70000001192102,
+          "p50": 2.70000001192102,
+          "p95": 2.70000001192102,
+          "max": 2.70000001192102
+        },
+        "activeFps": 25.188916884137917,
+        "raf": {
+          "n": 74,
+          "mean": 16.702702702863792,
+          "p50": 16.699999999999818,
+          "p95": 16.800000000000182,
+          "max": 33.30000000000018
+        },
+        "fps": 59.870550161234874,
+        "framesOver33ms": 0,
+        "longTasks": {
+          "n": 1,
+          "mean": 50,
+          "p50": 50,
+          "p95": 50,
+          "max": 50
+        },
+        "renderCalls": 1,
+        "renderMs": {
+          "n": 1,
+          "mean": 21.599999964237213,
+          "p50": 21.599999964237213,
+          "p95": 21.599999964237213,
+          "max": 21.599999964237213
+        },
+        "renderedPages": [
+          1
+        ],
+        "correct": true,
+        "actualLength": 5,
+        "expectedLength": 5,
+        "canvasCount": 2,
+        "sample": "biz_plan.hwp",
+        "initialPageCount": 6,
+        "errors": []
+      }
+    ],
+    "browser": "Chrome/152.0.7977.76",
+    "failure": "Expected baseline failure: final pixels do not match a fresh WASM render."
+  },
+  "after-multi-local": {
+    "label": "after-multi-local",
+    "platform": "darwin arm64",
+    "cpu": "Apple M4",
+    "wasmSha256": "04e75ba6347f7ab064c9ed38c1d0e2698b45e966f564eaae774d074645c94b51",
+    "commit": "8c70904d192fc3e69b404954ccdef2a7cf5777ac",
+    "scenarios": [
+      {
+        "mode": "multi-local",
+        "geometryCalls": {
+          "getCursorRect": 0,
+          "getSelectionRects": 0
+        },
+        "operations": 1,
+        "edits": 1,
+        "bursts": 1,
+        "burstSize": 1,
+        "pageCount": 6,
+        "editMs": 45.69999998807907,
+        "observationMs": 1266.300000011921,
+        "finalPixelsMatchFreshRender": true,
+        "activeRaf": {
+          "n": 1,
+          "mean": 4.800000000000182,
+          "p50": 4.800000000000182,
+          "p95": 4.800000000000182,
+          "max": 4.800000000000182
+        },
+        "activeFps": 21.881838080106167,
+        "raf": {
+          "n": 73,
+          "mean": 16.960273972602746,
+          "p50": 16.699999999999818,
+          "p95": 16.700000000000728,
+          "max": 50
+        },
+        "fps": 58.96131168726272,
+        "framesOver33ms": 1,
+        "longTasks": {
+          "n": 0,
+          "mean": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "renderCalls": 2,
+        "renderMs": {
+          "n": 2,
+          "mean": 14.550000011920929,
+          "p50": 22.399999976158142,
+          "p95": 22.399999976158142,
+          "max": 22.399999976158142
+        },
+        "renderedPages": [
+          0,
+          1
+        ],
+        "correct": true,
+        "actualLength": 5,
+        "expectedLength": 5,
+        "canvasCount": 2,
+        "sample": "biz_plan.hwp",
+        "initialPageCount": 6,
+        "errors": []
+      }
+    ],
+    "browser": "Chrome/152.0.7977.76",
+    "complete": true
+  },
+  "baseline-typewriter-1": {
+    "label": "baseline-typewriter-1",
+    "platform": "darwin arm64",
+    "cpu": "Apple M4",
+    "wasmSha256": "04e75ba6347f7ab064c9ed38c1d0e2698b45e966f564eaae774d074645c94b51",
+    "commit": "b44bc5ee3ef9dbd71cc52551ed7e2d7ece017d2f",
+    "scenarios": [
+      {
+        "mode": "typewriter",
+        "geometryCalls": {
+          "getCursorRect": 12576,
+          "getSelectionRects": 100
+        },
+        "operations": 100,
+        "edits": 0,
+        "bursts": 10,
+        "burstSize": 10,
+        "pageCount": 6,
+        "editMs": 1011.3000000119209,
+        "observationMs": 2228.800000011921,
+        "finalPixelsMatchFreshRender": true,
+        "activeRaf": {
+          "n": 18,
+          "mean": 40.827777777777754,
+          "p50": 33.30000000000018,
+          "p95": 116.69999999999982,
+          "max": 116.69999999999982
+        },
+        "activeFps": 17.798872737850115,
+        "raf": {
+          "n": 91,
+          "mean": 24.192307692307693,
+          "p50": 16.699999999999818,
+          "p95": 83.30000000000018,
+          "max": 150
+        },
+        "fps": 41.33545310015898,
+        "framesOver33ms": 10,
+        "longTasks": {
+          "n": 9,
+          "mean": 93.44444444444444,
+          "p50": 91,
+          "p95": 137,
+          "max": 137
+        },
+        "renderCalls": 0,
+        "renderMs": {
+          "n": 0,
+          "mean": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "renderedPages": [],
+        "correct": true,
+        "actualLength": 280,
+        "expectedLength": 280,
+        "canvasCount": 2,
+        "sample": "biz_plan.hwp",
+        "initialPageCount": 6,
+        "errors": []
+      }
+    ],
+    "browser": "Chrome/152.0.7977.76",
+    "complete": true
+  },
+  "after-typewriter-1": {
+    "label": "after-typewriter-1",
+    "platform": "darwin arm64",
+    "cpu": "Apple M4",
+    "wasmSha256": "04e75ba6347f7ab064c9ed38c1d0e2698b45e966f564eaae774d074645c94b51",
+    "commit": "8c70904d192fc3e69b404954ccdef2a7cf5777ac",
+    "scenarios": [
+      {
+        "mode": "typewriter",
+        "geometryCalls": {
+          "getCursorRect": 731,
+          "getSelectionRects": 80
+        },
+        "operations": 100,
+        "edits": 0,
+        "bursts": 10,
+        "burstSize": 10,
+        "pageCount": 6,
+        "editMs": 362.5999999642372,
+        "observationMs": 1590.800000011921,
+        "finalPixelsMatchFreshRender": true,
+        "activeRaf": {
+          "n": 20,
+          "mean": 16.93499999999999,
+          "p50": 16.699999999999818,
+          "p95": 33.400000000000546,
+          "max": 33.400000000000546
+        },
+        "activeFps": 55.15719801978096,
+        "raf": {
+          "n": 93,
+          "mean": 16.723655913978497,
+          "p50": 16.699999999999818,
+          "p95": 16.800000000000182,
+          "max": 33.400000000000546
+        },
+        "fps": 59.79553783835915,
+        "framesOver33ms": 1,
+        "longTasks": {
+          "n": 1,
+          "mean": 52,
+          "p50": 52,
+          "p95": 52,
+          "max": 52
+        },
+        "renderCalls": 0,
+        "renderMs": {
+          "n": 0,
+          "mean": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "renderedPages": [],
+        "correct": true,
+        "actualLength": 280,
+        "expectedLength": 280,
+        "canvasCount": 2,
+        "sample": "biz_plan.hwp",
+        "initialPageCount": 6,
+        "errors": []
+      }
+    ],
+    "browser": "Chrome/152.0.7977.76",
+    "complete": true
+  },
+  "baseline-typewriter-2": {
+    "label": "baseline-typewriter-2",
+    "platform": "darwin arm64",
+    "cpu": "Apple M4",
+    "wasmSha256": "04e75ba6347f7ab064c9ed38c1d0e2698b45e966f564eaae774d074645c94b51",
+    "commit": "b44bc5ee3ef9dbd71cc52551ed7e2d7ece017d2f",
+    "scenarios": [
+      {
+        "mode": "typewriter",
+        "geometryCalls": {
+          "getCursorRect": 12806,
+          "getSelectionRects": 100
+        },
+        "operations": 100,
+        "edits": 0,
+        "bursts": 10,
+        "burstSize": 10,
+        "pageCount": 6,
+        "editMs": 1075.7000000476837,
+        "observationMs": 2304.600000023842,
+        "finalPixelsMatchFreshRender": true,
+        "activeRaf": {
+          "n": 20,
+          "mean": 45.62499999880792,
+          "p50": 33.400000000000546,
+          "p95": 133.40000000000055,
+          "max": 133.40000000000055
+        },
+        "activeFps": 18.59254438887556,
+        "raf": {
+          "n": 94,
+          "mean": 24.245744680597426,
+          "p50": 16.699999999999818,
+          "p95": 99.89999999999964,
+          "max": 150
+        },
+        "fps": 41.244350840675416,
+        "framesOver33ms": 11,
+        "longTasks": {
+          "n": 10,
+          "mean": 92.6,
+          "p50": 95,
+          "p95": 142,
+          "max": 142
+        },
+        "renderCalls": 0,
+        "renderMs": {
+          "n": 0,
+          "mean": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "renderedPages": [],
+        "correct": true,
+        "actualLength": 280,
+        "expectedLength": 280,
+        "canvasCount": 2,
+        "sample": "biz_plan.hwp",
+        "initialPageCount": 6,
+        "errors": []
+      }
+    ],
+    "browser": "Chrome/152.0.7977.76",
+    "complete": true
+  },
+  "after-typewriter-2": {
+    "label": "after-typewriter-2",
+    "platform": "darwin arm64",
+    "cpu": "Apple M4",
+    "wasmSha256": "04e75ba6347f7ab064c9ed38c1d0e2698b45e966f564eaae774d074645c94b51",
+    "commit": "8c70904d192fc3e69b404954ccdef2a7cf5777ac",
+    "scenarios": [
+      {
+        "mode": "typewriter",
+        "geometryCalls": {
+          "getCursorRect": 731,
+          "getSelectionRects": 80
+        },
+        "operations": 100,
+        "edits": 0,
+        "bursts": 10,
+        "burstSize": 10,
+        "pageCount": 6,
+        "editMs": 355.10000002384186,
+        "observationMs": 1584.199999988079,
+        "finalPixelsMatchFreshRender": true,
+        "activeRaf": {
+          "n": 18,
+          "mean": 18.083333333995597,
+          "p50": 16.699999999999818,
+          "p95": 33.400000000000546,
+          "max": 33.400000000000546
+        },
+        "activeFps": 50.68994649054198,
+        "raf": {
+          "n": 92,
+          "mean": 16.94347826099914,
+          "p50": 16.699999999999818,
+          "p95": 16.800000000000182,
+          "max": 33.400000000000546
+        },
+        "fps": 59.019758788360555,
+        "framesOver33ms": 1,
+        "longTasks": {
+          "n": 0,
+          "mean": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "renderCalls": 0,
+        "renderMs": {
+          "n": 0,
+          "mean": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "renderedPages": [],
+        "correct": true,
+        "actualLength": 280,
+        "expectedLength": 280,
+        "canvasCount": 2,
+        "sample": "biz_plan.hwp",
+        "initialPageCount": 6,
+        "errors": []
+      }
+    ],
+    "browser": "Chrome/152.0.7977.76",
+    "complete": true
+  },
+  "baseline-typewriter-3": {
+    "label": "baseline-typewriter-3",
+    "platform": "darwin arm64",
+    "cpu": "Apple M4",
+    "wasmSha256": "04e75ba6347f7ab064c9ed38c1d0e2698b45e966f564eaae774d074645c94b51",
+    "commit": "b44bc5ee3ef9dbd71cc52551ed7e2d7ece017d2f",
+    "scenarios": [
+      {
+        "mode": "typewriter",
+        "geometryCalls": {
+          "getCursorRect": 12716,
+          "getSelectionRects": 100
+        },
+        "operations": 100,
+        "edits": 0,
+        "bursts": 10,
+        "burstSize": 10,
+        "pageCount": 6,
+        "editMs": 1036.4000000357628,
+        "observationMs": 2252.699999988079,
+        "finalPixelsMatchFreshRender": true,
+        "activeRaf": {
+          "n": 19,
+          "mean": 45.778947367793656,
+          "p50": 33.399999999999636,
+          "p95": 116.60000000000036,
+          "max": 116.60000000000036
+        },
+        "activeFps": 18.332690080417187,
+        "raf": {
+          "n": 92,
+          "mean": 24.128260869435646,
+          "p50": 16.699999999999818,
+          "p95": 100,
+          "max": 150
+        },
+        "fps": 41.44517524123527,
+        "framesOver33ms": 11,
+        "longTasks": {
+          "n": 8,
+          "mean": 99.5,
+          "p50": 106,
+          "p95": 140,
+          "max": 140
+        },
+        "renderCalls": 0,
+        "renderMs": {
+          "n": 0,
+          "mean": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "renderedPages": [],
+        "correct": true,
+        "actualLength": 280,
+        "expectedLength": 280,
+        "canvasCount": 2,
+        "sample": "biz_plan.hwp",
+        "initialPageCount": 6,
+        "errors": []
+      }
+    ],
+    "browser": "Chrome/152.0.7977.76",
+    "complete": true
+  },
+  "after-typewriter-3": {
+    "label": "after-typewriter-3",
+    "platform": "darwin arm64",
+    "cpu": "Apple M4",
+    "wasmSha256": "04e75ba6347f7ab064c9ed38c1d0e2698b45e966f564eaae774d074645c94b51",
+    "commit": "8c70904d192fc3e69b404954ccdef2a7cf5777ac",
+    "scenarios": [
+      {
+        "mode": "typewriter",
+        "geometryCalls": {
+          "getCursorRect": 728,
+          "getSelectionRects": 80
+        },
+        "operations": 100,
+        "edits": 0,
+        "bursts": 10,
+        "burstSize": 10,
+        "pageCount": 6,
+        "editMs": 368.39999997615814,
+        "observationMs": 1594.1000000238419,
+        "finalPixelsMatchFreshRender": true,
+        "activeRaf": {
+          "n": 19,
+          "mean": 17.789473684837933,
+          "p50": 16.699999999999818,
+          "p95": 50,
+          "max": 50
+        },
+        "activeFps": 51.57437568194796,
+        "raf": {
+          "n": 92,
+          "mean": 16.8978260870861,
+          "p50": 16.699999999999818,
+          "p95": 16.800000000000182,
+          "max": 50
+        },
+        "fps": 59.17921008574201,
+        "framesOver33ms": 1,
+        "longTasks": {
+          "n": 1,
+          "mean": 56,
+          "p50": 56,
+          "p95": 56,
+          "max": 56
+        },
+        "renderCalls": 0,
+        "renderMs": {
+          "n": 0,
+          "mean": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "renderedPages": [],
+        "correct": true,
+        "actualLength": 280,
+        "expectedLength": 280,
+        "canvasCount": 2,
+        "sample": "biz_plan.hwp",
+        "initialPageCount": 6,
+        "errors": []
+      }
+    ],
+    "browser": "Chrome/152.0.7977.76",
+    "complete": true
+  },
+  "experiment-engine-batch": {
+    "label": "experiment-engine-batch",
+    "platform": "darwin arm64",
+    "cpu": "Apple M4",
+    "wasmSha256": "04e75ba6347f7ab064c9ed38c1d0e2698b45e966f564eaae774d074645c94b51",
+    "commit": "8c70904d192fc3e69b404954ccdef2a7cf5777ac",
+    "scenarios": [
+      {
+        "mode": "engine-batch",
+        "geometryCalls": {
+          "getCursorRect": 0,
+          "getSelectionRects": 0
+        },
+        "operations": 48,
+        "edits": 48,
+        "bursts": 12,
+        "burstSize": 4,
+        "pageCount": 78,
+        "editMs": 6693.099999964237,
+        "observationMs": 7912.699999988079,
+        "finalPixelsMatchFreshRender": true,
+        "activeRaf": {
+          "n": 22,
+          "mean": 264.81363636255264,
+          "p50": 350,
+          "p95": 716.6000000000004,
+          "max": 783.2999999999993
+        },
+        "activeFps": 3.2869671751680913,
+        "raf": {
+          "n": 94,
+          "mean": 83.96276595719317,
+          "p50": 16.699999999999818,
+          "p95": 550,
+          "max": 866.5999999999985
+        },
+        "fps": 11.91004117836984,
+        "framesOver33ms": 12,
+        "longTasks": {
+          "n": 12,
+          "mean": 534.25,
+          "p50": 503,
+          "p95": 861,
+          "max": 861
+        },
+        "renderCalls": 13,
+        "renderMs": {
+          "n": 13,
+          "mean": 23.400000008252952,
+          "p50": 21.5,
+          "p95": 44.19999998807907,
+          "max": 44.19999998807907
+        },
+        "renderedPages": [
+          0,
+          1
+        ],
+        "correct": true,
+        "actualLength": 248,
+        "expectedLength": 248,
+        "canvasCount": 2,
+        "sample": "kps-ai.hwp",
+        "initialPageCount": 78,
+        "errors": []
+      }
+    ],
+    "browser": "Chrome/152.0.7977.76",
+    "complete": true
+  }
+}
