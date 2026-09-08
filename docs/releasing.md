@@ -29,6 +29,14 @@ Cloud builds push `<version>-amd64` and `<version>-arm64` image tags to GHCR. Af
 
 Each successful publication replaces the [nightly pre-release](https://github.com/ghandhitechnology/Rauhwpx/releases/tag/nightly) and moves its tag. The app version and artifact names use `<version>-nightly.<date>.<sha>`, where the date is UTC `YYYYMMDD` and the SHA is the first seven commit characters. The publication time depends on verification and build duration.
 
+## Installing desktop updates
+
+The desktop updater installs only after the user chooses **Restart to install** or **Install now**, approves document closure, and the app finishes its service cleanup. The final handoff uses `electron-updater.quitAndInstall()` on macOS, Windows, and AppImage builds. On macOS, this also waits for the native updater to stage the downloaded archive before restarting. Keep `autoInstallOnAppQuit` disabled so ordinary quits cannot start an installer outside this flow.
+
+Choosing **Later** or canceling document closure preserves the downloaded update. **Check for Updates** offers it again. Debian packages continue to use the system package manager.
+
+Users on 2.0.1 or earlier should download and install 2.0.2 manually once. The 2.0.2 release fixes the in-app installation handoff. Publish a new version for updater fixes instead of replacing assets under an existing version tag.
+
 ## Signing and package checks
 
 Both channels use [.github/actions/package-desktop](../.github/actions/package-desktop/action.yml) for macOS and Windows setup, builds and verification. Tagged Linux releases build on native x64 and arm64 runners. macOS jobs use the `macos-release` environment and require these secrets:

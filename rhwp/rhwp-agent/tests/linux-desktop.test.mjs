@@ -101,8 +101,8 @@ test('Linux update policy stages AppImages and leaves deb installation to the us
   assert.match(desktopMain, /linuxDeb[\s\S]*?shell\.openExternal\(RELEASES_URL\)/);
   assert.match(desktopMain, /RELEASES_API_URL/);
   assert.match(desktopMain, /checkForDebUpdates/);
-  assert.match(desktopMain, /isLinuxAppImage \? \['Restart to install', 'Later'\]/);
-  assert.match(desktopMain, /\['darwin', 'linux'\]\.includes\(process\.platform\)/);
+  assert.match(desktopMain, /createUpdateLifecycle\(\{[\s\S]*?platform: process\.platform/);
+  assert.match(desktopMain, /updateLifecycle\.configureUpdates\(\)/);
 });
 
 test('Deb update discovery compares stable versions and selects the native architecture', () => {

@@ -15,6 +15,7 @@ import { deliverPlainTextPaste } from '../../../desktop/plain-text-paste.mjs';
 import { SessionManager } from '../../../desktop/session-manager.mjs';
 import { safeSuggestedFilename } from '../../../desktop/safe-filename.mjs';
 import { SerializedStateWriter } from '../../../desktop/serialized-state-writer.mjs';
+import { completeWindowClose } from '../../../desktop/update-lifecycle.mjs';
 import {
   CREDENTIAL_RETENTION_DIR,
   LEGACY_CLEANUP_MARKER_FILE,
@@ -270,13 +271,32 @@ test('bookmark persistence serializes writes and close queues a latest-state flu
   assert.deepEqual(errors, ['disk unavailable']);
   assert.deepEqual(started, ['first', 'second', 'failed', 'latest']);
 
+  const closed: string[] = [];
+  const session = { allowCloseOnce: false, window: { close: () => closed.push('closed') } };
+  let canceled = false;
+  assert.equal(await completeWindowClose({
+    session, allowClose: true, timeoutMs: 100,
+    cancelQuit: () => { canceled = true; },
+    persistBookmarks: () => writer.enqueue('failed', { rejectOnError: true }),
+  }), false);
+  assert.equal(canceled, true);
+  assert.equal(session.allowCloseOnce, false);
+  assert.deepEqual(closed, []);
+  assert.equal(await completeWindowClose({
+    session, allowClose: true, timeoutMs: 100,
+    cancelQuit: () => {},
+    persistBookmarks: () => writer.enqueue('retry', { rejectOnError: true }),
+  }), true);
+  assert.deepEqual(closed, ['closed']);
+  assert.equal(started.at(-1), 'retry');
+
   assert.match(
     desktopMain,
     /desktop:remember-native-document'[\s\S]*?await persistNativeBookmarks\(\)/,
   );
   assert.match(
     desktopMain,
-    /desktop:close-response'[\s\S]*?if \(!allowClose\)[\s\S]*?await persistNativeBookmarks\(\)[\s\S]*?session\.window\.close\(\)/,
+    /desktop:close-response'[\s\S]*?completeWindowClose\(\{[\s\S]*?persistBookmarks: \(\) => persistNativeBookmarks\(\{ rejectOnError: true \}\)/,
   );
 });
 
