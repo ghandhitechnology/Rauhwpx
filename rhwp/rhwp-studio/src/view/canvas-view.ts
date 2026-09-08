@@ -3,6 +3,7 @@ import { EventBus } from '@/core/event-bus';
 import type { PageInfo } from '@/core/types';
 import { VirtualScroll } from './virtual-scroll';
 import { CanvasPool } from './canvas-pool';
+import { MutationRefreshQueue, type MutationRefreshBatch } from './mutation-refresh-queue';
 import { PageRenderer, type PageRenderContext, type PageRenderResult } from './page-renderer';
 import { ViewportManager } from './viewport-manager';
 import { CoordinateSystem } from './coordinate-system';
@@ -67,16 +68,18 @@ export class CanvasView {
   private headerFooterEditState: HeaderFooterModeState | null = null;
   private gridOverlaysByPage = new Map<number, HTMLElement[]>();
   private unsubscribers: (() => void)[] = [];
-  private pendingTextEditRefreshes = new Map<number, PageRenderContext>();
-  private textEditRefreshRafId: number | null = null;
   private textEditStaticLayerVerifyTimers = new Map<number, ReturnType<typeof setTimeout>>();
   private pendingPrefetchPages = new Set<number>();
+  private lastMutationTime = -Infinity;
   private deferredPrefetchTask: DeferredPrefetchTask | null = null;
   private rendererSelectionEpoch = 0;
   private rendererFallbackScheduled = false;
   private activeRendererDecisionKey: string | null = null;
   private autoRendererReselectionTimer: ReturnType<typeof setTimeout> | null = null;
-  private mutationRefreshRafId: number | null = null;
+  private mutationRefreshQueue = new MutationRefreshQueue(
+    (batch, isCurrent) => this.refreshMutationBatch(batch, isCurrent),
+    error => console.error('[CanvasView] 문서 갱신 실패:', error),
+  );
   private documentLoadPrepared = false;
   private layoutViewportSize = { width: 0, height: 0 };
   private disposed = false;
@@ -117,9 +120,15 @@ export class CanvasView {
         this.handleHeaderFooterModeChanged(payload);
       }),
       eventBus.on('document-page-invalidated', (payload) => {
-        // 같은 프레임에 전체 재렌더가 이미 예약돼 있으면 단일 페이지 갱신은 그 안에 흡수된다.
-        if (this.mutationRefreshRafId !== null) return;
-        void this.refreshInvalidatedPageForMutation(payload);
+        this.lastMutationTime = performance.now();
+        const pageIndex = this.pageIndexFromPayload(payload);
+        if (pageIndex === null) {
+          this.scheduleMutationRefresh();
+          return;
+        }
+        const textOnly = typeof payload === 'object' && payload !== null
+          && 'reason' in payload && payload.reason === 'text-edit';
+        this.mutationRefreshQueue.invalidatePage(pageIndex, textOnly);
       }),
       eventBus.on('document-changed', () => this.scheduleMutationRefresh()),
       eventBus.on('document-view-changed', (source) => {
@@ -228,27 +237,15 @@ export class CanvasView {
     this.pageRenderer.releaseAllPageDiagnostics();
   }
 
-  /**
-   * 문서 변이 재렌더를 프레임당 한 번으로 합친다. 에이전트 편집처럼 document-changed
-   * 가 짧은 간격으로 몰리면(툴 호출 버스트/벌크 교체) 이벤트마다 전체 재렌더를 돌지
-   * 않고, 다음 rAF 에서 최신 문서 상태로 한 번만 갱신한다.
-   */
+  /** 전체/쪽별 무효화를 같은 프레임의 renderer 선택 한 번으로 합친다. */
   private scheduleMutationRefresh(): void {
-    if (this.disposed || this.mutationRefreshRafId !== null) return;
-    if (typeof requestAnimationFrame !== 'function') {
-      void this.refreshPagesForMutation();
-      return;
-    }
-    this.mutationRefreshRafId = requestAnimationFrame(() => {
-      this.mutationRefreshRafId = null;
-      void this.refreshPagesForMutation();
-    });
+    if (this.disposed) return;
+    this.lastMutationTime = performance.now();
+    this.mutationRefreshQueue.invalidateAll();
   }
 
   private cancelScheduledMutationRefresh(): void {
-    if (this.mutationRefreshRafId === null) return;
-    cancelAnimationFrame(this.mutationRefreshRafId);
-    this.mutationRefreshRafId = null;
+    this.mutationRefreshQueue.cancel();
   }
 
   private async refreshPagesForRevision(): Promise<void> {
@@ -257,29 +254,29 @@ export class CanvasView {
     this.refreshPages();
   }
 
-  /**
-   * 현재 mutation revision의 페이지 배치를 갱신한다. 선택이 유효할 때만
-   * `document-layout-refreshed`를 보내 쪽/단 나누기 캐럿 reveal의 완료 경계가 된다.
-   */
-  private async refreshPagesForMutation(): Promise<void> {
+  private async refreshMutationBatch(
+    batch: MutationRefreshBatch,
+    isCurrent: () => boolean,
+  ): Promise<void> {
     const selected = await this.selectMutationRevision();
-    if (!selected || !this.rendererSession.isCurrent(selected.selection)) return;
-    this.refreshPages();
-    // InputHandler의 mutation 직후 caret 갱신보다 VirtualScroll 재계산이 늦다.
-    // 새 page offset을 소비할 수 있는 완료 경계를 별도 이벤트로 알린다.
-    // zoom/resize의 page-layout-changed와 분리한다 — 그쪽을 reveal에 쓰면
-    // 배율 변경마다 스크롤이 따라간다.
-    this.eventBus.emit('document-layout-refreshed', { source: 'mutation' });
-  }
-
-  private async refreshInvalidatedPageForMutation(payload: unknown): Promise<void> {
-    const selected = await this.selectMutationRevision();
-    if (!selected || !this.rendererSession.isCurrent(selected.selection)) return;
-    if (selected.backendChanged) {
+    if (!isCurrent() || !selected || !this.rendererSession.isCurrent(selected.selection)) return;
+    const full = batch.full || selected.backendChanged
+      || this.wasm.pageCount !== this.pages.length
+      || Array.from(batch.pages.keys()).some(page => page >= this.pages.length);
+    if (full) {
       this.refreshPages();
+      // 새 page offset을 사용하는 캐럿 reveal의 완료 경계.
+      this.eventBus.emit('document-layout-refreshed', { source: 'mutation' });
       return;
     }
-    this.refreshInvalidatedPage(payload);
+    for (const [pageIndex, textOnly] of batch.pages) {
+
+      this.cancelTextEditStaticLayerVerification(pageIndex);
+      this.refreshInvalidatedPageNow(pageIndex, {
+        reason: textOnly ? 'text-edit' : 'unknown',
+        allowStaticOverlayReuse: textOnly,
+      });
+    }
   }
 
   private async selectMutationRevision(): Promise<{
@@ -619,11 +616,19 @@ export class CanvasView {
 
     const run = () => {
       this.deferredPrefetchTask = null;
-      const pages = Array.from(this.pendingPrefetchPages);
-      this.pendingPrefetchPages.clear();
-      for (const pageIdx of pages) {
+      if (this.disposed || this.pendingPrefetchPages.size === 0) return;
+      // 편집 중에는 곧 무효화될 화면 밖 canvas를 만들지 않는다.
+      if (performance.now() - this.lastMutationTime < 150) {
+        this.deferredPrefetchTask = { kind: 'timeout', id: window.setTimeout(run, 150) };
+        return;
+      }
+      // 한 callback에 한 쪽만 그려 다음 입력/paint가 실행될 기회를 준다.
+      const pageIdx = this.pendingPrefetchPages.values().next().value;
+      if (pageIdx !== undefined) {
+        this.pendingPrefetchPages.delete(pageIdx);
         if (!this.canvasPool.has(pageIdx)) this.renderPage(pageIdx);
       }
+      this.schedulePrefetchPages(Array.from(this.pendingPrefetchPages));
     };
     const idleWindow = window as IdleCallbackWindow;
     if (typeof idleWindow.requestIdleCallback === 'function') {
@@ -654,7 +659,7 @@ export class CanvasView {
 
   /** 렌더된 페이지 하나의 canvas/overlay/타이머를 모두 해제한다. */
   private releaseRenderedPage(pageIdx: number): void {
-    this.cancelPendingTextEditRefresh(pageIdx);
+
     this.cancelTextEditStaticLayerVerification(pageIdx);
     this.pageRenderer.cancelReRender(pageIdx);
     this.pageRenderer.removePageLayers(this.scrollContent, pageIdx);
@@ -792,7 +797,7 @@ export class CanvasView {
       this.rendererFallbackScheduled = false;
       if (this.disposed || !this.rendererSession.isCurrent(selection)) return;
       this.applyRendererSelection(selection);
-      this.cancelPendingTextEditRefresh();
+
       this.cancelTextEditStaticLayerVerification();
       this.releaseAllRenderedPages();
       this.pageRenderer.cancelAll();
@@ -880,7 +885,7 @@ export class CanvasView {
 
     if (wasGrid || isGrid) {
       // 그리드 관련 변경 시 전체 재렌더링
-      this.cancelPendingTextEditRefresh();
+
       this.cancelTextEditStaticLayerVerification();
       this.releaseAllRenderedPages();
       this.pageRenderer.cancelAll();
@@ -995,7 +1000,7 @@ export class CanvasView {
     this.eventBus.emit('zoom-level-display', zoom);
 
     if (this.viewportManager.isZoomAnimating()) {
-      this.cancelPendingTextEditRefresh();
+
       this.cancelTextEditStaticLayerVerification();
       this.cancelPendingPrefetch();
       this.updateRenderedPageZoomPreview();
@@ -1003,7 +1008,7 @@ export class CanvasView {
     }
 
     // 모든 Canvas 재렌더링
-    this.cancelPendingTextEditRefresh();
+
     this.cancelTextEditStaticLayerVerification();
     this.releaseAllRenderedPages();
     this.pageRenderer.cancelAll();
@@ -1053,7 +1058,6 @@ export class CanvasView {
 
     this.recalcLayout();
 
-    this.cancelPendingTextEditRefresh();
     this.cancelTextEditStaticLayerVerification();
     this.pageRenderer.cancelAll();
 
@@ -1094,63 +1098,6 @@ export class CanvasView {
     );
   }
 
-  /** 텍스트 입력처럼 좁은 변경은 page info 재수집 없이 해당 페이지 canvas만 다시 그린다. */
-  private refreshInvalidatedPage(payload: unknown): void {
-    if (this.pages.length === 0) return;
-
-    const pageIndex =
-      typeof payload === 'object' && payload !== null && 'pageIndex' in payload
-        ? Number((payload as { pageIndex?: unknown }).pageIndex)
-        : Number(payload);
-    const reason =
-      typeof payload === 'object' && payload !== null && 'reason' in payload
-        ? (payload as { reason?: unknown }).reason
-        : undefined;
-    const renderContext: PageRenderContext =
-      reason === 'text-edit'
-        ? { reason: 'text-edit', allowStaticOverlayReuse: true }
-        : { reason: 'unknown', allowStaticOverlayReuse: false };
-
-    if (!Number.isInteger(pageIndex) || pageIndex < 0) {
-      this.cancelPendingTextEditRefresh();
-      this.cancelTextEditStaticLayerVerification();
-      this.refreshPages();
-      return;
-    }
-
-    const pageCount = this.wasm.pageCount;
-    if (pageCount !== this.pages.length || pageIndex >= pageCount) {
-      this.cancelPendingTextEditRefresh();
-      this.cancelTextEditStaticLayerVerification();
-      this.refreshPages();
-      return;
-    }
-
-    if (renderContext.reason === 'text-edit') {
-      this.scheduleTextEditPageRefresh(pageIndex, renderContext);
-      return;
-    }
-
-    this.cancelPendingTextEditRefresh(pageIndex);
-    this.cancelTextEditStaticLayerVerification(pageIndex);
-    this.refreshInvalidatedPageNow(pageIndex, renderContext);
-  }
-
-  private scheduleTextEditPageRefresh(pageIndex: number, renderContext: PageRenderContext): void {
-    this.cancelTextEditStaticLayerVerification(pageIndex);
-    this.pendingTextEditRefreshes.set(pageIndex, renderContext);
-    if (this.textEditRefreshRafId !== null) return;
-
-    this.textEditRefreshRafId = requestAnimationFrame(() => {
-      this.textEditRefreshRafId = null;
-      const pending = Array.from(this.pendingTextEditRefreshes.entries());
-      this.pendingTextEditRefreshes.clear();
-      for (const [pendingPageIndex, pendingContext] of pending) {
-        this.refreshInvalidatedPageNow(pendingPageIndex, pendingContext);
-      }
-    });
-  }
-
   private refreshInvalidatedPageNow(pageIndex: number, renderContext: PageRenderContext): void {
     if (this.pages.length === 0) return;
 
@@ -1172,19 +1119,6 @@ export class CanvasView {
       return;
     }
     this.renderHeaderFooterEditOverlays(true);
-  }
-
-  private cancelPendingTextEditRefresh(pageIndex?: number): void {
-    if (typeof pageIndex === 'number') {
-      this.pendingTextEditRefreshes.delete(pageIndex);
-    } else {
-      this.pendingTextEditRefreshes.clear();
-    }
-    if (this.pendingTextEditRefreshes.size > 0) return;
-    if (this.textEditRefreshRafId !== null) {
-      cancelAnimationFrame(this.textEditRefreshRafId);
-      this.textEditRefreshRafId = null;
-    }
   }
 
   private scheduleTextEditStaticLayerVerification(pageIndex: number): void {
@@ -1215,7 +1149,7 @@ export class CanvasView {
     const hadActivePage = this.activePageSnapshot !== null;
     const hadFocusedPage = this.editingPageIndex !== null;
     this.cancelScheduledMutationRefresh();
-    this.cancelPendingTextEditRefresh();
+
     this.cancelTextEditStaticLayerVerification();
     this.cancelPendingPrefetch();
     this.pageRenderer.cancelAll();

@@ -6,6 +6,7 @@ import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   app,
+  autoUpdater as nativeAutoUpdater,
   BrowserWindow,
   Menu,
   clipboard,
@@ -71,6 +72,7 @@ import { CloudApiTransport, SshTunnelManager } from './cloud-ssh-tunnel.mjs';
 import { collectProviderAuth } from './provider-auth.mjs';
 import { applyCloudRecovery } from './cloud-result.mjs';
 import { isNewerStableVersion, selectDebAsset } from './update-policy.mjs';
+import { createUpdateLifecycle, completeWindowClose } from './update-lifecycle.mjs';
 import { documentEditMenuItem } from './edit-menu.mjs';
 import { deliverPlainTextPaste } from './plain-text-paste.mjs';
 import {
@@ -590,8 +592,8 @@ async function loadNativeBookmarks() {
   }
 }
 
-function persistNativeBookmarks() {
-  return nativeBookmarkWriter.enqueue(JSON.stringify(nativeFiles.dumpBookmarks()));
+function persistNativeBookmarks(options) {
+  return nativeBookmarkWriter.enqueue(JSON.stringify(nativeFiles.dumpBookmarks()), options);
 }
 
 async function bestEffortStartupCleanup(label, cleanup) {
@@ -602,8 +604,25 @@ async function bestEffortStartupCleanup(label, cleanup) {
   }
 }
 
-let updateDownloadReady = false;
+const updateLifecycle = createUpdateLifecycle({
+  app,
+  updater: autoUpdater,
+  nativeUpdater: nativeAutoUpdater,
+  platform: process.platform,
+  isInteractive: () => manualUpdateCheck || interactiveUpdateDownload,
+  showMessageBox: (options) => dialog.showMessageBox(options),
+  openReleases: () => shell.openExternal(RELEASES_URL),
+  cleanupTasks: [
+    () => cloudDisplayConnections.closeAll(),
+    () => cloudCoordinator?.stop(),
+    () => hubOwner.teardown(),
+  ],
+  stopTransport: () => cloudTransport?.stop(),
+  onQuitRequested: (requested) => { quitRequested = requested; },
+  onTeardown: () => { quitting = true; },
+});
 let manualUpdateCheck = false;
+let interactiveUpdateDownload = false;
 let updateCheckPromise = null;
 
 async function showUpToDate() {
@@ -652,9 +671,7 @@ function configureAutoUpdater() {
   // macOS and AppImage builds can stage compatible updates. Debian packages
   // stay under the system package manager and only link to the signed release.
   autoUpdater.autoDownload = process.platform === 'darwin' || linuxAppImage;
-  autoUpdater.on('error', (error) => {
-    console.warn('[rauhwpx] update check failed:', error?.message ?? error);
-  });
+  updateLifecycle.configureUpdates();
   autoUpdater.on('update-not-available', () => {
     if (!manualUpdateCheck) return;
     void showUpToDate();
@@ -676,45 +693,17 @@ function configureAutoUpdater() {
       if (linuxDeb) {
         void shell.openExternal(RELEASES_URL);
       } else {
-        void autoUpdater.downloadUpdate().catch((error) => {
-          console.warn('[rauhwpx] update download failed:', error?.message ?? error);
+        interactiveUpdateDownload = true;
+        void autoUpdater.downloadUpdate().catch((error) => updateLifecycle.reportError(error)).finally(() => {
+          interactiveUpdateDownload = false;
         });
       }
-    });
-  });
-  autoUpdater.on('update-downloaded', (info) => {
-    if (updateDownloadReady) return;
-    updateDownloadReady = true;
-    const version = info?.version ?? '';
-    const isMac = process.platform === 'darwin';
-    const isLinuxAppImage = process.platform === 'linux' && Boolean(process.env.APPIMAGE);
-    const buttons = isMac
-      ? ['Quit to install', 'Later']
-      : isLinuxAppImage ? ['Restart to install', 'Later'] : ['Install now', 'Later'];
-    void dialog.showMessageBox({
-      type: 'info',
-      message: `Rauhwpx ${version} is ready to install`,
-      detail: isMac
-        ? 'It will be installed when Rauhwpx quits.'
-        : isLinuxAppImage
-          ? 'Restart Rauhwpx to replace this AppImage with the verified update.'
-          : 'The installer opens after Rauhwpx closes; Windows may ask you to confirm it because it is not signed yet.',
-      buttons,
-      defaultId: 1,
-      cancelId: 1,
-    }).then(({ response }) => {
-      if (response !== 0) return;
-      if (isMac) {
-        app.quit();
-        return;
-      }
-      updateDownloadReady = false;
-      setImmediate(() => autoUpdater.quitAndInstall(false, true));
-    });
+    }).catch((error) => updateLifecycle.reportError(error));
   });
 }
 
 async function checkForAppUpdates({ manual = true } = {}) {
+  if (manual && updateLifecycle.hasDownloadedUpdate()) return updateLifecycle.offerInstall();
   if (updateCheckPromise) {
     if (manual) manualUpdateCheck = true;
     return updateCheckPromise;
@@ -725,18 +714,12 @@ async function checkForAppUpdates({ manual = true } = {}) {
       if (process.platform === 'linux' && !process.env.APPIMAGE) {
         return await checkForDebUpdates({ manual: manualUpdateCheck });
       }
-      return await autoUpdater.checkForUpdates();
+      const result = await autoUpdater.checkForUpdates();
+      // Keep a user-requested automatic download interactive until it settles.
+      if (manualUpdateCheck && result?.downloadPromise) await result.downloadPromise;
+      return result;
     } catch (error) {
-      console.warn('[rauhwpx] update check failed:', error?.message ?? error);
-      if (!manualUpdateCheck) return null;
-      const { response } = await dialog.showMessageBox({
-        type: 'warning',
-        message: 'Rauhwpx could not check for updates',
-        detail: error?.message ?? String(error),
-        buttons: ['Open releases page', 'OK'],
-        defaultId: 1,
-      });
-      if (response === 0) void shell.openExternal(RELEASES_URL);
+      if (manualUpdateCheck) await updateLifecycle.reportError(error);
       return null;
     } finally {
       manualUpdateCheck = false;
@@ -888,7 +871,7 @@ async function createWindow(launch = launchRequest(), { generatedDocument = null
     nativeFiles.releaseSession(session.sessionId);
     sessions.removeWindow(window);
     if (quitRequested) setImmediate(() => {
-      if (quitRequested) app.quit();
+      if (quitRequested && !quitting) app.quit();
     });
     const hub = hubOwner.context() ?? closeHubContext;
     void closeHubSession({
@@ -974,6 +957,7 @@ async function openLaunch(request) {
 }
 
 function queueLaunch(request) {
+  if (quitting) return;
   if (!desktopReady) {
     pendingLaunches.push(request);
     return;
@@ -1524,49 +1508,22 @@ ipcMain.handle('desktop:close-response', async (event, requestId, allowClose) =>
   const session = sessionForEvent(event);
   if (session.pendingCloseRequestId !== requestId) return false;
   session.pendingCloseRequestId = null;
-  if (!allowClose) {
-    quitRequested = false;
-    return false;
-  }
-  if (session.cloudTransferPromise) {
-    let timer;
-    try {
-      await Promise.race([
-        session.cloudTransferPromise,
-        new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new Error('Cloud transfer close wait timed out')), CLOUD_CLOSE_WAIT_MS);
-        }),
-      ]);
-    } catch {
-      quitRequested = false;
-      return false;
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-  if (session.cloudTransferIntent) {
-    let timer;
-    const result = await Promise.race([
-      session.cloudTransferIntent.promise.then((completed) => ({ completed })),
-      new Promise((resolve) => {
-        timer = setTimeout(() => resolve({ completed: false, timeout: true }), CLOUD_CLOSE_WAIT_MS);
-      }),
-    ]);
-    clearTimeout(timer);
-    if (result.timeout && session.cloudTransferIntent && !session.cloudTransferIntent.settled) {
-      session.cloudTransferIntent.settled = true;
-      session.cloudTransferIntent.settle(false);
-      session.cloudTransferIntent = null;
-    }
-    if (!result.completed) {
-      quitRequested = false;
-      return false;
-    }
-  }
-  await persistNativeBookmarks();
-  session.allowCloseOnce = true;
-  session.window.close();
-  return true;
+  return completeWindowClose({
+    session,
+    allowClose,
+    cancelQuit: updateLifecycle.cancelQuit,
+    persistBookmarks: () => persistNativeBookmarks({ rejectOnError: true }),
+    timeoutMs: CLOUD_CLOSE_WAIT_MS,
+    onError: async (error) => {
+      console.warn('[rauhwpx] document close failed:', error);
+      await dialog.showMessageBox({
+        type: 'warning',
+        message: 'Rauhwpx could not close the document',
+        detail: error?.message ?? String(error),
+        buttons: ['OK'],
+      });
+    },
+  });
 });
 ipcMain.handle('agent-hub:ensure', async (event) => {
   sessionForEvent(event);
@@ -1578,9 +1535,7 @@ ipcMain.handle('agent-hub:ensure', async (event) => {
 if (!hasSingleInstanceLock) {
   app.quit();
 } else {
-  app.on('before-quit', () => {
-    quitRequested = true;
-  });
+  updateLifecycle.start();
 
   app.on('second-instance', (_event, argv, workingDirectory) => {
     queueLaunch(launchRequest({ argv, cwd: workingDirectory, source: 'second-instance' }));
@@ -1718,6 +1673,7 @@ if (!hasSingleInstanceLock) {
   });
 
   app.on('activate', () => {
+    if (quitting) return;
     const windows = sessions.windows();
     if (windows.length === 0) {
       queueLaunch(launchRequest({ source: 'activate' }));
@@ -1731,25 +1687,5 @@ if (!hasSingleInstanceLock) {
 
   app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit();
-  });
-
-  let teardownStarted = false;
-  let teardownFinished = false;
-  app.on('will-quit', (event) => {
-    if (teardownFinished) return;
-    event.preventDefault();
-    if (teardownStarted) return;
-    teardownStarted = true;
-    quitting = true;
-    void Promise.allSettled([
-      cloudDisplayConnections.closeAll(),
-      cloudCoordinator?.stop(),
-      hubOwner.teardown().catch((error) => {
-        console.warn('[rauhwpx] agent hub teardown did not finish:', error);
-      }),
-    ]).then(() => cloudTransport?.stop()).finally(() => {
-      teardownFinished = true;
-      app.exit(0);
-    });
   });
 }

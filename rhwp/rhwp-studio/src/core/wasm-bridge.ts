@@ -1,4 +1,5 @@
 import init, { HwpDocument, version } from '@wasm/rhwp.js';
+import { withBodyTextPaginationBatch } from './pagination-batch';
 import { requireCharShapeRunsDocument, parseCharShapeRuns, validateCharShapeRuns } from './char-shape-runs';
 import type { CharShapeRun } from './types';
 import * as wasmExports from '@wasm/rhwp.js';
@@ -1175,6 +1176,12 @@ export class WasmBridge {
     const hitTest = (this.doc as any).hitTestBodyFootnoteMarker;
     if (typeof hitTest !== 'function') return { hit: false };
     return JSON.parse(hitTest.call(this.doc, pageNum, x, y));
+  }
+
+  /** 여러 줄 삽입의 중간 페이지네이션을 생략하고 마지막에 한 번 확정한다. */
+  withBodyTextPaginationBatch<T>(sectionIdx: number, edit: () => T): T {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return withBodyTextPaginationBatch(this.doc, sectionIdx, edit);
   }
 
   insertText(sec: number, para: number, charOffset: number, text: string): string {

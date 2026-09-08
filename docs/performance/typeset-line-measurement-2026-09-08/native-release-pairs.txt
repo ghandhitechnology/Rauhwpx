@@ -1,0 +1,18 @@
+PAIR 1 before
+kps repeats=48 pages=78 total_ms=1245.684 median_ms=25.479 min_ms=21.596 max_ms=33.680
+business repeats=48 pages=2 total_ms=25.140 median_ms=0.456 min_ms=0.213 max_ms=1.081
+PAIR 1 after
+kps repeats=48 pages=78 total_ms=786.834 median_ms=15.566 min_ms=12.293 max_ms=23.659
+business repeats=48 pages=2 total_ms=25.919 median_ms=0.479 min_ms=0.200 max_ms=1.133
+PAIR 2 after
+kps repeats=48 pages=78 total_ms=784.199 median_ms=15.609 min_ms=12.375 max_ms=23.813
+business repeats=48 pages=2 total_ms=26.315 median_ms=0.492 min_ms=0.215 max_ms=1.135
+PAIR 2 before
+kps repeats=48 pages=78 total_ms=1255.567 median_ms=25.484 min_ms=22.057 max_ms=33.160
+business repeats=48 pages=2 total_ms=25.667 median_ms=0.490 min_ms=0.206 max_ms=1.108
+PAIR 3 before
+kps repeats=48 pages=78 total_ms=1249.491 median_ms=25.307 min_ms=22.084 max_ms=33.571
+business repeats=48 pages=2 total_ms=26.116 median_ms=0.486 min_ms=0.214 max_ms=1.135
+PAIR 3 after
+kps repeats=48 pages=78 total_ms=794.064 median_ms=15.778 min_ms=12.506 max_ms=23.774
+business repeats=48 pages=2 total_ms=26.137 median_ms=0.483 min_ms=0.212 max_ms=1.164

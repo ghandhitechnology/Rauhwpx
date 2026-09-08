@@ -6445,6 +6445,12 @@ impl HwpDocument {
         self.convert_to_editable_native().map_err(|e| e.into())
     }
 
+    /// 본문 여러 줄 삽입의 중간 페이지네이션을 생략할 수 있는 단일 단 구역인지 확인한다.
+    #[wasm_bindgen(js_name = canBatchBodyText)]
+    pub fn can_batch_body_text(&self, section_idx: u32) -> bool {
+        self.can_batch_body_text_native(section_idx as usize)
+    }
+
     /// Batch 모드를 시작한다. 이후 Command 호출 시 paginate()를 건너뛴다.
     #[wasm_bindgen(js_name = beginBatch)]
     pub fn begin_batch(&mut self) -> Result<String, JsValue> {
