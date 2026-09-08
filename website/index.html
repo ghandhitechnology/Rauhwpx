@@ -145,6 +145,14 @@ a{color:var(--ink)}
 .btn--sm{min-height:44px;padding:9px 15px;font-size:15px}
 .nav .btn--fill{color:var(--patch)}
 
+.update-notice{background:var(--patch);border-bottom:1px solid var(--rule)}
+.update-notice .wrap{display:flex;flex-wrap:wrap;align-items:center;gap:16px 28px;padding-top:20px;padding-bottom:20px}
+.update-notice__text{flex:1 1 560px;min-width:0}
+.update-notice h2{font-size:18px;line-height:1.5;margin-bottom:4px}
+.update-notice p{font-size:15px;line-height:1.7;color:var(--ink-2)}
+.update-notice .btn{flex:0 0 auto}
+.update-notice .btn:focus-visible{outline:3px solid var(--ink);outline-offset:4px}
+
 /* GitHub 스타 수 — API 응답 전에는 숨김 */
 .gh-stars{display:none}
 .gh-stars.is-on{
@@ -474,6 +482,16 @@ html.js .rv-drop.is-in{opacity:1;transform:none}
 </header>
 
 <main id="top">
+
+  <aside class="update-notice" aria-labelledby="update-notice-title">
+    <div class="wrap">
+      <div class="update-notice__text">
+        <h2 id="update-notice-title">기존 사용자 업데이트 안내</h2>
+        <p>2.0.2에서 앱 내 업데이트 설치 오류를 수정했어요.<br>2.0.1 이하 버전을 사용 중이라면 2.0.2를 한 번 직접 다운로드해 설치해 주세요.</p>
+      </div>
+      <a class="btn btn--line btn--sm" href="https://github.com/ghandhitechnology/Rauhwpx/releases/tag/v2.0.2">2.0.2 다운로드</a>
+    </div>
+  </aside>
 
   <!-- ─────────── 히어로 ─────────── -->
   <section class="hero">
