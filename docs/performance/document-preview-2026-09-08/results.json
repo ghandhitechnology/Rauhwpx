@@ -1,48 +1,59 @@
 {
-  "baseline-clean": {
-    "label": "baseline-clean",
+  "final-baseline-edits": {
+    "label": "final-baseline-edits",
+    "platform": "darwin arm64",
+    "cpu": "Apple M4",
+    "wasmSha256": "04e75ba6347f7ab064c9ed38c1d0e2698b45e966f564eaae774d074645c94b51",
     "commit": "b44bc5ee3ef9dbd71cc52551ed7e2d7ece017d2f",
     "scenarios": [
       {
         "mode": "global",
+        "paragraphCountBefore": 93,
+        "paragraphCountAfter": 93,
+        "exportedHwpSha256": null,
+        "geometryCalls": {
+          "getCursorRect": 0,
+          "getSelectionRects": 0
+        },
+        "operations": 48,
         "edits": 48,
         "bursts": 12,
         "burstSize": 4,
         "pageCount": 6,
-        "editMs": 1113.4000000357628,
-        "observationMs": 2341.100000023842,
+        "editMs": 1131.300000011921,
+        "observationMs": 2343.600000023842,
         "finalPixelsMatchFreshRender": true,
         "activeRaf": {
-          "n": 25,
-          "mean": 38.41599999999998,
+          "n": 22,
+          "mean": 39.395454545454555,
           "p50": 33.30000000000018,
-          "p95": 83.40000000000055,
-          "max": 100
+          "p95": 83.39999999999964,
+          "max": 116.69999999999982
         },
-        "activeFps": 22.45374528399227,
+        "activeFps": 20.33059312274166,
         "raf": {
-          "n": 99,
-          "mean": 23.337373737373735,
+          "n": 96,
+          "mean": 24.131249999999998,
           "p50": 16.699999999999818,
-          "p95": 66.60000000000036,
-          "max": 133.29999999999927
+          "p95": 83.30000000000018,
+          "max": 133.30000000000018
         },
-        "fps": 42.84972299168975,
-        "framesOver33ms": 11,
+        "fps": 41.44004144004144,
+        "framesOver33ms": 12,
         "longTasks": {
           "n": 12,
-          "mean": 79.08333333333333,
-          "p50": 74,
-          "p95": 137,
-          "max": 137
+          "mean": 77.83333333333333,
+          "p50": 72,
+          "p95": 133,
+          "max": 133
         },
-        "renderCalls": 16,
+        "renderCalls": 18,
         "renderMs": {
-          "n": 16,
-          "mean": 9.262499995529652,
-          "p50": 8,
-          "p95": 17.19999998807907,
-          "max": 17.19999998807907
+          "n": 18,
+          "mean": 9.93333332075013,
+          "p50": 7.899999976158142,
+          "p95": 20.600000023841858,
+          "max": 20.600000023841858
         },
         "renderedPages": [
           0,
@@ -58,44 +69,52 @@
       },
       {
         "mode": "page-local",
+        "paragraphCountBefore": 93,
+        "paragraphCountAfter": 93,
+        "exportedHwpSha256": null,
+        "geometryCalls": {
+          "getCursorRect": 0,
+          "getSelectionRects": 0
+        },
+        "operations": 48,
         "edits": 48,
         "bursts": 12,
         "burstSize": 4,
         "pageCount": 6,
-        "editMs": 1046.3999999761581,
-        "observationMs": 2273.899999976158,
+        "editMs": 1039.5999999642372,
+        "observationMs": 2260.5,
         "finalPixelsMatchFreshRender": true,
         "activeRaf": {
-          "n": 19,
-          "mean": 41.30000000125483,
-          "p50": 33.29999999999973,
+          "n": 18,
+          "mean": 38.890888888888895,
+          "p50": 33.40000000000009,
           "p95": 100,
           "max": 100
         },
-        "activeFps": 18.157492355153774,
+        "activeFps": 18.27626010066719,
         "raf": {
-          "n": 92,
-          "mean": 24.28913043504176,
+          "n": 91,
+          "mean": 23.80918681318681,
           "p50": 16.699999999999818,
-          "p95": 83.30000000000018,
+          "p95": 66.69999999999982,
           "max": 150
         },
-        "fps": 41.17067931576945,
-        "framesOver33ms": 10,
+        "fps": 42.0005944699525,
+        "framesOver33ms": 11,
         "longTasks": {
           "n": 12,
-          "mean": 84.25,
+          "mean": 83.66666666666667,
           "p50": 78,
-          "p95": 143,
-          "max": 143
+          "p95": 147,
+          "max": 147
         },
         "renderCalls": 12,
         "renderMs": {
           "n": 12,
-          "mean": 6.475000003973643,
-          "p50": 6.199999988079071,
-          "p95": 9,
-          "max": 9
+          "mean": 6.6083333392937975,
+          "p50": 6.600000023841858,
+          "p95": 10.5,
+          "max": 10.5
         },
         "renderedPages": [
           0
@@ -110,44 +129,52 @@
       },
       {
         "mode": "global",
+        "paragraphCountBefore": 841,
+        "paragraphCountAfter": 841,
+        "exportedHwpSha256": null,
+        "geometryCalls": {
+          "getCursorRect": 0,
+          "getSelectionRects": 0
+        },
+        "operations": 48,
         "edits": 48,
         "bursts": 12,
         "burstSize": 4,
         "pageCount": 78,
-        "editMs": 19173.399999976158,
-        "observationMs": 20409.19999998808,
+        "editMs": 19234.099999964237,
+        "observationMs": 20458.099999964237,
         "finalPixelsMatchFreshRender": true,
         "activeRaf": {
-          "n": 23,
-          "mean": 751.7260869570401,
-          "p50": 50.099999999998545,
-          "p95": 1716.5,
-          "max": 1816.6000000000022
+          "n": 20,
+          "mean": 774.135,
+          "p50": 1383.3000000000002,
+          "p95": 1716.5999999999985,
+          "max": 1716.5999999999985
         },
-        "activeFps": 1.1995785828297851,
+        "activeFps": 1.0918108983544355,
         "raf": {
-          "n": 93,
-          "mean": 218.88387096787014,
+          "n": 90,
+          "mean": 226.8433333333333,
           "p50": 16.700000000000728,
-          "p95": 1583.300000000001,
-          "max": 1883.2999999999993
+          "p95": 1599.8999999999996,
+          "max": 1933.199999999997
         },
-        "fps": 4.568632652457017,
-        "framesOver33ms": 18,
+        "fps": 4.408328802550954,
+        "framesOver33ms": 17,
         "longTasks": {
           "n": 12,
-          "mean": 1557,
-          "p50": 1528,
-          "p95": 1875,
-          "max": 1875
+          "mean": 1562.25,
+          "p50": 1527,
+          "p95": 1908,
+          "max": 1908
         },
         "renderCalls": 18,
         "renderMs": {
           "n": 18,
-          "mean": 27.788888888226616,
-          "p50": 23.900000035762787,
-          "p95": 42.80000001192093,
-          "max": 42.80000001192093
+          "mean": 27.827777766519123,
+          "p50": 24.799999952316284,
+          "p95": 42.10000002384186,
+          "max": 42.10000002384186
         },
         "renderedPages": [
           0,
@@ -163,44 +190,52 @@
       },
       {
         "mode": "page-local",
+        "paragraphCountBefore": 841,
+        "paragraphCountAfter": 841,
+        "exportedHwpSha256": null,
+        "geometryCalls": {
+          "getCursorRect": 0,
+          "getSelectionRects": 0
+        },
+        "operations": 48,
         "edits": 48,
         "bursts": 12,
         "burstSize": 4,
         "pageCount": 78,
-        "editMs": 19168.69999998808,
-        "observationMs": 20391.399999976158,
+        "editMs": 19557.30000001192,
+        "observationMs": 20776.80000001192,
         "finalPixelsMatchFreshRender": true,
         "activeRaf": {
-          "n": 18,
-          "mean": 955.1555555582046,
-          "p50": 1426.7760000476837,
-          "p95": 1900,
-          "max": 1900
+          "n": 20,
+          "mean": 809.1328999999998,
+          "p50": 1433.1999999999998,
+          "p95": 1850,
+          "max": 1850
         },
-        "activeFps": 0.9390308158618579,
+        "activeFps": 1.073767851389875,
         "raf": {
-          "n": 90,
-          "mean": 226.21444444497425,
+          "n": 92,
+          "mean": 209.77454347826085,
           "p50": 16.700000000000728,
-          "p95": 1583.2999999999993,
-          "max": 1983.2999999999993
+          "p95": 1683.2999999999993,
+          "max": 1933.2000000000007
         },
-        "fps": 4.4205842047511075,
-        "framesOver33ms": 12,
+        "fps": 4.767022649264547,
+        "framesOver33ms": 11,
         "longTasks": {
           "n": 12,
-          "mean": 1596.1666666666667,
-          "p50": 1546,
-          "p95": 1992,
-          "max": 1992
+          "mean": 1628.8333333333333,
+          "p50": 1676,
+          "p95": 1946,
+          "max": 1946
         },
         "renderCalls": 12,
         "renderMs": {
           "n": 12,
-          "mean": 21.54166667163372,
-          "p50": 22.19999998807907,
-          "p95": 28.100000023841858,
-          "max": 28.100000023841858
+          "mean": 21.508333325386047,
+          "p50": 23.30000001192093,
+          "p95": 26.5,
+          "max": 26.5
         },
         "renderedPages": [
           0
@@ -214,10 +249,11 @@
         "errors": []
       }
     ],
-    "browser": "Chrome/152.0.7977.76"
+    "browser": "Chrome/152.0.7977.76",
+    "complete": true
   },
-  "after": {
-    "label": "after",
+  "final-after-edits": {
+    "label": "final-after-edits",
     "platform": "darwin arm64",
     "cpu": "Apple M4",
     "wasmSha256": "04e75ba6347f7ab064c9ed38c1d0e2698b45e966f564eaae774d074645c94b51",
@@ -225,6 +261,9 @@
     "scenarios": [
       {
         "mode": "global",
+        "paragraphCountBefore": 93,
+        "paragraphCountAfter": 93,
+        "exportedHwpSha256": null,
         "geometryCalls": {
           "getCursorRect": 0,
           "getSelectionRects": 0
@@ -234,40 +273,40 @@
         "bursts": 12,
         "burstSize": 4,
         "pageCount": 6,
-        "editMs": 1017.6999999880791,
-        "observationMs": 2232.800000011921,
+        "editMs": 1029.5,
+        "observationMs": 2257.100000023842,
         "finalPixelsMatchFreshRender": true,
         "activeRaf": {
-          "n": 23,
-          "mean": 38.30434782505037,
+          "n": 21,
+          "mean": 42.06190476190475,
           "p50": 33.30000000000018,
-          "p95": 83.40000000000055,
-          "max": 116.70000000000073
+          "p95": 100,
+          "max": 116.69999999999982
         },
-        "activeFps": 22.599980348107902,
+        "activeFps": 21.369596891694997,
         "raf": {
-          "n": 97,
-          "mean": 22.82680412346555,
+          "n": 95,
+          "mean": 23.331578947368424,
           "p50": 16.699999999999818,
-          "p95": 66.60000000000036,
-          "max": 116.70000000000073
+          "p95": 66.70000000000073,
+          "max": 116.69999999999982
         },
-        "fps": 43.8081474126296,
-        "framesOver33ms": 12,
+        "fps": 42.86036544101059,
+        "framesOver33ms": 11,
         "longTasks": {
           "n": 10,
-          "mean": 81,
-          "p50": 79,
-          "p95": 132,
-          "max": 132
+          "mean": 82.4,
+          "p50": 80,
+          "p95": 133,
+          "max": 133
         },
         "renderCalls": 13,
         "renderMs": {
           "n": 13,
-          "mean": 7.846153850738819,
-          "p50": 6.399999976158142,
-          "p95": 25.400000035762787,
-          "max": 25.400000035762787
+          "mean": 8.161538467957424,
+          "p50": 6.299999952316284,
+          "p95": 27.69999998807907,
+          "max": 27.69999998807907
         },
         "renderedPages": [
           0,
@@ -283,6 +322,9 @@
       },
       {
         "mode": "page-local",
+        "paragraphCountBefore": 93,
+        "paragraphCountAfter": 93,
+        "exportedHwpSha256": null,
         "geometryCalls": {
           "getCursorRect": 0,
           "getSelectionRects": 0
@@ -292,40 +334,40 @@
         "bursts": 12,
         "burstSize": 4,
         "pageCount": 6,
-        "editMs": 1039.699999988079,
-        "observationMs": 2273.699999988079,
+        "editMs": 1067.6000000238419,
+        "observationMs": 2295.5,
         "finalPixelsMatchFreshRender": true,
         "activeRaf": {
-          "n": 22,
-          "mean": 40.7772727278146,
-          "p50": 33.40000000000009,
-          "p95": 100,
+          "n": 20,
+          "mean": 45.825,
+          "p50": 33.399999999999636,
+          "p95": 116.70000000000027,
           "max": 116.70000000000027
         },
-        "activeFps": 21.159949985815377,
+        "activeFps": 19.67028849712535,
         "raf": {
-          "n": 95,
-          "mean": 23.477894736967592,
+          "n": 93,
+          "mean": 24.191397849462362,
           "p50": 16.699999999999818,
           "p95": 66.69999999999982,
-          "max": 133.30000000000018
+          "max": 116.70000000000027
         },
-        "fps": 42.59325681469343,
-        "framesOver33ms": 12,
+        "fps": 41.33700773402081,
+        "framesOver33ms": 11,
         "longTasks": {
           "n": 10,
-          "mean": 83.2,
-          "p50": 79,
-          "p95": 130,
-          "max": 130
+          "mean": 86.1,
+          "p50": 84,
+          "p95": 134,
+          "max": 134
         },
         "renderCalls": 12,
         "renderMs": {
           "n": 12,
-          "mean": 6.4250000069538755,
-          "p50": 6.599999964237213,
-          "p95": 8.600000023841858,
-          "max": 8.600000023841858
+          "mean": 6.508333325386047,
+          "p50": 6.699999988079071,
+          "p95": 8.699999988079071,
+          "max": 8.699999988079071
         },
         "renderedPages": [
           0
@@ -340,6 +382,9 @@
       },
       {
         "mode": "global",
+        "paragraphCountBefore": 841,
+        "paragraphCountAfter": 841,
+        "exportedHwpSha256": null,
         "geometryCalls": {
           "getCursorRect": 0,
           "getSelectionRects": 0
@@ -349,40 +394,40 @@
         "bursts": 12,
         "burstSize": 4,
         "pageCount": 78,
-        "editMs": 18993.19999998808,
-        "observationMs": 20230.5,
+        "editMs": 19088.900000035763,
+        "observationMs": 20304.400000035763,
         "finalPixelsMatchFreshRender": true,
         "activeRaf": {
-          "n": 22,
-          "mean": 777.0227272727273,
-          "p50": 1400,
+          "n": 21,
+          "mean": 814.257142857143,
+          "p50": 1399.9,
           "p95": 1716.5999999999985,
-          "max": 1800
+          "max": 1816.5999999999985
         },
-        "activeFps": 1.15830928964123,
+        "activeFps": 1.1525022395192381,
         "raf": {
           "n": 92,
-          "mean": 219.32173913043476,
+          "mean": 220.4630434782609,
           "p50": 16.700000000000728,
-          "p95": 1600,
-          "max": 1899.9000000000015
+          "p95": 1583.2999999999993,
+          "max": 2000
         },
-        "fps": 4.5595115375465864,
+        "fps": 4.5359076252551445,
         "framesOver33ms": 13,
         "longTasks": {
-          "n": 13,
-          "mean": 1444.3076923076924,
-          "p50": 1493,
-          "p95": 1882,
-          "max": 1882
+          "n": 12,
+          "mean": 1567.4166666666667,
+          "p50": 1530,
+          "p95": 1977,
+          "max": 1977
         },
         "renderCalls": 13,
         "renderMs": {
           "n": 13,
-          "mean": 23.592307686805725,
-          "p50": 21.799999952316284,
-          "p95": 56.69999998807907,
-          "max": 56.69999998807907
+          "mean": 23.130769243607155,
+          "p50": 21.700000047683716,
+          "p95": 45,
+          "max": 45
         },
         "renderedPages": [
           0,
@@ -398,6 +443,9 @@
       },
       {
         "mode": "page-local",
+        "paragraphCountBefore": 841,
+        "paragraphCountAfter": 841,
+        "exportedHwpSha256": null,
         "geometryCalls": {
           "getCursorRect": 0,
           "getSelectionRects": 0
@@ -407,40 +455,40 @@
         "bursts": 12,
         "burstSize": 4,
         "pageCount": 78,
-        "editMs": 19058.899999976158,
-        "observationMs": 20293.899999976158,
+        "editMs": 19887.700000047684,
+        "observationMs": 21116.900000035763,
         "finalPixelsMatchFreshRender": true,
         "activeRaf": {
-          "n": 23,
-          "mean": 745.5826086956522,
-          "p50": 33.29999999999927,
-          "p95": 1716.5999999999985,
-          "max": 1799.9000000000015
+          "n": 21,
+          "mean": 851.5571428571429,
+          "p50": 1449.8999999999996,
+          "p95": 1783.2999999999993,
+          "max": 1866.7000000000007
         },
-        "activeFps": 1.2067852814185904,
+        "activeFps": 1.1062113768785355,
         "raf": {
-          "n": 95,
-          "mean": 213.14,
-          "p50": 16.700000000000728,
-          "p95": 1583.2000000000007,
-          "max": 1899.7999999999993
+          "n": 94,
+          "mean": 224.28297872340423,
+          "p50": 16.69999999999709,
+          "p95": 1699.8999999999996,
+          "max": 1999.9000000000015
         },
-        "fps": 4.69175190015952,
+        "fps": 4.458653107301757,
         "framesOver33ms": 13,
         "longTasks": {
           "n": 12,
-          "mean": 1565.25,
-          "p50": 1549,
-          "p95": 1892,
-          "max": 1892
+          "mean": 1634.4166666666667,
+          "p50": 1614,
+          "p95": 1985,
+          "max": 1985
         },
         "renderCalls": 12,
         "renderMs": {
           "n": 12,
-          "mean": 21.549999992052715,
-          "p50": 22.5,
-          "p95": 27.19999998807907,
-          "max": 27.19999998807907
+          "mean": 21.708333333333332,
+          "p50": 22.799999952316284,
+          "p95": 28.19999998807907,
+          "max": 28.19999998807907
         },
         "renderedPages": [
           0
@@ -594,8 +642,8 @@
     "browser": "Chrome/152.0.7977.76",
     "complete": true
   },
-  "baseline-typewriter-1": {
-    "label": "baseline-typewriter-1",
+  "final-baseline-typewriter-1": {
+    "label": "final-baseline-typewriter-1",
     "platform": "darwin arm64",
     "cpu": "Apple M4",
     "wasmSha256": "04e75ba6347f7ab064c9ed38c1d0e2698b45e966f564eaae774d074645c94b51",
@@ -603,8 +651,11 @@
     "scenarios": [
       {
         "mode": "typewriter",
+        "paragraphCountBefore": 93,
+        "paragraphCountAfter": 93,
+        "exportedHwpSha256": null,
         "geometryCalls": {
-          "getCursorRect": 12576,
+          "getCursorRect": 12704,
           "getSelectionRects": 100
         },
         "operations": 100,
@@ -612,30 +663,30 @@
         "bursts": 10,
         "burstSize": 10,
         "pageCount": 6,
-        "editMs": 1011.3000000119209,
-        "observationMs": 2228.800000011921,
+        "editMs": 1055.5999999642372,
+        "observationMs": 2278,
         "finalPixelsMatchFreshRender": true,
         "activeRaf": {
           "n": 18,
-          "mean": 40.827777777777754,
-          "p50": 33.30000000000018,
-          "p95": 116.69999999999982,
-          "max": 116.69999999999982
+          "mean": 50.005555555555574,
+          "p50": 33.29999999999927,
+          "p95": 133.39999999999964,
+          "max": 133.39999999999964
         },
-        "activeFps": 17.798872737850115,
+        "activeFps": 17.99924213778297,
         "raf": {
           "n": 91,
-          "mean": 24.192307692307693,
+          "mean": 24.725274725274726,
           "p50": 16.699999999999818,
           "p95": 83.30000000000018,
-          "max": 150
+          "max": 133.39999999999964
         },
-        "fps": 41.33545310015898,
-        "framesOver33ms": 10,
+        "fps": 40.44444444444444,
+        "framesOver33ms": 9,
         "longTasks": {
           "n": 9,
-          "mean": 93.44444444444444,
-          "p50": 91,
+          "mean": 96.11111111111111,
+          "p50": 97,
           "p95": 137,
           "max": 137
         },
@@ -660,8 +711,8 @@
     "browser": "Chrome/152.0.7977.76",
     "complete": true
   },
-  "after-typewriter-1": {
-    "label": "after-typewriter-1",
+  "final-after-typewriter-1": {
+    "label": "final-after-typewriter-1",
     "platform": "darwin arm64",
     "cpu": "Apple M4",
     "wasmSha256": "04e75ba6347f7ab064c9ed38c1d0e2698b45e966f564eaae774d074645c94b51",
@@ -669,8 +720,11 @@
     "scenarios": [
       {
         "mode": "typewriter",
+        "paragraphCountBefore": 93,
+        "paragraphCountAfter": 93,
+        "exportedHwpSha256": null,
         "geometryCalls": {
-          "getCursorRect": 731,
+          "getCursorRect": 736,
           "getSelectionRects": 80
         },
         "operations": 100,
@@ -678,32 +732,32 @@
         "bursts": 10,
         "burstSize": 10,
         "pageCount": 6,
-        "editMs": 362.5999999642372,
-        "observationMs": 1590.800000011921,
+        "editMs": 361.5,
+        "observationMs": 1574.5999999642372,
         "finalPixelsMatchFreshRender": true,
         "activeRaf": {
-          "n": 20,
-          "mean": 16.93499999999999,
+          "n": 19,
+          "mean": 17.547368421052614,
           "p50": 16.699999999999818,
-          "p95": 33.400000000000546,
-          "max": 33.400000000000546
+          "p95": 33.29999999999927,
+          "max": 33.29999999999927
         },
-        "activeFps": 55.15719801978096,
+        "activeFps": 55.325034578146614,
         "raf": {
-          "n": 93,
-          "mean": 16.723655913978497,
+          "n": 92,
+          "mean": 16.847826086956523,
           "p50": 16.699999999999818,
           "p95": 16.800000000000182,
-          "max": 33.400000000000546
+          "max": 33.29999999999927
         },
-        "fps": 59.79553783835915,
-        "framesOver33ms": 1,
+        "fps": 59.354838709677416,
+        "framesOver33ms": 0,
         "longTasks": {
-          "n": 1,
-          "mean": 52,
-          "p50": 52,
-          "p95": 52,
-          "max": 52
+          "n": 0,
+          "mean": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
         },
         "renderCalls": 0,
         "renderMs": {
@@ -726,8 +780,8 @@
     "browser": "Chrome/152.0.7977.76",
     "complete": true
   },
-  "baseline-typewriter-2": {
-    "label": "baseline-typewriter-2",
+  "final-baseline-typewriter-2": {
+    "label": "final-baseline-typewriter-2",
     "platform": "darwin arm64",
     "cpu": "Apple M4",
     "wasmSha256": "04e75ba6347f7ab064c9ed38c1d0e2698b45e966f564eaae774d074645c94b51",
@@ -735,8 +789,11 @@
     "scenarios": [
       {
         "mode": "typewriter",
+        "paragraphCountBefore": 93,
+        "paragraphCountAfter": 93,
+        "exportedHwpSha256": null,
         "geometryCalls": {
-          "getCursorRect": 12806,
+          "getCursorRect": 12649,
           "getSelectionRects": 100
         },
         "operations": 100,
@@ -744,32 +801,32 @@
         "bursts": 10,
         "burstSize": 10,
         "pageCount": 6,
-        "editMs": 1075.7000000476837,
-        "observationMs": 2304.600000023842,
+        "editMs": 1051.800000011921,
+        "observationMs": 2265.399999976158,
         "finalPixelsMatchFreshRender": true,
         "activeRaf": {
-          "n": 20,
-          "mean": 45.62499999880792,
-          "p50": 33.400000000000546,
-          "p95": 133.40000000000055,
-          "max": 133.40000000000055
+          "n": 17,
+          "mean": 51.96470588235297,
+          "p50": 33.399999999999636,
+          "p95": 133.29999999999927,
+          "max": 133.29999999999927
         },
-        "activeFps": 18.59254438887556,
+        "activeFps": 17.113519680353672,
         "raf": {
-          "n": 94,
-          "mean": 24.245744680597426,
+          "n": 90,
+          "mean": 24.814444444444447,
           "p50": 16.699999999999818,
-          "p95": 99.89999999999964,
-          "max": 150
+          "p95": 83.30000000000018,
+          "max": 133.29999999999927
         },
-        "fps": 41.244350840675416,
-        "framesOver33ms": 11,
+        "fps": 40.2991089419245,
+        "framesOver33ms": 10,
         "longTasks": {
           "n": 10,
-          "mean": 92.6,
-          "p50": 95,
-          "p95": 142,
-          "max": 142
+          "mean": 91.6,
+          "p50": 94,
+          "p95": 138,
+          "max": 138
         },
         "renderCalls": 0,
         "renderMs": {
@@ -792,8 +849,8 @@
     "browser": "Chrome/152.0.7977.76",
     "complete": true
   },
-  "after-typewriter-2": {
-    "label": "after-typewriter-2",
+  "final-after-typewriter-2": {
+    "label": "final-after-typewriter-2",
     "platform": "darwin arm64",
     "cpu": "Apple M4",
     "wasmSha256": "04e75ba6347f7ab064c9ed38c1d0e2698b45e966f564eaae774d074645c94b51",
@@ -801,6 +858,9 @@
     "scenarios": [
       {
         "mode": "typewriter",
+        "paragraphCountBefore": 93,
+        "paragraphCountAfter": 93,
+        "exportedHwpSha256": null,
         "geometryCalls": {
           "getCursorRect": 731,
           "getSelectionRects": 80
@@ -810,98 +870,101 @@
         "bursts": 10,
         "burstSize": 10,
         "pageCount": 6,
-        "editMs": 355.10000002384186,
-        "observationMs": 1584.199999988079,
+        "editMs": 366.9000000357628,
+        "observationMs": 1595.6000000238419,
+        "finalPixelsMatchFreshRender": true,
+        "activeRaf": {
+          "n": 19,
+          "mean": 17.542105263157904,
+          "p50": 16.699999999999818,
+          "p95": 33.30000000000018,
+          "max": 33.30000000000018
+        },
+        "activeFps": 54.51076587094724,
+        "raf": {
+          "n": 92,
+          "mean": 16.846739130434788,
+          "p50": 16.699999999999818,
+          "p95": 16.799999999999272,
+          "max": 33.30000000000018
+        },
+        "fps": 59.3586683011807,
+        "framesOver33ms": 0,
+        "longTasks": {
+          "n": 1,
+          "mean": 54,
+          "p50": 54,
+          "p95": 54,
+          "max": 54
+        },
+        "renderCalls": 0,
+        "renderMs": {
+          "n": 0,
+          "mean": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "renderedPages": [],
+        "correct": true,
+        "actualLength": 280,
+        "expectedLength": 280,
+        "canvasCount": 2,
+        "sample": "biz_plan.hwp",
+        "initialPageCount": 6,
+        "errors": []
+      }
+    ],
+    "browser": "Chrome/152.0.7977.76",
+    "complete": true
+  },
+  "final-baseline-typewriter-3": {
+    "label": "final-baseline-typewriter-3",
+    "platform": "darwin arm64",
+    "cpu": "Apple M4",
+    "wasmSha256": "04e75ba6347f7ab064c9ed38c1d0e2698b45e966f564eaae774d074645c94b51",
+    "commit": "b44bc5ee3ef9dbd71cc52551ed7e2d7ece017d2f",
+    "scenarios": [
+      {
+        "mode": "typewriter",
+        "paragraphCountBefore": 93,
+        "paragraphCountAfter": 93,
+        "exportedHwpSha256": null,
+        "geometryCalls": {
+          "getCursorRect": 12628,
+          "getSelectionRects": 100
+        },
+        "operations": 100,
+        "edits": 0,
+        "bursts": 10,
+        "burstSize": 10,
+        "pageCount": 6,
+        "editMs": 1038.699999988079,
+        "observationMs": 2260.400000035763,
         "finalPixelsMatchFreshRender": true,
         "activeRaf": {
           "n": 18,
-          "mean": 18.083333333995597,
-          "p50": 16.699999999999818,
-          "p95": 33.400000000000546,
-          "max": 33.400000000000546
+          "mean": 42.58888888888886,
+          "p50": 33.19999999999982,
+          "p95": 116.80000000000018,
+          "max": 116.80000000000018
         },
-        "activeFps": 50.68994649054198,
+        "activeFps": 18.292095889302068,
         "raf": {
-          "n": 92,
-          "mean": 16.94347826099914,
+          "n": 91,
+          "mean": 24.54065934065934,
           "p50": 16.699999999999818,
-          "p95": 16.800000000000182,
-          "max": 33.400000000000546
-        },
-        "fps": 59.019758788360555,
-        "framesOver33ms": 1,
-        "longTasks": {
-          "n": 0,
-          "mean": 0,
-          "p50": 0,
-          "p95": 0,
-          "max": 0
-        },
-        "renderCalls": 0,
-        "renderMs": {
-          "n": 0,
-          "mean": 0,
-          "p50": 0,
-          "p95": 0,
-          "max": 0
-        },
-        "renderedPages": [],
-        "correct": true,
-        "actualLength": 280,
-        "expectedLength": 280,
-        "canvasCount": 2,
-        "sample": "biz_plan.hwp",
-        "initialPageCount": 6,
-        "errors": []
-      }
-    ],
-    "browser": "Chrome/152.0.7977.76",
-    "complete": true
-  },
-  "baseline-typewriter-3": {
-    "label": "baseline-typewriter-3",
-    "platform": "darwin arm64",
-    "cpu": "Apple M4",
-    "wasmSha256": "04e75ba6347f7ab064c9ed38c1d0e2698b45e966f564eaae774d074645c94b51",
-    "commit": "b44bc5ee3ef9dbd71cc52551ed7e2d7ece017d2f",
-    "scenarios": [
-      {
-        "mode": "typewriter",
-        "geometryCalls": {
-          "getCursorRect": 12716,
-          "getSelectionRects": 100
-        },
-        "operations": 100,
-        "edits": 0,
-        "bursts": 10,
-        "burstSize": 10,
-        "pageCount": 6,
-        "editMs": 1036.4000000357628,
-        "observationMs": 2252.699999988079,
-        "finalPixelsMatchFreshRender": true,
-        "activeRaf": {
-          "n": 19,
-          "mean": 45.778947367793656,
-          "p50": 33.399999999999636,
-          "p95": 116.60000000000036,
-          "max": 116.60000000000036
-        },
-        "activeFps": 18.332690080417187,
-        "raf": {
-          "n": 92,
-          "mean": 24.128260869435646,
-          "p50": 16.699999999999818,
-          "p95": 100,
+          "p95": 83.30000000000018,
           "max": 150
         },
-        "fps": 41.44517524123527,
-        "framesOver33ms": 11,
+        "fps": 40.748701415009855,
+        "framesOver33ms": 10,
         "longTasks": {
-          "n": 8,
-          "mean": 99.5,
-          "p50": 106,
-          "p95": 140,
-          "max": 140
+          "n": 10,
+          "mean": 90.7,
+          "p50": 93,
+          "p95": 137,
+          "max": 137
         },
         "renderCalls": 0,
         "renderMs": {
@@ -924,8 +987,8 @@
     "browser": "Chrome/152.0.7977.76",
     "complete": true
   },
-  "after-typewriter-3": {
-    "label": "after-typewriter-3",
+  "final-after-typewriter-3": {
+    "label": "final-after-typewriter-3",
     "platform": "darwin arm64",
     "cpu": "Apple M4",
     "wasmSha256": "04e75ba6347f7ab064c9ed38c1d0e2698b45e966f564eaae774d074645c94b51",
@@ -933,8 +996,11 @@
     "scenarios": [
       {
         "mode": "typewriter",
+        "paragraphCountBefore": 93,
+        "paragraphCountAfter": 93,
+        "exportedHwpSha256": null,
         "geometryCalls": {
-          "getCursorRect": 728,
+          "getCursorRect": 731,
           "getSelectionRects": 80
         },
         "operations": 100,
@@ -942,32 +1008,32 @@
         "bursts": 10,
         "burstSize": 10,
         "pageCount": 6,
-        "editMs": 368.39999997615814,
-        "observationMs": 1594.1000000238419,
+        "editMs": 356.0999999642372,
+        "observationMs": 1582.699999988079,
         "finalPixelsMatchFreshRender": true,
         "activeRaf": {
           "n": 19,
-          "mean": 17.789473684837933,
+          "mean": 17.542105263157904,
           "p50": 16.699999999999818,
-          "p95": 50,
-          "max": 50
+          "p95": 33.399999999999636,
+          "max": 33.399999999999636
         },
-        "activeFps": 51.57437568194796,
+        "activeFps": 56.16399888236052,
         "raf": {
           "n": 92,
-          "mean": 16.8978260870861,
+          "mean": 16.847826086956523,
           "p50": 16.699999999999818,
           "p95": 16.800000000000182,
-          "max": 50
+          "max": 33.399999999999636
         },
-        "fps": 59.17921008574201,
+        "fps": 59.354838709677416,
         "framesOver33ms": 1,
         "longTasks": {
-          "n": 1,
-          "mean": 56,
-          "p50": 56,
-          "p95": 56,
-          "max": 56
+          "n": 0,
+          "mean": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
         },
         "renderCalls": 0,
         "renderMs": {
@@ -990,8 +1056,8 @@
     "browser": "Chrome/152.0.7977.76",
     "complete": true
   },
-  "experiment-engine-batch": {
-    "label": "experiment-engine-batch",
+  "final-experiment-engine-batch": {
+    "label": "final-experiment-engine-batch",
     "platform": "darwin arm64",
     "cpu": "Apple M4",
     "wasmSha256": "04e75ba6347f7ab064c9ed38c1d0e2698b45e966f564eaae774d074645c94b51",
@@ -999,6 +1065,9 @@
     "scenarios": [
       {
         "mode": "engine-batch",
+        "paragraphCountBefore": 841,
+        "paragraphCountAfter": 841,
+        "exportedHwpSha256": null,
         "geometryCalls": {
           "getCursorRect": 0,
           "getSelectionRects": 0
@@ -1008,40 +1077,40 @@
         "bursts": 12,
         "burstSize": 4,
         "pageCount": 78,
-        "editMs": 6693.099999964237,
-        "observationMs": 7912.699999988079,
+        "editMs": 6673.899999976158,
+        "observationMs": 7901.300000011921,
         "finalPixelsMatchFreshRender": true,
         "activeRaf": {
           "n": 22,
-          "mean": 264.81363636255264,
-          "p50": 350,
-          "p95": 716.6000000000004,
-          "max": 783.2999999999993
+          "mean": 263.6227272727272,
+          "p50": 366.6999999999998,
+          "p95": 683.2999999999993,
+          "max": 766.5999999999985
         },
-        "activeFps": 3.2869671751680913,
+        "activeFps": 3.44626080703669,
         "raf": {
-          "n": 94,
-          "mean": 83.96276595719317,
-          "p50": 16.699999999999818,
-          "p95": 550,
-          "max": 866.5999999999985
+          "n": 92,
+          "mean": 85.50326086956521,
+          "p50": 16.700000000000728,
+          "p95": 566.5999999999995,
+          "max": 850
         },
-        "fps": 11.91004117836984,
-        "framesOver33ms": 12,
+        "fps": 11.695460381627958,
+        "framesOver33ms": 15,
         "longTasks": {
-          "n": 12,
-          "mean": 534.25,
-          "p50": 503,
-          "p95": 861,
-          "max": 861
+          "n": 13,
+          "mean": 496.61538461538464,
+          "p50": 463,
+          "p95": 859,
+          "max": 859
         },
         "renderCalls": 13,
         "renderMs": {
           "n": 13,
-          "mean": 23.400000008252952,
-          "p50": 21.5,
-          "p95": 44.19999998807907,
-          "max": 44.19999998807907
+          "mean": 23.815384621803577,
+          "p50": 21.69999998807907,
+          "p95": 54.69999998807907,
+          "max": 54.69999998807907
         },
         "renderedPages": [
           0,

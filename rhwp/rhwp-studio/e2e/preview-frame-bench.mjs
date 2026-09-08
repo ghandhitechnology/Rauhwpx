@@ -187,9 +187,17 @@ try {
   throw error;
 } finally {
   fs.writeFileSync(path.join(out, 'results.json'), JSON.stringify(results, null, 2));
-  await browser?.close();
+  if (browser) {
+    const closing = browser.close().catch(() => {});
+    await Promise.race([closing, delay(3000, undefined, { ref: false })]);
+    const ownedChrome = browser.process();
+    if (ownedChrome && ownedChrome.exitCode === null && !ownedChrome.signalCode) {
+      ownedChrome.kill('SIGKILL');
+      await Promise.race([closing, delay(1000, undefined, { ref: false })]);
+    }
+  }
   server.kill('SIGTERM');
-  await Promise.race([new Promise(resolve => server.once('exit', resolve)), delay(3000)]);
+  await Promise.race([new Promise(resolve => server.once('exit', resolve)), delay(3000, undefined, { ref: false })]);
   if (server.exitCode === null) server.kill('SIGKILL');
   fs.closeSync(log);
 }
