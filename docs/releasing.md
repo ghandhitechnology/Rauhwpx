@@ -23,6 +23,21 @@ Run the full engine, browser, and agent suites through pull-request CI before me
 
 Cloud builds push `<version>-amd64` and `<version>-arm64` image tags to GHCR. After tagged-source verification, the workflow combines those exact tags into the `<version>` and `stable` multi-architecture images. It also retains `stable-amd64` and `stable-arm64` aliases. Both manifests use versioned architecture tags so overlapping releases cannot mix their images. Desktop and hosted provisioning pin the versioned image; `RAUHWpx_RAILWAY_IMAGE` can override it.
 
+## Cloud feature candidates
+
+Use the dedicated image workflow for a feature branch that needs a matching worker before a desktop release. It builds the engine, native extractor, Studio, provider runtime and worker from the requested ref, then runs document-shell and headed display/input proofs before publication.
+
+```sh
+gh workflow run cloud-sandbox-image.yml --ref feat/seamless-cloud-agents \
+  -f image_tag=2.0.3-cloud.1 -f publish_edge=false -f document_shell_only=false
+```
+
+Without `image_tag`, the candidate tag is `sha-<source commit>`. Download the workflow's `cloud-image-<source commit>` artifact for the registry digest, source commit and verification run. Pin an approved broker rollout to the recorded `image@sha256:...` value. The candidate workflow currently builds Linux amd64 for Railway; the tagged release workflow builds both architectures.
+
+Do not push `v*` or `cloud-sandbox-v*` Git tags for candidate testing. Those triggers promote stable or edge images. A branch dispatch with `publish_edge=false` leaves both shared channels unchanged, and a prerelease desktop version stays out of the stable updater.
+
+For conversation continuity, deploy the compatible broker before changing the worker image or distributing the new desktop. Preserve `SESSION_SECRET`, `DATABASE_URL` and unrelated staged Railway settings. Confirm the new worker advertises `capabilities.conversationRestore` before sending a task. See [the broker continuity and rollback rules](../rhwp/rau-credits/RAUCLOUD.md#conversation-continuity).
+
 ## Nightly
 
 [Nightly verification](../.github/workflows/nightly.yml) starts daily at 03:00 Asia/Seoul, `0 18 * * *` UTC, and also supports manual dispatch. Verification, packaging and publishing share one workflow and commit SHA. Publishing waits for successful verification and both platform packages. A manual run publishes only from `main`.
