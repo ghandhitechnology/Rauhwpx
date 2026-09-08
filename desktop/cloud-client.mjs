@@ -1361,6 +1361,17 @@ export class CloudClient {
     return Array.isArray(result.sessions) ? result.sessions : [];
   }
 
+  restoreSession(sourceSessionId, options = {}) {
+    return this.#request('/v1/sessions/restore', {
+      method: 'POST',
+      signal: options.signal,
+      retryAttempts: options.retryAttempts ?? SAFE_REQUEST_ATTEMPTS,
+      retryBaseMs: options.retryBaseMs,
+      timeoutMs: options.timeoutMs ?? 30_000,
+      body: { sourceSessionId },
+    });
+  }
+
   async takeoverState(sessionId, options = {}) {
     return this.#request(`/v1/sessions/${encodeURIComponent(sessionId)}/takeover`, options);
   }

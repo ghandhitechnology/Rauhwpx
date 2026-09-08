@@ -1,4 +1,5 @@
 import { CloudMergeRecovery } from './cloud-merge-recovery.mjs';
+import { CloudConversationRecovery } from './cloud-conversation-recovery.mjs';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
@@ -29,8 +30,6 @@ const LIVE_HANDOFF_STATES = Object.freeze([
   'downloading',
 ]);
 
-/** Deterministic failures must not retry a full re-upload forever. */
-const MAX_TRANSFER_RECOVERY_ATTEMPTS = 5;
 const NON_RETRYABLE_TRANSFER_CODES = new Set([
   ...PERMANENT_TRANSFER_CODES,
   'PROVIDER_KEY_REQUIRED',
@@ -64,6 +63,16 @@ function nonRetryableTransferError(error) {
     && /^(?:fetch failed|failed to fetch|networkerror|terminated|socket hang up)/i
       .test(String(error?.message ?? '').trim());
   return !transientSystemCodes.has(code) && !fetchTransportFailure;
+}
+
+function retryableQueuedCommandError(error) {
+  if (error?.retryable === true) return true;
+  if (error?.status === 404 || error?.code === 'SESSION_NOT_FOUND') return true;
+  return !nonRetryableTransferError(error);
+}
+
+function conversationRestoreSupported(health) {
+  return health?.capabilities?.conversationRestore === true || health?.conversationRestore === true;
 }
 
 function destinationFromReadiness(readiness) {
@@ -278,6 +287,10 @@ export class CloudCoordinator extends EventEmitter {
   #sandboxMessage = null;
   #raucloudStatus = null;
   #mergeRecovery;
+  #conversationRecovery;
+  #conversationRestores = new Map();
+  #queuedMessageRetries = new Map();
+  #continuityPromise = null;
   #accountSnapshot = null;
   #accountStatusPromise = null;
   #accountStatusAt = 0;
@@ -313,6 +326,9 @@ export class CloudCoordinator extends EventEmitter {
     this.#appServers = Array.isArray(appServers) ? createAppServerRegistry(appServers) : appServers;
     this.#mergeRecovery = new CloudMergeRecovery({
       store, recoveryDir, provider: () => this.#managedAccountProvider(),
+    });
+    this.#conversationRecovery = new CloudConversationRecovery({
+      store, provider: () => this.#managedAccountProvider(),
     });
     this.#collectProviderAuth = typeof collectProviderAuth === 'function' ? collectProviderAuth : null;
     this.#collectImportedAuth = typeof collectImportedAuth === 'function' ? collectImportedAuth : null;
@@ -372,6 +388,7 @@ export class CloudCoordinator extends EventEmitter {
 
   async refreshAccountStatus() {
     this.#mergeRecovery.reset();
+    this.#conversationRecovery.reset();
     // A read started before the account changed may still report the old identity.
     // Finish it before forcing a new read, so it cannot overwrite the fresh result.
     await this.#accountStatusPromise;
@@ -430,6 +447,9 @@ export class CloudCoordinator extends EventEmitter {
         || record.pendingTurnBoundary
       )) {
         this.#watch(record.id, record.cloudSessionId, record.lastEventSequence);
+        if ((record.queuedMessages ?? []).some((message) => message.retryPending)) {
+          void this.#retryQueuedMessages(record).catch(() => {});
+        }
       }
     }
     return this.snapshot();
@@ -437,6 +457,9 @@ export class CloudCoordinator extends EventEmitter {
 
   async stop() {
     this.#stopped = true;
+    const mergePrefetch = this.#mergeRecovery.prefetchInflight;
+    this.#mergeRecovery.reset();
+    this.#conversationRecovery.reset();
     this.#cancelConnectionWork();
     this.#disarmLinkWatchdog();
     const pending = [
@@ -453,6 +476,10 @@ export class CloudCoordinator extends EventEmitter {
       this.#teardownPromise,
       this.#provisionPromise,
       this.#accountStatusPromise,
+      mergePrefetch,
+      this.#continuityPromise,
+      ...this.#conversationRestores.values(),
+      ...this.#queuedMessageRetries.values(),
     ].filter(Boolean);
     for (const controller of this.#watchers.values()) controller.abort();
     this.#watchers.clear();
@@ -1011,7 +1038,7 @@ export class CloudCoordinator extends EventEmitter {
     const controller = new AbortController();
     this.#reconnectController = controller;
     try {
-      await this.#waitForProfileHealth(profile, { attempts: 2, timeoutMs: 2_000, signal: controller.signal });
+      const health = await this.#waitForProfileHealth(profile, { attempts: 2, timeoutMs: 2_000, signal: controller.signal });
       this.#assertProfileEpoch(profileEpoch);
       this.#abortSessionWatchers();
       // Reconcile the remote session list as well as health. A successful
@@ -1023,9 +1050,18 @@ export class CloudCoordinator extends EventEmitter {
         for (const session of this.#remoteSessions.values()) {
           if (['queued', 'running', 'suspended'].includes(session.status)) knownSessions.push(session.id ?? session.sessionId);
         }
-        const sessions = await this.#client.sessions({ timeoutMs: 2_000, retryAttempts: 1, signal: controller.signal });
+        let sessions = await this.#client.sessions({ timeoutMs: 2_000, retryAttempts: 1, signal: controller.signal });
         controller.signal.throwIfAborted();
-        const present = new Set(sessions.map((session) => session.id ?? session.sessionId));
+        let present = new Set(sessions.map((session) => session.id ?? session.sessionId));
+        const restored = await this.#restoreKnownConversations(profile, health, {
+          presentSessionIds: present,
+          signal: controller.signal,
+        });
+        if (restored > 0) {
+          sessions = await this.#client.sessions({ timeoutMs: 2_000, retryAttempts: 1, signal: controller.signal });
+          controller.signal.throwIfAborted();
+          present = new Set(sessions.map((session) => session.id ?? session.sessionId));
+        }
         if (knownSessions.some((id) => !present.has(id))) {
           throw transferError('Cloud 서버에서 이전 작업을 찾지 못했습니다. 서버를 다시 만들어 이 대화에서 이어가세요.', 'SESSION_NOT_FOUND');
         }
@@ -1109,12 +1145,224 @@ export class CloudCoordinator extends EventEmitter {
       const previous = JSON.stringify(this.#mergeRecovery.requests);
       await this.#mergeRecovery.refresh({ force,
         assertCurrent: () => this.#assertProfileEpoch(profileEpoch) });
-      if (previous !== JSON.stringify(this.#mergeRecovery.requests)) this.#emit({ type: 'merge-requests-updated' });
+      if (previous !== JSON.stringify(this.#mergeRecovery.requests)) {
+        this.#emit({ type: 'merge-requests-updated' });
+      }
+      void this.#mergeRecovery.prefetch({
+        assertCurrent: () => this.#assertProfileEpoch(profileEpoch),
+        onDownloaded: (request) => this.#emit({
+          type: 'merge-prefetch-completed',
+          sessionId: request.sessionId,
+          operationId: request.operationId,
+        }),
+        onFailure: (request, error) => this.#emit({
+          type: 'merge-prefetch-deferred',
+          sessionId: request.sessionId,
+          operationId: request.operationId,
+          error: error.message,
+        }),
+      }).catch((error) => {
+        if (error?.name !== 'AbortError' && error?.code !== 'PROFILE_CHANGED') {
+          this.#emit({ type: 'merge-prefetch-deferred', error: error.message });
+        }
+      });
     } catch (error) {
       if (error?.code !== 'PROFILE_CHANGED' && error?.name !== 'AbortError') {
         this.#emit({ type: 'merge-recovery-error', error: error.message });
       }
     }
+  }
+
+  async #retryQueuedMessages(record, profileEpoch = this.#profileEpoch) {
+    const existing = this.#queuedMessageRetries.get(record.id);
+    if (existing) return existing;
+    const operation = (async () => {
+      for (const queued of record.queuedMessages ?? []) {
+        if (!queued.retryPending || queued.serverQueued || queued.state === 'accepted'
+          || !queued.commandId || !queued.commandType || !queued.commandPayload) continue;
+        try {
+          const result = await this.#client.command(
+            record.cloudSessionId,
+            queued.commandType,
+            queued.commandPayload,
+            queued.commandId,
+          );
+          this.#assertProfileEpoch(profileEpoch);
+          if (result?.messageId !== queued.id || !['queued', 'accepted'].includes(result?.status)) {
+            throw new Error('Cloud message retry returned an invalid receipt');
+          }
+          await this.#store.patch(record.id, (latest) => ({
+            queuedMessages: (latest.queuedMessages ?? []).map((entry) => (
+              entry.id === queued.id ? {
+                ...entry,
+                state: entry.state === 'accepted' || result.status === 'accepted' ? 'accepted' : 'queued',
+                serverQueued: true,
+                retryPending: false,
+                lastError: null,
+              } : entry
+            )),
+          }));
+          this.#emit({ type: 'queued-message-reconciled', sessionId: record.cloudSessionId, messageId: queued.id });
+        } catch (error) {
+          this.#assertProfileEpoch(profileEpoch);
+          await this.#store.patch(record.id, (latest) => ({
+            queuedMessages: (latest.queuedMessages ?? []).map((entry) => (
+              entry.id === queued.id ? {
+                ...entry,
+                retryPending: retryableQueuedCommandError(error),
+                lastError: error.message,
+              } : entry
+            )),
+          }));
+          this.#emit({
+            type: 'queued-message-retry-deferred',
+            sessionId: record.cloudSessionId,
+            messageId: queued.id,
+            error: error.message,
+          });
+        }
+      }
+    })().finally(() => {
+      if (this.#queuedMessageRetries.get(record.id) === operation) {
+        this.#queuedMessageRetries.delete(record.id);
+      }
+    });
+    this.#queuedMessageRetries.set(record.id, operation);
+    return operation;
+  }
+
+  async #restoreKnownConversations(profile, health, {
+    presentSessionIds = null,
+    signal = null,
+  } = {}) {
+    if (profile?.mode !== 'app-hosted' || !conversationRestoreSupported(health)
+      || typeof this.#client.restoreSession !== 'function') return 0;
+    const profileEpoch = this.#profileEpoch;
+    let present = presentSessionIds;
+    if (!present) {
+      const sessions = await this.#client.sessions({ signal, timeoutMs: 5_000, retryAttempts: 1 });
+      this.#assertProfileEpoch(profileEpoch);
+      present = new Set(sessions.map((session) => session.id ?? session.sessionId));
+    }
+    const records = (await this.#store.list()).filter((record) => (
+      record.cloudSessionId
+      && ['queued', 'running', 'suspended'].includes(record.state)
+      && !present.has(record.cloudSessionId)
+    ));
+    this.#assertProfileEpoch(profileEpoch);
+    if (!records.length) return 0;
+    const snapshots = await this.#conversationRecovery.refresh({
+      assertCurrent: () => this.#assertProfileEpoch(profileEpoch),
+    });
+    const bySession = new Map(snapshots.map((snapshot) => [snapshot.sessionId, snapshot]));
+    let restored = 0;
+    for (const record of records.slice(0, 32)) {
+      const snapshot = bySession.get(record.cloudSessionId);
+      if (!snapshot) continue;
+      const previous = this.#conversationRestores.get(record.cloudSessionId);
+      const operation = previous ?? (async () => {
+        await this.#seedRemoteProvider(record.provider);
+        this.#assertProfileEpoch(profileEpoch);
+        const response = await this.#client.restoreSession(record.cloudSessionId, { signal });
+        this.#assertProfileEpoch(profileEpoch);
+        const session = response?.session ?? response;
+        if ((session?.id ?? session?.sessionId) !== record.cloudSessionId) {
+          throw new Error('Cloud conversation restore returned another session');
+        }
+        const sourceEventSeq = Number(response?.sourceEventSeq);
+        const restoredEventSeq = Number(response?.restoredEventSeq);
+        if (!Number.isSafeInteger(sourceEventSeq) || sourceEventSeq < 0
+          || !Number.isSafeInteger(restoredEventSeq) || restoredEventSeq <= sourceEventSeq) {
+          throw new Error('Cloud conversation restore returned an invalid event cursor');
+        }
+        const latest = await this.#store.get(record.id);
+        this.#assertProfileEpoch(profileEpoch);
+        if (!latest) return session;
+        const nextState = cloudState(session.status ?? session.state, latest.state);
+        const patch = {
+          handoffAcceptedAt: latest.handoffAcceptedAt ?? snapshot.createdAt,
+          restoredAt: new Date().toISOString(),
+          destination: destinationFromReadiness({ profile, health }),
+          lastEventSequence: sourceEventSeq,
+          serverVersion: session.stateVersion ?? session.version ?? latest.serverVersion,
+          statusMessage: session.suspendedReason?.message ?? session.statusMessage ?? null,
+          suspendedCode: session.suspendedReason?.code ?? null,
+          provider: session.provider ?? latest.provider,
+          executionConfig: session.executionConfig ?? latest.executionConfig,
+          executionPhase: session.executionPhase ?? latest.executionPhase ?? null,
+          currentWait: session.currentWait ?? null,
+        };
+        if (nextState === latest.state) await this.#store.patch(latest.id, patch);
+        else await this.#store.transition(latest.id, nextState, patch);
+        const watcherKey = `${profileEpoch}:${record.cloudSessionId}`;
+        this.#watchers.get(watcherKey)?.abort();
+        this.#watchers.delete(watcherKey);
+        return session;
+      })();
+      if (!previous) this.#conversationRestores.set(record.cloudSessionId, operation);
+      try {
+        const session = await operation;
+        present.add(record.cloudSessionId);
+        this.#remoteSessions.set(record.cloudSessionId, session);
+        restored += 1;
+        await this.#retryQueuedMessages(await this.#store.get(record.id), profileEpoch);
+        this.#emit({ type: 'cloud-conversation-restored', sessionId: record.cloudSessionId });
+      } finally {
+        if (!previous && this.#conversationRestores.get(record.cloudSessionId) === operation) {
+          this.#conversationRestores.delete(record.cloudSessionId);
+        }
+      }
+    }
+    return restored;
+  }
+
+  reconcileContinuity(options = {}) {
+    if (this.#continuityPromise) return this.#continuityPromise;
+    const operation = this.#reconcileContinuity(options).finally(() => {
+      if (this.#continuityPromise === operation) this.#continuityPromise = null;
+    });
+    this.#continuityPromise = operation;
+    return operation;
+  }
+
+  async #reconcileContinuity({ reason = 'background' } = {}) {
+    if (this.#stopped) return null;
+    await this.#refreshMergeRequests({ force: true });
+    const profile = await this.#client.loadProfile().catch(() => null);
+    if (!profile) return this.snapshot();
+    if (profile.mode === 'app-hosted') {
+      const provider = this.#sandboxProvider(profile.sandbox);
+      if (provider) {
+        let status;
+        try {
+          status = await provider.status(profile.sandbox);
+        } catch (error) {
+          this.#emit({ type: 'continuity-check-deferred', reason, error: error.message });
+          return this.snapshot();
+        }
+        if (status?.lifecycle === 'idle') {
+          const live = (await this.#store.list()).filter((record) => (
+            record.cloudSessionId
+            && ['queued', 'running', 'suspended'].includes(record.state)
+            && destinationMatchesProfile(record.destination, profile)
+          ));
+          if (!live.length) return this.snapshot();
+          let recoverable = [];
+          try {
+            recoverable = await this.#conversationRecovery.refresh();
+          } catch (error) {
+            this.#emit({ type: 'continuity-check-deferred', reason, error: error.message });
+            return this.snapshot();
+          }
+          if (live.some((record) => recoverable.some((entry) => entry.sessionId === record.cloudSessionId))) {
+            return this.spawnAppServer({ selectedProvider: live[0].provider });
+          }
+          return this.snapshot();
+        }
+      }
+    }
+    if (this.#link.kind !== 'ready') return this.reconnectCloud({ background: true });
+    return this.refresh();
   }
 
   refresh(options = {}) {
@@ -1129,8 +1377,17 @@ export class CloudCoordinator extends EventEmitter {
     if (this.#link.kind !== 'ready') return this.snapshot(options);
     if (profile && await this.#client.isPaired().catch(() => false)) {
       try {
-        const sessions = await this.#client.sessions({ timeoutMs: 2_000, retryAttempts: 1 });
+        const health = typeof this.#client.restoreSession === 'function'
+          && typeof this.#client.health === 'function'
+          ? await this.#client.health(profile, { timeoutMs: 2_000, retryAttempts: 1 })
+          : null;
+        let sessions = await this.#client.sessions({ timeoutMs: 2_000, retryAttempts: 1 });
         this.#assertProfileEpoch(profileEpoch);
+        const present = new Set(sessions.map((session) => session.id ?? session.sessionId));
+        if (await this.#restoreKnownConversations(profile, health, { presentSessionIds: present }) > 0) {
+          sessions = await this.#client.sessions({ timeoutMs: 2_000, retryAttempts: 1 });
+          this.#assertProfileEpoch(profileEpoch);
+        }
         const deviceId = await this.#client.deviceId();
         const hydratedSessions = await Promise.all(sessions.map(async (session) => this.#hydrateRemoteTakeover({
           ...session,
@@ -1477,7 +1734,7 @@ export class CloudCoordinator extends EventEmitter {
     });
   }
 
-  async #spawnAppServer({ providerId = null, deviceName = hostname() } = {}) {
+  async #spawnAppServer({ providerId = null, deviceName = hostname(), selectedProvider = null } = {}) {
     const pending = await this.#client.loadPendingAppSandbox?.();
     if (pending) {
       throw new AppServerError(
@@ -1521,8 +1778,9 @@ export class CloudCoordinator extends EventEmitter {
         });
       }
       if (status.lifecycle === 'ready') {
+        let health;
         try {
-          await this.#waitForProfileHealth(current, { attempts: 3 });
+          health = await this.#waitForProfileHealth(current, { attempts: 3 });
         } catch (error) {
           this.#setSandboxLifecycle('error', error.message);
           throw new AppServerError(`The existing app sandbox is deployed but unreachable: ${error.message}`, {
@@ -1534,6 +1792,8 @@ export class CloudCoordinator extends EventEmitter {
           this.#emit({ type: 'server-mode-persist-failed', mode: 'app-hosted', error: error.message });
           return 'app-hosted';
         });
+        await this.#restoreKnownConversations(current, health);
+        await this.#resumeRecoveriesForCurrentProfile();
         return this.snapshot({ extra: { sandbox: { ok: true, reused: true } } });
       }
       // lifecycle 'idle': the deployment was deleted out-of-band, so a fresh
@@ -1541,6 +1801,7 @@ export class CloudCoordinator extends EventEmitter {
       this.#emit({ type: 'provision-log', line: status.message ?? 'The previous app sandbox no longer exists.' });
     }
     const provider = this.#appServerFor(providerId);
+    const cloudProvider = selectedProvider ?? current?.provider ?? 'codex';
     this.#setSandboxLifecycle('provisioning', 'Starting an app-provided sandbox.');
     this.#emit({ type: 'sandbox-provision-started', providerId: provider.id });
     let spawned = null;
@@ -1550,8 +1811,8 @@ export class CloudCoordinator extends EventEmitter {
       spawned = await provider.spawn({
         deviceName,
         limits: current?.limits,
-        selectedProvider: current?.provider ?? 'codex',
-        credentials: await this.#providerAuth(current?.provider ?? 'codex'),
+        selectedProvider: cloudProvider,
+        credentials: await this.#providerAuth(cloudProvider),
         signal: controller.signal,
         onLine: (line) => this.#emit({ type: 'provision-log', line }),
         onSandboxCreated: async (sandbox) => {
@@ -1572,7 +1833,7 @@ export class CloudCoordinator extends EventEmitter {
         endpoint: spawned.receipt.endpoint,
         serverPublicKey: spawned.receipt.serverPublicKey,
         sandbox: spawned.sandbox,
-        provider: current?.provider ?? 'codex',
+        provider: cloudProvider,
         limits: current?.limits,
       });
       const reusePairing = Boolean(
@@ -1599,6 +1860,8 @@ export class CloudCoordinator extends EventEmitter {
         tokens: pairing.credentials,
         device: pairing.credentials.device,
       }));
+      await this.#restoreKnownConversations(profile, health, { presentSessionIds: new Set() });
+      await this.#resumeRecoveriesForCurrentProfile();
       await this.#client.clearPendingAppSandbox?.().catch((error) => {
         this.#emit({ type: 'sandbox-journal-clear-failed', error: error.message });
       });
@@ -2205,6 +2468,7 @@ export class CloudCoordinator extends EventEmitter {
       const state = cloudState(session.state ?? session.status);
       const updated = await this.#store.transition(record.id, state, {
         cloudSessionId: session.id ?? session.sessionId,
+        handoffAcceptedAt: new Date().toISOString(),
         serverVersion: session.stateVersion ?? session.version ?? 1,
         configurationSupported: session.configurationSupported === true,
         configurationPending: session.configurationPending === true,
@@ -2324,6 +2588,9 @@ export class CloudCoordinator extends EventEmitter {
     const messageDigest = queuedMessageId ? sha256Hex(Buffer.from(JSON.stringify({
       type: serverCommand, content: message, attachments: uploadedAttachments,
     }))) : null;
+    const commandId = queuedMessageId
+      ? `message_${sha256Hex(Buffer.from(`${sessionId}\0${queuedMessageId}`))}`
+      : undefined;
     const previousMessage = localHandoff?.queuedMessages?.find((entry) => entry.id === queuedMessageId);
     if (previousMessage && (previousMessage.text !== message
       || previousMessage.messageDigest && previousMessage.messageDigest !== messageDigest)) {
@@ -2357,6 +2624,10 @@ export class CloudCoordinator extends EventEmitter {
               messageDigest,
               queuedAt: new Date().toISOString(),
               state: 'queued',
+              commandId,
+              commandType: serverCommand,
+              commandPayload: body,
+              retryPending: false,
             },
           ],
       }));
@@ -2366,18 +2637,23 @@ export class CloudCoordinator extends EventEmitter {
       if (command === 'takeover') {
         ({ result, takeover } = await this.#requestTakeover(sessionId, body, localHandoff, profileEpoch));
       } else {
-        const commandId = queuedMessageId
-          ? `message_${sha256Hex(Buffer.from(`${sessionId}\0${queuedMessageId}`))}`
-          : undefined;
         result = await this.#client.command(sessionId, serverCommand, body, commandId);
       }
       this.#assertProfileEpoch(profileEpoch);
     } catch (error) {
       if (localHandoff && queuedMessageId) {
+        const retryPending = retryableQueuedCommandError(error);
         const updated = await this.#store.patch(localHandoff.id, (latest) => ({
-          queuedMessages: (latest.queuedMessages ?? []).filter((entry) => (
-            entry.id !== queuedMessageId || entry.state === 'accepted' || entry.serverQueued === true
-          )),
+          queuedMessages: (latest.queuedMessages ?? []).flatMap((entry) => {
+            if (entry.id !== queuedMessageId || entry.state === 'accepted' || entry.serverQueued === true) {
+              return [entry];
+            }
+            return retryPending ? [{
+              ...entry,
+              retryPending: true,
+              lastError: error.message,
+            }] : [];
+          }),
         }));
         const acknowledged = updated.queuedMessages.find((entry) => entry.id === queuedMessageId
           && (entry.state === 'accepted' || entry.serverQueued === true));
@@ -2391,6 +2667,21 @@ export class CloudCoordinator extends EventEmitter {
         }
       }
       throw error;
+    }
+    if (localHandoff && queuedMessageId
+      && result?.messageId === queuedMessageId
+      && ['queued', 'accepted'].includes(result?.status)) {
+      await this.#store.patch(localHandoff.id, (latest) => ({
+        queuedMessages: (latest.queuedMessages ?? []).map((entry) => (
+          entry.id === queuedMessageId ? {
+            ...entry,
+            state: entry.state === 'accepted' || result.status === 'accepted' ? 'accepted' : 'queued',
+            serverQueued: true,
+            retryPending: false,
+            lastError: null,
+          } : entry
+        )),
+      }));
     }
     const handoff = localHandoff;
     if (takeover?.document && result.session?.originDocument?.name) {
@@ -2851,6 +3142,9 @@ export class CloudCoordinator extends EventEmitter {
         || record.takeoverReady
       )) {
         this.#watch(record.id, record.cloudSessionId, record.lastEventSequence, profileEpoch);
+        if ((record.queuedMessages ?? []).some((message) => message.retryPending)) {
+          void this.#retryQueuedMessages(record, profileEpoch).catch(() => {});
+        }
       }
     }
     for (const session of this.#remoteSessions.values()) {
@@ -2871,6 +3165,7 @@ export class CloudCoordinator extends EventEmitter {
     this.#armLinkWatchdog();
     const onReconnect = () => { this.#scheduleArtifactSync(sessionId, handoffId, profileEpoch); };
     const onEvent = (event) => this.#profileOperationContext.exit(() => this.#withProfileOperation(async () => {
+      if (controller.signal.aborted || this.#watchers.get(watcherKey) !== controller) return;
       this.#assertProfileEpoch(profileEpoch);
       const source = event.session ?? event.payload?.session ?? event.payload ?? event;
       let current = await this.#store.get(handoffId);
@@ -3178,6 +3473,7 @@ export class CloudCoordinator extends EventEmitter {
       if (!committed) await this.#store.transition(record.id, 'committing');
       const updated = await this.#store.transition(record.id, state, {
         cloudSessionId: session.id ?? session.sessionId ?? record.id,
+        handoffAcceptedAt: new Date().toISOString(),
         serverVersion: session.stateVersion ?? session.version ?? 1,
         configurationSupported: session.configurationSupported === true,
         configurationPending: session.configurationPending === true,
@@ -3222,11 +3518,9 @@ export class CloudCoordinator extends EventEmitter {
       if (latest && ['preparing', 'uploading', 'committing'].includes(latest.state)) {
         const attempt = Number(latest.recoveryAttempt ?? 0) + 1;
         const retryable = !nonRetryableTransferError(error);
-        if (!retryable || attempt >= MAX_TRANSFER_RECOVERY_ATTEMPTS) {
+        if (!retryable) {
           await this.#store.transition(record.id, 'failed', {
-            error: !retryable
-              ? error.message
-              : `Cloud transfer recovery failed ${attempt} times: ${error.message}`,
+            error: error.message,
             errorCode: String(error?.code ?? '') || null,
             retryable: false,
             failurePhase: latest.state,
@@ -3246,6 +3540,7 @@ export class CloudCoordinator extends EventEmitter {
           errorCode: String(error?.code ?? '') || null,
           retryable: true,
           failurePhase: latest.state,
+          statusMessage: 'Connection interrupted. Retrying the transfer automatically…',
         }).catch(() => {});
         this.#scheduleTransferRecovery(record.id, attempt);
       }
@@ -3780,6 +4075,7 @@ export class CloudCoordinator extends EventEmitter {
       this.#emit({ type: 'remote-session-reconciled', sessionId });
     }, { expectedEpoch: profileEpoch }));
     const onEvent = (event) => this.#profileOperationContext.exit(() => this.#withProfileOperation(async () => {
+      if (controller.signal.aborted || this.#watchers.get(watcherKey) !== controller) return;
       this.#assertProfileEpoch(profileEpoch);
       this.#remoteWatchSequence.set(sessionId, event.sequence);
       const source = event.session ?? event.payload?.session ?? event.payload ?? event;
@@ -3944,6 +4240,7 @@ export class CloudCoordinator extends EventEmitter {
       threadId: record.threadId || 'cloud-thread',
       documentId: record.originDocumentId || null,
       documentName: record.documentName,
+      ...(record.handoffAcceptedAt ? { handoffAcceptedAt: record.handoffAcceptedAt } : {}),
     };
     if (record.takeoverReady) return {
       ...base,

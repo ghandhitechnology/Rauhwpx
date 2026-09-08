@@ -301,7 +301,7 @@ export function createRauCreditsClient({
           ? { body: JSON.stringify(backendRequest.body) }
           : {}),
       }, { signal, maxResponseBytes: method === 'GET'
-        && /^\/v1\/cloud\/merge-requests(?:\?|\/|$)/.test(pathname)
+        && /^\/v1\/cloud\/(?:merge-requests|conversations)(?:\?|\/|$)/.test(pathname)
         ? 2 * 1024 * 1024 : MAX_RESPONSE_BYTES });
     },
     /**

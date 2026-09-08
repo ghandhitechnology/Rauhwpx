@@ -930,6 +930,64 @@ test('rejected queue command removes exactly its staged durable message', async 
   assert.deepEqual(record.queuedMessages.map((message) => message.id), ['message-existing']);
 });
 
+test('an ambiguous queued message keeps its durable draft and retries the same command after restart', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-message-retry-'));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const created = await store.create({
+    sessionId: 'desktop-retry', threadId: 'thread-retry', documentId: 'document-retry',
+    documentName: 'source.hwpx', documentBytes: Buffer.from('document'), timeline: null,
+    provider: 'codex', limits: { maxTurns: 100 },
+  });
+  await store.transition(created.id, 'uploading');
+  await store.transition(created.id, 'committing');
+  await store.transition(created.id, 'running', {
+    cloudSessionId: 'cloud-retry', serverVersion: 2,
+    handoffAcceptedAt: '2026-09-08T00:00:00.000Z',
+  });
+  let fail = true;
+  const calls = [];
+  const reconciled = Promise.withResolvers();
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => null,
+      isPaired: async () => false,
+      command: async (_sessionId, _type, payload, commandId) => {
+        calls.push({ payload, commandId });
+        if (fail) throw Object.assign(new Error('command receipt lost'), { code: 'ETIMEDOUT' });
+        return { messageId: payload.messageId, status: 'queued' };
+      },
+      watchSession: async (_sessionId, _after, { signal }) => new Promise((resolve) => {
+        signal.addEventListener('abort', resolve, { once: true });
+      }),
+    },
+    store,
+    provisioner: {},
+    recoveryDir: path.join(directory, 'recovery'),
+  });
+  coordinator.on('event', (event) => {
+    if (event.type === 'queued-message-reconciled') reconciled.resolve();
+  });
+  t.after(async () => {
+    await coordinator.stop();
+    await rm(directory, { recursive: true, force: true });
+  });
+  await assert.rejects(coordinator.command({
+    sessionId: 'cloud-retry', command: 'queue-message', expectedVersion: 2,
+    message: 'Keep this draft', messageId: 'message-retry',
+  }), { code: 'ETIMEDOUT' });
+  let record = await store.get(created.id);
+  assert.equal(record.queuedMessages[0].retryPending, true);
+  assert.equal(record.queuedMessages[0].text, 'Keep this draft');
+  fail = false;
+  await coordinator.start();
+  await reconciled.promise;
+  record = await store.get(created.id);
+  assert.equal(record.queuedMessages[0].serverQueued, true);
+  assert.equal(record.queuedMessages[0].retryPending, false);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].commandId, calls[1].commandId);
+});
+
 test('activation receipt skips historical staged events before watching live updates', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-activation-replay-'));
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
@@ -984,6 +1042,8 @@ test('activation receipt skips historical staged events before watching live upd
   assert.equal(record.state, 'running');
   assert.equal(record.lastEventSequence, 3);
   assert.equal(record.serverVersion, 3);
+  assert.equal(Number.isFinite(Date.parse(record.handoffAcceptedAt)), true);
+  assert.equal((await coordinator.snapshot({ documentId: 'document-1' })).session.handoffAcceptedAt, record.handoffAcceptedAt);
 });
 
 test('verified result confirmation resumes after a crash boundary without redownloading', async (t) => {

@@ -106,6 +106,49 @@ test('coordinator refresh discovers merge requests with no worker profile and se
   assert.deepEqual(Buffer.from((await coordinator.downloadCheckpoint({ sessionId: 'cloud-session', operationId: 'turn-1' })).bytes), f.bytes);
 });
 
+test('merge discovery returns before automatic prefetch and publishes offline readiness when verification finishes', async (t) => {
+  const f = await fixture(t);
+  const release = Promise.withResolvers();
+  const started = Promise.withResolvers();
+  const originalDownload = f.provider.downloadMergeChunk;
+  f.provider.downloadMergeChunk = async (...args) => {
+    started.resolve();
+    await release.promise;
+    return originalDownload(...args);
+  };
+  const provider = {
+    ...f.provider,
+    id: 'raucloud',
+    displayName: 'Raucloud',
+    configuration: () => ({ configured: true }),
+    spawn() {}, status() {}, teardown() {},
+    accountStatus: async () => ({ signedIn: true }),
+  };
+  const coordinator = new CloudCoordinator({
+    client: { loadProfile: async () => null },
+    store: f.store,
+    recoveryDir: f.directory,
+    appServers: [provider],
+  });
+  t.after(() => coordinator.stop());
+  const refreshed = await coordinator.refresh({ documentId: 'document-1' });
+  assert.equal(refreshed.mergeRequests[0].localAvailable, false);
+  await started.promise;
+  const ready = Promise.withResolvers();
+  coordinator.on('event', (event) => {
+    if (event.type === 'merge-prefetch-completed') ready.resolve();
+  });
+  release.resolve();
+  await ready.promise;
+  const snapshot = await coordinator.snapshot({ documentId: 'document-1' });
+  assert.equal(snapshot.mergeRequests[0].localAvailable, true);
+  f.provider.listMergeRequests = async () => { throw new Error('offline'); };
+  assert.deepEqual(
+    Buffer.from((await coordinator.downloadCheckpoint({ sessionId: 'cloud-session', operationId: 'turn-1' })).bytes),
+    f.bytes,
+  );
+});
+
 test('expired broker metadata without a local download does not leave an unusable merge offer', async (t) => {
   const f = await fixture(t);
   await f.recovery.refresh();
