@@ -1,7 +1,13 @@
 import './cloud-onboarding.css';
 
 import type { CloudController } from '../../cloud/desktop-cloud.ts';
-import type { CloudProfileDraft, CloudServerMode, CloudSnapshot } from '../../cloud/types.ts';
+import type {
+  CloudProfileDraft,
+  CloudProviderSelection,
+  CloudServerMode,
+  CloudSnapshot,
+} from '../../cloud/types.ts';
+import { labelForEffort, labelForModel } from '../../agent/models.ts';
 import { inferCloudLink } from '../../cloud/link.ts';
 import {
   appServerProvider,
@@ -22,14 +28,22 @@ import {
   type CloudSetupState,
 } from './cloud-onboarding-state.ts';
 import { createIcon } from './icons.ts';
+import { AGENT_LABEL, createProviderIcon } from './providers.ts';
 
 export interface CloudOnboardingDeps {
   controller: CloudController;
   loginAccount?: () => Promise<{ authUrl: string } | null>;
   refreshSnapshot?: () => Promise<CloudSnapshot>;
-  onRequestTransfer(): void;
+  getTransferSelection?(): CloudProviderSelection;
+  captureTransferIntent?(): CloudTransferIntent | null;
+  onRequestTransfer(intent?: CloudTransferIntent): void;
   onCloseSettings(): void;
   onSetupStateChange(active: boolean): void;
+}
+
+export interface CloudTransferIntent {
+  selection: CloudProviderSelection;
+  requestKey?: string;
 }
 
 export interface CloudOnboarding {
@@ -107,6 +121,8 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
   let accountBusy = false;
   let accountAuthPending = false;
   let justSignedIn = false;
+  let transferContinuationRequested = false;
+  let transferIntent: CloudTransferIntent | null = null;
 
   const overlay = el('div', 'ag-cloud-setup-overlay');
   overlay.hidden = true;
@@ -265,6 +281,32 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     copy.append(el('strong', '', heading), el('p', '', text));
     node.append(iconNode, copy);
     return node;
+  }
+
+  function transferContext(intent: CloudSetupIntent): HTMLElement | null {
+    const selection = intent === 'transfer'
+      ? transferIntent?.selection ?? deps.getTransferSelection?.()
+      : null;
+    if (!selection) return null;
+    const node = el('div', 'ag-cloud-setup-transfer-context');
+    const icon = createProviderIcon(selection.agent);
+    const copy = el('div', 'ag-cloud-setup-transfer-copy');
+    copy.append(
+      el('span', 'ag-cloud-setup-transfer-label', '보낼 작업'),
+      el('strong', '', `${AGENT_LABEL[selection.agent]} · ${labelForModel(selection.agent, selection.model)}`),
+      el('span', 'ag-cloud-setup-transfer-detail', labelForEffort(selection.agent, selection.effort, selection.model)),
+    );
+    node.append(icon, copy);
+    return node;
+  }
+
+  function continueTransfer(intent: CloudSetupIntent): void {
+    if (intent !== 'transfer' || transferContinuationRequested || disposed) return;
+    transferContinuationRequested = true;
+    const requestedIntent = transferIntent ?? undefined;
+    close(false);
+    deps.onCloseSettings();
+    deps.onRequestTransfer(requestedIntent);
   }
 
   function inputField(
@@ -437,6 +479,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       if (!operationIsCurrent(operation)) return;
       const profile = snapshotProfile(provisioned) ?? draft;
       setState({ kind: 'connected', profile, intent }, 'Cloud 환경이 준비되었습니다.');
+      continueTransfer(intent);
     } catch (error) {
       if (!operationIsCurrent(operation)) return;
       setState({ kind: 'install-failed', draft, intent, issue: mapCloudSetupIssue(error, draft.transport.kind), retry: 'install' }, 'Cloud 환경 설치를 마치지 못했습니다.');
@@ -459,6 +502,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       const verified = await deps.controller.pair(pairingCode, draft);
       if (!operationIsCurrent(operation)) return;
       setState({ kind: 'connected', profile: snapshotProfile(verified) ?? draft, intent }, 'Cloud 환경이 연결되었습니다.');
+      continueTransfer(intent);
     } catch (error) {
       if (!operationIsCurrent(operation)) return;
       setState({
@@ -572,7 +616,8 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     const operation = beginOperation();
     setState({ kind: 'sandbox-provisioning', draft, intent, startedAt: Date.now() }, 'Raucloud를 준비하고 있습니다.');
     try {
-      const next = await deps.controller.spawnSandbox(providerId);
+      const selectedProvider = transferIntent?.selection.agent ?? deps.getTransferSelection?.().agent;
+      const next = await deps.controller.spawnSandbox(providerId, selectedProvider);
       if (!operationIsCurrent(operation)) return;
       const ready = snapshotSandbox(next);
       if (!ready) {
@@ -589,6 +634,7 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
         { kind: 'sandbox-ready', intent, name: ready.name, sandbox: ready.sandbox },
         'Raucloud가 준비되었습니다.',
       );
+      continueTransfer(intent);
     } catch (error) {
       if (!operationIsCurrent(operation)) return;
       setState({
@@ -644,7 +690,9 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     try {
       const next = await deps.controller.sandboxStatus();
       if (!operationIsCurrent(operation)) return;
-      setState(createCloudSetupState(next, intent), 'Raucloud 상태를 확인했습니다.');
+      const settled = createCloudSetupState(next, intent);
+      setState(settled, 'Raucloud 상태를 확인했습니다.');
+      if (settled.kind === 'sandbox-ready') continueTransfer(intent);
     } catch (error) {
       if (!operationIsCurrent(operation)) return;
       setState({ kind: 'sandbox-failed', draft, intent, issue: mapSandboxIssue(error), phase },
@@ -725,6 +773,8 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
         ),
       );
       body.appendChild(options);
+      const context = transferContext(intent);
+      if (context) body.appendChild(context);
       const loginRequired = mode === 'app-hosted' && needsRaucloudLogin(snapshot);
       const hardLock = mode === 'app-hosted' ? raucloudHardLock(snapshot) : null;
       const primary = button(
@@ -751,11 +801,15 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       const appHostedLock = raucloudLock(snapshot);
       title.textContent = 'Raucloud 사용';
       body.append(
-        description('Rauhwpx가 샌드박스를 만들고 이 기기에 연결합니다.'),
+        description(intent === 'transfer'
+          ? '서버를 준비한 뒤 작성한 요청과 문서를 바로 보냅니다.'
+          : 'Rauhwpx가 샌드박스를 만들고 이 기기에 연결합니다.'),
         callout('cloud', provider.displayName, '파일과 작업 상태를 샌드박스로 전송합니다. 서버를 종료하면 샌드박스도 삭제됩니다.'),
       );
+      const context = transferContext(intent);
+      if (context) body.appendChild(context);
       back.addEventListener('click', () => setState({ kind: 'choose', draft, intent, mode: 'app-hosted' }));
-      const primary = button('서버 만들기', 'primary');
+      const primary = button(intent === 'transfer' ? '준비하고 보내기' : '서버 만들기', 'primary');
       primary.disabled = Boolean(appHostedLock);
       if (appHostedLock) body.append(callout('cloud', 'Raucloud를 사용할 수 없음', appHostedLock));
       primary.addEventListener('click', () => { void spawnSandbox(); });
@@ -780,10 +834,12 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     } else if (state.kind === 'sandbox-provisioning') {
       title.textContent = 'Raucloud 준비 중';
       body.append(
-        description(`샌드박스를 기기에 연결하고 있습니다. 서버 생성과 첫 시작에는 최대 ${RAUCLOUD_SETUP_WAIT_MINUTES}분이 걸릴 수 있습니다.`),
+        description(`${state.intent === 'transfer' ? '요청을 보낼 서버를' : '샌드박스를'} 기기에 연결하고 있습니다. 서버 생성과 첫 시작에는 최대 ${RAUCLOUD_SETUP_WAIT_MINUTES}분이 걸릴 수 있습니다.`),
         el('div', 'ag-cloud-setup-indeterminate'),
         el('p', 'ag-cloud-setup-wait', setupProgressText(state.startedAt)),
       );
+      const context = transferContext(state.intent);
+      if (context) body.appendChild(context);
       const working = button('준비 중...', 'primary');
       working.disabled = true;
       footer.append(cancel, working);
@@ -800,14 +856,14 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       title.textContent = phase === 'teardown'
         ? 'Raucloud를 종료하지 못했습니다'
         : 'Raucloud를 준비하지 못했습니다';
-      body.append(
-        description(phase === 'teardown'
-          ? '샌드박스가 아직 남아 있습니다. 문제를 해결한 뒤 다시 종료하세요.'
-          : '다시 시도하거나 내 서버를 연결해 계속할 수 있습니다.'),
-        callout('cloud', issue.title, issue.guidance),
-        issueDetails(issue),
-      );
-      footer.append(cancel);
+      const explanation = phase === 'teardown'
+        ? description('샌드박스가 아직 남아 있습니다. 문제를 해결한 뒤 다시 종료하세요.')
+        : issue.title === title.textContent
+          ? description(issue.guidance)
+          : callout('cloud', issue.title, issue.guidance);
+      body.append(explanation, issueDetails(issue));
+      const context = phase === 'spawn' ? transferContext(intent) : null;
+      if (context) body.appendChild(context);
       const refresh = button('상태 확인');
       refresh.addEventListener('click', () => { void refreshSandbox(); });
       if (phase === 'teardown') {
@@ -855,11 +911,8 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
         body.append(callout('cloud', '새 작업을 시작할 수 없음', appHostedLock));
       }
       primary.addEventListener('click', () => {
-        if (intent === 'transfer') {
-          close(false);
-          deps.onCloseSettings();
-          deps.onRequestTransfer();
-        } else close(true);
+        if (intent === 'transfer') continueTransfer(intent);
+        else close(true);
       });
       footer.append(teardown, primary);
     } else if (state.kind === 'intro') {
@@ -947,10 +1000,14 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       title.textContent = '연결할 수 있습니다';
       body.append(
         callout('check', 'VPS 준비 확인 완료', `${state.draft.host}에 안전하게 연결할 수 있습니다.`),
-        description('이제 Rauhwpx Cloud 서비스를 설치하고 이 기기를 자동으로 연결합니다.'),
+        description(intent === 'transfer'
+          ? 'Cloud 서비스를 설치한 뒤 작성한 요청과 문서를 바로 보냅니다.'
+          : '이제 Rauhwpx Cloud 서비스를 설치하고 이 기기를 자동으로 연결합니다.'),
       );
+      const context = transferContext(intent);
+      if (context) body.appendChild(context);
       back.addEventListener('click', () => setState({ kind: 'editing', draft, intent, errors: {} }));
-      const primary = button('Cloud 환경 설치', 'primary');
+      const primary = button(intent === 'transfer' ? '설치하고 보내기' : 'Cloud 환경 설치', 'primary');
       primary.addEventListener('click', () => { void install(); });
       footer.append(back, cancel, primary);
     } else if (state.kind === 'installing') {
@@ -1014,11 +1071,8 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       }
       primary.addEventListener('click', () => {
         const transfer = state?.kind === 'connected' && state.intent === 'transfer';
-        if (transfer) {
-          close(false);
-          deps.onCloseSettings();
-          deps.onRequestTransfer();
-        } else close(true);
+        if (transfer) continueTransfer('transfer');
+        else close(true);
       });
       footer.append(primary);
     }
@@ -1103,6 +1157,11 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
     const preservedFailure = preserveOnOpen
       && (state?.kind === 'install-failed' || state?.kind === 'sandbox-failed');
     if (!operationActive(state) && !preservedFailure) {
+      transferContinuationRequested = false;
+      transferIntent = intent === 'transfer'
+        ? deps.captureTransferIntent?.()
+          ?? (deps.getTransferSelection ? { selection: deps.getTransferSelection() } : null)
+        : null;
       state = createCloudSetupState(snapshot, intent);
       resetConditionalDrafts(hasDraft(state) ? state.draft : currentDraft());
     }
@@ -1192,6 +1251,10 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       const lockChanged = raucloudLock(snapshot) !== previousLock;
       const signedInChanged = wasSignedIn !== (snapshot.account?.signedIn === true);
       if (visible && (state !== previous || lockChanged || signedInChanged)) renderDialog();
+      if (state && state !== previous
+        && (state.kind === 'connected' || state.kind === 'sandbox-ready')) {
+        continueTransfer(state.intent);
+      }
     },
     setMutationLocked(locked) {
       mutationLocked = locked;

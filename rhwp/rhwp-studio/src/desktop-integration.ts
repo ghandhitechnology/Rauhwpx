@@ -11,6 +11,7 @@ import type {
   FileSystemWritableFileStreamLike,
   SaveFilePickerOptionsLike,
 } from './command/file-system-access.ts';
+import type { AgentName } from './agent/types.ts';
 import { FALLBACK_DOCUMENT_FILE_NAME } from './core/document-names.ts';
 import type {
   CloudCommandRequest,
@@ -157,7 +158,7 @@ export interface RhwpDesktopApi {
   }) => Promise<unknown>;
   cloudPair?: (payload: { code: string; profile?: CloudProfileDraft }) => Promise<unknown>;
   cloudSelectServerMode?: (payload: { mode: CloudServerMode }) => Promise<unknown>;
-  cloudSpawnSandbox?: (payload: { providerId?: string }) => Promise<unknown>;
+  cloudSpawnSandbox?: (payload: { providerId?: string; selectedProvider?: AgentName }) => Promise<unknown>;
   cloudSandboxStatus?: () => Promise<unknown>;
   cloudTeardownSandbox?: (payload: { force?: boolean }) => Promise<unknown>;
   cloudForceQuitAccount?: () => Promise<unknown>;

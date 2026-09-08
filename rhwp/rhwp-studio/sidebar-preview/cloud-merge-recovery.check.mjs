@@ -134,6 +134,12 @@ export async function checkCloudMergeRecovery(page, origin, artifacts) {
   assert.equal(result.accountReviewIsolated, true, 'An old account query cannot mark the new account offer reviewed');
   assert.equal(result.profileHidden, true);
   assert.equal(result.expiredHidden, true);
+  const mergeEvidence = await page.$$eval('.ag-cloud-merge-button', (buttons) => {
+    const button = buttons.find((candidate) => candidate.checkVisibility());
+    return { localAvailable: button?.dataset.localAvailable, title: button?.title };
+  });
+  assert.equal(mergeEvidence.localAvailable, 'true');
+  assert.match(mergeEvidence.title, /이 기기에 저장된/);
   assert.deepEqual(result.errors, []);
   assert.deepEqual(result.downloads, [
     ['old-worker-session', 'turn-op-4', null], ['old-worker-session', 'turn-op-4', 'turn'],

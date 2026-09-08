@@ -123,6 +123,7 @@ export interface CloudQueuedMessage {
   text: string;
   queuedAt: string;
   state: 'queued' | 'accepted';
+  delivery: 'pending' | 'durable';
 }
 
 export interface CloudProviderSelection {
@@ -135,6 +136,8 @@ export interface CloudSessionBase {
   selection?: CloudProviderSelection;
   configurationPending?: boolean;
   configurationEditable?: boolean;
+  /** Set by the desktop only after the durable initial handoff acknowledgment. */
+  handoffAcceptedAt?: string;
   sessionId: string;
   version: number;
   threadId: string;

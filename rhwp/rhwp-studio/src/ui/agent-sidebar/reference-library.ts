@@ -64,7 +64,7 @@ export interface ReferenceLibraryOptions {
   bridge: SidebarBridge;
   getContext(): ReferenceLibraryContext;
   onOpenChange?(open: boolean): void;
-  onDraftStateChange?(): void;
+  onDraftStateChange?(change: 'content' | 'status'): void;
   onFileDeleted?(fileId: string): void;
 }
 
@@ -513,7 +513,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
       if (chip.staged && chip.target) {
         void bridge.discardStagedReference(chip.target.scopeId, chip.staged.id).catch(() => undefined);
       }
-      options.onDraftStateChange?.();
+      options.onDraftStateChange?.('content');
     });
     retry.addEventListener('click', async () => {
       if (!chip.target) return;
@@ -537,7 +537,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     );
     quickUploads.appendChild(root);
     draftUploads.push(chip);
-    options.onDraftStateChange?.();
+    options.onDraftStateChange?.('content');
     return chip;
   }
 
@@ -551,7 +551,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     chip.state.textContent = '업로드 중';
     chip.retry.hidden = true;
     chip.remove.hidden = true;
-    options.onDraftStateChange?.();
+    options.onDraftStateChange?.('status');
     try {
       const staged = await bridge.stageReference(chip.target.scopeId, chip.file);
       if (chip.cancelled) {
@@ -573,7 +573,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
       chip.remove.hidden = false;
       throw caught;
     } finally {
-      options.onDraftStateChange?.();
+      options.onDraftStateChange?.('status');
     }
   }
 
@@ -652,14 +652,14 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
         void bridge.discardStagedReference(chip.target.scopeId, chip.staged.id).catch(() => undefined);
       }
     }
-    options.onDraftStateChange?.();
+    options.onDraftStateChange?.('content');
   }
 
   function takeReadyDrafts(): StagedReference[] {
     if (draftUploads.some((chip) => chip.uploadState !== 'ready' || !chip.staged)) return [];
     const batch = draftUploads.splice(0);
     for (const chip of batch) releaseChip(chip);
-    options.onDraftStateChange?.();
+    options.onDraftStateChange?.('content');
     return batch.map((chip) => chip.staged!);
   }
 
@@ -674,7 +674,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
         void bridge.discardStagedReference(chip.target.scopeId, chip.staged.id).catch(() => undefined);
       }
     }
-    options.onDraftStateChange?.();
+    options.onDraftStateChange?.('content');
     return batch.map((chip, index) => ({ ...chip.staged!, bytes: bytes[index] }));
   }
 
