@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { runCloudMessageSubmission } from '../src/cloud/message-submission.ts';
+import {
+  cloudMessageRetryKey,
+  resolveCloudMessageRetry,
+  runCloudMessageSubmission,
+} from '../src/cloud/message-submission.ts';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -12,6 +16,43 @@ function deferred<T>() {
   });
   return { promise, resolve, reject };
 }
+
+test('retry keys follow attachment content instead of restored File identity', async () => {
+  const input = {
+    sessionId: 'session-b',
+    threadId: 'thread-b',
+    documentId: 'document-b',
+    composerText: '이 파일을 확인해 주세요.',
+    workflow: null,
+    attachments: [{
+      name: 'brief.pdf', mimeType: 'application/pdf', size: 3, bytes: new Uint8Array([1, 2, 3]),
+    }],
+  };
+  const original = await cloudMessageRetryKey(input);
+  const restored = await cloudMessageRetryKey({
+    ...input,
+    attachments: [{
+      name: 'brief.pdf', mimeType: 'application/pdf', size: 3, bytes: new Uint8Array([1, 2, 3]),
+    }],
+  });
+  const changed = await cloudMessageRetryKey({
+    ...input,
+    attachments: [{
+      name: 'brief.pdf', mimeType: 'application/pdf', size: 3, bytes: new Uint8Array([1, 2, 4]),
+    }],
+  });
+
+  assert.equal(restored, original);
+  assert.notEqual(changed, original);
+
+  let generated = 0;
+  const first = resolveCloudMessageRetry(null, original, () => `message-${++generated}`);
+  const retry = resolveCloudMessageRetry(first, restored, () => `message-${++generated}`);
+  const edited = resolveCloudMessageRetry(retry, changed, () => `message-${++generated}`);
+  assert.equal(retry.messageId, first.messageId);
+  assert.notEqual(edited.messageId, first.messageId);
+  assert.equal(generated, 2);
+});
 
 test('workflow, attachment preparation, queue, and commit hold one exclusive lock', async () => {
   const workflow = deferred<{ sessionId: string; threadId: string; documentId: string; expectedVersion: number }>();

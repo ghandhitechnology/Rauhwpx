@@ -24,6 +24,7 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
   let refreshFails = false;
   let spawnFailures = 0;
   let sandboxStatusRecovers = false;
+  let queueAckFailures = 0;
   let restartArchiveAvailable = true;
   let rejectRestartTransfer = false;
   const sandbox = { providerId: 'raucloud', sandboxId: 'preview-worker', displayName: 'Raucloud',
@@ -215,6 +216,10 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
     },
     async cloudCommand(request) {
       calls.commands.push(structuredClone(request));
+      if (request.command === 'queue-message' && queueAckFailures > 0) {
+        queueAckFailures--;
+        throw new Error('Preview queue receipt was lost.');
+      }
       if (request.command === 'configure') {
         const session = state.session;
         if (session.kind === 'idle' || request.sessionId !== session.sessionId
@@ -330,6 +335,7 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
     setRestartArchiveAvailable(available: boolean) { restartArchiveAvailable = available; },
     setSpawnFailures(count: number) { spawnFailures = Math.max(0, Math.floor(count)); },
     setSandboxStatusRecovery(enabled: boolean) { sandboxStatusRecovers = enabled; },
+    setQueueAckFailures(count: number) { queueAckFailures = Math.max(0, Math.floor(count)); },
     rejectRestartTransfer(reject: boolean) { rejectRestartTransfer = reject; },
     blockRefresh(blocked: boolean) {
       refreshBlocked = blocked;

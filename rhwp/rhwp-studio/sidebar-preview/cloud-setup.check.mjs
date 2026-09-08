@@ -171,4 +171,26 @@ export async function checkCloudSetup(page, origin, artifacts) {
   await click('상태 확인');
   await page.waitForFunction(() => window.sidebarPreview.cloud.calls.transfers.length === 1);
   assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.transfers[0].initialMessage.text), refreshDraft);
+
+  await page.evaluate(() => window.sidebarPreview.cloud.setQueueAckFailures(1));
+  const fileChooser = page.waitForFileChooser();
+  await page.click('.ag-reference-quick-add');
+  await (await fileChooser).accept([resolve(artifacts, 'sample.txt')]);
+  await page.waitForSelector('.ag-reference-upload-chip.ag-ready');
+  const followup = '첨부한 자료를 반영해 결론을 다듬어 주세요.';
+  await page.type('.ag-input', followup);
+  await page.click('.ag-send');
+  await page.waitForFunction(() => window.sidebarPreview.cloud.calls.commands
+    .filter((command) => command.command === 'queue-message').length === 1
+    && document.querySelector('.ag-reference-upload-chip.ag-ready')
+    && !document.querySelector('.ag-send').disabled);
+  assert.equal(await page.$eval('.ag-input', (node) => node.value), followup);
+  await page.click('.ag-send');
+  await page.waitForFunction(() => window.sidebarPreview.cloud.calls.commands
+    .filter((command) => command.command === 'queue-message').length === 2
+    && document.querySelector('.ag-input').value === '');
+  const queuedIds = await page.evaluate(() => window.sidebarPreview.cloud.calls.commands
+    .filter((command) => command.command === 'queue-message')
+    .map((command) => command.messageId));
+  assert.equal(queuedIds[1], queuedIds[0], '동일한 메시지와 파일의 재시도는 원래 messageId를 재사용한다');
 }

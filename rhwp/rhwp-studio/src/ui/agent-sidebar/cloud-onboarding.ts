@@ -856,16 +856,14 @@ export function createCloudOnboarding(deps: CloudOnboardingDeps): CloudOnboardin
       title.textContent = phase === 'teardown'
         ? 'Raucloud를 종료하지 못했습니다'
         : 'Raucloud를 준비하지 못했습니다';
-      body.append(
-        description(phase === 'teardown'
-          ? '샌드박스가 아직 남아 있습니다. 문제를 해결한 뒤 다시 종료하세요.'
-          : '다시 시도하거나 내 서버를 연결해 계속할 수 있습니다.'),
-        callout('cloud', issue.title, issue.guidance),
-        issueDetails(issue),
-      );
+      const explanation = phase === 'teardown'
+        ? description('샌드박스가 아직 남아 있습니다. 문제를 해결한 뒤 다시 종료하세요.')
+        : issue.title === title.textContent
+          ? description(issue.guidance)
+          : callout('cloud', issue.title, issue.guidance);
+      body.append(explanation, issueDetails(issue));
       const context = phase === 'spawn' ? transferContext(intent) : null;
       if (context) body.appendChild(context);
-      footer.append(cancel);
       const refresh = button('상태 확인');
       refresh.addEventListener('click', () => { void refreshSandbox(); });
       if (phase === 'teardown') {
