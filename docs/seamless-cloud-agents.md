@@ -36,4 +36,24 @@ Each track must document the behavior actually implemented and the checks actual
 
 ## Integration record
 
-Implementation and validation are in progress. This document is an acceptance plan, not completion evidence.
+The component work is split across [runtime continuity, #256](https://github.com/ghandhitechnology/Rauhwpx/pull/256), [desktop delivery, #257](https://github.com/ghandhitechnology/Rauhwpx/pull/257), and [Studio setup and review, #258](https://github.com/ghandhitechnology/Rauhwpx/pull/258). Their reviewed changes land in [the feature PR, #255](https://github.com/ghandhitechnology/Rauhwpx/pull/255).
+
+The combined checkout passes 326 desktop tests, 246 worker tests, five HTTP experience scenarios, and 110 broker tests with PostgreSQL. Studio passes 2,183 unit tests with one environment skip, all 46 browser tests, production-sidebar checks, the full build and the standalone sidebar build. The browser suite includes nine Cloud version-merge cases using real HWP/HWPX documents and the built WASM engine. Cloud onboarding, workspace and display smoke checks pass, including concurrent local typing, merged edits, Korean input and reconnect without duplicate chat or setup.
+
+Four worker checks require Linux filesystem or display support; the image workflow runs the document-shell and headed display/input proofs in the built container. Final component CI and image publication remain part of the feature PR's readiness gate. The HTTP experience scenarios run in the regular `npm run test:cloud` command.
+
+The HTTP experience tests use the production signed worker routes, encrypted broker artifact storage, desktop coordinator and local recovery files. They exercise:
+
+- Losing activation and attached-message responses, replacing the worker, restoring the original queue and retrying without duplicate messages or another attachment upload.
+- Failing broker persistence before activation acknowledgment, then recovering the same transfer and command identity.
+- Rejecting a managed runtime that lacks durable conversation restoration before it can receive a handoff.
+- Receiving a queued progress event before broker persistence fails, then restoring and delivering that still-pending message exactly once.
+- Completing a worker turn while the desktop is closed, downloading its verified result on return without allocating another worker, and reopening the local result offline.
+
+Provider output in these protocol tests is deterministic. Actual HWP/HWPX parsing, merge behavior, layout and keyboard input have separate browser and container checks.
+
+## Candidate rollout
+
+The feature uses `2.0.3-cloud.1` for desktop metadata, worker metadata and default image selection. A branch-dispatched image build publishes a separate candidate after runtime, broker and container checks. Its artifact records the registry digest and source commit and contains matching tested broker source. The shared stable and edge channels remain unchanged.
+
+Deploy the compatible broker before selecting the new worker image and distributing the desktop. Keep `SESSION_SECRET` and `DATABASE_URL` unchanged, and preserve unrelated staged Railway settings. Once conversation artifacts exist, a broker rollback must retain artifact-kind filtering; rolling back only the worker image keeps the completed-document inbox compatible. The [release guide](releasing.md#cloud-feature-candidates) contains the candidate command, and the feature PR records the final verification run, digest and rollout status.
