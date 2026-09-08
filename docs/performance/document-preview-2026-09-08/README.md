@@ -1,6 +1,6 @@
 # Document preview benchmark
 
-Measured on September 8, 2026 with fresh headless Chrome processes and the existing local WASM build. The baseline is `b44bc5ee`. The combined revision is `8c70904d`, containing the resource, typewriter, and mutation scheduler fixes. Raw measurements, browser version, and WASM digest are in [results.json](results.json).
+Measured on September 8, 2026 with fresh headless Chrome processes, the Canvas2D backend, and the existing local WASM build. These measurements do not cover CanvasKit GPU frame pacing. The baseline is `b44bc5ee`. The combined revision is `8c70904d`, containing the resource, typewriter, and mutation scheduler fixes. Raw measurements, browser version, and WASM digest are in [results.json](results.json).
 
 The typewriter workload improved from a median 18.33 to 51.57 FPS during dispatch across three alternating baseline/combined runs. Including the 1.2-second settling period, median FPS improved from 41.34 to 59.18. Median dispatch time fell from 1,036 to 363 ms; caret geometry calls fell from 12,716 to 731. This workload sends 100 notifications in ten bursts against a valid range in the six-page business-plan document.
 
