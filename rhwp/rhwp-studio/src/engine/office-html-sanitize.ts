@@ -77,6 +77,9 @@ export function sanitizeOfficeHtmlForCore(html: string): string {
   return out;
 }
 
+/** 붙여넣기 UI를 막지 않도록 문서모델 페이로드 절대 상한. 넘으면 HTML 경로로 폴백한다. */
+export const HWPJSON_PASTE_MAX_CHARS = 32_000_000;
+
 /**
  * 한글 클립보드 HTML 에서 문서 모델 JSON 을 꺼낸다.
  *
@@ -91,5 +94,6 @@ export function extractHwpJsonModel(html: string): string | null {
   const end = html.indexOf('-->', start);
   const raw = (end < 0 ? html.slice(start) : html.slice(start, end)).trim();
   if (raw.length < 2 || raw[0] !== '{') return null;
+  if (raw.length > HWPJSON_PASTE_MAX_CHARS) return null;
   return raw;
 }

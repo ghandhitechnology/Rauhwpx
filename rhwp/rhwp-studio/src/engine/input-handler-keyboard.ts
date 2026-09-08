@@ -24,7 +24,7 @@ import { scrollByPageStep, type PageScrollDirection } from '@/view/page-scroll';
 import { caretRectForPageScroll as resolveCaretRectForPageScroll } from '@/view/page-scroll-caret';
 import { inlinePictureInsertionTarget } from './inline-picture-target';
 import { inlineOfficeClipboardImages, liftImagesToBlockLevel, needsRtfImageInlining } from './office-clipboard-images';
-import { extractHwpJsonModel, sanitizeOfficeHtmlForCore } from './office-html-sanitize';
+import { extractHwpJsonModel, HWPJSON_PASTE_MAX_CHARS, sanitizeOfficeHtmlForCore } from './office-html-sanitize';
 
 const RHWP_CLIPBOARD_MARKER_RE = /<!--\s*rhwp-studio-clipboard:([A-Za-z0-9._:-]+)\s*-->/;
 const PAGINATION_BOUNDARY_KEYS = new Set([
@@ -2146,41 +2146,45 @@ export function onPaste(this: any, e: ClipboardEvent): void {
  * 호출한 쪽이 종전 HTML 경로로 되돌아가게 한다.
  */
 function pasteHwpJsonModel(this: any, model: string, hasSelection: boolean): boolean {
-  let ok = false;
+  if (model.length > HWPJSON_PASTE_MAX_CHARS) return false;
+  const cursor = this.cursor.getPosition();
+  // 표 칸 안은 아직 HTML 경로가 담당한다(코어에 셀 진입점이 없다).
+  if (cursor.parentParaIndex !== undefined) return false;
+  const selection = hasSelection ? this.cursor.getSelectionOrdered() : null;
   try {
     this.executeOperation({
       kind: 'snapshot',
       operationType: 'pasteHwpJson',
       operation: (wasm: WasmBridge) => {
-        const p = this.cursor.getPosition();
-        // 표 칸 안은 아직 HTML 경로가 담당한다(코어에 셀 진입점이 없다).
-        if (p.parentParaIndex !== undefined) return undefined;
-        if (hasSelection) this.deleteSelection({ deferRecord: true });
+        const p = selection
+          ? deleteSelectionImmediate(wasm, selection.start, selection.end)
+          : cursor;
         const result = wasm.pasteHwpJson(p.sectionIndex, p.paragraphIndex, p.charOffset, model);
         console.debug('[paste] pasteHwpJson 결과:', String(result).slice(0, 200));
         const parsed = JSON.parse(result);
-        if (!parsed.ok) return undefined;
-        ok = true;
+        if (!parsed.ok) throw new Error(String(parsed.error ?? 'pasteHwpJson 거절'));
         return positionAfterPasteResult(p, parsed);
       },
     });
+    this.cursor.clearSelection();
+    return true;
   } catch (error) {
     console.warn('[paste] 문서모델 붙여넣기 실패 — HTML 경로로 되돌아감:', error);
     return false;
   }
-  if (!ok) console.debug('[paste] 문서모델 경로 미적용 — HTML 경로로 되돌아감');
-  return ok;
 }
 
 /** 외부 HTML 붙여넣기 본체 — 코어 정리 → pasteHtml → 실패 시 text/plain 폴백. */
 function pasteExternalHtml(this: any, html: string, text: string, hasSelection: boolean): void {
   const htmlForCore = sanitizeOfficeHtmlForCore(html);
   console.debug(`[paste] HTML 붙여넣기 시작: 원본 ${html.length}자 → 정리 ${htmlForCore.length}자, img ${(htmlForCore.match(/<img\b/gi) ?? []).length}개`);
+  const selection = hasSelection ? this.cursor.getSelectionOrdered() : null;
   let htmlPasted = false;
   try {
     this.executeOperation({ kind: 'snapshot', operationType: 'pasteHtml', operation: (wasm: WasmBridge) => {
-      if (hasSelection) this.deleteSelection({ deferRecord: true });
-      const p = this.cursor.getPosition();
+      const p = selection
+        ? deleteSelectionImmediate(wasm, selection.start, selection.end)
+        : this.cursor.getPosition();
       let result: string;
       if (isNestedCellPosition(p)) {
         result = wasm.pasteHtmlInCellByPath(
@@ -2196,13 +2200,11 @@ function pasteExternalHtml(this: any, html: string, text: string, hasSelection: 
       }
       const parsed = JSON.parse(result);
       console.debug('[paste] pasteHtml 결과:', String(result).slice(0, 200));
-      if (parsed.ok) {
-        htmlPasted = true;
-        return positionAfterPasteResult(p, parsed);
-      }
-      console.warn('[paste] HTML 가져오기 거절(ok=false) — 텍스트로 폴백:', parsed.error ?? parsed);
-      return p;
+      if (!parsed.ok) throw new Error(String(parsed.error ?? 'pasteHtml 거절'));
+      htmlPasted = true;
+      return positionAfterPasteResult(p, parsed);
     }});
+    this.cursor.clearSelection();
   } catch (error) {
     console.warn('[paste] HTML 붙여넣기 실패 — 텍스트로 폴백:', error);
   }

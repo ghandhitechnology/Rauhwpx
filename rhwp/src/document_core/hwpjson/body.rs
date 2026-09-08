@@ -229,7 +229,10 @@ fn style_ref(ids: &mut Ids, objid: &str) -> Option<i64> {
 }
 
 fn borderfill_ref(ids: &mut Ids, objid: &str) -> Option<i64> {
-    issue(&mut ids.borderfill_id, objid)
+    if objid.is_empty() {
+        return None;
+    }
+    ids.borderfill_id.get(objid).copied()
 }
 
 /// `img.bi`(저장소 이름) → `imageN`. `bin_id` 가 비면 `bi` 배열 순서로 채운다.
@@ -374,12 +377,12 @@ fn emit_secpr(m: &Model, ids: &mut Ids, o: &Value) -> String {
     out
 }
 
-/// 파이썬은 `%s` 로 `None` 을 "None" 이라 적는다. 여기서도 같은 자리(속성 생략이 아닌 곳)에서만
-/// 쓰이며, 실제 모델에서는 항상 값이 있다.
+/// 속성 값이 없을 때 HWPX 파서가 숫자로 읽는 기본값 `0`을 낸다.
+/// (`0` 은 charPr 기본 항목, borderFill 은 '참조 없음'.)
 fn opt_str(v: Option<i64>) -> String {
     match v {
         Some(v) => v.to_string(),
-        None => "None".to_string(),
+        None => "0".to_string(),
     }
 }
 

@@ -40,6 +40,11 @@ fn checked_in_clipboard_model_converts() {
     assert_eq!(count_open(&parts.section_xml, "hp:p"), 1, "문단 수");
     assert!(parts.section_xml.contains("공개 클립보드 표본"));
     assert!(parts.bins.is_empty());
+    assert!(
+        !parts.section_xml.contains("charPrIDRef=\"None\""),
+        "빈 cp 는 숫자 기본값이어야 한다"
+    );
+    assert!(parts.section_xml.contains("charPrIDRef=\"0\""));
 }
 
 #[test]
@@ -68,4 +73,14 @@ fn unsupported_control_and_invalid_image_are_errors() {
         .unwrap_err()
         .to_string();
     assert!(corrupt_error.contains("hwpjson 이미지 base64가 손상됐다"));
+}
+
+#[test]
+fn memo_color_strings_are_xml_escaped() {
+    let json = r##"{
+        "mp": {"m0": {"lc": "#ff00\"x", "fc": "#00ff00", "ac": "#0000ff"}}
+    }"##;
+    let parts = hwpjson_to_hwpx_parts(json).expect("memo 변환 실패");
+    assert!(parts.header_xml.contains("lineColor=\"#ff00&quot;x\""));
+    assert!(!parts.header_xml.contains("lineColor=\"#ff00\"x\""));
 }

@@ -1037,7 +1037,7 @@ pub(crate) fn parse_css_value<'a>(css: &'a str, property: &str) -> Option<String
         let part = part.trim();
         if let Some(colon) = part.find(':') {
             let key = part[..colon].trim();
-            if key == property {
+            if key.eq_ignore_ascii_case(property) {
                 return Some(part[colon + 1..].trim().to_string());
             }
         }

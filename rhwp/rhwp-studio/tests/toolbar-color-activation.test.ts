@@ -37,6 +37,7 @@ test('#6635 형광펜 팔레트 액션은 click으로 적용하고 color input�
   assert.doesNotMatch(body, /btnOther\.appendChild\(hiddenPicker\)/);
   assert.match(body, /event\.key !== 'Escape'/);
   assert.match(body, /this\.btnHighlight\.focus\(\)/);
+  assert.match(body, /document\.addEventListener\('keydown',[\s\S]*?,\s*true\)/);
 });
 
 test('#6635 숨긴 글자색 input은 Tab 순서에서 제외한다', () => {

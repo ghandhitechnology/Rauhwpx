@@ -1046,15 +1046,18 @@ impl DocumentCore {
         };
         pic.border_x = [0i32, 0, w_hu as i32, 0];
         pic.border_y = [w_hu as i32, h_hu as i32, 0, h_hu as i32];
+        const MAX_IMAGE_PX: u32 = 40_000;
         let (nat_w, nat_h) =
             image_pixel_size(&decoded).unwrap_or((width.max(1.0) as u32, height.max(1.0) as u32));
+        let nat_w = nat_w.clamp(1, MAX_IMAGE_PX);
+        let nat_h = nat_h.clamp(1, MAX_IMAGE_PX);
         pic.crop = crate::model::image::CropInfo {
             left: 0,
             top: 0,
-            right: (nat_w * 75) as i32,
-            bottom: (nat_h * 75) as i32,
+            right: nat_w.saturating_mul(75) as i32,
+            bottom: nat_h.saturating_mul(75) as i32,
         };
-        pic.img_dim = (nat_w * 75, nat_h * 75);
+        pic.img_dim = (nat_w.saturating_mul(75), nat_h.saturating_mul(75));
         para.controls.push(Control::Picture(Box::new(pic)));
         para.ctrl_data_records = vec![None];
 

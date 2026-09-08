@@ -448,6 +448,10 @@ impl DocumentCore {
     /// data: URI 페이로드는 html_markup_len 에서 제외한다.
     const HTML_PASTE_MAX_BYTES: usize = 2_000_000;
 
+    /// 전체 입력 상한. `data:` 그림 바이트까지 포함해 잰다 — 태그 복잡도와 별개로
+    /// 버퍼 할당·주사 비용 자체를 묶어야 한다.
+    const HTML_PASTE_MAX_TOTAL_BYTES: usize = 32_000_000;
+
     pub(crate) fn parse_html_to_paragraphs(&mut self, html: &str) -> Vec<Paragraph> {
         self.parse_html_to_paragraphs_at_depth(html, 0)
     }
@@ -471,6 +475,7 @@ impl DocumentCore {
 
     fn parse_html_to_paragraphs_at_depth(&mut self, html: &str, depth: u32) -> Vec<Paragraph> {
         if depth >= Self::HTML_PASTE_MAX_RECURSION_DEPTH
+            || html.len() > Self::HTML_PASTE_MAX_TOTAL_BYTES
             || Self::html_markup_len(html) > Self::HTML_PASTE_MAX_BYTES
         {
             let mut fallback_paragraphs = Vec::new();
@@ -1167,7 +1172,7 @@ impl DocumentCore {
         if css_margin_left.is_some() || css_text_indent.is_some() {
             let ml = css_margin_left.unwrap_or(0);
             let ti = css_text_indent.unwrap_or(0);
-            ps.margin_left = (ml + ti).max(0);
+            ps.margin_left = ml.max(0);
             ps.indent = ti;
         }
         if let Some(v) = parse_css_value(&css_lower, "margin-top") {
@@ -1312,6 +1317,28 @@ mod tests {
         assert!(
             ps.raw_data.is_none(),
             "raw_data 가 남으면 정렬·줄간격 변경이 저장 시 사라진다"
+        );
+    }
+
+    #[test]
+    fn html_paste_text_indent_is_not_added_to_margin_left() {
+        let mut core = core_with_parsed_shapes();
+        let id = core.css_to_para_shape_id("margin-left:20pt;text-indent:10pt");
+        let ps = &core.document.doc_info.para_shapes[id as usize];
+        assert_eq!(ps.margin_left, 4000, "margin-left 만 왼쪽 여백");
+        assert_eq!(ps.indent, 2000, "text-indent 는 indent 필드");
+    }
+
+    #[test]
+    fn html_paste_font_family_matches_ascii_case_insensitively() {
+        let mut core = core_with_parsed_shapes();
+        let lower = core.css_to_char_shape_id("font-family:CaseFontX", false, false, false);
+        let mixed = core.css_to_char_shape_id("FONT-FAMILY:CaseFontX", false, false, false);
+        let a = &core.document.doc_info.char_shapes[lower as usize];
+        let b = &core.document.doc_info.char_shapes[mixed as usize];
+        assert_eq!(
+            a.font_ids, b.font_ids,
+            "속성 이름 대소문자만 달라도 같은 글꼴"
         );
     }
 }

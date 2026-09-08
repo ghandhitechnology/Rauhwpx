@@ -69,7 +69,7 @@ fn b(v: bool) -> &'static str {
 /// 정수 색상 → `#RRGGBB`. 한글은 BGR 순서로 담는다.
 fn color(v: &Value, k: &str, dflt: i64) -> String {
     if let Some(s) = v.get(k).and_then(Value::as_str) {
-        return s.to_string();
+        return esc_attr(s);
     }
     let n = geti(v, k, dflt) & 0xFF_FFFF;
     let (r, g, bb) = (n & 0xFF, (n >> 8) & 0xFF, (n >> 16) & 0xFF);

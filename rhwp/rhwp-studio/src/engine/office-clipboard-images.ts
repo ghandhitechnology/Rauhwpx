@@ -69,6 +69,11 @@ export function extractEmfDibs(emf: Uint8Array): { dibs: EmfDib[]; bounds: { x: 
     const size = view.getUint32(offset + 4, true);
     if (size < 8 || offset + size > emf.byteLength) break;
     if (type === EMR_STRETCHDIBITS || type === EMR_SETDIBITSTODEVICE) {
+      // offBmi…cbBits 는 오프셋 +48…+63. 선언 크기가 더 짧으면 레코드를 건너뛴다.
+      if (size < 64) {
+        offset += size;
+        continue;
+      }
       const xDest = view.getInt32(offset + 24, true);
       const yDest = view.getInt32(offset + 28, true);
       const offBmi = view.getUint32(offset + 48, true);
@@ -76,9 +81,9 @@ export function extractEmfDibs(emf: Uint8Array): { dibs: EmfDib[]; bounds: { x: 
       const offBits = view.getUint32(offset + 56, true);
       const cbBits = view.getUint32(offset + 60, true);
       // STRETCHDIBITS 만 cxDest/cyDest 를 갖는다. SETDIBITSTODEVICE 는 원본 크기 그대로다.
-      const cxDest = type === EMR_STRETCHDIBITS && offset + 80 <= emf.byteLength
+      const cxDest = type === EMR_STRETCHDIBITS && size >= 80
         ? view.getInt32(offset + 72, true) : 0;
-      const cyDest = type === EMR_STRETCHDIBITS && offset + 80 <= emf.byteLength
+      const cyDest = type === EMR_STRETCHDIBITS && size >= 80
         ? view.getInt32(offset + 76, true) : 0;
       if (cbBmi >= 12 && cbBits > 0
         && offset + offBmi + cbBmi <= emf.byteLength
@@ -181,24 +186,56 @@ export function imagePixelSize(bytes: Uint8Array): { w: number; h: number } | nu
   return null;
 }
 
+function stripNestedRtfGroups(s: string): string {
+  let out = '';
+  let depth = 0;
+  for (const ch of s) {
+    if (ch === '{') { depth++; continue; }
+    if (ch === '}') { if (depth > 0) depth--; continue; }
+    if (depth === 0) out += ch;
+  }
+  return out;
+}
+
 /** RTF 에서 그림을 문서 순서대로 뽑는다. */
 export function extractRtfPictures(rtf: string): RtfPicture[] {
   const pictures: RtfPicture[] = [];
-  const re = /\\pict([\s\S]*?)\}/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(rtf)) !== null) {
-    const body = m[1];
+  let searchFrom = 0;
+  while (searchFrom < rtf.length) {
+    const pict = rtf.indexOf('\\pict', searchFrom);
+    if (pict < 0) break;
+    let brace = pict - 1;
+    while (brace >= 0 && rtf.charCodeAt(brace) <= 0x20) brace--;
+    if (brace < 0 || rtf[brace] !== '{') {
+      searchFrom = pict + 5;
+      continue;
+    }
+    let depth = 1;
+    let cursor = pict + 5;
+    let end = -1;
+    while (cursor < rtf.length) {
+      const ch = rtf[cursor];
+      if (ch === '{') depth++;
+      else if (ch === '}') {
+        depth--;
+        if (depth === 0) { end = cursor; break; }
+      }
+      cursor++;
+    }
+    if (end < 0) break;
+    const body = stripNestedRtfGroups(rtf.slice(pict + 5, end));
     const isPng = /\\pngblip\b/.test(body);
     const isJpeg = /\\jpegblip\b/.test(body);
     const isMeta = /\\(?:wmetafile\d*|emfblip)\b/.test(body);
-    // 제어 단어(\picw3439 등)를 지우고 남는 16진수만 payload 다.
     const hex = body.replace(/\\[a-zA-Z]+-?\d*\s?/g, '').replace(/[^0-9a-fA-F]/g, '');
-    if (hex.length < 32) continue;
-    const bytes = hexToBytes(hex.slice(0, hex.length - (hex.length % 2)));
-    if (isPng) pictures.push({ bytes, mime: 'image/png' });
-    else if (isJpeg) pictures.push({ bytes, mime: 'image/jpeg' });
-    else if (isMeta) pictures.push({ bytes, mime: 'image/emf' });
-    else pictures.push({ bytes: new Uint8Array(0), mime: '' });
+    if (hex.length >= 32) {
+      const bytes = hexToBytes(hex.slice(0, hex.length - (hex.length % 2)));
+      if (isPng) pictures.push({ bytes, mime: 'image/png' });
+      else if (isJpeg) pictures.push({ bytes, mime: 'image/jpeg' });
+      else if (isMeta) pictures.push({ bytes, mime: 'image/emf' });
+      else pictures.push({ bytes: new Uint8Array(0), mime: '' });
+    }
+    searchFrom = end + 1;
   }
   return pictures;
 }

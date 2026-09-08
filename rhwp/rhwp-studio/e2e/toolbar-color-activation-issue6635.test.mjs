@@ -90,6 +90,18 @@ runTest('색상 버튼 표준 활성화와 선택 보존 (#6635)', async ({ page
     if (await isOpen(page)) await page.click('#btn-highlight');
   }
 
+  setTestCase('포인터로 연 팔레트도 Escape로 닫고 형광펜 버튼에 포커스를 되돌린다');
+  await selectText(page);
+  await page.click('#btn-highlight');
+  assert(await isOpen(page), '마우스 클릭으로 팔레트가 열린다');
+  await page.evaluate(() => window.__inputHandler.textarea.focus());
+  assert(await isOpen(page), '편집기 포커스만으로는 팔레트가 닫히지 않는다');
+  await page.keyboard.press('Escape');
+  assert(!await isOpen(page), '문서 범위 Escape로 팔레트가 닫힌다');
+  assert(await page.$eval('#btn-highlight', (button) => button === document.activeElement),
+    '포인터로 연 뒤 Escape 하면 형광펜 버튼으로 포커스가 복원된다');
+  assert(await selection(page) === selected, '포인터 열기 Escape는 선택 영역을 보존한다');
+
   await page.evaluate(() => {
     window.__colorPickerClicks = { text: 0, highlight: 0 };
     document.querySelector('#text-color-picker').addEventListener('click', () => {
