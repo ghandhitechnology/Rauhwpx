@@ -5,11 +5,13 @@ export function createCheckpointMirror({
   apply,
   retryBaseMs = 250,
   retryMaxMs = 10_000,
+  allowSameRevisionOperations = false,
 }: {
   download(sessionId: string, operationId?: string): Promise<CloudCheckpointPayload>;
   apply(checkpoint: CloudCheckpointPayload): void | Promise<void>;
   retryBaseMs?: number;
   retryMaxMs?: number;
+  allowSameRevisionOperations?: boolean;
 }) {
   type PendingOperation = {
     sessionId: string;
@@ -67,10 +69,18 @@ export function createCheckpointMirror({
         operation.operationId === 'reconnect' ? undefined : operation.operationId,
       );
       if (operation.generation !== generation || disposed) return;
-      if (checkpoint.revision > (revisions.get(operation.sessionId) ?? -1)) {
+      const previousRevision = revisions.get(operation.sessionId) ?? -1;
+      if (checkpoint.revision > previousRevision
+        || (allowSameRevisionOperations && checkpoint.revision === previousRevision
+          && !completed.get(operation.sessionId)?.has(checkpoint.operationId))) {
         await apply(checkpoint);
         if (operation.generation !== generation || disposed) return;
         revisions.set(operation.sessionId, checkpoint.revision);
+        if (allowSameRevisionOperations) {
+          const operations = completed.get(operation.sessionId) ?? new Set<string>();
+          operations.add(checkpoint.operationId);
+          completed.set(operation.sessionId, operations);
+        }
       }
       complete(operation);
     });
