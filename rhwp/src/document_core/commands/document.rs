@@ -2124,6 +2124,20 @@ impl DocumentCore {
         self.paginate();
     }
 
+    /// 본문 여러 줄 삽입을 중간 페이지네이션 없이 처리할 수 있는 구역인지 확인한다.
+    /// 다단의 줄 폭 수렴은 편집 중 페이지네이션 결과를 사용하므로 초기 설정뿐 아니라
+    /// 구역 중간에 등장하는 모든 단 정의를 확인한다.
+    pub fn can_batch_body_text_native(&self, section_idx: usize) -> bool {
+        self.document.sections.get(section_idx).is_some_and(|section| {
+            section.paragraphs.iter().all(|paragraph| {
+                paragraph.controls.iter().all(|control| match control {
+                    Control::ColumnDef(columns) => columns.column_count == 1,
+                    _ => true,
+                })
+            })
+        })
+    }
+
     /// Batch 모드를 시작한다. 이후 Command 호출 시 paginate()를 건너뛴다.
     pub fn begin_batch_native(&mut self) -> Result<String, HwpError> {
         self.batch_mode = true;
