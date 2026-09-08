@@ -142,6 +142,20 @@ test('cloud image publication requires real headed display and input verificatio
   }
 });
 
+test('cloud candidates include tested broker source from the same commit', () => {
+  const steps = workflows['cloud-sandbox-image.yml'].jobs.publish.steps;
+  const broker = steps.findIndex((step) => step.name === 'Verify and archive matching broker source');
+  const publish = steps.findIndex((step) => step.run?.includes('podman push'));
+  assert.ok(broker >= 0 && broker < publish);
+  assert.match(steps[broker].run, /npm --prefix rhwp\/rau-credits test/);
+  assert.match(steps[broker].run, /git archive "\$GITHUB_SHA:rhwp\/rau-credits"/);
+  assert.match(steps[broker].run, /sha256sum raucloud-broker-source\.tar\.gz/);
+  const upload = steps.find((step) => step.uses?.startsWith('actions/upload-artifact@'));
+  for (const name of ['cloud-image.json', 'raucloud-broker-source.tar.gz', 'raucloud-broker-source.json']) {
+    assert.ok(upload.with.path.includes(name), name);
+  }
+});
+
 for (const scenario of [
   { name: 'feature candidate', requested: '', edge: false, refType: 'branch', refName: 'feat/cloud' },
   { name: 'named candidate', requested: 'cloud-review-1', edge: false, refType: 'branch', refName: 'feat/cloud' },

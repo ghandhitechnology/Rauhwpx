@@ -34,6 +34,8 @@ gh workflow run cloud-sandbox-image.yml --ref feat/seamless-cloud-agents \
 
 Without `image_tag`, the candidate tag is `sha-<source commit>`. Download the workflow's `cloud-image-<source commit>` artifact for the registry digest, source commit and verification run. Pin an approved broker rollout to the recorded `image@sha256:...` value. The candidate workflow currently builds Linux amd64 for Railway; the tagged release workflow builds both architectures.
 
+The same artifact includes `raucloud-broker-source.tar.gz` and its source-commit/SHA-256 record. The workflow runs broker tests before archiving the tracked source. Deploy that archive with the matching image so an unrelated local edit cannot slip into the broker rollout.
+
 Do not push `v*` or `cloud-sandbox-v*` Git tags for candidate testing. Those triggers promote stable or edge images. A branch dispatch with `publish_edge=false` leaves both shared channels unchanged, and a prerelease desktop version stays out of the stable updater.
 
 For conversation continuity, deploy the compatible broker before changing the worker image or distributing the new desktop. Preserve `SESSION_SECRET`, `DATABASE_URL` and unrelated staged Railway settings. Confirm the new worker advertises `capabilities.conversationRestore` before sending a task. See [the broker continuity and rollback rules](../rhwp/rau-credits/RAUCLOUD.md#conversation-continuity).
