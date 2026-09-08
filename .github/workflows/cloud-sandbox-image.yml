@@ -79,6 +79,16 @@ jobs:
       - name: Verify cloud runtime
         run: npm --prefix cloud test
 
+      - name: Verify and archive matching broker source
+        run: |
+          set -euo pipefail
+          npm --prefix rhwp/rau-credits ci
+          npm --prefix rhwp/rau-credits test
+          git archive "$GITHUB_SHA:rhwp/rau-credits" | gzip -n > raucloud-broker-source.tar.gz
+          broker_digest=$(sha256sum raucloud-broker-source.tar.gz | cut -d ' ' -f 1)
+          jq -n --arg commit "$GITHUB_SHA" --arg sha256 "$broker_digest" \
+            '{file: "raucloud-broker-source.tar.gz", commit: $commit, sha256: $sha256}' > raucloud-broker-source.json
+
       - name: Build and smoke-test sandbox image
         env:
           DOCUMENT_SHELL_ONLY: ${{ inputs.document_shell_only }}
@@ -177,5 +187,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cloud-image-${{ github.sha }}
-          path: cloud-image.json
+          path: |
+            cloud-image.json
+            raucloud-broker-source.tar.gz
+            raucloud-broker-source.json
           if-no-files-found: error
