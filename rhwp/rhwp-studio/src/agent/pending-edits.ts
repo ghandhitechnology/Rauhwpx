@@ -11,6 +11,7 @@ import type {
 } from './types.ts';
 import { AgentToolError, isDestructiveTableMark, isObjectOpApplied, sameCell } from './types.ts';
 import type { OverlayOp, PendingOverlayRenderer } from './pending-overlay.ts';
+import type { AgentTextInsertedEvent } from './typewriter-reveal.ts';
 
 export interface PendingEditDeps {
   wasm: WasmBridge;
@@ -118,6 +119,7 @@ export class PendingEditManager {
   private bulkDocEventsReason: string | null = null;
   private bulkOverlayDirty = false;
   private bulkOpsChanged = false;
+  private bulkTextInserted: Array<{ opId: string; event: AgentTextInsertedEvent }> = [];
   /**
    * runAtomicBatch 구간 표시. 배치의 외부 스냅샷이 롤백을 전담하므로, 구간 안의
    * replaceText 는 per-op 스냅샷(문서 전체 클론)을 만들지 않는다 — op 이 N 개인
@@ -200,7 +202,7 @@ export class PendingEditManager {
     this.emitDocEvents('agent-pending-edit');
     this.syncOverlay();
     // 타자기 공개용 — op.range 라이브 참조를 넘겨 이후 shift 가 반영되게 한다.
-    this.deps.eventBus.emit('agent-text-inserted', { agent: op.agent, range: op.range, text });
+    this.emitTextInserted({ agent: op.agent, range: op.range, text }, op.id);
     this.emitChange({ type: 'ops-changed' });
     return { changeSetId: set.id, insertedRange: { ...range } };
   }
@@ -329,9 +331,9 @@ export class PendingEditManager {
       this.emitDocEvents('agent-pending-edit');
       this.syncOverlay();
       if (text.length > 0) {
-        this.deps.eventBus.emit('agent-text-inserted', {
+        this.emitTextInserted({
           agent: op.agent, range: op.range, text, oldText: deletedText,
-        });
+        }, op.id);
       }
       this.emitChange({ type: 'ops-changed' });
       return { changeSetId: set.id, insertedRange: { ...ins.range }, deletedText };
@@ -576,11 +578,13 @@ export class PendingEditManager {
     const snapId = wasm.saveSnapshot();
     this.deps.inputHandler.retainExternalSnapshot?.();
     const wasAtomic = this.inAtomicBatch;
+    const textInsertedBefore = this.bulkTextInserted.length;
     this.inAtomicBatch = true;
     this.beginBulk();
     try {
       return fn();
     } catch (err) {
+      this.bulkTextInserted.length = textInsertedBefore;
       try { wasm.restoreSnapshot(snapId); } catch { /* best effort */ }
       // 배치 중 추가된 op 이 보존 스냅샷을 점유했을 수 있다 — 롤백으로 op 이
       // 사라지기 전에 해제한다 (예산 누수 방지).
@@ -616,6 +620,8 @@ export class PendingEditManager {
     const docEventsReason = this.bulkDocEventsReason;
     const overlayDirty = this.bulkOverlayDirty;
     const opsChanged = this.bulkOpsChanged;
+    const textInserted = this.bulkTextInserted;
+    this.bulkTextInserted = [];
     this.bulkLayoutDirty = false;
     this.bulkDocEventsReason = null;
     this.bulkOverlayDirty = false;
@@ -623,6 +629,16 @@ export class PendingEditManager {
     if (layoutDirty) this.reconcilePreviewLayout();
     if (docEventsReason !== null) this.emitDocEvents(docEventsReason);
     if (overlayDirty) this.syncOverlay();
+    if (textInserted.length > 0) {
+      // 중첩 배치 롤백은 op을 클론으로 복원하므로 현재 op의 라이브 range를 찾는다.
+      const opsById = new Map(this.sets.flatMap((set) => set.ops.map((op) => [op.id, op] as const)));
+      for (const { opId, event } of textInserted) {
+        const op = opsById.get(opId);
+        if (op?.kind === 'insert' || op?.kind === 'replace') {
+          this.emitTextInserted({ ...event, range: op.range }, opId);
+        }
+      }
+    }
     if (opsChanged) this.emitChange({ type: 'ops-changed' });
   }
 
@@ -1042,6 +1058,14 @@ export class PendingEditManager {
     for (const cb of this.listeners) {
       try { cb(e); } catch (err) { console.warn('[pending-edits] onChange listener failed', err); }
     }
+  }
+
+  private emitTextInserted(event: AgentTextInsertedEvent, opId: string): void {
+    if (this.bulkDepth > 0) {
+      this.bulkTextInserted.push({ opId, event });
+      return;
+    }
+    this.deps.eventBus.emit('agent-text-inserted', event);
   }
 
   private emitDocEvents(reason: string): void {
