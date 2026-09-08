@@ -955,7 +955,9 @@ export class CloudClient {
     const activated = await this.command(
       cloudSessionId,
       'session.activate',
-      { expectedVersion: created.stateVersion ?? created.version ?? 1 },
+      // Creation always starts at version 1. Keep the idempotent activation
+      // payload stable when a full transfer is resumed after its receipt is lost.
+      { expectedVersion: 1 },
       `activate_${String(sessionId).replace(/[^A-Za-z0-9_-]/g, '_')}`,
       { signal },
     );

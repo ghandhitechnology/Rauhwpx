@@ -97,6 +97,20 @@ function uncertainMessageDeliveryError(cause) {
   );
 }
 
+function durableQueuedCommandReceiptState(result, queued, cloudSessionId) {
+  if (result?.messageId !== queued.id) return null;
+  if (queued.commandType === 'message.queue') {
+    return ['queued', 'accepted'].includes(result.status) ? result.status : null;
+  }
+  if (queued.commandType !== 'turn.redirect') return null;
+  const session = result.session;
+  const sessionId = session?.id ?? session?.sessionId;
+  if (sessionId !== cloudSessionId || session.status !== 'running'
+    || session.persistent !== true || session.roomStatus !== 'active'
+    || session.redirectRequested !== true) return null;
+  return 'accepted';
+}
+
 function conversationRestoreSupported(health) {
   return health?.capabilities?.conversationRestore === true || health?.conversationRestore === true;
 }
@@ -931,7 +945,10 @@ export class CloudCoordinator extends EventEmitter {
       session: selected ? this.#publicSession(selected) : this.#publicRemoteSession(remote),
       sessions: [...publicSessionsById.values()],
       mergeRequests: this.#mergeRecovery.requests,
-      queuedMessages: selected?.queuedMessages ?? [],
+      queuedMessages: (selected?.queuedMessages ?? []).map((message) => ({
+        ...message,
+        delivery: message.serverQueued === true ? 'durable' : 'pending',
+      })),
       timeline: selected?.timeline ?? remote?.timeline ?? null,
       updatedAt: now,
       ...(this.#accountSnapshot ? { account: this.#accountSnapshot } : {}),
@@ -1211,7 +1228,7 @@ export class CloudCoordinator extends EventEmitter {
     const operation = (async () => {
       const outcomes = new Map();
       for (const queued of record.queuedMessages ?? []) {
-        if (!queued.retryPending || queued.serverQueued || queued.state === 'accepted'
+        if (!queued.retryPending || queued.serverQueued
           || !queued.commandId || !queued.commandType || !queued.commandPayload) continue;
         try {
           const result = await this.#client.command(
@@ -1221,14 +1238,15 @@ export class CloudCoordinator extends EventEmitter {
             queued.commandId,
           );
           this.#assertProfileEpoch(profileEpoch);
-          if (result?.messageId !== queued.id || !['queued', 'accepted'].includes(result?.status)) {
+          const receiptState = durableQueuedCommandReceiptState(result, queued, record.cloudSessionId);
+          if (!receiptState) {
             throw new Error('Cloud message retry returned an invalid receipt');
           }
           await this.#store.patch(record.id, (latest) => ({
             queuedMessages: (latest.queuedMessages ?? []).map((entry) => (
               entry.id === queued.id ? {
                 ...entry,
-                state: entry.state === 'accepted' || result.status === 'accepted' ? 'accepted' : 'queued',
+                state: entry.state === 'accepted' || receiptState === 'accepted' ? 'accepted' : 'queued',
                 serverQueued: true,
                 retryPending: false,
                 lastError: null,
@@ -2654,7 +2672,7 @@ export class CloudCoordinator extends EventEmitter {
       const outcome = outcomes?.get(queuedMessageId);
       if (!previousMessage && outcome?.disposition === 'reject') throw outcome.error;
     }
-    if (previousMessage && (previousMessage.serverQueued === true || previousMessage.state === 'accepted')) {
+    if (previousMessage?.serverQueued === true) {
       return this.snapshot({ selectedSessionId: sessionId,
         extra: { commandResult: { messageId: queuedMessageId, status: previousMessage.state } } });
     }
@@ -2726,7 +2744,7 @@ export class CloudCoordinator extends EventEmitter {
               commandId,
               commandType: serverCommand,
               commandPayload: body,
-              retryPending: false,
+              retryPending: true,
             },
           ],
       }));
@@ -2745,7 +2763,7 @@ export class CloudCoordinator extends EventEmitter {
         const retryPending = disposition === 'defer';
         const updated = await this.#store.patch(localHandoff.id, (latest) => ({
           queuedMessages: (latest.queuedMessages ?? []).flatMap((entry) => {
-            if (entry.id !== queuedMessageId || entry.state === 'accepted' || entry.serverQueued === true) {
+            if (entry.id !== queuedMessageId || entry.serverQueued === true) {
               return [entry];
             }
             return retryPending ? [{
@@ -2756,7 +2774,7 @@ export class CloudCoordinator extends EventEmitter {
           }),
         }));
         const acknowledged = updated.queuedMessages.find((entry) => entry.id === queuedMessageId
-          && (entry.state === 'accepted' || entry.serverQueued === true));
+          && entry.serverQueued === true);
         if (acknowledged) {
           const snapshot = await this.snapshot({
             selectedSessionId: sessionId,
@@ -2778,14 +2796,16 @@ export class CloudCoordinator extends EventEmitter {
       }
       throw error;
     }
-    if (localHandoff && queuedMessageId
-      && result?.messageId === queuedMessageId
-      && ['queued', 'accepted'].includes(result?.status)) {
+    if (localHandoff && queuedMessageId) {
+      const queued = (await this.#store.get(localHandoff.id))?.queuedMessages
+        ?.find((entry) => entry.id === queuedMessageId);
+      const receiptState = durableQueuedCommandReceiptState(result, queued ?? {}, sessionId);
+      if (!receiptState) throw new Error('Cloud message command returned an invalid receipt');
       await this.#store.patch(localHandoff.id, (latest) => ({
         queuedMessages: (latest.queuedMessages ?? []).map((entry) => (
           entry.id === queuedMessageId ? {
             ...entry,
-            state: entry.state === 'accepted' || result.status === 'accepted' ? 'accepted' : 'queued',
+            state: entry.state === 'accepted' || receiptState === 'accepted' ? 'accepted' : 'queued',
             serverQueued: true,
             retryPending: false,
             lastError: null,
@@ -3365,7 +3385,7 @@ export class CloudCoordinator extends EventEmitter {
           ...(['message.queued', 'message.accepted'].includes(event.type) ? {
             queuedMessages: (latest.queuedMessages ?? []).map((message) => (
               message.id === source.messageId ? {
-                ...message, serverQueued: true,
+                ...message,
                 state: event.type === 'message.accepted' ? 'accepted' : message.state,
               } : message
             )),
@@ -3534,6 +3554,7 @@ export class CloudCoordinator extends EventEmitter {
         threadId: record.threadId,
         documentId: record.originDocumentId,
         provider: record.provider,
+        persistent: true,
         executionConfig: record.executionConfig,
         goal: record.goal,
         documentName: record.documentName,
