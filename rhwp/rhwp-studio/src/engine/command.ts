@@ -9,7 +9,7 @@ import {
   type EditableParagraphTarget,
   type EditableTextRange,
 } from './edit-target';
-import { CharFormatError, CharFormatRecoveryError, isCharFormatError } from '@/core/char-format-error';
+import { CharFormatError, CharFormatRecoveryError, isCharFormatError } from '../core/char-format-error';
 
 /** 편집 명령 공통 인터페이스 */
 export interface EditCommand {
@@ -897,7 +897,13 @@ export class ApplyCharFormatCommand implements EditCommand {
 
   private executeFormat(wasm: WasmBridge): DocumentPosition {
     if (this.entries.length > 0 && this.entries.every((entry) => entry.afterRuns !== undefined)) {
-      this.restoreCharShapeRuns(wasm, 'after');
+      try {
+        this.restoreCharShapeRuns(wasm, 'after');
+        this.recoveryNeeded = false;
+      } catch (error) {
+        this.recoveryNeeded = true;
+        throw error;
+      }
       return { ...this.cursorBefore };
     }
 
