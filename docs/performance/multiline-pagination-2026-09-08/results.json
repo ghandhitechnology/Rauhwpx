@@ -1,0 +1,440 @@
+{
+  "final-baseline-pending-multiline-1": {
+    "label": "final-baseline-pending-multiline-1",
+    "platform": "darwin arm64",
+    "cpu": "Apple M4",
+    "wasmSha256": "91d4ee14e63a0866173c6fdb2b0fe4667ec3efff30287e87da5108d92e45d2ed",
+    "commit": "ac0d607b385f8230ec863c639be73b9a7feebf4c",
+    "scenarios": [
+      {
+        "mode": "pending-multiline",
+        "paragraphCountBefore": 30,
+        "paragraphCountAfter": 61,
+        "exportedHwpSha256": "8b51352b6a038ede31c4630ef762b6e4948705730e8285dc9c917fbb1ca5667a",
+        "geometryCalls": {
+          "getCursorRect": 123,
+          "getSelectionRects": 2
+        },
+        "operations": 1,
+        "edits": 1,
+        "bursts": 1,
+        "burstSize": 1,
+        "pageCount": 2,
+        "editMs": 93.5,
+        "observationMs": 1332.2999999523163,
+        "finalPixelsMatchFreshRender": true,
+        "activeRaf": {
+          "n": 0,
+          "mean": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "activeFps": 10.695187165775401,
+        "raf": {
+          "n": 73,
+          "mean": 17.57808219178082,
+          "p50": 16.699999999999818,
+          "p95": 16.800000000000182,
+          "max": 83.30000000000018
+        },
+        "fps": 56.889027431421454,
+        "framesOver33ms": 1,
+        "longTasks": {
+          "n": 1,
+          "mean": 84,
+          "p50": 84,
+          "p95": 84,
+          "max": 84
+        },
+        "renderCalls": 2,
+        "renderMs": {
+          "n": 2,
+          "mean": 11.549999982118607,
+          "p50": 13.899999976158142,
+          "p95": 13.899999976158142,
+          "max": 13.899999976158142
+        },
+        "renderedPages": [
+          0,
+          1
+        ],
+        "correct": true,
+        "actualLength": 341,
+        "expectedLength": 341,
+        "canvasCount": 2,
+        "sample": "hwpx/hancom-hwp/business_overview.hwp",
+        "initialPageCount": 1,
+        "errors": []
+      }
+    ],
+    "browser": "Chrome/152.0.7977.76",
+    "complete": true
+  },
+  "final-after-pending-multiline-1": {
+    "label": "final-after-pending-multiline-1",
+    "platform": "darwin arm64",
+    "cpu": "Apple M4",
+    "wasmSha256": "91d4ee14e63a0866173c6fdb2b0fe4667ec3efff30287e87da5108d92e45d2ed",
+    "commit": "ac0d607b385f8230ec863c639be73b9a7feebf4c",
+    "scenarios": [
+      {
+        "mode": "pending-multiline",
+        "paragraphCountBefore": 30,
+        "paragraphCountAfter": 61,
+        "exportedHwpSha256": "8b51352b6a038ede31c4630ef762b6e4948705730e8285dc9c917fbb1ca5667a",
+        "geometryCalls": {
+          "getCursorRect": 123,
+          "getSelectionRects": 2
+        },
+        "operations": 1,
+        "edits": 1,
+        "bursts": 1,
+        "burstSize": 1,
+        "pageCount": 2,
+        "editMs": 44.40000003576279,
+        "observationMs": 1287.800000011921,
+        "finalPixelsMatchFreshRender": true,
+        "activeRaf": {
+          "n": 0,
+          "mean": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "activeFps": 22.522522504381346,
+        "raf": {
+          "n": 73,
+          "mean": 16.89315068493151,
+          "p50": 16.699999999999818,
+          "p95": 16.799999999999272,
+          "max": 33.30000000000018
+        },
+        "fps": 59.195588712293215,
+        "framesOver33ms": 0,
+        "longTasks": {
+          "n": 0,
+          "mean": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "renderCalls": 2,
+        "renderMs": {
+          "n": 2,
+          "mean": 14.449999988079071,
+          "p50": 14.899999976158142,
+          "p95": 14.899999976158142,
+          "max": 14.899999976158142
+        },
+        "renderedPages": [
+          0,
+          1
+        ],
+        "correct": true,
+        "actualLength": 341,
+        "expectedLength": 341,
+        "canvasCount": 2,
+        "sample": "hwpx/hancom-hwp/business_overview.hwp",
+        "initialPageCount": 1,
+        "errors": []
+      }
+    ],
+    "browser": "Chrome/152.0.7977.76",
+    "complete": true,
+    "measuredWorkingTree": "Guarded multiline batching changes on top of ac0d607b, subsequently committed as 2ec651e6.",
+    "resultingSourceCommit": "2ec651e6"
+  },
+  "final-baseline-pending-multiline-2": {
+    "label": "final-baseline-pending-multiline-2",
+    "platform": "darwin arm64",
+    "cpu": "Apple M4",
+    "wasmSha256": "91d4ee14e63a0866173c6fdb2b0fe4667ec3efff30287e87da5108d92e45d2ed",
+    "commit": "ac0d607b385f8230ec863c639be73b9a7feebf4c",
+    "scenarios": [
+      {
+        "mode": "pending-multiline",
+        "paragraphCountBefore": 30,
+        "paragraphCountAfter": 61,
+        "exportedHwpSha256": "8b51352b6a038ede31c4630ef762b6e4948705730e8285dc9c917fbb1ca5667a",
+        "geometryCalls": {
+          "getCursorRect": 123,
+          "getSelectionRects": 2
+        },
+        "operations": 1,
+        "edits": 1,
+        "bursts": 1,
+        "burstSize": 1,
+        "pageCount": 2,
+        "editMs": 70.20000004768372,
+        "observationMs": 1288.800000011921,
+        "finalPixelsMatchFreshRender": true,
+        "activeRaf": {
+          "n": 0,
+          "mean": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "activeFps": 14.245014235338244,
+        "raf": {
+          "n": 74,
+          "mean": 17.114864864864863,
+          "p50": 16.699999999999818,
+          "p95": 16.700000000000728,
+          "max": 50
+        },
+        "fps": 58.42874062376629,
+        "framesOver33ms": 1,
+        "longTasks": {
+          "n": 1,
+          "mean": 58,
+          "p50": 58,
+          "p95": 58,
+          "max": 58
+        },
+        "renderCalls": 2,
+        "renderMs": {
+          "n": 2,
+          "mean": 11.150000005960464,
+          "p50": 12.899999976158142,
+          "p95": 12.899999976158142,
+          "max": 12.899999976158142
+        },
+        "renderedPages": [
+          0,
+          1
+        ],
+        "correct": true,
+        "actualLength": 341,
+        "expectedLength": 341,
+        "canvasCount": 2,
+        "sample": "hwpx/hancom-hwp/business_overview.hwp",
+        "initialPageCount": 1,
+        "errors": []
+      }
+    ],
+    "browser": "Chrome/152.0.7977.76",
+    "complete": true
+  },
+  "final-after-pending-multiline-2": {
+    "label": "final-after-pending-multiline-2",
+    "platform": "darwin arm64",
+    "cpu": "Apple M4",
+    "wasmSha256": "91d4ee14e63a0866173c6fdb2b0fe4667ec3efff30287e87da5108d92e45d2ed",
+    "commit": "ac0d607b385f8230ec863c639be73b9a7feebf4c",
+    "scenarios": [
+      {
+        "mode": "pending-multiline",
+        "paragraphCountBefore": 30,
+        "paragraphCountAfter": 61,
+        "exportedHwpSha256": "8b51352b6a038ede31c4630ef762b6e4948705730e8285dc9c917fbb1ca5667a",
+        "geometryCalls": {
+          "getCursorRect": 123,
+          "getSelectionRects": 2
+        },
+        "operations": 1,
+        "edits": 1,
+        "bursts": 1,
+        "burstSize": 1,
+        "pageCount": 2,
+        "editMs": 23.700000047683716,
+        "observationMs": 1242.7000000476837,
+        "finalPixelsMatchFreshRender": true,
+        "activeRaf": {
+          "n": 0,
+          "mean": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "activeFps": 42.194092742110925,
+        "raf": {
+          "n": 73,
+          "mean": 16.66438356164383,
+          "p50": 16.699999999999818,
+          "p95": 16.700000000000273,
+          "max": 16.800000000000182
+        },
+        "fps": 60.00822030415127,
+        "framesOver33ms": 0,
+        "longTasks": {
+          "n": 0,
+          "mean": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "renderCalls": 2,
+        "renderMs": {
+          "n": 2,
+          "mean": 11.5,
+          "p50": 13.5,
+          "p95": 13.5,
+          "max": 13.5
+        },
+        "renderedPages": [
+          0,
+          1
+        ],
+        "correct": true,
+        "actualLength": 341,
+        "expectedLength": 341,
+        "canvasCount": 2,
+        "sample": "hwpx/hancom-hwp/business_overview.hwp",
+        "initialPageCount": 1,
+        "errors": []
+      }
+    ],
+    "browser": "Chrome/152.0.7977.76",
+    "complete": true,
+    "measuredWorkingTree": "Guarded multiline batching changes on top of ac0d607b, subsequently committed as 2ec651e6.",
+    "resultingSourceCommit": "2ec651e6"
+  },
+  "final-baseline-pending-multiline-3": {
+    "label": "final-baseline-pending-multiline-3",
+    "platform": "darwin arm64",
+    "cpu": "Apple M4",
+    "wasmSha256": "91d4ee14e63a0866173c6fdb2b0fe4667ec3efff30287e87da5108d92e45d2ed",
+    "commit": "ac0d607b385f8230ec863c639be73b9a7feebf4c",
+    "scenarios": [
+      {
+        "mode": "pending-multiline",
+        "paragraphCountBefore": 30,
+        "paragraphCountAfter": 61,
+        "exportedHwpSha256": "8b51352b6a038ede31c4630ef762b6e4948705730e8285dc9c917fbb1ca5667a",
+        "geometryCalls": {
+          "getCursorRect": 123,
+          "getSelectionRects": 2
+        },
+        "operations": 1,
+        "edits": 1,
+        "bursts": 1,
+        "burstSize": 1,
+        "pageCount": 2,
+        "editMs": 78,
+        "observationMs": 1299.4000000357628,
+        "finalPixelsMatchFreshRender": true,
+        "activeRaf": {
+          "n": 0,
+          "mean": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "activeFps": 0,
+        "raf": {
+          "n": 72,
+          "mean": 16.89772222222222,
+          "p50": 16.699999999999818,
+          "p95": 16.700000000000273,
+          "max": 33.335999999999785
+        },
+        "fps": 59.179573841313264,
+        "framesOver33ms": 0,
+        "longTasks": {
+          "n": 1,
+          "mean": 67,
+          "p50": 67,
+          "p95": 67,
+          "max": 67
+        },
+        "renderCalls": 2,
+        "renderMs": {
+          "n": 2,
+          "mean": 12.150000005960464,
+          "p50": 14.100000023841858,
+          "p95": 14.100000023841858,
+          "max": 14.100000023841858
+        },
+        "renderedPages": [
+          0,
+          1
+        ],
+        "correct": true,
+        "actualLength": 341,
+        "expectedLength": 341,
+        "canvasCount": 2,
+        "sample": "hwpx/hancom-hwp/business_overview.hwp",
+        "initialPageCount": 1,
+        "errors": []
+      }
+    ],
+    "browser": "Chrome/152.0.7977.76",
+    "complete": true
+  },
+  "final-after-pending-multiline-3": {
+    "label": "final-after-pending-multiline-3",
+    "platform": "darwin arm64",
+    "cpu": "Apple M4",
+    "wasmSha256": "91d4ee14e63a0866173c6fdb2b0fe4667ec3efff30287e87da5108d92e45d2ed",
+    "commit": "ac0d607b385f8230ec863c639be73b9a7feebf4c",
+    "scenarios": [
+      {
+        "mode": "pending-multiline",
+        "paragraphCountBefore": 30,
+        "paragraphCountAfter": 61,
+        "exportedHwpSha256": "8b51352b6a038ede31c4630ef762b6e4948705730e8285dc9c917fbb1ca5667a",
+        "geometryCalls": {
+          "getCursorRect": 123,
+          "getSelectionRects": 2
+        },
+        "operations": 1,
+        "edits": 1,
+        "bursts": 1,
+        "burstSize": 1,
+        "pageCount": 2,
+        "editMs": 30,
+        "observationMs": 1258,
+        "finalPixelsMatchFreshRender": true,
+        "activeRaf": {
+          "n": 0,
+          "mean": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "activeFps": 0,
+        "raf": {
+          "n": 73,
+          "mean": 16.66621917808219,
+          "p50": 16.699999999999818,
+          "p95": 16.800000000000182,
+          "max": 16.800000000000182
+        },
+        "fps": 60.00161100215842,
+        "framesOver33ms": 0,
+        "longTasks": {
+          "n": 0,
+          "mean": 0,
+          "p50": 0,
+          "p95": 0,
+          "max": 0
+        },
+        "renderCalls": 2,
+        "renderMs": {
+          "n": 2,
+          "mean": 11.300000011920929,
+          "p50": 13.300000011920929,
+          "p95": 13.300000011920929,
+          "max": 13.300000011920929
+        },
+        "renderedPages": [
+          0,
+          1
+        ],
+        "correct": true,
+        "actualLength": 341,
+        "expectedLength": 341,
+        "canvasCount": 2,
+        "sample": "hwpx/hancom-hwp/business_overview.hwp",
+        "initialPageCount": 1,
+        "errors": []
+      }
+    ],
+    "browser": "Chrome/152.0.7977.76",
+    "complete": true,
+    "measuredWorkingTree": "Guarded multiline batching changes on top of ac0d607b, subsequently committed as 2ec651e6.",
+    "resultingSourceCommit": "2ec651e6"
+  }
+}
