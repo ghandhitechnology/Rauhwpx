@@ -19,9 +19,9 @@ const revealSrc = readFileSync(new URL('../src/agent/typewriter-reveal.ts', impo
 test('document-changed 는 프레임당 한 번의 변이 재렌더로 합쳐진다', () => {
   assert.match(canvasViewSrc, /eventBus\.on\('document-changed', \(\) => this\.scheduleMutationRefresh\(\)\)/);
   assert.match(canvasViewSrc, /private scheduleMutationRefresh\(\): void/);
-  assert.match(canvasViewSrc, /this\.mutationRefreshRafId = requestAnimationFrame\(/);
+  assert.match(canvasViewSrc, /this\.mutationRefreshQueue\.invalidateAll\(\)/);
   // 전체 재렌더가 예약돼 있으면 단일 페이지 무효화는 그 안에 흡수된다.
-  assert.match(canvasViewSrc, /if \(this\.mutationRefreshRafId !== null\) return;\s*\n\s*void this\.refreshInvalidatedPageForMutation/);
+  assert.match(canvasViewSrc, /this\.mutationRefreshQueue\.invalidatePage\(pageIndex, textOnly\)/);
   // 문서 교체/정리 시 예약된 재렌더를 취소한다.
   assert.match(
     canvasViewSrc,
@@ -32,7 +32,7 @@ test('document-changed 는 프레임당 한 번의 변이 재렌더로 합쳐진
 test('refreshPages 는 보이는 페이지 canvas 를 버리지 않고 제자리에서 다시 그린다', () => {
   const refreshPagesBody = canvasViewSrc.slice(
     canvasViewSrc.indexOf('refreshPages(): void {'),
-    canvasViewSrc.indexOf('/** 텍스트 입력처럼 좁은 변경은'),
+    canvasViewSrc.indexOf('private refreshInvalidatedPageNow('),
   );
   // 전체 해제(releaseAllRenderedPages)는 줌/백엔드 교체 경로에만 남는다.
   assert.doesNotMatch(refreshPagesBody, /releaseAllRenderedPages/);

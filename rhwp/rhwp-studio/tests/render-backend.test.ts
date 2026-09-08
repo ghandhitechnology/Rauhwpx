@@ -355,7 +355,7 @@ test('CanvasView forwards text-edit invalidation as static overlay reuse context
   const source = readFileSync(new URL('../src/view/canvas-view.ts', import.meta.url), 'utf8');
   assert.match(source, /type PageRenderContext/);
   assert.match(source, /reason === 'text-edit'/);
-  assert.match(source, /allowStaticOverlayReuse:\s*true/);
+  assert.match(source, /allowStaticOverlayReuse:\s*textOnly/);
   assert.match(source, /allowStaticOverlayReuse:\s*false/);
   assert.match(source, /renderCanvas\(pageIndex,\s*canvas,\s*renderContext\)/);
   assert.match(
@@ -364,16 +364,12 @@ test('CanvasView forwards text-edit invalidation as static overlay reuse context
   );
 });
 
-test('CanvasView coalesces text-edit invalidations before rerendering a page', () => {
+test('CanvasView coalesces invalidations before asynchronous renderer selection', () => {
   const source = readFileSync(new URL('../src/view/canvas-view.ts', import.meta.url), 'utf8');
-  assert.match(source, /pendingTextEditRefreshes = new Map<number,\s*PageRenderContext>\(\)/);
-  assert.match(source, /textEditRefreshRafId: number \| null = null/);
-  assert.match(source, /scheduleTextEditPageRefresh\(pageIndex,\s*renderContext\)/);
-  assert.match(source, /requestAnimationFrame\(\(\) => \{/);
-  assert.match(source, /Array\.from\(this\.pendingTextEditRefreshes\.entries\(\)\)/);
-  assert.match(source, /this\.refreshInvalidatedPageNow\(pendingPageIndex,\s*pendingContext\)/);
-  assert.match(source, /cancelPendingTextEditRefresh\(pageIndex\)/);
-  assert.match(source, /cancelAnimationFrame\(this\.textEditRefreshRafId\)/);
+  assert.match(source, /new MutationRefreshQueue/);
+  assert.match(source, /invalidatePage\(pageIndex, textOnly\)/);
+  assert.match(source, /for \(const \[pageIndex, textOnly\] of batch.pages\)/);
+  assert.match(source, /!isCurrent\(\)/);
 });
 
 test('CanvasView verifies reused static layers after text-edit idle', () => {
