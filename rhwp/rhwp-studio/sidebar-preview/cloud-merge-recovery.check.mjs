@@ -12,7 +12,12 @@ export async function checkCloudMergeRecovery(page, origin, artifacts) {
     const request = { sessionId: 'old-worker-session', documentId: 'doc-recovered', threadId: 'old-thread',
       cloudStartId: 'durable-start', operationId: 'turn-op-4', revision: 4, turn: 4, kind: 'turn',
       fileName: 'recovered.hwpx', sha256: 'a'.repeat(64), size: 3, localAvailable: true };
-    snapshot = { ...snapshot, mergeRequests: [request], session: { kind: 'idle' }, sessions: [], timeline: null,
+    const receipts = [
+      { ...request, revision: 1, turn: 1, operationId: 'turn-op-1' },
+      request,
+      { ...request, revision: 2, turn: 2, operationId: 'turn-op-2' },
+    ];
+    snapshot = { ...snapshot, mergeRequests: receipts, session: { kind: 'idle' }, sessions: [], timeline: null,
       link: { kind: 'failed', error: 'Worker deleted', attempt: 1, canRecreate: true } };
     const listeners = new Set();
     let scope = { documentId: 'doc-recovered', threadId: 'local-thread' };
@@ -20,6 +25,7 @@ export async function checkCloudMergeRecovery(page, origin, artifacts) {
     const errors = [];
     const downloads = [];
     const applies = [];
+    const queries = [];
     let releaseQuery;
     let holdQuery = false;
     const deps = {
@@ -34,13 +40,17 @@ export async function checkCloudMergeRecovery(page, origin, artifacts) {
       onBeginAuthorityTransition: () => ({ release() {} }), onCloudBinding() {}, onTimeline: () => true,
       onAgentEvent() {}, onCheckpointPublished() {}, onResultResolved() {}, onBeforeTakeover: async () => true,
       onTakeover: async () => null, onTakeoverSettled() {}, onError: (message) => errors.push(message),
-      isCloudCheckpointMerged: async (offer) => holdQuery ? await new Promise((resolve) => { releaseQuery = resolve; }) : merged.has(offer.operationId),
+      isCloudCheckpointMerged: async (offer) => {
+        queries.push(offer.operationId);
+        return holdQuery ? await new Promise((resolve) => { releaseQuery = resolve; }) : merged.has(offer.operationId);
+      },
       onMergeCheckpoint: async (startId, checkpoint) => { applies.push(startId); merged.add(checkpoint.operationId); return true; },
     };
     const tick = () => new Promise((resolve) => setTimeout(resolve, 20));
     let ui = createCloudAgentUi(deps);
     await tick();
     const recovered = !ui.mergeButton.hidden && !ui.mergeButton.disabled;
+    const initialQueries = [...queries];
     scope = { ...scope, documentId: 'other-doc' };
     await ui.refreshLeaseScope();
     const otherDocumentHidden = ui.mergeButton.hidden;
@@ -85,9 +95,10 @@ export async function checkCloudMergeRecovery(page, origin, artifacts) {
     await tick();
     window.cleanupMergeEvidence = () => { evidenceUi.dispose(); evidenceUi.recoveryStrip.remove(); evidenceUi.mergeButton.remove(); mock.controller.dispose(); };
     return { recovered, otherDocumentHidden, reviewedHidden, reopenedHidden, accountHidden,
-      accountReviewIsolated, profileHidden, expiredHidden, errors, downloads, applies };
+      accountReviewIsolated, profileHidden, expiredHidden, errors, downloads, applies, initialQueries };
   });
   assert.equal(result.recovered, true, 'A durable offer survives an idle snapshot and deleted worker');
+  assert.deepEqual(result.initialQueries, ['turn-op-4'], 'Only the newest receipt per session queries version ancestry');
   assert.equal(result.otherDocumentHidden, true);
   assert.equal(result.reviewedHidden, true);
   assert.equal(result.reopenedHidden, true, 'Version ancestry keeps an integrated offer hidden after reopen');
