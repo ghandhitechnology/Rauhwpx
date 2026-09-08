@@ -4,6 +4,9 @@ import { sha256Hex, writeVerifiedRecoveryFile } from './cloud-handoff.mjs';
 
 const CHUNK_BYTES = 512 * 1024;
 const MAX_BYTES = 128 * 1024 * 1024;
+const PREFETCH_MAX_BYTES = 256 * 1024 * 1024;
+const PREFETCH_MAX_ITEMS = 8;
+const PREFETCH_CONCURRENCY = 2;
 const id = (value) => typeof value === 'string' && /^[A-Za-z0-9._:-]{1,160}$/.test(value);
 
 export function validateMergeRequest(value) {
@@ -28,15 +31,22 @@ export class CloudMergeRecovery {
     this.requests = [];
     this.generation = 0;
     this.inflight = null;
+    this.prefetchInflight = null;
+    this.prefetchController = null;
+    this.downloads = new Map();
     this.refreshedAt = 0;
   }
 
   reset() {
     this.generation += 1;
+    this.prefetchController?.abort(new DOMException('Cloud account changed', 'AbortError'));
     this.requests = [];
     this.accountId = null;
     this.refreshedAt = 0;
     this.inflight = null;
+    this.prefetchInflight = null;
+    this.prefetchController = null;
+    this.downloads.clear();
   }
 
   async refresh({ force = false, assertCurrent = () => {} } = {}) {
@@ -128,7 +138,96 @@ export class CloudMergeRecovery {
     return task;
   }
 
-  async download(sessionId, operationId, assertCurrent = () => {}) {
+  async prefetch({
+    maxBytes = PREFETCH_MAX_BYTES,
+    maxItems = PREFETCH_MAX_ITEMS,
+    concurrency = PREFETCH_CONCURRENCY,
+    assertCurrent = () => {},
+    onDownloaded = () => {},
+    onFailure = () => {},
+  } = {}) {
+    if (this.prefetchInflight) return this.prefetchInflight;
+    const generation = this.generation;
+    const accountId = this.accountId;
+    const controller = new AbortController();
+    this.prefetchController = controller;
+    const check = () => {
+      assertCurrent();
+      if (generation !== this.generation || accountId !== this.accountId) {
+        throw new DOMException('Cloud account changed', 'AbortError');
+      }
+    };
+    const selectBatch = () => {
+      const pending = this.requests.filter((request) => !request.localAvailable)
+        .sort((left, right) => right.revision - left.revision || right.turn - left.turn);
+      const selected = [];
+      let selectedBytes = 0;
+      for (const request of pending) {
+        if (selected.length >= Math.max(1, Math.min(PREFETCH_MAX_ITEMS, maxItems))) break;
+        if (selectedBytes + request.size > Math.max(MAX_BYTES, Math.min(PREFETCH_MAX_BYTES, maxBytes))) continue;
+        selected.push(request);
+        selectedBytes += request.size;
+      }
+      return selected;
+    };
+    const task = (async () => {
+      let attempted = 0;
+      let downloaded = 0;
+      const failures = [];
+      for (;;) {
+        check();
+        const selected = selectBatch();
+        if (!selected.length) break;
+        attempted += selected.length;
+        let cursor = 0;
+        let batchDownloaded = 0;
+        const batchFailures = [];
+        const worker = async () => {
+          while (cursor < selected.length) {
+            const request = selected[cursor++];
+            check();
+            try {
+              await this.download(request.sessionId, request.operationId, check, { signal: controller.signal });
+              downloaded += 1;
+              batchDownloaded += 1;
+              onDownloaded(request);
+            } catch (error) {
+              check();
+              const failure = { sessionId: request.sessionId, operationId: request.operationId, error };
+              failures.push(failure);
+              batchFailures.push(failure);
+              onFailure(request, error);
+            }
+          }
+        };
+        await Promise.all(Array.from(
+          { length: Math.min(selected.length, Math.max(1, Math.min(PREFETCH_CONCURRENCY, concurrency))) },
+          worker,
+        ));
+        check();
+        if (batchFailures.length || batchDownloaded === 0) break;
+      }
+      return { attempted, downloaded, failures };
+    })().finally(() => {
+      if (this.prefetchInflight === task) this.prefetchInflight = null;
+      if (this.prefetchController === controller) this.prefetchController = null;
+    });
+    this.prefetchInflight = task;
+    return task;
+  }
+
+  download(sessionId, operationId, assertCurrent = () => {}, options = {}) {
+    const key = `${this.generation}:${sessionId}:${operationId}`;
+    const existing = this.downloads.get(key);
+    if (existing) return existing;
+    const operation = this.#download(sessionId, operationId, assertCurrent, options).finally(() => {
+      if (this.downloads.get(key) === operation) this.downloads.delete(key);
+    });
+    this.downloads.set(key, operation);
+    return operation;
+  }
+
+  async #download(sessionId, operationId, assertCurrent = () => {}, { signal } = {}) {
     const receipt = this.requests.find((entry) => entry.sessionId === sessionId && entry.operationId === operationId);
     if (!receipt) return null;
     const generation = this.generation;
@@ -156,7 +255,7 @@ export class CloudMergeRecovery {
     if (!bytes) {
       bytes = Buffer.alloc(receipt.size);
       for (let index = 0; index < receipt.chunkCount; index += 1) {
-        const result = await this.provider().downloadMergeChunk(receipt.id, index);
+        const result = await this.provider().downloadMergeChunk(receipt.id, index, { signal });
         check();
         const encoded = result?.bytesBase64;
         const expected = Math.min(CHUNK_BYTES, receipt.size - index * CHUNK_BYTES);

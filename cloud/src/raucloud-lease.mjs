@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const MERGE_CHUNK_BYTES = 512 * 1024;
@@ -22,7 +23,7 @@ async function jsonBody(response) {
 
 export class RaucloudLeaseController {
   constructor({ baseUrl = '', runId = '', workerToken = '', fetchImpl = globalThis.fetch,
-    now = Date.now, brokerGraceMs = 90_000, reportStore = null } = {}) {
+    now = Date.now, brokerGraceMs = 10 * 60_000, reportStore = null } = {}) {
     this.baseUrl = String(baseUrl).replace(/\/+$/, '');
     this.runId = String(runId);
     this.workerToken = String(workerToken);
@@ -48,6 +49,7 @@ export class RaucloudLeaseController {
     this.failures = 0;
     this.brokerFailureSince = null;
     this.graceTimer = null;
+    this.quotaDeadlineAt = null;
   }
 
   async #fetch(path, { method = 'GET', body } = {}) {
@@ -75,6 +77,14 @@ export class RaucloudLeaseController {
     this.failures = 0;
     this.brokerFailureSince = null;
     const graceActive = payload.quota?.grace?.active === true;
+    if (payload.run?.status === 'active' && Number.isFinite(payload.quota?.remainingMs)
+      && Number.isFinite(payload.quota?.grace?.remainingMs)) {
+      // The last metered allowance bounds offline execution even when the
+      // broker cannot deliver its next quota response.
+      this.quotaDeadlineAt = this.now() + Math.max(0, payload.quota.remainingMs)
+        + Math.max(0, payload.quota.grace.remainingMs);
+      this.#armGraceDeadline(this.quotaDeadlineAt);
+    }
     if (payload.run?.inputBlocked === true
       || payload.quota?.remainingMs != null && Number(payload.quota.remainingMs) <= 0 || graceActive) {
       this.inputBlocked = true;
@@ -116,6 +126,19 @@ export class RaucloudLeaseController {
     });
   }
 
+  async #archiveRequest(path, body) {
+    const started = this.now();
+    for (;;) {
+      try { return await this.#fetch(path, { method: 'POST', body }); }
+      catch (error) {
+        if (!this.#transient(error) || this.now() - started >= this.brokerGraceMs) throw error;
+        this.failures += 1;
+        this.brokerFailureSince ??= this.now();
+        await delay(1_000);
+      }
+    }
+  }
+
   async discover() {
     if (!this.enabled) return { raucloud: false };
     if (this.discoveryRequest) return this.discoveryRequest;
@@ -132,7 +155,7 @@ export class RaucloudLeaseController {
       this.runId = nextRunId;
       this.terminal = false;
       this.inputBlocked = payload.inputBlocked === true;
-      this.mustStop = false;
+      this.mustStop = payload.mustStop === true;
       this.latestCheckpointId = null;
       this.allocation = null;
       this.failures = 0;
@@ -184,6 +207,10 @@ export class RaucloudLeaseController {
   }
 
   status() {
+    if (this.active && this.quotaDeadlineAt !== null && this.now() >= this.quotaDeadlineAt) {
+      this.mustStop = true;
+      this.inputBlocked = true;
+    }
     if (this.enabled && this.brokerFailureSince !== null
       && this.now() - this.brokerFailureSince >= this.brokerGraceMs) {
       this.mustStop = true;
@@ -193,6 +220,7 @@ export class RaucloudLeaseController {
   }
 
   #transient(error) {
+    if (['CLOUD_MERGE_CAPACITY', 'CLOUD_QUOTA_EXHAUSTED'].includes(error.code)) return false;
     return error.code === 'RAUCLOUD_BROKER_UNREACHABLE' || error.status === 408
       || error.status === 429 || error.status >= 500;
   }
@@ -234,7 +262,54 @@ export class RaucloudLeaseController {
     if (value) this.latestCheckpointId = value;
   }
 
-  async archiveMergeRequest(metadata, stream) {
+  archiveMergeRequest(metadata, stream) {
+    return this.archiveArtifact(metadata, stream, 'merge-requests');
+  }
+
+  archiveConversation(metadata, stream) {
+    return this.archiveArtifact(metadata, stream, 'conversations');
+  }
+
+  async prepareArchive() {
+    if (!this.enabled) return;
+    try { await this.discover(); }
+    catch (error) {
+      // Keep an accepted boundary retryable during a broker outage. The upload
+      // still authenticates the captured run and rejects retired assignments.
+      if (!this.#transient(error)) throw error;
+    }
+  }
+
+  async downloadConversation(sessionId) {
+    const listing = await this.#fetch(`/v1/internal/cloud/conversations?sessionId=${encodeURIComponent(sessionId)}`);
+    const record = listing.conversations?.find((item) => item.sessionId === sessionId);
+    if (!record || record.state === 'purged') throw raucloudError('CONVERSATION_SNAPSHOT_NOT_FOUND', 'Saved cloud conversation was not found', undefined, 404);
+    return { record, bytes: await this.downloadConversationArtifact(record) };
+  }
+
+  async downloadConversationArtifact(record, resource = false) {
+    if (!Number.isSafeInteger(record.size) || record.size < 1 || record.size > MAX_MERGE_BYTES
+      || !/^merge_[a-f0-9]{64}$/.test(record.id) || !/^[a-f0-9]{64}$/.test(record.sha256)
+      || record.chunkCount !== Math.ceil(record.size / MERGE_CHUNK_BYTES)) {
+      throw raucloudError('RAUCLOUD_BROKER_INVALID', 'Saved conversation size is invalid');
+    }
+    const chunks = [];
+    let total = 0;
+    for (let index = 0; index < record.chunkCount; index++) {
+      const chunk = await this.#fetch(`/v1/internal/cloud/${resource ? 'conversation-resources' : 'conversations'}/${encodeURIComponent(record.id)}/chunks/${index}`);
+      const bytes = Buffer.from(chunk.bytesBase64 ?? '', 'base64');
+      total += bytes.length;
+      if (total > record.size || bytes.length > MERGE_CHUNK_BYTES) throw raucloudError('RAUCLOUD_BROKER_INVALID', 'Saved conversation chunk is invalid');
+      chunks.push(bytes);
+    }
+    const bytes = Buffer.concat(chunks);
+    if (bytes.length !== record.size || createHash('sha256').update(bytes).digest('hex') !== record.sha256) {
+      throw raucloudError('RAUCLOUD_BROKER_INVALID', 'Saved conversation failed integrity verification');
+    }
+    return bytes;
+  }
+
+  async archiveArtifact(metadata, stream, collection) {
     if (!this.enabled) return { raucloud: false, skipped: true };
     const { size, sha256 } = metadata;
     if (!Number.isSafeInteger(size) || size < 1 || size > MAX_MERGE_BYTES
@@ -251,10 +326,8 @@ export class RaucloudLeaseController {
     let buffered = 0;
     let total = 0;
     let chunkIndex = 0;
-    const send = () => this.#fetch(`/v1/internal/cloud/runs/${encodeURIComponent(runId)}/merge-requests`, {
-      method: 'POST',
-      body: { ...metadata, chunkIndex, chunkCount, bytesBase64: buffer.subarray(0, buffered).toString('base64') },
-    });
+    const send = () => this.#archiveRequest(`/v1/internal/cloud/runs/${encodeURIComponent(runId)}/${collection}`,
+      { ...metadata, chunkIndex, chunkCount, bytesBase64: buffer.subarray(0, buffered).toString('base64') });
     for await (const bytes of stream) {
       total += bytes.length;
       if (total > size) throw raucloudError('RAUCLOUD_ARTIFACT_INVALID', 'Cloud document exceeds its declared size', undefined, 400);

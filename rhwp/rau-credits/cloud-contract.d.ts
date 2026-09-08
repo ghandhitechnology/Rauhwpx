@@ -2,6 +2,7 @@ export type RaucloudRunStatus =
   | 'allocating'
   | 'ready'
   | 'active'
+  | 'checkpointing'
   | 'checkpointed'
   | 'completed'
   | 'stopped'
@@ -127,4 +128,27 @@ export interface CloudMergeUploadReceipt {
 export interface CloudMergeRequestList {
   accountId: string;
   mergeRequests: CloudMergeRequest[];
+}
+
+export interface CloudConversationSnapshot extends Omit<CloudMergeRequest, 'kind'> {
+  kind: 'conversation';
+  /** Snapshot generation, independent of document revision. */
+  revision: number;
+  state: 'staged' | 'queued' | 'running' | 'suspended' | 'completed' | 'cancelled' | 'failed' | 'purged';
+  retentionUntil: number;
+  /** False for an idle completed room; result retrieval needs no replacement worker. */
+  pendingWork: boolean;
+}
+
+export interface CloudConversationList {
+  accountId: string;
+  conversations: CloudConversationSnapshot[];
+}
+
+export interface CloudConversationRestoreReceipt<Session> {
+  session: Session;
+  restored: true;
+  /** Reset the client watch cursor here after replacing a worker. */
+  sourceEventSeq: number;
+  restoredEventSeq: number;
 }

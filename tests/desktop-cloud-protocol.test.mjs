@@ -92,6 +92,28 @@ test('persistent transfer rejects a one-turn worker before uploading or activati
   assert.deepEqual(requests, ['/rauhwpx-cloud/v1/health']);
 });
 
+test('managed persistent transfer rejects protocol v2 without durable broker restore', async () => {
+  const requests = [];
+  const profile = normalizeCloudProfile({
+    mode: 'app-hosted',
+    endpoint: 'https://managed.example/rauhwpx-cloud',
+    serverPublicKey: SERVER_KEY,
+    sandbox: { providerId: 'raucloud', sandboxId: 'sandbox-old', host: 'managed.example' },
+  });
+  const client = new CloudClient({
+    vault: memoryVault({ 'cloud.profile': JSON.stringify(profile) }),
+    fetchImpl: signedFetch(async (url) => {
+      requests.push(new URL(url).pathname);
+      return jsonResponse({ ok: true, protocolVersion: 1, conversationProtocolVersion: 2, capabilities: {} });
+    }),
+  });
+  await assert.rejects(client.transfer({
+    sessionId: 'persistent-old-managed', provider: 'codex', persistent: true,
+    documentName: 'source.hwpx', documentBytes: Buffer.from('document'), timeline: cloudStartTransfer().timeline,
+  }), { code: 'CLOUD_RUNTIME_OUTDATED', retryable: false });
+  assert.deepEqual(requests, ['/rauhwpx-cloud/v1/health']);
+});
+
 function signedFetch(handler, identity = SERVER_IDENTITY) {
   const serverKey = `ed25519:${identity.publicKey.export({ type: 'spki', format: 'der' }).toString('base64url')}`;
   return async (url, options = {}) => {
@@ -773,7 +795,7 @@ test('command response advances state before its matching SSE event arrives', as
 
 for (const receiptState of ['queued', 'accepted']) {
 for (const lostReceipt of [false, true]) {
-test(`queued message remains ${receiptState} when its SSE receipt wins ${lostReceipt ? 'a lost' : 'the'} command response race`, async (t) => {
+test(`queued message keeps ${lostReceipt ? 'provisional' : 'durable'} ${receiptState} state when SSE wins the command response race`, async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-message-race-'));
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
   const created = await store.create({
@@ -808,7 +830,9 @@ test(`queued message remains ${receiptState} when its SSE receipt wins ${lostRec
           type: `message.${receiptState}`,
           payload: { status: 'running', stateVersion: 2, messageId: 'message-1' },
         });
-        if (lostReceipt) throw Object.assign(new Error('command receipt lost'), { code: 'ETIMEDOUT' });
+        if (lostReceipt && commandCalls === 1) {
+          throw Object.assign(new Error('command receipt lost'), { code: 'ETIMEDOUT' });
+        }
         return { messageId: 'message-1', status: 'queued', eventSeq: 6 };
       },
     },
@@ -824,25 +848,124 @@ test(`queued message remains ${receiptState} when its SSE receipt wins ${lostRec
   await coordinator.start();
   await watcherReady;
 
-  const snapshot = await coordinator.command({
+  const command = coordinator.command({
     sessionId: 'cloud-1', command: 'queue-message', expectedVersion: 2,
     message: 'Use the revised totals', messageId: 'message-1',
   });
-  assert.deepEqual(snapshot.queuedMessages.map(({ id, state }) => ({ id, state })), [
-    { id: 'message-1', state: receiptState },
-  ]);
+  const snapshot = lostReceipt
+    ? (await assert.rejects(command, { code: 'ETIMEDOUT' }), await coordinator.snapshot({ selectedSessionId: 'cloud-1' }))
+    : await command;
+  assert.deepEqual(snapshot.queuedMessages.map(({ id, state, delivery }) => ({ id, state, delivery })), [{
+    id: 'message-1', state: receiptState, delivery: lostReceipt ? 'pending' : 'durable',
+  }]);
   const record = await store.get(created.id);
   assert.equal(record.lastEventSequence, 7);
   assert.equal(record.queuedMessages[0].state, receiptState);
+  assert.equal(record.queuedMessages[0].retryPending, lostReceipt);
   await coordinator.command({ sessionId: 'cloud-1', command: 'queue-message', expectedVersion: 3,
     message: 'Use the revised totals', messageId: 'message-1' });
-  assert.equal(commandCalls, 1, 'a verified queue receipt prevents an unnecessary retry');
+  assert.equal(commandCalls, lostReceipt ? 2 : 1,
+    'only a durable command receipt prevents an exact retry');
   await assert.rejects(coordinator.command({ sessionId: 'cloud-1', command: 'queue-message',
     message: 'Different content', messageId: 'message-1' }), { code: 'MESSAGE_ID_CONFLICT' });
 });
 }
 
 }
+
+test('lost redirect acknowledgement accepts the exact redirect receipt shape on retry', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-redirect-retry-'));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const created = await store.create({
+    sessionId: 'desktop-redirect', threadId: 'thread-redirect', documentId: 'document-redirect',
+    documentName: 'source.hwpx', documentBytes: Buffer.from('document'), timeline: null,
+    provider: 'codex', limits: { maxTurns: 100 },
+  });
+  await store.transition(created.id, 'uploading');
+  await store.transition(created.id, 'committing');
+  await store.transition(created.id, 'running', { cloudSessionId: 'cloud-redirect', serverVersion: 2 });
+  const calls = [];
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => null,
+      command: async (_sessionId, type, payload, commandId) => {
+        calls.push({ type, payload, commandId });
+        if (calls.length === 1) throw Object.assign(new Error('redirect receipt lost'), { code: 'ETIMEDOUT' });
+        return {
+          messageId: payload.messageId,
+          eventSeq: 8,
+          session: {
+            id: 'cloud-redirect', status: 'running', persistent: true,
+            roomStatus: 'active', redirectRequested: true, stateVersion: 3,
+          },
+        };
+      },
+    },
+    store, provisioner: {}, recoveryDir: path.join(directory, 'recovery'),
+  });
+  t.after(async () => {
+    await coordinator.stop();
+    await rm(directory, { recursive: true, force: true });
+  });
+  const input = {
+    sessionId: 'cloud-redirect', command: 'redirect', expectedVersion: 2,
+    message: 'Use the replacement direction', messageId: 'message-redirect',
+  };
+  await assert.rejects(coordinator.command(input), { code: 'ETIMEDOUT' });
+  const result = await coordinator.command(input);
+  assert.equal(result.commandResult.status, 'accepted');
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1], calls[0], 'redirect reconciliation preserves command id and CAS payload');
+  const queued = (await store.get(created.id)).queuedMessages[0];
+  assert.equal(queued.state, 'accepted');
+  assert.equal(queued.serverQueued, true);
+  assert.equal(queued.retryPending, false);
+});
+
+test('a queued command is retryable on disk before its HTTP receipt resolves', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-outbox-inflight-'));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const created = await store.create({
+    sessionId: 'desktop-inflight', threadId: 'thread-inflight', documentId: 'document-inflight',
+    documentName: 'source.hwpx', documentBytes: Buffer.from('document'), timeline: null,
+    provider: 'codex', limits: { maxTurns: 100 },
+  });
+  await store.transition(created.id, 'uploading');
+  await store.transition(created.id, 'committing');
+  await store.transition(created.id, 'running', { cloudSessionId: 'cloud-inflight', serverVersion: 2 });
+  const dispatched = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => null,
+      command: async (_sessionId, _type, payload) => {
+        dispatched.resolve();
+        await release.promise;
+        return { messageId: payload.messageId, status: 'queued' };
+      },
+    },
+    store, provisioner: {}, recoveryDir: path.join(directory, 'recovery'),
+  });
+  t.after(async () => {
+    release.resolve();
+    await coordinator.stop();
+    await rm(directory, { recursive: true, force: true });
+  });
+  const pending = coordinator.command({
+    sessionId: 'cloud-inflight', command: 'queue-message',
+    message: 'Persist before sending', messageId: 'message-inflight',
+  });
+  await dispatched.promise;
+  let queued = (await store.get(created.id)).queuedMessages[0];
+  assert.equal(queued.retryPending, true);
+  assert.equal(queued.serverQueued, undefined);
+  assert.equal((await coordinator.snapshot({ selectedSessionId: 'cloud-inflight' })).queuedMessages[0].delivery, 'pending');
+  release.resolve();
+  await pending;
+  queued = (await store.get(created.id)).queuedMessages[0];
+  assert.equal(queued.retryPending, false);
+  assert.equal(queued.serverQueued, true);
+});
 
 for (const explicitIds of [false, true]) {
 test(`simultaneous follow-ups retain both durable messages with ${explicitIds ? 'explicit' : 'generated'} ids`, async (t) => {
@@ -930,6 +1053,185 @@ test('rejected queue command removes exactly its staged durable message', async 
   assert.deepEqual(record.queuedMessages.map((message) => message.id), ['message-existing']);
 });
 
+test('lost attachment acceptance replays the original receipt before any re-upload', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-attachment-reupload-'));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const created = await store.create({
+    sessionId: 'desktop-attachment', threadId: 'thread-attachment', documentId: 'document-attachment',
+    documentName: 'source.hwpx', documentBytes: Buffer.from('document'), timeline: null,
+    provider: 'codex', limits: { maxTurns: 100 },
+  });
+  await store.transition(created.id, 'uploading');
+  await store.transition(created.id, 'committing');
+  await store.transition(created.id, 'running', { cloudSessionId: 'cloud-attachment', serverVersion: 2 });
+  let uploads = 0;
+  const calls = [];
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => null,
+      uploadBlob: async ({ bytes }) => ({ blobId: `blob-${++uploads}`, size: bytes.length }),
+      command: async (_sessionId, _type, payload, commandId) => {
+        calls.push({ payload, commandId });
+        if (calls.length === 1) throw Object.assign(new Error('receipt lost'), { code: 'ECONNRESET' });
+        return { messageId: payload.messageId, status: 'accepted' };
+      },
+    },
+    store, provisioner: {}, recoveryDir: path.join(directory, 'recovery'),
+  });
+  t.after(async () => {
+    await coordinator.stop();
+    await rm(directory, { recursive: true, force: true });
+  });
+  const input = {
+    sessionId: 'cloud-attachment', command: 'queue-message', message: 'Read this', messageId: 'message-attachment',
+    attachments: [{ id: 'attachment-1', name: 'note.txt', mimeType: 'text/plain', size: 4, bytes: Buffer.from('note') }],
+  };
+  await assert.rejects(coordinator.command(input), { code: 'MESSAGE_DELIVERY_UNCERTAIN', retryable: true });
+  assert.equal((await store.get(created.id)).queuedMessages[0].retryPending, true);
+  const result = await coordinator.command(input);
+  assert.equal(result.commandResult.status, 'accepted');
+  assert.equal(uploads, 1, 'receipt reconciliation reuses the broker-retained attachment');
+  assert.deepEqual(calls[1], calls[0], 'receipt reconciliation replays the exact command identity and payload');
+});
+
+test('proven missing attachment blobs permit one fresh upload with the same message identity', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-attachment-reupload-'));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const created = await store.create({
+    sessionId: 'desktop-reupload', threadId: 'thread-reupload', documentId: 'document-reupload',
+    documentName: 'source.hwpx', documentBytes: Buffer.from('document'), timeline: null,
+    provider: 'codex', limits: { maxTurns: 100 },
+  });
+  await store.transition(created.id, 'uploading');
+  await store.transition(created.id, 'committing');
+  await store.transition(created.id, 'running', { cloudSessionId: 'cloud-reupload', serverVersion: 2 });
+  let uploads = 0;
+  const calls = [];
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => null,
+      uploadBlob: async ({ bytes }) => ({ blobId: `blob-${++uploads}`, size: bytes.length }),
+      command: async (_sessionId, _type, payload, commandId) => {
+        calls.push({ payload, commandId });
+        if (calls.length === 1) throw Object.assign(new Error('receipt lost'), { code: 'ETIMEDOUT' });
+        if (calls.length === 2) throw Object.assign(new Error('old blob is gone'), { code: 'BLOB_NOT_FOUND', status: 409 });
+        return { messageId: payload.messageId, status: 'queued' };
+      },
+    },
+    store, provisioner: {}, recoveryDir: path.join(directory, 'recovery'),
+  });
+  t.after(async () => {
+    await coordinator.stop();
+    await rm(directory, { recursive: true, force: true });
+  });
+  const input = {
+    sessionId: 'cloud-reupload', command: 'queue-message', message: 'Read this', messageId: 'message-reupload',
+    attachments: [{ id: 'attachment-1', name: 'note.txt', mimeType: 'text/plain', size: 4, bytes: Buffer.from('note') }],
+  };
+  await assert.rejects(coordinator.command(input), { code: 'MESSAGE_DELIVERY_UNCERTAIN' });
+  const result = await coordinator.command(input);
+  assert.equal(result.commandResult.status, 'queued');
+  assert.equal(uploads, 2);
+  assert.equal(calls.length, 3);
+  assert.equal(new Set(calls.map((call) => call.commandId)).size, 1);
+  assert.equal(calls[0].payload.attachments[0].blobId, 'blob-1');
+  assert.equal(calls[2].payload.attachments[0].blobId, 'blob-2');
+  assert.equal((await store.get(created.id)).queuedMessages[0].serverQueued, true);
+});
+
+test('permanently rejected queued retry removes its phantom draft', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-message-terminal-retry-'));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const created = await store.create({
+    sessionId: 'desktop-terminal', threadId: 'thread-terminal', documentId: 'document-terminal',
+    documentName: 'source.hwpx', documentBytes: Buffer.from('document'), timeline: null,
+    provider: 'codex', limits: { maxTurns: 100 },
+  });
+  await store.transition(created.id, 'uploading');
+  await store.transition(created.id, 'committing');
+  await store.transition(created.id, 'running', { cloudSessionId: 'cloud-terminal', serverVersion: 2 });
+  await store.patch(created.id, { queuedMessages: [{
+    id: 'message-terminal', text: 'Rejected draft', queuedAt: new Date().toISOString(), state: 'queued',
+    commandId: 'message_terminal', commandType: 'message.queue', commandPayload: { messageId: 'message-terminal' },
+    retryPending: true,
+  }] });
+  const rejected = Promise.withResolvers();
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => null, isPaired: async () => false,
+      command: async () => { throw Object.assign(new Error('invalid message'), { status: 400 }); },
+      watchSession: async (_id, _after, { signal }) => new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true })),
+    },
+    store, provisioner: {}, recoveryDir: path.join(directory, 'recovery'),
+  });
+  coordinator.on('event', (event) => { if (event.type === 'queued-message-rejected') rejected.resolve(); });
+  t.after(async () => {
+    await coordinator.stop();
+    await rm(directory, { recursive: true, force: true });
+  });
+  await coordinator.start();
+  await rejected.promise;
+  assert.deepEqual((await store.get(created.id)).queuedMessages, []);
+});
+
+test('an ambiguous queued message keeps its durable draft and retries the same command after restart', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-message-retry-'));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const created = await store.create({
+    sessionId: 'desktop-retry', threadId: 'thread-retry', documentId: 'document-retry',
+    documentName: 'source.hwpx', documentBytes: Buffer.from('document'), timeline: null,
+    provider: 'codex', limits: { maxTurns: 100 },
+  });
+  await store.transition(created.id, 'uploading');
+  await store.transition(created.id, 'committing');
+  await store.transition(created.id, 'running', {
+    cloudSessionId: 'cloud-retry', serverVersion: 2,
+    handoffAcceptedAt: '2026-09-08T00:00:00.000Z',
+  });
+  let fail = true;
+  const calls = [];
+  const reconciled = Promise.withResolvers();
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => null,
+      isPaired: async () => false,
+      command: async (_sessionId, _type, payload, commandId) => {
+        calls.push({ payload, commandId });
+        if (fail) throw Object.assign(new Error('command receipt lost'), { code: 'ETIMEDOUT' });
+        return { messageId: payload.messageId, status: 'queued' };
+      },
+      watchSession: async (_sessionId, _after, { signal }) => new Promise((resolve) => {
+        signal.addEventListener('abort', resolve, { once: true });
+      }),
+    },
+    store,
+    provisioner: {},
+    recoveryDir: path.join(directory, 'recovery'),
+  });
+  coordinator.on('event', (event) => {
+    if (event.type === 'queued-message-reconciled') reconciled.resolve();
+  });
+  t.after(async () => {
+    await coordinator.stop();
+    await rm(directory, { recursive: true, force: true });
+  });
+  await assert.rejects(coordinator.command({
+    sessionId: 'cloud-retry', command: 'queue-message', expectedVersion: 2,
+    message: 'Keep this draft', messageId: 'message-retry',
+  }), { code: 'ETIMEDOUT' });
+  let record = await store.get(created.id);
+  assert.equal(record.queuedMessages[0].retryPending, true);
+  assert.equal(record.queuedMessages[0].text, 'Keep this draft');
+  fail = false;
+  await coordinator.start();
+  await reconciled.promise;
+  record = await store.get(created.id);
+  assert.equal(record.queuedMessages[0].serverQueued, true);
+  assert.equal(record.queuedMessages[0].retryPending, false);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].commandId, calls[1].commandId);
+});
+
 test('activation receipt skips historical staged events before watching live updates', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-activation-replay-'));
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
@@ -984,6 +1286,49 @@ test('activation receipt skips historical staged events before watching live upd
   assert.equal(record.state, 'running');
   assert.equal(record.lastEventSequence, 3);
   assert.equal(record.serverVersion, 3);
+  assert.equal(Number.isFinite(Date.parse(record.handoffAcceptedAt)), true);
+  assert.equal((await coordinator.snapshot({ documentId: 'document-1' })).session.handoffAcceptedAt, record.handoffAcceptedAt);
+});
+
+test('old managed activation never publishes a durable handoff receipt', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-old-managed-receipt-'));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const profile = normalizeCloudProfile({
+    mode: 'app-hosted', endpoint: 'https://old-managed.example/rauhwpx-cloud', serverPublicKey: SERVER_KEY,
+    sandbox: { providerId: 'raucloud', sandboxId: 'old-worker', host: 'old-managed.example' },
+  });
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => profile,
+      isPaired: async () => true,
+      assertTransferReady: async () => ({
+        profile,
+        health: { ok: true, protocolVersion: 1, conversationProtocolVersion: 2, capabilities: {} },
+      }),
+      transfer: async ({ sessionId, onProgress, onSessionCreated, onSessionActivated }) => {
+        await onProgress({ phase: 'committing', loaded: 1, total: 1 });
+        await onSessionCreated({ sessionId, stateVersion: 1 });
+        await onSessionActivated({ sessionId, stateVersion: 2, eventSeq: 2 });
+        return { id: sessionId, status: 'queued', stateVersion: 2 };
+      },
+      watchSession: async (_id, _after, { signal }) => new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true })),
+    },
+    store, provisioner: {}, recoveryDir: path.join(directory, 'recovery'),
+  });
+  t.after(async () => {
+    await coordinator.stop();
+    await rm(directory, { recursive: true, force: true });
+  });
+  const result = await coordinator.transfer(cloudStartTransfer({
+    startId: 'oldmanagedstart', documentId: 'document-old-managed',
+    document: { fileName: 'source.hwpx', bytes: new Uint8Array(Buffer.from('document')) },
+    agent: 'codex', model: 'gpt-5.6', effort: 'high', workflow: 'direct', references: [],
+  }), {
+    originSessionId: 'desktop-old-managed',
+  });
+  const [record] = await store.list();
+  assert.equal(record.handoffAcceptedAt, undefined);
+  assert.equal(result.session.handoffAcceptedAt, undefined);
 });
 
 test('verified result confirmation resumes after a crash boundary without redownloading', async (t) => {
@@ -2038,6 +2383,66 @@ test('buffered watcher callbacks reject without store mutations after stop', asy
   const after = await store.get(created.id);
   assert.equal(after.revision, before.revision);
   assert.equal(after.state, 'running');
+});
+
+test('cold transfer recovery preserves persistent conversation semantics', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-persistent-recovery-'));
+  const profile = normalizeCloudProfile({
+    endpoint: 'https://persistent-recovery.example.ts.net/rauhwpx-cloud',
+    ssh: { host: 'persistent-recovery.example.ts.net', user: 'cloud', useTailscaleSsh: true },
+    serverPublicKey: SERVER_KEY,
+  });
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const created = await store.create({
+    sessionId: 'desktop-persistent-recovery', threadId: 'thread-persistent-recovery',
+    documentId: 'document-persistent-recovery', documentName: 'persistent-recovery.hwpx',
+    documentBytes: Buffer.from('document'), timeline: cloudStartTransfer().timeline,
+    provider: 'codex', limits: { maxTurns: 100 },
+    destination: {
+      endpoint: profile.endpoint,
+      serverPublicKey: profile.serverPublicKey,
+      mode: profile.mode,
+      sandboxId: null,
+      sandboxProvider: null,
+      protocolVersion: 2,
+    },
+  });
+  await store.transition(created.id, 'uploading');
+  const recovered = Promise.withResolvers();
+  let transferInput;
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => profile,
+      isPaired: async () => true,
+      assertTransferReady: async () => ({
+        profile,
+        health: { protocolVersion: 2, conversationProtocolVersion: 2, conversationRestore: true },
+      }),
+      transfer: async (input) => {
+        transferInput = input;
+        await input.onProgress({ phase: 'committing', loaded: 1, total: 1 });
+        await input.onSessionCreated({ sessionId: created.id, stateVersion: 1 });
+        await input.onSessionActivated({ sessionId: created.id, stateVersion: 2, eventSeq: 2 });
+        return { id: created.id, status: 'queued', stateVersion: 2 };
+      },
+      watchSession: async (_sessionId, _after, { signal }) => new Promise((resolve) => {
+        signal.addEventListener('abort', resolve, { once: true });
+      }),
+    },
+    store, provisioner: {}, recoveryDir: path.join(directory, 'recovery'),
+  });
+  coordinator.on('event', (event) => {
+    if (event.type === 'session-transfer-recovered') recovered.resolve();
+  });
+  t.after(async () => {
+    await coordinator.stop();
+    await store.flush();
+    await rm(directory, { recursive: true, force: true });
+  });
+  await coordinator.start();
+  await recovered.promise;
+  assert.equal(transferInput.persistent, true);
+  assert.equal((await store.get(created.id)).state, 'queued');
 });
 
 test('a recovery callback already queued by the timer cannot outlive stop', async (t) => {
