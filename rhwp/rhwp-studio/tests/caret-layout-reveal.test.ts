@@ -49,9 +49,9 @@ test('InputHandler는 mutation layout 완료 이벤트만 소비하고 zoom/resi
   assert.match(canvasView, /this\.eventBus\.emit\('document-layout-refreshed', \{ source: 'mutation' \}\)/);
 
   const mutationFn = canvasView.match(
-    /private async refreshPagesForMutation\(\)[\s\S]*?this\.refreshPages\(\);\s*\/\/[\s\S]*?document-layout-refreshed/,
+    /private async refreshMutationBatch\([\s\S]*?this\.refreshPages\(\);\s*\/\/[\s\S]*?document-layout-refreshed/,
   );
-  assert.ok(mutationFn, 'refreshPagesForMutation 성공 뒤에만 document-layout-refreshed를 보낸다');
+  assert.ok(mutationFn, 'refreshMutationBatch 성공 뒤에만 document-layout-refreshed를 보낸다');
 
   const layoutListener = inputHandler.match(
     /eventBus\.on\('page-layout-changed'[\s\S]{0,80}/,
