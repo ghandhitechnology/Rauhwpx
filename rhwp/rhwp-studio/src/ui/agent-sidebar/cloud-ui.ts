@@ -783,7 +783,10 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       if (!previous || request.revision >= previous.revision) {
         mergeOffers.set(request.sessionId, { ...request, startId: request.cloudStartId, durable: true });
       }
-      if (request.documentId !== documentId || !deps.isCloudCheckpointMerged) continue;
+    }
+    for (const request of mergeOffers.values()) {
+      if (!request.durable || request.documentId !== documentId || !deps.isCloudCheckpointMerged
+        || request.revision <= (reviewedRevisions.get(request.sessionId) ?? -1)) continue;
       const profileKey = mergeProfileKey(snapshot);
       const key = JSON.stringify([profileKey, documentId, request.sessionId, request.operationId, request.revision]);
       if (checkedMergeRequests.has(key)) continue;

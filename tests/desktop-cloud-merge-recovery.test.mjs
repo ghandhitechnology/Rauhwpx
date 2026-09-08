@@ -191,3 +191,33 @@ test('real worker upload and account HTTP client recover the merge after worker 
   assert.deepEqual(Buffer.from(recovered.bytes), f.bytes);
   assert.equal(recovered.sha256, f.receipt.sha256);
 });
+
+test('concurrent inbox refresh preserves a newly persisted download receipt for offline reopening', async (t) => {
+  const f = await fixture(t);
+  f.provider.getLocalCacheIdentity = async () => 'same-credential';
+  await f.recovery.refresh();
+  const patch = f.store.patch.bind(f.store);
+  let release;
+  let started;
+  const ready = new Promise((resolve) => { started = resolve; });
+  const pause = new Promise((resolve) => { release = resolve; });
+  let holdRefresh = true;
+  f.store.patch = async (...args) => {
+    if (holdRefresh) { holdRefresh = false; started(); await pause; }
+    return patch(...args);
+  };
+  const refreshing = f.recovery.refresh({ force: true });
+  await ready;
+  await f.recovery.download('cloud-session', 'turn-1');
+  const beforeRefresh = (await f.store.get(f.handoff.id)).mergeArchives[0].cachePath;
+  assert.ok(beforeRefresh);
+  release();
+  await refreshing;
+  assert.equal((await f.store.get(f.handoff.id)).mergeArchives[0].cachePath, beforeRefresh);
+  assert.equal(f.recovery.requests[0].localAvailable, true);
+  f.provider.listMergeRequests = async () => { throw new Error('offline'); };
+  const reopened = new CloudMergeRecovery({ store: new CloudHandoffStore({ filePath: f.filePath }),
+    recoveryDir: f.directory, provider: () => f.provider });
+  await reopened.refresh();
+  assert.deepEqual(Buffer.from((await reopened.download('cloud-session', 'turn-1')).bytes), f.bytes);
+});
