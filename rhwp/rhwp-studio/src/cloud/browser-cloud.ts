@@ -119,6 +119,13 @@ type BrowserTakeoverState = {
   timeline?: unknown;
 };
 
+type BrowserRetainedMessageCommand = {
+  semanticHash: string;
+  commandId: string;
+  type: string;
+  payload: Record<string, unknown>;
+};
+
 function cloudError(message: string, code: string, retryable = false, status = 0): BrowserCloudError {
   return Object.assign(new Error(message), { code, retryable, status });
 }
@@ -539,8 +546,12 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
   let eventListener: ((event: unknown) => void) | null = null;
   const watchers = new Map<string, AbortController>();
   const eventSequences = new Map<string, number>();
-  const queuedMessages = new Map<string, { id: string; sessionId: string; payloadHash: string; text: string; queuedAt: string; state: 'queued' | 'accepted'; serverQueued?: boolean }>();
+  const queuedMessages = new Map<string, { id: string; sessionId: string; payloadHash: string; text: string; queuedAt: string; state: 'queued' | 'accepted'; delivery: 'pending' | 'durable'; serverQueued?: boolean }>();
   const queuedMessageKey = (sessionId: string, messageId: string) => JSON.stringify([sessionId, messageId]);
+  const retainedMessageCommands = new Map<string, BrowserRetainedMessageCommand>();
+  const retainedMessageCommandKey = (sessionId: string, command: 'queue-message' | 'redirect', messageId: string) => (
+    JSON.stringify([sessionId, command, messageId])
+  );
   const dismissed = new Set<string>();
   const archivedSessions = new Map<string, Record<string, unknown>>();
   const completedTakeovers = new Set<string>();
@@ -693,7 +704,7 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
       session: selected ?? { kind: 'idle' },
       sessions: candidates,
       queuedMessages: [...queuedMessages.values()].filter((entry) => entry.sessionId === selected?.sessionId)
-        .map(({ id, text, queuedAt, state }) => ({ id, text, queuedAt, state })),
+        .map(({ id, text, queuedAt, state, delivery }) => ({ id, text, queuedAt, state, delivery })),
       timeline: selected ? timelines.get(selected.sessionId) ?? null : null,
       updatedAt: new Date().toISOString(),
       ...extra,
@@ -1184,6 +1195,7 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
     timelines.clear();
     eventSequences.clear();
     queuedMessages.clear();
+    retainedMessageCommands.clear();
     dismissed.clear();
     archivedSessions.clear();
     completedTakeovers.clear();
@@ -1662,46 +1674,117 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
         }
       }
       const serverType = COMMAND_TYPES[input.command];
-      const attachments = [];
-      for (const attachment of input.attachments ?? []) {
-        const stored = await upload(
-          attachment.bytes,
-          attachment.name,
-          'reference',
-          input.sessionId,
-          selectedProfile,
-        );
-        attachments.push({
-          attachmentId: attachment.id, blobId: stored.blobId, size: stored.size,
-          name: attachment.name, mimeType: attachment.mimeType,
-        });
-      }
       const messageId = input.messageId ?? randomId('message_');
-      const payload = {
-        ...(input.payload ?? {}),
-        ...(input.command === 'queue-message' || input.command === 'redirect'
-          ? {
-            content: input.message,
-            messageId,
-            ...(input.command === 'redirect' ? { expectedVersion: input.expectedVersion } : {}),
-            ...(attachments.length ? { attachments } : {}),
-          }
-          : { expectedVersion: input.expectedVersion }),
-      };
       const queuedKey = queuedMessageKey(input.sessionId, messageId);
-      if (input.command === 'queue-message' && input.message) {
-        const payloadHash = await sha256(utf8(JSON.stringify(payload)));
+      const messageCommand = input.command === 'queue-message' || input.command === 'redirect'
+        ? input.command
+        : null;
+      const retainedKey = messageCommand
+        ? retainedMessageCommandKey(input.sessionId, messageCommand, messageId)
+        : null;
+      let retainedMessageCommand = retainedKey ? retainedMessageCommands.get(retainedKey) : undefined;
+      if (messageCommand && input.message) {
+        const attachmentDigests = await Promise.all((input.attachments ?? []).map(async (attachment) => ({
+          id: attachment.id,
+          name: attachment.name,
+          mimeType: attachment.mimeType,
+          size: attachment.size,
+          sha256: await sha256(attachment.bytes),
+        })));
+        const payloadHash = await sha256(utf8(JSON.stringify({
+          type: serverType,
+          payload: input.payload ?? {},
+          content: input.message,
+          attachments: attachmentDigests,
+        })));
         const previous = queuedMessages.get(queuedKey);
-        if (previous && previous.payloadHash !== payloadHash) {
+        if ((previous && previous.payloadHash !== payloadHash)
+          || (retainedMessageCommand && retainedMessageCommand.semanticHash !== payloadHash)) {
           throw cloudError('Cloud 메시지 ID가 다른 내용에 다시 사용됐습니다.', 'MESSAGE_ID_CONFLICT');
         }
-        if (previous?.serverQueued || previous?.state === 'accepted') return snapshot();
-        if (!previous) queuedMessages.set(queuedKey, { id: messageId, sessionId: input.sessionId, payloadHash,
-          text: input.message, queuedAt: new Date().toISOString(), state: 'queued' });
+        if (previous?.delivery === 'durable') return snapshot();
+        if (!previous) {
+          queuedMessages.set(queuedKey, {
+            id: messageId,
+            sessionId: input.sessionId,
+            payloadHash,
+            text: input.message,
+            queuedAt: new Date().toISOString(),
+            state: 'queued',
+            delivery: 'pending',
+          });
+          emit({ type: 'queued-message-delivery-pending', sessionId: input.sessionId, messageId }, generation);
+        }
       }
-      const commandId = input.command === 'queue-message'
-        ? `message_${await sha256(utf8(`${input.sessionId}\0${messageId}`))}`
-        : randomId('command_');
+      const handleMessageFailure = (error: unknown) => {
+        if (!retainedKey) return;
+        const failure = error as BrowserCloudError;
+        if (failure.code === 'BLOB_NOT_FOUND') {
+          retainedMessageCommands.delete(retainedKey);
+          return;
+        }
+        if (failure.code === 'INVALID_SESSION_STATE') return;
+        const definitelyRejected = failure.retryable === false
+          || Boolean(failure.status && failure.status >= 400 && failure.status < 500);
+        if (!definitelyRejected) return;
+        retainedMessageCommands.delete(retainedKey);
+        queuedMessages.delete(queuedKey);
+        emit({ type: 'queued-message-delivery-rejected', sessionId: input.sessionId, messageId }, generation);
+      };
+      const attachments = [];
+      try {
+        if (!retainedMessageCommand) {
+          for (const attachment of input.attachments ?? []) {
+            const stored = await upload(
+              attachment.bytes,
+              attachment.name,
+              'reference',
+              input.sessionId,
+              selectedProfile,
+            );
+            attachments.push({
+              attachmentId: attachment.id, blobId: stored.blobId, size: stored.size,
+              name: attachment.name, mimeType: attachment.mimeType,
+            });
+          }
+        }
+      } catch (error) {
+        requireCurrentProfile(selectedProfile, generation);
+        handleMessageFailure(error);
+        throw error;
+      }
+      let payload: Record<string, unknown>;
+      let commandId: string;
+      if (retainedMessageCommand) {
+        payload = retainedMessageCommand.payload;
+        commandId = retainedMessageCommand.commandId;
+      } else {
+        payload = {
+          ...(input.payload ?? {}),
+          ...(messageCommand
+            ? {
+              content: input.message,
+              messageId,
+              ...(messageCommand === 'redirect' ? { expectedVersion: input.expectedVersion } : {}),
+              ...(attachments.length ? { attachments } : {}),
+            }
+            : { expectedVersion: input.expectedVersion }),
+        };
+        commandId = messageCommand
+          ? `${messageCommand === 'queue-message' ? 'message' : 'redirect'}_${await sha256(utf8(`${input.sessionId}\0${messageId}`))}`
+          : randomId('command_');
+        const pending = queuedMessages.get(queuedKey);
+        if (messageCommand && retainedKey && pending) {
+          retainedMessageCommand = {
+            semanticHash: pending.payloadHash,
+            commandId,
+            type: serverType,
+            payload: structuredClone(payload),
+          };
+          retainedMessageCommands.set(retainedKey, retainedMessageCommand);
+          payload = retainedMessageCommand.payload;
+        }
+      }
       let result: Record<string, unknown>;
       try {
         if (input.command === 'takeover') {
@@ -1806,20 +1889,32 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
           });
         }
         result = await requestJson(`/v1/sessions/${encodeURIComponent(input.sessionId)}/commands`, {
-          method: 'POST', body: { commandId, type: serverType, payload }, selectedProfile,
+          method: 'POST', body: { commandId, type: retainedMessageCommand?.type ?? serverType, payload }, selectedProfile,
         });
       } catch (error) {
         requireCurrentProfile(selectedProfile, generation);
-        if (input.command === 'queue-message') {
-          const acknowledged = queuedMessages.get(queuedKey);
-          if (acknowledged?.serverQueued || acknowledged?.state === 'accepted') return snapshot();
-          queuedMessages.delete(queuedKey);
-        }
+        handleMessageFailure(error);
         throw error;
       }
       if (input.command === 'queue-message' && result.messageId === messageId && result.status === 'queued') {
         const queued = queuedMessages.get(queuedKey);
-        if (queued) queuedMessages.set(queuedKey, { ...queued, serverQueued: true });
+        if (queued) queuedMessages.set(queuedKey, { ...queued, serverQueued: true, delivery: 'durable' });
+        if (retainedKey) retainedMessageCommands.delete(retainedKey);
+      } else if (input.command === 'redirect' && result.messageId === messageId
+        && record(result.session)?.id === input.sessionId
+        && record(result.session)?.status === 'running'
+        && record(result.session)?.persistent === true
+        && record(result.session)?.roomStatus === 'active'
+        && record(result.session)?.redirectRequested === true) {
+        const queued = queuedMessages.get(queuedKey);
+        if (queued) queuedMessages.set(queuedKey, {
+          ...queued, serverQueued: true, state: 'accepted', delivery: 'durable',
+        });
+        if (retainedKey) retainedMessageCommands.delete(retainedKey);
+      } else if (input.command === 'queue-message') {
+        throw cloudError('Cloud 메시지 수신을 확인하고 있습니다.', 'MESSAGE_DELIVERY_UNCERTAIN');
+      } else if (input.command === 'redirect') {
+        throw cloudError('Cloud 방향 전환 수신을 확인하고 있습니다.', 'MESSAGE_DELIVERY_UNCERTAIN');
       }
       const updated = record(result.session);
       if (updated) remoteSessions = [updated, ...remoteSessions.filter((session) => session.id !== input.sessionId)];
