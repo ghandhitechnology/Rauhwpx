@@ -1539,6 +1539,18 @@ pub fn stored_lines_overflow(
     inner_width_px: f64,
     styles: &ResolvedStyleSet,
 ) -> bool {
+    stored_lines_overflow_after_body_check(composed, para, inner_width_px, styles, None)
+}
+
+// Some은 본문 1.5× 검사를 통과한 같은 호출의 1.05× 결과다.
+// 이때 1.8× 초과는 불가능하므로 두 폭 검사를 다시 수행하지 않는다.
+fn stored_lines_overflow_after_body_check(
+    composed: &ComposedParagraph,
+    para: &Paragraph,
+    inner_width_px: f64,
+    styles: &ResolvedStyleSet,
+    masked_overflow_after_body_check: Option<bool>,
+) -> bool {
     let stored = !para.line_segs.is_empty()
         && para
             .line_segs
@@ -1557,10 +1569,11 @@ pub fn stored_lines_overflow(
     // 1줄 ≈4.5× 과밀 → 숫자 char_px*ratio*0.5 클램프로 0.5em 겹침). 마스킹(*)
     // 게이트와 무관하게 fresh 재래핑한다. 정당한 장평 압축 문서는 ratio 반영
     // 실폭이 내폭 이내라 오발동하지 않는다.
-    if composed
-        .lines
-        .iter()
-        .any(|l| estimate_composed_line_width(l, styles) > inner_width_px * 1.8)
+    if masked_overflow_after_body_check.is_none()
+        && composed
+            .lines
+            .iter()
+            .any(|l| estimate_composed_line_width(l, styles) > inner_width_px * 1.8)
     {
         return true;
     }
@@ -1576,10 +1589,12 @@ pub fn stored_lines_overflow(
     if stars < 8 || stars < others {
         return false;
     }
-    let fired = composed
-        .lines
-        .iter()
-        .any(|l| estimate_composed_line_width(l, styles) > inner_width_px * 1.05);
+    let fired = masked_overflow_after_body_check.unwrap_or_else(|| {
+        composed
+            .lines
+            .iter()
+            .any(|l| estimate_composed_line_width(l, styles) > inner_width_px * 1.05)
+    });
     if fired && std::env::var("RHWP_DIAG_REWRAP").is_ok() {
         let widths: Vec<String> = composed
             .lines
@@ -1657,7 +1672,23 @@ pub fn masked_stored_lines_stale(
     inner_width_px: f64,
     styles: &ResolvedStyleSet,
 ) -> bool {
-    if stored_lines_overflow(composed, para, inner_width_px, styles) {
+    masked_stored_lines_stale_after_body_check(composed, para, inner_width_px, styles, None)
+}
+
+fn masked_stored_lines_stale_after_body_check(
+    composed: &ComposedParagraph,
+    para: &Paragraph,
+    inner_width_px: f64,
+    styles: &ResolvedStyleSet,
+    masked_overflow_after_body_check: Option<bool>,
+) -> bool {
+    if stored_lines_overflow_after_body_check(
+        composed,
+        para,
+        inner_width_px,
+        styles,
+        masked_overflow_after_body_check,
+    ) {
         return true;
     }
     let stored = !para.line_segs.is_empty()
@@ -1811,14 +1842,25 @@ pub fn stored_lines_stale_for_body(
     if !stored_line_segs_structurally_coherent(para) {
         return true;
     }
-    let physically_overflowing = inner_width_px > 0.0
-        && composed
-            .lines
-            .iter()
-            .any(|line| estimate_composed_line_width(line, styles) > inner_width_px * 1.5);
-    physically_overflowing
-        || masked_stored_lines_stale(composed, para, inner_width_px, styles)
-        || compact_tac_marker_stored_lines_stale(composed, para, inner_width_px, styles)
+    let mut masked_overflow = false;
+    if inner_width_px > 0.0
+        && composed.lines.iter().any(|line| {
+            let width = estimate_composed_line_width(line, styles);
+            masked_overflow |= width > inner_width_px * 1.05;
+            width > inner_width_px * 1.5
+        })
+    {
+        return true;
+    }
+    // 양수 폭에서 위 검사가 끝까지 통과한 경우에만 측정 결과를 넘긴다.
+    // 줄별 폭을 저장하거나 다음 문서 revision까지 유지할 필요가 없다.
+    masked_stored_lines_stale_after_body_check(
+        composed,
+        para,
+        inner_width_px,
+        styles,
+        (inner_width_px > 0.0).then_some(masked_overflow),
+    ) || compact_tac_marker_stored_lines_stale(composed, para, inner_width_px, styles)
 }
 
 /// [#2279] 본문(column) 판 부실-저장 예외 — 저장 분할이 실폭 모순(과잉)이거나
@@ -2879,6 +2921,85 @@ mod p1_text_reflow_tests {
             }],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn body_width_reuse_matches_independent_checks_at_all_thresholds_and_guards() {
+        // 공개 masked_stored_lines_stale은 독립 측정 경로를 유지한다.
+        // 기존 본문 임계값과 조합해 합성 줄과 잘못된 저장 줄까지 비교한다.
+        let mut checked = 0;
+        for text in [
+            "Ordinary 한글 text",
+            "********************",
+            "*******abcdef",
+            "********abcdefgh",
+            "********abcdefghi",
+            "😀 cafe\u{301} 한글",
+        ] {
+            for ratio in [0.5, 1.0, 1.6] {
+                let mut styles = styles();
+                styles.char_styles[0].ratio = ratio;
+                for variant in 0..7 {
+                    let mut para = paragraph(text);
+                    para.line_segs = vec![LineSeg {
+                        text_start: 0,
+                        line_height: 1200,
+                        text_height: 1200,
+                        baseline_distance: 1000,
+                        segment_width: 30000,
+                        ..Default::default()
+                    }];
+                    if variant == 1 {
+                        let start = para.char_offsets[para.char_offsets.len() / 2];
+                        let mut second = para.line_segs[0].clone();
+                        second.text_start = start;
+                        para.line_segs.push(second);
+                    } else if variant == 2 {
+                        para.line_segs[0].tag = LineSeg::TAG_IMPLEMENTATION_PROPERTY;
+                    } else if variant == 3 {
+                        para.line_segs[0].line_height = 0;
+                    } else if variant == 4 {
+                        para.line_segs[0].text_start = 1;
+                    } else if variant == 5 {
+                        para.line_segs.clear();
+                    }
+                    let mut composed = compose_paragraph(&para);
+                    if variant == 6 {
+                        composed.lines.push(composed.lines[0].clone());
+                    }
+                    let max_width = composed
+                        .lines
+                        .iter()
+                        .map(|line| estimate_composed_line_width(line, &styles))
+                        .fold(0.0_f64, f64::max);
+                    let mut widths = vec![-1.0, 0.0, f64::NAN, f64::INFINITY];
+                    for threshold in [1.05, 1.5, 1.8] {
+                        let boundary = max_width / threshold;
+                        widths.extend([
+                            boundary * (1.0 - 1e-8),
+                            boundary,
+                            boundary * (1.0 + 1e-8),
+                        ]);
+                    }
+                    for width in widths {
+                        let expected = !stored_line_segs_structurally_coherent(&para)
+                            || (width > 0.0
+                                && composed.lines.iter().any(|line| {
+                                    estimate_composed_line_width(line, &styles) > width * 1.5
+                                }))
+                            || masked_stored_lines_stale(&composed, &para, width, &styles)
+                            || compact_tac_marker_stored_lines_stale(&composed, &para, width, &styles);
+                        assert_eq!(
+                            stored_lines_stale_for_body(&composed, &para, width, &styles),
+                            expected,
+                            "text={text:?} ratio={ratio} variant={variant} width={width}",
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, 1638);
     }
 
     #[test]
