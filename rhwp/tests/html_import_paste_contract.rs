@@ -6,7 +6,7 @@
 use rhwp::document_core::DocumentCore;
 use rhwp::model::style::UnderlineType;
 
-const HTML_PASTE_MAX_BYTES: usize = 400_000;
+    const HTML_PASTE_MAX_BYTES: usize = 2_000_000;
 const FLUSH_LINE_CHAR_CAP: usize = 4_000;
 
 fn paste_html(html: &str) -> DocumentCore {
@@ -136,7 +136,7 @@ fn oversized_markup_paste_falls_back_to_capped_paragraphs() {
     let core = paste_html(&format!("<div>{text}</div>"));
     let paragraphs = paragraphs(&core);
 
-    assert_eq!(paragraphs.len(), 101);
+    assert_eq!(paragraphs.len(), 501);
     assert!(paragraphs
         .iter()
         .all(|paragraph| paragraph.text.chars().count() <= FLUSH_LINE_CHAR_CAP));

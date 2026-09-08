@@ -334,8 +334,11 @@ impl DocumentCore {
 
             // 셀 내용 파싱
             // &nbsp; 등 HTML 엔티티를 디코딩한 후 공백만 남으면 빈 셀로 처리
-            let cell_paragraphs = if pc.content_html.trim().is_empty()
-                || html_to_plain_text(&pc.content_html).is_empty()
+            // 그림만 있는 셀은 평문이 비어 있어도 비우지 않는다.
+            let cell_has_image = pc.content_html.to_ascii_lowercase().contains("<img");
+            let cell_paragraphs = if !cell_has_image
+                && (pc.content_html.trim().is_empty()
+                    || html_to_plain_text(&pc.content_html).is_empty())
             {
                 vec![Paragraph::new_empty()]
             } else {
@@ -361,7 +364,8 @@ impl DocumentCore {
                 cp_para.char_count_msb = true; // 셀 문단은 항상 MSB 설정
                                                // char_count에 문단끝 마커(+1) 포함
                 let text_chars = cp_para.text.chars().count() as u32;
-                cp_para.char_count = text_chars + 1;
+                let control_units = cp_para.controls.len() as u32 * 8;
+                cp_para.char_count = text_chars + control_units + 1;
 
                 // para_shape_id: 기본 "본문" ParaShape 사용 (DIFF-3)
                 cp_para.para_shape_id = cell_para_shape_id;
@@ -968,21 +972,12 @@ impl DocumentCore {
             return;
         }
 
-        // BinData로 등록 — bin_data_id(위치)와 storage id 분리 채번
-        // (insert_picture_native 와 동일 규칙, 기존 storage id 충돌 방지)
-        let new_bin_id = (self.document.bin_data_content.len() + 1) as u16;
-        let storage_id = self.document.next_bin_data_storage_id();
-        self.document
-            .bin_data_content
-            .push(crate::model::bin_data::BinDataContent {
-                id: storage_id,
-                data: decoded.clone().into(),
-                extension: detect_clipboard_image_mime(&decoded)
-                    .split('/')
-                    .nth(1)
-                    .unwrap_or("png")
-                    .to_string(),
-            });
+        let extension = detect_clipboard_image_mime(&decoded)
+            .split('/')
+            .nth(1)
+            .unwrap_or("png")
+            .to_string();
+        let new_bin_id = self.register_embedded_bin_data(&decoded, &extension);
 
         // width/height 추출
         let width = parse_html_attr_f64(img_tag, "width").unwrap_or(200.0);
@@ -992,29 +987,130 @@ impl DocumentCore {
         let w_hu = crate::renderer::px_to_hwpunit(width, self.dpi) as u32;
         let h_hu = crate::renderer::px_to_hwpunit(height, self.dpi) as u32;
 
-        // Picture Control 생성 (placeholder로 텍스트 표현)
         let mut para = Paragraph::default();
-        para.text = "[이미지]".to_string();
-        para.char_count = para.text.encode_utf16().count() as u32;
-        para.char_offsets = para
-            .text
-            .chars()
-            .scan(0u32, |acc, c| {
-                let off = *acc;
-                *acc += c.len_utf16() as u32;
-                Some(off)
-            })
-            .collect();
+        let img_style = extract_html_attr(img_tag, "style").unwrap_or_default();
+        para.para_shape_id = if img_style.is_empty() {
+            0
+        } else {
+            self.css_to_para_shape_id(&img_style)
+        };
+        para.text = String::new();
+        para.char_count = 9;
+        para.control_mask = 0x00000800;
+        para.char_offsets = vec![];
+        para.has_para_text = true;
+        if self.document.doc_info.char_shapes.is_empty() {
+            self.document
+                .doc_info
+                .char_shapes
+                .push(crate::model::style::CharShape::default());
+        }
+        para.char_shapes = vec![crate::model::paragraph::CharShapeRef {
+            start_pos: 0,
+            char_shape_id: 0,
+        }];
+        para.line_segs = vec![crate::model::paragraph::LineSeg {
+            text_start: 0,
+            line_height: h_hu.min(i32::MAX as u32) as i32,
+            text_height: h_hu.min(i32::MAX as u32) as i32,
+            baseline_distance: (h_hu as f64 * 0.85).min(i32::MAX as f64) as i32,
+            line_spacing: 600,
+            segment_width: w_hu.min(i32::MAX as u32) as i32,
+            tag: crate::model::paragraph::LineSeg::TAG_SINGLE_SEGMENT_LINE,
+            ..Default::default()
+        }];
 
-        // Picture 컨트롤 생성
         let mut pic = crate::model::image::Picture::default();
         pic.image_attr.bin_data_id = new_bin_id;
+        pic.common.ctrl_id = 0x67736F20;
+        pic.common.attr = 0x01 | (4 << 15) | (2 << 18);
+        pic.common.treat_as_char = true;
+        pic.common.text_wrap = crate::model::shape::TextWrap::TopAndBottom;
         pic.common.width = w_hu;
         pic.common.height = h_hu;
         pic.common.vertical_offset = 0;
         pic.common.horizontal_offset = 0;
+        pic.common.z_order = 1;
+        pic.common.vert_rel_to = crate::model::shape::VertRelTo::Para;
+        pic.common.horz_rel_to = crate::model::shape::HorzRelTo::Para;
+        pic.common.flow_with_text = true;
+        pic.shape_attr = crate::model::shape::ShapeComponentAttr {
+            original_width: w_hu,
+            original_height: h_hu,
+            current_width: w_hu,
+            current_height: h_hu,
+            local_file_version: 1,
+            render_sx: 1.0,
+            render_sy: 1.0,
+            ..Default::default()
+        };
+        pic.border_x = [0i32, 0, w_hu as i32, 0];
+        pic.border_y = [w_hu as i32, h_hu as i32, 0, h_hu as i32];
+        let (nat_w, nat_h) =
+            image_pixel_size(&decoded).unwrap_or((width.max(1.0) as u32, height.max(1.0) as u32));
+        pic.crop = crate::model::image::CropInfo {
+            left: 0,
+            top: 0,
+            right: (nat_w * 75) as i32,
+            bottom: (nat_h * 75) as i32,
+        };
+        pic.img_dim = (nat_w * 75, nat_h * 75);
         para.controls.push(Control::Picture(Box::new(pic)));
+        para.ctrl_data_records = vec![None];
 
         paragraphs.push(para);
     }
+}
+
+/// 태그에서 속성 문자열을 그대로 뽑는다(따옴표 양쪽 지원).
+pub(crate) fn extract_html_attr(tag: &str, attr: &str) -> Option<String> {
+    let lower = tag.to_lowercase();
+    for quote in ['"', '\''] {
+        let needle = format!("{}={}", attr, quote);
+        if let Some(start) = lower.find(&needle) {
+            let after = &tag[start + needle.len()..];
+            if let Some(end) = after.find(quote) {
+                return Some(after[..end].to_string());
+            }
+        }
+    }
+    None
+}
+
+/// PNG·JPEG·BMP·GIF 헤더에서 원본 픽셀 크기를 읽는다.
+pub(crate) fn image_pixel_size(data: &[u8]) -> Option<(u32, u32)> {
+    if data.len() > 24 && data[..8] == [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a] {
+        let w = u32::from_be_bytes([data[16], data[17], data[18], data[19]]);
+        let h = u32::from_be_bytes([data[20], data[21], data[22], data[23]]);
+        return Some((w, h));
+    }
+    if data.len() > 26 && data[0] == b'B' && data[1] == b'M' {
+        let w = i32::from_le_bytes([data[18], data[19], data[20], data[21]]).unsigned_abs();
+        let h = i32::from_le_bytes([data[22], data[23], data[24], data[25]]).unsigned_abs();
+        return Some((w, h));
+    }
+    if data.len() > 10 && &data[..3] == b"GIF" {
+        let w = u16::from_le_bytes([data[6], data[7]]) as u32;
+        let h = u16::from_le_bytes([data[8], data[9]]) as u32;
+        return Some((w, h));
+    }
+    if data.len() > 4 && data[0] == 0xFF && data[1] == 0xD8 {
+        let mut i = 2usize;
+        while i + 9 < data.len() {
+            if data[i] != 0xFF {
+                i += 1;
+                continue;
+            }
+            let marker = data[i + 1];
+            let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+            if (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC
+            {
+                let h = u16::from_be_bytes([data[i + 5], data[i + 6]]) as u32;
+                let w = u16::from_be_bytes([data[i + 7], data[i + 8]]) as u32;
+                return Some((w, h));
+            }
+            i += 2 + len;
+        }
+    }
+    None
 }

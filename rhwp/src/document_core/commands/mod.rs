@@ -2,6 +2,7 @@ mod clipboard;
 mod document;
 mod document_transfer;
 mod footnote_ops;
+mod foreign_paste;
 mod formatting;
 mod formatting_runs;
 mod header_footer_ops;

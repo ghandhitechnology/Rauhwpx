@@ -445,14 +445,33 @@ impl DocumentCore {
 
     /// 파싱을 시도할 최대 HTML 바이트 크기. 이보다 크면 태그 트리 파싱 없이 평문으로
     /// 폴백한다 — 크기 자체가 계산량의 또 다른 축이라 깊이 상한과 별개로 방어한다.
-    const HTML_PASTE_MAX_BYTES: usize = 400_000;
+    /// data: URI 페이로드는 html_markup_len 에서 제외한다.
+    const HTML_PASTE_MAX_BYTES: usize = 2_000_000;
 
     pub(crate) fn parse_html_to_paragraphs(&mut self, html: &str) -> Vec<Paragraph> {
         self.parse_html_to_paragraphs_at_depth(html, 0)
     }
 
+    /// 크기 상한은 태그 트리 복잡도를 막으려는 것이므로 `data:` URI 로 실린
+    /// 그림 바이트는 빼고 잰다.
+    fn html_markup_len(html: &str) -> usize {
+        let mut payload = 0usize;
+        let mut rest = html;
+        while let Some(idx) = rest.find("data:") {
+            let after = &rest[idx..];
+            let end = after.find(['"', '\'', ' ', '>']).unwrap_or(after.len());
+            payload += end;
+            rest = &after[end..];
+            if rest.is_empty() {
+                break;
+            }
+        }
+        html.len().saturating_sub(payload)
+    }
+
     fn parse_html_to_paragraphs_at_depth(&mut self, html: &str, depth: u32) -> Vec<Paragraph> {
-        if depth >= Self::HTML_PASTE_MAX_RECURSION_DEPTH || html.len() > Self::HTML_PASTE_MAX_BYTES
+        if depth >= Self::HTML_PASTE_MAX_RECURSION_DEPTH
+            || Self::html_markup_len(html) > Self::HTML_PASTE_MAX_BYTES
         {
             let mut fallback_paragraphs = Vec::new();
             self.flush_text_to_paragraphs(&mut fallback_paragraphs, &html_strip_tags(html));
@@ -954,15 +973,41 @@ impl DocumentCore {
         let css_lower = css.to_lowercase();
 
         // font-family
-        if let Some(font_name) = parse_css_value(&css_lower, "font-family") {
-            let clean_name = font_name
+        //
+        // 문서에 없는 글꼴이면 새로 등록한다. 값은 대소문자를 보존해야 하므로
+        // css_lower 가 아니라 원본 css 에서 읽는다.
+        let first_family = |value: String| -> String {
+            value
+                .split(',')
+                .next()
+                .unwrap_or("")
+                .trim()
                 .trim_matches(|c: char| c == '\'' || c == '"')
                 .trim()
-                .to_string();
-            if !clean_name.is_empty() {
-                if let Some(font_id) = self.find_font_id(&clean_name) {
-                    cs.font_ids = [font_id; 7];
-                }
+                .to_string()
+        };
+        let latin_name = parse_css_value(css, "font-family")
+            .map(first_family)
+            .filter(|n| !n.is_empty());
+        let east_name = parse_css_value(css, "mso-fareast-font-family")
+            .map(first_family)
+            .filter(|n| !n.is_empty());
+        let east_ids = east_name
+            .as_deref()
+            .or(latin_name.as_deref())
+            .and_then(|n| self.find_or_register_font_ids(n));
+        let latin_ids = latin_name
+            .as_deref()
+            .or(east_name.as_deref())
+            .and_then(|n| self.find_or_register_font_ids(n));
+        if let Some(ids) = east_ids {
+            for lang_idx in [0usize, 2, 3] {
+                cs.font_ids[lang_idx] = ids[lang_idx];
+            }
+        }
+        if let Some(ids) = latin_ids {
+            for lang_idx in [1usize, 4, 5, 6] {
+                cs.font_ids[lang_idx] = ids[lang_idx];
             }
         }
 
@@ -971,6 +1016,15 @@ impl DocumentCore {
             if let Some(pt) = parse_pt_value(&size_str) {
                 // pt → HWPUNIT: 1pt = 100 HWPUNIT (base_size 단위)
                 cs.base_size = (pt * 100.0) as i32;
+            }
+        }
+
+        // letter-spacing(자간). CharShape.spacings 는 글꼴 크기 대비 퍼센트다.
+        if let Some(ls_str) = parse_css_value(&css_lower, "letter-spacing") {
+            if let Some(pt) = parse_pt_value(&ls_str) {
+                let base_pt = (f64::from(cs.base_size) / 100.0).max(1.0);
+                let pct = (pt / base_pt * 100.0).round().clamp(-50.0, 50.0) as i8;
+                cs.spacings = [pct; 7];
             }
         }
 
@@ -1078,6 +1132,55 @@ impl DocumentCore {
             }
         }
 
+        // 여백·들여쓰기. CSS 길이 → ParaShape 여백 단위(= HWPUNIT × 2).
+        // 이 포크에는 hwpx_plain_para_margin 필드가 없어 2배 스케일만 적용한다.
+        let css_len_to_hwpunit = |value: &str| -> Option<i32> {
+            let v = value.trim();
+            let (num, unit): (&str, &str) = if let Some(rest) = v.strip_suffix("pt") {
+                (rest, "pt")
+            } else if let Some(rest) = v.strip_suffix("px") {
+                (rest, "px")
+            } else if let Some(rest) = v.strip_suffix("cm") {
+                (rest, "cm")
+            } else if let Some(rest) = v.strip_suffix("mm") {
+                (rest, "mm")
+            } else {
+                (v, "pt")
+            };
+            let n: f64 = num.trim().parse().ok()?;
+            Some(match unit {
+                "px" => (n * 72.0 / 96.0 * 200.0).round() as i32,
+                "cm" => (n * 72.0 / 2.54 * 200.0).round() as i32,
+                "mm" => (n * 72.0 / 25.4 * 200.0).round() as i32,
+                _ => (n * 200.0).round() as i32,
+            })
+        };
+        let css_margin_left =
+            parse_css_value(&css_lower, "margin-left").and_then(|v| css_len_to_hwpunit(&v));
+        let css_text_indent =
+            parse_css_value(&css_lower, "text-indent").and_then(|v| css_len_to_hwpunit(&v));
+        if let Some(v) = parse_css_value(&css_lower, "margin-right") {
+            if let Some(hu) = css_len_to_hwpunit(&v) {
+                ps.margin_right = hu.max(0);
+            }
+        }
+        if css_margin_left.is_some() || css_text_indent.is_some() {
+            let ml = css_margin_left.unwrap_or(0);
+            let ti = css_text_indent.unwrap_or(0);
+            ps.margin_left = (ml + ti).max(0);
+            ps.indent = ti;
+        }
+        if let Some(v) = parse_css_value(&css_lower, "margin-top") {
+            if let Some(hu) = css_len_to_hwpunit(&v) {
+                ps.spacing_before = hu.max(0);
+            }
+        }
+        if let Some(v) = parse_css_value(&css_lower, "margin-bottom") {
+            if let Some(hu) = css_len_to_hwpunit(&v) {
+                ps.spacing_after = hu.max(0);
+            }
+        }
+
         // 동일한 ParaShape 검색
         for (i, existing) in self.document.doc_info.para_shapes.iter().enumerate() {
             if *existing == ps {
@@ -1107,6 +1210,59 @@ impl DocumentCore {
             }
         }
         None
+    }
+
+    /// 글꼴 이름으로 ID 를 찾고, 문서에 없으면 새로 등록해 그 ID 를 돌려준다.
+    fn find_or_register_font_ids(&mut self, name: &str) -> Option<[u16; 7]> {
+        let trimmed = name.trim();
+        const GENERIC: [&str; 8] = [
+            "serif",
+            "sans-serif",
+            "monospace",
+            "cursive",
+            "fantasy",
+            "system-ui",
+            "-apple-system",
+            "inherit",
+        ];
+        if trimmed.is_empty()
+            || trimmed.chars().count() > 64
+            || GENERIC.contains(&trimmed.to_lowercase().as_str())
+        {
+            return None;
+        }
+        let name_lower = trimmed.to_lowercase();
+        let faces = &mut self.document.doc_info.font_faces;
+        if faces.is_empty() {
+            return None;
+        }
+        let slot_count = faces.len().min(7);
+        let mut ids = [0u16; 7];
+        for (lang_idx, slot) in faces.iter_mut().take(7).enumerate() {
+            let idx = match slot
+                .iter()
+                .position(|font| font.name.to_lowercase() == name_lower)
+            {
+                Some(found) => found,
+                None => {
+                    if slot.len() >= 256 {
+                        return None;
+                    }
+                    slot.push(crate::model::style::Font {
+                        name: trimmed.to_string(),
+                        alt_type: 1,
+                        ..Default::default()
+                    });
+                    slot.len() - 1
+                }
+            };
+            ids[lang_idx] = u16::try_from(idx).ok()?;
+        }
+        let first = ids[0];
+        for id in ids.iter_mut().skip(slot_count) {
+            *id = first;
+        }
+        Some(ids)
     }
 }
 
