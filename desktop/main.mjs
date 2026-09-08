@@ -540,7 +540,10 @@ async function broadcastCloudEvent(payload) {
 function queueCloudBroadcast(payload) {
   // Build one snapshot per burst, but never collapse ordered agent deltas.
   // The renderer reconciles them with the stable timeline at each boundary.
-  cloudBroadcastPending.push(payload);
+  // Durable handoffs and operation snapshots can each contain the full timeline.
+  // Renderers reconcile from the per-window snapshot added at broadcast time.
+  const { handoff, snapshot, ...notification } = payload;
+  cloudBroadcastPending.push(notification);
   if (cloudBroadcastTimer) return;
   cloudBroadcastTimer = setTimeout(() => {
     cloudBroadcastTimer = null;

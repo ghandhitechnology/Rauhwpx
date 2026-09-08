@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
+import { runInNewContext } from 'node:vm';
 
 import { CloudClient } from '../desktop/cloud-client.mjs';
 import { CloudCoordinator } from '../desktop/cloud-coordinator.mjs';
@@ -3806,4 +3807,91 @@ test('local saves retain native identity validation while Cloud owns its separat
     assert.ok(block.includes(`nativeFiles.${operation}(session.sessionId,`));
     assert.ok(block.includes('documentLeases)'));
   }
+});
+
+
+test('desktop cloud bursts send history once per window and preserve ordered profile events', async (t) => {
+  // Exercise the production queue and broadcast without launching Electron.
+  const source = await readFile(new URL('../desktop/main.mjs', import.meta.url), 'utf8');
+  const broadcastFunctions = source.slice(
+    source.indexOf('async function broadcastCloudEvent(payload)'),
+    source.indexOf('function requireCloudCoordinator()'),
+  );
+  const timeline = { thread: { messages: [{ role: 'assistant', text: 'x'.repeat(1024 * 1024) }] } };
+  const snapshots = [
+    { profileEpoch: 8, session: { sessionId: 'cloud-a' }, timeline },
+    { profileEpoch: 8, session: { sessionId: 'cloud-b' }, timeline: null },
+  ];
+  const sent = [[], []];
+  const snapshotCalls = [];
+  const windows = sent.map((messages, index) => ({
+    isDestroyed: () => false,
+    webContents: { index, send: (channel, payload) => messages.push({ channel, payload }) },
+  }));
+  let flush;
+  const queue = runInNewContext(`
+    let cloudBroadcastChain = Promise.resolve();
+    const CLOUD_BROADCAST_COALESCE_MS = 100;
+    let cloudBroadcastTimer = null;
+    let cloudBroadcastPending = [];
+    ${broadcastFunctions}
+    ({ push: queueCloudBroadcast, pending: () => cloudBroadcastPending,
+       done: () => cloudBroadcastChain });
+  `, {
+    sessions: { windows: () => windows, sessionForSender: (sender) => sender.index },
+    scopedCloudSnapshot: async (session) => {
+      snapshotCalls.push(session);
+      return snapshots[session];
+    },
+    setTimeout: (callback) => { flush = callback; return { unref() {} }; },
+    console,
+  });
+  const inputs = Array.from({ length: 32 }, (_, sequence) => ({
+    version: 1,
+    type: 'session-event',
+    profileEpoch: sequence < 2 ? 7 : 8,
+    at: '2026-09-08T00:00:00.000Z',
+    sessionId: 'cloud-a',
+    event: { type: 'agent.event', sequence, data: { type: 'text_delta', text: 'next' } },
+    handoff: { id: 'handoff-a', timeline },
+  }));
+  inputs.push({
+    version: 1,
+    type: 'command-completed',
+    profileEpoch: 8,
+    at: '2026-09-08T00:00:01.000Z',
+    command: 'pause',
+    snapshot: { profileEpoch: 8, timeline },
+  });
+  for (const input of inputs) queue.push(input);
+  assert.equal(queue.pending().length, inputs.length);
+  for (const item of queue.pending()) {
+    assert.equal('handoff' in item, false);
+    assert.equal('snapshot' in item, false);
+  }
+  assert.deepEqual(snapshotCalls, []);
+  flush();
+  await queue.done();
+  assert.deepEqual(snapshotCalls, [0, 1]);
+  for (const [index, messages] of sent.entries()) {
+    assert.equal(messages.length, 1);
+    assert.equal(messages[0].channel, 'cloud:event');
+    const batch = messages[0].payload;
+    assert.equal(batch.type, 'cloud-event-batch');
+    assert.equal(batch.snapshot, snapshots[index]);
+    assert.equal(batch.events.length, inputs.length);
+    for (const [i, item] of batch.events.entries()) {
+      const { handoff, snapshot, ...expected } = inputs[i];
+      assert.deepEqual(JSON.parse(JSON.stringify(item)), expected);
+      if (inputs[i].handoff) assert.equal(inputs[i].handoff.timeline, timeline);
+      if (inputs[i].snapshot) assert.equal(inputs[i].snapshot.timeline, timeline);
+    }
+  }
+  const bytes = (value) => Buffer.byteLength(JSON.stringify(value));
+  const previousBytes = bytes({ type: 'cloud-event-batch', events: inputs, snapshot: snapshots[0] });
+  const currentBytes = bytes(sent[0][0].payload);
+  assert.ok(currentBytes < bytes(timeline) + 16_384, 'history should occur once per burst');
+  assert.ok(bytes(sent[1][0].payload) < 16_384, 'another window should receive only its scoped history');
+  assert.ok(previousBytes > currentBytes * 30, `${previousBytes} -> ${currentBytes} bytes`);
+  t.diagnostic(`32 deltas plus one operation with a 1 MiB timeline: ${previousBytes} -> ${currentBytes} bytes`);
 });
