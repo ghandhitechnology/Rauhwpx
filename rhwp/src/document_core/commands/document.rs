@@ -2151,8 +2151,8 @@ impl DocumentCore {
             sections: _,
             preview,
             bin_data_content,
-            extra_streams,
-            hwpx_aux_entries,
+            extra_streams: _,
+            hwpx_aux_entries: _,
             is_hwp3_variant,
             is_hwpx_variant,
             provenance,
@@ -2162,10 +2162,20 @@ impl DocumentCore {
             doc_properties: doc_properties.clone(),
             doc_info: doc_info.clone(),
             sections: Vec::new(),
-            preview: preview.clone(),
+            preview: preview
+                .as_ref()
+                .map(|preview| crate::model::document::Preview {
+                    text: preview.text.clone(),
+                    image: preview.image.as_ref().map(|image| {
+                        crate::model::document::PreviewImage {
+                            format: image.format,
+                            data: Vec::new(),
+                        }
+                    }),
+                }),
             bin_data_content: bin_data_content.clone(),
-            extra_streams: extra_streams.clone(),
-            hwpx_aux_entries: hwpx_aux_entries.clone(),
+            extra_streams: Vec::new(),
+            hwpx_aux_entries: Vec::new(),
             is_hwp3_variant: *is_hwp3_variant,
             is_hwpx_variant: *is_hwpx_variant,
             provenance: provenance.clone(),
@@ -2176,7 +2186,19 @@ impl DocumentCore {
         Section {
             section_def: section.section_def.clone(),
             paragraphs: Vec::new(),
-            raw_stream: section.raw_stream.clone(),
+            raw_stream: None,
+        }
+    }
+
+    // 가변 Document API는 원시 바이트도 수정할 수 있으므로 revision이나 포인터만으로
+    // 재사용하면 안 된다. 바이트 비교 비용은 남지만 동일한 값은 할당 없이 공유한다.
+    fn share_snapshot_payload<T: Clone + PartialEq>(
+        value: &T,
+        baseline: Option<&Arc<T>>,
+    ) -> Arc<T> {
+        match baseline {
+            Some(previous) if previous.as_ref() == value => Arc::clone(previous),
+            _ => Arc::new(value.clone()),
         }
     }
 
@@ -2230,12 +2252,39 @@ impl DocumentCore {
                     revision,
                     paragraph_sequence_revision,
                     section_shell: Self::clone_section_shell(section),
+                    raw_stream: section.raw_stream.as_ref().map(|bytes| {
+                        Self::share_snapshot_payload(
+                            bytes,
+                            baseline
+                                .and_then(|snapshot| snapshot.sections.get(section_idx))
+                                .and_then(|section| section.raw_stream.as_ref()),
+                        )
+                    }),
                     paragraphs,
                 }
             })
             .collect();
         DocumentSnapshot {
             document_shell: Self::clone_document_shell(&self.document),
+            extra_streams: Self::share_snapshot_payload(
+                &self.document.extra_streams,
+                baseline.map(|snapshot| &snapshot.extra_streams),
+            ),
+            hwpx_aux_entries: Self::share_snapshot_payload(
+                &self.document.hwpx_aux_entries,
+                baseline.map(|snapshot| &snapshot.hwpx_aux_entries),
+            ),
+            preview_image: self
+                .document
+                .preview
+                .as_ref()
+                .and_then(|preview| preview.image.as_ref())
+                .map(|image| {
+                    Self::share_snapshot_payload(
+                        &image.data,
+                        baseline.and_then(|snapshot| snapshot.preview_image.as_ref()),
+                    )
+                }),
             sections,
         }
     }
@@ -2406,15 +2455,30 @@ impl DocumentCore {
             .collect();
         let mut current_sections = std::mem::take(&mut self.document.sections);
         let mut restored = snapshot.document_shell.clone();
+        restored.extra_streams = snapshot.extra_streams.as_ref().clone();
+        restored.hwpx_aux_entries = snapshot.hwpx_aux_entries.as_ref().clone();
+        if let Some(image) = restored
+            .preview
+            .as_mut()
+            .and_then(|preview| preview.image.as_mut())
+        {
+            image.data = snapshot
+                .preview_image
+                .as_ref()
+                .expect("snapshot preview image")
+                .as_ref()
+                .clone();
+        }
         restored.doc_info.font_metrics_policy = self.document.doc_info.font_metrics_policy;
         restored.sections.reserve(snapshot.sections.len());
         for (section_idx, snapshot_section) in snapshot.sections.iter().enumerate() {
             if same_section_count && current_revisions[section_idx] == snapshot_section.revision {
-                restored
-                    .sections
-                    .push(std::mem::take(&mut current_sections[section_idx]));
+                let mut section = std::mem::take(&mut current_sections[section_idx]);
+                section.raw_stream = snapshot_section.raw_stream.as_deref().cloned();
+                restored.sections.push(section);
             } else {
                 let mut section = snapshot_section.section_shell.clone();
+                section.raw_stream = snapshot_section.raw_stream.as_deref().cloned();
                 let can_move_unchanged_paragraphs = same_section_count
                     && current_paragraph_sequence_revisions[section_idx]
                         == snapshot_section.paragraph_sequence_revision
@@ -2957,6 +3021,149 @@ mod replace_content_tests {
         core.restore_snapshot_native(shared_id)
             .expect("discarding one ID must not invalidate the shared ID");
         assert_eq!(serialized_document(&core), original);
+    }
+
+    fn add_snapshot_payloads(core: &mut DocumentCore, size: usize) {
+        use crate::model::document::{Preview, PreviewImage, PreviewImageFormat};
+        core.document.extra_streams = vec![("/Opaque".into(), vec![1; size])];
+        core.document.hwpx_aux_entries = vec![("custom/opaque.bin".into(), vec![2; size])];
+        core.document.preview = Some(Preview {
+            image: Some(PreviewImage {
+                format: PreviewImageFormat::Png,
+                data: vec![3; size],
+            }),
+            text: Some("preview".into()),
+        });
+        core.document.sections[0].raw_stream = Some(vec![4; size]);
+    }
+
+    #[test]
+    fn snapshots_share_opaque_payload_allocations() {
+        let mut core = DocumentCore::from_bytes(HML).unwrap();
+        add_snapshot_payloads(&mut core, 1024 * 1024);
+        // 다른 구역을 편집하면 원본 스트림이 남은 구역도 매번 캡처된다.
+        core.document
+            .sections
+            .push(core.document.sections[0].clone());
+        core.document.sections[1].raw_stream = None;
+        core.refresh_layout_native();
+        let mut capture_elapsed = std::time::Duration::ZERO;
+        for _ in 0..20 {
+            core.insert_text_native(1, 0, 0, "X").unwrap();
+            let started = std::time::Instant::now();
+            core.save_snapshot_native();
+            capture_elapsed += started.elapsed();
+        }
+        let first = &core.snapshot_store[0].1;
+        for (_, snapshot) in &core.snapshot_store {
+            assert!(Arc::ptr_eq(&first.extra_streams, &snapshot.extra_streams));
+            assert!(Arc::ptr_eq(
+                &first.hwpx_aux_entries,
+                &snapshot.hwpx_aux_entries
+            ));
+            assert!(Arc::ptr_eq(
+                first.preview_image.as_ref().unwrap(),
+                snapshot.preview_image.as_ref().unwrap()
+            ));
+            assert!(Arc::ptr_eq(
+                first.sections[0].raw_stream.as_ref().unwrap(),
+                snapshot.sections[0].raw_stream.as_ref().unwrap()
+            ));
+            assert!(snapshot.document_shell.extra_streams.is_empty());
+            assert!(snapshot.document_shell.hwpx_aux_entries.is_empty());
+            assert!(snapshot
+                .document_shell
+                .preview
+                .as_ref()
+                .unwrap()
+                .image
+                .as_ref()
+                .unwrap()
+                .data
+                .is_empty());
+            assert!(snapshot.sections[0].section_shell.raw_stream.is_none());
+        }
+        eprintln!("snapshot opaque payloads: 20 captures, 4 MiB unique bytes vs 80 MiB deep copies; capture {:?}", capture_elapsed);
+    }
+
+    #[test]
+    fn snapshot_opaque_payloads_preserve_untracked_mutations_and_restore_isolation() {
+        let mut core = DocumentCore::from_bytes(HML).unwrap();
+        add_snapshot_payloads(&mut core, 8);
+        let before = core.save_snapshot_native();
+        {
+            let doc = core.document_mut();
+            doc.extra_streams[0].1[0] = 11;
+            doc.hwpx_aux_entries[0].1[0] = 12;
+            doc.preview.as_mut().unwrap().image.as_mut().unwrap().data[0] = 13;
+            doc.sections[0].raw_stream.as_mut().unwrap()[0] = 14;
+        }
+        let after = core.save_snapshot_native();
+        let a = Arc::clone(&core.snapshot_store[0].1);
+        let b = Arc::clone(&core.snapshot_store[1].1);
+        assert!(!Arc::ptr_eq(&a.extra_streams, &b.extra_streams));
+        assert!(!Arc::ptr_eq(&a.hwpx_aux_entries, &b.hwpx_aux_entries));
+        assert!(!Arc::ptr_eq(
+            a.preview_image.as_ref().unwrap(),
+            b.preview_image.as_ref().unwrap()
+        ));
+        assert!(!Arc::ptr_eq(
+            a.sections[0].raw_stream.as_ref().unwrap(),
+            b.sections[0].raw_stream.as_ref().unwrap()
+        ));
+        for (id, delta) in [(before, 0), (after, 10), (before, 0)] {
+            core.restore_snapshot_native(id).unwrap();
+            let doc = core.document();
+            assert_eq!(doc.extra_streams[0].1[0], 1 + delta);
+            assert_eq!(doc.hwpx_aux_entries[0].1[0], 2 + delta);
+            assert_eq!(
+                doc.preview.as_ref().unwrap().image.as_ref().unwrap().data[0],
+                3 + delta
+            );
+            assert_eq!(doc.sections[0].raw_stream.as_ref().unwrap()[0], 4 + delta);
+        }
+        core.document_mut().extra_streams[0].1[0] = 21;
+        let edited = core.save_snapshot_native();
+        assert_eq!(a.extra_streams[0].1[0], 1);
+        assert_eq!(b.extra_streams[0].1[0], 11);
+        core.restore_snapshot_native(after).unwrap();
+        assert_eq!(core.document.extra_streams[0].1[0], 11);
+        core.restore_snapshot_native(edited).unwrap();
+        assert_eq!(core.document.extra_streams[0].1[0], 21);
+        core.document_mut().sections[0].raw_stream = None;
+        let without_raw = core.save_snapshot_native();
+        core.restore_snapshot_native(before).unwrap();
+        assert_eq!(core.document.sections[0].raw_stream.as_ref().unwrap()[0], 4);
+        core.restore_snapshot_native(without_raw).unwrap();
+        assert!(core.document.sections[0].raw_stream.is_none());
+    }
+
+    #[test]
+    fn snapshot_opaque_payload_presence_and_serialization_survive_undo_redo() {
+        let mut core = DocumentCore::from_bytes(HML).unwrap();
+        let absent = core.save_snapshot_native();
+        add_snapshot_payloads(&mut core, 8);
+        // 임의의 바이트는 유효한 HWP 구역 레코드가 아니므로 저장 검증에서는 제외한다.
+        core.document.sections[0].raw_stream = None;
+        let present = core.save_snapshot_native();
+        let expected_hwp = core.export_hwp_native().unwrap();
+        let expected_hwpx = core.export_hwpx_native().unwrap();
+        core.document_mut().extra_streams.clear();
+        core.document_mut().hwpx_aux_entries.clear();
+        core.document_mut().preview.as_mut().unwrap().image = None;
+        let removed = core.save_snapshot_native();
+        core.restore_snapshot_native(present).unwrap();
+        assert_eq!(core.export_hwp_native().unwrap(), expected_hwp);
+        assert_eq!(core.export_hwpx_native().unwrap(), expected_hwpx);
+        core.restore_snapshot_native(removed).unwrap();
+        assert!(core.document.extra_streams.is_empty());
+        assert!(core.document.hwpx_aux_entries.is_empty());
+        assert!(core.document.preview.as_ref().unwrap().image.is_none());
+        core.restore_snapshot_native(absent).unwrap();
+        assert!(core.document.extra_streams.is_empty());
+        assert!(core.document.hwpx_aux_entries.is_empty());
+        core.restore_snapshot_native(present).unwrap();
+        assert_eq!(core.export_hwp_native().unwrap(), expected_hwp);
     }
 
     #[test]
