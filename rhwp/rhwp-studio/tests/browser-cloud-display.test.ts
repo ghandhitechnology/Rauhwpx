@@ -56,6 +56,7 @@ function displayFixture({
   failSecondHealth = false,
   inlineFrameCount = 0,
   oversizedEvent = false,
+  eventChunks = undefined as string[] | undefined,
 } = {}) {
   const identity = generateKeyPairSync('ed25519');
   const serverPublicKey = `ed25519:${identity.publicKey.export({ type: 'spki', format: 'der' }).toString('base64url')}`;
@@ -67,6 +68,8 @@ function displayFixture({
   let streamCalls = 0;
   let capabilityCalls = 0;
   let streamAborted = false;
+  let streamCancelled = false;
+  let streamBody: ReadableStream<Uint8Array> | undefined;
   const firstCapabilityStarted = Promise.withResolvers<void>();
   const releaseCapabilityCleanup = Promise.withResolvers<void>();
   const secondCapabilityStarted = Promise.withResolvers<void>();
@@ -226,13 +229,17 @@ function displayFixture({
       const canonicalResponse = `RAUHWpx-response-v1\n${nonce}\nGET\n${url.pathname}${url.search}\n200\n${protocolDigest}`;
       const body = new ReadableStream<Uint8Array>({
         start(controller) {
-          controller.enqueue(frame);
+          for (const chunk of eventChunks ?? [frame]) {
+            controller.enqueue(typeof chunk === 'string' ? new TextEncoder().encode(chunk) : chunk);
+          }
           request.signal.addEventListener('abort', () => {
             streamAborted = true;
             try { controller.error(request.signal.reason); } catch {}
           }, { once: true });
         },
+        cancel() { streamCancelled = true; },
       });
+      streamBody = body;
       return new Response(body, {
         headers: {
           'content-type': 'text/event-stream; charset=utf-8',
@@ -261,6 +268,8 @@ function displayFixture({
     inputs,
     streamCalls: () => streamCalls,
     streamAborted: () => streamAborted,
+    streamCancelled: () => streamCancelled,
+    streamLocked: () => streamBody?.locked,
     firstCapabilityStarted: firstCapabilityStarted.promise,
     releaseCapabilityCleanup: () => releaseCapabilityCleanup.resolve(),
     secondCapabilityStarted: secondCapabilityStarted.promise,
@@ -593,3 +602,24 @@ test('browser display still rejects oversized individual events with ignored com
     unsubscribe();
   }
 });
+
+for (const complete of [false, true]) {
+  test(`browser display cancels and releases an oversized ${complete ? 'complete' : 'fragmented'} UTF-8 event`, async () => {
+    const raw = ':' + '한'.repeat(700_000);
+    const fixture = displayFixture({ eventChunks: complete ? [raw + '\n\n'] : [raw.slice(0, 350_000), raw.slice(350_000)] });
+    const api = await pairedApi(fixture);
+    const events: Array<{ event?: { kind: string; code?: string; retryable?: boolean } }> = [];
+    const unsubscribe = api.onCloudDisplayEvent((event) => events.push(event as typeof events[number]));
+    const opened = await api.cloudOpenDisplay({ sessionId });
+    try {
+      await waitFor(() => events.find(({ event }) => event?.code === 'SSE_PAYLOAD_INVALID'), 'oversized UTF-8 event failure');
+      assert.equal(events.some(({ event }) => event?.kind === 'frame'), false);
+      assert.equal(fixture.streamCancelled(), true);
+      assert.equal(fixture.streamLocked(), false);
+      assert.equal(fixture.streamCalls(), 1);
+    } finally {
+      await api.cloudCloseDisplay({ connectionId: opened.connectionId });
+      unsubscribe();
+    }
+  });
+}
