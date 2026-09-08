@@ -41,6 +41,7 @@
     "e2e:page-break-caret": "node e2e/page-break-caret-reveal.test.mjs --mode=headless",
     "e2e:drop-table-picture": "node e2e/drop-image-table-cell.test.mjs --mode=headless",
     "e2e:issue-4121": "node e2e/header-footer-selection-issue4121.test.mjs --mode=headless",
+    "e2e:issue-6635": "node e2e/toolbar-color-activation-issue6635.test.mjs --mode=headless",
     "e2e:renderer-contract": "node e2e/renderer-contract.test.mjs",
     "e2e:issue-2214": "node e2e/issue-2214-page-local-repaint.test.mjs --mode=headless",
     "e2e:issue-2809": "node e2e/issue-2809-split-alignment.test.mjs --mode=headless",
