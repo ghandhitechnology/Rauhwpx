@@ -123,6 +123,7 @@ export interface CloudQueuedMessage {
   text: string;
   queuedAt: string;
   state: 'queued' | 'accepted';
+  delivery: 'pending' | 'durable';
 }
 
 export interface CloudProviderSelection {
@@ -135,6 +136,8 @@ export interface CloudSessionBase {
   selection?: CloudProviderSelection;
   configurationPending?: boolean;
   configurationEditable?: boolean;
+  /** Set by the desktop only after the durable initial handoff acknowledgment. */
+  handoffAcceptedAt?: string;
   sessionId: string;
   version: number;
   threadId: string;
@@ -228,9 +231,25 @@ export interface CloudSandboxOutcome {
   unmanaged: boolean;
 }
 
+export interface CloudMergeRequest {
+  sessionId: string;
+  documentId: string;
+  threadId: string;
+  cloudStartId: string;
+  operationId: string;
+  revision: number;
+  turn: number;
+  kind: 'turn';
+  fileName: string;
+  sha256: string;
+  size: number;
+  localAvailable?: boolean;
+}
+
 export interface CloudSnapshot {
   revision: number;
   profileEpoch: number;
+  mergeRequests?: CloudMergeRequest[];
   available: boolean;
   profile: CloudProfileState;
   server: CloudServerState;

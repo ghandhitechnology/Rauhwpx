@@ -806,6 +806,13 @@ test('persistent message claims bind one queued message to one crash-recoverable
     timeline: { blobId: operationTimeline.id, size: operationTimeline.size },
   });
   sessions.requeueInterruptedSession(input.sessionId, 'worker_crashed_after_operation');
+  assert.equal(sessions.getSession(input.sessionId).status, 'suspended');
+  assert.equal(sessions.getSession(input.sessionId).suspendedReason.code, 'WORKER_REPLACED_UNCERTAIN');
+  assert.equal(sessions.claimNextSession(), null);
+  sessions.executeCommand(origin.device, input.sessionId, parseCommand({
+    commandId: 'resume_after_review', type: 'session.resume',
+    payload: { expectedVersion: sessions.getSession(input.sessionId).stateVersion },
+  }));
   assert.equal(database.prepare('SELECT status FROM session_turns WHERE id = ?').get(resumedTurn.id).status, 'queued');
   assert.equal(database.prepare('SELECT status FROM session_messages WHERE id = ?').get('crash-message-2').status, 'queued');
 
@@ -1065,7 +1072,7 @@ test('queued messages retain acceptance order when clocks tie or move backwards'
   assert.equal(sessions.claimFinish(session.id).waiting, true);
 });
 
-test('an interrupted initial turn remains runnable before queued follow-ups', async (t) => {
+test('an interrupted initial turn resumes after explicit review before queued follow-ups', async (t) => {
   const { sessions, blobs, origin, session } = await persistentRoomFixture(t);
   sessions.beginTurn(session.id, { turnNumber: 1 });
   const checkpoint = await upload(blobs, origin.device.id, Buffer.from('first operation saved'));
@@ -1080,6 +1087,11 @@ test('an interrupted initial turn remains runnable before queued follow-ups', as
     commandId: 'queue_after_initial', type: 'message.queue', payload: { content: 'Then edit the footer' },
   }));
   sessions.requeueInterruptedSession(session.id, 'worker_crash');
+  assert.equal(sessions.claimNextSession(), null);
+  sessions.executeCommand(origin.device, session.id, parseCommand({
+    commandId: 'resume_initial_after_review', type: 'session.resume',
+    payload: { expectedVersion: sessions.getSession(session.id).stateVersion },
+  }));
   sessions.claimNextSession();
   assert.equal(sessions.workerManifest(session.id).latestCheckpoint.kind, 'operation');
   assert.deepEqual(sessions.claimFinish(session.id).messages, [{

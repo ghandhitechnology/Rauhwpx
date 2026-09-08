@@ -1,12 +1,17 @@
-name: Publish cloud sandbox edge image
+name: Build verified Cloud sandbox image
 
 on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: Optional immutable GHCR tag for this build
+        description: Optional GHCR tag for this build; defaults to the source commit
         required: false
         type: string
+      publish_edge:
+        description: Also promote the verified image to the shared edge tag
+        required: false
+        default: false
+        type: boolean
       document_shell_only:
         description: Reuse the published engine and assets; update only the document shell
         required: false
@@ -31,7 +36,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - name: Check out tagged source
+      - name: Check out requested source
         uses: actions/checkout@v5
         with:
           persist-credentials: false
@@ -74,6 +79,16 @@ jobs:
       - name: Verify cloud runtime
         run: npm --prefix cloud test
 
+      - name: Verify and archive matching broker source
+        run: |
+          set -euo pipefail
+          npm --prefix rhwp/rau-credits ci
+          npm --prefix rhwp/rau-credits test
+          git archive "$GITHUB_SHA:rhwp/rau-credits" | gzip -n > raucloud-broker-source.tar.gz
+          broker_digest=$(sha256sum raucloud-broker-source.tar.gz | cut -d ' ' -f 1)
+          jq -n --arg commit "$GITHUB_SHA" --arg sha256 "$broker_digest" \
+            '{file: "raucloud-broker-source.tar.gz", commit: $commit, sha256: $sha256}' > raucloud-broker-source.json
+
       - name: Build and smoke-test sandbox image
         env:
           DOCUMENT_SHELL_ONLY: ${{ inputs.document_shell_only }}
@@ -82,7 +97,10 @@ jobs:
           if [[ "$DOCUMENT_SHELL_ONLY" == "true" ]]; then
             containerfile=cloud/install/Containerfile.document-shell
           fi
-          podman build --tag rauhwpx-cloud-sandbox-edge --file "$containerfile" cloud
+          podman build --tag rauhwpx-cloud-sandbox-edge \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --file "$containerfile" cloud
           podman run --rm --entrypoint node rauhwpx-cloud-sandbox-edge \
             --input-type=module -e 'import { parseConfig } from "/app/src/config.mjs";
           const config = parseConfig(process.env);
@@ -131,25 +149,46 @@ jobs:
             exit 1
           fi
 
-      - name: Publish edge and immutable images
+      - name: Publish candidate and optional edge images
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REQUESTED_TAG: ${{ inputs.image_tag }}
+          PUBLISH_EDGE: ${{ inputs.publish_edge }}
         run: |
           set -euo pipefail
-          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/rauhwpx-cloud"
-          immutable_tag="$REQUESTED_TAG"
+          image_owner=$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          image="ghcr.io/$image_owner/rauhwpx-cloud"
+          candidate_tag="${REQUESTED_TAG:-sha-$GITHUB_SHA}"
           if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" == cloud-sandbox-v* ]]; then
-            immutable_tag="${GITHUB_REF_NAME#cloud-sandbox-v}"
+            candidate_tag="${GITHUB_REF_NAME#cloud-sandbox-v}"
           fi
-          if [[ -n "$immutable_tag" && ! "$immutable_tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
-            echo "Invalid immutable image tag: $immutable_tag" >&2
+          if [[ ! "$candidate_tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ || "$candidate_tag" == edge || "$candidate_tag" == stable ]]; then
+            echo "Invalid candidate image tag: $candidate_tag" >&2
             exit 1
           fi
           printf '%s' "$GHCR_TOKEN" | podman login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
-          if [[ -n "$immutable_tag" ]]; then
-            podman tag rauhwpx-cloud-sandbox-edge "$image:$immutable_tag"
-            podman push "$image:$immutable_tag"
+          podman tag rauhwpx-cloud-sandbox-edge "$image:$candidate_tag"
+          podman push --digestfile cloud-image-digest.txt "$image:$candidate_tag"
+          digest=$(tr -d '\r\n' < cloud-image-digest.txt)
+          if [[ ! "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo 'Registry did not return a valid image digest.' >&2
+            exit 1
           fi
-          podman tag rauhwpx-cloud-sandbox-edge "$image:edge"
-          podman push "$image:edge"
+          jq -n --arg image "$image@$digest" --arg tag "$candidate_tag" \
+            --arg commit "$GITHUB_SHA" --arg run "https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            '{image: $image, tag: $tag, commit: $commit, run: $run}' > cloud-image.json
+          printf 'Verified Cloud image: `%s@%s`\n\nSource commit: `%s`\n' "$image" "$digest" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$PUBLISH_EDGE" == true || "$GITHUB_REF_TYPE" == tag ]]; then
+            podman tag rauhwpx-cloud-sandbox-edge "$image:edge"
+            podman push "$image:edge"
+          fi
+
+      - name: Record verified cloud image
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-image-${{ github.sha }}
+          path: |
+            cloud-image.json
+            raucloud-broker-source.tar.gz
+            raucloud-broker-source.json
+          if-no-files-found: error

@@ -139,6 +139,49 @@
   line-height: 1.6;
 }
 
+.ag-cloud-setup-transfer-context {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding-top: 13px;
+  border-top: 1px solid var(--ag-border);
+}
+
+.ag-cloud-setup-transfer-context .ag-provider-icon {
+  width: 22px;
+  height: 22px;
+}
+
+.ag-cloud-setup-transfer-copy {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 6px;
+  overflow: hidden;
+}
+
+.ag-cloud-setup-transfer-label,
+.ag-cloud-setup-transfer-detail {
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-sm, 11px);
+  white-space: nowrap;
+}
+
+.ag-cloud-setup-transfer-copy strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ag-text);
+  font-size: var(--font-size-sm, 11px);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-cloud-setup-transfer-detail::before {
+  content: '\00b7';
+  margin-right: 6px;
+}
+
 .ag-cloud-setup-wait {
   color: var(--ag-text-muted);
   font-size: var(--font-size-sm, 11px);

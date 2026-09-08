@@ -2,6 +2,7 @@ export type RaucloudRunStatus =
   | 'allocating'
   | 'ready'
   | 'active'
+  | 'checkpointing'
   | 'checkpointed'
   | 'completed'
   | 'stopped'
@@ -89,4 +90,65 @@ export interface CloudStatusEnvelope {
 export interface CloudRunEnvelope extends CloudStatusEnvelope {
   run: CloudRunSummary;
   coldStart?: boolean;
+}
+
+export interface CloudMergeMetadata {
+  sessionId: string;
+  documentId: string;
+  threadId: string;
+  cloudStartId: string;
+  operationId: string;
+  revision: number;
+  turn: number;
+  kind: 'turn';
+  fileName: string;
+  sha256: string;
+  size: number;
+  chunkCount: number;
+}
+
+export interface CloudMergeChunkUpload extends CloudMergeMetadata {
+  chunkIndex: number;
+  bytesBase64: string;
+}
+
+export interface CloudMergeRequest extends CloudMergeMetadata {
+  id: string;
+  runId: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
+export interface CloudMergeUploadReceipt {
+  /** Only true after every chunk and the complete SHA-256 have been verified. */
+  complete: boolean;
+  mergeRequest: CloudMergeRequest;
+}
+
+export interface CloudMergeRequestList {
+  accountId: string;
+  mergeRequests: CloudMergeRequest[];
+}
+
+export interface CloudConversationSnapshot extends Omit<CloudMergeRequest, 'kind'> {
+  kind: 'conversation';
+  /** Snapshot generation, independent of document revision. */
+  revision: number;
+  state: 'staged' | 'queued' | 'running' | 'suspended' | 'completed' | 'cancelled' | 'failed' | 'purged';
+  retentionUntil: number;
+  /** False for an idle completed room; result retrieval needs no replacement worker. */
+  pendingWork: boolean;
+}
+
+export interface CloudConversationList {
+  accountId: string;
+  conversations: CloudConversationSnapshot[];
+}
+
+export interface CloudConversationRestoreReceipt<Session> {
+  session: Session;
+  restored: true;
+  /** Reset the client watch cursor here after replacing a worker. */
+  sourceEventSeq: number;
+  restoredEventSeq: number;
 }

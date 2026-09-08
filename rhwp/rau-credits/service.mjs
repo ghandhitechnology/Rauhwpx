@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 import { decryptSecret, encryptSecret } from './crypto.mjs';
 import { createRaucloudBroker } from './cloud-broker.mjs';
+import { createMergeArtifacts, createMemoryMergeStore } from './merge-artifacts.mjs';
 import { RAU_CREDIT_LIMIT_USD, RAU_MODEL_IDS } from './catalog.mjs';
 import {
   renderCodePage,
@@ -331,6 +332,7 @@ export function createCreditsService({
   cloudWorkerSecret = '',
   cloudProvisioner = null,
   cloudProvisionerRequired = false,
+  mergeArtifactStore = createMemoryMergeStore(),
 } = {}) {
   if (!origin) throw new Error('origin is required');
   if (!sessionSecret) throw new Error('sessionSecret is required');
@@ -1012,6 +1014,9 @@ export function createCreditsService({
   }
 
   const cloudBroker = createRaucloudBroker({
+    mergeArtifacts: createMergeArtifacts({ store: mergeArtifactStore, sessionSecret, now }),
+    conversationArtifacts: createMergeArtifacts({ store: mergeArtifactStore, sessionSecret, now, kind: 'conversation' }),
+    conversationResources: createMergeArtifacts({ store: mergeArtifactStore, sessionSecret, now, kind: 'conversation-resource' }),
     store,
     mutate,
     now,
@@ -1720,7 +1725,10 @@ function htmlErrorStatus(error) {
   if (error?.code === 'RAU_ACCESS_INVALID' || error?.code === 'CLOUD_WORKER_UNAUTHORIZED') return 401;
   if (error?.code === 'RAU_PROXY_FORBIDDEN' || error?.code === 'RAU_MODEL_FORBIDDEN'
     || error?.code === 'CLOUD_DEVICE_MISMATCH') return 403;
-  if (error?.code === 'CLOUD_RUN_NOT_FOUND') return 404;
+  if (error?.code === 'CLOUD_RUN_NOT_FOUND' || error?.code === 'CLOUD_MERGE_NOT_FOUND') return 404;
+  if (error?.code === 'CLOUD_MERGE_CONFLICT' || error?.code === 'CLOUD_CONVERSATION_STALE') return 409;
+  if (error?.code === 'CLOUD_MERGE_DIGEST_MISMATCH') return 400;
+  if (error?.code === 'CLOUD_MERGE_CAPACITY') return 429;
   if (error?.code === 'RATE_LIMITED' || error?.code === 'DEVICE_PROOF_LOCKED'
     || error?.code === 'CLOUD_QUOTA_EXHAUSTED'
     || error?.code === 'CLOUD_COLD_START_RATE_LIMITED'
@@ -1845,6 +1853,35 @@ export function creditsRequestListener(service, {
       if (req.method === 'PATCH' && (url.pathname === '/v1/account' || url.pathname === '/v1/account/timezone')) {
         const body = await readJson(req);
         send(200, await service.setAccountTimezone(bearerToken(req), body.timezone));
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/v1/cloud/merge-requests') {
+        send(200, await service.listCloudMergeRequests(bearerToken(req), url.searchParams.get('sessionId')));
+        return;
+      }
+      if (req.method === 'GET' && ['/v1/cloud/conversations', '/v1/internal/cloud/conversations'].includes(url.pathname)) {
+        send(200, await service.listCloudConversations(bearerToken(req), url.searchParams.get('sessionId'), url.pathname.includes('/internal/')));
+        return;
+      }
+      const conversationChunk = url.pathname.match(/^\/v1\/internal\/cloud\/(conversations|conversation-resources)\/([^/]+)\/chunks\/(\d+)$/);
+      if (req.method === 'GET' && conversationChunk) {
+        send(200, await service.downloadCloudConversationChunk(bearerToken(req), conversationChunk[2], Number(conversationChunk[3]), conversationChunk[1] === 'conversation-resources'));
+        return;
+      }
+      const conversationUpload = url.pathname.match(/^\/v1\/internal\/cloud\/runs\/([^/]+)\/conversations$/);
+      if (req.method === 'POST' && conversationUpload) {
+        send(200, await service.uploadCloudConversation(bearerToken(req), decodeURIComponent(conversationUpload[1]), await readJson(req, 1024 * 1024)));
+        return;
+      }
+      const mergeChunk = url.pathname.match(/^\/v1\/cloud\/merge-requests\/([^/]+)\/chunks\/(\d+)$/);
+      if (req.method === 'GET' && mergeChunk) {
+        send(200, await service.downloadCloudMergeChunk(bearerToken(req), mergeChunk[1], Number(mergeChunk[2])));
+        return;
+      }
+      const mergeUpload = url.pathname.match(/^\/v1\/internal\/cloud\/runs\/([^/]+)\/merge-requests$/);
+      if (req.method === 'POST' && mergeUpload) {
+        const body = await readJson(req, 1024 * 1024);
+        send(200, await service.uploadCloudMergeRequest(bearerToken(req), decodeURIComponent(mergeUpload[1]), body));
         return;
       }
       if (req.method === 'GET' && url.pathname === '/v1/cloud/status') {

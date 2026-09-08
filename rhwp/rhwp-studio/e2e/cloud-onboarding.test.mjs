@@ -837,13 +837,13 @@ try {
   assert.match(await page.$eval('.ag-cloud-setup-technical pre', (node) => node.textContent), /reports crashed/);
   assert.deepEqual(
     await page.evaluate(() => window.__cloudHarness.calls.filter((call) => call.method === 'cloudSpawnSandbox').map((call) => call.payload)),
-    [{ providerId: 'railway' }],
+    [{ providerId: 'railway', selectedProvider: 'rau' }],
   );
   console.log('  PASS a failed sandbox spawn reports the provider detail and stays recoverable');
 
   assert.deepEqual(
     await page.$$eval('.ag-cloud-setup-footer button', (nodes) => nodes.map((node) => node.textContent.trim())),
-    ['취소', '내 서버 사용', '다시 시도'],
+    ['내 서버 사용', '다시 시도'],
   );
   await page.evaluate(() => window.__cloudHarness.setSpawnDelay(1_500));
   await clickButton(page, '다시 시도');
@@ -891,14 +891,14 @@ try {
   });
   await clickButton(page, '서버 종료');
   await waitForTitle(page, 'Raucloud를 종료하지 못했습니다');
-  assert.match(await page.$eval('.ag-cloud-setup-callout strong', (node) => node.textContent), /진행 중인 클라우드 작업이 있습니다/);
+  assert.match(await page.$eval('.ag-cloud-setup-description', (node) => node.textContent), /샌드박스가 아직 남아 있습니다/);
   assert.deepEqual(
     await page.evaluate(() => window.__cloudHarness.calls.filter((call) => call.method === 'cloudTeardownSandbox').map((call) => call.payload)),
     [{ force: false }],
   );
   assert.deepEqual(
     await page.$$eval('.ag-cloud-setup-footer button', (nodes) => nodes.map((node) => node.textContent.trim())),
-    ['취소', '상태 확인', '다시 종료', '서버 다시 선택'],
+    ['상태 확인', '다시 종료', '서버 다시 선택'],
   );
   await clickButton(page, '상태 확인');
   await waitForTitle(page, 'Raucloud가 준비되었습니다');
@@ -931,7 +931,7 @@ try {
   assert.match(await page.$eval('.ag-cloud-setup-callout strong', (node) => node.textContent), /샌드박스 ID를 확인하지 못했습니다/);
   assert.deepEqual(
     await page.$$eval('.ag-cloud-setup-footer button', (nodes) => nodes.map((node) => node.textContent.trim())),
-    ['취소', '내 서버 사용', '상태 확인', '서버 종료', '다시 시도'],
+    ['내 서버 사용', '상태 확인', '서버 종료', '다시 시도'],
   );
   for (const viewport of [{ width: 375, height: 667 }, { width: 1280, height: 800 }]) {
     await assertResponsiveDialog(page, viewport);

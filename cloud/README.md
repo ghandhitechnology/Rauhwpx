@@ -34,6 +34,15 @@ After Cloud is configured and paired, **Cloud로 보내기** sends the current d
 
 The Cloud workspace edits a separate draft. Stable checkpoints and timelines are archived for recovery; they never automatically replace the origin file. The desktop retains the origin's native document lease while the Cloud authority lease keeps that document read-only in the local editor. The interactive Cloud workspace remains separate from the origin.
 
+Raucloud retains completed turn documents in encrypted broker storage for 30 days,
+independently of the temporary instance. A laptop that was asleep can reopen the
+origin document and retrieve the matching **Cloud 변경 병합** request after the
+instance has expired. Downloaded copies stay in the desktop recovery directory
+and are verified before use. Deploy the broker upgrade before releasing either
+the worker image or the desktop client. Workers require a durable upload receipt
+before completing a turn; desktop recovery uses the broker discovery and
+chunk-download APIs.
+
 Publication is explicit: the user chooses **원본에 반영**, or the agent calls `publish_cloud_document`. The tool queues publication after a successful turn and stable checkpoint; it does not report that the local file has already been written. Publication checks the origin digest before replacement. An external save is preserved, with the Cloud version kept as a separate copy on desktop. Publishing leaves the Cloud conversation open for more turns.
 
 The HTTP transport remains protocol 1; persistent conversations require `conversationProtocolVersion: 2`. Desktop and PWA clients reject an older server before starting a persistent handoff. Desktop and PWA clients also require `supportedWorkflows` to be an array containing `question` before starting or switching to question mode. Direct, plan, and question workflows require matching control-plane and worker implementations; a compatible transport version alone does not establish workflow support. See [persistent conversation behavior](PERSISTENT_CONVERSATIONS.md).

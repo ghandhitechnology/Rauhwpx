@@ -21,6 +21,7 @@ import { applyProviderAuth, parseProviderAuth } from '../src/provider-auth.mjs';
 import { SessionStore } from '../src/session-store.mjs';
 import { SecretVault } from '../src/secret-vault.mjs';
 import { WorkerClient } from '../worker/client.mjs';
+import { createMemoryMergeStore, createMergeArtifacts } from '../../rhwp/rau-credits/merge-artifacts.mjs';
 import {
   SSE_STREAM_DIGEST,
   canonicalResponse,
@@ -353,7 +354,7 @@ test('HTTP handoff, idempotent command, SSE replay, and verified result download
   });
   assert.equal(blockedMessage.status, 409);
   assert.equal((await blockedMessage.json()).error.code, 'RAUCLOUD_INPUT_BLOCKED');
-  assert.deepEqual(admittedCommands, ['session.activate', 'session.activate', 'message.queue']);
+  assert.deepEqual(admittedCommands, ['session.activate', 'message.queue']);
 
   const controller = new AbortController();
   const eventNonce = proofNonce();
@@ -658,6 +659,97 @@ test('worker API accepts only the session worker token', async (t) => {
   assert.equal(takeover.takeover.status, 'ready');
   assert.equal(takeover.takeover.boundary.checkpoint.blobId, checkpoint.id);
   assert.equal(takeover.takeover.boundary.timeline.blobId, timeline.id);
+});
+
+test('managed turn boundaries retain the frozen document before local commit and retry failed uploads', async (t) => {
+  const archived = [];
+  const mergeStore = createMemoryMergeStore();
+  const createArchive = () => createMergeArtifacts({ store: mergeStore, sessionSecret: 'test-archive-key' });
+  const archive = createArchive();
+  let failUpload = true;
+  let replaceWorker = false;
+  let remembered = null;
+  const lease = {
+    enabled: true,
+    rememberCheckpoint: (id) => { remembered = id; },
+    async archiveMergeRequest(metadata, stream) {
+      assert.equal(sessionStore.listEvents('archive-session').filter((event) =>
+        event.type === 'boundary.committed' && event.payload.kind === 'turn').length, 0);
+      const parts = [];
+      for await (const part of stream) parts.push(part);
+      archived.push({ metadata, bytes: Buffer.concat(parts) });
+      if (failUpload) throw Object.assign(new Error('broker offline'), { code: 'RAUCLOUD_BROKER_UNREACHABLE', status: 503 });
+      const receipt = await archive.upload('account-1', 'run-1', { ...metadata,
+        chunkIndex: 0, chunkCount: 1, bytesBase64: Buffer.concat(parts).toString('base64') });
+      if (replaceWorker) sessionStore.prepareWorker('archive-session', 'replacement-worker');
+      return receipt;
+    },
+  };
+  const { base, auth, blobStore, sessionStore } = await fixture(t, { workerOnly: true, raucloudLease: lease });
+  const device = auth.redeemPairingCode({ code: auth.createPairingCode().code, deviceName: 'Origin' }).device;
+  const upload = async (bytes, name, kind) => {
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    let state = await blobStore.initUpload({ deviceId: device.id, sha256, size: bytes.length, name, kind });
+    while (state.status !== 'complete') state = await blobStore.appendChunk({
+      uploadId: state.uploadId, deviceId: device.id, offset: state.offset,
+      bytes: bytes.subarray(state.offset, state.offset + state.chunkSize),
+    });
+    return { blobId: sha256, size: bytes.length, name };
+  };
+  const document = await upload(Buffer.from('saved document'), 'source.hwpx', 'document');
+  const timeline = await upload(Buffer.from(JSON.stringify({ thread: { id: 'thread-1', cloudStartId: 'frozen-start' } })), 'timeline.json', 'timeline');
+  sessionStore.setProviderStatus('codex', { available: true, version: '1' });
+  const session = sessionStore.createSession(device, {
+    sessionId: 'archive-session', persistent: true, provider: 'codex', goal: 'Edit',
+    clientContext: { documentId: 'document-1', threadId: 'thread-1' },
+    originDocument: document, resources: [], timeline: null,
+    limits: { maxDurationSeconds: 3600, maxTurns: 10 },
+  });
+  sessionStore.executeCommand(device, session.id, {
+    commandId: 'archive-activate', type: 'session.activate', payload: { expectedVersion: session.stateVersion },
+  });
+  sessionStore.claimNextSession();
+  sessionStore.prepareWorker(session.id, 'archive-worker');
+  sessionStore.beginTurn(session.id, { turnNumber: 1 });
+  let workerToken = 'archive-worker';
+  const send = (kind, operationId, overrides = {}) => fetch(`${base}/v1/internal/worker/${session.id}/boundary`, {
+    method: 'POST', headers: { Authorization: `Bearer ${workerToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ operationId, turnNumber: 1, revision: kind === 'turn' ? 3 : 2, kind, checkpoint: document, timeline, ...overrides }),
+  });
+  assert.equal((await send('operation', 'operation-1')).status, 201);
+  assert.equal((await send('turn', 'wrong-turn', { turnNumber: 2 })).status, 409);
+  assert.equal((await send('turn', 'stale-revision', { revision: 2 })).status, 409);
+  assert.equal(archived.length, 0, 'operation saves stay local');
+  assert.equal((await send('turn', 'turn-1')).status, 503);
+  assert.equal(remembered, 'operation-1');
+  assert.equal(sessionStore.workerManifest(session.id).latestCheckpoint.kind, 'operation');
+  failUpload = false;
+  replaceWorker = true;
+  assert.equal((await send('turn', 'turn-1')).status, 401, 'an old worker cannot commit after its upload crosses replacement');
+  assert.equal(sessionStore.workerManifest(session.id).latestCheckpoint.kind, 'operation');
+  assert.equal(sessionStore.listEvents(session.id).filter((event) =>
+    event.type === 'boundary.committed' && event.payload.kind === 'turn').length, 0);
+  const reopenedArchive = createArchive();
+  const retained = (await reopenedArchive.list('account-1', session.id)).mergeRequests;
+  assert.equal(retained.length, 1, 'the broker recovery receipt survives rejection of the ephemeral local commit');
+  assert.equal(retained[0].operationId, 'turn-1');
+  const retainedChunk = await reopenedArchive.chunk('account-1', retained[0].id, 0);
+  const retainedBytes = Buffer.from(retainedChunk.bytesBase64, 'base64');
+  assert.equal(retainedBytes.toString(), 'saved document');
+  assert.equal(createHash('sha256').update(retainedBytes).digest('hex'), retained[0].sha256);
+  replaceWorker = false;
+  workerToken = 'replacement-worker';
+  assert.equal((await send('turn', 'turn-1')).status, 201);
+  assert.equal(remembered, 'turn-1');
+  assert.equal(sessionStore.workerManifest(session.id).latestCheckpoint.kind, 'turn');
+  assert.deepEqual(archived[0], archived[1]);
+  assert.deepEqual(archived[1], archived[2]);
+  assert.deepEqual(archived[1].metadata, {
+    sessionId: session.id, documentId: 'document-1', threadId: 'thread-1', cloudStartId: 'frozen-start',
+    operationId: 'turn-1', revision: 3, turn: 1, kind: 'turn', fileName: 'source.hwpx',
+    sha256: document.blobId, size: document.size,
+  });
+  assert.equal(archived[1].bytes.toString(), 'saved document');
 });
 
 test('an authenticated worker frame reaches paired devices with signed transient responses', async (t) => {

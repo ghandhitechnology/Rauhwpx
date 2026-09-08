@@ -1,4 +1,5 @@
 import type { RhwpDesktopApi } from '../desktop-integration.ts';
+import type { AgentName } from '../agent/types.ts';
 import { browserCloudSupported, createBrowserCloudApi } from './browser-cloud.ts';
 import {
   clientUnsupportedDisplay,
@@ -49,7 +50,7 @@ export interface CloudDesktopApi {
   }) => Promise<unknown>;
   cloudPair?: (payload: { code: string; profile?: CloudProfileDraft }) => Promise<unknown>;
   cloudSelectServerMode?: (payload: { mode: CloudServerMode }) => Promise<unknown>;
-  cloudSpawnSandbox?: (payload: { providerId?: string }) => Promise<unknown>;
+  cloudSpawnSandbox?: (payload: { providerId?: string; selectedProvider?: AgentName }) => Promise<unknown>;
   cloudSandboxStatus?: () => Promise<unknown>;
   cloudTeardownSandbox?: (payload: { force?: boolean }) => Promise<unknown>;
   cloudForceQuitAccount?: () => Promise<unknown>;
@@ -84,7 +85,7 @@ export interface CloudController {
   provision(installChannel?: 'stable' | 'prerelease', profile?: CloudProfileDraft): Promise<CloudSnapshot>;
   pair(code: string, profile?: CloudProfileDraft): Promise<CloudSnapshot>;
   selectServerMode(mode: CloudServerMode): Promise<CloudSnapshot>;
-  spawnSandbox(providerId?: string): Promise<CloudSnapshot>;
+  spawnSandbox(providerId?: string, selectedProvider?: AgentName): Promise<CloudSnapshot>;
   sandboxStatus(): Promise<CloudSnapshot>;
   teardownSandbox(options?: { force?: boolean }): Promise<CloudSnapshot>;
   forceQuitAccount(): Promise<CloudSnapshot>;
@@ -357,6 +358,7 @@ function parseSessionBase(state: Record<string, unknown>): CloudSessionBase | nu
     } } : {}),
     ...(typeof state.configurationPending === 'boolean' ? { configurationPending: state.configurationPending } : {}),
     ...(typeof state.configurationEditable === 'boolean' ? { configurationEditable: state.configurationEditable } : {}),
+    ...(strictIso(state.handoffAcceptedAt) ? { handoffAcceptedAt: strictIso(state.handoffAcceptedAt)! } : {}),
     sessionId,
     version,
     threadId,
@@ -551,12 +553,14 @@ export function parseCloudSnapshot(value: unknown): CloudSnapshot | null {
         const message = record(value);
         const queuedAt = strictIso(message?.queuedAt);
         if (!message || !string(message.id).trim() || !string(message.text).trim() || !queuedAt
-          || (message.state !== 'queued' && message.state !== 'accepted')) return [];
+          || (message.state !== 'queued' && message.state !== 'accepted')
+          || (message.delivery !== undefined && message.delivery !== 'pending' && message.delivery !== 'durable')) return [];
         return [{
           id: string(message.id),
           text: string(message.text),
           queuedAt,
           state: message.state === 'accepted' ? 'accepted' as const : 'queued' as const,
+          delivery: message.delivery === 'durable' ? 'durable' as const : 'pending' as const,
         }];
       });
   if (queuedMessages.length !== raw.queuedMessages.length) return null;
@@ -572,10 +576,29 @@ export function parseCloudSnapshot(value: unknown): CloudSnapshot | null {
   const sandbox = sandboxOutcome
     ? { removed: sandboxOutcome.removed === true, unmanaged: sandboxOutcome.unmanaged === true }
     : undefined;
+  const mergeRequests = raw.mergeRequests === undefined ? [] : raw.mergeRequests;
+  if (!Array.isArray(mergeRequests)) return null;
+  const parsedMergeRequests = mergeRequests.map((value) => {
+    const item = record(value);
+    if (!item || ['sessionId', 'documentId', 'threadId', 'cloudStartId', 'operationId', 'fileName']
+      .some((key) => typeof item[key] !== 'string' || !string(item[key]).trim())
+      || item.kind !== 'turn' || !/^[a-f0-9]{64}$/.test(string(item.sha256))
+      || !Number.isSafeInteger(item.revision) || Number(item.revision) < 1
+      || !Number.isSafeInteger(item.turn) || Number(item.turn) < 1
+      || !Number.isSafeInteger(item.size) || Number(item.size) < 1
+      || (item.localAvailable !== undefined && typeof item.localAvailable !== 'boolean')) return null;
+    return { sessionId: string(item.sessionId), documentId: string(item.documentId),
+      threadId: string(item.threadId), cloudStartId: string(item.cloudStartId),
+      operationId: string(item.operationId), revision: Number(item.revision), turn: Number(item.turn),
+      kind: 'turn' as const, fileName: string(item.fileName), sha256: string(item.sha256), size: Number(item.size),
+      ...(typeof item.localAvailable === 'boolean' ? { localAvailable: item.localAvailable } : {}) };
+  });
+  if (parsedMergeRequests.some((item) => !item)) return null;
   const link = raw.link === undefined ? undefined : parseCloudLink(raw.link);
   return {
     revision,
     profileEpoch,
+    mergeRequests: parsedMergeRequests.filter((item) => item !== null),
     available: raw.available,
     profile,
     server,
@@ -872,7 +895,10 @@ export function createCloudController(
     }),
     pair: (code, profile) => call('cloudPair', { code, ...(profile ? { profile } : {}) }),
     selectServerMode: (mode) => call('cloudSelectServerMode', { mode }),
-    spawnSandbox: (providerId) => call('cloudSpawnSandbox', providerId ? { providerId } : {}),
+    spawnSandbox: (providerId, selectedProvider) => call('cloudSpawnSandbox', {
+      ...(providerId ? { providerId } : {}),
+      ...(selectedProvider ? { selectedProvider } : {}),
+    }),
     sandboxStatus: () => call('cloudSandboxStatus'),
     teardownSandbox: (options = {}) => call('cloudTeardownSandbox', { force: options.force === true }),
     forceQuitAccount: () => call('cloudForceQuitAccount'),

@@ -1,7 +1,7 @@
 {
   "name": "rauhwpx",
   "productName": "Rauhwpx",
-  "version": "2.0.2",
+  "version": "2.0.3-cloud.1",
   "description": "HWP/HWPX editor with a local AI agent sidebar.",
   "author": "Hataewook",
   "license": "MIT",
@@ -36,7 +36,7 @@
     "test:ci": "node --test scripts/*.test.mjs",
     "audit:production": "node scripts/audit-production.mjs",
     "dev:studio": "npm --prefix rhwp/rhwp-studio run dev",
-    "test:cloud": "node --test tests/cloud-interaction-queue.test.mjs tests/desktop-cloud.test.mjs tests/desktop-cloud-display.test.mjs tests/desktop-cloud-protocol.test.mjs tests/desktop-cloud-client-reliability.test.mjs tests/desktop-cloud-connection-reliability.test.mjs tests/desktop-cloud-recovery.test.mjs tests/desktop-cloud-handoff-reliability.test.mjs tests/desktop-cloud-provisioner-recovery.test.mjs tests/desktop-provider-auth.test.mjs tests/desktop-app-servers.test.mjs tests/desktop-app-server-live.test.mjs tests/desktop-cloud-broker.test.mjs && npm --prefix cloud test",
+    "test:cloud": "node --test tests/cloud-interaction-queue.test.mjs tests/seamless-cloud-experience.test.mjs tests/desktop-cloud.test.mjs tests/desktop-cloud-continuity-triggers.test.mjs tests/desktop-cloud-conversation-recovery.test.mjs tests/desktop-cloud-display.test.mjs tests/desktop-cloud-protocol.test.mjs tests/desktop-cloud-client-reliability.test.mjs tests/desktop-cloud-connection-reliability.test.mjs tests/desktop-cloud-recovery.test.mjs tests/desktop-cloud-handoff-reliability.test.mjs tests/desktop-cloud-merge-recovery.test.mjs tests/desktop-cloud-provisioner-recovery.test.mjs tests/desktop-provider-auth.test.mjs tests/desktop-app-servers.test.mjs tests/desktop-app-server-live.test.mjs tests/desktop-cloud-broker.test.mjs && npm --prefix cloud test",
     "check:cloud": "node --check desktop/cloud-*.mjs desktop/fs-replace.mjs && npm --prefix cloud run check",
     "check:raucloud-branding": "node scripts/check-raucloud-branding.mjs",
     "package:linux": "electron-builder --linux AppImage deb --publish never",

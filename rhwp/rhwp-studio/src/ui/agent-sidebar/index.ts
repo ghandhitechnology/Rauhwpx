@@ -117,7 +117,7 @@ import { exportCloudTimeline, importCloudTimeline, type PortableCloudTimelineV1 
 import { CloudLiveTimelineGuard } from '../../cloud/live-timeline.ts';
 import { collectUsedCloudReferenceIds } from '../../cloud/references.ts';
 import { createCloudEditorScope } from '../../cloud/editor-scope.ts';
-import { runCloudMessageSubmission } from '../../cloud/message-submission.ts';
+import { cloudMessageRetryKey, resolveCloudMessageRetry, runCloudMessageSubmission } from '../../cloud/message-submission.ts';
 import {
   buildCloudStartTransfer,
   CLOUD_UNSAVED_MESSAGE,
@@ -192,6 +192,7 @@ export interface AgentSidebarDeps {
   cloudController?: CloudController;
   workspace?: WorkspaceController;
   prepareCloudTransfer?: (startId: string, restart?: { document: CloudDocumentPayload; sourceStartId?: string }) => Promise<CloudDocumentPayload | null>;
+  isCloudCheckpointMerged?: (checkpoint: Pick<CloudCheckpointPayload, 'documentId' | 'sessionId' | 'revision' | 'operationId' | 'sha256'>) => Promise<boolean>;
   mergeCloudCheckpoint?: (startId: string, checkpoint: CloudCheckpointPayload) => Promise<boolean>;
   beginCloudAuthorityTransition?: () => { release(): void };
   setCloudDocumentLease?: (cloudOwned: boolean, sessionId: string | null) => void;
@@ -753,6 +754,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   let pendingAssistantBubble: HTMLElement | null = null;
   const assistantBubbleSources = new WeakMap<HTMLElement, string>();
   let attachmentsSending = false;
+  let cloudMessageRetry: { key: string; messageId: string } | null = null;
   let threadsPanelOpen = false;
   let restoringLiveQuestion = false;
   let skillsPanelOpen = false;
@@ -1916,17 +1918,39 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   let cloudTimelineGuard = new CloudLiveTimelineGuard();
   let cloudTimelineGuardKey = '';
+  function cloudTransferIntentKey(): string {
+    const drafts = referenceLibrary.snapshotDraftFiles().map((file) => ({
+      name: file.name,
+      size: file.size,
+      type: file.type,
+      lastModified: file.lastModified,
+    }));
+    return JSON.stringify({
+      documentId: currentDocumentId,
+      threadId: currentThread.id,
+      text: input.value,
+      drafts,
+      selection: { agent: selectedAgent, model: selectedModel, effort: selectedEffort },
+    });
+  }
   const cloudUi = createCloudAgentUi({
     controller: cloudController,
+    getTransferSelection: () => ({ agent: selectedAgent, model: selectedModel, effort: selectedEffort }),
+    captureTransferIntent: () => ({
+      selection: { agent: selectedAgent, model: selectedModel, effort: selectedEffort },
+      requestKey: cloudTransferIntentKey(),
+    }),
     loginAccount: async () => {
       const started = await bridge.loginAccount();
       return started?.authUrl ? { authUrl: started.authUrl } : null;
     },
-    onRequestTransfer: () => {
+    onRequestTransfer: (intent) => {
+      if (intent?.requestKey && intent.requestKey !== cloudTransferIntentKey()) return;
       openCloudWorkspace();
       if (workspace.mode() !== 'cloud' || bridge.isTurnRunning()
-        || activeComposerSkill !== null || currentThread.messages.length === 0) return;
+        || activeComposerSkill !== null) return;
       if (!input.value.trim() && !referenceLibrary.hasDrafts()) {
+        if (currentThread.messages.length === 0) return;
         input.value = '현재 대화와 계획을 바탕으로 클라우드에서 이어서 진행해 주세요.';
         resizeComposerInput();
       }
@@ -2019,6 +2043,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       if (thread?.cloudRestartSourceSessionId === sessionId) return thread.cloudRestartSourceStartId;
       return thread?.cloudSessionId === sessionId ? thread.cloudStartId : undefined;
     },
+    isCloudCheckpointMerged: deps.isCloudCheckpointMerged,
     onMergeCheckpoint: deps.mergeCloudCheckpoint ? async (startId, checkpoint) => {
       workspace.setWorkspaceView('local');
       return deps.mergeCloudCheckpoint!(startId, checkpoint);
@@ -2113,7 +2138,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       if (mode === 'local') restoreLocalWorkspace();
       else openCloudWorkspace(trigger);
     },
-    configure(trigger: HTMLButtonElement) { cloudUi.openSetup(trigger); },
+    configure(trigger: HTMLButtonElement) { cloudUi.openStatus(trigger); },
   };
   const headerExecutionLocation = createExecutionLocation(executionLocationOptions);
   const workspaceExecutionLocation = createExecutionLocation(executionLocationOptions);
@@ -3182,7 +3207,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       chatPage.setAttribute('aria-hidden', open ? 'true' : 'false');
       chatPage.inert = open;
     },
-    onDraftStateChange() {
+    onDraftStateChange(change) {
+      if (change === 'content') cloudMessageRetry = null;
       persistComposerDraft();
       updateComposer();
     },
@@ -4687,7 +4713,43 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       composer.requestSubmit();
     }
   });
+  function createCloudMessageId(): string {
+    return globalThis.crypto?.randomUUID?.()
+      ?? `cloud-message-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  }
+
+  async function retryKeyForCloudDraft(
+    target: { sessionId: string; threadId: string; documentId: string | null },
+    composerText: string,
+    workflow: AgentWorkflow | null,
+    drafts: Array<{ name: string; mimeType: string; size: number; bytes: Uint8Array }>,
+  ): Promise<string> {
+    return cloudMessageRetryKey({
+      sessionId: target.sessionId,
+      threadId: target.threadId,
+      documentId: target.documentId,
+      composerText,
+      workflow,
+      attachments: drafts,
+    });
+  }
+
+  async function currentCloudDraftRetryKey(
+    target: { sessionId: string; threadId: string; documentId: string | null },
+    composerText: string,
+    workflow: AgentWorkflow | null,
+  ): Promise<string> {
+    const drafts = await Promise.all(referenceLibrary.snapshotDraftFiles().map(async (file) => ({
+      name: file.name,
+      mimeType: file.type || 'application/octet-stream',
+      size: file.size,
+      bytes: new Uint8Array(await file.arrayBuffer()),
+    })));
+    return retryKeyForCloudDraft(target, composerText, workflow, drafts);
+  }
+
   input.addEventListener('input', () => {
+    cloudMessageRetry = null;
     if (questionController.hasPending()) {
       questionController.handleComposerInput();
       resizeComposerInput();
@@ -4756,8 +4818,9 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
           ? '첨부한 이미지를 확인해 주세요.'
           : '첨부한 파일을 확인해 주세요.';
       }
-      const messageId = globalThis.crypto?.randomUUID?.()
-        ?? `cloud-message-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+      const retryCandidate = cloudMessageRetry;
+      const retryAttempt: { current: { key: string; messageId: string } | null } = { current: null };
+      let messageId = '';
       attachmentsSending = true;
       updateComposer();
       void (async () => {
@@ -4773,18 +4836,24 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
               : undefined,
             prepare: () => hasDrafts ? referenceLibrary.takeReadyCloudDrafts() : Promise.resolve([]),
             isCurrent: (target) => cloudUi.matchesTarget(target),
-            queue: (target, drafts) => cloudUi.queueMessage(
-              cloudText,
-              messageId,
-              drafts.map((file) => ({
-                id: file.id,
-                name: file.name,
-                mimeType: file.mimeType,
-                size: file.size,
-                bytes: file.bytes,
-              })),
-              target,
-            ),
+            queue: async (target, drafts) => {
+              const key = await retryKeyForCloudDraft(target, submittedDraft, cloudWorkflow, drafts);
+              retryAttempt.current = resolveCloudMessageRetry(retryCandidate, key, createCloudMessageId);
+              messageId = retryAttempt.current.messageId;
+              cloudMessageRetry = retryAttempt.current;
+              await cloudUi.queueMessage(
+                cloudText,
+                messageId,
+                drafts.map((file) => ({
+                  id: file.id,
+                  name: file.name,
+                  mimeType: file.mimeType,
+                  size: file.size,
+                  bytes: file.bytes,
+                })),
+                target,
+              );
+            },
             commit: (_target, drafts) => {
               const messageAttachments: ThreadAttachment[] = drafts.map((file) => ({
                 stageId: file.id,
@@ -4813,6 +4882,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
             systemMessage('선택한 Cloud 대화가 바뀌어 메시지를 보내지 않았습니다.');
             return;
           }
+          if (cloudMessageRetry?.messageId === messageId) cloudMessageRetry = null;
           if (currentThread.id === targetThread.id) workspace.setWorkspaceView('cloud');
           if (input.value === submittedDraft) input.value = '';
           resizeComposerInput();
@@ -4822,6 +4892,11 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
             scrollConversationToMessage(userBubble, { smooth: true });
           }
         } catch (error) {
+          if (retryAttempt.current) {
+            const currentKey = await currentCloudDraftRetryKey(execution, input.value, cloudWorkflow)
+              .catch(() => null);
+            cloudMessageRetry = currentKey === retryAttempt.current.key ? retryAttempt.current : null;
+          }
           const message = error instanceof Error ? error.message : String(error);
           resizeComposerInput();
           systemMessage(`메시지를 대기열에 넣지 못했습니다: ${message}`);
@@ -6011,6 +6086,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   function startNewChat(opts?: { silent?: boolean; documentSwitch?: boolean }): void {
     if (!opts?.documentSwitch && workspace.composerTarget().kind === 'workspace-blocked') return;
+    cloudMessageRetry = null;
     rememberThreadComposerDraft();
     setComposerSkill(null);
     if (bridge.isTurnRunning()) bridge.interrupt();
@@ -6079,6 +6155,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       setThreadsPanelOpen(false);
       return;
     }
+    cloudMessageRetry = null;
     // During a reload the bridge reconstructs the authoritative question
     // before the drawer can bind it. Treat that snapshot as live too, so
     // opening its persisted thread never stops the still-blocked provider.

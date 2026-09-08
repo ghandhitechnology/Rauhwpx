@@ -14,6 +14,7 @@ import {
   ipcMain,
   nativeTheme,
   net,
+  powerMonitor,
   protocol,
   safeStorage,
   session as electronSession,
@@ -63,6 +64,7 @@ import {
   raucloudBrokerUrl,
 } from './cloud-broker.mjs';
 import { CloudCoordinator } from './cloud-coordinator.mjs';
+import { installCloudContinuityTriggers } from './cloud-continuity-triggers.mjs';
 import { CloudDisplayRegistry } from './cloud-display-registry.mjs';
 import { CloudHandoffStore } from './cloud-handoff.mjs';
 import { collectProviderAuth as collectImportedProviderAuth } from './cloud-provider-auth.mjs';
@@ -79,7 +81,7 @@ import {
   hasPendingLaunchCleanupSync,
   retainLaunchRootForProcessCleanupSync,
 } from '../rhwp/rhwp-agent/credential-mirror.mjs';
-import { createAccountSession } from '../rhwp/rhwp-agent/account-session.mjs';
+import { ACCOUNT_SESSION_SECRET_ID, createAccountSession } from '../rhwp/rhwp-agent/account-session.mjs';
 import { createRauCreditsClient, rauCreditsUrl } from '../rhwp/rhwp-agent/rau-credits-client.mjs';
 import {
   launchStoragePaths,
@@ -416,6 +418,7 @@ let secretVault = null;
 let cloudAccountSession = null;
 let cloudCoordinator = null;
 let cloudTransport = null;
+let stopCloudContinuityTriggers = () => {};
 const cloudDisplayConnections = new CloudDisplayRegistry({
   openDisplay: (sessionId, listener, options) => requireCloudCoordinator().openDisplay(
     sessionId,
@@ -614,6 +617,7 @@ const updateLifecycle = createUpdateLifecycle({
   openReleases: () => shell.openExternal(RELEASES_URL),
   cleanupTasks: [
     () => cloudDisplayConnections.closeAll(),
+    () => stopCloudContinuityTriggers(),
     () => cloudCoordinator?.stop(),
     () => hubOwner.teardown(),
   ],
@@ -1236,6 +1240,7 @@ ipcMain.handle('cloud:spawn-sandbox', async (event, payload = {}) => {
   const session = sessionForEvent(event);
   return scopedCloudSnapshot(session, await requireCloudCoordinator().spawnAppServer({
     providerId: payload?.providerId ?? null,
+    selectedProvider: payload?.selectedProvider ?? null,
   }));
 });
 ipcMain.handle('cloud:sandbox-status', async (event) => {
@@ -1625,6 +1630,10 @@ if (!hasSingleInstanceLock) {
         authorizeOwnedBackend: (request, options) => (
           cloudAccountSession.authorizeOwnedBackend(request, options)
         ),
+        getLocalCacheIdentity: async () => {
+          const token = await secretVault.get(ACCOUNT_SESSION_SECRET_ID);
+          return token ? createHash('sha256').update(`raucloud-merge-cache:${raucloudBrokerUrl()}:${token}`).digest('hex') : null;
+        },
         getDeviceIdentity: raucloudDeviceIdentity,
       })],
       collectProviderAuth: (provider) => collectProviderAuth(provider, {
@@ -1640,6 +1649,11 @@ if (!hasSingleInstanceLock) {
     });
     cloudCoordinator.on('event', queueCloudBroadcast);
     await cloudCoordinator.start();
+    stopCloudContinuityTriggers = installCloudContinuityTriggers({
+      powerMonitor,
+      isOnline: () => net.isOnline(),
+      reconcile: (options) => cloudCoordinator?.reconcileContinuity(options),
+    });
     configureAutoUpdater();
     await loadNativeBookmarks();
     installMenu();

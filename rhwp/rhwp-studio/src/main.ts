@@ -1262,6 +1262,7 @@ async function initialize(): Promise<void> {
           setCloudDocumentLease,
           applyCloudResult,
           publishCloudCheckpoint,
+          isCloudCheckpointMerged: (checkpoint) => versionController.isCloudCheckpointMerged(checkpoint),
           mergeCloudCheckpoint: (startId, checkpoint) => versionController.mergeCloudCheckpoint(startId, checkpoint),
           applyCloudTakeover,
         });

@@ -160,6 +160,20 @@ jobs:
 
 
   app:
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: rau_test
+          POSTGRES_PASSWORD: rau_test
+          POSTGRES_DB: rau_test
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
     name: Auth and resource boundary regressions
@@ -187,8 +201,12 @@ jobs:
         run: npm --prefix rhwp/rhwp-agent run typecheck
       - name: Test agent, auth, and resource boundaries
         run: node --test --test-concurrency=1 rhwp/rhwp-agent/tests/*.test.mjs
-      - name: Test hosted authorization service
-        run: npm --prefix rhwp/rau-credits test
+      - name: Test hosted authorization service and durable checkpoint storage
+        env:
+          RAU_TEST_POSTGRES_URL: postgresql://rau_test:rau_test@127.0.0.1:${{ job.services.postgres.ports[5432] }}/rau_test
+        run: |
+          npm --prefix rhwp/rau-credits ci
+          npm --prefix rhwp/rau-credits test
       - name: Test Studio
         run: npm --prefix rhwp/rhwp-studio test
       - name: Check E2E entry points
@@ -234,6 +252,14 @@ jobs:
         run: npm --prefix rhwp/rhwp-studio run test:browser
       - name: Test sidebar server setup and recovery
         run: npm run test:sidebar
+      - name: Upload sidebar preview evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sidebar-preview-evidence
+          path: rhwp/rhwp-studio/sidebar-preview/artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Test document shortcuts, deletion, and agent table reveal
         working-directory: rhwp/rhwp-studio
         env:

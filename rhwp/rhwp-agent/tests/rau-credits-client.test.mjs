@@ -249,3 +249,21 @@ test('Rau cancellation reaches fetch and is never retried', async () => {
   }
   assert.equal(attempts, 1);
 });
+
+test('owned cloud merge downloads admit bounded chunks while ordinary account responses keep their limit', async () => {
+  const bytesBase64 = Buffer.alloc(512 * 1024, 7).toString('base64');
+  const client = createRauCreditsClient({
+    baseUrl: 'https://credits.rau.test',
+    fetchImpl: async () => new Response(JSON.stringify({ bytesBase64 }), { headers: { 'content-type': 'application/json' } }),
+  });
+  const token = `rau_account_v1_${'a'.repeat(43)}`;
+  const result = await client.authorizeOwnedBackend(token, { pathname: '/v1/cloud/merge-requests/merge-1/chunks/0' });
+  assert.equal(result.bytesBase64, bytesBase64);
+  await assert.rejects(client.authorizeOwnedBackend(token, { pathname: '/v1/account' }), { code: 'RAU_CREDITS_RESPONSE_TOO_LARGE' });
+  const oversized = createRauCreditsClient({
+    baseUrl: 'https://credits.rau.test',
+    fetchImpl: async () => new Response(JSON.stringify({ bytesBase64: 'a'.repeat(2 * 1024 * 1024) })),
+  });
+  await assert.rejects(oversized.authorizeOwnedBackend(token, { pathname: '/v1/cloud/merge-requests/merge-1/chunks/0' }),
+    { code: 'RAU_CREDITS_RESPONSE_TOO_LARGE' });
+});

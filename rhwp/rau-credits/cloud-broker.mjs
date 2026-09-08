@@ -2,8 +2,9 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 
 export const CLOUD_DAILY_LIMIT_MS = 60 * 60 * 1000;
 export const CLOUD_GRACE_LIMIT_MS = 30 * 60 * 1000;
-export const CLOUD_WARM_IDLE_MS = 20 * 60 * 1000;
+export const CLOUD_WARM_IDLE_MS = 2 * 60 * 60 * 1000;
 export const CLOUD_HEARTBEAT_LEASE_MS = 90 * 1000;
+export const CLOUD_FINAL_CHECKPOINT_MS = 60 * 1000;
 export const CLOUD_ALLOCATION_LEASE_MS = 30 * 60 * 1000;
 export const CLOUD_TIMEZONE_CHANGE_MS = 30 * 24 * 60 * 60 * 1000;
 export const CLOUD_COLD_START_WINDOW_MS = 15 * 60 * 1000;
@@ -350,10 +351,7 @@ function reconcileAccount(state, account, at) {
   if (running?.status === 'active') {
     const charge = chargeRun(account, running, at);
     if (charge.mustStop) {
-      running.status = 'stopped';
-      running.stopReason = 'grace_fuse';
-      running.completedAt = running.lastAccountedAt;
-      reserveTeardown(account, running, at);
+      requestFinalCheckpoint(running, at);
     }
   }
   advanceQuota(account, at);
@@ -362,6 +360,12 @@ function reconcileAccount(state, account, at) {
   const run = cloud.runs[worker.runId];
   if (!run) {
     account.worker = null;
+    return;
+  }
+  if (run.status === 'checkpointing' && at >= run.finalCheckpointDeadlineAt) {
+    run.status = 'stopped';
+    run.completedAt = at;
+    reserveTeardown(account, run, at);
     return;
   }
   if (worker.status === 'allocating' && at - Number(run.createdAt ?? at) >= CLOUD_ALLOCATION_LEASE_MS) {
@@ -375,6 +379,13 @@ function reconcileAccount(state, account, at) {
   if (['warm', 'ready'].includes(worker.status) && at >= Number(worker.warmUntil ?? 0)) {
     reserveTeardown(account, run, at);
   }
+}
+
+function requestFinalCheckpoint(run, at) {
+  run.status = 'checkpointing';
+  run.stopReason = 'grace_fuse';
+  run.inputBlocked = true;
+  run.finalCheckpointDeadlineAt ??= at + CLOUD_FINAL_CHECKPOINT_MS;
 }
 
 function reserveTeardown(account, run, at) {
@@ -506,6 +517,9 @@ export function createRaucloudBroker({
   store,
   mutate,
   authenticateAccessToken,
+  mergeArtifacts = null,
+  conversationArtifacts = null,
+  conversationResources = null,
   workerSecret = '',
   provisioner = null,
   provisionerRequired = false,
@@ -530,6 +544,23 @@ export function createRaucloudBroker({
       throw cloudError('CLOUD_WORKER_UNAUTHORIZED', 'Worker authentication failed');
     }
   }
+
+  function workerAccount(state, secret, runId = null) {
+    const cloud = ensureRaucloudState(state);
+    for (const [accountId, account] of Object.entries(cloud.accounts)) {
+      const worker = account.worker;
+      const run = worker && cloud.runs[worker.runId];
+      if (run && (!runId || run.id === runId) && worker.id === run.workerId
+        && sameSecret(worker.workerTokenHash, secretHash(secret))
+        && sameSecret(worker.workerTokenHash, run.workerTokenHash)
+        && ['active', 'ready', 'checkpointing'].includes(run.status)
+        && ['active', 'ready', 'warm'].includes(worker.status)
+        && run.teardownRequestedAt == null && run.remoteDeletedAt == null) return { account, accountId, run };
+    }
+    throw cloudError('CLOUD_WORKER_UNAUTHORIZED', 'This worker no longer owns the Raucloud run');
+  }
+
+  async function currentWorkerAccount(secret) { return workerAccount(await store.load(), secret); }
 
   function envelope(state, account, user, deviceId = '', runOverride = undefined, coldStart = undefined) {
     const cloud = ensureRaucloudState(state);
@@ -1012,6 +1043,66 @@ export function createRaucloudBroker({
       return result;
     },
 
+    async uploadCloudMergeRequest(secret, runId, input) {
+      const state = await store.load();
+      const cloud = ensureRaucloudState(state);
+      const run = cloud.runs[validId(runId, 'runId')];
+      const worker = run && cloud.accounts[run.accountId]?.worker;
+      // Historical run hashes remain for receipts. Only the current assignment
+      // authorizes new writes, including retries while the worker stays warm.
+      if (!run || !worker || worker.runId !== run.id || worker.id !== run.workerId
+        || !sameSecret(worker.workerTokenHash, run.workerTokenHash)
+        || !sameSecret(worker.workerTokenHash, secretHash(secret))
+        || !['active', 'ready', 'checkpointing'].includes(run.status)
+        || !['active', 'ready', 'warm'].includes(worker.status)
+        || run.teardownRequestedAt != null || run.remoteDeletedAt != null) {
+        throw cloudError('CLOUD_WORKER_UNAUTHORIZED', 'This worker no longer owns the Raucloud run');
+      }
+      if (!mergeArtifacts) throw cloudError('CLOUD_UNAVAILABLE', 'Checkpoint storage is unavailable');
+      return mergeArtifacts.upload(run.accountId, run.id, input);
+    },
+
+    async listCloudMergeRequests(token, sessionId) {
+      const accountId = await identity(token);
+      if (!mergeArtifacts) throw cloudError('CLOUD_UNAVAILABLE', 'Checkpoint storage is unavailable');
+      return { ...await mergeArtifacts.list(accountId, sessionId), accountId };
+    },
+
+    async uploadCloudConversation(secret, runId, input) {
+      // Hold the assignment mutation lock through the durable artifact commit.
+      // A retired worker cannot finish an upload after a replacement is assigned.
+      return mutate(async (state) => {
+        const { accountId, run } = workerAccount(state, secret, validId(runId, 'runId'));
+        const artifacts = input.kind === 'conversation-resource' ? conversationResources : conversationArtifacts;
+        if (!artifacts) throw cloudError('CLOUD_UNAVAILABLE', 'Conversation storage is unavailable');
+        return artifacts.upload(accountId, run.id, input);
+      });
+    },
+
+    async listCloudConversations(token, sessionId, worker = false) {
+      const accountId = worker ? (await currentWorkerAccount(token)).accountId : await identity(token);
+      if (!conversationArtifacts) throw cloudError('CLOUD_UNAVAILABLE', 'Conversation storage is unavailable');
+      const { mergeRequests } = await conversationArtifacts.list(accountId, sessionId);
+      return { accountId, conversations: mergeRequests };
+    },
+
+    async downloadCloudConversationChunk(secret, id, index, resource = false) {
+      const { accountId } = await currentWorkerAccount(secret);
+      const artifacts = resource ? conversationResources : conversationArtifacts;
+      if (!artifacts) throw cloudError('CLOUD_UNAVAILABLE', 'Conversation storage is unavailable');
+      return artifacts.chunk(accountId, id, index);
+    },
+
+    async downloadCloudMergeChunk(token, id, index) {
+      const accountId = await identity(token);
+      if (!mergeArtifacts) throw cloudError('CLOUD_UNAVAILABLE', 'Checkpoint storage is unavailable');
+      return mergeArtifacts.chunk(accountId, id, index);
+    },
+
+    async cleanupCloudMergeRequests() {
+      await mergeArtifacts?.cleanup();
+    },
+
     async confirmCloudAllocation(secret, runId) {
       return mutate((state) => {
         const at = now();
@@ -1051,16 +1142,16 @@ export function createRaucloudBroker({
         assertWorkerSecret(secret, run);
         if (!run) throw cloudError('CLOUD_RUN_NOT_FOUND', 'Raucloud run not found');
         const account = ensureAccount(state, run.accountId, at);
+        if (account.worker?.runId === run.id && run.status === 'checkpointing') {
+          return { run: publicRun(run), quota: publicQuota(account, run, at), mustStop: true };
+        }
         if (account.worker?.runId !== run.id || run.status !== 'active') {
           throw cloudError('CLOUD_RUN_STATE_INVALID', 'Raucloud run is not active');
         }
         const charge = chargeRun(account, run, at);
         run.lastHeartbeatAt = at;
         if (charge.mustStop) {
-          run.status = 'stopped';
-          run.stopReason = 'grace_fuse';
-          run.completedAt = run.lastAccountedAt;
-          reserveTeardown(account, run, at);
+          requestFinalCheckpoint(run, at);
         }
         return { run: publicRun(run), quota: publicQuota(account, run, at), mustStop: charge.mustStop };
       });
@@ -1103,8 +1194,11 @@ export function createRaucloudBroker({
         if (run.status === 'ready' && checkpointId && run.checkpointId === checkpointId) {
           return { run: publicRun(run), quota: publicQuota(account, run, at), worker: publicWorker(account.worker), mustStop: false };
         }
-        if (run.status !== 'active') throw cloudError('CLOUD_RUN_STATE_INVALID', 'Raucloud run is not active');
-        const charge = chargeRun(account, run, at);
+        if (['completed', 'checkpointed'].includes(run.status) && checkpointId && run.checkpointId === checkpointId) {
+          return { run: publicRun(run), quota: publicQuota(account, run, at), worker: null, mustStop: true };
+        }
+        if (!['active', 'checkpointing'].includes(run.status)) throw cloudError('CLOUD_RUN_STATE_INVALID', 'Raucloud run is not active');
+        const charge = run.status === 'checkpointing' ? { mustStop: true } : chargeRun(account, run, at);
         run.lastTurnCompletedAt = at;
         if (checkpointId) run.checkpointId = validId(checkpointId, 'checkpointId');
         if (run.checkpointId) account.latestCheckpointRunId = run.id;
@@ -1162,10 +1256,7 @@ export function createRaucloudBroker({
             advanceQuota(account, at);
             run.lastHeartbeatAt = at;
             if (charge.mustStop) {
-              run.status = 'stopped';
-              run.stopReason = 'grace_fuse';
-              run.completedAt = run.lastAccountedAt;
-              reserveTeardown(account, run, at);
+              requestFinalCheckpoint(run, at);
               stopped += 1;
             }
           } else {
@@ -1182,22 +1273,23 @@ export function createRaucloudBroker({
     /** A warm worker discovers its newly assigned run without receiving a new secret. */
     async getCloudLease(secret) {
       const hash = secretHash(secret);
-      const state = await store.load();
-      const cloud = ensureRaucloudState(state);
-      for (const account of Object.values(cloud.accounts)) {
-        if (!account.worker?.workerTokenHash || !sameSecret(account.worker.workerTokenHash, hash)) continue;
-        const run = cloud.runs[account.worker.runId];
-        if (!run || !['ready', 'active'].includes(run.status)) break;
-        return {
-          runId: run.id,
-          workerId: account.worker.id,
-          status: run.status,
-          ownerDeviceId: run.ownerDeviceId,
-          shouldConfirm: run.status === 'ready',
-          inputBlocked: Boolean(run.inputBlocked),
-        };
-      }
-      throw cloudError('CLOUD_WORKER_UNAUTHORIZED', 'No Raucloud lease matches this worker token');
+      return mutate((state) => {
+        const cloud = ensureRaucloudState(state);
+        for (const account of Object.values(cloud.accounts)) {
+          if (!account.worker?.workerTokenHash || !sameSecret(account.worker.workerTokenHash, hash)) continue;
+          const at = now();
+          reconcileAccount(state, account, at);
+          const run = account.worker && cloud.runs[account.worker.runId];
+          if (!run || !['ready', 'active', 'checkpointing'].includes(run.status)
+            || !['ready', 'warm', 'active'].includes(account.worker.status)) break;
+          return {
+            runId: run.id, workerId: account.worker.id, status: run.status, ownerDeviceId: run.ownerDeviceId,
+            shouldConfirm: run.status === 'ready', inputBlocked: Boolean(run.inputBlocked),
+            run: publicRun(run), quota: publicQuota(account, run, at), mustStop: run.status === 'checkpointing',
+          };
+        }
+        throw cloudError('CLOUD_WORKER_UNAUTHORIZED', 'No Raucloud lease matches this worker token');
+      });
     },
 
     async reconcileLegacyCloud() {
