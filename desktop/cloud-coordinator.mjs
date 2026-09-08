@@ -1,3 +1,4 @@
+import { CloudMergeRecovery } from './cloud-merge-recovery.mjs';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
@@ -276,6 +277,7 @@ export class CloudCoordinator extends EventEmitter {
   #sandboxLifecycle = 'idle';
   #sandboxMessage = null;
   #raucloudStatus = null;
+  #mergeRecovery;
   #accountSnapshot = null;
   #accountStatusPromise = null;
   #accountStatusAt = 0;
@@ -309,6 +311,9 @@ export class CloudCoordinator extends EventEmitter {
     this.#provisioner = provisioner;
     this.#recoveryDir = recoveryDir;
     this.#appServers = Array.isArray(appServers) ? createAppServerRegistry(appServers) : appServers;
+    this.#mergeRecovery = new CloudMergeRecovery({
+      store, recoveryDir, provider: () => this.#managedAccountProvider(),
+    });
     this.#collectProviderAuth = typeof collectProviderAuth === 'function' ? collectProviderAuth : null;
     this.#collectImportedAuth = typeof collectImportedAuth === 'function' ? collectImportedAuth : null;
   }
@@ -366,6 +371,7 @@ export class CloudCoordinator extends EventEmitter {
   }
 
   async refreshAccountStatus() {
+    this.#mergeRecovery.reset();
     // A read started before the account changed may still report the old identity.
     // Finish it before forcing a new read, so it cannot overwrite the fresh result.
     await this.#accountStatusPromise;
@@ -377,6 +383,7 @@ export class CloudCoordinator extends EventEmitter {
   async start() {
     this.#stopped = false;
     await this.#refreshAccountStatus({ force: true });
+    await this.#refreshMergeRequests({ force: true });
     this.#preferredMode = await this.#client.loadServerMode?.().catch(() => null) ?? null;
     const profile = await this.#client.loadProfile().catch(() => null);
     const pendingSandboxBlocked = await this.#recoverPendingAppSandbox(profile);
@@ -723,6 +730,7 @@ export class CloudCoordinator extends EventEmitter {
     // Account refresh is independent of the current document and must not hold
     // every state broadcast behind an unreachable broker.
     void this.#refreshAccountStatus();
+    void this.#refreshMergeRequests();
     const profile = await this.#client.loadProfile().catch(() => null);
     const paired = profile ? await this.#client.isPaired().catch(() => false) : false;
     const records = await this.#store.list();
@@ -863,6 +871,7 @@ export class CloudCoordinator extends EventEmitter {
               : { owner: 'local' },
       session: selected ? this.#publicSession(selected) : this.#publicRemoteSession(remote),
       sessions: [...publicSessionsById.values()],
+      mergeRequests: this.#mergeRecovery.requests,
       queuedMessages: selected?.queuedMessages ?? [],
       timeline: selected?.timeline ?? remote?.timeline ?? null,
       updatedAt: now,
@@ -1094,11 +1103,26 @@ export class CloudCoordinator extends EventEmitter {
     }
   }
 
+  async #refreshMergeRequests({ force = false } = {}) {
+    const profileEpoch = this.#profileEpoch;
+    try {
+      const previous = JSON.stringify(this.#mergeRecovery.requests);
+      await this.#mergeRecovery.refresh({ force,
+        assertCurrent: () => this.#assertProfileEpoch(profileEpoch) });
+      if (previous !== JSON.stringify(this.#mergeRecovery.requests)) this.#emit({ type: 'merge-requests-updated' });
+    } catch (error) {
+      if (error?.code !== 'PROFILE_CHANGED' && error?.name !== 'AbortError') {
+        this.#emit({ type: 'merge-recovery-error', error: error.message });
+      }
+    }
+  }
+
   refresh(options = {}) {
     return this.#withProfileOperation((profileEpoch) => this.#refresh(options, profileEpoch));
   }
 
   async #refresh(options, profileEpoch) {
+    await this.#refreshMergeRequests({ force: true });
     void this.#refreshAccountStatus();
     const profile = await this.#client.loadProfile().catch(() => null);
     this.#assertProfileEpoch(profileEpoch);
@@ -2571,6 +2595,11 @@ export class CloudCoordinator extends EventEmitter {
   }
 
   async #downloadCheckpoint({ sessionId, operationId = null, kind = null }, profileEpoch) {
+    if (operationId) {
+      const recovered = await this.#mergeRecovery.download(sessionId, operationId,
+        () => this.#assertProfileEpoch(profileEpoch));
+      if (recovered) return recovered;
+    }
     const [checkpoint, handoff] = await Promise.all([
       this.#client.downloadCheckpoint(sessionId, { operationId, ...(kind ? { kind } : {}) }),
       this.#handoffForSession(sessionId, profileEpoch),

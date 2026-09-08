@@ -572,10 +572,29 @@ export function parseCloudSnapshot(value: unknown): CloudSnapshot | null {
   const sandbox = sandboxOutcome
     ? { removed: sandboxOutcome.removed === true, unmanaged: sandboxOutcome.unmanaged === true }
     : undefined;
+  const mergeRequests = raw.mergeRequests === undefined ? [] : raw.mergeRequests;
+  if (!Array.isArray(mergeRequests)) return null;
+  const parsedMergeRequests = mergeRequests.map((value) => {
+    const item = record(value);
+    if (!item || ['sessionId', 'documentId', 'threadId', 'cloudStartId', 'operationId', 'fileName']
+      .some((key) => typeof item[key] !== 'string' || !string(item[key]).trim())
+      || item.kind !== 'turn' || !/^[a-f0-9]{64}$/.test(string(item.sha256))
+      || !Number.isSafeInteger(item.revision) || Number(item.revision) < 1
+      || !Number.isSafeInteger(item.turn) || Number(item.turn) < 1
+      || !Number.isSafeInteger(item.size) || Number(item.size) < 1
+      || (item.localAvailable !== undefined && typeof item.localAvailable !== 'boolean')) return null;
+    return { sessionId: string(item.sessionId), documentId: string(item.documentId),
+      threadId: string(item.threadId), cloudStartId: string(item.cloudStartId),
+      operationId: string(item.operationId), revision: Number(item.revision), turn: Number(item.turn),
+      kind: 'turn' as const, fileName: string(item.fileName), sha256: string(item.sha256), size: Number(item.size),
+      ...(typeof item.localAvailable === 'boolean' ? { localAvailable: item.localAvailable } : {}) };
+  });
+  if (parsedMergeRequests.some((item) => !item)) return null;
   const link = raw.link === undefined ? undefined : parseCloudLink(raw.link);
   return {
     revision,
     profileEpoch,
+    mergeRequests: parsedMergeRequests.filter((item) => item !== null),
     available: raw.available,
     profile,
     server,

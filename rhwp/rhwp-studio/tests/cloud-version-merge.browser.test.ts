@@ -304,9 +304,12 @@ test('successive cloud turns merge into the active local branch and older signal
       cloud.eventBus.emit('document-mutated');
       const before = cloud.inspect();
       const applied = await cloud.controller.mergeCloudCheckpoint(cloud.startId, cloud.checkpoint);
-      return { before, after: cloud.inspect(), applied };
+      return { before, after: cloud.inspect(), applied, integrated: await cloud.controller.isCloudCheckpointMerged(cloud.checkpoint),
+        otherDocumentIntegrated: await cloud.controller.isCloudCheckpointMerged({ ...cloud.checkpoint, documentId: 'other-document' }) };
     });
     assert.equal(first.applied, true);
+    assert.equal(first.integrated, true);
+    assert.equal(first.otherDocumentIntegrated, false);
     assert.equal(first.after.text, first.before.text);
     assert.equal(first.after.state.dirty, true);
     assert.equal(first.after.state.activeBranch, '검토');

@@ -192,6 +192,7 @@ export interface AgentSidebarDeps {
   cloudController?: CloudController;
   workspace?: WorkspaceController;
   prepareCloudTransfer?: (startId: string, restart?: { document: CloudDocumentPayload; sourceStartId?: string }) => Promise<CloudDocumentPayload | null>;
+  isCloudCheckpointMerged?: (checkpoint: Pick<CloudCheckpointPayload, 'documentId' | 'sessionId' | 'revision'>) => Promise<boolean>;
   mergeCloudCheckpoint?: (startId: string, checkpoint: CloudCheckpointPayload) => Promise<boolean>;
   beginCloudAuthorityTransition?: () => { release(): void };
   setCloudDocumentLease?: (cloudOwned: boolean, sessionId: string | null) => void;
@@ -2019,6 +2020,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       if (thread?.cloudRestartSourceSessionId === sessionId) return thread.cloudRestartSourceStartId;
       return thread?.cloudSessionId === sessionId ? thread.cloudStartId : undefined;
     },
+    isCloudCheckpointMerged: deps.isCloudCheckpointMerged,
     onMergeCheckpoint: deps.mergeCloudCheckpoint ? async (startId, checkpoint) => {
       workspace.setWorkspaceView('local');
       return deps.mergeCloudCheckpoint!(startId, checkpoint);

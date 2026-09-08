@@ -228,9 +228,25 @@ export interface CloudSandboxOutcome {
   unmanaged: boolean;
 }
 
+export interface CloudMergeRequest {
+  sessionId: string;
+  documentId: string;
+  threadId: string;
+  cloudStartId: string;
+  operationId: string;
+  revision: number;
+  turn: number;
+  kind: 'turn';
+  fileName: string;
+  sha256: string;
+  size: number;
+  localAvailable?: boolean;
+}
+
 export interface CloudSnapshot {
   revision: number;
   profileEpoch: number;
+  mergeRequests?: CloudMergeRequest[];
   available: boolean;
   profile: CloudProfileState;
   server: CloudServerState;

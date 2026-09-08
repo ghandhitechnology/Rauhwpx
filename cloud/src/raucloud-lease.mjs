@@ -1,4 +1,8 @@
+import { createHash } from 'node:crypto';
+
 const MAX_RESPONSE_BYTES = 1024 * 1024;
+const MERGE_CHUNK_BYTES = 512 * 1024;
+const MAX_MERGE_BYTES = 128 * 1024 * 1024;
 const BLOCKED_COMMANDS = new Set(['message.queue', 'session.resume', 'turn.redirect', 'session.takeover']);
 
 function raucloudError(code, message, cause, status = 503) {
@@ -228,6 +232,58 @@ export class RaucloudLeaseController {
   rememberCheckpoint(checkpointId) {
     const value = String(checkpointId ?? '').trim();
     if (value) this.latestCheckpointId = value;
+  }
+
+  async archiveMergeRequest(metadata, stream) {
+    if (!this.enabled) return { raucloud: false, skipped: true };
+    const { size, sha256 } = metadata;
+    if (!Number.isSafeInteger(size) || size < 1 || size > MAX_MERGE_BYTES
+      || typeof sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(sha256)) {
+      stream.destroy();
+      throw raucloudError('RAUCLOUD_ARTIFACT_INVALID', 'Cloud document size or digest is invalid', undefined, 400);
+    }
+    // A warm worker can discover another lease while an upload is in flight.
+    // Keep every chunk scoped to the lease that accepted this boundary.
+    const runId = this.runId;
+    const chunkCount = Math.ceil(size / MERGE_CHUNK_BYTES);
+    const digest = createHash('sha256');
+    const buffer = Buffer.allocUnsafe(MERGE_CHUNK_BYTES);
+    let buffered = 0;
+    let total = 0;
+    let chunkIndex = 0;
+    const send = () => this.#fetch(`/v1/internal/cloud/runs/${encodeURIComponent(runId)}/merge-requests`, {
+      method: 'POST',
+      body: { ...metadata, chunkIndex, chunkCount, bytesBase64: buffer.subarray(0, buffered).toString('base64') },
+    });
+    for await (const bytes of stream) {
+      total += bytes.length;
+      if (total > size) throw raucloudError('RAUCLOUD_ARTIFACT_INVALID', 'Cloud document exceeds its declared size', undefined, 400);
+      digest.update(bytes);
+      let offset = 0;
+      while (offset < bytes.length) {
+        const length = Math.min(buffer.length - buffered, bytes.length - offset);
+        bytes.copy(buffer, buffered, offset, offset + length);
+        buffered += length;
+        offset += length;
+        if (buffered === buffer.length && chunkIndex < chunkCount - 1) {
+          await send();
+          chunkIndex += 1;
+          buffered = 0;
+        }
+      }
+    }
+    // Hold the final chunk until EOF and the local digest agree. A successful
+    // final response is the broker's durable receipt, not merely an upload ack.
+    if (total !== size || digest.digest('hex') !== sha256) {
+      throw raucloudError('RAUCLOUD_ARTIFACT_INVALID', 'Cloud document failed integrity verification', undefined, 400);
+    }
+    const receipt = await send();
+    if (receipt.complete !== true || !receipt.mergeRequest?.id
+      || receipt.mergeRequest.sha256 !== sha256 || receipt.mergeRequest.size !== size
+      || receipt.mergeRequest.operationId !== metadata.operationId) {
+      throw raucloudError('RAUCLOUD_ARTIFACT_UNCONFIRMED', 'Cloud document storage was not confirmed');
+    }
+    return receipt;
   }
 
   async checkpoint(checkpointId = this.latestCheckpointId) {

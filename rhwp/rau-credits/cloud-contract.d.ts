@@ -90,3 +90,41 @@ export interface CloudRunEnvelope extends CloudStatusEnvelope {
   run: CloudRunSummary;
   coldStart?: boolean;
 }
+
+export interface CloudMergeMetadata {
+  sessionId: string;
+  documentId: string;
+  threadId: string;
+  cloudStartId: string;
+  operationId: string;
+  revision: number;
+  turn: number;
+  kind: 'turn';
+  fileName: string;
+  sha256: string;
+  size: number;
+  chunkCount: number;
+}
+
+export interface CloudMergeChunkUpload extends CloudMergeMetadata {
+  chunkIndex: number;
+  bytesBase64: string;
+}
+
+export interface CloudMergeRequest extends CloudMergeMetadata {
+  id: string;
+  runId: string;
+  createdAt: number;
+  expiresAt: number;
+}
+
+export interface CloudMergeUploadReceipt {
+  /** Only true after every chunk and the complete SHA-256 have been verified. */
+  complete: boolean;
+  mergeRequest: CloudMergeRequest;
+}
+
+export interface CloudMergeRequestList {
+  accountId: string;
+  mergeRequests: CloudMergeRequest[];
+}
