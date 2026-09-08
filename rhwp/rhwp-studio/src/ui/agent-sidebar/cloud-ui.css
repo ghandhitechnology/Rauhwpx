@@ -103,6 +103,13 @@
   font-size: var(--font-size-md, 13px);
 }
 
+.ag-cloud-panel-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.ag-cloud-panel-settings,
 .ag-cloud-panel-close {
   display: grid;
   width: 28px;
@@ -113,6 +120,12 @@
   background: transparent;
   color: var(--ag-text-muted);
   cursor: pointer;
+}
+
+.ag-cloud-panel-settings:hover,
+.ag-cloud-panel-close:hover {
+  background: var(--ag-hover);
+  color: var(--ag-text);
 }
 
 .ag-cloud-panel-body {
@@ -265,6 +278,49 @@
   font-size: var(--font-size-sm, 11px);
 }
 
+.ag-cloud-handoff-accepted {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  padding: 9px 0;
+  border-block: 1px solid var(--ag-border);
+}
+
+.ag-cloud-handoff-accepted[hidden] {
+  display: none;
+}
+
+.ag-cloud-handoff-icon {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--ag-ok) 13%, transparent);
+  color: var(--ag-ok);
+}
+
+.ag-cloud-handoff-icon .ag-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.ag-cloud-handoff-accepted > div {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.ag-cloud-handoff-accepted strong {
+  font-size: var(--font-size-sm, 11px);
+}
+
+.ag-cloud-handoff-accepted span:last-child {
+  color: var(--ag-text-muted);
+  font-size: var(--font-size-sm, 11px);
+}
+
 .ag-cloud-progress {
   height: 5px;
   overflow: hidden;
@@ -314,6 +370,7 @@
 
 .ag-cloud-action:hover:not(:disabled) { filter: brightness(0.96); }
 .ag-cloud-action:focus-visible,
+.ag-cloud-panel-settings:focus-visible,
 .ag-cloud-panel-close:focus-visible {
   outline: 2px solid var(--accent-primary);
   outline-offset: 2px;

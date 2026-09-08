@@ -26,6 +26,19 @@ test('header supports Local/Cloud selection and starts Cloud on first Send', () 
   assert.doesNotMatch(sidebar, /클라우드로 계속/);
 });
 
+test('safe-close and offline review copy require production-backed acknowledgments', () => {
+  assert.match(cloudUi, /!session\.handoffAcceptedAt/);
+  assert.match(cloudUi, /Cloud에 안전하게 전송됨/);
+  assert.match(cloudUi, /이제 노트북을 닫아도 됩니다/);
+  assert.match(cloudUi, /offer\?\.localAvailable/);
+  assert.match(cloudUi, /Cloud 결과가 이 기기에 준비되었습니다/);
+  assert.match(cloudUi, /현재 문서의 편집을 유지한 채 변경 내용을 검토/);
+  assert.match(cloudUi, /Cloud 작업이 일시 중지되었습니다/);
+  assert.doesNotMatch(cloudUi, /작업이 안전한 지점에서 멈췄습니다/);
+  assert.match(sidebar, /function cloudTransferIntentKey\(\)[\s\S]*documentId: currentDocumentId,[\s\S]*threadId: currentThread\.id,[\s\S]*text: input\.value,[\s\S]*drafts,[\s\S]*selection:/);
+  assert.match(sidebar, /intent\?\.requestKey && intent\.requestKey !== cloudTransferIntentKey\(\)/);
+});
+
 test('cloud action is available in sidebar and fullscreen headers', () => {
   assert.match(sidebar, /headerActions\.insertBefore\(headerExecutionLocation\.root/);
   assert.match(sidebar, /workspaceTrailing\.insertBefore\(workspaceExecutionLocation\.root/);

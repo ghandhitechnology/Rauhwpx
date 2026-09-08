@@ -1917,17 +1917,39 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
   let cloudTimelineGuard = new CloudLiveTimelineGuard();
   let cloudTimelineGuardKey = '';
+  function cloudTransferIntentKey(): string {
+    const drafts = referenceLibrary.snapshotDraftFiles().map((file) => ({
+      name: file.name,
+      size: file.size,
+      type: file.type,
+      lastModified: file.lastModified,
+    }));
+    return JSON.stringify({
+      documentId: currentDocumentId,
+      threadId: currentThread.id,
+      text: input.value,
+      drafts,
+      selection: { agent: selectedAgent, model: selectedModel, effort: selectedEffort },
+    });
+  }
   const cloudUi = createCloudAgentUi({
     controller: cloudController,
+    getTransferSelection: () => ({ agent: selectedAgent, model: selectedModel, effort: selectedEffort }),
+    captureTransferIntent: () => ({
+      selection: { agent: selectedAgent, model: selectedModel, effort: selectedEffort },
+      requestKey: cloudTransferIntentKey(),
+    }),
     loginAccount: async () => {
       const started = await bridge.loginAccount();
       return started?.authUrl ? { authUrl: started.authUrl } : null;
     },
-    onRequestTransfer: () => {
+    onRequestTransfer: (intent) => {
+      if (intent?.requestKey && intent.requestKey !== cloudTransferIntentKey()) return;
       openCloudWorkspace();
       if (workspace.mode() !== 'cloud' || bridge.isTurnRunning()
-        || activeComposerSkill !== null || currentThread.messages.length === 0) return;
+        || activeComposerSkill !== null) return;
       if (!input.value.trim() && !referenceLibrary.hasDrafts()) {
+        if (currentThread.messages.length === 0) return;
         input.value = '현재 대화와 계획을 바탕으로 클라우드에서 이어서 진행해 주세요.';
         resizeComposerInput();
       }
@@ -2115,7 +2137,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       if (mode === 'local') restoreLocalWorkspace();
       else openCloudWorkspace(trigger);
     },
-    configure(trigger: HTMLButtonElement) { cloudUi.openSetup(trigger); },
+    configure(trigger: HTMLButtonElement) { cloudUi.openStatus(trigger); },
   };
   const headerExecutionLocation = createExecutionLocation(executionLocationOptions);
   const workspaceExecutionLocation = createExecutionLocation(executionLocationOptions);

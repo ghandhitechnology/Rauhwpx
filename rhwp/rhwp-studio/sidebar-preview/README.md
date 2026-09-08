@@ -84,7 +84,7 @@ For Cloud recovery, open `?cloud=1`, choose **Codex**, click the document’s Cl
 and complete setup with **Cloud로 계속** before sending a message. The send button shows a Cloud icon in Cloud mode.
 Click the document’s Cloud icon again for execution options. In Cloud chats,
 **내 문서 / Cloud 문서** floats above the composer for switching document views;
-**Cloud 변경 병합** appears beside it when a completed checkpoint is ready. **Disconnect
+**Cloud 변경 검토** appears beside it when a completed checkpoint is ready. **Disconnect
 Cloud** pauses the connection while retaining the last frame; the production
 Cloud controls reconnect, rebuild from the same conversation, or stop the worker.
 The fixture records transfers and session scope in `window.sidebarPreview.cloud`.

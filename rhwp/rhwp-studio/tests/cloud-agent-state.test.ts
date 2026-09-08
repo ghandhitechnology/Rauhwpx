@@ -82,6 +82,13 @@ test('cloud state parser preserves the cloud lease and bounded running status', 
   }
 });
 
+test('durable handoff acceptance survives parsing only as a valid timestamp', () => {
+  const accepted = parseCloudSnapshot(state(8, { ...running(5), handoffAcceptedAt: now }));
+  assert.equal(accepted?.session.kind === 'running' ? accepted.session.handoffAcceptedAt : null, now);
+  const malformed = parseCloudSnapshot(state(9, { ...running(6), handoffAcceptedAt: 'queued' }));
+  assert.equal(malformed?.session.kind === 'running' ? malformed.session.handoffAcceptedAt : null, undefined);
+});
+
 test('cloud state parser preserves broker account quota and logged-out gates', () => {
   const signedIn = parseCloudSnapshot({
     ...state(8),

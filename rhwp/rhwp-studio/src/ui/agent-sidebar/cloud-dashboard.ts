@@ -70,8 +70,8 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
   cloud.height = 80;
   artwork.append(cloud);
   const heading = el('div', 'ag-cd-heading');
-  heading.append(el('h2', 'ag-cd-title', 'Cloud Connections'),
-    el('p', 'ag-cd-subtitle', 'Raucloud 사용 시간은 모든 기기에서 공유합니다.'));
+  heading.append(el('h2', 'ag-cd-title', 'Cloud 관리'),
+    el('p', 'ag-cd-subtitle', '사용 시간과 서버, 작업 기록을 확인합니다.'));
   const expand = button('크게 보기', 'ag-cd-expand');
   expand.prepend(createIcon('expand'));
   expand.addEventListener('click', () => element.dispatchEvent(new CustomEvent('ag-settings-expand-request', { bubbles: true })));
@@ -182,10 +182,9 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
   const chatList = el('ul', 'ag-cd-chat-list');
   chats.root.append(chatList);
 
-  const config = panel('서버 설정과 사용 한도', 'ag-cd-config');
+  const config = panel('서버 설정', 'ag-cd-config');
   const configFacts = el('dl', 'ag-cd-facts');
-  config.root.append(configFacts, deps.configuration,
-    el('p', 'ag-cd-muted', '관리 버튼에서 연결 방식과 인증을 설정하세요.'));
+  config.root.append(configFacts, deps.configuration);
   content.append(header, toolbar, feedback, stats, grid);
   element.append(content);
 

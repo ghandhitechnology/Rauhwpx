@@ -37,8 +37,8 @@ export function createExecutionLocation(options: {
         button.hidden = started && mode !== state.mode;
         label.hidden = started;
         button.disabled = started ? false : mode === 'local' ? state.localDisabled : state.cloudDisabled;
-        button.setAttribute('aria-label', mode === 'cloud' ? (started ? 'Cloud 설정' : 'Cloud') : 'Local');
-        button.title = mode === 'cloud' && started ? 'Cloud 설정' : mode === 'local' ? '로컬에서 실행' : 'Cloud에서 실행';
+        button.setAttribute('aria-label', mode === 'cloud' ? (started ? 'Cloud 상태' : 'Cloud') : 'Local');
+        button.title = mode === 'cloud' && started ? 'Cloud 작업 상태' : mode === 'local' ? '로컬에서 실행' : 'Cloud에서 실행';
         if (started) button.removeAttribute('aria-pressed');
         else button.setAttribute('aria-pressed', String(mode === state.mode));
         if (started && mode === 'cloud') button.setAttribute('aria-haspopup', 'dialog');

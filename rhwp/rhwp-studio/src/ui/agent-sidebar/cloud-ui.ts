@@ -12,6 +12,7 @@ import type {
   CloudCheckpointPayload,
   CloudResultAction,
   CloudResultResolution,
+  CloudProviderSelection,
   CloudSessionScope,
   CloudSnapshot,
   CloudTakeoverPayload,
@@ -43,7 +44,7 @@ import {
 } from '../../cloud/session-binding.ts';
 import { createCheckpointMirror } from '../../cloud/checkpoint-mirror.ts';
 import { createCheckpointPublisher } from '../../cloud/checkpoint-publisher.ts';
-import { createCloudOnboarding } from './cloud-onboarding.ts';
+import { createCloudOnboarding, type CloudTransferIntent } from './cloud-onboarding.ts';
 import { createCloudDashboard } from './cloud-dashboard.ts';
 import { createCloudSyncIcon, createIcon } from './icons.ts';
 
@@ -140,7 +141,9 @@ function sessionKindLabel(kind: CloudSnapshot['session']['kind']): string {
 export interface CloudAgentUiDeps {
   controller: CloudController;
   loginAccount?: () => Promise<{ authUrl: string } | null>;
-  onRequestTransfer(): void;
+  captureTransferIntent?(): CloudTransferIntent | null;
+  onRequestTransfer(intent?: CloudTransferIntent): void;
+  getTransferSelection?(): CloudProviderSelection;
   onRestartPrepared?(binding: CloudWorkspaceBinding): Promise<void>;
   onPrepareRestartConversation?(binding: CloudWorkspaceBinding): Promise<CloudTransferReference[]>;
   onRestartConversation?(binding: CloudWorkspaceBinding, document: CloudDocumentPayload, references: CloudTransferReference[]): Promise<void>;
@@ -203,6 +206,7 @@ export interface CloudAgentUi {
     attachments: CloudFollowupAttachment[] | undefined,
     target: CloudCommandTarget,
   ): Promise<void>;
+  openStatus(trigger: HTMLButtonElement): void;
   openSetup(trigger: HTMLElement): void;
   openSettings(): void;
   handleAccountEvent(event: { signedIn: boolean; error?: string }): void;
@@ -238,7 +242,13 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   let panelTrigger: HTMLButtonElement | null = null;
   let setupActive = false;
   const liveSequence = new Map<string, number>();
-  type MergeOffer = Pick<CloudCheckpointPayload, 'sessionId' | 'documentId' | 'revision' | 'turn' | 'operationId'> & { startId?: string; durable?: boolean; sha256?: string; size?: number };
+  type MergeOffer = Pick<CloudCheckpointPayload, 'sessionId' | 'documentId' | 'revision' | 'turn' | 'operationId'> & {
+    startId?: string;
+    durable?: boolean;
+    localAvailable?: boolean;
+    sha256?: string;
+    size?: number;
+  };
   const mergeOffers = new Map<string, MergeOffer>();
   const reviewedRevisions = new Map<string, { revision: number; operations: Set<string> }>();
   const checkedMergeRequests = new Set<string>();
@@ -294,13 +304,20 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   statusPanel.setAttribute('aria-modal', 'false');
   statusPanel.setAttribute('aria-labelledby', 'ag-cloud-panel-title');
   const panelHead = el('header', 'ag-cloud-panel-head');
-  const panelTitle = el('h2', 'ag-cloud-panel-title', 'Cloud agent');
+  const panelTitle = el('h2', 'ag-cloud-panel-title', 'Cloud 작업');
   panelTitle.id = 'ag-cloud-panel-title';
   const panelClose = el('button', 'ag-cloud-panel-close') as HTMLButtonElement;
   panelClose.type = 'button';
   panelClose.setAttribute('aria-label', '클라우드 상태 닫기');
   panelClose.appendChild(createIcon('close'));
-  panelHead.append(panelTitle, panelClose);
+  const panelHeadActions = el('div', 'ag-cloud-panel-head-actions');
+  const panelSettings = el('button', 'ag-cloud-panel-settings') as HTMLButtonElement;
+  panelSettings.type = 'button';
+  panelSettings.setAttribute('aria-label', 'Cloud 서버 설정');
+  panelSettings.title = 'Cloud 서버 설정';
+  panelSettings.appendChild(createIcon('gear'));
+  panelHeadActions.append(panelSettings, panelClose);
+  panelHead.append(panelTitle, panelHeadActions);
   const panelBody = el('div', 'ag-cloud-panel-body');
   const sessionPicker = el('label', 'ag-cloud-session-picker');
   const sessionPickerLabel = el('span', 'ag-cloud-session-picker-label', '클라우드 작업');
@@ -326,6 +343,16 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   panelStatus.setAttribute('role', 'status');
   panelStatus.setAttribute('aria-live', 'polite');
   const panelDetail = el('p', 'ag-cloud-panel-detail');
+  const panelHandoff = el('div', 'ag-cloud-handoff-accepted');
+  panelHandoff.hidden = true;
+  const panelHandoffIcon = el('span', 'ag-cloud-handoff-icon');
+  panelHandoffIcon.appendChild(createIcon('check'));
+  const panelHandoffCopy = el('div');
+  panelHandoffCopy.append(
+    el('strong', '', 'Cloud에 안전하게 전송됨'),
+    el('span', '', '이제 노트북을 닫아도 됩니다.'),
+  );
+  panelHandoff.append(panelHandoffIcon, panelHandoffCopy);
   const progress = el('div', 'ag-cloud-progress');
   progress.setAttribute('role', 'progressbar');
   progress.setAttribute('aria-valuemin', '0');
@@ -337,7 +364,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   panelConflict.hidden = true;
   const optionsElement = el('div', 'ag-cloud-options');
   const panelActions = el('div', 'ag-cloud-panel-actions');
-  panelBody.append(optionsElement, recovery, sessionPicker, panelStatus, panelDetail, progress, panelConflict, panelActions);
+  panelBody.append(optionsElement, recovery, sessionPicker, panelHandoff, panelStatus, panelDetail, progress, panelConflict, panelActions);
   statusPanel.append(panelHead, panelBody);
 
   const queueStrip = el('div', 'ag-cloud-queue-strip');
@@ -353,6 +380,8 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     controller: deps.controller,
     loginAccount: deps.loginAccount,
     refreshSnapshot: () => deps.controller.refresh(selectedScope()),
+    getTransferSelection: deps.getTransferSelection,
+    captureTransferIntent: deps.captureTransferIntent,
     onRequestTransfer: deps.onRequestTransfer,
     onCloseSettings: deps.onCloseSettings,
     onSetupStateChange: (active) => {
@@ -836,8 +865,11 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     const offer = currentMergeOffer();
     mergeButton.hidden = !deps.onMergeCheckpoint || !offer;
     mergeButton.disabled = busy || workspaceLocked || (!offer?.durable && inferCloudLink(snapshot).kind !== 'ready');
-    mergeButton.textContent = busy ? 'Cloud 변경 가져오는 중…' : `Cloud 변경 병합${offer ? ` · ${offer.turn}턴` : ''}`;
-    mergeButton.title = '완료된 Cloud 변경을 현재 로컬 브랜치에 병합합니다';
+    mergeButton.textContent = busy ? 'Cloud 변경 여는 중…' : `Cloud 변경 검토${offer ? ` · ${offer.turn}턴` : ''}`;
+    mergeButton.title = offer?.localAvailable
+      ? '이 기기에 저장된 Cloud 변경을 검토합니다. 현재 로컬 편집은 그대로 유지됩니다.'
+      : '완료된 Cloud 변경을 가져와 검토합니다. 현재 로컬 편집은 그대로 유지됩니다.';
+    mergeButton.dataset.localAvailable = String(offer?.localAvailable === true);
     mergeButton.dataset.revision = offer ? String(offer.revision) : '';
   }
 
@@ -918,6 +950,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     panelActions.replaceChildren();
     progress.hidden = true;
     panelConflict.hidden = true;
+    panelHandoff.hidden = true;
     const session = snapshot.session;
     if (cloudLinkNeedsAttention(link)) {
       panelStatus.textContent = '';
@@ -953,6 +986,8 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       appendForceQuit();
       return;
     }
+    panelHandoff.hidden = session.kind === 'idle' || !session.handoffAcceptedAt
+      || (session.kind !== 'queued' && session.kind !== 'running');
     switch (session.kind) {
       case 'idle':
         const profileReady = snapshot.profile.kind === 'configured' && snapshot.profile.connection === 'ready';
@@ -1006,7 +1041,9 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
         break;
       }
       case 'queued':
-        panelStatus.textContent = session.message || '실행 자리를 기다리고 있습니다.';
+        panelStatus.textContent = session.handoffAcceptedAt
+          ? 'Cloud가 작업을 맡았습니다.'
+          : session.message || '실행 자리를 기다리고 있습니다.';
         panelDetail.textContent = `대기 순서 ${session.position}`;
         panelActions.append(action('취소', () => command('cancel')));
         break;
@@ -1088,8 +1125,12 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
         panelDetail.textContent = '도구 호출이 끝나는 안전한 경계에서 멈춥니다.';
         break;
       case 'suspended':
-        panelStatus.textContent = '클라우드 작업이 멈췄습니다.';
-        panelDetail.textContent = session.reason;
+        panelStatus.textContent = session.resumable
+          ? 'Cloud 작업이 일시 중지되었습니다.'
+          : 'Cloud 작업이 종료되었습니다.';
+        panelDetail.textContent = session.resumable
+          ? `${session.reason} 다시 시작하면 저장된 대화와 문서에서 이어집니다.`
+          : session.reason;
         if (!deps.onMergeCheckpoint || currentMergeOffer()) {
           panelActions.append(action(deps.onMergeCheckpoint ? 'Cloud 변경 병합' : '원본에 반영', publishCheckpoint));
         }
@@ -1104,9 +1145,14 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
         break;
       case 'completed':
         if (deps.onMergeCheckpoint) {
-          panelStatus.textContent = 'Cloud 작업이 끝났습니다.';
-          panelDetail.textContent = '완료된 변경을 현재 로컬 브랜치에 병합할 수 있습니다.';
-          if (currentMergeOffer()) panelActions.append(action('Cloud 변경 병합', publishCheckpoint, 'ag-primary'));
+          const offer = currentMergeOffer();
+          panelStatus.textContent = offer?.localAvailable
+            ? 'Cloud 결과가 이 기기에 준비되었습니다.'
+            : 'Cloud 작업이 끝났습니다.';
+          panelDetail.textContent = offer?.localAvailable
+            ? '현재 문서의 편집을 유지한 채 변경 내용을 검토할 수 있습니다.'
+            : '완료된 변경을 가져와 검토할 수 있습니다.';
+          if (offer) panelActions.append(action('변경 검토', publishCheckpoint, 'ag-primary'));
           break;
         }
         panelStatus.textContent = downloadedResult ? '결과 미리보기가 준비되었습니다.' : '클라우드 작업이 끝났습니다.';
@@ -1169,7 +1215,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     }
     if (link.kind === 'reconnecting') {
       recoveryTitle.textContent = 'Cloud에 다시 연결하는 중';
-      recoveryDetail.textContent = '연결되면 이 대화에서 계속할 수 있습니다.';
+      recoveryDetail.textContent = '저장된 작업과 완료된 결과를 확인하고 있습니다.';
     } else if (link.kind === 'recreating') {
       recoveryTitle.textContent = '새 Cloud 서버를 준비하는 중';
       recoveryDetail.textContent = '현재 대화와 저장된 문서를 새 서버로 옮깁니다.';
@@ -1195,10 +1241,6 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     if (link.kind === 'failed') {
       stripActions.append(action('다시 연결', reconnectLink, 'ag-primary'));
       if (link.canRecreate) stripActions.append(action('서버 다시 만들기', recreateLink));
-    }
-    if (link.kind === 'reconnecting' && link.canRecreate) {
-      recoveryActions.append(action('서버 다시 만들기', recreateLink));
-      stripActions.append(action('서버 다시 만들기', recreateLink));
     }
     for (const container of [recoveryActions, recoveryStrip]) {
       for (const button of container.querySelectorAll<HTMLButtonElement>('button')) {
@@ -1343,8 +1385,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     if (restoreFocus && trigger?.isConnected && !trigger.hidden) trigger.focus();
   }
 
-  function activate(event: MouseEvent): void {
-    const trigger = event.currentTarget as HTMLButtonElement;
+  function activateFrom(trigger: HTMLButtonElement): void {
     const setupRequested = cloudSetupScopes.has(cloudSetupScopeKey());
     const profileReady = snapshot.profile.kind === 'configured' && snapshot.profile.connection === 'ready';
     cloudSetupScopes.add(cloudSetupScopeKey());
@@ -1360,9 +1401,18 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     });
   }
 
+  function activate(event: MouseEvent): void {
+    activateFrom(event.currentTarget as HTMLButtonElement);
+  }
+
   sidebarButton.addEventListener('click', activate);
   workspaceButton.addEventListener('click', activate);
   panelClose.addEventListener('click', () => closePanel(true));
+  panelSettings.addEventListener('click', () => {
+    const focusTrigger = panelTrigger ?? sidebarButton;
+    closePanel();
+    onboarding.open('manage', focusTrigger);
+  });
   statusPanel.addEventListener('keydown', (event) => {
     if (event.key === 'Escape') {
       event.preventDefault();
@@ -1563,8 +1613,11 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
         attachments,
       });
     },
+    openStatus(trigger) {
+      activateFrom(trigger);
+    },
     openSetup(trigger: HTMLElement) {
-      onboarding.open('manage', trigger);
+      onboarding.open('transfer', trigger);
     },
     openSettings() {
       if (authorityTransitionActive()) {

@@ -52,7 +52,16 @@ export async function checkCloudRecovery(page, origin, artifacts) {
     && !document.querySelector('.ag-input').disabled);
   assert.equal(await page.$eval('.ag-cloud-panel', (node) => node.hidden), true);
   assert.deepEqual(await page.$$eval('.ag-header .ag-execution-location-option', (nodes) => nodes.filter((node) => node.checkVisibility()).map((node) => ({ mode: node.dataset.workspaceMode, labelHidden: node.querySelector('span').hidden }))), [{ mode: 'cloud', labelHidden: true }]);
-  await page.click('.ag-header [aria-label="Cloud 설정"]');
+  await page.click('.ag-header [aria-label="Cloud 상태"]');
+  await page.waitForSelector('.ag-cloud-panel:not([hidden])');
+  assert.deepEqual(await page.$eval('.ag-cloud-handoff-accepted', (node) => ({
+    visible: node.checkVisibility(), text: node.textContent,
+  })), {
+    visible: true,
+    text: 'Cloud에 안전하게 전송됨이제 노트북을 닫아도 됩니다.',
+  });
+  await page.screenshot({ path: resolve(artifacts, 'cloud-accepted-safe-close.png') });
+  await page.click('.ag-cloud-panel-settings');
   await page.waitForSelector('.ag-cloud-setup-overlay:not([hidden])', { visible: true });
   assert.equal(await page.$('.ag-cloud-setup-eyebrow'), null);
   assert.equal(await page.$eval('.ag-cloud-setup-dialog', (dialog) => {
@@ -67,14 +76,18 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   await page.click('.ag-cloud-setup-close');
   assert.equal(await page.$eval('.ag-composer', (node) => node.getBoundingClientRect().height), setupComposerHeight,
     'Cloud settings never expand the composer');
-  await page.click('.ag-header [aria-label="Cloud 설정"]');
+  await page.click('.ag-header [aria-label="Cloud 상태"]');
+  await page.waitForSelector('.ag-cloud-panel:not([hidden])');
+  await page.click('.ag-cloud-panel-settings');
   await page.waitForSelector('.ag-cloud-setup-overlay:not([hidden])', { visible: true });
   await page.keyboard.press('Escape');
   assert.equal(await page.$eval('.ag-cloud-setup-overlay', (node) => node.hidden), true);
-  assert.equal(await page.$eval('.ag-header [aria-label="Cloud 설정"]', (node) => node === document.activeElement), true);
+  assert.equal(await page.$eval('.ag-header [aria-label="Cloud 상태"]', (node) => node === document.activeElement), true);
   const fullViewport = page.viewport();
   await page.setViewport({ ...fullViewport, height: 260 });
-  await page.click('.ag-header [aria-label="Cloud 설정"]');
+  await page.click('.ag-header [aria-label="Cloud 상태"]');
+  await page.waitForSelector('.ag-cloud-panel:not([hidden])');
+  await page.click('.ag-cloud-panel-settings');
   await page.waitForSelector('.ag-cloud-setup-overlay:not([hidden])', { visible: true });
   assert.equal(await page.$eval('.ag-cloud-setup-dialog', (dialog) => {
     const bounds = dialog.getBoundingClientRect();
