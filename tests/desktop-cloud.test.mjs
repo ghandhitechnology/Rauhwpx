@@ -162,6 +162,7 @@ test('transfer recovery retries only explicit transport and server failures', ()
     health: { protocolVersion: 1, version: '1.1.0' },
   };
   const destination = coordinatorTest.destinationFromReadiness(readiness);
+  assert.equal(destination.durableConversationRestore, false);
   assert.equal(coordinatorTest.sameDestination(destination, { ...destination, runtimeVersion: '1.1.1' }), true);
   assert.equal(coordinatorTest.sameDestination(destination, { ...destination, sandboxId: 'sandbox-two' }), false);
   assert.equal(coordinatorTest.sameDestination(destination, null), false);
@@ -1725,7 +1726,7 @@ test('client rejects echoed keys, body tampering, nonce replay, and SSE tamperin
   );
 });
 
-test('transfer uploads the raw portable timeline and idempotently activates the staged session', async () => {
+test('transfer uploads the raw timeline and replays a stable activation after a resumed create', async () => {
   const profile = normalizeCloudProfile({
     endpoint: 'https://cloud.example.ts.net/rauhwpx-cloud',
     ssh: { host: 'cloud.example.ts.net', user: 'cloud', useTailscaleSsh: true },
@@ -1759,8 +1760,8 @@ test('transfer uploads the raw portable timeline and idempotently activates the 
       });
       if (url.endsWith('/v1/sessions')) return jsonResponse({
         id: 'handoff-12345678',
-        status: 'staged',
-        stateVersion: 1,
+        status: 'queued',
+        stateVersion: 2,
       }, { status: 201 });
       if (url.endsWith('/v1/sessions/handoff-12345678/commands')) return jsonResponse({
         session: { id: 'handoff-12345678', status: 'queued', stateVersion: 2 },
