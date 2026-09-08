@@ -179,6 +179,11 @@ test('cloud state parser rejects missing, malformed and partially valid snapshot
   const { profileEpoch: _profileEpoch, ...stateWithoutEpoch } = state(1);
   assert.equal(parseCloudSnapshot(stateWithoutEpoch), null);
   assert.equal(parseCloudSnapshot({ ...state(1), queuedMessages: [{ id: 'q', text: 'hello' }] }), null);
+  const queued = { id: 'q', text: 'hello', queuedAt: now, state: 'accepted' };
+  assert.equal(parseCloudSnapshot({ ...state(1), queuedMessages: [queued] })?.queuedMessages[0]?.delivery, 'pending');
+  assert.equal(parseCloudSnapshot({ ...state(1), queuedMessages: [{ ...queued, delivery: 'durable' }] })
+    ?.queuedMessages[0]?.delivery, 'durable');
+  assert.equal(parseCloudSnapshot({ ...state(1), queuedMessages: [{ ...queued, delivery: 'maybe' }] }), null);
   assert.equal(parseCloudSnapshot(state(1, { ...running(), elapsedMs: -1 })), null);
   assert.equal(parseCloudSnapshot({ ...state(1), timeline: { schema: 'unknown' } }), null);
   assert.equal(parseCloudSnapshot({ ...state(1, running()), sessions: [running(), running()] }), null);

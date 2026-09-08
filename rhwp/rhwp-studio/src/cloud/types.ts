@@ -123,6 +123,7 @@ export interface CloudQueuedMessage {
   text: string;
   queuedAt: string;
   state: 'queued' | 'accepted';
+  delivery: 'pending' | 'durable';
 }
 
 export interface CloudProviderSelection {

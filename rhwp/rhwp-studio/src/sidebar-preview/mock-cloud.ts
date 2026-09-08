@@ -25,6 +25,8 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
   let spawnFailures = 0;
   let sandboxStatusRecovers = false;
   let queueAckFailures = 0;
+  let queueReceiptBlocked = false;
+  let releaseQueueReceipt: (() => void) | null = null;
   let restartArchiveAvailable = true;
   let rejectRestartTransfer = false;
   const sandbox = { providerId: 'raucloud', sandboxId: 'preview-worker', displayName: 'Raucloud',
@@ -216,9 +218,32 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
     },
     async cloudCommand(request) {
       calls.commands.push(structuredClone(request));
+      if (request.command === 'queue-message' && queueReceiptBlocked) {
+        await new Promise<void>((resolve) => { releaseQueueReceipt = resolve; });
+        releaseQueueReceipt = null;
+      }
       if (request.command === 'queue-message' && queueAckFailures > 0) {
         queueAckFailures--;
+        state.queuedMessages = [{
+          id: request.messageId!,
+          text: request.message!,
+          queuedAt: new Date().toISOString(),
+          state: 'queued',
+          delivery: 'pending',
+        }];
+        publish();
         throw new Error('Preview queue receipt was lost.');
+      }
+      if (request.command === 'queue-message') {
+        state.queuedMessages = [{
+          id: request.messageId!,
+          text: request.message!,
+          queuedAt: state.queuedMessages.find((message) => message.id === request.messageId)?.queuedAt
+            ?? new Date().toISOString(),
+          state: 'queued',
+          delivery: 'durable',
+        }];
+        publish();
       }
       if (request.command === 'configure') {
         const session = state.session;
@@ -300,6 +325,7 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
       session.turn++;
       session.phase = 'waiting';
       const operationId = `preview-turn-${session.turn}`;
+      state.queuedMessages = state.queuedMessages.map((message) => ({ ...message, state: 'accepted' }));
       checkpoints.set(session.sessionId, { sessionId: session.sessionId, documentId: session.documentId,
         fileName: '사업 제안서.hwpx', kind: 'turn', revision: session.turn, turn: session.turn, operationId,
         bytes: new Uint8Array([1, 2, 3]), byteLength: 3, sha256: 'a'.repeat(64) });
@@ -336,6 +362,10 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
     setSpawnFailures(count: number) { spawnFailures = Math.max(0, Math.floor(count)); },
     setSandboxStatusRecovery(enabled: boolean) { sandboxStatusRecovers = enabled; },
     setQueueAckFailures(count: number) { queueAckFailures = Math.max(0, Math.floor(count)); },
+    blockQueueReceipt(blocked: boolean) {
+      queueReceiptBlocked = blocked;
+      if (!blocked) releaseQueueReceipt?.();
+    },
     rejectRestartTransfer(reject: boolean) { rejectRestartTransfer = reject; },
     blockRefresh(blocked: boolean) {
       refreshBlocked = blocked;

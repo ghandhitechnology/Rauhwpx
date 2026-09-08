@@ -238,6 +238,8 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   let selectionScope = deps.getScope();
   let mountedBinding: CloudWorkspaceBinding | null = null;
   let pendingSessionSelections = 0;
+  let pendingRedirect: { sessionId: string; text: string; messageId: string } | null = null;
+  const pendingOutboundDeliveries = new Map<string, { sessionId: string; count: number }>();
   const selectionFence = createSessionSelectionFence();
   let panelTrigger: HTMLButtonElement | null = null;
   let setupActive = false;
@@ -252,6 +254,18 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   const mergeOffers = new Map<string, MergeOffer>();
   const reviewedRevisions = new Map<string, { revision: number; operations: Set<string> }>();
   const checkedMergeRequests = new Set<string>();
+  const beginOutboundDelivery = (sessionId: string, kind: 'message' | 'redirect', messageId: string) => {
+    const key = JSON.stringify([sessionId, kind, messageId]);
+    const current = pendingOutboundDeliveries.get(key);
+    pendingOutboundDeliveries.set(key, { sessionId, count: (current?.count ?? 0) + 1 });
+    render();
+    return () => {
+      const pending = pendingOutboundDeliveries.get(key);
+      if (!pending || pending.count <= 1) pendingOutboundDeliveries.delete(key);
+      else pendingOutboundDeliveries.set(key, { ...pending, count: pending.count - 1 });
+      render();
+    };
+  };
   const mergeProfileKey = (state: CloudSnapshot) => JSON.stringify([state.profileEpoch,
     state.profile.kind === 'configured' && state.profile.mode === 'self-hosted' ? serverIdentity(state) : 'app',
     state.account?.signedIn ? state.account.account?.id : null]);
@@ -645,16 +659,25 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     const session = snapshot.session;
     const content = text.trim();
     if (session.kind !== 'running' || session.phase !== 'working' || !content) return;
-    const messageId = globalThis.crypto?.randomUUID?.()
-      ?? `cloud-redirect-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    const messageId = pendingRedirect?.sessionId === session.sessionId && pendingRedirect.text === content
+      ? pendingRedirect.messageId
+      : globalThis.crypto?.randomUUID?.()
+        ?? `cloud-redirect-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    pendingRedirect = { sessionId: session.sessionId, text: content, messageId };
+    const finishDelivery = beginOutboundDelivery(session.sessionId, 'redirect', messageId);
     void operation(async () => {
-      await deps.controller.command({
-        sessionId: session.sessionId,
-        command: 'redirect',
-        expectedVersion: session.version,
-        message: content,
-        messageId,
-      });
+      try {
+        await deps.controller.command({
+          sessionId: session.sessionId,
+          command: 'redirect',
+          expectedVersion: session.version,
+          message: content,
+          messageId,
+        });
+        if (pendingRedirect?.messageId === messageId) pendingRedirect = null;
+      } finally {
+        finishDelivery();
+      }
     });
   }
 
@@ -928,14 +951,16 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
 
   function renderPanel(): void {
     const link = inferCloudLink(snapshot);
+    const activeSessionId = snapshot.session.kind === 'idle' ? null : snapshot.session.sessionId;
     // Keep focused/pressed buttons mounted across status and timeline updates.
     const renderKey = JSON.stringify([link.kind === 'ready' ? snapshot.session : null,
       link.kind === 'ready' ? snapshot.sessions : null, snapshot.profile, snapshot.server,
       snapshot.account, link.kind, busy, recoveryBusy, Boolean(pendingTakeover), Boolean(pendingResultReplace),
-      Boolean(downloadedResult), localTurnPending, currentMergeOffer()]);
+      Boolean(downloadedResult), localTurnPending, currentMergeOffer(),
+      snapshot.queuedMessages.map(({ id, delivery }) => [id, delivery]),
+      [...pendingOutboundDeliveries.values()].filter(({ sessionId }) => sessionId === activeSessionId).length]);
     if (renderKey === panelRenderKey) return;
     panelRenderKey = renderKey;
-    const activeSessionId = snapshot.session.kind === 'idle' ? null : snapshot.session.sessionId;
     if (!selectedSessionId && activeSessionId) selectedSessionId = activeSessionId;
     sessionPicker.hidden = snapshot.sessions.length <= 1 || cloudLinkNeedsAttention(link);
     sessionSelect.replaceChildren(...snapshot.sessions.map((session) => {
@@ -986,7 +1011,9 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       appendForceQuit();
       return;
     }
-    panelHandoff.hidden = session.kind === 'idle' || !session.handoffAcceptedAt
+    const messageDeliveryPending = snapshot.queuedMessages.some((message) => message.delivery !== 'durable')
+      || [...pendingOutboundDeliveries.values()].some(({ sessionId }) => sessionId === activeSessionId);
+    panelHandoff.hidden = session.kind === 'idle' || !session.handoffAcceptedAt || messageDeliveryPending
       || (session.kind !== 'queued' && session.kind !== 'running');
     switch (session.kind) {
       case 'idle':
@@ -1440,6 +1467,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       liveSequence.clear();
       const previousId = snapshot.session.kind === 'idle' ? null : snapshot.session.sessionId;
       const nextId = next.session.kind === 'idle' ? null : next.session.sessionId;
+      if (previousId !== nextId) pendingRedirect = null;
       if (!pendingResultReplace) downloadedResult = null;
       if (previousId && previousId === nextId) {
         selectedSessionId = nextId;
@@ -1604,14 +1632,19 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       if (!matchesTarget(target)) {
         throw new Error('선택한 Cloud 대화가 바뀌었습니다.');
       }
-      await deps.controller.command({
-        sessionId: target.sessionId,
-        command: 'queue-message',
-        expectedVersion: target.expectedVersion,
-        message: text,
-        messageId,
-        attachments,
-      });
+      const finishDelivery = beginOutboundDelivery(target.sessionId, 'message', messageId);
+      try {
+        await deps.controller.command({
+          sessionId: target.sessionId,
+          command: 'queue-message',
+          expectedVersion: target.expectedVersion,
+          message: text,
+          messageId,
+          attachments,
+        });
+      } finally {
+        finishDelivery();
+      }
     },
     openStatus(trigger) {
       activateFrom(trigger);

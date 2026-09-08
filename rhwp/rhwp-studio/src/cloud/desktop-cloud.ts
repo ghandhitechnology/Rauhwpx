@@ -553,12 +553,14 @@ export function parseCloudSnapshot(value: unknown): CloudSnapshot | null {
         const message = record(value);
         const queuedAt = strictIso(message?.queuedAt);
         if (!message || !string(message.id).trim() || !string(message.text).trim() || !queuedAt
-          || (message.state !== 'queued' && message.state !== 'accepted')) return [];
+          || (message.state !== 'queued' && message.state !== 'accepted')
+          || (message.delivery !== undefined && message.delivery !== 'pending' && message.delivery !== 'durable')) return [];
         return [{
           id: string(message.id),
           text: string(message.text),
           queuedAt,
           state: message.state === 'accepted' ? 'accepted' as const : 'queued' as const,
+          delivery: message.delivery === 'durable' ? 'durable' as const : 'pending' as const,
         }];
       });
   if (queuedMessages.length !== raw.queuedMessages.length) return null;

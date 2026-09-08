@@ -1789,7 +1789,7 @@ test('browser dirty transfer keeps uploaded snapshot separate from its verified 
 });
 
 for (const receipt of ['queued', 'accepted', 'wrong-session']) {
-  test(`browser keeps only scoped signed ${receipt} receipt after a lost queue response`, async (t) => {
+  test(`browser keeps signed ${receipt} progress provisional until the HTTP queue receipt`, async (t) => {
     const identity = serverIdentity();
     const storage = new MemoryStorage();
     const endpoint = 'https://message-receipt.example.test';
@@ -1853,34 +1853,137 @@ for (const receipt of ['queued', 'accepted', 'wrong-session']) {
     await api.cloudGetState(scope);
     const input = { sessionId, command: 'queue-message' as const, expectedVersion: 1,
       message: 'Continue from this draft', messageId: 'message-receipt' };
-    if (receipt === 'wrong-session') {
-      await assert.rejects(api.cloudCommand(input), /queue response lost/);
-      assert.deepEqual((await api.cloudGetState(scope)).queuedMessages, []);
-    } else {
-      const accepted = await api.cloudCommand(input);
-      assert.deepEqual((accepted.queuedMessages as any[]).map(({ id, state }) => ({ id, state })), [
-        { id: input.messageId, state: receipt },
-      ]);
-      await api.cloudCommand(input);
-      assert.equal(commandCalls, 1, 'acknowledged retry must not requeue the message');
-      await assert.rejects(api.cloudCommand({ ...input, message: 'Changed payload' }), { code: 'MESSAGE_ID_CONFLICT' });
-      assert.equal(commandCalls, 1);
-      responseLost = false;
-      const later = await api.cloudCommand({ ...input, messageId: 'newer-message', message: 'Then refine the wording' });
-      assert.deepEqual((later.queuedMessages as any[]).map((entry) => entry.id), ['message-receipt', 'newer-message']);
-      await api.cloudCommand({ ...input, sessionId: otherSession.id, message: 'Other room content' });
-      const other = await api.cloudGetState({ threadId: 'other-thread', documentId: 'other-doc', selectedSessionId: otherSession.id });
-      assert.deepEqual((other.queuedMessages as any[]).map(({ id, text }) => ({ id, text })), [
-        { id: input.messageId, text: 'Other room content' },
-      ]);
-      const original = await api.cloudGetState(scope);
-      assert.deepEqual((original.queuedMessages as any[]).map(({ id, text }) => ({ id, text })), [
-        { id: input.messageId, text: input.message },
-        { id: 'newer-message', text: 'Then refine the wording' },
-      ]);
-    }
+    await assert.rejects(api.cloudCommand(input), /queue response lost/);
+    const provisional = await api.cloudGetState(scope);
+    assert.deepEqual((provisional.queuedMessages as any[]).map(({ id, state, delivery }) => ({ id, state, delivery })), [
+      { id: input.messageId, state: receipt === 'accepted' ? 'accepted' : 'queued', delivery: 'pending' },
+    ]);
+    responseLost = false;
+    const accepted = await api.cloudCommand(input);
+    assert.deepEqual((accepted.queuedMessages as any[]).map(({ id, state, delivery }) => ({ id, state, delivery })), [
+      { id: input.messageId, state: receipt === 'accepted' ? 'accepted' : 'queued', delivery: 'durable' },
+    ]);
+    await api.cloudCommand(input);
+    assert.equal(commandCalls, 2, 'a durable retry must not requeue the message');
+    await assert.rejects(api.cloudCommand({ ...input, message: 'Changed payload' }), { code: 'MESSAGE_ID_CONFLICT' });
+    assert.equal(commandCalls, 2);
+    const later = await api.cloudCommand({ ...input, messageId: 'newer-message', message: 'Then refine the wording' });
+    assert.deepEqual((later.queuedMessages as any[]).map((entry) => entry.id), ['message-receipt', 'newer-message']);
+    await api.cloudCommand({ ...input, sessionId: otherSession.id, message: 'Other room content' });
+    const other = await api.cloudGetState({ threadId: 'other-thread', documentId: 'other-doc', selectedSessionId: otherSession.id });
+    assert.deepEqual((other.queuedMessages as any[]).map(({ id, text }) => ({ id, text })), [
+      { id: input.messageId, text: 'Other room content' },
+    ]);
+    const original = await api.cloudGetState(scope);
+    assert.deepEqual((original.queuedMessages as any[]).map(({ id, text }) => ({ id, text })), [
+      { id: input.messageId, text: input.message },
+      { id: 'newer-message', text: 'Then refine the wording' },
+    ]);
   });
 }
+
+test('browser replays the exact uploaded queue command after a lost receipt', async () => {
+  const identity = serverIdentity();
+  const storage = new MemoryStorage();
+  storeBrowserCredentials(storage, storedBrowserProfile('https://message-replay.example.test', identity.key), {
+    accessToken: 'replay-access', refreshToken: 'replay-refresh', accessExpiresAt: Date.now() + 600_000,
+  });
+  const commandBodies: any[] = [];
+  let uploadCalls = 0;
+  const api = createBrowserCloudApi({ storage, fetchImpl: async (input, init) => {
+    const request = new Request(input, init);
+    const path = new URL(request.url).pathname;
+    if (path.endsWith('/v1/uploads/init')) {
+      uploadCalls++;
+      return signedJson(request, identity, { blobExists: true, blob: { id: `blob-${uploadCalls}` } });
+    }
+    if (path.endsWith('/commands')) {
+      const body = await request.json();
+      commandBodies.push(body);
+      if (commandBodies.length === 1) throw Object.assign(new Error('queue response lost'), { code: 'ETIMEDOUT' });
+      return signedJson(request, identity, { messageId: body.payload.messageId, status: 'queued' });
+    }
+    throw new Error(`Unexpected request ${path}`);
+  } });
+  assert.ok(api);
+  const request = {
+    sessionId: 'replay-room', command: 'queue-message' as const, expectedVersion: 1,
+    message: 'Use the attached source', messageId: 'replay-message',
+    attachments: [{ id: 'source', name: 'source.txt', mimeType: 'text/plain', size: 3, bytes: new Uint8Array([1, 2, 3]) }],
+  };
+  await assert.rejects(api.cloudCommand(request), /queue response lost/);
+  await api.cloudCommand(request);
+  assert.equal(uploadCalls, 1, 'a dispatched retry must not create a new attachment receipt');
+  assert.deepEqual(commandBodies[1], commandBodies[0], 'the command id and full payload must be byte-stable');
+});
+
+test('browser rebuilds an uploaded queue command only after BLOB_NOT_FOUND', async () => {
+  const identity = serverIdentity();
+  const storage = new MemoryStorage();
+  storeBrowserCredentials(storage, storedBrowserProfile('https://message-blob-retry.example.test', identity.key), {
+    accessToken: 'blob-access', refreshToken: 'blob-refresh', accessExpiresAt: Date.now() + 600_000,
+  });
+  const commandBodies: any[] = [];
+  let uploadCalls = 0;
+  const api = createBrowserCloudApi({ storage, fetchImpl: async (input, init) => {
+    const request = new Request(input, init);
+    const path = new URL(request.url).pathname;
+    if (path.endsWith('/v1/uploads/init')) {
+      uploadCalls++;
+      return signedJson(request, identity, { blobExists: true, blob: { id: `blob-${uploadCalls}` } });
+    }
+    if (path.endsWith('/commands')) {
+      const body = await request.json();
+      commandBodies.push(body);
+      if (commandBodies.length === 1) {
+        return signedJson(request, identity, { error: { code: 'BLOB_NOT_FOUND', message: 'Attachment expired' } }, 404);
+      }
+      return signedJson(request, identity, { messageId: body.payload.messageId, status: 'queued' });
+    }
+    throw new Error(`Unexpected request ${path}`);
+  } });
+  assert.ok(api);
+  const request = {
+    sessionId: 'blob-room', command: 'queue-message' as const, expectedVersion: 1,
+    message: 'Retry this attachment', messageId: 'blob-message',
+    attachments: [{ id: 'source', name: 'source.txt', mimeType: 'text/plain', size: 1, bytes: new Uint8Array([9]) }],
+  };
+  await assert.rejects(api.cloudCommand(request), { code: 'BLOB_NOT_FOUND' });
+  await api.cloudCommand(request);
+  assert.equal(uploadCalls, 2);
+  assert.notEqual(commandBodies[1].payload.attachments[0].blobId, commandBodies[0].payload.attachments[0].blobId);
+  assert.equal(commandBodies[1].commandId, commandBodies[0].commandId);
+});
+
+test('browser retries redirects with their original command id and version', async () => {
+  const identity = serverIdentity();
+  const storage = new MemoryStorage();
+  storeBrowserCredentials(storage, storedBrowserProfile('https://redirect-replay.example.test', identity.key), {
+    accessToken: 'redirect-access', refreshToken: 'redirect-refresh', accessExpiresAt: Date.now() + 600_000,
+  });
+  const commandBodies: any[] = [];
+  const api = createBrowserCloudApi({ storage, fetchImpl: async (input, init) => {
+    const request = new Request(input, init);
+    const path = new URL(request.url).pathname;
+    if (path.endsWith('/commands')) {
+      const body = await request.json();
+      commandBodies.push(body);
+      if (commandBodies.length === 1) throw Object.assign(new Error('redirect response lost'), { code: 'ETIMEDOUT' });
+      return signedJson(request, identity, { messageId: body.payload.messageId,
+        session: { id: 'redirect-room', status: 'running', stateVersion: 2 } });
+    }
+    throw new Error(`Unexpected request ${path}`);
+  } });
+  assert.ok(api);
+  const request = { sessionId: 'redirect-room', command: 'redirect' as const, expectedVersion: 1,
+    message: 'Use the shorter structure', messageId: 'redirect-message' };
+  await assert.rejects(api.cloudCommand(request), /redirect response lost/);
+  await api.cloudCommand({ ...request, expectedVersion: 2 });
+  assert.deepEqual(commandBodies[1], commandBodies[0]);
+  assert.equal(commandBodies[1].payload.expectedVersion, 1);
+  await api.cloudCommand(request);
+  assert.equal(commandBodies.length, 2, 'a durable redirect must not be sent again');
+});
 
 for (const firstFailure of ['network', 'closed-stream']) {
   test(`browser reports ${firstFailure} immediately and restores readiness on an open stream`, { timeout: 5_000 }, async (t) => {

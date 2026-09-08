@@ -172,19 +172,43 @@ export async function checkCloudSetup(page, origin, artifacts) {
   await page.waitForFunction(() => window.sidebarPreview.cloud.calls.transfers.length === 1);
   assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.transfers[0].initialMessage.text), refreshDraft);
 
-  await page.evaluate(() => window.sidebarPreview.cloud.setQueueAckFailures(1));
+  await page.evaluate(() => {
+    window.sidebarPreview.cloud.setQueueAckFailures(1);
+    window.sidebarPreview.cloud.blockQueueReceipt(true);
+  });
   const fileChooser = page.waitForFileChooser();
   await page.click('.ag-reference-quick-add');
   await (await fileChooser).accept([resolve(artifacts, 'sample.txt')]);
   await page.waitForSelector('.ag-reference-upload-chip.ag-ready');
+  await page.click('.ag-header [aria-label="Cloud 상태"]');
+  await page.waitForSelector('.ag-cloud-panel:not([hidden])');
+  assert.equal(await page.$eval('.ag-cloud-handoff-accepted', (node) => node.checkVisibility()), true);
   const followup = '첨부한 자료를 반영해 결론을 다듬어 주세요.';
   await page.type('.ag-input', followup);
   await page.click('.ag-send');
   await page.waitForFunction(() => window.sidebarPreview.cloud.calls.commands
     .filter((command) => command.command === 'queue-message').length === 1
+    && document.querySelector('.ag-send').disabled);
+  assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.controller
+    .getSnapshot().queuedMessages.length), 0, '업로드 중에는 데스크톱 수신 상태가 아직 없다');
+  assert.equal(await page.$eval('.ag-cloud-handoff-accepted', (node) => node.checkVisibility()), false,
+    '업로드가 끝나기 전에도 즉시 안전 종료 안내를 숨긴다');
+  await page.evaluate(() => window.sidebarPreview.cloud.blockQueueReceipt(false));
+  await page.waitForFunction(() => window.sidebarPreview.cloud.calls.commands
+    .filter((command) => command.command === 'queue-message').length === 1
     && document.querySelector('.ag-reference-upload-chip.ag-ready')
     && !document.querySelector('.ag-send').disabled);
+  await page.waitForFunction(() => window.sidebarPreview.cloud.controller
+    .getSnapshot().queuedMessages[0]?.delivery === 'pending');
   assert.equal(await page.$eval('.ag-input', (node) => node.value), followup);
+  const pendingHandoff = await page.$eval('.ag-cloud-handoff-accepted', (node) => ({
+    hidden: node.hidden,
+    visible: node.checkVisibility(),
+  }));
+  assert.equal(pendingHandoff.visible, false,
+    `최신 메시지의 영속 수신이 확인되기 전에는 노트북을 닫아도 된다고 안내하지 않는다: ${JSON.stringify(pendingHandoff)}`);
+  assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.controller
+    .getSnapshot().queuedMessages[0]?.delivery), 'pending');
   await page.click('.ag-send');
   await page.waitForFunction(() => window.sidebarPreview.cloud.calls.commands
     .filter((command) => command.command === 'queue-message').length === 2
@@ -193,4 +217,8 @@ export async function checkCloudSetup(page, origin, artifacts) {
     .filter((command) => command.command === 'queue-message')
     .map((command) => command.messageId));
   assert.equal(queuedIds[1], queuedIds[0], '동일한 메시지와 파일의 재시도는 원래 messageId를 재사용한다');
+  assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.controller
+    .getSnapshot().queuedMessages[0]?.delivery), 'durable');
+  assert.equal(await page.$eval('.ag-cloud-handoff-accepted', (node) => node.checkVisibility()), true,
+    '최신 메시지의 영속 수신을 확인한 뒤에만 안전 종료 안내를 다시 보여 준다');
 }
