@@ -54,8 +54,17 @@ fn cell_para_line_anchor_y(
     }
 }
 
+/// 셀 중첩 문단 기준 어울림 표(`TopAndBottom`·`Square`)의 양수 vertOffset 리드.
+/// overlay / TAC / 음수 offset 은 0. `is_para_topbottom_float` 를 여기서 쓰지 않는다.
+/// 그 헬퍼를 Square 로 넓히면 다른 배치 경로가 같이 바뀐다.
 pub(crate) fn para_relative_float_table_lead(table: &crate::model::table::Table, dpi: f64) -> f64 {
-    if !is_para_topbottom_float(&table.common) {
+    if table.common.treat_as_char
+        || !matches!(table.common.vert_rel_to, VertRelTo::Para)
+        || !matches!(
+            table.common.text_wrap,
+            TextWrap::TopAndBottom | TextWrap::Square
+        )
+    {
         return 0.0;
     }
     let offset = signed_hwpunit(table.common.vertical_offset);
@@ -11881,5 +11890,61 @@ mod row_cut_tests {
             1,
             "owner table must be rescanned once after deletion"
         );
+    }
+}
+
+#[cfg(test)]
+mod para_relative_float_table_lead_tests {
+    use super::para_relative_float_table_lead;
+    use crate::model::shape::{CommonObjAttr, TextWrap, VertRelTo};
+    use crate::model::table::Table;
+
+    fn para_float_table(text_wrap: TextWrap, vertical_offset: u32, treat_as_char: bool) -> Table {
+        Table {
+            common: CommonObjAttr {
+                treat_as_char,
+                vert_rel_to: VertRelTo::Para,
+                vertical_offset,
+                text_wrap,
+                ..CommonObjAttr::default()
+            },
+            ..Table::default()
+        }
+    }
+
+    #[test]
+    fn top_and_bottom_and_square_wrap_share_vertical_offset_lead() {
+        let top = para_float_table(TextWrap::TopAndBottom, 1200, false);
+        assert!(
+            (para_relative_float_table_lead(&top, 96.0) - 16.0).abs() < 0.05,
+            "TopAndBottom 어울림은 종전대로 vertOffset 리드를 받아야 한다",
+        );
+
+        let square = para_float_table(TextWrap::Square, 1200, false);
+        assert!(
+            (para_relative_float_table_lead(&square, 96.0) - 16.0).abs() < 0.05,
+            "Square 어울림도 같은 vertOffset 리드를 받아야 한다",
+        );
+    }
+
+    #[test]
+    fn front_and_behind_overlay_wraps_stay_excluded_from_lead() {
+        for overlay in [TextWrap::BehindText, TextWrap::InFrontOfText] {
+            let table = para_float_table(overlay, 1200, false);
+            assert_eq!(
+                para_relative_float_table_lead(&table, 96.0),
+                0.0,
+                "글 앞/뒤 overlay 는 세로 배치 계약이 달라 리드에서 제외된다",
+            );
+        }
+    }
+
+    #[test]
+    fn signed_negative_offset_and_treat_as_char_take_no_lead() {
+        let negative = para_float_table(TextWrap::Square, 4_294_944_683, false);
+        assert_eq!(para_relative_float_table_lead(&negative, 96.0), 0.0);
+
+        let as_char = para_float_table(TextWrap::Square, 1200, true);
+        assert_eq!(para_relative_float_table_lead(&as_char, 96.0), 0.0);
     }
 }

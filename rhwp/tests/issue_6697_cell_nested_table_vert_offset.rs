@@ -1,8 +1,9 @@
-//! Issue #6697 — cell-nested TopAndBottom+Para table honors `vertical_offset`.
+//! Issue #6697 / Square follow-up — cell-nested Para float tables honor `vertical_offset`.
 //!
 //! Synthetic DocumentCore fixture only. Nested tables are collected as
 //! descendants of `RenderNodeType::TableCell(_)` (Rauhwpx `TableNode` has no
-//! `cell_context`).
+//! `cell_context`). TopAndBottom and Square wrap share the lead. Overlay wraps
+//! stay at lead 0.
 #![cfg(not(target_arch = "wasm32"))]
 
 use rhwp::document_core::DocumentCore;
@@ -19,7 +20,7 @@ const POSITIVE_OFFSET_HU: u32 = 3062;
 const NEGATIVE_OFFSET: u32 = (-22613i32) as u32;
 const EXPECTED_LEAD_PX: f64 = 3062.0 / 75.0;
 
-fn nested_table(vertical_offset: u32) -> Table {
+fn nested_table(vertical_offset: u32, text_wrap: TextWrap) -> Table {
     let mut table = Table {
         row_count: 1,
         col_count: 1,
@@ -37,7 +38,7 @@ fn nested_table(vertical_offset: u32) -> Table {
         ..Default::default()
     };
     table.common.treat_as_char = false;
-    table.common.text_wrap = TextWrap::TopAndBottom;
+    table.common.text_wrap = text_wrap;
     table.common.vert_rel_to = VertRelTo::Para;
     table.common.flow_with_text = true;
     table.common.vertical_offset = vertical_offset;
@@ -47,7 +48,7 @@ fn nested_table(vertical_offset: u32) -> Table {
     table
 }
 
-fn host_para(vertical_offset: u32) -> Paragraph {
+fn host_para(vertical_offset: u32, text_wrap: TextWrap) -> Paragraph {
     Paragraph {
         text: "캡션".to_string(),
         char_count: 2,
@@ -64,12 +65,15 @@ fn host_para(vertical_offset: u32) -> Paragraph {
             tag: LineSeg::TAG_SINGLE_SEGMENT_LINE,
             ..Default::default()
         }],
-        controls: vec![Control::Table(Box::new(nested_table(vertical_offset)))],
+        controls: vec![Control::Table(Box::new(nested_table(
+            vertical_offset,
+            text_wrap,
+        )))],
         ..Default::default()
     }
 }
 
-fn outer_table(vertical_offset: u32) -> Table {
+fn outer_table(vertical_offset: u32, text_wrap: TextWrap) -> Table {
     let mut table = Table {
         row_count: 1,
         col_count: 1,
@@ -81,7 +85,7 @@ fn outer_table(vertical_offset: u32) -> Table {
             width: 20_000,
             height: 16_000,
             apply_inner_margin: true,
-            paragraphs: vec![host_para(vertical_offset)],
+            paragraphs: vec![host_para(vertical_offset, text_wrap)],
             ..Default::default()
         }],
         ..Default::default()
@@ -95,7 +99,7 @@ fn outer_table(vertical_offset: u32) -> Table {
     table
 }
 
-fn document(vertical_offset: u32) -> Document {
+fn document(vertical_offset: u32, text_wrap: TextWrap) -> Document {
     let host = Paragraph {
         char_count: 1,
         line_segs: vec![LineSeg {
@@ -104,7 +108,10 @@ fn document(vertical_offset: u32) -> Document {
             tag: LineSeg::TAG_SINGLE_SEGMENT_LINE,
             ..Default::default()
         }],
-        controls: vec![Control::Table(Box::new(outer_table(vertical_offset)))],
+        controls: vec![Control::Table(Box::new(outer_table(
+            vertical_offset,
+            text_wrap,
+        )))],
         ..Default::default()
     };
     let mut section = Section::default();
@@ -124,9 +131,12 @@ fn document(vertical_offset: u32) -> Document {
     doc
 }
 
-fn render(vertical_offset: u32) -> rhwp::renderer::render_tree::PageRenderTree {
+fn render(
+    vertical_offset: u32,
+    text_wrap: TextWrap,
+) -> rhwp::renderer::render_tree::PageRenderTree {
     let mut core = DocumentCore::new_empty();
-    core.set_document(document(vertical_offset));
+    core.set_document(document(vertical_offset, text_wrap));
     core.build_page_render_tree(0).expect("page 1 render tree")
 }
 
@@ -140,8 +150,8 @@ fn collect_nested_tables<'a>(node: &'a RenderNode, in_cell: bool, out: &mut Vec<
     }
 }
 
-fn nested_table_y(vertical_offset: u32) -> f64 {
-    let tree = render(vertical_offset);
+fn nested_table_y(vertical_offset: u32, text_wrap: TextWrap) -> f64 {
+    let tree = render(vertical_offset, text_wrap);
     let mut nested = Vec::new();
     collect_nested_tables(&tree.root, false, &mut nested);
     assert_eq!(
@@ -153,22 +163,43 @@ fn nested_table_y(vertical_offset: u32) -> f64 {
     nested[0].bbox.y
 }
 
-#[test]
-fn cell_nested_float_table_honors_vert_offset() {
-    let y0 = nested_table_y(0);
-    let y_off = nested_table_y(POSITIVE_OFFSET_HU);
+fn assert_nested_y_moves_by_lead(text_wrap: TextWrap) {
+    let y0 = nested_table_y(0, text_wrap);
+    let y_off = nested_table_y(POSITIVE_OFFSET_HU, text_wrap);
     let delta = y_off - y0;
     assert!(
         (delta - EXPECTED_LEAD_PX).abs() <= 1.0,
-        "nested table y must move by {EXPECTED_LEAD_PX:.3}px (3062 HU / 75); \
+        "{text_wrap:?} nested table y must move by {EXPECTED_LEAD_PX:.3}px (3062 HU / 75); \
          got {delta:.3} (y0={y0:.3}, y_off={y_off:.3})"
     );
 }
 
 #[test]
+fn cell_nested_float_table_honors_vert_offset() {
+    assert_nested_y_moves_by_lead(TextWrap::TopAndBottom);
+}
+
+#[test]
+fn cell_nested_square_float_table_honors_vert_offset() {
+    assert_nested_y_moves_by_lead(TextWrap::Square);
+}
+
+#[test]
+fn cell_nested_overlay_float_tables_do_not_take_vert_offset_lead() {
+    for wrap in [TextWrap::BehindText, TextWrap::InFrontOfText] {
+        let y0 = nested_table_y(0, wrap);
+        let y_off = nested_table_y(POSITIVE_OFFSET_HU, wrap);
+        assert!(
+            (y_off - y0).abs() <= 1.0,
+            "{wrap:?} overlay must stay within 1px of offset 0; y0={y0:.3}, y_off={y_off:.3}"
+        );
+    }
+}
+
+#[test]
 fn negative_vert_offset_does_not_lift_the_nested_table() {
-    let y0 = nested_table_y(0);
-    let y_neg = nested_table_y(NEGATIVE_OFFSET);
+    let y0 = nested_table_y(0, TextWrap::TopAndBottom);
+    let y_neg = nested_table_y(NEGATIVE_OFFSET, TextWrap::TopAndBottom);
     assert!(
         (y_neg - y0).abs() <= 1.0,
         "negative vert offset must stay within 1px of offset 0; \
