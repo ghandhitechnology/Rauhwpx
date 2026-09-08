@@ -19,7 +19,9 @@ export async function checkCloudMergeRecovery(page, origin, artifacts) {
     ];
     snapshot = { ...snapshot, mergeRequests: receipts, session: { kind: 'idle' }, sessions: [], timeline: null,
       link: { kind: 'failed', error: 'Worker deleted', attempt: 1, canRecreate: true } };
+    let downloadRequest = request;
     const listeners = new Set();
+    const eventListeners = new Set();
     let scope = { documentId: 'doc-recovered', threadId: 'local-thread' };
     const merged = new Set();
     const errors = [];
@@ -32,8 +34,8 @@ export async function checkCloudMergeRecovery(page, origin, artifacts) {
       controller: { ...mock.controller, getSnapshot: () => snapshot,
         refresh: async () => snapshot,
         subscribe: (callback) => { listeners.add(callback); return () => listeners.delete(callback); },
-        subscribeEvents: () => () => {},
-        downloadCheckpoint: async (...args) => { downloads.push(args); return { ...request, byteLength: 3, bytes: new Uint8Array([1, 2, 3]) }; } },
+        subscribeEvents: (callback) => { eventListeners.add(callback); return () => eventListeners.delete(callback); },
+        downloadCheckpoint: async (...args) => { downloads.push(args); return { ...downloadRequest, byteLength: 3, bytes: new Uint8Array([1, 2, 3]) }; } },
       getScope: () => scope, isCloudMode: () => false,
       onRequestTransfer() {}, onCancelPendingTransfer() {}, onWorkspaceSwitchVisibilityChange() {},
       onCloseSettings() {}, onLeaseChange() {}, onWorkspaceLock: () => ({ release() {} }),
@@ -56,9 +58,30 @@ export async function checkCloudMergeRecovery(page, origin, artifacts) {
     const otherDocumentHidden = ui.mergeButton.hidden;
     scope = { ...scope, documentId: 'doc-recovered' };
     await ui.refreshLeaseScope();
+    for (const listener of eventListeners) listener({ sessionId: request.sessionId,
+      event: { type: 'boundary.committed', payload: { kind: 'turn', operationId: request.operationId } } });
+    await tick();
     ui.mergeButton.click();
     await tick();
     const reviewedHidden = ui.mergeButton.hidden;
+    const replacement = { ...request, operationId: 'turn-op-4-retry', sha256: 'b'.repeat(64) };
+    downloadRequest = replacement;
+    for (const listener of eventListeners) listener({ sessionId: request.sessionId,
+      event: { type: 'boundary.committed', payload: { kind: 'turn', operationId: replacement.operationId } } });
+    await tick();
+    for (const listener of listeners) listener(snapshot);
+    const liveReplacementRetained = !ui.mergeButton.hidden;
+    snapshot = { ...snapshot, mergeRequests: [...receipts, replacement] };
+    for (const listener of listeners) listener(snapshot);
+    await tick();
+    const sameRevisionOffered = !ui.mergeButton.hidden && !ui.mergeButton.disabled;
+    ui.dispose();
+    ui = createCloudAgentUi(deps);
+    await tick();
+    const sameRevisionReopenedOffered = !ui.mergeButton.hidden;
+    ui.mergeButton.click();
+    await tick();
+    const replacementReviewedHidden = ui.mergeButton.hidden;
     ui.dispose();
     ui = createCloudAgentUi(deps);
     await tick();
@@ -95,20 +118,28 @@ export async function checkCloudMergeRecovery(page, origin, artifacts) {
     await tick();
     window.cleanupMergeEvidence = () => { evidenceUi.dispose(); evidenceUi.recoveryStrip.remove(); evidenceUi.mergeButton.remove(); mock.controller.dispose(); };
     return { recovered, otherDocumentHidden, reviewedHidden, reopenedHidden, accountHidden,
-      accountReviewIsolated, profileHidden, expiredHidden, errors, downloads, applies, initialQueries };
+      accountReviewIsolated, profileHidden, expiredHidden, errors, downloads, applies, initialQueries,
+      sameRevisionOffered, sameRevisionReopenedOffered, replacementReviewedHidden, liveReplacementRetained };
   });
   assert.equal(result.recovered, true, 'A durable offer survives an idle snapshot and deleted worker');
   assert.deepEqual(result.initialQueries, ['turn-op-4'], 'Only the newest receipt per session queries version ancestry');
   assert.equal(result.otherDocumentHidden, true);
   assert.equal(result.reviewedHidden, true);
+  assert.equal(result.sameRevisionOffered, true);
+  assert.equal(result.liveReplacementRetained, true);
+  assert.equal(result.sameRevisionReopenedOffered, true);
+  assert.equal(result.replacementReviewedHidden, true);
   assert.equal(result.reopenedHidden, true, 'Version ancestry keeps an integrated offer hidden after reopen');
   assert.equal(result.accountHidden, true);
   assert.equal(result.accountReviewIsolated, true, 'An old account query cannot mark the new account offer reviewed');
   assert.equal(result.profileHidden, true);
   assert.equal(result.expiredHidden, true);
   assert.deepEqual(result.errors, []);
-  assert.deepEqual(result.downloads, [['old-worker-session', 'turn-op-4', 'turn']]);
-  assert.deepEqual(result.applies, ['durable-start']);
+  assert.deepEqual(result.downloads, [
+    ['old-worker-session', 'turn-op-4', null], ['old-worker-session', 'turn-op-4', 'turn'],
+    ['old-worker-session', 'turn-op-4-retry', null], ['old-worker-session', 'turn-op-4-retry', 'turn'],
+  ]);
+  assert.deepEqual(result.applies, ['durable-start', 'durable-start']);
   if (artifacts) await page.screenshot({ path: resolve(artifacts, 'cloud-durable-merge-recovery.png') });
   await page.evaluate(() => window.cleanupMergeEvidence());
 }

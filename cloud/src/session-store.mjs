@@ -1573,6 +1573,8 @@ export class SessionStore {
       return existing;
     };
     validateIdentity();
+    // A broker-committed recovery copy survives failure of this local commit.
+    // Runtime completion still requires the transaction and identity check below.
     await beforeCommit?.({ operationId, turnNumber, revision, kind, checkpoint, timeline });
     const events = [];
     let previousTimelineBlobId = null;

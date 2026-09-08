@@ -126,3 +126,23 @@ test('reset and dispose cancel old-profile retries without applying stale work',
   await assert.rejects(pending, { name: 'AbortError' });
   await assert.rejects(mirror.mirror('session-a', 'operation-c'), { name: 'AbortError' });
 });
+
+test('merge recovery mirrors distinct operations at one revision but suppresses replay and older revisions', async () => {
+  const applied: string[] = [];
+  let current = 'operation-a';
+  const mirror = createCheckpointMirror({
+    allowSameRevisionOperations: true,
+    download: async (_sessionId, operationId) => ({ ...checkpoint, operationId: operationId ?? current,
+      revision: operationId === 'older' ? 1 : 2 }),
+    apply: (value) => { applied.push(value.operationId); },
+  });
+  await mirror.mirror('session-a', 'operation-a');
+  current = 'operation-b';
+  await mirror.mirror('session-a', 'operation-b');
+  await mirror.mirror('session-a', 'operation-a');
+  await mirror.mirror('session-a', 'operation-b');
+  await mirror.mirror('session-a', 'reconnect');
+  await mirror.mirror('session-a', 'older');
+  assert.deepEqual(applied, ['operation-a', 'operation-b']);
+  mirror.dispose();
+});
