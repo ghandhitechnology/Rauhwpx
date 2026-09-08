@@ -154,6 +154,15 @@ pub struct CharShapeRef {
     pub char_shape_id: u32,
 }
 
+/// 문자 offset 범위의 균일 글자 모양 구간. JSON 키는 camelCase (WASM/Studio 계약).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CharShapeRun {
+    pub start_offset: usize,
+    pub end_offset: usize,
+    pub char_shape_id: u32,
+}
+
 /// 줄 레이아웃 정보 (HWPTAG_PARA_LINE_SEG)
 ///
 /// Task #604 의 포맷 무관 lineseg 표준을 구현한다.
@@ -1446,6 +1455,25 @@ impl Paragraph {
         }
         runs.push((run_start, end_char_offset, run_id));
         runs
+    }
+
+    /// `char_shape_runs_in_range` 를 WASM/JSON 계약용 구간 목록으로 감싼다.
+    pub fn char_shape_runs(&self, start_char_offset: usize, end_char_offset: usize) -> Vec<CharShapeRun> {
+        self.char_shape_runs_in_range(start_char_offset, end_char_offset)
+            .into_iter()
+            .map(|(start_offset, end_offset, char_shape_id)| CharShapeRun {
+                start_offset,
+                end_offset,
+                char_shape_id,
+            })
+            .collect()
+    }
+
+    /// 검증된 구간 목록을 문단에 순서대로 복원한다. 호출측이 범위·ID를 검사한다.
+    pub fn restore_char_shape_runs(&mut self, runs: &[CharShapeRun]) {
+        for run in runs {
+            self.apply_char_shape_range(run.start_offset, run.end_offset, run.char_shape_id);
+        }
     }
 
     /// 인라인 컨트롤이 텍스트의 어느 character 인덱스에 위치하는지 반환한다.

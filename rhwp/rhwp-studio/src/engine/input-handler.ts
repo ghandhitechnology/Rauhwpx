@@ -1,4 +1,5 @@
 import { WasmBridge } from '@/core/wasm-bridge';
+import { isCharFormatError, CharFormatRecoveryError } from '@/core/char-format-error';
 import { EventBus } from '@/core/event-bus';
 import { CursorState } from './cursor';
 import { CaretRenderer } from './caret-renderer';
@@ -2874,7 +2875,9 @@ export class InputHandler {
   /** Undo 처리 */
   private handleUndo(): void {
     this.flushDeferredPaginationIfNeeded('before-undo', false);
-    const newPos = this.history.undo(this.wasm);
+    let newPos: DocumentPosition | null;
+    try { newPos = this.history.undo(this.wasm); }
+    catch (error) { this.handleCharFormatError(error); return; }
     if (newPos) {
       this.prepareTextMutationBeforeCursor(IMMEDIATE_TEXT_MUTATION_EFFECTS);
       this.clearTableResizeRuntimeCache();
@@ -2890,7 +2893,9 @@ export class InputHandler {
   /** Redo 처리 */
   private handleRedo(): void {
     this.flushDeferredPaginationIfNeeded('before-redo', false);
-    const newPos = this.history.redo(this.wasm);
+    let newPos: DocumentPosition | null;
+    try { newPos = this.history.redo(this.wasm); }
+    catch (error) { this.handleCharFormatError(error); return; }
     if (newPos) {
       const boundaryHandled = this.prepareTextMutationBeforeCursor(
         this.history.consumeLastExecutionEffects(),
@@ -3044,6 +3049,17 @@ export class InputHandler {
     }
   }
 
+  private handleCharFormatError(error: unknown): void {
+    if (!isCharFormatError(error)) throw error;
+    console.error(error);
+    if (error instanceof CharFormatRecoveryError) {
+      this.prepareTextMutationBeforeCursor(IMMEDIATE_TEXT_MUTATION_EFFECTS);
+      this.resetDerivedStateAfterHistoryJump();
+      this.afterEdit();
+    }
+    alert(error.message);
+  }
+
   /**
    * 편집 작업 통합 라우터.
    * 호출부는 OperationDescriptor로 "무엇을 하려는가"만 서술하고,
@@ -3063,7 +3079,9 @@ export class InputHandler {
         if (keepFieldStartOutside) {
           this.wasm.clearActiveField();
         }
-        const newPos = this.history.execute(desc.command, this.wasm);
+        let newPos: DocumentPosition;
+        try { newPos = this.history.execute(desc.command, this.wasm); }
+        catch (error) { this.handleCharFormatError(error); return; }
         const boundaryHandled = this.prepareTextMutationBeforeCursor(
           this.history.consumeLastExecutionEffects(),
         );
@@ -3131,6 +3149,10 @@ export class InputHandler {
           desc.meta?.scroll === 'preserve',
         );
         break;
+      }
+      default: {
+        const _exhaustive: never = desc;
+        void _exhaustive;
       }
     }
   }

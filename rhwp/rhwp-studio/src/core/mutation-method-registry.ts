@@ -60,6 +60,7 @@ export const MUTATING_METHODS: readonly string[] = [
   'applyCharFormat', 'applyCharFormatAcrossSections', 'setCharShapeId',
   'applyCharFormatInCell', 'applyCharFormatInCellByPath',
   'setCharShapeIdInCell', 'setCharShapeIdInCellByPath',
+  'setCharShapeRuns', 'setCharShapeRunsInCellByPath',
   'applyParaFormat', 'applyParaFormatAcrossSections', 'setParaShapeId',
   'applyParaFormatInCell', 'setCellParaShapeId',
   'applyParaFormatInCellByPath', 'setCellParaShapeIdByPath',

@@ -3,6 +3,7 @@ mod document;
 mod document_transfer;
 mod footnote_ops;
 mod formatting;
+mod formatting_runs;
 mod header_footer_ops;
 mod html_import;
 mod object_ops;

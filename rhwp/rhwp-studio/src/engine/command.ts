@@ -1,5 +1,5 @@
 import type { RemovedParaMeta, WasmBridge } from '@/core/wasm-bridge';
-import type { DocumentPosition, CharProperties, ParaProperties, CellPathLike, CellPathEntry } from '@/core/types';
+import type { DocumentPosition, CharProperties, ParaProperties, CellPathLike, CellPathEntry, CharShapeRun } from '@/core/types';
 import type { HeaderFooterTextPosition } from './cursor';
 import { MAX_PAGE_LOCAL_TEXT_EDIT_CHARS } from './input-edit-invalidation';
 import type { LineEndpoints as LineEndpointsLike } from './object-drag-record';
@@ -9,6 +9,7 @@ import {
   type EditableParagraphTarget,
   type EditableTextRange,
 } from './edit-target';
+import { CharFormatError, CharFormatRecoveryError, isCharFormatError } from '@/core/char-format-error';
 
 /** 편집 명령 공통 인터페이스 */
 export interface EditCommand {
@@ -59,6 +60,13 @@ export interface EditCommand {
   selectionBefore?(): EditSelectionSnapshot | null;
   /** redo 뒤 되살릴 선택. 서식처럼 실행 전후 선택을 유지하는 명령만 구현한다. */
   selectionAfter?(): EditSelectionSnapshot | null;
+  /** 부분 변경이 남았으면 실패해도 Undo 정보를 폐기하지 않는다. */
+  retainOnFailure?(): boolean;
+  /**
+   * 문서를 바꾸지 않은 명령은 기록하지 않는다.
+   * 구현하지 않으면 종전대로 항상 기록된다.
+   */
+  isNoOp?(): boolean;
 }
 
 /**
@@ -848,20 +856,166 @@ interface CharShapeSpan {
 /** 문단 하나에 대한 서식 적용 정보 */
 interface ParaFormatEntry {
   target: EditableParagraphTarget;
-  /** undo용: 적용 전 run별 스팬 (startOffset~endOffset 을 빈틈없이 덮는다) */
-  beforeSpans: CharShapeSpan[];
-  /** redo용: 적용 후 run별 스팬 (첫 execute 에서 채움) */
-  afterSpans?: CharShapeSpan[];
+  startOffset: number;
+  endOffset: number;
+  /** undo용: 적용 전 run 목록 (startOffset~endOffset 을 빈틈없이 덮는다) */
+  beforeRuns: CharShapeRun[];
+  /** redo용: 적용 후 run 목록 (첫 execute 에서 채움) */
+  afterRuns?: CharShapeRun[];
+}
+
+export class ApplyCharFormatCommand implements EditCommand {
+  readonly type = 'applyCharFormat';
+  readonly timestamp = Date.now();
+
+  private entries: ParaFormatEntry[] = [];
+  private recoveryNeeded = false;
+
+  constructor(
+    private ranges: EditableTextRange[],
+    private props: Partial<CharProperties>,
+    private cursorBefore: DocumentPosition,
+    private contextBefore?: EditContext,
+  ) {}
+
+  isNoOp(): boolean {
+    return this.ranges.every((range) => range.endOffset <= range.startOffset);
+  }
+
+  retainOnFailure(): boolean {
+    return this.recoveryNeeded;
+  }
+
+  execute(wasm: WasmBridge): DocumentPosition {
+    try {
+      return this.executeFormat(wasm);
+    } catch (error) {
+      if (isCharFormatError(error)) throw error;
+      throw new CharFormatError('글자 서식을 적용하지 못했습니다.', { cause: error });
+    }
+  }
+
+  private executeFormat(wasm: WasmBridge): DocumentPosition {
+    if (this.entries.length > 0 && this.entries.every((entry) => entry.afterRuns !== undefined)) {
+      this.restoreCharShapeRuns(wasm, 'after');
+      return { ...this.cursorBefore };
+    }
+
+    this.entries = [];
+    for (const range of this.ranges) {
+      if (range.endOffset <= range.startOffset) continue;
+      this.entries.push({
+        target: range.target,
+        startOffset: range.startOffset,
+        endOffset: range.endOffset,
+        beforeRuns: this.readRuns(wasm, range.target, range.startOffset, range.endOffset),
+      });
+    }
+
+    const propsJson = JSON.stringify(this.props);
+    const attempted: ParaFormatEntry[] = [];
+    const applyFailures: unknown[] = [];
+    try {
+      for (const entry of this.entries) {
+        attempted.push(entry);
+        applyCharFormatToTarget(wasm, {
+          target: entry.target,
+          startOffset: entry.startOffset,
+          endOffset: entry.endOffset,
+        }, propsJson);
+        entry.afterRuns = this.readRuns(wasm, entry.target, entry.startOffset, entry.endOffset);
+      }
+    } catch (error) {
+      applyFailures.push(error);
+    }
+    if (applyFailures.length > 0) {
+      const failures: unknown[] = [];
+      for (const entry of attempted.reverse()) {
+        try { this.writeRuns(wasm, entry, entry.beforeRuns); }
+        catch (rollbackError) { failures.push(rollbackError); }
+      }
+      this.recoveryNeeded = failures.length > 0;
+      for (const entry of this.entries) entry.afterRuns = undefined;
+      if (this.recoveryNeeded) throw new CharFormatRecoveryError([...applyFailures, ...failures]);
+      this.entries = [];
+      if (applyFailures.length === 1) throw applyFailures[0];
+      throw new CharFormatError('글자 서식을 적용하지 못했습니다.', { cause: new AggregateError(applyFailures) });
+    }
+    return { ...this.cursorBefore };
+  }
+
+  private readRuns(wasm: WasmBridge, target: EditableParagraphTarget, from: number, to: number): CharShapeRun[] {
+    if (target.kind === 'body') {
+      return wasm.getCharShapeRuns(target.sectionIndex, target.paragraphIndex, from, to);
+    }
+    if (target.kind === 'container' && useContainerPath(target)) {
+      return wasm.getCharShapeRunsInCellByPath(
+        target.sectionIndex,
+        target.parentParagraphIndex,
+        targetCellPathJson(target),
+        from,
+        to,
+      );
+    }
+    const propsAt = (offset: number) => getCharPropertiesAtTarget(wasm, target, offset).charShapeId ?? 0;
+    return sampleCharShapeSpans(propsAt, from, to);
+  }
+
+  private writeRuns(wasm: WasmBridge, entry: ParaFormatEntry, runs: CharShapeRun[]): void {
+    const { target, startOffset, endOffset } = entry;
+    if (target.kind === 'body') {
+      wasm.setCharShapeRuns(target.sectionIndex, target.paragraphIndex, startOffset, endOffset, runs);
+      return;
+    }
+    if (target.kind === 'container' && useContainerPath(target)) {
+      wasm.setCharShapeRunsInCellByPath(
+        target.sectionIndex,
+        target.parentParagraphIndex,
+        targetCellPathJson(target),
+        startOffset,
+        endOffset,
+        runs,
+      );
+      return;
+    }
+    for (const span of runs) {
+      setCharShapeIdAtTarget(wasm, target, span);
+    }
+  }
+
+  undo(wasm: WasmBridge): DocumentPosition {
+    try {
+      this.restoreCharShapeRuns(wasm, 'before');
+      this.recoveryNeeded = false;
+      return { ...this.cursorBefore };
+    } catch (error) {
+      this.recoveryNeeded = true;
+      if (isCharFormatError(error)) throw error;
+      throw new CharFormatRecoveryError([error]);
+    }
+  }
+
+  private restoreCharShapeRuns(wasm: WasmBridge, side: 'before' | 'after'): void {
+    const failures: unknown[] = [];
+    for (const entry of this.entries) {
+      const runs = side === 'before' ? entry.beforeRuns : entry.afterRuns;
+      if (!runs) continue;
+      try { this.writeRuns(wasm, entry, runs); }
+      catch (error) { failures.push(error); }
+    }
+    if (failures.length > 0) throw new CharFormatRecoveryError(failures);
+  }
+
+  editContext(): EditContext | null {
+    return this.contextBefore ?? editContextForTarget(this.ranges[0]?.target) ?? null;
+  }
+
+  mergeWith(): null { return null; }
 }
 
 /**
  * 범위 내 run(균일 charShapeId 구간) 경계를 복원한다.
- *
- * WASM 에 run 열거 export 가 없어(wasm_api.rs) 오프셋별 charShapeId 샘플링으로
- * 근사한다 — Rust 측 char_shape_runs_in_range 와 같은 방식으로 인접 오프셋의
- * charShapeId 가 달라지는 지점을 경계로 삼는다. 인접 run 이 우연히 같은 id 를 공유할
- * 때만 하나로 합쳐지는데, 어차피 같은 id 를 같은 구간에 복원하므로 행위 차이는 없다.
- * 비용: 범위 길이만큼의 getCharPropertiesAt 호출(첫 execute 1회).
+ * 머리말/꼬리말·각주는 run API 가 없어 오프셋별 charShapeId 샘플링으로 근사한다.
  */
 function sampleCharShapeSpans(propsAt: (offset: number) => number, from: number, to: number): CharShapeSpan[] {
   const spans: CharShapeSpan[] = [];
@@ -876,27 +1030,6 @@ function sampleCharShapeSpans(propsAt: (offset: number) => number, from: number,
     }
   }
   spans.push({ startOffset: runStart, endOffset: to, charShapeId: runId });
-  return spans;
-}
-
-/**
- * 적용 후 run별 파생 shape 를 캡처한다.
- *
- * Rust apply_char_mods_to_paragraph 는 base run 별로 파생 shape 를 하나씩 만들어
- * 적용하므로 적용 후 경계는 적용 전 경계의 부분집합이다 — 각 전 스팬의 시작 오프셋만
- * 샘플링하고(전수 재스캔 불필요), 인접 스팬의 파생 id 가 같으면 합친다.
- */
-function deriveAfterSpans(beforeSpans: CharShapeSpan[], propsAt: (offset: number) => number): CharShapeSpan[] {
-  const spans: CharShapeSpan[] = [];
-  for (const before of beforeSpans) {
-    const charShapeId = propsAt(before.startOffset);
-    const last = spans[spans.length - 1];
-    if (last && last.charShapeId === charShapeId) {
-      last.endOffset = before.endOffset;
-    } else {
-      spans.push({ startOffset: before.startOffset, endOffset: before.endOffset, charShapeId });
-    }
-  }
   return spans;
 }
 
@@ -944,6 +1077,10 @@ function getCharPropertiesAtTarget(
         target.paragraphIndex,
         offset,
       );
+    default: {
+      const exhaustive: never = target;
+      return exhaustive;
+    }
   }
 }
 
@@ -998,6 +1135,10 @@ export function applyCharFormatToTarget(wasm: WasmBridge, range: EditableTextRan
         propsJson,
       );
       break;
+    default: {
+      const exhaustive: never = target;
+      void exhaustive;
+    }
   }
 }
 
@@ -1056,6 +1197,10 @@ function setCharShapeIdAtTarget(
         charShapeId,
       );
       break;
+    default: {
+      const exhaustive: never = target;
+      void exhaustive;
+    }
   }
 }
 
@@ -1216,66 +1361,6 @@ function editContextForTarget(target: EditableParagraphTarget | undefined): Edit
       charOffset: 0,
     };
   }
-}
-
-export class ApplyCharFormatCommand implements EditCommand {
-  readonly type = 'applyCharFormat';
-  readonly timestamp = Date.now();
-
-  private entries: ParaFormatEntry[] = [];
-
-  constructor(
-    private ranges: EditableTextRange[],
-    private props: Partial<CharProperties>,
-    private cursorBefore: DocumentPosition,
-    private contextBefore?: EditContext,
-  ) {}
-
-  execute(wasm: WasmBridge): DocumentPosition {
-    if (this.entries.length > 0 && this.entries.every((entry) => entry.afterSpans !== undefined)) {
-      this.restoreCharShapeIds(wasm, 'after');
-      return { ...this.cursorBefore };
-    }
-
-    const propsJson = JSON.stringify(this.props);
-    this.entries = [];
-    for (const range of this.ranges) {
-      if (range.endOffset <= range.startOffset) continue;
-      const propsAt = (offset: number) =>
-        getCharPropertiesAtTarget(wasm, range.target, offset).charShapeId ?? 0;
-      const beforeSpans = sampleCharShapeSpans(propsAt, range.startOffset, range.endOffset);
-      applyCharFormatToTarget(wasm, range, propsJson);
-      this.entries.push({
-        target: range.target,
-        beforeSpans,
-        afterSpans: deriveAfterSpans(beforeSpans, propsAt),
-      });
-    }
-
-    return { ...this.cursorBefore };
-  }
-
-  undo(wasm: WasmBridge): DocumentPosition {
-    this.restoreCharShapeIds(wasm, 'before');
-    return { ...this.cursorBefore };
-  }
-
-  private restoreCharShapeIds(wasm: WasmBridge, side: 'before' | 'after'): void {
-    for (const entry of this.entries) {
-      const spans = side === 'before' ? entry.beforeSpans : entry.afterSpans;
-      if (!spans) continue;
-
-      for (const span of spans) {
-        setCharShapeIdAtTarget(wasm, entry.target, span);
-      }
-    }
-  }
-
-  editContext(): EditContext | null {
-    return this.contextBefore ?? editContextForTarget(this.ranges[0]?.target) ?? null;
-  }
-
-  mergeWith(): null { return null; }
 }
 
 // ─── 문단 서식 적용 명령 ─────────────────────────────
