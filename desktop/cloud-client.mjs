@@ -840,9 +840,17 @@ export class CloudClient {
     if (document.length > MAX_RESULT_BYTES) throw new Error('Document exceeds the 64 MiB cloud limit');
     if (!validPortableTimeline(timeline)) throw new Error('Portable cloud timeline is invalid');
     if (persistent || executionConfig?.workflow === 'question') {
-      const health = await this.health(null, { signal });
-      if (persistent && health.conversationProtocolVersion !== 2) {
-        throw new CloudHttpError('Update the Cloud server before starting a persistent conversation.', {
+      const [health, profile] = await Promise.all([
+        this.health(null, { signal }),
+        persistent ? this.loadProfile().catch(() => null) : null,
+      ]);
+      const durableManagedConversation = profile?.mode !== 'app-hosted'
+        || health?.capabilities?.conversationRestore === true
+        || health?.conversationRestore === true;
+      if (persistent && (health.conversationProtocolVersion !== 2 || !durableManagedConversation)) {
+        throw new CloudHttpError(profile?.mode === 'app-hosted'
+          ? 'Recreate the managed Cloud server before starting this conversation.'
+          : 'Update the Cloud server before starting a persistent conversation.', {
           code: 'CLOUD_RUNTIME_OUTDATED', retryable: false,
         });
       }

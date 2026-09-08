@@ -1,5 +1,6 @@
 const MAX_CONVERSATIONS = 1024;
 const MAX_SNAPSHOT_BYTES = 128 * 1024 * 1024;
+const RESTORABLE_STATES = new Set(['staged', 'queued', 'running', 'suspended']);
 const identifier = (value, limit = 160) => (
   typeof value === 'string'
   && value.length >= 1
@@ -27,6 +28,7 @@ export function validateConversationSnapshot(value) {
     || !Number.isSafeInteger(value.revision) || value.revision < 1
     || !Number.isSafeInteger(value.turn) || value.turn < 0
     || !Number.isSafeInteger(value.size) || value.size < 1 || value.size > MAX_SNAPSHOT_BYTES
+    || typeof value.pendingWork !== 'boolean'
     || typeof value.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(value.sha256)
     || !Number.isFinite(Date.parse(createdAt))
     || !Number.isFinite(Date.parse(expiresAt))) {
@@ -34,8 +36,12 @@ export function validateConversationSnapshot(value) {
   }
   return { ...Object.fromEntries([
     'id', 'sessionId', 'documentId', 'threadId', 'cloudStartId', 'revision', 'turn',
-    'sha256', 'size', 'state',
+    'sha256', 'size', 'state', 'pendingWork',
   ].filter((key) => value[key] !== undefined).map((key) => [key, value[key]])), createdAt, expiresAt };
+}
+
+export function conversationSnapshotRestorable(snapshot) {
+  return RESTORABLE_STATES.has(String(snapshot?.state ?? '').toLowerCase());
 }
 
 /** Account-fenced broker discovery for conversations that can be restored to a replacement worker. */

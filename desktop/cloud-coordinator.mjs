@@ -1,5 +1,8 @@
 import { CloudMergeRecovery } from './cloud-merge-recovery.mjs';
-import { CloudConversationRecovery } from './cloud-conversation-recovery.mjs';
+import {
+  CloudConversationRecovery,
+  conversationSnapshotRestorable,
+} from './cloud-conversation-recovery.mjs';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
@@ -71,6 +74,13 @@ function retryableQueuedCommandError(error) {
   return !nonRetryableTransferError(error);
 }
 
+function attachmentReuploadError(cause) {
+  return Object.assign(
+    new Error('The Cloud worker changed before it accepted the attachments. Send the message again to re-upload them.', { cause }),
+    { code: 'ATTACHMENT_REUPLOAD_REQUIRED', retryable: true },
+  );
+}
+
 function conversationRestoreSupported(health) {
   return health?.capabilities?.conversationRestore === true || health?.conversationRestore === true;
 }
@@ -86,7 +96,13 @@ function destinationFromReadiness(readiness) {
     sandboxProvider: profile.sandbox?.providerId ?? null,
     protocolVersion: readiness?.health?.protocolVersion ?? 1,
     runtimeVersion: readiness?.health?.version ?? null,
+    durableConversationRestore: conversationRestoreSupported(readiness?.health),
   };
+}
+
+function canConfirmDurableHandoff(record) {
+  return record?.destination?.mode !== 'app-hosted'
+    || record.destination.durableConversationRestore === true;
 }
 
 function sameDestination(left, right) {
@@ -434,7 +450,7 @@ export class CloudCoordinator extends EventEmitter {
         continue;
       }
       if (record.cloudSessionId && record.documentStagingPath) {
-        void this.#store.clearPayload(record.id).catch((error) => {
+        await this.#store.clearPayload(record.id).catch((error) => {
           this.#emit({ type: 'payload-cleanup-failed', handoffId: record.id, error: error.message });
         });
       }
@@ -1205,20 +1221,22 @@ export class CloudCoordinator extends EventEmitter {
           this.#emit({ type: 'queued-message-reconciled', sessionId: record.cloudSessionId, messageId: queued.id });
         } catch (error) {
           this.#assertProfileEpoch(profileEpoch);
+          const retryPending = retryableQueuedCommandError(error);
           await this.#store.patch(record.id, (latest) => ({
-            queuedMessages: (latest.queuedMessages ?? []).map((entry) => (
-              entry.id === queued.id ? {
+            queuedMessages: (latest.queuedMessages ?? []).flatMap((entry) => (
+              entry.id !== queued.id ? [entry] : retryPending ? [{
                 ...entry,
-                retryPending: retryableQueuedCommandError(error),
+                retryPending: true,
                 lastError: error.message,
-              } : entry
+              }] : []
             )),
           }));
           this.#emit({
-            type: 'queued-message-retry-deferred',
+            type: retryPending ? 'queued-message-retry-deferred' : 'queued-message-rejected',
             sessionId: record.cloudSessionId,
             messageId: queued.id,
             error: error.message,
+            retryable: retryPending,
           });
         }
       }
@@ -1258,7 +1276,7 @@ export class CloudCoordinator extends EventEmitter {
     let restored = 0;
     for (const record of records.slice(0, 32)) {
       const snapshot = bySession.get(record.cloudSessionId);
-      if (!snapshot) continue;
+      if (!snapshot || !conversationSnapshotRestorable(snapshot)) continue;
       const previous = this.#conversationRestores.get(record.cloudSessionId);
       const operation = previous ?? (async () => {
         await this.#seedRemoteProvider(record.provider);
@@ -1354,8 +1372,13 @@ export class CloudCoordinator extends EventEmitter {
             this.#emit({ type: 'continuity-check-deferred', reason, error: error.message });
             return this.snapshot();
           }
-          if (live.some((record) => recoverable.some((entry) => entry.sessionId === record.cloudSessionId))) {
-            return this.spawnAppServer({ selectedProvider: live[0].provider });
+          const pending = live.find((record) => recoverable.some((entry) => (
+            entry.sessionId === record.cloudSessionId
+            && conversationSnapshotRestorable(entry)
+            && entry.pendingWork === true
+          )));
+          if (pending) {
+            return this.spawnAppServer({ selectedProvider: pending.provider });
           }
           return this.snapshot();
         }
@@ -2468,7 +2491,7 @@ export class CloudCoordinator extends EventEmitter {
       const state = cloudState(session.state ?? session.status);
       const updated = await this.#store.transition(record.id, state, {
         cloudSessionId: session.id ?? session.sessionId,
-        handoffAcceptedAt: new Date().toISOString(),
+        ...(canConfirmDurableHandoff(record) ? { handoffAcceptedAt: new Date().toISOString() } : {}),
         serverVersion: session.stateVersion ?? session.version ?? 1,
         configurationSupported: session.configurationSupported === true,
         configurationPending: session.configurationPending === true,
@@ -2534,8 +2557,37 @@ export class CloudCoordinator extends EventEmitter {
     }
   }
 
-  command(input) {
+  async command(input) {
+    if (input?.command === 'queue-message' || input?.command === 'redirect') {
+      await this.#ensureConversationWorker(input.sessionId);
+    }
     return this.#withProfileOperation((profileEpoch) => this.#command(input, profileEpoch));
+  }
+
+  async #ensureConversationWorker(sessionId) {
+    if (this.#stopped) throw transferError('Cloud coordinator is stopped', 'COORDINATOR_STOPPED');
+    const [profile, handoff] = await Promise.all([
+      this.#client.loadProfile().catch(() => null),
+      this.handoffForSession(sessionId),
+    ]);
+    if (profile?.mode !== 'app-hosted' || !handoff?.cloudSessionId) return;
+    const provider = this.#sandboxProvider(profile.sandbox);
+    if (!provider) return;
+    let status;
+    try {
+      status = await provider.status(profile.sandbox);
+    } catch {
+      return;
+    }
+    if (status?.lifecycle !== 'idle') return;
+    const snapshots = await this.#conversationRecovery.refresh({ sessionId: handoff.cloudSessionId });
+    const restorable = snapshots.find((snapshot) => (
+      snapshot.sessionId === handoff.cloudSessionId && conversationSnapshotRestorable(snapshot)
+    ));
+    if (!restorable) {
+      throw transferError('The saved Cloud conversation is no longer available.', 'CONVERSATION_SNAPSHOT_NOT_FOUND');
+    }
+    await this.spawnAppServer({ selectedProvider: handoff.provider });
   }
 
   async #command({ sessionId, command, expectedVersion, payload = {}, message, messageId, attachments = [] }, profileEpoch) {
@@ -2546,6 +2598,9 @@ export class CloudCoordinator extends EventEmitter {
       || (attachments.length > 0 && !['queue-message', 'redirect'].includes(command))) {
       throw new Error('Cloud follow-up attachments are invalid');
     }
+    const serverCommand = CLIENT_TO_SERVER_COMMAND[command];
+    if (!serverCommand) throw new Error('Unsupported cloud command');
+    const localHandoff = await this.#handoffForSession(sessionId, profileEpoch);
     const uploadedAttachments = [];
     for (const attachment of attachments) {
       const bytes = Buffer.from(attachment?.bytes ?? []);
@@ -2574,9 +2629,6 @@ export class CloudCoordinator extends EventEmitter {
       ...(uploadedAttachments.length ? { attachments: uploadedAttachments } : {}),
       ...(expectedVersion == null ? {} : { expectedVersion }),
     };
-    const serverCommand = CLIENT_TO_SERVER_COMMAND[command];
-    if (!serverCommand) throw new Error('Unsupported cloud command');
-    const localHandoff = await this.#handoffForSession(sessionId, profileEpoch);
     if (command === 'configure' && payload.provider !== (localHandoff?.provider ?? this.#remoteSessions.get(sessionId)?.provider)) {
       const auth = await this.#providerAuthFor(payload.provider);
       this.#assertProfileEpoch(profileEpoch);
@@ -2642,7 +2694,7 @@ export class CloudCoordinator extends EventEmitter {
       this.#assertProfileEpoch(profileEpoch);
     } catch (error) {
       if (localHandoff && queuedMessageId) {
-        const retryPending = retryableQueuedCommandError(error);
+        const retryPending = uploadedAttachments.length === 0 && retryableQueuedCommandError(error);
         const updated = await this.#store.patch(localHandoff.id, (latest) => ({
           queuedMessages: (latest.queuedMessages ?? []).flatMap((entry) => {
             if (entry.id !== queuedMessageId || entry.state === 'accepted' || entry.serverQueued === true) {
@@ -2665,6 +2717,14 @@ export class CloudCoordinator extends EventEmitter {
           this.#emit({ type: 'command-completed', command, snapshot });
           return snapshot;
         }
+        this.#emit({
+          type: retryPending ? 'queued-message-retry-deferred' : 'queued-message-rejected',
+          sessionId,
+          messageId: queuedMessageId,
+          error: error.message,
+          retryable: retryPending || uploadedAttachments.length > 0,
+        });
+        if (uploadedAttachments.length > 0) throw attachmentReuploadError(error);
       }
       throw error;
     }
@@ -3473,7 +3533,7 @@ export class CloudCoordinator extends EventEmitter {
       if (!committed) await this.#store.transition(record.id, 'committing');
       const updated = await this.#store.transition(record.id, state, {
         cloudSessionId: session.id ?? session.sessionId ?? record.id,
-        handoffAcceptedAt: new Date().toISOString(),
+        ...(canConfirmDurableHandoff(record) ? { handoffAcceptedAt: new Date().toISOString() } : {}),
         serverVersion: session.stateVersion ?? session.version ?? 1,
         configurationSupported: session.configurationSupported === true,
         configurationPending: session.configurationPending === true,

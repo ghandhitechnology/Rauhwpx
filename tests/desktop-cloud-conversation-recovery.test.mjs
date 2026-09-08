@@ -29,6 +29,7 @@ function snapshot(overrides = {}) {
     sha256: 'b'.repeat(64),
     size: 4096,
     state: 'running',
+    pendingWork: true,
     ...overrides,
   };
 }
@@ -63,6 +64,7 @@ test('conversation descriptors normalize broker timestamps and reject oversized 
     { sha256: 'bad' },
     { sessionId: '../other' },
     { expiresAt: 0 },
+    { pendingWork: undefined },
   ]) assert.throws(() => validateConversationSnapshot(snapshot(patch)), /invalid/);
 });
 
@@ -189,4 +191,81 @@ test('confirmed idle worker plus a matching live snapshot starts one replacement
   assert.deepEqual(first, { restored: true });
   assert.deepEqual(second, { restored: true });
   assert.deepEqual(calls, [{ selectedProvider: 'claude' }]);
+});
+
+test('background continuity leaves idle and ended conversations cold', async (t) => {
+  for (const descriptor of [
+    snapshot({ pendingWork: false }),
+    snapshot({ state: 'completed', pendingWork: false }),
+  ]) {
+    const { directory, store, created } = await handoffFixture(t);
+    const profile = normalizeCloudProfile({
+      mode: 'app-hosted', endpoint: 'https://gone.example/rauhwpx-cloud', serverPublicKey: SERVER_KEY,
+      sandbox: { providerId: 'raucloud', sandboxId: 'run-gone', host: 'gone.example' }, provider: 'claude',
+    });
+    await store.patch(created.id, {
+      destination: {
+        endpoint: profile.endpoint, serverPublicKey: profile.serverPublicKey, mode: 'app-hosted',
+        sandboxId: profile.sandbox.sandboxId, sandboxProvider: profile.sandbox.providerId,
+        protocolVersion: 2, runtimeVersion: null,
+      },
+    });
+    const provider = {
+      id: 'raucloud', displayName: 'Raucloud', configuration: () => ({ configured: true }),
+      spawn() {}, teardown() {},
+      status: async () => ({ lifecycle: 'idle' }), accountStatus: async () => ({ signedIn: true }),
+      getLocalCacheIdentity: async () => 'account-credential-1',
+      listConversations: async () => ({ accountId: 'account-1', conversations: [descriptor] }),
+    };
+    const coordinator = new CloudCoordinator({
+      client: { loadProfile: async () => profile, isPaired: async () => false },
+      store, recoveryDir: path.join(directory, 'recovery'),
+      appServers: [provider],
+    });
+    t.after(() => coordinator.stop());
+    coordinator.spawnAppServer = async () => assert.fail('idle history must not allocate a worker');
+    const result = await coordinator.reconcileContinuity({ reason: 'wake' });
+    assert.equal(result.session.kind, 'running');
+  }
+});
+
+test('explicit follow-up restores an idle conversation before uploading attachments', async (t) => {
+  const { directory, store, created } = await handoffFixture(t);
+  const profile = normalizeCloudProfile({
+    mode: 'app-hosted', endpoint: 'https://gone.example/rauhwpx-cloud', serverPublicKey: SERVER_KEY,
+    sandbox: { providerId: 'raucloud', sandboxId: 'run-gone', host: 'gone.example' }, provider: 'claude',
+  });
+  await store.patch(created.id, {
+    destination: {
+      endpoint: profile.endpoint, serverPublicKey: profile.serverPublicKey, mode: 'app-hosted',
+      sandboxId: profile.sandbox.sandboxId, sandboxProvider: profile.sandbox.providerId,
+      protocolVersion: 2, runtimeVersion: null,
+    },
+  });
+  const order = [];
+  const provider = {
+    id: 'raucloud', displayName: 'Raucloud', configuration: () => ({ configured: true }),
+    spawn() {}, teardown() {},
+    status: async () => ({ lifecycle: 'idle' }), accountStatus: async () => ({ signedIn: true }),
+    getLocalCacheIdentity: async () => 'account-credential-1',
+    listConversations: async () => ({
+      accountId: 'account-1', conversations: [snapshot({ pendingWork: false })],
+    }),
+  };
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => profile,
+      isPaired: async () => false,
+      uploadBlob: async ({ bytes }) => { order.push('upload'); return { blobId: 'blob-new', size: bytes.length }; },
+      command: async () => { order.push('command'); return { messageId: 'message-1', status: 'queued' }; },
+    },
+    store, recoveryDir: path.join(directory, 'recovery'), appServers: [provider],
+  });
+  t.after(() => coordinator.stop());
+  coordinator.spawnAppServer = async () => { order.push('spawn'); return {}; };
+  await coordinator.command({
+    sessionId: 'cloud-session', command: 'queue-message', message: 'Use the attachment', messageId: 'message-1',
+    attachments: [{ id: 'attachment-1', name: 'note.txt', mimeType: 'text/plain', size: 4, bytes: Buffer.from('note') }],
+  });
+  assert.deepEqual(order, ['spawn', 'upload', 'command']);
 });

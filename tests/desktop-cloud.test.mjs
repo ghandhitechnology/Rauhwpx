@@ -162,6 +162,7 @@ test('transfer recovery retries only explicit transport and server failures', ()
     health: { protocolVersion: 1, version: '1.1.0' },
   };
   const destination = coordinatorTest.destinationFromReadiness(readiness);
+  assert.equal(destination.durableConversationRestore, false);
   assert.equal(coordinatorTest.sameDestination(destination, { ...destination, runtimeVersion: '1.1.1' }), true);
   assert.equal(coordinatorTest.sameDestination(destination, { ...destination, sandboxId: 'sandbox-two' }), false);
   assert.equal(coordinatorTest.sameDestination(destination, null), false);

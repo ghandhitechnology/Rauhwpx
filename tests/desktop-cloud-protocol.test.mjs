@@ -92,6 +92,28 @@ test('persistent transfer rejects a one-turn worker before uploading or activati
   assert.deepEqual(requests, ['/rauhwpx-cloud/v1/health']);
 });
 
+test('managed persistent transfer rejects protocol v2 without durable broker restore', async () => {
+  const requests = [];
+  const profile = normalizeCloudProfile({
+    mode: 'app-hosted',
+    endpoint: 'https://managed.example/rauhwpx-cloud',
+    serverPublicKey: SERVER_KEY,
+    sandbox: { providerId: 'raucloud', sandboxId: 'sandbox-old', host: 'managed.example' },
+  });
+  const client = new CloudClient({
+    vault: memoryVault({ 'cloud.profile': JSON.stringify(profile) }),
+    fetchImpl: signedFetch(async (url) => {
+      requests.push(new URL(url).pathname);
+      return jsonResponse({ ok: true, protocolVersion: 1, conversationProtocolVersion: 2, capabilities: {} });
+    }),
+  });
+  await assert.rejects(client.transfer({
+    sessionId: 'persistent-old-managed', provider: 'codex', persistent: true,
+    documentName: 'source.hwpx', documentBytes: Buffer.from('document'), timeline: cloudStartTransfer().timeline,
+  }), { code: 'CLOUD_RUNTIME_OUTDATED', retryable: false });
+  assert.deepEqual(requests, ['/rauhwpx-cloud/v1/health']);
+});
+
 function signedFetch(handler, identity = SERVER_IDENTITY) {
   const serverKey = `ed25519:${identity.publicKey.export({ type: 'spki', format: 'der' }).toString('base64url')}`;
   return async (url, options = {}) => {
@@ -930,6 +952,71 @@ test('rejected queue command removes exactly its staged durable message', async 
   assert.deepEqual(record.queuedMessages.map((message) => message.id), ['message-existing']);
 });
 
+test('lost attachment acceptance asks for re-upload without leaving a queued draft', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-attachment-reupload-'));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const created = await store.create({
+    sessionId: 'desktop-attachment', threadId: 'thread-attachment', documentId: 'document-attachment',
+    documentName: 'source.hwpx', documentBytes: Buffer.from('document'), timeline: null,
+    provider: 'codex', limits: { maxTurns: 100 },
+  });
+  await store.transition(created.id, 'uploading');
+  await store.transition(created.id, 'committing');
+  await store.transition(created.id, 'running', { cloudSessionId: 'cloud-attachment', serverVersion: 2 });
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => null,
+      uploadBlob: async ({ bytes }) => ({ blobId: 'dead-worker-blob', size: bytes.length }),
+      command: async () => { throw Object.assign(new Error('worker disappeared'), { code: 'ECONNRESET' }); },
+    },
+    store, provisioner: {}, recoveryDir: path.join(directory, 'recovery'),
+  });
+  t.after(async () => {
+    await coordinator.stop();
+    await rm(directory, { recursive: true, force: true });
+  });
+  await assert.rejects(coordinator.command({
+    sessionId: 'cloud-attachment', command: 'queue-message', message: 'Read this', messageId: 'message-attachment',
+    attachments: [{ id: 'attachment-1', name: 'note.txt', mimeType: 'text/plain', size: 4, bytes: Buffer.from('note') }],
+  }), { code: 'ATTACHMENT_REUPLOAD_REQUIRED', retryable: true });
+  assert.deepEqual((await store.get(created.id)).queuedMessages, []);
+});
+
+test('permanently rejected queued retry removes its phantom draft', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-message-terminal-retry-'));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const created = await store.create({
+    sessionId: 'desktop-terminal', threadId: 'thread-terminal', documentId: 'document-terminal',
+    documentName: 'source.hwpx', documentBytes: Buffer.from('document'), timeline: null,
+    provider: 'codex', limits: { maxTurns: 100 },
+  });
+  await store.transition(created.id, 'uploading');
+  await store.transition(created.id, 'committing');
+  await store.transition(created.id, 'running', { cloudSessionId: 'cloud-terminal', serverVersion: 2 });
+  await store.patch(created.id, { queuedMessages: [{
+    id: 'message-terminal', text: 'Rejected draft', queuedAt: new Date().toISOString(), state: 'queued',
+    commandId: 'message_terminal', commandType: 'message.queue', commandPayload: { messageId: 'message-terminal' },
+    retryPending: true,
+  }] });
+  const rejected = Promise.withResolvers();
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => null, isPaired: async () => false,
+      command: async () => { throw Object.assign(new Error('invalid message'), { status: 400 }); },
+      watchSession: async (_id, _after, { signal }) => new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true })),
+    },
+    store, provisioner: {}, recoveryDir: path.join(directory, 'recovery'),
+  });
+  coordinator.on('event', (event) => { if (event.type === 'queued-message-rejected') rejected.resolve(); });
+  t.after(async () => {
+    await coordinator.stop();
+    await rm(directory, { recursive: true, force: true });
+  });
+  await coordinator.start();
+  await rejected.promise;
+  assert.deepEqual((await store.get(created.id)).queuedMessages, []);
+});
+
 test('an ambiguous queued message keeps its durable draft and retries the same command after restart', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-message-retry-'));
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
@@ -1044,6 +1131,47 @@ test('activation receipt skips historical staged events before watching live upd
   assert.equal(record.serverVersion, 3);
   assert.equal(Number.isFinite(Date.parse(record.handoffAcceptedAt)), true);
   assert.equal((await coordinator.snapshot({ documentId: 'document-1' })).session.handoffAcceptedAt, record.handoffAcceptedAt);
+});
+
+test('old managed activation never publishes a durable handoff receipt', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-old-managed-receipt-'));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const profile = normalizeCloudProfile({
+    mode: 'app-hosted', endpoint: 'https://old-managed.example/rauhwpx-cloud', serverPublicKey: SERVER_KEY,
+    sandbox: { providerId: 'raucloud', sandboxId: 'old-worker', host: 'old-managed.example' },
+  });
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => profile,
+      isPaired: async () => true,
+      assertTransferReady: async () => ({
+        profile,
+        health: { ok: true, protocolVersion: 1, conversationProtocolVersion: 2, capabilities: {} },
+      }),
+      transfer: async ({ sessionId, onProgress, onSessionCreated, onSessionActivated }) => {
+        await onProgress({ phase: 'committing', loaded: 1, total: 1 });
+        await onSessionCreated({ sessionId, stateVersion: 1 });
+        await onSessionActivated({ sessionId, stateVersion: 2, eventSeq: 2 });
+        return { id: sessionId, status: 'queued', stateVersion: 2 };
+      },
+      watchSession: async (_id, _after, { signal }) => new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true })),
+    },
+    store, provisioner: {}, recoveryDir: path.join(directory, 'recovery'),
+  });
+  t.after(async () => {
+    await coordinator.stop();
+    await rm(directory, { recursive: true, force: true });
+  });
+  const result = await coordinator.transfer(cloudStartTransfer({
+    startId: 'oldmanagedstart', documentId: 'document-old-managed',
+    document: { fileName: 'source.hwpx', bytes: new Uint8Array(Buffer.from('document')) },
+    agent: 'codex', model: 'gpt-5.6', effort: 'high', workflow: 'direct', references: [],
+  }), {
+    originSessionId: 'desktop-old-managed',
+  });
+  const [record] = await store.list();
+  assert.equal(record.handoffAcceptedAt, undefined);
+  assert.equal(result.session.handoffAcceptedAt, undefined);
 });
 
 test('verified result confirmation resumes after a crash boundary without redownloading', async (t) => {
