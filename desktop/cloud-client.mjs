@@ -840,9 +840,17 @@ export class CloudClient {
     if (document.length > MAX_RESULT_BYTES) throw new Error('Document exceeds the 64 MiB cloud limit');
     if (!validPortableTimeline(timeline)) throw new Error('Portable cloud timeline is invalid');
     if (persistent || executionConfig?.workflow === 'question') {
-      const health = await this.health(null, { signal });
-      if (persistent && health.conversationProtocolVersion !== 2) {
-        throw new CloudHttpError('Update the Cloud server before starting a persistent conversation.', {
+      const [health, profile] = await Promise.all([
+        this.health(null, { signal }),
+        persistent ? this.loadProfile().catch(() => null) : null,
+      ]);
+      const durableManagedConversation = profile?.mode !== 'app-hosted'
+        || health?.capabilities?.conversationRestore === true
+        || health?.conversationRestore === true;
+      if (persistent && (health.conversationProtocolVersion !== 2 || !durableManagedConversation)) {
+        throw new CloudHttpError(profile?.mode === 'app-hosted'
+          ? 'Recreate the managed Cloud server before starting this conversation.'
+          : 'Update the Cloud server before starting a persistent conversation.', {
           code: 'CLOUD_RUNTIME_OUTDATED', retryable: false,
         });
       }
@@ -947,7 +955,9 @@ export class CloudClient {
     const activated = await this.command(
       cloudSessionId,
       'session.activate',
-      { expectedVersion: created.stateVersion ?? created.version ?? 1 },
+      // Creation always starts at version 1. Keep the idempotent activation
+      // payload stable when a full transfer is resumed after its receipt is lost.
+      { expectedVersion: 1 },
       `activate_${String(sessionId).replace(/[^A-Za-z0-9_-]/g, '_')}`,
       { signal },
     );
@@ -1359,6 +1369,17 @@ export class CloudClient {
   async sessions(options = {}) {
     const result = await this.#request('/v1/sessions', options);
     return Array.isArray(result.sessions) ? result.sessions : [];
+  }
+
+  restoreSession(sourceSessionId, options = {}) {
+    return this.#request('/v1/sessions/restore', {
+      method: 'POST',
+      signal: options.signal,
+      retryAttempts: options.retryAttempts ?? SAFE_REQUEST_ATTEMPTS,
+      retryBaseMs: options.retryBaseMs,
+      timeoutMs: options.timeoutMs ?? 30_000,
+      body: { sourceSessionId },
+    });
   }
 
   async takeoverState(sessionId, options = {}) {

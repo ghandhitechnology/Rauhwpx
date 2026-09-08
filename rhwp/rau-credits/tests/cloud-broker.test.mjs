@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { setImmediate as nextTick } from 'node:timers/promises';
 import test from 'node:test';
-import { createRaucloudBroker, CLOUD_ALLOCATION_LEASE_MS, CLOUD_WARM_IDLE_MS } from '../cloud-broker.mjs';
+import { createRaucloudBroker, CLOUD_ALLOCATION_LEASE_MS, CLOUD_WARM_IDLE_MS, CLOUD_FINAL_CHECKPOINT_MS,
+  CLOUD_DAILY_LIMIT_MS, CLOUD_GRACE_LIMIT_MS } from '../cloud-broker.mjs';
 
 function fixture({ provisioner = null, at = Date.parse('2026-09-05T23:59:30Z') } = {}) {
   let state = { users: { 'account-1': { id: 'account-1', email: 'user@example.com' } } };
@@ -77,9 +78,41 @@ test('provisioning and warm idle are unbilled, and repeated allocation requests 
 const REMOTE = { providerId: 'railway', serviceId: 'service-1', projectId: 'project-1', environmentId: 'environment-1' };
 const RECEIPT = { endpoint: 'https://worker.up.railway.app/rauhwpx-cloud', serverPublicKey: `ed25519:${'A'.repeat(43)}`, pairingCode: 'ABCD-EFGH-JKLM' };
 
+for (const finish of [true, false]) {
+  test(`quota fuse allows one bounded final checkpoint window${finish ? ' and tears down after its receipt' : ' before forced cleanup'}`, async () => {
+    const deleted = [];
+    const setup = fixture({ at: Date.parse('2026-09-05T10:00:00Z'), provisioner: {
+      provision: async () => ({ remote: REMOTE, receipt: RECEIPT }),
+      teardown: async (remote) => { deleted.push(remote.serviceId); },
+    } });
+    const created = await setup.create();
+    await setup.waitFor((state) => state.raucloud.accounts['account-1'].worker?.status === 'ready');
+    await setup.broker.confirmCloudAllocation('worker-secret', created.run.id);
+    setup.advance(CLOUD_DAILY_LIMIT_MS + CLOUD_GRACE_LIMIT_MS);
+    const stop = await setup.broker.heartbeatCloudRun('worker-secret', created.run.id);
+    assert.equal(stop.mustStop, true);
+    assert.equal(stop.run.status, 'checkpointing');
+    assert.equal(stop.run.inputBlocked, true);
+    assert.deepEqual(deleted, []);
+    await assert.rejects(setup.broker.confirmCloudAllocation('worker-secret', created.run.id), { code: 'CLOUD_RUN_STATE_INVALID' });
+    if (finish) {
+      const completed = await setup.broker.completeCloudRun('worker-secret', created.run.id, { checkpointId: 'final-boundary' });
+      assert.equal(completed.run.status, 'completed');
+    } else {
+      setup.advance(CLOUD_FINAL_CHECKPOINT_MS - 1);
+      await setup.broker.reconcileCloudUsage();
+      assert.deepEqual(deleted, []);
+      setup.advance(1);
+      await setup.broker.reconcileCloudUsage();
+    }
+    assert.deepEqual(deleted, ['service-1']);
+    assert.equal((await setup.status(created.run.id)).quota.usedMs, CLOUD_DAILY_LIMIT_MS);
+  });
+}
+
 for (const workerStatus of ['ready', 'warm']) {
   for (const renew of [false, true]) {
-    test(`${workerStatus} worker expires after 20 unbilled idle minutes${renew ? ' from workspace activity' : ''}`, async () => {
+    test(`${workerStatus} worker expires after two unbilled idle hours${renew ? ' from workspace activity' : ''}`, async () => {
       const at = Date.parse('2026-09-05T10:00:00Z');
       const deleted = [];
       const setup = fixture({ at, provisioner: {
@@ -92,14 +125,14 @@ for (const workerStatus of ['ready', 'warm']) {
         await setup.broker.confirmCloudAllocation('worker-secret', created.run.id);
         await setup.broker.completeCloudRun('worker-secret', created.run.id);
       }
-      assert.equal((await setup.status(created.run.id)).worker.warmUntil, at + 20 * 60_000);
+      assert.equal((await setup.status(created.run.id)).worker.warmUntil, at + CLOUD_WARM_IDLE_MS);
 
       if (renew) {
         setup.advance(10 * 60_000);
         const touched = await setup.broker.touchCloudWorkspace('worker-secret', created.run.id);
-        assert.equal(touched.worker.warmUntil, at + 30 * 60_000);
+        assert.equal(touched.worker.warmUntil, at + 10 * 60_000 + CLOUD_WARM_IDLE_MS);
       }
-      setup.advance(20 * 60_000 - 1);
+      setup.advance(CLOUD_WARM_IDLE_MS - 1);
       await setup.broker.reconcileCloudUsage();
       const retained = await setup.status(created.run.id);
       assert.equal(retained.worker.status, workerStatus);

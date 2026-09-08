@@ -354,7 +354,7 @@ test('HTTP handoff, idempotent command, SSE replay, and verified result download
   });
   assert.equal(blockedMessage.status, 409);
   assert.equal((await blockedMessage.json()).error.code, 'RAUCLOUD_INPUT_BLOCKED');
-  assert.deepEqual(admittedCommands, ['session.activate', 'session.activate', 'message.queue']);
+  assert.deepEqual(admittedCommands, ['session.activate', 'message.queue']);
 
   const controller = new AbortController();
   const eventNonce = proofNonce();
