@@ -38,9 +38,9 @@ function ownedBackendPath(pathname) {
   return `${parsed.pathname}${parsed.search}`;
 }
 
-async function boundedJson(response) {
+async function boundedJson(response, maxBytes = MAX_RESPONSE_BYTES) {
   const declared = Number(response.headers?.get?.('content-length'));
-  if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
+  if (Number.isFinite(declared) && declared > maxBytes) {
     try { await response?.body?.cancel?.(); } catch {}
     throw creditsError('RAU_CREDITS_RESPONSE_TOO_LARGE', 'Rau 크레딧 서버 응답이 너무 커요.');
   }
@@ -57,7 +57,7 @@ async function boundedJson(response) {
         break;
       }
       total += value.byteLength;
-      if (total > MAX_RESPONSE_BYTES) {
+      if (total > maxBytes) {
         await reader.cancel().catch(() => {});
         throw creditsError('RAU_CREDITS_RESPONSE_TOO_LARGE', 'Rau 크레딧 서버 응답이 너무 커요.');
       }
@@ -138,7 +138,7 @@ export function createRauCreditsClient({
 } = {}) {
   const origin = String(baseUrl).replace(/\/$/, '');
 
-  async function request(pathname, init = {}, { signal } = {}) {
+  async function request(pathname, init = {}, { signal, maxResponseBytes = MAX_RESPONSE_BYTES } = {}) {
     if (signal?.aborted) throw abortError();
     const controller = new AbortController();
     let timedOut = false;
@@ -158,7 +158,7 @@ export function createRauCreditsClient({
       return await Promise.race([
         (async () => {
           const response = await fetchImpl(`${origin}${pathname}`, { ...init, signal: controller.signal });
-          const body = await boundedJson(response);
+          const body = await boundedJson(response, maxResponseBytes);
           if (!response.ok) {
             const error = creditsError(
               body?.error ?? body?.code ?? 'RAU_CREDITS_HTTP',
@@ -300,7 +300,9 @@ export function createRauCreditsClient({
         ...(backendRequest?.body !== undefined
           ? { body: JSON.stringify(backendRequest.body) }
           : {}),
-      }, { signal });
+      }, { signal, maxResponseBytes: method === 'GET'
+        && /^\/v1\/cloud\/merge-requests(?:\?|\/|$)/.test(pathname)
+        ? 2 * 1024 * 1024 : MAX_RESPONSE_BYTES });
     },
     /**
      * ready 가 될 때까지 폴링한다. 저장 확인 전까지 같은 키를 다시 받을 수 있다.

@@ -29,6 +29,12 @@ The implementation keeps these boundaries:
   conversation or become ordinary messages accidentally.
 - Stable document/timeline boundaries are archived for recovery. Neither turn
   completion nor checkpoint mirroring automatically overwrites the origin.
+- Raucloud uploads each completed turn document and its merge identity to the
+  account broker before acknowledging the stable turn boundary. Encrypted broker
+  artifacts survive deletion of the temporary instance for 30 days. A sleeping
+  laptop discovers them through the broker when the document reopens. Downloaded
+  copies remain available locally, including offline under the same account
+  credential; the desktop verifies the exact size and SHA-256 before merging.
 - Completed turns offer **Cloud 변경 병합** on the originating client. The exact
   handoff is retained in Hancom Git and later checkpoints descend from that Cloud
   branch. Local file saves leave edits uncommitted. Before merging, the user can

@@ -506,6 +506,7 @@ export function createRaucloudBroker({
   store,
   mutate,
   authenticateAccessToken,
+  mergeArtifacts = null,
   workerSecret = '',
   provisioner = null,
   provisionerRequired = false,
@@ -1010,6 +1011,41 @@ export function createRaucloudBroker({
       });
       await cleanupPendingRemotes();
       return result;
+    },
+
+    async uploadCloudMergeRequest(secret, runId, input) {
+      const state = await store.load();
+      const cloud = ensureRaucloudState(state);
+      const run = cloud.runs[validId(runId, 'runId')];
+      const worker = run && cloud.accounts[run.accountId]?.worker;
+      // Historical run hashes remain for receipts. Only the current assignment
+      // authorizes new writes, including retries while the worker stays warm.
+      if (!run || !worker || worker.runId !== run.id || worker.id !== run.workerId
+        || !sameSecret(worker.workerTokenHash, run.workerTokenHash)
+        || !sameSecret(worker.workerTokenHash, secretHash(secret))
+        || !['active', 'ready', 'checkpointing'].includes(run.status)
+        || !['active', 'ready', 'warm'].includes(worker.status)
+        || run.teardownRequestedAt != null || run.remoteDeletedAt != null) {
+        throw cloudError('CLOUD_WORKER_UNAUTHORIZED', 'This worker no longer owns the Raucloud run');
+      }
+      if (!mergeArtifacts) throw cloudError('CLOUD_UNAVAILABLE', 'Checkpoint storage is unavailable');
+      return mergeArtifacts.upload(run.accountId, run.id, input);
+    },
+
+    async listCloudMergeRequests(token, sessionId) {
+      const accountId = await identity(token);
+      if (!mergeArtifacts) throw cloudError('CLOUD_UNAVAILABLE', 'Checkpoint storage is unavailable');
+      return { ...await mergeArtifacts.list(accountId, sessionId), accountId };
+    },
+
+    async downloadCloudMergeChunk(token, id, index) {
+      const accountId = await identity(token);
+      if (!mergeArtifacts) throw cloudError('CLOUD_UNAVAILABLE', 'Checkpoint storage is unavailable');
+      return mergeArtifacts.chunk(accountId, id, index);
+    },
+
+    async cleanupCloudMergeRequests() {
+      await mergeArtifacts?.cleanup();
     },
 
     async confirmCloudAllocation(secret, runId) {

@@ -1539,7 +1539,7 @@ export class SessionStore {
     kind = 'turn',
     checkpoint,
     timeline,
-  }) {
+  }, { beforeCommit } = {}) {
     if (typeof operationId !== 'string' || !/^[A-Za-z0-9._:-]{1,160}$/.test(operationId)) {
       throw new CloudError('INVALID_REQUEST', 'Boundary operationId is invalid');
     }
@@ -1552,23 +1552,34 @@ export class SessionStore {
     }
     this.#requireBlob(checkpoint, 'Boundary checkpoint');
     this.#requireBlob(timeline, 'Boundary timeline');
+    // Validate before external storage, then validate again when committing:
+    // another control request may revoke the worker while the upload runs.
+    const workerTokenHash = this.getSessionRow(sessionId).worker_token_hash;
+    const validateIdentity = () => {
+      const session = this.getSessionRow(sessionId);
+      if (session.status !== 'running') throw new CloudError('INVALID_SESSION_STATE', 'Session is not running', 409);
+      if (Boolean(session.worker_token_hash) !== Boolean(workerTokenHash)
+        || (workerTokenHash && !Buffer.from(session.worker_token_hash).equals(Buffer.from(workerTokenHash)))) {
+        throw new CloudError('WORKER_UNAUTHORIZED', 'Worker changed while the boundary was being retained', 401);
+      }
+      const existing = this.database.prepare(`
+        SELECT * FROM session_checkpoints WHERE session_id = ? AND operation_id = ?
+      `).get(sessionId, operationId);
+      if (existing && (existing.turn_number !== turnNumber || existing.revision !== revision
+        || existing.boundary_kind !== kind || existing.blob_sha256 !== checkpoint.blobId
+        || existing.timeline_blob_sha256 !== timeline.blobId || existing.timeline_size !== timeline.size)) {
+        throw new CloudError('BOUNDARY_OPERATION_CONFLICT', 'Boundary operationId was reused with different artifacts', 409);
+      }
+      return existing;
+    };
+    validateIdentity();
+    await beforeCommit?.({ operationId, turnNumber, revision, kind, checkpoint, timeline });
     const events = [];
     let previousTimelineBlobId = null;
     let boundary;
     transaction(this.database, () => {
-      const session = this.getSessionRow(sessionId);
-      if (session.status !== 'running') throw new CloudError('INVALID_SESSION_STATE', 'Session is not running', 409);
-      const existing = this.database.prepare(`
-        SELECT * FROM session_checkpoints WHERE session_id = ? AND operation_id = ?
-      `).get(sessionId, operationId);
+      const existing = validateIdentity();
       if (existing) {
-        if (existing.turn_number !== turnNumber || existing.revision !== revision
-          || existing.boundary_kind !== kind
-          || existing.blob_sha256 !== checkpoint.blobId
-          || existing.timeline_blob_sha256 !== timeline.blobId
-          || existing.timeline_size !== timeline.size) {
-          throw new CloudError('BOUNDARY_OPERATION_CONFLICT', 'Boundary operationId was reused with different artifacts', 409);
-        }
         boundary = this.#publicBoundary(sessionId, this.#boundaryRow(sessionId, operationId));
         return;
       }

@@ -79,7 +79,7 @@ import {
   hasPendingLaunchCleanupSync,
   retainLaunchRootForProcessCleanupSync,
 } from '../rhwp/rhwp-agent/credential-mirror.mjs';
-import { createAccountSession } from '../rhwp/rhwp-agent/account-session.mjs';
+import { ACCOUNT_SESSION_SECRET_ID, createAccountSession } from '../rhwp/rhwp-agent/account-session.mjs';
 import { createRauCreditsClient, rauCreditsUrl } from '../rhwp/rhwp-agent/rau-credits-client.mjs';
 import {
   launchStoragePaths,
@@ -1625,6 +1625,10 @@ if (!hasSingleInstanceLock) {
         authorizeOwnedBackend: (request, options) => (
           cloudAccountSession.authorizeOwnedBackend(request, options)
         ),
+        getLocalCacheIdentity: async () => {
+          const token = await secretVault.get(ACCOUNT_SESSION_SECRET_ID);
+          return token ? createHash('sha256').update(`raucloud-merge-cache:${raucloudBrokerUrl()}:${token}`).digest('hex') : null;
+        },
         getDeviceIdentity: raucloudDeviceIdentity,
       })],
       collectProviderAuth: (provider) => collectProviderAuth(provider, {
