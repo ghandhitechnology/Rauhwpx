@@ -181,6 +181,7 @@ export function createCloudHttpHandler({
   applyProviderAuth = null,
   seedProvider,
   raucloudLease = null,
+  conversationBackup = null,
 }, { workerOnly = false } = {}) {
   const authenticate = (request) => auth.authenticate(bearer(request));
   const authenticateWorker = (request, sessionId, options) => (
@@ -219,6 +220,8 @@ export function createCloudHttpHandler({
           version: SERVICE_VERSION,
           protocolVersion: PROTOCOL_VERSION,
           conversationProtocolVersion: ROOM_PROTOCOL_VERSION,
+          ...(conversationBackup?.enabled ? { capabilities: { conversationRestore: true,
+            conversationResourceMaxBytes: 128 * 1024 * 1024 } } : {}),
           supportedWorkflows: EXECUTION_WORKFLOWS,
           serverPublicKey: identity.serverPublicKey,
           serverId: identity.serverId,
@@ -352,6 +355,9 @@ export function createCloudHttpHandler({
             }
           }
           const saved = sessionStore.appendEvents(sessionId, events);
+          // Progress text is coalesced by the backup maintenance tick. Accepted
+          // commands, turns, waits and boundaries flush before their receipts.
+          conversationBackup?.markDirty(sessionId);
           json(response, 201, body.events ? { events: saved } : saved[0]);
           return;
         }
@@ -373,33 +379,39 @@ export function createCloudHttpHandler({
         }
         if (request.method === 'POST' && action === '/waits') {
           const body = await readJson(request);
-          json(response, 201, sessionStore.createWait(sessionId, {
+          const result = sessionStore.createWait(sessionId, {
             turnNumber: body.turnNumber,
             kind: body.kind,
             payload: body.payload ?? {},
-          }));
+          });
+          await conversationBackup?.save(sessionId);
+          json(response, 201, result);
           return;
         }
         if (request.method === 'POST' && action === '/configuration-restart-ack') {
           const result = sessionStore.acknowledgeConfigurationRestart(sessionId);
+          await conversationBackup?.save(sessionId);
           await raucloudLease?.checkpoint?.();
           json(response, 200, result);
           return;
         }
         if (request.method === 'POST' && action === '/pause-ack') {
           const result = sessionStore.acknowledgePause(sessionId);
+          await conversationBackup?.save(sessionId);
           await raucloudLease?.checkpoint?.();
           json(response, 200, result);
           return;
         }
         if (request.method === 'POST' && action === '/sleep-ack') {
           const result = sessionStore.acknowledgeSleep(sessionId);
-          await raucloudLease?.checkpoint?.();
+          await conversationBackup?.save(sessionId);
+          await raucloudLease?.complete?.();
           json(response, 200, result);
           return;
         }
         if (request.method === 'POST' && action === '/takeover-ack') {
           const result = sessionStore.acknowledgeTakeover(sessionId);
+          await conversationBackup?.save(sessionId);
           await raucloudLease?.checkpoint?.();
           json(response, 200, result);
           return;
@@ -482,17 +494,20 @@ export function createCloudHttpHandler({
             }),
           });
           raucloudLease?.rememberCheckpoint?.(body.operationId);
+          await conversationBackup?.save(sessionId);
           json(response, 201, result);
           return;
         }
         if (request.method === 'POST' && action === '/turn-start') {
           const body = await readJson(request);
           await raucloudLease?.beforeTurnStart?.();
-          json(response, 201, sessionStore.beginTurn(sessionId, {
+          const result = sessionStore.beginTurn(sessionId, {
             turnNumber: body.turnNumber,
             messageId: body.messageId ?? null,
             mode: body.mode,
-          }));
+          });
+          await conversationBackup?.save(sessionId);
+          json(response, 201, result);
           return;
         }
         if (request.method === 'POST' && action === '/turn-complete') {
@@ -501,6 +516,7 @@ export function createCloudHttpHandler({
             outcome: body.outcome,
             boundaryOperationId: body.boundaryOperationId ?? null,
           });
+          await conversationBackup?.save(sessionId);
           if (raucloudLease?.queueCompletion) {
             raucloudLease.queueCompletion(body.boundaryOperationId ?? null);
             void raucloudLease.heartbeat().catch((error) => logger?.error('broker.completion_failed', { message: error.message }));
@@ -510,7 +526,9 @@ export function createCloudHttpHandler({
         }
         if (request.method === 'POST' && action === '/result') {
           const body = await readJson(request);
-          json(response, 200, sessionStore.publishResult(sessionId, { blobId: body.blobId, size: body.size }));
+          const result = sessionStore.publishResult(sessionId, { blobId: body.blobId, size: body.size });
+          await conversationBackup?.save(sessionId);
+          json(response, 200, result);
           return;
         }
         if (request.method === 'POST' && action === '/timeline') {
@@ -525,6 +543,7 @@ export function createCloudHttpHandler({
             code: failureCode,
             message: String(body.message || 'Worker suspended').slice(0, 1024),
           });
+          await conversationBackup?.save(sessionId);
           await raucloudLease?.release?.(failureCode);
           json(response, 200, result);
           return;
@@ -567,7 +586,16 @@ export function createCloudHttpHandler({
         return;
       }
       if (request.method === 'POST' && pathname === '/v1/sessions') {
-        json(response, 201, sessionStore.createSession(device, parseSessionCreate(await readJson(request))));
+        const input = parseSessionCreate(await readJson(request));
+        conversationBackup?.validateCreate(input);
+        const result = sessionStore.createSession(device, input);
+        await conversationBackup?.save(result.id);
+        json(response, 201, result);
+        return;
+      }
+      if (request.method === 'POST' && pathname === '/v1/sessions/restore') {
+        if (!conversationBackup?.enabled) throw new CloudError('CONVERSATION_RESTORE_UNAVAILABLE', 'Conversation restore is unavailable', 501);
+        json(response, 200, await conversationBackup.restore(device, (await readJson(request)).sourceSessionId));
         return;
       }
       const displayCapabilityRoute = pathname.match(/^\/v1\/sessions\/([^/]+)\/display$/);
@@ -784,8 +812,15 @@ export function createCloudHttpHandler({
         }
         if (request.method === 'POST' && sessionRoute[2] === '/commands') {
           const command = parseCommand(await readJson(request));
-          await raucloudLease?.assertCommandAllowed?.(command.type);
-          json(response, 200, sessionStore.executeCommand(device, sessionId, command));
+          // A quota gate blocks new input, not an authenticated exact replay of
+          // an existing command. Its receipt still waits for broker durability.
+          let result = sessionStore.commandReceipt(device, sessionId, command);
+          if (!result) {
+            await raucloudLease?.assertCommandAllowed?.(command.type);
+            result = sessionStore.executeCommand(device, sessionId, command);
+          }
+          await conversationBackup?.save(sessionId);
+          json(response, 200, result);
           return;
         }
         if (request.method === 'GET' && sessionRoute[2] === '/timeline') {
@@ -895,11 +930,13 @@ export function createCloudHttpHandler({
           return;
         }
         if (request.method === 'POST' && resultRoute[2] === '/download-confirmed') {
-          json(response, 200, await sessionStore.confirmResultDownloaded(
+          const result = await sessionStore.confirmResultDownloaded(
             device,
             sessionId,
             parseDownloadConfirmation(await readJson(request)),
-          ));
+          );
+          await conversationBackup?.save(sessionId);
+          json(response, 200, result);
           return;
         }
       }

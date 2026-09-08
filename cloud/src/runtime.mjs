@@ -17,6 +17,7 @@ import { Scheduler } from './scheduler.mjs';
 import { SecretVault } from './secret-vault.mjs';
 import { SessionStore } from './session-store.mjs';
 import { ProviderCliManager } from './provider-cli.mjs';
+import { ConversationBackup } from './conversation-backup.mjs';
 
 function listen(server, target, host) {
   return new Promise((resolve, reject) => {
@@ -93,6 +94,8 @@ export function createCloudRuntime(config, dependencies = {}) {
     },
   });
   const seedProvider = dependencies.seedProvider ?? ((input) => providerCli.seed(input.provider, input));
+  const conversationBackup = dependencies.conversationBackup ?? new ConversationBackup({ sessionStore, blobStore, lease: raucloudLease });
+  let backupTimer = null;
   const services = {
     auth,
     blobStore,
@@ -104,6 +107,7 @@ export function createCloudRuntime(config, dependencies = {}) {
     vault,
     seedProvider,
     raucloudLease,
+    conversationBackup,
     applyProviderAuth: async (provider, raw) => {
       const imported = await applyProviderAuth(provider, parseProviderAuth(provider, raw), {
         vault,
@@ -160,6 +164,12 @@ export function createCloudRuntime(config, dependencies = {}) {
         await listen(publicServer, config.port, config.host);
         await providerManager.probeAll(config.startupProviders);
         await scheduler.start();
+        if (conversationBackup.enabled) {
+          backupTimer = setInterval(() => { void conversationBackup.flush().catch((error) => {
+            logger.error('conversation.backup_failed', { code: error.code, message: error.message });
+          }); }, 15_000);
+          backupTimer.unref?.();
+        }
         return {
           endpoint: `http://${config.host}:${config.port}${config.basePath}`,
           workerControlSocket: scheduler.controlEndpoint.socketPath ?? null,
@@ -177,7 +187,9 @@ export function createCloudRuntime(config, dependencies = {}) {
       }
     },
     async stop() {
+      if (backupTimer) clearInterval(backupTimer);
       await scheduler.stop();
+      await conversationBackup.flush().catch((error) => logger.error('conversation.backup_failed', { code: error.code, message: error.message }));
       await raucloudLease.release('CONTROL_PLANE_SHUTDOWN').catch((error) => {
         logger.error('raucloud.release_failed', { code: error.code, message: error.message });
       });
