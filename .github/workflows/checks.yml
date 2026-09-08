@@ -234,7 +234,7 @@ jobs:
         run: npm --prefix rhwp/rhwp-studio run test:browser
       - name: Test sidebar server setup and recovery
         run: npm run test:sidebar
-      - name: Test document shortcuts and deletion
+      - name: Test document shortcuts, deletion, and agent table reveal
         working-directory: rhwp/rhwp-studio
         env:
           VITE_URL: http://127.0.0.1:7700
@@ -254,6 +254,7 @@ jobs:
           curl --fail --silent "$VITE_URL" > /dev/null
           node e2e/global-shortcut.test.mjs --mode=headless
           node e2e/deletion-caret.test.mjs --mode=headless
+          node e2e/agent-table-reveal.test.mjs --mode=headless
       - name: Test Cloud onboarding, conversation handoff, and display interaction
         run: |
           npm --prefix rhwp/rhwp-studio run e2e:cloud-onboarding
