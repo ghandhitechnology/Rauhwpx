@@ -383,6 +383,15 @@ export function createRaucloudBrokerClient({
         ...(timeoutMs == null ? {} : { timeoutMs }),
       });
     },
+    async listMergeRequests({ sessionId, signal } = {}) {
+      return request('/v1/cloud/merge-requests', { query: { sessionId }, signal });
+    },
+    async listConversations({ sessionId, signal } = {}) {
+      return request('/v1/cloud/conversations', { query: { sessionId }, signal });
+    },
+    async downloadMergeChunk(id, index, { signal } = {}) {
+      return request(`/v1/cloud/merge-requests/${encodeURIComponent(id)}/chunks/${index}`, { signal });
+    },
     async createRun({ deviceName, provider = 'codex', signal = null, idempotencyKey = randomUUID() } = {}) {
       const currentDevice = await device(deviceName);
       return request('/v1/cloud/runs', {
@@ -533,6 +542,10 @@ export function createRaucloudBrokerProvider(options = {}) {
       const payload = await client.status({ runId: sandbox?.sandboxId, signal });
       return { ...normalizedStatus(payload), account: accountSnapshotFrom(payload) };
     },
+    ...(options.getLocalCacheIdentity ? { getLocalCacheIdentity: options.getLocalCacheIdentity } : {}),
+    listMergeRequests(options) { return client.listMergeRequests(options); },
+    listConversations(options) { return client.listConversations(options); },
+    downloadMergeChunk(id, index, options) { return client.downloadMergeChunk(id, index, options); },
     async accountStatus({ signal = null } = {}) {
       try {
         return accountSnapshotFrom(await client.status({ signal }));

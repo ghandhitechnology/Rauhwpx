@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { createHash } from 'node:crypto';
+import { Readable } from 'node:stream';
 
 import { parseConfig } from '../src/config.mjs';
 import { RaucloudLeaseController } from '../src/raucloud-lease.mjs';
@@ -88,9 +90,46 @@ test('brief broker outages preserve the worker, but the bounded grace expires', 
     assert.deepEqual(await lease.heartbeat(), { mustStop: false, degraded: true });
     now += 15_000;
   }
-  now = 90_000;
+  now = 10 * 60_000;
   assert.deepEqual(lease.status(), { mustStop: true, degraded: true });
   await assert.rejects(lease.assertCommandAllowed('session.resume'), { code: 'RAUCLOUD_INPUT_BLOCKED' });
+});
+
+test('the last metered allowance stops offline work before the broker outage grace ends', async () => {
+  let now = 0;
+  let offline = false;
+  const { lease } = controller((url) => {
+    if (offline) throw new Error('offline');
+    if (url.pathname.endsWith('/lease')) return response({ runId: 'run-1', status: 'ready' });
+    return response({ run: { status: 'active' }, quota: { remainingMs: 1_000,
+      grace: { active: false, remainingMs: 2_000 } } });
+  }, { now: () => now });
+  await lease.beforeTurnStart();
+  offline = true;
+  assert.equal((await lease.heartbeat()).mustStop, false);
+  now = 2_999;
+  assert.equal(lease.status().mustStop, false);
+  now = 3_000;
+  assert.equal(lease.status().mustStop, true);
+});
+
+test('a broker outage longer than the old ninety-second grace recovers without stopping accepted work', async () => {
+  let now = 0;
+  let offline = false;
+  const { lease } = controller((url) => {
+    if (offline) throw new Error('offline');
+    if (url.pathname.endsWith('/lease')) return response({ runId: 'run-1', status: 'ready' });
+    return response({ run: { status: 'active' }, quota: { remainingMs: 3_600_000,
+      grace: { active: false, remainingMs: 1_800_000 } } });
+  }, { now: () => now });
+  await lease.beforeTurnStart();
+  offline = true;
+  await lease.heartbeat();
+  now = 5 * 60_000;
+  assert.equal((await lease.heartbeat()).mustStop, false);
+  offline = false;
+  await lease.heartbeat();
+  assert.deepEqual(lease.status(), { mustStop: false, degraded: false });
 });
 
 test('one Raucloud runtime can meter two turns independently on the same lease', async () => {
@@ -155,6 +194,19 @@ test('warm workers discover and activate a newly assigned run', async () => {
   await lease.beforeTurnStart();
   assert.equal(lease.runId, 'run-2');
   assert.ok(calls.some(({ url }) => url.pathname.endsWith('/runs/run-2/allocation')));
+});
+
+test('conversation archives discover a warm-reused assignment before selecting the upload URL', async () => {
+  const bytes = Buffer.from('conversation state');
+  const metadata = { operationId: 'snapshot-1', size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
+  const { lease, calls } = controller((url) => {
+    if (url.pathname.endsWith('/lease')) return response({ runId: 'replacement-run', status: 'ready' });
+    assert.equal(url.pathname, '/v1/internal/cloud/runs/replacement-run/conversations');
+    return response({ complete: true, mergeRequest: { id: 'snapshot', ...metadata } });
+  });
+  await lease.prepareArchive();
+  await lease.archiveConversation(metadata, Readable.from([bytes]));
+  assert.equal(calls.length, 2);
 });
 
 test('Raucloud lease configuration is all-or-nothing and self-hosted remains empty', () => {
@@ -234,4 +286,54 @@ test('explicit broker revocation stops immediately without waiting for outage gr
   });
   await lease.beforeTurnStart();
   assert.equal((await lease.heartbeat()).mustStop, true);
+});
+
+test('merge uploads stream canonical chunks and require the final durable receipt', async () => {
+  const chunkBytes = 512 * 1024;
+  const bytes = Buffer.alloc(chunkBytes * 2 + 17, 7);
+  const metadata = { sessionId: 'session-1', documentId: 'document-1', threadId: 'thread-1',
+    cloudStartId: 'start-1', operationId: 'turn-1', revision: 3, turn: 1, kind: 'turn',
+    fileName: '문서.hwpx', sha256: createHash('sha256').update(bytes).digest('hex'), size: bytes.length };
+  let yielded = 0;
+  const { lease, calls } = controller((url, options) => {
+    assert.equal(url.pathname, '/v1/internal/cloud/runs/run-1/merge-requests');
+    assert.equal(options.headers.authorization, `Bearer ${TOKEN}`);
+    const body = JSON.parse(options.body);
+    const offset = body.chunkIndex * chunkBytes;
+    assert.equal(body.chunkCount, 3);
+    assert.deepEqual(Buffer.from(body.bytesBase64, 'base64'), bytes.subarray(offset, offset + chunkBytes));
+    // A slow broker must hold back reads, rather than buffer the whole file.
+    if (body.chunkIndex === 0) assert.ok(yielded <= 10);
+    return response({ complete: body.chunkIndex === 2, mergeRequest: { id: 'merge-1', ...metadata } });
+  });
+  const stream = Readable.from((async function* () {
+    for (let offset = 0; offset < bytes.length; offset += 64 * 1024) {
+      yielded++;
+      yield bytes.subarray(offset, offset + 64 * 1024);
+    }
+  })(), { highWaterMark: 1 });
+  const result = await lease.archiveMergeRequest(metadata, stream);
+  assert.equal(result.complete, true);
+  assert.equal(calls.length, 3);
+});
+
+test('merge uploads retry immutable chunks after a lost response without interrupting the turn', async () => {
+  const bytes = Buffer.from('durable document');
+  const metadata = { operationId: 'turn-retry', size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
+  const { lease, calls } = controller((_url, _options, attempt) => {
+    if (attempt === 1) throw new Error('response lost after durable write');
+    return response({ complete: true, mergeRequest: { id: 'merge-retry', ...metadata } });
+  });
+  assert.equal((await lease.archiveMergeRequest(metadata, Readable.from([bytes]))).mergeRequest.id, 'merge-retry');
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].options.body, calls[1].options.body);
+});
+
+test('merge upload rejects damaged bytes and incomplete broker receipts', async () => {
+  const bytes = Buffer.from('document');
+  const metadata = { operationId: 'turn-check', size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
+  const { lease, calls } = controller(() => response({ complete: false }));
+  await assert.rejects(lease.archiveMergeRequest(metadata, Readable.from([Buffer.from('damaged!')])), { code: 'RAUCLOUD_ARTIFACT_INVALID' });
+  assert.equal(calls.length, 0, 'invalid final bytes must never publish');
+  await assert.rejects(lease.archiveMergeRequest(metadata, Readable.from([bytes])), { code: 'RAUCLOUD_ARTIFACT_UNCONFIRMED' });
 });

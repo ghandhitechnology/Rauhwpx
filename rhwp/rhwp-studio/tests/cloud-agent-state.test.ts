@@ -82,6 +82,13 @@ test('cloud state parser preserves the cloud lease and bounded running status', 
   }
 });
 
+test('durable handoff acceptance survives parsing only as a valid timestamp', () => {
+  const accepted = parseCloudSnapshot(state(8, { ...running(5), handoffAcceptedAt: now }));
+  assert.equal(accepted?.session.kind === 'running' ? accepted.session.handoffAcceptedAt : null, now);
+  const malformed = parseCloudSnapshot(state(9, { ...running(6), handoffAcceptedAt: 'queued' }));
+  assert.equal(malformed?.session.kind === 'running' ? malformed.session.handoffAcceptedAt : null, undefined);
+});
+
 test('cloud state parser preserves broker account quota and logged-out gates', () => {
   const signedIn = parseCloudSnapshot({
     ...state(8),
@@ -172,6 +179,11 @@ test('cloud state parser rejects missing, malformed and partially valid snapshot
   const { profileEpoch: _profileEpoch, ...stateWithoutEpoch } = state(1);
   assert.equal(parseCloudSnapshot(stateWithoutEpoch), null);
   assert.equal(parseCloudSnapshot({ ...state(1), queuedMessages: [{ id: 'q', text: 'hello' }] }), null);
+  const queued = { id: 'q', text: 'hello', queuedAt: now, state: 'accepted' };
+  assert.equal(parseCloudSnapshot({ ...state(1), queuedMessages: [queued] })?.queuedMessages[0]?.delivery, 'pending');
+  assert.equal(parseCloudSnapshot({ ...state(1), queuedMessages: [{ ...queued, delivery: 'durable' }] })
+    ?.queuedMessages[0]?.delivery, 'durable');
+  assert.equal(parseCloudSnapshot({ ...state(1), queuedMessages: [{ ...queued, delivery: 'maybe' }] }), null);
   assert.equal(parseCloudSnapshot(state(1, { ...running(), elapsedMs: -1 })), null);
   assert.equal(parseCloudSnapshot({ ...state(1), timeline: { schema: 'unknown' } }), null);
   assert.equal(parseCloudSnapshot({ ...state(1, running()), sessions: [running(), running()] }), null);
@@ -424,4 +436,18 @@ test('paused provider-setting capability survives snapshot parsing without being
   const current = parseCloudSnapshot(state(2, { ...paused, configurationEditable: true }));
   assert.equal(current.session.configurationEditable, true);
   assert.deepEqual(current.session.selection, paused.selection);
+});
+
+
+test('cloud snapshot restores validated durable merge metadata without a live session', () => {
+  const request = { sessionId: 'old-session', documentId: 'doc-1', threadId: 'thread-1',
+    cloudStartId: 'start-1', operationId: 'op-4', revision: 4, turn: 4, kind: 'turn',
+    fileName: 'result.hwpx', sha256: 'a'.repeat(64), size: 123, localAvailable: true };
+  assert.deepEqual(parseCloudSnapshot({ ...state(20), mergeRequests: [request] })?.mergeRequests, [request]);
+  for (const patch of [{ cloudStartId: '' }, { documentId: null }, { operationId: ' ' },
+    { revision: 0 }, { turn: -1 }, { size: 0 }, { size: 1.5 }, { sha256: 'bad' },
+    { kind: 'manual' }, { localAvailable: 'yes' }]) {
+    assert.equal(parseCloudSnapshot({ ...state(20), mergeRequests: [{ ...request, ...patch }] }), null);
+  }
+  assert.equal(parseCloudSnapshot({ ...state(20), mergeRequests: {} }), null);
 });

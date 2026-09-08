@@ -142,6 +142,84 @@ test('cloud image publication requires real headed display and input verificatio
   }
 });
 
+test('cloud candidates include tested broker source from the same commit', () => {
+  const steps = workflows['cloud-sandbox-image.yml'].jobs.publish.steps;
+  const broker = steps.findIndex((step) => step.name === 'Verify and archive matching broker source');
+  const publish = steps.findIndex((step) => step.run?.includes('podman push'));
+  assert.ok(broker >= 0 && broker < publish);
+  assert.match(steps[broker].run, /npm --prefix rhwp\/rau-credits test/);
+  assert.match(steps[broker].run, /git archive "\$GITHUB_SHA:rhwp\/rau-credits"/);
+  assert.match(steps[broker].run, /sha256sum raucloud-broker-source\.tar\.gz/);
+  const upload = steps.find((step) => step.uses?.startsWith('actions/upload-artifact@'));
+  for (const name of ['cloud-image.json', 'raucloud-broker-source.tar.gz', 'raucloud-broker-source.json']) {
+    assert.ok(upload.with.path.includes(name), name);
+  }
+});
+
+for (const scenario of [
+  { name: 'feature candidate', requested: '', edge: false, refType: 'branch', refName: 'feat/cloud' },
+  { name: 'named candidate', requested: 'cloud-review-1', edge: false, refType: 'branch', refName: 'feat/cloud' },
+  { name: 'explicit edge promotion', requested: 'cloud-review-2', edge: true, refType: 'branch', refName: 'feat/cloud' },
+  { name: 'cloud release tag', requested: '', edge: false, refType: 'tag', refName: 'cloud-sandbox-v2.1.0' },
+]) {
+  test(`cloud image publication records the verified digest for ${scenario.name}`, { skip: process.platform === 'win32' }, (t) => {
+    const directory = mkdtempSync(path.join(tmpdir(), 'cloud-image-publication-'));
+    t.after(() => rmSync(directory, { recursive: true, force: true }));
+    const callsPath = path.join(directory, 'calls');
+    const commit = 'a'.repeat(40);
+    const digest = 'd'.repeat(64);
+    const run = workflows['cloud-sandbox-image.yml'].jobs.publish.steps
+      .find((step) => step.name === 'Publish candidate and optional edge images').run;
+    const result = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', `
+      podman() {
+        printf '%s\\n' "$*" >> "$RAU_IMAGE_TEST_CALLS"
+        if [[ "$1" == login ]]; then read -r ignored || true; fi
+        if [[ "$1" == push && "$2" == --digestfile ]]; then
+          printf 'sha256:%s\\n' "$RAU_IMAGE_TEST_DIGEST" > "$3"
+        fi
+      }
+      ${run}
+    `], { encoding: 'utf8', timeout: 5_000, cwd: directory, env: {
+      ...process.env, RAU_IMAGE_TEST_CALLS: callsPath, RAU_IMAGE_TEST_DIGEST: digest,
+      GHCR_TOKEN: 'test-token', GITHUB_ACTOR: 'test-user', GITHUB_REPOSITORY_OWNER: 'TestOrg',
+      GITHUB_REPOSITORY: 'TestOrg/Rauhwpx', GITHUB_SHA: commit, GITHUB_RUN_ID: '42',
+      GITHUB_REF_TYPE: scenario.refType, GITHUB_REF_NAME: scenario.refName,
+      GITHUB_STEP_SUMMARY: path.join(directory, 'summary'), REQUESTED_TAG: scenario.requested,
+      PUBLISH_EDGE: String(scenario.edge),
+    } });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, result.stderr);
+    const tag = scenario.refType === 'tag' ? '2.1.0' : scenario.requested || `sha-${commit}`;
+    const image = 'ghcr.io/testorg/rauhwpx-cloud';
+    assert.deepEqual(JSON.parse(readFileSync(path.join(directory, 'cloud-image.json'), 'utf8')), {
+      image: `${image}@sha256:${digest}`, tag, commit,
+      run: 'https://github.com/TestOrg/Rauhwpx/actions/runs/42',
+    });
+    const calls = readFileSync(callsPath, 'utf8');
+    assert.ok(calls.includes(`push --digestfile cloud-image-digest.txt ${image}:${tag}`));
+    assert.equal(calls.includes(`push ${image}:edge\n`), scenario.edge || scenario.refType === 'tag');
+    assert.equal(calls.includes(`${image}:stable`), false);
+    assert.equal(calls.includes('test-token'), false);
+  });
+}
+
+test('candidate publication rejects shared and malformed tags before registry login', { skip: process.platform === 'win32' }, () => {
+  const run = workflows['cloud-sandbox-image.yml'].jobs.publish.steps
+    .find((step) => step.name === 'Publish candidate and optional edge images').run;
+  for (const requested of ['edge', 'stable', 'invalid/tag']) {
+    const result = spawnSync('bash', ['-e', '-o', 'pipefail', '-c', `podman() { echo 'UNEXPECTED_REGISTRY_ACCESS'; }; ${run}`], {
+      encoding: 'utf8', timeout: 5_000, env: {
+        ...process.env, REQUESTED_TAG: requested, GITHUB_REPOSITORY_OWNER: 'test',
+        GITHUB_REF_TYPE: 'branch', GITHUB_REF_NAME: 'feat/cloud',
+      },
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Invalid candidate image tag/);
+    assert.equal(result.stdout.includes('UNEXPECTED_REGISTRY_ACCESS'), false);
+  }
+});
+
 for (const ready of [true, false]) {
   test(`cloud image startup ${ready ? 'waits for initialization after HTTP becomes healthy' : 'fails when initialization never finishes'}`, {
     skip: process.platform === 'win32',

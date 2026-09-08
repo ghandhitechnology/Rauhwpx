@@ -431,6 +431,26 @@ export class DocumentVersionController implements VersionManagerController {
     });
   }
 
+  async isCloudCheckpointMerged(checkpoint: Pick<CloudCheckpointPayload, 'documentId' | 'sessionId' | 'revision' | 'operationId' | 'sha256'>): Promise<boolean> {
+    return this.#enqueue(async () => {
+      await this.#refreshData(false);
+      if (!this.#repository || this.#captureWorkspaceToken().documentId !== checkpoint.documentId) return false;
+      const workspace = this.#captureWorkspaceToken();
+      const operationId = this.#cloudCheckpointCommitId(checkpoint);
+      const legacyId = commitId(`cloud:${this.#repository.id}:${checkpoint.sessionId}:${checkpoint.revision}`);
+      const commit = await this.#store.getCommit(operationId) ?? await this.#store.getCommit(legacyId);
+      if (!commit) return false;
+      const blob = await this.#store.getBlob(commit.blobId);
+      if (!blob) return false;
+      const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', blob.bytes.slice().buffer))]
+        .map((byte) => byte.toString(16).padStart(2, '0')).join('');
+      if (digest !== checkpoint.sha256) return false;
+      const relation = await this.#store.getMergeRelation(this.#repository.id, this.#requireActiveBranch().target, commit.id);
+      this.#assertWorkspaceToken(workspace);
+      return relation.relation === 'already-integrated';
+    });
+  }
+
   async mergeCloudCheckpoint(startId: string, checkpoint: CloudCheckpointPayload): Promise<boolean> {
     const source = await this.#enqueue(async () => {
       await this.#refreshData(false);
@@ -455,8 +475,12 @@ export class DocumentVersionController implements VersionManagerController {
       if (branch.name === this.#requireActiveBranch().name) {
         throw new Error('Cloud 결과를 받을 로컬 브랜치를 먼저 선택하세요.');
       }
-      const id = commitId(`cloud:${repository.id}:${checkpoint.sessionId}:${checkpoint.revision}`);
-      const existing = await this.#store.getCommit(id);
+      const id = this.#cloudCheckpointCommitId(checkpoint);
+      let existing = await this.#store.getCommit(id);
+      if (!existing) {
+        const legacy = await this.#store.getCommit(commitId(`cloud:${repository.id}:${checkpoint.sessionId}:${checkpoint.revision}`));
+        if (legacy?.blobId === hashBytes(checkpoint.bytes)) existing = legacy;
+      }
       if (existing) {
         if (existing.blobId !== hashBytes(checkpoint.bytes)) {
           throw new VersionError('CORRUPT_BLOB', '같은 Cloud 버전의 문서 내용이 달라졌습니다.');
@@ -471,7 +495,7 @@ export class DocumentVersionController implements VersionManagerController {
         // Pin the source head. An old or replayed boundary must never move it backwards.
         const head = await this.#requireCommit(branch.target);
         const prefix = `cloud:${repository.id}:${checkpoint.sessionId}:`;
-        if (head.id.startsWith(prefix) && Number(head.id.slice(prefix.length)) >= checkpoint.revision) {
+        if (head.id.startsWith(prefix) && Number(head.id.slice(prefix.length).split(':')[0]) > checkpoint.revision) {
           throw new VersionError('STALE_WORKSPACE', '더 최신 Cloud 변경을 이미 가져왔습니다.');
         }
         const capture = await this.#captureIncoming(checkpoint.bytes, checkpoint.fileName);
@@ -486,6 +510,11 @@ export class DocumentVersionController implements VersionManagerController {
     this.#mergeCompletion = null;
     await this.startMerge(source.name);
     return this.#mergeCompletion ? await this.#mergeCompletion : false;
+  }
+
+  #cloudCheckpointCommitId(checkpoint: Pick<CloudCheckpointPayload, 'sessionId' | 'revision' | 'operationId'>): CommitId {
+    const operation = hashBytes(new TextEncoder().encode(checkpoint.operationId)).slice(7);
+    return commitId(`cloud:${this.#requireRepository().id}:${checkpoint.sessionId}:${checkpoint.revision}:${operation}`);
   }
 
   #cloudBranchName(startId: string): BranchName {

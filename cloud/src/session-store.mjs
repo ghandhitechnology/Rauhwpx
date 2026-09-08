@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { transaction } from './database.mjs';
 import { CloudError, DEFAULT_LIMITS, ROOM_PROTOCOL_VERSION, TRANSFER_LIMITS, publicSession, parseProviderSelection, providerConfigurationEditable } from './protocol.mjs';
 
@@ -204,6 +205,23 @@ export class SessionStore {
     return { outcome: 'requeued', turnNumber: turn.turn_number, messageId: turn.message_id };
   }
 
+  #suspendUncertainWorkerInTransaction(session, now) {
+    if (session.protocol_version !== ROOM_PROTOCOL_VERSION || !session.current_turn_id) return null;
+    const turn = this.database.prepare('SELECT turn_number FROM session_turns WHERE id = ? AND session_id = ?')
+      .get(session.current_turn_id, session.id);
+    if (!turn || this.database.prepare(`SELECT 1 FROM session_checkpoints
+      WHERE session_id = ? AND turn_number = ? AND boundary_kind = 'turn' AND stable = 1`)
+      .get(session.id, turn.turn_number)) return null;
+    const reason = { code: 'WORKER_REPLACED_UNCERTAIN',
+      message: 'The worker stopped during a turn. Review its last saved state before resuming.' };
+    this.database.prepare(`UPDATE sessions SET status = 'suspended', state_version = state_version + 1,
+      suspended_reason = ?, sandbox_id = NULL, worker_token_hash = NULL, worker_heartbeat_at = NULL,
+      started_at = NULL, finishing_at = NULL, expires_at = ?, updated_at = ? WHERE id = ?`)
+      .run(JSON.stringify(reason), now + SUSPENDED_RETENTION_MS, now, session.id);
+    this.database.prepare('DELETE FROM session_runtime_leases WHERE session_id = ?').run(session.id);
+    return this.#appendEventInTransaction(session.id, 'session.suspended', { status: 'suspended', reason });
+  }
+
   createSession(device, input) {
     const provider = this.providerStatus(input.provider);
     if (!provider.available) {
@@ -367,6 +385,7 @@ export class SessionStore {
   }
 
   #notify(event) {
+    this.onStateChanged?.(event.sessionId);
     queueMicrotask(() => this.events.emit(`session:${event.sessionId}`, event));
   }
 
@@ -405,16 +424,21 @@ export class SessionStore {
     return events;
   }
 
+  commandReceipt(device, sessionId, command) {
+    const existing = this.database.prepare('SELECT * FROM commands WHERE id = ?').get(command.commandId);
+    if (!existing) return null;
+    if (existing.session_id !== sessionId || existing.device_id !== device.id || existing.type !== command.type
+      || !isDeepStrictEqual(JSON.parse(existing.payload_json), command.payload)) {
+      throw new CloudError('COMMAND_ID_CONFLICT', 'Command ID was already used for another command', 409);
+    }
+    return JSON.parse(existing.response_json);
+  }
+
   executeCommand(device, sessionId, command) {
     let event = null;
     const response = transaction(this.database, () => {
-      const existing = this.database.prepare('SELECT * FROM commands WHERE id = ?').get(command.commandId);
-      if (existing) {
-        if (existing.session_id !== sessionId || existing.device_id !== device.id || existing.type !== command.type) {
-          throw new CloudError('COMMAND_ID_CONFLICT', 'Command ID was already used for another command', 409);
-        }
-        return JSON.parse(existing.response_json);
-      }
+      const receipt = this.commandReceipt(device, sessionId, command);
+      if (receipt) return receipt;
       const session = this.getSessionRow(sessionId);
       if (command.type !== 'message.queue') {
         if (!Number.isSafeInteger(command.payload.expectedVersion)) {
@@ -563,6 +587,14 @@ export class SessionStore {
       const provider = this.providerStatus(session.provider);
       if (!provider.available) throw new CloudError('PROVIDER_UNAVAILABLE', `${session.provider} is not ready on this VPS`, 409, provider);
       if (!provider.authenticated) throw new CloudError('AUTH_REQUIRED', `${session.provider} must be authenticated on this VPS`, 409, provider);
+      const restored = session.suspended_reason && JSON.parse(session.suspended_reason);
+      if (['WORKER_REPLACED', 'WORKER_REPLACED_UNCERTAIN'].includes(restored?.code)) {
+        // Resuming is an explicit decision to restart any unfinished turn from
+        // its saved document. Keep the original wait visible until that choice.
+        this.#recoverInterruptedTurnInTransaction(session, now);
+        this.database.prepare('UPDATE sessions SET current_turn_id = NULL, current_wait_id = NULL WHERE id = ?').run(session.id);
+        this.database.prepare("UPDATE session_messages SET status = 'queued', delivered_at = NULL WHERE session_id = ? AND status = 'delivered'").run(session.id);
+      }
       // The duration budget covers agent work, not wall time spent suspended;
       // clearing started_at lets the next claim restamp a fresh run.
       this.database.prepare('UPDATE sessions SET pause_requested_at = NULL, started_at = NULL WHERE id = ?').run(session.id);
@@ -1539,7 +1571,7 @@ export class SessionStore {
     kind = 'turn',
     checkpoint,
     timeline,
-  }) {
+  }, { beforeCommit } = {}) {
     if (typeof operationId !== 'string' || !/^[A-Za-z0-9._:-]{1,160}$/.test(operationId)) {
       throw new CloudError('INVALID_REQUEST', 'Boundary operationId is invalid');
     }
@@ -1552,23 +1584,36 @@ export class SessionStore {
     }
     this.#requireBlob(checkpoint, 'Boundary checkpoint');
     this.#requireBlob(timeline, 'Boundary timeline');
+    // Validate before external storage, then validate again when committing:
+    // another control request may revoke the worker while the upload runs.
+    const workerTokenHash = this.getSessionRow(sessionId).worker_token_hash;
+    const validateIdentity = () => {
+      const session = this.getSessionRow(sessionId);
+      if (session.status !== 'running') throw new CloudError('INVALID_SESSION_STATE', 'Session is not running', 409);
+      if (Boolean(session.worker_token_hash) !== Boolean(workerTokenHash)
+        || (workerTokenHash && !Buffer.from(session.worker_token_hash).equals(Buffer.from(workerTokenHash)))) {
+        throw new CloudError('WORKER_UNAUTHORIZED', 'Worker changed while the boundary was being retained', 401);
+      }
+      const existing = this.database.prepare(`
+        SELECT * FROM session_checkpoints WHERE session_id = ? AND operation_id = ?
+      `).get(sessionId, operationId);
+      if (existing && (existing.turn_number !== turnNumber || existing.revision !== revision
+        || existing.boundary_kind !== kind || existing.blob_sha256 !== checkpoint.blobId
+        || existing.timeline_blob_sha256 !== timeline.blobId || existing.timeline_size !== timeline.size)) {
+        throw new CloudError('BOUNDARY_OPERATION_CONFLICT', 'Boundary operationId was reused with different artifacts', 409);
+      }
+      return existing;
+    };
+    validateIdentity();
+    // A broker-committed recovery copy survives failure of this local commit.
+    // Runtime completion still requires the transaction and identity check below.
+    await beforeCommit?.({ operationId, turnNumber, revision, kind, checkpoint, timeline });
     const events = [];
     let previousTimelineBlobId = null;
     let boundary;
     transaction(this.database, () => {
-      const session = this.getSessionRow(sessionId);
-      if (session.status !== 'running') throw new CloudError('INVALID_SESSION_STATE', 'Session is not running', 409);
-      const existing = this.database.prepare(`
-        SELECT * FROM session_checkpoints WHERE session_id = ? AND operation_id = ?
-      `).get(sessionId, operationId);
+      const existing = validateIdentity();
       if (existing) {
-        if (existing.turn_number !== turnNumber || existing.revision !== revision
-          || existing.boundary_kind !== kind
-          || existing.blob_sha256 !== checkpoint.blobId
-          || existing.timeline_blob_sha256 !== timeline.blobId
-          || existing.timeline_size !== timeline.size) {
-          throw new CloudError('BOUNDARY_OPERATION_CONFLICT', 'Boundary operationId was reused with different artifacts', 409);
-        }
         boundary = this.#publicBoundary(sessionId, this.#boundaryRow(sessionId, operationId));
         return;
       }
@@ -1864,6 +1909,12 @@ export class SessionStore {
           recovered.push({ sessionId: row.id, action: 'takeover_frozen', sandboxId: null });
           continue;
         }
+        const uncertain = this.#suspendUncertainWorkerInTransaction(row, this.now());
+        if (uncertain) {
+          notifications.push(uncertain);
+          recovered.push({ sessionId: row.id, action: 'review_required', sandboxId: null });
+          continue;
+        }
         const paused = Boolean(row.pause_requested_at);
         const status = paused ? 'suspended' : 'queued';
         const now = this.now();
@@ -1905,6 +1956,11 @@ export class SessionStore {
         const result = this.#freezeTakeoverInTransaction(row, { recovered: true });
         event = result.event;
         return result.response.session;
+      }
+      const uncertain = this.#suspendUncertainWorkerInTransaction(row, this.now());
+      if (uncertain) {
+        event = uncertain;
+        return this.getSession(sessionId);
       }
       const paused = Boolean(row.pause_requested_at);
       const status = paused ? 'suspended' : 'queued';
