@@ -1,4 +1,4 @@
-name: Publish cloud sandbox edge image
+name: Build verified Cloud sandbox image
 
 on:
   workflow_dispatch:
@@ -36,7 +36,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - name: Check out tagged source
+      - name: Check out requested source
         uses: actions/checkout@v5
         with:
           persist-credentials: false

@@ -4,7 +4,7 @@ import { AppServerError } from './cloud-app-server.mjs';
 import { sandboxCredentialVariables } from './provider-auth.mjs';
 
 export const RAILWAY_API_URL = 'https://backboard.railway.com/graphql/v2';
-export const RAILWAY_DEFAULT_IMAGE = 'ghcr.io/ghandhitechnology/rauhwpx-cloud:2.0.2';
+export const RAILWAY_DEFAULT_IMAGE = 'ghcr.io/ghandhitechnology/rauhwpx-cloud:2.0.3-cloud.1';
 export const SANDBOX_BASE_PATH = '/rauhwpx-cloud';
 export const SANDBOX_PORT = 7740;
 
