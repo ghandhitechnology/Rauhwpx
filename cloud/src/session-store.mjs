@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { transaction } from './database.mjs';
 import { CloudError, DEFAULT_LIMITS, ROOM_PROTOCOL_VERSION, TRANSFER_LIMITS, publicSession, parseProviderSelection, providerConfigurationEditable } from './protocol.mjs';
 
@@ -423,16 +424,21 @@ export class SessionStore {
     return events;
   }
 
+  commandReceipt(device, sessionId, command) {
+    const existing = this.database.prepare('SELECT * FROM commands WHERE id = ?').get(command.commandId);
+    if (!existing) return null;
+    if (existing.session_id !== sessionId || existing.device_id !== device.id || existing.type !== command.type
+      || !isDeepStrictEqual(JSON.parse(existing.payload_json), command.payload)) {
+      throw new CloudError('COMMAND_ID_CONFLICT', 'Command ID was already used for another command', 409);
+    }
+    return JSON.parse(existing.response_json);
+  }
+
   executeCommand(device, sessionId, command) {
     let event = null;
     const response = transaction(this.database, () => {
-      const existing = this.database.prepare('SELECT * FROM commands WHERE id = ?').get(command.commandId);
-      if (existing) {
-        if (existing.session_id !== sessionId || existing.device_id !== device.id || existing.type !== command.type) {
-          throw new CloudError('COMMAND_ID_CONFLICT', 'Command ID was already used for another command', 409);
-        }
-        return JSON.parse(existing.response_json);
-      }
+      const receipt = this.commandReceipt(device, sessionId, command);
+      if (receipt) return receipt;
       const session = this.getSessionRow(sessionId);
       if (command.type !== 'message.queue') {
         if (!Number.isSafeInteger(command.payload.expectedVersion)) {

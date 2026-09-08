@@ -812,8 +812,13 @@ export function createCloudHttpHandler({
         }
         if (request.method === 'POST' && sessionRoute[2] === '/commands') {
           const command = parseCommand(await readJson(request));
-          await raucloudLease?.assertCommandAllowed?.(command.type);
-          const result = sessionStore.executeCommand(device, sessionId, command);
+          // A quota gate blocks new input, not an authenticated exact replay of
+          // an existing command. Its receipt still waits for broker durability.
+          let result = sessionStore.commandReceipt(device, sessionId, command);
+          if (!result) {
+            await raucloudLease?.assertCommandAllowed?.(command.type);
+            result = sessionStore.executeCommand(device, sessionId, command);
+          }
           await conversationBackup?.save(sessionId);
           json(response, 200, result);
           return;

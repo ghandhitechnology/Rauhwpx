@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, generateKeyPairSync, randomBytes } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -59,7 +59,7 @@ async function fixture(t, lease) {
   const blobStore = new BlobStore(database, { root });
   const auth = new AuthService(database);
   const pairing = auth.createPairingCode();
-  const { device } = auth.redeemPairingCode({ code: pairing.code, deviceName: 'Laptop' });
+  const { device, accessToken } = auth.redeemPairingCode({ code: pairing.code, deviceName: 'Laptop' });
   const sessionStore = new SessionStore(database, blobStore);
   sessionStore.setProviderStatus('codex', { available: true, authenticated: true });
   const backup = new ConversationBackup({ sessionStore, blobStore, lease });
@@ -70,7 +70,7 @@ async function fixture(t, lease) {
       uploadId: result.uploadId, offset: result.offset, bytes: bytes.subarray(result.offset, result.offset + result.chunkSize) });
     return { blobId: result.blob.sha256, size: bytes.length };
   }
-  return { root, database, sessionStore, blobStore, device, auth, backup, upload,
+  return { root, database, sessionStore, blobStore, device, accessToken, auth, backup, upload,
     async create() {
       const document = await upload(Buffer.from('original document'), 'document');
       const timeline = await upload(Buffer.from(JSON.stringify({ thread: { id: 'thread-1', cloudStartId: 'start-1' } })), 'timeline');
@@ -230,6 +230,66 @@ test('HTTP sleep acknowledgment archives the room and retains a warm lease for p
   assert.equal(second.sessionStore.openPresence('session-1', second.device.id, 'returned-laptop').presence.waking, true);
   assert.equal(second.sessionStore.getSession('session-1').status, 'queued');
 });
+
+for (const type of ['message.queue', 'turn.redirect']) {
+  test(`restored ${type} attachment receipts replay through quota gates without bypassing identity or durability`, async (t) => {
+    const broker = durableBroker();
+    const first = await fixture(t, broker.lease);
+    const created = await first.create();
+    first.command('session.activate', { expectedVersion: created.stateVersion });
+    first.sessionStore.claimNextSession();
+    const attachment = await first.upload(Buffer.from('follow-up attachment'), 'reference');
+    const command = parseCommand({ commandId: 'attached-command', type, payload: {
+      content: 'Use this attachment', messageId: 'attached-message',
+      ...(type === 'turn.redirect' ? { expectedVersion: first.sessionStore.getSession('session-1').stateVersion } : {}),
+      attachments: [{ attachmentId: 'reference-1', ...attachment, name: 'reference.txt', mimeType: 'text/plain' }],
+    } });
+    const receipt = first.sessionStore.executeCommand(first.device, 'session-1', command);
+    await first.backup.save('session-1');
+    const second = await fixture(t, broker.lease);
+    await second.backup.restore(second.device, 'session-1');
+    assert.equal(second.blobStore.get(attachment.blobId).size, attachment.size);
+    let admissionCalls = 0;
+    broker.lease.assertCommandAllowed = async () => {
+      admissionCalls++;
+      throw Object.assign(new Error('Quota reached'), { code: 'RAUCLOUD_INPUT_BLOCKED', status: 409 });
+    };
+    const pair = generateKeyPairSync('ed25519');
+    const identity = { privateKey: pair.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+      serverPublicKey: `ed25519:${pair.publicKey.export({ type: 'spki', format: 'der' }).toString('base64url')}` };
+    const server = http.createServer(createCloudHttpHandler({ auth: second.auth, blobStore: second.blobStore,
+      sessionStore: second.sessionStore, conversationBackup: second.backup, raucloudLease: broker.lease,
+      config: { basePath: '' }, identity, logger: { error() {} } }));
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    t.after(() => { server.closeAllConnections(); return new Promise((resolve) => server.close(resolve)); });
+    const send = (body, token = second.accessToken) => fetch(`http://127.0.0.1:${server.address().port}/v1/sessions/session-1/commands`, {
+      method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json',
+        'x-rauhwpx-request-nonce': randomBytes(24).toString('base64url') }, body: JSON.stringify(body),
+    });
+    const repeated = await send(command);
+    assert.equal(repeated.status, 200, await repeated.clone().text());
+    assert.deepEqual(await repeated.json(), receipt);
+    assert.equal(admissionCalls, 0);
+    const conflict = await send({ ...command, payload: { ...command.payload, content: 'Changed content' } });
+    assert.equal(conflict.status, 409);
+    assert.equal((await conflict.json()).error.code, 'COMMAND_ID_CONFLICT');
+    const otherPairing = second.auth.createPairingCode();
+    const other = second.auth.redeemPairingCode({ code: otherPairing.code, deviceName: 'Other device' });
+    assert.equal((await send(command, other.accessToken)).status, 409);
+    assert.equal((await send(command, 'invalid-token')).status, 401);
+    const blocked = await send({ ...command, commandId: 'new-command' });
+    assert.equal(blocked.status, 409);
+    assert.equal((await blocked.json()).error.code, 'RAUCLOUD_INPUT_BLOCKED');
+    assert.equal(admissionCalls, 1);
+    second.sessionStore.appendEvent('session-1', 'agent.event', { text: 'Newer pending state' });
+    broker.setOffline(true);
+    assert.equal((await send(command)).status, 503);
+    broker.setOffline(false);
+    assert.equal((await send(command)).status, 200);
+    assert.equal(second.database.prepare('SELECT COUNT(*) AS count FROM session_messages').get().count, 1);
+    assert.equal(second.database.prepare('SELECT COUNT(*) AS count FROM session_attachment_versions').get().count, 1);
+  });
+}
 
 test('concurrent save retries coalesce while a newer command still waits for its own captured state', async (t) => {
   const broker = durableBroker();
