@@ -54,8 +54,17 @@ fn cell_para_line_anchor_y(
     }
 }
 
+/// 셀 중첩 문단 기준 어울림 표(`TopAndBottom`·`Square`)의 양수 vertOffset 리드.
+/// overlay / TAC / 음수 offset 은 0. `is_para_topbottom_float` 를 여기서 쓰지 않는다.
+/// 그 헬퍼를 Square 로 넓히면 다른 배치 경로가 같이 바뀐다.
 pub(crate) fn para_relative_float_table_lead(table: &crate::model::table::Table, dpi: f64) -> f64 {
-    if !is_para_topbottom_float(&table.common) {
+    if table.common.treat_as_char
+        || !matches!(table.common.vert_rel_to, VertRelTo::Para)
+        || !matches!(
+            table.common.text_wrap,
+            TextWrap::TopAndBottom | TextWrap::Square
+        )
+    {
         return 0.0;
     }
     let offset = signed_hwpunit(table.common.vertical_offset);
