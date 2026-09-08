@@ -309,13 +309,19 @@ pub(crate) struct SnapshotParagraph {
 pub(crate) struct SnapshotSection {
     pub(crate) revision: u64,
     pub(crate) paragraph_sequence_revision: u64,
+    // 원시 바이트와 문단은 아래의 공유 필드에서 보관한다.
     pub(crate) section_shell: Section,
+    pub(crate) raw_stream: Option<Arc<Vec<u8>>>,
     pub(crate) paragraphs: Vec<SnapshotParagraph>,
 }
 
 #[derive(Clone)]
 pub(crate) struct DocumentSnapshot {
+    // 보존용 스트림과 미리보기 이미지 바이트는 셸에서 제외한다.
     pub(crate) document_shell: Document,
+    pub(crate) extra_streams: Arc<Vec<(String, Vec<u8>)>>,
+    pub(crate) hwpx_aux_entries: Arc<Vec<(String, Vec<u8>)>>,
+    pub(crate) preview_image: Option<Arc<Vec<u8>>>,
     pub(crate) sections: Vec<SnapshotSection>,
 }
 
