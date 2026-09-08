@@ -87,20 +87,29 @@ export class CloudMergeRecovery {
         const matching = incoming.filter((entry) => entry.sessionId === record.cloudSessionId
           && entry.documentId === record.originDocumentId && entry.threadId === record.threadId
           && (!record.timeline?.thread?.cloudStartId || entry.cloudStartId === record.timeline.thread.cloudStartId));
-        const cached = (record.mergeArchives ?? []).filter((entry) => entry.accountId === result.accountId
-          && (entry.cachePath || matching.some((request) => request.operationId === entry.operationId)));
-        const merged = new Map(cached.map((entry) => [entry.operationId, entry]));
-        for (const entry of matching) {
-          const previous = merged.get(entry.operationId);
-          if (previous && JSON.stringify(validateMergeRequest(previous)) !== JSON.stringify(entry)) {
-            throw new Error('Cloud merge receipt changed');
+        const mergeEntries = (latest) => {
+          const cached = (latest.mergeArchives ?? []).filter((entry) => entry.accountId === result.accountId
+            && (entry.cachePath || matching.some((request) => request.operationId === entry.operationId)));
+          const merged = new Map(cached.map((entry) => [entry.operationId, entry]));
+          for (const entry of matching) {
+            const previous = merged.get(entry.operationId);
+            if (previous && JSON.stringify(validateMergeRequest(previous)) !== JSON.stringify(entry)) {
+              throw new Error('Cloud merge receipt changed');
+            }
+            merged.set(entry.operationId, { ...previous, ...entry, accountId: result.accountId,
+              ...(cacheIdentity ? { cacheIdentity } : {}) });
           }
-          merged.set(entry.operationId, { ...previous, ...entry, accountId: result.accountId, ...(cacheIdentity ? { cacheIdentity } : {}) });
-        }
-        const entries = [...merged.values()];
+          return [...merged.values()];
+        };
+        let entries = mergeEntries(record);
         if (matching.length) {
-          await this.store.patch(record.id, { mergeArchives: entries });
+          // Preserve a download receipt written while discovery was in flight.
+          const updated = await this.store.patch(record.id, (latest) => ({ mergeArchives: [
+            ...(latest.mergeArchives ?? []).filter((entry) => entry.accountId !== result.accountId),
+            ...mergeEntries(latest),
+          ] }));
           check();
+          entries = mergeEntries(updated);
         }
         requests.push(...entries.map((entry) => ({ ...validateMergeRequest(entry), localAvailable: Boolean(entry.cachePath) })));
       }
