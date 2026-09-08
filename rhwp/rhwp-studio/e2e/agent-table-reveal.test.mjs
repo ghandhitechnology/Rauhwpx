@@ -20,10 +20,31 @@ try {
     const newText = Array.from({ length: 16 }, (_, i) =>
       `${i + 1}. 장비 네 대의 시각을 맞추고 온도는 1분마다 측정한다. `).join('');
     wasm.insertTextInCell(0, addr.paraIdx, addr.controlIdx, 0, 0, 0, oldText);
+    window.__agentTableRevealLayoutReady = false;
+    const unsubscribe = window.__eventBus.on('document-layout-refreshed', (event) => {
+      if (event?.source !== 'mutation') return;
+      window.__agentTableRevealLayoutReady = true;
+      unsubscribe();
+    });
+    // Let the mutation frame own layout instead of racing it with loadDocument.
     window.__eventBus.emit('document-changed');
-    await window.__canvasView.loadDocument();
     return { addr, oldText, newText };
   });
+  await page.waitForFunction(({ addr, oldText }) => {
+    if (!window.__agentTableRevealLayoutReady) return false;
+    const wasm = window.__wasm;
+    const pages = window.__canvasView.getVirtualScroll();
+    if (!pages.pageCount || pages.pageCount !== wasm.pageCount) return false;
+    const caret = wasm.getCursorRectInCell(0, addr.paraIdx, addr.controlIdx, 0, 0, 0);
+    const rects = wasm.getSelectionRectsInCell(
+      0, addr.paraIdx, addr.controlIdx, 0, 0, 0, 0, Array.from(oldText).length,
+    );
+    return caret.height > 0 && caret.pageIndex < pages.pageCount && rects.length > 0
+      && rects.every((rect) => rect.pageIndex < pages.pageCount
+        && rect.width > 0 && rect.height > 0
+        && pages.getPageWidth(rect.pageIndex) > 0
+        && Number.isFinite(pages.getPageOffset(rect.pageIndex)));
+  }, { polling: 'raf', timeout: 10_000 }, fixture);
   const result = await page.evaluate(({ addr, oldText, newText }) => {
     const pending = window.__agentBridge.pendingEdits;
     pending.beginTurn('codex');
