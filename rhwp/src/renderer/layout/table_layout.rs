@@ -11883,3 +11883,59 @@ mod row_cut_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod para_relative_float_table_lead_tests {
+    use super::para_relative_float_table_lead;
+    use crate::model::shape::{CommonObjAttr, TextWrap, VertRelTo};
+    use crate::model::table::Table;
+
+    fn para_float_table(text_wrap: TextWrap, vertical_offset: u32, treat_as_char: bool) -> Table {
+        Table {
+            common: CommonObjAttr {
+                treat_as_char,
+                vert_rel_to: VertRelTo::Para,
+                vertical_offset,
+                text_wrap,
+                ..CommonObjAttr::default()
+            },
+            ..Table::default()
+        }
+    }
+
+    #[test]
+    fn top_and_bottom_and_square_wrap_share_vertical_offset_lead() {
+        let top = para_float_table(TextWrap::TopAndBottom, 1200, false);
+        assert!(
+            (para_relative_float_table_lead(&top, 96.0) - 16.0).abs() < 0.05,
+            "TopAndBottom 어울림은 종전대로 vertOffset 리드를 받아야 한다",
+        );
+
+        let square = para_float_table(TextWrap::Square, 1200, false);
+        assert!(
+            (para_relative_float_table_lead(&square, 96.0) - 16.0).abs() < 0.05,
+            "Square 어울림도 같은 vertOffset 리드를 받아야 한다",
+        );
+    }
+
+    #[test]
+    fn front_and_behind_overlay_wraps_stay_excluded_from_lead() {
+        for overlay in [TextWrap::BehindText, TextWrap::InFrontOfText] {
+            let table = para_float_table(overlay, 1200, false);
+            assert_eq!(
+                para_relative_float_table_lead(&table, 96.0),
+                0.0,
+                "글 앞/뒤 overlay 는 세로 배치 계약이 달라 리드에서 제외된다",
+            );
+        }
+    }
+
+    #[test]
+    fn signed_negative_offset_and_treat_as_char_take_no_lead() {
+        let negative = para_float_table(TextWrap::Square, 4_294_944_683, false);
+        assert_eq!(para_relative_float_table_lead(&negative, 96.0), 0.0);
+
+        let as_char = para_float_table(TextWrap::Square, 1200, true);
+        assert_eq!(para_relative_float_table_lead(&as_char, 96.0), 0.0);
+    }
+}
