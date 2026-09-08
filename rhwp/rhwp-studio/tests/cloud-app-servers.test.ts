@@ -206,7 +206,7 @@ test('the controller forwards every server mode call to its own IPC channel', as
   };
   const controller = createCloudController(api as never);
   await controller.selectServerMode('app-hosted');
-  await controller.spawnSandbox('railway');
+  await controller.spawnSandbox('railway', 'claude');
   await controller.spawnSandbox();
   await controller.sandboxStatus();
   await controller.teardownSandbox();
@@ -214,7 +214,7 @@ test('the controller forwards every server mode call to its own IPC channel', as
   await controller.forceQuitAccount();
   assert.deepEqual(calls, [
     ['select', { mode: 'app-hosted' }],
-    ['spawn', { providerId: 'railway' }],
+    ['spawn', { providerId: 'railway', selectedProvider: 'claude' }],
     ['spawn', {}],
     ['status', undefined],
     ['teardown', { force: false }],
@@ -392,7 +392,12 @@ test('the dialog offers both servers and only restorable sandbox actions', () =>
   assert.match(onboarding, /role', 'radiogroup'/);
   assert.match(onboarding, /dataset\.serverMode = mode/);
   assert.match(onboarding, /controller\.selectServerMode\(mode\)/);
-  assert.match(onboarding, /controller\.spawnSandbox\(providerId\)/);
+  assert.match(onboarding, /const selectedProvider = transferIntent\?\.selection\.agent/);
+  assert.match(onboarding, /controller\.spawnSandbox\(providerId, selectedProvider\)/);
+  assert.match(onboarding, /captureTransferIntent\?\.\(\)/);
+  assert.match(onboarding, /settled\.kind === 'sandbox-ready'\) continueTransfer\(intent\)/);
+  assert.match(onboarding, /continueTransfer\(intent\)/);
+  assert.match(onboarding, /준비하고 보내기/);
   assert.match(onboarding, /controller\.teardownSandbox\(\)/);
   assert.match(onboarding, /controller\.sandboxStatus\(\)/);
   assert.doesNotMatch(onboarding, /controller\.takeoverSandbox\(\)/);
@@ -404,7 +409,7 @@ test('the dialog offers both servers and only restorable sandbox actions', () =>
   assert.match(onboarding, /운영자가 \$\{provider\.missingConfig\.join\(', '\)\}/);
   assert.match(onboarding, /state\.kind !== 'sandbox-intro' && state\.kind !== 'sandbox-failed'/);
   assert.match(onboarding, /kind: 'sandbox-provisioning'/);
-  assert.match(onboarding, /샌드박스를 기기에 연결하고 있습니다\. 서버 생성과 첫 시작에는 최대 \$\{RAUCLOUD_SETUP_WAIT_MINUTES\}분이 걸릴 수 있습니다/);
+  assert.match(onboarding, /서버 생성과 첫 시작에는 최대 \$\{RAUCLOUD_SETUP_WAIT_MINUTES\}분이 걸릴 수 있습니다/);
   assert.match(onboarding, /return raucloudSetupElapsed\(startedAt\)/);
   assert.match(onboarding, /진행 보기/);
   assert.match(onboarding, /Raucloud를 종료하고 있습니다/);

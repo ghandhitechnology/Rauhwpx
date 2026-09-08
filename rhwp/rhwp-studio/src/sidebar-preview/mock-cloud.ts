@@ -1,6 +1,6 @@
 import { createCloudController, type CloudDesktopApi } from '../cloud/desktop-cloud.ts';
+import type { AgentName, AgentStreamEvent } from '../agent/types.ts';
 import type { CloudSessionState, CloudLinkKind, CloudSessionScope, CloudSnapshot, CloudTransferRequest, CloudCheckpointPayload, CloudCommandRequest } from '../cloud/types.ts';
-import type { AgentStreamEvent } from '../agent/types.ts';
 import { recordCloudUsage } from '../cloud/usage-history.ts';
 
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -17,8 +17,16 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
   let sequence = 0;
   const checkpoints = new Map<string, CloudCheckpointPayload>();
   const merges: Array<{ startId: string; checkpoint: CloudCheckpointPayload }> = [];
-  const calls = { commands: [] as CloudCommandRequest[], merges, downloads: 0, spawn: 0, teardown: 0, refresh: 0, referenceReads: 0, prepareRestart: 0, reconnect: 0, recreate: 0, stop: 0, display: 0, inputs: 0, transfers: [] as CloudTransferRequest[] };
+  const calls = { commands: [] as CloudCommandRequest[], merges, downloads: 0, spawn: 0,
+    spawnPayloads: [] as Array<{ providerId?: string; selectedProvider?: AgentName }>,
+    teardown: 0, refresh: 0, referenceReads: 0, prepareRestart: 0, reconnect: 0, recreate: 0,
+    stop: 0, display: 0, inputs: 0, transfers: [] as CloudTransferRequest[] };
   let refreshFails = false;
+  let spawnFailures = 0;
+  let sandboxStatusRecovers = false;
+  let queueAckFailures = 0;
+  let queueReceiptBlocked = false;
+  let releaseQueueReceipt: (() => void) | null = null;
   let restartArchiveAvailable = true;
   let rejectRestartTransfer = false;
   const sandbox = { providerId: 'raucloud', sandboxId: 'preview-worker', displayName: 'Raucloud',
@@ -108,6 +116,7 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
       state.timeline = structuredClone(request.timeline);
       state.session = { kind: 'running', sessionId: `preview-session-${++sessionNumber}`, version: 1,
         threadId: request.threadId, documentId: request.documentId, documentName: request.documentName,
+        handoffAcceptedAt: new Date().toISOString(),
         startedAt: new Date().toISOString(), turn: 0, turnLimit: 100, elapsedMs: 0, timeLimitMs: 3600000,
         currentActivity: '문서 검토 중', phase: 'waiting', wait: null,
         selection: { agent: request.timeline.thread.agent, model: request.timeline.thread.model, effort: request.timeline.thread.effort },
@@ -165,11 +174,21 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
       state.server.preferredMode = mode;
       return snapshot();
     },
-    async cloudSpawnSandbox() {
+    async cloudSpawnSandbox(payload) {
       calls.spawn++;
+      calls.spawnPayloads.push(structuredClone(payload));
       state.server.lifecycle = 'provisioning';
       publish();
       await wait(300);
+      if (spawnFailures > 0) {
+        spawnFailures--;
+        state.server.lifecycle = 'error';
+        state.server.message = 'Preview sandbox allocation was interrupted.';
+        state.profile = { kind: 'configured', mode: 'app-hosted', name: 'Raucloud', sandbox,
+          connection: 'unknown', message: state.server.message, serviceVersion: 'preview' };
+        publish();
+        throw new Error(state.server.message);
+      }
       state.profileEpoch++;
       state.profile = { kind: 'configured', mode: 'app-hosted', name: 'Raucloud', sandbox,
         connection: 'ready', message: null, serviceVersion: 'preview' };
@@ -186,9 +205,46 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
       publish();
       return snapshot();
     },
-    cloudSandboxStatus: async () => snapshot(),
+    async cloudSandboxStatus() {
+      if (sandboxStatusRecovers) {
+        sandboxStatusRecovers = false;
+        state.profile = { kind: 'configured', mode: 'app-hosted', name: 'Raucloud', sandbox,
+          connection: 'ready', message: null, serviceVersion: 'preview' };
+        state.server.mode = 'app-hosted';
+        state.server.lifecycle = 'ready';
+        state.server.message = null;
+      }
+      return snapshot();
+    },
     async cloudCommand(request) {
       calls.commands.push(structuredClone(request));
+      if (request.command === 'queue-message' && queueReceiptBlocked) {
+        await new Promise<void>((resolve) => { releaseQueueReceipt = resolve; });
+        releaseQueueReceipt = null;
+      }
+      if (request.command === 'queue-message' && queueAckFailures > 0) {
+        queueAckFailures--;
+        state.queuedMessages = [{
+          id: request.messageId!,
+          text: request.message!,
+          queuedAt: new Date().toISOString(),
+          state: 'queued',
+          delivery: 'pending',
+        }];
+        publish();
+        throw new Error('Preview queue receipt was lost.');
+      }
+      if (request.command === 'queue-message') {
+        state.queuedMessages = [{
+          id: request.messageId!,
+          text: request.message!,
+          queuedAt: state.queuedMessages.find((message) => message.id === request.messageId)?.queuedAt
+            ?? new Date().toISOString(),
+          state: 'queued',
+          delivery: 'durable',
+        }];
+        publish();
+      }
       if (request.command === 'configure') {
         const session = state.session;
         if (session.kind === 'idle' || request.sessionId !== session.sessionId
@@ -269,6 +325,7 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
       session.turn++;
       session.phase = 'waiting';
       const operationId = `preview-turn-${session.turn}`;
+      state.queuedMessages = state.queuedMessages.map((message) => ({ ...message, state: 'accepted' }));
       checkpoints.set(session.sessionId, { sessionId: session.sessionId, documentId: session.documentId,
         fileName: '사업 제안서.hwpx', kind: 'turn', revision: session.turn, turn: session.turn, operationId,
         bytes: new Uint8Array([1, 2, 3]), byteLength: 3, sha256: 'a'.repeat(64) });
@@ -282,6 +339,7 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
       if (session.kind === 'idle') throw new Error('Start a Cloud conversation first');
       const base = { sessionId: session.sessionId, threadId: session.threadId, documentId: session.documentId,
         documentName: session.documentName, version: session.version + 1, selection: session.selection,
+        handoffAcceptedAt: session.handoffAcceptedAt,
         configurationPending: false, configurationEditable: phase !== 'working' };
       const next: Exclude<CloudSessionState, { kind: 'idle' }> = phase === 'suspended'
         ? { ...base, kind: 'suspended', reason: '사용자가 일시 정지했습니다.', resumable: true }
@@ -301,6 +359,13 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
       publish();
     },
     setRestartArchiveAvailable(available: boolean) { restartArchiveAvailable = available; },
+    setSpawnFailures(count: number) { spawnFailures = Math.max(0, Math.floor(count)); },
+    setSandboxStatusRecovery(enabled: boolean) { sandboxStatusRecovers = enabled; },
+    setQueueAckFailures(count: number) { queueAckFailures = Math.max(0, Math.floor(count)); },
+    blockQueueReceipt(blocked: boolean) {
+      queueReceiptBlocked = blocked;
+      if (!blocked) releaseQueueReceipt?.();
+    },
     rejectRestartTransfer(reject: boolean) { rejectRestartTransfer = reject; },
     blockRefresh(blocked: boolean) {
       refreshBlocked = blocked;

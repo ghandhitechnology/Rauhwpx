@@ -81,7 +81,7 @@ Parameters can be combined. Select **Next reply**, then type a message or press
 reconnecting, replaced-session, and setup screens without waiting for real failures.
 
 For Cloud recovery, open `?cloud=1`, choose **Codex**, click the document’s Cloud icon,
-and complete setup with **Cloud로 계속** before sending a message. The send button shows a Cloud icon in Cloud mode.
+and complete setup with **준비하고 보내기** before sending a message. The send button shows a Cloud icon in Cloud mode.
 Click the document’s Cloud icon again for execution options. In Cloud chats,
 **내 문서 / Cloud 문서** floats above the composer for switching document views;
 **Cloud 변경 병합** appears beside it when a completed checkpoint is ready. **Disconnect
