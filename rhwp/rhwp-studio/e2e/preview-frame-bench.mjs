@@ -76,8 +76,14 @@ try {
           wasm[name] = function(...args) { geometryCalls[name]++; return geometryOriginals[name].apply(this, args); };
         }
         const raf = [], longTasks = [], renderDurations = [], renderedPages = [];
-        let running = true, previous = performance.now(), calls = 0;
-        const tick = now => { if (!running) return; raf.push(now - previous); previous = now; requestAnimationFrame(tick); };
+        let running = true, previous = null, calls = 0, frameCount = 0;
+        const tick = now => {
+          if (!running) return;
+          frameCount++;
+          if (previous !== null) raf.push(now - previous);
+          previous = now;
+          requestAnimationFrame(tick);
+        };
         const observer = new PerformanceObserver(list => longTasks.push(...list.getEntries().map(e => e.duration)));
         observer.observe({ type: 'longtask', buffered: false });
         const original = view.renderCanvas;
@@ -127,7 +133,8 @@ try {
           }
         }
         const editEnd = performance.now();
-        const activeFrameCount = raf.length;
+        const activeFrameCount = frameCount;
+        const activeIntervalCount = raf.length;
         // 동일한 종료 관찰 구간에 예약 렌더/idle 작업까지 포함한다.
         await new Promise(resolve => setTimeout(resolve, 1200));
         running = false;
@@ -149,7 +156,7 @@ try {
           ? Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', wasm.exportHwp())), byte => byte.toString(16).padStart(2, '0')).join('')
           : null;
         return { mode, paragraphCountBefore, paragraphCountAfter: wasm.getParagraphCount(0), exportedHwpSha256, previewPng: mode === 'multi-local' ? pixelsBefore : null, freshPng: mode === 'multi-local' ? pixelsAfter : null, geometryCalls, operations: bursts * burstSize, edits: mode === 'typewriter' ? 0 : bursts * burstSize, bursts, burstSize, pageCount: wasm.pageCount, editMs: editEnd-started,
-          observationMs: performance.now()-started, finalPixelsMatchFreshRender: pixelsBefore === pixelsAfter, activeRaf: summarize(raf.slice(0, activeFrameCount)), activeFps: activeFrameCount * 1000 / (editEnd-started), raf: summarize(raf), fps: 1000/(summarize(raf).mean || 1),
+          observationMs: performance.now()-started, finalPixelsMatchFreshRender: pixelsBefore === pixelsAfter, activeRaf: summarize(raf.slice(0, activeIntervalCount)), activeFps: activeFrameCount * 1000 / (editEnd-started), raf: summarize(raf), fps: 1000/(summarize(raf).mean || 1),
           framesOver33ms: raf.filter(x => x > 33.34).length, longTasks: summarize(longTasks),
           renderCalls: calls, renderMs: summarize(renderDurations), renderedPages: [...new Set(renderedPages)],
           correct: actual === expectedPrefix + before, actualLength: actual.length, expectedLength: (expectedPrefix+before).length,
