@@ -2145,3 +2145,51 @@ for (const failure of ['revoked', 'invalid-proof']) {
     assert.equal(streamCalls, 1, 'permanent failures must not enter the reconnect loop');
   });
 }
+
+for (const complete of [false, true]) {
+  test(`browser session stream fails terminally and releases an oversized ${complete ? 'complete' : 'fragmented'} event`, { timeout: 5_000 }, async (t) => {
+    const identity = serverIdentity();
+    const storage = new MemoryStorage();
+    storeBrowserCredentials(storage, storedBrowserProfile('https://stream-bounds.example.test', identity.key), {
+      accessToken: 'access', refreshToken: 'refresh', accessExpiresAt: Date.now() + 600_000,
+    });
+    const session = { id: 'bounded-room', status: 'running', stateVersion: 1,
+      clientContext: { threadId: 'bounded-thread', documentId: 'bounded-doc' } };
+    const failed = Promise.withResolvers<any>();
+    let streamCalls = 0;
+    let cancelled = false;
+    let body: ReadableStream<Uint8Array> | undefined;
+    const api = createBrowserCloudApi({ storage, fetchImpl: async (input, init) => {
+      const request = new Request(input, init);
+      const path = new URL(request.url).pathname;
+      if (path.endsWith('/v1/sessions')) return signedJson(request, identity, { sessions: [session] });
+      if (path.endsWith('/timeline')) return signedJson(request, identity, { thread: { id: 'bounded-thread' } });
+      if (path.endsWith('/events')) {
+        streamCalls += 1;
+        const signed = signedSse(request, identity, { type: 'agent.event', sessionId: session.id });
+        const raw = 'data: ' + '한'.repeat(700_000);
+        const chunks = complete ? [raw + '\n\n'] : [raw.slice(0, 350_000), raw.slice(350_000)];
+        body = new ReadableStream<Uint8Array>({
+          start(controller) { for (const chunk of chunks) controller.enqueue(new TextEncoder().encode(chunk)); },
+          cancel() { cancelled = true; },
+        });
+        return new Response(body, { headers: signed.headers });
+      }
+      throw new Error(`Unexpected request ${path}`);
+    } });
+    assert.ok(api);
+    let emitted = false;
+    t.after(api.onCloudEvent((event: any) => {
+      if (event.type === 'remote-session-stream-error') failed.resolve(event.snapshot);
+      if (event.type === 'remote-session-event') emitted = true;
+    }));
+    await api.cloudGetState({ threadId: 'bounded-thread', documentId: 'bounded-doc' });
+    const snapshot = await failed.promise;
+    assert.equal(snapshot.link.kind, 'failed');
+    assert.equal(snapshot.profile.connection, 'error');
+    assert.equal(emitted, false);
+    assert.equal(cancelled, true);
+    assert.equal(body?.locked, false);
+    assert.equal(streamCalls, 1);
+  });
+}

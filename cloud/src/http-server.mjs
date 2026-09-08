@@ -16,6 +16,7 @@ import {
   parseSessionCreate,
   parseUploadInit,
 } from './protocol.mjs';
+import { streamSessionEvents } from './session-event-stream.mjs';
 import { SERVICE_VERSION } from './version.mjs';
 import { parseProviderCredentialBody } from './provider-credentials.mjs';
 import {
@@ -118,7 +119,7 @@ function displayCaptureTime(value) {
 }
 
 function writeSse(response, event) {
-  response.write(signedSseFrame(response[responseProof], event));
+  return response.write(signedSseFrame(response[responseProof], event));
 }
 
 function workerIdentity(session) {
@@ -826,9 +827,9 @@ export function createCloudHttpHandler({
         }
         if (request.method === 'GET' && sessionRoute[2] === '/events') {
           sessionStore.getSessionRow(sessionId);
+          const after = positiveSequence(requestUrl.searchParams.get('after') ?? request.headers['last-event-id']);
           const presenceConnectionId = randomUUID();
           sessionStore.openPresence(sessionId, device.id, presenceConnectionId);
-          const after = positiveSequence(requestUrl.searchParams.get('after') ?? request.headers['last-event-id']);
           response.writeHead(200, {
             'Content-Type': 'text/event-stream; charset=utf-8',
             'Cache-Control': 'no-cache, no-transform',
@@ -838,51 +839,20 @@ export function createCloudHttpHandler({
             ...responseProofHeaders(response[responseProof], 200, SSE_STREAM_DIGEST),
           });
           response.flushHeaders();
-          let cursor = after;
-          let following = false;
-          const pending = [];
-          const deliver = (event) => {
-            if (!following) {
-              pending.push(event);
-              return;
-            }
-            if (event.seq <= cursor) return;
-            writeSse(response, event);
-            cursor = event.seq;
-          };
-          const unsubscribe = sessionStore.subscribe(sessionId, deliver);
-          while (true) {
-            const replay = sessionStore.listEvents(sessionId, cursor);
-            for (const event of replay) {
-              writeSse(response, event);
-              cursor = event.seq;
-            }
-            if (replay.length < 1000) break;
-          }
-          following = true;
-          pending.sort((left, right) => left.seq - right.seq);
-          for (const event of pending) deliver(event);
-          const keepalive = setInterval(() => {
-            sessionStore.touchPresence(sessionId, device.id, presenceConnectionId);
-            response.write(': keepalive\n\n');
-          }, 15_000);
-          let closed = false;
-          const close = () => {
-            if (closed) return;
-            closed = true;
-            clearInterval(keepalive);
-            unsubscribe();
-            // A process/test shutdown may close SQLite before Node delivers
-            // the socket's final close notification. Presence is advisory;
-            // stale rows are expired by the idle sweep on the next startup.
-            try {
-              sessionStore.closePresence(sessionId, device.id, presenceConnectionId);
-            } catch (error) {
-              if (error?.code !== 'ERR_INVALID_STATE') throw error;
-            }
-          };
-          request.once('close', close);
-          response.once('close', close);
+          streamSessionEvents({
+            response, sessionStore, sessionId, after,
+            writeEvent: (event) => writeSse(response, event),
+            onError: (error) => logger?.error?.('http.session_stream_failed', { sessionId, code: error.code, message: error.message }),
+            touchPresence: () => sessionStore.touchPresence(sessionId, device.id, presenceConnectionId),
+            closePresence: () => {
+              // Shutdown can close SQLite before the socket's close event.
+              try {
+                sessionStore.closePresence(sessionId, device.id, presenceConnectionId);
+              } catch (error) {
+                if (error?.code !== 'ERR_INVALID_STATE') throw error;
+              }
+            },
+          });
           return;
         }
       }
