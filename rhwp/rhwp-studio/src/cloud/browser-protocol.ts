@@ -1,5 +1,6 @@
 const RESPONSE_VERSION = 'RAUHWpx-response-v1';
 const SSE_VERSION = 'RAUHWpx-sse-event-v1';
+const MAX_SSE_FRAME_BYTES = 2 * 1024 * 1024;
 
 export type BrowserProofProfile = { serverPublicKey: string };
 export type BrowserRequestContext = { nonce: string; method: string; pathAndQuery: string };
@@ -118,15 +119,23 @@ export async function verifyResponseProof(
   if (!valid) throw protocolError('Cloud 응답 서명이 잘못됐습니다.', 'SERVER_PROOF_INVALID');
 }
 
+function requireBoundedSseFrame(raw: string): void {
+  // Check characters first to avoid encoding an already oversized network read.
+  if (raw.length > MAX_SSE_FRAME_BYTES || utf8(raw).byteLength > MAX_SSE_FRAME_BYTES) {
+    throw protocolError('Cloud 이벤트 크기 제한을 초과했습니다.', 'SSE_PAYLOAD_INVALID');
+  }
+}
+
 export function parseSse(buffer: string): { frames: BrowserSseFrame[]; rest: string } {
   const frames: BrowserSseFrame[] = [];
-  let rest = buffer.replace(/\r\n/g, '\n');
-  let boundary = rest.indexOf('\n\n');
-  while (boundary !== -1) {
-    const raw = rest.slice(0, boundary);
-    rest = rest.slice(boundary + 2);
+  let start = 0;
+  // Keep the incomplete tail unchanged, including a CR split across reads.
+  for (const boundary of buffer.matchAll(/\r?\n\r?\n/g)) {
+    const raw = buffer.slice(start, boundary.index);
+    requireBoundedSseFrame(raw);
+    start = boundary.index + boundary[0].length;
     const fields = { id: '', event: 'message', digest: '', signature: '', data: [] as string[] };
-    for (const line of raw.split('\n')) {
+    for (const line of raw.split(/\r?\n/)) {
       if (!line || line.startsWith(':')) continue;
       const separator = line.indexOf(':');
       const key = separator < 0 ? line : line.slice(0, separator);
@@ -138,8 +147,10 @@ export function parseSse(buffer: string): { frames: BrowserSseFrame[]; rest: str
       else if (key === 'data') fields.data.push(value);
     }
     if (fields.data.length) frames.push({ ...fields, data: fields.data.join('\n') });
-    boundary = rest.indexOf('\n\n');
   }
+  const rest = buffer.slice(start);
+  // A delimiter can arrive in the next read; do not count its partial prefix.
+  requireBoundedSseFrame(rest.replace(/\r?\n\r?$|\r$/, ''));
   return { frames, rest };
 }
 
