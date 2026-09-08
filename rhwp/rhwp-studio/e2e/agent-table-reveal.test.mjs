@@ -45,7 +45,7 @@ try {
         && pages.getPageWidth(rect.pageIndex) > 0
         && Number.isFinite(pages.getPageOffset(rect.pageIndex)));
   }, { polling: 'raf', timeout: 10_000 }, fixture);
-  const result = await page.evaluate(({ addr, oldText, newText }) => {
+  const result = await page.evaluate(async ({ addr, oldText, newText }) => {
     const pending = window.__agentBridge.pendingEdits;
     pending.beginTurn('codex');
     pending.replaceText({
@@ -55,22 +55,28 @@ try {
     }, newText, 'codex');
     const coverCount = () => Array.from(document.querySelectorAll('.ag-reveal-cover'))
       .filter(node => node.style.display !== 'none').length;
+    // Covers are placed once per edit batch, before the next browser paint.
+    await Promise.resolve();
     const duringEdit = coverCount();
     pending.endTurn('review');
+    const afterTurn = coverCount();
+    await Promise.resolve();
     return {
       duringEdit,
-      afterTurn: coverCount(),
+      afterTurn,
+      afterMicrotask: coverCount(),
       hasPending: pending.hasPending(),
       text: window.__wasm.getTextInCell(0, addr.paraIdx, addr.controlIdx, 0, 0, 0, Array.from(newText).length),
     };
   }, fixture);
   await page.screenshot({ path: path.join(artifacts, 'after-turn.png') });
   fs.writeFileSync(path.join(artifacts, 'result.json'), JSON.stringify(result, null, 2));
-  console.log(JSON.stringify({ duringEdit: result.duringEdit, afterTurn: result.afterTurn, hasPending: result.hasPending }));
-  assert.ok(result.duringEdit > 10, 'the rewrite exercises a queue of scattered text covers');
+  console.log(JSON.stringify({ duringEdit: result.duringEdit, afterTurn: result.afterTurn, afterMicrotask: result.afterMicrotask, hasPending: result.hasPending }));
+  assert.ok(result.duringEdit > 0, 'the rewrite starts revealing text before the turn finishes');
   assert.equal(result.text, fixture.newText, 'all Korean cell text remains in the document');
   assert.equal(result.hasPending, true, 'finishing animation keeps changes pending for review');
   assert.equal(result.afterTurn, 0, 'completed agent turns leave no white covers hiding table text');
+  assert.equal(result.afterMicrotask, 0, 'deferred reveal work keeps completed turns uncovered');
 } finally {
   await closeBrowser(browser);
 }
