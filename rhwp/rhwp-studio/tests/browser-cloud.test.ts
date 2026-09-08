@@ -1912,6 +1912,9 @@ test('browser replays the exact uploaded queue command after a lost receipt', as
     attachments: [{ id: 'source', name: 'source.txt', mimeType: 'text/plain', size: 3, bytes: new Uint8Array([1, 2, 3]) }],
   };
   await assert.rejects(api.cloudCommand(request), /queue response lost/);
+  await assert.rejects(api.cloudCommand({ ...request, attachments: [{ ...request.attachments[0], id: 'other-source' }] }), {
+    code: 'MESSAGE_ID_CONFLICT',
+  });
   await api.cloudCommand(request);
   assert.equal(uploadCalls, 1, 'a dispatched retry must not create a new attachment receipt');
   assert.deepEqual(commandBodies[1], commandBodies[0], 'the command id and full payload must be byte-stable');
@@ -1955,6 +1958,35 @@ test('browser rebuilds an uploaded queue command only after BLOB_NOT_FOUND', asy
   assert.equal(commandBodies[1].commandId, commandBodies[0].commandId);
 });
 
+test('browser releases a message id after a definite command rejection', async () => {
+  const identity = serverIdentity();
+  const storage = new MemoryStorage();
+  storeBrowserCredentials(storage, storedBrowserProfile('https://message-rejected.example.test', identity.key), {
+    accessToken: 'rejected-access', refreshToken: 'rejected-refresh', accessExpiresAt: Date.now() + 600_000,
+  });
+  const commandBodies: any[] = [];
+  const api = createBrowserCloudApi({ storage, fetchImpl: async (input, init) => {
+    const request = new Request(input, init);
+    const path = new URL(request.url).pathname;
+    if (path.endsWith('/commands')) {
+      const body = await request.json();
+      commandBodies.push(body);
+      if (commandBodies.length === 1) {
+        return signedJson(request, identity, { error: { code: 'INVALID_REQUEST', message: 'Message rejected' } }, 400);
+      }
+      return signedJson(request, identity, { messageId: body.payload.messageId, status: 'queued' });
+    }
+    throw new Error(`Unexpected request ${path}`);
+  } });
+  assert.ok(api);
+  const request = { sessionId: 'rejected-room', command: 'queue-message' as const, expectedVersion: 1,
+    message: 'Rejected content', messageId: 'rejected-message' };
+  await assert.rejects(api.cloudCommand(request), { code: 'INVALID_REQUEST' });
+  await api.cloudCommand({ ...request, message: 'Corrected content' });
+  assert.equal(commandBodies.length, 2);
+  assert.equal(commandBodies[1].payload.content, 'Corrected content');
+});
+
 test('browser retries redirects with their original command id and version', async () => {
   const identity = serverIdentity();
   const storage = new MemoryStorage();
@@ -1969,8 +2001,13 @@ test('browser retries redirects with their original command id and version', asy
       const body = await request.json();
       commandBodies.push(body);
       if (commandBodies.length === 1) throw Object.assign(new Error('redirect response lost'), { code: 'ETIMEDOUT' });
+      if (commandBodies.length === 2) {
+        return signedJson(request, identity, { messageId: body.payload.messageId,
+          session: { id: 'redirect-room', status: 'running', persistent: true, roomStatus: 'active' } });
+      }
       return signedJson(request, identity, { messageId: body.payload.messageId,
-        session: { id: 'redirect-room', status: 'running', stateVersion: 2 } });
+        session: { id: 'redirect-room', status: 'running', persistent: true, roomStatus: 'active',
+          redirectRequested: true, stateVersion: 2 } });
     }
     throw new Error(`Unexpected request ${path}`);
   } });
@@ -1978,11 +2015,13 @@ test('browser retries redirects with their original command id and version', asy
   const request = { sessionId: 'redirect-room', command: 'redirect' as const, expectedVersion: 1,
     message: 'Use the shorter structure', messageId: 'redirect-message' };
   await assert.rejects(api.cloudCommand(request), /redirect response lost/);
-  await api.cloudCommand({ ...request, expectedVersion: 2 });
+  await assert.rejects(api.cloudCommand({ ...request, expectedVersion: 2 }), { code: 'MESSAGE_DELIVERY_UNCERTAIN' });
+  await api.cloudCommand({ ...request, expectedVersion: 3 });
   assert.deepEqual(commandBodies[1], commandBodies[0]);
-  assert.equal(commandBodies[1].payload.expectedVersion, 1);
+  assert.deepEqual(commandBodies[2], commandBodies[0]);
+  assert.equal(commandBodies[2].payload.expectedVersion, 1);
   await api.cloudCommand(request);
-  assert.equal(commandBodies.length, 2, 'a durable redirect must not be sent again');
+  assert.equal(commandBodies.length, 3, 'a durable redirect must not be sent again');
 });
 
 for (const firstFailure of ['network', 'closed-stream']) {

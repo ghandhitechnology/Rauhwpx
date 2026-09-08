@@ -1685,6 +1685,7 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
       let retainedMessageCommand = retainedKey ? retainedMessageCommands.get(retainedKey) : undefined;
       if (messageCommand && input.message) {
         const attachmentDigests = await Promise.all((input.attachments ?? []).map(async (attachment) => ({
+          id: attachment.id,
           name: attachment.name,
           mimeType: attachment.mimeType,
           size: attachment.size,
@@ -1715,21 +1716,42 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
           emit({ type: 'queued-message-delivery-pending', sessionId: input.sessionId, messageId }, generation);
         }
       }
-      const attachments = [];
-      if (!retainedMessageCommand) {
-        for (const attachment of input.attachments ?? []) {
-          const stored = await upload(
-            attachment.bytes,
-            attachment.name,
-            'reference',
-            input.sessionId,
-            selectedProfile,
-          );
-          attachments.push({
-            attachmentId: attachment.id, blobId: stored.blobId, size: stored.size,
-            name: attachment.name, mimeType: attachment.mimeType,
-          });
+      const handleMessageFailure = (error: unknown) => {
+        if (!retainedKey) return;
+        const failure = error as BrowserCloudError;
+        if (failure.code === 'BLOB_NOT_FOUND') {
+          retainedMessageCommands.delete(retainedKey);
+          return;
         }
+        if (failure.code === 'INVALID_SESSION_STATE') return;
+        const definitelyRejected = failure.retryable === false
+          || Boolean(failure.status && failure.status >= 400 && failure.status < 500);
+        if (!definitelyRejected) return;
+        retainedMessageCommands.delete(retainedKey);
+        queuedMessages.delete(queuedKey);
+        emit({ type: 'queued-message-delivery-rejected', sessionId: input.sessionId, messageId }, generation);
+      };
+      const attachments = [];
+      try {
+        if (!retainedMessageCommand) {
+          for (const attachment of input.attachments ?? []) {
+            const stored = await upload(
+              attachment.bytes,
+              attachment.name,
+              'reference',
+              input.sessionId,
+              selectedProfile,
+            );
+            attachments.push({
+              attachmentId: attachment.id, blobId: stored.blobId, size: stored.size,
+              name: attachment.name, mimeType: attachment.mimeType,
+            });
+          }
+        }
+      } catch (error) {
+        requireCurrentProfile(selectedProfile, generation);
+        handleMessageFailure(error);
+        throw error;
       }
       let payload: Record<string, unknown>;
       let commandId: string;
@@ -1871,18 +1893,23 @@ export function createBrowserCloudApi(options: BrowserCloudOptions = {}) {
         });
       } catch (error) {
         requireCurrentProfile(selectedProfile, generation);
-        if (retainedKey && (error as BrowserCloudError).code === 'BLOB_NOT_FOUND') {
-          retainedMessageCommands.delete(retainedKey);
-        }
+        handleMessageFailure(error);
         throw error;
       }
       if (input.command === 'queue-message' && result.messageId === messageId && result.status === 'queued') {
         const queued = queuedMessages.get(queuedKey);
         if (queued) queuedMessages.set(queuedKey, { ...queued, serverQueued: true, delivery: 'durable' });
         if (retainedKey) retainedMessageCommands.delete(retainedKey);
-      } else if (input.command === 'redirect' && result.messageId === messageId) {
+      } else if (input.command === 'redirect' && result.messageId === messageId
+        && record(result.session)?.id === input.sessionId
+        && record(result.session)?.status === 'running'
+        && record(result.session)?.persistent === true
+        && record(result.session)?.roomStatus === 'active'
+        && record(result.session)?.redirectRequested === true) {
         const queued = queuedMessages.get(queuedKey);
-        if (queued) queuedMessages.set(queuedKey, { ...queued, serverQueued: true, delivery: 'durable' });
+        if (queued) queuedMessages.set(queuedKey, {
+          ...queued, serverQueued: true, state: 'accepted', delivery: 'durable',
+        });
         if (retainedKey) retainedMessageCommands.delete(retainedKey);
       } else if (input.command === 'queue-message') {
         throw cloudError('Cloud 메시지 수신을 확인하고 있습니다.', 'MESSAGE_DELIVERY_UNCERTAIN');
