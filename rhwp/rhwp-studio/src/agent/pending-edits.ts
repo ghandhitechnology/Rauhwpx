@@ -2074,7 +2074,7 @@ export class PendingEditManager {
         this.parseOk(wasm.splitParagraphLogical(sec, p, o), 'splitParagraphLogical');
       }
     };
-    try {
+    const insertLines = () => {
       if (lines[0].length > 0) {
         curOff = insertLine(para, off, lines[0]);
       }
@@ -2086,6 +2086,13 @@ export class PendingEditManager {
           curOff = insertLine(curPara, 0, lines[i]);
         }
       }
+    };
+    try {
+      // 각 줄의 insert/split은 IR 좌표만 사용한다. 실패 시 배치를 닫은 뒤 역연산한다.
+      // 한 줄 삽입은 기존 단일 명령 페이지네이션을 그대로 사용한다.
+      if (lines.length > 1 && !cell && wasm.withBodyTextPaginationBatch) {
+        wasm.withBodyTextPaginationBatch(sec, insertLines);
+      } else insertLines();
     } catch (e) {
       if (curPara !== para || curOff !== off) {
         try {
