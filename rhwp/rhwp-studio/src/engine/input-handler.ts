@@ -41,6 +41,7 @@ import * as _keyboard from './input-handler-keyboard';
 import { getBodySelectionSegments } from './body-selection-range';
 import * as _text from './input-handler-text';
 import * as _picture from './input-handler-picture';
+import type { PictureResizeJournal } from './picture-resize-journal';
 import * as _connector from './input-handler-connector';
 import { computeHangingIndentPx } from './hanging-indent';
 import { isPageLocalTextEditCommand, type PageLocalTextEditOptions } from './input-edit-invalidation';
@@ -425,6 +426,8 @@ export class InputHandler {
     rotationAngle: number;
     /** 다중 선택 리사이즈 시 각 개체의 원래 크기/위치 */
     multiRefs?: { sec: number; ppi: number; ci: number; type: string; origWidth: number; origHeight: number; origHorzOffset: number; origVertOffset: number; bboxX: number; bboxY: number }[];
+    /** [#6806] 뮤테이션 직전에 보관한 그림 원본 변환 — 기록되면 null, 남아 있으면 cleanup 이 되돌린다. */
+    resizeTransformJournal?: PictureResizeJournal | null;
   } | null = null;
 
   // 그림/글상자 이동 드래그 상태

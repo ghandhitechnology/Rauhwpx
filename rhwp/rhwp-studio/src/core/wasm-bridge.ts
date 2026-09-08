@@ -112,6 +112,24 @@ function headerFooterEditDocument(doc: HwpDocument) {
   return doc as unknown as HeaderFooterEditDocument;
 }
 
+interface PictureTransformJournalDocument {
+  capturePictureTransform(targetJson: string): number;
+  swapPictureTransform(id: number): void;
+  discardPictureTransform(id: number): void;
+}
+
+/** [#6806] 세 함수가 모두 있는 빌드에서만 그림 리사이즈 Undo 를 저널로 기록한다. */
+function pictureTransformJournalDocument(doc: HwpDocument | null): PictureTransformJournalDocument {
+  if (!doc) throw new Error('문서가 로드되지 않았습니다');
+  const journal = doc as unknown as Partial<PictureTransformJournalDocument>;
+  if (typeof journal.capturePictureTransform !== 'function'
+    || typeof journal.swapPictureTransform !== 'function'
+    || typeof journal.discardPictureTransform !== 'function') {
+    throw new Error('그림 리사이즈 Undo를 지원하는 WASM 빌드가 필요합니다');
+  }
+  return journal as PictureTransformJournalDocument;
+}
+
 function serializeParaMeta(meta: RemovedParaMeta | undefined): string | undefined {
   return meta && JSON.stringify(meta);
 }
@@ -3017,6 +3035,20 @@ export class WasmBridge {
   }
 
   // ─── Undo/Redo 스냅샷 API ──────────────────────────
+
+  /** [#6806] 그림 리사이즈 전 원본 변환(common/shape_attr)만 코어 저널에 보관하고 handle 을 받는다. */
+  capturePictureTransform(target: Record<string, unknown>): number {
+    return pictureTransformJournalDocument(this.doc).capturePictureTransform(JSON.stringify(target));
+  }
+
+  /** 저장 상태와 현재 상태를 교환한다 — 같은 handle 로 Undo/Redo 를 왕복한다. */
+  swapPictureTransform(id: number): void {
+    pictureTransformJournalDocument(this.doc).swapPictureTransform(id);
+  }
+
+  discardPictureTransform(id: number): void {
+    pictureTransformJournalDocument(this.doc).discardPictureTransform(id);
+  }
 
   saveSnapshot(): number {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
