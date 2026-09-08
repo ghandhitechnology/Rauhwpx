@@ -1249,10 +1249,9 @@ export class AgentBridgeImpl implements AgentBridge {
       wasm: deps.wasm,
       eventBus: deps.eventBus,
     });
-    // 승인/거절/무효화 시 진행 중인 타자기 공개를 즉시 완료한다 — 커버가
-    // 사라진 op 위에 남지 않도록.
+    // 검토 대기/승인/거절/무효화 시 타자기 커버를 걷어 최종 텍스트를 보여 준다.
     this.revealUnsub = this.pendingEdits.onChange((e) => {
-      if (e.type === 'approved' || e.type === 'rejected' || e.type === 'invalidated') {
+      if (e.type === 'set-finalized' || e.type === 'approved' || e.type === 'rejected' || e.type === 'invalidated') {
         this.reveal.finishAll();
       }
     });
