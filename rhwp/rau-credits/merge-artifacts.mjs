@@ -12,7 +12,7 @@ const fail = (code, message) => Object.assign(new Error(message), { code });
 const hash = (value) => createHash('sha256').update(value).digest('hex');
 const fields = ['sessionId', 'documentId', 'threadId', 'cloudStartId', 'operationId'];
 
-function validate(input) {
+function validate(input, kind = 'turn') {
   const metadata = {};
   for (const name of fields) {
     if (typeof input?.[name] !== 'string' || !/^[A-Za-z0-9._:-]{1,160}$/.test(input[name])) {
@@ -25,7 +25,7 @@ function validate(input) {
       throw fail('CLOUD_INVALID_REQUEST', `${name} is invalid`);
     }
   }
-  if (input.kind !== 'turn' || typeof input.fileName !== 'string' || !input.fileName.trim()
+  if (input.kind !== kind || typeof input.fileName !== 'string' || !input.fileName.trim()
     || input.fileName.length > 255 || /[\x00-\x1f/\\]/.test(input.fileName)
     || !/^[a-f0-9]{64}$/.test(input.sha256 ?? '') || input.size > MERGE_MAX_BYTES
     || input.chunkCount !== Math.ceil(input.size / MERGE_CHUNK_BYTES)
@@ -39,11 +39,19 @@ function validate(input) {
   const expected = Math.min(MERGE_CHUNK_BYTES, input.size - input.chunkIndex * MERGE_CHUNK_BYTES);
   if (bytes.length !== expected || bytes.toString('base64') !== encoded) throw fail('CLOUD_INVALID_REQUEST', 'Incorrect chunk size');
   for (const name of ['revision', 'turn', 'kind', 'fileName', 'sha256', 'size', 'chunkCount']) metadata[name] = input[name];
+  if (kind === 'conversation') {
+    if (!['staged', 'queued', 'running', 'suspended', 'completed', 'cancelled', 'failed', 'purged'].includes(input.state)) {
+      throw fail('CLOUD_INVALID_REQUEST', 'Conversation state is invalid');
+    }
+    metadata.state = input.state;
+    if (!Number.isSafeInteger(input.retentionUntil) || input.retentionUntil < 1) throw fail('CLOUD_INVALID_REQUEST', 'Conversation retention is invalid');
+    metadata.retentionUntil = input.retentionUntil;
+  }
   return { metadata, bytes, index: input.chunkIndex };
 }
 
 export function createMergeArtifacts({ store, sessionSecret, now = Date.now,
-  accountBytes = MERGE_ACCOUNT_BYTES, accountCount = MERGE_ACCOUNT_COUNT }) {
+  accountBytes = MERGE_ACCOUNT_BYTES, accountCount = MERGE_ACCOUNT_COUNT, kind = 'turn' }) {
   if (!sessionSecret) throw new Error('sessionSecret is required for checkpoint encryption');
   const key = createHash('sha256').update(`rau-merge-artifacts:v1:${sessionSecret}`).digest();
   const aad = (accountId, id, index) => Buffer.from(JSON.stringify([accountId, id, index]));
@@ -63,10 +71,17 @@ export function createMergeArtifacts({ store, sessionSecret, now = Date.now,
   const publicRecord = ({ complete, ...record }) => record;
   return {
     async upload(accountId, runId, input) {
-      const { metadata, bytes, index } = validate(input);
-      const id = `merge_${hash(JSON.stringify([accountId, metadata.sessionId, metadata.operationId]))}`;
+      const { metadata, bytes, index } = validate(input, kind);
+      const id = `merge_${hash(JSON.stringify([accountId, metadata.sessionId, metadata.operationId, ...(kind === 'turn' ? [] : [kind])]))}`;
       return store.transaction(accountId, async (repo) => {
         await repo.expire(now());
+        if (kind === 'conversation') {
+          const latest = (await repo.list()).filter((item) => item.kind === kind && item.sessionId === metadata.sessionId && item.complete)
+            .sort((a, b) => b.revision - a.revision)[0];
+          if (latest && latest.id !== id && (latest.revision >= metadata.revision || latest.state === 'purged')) {
+            throw fail('CLOUD_CONVERSATION_STALE', 'A newer conversation snapshot is already stored');
+          }
+        }
         let record = await repo.get(id);
         if (record) {
           if (Object.entries(metadata).some(([name, value]) => record[name] !== value)) {
@@ -77,7 +92,8 @@ export function createMergeArtifacts({ store, sessionSecret, now = Date.now,
           if (records.length >= accountCount || records.reduce((sum, item) => sum + item.size, 0) + metadata.size > accountBytes) {
             throw fail('CLOUD_MERGE_CAPACITY', 'Checkpoint storage allowance is full');
           }
-          record = { id, runId, ...metadata, createdAt: now(), expiresAt: now() + MERGE_RETENTION_MS, complete: false };
+          record = { id, runId, ...metadata, createdAt: now(),
+            expiresAt: Math.min(now() + MERGE_RETENTION_MS, metadata.retentionUntil ?? Infinity), complete: false };
           await repo.put(record);
         }
         const previous = await repo.chunk(id, index);
@@ -101,7 +117,19 @@ export function createMergeArtifacts({ store, sessionSecret, now = Date.now,
             if (total !== record.size || digest.digest('hex') !== record.sha256) throw fail('CLOUD_MERGE_DIGEST_MISMATCH', 'Checkpoint digest does not match');
             record.complete = true;
             await repo.put(record);
+            if (kind === 'conversation') {
+              for (const previous of await repo.list()) {
+                if (previous.sessionId === record.sessionId && previous.id !== record.id
+                  && (previous.kind === kind || record.state === 'purged' && previous.kind === 'conversation-resource')) {
+                  await repo.remove(previous);
+                }
+              }
+            }
           }
+        }
+        if (kind === 'conversation-resource' && record.complete) {
+          record.expiresAt = now() + MERGE_RETENTION_MS;
+          await repo.put(record);
         }
         return { complete: record.complete, mergeRequest: publicRecord(record) };
       });
@@ -109,14 +137,14 @@ export function createMergeArtifacts({ store, sessionSecret, now = Date.now,
     async list(accountId, sessionId) {
       if (sessionId != null && (typeof sessionId !== 'string' || !/^[A-Za-z0-9._:-]{1,160}$/.test(sessionId))) throw fail('CLOUD_INVALID_REQUEST', 'sessionId is invalid');
       return store.transaction(accountId, async (repo) => ({ mergeRequests: (await repo.list())
-        .filter((item) => item.complete && item.expiresAt > now() && (sessionId == null || item.sessionId === sessionId))
+        .filter((item) => item.kind === kind && item.complete && item.expiresAt > now() && (sessionId == null || item.sessionId === sessionId))
         .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)).map(publicRecord) }));
     },
     async chunk(accountId, id, index) {
       if (!/^merge_[a-f0-9]{64}$/.test(id) || !Number.isSafeInteger(index) || index < 0) throw fail('CLOUD_INVALID_REQUEST', 'Invalid checkpoint chunk');
       return store.transaction(accountId, async (repo) => {
         const record = await repo.get(id);
-        if (!record?.complete || record.expiresAt <= now() || index >= record.chunkCount) throw fail('CLOUD_MERGE_NOT_FOUND', 'Checkpoint not found');
+        if (!record?.complete || record.kind !== kind || record.expiresAt <= now() || index >= record.chunkCount) throw fail('CLOUD_MERGE_NOT_FOUND', 'Checkpoint not found');
         const bytes = await repo.chunk(id, index);
         if (!bytes) throw fail('CLOUD_MERGE_NOT_FOUND', 'Checkpoint chunk not found');
         return { bytesBase64: decrypt(accountId, id, index, bytes).toString('base64') };
@@ -156,6 +184,10 @@ function objectRepository(state) {
     async list() { return Object.values(state.records); },
     async get(id) { return state.records[id]; },
     async put(record) { state.records[record.id] = record; },
+    async remove(record) {
+      delete state.records[record.id];
+      for (let i = 0; i < record.chunkCount; i++) delete state.chunks[`${record.id}:${i}`];
+    },
     async chunk(id, index) { const value = state.chunks[`${id}:${index}`]; return value ? Buffer.from(value) : null; },
     async putChunk(id, index, bytes) { state.chunks[`${id}:${index}`] = bytes; },
     async chunkCount(id) { return Object.keys(state.chunks).filter((key) => key.startsWith(`${id}:`)).length; },
@@ -202,6 +234,10 @@ export function createFileMergeStore(directory) {
       async list() { return Object.values(records); },
       async get(id) { return records[id]; },
       async put(record) { records[record.id] = record; changed = true; },
+      async remove(record) {
+        delete records[record.id]; changed = true;
+        for (let i = 0; i < record.chunkCount; i++) removed.push(chunkPath(record.id, i));
+      },
       async chunk(id, index) {
         const key = chunkPath(id, index);
         if (pending.has(key)) return pending.get(key);
@@ -270,8 +306,9 @@ export async function createPostgresMergeStore({ connectionString, PoolClass = n
         const repo = {
           async list() { return (await client.query('SELECT metadata FROM rau_cloud_merge_artifacts WHERE account_id = $1', [accountId])).rows.map((row) => row.metadata); },
           async get(id) { return (await client.query('SELECT metadata FROM rau_cloud_merge_artifacts WHERE account_id = $1 AND id = $2', [accountId, id])).rows[0]?.metadata; },
+          async remove(record) { await client.query('DELETE FROM rau_cloud_merge_artifacts WHERE account_id = $1 AND id = $2', [accountId, record.id]); },
           async put(record) { await client.query(`INSERT INTO rau_cloud_merge_artifacts(id, account_id, metadata, expires_at) VALUES ($1,$2,$3::jsonb,$4)
-            ON CONFLICT(id) DO UPDATE SET metadata = EXCLUDED.metadata WHERE rau_cloud_merge_artifacts.account_id = EXCLUDED.account_id`, [record.id, accountId, JSON.stringify(record), record.expiresAt]); },
+            ON CONFLICT(id) DO UPDATE SET metadata = EXCLUDED.metadata, expires_at = EXCLUDED.expires_at WHERE rau_cloud_merge_artifacts.account_id = EXCLUDED.account_id`, [record.id, accountId, JSON.stringify(record), record.expiresAt]); },
           async chunk(id, index) { return (await client.query(`SELECT c.ciphertext FROM rau_cloud_merge_chunks c JOIN rau_cloud_merge_artifacts a ON a.id = c.artifact_id
             WHERE a.account_id = $1 AND a.id = $2 AND c.chunk_index = $3`, [accountId, id, index])).rows[0]?.ciphertext; },
           async chunkCount(id) { return Number((await client.query('SELECT COUNT(*) AS count FROM rau_cloud_merge_chunks WHERE artifact_id = $1', [id])).rows[0].count); },

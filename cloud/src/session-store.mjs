@@ -204,6 +204,23 @@ export class SessionStore {
     return { outcome: 'requeued', turnNumber: turn.turn_number, messageId: turn.message_id };
   }
 
+  #suspendUncertainWorkerInTransaction(session, now) {
+    if (session.protocol_version !== ROOM_PROTOCOL_VERSION || !session.current_turn_id) return null;
+    const turn = this.database.prepare('SELECT turn_number FROM session_turns WHERE id = ? AND session_id = ?')
+      .get(session.current_turn_id, session.id);
+    if (!turn || this.database.prepare(`SELECT 1 FROM session_checkpoints
+      WHERE session_id = ? AND turn_number = ? AND boundary_kind = 'turn' AND stable = 1`)
+      .get(session.id, turn.turn_number)) return null;
+    const reason = { code: 'WORKER_REPLACED_UNCERTAIN',
+      message: 'The worker stopped during a turn. Review its last saved state before resuming.' };
+    this.database.prepare(`UPDATE sessions SET status = 'suspended', state_version = state_version + 1,
+      suspended_reason = ?, sandbox_id = NULL, worker_token_hash = NULL, worker_heartbeat_at = NULL,
+      started_at = NULL, finishing_at = NULL, expires_at = ?, updated_at = ? WHERE id = ?`)
+      .run(JSON.stringify(reason), now + SUSPENDED_RETENTION_MS, now, session.id);
+    this.database.prepare('DELETE FROM session_runtime_leases WHERE session_id = ?').run(session.id);
+    return this.#appendEventInTransaction(session.id, 'session.suspended', { status: 'suspended', reason });
+  }
+
   createSession(device, input) {
     const provider = this.providerStatus(input.provider);
     if (!provider.available) {
@@ -367,6 +384,7 @@ export class SessionStore {
   }
 
   #notify(event) {
+    this.onStateChanged?.(event.sessionId);
     queueMicrotask(() => this.events.emit(`session:${event.sessionId}`, event));
   }
 
@@ -563,6 +581,14 @@ export class SessionStore {
       const provider = this.providerStatus(session.provider);
       if (!provider.available) throw new CloudError('PROVIDER_UNAVAILABLE', `${session.provider} is not ready on this VPS`, 409, provider);
       if (!provider.authenticated) throw new CloudError('AUTH_REQUIRED', `${session.provider} must be authenticated on this VPS`, 409, provider);
+      const restored = session.suspended_reason && JSON.parse(session.suspended_reason);
+      if (['WORKER_REPLACED', 'WORKER_REPLACED_UNCERTAIN'].includes(restored?.code)) {
+        // Resuming is an explicit decision to restart any unfinished turn from
+        // its saved document. Keep the original wait visible until that choice.
+        this.#recoverInterruptedTurnInTransaction(session, now);
+        this.database.prepare('UPDATE sessions SET current_turn_id = NULL, current_wait_id = NULL WHERE id = ?').run(session.id);
+        this.database.prepare("UPDATE session_messages SET status = 'queued', delivered_at = NULL WHERE session_id = ? AND status = 'delivered'").run(session.id);
+      }
       // The duration budget covers agent work, not wall time spent suspended;
       // clearing started_at lets the next claim restamp a fresh run.
       this.database.prepare('UPDATE sessions SET pause_requested_at = NULL, started_at = NULL WHERE id = ?').run(session.id);
@@ -1877,6 +1903,12 @@ export class SessionStore {
           recovered.push({ sessionId: row.id, action: 'takeover_frozen', sandboxId: null });
           continue;
         }
+        const uncertain = this.#suspendUncertainWorkerInTransaction(row, this.now());
+        if (uncertain) {
+          notifications.push(uncertain);
+          recovered.push({ sessionId: row.id, action: 'review_required', sandboxId: null });
+          continue;
+        }
         const paused = Boolean(row.pause_requested_at);
         const status = paused ? 'suspended' : 'queued';
         const now = this.now();
@@ -1918,6 +1950,11 @@ export class SessionStore {
         const result = this.#freezeTakeoverInTransaction(row, { recovered: true });
         event = result.event;
         return result.response.session;
+      }
+      const uncertain = this.#suspendUncertainWorkerInTransaction(row, this.now());
+      if (uncertain) {
+        event = uncertain;
+        return this.getSession(sessionId);
       }
       const paused = Boolean(row.pause_requested_at);
       const status = paused ? 'suspended' : 'queued';

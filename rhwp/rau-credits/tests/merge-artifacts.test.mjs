@@ -7,6 +7,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { createCreditsService, creditsRequestListener } from '../service.mjs';
 import { createMemoryStore } from '../store.mjs';
+import { createRaucloudBroker } from '../cloud-broker.mjs';
 import { createMergeArtifacts, createMemoryMergeStore, createFileMergeStore, createPostgresMergeStore,
   MERGE_CHUNK_BYTES, MERGE_RETENTION_MS } from '../merge-artifacts.mjs';
 
@@ -18,6 +19,71 @@ function input(bytes, index = 0, overrides = {}) {
     sha256: sha(bytes), size: bytes.length, chunkCount: Math.ceil(bytes.length / MERGE_CHUNK_BYTES),
     chunkIndex: index, bytesBase64: bytes.subarray(index * MERGE_CHUNK_BYTES, (index + 1) * MERGE_CHUNK_BYTES).toString('base64'), ...overrides };
 }
+
+for (const backend of ['memory', 'file', ...(process.env.RAU_TEST_POSTGRES_URL ? ['postgres'] : [])]) {
+  test(`${backend}: conversation generations, resource retention and tombstones survive reconstruction`, async (t) => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'rau-conversation-artifacts-'));
+    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    const store = backend === 'memory' ? createMemoryMergeStore() : backend === 'file' ? createFileMergeStore(directory)
+      : await createPostgresMergeStore({ connectionString: process.env.RAU_TEST_POSTGRES_URL });
+    t.after(() => store.close?.());
+    let clock = Date.now();
+    const options = { store, sessionSecret: secret, now: () => clock };
+    const snapshots = createMergeArtifacts({ ...options, kind: 'conversation' });
+    const resources = createMergeArtifacts({ ...options, kind: 'conversation-resource' });
+    const documents = createMergeArtifacts(options);
+    const account = `conversation-${randomBytes(8).toString('hex')}`;
+    const resource = Buffer.from('private document bytes');
+    const resourceInput = input(resource, 0, { kind: 'conversation-resource' });
+    const savedResource = await resources.upload(account, 'run-1', resourceInput);
+    const descriptor = (generation, state = 'queued') => input(Buffer.from(JSON.stringify({ generation, state })), 0,
+      { kind: 'conversation', state, revision: generation, operationId: `generation-${generation}`,
+        retentionUntil: savedResource.mergeRequest.expiresAt });
+    const old = await snapshots.upload(account, 'run-1', descriptor(1));
+    const latest = await snapshots.upload(account, 'run-1', descriptor(2));
+    await assert.rejects(snapshots.upload(account, 'run-1', descriptor(1)), { code: 'CLOUD_CONVERSATION_STALE' });
+    await assert.rejects(snapshots.chunk(account, old.mergeRequest.id, 0), { code: 'CLOUD_MERGE_NOT_FOUND' });
+    assert.deepEqual((await snapshots.list(account)).mergeRequests.map((item) => item.id), [latest.mergeRequest.id]);
+    assert.deepEqual((await documents.list(account)).mergeRequests, []);
+    await assert.rejects(snapshots.chunk('another-account', latest.mergeRequest.id, 0), { code: 'CLOUD_MERGE_NOT_FOUND' });
+    await assert.rejects(snapshots.chunk(account, savedResource.mergeRequest.id, 0), { code: 'CLOUD_MERGE_NOT_FOUND' });
+    clock += 24 * 60 * 60_000;
+    const renewed = await resources.upload(account, 'run-2', resourceInput);
+    assert.equal(renewed.mergeRequest.id, savedResource.mergeRequest.id);
+    assert.equal(renewed.mergeRequest.expiresAt, clock + MERGE_RETENTION_MS);
+    const tombstone = await snapshots.upload(account, 'run-2', descriptor(3, 'purged'));
+    await assert.rejects(resources.chunk(account, savedResource.mergeRequest.id, 0), { code: 'CLOUD_MERGE_NOT_FOUND' });
+    const reopened = createMergeArtifacts({ ...options, kind: 'conversation' });
+    assert.equal((await reopened.list(account)).mergeRequests[0].state, 'purged');
+    assert.equal((await reopened.list(account)).mergeRequests[0].id, tombstone.mergeRequest.id);
+    await assert.rejects(reopened.upload(account, 'run-3', descriptor(4)), { code: 'CLOUD_CONVERSATION_STALE' });
+  });
+}
+
+test('conversation writes hold the worker assignment fence until their durable receipt', async () => {
+  const token = 'worker-scoped-token';
+  const state = createMemoryStore({ raucloud: { accounts: { account: { worker: {
+    id: 'worker', runId: 'run', workerTokenHash: sha(token), status: 'active',
+  } } }, runs: { run: { id: 'run', accountId: 'account', workerId: 'worker', workerTokenHash: sha(token), status: 'active' } } } });
+  const entered = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  let writes = 0;
+  const broker = createRaucloudBroker({ store: state, mutate: (task) => state.mutate(task),
+    authenticateAccessToken: async () => 'account', conversationArtifacts: {
+      async upload(accountId) { writes++; assert.equal(accountId, 'account'); entered.resolve(); await release.promise; return { complete: true }; },
+    } });
+  const upload = broker.uploadCloudConversation(token, 'run', { kind: 'conversation' });
+  await entered.promise;
+  let replaced = false;
+  const replace = state.mutate((value) => { value.raucloud.accounts.account.worker = null; replaced = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(replaced, false);
+  release.resolve();
+  assert.equal((await upload).complete, true);
+  await replace;
+  await assert.rejects(broker.uploadCloudConversation(token, 'run', { kind: 'conversation' }), { code: 'CLOUD_WORKER_UNAUTHORIZED' });
+  assert.equal(writes, 1);
+});
 
 for (const backend of ['memory', 'file', ...(process.env.RAU_TEST_POSTGRES_URL ? ['postgres'] : [])]) {
   test(`${backend}: chunks survive reconstruction, publish atomically, and reject conflicting retries`, async (t) => {
@@ -176,4 +242,19 @@ if (process.env.RAU_TEST_POSTGRES_URL) test('postgres replicas serialize simulta
   const reservations = await Promise.allSettled(apis.map((api, i) => api.upload(`${account}-capacity`, 'run-1', input(bytes, 0, { operationId: `op-${i}` }))));
   assert.equal(reservations.filter((value) => value.status === 'fulfilled').length, 1);
   assert.equal(reservations.find((value) => value.status === 'rejected').reason.code, 'CLOUD_MERGE_CAPACITY');
+});
+
+if (process.env.RAU_TEST_POSTGRES_URL) test('postgres snapshot replicas cannot publish an older generation over a newer one', async (t) => {
+  const stores = await Promise.all([0, 1].map(() => createPostgresMergeStore({ connectionString: process.env.RAU_TEST_POSTGRES_URL })));
+  t.after(() => Promise.all(stores.map((store) => store.close())));
+  const account = `snapshot-replica-${randomBytes(8).toString('hex')}`;
+  const apis = stores.map((store) => createMergeArtifacts({ store, sessionSecret: secret, kind: 'conversation' }));
+  const payload = (generation) => input(Buffer.from(`snapshot ${generation}`), 0, { revision: generation,
+    operationId: `snapshot-${generation}`, kind: 'conversation', state: 'queued', retentionUntil: Date.now() + MERGE_RETENTION_MS });
+  const results = await Promise.allSettled([apis[0].upload(account, 'run-1', payload(2)), apis[1].upload(account, 'run-1', payload(1))]);
+  assert.equal(results[0].status, 'fulfilled');
+  if (results[1].status === 'rejected') assert.equal(results[1].reason.code, 'CLOUD_CONVERSATION_STALE');
+  const listed = (await apis[1].list(account)).mergeRequests;
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].revision, 2);
 });
