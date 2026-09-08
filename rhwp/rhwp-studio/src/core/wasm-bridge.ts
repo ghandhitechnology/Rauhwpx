@@ -1,4 +1,6 @@
 import init, { HwpDocument, version } from '@wasm/rhwp.js';
+import { requireCharShapeRunsDocument, parseCharShapeRuns, validateCharShapeRuns } from './char-shape-runs';
+import type { CharShapeRun } from './types';
 import * as wasmExports from '@wasm/rhwp.js';
 import { blake3 } from '@noble/hashes/blake3.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
@@ -2621,6 +2623,20 @@ export class WasmBridge {
     return this.doc.exportSelectionInCellHtml(sec, parentPara, controlIdx, cellIdx, startCellPara, startOffset, endCellPara, endOffset);
   }
 
+  /**
+   * 한글 클립보드 문서모델(hwpjson) 붙여넣기.
+   *
+   * HTML 에는 글꼴 등록·문단모양 정의·쪽 설정이 없어 원본 조판이 재현되지 않는다.
+   * 한글이 클립보드 주석에 함께 싣는 문서 모델을 코어가 HWPX 로 옮겨 붙인다.
+   * 코어가 이 진입점을 갖고 있지 않은 옛 wasm 에서도 죽지 않도록 존재를 확인한다.
+   */
+  pasteHwpJson(sec: number, para: number, charOffset: number, json: string): string {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    const fn = (this.doc as { pasteHwpJson?: (sec: number, para: number, charOffset: number, json: string) => string }).pasteHwpJson;
+    if (typeof fn !== 'function') return '{"ok":false,"error":"pasteHwpJson 미지원"}';
+    return fn.call(this.doc, sec, para, charOffset, json);
+  }
+
   pasteHtml(sec: number, para: number, charOffset: number, html: string): string {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return this.doc.pasteHtml(sec, para, charOffset, html);
@@ -2657,6 +2673,30 @@ export class WasmBridge {
   applyCharFormat(sec: number, para: number, startOffset: number, endOffset: number, propsJson: string): string {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return this.doc.applyCharFormat(sec, para, startOffset, endOffset, propsJson);
+  }
+
+  getCharShapeRuns(sec: number, para: number, start: number, end: number): CharShapeRun[] {
+    return parseCharShapeRuns(requireCharShapeRunsDocument(this.doc).getCharShapeRuns(sec, para, start, end), start, end);
+  }
+
+  setCharShapeRuns(sec: number, para: number, start: number, end: number, runs: CharShapeRun[]): string {
+    const doc = requireCharShapeRunsDocument(this.doc);
+    const json = JSON.stringify(validateCharShapeRuns(runs, start, end));
+    return doc.setCharShapeRuns(sec, para, start, end, json);
+  }
+
+  getCharShapeRunsInCellByPath(sec: number, para: number, path: string, start: number, end: number): CharShapeRun[] {
+    return parseCharShapeRuns(
+      requireCharShapeRunsDocument(this.doc).getCharShapeRunsInCellByPath(sec, para, path, start, end),
+      start,
+      end,
+    );
+  }
+
+  setCharShapeRunsInCellByPath(sec: number, para: number, path: string, start: number, end: number, runs: CharShapeRun[]): string {
+    const doc = requireCharShapeRunsDocument(this.doc);
+    const json = JSON.stringify(validateCharShapeRuns(runs, start, end));
+    return doc.setCharShapeRunsInCellByPath(sec, para, path, start, end, json);
   }
 
   applyCharFormatAcrossSections(startSec: number, startPara: number, startOffset: number, endSec: number, endPara: number, endOffset: number, propsJson: string): string {

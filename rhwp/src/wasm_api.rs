@@ -7329,6 +7329,62 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    /// 문자 offset 범위의 모양 구간 목록을 조회한다.
+    #[wasm_bindgen(js_name = getCharShapeRuns)]
+    pub fn get_char_shape_runs(
+        &self,
+        sec: usize,
+        para: usize,
+        start: usize,
+        end: usize,
+    ) -> Result<String, JsValue> {
+        self.get_char_shape_runs_native(sec, para, start, end)
+            .map_err(Into::into)
+    }
+
+    /// 구간 목록 전체를 검사한 뒤 본문 모양을 복원한다.
+    #[wasm_bindgen(js_name = setCharShapeRuns)]
+    pub fn set_char_shape_runs(
+        &mut self,
+        sec: usize,
+        para: usize,
+        start: usize,
+        end: usize,
+        runs_json: &str,
+    ) -> Result<String, JsValue> {
+        self.set_char_shape_runs_native(sec, para, start, end, runs_json)
+            .map_err(Into::into)
+    }
+
+    #[wasm_bindgen(js_name = getCharShapeRunsInCellByPath)]
+    pub fn get_char_shape_runs_in_cell_by_path(
+        &mut self,
+        sec: usize,
+        para: usize,
+        path_json: &str,
+        start: usize,
+        end: usize,
+    ) -> Result<String, JsValue> {
+        let path = DocumentCore::parse_cell_path(path_json)?;
+        self.get_char_shape_runs_in_cell_by_path_native(sec, para, &path, start, end)
+            .map_err(Into::into)
+    }
+
+    #[wasm_bindgen(js_name = setCharShapeRunsInCellByPath)]
+    pub fn set_char_shape_runs_in_cell_by_path(
+        &mut self,
+        sec: usize,
+        para: usize,
+        path_json: &str,
+        start: usize,
+        end: usize,
+        runs_json: &str,
+    ) -> Result<String, JsValue> {
+        let path = DocumentCore::parse_cell_path(path_json)?;
+        self.set_char_shape_runs_in_cell_by_path_native(sec, para, &path, start, end, runs_json)
+            .map_err(Into::into)
+    }
+
     /// 글자 서식 ID를 직접 복원한다 (본문 문단).
     #[wasm_bindgen(js_name = setCharShapeId)]
     pub fn set_char_shape_id(
@@ -8097,6 +8153,28 @@ impl HwpDocument {
             para_idx as usize,
             &cell_path,
             control_idx as usize,
+        )
+        .map_err(|e| e.into())
+    }
+
+    /// 한글 클립보드 문서모델(hwpjson)을 캐럿 위치에 삽입한다 (본문).
+    ///
+    /// 한글은 Ctrl+C 시 클립보드 HTML 끝 주석에 문서 모델 전체를 싣는다. HTML 에는 없는
+    /// 글꼴 등록·문단모양·쪽 설정·셀 속성·그림 원본이 여기 있어, 이 경로라야 원본과 같은
+    /// 조판이 나온다. 실패하면 호출한 쪽이 종전 `pasteHtml` 로 되돌아가면 된다.
+    #[wasm_bindgen(js_name = pasteHwpJson)]
+    pub fn paste_hwp_json(
+        &mut self,
+        section_idx: u32,
+        para_idx: u32,
+        char_offset: u32,
+        json: &str,
+    ) -> Result<String, JsValue> {
+        self.paste_hwp_json_native(
+            section_idx as usize,
+            para_idx as usize,
+            char_offset as usize,
+            json,
         )
         .map_err(|e| e.into())
     }

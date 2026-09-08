@@ -23,6 +23,8 @@ import { emitHeaderFooterModeChanged } from './header-footer-mode';
 import { scrollByPageStep, type PageScrollDirection } from '@/view/page-scroll';
 import { caretRectForPageScroll as resolveCaretRectForPageScroll } from '@/view/page-scroll-caret';
 import { inlinePictureInsertionTarget } from './inline-picture-target';
+import { inlineOfficeClipboardImages, liftImagesToBlockLevel, needsRtfImageInlining } from './office-clipboard-images';
+import { extractHwpJsonModel, HWPJSON_PASTE_MAX_CHARS, sanitizeOfficeHtmlForCore } from './office-html-sanitize';
 
 const RHWP_CLIPBOARD_MARKER_RE = /<!--\s*rhwp-studio-clipboard:([A-Za-z0-9._:-]+)\s*-->/;
 const PAGINATION_BOUNDARY_KEYS = new Set([
@@ -2012,6 +2014,7 @@ export function onPaste(this: any, e: ClipboardEvent): void {
   const clipboardData = e.clipboardData;
   const html = clipboardData?.getData('text/html') || '';
   const text = clipboardData?.getData('text/plain') || '';
+  const rtf = clipboardData?.getData('text/rtf') || '';
   // HF는 이번 이슈에서 rich clipboard round-trip을 만들지 않는다. 내부 marker/HTML이
   // 있어도 시스템 plain text를 코어의 원자 범위 primitive로 삽입·치환한다.
   if (this.cursor.isInHeaderFooter()) {
@@ -2108,33 +2111,106 @@ export function onPaste(this: any, e: ClipboardEvent): void {
 
   // 외부 클립보드: HTML이 있으면 pasteHtml로 표/서식 보존 붙여넣기
   if (html) {
-    this.executeOperation({ kind: 'snapshot', operationType: 'pasteHtml', operation: (wasm: WasmBridge) => {
-      if (hasSelection) this.deleteSelection();
-      const p = this.cursor.getPosition();
-      let result: string;
-      if (isNestedCellPosition(p)) {
-        result = wasm.pasteHtmlInCellByPath(
-          p.sectionIndex, p.parentParaIndex!, JSON.stringify(p.cellPath), p.charOffset, html,
-        );
-      } else if (p.parentParaIndex !== undefined) {
-        result = wasm.pasteHtmlInCell(
-          p.sectionIndex, p.parentParaIndex, p.controlIndex!,
-          p.cellIndex!, p.cellParaIndex!, p.charOffset, html,
-        );
-      } else {
-        result = wasm.pasteHtml(p.sectionIndex, p.paragraphIndex, p.charOffset, html);
-      }
-      const parsed = JSON.parse(result);
-      if (parsed.ok) {
-        return positionAfterPasteResult(p, parsed);
-      }
-      return p;
-    }});
+    // 한글에서 복사한 것이면 문서 모델을 먼저 쓴다.
+    //
+    // 한글은 클립보드 HTML 끝 주석 `[data-hwpjson]` 에 문서 모델 전체를 싣는다.
+    // HTML 에는 글꼴 등록·문단모양 정의·쪽 설정·셀 속성이 없어, HTML 만 읽으면 대상 문서의
+    // 기본 글꼴로 떨어지고 줄바꿈·쪽수가 어긋난다. 실패하면 조용히 종전 HTML 경로로
+    // 되돌아간다 — 워드·엑셀·파워포인트에는 이 주석이 없다.
+    const model = extractHwpJsonModel(html);
+    if (model && pasteHwpJsonModel.call(this, model, hasSelection)) return;
+    // 한글은 그림을 HTML 에 file:/// 로만 적고 실제 픽셀은 같은 클립보드의
+    // text/rtf 안에 둔다. 그 경우에만 RTF 에서 그림을 꺼내 data URI 로 채운 뒤 붙여넣는다.
+    if (needsRtfImageInlining(html, rtf)) {
+      void (async () => {
+        let merged = html;
+        try {
+          merged = await inlineOfficeClipboardImages(html, rtf);
+        } catch (error) {
+          console.warn('[paste] RTF 그림 삽입 실패 — 그림 없이 붙여넣기:', error);
+        }
+        pasteExternalHtml.call(this, merged, text, hasSelection);
+      })();
+      return;
+    }
+    pasteExternalHtml.call(this, liftImagesToBlockLevel(html), text, hasSelection);
     return;
   }
 
   // 플레인 텍스트 붙여넣기 fallback도 동일한 원자적 경로를 쓴다.
   pastePlainText.call(this, text);
+}
+
+/**
+ * 문서 모델 붙여넣기. 코어가 이 경로를 못 다루면 false 를 돌려
+ * 호출한 쪽이 종전 HTML 경로로 되돌아가게 한다.
+ */
+function pasteHwpJsonModel(this: any, model: string, hasSelection: boolean): boolean {
+  if (model.length > HWPJSON_PASTE_MAX_CHARS) return false;
+  const cursor = this.cursor.getPosition();
+  // 표 칸 안은 아직 HTML 경로가 담당한다(코어에 셀 진입점이 없다).
+  if (cursor.parentParaIndex !== undefined) return false;
+  const selection = hasSelection ? this.cursor.getSelectionOrdered() : null;
+  try {
+    this.executeOperation({
+      kind: 'snapshot',
+      operationType: 'pasteHwpJson',
+      operation: (wasm: WasmBridge) => {
+        const p = selection
+          ? deleteSelectionImmediate(wasm, selection.start, selection.end)
+          : cursor;
+        const result = wasm.pasteHwpJson(p.sectionIndex, p.paragraphIndex, p.charOffset, model);
+        console.debug('[paste] pasteHwpJson 결과:', String(result).slice(0, 200));
+        const parsed = JSON.parse(result);
+        if (!parsed.ok) throw new Error(String(parsed.error ?? 'pasteHwpJson 거절'));
+        return positionAfterPasteResult(p, parsed);
+      },
+    });
+    this.cursor.clearSelection();
+    return true;
+  } catch (error) {
+    console.warn('[paste] 문서모델 붙여넣기 실패 — HTML 경로로 되돌아감:', error);
+    return false;
+  }
+}
+
+/** 외부 HTML 붙여넣기 본체 — 코어 정리 → pasteHtml → 실패 시 text/plain 폴백. */
+function pasteExternalHtml(this: any, html: string, text: string, hasSelection: boolean): void {
+  const htmlForCore = sanitizeOfficeHtmlForCore(html);
+  console.debug(`[paste] HTML 붙여넣기 시작: 원본 ${html.length}자 → 정리 ${htmlForCore.length}자, img ${(htmlForCore.match(/<img\b/gi) ?? []).length}개`);
+  const selection = hasSelection ? this.cursor.getSelectionOrdered() : null;
+  let htmlPasted = false;
+  try {
+    this.executeOperation({ kind: 'snapshot', operationType: 'pasteHtml', operation: (wasm: WasmBridge) => {
+      const p = selection
+        ? deleteSelectionImmediate(wasm, selection.start, selection.end)
+        : this.cursor.getPosition();
+      let result: string;
+      if (isNestedCellPosition(p)) {
+        result = wasm.pasteHtmlInCellByPath(
+          p.sectionIndex, p.parentParaIndex!, JSON.stringify(p.cellPath), p.charOffset, htmlForCore,
+        );
+      } else if (p.parentParaIndex !== undefined) {
+        result = wasm.pasteHtmlInCell(
+          p.sectionIndex, p.parentParaIndex, p.controlIndex!,
+          p.cellIndex!, p.cellParaIndex!, p.charOffset, htmlForCore,
+        );
+      } else {
+        result = wasm.pasteHtml(p.sectionIndex, p.paragraphIndex, p.charOffset, htmlForCore);
+      }
+      const parsed = JSON.parse(result);
+      console.debug('[paste] pasteHtml 결과:', String(result).slice(0, 200));
+      if (!parsed.ok) throw new Error(String(parsed.error ?? 'pasteHtml 거절'));
+      htmlPasted = true;
+      return positionAfterPasteResult(p, parsed);
+    }});
+    this.cursor.clearSelection();
+  } catch (error) {
+    console.warn('[paste] HTML 붙여넣기 실패 — 텍스트로 폴백:', error);
+  }
+  if (!htmlPasted && text) {
+    pastePlainText.call(this, text);
+  }
 }
 
 /** 클립보드의 이미지 파일을 커서 위치에 삽입한다. */

@@ -4,19 +4,6 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// ApplyCharFormatCommand 의 MIXED 서식 범위 redo per-run 복원 가드.
-//
-// Rust 측 apply_char_mods_to_paragraph(formatting.rs)가 MIXED 범위에서 run 별 base 서식을
-// 보존(= run 별 파생 shape)하도록 바뀐 뒤, 범위 시작에서 샘플링한 단일 afterCharShapeId 를
-// redo 에서 범위 전체에 setCharShapeId 하면 보존된 run 들이 하나의 서식으로 붕괴한다.
-// 그래서 execute 가 before/after 모두 run(균일 charShapeId 구간) 단위 스팬으로 캡처하고,
-// undo/redo 는 스팬별로 복원해야 한다. WASM 에 run 열거 export 가 없어 오프셋별
-// getCharPropertiesAt 샘플링(sampleCharShapeSpans)으로 경계를 복원한다.
-//
-// node --test 는 strip-only TS 라 engine 클래스를 실행할 수 없어(이 저장소 undo 테스트
-// 관례) 소스 배선을 정적으로 검증한다. 행위 증명(브라우저 undo/redo 왕복)은 PR 검증에서
-// 별도 수행.
-
 const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const commandSrc = readFileSync(join(rootDir, 'src/engine/command.ts'), 'utf8');
 
@@ -27,79 +14,38 @@ function classBlock(name: string): string {
   return rel === -1 ? commandSrc.slice(start) : commandSrc.slice(start, start + 1 + rel);
 }
 
-test('서식 이력은 문단당 단일 ID 가 아니라 run 단위 스팬(before/after)으로 캡처한다', () => {
+test('서식 이력은 문단당 단일 ID 가 아니라 run 목록(before/after)으로 캡처한다', () => {
   const block = classBlock('ApplyCharFormatCommand');
-  assert.match(commandSrc, /interface CharShapeSpan \{/, 'run 스팬 타입 필요');
-  assert.match(commandSrc, /beforeSpans: CharShapeSpan\[\]/, 'undo용 before run 스팬');
-  assert.match(commandSrc, /afterSpans\?: CharShapeSpan\[\]/, 'redo용 after run 스팬');
-  // 단일 ID 캡처가 남아 있으면 MIXED 범위 redo 붕괴가 재발한다.
+  assert.match(commandSrc, /beforeRuns: CharShapeRun\[\]/, 'undo용 before run 목록');
+  assert.match(commandSrc, /afterRuns\?: CharShapeRun\[\]/, 'redo용 after run 목록');
   assert.doesNotMatch(commandSrc, /beforeCharShapeId/, '단일 beforeCharShapeId 캡처 금지');
   assert.doesNotMatch(commandSrc, /afterCharShapeId/, '단일 afterCharShapeId 캡처 금지');
-  assert.match(
-    block,
-    /entries\.push\(\{\s*target: range\.target,\s*beforeSpans,\s*afterSpans:/,
-    '문단별 스팬 엔트리 축적',
-  );
+  assert.match(block, /beforeRuns: this\.readRuns\(/, '문단별 run 엔트리 축적');
 });
 
-test('execute 는 서식 적용 전 run 경계를 샘플링하고 적용 후 run별 파생 shape 를 캡처한다', () => {
+test('execute 는 서식 적용 전 run 을 읽고 적용 후 run 을 캡처한다', () => {
   const block = classBlock('ApplyCharFormatCommand');
-  const sampleIdx = block.indexOf('sampleCharShapeSpans(');
+  const readIdx = block.indexOf('this.readRuns(');
   const applyIdx = block.indexOf('applyCharFormatToTarget(');
-  const deriveIdx = block.indexOf('deriveAfterSpans(', applyIdx);
-  assert.ok(sampleIdx !== -1 && sampleIdx < applyIdx,
-    '대상별 서식 적용 전에 run 경계 샘플링(beforeSpans)이 와야 함');
-  assert.ok(deriveIdx > applyIdx, '대상별 서식 적용 후 after run 스팬을 캡처해야 함');
+  const afterIdx = block.indexOf('entry.afterRuns = this.readRuns(');
+  assert.ok(readIdx !== -1 && readIdx < applyIdx,
+    '대상별 서식 적용 전에 beforeRuns 캡처가 와야 함');
+  assert.ok(afterIdx > applyIdx, '대상별 서식 적용 후 afterRuns 를 캡처해야 함');
 });
 
-test('run 경계 샘플링은 오프셋별 charShapeId 비교로 균일 구간을 자른다', () => {
-  const fnIdx = commandSrc.indexOf('function sampleCharShapeSpans(');
-  assert.notEqual(fnIdx, -1, 'sampleCharShapeSpans not found');
-  const fnBlock = commandSrc.slice(fnIdx, fnIdx + 1200);
-  // Rust char_shape_runs_in_range 와 동형: 오프셋을 순회하며 id 변경 지점을 경계로 삼는다.
-  assert.match(fnBlock, /for \(let o = from \+ 1; o < to; o\+\+\)/, '오프셋 전수 순회');
-  assert.match(fnBlock, /if \(id !== runId\)/, 'charShapeId 변경 지점에서 스팬 분할');
-  assert.match(fnBlock, /endOffset: to/, '마지막 스팬은 범위 끝까지');
-});
-
-test('after 캡처는 Rust 의 run별 파생 규칙을 따라 전 스팬 시작만 샘플링하고 같은 파생 id 는 합친다', () => {
-  const fnIdx = commandSrc.indexOf('function deriveAfterSpans(');
-  assert.notEqual(fnIdx, -1, 'deriveAfterSpans not found');
-  const fnBlock = commandSrc.slice(fnIdx, fnIdx + 1200);
-  assert.match(fnBlock, /propsAt\(before\.startOffset\)/, '전 run 시작 오프셋에서 파생 id 샘플링');
-  assert.match(fnBlock, /last\.charShapeId === charShapeId/, '인접 동일 파생 id 병합');
-});
-
-test('redo(재실행)는 before 가 아니라 after run 스팬을 복원한다', () => {
+test('본문/셀 복원은 구간 API 한 호출이고 HF/FN 은 setCharShapeId 를 유지한다', () => {
   const block = classBlock('ApplyCharFormatCommand');
-  const eIdx = block.indexOf('execute(wasm: WasmBridge): DocumentPosition {');
-  const uIdx = block.indexOf('undo(wasm: WasmBridge): DocumentPosition {');
-  const execute = block.slice(eIdx, uIdx);
-  assert.match(execute, /every\(\(entry\) => entry\.afterSpans !== undefined\)/,
-    '재실행 판정은 afterSpans 캡처 완료 여부');
-  assert.match(execute, /restoreCharShapeIds\(wasm, 'after'\)/, 'redo 는 after 스팬 복원');
-  const undo = block.slice(uIdx);
-  assert.match(undo, /restoreCharShapeIds\(wasm, 'before'\)/, 'undo 는 before 스팬 복원');
+  assert.match(block, /wasm\.setCharShapeRuns\(/, '본문 원자 복원');
+  assert.match(block, /wasm\.setCharShapeRunsInCellByPath\(/, '셀 원자 복원');
+  assert.match(block, /setCharShapeIdAtTarget\(wasm, target, span\)/, 'HF/FN 스팬 복원');
+  const execute = block.slice(block.indexOf('execute(wasm'), block.indexOf('undo(wasm'));
+  assert.match(execute, /restoreCharShapeRuns\(wasm, 'after'\)/, 'redo 는 after run 복원');
+  assert.match(block, /restoreCharShapeRuns\(wasm, 'before'\)/, 'undo 는 before run 복원');
 });
 
-test('undo/redo 복원은 모든 editable scope에서 스팬별 setCharShapeId 호출이다', () => {
+test('적용 실패 시 부분 변경을 되돌리고 복원 실패는 retainOnFailure 로 남긴다', () => {
   const block = classBlock('ApplyCharFormatCommand');
-  const rIdx = block.indexOf('private restoreCharShapeIds(');
-  assert.notEqual(rIdx, -1, 'restoreCharShapeIds not found');
-  const restore = block.slice(rIdx);
-  assert.match(restore, /for \(const span of spans\)/, '스팬 순회 복원');
-  assert.match(restore, /setCharShapeIdAtTarget\(wasm, entry\.target, span\)/,
-    '복원은 대상 라우터에 스팬을 그대로 넘긴다');
-  const routerStart = commandSrc.indexOf('function setCharShapeIdAtTarget(');
-  const routerEnd = commandSrc.indexOf('\nfunction getParaPropertiesAtTarget(', routerStart);
-  const router = commandSrc.slice(routerStart, routerEnd);
-  for (const call of [
-    'wasm.setCharShapeId(',
-    'wasm.setCharShapeIdInCellByPath(',
-    'wasm.setCharShapeIdInCell(',
-    'wasm.setCharShapeIdInHf(',
-    'wasm.setCharShapeIdInFootnote(',
-  ]) {
-    assert.match(router, new RegExp(call.replace(/[.(]/g, '\\$&')), `${call} 라우팅`);
-  }
+  assert.match(block, /retainOnFailure\(\): boolean/, '실패 보존 훅');
+  assert.match(block, /CharFormatRecoveryError/, '부분 복원 실패 오류');
+  assert.match(block, /attempted\.reverse\(\)/, '적용한 문단부터 역순 rollback');
 });

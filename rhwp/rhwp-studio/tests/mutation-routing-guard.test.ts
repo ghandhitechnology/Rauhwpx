@@ -164,7 +164,7 @@ const BASELINE: Readonly<Record<string, number>> = {
   'src/engine/input-handler-connector.ts': 1,
   // +1: 각주 문단 끝 Delete의 다음 문단 병합. 즉시 결과를 MergeParagraphInFootnoteCommand
   // record에 넘겨 undo/redo 및 removedParaMeta 복원을 보존한다.
-  'src/engine/input-handler-keyboard.ts': 22,
+  'src/engine/input-handler-keyboard.ts': 23, // +1: #6725 pasteHwpJson (executeOperation snapshot 내부)
   'src/engine/input-handler-mouse.ts': 3,
   'src/engine/input-handler-picture.ts': 11,
   'src/engine/input-handler-table.ts': 7,

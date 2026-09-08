@@ -179,6 +179,12 @@ const EXEMPT: &[(&str, &str, Exempt, &str)] = &[
     ),
     (
         "commands/document.rs",
+        "set_font_metrics_policy_native",
+        Exempt::SessionState,
+        "글꼴 메트릭 정책 + 조판 캐시. 본문 패스스루와 무관하며 refresh_layout_native 에 위임.",
+    ),
+    (
+        "commands/document.rs",
         "discard_snapshot_native",
         Exempt::SessionState,
         "`snapshot_store` 에서 항목 제거.",
@@ -194,6 +200,12 @@ const EXEMPT: &[(&str, &str, Exempt, &str)] = &[
         "get_cell_para_properties_at_by_path",
         Exempt::SessionState,
         "순수 조회. `&mut` 는 가변 접근자(`get_cell_paragraph_mut_by_path`) 재사용 때문.",
+    ),
+    (
+        "commands/formatting_runs.rs",
+        "get_char_shape_runs_in_cell_by_path_native",
+        Exempt::SessionState,
+        "[#6788] 구간 검증과 모양 목록 직렬화만 하는 순수 조회. `&mut` 는 가변 셀 접근자 재사용 때문이며 문서 IR 비변경.",
     ),
     (
         "commands/header_footer_ops.rs",
@@ -313,6 +325,12 @@ const EXEMPT: &[(&str, &str, Exempt, &str)] = &[
         "serialize_hwp_with_verify",
         Exempt::SessionState,
         "저장 검증용 clone/재로드만 수행. 라이브 IR 과 패스스루는 바꾸지 않는다.",
+    ),
+    (
+        "commands/object_ops/picture.rs",
+        "insert_picture_native",
+        Exempt::DelegatesTo("insert_picture_with_placement_native"),
+        "배치 API 래퍼 — 실제 삽입·무효화는 insert_picture_with_placement_native 본문.",
     ),
     (
         "commands/table_ops.rs",

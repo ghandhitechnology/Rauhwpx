@@ -6,7 +6,7 @@
 use rhwp::document_core::DocumentCore;
 use rhwp::model::style::UnderlineType;
 
-const HTML_PASTE_MAX_BYTES: usize = 400_000;
+const HTML_PASTE_MAX_BYTES: usize = 2_000_000;
 const FLUSH_LINE_CHAR_CAP: usize = 4_000;
 
 fn paste_html(html: &str) -> DocumentCore {
@@ -136,11 +136,24 @@ fn oversized_markup_paste_falls_back_to_capped_paragraphs() {
     let core = paste_html(&format!("<div>{text}</div>"));
     let paragraphs = paragraphs(&core);
 
-    assert_eq!(paragraphs.len(), 101);
+    assert_eq!(paragraphs.len(), 501);
     assert!(paragraphs
         .iter()
         .all(|paragraph| paragraph.text.chars().count() <= FLUSH_LINE_CHAR_CAP));
     assert_eq!(paragraphs.last().expect("마지막 문단").text, "가");
+}
+
+#[test]
+fn html_paste_enforces_absolute_input_ceiling_besides_markup_len() {
+    let src = include_str!("../src/document_core/commands/html_import.rs");
+    assert!(
+        src.contains("HTML_PASTE_MAX_TOTAL_BYTES"),
+        "data: 페이로드를 포함한 절대 상한이 있어야 한다"
+    );
+    assert!(
+        src.contains("html.len() > Self::HTML_PASTE_MAX_TOTAL_BYTES"),
+        "마크업 길이와 별개로 html.len() 을 검사해야 한다"
+    );
 }
 
 #[test]
@@ -174,7 +187,10 @@ fn paragraph_and_table_paste_preserves_surrounding_text_and_remains_editable() {
                 }
             })
             .expect("pasted table");
-        assert!(table.common.treat_as_char, "HTML 표는 본문 흐름에 배치돼야 한다");
+        assert!(
+            table.common.treat_as_char,
+            "HTML 표는 본문 흐름에 배치돼야 한다"
+        );
         assert!(table.common.width > 0 && table.common.height > 0);
         assert_eq!(table.cells.len(), 2);
         assert_eq!(table.cells[0].paragraphs[0].text, "Cell A");

@@ -957,13 +957,16 @@ impl DocumentCore {
                 continue;
             }
 
-            let base_id = self
+            let runs = self
                 .get_hf_paragraph_ref(section_idx, is_header, apply_to, hf_para_idx)
-                .and_then(|paragraph| paragraph.char_shape_id_at(range_start))
-                .unwrap_or(0);
-            let new_id = self.document.find_or_create_char_shape(base_id, &mods);
-            self.get_hf_paragraph_mut(section_idx, is_header, apply_to, hf_para_idx)?
-                .apply_char_shape_range(range_start, range_end, new_id);
+                .map(|paragraph| paragraph.char_shape_runs_in_range(range_start, range_end))
+                .unwrap_or_default();
+            let applications = self.derive_char_shape_applications(runs, &mods);
+            let paragraph =
+                self.get_hf_paragraph_mut(section_idx, is_header, apply_to, hf_para_idx)?;
+            for (start, end, shape_id) in applications {
+                paragraph.apply_char_shape_range(start, end, shape_id);
+            }
             changed_paragraphs.push((hf_para_idx, range_start, range_end));
         }
 
