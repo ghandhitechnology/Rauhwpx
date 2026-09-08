@@ -8,11 +8,11 @@ export class SerializedStateWriter {
     this.#onError = onError;
   }
 
-  enqueue(snapshot) {
+  enqueue(snapshot, { rejectOnError = false } = {}) {
     const next = this.#queue.then(() => this.#write(snapshot));
     this.#queue = next.catch((error) => {
       this.#onError(error);
     });
-    return this.#queue;
+    return rejectOnError ? next : this.#queue;
   }
 }
