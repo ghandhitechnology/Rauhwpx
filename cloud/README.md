@@ -38,8 +38,10 @@ Raucloud retains completed turn documents in encrypted broker storage for 30 day
 independently of the temporary instance. A laptop that was asleep can reopen the
 origin document and retrieve the matching **Cloud 변경 병합** request after the
 instance has expired. Downloaded copies stay in the desktop recovery directory
-and are verified before use. The broker must be upgraded before the worker image;
-workers require a durable upload receipt before completing a turn.
+and are verified before use. Deploy the broker upgrade before releasing either
+the worker image or the desktop client. Workers require a durable upload receipt
+before completing a turn; desktop recovery uses the broker discovery and
+chunk-download APIs.
 
 Publication is explicit: the user chooses **원본에 반영**, or the agent calls `publish_cloud_document`. The tool queues publication after a successful turn and stable checkpoint; it does not report that the local file has already been written. Publication checks the origin digest before replacement. An external save is preserved, with the Cloud version kept as a separate copy on desktop. Publishing leaves the Cloud conversation open for more turns.
 

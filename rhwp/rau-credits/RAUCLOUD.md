@@ -84,6 +84,13 @@ The worker uploads each completed turn before acknowledging durable delivery:
 - `GET /v1/cloud/merge-requests/:id/chunks/:index` uses the same account bearer
   token and returns `{bytesBase64}`. Other accounts receive 404.
 
+The broker commits recovery publication when the final chunk passes verification.
+The frozen document remains available for manual merge even if the worker dies or
+loses its local assignment before committing its runtime boundary. This receipt
+does not acknowledge runtime turn completion or authorize an origin-file write.
+A later worker confirmation is not required, so instance deletion cannot strand
+an otherwise complete recovery copy.
+
 Account, session and operation identify one immutable receipt. Repeated chunks
 must have identical bytes and metadata; conflicting retries return HTTP 409
 `CLOUD_MERGE_CONFLICT`. Retries may use a later authenticated run from the same

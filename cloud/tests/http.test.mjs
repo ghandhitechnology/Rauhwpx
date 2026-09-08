@@ -21,6 +21,7 @@ import { applyProviderAuth, parseProviderAuth } from '../src/provider-auth.mjs';
 import { SessionStore } from '../src/session-store.mjs';
 import { SecretVault } from '../src/secret-vault.mjs';
 import { WorkerClient } from '../worker/client.mjs';
+import { createMemoryMergeStore, createMergeArtifacts } from '../../rhwp/rau-credits/merge-artifacts.mjs';
 import {
   SSE_STREAM_DIGEST,
   canonicalResponse,
@@ -662,6 +663,9 @@ test('worker API accepts only the session worker token', async (t) => {
 
 test('managed turn boundaries retain the frozen document before local commit and retry failed uploads', async (t) => {
   const archived = [];
+  const mergeStore = createMemoryMergeStore();
+  const createArchive = () => createMergeArtifacts({ store: mergeStore, sessionSecret: 'test-archive-key' });
+  const archive = createArchive();
   let failUpload = true;
   let replaceWorker = false;
   let remembered = null;
@@ -675,8 +679,10 @@ test('managed turn boundaries retain the frozen document before local commit and
       for await (const part of stream) parts.push(part);
       archived.push({ metadata, bytes: Buffer.concat(parts) });
       if (failUpload) throw Object.assign(new Error('broker offline'), { code: 'RAUCLOUD_BROKER_UNREACHABLE', status: 503 });
+      const receipt = await archive.upload('account-1', 'run-1', { ...metadata,
+        chunkIndex: 0, chunkCount: 1, bytesBase64: Buffer.concat(parts).toString('base64') });
       if (replaceWorker) sessionStore.prepareWorker('archive-session', 'replacement-worker');
-      return { complete: true, mergeRequest: { id: 'merge-1', ...metadata } };
+      return receipt;
     },
   };
   const { base, auth, blobStore, sessionStore } = await fixture(t, { workerOnly: true, raucloudLease: lease });
@@ -721,6 +727,16 @@ test('managed turn boundaries retain the frozen document before local commit and
   replaceWorker = true;
   assert.equal((await send('turn', 'turn-1')).status, 401, 'an old worker cannot commit after its upload crosses replacement');
   assert.equal(sessionStore.workerManifest(session.id).latestCheckpoint.kind, 'operation');
+  assert.equal(sessionStore.listEvents(session.id).filter((event) =>
+    event.type === 'boundary.committed' && event.payload.kind === 'turn').length, 0);
+  const reopenedArchive = createArchive();
+  const retained = (await reopenedArchive.list('account-1', session.id)).mergeRequests;
+  assert.equal(retained.length, 1, 'the broker recovery receipt survives rejection of the ephemeral local commit');
+  assert.equal(retained[0].operationId, 'turn-1');
+  const retainedChunk = await reopenedArchive.chunk('account-1', retained[0].id, 0);
+  const retainedBytes = Buffer.from(retainedChunk.bytesBase64, 'base64');
+  assert.equal(retainedBytes.toString(), 'saved document');
+  assert.equal(createHash('sha256').update(retainedBytes).digest('hex'), retained[0].sha256);
   replaceWorker = false;
   workerToken = 'replacement-worker';
   assert.equal((await send('turn', 'turn-1')).status, 201);

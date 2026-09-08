@@ -192,7 +192,7 @@ export interface AgentSidebarDeps {
   cloudController?: CloudController;
   workspace?: WorkspaceController;
   prepareCloudTransfer?: (startId: string, restart?: { document: CloudDocumentPayload; sourceStartId?: string }) => Promise<CloudDocumentPayload | null>;
-  isCloudCheckpointMerged?: (checkpoint: Pick<CloudCheckpointPayload, 'documentId' | 'sessionId' | 'revision'>) => Promise<boolean>;
+  isCloudCheckpointMerged?: (checkpoint: Pick<CloudCheckpointPayload, 'documentId' | 'sessionId' | 'revision' | 'operationId' | 'sha256'>) => Promise<boolean>;
   mergeCloudCheckpoint?: (startId: string, checkpoint: CloudCheckpointPayload) => Promise<boolean>;
   beginCloudAuthorityTransition?: () => { release(): void };
   setCloudDocumentLease?: (cloudOwned: boolean, sessionId: string | null) => void;

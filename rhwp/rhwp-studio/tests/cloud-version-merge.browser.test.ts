@@ -143,7 +143,13 @@ async function openCloudDocument(page: import('puppeteer-core').Page, format: 'h
     const text = () => snapshots.captureVersionSnapshot(wasm).compareSnapshot.paragraphs.map((p) => p.text).join('\n');
     const inspect = () => ({ state: controller.getState(), text: text() });
     const cloud = {
-      controller, store, wasm, dirty, eventBus, checkpoint, startId, inspect,
+      controller, store, wasm, dirty, eventBus, checkpoint, startId, handoff, inspect,
+      reopen: async () => {
+        controller.dispose();
+        controller = new DocumentVersionController(deps);
+        await controller.refresh();
+        cloud.controller = controller;
+      },
       begin: () => {
         (window as any).__cloudOutcome = undefined;
         (window as any).__cloudError = null;
@@ -355,6 +361,79 @@ test('successive cloud turns merge into the active local branch and older signal
     assert.match(final.text, /:CLOUD:NEXT/);
   } finally { await page.close(); }
 });
+
+for (const legacy of [false, true]) {
+  test(`same-revision replacement preserves operation identity${legacy ? ' with legacy commits' : ''}`, { timeout: 60_000 }, async () => {
+    const page = await browser!.newPage();
+    try {
+      await openCloudDocument(page, 'hwpx', `collision-${legacy}`);
+      await page.evaluate(async (legacy) => {
+        const cloud = (window as any).__cloud;
+        await cloud.controller.createBranch('검토');
+        cloud.checkpoint.revision = 3;
+        if (legacy) {
+          const create = cloud.store.createCheckpoint.bind(cloud.store);
+          cloud.store.createCheckpoint = (input: any) => create({ ...input,
+            ...(input.id?.startsWith('cloud:') ? { id: input.id.slice(0, input.id.lastIndexOf(':')) } : {}) });
+          cloud.restoreCreateCheckpoint = () => { cloud.store.createCheckpoint = create; };
+        }
+        cloud.begin();
+      }, legacy);
+      await finishReview(page);
+      const before = await page.evaluate(async () => {
+        const cloud = (window as any).__cloud;
+        cloud.restoreCreateCheckpoint?.();
+        cloud.firstCheckpoint = { ...cloud.checkpoint };
+        cloud.wasm.insertText(0, 1, 0, 'AFTER_A:');
+        cloud.dirty.markDirty('test');
+        cloud.eventBus.emit('document-mutated');
+        await cloud.controller.checkpoint('A 이후 로컬 편집');
+        const { WasmBridge } = await import('/src/core/wasm-bridge.ts');
+        const remote = new WasmBridge();
+        await remote.initialize();
+        remote.loadDocument(cloud.handoff, cloud.checkpoint.fileName);
+        remote.insertText(0, 0, remote.getParagraphLength(0, 0), ':REPLACEMENT');
+        const bytes = remote.exportHwpx();
+        remote.releaseDocument();
+        const sha256 = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes.slice().buffer))]
+          .map((byte) => byte.toString(16).padStart(2, '0')).join('');
+        Object.assign(cloud.checkpoint, { bytes, sha256, byteLength: bytes.length, operationId: 'turn-1-replacement' });
+        await cloud.reopen();
+        return { a: await cloud.controller.isCloudCheckpointMerged(cloud.firstCheckpoint),
+          b: await cloud.controller.isCloudCheckpointMerged(cloud.checkpoint), text: cloud.inspect().text };
+      });
+      assert.equal(before.a, true, 'A is recognized after reopening, including a matching legacy digest');
+      assert.equal(before.b, false, 'A numeric legacy ID cannot stand in for different B bytes');
+      await page.evaluate(() => (window as any).__cloud.begin());
+      await finishReview(page);
+      const result = await page.evaluate(async () => {
+        const cloud = (window as any).__cloud;
+        await cloud.reopen();
+        const a = await cloud.controller.isCloudCheckpointMerged(cloud.firstCheckpoint);
+        const b = await cloud.controller.isCloudCheckpointMerged(cloud.checkpoint);
+        const before = cloud.inspect();
+        const replay = await cloud.controller.mergeCloudCheckpoint(cloud.startId, cloud.checkpoint);
+        let staleError = '';
+        try {
+          await cloud.controller.mergeCloudCheckpoint(cloud.startId, { ...cloud.checkpoint, revision: 2, operationId: 'older-unseen' });
+        } catch (error) {
+          const cause = (error as Error).cause as { code?: string; message?: string } | undefined;
+          staleError = `${cause?.code}:${cause?.message}`;
+        }
+        return { a, b, before, after: cloud.inspect(), replay, staleError };
+      });
+      assert.equal(result.a, true);
+      assert.equal(result.b, true);
+      assert.equal(result.replay, true);
+      assert.match(result.staleError, /^STALE_WORKSPACE:더 최신 Cloud 변경/);
+      assert.equal(result.after.text, result.before.text);
+      assert.match(result.after.text, /LOCAL:/);
+      assert.match(result.after.text, /AFTER_A:/);
+      assert.match(result.after.text, /:REPLACEMENT/);
+      assert.doesNotMatch(result.after.text, /:CLOUD/);
+    } finally { await page.close(); }
+  });
+}
 
 test('a restarted Cloud session inherits its source branch and preserves newer local commits', { timeout: 45_000 }, async () => {
   const page = await browser!.newPage();
