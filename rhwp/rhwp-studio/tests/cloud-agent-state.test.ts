@@ -425,3 +425,17 @@ test('paused provider-setting capability survives snapshot parsing without being
   assert.equal(current.session.configurationEditable, true);
   assert.deepEqual(current.session.selection, paused.selection);
 });
+
+
+test('cloud snapshot restores validated durable merge metadata without a live session', () => {
+  const request = { sessionId: 'old-session', documentId: 'doc-1', threadId: 'thread-1',
+    cloudStartId: 'start-1', operationId: 'op-4', revision: 4, turn: 4, kind: 'turn',
+    fileName: 'result.hwpx', sha256: 'a'.repeat(64), size: 123, localAvailable: true };
+  assert.deepEqual(parseCloudSnapshot({ ...state(20), mergeRequests: [request] })?.mergeRequests, [request]);
+  for (const patch of [{ cloudStartId: '' }, { documentId: null }, { operationId: ' ' },
+    { revision: 0 }, { turn: -1 }, { size: 0 }, { size: 1.5 }, { sha256: 'bad' },
+    { kind: 'manual' }, { localAvailable: 'yes' }]) {
+    assert.equal(parseCloudSnapshot({ ...state(20), mergeRequests: [{ ...request, ...patch }] }), null);
+  }
+  assert.equal(parseCloudSnapshot({ ...state(20), mergeRequests: {} }), null);
+});

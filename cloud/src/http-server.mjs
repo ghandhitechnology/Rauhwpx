@@ -17,6 +17,7 @@ import {
   parseUploadInit,
 } from './protocol.mjs';
 import { streamSessionEvents } from './session-event-stream.mjs';
+import { archiveTurnBoundary } from './raucloud-merge-request.mjs';
 import { SERVICE_VERSION } from './version.mjs';
 import { parseProviderCredentialBody } from './provider-credentials.mjs';
 import {
@@ -475,6 +476,10 @@ export function createCloudHttpHandler({
               blobId: body.timeline?.blobId,
               size: body.timeline?.size,
             },
+          }, {
+            beforeCommit: (boundary) => archiveTurnBoundary({
+              lease: raucloudLease, sessionStore, blobStore, sessionId, boundary,
+            }),
           });
           raucloudLease?.rememberCheckpoint?.(body.operationId);
           json(response, 201, result);

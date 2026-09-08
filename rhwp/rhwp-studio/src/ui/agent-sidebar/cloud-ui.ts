@@ -157,6 +157,7 @@ export interface CloudAgentUiDeps {
   onAgentEvent(binding: CloudWorkspaceBinding, event: AgentStreamEvent): void;
   onCheckpointPublished(checkpoint: CloudCheckpointPayload): void | Promise<void>;
   getCloudStartId?(threadId: string, sessionId: string): string | undefined;
+  isCloudCheckpointMerged?(checkpoint: Pick<CloudCheckpointPayload, 'documentId' | 'sessionId' | 'revision'>): Promise<boolean>;
   onMergeCheckpoint?(startId: string, checkpoint: CloudCheckpointPayload): Promise<boolean>;
   onResultResolved(result: CloudDownloadResult, resolution: CloudResultResolution): void | Promise<void>;
   onBeforeTakeover(): Promise<boolean>;
@@ -237,9 +238,13 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   let panelTrigger: HTMLButtonElement | null = null;
   let setupActive = false;
   const liveSequence = new Map<string, number>();
-  type MergeOffer = Pick<CloudCheckpointPayload, 'sessionId' | 'documentId' | 'revision' | 'turn' | 'operationId'> & { startId?: string };
+  type MergeOffer = Pick<CloudCheckpointPayload, 'sessionId' | 'documentId' | 'revision' | 'turn' | 'operationId'> & { startId?: string; durable?: boolean; sha256?: string; size?: number };
   const mergeOffers = new Map<string, MergeOffer>();
   const reviewedRevisions = new Map<string, number>();
+  const checkedMergeRequests = new Set<string>();
+  const mergeProfileKey = (state: CloudSnapshot) => JSON.stringify([state.profileEpoch,
+    state.profile.kind === 'configured' && state.profile.mode === 'self-hosted' ? serverIdentity(state) : 'app',
+    state.account?.signedIn ? state.account.account?.id : null]);
   const mergeButton = el('button', 'ag-cloud-merge-button') as HTMLButtonElement;
   mergeButton.type = 'button';
   mergeButton.hidden = true;
@@ -763,6 +768,40 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
         ? snapshot.timeline.thread.cloudStartId : undefined);
   }
 
+  function restoreMergeOffers(): void {
+    const documentId = deps.getScope().documentId;
+    if (snapshot.mergeRequests) {
+      for (const [sessionId, offer] of mergeOffers) {
+        if (offer.durable && !snapshot.mergeRequests.some((request) => request.sessionId === sessionId
+          && request.operationId === offer.operationId && request.revision === offer.revision)) {
+          mergeOffers.delete(sessionId);
+        }
+      }
+    }
+    for (const request of snapshot.mergeRequests ?? []) {
+      const previous = mergeOffers.get(request.sessionId);
+      if (!previous || request.revision >= previous.revision) {
+        mergeOffers.set(request.sessionId, { ...request, startId: request.cloudStartId, durable: true });
+      }
+      if (request.documentId !== documentId || !deps.isCloudCheckpointMerged) continue;
+      const profileKey = mergeProfileKey(snapshot);
+      const key = JSON.stringify([profileKey, documentId, request.sessionId, request.operationId, request.revision]);
+      if (checkedMergeRequests.has(key)) continue;
+      checkedMergeRequests.add(key);
+      void deps.isCloudCheckpointMerged(request).then((merged) => {
+        if (profileKey !== mergeProfileKey(snapshot) || deps.getScope().documentId !== documentId) {
+          checkedMergeRequests.delete(key);
+          return;
+        }
+        if (merged) {
+          reviewedRevisions.set(request.sessionId, Math.max(request.revision, reviewedRevisions.get(request.sessionId) ?? -1));
+          renderMergeButton();
+          renderPanel();
+        }
+      }).catch(() => { checkedMergeRequests.delete(key); });
+    }
+  }
+
   function currentMergeOffer(): MergeOffer | undefined {
     const scope = deps.getScope();
     const matching = [...mergeOffers.values()].filter((offer) => offer.documentId === scope.documentId
@@ -774,7 +813,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   function renderMergeButton(): void {
     const offer = currentMergeOffer();
     mergeButton.hidden = !deps.onMergeCheckpoint || !offer;
-    mergeButton.disabled = busy || workspaceLocked || inferCloudLink(snapshot).kind !== 'ready';
+    mergeButton.disabled = busy || workspaceLocked || (!offer?.durable && inferCloudLink(snapshot).kind !== 'ready');
     mergeButton.textContent = busy ? 'Cloud 변경 가져오는 중…' : `Cloud 변경 병합${offer ? ` · ${offer.turn}턴` : ''}`;
     mergeButton.title = '완료된 Cloud 변경을 현재 로컬 브랜치에 병합합니다';
     mergeButton.dataset.revision = offer ? String(offer.revision) : '';
@@ -784,17 +823,19 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     const offer = currentMergeOffer();
     if (!offer || !deps.onMergeCheckpoint || busy) return;
     const profileEpoch = snapshot.profileEpoch;
+    const profileKey = mergeProfileKey(snapshot);
     const documentId = deps.getScope().documentId;
     const startId = offer.startId ?? mergeStartId(offer.sessionId);
     if (!startId) return deps.onError('Cloud 시작 대화를 불러온 뒤 다시 병합하세요.');
     await operation(async () => {
-      const checkpoint = await deps.controller.downloadCheckpoint(offer.sessionId, offer.operationId);
-      if (snapshot.profileEpoch !== profileEpoch || deps.getScope().documentId !== documentId) return;
+      const checkpoint = await deps.controller.downloadCheckpoint(offer.sessionId, offer.operationId, 'turn');
+      if (snapshot.profileEpoch !== profileEpoch || mergeProfileKey(snapshot) !== profileKey || deps.getScope().documentId !== documentId) return;
       if (checkpoint.sessionId !== offer.sessionId || checkpoint.documentId !== documentId
         || checkpoint.kind !== 'turn' || checkpoint.revision !== offer.revision
-        || checkpoint.operationId !== offer.operationId) throw new Error('요청한 Cloud 변경과 다운로드한 문서가 다릅니다.');
+        || checkpoint.operationId !== offer.operationId
+        || (offer.durable && (checkpoint.sha256 !== offer.sha256 || checkpoint.byteLength !== offer.size))) throw new Error('요청한 Cloud 변경과 다운로드한 문서가 다릅니다.');
       const applied = await deps.onMergeCheckpoint!(startId, checkpoint);
-      if (applied && snapshot.profileEpoch === profileEpoch) {
+      if (applied && snapshot.profileEpoch === profileEpoch && mergeProfileKey(snapshot) === profileKey) {
         reviewedRevisions.set(offer.sessionId, offer.revision);
       }
     });
@@ -806,7 +847,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     const profileEpoch = snapshot.profileEpoch;
     const documentId = deps.getScope().documentId;
     void operation(async () => {
-      const checkpoint = await deps.controller.downloadCheckpoint(offer.sessionId, offer.operationId);
+      const checkpoint = await deps.controller.downloadCheckpoint(offer.sessionId, offer.operationId, 'turn');
       if (snapshot.profileEpoch !== profileEpoch || deps.getScope().documentId !== documentId) return;
       const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', checkpoint.bytes.slice().buffer))]
         .map((byte) => byte.toString(16).padStart(2, '0')).join('');
@@ -1218,6 +1259,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   }
 
   function render(): void {
+    restoreMergeOffers();
     renderButtons();
     renderMergeButton();
     renderPanel();
@@ -1314,11 +1356,12 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     void operation(() => selectAndBind(nextSessionId, true));
   });
   const unsubscribe = deps.controller.subscribe((next) => {
-    const profileChanged = next.profileEpoch !== checkpointProfileEpoch;
+    const profileChanged = next.profileEpoch !== checkpointProfileEpoch || mergeProfileKey(next) !== mergeProfileKey(snapshot);
     if (profileChanged) {
       checkpointProfileEpoch = next.profileEpoch;
       mergeOffers.clear();
       reviewedRevisions.clear();
+      checkedMergeRequests.clear();
       checkpointMirror.reset();
       checkpointPublisher.reset();
       selectionFence.invalidate();
@@ -1392,6 +1435,8 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     if (event && typeof event.type === 'string') deps.onAgentEvent(mountedBinding, event);
   });
   onboarding.sync(snapshot);
+  restoreMergeOffers();
+  renderMergeButton();
   void deps.controller.refresh(selectedScope()).catch((error) => {
     render();
     // A build without the desktop bridge stays quiet; a real cloud build must

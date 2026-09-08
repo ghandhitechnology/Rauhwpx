@@ -1,3 +1,4 @@
+import { checkCloudMergeRecovery } from './cloud-merge-recovery.check.mjs';
 import { checkCloudSetup } from './cloud-setup.check.mjs';
 import { checkCliTerminalDefaults } from './cli-terminal-defaults.check.mjs';
 import assert from 'node:assert/strict';
@@ -146,6 +147,8 @@ try {
     () => checkCloudRecovery(page, origin, artifacts));
   await step('Cloud streamed text survives delayed timelines and terminal errors do not reconnect',
     () => checkCloudStream(page, origin, artifacts));
+  await step('Durable Cloud merge recovery, review persistence, and account isolation',
+    () => checkCloudMergeRecovery(page, origin, artifacts));
   await step('Cloud dashboard, usage gaps, conversations, configuration and responsive settings', async () => {
     await open('cloud=1&dashboard=1&page=settings&destination=cloud&controls=0');
     await page.waitForSelector('.ag-cd-quota .ag-cd-stat-value');
@@ -548,7 +551,8 @@ try {
       await page.click('.ag-settings-usage-block[data-agent="codex"] .ag-settings-usage-toggle');
       assert.equal(await page.$eval('.ag-settings-usage-block[data-agent="codex"] .ag-settings-usage-expanded', el => el.hidden), true);
       await page.click('.ag-settings-usage-disclosure > summary');
-      await page.click('[data-action="request-reset"]');
+      // Usage polling replaces quota cards while the click scrolls into view.
+      await page.locator('[data-action="request-reset"]').click();
       await page.waitForSelector('[data-action="confirm-reset"]', { visible: true });
       assert.match(await page.$eval('.ag-provider-quotas', (el) => el.textContent), /보관한 리셋 2개/);
       await page.click('[data-action="confirm-reset"]');

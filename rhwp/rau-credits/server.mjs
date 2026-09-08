@@ -13,6 +13,7 @@ import {
 import { creditsRequestListener, createCreditsService } from './service.mjs';
 import { createRailwayCloudProvisioner, railwayCloudConfigFromEnv } from './cloud-provisioner.mjs';
 import { createFileStore, createPostgresStore } from './store.mjs';
+import { createFileMergeStore, createMemoryMergeStore, createPostgresMergeStore } from './merge-artifacts.mjs';
 import {
   DEFAULT_UNIQUE_INSTALL_PING_KEY,
   createUniqueInstallsService,
@@ -30,7 +31,11 @@ export async function createCreditsHttpServer(options = {}) {
   const store = options.store ?? (databaseUrl
     ? await createPostgresStore({ connectionString: databaseUrl, legacyFilePath: dbPath })
     : createFileStore(dbPath));
+  const mergeArtifactStore = options.mergeArtifactStore ?? (databaseUrl
+    ? await createPostgresMergeStore({ connectionString: databaseUrl })
+    : options.store ? createMemoryMergeStore() : createFileMergeStore(`${dbPath}.merge-artifacts`));
   const service = createCreditsService({
+    mergeArtifactStore,
     origin,
     sessionSecret,
     workosApiKey: options.workosApiKey ?? process.env.WORKOS_API_KEY ?? '',
@@ -91,7 +96,17 @@ export async function createCreditsHttpServer(options = {}) {
   server.once('close', () => {
     clearInterval(reconcileTimer);
     void store.close?.();
+    void mergeArtifactStore.close?.();
   });
+  const cleanupArtifacts = () => {
+    void service.cleanupCloudMergeRequests().catch((error) => {
+      process.stderr.write(`[rau-credits] checkpoint cleanup failed: ${error?.message ?? error}\n`);
+    });
+  };
+  const artifactTimer = setInterval(cleanupArtifacts, 60 * 60 * 1000);
+  artifactTimer.unref();
+  server.once('close', () => clearInterval(artifactTimer));
+  cleanupArtifacts();
   const legacyTimer = setInterval(() => {
     void service.reconcileLegacyCloud().catch((error) => {
       process.stderr.write(`[rau-credits] legacy Cloud reconcile failed: ${error?.message ?? error}\n`);

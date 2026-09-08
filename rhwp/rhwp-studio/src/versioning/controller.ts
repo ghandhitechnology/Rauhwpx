@@ -431,6 +431,19 @@ export class DocumentVersionController implements VersionManagerController {
     });
   }
 
+  async isCloudCheckpointMerged(checkpoint: Pick<CloudCheckpointPayload, 'documentId' | 'sessionId' | 'revision'>): Promise<boolean> {
+    return this.#enqueue(async () => {
+      await this.#refreshData(false);
+      if (!this.#repository || this.#captureWorkspaceToken().documentId !== checkpoint.documentId) return false;
+      const workspace = this.#captureWorkspaceToken();
+      const id = commitId(`cloud:${this.#repository.id}:${checkpoint.sessionId}:${checkpoint.revision}`);
+      if (!await this.#store.getCommit(id)) return false;
+      const relation = await this.#store.getMergeRelation(this.#repository.id, this.#requireActiveBranch().target, id);
+      this.#assertWorkspaceToken(workspace);
+      return relation.relation === 'already-integrated';
+    });
+  }
+
   async mergeCloudCheckpoint(startId: string, checkpoint: CloudCheckpointPayload): Promise<boolean> {
     const source = await this.#enqueue(async () => {
       await this.#refreshData(false);
