@@ -1017,3 +1017,54 @@ test('runAtomicBatch(apply_edits 경로): 혼합 서식 교체의 reject 복원�
   assert.equal(mgr.hasPending(), false);
   assert.equal(fake.snapshotCount(), 0, '거절 후 스냅샷 누수 없음');
 });
+
+test('atomic text previews notify only after final layout and retain shifted ranges', () => {
+  const { mgr, fake, eventBus } = makeManager([paraOf('hello')]);
+  const inserted: Array<{ range: DocRange }> = [];
+  eventBus.on('agent-text-inserted', (event) => {
+    assert.equal(fake.calls.filter((call) => call.m === 'refreshLayout').length, 1);
+    assert.equal(fake.text(0), 'BAhello');
+    inserted.push(event as { range: DocRange });
+  });
+  mgr.runAtomicBatch(() => {
+    mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 0 }, 'A');
+    mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 0 }, 'B');
+    assert.equal(inserted.length, 0);
+  });
+  assert.equal(inserted.length, 2);
+  assert.deepEqual(inserted.map((event) => event.range.startCharOffset), [1, 0]);
+});
+
+test('failed atomic text previews do not animate rolled-back insertions', () => {
+  const { mgr, fake, eventBus } = makeManager([paraOf('hello')]);
+  let inserted = 0;
+  eventBus.on('agent-text-inserted', () => inserted++);
+  assert.throws(() => mgr.runAtomicBatch(() => {
+    mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 0 }, 'A');
+    throw new Error('abort batch');
+  }), /abort batch/);
+  assert.equal(fake.text(0), 'hello');
+  assert.equal(inserted, 0);
+  mgr.runAtomicBatch(() => {
+    mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 0 }, 'B');
+  });
+  assert.equal(inserted, 1, 'the failed batch leaves no queued notification');
+});
+
+test('a nested rollback keeps outer insertion notifications bound to restored live ranges', () => {
+  const { mgr, fake, eventBus } = makeManager([paraOf('hello')]);
+  const inserted: Array<{ range: DocRange }> = [];
+  eventBus.on('agent-text-inserted', (event) => inserted.push(event as { range: DocRange }));
+  mgr.runAtomicBatch(() => {
+    mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 0 }, 'A');
+    assert.throws(() => mgr.runAtomicBatch(() => {
+      mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 0 }, 'discard');
+      throw new Error('abort inner');
+    }), /abort inner/);
+    mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 0 }, 'B');
+  });
+  assert.equal(fake.text(0), 'BAhello');
+  assert.deepEqual(inserted.map((event) => event.range.startCharOffset), [1, 0]);
+  mgr.insertText('claude', { sectionIdx: 0, paraIdx: 0, charOffset: 0 }, 'C');
+  assert.deepEqual(inserted.map((event) => event.range.startCharOffset), [2, 1, 0]);
+});
