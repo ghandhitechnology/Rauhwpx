@@ -74,10 +74,26 @@ function retryableQueuedCommandError(error) {
   return !nonRetryableTransferError(error);
 }
 
+function queuedCommandRetryDisposition(error, commandPayload) {
+  const hasAttachments = Array.isArray(commandPayload?.attachments)
+    && commandPayload.attachments.length > 0;
+  const code = String(error?.code ?? '').toUpperCase();
+  if (hasAttachments && code === 'BLOB_NOT_FOUND') return 'reupload';
+  if (hasAttachments && code === 'INVALID_SESSION_STATE') return 'defer';
+  return retryableQueuedCommandError(error) ? 'defer' : 'reject';
+}
+
 function attachmentReuploadError(cause) {
   return Object.assign(
     new Error('The Cloud worker changed before it accepted the attachments. Send the message again to re-upload them.', { cause }),
     { code: 'ATTACHMENT_REUPLOAD_REQUIRED', retryable: true },
+  );
+}
+
+function uncertainMessageDeliveryError(cause) {
+  return Object.assign(
+    new Error('Cloud message delivery is still being verified. Try again after the conversation reconnects.', { cause }),
+    { code: 'MESSAGE_DELIVERY_UNCERTAIN', retryable: true },
   );
 }
 
@@ -1193,6 +1209,7 @@ export class CloudCoordinator extends EventEmitter {
     const existing = this.#queuedMessageRetries.get(record.id);
     if (existing) return existing;
     const operation = (async () => {
+      const outcomes = new Map();
       for (const queued of record.queuedMessages ?? []) {
         if (!queued.retryPending || queued.serverQueued || queued.state === 'accepted'
           || !queued.commandId || !queued.commandType || !queued.commandPayload) continue;
@@ -1218,10 +1235,13 @@ export class CloudCoordinator extends EventEmitter {
               } : entry
             )),
           }));
+          outcomes.set(queued.id, { disposition: 'accepted' });
           this.#emit({ type: 'queued-message-reconciled', sessionId: record.cloudSessionId, messageId: queued.id });
         } catch (error) {
           this.#assertProfileEpoch(profileEpoch);
-          const retryPending = retryableQueuedCommandError(error);
+          const disposition = queuedCommandRetryDisposition(error, queued.commandPayload);
+          outcomes.set(queued.id, { disposition, error });
+          const retryPending = disposition === 'defer';
           await this.#store.patch(record.id, (latest) => ({
             queuedMessages: (latest.queuedMessages ?? []).flatMap((entry) => (
               entry.id !== queued.id ? [entry] : retryPending ? [{
@@ -1236,10 +1256,12 @@ export class CloudCoordinator extends EventEmitter {
             sessionId: record.cloudSessionId,
             messageId: queued.id,
             error: error.message,
-            retryable: retryPending,
+            code: disposition === 'reupload' ? 'ATTACHMENT_REUPLOAD_REQUIRED' : error.code,
+            retryable: retryPending || disposition === 'reupload',
           });
         }
       }
+      return outcomes;
     })().finally(() => {
       if (this.#queuedMessageRetries.get(record.id) === operation) {
         this.#queuedMessageRetries.delete(record.id);
@@ -2600,14 +2622,47 @@ export class CloudCoordinator extends EventEmitter {
     }
     const serverCommand = CLIENT_TO_SERVER_COMMAND[command];
     if (!serverCommand) throw new Error('Unsupported cloud command');
-    const localHandoff = await this.#handoffForSession(sessionId, profileEpoch);
-    const uploadedAttachments = [];
-    for (const attachment of attachments) {
+    const attachmentInputs = attachments.map((attachment) => {
       const bytes = Buffer.from(attachment?.bytes ?? []);
       if (!attachment?.id || !attachment?.name || !attachment?.mimeType
         || bytes.length < 1 || bytes.length !== attachment.size || bytes.length > 128 * 1024 * 1024) {
         throw new Error('Cloud follow-up attachment is invalid');
       }
+      return { attachment, bytes };
+    });
+    const submissionDigest = queuedMessageId ? sha256Hex(Buffer.from(JSON.stringify({
+      type: serverCommand,
+      content: message,
+      attachments: attachmentInputs.map(({ attachment, bytes }) => ({
+        id: attachment.id,
+        name: attachment.name,
+        mimeType: attachment.mimeType,
+        size: bytes.length,
+        sha256: sha256Hex(bytes),
+      })),
+    }))) : null;
+    let localHandoff = await this.#handoffForSession(sessionId, profileEpoch);
+    let previousMessage = localHandoff?.queuedMessages?.find((entry) => entry.id === queuedMessageId);
+    if (previousMessage && (previousMessage.text !== message
+      || previousMessage.submissionDigest && previousMessage.submissionDigest !== submissionDigest)) {
+      throw transferError('Cloud message id was reused for different content', 'MESSAGE_ID_CONFLICT');
+    }
+    if (previousMessage?.retryPending) {
+      const outcomes = await this.#retryQueuedMessages(localHandoff, profileEpoch);
+      localHandoff = await this.#handoffForSession(sessionId, profileEpoch);
+      previousMessage = localHandoff?.queuedMessages?.find((entry) => entry.id === queuedMessageId);
+      const outcome = outcomes?.get(queuedMessageId);
+      if (!previousMessage && outcome?.disposition === 'reject') throw outcome.error;
+    }
+    if (previousMessage && (previousMessage.serverQueued === true || previousMessage.state === 'accepted')) {
+      return this.snapshot({ selectedSessionId: sessionId,
+        extra: { commandResult: { messageId: queuedMessageId, status: previousMessage.state } } });
+    }
+    if (previousMessage?.retryPending) {
+      throw uncertainMessageDeliveryError(new Error(previousMessage.lastError ?? 'Cloud message receipt is pending'));
+    }
+    const uploadedAttachments = [];
+    for (const { attachment, bytes } of attachmentInputs) {
       const uploaded = await this.#client.uploadBlob({
         bytes,
         name: attachment.name,
@@ -2643,15 +2698,6 @@ export class CloudCoordinator extends EventEmitter {
     const commandId = queuedMessageId
       ? `message_${sha256Hex(Buffer.from(`${sessionId}\0${queuedMessageId}`))}`
       : undefined;
-    const previousMessage = localHandoff?.queuedMessages?.find((entry) => entry.id === queuedMessageId);
-    if (previousMessage && (previousMessage.text !== message
-      || previousMessage.messageDigest && previousMessage.messageDigest !== messageDigest)) {
-      throw transferError('Cloud message id was reused for different content', 'MESSAGE_ID_CONFLICT');
-    }
-    if (previousMessage && (previousMessage.serverQueued === true || previousMessage.state === 'accepted')) {
-      return this.snapshot({ selectedSessionId: sessionId,
-        extra: { commandResult: { messageId: queuedMessageId, status: previousMessage.state } } });
-    }
     if (command === 'cancel' && localHandoff
       && ['preparing', 'uploading', 'committing'].includes(localHandoff.state)) {
       await this.#store.patch(localHandoff.id, { cancelRequested: true, error: null });
@@ -2674,6 +2720,7 @@ export class CloudCoordinator extends EventEmitter {
               id: queuedMessageId,
               text: message,
               messageDigest,
+              submissionDigest,
               queuedAt: new Date().toISOString(),
               state: 'queued',
               commandId,
@@ -2694,7 +2741,8 @@ export class CloudCoordinator extends EventEmitter {
       this.#assertProfileEpoch(profileEpoch);
     } catch (error) {
       if (localHandoff && queuedMessageId) {
-        const retryPending = uploadedAttachments.length === 0 && retryableQueuedCommandError(error);
+        const disposition = queuedCommandRetryDisposition(error, body);
+        const retryPending = disposition === 'defer';
         const updated = await this.#store.patch(localHandoff.id, (latest) => ({
           queuedMessages: (latest.queuedMessages ?? []).flatMap((entry) => {
             if (entry.id !== queuedMessageId || entry.state === 'accepted' || entry.serverQueued === true) {
@@ -2722,9 +2770,11 @@ export class CloudCoordinator extends EventEmitter {
           sessionId,
           messageId: queuedMessageId,
           error: error.message,
-          retryable: retryPending || uploadedAttachments.length > 0,
+          code: disposition === 'reupload' ? 'ATTACHMENT_REUPLOAD_REQUIRED' : error.code,
+          retryable: retryPending || disposition === 'reupload',
         });
-        if (uploadedAttachments.length > 0) throw attachmentReuploadError(error);
+        if (disposition === 'reupload') throw attachmentReuploadError(error);
+        if (retryPending && uploadedAttachments.length > 0) throw uncertainMessageDeliveryError(error);
       }
       throw error;
     }

@@ -952,7 +952,7 @@ test('rejected queue command removes exactly its staged durable message', async 
   assert.deepEqual(record.queuedMessages.map((message) => message.id), ['message-existing']);
 });
 
-test('lost attachment acceptance asks for re-upload without leaving a queued draft', async (t) => {
+test('lost attachment acceptance replays the original receipt before any re-upload', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-attachment-reupload-'));
   const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
   const created = await store.create({
@@ -963,11 +963,17 @@ test('lost attachment acceptance asks for re-upload without leaving a queued dra
   await store.transition(created.id, 'uploading');
   await store.transition(created.id, 'committing');
   await store.transition(created.id, 'running', { cloudSessionId: 'cloud-attachment', serverVersion: 2 });
+  let uploads = 0;
+  const calls = [];
   const coordinator = new CloudCoordinator({
     client: {
       loadProfile: async () => null,
-      uploadBlob: async ({ bytes }) => ({ blobId: 'dead-worker-blob', size: bytes.length }),
-      command: async () => { throw Object.assign(new Error('worker disappeared'), { code: 'ECONNRESET' }); },
+      uploadBlob: async ({ bytes }) => ({ blobId: `blob-${++uploads}`, size: bytes.length }),
+      command: async (_sessionId, _type, payload, commandId) => {
+        calls.push({ payload, commandId });
+        if (calls.length === 1) throw Object.assign(new Error('receipt lost'), { code: 'ECONNRESET' });
+        return { messageId: payload.messageId, status: 'accepted' };
+      },
     },
     store, provisioner: {}, recoveryDir: path.join(directory, 'recovery'),
   });
@@ -975,11 +981,61 @@ test('lost attachment acceptance asks for re-upload without leaving a queued dra
     await coordinator.stop();
     await rm(directory, { recursive: true, force: true });
   });
-  await assert.rejects(coordinator.command({
+  const input = {
     sessionId: 'cloud-attachment', command: 'queue-message', message: 'Read this', messageId: 'message-attachment',
     attachments: [{ id: 'attachment-1', name: 'note.txt', mimeType: 'text/plain', size: 4, bytes: Buffer.from('note') }],
-  }), { code: 'ATTACHMENT_REUPLOAD_REQUIRED', retryable: true });
-  assert.deepEqual((await store.get(created.id)).queuedMessages, []);
+  };
+  await assert.rejects(coordinator.command(input), { code: 'MESSAGE_DELIVERY_UNCERTAIN', retryable: true });
+  assert.equal((await store.get(created.id)).queuedMessages[0].retryPending, true);
+  const result = await coordinator.command(input);
+  assert.equal(result.commandResult.status, 'accepted');
+  assert.equal(uploads, 1, 'receipt reconciliation reuses the broker-retained attachment');
+  assert.deepEqual(calls[1], calls[0], 'receipt reconciliation replays the exact command identity and payload');
+});
+
+test('proven missing attachment blobs permit one fresh upload with the same message identity', async (t) => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-attachment-reupload-'));
+  const store = new CloudHandoffStore({ filePath: path.join(directory, 'handoffs.json') });
+  const created = await store.create({
+    sessionId: 'desktop-reupload', threadId: 'thread-reupload', documentId: 'document-reupload',
+    documentName: 'source.hwpx', documentBytes: Buffer.from('document'), timeline: null,
+    provider: 'codex', limits: { maxTurns: 100 },
+  });
+  await store.transition(created.id, 'uploading');
+  await store.transition(created.id, 'committing');
+  await store.transition(created.id, 'running', { cloudSessionId: 'cloud-reupload', serverVersion: 2 });
+  let uploads = 0;
+  const calls = [];
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadProfile: async () => null,
+      uploadBlob: async ({ bytes }) => ({ blobId: `blob-${++uploads}`, size: bytes.length }),
+      command: async (_sessionId, _type, payload, commandId) => {
+        calls.push({ payload, commandId });
+        if (calls.length === 1) throw Object.assign(new Error('receipt lost'), { code: 'ETIMEDOUT' });
+        if (calls.length === 2) throw Object.assign(new Error('old blob is gone'), { code: 'BLOB_NOT_FOUND', status: 409 });
+        return { messageId: payload.messageId, status: 'queued' };
+      },
+    },
+    store, provisioner: {}, recoveryDir: path.join(directory, 'recovery'),
+  });
+  t.after(async () => {
+    await coordinator.stop();
+    await rm(directory, { recursive: true, force: true });
+  });
+  const input = {
+    sessionId: 'cloud-reupload', command: 'queue-message', message: 'Read this', messageId: 'message-reupload',
+    attachments: [{ id: 'attachment-1', name: 'note.txt', mimeType: 'text/plain', size: 4, bytes: Buffer.from('note') }],
+  };
+  await assert.rejects(coordinator.command(input), { code: 'MESSAGE_DELIVERY_UNCERTAIN' });
+  const result = await coordinator.command(input);
+  assert.equal(result.commandResult.status, 'queued');
+  assert.equal(uploads, 2);
+  assert.equal(calls.length, 3);
+  assert.equal(new Set(calls.map((call) => call.commandId)).size, 1);
+  assert.equal(calls[0].payload.attachments[0].blobId, 'blob-1');
+  assert.equal(calls[2].payload.attachments[0].blobId, 'blob-2');
+  assert.equal((await store.get(created.id)).queuedMessages[0].serverQueued, true);
 });
 
 test('permanently rejected queued retry removes its phantom draft', async (t) => {

@@ -149,6 +149,99 @@ test('merge discovery returns before automatic prefetch and publishes offline re
   );
 });
 
+test('one refresh drains more than eight merge results through bounded background batches', async (t) => {
+  const f = await fixture(t);
+  const payloads = new Map();
+  const receipts = Array.from({ length: 10 }, (_, index) => {
+    const number = index + 1;
+    const bytes = Buffer.from(`result-${number}`);
+    const receipt = {
+      ...f.receipt,
+      id: `merge-${number}`,
+      operationId: `turn-${number}`,
+      revision: number,
+      turn: number,
+      sha256: sha256Hex(bytes),
+      size: bytes.length,
+      chunkCount: 1,
+    };
+    payloads.set(receipt.id, bytes);
+    return receipt;
+  });
+  let active = 0;
+  let maxActive = 0;
+  f.provider.listMergeRequests = async () => ({ accountId: 'account-1', mergeRequests: receipts });
+  f.provider.downloadMergeChunk = async (receiptId) => {
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    await new Promise((resolve) => setImmediate(resolve));
+    active -= 1;
+    return { bytesBase64: payloads.get(receiptId).toString('base64') };
+  };
+  const provider = {
+    ...f.provider,
+    id: 'raucloud', displayName: 'Raucloud', configuration: () => ({ configured: true }),
+    spawn() {}, status() {}, teardown() {}, accountStatus: async () => ({ signedIn: true }),
+  };
+  const coordinator = new CloudCoordinator({
+    client: { loadProfile: async () => null }, store: f.store,
+    recoveryDir: f.directory, appServers: [provider],
+  });
+  t.after(() => coordinator.stop());
+  const completed = new Set();
+  const allReady = Promise.withResolvers();
+  coordinator.on('event', (event) => {
+    if (event.type !== 'merge-prefetch-completed') return;
+    completed.add(event.operationId);
+    if (completed.size === receipts.length) allReady.resolve();
+  });
+  await coordinator.refresh({ documentId: 'document-1' });
+  let timeout;
+  try {
+    await Promise.race([
+      allReady.promise,
+      new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('prefetch did not drain')), 2_000); }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+  const snapshot = await coordinator.snapshot({ documentId: 'document-1' });
+  assert.equal(snapshot.mergeRequests.length, 10);
+  assert.equal(snapshot.mergeRequests.every((request) => request.localAvailable), true);
+  assert.ok(maxActive <= 2);
+});
+
+test('a failed prefetch batch stops without busy-retrying or advancing to another batch', async (t) => {
+  const f = await fixture(t);
+  const bytes = Buffer.from('merge-result');
+  const receipts = Array.from({ length: 10 }, (_, index) => ({
+    ...f.receipt,
+    id: `merge-${index + 1}`,
+    operationId: `turn-${index + 1}`,
+    revision: index + 1,
+    turn: index + 1,
+    sha256: sha256Hex(bytes),
+    size: bytes.length,
+    chunkCount: 1,
+  }));
+  f.provider.listMergeRequests = async () => ({ accountId: 'account-1', mergeRequests: receipts });
+  let failedReads = 0;
+  f.provider.downloadMergeChunk = async (receiptId) => {
+    if (receiptId === 'merge-10') {
+      failedReads += 1;
+      throw new Error('broker temporarily unavailable');
+    }
+    return { bytesBase64: bytes.toString('base64') };
+  };
+  await f.recovery.refresh();
+  const result = await f.recovery.prefetch();
+  assert.equal(result.attempted, 8);
+  assert.equal(result.downloaded, 7);
+  assert.equal(result.failures.length, 1);
+  assert.equal(failedReads, 1);
+  assert.equal(f.recovery.requests.filter((request) => request.localAvailable).length, 7);
+});
+
 test('expired broker metadata without a local download does not leave an unusable merge offer', async (t) => {
   const f = await fixture(t);
   await f.recovery.refresh();

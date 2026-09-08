@@ -157,41 +157,57 @@ export class CloudMergeRecovery {
         throw new DOMException('Cloud account changed', 'AbortError');
       }
     };
-    const pending = this.requests.filter((request) => !request.localAvailable)
-      .sort((left, right) => right.revision - left.revision || right.turn - left.turn);
-    const selected = [];
-    let selectedBytes = 0;
-    for (const request of pending) {
-      if (selected.length >= Math.max(1, Math.min(PREFETCH_MAX_ITEMS, maxItems))) break;
-      if (selectedBytes + request.size > Math.max(MAX_BYTES, Math.min(PREFETCH_MAX_BYTES, maxBytes))) continue;
-      selected.push(request);
-      selectedBytes += request.size;
-    }
+    const selectBatch = () => {
+      const pending = this.requests.filter((request) => !request.localAvailable)
+        .sort((left, right) => right.revision - left.revision || right.turn - left.turn);
+      const selected = [];
+      let selectedBytes = 0;
+      for (const request of pending) {
+        if (selected.length >= Math.max(1, Math.min(PREFETCH_MAX_ITEMS, maxItems))) break;
+        if (selectedBytes + request.size > Math.max(MAX_BYTES, Math.min(PREFETCH_MAX_BYTES, maxBytes))) continue;
+        selected.push(request);
+        selectedBytes += request.size;
+      }
+      return selected;
+    };
     const task = (async () => {
-      let cursor = 0;
+      let attempted = 0;
       let downloaded = 0;
       const failures = [];
-      const worker = async () => {
-        while (cursor < selected.length) {
-          const request = selected[cursor++];
-          check();
-          try {
-            await this.download(request.sessionId, request.operationId, check, { signal: controller.signal });
-            downloaded += 1;
-            onDownloaded(request);
-          } catch (error) {
+      for (;;) {
+        check();
+        const selected = selectBatch();
+        if (!selected.length) break;
+        attempted += selected.length;
+        let cursor = 0;
+        let batchDownloaded = 0;
+        const batchFailures = [];
+        const worker = async () => {
+          while (cursor < selected.length) {
+            const request = selected[cursor++];
             check();
-            failures.push({ sessionId: request.sessionId, operationId: request.operationId, error });
-            onFailure(request, error);
+            try {
+              await this.download(request.sessionId, request.operationId, check, { signal: controller.signal });
+              downloaded += 1;
+              batchDownloaded += 1;
+              onDownloaded(request);
+            } catch (error) {
+              check();
+              const failure = { sessionId: request.sessionId, operationId: request.operationId, error };
+              failures.push(failure);
+              batchFailures.push(failure);
+              onFailure(request, error);
+            }
           }
-        }
-      };
-      await Promise.all(Array.from(
-        { length: Math.min(selected.length, Math.max(1, Math.min(PREFETCH_CONCURRENCY, concurrency))) },
-        worker,
-      ));
-      check();
-      return { attempted: selected.length, downloaded, failures };
+        };
+        await Promise.all(Array.from(
+          { length: Math.min(selected.length, Math.max(1, Math.min(PREFETCH_CONCURRENCY, concurrency))) },
+          worker,
+        ));
+        check();
+        if (batchFailures.length || batchDownloaded === 0) break;
+      }
+      return { attempted, downloaded, failures };
     })().finally(() => {
       if (this.prefetchInflight === task) this.prefetchInflight = null;
       if (this.prefetchController === controller) this.prefetchController = null;
