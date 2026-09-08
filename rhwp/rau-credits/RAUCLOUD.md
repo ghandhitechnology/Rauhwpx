@@ -59,6 +59,8 @@ Each resource and state snapshot is limited to 128 MiB. Creation rejects an over
 
 Roll out the broker before the worker image, then clients that use capability negotiation. Existing worker databases add four continuity bookkeeping tables on startup; the broker reuses its encrypted artifact tables. No production deployment is performed by these tests. Verify a real provider task with the laptop disconnected, an idle worker replacement, and a pending approval before broad rollout.
 
+For rollback, prefer reverting only the worker image while retaining the compatible broker. Once conversation or resource rows exist, an older broker without artifact-kind filtering would return those rows in the completed-document inbox and break older desktop validation. Any broker rollback must preserve the new kind filters and storage compatibility.
+
 ## Railway and migration
 
 Only this service uses `RAUHWpx_RAILWAY_TOKEN`, the Railway project and environment IDs, and the configured worker image. `RAUHWpx_LEGACY_MIGRATION_STARTED_AT` starts a 72-hour migration window. After that window, the hourly reconciler lists and removes legacy `rauhwpx-sandbox-*` services. It reads the service list again before marking deletion complete.
