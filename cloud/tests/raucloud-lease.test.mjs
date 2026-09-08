@@ -196,6 +196,19 @@ test('warm workers discover and activate a newly assigned run', async () => {
   assert.ok(calls.some(({ url }) => url.pathname.endsWith('/runs/run-2/allocation')));
 });
 
+test('conversation archives discover a warm-reused assignment before selecting the upload URL', async () => {
+  const bytes = Buffer.from('conversation state');
+  const metadata = { operationId: 'snapshot-1', size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') };
+  const { lease, calls } = controller((url) => {
+    if (url.pathname.endsWith('/lease')) return response({ runId: 'replacement-run', status: 'ready' });
+    assert.equal(url.pathname, '/v1/internal/cloud/runs/replacement-run/conversations');
+    return response({ complete: true, mergeRequest: { id: 'snapshot', ...metadata } });
+  });
+  await lease.prepareArchive();
+  await lease.archiveConversation(metadata, Readable.from([bytes]));
+  assert.equal(calls.length, 2);
+});
+
 test('Raucloud lease configuration is all-or-nothing and self-hosted remains empty', () => {
   const selfHosted = parseConfig({ RAUHWpx_RUNNER: 'podman' });
   assert.equal(selfHosted.raucloudBrokerUrl, '');

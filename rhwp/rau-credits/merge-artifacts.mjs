@@ -44,6 +44,8 @@ function validate(input, kind = 'turn') {
       throw fail('CLOUD_INVALID_REQUEST', 'Conversation state is invalid');
     }
     metadata.state = input.state;
+    if (typeof input.pendingWork !== 'boolean') throw fail('CLOUD_INVALID_REQUEST', 'Conversation work state is invalid');
+    metadata.pendingWork = input.pendingWork;
     if (!Number.isSafeInteger(input.retentionUntil) || input.retentionUntil < 1) throw fail('CLOUD_INVALID_REQUEST', 'Conversation retention is invalid');
     metadata.retentionUntil = input.retentionUntil;
   }

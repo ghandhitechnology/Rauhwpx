@@ -20,6 +20,7 @@ export class ConversationBackup {
     this.lease = lease;
     this.enabled = lease?.enabled === true;
     this.tail = Promise.resolve();
+    this.saving = new Map();
     this.flushing = null;
     this.database.exec('CREATE TABLE IF NOT EXISTS conversation_backup_pending (session_id TEXT PRIMARY KEY)');
     this.database.exec(`CREATE TABLE IF NOT EXISTS conversation_backup_state (
@@ -47,9 +48,20 @@ export class ConversationBackup {
   save(sessionId) {
     if (!this.enabled) return Promise.resolve();
     this.markDirty(sessionId);
+    const target = this.sessionStore.getSessionRow(sessionId);
+    const existing = this.saving.get(sessionId);
+    if (existing) return existing.then((saved) => {
+      // The shared upload may have captured an earlier command. A receipt for
+      // this request must cover its own durable state, not merely any snapshot.
+      if (saved.eventSeq >= target.next_event_seq && saved.stateVersion >= target.state_version) return saved;
+      return this.save(sessionId);
+    });
     const operation = this.tail.catch(() => {}).then(() => this.#save(sessionId));
     this.tail = operation;
-    return operation;
+    this.saving.set(sessionId, operation);
+    return operation.finally(() => {
+      if (this.saving.get(sessionId) === operation) this.saving.delete(sessionId);
+    });
   }
 
   flush() {
@@ -63,6 +75,7 @@ export class ConversationBackup {
   }
 
   async #save(sessionId) {
+    await this.lease.prepareArchive?.();
     const session = { ...this.sessionStore.getSessionRow(sessionId) };
     session.worker_token_hash = null;
     session.sandbox_id = null;
@@ -116,13 +129,23 @@ export class ConversationBackup {
     const bytes = Buffer.from(JSON.stringify({ version: 1, session, rows, blobs }));
     if (bytes.length > MAX_BYTES) throw new CloudError('CONVERSATION_STORAGE_LIMIT', 'Conversation state exceeds 128 MiB', 413);
     const sha256 = hash(bytes);
+    const currentTurn = rows.session_turns.find((turn) => turn.id === session.current_turn_id);
+    const committedTurn = currentTurn && rows.session_checkpoints.some((boundary) =>
+      boundary.turn_number === currentTurn.turn_number && boundary.boundary_kind === 'turn' && boundary.stable === 1);
+    const completedTurns = Math.max(session.turns_used, ...rows.session_checkpoints
+      .filter((boundary) => boundary.boundary_kind === 'turn' && boundary.stable === 1).map((boundary) => boundary.turn_number));
+    const pendingWork = ['staged', 'queued', 'running', 'suspended'].includes(session.status)
+      && !['ended', 'purged'].includes(session.room_status) && !session.end_requested_at
+      && (Boolean(currentTurn && !committedTurn) || completedTurns === 0
+        || rows.session_messages.some((message) => ['queued', 'delivered'].includes(message.status)
+          && !(committedTurn && message.id === currentTurn.message_id)));
     if (sha256 !== state.sha256) {
       const generation = state.generation + 1;
       // Persist the attempt before upload, so a restart cannot reuse its revision
       // for different bytes after losing the broker receipt.
       this.database.prepare('UPDATE conversation_backup_state SET generation = ? WHERE session_id = ?').run(generation, sessionId);
       await this.lease.archiveConversation({ ...identity, operationId: `${generation}:${sha256}`,
-        revision: generation, turn: session.turns_used, kind: 'conversation', state: session.status,
+        revision: generation, turn: session.turns_used, kind: 'conversation', state: session.status, pendingWork,
         retentionUntil: Math.min(Date.now() + RETENTION_MS, ...blobs.filter((blob) => blob.size > 0).map((blob) => blob.expiresAt)),
         fileName: 'conversation.json', size: bytes.length, sha256 }, Readable.from([bytes]));
       this.database.prepare('UPDATE conversation_backup_state SET sha256 = ? WHERE session_id = ?').run(sha256, sessionId);
@@ -132,13 +155,17 @@ export class ConversationBackup {
     if (current.next_event_seq === session.next_event_seq && current.state_version === session.state_version) {
       this.database.prepare('DELETE FROM conversation_backup_pending WHERE session_id = ?').run(sessionId);
     }
+    return { eventSeq: session.next_event_seq, stateVersion: session.state_version };
   }
 
   async restore(device, sessionId) {
     if (!this.enabled) throw new CloudError('CONVERSATION_RESTORE_UNAVAILABLE', 'Conversation restore is unavailable', 501);
     if (typeof sessionId !== 'string' || !/^[A-Za-z0-9._:-]{1,160}$/.test(sessionId)) throw fail('Session identity is invalid');
     const existing = this.database.prepare('SELECT id FROM sessions WHERE id = ?').get(sessionId);
-    if (existing) return this.#restoreReceipt(sessionId);
+    if (existing) {
+      await this.save(sessionId);
+      return this.#restoreReceipt(sessionId);
+    }
     const { bytes, record } = await this.lease.downloadConversation(sessionId);
     let snapshot;
     try { snapshot = JSON.parse(bytes.toString('utf8')); } catch { throw fail('Conversation snapshot is invalid JSON'); }

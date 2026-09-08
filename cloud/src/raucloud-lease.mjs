@@ -270,6 +270,16 @@ export class RaucloudLeaseController {
     return this.archiveArtifact(metadata, stream, 'conversations');
   }
 
+  async prepareArchive() {
+    if (!this.enabled) return;
+    try { await this.discover(); }
+    catch (error) {
+      // Keep an accepted boundary retryable during a broker outage. The upload
+      // still authenticates the captured run and rejects retired assignments.
+      if (!this.#transient(error)) throw error;
+    }
+  }
+
   async downloadConversation(sessionId) {
     const listing = await this.#fetch(`/v1/internal/cloud/conversations?sessionId=${encodeURIComponent(sessionId)}`);
     const record = listing.conversations?.find((item) => item.sessionId === sessionId);

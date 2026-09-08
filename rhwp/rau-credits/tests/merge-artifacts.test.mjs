@@ -37,7 +37,7 @@ for (const backend of ['memory', 'file', ...(process.env.RAU_TEST_POSTGRES_URL ?
     const resourceInput = input(resource, 0, { kind: 'conversation-resource' });
     const savedResource = await resources.upload(account, 'run-1', resourceInput);
     const descriptor = (generation, state = 'queued') => input(Buffer.from(JSON.stringify({ generation, state })), 0,
-      { kind: 'conversation', state, revision: generation, operationId: `generation-${generation}`,
+      { kind: 'conversation', state, pendingWork: state !== 'purged', revision: generation, operationId: `generation-${generation}`,
         retentionUntil: savedResource.mergeRequest.expiresAt });
     const old = await snapshots.upload(account, 'run-1', descriptor(1));
     const latest = await snapshots.upload(account, 'run-1', descriptor(2));
@@ -250,7 +250,7 @@ if (process.env.RAU_TEST_POSTGRES_URL) test('postgres snapshot replicas cannot p
   const account = `snapshot-replica-${randomBytes(8).toString('hex')}`;
   const apis = stores.map((store) => createMergeArtifacts({ store, sessionSecret: secret, kind: 'conversation' }));
   const payload = (generation) => input(Buffer.from(`snapshot ${generation}`), 0, { revision: generation,
-    operationId: `snapshot-${generation}`, kind: 'conversation', state: 'queued', retentionUntil: Date.now() + MERGE_RETENTION_MS });
+    operationId: `snapshot-${generation}`, kind: 'conversation', state: 'queued', pendingWork: true, retentionUntil: Date.now() + MERGE_RETENTION_MS });
   const results = await Promise.allSettled([apis[0].upload(account, 'run-1', payload(2)), apis[1].upload(account, 'run-1', payload(1))]);
   assert.equal(results[0].status, 'fulfilled');
   if (results[1].status === 'rejected') assert.equal(results[1].reason.code, 'CLOUD_CONVERSATION_STALE');

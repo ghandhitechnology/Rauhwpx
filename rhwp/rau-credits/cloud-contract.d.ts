@@ -136,6 +136,8 @@ export interface CloudConversationSnapshot extends Omit<CloudMergeRequest, 'kind
   revision: number;
   state: 'staged' | 'queued' | 'running' | 'suspended' | 'completed' | 'cancelled' | 'failed' | 'purged';
   retentionUntil: number;
+  /** False for an idle completed room; result retrieval needs no replacement worker. */
+  pendingWork: boolean;
 }
 
 export interface CloudConversationList {
