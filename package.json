@@ -58,8 +58,8 @@
     "cross-env": "^10.1.0",
     "electron": "^43.3.0",
     "electron-builder": "^26.15.3",
-    "wait-on": "^9.1.0",
-    "js-yaml": "^4.3.1"
+    "js-yaml": "^4.3.2",
+    "wait-on": "^9.1.0"
   },
   "build": {
     "appId": "com.hataewook.rauhwpx",
