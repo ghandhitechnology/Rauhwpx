@@ -14,12 +14,14 @@ function errorWithCode(code) {
 
 function memoryFs(entries, hooks = {}) {
   const files = new Map(entries);
+  const fileStat = (filePath) => {
+    if (!files.has(filePath)) throw errorWithCode('ENOENT');
+    return { isFile: () => true, isDirectory: () => false };
+  };
   return {
     files,
-    async stat(filePath) {
-      if (!files.has(filePath)) throw errorWithCode('ENOENT');
-      return { isFile: () => true };
-    },
+    async lstat(filePath) { return fileStat(filePath); },
+    async stat(filePath) { return fileStat(filePath); },
     async rename(from, to) {
       await hooks.rename?.(from, to);
       if (!files.has(from)) throw errorWithCode('ENOENT');
