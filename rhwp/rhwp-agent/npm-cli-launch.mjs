@@ -47,8 +47,14 @@ export function nodeHostShimFileName(platform) {
 }
 
 /**
- * Packaged Windows has no `node` on PATH. Claude postinstall is `node install.cjs`
- * and npm `.cmd` shims look up `node`. Point a shim at the host Electron/Node.
+ * @param {string} dir
+ * @param {string} nodeCommand
+ * @param {{
+ *   platform?: string,
+ *   mkdir?: typeof fsPromises.mkdir,
+ *   writeFile?: typeof fsPromises.writeFile,
+ * }} [options]
+ * @returns {Promise<string>}
  */
 export async function writeNodeHostShim(dir, nodeCommand, {
   platform = 'win32',
@@ -66,17 +72,38 @@ export async function writeNodeHostShim(dir, nodeCommand, {
   return file;
 }
 
-export function createNodeHost({ rootDir, nodeCommand, platform }) {
+/**
+ * @param {{
+ *   rootDir: string,
+ *   nodeCommand: string,
+ *   platform: string,
+ *   mkdir?: typeof fsPromises.mkdir,
+ *   writeFile?: typeof fsPromises.writeFile,
+ * }} options
+ * @returns {() => Promise<string | null>}
+ */
+export function createNodeHost({ rootDir, nodeCommand, platform, mkdir, writeFile }) {
   const nodeHostDir = path.join(rootDir, 'node-host');
+  /** @type {Promise<string> | null} */
   let ready = null;
   return async function ensureNodeHost() {
     if (!nodeHostNeedsShim(platform, nodeCommand)) return null;
-    ready ??= writeNodeHostShim(nodeHostDir, nodeCommand, { platform });
-    await ready;
+    ready ??= writeNodeHostShim(nodeHostDir, nodeCommand, { platform, mkdir, writeFile });
+    try {
+      await ready;
+    } catch (error) {
+      ready = null;
+      throw error;
+    }
     return nodeHostDir;
   };
 }
 
+/**
+ * @param {NodeJS.ProcessEnv} env
+ * @param {{ nodeCommand?: string, shimDir?: string | null, platform?: string }} [options]
+ * @returns {NodeJS.ProcessEnv}
+ */
 export function applyNodeHostEnv(env, { nodeCommand, shimDir, platform = 'win32' } = {}) {
   const next = { ...env };
   const delimiter = platform === 'win32' ? ';' : ':';

@@ -14,6 +14,7 @@ import {
 } from '../harness-update.mjs';
 import {
   applyNodeHostEnv,
+  createNodeHost,
   isNodeBinary,
   nodeHostNeedsShim,
   nodeHostShimFileName,
@@ -53,6 +54,27 @@ test('Windows Electron hosts get a node.cmd shim and npm_node_execpath', async (
 test('a real Node host on Unix does not need a PATH shim', () => {
   assert.equal(nodeHostNeedsShim('darwin', '/usr/bin/node'), false);
   assert.equal(nodeHostNeedsShim('darwin', '/Applications/Rauhwpx.app/Contents/MacOS/Rauhwpx'), true);
+});
+
+test('a failed node-host write is retried on the next ensure', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-node-host-retry-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  let attempts = 0;
+  const ensure = createNodeHost({
+    rootDir: root,
+    nodeCommand: path.join(root, 'Rauhwpx.exe'),
+    platform: 'win32',
+    writeFile: async (file, body) => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' });
+      }
+      await fs.writeFile(file, body);
+    },
+  });
+  await assert.rejects(ensure(), { code: 'EBUSY' });
+  assert.equal(await ensure(), path.join(root, 'node-host'));
+  assert.equal(attempts, 2);
 });
 
 test('Windows process cleanup never retargets a reusable PID after its first tree command', async () => {

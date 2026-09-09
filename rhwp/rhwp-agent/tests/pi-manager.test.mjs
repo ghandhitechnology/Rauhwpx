@@ -453,6 +453,36 @@ test('Windows Pi npm install exposes node for native postinstall under Electron'
   await fs.rm(rootDir, { recursive: true, force: true });
 });
 
+test('Windows Pi cancel during node-host setup does not start npm', async () => {
+  const rootDir = await tmpRoot();
+  let releaseWrite;
+  const writeStarted = Promise.withResolvers();
+  const writeBlocked = new Promise((resolve) => { releaseWrite = resolve; });
+  const { spawns, spawnProcess } = fakeSpawner();
+  const manager = createPiManager({
+    rootDir,
+    spawnProcess,
+    platform: 'win32',
+    nodeCommand: path.join(rootDir, 'Rauhwpx.exe'),
+    baseEnv: { PATH: 'C:\\Windows\\System32' },
+    openRouter: fakeOpenRouter(),
+    fetchImpl: offlineFetch,
+    writeNodeHostFile: async () => {
+      writeStarted.resolve();
+      await writeBlocked;
+    },
+  });
+
+  const installing = manager.install();
+  await writeStarted.promise;
+  assert.equal(await manager.cancelSetup(), false);
+  releaseWrite();
+  await assert.rejects(installing, { code: 'PI_INSTALL_FAILED' });
+  assert.equal(spawns.length, 0);
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
 test('Windows Pi cancellation waits for taskkill proof after leader exit', async () => {
   const rootDir = await tmpRoot();
   let npmProcess;

@@ -275,7 +275,8 @@ export function defaultRauRoot(env = process.env, platform = process.platform, h
  *           baseEnv?: NodeJS.ProcessEnv, secretStore?: object, secretId?: string,
  *           lockedModels?: readonly object[] | null, skipLegacyKey?: boolean,
  *           tarballMaxBytes?: number, oauthExchangeTimeoutMs?: number,
- *           replaceFile?: typeof replaceFileAtomically }} [deps]
+ *           replaceFile?: typeof replaceFileAtomically,
+ *           writeNodeHostFile?: typeof import('node:fs/promises').writeFile }} [deps]
  */
 export function createPiManager({
   rootDir = defaultPiRoot(),
@@ -296,6 +297,7 @@ export function createPiManager({
   tarballMaxBytes = PI_TARBALL_MAX_BYTES,
   oauthExchangeTimeoutMs = OAUTH_EXCHANGE_TIMEOUT_MS,
   replaceFile = replaceFileAtomically,
+  writeNodeHostFile,
 } = {}) {
   const tarballLimitBytes = Number.isSafeInteger(tarballMaxBytes) && tarballMaxBytes > 0
     ? Math.min(tarballMaxBytes, PI_TARBALL_MAX_BYTES)
@@ -320,7 +322,9 @@ export function createPiManager({
   );
   const client = openRouter ?? createOpenRouter({ fetchImpl, now, cacheDir: rootDir });
   const npmLaunch = bundledNpmLaunch({ nodeCommand, npmCommand });
-  const ensureNodeHost = createNodeHost({ rootDir, nodeCommand, platform });
+  const ensureNodeHost = createNodeHost({
+    rootDir, nodeCommand, platform, writeFile: writeNodeHostFile,
+  });
 
   let config = {
     version: CONFIG_VERSION,
@@ -346,6 +350,7 @@ export function createPiManager({
   /** @type {Promise<PiStatus> | null} */
   let installInFlight = null;
   let installProcess = null;
+  let installCancelled = false;
   const installCleanupPromises = new WeakMap();
   /** @type {Set<(progress: { state: string, detail?: string }) => void>} */
   const installListeners = new Set();
@@ -725,8 +730,15 @@ export function createPiManager({
     return filePath;
   }
 
+  function throwIfInstallCancelled() {
+    if (!installCancelled) return;
+    throw piError('PI_INSTALL_FAILED', 'pi 설치를 취소했어요');
+  }
+
   async function runNpmInstall(emit, localTarball = null, targetPrefix = prefixDir) {
+    throwIfInstallCancelled();
     const shimDir = await ensureNodeHost();
+    throwIfInstallCancelled();
     const npmEnv = shimDir
       ? applyNodeHostEnv(baseEnv, { nodeCommand, shimDir, platform })
       : baseEnv;
@@ -939,6 +951,7 @@ export function createPiManager({
         );
       }
       installing = true;
+      installCancelled = false;
       lastError = null;
       // await 없이 곧바로 in-flight 를 세워야 동시에 들어온 호출이 하나로 합쳐진다.
       const running = (async () => {
@@ -976,6 +989,7 @@ export function createPiManager({
           throw error;
         } finally {
           installing = false;
+          installCancelled = false;
         }
       })();
       installInFlight = running;
@@ -1005,6 +1019,7 @@ export function createPiManager({
 
       let tarballPath = null;
       let cleanupUncertain = false;
+      installCancelled = false;
       try {
         tarballPath = await downloadTarball(dist, () => {});
         await updatePrefixAtomically({
@@ -1028,6 +1043,7 @@ export function createPiManager({
         installedVersion = await readInstalledVersion();
         updateRequired = installedVersion !== latestVersion;
       } finally {
+        installCancelled = false;
         if (tarballPath && !cleanupUncertain) await fs.unlink(tarballPath).catch(() => {});
       }
       return currentStatus();
@@ -1274,6 +1290,7 @@ export function createPiManager({
 
     async cancelSetup() {
       oauthFlow = null;
+      installCancelled = true;
       const proc = installProcess;
       if (!proc) return false;
       let cleanup = installCleanupPromises.get(proc);
