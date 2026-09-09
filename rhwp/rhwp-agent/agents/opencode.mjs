@@ -289,6 +289,8 @@ export function createOpenCodeSession(opts, {
   terminateProcess = terminateProcessTree,
   prepareHome = prepareOpenCodeHome,
   flushCredentialMirror = flushOpenCodeCredentialMirror,
+  platform = process.platform,
+  nodeCommand = process.execPath,
 } = {}) {
   const onEvent = opts.onEvent;
   /** @type {string|null} */
@@ -441,7 +443,7 @@ export function createOpenCodeSession(opts, {
         if (!currentModel && modelOption?.currentValue) currentModel = String(modelOption.currentValue);
       },
       onSessionUpdate: handleUpdate,
-    }, { terminateProcess });
+    }, { terminateProcess, platform, nodeCommand });
   }
 
   function costForTurn() {

@@ -3428,3 +3428,53 @@ test('Windows Claude npm install exposes node for postinstall under Electron', a
   assert.equal(calls[0].options.env.PATH.startsWith(path.join(rootDir, 'node-host')), true);
   assert.match(await fs.readFile(path.join(rootDir, 'node-host', 'node.cmd'), 'utf8'), /Rauhwpx\.exe/);
 });
+
+test('Windows envFor after init puts the Node host on PATH', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-envfor-host-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const electron = path.join(rootDir, 'Rauhwpx.exe');
+  const manager = await createCliSetupManager({
+    rootDir,
+    platform: 'win32',
+    nodeCommand: electron,
+    baseEnv: { PATH: 'C:\\Windows\\System32' },
+    spawnProcess() { throw new Error('no spawn'); },
+  }).init();
+  const env = manager.envFor('codex');
+  assert.equal(manager.nodeHostDir(), path.join(rootDir, 'node-host'));
+  assert.equal(env.PATH.startsWith(`${path.join(rootDir, 'node-host')};`), true);
+  assert.equal(env.ELECTRON_RUN_AS_NODE, '1');
+  assert.equal(env.npm_node_execpath, electron);
+});
+
+test('Windows Claude install cancel during node-host setup does not start npm', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-host-cancel-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  let releaseWrite;
+  const writeStarted = Promise.withResolvers();
+  const writeBlocked = new Promise((resolve) => { releaseWrite = resolve; });
+  const calls = [];
+  const spawnProcess = (command, argv, options) => {
+    const proc = new FakeProcess();
+    calls.push({ command, argv, options });
+    queueMicrotask(() => proc.emit('close', 0, null));
+    return proc;
+  };
+  const manager = createCliSetupManager({
+    rootDir,
+    spawnProcess,
+    platform: 'win32',
+    nodeCommand: path.join(rootDir, 'Rauhwpx.exe'),
+    baseEnv: { PATH: 'C:\\Windows\\System32' },
+    writeNodeHostFile: async () => {
+      writeStarted.resolve();
+      await writeBlocked;
+    },
+  });
+  const installing = manager.install('claude');
+  await writeStarted.promise;
+  assert.equal(await manager.cancel('claude'), false);
+  releaseWrite();
+  await assert.rejects(installing, { code: 'AGENT_INSTALL_FAILED' });
+  assert.equal(calls.length, 0);
+});

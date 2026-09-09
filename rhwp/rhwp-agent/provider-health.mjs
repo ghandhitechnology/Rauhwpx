@@ -6,6 +6,7 @@ import {
   terminateAndWaitForProcessTreeExit,
   terminateProcessTree,
 } from './process-tree.mjs';
+import { applyManagedCliLaunch } from './npm-cli-launch.mjs';
 
 /** CLI 가 살아 있는지 확인하는 프로브 — `<cli> --version` 한 줄이면 충분하다. */
 const PROBE_COMMANDS = /** @type {const} */ ({
@@ -75,6 +76,7 @@ export function createProviderHealth({
   cliBin = (agent) => PROBE_COMMANDS[agent],
   probeEnv = () => undefined,
   platform = process.platform,
+  nodeCommand = process.execPath,
 } = {}) {
   /** @type {{ result: { claude: ProviderHealth, codex: ProviderHealth, grok: ProviderHealth, cursor: ProviderHealth, opencode: ProviderHealth, pi: ProviderHealth, rau: ProviderHealth }, checkedAt: number } | null} */
   let cache = null;
@@ -121,11 +123,17 @@ export function createProviderHealth({
 
       let proc;
       try {
-        proc = spawnProcess(command, ['--version'], {
+        const launched = applyManagedCliLaunch(command, ['--version'], {
+          platform, nodeCommand, env,
+        });
+        const options = {
           stdio: ['ignore', 'pipe', 'pipe'],
           ...processTreeSpawnOptions(platform),
-          ...(env ? { env } : {}),
-        });
+        };
+        if (env || (launched.env && Object.keys(launched.env).length > 0)) {
+          options.env = launched.env;
+        }
+        proc = spawnProcess(launched.command, launched.argv, options);
       } catch (error) {
         done({
           available: false,

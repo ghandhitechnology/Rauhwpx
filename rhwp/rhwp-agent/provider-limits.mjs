@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import spawn from 'cross-spawn';
+import { applyManagedCliLaunch } from './npm-cli-launch.mjs';
 import { readUtf8FileBounded } from './bounded-file.mjs';
 import { recoverInterruptedFileReplacement, replaceFileAtomically } from './harness-update.mjs';
 import { cancelResponseBody, readResponseJsonBounded } from './response-bounds.mjs';
@@ -82,7 +83,7 @@ async function readKeychain(service) {
 }
 
 /** One short-lived app-server; no thread or model request is created. */
-export function readCodexRateLimits({ bin = 'codex', env = process.env, homeDir = os.homedir(), timeoutMs = REQUEST_TIMEOUT, spawnProcess = spawn } = {}) {
+export function readCodexRateLimits({ bin = 'codex', env = process.env, homeDir = os.homedir(), timeoutMs = REQUEST_TIMEOUT, spawnProcess = spawn, platform = process.platform, nodeCommand = process.execPath } = {}) {
   return new Promise((resolve, reject) => {
     let child;
     let done = false;
@@ -112,8 +113,11 @@ export function readCodexRateLimits({ bin = 'codex', env = process.env, homeDir 
         'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'GROK_API_KEY', 'XAI_API_KEY',
         'OPENROUTER_API_KEY', 'CURSOR_API_KEY', 'BROWSERBASE_API_KEY', 'RHWP_CLIPROXY_KEY',
       ]) delete codexEnv[key];
-      child = spawnProcess(bin, ['-s', 'read-only', '-a', 'never', 'app-server'], {
-        env: codexEnv, cwd: homeDir, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true,
+      const launched = applyManagedCliLaunch(bin, ['-s', 'read-only', '-a', 'never', 'app-server'], {
+        platform, nodeCommand, env: codexEnv,
+      });
+      child = spawnProcess(launched.command, launched.argv, {
+        env: launched.env, cwd: homeDir, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true,
       });
       child.on('error', () => finish(failure('CODEX_RPC_UNAVAILABLE', 'Codex usage service is unavailable.')));
       child.on('close', () => finish(failure('CODEX_RPC_UNAVAILABLE', 'Codex usage service stopped before responding.')));

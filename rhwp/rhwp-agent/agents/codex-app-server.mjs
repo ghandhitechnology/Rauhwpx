@@ -23,6 +23,7 @@ import {
   terminateAndWaitForProcessTreeExit,
   terminateProcessTree,
 } from '../process-tree.mjs';
+import { applyManagedCliLaunch } from '../npm-cli-launch.mjs';
 
 const DEFAULT_CODEX_MODEL = 'gpt-5.6-sol';
 const DEFAULT_MODE_FEATURE = 'default_mode_request_user_input';
@@ -363,6 +364,8 @@ export function createCodexAppServerSession(opts, dependencies = {}) {
     createRolloutWatcher,
     prepareHome = () => {},
     createLegacySession,
+    platform = process.platform,
+    nodeCommand = process.execPath,
   } = dependencies;
   const onEvent = opts.onEvent;
   /** @type {import('node:child_process').ChildProcess | null} */
@@ -758,15 +761,17 @@ export function createCodexAppServerSession(opts, dependencies = {}) {
     expectedShutdown = false;
     let child;
     try {
-      child = spawnProcess(opts.codexBin ?? 'codex', buildCodexAppServerArgv(opts, {
+      const spawnEnv = {
+        ...isolatedProcessEnv(opts, opts.providerEnv ?? process.env),
+        CODEX_HOME: codexHome,
+      };
+      const launched = applyManagedCliLaunch(opts.codexBin ?? 'codex', buildCodexAppServerArgv(opts, {
         enableDefaultModeUserInput: featureForced,
-      }), {
+      }), { platform, nodeCommand, env: spawnEnv });
+      child = spawnProcess(launched.command, launched.argv, {
         ...processTreeSpawnOptions(),
         cwd: opts.rootDir,
-        env: {
-          ...isolatedProcessEnv(opts, opts.providerEnv ?? process.env),
-          CODEX_HOME: codexHome,
-        },
+        env: launched.env,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
     } catch (error) {

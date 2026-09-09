@@ -39,6 +39,7 @@ import {
   terminateProcessTree,
   waitForProcessTreeExit,
 } from '../process-tree.mjs';
+import { applyManagedCliLaunch } from '../npm-cli-launch.mjs';
 
 const STDERR_TAIL_LIMIT = 16_000;
 const DEFAULT_CODEX_MODEL = 'gpt-5.6-sol';
@@ -213,6 +214,7 @@ export function createLegacyCodexSession(opts, {
   initialThreadId = null,
   closeGraceMs = 2_000,
   platform = process.platform,
+  nodeCommand = process.execPath,
 } = {}) {
   const onEvent = opts.onEvent;
 
@@ -502,13 +504,17 @@ export function createLegacyCodexSession(opts, {
       let proc;
       try {
         prepareCodexHome(codexHome, opts.codexAuthPath);
-        proc = spawnProcess(opts.codexBin ?? 'codex', argv, {
+        const spawnEnv = {
+          ...isolatedProcessEnv(opts, opts.providerEnv ?? process.env),
+          CODEX_HOME: codexHome,
+        };
+        const launched = applyManagedCliLaunch(opts.codexBin ?? 'codex', argv, {
+          platform, nodeCommand, env: spawnEnv,
+        });
+        proc = spawnProcess(launched.command, launched.argv, {
           ...processTreeSpawnOptions(),
           cwd: opts.rootDir,
-          env: {
-            ...isolatedProcessEnv(opts, opts.providerEnv ?? process.env),
-            CODEX_HOME: codexHome,
-          },
+          env: launched.env,
           stdio: ['pipe', 'pipe', 'pipe'],
         });
       } catch (e) {
