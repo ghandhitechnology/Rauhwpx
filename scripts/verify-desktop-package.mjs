@@ -2,6 +2,7 @@ import { existsSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { listPackage } from '@electron/asar';
 
+import { packagedStagedNativeExtractorPath } from '../desktop/native-rhwp-path.mjs';
 import { normalizeArchivePath } from './desktop-package-paths.mjs';
 import { smokePackagedAgentHub } from './packaged-agent-hub-smoke.mjs';
 
@@ -37,6 +38,7 @@ const required = [
   join(unpackedAgent, 'node_modules', 'ws', 'package.json'),
   unpackedCreditsCatalog,
   extractor,
+  packagedStagedNativeExtractorPath(resourcesDir, process.platform, process.arch),
   desktopExecutable,
 ];
 for (const path of required) {
