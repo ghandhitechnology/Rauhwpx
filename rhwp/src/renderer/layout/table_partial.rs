@@ -13,7 +13,8 @@ use super::table_layout::{calc_nested_split_rows, NestedTableSplit};
 use super::text_measurement::{estimate_text_width, resolved_to_text_style};
 use super::utils::find_bin_data;
 use super::{
-    repeats_native_empty_host_rowbreak_fragment_margin, CellContext, CellPathEntry, LayoutEngine,
+    repeats_native_empty_host_rowbreak_fragment_margin, stored_float_anchor_offset_px, CellContext,
+    CellPathEntry, LayoutEngine,
 };
 use crate::document_core::queries::rendering::is_projected_cell_stack_picture_paragraph;
 use crate::model::bin_data::BinDataContent;
@@ -1586,13 +1587,20 @@ impl LayoutEngine {
             // (부동 RowBreak 표 91.2px 오버플로우). 표의 참 상단 = para_start+vert_off =
             // y_start+(vert_off−host_h). typeset 예산도 동일 감액을 적용한다.
             // host pre-emit 이 아니면 host_h=0 → 종전과 동일(회귀 없음).
-            let host_h = self
-                .pre_emitted_host_heights
-                .borrow()
-                .get(&para_index)
-                .copied()
-                .unwrap_or(0.0);
-            (hwpunit_to_px(vert_off_signed, self.dpi) - host_h).max(0.0)
+            // [#6860] pre-emit 경로는 layout 의 `para_start_y + 앵커` 블록을 건너뛰므로
+            // 앵커 간격을 여기서 더한다. 아니면 `para_start_y` 와 이중 적용된다.
+            let (host_h, host_pre_emitted) = {
+                let heights = self.pre_emitted_host_heights.borrow();
+                (
+                    heights.get(&para_index).copied().unwrap_or(0.0),
+                    heights.contains_key(&para_index),
+                )
+            };
+            let mut raw = hwpunit_to_px(vert_off_signed, self.dpi);
+            if host_pre_emitted {
+                raw += stored_float_anchor_offset_px(para, table, control_index, self.dpi);
+            }
+            (raw - host_h).max(0.0)
         } else {
             0.0
         };

@@ -10,6 +10,16 @@ fn test_paragraph_default() {
     assert!(para.controls.is_empty());
 }
 
+#[test]
+fn utf16_pos_after_last_char_counts_supplementary_plane_width() {
+    let para = Paragraph {
+        text: "A\u{1F600}".into(),
+        char_offsets: vec![0, 1],
+        ..Paragraph::new_empty()
+    };
+    assert_eq!(para.utf16_pos_after_last_char(), Some(3));
+}
+
 fn non_bmp_picture_paragraph() -> Paragraph {
     Paragraph {
         text: "A😀𠀀B.".to_string(),
