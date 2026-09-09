@@ -41,7 +41,7 @@ export {
   handleGrokAskUserQuestionFrame,
   selectGrokUserInputTransport,
 };
-import { applyNpmCliLaunch } from '../npm-cli-launch.mjs';
+import { applyManagedCliLaunch } from '../npm-cli-launch.mjs';
 import {
   isolatedProcessEnv,
   processTreeSpawnOptions,
@@ -1257,7 +1257,7 @@ export function createGrokSession(opts, {
         nativeSessionInfoEmitted = false;
       },
       onSessionUpdate: handleNativeUpdate,
-    }, { spawnProcess, terminateProcess });
+    }, { spawnProcess, terminateProcess, platform, nodeCommand });
   }
 
   function prepareNativeHome() {
@@ -1322,7 +1322,7 @@ export function createGrokSession(opts, {
       prepareNativeHome();
       writeFileSync(promptPath, text, 'utf8');
       const spawnEnv = buildGrokEnv(opts);
-      const launched = applyNpmCliLaunch(
+      const launched = applyManagedCliLaunch(
         opts.grokBin ?? 'grok',
         buildGrokArgv(opts, sessionId, resume, promptPath),
         { platform, nodeCommand, env: spawnEnv },
@@ -1330,7 +1330,7 @@ export function createGrokSession(opts, {
       proc = spawnProcess(launched.command, launched.argv, {
         ...processTreeSpawnOptions(),
         cwd: opts.rootDir,
-        env: { ...spawnEnv, ...launched.env },
+        env: launched.env,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch (e) {

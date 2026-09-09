@@ -6,6 +6,7 @@ import path from 'node:path';
 import spawn from 'cross-spawn';
 import { z } from 'zod';
 
+import { applyManagedCliLaunch } from '../npm-cli-launch.mjs';
 import {
   isolatedProcessEnv,
   PROCESS_TREE_CLEANUP_OUTCOME,
@@ -285,6 +286,8 @@ function runCli(spec, prompt, timeoutMs, {
   terminateProcess = terminateProcessTree,
   cleanupProcessOutcome,
   onCleanupUncertain = () => {},
+  platform,
+  nodeCommand,
 } = {}) {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -352,11 +355,16 @@ function runCli(spec, prompt, timeoutMs, {
     };
 
     try {
-      child = spawnProcess(spec.command, spec.argv, {
+      const launched = applyManagedCliLaunch(spec.command, spec.argv, {
+        platform,
+        nodeCommand,
+        env,
+      });
+      child = spawnProcess(launched.command, launched.argv, {
         ...processTreeSpawnOptions(),
         shell: false,
         ...(cwd ? { cwd } : {}),
-        ...(env ? { env } : {}),
+        env: launched.env,
         stdio: [spec.stdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
       });
     } catch {
@@ -480,6 +488,8 @@ async function runPreparedCli(workspace, prompt, timeoutMs, deps) {
       terminateProcess: deps.terminateProcess,
       cleanupProcessOutcome: deps.cleanupProcessOutcome,
       env: workspace.env,
+      platform: deps.platform,
+      nodeCommand: deps.nodeCommand,
       onCleanupUncertain: () => { cleanupUncertain = true; },
     });
   } catch (error) {

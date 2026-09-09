@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { createRequire } from 'node:module';
+import { applyManagedCliLaunch } from './npm-cli-launch.mjs';
 import { terminateAndWaitForProcessTreeExit } from './process-tree.mjs';
 
 const require = createRequire(import.meta.url);
@@ -13,12 +14,14 @@ export function createSetupTerminal({ command, argv, env, cwd, onOutput, signal,
   if (signal?.aborted) throw failure('AGENT_AUTH_CANCELLED', '로그인을 취소했어요.');
   let terminal;
   try {
+    const launched = applyManagedCliLaunch(command, argv, { env, platform: process.platform });
+    const spawnEnv = launched.env ?? env;
     const launch = process.platform === 'win32'
-      ? require('cross-spawn/lib/parse')(command, argv, { env })
-      : { command, args: argv, options: {} };
+      ? require('cross-spawn/lib/parse')(launched.command, launched.argv, { env: spawnEnv })
+      : { command: launched.command, args: launched.argv, options: {} };
     const args = launch.options.windowsVerbatimArguments ? launch.args.join(' ') : launch.args;
     terminal = spawnPty(launch.command, args, { name: 'xterm-256color', cols: 80, rows: 18, cwd,
-      env: Object.fromEntries(Object.entries(env).filter(([, value]) => typeof value === 'string')) });
+      env: Object.fromEntries(Object.entries(spawnEnv).filter(([, value]) => typeof value === 'string')) });
   } catch {
     throw failure('AGENT_AUTH_TERMINAL_UNAVAILABLE', '로그인 창을 열지 못했어요. API 키로 연결해 주세요.');
   }

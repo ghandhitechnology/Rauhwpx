@@ -14,8 +14,8 @@ import {
   updatePrefixAtomically,
 } from './harness-update.mjs';
 import {
+  applyManagedCliLaunch,
   applyNodeHostEnv,
-  applyNpmCliLaunch,
   createNodeHost,
 } from './npm-cli-launch.mjs';
 import { bundledNpmLaunch } from './npm-runtime.mjs';
@@ -307,7 +307,8 @@ export function defaultOpenCodeAuthPath(
  *           replaceConfigFile?: typeof replaceFileAtomically,
  *           terminateProcessTreeImpl?: typeof terminateProcessTree,
  *           createCursorKeyCheckHome?: typeof fs.mkdtemp,
- *           removeCursorKeyCheckHome?: typeof fs.rm }} [deps]
+ *           removeCursorKeyCheckHome?: typeof fs.rm,
+ *           writeNodeHostFile?: typeof import('node:fs').promises.writeFile }} [deps]
  */
 export function createCliSetupManager({
   rootDir = defaultCliSetupRoot(),
@@ -325,6 +326,7 @@ export function createCliSetupManager({
   terminateProcessTreeImpl = terminateProcessTree,
   createCursorKeyCheckHome = (prefix) => fs.mkdtemp(prefix),
   removeCursorKeyCheckHome = (home, options) => fs.rm(home, options),
+  writeNodeHostFile,
 } = {}) {
   const platformPath = platform === 'win32' ? path.win32 : path;
   const prefixDir = path.join(rootDir, 'prefix');
@@ -391,20 +393,25 @@ export function createCliSetupManager({
     ['opencode', { latestVersion: null, updateRequired: false, error: null }],
   ]);
   const npmLaunch = bundledNpmLaunch({ nodeCommand, npmCommand });
-  const ensureNodeHost = createNodeHost({ rootDir, nodeCommand, platform });
-  async function resolveSpawn(command, argv, env) {
+  const ensureNodeHost = createNodeHost({
+    rootDir, nodeCommand, platform, writeFile: writeNodeHostFile,
+  });
+  /** @type {string | null} */
+  let nodeHostShimDir = null;
+  const cancelledOps = new Set();
+  async function resolveSpawn(command, argv, env, operationKey = null) {
     const shimDir = await ensureNodeHost();
-    const resolvedEnv = shimDir
-      ? applyNodeHostEnv(env, { nodeCommand, shimDir, platform })
-      : env;
-    const launched = applyNpmCliLaunch(command, argv, {
-      platform, nodeCommand, env: resolvedEnv,
+    nodeHostShimDir = shimDir;
+    if (operationKey && cancelledOps.has(operationKey)) {
+      const auth = operationKey.startsWith('auth:');
+      throw setupError(
+        auth ? 'AGENT_AUTH_CANCELLED' : 'AGENT_INSTALL_FAILED',
+        auth ? '로그인을 취소했어요.' : '설치를 취소했어요.',
+      );
+    }
+    return applyManagedCliLaunch(command, argv, {
+      platform, nodeCommand, env, shimDir,
     });
-    return {
-      command: launched.command,
-      argv: launched.argv,
-      env: { ...resolvedEnv, ...launched.env },
-    };
   }
   /** 공용 prefix 를 건드리는 작업(설치·자동 업데이트)의 직렬화 큐. */
   let prefixChain = Promise.resolve();
@@ -891,7 +898,9 @@ export function createCliSetupManager({
       delete env[other.keyEnv];
     }
     if (item.keyEnv && apiKeys[agent]) env[item.keyEnv] = apiKeys[agent];
-    return env;
+    return nodeHostShimDir
+      ? applyNodeHostEnv(env, { nodeCommand, shimDir: nodeHostShimDir, platform })
+      : env;
   }
 
   /**
@@ -985,7 +994,7 @@ export function createCliSetupManager({
     maxStdoutBytes = SHORT_STDOUT_LIMIT_BYTES,
     maxStderrBytes = SHORT_STDERR_LIMIT_BYTES,
   } = {}) {
-    const launched = await resolveSpawn(command, argv, env);
+    const launched = await resolveSpawn(command, argv, env, operationKey);
     return new Promise((resolve, reject) => {
       if (operationKey && activeProcesses.has(operationKey)) {
         reject(setupError(
@@ -1307,6 +1316,7 @@ export function createCliSetupManager({
   async function install(agent, onProgress) {
     const item = assertAgent(agent);
     if (installs.has(agent)) return installs.get(agent);
+    cancelledOps.delete(`install:${agent}`);
     let running;
     if (item.kind === 'script') {
       running = runScriptInstall(agent, item, onProgress);
@@ -1876,6 +1886,7 @@ export function createCliSetupManager({
     // 지난 로그인에서 남은 취소 표시는 이번 시도와 무관하다 — 진짜 실패를 취소로
     // 둔갑시키지 않도록 시작할 때 지운다.
     cancelledAuth.delete(agent);
+    cancelledOps.delete(`auth:${agent}`);
     const running = (async () => {
       await load();
       throwIfAuthCancelled(signal);
@@ -2009,7 +2020,7 @@ export function createCliSetupManager({
         if (agent === 'cursor' && platform !== 'win32') await fs.mkdir(cursorHomeDir, { recursive: true });
         throwIfAuthCancelled(signal);
         const result = (terminal || agent === 'opencode') ? await (async () => {
-          const loginLaunch = await resolveSpawn(command, loginSpec.argv, loginSpec.env);
+          const loginLaunch = await resolveSpawn(command, loginSpec.argv, loginSpec.env, `auth:${agent}`);
           const session = createTerminal({ command: loginLaunch.command, argv: loginLaunch.argv, env: loginLaunch.env,
             cwd: credentialTransaction?.homeDir ?? (agent === 'grok' ? grokHomeDir : cursorHomeDir), signal, timeoutMs: AUTH_TIMEOUT_MS,
             onOutput: terminalData => onProgress?.({ state: 'authorizing', terminalData }),
@@ -2225,6 +2236,7 @@ export function createCliSetupManager({
     claudeOAuthStagingDir,
     binPath,
     envFor,
+    nodeHostDir: () => nodeHostShimDir,
     grokAuthPath,
     cursorModels,
     openCodeAuthPath,
@@ -2246,6 +2258,11 @@ export function createCliSetupManager({
         (stagingDir) => cleanupStaleOAuthCredentialStaging(stagingDir).catch(() => {}),
       ));
       await load();
+      try {
+        nodeHostShimDir = await ensureNodeHost();
+      } catch {
+        nodeHostShimDir = null;
+      }
       return this;
     },
     status,
@@ -2257,6 +2274,8 @@ export function createCliSetupManager({
     terminalResize(agent, cols, rows) { setupTerminals.get(agent)?.resize(cols, rows); },
     async cancel(agent) {
       assertAgent(agent);
+      cancelledOps.add(`install:${agent}`);
+      cancelledOps.add(`auth:${agent}`);
       if (setupTerminals.has(agent)) return setupTerminals.get(agent).cancel().catch(() => false);
       if (activeProcesses.has(`auth:${agent}`)) cancelledAuth.add(agent);
       const entries = [`install:${agent}`, `auth:${agent}`]
