@@ -3286,6 +3286,7 @@ impl DocumentCore {
             .with_hwp3_variant(profile.hwp3_layout())
             .with_hwpx_cell_spacing(profile.hwpx_stored_layout() || profile.hwp5_origin_hwpx())
             .with_hwp3_origin_flow_spacing_before(hwp3_origin_flow_spacing_before)
+            .with_session_edited(profile.session_edited())
             .with_render_normalization(std::sync::Arc::clone(&self.render_normalization.overlay));
         let column_def = Self::find_initial_column_def(paragraphs);
         let layout =
@@ -3622,6 +3623,7 @@ impl DocumentCore {
             .with_hwp3_variant(profile.hwp3_layout())
             .with_hwpx_cell_spacing(profile.hwpx_stored_layout() || profile.hwp5_origin_hwpx())
             .with_hwp3_origin_flow_spacing_before(hwp3_origin_flow_spacing_before)
+            .with_session_edited(profile.session_edited())
             .with_render_normalization(std::sync::Arc::clone(&self.render_normalization.overlay));
 
         if self.document.sections.is_empty() {
@@ -7008,6 +7010,7 @@ mod tests {
                 ..Default::default()
             }],
             raw_stream: None,
+            raw_provenance: None,
         });
 
         let mut core = DocumentCore::new_empty();
@@ -7126,6 +7129,7 @@ mod tests {
             },
             paragraphs: vec![Paragraph::default()],
             raw_stream: None,
+            raw_provenance: None,
         });
 
         let mut core = DocumentCore::new_empty();
@@ -7172,6 +7176,7 @@ mod tests {
                 section_def,
                 paragraphs: vec![Paragraph::default()],
                 raw_stream: None,
+                raw_provenance: None,
             }
         }
 
@@ -7242,6 +7247,7 @@ mod tests {
                 section_def,
                 paragraphs: vec![Paragraph::default()],
                 raw_stream: None,
+                raw_provenance: None,
             }
         }
 
@@ -7305,6 +7311,7 @@ mod tests {
                 section_def,
                 paragraphs: vec![Paragraph::default()],
                 raw_stream: None,
+                raw_provenance: None,
             }
         }
 
@@ -7362,6 +7369,7 @@ mod tests {
             section_def: SectionDef::default(),
             paragraphs: vec![Paragraph::default()],
             raw_stream: None,
+            raw_provenance: None,
         });
         core.set_document(document);
         core.paginate();

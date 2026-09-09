@@ -1780,6 +1780,7 @@ fn test_document_with_paragraphs() {
             },
         ],
         raw_stream: None,
+        raw_provenance: None,
     });
     doc.set_document(document);
 
@@ -1989,6 +1990,7 @@ fn create_doc_with_table() -> HwpDocument {
         },
         paragraphs: vec![parent_para],
         raw_stream: None,
+        raw_provenance: None,
     });
     doc.set_document(document);
     doc
@@ -2075,6 +2077,7 @@ fn create_doc_with_page_count_boundary_table() -> HwpDocument {
         },
         paragraphs: vec![parent_para],
         raw_stream: None,
+        raw_provenance: None,
     });
     doc.set_document(document);
     doc
@@ -4761,6 +4764,7 @@ fn create_doc_with_floating_picture(tac: bool, voff: u32, hoff: u32) -> HwpDocum
         },
         paragraphs: vec![pic_para, Paragraph::default()],
         raw_stream: None,
+        raw_provenance: None,
     });
     doc.set_document(document);
     doc

@@ -3467,6 +3467,7 @@ fn merge_sections(
                 section_def,
                 paragraphs,
                 raw_stream: None,
+                raw_provenance: None,
             })
         })
         .collect()
@@ -8675,12 +8676,22 @@ mod tests {
         let mut analysis = Ctx::new(MergeOptions::default());
         merge_paras(&path, &base, &current, &incoming, None, &mut analysis).unwrap();
         assert_eq!(analysis.conflicts.len(), 1);
-        assert_eq!(analysis.conflicts[0].reason, MergeConflictReason::DeleteVersusEdit);
-        let resolutions = BTreeMap::from([
-            (analysis.conflicts[0].id.clone(), MergeResolution::Incoming),
-        ]);
+        assert_eq!(
+            analysis.conflicts[0].reason,
+            MergeConflictReason::DeleteVersusEdit
+        );
+        let resolutions =
+            BTreeMap::from([(analysis.conflicts[0].id.clone(), MergeResolution::Incoming)]);
         let mut materialized = Ctx::new(MergeOptions::default());
-        let result = merge_paras(&path, &base, &current, &incoming, Some(&resolutions), &mut materialized).unwrap();
+        let result = merge_paras(
+            &path,
+            &base,
+            &current,
+            &incoming,
+            Some(&resolutions),
+            &mut materialized,
+        )
+        .unwrap();
         assert_eq!(
             result.iter().map(|p| p.text.as_str()).collect::<Vec<_>>(),
             vec!["local insertion", "cloud edit", "anchor"],
@@ -9358,6 +9369,7 @@ mod tests {
             },
             sections: vec![Section {
                 raw_stream: Some(vec![0xaa, 0xbb]),
+                raw_provenance: None,
                 paragraphs: vec![Paragraph {
                     controls: vec![
                         Control::Picture(Box::new(Picture {
@@ -9681,6 +9693,7 @@ mod tests {
             },
             sections: vec![Section {
                 raw_stream: Some(vec![0xde, 0xad]),
+                raw_provenance: None,
                 paragraphs: vec![Paragraph {
                     controls: vec![Control::Shape(Box::new(ShapeObject::Line(line)))],
                     ..Default::default()
@@ -10680,6 +10693,7 @@ mod tests {
         };
         incoming.sections[0] = Section {
             raw_stream: Some(vec![0xaa, 0xbb]),
+            raw_provenance: None,
             paragraphs: vec![Paragraph {
                 para_shape_id: 1,
                 style_id: 1,

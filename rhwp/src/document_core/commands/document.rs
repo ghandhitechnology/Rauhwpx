@@ -2203,6 +2203,7 @@ impl DocumentCore {
             section_def: section.section_def.clone(),
             paragraphs: Vec::new(),
             raw_stream: None,
+            raw_provenance: None,
         }
     }
 

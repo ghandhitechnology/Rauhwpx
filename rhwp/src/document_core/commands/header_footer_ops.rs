@@ -1566,6 +1566,7 @@ mod tests {
             },
             paragraphs: vec![Paragraph::default()],
             raw_stream: None,
+            raw_provenance: None,
         };
         doc.sections.push(section);
         let mut core = DocumentCore::new_empty();

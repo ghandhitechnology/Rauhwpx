@@ -584,6 +584,7 @@ fn parse_sections_strict(
             Ok(mut section) => {
                 // 원본 BodyText 스트림 보존 (라운드트립용)
                 section.raw_stream = Some(section_data);
+                section.raw_provenance = Some(());
                 sections.push(section);
             }
             Err(e) => {
@@ -668,6 +669,7 @@ fn parse_hwp_with_lenient(lenient: cfb_reader::LenientCfbReader) -> Result<Docum
         match body_text::parse_body_text_section(&section_data) {
             Ok(mut section) => {
                 section.raw_stream = Some(section_data);
+                section.raw_provenance = Some(());
                 sections.push(section);
             }
             Err(e) => {

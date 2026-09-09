@@ -3564,6 +3564,7 @@ pub(crate) fn parse_hwp3_validated(data: &[u8]) -> Result<Document, Hwp3Error> {
         section_def,
         paragraphs,
         raw_stream: None,
+        raw_provenance: None,
     };
     doc.sections.push(section);
 
