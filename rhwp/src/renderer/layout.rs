@@ -1151,7 +1151,7 @@ fn stored_float_anchor_line_top(
         .char_offsets
         .get(char_pos)
         .copied()
-        .or_else(|| para.char_offsets.last().map(|last| last + 1))?;
+        .or_else(|| para.utf16_pos_after_last_char())?;
     stored
         .iter()
         .rev()
