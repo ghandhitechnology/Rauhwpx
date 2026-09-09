@@ -91,6 +91,10 @@ import {
   writeLaunchOwnerMetadata,
 } from './runtime-cleanup.mjs';
 import { reportUniqueInstall, uniqueInstallsPublicUrl } from './unique-install.mjs';
+import {
+  nativeExtractorFileName,
+  sourceStagedNativeExtractorPath,
+} from './native-rhwp-path.mjs';
 
 const { autoUpdater } = electronUpdater;
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
@@ -151,13 +155,23 @@ function agentScript() {
 }
 
 function nativeRhwpExecutable() {
-  const executable = process.platform === 'win32' ? 'rhwp.exe' : 'rhwp';
-  const bundled = unpackedPath(join(__dirname, 'bin', `${process.platform}-${process.arch}`, executable));
+  const bundled = unpackedPath(sourceStagedNativeExtractorPath(
+    __dirname,
+    process.platform,
+    process.arch,
+  ));
   if (existsSync(bundled)) return bundled;
   if (app.isPackaged) throw new Error(`Packaged native document extractor is missing: ${bundled}`);
   const configured = String(process.env.RHWP_BIN ?? '').trim();
   if (configured && existsSync(configured)) return configured;
-  const development = join(__dirname, '..', 'rhwp', 'target', 'release', executable);
+  const development = join(
+    __dirname,
+    '..',
+    'rhwp',
+    'target',
+    'release',
+    nativeExtractorFileName(process.platform),
+  );
   return existsSync(development) ? development : null;
 }
 
