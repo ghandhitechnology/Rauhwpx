@@ -344,3 +344,32 @@ fn cell_enter_growth_whole_table_carries_over_and_merge_restores() {
         "병합 원복: 행 하한이 로드 시점 배분(baseline)이라 쪽수·형상이 되돌아와야 함"
     );
 }
+
+#[test]
+fn snapshot_restore_preserves_session_edited_seal() {
+    let mut core = load_growth_sample();
+    assert!(
+        !core.document().layout_profile().session_edited(),
+        "로드 직후는 열람"
+    );
+    let before = core.save_snapshot_native();
+    enter_in_growth_cell(&mut core, 1);
+    assert!(
+        core.document().layout_profile().session_edited(),
+        "셀 Enter 뒤는 편집 세션"
+    );
+    let after = core.save_snapshot_native();
+
+    core.restore_snapshot_native(before)
+        .expect("restore before");
+    assert!(
+        !core.document().layout_profile().session_edited(),
+        "편집 전 스냅샷 복원은 열람"
+    );
+
+    core.restore_snapshot_native(after).expect("restore after");
+    assert!(
+        core.document().layout_profile().session_edited(),
+        "편집 후 스냅샷 복원은 봉인을 유지해야 한다"
+    );
+}

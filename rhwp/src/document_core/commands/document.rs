@@ -2203,7 +2203,9 @@ impl DocumentCore {
             section_def: section.section_def.clone(),
             paragraphs: Vec::new(),
             raw_stream: None,
-            raw_provenance: None,
+            // 봉인은 세션 메타라 문단 셸과 같이 복원한다. raw_stream 은 아래
+            // SnapshotSection.raw_stream 이 따로 들고, 복원 때 합친다.
+            raw_provenance: section.raw_provenance,
         }
     }
 
