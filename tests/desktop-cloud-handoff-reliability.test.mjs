@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rename, rm } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -14,12 +14,14 @@ function errorWithCode(code) {
 
 function memoryFs(entries, hooks = {}) {
   const files = new Map(entries);
+  const fileStat = (filePath) => {
+    if (!files.has(filePath)) throw errorWithCode('ENOENT');
+    return { isFile: () => true, isDirectory: () => false };
+  };
   return {
     files,
-    async stat(filePath) {
-      if (!files.has(filePath)) throw errorWithCode('ENOENT');
-      return { isFile: () => true };
-    },
+    async lstat(filePath) { return fileStat(filePath); },
+    async stat(filePath) { return fileStat(filePath); },
     async rename(from, to) {
       await hooks.rename?.(from, to);
       if (!files.has(from)) throw errorWithCode('ENOENT');
@@ -185,6 +187,37 @@ test('win32 replacement removes its temp file when the original stays locked', a
   assert.equal(fsImpl.files.get(target), 'old');
   assert.equal(fsImpl.files.has(previous), false);
   assert.equal(fsImpl.files.has(temp), false);
+});
+
+test('win32 replacement refuses to move a directory target aside', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'rauhwpx-replace-dir-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, 'handoffs.json');
+  const temp = path.join(directory, 'handoffs.tmp');
+  await mkdir(target);
+  await writeFile(path.join(target, 'inside.txt'), 'keep');
+  await writeFile(temp, 'new');
+
+  await assert.rejects(replaceFile(temp, target, 'win32'), { code: 'EISDIR' });
+  assert.equal(await readFile(path.join(target, 'inside.txt'), 'utf8'), 'keep');
+  await assert.rejects(access(replaceTest.backupPath(target)), { code: 'ENOENT' });
+  assert.equal(await readFile(temp, 'utf8'), 'new');
+});
+
+test('win32 replacement recovery does not publish over a restored directory backup', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'rauhwpx-replace-dir-recovery-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, 'handoffs.json');
+  const temp = path.join(directory, 'handoffs.tmp');
+  const previous = replaceTest.backupPath(target);
+  await mkdir(previous);
+  await writeFile(path.join(previous, 'inside.txt'), 'keep');
+  await writeFile(temp, 'new');
+
+  await assert.rejects(replaceFile(temp, target, 'win32'), { code: 'EISDIR' });
+  assert.equal(await readFile(path.join(target, 'inside.txt'), 'utf8'), 'keep');
+  await assert.rejects(access(previous), { code: 'ENOENT' });
+  assert.equal(await readFile(temp, 'utf8'), 'new');
 });
 
 test('handoff startup restores an interrupted win32 persistence backup', async (t) => {

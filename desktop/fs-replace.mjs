@@ -27,6 +27,21 @@ async function exists(fsImpl, filePath) {
   }
 }
 
+async function isDirectory(fsImpl, filePath) {
+  try {
+    return (await fsImpl.lstat(filePath)).isDirectory();
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+function directoryReplaceError(targetPath) {
+  const error = new Error(`Refusing to replace directory ${targetPath}`);
+  error.code = 'EISDIR';
+  return error;
+}
+
 function dependencies(options = {}) {
   return {
     fsImpl: options.fsImpl ?? fs,
@@ -56,6 +71,9 @@ export async function recoverReplacedFile(targetPath, platform = process.platfor
 export async function replaceFile(tempPath, targetPath, platform = process.platform, options = {}) {
   const { fsImpl, sleep } = dependencies(options);
   if (platform !== 'win32') return fsImpl.rename(tempPath, targetPath);
+  if (await isDirectory(fsImpl, targetPath)) {
+    throw directoryReplaceError(targetPath);
+  }
   const previous = backupPath(targetPath);
 
   try {
@@ -68,6 +86,10 @@ export async function replaceFile(tempPath, targetPath, platform = process.platf
   } catch (error) {
     await fsImpl.rm(tempPath, { force: true }).catch(() => {});
     throw error;
+  }
+
+  if (await isDirectory(fsImpl, targetPath)) {
+    throw directoryReplaceError(targetPath);
   }
 
   let moved = false;
