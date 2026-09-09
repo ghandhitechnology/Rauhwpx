@@ -13,6 +13,11 @@ import {
   replaceFileAtomically,
   updatePrefixAtomically,
 } from './harness-update.mjs';
+import {
+  applyNodeHostEnv,
+  applyNpmCliLaunch,
+  createNodeHost,
+} from './npm-cli-launch.mjs';
 import { bundledNpmLaunch } from './npm-runtime.mjs';
 import {
   cleanupStaleOAuthCredentialStaging,
@@ -386,6 +391,21 @@ export function createCliSetupManager({
     ['opencode', { latestVersion: null, updateRequired: false, error: null }],
   ]);
   const npmLaunch = bundledNpmLaunch({ nodeCommand, npmCommand });
+  const ensureNodeHost = createNodeHost({ rootDir, nodeCommand, platform });
+  async function resolveSpawn(command, argv, env) {
+    const shimDir = await ensureNodeHost();
+    const resolvedEnv = shimDir
+      ? applyNodeHostEnv(env, { nodeCommand, shimDir, platform })
+      : env;
+    const launched = applyNpmCliLaunch(command, argv, {
+      platform, nodeCommand, env: resolvedEnv,
+    });
+    return {
+      command: launched.command,
+      argv: launched.argv,
+      env: { ...resolvedEnv, ...launched.env },
+    };
+  }
   /** 공용 prefix 를 건드리는 작업(설치·자동 업데이트)의 직렬화 큐. */
   let prefixChain = Promise.resolve();
   let authPersistenceChain = Promise.resolve();
@@ -959,12 +979,13 @@ export function createCliSetupManager({
     return platformPath.join(homes[0] ?? defaultCodexHomeDir, 'auth.json');
   }
 
-  function run(command, argv, {
+  async function run(command, argv, {
     input = null, timeoutMs = STATUS_TIMEOUT_MS, env = baseEnv, onOutput, operationKey = null,
     keepStdinOpen = false,
     maxStdoutBytes = SHORT_STDOUT_LIMIT_BYTES,
     maxStderrBytes = SHORT_STDERR_LIMIT_BYTES,
   } = {}) {
+    const launched = await resolveSpawn(command, argv, env);
     return new Promise((resolve, reject) => {
       if (operationKey && activeProcesses.has(operationKey)) {
         reject(setupError(
@@ -992,9 +1013,9 @@ export function createCliSetupManager({
       };
       let proc;
       try {
-        proc = spawnProcess(command, argv, {
+        proc = spawnProcess(launched.command, launched.argv, {
           ...processTreeSpawnOptions(platform),
-          env,
+          env: launched.env,
           stdio: ['pipe', 'pipe', 'pipe'],
           windowsHide: true,
         });
@@ -1002,14 +1023,14 @@ export function createCliSetupManager({
         finish(error);
         return;
       }
-      processEnvironments.set(proc, env);
+      processEnvironments.set(proc, launched.env);
       if (operationKey) activeProcesses.set(operationKey, proc);
       const cleanupProcess = () => {
         const current = processCleanupPromises.get(proc);
         if (current) return current;
         const cleanup = terminateAndWaitForProcessTreeExit(proc, {
           terminateProcess: terminateProcessTreeImpl,
-          terminateOptions: { platform, spawnProcess, env },
+          terminateOptions: { platform, spawnProcess, env: launched.env },
         }).catch(() => false);
         processCleanupPromises.set(proc, cleanup);
         return cleanup;
@@ -1988,7 +2009,8 @@ export function createCliSetupManager({
         if (agent === 'cursor' && platform !== 'win32') await fs.mkdir(cursorHomeDir, { recursive: true });
         throwIfAuthCancelled(signal);
         const result = (terminal || agent === 'opencode') ? await (async () => {
-          const session = createTerminal({ command, argv: loginSpec.argv, env: loginSpec.env,
+          const loginLaunch = await resolveSpawn(command, loginSpec.argv, loginSpec.env);
+          const session = createTerminal({ command: loginLaunch.command, argv: loginLaunch.argv, env: loginLaunch.env,
             cwd: credentialTransaction?.homeDir ?? (agent === 'grok' ? grokHomeDir : cursorHomeDir), signal, timeoutMs: AUTH_TIMEOUT_MS,
             onOutput: terminalData => onProgress?.({ state: 'authorizing', terminalData }),
           });

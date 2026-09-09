@@ -424,6 +424,65 @@ test('concurrent installs share a single npm run', async () => {
   await fs.rm(rootDir, { recursive: true, force: true });
 });
 
+test('Windows Pi npm install exposes node for native postinstall under Electron', async () => {
+  const rootDir = await tmpRoot();
+  const prefixDir = path.join(rootDir, 'prefix');
+  const electron = path.join(rootDir, 'Rauhwpx.exe');
+  const { spawns, spawnProcess } = fakeSpawner(installer(prefixDir));
+  const manager = createPiManager({
+    rootDir,
+    spawnProcess,
+    platform: 'win32',
+    nodeCommand: electron,
+    baseEnv: { PATH: 'C:\\Windows\\System32' },
+    openRouter: fakeOpenRouter(),
+    fetchImpl: offlineFetch,
+  });
+
+  const status = await manager.install();
+  assert.equal(status.installed, true);
+  assert.equal(spawns[0].command, electron);
+  assert.equal(spawns[0].options.env.ELECTRON_RUN_AS_NODE, '1');
+  assert.equal(spawns[0].options.env.npm_node_execpath, electron);
+  assert.equal(spawns[0].options.env.PATH.startsWith(path.join(rootDir, 'node-host')), true);
+  assert.equal(
+    await fs.readFile(path.join(rootDir, 'node-host', 'node.cmd'), 'utf8').then((body) => body.includes('Rauhwpx.exe')),
+    true,
+  );
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
+test('Windows Pi cancel during node-host setup does not start npm', async () => {
+  const rootDir = await tmpRoot();
+  let releaseWrite;
+  const writeStarted = Promise.withResolvers();
+  const writeBlocked = new Promise((resolve) => { releaseWrite = resolve; });
+  const { spawns, spawnProcess } = fakeSpawner();
+  const manager = createPiManager({
+    rootDir,
+    spawnProcess,
+    platform: 'win32',
+    nodeCommand: path.join(rootDir, 'Rauhwpx.exe'),
+    baseEnv: { PATH: 'C:\\Windows\\System32' },
+    openRouter: fakeOpenRouter(),
+    fetchImpl: offlineFetch,
+    writeNodeHostFile: async () => {
+      writeStarted.resolve();
+      await writeBlocked;
+    },
+  });
+
+  const installing = manager.install();
+  await writeStarted.promise;
+  assert.equal(await manager.cancelSetup(), false);
+  releaseWrite();
+  await assert.rejects(installing, { code: 'PI_INSTALL_FAILED' });
+  assert.equal(spawns.length, 0);
+
+  await fs.rm(rootDir, { recursive: true, force: true });
+});
+
 test('Windows Pi cancellation waits for taskkill proof after leader exit', async () => {
   const rootDir = await tmpRoot();
   let npmProcess;
