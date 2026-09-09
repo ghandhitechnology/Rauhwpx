@@ -3,6 +3,7 @@
 
 import { MovePictureCommand, MoveShapeCommand, ResizeObjectCommand } from './command';
 import type { HeaderFooterObjectRef, ObjectResizeTarget } from './command';
+import { PictureResizeJournal } from './picture-resize-journal';
 import { computeArrowResize, MIN_SIZE_HWP, type ArrowKey } from './picture-resize';
 import { computeRotationRecord } from './object-drag-record';
 import { isMasterPageDecoration } from './picture-hit-policy';
@@ -671,13 +672,19 @@ export function resizeSelectedPicture(this: any, key: ArrowKey): void {
     if (pending.length === 0) return;
     // 2단계: 적용 후 Undo 기록 (드래그 리사이즈와 동일 순서; 원본 ref 로 적용해
     // headerFooter 등 dispatch 필드를 보존한다)
-    for (const { r, target } of pending) {
-      setObjectProperties.call(this, r, target.after);
+    const journal = PictureResizeJournal.capture(this.wasm, pending.map((p) => p.r));
+    try {
+      for (const { r, target } of pending) {
+        setObjectProperties.call(this, r, target.after);
+      }
+      this.executeOperation({
+        kind: 'record',
+        command: journal.command(pending.map((p) => p.target)),
+      });
+    } catch (error) {
+      journal.cancel(this.wasm);
+      throw error;
     }
-    this.executeOperation({
-      kind: 'record',
-      command: new ResizeObjectCommand(pending.map((p) => p.target)),
-    });
     this.eventBus.emit('document-changed');
     this.renderPictureObjectSelection();
   } catch (err) {
@@ -857,6 +864,18 @@ export function finishPictureResizeDrag(this: any, e: MouseEvent): void {
   const zoom = this.viewportManager.getZoom();
   const PX2HWP = PX_TO_HWP;
 
+  // [#6806] 드래그 중에는 점선 프리뷰만 그리므로 첫 뮤테이션 직전인 여기가 원본 변환의
+  // 보관 시점이다. 기록되지 않은 채 남은 저널은 cleanupPictureResizeDrag 가 되돌린다.
+  try {
+    state.resizeTransformJournal = PictureResizeJournal.capture(
+      this.wasm, state.multiRefs ?? [state.ref],
+    );
+  } catch (error) {
+    console.warn('[InputHandler] 그림 리사이즈 원본 보관 실패:', error);
+    this.cleanupPictureResizeDrag();
+    return;
+  }
+
   // 다중 선택 리사이즈를 최종 좌표에 한 번 적용한다.
   if (state.multiRefs && state.multiRefs.length > 0) {
     const newBbox = this.calcResizedBbox(e, zoom);
@@ -897,7 +916,8 @@ export function finishPictureResizeDrag(this: any, e: MouseEvent): void {
         historyTargets.push({ sec: r.sec, ppi: r.ppi, ci: r.ci, type: r.type, cellPath: r.cellPath, headerFooter: r.headerFooter, before, after: updated });
       }
       if (historyTargets.length > 0) {
-        this.executeOperation({ kind: 'record', command: new ResizeObjectCommand(historyTargets) });
+        this.executeOperation({ kind: 'record', command: state.resizeTransformJournal.command(historyTargets) });
+        state.resizeTransformJournal = null;
       }
       this.eventBus.emit('document-changed');
     } catch (err) {
@@ -951,8 +971,9 @@ export function finishPictureResizeDrag(this: any, e: MouseEvent): void {
       setObjectProperties.call(this, state.ref, updated);
       this.executeOperation({
         kind: 'record',
-        command: new ResizeObjectCommand([{ sec: state.ref.sec, ppi: state.ref.ppi, ci: state.ref.ci, type: state.ref.type, cellPath: state.ref.cellPath, headerFooter: state.ref.headerFooter, before, after: updated }]),
+        command: state.resizeTransformJournal.command([{ sec: state.ref.sec, ppi: state.ref.ppi, ci: state.ref.ci, type: state.ref.type, cellPath: state.ref.cellPath, headerFooter: state.ref.headerFooter, before, after: updated }]),
       });
+      state.resizeTransformJournal = null;
       this.eventBus.emit('document-changed');
     }
   } catch (err) {
@@ -999,6 +1020,12 @@ export function calcResizedBbox(this: any, e: MouseEvent, zoom: number): { x: nu
 }
 
 export function cleanupPictureResizeDrag(this: any): void {
+  const journal = this.pictureResizeState?.resizeTransformJournal;
+  if (journal) {
+    this.pictureResizeState.resizeTransformJournal = null;
+    try { journal.cancel(this.wasm); }
+    catch (error) { console.warn('[InputHandler] 그림 리사이즈 취소 복원 실패:', error); }
+  }
   this.isPictureResizeDragging = false;
   this.pictureResizeState = null;
   this.container.style.cursor = '';

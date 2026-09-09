@@ -1104,6 +1104,87 @@ fn para_has_non_whitespace_text(para: &Paragraph) -> bool {
         .any(|c| c > '\u{001F}' && c != '\u{FFFC}' && !c.is_whitespace())
 }
 
+/// [#5584] 자리차지 표 호스트 문단의 **저장 줄 전부가 표 위**인가.
+///
+/// 한글은 호스트 텍스트를 표의 세로 오프셋보다 앞선 저장 vpos 에 그대로 둔다
+/// (00072 별표 제목: 저장 줄 3420 < 표 vertOffset 4129 → 1쪽 표 위).
+fn stored_host_lines_precede_float(
+    para: &Paragraph,
+    table: &crate::model::table::Table,
+    control_index: usize,
+) -> bool {
+    let v_off = signed_hwpunit(table.common.vertical_offset);
+    if v_off <= 0 {
+        return false;
+    }
+    let stored: Vec<&crate::model::paragraph::LineSeg> = para
+        .line_segs
+        .iter()
+        .filter(|ls| ls.tag & crate::model::paragraph::LineSeg::TAG_IMPLEMENTATION_PROPERTY == 0)
+        .collect();
+    let Some(base) = stored.first().map(|ls| ls.vertical_pos) else {
+        return false;
+    };
+    // [#6860] `v_off` 의 기준은 문단 첫 줄이 아니라 **앵커 줄**(표 제어 문자가 실린
+    // 저장 줄)이다.
+    let anchor_top = stored_float_anchor_line_top(para, control_index, &stored).unwrap_or(base);
+    let float_top = (anchor_top as i64 - base as i64) + v_off as i64;
+    // 줄이 표 상단 **위에서 끝나야** 한다 — 표 상단이 줄 밴드 안이면 그
+    // 줄은 표의 앵커 줄이지 선행 줄이 아니다 (pr-1674 #1686).
+    stored
+        .iter()
+        .all(|ls| (ls.vertical_pos as i64 - base as i64) + i64::from(ls.line_height) <= float_top)
+}
+
+/// [#6860] 자리차지 개체의 **앵커 줄** 상단 — 그 개체의 제어 문자가 실린 저장 줄이다.
+///
+/// 한글은 `vertOffset` 을 문단 첫 줄이 아니라 앵커 줄 기준으로 잰다.
+fn stored_float_anchor_line_top(
+    para: &Paragraph,
+    control_index: usize,
+    stored: &[&crate::model::paragraph::LineSeg],
+) -> Option<i32> {
+    let char_pos = para.control_text_positions().get(control_index).copied()?;
+    // 줄의 `text_start` 와 같은 축(HWP5 UTF-16)으로 올려서 견준다. 제어 문자가 텍스트
+    // 끝에 있으면 `char_offsets` 범위를 벗어나므로 마지막 글자 바로 뒤로 잡는다.
+    let anchor_u16 = para
+        .char_offsets
+        .get(char_pos)
+        .copied()
+        .or_else(|| para.utf16_pos_after_last_char())?;
+    stored
+        .iter()
+        .rev()
+        .find(|ls| ls.text_start <= anchor_u16)
+        .map(|ls| ls.vertical_pos)
+}
+
+/// [#6860] 앵커 줄이 문단 첫 줄보다 아래일 때 그 **간격**(px).
+///
+/// `vertOffset` 의 기준점이 앵커 줄이므로 개체의 세로 원점도 그만큼 내려가야 한다.
+pub(crate) fn stored_float_anchor_offset_px(
+    para: &Paragraph,
+    table: &crate::model::table::Table,
+    control_index: usize,
+    dpi: f64,
+) -> f64 {
+    if !stored_host_lines_precede_float(para, table, control_index) {
+        return 0.0;
+    }
+    let stored: Vec<&crate::model::paragraph::LineSeg> = para
+        .line_segs
+        .iter()
+        .filter(|ls| ls.tag & crate::model::paragraph::LineSeg::TAG_IMPLEMENTATION_PROPERTY == 0)
+        .collect();
+    let Some(base) = stored.first().map(|ls| ls.vertical_pos) else {
+        return 0.0;
+    };
+    let Some(anchor_top) = stored_float_anchor_line_top(para, control_index, &stored) else {
+        return 0.0;
+    };
+    hwpunit_to_px((anchor_top - base).max(0), dpi)
+}
+
 fn repeats_native_empty_host_rowbreak_fragment_margin(
     native_hwp5_layout: bool,
     paragraphs: &[Paragraph],
@@ -8296,7 +8377,8 @@ impl LayoutEngine {
                                 t.page_break,
                                 crate::model::table::TablePageBreak::RowBreak
                             )
-                            && para_has_non_whitespace_text(para) =>
+                            && para_has_non_whitespace_text(para)
+                            && !stored_host_lines_precede_float(para, t, control_index) =>
                     {
                         Some(t.row_count as usize)
                     }
@@ -8341,7 +8423,16 @@ impl LayoutEngine {
                                     })
                                     .map(|i| i + 1)
                                     .unwrap_or(comp.lines.len());
-                                para_start_y.insert(para_index, y_offset);
+                                let anchor_offset = match para.controls.get(control_index) {
+                                    Some(Control::Table(t)) => stored_float_anchor_offset_px(
+                                        para,
+                                        t,
+                                        control_index,
+                                        self.dpi,
+                                    ),
+                                    _ => 0.0,
+                                };
+                                para_start_y.insert(para_index, y_offset + anchor_offset);
                                 let _text_y_end = self.layout_partial_paragraph(
                                     tree,
                                     col_node,

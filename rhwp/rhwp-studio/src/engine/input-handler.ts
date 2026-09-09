@@ -3,6 +3,7 @@ import { isCharFormatError, CharFormatRecoveryError } from '@/core/char-format-e
 import { EventBus } from '@/core/event-bus';
 import { CursorState } from './cursor';
 import { CaretRenderer } from './caret-renderer';
+import { resolveGlyphStartRect, isCompositionBoxRepresentable } from './line-start-affinity';
 import { FieldMarkerRenderer } from './field-marker-renderer';
 import { SelectionRenderer } from './selection-renderer';
 import { CommandHistory } from './history';
@@ -40,6 +41,7 @@ import * as _keyboard from './input-handler-keyboard';
 import { getBodySelectionSegments } from './body-selection-range';
 import * as _text from './input-handler-text';
 import * as _picture from './input-handler-picture';
+import type { PictureResizeJournal } from './picture-resize-journal';
 import * as _connector from './input-handler-connector';
 import { computeHangingIndentPx } from './hanging-indent';
 import { isPageLocalTextEditCommand, type PageLocalTextEditOptions } from './input-edit-invalidation';
@@ -424,6 +426,8 @@ export class InputHandler {
     rotationAngle: number;
     /** 다중 선택 리사이즈 시 각 개체의 원래 크기/위치 */
     multiRefs?: { sec: number; ppi: number; ci: number; type: string; origWidth: number; origHeight: number; origHorzOffset: number; origVertOffset: number; bboxX: number; bboxY: number }[];
+    /** [#6806] 뮤테이션 직전에 보관한 그림 원본 변환 — 기록되면 null, 남아 있으면 cleanup 이 되돌린다. */
+    resizeTransformJournal?: PictureResizeJournal | null;
   } | null = null;
 
   // 그림/글상자 이동 드래그 상태
@@ -3714,8 +3718,15 @@ export class InputHandler {
         this.caret.update(caretRect, zoom);
         if (this.isComposing && this.compositionAnchor && this.compositionLength > 0) {
           const startRect = this.compositionStartRect();
-          if (startRect) this.caret.showCompositionUnderline(startRect, caretRect, zoom);
-          else this.caret.hideComposition();
+          if (startRect && isCompositionBoxRepresentable(startRect, caretRect)) {
+            this.caret.showCompositionUnderline(startRect, caretRect, zoom);
+          } else {
+            // [Issue #6738] 줄 affinity 를 물을 수 없는 문맥(머리말/꼬리말·각주·2단계 이상 중첩 셀)
+            // 에서는 조합 글자가 줄이나 쪽을 넘어가도 시작 좌표를 바로잡을 수 없다. 틀린 자리에
+            // 밑줄을 긋는 대신 조회 실패와 같은 경로로 일반 캐럿만 보여준다.
+            this.caret.hideComposition();
+            this.caret.update(caretRect, zoom);
+          }
         } else {
           this.caret.hideComposition();
         }
@@ -3778,6 +3789,7 @@ export class InputHandler {
         );
       }
       if (!startRect) return null;
+      startRect = this.compositionOverlayStartRect(anchor, startRect);
       this.compositionAnchorRect = {
         ...startRect,
         cellBounds: startRect.cellBounds ? { ...startRect.cellBounds } : undefined,
@@ -3786,6 +3798,49 @@ export class InputHandler {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * IME 조합 밑줄의 원점 rect 를 돌려준다.
+   *
+   * [Issue #6553] 조합 중인 글자가 soft-wrap 으로 다음 줄로 넘어가면 `anchor.charOffset` 이
+   * 줄 경계 offset 이 되고, 줄 affinity 인자가 없는 exact 조회는 이전 줄 끝을 돌려준다.
+   * 밑줄은 글자가 실제로 그려지는 줄에 놓여야 하므로 시각 줄을 명시해 다시 조회한다.
+   * 머리말/꼬리말·각주와 2단 이상 중첩 셀은 `getCursorRectOnLine` 이 대상 문단을 지목할 수
+   * 없어 제외한다(exact 유지).
+   */
+  private compositionOverlayStartRect(anchor: DocumentPosition, exact: CursorRect): CursorRect {
+    if (this.cursor.isInHeaderFooter() || this.cursor.isInFootnote()) return exact;
+    if ((anchor.cellPath?.length ?? 0) > 1) return exact;
+    const inCell = anchor.parentParaIndex !== undefined;
+    // 두 질의 모두 실패를 null 로 알린다 — 여기서 예외가 새면 compositionStartRect 의 바깥
+    // catch 가 조합 밑줄을 통째로 접어버려, exact 로 물러나는 것보다 나쁜 결과가 된다.
+    return resolveGlyphStartRect(anchor.charOffset, exact, {
+      lineInfoAt: (charOffset) => {
+        try {
+          return inCell
+            ? this.wasm.getLineInfoInCell(
+                anchor.sectionIndex, anchor.parentParaIndex!, anchor.controlIndex!,
+                anchor.cellIndex!, anchor.cellParaIndex!, charOffset,
+              )
+            : this.wasm.getLineInfo(anchor.sectionIndex, anchor.paragraphIndex, charOffset);
+        } catch {
+          return null;
+        }
+      },
+      rectAtLineStart: (lineIndex) => {
+        try {
+          return this.wasm.getCursorRectOnLine(
+            anchor.sectionIndex, anchor.paragraphIndex, lineIndex, false,
+            anchor.parentParaIndex ?? 0xFFFFFFFF, anchor.controlIndex ?? 0xFFFFFFFF,
+            anchor.cellIndex ?? 0xFFFFFFFF, anchor.cellParaIndex ?? 0xFFFFFFFF,
+          );
+        } catch {
+          // getCursorRectOnLine 을 내보내지 않는 wasm 빌드 — 기존 exact 동작을 유지한다.
+          return null;
+        }
+      },
+    });
   }
 
   /** 네이티브 IME 후보창이 실제 캐럿 근처에 열리도록 숨은 입력을 배치한다. */

@@ -3,6 +3,7 @@ use super::super::pagination::{ColumnContent, PageContent, PageItem};
 use super::text_measurement::estimate_text_width;
 use super::utils::{expand_numbering_format, numbering_format_to_number_format};
 use super::*;
+use crate::model::control::Control;
 use crate::model::page::{ColumnDef, PageDef};
 use crate::model::paragraph::{CharShapeRef, LineSeg, Paragraph};
 use crate::model::shape::{
@@ -3148,6 +3149,64 @@ fn page_bg_image_only_on_section_first_page() {
     let (color_rest, image_rest) = page_bg_color_and_image_present(false);
     assert!(!image_rest, "구역 첫 쪽이 아니면 배경 이미지가 없어야 한다");
     assert!(color_rest, "이미지가 억제돼도 색 채우기는 유지되어야 한다");
+}
+
+#[test]
+fn end_anchored_table_after_supplementary_char_picks_the_control_line() {
+    let para = Paragraph {
+        text: "A\u{1F600}".into(),
+        char_offsets: vec![0, 1],
+        controls: vec![Control::Table(Box::new(Table::default()))],
+        line_segs: vec![
+            LineSeg {
+                text_start: 0,
+                vertical_pos: 1000,
+                line_height: 500,
+                ..Default::default()
+            },
+            LineSeg {
+                text_start: 3,
+                vertical_pos: 2000,
+                line_height: 500,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let stored: Vec<&LineSeg> = para.line_segs.iter().collect();
+    let top = super::stored_float_anchor_line_top(&para, 0, &stored);
+    assert_eq!(
+        top,
+        Some(2000),
+        "보조 평면 마지막 글자 뒤 끝 앵커는 잘린 last+1(2) 이 아니라 UTF-16 끝(3) 줄을 집어야 한다"
+    );
+}
+
+#[test]
+fn end_anchored_table_after_bmp_char_still_picks_the_control_line() {
+    let para = Paragraph {
+        text: "AB".into(),
+        char_offsets: vec![0, 1],
+        controls: vec![Control::Table(Box::new(Table::default()))],
+        line_segs: vec![
+            LineSeg {
+                text_start: 0,
+                vertical_pos: 1000,
+                line_height: 500,
+                ..Default::default()
+            },
+            LineSeg {
+                text_start: 2,
+                vertical_pos: 2000,
+                line_height: 500,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let stored: Vec<&LineSeg> = para.line_segs.iter().collect();
+    let top = super::stored_float_anchor_line_top(&para, 0, &stored);
+    assert_eq!(top, Some(2000));
 }
 
 /// [Task #2835] TAC picture/shape 배치 경로의 좌측 margin 이 paragraph_layout.rs

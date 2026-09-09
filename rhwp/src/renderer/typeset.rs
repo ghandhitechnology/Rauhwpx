@@ -26,7 +26,9 @@ use crate::renderer::float_placement::{
 };
 use crate::renderer::height_cursor::HeightCursor;
 use crate::renderer::height_measurer::{fit_measured_table_to_declared_height, MeasuredTable};
-use crate::renderer::layout::{border_width_to_px, ENDNOTE_COLUMN_BOTTOM_BLEED_TOLERANCE_PX};
+use crate::renderer::layout::{
+    border_width_to_px, stored_float_anchor_offset_px, ENDNOTE_COLUMN_BOTTOM_BLEED_TOLERANCE_PX,
+};
 use crate::renderer::page_layout::PageLayoutInfo;
 use crate::renderer::style_resolver::ResolvedStyleSet;
 use crate::renderer::{
@@ -17739,7 +17741,10 @@ impl TypesetEngine {
                     // HwpUnit=u32 이므로 음수 (u32 wrap) 는 i32 로 캐스트 후 확인.
                     let v_off_i32 = table.common.vertical_offset as i32;
                     if is_para_topbottom && v_off_i32 > 0 {
-                        let raw = hwpunit_to_px(v_off_i32, self.dpi);
+                        // [#6860] layout 이 개체 원점을 앵커 줄만큼 내리므로 분할 예산도
+                        // 같이 내린다. 안 빼면 첫 조각이 본문을 10.3px 넘는다.
+                        let raw = hwpunit_to_px(v_off_i32, self.dpi)
+                            + stored_float_anchor_offset_px(para, table, ctrl_idx, self.dpi);
                         // [#2015] host 텍스트가 pre-emit(pre_emit_visible_rowbreak_host_text)
                         // 되어 current_height 를 para_start → para_start+host_h 로 전진시킨 경우,
                         // vert_off(para_start 기준 표 오프셋)를 그대로 빼면 host_h 만큼 이중계상되어

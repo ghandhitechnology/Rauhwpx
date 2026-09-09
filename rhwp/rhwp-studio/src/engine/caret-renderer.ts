@@ -1,5 +1,6 @@
 import type { CursorRect } from '@/core/types';
 import { VirtualScroll } from '@/view/virtual-scroll';
+import { isCompositionBoxRepresentable } from './line-start-affinity';
 
 /** 활자를 이어 치는 동안 깜박임을 멈춰 두는 시간(ms). */
 const TYPING_IDLE_MS = 500;
@@ -97,15 +98,16 @@ export class CaretRenderer {
   /**
    * 같은 줄의 조합 범위에만 1.5px 밑줄을 그린다. 줄바꿈이 일어나면 숨긴다 —
    * 글리프는 이미 엔진 캔버스에 있다.
+   *
+   * 같은 줄 판정에 y 를 쓰지 않는다 — 글꼴 크기가 섞이면 같은 줄에서도 캐럿 y 가 run 마다
+   * 달라 밑줄이 사라졌다. 판정은 `isCompositionBoxRepresentable` 한 곳이 소유한다.
    */
   showCompositionUnderline(startRect: CursorRect, endRect: CursorRect, zoom: number): void {
     this.ensureAttached();
     this.isCompMode = true;
 
-    const sameLine = startRect.pageIndex === endRect.pageIndex
-      && Math.abs(startRect.y - endRect.y) < Math.max(startRect.height, endRect.height, 1) * 0.5;
     const rawWidth = endRect.x - startRect.x;
-    if (!sameLine || !(rawWidth > 0)) {
+    if (!isCompositionBoxRepresentable(startRect, endRect) || !(rawWidth > 0)) {
       this.underlineEl.style.display = 'none';
       return;
     }

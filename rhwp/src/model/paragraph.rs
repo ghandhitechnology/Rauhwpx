@@ -495,12 +495,22 @@ impl Paragraph {
     }
 
     /// 문자의 UTF-16 코드 유닛 수를 반환한다.
-    fn char_utf16_len(c: char) -> u32 {
+    pub(crate) fn char_utf16_len(c: char) -> u32 {
         if (c as u32) > 0xFFFF {
             2
         } else {
             1
         }
+    }
+
+    /// 마지막 본문 글자 바로 뒤의 UTF-16 코드 유닛 인덱스.
+    ///
+    /// 보조 평면 글자는 2 유닛이다. 끝 앵커 컨트롤을 `last + 1` 로 자르면
+    /// `LineSeg::text_start` 비교가 앞 줄을 집을 수 있다.
+    pub(crate) fn utf16_pos_after_last_char(&self) -> Option<u32> {
+        let last = *self.char_offsets.last()?;
+        let last_ch = self.text.chars().last()?;
+        Some(last + Self::char_utf16_len(last_ch))
     }
 
     /// char_offset 위치에 텍스트를 삽입한다.
@@ -1458,7 +1468,11 @@ impl Paragraph {
     }
 
     /// `char_shape_runs_in_range` 를 WASM/JSON 계약용 구간 목록으로 감싼다.
-    pub fn char_shape_runs(&self, start_char_offset: usize, end_char_offset: usize) -> Vec<CharShapeRun> {
+    pub fn char_shape_runs(
+        &self,
+        start_char_offset: usize,
+        end_char_offset: usize,
+    ) -> Vec<CharShapeRun> {
         self.char_shape_runs_in_range(start_char_offset, end_char_offset)
             .into_iter()
             .map(|(start_offset, end_offset, char_shape_id)| CharShapeRun {
