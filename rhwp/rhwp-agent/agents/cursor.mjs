@@ -38,6 +38,7 @@ import {
   terminateProcessTree,
   waitForProcessTreeExit,
 } from '../process-tree.mjs';
+import { applyManagedCliLaunch } from '../npm-cli-launch.mjs';
 import { acpMcpServer, createPersistentAcpSession } from './acp-session.mjs';
 import {
   CURSOR_ASK_QUESTION_METHOD,
@@ -463,6 +464,7 @@ export function createCursorSession(opts, {
   waitForExit = waitForProcessTreeExit,
   createAcpSession = createPersistentAcpSession,
   platform = process.platform,
+  nodeCommand = process.execPath,
   closeGraceMs = 2_000,
 } = {}) {
   const onEvent = opts.onEvent;
@@ -1050,7 +1052,7 @@ export function createCursorSession(opts, {
         nativeSessionInfoEmitted = false;
       },
       onSessionUpdate: handleNativeUpdate,
-    }, { spawnProcess, terminateProcess });
+    }, { spawnProcess, terminateProcess, platform, nodeCommand });
   }
 
   function prepareNativeHome() {
@@ -1123,10 +1125,15 @@ export function createCursorSession(opts, {
       prepareNativeHome();
       const childEnv = isolatedProcessEnv(opts, opts.providerEnv ?? process.env);
       delete childEnv.CURSOR_CONFIG_DIR;
-      proc = spawnProcess(opts.cursorBin ?? 'cursor-agent', buildCursorArgv(opts, chatId, prompt), {
+      const launched = applyManagedCliLaunch(
+        opts.cursorBin ?? 'cursor-agent',
+        buildCursorArgv(opts, chatId, prompt),
+        { platform, nodeCommand, env: childEnv },
+      );
+      proc = spawnProcess(launched.command, launched.argv, {
         ...processTreeSpawnOptions(),
         cwd: opts.rootDir,
-        env: childEnv,
+        env: launched.env,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch (e) {
