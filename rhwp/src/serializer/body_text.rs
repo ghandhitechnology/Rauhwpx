@@ -2003,6 +2003,7 @@ mod tests {
         let section = Section {
             paragraphs: vec![para],
             raw_stream: None,
+            raw_provenance: None,
             ..Default::default()
         };
 
@@ -2035,6 +2036,7 @@ mod tests {
         let section = Section {
             paragraphs: vec![para],
             raw_stream: None,
+            raw_provenance: None,
             ..Default::default()
         };
 
@@ -2065,6 +2067,7 @@ mod tests {
         let section = Section {
             paragraphs: vec![para],
             raw_stream: None,
+            raw_provenance: None,
             ..Default::default()
         };
 
@@ -2096,6 +2099,7 @@ mod tests {
         let section = Section {
             paragraphs: vec![para],
             raw_stream: None,
+            raw_provenance: None,
             ..Default::default()
         };
 
@@ -2116,6 +2120,7 @@ mod tests {
         let section = Section {
             paragraphs: vec![para],
             raw_stream: None,
+            raw_provenance: None,
             ..Default::default()
         };
 
@@ -2166,6 +2171,7 @@ mod tests {
         let section = Section {
             paragraphs: vec![para1, para2],
             raw_stream: None,
+            raw_provenance: None,
             ..Default::default()
         };
 
@@ -2205,6 +2211,7 @@ mod tests {
         let section = Section {
             paragraphs: vec![para],
             raw_stream: None,
+            raw_provenance: None,
             ..Default::default()
         };
 
@@ -2246,6 +2253,7 @@ mod tests {
         let section = Section {
             paragraphs: vec![para],
             raw_stream: None,
+            raw_provenance: None,
             ..Default::default()
         };
 
@@ -2286,6 +2294,7 @@ mod tests {
         let section = Section {
             paragraphs: vec![para],
             raw_stream: None,
+            raw_provenance: None,
             ..Default::default()
         };
 
@@ -2573,6 +2582,7 @@ mod tests {
         let section = Section {
             paragraphs: vec![para],
             raw_stream: None,
+            raw_provenance: None,
             ..Default::default()
         };
 
@@ -2624,6 +2634,7 @@ mod tests {
         let section = Section {
             paragraphs: vec![para],
             raw_stream: None,
+            raw_provenance: None,
             ..Default::default()
         };
 
@@ -2657,6 +2668,7 @@ mod tests {
         let section = Section {
             paragraphs: vec![para],
             raw_stream: None,
+            raw_provenance: None,
             ..Default::default()
         };
 

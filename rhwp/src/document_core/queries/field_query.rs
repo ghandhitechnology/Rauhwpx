@@ -1642,6 +1642,7 @@ mod tests {
         core.document.sections.push(Section {
             paragraphs: vec![para_with_click_here_field()],
             raw_stream: Some(vec![0xAB; 64]),
+            raw_provenance: None,
             ..Default::default()
         });
         core.composed = vec![Vec::new()];
@@ -1682,6 +1683,7 @@ mod tests {
         core.document.sections.push(Section {
             paragraphs: vec![parent_para],
             raw_stream: Some(vec![0xAB; 64]),
+            raw_provenance: None,
             ..Default::default()
         });
         core.composed = vec![Vec::new()];
@@ -1895,6 +1897,7 @@ mod tests {
                 ..Default::default()
             }],
             raw_stream: Some(vec![0xAB; 64]),
+            raw_provenance: None,
             ..Default::default()
         });
         core.composed = vec![Vec::new()];

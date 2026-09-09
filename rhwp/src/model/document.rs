@@ -213,6 +213,9 @@ pub struct Section {
     /// 원본 BodyText 레코드 스트림 바이트 (직렬화 시 원본 복원용)
     /// 편집 시 None으로 초기화하여 재직렬화 유도
     pub raw_stream: Option<Vec<u8>>,
+    /// 로드 시 raw_stream 과 함께 세운 봉인. 편집은 raw_stream 만 지운다.
+    /// 이 포크는 업스트림 다이제스트 봉인(#4488)이 없어 존재 여부만 편집 세션 신호로 쓴다.
+    pub raw_provenance: Option<()>,
 }
 
 /// 구역 정의 (HWPTAG_CTRL_HEADER - 'secd')
@@ -304,6 +307,19 @@ impl Document {
             self.provenance.format == SourceFormat::Hwp5
                 && !self.provenance.hwp3_lineage
                 && !self.provenance.hwpx_lineage,
+        )
+        // native HWP5 는 로드 시 raw_stream 을 보유한 섹션을 raw_provenance 로
+        // 봉인한다. 편집 명령은 raw_stream 만 None 으로 지우고 봉인은 남기므로,
+        // "봉인은 있는데 raw_stream 이 사라짐" = 이 세션의 문서 변조 신호다.
+        // 합성·신규 문서(Document::default 직접 구성)는 봉인 자체가 없어 편집이
+        // 아니어도 raw_stream 이 없으므로, raw_stream 부재만으로 판정하면
+        // 오탐이다. 봉인 존재를 함께 요구해 실제 로드된 문서의 편집만 잡는다.
+        .with_session_edited(
+            self.provenance.format == SourceFormat::Hwp5
+                && self
+                    .sections
+                    .iter()
+                    .any(|s| s.raw_provenance.is_some() && s.raw_stream.is_none()),
         )
     }
 
