@@ -333,6 +333,18 @@ const EXEMPT: &[(&str, &str, Exempt, &str)] = &[
     ),
     // ── 위임 ───────────────────────────────────────────────────────────────
     (
+        "commands/object_ops/table.rs",
+        "delete_cell_picture_control_by_path_native",
+        Exempt::DelegatesTo("delete_cell_control_by_path_native"),
+        "그림 종류를 지정하는 래퍼. 공통 helper가 삭제와 구역 raw_stream 무효화를 수행한다.",
+    ),
+    (
+        "commands/object_ops/table.rs",
+        "delete_cell_table_control_by_path_native",
+        Exempt::DelegatesTo("delete_cell_control_by_path_native"),
+        "표 종류를 지정하는 래퍼. 공통 helper가 삭제와 구역 raw_stream 무효화를 수행한다.",
+    ),
+    (
         "commands/document.rs",
         "serialize_hwp_with_verify",
         Exempt::SessionState,

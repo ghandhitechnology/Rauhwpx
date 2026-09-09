@@ -66,6 +66,13 @@ pub enum DocumentEvent {
     },
 
     // ── 표 구조 ──
+    /// 셀 또는 글상자의 경로로 지정한 내부 표를 삭제했다.
+    CellTableDeleted {
+        section: usize,
+        para: usize,
+        cell_path: Vec<(usize, usize, usize)>,
+        ctrl: usize,
+    },
     TableRowInserted {
         section: usize,
         para: usize,
@@ -157,6 +164,7 @@ impl DocumentEvent {
             | DocumentEvent::ParagraphInserted { section, .. }
             | DocumentEvent::CharFormatChanged { section, .. }
             | DocumentEvent::ParaFormatChanged { section, .. }
+            | DocumentEvent::CellTableDeleted { section, .. }
             | DocumentEvent::TableRowInserted { section, .. }
             | DocumentEvent::TableRowDeleted { section, .. }
             | DocumentEvent::TableColumnInserted { section, .. }
@@ -186,6 +194,7 @@ impl DocumentEvent {
             | DocumentEvent::ParagraphInserted { para, .. }
             | DocumentEvent::CharFormatChanged { para, .. }
             | DocumentEvent::ParaFormatChanged { para, .. }
+            | DocumentEvent::CellTableDeleted { para, .. }
             | DocumentEvent::TableRowInserted { para, .. }
             | DocumentEvent::TableRowDeleted { para, .. }
             | DocumentEvent::TableColumnInserted { para, .. }
@@ -298,6 +307,25 @@ impl DocumentEvent {
             ),
 
             // 표 구조
+            DocumentEvent::CellTableDeleted {
+                section,
+                para,
+                cell_path,
+                ctrl,
+            } => serde_json::json!({
+                "type": "CellTableDeleted",
+                "section": section,
+                "para": para,
+                "cellPath": cell_path.iter().map(|&(control, cell, paragraph)| {
+                    serde_json::json!({
+                        "controlIndex": control,
+                        "cellIndex": cell,
+                        "cellParaIndex": paragraph,
+                    })
+                }).collect::<Vec<_>>(),
+                "innerControlIndex": ctrl,
+            })
+            .to_string(),
             DocumentEvent::TableRowInserted {
                 section,
                 para,
