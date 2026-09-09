@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { promises as realFs } from 'node:fs';
 import { access, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -215,6 +216,35 @@ test('win32 replacement recovery does not publish over a restored directory back
   await writeFile(temp, 'new');
 
   await assert.rejects(replaceFile(temp, target, 'win32'), { code: 'EISDIR' });
+  assert.equal(await readFile(path.join(target, 'inside.txt'), 'utf8'), 'keep');
+  await assert.rejects(access(previous), { code: 'ENOENT' });
+  assert.equal(await readFile(temp, 'utf8'), 'new');
+});
+
+test('win32 replacement restores a directory that appears between lstat and rename', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'rauhwpx-replace-dir-race-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, 'handoffs.json');
+  const temp = path.join(directory, 'handoffs.tmp');
+  const previous = replaceTest.backupPath(target);
+  await mkdir(target);
+  await writeFile(path.join(target, 'inside.txt'), 'keep');
+  await writeFile(temp, 'new');
+
+  const fsImpl = {
+    lstat(filePath) {
+      if (filePath === target) return Promise.resolve({ isDirectory: () => false, isFile: () => true });
+      return realFs.lstat(filePath);
+    },
+    stat: (...args) => realFs.stat(...args),
+    rename: (...args) => realFs.rename(...args),
+    rm: (...args) => realFs.rm(...args),
+  };
+
+  await assert.rejects(
+    replaceFile(temp, target, 'win32', { fsImpl, sleep: async () => {} }),
+    { code: 'EISDIR' },
+  );
   assert.equal(await readFile(path.join(target, 'inside.txt'), 'utf8'), 'keep');
   await assert.rejects(access(previous), { code: 'ENOENT' });
   assert.equal(await readFile(temp, 'utf8'), 'new');
