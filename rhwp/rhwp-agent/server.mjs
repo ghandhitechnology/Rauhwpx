@@ -311,7 +311,9 @@ function claudeRuntimeEnv(isolatedHome) {
 // 허브가 관리하는 API 키는 process.env 에 올리지 않는다 — npm lifecycle 스크립트,
 // 설치 스크립트 등 무관한 자식 프로세스까지 상속받는 누수 지점이 된다.
 // 키는 auxSpawnProcess 가 해당 CLI 자식에게만 env 로 얹어 준다.
-process.env.PATH = `${cliSetup.binDir}${path.delimiter}${process.env.PATH ?? ''}`;
+process.env.PATH = [cliSetup.nodeHostDir(), cliSetup.binDir, process.env.PATH]
+  .filter(Boolean)
+  .join(path.delimiter);
 const [initialClaudeSetup, initialCodexSetup, initialGrokSetup, initialCursorSetup, initialOpenCodeSetup] = await Promise.all([
   cliSetup.status('claude'),
   cliSetup.status('codex'),

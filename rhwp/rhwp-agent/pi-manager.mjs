@@ -15,7 +15,7 @@ import {
   updatePrefixAtomically,
 } from './harness-update.mjs';
 import {
-  applyNodeHostEnv,
+  applyManagedCliLaunch,
   createNodeHost,
 } from './npm-cli-launch.mjs';
 import { bundledNpmLaunch } from './npm-runtime.mjs';
@@ -739,16 +739,17 @@ export function createPiManager({
     throwIfInstallCancelled();
     const shimDir = await ensureNodeHost();
     throwIfInstallCancelled();
-    const npmEnv = shimDir
-      ? applyNodeHostEnv(baseEnv, { nodeCommand, shimDir, platform })
-      : baseEnv;
+    const argv = [
+      'install', '--prefix', targetPrefix, '--no-fund', '--no-audit',
+      // 폴백(npm 이 직접 내려받는) 경로에서는 http 로그가 활동 신호가 된다.
+      localTarball ? '--loglevel=error' : '--loglevel=http',
+      localTarball ?? packageSpec,
+    ];
+    const launched = applyManagedCliLaunch(npmLaunch.command, [...npmLaunch.leadingArgs, ...argv], {
+      platform, nodeCommand, env: baseEnv, shimDir,
+    });
+    const npmEnv = launched.env;
     return new Promise((resolve, reject) => {
-      const argv = [
-        'install', '--prefix', targetPrefix, '--no-fund', '--no-audit',
-        // 폴백(npm 이 직접 내려받는) 경로에서는 http 로그가 활동 신호가 된다.
-        localTarball ? '--loglevel=error' : '--loglevel=http',
-        localTarball ?? packageSpec,
-      ];
       let settled = false;
       let stderrText = '';
       let lastActivity = 0;
@@ -768,7 +769,7 @@ export function createPiManager({
 
       let proc;
       try {
-        proc = spawnProcess(npmLaunch.command, [...npmLaunch.leadingArgs, ...argv], {
+        proc = spawnProcess(launched.command, launched.argv, {
           ...processTreeSpawnOptions(platform),
           stdio: ['ignore', 'pipe', 'pipe'], env: npmEnv,
         });

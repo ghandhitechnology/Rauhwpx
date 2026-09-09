@@ -12,6 +12,7 @@ import {
   terminateAndWaitForProcessTreeExitOutcome,
   terminateProcessTree,
 } from '../process-tree.mjs';
+import { applyManagedCliLaunch } from '../npm-cli-launch.mjs';
 
 const PASSTHROUGH = { parse: (value) => value };
 const MAX_PROVIDER_FRAME_BYTES = 8 * 1024 * 1024;
@@ -169,7 +170,7 @@ function combineSignals(first, second) {
  * Long-lived ACP client. It deliberately does not project provider events: adapters retain
  * their established event semantics and receive raw session/update payloads here.
  * @param {PersistentAcpOptions} options
- * @param {{spawnProcess?:Function, terminateProcess?:(child:any)=>unknown}} [dependencies]
+ * @param {{spawnProcess?:Function, terminateProcess?:(child:any)=>unknown, platform?:NodeJS.Platform, nodeCommand?:string}} [dependencies]
  */
 export function createPersistentAcpSession({
   clientName,
@@ -192,6 +193,8 @@ export function createPersistentAcpSession({
 }, {
   spawnProcess = spawn,
   terminateProcess = terminateProcessTree,
+  platform = process.platform,
+  nodeCommand = process.execPath,
 } = {}) {
   /** @type {any} */
   let proc = null;
@@ -424,10 +427,14 @@ export function createPersistentAcpSession({
   async function startOnce() {
     if (disposed) throw new Error(`${clientName} ACP session is disposed`);
     if (proc) throw new Error(`${clientName} ACP process-tree cleanup is still pending`);
-    const child = spawnProcess(command, args, {
+    const spawnEnv = typeof env === 'function' ? env() : env;
+    const launched = applyManagedCliLaunch(command, args, {
+      platform, nodeCommand, env: spawnEnv,
+    });
+    const child = spawnProcess(launched.command, launched.argv, {
       ...processTreeSpawnOptions(),
       cwd,
-      env: typeof env === 'function' ? env() : env,
+      ...(launched.env ? { env: launched.env } : {}),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     proc = child;

@@ -216,3 +216,44 @@ export function applyNpmCliLaunch(command, argv, deps) {
     env: launch.env,
   };
 }
+
+/**
+ * Windows 관리형 CLI 스폰 계약: Node-host PATH 를 붙인 뒤 npm `.cmd` 를 unwrap 한다.
+ *
+ * @param {string} command
+ * @param {readonly string[]} argv
+ * @param {Parameters<typeof resolveNpmCliLaunch>[1] & {
+ *   env?: NodeJS.ProcessEnv,
+ *   shimDir?: string | null,
+ * }} [deps]
+ */
+export function applyManagedCliLaunch(command, argv, deps = {}) {
+  const platform = deps.platform ?? process.platform;
+  const nodeCommand = deps.nodeCommand ?? process.execPath;
+  const env = deps.env;
+  const resolvedEnv = deps.shimDir
+    ? applyNodeHostEnv(env ?? {}, { nodeCommand, shimDir: deps.shimDir, platform })
+    : env;
+  const launched = applyNpmCliLaunch(command, argv, {
+    ...deps,
+    platform,
+    nodeCommand,
+    ...(resolvedEnv !== undefined ? { env: resolvedEnv } : {}),
+  });
+  if (resolvedEnv !== undefined) {
+    return {
+      command: launched.command,
+      argv: launched.argv,
+      env: { ...resolvedEnv, ...launched.env },
+    };
+  }
+  const extra = launched.env;
+  if (!extra || Object.keys(extra).length === 0) {
+    return { command: launched.command, argv: launched.argv, env: undefined };
+  }
+  return {
+    command: launched.command,
+    argv: launched.argv,
+    env: { ...process.env, ...extra },
+  };
+}
