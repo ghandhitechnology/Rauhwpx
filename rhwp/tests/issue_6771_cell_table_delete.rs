@@ -14,7 +14,6 @@ use rhwp::model::paragraph::Paragraph;
 use rhwp::model::shape::{CommonObjAttr, DrawingObjAttr, RectangleShape, ShapeObject, TextBox};
 use rhwp::model::table::{Cell, Table};
 
-/// 셀 안에 표가 든 공개 샘플 — 섹션0 문단 20, 셀 0의 문단 2가 표를 품는다.
 const SAMPLE: &str = "samples/2022년 국립국어원 업무계획.hwp";
 const PARENT_PARA: usize = 20;
 
@@ -23,7 +22,6 @@ fn load() -> DocumentCore {
     DocumentCore::from_bytes(&bytes).expect("parse sample")
 }
 
-/// 셀 안 표가 든 호스트 문단 경로.
 const HOST_PATH: &str = r#"[{"controlIndex":0,"cellIndex":0,"cellParaIndex":2}]"#;
 
 #[test]
@@ -34,17 +32,14 @@ fn deletes_table_inside_cell() {
     assert!(deleted.is_ok(), "셀 안 표 삭제 실패: {:?}", deleted.err());
     assert_eq!(deleted.unwrap(), "{\"ok\":true}");
 
-    // 지운 뒤 같은 자리를 다시 지우려 하면 **없다**고 답해야 한다 — 삭제가 실제로 일어난 증거다.
     let again = doc.delete_cell_table_control_by_path_native(0, PARENT_PARA, HOST_PATH, 0);
     assert!(again.is_err(), "표가 남아 있다: {:?}", again.ok());
 }
 
-/// 종류를 지목해서 지운다 — 그림 자리에 표 삭제를 부르면 거절해야 한다(반대도 같다).
 #[test]
 fn rejects_when_control_is_not_a_table() {
     let mut doc = load();
 
-    // 같은 자리를 그림으로 지목하면 거절한다(그 컨트롤은 표다).
     let wrong = doc.delete_cell_picture_control_by_path_native(0, PARENT_PARA, HOST_PATH, 0);
     assert!(wrong.is_err(), "그림이 아닌데 지워졌다");
     assert!(
@@ -53,7 +48,6 @@ fn rejects_when_control_is_not_a_table() {
     );
 }
 
-/// 범위 밖 컨트롤 번호는 조용히 성공하지 않는다.
 #[test]
 fn rejects_out_of_range_control_index() {
     let mut doc = load();
@@ -125,6 +119,8 @@ fn real_sample_deletion_survives_hwp_and_hwpx_save() {
 }
 
 fn table_with(paragraph: Paragraph) -> Control {
+    // This fork's HWPX writer registers header border fills as 1-based ids and only
+    // pre-registers top-level table ids. A 0 fill inside a textbox is unresolved.
     Control::Table(Box::new(Table {
         common: CommonObjAttr {
             width: 12_000,
@@ -134,11 +130,13 @@ fn table_with(paragraph: Paragraph) -> Control {
         },
         row_count: 1,
         col_count: 1,
+        border_fill_id: 1,
         cells: vec![Cell {
             row_span: 1,
             col_span: 1,
             width: 12_000,
             height: 4_000,
+            border_fill_id: 1,
             paragraphs: vec![paragraph],
             ..Default::default()
         }],
