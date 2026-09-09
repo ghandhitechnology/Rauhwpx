@@ -14,6 +14,10 @@ import {
   replaceFileAtomically,
   updatePrefixAtomically,
 } from './harness-update.mjs';
+import {
+  applyNodeHostEnv,
+  createNodeHost,
+} from './npm-cli-launch.mjs';
 import { bundledNpmLaunch } from './npm-runtime.mjs';
 import { API_KEY_MAX_BYTES, textFitsByteLimit } from './input-bounds.mjs';
 import { cancelResponseBody, readResponseJsonBounded } from './response-bounds.mjs';
@@ -316,6 +320,7 @@ export function createPiManager({
   );
   const client = openRouter ?? createOpenRouter({ fetchImpl, now, cacheDir: rootDir });
   const npmLaunch = bundledNpmLaunch({ nodeCommand, npmCommand });
+  const ensureNodeHost = createNodeHost({ rootDir, nodeCommand, platform });
 
   let config = {
     version: CONFIG_VERSION,
@@ -720,7 +725,11 @@ export function createPiManager({
     return filePath;
   }
 
-  function runNpmInstall(emit, localTarball = null, targetPrefix = prefixDir) {
+  async function runNpmInstall(emit, localTarball = null, targetPrefix = prefixDir) {
+    const shimDir = await ensureNodeHost();
+    const npmEnv = shimDir
+      ? applyNodeHostEnv(baseEnv, { nodeCommand, shimDir, platform })
+      : baseEnv;
     return new Promise((resolve, reject) => {
       const argv = [
         'install', '--prefix', targetPrefix, '--no-fund', '--no-audit',
@@ -749,7 +758,7 @@ export function createPiManager({
       try {
         proc = spawnProcess(npmLaunch.command, [...npmLaunch.leadingArgs, ...argv], {
           ...processTreeSpawnOptions(platform),
-          stdio: ['ignore', 'pipe', 'pipe'], env: baseEnv,
+          stdio: ['ignore', 'pipe', 'pipe'], env: npmEnv,
         });
       } catch (error) {
         done(piError('PI_INSTALL_FAILED', setupFailureMessage(error, '', 'npm 실행에 실패했어요.')));
@@ -762,7 +771,7 @@ export function createPiManager({
         if (current) return current;
         const cleanup = terminateAndWaitForProcessTreeExit(proc, {
           terminateProcess: terminateProcessTree,
-          terminateOptions: { platform, spawnProcess, env: baseEnv },
+          terminateOptions: { platform, spawnProcess, env: npmEnv },
         }).catch(() => false);
         installCleanupPromises.set(proc, cleanup);
         return cleanup;

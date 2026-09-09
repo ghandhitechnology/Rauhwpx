@@ -1,4 +1,4 @@
-import { existsSync as fsExistsSync, readFileSync as fsReadFileSync } from 'node:fs';
+import { existsSync as fsExistsSync, readFileSync as fsReadFileSync, promises as fsPromises } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 
@@ -34,8 +34,60 @@ export function windowsCmdExeCommandLineLength(command, argv, options) {
   return windowsCmdExeCommandLine(command, argv, options).length;
 }
 
-function isNodeBinary(command) {
+export function isNodeBinary(command) {
   return NODE_BIN.test(path.basename(String(command ?? '')));
+}
+
+export function nodeHostNeedsShim(platform, nodeCommand) {
+  return platform === 'win32' || !isNodeBinary(nodeCommand);
+}
+
+export function nodeHostShimFileName(platform) {
+  return platform === 'win32' ? 'node.cmd' : 'node';
+}
+
+/**
+ * Packaged Windows has no `node` on PATH. Claude postinstall is `node install.cjs`
+ * and npm `.cmd` shims look up `node`. Point a shim at the host Electron/Node.
+ */
+export async function writeNodeHostShim(dir, nodeCommand, {
+  platform = 'win32',
+  mkdir = fsPromises.mkdir,
+  writeFile = fsPromises.writeFile,
+} = {}) {
+  await mkdir(dir, { recursive: true });
+  const file = path.join(dir, nodeHostShimFileName(platform));
+  const exe = String(nodeCommand ?? '').replace(/"/g, '');
+  if (platform === 'win32') {
+    await writeFile(file, `@echo off\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${exe}" %*\r\n`);
+  } else {
+    await writeFile(file, `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec "${exe}" "$@"\n`, { mode: 0o755 });
+  }
+  return file;
+}
+
+export function createNodeHost({ rootDir, nodeCommand, platform }) {
+  const nodeHostDir = path.join(rootDir, 'node-host');
+  let ready = null;
+  return async function ensureNodeHost() {
+    if (!nodeHostNeedsShim(platform, nodeCommand)) return null;
+    ready ??= writeNodeHostShim(nodeHostDir, nodeCommand, { platform });
+    await ready;
+    return nodeHostDir;
+  };
+}
+
+export function applyNodeHostEnv(env, { nodeCommand, shimDir, platform = 'win32' } = {}) {
+  const next = { ...env };
+  const delimiter = platform === 'win32' ? ';' : ':';
+  if (shimDir) {
+    const current = next.PATH ?? next.Path ?? '';
+    next.PATH = current ? `${shimDir}${delimiter}${current}` : shimDir;
+    if (platform === 'win32') next.Path = next.PATH;
+  }
+  if (nodeCommand) next.npm_node_execpath = nodeCommand;
+  if (nodeCommand && !isNodeBinary(nodeCommand)) next.ELECTRON_RUN_AS_NODE = '1';
+  return next;
 }
 
 function expandCmdVars(raw, cmdFile) {
