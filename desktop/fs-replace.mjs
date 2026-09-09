@@ -27,6 +27,25 @@ async function exists(fsImpl, filePath) {
   }
 }
 
+async function isDirectory(fsImpl, filePath) {
+  const lstat = typeof fsImpl.lstat === 'function'
+    ? fsImpl.lstat.bind(fsImpl)
+    : fsImpl.stat.bind(fsImpl);
+  try {
+    const stats = await lstat(filePath);
+    return typeof stats?.isDirectory === 'function' ? stats.isDirectory() : false;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+function directoryReplaceError(targetPath) {
+  const error = new Error(`Refusing to replace directory ${targetPath}`);
+  error.code = 'EISDIR';
+  return error;
+}
+
 function dependencies(options = {}) {
   return {
     fsImpl: options.fsImpl ?? fs,
@@ -52,10 +71,15 @@ export async function recoverReplacedFile(targetPath, platform = process.platfor
  * Windows cannot rename over an existing file and may briefly lock files for
  * antivirus or indexing. Keep one deterministic backup so startup can restore
  * the last complete value if both the commit and its immediate rollback fail.
+ * The two-step rename would also move a directory target aside, so refuse
+ * directories with EISDIR before any backup is created.
  */
 export async function replaceFile(tempPath, targetPath, platform = process.platform, options = {}) {
   const { fsImpl, sleep } = dependencies(options);
   if (platform !== 'win32') return fsImpl.rename(tempPath, targetPath);
+  if (await isDirectory(fsImpl, targetPath)) {
+    throw directoryReplaceError(targetPath);
+  }
   const previous = backupPath(targetPath);
 
   try {
@@ -68,6 +92,10 @@ export async function replaceFile(tempPath, targetPath, platform = process.platf
   } catch (error) {
     await fsImpl.rm(tempPath, { force: true }).catch(() => {});
     throw error;
+  }
+
+  if (await isDirectory(fsImpl, targetPath)) {
+    throw directoryReplaceError(targetPath);
   }
 
   let moved = false;
