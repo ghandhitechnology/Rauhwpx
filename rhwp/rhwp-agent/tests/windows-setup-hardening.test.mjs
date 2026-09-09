@@ -330,6 +330,59 @@ test('a locked stale Windows vault backup does not invalidate the committed prim
   await fs.rm(root, { recursive: true, force: true });
 });
 
+test('Windows vault replacement refuses to move a directory target aside', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-vault-dir-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const filePath = path.join(root, 'secrets.json');
+  const safeStorage = {
+    async isAsyncEncryptionAvailable() { return true; },
+    async encryptStringAsync(value) { return Buffer.from(`protected:${value}`); },
+    async decryptStringAsync(value) {
+      return { shouldReEncrypt: false, result: value.toString().replace(/^protected:/, '') };
+    },
+  };
+  const vault = createSecretVault({ filePath, safeStorage, platform: 'win32' });
+  await vault.set('rhwp.test', 'first');
+  await fs.rm(filePath);
+  await fs.mkdir(filePath);
+  await fs.writeFile(path.join(filePath, 'inside.txt'), 'keep');
+
+  await assert.rejects(() => vault.set('rhwp.test', 'second'), { code: 'EISDIR' });
+  assert.equal(await fs.readFile(path.join(filePath, 'inside.txt'), 'utf8'), 'keep');
+  await assert.rejects(fs.access(`${filePath}.previous-write`), { code: 'ENOENT' });
+  const temps = (await fs.readdir(root)).filter((name) => name.startsWith('secrets.json.tmp-'));
+  assert.equal(temps.length, 1);
+  const pending = JSON.parse(await fs.readFile(path.join(root, temps[0]), 'utf8'));
+  assert.equal(pending.version, 1);
+  assert.equal(typeof pending.secrets['rhwp.test'], 'string');
+});
+
+test('Windows vault replacement recovery does not publish over a restored directory backup', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-vault-dir-recovery-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const filePath = path.join(root, 'secrets.json');
+  const previous = `${filePath}.previous-write`;
+  const safeStorage = {
+    async isAsyncEncryptionAvailable() { return true; },
+    async encryptStringAsync(value) { return Buffer.from(`protected:${value}`); },
+    async decryptStringAsync(value) {
+      return { shouldReEncrypt: false, result: value.toString().replace(/^protected:/, '') };
+    },
+  };
+  const vault = createSecretVault({ filePath, safeStorage, platform: 'win32' });
+  await vault.set('rhwp.test', 'first');
+  await fs.rm(filePath);
+  await fs.mkdir(previous);
+  await fs.writeFile(path.join(previous, 'inside.txt'), 'keep');
+
+  await assert.rejects(() => vault.set('rhwp.test', 'second'), { code: 'EISDIR' });
+  assert.equal(await fs.readFile(path.join(filePath, 'inside.txt'), 'utf8'), 'keep');
+  await assert.rejects(fs.access(previous), { code: 'ENOENT' });
+  const temps = (await fs.readdir(root)).filter((name) => name.startsWith('secrets.json.tmp-'));
+  assert.equal(temps.length, 1);
+  assert.equal(JSON.parse(await fs.readFile(path.join(root, temps[0]), 'utf8')).version, 1);
+});
+
 test('the Windows vault recovers a validated previous-write after an interrupted replace', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-vault-recover-'));
   const filePath = path.join(root, 'secrets.json');
