@@ -1315,8 +1315,8 @@ export function createCliSetupManager({
    */
   async function install(agent, onProgress) {
     const item = assertAgent(agent);
-    cancelledOps.delete(`install:${agent}`);
     if (installs.has(agent)) return installs.get(agent);
+    cancelledOps.delete(`install:${agent}`);
     let running;
     if (item.kind === 'script') {
       running = runScriptInstall(agent, item, onProgress);

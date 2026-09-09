@@ -3478,3 +3478,72 @@ test('Windows Claude install cancel during node-host setup does not start npm', 
   await assert.rejects(installing, { code: 'AGENT_INSTALL_FAILED' });
   assert.equal(calls.length, 0);
 });
+
+test('Windows Claude install cancel still holds if a second install joins during host setup', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-host-cancel-join-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  let releaseWrite;
+  const writeStarted = Promise.withResolvers();
+  const writeBlocked = new Promise((resolve) => { releaseWrite = resolve; });
+  const calls = [];
+  const spawnProcess = (command, argv, options) => {
+    const proc = new FakeProcess();
+    calls.push({ command, argv, options });
+    queueMicrotask(() => proc.emit('close', 0, null));
+    return proc;
+  };
+  const manager = createCliSetupManager({
+    rootDir,
+    spawnProcess,
+    platform: 'win32',
+    nodeCommand: path.join(rootDir, 'Rauhwpx.exe'),
+    baseEnv: { PATH: 'C:\\Windows\\System32' },
+    writeNodeHostFile: async () => {
+      writeStarted.resolve();
+      await writeBlocked;
+    },
+  });
+  const installing = manager.install('claude');
+  await writeStarted.promise;
+  assert.equal(await manager.cancel('claude'), false);
+  const joined = manager.install('claude');
+  releaseWrite();
+  await assert.rejects(installing, { code: 'AGENT_INSTALL_FAILED' });
+  await assert.rejects(joined, { code: 'AGENT_INSTALL_FAILED' });
+  assert.equal(calls.length, 0);
+});
+
+test('Windows Claude install after a cancelled host setup can start npm', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-host-cancel-retry-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  let releaseWrite;
+  const writeStarted = Promise.withResolvers();
+  const writeBlocked = new Promise((resolve) => { releaseWrite = resolve; });
+  const calls = [];
+  const spawnProcess = (command, argv, options) => {
+    const proc = new FakeProcess();
+    calls.push({ command, argv, options });
+    queueMicrotask(() => proc.emit('close', 0, null));
+    return proc;
+  };
+  const manager = createCliSetupManager({
+    rootDir,
+    spawnProcess,
+    platform: 'win32',
+    nodeCommand: path.join(rootDir, 'Rauhwpx.exe'),
+    baseEnv: { PATH: 'C:\\Windows\\System32' },
+    writeNodeHostFile: async () => {
+      writeStarted.resolve();
+      await writeBlocked;
+    },
+  });
+  const installing = manager.install('claude');
+  await writeStarted.promise;
+  assert.equal(await manager.cancel('claude'), false);
+  releaseWrite();
+  await assert.rejects(installing, { code: 'AGENT_INSTALL_FAILED' });
+  assert.equal(calls.length, 0);
+
+  await manager.install('claude').then(() => {}, () => {});
+  assert.equal(calls.length, 1);
+});
