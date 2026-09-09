@@ -1257,7 +1257,7 @@ export function createGrokSession(opts, {
         nativeSessionInfoEmitted = false;
       },
       onSessionUpdate: handleNativeUpdate,
-    }, { spawnProcess, terminateProcess });
+    }, { spawnProcess, terminateProcess, platform, nodeCommand });
   }
 
   function prepareNativeHome() {

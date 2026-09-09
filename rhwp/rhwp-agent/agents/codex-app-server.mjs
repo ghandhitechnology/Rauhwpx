@@ -17,6 +17,7 @@ import {
   codexDefaultModeUserInputEnabled,
   handleCodexRequestUserInputFrame,
 } from './provider-user-input.mjs';
+import { applyNpmCliLaunch } from '../npm-cli-launch.mjs';
 import {
   isolatedProcessEnv,
   processTreeSpawnOptions,
@@ -363,6 +364,8 @@ export function createCodexAppServerSession(opts, dependencies = {}) {
     createRolloutWatcher,
     prepareHome = () => {},
     createLegacySession,
+    platform = process.platform,
+    nodeCommand = process.execPath,
   } = dependencies;
   const onEvent = opts.onEvent;
   /** @type {import('node:child_process').ChildProcess | null} */
@@ -758,15 +761,19 @@ export function createCodexAppServerSession(opts, dependencies = {}) {
     expectedShutdown = false;
     let child;
     try {
-      child = spawnProcess(opts.codexBin ?? 'codex', buildCodexAppServerArgv(opts, {
-        enableDefaultModeUserInput: featureForced,
-      }), {
+      const spawnEnv = {
+        ...isolatedProcessEnv(opts, opts.providerEnv ?? process.env),
+        CODEX_HOME: codexHome,
+      };
+      const launched = applyNpmCliLaunch(
+        opts.codexBin ?? 'codex',
+        buildCodexAppServerArgv(opts, { enableDefaultModeUserInput: featureForced }),
+        { platform, nodeCommand, env: spawnEnv },
+      );
+      child = spawnProcess(launched.command, launched.argv, {
         ...processTreeSpawnOptions(),
         cwd: opts.rootDir,
-        env: {
-          ...isolatedProcessEnv(opts, opts.providerEnv ?? process.env),
-          CODEX_HOME: codexHome,
-        },
+        env: { ...spawnEnv, ...launched.env },
         stdio: ['pipe', 'pipe', 'pipe'],
       });
     } catch (error) {

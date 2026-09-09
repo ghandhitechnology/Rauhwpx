@@ -6,6 +6,7 @@ import {
   methods,
   ndJsonStream,
 } from '@agentclientprotocol/sdk';
+import { applyNpmCliLaunch } from '../npm-cli-launch.mjs';
 import {
   PROCESS_TREE_CLEANUP_OUTCOME,
   processTreeSpawnOptions,
@@ -192,6 +193,8 @@ export function createPersistentAcpSession({
 }, {
   spawnProcess = spawn,
   terminateProcess = terminateProcessTree,
+  platform = process.platform,
+  nodeCommand = process.execPath,
 } = {}) {
   /** @type {any} */
   let proc = null;
@@ -424,10 +427,15 @@ export function createPersistentAcpSession({
   async function startOnce() {
     if (disposed) throw new Error(`${clientName} ACP session is disposed`);
     if (proc) throw new Error(`${clientName} ACP process-tree cleanup is still pending`);
-    const child = spawnProcess(command, args, {
+    const resolvedEnv = typeof env === 'function' ? env() : env;
+    const spawnEnv = resolvedEnv ?? process.env;
+    const launched = applyNpmCliLaunch(command, args, {
+      platform, nodeCommand, env: spawnEnv,
+    });
+    const child = spawnProcess(launched.command, launched.argv, {
       ...processTreeSpawnOptions(),
       cwd,
-      env: typeof env === 'function' ? env() : env,
+      env: { ...spawnEnv, ...launched.env },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     proc = child;

@@ -1,3 +1,4 @@
+import spawn from 'cross-spawn';
 import path from 'node:path';
 import { mkdirSync, rmSync } from 'node:fs';
 import {
@@ -286,9 +287,12 @@ export function openCodeResultPreview(update) {
 /** @param {import('./backend.mjs').BackendOptions & Record<string, any>} opts */
 export function createOpenCodeSession(opts, {
   createAcpSession = createPersistentAcpSession,
+  spawnProcess = spawn,
   terminateProcess = terminateProcessTree,
   prepareHome = prepareOpenCodeHome,
   flushCredentialMirror = flushOpenCodeCredentialMirror,
+  platform = process.platform,
+  nodeCommand = process.execPath,
 } = {}) {
   const onEvent = opts.onEvent;
   /** @type {string|null} */
@@ -441,7 +445,7 @@ export function createOpenCodeSession(opts, {
         if (!currentModel && modelOption?.currentValue) currentModel = String(modelOption.currentValue);
       },
       onSessionUpdate: handleUpdate,
-    }, { terminateProcess });
+    }, { spawnProcess, terminateProcess, platform, nodeCommand });
   }
 
   function costForTurn() {

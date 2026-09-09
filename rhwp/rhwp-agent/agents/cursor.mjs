@@ -1,4 +1,3 @@
-// cross-spawn: Windows에서 npm .cmd 심을 인자 이스케이프 손상 없이 실행한다.
 import spawn from 'cross-spawn';
 import {
   lstatSync,
@@ -32,6 +31,7 @@ import {
   truncate,
   validateExecutionMode,
 } from './backend.mjs';
+import { applyNpmCliLaunch } from '../npm-cli-launch.mjs';
 import {
   isolatedProcessEnv,
   processTreeSpawnOptions,
@@ -463,6 +463,7 @@ export function createCursorSession(opts, {
   waitForExit = waitForProcessTreeExit,
   createAcpSession = createPersistentAcpSession,
   platform = process.platform,
+  nodeCommand = process.execPath,
   closeGraceMs = 2_000,
 } = {}) {
   const onEvent = opts.onEvent;
@@ -1050,7 +1051,7 @@ export function createCursorSession(opts, {
         nativeSessionInfoEmitted = false;
       },
       onSessionUpdate: handleNativeUpdate,
-    }, { spawnProcess, terminateProcess });
+    }, { spawnProcess, terminateProcess, platform, nodeCommand });
   }
 
   function prepareNativeHome() {
@@ -1123,10 +1124,15 @@ export function createCursorSession(opts, {
       prepareNativeHome();
       const childEnv = isolatedProcessEnv(opts, opts.providerEnv ?? process.env);
       delete childEnv.CURSOR_CONFIG_DIR;
-      proc = spawnProcess(opts.cursorBin ?? 'cursor-agent', buildCursorArgv(opts, chatId, prompt), {
+      const launched = applyNpmCliLaunch(
+        opts.cursorBin ?? 'cursor-agent',
+        buildCursorArgv(opts, chatId, prompt),
+        { platform, nodeCommand, env: childEnv },
+      );
+      proc = spawnProcess(launched.command, launched.argv, {
         ...processTreeSpawnOptions(),
         cwd: opts.rootDir,
-        env: childEnv,
+        env: { ...childEnv, ...launched.env },
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch (e) {

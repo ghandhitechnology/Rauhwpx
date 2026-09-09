@@ -1,4 +1,3 @@
-// cross-spawn: Windows에서 npm .cmd 심을 인자 이스케이프 손상 없이 실행한다.
 import spawn from 'cross-spawn';
 import { mkdirSync, rmSync } from 'node:fs';
 import os from 'node:os';
@@ -8,6 +7,7 @@ import {
   flushCredentialMirrorSync,
   prepareCredentialMirrorSync,
 } from '../credential-mirror.mjs';
+import { applyNpmCliLaunch } from '../npm-cli-launch.mjs';
 import {
   createLineReader,
   isPlanningRestricted,
@@ -213,6 +213,7 @@ export function createLegacyCodexSession(opts, {
   initialThreadId = null,
   closeGraceMs = 2_000,
   platform = process.platform,
+  nodeCommand = process.execPath,
 } = {}) {
   const onEvent = opts.onEvent;
 
@@ -502,13 +503,17 @@ export function createLegacyCodexSession(opts, {
       let proc;
       try {
         prepareCodexHome(codexHome, opts.codexAuthPath);
-        proc = spawnProcess(opts.codexBin ?? 'codex', argv, {
+        const spawnEnv = {
+          ...isolatedProcessEnv(opts, opts.providerEnv ?? process.env),
+          CODEX_HOME: codexHome,
+        };
+        const launched = applyNpmCliLaunch(opts.codexBin ?? 'codex', argv, {
+          platform, nodeCommand, env: spawnEnv,
+        });
+        proc = spawnProcess(launched.command, launched.argv, {
           ...processTreeSpawnOptions(),
           cwd: opts.rootDir,
-          env: {
-            ...isolatedProcessEnv(opts, opts.providerEnv ?? process.env),
-            CODEX_HOME: codexHome,
-          },
+          env: { ...spawnEnv, ...launched.env },
           stdio: ['pipe', 'pipe', 'pipe'],
         });
       } catch (e) {

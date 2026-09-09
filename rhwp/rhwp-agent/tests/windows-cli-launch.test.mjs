@@ -4,9 +4,15 @@ import { EventEmitter } from 'node:events';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { PassThrough } from 'node:stream';
 import test from 'node:test';
 
+import { createPersistentAcpSession } from '../agents/acp-session.mjs';
+import { systemBriefFor } from '../agents/backend.mjs';
 import { buildClaudeArgv, createClaudeSession } from '../agents/claude.mjs';
+import { createLegacyCodexSession } from '../agents/codex.mjs';
+import { createCodexAppServerSession } from '../agents/codex-app-server.mjs';
+import { buildCursorArgv, createCursorSession } from '../agents/cursor.mjs';
 import { buildGrokArgv } from '../agents/grok.mjs';
 import { buildPiArgv } from '../agents/pi.mjs';
 import {
@@ -273,6 +279,7 @@ class FakeProcess extends EventEmitter {
   stdout = new FakeStream();
   stderr = new FakeStream();
   stdin = new FakeStream();
+  pid = 4242;
   exitCode = null;
   signalCode = null;
   kill() { return true; }
@@ -363,4 +370,176 @@ test('native Claude SDK launch unwraps Windows .cmd and merges Electron env', as
   assert.equal(sdkOptions[0].pathToClaudeCodeExecutable, scriptPath);
   assert.equal(sdkOptions[0].env.ELECTRON_RUN_AS_NODE, '1');
   assert.equal(/\.(?:cmd|bat)$/i.test(sdkOptions[0].pathToClaudeCodeExecutable), false);
+});
+
+test('Cursor prompt plus system brief overflows cmd.exe through a .cmd shim', () => {
+  const prompt = `${systemBriefFor(claudeOpts, 'cursor')}\n\n${'keep the table borders and apply the requested edits. '.repeat(80)}`;
+  assert.ok(
+    windowsCmdExeCommandLineLength('cursor-agent.cmd', buildCursorArgv(claudeOpts, sessionId, prompt))
+      > WINDOWS_CMD_LINE_LIMIT,
+    'a realistic Cursor prompt should overflow cmd.exe',
+  );
+});
+
+test('createLegacyCodexSession unwraps a Windows .cmd bin before spawn', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-codex-session-unwrap-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const { cmdPath, scriptPath } = writeNpmCmdShim(root, 'codex', 'cli.js');
+  const spawns = [];
+  const session = createLegacyCodexSession({
+    ...claudeOpts,
+    isolatedHome: path.join(root, 'home'),
+    codexHome: path.join(root, 'home', '.codex'),
+    codexBin: cmdPath,
+    onEvent() {},
+  }, {
+    platform: 'win32',
+    nodeCommand: process.execPath,
+    spawnProcess(command, argv) {
+      const proc = new FakeProcess();
+      spawns.push({ command, argv });
+      return proc;
+    },
+    terminateProcess() { return true; },
+    waitForExit: async () => true,
+    closeGraceMs: 1,
+  });
+  t.after(() => session.dispose());
+  session.sendUserMessage('review');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(spawns.length, 1);
+  assert.equal(spawns[0].command, process.execPath);
+  assert.equal(spawns[0].argv[0], scriptPath);
+  assert.equal(spawns[0].argv.includes('exec'), true);
+  assert.equal(/\.(?:cmd|bat)$/i.test(spawns[0].command), false);
+});
+
+test('createCodexAppServerSession unwraps a Windows .cmd bin before spawn', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-codex-appserver-unwrap-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const { cmdPath, scriptPath } = writeNpmCmdShim(root, 'codex', 'cli.js');
+  const spawns = [];
+  const session = createCodexAppServerSession({
+    ...claudeOpts,
+    isolatedHome: path.join(root, 'home'),
+    codexHome: path.join(root, 'home', '.codex'),
+    codexBin: cmdPath,
+    agentRole: 'chat',
+    requestUserInput: async () => ({ status: 'cancelled', reason: 'user-stop' }),
+    onEvent() {},
+  }, {
+    platform: 'win32',
+    nodeCommand: process.execPath,
+    spawnProcess(command, argv) {
+      const proc = new FakeProcess();
+      spawns.push({ command, argv });
+      return proc;
+    },
+    terminateProcess(child) {
+      child.exitCode = 1;
+      child.emit('exit', 1, null);
+      child.emit('close', 1, null);
+      return true;
+    },
+    createLegacySession() {
+      return { sendUserMessage() {}, dispose() { return true; } };
+    },
+  });
+  session.sendUserMessage('review');
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(spawns.length, 1);
+  assert.equal(spawns[0].command, process.execPath);
+  assert.equal(spawns[0].argv[0], scriptPath);
+  assert.equal(spawns[0].argv.includes('app-server'), true);
+  assert.equal(/\.(?:cmd|bat)$/i.test(spawns[0].command), false);
+  await session.dispose();
+});
+
+test('createCursorSession unwraps a Windows .cmd bin before legacy spawn', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-cursor-session-unwrap-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const { cmdPath, scriptPath } = writeNpmCmdShim(root, 'cursor-agent', 'cli.js');
+  const spawns = [];
+  const session = createCursorSession({
+    ...claudeOpts,
+    isolatedHome: path.join(root, 'home'),
+    cursorBin: cmdPath,
+    onEvent() {},
+  }, {
+    platform: 'win32',
+    nodeCommand: process.execPath,
+    spawnProcess(command, argv) {
+      const proc = new FakeProcess();
+      spawns.push({ command, argv });
+      return proc;
+    },
+    terminateProcess(child) {
+      child.exitCode = 1;
+      child.emit('exit', 1, null);
+      child.emit('close', 1, null);
+      return true;
+    },
+    waitForExit: async () => true,
+    closeGraceMs: 1,
+  });
+  session.sendUserMessage('review');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(spawns.length, 1);
+  assert.equal(spawns[0].command, process.execPath);
+  assert.equal(spawns[0].argv[0], scriptPath);
+  assert.equal(spawns[0].argv.includes('-p'), true);
+  assert.equal(/\.(?:cmd|bat)$/i.test(spawns[0].command), false);
+  await session.dispose();
+});
+
+test('ACP sessions unwrap a Windows .cmd bin before spawn', async (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-acp-session-unwrap-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const { cmdPath, scriptPath } = writeNpmCmdShim(root, 'opencode', 'cli.js');
+  const spawns = [];
+  const transport = createPersistentAcpSession({
+    clientName: 'rhwp-opencode',
+    command: cmdPath,
+    args: ['acp', '--pure'],
+    cwd: root,
+    env: { PATH: root },
+  }, {
+    platform: 'win32',
+    nodeCommand: process.execPath,
+    spawnProcess(command, argv) {
+      const proc = new EventEmitter();
+      proc.stdin = new PassThrough();
+      proc.stdout = new PassThrough();
+      proc.stderr = new PassThrough();
+      proc.pid = 4243;
+      proc.exitCode = null;
+      proc.signalCode = null;
+      proc.kill = () => true;
+      spawns.push({ command, argv, proc });
+      return proc;
+    },
+    terminateProcess(child) {
+      child.exitCode = 1;
+      child.emit('exit', 1, null);
+      child.emit('close', 1, null);
+      return true;
+    },
+  });
+  const started = transport.start();
+  started.catch(() => {});
+  await waitUntil(() => spawns.length === 1, 'ACP spawn did not run');
+  assert.equal(spawns[0].command, process.execPath);
+  assert.equal(spawns[0].argv[0], scriptPath);
+  assert.deepEqual(spawns[0].argv.slice(1), ['acp', '--pure']);
+  assert.equal(/\.(?:cmd|bat)$/i.test(spawns[0].command), false);
+  const { proc } = spawns[0];
+  proc.exitCode = 1;
+  proc.emit('exit', 1, null);
+  proc.stdout.end();
+  proc.stderr.end();
+  proc.stdin.end();
+  proc.emit('close', 1, null);
+  await started.catch(() => {});
+  await transport.dispose();
 });
