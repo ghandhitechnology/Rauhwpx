@@ -12,6 +12,14 @@ import {
   replaceFileAtomically,
   retryLockedOperation,
 } from '../harness-update.mjs';
+import {
+  applyNodeHostEnv,
+  createNodeHost,
+  isNodeBinary,
+  nodeHostNeedsShim,
+  nodeHostShimFileName,
+  writeNodeHostShim,
+} from '../npm-cli-launch.mjs';
 import { bundledNpmLaunch } from '../npm-runtime.mjs';
 import { terminateProcessTree } from '../process-tree.mjs';
 import { createIpcSecretStore } from '../secret-store.mjs';
@@ -21,6 +29,52 @@ test('the bundled npm launcher uses the current Node-compatible executable', () 
   const launch = bundledNpmLaunch({ nodeCommand: 'Rauhwpx.exe' });
   assert.equal(launch.command, 'Rauhwpx.exe');
   assert.match(launch.leadingArgs[0], /npm[/\\]bin[/\\]npm-cli\.js$/);
+});
+
+test('Windows Electron hosts get a node.cmd shim and npm_node_execpath', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-node-host-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const electron = path.join(root, 'Rauhwpx.exe');
+  assert.equal(isNodeBinary(electron), false);
+  assert.equal(nodeHostNeedsShim('win32', electron), true);
+  assert.equal(nodeHostShimFileName('win32'), 'node.cmd');
+  const shim = await writeNodeHostShim(root, electron, { platform: 'win32' });
+  assert.equal(path.basename(shim), 'node.cmd');
+  const body = await fs.readFile(shim, 'utf8');
+  assert.match(body, /ELECTRON_RUN_AS_NODE=1/);
+  assert.match(body, /Rauhwpx\.exe/);
+  const env = applyNodeHostEnv({ PATH: 'C:\\Windows\\System32' }, {
+    nodeCommand: electron, shimDir: root, platform: 'win32',
+  });
+  assert.equal(env.npm_node_execpath, electron);
+  assert.equal(env.ELECTRON_RUN_AS_NODE, '1');
+  assert.equal(env.PATH.startsWith(`${root};`), true);
+});
+
+test('a real Node host on Unix does not need a PATH shim', () => {
+  assert.equal(nodeHostNeedsShim('darwin', '/usr/bin/node'), false);
+  assert.equal(nodeHostNeedsShim('darwin', '/Applications/Rauhwpx.app/Contents/MacOS/Rauhwpx'), true);
+});
+
+test('a failed node-host write is retried on the next ensure', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-node-host-retry-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  let attempts = 0;
+  const ensure = createNodeHost({
+    rootDir: root,
+    nodeCommand: path.join(root, 'Rauhwpx.exe'),
+    platform: 'win32',
+    writeFile: async (file, body) => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' });
+      }
+      await fs.writeFile(file, body);
+    },
+  });
+  await assert.rejects(ensure(), { code: 'EBUSY' });
+  assert.equal(await ensure(), path.join(root, 'node-host'));
+  assert.equal(attempts, 2);
 });
 
 test('Windows process cleanup never retargets a reusable PID after its first tree command', async () => {
