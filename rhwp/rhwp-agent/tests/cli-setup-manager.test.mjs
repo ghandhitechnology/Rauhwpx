@@ -840,9 +840,9 @@ test('Codex OAuth uses device auth on every platform, never a localhost callback
     }).init();
 
     await manager.authenticate('codex', 'oauth');
-    const login = calls.find((call) => call.argv[0] === 'login');
-    assert.equal(login.command, 'codex', platform);
-    assert.deepEqual(login.argv, ['login', '--device-auth'], platform);
+    const login = calls.find((call) => call.argv.includes('login') && call.argv.includes('--device-auth'));
+    assert.match(String(login.command), /codex(?:\.cmd)?$/i, platform);
+    assert.deepEqual(login.argv.slice(-2), ['login', '--device-auth'], platform);
     assert.equal(login.options.env.CODEX_HOME, stagedHome, platform);
 
     await fs.rm(rootDir, { recursive: true, force: true });
@@ -3310,4 +3310,121 @@ test('CLI terminal mode uses each provider login command and preserves failure r
     await assert.rejects(manager.authenticate(agent, 'oauth', undefined, undefined, { terminal: true }), { code: 'AGENT_AUTH_FAILED' });
     assert.equal(launched, true, agent);
   }
+});
+
+function writeWindowsNpmShim(root, binName, scriptRelPath) {
+  const binDir = path.join(root, 'prefix', 'node_modules', '.bin');
+  mkdirSync(binDir, { recursive: true });
+  const scriptPath = path.join(root, 'prefix', scriptRelPath);
+  mkdirSync(path.dirname(scriptPath), { recursive: true });
+  const cmdPath = path.join(binDir, `${binName}.cmd`);
+  const relativeFromBin = path.relative(binDir, scriptPath).replace(/\\/g, '\\');
+  writeFileSync(scriptPath, 'process.exit(0);\n');
+  writeFileSync(cmdPath, [
+    '@ECHO off',
+    'GOTO start',
+    ':find_dp0',
+    'SET dp0=%~dp0',
+    'GOTO :eof',
+    ':start',
+    'SETLOCAL',
+    'CALL :find_dp0',
+    'IF EXIST "%dp0%\\node.exe" (',
+    '  SET "_prog=%dp0%\\node.exe"',
+    ') ELSE (',
+    '  SET "_prog=node"',
+    '  SET PATHEXT=%PATHEXT:;.JS;=;%',
+    ')',
+    `endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\${relativeFromBin}" %*`,
+    '',
+  ].join('\r\n'));
+  return { cmdPath, scriptPath };
+}
+
+test('Windows Codex OAuth unwraps the managed .cmd shim through Electron-as-Node', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-codex-unwrap-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const electron = path.join(rootDir, 'Rauhwpx.exe');
+  const { scriptPath } = writeWindowsNpmShim(
+    rootDir, 'codex', path.join('node_modules', '@openai', 'codex', 'bin', 'codex.js'),
+  );
+  await fs.mkdir(path.join(rootDir, 'prefix', 'node_modules', '@openai', 'codex'), { recursive: true });
+  await fs.writeFile(
+    path.join(rootDir, 'prefix', 'node_modules', '@openai', 'codex', 'package.json'),
+    JSON.stringify({ name: '@openai/codex', version: '1.2.3' }),
+  );
+  const stagedHome = path.join(rootDir, 'codex-stage');
+  await fs.mkdir(stagedHome, { recursive: true });
+  const calls = [];
+  const spawnProcess = (command, argv, options) => {
+    const proc = new FakeProcess();
+    calls.push({ command, argv, options });
+    queueMicrotask(() => {
+      if (argv.includes('--device-auth') && options.env.CODEX_HOME) {
+        void fs.writeFile(path.join(options.env.CODEX_HOME, 'auth.json'), '{"token":"new-codex"}')
+          .then(() => proc.emit('close', 0, null), (error) => proc.emit('error', error));
+        return;
+      }
+      proc.emit('close', 0, null);
+    });
+    return proc;
+  };
+  const manager = await createCliSetupManager({
+    rootDir,
+    spawnProcess,
+    platform: 'win32',
+    nodeCommand: electron,
+    baseEnv: { PATH: 'C:\\Windows\\System32', USERPROFILE: path.join(rootDir, 'profile') },
+    homeDir: path.join(rootDir, 'profile'),
+    prepareOAuthCredential: async () => oauthTransactionStub(stagedHome),
+  }).init();
+
+  await manager.authenticate('codex', 'oauth');
+  const login = calls.find((call) => call.argv.includes('login'));
+  assert.equal(login.command, electron);
+  assert.equal(login.argv[0], scriptPath);
+  assert.deepEqual(login.argv.slice(-2), ['login', '--device-auth']);
+  assert.equal(login.options.env.ELECTRON_RUN_AS_NODE, '1');
+  assert.equal(login.options.env.npm_node_execpath, electron);
+  assert.match(login.options.env.PATH, /node-host/);
+  assert.equal(existsSync(path.join(rootDir, 'node-host', 'node.cmd')), true);
+});
+
+test('Windows Claude npm install exposes node for postinstall under Electron', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-claude-nodehost-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const electron = path.join(rootDir, 'Rauhwpx.exe');
+  const prefixDir = path.join(rootDir, 'prefix');
+  const calls = [];
+  const spawnProcess = (command, argv, options) => {
+    const proc = new FakeProcess();
+    calls.push({ command, argv, options });
+    queueMicrotask(() => {
+      if (argv.includes('install')) {
+        const packageDir = path.join(prefixDir, 'node_modules', '@anthropic-ai', 'claude-code');
+        mkdirSync(packageDir, { recursive: true });
+        writeFileSync(path.join(packageDir, 'package.json'), JSON.stringify({
+          name: '@anthropic-ai/claude-code', version: '1.2.3',
+        }));
+      }
+      proc.emit('close', 0, null);
+    });
+    return proc;
+  };
+  const manager = await createCliSetupManager({
+    rootDir,
+    spawnProcess,
+    platform: 'win32',
+    nodeCommand: electron,
+    baseEnv: { PATH: 'C:\\Windows\\System32' },
+  }).init();
+
+  const status = await manager.install('claude');
+  assert.equal(status.installed, true);
+  assert.equal(calls[0].command, electron);
+  assert.match(calls[0].argv[0], /npm[/\\]bin[/\\]npm-cli\.js$/);
+  assert.equal(calls[0].options.env.ELECTRON_RUN_AS_NODE, '1');
+  assert.equal(calls[0].options.env.npm_node_execpath, electron);
+  assert.equal(calls[0].options.env.PATH.startsWith(path.join(rootDir, 'node-host')), true);
+  assert.match(await fs.readFile(path.join(rootDir, 'node-host', 'node.cmd'), 'utf8'), /Rauhwpx\.exe/);
 });
