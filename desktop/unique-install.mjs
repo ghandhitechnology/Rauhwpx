@@ -133,20 +133,10 @@ async function replaceUniqueInstallFile(temp, filePath, {
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error;
   }
-  if (moved && (await lstatOrMissing(lstatImpl, previous))?.isDirectory()) {
-    try {
-      await retryWindows(() => renameImpl(previous, filePath), platform);
-    } catch (restoreError) {
-      throw rollbackFailedError(
-        directoryReplaceError(filePath),
-        restoreError,
-        previous,
-        temp,
-      );
-    }
-    throw directoryReplaceError(filePath);
-  }
   try {
+    if (moved && (await lstatOrMissing(lstatImpl, previous))?.isDirectory()) {
+      throw directoryReplaceError(filePath);
+    }
     await retryWindows(() => renameImpl(temp, filePath), platform);
   } catch (error) {
     if (moved) {
