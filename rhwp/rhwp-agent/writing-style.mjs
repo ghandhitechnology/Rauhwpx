@@ -7,6 +7,7 @@ import {
   recoverInterruptedFileReplacement,
   removeFileAndReplacementBackup,
   replaceFileAtomically,
+  retryLockedOperation,
 } from './harness-update.mjs';
 import { readFileBytesBounded, readUtf8FileBounded } from './bounded-file.mjs';
 
@@ -182,8 +183,16 @@ export class WritingStyleStore {
       platform: this.platform,
       fsApi: this.fs,
     });
+    await recoverInterruptedFileReplacement(this.commitJournalPath, {
+      platform: this.platform,
+      fsApi: this.fs,
+    });
     await this.recoverInterruptedCommit();
     return this;
+  }
+
+  #locked(operation) {
+    return retryLockedOperation(operation, this.lockRetry);
   }
 
   async recoverInterruptedCommit() {
@@ -220,15 +229,17 @@ export class WritingStyleStore {
         const backup = `${target}.old-${id}`;
         try {
           await this.fs.lstat(backup);
-          await this.fs.rm(target, { recursive: true, force: true });
-          await this.fs.rename(backup, target);
+          await this.#locked(() => this.fs.rm(target, { recursive: true, force: true }));
+          await this.#locked(() => this.fs.rename(backup, target));
         } catch (error) {
           if (error?.code !== 'ENOENT') throw error;
         }
-        if (!entry.hadOriginal) await this.fs.rm(target, { recursive: true, force: true });
-        if (entry.staged) await this.fs.rm(path.join(this.root, entry.staged), { recursive: true, force: true });
+        if (!entry.hadOriginal) await this.#locked(() => this.fs.rm(target, { recursive: true, force: true }));
+        if (entry.staged) {
+          await this.#locked(() => this.fs.rm(path.join(this.root, entry.staged), { recursive: true, force: true }));
+        }
       }
-      await this.fs.rm(this.commitJournalPath, { force: true });
+      await this.#locked(() => this.fs.rm(this.commitJournalPath, { force: true }));
     }
 
     // Recover transactions from builds predating the journal, then remove
@@ -239,15 +250,18 @@ export class WritingStyleStore {
       if (oldMatch) {
         const backup = path.join(this.root, name);
         const target = path.join(this.root, oldMatch[1]);
-        try { await this.fs.lstat(target); await this.fs.rm(backup, { recursive: true, force: true }); }
+        try {
+          await this.fs.lstat(target);
+          await this.#locked(() => this.fs.rm(backup, { recursive: true, force: true }));
+        }
         catch (error) {
           if (error?.code !== 'ENOENT') throw error;
-          await this.fs.rename(backup, target);
+          await this.#locked(() => this.fs.rename(backup, target));
         }
         continue;
       }
       if (/^(style\.md|metadata\.json|profile\.json|sources|sources\.json|commit-journal\.json)\.tmp-[a-zA-Z0-9-]+$/.test(name)) {
-        await this.fs.rm(path.join(this.root, name), { recursive: true, force: true });
+        await this.#locked(() => this.fs.rm(path.join(this.root, name), { recursive: true, force: true }));
       }
     }
   }
@@ -476,21 +490,24 @@ export class WritingStyleStore {
       })),
     };
     await this.fs.writeFile(journalTemp, `${JSON.stringify(journal, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
-    await this.fs.rename(journalTemp, this.commitJournalPath);
+    await replaceFileAtomically(journalTemp, this.commitJournalPath, {
+      platform: this.platform,
+      fsApi: this.fs,
+    });
     try {
       for (const artifact of artifacts) {
         const backup = `${artifact.target}.old-${transactionId}`;
         let hadOriginal = true;
-        try { await this.fs.rename(artifact.target, backup); }
+        try { await this.#locked(() => this.fs.rename(artifact.target, backup)); }
         catch (error) {
           if (error?.code === 'ENOENT') hadOriginal = false;
           else throw error;
         }
         try {
-          if (artifact.staged) await this.fs.rename(artifact.staged, artifact.target);
+          if (artifact.staged) await this.#locked(() => this.fs.rename(artifact.staged, artifact.target));
           committed.push({ ...artifact, backup, hadOriginal });
         } catch (error) {
-          if (hadOriginal) await this.fs.rename(backup, artifact.target).catch(() => {});
+          if (hadOriginal) await this.#locked(() => this.fs.rename(backup, artifact.target)).catch(() => {});
           throw error;
         }
       }
@@ -507,8 +524,10 @@ export class WritingStyleStore {
     }
     // Removing the journal commits the transaction. Backup cleanup can then be
     // retried opportunistically without making a completed save look failed.
-    await this.fs.rm(this.commitJournalPath, { force: true });
-    await Promise.all(committed.map((artifact) => this.fs.rm(artifact.backup, { recursive: true, force: true }).catch(() => {})));
+    await this.#locked(() => this.fs.rm(this.commitJournalPath, { force: true }));
+    await Promise.all(committed.map((artifact) => (
+      this.#locked(() => this.fs.rm(artifact.backup, { recursive: true, force: true })).catch(() => {})
+    )));
   }
 
   async save(profile, options = {}) {
