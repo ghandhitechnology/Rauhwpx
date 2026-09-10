@@ -5912,10 +5912,22 @@ impl DocumentCore {
                 .to_string()
         }
 
+        const MAX_NEST_DEPTH: usize = 8;
+
+        fn cell_text_slice(chars: &[char], start: usize, end: usize) -> String {
+            let text: String = chars[start..end]
+                .iter()
+                .copied()
+                .filter(|&c| c != '\u{FFFC}')
+                .collect();
+            markdown_escape_cell(&text)
+        }
+
         fn table_cell_text(
             cell: &crate::model::table::Cell,
             table_id: &str,
             nested_tables: &mut Vec<String>,
+            depth: usize,
         ) -> String {
             let mut parts: Vec<String> = Vec::new();
             for para in &cell.paragraphs {
@@ -5932,15 +5944,17 @@ impl DocumentCore {
                         let insertion = match control {
                             Control::Table(table) => {
                                 let child_id = format!("{}-{}", table_id, nested_tables.len() + 1);
-                                let markdown = table_to_markdown(table, &child_id);
-                                nested_tables.push(format!(
-                                    "**하위 표 {} — 표 {}의 {}행 {}열**\n\n{}",
-                                    child_id,
-                                    table_id,
-                                    usize::from(cell.row) + 1,
-                                    usize::from(cell.col) + 1,
-                                    markdown,
-                                ));
+                                if depth + 1 < MAX_NEST_DEPTH {
+                                    let markdown = table_to_markdown(table, &child_id, depth + 1);
+                                    nested_tables.push(format!(
+                                        "**하위 표 {} — 표 {}의 {}행 {}열**\n\n{}",
+                                        child_id,
+                                        table_id,
+                                        usize::from(cell.row) + 1,
+                                        usize::from(cell.col) + 1,
+                                        markdown,
+                                    ));
+                                }
                                 format!("[하위 표 {} 참조]", child_id)
                             }
                             Control::Equation(equation) => markdown_escape_cell(&equation.script),
@@ -5952,17 +5966,18 @@ impl DocumentCore {
                             .unwrap_or(chars.len())
                             .min(chars.len())
                             .max(cursor);
-                        let text: String = chars[cursor..position].iter().collect();
-                        content.push_str(&markdown_escape_cell(&text));
+                        content.push_str(&cell_text_slice(&chars, cursor, position));
                         if !content.is_empty() {
                             content.push(' ');
                         }
                         content.push_str(&insertion);
                         content.push(' ');
                         cursor = position;
+                        if chars.get(cursor) == Some(&'\u{FFFC}') {
+                            cursor += 1;
+                        }
                     }
-                    let text: String = chars[cursor..].iter().collect();
-                    content.push_str(&markdown_escape_cell(&text));
+                    content.push_str(&cell_text_slice(&chars, cursor, chars.len()));
                     if !content.trim().is_empty() {
                         parts.push(content.trim().to_string());
                     }
@@ -5976,7 +5991,11 @@ impl DocumentCore {
             parts.join(" <br> ")
         }
 
-        fn table_to_markdown(table: &crate::model::table::Table, table_id: &str) -> String {
+        fn table_to_markdown(
+            table: &crate::model::table::Table,
+            table_id: &str,
+            depth: usize,
+        ) -> String {
             let rows = table.row_count as usize;
             let cols = table.col_count as usize;
             if rows == 0 || cols == 0 {
@@ -5992,7 +6011,7 @@ impl DocumentCore {
                 if r >= rows || c >= cols {
                     continue;
                 }
-                grid[r][c] = table_cell_text(cell, table_id, &mut nested_tables);
+                grid[r][c] = table_cell_text(cell, table_id, &mut nested_tables, depth);
             }
 
             let make_row = |cells: &[String]| -> String { format!("| {} |", cells.join(" | ")) };
@@ -6065,7 +6084,7 @@ impl DocumentCore {
                                 .count()
                                 + 1)
                             .to_string();
-                            let md = table_to_markdown(table, &table_id);
+                            let md = table_to_markdown(table, &table_id, 0);
                             if !md.is_empty() {
                                 items.push(MarkdownItem::Table(md));
                             }
@@ -6364,6 +6383,7 @@ fn format_line_seg_brief(para: Option<&Paragraph>) -> String {
 mod tests {
     use super::*;
     use crate::model::bin_data::BinDataContent;
+    use crate::model::table::{Cell, Table};
     use crate::renderer::render_tree::RenderNodeType;
 
     fn assert_send<T: Send>() {}
@@ -7726,5 +7746,101 @@ mod tests {
                 t
             );
         }
+    }
+
+    fn one_cell_table(paragraph: Paragraph) -> Table {
+        Table {
+            row_count: 1,
+            col_count: 1,
+            cells: vec![Cell {
+                row: 0,
+                col: 0,
+                col_span: 1,
+                row_span: 1,
+                width: 20_000,
+                height: 4_000,
+                paragraphs: vec![paragraph],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn core_with_body_table(table: Table) -> DocumentCore {
+        let mut document = Document::default();
+        let mut body = Paragraph::default();
+        body.controls.push(Control::Table(Box::new(table)));
+        document.sections.push(Section {
+            paragraphs: vec![body],
+            ..Default::default()
+        });
+        let composed = document
+            .sections
+            .iter()
+            .map(crate::renderer::composer::compose_section)
+            .collect();
+        let mut core = DocumentCore::new_empty();
+        core.document = document;
+        core.composed = composed;
+        core.dirty_sections = vec![true];
+        core.paginate();
+        core
+    }
+
+    #[test]
+    fn nested_table_markdown_skips_hwp3_object_replacement() {
+        let inner = one_cell_table(Paragraph {
+            text: "INNER".into(),
+            ..Default::default()
+        });
+        let text = "BEFORE\u{FFFC}AFTER";
+        let host = Paragraph {
+            text: text.to_string(),
+            char_offsets: (0..text.chars().count() as u32).collect(),
+            controls: vec![Control::Table(Box::new(inner))],
+            ..Default::default()
+        };
+        let core = core_with_body_table(one_cell_table(host));
+        let (markdown, _) = core
+            .extract_page_markdown_with_images_native(0)
+            .expect("markdown");
+        assert!(
+            !markdown.contains('\u{FFFC}'),
+            "object replacement must not leak: {markdown:?}"
+        );
+        assert!(markdown.contains("BEFORE"), "{markdown}");
+        assert!(markdown.contains("AFTER"), "{markdown}");
+        assert!(markdown.contains("INNER"), "{markdown}");
+    }
+
+    #[test]
+    fn nested_table_markdown_stops_at_export_tables_depth() {
+        let mut table = one_cell_table(Paragraph {
+            text: "LEAF".into(),
+            ..Default::default()
+        });
+        for depth in (0..12).rev() {
+            let label = format!("L{depth}\u{FFFC}");
+            table = one_cell_table(Paragraph {
+                text: label.clone(),
+                char_offsets: (0..label.chars().count() as u32).collect(),
+                controls: vec![Control::Table(Box::new(table))],
+                ..Default::default()
+            });
+        }
+        let core = core_with_body_table(table);
+        let (markdown, _) = core
+            .extract_page_markdown_with_images_native(0)
+            .expect("markdown");
+        assert!(
+            !markdown.contains('\u{FFFC}'),
+            "object replacement must not leak: {markdown:?}"
+        );
+        let headings = markdown.matches("**하위 표").count();
+        assert!(
+            headings <= 8,
+            "nested expansion must cap at export-tables depth: {headings} {markdown}"
+        );
+        assert!(markdown.contains("L0"), "{markdown}");
     }
 }

@@ -41,6 +41,7 @@ fn nested_tables_keep_cell_text_and_order() {
         "{markdown}"
     );
     assert!(markdown.contains("| DEEP VALUE |"), "{markdown}");
+    assert!(!markdown.contains('\u{FFFC}'), "{markdown}");
     assert!(!markdown.contains("<table>"), "{markdown}");
     assert!(!markdown.contains("<td>"), "{markdown}");
 }
