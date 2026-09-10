@@ -111,7 +111,7 @@ test('TemplateStore publishes a Windows blob over an existing destination', asyn
   });
   assert.equal(replaced.revision, 2);
   assert.deepEqual((await store.read(added.id)).bytes, HWPX);
-  assert.equal(await fs.readFile(nextBlob).then((bytes) => bytes.equals(HWPX)), true);
+  assert.deepEqual(await fs.readFile(nextBlob), HWPX);
 });
 
 test('TemplateStore restores Windows metadata left at the replacement gap', async (t) => {

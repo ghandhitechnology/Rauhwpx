@@ -671,7 +671,10 @@ export class TemplateStore {
       await handle.sync();
       await handle.close();
       handle = null;
-      await this.fileOperations.rename(temp, destination);
+      await replaceFileAtomically(temp, destination, {
+        platform: this.platform,
+        fsApi: this.fileOperations,
+      });
     } finally {
       await handle?.close().catch(() => {});
       await fs.unlink(temp).catch(() => {});
