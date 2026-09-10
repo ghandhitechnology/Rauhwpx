@@ -42,6 +42,24 @@ function directoryReplaceError(targetPath) {
   return error;
 }
 
+function rollbackFailedError(error, rollbackError, previous, tempPath) {
+  const failure = new AggregateError(
+    [error, rollbackError],
+    `Windows file replacement failed; the previous value remains at ${previous}`,
+  );
+  failure.code = 'FILE_REPLACE_ROLLBACK_FAILED';
+  failure.backupPath = previous;
+  failure.tempPath = tempPath;
+  return failure;
+}
+
+async function removeReplacementBackup(fsImpl, filePath, platform, sleep) {
+  if (await isDirectory(fsImpl, filePath)) {
+    throw directoryReplaceError(filePath);
+  }
+  await retryWindows(() => fsImpl.rm(filePath, { force: true }), platform, sleep);
+}
+
 function dependencies(options = {}) {
   return {
     fsImpl: options.fsImpl ?? fs,
@@ -56,7 +74,7 @@ export async function recoverReplacedFile(targetPath, platform = process.platfor
   const previous = backupPath(targetPath);
   if (!await exists(fsImpl, previous)) return false;
   if (await exists(fsImpl, targetPath)) {
-    await retryWindows(() => fsImpl.rm(previous, { force: true }), platform, sleep).catch(() => {});
+    await removeReplacementBackup(fsImpl, previous, platform, sleep).catch(() => {});
     return false;
   }
   await retryWindows(() => fsImpl.rename(previous, targetPath), platform, sleep);
@@ -103,6 +121,20 @@ export async function replaceFile(tempPath, targetPath, platform = process.platf
     }
   }
 
+  if (moved && await isDirectory(fsImpl, previous)) {
+    try {
+      await retryWindows(() => fsImpl.rename(previous, targetPath), platform, sleep);
+    } catch (restoreError) {
+      throw rollbackFailedError(
+        directoryReplaceError(targetPath),
+        restoreError,
+        previous,
+        tempPath,
+      );
+    }
+    throw directoryReplaceError(targetPath);
+  }
+
   try {
     await retryWindows(() => fsImpl.rename(tempPath, targetPath), platform, sleep);
   } catch (error) {
@@ -115,21 +147,12 @@ export async function replaceFile(tempPath, targetPath, platform = process.platf
       }
     }
     if (!rollbackError) await fsImpl.rm(tempPath, { force: true }).catch(() => {});
-    if (rollbackError) {
-      const failure = new AggregateError(
-        [error, rollbackError],
-        `Windows file replacement failed; the previous value remains at ${previous}`,
-      );
-      failure.code = 'FILE_REPLACE_ROLLBACK_FAILED';
-      failure.backupPath = previous;
-      failure.tempPath = tempPath;
-      throw failure;
-    }
+    if (rollbackError) throw rollbackFailedError(error, rollbackError, previous, tempPath);
     throw error;
   }
 
   if (moved) {
-    await retryWindows(() => fsImpl.rm(previous, { force: true }), platform, sleep).catch(() => {});
+    await removeReplacementBackup(fsImpl, previous, platform, sleep).catch(() => {});
   }
 }
 
