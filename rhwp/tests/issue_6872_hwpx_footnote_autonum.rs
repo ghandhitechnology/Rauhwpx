@@ -1,7 +1,4 @@
 //! Issue #6872: HWPX 저장이 각주 numbering 토큰과 빈 장식 문자를 원본대로 보존한다.
-//!
-//! 파서가 `ON_PAGE` 와 `RESTART_PAGE` 를 둘 다 받으므로 rhwp 자기 왕복은 통과한다.
-//! 한글은 `RESTART_*` 를 연속 번호로 떨어뜨리고, 빈 `suffixChar` 를 `)` 로 되돌린다.
 
 use std::io::Read;
 

@@ -561,8 +561,6 @@ fn render_note_line_spacing(shape: &crate::model::footnote::FootnoteShape) -> (S
     (note_line, note_spacing)
 }
 
-/// FootnoteNumbering → HWPX `type` 토큰.
-///
 /// 한컴 원본은 `ON_PAGE`/`ON_SECTION` 만 쓴다. `RESTART_*` 는 rhwp 파서가 받아도
 /// 한글은 연속 번호로 떨어진다.
 fn note_numbering_str(numbering: crate::model::footnote::FootnoteNumbering) -> &'static str {

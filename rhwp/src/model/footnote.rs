@@ -90,9 +90,6 @@ pub struct FootnoteShape {
     /// HWP5 미문서화 2바이트. 한컴 UI의 "주석 사이" 값으로 사용된다.
     pub raw_unknown: u16,
     /// HWPX `<hp:autoNumFormat>` 장식 문자를 원본에서 읽었는지.
-    ///
-    /// `'\0'` 만으로는 원본이 명시한 빈 값과 IR 미설정(#2742 템플릿 `)`)을 구분하지 못한다.
-    /// HWPX 파서만 `true` 로 세운다. HWP5/HWP3 경로는 종전 폴백을 쓴다.
     pub deco_chars_from_source: bool,
 }
 
