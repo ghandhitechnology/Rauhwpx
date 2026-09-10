@@ -7,6 +7,7 @@ import path from 'node:path';
 import {
   recoverInterruptedFileReplacement,
   replaceFileAtomically,
+  retryLockedOperation,
 } from './harness-update.mjs';
 import {
   MAX_EXTRACTED_CHARS as MAX_EXTRACTED_CHARS_PER_FILE,
@@ -325,7 +326,7 @@ async function pathIsPlainFile(file) {
   }
 }
 
-async function atomicWriteJson(file, value, { onRetainedTemp = null } = {}) {
+async function atomicWriteJson(file, value, { onRetainedTemp = null, platform = process.platform } = {}) {
   const temp = `${file}.tmp-${process.pid}-${crypto.randomUUID()}`;
   const serialized = `${JSON.stringify(value)}\n`;
   let handle;
@@ -335,7 +336,7 @@ async function atomicWriteJson(file, value, { onRetainedTemp = null } = {}) {
     await handle.sync();
     await handle.close();
     handle = null;
-    await replaceFileAtomically(temp, file);
+    await replaceFileAtomically(temp, file, { platform });
   } finally {
     await handle?.close().catch(() => undefined);
     await fs.unlink(temp).catch((error) => {
@@ -345,6 +346,26 @@ async function atomicWriteJson(file, value, { onRetainedTemp = null } = {}) {
       }
     });
   }
+}
+
+export async function publishNewReferenceBlob(staging, blobPath, {
+  platform = process.platform,
+  rename = fs.rename,
+  lstat = fs.lstat,
+  delays,
+} = {}) {
+  if (platform !== 'win32') return rename(staging, blobPath);
+  try {
+    const stats = await lstat(blobPath);
+    if (stats.isDirectory()) {
+      const error = new Error(`Refusing to replace directory ${blobPath}`);
+      error.code = 'EISDIR';
+      throw error;
+    }
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
+  await retryLockedOperation(() => rename(staging, blobPath), { platform, delays });
 }
 
 function publicFile(record) {
@@ -534,7 +555,7 @@ export class ReferenceStore {
         if (error instanceof ReferenceStoreError) throw error;
         throw new ReferenceStoreError('REFERENCE_STORE_CORRUPT', `Could not read reference metadata: ${error?.message ?? error}`);
       }
-      await atomicWriteJson(this.metadataPath, this.metadata);
+      await atomicWriteJson(this.metadataPath, this.metadata, { platform: this.platform });
       this.metadataPhysicalBytes = Buffer.byteLength(JSON.stringify(this.metadata), 'utf8') + 1;
     }
     await this.#loadPhysicalObjects();
@@ -1160,6 +1181,7 @@ export class ReferenceStore {
       };
       await atomicWriteJson(this.#stagedMetadataPath(stageId), staged, {
         onRetainedTemp: (file, bytes) => this.#trackQuarantinedFile(file, bytes),
+        platform: this.platform,
       });
       await this.#exclusive(() => {
         if (this.stagedFiles.has(stageId)) {
@@ -1593,6 +1615,7 @@ export class ReferenceStore {
     this.#assertUsageWithinLimits(usage);
     await this.persistMetadata(this.metadataPath, this.metadata, {
       onRetainedTemp: (file, bytes) => this.#trackQuarantinedFile(file, bytes),
+      platform: this.platform,
     });
     this.metadataPhysicalBytes = serializedBytes;
   }
@@ -1732,11 +1755,12 @@ export class ReferenceStore {
         if (!objectExisted) {
           await atomicWriteJson(objectPath, object, {
             onRetainedTemp: (file, bytes) => this.#trackQuarantinedFile(file, bytes),
+            platform: this.platform,
           });
         }
         try {
           if (blobExisted) await this.#unlinkOrQuarantine(staging, size, { coveredByStageId: transferStageId });
-          else await fs.rename(staging, blobPath);
+          else await publishNewReferenceBlob(staging, blobPath, { platform: this.platform });
         } catch (error) {
           if (!objectExisted) await this.#unlinkOrQuarantine(objectPath, objectBytes);
           throw error;

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -7,6 +8,7 @@ import test from 'node:test';
 import {
   ReferenceStore,
   ReferenceStoreError,
+  publishNewReferenceBlob,
   sanitizeReferenceName,
   scopesForReferenceSession,
   tokenizeReferenceText,
@@ -73,6 +75,97 @@ test('Windows startup recovers reference metadata left at the replacement gap', 
 
   const recovered = await new ReferenceStore({ root, platform: 'win32' }).init();
   assert.equal(recovered.list({ scope: 'chat', scopeId: 'recover-chat' })[0].id, added.id);
+});
+
+test('injected win32 persist deletes leftover metadata.json.previous-write', async (t) => {
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-reference-win32-persist-'));
+  t.after(() => fs.rm(parent, { recursive: true, force: true }));
+  const root = path.join(parent, 'references');
+  const store = await new ReferenceStore({ root, platform: 'win32' }).init();
+  await store.addBuffer({
+    scope: 'chat', scopeId: 'win32-persist', name: 'one.txt', bytes: Buffer.from('first file'),
+  });
+  const leftover = `${store.metadataPath}.previous-write`;
+  await fs.writeFile(leftover, 'stale-backup');
+  await store.addBuffer({
+    scope: 'chat', scopeId: 'win32-persist', name: 'two.txt', bytes: Buffer.from('second file'),
+  });
+  await assert.rejects(fs.access(leftover), { code: 'ENOENT' });
+  const metadata = JSON.parse(await fs.readFile(store.metadataPath, 'utf8'));
+  assert.equal(metadata.schemaVersion, 1);
+  assert.deepEqual(metadata.files.map((file) => file.name), ['one.txt', 'two.txt']);
+  assert.equal(store.list({ scope: 'chat', scopeId: 'win32-persist' }).length, 2);
+});
+
+test('blob publish retries a locked first rename on win32 then succeeds', async (t) => {
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-reference-blob-retry-'));
+  t.after(() => fs.rm(parent, { recursive: true, force: true }));
+  const staging = path.join(parent, 'staging.bin');
+  const blobPath = path.join(parent, 'blob.bin');
+  await fs.writeFile(staging, 'published-bytes');
+  let attempts = 0;
+  const rename = async (from, to) => {
+    attempts += 1;
+    if (attempts === 1) throw Object.assign(new Error('locked'), { code: 'EPERM' });
+    return fs.rename(from, to);
+  };
+  await publishNewReferenceBlob(staging, blobPath, { platform: 'win32', delays: [0], rename });
+  assert.equal(await fs.readFile(blobPath, 'utf8'), 'published-bytes');
+  await assert.rejects(fs.access(staging), { code: 'ENOENT' });
+  assert.equal(attempts, 2);
+
+  const unixStaging = path.join(parent, 'unix-staging.bin');
+  await fs.writeFile(unixStaging, 'unix-bytes');
+  let unixAttempts = 0;
+  const unixRename = async (from, to) => {
+    unixAttempts += 1;
+    if (unixAttempts === 1) throw Object.assign(new Error('locked'), { code: 'EPERM' });
+    return fs.rename(from, to);
+  };
+  await assert.rejects(
+    publishNewReferenceBlob(unixStaging, path.join(parent, 'unix-blob.bin'), {
+      platform: 'linux',
+      rename: unixRename,
+    }),
+    (error) => error.code === 'EPERM',
+  );
+  assert.equal(unixAttempts, 1);
+  assert.equal(await fs.readFile(unixStaging, 'utf8'), 'unix-bytes');
+});
+
+test('blob publish refuses a directory target on win32 and leaves staging', async (t) => {
+  const parent = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-reference-blob-dir-'));
+  t.after(() => fs.rm(parent, { recursive: true, force: true }));
+  const blobPath = path.join(parent, 'blob-dir');
+  const staging = path.join(parent, 'staging.bin');
+  await fs.mkdir(blobPath);
+  await fs.writeFile(path.join(blobPath, 'inside.txt'), 'keep');
+  await fs.writeFile(staging, 'new');
+  await assert.rejects(
+    publishNewReferenceBlob(staging, blobPath, { platform: 'win32' }),
+    { code: 'EISDIR' },
+  );
+  assert.equal(await fs.readFile(path.join(blobPath, 'inside.txt'), 'utf8'), 'keep');
+  await assert.rejects(fs.access(`${blobPath}.previous-write`), { code: 'ENOENT' });
+  assert.equal(await fs.readFile(staging, 'utf8'), 'new');
+
+  const store = await new ReferenceStore({
+    root: path.join(parent, 'references'),
+    platform: 'win32',
+  }).init();
+  const bytes = Buffer.from('dir-collision-bytes');
+  const digest = crypto.createHash('sha256').update(bytes).digest('hex');
+  const blobDir = path.join(store.blobsDir, digest);
+  await fs.mkdir(blobDir);
+  await fs.writeFile(path.join(blobDir, 'inside.txt'), 'keep');
+  await assert.rejects(
+    store.addBuffer({
+      scope: 'chat', scopeId: 'blob-dir', name: 'notes.txt', bytes,
+    }),
+    (error) => error.code === 'EISDIR',
+  );
+  assert.equal(await fs.readFile(path.join(blobDir, 'inside.txt'), 'utf8'), 'keep');
+  assert.deepEqual(store.list({ scope: 'chat', scopeId: 'blob-dir' }), []);
 });
 
 test('staged message files consume chat quota, survive restart, and promote in place', async (t) => {
