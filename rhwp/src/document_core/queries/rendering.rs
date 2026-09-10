@@ -5857,8 +5857,26 @@ impl DocumentCore {
             },
         }
 
-        fn collect_line_text(node: &RenderNode, out: &mut String, has_token: &mut bool) {
+        fn collect_line_text(
+            node: &RenderNode,
+            out: &mut String,
+            has_token: &mut bool,
+            items: &mut Vec<MarkdownItem>,
+        ) {
             match &node.node_type {
+                RenderNodeType::Image(image_node) => {
+                    if *has_token {
+                        items.push(MarkdownItem::Line(std::mem::take(out)));
+                        *has_token = false;
+                    }
+                    items.push(MarkdownItem::Image {
+                        sec_idx: image_node.section_index,
+                        para_idx: image_node.para_index,
+                        control_idx: image_node.control_index,
+                        bin_data_id: image_node.bin_data_id,
+                    });
+                    return;
+                }
                 RenderNodeType::TextRun(tr) => {
                     // 사람이 읽을 문자열이므로 표시 텍스트를 쓴다 — 머리말 필드는
                     // 모델에 제어문자 1자라 그대로 내보내면 값이 사라진다 (Task #3216).
@@ -5882,7 +5900,7 @@ impl DocumentCore {
             }
 
             for child in &node.children {
-                collect_line_text(child, out, has_token);
+                collect_line_text(child, out, has_token, items);
             }
         }
 
@@ -5894,18 +5912,71 @@ impl DocumentCore {
                 .to_string()
         }
 
-        fn table_cell_text(cell: &crate::model::table::Cell) -> String {
+        fn table_cell_text(
+            cell: &crate::model::table::Cell,
+            table_id: &str,
+            nested_tables: &mut Vec<String>,
+        ) -> String {
             let mut parts: Vec<String> = Vec::new();
             for para in &cell.paragraphs {
-                let txt = para.text.trim();
-                if !txt.is_empty() {
-                    parts.push(markdown_escape_cell(txt));
+                if para
+                    .controls
+                    .iter()
+                    .any(|ctrl| matches!(ctrl, Control::Table(_)))
+                {
+                    let chars: Vec<char> = para.text.chars().collect();
+                    let positions = para.control_text_positions();
+                    let mut cursor = 0;
+                    let mut content = String::new();
+                    for (index, control) in para.controls.iter().enumerate() {
+                        let insertion = match control {
+                            Control::Table(table) => {
+                                let child_id = format!("{}-{}", table_id, nested_tables.len() + 1);
+                                let markdown = table_to_markdown(table, &child_id);
+                                nested_tables.push(format!(
+                                    "**하위 표 {} — 표 {}의 {}행 {}열**\n\n{}",
+                                    child_id,
+                                    table_id,
+                                    usize::from(cell.row) + 1,
+                                    usize::from(cell.col) + 1,
+                                    markdown,
+                                ));
+                                format!("[하위 표 {} 참조]", child_id)
+                            }
+                            Control::Equation(equation) => markdown_escape_cell(&equation.script),
+                            _ => continue,
+                        };
+                        let position = positions
+                            .get(index)
+                            .copied()
+                            .unwrap_or(chars.len())
+                            .min(chars.len())
+                            .max(cursor);
+                        let text: String = chars[cursor..position].iter().collect();
+                        content.push_str(&markdown_escape_cell(&text));
+                        if !content.is_empty() {
+                            content.push(' ');
+                        }
+                        content.push_str(&insertion);
+                        content.push(' ');
+                        cursor = position;
+                    }
+                    let text: String = chars[cursor..].iter().collect();
+                    content.push_str(&markdown_escape_cell(&text));
+                    if !content.trim().is_empty() {
+                        parts.push(content.trim().to_string());
+                    }
+                } else {
+                    let txt = para.text.trim();
+                    if !txt.is_empty() {
+                        parts.push(markdown_escape_cell(txt));
+                    }
                 }
             }
             parts.join(" <br> ")
         }
 
-        fn table_to_markdown(table: &crate::model::table::Table) -> String {
+        fn table_to_markdown(table: &crate::model::table::Table, table_id: &str) -> String {
             let rows = table.row_count as usize;
             let cols = table.col_count as usize;
             if rows == 0 || cols == 0 {
@@ -5913,6 +5984,7 @@ impl DocumentCore {
             }
 
             let mut grid = vec![vec![String::new(); cols]; rows];
+            let mut nested_tables = Vec::new();
 
             for cell in &table.cells {
                 let r = cell.row as usize;
@@ -5920,7 +5992,7 @@ impl DocumentCore {
                 if r >= rows || c >= cols {
                     continue;
                 }
-                grid[r][c] = table_cell_text(cell);
+                grid[r][c] = table_cell_text(cell, table_id, &mut nested_tables);
             }
 
             let make_row = |cells: &[String]| -> String { format!("| {} |", cells.join(" | ")) };
@@ -5938,7 +6010,12 @@ impl DocumentCore {
             for row in grid.iter().skip(1) {
                 lines.push(make_row(row));
             }
-            lines.join("\n")
+            let mut markdown = lines.join("\n");
+            for nested in nested_tables {
+                markdown.push_str("\n\n");
+                markdown.push_str(&nested);
+            }
+            markdown
         }
 
         fn lookup_table<'a>(
@@ -5982,7 +6059,13 @@ impl DocumentCore {
                         table_node.control_index,
                     ) {
                         if let Some(table) = lookup_table(doc, si, pi, ci) {
-                            let md = table_to_markdown(table);
+                            let table_id = (items
+                                .iter()
+                                .filter(|item| matches!(item, MarkdownItem::Table(_)))
+                                .count()
+                                + 1)
+                            .to_string();
+                            let md = table_to_markdown(table, &table_id);
                             if !md.is_empty() {
                                 items.push(MarkdownItem::Table(md));
                             }
@@ -6008,7 +6091,7 @@ impl DocumentCore {
                     let mut line = String::new();
                     let mut has_token = false;
                     for child in &node.children {
-                        collect_line_text(child, &mut line, &mut has_token);
+                        collect_line_text(child, &mut line, &mut has_token, items);
                     }
                     if has_token {
                         items.push(MarkdownItem::Line(line));
