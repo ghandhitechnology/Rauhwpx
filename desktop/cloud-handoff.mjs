@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { recoverReplacedFile, replaceFile } from './fs-replace.mjs';
+import { recoverReplacedFile, replaceFile, retryWindows } from './fs-replace.mjs';
 
 export const CLOUD_HANDOFF_STATES = Object.freeze([
   'preparing',
@@ -118,6 +118,8 @@ export class CloudHandoffStore {
   #payloadRoot;
   #platform;
   #atomicWrite;
+  #rename;
+  #sleep;
   #records = new Map();
   #takeoverReceipts = new Map();
   #loaded = false;
@@ -125,13 +127,21 @@ export class CloudHandoffStore {
   #writeChain = Promise.resolve();
   #persistTimer = null;
 
-  constructor({ filePath, platform = process.platform, atomicWrite = atomicJsonWrite }) {
+  constructor({
+    filePath,
+    platform = process.platform,
+    atomicWrite = atomicJsonWrite,
+    rename = fs.rename,
+    sleep,
+  }) {
     if (!filePath) throw new Error('Cloud handoff store requires a file path');
     if (typeof atomicWrite !== 'function') throw new Error('Cloud handoff store requires an atomic writer');
     this.#filePath = filePath;
     this.#payloadRoot = path.join(path.dirname(filePath), 'pending-payloads');
     this.#platform = platform;
     this.#atomicWrite = atomicWrite;
+    this.#rename = rename;
+    this.#sleep = sleep;
   }
 
   load() {
@@ -206,7 +216,11 @@ export class CloudHandoffStore {
     } catch (error) {
       if (error?.code !== 'ENOENT') {
         const corrupt = `${this.#filePath}.corrupt-${Date.now()}`;
-        await fs.rename(this.#filePath, corrupt).catch(() => {});
+        await retryWindows(
+          () => this.#rename(this.#filePath, corrupt),
+          this.#platform,
+          this.#sleep,
+        ).catch(() => {});
       }
     }
     this.#loaded = true;
