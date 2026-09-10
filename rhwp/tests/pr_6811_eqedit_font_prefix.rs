@@ -17,13 +17,6 @@ fn font_switches_without_a_space() {
     check("rmd", "\\mathrm{d}");
     check("itx", "\\mathit{x}");
     check("boldv", "\\mathbf{v}");
-    // The literals above pin the value; this pins the contract, which is
-    // that the two spellings are interchangeable. Stated as an equivalence
-    // because a multi-character argument nests a `\text{…}` inside the
-    // font switch, and how the backend renders an identifier is a separate
-    // concern from whether the switch was recognised at all. The words are
-    // the ones the corpus carries: `rmAgCl(its)` for AgCl(s), `(itaq)` for
-    // the aqueous marker.
     for (unspaced, spaced) in [
         ("rmAgCl", "rm AgCl"),
         ("itaq", "it aq"),
@@ -36,9 +29,6 @@ fn font_switches_without_a_space() {
             "{unspaced:?} must convert as {spaced:?} does"
         );
     }
-    // Only a *leading* switch splits. `mu rmC` is two tokens in the source
-    // and stays two; the run-together `murmC` is one word the corpus means
-    // literally, and must not be mined for an interior `rm`.
     check("mu rmC", "\\mu \\mathrm{C}");
     check("murmC", "\\text{murmC}");
 }
