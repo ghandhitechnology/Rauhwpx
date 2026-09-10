@@ -1276,23 +1276,23 @@ impl LayoutEngine {
                         } else {
                             0.0
                         };
-                        let outer_x_for_box = self.compute_table_x_position(
-                            nested,
-                            nested_w,
-                            col_area,
-                            depth,
-                            host_alignment,
-                            host_margin_left,
-                            host_margin_right,
-                            inline_x_override,
-                            paper_w,
-                        ) + wrapper_left_inset;
                         let inner_area = LayoutRect {
                             x: col_area.x + wrapper_left_inset,
                             y: col_area.y,
                             width: col_area.width,
                             height: col_area.height,
                         };
+                        let outer_x_for_box = self.compute_table_x_position(
+                            nested,
+                            nested_w,
+                            &inner_area,
+                            depth,
+                            host_alignment,
+                            host_margin_left,
+                            host_margin_right,
+                            inline_x_override,
+                            paper_w,
+                        );
 
                         let y_end = self.layout_table_with_wrapper_margin(
                             tree,
@@ -12134,6 +12134,16 @@ mod wrapper_left_margin_unwrap_tests {
         inline_x_override: Option<f64>,
         native_hwp5: bool,
     ) -> BoundingBox {
+        layout_nested_bbox_with_body(wrapper, depth, inline_x_override, native_hwp5, None)
+    }
+
+    fn layout_nested_bbox_with_body(
+        wrapper: &Table,
+        depth: usize,
+        inline_x_override: Option<f64>,
+        native_hwp5: bool,
+        body_area: Option<(f64, f64, f64, f64)>,
+    ) -> BoundingBox {
         let eng = LayoutEngine::new(DEFAULT_DPI);
         eng.set_layout_profile(crate::model::provenance::LayoutCompatibilityProfile::new(
             false,
@@ -12142,6 +12152,9 @@ mod wrapper_left_margin_unwrap_tests {
             false,
             native_hwp5,
         ));
+        if let Some(body) = body_area {
+            eng.current_body_area.set(body);
+        }
         let mut tree = PageRenderTree::new(0, 800.0, 1100.0);
         let mut col_node = RenderNode::new(
             tree.next_id(),
@@ -12330,6 +12343,51 @@ mod wrapper_left_margin_unwrap_tests {
             (hwpx.x - COL_X).abs() < 0.001,
             "HWPX stored layout must keep its existing margin owner; got {}",
             hwpx.x
+        );
+    }
+
+    #[test]
+    fn page_and_paper_nested_do_not_inherit_wrapper_column_inset() {
+        let margin = hwpunit_to_px(WRAPPER_MARGIN_HU as i32, DEFAULT_DPI);
+        let mut page_nested = nested_body();
+        page_nested.common.horz_rel_to = HorzRelTo::Page;
+        let page = layout_nested_bbox_with_body(
+            &wrapper_table(
+                page_nested,
+                HorzRelTo::Column,
+                HorzAlign::Left,
+                WRAPPER_MARGIN_HU,
+            ),
+            0,
+            None,
+            true,
+            Some((0.0, 0.0, 600.0, 1000.0)),
+        );
+        assert!(
+            (page.x - 0.0).abs() < 0.001,
+            "Page nested must keep body origin, not wrapper inset; got {} inset={}",
+            page.x,
+            COL_X + margin
+        );
+
+        let mut paper_nested = nested_body();
+        paper_nested.common.horz_rel_to = HorzRelTo::Paper;
+        let paper = layout_nested_bbox(
+            &wrapper_table(
+                paper_nested,
+                HorzRelTo::Column,
+                HorzAlign::Left,
+                WRAPPER_MARGIN_HU,
+            ),
+            0,
+            None,
+            true,
+        );
+        assert!(
+            (paper.x - 0.0).abs() < 0.001,
+            "Paper nested must keep paper origin, not wrapper inset; got {} inset={}",
+            paper.x,
+            COL_X + margin
         );
     }
 }
