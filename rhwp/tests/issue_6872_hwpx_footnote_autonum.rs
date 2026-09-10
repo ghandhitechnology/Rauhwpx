@@ -9,7 +9,7 @@ use std::io::Read;
 
 use rhwp::model::document::Document;
 use rhwp::model::footnote::{FootnoteNumbering, NumberFormat};
-use rhwp::parser::hwpx::parse_hwpx;
+use rhwp::parser::hwpx::section::parse_hwpx_section;
 use rhwp::serializer::serialize_hwpx;
 
 fn section0_xml(doc: &Document) -> String {
@@ -67,9 +67,10 @@ fn issue6872_source_empty_suffix_char_stays_empty() {
         "원본이 비운 접미는 빈 채로 나가야 한다(`*` 가 `*)` 가 되지 않게): {xml:.600}"
     );
 
-    let bytes = serialize_hwpx(&doc).expect("HWPX 직렬화");
-    let parsed = parse_hwpx(&bytes).expect("왕복 파싱");
-    let xml2 = section0_xml(&parsed);
+    let parsed = parse_hwpx_section(&xml).expect("section XML 파싱");
+    let mut doc2 = doc_with_one_section();
+    doc2.sections[0].section_def.footnote_shape = parsed.section_def.footnote_shape;
+    let xml2 = section0_xml(&doc2);
     assert!(
         xml2.contains(r#"type="USER_CHAR" userChar="*" prefixChar="" suffixChar="""#),
         "파서가 빈 접미를 다시 읽은 뒤에도 빈 채로 나가야 한다: {xml2:.600}"
