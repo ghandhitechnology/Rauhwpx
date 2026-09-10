@@ -1,12 +1,4 @@
-//! [parser] `LenientCfbReader` 가 CFB 스트림을 경로가 아니라 이름으로 찾던 회귀.
-//!
-//! `BodyText/Section0` 과 `ViewText/Section0` 은 이름이 같다. 종전 `find_entry_idx` 는
-//! 경로의 마지막 세그먼트만 떼어 전체 엔트리에서 첫 일치를 돌려주었으므로, 명시적으로
-//! `/BodyText/Section0` 을 물어도 디렉터리에 먼저 나오는 `ViewText/Section0` 이 왔다.
-//!
-//! 계약: 두 경로는 서로 다른 스트림으로 풀려야 하고, 본문 헬퍼는 BodyText 를 줘야 한다.
-//! #5169 의 배포 문서 ViewText 우선 규칙은 이 테스트가 건드리지 않는다.
-
+//! Port of edwardkim/rhwp #6885.
 #![cfg(not(target_arch = "wasm32"))]
 
 use rhwp::parser::cfb_reader::LenientCfbReader;
@@ -32,8 +24,7 @@ fn small_cfb(streams: &[(&str, &[u8])]) -> Vec<u8> {
     cfb.into_inner().into_inner()
 }
 
-fn colliding_section_cfb() -> Vec<u8> {
-    // ViewText 를 먼저 만들어 디렉터리에서 Section0 이 그쪽이 먼저 나오게 한다.
+fn cfb_with_view_text_section_listed_before_body_text() -> Vec<u8> {
     small_cfb(&[("/ViewText/Section0", VIEW), ("/BodyText/Section0", BODY)])
 }
 
@@ -49,7 +40,7 @@ fn set_u32(bytes: &mut [u8], offset: usize, value: u32) {
 
 #[test]
 fn lenient_cfb_resolves_same_named_streams_by_path() {
-    let data = colliding_section_cfb();
+    let data = cfb_with_view_text_section_listed_before_body_text();
     let lenient = LenientCfbReader::open(&data).expect("lenient open");
 
     let same_named = lenient
@@ -80,7 +71,7 @@ fn lenient_cfb_resolves_same_named_streams_by_path() {
 
 #[test]
 fn lenient_body_text_section_reads_bodytext_storage() {
-    let data = colliding_section_cfb();
+    let data = cfb_with_view_text_section_listed_before_body_text();
     let lenient = LenientCfbReader::open(&data).expect("lenient open");
 
     let raw = lenient
@@ -118,7 +109,7 @@ fn lenient_cfb_broken_child_link_recovers_only_unique_names() {
     let reader = LenientCfbReader::open(&bytes).unwrap();
     assert_eq!(reader.read_file_header().unwrap(), b"valid header");
 
-    let mut bytes = colliding_section_cfb();
+    let mut bytes = cfb_with_view_text_section_listed_before_body_text();
     let dir = directory_offset(&bytes);
     set_u32(&mut bytes, dir + 76, 10_000);
     let reader = LenientCfbReader::open(&bytes).unwrap();

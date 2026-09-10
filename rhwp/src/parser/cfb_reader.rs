@@ -853,8 +853,6 @@ pub struct LenientCfbReader {
     sector_size: usize,
     /// Directory entries: (name, start_sector, size, obj_type)
     entries: Vec<(String, u32, u64, u8)>,
-    /// 원본 directory ID를 보존한 엔트리. 경로가 중요한 ViewText는 이 트리를 따라
-    /// 찾아야 `BodyText/SectionN`과 이름만 같은 스트림을 혼동하지 않는다.
     directory_entries: Vec<LenientDirectoryEntry>,
     /// FAT table
     fat: Vec<u32>,
@@ -1236,12 +1234,6 @@ impl LenientCfbReader {
         result
     }
 
-    /// 디렉토리 경로로 엔트리 id(= `directory_entries` 인덱스)를 찾는다.
-    /// 경로 형식: "FileHeader", "/DocInfo", "/BodyText/Section0" 등
-    ///
-    /// 스토리지를 실제로 따라간다. 이름만 비교하면 `BodyText/Section0` 과
-    /// `ViewText/Section0` 처럼 이름이 같은 스트림을 가진 문서에서 디렉터리에
-    /// 먼저 나오는 쪽이 잡힌다(변경 추적 문서 등에서 실제로 발생).
     fn find_entry_id(&self, path: &str) -> Option<usize> {
         let parts: Vec<&str> = path
             .trim_start_matches('/')
@@ -1250,7 +1242,6 @@ impl LenientCfbReader {
             .collect();
         let (last, parents) = parts.split_last()?;
 
-        // 1) 정상 CFB: 루트에서 세그먼트마다 자식으로 내려간다.
         if let Some(root_id) = self
             .directory_entries
             .iter()
@@ -1262,8 +1253,6 @@ impl LenientCfbReader {
                     .and_then(|id| self.find_child_entry_by_name(id, segment))
                     .filter(|&id| self.directory_entries[id].obj_type == 1);
             }
-            // 손상된 링크가 이름만 남은 삭제 슬롯을 가리킬 수 있다.
-            // 무효 entry는 채택하지 않고 아래의 유일 이름 복구를 시도한다.
             if let Some(id) = current
                 .and_then(|id| self.find_child_entry_by_name(id, last))
                 .filter(|&id| matches!(self.directory_entries[id].obj_type, 1 | 2 | 5))
@@ -1272,9 +1261,6 @@ impl LenientCfbReader {
             }
         }
 
-        // 2) lenient 폴백: 디렉터리 트리가 깨진 입력은 이름으로 찾는다.
-        //    단 같은 이름이 둘 이상이면 어느 쪽이 맞는지 알 수 없으므로 고르지 않는다
-        //    (잘못된 스트림을 조용히 읽느니 없다고 답한다).
         let mut found = None;
         for (id, entry) in self.directory_entries.iter().enumerate() {
             if entry.name == *last && matches!(entry.obj_type, 1 | 2 | 5) {
@@ -1287,7 +1273,6 @@ impl LenientCfbReader {
         found
     }
 
-    /// 본문 섹션 스트림 경로. strict `CfbReader::read_body_text_section` 과 같은 규칙.
     fn body_text_section_path(&self, index: u32) -> String {
         let bodytext_path = format!("/BodyText/Section{}", index);
         if self.has_stream(&bodytext_path) {
@@ -1489,7 +1474,6 @@ impl LenientCfbReader {
     }
 
     /// 일반 BodyText 섹션의 원본을 caller 제공 상한까지 읽는다.
-    /// strict `CfbReader::read_body_text_section_limited` 와 같은 경로 규칙.
     pub fn read_body_text_section_raw_limited(
         &self,
         index: u32,
