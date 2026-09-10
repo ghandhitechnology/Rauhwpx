@@ -25,6 +25,27 @@ import { terminateProcessTree } from '../process-tree.mjs';
 import { createIpcSecretStore } from '../secret-store.mjs';
 import { setupFailureMessage, shouldUseNpmNetworkPath } from '../setup-errors.mjs';
 
+function errorWithCode(code) {
+  return Object.assign(new Error(code), { code });
+}
+
+function rmFileOnly(filePath, options) {
+  if (options?.recursive) throw new Error(`recursive rm is forbidden for ${filePath}`);
+  return fs.rm(filePath, options);
+}
+
+function lyingLstatFs(target, overrides = {}) {
+  return {
+    lstat: (filePath) => (filePath === target
+      ? Promise.resolve({ isDirectory: () => false, isFile: () => true })
+      : fs.lstat(filePath)),
+    access: (...args) => fs.access(...args),
+    rename: (...args) => fs.rename(...args),
+    rm: rmFileOnly,
+    ...overrides,
+  };
+}
+
 test('the bundled npm launcher uses the current Node-compatible executable', () => {
   const launch = bundledNpmLaunch({ nodeCommand: 'Rauhwpx.exe' });
   assert.equal(launch.command, 'Rauhwpx.exe');
@@ -160,6 +181,80 @@ test('Windows replacement recovery does not publish over a restored directory ba
   assert.equal(await fs.readFile(temp, 'utf8'), 'new');
 });
 
+test('Windows file replacement restores a directory that appears between lstat and rename', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-file-replace-dir-race-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const target = path.join(root, 'state.json');
+  const temp = path.join(root, 'state.tmp');
+  const previous = `${target}.previous-write`;
+  await fs.mkdir(target);
+  await fs.writeFile(path.join(target, 'inside.txt'), 'keep');
+  await fs.writeFile(temp, 'new');
+
+  await assert.rejects(
+    replaceFileAtomically(temp, target, { platform: 'win32', fsApi: lyingLstatFs(target) }),
+    { code: 'EISDIR' },
+  );
+  assert.equal(await fs.readFile(path.join(target, 'inside.txt'), 'utf8'), 'keep');
+  await assert.rejects(fs.access(previous), { code: 'ENOENT' });
+  assert.equal(await fs.readFile(temp, 'utf8'), 'new');
+});
+
+test('Windows file replacement leaves a raced directory stranded when restore fails', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-file-replace-dir-stranded-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const target = path.join(root, 'state.json');
+  const temp = path.join(root, 'state.tmp');
+  const previous = `${target}.previous-write`;
+  await fs.mkdir(target);
+  await fs.writeFile(path.join(target, 'inside.txt'), 'keep');
+  await fs.writeFile(temp, 'new');
+  const fsApi = lyingLstatFs(target, {
+    async rename(from, to) {
+      if (from === previous && to === target) throw errorWithCode('EIO');
+      return fs.rename(from, to);
+    },
+  });
+
+  await assert.rejects(
+    replaceFileAtomically(temp, target, { platform: 'win32', fsApi }),
+    (error) => error instanceof AggregateError
+      && error.code === 'FILE_REPLACE_ROLLBACK_FAILED'
+      && error.backupPath === previous
+      && error.tempPath === temp
+      && error.errors[0].code === 'EISDIR'
+      && error.errors[1].code === 'EIO',
+  );
+  assert.equal(await fs.readFile(path.join(previous, 'inside.txt'), 'utf8'), 'keep');
+  await assert.rejects(fs.access(target), { code: 'ENOENT' });
+  assert.equal(await fs.readFile(temp, 'utf8'), 'new');
+});
+
+test('Windows file replacement refuses a directory left in the backup slot before moving the target aside', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-file-replace-dir-backup-slot-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const target = path.join(root, 'state.json');
+  const temp = path.join(root, 'state.tmp');
+  const previous = `${target}.previous-write`;
+  await fs.writeFile(target, 'old');
+  await fs.mkdir(previous);
+  await fs.writeFile(path.join(previous, 'inside.txt'), 'keep');
+  await fs.writeFile(temp, 'new');
+  const fsApi = {
+    access: (...args) => fs.access(...args),
+    rename: (...args) => fs.rename(...args),
+    rm: rmFileOnly,
+  };
+
+  await assert.rejects(
+    replaceFileAtomically(temp, target, { platform: 'win32', fsApi }),
+    { code: 'EISDIR' },
+  );
+  assert.equal(await fs.readFile(target, 'utf8'), 'old');
+  assert.equal(await fs.readFile(path.join(previous, 'inside.txt'), 'utf8'), 'keep');
+  assert.equal(await fs.readFile(temp, 'utf8'), 'new');
+});
+
 test('a stale Windows backup cleanup cannot turn a committed replacement into failure', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-file-replace-cleanup-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -186,6 +281,39 @@ test('a stale Windows backup cleanup cannot turn a committed replacement into fa
   assert.equal(await fs.readFile(previous, 'utf8'), 'old');
 });
 
+test('a failed Windows publish rollback reports where the previous file is', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-file-replace-rollback-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const target = path.join(root, 'state.json');
+  const temp = path.join(root, 'state.tmp');
+  const previous = `${target}.previous-write`;
+  await fs.writeFile(target, 'old');
+  await fs.writeFile(temp, 'new');
+  const fsApi = {
+    access: (...args) => fs.access(...args),
+    async rename(from, to) {
+      if (to === target) throw errorWithCode('EIO');
+      return fs.rename(from, to);
+    },
+    rm: rmFileOnly,
+  };
+
+  await assert.rejects(
+    replaceFileAtomically(temp, target, { platform: 'win32', fsApi }),
+    (error) => error.code === 'FILE_REPLACE_ROLLBACK_FAILED'
+      && error.backupPath === previous
+      && error.tempPath === temp
+      && error.errors[0].code === 'EIO',
+  );
+  assert.equal(await fs.readFile(previous, 'utf8'), 'old');
+  await assert.rejects(fs.access(target), { code: 'ENOENT' });
+  assert.equal(await fs.readFile(temp, 'utf8'), 'new');
+
+  assert.equal(await recoverInterruptedFileReplacement(target, { platform: 'win32' }), true);
+  assert.equal(await fs.readFile(target, 'utf8'), 'old');
+  await assert.rejects(fs.access(previous), { code: 'ENOENT' });
+});
+
 test('Windows replacement recovery restores a backup left at the rename gap', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-file-replace-recovery-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -199,6 +327,20 @@ test('Windows replacement recovery restores a backup left at the rename gap', as
   );
   assert.equal(await fs.readFile(target, 'utf8'), 'recover me');
   await assert.rejects(fs.access(previous), { code: 'ENOENT' });
+});
+
+test('Windows replacement recovery does not recursively delete a leftover directory backup', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-file-replace-dir-leftover-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const target = path.join(root, 'state.json');
+  const previous = `${target}.previous-write`;
+  await fs.writeFile(target, 'new');
+  await fs.mkdir(previous);
+  await fs.writeFile(path.join(previous, 'inside.txt'), 'keep');
+
+  assert.equal(await recoverInterruptedFileReplacement(target, { platform: 'win32' }), false);
+  assert.equal(await fs.readFile(target, 'utf8'), 'new');
+  assert.equal(await fs.readFile(path.join(previous, 'inside.txt'), 'utf8'), 'keep');
 });
 
 test('Windows deletion removes recovery state first and fails closed when it is locked', async (t) => {
@@ -229,6 +371,23 @@ test('Windows deletion removes recovery state first and fails closed when it is 
   await removeFileAndReplacementBackup(target, { platform: 'win32' });
   await assert.rejects(fs.access(target), { code: 'ENOENT' });
   await assert.rejects(fs.access(previous), { code: 'ENOENT' });
+});
+
+test('Windows deletion fails closed on a directory backup without recursion', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-file-delete-dir-backup-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const target = path.join(root, 'state.json');
+  const previous = `${target}.previous-write`;
+  await fs.writeFile(target, 'current');
+  await fs.mkdir(previous);
+  await fs.writeFile(path.join(previous, 'inside.txt'), 'keep');
+
+  await assert.rejects(
+    removeFileAndReplacementBackup(target, { platform: 'win32', fsApi: { rm: rmFileOnly } }),
+    { code: 'EISDIR' },
+  );
+  assert.equal(await fs.readFile(target, 'utf8'), 'current');
+  assert.equal(await fs.readFile(path.join(previous, 'inside.txt'), 'utf8'), 'keep');
 });
 
 test('setup errors give Windows-specific proxy, certificate, lock and path guidance', () => {
