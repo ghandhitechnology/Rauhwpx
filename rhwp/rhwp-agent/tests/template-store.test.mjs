@@ -75,6 +75,38 @@ test('concurrent template mutations preserve unique names and every committed re
   );
 });
 
+async function win32Rename(from, to) {
+  try {
+    await fs.lstat(to);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return fs.rename(from, to);
+    throw error;
+  }
+  throw Object.assign(new Error('rename over existing'), { code: 'EPERM' });
+}
+
+test('TemplateStore publishes a Windows blob over an existing destination', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-template-blob-overwrite-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const store = await new TemplateStore({
+    rootDir,
+    platform: 'win32',
+    fileOperations: { rename: win32Rename },
+  }).init();
+  const added = await store.add({
+    name: '덮어쓰기 보고서', originalName: 'report.hwp', bytes: HWP, pageCount: 1, sectionCount: 1,
+  });
+  const nextBlob = path.join(store.blobDir, `${added.id}-r2.hwpx`);
+  await fs.writeFile(nextBlob, HWP);
+
+  const replaced = await store.replace(added.id, {
+    originalName: 'report.hwpx', bytes: HWPX, pageCount: 2, sectionCount: 1,
+  });
+  assert.equal(replaced.revision, 2);
+  assert.deepEqual((await store.read(added.id)).bytes, HWPX);
+  assert.deepEqual(await fs.readFile(nextBlob), HWPX);
+});
+
 test('TemplateStore restores Windows metadata left at the replacement gap', async (t) => {
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-template-recovery-'));
   t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
