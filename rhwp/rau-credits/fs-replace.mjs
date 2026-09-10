@@ -121,18 +121,17 @@ export async function replaceFile(tempPath, targetPath, platform = process.platf
     }
   }
 
-  if (moved && await isDirectory(fsImpl, previous)) {
+  if (moved) {
     try {
-      await retryWindows(() => fsImpl.rename(previous, targetPath), platform, sleep);
-    } catch (restoreError) {
-      throw rollbackFailedError(
-        directoryReplaceError(targetPath),
-        restoreError,
-        previous,
-        tempPath,
-      );
+      if (await isDirectory(fsImpl, previous)) throw directoryReplaceError(targetPath);
+    } catch (error) {
+      try {
+        await retryWindows(() => fsImpl.rename(previous, targetPath), platform, sleep);
+      } catch (restoreError) {
+        throw rollbackFailedError(error, restoreError, previous, tempPath);
+      }
+      throw error;
     }
-    throw directoryReplaceError(targetPath);
   }
 
   try {
