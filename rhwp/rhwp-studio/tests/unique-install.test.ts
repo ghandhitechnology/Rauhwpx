@@ -137,7 +137,7 @@ test('Windows unique-install writes move the previous file aside instead of rena
   await withUserData(async (userDataDir) => {
     const filePath = path.join(userDataDir, UNIQUE_INSTALL_FILE);
     const ops = [];
-    const existing = { isFile: () => true };
+    const existing = { isFile: () => true, isDirectory: () => false };
     await writeUniqueInstallState(filePath, {
       installId: INSTALL_ID,
       recorded: true,
@@ -259,6 +259,22 @@ test('Windows unique-install writes do not recursively delete a leftover directo
     );
     assert.equal(await readFile(filePath, 'utf8'), `${JSON.stringify(RECORDED_STATE, null, 2)}\n`);
     assert.equal(await readFile(path.join(previous, 'inside.txt'), 'utf8'), 'keep');
+  });
+});
+
+test('Windows unique-install writes honor an injected statImpl when lstatImpl is omitted', async () => {
+  await withUserData(async (userDataDir) => {
+    const filePath = path.join(userDataDir, UNIQUE_INSTALL_FILE);
+    await writeFile(filePath, `${JSON.stringify(RECORDED_STATE, null, 2)}\n`);
+    await assert.rejects(
+      writeUniqueInstallState(filePath, RECORDED_STATE, {
+        platform: 'win32',
+        statImpl: async () => ({ isDirectory: () => true, isFile: () => false }),
+        rmImpl: rmFileOnly,
+      }),
+      { code: 'EISDIR' },
+    );
+    assert.equal(await readFile(filePath, 'utf8'), `${JSON.stringify(RECORDED_STATE, null, 2)}\n`);
   });
 });
 

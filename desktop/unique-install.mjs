@@ -1,5 +1,5 @@
 import { createHmac, randomUUID } from 'node:crypto';
-import { lstat, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import { rauCreditsUrl } from '../rhwp/rhwp-agent/rau-credits-client.mjs';
@@ -68,6 +68,10 @@ async function retryWindows(operation, platform) {
       await new Promise((resolve) => setTimeout(resolve, WINDOWS_LOCK_RETRY_MS[attempt]));
     }
   }
+}
+
+function typeStatImpl(lstatImpl, statImpl) {
+  return lstatImpl ?? statImpl ?? lstat;
 }
 
 async function lstatOrMissing(lstatImpl, filePath) {
@@ -165,8 +169,8 @@ export async function loadOrCreateUniqueInstallState(filePath, {
   writeFileImpl = writeFile,
   renameImpl = rename,
   rmImpl = rm,
-  statImpl = stat,
-  lstatImpl = lstat,
+  statImpl,
+  lstatImpl,
   randomUUIDImpl = randomUUID,
   platform = process.platform,
 } = {}) {
@@ -210,8 +214,8 @@ export async function writeUniqueInstallState(filePath, state, {
   writeFileImpl = writeFile,
   renameImpl = rename,
   rmImpl = rm,
-  statImpl = stat,
-  lstatImpl = lstat,
+  statImpl,
+  lstatImpl,
   platform = process.platform,
 } = {}) {
   const directory = dirname(filePath);
@@ -222,7 +226,7 @@ export async function writeUniqueInstallState(filePath, state, {
     await replaceUniqueInstallFile(temp, filePath, {
       renameImpl,
       rmImpl,
-      lstatImpl: lstatImpl ?? statImpl,
+      lstatImpl: typeStatImpl(lstatImpl, statImpl),
       platform,
     });
   } catch (error) {
@@ -275,8 +279,8 @@ export async function reportUniqueInstall({
   writeFileImpl = writeFile,
   renameImpl = rename,
   rmImpl = rm,
-  statImpl = stat,
-  lstatImpl = lstat,
+  statImpl,
+  lstatImpl,
   randomUUIDImpl = randomUUID,
   now = Date.now,
   platform = process.platform,
