@@ -776,7 +776,7 @@ fn load_bin_data_content_lenient(
             BinDataCompression::NoCompress => false,
         };
 
-        match lenient.read_stream_limited(&storage_name, member_limit) {
+        match lenient.read_stream_limited(&format!("/BinData/{storage_name}"), member_limit) {
             Ok(data) => {
                 let mut decompressed =
                     match decode_hwp_bin_data_stream(data, stream_compressed, member_limit) {
