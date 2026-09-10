@@ -60,6 +60,14 @@ async function removeReplacementBackup(fsImpl, filePath, platform, sleep) {
   await retryWindows(() => fsImpl.rm(filePath, { force: true }), platform, sleep);
 }
 
+async function restoreMovedTarget(error, fsImpl, previous, targetPath, tempPath, platform, sleep) {
+  try {
+    await retryWindows(() => fsImpl.rename(previous, targetPath), platform, sleep);
+  } catch (restoreError) {
+    throw rollbackFailedError(error, restoreError, previous, tempPath);
+  }
+}
+
 function dependencies(options = {}) {
   return {
     fsImpl: options.fsImpl ?? fs,
@@ -125,11 +133,7 @@ export async function replaceFile(tempPath, targetPath, platform = process.platf
     try {
       if (await isDirectory(fsImpl, previous)) throw directoryReplaceError(targetPath);
     } catch (error) {
-      try {
-        await retryWindows(() => fsImpl.rename(previous, targetPath), platform, sleep);
-      } catch (restoreError) {
-        throw rollbackFailedError(error, restoreError, previous, tempPath);
-      }
+      await restoreMovedTarget(error, fsImpl, previous, targetPath, tempPath, platform, sleep);
       throw error;
     }
   }
@@ -137,16 +141,8 @@ export async function replaceFile(tempPath, targetPath, platform = process.platf
   try {
     await retryWindows(() => fsImpl.rename(tempPath, targetPath), platform, sleep);
   } catch (error) {
-    let rollbackError = null;
-    if (moved) {
-      try {
-        await retryWindows(() => fsImpl.rename(previous, targetPath), platform, sleep);
-      } catch (caught) {
-        rollbackError = caught;
-      }
-    }
-    if (!rollbackError) await fsImpl.rm(tempPath, { force: true }).catch(() => {});
-    if (rollbackError) throw rollbackFailedError(error, rollbackError, previous, tempPath);
+    if (moved) await restoreMovedTarget(error, fsImpl, previous, targetPath, tempPath, platform, sleep);
+    await fsImpl.rm(tempPath, { force: true }).catch(() => {});
     throw error;
   }
 
