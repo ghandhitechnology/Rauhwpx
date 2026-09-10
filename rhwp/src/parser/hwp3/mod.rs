@@ -378,14 +378,22 @@ pub(crate) fn convert_para_shape(
     ps.spacing_after = hwp3_para_metric_u16_to_ir(hwp3_ps.margin_bottom);
     ps.spacing_before = hwp3_para_metric_u16_to_ir(hwp3_ps.margin_top);
     ps.alignment = match hwp3_ps.align {
-        0 => crate::model::style::Alignment::Justify,
+        0 | 6 => crate::model::style::Alignment::Justify,
         1 => crate::model::style::Alignment::Left,
         2 => crate::model::style::Alignment::Right,
         3 => crate::model::style::Alignment::Center,
         4 => crate::model::style::Alignment::Distribute,
-        5 => crate::model::style::Alignment::Split,
+        // [#6864] HWP3 정렬 필드는 0..=7이다. SO-SUEOP의 원값 7은
+        // 한컴 HWPX에서 DISTRIBUTE_SPACE로 변환된다. 6(sample11)은
+        // JUSTIFY이므로 머리말 전체를 Split으로 바꾸면 안 된다.
+        5 | 7 => crate::model::style::Alignment::Split,
         _ => crate::model::style::Alignment::Justify,
     };
+
+    // 한컴 HWPX 재변환에서 JUSTIFY와 원값 7(공백 분배)은 KEEP_WORD를 유지한다.
+    if matches!(ps.alignment, crate::model::style::Alignment::Justify) || hwp3_ps.align == 7 {
+        ps.attr1 |= 1 << 7;
+    }
 
     // [#2976] 문단 테두리 연결(인접 문단끼리 테두리를 이어 그릴지) 플래그.
     // 접근자 border_connection()은 있었으나 attr1 bit 28(HWPX 직렬화기·편집
