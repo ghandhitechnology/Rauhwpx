@@ -4330,6 +4330,25 @@ mod tests {
     }
 
     #[test]
+    fn hwp3_align_6_is_justify_and_7_is_split_with_keep_word() {
+        let mut doc_tab_defs = Vec::new();
+        for (align, expected) in [
+            (0u8, crate::model::style::Alignment::Justify),
+            (5, crate::model::style::Alignment::Split),
+            (6, crate::model::style::Alignment::Justify),
+            (7, crate::model::style::Alignment::Split),
+        ] {
+            let mut hwp3_ps = crate::parser::hwp3::records::Hwp3ParaShape::default();
+            hwp3_ps.align = align;
+            let ps = convert_para_shape(&hwp3_ps, &mut doc_tab_defs);
+            assert_eq!(ps.alignment, expected, "align={align}");
+            if align == 0 || align == 6 || align == 7 {
+                assert_ne!(ps.attr1 & (1 << 7), 0, "align={align}: KEEP_WORD");
+            }
+        }
+    }
+
+    #[test]
     fn test_convert_para_shape_wires_border_connection_into_attr1_bit28() {
         // [#2976] border_connection() 접근자는 있었으나 attr1 bit 28로 배선되지
         // 않아 항상 소실되던 결함의 회귀 테스트.
