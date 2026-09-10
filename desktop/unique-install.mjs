@@ -1,5 +1,5 @@
 import { createHmac, randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import { rauCreditsUrl } from '../rhwp/rhwp-agent/rau-credits-client.mjs';
@@ -70,29 +70,62 @@ async function retryWindows(operation, platform) {
   }
 }
 
-/** Windows cannot reliably rename over an existing file. Do not replace a directory. */
+function typeStatImpl(lstatImpl, statImpl) {
+  return lstatImpl ?? statImpl ?? lstat;
+}
+
+async function lstatOrMissing(lstatImpl, filePath) {
+  try {
+    return await lstatImpl(filePath);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function directoryReplaceError(targetPath) {
+  const error = new Error(`Refusing to replace directory ${targetPath}`);
+  error.code = 'EISDIR';
+  return error;
+}
+
+function rollbackFailedError(error, rollbackError, previous, tempPath) {
+  const failure = new AggregateError(
+    [error, rollbackError],
+    `Windows unique-install replacement failed; the previous value remains at ${previous}`,
+  );
+  failure.code = 'FILE_REPLACE_ROLLBACK_FAILED';
+  failure.backupPath = previous;
+  failure.tempPath = tempPath;
+  return failure;
+}
+
+async function removeUniqueInstallBackup(previous, { rmImpl, lstatImpl, platform }) {
+  const info = await lstatOrMissing(lstatImpl, previous);
+  if (info?.isDirectory()) throw directoryReplaceError(previous);
+  await retryWindows(() => rmImpl(previous, { force: true }), platform);
+}
+
+/** Windows cannot rename over an existing file. */
 async function replaceUniqueInstallFile(temp, filePath, {
   renameImpl,
   rmImpl,
-  statImpl,
+  lstatImpl,
   platform,
 }) {
   if (platform !== 'win32') {
     await renameImpl(temp, filePath);
     return;
   }
-  try {
-    const info = await statImpl(filePath);
-    if (!info.isFile()) {
-      throw Object.assign(new Error('unique install state is not a file'), {
-        code: 'UNIQUE_INSTALL_STATE_UNREADABLE',
-      });
-    }
-  } catch (error) {
-    if (error?.code !== 'ENOENT') throw error;
+  const live = await lstatOrMissing(lstatImpl, filePath);
+  if (live?.isDirectory()) throw directoryReplaceError(filePath);
+  if (live && !live.isFile()) {
+    throw Object.assign(new Error('unique install state is not a file'), {
+      code: 'UNIQUE_INSTALL_STATE_UNREADABLE',
+    });
   }
   const previous = `${filePath}.previous-write`;
-  await retryWindows(() => rmImpl(previous, { force: true }), platform);
+  await removeUniqueInstallBackup(previous, { rmImpl, lstatImpl, platform });
   let moved = false;
   try {
     await retryWindows(() => renameImpl(filePath, previous), platform);
@@ -100,15 +133,34 @@ async function replaceUniqueInstallFile(temp, filePath, {
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error;
   }
+  if (moved && (await lstatOrMissing(lstatImpl, previous))?.isDirectory()) {
+    try {
+      await retryWindows(() => renameImpl(previous, filePath), platform);
+    } catch (restoreError) {
+      throw rollbackFailedError(
+        directoryReplaceError(filePath),
+        restoreError,
+        previous,
+        temp,
+      );
+    }
+    throw directoryReplaceError(filePath);
+  }
   try {
     await retryWindows(() => renameImpl(temp, filePath), platform);
   } catch (error) {
     if (moved) {
-      await retryWindows(() => renameImpl(previous, filePath), platform).catch(() => {});
+      try {
+        await retryWindows(() => renameImpl(previous, filePath), platform);
+      } catch (restoreError) {
+        throw rollbackFailedError(error, restoreError, previous, temp);
+      }
     }
     throw error;
   }
-  await retryWindows(() => rmImpl(previous, { force: true }), platform).catch(() => {});
+  if (moved) {
+    await removeUniqueInstallBackup(previous, { rmImpl, lstatImpl, platform }).catch(() => {});
+  }
 }
 
 export async function loadOrCreateUniqueInstallState(filePath, {
@@ -117,7 +169,8 @@ export async function loadOrCreateUniqueInstallState(filePath, {
   writeFileImpl = writeFile,
   renameImpl = rename,
   rmImpl = rm,
-  statImpl = stat,
+  statImpl,
+  lstatImpl,
   randomUUIDImpl = randomUUID,
   platform = process.platform,
 } = {}) {
@@ -150,6 +203,7 @@ export async function loadOrCreateUniqueInstallState(filePath, {
     renameImpl,
     rmImpl,
     statImpl,
+    lstatImpl,
     platform,
   });
   return created;
@@ -160,7 +214,8 @@ export async function writeUniqueInstallState(filePath, state, {
   writeFileImpl = writeFile,
   renameImpl = rename,
   rmImpl = rm,
-  statImpl = stat,
+  statImpl,
+  lstatImpl,
   platform = process.platform,
 } = {}) {
   const directory = dirname(filePath);
@@ -171,11 +226,13 @@ export async function writeUniqueInstallState(filePath, state, {
     await replaceUniqueInstallFile(temp, filePath, {
       renameImpl,
       rmImpl,
-      statImpl,
+      lstatImpl: typeStatImpl(lstatImpl, statImpl),
       platform,
     });
   } catch (error) {
-    await rmImpl(temp, { force: true }).catch(() => {});
+    if (error?.code !== 'EISDIR' && error?.code !== 'FILE_REPLACE_ROLLBACK_FAILED') {
+      await rmImpl(temp, { force: true }).catch(() => {});
+    }
     throw error;
   }
 }
@@ -222,7 +279,8 @@ export async function reportUniqueInstall({
   writeFileImpl = writeFile,
   renameImpl = rename,
   rmImpl = rm,
-  statImpl = stat,
+  statImpl,
+  lstatImpl,
   randomUUIDImpl = randomUUID,
   now = Date.now,
   platform = process.platform,
@@ -247,6 +305,7 @@ export async function reportUniqueInstall({
       renameImpl,
       rmImpl,
       statImpl,
+      lstatImpl,
       randomUUIDImpl,
       now,
       platform,
@@ -273,6 +332,7 @@ async function reportUniqueInstallInner({
   renameImpl,
   rmImpl,
   statImpl,
+  lstatImpl,
   randomUUIDImpl,
   now,
   platform,
@@ -288,6 +348,7 @@ async function reportUniqueInstallInner({
       renameImpl,
       rmImpl,
       statImpl,
+      lstatImpl,
       randomUUIDImpl,
       platform,
     });
@@ -349,6 +410,7 @@ async function reportUniqueInstallInner({
       renameImpl,
       rmImpl,
       statImpl,
+      lstatImpl,
       platform,
     });
     return snapshotFromBody(posted.body, origin, true);
