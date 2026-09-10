@@ -3741,6 +3741,7 @@ fn merge_note_shape(
     t!(number_code_superscript);
     t!(print_inline_after_text);
     t!(raw_unknown);
+    t!(deco_chars_from_source);
     Ok(out)
 }
 fn merge_master_pages(
