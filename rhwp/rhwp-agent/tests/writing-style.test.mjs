@@ -15,6 +15,52 @@ function upload(name, text) {
   return { name, type: 'text/plain', size: Buffer.byteLength(text), content: Buffer.from(text).toString('base64') };
 }
 
+function stylePayload(summary) {
+  return {
+    markdown: `# Style\n\n${`${summary}. Prefer concrete openings and explicit decisions. `.repeat(12)}`,
+    language: 'en',
+    sourceCount: 1,
+    pageEstimate: 12,
+    summary,
+  };
+}
+
+function win32RenameFsApi() {
+  const fsApi = Object.create(fs);
+  const originalRename = fs.rename.bind(fs);
+  fsApi.rename = async (from, to) => {
+    try {
+      await fs.lstat(to);
+    } catch (error) {
+      if (error?.code === 'ENOENT') return originalRename(from, to);
+      throw error;
+    }
+    const failure = new Error(`EEXIST: win32 cannot rename over ${to}`);
+    failure.code = 'EEXIST';
+    throw failure;
+  };
+  return fsApi;
+}
+
+function lockedStyleRenameFsApi() {
+  const fsApi = Object.create(fs);
+  const originalRename = fs.rename.bind(fs);
+  let lockedAttempts = 0;
+  fsApi.rename = async (from, to) => {
+    if (
+      path.basename(from) === 'style.md'
+      && path.basename(to).startsWith('style.md.old-')
+      && lockedAttempts === 0
+    ) {
+      lockedAttempts += 1;
+      throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+    }
+    return originalRename(from, to);
+  };
+  fsApi.lockedAttempts = () => lockedAttempts;
+  return fsApi;
+}
+
 /** 10쪽(18,000자) 기준을 넘기는 한국어 원고를 만든다. */
 function longKoreanSample() {
   const block = [
@@ -562,6 +608,75 @@ test('startup rolls an interrupted multi-artifact transaction back to the previo
   assert.equal(await fs.readFile(path.join(root, 'metadata.json'), 'utf8'), oldMetadata);
   assert.equal((await recovered.status()).summary, 'old');
   assert.equal((await fs.readdir(root)).some((name) => name.includes('.old-') || name.includes('.tmp-') || name === 'commit-journal.json'), false);
+});
+
+test('Windows save publishes over a leftover commit journal', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-writing-style-journal-win32-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const store = await new WritingStyleStore({
+    root,
+    platform: 'win32',
+    fsApi: win32RenameFsApi(),
+  }).init();
+  await store.save(stylePayload('first'));
+  await fs.writeFile(path.join(root, 'commit-journal.json'), `${JSON.stringify({ leftover: true }, null, 2)}\n`);
+
+  const status = await store.save(stylePayload('second'));
+  assert.equal(status.summary, 'second');
+  assert.match(await fs.readFile(path.join(root, 'style.md'), 'utf8'), /^# Style\n\nsecond\./);
+  assert.equal((await fs.readdir(root)).includes('commit-journal.json'), false);
+  assert.equal((await fs.readdir(root)).some((name) => name.includes('.previous-write') || name.includes('.tmp-')), false);
+});
+
+test('Windows startup recovers a commit journal left at the replacement gap', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-writing-style-journal-gap-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const store = await new WritingStyleStore({ root, platform: 'win32' }).init();
+  const oldMarkdown = `# Old style\n\n${'Keep the old stable profile. '.repeat(20)}`;
+  await store.save({ language: 'en', markdown: oldMarkdown, sourceCount: 1, pageEstimate: 12, summary: 'old' });
+  const oldMetadata = await fs.readFile(path.join(root, 'metadata.json'), 'utf8');
+  const id = 'interrupted-journal-gap';
+  const styleTemp = `style.md.tmp-${id}`;
+  const metadataTemp = `metadata.json.tmp-${id}`;
+  await fs.writeFile(path.join(root, styleTemp), `# New style\n\n${'partial write '.repeat(30)}`);
+  await fs.writeFile(path.join(root, metadataTemp), JSON.stringify({ language: 'ko', summary: 'new' }));
+  await fs.rename(path.join(root, 'style.md'), path.join(root, `style.md.old-${id}`));
+  await fs.rename(path.join(root, styleTemp), path.join(root, 'style.md'));
+  await fs.rename(path.join(root, 'metadata.json'), path.join(root, `metadata.json.old-${id}`));
+  await fs.writeFile(path.join(root, 'commit-journal.json'), JSON.stringify({
+    version: 1,
+    id,
+    artifacts: [
+      { target: 'style.md', staged: styleTemp, hadOriginal: true },
+      { target: 'metadata.json', staged: metadataTemp, hadOriginal: true },
+    ],
+  }));
+  await fs.rename(path.join(root, 'commit-journal.json'), path.join(root, 'commit-journal.json.previous-write'));
+
+  const recovered = await new WritingStyleStore({ root, platform: 'win32' }).init();
+  assert.equal(await fs.readFile(path.join(root, 'style.md'), 'utf8'), `${oldMarkdown.trim()}\n`);
+  assert.equal(await fs.readFile(path.join(root, 'metadata.json'), 'utf8'), oldMetadata);
+  assert.equal((await recovered.status()).summary, 'old');
+  assert.equal((await fs.readdir(root)).some((name) => (
+    name.includes('.old-') || name.includes('.tmp-') || name.includes('.previous-write') || name === 'commit-journal.json'
+  )), false);
+});
+
+test('Windows save retries a briefly locked profile rename', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-writing-style-locked-rename-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const fsApi = lockedStyleRenameFsApi();
+  const store = await new WritingStyleStore({
+    root,
+    platform: 'win32',
+    fsApi,
+    retryDelays: [0],
+  }).init();
+  await store.save(stylePayload('first'));
+  const status = await store.save(stylePayload('second'));
+  assert.equal(status.summary, 'second');
+  assert.equal(fsApi.lockedAttempts(), 1);
+  assert.match(await fs.readFile(path.join(root, 'style.md'), 'utf8'), /^# Style\n\nsecond\./);
 });
 
 test('append compatibility protects the calibrated language and optional revision', () => {
