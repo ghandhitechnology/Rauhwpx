@@ -262,6 +262,78 @@ test('Windows unique-install writes do not recursively delete a leftover directo
   });
 });
 
+test('Windows unique-install writes restore the target when post-aside lstat fails', async () => {
+  await withUserData(async (userDataDir) => {
+    const filePath = path.join(userDataDir, UNIQUE_INSTALL_FILE);
+    const previous = `${filePath}.previous-write`;
+    const committed = `${JSON.stringify(RECORDED_STATE, null, 2)}\n`;
+    await writeFile(filePath, committed);
+    let asideDone = false;
+
+    await assert.rejects(
+      writeUniqueInstallState(filePath, {
+        installId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        recorded: true,
+        recordedAt: '2026-09-10T00:00:00.000Z',
+      }, {
+        platform: 'win32',
+        lstatImpl: async (target) => {
+          if (asideDone && target === previous) throw errorWithCode('EIO');
+          return realFs.lstat(target);
+        },
+        renameImpl: async (from, to) => {
+          const result = await realFs.rename(from, to);
+          if (from === filePath && to === previous) asideDone = true;
+          return result;
+        },
+        rmImpl: rmFileOnly,
+      }),
+      { code: 'EIO' },
+    );
+    assert.equal(await readFile(filePath, 'utf8'), committed);
+    await assert.rejects(access(previous), { code: 'ENOENT' });
+    assert.equal((await pendingUniqueInstallTemps(userDataDir)).length, 0);
+  });
+});
+
+test('Windows unique-install writes leave the backup when post-aside lstat restore fails', async () => {
+  await withUserData(async (userDataDir) => {
+    const filePath = path.join(userDataDir, UNIQUE_INSTALL_FILE);
+    const previous = `${filePath}.previous-write`;
+    const committed = `${JSON.stringify(RECORDED_STATE, null, 2)}\n`;
+    await writeFile(filePath, committed);
+    let asideDone = false;
+
+    await assert.rejects(
+      writeUniqueInstallState(filePath, {
+        installId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+        recorded: true,
+        recordedAt: '2026-09-10T00:00:00.000Z',
+      }, {
+        platform: 'win32',
+        lstatImpl: async (target) => {
+          if (asideDone && target === previous) throw errorWithCode('EIO');
+          return realFs.lstat(target);
+        },
+        renameImpl: async (from, to) => {
+          if (from === previous && to === filePath) throw errorWithCode('EIO');
+          const result = await realFs.rename(from, to);
+          if (from === filePath && to === previous) asideDone = true;
+          return result;
+        },
+        rmImpl: rmFileOnly,
+      }),
+      (error) => error.code === 'FILE_REPLACE_ROLLBACK_FAILED'
+        && error.backupPath === previous
+        && typeof error.tempPath === 'string'
+        && path.basename(error.tempPath).startsWith(`${UNIQUE_INSTALL_FILE}.tmp-`),
+    );
+    assert.equal(await readFile(previous, 'utf8'), committed);
+    await assert.rejects(access(filePath), { code: 'ENOENT' });
+    assert.equal((await pendingUniqueInstallTemps(userDataDir)).length, 1);
+  });
+});
+
 test('Windows unique-install writes honor an injected statImpl when lstatImpl is omitted', async () => {
   await withUserData(async (userDataDir) => {
     const filePath = path.join(userDataDir, UNIQUE_INSTALL_FILE);
