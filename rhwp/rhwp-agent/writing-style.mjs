@@ -156,9 +156,16 @@ export function assertWritingStyleAppendCompatible(status, { language, baseRevis
 }
 
 export class WritingStyleStore {
-  constructor({ root = defaultWritingStyleRoot(), platform = process.platform } = {}) {
+  constructor({
+    root = defaultWritingStyleRoot(),
+    platform = process.platform,
+    fsApi = fs,
+    retryDelays,
+  } = {}) {
     this.root = root;
     this.platform = platform;
+    this.fs = fsApi;
+    this.lockRetry = retryDelays ? { platform, delays: retryDelays } : { platform };
     this.profilePath = path.join(root, PROFILE_FILE);
     this.metadataPath = path.join(root, METADATA_FILE);
     this.structuredPath = path.join(root, STRUCTURED_FILE);
@@ -170,9 +177,10 @@ export class WritingStyleStore {
   }
 
   async init() {
-    await fs.mkdir(this.root, { recursive: true });
+    await this.fs.mkdir(this.root, { recursive: true });
     await recoverInterruptedFileReplacement(this.additionalInstructionPath, {
       platform: this.platform,
+      fsApi: this.fs,
     });
     await this.recoverInterruptedCommit();
     return this;
@@ -211,35 +219,35 @@ export class WritingStyleStore {
         const target = path.join(this.root, entry.target);
         const backup = `${target}.old-${id}`;
         try {
-          await fs.lstat(backup);
-          await fs.rm(target, { recursive: true, force: true });
-          await fs.rename(backup, target);
+          await this.fs.lstat(backup);
+          await this.fs.rm(target, { recursive: true, force: true });
+          await this.fs.rename(backup, target);
         } catch (error) {
           if (error?.code !== 'ENOENT') throw error;
         }
-        if (!entry.hadOriginal) await fs.rm(target, { recursive: true, force: true });
-        if (entry.staged) await fs.rm(path.join(this.root, entry.staged), { recursive: true, force: true });
+        if (!entry.hadOriginal) await this.fs.rm(target, { recursive: true, force: true });
+        if (entry.staged) await this.fs.rm(path.join(this.root, entry.staged), { recursive: true, force: true });
       }
-      await fs.rm(this.commitJournalPath, { force: true });
+      await this.fs.rm(this.commitJournalPath, { force: true });
     }
 
     // Recover transactions from builds predating the journal, then remove
     // abandoned staging files. Scope is limited to known writing-style targets.
-    const entries = await fs.readdir(this.root).catch((error) => error?.code === 'ENOENT' ? [] : Promise.reject(error));
+    const entries = await this.fs.readdir(this.root).catch((error) => error?.code === 'ENOENT' ? [] : Promise.reject(error));
     for (const name of entries) {
       const oldMatch = name.match(/^(style\.md|metadata\.json|profile\.json|sources|sources\.json)\.old-[a-zA-Z0-9-]+$/);
       if (oldMatch) {
         const backup = path.join(this.root, name);
         const target = path.join(this.root, oldMatch[1]);
-        try { await fs.lstat(target); await fs.rm(backup, { recursive: true, force: true }); }
+        try { await this.fs.lstat(target); await this.fs.rm(backup, { recursive: true, force: true }); }
         catch (error) {
           if (error?.code !== 'ENOENT') throw error;
-          await fs.rename(backup, target);
+          await this.fs.rename(backup, target);
         }
         continue;
       }
       if (/^(style\.md|metadata\.json|profile\.json|sources|sources\.json|commit-journal\.json)\.tmp-[a-zA-Z0-9-]+$/.test(name)) {
-        await fs.rm(path.join(this.root, name), { recursive: true, force: true });
+        await this.fs.rm(path.join(this.root, name), { recursive: true, force: true });
       }
     }
   }
@@ -452,7 +460,7 @@ export class WritingStyleStore {
     const committed = [];
     const journalTemp = `${this.commitJournalPath}.tmp-${transactionId}`;
     const originalStates = await Promise.all(artifacts.map(async (artifact) => {
-      try { await fs.lstat(artifact.target); return true; }
+      try { await this.fs.lstat(artifact.target); return true; }
       catch (error) {
         if (error?.code === 'ENOENT') return false;
         throw error;
@@ -467,22 +475,22 @@ export class WritingStyleStore {
         hadOriginal: originalStates[index],
       })),
     };
-    await fs.writeFile(journalTemp, `${JSON.stringify(journal, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
-    await fs.rename(journalTemp, this.commitJournalPath);
+    await this.fs.writeFile(journalTemp, `${JSON.stringify(journal, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+    await this.fs.rename(journalTemp, this.commitJournalPath);
     try {
       for (const artifact of artifacts) {
         const backup = `${artifact.target}.old-${transactionId}`;
         let hadOriginal = true;
-        try { await fs.rename(artifact.target, backup); }
+        try { await this.fs.rename(artifact.target, backup); }
         catch (error) {
           if (error?.code === 'ENOENT') hadOriginal = false;
           else throw error;
         }
         try {
-          if (artifact.staged) await fs.rename(artifact.staged, artifact.target);
+          if (artifact.staged) await this.fs.rename(artifact.staged, artifact.target);
           committed.push({ ...artifact, backup, hadOriginal });
         } catch (error) {
-          if (hadOriginal) await fs.rename(backup, artifact.target).catch(() => {});
+          if (hadOriginal) await this.fs.rename(backup, artifact.target).catch(() => {});
           throw error;
         }
       }
@@ -499,8 +507,8 @@ export class WritingStyleStore {
     }
     // Removing the journal commits the transaction. Backup cleanup can then be
     // retried opportunistically without making a completed save look failed.
-    await fs.rm(this.commitJournalPath, { force: true });
-    await Promise.all(committed.map((artifact) => fs.rm(artifact.backup, { recursive: true, force: true }).catch(() => {})));
+    await this.fs.rm(this.commitJournalPath, { force: true });
+    await Promise.all(committed.map((artifact) => this.fs.rm(artifact.backup, { recursive: true, force: true }).catch(() => {})));
   }
 
   async save(profile, options = {}) {
@@ -573,17 +581,19 @@ export class WritingStyleStore {
     if (!instruction) {
       await removeFileAndReplacementBackup(this.additionalInstructionPath, {
         platform: this.platform,
+        fsApi: this.fs,
       });
       return this.status();
     }
     const temp = `${this.additionalInstructionPath}.tmp-${process.pid}-${crypto.randomUUID()}`;
     try {
-      await fs.writeFile(temp, `${instruction}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+      await this.fs.writeFile(temp, `${instruction}\n`, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
       await replaceFileAtomically(temp, this.additionalInstructionPath, {
         platform: this.platform,
+        fsApi: this.fs,
       });
     } finally {
-      await fs.rm(temp, { force: true }).catch(() => {});
+      await this.fs.rm(temp, { force: true }).catch(() => {});
     }
     return this.status();
   }
