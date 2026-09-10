@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { promises as realFs } from 'node:fs';
 import { access, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,6 +11,11 @@ import { createSecretVault } from '../desktop/secret-vault.mjs';
 
 function errorWithCode(code) {
   return Object.assign(new Error(code), { code });
+}
+
+function rmFileOnly(filePath, options) {
+  if (options?.recursive) throw new Error(`recursive rm is forbidden for ${filePath}`);
+  return realFs.rm(filePath, options);
 }
 
 function memoryFs(entries, hooks = {}) {
@@ -218,6 +224,90 @@ test('win32 replacement recovery does not publish over a restored directory back
   assert.equal(await readFile(path.join(target, 'inside.txt'), 'utf8'), 'keep');
   await assert.rejects(access(previous), { code: 'ENOENT' });
   assert.equal(await readFile(temp, 'utf8'), 'new');
+});
+
+test('win32 replacement restores a directory that appears between lstat and rename', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'rauhwpx-replace-dir-race-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, 'handoffs.json');
+  const temp = path.join(directory, 'handoffs.tmp');
+  const previous = replaceTest.backupPath(target);
+  await mkdir(target);
+  await writeFile(path.join(target, 'inside.txt'), 'keep');
+  await writeFile(temp, 'new');
+
+  const fsImpl = {
+    lstat(filePath) {
+      if (filePath === target) return Promise.resolve({ isDirectory: () => false, isFile: () => true });
+      return realFs.lstat(filePath);
+    },
+    stat: (...args) => realFs.stat(...args),
+    rename: (...args) => realFs.rename(...args),
+    rm: rmFileOnly,
+  };
+
+  await assert.rejects(
+    replaceFile(temp, target, 'win32', { fsImpl, sleep: async () => {} }),
+    { code: 'EISDIR' },
+  );
+  assert.equal(await readFile(path.join(target, 'inside.txt'), 'utf8'), 'keep');
+  await assert.rejects(access(previous), { code: 'ENOENT' });
+  assert.equal(await readFile(temp, 'utf8'), 'new');
+});
+
+test('win32 replacement leaves a raced directory stranded when restore fails', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'rauhwpx-replace-dir-stranded-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, 'handoffs.json');
+  const temp = path.join(directory, 'handoffs.tmp');
+  const previous = replaceTest.backupPath(target);
+  await mkdir(target);
+  await writeFile(path.join(target, 'inside.txt'), 'keep');
+  await writeFile(temp, 'new');
+
+  const fsImpl = {
+    lstat(filePath) {
+      if (filePath === target) return Promise.resolve({ isDirectory: () => false, isFile: () => true });
+      return realFs.lstat(filePath);
+    },
+    stat: (...args) => realFs.stat(...args),
+    async rename(from, to) {
+      if (from === previous && to === target) throw errorWithCode('EPERM');
+      return realFs.rename(from, to);
+    },
+    rm: rmFileOnly,
+  };
+
+  await assert.rejects(
+    replaceFile(temp, target, 'win32', { fsImpl, sleep: async () => {} }),
+    (error) => error.code === 'FILE_REPLACE_ROLLBACK_FAILED'
+      && error.backupPath === previous
+      && error.tempPath === temp,
+  );
+  assert.equal(await readFile(path.join(previous, 'inside.txt'), 'utf8'), 'keep');
+  await assert.rejects(access(target), { code: 'ENOENT' });
+  assert.equal(await readFile(temp, 'utf8'), 'new');
+});
+
+test('win32 recovery does not recursively delete a leftover directory backup', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'rauhwpx-replace-dir-leftover-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, 'handoffs.json');
+  const previous = replaceTest.backupPath(target);
+  await writeFile(target, 'new');
+  await mkdir(previous);
+  await writeFile(path.join(previous, 'inside.txt'), 'keep');
+
+  const fsImpl = {
+    lstat: (...args) => realFs.lstat(...args),
+    stat: (...args) => realFs.stat(...args),
+    rename: (...args) => realFs.rename(...args),
+    rm: rmFileOnly,
+  };
+
+  assert.equal(await recoverReplacedFile(target, 'win32', { fsImpl, sleep: async () => {} }), false);
+  assert.equal(await readFile(target, 'utf8'), 'new');
+  assert.equal(await readFile(path.join(previous, 'inside.txt'), 'utf8'), 'keep');
 });
 
 test('handoff startup restores an interrupted win32 persistence backup', async (t) => {
