@@ -2,8 +2,6 @@
 //!
 //! 파서가 `ON_PAGE` 와 `RESTART_PAGE` 를 둘 다 받으므로 rhwp 자기 왕복은 통과한다.
 //! 한글은 `RESTART_*` 를 연속 번호로 떨어뜨리고, 빈 `suffixChar` 를 `)` 로 되돌린다.
-//!
-//! Rauhwpx 는 `tests/cases/` 가 아니라 `tests/issue_NNNN_*.rs` 를 쓴다.
 
 use std::io::Read;
 
