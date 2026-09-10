@@ -7,6 +7,7 @@
 //! - ViewText/Section{N}: 배포용 문서 (암호화 + 압축)
 //! - BinData/BIN{XXXX}.{ext}: 바이너리 데이터
 
+use std::collections::HashSet;
 use std::io::{Cursor, Read};
 use std::sync::Arc;
 
@@ -875,6 +876,12 @@ struct LenientDirectoryEntry {
     obj_type: u8,
 }
 
+enum DirectoryWalk {
+    Found(usize),
+    Miss,
+    Damaged,
+}
+
 impl LenientCfbReader {
     const END_OF_CHAIN: u32 = 0xFFFFFFFE;
     const FREE_SECT: u32 = 0xFFFFFFFF;
@@ -1242,28 +1249,51 @@ impl LenientCfbReader {
             .collect();
         let (last, parents) = parts.split_last()?;
 
-        if let Some(root_id) = self
+        match self.walk_path(parents, last) {
+            DirectoryWalk::Found(id) => Some(id),
+            DirectoryWalk::Miss => None,
+            DirectoryWalk::Damaged => self.unique_name_entry_id(last),
+        }
+    }
+
+    fn walk_path(&self, parents: &[&str], last: &str) -> DirectoryWalk {
+        let Some(root_id) = self
             .directory_entries
             .iter()
             .position(|entry| entry.obj_type == 5)
-        {
-            let mut current = Some(root_id);
-            for segment in parents {
-                current = current
-                    .and_then(|id| self.find_child_entry_by_name(id, segment))
-                    .filter(|&id| self.directory_entries[id].obj_type == 1);
-            }
-            if let Some(id) = current
-                .and_then(|id| self.find_child_entry_by_name(id, last))
-                .filter(|&id| matches!(self.directory_entries[id].obj_type, 1 | 2 | 5))
-            {
-                return Some(id);
+        else {
+            return DirectoryWalk::Damaged;
+        };
+        let mut current = root_id;
+        for segment in parents {
+            match self.find_child_walk(current, segment) {
+                DirectoryWalk::Found(id) => {
+                    if self.directory_entries[id].obj_type != 1 {
+                        return DirectoryWalk::Miss;
+                    }
+                    current = id;
+                }
+                DirectoryWalk::Miss => return DirectoryWalk::Miss,
+                DirectoryWalk::Damaged => return DirectoryWalk::Damaged,
             }
         }
+        match self.find_child_walk(current, last) {
+            DirectoryWalk::Found(id) => {
+                if matches!(self.directory_entries[id].obj_type, 1 | 2 | 5) {
+                    DirectoryWalk::Found(id)
+                } else {
+                    DirectoryWalk::Miss
+                }
+            }
+            DirectoryWalk::Miss => DirectoryWalk::Miss,
+            DirectoryWalk::Damaged => DirectoryWalk::Damaged,
+        }
+    }
 
+    fn unique_name_entry_id(&self, last: &str) -> Option<usize> {
         let mut found = None;
         for (id, entry) in self.directory_entries.iter().enumerate() {
-            if entry.name == *last && matches!(entry.obj_type, 1 | 2 | 5) {
+            if entry.name == last && matches!(entry.obj_type, 1 | 2 | 5) {
                 if found.is_some() {
                     return None;
                 }
@@ -1281,10 +1311,12 @@ impl LenientCfbReader {
         format!("/Section{}", index)
     }
 
-    fn find_child_entry_by_name(&self, parent_id: usize, name: &str) -> Option<usize> {
-        let first_child = self.directory_entries.get(parent_id)?.child;
-        let mut pending = vec![first_child];
-        let mut visited = std::collections::HashSet::new();
+    fn find_child_walk(&self, parent_id: usize, name: &str) -> DirectoryWalk {
+        let Some(parent) = self.directory_entries.get(parent_id) else {
+            return DirectoryWalk::Damaged;
+        };
+        let mut pending = vec![parent.child];
+        let mut visited = HashSet::new();
 
         while let Some(entry_id) = pending.pop() {
             if entry_id == Self::END_OF_CHAIN || entry_id == Self::FREE_SECT {
@@ -1292,19 +1324,22 @@ impl LenientCfbReader {
             }
             let entry_id = entry_id as usize;
             if !visited.insert(entry_id) {
-                continue;
+                return DirectoryWalk::Damaged;
             }
             let Some(entry) = self.directory_entries.get(entry_id) else {
-                continue;
+                return DirectoryWalk::Damaged;
             };
+            if entry.obj_type == 0 || entry.obj_type == 255 {
+                return DirectoryWalk::Damaged;
+            }
             if entry.name == name {
-                return Some(entry_id);
+                return DirectoryWalk::Found(entry_id);
             }
             pending.push(entry.left_sibling);
             pending.push(entry.right_sibling);
         }
 
-        None
+        DirectoryWalk::Miss
     }
 
     fn read_directory_stream_limited(
@@ -1375,7 +1410,9 @@ impl LenientCfbReader {
     }
 
     pub fn has_stream(&self, path: &str) -> bool {
-        self.find_entry_id(path).is_some()
+        self.find_entry_id(path)
+            .and_then(|id| self.directory_entries.get(id))
+            .is_some_and(|entry| entry.obj_type == 2)
     }
 
     pub fn read_doc_info(&self, compressed: bool) -> Result<Vec<u8>, CfbError> {
