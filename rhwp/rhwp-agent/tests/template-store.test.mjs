@@ -75,21 +75,14 @@ test('concurrent template mutations preserve unique names and every committed re
   );
 });
 
-function win32RenameRejectsOverwrite() {
-  return {
-    async rename(from, to) {
-      try {
-        await fs.lstat(to);
-      } catch (error) {
-        if (error?.code === 'ENOENT') return fs.rename(from, to);
-        throw error;
-      }
-      throw Object.assign(new Error('rename over existing'), { code: 'EPERM' });
-    },
-    rm: (...args) => fs.rm(...args),
-    lstat: (...args) => fs.lstat(...args),
-    access: (...args) => fs.access(...args),
-  };
+async function win32Rename(from, to) {
+  try {
+    await fs.lstat(to);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return fs.rename(from, to);
+    throw error;
+  }
+  throw Object.assign(new Error('rename over existing'), { code: 'EPERM' });
 }
 
 test('TemplateStore publishes a Windows blob over an existing destination', async (t) => {
@@ -98,7 +91,7 @@ test('TemplateStore publishes a Windows blob over an existing destination', asyn
   const store = await new TemplateStore({
     rootDir,
     platform: 'win32',
-    fileOperations: win32RenameRejectsOverwrite(),
+    fileOperations: { rename: win32Rename },
   }).init();
   const added = await store.add({
     name: '덮어쓰기 보고서', originalName: 'report.hwp', bytes: HWP, pageCount: 1, sectionCount: 1,
