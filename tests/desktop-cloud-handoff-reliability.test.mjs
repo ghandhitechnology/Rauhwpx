@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { promises as realFs } from 'node:fs';
-import { access, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -11,6 +11,17 @@ import { createSecretVault } from '../desktop/secret-vault.mjs';
 
 function errorWithCode(code) {
   return Object.assign(new Error(code), { code });
+}
+
+function lockedRename(realRename, { failTimes = Infinity, code = 'EPERM' } = {}) {
+  let failures = 0;
+  return async (from, to) => {
+    if (failures < failTimes) {
+      failures += 1;
+      throw errorWithCode(code);
+    }
+    return realRename(from, to);
+  };
 }
 
 function rmFileOnly(filePath, options) {
@@ -450,4 +461,41 @@ test('state-changing stream events preserve messages queued while the transition
   const final = await store.get(created.id);
   assert.equal(final.state, 'running');
   assert.deepEqual(final.queuedMessages, [{ id: 'first', state: 'accepted' }, { id: 'second', state: 'queued' }]);
+});
+
+test('win32 corrupt handoff quarantine retries a locked rename then leaves a sibling', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'rauhwpx-handoff-corrupt-retry-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const filePath = path.join(directory, 'handoffs.json');
+  await writeFile(filePath, '{not-json');
+  const store = new CloudHandoffStore({
+    filePath,
+    platform: 'win32',
+    rename: lockedRename(rename, { failTimes: 1 }),
+    sleep: async () => {},
+  });
+
+  const records = await store.load();
+  assert.deepEqual(records, []);
+  await assert.rejects(access(filePath), { code: 'ENOENT' });
+  const siblings = (await readdir(directory)).filter((name) => name.startsWith('handoffs.json.corrupt-'));
+  assert.equal(siblings.length, 1);
+  assert.equal(await readFile(path.join(directory, siblings[0]), 'utf8'), '{not-json');
+});
+
+test('win32 corrupt handoff load stays empty when quarantine rename stays locked', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'rauhwpx-handoff-corrupt-locked-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const filePath = path.join(directory, 'handoffs.json');
+  await writeFile(filePath, '{not-json');
+  const store = new CloudHandoffStore({
+    filePath,
+    platform: 'win32',
+    rename: lockedRename(rename, { failTimes: Infinity }),
+    sleep: async () => {},
+  });
+
+  const records = await store.load();
+  assert.deepEqual(records, []);
+  assert.equal(await readFile(filePath, 'utf8'), '{not-json');
 });

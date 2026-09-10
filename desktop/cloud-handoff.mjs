@@ -118,6 +118,7 @@ export class CloudHandoffStore {
   #payloadRoot;
   #platform;
   #atomicWrite;
+  #rename;
   #records = new Map();
   #takeoverReceipts = new Map();
   #loaded = false;
@@ -125,13 +126,19 @@ export class CloudHandoffStore {
   #writeChain = Promise.resolve();
   #persistTimer = null;
 
-  constructor({ filePath, platform = process.platform, atomicWrite = atomicJsonWrite }) {
+  constructor({
+    filePath,
+    platform = process.platform,
+    atomicWrite = atomicJsonWrite,
+    rename = fs.rename,
+  }) {
     if (!filePath) throw new Error('Cloud handoff store requires a file path');
     if (typeof atomicWrite !== 'function') throw new Error('Cloud handoff store requires an atomic writer');
     this.#filePath = filePath;
     this.#payloadRoot = path.join(path.dirname(filePath), 'pending-payloads');
     this.#platform = platform;
     this.#atomicWrite = atomicWrite;
+    this.#rename = rename;
   }
 
   load() {
@@ -206,7 +213,7 @@ export class CloudHandoffStore {
     } catch (error) {
       if (error?.code !== 'ENOENT') {
         const corrupt = `${this.#filePath}.corrupt-${Date.now()}`;
-        await fs.rename(this.#filePath, corrupt).catch(() => {});
+        await this.#rename(this.#filePath, corrupt).catch(() => {});
       }
     }
     this.#loaded = true;
