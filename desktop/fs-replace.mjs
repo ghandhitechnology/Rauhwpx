@@ -7,7 +7,11 @@ function backupPath(targetPath) {
   return path.join(path.dirname(targetPath), `.${path.basename(targetPath)}.previous-write`);
 }
 
-async function retryWindows(operation, platform, sleep) {
+function defaultSleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function retryWindows(operation, platform, sleep = defaultSleep) {
   const delays = [50, 100, 200, 400, 800];
   for (let attempt = 0; ; attempt += 1) {
     try { return await operation(); } catch (error) {
@@ -71,7 +75,7 @@ async function restoreMovedTarget(error, fsImpl, previous, targetPath, tempPath,
 function dependencies(options = {}) {
   return {
     fsImpl: options.fsImpl ?? fs,
-    sleep: options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
+    sleep: options.sleep ?? defaultSleep,
   };
 }
 
