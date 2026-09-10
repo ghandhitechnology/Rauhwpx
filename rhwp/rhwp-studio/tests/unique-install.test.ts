@@ -226,7 +226,7 @@ test('Windows unique-install writes leave a raced directory stranded when restor
         lstatImpl: lieFile,
         statImpl: lieFile,
         renameImpl: async (from, to) => {
-          if (from === previous && to === filePath) throw errorWithCode('EPERM');
+          if (from === previous && to === filePath) throw errorWithCode('EIO');
           return realFs.rename(from, to);
         },
         rmImpl: rmFileOnly,
