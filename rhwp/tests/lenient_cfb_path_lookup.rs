@@ -67,6 +67,11 @@ fn lenient_cfb_resolves_same_named_streams_by_path() {
     );
     assert_eq!(body, BODY, "/BodyText/Section0 가 ViewText 쪽으로 풀렸다");
     assert_eq!(view, VIEW, "/ViewText/Section0 내용이 다르다");
+    assert!(
+        !lenient.has_stream("/ViewText"),
+        "storage 는 has_stream 이 아니어야 한다"
+    );
+    assert!(lenient.has_stream("/ViewText/Section0"));
 }
 
 #[test]
@@ -78,6 +83,31 @@ fn lenient_body_text_section_reads_bodytext_storage() {
         .read_body_text_section_raw_limited(0, CAP)
         .expect("BodyText Section0 raw");
     assert_eq!(raw, BODY, "본문 섹션 읽기가 ViewText 스트림을 집었다");
+}
+
+#[test]
+fn lenient_cfb_valid_tree_does_not_return_viewtext_for_missing_bodytext() {
+    let data = small_cfb(&[("/ViewText/Section0", VIEW)]);
+    let lenient = LenientCfbReader::open(&data).expect("lenient open");
+
+    let same_named = lenient
+        .list_entries()
+        .iter()
+        .filter(|(name, _, _, _)| name == "Section0")
+        .count();
+    assert_eq!(same_named, 1);
+
+    assert!(!lenient.has_stream("/BodyText/Section0"));
+    assert!(lenient
+        .read_stream_limited("/BodyText/Section0", CAP)
+        .is_err());
+    assert!(lenient.read_body_text_section_raw_limited(0, CAP).is_err());
+    assert_eq!(
+        lenient
+            .read_stream_limited("/ViewText/Section0", CAP)
+            .expect("/ViewText/Section0"),
+        VIEW
+    );
 }
 
 fn small_header_cfb() -> Vec<u8> {
