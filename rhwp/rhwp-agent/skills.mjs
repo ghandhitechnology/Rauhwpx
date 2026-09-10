@@ -234,11 +234,18 @@ export class SkillRegistry {
     userRoot = defaultSkillDataRoot(),
     writingStyleStore = null,
     platform = process.platform,
+    fileOperations = {},
+    lockRetryDelays,
   }) {
     this.bundledRoot = bundledRoot;
     this.userRoot = userRoot;
     this.writingStyleStore = writingStyleStore;
     this.platform = platform;
+    this.fileOperations = {
+      rename: fileOperations.rename ?? fs.rename,
+      rm: fileOperations.rm ?? fs.rm,
+    };
+    this.lockRetryDelays = lockRetryDelays;
     this.statePath = path.join(userRoot, '.catalog-state.json');
     this.trashRoot = path.join(userRoot, '.trash');
     this.revision = 1;
@@ -402,18 +409,18 @@ export class SkillRegistry {
           await fs.writeFile(dest, file.bytes, { mode: file.path.startsWith('scripts/') ? 0o700 : 0o600 });
         }
         try {
-          await fs.rename(target, backup);
+          await this.fileOperations.rename(target, backup);
           backedUp = true;
         } catch (error) {
           if (error?.code !== 'ENOENT') throw error;
         }
-        await fs.rename(temp, target);
+        await this.fileOperations.rename(temp, target);
         installed = true;
         const result = await this.read(name);
         this.revision++;
         return { ...result, revision: this.revision };
       } catch (error) {
-        await fs.rm(temp, { recursive: true, force: true });
+        await this.fileOperations.rm(temp, { recursive: true, force: true });
         let rollbackError = null;
         if (installed) {
           const failedTarget = path.join(
@@ -421,14 +428,14 @@ export class SkillRegistry {
             `${Date.now()}-${name}-failed-${randomUUID()}`,
           );
           try {
-            await fs.rename(target, failedTarget);
+            await this.fileOperations.rename(target, failedTarget);
           } catch (moveError) {
             if (moveError?.code !== 'ENOENT') rollbackError = moveError;
           }
         }
         if (backedUp) {
           if (!rollbackError) {
-            try { await fs.rename(backup, target); }
+            try { await this.fileOperations.rename(backup, target); }
             catch (restoreError) { rollbackError = restoreError; }
           }
         }
@@ -475,7 +482,7 @@ export class SkillRegistry {
       const skill = await this._find(name);
       if (skill.origin !== 'user') throw new SkillError('READ_ONLY_SKILL', 'Bundled skills cannot be deleted');
       const trashPath = path.join(this.trashRoot, `${Date.now()}-${randomUUID()}-${name}`);
-      await fs.rename(skill.root, trashPath);
+      await this.fileOperations.rename(skill.root, trashPath);
       try {
         const state = await this._state();
         if (state.disabled.includes(name)) {
@@ -483,7 +490,7 @@ export class SkillRegistry {
         }
       } catch (error) {
         try {
-          await fs.rename(trashPath, skill.root);
+          await this.fileOperations.rename(trashPath, skill.root);
         } catch (rollbackError) {
           const recoveryError = new SkillError(
             'SKILL_ROLLBACK_FAILED',

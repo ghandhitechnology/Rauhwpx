@@ -132,6 +132,69 @@ test('SkillRegistry restores the previous skill when post-rename verification fa
   assert.ok(trash.some((entry) => entry.includes('-rollback-skill-failed-')));
 });
 
+function failOnceRename() {
+  let failed = false;
+  return async (from, to) => {
+    if (!failed) {
+      failed = true;
+      throw Object.assign(new Error('busy'), { code: 'EPERM' });
+    }
+    return fs.rename(from, to);
+  };
+}
+
+test('SkillRegistry retries a briefly locked Windows skill replace', async (t) => {
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-skill-win-replace-'));
+  t.after(() => fs.rm(temp, { recursive: true, force: true }));
+  const bundledRoot = path.join(temp, 'bundled');
+  const userRoot = path.join(temp, 'user');
+  await fs.mkdir(bundledRoot, { recursive: true });
+  const registry = await new SkillRegistry({
+    bundledRoot,
+    userRoot,
+    platform: 'win32',
+    lockRetryDelays: [0],
+  }).init();
+  await registry.save({
+    name: 'locked-skill',
+    files: [{ path: 'SKILL.md', content: MARKDOWN('locked-skill', 'Original version') }],
+  });
+
+  registry.fileOperations.rename = failOnceRename();
+  await registry.save({
+    name: 'locked-skill',
+    files: [{ path: 'SKILL.md', content: MARKDOWN('locked-skill', 'Replacement version') }],
+  });
+
+  const replaced = await registry.read('locked-skill');
+  const markdown = replaced.skill.files.find((file) => file.path === 'SKILL.md').content;
+  assert.match(markdown, /Replacement version/);
+  assert.doesNotMatch(markdown, /Original version/);
+});
+
+test('SkillRegistry retries a briefly locked Windows skill delete', async (t) => {
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-skill-win-delete-'));
+  t.after(() => fs.rm(temp, { recursive: true, force: true }));
+  const bundledRoot = path.join(temp, 'bundled');
+  const userRoot = path.join(temp, 'user');
+  await fs.mkdir(bundledRoot, { recursive: true });
+  const registry = await new SkillRegistry({
+    bundledRoot,
+    userRoot,
+    platform: 'win32',
+    lockRetryDelays: [0],
+  }).init();
+  await registry.save({
+    name: 'locked-skill',
+    files: [{ path: 'SKILL.md', content: MARKDOWN('locked-skill') }],
+  });
+
+  registry.fileOperations.rename = failOnceRename();
+  const deleted = await registry.delete('locked-skill');
+  assert.equal(deleted.name, 'locked-skill');
+  assert.equal((await registry.list()).skills.some((skill) => skill.name === 'locked-skill'), false);
+});
+
 test('SkillRegistry serializes concurrent catalog mutations and recovers Windows state', async (t) => {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-skill-mutation-test-'));
   t.after(() => fs.rm(temp, { recursive: true, force: true }));
