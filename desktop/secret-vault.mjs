@@ -83,28 +83,19 @@ async function replaceFile(temp, target, platform, operations) {
   } catch (error) {
     if (error?.code !== 'ENOENT') throw error;
   }
-  if (moved && (await lstatOrMissing(operations.lstat, previous))?.isDirectory()) {
-    try {
-      await retryWindows(() => operations.rename(previous, target), platform);
-    } catch (restoreError) {
-      throw rollbackFailedError(
-        directoryReplaceError(target),
-        restoreError,
-        previous,
-        temp,
-      );
-    }
-    throw directoryReplaceError(target);
-  }
   try {
+    if (moved && (await lstatOrMissing(operations.lstat, previous))?.isDirectory()) {
+      throw directoryReplaceError(target);
+    }
     await retryWindows(() => operations.rename(temp, target), platform);
   } catch (error) {
     if (moved) {
-      const restored = await retryWindows(
-        () => operations.rename(previous, target),
-        platform,
-      ).then(() => true, () => false);
-      if (!restored) {
+      try {
+        await retryWindows(() => operations.rename(previous, target), platform);
+      } catch (restoreError) {
+        if (error?.code === 'EISDIR') {
+          throw rollbackFailedError(error, restoreError, previous, temp);
+        }
         throw Object.assign(new Error('Secure secret storage rollback failed.'), {
           code: 'SECRET_VAULT_COMMIT_UNCERTAIN',
           cause: error,
