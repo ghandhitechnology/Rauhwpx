@@ -1,12 +1,18 @@
 import assert from 'node:assert/strict';
 import { promises as realFs } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
+import { recoverReplacedFile, replaceFile, __test as replaceTest } from '../fs-replace.mjs';
 import { createFileMergeStore } from '../merge-artifacts.mjs';
 import { createFileStore } from '../store.mjs';
+
+function rmFileOnly(filePath, options) {
+  if (options?.recursive) throw new Error(`recursive rm is forbidden for ${filePath}`);
+  return realFs.rm(filePath, options);
+}
 
 function installWin32RenameSemantics(fsPromises) {
   const original = fsPromises.rename.bind(fsPromises);
@@ -87,4 +93,69 @@ test('file merge store overwrites existing metadata under win32 rename semantics
   const accountDirs = await realFs.readdir(directory);
   assert.equal(accountDirs.length, 1);
   assert.deepEqual(await leftoverNames(path.join(directory, accountDirs[0])), []);
+});
+
+test('win32 replacement refuses a static directory target', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'rau-credits-replace-dir-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, 'credits.json');
+  const temp = path.join(directory, 'credits.tmp');
+  await mkdir(target);
+  await writeFile(path.join(target, 'inside.txt'), 'keep');
+  await writeFile(temp, 'new');
+
+  await assert.rejects(replaceFile(temp, target, 'win32'), { code: 'EISDIR' });
+  assert.equal(await readFile(path.join(target, 'inside.txt'), 'utf8'), 'keep');
+  await assert.rejects(access(replaceTest.backupPath(target)), { code: 'ENOENT' });
+  assert.equal(await readFile(temp, 'utf8'), 'new');
+});
+
+test('win32 replacement restores a directory that appears between lstat and rename', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'rau-credits-replace-dir-race-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, 'metadata.json');
+  const temp = path.join(directory, 'metadata.tmp');
+  const previous = replaceTest.backupPath(target);
+  await mkdir(target);
+  await writeFile(path.join(target, 'inside.txt'), 'keep');
+  await writeFile(temp, 'new');
+
+  const fsImpl = {
+    lstat(filePath) {
+      if (filePath === target) return Promise.resolve({ isDirectory: () => false, isFile: () => true });
+      return realFs.lstat(filePath);
+    },
+    stat: (...args) => realFs.stat(...args),
+    rename: (...args) => realFs.rename(...args),
+    rm: rmFileOnly,
+  };
+
+  await assert.rejects(
+    replaceFile(temp, target, 'win32', { fsImpl, sleep: async () => {} }),
+    { code: 'EISDIR' },
+  );
+  assert.equal(await readFile(path.join(target, 'inside.txt'), 'utf8'), 'keep');
+  await assert.rejects(access(previous), { code: 'ENOENT' });
+  assert.equal(await readFile(temp, 'utf8'), 'new');
+});
+
+test('win32 recovery does not recursively delete a leftover directory backup', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'rau-credits-replace-dir-leftover-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, 'credits.json');
+  const previous = replaceTest.backupPath(target);
+  await writeFile(target, 'new');
+  await mkdir(previous);
+  await writeFile(path.join(previous, 'inside.txt'), 'keep');
+
+  const fsImpl = {
+    lstat: (...args) => realFs.lstat(...args),
+    stat: (...args) => realFs.stat(...args),
+    rename: (...args) => realFs.rename(...args),
+    rm: rmFileOnly,
+  };
+
+  assert.equal(await recoverReplacedFile(target, 'win32', { fsImpl, sleep: async () => {} }), false);
+  assert.equal(await readFile(target, 'utf8'), 'new');
+  assert.equal(await readFile(path.join(previous, 'inside.txt'), 'utf8'), 'keep');
 });
