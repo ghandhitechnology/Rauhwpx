@@ -1069,6 +1069,60 @@ impl LayoutEngine {
         clamp_header_negative_para_offset: bool,
         native_saved_text_frame_outer_box: bool,
     ) -> f64 {
+        self.layout_table_with_wrapper_margin(
+            tree,
+            col_node,
+            table,
+            section_index,
+            styles,
+            outline_numbering_id,
+            col_area,
+            y_start,
+            bin_data_content,
+            measured_table,
+            depth,
+            table_meta,
+            host_alignment,
+            enclosing_cell_ctx,
+            host_margin_left,
+            host_margin_right,
+            inline_x_override,
+            nested_split,
+            para_y,
+            allow_para_top_bleed,
+            clamp_header_negative_para_offset,
+            native_saved_text_frame_outer_box,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn layout_table_with_wrapper_margin(
+        &self,
+        tree: &mut PageRenderTree,
+        col_node: &mut RenderNode,
+        table: &crate::model::table::Table,
+        section_index: usize,
+        styles: &ResolvedStyleSet,
+        outline_numbering_id: u16,
+        col_area: &LayoutRect,
+        y_start: f64,
+        bin_data_content: &[BinDataContent],
+        measured_table: Option<&MeasuredTable>,
+        depth: usize,
+        table_meta: Option<(usize, usize)>,
+        host_alignment: Alignment,
+        enclosing_cell_ctx: Option<CellContext>,
+        host_margin_left: f64,
+        host_margin_right: f64,
+        inline_x_override: Option<f64>,
+        nested_split: Option<&NestedTableSplit>,
+        para_y: Option<f64>,
+        allow_para_top_bleed: bool,
+        clamp_header_negative_para_offset: bool,
+        native_saved_text_frame_outer_box: bool,
+        wrapper_margin_already_applied: bool,
+    ) -> f64 {
         if table.cells.is_empty() {
             if depth == 0 {
                 return y_start;
@@ -1201,6 +1255,30 @@ impl LayoutEngine {
                         let nested_w = hwpunit_to_px(nested.common.width as i32, self.dpi)
                             * self.render_table_width_scale(nested);
                         let outer_w_for_box = nested_w;
+                        // 원본 HWP 최상위 1x1 블록 래퍼를 풀면 왼쪽 바깥 여백이 사라진다.
+                        // 첫 unwrap 만 가산하고, 재귀에는 이미 적용했음을 넘겨 중복을 막는다.
+                        // 세로 배치는 바꾸지 않는다.
+                        let wrapper_left_inset = if !wrapper_margin_already_applied
+                            && depth == 0
+                            && self.profile.get().native_hwp5_layout()
+                            && inline_x_override.is_none()
+                            && !table.common.treat_as_char
+                            && matches!(table.common.text_wrap, TextWrap::TopAndBottom)
+                            && matches!(table.common.vert_rel_to, VertRelTo::Para)
+                            && matches!(
+                                table.common.horz_rel_to,
+                                HorzRelTo::Column | HorzRelTo::Para
+                            )
+                            && matches!(
+                                table.common.horz_align,
+                                HorzAlign::Left | HorzAlign::Inside
+                            )
+                            && signed_hwpunit(table.common.horizontal_offset) == 0
+                        {
+                            hwpunit_to_px(table.outer_margin_left as i32, self.dpi)
+                        } else {
+                            0.0
+                        };
                         let outer_x_for_box = self.compute_table_x_position(
                             nested,
                             nested_w,
@@ -1211,16 +1289,22 @@ impl LayoutEngine {
                             host_margin_right,
                             inline_x_override,
                             paper_w,
-                        );
+                        ) + wrapper_left_inset;
+                        let inner_area = LayoutRect {
+                            x: col_area.x + wrapper_left_inset,
+                            y: col_area.y,
+                            width: col_area.width,
+                            height: col_area.height,
+                        };
 
-                        let y_end = self.layout_table(
+                        let y_end = self.layout_table_with_wrapper_margin(
                             tree,
                             col_node,
                             nested,
                             section_index,
                             styles,
                             outline_numbering_id,
-                            col_area,
+                            &inner_area,
                             y_start,
                             bin_data_content,
                             None,
@@ -1236,6 +1320,7 @@ impl LayoutEngine {
                             allow_para_top_bleed,
                             clamp_header_negative_para_offset,
                             false,
+                            true,
                         );
 
                         if let Some(bs_borders) = outer_border_meta {
@@ -11946,5 +12031,308 @@ mod para_relative_float_table_lead_tests {
 
         let as_char = para_float_table(TextWrap::Square, 1200, true);
         assert_eq!(para_relative_float_table_lead(&as_char, 96.0), 0.0);
+    }
+}
+
+#[cfg(test)]
+mod wrapper_left_margin_unwrap_tests {
+    use super::LayoutEngine;
+    use crate::model::control::Control;
+    use crate::model::paragraph::Paragraph;
+    use crate::model::shape::{CommonObjAttr, HorzAlign, HorzRelTo, TextWrap, VertRelTo};
+    use crate::model::style::Alignment;
+    use crate::model::table::{Cell, Table};
+    use crate::renderer::page_layout::LayoutRect;
+    use crate::renderer::render_tree::{BoundingBox, PageRenderTree, RenderNode, RenderNodeType};
+    use crate::renderer::style_resolver::ResolvedStyleSet;
+    use crate::renderer::{hwpunit_to_px, DEFAULT_DPI};
+
+    const WRAPPER_MARGIN_HU: i16 = 283;
+    const COL_X: f64 = 100.0;
+    const COL_Y: f64 = 120.0;
+
+    fn nested_body() -> Table {
+        Table {
+            row_count: 2,
+            col_count: 1,
+            cells: vec![
+                Cell {
+                    row: 0,
+                    col: 0,
+                    row_span: 1,
+                    col_span: 1,
+                    width: 10_000,
+                    height: 1_200,
+                    ..Default::default()
+                },
+                Cell {
+                    row: 1,
+                    col: 0,
+                    row_span: 1,
+                    col_span: 1,
+                    width: 10_000,
+                    height: 1_200,
+                    ..Default::default()
+                },
+            ],
+            common: CommonObjAttr {
+                width: 10_000,
+                height: 2_400,
+                text_wrap: TextWrap::TopAndBottom,
+                vert_rel_to: VertRelTo::Para,
+                horz_rel_to: HorzRelTo::Column,
+                horz_align: HorzAlign::Left,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn wrapper_table(
+        nested: Table,
+        horz_rel_to: HorzRelTo,
+        horz_align: HorzAlign,
+        outer_margin_left: i16,
+    ) -> Table {
+        Table {
+            row_count: 1,
+            col_count: 1,
+            cells: vec![Cell {
+                row: 0,
+                col: 0,
+                row_span: 1,
+                col_span: 1,
+                width: 10_000,
+                height: 2_400,
+                paragraphs: vec![Paragraph {
+                    controls: vec![Control::Table(Box::new(nested))],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            common: CommonObjAttr {
+                width: 10_000,
+                height: 2_400,
+                text_wrap: TextWrap::TopAndBottom,
+                vert_rel_to: VertRelTo::Para,
+                horz_rel_to,
+                horz_align,
+                ..Default::default()
+            },
+            outer_margin_left,
+            ..Default::default()
+        }
+    }
+
+    fn first_table_bbox(node: &RenderNode) -> Option<BoundingBox> {
+        if matches!(node.node_type, RenderNodeType::Table(_)) {
+            return Some(node.bbox);
+        }
+        node.children.iter().find_map(first_table_bbox)
+    }
+
+    fn layout_nested_bbox(
+        wrapper: &Table,
+        depth: usize,
+        inline_x_override: Option<f64>,
+        native_hwp5: bool,
+    ) -> BoundingBox {
+        let eng = LayoutEngine::new(DEFAULT_DPI);
+        eng.set_layout_profile(crate::model::provenance::LayoutCompatibilityProfile::new(
+            false,
+            false,
+            !native_hwp5,
+            false,
+            native_hwp5,
+        ));
+        let mut tree = PageRenderTree::new(0, 800.0, 1100.0);
+        let mut col_node = RenderNode::new(
+            tree.next_id(),
+            RenderNodeType::Column(0),
+            BoundingBox::new(COL_X, COL_Y, 500.0, 800.0),
+        );
+        let col_area = LayoutRect {
+            x: COL_X,
+            y: COL_Y,
+            width: 500.0,
+            height: 800.0,
+        };
+        let styles = ResolvedStyleSet::default();
+        eng.layout_table(
+            &mut tree,
+            &mut col_node,
+            wrapper,
+            0,
+            &styles,
+            0,
+            &col_area,
+            COL_Y,
+            &[],
+            None,
+            depth,
+            None,
+            Alignment::Left,
+            None,
+            0.0,
+            0.0,
+            inline_x_override,
+            None,
+            Some(COL_Y),
+            false,
+            false,
+            false,
+        );
+        first_table_bbox(&col_node).expect("unwrapped nested table node")
+    }
+
+    #[test]
+    fn native_column_left_wrapper_keeps_left_outer_margin() {
+        let margin = hwpunit_to_px(WRAPPER_MARGIN_HU as i32, DEFAULT_DPI);
+        let with_margin = layout_nested_bbox(
+            &wrapper_table(
+                nested_body(),
+                HorzRelTo::Column,
+                HorzAlign::Left,
+                WRAPPER_MARGIN_HU,
+            ),
+            0,
+            None,
+            true,
+        );
+        let without_margin = layout_nested_bbox(
+            &wrapper_table(nested_body(), HorzRelTo::Column, HorzAlign::Left, 0),
+            0,
+            None,
+            true,
+        );
+
+        assert!(
+            (with_margin.x - (COL_X + margin)).abs() < 0.001,
+            "nested x must include wrapper left outer margin; got {}",
+            with_margin.x
+        );
+        assert!(
+            (without_margin.x - COL_X).abs() < 0.001,
+            "zero wrapper margin must stay on the column origin; got {}",
+            without_margin.x
+        );
+        assert!(
+            (with_margin.y - without_margin.y).abs() < 0.001,
+            "vertical placement must stay unchanged; with={} without={}",
+            with_margin.y,
+            without_margin.y
+        );
+    }
+
+    #[test]
+    fn native_para_inside_wrapper_keeps_left_outer_margin() {
+        let margin = hwpunit_to_px(WRAPPER_MARGIN_HU as i32, DEFAULT_DPI);
+        let bbox = layout_nested_bbox(
+            &wrapper_table(
+                nested_body(),
+                HorzRelTo::Para,
+                HorzAlign::Inside,
+                WRAPPER_MARGIN_HU,
+            ),
+            0,
+            None,
+            true,
+        );
+        assert!(
+            (bbox.x - (COL_X + margin)).abs() < 0.001,
+            "Para/Inside wrapper must keep left outer margin; got {}",
+            bbox.x
+        );
+    }
+
+    #[test]
+    fn recursive_unwrap_does_not_double_add_wrapper_margin() {
+        let margin = hwpunit_to_px(WRAPPER_MARGIN_HU as i32, DEFAULT_DPI);
+        let inner_wrapper = wrapper_table(
+            nested_body(),
+            HorzRelTo::Column,
+            HorzAlign::Left,
+            WRAPPER_MARGIN_HU,
+        );
+        let outer_wrapper = wrapper_table(
+            inner_wrapper,
+            HorzRelTo::Column,
+            HorzAlign::Left,
+            WRAPPER_MARGIN_HU,
+        );
+        let bbox = layout_nested_bbox(&outer_wrapper, 0, None, true);
+        assert!(
+            (bbox.x - (COL_X + margin)).abs() < 0.001,
+            "only the first wrapper inset may apply; got {} expected {}",
+            bbox.x,
+            COL_X + margin
+        );
+    }
+
+    #[test]
+    fn wrapper_left_margin_keeps_existing_inline_depth_profile_offset_guards() {
+        let margin = hwpunit_to_px(WRAPPER_MARGIN_HU as i32, DEFAULT_DPI);
+        let matching = wrapper_table(
+            nested_body(),
+            HorzRelTo::Column,
+            HorzAlign::Left,
+            WRAPPER_MARGIN_HU,
+        );
+
+        let mut tac = matching.clone();
+        tac.common.treat_as_char = true;
+        let tac_bbox = layout_nested_bbox(&tac, 0, None, true);
+        assert!(
+            (tac_bbox.x - COL_X).abs() < 0.001,
+            "treat_as_char must not take the unwrap inset; got {}",
+            tac_bbox.x
+        );
+
+        let inline_bbox = layout_nested_bbox(&matching, 0, Some(COL_X), true);
+        assert!(
+            (inline_bbox.x - COL_X).abs() < 0.001,
+            "inline_x_override must keep its existing owner; got {}",
+            inline_bbox.x
+        );
+
+        let nested_depth = layout_nested_bbox(&matching, 1, None, true);
+        assert!(
+            (nested_depth.x - COL_X).abs() < 0.001,
+            "depth > 0 must not take the top-level unwrap inset; got {}",
+            nested_depth.x
+        );
+
+        let mut offset = matching.clone();
+        offset.common.horizontal_offset = 1_200;
+        let offset_bbox = layout_nested_bbox(&offset, 0, None, true);
+        assert!(
+            (offset_bbox.x - COL_X).abs() < 0.001,
+            "nonzero horizontal_offset must keep the existing owner; got {}",
+            offset_bbox.x
+        );
+
+        let right = layout_nested_bbox(
+            &wrapper_table(
+                nested_body(),
+                HorzRelTo::Column,
+                HorzAlign::Right,
+                WRAPPER_MARGIN_HU,
+            ),
+            0,
+            None,
+            true,
+        );
+        assert!(
+            (right.x - (COL_X + margin)).abs() > 1.0,
+            "Right align must not use the Left/Inside unwrap inset; got {}",
+            right.x
+        );
+
+        let hwpx = layout_nested_bbox(&matching, 0, None, false);
+        assert!(
+            (hwpx.x - COL_X).abs() < 0.001,
+            "HWPX stored layout must keep its existing margin owner; got {}",
+            hwpx.x
+        );
     }
 }
