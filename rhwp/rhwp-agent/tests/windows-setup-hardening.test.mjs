@@ -34,7 +34,6 @@ function rmFileOnly(filePath, options) {
   return fs.rm(filePath, options);
 }
 
-/** Real fs, except lstat(target) reports a file: the directory "appears" after the guard. */
 function lyingLstatFs(target, overrides = {}) {
   return {
     lstat: (filePath) => (filePath === target

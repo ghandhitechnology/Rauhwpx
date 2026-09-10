@@ -75,13 +75,11 @@ function rollbackFailedError(error, restoreError, backupPath, tempPath) {
   return failure;
 }
 
-/** `.previous-write` only ever holds a moved-aside file; a directory there is foreign data. */
 async function removeReplacementBackup(backupPath, deps) {
   if (await isDirectory(backupPath, deps.fsApi)) throw directoryReplaceError(backupPath, 'delete');
   await retryLockedOperation(() => deps.fsApi.rm(backupPath, { force: true }), deps);
 }
 
-/** The backup is the old value's only copy (or a raced-in directory), so it is never removed. */
 async function restoreMovedTarget(error, { targetPath, backupPath, tempPath }, deps) {
   try {
     await retryLockedOperation(() => deps.fsApi.rename(backupPath, targetPath), deps);
@@ -104,8 +102,6 @@ export async function replaceFileAtomically(
   // target would be renamed to `.previous-write` and the write would publish.
   if (await isDirectory(targetPath, fsApi)) throw directoryReplaceError(targetPath);
   await recoverInterruptedFileReplacement(targetPath, deps);
-  // Recovery can restore a directory that was left at `.previous-write`.
-  // Re-check before the two-step rename so that directory is not moved aside.
   if (await isDirectory(targetPath, fsApi)) throw directoryReplaceError(targetPath);
   await removeReplacementBackup(paths.backupPath, deps);
   let moved = false;
@@ -124,9 +120,6 @@ export async function replaceFileAtomically(
     if (moved) await restoreMovedTarget(error, paths, deps);
     throw error;
   }
-  // The commit boundary is the temp -> target rename. A locked stale backup is
-  // safe to clean up on the next write/startup and must not turn a committed
-  // state change into a reported failure.
   if (moved) await removeReplacementBackup(paths.backupPath, deps).catch(() => {});
 }
 
@@ -154,8 +147,6 @@ export async function removeFileAndReplacementBackup(
 ) {
   const deps = { platform, fsApi, delays };
   if (platform === 'win32') {
-    // Removing the backup first makes a crash conservative: before the target
-    // removal the old live value remains, and after it no recovery copy exists.
     await removeReplacementBackup(replacementBackupPath(targetPath), deps);
   }
   await retryLockedOperation(() => fsApi.rm(targetPath, { force: true }), deps);
