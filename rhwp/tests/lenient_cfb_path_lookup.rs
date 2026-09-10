@@ -34,10 +34,7 @@ fn small_cfb(streams: &[(&str, &[u8])]) -> Vec<u8> {
 
 fn colliding_section_cfb() -> Vec<u8> {
     // ViewText 를 먼저 만들어 디렉터리에서 Section0 이 그쪽이 먼저 나오게 한다.
-    small_cfb(&[
-        ("/ViewText/Section0", VIEW),
-        ("/BodyText/Section0", BODY),
-    ])
+    small_cfb(&[("/ViewText/Section0", VIEW), ("/BodyText/Section0", BODY)])
 }
 
 fn directory_offset(bytes: &[u8]) -> usize {
@@ -87,7 +84,7 @@ fn lenient_body_text_section_reads_bodytext_storage() {
     let lenient = LenientCfbReader::open(&data).expect("lenient open");
 
     let raw = lenient
-        .read_body_text_section_limited(0, false, CAP)
+        .read_body_text_section_raw_limited(0, CAP)
         .expect("BodyText Section0 raw");
     assert_eq!(raw, BODY, "본문 섹션 읽기가 ViewText 스트림을 집었다");
 }

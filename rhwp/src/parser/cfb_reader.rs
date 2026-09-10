@@ -853,6 +853,9 @@ pub struct LenientCfbReader {
     sector_size: usize,
     /// Directory entries: (name, start_sector, size, obj_type)
     entries: Vec<(String, u32, u64, u8)>,
+    /// 원본 directory ID를 보존한 엔트리. 경로가 중요한 ViewText는 이 트리를 따라
+    /// 찾아야 `BodyText/SectionN`과 이름만 같은 스트림을 혼동하지 않는다.
+    directory_entries: Vec<LenientDirectoryEntry>,
     /// FAT table
     fat: Vec<u32>,
     /// Mini-stream data
@@ -861,6 +864,17 @@ pub struct LenientCfbReader {
     mini_fat: Vec<u32>,
     /// Mini-stream cutoff size
     mini_stream_cutoff: u32,
+}
+
+#[derive(Debug)]
+struct LenientDirectoryEntry {
+    name: String,
+    left_sibling: u32,
+    right_sibling: u32,
+    child: u32,
+    start_sector: u32,
+    size: u64,
+    obj_type: u8,
 }
 
 impl LenientCfbReader {
@@ -1040,6 +1054,7 @@ impl LenientCfbReader {
             MAX_CFB_DIRECTORY_ENTRIES * 128,
         );
         let mut entries = Vec::new();
+        let mut directory_entries = Vec::new();
         let entry_size = 128;
         let n_entries = dir_data.len() / entry_size;
         for i in 0..n_entries {
@@ -1062,6 +1077,24 @@ impl LenientCfbReader {
                 String::new()
             };
             let obj_type = dir_data[eoff + 66];
+            let left_sibling = u32::from_le_bytes([
+                dir_data[eoff + 68],
+                dir_data[eoff + 69],
+                dir_data[eoff + 70],
+                dir_data[eoff + 71],
+            ]);
+            let right_sibling = u32::from_le_bytes([
+                dir_data[eoff + 72],
+                dir_data[eoff + 73],
+                dir_data[eoff + 74],
+                dir_data[eoff + 75],
+            ]);
+            let child = u32::from_le_bytes([
+                dir_data[eoff + 76],
+                dir_data[eoff + 77],
+                dir_data[eoff + 78],
+                dir_data[eoff + 79],
+            ]);
             let start_sector = u32::from_le_bytes([
                 dir_data[eoff + 116],
                 dir_data[eoff + 117],
@@ -1078,6 +1111,16 @@ impl LenientCfbReader {
                 dir_data[eoff + 126],
                 dir_data[eoff + 127],
             ]);
+
+            directory_entries.push(LenientDirectoryEntry {
+                name: name.clone(),
+                left_sibling,
+                right_sibling,
+                child,
+                start_sector,
+                size,
+                obj_type,
+            });
 
             if obj_type == 1 || obj_type == 2 || obj_type == 5 {
                 entries.push((name, start_sector, size, obj_type));
@@ -1098,19 +1141,28 @@ impl LenientCfbReader {
         }
 
         // Mini-stream: Root entry의 스트림 데이터
-        let mini_stream = if !entries.is_empty() && entries[0].3 == 5 {
-            let root_size = usize::try_from(entries[0].2)
-                .unwrap_or(MAX_BINARY_BYTES)
-                .min(MAX_BINARY_BYTES);
-            Self::read_chain_static_limited(&data, &fat, entries[0].1, sector_size, root_size)
-        } else {
-            Vec::new()
-        };
+        let mini_stream = directory_entries
+            .iter()
+            .find(|entry| entry.obj_type == 5)
+            .map(|root| {
+                let root_size = usize::try_from(root.size)
+                    .unwrap_or(MAX_BINARY_BYTES)
+                    .min(MAX_BINARY_BYTES);
+                Self::read_chain_static_limited(
+                    &data,
+                    &fat,
+                    root.start_sector,
+                    sector_size,
+                    root_size,
+                )
+            })
+            .unwrap_or_default();
 
         let reader = LenientCfbReader {
             data,
             sector_size,
             entries,
+            directory_entries,
             fat,
             mini_stream,
             mini_fat,
@@ -1184,30 +1236,126 @@ impl LenientCfbReader {
         result
     }
 
-    /// 디렉토리 경로로 스트림 내용을 가져온다.
-    /// 경로 형식: "FileHeader", "DocInfo", "BodyText/Section0" 등
-    fn find_entry_idx(&self, path: &str) -> Option<usize> {
-        // 경로 "/" 제거 및 트리 탐색 단순화: 이름으로 검색
-        let parts: Vec<&str> = path.trim_start_matches('/').split('/').collect();
-        if parts.is_empty() {
-            return None;
+    /// 디렉토리 경로로 엔트리 id(= `directory_entries` 인덱스)를 찾는다.
+    /// 경로 형식: "FileHeader", "/DocInfo", "/BodyText/Section0" 등
+    ///
+    /// 스토리지를 실제로 따라간다. 이름만 비교하면 `BodyText/Section0` 과
+    /// `ViewText/Section0` 처럼 이름이 같은 스트림을 가진 문서에서 디렉터리에
+    /// 먼저 나오는 쪽이 잡힌다(변경 추적 문서 등에서 실제로 발생).
+    fn find_entry_id(&self, path: &str) -> Option<usize> {
+        let parts: Vec<&str> = path
+            .trim_start_matches('/')
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .collect();
+        let (last, parents) = parts.split_last()?;
+
+        // 1) 정상 CFB: 루트에서 세그먼트마다 자식으로 내려간다.
+        if let Some(root_id) = self
+            .directory_entries
+            .iter()
+            .position(|entry| entry.obj_type == 5)
+        {
+            let mut current = Some(root_id);
+            for segment in parents {
+                current = current
+                    .and_then(|id| self.find_child_entry_by_name(id, segment))
+                    .filter(|&id| self.directory_entries[id].obj_type == 1);
+            }
+            // 손상된 링크가 이름만 남은 삭제 슬롯을 가리킬 수 있다.
+            // 무효 entry는 채택하지 않고 아래의 유일 이름 복구를 시도한다.
+            if let Some(id) = current
+                .and_then(|id| self.find_child_entry_by_name(id, last))
+                .filter(|&id| matches!(self.directory_entries[id].obj_type, 1 | 2 | 5))
+            {
+                return Some(id);
+            }
         }
 
-        // 간단한 DFS - directory entries가 Red-Black 트리이므로
-        // child_id/sibling을 써야 하지만, 이름 기반 단순 매칭으로 충분
-        // (HWP 파일은 스트림이 많지 않음)
-        let target_name = if parts.len() == 1 {
-            parts[0].to_string()
-        } else {
-            // 마지막 세그먼트를 이름으로 사용
-            parts.last().unwrap().to_string()
-        };
+        // 2) lenient 폴백: 디렉터리 트리가 깨진 입력은 이름으로 찾는다.
+        //    단 같은 이름이 둘 이상이면 어느 쪽이 맞는지 알 수 없으므로 고르지 않는다
+        //    (잘못된 스트림을 조용히 읽느니 없다고 답한다).
+        let mut found = None;
+        for (id, entry) in self.directory_entries.iter().enumerate() {
+            if entry.name == *last && matches!(entry.obj_type, 1 | 2 | 5) {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some(id);
+            }
+        }
+        found
+    }
 
-        // 정확한 경로 매칭이 필요하면 트리 탐색해야 하지만,
-        // HWP에서는 이름이 유일하므로 단순 매칭
-        self.entries
-            .iter()
-            .position(|(name, _, _, _)| name == &target_name)
+    /// 본문 섹션 스트림 경로. strict `CfbReader::read_body_text_section` 과 같은 규칙.
+    fn body_text_section_path(&self, index: u32) -> String {
+        let bodytext_path = format!("/BodyText/Section{}", index);
+        if self.has_stream(&bodytext_path) {
+            return bodytext_path;
+        }
+        format!("/Section{}", index)
+    }
+
+    fn find_child_entry_by_name(&self, parent_id: usize, name: &str) -> Option<usize> {
+        let first_child = self.directory_entries.get(parent_id)?.child;
+        let mut pending = vec![first_child];
+        let mut visited = std::collections::HashSet::new();
+
+        while let Some(entry_id) = pending.pop() {
+            if entry_id == Self::END_OF_CHAIN || entry_id == Self::FREE_SECT {
+                continue;
+            }
+            let entry_id = entry_id as usize;
+            if !visited.insert(entry_id) {
+                continue;
+            }
+            let Some(entry) = self.directory_entries.get(entry_id) else {
+                continue;
+            };
+            if entry.name == name {
+                return Some(entry_id);
+            }
+            pending.push(entry.left_sibling);
+            pending.push(entry.right_sibling);
+        }
+
+        None
+    }
+
+    fn read_directory_stream_limited(
+        &self,
+        entry_id: usize,
+        path: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, CfbError> {
+        let entry = self
+            .directory_entries
+            .get(entry_id)
+            .ok_or_else(|| CfbError::StreamNotFound(path.to_string()))?;
+        if entry.obj_type != 2 {
+            return Err(CfbError::StreamError(format!(
+                "{}: 스트림이 아님 (type={})",
+                path, entry.obj_type
+            )));
+        }
+        let requested_limit = max_bytes.min(lenient_stream_limit(path));
+        let max_bytes = requested_limit.min(stream_limit(&format!("/{}", entry.name)));
+        if entry.size > max_bytes as u64 {
+            return Err(CfbError::LimitExceeded(max_bytes));
+        }
+        let size = usize::try_from(entry.size).map_err(|_| CfbError::LimitExceeded(max_bytes))?;
+
+        if size < self.mini_stream_cutoff as usize {
+            Ok(self.read_mini_stream(entry.start_sector, size as u64))
+        } else {
+            Ok(Self::read_chain_static_limited(
+                &self.data,
+                &self.fat,
+                entry.start_sector,
+                self.sector_size,
+                size,
+            ))
+        }
     }
 
     fn validate_stream_budget(&self) -> Result<(), CfbError> {
@@ -1235,38 +1383,14 @@ impl LenientCfbReader {
     }
 
     pub fn read_stream_limited(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>, CfbError> {
-        let requested_limit = max_bytes.min(lenient_stream_limit(path));
-        let idx = self
-            .find_entry_idx(path)
+        let entry_id = self
+            .find_entry_id(path)
             .ok_or_else(|| CfbError::StreamNotFound(path.to_string()))?;
-        let (actual_name, start, size, obj_type) = &self.entries[idx];
-        let max_bytes = requested_limit.min(stream_limit(&format!("/{actual_name}")));
-        if *obj_type != 2 {
-            return Err(CfbError::StreamError(format!(
-                "{}: 스트림이 아님 (type={})",
-                path, obj_type
-            )));
-        }
-        if *size > max_bytes as u64 {
-            return Err(CfbError::LimitExceeded(max_bytes));
-        }
-        let size = usize::try_from(*size).map_err(|_| CfbError::LimitExceeded(max_bytes))?;
-
-        if size < self.mini_stream_cutoff as usize {
-            Ok(self.read_mini_stream(*start, size as u64))
-        } else {
-            Ok(Self::read_chain_static_limited(
-                &self.data,
-                &self.fat,
-                *start,
-                self.sector_size,
-                size,
-            ))
-        }
+        self.read_directory_stream_limited(entry_id, path, max_bytes)
     }
 
     pub fn has_stream(&self, path: &str) -> bool {
-        self.find_entry_idx(path).is_some()
+        self.find_entry_id(path).is_some()
     }
 
     pub fn read_doc_info(&self, compressed: bool) -> Result<Vec<u8>, CfbError> {
@@ -1302,8 +1426,8 @@ impl LenientCfbReader {
         max_bytes: usize,
     ) -> Result<Vec<u8>, CfbError> {
         let max_bytes = max_bytes.min(MAX_STRUCTURAL_BYTES);
-        let name = format!("Section{}", index);
-        let raw = self.read_stream_limited(&name, max_bytes)?;
+        let path = self.body_text_section_path(index);
+        let raw = self.read_stream_limited(&path, max_bytes)?;
         if compressed {
             decompress_stream_limited(&raw, max_bytes)
         } else {
@@ -1348,20 +1472,31 @@ impl LenientCfbReader {
     ) -> Result<Vec<u8>, CfbError> {
         let max_bytes = max_bytes.min(MAX_STRUCTURAL_BYTES);
         if distribution {
-            let viewtext_name = format!("Section{}", index);
+            let viewtext_path = format!("/ViewText/Section{}", index);
             // ViewText 하위 스트림 탐색
-            if self.has_stream(&viewtext_name) {
-                return self.read_stream_limited(&viewtext_name, max_bytes);
+            if self.has_stream(&viewtext_path) {
+                return self.read_stream_limited(&viewtext_path, max_bytes);
             }
         }
 
-        let name = format!("Section{}", index);
-        let raw = self.read_stream_limited(&name, max_bytes)?;
+        let path = self.body_text_section_path(index);
+        let raw = self.read_stream_limited(&path, max_bytes)?;
         if compressed {
             decompress_stream_limited(&raw, max_bytes)
         } else {
             Ok(raw)
         }
+    }
+
+    /// 일반 BodyText 섹션의 원본을 caller 제공 상한까지 읽는다.
+    /// strict `CfbReader::read_body_text_section_limited` 와 같은 경로 규칙.
+    pub fn read_body_text_section_raw_limited(
+        &self,
+        index: u32,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, CfbError> {
+        let path = self.body_text_section_path(index);
+        self.read_stream_limited(&path, max_bytes)
     }
 
     /// 본문 섹션 수 계산
@@ -1468,12 +1603,29 @@ mod tests {
         assert!(validate_bin_data_storage_name(&"A".repeat(32)).is_err());
     }
 
+    fn unique_stream_entry(name: &str, start_sector: u32, size: u64) -> LenientDirectoryEntry {
+        LenientDirectoryEntry {
+            name: name.to_string(),
+            left_sibling: LenientCfbReader::FREE_SECT,
+            right_sibling: LenientCfbReader::FREE_SECT,
+            child: LenientCfbReader::FREE_SECT,
+            start_sector,
+            size,
+            obj_type: 2,
+        }
+    }
+
     #[test]
     fn lenient_reads_apply_the_limit_of_the_resolved_entry() {
         let reader = LenientCfbReader {
             data: Arc::from(Vec::<u8>::new()),
             sector_size: 512,
             entries: vec![("DocInfo".to_string(), 0, MAX_STRUCTURAL_BYTES as u64 + 1, 2)],
+            directory_entries: vec![unique_stream_entry(
+                "DocInfo",
+                0,
+                MAX_STRUCTURAL_BYTES as u64 + 1,
+            )],
             fat: Vec::new(),
             mini_stream: Vec::new(),
             mini_fat: Vec::new(),
@@ -1662,6 +1814,7 @@ mod tests {
             data: Arc::from(data),
             sector_size: 512,
             entries: vec![("Payload".to_string(), 0, 1, 2)],
+            directory_entries: vec![unique_stream_entry("Payload", 0, 1)],
             fat: vec![1, 2, LenientCfbReader::END_OF_CHAIN],
             mini_stream: Vec::new(),
             mini_fat: Vec::new(),
