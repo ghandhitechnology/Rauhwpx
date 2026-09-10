@@ -1255,9 +1255,6 @@ impl LayoutEngine {
                         let nested_w = hwpunit_to_px(nested.common.width as i32, self.dpi)
                             * self.render_table_width_scale(nested);
                         let outer_w_for_box = nested_w;
-                        // 원본 HWP 최상위 1x1 블록 래퍼를 풀면 왼쪽 바깥 여백이 사라진다.
-                        // 첫 unwrap 만 가산하고, 재귀에는 이미 적용했음을 넘겨 중복을 막는다.
-                        // 세로 배치는 바꾸지 않는다.
                         let wrapper_left_inset = if !wrapper_margin_already_applied
                             && depth == 0
                             && self.profile.get().native_hwp5_layout()
