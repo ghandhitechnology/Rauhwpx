@@ -9,6 +9,10 @@ import { recoverReplacedFile, replaceFile, __test as replaceTest } from '../fs-r
 import { createFileMergeStore } from '../merge-artifacts.mjs';
 import { createFileStore } from '../store.mjs';
 
+function errorWithCode(code) {
+  return Object.assign(new Error(code), { code });
+}
+
 function rmFileOnly(filePath, options) {
   if (options?.recursive) throw new Error(`recursive rm is forbidden for ${filePath}`);
   return realFs.rm(filePath, options);
@@ -136,6 +140,75 @@ test('win32 replacement restores a directory that appears between lstat and rena
   );
   assert.equal(await readFile(path.join(target, 'inside.txt'), 'utf8'), 'keep');
   await assert.rejects(access(previous), { code: 'ENOENT' });
+  assert.equal(await readFile(temp, 'utf8'), 'new');
+});
+
+test('win32 replacement restores the target when post-aside lstat fails', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'rau-credits-replace-lstat-fail-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, 'credits.json');
+  const temp = path.join(directory, 'credits.tmp');
+  const previous = replaceTest.backupPath(target);
+  await writeFile(target, 'old');
+  await writeFile(temp, 'new');
+  let asideDone = false;
+  const fsImpl = {
+    async lstat(filePath) {
+      if (asideDone && filePath === previous) throw errorWithCode('EIO');
+      return realFs.lstat(filePath);
+    },
+    stat: (...args) => realFs.stat(...args),
+    async rename(from, to) {
+      const result = await realFs.rename(from, to);
+      if (from === target && to === previous) asideDone = true;
+      return result;
+    },
+    rm: rmFileOnly,
+  };
+
+  await assert.rejects(
+    replaceFile(temp, target, 'win32', { fsImpl, sleep: async () => {} }),
+    { code: 'EIO' },
+  );
+  assert.equal(await readFile(target, 'utf8'), 'old');
+  await assert.rejects(access(previous), { code: 'ENOENT' });
+  assert.equal(await readFile(temp, 'utf8'), 'new');
+});
+
+test('win32 replacement reports rollback failure when post-aside lstat restore fails', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'rau-credits-replace-lstat-rollback-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const target = path.join(directory, 'credits.json');
+  const temp = path.join(directory, 'credits.tmp');
+  const previous = replaceTest.backupPath(target);
+  await writeFile(target, 'old');
+  await writeFile(temp, 'new');
+  let asideDone = false;
+  const fsImpl = {
+    async lstat(filePath) {
+      if (asideDone && filePath === previous) throw errorWithCode('EIO');
+      return realFs.lstat(filePath);
+    },
+    stat: (...args) => realFs.stat(...args),
+    async rename(from, to) {
+      if (asideDone && from === previous && to === target) throw errorWithCode('EPERM');
+      const result = await realFs.rename(from, to);
+      if (from === target && to === previous) asideDone = true;
+      return result;
+    },
+    rm: rmFileOnly,
+  };
+
+  await assert.rejects(
+    replaceFile(temp, target, 'win32', { fsImpl, sleep: async () => {} }),
+    (error) => error.code === 'FILE_REPLACE_ROLLBACK_FAILED'
+      && error.backupPath === previous
+      && error.tempPath === temp
+      && error.errors[0].code === 'EIO'
+      && error.errors[1].code === 'EPERM',
+  );
+  assert.equal(await readFile(previous, 'utf8'), 'old');
+  await assert.rejects(access(target), { code: 'ENOENT' });
   assert.equal(await readFile(temp, 'utf8'), 'new');
 });
 
