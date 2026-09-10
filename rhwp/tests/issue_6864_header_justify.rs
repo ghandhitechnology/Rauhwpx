@@ -1,6 +1,4 @@
 //! #6864: 저장된 머리말의 양쪽 정렬을 나눔 정렬처럼 늘리지 않는다.
-//!
-//! 업스트림: edwardkim/rhwp#6962 (fixes #6864).
 
 use rhwp::model::control::Control;
 use rhwp::model::style::Alignment;
@@ -99,8 +97,6 @@ fn header_justify_keeps_natural_width_after_hwp_and_hwpx_roundtrip() {
 
 #[test]
 fn hwp3_header_alignment_preserves_distinct_hancom_import_contracts() {
-    // 한컴 engine 2020 재변환: sample11의 원값 6은 JUSTIFY,
-    // SO-SUEOP의 원값 7은 DISTRIBUTE_SPACE. 둘 다 KEEP_WORD이다.
     for (file, expected) in [
         ("hwp3-sample11.hwp", Alignment::Justify),
         ("SO-SUEOP.hwp", Alignment::Split),

@@ -4078,8 +4078,6 @@ impl LayoutEngine {
 
             // 정렬별 간격 분배 계산
             let has_forced_break = comp_line.has_line_break;
-            // [#6864] 저장 줄 정보나 머리말/꼬리말 위치는 정렬 의미를 바꾸지
-            // 않는다. 마지막 줄 분배가 필요한 원본은 파서가 Split으로 전달한다.
             let needs_justify =
                 needs_word_distribution(alignment, is_last_line_of_para, has_forced_break);
             let needs_distribute = alignment == Alignment::Distribute;

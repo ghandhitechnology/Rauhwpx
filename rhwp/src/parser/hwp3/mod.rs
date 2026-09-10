@@ -383,14 +383,10 @@ pub(crate) fn convert_para_shape(
         2 => crate::model::style::Alignment::Right,
         3 => crate::model::style::Alignment::Center,
         4 => crate::model::style::Alignment::Distribute,
-        // [#6864] HWP3 정렬 필드는 0..=7이다. SO-SUEOP의 원값 7은
-        // 한컴 HWPX에서 DISTRIBUTE_SPACE로 변환된다. 6(sample11)은
-        // JUSTIFY이므로 머리말 전체를 Split으로 바꾸면 안 된다.
         5 | 7 => crate::model::style::Alignment::Split,
         _ => crate::model::style::Alignment::Justify,
     };
 
-    // 한컴 HWPX 재변환에서 JUSTIFY와 원값 7(공백 분배)은 KEEP_WORD를 유지한다.
     if matches!(ps.alignment, crate::model::style::Alignment::Justify) || hwp3_ps.align == 7 {
         ps.attr1 |= 1 << 7;
     }
