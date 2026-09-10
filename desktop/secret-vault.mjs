@@ -24,12 +24,40 @@ async function retryWindows(operation, platform) {
   }
 }
 
+async function lstatOrMissing(filePath) {
+  try {
+    return await fs.lstat(filePath);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+function directoryReplaceError(targetPath) {
+  const error = new Error(`Refusing to replace directory ${targetPath}`);
+  error.code = 'EISDIR';
+  return error;
+}
+
 async function replaceFile(temp, target, platform, operations) {
   if (platform !== 'win32') {
     await operations.rename(temp, target);
     return null;
   }
+  if ((await lstatOrMissing(target))?.isDirectory()) {
+    throw directoryReplaceError(target);
+  }
   const previous = `${target}.previous-write`;
+  if (await lstatOrMissing(previous)) {
+    if (await lstatOrMissing(target)) {
+      await retryWindows(() => operations.rm(previous, { force: true }), platform).catch(() => {});
+    } else {
+      await retryWindows(() => operations.rename(previous, target), platform);
+    }
+  }
+  if ((await lstatOrMissing(target))?.isDirectory()) {
+    throw directoryReplaceError(target);
+  }
   await retryWindows(() => operations.rm(previous, { force: true }), platform);
   let moved = false;
   try {
@@ -218,7 +246,9 @@ export function createSecretVault({
         try { await parent.sync(); } finally { await parent.close(); }
       }
     } catch (error) {
-      await operations.rm(temp, { force: true }).catch(() => {});
+      if (error?.code !== 'EISDIR') {
+        await operations.rm(temp, { force: true }).catch(() => {});
+      }
       if (error?.vaultStateUncertain) {
         corruptError = Object.assign(
           new Error('Secure secret storage replacement could not be recovered. Restart or reset the vault.'),
