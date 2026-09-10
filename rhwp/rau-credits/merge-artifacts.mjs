@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { recoverReplacedFile, replaceFile } from './fs-replace.mjs';
 import { syncDirectory } from './store.mjs';
 
 export const MERGE_CHUNK_BYTES = 512 * 1024;
@@ -204,9 +205,13 @@ function objectRepository(state) {
 
 // Local development uses immutable chunk files and atomically published metadata.
 // A directory must have only one broker process; production uses PostgreSQL locks.
-export function createFileMergeStore(directory) {
+export function createFileMergeStore(directory, {
+  platform = process.platform,
+  syncDirectoryImpl = syncDirectory,
+} = {}) {
   const queue = serialized();
   async function read(file) {
+    await recoverReplacedFile(file, platform);
     try { return JSON.parse(await fs.readFile(file, 'utf8')); }
     catch (error) { if (error.code === 'ENOENT') return {}; throw error; }
   }
@@ -220,9 +225,15 @@ export function createFileMergeStore(directory) {
       await handle.sync();
       await handle.close();
       handle = null;
-      await fs.rename(temporary, file);
-      await syncDirectory(path.dirname(file));
-    } finally { await handle?.close(); await fs.rm(temporary, { force: true }); }
+      await replaceFile(temporary, file, platform);
+      await syncDirectoryImpl(path.dirname(file), { platform });
+    } catch (error) {
+      await handle?.close().catch(() => {});
+      if (error?.code !== 'FILE_REPLACE_ROLLBACK_FAILED') {
+        await fs.rm(temporary, { force: true }).catch(() => {});
+      }
+      throw error;
+    }
   }
   async function transaction(accountKey, task) {
     const location = path.join(directory, accountKey);

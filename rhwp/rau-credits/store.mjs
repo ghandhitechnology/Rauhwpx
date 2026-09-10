@@ -2,6 +2,8 @@ import { promises as fs } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 
+import { recoverReplacedFile, replaceFile } from './fs-replace.mjs';
+
 export const MAX_STORE_BYTES = 8 * 1024 * 1024;
 
 const UNSUPPORTED_DIRECTORY_SYNC_ERRORS = new Set([
@@ -89,10 +91,12 @@ export async function syncDirectory(directory, {
 export function createFileStore(filePath, {
   syncDirectoryImpl = syncDirectory,
   emptyState: createEmpty = emptyState,
+  platform = process.platform,
 } = {}) {
   let chain = Promise.resolve();
 
   async function readState() {
+    await recoverReplacedFile(filePath, platform);
     let handle;
     try {
       handle = await fs.open(filePath, 'r');
@@ -132,11 +136,13 @@ export function createFileStore(filePath, {
       await handle.sync();
       await handle.close();
       handle = undefined;
-      await fs.rename(temp, filePath);
-      await syncDirectoryImpl(directory);
+      await replaceFile(temp, filePath, platform);
+      await syncDirectoryImpl(directory, { platform });
     } catch (error) {
       await handle?.close().catch(() => {});
-      await fs.rm(temp, { force: true }).catch(() => {});
+      if (error?.code !== 'FILE_REPLACE_ROLLBACK_FAILED') {
+        await fs.rm(temp, { force: true }).catch(() => {});
+      }
       throw error;
     }
   }
