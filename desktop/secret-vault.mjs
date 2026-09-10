@@ -24,9 +24,9 @@ async function retryWindows(operation, platform) {
   }
 }
 
-async function lstatOrMissing(filePath) {
+async function lstatOrMissing(lstatImpl, filePath) {
   try {
-    return await fs.lstat(filePath);
+    return await lstatImpl(filePath);
   } catch (error) {
     if (error?.code === 'ENOENT') return null;
     throw error;
@@ -44,18 +44,18 @@ async function replaceFile(temp, target, platform, operations) {
     await operations.rename(temp, target);
     return null;
   }
-  if ((await lstatOrMissing(target))?.isDirectory()) {
+  if ((await lstatOrMissing(operations.lstat, target))?.isDirectory()) {
     throw directoryReplaceError(target);
   }
   const previous = `${target}.previous-write`;
-  if (await lstatOrMissing(previous)) {
-    if (await lstatOrMissing(target)) {
+  if (await lstatOrMissing(operations.lstat, previous)) {
+    if (await lstatOrMissing(operations.lstat, target)) {
       await retryWindows(() => operations.rm(previous, { force: true }), platform).catch(() => {});
     } else {
       await retryWindows(() => operations.rename(previous, target), platform);
     }
   }
-  if ((await lstatOrMissing(target))?.isDirectory()) {
+  if ((await lstatOrMissing(operations.lstat, target))?.isDirectory()) {
     throw directoryReplaceError(target);
   }
   await retryWindows(() => operations.rm(previous, { force: true }), platform);
@@ -97,6 +97,7 @@ export function createSecretVault({
   const operations = {
     rename: fileOperations.rename ?? fs.rename,
     rm: fileOperations.rm ?? fs.rm,
+    lstat: fileOperations.lstat ?? fs.lstat,
   };
   let loadPromise = null;
   let entries = {};

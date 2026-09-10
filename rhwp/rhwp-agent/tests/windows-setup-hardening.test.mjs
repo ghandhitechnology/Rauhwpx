@@ -34,6 +34,20 @@ function rmFileOnly(filePath, options) {
   return fs.rm(filePath, options);
 }
 
+function vaultSafeStorage() {
+  return {
+    async isAsyncEncryptionAvailable() { return true; },
+    async encryptStringAsync(value) { return Buffer.from(`protected:${value}`); },
+    async decryptStringAsync(value) {
+      return { shouldReEncrypt: false, result: value.toString().replace(/^protected:/, '') };
+    },
+  };
+}
+
+async function pendingVaultTemps(root) {
+  return (await fs.readdir(root)).filter((name) => name.startsWith('secrets.json.tmp-'));
+}
+
 function lyingLstatFs(target, overrides = {}) {
   return {
     lstat: (filePath) => (filePath === target
@@ -540,6 +554,91 @@ test('Windows vault replacement recovery does not publish over a restored direct
   const temps = (await fs.readdir(root)).filter((name) => name.startsWith('secrets.json.tmp-'));
   assert.equal(temps.length, 1);
   assert.equal(JSON.parse(await fs.readFile(path.join(root, temps[0]), 'utf8')).version, 1);
+});
+
+test('Windows vault replacement restores a directory that appears between lstat and rename', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-vault-dir-race-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const filePath = path.join(root, 'secrets.json');
+  const previous = `${filePath}.previous-write`;
+  const vault = createSecretVault({
+    filePath,
+    safeStorage: vaultSafeStorage(),
+    platform: 'win32',
+    fileOperations: {
+      lstat: (target) => (target === filePath
+        ? Promise.resolve({ isDirectory: () => false, isFile: () => true })
+        : fs.lstat(target)),
+      rm: rmFileOnly,
+    },
+  });
+  await vault.set('rhwp.test', 'first');
+  await fs.rm(filePath);
+  await fs.mkdir(filePath);
+  await fs.writeFile(path.join(filePath, 'inside.txt'), 'keep');
+
+  await assert.rejects(() => vault.set('rhwp.test', 'second'), { code: 'EISDIR' });
+  assert.equal(await fs.readFile(path.join(filePath, 'inside.txt'), 'utf8'), 'keep');
+  await assert.rejects(fs.access(previous), { code: 'ENOENT' });
+  assert.equal((await pendingVaultTemps(root)).length, 1);
+});
+
+test('Windows vault replacement leaves a raced directory stranded when restore fails', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-vault-dir-stranded-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const filePath = path.join(root, 'secrets.json');
+  const previous = `${filePath}.previous-write`;
+  const vault = createSecretVault({
+    filePath,
+    safeStorage: vaultSafeStorage(),
+    platform: 'win32',
+    fileOperations: {
+      lstat: (target) => (target === filePath
+        ? Promise.resolve({ isDirectory: () => false, isFile: () => true })
+        : fs.lstat(target)),
+      async rename(from, to) {
+        if (from === previous && to === filePath) throw errorWithCode('EIO');
+        return fs.rename(from, to);
+      },
+      rm: rmFileOnly,
+    },
+  });
+  await vault.set('rhwp.test', 'first');
+  await fs.rm(filePath);
+  await fs.mkdir(filePath);
+  await fs.writeFile(path.join(filePath, 'inside.txt'), 'keep');
+
+  await assert.rejects(
+    () => vault.set('rhwp.test', 'second'),
+    (error) => error.code === 'FILE_REPLACE_ROLLBACK_FAILED'
+      && error.backupPath === previous
+      && typeof error.tempPath === 'string'
+      && path.basename(error.tempPath).startsWith('secrets.json.tmp-'),
+  );
+  assert.equal(await fs.readFile(path.join(previous, 'inside.txt'), 'utf8'), 'keep');
+  await assert.rejects(fs.access(filePath), { code: 'ENOENT' });
+  assert.equal((await pendingVaultTemps(root)).length, 1);
+});
+
+test('Windows vault replacement does not recursively delete a leftover directory backup', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-vault-dir-leftover-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const filePath = path.join(root, 'secrets.json');
+  const previous = `${filePath}.previous-write`;
+  const vault = createSecretVault({
+    filePath,
+    safeStorage: vaultSafeStorage(),
+    platform: 'win32',
+    fileOperations: { rm: rmFileOnly },
+  });
+  await vault.set('rhwp.test', 'first');
+  const committed = await fs.readFile(filePath, 'utf8');
+  await fs.mkdir(previous);
+  await fs.writeFile(path.join(previous, 'inside.txt'), 'keep');
+
+  await assert.rejects(() => vault.set('rhwp.test', 'second'), { code: 'EISDIR' });
+  assert.equal(await fs.readFile(filePath, 'utf8'), committed);
+  assert.equal(await fs.readFile(path.join(previous, 'inside.txt'), 'utf8'), 'keep');
 });
 
 test('the Windows vault recovers a validated previous-write after an interrupted replace', async () => {
