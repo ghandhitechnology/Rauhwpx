@@ -378,14 +378,18 @@ pub(crate) fn convert_para_shape(
     ps.spacing_after = hwp3_para_metric_u16_to_ir(hwp3_ps.margin_bottom);
     ps.spacing_before = hwp3_para_metric_u16_to_ir(hwp3_ps.margin_top);
     ps.alignment = match hwp3_ps.align {
-        0 => crate::model::style::Alignment::Justify,
+        0 | 6 => crate::model::style::Alignment::Justify,
         1 => crate::model::style::Alignment::Left,
         2 => crate::model::style::Alignment::Right,
         3 => crate::model::style::Alignment::Center,
         4 => crate::model::style::Alignment::Distribute,
-        5 => crate::model::style::Alignment::Split,
+        5 | 7 => crate::model::style::Alignment::Split,
         _ => crate::model::style::Alignment::Justify,
     };
+
+    if matches!(ps.alignment, crate::model::style::Alignment::Justify) || hwp3_ps.align == 7 {
+        ps.attr1 |= 1 << 7;
+    }
 
     // [#2976] 문단 테두리 연결(인접 문단끼리 테두리를 이어 그릴지) 플래그.
     // 접근자 border_connection()은 있었으나 attr1 bit 28(HWPX 직렬화기·편집
@@ -4327,6 +4331,25 @@ mod tests {
             Err(Hwp3Error::ParseError { message })
                 if message.contains("info block extends beyond")
         ));
+    }
+
+    #[test]
+    fn hwp3_align_6_is_justify_and_7_is_split_with_keep_word() {
+        let mut doc_tab_defs = Vec::new();
+        for (align, expected) in [
+            (0u8, crate::model::style::Alignment::Justify),
+            (5, crate::model::style::Alignment::Split),
+            (6, crate::model::style::Alignment::Justify),
+            (7, crate::model::style::Alignment::Split),
+        ] {
+            let mut hwp3_ps = crate::parser::hwp3::records::Hwp3ParaShape::default();
+            hwp3_ps.align = align;
+            let ps = convert_para_shape(&hwp3_ps, &mut doc_tab_defs);
+            assert_eq!(ps.alignment, expected, "align={align}");
+            if align == 0 || align == 6 || align == 7 {
+                assert_ne!(ps.attr1 & (1 << 7), 0, "align={align}: KEEP_WORD");
+            }
+        }
     }
 
     #[test]

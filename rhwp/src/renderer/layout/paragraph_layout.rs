@@ -1662,14 +1662,11 @@ fn compute_line_extra_spacing(
 fn needs_word_distribution(
     alignment: Alignment,
     is_last_line_of_para: bool,
-    distribute_justify_last_line: bool,
     has_forced_break: bool,
 ) -> bool {
     match alignment {
         Alignment::Split => !has_forced_break,
-        Alignment::Justify => {
-            (!is_last_line_of_para || distribute_justify_last_line) && !has_forced_break
-        }
+        Alignment::Justify => !is_last_line_of_para && !has_forced_break,
         _ => false,
     }
 }
@@ -4081,21 +4078,8 @@ impl LayoutEngine {
 
             // 정렬별 간격 분배 계산
             let has_forced_break = comp_line.has_line_break;
-            // 머리말/꼬리말은 내부 문단 인덱스를 `usize::MAX - i`로 넘긴다.
-            // 저장 LINE_SEG가 있는 가져온 HF는 한컴 원본의 단일 줄 Justify 분배를
-            // 보존한다(#1692). 새로 만든 합성 HF는 본문 기본 양쪽 정렬과 같은 마지막
-            // 줄 규칙을 사용해, 짧은 한 줄의 공백이 영역 전체로 늘어나지 않게 한다.
-            let is_header_footer_para = para_index >= usize::MAX - 1024;
-            let distribute_stored_hf_justify_last_line = is_header_footer_para
-                && para.is_some_and(|paragraph| {
-                    !crate::renderer::para_has_no_stored_line_segs(paragraph)
-                });
-            let needs_justify = needs_word_distribution(
-                alignment,
-                is_last_line_of_para,
-                distribute_stored_hf_justify_last_line,
-                has_forced_break,
-            );
+            let needs_justify =
+                needs_word_distribution(alignment, is_last_line_of_para, has_forced_break);
             let needs_distribute = alignment == Alignment::Distribute;
 
             let has_tabs = comp_line.runs.iter().any(|r| r.text.contains('\t'));
@@ -7260,36 +7244,11 @@ mod issue_2809_split_alignment_tests {
 
     #[test]
     fn split_distributes_single_last_line_but_justify_does_not() {
-        assert!(needs_word_distribution(
-            Alignment::Split,
-            true,
-            false,
-            false
-        ));
-        assert!(!needs_word_distribution(
-            Alignment::Justify,
-            true,
-            false,
-            false
-        ));
-        assert!(needs_word_distribution(
-            Alignment::Justify,
-            true,
-            true,
-            false
-        ));
-        assert!(needs_word_distribution(
-            Alignment::Justify,
-            false,
-            false,
-            false
-        ));
-        assert!(!needs_word_distribution(
-            Alignment::Split,
-            true,
-            false,
-            true
-        ));
+        assert!(needs_word_distribution(Alignment::Split, true, false));
+        assert!(!needs_word_distribution(Alignment::Justify, true, false));
+        assert!(needs_word_distribution(Alignment::Justify, false, false));
+        assert!(!needs_word_distribution(Alignment::Justify, false, true));
+        assert!(!needs_word_distribution(Alignment::Split, true, true));
     }
 
     #[test]
