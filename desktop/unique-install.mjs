@@ -102,7 +102,7 @@ async function removeUniqueInstallBackup(previous, { rmImpl, lstatImpl, platform
   await retryWindows(() => rmImpl(previous, { force: true }), platform);
 }
 
-/** Windows cannot rename over an existing file. Directory targets throw EISDIR. */
+/** Windows cannot rename over an existing file. */
 async function replaceUniqueInstallFile(temp, filePath, {
   renameImpl,
   rmImpl,
