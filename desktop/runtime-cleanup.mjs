@@ -86,8 +86,6 @@ async function discardTemporaryMarker(rmImpl, temporary) {
   await rmImpl(temporary, { force: true }).catch(() => {});
 }
 
-// Windows cannot rename over a file. Aside the live marker, then publish.
-// Restore on failure so a failed write does not unmark the root. Unix is one-shot.
 async function publishMarkerFile(temporary, target, {
   platform = process.platform,
   sleep,

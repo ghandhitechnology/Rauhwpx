@@ -63,7 +63,6 @@ function lockedOp<Args extends unknown[], Result>(
   };
 }
 
-/** Windows cannot rename over an existing file. POSIX can. */
 function windowsRename(realRename: typeof rename) {
   return async (from: string, to: string) => {
     try {
