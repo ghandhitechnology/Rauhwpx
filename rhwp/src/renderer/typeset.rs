@@ -1752,12 +1752,7 @@ fn line_has_tac_control(para: &Paragraph, comp: &ComposedParagraph, line_idx: us
 }
 
 fn tac_picture_or_shape_height_px(ctrl: &Control, dpi: f64) -> Option<f64> {
-    let height_hu = match ctrl {
-        Control::Picture(pic) if pic.common.treat_as_char => pic.common.height as i32,
-        Control::Shape(shape) if shape.common().treat_as_char => shape.common().height as i32,
-        _ => return None,
-    };
-    Some(hwpunit_to_px(height_hu, dpi))
+    crate::renderer::tac_object_flow_height_px(ctrl, dpi)
 }
 
 fn line_tac_picture_or_shape_height(
@@ -12295,8 +12290,20 @@ impl TypesetEngine {
                 }
                 let runs_all_whitespace = line.runs.iter().all(|r| r.text.trim().is_empty());
                 let line_has_tac_control = line_has_tac_control(para, comp, line_idx);
+                // [#6972] 저장 줄 높이가 TAC 개체 하나의 흐름 높이와 같으면 그 줄은
+                // 개체가 소유한 줄이지 빈 guide 줄이 아니다. composer 가 두 줄에
+                // 같은 char_start 를 실으면 `tac_control_indices_for_line` 의 char-range
+                // 매핑이 [start, start) 로 비어 `line_has_tac_control` 이 거짓이 되고,
+                // 전면 크기 TAC 그림 줄이 통째로 0 이 된다.
+                let line_owns_tac_object = crate::renderer::line_owning_tac_object_height_px(
+                    para,
+                    hwpunit_to_px(line.line_height, self.dpi),
+                    self.dpi,
+                )
+                .is_some();
                 let empty_tac_guide_line = runs_all_whitespace
                     && !line_has_tac_control
+                    && !line_owns_tac_object
                     && comp
                         .lines
                         .get(line_idx + 1)

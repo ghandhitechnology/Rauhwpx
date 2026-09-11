@@ -930,6 +930,42 @@ pub fn hwpunit_to_px(hwpunit: i32, dpi: f64) -> f64 {
     hwpunit as f64 * dpi / HWPUNIT_PER_INCH
 }
 
+/// 글자처럼 취급 그림/도형의 흐름 높이(px). 조판과 렌더가 같은 값을 쓴다.
+pub(crate) fn tac_object_flow_height_px(
+    ctrl: &crate::model::control::Control,
+    dpi: f64,
+) -> Option<f64> {
+    tac_object_flow_height_hu(ctrl).map(|height_hu| hwpunit_to_px(height_hu, dpi))
+}
+
+/// [`tac_object_flow_height_px`] 와 같은 값의 HWPUNIT 판. 저장 `LineSeg.line_height`
+/// 와 직접 견주는 자리는 dpi 를 거치지 않아야 반올림 없이 같은 줄을 짚는다.
+#[inline]
+pub(crate) fn tac_object_flow_height_hu(ctrl: &crate::model::control::Control) -> Option<i32> {
+    match ctrl {
+        Control::Picture(pic) if pic.common.treat_as_char => Some(pic.common.height as i32),
+        Control::Shape(shape) if shape.common().treat_as_char => Some(shape.common().height as i32),
+        _ => None,
+    }
+}
+
+/// 저장 줄 높이가 문단의 인라인 개체 하나로 설명될 때, 그 개체의 흐름 높이(px).
+///
+/// "이 줄은 인라인 개체가 소유한 줄인가" 를 묻는 술어다. 조판과 렌더가 같은 줄에
+/// 같은 답을 내지 않으면 그 줄의 예약 높이가 갈리므로 정의는 하나다.
+pub(crate) fn line_owning_tac_object_height_px(
+    para: &crate::model::paragraph::Paragraph,
+    raw_line_height: f64,
+    dpi: f64,
+) -> Option<f64> {
+    para.controls
+        .iter()
+        .filter_map(|ctrl| tac_object_flow_height_px(ctrl, dpi))
+        .find(|height| {
+            *height > 8.0 && raw_line_height + 4.0 >= *height && raw_line_height <= *height + 8.0
+        })
+}
+
 /// 픽셀을 HWPUNIT으로 변환
 #[inline]
 pub fn px_to_hwpunit(px: f64, dpi: f64) -> i32 {

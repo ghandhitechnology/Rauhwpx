@@ -3,11 +3,11 @@ use crate::model::control::Control;
 use crate::model::image::Picture;
 use crate::model::page::{ColumnDef, PageDef};
 use crate::model::paragraph::{LineSeg, Paragraph};
-use crate::renderer::page_layout::PageLayoutInfo;
 use crate::model::shape::{
     Caption, CaptionDirection, CommonObjAttr, HorzAlign, HorzRelTo, RectangleShape, ShapeObject,
     SizeCriterion, TextWrap, VertAlign, VertRelTo,
 };
+use crate::renderer::page_layout::PageLayoutInfo;
 
 fn a4_page_def() -> PageDef {
     PageDef {
