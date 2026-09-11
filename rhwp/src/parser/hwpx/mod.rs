@@ -699,6 +699,8 @@ pub(crate) fn parse_hwpx_validated(data: &[u8]) -> Result<Document, HwpxError> {
         }
     }
 
+    section::link_orphan_field_ends_across_sections(&mut sections);
+
     // [Task #1608] (제거) 과거 Task #554 의 HWP3-origin tolerance 부여는
     // head version == "1.4" 오탐지로 네이티브 HWPX 전반에 부당 적용되어 삭제했다.
     // 상세 사유는 위 hwpml_version 파싱부 주석 참조.

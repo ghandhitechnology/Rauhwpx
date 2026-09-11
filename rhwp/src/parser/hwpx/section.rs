@@ -111,7 +111,64 @@ pub fn parse_hwpx_section(xml: &str) -> Result<Section, HwpxError> {
         buf.clear();
     }
 
+    link_orphan_field_ends(&mut section.paragraphs, &mut Vec::new());
+
     Ok(section)
+}
+
+/// 같은 문단 목록 안에서 끝난 다문단 fieldEnd에 짝 fieldBegin의 HWP5 control id를 연결한다.
+///
+/// HWPX fieldEnd는 beginIDRef와 fieldid만 보관하므로, HWP5 PARA_TEXT로 다시 쓸 때 필요한
+/// field control fourcc는 앞 문단의 fieldBegin에서 찾아야 한다. 짝을 찾지 못한 종료 마커는
+/// 그대로 남긴다.
+fn link_orphan_field_ends(paragraphs: &mut [Paragraph], open_fields: &mut Vec<(u32, u32)>) {
+    for para in paragraphs.iter_mut() {
+        for orphan in &mut para.orphan_field_ends {
+            let Some((field_id, ctrl_id)) = open_fields.last().copied() else {
+                continue;
+            };
+
+            // HWPX는 beginIDRef로 짝을 식별한다. 0은 손상·부분 입력 호환을 위한
+            // 미지정값이므로 HWP5 parser와 같이 현재 열린 필드에 연결한다.
+            if orphan.begin_id_ref != 0 && orphan.begin_id_ref != field_id {
+                continue;
+            }
+
+            open_fields.pop();
+            if orphan.begin_id_ref == 0 {
+                orphan.begin_id_ref = field_id;
+            }
+            orphan.begin_ctrl_id = ctrl_id;
+        }
+
+        for (control_idx, control) in para.controls.iter().enumerate() {
+            let Control::Field(field) = control else {
+                continue;
+            };
+            let closes_in_this_paragraph = para
+                .field_ranges
+                .iter()
+                .any(|range| range.control_idx == control_idx);
+            if !closes_in_this_paragraph && field.field_id != 0 {
+                open_fields.push((field.field_id, field.ctrl_id));
+            }
+        }
+    }
+}
+
+/// 구역 경계를 넘는 누름틀의 종료 마커를 잇는다.
+///
+/// 구역 하나를 파싱하는 동안에는 앞 구역에서 열린 필드를 볼 수 없다. 그래서 구역
+/// 최상위 문단 목록만 하나의 스택으로 다시 훑는다. 이미 짝을 지은 마커에는 같은 값이
+/// 다시 들어갈 뿐이라 구역 안에서 닫힌 필드의 결과는 바뀌지 않는다.
+///
+/// 컨테이너(표 칸·글상자·각주) 목록은 건드리지 않는다. 필드는 컨테이너 경계를 넘지
+/// 못한다.
+pub fn link_orphan_field_ends_across_sections(sections: &mut [Section]) {
+    let mut open_fields: Vec<(u32, u32)> = Vec::new();
+    for section in sections.iter_mut() {
+        link_orphan_field_ends(&mut section.paragraphs, &mut open_fields);
+    }
 }
 
 /// section XML의 `<hp:masterPage idRef="...">` 참조를 문서 순서대로 수집한다.
@@ -719,6 +776,7 @@ fn parse_paragraph(
                         char_idx: visible_char_idx,
                         begin_id_ref,
                         field_id,
+                        begin_ctrl_id: 0,
                     });
                 }
             }

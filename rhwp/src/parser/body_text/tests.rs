@@ -34,7 +34,7 @@ fn make_para_text_data(text: &str) -> Vec<u8> {
 
 #[test]
 fn test_parse_para_text_simple() {
-    let (text, offsets, _, _) = parse_para_text(&make_para_text_data("Hello, World!"));
+    let (text, offsets, _, _, _) = parse_para_text(&make_para_text_data("Hello, World!"));
     assert_eq!(text, "Hello, World!");
     assert_eq!(offsets.len(), 13);
     assert_eq!(offsets[0], 0); // 'H' at position 0
@@ -42,7 +42,7 @@ fn test_parse_para_text_simple() {
 
 #[test]
 fn test_parse_para_text_korean() {
-    let (text, offsets, _, _) = parse_para_text(&make_para_text_data("한글 테스트입니다."));
+    let (text, offsets, _, _, _) = parse_para_text(&make_para_text_data("한글 테스트입니다."));
     assert_eq!(text, "한글 테스트입니다.");
     assert_eq!(offsets.len(), text.chars().count());
 }
@@ -59,7 +59,7 @@ fn test_parse_para_text_with_tab() {
     }
     data.extend_from_slice(&0x0042u16.to_le_bytes()); // 'B'
     data.extend_from_slice(&0x000Du16.to_le_bytes()); // para break
-    let (text, offsets, _, _) = parse_para_text(&data);
+    let (text, offsets, _, _, _) = parse_para_text(&data);
     assert_eq!(text, "A\tB");
     // 'A' at code unit 0, tab takes 8 units (1-8), 'B' at code unit 9
     assert_eq!(offsets, vec![0, 1, 9]);
@@ -77,7 +77,7 @@ fn test_parse_para_text_with_extended_ctrl() {
     }
     data.extend_from_slice(&0x0042u16.to_le_bytes()); // 'B'
     data.extend_from_slice(&0x000Du16.to_le_bytes()); // para break
-    let (text, offsets, _, _) = parse_para_text(&data);
+    let (text, offsets, _, _, _) = parse_para_text(&data);
     assert_eq!(text, "AB");
     // 'A' at code unit 0, extended ctrl takes 8 units (1-8), 'B' at code unit 9
     assert_eq!(offsets, vec![0, 9]);
@@ -87,7 +87,7 @@ fn test_parse_para_text_with_extended_ctrl() {
 fn test_parse_para_text_empty() {
     // 문단 끝만 있는 경우
     let data = 0x000Du16.to_le_bytes();
-    let (text, offsets, _, _) = parse_para_text(&data);
+    let (text, offsets, _, _, _) = parse_para_text(&data);
     assert_eq!(text, "");
     assert!(offsets.is_empty());
 }
