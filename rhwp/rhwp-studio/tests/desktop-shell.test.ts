@@ -49,6 +49,8 @@ function errorWithCode(code: string) {
   return Object.assign(new Error(code), { code });
 }
 
+const WINDOWS_LOCK_CODES = ['EPERM', 'EBUSY', 'EACCES', 'ENOTEMPTY'] as const;
+
 function lockedOp<Args extends unknown[], Result>(
   operation: (...args: Args) => Promise<Result>,
   { failTimes = Infinity, code = 'EPERM' } = {},
@@ -97,6 +99,24 @@ async function prepareLegacyLaunch(t: { after: (fn: () => Promise<void>) => void
   const old = new Date(now - 8 * 24 * 60 * 60 * 1000);
   await utimes(directory, old, old);
   return { root, directory, now };
+}
+
+async function prepareOwnedStaleLaunch(
+  t: { after: (fn: () => Promise<void>) => void },
+  prefix: string,
+) {
+  const root = await mkdtemp(path.join(tmpdir(), prefix));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const launchId = '5327bd99-1d76-4ed5-81cf-f3182f6d127f';
+  const profileId = OWNER_PROFILE_ID;
+  const directory = path.join(root, launchId);
+  await writeLaunchOwnerMetadata(directory, {
+    launchId,
+    profileId,
+    pid: 11,
+    createdAtMs: 1_000,
+  });
+  return { root, directory, launchId, profileId };
 }
 
 test('dialog suggestions are portable across Windows and strip renderer paths', () => {
@@ -866,6 +886,100 @@ test('unix marker publish does not retry a locked rename', async (t) => {
     }),
     { code: 'EPERM' },
   );
+});
+
+test('win32 launch-directory cleanup retries a locked recursive rm then succeeds', async (t) => {
+  for (const code of WINDOWS_LOCK_CODES) {
+    const stale = await prepareOwnedStaleLaunch(t, `rauhwpx-stale-rm-${code.toLowerCase()}-`);
+    assert.deepEqual(await removeStaleLaunchDirectories(stale.root, '', {
+      expectedProfileId: stale.profileId,
+      minimumAgeMs: 0,
+      now: () => 20_000,
+      isAlive: () => false,
+      rmImpl: lockedOp(rm, { failTimes: 1, code }),
+      platform: 'win32',
+      sleep: async () => {},
+    }), [stale.launchId]);
+    await assert.rejects(stat(stale.directory), { code: 'ENOENT' });
+
+    const ownedLegacy = await prepareOwnedStaleLaunch(
+      t,
+      `rauhwpx-legacy-owned-rm-${code.toLowerCase()}-`,
+    );
+    assert.deepEqual(await removeLegacyLaunchDirectories(ownedLegacy.root, '', {
+      minimumAgeMs: 0,
+      now: () => 20_000,
+      uptimeSeconds: () => 10,
+      isAlive: () => false,
+      rmImpl: lockedOp(rm, { failTimes: 1, code }),
+      platform: 'win32',
+      sleep: async () => {},
+    }), [ownedLegacy.launchId]);
+    await assert.rejects(stat(ownedLegacy.directory), { code: 'ENOENT' });
+
+    const { root, directory, now } = await prepareLegacyLaunch(t);
+    await removeLegacyLaunchDirectories(root, '', {
+      now: () => now,
+      uptimeSeconds: () => 10_000,
+    });
+    assert.deepEqual(await removeLegacyLaunchDirectories(root, '', {
+      now: () => now + 2_000,
+      uptimeSeconds: () => 10,
+      rmImpl: lockedOp(rm, { failTimes: 1, code }),
+      platform: 'win32',
+      sleep: async () => {},
+    }), [LEGACY_LAUNCH_ID]);
+    await assert.rejects(stat(directory), { code: 'ENOENT' });
+  }
+});
+
+test('unix launch-directory cleanup does not retry a locked recursive rm', async (t) => {
+  const stale = await prepareOwnedStaleLaunch(t, 'rauhwpx-stale-rm-unix-');
+  await assert.rejects(
+    removeStaleLaunchDirectories(stale.root, '', {
+      expectedProfileId: stale.profileId,
+      minimumAgeMs: 0,
+      now: () => 20_000,
+      isAlive: () => false,
+      rmImpl: lockedOp(rm, { failTimes: 1 }),
+      platform: 'linux',
+      sleep: async () => {},
+    }),
+    { code: 'EPERM' },
+  );
+  assert.equal((await stat(stale.directory)).isDirectory(), true);
+
+  const ownedLegacy = await prepareOwnedStaleLaunch(t, 'rauhwpx-legacy-owned-rm-unix-');
+  await assert.rejects(
+    removeLegacyLaunchDirectories(ownedLegacy.root, '', {
+      minimumAgeMs: 0,
+      now: () => 20_000,
+      uptimeSeconds: () => 10,
+      isAlive: () => false,
+      rmImpl: lockedOp(rm, { failTimes: 1 }),
+      platform: 'linux',
+      sleep: async () => {},
+    }),
+    { code: 'EPERM' },
+  );
+  assert.equal((await stat(ownedLegacy.directory)).isDirectory(), true);
+
+  const { root, directory, now } = await prepareLegacyLaunch(t);
+  await removeLegacyLaunchDirectories(root, '', {
+    now: () => now,
+    uptimeSeconds: () => 10_000,
+  });
+  await assert.rejects(
+    removeLegacyLaunchDirectories(root, '', {
+      now: () => now + 2_000,
+      uptimeSeconds: () => 10,
+      rmImpl: lockedOp(rm, { failTimes: 1 }),
+      platform: 'linux',
+      sleep: async () => {},
+    }),
+    { code: 'EPERM' },
+  );
+  assert.equal((await stat(directory)).isDirectory(), true);
 });
 
 test('desktop package registers supported document associations without bundling runtime data', () => {

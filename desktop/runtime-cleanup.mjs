@@ -369,6 +369,8 @@ export async function removeStaleLaunchDirectories(
     readFileImpl,
     readdirImpl,
     rmImpl = rm,
+    platform = process.platform,
+    sleep,
   } = {},
 ) {
   let entries;
@@ -425,7 +427,11 @@ export async function removeStaleLaunchDirectories(
       }
     }
 
-    await rmImpl(directory, { recursive: true, force: true });
+    await retryWindows(
+      () => rmImpl(directory, { recursive: true, force: true }),
+      platform,
+      sleep,
+    );
     removed.push(entry.name);
   }
   return removed;
@@ -525,7 +531,11 @@ async function removeLegacyLaunchDirectoriesAfterReboot(
         || currentTime - owner.createdAtMs < minimumAgeMs
         || isAlive(owner.pid)
         || await hasPendingCredentialCopyback(directory, directoryOptions)) continue;
-      await rmImpl(directory, { recursive: true, force: true });
+      await retryWindows(
+        () => rmImpl(directory, { recursive: true, force: true }),
+        platform,
+        sleep,
+      );
       removed.push(entry.name);
       continue;
     }
@@ -543,7 +553,11 @@ async function removeLegacyLaunchDirectoriesAfterReboot(
     if (marker) {
       if (currentUptime + LEGACY_REBOOT_UPTIME_TOLERANCE_SECONDS
         < marker.observedUptimeSeconds) {
-        await rmImpl(directory, { recursive: true, force: true });
+        await retryWindows(
+          () => rmImpl(directory, { recursive: true, force: true }),
+          platform,
+          sleep,
+        );
         removed.push(entry.name);
         continue;
       }
