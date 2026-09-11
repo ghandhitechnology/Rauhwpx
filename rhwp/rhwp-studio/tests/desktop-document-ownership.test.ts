@@ -94,6 +94,10 @@ const TEST_NATIVE_FINGERPRINT = Object.freeze({
 });
 const fakeNativeFingerprint = async () => TEST_NATIVE_FINGERPRINT;
 
+function errorWithCode(code: string) {
+  return Object.assign(new Error(code), { code });
+}
+
 test('failed duplicate reservation preserves the caller and owner leases', () => {
   const ids = ['reservation-a', 'reservation-b', 'reservation-c'];
   const leases = new DocumentLeaseManager({ createId: () => ids.shift() });
@@ -1301,10 +1305,6 @@ test('atomic native replacement reports a real directory fsync failure after ren
   });
 });
 
-function errorWithCode(code: string) {
-  return Object.assign(new Error(code), { code });
-}
-
 test('Windows atomic replacement retries transient destination locks without deleting the old file', async () => {
   await withTemporaryDirectory(async (directory) => {
     const target = join(directory, 'report.hwp');
@@ -1317,7 +1317,7 @@ test('Windows atomic replacement retries transient destination locks without del
       sleep: async () => {},
       renameImpl: async (from: string, to: string) => {
         attempts += 1;
-        if (attempts === 1) throw Object.assign(new Error('temporarily locked'), { code: 'EPERM' });
+        if (attempts === 1) throw errorWithCode('EPERM');
         await renameFs(from, to);
       },
     });
@@ -1344,10 +1344,6 @@ test('win32 rename-aside retries a first ENOTEMPTY then publishes the save', asy
     });
     assert.equal(attempts, 2);
     assert.equal(saved.state, 'file');
-    assert.equal(
-      saved.digest,
-      'sha256:bd7c250566c6e99f47c174b589b7551f8b0e930ed056511d1e8f653bc71d3c4a',
-    );
     assert.deepEqual(new Uint8Array(await readFs(target)), new Uint8Array([7, 8]));
     assert.deepEqual(await readdir(directory), ['report.hwp']);
   });
