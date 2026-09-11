@@ -481,12 +481,12 @@ fn parse_paragraph(
                         let char_base = visible_char_count_from_parts(&text_parts);
                         let utf16_base = calc_utf16_len_from_parts(&text_parts);
                         for (rel, color) in marks {
+                            let prefix: u32 =
+                                text.chars().take(rel).map(hwpx_char_utf16_width).sum();
                             para.markpen_marks.push(MarkpenMark {
                                 char_idx: char_base + rel,
                                 color,
-                                utf16_pos: Some(
-                                    utf16_base + utf16_width_of_text_prefix(&text, rel),
-                                ),
+                                utf16_pos: Some(utf16_base + prefix),
                             });
                         }
                         text_parts.push(text);
@@ -759,14 +759,7 @@ fn parse_paragraph(
                 for c in part.chars() {
                     char_offsets.push(utf16_pos);
                     visual_text.push(c);
-                    let width = if c == '\t' {
-                        8
-                    } else if (c as u32) > 0xFFFF {
-                        2
-                    } else {
-                        1
-                    };
-                    utf16_pos += width;
+                    utf16_pos += hwpx_char_utf16_width(c);
                 }
             }
         }
@@ -5772,8 +5765,18 @@ fn parse_empty_equation(e: &quick_xml::events::BytesStart) -> Control {
 
 // ─── 유틸리티 (section 전용) ───
 
+/// 본문 글자 하나의 UTF-16 폭. 탭은 HWP 바이너리와 동일하게 8 code unit 이다.
+fn hwpx_char_utf16_width(c: char) -> u32 {
+    if c == '\t' {
+        8
+    } else if (c as u32) > 0xFFFF {
+        2
+    } else {
+        1
+    }
+}
+
 /// 텍스트 파트들의 UTF-16 길이 합산
-/// 탭 문자는 HWP 바이너리와 동일하게 8 code unit으로 계산
 fn calc_utf16_len_from_parts(parts: &[String]) -> u32 {
     parts
         .iter()
@@ -5782,18 +5785,7 @@ fn calc_utf16_len_from_parts(parts: &[String]) -> u32 {
             // (offsets 조립 루프와 동일 축). 종전 `_` 분기(1유닛)로 빠져 char_shapes
             // 경계가 offsets 축과 어긋났다 (143E 각주 run 경계 2 → 정답 9).
             "\u{0002}" | "\u{0003}" | "\u{0004}" | "\u{0012}" => 8,
-            _ => s
-                .chars()
-                .map(|c| {
-                    if c == '\t' {
-                        8u32
-                    } else if (c as u32) > 0xFFFF {
-                        2
-                    } else {
-                        1
-                    }
-                })
-                .sum(),
+            _ => s.chars().map(hwpx_char_utf16_width).sum(),
         })
         .sum()
 }
@@ -5805,21 +5797,6 @@ fn visible_char_count_from_parts(parts: &[String]) -> usize {
             "\u{0002}" | "\u{0003}" | "\u{0004}" => 0,
             "\u{0012}" => 1,
             _ => s.chars().count(),
-        })
-        .sum()
-}
-
-fn utf16_width_of_text_prefix(text: &str, char_idx: usize) -> u32 {
-    text.chars()
-        .take(char_idx)
-        .map(|c| {
-            if c == '\t' {
-                8
-            } else if (c as u32) > 0xFFFF {
-                2
-            } else {
-                1
-            }
         })
         .sum()
 }
