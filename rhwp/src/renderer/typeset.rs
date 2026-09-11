@@ -1752,12 +1752,7 @@ fn line_has_tac_control(para: &Paragraph, comp: &ComposedParagraph, line_idx: us
 }
 
 fn tac_picture_or_shape_height_px(ctrl: &Control, dpi: f64) -> Option<f64> {
-    let height_hu = match ctrl {
-        Control::Picture(pic) if pic.common.treat_as_char => pic.common.height as i32,
-        Control::Shape(shape) if shape.common().treat_as_char => shape.common().height as i32,
-        _ => return None,
-    };
-    Some(hwpunit_to_px(height_hu, dpi))
+    crate::renderer::tac_object_flow_height_px(ctrl, dpi)
 }
 
 fn line_tac_picture_or_shape_height(
@@ -12304,7 +12299,13 @@ impl TypesetEngine {
                     && comp
                         .tac_controls
                         .iter()
-                        .any(|(pos, _, _)| *pos == line.char_start);
+                        .any(|(pos, _, _)| *pos == line.char_start)
+                    && crate::renderer::line_owning_tac_object_height_px(
+                        para,
+                        hwpunit_to_px(line.line_height, self.dpi),
+                        self.dpi,
+                    )
+                    .is_none();
                 if empty_tac_guide_line {
                     pairs.push((0.0, 0.0));
                     prev_line_reserved_tac_picture_height = None;
@@ -12326,23 +12327,8 @@ impl TypesetEngine {
                 let max_fs = crate::renderer::composed_line_max_font_size(line, para, styles);
                 let text_before_picture_line =
                     text_line_is_picture_lead_in(para, comp, line_idx, raw_lh, max_fs, self.dpi);
-                let tac_picture_height = para.controls.iter().find_map(|ctrl| {
-                    let height_hu = match ctrl {
-                        Control::Picture(pic) if pic.common.treat_as_char => {
-                            pic.common.height as i32
-                        }
-                        Control::Shape(shape) if shape.common().treat_as_char => {
-                            shape.common().height as i32
-                        }
-                        _ => return None,
-                    };
-                    let height = hwpunit_to_px(height_hu, self.dpi);
-                    if height > 8.0 && raw_lh + 4.0 >= height && raw_lh <= height + 8.0 {
-                        Some(height)
-                    } else {
-                        None
-                    }
-                });
+                let tac_picture_height =
+                    crate::renderer::line_owning_tac_object_height_px(para, raw_lh, self.dpi);
                 let tac_picture_height = if text_before_picture_line {
                     None
                 } else {
@@ -19266,7 +19252,7 @@ mod tests {
     use crate::model::shape::{CommonObjAttr, TextWrap, VertRelTo};
     use crate::model::table::{Cell, Table, TablePageBreak};
     use crate::model::Padding;
-    use crate::renderer::composer::ComposedParagraph;
+    use crate::renderer::composer::{ComposedLine, ComposedParagraph, ComposedTextRun};
     use crate::renderer::height_measurer::HeightMeasurer;
     use crate::renderer::layout::LayoutEngine;
     use crate::renderer::page_layout::PageLayoutInfo;
@@ -21311,6 +21297,119 @@ mod tests {
             "[#1995] 전면 non-TAC 이미지 3장은 각각 한 페이지에 단독 배치되어야 함(>= 3 페이지). \
              실제 {} 페이지 — 미수정 시 한 앵커에 스택",
             typeset_result.pages.len(),
+        );
+    }
+
+    const ISSUE_6972_PICTURE_HU: i32 = 72347;
+
+    fn issue6972_cover_picture_para() -> Paragraph {
+        let mut picture = Picture::default();
+        picture.common.treat_as_char = true;
+        picture.common.height = ISSUE_6972_PICTURE_HU as u32;
+        Paragraph {
+            text: "< 규제 개요 >".to_string(),
+            char_offsets: (0..9).collect(),
+            controls: vec![Control::Picture(Box::new(picture))],
+            line_segs: vec![
+                LineSeg {
+                    text_start: 0,
+                    line_height: ISSUE_6972_PICTURE_HU,
+                    ..Default::default()
+                },
+                LineSeg {
+                    text_start: 8,
+                    line_height: 1500,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn issue6972_cover_picture_composed() -> ComposedParagraph {
+        ComposedParagraph {
+            lines: vec![
+                ComposedLine {
+                    runs: Vec::new(),
+                    line_height: ISSUE_6972_PICTURE_HU,
+                    baseline_distance: 0,
+                    segment_width: 48188,
+                    column_start: 0,
+                    line_spacing: 0,
+                    has_line_break: false,
+                    char_start: 0,
+                },
+                ComposedLine {
+                    runs: vec![ComposedTextRun {
+                        text: "< 규제 개요 >".to_string(),
+                        ..Default::default()
+                    }],
+                    line_height: 1500,
+                    baseline_distance: 0,
+                    segment_width: 48188,
+                    column_start: 0,
+                    line_spacing: 0,
+                    has_line_break: false,
+                    char_start: 0,
+                },
+            ],
+            para_style_id: 0,
+            inline_controls: Vec::new(),
+            numbering_text: None,
+            tac_controls: vec![(0, 49070, 0)],
+            footnote_positions: Vec::new(),
+            tab_extended: Vec::new(),
+        }
+    }
+
+    fn issue6972_para0_line_ranges(result: &PaginationResult) -> Vec<(usize, usize, usize)> {
+        let mut ranges = Vec::new();
+        for (page_idx, page) in result.pages.iter().enumerate() {
+            for col in &page.column_contents {
+                for item in &col.items {
+                    match item {
+                        PageItem::FullParagraph { para_index: 0 } => {
+                            ranges.push((page_idx, 0, 2));
+                        }
+                        PageItem::PartialParagraph {
+                            para_index: 0,
+                            start_line,
+                            end_line,
+                        } => {
+                            ranges.push((page_idx, *start_line, *end_line));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        ranges
+    }
+
+    #[test]
+    fn issue6972_full_page_tac_picture_line_keeps_owned_height_and_splits() {
+        let engine = TypesetEngine::with_default_dpi();
+        let styles = ResolvedStyleSet::default();
+        let paras = vec![issue6972_cover_picture_para()];
+        let composed = vec![issue6972_cover_picture_composed()];
+        let result = engine.typeset_section(
+            &paras,
+            &composed,
+            &styles,
+            &a4_page_def(),
+            &ColumnDef::default(),
+            0,
+            &[],
+            false,
+            &std::collections::HashSet::new(),
+        );
+
+        let ranges = issue6972_para0_line_ranges(&result);
+        assert!(
+            ranges.iter().any(|&(_, start, end)| start == 0 && end == 1)
+                && ranges.iter().any(|&(_, start, _)| start == 1),
+            "[#6972] 전면 TAC 그림 줄은 빈 guide 줄로 지워지면 안 된다. \
+             그림 줄(964px)과 글자 줄(20px)은 같은 쪽에 들어가지 않아야 한다. ranges={ranges:?}"
         );
     }
 }

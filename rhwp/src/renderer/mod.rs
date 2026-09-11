@@ -930,6 +930,41 @@ pub fn hwpunit_to_px(hwpunit: i32, dpi: f64) -> f64 {
     hwpunit as f64 * dpi / HWPUNIT_PER_INCH
 }
 
+pub(crate) const MIN_TAC_OBJECT_HEIGHT_PX: f64 = 8.0;
+const TAC_OWNER_HEIGHT_UNDER_PX: f64 = 4.0;
+const TAC_OWNER_HEIGHT_OVER_PX: f64 = 8.0;
+
+pub(crate) fn tac_object_flow_height_px(
+    ctrl: &crate::model::control::Control,
+    dpi: f64,
+) -> Option<f64> {
+    tac_object_flow_height_hu(ctrl).map(|height_hu| hwpunit_to_px(height_hu, dpi))
+}
+
+#[inline]
+pub(crate) fn tac_object_flow_height_hu(ctrl: &crate::model::control::Control) -> Option<i32> {
+    match ctrl {
+        Control::Picture(pic) if pic.common.treat_as_char => Some(pic.common.height as i32),
+        Control::Shape(shape) if shape.common().treat_as_char => Some(shape.common().height as i32),
+        _ => None,
+    }
+}
+
+pub(crate) fn line_owning_tac_object_height_px(
+    para: &crate::model::paragraph::Paragraph,
+    raw_line_height: f64,
+    dpi: f64,
+) -> Option<f64> {
+    para.controls
+        .iter()
+        .filter_map(|ctrl| tac_object_flow_height_px(ctrl, dpi))
+        .find(|height| {
+            *height > MIN_TAC_OBJECT_HEIGHT_PX
+                && raw_line_height + TAC_OWNER_HEIGHT_UNDER_PX >= *height
+                && raw_line_height <= *height + TAC_OWNER_HEIGHT_OVER_PX
+        })
+}
+
 /// 픽셀을 HWPUNIT으로 변환
 #[inline]
 pub fn px_to_hwpunit(px: f64, dpi: f64) -> i32 {
