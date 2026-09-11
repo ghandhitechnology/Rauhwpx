@@ -22,7 +22,6 @@ import path from 'node:path';
 
 const COPY_FALLBACK_CODES = new Set(['EPERM', 'EACCES', 'ENOTSUP']);
 const LOCK_CODES = new Set(['EPERM', 'EBUSY', 'ENOTEMPTY', 'EACCES']);
-// Same schedule as desktop/fs-replace `retryWindows`, not the harness 80ms ladder.
 const LOCK_RETRY_DELAYS_MS = [50, 100, 200, 400, 800];
 const JOURNAL_VERSION = 1;
 const JOURNAL_ID_PATTERN = /^[0-9a-f]{16}$/;
@@ -427,7 +426,7 @@ export function flushCredentialMirrorSync(handle, {
     return { copied: false, conflict: false };
   }
 
-  recoverInterruptedReplacement(verified, { rename });
+  recoverInterruptedReplacement(verified, { rename, rm });
   if (!plainFile(verified.target)) {
     if (!plainFile(verified.source)) return finishTerminalConflict(verified, null, { rename, rm });
     removeMirrorArtifacts(verified);
@@ -503,6 +502,9 @@ export function recoverCredentialMirrorsSync(source, {
   isAlive = processAlive,
   platform = process.platform,
   validateTarget = /** @type {((content: Buffer) => boolean) | null} */ (null),
+  renameFile = renameSync,
+  delays,
+  sleep,
 } = {}) {
   const resolvedSource = path.resolve(source);
   let names;
@@ -519,7 +521,9 @@ export function recoverCredentialMirrorsSync(source, {
     const handle = readJournal(path.join(path.dirname(resolvedSource), name));
     if (!handle || handle.source !== resolvedSource) continue;
     if (handle.pid === currentPid || isAlive(handle.pid)) continue;
-    results.push(flushCredentialMirrorSync(handle, { platform, validateTarget }));
+    results.push(flushCredentialMirrorSync(handle, {
+      platform, validateTarget, renameFile, delays, sleep,
+    }));
   }
   return results;
 }
@@ -549,6 +553,9 @@ export function prepareCredentialMirrorSync(source, target, {
     currentPid: pid,
     platform,
     validateTarget: validateSource,
+    renameFile,
+    delays,
+    sleep,
   });
   if (!plainFile(resolvedSource)) return null;
 
@@ -610,10 +617,10 @@ export function prepareCredentialMirrorSync(source, target, {
     }
     writeNewAtomically(resolvedTarget, sourceBytes, { rename, rm });
   } catch (error) {
-    rmSync(temporaryJournal, { force: true });
-    rmSync(journalPath, { force: true });
-    if (retentionMarker) rmSync(retentionMarker, { force: true });
-    rmSync(resolvedTarget, { force: true });
+    rm(temporaryJournal, { force: true });
+    rm(journalPath, { force: true });
+    if (retentionMarker) rm(retentionMarker, { force: true });
+    rm(resolvedTarget, { force: true });
     throw error;
   }
   const handle = readJournal(journalPath);
