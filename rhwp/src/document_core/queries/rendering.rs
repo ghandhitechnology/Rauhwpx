@@ -2581,6 +2581,8 @@ impl DocumentCore {
         Ok(format!("{{\"runs\":[{}]}}", runs.join(",")))
     }
 
+    /// 도형 노드는 `CellContext` 가 없고 #1138 스칼라만 든다. 그 셋이 곧 1단계
+    /// `cellPath` 이며, 전부 있거나 전부 없다.
     fn shape_cell_context_json(
         cell_index: Option<usize>,
         cell_para_index: Option<usize>,
@@ -2925,6 +2927,8 @@ impl DocumentCore {
                             node.bbox.x, node.bbox.y, node.bbox.width, node.bbox.height,
                             si, pi, ci, cell_str, layer_str
                         ));
+                        // [#1171] return 하지 않는다. 사각형 글상자는 자식으로 재귀해야
+                        // 안쪽 picture/도형이 cell_index=0 sentinel 경로를 탄다.
                     }
                 }
                 RenderNodeType::Line(line_node) => {
@@ -2978,6 +2982,7 @@ impl DocumentCore {
                             path_node.outer_table_control_index,
                         );
                         if let Some((x1, y1, x2, y2)) = path_node.connector_endpoints {
+                            // 연결선은 채워진 도형이 아니라 선으로 선택된다.
                             controls.push(format!(
                                 "{{\"type\":\"line\",\"x\":{:.1},\"y\":{:.1},\"w\":{:.1},\"h\":{:.1},\"x1\":{:.1},\"y1\":{:.1},\"x2\":{:.1},\"y2\":{:.1},\"secIdx\":{},\"paraIdx\":{},\"controlIdx\":{}{}{}}}",
                                 node.bbox.x, node.bbox.y, node.bbox.width, node.bbox.height,
