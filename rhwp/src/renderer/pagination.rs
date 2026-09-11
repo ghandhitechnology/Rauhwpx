@@ -489,16 +489,10 @@ fn projected_inline_control_line_seg_index(para: &Paragraph, ctrl_idx: usize) ->
     )
 }
 
-/// TAC 개체가 소유한 저장 줄을 기하로 짚는다. 저장 `line_height` 가 개체의 흐름
-/// 높이와 같은 줄이 그 개체의 줄이다.
-///
-/// [#6972] 글자 위치 투영은 개체가 문단의 모든 글자 앞에 있을 때 첫 글자의 줄,
-/// 곧 개체 줄의 다음 줄을 돌려줄 수 있다. 그러면 문단이 쪽으로 갈릴 때 전면
-/// 크기 TAC 그림이 자기 줄이 없는 뒤 조각으로 라우팅돼 두 쪽에 그려진다.
-/// 같은 높이의 줄이 둘 이상이면(#2004 이미지 스택) 모호하므로 쓰지 않는다.
 fn tac_object_owning_line_seg_index(para: &Paragraph, ctrl_idx: usize) -> Option<usize> {
-    // 8px @96dpi. `line_owning_tac_object_height_px` 의 하한과 같은 자리다.
-    const MIN_OBJECT_LINE_HU: i32 = 600;
+    const MIN_OBJECT_LINE_HU: i32 =
+        (crate::renderer::MIN_TAC_OBJECT_HEIGHT_PX * crate::renderer::HWPUNIT_PER_INCH / 96.0)
+            as i32;
 
     if para.line_segs.len() < 2 {
         return None;

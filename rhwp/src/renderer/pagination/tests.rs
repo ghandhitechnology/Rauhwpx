@@ -1783,7 +1783,6 @@ fn bottom_caption_reserve_ignores_negative_host_line_spacing_issue2699() {
     );
 }
 
-/// 표지 그림의 흐름 높이. 원본 `hp:sz` 와 `ls[0].line_height` 가 같은 값이다.
 const ISSUE_6972_PICTURE_HU: i32 = 72347;
 
 fn issue6972_cover_picture_paragraph() -> Paragraph {
