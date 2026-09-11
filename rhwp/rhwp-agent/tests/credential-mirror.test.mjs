@@ -212,10 +212,13 @@ test('a transient Windows source replacement failure retains the launch root unt
     platform: 'win32', pid: 556, now: () => 5_001, symlink: deniedSymlink,
   });
   await fs.writeFile(target, 'refreshed');
+  let asideAttempts = 0;
   const result = flushCredentialMirrorSync(handle, {
     platform: 'win32',
+    delays: [0],
     renameFile(from, to) {
       if (from === source && to === handle.previousPath) {
+        asideAttempts += 1;
         throw Object.assign(new Error('credential source is locked'), { code: 'EACCES' });
       }
       renameSync(from, to);
@@ -229,6 +232,7 @@ test('a transient Windows source replacement failure retains the launch root unt
     errorCode: 'EACCES',
     errorMessage: 'credential source is locked',
   });
+  assert.ok(asideAttempts > 1);
   assert.equal(await fs.readFile(source, 'utf8'), 'original');
   assert.equal(await fs.readFile(target, 'utf8'), 'refreshed');
   assert.equal(await fs.readFile(handle.nextPath, 'utf8'), 'refreshed');
@@ -401,4 +405,171 @@ test('interrupted replacement recovery rejects an oversized staged credential', 
   assert.equal(existsSync(source), false);
   assert.equal(existsSync(handle.nextPath), true);
   assert.equal(existsSync(handle.journalPath), true);
+});
+
+test('journal publish retries a locked first rename on win32 then succeeds', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-credential-journal-lock-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const source = path.join(root, 'profile', 'auth.json');
+  const target = path.join(root, 'isolated', 'auth.json');
+  await fs.mkdir(path.dirname(source), { recursive: true });
+  await fs.writeFile(source, '{"refresh":"seed"}');
+  let attempts = 0;
+
+  const handle = prepareCredentialMirrorSync(source, target, {
+    platform: 'win32',
+    pid: 2_001,
+    delays: [0],
+    symlink: deniedSymlink,
+    renameFile(from, to) {
+      if (path.basename(to).includes('rauhwpx-copyback-') && to.endsWith('.json')) {
+        attempts += 1;
+        if (attempts === 1) throw Object.assign(new Error('busy'), { code: 'EBUSY' });
+      }
+      renameSync(from, to);
+    },
+  });
+
+  assert.equal(handle.mode, 'copy');
+  assert.equal(existsSync(handle.journalPath), true);
+  assert.equal(await fs.readFile(source, 'utf8'), '{"refresh":"seed"}');
+  assert.equal(await fs.readFile(target, 'utf8'), '{"refresh":"seed"}');
+  assert.equal(attempts, 2);
+});
+
+test('win32 replaceSource retries a locked aside rename then succeeds', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-credential-replace-lock-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const source = path.join(root, 'profile', 'auth.json');
+  const target = path.join(root, 'isolated', 'auth.json');
+  await fs.mkdir(path.dirname(source), { recursive: true });
+  await fs.writeFile(source, 'original');
+  const handle = prepareCredentialMirrorSync(source, target, {
+    platform: 'win32', pid: 2_002, symlink: deniedSymlink,
+  });
+  await fs.writeFile(target, 'refreshed');
+  let attempts = 0;
+
+  assert.deepEqual(flushCredentialMirrorSync(handle, {
+    platform: 'win32',
+    delays: [0],
+    renameFile(from, to) {
+      if (to === handle.previousPath) {
+        attempts += 1;
+        if (attempts === 1) throw Object.assign(new Error('locked'), { code: 'EPERM' });
+      }
+      renameSync(from, to);
+    },
+  }), { copied: true, conflict: false });
+  assert.equal(await fs.readFile(source, 'utf8'), 'refreshed');
+  assert.equal(attempts, 2);
+});
+
+test('writeNewAtomically retries a locked first rename on win32 then succeeds', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-credential-write-new-lock-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const source = path.join(root, 'profile', 'auth.json');
+  const target = path.join(root, 'isolated', 'auth.json');
+  await fs.mkdir(path.dirname(source), { recursive: true });
+  await fs.writeFile(source, 'seeded');
+  let attempts = 0;
+
+  const handle = prepareCredentialMirrorSync(source, target, {
+    platform: 'win32',
+    pid: 2_003,
+    delays: [0],
+    symlink: deniedSymlink,
+    renameFile(from, to) {
+      if (to === target) {
+        attempts += 1;
+        if (attempts === 1) throw Object.assign(new Error('denied'), { code: 'EACCES' });
+      }
+      renameSync(from, to);
+    },
+  });
+
+  assert.equal(handle.mode, 'copy');
+  assert.equal(await fs.readFile(target, 'utf8'), 'seeded');
+  assert.equal(attempts, 2);
+});
+
+test('conflict preserve retries a locked publish rename on win32 then keeps the host login', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-credential-conflict-lock-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const source = path.join(root, 'profile', 'auth.json');
+  const target = path.join(root, 'isolated', 'auth.json');
+  await fs.mkdir(path.dirname(source), { recursive: true });
+  await fs.writeFile(source, 'initial');
+  const handle = prepareCredentialMirrorSync(source, target, {
+    platform: 'win32', pid: 2_004, symlink: deniedSymlink,
+  });
+  await fs.writeFile(source, 'new-login');
+  await fs.writeFile(target, 'isolated-refresh');
+  const conflictPath = credentialConflictPath(source);
+  let attempts = 0;
+
+  assert.deepEqual(flushCredentialMirrorSync(handle, {
+    platform: 'win32',
+    delays: [0],
+    renameFile(from, to) {
+      if (to === conflictPath) {
+        attempts += 1;
+        if (attempts === 1) throw Object.assign(new Error('busy'), { code: 'EBUSY' });
+      }
+      renameSync(from, to);
+    },
+  }), { copied: false, conflict: true, conflictPath });
+  assert.equal(attempts, 2);
+  assert.equal(await fs.readFile(source, 'utf8'), 'new-login');
+  assert.equal(await fs.readFile(conflictPath, 'utf8'), 'isolated-refresh');
+});
+
+test('journal publish does not retry a non-lock or unix lock error', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-credential-journal-noretry-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const source = path.join(root, 'profile', 'auth.json');
+  const target = path.join(root, 'isolated', 'auth.json');
+  await fs.mkdir(path.dirname(source), { recursive: true });
+  await fs.writeFile(source, 'seed');
+  let attempts = 0;
+
+  assert.throws(
+    () => prepareCredentialMirrorSync(source, target, {
+      platform: 'win32',
+      pid: 2_005,
+      delays: [0],
+      symlink: deniedSymlink,
+      renameFile(from, to) {
+        if (path.basename(to).includes('rauhwpx-copyback-') && to.endsWith('.json')) {
+          attempts += 1;
+          throw Object.assign(new Error('no space'), { code: 'ENOSPC' });
+        }
+        renameSync(from, to);
+      },
+    }),
+    (error) => error.code === 'ENOSPC',
+  );
+  assert.equal(attempts, 1);
+
+  const unixSource = path.join(root, 'profile', 'unix-auth.json');
+  const unixTarget = path.join(root, 'isolated', 'unix-auth.json');
+  await fs.writeFile(unixSource, 'seed');
+  let unixAttempts = 0;
+  assert.throws(
+    () => prepareCredentialMirrorSync(unixSource, unixTarget, {
+      platform: 'linux',
+      copyOnly: true,
+      pid: 2_006,
+      delays: [0],
+      renameFile(from, to) {
+        if (path.basename(to).includes('rauhwpx-copyback-') && to.endsWith('.json')) {
+          unixAttempts += 1;
+          throw Object.assign(new Error('locked'), { code: 'EPERM' });
+        }
+        renameSync(from, to);
+      },
+    }),
+    (error) => error.code === 'EPERM',
+  );
+  assert.equal(unixAttempts, 1);
 });

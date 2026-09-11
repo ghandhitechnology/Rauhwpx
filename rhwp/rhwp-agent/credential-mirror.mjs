@@ -21,6 +21,9 @@ import { uptime as systemUptime } from 'node:os';
 import path from 'node:path';
 
 const COPY_FALLBACK_CODES = new Set(['EPERM', 'EACCES', 'ENOTSUP']);
+const LOCK_CODES = new Set(['EPERM', 'EBUSY', 'ENOTEMPTY', 'EACCES']);
+// Same schedule as desktop/fs-replace `retryWindows`, not the harness 80ms ladder.
+const LOCK_RETRY_DELAYS_MS = [50, 100, 200, 400, 800];
 const JOURNAL_VERSION = 1;
 const JOURNAL_ID_PATTERN = /^[0-9a-f]{16}$/;
 const OWNER_FILE = '.rauhwpx-owner.json';
@@ -29,6 +32,28 @@ export const CREDENTIAL_RETENTION_DIR = '.rauhwpx-credential-copybacks';
 export const LAUNCH_CLEANUP_RETENTION_FILE = '.rauhwpx-legacy-cleanup.json';
 export const MAX_CREDENTIAL_MIRROR_BYTES = 1024 * 1024;
 export const MAX_CREDENTIAL_JOURNAL_BYTES = 64 * 1024;
+
+function sleepSync(ms) {
+  if (ms <= 0) return;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function retryLockedSync(operation, {
+  platform = process.platform,
+  delays = LOCK_RETRY_DELAYS_MS,
+  sleep = sleepSync,
+} = {}) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return operation();
+    } catch (error) {
+      if (platform !== 'win32' || !LOCK_CODES.has(error?.code) || attempt >= delays.length) {
+        throw error;
+      }
+      sleep(delays[attempt]);
+    }
+  }
+}
 
 function digest(bytes) {
   return createHash('sha256').update(bytes).digest('hex');
@@ -150,19 +175,19 @@ export function credentialMirrorHasPendingCopybackSync(handle) {
     && [handle.target, handle.nextPath, handle.previousPath].some(pathStillExists);
 }
 
-function writeNewAtomically(target, bytes) {
+function writeNewAtomically(target, bytes, { rename, rm }) {
   mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
   const temporary = `${target}.rauhwpx-new-${process.pid}-${randomUUID()}`;
   try {
     durableWrite(temporary, bytes);
-    renameSync(temporary, target);
+    rename(temporary, target);
   } catch (error) {
-    rmSync(temporary, { force: true });
+    rm(temporary, { force: true });
     throw error;
   }
 }
 
-function preserveConflictCopy(handle, bytes) {
+function preserveConflictCopy(handle, bytes, { rename, rm }) {
   if (!bytes || bytes.byteLength > MAX_CREDENTIAL_MIRROR_BYTES) return null;
   const target = credentialConflictPath(handle.source);
   if (handle.retentionMarker) {
@@ -176,11 +201,11 @@ function preserveConflictCopy(handle, bytes) {
     durableWrite(temporary, bytes, 0o600);
     // A single fixed path puts a hard 1 MiB ceiling on retained conflict data
     // for each source. The latest unresolved provider refresh wins.
-    rmSync(target, { force: true });
-    renameSync(temporary, target);
+    rm(target, { force: true });
+    rename(temporary, target);
     return target;
   } catch (error) {
-    rmSync(temporary, { force: true });
+    rm(temporary, { force: true });
     throw error;
   }
 }
@@ -321,12 +346,12 @@ function removeMirrorArtifacts(handle) {
   }
 }
 
-function finishTerminalConflict(handle, targetBytes) {
+function finishTerminalConflict(handle, targetBytes, { rename, rm }) {
   /** @type {string | null} */
   let conflictPath = null;
   if (targetBytes && digest(targetBytes) !== handle.initialSourceDigest) {
     try {
-      conflictPath = preserveConflictCopy(handle, targetBytes);
+      conflictPath = preserveConflictCopy(handle, targetBytes, { rename, rm });
       if (!conflictPath) throw new Error('No recovery path exists outside the launch root');
     } catch (error) {
       const preservationMessage = error instanceof Error ? error.message : String(error);
@@ -344,41 +369,41 @@ function finishTerminalConflict(handle, targetBytes) {
   return { copied: false, conflict: true, conflictPath };
 }
 
-function recoverInterruptedReplacement(handle, { renameFile = renameSync } = {}) {
+function recoverInterruptedReplacement(handle, { rename, rm }) {
   if (plainFile(handle.source)) return;
   if (plainFile(handle.nextPath)) {
     readCredential(handle.nextPath);
-    renameFile(handle.nextPath, handle.source);
-    rmSync(handle.previousPath, { force: true });
+    rename(handle.nextPath, handle.source);
+    rm(handle.previousPath, { force: true });
     return;
   }
   if (plainFile(handle.previousPath)) {
     readCredential(handle.previousPath);
-    renameFile(handle.previousPath, handle.source);
+    rename(handle.previousPath, handle.source);
   }
 }
 
-function replaceSource(handle, bytes, platform, { renameFile = renameSync } = {}) {
-  rmSync(handle.nextPath, { force: true });
+function replaceSource(handle, bytes, platform, { rename, rm }) {
+  rm(handle.nextPath, { force: true });
   durableWrite(handle.nextPath, bytes);
   if (platform !== 'win32') {
-    renameFile(handle.nextPath, handle.source);
+    rename(handle.nextPath, handle.source);
     return;
   }
 
-  rmSync(handle.previousPath, { force: true });
+  rm(handle.previousPath, { force: true });
   let moved = false;
   try {
-    renameFile(handle.source, handle.previousPath);
+    rename(handle.source, handle.previousPath);
     moved = true;
-    renameFile(handle.nextPath, handle.source);
+    rename(handle.nextPath, handle.source);
   } catch (error) {
     if (moved && !plainFile(handle.source) && plainFile(handle.previousPath)) {
-      try { renameFile(handle.previousPath, handle.source); } catch {}
+      try { rename(handle.previousPath, handle.source); } catch {}
     }
     throw error;
   }
-  rmSync(handle.previousPath, { force: true });
+  rm(handle.previousPath, { force: true });
 }
 
 /**
@@ -388,8 +413,13 @@ function replaceSource(handle, bytes, platform, { renameFile = renameSync } = {}
 export function flushCredentialMirrorSync(handle, {
   platform = process.platform,
   renameFile = renameSync,
+  delays,
+  sleep,
   validateTarget = /** @type {((content: Buffer) => boolean) | null} */ (null),
 } = {}) {
+  const lock = { platform, delays, sleep };
+  const rename = (from, to) => retryLockedSync(() => renameFile(from, to), lock);
+  const rm = (target, options = { force: true }) => retryLockedSync(() => rmSync(target, options), lock);
   if (!handle || handle.mode !== 'copy') return { copied: false, conflict: false };
   const verified = readJournal(handle.journalPath);
   if (!verified || verified.source !== path.resolve(handle.source)
@@ -397,9 +427,9 @@ export function flushCredentialMirrorSync(handle, {
     return { copied: false, conflict: false };
   }
 
-  recoverInterruptedReplacement(verified, { renameFile });
+  recoverInterruptedReplacement(verified, { rename });
   if (!plainFile(verified.target)) {
-    if (!plainFile(verified.source)) return finishTerminalConflict(verified, null);
+    if (!plainFile(verified.source)) return finishTerminalConflict(verified, null, { rename, rm });
     removeMirrorArtifacts(verified);
     return { copied: false, conflict: false };
   }
@@ -415,7 +445,7 @@ export function flushCredentialMirrorSync(handle, {
     throw error;
   }
   if (targetBytes === null) {
-    if (!plainFile(verified.source)) return finishTerminalConflict(verified, null);
+    if (!plainFile(verified.source)) return finishTerminalConflict(verified, null, { rename, rm });
     removeMirrorArtifacts(verified);
     return { copied: false, conflict: false };
   }
@@ -425,16 +455,16 @@ export function flushCredentialMirrorSync(handle, {
     return { copied: false, conflict: false };
   }
   const targetDigest = digest(targetBytes);
-  if (!plainFile(verified.source)) return finishTerminalConflict(verified, targetBytes);
+  if (!plainFile(verified.source)) return finishTerminalConflict(verified, targetBytes, { rename, rm });
   let sourceBytes;
   try {
     sourceBytes = readCredential(verified.source);
   } catch (error) {
     if (error?.code !== 'CREDENTIAL_MIRROR_TOO_LARGE'
       && error?.code !== 'CREDENTIAL_MIRROR_UNSAFE_FILE') throw error;
-    return finishTerminalConflict(verified, targetBytes);
+    return finishTerminalConflict(verified, targetBytes, { rename, rm });
   }
-  if (sourceBytes === null) return finishTerminalConflict(verified, targetBytes);
+  if (sourceBytes === null) return finishTerminalConflict(verified, targetBytes, { rename, rm });
   const sourceDigest = digest(sourceBytes);
 
   if (targetDigest === verified.initialSourceDigest || sourceDigest === targetDigest) {
@@ -442,11 +472,11 @@ export function flushCredentialMirrorSync(handle, {
     return { copied: false, conflict: false };
   }
   if (sourceDigest !== verified.initialSourceDigest) {
-    return finishTerminalConflict(verified, targetBytes);
+    return finishTerminalConflict(verified, targetBytes, { rename, rm });
   }
 
   try {
-    replaceSource(verified, targetBytes, platform, { renameFile });
+    replaceSource(verified, targetBytes, platform, { rename, rm });
     const installed = readCredential(verified.source);
     if (installed === null || digest(installed) !== targetDigest) {
       throw new Error(`Credential copyback verification failed: ${verified.source}`);
@@ -505,7 +535,13 @@ export function prepareCredentialMirrorSync(source, target, {
   symlink = symlinkSync,
   copyOnly = false,
   validateSource = /** @type {((content: Buffer) => boolean) | null} */ (null),
+  renameFile = renameSync,
+  delays,
+  sleep,
 } = {}) {
+  const lock = { platform, delays, sleep };
+  const rename = (from, to) => retryLockedSync(() => renameFile(from, to), lock);
+  const rm = (target, options = { force: true }) => retryLockedSync(() => rmSync(target, options), lock);
   if (!source) return null;
   const resolvedSource = path.resolve(source);
   const resolvedTarget = path.resolve(target);
@@ -567,12 +603,12 @@ export function prepareCredentialMirrorSync(source, target, {
   const temporaryJournal = `${journalPath}.new-${pid}-${randomUUID()}`;
   try {
     durableWrite(temporaryJournal, `${JSON.stringify(journal)}\n`);
-    renameSync(temporaryJournal, journalPath);
+    rename(temporaryJournal, journalPath);
     if (retentionMarker) {
       mkdirSync(path.dirname(retentionMarker), { recursive: true, mode: 0o700 });
       durableWrite(retentionMarker, `${journalPath}\n`);
     }
-    writeNewAtomically(resolvedTarget, sourceBytes);
+    writeNewAtomically(resolvedTarget, sourceBytes, { rename, rm });
   } catch (error) {
     rmSync(temporaryJournal, { force: true });
     rmSync(journalPath, { force: true });
