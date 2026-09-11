@@ -412,8 +412,8 @@ function replaceSource(handle, bytes, platform, { rename, rm }) {
 export function flushCredentialMirrorSync(handle, {
   platform = process.platform,
   renameFile = renameSync,
-  delays,
-  sleep,
+  delays = LOCK_RETRY_DELAYS_MS,
+  sleep = sleepSync,
   validateTarget = /** @type {((content: Buffer) => boolean) | null} */ (null),
 } = {}) {
   const lock = { platform, delays, sleep };
@@ -503,8 +503,8 @@ export function recoverCredentialMirrorsSync(source, {
   platform = process.platform,
   validateTarget = /** @type {((content: Buffer) => boolean) | null} */ (null),
   renameFile = renameSync,
-  delays,
-  sleep,
+  delays = LOCK_RETRY_DELAYS_MS,
+  sleep = sleepSync,
 } = {}) {
   const resolvedSource = path.resolve(source);
   let names;
@@ -540,8 +540,8 @@ export function prepareCredentialMirrorSync(source, target, {
   copyOnly = false,
   validateSource = /** @type {((content: Buffer) => boolean) | null} */ (null),
   renameFile = renameSync,
-  delays,
-  sleep,
+  delays = LOCK_RETRY_DELAYS_MS,
+  sleep = sleepSync,
 } = {}) {
   const lock = { platform, delays, sleep };
   const rename = (from, to) => retryLockedSync(() => renameFile(from, to), lock);
