@@ -806,7 +806,9 @@ test('win32 marker publish keeps the previous marker when replacement rename fai
           asideDone = true;
           return result;
         }
-        if (asideDone && to === ownerPath) throw errorWithCode('EIO');
+        if (asideDone && to === ownerPath && path.basename(from).includes('.tmp')) {
+          throw errorWithCode('EIO');
+        }
         return winRename(from, to);
       },
       platform: 'win32',
