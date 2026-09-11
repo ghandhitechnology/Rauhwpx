@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { open, rename } from 'node:fs/promises';
+import { retryWindows } from './fs-replace.mjs';
 
 export const MAX_BOOKMARK_STATE_BYTES = 4 * 1024 * 1024;
 
@@ -50,10 +51,16 @@ export async function readBookmarkState(filePath, {
 export async function quarantineBookmarkState(filePath, {
   renameImpl = rename,
   suffix = `${Date.now()}-${randomUUID()}`,
+  platform = process.platform,
+  sleep,
 } = {}) {
   const quarantinePath = `${filePath}.corrupt-${suffix}`;
   try {
-    await renameImpl(filePath, quarantinePath);
+    await retryWindows(
+      () => renameImpl(filePath, quarantinePath),
+      platform,
+      sleep,
+    );
     return quarantinePath;
   } catch (error) {
     if (error?.code === 'ENOENT') return null;
