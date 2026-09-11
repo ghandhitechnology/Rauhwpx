@@ -1,21 +1,4 @@
-//! [Issue #4068] 안 잘린 중첩 칸이 선언된 세로 정렬을 잃는다.
-//!
-//! `table_layout.rs` 의 `effective_valign` 은 잘림 조건에서 `Top` 으로 수렴한다.
-//! `cell_clipped_by_parent_viewport` 는 호출자가 넘긴 `col_area` 로 잘림을
-//! 판정하는데, 그 값은 직전 조각까지 품은 채 올 수 있다. 그래서 페이지 안에
-//! 온전히 들어간 칸까지 "잘렸다"고 오판한다.
-//!
-//! ```text
-//!   hwpx_sample2 19쪽 · 중첩 표 1행×2열 · 두 칸 모두 선언 valign=Center
-//!     셀 961.80..1063.40 · page bbox 0.00..1122.50   → 실제로는 안 잘린다
-//!     그런데 parentvp=true 로 Top 강제
-//! ```
-//!
-//! 고친 것은 술어에 실제 클립(page bbox) 한 항을 더한 것뿐이다. 안 잘린 칸은
-//! 잘림 수렴의 대상이 아니다.
-//!
-//! 이 수정은 `#4068` 의 그림 dy 를 움직이지 않는다. 그림 칸은 내용 높이가
-//! 안높이보다 커서 정렬 몫이 0 이다. 이 시험이 잠그는 것은 칸 정렬 오판 하나다.
+//! 페이지 안에 온전히 들어간 중첩 칸은 선언된 Center/Bottom valign을 유지한다.
 
 #![cfg(not(target_arch = "wasm32"))]
 
@@ -31,10 +14,7 @@ use rhwp::model::style::ParaShape;
 use rhwp::model::table::{Cell, Table, VerticalAlign};
 use rhwp::renderer::render_tree::{RenderNode, RenderNodeType};
 
-/// 중첩 표를 담은 정식 회귀 입력. 그림 칸과 글자 칸이 한 행에 나란히 있다.
 const NESTED_SAMPLE: &str = "samples/hwpx_sample2.hwp";
-
-/// `walk` 은 자기 자신을 세므로 최상위 표의 칸이 1, 그 안의 중첩 표 칸이 2 다.
 const NESTED_DEPTH_SAMPLE2: usize = 2;
 
 fn sample(rel: &str) -> PathBuf {
@@ -128,8 +108,6 @@ fn parent_clip_fixture(align: VerticalAlign) -> RenderNode {
         controls: vec![Control::Table(Box::new(outer))],
         ..Default::default()
     });
-    // 기본 글자 모양/글꼴도 갖춘 문서에서 출발해야 TextLine이 생성된다.
-    // 스타일이 비어 있는 Document::default()는 정렬 반례 입력이 아니다.
     let mut core = DocumentCore::new_empty();
     let mut doc = core.document().clone();
     doc.doc_info.para_shapes = vec![ParaShape::default()];
@@ -151,13 +129,13 @@ fn outer_clip(node: &RenderNode) -> Option<(f64, f64)> {
 #[test]
 fn a_fully_parent_contained_cell_keeps_center_and_bottom_alignment() {
     let top_root = parent_clip_fixture(VerticalAlign::Top);
-    let top = nested_cell_contents(&top_root, 2);
+    let top = nested_cell_contents(&top_root, NESTED_DEPTH_SAMPLE2);
     assert_eq!(top.len(), 1);
     let mut offsets = Vec::new();
     for align in [VerticalAlign::Center, VerticalAlign::Bottom] {
         let root = parent_clip_fixture(align);
         let (parent_top, parent_bottom) = outer_clip(&root).expect("부모 셀");
-        let cells = nested_cell_contents(&root, 2);
+        let cells = nested_cell_contents(&root, NESTED_DEPTH_SAMPLE2);
         assert_eq!(cells.len(), 1);
         let cell = cells[0];
         assert!(cell.cell_y >= parent_top && cell.cell_y + cell.cell_h <= parent_bottom);
@@ -173,7 +151,6 @@ fn a_fully_parent_contained_cell_keeps_center_and_bottom_alignment() {
     );
 }
 
-/// 한 칸이 그린 첫 글줄의 상단과 그 칸의 상단.
 #[derive(Debug, Clone, Copy)]
 struct CellContent {
     cell_x: f64,
@@ -183,13 +160,11 @@ struct CellContent {
 }
 
 impl CellContent {
-    /// 칸 상단부터 첫 글줄까지. 여백 + 세로 정렬 몫.
     fn offset(&self) -> f64 {
         self.first_line_y - self.cell_y
     }
 }
 
-/// `depth` 단계 이상 중첩된 칸들의 (칸 상자, 첫 글줄) 을 모은다.
 fn nested_cell_contents(node: &RenderNode, min_depth: usize) -> Vec<CellContent> {
     fn first_line_y(node: &RenderNode) -> Option<f64> {
         let mut best: Option<f64> = None;
@@ -243,7 +218,6 @@ fn page_tree(rel: &str, page_num: u32) -> (RenderNode, f64) {
     (tree.root, page_bottom)
 }
 
-/// `hwpx_sample2` 19쪽(0-based 18)의 중첩 표 한 행. 왼쪽 그림 칸, 오른쪽 글자 칸.
 fn nested_row() -> (CellContent, CellContent, f64) {
     let (root, page_bottom) = page_tree(NESTED_SAMPLE, 18);
     let cells: Vec<CellContent> = nested_cell_contents(&root, NESTED_DEPTH_SAMPLE2)
@@ -258,10 +232,6 @@ fn nested_row() -> (CellContent, CellContent, f64) {
     (cells[0], cells[1], page_bottom)
 }
 
-/// 안 잘린 칸은 선언된 `Center` 를 받는다.
-///
-/// 수정 전에는 두 칸이 같은 오프셋(0.90px = 여백만)이었다. 오른쪽 글자 칸은
-/// 내용(96.00px)이 안높이(99.76px)보다 짧아 정렬 몫 1.90px 을 받아야 한다.
 #[test]
 fn an_unclipped_nested_cell_keeps_its_declared_center_alignment() {
     let (picture_cell, text_cell, page_bottom) = nested_row();
@@ -283,9 +253,6 @@ fn an_unclipped_nested_cell_keeps_its_declared_center_alignment() {
     );
 }
 
-/// 정렬 여유가 없는 칸은 움직이지 않는다.
-///
-/// 왼쪽 그림 칸은 내용(103.95px)이 안높이(99.76px)보다 커서 정렬 몫이 0 이다.
 #[test]
 fn the_cell_without_alignment_slack_stays_put() {
     let (picture_cell, _text_cell, _) = nested_row();

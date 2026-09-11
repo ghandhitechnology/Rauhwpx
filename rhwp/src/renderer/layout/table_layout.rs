@@ -4836,10 +4836,6 @@ impl LayoutEngine {
             };
 
             // 수직 정렬 (분할 표에서는 Top 강제 — 보이는 영역이 전체 셀보다 작음)
-            // [#4068] 중첩 셀은 부모 `col_area` 또는 page bbox 밖으로 나가면 Top 으로
-            // 수렴한다. 호출자가 넘긴 `col_area` 가 직전 조각까지 포함해 낡아 있으면
-            // 페이지 안에 온전히 들어간 칸까지 "잘렸다"고 오판한다. 실제 클립은
-            // page bbox 이므로, 페이지에 들어가는 칸은 선언된 Center/Bottom 을 유지한다.
             let page_bbox = tree.root.bbox;
             let page_view_top = page_bbox.y;
             let page_view_bottom = page_bbox.y + page_bbox.height;
