@@ -3,6 +3,7 @@ import { constants as fsConstants, realpathSync } from 'node:fs';
 import { lstat, mkdir, open, opendir, rename, rm, writeFile } from 'node:fs/promises';
 import { uptime as systemUptime } from 'node:os';
 import path from 'node:path';
+import { retryWindows } from './fs-replace.mjs';
 
 const LAUNCH_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PROFILE_ID_PATTERN = /^[0-9a-f]{20}$/;
@@ -81,6 +82,87 @@ export function launchStoragePaths({
   });
 }
 
+async function discardTemporaryMarker(rmImpl, temporary) {
+  await rmImpl(temporary, { force: true }).catch(() => {});
+}
+
+async function publishMarkerFile(temporary, target, {
+  platform = process.platform,
+  sleep,
+  renameImpl,
+  rmImpl,
+  lstatImpl = lstat,
+}) {
+  if (platform !== 'win32') {
+    try {
+      await renameImpl(temporary, target);
+    } catch (error) {
+      await discardTemporaryMarker(rmImpl, temporary);
+      throw error;
+    }
+    return;
+  }
+
+  const publish = () => retryWindows(() => renameImpl(temporary, target), platform, sleep);
+
+  let live = null;
+  try {
+    live = await lstatImpl(target);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      await discardTemporaryMarker(rmImpl, temporary);
+      throw error;
+    }
+  }
+
+  if (!live) {
+    try {
+      await publish();
+    } catch (error) {
+      await discardTemporaryMarker(rmImpl, temporary);
+      throw error;
+    }
+    return;
+  }
+
+  const previous = `${target}.previous-write`;
+  await retryWindows(() => rmImpl(previous, { force: true }), platform, sleep);
+  let moved = false;
+  try {
+    await retryWindows(() => renameImpl(target, previous), platform, sleep);
+    moved = true;
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      await discardTemporaryMarker(rmImpl, temporary);
+      throw error;
+    }
+  }
+
+  try {
+    await publish();
+  } catch (error) {
+    if (moved) {
+      try {
+        await retryWindows(() => renameImpl(previous, target), platform, sleep);
+      } catch (restoreError) {
+        await discardTemporaryMarker(rmImpl, temporary);
+        const failure = new AggregateError(
+          [error, restoreError],
+          `Windows marker replacement failed; the previous value remains at ${previous}`,
+        );
+        failure.code = 'FILE_REPLACE_ROLLBACK_FAILED';
+        throw failure;
+      }
+    }
+    await discardTemporaryMarker(rmImpl, temporary);
+    throw error;
+  }
+
+  if (moved) {
+    await retryWindows(() => rmImpl(previous, { force: true }), platform, sleep).catch(() => {});
+  }
+}
+
 export async function writeLaunchOwnerMetadata(directory, {
   launchId,
   profileId,
@@ -90,6 +172,10 @@ export async function writeLaunchOwnerMetadata(directory, {
   mkdirImpl = mkdir,
   renameImpl = rename,
   writeFileImpl = writeFile,
+  rmImpl = rm,
+  lstatImpl = lstat,
+  platform = process.platform,
+  sleep,
 } = {}) {
   if (!LAUNCH_ID_PATTERN.test(String(launchId))) throw new Error('Invalid launch owner id');
   if (!PROFILE_ID_PATTERN.test(String(profileId))) throw new Error('Invalid launch profile id');
@@ -107,12 +193,13 @@ export async function writeLaunchOwnerMetadata(directory, {
     createdAtMs,
   };
   await writeFileImpl(temporary, `${JSON.stringify(metadata)}\n`, { encoding: 'utf8', mode: 0o600 });
-  try {
-    await renameImpl(temporary, target);
-  } catch (error) {
-    await rm(temporary, { force: true }).catch(() => {});
-    throw error;
-  }
+  await publishMarkerFile(temporary, target, {
+    platform,
+    sleep,
+    renameImpl,
+    rmImpl,
+    lstatImpl,
+  });
   return metadata;
 }
 
@@ -361,6 +448,9 @@ async function writeLegacyCleanupMarker(directory, marker, {
   renameImpl,
   rmImpl,
   writeFileImpl,
+  lstatImpl,
+  platform,
+  sleep,
 }) {
   const target = path.join(directory, LEGACY_CLEANUP_MARKER_FILE);
   const temporary = path.join(
@@ -368,21 +458,13 @@ async function writeLegacyCleanupMarker(directory, marker, {
     `.${LEGACY_CLEANUP_MARKER_FILE}.${process.pid}.${randomUUID()}.tmp`,
   );
   await writeFileImpl(temporary, `${JSON.stringify(marker)}\n`, { encoding: 'utf8', mode: 0o600 });
-  try {
-    await renameImpl(temporary, target);
-  } catch (error) {
-    if (error?.code !== 'EEXIST' && error?.code !== 'EPERM') {
-      await rmImpl(temporary, { force: true }).catch(() => {});
-      throw error;
-    }
-    await rmImpl(target, { force: true });
-    try {
-      await renameImpl(temporary, target);
-    } catch (replacementError) {
-      await rmImpl(temporary, { force: true }).catch(() => {});
-      throw replacementError;
-    }
-  }
+  await publishMarkerFile(temporary, target, {
+    platform,
+    sleep,
+    renameImpl,
+    rmImpl,
+    lstatImpl,
+  });
 }
 
 /**
@@ -407,6 +489,8 @@ async function removeLegacyLaunchDirectoriesAfterReboot(
     renameImpl = rename,
     rmImpl = rm,
     writeFileImpl = writeFile,
+    platform = process.platform,
+    sleep,
   } = {},
 ) {
   let entries;
@@ -472,7 +556,7 @@ async function removeLegacyLaunchDirectoriesAfterReboot(
           ...marker,
           observedUptimeSeconds: currentUptime,
           observedAtMs: currentTime,
-        }, { renameImpl, rmImpl, writeFileImpl });
+        }, { renameImpl, rmImpl, writeFileImpl, lstatImpl, platform, sleep });
       }
       continue;
     }
@@ -495,7 +579,7 @@ async function removeLegacyLaunchDirectoriesAfterReboot(
       observedUptimeSeconds: currentUptime,
       observedAtMs: currentTime,
       directoryMtimeMs: directoryStat.mtimeMs,
-    }, { renameImpl, rmImpl, writeFileImpl });
+    }, { renameImpl, rmImpl, writeFileImpl, lstatImpl, platform, sleep });
   }
   return removed;
 }
