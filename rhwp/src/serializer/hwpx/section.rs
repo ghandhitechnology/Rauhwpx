@@ -1201,6 +1201,7 @@ fn split_text_into(
     para: &Paragraph,
     tab_idx: &mut usize,
     max_bytes: usize,
+    markpens: &mut PositionedMarkpens<'_>,
 ) -> Result<(), SerializeError> {
     let mut text_buf = String::new();
     let mut running_pos = 0u32;
@@ -1216,6 +1217,7 @@ fn split_text_into(
             )?;
             splitter.cut_before(char_pos);
         }
+        markpens.flush(char_pos, splitter, &mut text_buf, para, tab_idx, max_bytes)?;
         text_buf.push(c);
         running_pos = char_pos
             .max(running_pos)
@@ -1228,6 +1230,7 @@ fn split_text_into(
         tab_idx,
         max_bytes.saturating_sub(splitter.runs.len()),
     )?;
+    markpens.flush(u32::MAX, splitter, &mut text_buf, para, tab_idx, max_bytes)?;
     Ok(())
 }
 
@@ -1257,6 +1260,7 @@ fn render_runs_limited(
         && para.controls.is_empty()
         && para.field_ranges.is_empty()
         && para.orphan_field_ends.is_empty()
+        && para.markpen_marks.is_empty()
     {
         return Ok(String::new());
     }
@@ -1368,6 +1372,7 @@ fn render_runs_limited(
         && para.field_ranges.is_empty()
         && para.orphan_field_ends.is_empty()
         && splitter.single_run()
+        && para.markpen_marks.is_empty()
     {
         let remaining = max_bytes
             .saturating_sub(splitter.runs.len())
@@ -1379,8 +1384,9 @@ fn render_runs_limited(
     }
 
     // mismatch 경로: 슬롯 위치 추정 불가 — 텍스트(경계 분할 포함) 후 슬롯 일괄 방출
+    let mut markpens = PositionedMarkpens::from_para(para);
     if slot_count != slots.len() {
-        split_text_into(&mut splitter, para, &mut tab_idx, max_bytes)?;
+        split_text_into(&mut splitter, para, &mut tab_idx, max_bytes, &mut markpens)?;
         let mut bm_done = vec![false; para.controls.len()];
         for (si, slot) in slots.iter().enumerate() {
             // [Task #1627] empty-text 문단: 이 slot 앞(controls 순서)의 bookmark 를 먼저 방출.
@@ -1414,6 +1420,14 @@ fn render_runs_limited(
         for ofe in &para.orphan_field_ends {
             emit_orphan_field_end(&mut splitter.content, ofe)?;
         }
+        markpens.flush(
+            u32::MAX,
+            &mut splitter,
+            &mut String::new(),
+            para,
+            &mut tab_idx,
+            max_bytes,
+        )?;
         return finish_runs_limited(splitter, max_bytes);
     }
 
@@ -1436,6 +1450,14 @@ fn render_runs_limited(
     if para.text.is_empty() {
         while slot_idx < slots.len() {
             splitter.cut_before(expected_utf16_pos);
+            markpens.flush(
+                expected_utf16_pos,
+                &mut splitter,
+                &mut text_buf,
+                para,
+                &mut tab_idx,
+                max_bytes,
+            )?;
             if bm_inorder {
                 emit_inorder_bookmarks(
                     &mut splitter.content,
@@ -1516,6 +1538,14 @@ fn render_runs_limited(
             )?;
             // 슬롯 시작 위치의 경계 — 슬롯은 새 run 소속 (규칙 1)
             splitter.cut_before(expected_utf16_pos);
+            markpens.flush(
+                expected_utf16_pos,
+                &mut splitter,
+                &mut text_buf,
+                para,
+                &mut tab_idx,
+                max_bytes,
+            )?;
             if bm_inorder {
                 emit_inorder_bookmarks(
                     &mut splitter.content,
@@ -1616,6 +1646,14 @@ fn render_runs_limited(
                 max_bytes.saturating_sub(splitter.runs.len()),
             )?;
             splitter.cut_before(expected_utf16_pos);
+            markpens.flush(
+                expected_utf16_pos,
+                &mut splitter,
+                &mut text_buf,
+                para,
+                &mut tab_idx,
+                max_bytes,
+            )?;
             render_control_slot_limited(
                 &mut splitter.content,
                 slots[slot_idx],
@@ -1639,6 +1677,14 @@ fn render_runs_limited(
             splitter.cut_before(char_pos);
         }
 
+        markpens.flush(
+            char_pos,
+            &mut splitter,
+            &mut text_buf,
+            para,
+            &mut tab_idx,
+            max_bytes,
+        )?;
         text_buf.push(c);
         let width = char_utf16_width(c);
         if char_pos >= expected_utf16_pos {
@@ -1718,6 +1764,14 @@ fn render_runs_limited(
 
     while slot_idx < slots.len() {
         splitter.cut_before(expected_utf16_pos);
+        markpens.flush(
+            expected_utf16_pos,
+            &mut splitter,
+            &mut text_buf,
+            para,
+            &mut tab_idx,
+            max_bytes,
+        )?;
         if bm_inorder {
             emit_inorder_bookmarks(
                 &mut splitter.content,
@@ -1763,6 +1817,14 @@ fn render_runs_limited(
         emit_inorder_bookmarks(&mut splitter.content, para, &mut bm_done, usize::MAX)?;
     }
 
+    markpens.flush(
+        u32::MAX,
+        &mut splitter,
+        &mut text_buf,
+        para,
+        &mut tab_idx,
+        max_bytes,
+    )?;
     finish_runs_limited(splitter, max_bytes)
 }
 
@@ -1835,6 +1897,65 @@ pub(crate) fn is_hwpx_inline_slot(control: &Control) -> bool {
             | Control::Footer(_)
             | Control::AutoNumber(_)
     )
+}
+
+struct PositionedMarkpens<'a> {
+    marks: Vec<(u32, &'a crate::model::paragraph::MarkpenMark)>,
+    next: usize,
+}
+
+impl PositionedMarkpens<'_> {
+    fn from_para(para: &Paragraph) -> PositionedMarkpens<'_> {
+        let mut marks: Vec<_> = para
+            .markpen_marks
+            .iter()
+            .map(|m| (m.stream_position(para), m))
+            .collect();
+        marks.sort_by_key(|(pos, _)| *pos);
+        PositionedMarkpens { marks, next: 0 }
+    }
+
+    fn flush(
+        &mut self,
+        position: u32,
+        splitter: &mut RunSplitter,
+        text: &mut String,
+        para: &Paragraph,
+        tab_idx: &mut usize,
+        max_bytes: usize,
+    ) -> Result<(), SerializeError> {
+        if !self
+            .marks
+            .get(self.next)
+            .is_some_and(|(pos, _)| *pos <= position)
+        {
+            return Ok(());
+        }
+        flush_text_fragment(
+            &mut splitter.content,
+            text,
+            &para.tab_extended,
+            tab_idx,
+            max_bytes.saturating_sub(splitter.runs.len()),
+        )?;
+        while let Some(&(pos, mark)) = self.marks.get(self.next) {
+            if pos > position {
+                break;
+            }
+            splitter.cut_before(pos);
+            splitter.content.push_str("<hp:t>");
+            match &mark.color {
+                Some(color) => splitter.content.push_str(&format!(
+                    r#"<hp:markpenBegin color="{}"/>"#,
+                    xml_escape(color)
+                )),
+                None => splitter.content.push_str("<hp:markpenEnd/>"),
+            }
+            splitter.content.push_str("</hp:t>");
+            self.next += 1;
+        }
+        Ok(())
+    }
 }
 
 fn flush_text_fragment(

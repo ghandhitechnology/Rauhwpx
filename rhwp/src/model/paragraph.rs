@@ -52,6 +52,11 @@ pub struct Paragraph {
     /// TAB 확장 데이터 (라운드트립 보존용)
     /// 각 탭 문자의 7 code unit (탭 너비, 종류 등) — text 내 '\t' 순서와 1:1 대응
     pub tab_extended: Vec<[u16; 7]>,
+    /// [#6956] 형광펜 표시 (`<hp:t>` 안의 `<hp:markpenBegin/>`·`<hp:markpenEnd/>`)
+    ///
+    /// 글자 축을 소비하지 않는다. 한컴 원본의 `hp:lineseg/@textpos` 가 이 표지를 세지
+    /// 않으므로 `text` 에도, 유닛 계산에도 넣지 않고 위치와 색만 보존한다.
+    pub markpen_marks: Vec<MarkpenMark>,
     /// 문단 번호 시작 방식 오버라이드
     /// None = 앞 번호 목록에 이어 (기본)
     /// Some(NumberingRestart) = 이전 번호 이어 / 새 번호 시작
@@ -295,6 +300,37 @@ pub struct RangeTag {
     pub tag: u32,
 }
 
+/// [#6956] 형광펜 표시 한 개.
+///
+/// 한컴은 여는 표지에 색을 싣고 닫는 표지는 속성이 없다. 둘 다 텍스트 원소 안 글자
+/// 사이에 오며 글자 축을 소비하지 않는다.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MarkpenMark {
+    /// `text` 문자열 내 삽입 위치 (이 인덱스의 문자 **앞**에 놓인다)
+    pub char_idx: usize,
+    /// 여는 표지의 색. `None` 이면 닫는 표지다.
+    pub color: Option<String>,
+    /// 확장 제어를 포함한 HWP5 UTF-16 위치. 표 앞뒤의 같은 char_idx를 구분한다.
+    pub utf16_pos: Option<u32>,
+}
+
+impl MarkpenMark {
+    pub(crate) fn stream_position(&self, para: &Paragraph) -> u32 {
+        self.utf16_pos.unwrap_or_else(|| {
+            para.char_offsets
+                .get(self.char_idx)
+                .copied()
+                .unwrap_or_else(|| {
+                    para.text
+                        .chars()
+                        .take(self.char_idx)
+                        .map(|c| c.len_utf16() as u32)
+                        .sum()
+                })
+        })
+    }
+}
+
 /// 필드 텍스트 범위 (0x03 FIELD_BEGIN ~ 0x04 FIELD_END 사이 텍스트)
 #[derive(Debug, Clone, Default)]
 pub struct FieldRange {
@@ -329,6 +365,63 @@ pub struct OrphanFieldEnd {
 }
 
 impl Paragraph {
+    /// 한컴 2022 실측: 종류 2, 하위 24비트는 COLORREF(BGR), 끝 위치는 exclusive.
+    pub(crate) fn import_markpen_range_tags(&mut self) {
+        self.markpen_marks = self
+            .range_tags
+            .iter()
+            .filter(|r| r.tag >> 24 == 2)
+            .flat_map(|r| {
+                let color = format!(
+                    "#{:02X}{:02X}{:02X}",
+                    r.tag & 255,
+                    (r.tag >> 8) & 255,
+                    (r.tag >> 16) & 255
+                );
+                [(r.start, Some(color)), (r.end, None)]
+            })
+            .map(|(pos, color)| MarkpenMark {
+                char_idx: self.char_offsets.partition_point(|&offset| offset < pos),
+                color,
+                utf16_pos: Some(pos),
+            })
+            .collect();
+        self.markpen_marks.sort_by_key(|m| m.utf16_pos);
+    }
+
+    pub(crate) fn effective_markpen_range_tags(&self) -> Vec<RangeTag> {
+        if self.markpen_marks.is_empty() {
+            return self.range_tags.clone();
+        }
+        let mut ranges: Vec<_> = self
+            .range_tags
+            .iter()
+            .filter(|r| r.tag >> 24 != 2)
+            .cloned()
+            .collect();
+        let mut open = Vec::new();
+        for mark in &self.markpen_marks {
+            let pos = mark.stream_position(self);
+            if let Some(color) = &mark.color {
+                let rgb = color
+                    .strip_prefix('#')
+                    .filter(|s| s.len() == 6)
+                    .and_then(|s| u32::from_str_radix(s, 16).ok());
+                open.push((pos, rgb));
+            } else if let Some((start, Some(rgb))) = open.pop() {
+                if pos >= start {
+                    let bgr = ((rgb & 255) << 16) | (rgb & 0xff00) | ((rgb >> 16) & 255);
+                    ranges.push(RangeTag {
+                        start,
+                        end: pos,
+                        tag: 0x0200_0000 | bgr,
+                    });
+                }
+            }
+        }
+        ranges
+    }
+
     /// 문단 분할 때 위치에 따라 앞/뒤 문단으로 이동해야 하는 zero-width 컨트롤.
     ///
     /// `is_split_movable_control`은 커서의 logical offset을 한 칸 소비하는 인라인
@@ -642,6 +735,17 @@ impl Paragraph {
         let new_chars: Vec<char> = new_text.chars().collect();
         let utf16_delta: u32 = new_chars.iter().map(|c| Self::char_utf16_len(*c)).sum();
 
+        for mark in &mut self.markpen_marks {
+            if mark.char_idx >= char_offset {
+                mark.char_idx += new_chars.len();
+            }
+            if let Some(pos) = &mut mark.utf16_pos {
+                if *pos >= utf16_insert_pos {
+                    *pos += utf16_delta;
+                }
+            }
+        }
+
         // 1. 텍스트 삽입
         self.text.insert_str(byte_offset, new_text);
 
@@ -747,6 +851,21 @@ impl Paragraph {
             .map(|c| Self::char_utf16_len(*c))
             .sum();
         let utf16_end = utf16_start + utf16_delta;
+
+        for mark in &mut self.markpen_marks {
+            mark.char_idx = if mark.char_idx >= del_end {
+                mark.char_idx - (del_end - char_offset)
+            } else {
+                mark.char_idx.min(char_offset)
+            };
+            if let Some(pos) = &mut mark.utf16_pos {
+                *pos = if *pos >= utf16_end {
+                    *pos - utf16_delta
+                } else {
+                    (*pos).min(utf16_start)
+                };
+            }
+        }
 
         // 1. 텍스트 삭제
         self.text.drain(byte_start..byte_end);
@@ -1073,6 +1192,18 @@ impl Paragraph {
         }
         self.orphan_field_ends = kept_orphan_field_ends;
 
+        let new_markpen_marks: Vec<MarkpenMark> = self
+            .markpen_marks
+            .iter()
+            .filter(|m| m.char_idx >= split_pos)
+            .map(|m| MarkpenMark {
+                char_idx: m.char_idx - split_pos,
+                color: m.color.clone(),
+                utf16_pos: m.utf16_pos.map(|pos| pos.saturating_sub(utf16_split)),
+            })
+            .collect();
+        self.markpen_marks.retain(|m| m.char_idx < split_pos);
+
         // Field는 보이는 문자 오프셋에서 한 글자를 차지하지 않는다. 다만 새 문단으로
         // 이관되는 FieldRange가 참조하는 Field control은 범위와 함께 이동해야 한다.
         // 일반 이동형 컨트롤로 분류하면 split의 논리 offset 계산에 Field가 더해져
@@ -1185,6 +1316,7 @@ impl Paragraph {
             raw_header_extra: Vec::new(),
             has_para_text: new_has_para_text,
             tab_extended: new_tab_extended,
+            markpen_marks: new_markpen_marks,
             numbering_restart: None,
         }
     }
@@ -1200,6 +1332,7 @@ impl Paragraph {
             && other.field_ranges.is_empty()
             && other.orphan_field_ends.is_empty()
             && other.range_tags.is_empty()
+            && other.markpen_marks.is_empty()
         {
             return self.text.chars().count();
         }
@@ -1305,6 +1438,13 @@ impl Paragraph {
                 tag: rt.tag,
             });
         }
+
+        self.markpen_marks
+            .extend(other.markpen_marks.iter().map(|m| MarkpenMark {
+                char_idx: m.char_idx + self_text_len,
+                color: m.color.clone(),
+                utf16_pos: m.utf16_pos.map(|pos| pos + utf16_end),
+            }));
 
         // 5-1. field_ranges 결합 (other의 char 인덱스에 self_text_len 추가)
         //      ctrl_offset은 병합 전 self.controls.len() — 5-2의 controls 병합보다 먼저 캡처
