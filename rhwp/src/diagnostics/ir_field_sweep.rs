@@ -544,6 +544,7 @@ fn sweep_paragraph(base: &str, a: &Paragraph, b: &Paragraph, out: &mut SweepRepo
         raw_header_extra,
         has_para_text,
         tab_extended,
+        markpen_marks,
         numbering_restart,
     } = a;
 
@@ -570,6 +571,7 @@ fn sweep_paragraph(base: &str, a: &Paragraph, b: &Paragraph, out: &mut SweepRepo
     f!(raw_header_extra);
     f!(has_para_text);
     f!(tab_extended);
+    f!(markpen_marks);
     f!(numbering_restart);
 
     sweep_controls(&format!("{base}.controls"), controls, &b.controls, out);
