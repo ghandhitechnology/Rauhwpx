@@ -27,7 +27,7 @@ use crate::model::page::{
     BindingMethod, ColumnDef, ColumnDirection, ColumnType, PageBorderFill, PageDef,
 };
 use crate::model::paragraph::{
-    CharShapeRef, ColumnBreakType, FieldRange, LineSeg, Paragraph, RangeTag,
+    CharShapeRef, ColumnBreakType, FieldRange, LineSeg, OrphanFieldEnd, Paragraph, RangeTag,
 };
 
 /// BodyText 파싱 에러
@@ -119,6 +119,8 @@ pub fn parse_body_text_section(data: &[u8]) -> Result<Section, BodyTextError> {
         }
     }
 
+    link_orphan_field_ends(&mut section.paragraphs);
+
     Ok(section)
 }
 
@@ -145,11 +147,13 @@ pub fn parse_paragraph(records: &[Record]) -> Result<Paragraph, BodyTextError> {
 
         match record.tag_id {
             tags::HWPTAG_PARA_TEXT => {
-                let (text, offsets, field_ranges, tab_ext) = parse_para_text(&record.data);
+                let (text, offsets, field_ranges, tab_ext, orphan_field_ends) =
+                    parse_para_text(&record.data);
                 para.text = text;
                 para.char_offsets = offsets;
                 para.field_ranges = field_ranges;
                 para.tab_extended = tab_ext;
+                para.orphan_field_ends = orphan_field_ends;
                 para.has_para_text = true;
             }
             tags::HWPTAG_PARA_CHAR_SHAPE => {
@@ -259,11 +263,20 @@ fn parse_para_header(data: &[u8]) -> Paragraph {
 /// HWP의 텍스트는 UTF-16LE로 저장되며, 0x0000~0x001F 범위는 컨트롤 문자.
 /// - 확장 컨트롤 문자: 8 code unit (16바이트) 차지
 /// - 인라인 컨트롤 문자: 1 code unit (2바이트) 차지
-fn parse_para_text(data: &[u8]) -> (String, Vec<u32>, Vec<FieldRange>, Vec<[u16; 7]>) {
+fn parse_para_text(
+    data: &[u8],
+) -> (
+    String,
+    Vec<u32>,
+    Vec<FieldRange>,
+    Vec<[u16; 7]>,
+    Vec<OrphanFieldEnd>,
+) {
     let mut text = String::new();
     let mut char_offsets: Vec<u32> = Vec::new();
     let mut field_ranges: Vec<FieldRange> = Vec::new();
     let mut tab_extended: Vec<[u16; 7]> = Vec::new();
+    let mut orphan_field_ends: Vec<OrphanFieldEnd> = Vec::new();
     let mut pos = 0;
     // 확장 컨트롤(extended) 카운터 → controls[] 인덱스와 1:1 대응
     let mut ctrl_idx: usize = 0;
@@ -324,6 +337,16 @@ fn parse_para_text(data: &[u8]) -> (String, Vec<u32>, Vec<FieldRange>, Vec<[u16;
                         end_char_idx: char_count,
                         control_idx: field_ctrl_idx,
                         end_field_id: 0,
+                    });
+                } else {
+                    // 짝 FIELD_BEGIN 이 앞 문단에 있는 다단락 필드의 종료 마커.
+                    // HWP5 PARA_TEXT 의 종료 마커는 짝 id 를 싣지 않는다.
+                    // `link_orphan_field_ends` 가 섹션을 훑어 채운다.
+                    orphan_field_ends.push(OrphanFieldEnd {
+                        char_idx: char_count,
+                        begin_id_ref: 0,
+                        field_id: 0,
+                        begin_ctrl_id: 0,
                     });
                 }
             } else if is_extended_only_ctrl_char(ch) {
@@ -389,7 +412,65 @@ fn parse_para_text(data: &[u8]) -> (String, Vec<u32>, Vec<FieldRange>, Vec<[u16;
         }
     }
 
-    (text, char_offsets, field_ranges, tab_extended)
+    (
+        text,
+        char_offsets,
+        field_ranges,
+        tab_extended,
+        orphan_field_ends,
+    )
+}
+
+/// 다단락 필드의 종료 마커에 짝 `fieldBegin` 의 id 를 채운다.
+///
+/// PARA_TEXT 의 종료 마커에는 짝 id 가 없어서 문단 단위 파싱만으로는 알 수 없다.
+/// 섹션을 순서대로 훑으며 아직 닫히지 않은 필드를 쌓아 두고 연결한다.
+fn link_orphan_field_ends(paragraphs: &mut [Paragraph]) {
+    let mut open_fields: Vec<(u32, u32)> = Vec::new();
+    link_orphan_field_ends_with(paragraphs, &mut open_fields);
+}
+
+/// [`link_orphan_field_ends`] 의 본체. 열린 필드 스택을 밖에서 넘겨 이어 쓴다.
+///
+/// 짝을 이미 채운 종료 마커에서도 스택을 pop 한다. HWP5 종료 마커에는 짝 id 가 없어
+/// 순서만이 짝이므로, 이미 이은 마커를 건너뛰면 그 짝이 스택에 남아 뒤에 오는 마커가
+/// 엉뚱한 필드를 닫는다. 채우기만 조건부로 한다.
+fn link_orphan_field_ends_with(paragraphs: &mut [Paragraph], open_fields: &mut Vec<(u32, u32)>) {
+    for para in paragraphs.iter_mut() {
+        for ofe in para.orphan_field_ends.iter_mut() {
+            let Some((id, ctrl_id)) = open_fields.pop() else {
+                continue;
+            };
+            if ofe.begin_id_ref == 0 {
+                ofe.begin_id_ref = id;
+                ofe.begin_ctrl_id = ctrl_id;
+            }
+        }
+
+        for (i, ctrl) in para.controls.iter().enumerate() {
+            let Control::Field(field) = ctrl else {
+                continue;
+            };
+            let closed_here = para.field_ranges.iter().any(|fr| fr.control_idx == i);
+            if !closed_here && field.field_id != 0 {
+                open_fields.push((field.field_id, field.ctrl_id));
+            }
+        }
+    }
+}
+
+/// 구역 경계를 넘는 누름틀의 종료 마커를 잇는다.
+///
+/// [`link_orphan_field_ends`] 는 `BodyText/SectionN` 하나를 파싱한 끝에 걸리므로 열린
+/// 필드 스택이 구역과 함께 버려진다. 최상위 문단 목록만 하나의 스택으로 다시 훑는다.
+/// 중첩 목록(셀·각주·글상자)은 자기 안에서 이미 짝을 지었고 필드가 그 경계를 넘지 못한다.
+///
+/// 진짜로 짝이 없는 종료 마커는 여전히 `begin_id_ref == 0` 으로 남는다.
+pub fn link_orphan_field_ends_across_sections(sections: &mut [crate::model::document::Section]) {
+    let mut open_fields: Vec<(u32, u32)> = Vec::new();
+    for section in sections.iter_mut() {
+        link_orphan_field_ends_with(&mut section.paragraphs, &mut open_fields);
+    }
 }
 
 /// extended 컨트롤 문자 여부 (CTRL_HEADER 레코드가 있는 컨트롤)
@@ -509,6 +590,8 @@ pub fn parse_paragraph_list(records: &[Record]) -> Vec<Paragraph> {
             idx += 1;
         }
     }
+
+    link_orphan_field_ends(&mut paragraphs);
 
     paragraphs
 }

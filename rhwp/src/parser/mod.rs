@@ -595,6 +595,8 @@ fn parse_sections_strict(
         }
     }
 
+    body_text::link_orphan_field_ends_across_sections(&mut sections);
+
     Ok(sections)
 }
 
@@ -678,6 +680,8 @@ fn parse_hwp_with_lenient(lenient: cfb_reader::LenientCfbReader) -> Result<Docum
             }
         }
     }
+
+    body_text::link_orphan_field_ends_across_sections(&mut sections);
 
     // BinData 로드 시도
     let bin_data_content = load_bin_data_content_lenient(

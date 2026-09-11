@@ -1334,6 +1334,7 @@ fn test_split_and_merge_keep_orphan_only_paragraph_serializable() {
             char_idx: 0,
             begin_id_ref: 41,
             field_id: 77,
+            begin_ctrl_id: 0,
         }],
         char_count: 9,
         has_para_text: true,
