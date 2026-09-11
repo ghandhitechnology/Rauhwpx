@@ -4836,7 +4836,35 @@ impl LayoutEngine {
             };
 
             // 수직 정렬 (분할 표에서는 Top 강제 — 보이는 영역이 전체 셀보다 작음)
-            let effective_valign = if row_filter.is_some() {
+            // [#4068] 중첩 셀은 부모 `col_area` 또는 page bbox 밖으로 나가면 Top 으로
+            // 수렴한다. 호출자가 넘긴 `col_area` 가 직전 조각까지 포함해 낡아 있으면
+            // 페이지 안에 온전히 들어간 칸까지 "잘렸다"고 오판한다. 실제 클립은
+            // page bbox 이므로, 페이지에 들어가는 칸은 선언된 Center/Bottom 을 유지한다.
+            let page_bbox = tree.root.bbox;
+            let page_view_top = page_bbox.y;
+            let page_view_bottom = page_bbox.y + page_bbox.height;
+            let cell_fits_inside_page_viewport =
+                cell_y >= page_view_top - 0.5 && cell_y + cell_h <= page_view_bottom + 0.5;
+            let parent_view_top = col_area.y;
+            let parent_view_bottom = col_area.y + col_area.height;
+            let cell_intersects_parent_viewport =
+                cell_y < parent_view_bottom - 0.5 && cell_y + cell_h > parent_view_top + 0.5;
+            let cell_clipped_by_parent_viewport = depth > 0
+                && !table.common.treat_as_char
+                && col_area.height > 0.5
+                && !cell_fits_inside_page_viewport
+                && cell_intersects_parent_viewport
+                && (cell_y < parent_view_top - 0.5 || cell_y + cell_h > parent_view_bottom + 0.5);
+            let cell_intersects_page_viewport =
+                cell_y < page_view_bottom - 0.5 && cell_y + cell_h > page_view_top + 0.5;
+            let cell_clipped_by_page_viewport = depth > 0
+                && !table.common.treat_as_char
+                && cell_intersects_page_viewport
+                && (cell_y < page_view_top - 0.5 || cell_y + cell_h > page_view_bottom + 0.5);
+            let effective_valign = if row_filter.is_some()
+                || cell_clipped_by_parent_viewport
+                || cell_clipped_by_page_viewport
+            {
                 VerticalAlign::Top
             } else {
                 cell.vertical_align
