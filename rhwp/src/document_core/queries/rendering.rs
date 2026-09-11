@@ -2581,16 +2581,6 @@ impl DocumentCore {
         Ok(format!("{{\"runs\":[{}]}}", runs.join(",")))
     }
 
-    /// [#7005] 칸 안 도형(사각형·직선·타원·path)의 칸 좌표 JSON.
-    ///
-    /// `cellPath` 가 정본이고 단일 레벨 스칼라는 studio 하위호환이다. 도형 노드는
-    /// `CellContext` 대신 #1138 의 평평한 3필드를 들고 있으므로 그것으로 1단계 경로를
-    /// 만든다. 셋은 같은 `table_cell_ref` 에서 함께 오므로 전부 있거나 전부 없다.
-    ///
-    /// 종전에는 스칼라만 방출해 studio 의 `hasCellPath` 가 거짓이 됐고,
-    /// `getObjectProperties` 가 본문 API 로 떨어져 던지면서 칸 안 도형의 마우스 조작이
-    /// 전부 막혔다. 선택 토글도 `cellPath` 로 개체를 구분하므로 같은 문단의 두 도형을
-    /// 같은 것으로 봤다.
     fn shape_cell_context_json(
         cell_index: Option<usize>,
         cell_para_index: Option<usize>,
@@ -2920,13 +2910,11 @@ impl DocumentCore {
                     }
                 }
                 RenderNodeType::Rectangle(rect_node) => {
-                    // 문서 좌표가 있는 Rectangle만 shape로 수집 (배경 사각형 제외)
                     if let (Some(si), Some(pi), Some(ci)) = (
                         rect_node.section_index,
                         rect_node.para_index,
                         rect_node.control_index,
                     ) {
-                        // [Task #1138] 표 셀 안 사각형: cellIdx/cellParaIdx/outerTableControlIdx
                         let cell_str = DocumentCore::shape_cell_context_json(
                             rect_node.cell_index,
                             rect_node.cell_para_index,
@@ -2937,10 +2925,6 @@ impl DocumentCore {
                             node.bbox.x, node.bbox.y, node.bbox.width, node.bbox.height,
                             si, pi, ci, cell_str, layer_str
                         ));
-                        // [Task #1171] return 하지 않고 자식으로 재귀 — 사각형 글상자(text_box)
-                        // 안 중첩 picture/도형이 cellPath(cell_index=0 sentinel)로 수집되도록 한다.
-                        // 장식 노드(테두리 등)는 section/para/control 좌표가 None 이라 컨트롤로
-                        // 방출되지 않는다(좌표 가드). Table 핸들러와 동일하게 자식 탐색.
                     }
                 }
                 RenderNodeType::Line(line_node) => {
@@ -2949,7 +2933,6 @@ impl DocumentCore {
                         line_node.para_index,
                         line_node.control_index,
                     ) {
-                        // [Task #1138] 표 셀 안 직선
                         let cell_str = DocumentCore::shape_cell_context_json(
                             line_node.cell_index,
                             line_node.cell_para_index,
@@ -2970,7 +2953,6 @@ impl DocumentCore {
                         ell_node.para_index,
                         ell_node.control_index,
                     ) {
-                        // [Task #1138] 표 셀 안 타원
                         let cell_str = DocumentCore::shape_cell_context_json(
                             ell_node.cell_index,
                             ell_node.cell_para_index,
@@ -2990,14 +2972,12 @@ impl DocumentCore {
                         path_node.para_index,
                         path_node.control_index,
                     ) {
-                        // [Task #1138] 표 셀 안 path (다각형/곡선/연결선)
                         let cell_str = DocumentCore::shape_cell_context_json(
                             path_node.cell_index,
                             path_node.cell_para_index,
                             path_node.outer_table_control_index,
                         );
                         if let Some((x1, y1, x2, y2)) = path_node.connector_endpoints {
-                            // 연결선: 선 선택 방식 (시작/끝 좌표 포함)
                             controls.push(format!(
                                 "{{\"type\":\"line\",\"x\":{:.1},\"y\":{:.1},\"w\":{:.1},\"h\":{:.1},\"x1\":{:.1},\"y1\":{:.1},\"x2\":{:.1},\"y2\":{:.1},\"secIdx\":{},\"paraIdx\":{},\"controlIdx\":{}{}{}}}",
                                 node.bbox.x, node.bbox.y, node.bbox.width, node.bbox.height,
