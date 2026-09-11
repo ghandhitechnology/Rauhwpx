@@ -24,6 +24,17 @@ function lockedRename(realRename, { failTimes = Infinity, code = 'EPERM' } = {})
   };
 }
 
+function lockedRm(realRm, { failTimes = Infinity, code = 'EPERM' } = {}) {
+  let failures = 0;
+  return async (filePath, options) => {
+    if (options?.recursive && failures < failTimes) {
+      failures += 1;
+      throw errorWithCode(code);
+    }
+    return realRm(filePath, options);
+  };
+}
+
 function rmFileOnly(filePath, options) {
   if (options?.recursive) throw new Error(`recursive rm is forbidden for ${filePath}`);
   return realFs.rm(filePath, options);
@@ -498,4 +509,57 @@ test('win32 corrupt handoff load stays empty when quarantine rename stays locked
   const records = await store.load();
   assert.deepEqual(records, []);
   assert.equal(await readFile(filePath, 'utf8'), '{not-json');
+});
+
+test('win32 terminal payload rm retries a locked recursive delete then succeeds', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'rauhwpx-handoff-payload-rm-retry-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const filePath = path.join(directory, 'handoffs.json');
+  const store = new CloudHandoffStore({
+    filePath,
+    platform: 'win32',
+    rm: lockedRm(rm, { failTimes: 1 }),
+    sleep: async () => {},
+  });
+  const created = await store.create({
+    sessionId: 'desktop-session',
+    documentId: 'document-1',
+    documentName: 'source.hwpx',
+    documentBytes: Buffer.from('document'),
+    provider: 'codex',
+    limits: { maxTurns: 100 },
+  });
+  const payloadDirectory = path.join(directory, 'pending-payloads', created.id);
+
+  const cancelled = await store.transition(created.id, 'cancelled');
+  assert.equal(cancelled.state, 'cancelled');
+  await assert.rejects(access(payloadDirectory), { code: 'ENOENT' });
+});
+
+test('unix terminal payload rm fails closed on the first lock', async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'rauhwpx-handoff-payload-rm-unix-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const filePath = path.join(directory, 'handoffs.json');
+  const store = new CloudHandoffStore({
+    filePath,
+    platform: 'linux',
+    rm: lockedRm(rm, { failTimes: 1 }),
+    sleep: async () => {},
+  });
+  const created = await store.create({
+    sessionId: 'desktop-session',
+    documentId: 'document-1',
+    documentName: 'source.hwpx',
+    documentBytes: Buffer.from('document'),
+    provider: 'codex',
+    limits: { maxTurns: 100 },
+  });
+  const payloadDirectory = path.join(directory, 'pending-payloads', created.id);
+
+  await assert.rejects(
+    store.transition(created.id, 'cancelled'),
+    (error) => error.code === 'EPERM',
+  );
+  assert.equal((await store.get(created.id)).state, 'preparing');
+  assert.equal(await readFile(path.join(payloadDirectory, 'document.bin'), 'utf8'), 'document');
 });
