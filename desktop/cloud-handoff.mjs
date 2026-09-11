@@ -119,6 +119,7 @@ export class CloudHandoffStore {
   #platform;
   #atomicWrite;
   #rename;
+  #rm;
   #sleep;
   #records = new Map();
   #takeoverReceipts = new Map();
@@ -132,6 +133,7 @@ export class CloudHandoffStore {
     platform = process.platform,
     atomicWrite = atomicJsonWrite,
     rename = fs.rename,
+    rm = fs.rm,
     sleep,
   }) {
     if (!filePath) throw new Error('Cloud handoff store requires a file path');
@@ -141,7 +143,16 @@ export class CloudHandoffStore {
     this.#platform = platform;
     this.#atomicWrite = atomicWrite;
     this.#rename = rename;
+    this.#rm = rm;
     this.#sleep = sleep;
+  }
+
+  async #removePayloadDirectory(directory) {
+    await retryWindows(
+      () => this.#rm(directory, { recursive: true, force: true }),
+      this.#platform,
+      this.#sleep,
+    );
   }
 
   load() {
@@ -181,7 +192,7 @@ export class CloudHandoffStore {
             } : {}),
           };
           if (terminal && validated.documentStagingPath) {
-            await fs.rm(path.join(this.#payloadRoot, validated.id), { recursive: true, force: true }).catch(() => {});
+            await this.#removePayloadDirectory(path.join(this.#payloadRoot, validated.id)).catch(() => {});
             migrated = true;
           }
           this.#records.set(normalized.id, Object.freeze(normalized));
@@ -210,7 +221,7 @@ export class CloudHandoffStore {
       );
       for (const entry of await fs.readdir(this.#payloadRoot, { withFileTypes: true }).catch(() => [])) {
         if (entry.isDirectory() && !activePayloadIds.has(entry.name)) {
-          await fs.rm(path.join(this.#payloadRoot, entry.name), { recursive: true, force: true }).catch(() => {});
+          await this.#removePayloadDirectory(path.join(this.#payloadRoot, entry.name)).catch(() => {});
         }
       }
     } catch (error) {
@@ -285,7 +296,7 @@ export class CloudHandoffStore {
         });
       }
     } catch (error) {
-      await fs.rm(payloadDirectory, { recursive: true, force: true });
+      await this.#removePayloadDirectory(payloadDirectory);
       throw error;
     }
     const record = Object.freeze({
@@ -324,7 +335,7 @@ export class CloudHandoffStore {
       await this.#persist();
     } catch (error) {
       this.#records.delete(record.id);
-      await fs.rm(payloadDirectory, { recursive: true, force: true });
+      await this.#removePayloadDirectory(payloadDirectory);
       throw error;
     }
     return record;
@@ -341,7 +352,7 @@ export class CloudHandoffStore {
       throw new Error(`Invalid cloud handoff transition: ${current.state} -> ${nextState}`);
     }
     if (terminal) {
-      await fs.rm(path.join(this.#payloadRoot, id), { recursive: true, force: true });
+      await this.#removePayloadDirectory(path.join(this.#payloadRoot, id));
       current = this.#records.get(id);
       if (!current) throw new Error('Cloud handoff does not exist');
       if (sequence !== null && sequence <= current.lastEventSequence) return current;
@@ -418,7 +429,7 @@ export class CloudHandoffStore {
     await this.load();
     const removed = this.#records.delete(id);
     if (removed) {
-      await fs.rm(path.join(this.#payloadRoot, id), { recursive: true, force: true });
+      await this.#removePayloadDirectory(path.join(this.#payloadRoot, id));
       await this.#persist();
     }
     return removed;
@@ -488,7 +499,7 @@ export class CloudHandoffStore {
     await this.load();
     const record = this.#records.get(id);
     if (!record) return false;
-    await fs.rm(path.join(this.#payloadRoot, id), { recursive: true, force: true });
+    await this.#removePayloadDirectory(path.join(this.#payloadRoot, id));
     await this.patch(id, {
       documentStagingPath: null,
       resources: (record.resources ?? []).map(({ stagingPath: _stagingPath, ...resource }) => resource),
