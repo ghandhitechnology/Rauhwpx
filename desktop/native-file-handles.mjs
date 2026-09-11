@@ -4,6 +4,8 @@ import { constants } from 'node:fs';
 import { copyFile, link, open, opendir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, isAbsolute, join, normalize, win32 } from 'node:path';
 
+import { retryWindows } from './fs-replace.mjs';
+
 const SUPPORTED_EXTENSIONS = new Set(['.hwp', '.hwpx', '.hml', '.rhwpx']);
 const PORTABLE_HISTORY_INNER_FILE = 'history';
 const PORTABLE_HISTORY_MAGIC = new TextEncoder().encode('RAUHWPX-HISTORY\0');
@@ -16,7 +18,6 @@ const NEARBY_DIRECTORY_CAP = 12;
 const NEARBY_FILE_CAP = 8;
 const NEARBY_DIR_ENTRY_CAP = 256;
 const CFB_SIGNATURE = new Uint8Array([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
-const WINDOWS_RENAME_RETRY_CODES = new Set(['EACCES', 'EBUSY', 'EPERM']);
 const UNSUPPORTED_DIRECTORY_SYNC_CODES = new Set(['EINVAL', 'ENOSYS', 'ENOTSUP', 'EOPNOTSUPP']);
 export const NATIVE_FILE_CONFLICT_CODE = 'NATIVE_FILE_CONFLICT';
 export const NATIVE_FILE_CONFLICT_MESSAGE = 'This document changed on disk after it was opened. Reopen it before saving.';
@@ -559,22 +560,6 @@ export function validateNativeDocumentBytes(filePath, bytes) {
   }
 }
 
-async function retryWindowsRename(operation, platform) {
-  const delays = [40, 80, 160, 320, 640];
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      return await operation();
-    } catch (error) {
-      if (platform !== 'win32'
-        || !WINDOWS_RENAME_RETRY_CODES.has(error?.code)
-        || attempt >= delays.length) {
-        throw error;
-      }
-      await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
-    }
-  }
-}
-
 async function syncParentDirectory(filePath, platform) {
   // Directory fsync makes the rename durable on POSIX. Windows does not allow
   // opening directories this way; the temporary file itself is still fsynced.
@@ -616,6 +601,7 @@ export async function writeNativeFileAtomically(
     windowsSystemRoot = process.env.SystemRoot ?? process.env.WINDIR,
     windowsProcessEnv = process.env,
     expectedFingerprint,
+    sleep,
   } = {},
 ) {
   const temporaryPath = `${filePath}.rauhwpx-${process.pid}-${randomUUID()}.tmp`;
@@ -691,7 +677,7 @@ export async function writeNativeFileAtomically(
 
     if (effectiveExpectedFingerprint.state === 'file') {
       try {
-        await retryWindowsRename(() => renameImpl(filePath, backupPath), platform);
+        await retryWindows(() => renameImpl(filePath, backupPath), platform, sleep);
       } catch (error) {
         if (error?.code === 'ENOENT') throw nativeFileConflictError();
         throw error;
@@ -714,11 +700,11 @@ export async function writeNativeFileAtomically(
       throw nativeFileAtomicUnsupportedError(error);
     }
     published = true;
-    await rmImpl(temporaryPath, { force: true });
+    await retryWindows(() => rmImpl(temporaryPath, { force: true }), platform, sleep);
 
     await syncParentImpl(filePath, platform);
     if (backupMoved) {
-      await rmImpl(backupPath, { force: true });
+      await retryWindows(() => rmImpl(backupPath, { force: true }), platform, sleep);
       backupMoved = false;
       await syncParentImpl(filePath, platform);
     }
