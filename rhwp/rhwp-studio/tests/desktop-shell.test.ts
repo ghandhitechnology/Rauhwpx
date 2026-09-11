@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { mkdtemp, mkdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rename, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -43,6 +43,61 @@ function fakeWindow(id: number) {
 function associationExts(association: { ext?: string | string[] }): string[] {
   if (!association.ext) return [];
   return Array.isArray(association.ext) ? association.ext : [association.ext];
+}
+
+function errorWithCode(code: string) {
+  return Object.assign(new Error(code), { code });
+}
+
+function lockedOp<Args extends unknown[], Result>(
+  operation: (...args: Args) => Promise<Result>,
+  { failTimes = Infinity, code = 'EPERM' } = {},
+) {
+  let failures = 0;
+  return async (...args: Args) => {
+    if (failures < failTimes) {
+      failures += 1;
+      throw errorWithCode(code);
+    }
+    return operation(...args);
+  };
+}
+
+/** Windows cannot rename over an existing file. POSIX can. */
+function windowsRename(realRename: typeof rename) {
+  return async (from: string, to: string) => {
+    try {
+      await stat(to);
+    } catch (error: NodeJS.ErrnoException) {
+      if (error?.code === 'ENOENT') return realRename(from, to);
+      throw error;
+    }
+    throw errorWithCode('EEXIST');
+  };
+}
+
+const OWNER_LAUNCH_ID = '2257ce8b-6e52-4fec-889e-c6ba489226f8';
+const OWNER_PROFILE_ID = '1234567890abcdef1234';
+const LEGACY_LAUNCH_ID = '2848f76b-9d57-4d81-8410-4023c59cb403';
+
+async function writeOwner(directory: string, pid: number, createdAtMs: number, options = {}) {
+  return writeLaunchOwnerMetadata(directory, {
+    launchId: OWNER_LAUNCH_ID,
+    profileId: OWNER_PROFILE_ID,
+    pid,
+    createdAtMs,
+  }, options);
+}
+
+async function prepareLegacyLaunch(t: { after: (fn: () => Promise<void>) => void }) {
+  const root = await mkdtemp(path.join(tmpdir(), 'rauhwpx-legacy-marker-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const directory = path.join(root, LEGACY_LAUNCH_ID);
+  await mkdir(directory);
+  const now = Date.now();
+  const old = new Date(now - 8 * 24 * 60 * 60 * 1000);
+  await utimes(directory, old, old);
+  return { root, directory, now };
 }
 
 test('dialog suggestions are portable across Windows and strip renderer paths', () => {
@@ -680,6 +735,136 @@ test('owner metadata is written before cleanup begins', async () => {
   });
   assert.deepEqual(writes[0].options, { encoding: 'utf8', mode: 0o600 });
   assert.equal(renames[0][1], path.join('/runtime/launch', LAUNCH_OWNER_FILE));
+});
+
+test('win32 marker publish retries a locked rename then succeeds', async (t) => {
+  const ownerRoot = await mkdtemp(path.join(tmpdir(), 'rauhwpx-owner-retry-'));
+  t.after(() => rm(ownerRoot, { recursive: true, force: true }));
+  await writeOwner(ownerRoot, 11, 1_000, {
+    renameImpl: lockedOp(rename, { failTimes: 1 }),
+    platform: 'win32',
+    sleep: async () => {},
+  });
+  assert.equal(JSON.parse(await readFile(path.join(ownerRoot, LAUNCH_OWNER_FILE), 'utf8')).pid, 11);
+
+  const { root, now } = await prepareLegacyLaunch(t);
+  assert.deepEqual(await removeLegacyLaunchDirectories(root, '', {
+    now: () => now,
+    uptimeSeconds: () => 10_000,
+    renameImpl: lockedOp(rename, { failTimes: 1 }),
+    platform: 'win32',
+    sleep: async () => {},
+  }), []);
+  assert.equal(JSON.parse(await readFile(
+    path.join(root, LEGACY_LAUNCH_ID, LEGACY_CLEANUP_MARKER_FILE),
+    'utf8',
+  )).observedUptimeSeconds, 10_000);
+});
+
+test('win32 marker publish overwrites an existing marker', async (t) => {
+  const ownerRoot = await mkdtemp(path.join(tmpdir(), 'rauhwpx-owner-overwrite-'));
+  t.after(() => rm(ownerRoot, { recursive: true, force: true }));
+  await writeOwner(ownerRoot, 11, 1_000);
+  await writeOwner(ownerRoot, 22, 2_000, {
+    renameImpl: windowsRename(rename),
+    platform: 'win32',
+    sleep: async () => {},
+  });
+  assert.equal(JSON.parse(await readFile(path.join(ownerRoot, LAUNCH_OWNER_FILE), 'utf8')).pid, 22);
+
+  const { root, directory, now } = await prepareLegacyLaunch(t);
+  await removeLegacyLaunchDirectories(root, '', {
+    now: () => now,
+    uptimeSeconds: () => 10_000,
+  });
+  assert.deepEqual(await removeLegacyLaunchDirectories(root, '', {
+    now: () => now + 1_000,
+    uptimeSeconds: () => 20_000,
+    renameImpl: windowsRename(rename),
+    rmImpl: lockedOp(rm, { failTimes: 1 }),
+    platform: 'win32',
+    sleep: async () => {},
+  }), []);
+  assert.equal(JSON.parse(await readFile(
+    path.join(directory, LEGACY_CLEANUP_MARKER_FILE),
+    'utf8',
+  )).observedUptimeSeconds, 20_000);
+});
+
+test('win32 marker publish keeps the previous marker when replacement rename fails', async (t) => {
+  const ownerRoot = await mkdtemp(path.join(tmpdir(), 'rauhwpx-owner-restore-'));
+  t.after(() => rm(ownerRoot, { recursive: true, force: true }));
+  await writeOwner(ownerRoot, 11, 1_000);
+  const ownerPath = path.join(ownerRoot, LAUNCH_OWNER_FILE);
+  const winRename = windowsRename(rename);
+  let asideDone = false;
+  await assert.rejects(
+    writeOwner(ownerRoot, 22, 2_000, {
+      renameImpl: async (from: string, to: string) => {
+        if (from === ownerPath) {
+          const result = await winRename(from, to);
+          asideDone = true;
+          return result;
+        }
+        if (asideDone && to === ownerPath) throw errorWithCode('EIO');
+        return winRename(from, to);
+      },
+      platform: 'win32',
+      sleep: async () => {},
+    }),
+    { code: 'EIO' },
+  );
+  assert.equal(JSON.parse(await readFile(ownerPath, 'utf8')).pid, 11);
+});
+
+test('win32 marker publish surfaces a lock that outlasts the delay budget', async (t) => {
+  const ownerRoot = await mkdtemp(path.join(tmpdir(), 'rauhwpx-owner-locked-'));
+  t.after(() => rm(ownerRoot, { recursive: true, force: true }));
+  await assert.rejects(
+    writeOwner(ownerRoot, 11, 1_000, {
+      renameImpl: lockedOp(rename),
+      platform: 'win32',
+      sleep: async () => {},
+    }),
+    { code: 'EPERM' },
+  );
+
+  const { root, now } = await prepareLegacyLaunch(t);
+  await assert.rejects(
+    removeLegacyLaunchDirectories(root, '', {
+      now: () => now,
+      uptimeSeconds: () => 10_000,
+      renameImpl: lockedOp(rename),
+      platform: 'win32',
+      sleep: async () => {},
+    }),
+    { code: 'EPERM' },
+  );
+});
+
+test('unix marker publish does not retry a locked rename', async (t) => {
+  const ownerRoot = await mkdtemp(path.join(tmpdir(), 'rauhwpx-owner-unix-lock-'));
+  t.after(() => rm(ownerRoot, { recursive: true, force: true }));
+  await assert.rejects(
+    writeOwner(ownerRoot, 11, 1_000, {
+      renameImpl: lockedOp(rename, { failTimes: 1 }),
+      platform: 'linux',
+      sleep: async () => {},
+    }),
+    { code: 'EPERM' },
+  );
+
+  const { root, now } = await prepareLegacyLaunch(t);
+  await assert.rejects(
+    removeLegacyLaunchDirectories(root, '', {
+      now: () => now,
+      uptimeSeconds: () => 10_000,
+      renameImpl: lockedOp(rename, { failTimes: 1 }),
+      platform: 'linux',
+      sleep: async () => {},
+    }),
+    { code: 'EPERM' },
+  );
 });
 
 test('desktop package registers supported document associations without bundling runtime data', () => {
