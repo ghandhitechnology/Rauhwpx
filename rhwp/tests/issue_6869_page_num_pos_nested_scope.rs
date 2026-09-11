@@ -59,7 +59,6 @@ fn document(paragraphs: Vec<Paragraph>, format: SourceFormat) -> Document {
     doc.provenance.format = format;
     doc.doc_info.para_shapes.push(Default::default());
     doc.doc_info.char_shapes.push(Default::default());
-    // 셀 문단이 paraPrIDRef/styleIDRef 0 을 참조한다.
     doc.doc_info.styles.push(Default::default());
     doc.sections.push(Section {
         paragraphs,

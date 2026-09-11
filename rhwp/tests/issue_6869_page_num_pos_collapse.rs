@@ -75,7 +75,6 @@ fn issue6869_page_num_pos_is_emitted_once_per_paragraph() {
 
 #[test]
 fn issue6869_single_page_num_is_untouched() {
-    // 중복이 아닌 정상 문단은 종전 그대로 — 컨트롤도 축도 건드리지 않는다.
     let xml = section0_xml(&doc_with_page_num_controls(1));
     assert_eq!(xml.matches("<hp:pageNum").count(), 1);
 }

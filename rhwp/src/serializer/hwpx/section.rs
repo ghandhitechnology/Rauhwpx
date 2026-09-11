@@ -2062,7 +2062,6 @@ fn render_control_slot_tracked(
 ) -> Result<(), SerializeError> {
     let before = out.len();
     // [#6871] 이 슬롯이 **우리가 접은 것**인지 미리 안다 — 두 번째 이후 쪽번호 위치.
-    // 플래그는 첫 방출 안에서 뒤집히므로 호출 전에 읽는다.
     let collapses_here =
         matches!(control, Control::PageNumberPos(_)) && ctx.para_page_num_pos_emitted;
     render_control_slot_limited(out, control, ctx, max_bytes)?;
