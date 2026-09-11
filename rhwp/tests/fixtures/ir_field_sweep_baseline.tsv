@@ -7,6 +7,7 @@ hwp5rb	2025 행정업무운영 편람(최종).hwp	sections[].paragraphs[].contro
 hwp5rb	2025 행정업무운영 편람(최종).hwp	sections[].paragraphs[].controls[].cells[].paragraphs[].control_mask	1
 hwp5rb	2025 행정업무운영 편람(최종).hwp	sections[].paragraphs[].controls[].cells[].paragraphs[].controls[].cells[].list_header_width_ref	754
 hwp5rb	2025 행정업무운영 편람(최종).hwp	sections[].paragraphs[].controls[].cells[].paragraphs[].controls[].cells[].paragraphs[].controls[].cells[].list_header_width_ref	18
+hwp5rb	2025 행정업무운영 편람(최종).hwp	sections[].paragraphs[].controls[].cells[].paragraphs[].orphan_field_ends.len	1
 hwp5rb	20250130-hongbo.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	18
 hwp5rb	20250130-hongbo_saved.hwp	doc_info.bullet_count	1
 hwp5rb	20250130-hongbo_saved.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	18
@@ -89,19 +90,23 @@ hwp5rb	76076_regulatory_analysis.hwp	sections[].paragraphs[].controls[].cells[].
 hwp5rb	76076_regulatory_analysis.hwp	sections[].paragraphs[].controls[].cells[].paragraphs[].char_count	9
 hwp5rb	76076_regulatory_analysis.hwp	sections[].paragraphs[].controls[].cells[].paragraphs[].control_mask	9
 hwp5rb	76076_regulatory_analysis.hwp	sections[].paragraphs[].controls[].cells[].paragraphs[].controls[].cells[].list_header_width_ref	46
+hwp5rb	76076_regulatory_analysis.hwp	sections[].paragraphs[].controls[].cells[].paragraphs[].orphan_field_ends.len	9
 hwp5rb	80168_regulatory_analysis.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	1495
 hwp5rb	80168_regulatory_analysis.hwp	sections[].paragraphs[].controls[].cells[].paragraphs[].char_count	1
 hwp5rb	80168_regulatory_analysis.hwp	sections[].paragraphs[].controls[].cells[].paragraphs[].control_mask	1
 hwp5rb	80168_regulatory_analysis.hwp	sections[].paragraphs[].controls[].cells[].paragraphs[].controls[].cells[].list_header_width_ref	68
+hwp5rb	80168_regulatory_analysis.hwp	sections[].paragraphs[].controls[].cells[].paragraphs[].orphan_field_ends.len	1
 hwp5rb	80250_regulatory_analysis.hwp	sections[].paragraphs[].char_count	5
 hwp5rb	80250_regulatory_analysis.hwp	sections[].paragraphs[].control_mask	5
 hwp5rb	80250_regulatory_analysis.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	124
 hwp5rb	80250_regulatory_analysis.hwp	sections[].paragraphs[].controls[].cells[].paragraphs[].controls[].cells[].list_header_width_ref	5
+hwp5rb	80250_regulatory_analysis.hwp	sections[].paragraphs[].orphan_field_ends.len	5
 hwp5rb	86712_regulatory_analysis.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	840
 hwp5rb	86712_regulatory_analysis.hwp	sections[].paragraphs[].controls[].cells[].paragraphs[].char_count	4
 hwp5rb	86712_regulatory_analysis.hwp	sections[].paragraphs[].controls[].cells[].paragraphs[].control_mask	4
 hwp5rb	86712_regulatory_analysis.hwp	sections[].paragraphs[].controls[].cells[].paragraphs[].controls[].cells[].list_header_width_ref	30
 hwp5rb	86712_regulatory_analysis.hwp	sections[].paragraphs[].controls[].cells[].paragraphs[].controls[].cells[].paragraphs[].controls[].cells[].list_header_width_ref	56
+hwp5rb	86712_regulatory_analysis.hwp	sections[].paragraphs[].controls[].cells[].paragraphs[].orphan_field_ends.len	4
 hwp5rb	KTX.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	280
 hwp5rb	KTX.hwp	sections[].paragraphs[].controls[].cells[].paragraphs[].controls[].cells[].list_header_width_ref	3
 hwp5rb	[2027] 온새미로 1 본교재.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	115
@@ -143,12 +148,9 @@ hwp5rb	exam_eng.hwp	sections[].paragraphs[].controls[].paragraphs[].controls[].c
 hwp5rb	exam_kor.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	49
 hwp5rb	exam_kor.hwp	sections[].paragraphs[].controls[].paragraphs[].controls[].cells[].list_header_width_ref	1
 hwp5rb	exam_math.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	11
-hwp5rb	exam_math.hwp	sections[].section_def.master_pages.len	2
-hwp5rb	exam_math_8.hwp	sections[].section_def.master_pages.len	1
 hwp5rb	exam_math_no.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	11
 hwp5rb	exam_science.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	98
 hwp5rb	exam_science.hwp	sections[].paragraphs[].controls[].cells[].paragraphs[].controls[].cells[].list_header_width_ref	17
-hwp5rb	exam_science.hwp	sections[].section_def.master_pages.len	1
 hwp5rb	exam_social-p1.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	56
 hwp5rb	exam_social-p1.hwp	sections[].paragraphs[].controls[].cells[].paragraphs[].controls[].cells[].list_header_width_ref	13
 hwp5rb	exam_social-p1.hwp	sections[].paragraphs[].controls[].paragraphs[].controls[].cells[].list_header_width_ref	2
@@ -235,9 +237,7 @@ hwp5rb	hwp_table_test.hwp	sections[].paragraphs[].controls[].cells[].list_header
 hwp5rb	hwp_table_test_saved.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	46
 hwp5rb	hwpctl_API_v2.4.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	1024
 hwp5rb	hwpctl_Action_Table__v1.1.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	939
-hwp5rb	hwpctl_Action_Table__v1.1.hwp	sections[].section_def.master_pages.len	1
 hwp5rb	hwpctl_ParameterSetID_Item_v1.2.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	1786
-hwp5rb	hwpctl_ParameterSetID_Item_v1.2.hwp	sections[].section_def.master_pages.len	1
 hwp5rb	hwpers_test4_complex_table.hwp	sections[].paragraphs[].has_para_text	4
 hwp5rb	hwpx/2024년 1분기 해외직접투자 보도자료 ff.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	1453
 hwp5rb	hwpx/hancom-hwp/2024년 1분기 해외직접투자 보도자료 ff.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	1453
@@ -274,6 +274,8 @@ hwp5rb	issue1921/59043_regulatory_analysis.hwp	sections[].paragraphs[].controls[
 hwp5rb	issue1921/59043_regulatory_analysis.hwp	sections[].paragraphs[].controls[].cells[].paragraphs[].char_count	4
 hwp5rb	issue1921/59043_regulatory_analysis.hwp	sections[].paragraphs[].controls[].cells[].paragraphs[].control_mask	4
 hwp5rb	issue1921/59043_regulatory_analysis.hwp	sections[].paragraphs[].controls[].cells[].paragraphs[].controls[].cells[].list_header_width_ref	9
+hwp5rb	issue1921/59043_regulatory_analysis.hwp	sections[].paragraphs[].controls[].cells[].paragraphs[].orphan_field_ends.len	4
+hwp5rb	issue1921/59043_regulatory_analysis.hwp	sections[].paragraphs[].orphan_field_ends.len	9
 hwp5rb	issue1937_rowbreak_footnote_overpagination.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	701
 hwp5rb	issue1937_rowbreak_footnote_overpagination.hwp	sections[].paragraphs[].controls[].cells[].paragraphs[].control_mask	3
 hwp5rb	issue1949_giant_cell_nested_tables_perf.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	3
@@ -282,6 +284,7 @@ hwp5rb	issue1949_giant_cell_nested_tables_perf.hwp	sections[].paragraphs[].contr
 hwp5rb	issue2004_cell_image_stack.hwp	sections[].paragraphs[].char_count	1
 hwp5rb	issue2004_cell_image_stack.hwp	sections[].paragraphs[].control_mask	1
 hwp5rb	issue2004_cell_image_stack.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	121
+hwp5rb	issue2004_cell_image_stack.hwp	sections[].paragraphs[].orphan_field_ends.len	1
 hwp5rb	issue2020/(250813) (보도자료) 2025년 7월중 가계대출 동향.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	40
 hwp5rb	issue2020/passport_application_lawgo.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	26
 hwp5rb	issue2063_huge_cellbreak_table.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	52678
@@ -348,6 +351,7 @@ hwp5rb	table-vpos-01.hwp	sections[].paragraphs[].char_count	1
 hwp5rb	table-vpos-01.hwp	sections[].paragraphs[].control_mask	1
 hwp5rb	table-vpos-01.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	36
 hwp5rb	table-vpos-01.hwp	sections[].paragraphs[].controls[].cells[].paragraphs[].controls[].cells[].list_header_width_ref	11
+hwp5rb	table-vpos-01.hwp	sections[].paragraphs[].orphan_field_ends.len	1
 hwp5rb	table_scattered_header_rowbreak.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	3901
 hwp5rb	tac-case-001.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	4
 hwp5rb	tac-img-02.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	1871
@@ -368,10 +372,12 @@ hwp5rb	task1749/saved_bounds_cumulative_page_break.hwp	sections[].paragraphs[].c
 hwp5rb	task1749/saved_bounds_cumulative_page_break.hwp	sections[].paragraphs[].control_mask	1
 hwp5rb	task1749/saved_bounds_cumulative_page_break.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	22
 hwp5rb	task1749/saved_bounds_cumulative_page_break.hwp	sections[].paragraphs[].controls[].cells[].paragraphs[].controls[].cells[].list_header_width_ref	15
+hwp5rb	task1749/saved_bounds_cumulative_page_break.hwp	sections[].paragraphs[].orphan_field_ends.len	1
 hwp5rb	task1749/saved_bounds_cumulative_vpos.hwp	sections[].paragraphs[].char_count	1
 hwp5rb	task1749/saved_bounds_cumulative_vpos.hwp	sections[].paragraphs[].control_mask	1
 hwp5rb	task1749/saved_bounds_cumulative_vpos.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	32
 hwp5rb	task1749/saved_bounds_cumulative_vpos.hwp	sections[].paragraphs[].controls[].cells[].paragraphs[].controls[].cells[].list_header_width_ref	52
+hwp5rb	task1749/saved_bounds_cumulative_vpos.hwp	sections[].paragraphs[].orphan_field_ends.len	1
 hwp5rb	task1753/deferred_takeplace_fill_ahead.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	2161
 hwp5rb	task1763/cell_trailing_ls_expand.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	111
 hwp5rb	task1765/merged_cell_trailing_ls.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	37
@@ -543,8 +549,6 @@ hwpx	issue2019_floating_form_74312.hwpx	sections[].paragraphs[].controls.len	9
 hwpx	issue2019_floating_form_74312.hwpx	sections[].paragraphs[].controls[]	18
 hwpx	issue2019_floating_form_74312.hwpx	sections[].paragraphs[].controls[].cells[].paragraphs[].raw_header_extra[]	81
 hwpx	issue2019_floating_form_74312.hwpx	sections[].paragraphs[].controls[].section_def.default_tab_spacing	1
-hwpx	issue2019_floating_form_74312.hwpx	sections[].paragraphs[].controls[].section_def.endnote_shape.suffix_char	1
-hwpx	issue2019_floating_form_74312.hwpx	sections[].paragraphs[].controls[].section_def.footnote_shape.suffix_char	1
 hwpx	issue2019_floating_form_74312.hwpx	sections[].paragraphs[].controls[].section_def.page_def.margin_bottom	1
 hwpx	issue2019_floating_form_74312.hwpx	sections[].paragraphs[].controls[].section_def.page_def.margin_left	1
 hwpx	issue2019_floating_form_74312.hwpx	sections[].paragraphs[].controls[].section_def.page_def.margin_right	1
@@ -553,8 +557,6 @@ hwpx	issue2019_floating_form_74312.hwpx	sections[].paragraphs[].controls[].text_
 hwpx	issue2019_floating_form_74312.hwpx	sections[].paragraphs[].raw_break_type	9
 hwpx	issue2019_floating_form_74312.hwpx	sections[].paragraphs[].raw_header_extra[]	675
 hwpx	issue2019_floating_form_74312.hwpx	sections[].section_def.default_tab_spacing	1
-hwpx	issue2019_floating_form_74312.hwpx	sections[].section_def.endnote_shape.suffix_char	1
-hwpx	issue2019_floating_form_74312.hwpx	sections[].section_def.footnote_shape.suffix_char	1
 hwpx	issue2439_page_local_float_exclusion.hwpx	sections[].paragraphs[].controls[].cells[].paragraphs[].raw_header_extra[]	92
 hwpx	issue2439_page_local_float_exclusion.hwpx	sections[].paragraphs[].raw_header_extra[]	8
 hwpx	issue_1133.hwpx	sections[].paragraphs[].controls[].cells[].paragraphs[].controls[].cells[].paragraphs[].raw_header_extra[]	9
