@@ -430,8 +430,6 @@ fn link_orphan_field_ends(paragraphs: &mut [Paragraph]) {
     link_orphan_field_ends_with(paragraphs, &mut open_fields);
 }
 
-/// [`link_orphan_field_ends`] 의 본체. 열린 필드 스택을 밖에서 넘겨 이어 쓴다.
-///
 /// 짝을 이미 채운 종료 마커에서도 스택을 pop 한다. HWP5 종료 마커에는 짝 id 가 없어
 /// 순서만이 짝이므로, 이미 이은 마커를 건너뛰면 그 짝이 스택에 남아 뒤에 오는 마커가
 /// 엉뚱한 필드를 닫는다. 채우기만 조건부로 한다.

@@ -699,8 +699,6 @@ pub(crate) fn parse_hwpx_validated(data: &[u8]) -> Result<Document, HwpxError> {
         }
     }
 
-    // 구역 경계를 넘는 누름틀의 종료 마커를 잇는다. 구역 하나를 파싱하는 동안에는
-    // 앞 구역에서 열린 필드를 볼 수 없다.
     section::link_orphan_field_ends_across_sections(&mut sections);
 
     // [Task #1608] (제거) 과거 Task #554 의 HWP3-origin tolerance 부여는
