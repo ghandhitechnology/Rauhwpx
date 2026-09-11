@@ -10,6 +10,7 @@ import {
   open as openFs,
   readFile as readFs,
   readdir,
+  rename as renameFs,
   rm as rmFs,
   stat as statFs,
   writeFile as writeFs,
@@ -92,6 +93,10 @@ const TEST_NATIVE_FINGERPRINT = Object.freeze({
   digest: `sha256:${'0'.repeat(64)}`,
 });
 const fakeNativeFingerprint = async () => TEST_NATIVE_FINGERPRINT;
+
+function errorWithCode(code: string) {
+  return Object.assign(new Error(code), { code });
+}
 
 test('failed duplicate reservation preserves the caller and owner leases', () => {
   const ids = ['reservation-a', 'reservation-b', 'reservation-c'];
@@ -1309,15 +1314,87 @@ test('Windows atomic replacement retries transient destination locks without del
       platform: 'win32',
       windowsSystemRoot: 'C:\\Windows',
       runCommandImpl: async () => {},
+      sleep: async () => {},
       renameImpl: async (from: string, to: string) => {
         attempts += 1;
-        if (attempts === 1) throw Object.assign(new Error('temporarily locked'), { code: 'EPERM' });
-        const { rename } = await import('node:fs/promises');
-        await rename(from, to);
+        if (attempts === 1) throw errorWithCode('EPERM');
+        await renameFs(from, to);
       },
     });
     assert.equal(attempts, 2);
     assert.deepEqual(new Uint8Array(await readFs(target)), new Uint8Array([7, 8]));
+  });
+});
+
+test('win32 rename-aside retries a first ENOTEMPTY then publishes the save', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const target = join(directory, 'report.hwp');
+    await writeFs(target, 'previous');
+    let attempts = 0;
+    const saved = await writeNativeFileAtomically(target, new Uint8Array([7, 8]), {
+      platform: 'win32',
+      windowsSystemRoot: 'C:\\Windows',
+      runCommandImpl: async () => {},
+      sleep: async () => {},
+      renameImpl: async (from: string, to: string) => {
+        attempts += 1;
+        if (attempts === 1) throw errorWithCode('ENOTEMPTY');
+        await renameFs(from, to);
+      },
+    });
+    assert.equal(attempts, 2);
+    assert.equal(saved.state, 'file');
+    assert.deepEqual(new Uint8Array(await readFs(target)), new Uint8Array([7, 8]));
+    assert.deepEqual(await readdir(directory), ['report.hwp']);
+  });
+});
+
+test('win32 post-publish backup rm retries a first lock then returns the save', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const target = join(directory, 'report.hwp');
+    await writeFs(target, 'previous');
+    let recoveryRmAttempts = 0;
+    const saved = await writeNativeFileAtomically(target, new Uint8Array([7, 8]), {
+      platform: 'win32',
+      windowsSystemRoot: 'C:\\Windows',
+      runCommandImpl: async () => {},
+      sleep: async () => {},
+      rmImpl: async (filePath: string, options?: { force?: boolean }) => {
+        if (String(filePath).includes('.rauhwpx-recovery-')) {
+          recoveryRmAttempts += 1;
+          if (recoveryRmAttempts === 1) throw errorWithCode('EPERM');
+        }
+        await rmFs(filePath, options);
+      },
+    });
+    assert.equal(recoveryRmAttempts, 2);
+    assert.equal(saved.state, 'file');
+    assert.deepEqual(new Uint8Array(await readFs(target)), new Uint8Array([7, 8]));
+    assert.deepEqual(await readdir(directory), ['report.hwp']);
+  });
+});
+
+test('non-win32 rename-aside fails immediately on the first lock', async () => {
+  await withTemporaryDirectory(async (directory) => {
+    const target = join(directory, 'report.hwp');
+    await writeFs(target, 'previous');
+    let attempts = 0;
+    let slept = 0;
+    await assert.rejects(
+      writeNativeFileAtomically(target, new Uint8Array([7, 8]), {
+        platform: 'linux',
+        sleep: async () => { slept += 1; },
+        renameImpl: async () => {
+          attempts += 1;
+          throw errorWithCode('ENOTEMPTY');
+        },
+      }),
+      { code: 'ENOTEMPTY' },
+    );
+    assert.equal(attempts, 1);
+    assert.equal(slept, 0);
+    assert.equal(await readFs(target, 'utf8'), 'previous');
+    assert.deepEqual(await readdir(directory), ['report.hwp']);
   });
 });
 
