@@ -8318,8 +8318,6 @@ impl HwpDocument {
     }
 }
 
-pub(crate) mod event;
-
 /// WASM 뷰어 컨트롤러 (뷰포트 관리 + 스케줄링)
 #[wasm_bindgen]
 pub struct HwpViewer {

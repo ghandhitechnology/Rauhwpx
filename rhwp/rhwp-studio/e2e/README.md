@@ -10,12 +10,7 @@ point to existing scripts. The filesystem and executable commands are the
 inventory; adding a test does not require editing a second table.
 
 Name regression scripts `*.test.mjs` and make assertion failures exit nonzero.
-Name manual investigations `probe-*.mjs` or `debug-*.mjs`. Helpers, render reports,
-and benchmark runners are not regression coverage merely because they execute.
-
-Retained investigations include `probe-body-outside-click-fallback.mjs` for body
-hit testing, `probe-grid-mode-click-coord.mjs` for grid coordinates, and
-`probe-issue-595.mjs` for screenshots and coordinate inspection. Their results
-require human interpretation and they are not CI gates.
+Helpers, render reports, and benchmark runners are not regression coverage
+merely because they execute.
 
 For fixture setup and development prerequisites, see [CONTRIBUTING](../../../CONTRIBUTING.md).

@@ -61,9 +61,8 @@ def hangul_col0_heights(
     tbl = None
     while ctrl is not None:
         if ctrl.CtrlID == "tbl":
-            # [v3 판별자] HeadCtrl 은 중첩 표도 열거 — 본문 앵커(List==0)만 센다
-            # (tools/table_row_sum_classify3.py 선례). anchor_pi 지정 시 앵커
-            # 문단(Para)==anchor_pi 인 본문 표를 직접 선택.
+            # [v3 판별자] HeadCtrl 은 중첩 표도 열거 — 본문 앵커(List==0)만 센다.
+            # anchor_pi 지정 시 앵커 문단(Para)==anchor_pi 인 본문 표를 직접 선택.
             try:
                 aps = ctrl.GetAnchorPos(0)
                 lst = aps.Item("List")
