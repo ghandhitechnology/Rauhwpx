@@ -828,16 +828,12 @@ fn issue_1692_so_sueop_hwp3_page22_relationship_box_uses_table_flow() {
         hwp3_table_bottom,
         om_bottom_px
     );
-    // HWPX p22 본문은 flow_with_text + outer_margin_top 때문에 권위 PDF보다
-    // 약 11px 아래(348.4)에 놓인다. HWP3 자리차지 본문은 PDF y0=337.8px 에
-    // 정합하므로 HWPX y 일치를 요구하지 않는다. 그 핀은 follow-up PDF 계약과
-    // 충돌하고, HWP3 를 HWPX 쪽으로 내리면 follow-up 의 ±2.5px PDF 핀이 깨진다.
-    let pdf_body_y = 337.8;
+    let so_sueop_pdf_p22_body_y0 = 337.8;
     assert!(
-        (hwp3_body.1 - pdf_body_y).abs() <= 1.5,
+        (hwp3_body.1 - so_sueop_pdf_p22_body_y0).abs() <= 1.5,
         "HWP3 p22 first body y={} must match PDF y={}",
         hwp3_body.1,
-        pdf_body_y
+        so_sueop_pdf_p22_body_y0
     );
     let hwp3_body_text = text_concat_in_tree(&hwp3_tree, "Body");
     for expected in [

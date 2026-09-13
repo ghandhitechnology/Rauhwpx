@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-"""Rebuild packaging and UI icons from the B&W 1024 master.
-
-Extracts the white hippo strokes from a source PNG (or uses a black-background
-master as-is) and writes the logo PNG ladder, favicon.ico, Electron icns/ico,
-Studio PWA icons, and VS Code icon.
-"""
 
 from __future__ import annotations
 
@@ -44,7 +38,6 @@ def load_master(path: Path) -> Image.Image:
 
 
 def hippo_on_black(src: Image.Image) -> Image.Image:
-    """Keep near-white strokes and place them on a pure black square."""
     src = src.convert("RGBA")
     w, h = src.size
     xs: list[int] = []

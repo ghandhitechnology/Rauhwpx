@@ -107,8 +107,6 @@ pub(crate) fn check_record_items(count: usize, bytes_per_item: usize) -> Result<
     check_record_count(bytes)
 }
 
-/// HWP3 stores many linear measures in 1/4 HWPUNIT. Hostile i16 values must
-/// saturate instead of panicking under overflow checks (fuzz `parse_hwp3`).
 fn hwp3_i16_to_hu16(quarter_hu: i16) -> crate::model::HwpUnit16 {
     quarter_hu.saturating_mul(4)
 }
