@@ -334,6 +334,8 @@ export class WasmBridge {
    * 첫 렌더 이후에 fetch 가 끝나면 뷰가 재갱신 없이는 이미지를 표시하지 못하므로,
    * main 쪽에서 뷰 갱신을 배선한다 (dirty 마킹 없는 뷰 전용 경로여야 함). */
   onExternalImagesInjected?: (injected: number) => void;
+  /** 문서 로드·새 문서·저장 이름 확정 후 알림. 메인 창만 제목 갱신을 구독한다. */
+  onFileNameChanged?: (fileName: string) => void;
 
   async initialize(): Promise<void> {
     if (this.initialized) return;
@@ -474,6 +476,8 @@ export class WasmBridge {
     this._documentDigest = next.documentDigest;
     console.log(`[WasmBridge] 문서 로드: ${next.info.pageCount}페이지`);
     void this.populateExternalImagesFromDevServer(next.document, this.documentGeneration);
+    // 알림은 문서 교체의 rollback 구간 밖에서 보낸다.
+    this.onFileNameChanged?.(this._fileName);
     return next.info;
   }
 
@@ -495,6 +499,7 @@ export class WasmBridge {
     const nextFileName = fileName ?? FALLBACK_DOCUMENT_FILE_NAME;
     const nextDocumentDigest = `blake3:${bytesToHex(blake3(data))}`;
     let nextDoc: HwpDocument | null = null;
+    let info: DocumentInfo;
 
     try {
       nextDoc = createDocument(data);
@@ -504,15 +509,13 @@ export class WasmBridge {
       this.doc.convertToEditable();
       this.ensureParagraphStableIds();
       this.doc.setFileName(this._fileName);
-      const info: DocumentInfo = JSON.parse(this.doc.getDocumentInfo());
+      info = JSON.parse(this.doc.getDocumentInfo());
       console.log(`[WasmBridge] 문서 로드: ${info.pageCount}페이지`);
 
       // [Task #741 후속] 외부 file path 그림은 dev 환경에서 fetch로 채운다 (basename 기준,
       // HWP 파일과 같은 dir의 image를 찾는 방식 — dev 환경에서는 samples/ 아래
       // Vite asset). fetch하지 못한 그림은 placeholder로 표시.
       void this.populateExternalImagesFromDevServer(nextDoc, this.documentGeneration);
-
-      return info;
     } catch (error) {
       if (this.doc === nextDoc) {
         this.doc = null;
@@ -527,8 +530,12 @@ export class WasmBridge {
       this._fileName = FALLBACK_DOCUMENT_FILE_NAME;
       this._currentFileHandle = null;
       this._documentDigest = null;
+      this.onFileNameChanged?.(this._fileName);
       throw error;
     }
+    // 알림은 문서 교체의 rollback 구간 밖에서 보낸다.
+    this.onFileNameChanged?.(this._fileName);
+    return info;
   }
 
   /** 현재 파일 바인딩을 유지한 채 완전히 파싱된 문서 내용으로 교체한다. */
@@ -639,8 +646,9 @@ export class WasmBridge {
   }
 
   set fileName(name: string) {
-    this._fileName = name;
     this.doc?.setFileName(name);
+    this._fileName = name;
+    this.onFileNameChanged?.(name);
   }
 
   get currentFileHandle(): FileSystemFileHandleLike | null {
