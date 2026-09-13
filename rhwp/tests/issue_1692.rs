@@ -807,16 +807,12 @@ fn issue_1692_so_sueop_hwp3_page22_relationship_box_uses_table_flow() {
     );
 
     let hwp3_doc = load_wasm_doc("samples/SO-SUEOP.hwp");
-    let hwpx_doc = load_wasm_doc("samples/SO-SUEOP.hwpx");
     let hwp3_tree = page_render_tree(&hwp3_doc, 21);
-    let hwpx_tree = page_render_tree(&hwpx_doc, 21);
 
     let hwp3_table = first_bbox_by_type(&hwp3_tree, "Table")
         .expect("HWP3 page 22 relationship diagram table bbox");
     let hwp3_body = text_bbox_containing_in_tree(&hwp3_tree, "윤두꺼비 시절 부친 말대가리")
         .expect("HWP3 page 22 first body line bbox");
-    let hwpx_body = text_bbox_containing_in_tree(&hwpx_tree, "윤두꺼비 시절 부친 말대가리")
-        .expect("HWPX page 22 first body line bbox");
     let hwp3_table_bottom = hwp3_table.1 + hwp3_table.3;
     // [Task #1841] 관계도 표(자리차지, outer_margin_bottom=852HU=11.36px) 아래 본문은
     // 표 하단 + 바깥 여백 bottom 에서 시작한다. 권위 PDF(pdf/SO-SUEOP-2024.pdf p22)
@@ -832,11 +828,16 @@ fn issue_1692_so_sueop_hwp3_page22_relationship_box_uses_table_flow() {
         hwp3_table_bottom,
         om_bottom_px
     );
+    // HWPX p22 본문은 flow_with_text + outer_margin_top 때문에 권위 PDF보다
+    // 약 11px 아래(348.4)에 놓인다. HWP3 자리차지 본문은 PDF y0=337.8px 에
+    // 정합하므로 HWPX y 일치를 요구하지 않는다. 그 핀은 follow-up PDF 계약과
+    // 충돌하고, HWP3 를 HWPX 쪽으로 내리면 follow-up 의 ±2.5px PDF 핀이 깨진다.
+    let pdf_body_y = 337.8;
     assert!(
-        (hwp3_body.1 - hwpx_body.1).abs() <= 1.0,
-        "HWP3 p22 first body y={} must match HWPX y={}",
+        (hwp3_body.1 - pdf_body_y).abs() <= 1.5,
+        "HWP3 p22 first body y={} must match PDF y={}",
         hwp3_body.1,
-        hwpx_body.1
+        pdf_body_y
     );
     let hwp3_body_text = text_concat_in_tree(&hwp3_tree, "Body");
     for expected in [
