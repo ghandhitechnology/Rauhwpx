@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 import shutil
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -81,22 +83,61 @@ def run(cmd: list[str]) -> None:
     subprocess.run(cmd, check=True)
 
 
-def write_favicon_and_ico(master: Image.Image) -> None:
-    tmp = ROOT / ".icon-work"
-    if tmp.exists():
-        shutil.rmtree(tmp)
-    tmp.mkdir()
-    ico_pngs = []
+def write_png_compressed_ico(master: Image.Image, dest: Path) -> None:
+    """Write a 32-bpp PNG-in-ICO.
+
+    `icotool -c` quantizes to 8-bpp palette DIBs. Electron-builder / rcedit on
+    Windows reject those and expect 32-bpp images (PNG-compressed ICO entries).
+    """
+    pngs: list[bytes] = []
     for size in ICO_SIZES:
-        p = tmp / f"icon-{size}.png"
-        master.resize((size, size), Image.Resampling.LANCZOS).save(p)
-        ico_pngs.append(str(p))
+        buf = io.BytesIO()
+        master.resize((size, size), Image.Resampling.LANCZOS).convert("RGBA").save(
+            buf, format="PNG", optimize=True
+        )
+        pngs.append(buf.getvalue())
+
+    count = len(pngs)
+    offset = 6 + 16 * count
+    header = struct.pack("<HHH", 0, 1, count)
+    entries = bytearray()
+    blobs = bytearray()
+    for size, data in zip(ICO_SIZES, pngs, strict=True):
+        width = 0 if size >= 256 else size
+        height = 0 if size >= 256 else size
+        entries += struct.pack("<BBBBHHII", width, height, 0, 0, 1, 32, len(data), offset)
+        blobs += data
+        offset += len(data)
+    dest.write_bytes(header + bytes(entries) + bytes(blobs))
+    assert_ico_is_32bpp_png(dest)
+
+
+def assert_ico_is_32bpp_png(path: Path) -> None:
+    data = path.read_bytes()
+    reserved, typ, count = struct.unpack_from("<HHH", data, 0)
+    if reserved != 0 or typ != 1 or count == 0:
+        raise SystemExit(f"{path}: invalid ICO header")
+    off = 6
+    for _ in range(count):
+        _w, _h, _colors, _reserved, planes, bitcount, size, offset = struct.unpack_from(
+            "<BBBBHHII", data, off
+        )
+        if planes != 1 or bitcount != 32:
+            raise SystemExit(f"{path}: expected 32-bpp ICO entry, got planes={planes} bpp={bitcount}")
+        if data[offset : offset + 8] != b"\x89PNG\r\n\x1a\n":
+            raise SystemExit(f"{path}: expected PNG-compressed ICO image data")
+        if size == 0 or offset + size > len(data):
+            raise SystemExit(f"{path}: ICO entry payload is truncated")
+        off += 16
+
+
+def write_favicon_and_ico(master: Image.Image) -> None:
     favicon = LOGO_DIR / "favicon.ico"
     electron_ico = BUILD_DIR / "icon.ico"
-    BUILD_DIR.mkdir(parents=True, exist_ok=True)
-    run(["icotool", "-c", "-o", str(favicon), *ico_pngs])
-    shutil.copy2(favicon, electron_ico)
     studio_favicon = STUDIO_PUBLIC / "favicon.ico"
+    BUILD_DIR.mkdir(parents=True, exist_ok=True)
+    write_png_compressed_ico(master, favicon)
+    shutil.copy2(favicon, electron_ico)
     shutil.copy2(favicon, studio_favicon)
     print(f"wrote {favicon}")
     print(f"wrote {electron_ico}")
