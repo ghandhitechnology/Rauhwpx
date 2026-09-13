@@ -33,6 +33,7 @@
     "e2e:inline-prompt": "node e2e/inline-prompt.test.mjs --mode=headless",
     "e2e:unsaved-guard": "node e2e/unsaved-changes-guard.test.mjs",
     "e2e:undo": "node e2e/undo-contracts.test.mjs",
+    "e2e:document-title": "node e2e/document-title-issue6566.test.mjs --mode=headless",
     "e2e:undo-object-selection": "node e2e/undo-object-selection.test.mjs",
     "e2e:contextual-toolbar": "node e2e/contextual-editing-toolbar.test.mjs --mode=headless",
     "e2e:clipboard-priority": "node e2e/task-871-clipboard-priority.test.mjs",

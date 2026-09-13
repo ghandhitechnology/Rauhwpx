@@ -1,6 +1,8 @@
 /** 연결선 드로잉 모드 — input-handler에서 호출되는 헬퍼 함수 */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+import { isBodyControl } from './picture-hit-policy.ts';
+
 /** 개체의 4방향 연결점 (상/우/하/좌 중점) */
 export interface ConnectionPoint {
   /** 페이지 내 절대 X (page px) */
@@ -27,7 +29,7 @@ export function findNearestConnectionPoint(
   excludeRef?: { sec: number; ppi: number; ci: number },
 ): ConnectionPoint | null {
   try {
-    const layout = this.wasm.getPageControlLayout(pageIdx);
+    const layout = { controls: this.wasm.getPageControlLayout(pageIdx).controls.filter(isBodyControl) };
     let best: ConnectionPoint | null = null;
     let bestDist = threshold;
 
@@ -76,7 +78,7 @@ export function showConnectionPointOverlay(
 ): void {
   removeConnectionPointOverlay.call(this);
 
-  const layout = this.wasm.getPageControlLayout(pageIdx);
+  const layout = { controls: this.wasm.getPageControlLayout(pageIdx).controls.filter(isBodyControl) };
   const sc = this.container.querySelector('#scroll-content');
   if (!sc) return;
   const zoom = this.viewportManager.getZoom();
