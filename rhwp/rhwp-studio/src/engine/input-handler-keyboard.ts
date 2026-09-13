@@ -1,6 +1,7 @@
 /** input-handler keyboard methods — extracted from InputHandler class */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+import { isBodyControl } from './picture-hit-policy';
 import { InsertTextCommand, InsertLineBreakCommand, InsertTabCommand, SplitParagraphCommand, SplitParagraphInCellCommand, InsertTextInHeaderFooterCommand, SplitParagraphInHeaderFooterCommand, SplitParagraphInFootnoteCommand, DeleteTextInFootnoteCommand, MergeParagraphInFootnoteCommand, deleteSelectionImmediate } from './command';
 import { matchShortcut, defaultShortcuts } from '@/command/shortcut-map';
 import * as _connector from './input-handler-connector';
@@ -2365,7 +2366,7 @@ export function handleF11(this: any): void {
         try {
           const pageCount = this.wasm.pageCount;
           for (let p = 0; p < pageCount; p++) {
-            const layout = this.wasm.getPageControlLayout(p);
+            const layout = { controls: this.wasm.getPageControlLayout(p).controls.filter(isBodyControl) };
             for (const ctrl of layout.controls) {
               if (ctrl.type === 'line' && ctrl.secIdx === result.sec && ctrl.paraIdx === result.para && ctrl.controlIdx === result.ci) {
                 ctrlType = 'line';
@@ -2463,7 +2464,7 @@ export function handleShiftF11(this: any): void {
         try {
           const pageCount = this.wasm.pageCount;
           for (let p = 0; p < pageCount; p++) {
-            const layout = this.wasm.getPageControlLayout(p);
+            const layout = { controls: this.wasm.getPageControlLayout(p).controls.filter(isBodyControl) };
             for (const ctrl of layout.controls) {
               if (ctrl.type === 'line' && ctrl.secIdx === result.sec && ctrl.paraIdx === result.para && ctrl.controlIdx === result.ci) {
                 ctrlType = 'line';
