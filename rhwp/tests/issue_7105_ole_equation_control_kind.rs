@@ -26,7 +26,6 @@ use std::path::Path;
 use rhwp::document_core::DocumentCore;
 
 const EQ_OLE_SAMPLE: &str = "samples/issue5725/2921145_equation_ole.hwpx";
-/// 음성 대조 — native `$eqed` 수식 문서.
 const NATIVE_EQ_SAMPLE: &str = "samples/equation-lim.hwp";
 
 fn read_repo(rel: &str) -> Vec<u8> {
@@ -34,7 +33,6 @@ fn read_repo(rel: &str) -> Vec<u8> {
         .unwrap_or_else(|e| panic!("read {rel}: {e}"))
 }
 
-/// 표 칸 안의 레거시 OLE 수식을 복제해 본문 끝 문단에 하나 더 넣은 HWPX.
 fn hwpx_with_body_level_ole_equation() -> Vec<u8> {
     let template = read_repo(EQ_OLE_SAMPLE);
     let mut src = zip::ZipArchive::new(std::io::Cursor::new(template)).expect("template ZIP");
@@ -73,8 +71,14 @@ fn hwpx_with_body_level_ole_equation() -> Vec<u8> {
     out.finish().expect("ZIP 마감").into_inner()
 }
 
-/// 배치 목록 한 항목 — `(type, secIdx, paraIdx, controlIdx, 칸 안인가)`.
-type ControlEntry = (String, usize, usize, usize, bool);
+#[derive(Debug)]
+struct ControlEntry {
+    kind: String,
+    sec: usize,
+    para: usize,
+    ctrl: usize,
+    in_cell: bool,
+}
 
 fn controls(core: &DocumentCore) -> Vec<ControlEntry> {
     (0..core.page_count())
@@ -90,30 +94,33 @@ fn controls(core: &DocumentCore) -> Vec<ControlEntry> {
                 .unwrap_or_default()
         })
         .filter_map(|c| {
-            Some((
-                c.get("type")?.as_str()?.to_string(),
-                c.get("secIdx")?.as_u64()? as usize,
-                c.get("paraIdx")?.as_u64()? as usize,
-                c.get("controlIdx")?.as_u64()? as usize,
-                c.get("cellIdx").is_some(),
-            ))
+            Some(ControlEntry {
+                kind: c.get("type")?.as_str()?.to_string(),
+                sec: c.get("secIdx")?.as_u64()? as usize,
+                para: c.get("paraIdx")?.as_u64()? as usize,
+                ctrl: c.get("controlIdx")?.as_u64()? as usize,
+                in_cell: c.get("cellIdx").is_some(),
+            })
         })
         .collect()
+}
+
+fn shares_table_address(entries: &[ControlEntry], entry: &ControlEntry) -> bool {
+    entries.iter().any(|other| {
+        other.kind == "table"
+            && other.sec == entry.sec
+            && other.para == entry.para
+            && other.ctrl == entry.ctrl
+    })
 }
 
 fn body_ole(entries: &[ControlEntry]) -> Option<(usize, usize, usize)> {
     entries
         .iter()
-        .find(|(kind, sec, para, ctrl, in_cell)| {
-            *kind == "ole"
-                && !*in_cell
-                // 칸 안 OLE 수식은 Equation 과 별도로 표 주소의 RawSvg/Placeholder `ole` 로도
-                // 난다. 그 항목은 `Control::Shape(Ole)` 가 아니므로 본문 복제분을 고를 때 건너뛴다.
-                && !entries.iter().any(|(other, s, p, c, _)| {
-                    other == "table" && s == sec && p == para && c == ctrl
-                })
+        .find(|entry| {
+            entry.kind == "ole" && !entry.in_cell && !shares_table_address(entries, entry)
         })
-        .map(|(_, sec, para, ctrl, _)| (*sec, *para, *ctrl))
+        .map(|entry| (entry.sec, entry.para, entry.ctrl))
 }
 
 #[test]
@@ -127,7 +134,7 @@ fn issue_7105_body_level_ole_equation_is_reported_as_ole() {
     assert!(
         !found
             .iter()
-            .any(|(kind, .., in_cell)| kind == "equation" && !in_cell),
+            .any(|entry| entry.kind == "equation" && !entry.in_cell),
         "#7105: 이 문서의 본문에는 native 수식이 없으므로 본문 `equation` 은 OLE 를 잘못 알린 것이다: {found:?}"
     );
 }
@@ -137,13 +144,11 @@ fn issue_7105_reported_kind_routes_to_a_command_the_core_accepts() {
     let mut core = DocumentCore::from_bytes(&hwpx_with_body_level_ole_equation()).expect("open");
     let (sec, para, ctrl) = body_ole(&controls(&core)).expect("ole 로 알린 본문 수식 개체");
 
-    // 수정 전 편집기가 고르던 수식 명령은 OLE 를 거부한다 — 이것이 신고된 증상이다.
     assert!(
         core.delete_equation_control_native(sec, para, ctrl)
             .is_err(),
         "수식 명령은 native 수식만 받는다(OLE 거부)"
     );
-    // `ole` 이 고르는 도형 명령은 같은 개체를 읽고 지운다.
     assert!(
         core.get_shape_properties_native(sec, para, ctrl).is_ok(),
         "#7105: 도형 속성 조회가 OLE 수식에서 성공해야 한다"
@@ -158,12 +163,12 @@ fn issue_7105_reported_kind_routes_to_a_command_the_core_accepts() {
 
 #[test]
 fn issue_7105_native_equation_is_still_reported_as_equation() {
-    // 음성 대조 — native 수식은 종전대로 `equation` 이고 수식 명령이 받는다.
     let mut core = DocumentCore::from_bytes(&read_repo(NATIVE_EQ_SAMPLE)).expect("open");
-    let (_, sec, para, ctrl, _) = controls(&core)
+    let native = controls(&core)
         .into_iter()
-        .find(|(kind, .., in_cell)| kind == "equation" && !in_cell)
+        .find(|entry| entry.kind == "equation" && !entry.in_cell)
         .expect("#7105: native 수식은 `equation` 으로 알려야 한다");
+    let (sec, para, ctrl) = (native.sec, native.para, native.ctrl);
     core.delete_equation_control_native(sec, para, ctrl)
         .expect("native 수식은 수식 명령이 지운다");
 }

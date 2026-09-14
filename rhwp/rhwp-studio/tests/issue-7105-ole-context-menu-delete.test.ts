@@ -20,7 +20,6 @@ const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const insertSrc = readFileSync(join(rootDir, 'src/command/commands/insert.ts'), 'utf8');
 const pictureSrc = readFileSync(join(rootDir, 'src/engine/input-handler-picture.ts'), 'utf8');
 
-/** `if (<조건>) { … wasm.deleteShapeControl(` 의 조건식에서 `ref.type === '<종류>'` 들을 뽑는다. */
 function shapeDeleteTypes(block: string, label: string): string[] {
   const m = block.match(/if\s*\(([^{]*?)\)\s*\{\s*(?:this\.)?wasm\.deleteShapeControl\(/);
   assert.ok(m, `${label}: 도형 삭제 분기를 찾아야 한다`);
