@@ -130,6 +130,10 @@ pub fn serialize_hwpx(doc: &Document) -> Result<Vec<u8>, SerializeError> {
             .unwrap_or_else(|| SETTINGS_XML.as_bytes()),
     )?;
 
+    if let Some(bytes) = crate::model::hyperlink_format::encode(doc) {
+        z.write_deflated(crate::model::hyperlink_format::HWPX_ENTRY, &bytes)?;
+    }
+
     // 7. META-INF/container.rdf — header + every section part.
     // Hancom uses this RDF graph alongside content.hpf; a stale one-section
     // RDF makes multi-section documents fail to open even when the ZIP and
@@ -198,7 +202,8 @@ pub fn serialize_hwpx(doc: &Document) -> Result<Vec<u8>, SerializeError> {
     .into_iter()
     .map(str::to_string)
     .collect();
-    generated_entries.extend(section_hrefs.iter().cloned());
+        generated_entries.insert(crate::model::hyperlink_format::HWPX_ENTRY.to_string());
+        generated_entries.extend(section_hrefs.iter().cloned());
     generated_entries.extend(master_items.iter().map(|(_, href)| href.clone()));
     generated_entries.extend(
         bin_entries

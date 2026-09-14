@@ -819,6 +819,12 @@ pub(crate) fn parse_hwpx_validated(data: &[u8]) -> Result<Document, HwpxError> {
     // 이후 populate_external_images_from_dir가 문서 폴더에서 파일명이 일치하는 그림을 읽는다.
     populate_hwpx_link_image_paths(&mut doc);
 
+    if let Ok(bytes) =
+        reader.read_file_bytes_limited(crate::model::hyperlink_format::HWPX_ENTRY, 16 * 1024 * 1024)
+    {
+        crate::model::hyperlink_format::decode(&mut doc, &bytes);
+    }
+
     Ok(doc)
 }
 
