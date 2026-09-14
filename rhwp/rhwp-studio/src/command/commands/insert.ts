@@ -1,4 +1,5 @@
 import type { CommandDef } from '../types';
+import { hyperlinkCommand, editHyperlinkCommand, removeHyperlinkCommand } from './hyperlink';
 import { PicturePropsDialog } from '@/ui/picture-props-dialog';
 import { EquationEditorDialog } from '@/ui/equation-editor-dialog';
 import { EquationPropertiesDialog } from '@/ui/equation-props-dialog';
@@ -324,7 +325,9 @@ export const insertCommands: CommandDef[] = [
       symbolsDialog.show();
     },
   },
-  stub('insert:hyperlink', '하이퍼링크', 'icon-hyperlink', 'Ctrl+K+H'),
+  hyperlinkCommand,
+  editHyperlinkCommand,
+  removeHyperlinkCommand,
   {
     id: 'insert:bookmark',
     label: '책갈피',

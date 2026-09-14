@@ -19,6 +19,7 @@
 @import './styles/find-dialog.css';
 @import './styles/symbols-dialog.css';
 @import './styles/bookmark-dialog.css';
+@import './styles/hyperlink-dialog.css';
 @import './styles/shape-picker.css';
 @import './styles/command-palette.css';
 @import './styles/compare-dialog.css';

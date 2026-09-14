@@ -4923,6 +4923,13 @@ export class InputHandler {
   /** 현재 커서 위치를 반환한다 */
   getCursorPosition(): DocumentPosition { return this.cursor.getPosition(); }
 
+  /** 별도 좌표계·개체 선택을 본문 링크 편집으로 오인하지 않도록 명시적으로 차단한다. */
+  canEditHyperlink(): boolean {
+    return !this.cursor.isInHeaderFooter() && !this.cursor.isInFootnote()
+      && !this.cursor.isInCellSelectionMode() && !this.cursor.isInPictureObjectSelection()
+      && !this.cursor.isInTableObjectSelection();
+  }
+
   /** 커서를 지정 위치로 이동하고 캐럿을 표시한다. 성공하면 true 반환. */
   moveCursorTo(pos: DocumentPosition): boolean {
     // 이동 전 위치가 유효한지 사전 검증 (경고 로그 방지)

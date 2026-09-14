@@ -91,6 +91,7 @@ function mutationResult(cellFlowChanged) {
 }
 
 class FakeWasm {
+  getHyperlinkContext() { return { text: '', links: [] }; }
   constructor(...deferredResults) {
     this.deferredResults = [...deferredResults];
     this.bodyResults = [];
