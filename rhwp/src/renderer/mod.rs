@@ -23,6 +23,7 @@ pub(crate) mod form_caption;
 pub mod height_cursor;
 pub mod height_measurer;
 pub mod html;
+pub mod hyperlinks;
 pub(crate) mod image_header;
 pub mod image_resolver;
 pub mod layer_renderer;
