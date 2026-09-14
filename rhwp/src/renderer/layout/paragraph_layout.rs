@@ -1995,8 +1995,6 @@ impl LayoutEngine {
                 12.0
             }
         };
-        // [#7018] 런이 속한 저장 줄의 baseline 을 쓴다. 문단 단위 불린이 아니다.
-        // char_offsets 와 LineSeg.text_start 는 같은 UTF-16 축이고 컨트롤 슬롯을 포함한다.
         let stored_line_baseline_at = |char_idx: usize| -> Option<f64> {
             if para.line_segs.len() < 2 {
                 return None;
@@ -2242,7 +2240,6 @@ impl LayoutEngine {
                         };
                         let cs_changed = cs_id != current_cs_id;
 
-                        // 줄바꿈된 텍스트의 BoundingBox 높이: 런이 속한 저장 줄
                         let run_bbox_h = stored_line_baseline_at(line_run_start).unwrap_or(
                             if wrapped_below_table {
                                 text_line_baseline
@@ -2313,7 +2310,6 @@ impl LayoutEngine {
                         inline_x += ch_w;
                     }
 
-                    // 남은 run의 BoundingBox 높이. 마지막 run 도 같은 줄 소속 규칙을 쓴다.
                     let remaining_bbox_h =
                         stored_line_baseline_at(line_run_start).unwrap_or(if wrapped_below_table {
                             text_line_baseline
