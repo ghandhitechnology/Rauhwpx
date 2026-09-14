@@ -1,4 +1,3 @@
-//! Studio 하이퍼링크의 엄격한 JSON options 어댑터 (#6963).
 use super::HwpDocument;
 use crate::document_core::hyperlink::HyperlinkTarget;
 use serde::Deserialize;

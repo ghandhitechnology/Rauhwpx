@@ -1,4 +1,3 @@
-//! 출력 페이지의 링크 사각형과 공통 URI 표현 (#6963).
 use super::render_tree::BoundingBox;
 
 /// 페이지 좌상단 기준 CSS px. PDF writer에서만 72/96 배율과 y축 반전을 적용한다.

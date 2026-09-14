@@ -1,4 +1,3 @@
-//! 출력에 실제 포함된 TextRun의 문자 경계와 clip을 사용한 링크 영역 질의 (#6963).
 use crate::document_core::{hyperlink::HyperlinkTarget, DocumentCore};
 use crate::error::HwpError;
 use crate::model::{

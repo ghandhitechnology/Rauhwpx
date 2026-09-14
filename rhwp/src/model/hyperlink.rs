@@ -1,5 +1,3 @@
-//! HWP/HWPX 하이퍼링크 Command의 공통 주소 인코딩 (#6963).
-
 use crate::error::HwpError;
 
 /// 첫 번째 비이스케이프 세미콜론 앞의 주소를 읽는다.

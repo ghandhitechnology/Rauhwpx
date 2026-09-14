@@ -66,7 +66,6 @@ export function applyHyperlinkFormat(wasm: WasmBridge, target: HyperlinkTarget,
   } else wasm.applyCharFormat(target.section, target.para, start, end, props);
 }
 
-/** 미리 열기는 입력 주소만 검증하고 문서·방문 색을 변경하지 않는다. */
 export function webHyperlinkUrl(value: string): string | null {
   const uri = value.trim();
   if (!/^https?:\/\//i.test(uri) || /[\s\\\x00-\x1f\x7f]/.test(uri)) return null;

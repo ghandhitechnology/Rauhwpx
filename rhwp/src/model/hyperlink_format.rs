@@ -399,7 +399,6 @@ fn attach_shape(shape: &mut crate::model::shape::ShapeObject, records: &HashMap<
 }
 
 pub fn decode(doc: &mut Document, bytes: &[u8]) {
-    // 잘못된 부가 정보가 본문 읽기를 막거나 임의 서식을 적용하지 않게 한다.
     let Ok(data) = serde_json::from_slice::<Envelope>(bytes) else {
         return;
     };

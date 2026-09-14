@@ -1,4 +1,3 @@
-/** Delete/Backspace로 링크 글자를 지울 때 필드와 표시 문자열을 한 단위로 제거한다. */
 import { hyperlinkTarget } from '@/core/hyperlink';
 import type { DocumentPosition } from '@/core/types';
 import type { WasmBridge } from '@/core/wasm-bridge';

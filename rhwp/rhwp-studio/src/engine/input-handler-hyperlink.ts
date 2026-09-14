@@ -1,4 +1,3 @@
-/** 링크의 실제 글자 선택 영역 안에서만 hover/열기/우클릭 대상을 찾는다. */
 import { hyperlinkTarget, applyHyperlinkFormat } from '@/core/hyperlink';
 import type { HyperlinkInfo, HyperlinkTarget } from '@/core/hyperlink';
 import type { DocumentPosition } from '@/core/types';
@@ -34,7 +33,7 @@ export function hyperlinkAtPointer(self: any, e: MouseEvent): LinkHit | null {
         return { target, link, position: { ...hit, charOffset: link.start } };
       }
     }
-  } catch { /* 미지원 문서 컨텍스트는 일반 글자 편집으로 처리한다. */ }
+  } catch {}
   return null;
 }
 

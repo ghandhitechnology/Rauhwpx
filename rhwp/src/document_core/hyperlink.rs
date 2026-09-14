@@ -103,7 +103,6 @@ impl DocumentCore {
         let field_id = max_id
             .checked_add(1)
             .ok_or_else(|| invalid("필드 ID 공간이 소진되었습니다"))?;
-        // FieldRange가 정확한 위치 정본이다. END 갭을 controls[] 슬롯으로 오인하지 않는다.
         let positions = candidate.control_text_positions();
         let insert_idx = candidate
             .controls
@@ -176,7 +175,6 @@ impl DocumentCore {
         let Control::Field(field) = &p.controls[idx] else {
             unreachable!()
         };
-        // 기존 mail/file/internal 링크를 웹 링크로 암묵적으로 바꾸지 않는다.
         web_command(&command_uri(&field.command))?;
         if command_uri(&field.command) == uri {
             return Ok(false);
@@ -237,10 +235,8 @@ impl DocumentCore {
             .find(|s| s.start_pos <= raw_start)
             .cloned();
         let new_len = text.chars().count();
-        // 먼저 삽입하여 빈 필드로 축소되는 중간 상태를 피한다.
         candidate.insert_text_at(start, text);
         candidate.delete_text_at(start + new_len, end - start);
-        // 경계 삽입의 일반 규칙이 이전 링크 끝까지 늘리지 않도록 정본에서 복원한다.
         if candidate.field_ranges.len() != ranges.len() {
             return Err(invalid("표시 문자열 교체 중 필드 범위가 깨졌습니다"));
         }
@@ -263,7 +259,6 @@ impl DocumentCore {
         if let Control::Field(f) = &mut candidate.controls[ctrl_idx] {
             f.hyperlink_format = original_format;
         }
-        // 새 글자는 기존 링크 첫 글자의 서식을 이어받는다.
         if let Some(mut shape) = shape {
             shape.start_pos = raw_start;
             candidate.char_shapes.retain(|s| s.start_pos != raw_start);
@@ -413,7 +408,6 @@ impl DocumentCore {
                 "개체·다단락 필드·HWP3 문단의 링크 편집은 아직 지원하지 않습니다",
             ));
         }
-        // 앞 문단에서 열린 다단락 필드의 중간 문단도 편집 대상에서 제외한다.
         let mut open = std::collections::HashSet::new();
         let (paragraphs, para_idx) = self.hyperlink_paragraph_list(target)?;
         for preceding in &paragraphs[..para_idx] {

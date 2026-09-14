@@ -735,8 +735,6 @@ impl Paragraph {
             (self.controls.len() as u32) * 8
         };
         let char_offset = effective_char_offset;
-        // 링크 경계에 삽입하는 글자는 링크 밖에 둔다. 시작 경계에서는 링크의
-        // 서식 run을 뒤로 밀고, 끝 경계에서는 복원된 일반 서식 run을 유지한다.
         let hyperlink_starts = self
             .field_ranges
             .iter()
@@ -1915,8 +1913,6 @@ impl Paragraph {
                 .sum()
         };
 
-        // 링크가 문단 끝까지 있어도 링크 밖의 원래 서식을 남긴다.
-        // 이어 쓰기와 방문 색 변경이 링크 색/밑줄을 다음 입력으로 전파하지 않게 한다.
         let preserve_link_end = self.field_ranges.iter().any(|range| {
             range.end_char_idx == end_char_offset
                 && matches!(
