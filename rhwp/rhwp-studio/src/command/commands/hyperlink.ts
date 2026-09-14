@@ -42,36 +42,44 @@ export const hyperlinkCommand: CommandDef = {
           operationType: 'editHyperlink',
           selectionBefore: selection ? { ...selection, blockPhase: null } : null,
           operation: wasm => {
-            if (edit.kind === 'remove') {
-              if (!existing) return { ...pos, charOffset: end };
-              wasm.removeHyperlink(target, existing.fieldId, true);
-              applied = true;
-              return { ...pos, charOffset: existing.end };
-            }
-            if (existing) {
-              wasm.updateHyperlink(target, existing.fieldId, edit.uri);
-              if (edit.text !== text) wasm.replaceHyperlinkText(target, existing.fieldId, edit.text);
-              applied = true;
-              return { ...pos, charOffset: existing.start + Array.from(edit.text).length };
-            }
-            let linkEnd = end;
-            if (canInsertText) {
-              if (target.cellPath.length) {
-                const path = target.cellPath.map(([controlIndex, cellIndex, cellParaIndex]) => ({ controlIndex, cellIndex, cellParaIndex }));
-                wasm.insertTextInCellByPath(target.section, target.para, JSON.stringify(path), start, edit.text);
-              } else {
-                wasm.insertText(target.section, target.para, start, edit.text);
+            switch (edit.kind) {
+              case 'remove': {
+                if (!existing) return { ...pos, charOffset: end };
+                wasm.removeHyperlink(target, existing.fieldId, true);
+                applied = true;
+                return { ...pos, charOffset: existing.end };
               }
-              linkEnd = start + Array.from(edit.text).length;
+              case 'save': {
+                if (existing) {
+                  wasm.updateHyperlink(target, existing.fieldId, edit.uri);
+                  if (edit.text !== text) wasm.replaceHyperlinkText(target, existing.fieldId, edit.text);
+                  applied = true;
+                  return { ...pos, charOffset: existing.start + Array.from(edit.text).length };
+                }
+                let linkEnd = end;
+                if (canInsertText) {
+                  if (target.cellPath.length) {
+                    const path = target.cellPath.map(([controlIndex, cellIndex, cellParaIndex]) => ({ controlIndex, cellIndex, cellParaIndex }));
+                    wasm.insertTextInCellByPath(target.section, target.para, JSON.stringify(path), start, edit.text);
+                  } else {
+                    wasm.insertText(target.section, target.para, start, edit.text);
+                  }
+                  linkEnd = start + Array.from(edit.text).length;
+                }
+                const fieldId = wasm.insertHyperlink(target, start, linkEnd, edit.uri);
+                if (!canInsertText && edit.text !== text) {
+                  wasm.replaceHyperlinkText(target, fieldId, edit.text);
+                  linkEnd = start + Array.from(edit.text).length;
+                }
+                applyHyperlinkFormat(wasm, target, start, linkEnd, '#0000ff');
+                applied = true;
+                return { ...pos, charOffset: linkEnd };
+              }
+              default: {
+                const _never: never = edit;
+                return _never;
+              }
             }
-            const fieldId = wasm.insertHyperlink(target, start, linkEnd, edit.uri);
-            if (!canInsertText && edit.text !== text) {
-              wasm.replaceHyperlinkText(target, fieldId, edit.text);
-              linkEnd = start + Array.from(edit.text).length;
-            }
-            applyHyperlinkFormat(wasm, target, start, linkEnd, '#0000ff');
-            applied = true;
-            return { ...pos, charOffset: linkEnd };
           },
         });
         if (!applied) throw new Error('하이퍼링크를 적용할 수 없습니다. 편집 모드를 확인해 주세요.');
