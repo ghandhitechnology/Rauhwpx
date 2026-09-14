@@ -202,8 +202,8 @@ pub fn serialize_hwpx(doc: &Document) -> Result<Vec<u8>, SerializeError> {
     .into_iter()
     .map(str::to_string)
     .collect();
-        generated_entries.insert(crate::model::hyperlink_format::HWPX_ENTRY.to_string());
-        generated_entries.extend(section_hrefs.iter().cloned());
+    generated_entries.insert(crate::model::hyperlink_format::HWPX_ENTRY.to_string());
+    generated_entries.extend(section_hrefs.iter().cloned());
     generated_entries.extend(master_items.iter().map(|(_, href)| href.clone()));
     generated_entries.extend(
         bin_entries

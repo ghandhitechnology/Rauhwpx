@@ -456,7 +456,8 @@ impl DocumentEvent {
                 field_id,
             } => {
                 let mut cell_path_json = String::from("[");
-                for (i, &(control_index, cell_index, cell_para_index)) in cell_path.iter().enumerate()
+                for (i, &(control_index, cell_index, cell_para_index)) in
+                    cell_path.iter().enumerate()
                 {
                     if i != 0 {
                         cell_path_json.push(',');

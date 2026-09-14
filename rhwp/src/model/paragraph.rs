@@ -768,13 +768,12 @@ impl Paragraph {
             self.char_offsets[char_offset - 1] + Self::char_utf16_len(text_chars[char_offset - 1])
         };
         let begin_units = hyperlink_starts * 8;
-        let utf16_insert_pos = if at_hyperlink_start
-            && utf16_insert_pos >= preceding_text_end + begin_units
-        {
-            utf16_insert_pos - begin_units
-        } else {
-            utf16_insert_pos
-        };
+        let utf16_insert_pos =
+            if at_hyperlink_start && utf16_insert_pos >= preceding_text_end + begin_units {
+                utf16_insert_pos - begin_units
+            } else {
+                utf16_insert_pos
+            };
 
         // 새 텍스트의 UTF-16 총 길이
         let new_chars: Vec<char> = new_text.chars().collect();
