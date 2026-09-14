@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 
 export const RAILWAY_API_URL = 'https://backboard.railway.com/graphql/v2';
-export const RAILWAY_DEFAULT_IMAGE = 'ghcr.io/ghandhitechnology/rauhwpx-cloud:2.0.3-cloud.1';
+export const RAILWAY_DEFAULT_IMAGE = 'ghcr.io/ghandhitechnology/rauhwpx-cloud:2.0.3';
 export const RAUCLOUD_BASE_PATH = '/rauhwpx-cloud';
 export const RAUCLOUD_PORT = 7740;
 
