@@ -1,6 +1,6 @@
 {
   "name": "@rauhwpx/cloud",
-  "version": "2.0.3-cloud.1",
+  "version": "2.0.3",
   "private": true,
   "type": "module",
   "engines": {
