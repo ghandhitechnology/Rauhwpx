@@ -26,7 +26,6 @@ use std::path::Path;
 use rhwp::document_core::DocumentCore;
 use rhwp::renderer::render_tree::{RenderNode, RenderNodeType};
 
-/// 자기 칸 상자 아래로 내려간 글줄 — 이 결함이 화면에서 글자를 지우는 그 모양이다.
 fn lines_outside_their_cell(node: &RenderNode, cell_bottom: Option<f64>, out: &mut Vec<String>) {
     if !node.visible || node.editor_only {
         return;
@@ -135,7 +134,6 @@ fn no_occurrence_of_the_line_escapes_its_cell() {
     );
 }
 
-/// 그 쪽 전체에도 칸 밖 글줄이 없어야 한다 — 한 줄만 밀어 넣고 다른 줄을 밀어내면 안 된다.
 #[test]
 fn the_pages_that_carry_it_have_no_escaped_line() {
     let path = fixture_path();
@@ -148,8 +146,6 @@ fn the_pages_that_carry_it_have_no_escaped_line() {
     }
 }
 
-/// 원본의 section 28 / 표 문단을 보존한 내부 IR 계약 입력이다.
-/// 별도로 한컴에서 저장하거나 PDF로 변환한 축소 문서가 아니다.
 fn isolated_curriculum_table() -> rhwp::model::document::Document {
     let path = fixture_path();
     let bytes = std::fs::read(&path).expect("committed curriculum fixture");
@@ -219,8 +215,6 @@ fn assert_continuation_document(
             .expect("render every fragment");
         let mut found = Vec::new();
         locate(&tree.root, None, NEEDLE, &mut found);
-        // 기본 입력의 이어받는 바늘 조각은 본문 안에 있어야 한다. 여백을 조인
-        // 변형은 이 엔진의 기존 13px 하단 압축으로 본문을 넘길 수 있어 칸 경계만 잠근다.
         if check_needle_body && !found.is_empty() {
             assert_tables_inside_body(&tree.root, None);
         }
@@ -243,9 +237,6 @@ fn consumed_start_cut_does_not_grow_the_fragment_past_the_body() {
     );
 }
 
-/// 본문 예산을 바꿔 쪽수 전환을 강제한다. 이 엔진은 13px 하단 압축이
-/// 상류 ±20px(1500 HU) 변화를 흡수해 쪽수가 그대로라, 같은 41점을 더 넓은
-/// 여백에서 검사한다.
 #[test]
 fn continuation_height_respects_varying_page_budgets() {
     let source = isolated_curriculum_table();

@@ -18402,7 +18402,6 @@ impl TypesetEngine {
                     )
                     .is_none_or(|remaining| remaining <= 0.0);
 
-            // 중간 또는 내용이 완전히 소비된 최종 컷 fragment 배치
             st.current_items.push(PageItem::PartialTable {
                 para_index: para_idx,
                 control_index: ctrl_idx,
