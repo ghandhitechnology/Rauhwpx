@@ -1123,7 +1123,6 @@ impl LayoutEngine {
         native_saved_text_frame_outer_box: bool,
         wrapper_margin_already_applied: bool,
     ) -> f64 {
-        // [#6929] 진입 시점의 단 상태 — 이후 이 함수가 자식을 붙이므로 먼저 찍어 둔다.
         let column_is_empty_on_entry = col_node.children.is_empty();
         if table.cells.is_empty() {
             if depth == 0 {
@@ -2915,8 +2914,6 @@ impl LayoutEngine {
         caption_spacing: f64,
         para_y: Option<f64>,
         allow_para_top_bleed: bool,
-        // [#6929] 이 단(column)에 아직 아무것도 안 놓였나 — 공동 앵커 형제 쌓임과
-        // 앵커 자신의 줄 예약을 가른다.
         column_is_empty: bool,
     ) -> f64 {
         let table_treat_as_char = table.common.treat_as_char;
@@ -3027,20 +3024,6 @@ impl LayoutEngine {
                         && declared_height > 0.0
                         && table_height
                             > declared_height + ROWBREAK_OBJECT_BOTTOM_BLEED_TOLERANCE_PX;
-                // [#6929] 앵커가 칼럼 맨 위면 push-down 의 기준은 **앵커 자신**이다.
-                //
-                // `#347` 의 push-down 은 "앞선 표·텍스트 아래로 민다"인데, 앵커 문단이
-                // 칼럼 최상단에 있으면 앞선 것이 없다. 그때 `y_start` 가 앵커보다 아래인
-                // 것은 **앵커 문단 자신의 줄 예약**뿐이고, 그 아래로 밀면 문단 기준
-                // `vert_offset` 이 통째로 무시된다. 실측(`samples/issue6929/148776468_….hwp`
-                // 1쪽): 본문 상단 94.5 + 저장 `vertOffset` 433 HU(5.77px) = 100.3 인데
-                // `y_start` 118.5(= 94.5 + 앵커 줄 24.0)로 밀려, 표 아래끝이 제목 문단을
-                // 18.2px 침범했다. 한/글 2020 정본은 100.2 에 그린다.
-                //
-                // ⚠ **단이 비었을 때만**이다. 한 문단에 자리차지 표가 여럿 달리면
-                // (co-anchored) 그 쌓임을 만드는 것이 `y_start` 다 — `#1639` 가 그 순서를,
-                // `#1549` 가 "보이는 host 제목 아래로 민다"를 잠그고 있다. 둘 다 이 조건에서
-                // 빠진다(앞자는 형제가 이미 놓여 단이 비지 않았고, 뒷자는 제목 줄이 먼저 놓인다).
                 let anchor_at_column_top = (anchor_y - col_area.y).abs() <= 0.5;
                 let push_floor = if anchor_at_column_top
                     && column_is_empty
