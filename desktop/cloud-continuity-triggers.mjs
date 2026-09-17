@@ -32,7 +32,12 @@ export function installCloudContinuityTriggers({
   powerMonitor.on('unlock-screen', onUnlock);
   const edgeTimer = setIntervalImpl(() => {
     const next = Boolean(isOnline());
-    if (next && !online) run('online');
+    // A laptop that was offline at the last tick renews the reservation as soon
+    // as connectivity returns instead of waiting out the keep-warm interval.
+    if (next && !online) {
+      run('online');
+      warm('online');
+    }
     online = next;
   }, pollMs);
   edgeTimer.unref?.();

@@ -523,6 +523,7 @@ export class CloudCoordinator extends EventEmitter {
       this.#spawnPromise,
       this.#teardownPromise,
       this.#provisionPromise,
+      this.#prewarmPromise,
       this.#accountStatusPromise,
       mergePrefetch,
       this.#continuityPromise,
@@ -1804,6 +1805,9 @@ export class CloudCoordinator extends EventEmitter {
     const provider = this.#managedAccountProvider();
     if (!provider || typeof provider.prewarm !== 'function') return null;
     const profile = await this.#client.loadProfile().catch(() => null);
+    // A self-hosted setup never sends work to Raucloud, so holding a warm
+    // broker worker for it would only spend unbilled operator capacity.
+    if (profile?.mode === 'self-hosted') return null;
     if (profile?.mode === 'app-hosted') {
       // A live app sandbox already owns the account's worker. Only prepare a new
       // reservation once the saved one is gone, so an open app never keeps a
@@ -1814,7 +1818,8 @@ export class CloudCoordinator extends EventEmitter {
         .then((status) => status?.lifecycle ?? null, () => null);
       if (lifecycle !== 'idle') return null;
     }
-    const account = this.#accountSnapshot ?? await this.#refreshAccountStatus();
+    // The snapshot can be arbitrarily old; the refresh dedupes within 15s.
+    const account = await this.#refreshAccountStatus();
     if (account?.signedIn !== true || !account.account) return null;
     if (account.quota && account.quota.remainingMs <= 0) return null;
     if (account.raucloud?.kind === 'active-elsewhere') return null;
@@ -1831,6 +1836,7 @@ export class CloudCoordinator extends EventEmitter {
       type: 'sandbox-prewarm-ready',
       reason,
       lifecycle: status.lifecycle,
+      prewarmed: status.prewarmed === true,
       warmUntil: status.raucloud?.warmUntil ?? null,
     });
     return status;

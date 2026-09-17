@@ -119,7 +119,7 @@ function normalizedStatus(payload, fallback = 'idle') {
       controller: controller && typeof controller === 'object' ? controller : null,
       readOnly: run.readOnly === true || payload?.readOnly === true || gate?.state === 'owned_elsewhere',
       takeoverRequired: run.takeoverRequired === true || payload?.takeoverRequired === true || gate?.state === 'owned_elsewhere',
-      warmUntil: typeof warmUntil === 'string' ? warmUntil : null,
+      warmUntil: isoTime(warmUntil, null),
       reused: run.reused === true || payload?.reused === true,
       quota: quota && typeof quota === 'object' ? quota : null,
       gate,
@@ -415,8 +415,10 @@ export function createRaucloudBrokerClient({
     },
     async prewarm({ deviceName = '', signal = null } = {}) {
       const currentDevice = await device(deviceName);
+      // Prewarm answers from broker state without waiting on provisioning, so
+      // it needs only the standard request deadline.
       return request('/v1/cloud/prewarm', {
-        method: 'POST', signal, timeoutMs: setupRequestTimeoutMs,
+        method: 'POST', signal,
         body: {
           deviceId: currentDevice.id,
           deviceName: currentDevice.name,
@@ -429,7 +431,7 @@ export function createRaucloudBrokerClient({
       if (!safeId) throw new AppServerError('Raucloud run id is invalid', { code: 'RAUCLOUD_RUN_INVALID', retryable: false });
       const currentDevice = await device(deviceName);
       return request(`/v1/cloud/runs/${safeId}/receipt`, {
-        method: 'POST', signal, timeoutMs: setupRequestTimeoutMs,
+        method: 'POST', signal,
         body: { deviceId: currentDevice.id, deviceName: currentDevice.name },
       });
     },
@@ -604,7 +606,7 @@ export function createRaucloudBrokerProvider(options = {}) {
           ? 'Your Cloud worker is warm and waiting'
           : 'Preparing your Cloud worker before the first message');
       }
-      return { supported: true, ...state, account: accountSnapshotFrom(payload) };
+      return { supported: true, prewarmed: payload?.prewarm === true, ...state, account: accountSnapshotFrom(payload) };
     },
     ...(options.getLocalCacheIdentity ? { getLocalCacheIdentity: options.getLocalCacheIdentity } : {}),
     listMergeRequests(options) { return client.listMergeRequests(options); },

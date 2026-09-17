@@ -58,18 +58,22 @@ test('a cadence timer reconciles without a wake or network edge', async () => {
   setup.stop();
 });
 
-test('the warm reservation is renewed on startup, wake, unlock, and its own cadence', async () => {
+test('the warm reservation is renewed on startup, wake, unlock, reconnect, and its own cadence', async () => {
   const setup = harness();
   await settle();
   setup.monitor.emit('resume');
   setup.monitor.emit('unlock-screen');
+  setup.state.online = false;
+  setup.timers.get(10_000)();
+  setup.state.online = true;
+  setup.timers.get(10_000)();
   setup.timers.get(20 * 60_000)();
   await settle();
-  assert.deepEqual(setup.warmCalls, ['startup', 'resume', 'unlock', 'keep-warm']);
+  assert.deepEqual(setup.warmCalls, ['startup', 'resume', 'unlock', 'online', 'keep-warm']);
   setup.stop();
   setup.timers.get(20 * 60_000)();
   await settle();
-  assert.deepEqual(setup.warmCalls, ['startup', 'resume', 'unlock', 'keep-warm']);
+  assert.deepEqual(setup.warmCalls, ['startup', 'resume', 'unlock', 'online', 'keep-warm']);
 });
 
 test('a reconcile or warm failure never rejects into the caller', async () => {
