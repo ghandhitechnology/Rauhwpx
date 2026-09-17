@@ -120,8 +120,6 @@ export function ensureTableCellBboxCache<B extends PageScopedBbox>(
   }
 
   try {
-    // [#7189] 중첩 표는 평면 좌표계로 가리킬 수 없다 — 경로 API 로 물어야 안쪽 표의
-    // 괘선이 나온다. 깊이 1 은 평면 질의가 페이지 힌트까지 받으므로 그대로 둔다.
     const path = tableRef.path;
     const bboxes = path && path.length > 1
       ? host.wasm.getTableCellBboxesByPath(tableRef.sec, tableRef.ppi, JSON.stringify(path))

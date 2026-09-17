@@ -1636,13 +1636,9 @@ impl DocumentCore {
             crate::renderer::style_resolver::resolve_styles(&self.document.doc_info, self.dpi);
     }
 
-    /// 여러 셀의 width/height를 한 번에 조절한다 (네이티브).
-    ///
-    /// json 형식: `[{"cellIdx":0,"widthDelta":150},{"cellIdx":2,"heightDelta":-100}]`
-    /// [#7189] 셀 크기 조절의 공통 본문 — 표 하나를 받아 갱신하고 리플로우 대상을 돌려준다.
+    /// 셀 크기 갱신을 표에 반영하고, 폭이 바뀐 셀의 `(셀 번호, 문단 수)` 를 돌려준다.
     ///
     /// Hangul 3모드 local_resize / renderWidth / renderHeight 도 여기서 반영한다.
-    /// 반환값은 폭이 바뀐 셀의 `(셀 번호, 문단 수)`.
     fn apply_cell_resize_updates(
         table: &mut Table,
         updates: &[CellResizeUpdate],
@@ -1951,6 +1947,9 @@ impl DocumentCore {
         Ok("{\"ok\":true}".to_string())
     }
 
+    /// 여러 셀의 width/height를 한 번에 조절한다 (네이티브).
+    ///
+    /// json 형식: `[{"cellIdx":0,"widthDelta":150},{"cellIdx":2,"heightDelta":-100}]`
     pub(crate) fn resize_table_cells_native(
         &mut self,
         section_idx: usize,
