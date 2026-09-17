@@ -13,15 +13,6 @@ export interface BorderEdge {
   pageIndex: number;
 }
 
-/**
- * 경계선이 **실제로 존재하는** 구간. 병합 칸이 있으면 한 열/행 경계가 여러 토막으로 끊긴다.
- *
- * [#7191] 종전에는 선마다 표 전체 범위(`minX..maxX` / `minY..maxY`) 하나만 들고 있었다.
- * 그런데 적중 판정(`hitTestBorder`)은 칸 상자를 훑으므로, 그리는 범위와 잡는 범위가
- * 서로 다른 출처였다 — 경계가 두 칸에만 있는데 선은 표 높이 828px 를 가로질러 그려지고,
- * 그 구간에 마우스를 올리면 잡히지 않았다(3147199 1쪽 `x=374.0`·`x=446.5`).
- * 이제 둘 다 칸 상자에서 나온다.
- */
 interface RowLine { y: number; spans: BorderSpan[]; index: number }
 interface ColLine { x: number; spans: BorderSpan[]; index: number }
 
@@ -45,13 +36,7 @@ export class TableResizeRenderer {
     }
   }
 
-  /**
-   * 셀 bbox 배열에서 행/열 경계선 좌표를 계산한다 (페이지 좌표 기준).
-   *
-   * rowIndexByY/colIndexByX 는 병합 **전** 반올림 좌표에서 대표 괘선 인덱스를 찾는 맵이다.
-   * 셀 좌표로 인덱스를 되찾는 쪽(hitTestBorder)은 반드시 이 맵을 써야 한다 — 괘선 목록의
-   * 대표 좌표만으로 맵을 다시 만들면, 병합돼 사라진 좌표를 가진 셀의 경계를 못 찾는다.
-   */
+  /** 셀 bbox 배열에서 행/열 경계선 좌표를 계산한다 (페이지 좌표 기준). */
   computeBorderLines(bboxes: CellBbox[]): {
     rowLines: RowLine[];
     colLines: ColLine[];
@@ -74,12 +59,9 @@ export class TableResizeRenderer {
       colXs.add(ry(b.x + b.w));
     }
 
-    // 반올림 경계에 걸쳐 갈라진 같은 경계를 하나로 묶는다.
     const rows = mergeBorderCoords(rowYs);
     const cols = mergeBorderCoords(colXs);
 
-    // [#7191] 각 경계선이 실제로 존재하는 구간을 칸 상자에서 모은다 — 적중 판정과 같은
-    // 출처다. 아래 두 루프의 인덱스 조회는 `hitTestBorder` 의 것과 한 글자도 다르지 않다.
     const { rowSpans, colSpans } = computeBorderSpans(
       bboxes, rows.indexByCoord, cols.indexByCoord, ry,
     );
@@ -108,8 +90,6 @@ export class TableResizeRenderer {
   ): BorderEdge | null {
     if (bboxes.length === 0) return null;
 
-    // 인덱스 맵은 반드시 computeBorderLines 가 준 것을 쓴다. 괘선 목록의 대표 좌표로
-    // 다시 만들면 병합돼 사라진 좌표를 가진 셀의 경계가 잡히지 않는다.
     const { rowIndexByY, colIndexByX } = this.computeBorderLines(bboxes);
     const pageIndex = bboxes[0].pageIndex;
     const rounded = (v: number) => Math.round(v * 10) / 10;
@@ -191,8 +171,6 @@ export class TableResizeRenderer {
       : colLines.find(l => l.index === edge.index);
     if (!line || line.spans.length === 0) return;
 
-    // [#7191] 경계가 실제로 있는 구간마다 하나씩 그린다. 병합 칸 때문에 한 경계가 여러
-    // 토막으로 끊기면 그 토막들만 보이고, 잡히지 않는 구간에는 선도 없다.
     const el = document.createElement('div');
     el.style.cssText = 'position:absolute;left:0;top:0;pointer-events:none;';
     for (const span of line.spans) {

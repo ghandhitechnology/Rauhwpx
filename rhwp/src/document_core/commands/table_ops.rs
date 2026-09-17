@@ -1897,10 +1897,7 @@ impl DocumentCore {
         }
     }
 
-    /// [#7189] 중첩 표의 셀 크기를 셀 경로로 조절한다.
-    ///
-    /// 평면 API는 최상위 표만 닿아, 중첩 표 셀 번호가 바깥 표에 적용됐다.
-    /// 깊이 1 경로는 평면 경로에 위임한다.
+    /// 중첩 표의 셀 크기를 셀 경로로 조절한다. 깊이 1 경로는 평면 경로에 위임한다.
     pub fn resize_table_cells_by_cell_path_native(
         &mut self,
         section_idx: usize,
@@ -1923,8 +1920,6 @@ impl DocumentCore {
         let table = self.resolve_table_mut_by_cell_path(section_idx, parent_para_idx, path)?;
         let reflow_cells = Self::apply_cell_resize_updates(table, &updates, force_local_resize);
 
-        // 리플로우는 안쪽 셀 폭을 기준으로 해야 한다. 바깥 표 폭으로 재면 중첩 표 글줄이
-        // 제 칸을 넘는다.
         let depth = path.len() - 1;
         let mut inner_path: Vec<(usize, usize, usize)> = path[..depth].to_vec();
         inner_path.push((control_idx, 0, 0));
