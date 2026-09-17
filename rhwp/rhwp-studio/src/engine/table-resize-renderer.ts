@@ -1,5 +1,6 @@
 import { VirtualScroll } from '@/view/virtual-scroll';
 import type { CellBbox } from '@/core/types';
+import { computeBorderSpans, mergeBorderCoords, type BorderSpan } from './table-border-lines';
 
 /** 경계선 종류 */
 export type BorderEdgeType = 'row' | 'col';
@@ -12,8 +13,17 @@ export interface BorderEdge {
   pageIndex: number;
 }
 
-interface RowLine { y: number; xStart: number; xEnd: number; index: number }
-interface ColLine { x: number; yStart: number; yEnd: number; index: number }
+/**
+ * 경계선이 **실제로 존재하는** 구간. 병합 칸이 있으면 한 열/행 경계가 여러 토막으로 끊긴다.
+ *
+ * [#7191] 종전에는 선마다 표 전체 범위(`minX..maxX` / `minY..maxY`) 하나만 들고 있었다.
+ * 그런데 적중 판정(`hitTestBorder`)은 칸 상자를 훑으므로, 그리는 범위와 잡는 범위가
+ * 서로 다른 출처였다 — 경계가 두 칸에만 있는데 선은 표 높이 828px 를 가로질러 그려지고,
+ * 그 구간에 마우스를 올리면 잡히지 않았다(3147199 1쪽 `x=374.0`·`x=446.5`).
+ * 이제 둘 다 칸 상자에서 나온다.
+ */
+interface RowLine { y: number; spans: BorderSpan[]; index: number }
+interface ColLine { x: number; spans: BorderSpan[]; index: number }
 
 /** 표 셀 경계선 위 hover 시 마커(하이라이트 라인)를 표시한다 */
 export class TableResizeRenderer {
@@ -35,25 +45,23 @@ export class TableResizeRenderer {
     }
   }
 
-  /** 셀 bbox 배열에서 행/열 경계선 좌표를 계산한다 (페이지 좌표 기준) */
-  computeBorderLines(bboxes: CellBbox[]): { rowLines: RowLine[]; colLines: ColLine[] } {
-    if (bboxes.length === 0) return { rowLines: [], colLines: [] };
-
-    // 표 전체 범위
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    for (const b of bboxes) {
-      minX = Math.min(minX, b.x);
-      maxX = Math.max(maxX, b.x + b.w);
-      minY = Math.min(minY, b.y);
-      maxY = Math.max(maxY, b.y + b.h);
+  /**
+   * 셀 bbox 배열에서 행/열 경계선 좌표를 계산한다 (페이지 좌표 기준).
+   *
+   * rowIndexByY/colIndexByX 는 병합 **전** 반올림 좌표에서 대표 괘선 인덱스를 찾는 맵이다.
+   * 셀 좌표로 인덱스를 되찾는 쪽(hitTestBorder)은 반드시 이 맵을 써야 한다 — 괘선 목록의
+   * 대표 좌표만으로 맵을 다시 만들면, 병합돼 사라진 좌표를 가진 셀의 경계를 못 찾는다.
+   */
+  computeBorderLines(bboxes: CellBbox[]): {
+    rowLines: RowLine[];
+    colLines: ColLine[];
+    rowIndexByY: Map<number, number>;
+    colIndexByX: Map<number, number>;
+  } {
+    if (bboxes.length === 0) {
+      return { rowLines: [], colLines: [], rowIndexByY: new Map(), colIndexByX: new Map() };
     }
 
-    // 행 경계선 (수평): 셀 상단/하단 y 좌표 수집
-    const rowYSet = new Map<number, number>(); // y(rounded) → index
-    // 열 경계선 (수직): 셀 좌측/우측 x 좌표 수집
-    const colXSet = new Map<number, number>(); // x(rounded) → index
-
-    // 표 상단/하단, 좌측/우측 추가
     const ry = (v: number) => Math.round(v * 10) / 10; // 소수점 1자리 반올림
 
     // 모든 셀의 상/하단, 좌/우측 좌표 수집
@@ -66,19 +74,30 @@ export class TableResizeRenderer {
       colXs.add(ry(b.x + b.w));
     }
 
-    // 정렬하여 인덱스 부여
-    const sortedRowYs = [...rowYs].sort((a, b) => a - b);
-    const sortedColXs = [...colXs].sort((a, b) => a - b);
+    // 반올림 경계에 걸쳐 갈라진 같은 경계를 하나로 묶는다.
+    const rows = mergeBorderCoords(rowYs);
+    const cols = mergeBorderCoords(colXs);
 
-    const rowLines: RowLine[] = sortedRowYs.map((y, i) => ({
-      y, xStart: minX, xEnd: maxX, index: i,
+    // [#7191] 각 경계선이 실제로 존재하는 구간을 칸 상자에서 모은다 — 적중 판정과 같은
+    // 출처다. 아래 두 루프의 인덱스 조회는 `hitTestBorder` 의 것과 한 글자도 다르지 않다.
+    const { rowSpans, colSpans } = computeBorderSpans(
+      bboxes, rows.indexByCoord, cols.indexByCoord, ry,
+    );
+
+    const rowLines: RowLine[] = rows.positions.map((y, i) => ({
+      y, spans: rowSpans.get(i) ?? [], index: i,
     }));
 
-    const colLines: ColLine[] = sortedColXs.map((x, i) => ({
-      x, yStart: minY, yEnd: maxY, index: i,
+    const colLines: ColLine[] = cols.positions.map((x, i) => ({
+      x, spans: colSpans.get(i) ?? [], index: i,
     }));
 
-    return { rowLines, colLines };
+    return {
+      rowLines,
+      colLines,
+      rowIndexByY: rows.indexByCoord,
+      colIndexByX: cols.indexByCoord,
+    };
   }
 
   /** 마우스 좌표가 경계선 위인지 판별한다 (페이지 좌표 기준) */
@@ -89,11 +108,11 @@ export class TableResizeRenderer {
   ): BorderEdge | null {
     if (bboxes.length === 0) return null;
 
-    const { rowLines, colLines } = this.computeBorderLines(bboxes);
+    // 인덱스 맵은 반드시 computeBorderLines 가 준 것을 쓴다. 괘선 목록의 대표 좌표로
+    // 다시 만들면 병합돼 사라진 좌표를 가진 셀의 경계가 잡히지 않는다.
+    const { rowIndexByY, colIndexByX } = this.computeBorderLines(bboxes);
     const pageIndex = bboxes[0].pageIndex;
     const rounded = (v: number) => Math.round(v * 10) / 10;
-    const rowIndexByY = new Map(rowLines.map(line => [rounded(line.y), line.index]));
-    const colIndexByX = new Map(colLines.map(line => [rounded(line.x), line.index]));
 
     const candidates: Array<{ edge: BorderEdge; distance: number; priority: number }> = [];
 
@@ -139,7 +158,7 @@ export class TableResizeRenderer {
       if (rightIndex !== undefined && Math.abs(pageX - rightX) <= tolerance) {
         candidates.push({
           edge: { type: 'col', index: rightIndex, pageIndex },
-          distance: Math.abs(pageX - rightX),
+          distance: Math.abs(pageX - b.x),
           priority: 0,
         });
       }
@@ -167,30 +186,37 @@ export class TableResizeRenderer {
     const pageLeft = this.virtualScroll.getPageLeftResolved(edge.pageIndex, contentWidth);
 
     const t = TableResizeRenderer.MARKER_THICKNESS;
-    const el = document.createElement('div');
+    const line = edge.type === 'row'
+      ? rowLines.find(l => l.index === edge.index)
+      : colLines.find(l => l.index === edge.index);
+    if (!line || line.spans.length === 0) return;
 
-    if (edge.type === 'row') {
-      const line = rowLines.find(l => l.index === edge.index);
-      if (!line) return;
-      const left = pageLeft + line.xStart * zoom;
-      const top = pageOffset + line.y * zoom - t / 2;
-      const width = (line.xEnd - line.xStart) * zoom;
-      el.style.cssText =
-        `position:absolute;` +
-        `left:${left}px;top:${top}px;` +
-        `width:${width}px;height:${t}px;` +
-        `background:${TableResizeRenderer.MARKER_COLOR};pointer-events:none;`;
-    } else {
-      const line = colLines.find(l => l.index === edge.index);
-      if (!line) return;
-      const left = pageLeft + line.x * zoom - t / 2;
-      const top = pageOffset + line.yStart * zoom;
-      const height = (line.yEnd - line.yStart) * zoom;
-      el.style.cssText =
-        `position:absolute;` +
-        `left:${left}px;top:${top}px;` +
-        `width:${t}px;height:${height}px;` +
-        `background:${TableResizeRenderer.MARKER_COLOR};pointer-events:none;`;
+    // [#7191] 경계가 실제로 있는 구간마다 하나씩 그린다. 병합 칸 때문에 한 경계가 여러
+    // 토막으로 끊기면 그 토막들만 보이고, 잡히지 않는 구간에는 선도 없다.
+    const el = document.createElement('div');
+    el.style.cssText = 'position:absolute;left:0;top:0;pointer-events:none;';
+    for (const span of line.spans) {
+      const seg = document.createElement('div');
+      if (edge.type === 'row') {
+        const left = pageLeft + span.start * zoom;
+        const top = pageOffset + (line as RowLine).y * zoom - t / 2;
+        const width = (span.end - span.start) * zoom;
+        seg.style.cssText =
+          `position:absolute;` +
+          `left:${left}px;top:${top}px;` +
+          `width:${width}px;height:${t}px;` +
+          `background:${TableResizeRenderer.MARKER_COLOR};pointer-events:none;`;
+      } else {
+        const left = pageLeft + (line as ColLine).x * zoom - t / 2;
+        const top = pageOffset + span.start * zoom;
+        const height = (span.end - span.start) * zoom;
+        seg.style.cssText =
+          `position:absolute;` +
+          `left:${left}px;top:${top}px;` +
+          `width:${t}px;height:${height}px;` +
+          `background:${TableResizeRenderer.MARKER_COLOR};pointer-events:none;`;
+      }
+      el.appendChild(seg);
     }
 
     this.layer.appendChild(el);
