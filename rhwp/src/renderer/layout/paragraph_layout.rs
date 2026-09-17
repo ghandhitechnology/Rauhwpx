@@ -4978,7 +4978,6 @@ impl LayoutEngine {
             mut pending_right_leader_digit_render,
             mut current_line_reserved_tac_picture_height,
         } = st;
-        // [#7150] 이 줄이 실제로 방출하는 TAC 집합에서 표 앵커를 한 번 고른다.
         // 줄 끝 표와 다음 줄 첫 개체는 같은 가시 문자 위치에 투영될 수 있다.
         // 그때는 저장 UTF-16 줄 소속으로 다른 줄의 표를 걸러 낸다.
         let stored_assign = para.and_then(|p| stored_tac_line_assignment(p, composed));
@@ -5889,7 +5888,6 @@ impl LayoutEngine {
                         }
                     }
                     // 인라인 TAC 표: 텍스트 흐름 위치에 직접 렌더링
-                    // 표 하단 = 베이스라인 + outer_margin_bottom
                     if let (Some(p), Some(bdc)) = (para, bin_data_content) {
                         if let Some(Control::Table(t)) = p.controls.get(tac_ci) {
                             let raw_seg_width =
@@ -5926,8 +5924,7 @@ impl LayoutEngine {
                                     hwpunit_to_px(t.outer_margin_bottom as i32, self.dpi);
                                 // [#7150] 저장 lh가 자기 높이와 상하 여백의 합이면 자기
                                 // 바깥여백에 앉힌다. 동반 표는 위에서 한 번 선택한 줄별
-                                // 앵커를 공유한다. 소유자가 없는 줄은 기존
-                                // `baseline + om_bottom` 경로를 유지한다.
+                                // 앵커를 공유한다.
                                 let stored_lh_covers_om = (om_top > 0.0 || om_bottom > 0.0)
                                     && (table_h + om_top + om_bottom - 0.2
                                         ..=table_h + om_top + om_bottom + 0.2)
@@ -5940,7 +5937,6 @@ impl LayoutEngine {
                                     // 앉히면 `y + owner_om_top + 0.85×(owner_h − table_h)`.
                                     (y + owner_om_top + (owner_h - table_h) * 0.85).max(y)
                                 } else {
-                                    // 표 하단 = 베이스라인 + outer_margin_bottom
                                     (y + baseline + om_bottom - table_h).max(y)
                                 };
                                 // [Task #2212] 셀 안 인라인 TAC 표는 외곽 셀 경로를

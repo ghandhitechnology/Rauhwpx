@@ -3,12 +3,6 @@
 //! [Issue #7150] 한 줄에 글자처럼 취급되는 표가 둘 이상이면, **줄 높이를 정한 표**까지
 //! 저장 기준선에 앉아 그 줄 전체가 내려앉는다.
 //!
-//! 업스트림 `#7049` 는 밴드 분기(`y + om_top`)를 「줄을 독점한 표」로 좁히며
-//! `line_tac_table_count <= 1` 을 걸었고, 그 술어는 줄을 **소유한** 표까지 배제한다.
-//! Rauhwpx 는 그 술어 자체가 없고 `table_y = (y + baseline + om_bottom - table_h).max(y)`
-//! 만 쓴다. 소유 표는 `.max(y)` 로 줄 상단에 붙고, 동반 표는 저장 기준선에 앉아
-//! 하단차가 높이차의 0.15배가 되지 않는다.
-//!
 //! 한/글은 소유자를 `줄상단 + om_top` 에 고정하고, 같은 줄의 다른 표는 그 앵커에서
 //! 유도한 공유 기준선 `y + owner_om_top + 0.85×owner_h` 에 앉힌다.
 //!
@@ -60,7 +54,6 @@ fn page_lines(root: &RenderNode) -> Vec<(f64, f64, f64, f64)> {
     out
 }
 
-/// 폭이 `[lo, hi]` 인 표들을 x 순으로.
 fn by_width(tables: &[(f64, f64, f64, f64)], lo: f64, hi: f64) -> Vec<(f64, f64, f64, f64)> {
     let mut v: Vec<_> = tables
         .iter()
@@ -111,7 +104,6 @@ fn approval_tables(rel: &str) -> (RenderNode, (f64, f64, f64, f64), (f64, f64, f
     (root, companion[0], owner[0])
 }
 
-/// 줄을 소유한 표(우 7×4, 높이 150.60)는 `줄상단 + om_top` 에 앉는다.
 #[test]
 fn issue_7150_line_owner_sits_at_its_outer_margin() {
     let (root, _, owner) = approval_tables(SAMPLE);
@@ -129,7 +121,6 @@ fn issue_7150_line_owner_sits_at_its_outer_margin() {
     );
 }
 
-/// 같은 줄의 다른 표(좌 4×2, 높이 109.00)도 소유자 앵커에서 유도한 기준선에 앉는다.
 #[test]
 fn issue_7150_line_companion_follows_the_owner_anchor() {
     let (root, companion, owner) = approval_tables(SAMPLE);
@@ -161,7 +152,6 @@ fn issue_7150_bottom_gap_keeps_the_issue_7049_contract() {
     );
 }
 
-/// 같은 쪽의 본문 칸은 건드리지 않는다 — 바깥 표의 나머지 세 행.
 #[test]
 fn issue_7150_body_rows_are_untouched() {
     let root = load_page(SAMPLE, 0);
