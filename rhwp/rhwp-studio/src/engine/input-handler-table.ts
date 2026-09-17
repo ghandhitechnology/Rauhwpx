@@ -5,6 +5,7 @@ import { MoveTableCommand, MovePictureCommand, MoveShapeCommand } from './comman
 import { getObjectProperties, setObjectProperties } from './input-handler-picture';
 import type { CellBbox } from '@/core/types';
 import type { WasmBridge } from '@/core/wasm-bridge';
+import type { TableRef } from './table-bbox-cache';
 import type { BorderEdge } from './table-resize-renderer';
 import { showToast } from '@/ui/toast';
 import {
@@ -400,7 +401,7 @@ function rememberLocalResizeSegment(
 
 function clampSingleCellResizeDelta(
   wasm: any,
-  tableRef: { sec: number; ppi: number; ci: number },
+  tableRef: TableRef,
   edge: BorderEdge,
   targetCellIdx: number,
   neighborCellIdx: number | null,
@@ -409,8 +410,8 @@ function clampSingleCellResizeDelta(
   if (neighborCellIdx === null || requestedDelta === 0) return requestedDelta;
 
   try {
-    const targetProps = wasm.getCellProperties(tableRef.sec, tableRef.ppi, tableRef.ci, targetCellIdx);
-    const neighborProps = wasm.getCellProperties(tableRef.sec, tableRef.ppi, tableRef.ci, neighborCellIdx);
+    const targetProps = cellProperties(wasm, tableRef, targetCellIdx);
+    const neighborProps = cellProperties(wasm, tableRef, neighborCellIdx);
     const targetSize = edge.type === 'col' ? targetProps.width : targetProps.height;
     const neighborSize = edge.type === 'col' ? neighborProps.width : neighborProps.height;
     if (!Number.isFinite(targetSize) || !Number.isFinite(neighborSize)) return requestedDelta;
@@ -518,7 +519,7 @@ function pushLocalResizeDisplayHint(
 
 function clampCompensatedResizeDelta(
   wasm: any,
-  tableRef: { sec: number; ppi: number; ci: number },
+  tableRef: TableRef,
   edge: BorderEdge,
   pairs: Array<{ targetCellIdx: number; neighborCellIdxs: number[] }>,
   requestedDelta: number,
@@ -528,14 +529,14 @@ function clampCompensatedResizeDelta(
 
   for (const pair of pairs) {
     try {
-      const targetProps = wasm.getCellProperties(tableRef.sec, tableRef.ppi, tableRef.ci, pair.targetCellIdx);
+      const targetProps = cellProperties(wasm, tableRef, pair.targetCellIdx);
       const targetSize = edge.type === 'col' ? targetProps.width : targetProps.height;
       if (requestedDelta < 0 && Number.isFinite(targetSize)) {
         finiteLimits.push(Math.max(0, Math.round(targetSize - MIN_TABLE_CELL_SIZE_HWP)));
       }
 
       for (const neighborCellIdx of pair.neighborCellIdxs) {
-        const neighborProps = wasm.getCellProperties(tableRef.sec, tableRef.ppi, tableRef.ci, neighborCellIdx);
+        const neighborProps = cellProperties(wasm, tableRef, neighborCellIdx);
         const neighborSize = edge.type === 'col' ? neighborProps.width : neighborProps.height;
         if (requestedDelta > 0 && Number.isFinite(neighborSize)) {
           finiteLimits.push(Math.max(0, Math.round(neighborSize - MIN_TABLE_CELL_SIZE_HWP)));
@@ -550,6 +551,12 @@ function clampCompensatedResizeDelta(
   const limit = Math.min(...finiteLimits);
   if (requestedDelta > 0) return Math.min(requestedDelta, limit);
   return -Math.min(Math.abs(requestedDelta), limit);
+}
+
+function cellProperties(wasm: any, tableRef: TableRef, cellIdx: number) {
+  return tableRef.path && tableRef.path.length > 1
+    ? wasm.getCellPropertiesByPath(tableRef.sec, tableRef.ppi, JSON.stringify(tableRef.path), cellIdx)
+    : wasm.getCellProperties(tableRef.sec, tableRef.ppi, tableRef.ci, cellIdx);
 }
 
 function clampCompensatedDisplayDelta(
@@ -794,10 +801,9 @@ export function finishResizeDrag(this: any, e: MouseEvent): void {
       this.cleanupResizeDrag();
       return;
     }
-    const targetProps = this.wasm.getCellProperties(
-      state.tableRef.sec,
-      state.tableRef.ppi,
-      state.tableRef.ci,
+    const targetProps = cellProperties(
+      this.wasm,
+      state.tableRef,
       state.singleCellTarget.cellIdx,
     );
     const targetDesiredSize = Math.max(MIN_TABLE_CELL_SIZE_HWP, targetDisplaySize + delta);
@@ -818,12 +824,11 @@ export function finishResizeDrag(this: any, e: MouseEvent): void {
         renderHeight: targetDesiredSize,
       }];
     if (neighborIdx !== null && neighborBox) {
-      const neighborProps = this.wasm.getCellProperties(
-        state.tableRef.sec,
-        state.tableRef.ppi,
-      state.tableRef.ci,
-      neighborIdx,
-    );
+      const neighborProps = cellProperties(
+        this.wasm,
+        state.tableRef,
+        neighborIdx,
+      );
     const neighborDesiredSize = Math.max(
       MIN_TABLE_CELL_SIZE_HWP,
       getCellDisplaySize(neighborBox, state.edge) - delta,
@@ -930,10 +935,9 @@ export function finishResizeDrag(this: any, e: MouseEvent): void {
     if (hasLocalHistory) {
       const updatedCells = new Set<number>();
       for (const pair of pairBoxes) {
-        const targetProps = this.wasm.getCellProperties(
-          state.tableRef.sec,
-          state.tableRef.ppi,
-          state.tableRef.ci,
+        const targetProps = cellProperties(
+          this.wasm,
+          state.tableRef,
           pair.targetCellIdx,
         );
         const targetDesiredSize = Math.max(
@@ -951,10 +955,9 @@ export function finishResizeDrag(this: any, e: MouseEvent): void {
 
         for (const neighborBox of pair.neighborBoxes) {
           if (updatedCells.has(neighborBox.cellIdx)) continue;
-          const neighborProps = this.wasm.getCellProperties(
-            state.tableRef.sec,
-            state.tableRef.ppi,
-            state.tableRef.ci,
+          const neighborProps = cellProperties(
+            this.wasm,
+            state.tableRef,
             neighborBox.cellIdx,
           );
           const neighborDesiredSize = Math.max(
@@ -1012,12 +1015,21 @@ export function finishResizeDrag(this: any, e: MouseEvent): void {
       kind: 'snapshot',
       operationType: 'resizeTableCells',
       operation: (wasm: any) => {
-        wasm.resizeTableCells(
-          state.tableRef.sec,
-          state.tableRef.ppi,
-          state.tableRef.ci,
-          updates,
-        );
+        if (state.tableRef.path && state.tableRef.path.length > 1) {
+          wasm.resizeTableCellsByPath(
+            state.tableRef.sec,
+            state.tableRef.ppi,
+            JSON.stringify(state.tableRef.path),
+            updates,
+          );
+        } else {
+          wasm.resizeTableCells(
+            state.tableRef.sec,
+            state.tableRef.ppi,
+            state.tableRef.ci,
+            updates,
+          );
+        }
         return this.cursor.getPosition();
       },
     });

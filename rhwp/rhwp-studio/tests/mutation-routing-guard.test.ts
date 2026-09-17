@@ -167,7 +167,7 @@ const BASELINE: Readonly<Record<string, number>> = {
   'src/engine/input-handler-keyboard.ts': 23, // +1: #6725 pasteHwpJson (executeOperation snapshot 내부)
   'src/engine/input-handler-mouse.ts': 3,
   'src/engine/input-handler-picture.ts': 11,
-  'src/engine/input-handler-table.ts': 7,
+  'src/engine/input-handler-table.ts': 8, // +1: [#7189] 같은 executeOperation 안의 resizeTableCellsByPath 전용 분기
   'src/engine/input-handler-text.ts': 11, // #2424: raw IME delete를 command 공통 typed helper로 이관
 };
 
