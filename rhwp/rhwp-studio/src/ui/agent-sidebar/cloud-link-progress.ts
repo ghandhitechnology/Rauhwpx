@@ -23,9 +23,13 @@ export function createLinkProgress(): LinkProgress {
   const element = document.createElement('div');
   element.className = 'ag-cloud-link-progress';
   element.hidden = true;
+  // 진행률은 추정치라서 부모 상태 영역의 낭독을 따라가지 않는다.
+  element.setAttribute('aria-live', 'off');
   const track = document.createElement('div');
   track.className = 'ag-cloud-link-progress-track';
   track.setAttribute('role', 'progressbar');
+  track.setAttribute('aria-valuemin', '0');
+  track.setAttribute('aria-valuemax', '100');
   const fill = document.createElement('div');
   fill.className = 'ag-cloud-link-progress-fill';
   track.append(fill);
@@ -41,7 +45,10 @@ export function createLinkProgress(): LinkProgress {
   let lingerTimer = 0;
 
   function paint(elapsedMs: number): void {
-    fill.style.width = `${(linkProgressRatio(elapsedMs, estimateMs) * 100).toFixed(1)}%`;
+    const ratio = linkProgressRatio(elapsedMs, estimateMs);
+    fill.style.width = `${(ratio * 100).toFixed(1)}%`;
+    const now = String(Math.round(ratio * 100));
+    if (track.getAttribute('aria-valuenow') !== now) track.setAttribute('aria-valuenow', now);
     const label = formatLinkEta(estimateMs - elapsedMs);
     eta.textContent = label;
     if (track.getAttribute('aria-valuetext') !== label) track.setAttribute('aria-valuetext', label);
@@ -59,14 +66,14 @@ export function createLinkProgress(): LinkProgress {
       kind = next;
       startedAt = performance.now();
       estimateMs = linkEstimateMs(next);
-      if (element.dataset.state === 'done') {
-        fill.style.transition = 'none';
-        window.requestAnimationFrame(() => { fill.style.transition = ''; });
-      }
       delete element.dataset.state;
       element.hidden = false;
       track.setAttribute('aria-label', next === 'reconnecting' ? 'Cloud 서버 연결 진행' : 'Cloud 서버 다시 만들기 진행');
+      // 완료 직후 다시 시작할 때 100%에서 0%로 거꾸로 차오르지 않게 전환 없이 되돌린다.
+      fill.style.transition = 'none';
       fill.style.width = '0%';
+      void fill.offsetWidth;
+      fill.style.transition = '';
       tick();
       window.clearInterval(tickTimer);
       tickTimer = window.setInterval(tick, TICK_MS);
@@ -86,6 +93,7 @@ export function createLinkProgress(): LinkProgress {
       rememberLinkDuration(finished, elapsedMs);
       element.dataset.state = 'done';
       fill.style.width = '100%';
+      track.setAttribute('aria-valuenow', '100');
       eta.textContent = '완료';
       track.setAttribute('aria-valuetext', '완료');
       lingerTimer = window.setTimeout(() => {
