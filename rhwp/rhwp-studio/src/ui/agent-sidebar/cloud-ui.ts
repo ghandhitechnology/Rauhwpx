@@ -46,6 +46,7 @@ import { createCheckpointMirror } from '../../cloud/checkpoint-mirror.ts';
 import { createCheckpointPublisher } from '../../cloud/checkpoint-publisher.ts';
 import { createCloudOnboarding, type CloudTransferIntent } from './cloud-onboarding.ts';
 import { createCloudDashboard } from './cloud-dashboard.ts';
+import { createLinkProgress } from './cloud-link-progress.ts';
 import { createCloudSyncIcon, createIcon } from './icons.ts';
 
 function el<K extends keyof HTMLElementTagNameMap>(
@@ -352,7 +353,8 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   const recoveryDetail = el('p', 'ag-cloud-recovery-detail');
   recoveryCopy.append(recoveryTitle, recoveryDetail);
   const recoveryActions = el('div', 'ag-cloud-recovery-actions');
-  recovery.append(recoveryChip, recoveryCopy, recoveryActions);
+  const recoveryProgress = createLinkProgress();
+  recovery.append(recoveryChip, recoveryCopy, recoveryProgress.element, recoveryActions);
   const panelStatus = el('div', 'ag-cloud-panel-status');
   panelStatus.setAttribute('role', 'status');
   panelStatus.setAttribute('aria-live', 'polite');
@@ -389,6 +391,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   recoveryStrip.hidden = true;
   recoveryStrip.setAttribute('role', 'status');
   recoveryStrip.setAttribute('aria-live', 'polite');
+  const recoveryStripProgress = createLinkProgress();
 
   const onboarding = createCloudOnboarding({
     controller: deps.controller,
@@ -1225,6 +1228,11 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   function renderRecovery(): void {
     const link = inferCloudLink(snapshot);
     const needsAttention = cloudLinkNeedsAttention(link);
+    const activeKind = link.kind === 'reconnecting' || link.kind === 'recreating' ? link.kind : null;
+    for (const progress of [recoveryProgress, recoveryStripProgress]) {
+      if (activeKind) progress.start(activeKind);
+      else progress.settle(link.kind === 'ready' ? 'done' : 'failed');
+    }
     recoveryStrip.hidden = !needsAttention || !deps.isCloudMode();
     const renderKey = JSON.stringify([link.kind, link.canRecreate, busy, recoveryBusy, authorityTransitionActive()]);
     if (renderKey === recoveryRenderKey) return;
@@ -1264,7 +1272,7 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     const stripIndicator = el('span', 'ag-cloud-recovery-strip-pulse');
     stripIndicator.setAttribute('aria-hidden', 'true');
     const stripActions = el('div', 'ag-cloud-recovery-strip-actions');
-    recoveryStrip.append(stripIndicator, stripTitle, stripActions);
+    recoveryStrip.append(stripIndicator, stripTitle, recoveryStripProgress.element, stripActions);
     if (link.kind === 'failed') {
       stripActions.append(action('다시 연결', reconnectLink, 'ag-primary'));
       if (link.canRecreate) stripActions.append(action('서버 다시 만들기', recreateLink));
@@ -1677,6 +1685,8 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
       unsubscribeEvents();
       dashboard.dispose();
       onboarding.dispose();
+      recoveryProgress.dispose();
+      recoveryStripProgress.dispose();
       closePanel();
     },
   };

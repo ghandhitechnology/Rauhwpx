@@ -2,6 +2,7 @@ import './cloud-dashboard.css';
 import type { CloudSnapshot } from '../../cloud/types.ts';
 import { inferCloudLink } from '../../cloud/link.ts';
 import { cloudDashboardSessions, cloudUsageSeries, readCloudUsage } from '../../cloud/usage-history.ts';
+import { createLinkProgress } from './cloud-link-progress.ts';
 import { createIcon } from './icons.ts';
 import { AGENT_LABEL } from './providers.ts';
 
@@ -112,6 +113,7 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
   const feedback = el('p', 'ag-cd-feedback');
   feedback.hidden = true;
   feedback.setAttribute('role', 'status');
+  const reconnectProgress = createLinkProgress();
 
   const stats = el('div', 'ag-cd-stats');
   function stat(label: string, className = '') {
@@ -185,7 +187,7 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
   const config = panel('서버 설정', 'ag-cd-config');
   const configFacts = el('dl', 'ag-cd-facts');
   config.root.append(configFacts, deps.configuration);
-  content.append(header, toolbar, feedback, stats, grid);
+  content.append(header, toolbar, feedback, reconnectProgress.element, stats, grid);
   element.append(content);
 
   function facts(target: HTMLElement, entries: Array<[string, string]>) {
@@ -200,7 +202,9 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
       delete feedback.dataset.kind;
       feedback.textContent = kind === 'refresh' ? '사용량과 연결 상태 확인 중…' : '서버에 다시 연결 중…';
     }
+    if (kind === 'reconnect') reconnectProgress.start('reconnecting');
     render();
+    let failed = false;
     try {
       const next = await (kind === 'refresh' ? deps.refresh() : deps.reconnect());
       if (disposed) return;
@@ -210,6 +214,7 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
       feedback.textContent = kind === 'refresh' ? '서버 상태와 사용량을 불러왔습니다.' : '연결 상태를 확인했습니다.';
       feedback.dataset.kind = 'success';
     } catch {
+      failed = true;
       if (disposed) return;
       refreshError = true;
       feedback.hidden = false;
@@ -217,6 +222,7 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
       feedback.dataset.kind = 'error';
     } finally {
       pending = false;
+      if (kind === 'reconnect') reconnectProgress.settle(failed ? 'failed' : 'done');
       if (!disposed) render();
     }
   }
@@ -426,6 +432,7 @@ export function createCloudDashboard(deps: CloudDashboardDeps) {
     dispose() {
       disposed = true;
       window.clearInterval(refreshTimer);
+      reconnectProgress.dispose();
       document.removeEventListener('visibilitychange', onVisibilityChange);
     },
   };
