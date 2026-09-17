@@ -46,8 +46,7 @@
 | 파일 | 용도 |
 |------|------|
 | `_convert.ps1` | PowerShell 변환 스크립트 (크래시 자동 복구 포함) |
-| `_watchdog.ps1` | Hang 감지 watchdog (10초마다 _convert.log mtime 감시 → 60초 무변동 시 Hwp.exe 강제 종료) |
-| `_convert.log` | 본 변환 실행 전체 로그 (재현/디버깅 참고용) |
+| `_watchdog.ps1` | Hang 감지 watchdog (10초마다 변환 로그 mtime 감시 → 60초 무변동 시 Hwp.exe 강제 종료) |
 
 ### 환경 구성
 

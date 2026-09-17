@@ -8318,7 +8318,6 @@ impl HwpDocument {
     }
 }
 
-pub(crate) mod event;
 mod hyperlink;
 
 /// WASM 뷰어 컨트롤러 (뷰포트 관리 + 스케줄링)
