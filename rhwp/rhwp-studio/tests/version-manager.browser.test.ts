@@ -447,11 +447,13 @@ test('dates appear on hover and focus without changing row height, and clean up 
     await page.hover('.ag-version-date-tooltip');
     assert(await page.$eval('.ag-version-date-tooltip', (tip) => tip.classList.contains('ag-visible')));
     assert.equal(await page.$eval('.ag-version-row', (row) => row.getBoundingClientRect().height), height);
+    await page.hover('.ag-versions-title');
+    await page.waitForFunction(() => !document.querySelector('.ag-version-date-tooltip.ag-visible'));
     await page.focus('[data-commit-id="merge5"]');
     await page.keyboard.press('ArrowDown');
     await page.waitForSelector('.ag-version-date-tooltip.ag-visible', { visible: true });
     await page.keyboard.press('Escape');
-    assert.equal(await page.$('.ag-version-date-tooltip.ag-visible'), null);
+    await page.waitForFunction(() => !document.querySelector('.ag-version-date-tooltip.ag-visible'));
     await page.hover('[data-commit-id="main3"]');
     await page.waitForSelector('.ag-version-date-tooltip.ag-visible', { visible: true });
     await page.evaluate(() => (window as any).__versionManagerHarness.close());
