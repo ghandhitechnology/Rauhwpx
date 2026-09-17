@@ -262,15 +262,42 @@ export async function checkCloudRecovery(page, origin, artifacts) {
     for (let index = 0; index < 25; index++) window.sidebarPreview.cloud.publish();
     return button.isConnected && document.activeElement === button;
   }), true);
-  const reconnectAt = performance.now();
+  await page.click('#cloud-hold-reconnect');
+  assert.equal(await page.$eval('#cloud-hold-reconnect', (node) => node.checked), true);
   await page.evaluate(() => {
     const button = document.querySelector('.ag-cloud-recovery-actions .ag-primary');
     button.click(); button.click(); button.click();
   });
+  // The recovery bar shows the estimate while the link is still down.
+  await page.waitForFunction(() => {
+    const bar = document.querySelector('.ag-cloud-recovery .ag-cloud-link-progress');
+    return bar && !bar.hidden && bar.querySelector('.ag-cloud-link-progress-eta').textContent !== '';
+  });
+  const reconnectProgress = await page.evaluate(async () => {
+    const node = document.querySelector('.ag-cloud-recovery .ag-cloud-link-progress');
+    const width = () => Number.parseFloat(node.querySelector('.ag-cloud-link-progress-fill').style.width);
+    const first = width();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    return {
+      eta: node.querySelector('.ag-cloud-link-progress-eta').textContent,
+      spoken: node.querySelector('[role="progressbar"]').getAttribute('aria-valuetext'),
+      first,
+      width: width(),
+      stripEta: document.querySelector('.ag-cloud-recovery-strip .ag-cloud-link-progress-eta').textContent,
+    };
+  });
+  assert.match(reconnectProgress.eta, /^약 \d+초 남음$/);
+  assert.equal(reconnectProgress.spoken, reconnectProgress.eta);
+  assert.match(reconnectProgress.stripEta, /^약 \d+초 남음$/, 'the composer strip shows its own estimate');
+  assert.ok(reconnectProgress.width > reconnectProgress.first && reconnectProgress.width < 40,
+    `the bar must crawl without filling up, got ${reconnectProgress.first}% → ${reconnectProgress.width}%`);
+  await page.screenshot({ path: resolve(artifacts, 'cloud-reconnect-eta.png') });
+  const releasedAt = performance.now();
+  await page.click('#cloud-hold-reconnect');
   await page.waitForFunction(() => window.sidebarPreview.cloud.controller.getSnapshot().link.kind === 'ready'
     && document.querySelector('#cloud-workspace').dataset.displayState === 'live'
     && !document.querySelector('.ag-input').disabled);
-  const reconnectMs = performance.now() - reconnectAt;
+  const reconnectMs = performance.now() - releasedAt;
   assert.ok(reconnectMs < 1500);
   assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.reconnect), 1);
   assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.controller.getSnapshot().session.sessionId), original.sessionId);
@@ -342,6 +369,31 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   await page.screenshot({ path: resolve(artifacts, 'cloud-restarted.png') });
   // A replacement profile discards old merge offers instead of rebinding them.
   assert.equal(await page.$eval('.ag-cloud-merge-button', (button) => button.hidden), true);
+
+  // 서버 다시 만들기도 같은 추정 막대를 쓴다.
+  await page.evaluate(() => window.sidebarPreview.cloud.setLink('recreating'));
+  await page.waitForFunction(() => {
+    const bar = document.querySelector('.ag-cloud-recovery .ag-cloud-link-progress');
+    return bar && !bar.hidden && bar.dataset.state !== 'done';
+  });
+  const recreateProgress = await page.evaluate(async () => {
+    const node = document.querySelector('.ag-cloud-recovery .ag-cloud-link-progress');
+    const width = () => Number.parseFloat(node.querySelector('.ag-cloud-link-progress-fill').style.width);
+    const first = width();
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    return {
+      eta: node.querySelector('.ag-cloud-link-progress-eta').textContent,
+      label: node.querySelector('[role="progressbar"]').getAttribute('aria-label'),
+      first,
+      width: width(),
+    };
+  });
+  assert.match(recreateProgress.eta, /^약 (?:\d+초|\d+분(?:\s\d+초)?) 남음$/);
+  assert.equal(recreateProgress.label, 'Cloud 서버 다시 만들기 진행');
+  assert.ok(recreateProgress.width > recreateProgress.first && recreateProgress.width <= 20,
+    `a rebuild bar must start near zero and crawl, got ${recreateProgress.first}% → ${recreateProgress.width}%`);
+  await page.screenshot({ path: resolve(artifacts, 'cloud-recreate-eta.png') });
+  await page.evaluate(() => window.sidebarPreview.cloud.setLink('ready'));
 
   await page.evaluate(() => window.sidebarPreview.cloud.requireReference(null));
 
