@@ -404,3 +404,38 @@ test('prewarm funds an idle worker only after the account has run a turn', async
   assert.equal(warm.prewarm, true);
   assert.equal(spawned, 2);
 });
+
+test('an unclaimed reservation withholds its pairing code and cannot activate', async () => {
+  const setup = warmFixture();
+  const reserved = await setup.prewarm();
+  await setup.readyWorker();
+  const status = await setup.broker.getCloudStatus('access-token', { deviceId: 'device-1', runId: reserved.run.id });
+  assert.equal(status.worker.prewarm, true);
+  assert.equal(status.worker.receipt, null);
+  assert.equal(status.run.prewarm, true);
+  assert.equal(status.run.receipt, null);
+  await assert.rejects(
+    setup.broker.confirmCloudAllocation('worker-secret', reserved.run.id),
+    { code: 'CLOUD_RUN_STATE_INVALID' },
+  );
+  await assert.rejects(
+    setup.broker.touchCloudWorkspace('worker-secret', reserved.run.id),
+    { code: 'CLOUD_RUN_STATE_INVALID' },
+  );
+  const claimed = await setup.create();
+  assert.equal(claimed.run.receipt.pairingCode, PREWARM_RECEIPT.pairingCode);
+  const activated = await setup.broker.confirmCloudAllocation('worker-secret', claimed.run.id);
+  assert.equal(activated.run.status, 'active');
+});
+
+test('a worker still being removed makes prewarm report teardown pending', async () => {
+  const setup = warmFixture({ provisioner: {
+    provision: async () => ({ remote: PREWARM_REMOTE, receipt: PREWARM_RECEIPT }),
+    teardown: async () => { throw new Error('Railway delete timed out'); },
+  } });
+  const reserved = await setup.prewarm();
+  await setup.readyWorker();
+  await setup.broker.stopCloudRun('access-token', reserved.run.id, { deviceId: 'device-1', reason: 'test' });
+  assert.equal(setup.snapshot().raucloud.accounts['account-1'].worker.status, 'tearing_down');
+  await assert.rejects(setup.prewarm(), { code: 'CLOUD_TEARDOWN_PENDING' });
+});

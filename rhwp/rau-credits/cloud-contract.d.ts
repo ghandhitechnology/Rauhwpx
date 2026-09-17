@@ -62,7 +62,7 @@ export interface CloudRunSummary {
   prewarm: boolean;
   /** True when this run claimed an existing warm worker instead of provisioning. */
   reused: boolean;
-  /** Present only when the requesting token is bound to ownerDeviceId. */
+  /** Present only when the requesting token is bound to ownerDeviceId and the run is claimed. */
   receipt: RaucloudReceipt | null;
 }
 
@@ -91,6 +91,12 @@ export interface CloudStatusEnvelope {
   /** Present when GET /v1/cloud/status includes a runId query. */
   run?: CloudRunSummary;
   gate: RaucloudGate;
+  /** Present on POST /v1/cloud/prewarm responses: true while the reservation is unclaimed. */
+  prewarm?: boolean;
+}
+
+export interface CloudReceiptEnvelope {
+  receipt: RaucloudReceipt;
 }
 
 export interface CloudRunEnvelope extends CloudStatusEnvelope {
