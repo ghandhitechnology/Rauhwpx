@@ -1228,7 +1228,8 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
   function renderRecovery(): void {
     const link = inferCloudLink(snapshot);
     const needsAttention = cloudLinkNeedsAttention(link);
-    const activeKind = link.kind === 'reconnecting' || link.kind === 'recreating' ? link.kind : null;
+    const busyKind = recoveryBusy === 'reconnecting' || recoveryBusy === 'recreating' ? recoveryBusy : null;
+    const activeKind = busyKind ?? (link.kind === 'reconnecting' || link.kind === 'recreating' ? link.kind : null);
     for (const progress of [recoveryProgress, recoveryStripProgress]) {
       if (activeKind) progress.start(activeKind);
       else progress.settle(link.kind === 'ready' ? 'done' : 'failed');
@@ -1239,19 +1240,19 @@ export function createCloudAgentUi(deps: CloudAgentUiDeps): CloudAgentUi {
     recoveryRenderKey = renderKey;
     statusPanel.dataset.link = link.kind;
     recovery.hidden = !needsAttention;
-    recovery.dataset.kind = link.kind;
+    recovery.dataset.kind = activeKind ?? link.kind;
     recoveryActions.replaceChildren();
     recoveryStrip.replaceChildren();
-    recoveryStrip.dataset.kind = link.kind;
+    recoveryStrip.dataset.kind = activeKind ?? link.kind;
     if (!needsAttention) {
       recoveryTitle.textContent = '';
       recoveryDetail.textContent = '';
       return;
     }
-    if (link.kind === 'reconnecting') {
+    if (activeKind === 'reconnecting') {
       recoveryTitle.textContent = 'Cloud에 다시 연결하는 중';
       recoveryDetail.textContent = '저장된 작업과 완료된 결과를 확인하고 있습니다.';
-    } else if (link.kind === 'recreating') {
+    } else if (activeKind === 'recreating') {
       recoveryTitle.textContent = '새 Cloud 서버를 준비하는 중';
       recoveryDetail.textContent = '현재 대화와 저장된 문서를 새 서버로 옮깁니다.';
     } else {
