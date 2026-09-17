@@ -15,6 +15,8 @@ Deploy the credits service with this endpoint before releasing the linked deskto
 - `PATCH /v1/account/timezone` with `{ "timezone": "Asia/Seoul" }` initializes or schedules the account timezone.
 - `GET /v1/cloud/status?deviceId=…&timezone=…&runId=…` returns `CloudStatusEnvelope`. Omit `deviceId` when Settings only needs account data. Supplying it binds the account session to that device. Supplying `runId` includes that run even after it fails.
 - `POST /v1/cloud/runs` with `{ deviceId, timezone?, idempotencyKey }` durably reserves the run and returns an `allocating` `CloudRunEnvelope` immediately. Provisioning continues in the service process, and clients poll status by run ID.
+- `POST /v1/cloud/prewarm` with `{ deviceId, timezone? }` reserves the account's worker before the first turn. It is unbilled, idempotent, and reuses or renews an existing reservation. Idle capacity is only funded for accounts that have already run a Cloud turn. The next `POST /v1/cloud/runs` claims the reservation and returns the same run with `run.reused: true` and a receipt instead of provisioning again.
+- `POST /v1/cloud/runs/:id/receipt` reissues a pairing receipt for the controlling device. Prewarmed workers are provisioned before a device asks for a run, and their original bootstrap code expires after ten minutes.
 - `POST /v1/cloud/runs/:id/takeover` rejects the request unless the completed checkpoint has an encrypted artifact owned by the broker. Merge checkpoint storage retains reviewable document copies; cross-worker runtime takeover remains unavailable.
 - `POST /v1/cloud/runs/:id/stop` with `{ deviceId, reason?, finishCurrentTurn?, checkpoint? }` either stops the run now or blocks new input until the current turn ends.
 
@@ -37,7 +39,8 @@ Only the broker reconciler uses `CLOUD_WORKER_SECRET`. Do not add it to a user w
 - 60 billed minutes per account-local quota window. A positive balance can start a turn.
 - A turn that reaches zero may run for 30 more minutes to finish its current response. That extra time is deducted from the next quota window. Midnight does not extend the 30-minute deadline.
 - Three confirmed cold starts per rolling 15 minutes and 12 per account-local window. Idempotent retries and warm reuse do not count.
-- Ready and warm workers expire after two unbilled idle hours. Accepted workspace activity renews that window. If deletion fails, the account remains in `tearing_down`. New allocation stays blocked until a reconciler confirms deletion.
+- Ready and warm workers expire after two unbilled idle hours. Accepted workspace activity renews that window, and an explicit prewarm renews a reservation without counting a new cold start. If deletion fails, the account remains in `tearing_down`. New allocation stays blocked until a reconciler confirms deletion.
+- A reservation stays out of `activeRun` and never reports `owned_elsewhere`, so a paired device that did not request it still sees an available account. A takeover retires an unclaimed reservation instead of leaving it warm.
 - An allocating worker may take up to 30 minutes before the broker expires its reservation. This covers Railway deployment and worker-health deadlines without holding the public create request open.
 - An account may change its timezone once every 30 days. The change takes effect at the current quota window's end, so changing timezone cannot trigger an early reset.
 - The service retains encrypted merge checkpoints and conversation snapshots for up to 30 days. A replacement worker restores verified conversation rows and resources through the account-fenced restore protocol described below.

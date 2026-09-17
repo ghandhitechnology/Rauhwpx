@@ -58,6 +58,10 @@ export interface CloudRunSummary {
   graceDeadlineAt: number | null;
   failureCode: string | null;
   message: string | null;
+  /** True while no turn has claimed the prewarmed worker. */
+  prewarm: boolean;
+  /** True when this run claimed an existing warm worker instead of provisioning. */
+  reused: boolean;
   /** Present only when the requesting token is bound to ownerDeviceId. */
   receipt: RaucloudReceipt | null;
 }
@@ -78,6 +82,8 @@ export interface CloudStatusEnvelope {
     ownerDeviceId: string;
     runId: string;
     warmUntil: number | null;
+    /** True while the worker holds an unclaimed reservation. */
+    prewarm: boolean;
     receipt: RaucloudReceipt | null;
   };
   activeRun: CloudRunSummary | null;

@@ -1900,8 +1900,18 @@ export function creditsRequestListener(service, {
         }));
         return;
       }
-      const takeover = url.pathname.match(/^\/v1\/cloud\/runs\/([^/]+)\/takeover$/);
-      if (req.method === 'POST' && takeover) {
+      if (req.method === 'POST' && url.pathname === '/v1/cloud/prewarm') {
+        const body = await readJson(req);
+        send(200, await service.prewarmCloudWorker(bearerToken(req), body));
+        return;
+      }
+      const receipt = url.pathname.match(/^\/v1\/cloud\/runs\/([^/]+)\/receipt$/);
+      if (req.method === 'POST' && receipt) {
+        const body = await readJson(req);
+        send(201, await service.refreshCloudRunReceipt(bearerToken(req), decodeURIComponent(receipt[1]), body));
+        return;
+      }
+      const takeover = url.pathname.match(/^\/v1\/cloud\/runs\/([^/]+)\/takeover$/);      if (req.method === 'POST' && takeover) {
         const body = await readJson(req);
         send(201, await service.takeoverCloudRun(
           bearerToken(req),
