@@ -49,5 +49,5 @@ test('문서 전환 이벤트도 표 resize 런타임 캐시 정리 helper를 �
   const events = constructorEventsBlock();
 
   assert.match(events, /create-new-document'[\s\S]*clearTableResizeRuntimeCache\(\)/, '새 문서에서 캐시 정리 필요');
-  assert.match(events, /open-document-bytes'[\s\S]*clearTableResizeRuntimeCache\(\)/, '문서 열기에서 캐시 정리 필요');
+  assert.match(events, /document-swapped'[\s\S]*clearTableResizeRuntimeCache\(\)/, '문서 교체에서 캐시 정리 필요');
 });
