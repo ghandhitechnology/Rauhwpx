@@ -1911,7 +1911,8 @@ export function creditsRequestListener(service, {
         send(201, await service.refreshCloudRunReceipt(bearerToken(req), decodeURIComponent(receipt[1]), body));
         return;
       }
-      const takeover = url.pathname.match(/^\/v1\/cloud\/runs\/([^/]+)\/takeover$/);      if (req.method === 'POST' && takeover) {
+      const takeover = url.pathname.match(/^\/v1\/cloud\/runs\/([^/]+)\/takeover$/);
+      if (req.method === 'POST' && takeover) {
         const body = await readJson(req);
         send(201, await service.takeoverCloudRun(
           bearerToken(req),
