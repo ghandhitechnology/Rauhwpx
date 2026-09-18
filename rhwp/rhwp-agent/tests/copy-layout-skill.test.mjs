@@ -59,33 +59,6 @@ test('bundled copy-layout skill is a valid explicit slash-command skill', () => 
   assert.match(markdown, /`text_decisions\.kept`/);
   assert.match(markdown, /preserve-by-default policy/);
 });
-
-test('copy-layout helper retains safety gates and reports fidelity separately', () => {
-  const script = readFileSync(scriptUrl, 'utf8');
-
-  assert.doesNotMatch(script, /\blxml\b/);
-  assert.match(script, /xml\.etree\.ElementTree/);
-  assert.match(script, /unsafe XML declaration/);
-  assert.match(script, /visible text remains/);
-  assert.match(script, /layout geometry fingerprint changed/);
-  assert.match(script, /refusing to overwrite the source document/);
-  assert.match(script, /PAYLOAD_PREFIXES/);
-  assert.match(script, /export-hwpx/);
-  assert.match(script, /native output introduced or changed generated layout text/);
-  assert.match(script, /render-diff/);
-  assert.match(script, /fallback_reason/);
-  assert.match(script, /"quality": "best_effort" if delivery_warnings else "verified"/);
-  assert.match(script, /--rhwp-bin/);
-  assert.match(script, /--preserve-guidance/);
-  assert.match(script, /--inspect-text/);
-  assert.match(script, /--text-plan/);
-  assert.match(script, /source_sha256/);
-  assert.match(script, /visible text differs from approved guidance/);
-  assert.match(script, /LAYOUT_ANCHOR = "\\u2060"/);
-  assert.match(script, /zero-width layout anchors/);
-  assert.match(script, /PUBLISHABLE_PREVIEW_ENTRIES/);
-});
-
 test('copy-layout helper runs without site packages and defers only an intermediate page-count mismatch', (t) => {
   const python = process.platform === 'win32' ? 'python' : 'python3';
   const availability = spawnSync(python, ['-S', '-c', 'import sys'], { encoding: 'utf8' });

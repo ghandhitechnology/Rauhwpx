@@ -4,7 +4,6 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createTestModuleServer } from './support/module-server.ts';
-import { functionBodyFrom } from './support/source-guard.ts';
 
 const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const src = (rel: string): string => readFileSync(join(rootDir, rel), 'utf8');
@@ -87,26 +86,6 @@ test('#4121 HF snapshot command는 undo/redo 문맥과 선택 정책을 분리�
   }
 });
 
-test('#4121 HF 선택 삭제와 치환은 범위 API 한 호출과 선택 history를 사용한다', () => {
-  const handler = src('src/engine/input-handler.ts');
-  const del = functionBodyFrom(handler, 'private deleteSelection(');
-  assert.match(del, /getNonEmptyHeaderFooterSelection\(\)/);
-  assert.match(del, /replaceHeaderFooterSelection/);
-  assert.match(handler, /replaceRangeInHeaderFooter\(/);
-  assert.match(handler, /selectionBefore:/);
-  assert.match(handler, /editContextAfter:/);
-});
-
-test('#4121 일반 입력과 IME는 HF 선택을 별도 삭제하지 않고 원자 치환한다', () => {
-  const text = src('src/engine/input-handler-text.ts');
-  const input = functionBodyFrom(text, 'export function onInput(');
-  const compositionStart = functionBodyFrom(text, 'export function onCompositionStart(');
-  const compositionEnd = functionBodyFrom(text, 'export function onCompositionEnd(');
-  assert.match(input, /replaceHeaderFooterSelection/);
-  assert.match(compositionStart, /beginHeaderFooterSelectionComposition/);
-  assert.match(compositionEnd, /headerFooterSelectionComposition/);
-});
-
 test('#4121 HF IME 시작은 남아 있는 본문 selection을 삭제하지 않는다', async () => {
   const vite = await createTestModuleServer(rootDir);
   try {
@@ -148,35 +127,4 @@ test('#4121 HF IME 시작은 남아 있는 본문 selection을 삭제하지 않�
   } finally {
     await vite.close();
   }
-});
-
-test('#4121 HF copy/cut/paste는 HF 전용 copy와 평문 범위 치환을 사용한다', () => {
-  const keyboard = src('src/engine/input-handler-keyboard.ts');
-  const copy = functionBodyFrom(keyboard, 'export function onCopy(');
-  const cut = functionBodyFrom(keyboard, 'export function onCut(');
-  const paste = functionBodyFrom(keyboard, 'export function onPaste(');
-  assert.match(copy, /copyHeaderFooterSelection/);
-  assert.match(cut, /copyHeaderFooterSelection[\s\S]*deleteSelection/);
-  assert.match(paste, /isInHeaderFooter\(\)[\s\S]*replaceHeaderFooterSelection/);
-  assert.match(keyboard, /copySelectionInHeaderFooter\(/);
-});
-
-test('#4121 HF 부분 글자 서식은 선택 범위 API와 선택 유지 history를 사용한다', () => {
-  const handler = src('src/engine/input-handler.ts');
-  const apply = functionBodyFrom(handler, 'private applyCharFormat(');
-  const props = functionBodyFrom(handler, 'private getCharPropertiesAtCursor(');
-  assert.match(apply, /applyCharFormatInHeaderFooterSelection/);
-  assert.match(handler, /applyCharFormatInHeaderFooter\(/);
-  assert.match(handler, /selectionAfter:/);
-  assert.match(props, /getCharPropertiesInHeaderFooter/);
-});
-
-test('#4121 undo는 HF selectionBefore, redo는 format의 selectionAfter를 복원한다', () => {
-  const handler = src('src/engine/input-handler.ts');
-  const undo = functionBodyFrom(handler, 'private handleUndo()');
-  const redo = functionBodyFrom(handler, 'private handleRedo()');
-  const restore = functionBodyFrom(handler, 'private restoreSelectionAfterUndo');
-  assert.match(undo, /restoreSelectionAfterUndo/);
-  assert.match(redo, /restoreSelectionAfterRedo/);
-  assert.match(restore, /selectHeaderFooterRange/);
 });

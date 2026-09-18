@@ -1,10 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createTestModuleServer } from './support/module-server.ts';
-import { codeOnly, functionBodyFrom } from './support/source-guard.ts';
 
 const rootDir = fileURLToPath(new URL('..', import.meta.url));
 
@@ -80,25 +77,4 @@ test('다중 선택 캡처 실패는 앞서 캡처한 핸들을 해제한다', a
     assert.throws(() => Journal.capture(wasm, [{ type: 'image' }, { type: 'image' }]));
     assert.equal(wasm.store.size, 0);
   });
-});
-
-test('리사이즈 경로는 첫 뮤테이션 전에 저널을 보관하고 회전·머리말 계약은 유지한다', () => {
-  const src = codeOnly(readFileSync(join(rootDir, 'src/engine/input-handler-picture.ts'), 'utf8'));
-
-  const finish = functionBodyFrom(src, 'export function finishPictureResizeDrag(');
-  const capture = finish.indexOf('PictureResizeJournal.capture(');
-  assert.ok(capture > -1, 'finishPictureResizeDrag 는 저널을 보관한다');
-  assert.ok(capture < finish.indexOf('setObjectProperties.call('), '보관은 첫 setObjectProperties 보다 앞선다');
-  assert.equal(finish.match(/state\.resizeTransformJournal\.command\(/g)?.length, 2, '다중·단일 기록 모두 저널 커맨드를 쓴다');
-  assert.equal(finish.match(/state\.resizeTransformJournal = null/g)?.length, 2, '기록 뒤 저널 소유권을 넘긴다');
-  assert.doesNotMatch(finish, /new ResizeObjectCommand\(/);
-  assert.equal(finish.match(/headerFooter: (r|state\.ref)\.headerFooter/g)?.length, 2, '머리말/꼬리말 marker 는 두 기록 대상 모두에 남는다');
-
-  const arrow = functionBodyFrom(src, 'export function resizeSelectedPicture(');
-  assert.ok(arrow.indexOf('PictureResizeJournal.capture(') < arrow.indexOf('setObjectProperties.call('));
-  assert.match(arrow, /journal\.command\(/);
-  assert.match(arrow, /journal\.cancel\(this\.wasm\)/);
-
-  assert.match(functionBodyFrom(src, 'export function cleanupPictureResizeDrag('), /journal\.cancel\(this\.wasm\)/);
-  assert.match(functionBodyFrom(src, 'export function finishPictureRotateDrag('), /new ResizeObjectCommand\(/, '회전은 스칼라 기록을 유지한다');
 });

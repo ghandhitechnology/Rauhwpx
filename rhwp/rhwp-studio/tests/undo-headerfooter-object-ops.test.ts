@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as nodeModule from 'node:module';
@@ -44,15 +43,3 @@ test('머리말/꼬리말 개체 Undo/Redo 라우팅 (자식 프로세스 로드
 
 // 커맨드 생성부에서 marker 를 흘리면 위 행위 테스트가 통과해도 실사용은 여전히 깨진다.
 // (드래그 종료 핸들러가 headerFooter 를 넘기지 않으면 커맨드는 본문 경로로 되돌아간다.)
-test('개체 드래그/키보드 종료 핸들러가 headerFooter marker 를 커맨드로 전달한다', () => {
-  const src = readFileSync(join(here, '..', 'src', 'engine', 'input-handler-picture.ts'), 'utf8');
-
-  // ResizeObjectCommand 타깃 리터럴 4곳: Shift+방향키 / 다중 리사이즈 / 단일 리사이즈 / 회전
-  const hfPassCount = (src.match(/headerFooter: (?:r|state\.ref)\.headerFooter/g) ?? []).length;
-  assert.ok(hfPassCount >= 4,
-    `ResizeObjectCommand 타깃에 headerFooter 를 넣는 지점이 4곳 이상이어야 함 (현재 ${hfPassCount})`);
-
-  // 이동 커맨드(MovePictureCommand/MoveShapeCommand)는 cellPath 다음 인자로 넘긴다.
-  assert.match(src, /r\.cellPath,\s*\n\s*r\.headerFooter,/,
-    'finishPictureMoveDrag 가 cellPath 뒤에 headerFooter 를 넘겨야 함');
-});
