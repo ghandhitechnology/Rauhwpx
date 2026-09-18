@@ -971,6 +971,115 @@ pub(super) fn empty_tac_host_before_text(
     })
 }
 
+const CTRL_CHAR_CODE_UNITS: u32 = 8;
+
+/// 인라인 컨트롤의 원본 UTF-16 시작 위치. 가시 문자 인덱스가 아니라 저장 스트림이다.
+fn control_utf16_positions(para: &Paragraph) -> Vec<u32> {
+    if para.text.is_empty()
+        && para.char_offsets.is_empty()
+        && para.char_count >= (para.controls.len() as u32).saturating_mul(CTRL_CHAR_CODE_UNITS)
+    {
+        return (0..para.controls.len())
+            .map(|i| i as u32 * CTRL_CHAR_CODE_UNITS)
+            .collect();
+    }
+    let text_positions = para.control_text_positions();
+    let text_chars = para.text.chars().collect::<Vec<_>>();
+    let text_end = para
+        .char_offsets
+        .last()
+        .zip(text_chars.last())
+        .map(|(offset, ch)| *offset + ch.len_utf16() as u32)
+        .unwrap_or_else(|| text_chars.iter().map(|ch| ch.len_utf16() as u32).sum());
+    let mut raw_positions = vec![text_end; text_positions.len()];
+
+    let mut group_start = 0;
+    while group_start < text_positions.len() {
+        let text_position = text_positions[group_start];
+        let mut group_end = group_start + 1;
+        while text_positions.get(group_end) == Some(&text_position) {
+            group_end += 1;
+        }
+
+        let count = (group_end - group_start) as u32;
+        let first_raw = para
+            .char_offsets
+            .get(text_position)
+            .copied()
+            .map(|offset| {
+                let previous_end = text_position
+                    .checked_sub(1)
+                    .and_then(|i| para.char_offsets.get(i).zip(text_chars.get(i)))
+                    .map_or(0, |(start, ch)| *start + ch.len_utf16() as u32);
+                if count == 1
+                    && text_chars.get(text_position) == Some(&'\u{FFFC}')
+                    && offset.saturating_sub(previous_end) < CTRL_CHAR_CODE_UNITS
+                {
+                    offset
+                } else {
+                    offset.saturating_sub(count * CTRL_CHAR_CODE_UNITS)
+                }
+            })
+            .unwrap_or(text_end);
+        for (ordinal, raw_position) in raw_positions[group_start..group_end].iter_mut().enumerate()
+        {
+            *raw_position = first_raw + ordinal as u32 * CTRL_CHAR_CODE_UNITS;
+        }
+        group_start = group_end;
+    }
+
+    raw_positions
+}
+
+/// [#6706 / #7150] 줄 끝 개체와 다음 줄 첫 글자는 같은 가시 위치로 투영될 수 있다.
+/// 원본 줄 구성이 유지되고 그 충돌이 있을 때만 저장 UTF-16 줄로 소유를 복원한다.
+fn stored_tac_line_assignment(
+    para: &Paragraph,
+    comp: &ComposedParagraph,
+) -> Option<Vec<(usize, usize)>> {
+    if para.char_offsets.is_empty()
+        || comp.lines.len() != para.line_segs.len()
+        || comp.lines.len() < 2
+        || comp
+            .lines
+            .iter()
+            .zip(&para.line_segs)
+            .enumerate()
+            .any(|(i, (line, seg))| {
+                seg.tag & LineSeg::TAG_IMPLEMENTATION_PROPERTY != 0
+                    || line.line_height != seg.line_height
+                    || line.segment_width != seg.segment_width
+                    || line.char_start
+                        != para
+                            .char_offsets
+                            .partition_point(|&offset| offset < seg.text_start)
+            })
+    {
+        return None;
+    }
+    let raw = control_utf16_positions(para);
+    let assignments: Vec<(usize, usize)> = comp
+        .tac_controls
+        .iter()
+        .map(|(_, _, ci)| {
+            let start = *raw.get(*ci)?;
+            let owner =
+                (0..para.line_segs.len()).rfind(|&i| para.line_segs[i].text_start <= start)?;
+            Some((*ci, owner))
+        })
+        .collect::<Option<_>>()?;
+    let collapsed_boundary =
+        comp.tac_controls
+            .iter()
+            .zip(&assignments)
+            .any(|((pos, _, _), (_, owner))| {
+                comp.lines
+                    .get(owner + 1)
+                    .is_some_and(|next| *pos >= next.char_start)
+            });
+    collapsed_boundary.then_some(assignments)
+}
+
 fn tac_offsets_for_line(
     comp: &ComposedParagraph,
     tac_offsets_px: &[(usize, f64, usize)],
@@ -4320,6 +4429,7 @@ impl LayoutEngine {
                 &cell_ctx,
                 &tab_stops,
                 &tac_offsets_px,
+                &line_tac_offsets_for_width,
                 &shape_markers,
                 fn_positions,
                 &mut fn_marker_inserted,
@@ -4844,6 +4954,7 @@ impl LayoutEngine {
         cell_ctx: &Option<CellContext>,
         tab_stops: &[TabStop],
         tac_offsets_px: &[(usize, f64, usize)],
+        line_tac_offsets: &[(usize, f64, usize)],
         shape_markers: &[(usize, String)],
         fn_positions: &[(usize, u16, usize)],
         fn_marker_inserted: &mut [bool],
@@ -4887,6 +4998,31 @@ impl LayoutEngine {
             mut pending_right_leader_digit_render,
             mut current_line_reserved_tac_picture_height,
         } = st;
+        // 줄 끝 표와 다음 줄 첫 개체는 같은 가시 문자 위치에 투영될 수 있다.
+        // 그때는 저장 UTF-16 줄 소속으로 다른 줄의 표를 걸러 낸다.
+        let stored_assign = para.and_then(|p| stored_tac_line_assignment(p, composed));
+        let line_table_owner = para.and_then(|p| {
+            line_tac_offsets.iter().find_map(|(_, _, ci)| {
+                if stored_assign.as_ref().is_some_and(|assign| {
+                    !assign
+                        .iter()
+                        .any(|(control, owner)| control == ci && *owner == line_idx)
+                }) {
+                    return None;
+                }
+                match p.controls.get(*ci) {
+                    Some(Control::Table(table)) if table.common.treat_as_char => {
+                        let h = hwpunit_to_px(table.common.height as i32, self.dpi);
+                        let mt = hwpunit_to_px(table.outer_margin_top as i32, self.dpi);
+                        let mb = hwpunit_to_px(table.outer_margin_bottom as i32, self.dpi);
+                        ((mt > 0.0 || mb > 0.0)
+                            && (h + mt + mb - 0.2..=h + mt + mb + 0.2).contains(&raw_lh))
+                        .then_some((h, mt))
+                    }
+                    _ => None,
+                }
+            })
+        });
         let is_last_run_of_line = |idx: usize| idx == comp_line.runs.len() - 1;
         for (run_idx, run) in comp_line.runs.iter().enumerate() {
             // 조판부호: 이 run 시작 위치 이전의 도형 마커를 먼저 삽입
@@ -5772,7 +5908,6 @@ impl LayoutEngine {
                         }
                     }
                     // 인라인 TAC 표: 텍스트 흐름 위치에 직접 렌더링
-                    // 표 하단 = 베이스라인 + outer_margin_bottom
                     if let (Some(p), Some(bdc)) = (para, bin_data_content) {
                         if let Some(Control::Table(t)) = p.controls.get(tac_ci) {
                             let raw_seg_width =
@@ -5804,9 +5939,26 @@ impl LayoutEngine {
                             }
                             if t.common.treat_as_char && should_render_inline && !already_rendered {
                                 let table_h = hwpunit_to_px(t.common.height as i32, self.dpi);
+                                let om_top = hwpunit_to_px(t.outer_margin_top as i32, self.dpi);
                                 let om_bottom =
                                     hwpunit_to_px(t.outer_margin_bottom as i32, self.dpi);
-                                let table_y = (y + baseline + om_bottom - table_h).max(y);
+                                // [#7150] 저장 lh가 자기 높이와 상하 여백의 합이면 자기
+                                // 바깥여백에 앉힌다. 동반 표는 위에서 한 번 선택한 줄별
+                                // 앵커를 공유한다.
+                                let stored_lh_covers_om = (om_top > 0.0 || om_bottom > 0.0)
+                                    && (table_h + om_top + om_bottom - 0.2
+                                        ..=table_h + om_top + om_bottom + 0.2)
+                                        .contains(&raw_lh);
+                                let table_y = if stored_lh_covers_om {
+                                    y + om_top
+                                } else if let Some((owner_h, owner_om_top)) = line_table_owner {
+                                    // 소유자가 `y + owner_om_top` 에 앉으면 공유 기준선은
+                                    // `y + owner_om_top + 0.85×owner_h`. 이 표를 거기에
+                                    // 앉히면 `y + owner_om_top + 0.85×(owner_h − table_h)`.
+                                    (y + owner_om_top + (owner_h - table_h) * 0.85).max(y)
+                                } else {
+                                    (y + baseline + om_bottom - table_h).max(y)
+                                };
                                 // [Task #2212] 셀 안 인라인 TAC 표는 외곽 셀 경로를
                                 // 확장한 2단 cell_context 로 렌더해야 경로 기반 조회
                                 // (get_table_cell_bboxes_by_path 등)가 내부 셀을 찾는다.
