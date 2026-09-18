@@ -857,6 +857,14 @@ impl DocumentCore {
                 svg.insert_str(pos + 1, &insert);
             }
         }
+        if !profile.shows_editor_visuals() {
+            let links = self
+                .hyperlinks_in_layer_tree(&layer_tree)?
+                .iter()
+                .map(|l| l.pdf_link())
+                .collect::<Vec<_>>();
+            crate::renderer::hyperlinks::append_svg_links(&mut svg, &links);
+        }
         Ok(svg)
     }
 
@@ -894,10 +902,17 @@ impl DocumentCore {
         }
 
         let mut svg_pages = Vec::with_capacity(page_nums.len());
+        let mut page_links = Vec::with_capacity(page_nums.len());
         for &page_num in page_nums {
             svg_pages.push(self.render_page_svg_native(page_num)?);
+            page_links.push(
+                self.page_hyperlinks_native(page_num, RenderProfile::Print)?
+                    .iter()
+                    .map(|l| l.pdf_link())
+                    .collect(),
+            );
         }
-        crate::renderer::pdf::svgs_to_pdf_with_options(&svg_pages, options)
+        crate::renderer::pdf::svgs_to_pdf_with_links(&svg_pages, &page_links, options)
             .map_err(HwpError::RenderError)
     }
 
@@ -916,10 +931,17 @@ impl DocumentCore {
         }
 
         let mut svg_pages = Vec::with_capacity(page_nums.len());
+        let mut page_links = Vec::with_capacity(page_nums.len());
         for &page_num in page_nums {
             svg_pages.push(self.render_page_svg_layer_with_profile_native(page_num, profile)?);
+            page_links.push(
+                self.page_hyperlinks_native(page_num, profile)?
+                    .iter()
+                    .map(|l| l.pdf_link())
+                    .collect(),
+            );
         }
-        crate::renderer::pdf::svgs_to_pdf_with_options(&svg_pages, options)
+        crate::renderer::pdf::svgs_to_pdf_with_links(&svg_pages, &page_links, options)
             .map_err(HwpError::RenderError)
     }
 
@@ -988,10 +1010,18 @@ impl DocumentCore {
         }
 
         let mut layer_trees = Vec::with_capacity(page_nums.len());
+        let mut page_links = Vec::with_capacity(page_nums.len());
         for &page_num in page_nums {
-            layer_trees.push(self.build_page_layer_tree_with_profile(page_num, profile)?);
+            let tree = self.build_page_layer_tree_with_profile(page_num, profile)?;
+            page_links.push(
+                self.hyperlinks_in_layer_tree(&tree)?
+                    .iter()
+                    .map(|l| l.pdf_link())
+                    .collect(),
+            );
+            layer_trees.push(tree);
         }
-        crate::renderer::pdf::layer_trees_to_pdf_with_options(&layer_trees, options)
+        crate::renderer::pdf::layer_trees_to_pdf_with_links(&layer_trees, &page_links, options)
             .map_err(HwpError::RenderError)
     }
 
@@ -2606,7 +2636,11 @@ impl DocumentCore {
         let tree = self.build_page_tree_cached(page_num)?;
 
         // 렌더 트리에서 Table, Image 노드를 재귀적으로 수집
-        fn collect_controls(node: &RenderNode, controls: &mut Vec<String>) {
+        fn collect_controls(
+            node: &RenderNode,
+            controls: &mut Vec<String>,
+            doc: &crate::model::document::Document,
+        ) {
             // [Task #1280 v2] 컨트롤별 plane/zOrder/stableIndex 노출 — 렌더 정렬키
             // `paper_node_sort_key`(layout.rs)를 그대로 재사용해 프런트 히트테스트가
             // 겹침 시 "최상단 개체"를 선택할 수 있게 한다. inline(layer=None) 노드는
@@ -2707,8 +2741,34 @@ impl DocumentCore {
                         )
                     });
 
+                    // [#7105] 한/글 5.x·97 계열 수식은 `hwpeq5X` OLE 개체로 저장되지만
+                    // `#5725` 경로가 수식 렌더러로 그려 `Equation` 노드가 된다. 그 노드를
+                    // `equation` 으로 알리면 편집기가 삭제·속성을 수식 전용 명령
+                    // (`deleteEquationControl` · 수식 속성)으로 보내고, 그 명령은 native
+                    // `Control::Equation` 만 받아 거부한다 — 선택 핸들은 뜨는데 지워지지 않는다.
+                    // 원본이 OLE 도형이면 `ole` 로 알려 도형 명령(삭제·속성은 코어에서 성공)을
+                    // 쓰게 한다. 칸 안·주석 안 수식은 문단 좌표 체계가 달라 여기서 판정하지 않는다.
+                    let source_is_ole = eq_node.cell_index.is_none()
+                        && eq_node.note_ref.is_none()
+                        && matches!(
+                            (eq_node.section_index, eq_node.para_index, eq_node.control_index),
+                            (Some(si), Some(pi), Some(ci))
+                                if matches!(
+                                    doc.sections
+                                        .get(si)
+                                        .and_then(|section| section.paragraphs.get(pi))
+                                        .and_then(|para| para.controls.get(ci)),
+                                    Some(crate::model::control::Control::Shape(shape))
+                                        if matches!(
+                                            shape.as_ref(),
+                                            crate::model::shape::ShapeObject::Ole(_)
+                                        )
+                                )
+                        );
+                    let control_type = if source_is_ole { "ole" } else { "equation" };
                     controls.push(format!(
-                        "{{\"type\":\"equation\",\"x\":{:.1},\"y\":{:.1},\"w\":{:.1},\"h\":{:.1}{}{}{}{}}}",
+                        "{{\"type\":\"{}\",\"x\":{:.1},\"y\":{:.1},\"w\":{:.1},\"h\":{:.1}{}{}{}{}}}",
+                        control_type,
                         node.bbox.x, node.bbox.y, node.bbox.width, node.bbox.height,
                         doc_coords, cell_coords, note_ref, layer_str
                     ));
@@ -3002,12 +3062,12 @@ impl DocumentCore {
                 _ => {}
             }
             for child in &node.children {
-                collect_controls(child, controls);
+                collect_controls(child, controls, doc);
             }
         }
 
         let mut controls = Vec::new();
-        collect_controls(&tree.root, &mut controls);
+        collect_controls(&tree.root, &mut controls, &self.document);
 
         Ok(format!("{{\"controls\":[{}]}}", controls.join(",")))
     }

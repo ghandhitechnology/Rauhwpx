@@ -1,6 +1,6 @@
 //! 문단 (Paragraph, CharRun, LineSeg, RangeTag)
 
-use super::control::Control;
+use super::control::{Control, FieldType};
 use serde::{Deserialize, Serialize};
 
 /// 문단 (HWPTAG_PARA_HEADER + 하위 레코드)
@@ -735,6 +735,43 @@ impl Paragraph {
             (self.controls.len() as u32) * 8
         };
         let char_offset = effective_char_offset;
+        let hyperlink_starts = self
+            .field_ranges
+            .iter()
+            .filter(|range| {
+                range.start_char_idx < range.end_char_idx
+                    && range.start_char_idx == char_offset
+                    && matches!(
+                        self.controls.get(range.control_idx),
+                        Some(Control::Field(field)) if field.field_type == FieldType::Hyperlink
+                    )
+            })
+            .count() as u32;
+        let at_hyperlink_start = hyperlink_starts > 0;
+        let at_hyperlink_end = self.field_ranges.iter().any(|range| {
+            range.start_char_idx < range.end_char_idx
+                && range.end_char_idx == char_offset
+                && matches!(
+                    self.controls.get(range.control_idx),
+                    Some(Control::Field(field)) if field.field_type == FieldType::Hyperlink
+                )
+        });
+
+        // 범위뿐 아니라 FIELD_BEGIN의 raw 슬롯도 새 글자 뒤에 있어야 한다.
+        // 그렇지 않으면 HWPX 저장 시 기존 선행 갭에서 BEGIN을 먼저 방출해
+        // 링크 밖에 입력한 글자가 다시 링크에 포함된다.
+        let preceding_text_end = if char_offset == 0 {
+            0
+        } else {
+            self.char_offsets[char_offset - 1] + Self::char_utf16_len(text_chars[char_offset - 1])
+        };
+        let begin_units = hyperlink_starts * 8;
+        let utf16_insert_pos =
+            if at_hyperlink_start && utf16_insert_pos >= preceding_text_end + begin_units {
+                utf16_insert_pos - begin_units
+            } else {
+                utf16_insert_pos
+            };
 
         // 새 텍스트의 UTF-16 총 길이
         let new_chars: Vec<char> = new_text.chars().collect();
@@ -778,7 +815,10 @@ impl Paragraph {
         for cs in &mut self.char_shapes {
             if cs.start_pos > utf16_insert_pos {
                 cs.start_pos += utf16_delta;
-            } else if cs.start_pos == utf16_insert_pos && cs.start_pos > 0 {
+            } else if cs.start_pos == utf16_insert_pos
+                && cs.start_pos > 0
+                && (!at_hyperlink_end || at_hyperlink_start)
+            {
                 cs.start_pos += utf16_delta;
             }
         }
@@ -802,13 +842,22 @@ impl Paragraph {
             }
         }
 
+        super::hyperlink_format::text_edit(self, char_offset, char_offset, new_chars.len());
         // 5-1. field_ranges: 삽입 지점 이후의 char 인덱스 시프트
         let inserted_len = new_chars.len();
         for fr in &mut self.field_ranges {
-            if fr.start_char_idx > char_offset {
+            let is_hyperlink = matches!(
+                self.controls.get(fr.control_idx),
+                Some(Control::Field(field)) if field.field_type == FieldType::Hyperlink
+            );
+            if fr.start_char_idx > char_offset
+                || (is_hyperlink
+                    && fr.start_char_idx == char_offset
+                    && fr.start_char_idx < fr.end_char_idx)
+            {
                 fr.start_char_idx += inserted_len;
             }
-            if fr.end_char_idx >= char_offset {
+            if fr.end_char_idx > char_offset || (fr.end_char_idx == char_offset && !is_hyperlink) {
                 fr.end_char_idx += inserted_len;
             }
         }
@@ -920,6 +969,7 @@ impl Paragraph {
             }
         }
 
+        super::hyperlink_format::text_edit(self, char_offset, del_end, 0);
         // 5-1. field_ranges: 삭제 범위에 따라 축소/조정
         for fr in &mut self.field_ranges {
             if fr.start_char_idx >= del_end {
@@ -1149,6 +1199,19 @@ impl Paragraph {
         }
         self.range_tags = kept_range_tags;
 
+        for fr in &self.field_ranges {
+            if fr.start_char_idx < split_pos && split_pos < fr.end_char_idx {
+                if let Some(Control::Field(f)) = self.controls.get_mut(fr.control_idx) {
+                    if let Some(format) = &mut f.hyperlink_format {
+                        format.replace(
+                            split_pos - fr.start_char_idx,
+                            fr.end_char_idx - fr.start_char_idx,
+                            0,
+                        );
+                    }
+                }
+            }
+        }
         // 5-1. field_ranges 분할
         let mut new_field_ranges: Vec<FieldRange> = Vec::new();
         let mut new_orphan_field_ends: Vec<OrphanFieldEnd> = Vec::new();
@@ -1792,13 +1855,32 @@ impl Paragraph {
             });
         }
 
+        // 링크 서식은 마지막 표시 글자까지만 적용한다. FIELD_END와 다음
+        // FIELD_BEGIN 사이의 갭까지 칠하면 인접 링크 사이의 일반 서식이 사라진다.
+        let ends_hyperlink = self.field_ranges.iter().any(|range| {
+            range.end_char_idx == end_char_offset
+                && matches!(
+                    self.controls.get(range.control_idx),
+                    Some(Control::Field(field)) if field.field_type == FieldType::Hyperlink
+                )
+        });
         // char offset → UTF-16 위치 변환
         let utf16_start = if start_char_offset < self.char_offsets.len() {
             self.char_offsets[start_char_offset]
         } else {
             return;
         };
-        let utf16_end = if end_char_offset < self.char_offsets.len() {
+        let utf16_end = if ends_hyperlink && end_char_offset > 0 {
+            let last_idx = end_char_offset - 1;
+            let Some(&raw) = self.char_offsets.get(last_idx) else {
+                return;
+            };
+            raw + self
+                .text
+                .chars()
+                .nth(last_idx)
+                .map_or(1, Self::char_utf16_len)
+        } else if end_char_offset < self.char_offsets.len() {
             self.char_offsets[end_char_offset]
         } else if !self.char_offsets.is_empty() {
             let last = *self.char_offsets.last().unwrap();
@@ -1831,6 +1913,13 @@ impl Paragraph {
                 .sum()
         };
 
+        let preserve_link_end = self.field_ranges.iter().any(|range| {
+            range.end_char_idx == end_char_offset
+                && matches!(
+                    self.controls.get(range.control_idx),
+                    Some(Control::Field(field)) if field.field_type == FieldType::Hyperlink
+                )
+        });
         // 새 CharShapeRef 배열을 구축
         let mut new_refs: Vec<CharShapeRef> = Vec::new();
 
@@ -1883,7 +1972,7 @@ impl Paragraph {
                 }
 
                 // 범위 뒷부분 복원 (utf16_end < seg_end, 텍스트 범위 내일 때만)
-                if utf16_end < seg_end && utf16_end < text_utf16_end {
+                if utf16_end < seg_end && (utf16_end < text_utf16_end || preserve_link_end) {
                     new_refs.push(CharShapeRef {
                         start_pos: utf16_end,
                         char_shape_id: csr.char_shape_id,
