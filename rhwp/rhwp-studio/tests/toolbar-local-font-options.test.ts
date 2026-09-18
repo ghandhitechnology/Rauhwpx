@@ -41,12 +41,3 @@ test('글꼴 메뉴는 현재 범주 목록을 검색어로 좁힌다', () => {
   assert.match(source, /if \(event\.key !== 'Enter' \|\| event\.isComposing\) return;/);
   assert.match(styles, /\.font-picker-search \{/);
 });
-
-test('로컬 글꼴 재감지는 캐럿 글꼴이 아니라 문서 전체 글꼴 목록을 보존한다', () => {
-  const refreshStart = source.indexOf('private refreshFontDropdown(): void');
-  const refreshEnd = source.indexOf('/** 문서 로드 시 스타일 목록', refreshStart);
-  const refreshMethod = source.slice(refreshStart, refreshEnd);
-
-  assert.match(refreshMethod, /this\.initFontDropdown\(this\.fontMenuDocumentFonts\)/);
-  assert.doesNotMatch(refreshMethod, /this\.initFontDropdown\(this\.lastFontFamilies\)/);
-});

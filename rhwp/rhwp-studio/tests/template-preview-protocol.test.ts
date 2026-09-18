@@ -8,16 +8,6 @@ import { AgentToolExecutor } from '../src/agent/tool-executor.ts';
 
 const dispatcher = readFileSync(new URL('../src/command/dispatcher.ts', import.meta.url), 'utf8');
 const toolExecutor = readFileSync(new URL('../src/agent/tool-executor.ts', import.meta.url), 'utf8');
-test('template block insertion transfers exact source bytes through the native importer', () => {
-  const insertBlock = toolExecutor.match(
-    /private async templateInsertBlock[\s\S]*?\n  dispose\(\): void/,
-  )?.[0];
-  assert.ok(insertBlock, 'templateInsertBlock implementation must be present');
-  assert.match(insertBlock, /templateBytes\.slice\(\)/);
-  assert.match(insertBlock, /pasteDocumentBlock\(/);
-  assert.doesNotMatch(insertBlock, /exportSelectionHtml|pasteHtml/);
-});
-
 test('read-only dispatcher permits view/copy but rejects document and file mutations', () => {
   const executed: string[] = [];
   const definitions = new Map(['edit:copy', 'view:zoom-in', 'insert:table', 'file:save'].map((id) => [

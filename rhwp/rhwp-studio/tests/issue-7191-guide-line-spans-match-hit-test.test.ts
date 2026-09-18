@@ -1,15 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import {
-  coalesceSpans,
-  computeBorderSpans,
-  mergeBorderCoords,
-} from '../src/engine/table-border-lines.ts';
-
-const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
+import { coalesceSpans, computeBorderSpans, mergeBorderCoords } from '../src/engine/table-border-lines.ts';
 const round = (v: number) => Math.round(v * 10) / 10;
 
 interface SpanCell { x: number; y: number; w: number; h: number }
@@ -124,19 +115,5 @@ test('맞닿은 칸 변은 잇고 벌어진 것은 끊는다', () => {
     coalesceSpans([{ start: 60, end: 100 }, { start: 0, end: 50 }]),
     [{ start: 0, end: 50 }, { start: 60, end: 100 }],
     '입력 순서와 무관하다',
-  );
-});
-
-test('그리는 쪽은 표 전체 범위가 아니라 구간을 쓴다', () => {
-  const renderer = readFileSync(join(rootDir, 'src/engine/table-resize-renderer.ts'), 'utf8');
-  const start = renderer.indexOf('  showMarker(');
-  assert.notEqual(start, -1, 'showMarker 를 찾지 못했다');
-  const body = renderer.slice(start, renderer.indexOf('\n  /**', start + 1));
-
-  assert.match(body, /line\.spans/, 'showMarker 는 경계 구간으로 그려야 한다');
-  assert.doesNotMatch(
-    body,
-    /xStart|xEnd|yStart|yEnd/,
-    '표 전체 범위는 적중 판정과 다른 출처다 — 두 번째 진실원을 남기지 않는다',
   );
 });

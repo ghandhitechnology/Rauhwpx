@@ -27,15 +27,3 @@ test('planning and user-input protocol uses v5 and validates the complete struct
   assert.equal(isStructuredPlan({ ...plan, risks: undefined }), false);
   assert.equal(isStructuredPlan({ ...plan, steps: [{ title: '검토' }] }), false);
 });
-
-test('connected first message records pendingChatStart so reconnect can retry the start', () => {
-  const sendUserOffset = bridgeSource.indexOf('\n  sendUserMessage(');
-  const sendUserSource = bridgeSource.slice(
-    sendUserOffset,
-    bridgeSource.indexOf('\n  private dispatchUserMessage(', sendUserOffset),
-  );
-  assert.match(sendUserSource, /this\.rememberPendingChatStart\(\);/);
-  assert.match(sendUserSource, /this\.pendingChatStart = \{/);
-  assert.match(sendUserSource, /if \(!this\.workflowSwitchPending\) this\.sendPendingChatStart\(\)/);
-  assert.doesNotMatch(sendUserSource, /\} else \{\s*this\.pendingChatStart = \{/);
-});

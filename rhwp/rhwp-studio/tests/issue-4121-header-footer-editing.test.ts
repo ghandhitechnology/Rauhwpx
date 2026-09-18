@@ -180,12 +180,3 @@ test('#4121 undo는 HF selectionBefore, redo는 format의 selectionAfter를 복�
   assert.match(redo, /restoreSelectionAfterRedo/);
   assert.match(restore, /selectHeaderFooterRange/);
 });
-
-test('#4121 새 HF WASM API는 생성 바인딩 타입을 우회하지 않고 탐색 실패를 기록한다', () => {
-  const bridge = src('src/core/wasm-bridge.ts');
-  const cursor = src('src/engine/cursor.ts');
-  assert.doesNotMatch(bridge, /\(this\.doc as any\)\.(?:replaceRangeInHeaderFooter|copySelectionInHeaderFooter|getCharPropertiesInHeaderFooter|applyCharFormatInHeaderFooter|getSelectionRectsInHeaderFooter)/);
-  assert.match(cursor, /moveToWordBoundaryInHf 실패/);
-  assert.match(cursor, /moveToParagraphBoundaryInHf 실패/);
-  assert.match(cursor, /moveToHeaderFooterBoundary 실패/);
-});

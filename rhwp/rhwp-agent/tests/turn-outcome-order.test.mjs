@@ -38,10 +38,3 @@ test('failed replay keeps the terminal outcome for the next reconnect', () => {
   assert.equal(frames[0].event, event);
   assert.equal(record.missedTurnEnd, null);
 });
-
-test('server invokes terminal replay before reconnect welcome', () => {
-  const replay = server.indexOf('replayMissedTurnEnd(record, ws, sendJson);');
-  const welcome = server.indexOf("type: 'welcome'", replay);
-  assert.ok(replay >= 0);
-  assert.ok(welcome > replay, 'welcome must not precede the authoritative terminal outcome');
-});

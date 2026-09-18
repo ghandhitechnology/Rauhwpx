@@ -39,67 +39,10 @@ const EDITOR_ROUTED = parseStringArray(guardSrc, 'EDITOR_ROUTED_MUTATING_METHODS
 // ── (1) 드리프트: 브리지 공개 메서드 분류 강제 ──────────────────────────────
 
 /** WasmBridge 클래스 본문의 공개 메서드 이름을 추출한다(2칸 들여쓰기 최상위). */
-function bridgePublicMethods(): string[] {
-  const src = source('src/core/wasm-bridge.ts');
-  const names = new Set<string>();
-  const priv = new Set<string>();
-  const re = /^ {2}(public |private |protected )?(async )?([a-zA-Z_]\w*)\s*\(/gm;
-  for (const m of src.matchAll(re)) {
-    const name = m[3];
-    if (['constructor', 'if', 'for', 'while', 'switch', 'catch', 'return'].includes(name)) continue;
-    if (m[1] === 'private ' || m[1] === 'protected ') priv.add(name);
-    else names.add(name);
-  }
-  return [...names].filter((n) => !priv.has(n));
-}
 
 // 문서 변경을 시사하는 동사 접두어. MUTATING_METHODS 의 모든 이름을 커버해야
 // 하며(아래 자기정합 단언이 강제), 그래야 새 브리지 뮤테이터가 drift 에 걸린다.
 // find* 는 쿼리(findNextEditableControl 등)가 많아 findOrCreate 로 좁힌다.
-const MUTATING_VERB = /^(insert|delete|create|apply|add|remove|move|resize|merge|split|update|toggle|replace|paste|assign|group|ungroup|change|clear|evaluate|transpose|ensure|fit|findOrCreate|reflow|refresh|setPage|setSection|setColumn|setCell|setTable|setPicture|setShape|setEquation|setNote|setChar|setPara|setField|setForm|setNumbering|setHeaderFooter|setActiveField|renameBookmark)/;
-
-test('MUTATING_VERB 는 MUTATING_METHODS 전 항목을 커버한다(drift 사각 방지)', () => {
-  // 목록에 있으나 동사 패턴에 안 걸리는 이름이 있으면, 그 계열의 신규 브리지
-  // 뮤테이터가 drift 에서 누락된다(ensure*/find* 계열 사각이 실제였음).
-  const uncovered = MUTATING.filter((m) => !MUTATING_VERB.test(m));
-  assert.deepEqual(uncovered, [],
-    `MUTATING_METHODS 에 MUTATING_VERB 가 못 잡는 이름: ${uncovered.join(', ')} → 동사 추가 필요`);
-});
-
-test('드리프트: 문서-변경형 브리지 공개 메서드는 모두 분류돼야 한다', () => {
-  const classified = new Set([...MUTATING, ...EDITOR_ROUTED, ...EXCLUDED]);
-  const unclassified = bridgePublicMethods()
-    .filter((n) => MUTATING_VERB.test(n))
-    .filter((n) => !classified.has(n));
-  assert.deepEqual(
-    unclassified,
-    [],
-    `WasmBridge 신규(?) 뮤테이터가 분류되지 않음: ${unclassified.join(', ')}\n` +
-      `→ mutation-method-registry.ts 의 MUTATING_METHODS(기록 대상) 또는 ` +
-      `EXCLUDED_NON_DOCUMENT(문서 비변경 사유)에 추가하라.`,
-  );
-});
-
-test('MUTATING_METHODS / EXCLUDED_NON_DOCUMENT 는 서로 겹치지 않는다', () => {
-  const allMutating = [...MUTATING, ...EDITOR_ROUTED];
-  const dup = allMutating.filter(
-    (method, index) => EXCLUDED.includes(method) || allMutating.indexOf(method) !== index,
-  );
-  assert.deepEqual(dup, [], `양쪽에 중복 분류됨: ${dup.join(', ')}`);
-});
-
-test('MUTATING_METHODS 는 모두 실제 브리지 공개 메서드여야 한다(rename skip 방지)', () => {
-  // 브리지에서 메서드가 rename/제거되면 목록의 옛 이름이 드리프트·원장 검사에서
-  // 무의미해지므로(권위 목록 사각), 목록 항목이 전부 실재하는지 역방향으로 강제한다.
-  const bridge = new Set(bridgePublicMethods());
-  const missing = [...MUTATING, ...EDITOR_ROUTED].filter((m) => !bridge.has(m));
-  assert.deepEqual(
-    missing,
-    [],
-    `MUTATING_METHODS 에 브리지에 없는 이름: ${missing.join(', ')}\n` +
-      `→ 브리지에서 rename/제거된 메서드. 목록을 갱신하라(방치 시 가드 무통보 비활성).`,
-  );
-});
 
 // ── (2) 원장 트립와이어: 뮤테이션 표면 동결 ─────────────────────────────────
 

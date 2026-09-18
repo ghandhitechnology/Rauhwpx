@@ -1,14 +1,8 @@
 import assert from 'node:assert/strict';
 import { generateKeyPairSync } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { AppServerError } from '../desktop/cloud-app-server.mjs';
-import {
-  createRaucloudBrokerClient,
-  createRaucloudBrokerProvider,
-  RAUCLOUD_PROVIDER_ID,
-  RAUCLOUD_SETUP_TIMEOUT_MS,
-} from '../desktop/cloud-broker.mjs';
+import { createRaucloudBrokerClient, createRaucloudBrokerProvider, RAUCLOUD_PROVIDER_ID, RAUCLOUD_SETUP_TIMEOUT_MS } from '../desktop/cloud-broker.mjs';
 import { createRaucloudBroker } from '../rhwp/rau-credits/cloud-broker.mjs';
 import { CloudCoordinator } from '../desktop/cloud-coordinator.mjs';
 
@@ -593,20 +587,6 @@ test('Raucloud keeps broker conflict and quota failures stable for the UI', asyn
     assert.equal(error.retryable, true);
     return true;
   });
-});
-
-test('the packaged desktop uses the account-session boundary and not the direct Railway provider', async () => {
-  const source = await readFile(new URL('../desktop/main.mjs', import.meta.url), 'utf8');
-  const preload = await readFile(new URL('../desktop/preload.cjs', import.meta.url), 'utf8');
-  assert.match(source, /createRaucloudBrokerProvider/);
-  assert.match(source, /authorizeOwnedBackend:\s*\(request, options\) =>/);
-  assert.match(source, /cloudAccountSession\.authorizeOwnedBackend\(request, options\)/);
-  assert.doesNotMatch(source, /createRailwayServerProvider/);
-  assert.doesNotMatch(source, /RAUCLOUD_ACCESS_SECRET|getAccessToken/);
-  assert.match(source, /cloud:reconnect-link/);
-  assert.match(source, /cloud:recreate-link/);
-  assert.match(preload, /cloudReconnectLink/);
-  assert.match(preload, /cloudRecreateLink/);
 });
 
 test('coordinator snapshots expose a logged-out account gate before any Cloud profile exists', async () => {

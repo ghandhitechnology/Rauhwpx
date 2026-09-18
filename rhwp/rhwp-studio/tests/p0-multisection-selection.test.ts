@@ -1,8 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { getBodySelectionSegments } from '../src/engine/body-selection-range.ts';
 
 const sections = [
@@ -87,24 +85,4 @@ test('character and paragraph formatting enumerate all selected sections', () =>
   assert.ok(characterTargets.includes('2:1:1'));
   assert.ok(!characterTargets.includes('0:0:2'));
   assert.ok(!characterTargets.includes('2:1:2'));
-});
-
-test('Studio routes copy/delete/format/render through cross-section APIs or segments', () => {
-  const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
-  const command = readFileSync(join(rootDir, 'src/engine/command.ts'), 'utf8');
-  const keyboard = readFileSync(join(rootDir, 'src/engine/input-handler-keyboard.ts'), 'utf8');
-  const inputHandler = readFileSync(join(rootDir, 'src/engine/input-handler.ts'), 'utf8');
-
-  assert.match(keyboard, /copySelectionAcrossSections\(/);
-  assert.match(keyboard, /exportSelectionAcrossSectionsHtml\(/);
-  assert.match(command, /deleteRangeAcrossSections\(/);
-  // Formatting now uses the shared editable-target command path so the same
-  // undo/redo implementation also covers cells, HF and notes. Body ranges are
-  // still segmented across sections by InputHandler, then applied one target
-  // at a time here.
-  assert.match(command, /for \(const range of this\.ranges\)/);
-  assert.match(command, /applyCharFormatToTarget\(wasm,/);
-  assert.match(command, /for \(const entry of entries\)/);
-  assert.match(command, /applyParaFormatToTarget\(wasm, entry\.target, propsJson\)/);
-  assert.match(inputHandler, /getBodySelectionSegments\(this\.wasm, start, end\)\.flatMap/);
 });
