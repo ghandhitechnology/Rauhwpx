@@ -42,6 +42,7 @@ test('표 resize 런타임 캐시 정리는 local segment와 bbox 캐시를 함�
   assert.match(clear, /tableLocalResizeSegments\.clear\(\)/, 'local resize segment 캐시 삭제 필요');
   assert.match(clear, /cachedTableRef = null/, '표 ref 캐시 삭제 필요');
   assert.match(clear, /cachedCellBboxes = null/, 'bbox 캐시 삭제 필요');
+  assert.match(clear, /lastCellKey = null/, '문서 교체 뒤 같은 셀 키로 눈금자가 옛 너비를 유지하면 안 된다');
   assert.match(clear, /tableResizeRenderer\?\.clear\(\)/, 'hover/drag marker 삭제 필요');
 });
 

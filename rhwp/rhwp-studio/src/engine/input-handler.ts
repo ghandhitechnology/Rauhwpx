@@ -845,6 +845,7 @@ export class InputHandler {
     this.cachedTableRef = null;
     this.cachedCellBboxes = null;
     this.tableBboxFetchFailures.clear();
+    this.lastCellKey = null;
     this.tableResizeRenderer?.clear();
   }
 

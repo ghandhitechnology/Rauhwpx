@@ -138,7 +138,7 @@ export class TableResizeRenderer {
       if (rightIndex !== undefined && Math.abs(pageX - rightX) <= tolerance) {
         candidates.push({
           edge: { type: 'col', index: rightIndex, pageIndex },
-          distance: Math.abs(pageX - b.x),
+          distance: Math.abs(pageX - rightX),
           priority: 0,
         });
       }

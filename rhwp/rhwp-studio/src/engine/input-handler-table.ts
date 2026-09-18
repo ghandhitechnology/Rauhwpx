@@ -5,7 +5,7 @@ import { MoveTableCommand, MovePictureCommand, MoveShapeCommand } from './comman
 import { getObjectProperties, setObjectProperties } from './input-handler-picture';
 import type { CellBbox } from '@/core/types';
 import type { WasmBridge } from '@/core/wasm-bridge';
-import type { TableRef } from './table-bbox-cache';
+import { tableIdentity, type TableRef } from './table-bbox-cache';
 import type { BorderEdge } from './table-resize-renderer';
 import { showToast } from '@/ui/toast';
 import {
@@ -280,7 +280,7 @@ function findAlignedLogicalResizeAffectedCells(
 }
 
 function localResizeSegmentKey(
-  tableRef: { sec: number; ppi: number; ci: number },
+  tableRef: TableRef,
   edge: BorderEdge,
   target: { cellIdx: number; side: 'start' | 'end' },
   bboxes: CellBbox[],
@@ -293,9 +293,7 @@ function localResizeSegmentKey(
       ? targetBox.col + targetBox.colSpan
       : targetBox.col;
     return [
-      tableRef.sec,
-      tableRef.ppi,
-      tableRef.ci,
+      tableIdentity(tableRef),
       'col',
       boundaryCol,
       targetBox.row,
@@ -307,9 +305,7 @@ function localResizeSegmentKey(
     ? targetBox.row + targetBox.rowSpan
     : targetBox.row;
   return [
-    tableRef.sec,
-    tableRef.ppi,
-    tableRef.ci,
+    tableIdentity(tableRef),
     'row',
     boundaryRow,
     targetBox.col,
@@ -362,7 +358,7 @@ function isSegmentSeparatedFromLogicalBoundary(
 
 function isKnownLocalResizeSegment(
   self: any,
-  tableRef: { sec: number; ppi: number; ci: number },
+  tableRef: TableRef,
   edge: BorderEdge,
   target: { cellIdx: number; side: 'start' | 'end' },
   bboxes: CellBbox[],
@@ -375,11 +371,11 @@ function isKnownLocalResizeSegment(
 
 function hasLocalResizeHistory(
   self: any,
-  tableRef: { sec: number; ppi: number; ci: number },
+  tableRef: TableRef,
 ): boolean {
   const segments = self.tableLocalResizeSegments;
   if (!segments) return false;
-  const prefix = `${tableRef.sec}:${tableRef.ppi}:${tableRef.ci}:`;
+  const prefix = `${tableIdentity(tableRef)}:`;
   for (const key of segments) {
     if (typeof key === 'string' && key.startsWith(prefix)) return true;
   }
@@ -388,7 +384,7 @@ function hasLocalResizeHistory(
 
 function rememberLocalResizeSegment(
   self: any,
-  tableRef: { sec: number; ppi: number; ci: number },
+  tableRef: TableRef,
   edge: BorderEdge,
   target: { cellIdx: number; side: 'start' | 'end' },
   bboxes: CellBbox[],

@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 interface Bbox { pageIndex: number; tag: string }
 
@@ -105,5 +108,22 @@ test('실패 메모도 표마다 따로 남는다', async () => {
     h.tableBboxFetchFailures.size,
     2,
     '바깥 표의 실패가 안쪽 표의 조회까지 막으면 안 된다',
+  );
+});
+
+test('로컬 resize 이력 키는 tableIdentity 를 쓴다', () => {
+  const table = readFileSync(
+    join(dirname(dirname(fileURLToPath(import.meta.url))), 'src/engine/input-handler-table.ts'),
+    'utf8',
+  );
+  assert.match(
+    table,
+    /function localResizeSegmentKey\([\s\S]*?tableIdentity\(tableRef\)/,
+    '바깥 표와 안쪽 표가 같은 sec/ppi/ci 이력이 되면 안 된다',
+  );
+  assert.match(
+    table,
+    /function hasLocalResizeHistory\([\s\S]*?tableIdentity\(tableRef\)/,
+    '이력 조회도 같은 신원을 써야 한다',
   );
 });
