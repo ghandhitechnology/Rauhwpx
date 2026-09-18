@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createTestModuleServer } from './support/module-server.ts';
+import { functionBodyFrom } from './support/source-guard.ts';
 
 const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const src = (rel: string): string => readFileSync(join(rootDir, rel), 'utf8');
@@ -255,4 +256,44 @@ test('#4121 HF 모두 선택은 메뉴와 Ctrl/Cmd+A 모두 현재 정의만 대
   } finally {
     await vite.close();
   }
+});
+
+test('#4121 마우스 HF 선택은 클릭 페이지 target을 확인하고 drag lifecycle을 시작한다', () => {
+  const mouse = src('src/engine/input-handler-mouse.ts');
+  const click = functionBodyFrom(mouse, 'export function onClick(');
+  assert.match(click, /inHfHit\.sectionIndex/);
+  assert.match(click, /inHfHit\.applyTo/);
+  assert.match(click, /setHfAnchor\(\)/);
+  assert.match(click, /startTextSelectionDrag\(e\)/);
+  assert.match(click, /switchHeaderFooterTarget/);
+});
+
+test('#4121 HF 키보드는 Shift 선택과 Esc 2단계를 제공한다', () => {
+  const keyboard = src('src/engine/input-handler-keyboard.ts');
+  const keydown = functionBodyFrom(keyboard, 'export function onKeyDown(');
+  const hfStart = keydown.indexOf('if (this.cursor.isInHeaderFooter())');
+  const fnStart = keydown.indexOf('if (this.cursor.isInFootnote())');
+  const hf = keydown.slice(hfStart, fnStart);
+  assert.match(hf, /e\.shiftKey[\s\S]*setHfAnchor\(\)/);
+  assert.match(hf, /handleHeaderFooterNavigationShortcut/);
+  assert.match(hf, /moveVerticalInHf/);
+  assert.match(hf, /hasHeaderFooterSelection\(\)/);
+  assert.match(hf, /clearSelection\(\)/);
+});
+
+test('#4121 HF overlay는 visible page마다 코어 기하를 조회한다', () => {
+  const handler = src('src/engine/input-handler.ts');
+  const update = functionBodyFrom(handler, 'private updateSelection()');
+  assert.match(update, /getHeaderFooterSelectionOrdered\(\)/);
+  assert.match(update, /getVisiblePages\(/);
+  assert.match(update, /getSelectionRectsInHeaderFooter\(/);
+  assert.match(update, /return \[\];/);
+  assert.match(handler, /eventBus\.on\('viewport-scroll',[\s\S]*updateSelection\(\)/);
+});
+
+test('#4121 선택 renderer는 모든 쪽 배치의 resolved page-left를 사용한다', () => {
+  const renderer = src('src/engine/selection-renderer.ts');
+  const render = functionBodyFrom(renderer, 'render(');
+  assert.match(render, /getPageLeftResolved\(/);
+  assert.doesNotMatch(render, /\(contentWidth - pageDisplayWidth\) \/ 2/);
 });

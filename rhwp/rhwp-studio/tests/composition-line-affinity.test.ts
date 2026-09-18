@@ -8,9 +8,10 @@
 //   getCursorRectOnLine(0, 1, 1, at_end=false) = { x: 121.6, y: 146.5 }  (글자가 놓인 줄의 시작)
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import { resolveGlyphStartRect, isCompositionBoxRepresentable } from '../src/engine/line-start-affinity.ts';
-import { functionBodyFrom } from './support/source-guard.ts';
+import { balancedFrom, codeOnly, functionBodyFrom } from './support/source-guard.ts';
 import type { CursorRect, LineInfo } from '../src/core/types.ts';
 
 /** 이전 줄 끝 — 줄 affinity 없는 exact 조회 결과. */
@@ -22,6 +23,9 @@ const NEXT_LINE_START: CursorRect = { pageIndex: 0, x: 121.6, y: 146.5, height: 
 
 /** 소스 가드용 — 줄바꿈·연속 공백을 한 칸으로 눌러 서식 의존을 없앤다. */
 const flatten = (src: string) => src.replace(/\s+/g, ' ');
+
+const inputHandlerSource = () =>
+  codeOnly(readFileSync(new URL('../src/engine/input-handler.ts', import.meta.url), 'utf8'));
 
 /** offset 22 가 두 번째 줄(lineIndex 1)의 시작인 문단. */
 const WRAP_BOUNDARY_LINE: LineInfo = { lineIndex: 1, lineCount: 2, charStart: 22, charEnd: 45 };
@@ -101,6 +105,38 @@ test('셀 밑줄 클램프용 cellBounds 는 줄 재조회 뒤에도 보존된�
   assert.equal(resolved.x, NEXT_LINE_START.x);
 });
 
+test('compositionStartRect 는 exact 조회 뒤, 캐시에 넣기 전에 줄 affinity 를 적용한다', () => {
+  const source = inputHandlerSource();
+  const startRect = functionBodyFrom(source, 'private compositionStartRect(');
+
+  const applied = startRect.indexOf('startRect = this.compositionOverlayStartRect(anchor, startRect);');
+  const cached = startRect.indexOf('this.compositionAnchorRect = {');
+  assert.ok(applied >= 0, '조합 밑줄 원점이 줄 affinity 를 거쳐야 한다');
+  assert.ok(cached >= 0);
+  assert.ok(applied < cached, '캐시에 넣기 전에 원점을 확정해야 한다 — 캐시된 값은 다시 보정되지 않는다');
+
+  // 아래 가드들은 서식이 아니라 **의미**를 잠근다 — 줄바꿈·들여쓰기·연산자 간격이 바뀌어도
+  // 통과해야 한다(무해한 재포맷에 깨지는 구조 정규식을 쓰지 않는다).
+  const resolver = flatten(functionBodyFrom(source, 'private compositionOverlayStartRect('));
+  assert.match(resolver, /resolveGlyphStartRect\(\s*anchor\.charOffset\s*,\s*exact\s*,/);
+  assert.match(
+    resolver,
+    /isInHeaderFooter\(\)\s*\|\|\s*this\.cursor\.isInFootnote\(\)\s*\)\s*return exact;/,
+    '머리말・꼬리말·각주는 getCursorRectOnLine 대상이 아니라 exact 를 유지한다',
+  );
+  assert.match(
+    resolver,
+    /anchor\.cellPath\?\.length\s*\?\?\s*0\s*\)\s*>\s*1\s*\)\s*return exact;/,
+    '2단 이상 중첩 셀은 getCursorRectOnLine 이 문단을 지목할 수 없어 exact 를 유지한다',
+  );
+  assert.match(resolver, /this\.wasm\.getCursorRectOnLine\(/);
+  assert.match(
+    resolver,
+    /getCursorRectOnLine\(\s*anchor\.sectionIndex\s*,\s*anchor\.paragraphIndex\s*,\s*lineIndex\s*,\s*false\s*,/,
+    'cursor.ts getCursorRectOnVisualLine 과 같은 인자 순서(sectionIndex, paragraphIndex, lineIndex, atEnd)',
+  );
+});
+
 // [Issue #6738] 줄 affinity 를 물을 수 없는 문맥(머리말/꼬리말·각주·2단계 이상 중첩 셀)에서는
 // 조합 글자가 줄을 넘어가도 시작 좌표를 바로잡을 수 없다. 그 상태로 단일 밑줄을 그리면
 // 폭이 음수가 되어 이전 줄 끝에 밑줄이 남거나, 판정을 y 로 하면 글꼴 크기가 섞인 줄에서 사라진다.
@@ -121,6 +157,34 @@ test('쪽을 넘어간 조합은 그릴 수 없다고 판정한다', () => {
   const prevPage: CursorRect = { ...CARET_ON_NEXT_LINE, pageIndex: 0, x: 100 };
   const nextPage: CursorRect = { ...CARET_ON_NEXT_LINE, pageIndex: 1, x: 121.6 };
   assert.equal(isCompositionBoxRepresentable(prevPage, nextPage), false);
+});
+
+test('그릴 수 없는 조합은 밑줄 대신 일반 캐럿으로 물러난다', () => {
+  const updateCaret = functionBodyFrom(inputHandlerSource(), 'private updateCaret(');
+
+  const guard = updateCaret.indexOf('isCompositionBoxRepresentable(startRect, caretRect)');
+  const show = updateCaret.indexOf('this.caret.showCompositionUnderline(');
+  assert.ok(guard >= 0 && show > guard, '밑줄을 긋기 전에 판정해야 한다');
+
+  // 블록을 괄호 짝으로 잘라 **무엇을 하는지**만 본다 — 문 사이 서식에 걸리지 않는다.
+  const shown = balancedFrom(updateCaret, 'if (startRect && isCompositionBoxRepresentable', '{');
+  assert.match(shown, /this\.caret\.showCompositionUnderline\(\s*startRect\s*,\s*caretRect\s*,/);
+  assert.doesNotMatch(shown, /hideComposition/);
+
+  const fallback = balancedFrom(updateCaret.slice(updateCaret.indexOf(shown) + shown.length), 'else', '{');
+  assert.match(fallback, /this\.caret\.hideComposition\(\)/, '그릴 수 없으면 밑줄을 접어야 한다');
+  assert.match(fallback, /this\.caret\.update\(\s*caretRect\s*,/, '조회 실패와 같은 경로로 일반 캐럿을 보여야 한다');
+  assert.doesNotMatch(fallback, /showCompositionUnderline/, '그릴 수 없는데 밑줄을 그리면 안 된다');
+});
+
+test('caret-renderer 의 같은 줄 판정은 y 가 아니라 isCompositionBoxRepresentable 이 소유한다', () => {
+  // 같은 줄이라도 글꼴 크기가 섞이면 캐럿 y 가 run 마다 다르다(baseline 기준). y 차이로
+  // 판정하면 그 줄의 조합 밑줄이 사라진다. 판정은 한 곳(line-start-affinity)만 소유한다.
+  const source = codeOnly(readFileSync(new URL('../src/engine/caret-renderer.ts', import.meta.url), 'utf8'));
+  const underline = functionBodyFrom(source, 'showCompositionUnderline(');
+  assert.match(underline, /isCompositionBoxRepresentable\(\s*startRect\s*,\s*endRect\s*\)/);
+  assert.doesNotMatch(underline, /startRect\.y\s*-\s*endRect\.y/, 'y 기반 같은 줄 판정을 두면 안 된다');
+  assert.match(underline, /rawWidth\s*>\s*0/, '폭 0 이하는 여전히 숨긴다');
 });
 
 test('줄 정보를 조회할 수 없으면 exact 동작을 유지한다', () => {

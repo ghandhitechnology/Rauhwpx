@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createTestModuleServer } from './support/module-server.ts';
+import { functionBodyFrom } from './support/source-guard.ts';
 
 const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const src = (rel: string): string => readFileSync(join(rootDir, rel), 'utf8');
@@ -38,4 +39,26 @@ test('#6453 HF 커서 위치 API는 대표 편집 페이지를 바꾸지 않는�
   } finally {
     await vite.close();
   }
+});
+
+test('#6453 HF 공개 커서 위치 API는 문단·문자 좌표만 받는다', () => {
+  const cursor = src('src/engine/cursor.ts');
+  const setPosition = functionBodyFrom(cursor, 'setHfCursorPosition(');
+
+  assert.match(cursor, /setHfCursorPosition\(paraIdx: number, charOffset: number\): void/);
+  assert.doesNotMatch(setPosition, /page|resolveHeaderFooterPreviewPage/);
+});
+
+test('#6453 IME 조합 캐럿도 HF 대표 편집 페이지를 직접 사용한다', () => {
+  const handler = src('src/engine/input-handler.ts');
+  const compositionStart = functionBodyFrom(handler, 'private compositionStartRect(');
+
+  assert.match(
+    compositionStart,
+    /getCursorRectInHeaderFooter\([\s\S]*?this\.cursor\.hfPreviewPage/,
+  );
+  assert.doesNotMatch(
+    compositionStart,
+    /getCursorRectInHeaderFooter\([\s\S]*?this\.cursor\.getRect\(\)\?\.pageIndex/,
+  );
 });
