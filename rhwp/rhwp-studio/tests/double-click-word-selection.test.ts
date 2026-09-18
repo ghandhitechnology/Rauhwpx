@@ -80,3 +80,11 @@ test('글상자 본문은 제외하고 글상자 안 중첩 표 셀은 선택한
   assert.equal(selectCurrentTableCell(nestedTable.self), true);
   assert.ok(nestedTable.calls.includes('enter-cell-selection'));
 });
+
+test('더블클릭 라우팅은 표 셀 선택을 단어 선택보다 먼저 시도한다', () => {
+  const tableCell = mouseHandler.indexOf('if (selectCurrentTableCell(this))');
+  const word = mouseHandler.lastIndexOf('if (selectCurrentWord(this))');
+  assert.notEqual(tableCell, -1);
+  assert.notEqual(word, -1);
+  assert.ok(tableCell < word);
+});

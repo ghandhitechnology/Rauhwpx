@@ -36,3 +36,38 @@ test('서식 도구 모음의 폼 컨트롤은 접근 가능한 이름을 제공
     );
   }
 });
+
+test('숨겨진 편집 입력과 글자색 입력은 접근 가능한 이름을 제공한다', () => {
+  const html = source('index.html');
+  const inputHandler = source('src/engine/input-handler.ts');
+
+  assert.match(html, /id="text-color-picker"[^>]*aria-label="글자 색 선택"/);
+  assert.match(inputHandler, /setAttribute\('aria-label', '문서 편집 입력'\)/);
+  assert.match(inputHandler, /this\.container\.closest\('main'\)/);
+});
+
+test('문서 렌더링 이미지와 스크롤 영역은 보조 기술 및 키보드 계약을 제공한다', () => {
+  const html = source('index.html');
+  const pageRenderer = source('src/view/page-renderer.ts');
+
+  assert.match(
+    html,
+    /<div id="scroll-container" role="region" aria-label="문서 페이지" tabindex="0">/,
+  );
+  assert.match(pageRenderer, /const element = new Image\(\);\s*element\.alt = '';/);
+});
+
+test('문서가 없을 때 파일 열기와 드롭 위치를 명확히 표시한다', () => {
+  const html = source('index.html');
+  const main = source('src/main.ts');
+
+  assert.match(html, /id="document-empty-state"/);
+  assert.match(html, /HWP, HWPX, HML 파일을 선택하거나 여기에 놓으세요\./);
+  assert.match(html, /id="document-open-action">HWP\/HWPX 열기<\/button>/);
+  assert.match(html, /id="document-new-action">새 파일<\/button>/);
+  assert.match(main, /document-open-action/);
+  assert.match(main, /document-new-action/);
+  assert.match(main, /dispatcher\.dispatch\('file:open'\)/);
+  assert.match(main, /dispatcher\.dispatch\('file:new-doc'\)/);
+  assert.match(main, /emptyState\.hidden = true/);
+});

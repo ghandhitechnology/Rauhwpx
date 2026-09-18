@@ -18,8 +18,35 @@ const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const commandSrc = readFileSync(join(rootDir, 'src/engine/command.ts'), 'utf8');
 
 /** `export class NAME ...` 부터 다음 `export class` 전까지 클래스 본문을 추출. */
+function classBlock(src: string, name: string): string {
+  const start = src.indexOf(`export class ${name}`);
+  assert.notEqual(start, -1, `${name} 클래스 not found`);
+  const rel = src.slice(start + 1).indexOf('\nexport class ');
+  return rel === -1 ? src.slice(start) : src.slice(start, start + 1 + rel);
+}
 
 /** 클래스 본문에서 undo() 블록만 분리. */
+function undoBlock(block: string): string {
+  const uIdx = block.indexOf('undo(wasm: WasmBridge): DocumentPosition {');
+  assert.notEqual(uIdx, -1, 'undo 시그니처 not found');
+  return block.slice(uIdx);
+}
+
+test('InsertTextCommand.undo 는 삭제 count 를 charCount 로 계산한다', () => {
+  const undo = undoBlock(classBlock(commandSrc, 'InsertTextCommand'));
+
+  assert.match(undo, /doDeleteTextImmediate\([^)]*charCount\(this\.text\)/,
+    'astral 문자 over-delete 방지 — charCount 로 코드포인트 수를 넘겨야 함');
+  assert.doesNotMatch(undo, /doDeleteTextImmediate\([^)]*this\.text\.length/,
+    'UTF-16 length 를 삭제 count 로 넘기면 😀 입력 후 undo 가 인접 문자까지 지운다');
+});
+
+test('InsertTextCommand의 커서와 merge 연속성도 scalar 축을 사용한다', () => {
+  const insert = classBlock(commandSrc, 'InsertTextCommand');
+  assert.match(insert, /charOffset: this\.position\.charOffset \+ charCount\(this\.text\)/);
+  assert.match(insert, /const expectedOffset = this\.position\.charOffset \+ charCount\(this\.text\);/);
+  assert.doesNotMatch(insert, /charOffset \+ this\.text\.length/);
+});
 
 test('command.ts 의 삭제 count 에 UTF-16 length 를 넘기는 호출이 없다', () => {
   // 삭제 count 인자도 같은 scalar 계약을 지켜야 한다.

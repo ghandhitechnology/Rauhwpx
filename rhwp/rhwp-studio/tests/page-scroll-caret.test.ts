@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import { caretRectForPageScroll } from '../src/view/page-scroll-caret.ts';
 
@@ -32,4 +33,16 @@ test('머리말·개체 선택·셀 선택 캐럿도 화면만 옮긴다', () =>
   assert.equal(caretRectForPageScroll(cursor({ isInPictureObjectSelection: () => true })), null);
   assert.equal(caretRectForPageScroll(cursor({ isInCellSelectionMode: () => true })), null);
   assert.equal(caretRectForPageScroll(cursor(), true), null);
+});
+
+test('CanvasView는 viewport 높이와 세로 이동을 setPageDimensions에 전달한다', () => {
+  const source = readFileSync(new URL('../src/view/canvas-view.ts', import.meta.url), 'utf8');
+  const start = source.indexOf('private recalcLayout(): void {');
+  const end = source.indexOf('this.scrollContent.style.height', start);
+  const block = source.slice(start, end);
+
+  assert.match(block, /setPageDimensions\(/);
+  assert.match(block, /viewport\.width/);
+  assert.match(block, /'vertical'/);
+  assert.match(block, /viewport\.height/);
 });

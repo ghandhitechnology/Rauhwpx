@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
+import { runInNewContext } from 'node:vm';
 
 import { CloudClient } from '../desktop/cloud-client.mjs';
 import { CloudCoordinator } from '../desktop/cloud-coordinator.mjs';
@@ -37,6 +38,35 @@ function cloudStartTransfer(extra = {}) {
     ...extra,
   };
 }
+
+test('desktop checkpoint IPC preserves the immutable boundary operation id', async () => {
+  const source = await readFile(new URL('../desktop/main.mjs', import.meta.url), 'utf8');
+  assert.match(source, /cloud:download-checkpoint[\s\S]*?\^\[A-Za-z0-9\._:-\]\{1,160\}\$[\s\S]*?downloadCheckpoint\(\{ sessionId, operationId, \.\.\.\(kind \? \{ kind \} : \{\}\) \}\)/);
+});
+
+test('desktop takeover completion IPC passes through the applied operation id', async () => {
+  const source = await readFile(new URL('../desktop/main.mjs', import.meta.url), 'utf8');
+  assert.match(
+    source,
+    /cloud:complete-takeover[\s\S]*?completeTakeover\(payload\)/,
+  );
+});
+
+test('desktop result resolution holds one coordinator profile lease', async () => {
+  const source = await readFile(new URL('../desktop/main.mjs', import.meta.url), 'utf8');
+  assert.match(
+    source,
+    /cloud:resolve-result[\s\S]*?coordinator\.withActiveHandoff\(payload\.sessionId, async \(handoff\) => \{[\s\S]*?applyCloudRecovery\([\s\S]*?scopedCloudSnapshot\([\s\S]*?coordinator\.recordResolution\(/,
+  );
+});
+
+test('desktop result download holds one coordinator profile lease through preview and snapshot', async () => {
+  const source = await readFile(new URL('../desktop/main.mjs', import.meta.url), 'utf8');
+  assert.match(
+    source,
+    /cloud:download-result[\s\S]*?coordinator\.withActiveHandoff\(payload\.sessionId, async[\s\S]*?coordinator\.downloadResult\(payload\)[\s\S]*?coordinator\.handoffForSession\(payload\?\.sessionId\)[\s\S]*?createWindow\([\s\S]*?scopedCloudSnapshot\(/,
+  );
+});
 
 const SERVER_IDENTITY = generateKeyPairSync('ed25519');
 const SERVER_KEY = `ed25519:${SERVER_IDENTITY.publicKey.export({ type: 'spki', format: 'der' }).toString('base64url')}`;
@@ -4099,6 +4129,62 @@ async function publicationFixture(t, { snapshot = 'original', originDigest } = {
   return { coordinator, store, id: created.id, originPath, deliver, waitFor, staged };
 }
 
+test('agent delivery requests archive completed work without overwriting local edits', async (t) => {
+  const fixture = await publicationFixture(t);
+  await fixture.deliver({ sequence: 1, type: 'document.publish_requested', payload: { operationId: 'turn-1' } });
+  await fixture.waitFor((record) => record.pendingOriginPublications.length === 0);
+  assert.equal(await readFile(fixture.originPath, 'utf8'), 'original');
+  assert.equal(await readFile(path.join(path.dirname(fixture.originPath), 'recovery', 'merge', fixture.id, 'revision-1.hwpx'), 'utf8'), 'cloud revision 1');
+  await fixture.deliver({ sequence: 2, type: 'boundary.committed', payload: { kind: 'turn', operationId: 'turn-2', revision: 2, turnNumber: 2 } });
+  const archived = await fixture.waitFor((record) => record.lastSyncedRevision === 2);
+  assert.equal(archived.state, 'running');
+  assert.equal(await readFile(fixture.originPath, 'utf8'), 'original');
+  await fixture.coordinator.publishCheckpoint({ sessionId: 'cloud-publish', operationId: 'turn-2' });
+  await fixture.deliver({ sequence: 3, type: 'document.publish_requested', payload: { operationId: 'turn-1' } });
+  const replayed = await fixture.waitFor((record) => record.pendingOriginPublications.length === 0);
+  assert.equal(replayed.lastPublishedRevision, 2);
+  assert.equal(replayed.state, 'running');
+  assert.equal(await readFile(fixture.originPath, 'utf8'), 'cloud revision 2');
+});
+
+test('publication preserves an externally edited origin without ending or taking over the cloud session', async (t) => {
+  const fixture = await publicationFixture(t);
+  await writeFile(fixture.originPath, 'external edit');
+  const published = await fixture.coordinator.publishCheckpoint({ sessionId: 'cloud-publish', operationId: 'turn-1' });
+  assert.equal(published.publication, 'conflict');
+  assert.equal(await readFile(fixture.originPath, 'utf8'), 'external edit');
+  assert.equal(await readFile(path.join(path.dirname(fixture.originPath), published.preservedCopyName), 'utf8'), 'cloud revision 1');
+  assert.equal((await fixture.store.get(fixture.id)).state, 'running');
+  const again = await fixture.coordinator.publishCheckpoint({ sessionId: 'cloud-publish', operationId: 'turn-1' });
+  assert.equal(again.publication, 'conflict');
+});
+
+
+test('dirty snapshot publication uses the saved origin baseline and retains its snapshot digest', async (t) => {
+  const originDigest = createHash('sha256').update('original').digest('hex');
+  const fixture = await publicationFixture(t, { snapshot: 'unsaved local draft', originDigest });
+  const before = await fixture.store.get(fixture.id);
+  assert.notEqual(before.documentDigest, before.originDigest);
+  assert.equal(await readFile(fixture.originPath, 'utf8'), 'original');
+  const published = await fixture.coordinator.publishCheckpoint({ sessionId: 'cloud-publish', operationId: 'turn-1' });
+  assert.equal(published.publication, 'written');
+  assert.equal(await readFile(fixture.originPath, 'utf8'), 'cloud revision 1');
+  assert.equal((await fixture.store.get(fixture.id)).documentDigest, before.documentDigest);
+  assert.equal(Buffer.from(fixture.staged.documentBytes).toString(), 'unsaved local draft');
+  await writeFile(fixture.originPath, 'external after publication');
+  assert.equal((await fixture.coordinator.publishCheckpoint({ sessionId: 'cloud-publish', operationId: 'turn-2' })).publication, 'conflict');
+  assert.equal(await readFile(fixture.originPath, 'utf8'), 'external after publication');
+});
+
+test('unknown origin baseline preserves external bytes even when the dirty snapshot differs', async (t) => {
+  const fixture = await publicationFixture(t, { snapshot: 'unsaved local draft', originDigest: null });
+  await writeFile(fixture.originPath, 'external before handoff');
+  const published = await fixture.coordinator.publishCheckpoint({ sessionId: 'cloud-publish', operationId: 'turn-1' });
+  assert.equal(published.publication, 'conflict');
+  assert.equal(await readFile(fixture.originPath, 'utf8'), 'external before handoff');
+});
+
+
 test('native cloud origin baseline remains the accepted file fingerprint after an external edit', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'cloud-origin-fingerprint-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -4115,3 +4201,102 @@ test('native cloud origin baseline remains the accepted file fingerprint after a
   assert.equal(registry.originDigestForSessionPath('owner', null), null);
 });
 
+test('local saves retain native identity validation while Cloud owns its separate copy', async () => {
+  const source = await readFile(new URL('../desktop/main.mjs', import.meta.url), 'utf8');
+  for (const [start, end, operation] of [
+    ['desktop:native-file-validate-save', 'desktop:native-file-write', 'validateSave'],
+    ['desktop:native-file-write', 'desktop:native-file-is-same', 'write'],
+  ]) {
+    const block = source.slice(source.indexOf(`ipcMain.handle('${start}'`), source.indexOf(`ipcMain.handle('${end}'`));
+    assert.doesNotMatch(block, /cloudLocked/);
+    assert.ok(block.includes(`nativeFiles.${operation}(session.sessionId,`));
+    assert.ok(block.includes('documentLeases)'));
+  }
+});
+
+
+test('desktop cloud bursts send history once per window and preserve ordered profile events', async (t) => {
+  // Exercise the production queue and broadcast without launching Electron.
+  const source = await readFile(new URL('../desktop/main.mjs', import.meta.url), 'utf8');
+  const broadcastFunctions = source.slice(
+    source.indexOf('async function broadcastCloudEvent(payload)'),
+    source.indexOf('function requireCloudCoordinator()'),
+  );
+  const timeline = { thread: { messages: [{ role: 'assistant', text: 'x'.repeat(1024 * 1024) }] } };
+  const snapshots = [
+    { profileEpoch: 8, session: { sessionId: 'cloud-a' }, timeline },
+    { profileEpoch: 8, session: { sessionId: 'cloud-b' }, timeline: null },
+  ];
+  const sent = [[], []];
+  const snapshotCalls = [];
+  const windows = sent.map((messages, index) => ({
+    isDestroyed: () => false,
+    webContents: { index, send: (channel, payload) => messages.push({ channel, payload }) },
+  }));
+  let flush;
+  const queue = runInNewContext(`
+    let cloudBroadcastChain = Promise.resolve();
+    const CLOUD_BROADCAST_COALESCE_MS = 100;
+    let cloudBroadcastTimer = null;
+    let cloudBroadcastPending = [];
+    ${broadcastFunctions}
+    ({ push: queueCloudBroadcast, pending: () => cloudBroadcastPending,
+       done: () => cloudBroadcastChain });
+  `, {
+    sessions: { windows: () => windows, sessionForSender: (sender) => sender.index },
+    scopedCloudSnapshot: async (session) => {
+      snapshotCalls.push(session);
+      return snapshots[session];
+    },
+    setTimeout: (callback) => { flush = callback; return { unref() {} }; },
+    console,
+  });
+  const inputs = Array.from({ length: 32 }, (_, sequence) => ({
+    version: 1,
+    type: 'session-event',
+    profileEpoch: sequence < 2 ? 7 : 8,
+    at: '2026-09-08T00:00:00.000Z',
+    sessionId: 'cloud-a',
+    event: { type: 'agent.event', sequence, data: { type: 'text_delta', text: 'next' } },
+    handoff: { id: 'handoff-a', timeline },
+  }));
+  inputs.push({
+    version: 1,
+    type: 'command-completed',
+    profileEpoch: 8,
+    at: '2026-09-08T00:00:01.000Z',
+    command: 'pause',
+    snapshot: { profileEpoch: 8, timeline },
+  });
+  for (const input of inputs) queue.push(input);
+  assert.equal(queue.pending().length, inputs.length);
+  for (const item of queue.pending()) {
+    assert.equal('handoff' in item, false);
+    assert.equal('snapshot' in item, false);
+  }
+  assert.deepEqual(snapshotCalls, []);
+  flush();
+  await queue.done();
+  assert.deepEqual(snapshotCalls, [0, 1]);
+  for (const [index, messages] of sent.entries()) {
+    assert.equal(messages.length, 1);
+    assert.equal(messages[0].channel, 'cloud:event');
+    const batch = messages[0].payload;
+    assert.equal(batch.type, 'cloud-event-batch');
+    assert.equal(batch.snapshot, snapshots[index]);
+    assert.equal(batch.events.length, inputs.length);
+    for (const [i, item] of batch.events.entries()) {
+      const { handoff, snapshot, ...expected } = inputs[i];
+      assert.deepEqual(JSON.parse(JSON.stringify(item)), expected);
+      if (inputs[i].handoff) assert.equal(inputs[i].handoff.timeline, timeline);
+      if (inputs[i].snapshot) assert.equal(inputs[i].snapshot.timeline, timeline);
+    }
+  }
+  const bytes = (value) => Buffer.byteLength(JSON.stringify(value));
+  const previousBytes = bytes({ type: 'cloud-event-batch', events: inputs, snapshot: snapshots[0] });
+  const currentBytes = bytes(sent[0][0].payload);
+  assert.ok(currentBytes < bytes(timeline) + 16_384, 'history should occur once per burst');
+  assert.ok(bytes(sent[1][0].payload) < 16_384, 'another window should receive only its scoped history');
+  assert.ok(previousBytes > currentBytes * 30, `${previousBytes} -> ${currentBytes} bytes`);
+  t.diagnostic(`32 deltas plus one operation with a 1 MiB timeline: ${previousBytes} -> ${currentBytes} bytes`);
+});

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import { isPageLocalTextEditCommand, MAX_PAGE_LOCAL_TEXT_EDIT_CHARS } from '../src/engine/input-edit-invalidation.ts';
 import type { DocumentPosition } from '../src/core/types.ts';
@@ -23,6 +24,30 @@ test('isPageLocalTextEditCommand는 같은 셀 내부 insert/delete만 허용한
   assert.equal(
     isPageLocalTextEditCommand('deleteText', baseCellPos, baseCellPos, { deleteCount: 1 }),
     true,
+  );
+});
+
+test('depth-1 셀 IME replacement는 body fallback보다 먼저 atomic helper를 사용한다', () => {
+  const textSource = readFileSync(
+    new URL('../src/engine/input-handler-text.ts', import.meta.url),
+    'utf8',
+  );
+  const replaceStart = textSource.indexOf('export function replaceTextAtRaw(');
+  const deleteStart = textSource.indexOf('export function deleteTextAt(', replaceStart);
+  const replaceSource = textSource.slice(replaceStart, deleteStart);
+
+  assert.match(
+    replaceSource,
+    /canUseDeferredCellTextReplace\(pos, deleteCount, text\)/,
+  );
+  assert.match(
+    replaceSource,
+    /return replaceCellTextWithMutationEffects\(this\.wasm, pos, deleteCount, text\);/,
+  );
+  assert.ok(
+    replaceSource.indexOf('canUseDeferredCellTextReplace') <
+      replaceSource.indexOf('canUseLocalBodyTextReplace'),
+    'cell atomic route must be checked before the body-only route',
   );
 });
 
