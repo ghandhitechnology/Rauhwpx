@@ -749,7 +749,7 @@ export class InputHandler {
       this.clearTableResizeRuntimeCache();
       this.clearPendingCharFormat();
     });
-    eventBus.on('open-document-bytes', () => {
+    eventBus.on('document-swapped', () => {
       this.clearTableResizeRuntimeCache();
       this.clearPendingCharFormat();
     });
@@ -845,6 +845,7 @@ export class InputHandler {
     this.cachedTableRef = null;
     this.cachedCellBboxes = null;
     this.tableBboxFetchFailures.clear();
+    this.lastCellKey = null;
     this.tableResizeRenderer?.clear();
   }
 

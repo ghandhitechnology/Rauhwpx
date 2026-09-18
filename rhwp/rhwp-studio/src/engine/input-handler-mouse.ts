@@ -13,7 +13,7 @@ import { selectCurrentTableCell } from './table-cell-selection';
 import { CursorState } from './cursor';
 import { isTopLevelBodyObject } from '@/core/object-address';
 import { emitHeaderFooterModeChanged } from './header-footer-mode';
-import { cacheTableCellBboxes, ensureTableCellBboxCache } from './table-bbox-cache';
+import { cacheTableCellBboxes, ensureTableCellBboxCache, type TableRef } from './table-bbox-cache';
 
 function readCurrentParagraphText(self: any) {
   if (self.cursor.isInHeaderFooter()) {
@@ -1995,13 +1995,18 @@ export function handleResizeHover(this: any, e: MouseEvent): void {
   const pageY = (contentY - pageOffset) / zoom;
 
   // hitTest로 표 셀 위인지 확인
-  let tableRef: { sec: number; ppi: number; ci: number } | null = null;
+  let tableRef: TableRef | null = null;
   let tableHit: any = null;
   try {
     const hit = this.wasm.hitTest(pageIdx, pageX, pageY);
     if (hit.parentParaIndex !== undefined && hit.controlIndex !== undefined && !hit.isTextBox) {
       tableHit = hit;
-      tableRef = { sec: hit.sectionIndex, ppi: hit.parentParaIndex, ci: hit.controlIndex };
+      tableRef = {
+        sec: hit.sectionIndex,
+        ppi: hit.parentParaIndex,
+        ci: hit.controlIndex,
+        path: Array.isArray(hit.cellPath) ? hit.cellPath : undefined,
+      };
     }
   } catch { /* hitTest 실패 시 표 밖 */ }
 

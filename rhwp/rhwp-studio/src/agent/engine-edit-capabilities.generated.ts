@@ -1104,6 +1104,17 @@ export const ENGINE_EDIT_CAPABILITIES = [
     "signature": "pasteHtmlInCellByPath(sec: number, parentPara: number, pathJson: string, charOffset: number, html: string)"
   },
   {
+    "method": "pasteHwpJson",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "para",
+      "charOffset",
+      "json"
+    ],
+    "signature": "pasteHwpJson(sec: number, para: number, charOffset: number, json: string)"
+  },
+  {
     "method": "pasteInternal",
     "kind": "document",
     "parameters": [
@@ -1270,6 +1281,17 @@ export const ENGINE_EDIT_CAPABILITIES = [
     "signature": "resizeTableCells(sec: number, parentPara: number, controlIdx: number, updates: TableCellResizeUpdate[],)"
   },
   {
+    "method": "resizeTableCellsByPath",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "parentPara",
+      "pathJson",
+      "updates"
+    ],
+    "signature": "resizeTableCellsByPath(sec: number, parentPara: number, pathJson: string, updates: TableCellResizeUpdate[],)"
+  },
+  {
     "method": "setCellParaShapeId",
     "kind": "document",
     "parameters": [
@@ -1408,6 +1430,31 @@ export const ENGINE_EDIT_CAPABILITIES = [
       "shapeId"
     ],
     "signature": "setCharShapeIdInHf(sec: number, isHeader: boolean, applyTo: number, para: number, start: number, end: number, shapeId: number)"
+  },
+  {
+    "method": "setCharShapeRuns",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "para",
+      "start",
+      "end",
+      "runs"
+    ],
+    "signature": "setCharShapeRuns(sec: number, para: number, start: number, end: number, runs: CharShapeRun[])"
+  },
+  {
+    "method": "setCharShapeRunsInCellByPath",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "para",
+      "path",
+      "start",
+      "end",
+      "runs"
+    ],
+    "signature": "setCharShapeRunsInCellByPath(sec: number, para: number, path: string, start: number, end: number, runs: CharShapeRun[])"
   },
   {
     "method": "setColumnDef",
@@ -1861,6 +1908,7 @@ export const ENGINE_EDIT_TYPE_DEFINITIONS = {
   "DocumentPosition": "export interface DocumentPosition { sectionIndex: number; paragraphIndex: number; charOffset: number; parentParaIndex?: number; controlIndex?: number; cellIndex?: number; cellParaIndex?: number; cellPath?: CellPathEntry[]; isTextBox?: boolean; cursorRect?: CursorRect; }",
   "TableCellResizeUpdate": "export interface TableCellResizeUpdate { cellIdx: number; widthDelta?: number; heightDelta?: number; localResize?: boolean; renderWidth?: number; renderHeight?: number; }",
   "CellProperties": "export interface CellProperties { width: number; height: number; paddingLeft: number; paddingRight: number; paddingTop: number; paddingBottom: number; applyInnerMargin: boolean; verticalAlign: number; textDirection: number; isHeader: boolean; cellProtect?: boolean; fieldName?: string; editableInForm?: boolean; borderFillId?: number; borderLeft?: BorderLineInfo; borderRight?: BorderLineInfo; borderTop?: BorderLineInfo; borderBottom?: BorderLineInfo; fillType?: string; fillColor?: string; patternColor?: string; patternType?: number; diagonalLine?: number; diagonalSlash?: number; diagonalBackSlash?: number; diagonalWidth?: number; diagonalColor?: string; centerLine?: string; }",
+  "CharShapeRun": "export interface CharShapeRun { startOffset: number; endOffset: number; charShapeId: number; }",
   "NoteControlRef": "export interface NoteControlRef { kind: 'footnote' | 'endnote'; sectionIdx: number; paraIdx: number; controlIdx: number; noteParaIdx: number; innerControlIdx: number; }",
   "PageBorderFillSettings": "export interface PageBorderFillSettings { attr: number; basis: 'paper' | 'page'; spacingLeft: number; spacingRight: number; spacingTop: number; spacingBottom: number; borderFillId: number; headerInside: boolean; footerInside: boolean; fillArea: 'paper' | 'page' | 'border'; hideBorder: boolean; hideFill: boolean; borderLeft: BorderLineProps; borderRight: BorderLineProps; borderTop: BorderLineProps; borderBottom: BorderLineProps; fillType: 'none' | 'solid' | string; fillColor: string; patternColor: string; patternType: number; applyPage?: 'all' | 'exceptFirst' | 'firstOnly'; }",
   "PageDef": "export interface PageDef { width: number; height: number; marginLeft: number; marginRight: number; marginTop: number; marginBottom: number; marginHeader: number; marginFooter: number; marginGutter: number; landscape: boolean; binding: number; }",

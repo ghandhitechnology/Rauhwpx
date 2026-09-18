@@ -42,6 +42,7 @@ test('표 resize 런타임 캐시 정리는 local segment와 bbox 캐시를 함�
   assert.match(clear, /tableLocalResizeSegments\.clear\(\)/, 'local resize segment 캐시 삭제 필요');
   assert.match(clear, /cachedTableRef = null/, '표 ref 캐시 삭제 필요');
   assert.match(clear, /cachedCellBboxes = null/, 'bbox 캐시 삭제 필요');
+  assert.match(clear, /lastCellKey = null/, '문서 교체 뒤 같은 셀 키로 눈금자가 옛 너비를 유지하면 안 된다');
   assert.match(clear, /tableResizeRenderer\?\.clear\(\)/, 'hover/drag marker 삭제 필요');
 });
 
@@ -49,5 +50,5 @@ test('문서 전환 이벤트도 표 resize 런타임 캐시 정리 helper를 �
   const events = constructorEventsBlock();
 
   assert.match(events, /create-new-document'[\s\S]*clearTableResizeRuntimeCache\(\)/, '새 문서에서 캐시 정리 필요');
-  assert.match(events, /open-document-bytes'[\s\S]*clearTableResizeRuntimeCache\(\)/, '문서 열기에서 캐시 정리 필요');
+  assert.match(events, /document-swapped'[\s\S]*clearTableResizeRuntimeCache\(\)/, '문서 교체에서 캐시 정리 필요');
 });
