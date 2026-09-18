@@ -822,3 +822,149 @@ for (const getTimezone of [() => '', () => 'invalid/timezone', () => { throw new
     assert.equal(calls[1].body.timezone, 'UTC');
   });
 }
+
+test('prewarm reserves the account worker through the broker without starting a run', async () => {
+  const { client, calls } = broker({
+    'POST /v1/cloud/prewarm': json({
+      run: { id: 'run-warm', status: 'allocating', prewarm: true },
+      worker: { id: 'worker-warm', runId: 'run-warm', status: 'allocating', prewarm: true },
+      account: { id: 'account-1', email: 'andy@example.com' },
+      quota: { limitMs: 3_600_000, usedMs: 0, remainingMs: 3_600_000, coldStarts: { usedToday: 1, dailyLimit: 12 } },
+      gate: { state: 'ready', canStart: true, reason: null },
+      prewarm: true,
+    }),
+  });
+  const provider = createRaucloudBrokerProvider({ client });
+  const lines = [];
+  const result = await provider.prewarm({ onLine: (line) => lines.push(line) });
+
+  assert.equal(result.supported, true);
+  assert.equal(result.lifecycle, 'provisioning');
+  assert.equal(result.account.quota.remainingMs, 3_600_000);
+  assert.deepEqual(calls[0].body, {
+    deviceId: 'device-desktop-123',
+    deviceName: 'Laptop',
+    timezone: 'Asia/Seoul',
+  });
+  assert.equal(lines.length, 1);
+});
+
+test('prewarm reports an older broker as unsupported instead of failing startup', async () => {
+  const { client } = broker({ 'POST /v1/cloud/prewarm': json({ error: 'not found' }, 404) });
+  const result = await createRaucloudBrokerProvider({ client }).prewarm();
+  assert.deepEqual(result, { supported: false });
+});
+
+test('spawn refreshes the pairing receipt when it claims a warm worker', async () => {
+  const { client, calls } = broker({
+    'POST /v1/cloud/runs': json({
+      run: { id: 'run-warm', status: 'ready', reused: true },
+      receipt: RECEIPT,
+    }),
+    'POST /v1/cloud/runs/run-warm/receipt': json({
+      receipt: { ...RECEIPT, pairingCode: 'MNOP-QRST-UVWX' },
+    }),
+  });
+  const lines = [];
+  const result = await createRaucloudBrokerProvider({ client }).spawn({
+    deviceName: 'Work laptop',
+    onLine: (line) => lines.push(line),
+  });
+
+  assert.deepEqual(calls.map((call) => call.key), [
+    'POST /v1/cloud/runs',
+    'POST /v1/cloud/runs/run-warm/receipt',
+  ]);
+  assert.equal(result.receipt.pairingCode, 'MNOP-QRST-UVWX');
+  assert.ok(lines.some((line) => line.includes('warm Cloud worker')));
+});
+
+test('spawn keeps the original receipt when the warm worker refuses a reissue', async () => {
+  const { client } = broker({
+    'POST /v1/cloud/runs': json({
+      run: { id: 'run-warm', status: 'ready', reused: true },
+      receipt: RECEIPT,
+    }),
+    'POST /v1/cloud/runs/run-warm/receipt': json({
+      error: 'BOOTSTRAP_CLOSED', message: 'Bootstrap pairing closed after the first device paired',
+    }, 409),
+  });
+  const lines = [];
+  const result = await createRaucloudBrokerProvider({ client }).spawn({
+    onLine: (line) => lines.push(line),
+  });
+  assert.equal(result.receipt.pairingCode, RECEIPT.pairingCode);
+  assert.ok(lines.some((line) => line.includes('Keeping the original pairing receipt')));
+});
+
+test('coordinator start prewarms a signed-in account with no live sandbox', async () => {
+  const prewarmed = [];
+  const provider = {
+    id: RAUCLOUD_PROVIDER_ID,
+    displayName: 'Raucloud',
+    configuration: () => ({ configured: true, missing: [] }),
+    spawn: async () => { throw new Error('start must not spawn a sandbox'); },
+    status: async () => ({ lifecycle: 'idle' }),
+    teardown: async () => ({ removed: true }),
+    accountStatus: async () => ({
+      signedIn: true, account: { id: 'user-1' }, quota: { remainingMs: 3_600_000 },
+      raucloud: { kind: 'available' }, updatedAt: new Date().toISOString(),
+    }),
+    prewarm: async () => {
+      prewarmed.push(1);
+      return { supported: true, lifecycle: 'provisioning', raucloud: null };
+    },
+  };
+  const coordinator = new CloudCoordinator({
+    client: { loadServerMode: async () => null, loadProfile: async () => null },
+    store: { load: async () => [], list: async () => [], flush: async () => {} },
+    appServers: [provider],
+  });
+  await coordinator.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(prewarmed.length, 1);
+  await coordinator.stop();
+});
+
+test('coordinator prewarm skips a live app sandbox and a logged-out account', async () => {
+  const prewarmed = [];
+  const profile = {
+    mode: 'app-hosted',
+    name: 'Raucloud',
+    endpoint: RECEIPT.endpoint,
+    serverPublicKey: RECEIPT.serverPublicKey,
+    sandbox: { providerId: RAUCLOUD_PROVIDER_ID, sandboxId: 'run-live' },
+  };
+  const provider = {
+    id: RAUCLOUD_PROVIDER_ID,
+    displayName: 'Raucloud',
+    configuration: () => ({ configured: true, missing: [] }),
+    spawn: async () => { throw new Error('not used'); },
+    status: async () => ({ lifecycle: 'ready' }),
+    teardown: async () => ({ removed: true }),
+    accountStatus: async () => ({
+      signedIn: true, account: { id: 'user-1' }, quota: { remainingMs: 3_600_000 },
+      raucloud: { kind: 'available' }, updatedAt: new Date().toISOString(),
+    }),
+    prewarm: async () => {
+      prewarmed.push(1);
+      return { supported: true, lifecycle: 'ready' };
+    },
+  };
+  const coordinator = new CloudCoordinator({
+    client: {
+      loadServerMode: async () => 'app-hosted',
+      loadProfile: async () => profile,
+      isPaired: async () => true,
+      health: async () => ({ ok: true, serverPublicKey: profile.serverPublicKey }),
+    },
+    store: { load: async () => [], list: async () => [], flush: async () => {} },
+    appServers: [provider],
+  });
+  await coordinator.start();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(prewarmed.length, 0, 'a live sandbox already owns the worker');
+  await coordinator.prewarmAppServer({ reason: 'test' });
+  assert.equal(prewarmed.length, 0);
+  await coordinator.stop();
+});

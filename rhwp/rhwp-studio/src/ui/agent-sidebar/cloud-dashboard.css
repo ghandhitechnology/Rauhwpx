@@ -29,6 +29,7 @@
 .ag-cd-status[data-state='pending']::before { background: #ba9456; }
 .ag-cd-updated { margin-left: auto; color: var(--ag-text-muted); font-size: 10px; }
 .ag-cd-feedback { padding: 10px 12px; margin: 0 0 16px; border: 1px solid var(--ag-border); border-radius: 8px; background: var(--cd-tint); overflow-wrap: anywhere; }
+.ag-cd-content > .ag-cloud-link-progress { margin: 0 0 16px; }
 .ag-cd-feedback[data-kind='error'] { background: color-mix(in srgb, #c77958 10%, var(--ag-bg)); }
 .ag-cd-feedback[hidden], .ag-cd-meter[hidden], .ag-cd-reconnect[hidden], .ag-cd-setup[hidden], .ag-cd-login[hidden] { display: none; }
 .ag-cd-stats { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 16px; margin-bottom: 18px; }

@@ -342,6 +342,7 @@ export class CloudCoordinator extends EventEmitter {
   #accountStatusAt = 0;
   #spawnPromise = null;
   #spawnController = null;
+  #prewarmPromise = null;
   #statusPromise = null;
   #teardownPromise = null;
   #provisionPromise = null;
@@ -446,6 +447,7 @@ export class CloudCoordinator extends EventEmitter {
   async start() {
     this.#stopped = false;
     await this.#refreshAccountStatus({ force: true });
+    void this.prewarmAppServer({ reason: 'startup' });
     await this.#refreshMergeRequests({ force: true });
     this.#preferredMode = await this.#client.loadServerMode?.().catch(() => null) ?? null;
     const profile = await this.#client.loadProfile().catch(() => null);
@@ -521,6 +523,7 @@ export class CloudCoordinator extends EventEmitter {
       this.#spawnPromise,
       this.#teardownPromise,
       this.#provisionPromise,
+      this.#prewarmPromise,
       this.#accountStatusPromise,
       mergePrefetch,
       this.#continuityPromise,
@@ -1203,6 +1206,9 @@ export class CloudCoordinator extends EventEmitter {
           type: 'merge-prefetch-completed',
           sessionId: request.sessionId,
           operationId: request.operationId,
+          documentId: request.documentId,
+          fileName: request.fileName,
+          turn: request.turn,
         }),
         onFailure: (request, error) => this.#emit({
           type: 'merge-prefetch-deferred',
@@ -1774,6 +1780,66 @@ export class CloudCoordinator extends EventEmitter {
       );
     }
     return provider;
+  }
+
+  /**
+   * Reserves the account's warm Cloud worker before the first turn, so
+   * "Cloud로 보내기" only has to upload and activate. Best-effort: an older
+   * broker, a missing account session, or an offline laptop is not an error.
+   */
+  prewarmAppServer(options = {}) {
+    if (this.#stopped) return Promise.resolve(null);
+    if (this.#prewarmPromise) return this.#prewarmPromise;
+    const operation = this.#prewarmAppServer(options).catch((error) => {
+      this.#emit({ type: 'sandbox-prewarm-deferred', reason: options.reason ?? 'startup', error: error.message });
+      return null;
+    }).finally(() => {
+      if (this.#prewarmPromise === operation) this.#prewarmPromise = null;
+    });
+    this.#prewarmPromise = operation;
+    return operation;
+  }
+
+  async #prewarmAppServer({ reason = 'startup' } = {}) {
+    if (this.#spawnPromise || this.#teardownPromise || this.#provisionPromise || this.#recreatePromise) return null;
+    const provider = this.#managedAccountProvider();
+    if (!provider || typeof provider.prewarm !== 'function') return null;
+    const profile = await this.#client.loadProfile().catch(() => null);
+    // A self-hosted setup never sends work to Raucloud, so holding a warm
+    // broker worker for it would only spend unbilled operator capacity.
+    if (profile?.mode === 'self-hosted') return null;
+    if (profile?.mode === 'app-hosted') {
+      // A live app sandbox already owns the account's worker. Only prepare a new
+      // reservation once the saved one is gone, so an open app never keeps a
+      // sandbox alive past the broker's idle window.
+      const sandboxProvider = this.#sandboxProvider(profile.sandbox);
+      if (!sandboxProvider || typeof sandboxProvider.status !== 'function') return null;
+      const lifecycle = await sandboxProvider.status(profile.sandbox)
+        .then((status) => status?.lifecycle ?? null, () => null);
+      if (lifecycle !== 'idle') return null;
+    }
+    // The snapshot can be arbitrarily old; the refresh dedupes within 15s.
+    const account = await this.#refreshAccountStatus();
+    if (account?.signedIn !== true || !account.account) return null;
+    if (account.quota && account.quota.remainingMs <= 0) return null;
+    if (account.raucloud?.kind === 'active-elsewhere') return null;
+    const status = await provider.prewarm({
+      onLine: (line) => this.#emit({ type: 'provision-log', line }),
+    });
+    if (!status?.supported) return null;
+    if (status.account) {
+      this.#accountSnapshot = status.account;
+      this.#accountStatusAt = Date.now();
+    }
+    this.#raucloudStatus = status.raucloud ?? this.#raucloudStatus;
+    this.#emit({
+      type: 'sandbox-prewarm-ready',
+      reason,
+      lifecycle: status.lifecycle,
+      prewarmed: status.prewarmed === true,
+      warmUntil: status.raucloud?.warmUntil ?? null,
+    });
+    return status;
   }
 
   /** 동시 요청은 진행 중인 생성 작업을 공유해 유료 샌드박스를 중복 생성하지 않는다. */

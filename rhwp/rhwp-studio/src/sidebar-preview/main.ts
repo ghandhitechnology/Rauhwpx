@@ -106,6 +106,8 @@ const cloudControls = document.querySelector<HTMLElement>('#cloud-preview-contro
 cloudControls.hidden = !cloud;
 document.querySelector('#cloud-disconnect')!.addEventListener('click', () => cloud?.setLink('failed'));
 document.querySelector('#cloud-restore')!.addEventListener('click', () => cloud?.setLink('ready'));
+const holdReconnect = document.querySelector<HTMLInputElement>('#cloud-hold-reconnect')!;
+holdReconnect.addEventListener('change', () => cloud?.blockReconnect(holdReconnect.checked));
 
 const scenarioSelect = document.querySelector<HTMLSelectElement>('#scenario')!;
 for (const name of scenarios)

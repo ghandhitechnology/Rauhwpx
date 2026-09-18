@@ -175,6 +175,11 @@ test('표 경계 hitTest는 교차점에서 행 경계 선반환으로 컬럼 re
   assert.match(block, /type:\s*'col'[\s\S]*priority:\s*0/, '동률일 때 컬럼 후보를 우선해야 함');
   assert.match(block, /type:\s*'row'[\s\S]*priority:\s*1/, '행 후보는 컬럼 동률 우선순위 뒤에 있어야 함');
   assert.match(block, /candidates\.sort\(\(a,\s*b\) => a\.distance - b\.distance \|\| a\.priority - b\.priority\)/, '가장 가까운 경계를 고르고 동률은 컬럼 우선이어야 함');
+  assert.match(
+    block,
+    /const rightX = b\.x \+ b\.w;[\s\S]*distance:\s*Math\.abs\(pageX - rightX\)/,
+    '오른쪽 열 후보는 rightX 와의 거리여야 한다',
+  );
 });
 
 test('Shift가 drag 중 확인되어도 시작 시 계산한 단일 셀 후보를 resize 대상으로 승격한다', () => {

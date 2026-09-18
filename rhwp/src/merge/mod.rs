@@ -1913,6 +1913,7 @@ fn merge_control(
             t!(memo_index);
             t!(memo_text_direction);
             t!(raw_parameters_xml);
+            t!(hyperlink_format);
             let mut p = path.to_vec();
             p.push("memoParagraphs".into());
             out.memo_paragraphs = merge_paras(

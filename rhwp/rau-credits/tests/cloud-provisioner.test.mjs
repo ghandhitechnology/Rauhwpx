@@ -192,3 +192,53 @@ test('orphan cleanup retains services if checking current allocation ownership f
   assert.equal(result.failed.length, 1);
   assert.equal(setup.calls.includes('RaucloudServiceDelete'), false);
 });
+
+const WARM_REMOTE = { providerId: 'railway', serviceId: 'service-1', projectId: 'project-1',
+  environmentId: 'environment-1', domain: 'worker.up.railway.app', bootstrapToken: 'stored-bootstrap-token' };
+
+test('a prewarmed worker reissues its pairing code from the stored bootstrap token', async () => {
+  const setup = fixture(async ({ operation, init }) => {
+    if (operation !== 'bootstrap') return undefined;
+    assert.equal(init.headers.authorization, 'Bearer stored-bootstrap-token');
+    assert.equal(JSON.parse(init.body).deviceName, 'Laptop');
+    return json({ ...RECEIPT, code: 'MNOP-QRST-UVWX' });
+  });
+  const receipt = await setup.provisioner.receipt(WARM_REMOTE, { deviceName: 'Laptop', serverPublicKey: PUBLIC_KEY });
+  assert.equal(receipt.pairingCode, 'MNOP-QRST-UVWX');
+  assert.equal(receipt.endpoint, 'https://worker.up.railway.app/rauhwpx-cloud');
+  assert.deepEqual(setup.calls.filter((call) => call === 'health').length, 1);
+});
+
+test('reissuing a pairing code refuses a remote without a bootstrap token', async () => {
+  const setup = fixture();
+  await assert.rejects(
+    setup.provisioner.receipt({ ...WARM_REMOTE, bootstrapToken: '' }),
+    { code: 'PROVIDER_RESPONSE_INVALID' },
+  );
+});
+
+test('reissuing a pairing code rejects a worker whose identity key changed', async () => {
+  const setup = fixture();
+  await assert.rejects(
+    setup.provisioner.receipt(WARM_REMOTE, { serverPublicKey: `ed25519:${'Z'.repeat(43)}` }),
+    { code: 'SANDBOX_IDENTITY_MISMATCH' },
+  );
+});
+
+test('reissuing a pairing code surfaces the worker refusal instead of an invalid receipt', async () => {
+  const setup = fixture(async ({ operation }) => {
+    if (operation !== 'bootstrap') return undefined;
+    return json({ error: 'BOOTSTRAP_CLOSED', message: 'Bootstrap pairing closed after the first device paired' }, 409);
+  });
+  await assert.rejects(
+    setup.provisioner.receipt(WARM_REMOTE, { serverPublicKey: PUBLIC_KEY }),
+    { code: 'PROVIDER_REJECTED', message: /Bootstrap pairing closed/ },
+  );
+});
+
+test('provisioning stores the bootstrap token on the remote it hands to the broker', async () => {
+  const setup = fixture();
+  const result = await setup.provision();
+  assert.match(setup.remotes.at(-1).bootstrapToken, /^[A-Za-z0-9_-]{43}$/);
+  assert.equal(result.receipt.pairingCode, RECEIPT.code);
+});

@@ -308,6 +308,9 @@ function publicRun(run, viewerDeviceId = null) {
     allocatedAt: run.allocatedAt ?? null,
     completedAt: run.completedAt ?? null,
     checkpointId: run.checkpointId ?? null,
+    prewarm: run.prewarm === true,
+    /** True when this run claimed an existing warm worker instead of provisioning. */
+    reused: run.reused === true,
     inputBlocked: Boolean(run.inputBlocked),
     graceDeadlineAt: run.logoutRequestedAt != null
       ? run.logoutRequestedAt + CLOUD_GRACE_LIMIT_MS
@@ -316,7 +319,9 @@ function publicRun(run, viewerDeviceId = null) {
     message: run.status === 'failed'
       ? run.failureMessage ?? 'Raucloud worker preparation failed'
       : null,
-    receipt: run.receipt && viewerDeviceId === run.ownerDeviceId ? { ...run.receipt } : null,
+    // A reservation keeps its pairing code server-side until a device claims
+    // it, so nothing can pair with a worker no run was created for.
+    receipt: run.receipt && !run.prewarm && viewerDeviceId === run.ownerDeviceId ? { ...run.receipt } : null,
   };
 }
 
@@ -328,14 +333,29 @@ function publicWorker(worker, viewerDeviceId = null) {
     ownerDeviceId: worker.ownerDeviceId,
     runId: worker.runId,
     warmUntil: worker.warmUntil ?? null,
-    receipt: worker.receipt && viewerDeviceId === worker.ownerDeviceId ? { ...worker.receipt } : null,
+    prewarm: worker.prewarm === true,
+    receipt: worker.receipt && !worker.prewarm && viewerDeviceId === worker.ownerDeviceId ? { ...worker.receipt } : null,
   };
 }
 
 function activeRun(cloud, account) {
+  const run = runForWorker(cloud, account);
+  return run && !run.prewarm && ['allocating', 'ready', 'active', 'checkpointing'].includes(run.status) ? run : null;
+}
+
+function runForWorker(cloud, account) {
   const runId = account.worker?.runId;
-  const run = runId ? cloud.runs[runId] : null;
-  return run && ['allocating', 'ready', 'active', 'checkpointing'].includes(run.status) ? run : null;
+  return runId ? cloud.runs[runId] : null;
+}
+
+/**
+ * A prewarmed worker holds a reservation run that no user turn has claimed yet.
+ * It stays out of `activeRun` so account status keeps reporting an available
+ * worker, and the next `createCloudRun` from any paired device promotes it.
+ */
+function reservedRun(cloud, account) {
+  const run = runForWorker(cloud, account);
+  return run?.prewarm === true && ['allocating', 'ready'].includes(run.status) ? run : null;
 }
 
 function takeoverRun(cloud, account) {
@@ -403,7 +423,9 @@ function reserveTeardown(account, run, at) {
 function sanitizeRemote(remote) {
   if (!remote || typeof remote !== 'object') throw cloudError('CLOUD_PROVISION_FAILED', 'Provisioner returned no remote worker');
   const result = {};
-  for (const key of ['providerId', 'serviceId', 'projectId', 'environmentId', 'domainId', 'domain', 'runId']) {
+  // bootstrapToken stays server-side: it is the only way to mint a pairing code
+  // for a worker that was provisioned before the device asked for one.
+  for (const key of ['providerId', 'serviceId', 'projectId', 'environmentId', 'domainId', 'domain', 'runId', 'bootstrapToken']) {
     const value = String(remote[key] ?? '').trim();
     if (value) result[key] = value.slice(0, 512);
   }
@@ -431,7 +453,10 @@ function confirmAllocationState(state, runId, at) {
   const run = cloud.runs[validId(runId, 'runId')];
   if (!run) throw cloudError('CLOUD_RUN_NOT_FOUND', 'Raucloud run not found');
   const account = ensureAccount(state, run.accountId, at);
-  if (account.worker?.runId !== run.id || !['allocating', 'ready'].includes(run.status)) {
+  // A reservation activates only after a device claims it; until then the
+  // worker has no paired session that could legitimately start a turn.
+  if (account.worker?.runId !== run.id || run.prewarm === true
+    || !['allocating', 'ready'].includes(run.status)) {
     throw cloudError('CLOUD_RUN_STATE_INVALID', 'Raucloud run is not awaiting allocation');
   }
   advanceQuota(account, at);
@@ -454,6 +479,9 @@ function confirmAllocationState(state, runId, at) {
   run.status = 'active';
   run.allocatedAt ??= at;
   run.turnAllocatedAt = at;
+  // A durable "this account has actually used Cloud" mark. Prewarming keys off
+  // it so idle containers are only funded for accounts that run turns.
+  account.usedCloudAt ??= at;
   run.lastAccountedAt = at;
   run.lastHeartbeatAt = at;
   run.graceStartedAt = null;
@@ -470,6 +498,7 @@ function confirmAllocationState(state, runId, at) {
 function gateFor(cloud, account, deviceId = '') {
   const run = activeRun(cloud, account);
   const checkpoint = takeoverRun(cloud, account);
+  const reservation = reservedRun(cloud, account);
   if (!account.timezone) {
     return { state: 'timezone_required', canStart: false, canTakeover: false, reason: 'Set an account timezone' };
   }
@@ -479,7 +508,9 @@ function gateFor(cloud, account, deviceId = '') {
   if (run && run.ownerDeviceId !== deviceId) {
     return { state: 'owned_elsewhere', canStart: false, canTakeover: run.status === 'checkpointed', reason: 'Raucloud is active on another device' };
   }
-  if (account.worker && account.worker.ownerDeviceId !== deviceId) {
+  // A reservation belongs to the account, not to the device that warmed it.
+  // Any paired device may claim it, so it never reports owned_elsewhere.
+  if (account.worker && !reservation && account.worker.ownerDeviceId !== deviceId) {
     return { state: 'owned_elsewhere', canStart: false, canTakeover: false, reason: 'Raucloud is reserved by another device' };
   }
   if (!run && !account.worker && checkpoint && checkpoint.ownerDeviceId !== deviceId) {
@@ -551,6 +582,7 @@ export function createRaucloudBroker({
       const worker = account.worker;
       const run = worker && cloud.runs[worker.runId];
       if (run && (!runId || run.id === runId) && worker.id === run.workerId
+        && run.prewarm !== true
         && sameSecret(worker.workerTokenHash, secretHash(secret))
         && sameSecret(worker.workerTokenHash, run.workerTokenHash)
         && ['active', 'ready', 'checkpointing'].includes(run.status)
@@ -795,14 +827,17 @@ export function createRaucloudBroker({
           return envelope(state, account, state.users?.[userId], ownerDeviceId, prior, replay.coldStart);
         }
         const current = activeRun(cloud, account);
-        if (current) {
+        // A prewarmed worker already holds a reservation. The first device to ask
+        // for a run claims it instead of paying for a second cold start.
+        const reservation = reservedRun(cloud, account);
+        if (current && current.id !== reservation?.id) {
           throw cloudError(
             current.ownerDeviceId === ownerDeviceId ? 'CLOUD_RUN_ALREADY_ACTIVE' : 'CLOUD_OWNED_ELSEWHERE',
             current.ownerDeviceId === ownerDeviceId ? 'A Raucloud run is already active' : 'Raucloud is active on another device',
             { runId: current.id },
           );
         }
-        if (account.worker && account.worker.ownerDeviceId !== ownerDeviceId) {
+        if (!reservation && account.worker && account.worker.ownerDeviceId !== ownerDeviceId) {
           throw cloudError('CLOUD_OWNED_ELSEWHERE', 'Raucloud is reserved by another device');
         }
         if (account.worker?.status === 'tearing_down') {
@@ -810,6 +845,22 @@ export function createRaucloudBroker({
         }
         if (normalRemaining(account) <= 0) {
           throw cloudError('CLOUD_QUOTA_EXHAUSTED', 'The daily Raucloud allowance is exhausted', { resetsAt: account.quota.window.endAt });
+        }
+        if (reservation) {
+          reservation.prewarm = false;
+          reservation.reused = true;
+          reservation.ownerDeviceId = ownerDeviceId;
+          const worker = account.worker;
+          delete worker.prewarm;
+          account.worker = {
+            ...worker,
+            ownerDeviceId,
+            runId: reservation.id,
+            workerTokenHash: reservation.workerTokenHash,
+          };
+          if (['ready', 'warm'].includes(worker.status)) account.worker.warmUntil = at + CLOUD_WARM_IDLE_MS;
+          cloud.idempotency[idem] = { runId: reservation.id, coldStart: false, createdAt: at };
+          return envelope(state, account, state.users?.[userId], ownerDeviceId, reservation, false);
         }
         const coldStart = !account.worker;
         if (coldStart) {
@@ -865,6 +916,139 @@ export function createRaucloudBroker({
       return created;
     },
 
+    /**
+     * Reserves one worker for the account before the user asks for a turn. The
+     * reservation is unbilled, expires with the normal warm-idle window, and is
+     * claimed by the next `createCloudRun`. Repeated calls renew it instead of
+     * starting another cold start, so an open app keeps exactly one worker warm.
+     */
+    async prewarmCloudWorker(token, { deviceId, timezone = null } = {}) {
+      const ownerDeviceId = validId(deviceId, 'deviceId');
+      const userId = await identity(token, ownerDeviceId);
+      if (provisionerRequired && !provisioner) throw cloudError('CLOUD_UNAVAILABLE', 'Raucloud provisioning is unavailable');
+      let shouldProvision = false;
+      let provisionWorkerToken = null;
+      let reservedRunId = null;
+      const result = await mutate((state) => {
+        const at = now();
+        const cloud = ensureRaucloudState(state);
+        const account = ensureAccount(state, userId, at);
+        if (!account.timezone && timezone) initializeTimezone(account, timezone, at);
+        if (!account.timezone) throw cloudError('CLOUD_TIMEZONE_REQUIRED', 'Choose a timezone before using Raucloud');
+        reconcileAccount(state, account, at);
+        const reservation = reservedRun(cloud, account);
+        if (reservation) {
+          if (['warm', 'ready'].includes(account.worker.status)) {
+            account.worker.warmUntil = at + CLOUD_WARM_IDLE_MS;
+          }
+          return envelope(state, account, state.users?.[userId], ownerDeviceId, reservation);
+        }
+        if (account.worker?.status === 'tearing_down') {
+          throw cloudError('CLOUD_TEARDOWN_PENDING', 'The previous Raucloud worker is still being removed');
+        }
+        if (activeRun(cloud, account) || account.worker) {
+          if (account.worker && ['warm', 'ready'].includes(account.worker.status)) {
+            account.worker.warmUntil = at + CLOUD_WARM_IDLE_MS;
+          }
+          return envelope(state, account, state.users?.[userId], ownerDeviceId);
+        }
+        // Prewarming spends unbilled operator capacity. Fund it only for accounts
+        // that have already run a Cloud turn; delete this line to warm every
+        // signed-in launch instead.
+        if (account.usedCloudAt == null) return envelope(state, account, state.users?.[userId], ownerDeviceId);
+        if (!provisioner) return envelope(state, account, state.users?.[userId], ownerDeviceId);
+        if (normalRemaining(account) <= 0) {
+          throw cloudError('CLOUD_QUOTA_EXHAUSTED', 'The daily Raucloud allowance is exhausted', { resetsAt: account.quota.window.endAt });
+        }
+        account.coldStarts = account.coldStarts.filter((stamp) => stamp >= account.quota.window.startAt);
+        const counts = coldStartCounts(account, at);
+        if (counts.recent >= CLOUD_COLD_START_WINDOW_LIMIT || counts.usedToday >= CLOUD_COLD_START_DAILY_LIMIT) {
+          throw cloudError('CLOUD_COLD_START_RATE_LIMITED', 'Too many Raucloud cold starts', {
+            retryAt: Math.min(
+              account.coldStarts.at(-CLOUD_COLD_START_WINDOW_LIMIT) + CLOUD_COLD_START_WINDOW_MS,
+              account.quota.window.endAt,
+            ),
+          });
+        }
+        account.coldStarts.push(at);
+        const workerToken = `mcw_${randomBytes(32).toString('base64url')}`;
+        reservedRunId = `run_${randomBytes(18).toString('base64url')}`;
+        const workerId = `worker_${randomBytes(18).toString('base64url')}`;
+        const run = {
+          id: reservedRunId,
+          accountId: userId,
+          ownerDeviceId,
+          workerId,
+          status: 'allocating',
+          createdAt: at,
+          graceStartedAt: null,
+          graceUsedMs: 0,
+          inputBlocked: false,
+          coldStart: true,
+          coldStartConfirmed: true,
+          prewarm: true,
+          workerTokenHash: secretHash(workerToken),
+        };
+        cloud.runs[reservedRunId] = run;
+        account.worker = {
+          id: workerId,
+          ownerDeviceId,
+          runId: reservedRunId,
+          status: 'allocating',
+          prewarm: true,
+          createdAt: at,
+          warmUntil: null,
+          workerTokenHash: secretHash(workerToken),
+        };
+        shouldProvision = true;
+        provisionWorkerToken = workerToken;
+        return envelope(state, account, state.users?.[userId], ownerDeviceId, run, true);
+      });
+      if (shouldProvision) provisionCreatedRunInBackground(userId, reservedRunId, ownerDeviceId, provisionWorkerToken);
+      return { ...result, prewarm: Boolean(result.run?.prewarm || result.worker?.prewarm) };
+    },
+
+    /**
+     * Mints a pairing code for a worker that was provisioned before this device
+     * asked for it. Bootstrap pairing closes after the first device pairs, so a
+     * worker that already handed out its code keeps using that receipt instead.
+     */
+    async refreshCloudRunReceipt(token, runId, { deviceId, deviceName = 'Rauhwpx desktop' } = {}) {
+      const ownerDeviceId = validId(deviceId, 'deviceId');
+      const userId = await identity(token, ownerDeviceId);
+      const targetId = validId(runId, 'runId');
+      if (!provisioner || typeof provisioner.receipt !== 'function') {
+        throw cloudError('CLOUD_UNAVAILABLE', 'Raucloud provisioning is unavailable');
+      }
+      const snapshot = await store.load();
+      const run = ensureRaucloudState(snapshot).runs[targetId];
+      if (!run || run.accountId !== userId) throw cloudError('CLOUD_RUN_NOT_FOUND', 'Raucloud run not found');
+      if (run.ownerDeviceId !== ownerDeviceId) {
+        throw cloudError('CLOUD_OWNED_ELSEWHERE', 'Only the controlling device can pair this worker');
+      }
+      if (!run.remote || !['allocating', 'ready', 'active'].includes(run.status)) {
+        throw cloudError('CLOUD_RUN_STATE_INVALID', 'Raucloud worker is not ready for pairing');
+      }
+      const receipt = sanitizeReceipt(await provisioner.receipt(structuredClone(run.remote), {
+        deviceName,
+        serverPublicKey: run.receipt?.serverPublicKey ?? '',
+      }));
+      // The run may have been stopped while the worker minted the code. Handing
+      // out a receipt that was never stored would pair against a dead worker.
+      const stored = await mutate((state) => {
+        const cloud = ensureRaucloudState(state);
+        const current = cloud.runs[targetId];
+        if (!current || current.accountId !== userId || current.ownerDeviceId !== ownerDeviceId
+          || !['allocating', 'ready', 'active'].includes(current.status)) return false;
+        current.receipt = receipt;
+        const account = cloud.accounts[userId];
+        if (account?.worker?.runId === targetId) account.worker.receipt = receipt;
+        return true;
+      });
+      if (!stored) throw cloudError('CLOUD_RUN_STATE_INVALID', 'Raucloud worker is not ready for pairing');
+      return { receipt };
+    },
+
     async takeoverCloudRun(token, sourceRunId, { deviceId, checkpointId, idempotencyKey: rawKey } = {}) {
       const ownerDeviceId = validId(deviceId, 'deviceId');
       const userId = await identity(token, ownerDeviceId);
@@ -897,7 +1081,14 @@ export function createRaucloudBroker({
           );
         }
         if (activeRun(cloud, account) || account.worker) {
-          throw cloudError('CLOUD_RUN_ALREADY_ACTIVE', 'Another Raucloud worker is already allocated');
+          const reservation = reservedRun(cloud, account);
+          // A takeover provisions its own worker. Retire the reservation now so
+          // the replacement never leaves an unrenewed warm service behind.
+          if (!reservation) throw cloudError('CLOUD_RUN_ALREADY_ACTIVE', 'Another Raucloud worker is already allocated');
+          reservation.status = 'stopped';
+          reservation.stopReason = 'takeover';
+          reservation.completedAt = at;
+          reserveTeardown(account, reservation, at);
         }
         if (!account.timezone || normalRemaining(account) <= 0) {
           throw cloudError('CLOUD_QUOTA_EXHAUSTED', 'The daily Raucloud allowance is exhausted');
@@ -1022,7 +1213,7 @@ export function createRaucloudBroker({
         const cloud = ensureRaucloudState(state);
         const account = ensureAccount(state, userId, at);
         reconcileAccount(state, account, at);
-        const run = activeRun(cloud, account);
+        const run = activeRun(cloud, account) ?? reservedRun(cloud, account);
         if (!account.worker || account.worker.ownerDeviceId !== ownerDeviceId) return { controlling: false };
         if (run?.status === 'active') {
           chargeRun(account, run, at);
@@ -1051,6 +1242,7 @@ export function createRaucloudBroker({
       // Historical run hashes remain for receipts. Only the current assignment
       // authorizes new writes, including retries while the worker stays warm.
       if (!run || !worker || worker.runId !== run.id || worker.id !== run.workerId
+        || run.prewarm === true
         || !sameSecret(worker.workerTokenHash, run.workerTokenHash)
         || !sameSecret(worker.workerTokenHash, secretHash(secret))
         || !['active', 'ready', 'checkpointing'].includes(run.status)
@@ -1121,7 +1313,8 @@ export function createRaucloudBroker({
         assertWorkerSecret(secret, run);
         if (!run) throw cloudError('CLOUD_RUN_NOT_FOUND', 'Raucloud run not found');
         const account = ensureAccount(state, run.accountId, at);
-        if (account.worker?.runId !== run.id || !['ready', 'active'].includes(run.status)
+        if (account.worker?.runId !== run.id || run.prewarm === true
+          || !['ready', 'active'].includes(run.status)
           || !['warm', 'ready', 'active'].includes(account.worker.status)
           || run.inputBlocked || run.logoutRequestedAt != null) {
           throw cloudError('CLOUD_RUN_STATE_INVALID', 'Raucloud workspace is no longer active');
