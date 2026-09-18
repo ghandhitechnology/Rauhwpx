@@ -66,7 +66,7 @@ fn issue_1198_exam_social_internal_paste_uses_nested_cell_path() {
     let mut doc = load_sample("exam_social.hwp");
 
     // 1쪽 상단 답안지 `성명` 오른쪽 빈 입력칸 내부 좌표.
-    let hit = hit_json(&doc, 0, 250.0, 210.0);
+    let hit = hit_json(&doc, 0, 250.0, 220.0);
     let path = path_tuples(&hit);
     assert_eq!(
         path,
@@ -116,7 +116,7 @@ fn issue_1198_exam_social_internal_paste_uses_nested_cell_path() {
 fn issue_1198_exam_social_html_paste_uses_nested_cell_path() {
     let mut doc = load_sample("exam_social.hwp");
 
-    let hit = hit_json(&doc, 0, 250.0, 210.0);
+    let hit = hit_json(&doc, 0, 250.0, 220.0);
     let path = path_tuples(&hit);
     assert_eq!(
         path,
