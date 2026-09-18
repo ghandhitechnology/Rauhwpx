@@ -578,6 +578,9 @@ pub(crate) fn parse_hwpx_validated(data: &[u8]) -> Result<Document, HwpxError> {
 
     // 3. header.xml → DocInfo, DocProperties
     let header_xml = reader.read_file("Contents/header.xml")?;
+    let hwp5_origin_hwpx = hwpx_aux_entries
+        .iter()
+        .any(|(path, _)| path == crate::model::document::HWP5_ORIGIN_HWPX_MARKER_PATH);
     let margin_units = header::ParagraphMarginUnits::from_package_version(
         hwpx_aux_entries
             .iter()
@@ -585,14 +588,17 @@ pub(crate) fn parse_hwpx_validated(data: &[u8]) -> Result<Document, HwpxError> {
             .map(|(_, bytes)| bytes.as_slice()),
     );
     let (original_doc_info, doc_properties) =
-        header::parse_hwpx_header_with_margin_units(&header_xml, margin_units)?;
+        header::parse_hwpx_header_with_margin_units(&header_xml, margin_units, hwp5_origin_hwpx)?;
     let remapped_header_xml =
         rewrite_binary_item_id_refs(&header_xml, &bin_data_ids.by_manifest_id)?;
     let mut doc_info = if matches!(&remapped_header_xml, Cow::Borrowed(_)) {
         original_doc_info
     } else {
-        let (mut remapped_doc_info, _) =
-            header::parse_hwpx_header_with_margin_units(&remapped_header_xml, margin_units)?;
+        let (mut remapped_doc_info, _) = header::parse_hwpx_header_with_margin_units(
+            &remapped_header_xml,
+            margin_units,
+            hwp5_origin_hwpx,
+        )?;
         restore_font_manifest_refs(&mut remapped_doc_info, &original_doc_info);
         remapped_doc_info
     };
