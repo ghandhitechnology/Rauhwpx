@@ -71,6 +71,8 @@ an existing HTTPS/Tailscale server whose provider is already ready.
 
 Provider credentials live on the VPS. A paired desktop imports the selected provider's local API key or auth files through `PUT /v1/providers/:provider/auth` before it stages a session. The control plane stores API keys in the vault and OAuth state under `/var/lib/rauhwpx-cloud/provider-auth`, then re-probes readiness. Interactive VPS login remains available.
 
+A transferred Claude subscription login is written to `.claude/.credentials.json` under the provider home, and the CLI runs with `CLAUDE_CONFIG_DIR` set to that directory so the seeded OAuth credential stays authoritative. On macOS the desktop reads that login from the Keychain when no credential file exists; the Keychain is only ever read.
+
 ```bash
 sudo rauhwpx-cloud provider install codex
 sudo rauhwpx-cloud provider login codex
