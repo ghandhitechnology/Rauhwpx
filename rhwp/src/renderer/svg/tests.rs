@@ -70,6 +70,112 @@ fn test_svg_draw_text_medium_weight() {
 }
 
 #[test]
+fn test_svg_draw_text_gulimche_faux_bold_uses_stroke() {
+    let mut renderer = SvgRenderer::new();
+    renderer.begin_page(800.0, 600.0);
+    let font_size = 16.0;
+    renderer.draw_text(
+        "굵게",
+        10.0,
+        20.0,
+        &TextStyle {
+            font_size,
+            font_family: "굴림체".to_string(),
+            bold: true,
+            ..Default::default()
+        },
+    );
+    let output = renderer.output();
+    let want = format!("stroke-width=\"{:.3}\"", font_size * 0.02);
+    assert!(
+        output.contains(&want),
+        "굴림체 볼드는 0.02em 획이어야 함 — {want} 없음: {output}"
+    );
+    assert!(
+        !output.contains("font-weight=\"bold\""),
+        "합성 획과 font-weight=\"bold\" 를 겹치면 안 됨: {output}"
+    );
+}
+
+#[test]
+fn test_svg_draw_text_malgun_gothic_bold_keeps_font_weight() {
+    let mut renderer = SvgRenderer::new();
+    renderer.begin_page(800.0, 600.0);
+    renderer.draw_text(
+        "굵게",
+        10.0,
+        20.0,
+        &TextStyle {
+            font_size: 16.0,
+            font_family: "맑은 고딕".to_string(),
+            bold: true,
+            ..Default::default()
+        },
+    );
+    let output = renderer.output();
+    assert!(
+        output.contains("font-weight=\"bold\""),
+        "맑은 고딕은 Bold 메트릭이 있어 font-weight=\"bold\" 를 유지해야 함: {output}"
+    );
+    assert!(
+        !output.contains("stroke-width="),
+        "실제 Bold face 에 합성 획을 겹치면 안 됨: {output}"
+    );
+}
+
+#[test]
+fn test_svg_draw_text_unknown_family_bold_keeps_font_weight() {
+    let mut renderer = SvgRenderer::new();
+    renderer.begin_page(800.0, 600.0);
+    renderer.draw_text(
+        "굵게",
+        10.0,
+        20.0,
+        &TextStyle {
+            font_size: 16.0,
+            font_family: "NoSuchFace7151".to_string(),
+            bold: true,
+            ..Default::default()
+        },
+    );
+    let output = renderer.output();
+    assert!(
+        output.contains("font-weight=\"bold\""),
+        "메트릭 DB 미스면 종전 font-weight=\"bold\" 를 유지해야 함: {output}"
+    );
+    assert!(
+        !output.contains("stroke-width="),
+        "DB 미스 face 에 합성 획을 주면 안 됨: {output}"
+    );
+}
+
+#[test]
+fn test_svg_draw_text_headline_without_charshape_bold_has_no_stroke() {
+    let mut renderer = SvgRenderer::new();
+    renderer.begin_page(800.0, 600.0);
+    renderer.draw_text(
+        "제목",
+        10.0,
+        20.0,
+        &TextStyle {
+            font_size: 16.0,
+            font_family: "HY헤드라인M".to_string(),
+            bold: false,
+            ..Default::default()
+        },
+    );
+    let output = renderer.output();
+    assert!(
+        output.contains("font-weight=\"bold\""),
+        "HY헤드라인M 은 is_visually_bold 로 font-weight=\"bold\" 여야 함: {output}"
+    );
+    assert!(
+        !output.contains("stroke-width="),
+        "CharShape.bold 없는 heavy display 는 획을 주면 안 됨: {output}"
+    );
+}
+
+#[test]
 fn test_svg_draw_text_superscript_adjusts_baseline_and_size() {
     let mut renderer = SvgRenderer::new();
     renderer.begin_page(800.0, 600.0);
