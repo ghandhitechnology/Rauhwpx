@@ -12,6 +12,13 @@ import {
   prepareClaudeHome,
 } from './agents/claude.mjs';
 import {
+  claudeCredentialExpiry,
+  parseClaudeOAuthCredential,
+  readClaudeCredentialFile,
+  readClaudeOAuthCredential,
+  writeClaudeCredentialFile,
+} from './claude-credentials.mjs';
+import {
   createCodexSession,
   flushCodexCredentialMirror,
   prepareCodexHome,
@@ -232,10 +239,8 @@ const SOURCE_CLAUDE_CONFIG_DIR = typeof process.env.CLAUDE_CONFIG_DIR === 'strin
   && process.env.CLAUDE_CONFIG_DIR.trim()
   ? path.resolve(process.env.CLAUDE_CONFIG_DIR)
   : path.join(HOST_PROFILE_HOME, '.claude');
-const sourceClaudeAuth = {
-  credentialsPath: path.join(SOURCE_CLAUDE_CONFIG_DIR, '.credentials.json'),
-  configPath: path.join(HOST_PROFILE_HOME, '.claude.json'),
-};
+const SOURCE_CLAUDE_CREDENTIALS = path.join(SOURCE_CLAUDE_CONFIG_DIR, '.credentials.json');
+const SOURCE_CLAUDE_CONFIG = path.join(HOST_PROFILE_HOME, '.claude.json');
 const sourceCodexHomes = [...new Set([
   process.env.CODEX_HOME,
   path.join(HOST_PROFILE_HOME, '.codex'),
@@ -299,6 +304,48 @@ function mutateSharedNpmPrefix(operation) {
   return running;
 }
 const cliSetup = await createCliSetupManager({ secretStore }).init();
+const CLAUDE_CREDENTIAL_SEED_FILE = path.join(
+  cliSetup.rootDir,
+  'claude-source-credentials',
+  '.credentials.json',
+);
+/**
+ * Codex is usable the moment its profile holds an `auth.json`, because that
+ * file is copied into every isolated home. Claude's login can instead live only
+ * in the macOS Keychain, where the same seeding path cannot reach it, so a
+ * Keychain-only profile is materialized once into a hub-owned file.
+ *
+ * The profile's own credential file always wins, and a previously materialized
+ * seed is kept while it is at least as fresh as the Keychain — an isolated
+ * session refreshes its token through copy-back, and that refreshed value must
+ * not be replaced by the older Keychain copy.
+ */
+async function resolveSourceClaudeAuth() {
+  const fallback = {
+    credentialsPath: SOURCE_CLAUDE_CREDENTIALS,
+    configPath: SOURCE_CLAUDE_CONFIG,
+  };
+  const resolved = await readClaudeOAuthCredential({
+    homeDir: HOST_PROFILE_HOME,
+    configDir: SOURCE_CLAUDE_CONFIG_DIR,
+    env: process.env,
+    platform: process.platform,
+  }).catch(() => null);
+  if (!resolved) return fallback;
+  if (resolved.source === 'file') return { credentialsPath: resolved.file, configPath: SOURCE_CLAUDE_CONFIG };
+  const fromKeychain = parseClaudeOAuthCredential(resolved.text);
+  const seeded = await readClaudeCredentialFile(CLAUDE_CREDENTIAL_SEED_FILE);
+  if (seeded && claudeCredentialExpiry(seeded) >= claudeCredentialExpiry(fromKeychain)) {
+    return { credentialsPath: CLAUDE_CREDENTIAL_SEED_FILE, configPath: SOURCE_CLAUDE_CONFIG };
+  }
+  const written = await writeClaudeCredentialFile(CLAUDE_CREDENTIAL_SEED_FILE, resolved.text)
+    .then(() => true, () => false);
+  return {
+    credentialsPath: written ? CLAUDE_CREDENTIAL_SEED_FILE : SOURCE_CLAUDE_CREDENTIALS,
+    configPath: SOURCE_CLAUDE_CONFIG,
+  };
+}
+let sourceClaudeAuth = await resolveSourceClaudeAuth();
 function claudeRuntimeEnv(isolatedHome) {
   return {
     ...cliSetup.envFor('claude'),
@@ -4189,6 +4236,7 @@ async function handleStudioMessage(record, sock, msg) {
           .then(async (status) => {
             cliSetupStatus[agent] = status;
             if (agent === 'codex') sourceCodexAuthPath = await findSourceCodexAuthPath();
+            if (agent === 'claude') sourceClaudeAuth = await resolveSourceClaudeAuth();
             if (agent === 'grok') sourceGrokAuthPath = (await cliSetup.grokAuthPath()) ?? undefined;
             if (agent === 'opencode') sourceOpenCodeAuthPath = (await cliSetup.openCodeAuthPath()) ?? undefined;
             refreshSessionCredentials(agent);
