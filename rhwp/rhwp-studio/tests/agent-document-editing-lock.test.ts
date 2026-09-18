@@ -140,6 +140,68 @@ test('plan mode leaves the document editable while a planning turn is running', 
   );
 });
 
+test('planning saves after a user edit notify the hub mid-plan', () => {
+  assert.match(bridge, /eventBus\.on\('document-changed', \(\) => this\.markUserDocumentEdit\(\)\)/);
+  assert.match(bridge, /eventBus\.on\('document-mutated', \(\) => this\.markUserDocumentEdit\(\)\)/);
+  assert.match(bridge, /eventBus\.on\('document-saved', \(\) => this\.notifyPlanningDocumentSaved\(\)\)/);
+  assert.match(bridge, /this\.pendingChatStart = null;[\s\S]*this\.notifyPlanningDocumentSaved\(\)/);
+  assert.match(bridge, /case 'chat-started':[\s\S]*this\.notifyPlanningDocumentSaved\(\)/);
+  assert.match(bridge, /case 'workflow-changed':[\s\S]*this\.notifyPlanningDocumentSaved\(\)/);
+  assert.match(bridge, /type: 'chat-document-saved'/);
+  assert.match(bridge, /type: 'planning-document-saved'/);
+  assert.match(sidebar, /case 'planning-document-saved':/);
+  assert.match(sidebar, /문서를 저장했습니다/);
+});
+
+test('entering plan mode unlocks the lease immediately and holds messages until the hub finishes', () => {
+  assert.match(bridge, /this\.beginWorkflowSwitch\(workflow\);[\s\S]*type: 'chat-workflow-set'/);
+  assert.match(bridge, /this\.workflowSwitchPending = true;[\s\S]*this\.resetWorkflowState\(workflow\)/);
+  assert.match(bridge, /if \(this\.pendingChatStart \|\| this\.workflowSwitchPending \|\| this\.activeAgent === null \|\| this\.queuedMessages\.length > 0\)/);
+  assert.match(bridge, /if \(this\.workflowSwitchPending \|\| this\.pendingChatStart\) return;/);
+  assert.match(bridge, /case 'workflow-changed':[\s\S]*this\.finishWorkflowSwitch\(\);[\s\S]*this\.flushQueuedMessages\(\)/);
+  assert.match(bridge, /BACKEND_SWITCH_FAILED[\s\S]*INVALID_WORKFLOW[\s\S]*WORKFLOW_ERROR[\s\S]*this\.revertWorkflowSwitch\(\)/);
+  assert.match(bridge, /planModeAllowsUserEditing\(msg\.workflow, msg\.phase\)[\s\S]*this\.workflow = msg\.workflow;[\s\S]*this\.phase = msg\.phase/);
+});
+
+test('user input gates remain separate from autonomous agent mutation paths', () => {
+  assert.match(input, /executeOperation\(desc:[\s\S]*this\.userEditingLocked && desc\.meta\?\.origin !== 'agent'/);
+  assert.match(input, /executeAppliedSnapshot[\s\S]*if \(this\.readOnly\)/);
+  assert.doesNotMatch(input.match(/executeAppliedSnapshot[\s\S]*?\n  \}/)?.[0] ?? '', /userEditingLocked/);
+  assert.match(pendingEdits, /meta: \{ origin: 'agent', refresh: 'full', scroll: 'preserve' \}/);
+  assert.match(textInput, /onInput[\s\S]*this\.readOnly \|\| this\.userEditingLocked/);
+  assert.match(keyboardInput, /onKeyDown[\s\S]*this\.readOnly \|\| this\.userEditingLocked/);
+  assert.match(input, /format-char'[\s\S]*this\.readOnly \|\| this\.userEditingLocked/);
+  assert.match(input, /insertDroppedImageAtClientPoint[\s\S]*this\.readOnly \|\| this\.userEditingLocked/);
+  assert.match(toolbar, /querySelectorAll<HTMLButtonElement \| HTMLInputElement \| HTMLSelectElement>\('button, input, select'\)[\s\S]*control\.disabled = !enabled/);
+});
+
+test('document replacement and active pointer gestures respect the lease boundary', () => {
+  assert.match(main, /canReplaceCurrentDocument[\s\S]*if \(agentEditingLease\.active\)/);
+  assert.match(main, /loadFile[\s\S]*canReplaceCurrentDocument\(options\.skipUnsavedGuard\)/);
+  assert.match(input, /setUserEditingLocked[\s\S]*_mouse\.onMouseUp\.call\(this, new MouseEvent/);
+  assert.match(input, /setUserEditingLocked[\s\S]*this\.cancelImagePlacement\(\)[\s\S]*this\.cancelTextboxPlacement\(\)[\s\S]*this\.cancelPolygonDrawing\(\)/);
+  assert.match(input, /setUserEditingLocked[\s\S]*this\.cancelFormOverlayEdit\?\.\(\)[\s\S]*revertCompositionPreview/);
+  assert.doesNotMatch(input.match(/setUserEditingLocked[\s\S]*?\n  \}/)?.[0] ?? '', /this\.textarea\.focus\(\)/);
+  assert.match(main, /addEventListener\('drop'[\s\S]*if \(agentEditingLease\.active\)[\s\S]*에이전트가 편집을 마친 뒤 파일을 놓을 수 있습니다/);
+  assert.match(sidebar, /approve\.disabled = editingLeaseActive;[\s\S]*if \(bridge\.getEditingLease\(\)\.active\) return;[\s\S]*pendingEdits\.approve/);
+  assert.match(sidebar, /reject\.disabled = editingLeaseActive;[\s\S]*if \(bridge\.getEditingLease\(\)\.active\) return;[\s\S]*pendingEdits\.reject/);
+  assert.match(sidebar, /onEditingLeaseChange\(\(\) => rebuildReview\(\)\)/);
+});
+
+test('editing frame reflects the active agent and has responsive reduced-motion treatment', () => {
+  assert.match(html, /id="agent-editing-frame"[\s\S]*id="agent-editing-status"[^>]*role="status"[^>]*aria-live="polite"/);
+  assert.match(main, /editorArea\?\.setAttribute\('aria-busy', lease\.active \? 'true' : 'false'\)/);
+  assert.match(main, /statusLabel\.textContent = `\$\{AGENT_LABEL\[lease\.agent\]\}가 문서를 편집 중이에요`/);
+  assert.match(main, /if \(lease\.waitingForUser\) statusLabel\.textContent = `\$\{AGENT_LABEL\[lease\.agent\]\}가 답변을 기다리고 있어요`/);
+  for (const agent of ['claude', 'pi', 'grok', 'cursor']) {
+    assert.match(css, new RegExp(`data-editing-agent='${agent}'`));
+  }
+  assert.match(css, /animation:\s*agent-editing-sweep/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*#agent-editing-frame[\s\S]*animation: none/);
+  assert.match(css, /@media \(max-width: 1023px\)[\s\S]*#agent-editing-status/);
+});
+
+
 test('authenticated worker editing is separate from the provider replacement lease', () => {
   const lease = deriveAgentEditingLease({ turnRunning: true, activeToolRequests: 2,
     agent: 'codex', workflow: 'direct', phase: 'direct' });

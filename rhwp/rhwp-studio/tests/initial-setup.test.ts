@@ -5,8 +5,26 @@ import test from 'node:test';
 import { AGENT_MODELS, setOpenCodeModels } from '../src/agent/models.ts';
 import type { AccountSessionStatus, AgentName, AgentSetupStatus } from '../src/agent/types.ts';
 import { PROVIDER_ORDER } from '../src/ui/agent-sidebar/providers.ts';
-import { BYOK_AGENTS, isProviderConfigured, isRauFirstRunFailure, previewModelLabels, PROVIDER_VENDOR, RAU_FAILURE_FORWARD_COPY, rauSignInFeedback, SUGGESTED_AGENT } from '../src/ui/initial-setup/catalog.ts';
-import { completeInitialSetup, defaultInitialSetup, isInitialSetupComplete, loadInitialSetup, shouldForceInitialSetup, shouldForceRauFailurePreview, shouldShowInitialSetup, shouldSuppressInitialSetup } from '../src/ui/initial-setup/state.ts';
+import {
+  BYOK_AGENTS,
+  isProviderConfigured,
+  isRauFirstRunFailure,
+  previewModelLabels,
+  PROVIDER_VENDOR,
+  RAU_FAILURE_FORWARD_COPY,
+  rauSignInFeedback,
+  SUGGESTED_AGENT,
+} from '../src/ui/initial-setup/catalog.ts';
+import {
+  completeInitialSetup,
+  defaultInitialSetup,
+  isInitialSetupComplete,
+  loadInitialSetup,
+  shouldForceInitialSetup,
+  shouldForceRauFailurePreview,
+  shouldShowInitialSetup,
+  shouldSuppressInitialSetup,
+} from '../src/ui/initial-setup/state.ts';
 
 const readSource = (relativePath: string) => readFileSync(
   new URL(relativePath, import.meta.url),
@@ -116,6 +134,86 @@ test('연결됨은 실행 가능한 CLI와 인증을 둘 다 확인한다', () =
   assert.equal(isProviderConfigured('opencode', statuses), false, 'OpenCode 자격 증명만 있어도 연결 완료로 치지 않는다');
 });
 
+test('사이드바가 첫 실행 마법사를 설정 모달·보정 창에 붙인다', () => {
+  const source = readSource('../src/ui/agent-sidebar/index.ts');
+  const setup = readSource('../src/ui/initial-setup/initial-setup.ts');
+  const css = readSource('../src/ui/initial-setup/initial-setup.css');
+  const settings = readSource('../src/ui/agent-sidebar/settings.ts');
+  const calibration = readSource('../src/ui/agent-sidebar/writing-style-calibration.ts');
+
+  assert.match(source, /maybeStartInitialSetup/);
+  assert.match(source, /settingsPanel\.openAgentSetup\(agent\)/);
+  assert.match(source, /settingsPanel\.beginAgentConnect\(agent\)/);
+  assert.match(source, /settingsPanel\.closeAgentSetup\(\)/);
+  assert.match(source, /initialSetup\?\.notifySetupAbandoned\(info\)/);
+  assert.match(source, /writingStyleCalibration\.open\(options\)/);
+  assert.match(source, /initialSetup\?\.notifyCalibrationClosed\(result\.completed\)/);
+  assert.match(settings, /openAgentSetup,/);
+  assert.match(settings, /beginAgentConnect,/);
+  assert.match(settings, /closeAgentSetup,/);
+  assert.match(settings, /onAgentSetupAbandoned\?/);
+  assert.match(settings, /code: 'RAU_LOGIN_CANCELLED'/);
+  assert.match(settings, /code: 'RAU_LOGIN_START_FAILED'/);
+  assert.match(settings, /await startSetupAuth\('oauth'\)/);
+  assert.match(calibration, /elevate\?: boolean/);
+  assert.match(calibration, /onDismiss\?: \(result: \{ completed: boolean \}\) => void/);
+
+  assert.match(setup, /for \(const agent of PROVIDER_ORDER\)/);
+  assert.match(setup, /createProviderIcon\(agent\)/);
+  assert.match(setup, /previewModelLabels\(agent\)/);
+  assert.match(setup, /from '\.\.\/agent-sidebar\/providers\.ts'/);
+  assert.match(setup, /나중에 하기/);
+  assert.match(setup, /모델 연결 단계로 돌아가기/);
+  assert.match(setup, /function goBack\(\)/);
+  assert.match(setup, /dialog\.scrollTop = 0/);
+  assert.match(setup, /cards\.get\(PROVIDER_ORDER\[0\]\)\?\.action/);
+  assert.match(setup, /focus\(\{ preventScroll: true \}\)/);
+  assert.match(setup, /requestAnimationFrame\([\s\S]*dialog\.scrollTo\(\{ top: 0, behavior: 'instant' \}\)/);
+  assert.match(setup, /보정 시작/);
+  assert.match(setup, /모델을 연결하세요/);
+  assert.match(setup, /말투를 맞출까요\?/);
+  assert.match(setup, /원고 10페이지를 올리면, 에이전트가 문장 규칙이 아니라 그 목소리로 씁니다/);
+  assert.doesNotMatch(setup, /rhwp-setup-kicker/);
+  assert.doesNotMatch(setup, /rhwp-setup-lead/);
+  assert.match(setup, /\(beginAgentConnect \?\? openAgentSetup\)\(agent\)/);
+  assert.match(setup, /openCalibration\(\{ elevate: true \}\)/);
+  assert.match(setup, /function enterRauFailureRecovery\(\)/);
+  assert.match(setup, /function skipToEditor\(\)/);
+  assert.match(setup, /applyFirstRunDefaultAgent\(configuredAgents\(\), storage \?\? null\)/);
+  assert.match(setup, /dataset\.byok = 'true'/);
+  assert.match(setup, /agent === 'rau' \? 'Rau로 시작' : '설정'/);
+  assert.match(setup, /RAU_FAILURE_FORWARD_COPY/);
+  assert.match(setup, /shouldForceRauFailurePreview\(\)/);
+  assert.match(setup, /notifySetupAbandoned/);
+
+  assert.match(css, /grid-template-columns: repeat\(4, minmax\(0, 1fr\)\)/);
+  assert.match(css, /\.rhwp-setup-card:nth-child\(7\)/);
+  assert.match(css, /@media \(max-width: 1100px\)[\s\S]*repeat\(3, minmax\(0, 1fr\)\)/);
+  assert.match(css, /@media \(max-width: 860px\)[\s\S]*repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(css, /@media \(max-width: 720px\)[\s\S]*grid-template-columns: 1fr/);
+  assert.match(css, /\.rhwp-setup-card\[data-agent='rau'\] \{\s*border-color: #ffffff/);
+  assert.match(css, /\.rhwp-setup-card\[data-agent='rau'\]\[data-suggested='true'\]::before \{\s*content: none/);
+  assert.match(css, /rhwp-setup-cal\[hidden\]/);
+  assert.match(css, /\.rhwp-setup-providers \{[\s\S]*overflow: auto/);
+  assert.match(css, /\.rhwp-setup-footer \{[\s\S]*position: sticky/);
+  assert.match(css, /data-recovery='true'[\s\S]*rhwp-setup-card-models \{[\s\S]*display: none/);
+  assert.match(css, /prefers-reduced-motion: reduce/);
+  assert.match(css, /overflow-anchor: none/);
+  assert.match(css, /--setup-spring-snappy: linear\(/);
+  assert.match(css, /@media \(min-width: 1440px\) and \(min-height: 820px\)/);
+  assert.match(css, /width: min\(1480px, 100%\)/);
+  assert.match(css, /url\('\/icons\/provider-codex\.png'\)/);
+  assert.match(css, /url\('\/icons\/provider-pi\.svg'\)/);
+  assert.match(css, /url\('\/icons\/provider-grok\.svg'\)/);
+  assert.match(css, /url\('\/icons\/provider-cursor\.svg'\)/);
+  assert.match(css, /url\('\/icons\/provider-opencode\.svg'\)/);
+  assert.doesNotMatch(css, /transition: all/);
+  assert.doesNotMatch(css, /\d+ms ease(?:;|,)/);
+  assert.match(css, /\.rhwp-setup-recovery\[hidden\]/);
+  assert.match(css, /data-recovery-option='true'/);
+  assert.match(css, /\.rhwp-setup-recovery \{/);
+});
+
 test('Rau 로그인·민트 실패는 같은 화면의 BYOK 경로로 접는다', () => {
   assert.equal(isRauFirstRunFailure({ agent: 'rau', code: 'RAU_CREDITS_TIMEOUT' }), true);
   assert.equal(isRauFirstRunFailure({ agent: 'rau', code: 'RAU_LOGIN_CANCELLED' }), true);
@@ -197,6 +295,22 @@ test('Rau 카드가 generic account snapshot의 로그인 진행과 완료를 �
   assert.match(setup, /requestAccountStatus\(\)/);
   assert.match(css, /data-account-state='signed-in'[\s\S]*background: #b7c9ad/);
   assert.doesNotMatch(setup, /Raucloud|Railway|quota|allowance|크레딧|한도|60분|\$5/);
+});
+
+test('Rau 카드의 픽셀 구름은 상태·좁은 화면·reduced motion을 따른다', () => {
+  const setup = readSource('../src/ui/initial-setup/initial-setup.ts');
+  const css = readSource('../src/ui/initial-setup/initial-setup.css');
+
+  assert.match(setup, /function createPixelCloudArtwork\(\)/);
+  assert.match(setup, /<svg viewBox="0 0 240 160"/);
+  assert.match(setup, /agent === 'rau' \? createPixelCloudArtwork\(\) : null/);
+  assert.match(css, /\.rhwp-setup-pixel-cloud \{/);
+  assert.match(css, /image-rendering: pixelated/);
+  assert.match(css, /data-account-state='pending'[\s\S]*rhwp-setup-cloud-glint/);
+  assert.match(css, /data-account-state='signed-in'[\s\S]*fill: #edf6e8/);
+  assert.match(css, /@media \(max-width: 720px\)[\s\S]*\.rhwp-setup-pixel-cloud/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.rhwp-setup-cloud-float,[\s\S]*animation: none/);
+  assert.doesNotMatch(setup, /Raucloud|Railway|quota|allowance|60분|\$5/);
 });
 
 test('실패 경로의 건너뛰기는 보정 단계 없이 편집기로 끝낸다', () => {

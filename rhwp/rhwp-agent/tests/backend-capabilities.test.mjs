@@ -1,17 +1,52 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  readlinkSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { buildClaudeArgv, buildClaudeSdkOptions, createClaudeSession, flushClaudeCredentialMirrors, prepareClaudeHome } from '../agents/claude.mjs';
-import { createCodexSession, buildCodexArgv, flushCodexCredentialMirror, prepareCodexHome } from '../agents/codex.mjs';
-import { buildCodexAppServerArgv, sandboxPolicy as codexAppServerSandboxPolicy } from '../agents/codex-app-server.mjs';
+import {
+  buildClaudeArgv,
+  buildClaudeSdkOptions,
+  createClaudeSession,
+  flushClaudeCredentialMirrors,
+  prepareClaudeHome,
+} from '../agents/claude.mjs';
+import {
+  createCodexSession,
+  buildCodexArgv,
+  flushCodexCredentialMirror,
+  prepareCodexHome,
+} from '../agents/codex.mjs';
+import {
+  buildCodexAppServerArgv,
+  sandboxPolicy as codexAppServerSandboxPolicy,
+} from '../agents/codex-app-server.mjs';
 import { buildCursorCliConfig } from '../agents/cursor.mjs';
 import { buildGrokArgv } from '../agents/grok.mjs';
 import { buildPiArgv, buildPiEnv } from '../agents/pi.mjs';
-import { isOpenCodeModelId, mcpCapabilityEnv, mcpRuntimeFor, normalizeUsageTokens, parallelWorkBriefFor, providerInteractionMode, providerToolNoteFor, RHWP_SUBAGENTS, systemBriefFor, validateExecutionMode } from '../agents/backend.mjs';
+import {
+  isOpenCodeModelId,
+  mcpCapabilityEnv,
+  mcpRuntimeFor,
+  normalizeUsageTokens,
+  parallelWorkBriefFor,
+  providerInteractionMode,
+  providerToolNoteFor,
+  RHWP_SUBAGENTS,
+  systemBriefFor,
+  validateExecutionMode,
+} from '../agents/backend.mjs';
 
 test('OpenCode model ids preserve provider-defined catalog names without accepting unsafe lines', () => {
   assert.equal(isOpenCodeModelId('openrouter/~anthropic/claude-fable-latest'), true);
@@ -610,6 +645,14 @@ test('all workflow system prompts default document design to black and white', (
     assert.match(brief, /user explicitly requests a color/);
     assert.match(brief, /reuse its established colors/);
   }
+});
+
+test('plan revision prompt reopens discovery instead of forcing replacement', () => {
+  const server = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
+  assert.match(server, /Return to discovery: inspect the affected current state/);
+  assert.match(server, /ambiguous or changes an assumption/);
+  assert.match(server, /ask one focused question in normal chat instead of immediately presenting a replacement/);
+  assert.doesNotMatch(server, /Revise the plan in response and present the complete replacement/);
 });
 
 test('resume argv retains the selected capability profile', () => {

@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync,
+} from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
@@ -14,6 +16,27 @@ import { ALIVE_PI_FIXTURE_SOURCE, writeFakeCliBin } from './fake-cli-bin.mjs';
 const TOKEN = 'hub-tenancy-test-token';
 const LAUNCH_ID = 'hub-tenancy-test-launch';
 const serverSource = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
+
+test('hub bounds Studio-bound calls retained across provider sockets', () => {
+  assert.match(serverSource, /const MAX_PENDING_STUDIO_TOOL_CALLS = 64/);
+  assert.match(serverSource, /record\.pendingCalls\.size >= MAX_PENDING_STUDIO_TOOL_CALLS/);
+  assert.match(serverSource, /TOO_MANY_INFLIGHT_CALLS/);
+  assert.match(serverSource, /Number\.isSafeInteger\(clientId\)/);
+  assert.match(serverSource, /INVALID_CALL_ID/);
+  assert.match(serverSource, /const MAX_STUDIO_QUEUED_FRAME_BYTES = 96 \* 1024 \* 1024/);
+  assert.match(serverSource, /queuedStudioBytes \+ frameBytes > MAX_STUDIO_QUEUED_FRAME_BYTES/);
+  assert.match(serverSource, /\.finally\(releaseStudioBudget\)/);
+});
+
+test('owner shutdown acknowledges only proven cleanup and retains unproven work', () => {
+  assert.match(serverSource, /const cleanupProven = await prepareShutdown\('owner request'\)/);
+  assert.match(
+    serverSource,
+    /sendHttpJson\(res, cleanupProven \? 200 : 503, \{\s*status: cleanupProven \? 'prepared' : 'cleanup-unproven'/,
+  );
+  assert.match(serverSource, /const cleanupProven = await sessions\.disposeAll\(/);
+  assert.match(serverSource, /if \(!cleanupProven\) retainUncertainProcessCleanup\(WORK_ROOT\)/);
+});
 
 test('provider capabilities open only after the backend starts the exact queued turn', () => {
   assert.match(

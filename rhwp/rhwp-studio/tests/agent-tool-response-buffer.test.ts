@@ -1,6 +1,7 @@
 // 끊긴 사이에 끝난 tool-response 를 붙잡아 두는 버퍼와, 브리지가 그것을 물린 자리를 고정한다.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { registerHooks } from 'node:module';
 
 // bridge.ts 는 오버레이 css 를 함께 들여온다 — node 테스트에서는 빈 모듈로 대체한다.
@@ -13,6 +14,8 @@ registerHooks({
 
 const { AgentBridgeImpl, ToolResponseBuffer, providerTurnEndMatches } = await import('../src/agent/bridge.ts');
 const { assertToolRequestActive } = await import('../src/agent/tool-executor.ts');
+const bridgeSource = readFileSync(new URL('../src/agent/bridge.ts', import.meta.url), 'utf8');
+
 test('ToolResponseBuffer: 담은 순서대로 흘려보내고 비운다', () => {
   const buffer = new ToolResponseBuffer();
   buffer.push({ id: 1 });
@@ -119,6 +122,17 @@ test('turn cancellation releases the editing lease before deferred tools settle'
   assert.equal(lateMutations, 0);
   assert.deepEqual(responses, []);
   assert.equal(bridge.activeToolRequests, 0);
+});
+
+test('브리지는 전송 실패한 tool-response 를 버퍼에 넣고 재연결 때 흘려보낸다', () => {
+  assert.match(bridgeSource, /private sendToolResponse\(frame: unknown\): void \{\s*if \(this\.sendJson\(frame\)\) return;\s*this\.toolResponses\.push\(frame\);/);
+  assert.match(bridgeSource, /this\.setState\('connected'\);[\s\S]{0,200}this\.flushToolResponses\(\);/);
+  assert.doesNotMatch(bridgeSource, /this\.sendJson\(\{ v: AGENT_PROTOCOL_VERSION, type: 'tool-response'/);
+});
+
+test('스튜디오 소켓 URL 은 페이지 인스턴스 id 를 함께 보낸다', () => {
+  assert.match(bridgeSource, /&instance=\$\{encodeURIComponent\(STUDIO_INSTANCE_ID\)\}/);
+  assert.match(bridgeSource, /const STUDIO_INSTANCE_ID = /);
 });
 
 function interruptBridgeFixture(execute: (...args: any[]) => Promise<unknown> = async () => ({})) {

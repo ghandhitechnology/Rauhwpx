@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { PendingRequestRegistry } from '../src/agent/pending-requests.ts';
+
+const bridge = readFileSync(new URL('../src/agent/bridge.ts', import.meta.url), 'utf8');
+const types = readFileSync(new URL('../src/agent/types.ts', import.meta.url), 'utf8');
 
 // ─── 요청/응답 짝 맞추기 (실제 모듈) ────────────────────────
 
@@ -44,3 +48,100 @@ test('연결이 끊기면 대기 중인 모든 요청이 null 로 닫힌다', as
 });
 
 // ─── 브리지 배선 (소스 계약) ────────────────────────────────
+
+test('브리지가 프로바이더 상태·사용량 요청 메시지를 보낸다', () => {
+  assert.match(bridge, /type: 'provider-status-request'/);
+  assert.match(bridge, /type: 'usage-request'/);
+  assert.match(bridge, /type: 'usage-plan-set', agent, plan/);
+  assert.match(bridge, /type: 'cliproxy-connect', url, key/);
+  assert.match(bridge, /type: 'cliproxy-disconnect'/);
+  assert.match(bridge, /requestProviderStatus\(refresh = false\): Promise<ProviderStatusMap \| null>/);
+  assert.match(bridge, /requestUsage\(refresh = false\): Promise<UsageSummary \| null>/);
+  assert.match(bridge, /setUsagePlan\(agent: AgentName, plan: string\): Promise<UsageSummary \| null>/);
+  assert.match(bridge, /connectCliproxy\(url: string, key: string\): Promise<UsageSummary \| null>/);
+  assert.match(bridge, /disconnectCliproxy\(\): Promise<UsageSummary \| null>/);
+});
+
+test('오프라인이면 요청은 곧바로 null 로 안착한다', () => {
+  assert.match(
+    bridge,
+    /if \(this\.state !== 'connected'\) return Promise\.resolve\(null\);/,
+  );
+  // 전송 실패도 같은 자리에서 닫는다.
+  assert.match(bridge, /if \(!sent\) this\.requests\.settle\(requestId, null\);/);
+  assert.match(bridge, /const REQUEST_TIMEOUT_MS = 10_000;/);
+  assert.match(bridge, /this\.requests\.create<T>\(requestId, timeoutMs\)/);
+});
+
+test('허브 메시지는 대기 중인 요청을 풀고 사이드바 이벤트도 낸다', () => {
+  assert.match(
+    bridge,
+    /case 'provider-status': \{[\s\S]*this\.requests\.settle\(msg\.requestId, providers\)[\s\S]*this\.emit\(\{ type: 'provider-status', providers \}\)/,
+  );
+  assert.match(
+    bridge,
+    /case 'usage-report': \{[\s\S]*this\.requests\.settle\(msg\.requestId, usage\)[\s\S]*this\.emit\(\{ type: 'usage-report', usage \}\)/,
+  );
+  // usage-error/provider-error 는 던지지 않고 null 로 닫는다.
+  assert.match(bridge, /case 'usage-error':\s*case 'provider-error': \{[\s\S]*settle\(msg\.requestId, null\)/);
+  assert.match(bridge, /this\.requests\.cancelAll\(\)/);
+});
+
+test('와이어 값은 항상 두 프로바이더가 있는 형태로 정규화된다', () => {
+  assert.match(bridge, /function readProviderStatus\(value: unknown\): ProviderStatusMap/);
+  assert.match(bridge, /function readUsageSummary\(value: unknown\): UsageSummary \| null/);
+  assert.match(bridge, /cacheReadTokens: num\(src\['cacheReadTokens'\]\)/);
+  assert.match(bridge, /session5h: nullableNum\(limit\['session5h'\]\)/);
+  assert.match(bridge, /function readCliproxyStatus\(value: unknown\): CliproxyStatus/);
+  assert.match(bridge, /source: readUsageSource\(src\['source'\]\)/);
+  assert.match(bridge, /const out = Object\.create\(null\) as Record<string, UsageModelBreakdown>/);
+  assert.match(bridge, /MAX_USAGE_MODEL_ENTRIES = 512/);
+  assert.match(bridge, /for \(const model in source\)/);
+  assert.match(bridge, /model\.length > MAX_USAGE_MODEL_NAME_CHARS/);
+});
+
+test('사용량·프로바이더 타입과 SidebarEvent 항목이 types.ts 에 산다', () => {
+  assert.match(types, /export interface ProviderHealth \{/);
+  assert.match(types, /export type ProviderStatusMap = Record<AgentName, ProviderHealth>;/);
+  assert.match(types, /export interface UsageWindow \{/);
+  assert.match(types, /export interface ProviderUsage \{/);
+  assert.match(types, /export interface UsageSummary \{/);
+  assert.match(types, /export interface CliproxyStatus \{/);
+  assert.match(types, /export type UsageSource = 'estimate' \| 'cliproxy';/);
+  assert.match(types, /export type ClaudeUsagePlan = 'pro' \| 'max5x' \| 'max20x' \| 'api';/);
+  assert.match(types, /export type CodexUsagePlan = 'plus' \| 'pro' \| 'api';/);
+  assert.match(types, /\| \{ type: 'provider-status'; providers: ProviderStatusMap \}/);
+  assert.match(types, /\| \{ type: 'usage-report'; usage: UsageSummary \}/);
+});
+
+test('프로바이더 상태·사용량 정규화는 일곱 프로바이더를 모두 채운다', () => {
+  for (const agent of ['rau', 'claude', 'codex', 'pi', 'grok', 'cursor', 'opencode']) {
+    assert.match(bridge, new RegExp(`${agent}: readProviderHealth\\(src\\['${agent}'\\]\\)`));
+    assert.match(bridge, new RegExp(`${agent}: readProviderUsage\\(providers\\['${agent}'\\]\\)`));
+    assert.match(bridge, new RegExp(`${agent}: readAgentSetupStatus\\(src\\['${agent}'\\], '${agent}'\\)`));
+  }
+  // grok · cursor · opencode는 사용량 기반 API 한 가지뿐이다.
+  assert.match(bridge, /grok: typeof plans\['grok'\] === 'string' \? plans\['grok'\] : 'api'/);
+  assert.match(bridge, /cursor: typeof plans\['cursor'\] === 'string' \? plans\['cursor'\] : 'api'/);
+  assert.match(bridge, /opencode: typeof plans\['opencode'\] === 'string' \? plans\['opencode'\] : 'api'/);
+  assert.match(types, /export type ApiOnlyUsagePlan = 'api';/);
+  assert.match(types, /plans: Record<AgentName, string>;/);
+  assert.match(types, /const USAGE_PLAN_GUARDS: Record<AgentName, \(value: unknown\) => boolean>/);
+});
+
+test('cursor와 opencode 모델 목록은 agent-setup-status를 타고 레지스트리로 들어간다', () => {
+  assert.match(types, /export type AgentName = 'claude' \| 'codex' \| 'pi' \| 'grok' \| 'cursor' \| 'opencode' \| 'rau';/);
+  assert.match(types, /models\?: readonly string\[\];/);
+  assert.match(bridge, /setCursorModels as setCursorModelRegistry/);
+  assert.match(bridge, /setOpenCodeModels as setOpenCodeModelRegistry/);
+  assert.match(bridge, /if \(statuses\.cursor\.models\) setCursorModelRegistry\(statuses\.cursor\.models\);/);
+  assert.match(bridge, /if \(statuses\.opencode\.models\) setOpenCodeModelRegistry\(statuses\.opencode\.models\);/);
+  // 레지스트리 갱신은 이벤트 발행보다 먼저 일어나야 한다.
+  const handler = bridge.slice(bridge.indexOf("case 'agent-setup-status':"));
+  assert.ok(
+    handler.indexOf('setCursorModelRegistry') < handler.indexOf("this.emit({ type: 'agent-setup-status'"),
+  );
+  assert.ok(
+    handler.indexOf('setOpenCodeModelRegistry') < handler.indexOf("this.emit({ type: 'agent-setup-status'"),
+  );
+});

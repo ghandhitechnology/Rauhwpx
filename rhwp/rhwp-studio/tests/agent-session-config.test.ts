@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { resolveRendererSessionContext, websocketHubUrl } from '../src/desktop-integration.ts';
+import {
+  resolveRendererSessionContext,
+  websocketHubUrl,
+} from '../src/desktop-integration.ts';
+
+const bridgeSource = readFileSync(new URL('../src/agent/bridge.ts', import.meta.url), 'utf8');
 
 test('Electron renderer session context is loaded asynchronously from preload', async () => {
   const expected = {
@@ -54,4 +60,11 @@ test('browser/dev context keeps explicit overrides and HTTP hub URLs become WebS
     templateToken: 'browser-token',
   });
   assert.equal(websocketHubUrl(context!.hubUrl), 'wss://hub.example.test/base');
+});
+
+test('AgentBridge carries the renderer session on WebSocket and HTTP hub requests', () => {
+  assert.match(bridgeSource, /\/studio\?token=.*&sessionId=/);
+  assert.match(bridgeSource, /url\.searchParams\.set\('sessionId', this\.sessionId\)/);
+  assert.match(bridgeSource, /await this\.refreshSessionContext\(\)/);
+  assert.doesNotMatch(bridgeSource, /opts\?\.url \?\?.*5175/);
 });

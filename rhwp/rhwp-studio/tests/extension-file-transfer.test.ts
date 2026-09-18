@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import { EXTENSION_FETCH_CHUNK_MAX_BYTES, readExtensionDocumentBytes, type ExtensionMessageRuntime } from '../src/core/extension-file-transfer.ts';
+import {
+  EXTENSION_FETCH_CHUNK_MAX_BYTES,
+  readExtensionDocumentBytes,
+  type ExtensionMessageRuntime,
+} from '../src/core/extension-file-transfer.ts';
 
 type Message = Record<string, unknown>;
 
@@ -185,4 +190,31 @@ test('fails closed for every remote URL before extension messaging', async () =>
     );
   }
   assert.deepEqual(calls, []);
+});
+
+test('source contract forbids whole-file number-array conversion', () => {
+  const main = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
+  const chromeRouter = readFileSync(
+    new URL('../../rhwp-chrome/sw/message-router.js', import.meta.url),
+    'utf8',
+  );
+  const firefoxRouter = readFileSync(
+    new URL('../../rhwp-firefox/sw/message-router.js', import.meta.url),
+    'utf8',
+  );
+  const safariBackground = readFileSync(
+    new URL('../../rhwp-safari/src/background.js', import.meta.url),
+    'utf8',
+  );
+
+  assert.match(main, /throw new ExtensionRemoteProxyUnavailableError\(\)/);
+  assert.match(main, /validatedRemoteUrl = validateRemoteDocumentUrl\(fileUrl\)/);
+  assert.match(main, /hasExtensionRuntime && validatedRemoteUrl/);
+  assert.match(main, /fetch\(validatedRemoteUrl\?\.href \?\? fileUrl\)/);
+  assert.doesNotMatch(main, /readExtensionDocumentBytes\(/);
+  assert.doesNotMatch(main, /new Uint8Array\(result\.data\)/);
+  assert.doesNotMatch(chromeRouter, /Array\.from\(bytes\)/);
+  assert.doesNotMatch(firefoxRouter, /Array\.from\(bytes\)/);
+  assert.match(safariBackground, /code: 'REMOTE_PROXY_UNAVAILABLE'/);
+  assert.match(safariBackground, /requirement: 'SERVER_FETCH_REQUIRED'/);
 });

@@ -22,6 +22,14 @@ test('구두점만 있는 위치에는 단어 선택을 만들지 않는다', ()
   assert.equal(findWordSelectionRange('...', 1), null);
 });
 
+test('더블클릭은 텍스트 컨텍스트별 선택 anchor를 설정한다', () => {
+  assert.match(mouseHandler, /if \(selectCurrentWord\(this\)\) e\.preventDefault\(\)/);
+  assert.match(mouseHandler, /self\.cursor\.setHfAnchor\(\)/);
+  assert.match(mouseHandler, /self\.cursor\.setFnAnchor\(\)/);
+  assert.match(mouseHandler, /self\.cursor\.setAnchor\(\)/);
+  assert.match(mouseHandler, /getTextInCellByPath/);
+});
+
 function tableCellHarness(options: { protected?: boolean; textBoxDepth?: number } = {}) {
   const calls: string[] = [];
   const protectedCell = options.protected === true;
@@ -79,4 +87,12 @@ test('글상자 본문은 제외하고 글상자 안 중첩 표 셀은 선택한
   const nestedTable = tableCellHarness({ textBoxDepth: 2 });
   assert.equal(selectCurrentTableCell(nestedTable.self), true);
   assert.ok(nestedTable.calls.includes('enter-cell-selection'));
+});
+
+test('더블클릭 라우팅은 표 셀 선택을 단어 선택보다 먼저 시도한다', () => {
+  const tableCell = mouseHandler.indexOf('if (selectCurrentTableCell(this))');
+  const word = mouseHandler.lastIndexOf('if (selectCurrentWord(this))');
+  assert.notEqual(tableCell, -1);
+  assert.notEqual(word, -1);
+  assert.ok(tableCell < word);
 });

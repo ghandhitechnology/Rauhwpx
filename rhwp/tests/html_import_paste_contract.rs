@@ -144,6 +144,19 @@ fn oversized_markup_paste_falls_back_to_capped_paragraphs() {
 }
 
 #[test]
+fn html_paste_enforces_absolute_input_ceiling_besides_markup_len() {
+    let src = include_str!("../src/document_core/commands/html_import.rs");
+    assert!(
+        src.contains("HTML_PASTE_MAX_TOTAL_BYTES"),
+        "data: 페이로드를 포함한 절대 상한이 있어야 한다"
+    );
+    assert!(
+        src.contains("html.len() > Self::HTML_PASTE_MAX_TOTAL_BYTES"),
+        "마크업 길이와 별개로 html.len() 을 검사해야 한다"
+    );
+}
+
+#[test]
 fn paragraph_and_table_paste_preserves_surrounding_text_and_remains_editable() {
     use rhwp::model::control::Control;
 

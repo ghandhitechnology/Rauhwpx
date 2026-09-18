@@ -1,9 +1,26 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { createCloudController, parseCloudSnapshot } from '../src/cloud/desktop-cloud.ts';
 import type { CloudSnapshot } from '../src/cloud/types.ts';
-import { appServerProvider, createCloudSetupState, mapCloudSetupIssue, mapSandboxIssue, RAUCLOUD_SETUP_WAIT_MINUTES, reconcileCloudSetupState, raucloudSetupElapsed, snapshotProfile, snapshotSandbox } from '../src/ui/agent-sidebar/cloud-onboarding-state.ts';
+import {
+  appServerProvider,
+  createCloudSetupState,
+  mapCloudSetupIssue,
+  mapSandboxIssue,
+  RAUCLOUD_SETUP_WAIT_MINUTES,
+  reconcileCloudSetupState,
+  raucloudSetupElapsed,
+  snapshotProfile,
+  snapshotSandbox,
+} from '../src/ui/agent-sidebar/cloud-onboarding-state.ts';
+
+const onboarding = readFileSync(new URL('../src/ui/agent-sidebar/cloud-onboarding.ts', import.meta.url), 'utf8');
+const onboardingCss = readFileSync(new URL('../src/ui/agent-sidebar/cloud-onboarding.css', import.meta.url), 'utf8');
+const cloudUi = readFileSync(new URL('../src/ui/agent-sidebar/cloud-ui.ts', import.meta.url), 'utf8');
+const preload = readFileSync(new URL('../../../desktop/preload.cjs', import.meta.url), 'utf8');
+const desktopMain = readFileSync(new URL('../../../desktop/main.mjs', import.meta.url), 'utf8');
 
 const SANDBOX = {
   providerId: 'railway',
@@ -362,4 +379,59 @@ test('app server failures read as something the user can act on', () => {
     mapCloudSetupIssue(new Error('Shut down the app-provided sandbox before connecting your own server.')).title,
     '앱 샌드박스를 먼저 종료하세요',
   );
+});
+
+test('the dialog offers both servers and only restorable sandbox actions', () => {
+  assert.match(onboarding, /Cloud 서버 선택/);
+  assert.match(onboarding, /Raucloud/);
+  assert.match(onboarding, /내 서버 사용/);
+  assert.match(onboarding, /accountAuthPending \|\| accountBusy \? '로그인 확인 중…' : '로그인'/);
+  assert.match(onboarding, /justSignedIn && mode === 'app-hosted'\s*\n\s*\? '로그인됨'/);
+  assert.match(onboarding, /window\.open\(next\.authUrl, '_blank', 'noopener,noreferrer'\)/);
+  assert.match(cloudUi, /loginAccount: deps\.loginAccount/);
+  assert.match(onboarding, /role', 'radiogroup'/);
+  assert.match(onboarding, /dataset\.serverMode = mode/);
+  assert.match(onboarding, /controller\.selectServerMode\(mode\)/);
+  assert.match(onboarding, /const selectedProvider = transferIntent\?\.selection\.agent/);
+  assert.match(onboarding, /controller\.spawnSandbox\(providerId, selectedProvider\)/);
+  assert.match(onboarding, /captureTransferIntent\?\.\(\)/);
+  assert.match(onboarding, /settled\.kind === 'sandbox-ready'\) continueTransfer\(intent\)/);
+  assert.match(onboarding, /continueTransfer\(intent\)/);
+  assert.match(onboarding, /준비하고 보내기/);
+  assert.match(onboarding, /controller\.teardownSandbox\(\)/);
+  assert.match(onboarding, /controller\.sandboxStatus\(\)/);
+  assert.doesNotMatch(onboarding, /controller\.takeoverSandbox\(\)/);
+  assert.match(onboarding, /서버 강제 종료로 끊을 수 있습니다/);
+  assert.match(onboarding, /남은 서버는 공급자 콘솔에서 직접 삭제하세요/);
+  // 놓고 온 유료 서버는 화면에 보여야 한다. 스크린 리더 전용 안내로는 부족하다.
+  assert.match(onboarding, /state\.notice.*callout\('cloud', '남은 서버를 확인하세요', state\.notice\)/);
+  assert.match(onboarding, /'Raucloud를 종료하지 못했습니다'\n\s*: 'Raucloud를 준비하지 못했습니다'/);
+  assert.match(onboarding, /운영자가 \$\{provider\.missingConfig\.join\(', '\)\}/);
+  assert.match(onboarding, /state\.kind !== 'sandbox-intro' && state\.kind !== 'sandbox-failed'/);
+  assert.match(onboarding, /kind: 'sandbox-provisioning'/);
+  assert.match(onboarding, /서버 생성과 첫 시작에는 최대 \$\{RAUCLOUD_SETUP_WAIT_MINUTES\}분이 걸릴 수 있습니다/);
+  assert.match(onboarding, /return raucloudSetupElapsed\(startedAt\)/);
+  assert.match(onboarding, /진행 보기/);
+  assert.match(onboarding, /Raucloud를 종료하고 있습니다/);
+  assert.match(onboarding, /Raucloud · /);
+  assert.match(onboardingCss, /\.ag-cloud-setup-option\.ag-selected/);
+  assert.match(cloudUi, /appHosted/);
+  assert.match(cloudUi, /setupActive\n\s+\? '준비 중'\n\s+: link\.kind === 'reconnecting'/);
+  assert.match(cloudUi, /if \(setupActive \|\|[\s\S]*?closePanel\(\);\n\s+onboarding\.open\('transfer', trigger\)/);
+  assert.match(preload, /cloudSelectServerMode: \(payload\) => ipcRenderer\.invoke\('cloud:select-server-mode', payload\)/);
+  assert.match(preload, /cloudSpawnSandbox: \(payload\) => ipcRenderer\.invoke\('cloud:spawn-sandbox', payload\)/);
+  assert.match(preload, /cloudSandboxStatus: \(\) => ipcRenderer\.invoke\('cloud:sandbox-status'\)/);
+  assert.match(preload, /cloudTeardownSandbox: \(payload\) => ipcRenderer\.invoke\('cloud:teardown-sandbox', payload\)/);
+  assert.match(preload, /cloudTakeoverSandbox: \(\) => ipcRenderer\.invoke\('cloud:takeover-sandbox'\)/);
+  assert.match(preload, /cloudForceQuitAccount: \(\) => ipcRenderer\.invoke\('cloud:force-quit-account'\)/);
+  assert.match(preload, /cloudReconnectLink: \(\) => ipcRenderer\.invoke\('cloud:reconnect-link'\)/);
+  assert.match(preload, /cloudRecreateLink: \(\) => ipcRenderer\.invoke\('cloud:recreate-link'\)/);
+  for (const channel of ['cloud:select-server-mode', 'cloud:spawn-sandbox', 'cloud:sandbox-status', 'cloud:teardown-sandbox', 'cloud:takeover-sandbox', 'cloud:force-quit-account', 'cloud:reconnect-link', 'cloud:recreate-link']) {
+    assert.match(desktopMain, new RegExp(`ipcMain\\.handle\\('${channel}'`));
+  }
+  assert.match(desktopMain, /createRaucloudBrokerProvider\(\{/);
+  assert.match(desktopMain, /authorizeOwnedBackend: \(request, options\) =>/);
+  assert.match(desktopMain, /cloudAccountSession\.authorizeOwnedBackend\(request, options\)/);
+  assert.doesNotMatch(desktopMain, /RAUCLOUD_ACCESS_SECRET|getAccessToken/);
+  assert.doesNotMatch(desktopMain, /createRailwayServerProvider\(\{/);
 });
