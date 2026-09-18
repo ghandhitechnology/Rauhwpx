@@ -14,6 +14,7 @@ import {
   ipcMain,
   nativeTheme,
   net,
+  Notification as ElectronNotification,
   powerMonitor,
   protocol,
   safeStorage,
@@ -556,7 +557,54 @@ async function broadcastCloudEvent(payload) {
   }));
 }
 
+const pendingMergeNotifications = new Map();
+let mergeNotificationTimer = null;
+
+/**
+ * A completed Cloud turn has to reach the user while they are in another app.
+ * macOS only delivers these for a signed bundle, so this stays best-effort.
+ * One turn can finish several merge requests at once, so a burst settles into
+ * a single banner on the same cadence as the event broadcast coalescing.
+ */
+function notifyCloudMergeReady(payload) {
+  if (payload?.type !== 'merge-prefetch-completed') return;
+  pendingMergeNotifications.set(payload.operationId ?? pendingMergeNotifications.size, payload);
+  if (mergeNotificationTimer) return;
+  mergeNotificationTimer = setTimeout(() => {
+    mergeNotificationTimer = null;
+    const payloads = [...pendingMergeNotifications.values()];
+    pendingMergeNotifications.clear();
+    try {
+      if (!payloads.length || !ElectronNotification.isSupported()) return;
+      const windows = sessions.windows().filter((candidate) => !candidate.isDestroyed());
+      // The sidebar already shows the arriving change while the app has focus.
+      if (!windows.length || windows.some((candidate) => candidate.isFocused())) return;
+      const [first] = payloads;
+      const notification = new ElectronNotification({
+        title: 'Cloud 변경이 준비되었습니다',
+        body: payloads.length > 1
+          ? `${payloads.length}개의 Cloud 변경이 도착했습니다.`
+          : first.fileName
+            ? `${first.fileName}${Number.isSafeInteger(first.turn) ? ` · ${first.turn}턴` : ''}`
+            : '검토할 Cloud 변경이 도착했습니다.',
+      });
+      notification.on('click', () => {
+        const [target] = sessions.windows().filter((candidate) => !candidate.isDestroyed());
+        if (!target) return;
+        if (target.isMinimized()) target.restore();
+        target.show();
+        target.focus();
+      });
+      notification.show();
+    } catch (error) {
+      console.warn('[rauhwpx] cloud notification failed:', error);
+    }
+  }, CLOUD_BROADCAST_COALESCE_MS);
+  mergeNotificationTimer.unref?.();
+}
+
 function queueCloudBroadcast(payload) {
+  notifyCloudMergeReady(payload);
   // Build one snapshot per burst, but never collapse ordered agent deltas.
   // The renderer reconciles them with the stable timeline at each boundary.
   // Durable handoffs and operation snapshots can each contain the full timeline.
@@ -1667,6 +1715,7 @@ if (!hasSingleInstanceLock) {
       powerMonitor,
       isOnline: () => net.isOnline(),
       reconcile: (options) => cloudCoordinator?.reconcileContinuity(options),
+      keepWarm: (options) => cloudCoordinator?.prewarmAppServer(options),
     });
     configureAutoUpdater();
     await loadNativeBookmarks();

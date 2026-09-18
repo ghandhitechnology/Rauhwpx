@@ -119,7 +119,7 @@ function normalizedStatus(payload, fallback = 'idle') {
       controller: controller && typeof controller === 'object' ? controller : null,
       readOnly: run.readOnly === true || payload?.readOnly === true || gate?.state === 'owned_elsewhere',
       takeoverRequired: run.takeoverRequired === true || payload?.takeoverRequired === true || gate?.state === 'owned_elsewhere',
-      warmUntil: typeof warmUntil === 'string' ? warmUntil : null,
+      warmUntil: isoTime(warmUntil, null),
       reused: run.reused === true || payload?.reused === true,
       quota: quota && typeof quota === 'object' ? quota : null,
       gate,
@@ -354,6 +354,15 @@ export function createRaucloudBrokerClient({
         if (error.retryAfter) brokerError.retryAfter = error.retryAfter;
         throw brokerError;
       }
+      if (Number(error.status) === 404 && typeof error?.code === 'string'
+        && !error.code.startsWith('RAUCLOUD_') && !error.code.startsWith('CLOUD_')) {
+        // An unknown route means this broker predates the requested capability.
+        const unsupported = new AppServerError('This Raucloud service does not support the request', {
+          code: 'RAUCLOUD_UNSUPPORTED', retryable: false, cause: error,
+        });
+        unsupported.status = 404;
+        throw unsupported;
+      }
       throw publicError(error);
     } finally {
       clearTimeout(timer);
@@ -402,6 +411,28 @@ export function createRaucloudBrokerClient({
           timezone: validatedTimezone(getTimezone),
           provider,
         },
+      });
+    },
+    async prewarm({ deviceName = '', signal = null } = {}) {
+      const currentDevice = await device(deviceName);
+      // Prewarm answers from broker state without waiting on provisioning, so
+      // it needs only the standard request deadline.
+      return request('/v1/cloud/prewarm', {
+        method: 'POST', signal,
+        body: {
+          deviceId: currentDevice.id,
+          deviceName: currentDevice.name,
+          timezone: validatedTimezone(getTimezone),
+        },
+      });
+    },
+    async receipt(id, { deviceName = '', signal = null } = {}) {
+      const safeId = encodeURIComponent(trimmed(id, 128));
+      if (!safeId) throw new AppServerError('Raucloud run id is invalid', { code: 'RAUCLOUD_RUN_INVALID', retryable: false });
+      const currentDevice = await device(deviceName);
+      return request(`/v1/cloud/runs/${safeId}/receipt`, {
+        method: 'POST', signal,
+        body: { deviceId: currentDevice.id, deviceName: currentDevice.name },
       });
     },
     async takeoverRun(id, {
@@ -523,6 +554,20 @@ export function createRaucloudBrokerProvider(options = {}) {
             code: 'RAUCLOUD_ALLOCATION_TIMEOUT', retryable: true,
           });
         }
+        // A reused worker was provisioned before this device asked for it, so its
+        // bootstrap pairing code may already be stale. Mint a fresh one; fall back
+        // to the original receipt when the worker is already paired elsewhere.
+        if (payload?.reused === true || state.raucloud.reused === true) {
+          try {
+            const refreshed = receiptFrom(await client.receipt(id, { deviceName, signal }));
+            if (refreshed) {
+              receipt = refreshed;
+              onLine('Refreshed the pairing receipt for your warm Cloud worker');
+            }
+          } catch (error) {
+            onLine(`Keeping the original pairing receipt: ${error.message}`);
+          }
+        }
         sandbox.host = new URL(receipt.endpoint).hostname;
         return {
           sandbox,
@@ -541,6 +586,27 @@ export function createRaucloudBrokerProvider(options = {}) {
     async status(sandbox, { signal = null } = {}) {
       const payload = await client.status({ runId: sandbox?.sandboxId, signal });
       return { ...normalizedStatus(payload), account: accountSnapshotFrom(payload) };
+    },
+    /**
+     * Reserves a worker before the first turn. Older brokers have no prewarm
+     * route, so an unsupported response resolves to `supported: false` instead
+     * of failing the caller.
+     */
+    async prewarm({ signal = null, onLine = () => {} } = {}) {
+      let payload;
+      try {
+        payload = await client.prewarm({ signal });
+      } catch (error) {
+        if (error?.code === 'RAUCLOUD_UNSUPPORTED') return { supported: false };
+        throw error;
+      }
+      const state = normalizedStatus(payload, 'idle');
+      if (payload?.prewarm === true) {
+        onLine(state.lifecycle === 'ready'
+          ? 'Your Cloud worker is warm and waiting'
+          : 'Preparing your Cloud worker before the first message');
+      }
+      return { supported: true, prewarmed: payload?.prewarm === true, ...state, account: accountSnapshotFrom(payload) };
     },
     ...(options.getLocalCacheIdentity ? { getLocalCacheIdentity: options.getLocalCacheIdentity } : {}),
     listMergeRequests(options) { return client.listMergeRequests(options); },

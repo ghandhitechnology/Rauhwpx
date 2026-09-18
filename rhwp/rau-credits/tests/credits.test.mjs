@@ -1907,3 +1907,40 @@ test('Railway config pins the production health and restart contract', async () 
   assert.match(config, /restartPolicyType = "ON_FAILURE"/);
   assert.match(config, /restartPolicyMaxRetries = 3/);
 });
+
+test('HTTP prewarm and receipt routes answer through the account session', async () => {
+  const credits = service({ authenticateMagic: async (email) => ({ id: 'user_prewarm', email }) });
+  const { redeemed } = await issueAccountSession(credits, { verifier: 'p'.repeat(43) });
+  await credits.commitAccountSession(redeemed.accountToken);
+  const server = http.createServer(creditsRequestListener(credits));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  const approve = (pathname, body) => fetch(`http://127.0.0.1:${port}${pathname}`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${redeemed.accountToken}`, 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  try {
+    const unauthorized = await fetch(`http://127.0.0.1:${port}/v1/cloud/prewarm`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ deviceId: 'device-1' }),
+    });
+    assert.equal(unauthorized.status, 401);
+
+    const prewarm = await approve('/v1/cloud/prewarm', { deviceId: 'device-1', timezone: 'Asia/Seoul' });
+    assert.equal(prewarm.status, 200);
+    const body = await prewarm.json();
+    assert.equal(body.prewarm, false, 'no provisioner is configured in this build');
+    assert.equal(body.worker, null);
+    assert.equal(body.activeRun, null);
+    assert.equal(body.account.timezone, 'Asia/Seoul');
+    assert.equal(body.quota.usedMs, 0);
+
+    const receipt = await approve('/v1/cloud/runs/run-missing/receipt', { deviceId: 'device-1' });
+    assert.equal(receipt.status, 503);
+    assert.equal((await receipt.json()).error, 'CLOUD_UNAVAILABLE');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
