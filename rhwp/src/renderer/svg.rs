@@ -2702,8 +2702,6 @@ impl Renderer for SvgRenderer {
         let has_ratio = (ratio - 1.0).abs() > 0.01;
 
         // 공통 스타일 속성 구성 (fill 제외 — 그림자/원본에서 각각 설정)
-        // [#7151] 합성 볼드는 굵기를 획으로 명시한다 — 색이 fill 과 같아야 하므로
-        // 속성 자체는 fill 을 아는 `attrs_for_cluster` 에서 붙인다.
         let faux_bold_stroke = faux_bold_stroke_width(style, font_size);
         let mut base_attrs = format!("font-size=\"{}\"", font_size);
         if faux_bold_stroke.is_none() {
@@ -3266,7 +3264,6 @@ fn faux_bold_stroke_width(style: &TextStyle, font_size: f64) -> Option<f64> {
         .then_some(font_size * HANCOM_FAUX_BOLD_STROKE_EM)
 }
 
-/// `fill` 과 같은 색으로 합성 볼드 획을 준다 — PDF `2 Tr` 과 같은 채움 후 획.
 fn faux_bold_stroke_attr(width: f64, fill: &str) -> String {
     format!(" stroke=\"{}\" stroke-width=\"{:.3}\"", fill, width)
 }
