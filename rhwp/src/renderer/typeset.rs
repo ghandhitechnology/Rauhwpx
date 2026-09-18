@@ -18377,12 +18377,15 @@ impl TypesetEngine {
             // 최종 행의 컷이 모든 가시 유닛을 소비했다면 다음 조각은 없다.
             // 컷을 지우면 원래 행 높이가 복원되므로 paint 컷은 그대로 보존하고,
             // 빈 후속 페이지를 할당하기 전에 continuation만 종료한다.
+            // saved residual 계약(한컴 저장 잔여 밴드)은 빈 종단 연속분 자체가
+            // 페이지 증거이므로 이 단축에서 제외한다.
             let terminal_cut_consumed = end_row >= row_count
                 && split_end_limit > 0.0
                 && !split_end_cut.is_empty()
                 && split_block_start.is_none()
                 && !start_cut_is_block
                 && mt.allows_row_break_split()
+                && saved_residual_split_hu.is_none()
                 && caption_overhead <= 0.0
                 && (total_footnote - st.current_footnote_height).max(0.0) <= 0.5
                 && can_intra_split
