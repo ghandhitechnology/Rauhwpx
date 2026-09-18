@@ -291,6 +291,9 @@ pub struct Field {
     /// 가지나 IR 은 Command/Number 만 추출하므로, 무손실 roundtrip 을 위해 원문을
     /// 그대로 보존한다 (HWP5 경로엔 무관 — HWPX 파서만 적재).
     pub raw_parameters_xml: Option<String>,
+    /// 링크 색/밑줄을 적용하기 전의 서식. 한컴 필드 Command에 섞지 않고
+    /// 별도 컨테이너 메타데이터로 보존한다. 없으면 해제 시 현재 서식을 유지한다.
+    pub hyperlink_format: Option<Box<super::hyperlink_format::OriginalFormat>>,
 }
 
 impl Field {

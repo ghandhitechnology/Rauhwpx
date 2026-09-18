@@ -2104,6 +2104,22 @@ impl LayoutEngine {
                 12.0
             }
         };
+        let stored_line_baseline_at = |char_idx: usize| -> Option<f64> {
+            if para.line_segs.len() < 2 {
+                return None;
+            }
+            let pos = *para.char_offsets.get(char_idx)?;
+            let idx = (0..para.line_segs.len()).rev().find(|&i| {
+                para.line_segs
+                    .get(i)
+                    .is_some_and(|seg| seg.text_start <= pos)
+            })?;
+            let seg = para.line_segs.get(idx)?;
+            Some(ensure_min_baseline(
+                hwpunit_to_px(seg.baseline_distance, self.dpi),
+                para_max_font_size,
+            ))
+        };
         let baseline_dist = if let Some(ls) = para.line_segs.first() {
             ensure_min_baseline(
                 hwpunit_to_px(ls.baseline_distance, self.dpi),
@@ -2227,11 +2243,13 @@ impl LayoutEngine {
                                 let run_ts =
                                     resolved_to_text_style(styles, current_cs_id, first_lang);
                                 let run_width = estimate_text_width(&run_text, &run_ts);
-                                let run_bbox_h = if wrapped_below_table {
-                                    text_line_baseline
-                                } else {
-                                    baseline_dist
-                                };
+                                let run_bbox_h = stored_line_baseline_at(line_run_start).unwrap_or(
+                                    if wrapped_below_table {
+                                        text_line_baseline
+                                    } else {
+                                        baseline_dist
+                                    },
+                                );
                                 let run_id = tree.next_id();
                                 let run_node = RenderNode::new(
                                     run_id,
@@ -2278,11 +2296,12 @@ impl LayoutEngine {
                                 ..Default::default()
                             };
                             let sup_w = estimate_text_width(&fn_text, &sup_ts);
-                            let run_bbox_h = if wrapped_below_table {
-                                text_line_baseline
-                            } else {
-                                baseline_dist
-                            };
+                            let run_bbox_h =
+                                stored_line_baseline_at(ch_idx).unwrap_or(if wrapped_below_table {
+                                    text_line_baseline
+                                } else {
+                                    baseline_dist
+                                });
                             let marker_id = tree.next_id();
                             let marker_node = RenderNode::new(
                                 marker_id,
@@ -2330,12 +2349,13 @@ impl LayoutEngine {
                         };
                         let cs_changed = cs_id != current_cs_id;
 
-                        // 줄바꿈된 텍스트의 BoundingBox 높이: 표 줄 vs 텍스트 줄
-                        let run_bbox_h = if wrapped_below_table {
-                            text_line_baseline
-                        } else {
-                            baseline_dist
-                        };
+                        let run_bbox_h = stored_line_baseline_at(line_run_start).unwrap_or(
+                            if wrapped_below_table {
+                                text_line_baseline
+                            } else {
+                                baseline_dist
+                            },
+                        );
 
                         if (cs_changed || need_wrap) && ch_idx > line_run_start {
                             // 누적된 run 출력
@@ -2399,12 +2419,12 @@ impl LayoutEngine {
                         inline_x += ch_w;
                     }
 
-                    // 남은 run의 BoundingBox 높이
-                    let remaining_bbox_h = if wrapped_below_table {
-                        text_line_baseline
-                    } else {
-                        baseline_dist
-                    };
+                    let remaining_bbox_h =
+                        stored_line_baseline_at(line_run_start).unwrap_or(if wrapped_below_table {
+                            text_line_baseline
+                        } else {
+                            baseline_dist
+                        });
 
                     // 남은 run 출력
                     if line_run_start < *e {

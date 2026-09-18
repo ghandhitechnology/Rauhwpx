@@ -9,3 +9,4 @@ tests/golden_svg/**/*.svg text eol=lf
 
 # Lawful HML corpus — preserve provenance bytes (BOM/CRLF/trailing spaces) and verify by SHA
 samples/hml/*.hml -text -diff
+samples/issue6929/*.hwp -text -diff
