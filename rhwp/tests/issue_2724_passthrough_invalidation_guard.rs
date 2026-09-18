@@ -500,6 +500,36 @@ const EXEMPT: &[(&str, &str, Exempt, &str)] = &[
         Exempt::DelegatesTo("split_paragraph_in_cell_with_intent_native"),
         "셀 논리 분할 래퍼 — 실제 분할·무효화는 intent 헬퍼가 수행.",
     ),
+    (
+        "hyperlink.rs",
+        "insert_hyperlink_native",
+        Exempt::DelegatesTo("commit_hyperlink_paragraph"),
+        "본문·셀·글상자 링크 삽입. 구역 raw_stream 무효화는 commit_hyperlink_paragraph.",
+    ),
+    (
+        "hyperlink.rs",
+        "update_hyperlink_native",
+        Exempt::DelegatesTo("commit_hyperlink_paragraph"),
+        "주소 변경. 무효화는 commit_hyperlink_paragraph. 동일 주소는 커밋하지 않는다.",
+    ),
+    (
+        "hyperlink.rs",
+        "replace_hyperlink_text_native",
+        Exempt::DelegatesTo("commit_hyperlink_paragraph"),
+        "표시 문자열 교체. 무효화는 commit_hyperlink_paragraph.",
+    ),
+    (
+        "hyperlink.rs",
+        "remove_hyperlink_native",
+        Exempt::DelegatesTo("remove_hyperlink_with_format_native"),
+        "서식 복원 없는 해제 래퍼.",
+    ),
+    (
+        "hyperlink.rs",
+        "remove_hyperlink_with_format_native",
+        Exempt::DelegatesTo("commit_hyperlink_paragraph"),
+        "필드 마커 제거. 무효화는 commit_hyperlink_paragraph.",
+    ),
     // ── 판정 보류 ──────────────────────────────────────────────────────────
     (
         "commands/document.rs",
@@ -535,6 +565,7 @@ const INVALIDATION_LEDGER: &[(&str, usize)] = &[
     ("commands/text_editing.rs", 21),
     ("converters/hwpx_to_hwp.rs", 3),
     ("html_table_import.rs", 2),
+    ("hyperlink.rs", 1),
     ("queries/bookmark_query.rs", 3),
     ("queries/field_query.rs", 8),
     ("queries/form_query.rs", 2),
