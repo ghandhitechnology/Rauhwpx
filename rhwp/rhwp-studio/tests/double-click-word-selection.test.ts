@@ -22,6 +22,14 @@ test('구두점만 있는 위치에는 단어 선택을 만들지 않는다', ()
   assert.equal(findWordSelectionRange('...', 1), null);
 });
 
+test('더블클릭은 텍스트 컨텍스트별 선택 anchor를 설정한다', () => {
+  assert.match(mouseHandler, /if \(selectCurrentWord\(this\)\) e\.preventDefault\(\)/);
+  assert.match(mouseHandler, /self\.cursor\.setHfAnchor\(\)/);
+  assert.match(mouseHandler, /self\.cursor\.setFnAnchor\(\)/);
+  assert.match(mouseHandler, /self\.cursor\.setAnchor\(\)/);
+  assert.match(mouseHandler, /getTextInCellByPath/);
+});
+
 function tableCellHarness(options: { protected?: boolean; textBoxDepth?: number } = {}) {
   const calls: string[] = [];
   const protectedCell = options.protected === true;

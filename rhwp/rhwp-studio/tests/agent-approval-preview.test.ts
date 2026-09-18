@@ -4,6 +4,11 @@ import { readFileSync } from 'node:fs';
 import { PreparedSnapshotCommand } from '../src/engine/prepared-snapshot-command.ts';
 
 const pendingSrc = readFileSync(new URL('../src/agent/pending-edits.ts', import.meta.url), 'utf8');
+const commandSrc = readFileSync(new URL('../src/engine/prepared-snapshot-command.ts', import.meta.url), 'utf8');
+const historySrc = readFileSync(new URL('../src/engine/history.ts', import.meta.url), 'utf8');
+const overlaySrc = readFileSync(new URL('../src/agent/pending-overlay.ts', import.meta.url), 'utf8');
+const overlayCss = readFileSync(new URL('../src/agent/pending-overlay.css', import.meta.url), 'utf8');
+
 function between(source: string, start: string, end: string): string {
   const from = source.indexOf(start);
   const to = source.indexOf(end, from + start.length);
@@ -32,6 +37,16 @@ test('agent approval records the rendered preview instead of replaying applied e
     'approval must not reconstruct text or formatting from lossy operation metadata');
 });
 
+test('prepared snapshot command restores exact before and after documents for undo/redo', () => {
+  const prepared = between(commandSrc, 'export class PreparedSnapshotCommand', '\n}');
+
+  assert.match(prepared, /wasm\.restoreSnapshot\(this\.afterId\)/, 'redo restores the committed document');
+  assert.match(prepared, /this\.afterId = wasm\.saveSnapshot\(\)/, 'first execution captures committed output');
+  assert.match(prepared, /wasm\.restoreSnapshot\(this\.beforeId\)/, 'undo restores the pre-agent document');
+  assert.match(historySrc, /recordWithoutExecute[\s\S]*command\.snapshotResourceCount[\s\S]*enforceSnapshotBudget/,
+    'recorded snapshots participate in the history resource budget');
+});
+
 test('prepared snapshot command adopts current preview and round-trips snapshots', () => {
   let document = 'preview-with-original-formatting';
   let nextId = 1;
@@ -58,4 +73,39 @@ test('prepared snapshot command adopts current preview and round-trips snapshots
   command.execute(wasm as never);
   assert.equal(document, 'preview-with-original-formatting+approval-only-delete');
   assert.equal(command.snapshotResourceCount(), 2);
+});
+
+test('template transfers capture a lossless baseline, lock direct edits, and join normal approval undo', () => {
+  const addTemplate = between(pendingSrc, '  addTemplateMutation(', '\n  /**\n   * executor 가드');
+  assert.match(addTemplate, /const snapshotId = wasm\.saveSnapshot\(\)[\s\S]*rawReport = operation\(\)/,
+    'the baseline must be captured before structural transfer');
+  assert.match(addTemplate, /kind: 'template'[\s\S]*snapshotId/);
+  assert.match(addTemplate, /TEMPLATE_PENDING_CONFLICT/,
+    'structural snapshots cannot be layered over coordinate-based pending edits');
+  assert.match(addTemplate, /syncTemplateLock\(\)/);
+  assert.match(pendingSrc, /op\.kind === 'template'[\s\S]*restoreSnapshot\(op\.snapshotId\)/,
+    'reject and approval baseline capture restore the exact template snapshot');
+  assert.match(pendingSrc, /if \(locked === this\.templateLocked\) return;[\s\S]*agent-template-lock-changed/,
+    'the editor lock only emits on a real state transition');
+  assert.doesNotMatch(pendingSrc, /op\.kind === 'template' && op\.userEditSeqAtSnapshot !== this\.userEditSeq/,
+    'template previews must stay revertible instead of being dropped as ordinary text drift');
+  assert.match(pendingSrc, /new PreparedSnapshotCommand\(/,
+    'approval continues to create one snapshot-backed undo command for the change set');
+});
+
+test('pending additions and formatting recolor glyphs with model-specific ink', () => {
+  assert.match(overlayCss, /\.ag-pending-rect\.ag-claude[\s\S]*--ag-pending-ink:/);
+  assert.match(overlayCss, /\.ag-pending-rect\.ag-codex[\s\S]*--ag-pending-ink:/);
+  assert.match(overlayCss, /\.ag-pending-ink[\s\S]*mix-blend-mode:\s*screen/,
+    'canvas glyphs are recolored without tinting the white page');
+  assert.match(overlayCss, /@supports not \(mix-blend-mode: screen\)[\s\S]*\.ag-pending-ink\s*\{\s*display:\s*none/,
+    'unsupported blending hides the ink instead of obscuring the document');
+  assert.match(overlayCss, /\.ag-pending-marker\.ag-insert[\s\S]*box-shadow:/,
+    'inserted whitespace remains visibly marked');
+  assert.match(overlayCss, /\.ag-pending-marker\.ag-format[\s\S]*box-shadow:/,
+    'format-only edits remain identifiable even when glyph color is unchanged');
+  assert.match(overlaySrc, /scrollContent\.appendChild\(node\.ink\)/,
+    'ink rectangles must blend as direct canvas siblings, outside the marker stacking context');
+  assert.match(overlaySrc, /markerLayer\.appendChild\(node\.marker\)/,
+    'review markers render separately from the blended ink');
 });

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 type AnimationFrameCallback = (timestamp: number) => void;
 type ViewportManagerConstructor = new (eventBus: never) => {
@@ -413,4 +414,31 @@ test('wheel zoom emits the pointer anchor and inverse deltas restore zoom', asyn
 
   assert.ok(zoomedIn > 1);
   assert.ok(Math.abs(viewport.getZoom() - 1) < 1e-12);
+});
+
+test('zoom in and out controls use the smooth zoom path', () => {
+  const mainSource = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
+  const viewCommandSource = readFileSync(
+    new URL('../src/command/commands/view.ts', import.meta.url),
+    'utf8',
+  );
+
+  assert.match(mainSource, /sb-zoom-in[\s\S]*?smoothZoomBy\(0\.1\)/);
+  assert.match(mainSource, /sb-zoom-out[\s\S]*?smoothZoomBy\(-0\.1\)/);
+  assert.match(viewCommandSource, /id: 'view:zoom-in'[\s\S]*?smoothZoomBy\(0\.1\)/);
+  assert.match(viewCommandSource, /id: 'view:zoom-out'[\s\S]*?smoothZoomBy\(-0\.1\)/);
+});
+
+test('CanvasView scales existing pages during zoom and rerenders only after settling', () => {
+  const source = readFileSync(new URL('../src/view/canvas-view.ts', import.meta.url), 'utf8');
+
+  assert.match(
+    source,
+    /eventBus\.on\('viewport-scroll', \(\) => \{[\s\S]*?if \(!this\.viewportManager\.isZoomAnimating\(\)\) this\.updateVisiblePages\(\);[\s\S]*?\}\)/,
+  );
+  assert.match(
+    source,
+    /if \(this\.viewportManager\.isZoomAnimating\(\)\) \{[\s\S]*?this\.cancelPendingPrefetch\(\);[\s\S]*?this\.updateRenderedPageZoomPreview\(\);[\s\S]*?return;/,
+  );
+  assert.match(source, /dataset\.rhwpRenderedZoom = String\(zoom\)/);
 });

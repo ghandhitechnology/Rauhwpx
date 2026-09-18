@@ -6,14 +6,27 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { documentPathsFromArgv, launchRequest } from '../../../desktop/launch-routing.mjs';
-import { readGeneratedDocumentResponse, resolveGeneratedDocumentArtifact } from '../../../desktop/generated-document-artifact.mjs';
+import {
+  readGeneratedDocumentResponse,
+  resolveGeneratedDocumentArtifact,
+} from '../../../desktop/generated-document-artifact.mjs';
 import { documentEditMenuItem } from '../../../desktop/edit-menu.mjs';
 import { deliverPlainTextPaste } from '../../../desktop/plain-text-paste.mjs';
 import { SessionManager } from '../../../desktop/session-manager.mjs';
 import { safeSuggestedFilename } from '../../../desktop/safe-filename.mjs';
 import { SerializedStateWriter } from '../../../desktop/serialized-state-writer.mjs';
 import { completeWindowClose } from '../../../desktop/update-lifecycle.mjs';
-import { CREDENTIAL_RETENTION_DIR, LEGACY_CLEANUP_MARKER_FILE, LAUNCH_OWNER_FILE, MAX_LAUNCH_DIRECTORY_ENTRIES, launchStoragePaths, prepareDevelopmentCaches, removeLegacyLaunchDirectories, removeStaleLaunchDirectories, writeLaunchOwnerMetadata } from '../../../desktop/runtime-cleanup.mjs';
+import {
+  CREDENTIAL_RETENTION_DIR,
+  LEGACY_CLEANUP_MARKER_FILE,
+  LAUNCH_OWNER_FILE,
+  MAX_LAUNCH_DIRECTORY_ENTRIES,
+  launchStoragePaths,
+  prepareDevelopmentCaches,
+  removeLegacyLaunchDirectories,
+  removeStaleLaunchDirectories,
+  writeLaunchOwnerMetadata,
+} from '../../../desktop/runtime-cleanup.mjs';
 import { resolveStudioAsset, STUDIO_URL } from '../../../desktop/studio-protocol.mjs';
 import { LAUNCH_CLEANUP_RETENTION_FILE } from '../../rhwp-agent/credential-mirror.mjs';
 
@@ -270,6 +283,39 @@ test('packaged Studio uses a secure path-safe standard scheme', () => {
   assert.doesNotMatch(desktopMain, /createServer/);
 });
 
+test('desktop close and native-file IPC contracts stay sender-owned', () => {
+  const preload = readFileSync(new URL('../../../desktop/preload.cjs', import.meta.url), 'utf8');
+  assert.match(desktopMain, /closeHubSession\(\{[\s\S]*?port: hub\.port,[\s\S]*?token: hubToken,[\s\S]*?launchId,[\s\S]*?sessionId: session\.sessionId/);
+  for (const channel of [
+    'desktop:pick-native-open-file',
+    'desktop:pick-legacy-history-folder',
+    'desktop:open-generated-document-window',
+    'desktop:get-launch-generated-document',
+    'desktop:claim-native-dropped-file',
+    'desktop:pick-native-save-file',
+    'desktop:release-native-file',
+    'desktop:native-file-read',
+    'desktop:native-file-source-path',
+    'desktop:native-file-validate-save',
+    'desktop:native-file-write',
+    'desktop:native-file-is-same',
+    'desktop:remember-native-document',
+    'desktop:reopen-native-document',
+    'desktop:document-reserve',
+    'desktop:document-commit',
+    'desktop:document-cancel',
+    'desktop:document-release',
+    'desktop:close-response',
+    'desktop:get-unique-installs',
+  ]) {
+    assert.match(desktopMain, new RegExp(`ipcMain\\.handle\\('${channel}'`));
+    assert.match(preload, new RegExp(channel));
+  }
+  assert.match(desktopMain, /window\.on\('close',[\s\S]*desktop:close-requested/);
+  assert.match(desktopMain, /nativeFiles\.createSaveTarget\(session\.sessionId, filePath\)/);
+  assert.doesNotMatch(preload, /\b(?:file)?path\s*:/i);
+});
+
 test('bookmark persistence serializes writes and close queues a latest-state flush', async () => {
   const started: string[] = [];
   const errors: string[] = [];
@@ -392,6 +438,20 @@ test('generated artifact responses enforce declared and observed limits before a
     4,
   );
   assert.deepEqual(exact, new Uint8Array([1, 2, 3, 4]));
+});
+
+test('window close never deadlocks on a dead renderer', () => {
+  // The close prompt is skipped (not blocked on) when the renderer cannot answer.
+  assert.match(
+    desktopMain,
+    /window\.on\('close',[\s\S]*?isDestroyed\(\) \|\| window\.webContents\.isCrashed\(\)\) return;[\s\S]*?event\.preventDefault\(\)/,
+  );
+  assert.match(desktopMain, /render-process-gone[\s\S]*?pendingCloseRequestId = null/);
+});
+
+test('one failed startup launch does not abort the remaining launches', () => {
+  assert.match(desktopMain, /await openLaunch\(request\)\.catch\(/);
+  assert.match(desktopMain, /failedLaunches > 0 && sessions\.windows\(\)\.length === 0/);
 });
 
 test('desktop dev cache is disabled and cleared before loading the Studio', async () => {
@@ -921,6 +981,30 @@ test('unix launch-directory cleanup does not retry a locked recursive rm', async
   );
   assert.equal((await stat(directory)).isDirectory(), true);
 });
+
+test('desktop package registers supported document associations without bundling runtime data', () => {
+  const hangulAssociation = rootPackage.build.fileAssociations.find(
+    (association: { name?: string }) => association.name === 'Hangul document',
+  );
+  const historyAssociation = rootPackage.build.fileAssociations.find(
+    (association: { ext?: string | string[] }) => associationExts(association).includes('rhwpx'),
+  );
+  assert.deepEqual(hangulAssociation?.ext, ['hwp', 'hwpx', 'hml']);
+  assert.deepEqual(historyAssociation?.ext, ['rhwpx']);
+  assert.equal(historyAssociation?.name, 'Rauhwpx history archive');
+  assert.notEqual(historyAssociation?.name, 'Hangul document');
+  assert.equal(historyAssociation?.isPackage, undefined);
+  assert.match(desktopMain, /desktop:pick-legacy-history-folder/);
+  assert.match(desktopMain, /properties: \['openFile'\]/);
+  assert.match(desktopMain, /properties: \['openDirectory'\]/);
+  assert.doesNotMatch(desktopMain, /\['openFile', 'openDirectory'\]/);
+  assert.doesNotMatch(desktopMain, /writePortableHistoryFolder\(/);
+  assert.doesNotMatch(desktopMain, /desktop:(?:save-portable-history-file|native-file-write-portable-history)/);
+  assert.match(desktopMain, /RauHWPX history archive/);
+  assert.ok(rootPackage.build.asarUnpack.includes('rhwp/rhwp-agent/**'));
+  assert.ok(rootPackage.build.files.every((entry: string) => !/runtime|launch-work/.test(entry)));
+});
+
 
 test('desktop edit accelerators send commands to the focused renderer', () => {
   const events: unknown[] = [];

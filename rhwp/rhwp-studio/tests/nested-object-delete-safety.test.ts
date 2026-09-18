@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import { canGroupTopLevelBodyObjects, canUngroupTopLevelBodyObject, sameAddressedObject } from '../src/core/object-address.ts';
+import {
+  canGroupTopLevelBodyObjects,
+  canUngroupTopLevelBodyObject,
+  sameAddressedObject,
+} from '../src/core/object-address.ts';
 
 const picture = readFileSync(
   new URL('../src/engine/input-handler-picture.ts', import.meta.url),
@@ -27,6 +31,55 @@ const cursor = readFileSync(
   new URL('../src/engine/cursor.ts', import.meta.url),
   'utf8',
 );
+
+test('unsupported nested object addresses never fall through to body delete APIs', () => {
+  const helperStart = picture.indexOf('export function canDeleteObjectControl');
+  const helperEnd = picture.indexOf('/**', helperStart + 1);
+  const helper = picture.slice(helperStart, helperEnd);
+  assert.match(helper, /objectAddressScope\(ref\)/);
+  assert.match(helper, /scope === 'body'/);
+  assert.match(helper, /scope === 'cell' && ref\.type === 'image'/);
+
+  const commandStart = insert.indexOf("id: 'insert:picture-delete'");
+  const commandEnd = insert.indexOf("id: 'insert:group-shapes'", commandStart);
+  assert.match(
+    insert.slice(commandStart, commandEnd),
+    /!isObjectDeleteTargetSupported\(ref\)/,
+  );
+
+  const keyStart = keyboard.indexOf("if (e.key === 'Delete' || e.key === 'Backspace')");
+  const keyEnd = keyboard.indexOf('// Ctrl+C', keyStart);
+  assert.match(keyboard.slice(keyStart, keyEnd), /canDeleteObjectControl\(ref\)/);
+
+  for (const method of ['performCut(): void', 'performDelete(): void']) {
+    const start = input.indexOf(method);
+    const end = input.indexOf('\n  /**', start + 1);
+    assert.match(input.slice(start, end), /_picture\.canDeleteObjectControl\(ref\)/);
+  }
+});
+
+test('grouping and click-to-front reject nested address domains', () => {
+  const groupStart = insert.indexOf("id: 'insert:group-shapes'");
+  const groupEnd = insert.indexOf("id: 'insert:ungroup-shapes'", groupStart);
+  assert.match(
+    insert.slice(groupStart, groupEnd),
+    /!canGroupTopLevelBodyObjects\(refs\)/,
+  );
+  assert.match(insert.slice(groupStart, groupEnd), /ctx\.canGroupSelectedObjects/);
+
+  const ungroupStart = groupEnd;
+  const ungroupEnd = insert.indexOf('// ─── 회전/대칭', ungroupStart);
+  assert.match(
+    insert.slice(ungroupStart, ungroupEnd),
+    /!canUngroupTopLevelBodyObject\(ref\)/,
+  );
+  assert.match(insert.slice(ungroupStart, ungroupEnd), /ctx\.canUngroupSelectedObject/);
+
+  const frontStart = mouse.indexOf('function bringShapeToFront');
+  const frontEnd = mouse.indexOf('\n}\n', frontStart) + 2;
+  const front = mouse.slice(frontStart, frontEnd);
+  assert.match(front, /isTopLevelBodyObject\(picHit\)/);
+});
 
 test('nested and non-body group addresses are rejected before body-only APIs', () => {
   const bodyA = { sec: 0, ppi: 0, ci: 0, type: 'shape' };

@@ -2,11 +2,44 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-import { bindNativeFileHandleIdentity, captureDesktopNativeDroppedFile, createNativeFileHandle, ensureDesktopAgentHub, getNativeFileHandleVerifiedDocumentId, getNativeFileSourcePath, installDesktopGeneratedDocumentHandling, installDesktopPlainTextPasteHandling, installDesktopEditCommandHandling, installWebAppShell, isDesktopApp, isLegacyPortableHistoryFolderHandle, openPublishedDocumentInNewWindow, parsePublishedDocumentLink, pickDesktopLegacyHistoryFolder, pickDesktopNativeOpenFile, pickDesktopNativeSaveFile, pickDesktopPortableHistorySaveFile, rememberNativeDocument, requestDevAgentHub, restoreNativeDocument, releaseReplacedNativeFileHandle, searchNearbyNativeDocuments, suppressDesktopServiceWorker, stableBrowserSessionId, type NativeFileHandleDescriptor } from '../src/desktop-integration.ts';
+import {
+  bindNativeFileHandleIdentity,
+  captureDesktopNativeDroppedFile,
+  createNativeFileHandle,
+  ensureDesktopAgentHub,
+  getNativeFileHandleVerifiedDocumentId,
+  getNativeFileSourcePath,
+  installDesktopGeneratedDocumentHandling,
+  installDesktopPlainTextPasteHandling,
+  installDesktopEditCommandHandling,
+  installWebAppShell,
+  isDesktopApp,
+  isLegacyPortableHistoryFolderHandle,
+  openPublishedDocumentInNewWindow,
+  parsePublishedDocumentLink,
+  pickDesktopLegacyHistoryFolder,
+  pickDesktopNativeOpenFile,
+  pickDesktopNativeSaveFile,
+  pickDesktopPortableHistorySaveFile,
+  rememberNativeDocument,
+  requestDevAgentHub,
+  restoreNativeDocument,
+  releaseReplacedNativeFileHandle,
+  searchNearbyNativeDocuments,
+  suppressDesktopServiceWorker,
+  stableBrowserSessionId,
+  type NativeFileHandleDescriptor,
+} from '../src/desktop-integration.ts';
 import { writeBlobToHandle } from '../src/command/file-system-access.ts';
-import { EXACT_LOCAL_DOCUMENT_MAX_BYTES, PORTABLE_HISTORY_MAX_BYTES } from '../src/core/document-input-limits.ts';
+import {
+  EXACT_LOCAL_DOCUMENT_MAX_BYTES,
+  PORTABLE_HISTORY_MAX_BYTES,
+} from '../src/core/document-input-limits.ts';
 
 const source = readFileSync(new URL('../src/desktop-integration.ts', import.meta.url), 'utf8');
+const bridge = readFileSync(new URL('../src/agent/bridge.ts', import.meta.url), 'utf8');
+const settings = readFileSync(new URL('../src/ui/agent-sidebar/settings.ts', import.meta.url), 'utf8');
+
 test('desktop integration asks the shell to launch a missing hub', async () => {
   assert.equal(isDesktopApp({}), false);
   assert.equal(await ensureDesktopAgentHub({}), false);
@@ -585,6 +618,20 @@ test('releasing a replaced native handle bookmarks it first', async () => {
   assert.deepEqual(released, ['old']);
 });
 
+test('브리지와 설정 재연결이 데스크톱 허브 기동을 탄다', () => {
+  assert.match(bridge, /await this\.requestHubLaunch\(\)/);
+  assert.match(bridge, /async reconnectNow\(\): Promise<void>/);
+  assert.match(settings, /void bridge\.reconnectNow\(\)/);
+  assert.doesNotMatch(settings, /ensureDesktopAgentHub/);
+  assert.match(settings, /hubReconnect\.disabled = connectionState === 'connected'/);
+  assert.doesNotMatch(
+    settings,
+    /hubReconnect\.disabled = connectionState === 'connected' \|\| connectionState === 'connecting'/,
+  );
+  assert.match(source, /rhwpDesktop\?\.ensureAgentHub/);
+  assert.match(source, /\/Electron\/i\.test\(ua\)/);
+});
+
 test('데스크톱 셸은 서비스 워커를 끄고 PWA 등록을 건너뛴다', async () => {
   const vite = readFileSync(new URL('../vite.config.ts', import.meta.url), 'utf8');
   const main = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
@@ -610,6 +657,7 @@ test('데스크톱 셸은 서비스 워커를 끄고 PWA 등록을 건너뛴다'
 
   installWebAppShell({});
 });
+
 
 test('desktop edit menu routes supported document commands once', () => {
   let listener: ((command: string) => void) | undefined;
