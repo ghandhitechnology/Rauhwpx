@@ -1,4 +1,5 @@
 import type { CommandDef } from '../types';
+import { hyperlinkCommand, editHyperlinkCommand, removeHyperlinkCommand } from './hyperlink';
 import { PicturePropsDialog } from '@/ui/picture-props-dialog';
 import { EquationEditorDialog } from '@/ui/equation-editor-dialog';
 import { EquationPropertiesDialog } from '@/ui/equation-props-dialog';
@@ -324,7 +325,9 @@ export const insertCommands: CommandDef[] = [
       symbolsDialog.show();
     },
   },
-  stub('insert:hyperlink', '하이퍼링크', 'icon-hyperlink', 'Ctrl+K+H'),
+  hyperlinkCommand,
+  editHyperlinkCommand,
+  removeHyperlinkCommand,
   {
     id: 'insert:bookmark',
     label: '책갈피',
@@ -503,7 +506,10 @@ export const insertCommands: CommandDef[] = [
       const ref = ih.getSelectedPictureRef();
       if (!ref || !isObjectDeleteTargetSupported(ref)) return;
       recordObjectMutation(ih, 'deleteObject', (wasm) => {
-        if (ref.type === 'shape' || ref.type === 'line' || ref.type === 'group') {
+        // [#7105] OLE 는 코어에서 `Control::Shape(Ole)` 다 — 그림 삭제(`deletePictureControl`)는
+        // `Control::Picture` 만 받아 거부하므로 도형 삭제로 보낸다. 키보드 Delete 경로
+        // (`deleteObjectControl`)와 같은 종류 집합이다.
+        if (ref.type === 'shape' || ref.type === 'line' || ref.type === 'group' || ref.type === 'ole') {
           wasm.deleteShapeControl(ref.sec, ref.ppi, ref.ci);
         } else if (ref.type === 'equation') {
           wasm.deleteEquationControl(ref.sec, ref.ppi, ref.ci);
