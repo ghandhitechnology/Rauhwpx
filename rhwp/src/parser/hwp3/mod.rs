@@ -2502,7 +2502,9 @@ pub(crate) fn parse_paragraph_list(
                 // percent: lh=th, ls=th*(ratio-100)/100
                 (
                     fallback_text_height,
-                    fallback_text_height * (line_spacing_ratio - 100) / 100,
+                    fallback_text_height
+                        .saturating_mul(line_spacing_ratio.saturating_sub(100))
+                        / 100,
                 )
             };
         fallback_line_height = fallback_line_height.max(100); // 0 방지
@@ -2677,7 +2679,7 @@ pub(crate) fn parse_paragraph_list(
                         ls = if has_tac_picture {
                             600
                         } else {
-                            th * (line_spacing_ratio - 100) / 100
+                            th.saturating_mul(line_spacing_ratio.saturating_sub(100)) / 100
                         };
                     }
                 }
