@@ -15,6 +15,7 @@ import {
   parseProviderAuth,
   resolveAuthFile,
 } from '../src/provider-auth.mjs';
+import { ProviderCliManager } from '../src/provider-cli.mjs';
 import { ProviderManager } from '../src/provider-manager.mjs';
 import { PROVIDERS } from '../src/protocol.mjs';
 import { SecretVault } from '../src/secret-vault.mjs';
@@ -103,6 +104,29 @@ test('applying auth writes vault secrets and allow-listed files for every provid
       assert.equal(await fs.readFile(path.join(authDirectory, provider, relative), 'utf8'), content);
     }
   }
+});
+
+test('an imported Claude login lands on the CLAUDE_CONFIG_DIR the CLI is given', async (t) => {
+  const { vault, authDirectory } = await vaultFixture(t);
+  const manager = new ProviderCliManager(
+    { providerAuthDirectory: authDirectory, providerCliDirectory: path.join(authDirectory, 'cli') },
+    { probe: async () => ({}) },
+    vault,
+  );
+
+  await manager.seed('claude', {
+    files: [{ path: '.claude/.credentials.json', content: AUTH_BUNDLES.claude.files['.claude/.credentials.json'] }],
+  });
+
+  const environment = manager.environment('claude');
+  assert.equal(
+    path.join(environment.CLAUDE_CONFIG_DIR, '.credentials.json'),
+    path.join(authDirectory, 'claude', '.claude', '.credentials.json'),
+  );
+  assert.equal(
+    await fs.readFile(path.join(environment.CLAUDE_CONFIG_DIR, '.credentials.json'), 'utf8'),
+    AUTH_BUNDLES.claude.files['.claude/.credentials.json'],
+  );
 });
 
 test('ProviderManager treats imported files and vault secrets as authenticated', async (t) => {

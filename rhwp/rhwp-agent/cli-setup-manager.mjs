@@ -7,6 +7,11 @@ import path from 'node:path';
 import { isOpenCodeModelId, redactDiagnosticText } from './agents/backend.mjs';
 import { readUtf8FileBounded } from './bounded-file.mjs';
 import {
+  readClaudeCredentialFile,
+  readClaudeKeychainCredential,
+  writeClaudeCredentialFile,
+} from './claude-credentials.mjs';
+import {
   fetchLatestPackage,
   recoverInterruptedFileReplacement,
   removeFileAndReplacementBackup,
@@ -322,6 +327,7 @@ export function createCliSetupManager({
   fetchImpl = globalThis.fetch,
   secretStore = null,
   prepareOAuthCredential = prepareStagedOAuthCredential,
+  readClaudeKeychain = readClaudeKeychainCredential,
   replaceConfigFile = replaceFileAtomically,
   terminateProcessTreeImpl = terminateProcessTree,
   createCursorKeyCheckHome = (prefix) => fs.mkdtemp(prefix),
@@ -712,6 +718,34 @@ export function createCliSetupManager({
       return platformPath.join(cursorSourceDir, 'cli-config.json');
     }
     return managedOAuthCredentialPath(agent);
+  }
+
+  /**
+   * Claude Code normally authors its login at
+   * `CLAUDE_CONFIG_DIR/.credentials.json`, which the staged transaction already
+   * owns. A build that can only authorize its Keychain item would leave that
+   * file empty and publication would have nothing to install, so the isolated
+   * profile's own item is harvested into the staged file first. Only the
+   * throwaway profile is read here — the host profile's item is never touched —
+   * and the harvested bytes reach the host through the same staged transaction
+   * as a file-authored login.
+   */
+  async function harvestStagedClaudeKeychainCredential(credentialTransaction) {
+    if (platform !== 'darwin' || !credentialTransaction) return false;
+    if (await readClaudeCredentialFile(credentialTransaction.credentialFile)) return false;
+    const harvested = await readClaudeKeychain({
+      configDir: credentialTransaction.configDir,
+      // The login ran with this directory as CLAUDE_CONFIG_DIR, so its item is
+      // the digest-suffixed one rather than the default profile's.
+      hasConfigDir: true,
+      platform,
+    });
+    if (!harvested) return false;
+    await writeClaudeCredentialFile(
+      credentialTransaction.credentialFile,
+      JSON.stringify(harvested),
+    );
+    return true;
   }
 
   function validateOAuthJournal(raw, expectedAgent) {
@@ -1202,7 +1236,7 @@ export function createCliSetupManager({
       agent,
       installed: Boolean(version),
       installing: installs.has(agent),
-      terminalAuthSupported: !(agent === 'claude' && platform === 'darwin'),
+      terminalAuthSupported: true,
       version,
       ...auth,
       authenticating: authRuns.has(agent),
@@ -1890,14 +1924,6 @@ export function createCliSetupManager({
     const running = (async () => {
       await load();
       throwIfAuthCancelled(signal);
-      if (method === 'oauth' && agent === 'claude' && platform === 'darwin') {
-        // Claude Code stores OAuth state in the macOS Keychain. A file transaction
-        // cannot isolate or roll that state back, so setup must not start the CLI.
-        throw setupError(
-          'AGENT_AUTH_OAUTH_UNSUPPORTED',
-          'macOS에서는 Claude OAuth 로그인을 안전하게 격리할 수 없어요. Claude API 키를 사용해 주세요.',
-        );
-      }
       const managedVersion = await installedVersion(agent);
       throwIfAuthCancelled(signal);
       const command = managedVersion ? binPath(agent) : item.bin;
@@ -2074,6 +2100,7 @@ export function createCliSetupManager({
             throw setupError('AGENT_AUTH_FAILED', 'OpenCode 로그인을 확인하지 못했어요. 다시 시도하거나 API 키로 연결해 주세요.');
           }
         }
+        await harvestStagedClaudeKeychainCredential(credentialTransaction);
         credentialCommitAttempted = true;
         await commitOAuth(
           agent,
@@ -2251,8 +2278,7 @@ export function createCliSetupManager({
       }
       // A hard crash cannot run the transaction finally path. Reap only
       // expired profiles whose recorded owner process is no longer alive.
-      const stagingDirs = [codexOAuthStagingDir, openCodeOAuthStagingDir];
-      if (platform !== 'darwin') stagingDirs.push(claudeOAuthStagingDir);
+      const stagingDirs = [codexOAuthStagingDir, openCodeOAuthStagingDir, claudeOAuthStagingDir];
       if (platform === 'win32') stagingDirs.push(cursorOAuthStagingDir);
       await Promise.all(stagingDirs.map(
         (stagingDir) => cleanupStaleOAuthCredentialStaging(stagingDir).catch(() => {}),

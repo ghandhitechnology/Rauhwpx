@@ -36,6 +36,7 @@ export const MUTATING_METHODS: readonly string[] = [
   'createTable', 'createTableEx', 'deleteTableControl', 'insertTableRow',
   'insertTableColumn', 'deleteTableRow', 'deleteTableColumn', 'mergeTableCells',
   'splitTableCell', 'splitTableCellInto', 'splitTableCellsInRange', 'resizeTableCells',
+  'resizeTableCellsByPath', // [#7189] 중첩 표는 평면 resizeTableCells 로 닿지 않는다
   'moveTableOffset', 'setTableProperties', 'setCellProperties', 'setCellZoneProperties',
   'pasteTableCellsTransposed', 'transposeTableCellsInPlace', 'pasteTableCellsTransposedAsTable',
   'evaluateTableFormula', 'evaluateTableFormulaEx',
@@ -76,6 +77,7 @@ export const MUTATING_METHODS: readonly string[] = [
   'applyCharFormatInHf', 'setCharShapeIdInHf', 'setParaShapeIdInHf',
   // 필드/양식/찾아바꾸기/책갈피
   'setFieldValue', 'setFieldValueByName', 'removeFieldAt', 'insertClickHereField',
+  'insertHyperlink', 'updateHyperlink', 'replaceHyperlinkText', 'removeHyperlink',
   'updateClickHereProps', 'setFormValue', 'setFormValueInCell',
   'replaceText', 'replaceOne', 'replaceAll',
   'addBookmark', 'deleteBookmark', 'renameBookmark',

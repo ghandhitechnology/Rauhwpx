@@ -231,6 +231,34 @@ export function createRailwayCloudProvisioner({
     throw provisionerError('SANDBOX_DEPLOY_TIMEOUT', 'Railway deployment did not become ready in time');
   }
 
+  async function mintReceipt(endpoint, bootstrapToken, deviceName, publicKey) {
+    const body = await request(`${endpoint}/v1/pairing/bootstrap`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${bootstrapToken}`,
+        'content-type': 'application/json',
+        accept: 'application/json',
+        'x-rauhwpx-request-nonce': randomBytes(24).toString('base64url'),
+      },
+      body: JSON.stringify({ deviceName: String(deviceName ?? '').slice(0, 120) }),
+    }, async (paired) => {
+      const payload = await boundedJson(paired);
+      if (!paired.ok) {
+        throw provisionerError(
+          'PROVIDER_REJECTED',
+          clean(payload.message, 500) || `Raucloud worker refused pairing (HTTP ${paired.status})`,
+        );
+      }
+      return payload;
+    });
+    const pairingCode = clean(body.code, 64);
+    if (!/^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/.test(pairingCode)
+      || clean(body.serverPublicKey, 512) !== publicKey) {
+      throw provisionerError('BOOTSTRAP_RECEIPT_INVALID', 'Raucloud worker returned an invalid pairing receipt');
+    }
+    return { endpoint, serverPublicKey: publicKey, pairingCode };
+  }
+
   async function waitForReceipt(endpoint, bootstrapToken, deviceName) {
     const deadline = now() + healthTimeoutMs;
     let publicKey = '';
@@ -251,22 +279,7 @@ export function createRailwayCloudProvisioner({
       await sleep(Math.min(1_500, Math.max(0, deadline - now())));
     }
     if (!publicKey) throw provisionerError('SANDBOX_UNHEALTHY', 'Raucloud worker did not answer its health check');
-    const body = await request(`${endpoint}/v1/pairing/bootstrap`, {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${bootstrapToken}`,
-        'content-type': 'application/json',
-        accept: 'application/json',
-        'x-rauhwpx-request-nonce': randomBytes(24).toString('base64url'),
-      },
-      body: JSON.stringify({ deviceName: String(deviceName ?? '').slice(0, 120) }),
-    }, async (paired) => ({ ...(await boundedJson(paired)), responseOk: paired.ok }));
-    const pairingCode = clean(body.code, 64);
-    if (!body.responseOk || !/^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/.test(pairingCode)
-      || clean(body.serverPublicKey, 512) !== publicKey) {
-      throw provisionerError('BOOTSTRAP_RECEIPT_INVALID', 'Raucloud worker returned an invalid pairing receipt');
-    }
-    return { endpoint, serverPublicKey: publicKey, pairingCode };
+    return mintReceipt(endpoint, bootstrapToken, deviceName, publicKey);
   }
 
   async function projectServices() {
@@ -344,6 +357,7 @@ export function createRailwayCloudProvisioner({
         projectId: config.projectId,
         environmentId: config.environmentId,
         runId,
+        bootstrapToken,
         createdAt: now(),
       };
       try {
@@ -364,6 +378,28 @@ export function createRailwayCloudProvisioner({
         await this.teardown(remote).catch((cleanupError) => { error.cleanupError = cleanupError.message; });
         throw error;
       }
+    },
+
+    /** Reissues a pairing receipt for a worker this provisioner already created. */
+    async receipt(remote, { deviceName = 'Rauhwpx desktop', serverPublicKey = '' } = {}) {
+      const domain = safeDomain(remote?.domain);
+      const bootstrapToken = clean(remote?.bootstrapToken, 512);
+      if (!domain || !bootstrapToken) {
+        throw provisionerError('PROVIDER_RESPONSE_INVALID', 'Raucloud worker cannot reissue a pairing receipt');
+      }
+      const endpoint = `https://${domain}${RAUCLOUD_BASE_PATH}`;
+      const healthKey = await request(`${endpoint}/v1/health`, {
+        headers: { accept: 'application/json' },
+      }, async (health) => {
+        const body = await boundedJson(health);
+        const key = clean(body.serverPublicKey, 512);
+        return health.ok && body.ok === true && /^ed25519:[A-Za-z0-9_-]{40,}$/.test(key) ? key : '';
+      });
+      if (!healthKey) throw provisionerError('SANDBOX_UNHEALTHY', 'Raucloud worker did not answer its health check');
+      if (serverPublicKey && clean(serverPublicKey, 512) !== healthKey) {
+        throw provisionerError('SANDBOX_IDENTITY_MISMATCH', 'Raucloud worker identity changed since provisioning');
+      }
+      return mintReceipt(endpoint, bootstrapToken, deviceName, healthKey);
     },
 
     async teardown(remote) {

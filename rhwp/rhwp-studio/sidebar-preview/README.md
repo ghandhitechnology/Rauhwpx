@@ -87,6 +87,8 @@ Click the document’s Cloud icon again for execution options. In Cloud chats,
 **Cloud 변경 병합** appears beside it when a completed checkpoint is ready. **Disconnect
 Cloud** pauses the connection while retaining the last frame; the production
 Cloud controls reconnect, rebuild from the same conversation, or stop the worker.
+**Hold reconnect** keeps the link down for as long as it stays checked, which is how to
+watch the reconnect ETA bar crawl instead of resolving in the fixture's 300ms.
 The fixture records transfers and session scope in `window.sidebarPreview.cloud`.
 
 The Cloud settings dashboard's **크게 보기** button opens the production full-screen
@@ -199,4 +201,4 @@ Open the **OpenCode login terminal** audit scene to review the expanding login p
 The terminal supports keyboard input, paste, resizing, browser links, cancellation, and restoration after a connection interruption. Raw terminal output is kept only in the owning login's memory, with bounded buffers. Credentials are staged and published through the existing authentication transaction after successful validation.
 
 
-New Claude, Codex, Grok, Cursor, and OpenCode installs continue into the embedded login terminal. The hub advertises platform support; Claude on macOS keeps API-key setup because its Keychain login cannot use the existing isolated credential transaction. Rau and Pi retain their browser account flows. Provider connection status still refreshes automatically after login, and API-key entry remains available as a fallback.
+New Claude, Codex, Grok, Cursor, and OpenCode installs continue into the embedded login terminal. The hub advertises platform support; every provider including Claude on macOS can complete its login there, because Claude Code writes the staged profile's `.credentials.json` and a Keychain-only login is read back into it. Rau and Pi retain their browser account flows. Provider connection status still refreshes automatically after login, and API-key entry remains available as a fallback.

@@ -3175,6 +3175,25 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    /// [#7189] cellPath가 가리키는 표에서 셀 속성을 조회한다.
+    #[wasm_bindgen(js_name = getCellPropertiesByPath)]
+    pub fn get_cell_properties_by_path(
+        &self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        cell_path_json: &str,
+        cell_idx: u32,
+    ) -> Result<String, JsValue> {
+        let path = parse_cell_path_arg(cell_path_json)?;
+        self.get_cell_properties_by_cell_path_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            &path,
+            cell_idx as usize,
+        )
+        .map_err(|e| e.into())
+    }
+
     /// 셀 고유 속성을 조회한다.
     ///
     /// cellzone overlay를 합성하지 않고 셀 자체의 borderFill만 반환한다.
@@ -3261,6 +3280,28 @@ impl HwpDocument {
             section_idx as usize,
             parent_para_idx as usize,
             control_idx as usize,
+            json,
+        )
+        .map_err(|e| e.into())
+    }
+
+    /// [#7189] 중첩 표의 셀 크기를 셀 경로로 조절한다 (배치).
+    ///
+    /// `cell_path_json`: `[{"controlIndex":0,"cellIndex":0,"cellParaIndex":9},...]`
+    /// 마지막 항목이 조절할 표를 가리킨다. 깊이 1 이면 평면 API 와 같은 경로로 처리한다.
+    #[wasm_bindgen(js_name = resizeTableCellsByPath)]
+    pub fn resize_table_cells_by_path(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        cell_path_json: &str,
+        json: &str,
+    ) -> Result<String, JsValue> {
+        let path = parse_cell_path_arg(cell_path_json)?;
+        self.resize_table_cells_by_cell_path_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            &path,
             json,
         )
         .map_err(|e| e.into())
@@ -8318,7 +8359,7 @@ impl HwpDocument {
     }
 }
 
-pub(crate) mod event;
+mod hyperlink;
 
 /// WASM 뷰어 컨트롤러 (뷰포트 관리 + 스케줄링)
 #[wasm_bindgen]

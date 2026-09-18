@@ -229,7 +229,21 @@ try {
     await page.select('#theme', 'dark');
     await page.$eval('#ag-settings-pane-cloud', (node) => node.scrollTo({ top: 270 }));
     await screenshot('cloud-dashboard-disconnected');
+    await page.evaluate(() => window.sidebarPreview.cloud.blockReconnect(true));
     await page.click('.ag-cd-reconnect');
+    await page.waitForSelector('.ag-cd-content .ag-cloud-link-progress:not([hidden])');
+    const dashboardReconnect = await page.evaluate(async () => {
+      const node = document.querySelector('.ag-cd-content .ag-cloud-link-progress');
+      const width = () => Number.parseFloat(node.querySelector('.ag-cloud-link-progress-fill').style.width);
+      const first = width();
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      return { eta: node.querySelector('.ag-cloud-link-progress-eta').textContent, first, width: width() };
+    });
+    assert.match(dashboardReconnect.eta, /^약 \d+초 남음$/);
+    assert.ok(dashboardReconnect.width > dashboardReconnect.first && dashboardReconnect.width < 40,
+      `the dashboard bar must crawl without filling up, got ${dashboardReconnect.first}% → ${dashboardReconnect.width}%`);
+    await screenshot('cloud-dashboard-reconnect-eta');
+    await page.evaluate(() => window.sidebarPreview.cloud.blockReconnect(false));
     await page.waitForSelector('.ag-cd-status[data-state="ready"]');
     await page.evaluate(() => window.sidebarPreview.cloud.setDashboardState('exhausted'));
     assert.equal(await page.$eval('.ag-cd-quota .ag-cd-stat-value', (node) => node.textContent), '0분');

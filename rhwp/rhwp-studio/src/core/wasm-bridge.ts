@@ -2,6 +2,7 @@ import init, { HwpDocument, version } from '@wasm/rhwp.js';
 import { withBodyTextPaginationBatch } from './pagination-batch';
 import { requireCharShapeRunsDocument, parseCharShapeRuns, validateCharShapeRuns } from './char-shape-runs';
 import type { CharShapeRun } from './types';
+import type { HyperlinkTarget, HyperlinkContext } from './hyperlink';
 import * as wasmExports from '@wasm/rhwp.js';
 import { blake3 } from '@noble/hashes/blake3.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
@@ -325,7 +326,13 @@ class PreparedWasmDocumentState implements PreparedWasmDocument {
 
 export class WasmBridge {
   private doc: HwpDocument | null = null;
-  private documentGeneration = 0;
+  private _documentGeneration = 0;
+  get documentGeneration(): number {
+    return this._documentGeneration;
+  }
+  private set documentGeneration(value: number) {
+    this._documentGeneration = value;
+  }
   private initialized = false;
   private _fileName = FALLBACK_DOCUMENT_FILE_NAME;
   private _currentFileHandle: FileSystemFileHandleLike | null = null;
@@ -1712,6 +1719,14 @@ export class WasmBridge {
     return JSON.parse(this.doc.getCellProperties(sec, parentPara, controlIdx, cellIdx));
   }
 
+  getCellPropertiesByPath(sec: number, parentPara: number, pathJson: string, cellIdx: number): CellProperties {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    const doc = this.doc as unknown as {
+      getCellPropertiesByPath(sec: number, parentPara: number, pathJson: string, cellIdx: number): string;
+    };
+    return JSON.parse(doc.getCellPropertiesByPath(sec, parentPara, pathJson, cellIdx));
+  }
+
   getCellOwnProperties(sec: number, parentPara: number, controlIdx: number, cellIdx: number): CellProperties {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     const doc = this.doc as unknown as {
@@ -1763,6 +1778,17 @@ export class WasmBridge {
   ): { ok: boolean } {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return JSON.parse(this.doc.resizeTableCells(sec, parentPara, controlIdx, JSON.stringify(updates)));
+  }
+
+  resizeTableCellsByPath(
+    sec: number, parentPara: number, pathJson: string,
+    updates: TableCellResizeUpdate[],
+  ): { ok: boolean } {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    const doc = this.doc as unknown as {
+      resizeTableCellsByPath(sec: number, parentPara: number, pathJson: string, json: string): string;
+    };
+    return JSON.parse(doc.resizeTableCellsByPath(sec, parentPara, pathJson, JSON.stringify(updates)));
   }
 
   moveTableOffset(sec: number, parentPara: number, controlIdx: number, deltaH: number, deltaV: number): { ok: boolean; ppi: number; ci: number } {
@@ -3404,6 +3430,31 @@ export class WasmBridge {
   setFieldValueByName(name: string, value: string): { ok: boolean; fieldId: number; oldValue: string; newValue: string } {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return JSON.parse((this.doc as any).setFieldValueByName(name, value));
+  }
+
+  getHyperlinkContext(target: HyperlinkTarget): HyperlinkContext {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse((this.doc as any).getHyperlinkContext(JSON.stringify(target)));
+  }
+
+  insertHyperlink(target: HyperlinkTarget, start: number, end: number, uri: string): number {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return (this.doc as any).insertHyperlinkEx(JSON.stringify({ target, start, end, uri }));
+  }
+
+  updateHyperlink(target: HyperlinkTarget, fieldId: number, uri: string): boolean {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return (this.doc as any).updateHyperlinkEx(JSON.stringify({ target, fieldId, uri }));
+  }
+
+  replaceHyperlinkText(target: HyperlinkTarget, fieldId: number, text: string): boolean {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return (this.doc as any).replaceHyperlinkTextEx(JSON.stringify({ target, fieldId, text }));
+  }
+
+  removeHyperlink(target: HyperlinkTarget, fieldId: number, restoreFormatting = false): void {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    (this.doc as any).removeHyperlinkEx(JSON.stringify({ target, fieldId, restoreFormatting }));
   }
 
   /** 커서 위치의 필드 범위 정보를 조회한다. */

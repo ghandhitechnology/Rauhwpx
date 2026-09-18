@@ -750,7 +750,7 @@ export class InputHandler {
       this.clearTableResizeRuntimeCache();
       this.clearPendingCharFormat();
     });
-    eventBus.on('open-document-bytes', () => {
+    eventBus.on('document-swapped', () => {
       this.clearTableResizeRuntimeCache();
       this.clearPendingCharFormat();
     });
@@ -846,6 +846,7 @@ export class InputHandler {
     this.cachedTableRef = null;
     this.cachedCellBboxes = null;
     this.tableBboxFetchFailures.clear();
+    this.lastCellKey = null;
     this.tableResizeRenderer?.clear();
   }
 
@@ -4923,6 +4924,12 @@ export class InputHandler {
 
   /** 현재 커서 위치를 반환한다 */
   getCursorPosition(): DocumentPosition { return this.cursor.getPosition(); }
+
+  canEditHyperlink(): boolean {
+    return !this.cursor.isInHeaderFooter() && !this.cursor.isInFootnote()
+      && !this.cursor.isInCellSelectionMode() && !this.cursor.isInPictureObjectSelection()
+      && !this.cursor.isInTableObjectSelection();
+  }
 
   /** 커서를 지정 위치로 이동하고 캐럿을 표시한다. 성공하면 true 반환. */
   moveCursorTo(pos: DocumentPosition): boolean {

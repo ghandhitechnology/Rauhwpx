@@ -14,10 +14,18 @@
  * 직접 불러 채움·메모 계약을 검증할 수 있다.
  */
 
+/** `hitTest` 가 주는 셀 경로 한 마디. */
+export interface CellPathStep {
+  controlIndex: number;
+  cellIndex: number;
+  cellParaIndex: number;
+}
+
 export interface TableRef {
   sec: number;
   ppi: number;
   ci: number;
+  path?: readonly CellPathStep[];
 }
 
 export interface PageScopedBbox {
@@ -32,18 +40,26 @@ export interface CachedTableRef extends TableRef {
 export interface TableBboxCacheHost<B extends PageScopedBbox = PageScopedBbox> {
   wasm: {
     getTableCellBboxes(sec: number, ppi: number, ci: number, pageHint?: number): B[];
+    getTableCellBboxesByPath(sec: number, ppi: number, pathJson: string): B[];
   };
   cachedTableRef: CachedTableRef | null;
   cachedCellBboxes: B[] | null;
   tableBboxFetchFailures: Set<string>;
 }
 
+export function tableIdentity(tableRef: TableRef): string {
+  const base = `${tableRef.sec}:${tableRef.ppi}:${tableRef.ci}`;
+  const path = tableRef.path;
+  if (!path || path.length <= 1) return base;
+  return `${base}|${path.map((s) => `${s.controlIndex}.${s.cellIndex}.${s.cellParaIndex}`).join('/')}`;
+}
+
 function sameTable(a: TableRef, b: TableRef): boolean {
-  return a.sec === b.sec && a.ppi === b.ppi && a.ci === b.ci;
+  return tableIdentity(a) === tableIdentity(b);
 }
 
 function failureKey(tableRef: TableRef, pageIdx: number): string {
-  return `${tableRef.sec}:${tableRef.ppi}:${tableRef.ci}:${pageIdx}`;
+  return `${tableIdentity(tableRef)}:${pageIdx}`;
 }
 
 /** 성공한 bbox 조회를 한 번에 기록하고, 같은 범위의 과거 실패를 해제한다. */
@@ -91,7 +107,10 @@ export function ensureTableCellBboxCache<B extends PageScopedBbox>(
   }
 
   try {
-    const bboxes = host.wasm.getTableCellBboxes(tableRef.sec, tableRef.ppi, tableRef.ci, pageIdx);
+    const path = tableRef.path;
+    const bboxes = path && path.length > 1
+      ? host.wasm.getTableCellBboxesByPath(tableRef.sec, tableRef.ppi, JSON.stringify(path))
+      : host.wasm.getTableCellBboxes(tableRef.sec, tableRef.ppi, tableRef.ci, pageIdx);
     if (bboxes && bboxes.length > 0) {
       return cacheTableCellBboxes(host, tableRef, pageIdx, bboxes);
     }

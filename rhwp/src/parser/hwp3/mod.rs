@@ -107,6 +107,25 @@ pub(crate) fn check_record_items(count: usize, bytes_per_item: usize) -> Result<
     check_record_count(bytes)
 }
 
+fn hwp3_i16_to_hu16(quarter_hu: i16) -> crate::model::HwpUnit16 {
+    quarter_hu.saturating_mul(4)
+}
+
+fn hwp3_u16_to_hu16(quarter_hu: u16) -> crate::model::HwpUnit16 {
+    i32::from(quarter_hu)
+        .saturating_mul(4)
+        .clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
+}
+
+fn hwp3_hu16_at(buf: &[u8], offset: usize) -> crate::model::HwpUnit16 {
+    let quarter = buf
+        .get(offset..offset + 2)
+        .and_then(|slice| slice.try_into().ok())
+        .map(i16::from_le_bytes)
+        .unwrap_or(0);
+    hwp3_i16_to_hu16(quarter)
+}
+
 // HWP3 spec (한글문서파일구조3.0.md:248) doc_info offset 122 "빈줄감춤"(0 이외=on).
 fn hwp3_hide_empty_line(doc_info: &Hwp3DocInfo) -> bool {
     doc_info.hide_empty_line != 0
@@ -134,10 +153,10 @@ fn hwp3_page_border_fill(
     // Page/BodyBased로 정규화한다. (Task #1129 Stage 24)
     crate::model::page::PageBorderFill {
         attr: 0x01,
-        spacing_left: (doc_info.border_margin_left as i16) * 4,
-        spacing_right: (doc_info.border_margin_right as i16) * 4,
-        spacing_top: (doc_info.border_margin_top as i16) * 4,
-        spacing_bottom: (doc_info.border_margin_bottom as i16) * 4,
+        spacing_left: hwp3_u16_to_hu16(doc_info.border_margin_left),
+        spacing_right: hwp3_u16_to_hu16(doc_info.border_margin_right),
+        spacing_top: hwp3_u16_to_hu16(doc_info.border_margin_top),
+        spacing_bottom: hwp3_u16_to_hu16(doc_info.border_margin_bottom),
         border_fill_id,
         basis: crate::model::page::PageBorderBasis::BodyBased,
         ui_basis: crate::model::page::PageBorderUiBasis::Page,
@@ -550,7 +569,7 @@ fn hwp3_default_endnote_shape(doc_info: &Hwp3DocInfo) -> crate::model::footnote:
     // 사이의 간격")을 separator_margin_top 으로 배선한다. 미배선 시 항상
     // 하드코딩된 864 값이 쓰여 문서가 지정한 간격이 무시됐다.
     let separator_margin_top = if doc_info.footnote_line_margin != 0 {
-        (doc_info.footnote_line_margin as i16).saturating_mul(4)
+        hwp3_u16_to_hu16(doc_info.footnote_line_margin)
     } else {
         864
     };
@@ -559,7 +578,7 @@ fn hwp3_default_endnote_shape(doc_info: &Hwp3DocInfo) -> crate::model::footnote:
     // 간격)을 note_spacing 으로 배선한다. 미배선 시 항상 하드코딩된 576 값이
     // 쓰여 문서가 지정한 간격이 무시됐다.
     let note_spacing = if doc_info.footnote_text_margin != 0 {
-        (doc_info.footnote_text_margin as i16).saturating_mul(4)
+        hwp3_u16_to_hu16(doc_info.footnote_text_margin)
     } else {
         576
     };
@@ -698,19 +717,19 @@ fn parse_hwp3_object_dispatch(
         // 이들은 모두 같은 구조를 가집니다: 84바이트 정보 -> 각 셀당 27바이트 -> 셀당 문단 리스트 -> 캡션 문단.
         let mut table = crate::model::table::Table::default();
 
-        table.outer_margin_left = (&info_buf[18..20]).read_i16::<LittleEndian>().unwrap_or(0) * 4;
-        table.outer_margin_right = (&info_buf[20..22]).read_i16::<LittleEndian>().unwrap_or(0) * 4;
-        table.outer_margin_top = (&info_buf[22..24]).read_i16::<LittleEndian>().unwrap_or(0) * 4;
-        table.outer_margin_bottom = (&info_buf[24..26]).read_i16::<LittleEndian>().unwrap_or(0) * 4;
+        table.outer_margin_left = hwp3_hu16_at(&info_buf, 18);
+        table.outer_margin_right = hwp3_hu16_at(&info_buf, 20);
+        table.outer_margin_top = hwp3_hu16_at(&info_buf, 22);
+        table.outer_margin_bottom = hwp3_hu16_at(&info_buf, 24);
         table.common.margin.left = table.outer_margin_left;
         table.common.margin.right = table.outer_margin_right;
         table.common.margin.top = table.outer_margin_top;
         table.common.margin.bottom = table.outer_margin_bottom;
 
-        table.padding.left = (&info_buf[26..28]).read_i16::<LittleEndian>().unwrap_or(0) * 4;
-        table.padding.right = (&info_buf[28..30]).read_i16::<LittleEndian>().unwrap_or(0) * 4;
-        table.padding.top = (&info_buf[30..32]).read_i16::<LittleEndian>().unwrap_or(0) * 4;
-        table.padding.bottom = (&info_buf[32..34]).read_i16::<LittleEndian>().unwrap_or(0) * 4;
+        table.padding.left = hwp3_hu16_at(&info_buf, 26);
+        table.padding.right = hwp3_hu16_at(&info_buf, 28);
+        table.padding.top = hwp3_hu16_at(&info_buf, 30);
+        table.padding.bottom = hwp3_hu16_at(&info_buf, 32);
 
         table.common.width =
             ((&info_buf[42..44]).read_u16::<LittleEndian>().unwrap_or(0) as u32) * 4;
@@ -776,19 +795,14 @@ fn parse_hwp3_object_dispatch(
         // 미리 채워두면 serializer/hwpx_to_hwp 수정 없이 attr가 올바르게 저장된다.
         table.raw_ctrl_data = build_raw_ctrl_data(&table.common);
 
-        let cell_padding_left =
-            (&info_buf[34..36]).read_i16::<LittleEndian>().unwrap_or(0) as u32 * 4;
-        let cell_padding_right =
-            (&info_buf[36..38]).read_i16::<LittleEndian>().unwrap_or(0) as u32 * 4;
-        let cell_padding_top =
-            (&info_buf[38..40]).read_i16::<LittleEndian>().unwrap_or(0) as u32 * 4;
-        let cell_padding_bottom =
-            (&info_buf[40..42]).read_i16::<LittleEndian>().unwrap_or(0) as u32 * 4;
-
-        table.padding.left = cell_padding_left as i16;
-        table.padding.right = cell_padding_right as i16;
-        table.padding.top = cell_padding_top as i16;
-        table.padding.bottom = cell_padding_bottom as i16;
+        let cell_padding_left = hwp3_hu16_at(&info_buf, 34);
+        let cell_padding_right = hwp3_hu16_at(&info_buf, 36);
+        let cell_padding_top = hwp3_hu16_at(&info_buf, 38);
+        let cell_padding_bottom = hwp3_hu16_at(&info_buf, 40);
+        table.padding.left = cell_padding_left;
+        table.padding.right = cell_padding_right;
+        table.padding.top = cell_padding_top;
+        table.padding.bottom = cell_padding_bottom;
 
         let caption_width = (&info_buf[46..48]).read_u16::<LittleEndian>().unwrap_or(0) as u32 * 4;
         let caption_pos = (&info_buf[70..72]).read_u16::<LittleEndian>().unwrap_or(0);
@@ -885,10 +899,10 @@ fn parse_hwp3_object_dispatch(
             cell.width = w as u32;
             cell.height = h as u32;
 
-            cell.padding.left = cell_padding_left as i16;
-            cell.padding.right = cell_padding_right as i16;
-            cell.padding.top = cell_padding_top as i16;
-            cell.padding.bottom = cell_padding_bottom as i16;
+            cell.padding.left = cell_padding_left;
+            cell.padding.right = cell_padding_right;
+            cell.padding.top = cell_padding_top;
+            cell.padding.bottom = cell_padding_bottom;
 
             let v_align = cell_info[19];
             cell.vertical_align = match v_align {
@@ -1083,15 +1097,15 @@ fn parse_hwp3_object_dispatch(
             pic.common.text_wrap = crate::model::shape::TextWrap::TopAndBottom;
         }
 
-        pic.common.margin.left = (&info_buf[18..20]).read_i16::<LittleEndian>().unwrap_or(0) * 4;
-        pic.common.margin.right = (&info_buf[20..22]).read_i16::<LittleEndian>().unwrap_or(0) * 4;
-        pic.common.margin.top = (&info_buf[22..24]).read_i16::<LittleEndian>().unwrap_or(0) * 4;
-        pic.common.margin.bottom = (&info_buf[24..26]).read_i16::<LittleEndian>().unwrap_or(0) * 4;
+        pic.common.margin.left = hwp3_hu16_at(&info_buf, 18);
+        pic.common.margin.right = hwp3_hu16_at(&info_buf, 20);
+        pic.common.margin.top = hwp3_hu16_at(&info_buf, 22);
+        pic.common.margin.bottom = hwp3_hu16_at(&info_buf, 24);
 
-        pic.padding.left = (&info_buf[26..28]).read_i16::<LittleEndian>().unwrap_or(0) * 4;
-        pic.padding.right = (&info_buf[28..30]).read_i16::<LittleEndian>().unwrap_or(0) * 4;
-        pic.padding.top = (&info_buf[30..32]).read_i16::<LittleEndian>().unwrap_or(0) * 4;
-        pic.padding.bottom = (&info_buf[32..34]).read_i16::<LittleEndian>().unwrap_or(0) * 4;
+        pic.padding.left = hwp3_hu16_at(&info_buf, 26);
+        pic.padding.right = hwp3_hu16_at(&info_buf, 28);
+        pic.padding.top = hwp3_hu16_at(&info_buf, 30);
+        pic.padding.bottom = hwp3_hu16_at(&info_buf, 32);
 
         let horz_align = (&info_buf[10..12]).read_i16::<LittleEndian>().unwrap_or(0);
         if horz_align == -1 {
@@ -2488,7 +2502,9 @@ pub(crate) fn parse_paragraph_list(
                 // percent: lh=th, ls=th*(ratio-100)/100
                 (
                     fallback_text_height,
-                    fallback_text_height * (line_spacing_ratio - 100) / 100,
+                    fallback_text_height
+                        .saturating_mul(line_spacing_ratio.saturating_sub(100))
+                        / 100,
                 )
             };
         fallback_line_height = fallback_line_height.max(100); // 0 방지
@@ -2663,7 +2679,7 @@ pub(crate) fn parse_paragraph_list(
                         ls = if has_tac_picture {
                             600
                         } else {
-                            th * (line_spacing_ratio - 100) / 100
+                            th.saturating_mul(line_spacing_ratio.saturating_sub(100)) / 100
                         };
                     }
                 }
@@ -4313,6 +4329,32 @@ mod tests {
             crate::parser::limits::MAX_UNTRUSTED_INPUT_BYTES,
         )
         .is_err());
+    }
+
+    #[test]
+    fn hwp3_i16_quarter_to_hu16_saturates_hostile_values() {
+        assert_eq!(hwp3_i16_to_hu16(0), 0);
+        assert_eq!(hwp3_i16_to_hu16(213), 852);
+        assert_eq!(hwp3_i16_to_hu16(i16::MAX), i16::MAX);
+        assert_eq!(hwp3_i16_to_hu16(i16::MIN), i16::MIN);
+        let mut buf = [0u8; 42];
+        buf[18..20].copy_from_slice(&i16::MAX.to_le_bytes());
+        buf[20..22].copy_from_slice(&i16::MIN.to_le_bytes());
+        buf[34..36].copy_from_slice(&(-1i16).to_le_bytes());
+        assert_eq!(hwp3_hu16_at(&buf, 18), i16::MAX);
+        assert_eq!(hwp3_hu16_at(&buf, 20), i16::MIN);
+        assert_eq!(hwp3_hu16_at(&buf, 34), -4);
+        assert_eq!(hwp3_u16_to_hu16(u16::MAX), i16::MAX);
+    }
+
+    #[test]
+    fn parse_hwp3_fuzz_corpus_seeds_do_not_panic() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/fuzz/corpus/parse_hwp3");
+        for name in ["hwp3-pagedef-1915.hwp", "hwp3-sample.hwp"] {
+            let bytes = std::fs::read(format!("{dir}/{name}"))
+                .unwrap_or_else(|err| panic!("read {name}: {err}"));
+            let _ = parse_hwp3(&bytes);
+        }
     }
     use std::fs::File;
     use std::io::Read;

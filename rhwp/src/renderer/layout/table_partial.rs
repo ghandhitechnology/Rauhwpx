@@ -409,47 +409,17 @@ impl LayoutEngine {
                 };
                 Some(pair)
             } else if is_rowbreak_straddle {
-                // [Task #1748] 높이 기반 유닛 컷. 이전 프래그먼트 소비 높이(prior_h)는
-                // 2b 오버라이드와 동일한 식으로 재계산 — 온전 행은 컷 측정
-                // (row_cut_content_height), 분할 행(start_row)은 start_cut 이전 유닛
-                // 높이. 컷 페이지가 end_cut 으로 계산한 값과 같은 식이라 경계 유닛
-                // 인덱스(컷 페이지 eu == 연속 페이지 su)가 산술적으로 일치한다.
-                let mut prior_h = 0.0f64;
-                if straddles_fragment_start {
-                    for r in cell_row..start_row {
-                        let has_single_row_cells = table
-                            .cells
-                            .iter()
-                            .any(|c| c.row as usize == r && c.row_span == 1);
-                        let h = if has_single_row_cells {
-                            let h = self.row_cut_content_height(table, r, &[], &[], styles);
-                            if h > 0.0 {
-                                h
-                            } else {
-                                resolved_row_heights.get(r).copied().unwrap_or(0.0)
-                            }
-                        } else {
-                            resolved_row_heights.get(r).copied().unwrap_or(0.0)
-                        };
-                        prior_h += h + cell_spacing;
-                    }
-                    if !start_cut.is_empty() {
-                        prior_h +=
-                            self.row_cut_content_height(table, start_row, &[], start_cut, styles);
-                    }
-                }
-                let su = if prior_h > 0.0 {
-                    self.cell_units_fitting_height(cell, table, styles, prior_h - pad_top)
-                } else {
-                    0
-                };
-                let eu = if straddles_fragment_end {
-                    self.cell_units_fitting_height(cell, table, styles, prior_h + cell_h - pad_top)
-                        .max(su)
-                } else {
-                    usize::MAX
-                };
-                Some((su, eu))
+                Some(self.rowbreak_straddle_cut_units(
+                    table,
+                    cell,
+                    start_row,
+                    render_range_end,
+                    start_cut,
+                    end_cut.is_empty(),
+                    cell_h,
+                    resolved_row_heights,
+                    styles,
+                ))
             } else {
                 None
             };
@@ -1897,6 +1867,39 @@ impl LayoutEngine {
                         if let Some(last) = (bs..be.min(row_count)).next_back() {
                             row_heights[last] += target - cur;
                         }
+                    }
+                }
+            }
+
+            // [#6981] per-row 경로에는 위 블록-합 보정이 없다. 조각 경계가 rowspan
+            // 블록 안쪽에 떨어지면 이어받는 걸침 셀은 #1748 높이-컷으로 남은 유닛
+            // 전부를 받는데, 덮는 행 높이는 row_span==1 셀만 보고 정해진다. 어긋난
+            // 만큼 clip이 글자를 지운다. 요구 높이는 조판과 같은
+            // straddle_continuation_demand에서 낸다.
+            if !is_block_split {
+                for r in start_row..end_row.min(row_count) {
+                    let Some(need) = self.straddle_continuation_demand(
+                        table,
+                        r,
+                        start_row,
+                        start_cut,
+                        &resolved_row_heights,
+                        styles,
+                        (end_row, end_cut.is_empty()),
+                    ) else {
+                        continue;
+                    };
+                    let have: f64 = (start_row..=r)
+                        .map(|rr| row_heights.get(rr).copied().unwrap_or(0.0))
+                        .sum::<f64>()
+                        + cell_spacing * (r - start_row) as f64;
+                    if std::env::var("RHWP_DIAG_6981").is_ok() {
+                        eprintln!(
+                            "D6981R r={r} start_row={start_row} end_row={end_row} need={need:.1} have={have:.1}"
+                        );
+                    }
+                    if need > have + 0.5 {
+                        row_heights[r] += need - have;
                     }
                 }
             }

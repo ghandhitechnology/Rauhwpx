@@ -97,6 +97,11 @@ export class ProviderCliManager {
       XDG_CACHE_HOME: ensurePrivateDirectory(path.join(home, '.cache')),
       XDG_DATA_HOME: ensurePrivateDirectory(path.join(local, 'share')),
       XDG_STATE_HOME: ensurePrivateDirectory(path.join(local, 'state')),
+      // A transferred Claude login lands at `.claude/.credentials.json` under
+      // this home. Naming the directory explicitly keeps the seeded subscription
+      // OAuth credential authoritative instead of inheriting whichever
+      // CLAUDE_CONFIG_DIR the Cloud host process happens to carry.
+      CLAUDE_CONFIG_DIR: ensurePrivateDirectory(path.join(home, '.claude')),
       CODEX_HOME: ensurePrivateDirectory(path.join(home, '.codex')),
       GROK_HOME: ensurePrivateDirectory(path.join(home, '.grok')),
       PI_CODING_AGENT_DIR: ensurePrivateDirectory(path.join(piHome, 'agent')),

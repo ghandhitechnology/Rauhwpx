@@ -391,6 +391,7 @@ test('provider environments precreate every private CLI state directory', async 
       environment.XDG_CACHE_HOME,
       environment.XDG_DATA_HOME,
       environment.XDG_STATE_HOME,
+      environment.CLAUDE_CONFIG_DIR,
       environment.CODEX_HOME,
       environment.GROK_HOME,
       environment.PI_CODING_AGENT_DIR,

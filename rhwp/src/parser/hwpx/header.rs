@@ -93,7 +93,7 @@ pub fn parse_hwpx_hwpml_version(xml: &str) -> Option<String> {
 
 /// header.xml을 파싱하여 DocInfo와 DocProperties를 생성한다.
 pub fn parse_hwpx_header(xml: &str) -> Result<(DocInfo, DocProperties), HwpxError> {
-    parse_hwpx_header_with_margin_units(xml, ParagraphMarginUnits::EffectiveHwpUnit)
+    parse_hwpx_header_with_margin_units(xml, ParagraphMarginUnits::EffectiveHwpUnit, false)
 }
 
 /// The package XML version, not hh:head@version, selects Hancom's margin
@@ -148,6 +148,7 @@ impl ParagraphMarginUnits {
 pub(super) fn parse_hwpx_header_with_margin_units(
     xml: &str,
     margin_units: ParagraphMarginUnits,
+    prefer_default_horizontal_margins: bool,
 ) -> Result<(DocInfo, DocProperties), HwpxError> {
     let mut doc_info = DocInfo::default();
     let mut doc_props = DocProperties::default();
@@ -193,7 +194,13 @@ pub(super) fn parse_hwpx_header_with_margin_units(
                         parse_char_shape(e, &mut reader, &mut doc_info)?;
                     }
                     b"paraPr" => {
-                        parse_para_shape(e, &mut reader, &mut doc_info, margin_units)?;
+                        parse_para_shape(
+                            e,
+                            &mut reader,
+                            &mut doc_info,
+                            margin_units,
+                            prefer_default_horizontal_margins,
+                        )?;
                     }
                     b"style" => parse_style(e, &mut doc_info),
                     b"borderFill" => {
@@ -922,6 +929,7 @@ fn parse_para_shape(
     reader: &mut Reader<&[u8]>,
     doc_info: &mut DocInfo,
     margin_units: ParagraphMarginUnits,
+    prefer_default_horizontal_margins: bool,
 ) -> Result<(), HwpxError> {
     let mut ps = ParaShape::default();
     // OWPML ParaShapeType의 snapToGrid 기본값은 true.
@@ -969,7 +977,12 @@ fn parse_para_shape(
                         ParaShapeChildKind::Switch => {
                             // <switch>/<case>/<default> 네임스페이스 분기 처리
                             // HwpUnitChar case를 우선 적용, 없으면 default 사용
-                            parse_para_shape_switch(reader, &mut ps, margin_units)?;
+                            parse_para_shape_switch(
+                                reader,
+                                &mut ps,
+                                margin_units,
+                                prefer_default_horizontal_margins,
+                            )?;
                         }
                         ParaShapeChildKind::Other => {}
                     }
@@ -1243,6 +1256,7 @@ fn parse_para_shape_switch(
     reader: &mut Reader<&[u8]>,
     ps: &mut ParaShape,
     margin_units: ParagraphMarginUnits,
+    prefer_default_horizontal_margins: bool,
 ) -> Result<(), HwpxError> {
     let mut buf = Vec::new();
     let mut in_hwpunitchar_case = false;
@@ -1404,6 +1418,20 @@ fn parse_para_shape_switch(
         }
         if let Some(v) = def_line_spacing {
             ps.line_spacing = v;
+        }
+    }
+    // rhwp HWP5→HWPX 산출물은 IR 수평 margin을 <default>에 그대로 저장하고
+    // HwpUnitChar case에는 절반값을 쓴다. marker가 있는 문서는 pagination
+    // 보존을 위해 저장된 default margin을 복원한다.
+    if prefer_default_horizontal_margins {
+        if let Some(v) = def_margin_left {
+            ps.margin_left = v;
+        }
+        if let Some(v) = def_margin_right {
+            ps.margin_right = v;
+        }
+        if let Some(v) = def_indent {
+            ps.indent = v;
         }
     }
 
@@ -2351,7 +2379,8 @@ mod tests {
           </hp:case><hp:default><hh:margin><hc:prev value="1200"/><hc:next value="600"/></hh:margin></hp:default>
         </hp:switch></hh:paraPr></hh:head>"#;
         let (legacy, _) =
-            parse_hwpx_header_with_margin_units(xml, ParagraphMarginUnits::LegacyDoubled).unwrap();
+            parse_hwpx_header_with_margin_units(xml, ParagraphMarginUnits::LegacyDoubled, false)
+                .unwrap();
         let (modern, _) = parse_hwpx_header(xml).unwrap();
         let fields = |shape: &ParaShape| {
             (
@@ -2369,14 +2398,35 @@ mod tests {
             modern.para_shapes[0].line_spacing
         );
         let default_only = r#"<hh:head><hh:paraPr id="0"><hp:switch><hp:default><hh:margin><hc:prev value="1200"/><hc:next value="600"/></hh:margin></hp:default></hp:switch></hh:paraPr></hh:head>"#;
-        let (legacy, _) =
-            parse_hwpx_header_with_margin_units(default_only, ParagraphMarginUnits::LegacyDoubled)
-                .unwrap();
+        let (legacy, _) = parse_hwpx_header_with_margin_units(
+            default_only,
+            ParagraphMarginUnits::LegacyDoubled,
+            false,
+        )
+        .unwrap();
         let (modern, _) = parse_hwpx_header(default_only).unwrap();
         assert_eq!(
             fields(&legacy.para_shapes[0]),
             fields(&modern.para_shapes[0])
         );
+    }
+
+    #[test]
+    fn hwp5_origin_switch_prefers_default_horizontal_margins_only() {
+        let xml = r#"<hh:head><hh:paraPr id="0"><hp:switch>
+          <hp:case hp:required-namespace="http://www.hancom.co.kr/hwpml/2016/HwpUnitChar">
+            <hh:margin><hc:intent value="-200"/><hc:left value="400"/><hc:right value="800"/><hc:prev value="600"/><hc:next value="300"/></hh:margin>
+          </hp:case><hp:default><hh:margin><hc:intent value="-400"/><hc:left value="800"/><hc:right value="1600"/><hc:prev value="1200"/><hc:next value="600"/></hh:margin></hp:default>
+        </hp:switch></hh:paraPr></hh:head>"#;
+        let (parsed, _) =
+            parse_hwpx_header_with_margin_units(xml, ParagraphMarginUnits::LegacyDoubled, true)
+                .unwrap();
+        let shape = &parsed.para_shapes[0];
+        assert_eq!(shape.indent, -400);
+        assert_eq!(shape.margin_left, 800);
+        assert_eq!(shape.margin_right, 1600);
+        assert_eq!(shape.spacing_before, 600);
+        assert_eq!(shape.spacing_after, 300);
     }
 
     #[test]

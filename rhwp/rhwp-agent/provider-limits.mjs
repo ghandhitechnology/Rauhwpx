@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import spawn from 'cross-spawn';
 import { applyManagedCliLaunch } from './npm-cli-launch.mjs';
 import { readUtf8FileBounded } from './bounded-file.mjs';
+import { claudeKeychainService } from './claude-credentials.mjs';
 import { recoverInterruptedFileReplacement, replaceFileAtomically } from './harness-update.mjs';
 import { cancelResponseBody, readResponseJsonBounded } from './response-bounds.mjs';
 
@@ -194,8 +195,10 @@ export function createProviderLimitsClient({
     let raw = null;
     if (providerEnv.CLAUDE_CODE_OAUTH_TOKEN) raw = { claudeAiOauth: { accessToken: providerEnv.CLAUDE_CODE_OAUTH_TOKEN } };
     if (!raw && platform === 'darwin') {
-      if (providerEnv.CLAUDE_CONFIG_DIR) raw = await keychainRead(`Claude Code-credentials-${hash(path.resolve(configDir)).slice(0, 8)}`);
-      else raw = await keychainRead('Claude Code-credentials');
+      raw = await keychainRead(claudeKeychainService({
+        configDir,
+        hasConfigDir: Boolean(providerEnv.CLAUDE_CONFIG_DIR),
+      }));
     }
     raw ??= await readCredentials(path.join(configDir, '.credentials.json'));
     const oauth = raw?.claudeAiOauth;

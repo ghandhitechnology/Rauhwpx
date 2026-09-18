@@ -2,10 +2,11 @@ import assert from 'node:assert/strict';
 import { setImmediate as nextTick } from 'node:timers/promises';
 import test from 'node:test';
 import { createRaucloudBroker, CLOUD_ALLOCATION_LEASE_MS, CLOUD_WARM_IDLE_MS, CLOUD_FINAL_CHECKPOINT_MS,
-  CLOUD_DAILY_LIMIT_MS, CLOUD_GRACE_LIMIT_MS } from '../cloud-broker.mjs';
+  CLOUD_DAILY_LIMIT_MS, CLOUD_GRACE_LIMIT_MS, CLOUD_COLD_START_WINDOW_LIMIT } from '../cloud-broker.mjs';
 
-function fixture({ provisioner = null, at = Date.parse('2026-09-05T23:59:30Z') } = {}) {
+function fixture({ provisioner = null, at = Date.parse('2026-09-05T23:59:30Z'), raucloud = null } = {}) {
   let state = { users: { 'account-1': { id: 'account-1', email: 'user@example.com' } } };
+  if (raucloud) state.raucloud = structuredClone(raucloud);
   let chain = Promise.resolve();
   let clock = at;
   const mutate = (operation) => {
@@ -232,4 +233,209 @@ test('orphan scan retains an allocation created after its initial state snapshot
     release();
     await reconcile;
   }
+});
+
+const PREWARM_REMOTE = {
+  providerId: 'railway', serviceId: 'service-warm', projectId: 'project-1', environmentId: 'environment-1',
+  domain: 'worker.up.railway.app', bootstrapToken: 'bootstrap-token',
+};
+const PREWARM_RECEIPT = {
+  endpoint: 'https://worker.up.railway.app/rauhwpx-cloud',
+  serverPublicKey: `ed25519:${'B'.repeat(43)}`,
+  pairingCode: 'WARM-WARM-WARM',
+};
+
+function warmFixture({ at = Date.parse('2026-09-05T10:00:00Z'), provisioner = null, raucloud = null } = {}) {
+  const deleted = [];
+  const refreshed = [];
+  const setup = fixture({
+    at,
+    raucloud: raucloud ?? { accounts: { 'account-1': { usedCloudAt: at - 24 * 60 * 60 * 1000 } } },
+    provisioner: provisioner ?? {
+      provision: async () => ({ remote: PREWARM_REMOTE, receipt: PREWARM_RECEIPT }),
+      receipt: async (remote, options) => {
+        refreshed.push({ remote, options });
+        return { ...PREWARM_RECEIPT, pairingCode: 'BCDF-GHJK-LMNP' };
+      },
+      teardown: async (remote) => { deleted.push(remote.serviceId); return { removed: true }; },
+    },
+  });
+  return {
+    ...setup,
+    deleted,
+    refreshed,
+    prewarm: () => setup.broker.prewarmCloudWorker('access-token', { deviceId: 'device-1', timezone: 'UTC' }),
+    readyWorker: () => setup.waitFor((state) => state.raucloud.accounts['account-1'].worker?.status === 'ready'),
+  };
+}
+
+test('a prewarmed worker stays idle, unbilled, and invisible until a run claims it', async () => {
+  const setup = warmFixture();
+  const reserved = await setup.prewarm();
+  await setup.readyWorker();
+  assert.equal(reserved.prewarm, true);
+  const status = await setup.broker.getCloudStatus('access-token', { deviceId: 'device-1' });
+  assert.equal(status.activeRun, null);
+  assert.equal(status.worker.prewarm, true);
+  assert.equal(status.gate.state, 'ready');
+  assert.equal(status.gate.canStart, true);
+  assert.equal(status.quota.usedMs, 0);
+  assert.equal(status.quota.coldStarts.usedToday, 1);
+  const other = await setup.broker.getCloudStatus('access-token', { deviceId: 'device-2' });
+  assert.equal(other.gate.state, 'ready');
+  assert.equal(other.gate.canStart, true);
+});
+
+test('the first run claims the reservation instead of paying for another cold start', async () => {
+  const setup = warmFixture();
+  const reserved = await setup.prewarm();
+  await setup.readyWorker();
+  setup.advance(30 * 60_000);
+  const claimed = await setup.create();
+  assert.equal(claimed.run.id, reserved.run.id);
+  assert.equal(claimed.run.status, 'ready');
+  assert.equal(claimed.run.prewarm, false);
+  assert.equal(claimed.run.reused, true);
+  assert.equal(claimed.coldStart, false);
+  assert.equal(claimed.quota.usedMs, 0);
+  assert.equal(claimed.quota.coldStarts.usedToday, 1);
+  assert.equal(claimed.run.receipt.pairingCode, PREWARM_RECEIPT.pairingCode);
+  assert.equal(setup.snapshot().raucloud.accounts['account-1'].worker.prewarm, undefined);
+});
+
+test('repeated prewarm calls renew one reservation without another cold start', async () => {
+  const setup = warmFixture();
+  await setup.prewarm();
+  await setup.readyWorker();
+  setup.advance(CLOUD_WARM_IDLE_MS - 1);
+  const renewed = await setup.prewarm();
+  assert.equal(renewed.prewarm, true);
+  assert.equal(renewed.quota.coldStarts.usedToday, 1);
+  setup.advance(CLOUD_WARM_IDLE_MS - 1);
+  await setup.broker.reconcileCloudUsage();
+  assert.deepEqual(setup.deleted, []);
+  assert.equal(setup.snapshot().raucloud.accounts['account-1'].worker.status, 'ready');
+});
+
+test('an unclaimed reservation expires with the warm idle window', async () => {
+  const setup = warmFixture();
+  await setup.prewarm();
+  await setup.readyWorker();
+  setup.advance(CLOUD_WARM_IDLE_MS + 1);
+  await setup.broker.reconcileCloudUsage();
+  assert.deepEqual(setup.deleted, ['service-warm']);
+  assert.equal(setup.snapshot().raucloud.accounts['account-1'].worker, null);
+});
+
+test('an unclaimed reservation still counts against the cold start limit', async () => {
+  const setup = warmFixture();
+  for (let attempt = 0; attempt < CLOUD_COLD_START_WINDOW_LIMIT; attempt += 1) {
+    const reserved = await setup.prewarm();
+    await setup.readyWorker();
+    await setup.broker.stopCloudRun('access-token', reserved.run.id, { deviceId: 'device-1', reason: 'test' });
+  }
+  await assert.rejects(setup.prewarm(), { code: 'CLOUD_COLD_START_RATE_LIMITED' });
+});
+
+test('stopping a reservation cancels the worker it holds', async () => {
+  const setup = warmFixture();
+  const reserved = await setup.prewarm();
+  await setup.readyWorker();
+  const stopped = await setup.broker.stopCloudRun('access-token', reserved.run.id, {
+    deviceId: 'device-1', reason: 'user',
+  });
+  assert.equal(stopped.run.status, 'stopped');
+  await setup.broker.reconcileCloudUsage();
+  assert.deepEqual(setup.deleted, ['service-warm']);
+});
+
+test('a claimed run reissues a fresh pairing receipt for its own device only', async () => {
+  const setup = warmFixture();
+  const reserved = await setup.prewarm();
+  await setup.readyWorker();
+  const claimed = await setup.create();
+  const refreshed = await setup.broker.refreshCloudRunReceipt('access-token', claimed.run.id, {
+    deviceId: 'device-1', deviceName: 'Laptop',
+  });
+  assert.equal(refreshed.receipt.pairingCode, 'BCDF-GHJK-LMNP');
+  assert.equal(setup.refreshed[0].remote.bootstrapToken, 'bootstrap-token');
+  assert.equal(setup.refreshed[0].options.serverPublicKey, PREWARM_RECEIPT.serverPublicKey);
+  assert.equal((await setup.status(claimed.run.id)).run.receipt.pairingCode, 'BCDF-GHJK-LMNP');
+  await assert.rejects(
+    setup.broker.refreshCloudRunReceipt('access-token', claimed.run.id, { deviceId: 'device-2' }),
+    { code: 'CLOUD_OWNED_ELSEWHERE' },
+  );
+});
+
+test('an active run keeps a reservation request from provisioning a second worker', async () => {
+  let spawned = 0;
+  const setup = warmFixture({ provisioner: {
+    provision: async () => { spawned += 1; return { remote: PREWARM_REMOTE, receipt: PREWARM_RECEIPT }; },
+    teardown: async () => ({ removed: true }),
+  } });
+  const created = await setup.create();
+  await setup.readyWorker();
+  const result = await setup.prewarm();
+  assert.equal(result.prewarm, false);
+  assert.equal(result.activeRun.id, created.run.id);
+  assert.equal(spawned, 1);
+});
+
+test('prewarm funds an idle worker only after the account has run a turn', async () => {
+  let spawned = 0;
+  const setup = warmFixture({
+    raucloud: { accounts: {} },
+    provisioner: {
+      provision: async () => { spawned += 1; return { remote: PREWARM_REMOTE, receipt: PREWARM_RECEIPT }; },
+      teardown: async () => ({ removed: true }),
+    },
+  });
+  const first = await setup.prewarm();
+  assert.equal(first.prewarm, false);
+  assert.equal(spawned, 0);
+  const created = await setup.create();
+  await setup.readyWorker();
+  await setup.broker.confirmCloudAllocation('worker-secret', created.run.id);
+  await setup.broker.completeCloudRun('worker-secret', created.run.id, { checkpointId: 'turn-1' });
+  await setup.broker.stopCloudRun('access-token', created.run.id, { deviceId: 'device-1', reason: 'test' });
+  assert.equal(setup.snapshot().raucloud.accounts['account-1'].worker, null);
+  const warm = await setup.prewarm();
+  await setup.readyWorker();
+  assert.equal(warm.prewarm, true);
+  assert.equal(spawned, 2);
+});
+
+test('an unclaimed reservation withholds its pairing code and cannot activate', async () => {
+  const setup = warmFixture();
+  const reserved = await setup.prewarm();
+  await setup.readyWorker();
+  const status = await setup.broker.getCloudStatus('access-token', { deviceId: 'device-1', runId: reserved.run.id });
+  assert.equal(status.worker.prewarm, true);
+  assert.equal(status.worker.receipt, null);
+  assert.equal(status.run.prewarm, true);
+  assert.equal(status.run.receipt, null);
+  await assert.rejects(
+    setup.broker.confirmCloudAllocation('worker-secret', reserved.run.id),
+    { code: 'CLOUD_RUN_STATE_INVALID' },
+  );
+  await assert.rejects(
+    setup.broker.touchCloudWorkspace('worker-secret', reserved.run.id),
+    { code: 'CLOUD_RUN_STATE_INVALID' },
+  );
+  const claimed = await setup.create();
+  assert.equal(claimed.run.receipt.pairingCode, PREWARM_RECEIPT.pairingCode);
+  const activated = await setup.broker.confirmCloudAllocation('worker-secret', claimed.run.id);
+  assert.equal(activated.run.status, 'active');
+});
+
+test('a worker still being removed makes prewarm report teardown pending', async () => {
+  const setup = warmFixture({ provisioner: {
+    provision: async () => ({ remote: PREWARM_REMOTE, receipt: PREWARM_RECEIPT }),
+    teardown: async () => { throw new Error('Railway delete timed out'); },
+  } });
+  const reserved = await setup.prewarm();
+  await setup.readyWorker();
+  await setup.broker.stopCloudRun('access-token', reserved.run.id, { deviceId: 'device-1', reason: 'test' });
+  assert.equal(setup.snapshot().raucloud.accounts['account-1'].worker.status, 'tearing_down');
+  await assert.rejects(setup.prewarm(), { code: 'CLOUD_TEARDOWN_PENDING' });
 });

@@ -2035,6 +2035,7 @@ async function loadBytes(
   await releaseReplacedNativeFileHandle(previousFileHandle, fileHandle)
     .catch((error) => console.warn('[desktop] 교체된 네이티브 파일 핸들 해제 실패:', error));
   prepareCanvasRendererDocument();
+  eventBus.emit('document-swapped');
   await updateLoadProgress(45, '자동 저장 준비 중...');
   forgetConvertedHmlSaveHandle(fileHandle);
   wasm.currentFileHandle = fileHandle;
