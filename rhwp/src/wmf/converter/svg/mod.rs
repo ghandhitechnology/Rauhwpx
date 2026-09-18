@@ -571,10 +571,13 @@ impl crate::wmf::converter::Player for SVGPlayer {
                 bottom,
             } = placeable.bounding_box;
 
-            self.context_current = self
-                .context_current
-                .window_origin(left, top)
-                .window_ext(right - left, bottom - top);
+            let width = i32::from(right) - i32::from(left);
+            let height = i32::from(bottom) - i32::from(top);
+
+            self.context_current = self.context_current.window_origin(left, top).window_ext(
+                width.clamp(0, i32::from(i16::MAX)) as i16,
+                height.clamp(0, i32::from(i16::MAX)) as i16,
+            );
         }
 
         self.context_current = self
@@ -2374,4 +2377,47 @@ fn parse_attr_i32(s: &str, attr: &str) -> Option<i32> {
     let val_start = start + needle.len();
     let val_end = s[val_start..].find('"')?;
     s[val_start..val_start + val_end].parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wmf::converter::Player;
+
+    #[test]
+    fn hostile_placeable_extents_do_not_overflow() {
+        let player = SVGPlayer::new()
+            .header(
+                0,
+                MetafileHeader::StartsWithPlaceable(
+                    META_PLACEABLE {
+                        key: 0x9AC6_CDD7,
+                        hwmf: 0,
+                        bounding_box: Rect {
+                            left: i16::MIN,
+                            top: i16::MAX,
+                            right: i16::MAX,
+                            bottom: i16::MIN,
+                        },
+                        inch: 96,
+                        reserved: 0,
+                        checksum: [0, 0],
+                    },
+                    META_HEADER {
+                        typ: MetafileType::MEMORYMETAFILE,
+                        header_size: 9,
+                        version: MetafileVersion::METAVERSION300,
+                        size_low: 0,
+                        size_high: 0,
+                        number_of_objects: 0,
+                        max_record: 0,
+                        number_of_members: 0,
+                    },
+                ),
+            )
+            .unwrap();
+
+        assert_eq!(player.context_current.window.x, i16::MAX);
+        assert_eq!(player.context_current.window.y, 0);
+    }
 }
