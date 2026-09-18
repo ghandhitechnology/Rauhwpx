@@ -1,10 +1,7 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { AGENT_PROTOCOL_VERSION, isStructuredPlan } from '../src/agent/types.ts';
-
-const bridgeSource = readFileSync(new URL('../src/agent/bridge.ts', import.meta.url), 'utf8');
 
 test('planning and user-input protocol uses v5 and validates the complete structured plan', () => {
   assert.equal(AGENT_PROTOCOL_VERSION, 5);

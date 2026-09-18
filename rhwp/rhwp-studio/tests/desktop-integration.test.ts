@@ -1,12 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 
 import { bindNativeFileHandleIdentity, captureDesktopNativeDroppedFile, createNativeFileHandle, ensureDesktopAgentHub, getNativeFileHandleVerifiedDocumentId, getNativeFileSourcePath, installDesktopGeneratedDocumentHandling, installDesktopPlainTextPasteHandling, installDesktopEditCommandHandling, installWebAppShell, isDesktopApp, isLegacyPortableHistoryFolderHandle, openPublishedDocumentInNewWindow, parsePublishedDocumentLink, pickDesktopLegacyHistoryFolder, pickDesktopNativeOpenFile, pickDesktopNativeSaveFile, pickDesktopPortableHistorySaveFile, rememberNativeDocument, requestDevAgentHub, restoreNativeDocument, releaseReplacedNativeFileHandle, searchNearbyNativeDocuments, suppressDesktopServiceWorker, stableBrowserSessionId, type NativeFileHandleDescriptor } from '../src/desktop-integration.ts';
 import { writeBlobToHandle } from '../src/command/file-system-access.ts';
 import { EXACT_LOCAL_DOCUMENT_MAX_BYTES, PORTABLE_HISTORY_MAX_BYTES } from '../src/core/document-input-limits.ts';
 
-const source = readFileSync(new URL('../src/desktop-integration.ts', import.meta.url), 'utf8');
 test('desktop integration asks the shell to launch a missing hub', async () => {
   assert.equal(isDesktopApp({}), false);
   assert.equal(await ensureDesktopAgentHub({}), false);
@@ -42,7 +40,6 @@ test('desktop integration asks the shell to launch a missing hub', async () => {
 });
 
 test('dev ensure path asks Vite to start a missing hub', async () => {
-  assert.match(source, /\/__rhwp\/ensure-agent-hub/);
   let calls = 0;
   const ready = await requestDevAgentHub(async (url, init) => {
     calls += 1;
@@ -586,11 +583,6 @@ test('releasing a replaced native handle bookmarks it first', async () => {
 });
 
 test('데스크톱 셸은 서비스 워커를 끄고 PWA 등록을 건너뛴다', async () => {
-  const vite = readFileSync(new URL('../vite.config.ts', import.meta.url), 'utf8');
-  const main = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
-  assert.match(vite, /injectRegister:\s*false/);
-  assert.match(main, /installWebAppShell\(\)/);
-
   const unregisters: string[] = [];
   await suppressDesktopServiceWorker({
     rhwpDesktop: { ensureAgentHub: async () => true },

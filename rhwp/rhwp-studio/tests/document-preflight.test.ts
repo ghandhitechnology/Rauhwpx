@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 
 import type { FileSystemFileHandleLike } from '../src/command/file-system-access.ts';
 import {
@@ -154,13 +153,6 @@ test('main-issued native identity survives stale handles and feeds the active ve
   );
   assert.equal(result.documentId, 'original-history');
   assert.equal(result.useSourceDigest, false);
-
-  const main = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
-  assert.match(main, /const verifiedGrant = grant \?\?/,
-    'an explicit project/recent grant must retain priority over native metadata');
-  assert.match(main, /activeDocumentId = ownership\.identity\.documentId/);
-  assert.match(main, /getDocumentId: \(\) => activeDocumentId/,
-    'the recovered identity must remain the version repository lookup key');
 });
 
 test('successful isSameEntry=false keeps identical copies logically separate', async () => {

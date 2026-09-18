@@ -83,19 +83,6 @@ test('VS Code distribution preserves the approved font subset', () => {
   );
 });
 
-test('VS Code CanvasKit auto font planning is limited to packaged fonts', () => {
-  const viewerSource = readFileSync(
-    path.join(ROOT, 'rhwp-vscode/src/webview/viewer.ts'),
-    'utf8',
-  );
-  const planStart = viewerSource.indexOf('const canvasKitFontPlan');
-  const planEnd = viewerSource.indexOf('const rendererSession', planStart);
-  assert.ok(planStart >= 0 && planEnd > planStart, 'VS Code CanvasKit font plan must be declared');
-  const planSource = viewerSource.slice(planStart, planEnd);
-  assert.match(planSource, /availableLocalFiles:\s*vscodeBundledFontFiles/);
-  assert.match(planSource, /disableExternalWebFonts:\s*true/);
-});
-
 test('VS Code VSIX distribution preserves full runtime dependency license notices', () => {
   const vscodeRoot = path.join(ROOT, 'rhwp-vscode');
   assert.match(

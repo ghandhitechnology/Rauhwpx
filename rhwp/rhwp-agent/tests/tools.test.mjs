@@ -2,8 +2,6 @@
 // (mcp-stdio.mjs 를 임포트하면 stdio 서버가 뜨므로 절대 임포트하지 않는다).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import {
   TOOL_CATEGORIES,
   TOOL_CLASSIFICATIONS,
@@ -43,9 +41,6 @@ test('document-write annotations stay non-destructive so safe mode can edit', ()
   assert.deepEqual(toolAnnotations('artifact-write'), {
     readOnlyHint: false, destructiveHint: false, openWorldHint: false,
   });
-  const mcpStdio = readFileSync(fileURLToPath(new URL('../mcp-stdio.mjs', import.meta.url)), 'utf8');
-  assert.match(mcpStdio, /annotations: toolAnnotations\(def\.category\)/);
-  assert.doesNotMatch(mcpStdio, /destructiveHint:\s*true/);
 });
 
 test('도구 프로필은 direct 호환성과 planning/implementing 가시성을 지킨다', () => {

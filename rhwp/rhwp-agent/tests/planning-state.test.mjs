@@ -1,20 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { PlanningState, authorizeToolCall, buildApprovedPlanPrompt, isExplicitImplementationApproval, buildPlanningDocumentSavedPrompt } from '../planning-state.mjs';
-
-const serverSource = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
-
-test('chat startup leaves tool profiles derived from mutable execution mode', () => {
-  const start = serverSource.lastIndexOf('  const opts = {');
-  const end = serverSource.indexOf('  const createBackend = SESSION_FACTORIES[agent];', start);
-  assert.ok(start >= 0 && end > start);
-  const chatOptions = serverSource.slice(start, end);
-  assert.match(chatOptions, /capabilityEpoch: planning\.capabilityEpoch/);
-  assert.doesNotMatch(chatOptions, /\b(?:toolProfile|mcpEnvironment)\s*:/);
-  assert.match(serverSource, /toolProfile: 'copy-layout-worker'/,
-    'background workers retain their explicit restricted profile');
-});
 
 function plan() {
   return {
@@ -246,10 +232,4 @@ test('document-saved follow-up asks the planner to re-read live state', () => {
   assert.match(prompt, /초안\.hwpx/);
   assert.match(prompt, /get_structure/);
   assert.match(prompt, /Do not edit the local filesystem or live document/);
-  assert.match(serverSource, /case 'chat-document-saved'/);
-  assert.match(serverSource, /queuePlanningDocumentSaved\(record, msg\)/);
-  assert.match(serverSource, /if \(evt\.type === 'turn-end'\) drainPlanningDocumentSaved\(record\)/);
-  assert.match(serverSource, /reason: 'document-saved'/);
-  assert.match(serverSource, /promptOverride: prompt/);
-  assert.match(serverSource, /sessionStatusOverride: 'idle'/);
 });

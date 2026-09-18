@@ -1,12 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createTestModuleServer } from './support/module-server.ts';
 
 const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
-const src = (rel: string): string => readFileSync(join(rootDir, rel), 'utf8');
 
 test('#4121 history 복원용 HF 선택은 현재 target과 문단 경계를 다시 검증한다', async () => {
   const vite = await createTestModuleServer(rootDir);

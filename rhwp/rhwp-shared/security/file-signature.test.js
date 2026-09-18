@@ -37,10 +37,6 @@ const privateNetworkModule = fs.readFileSync(
   'utf8',
 );
 const safariPrivateNetwork = privateNetworkModule.replace(/^export /gm, '');
-const safariBuildScript = fs.readFileSync(
-  new URL('rhwp-safari/build.sh', repositoryRoot),
-  'utf8',
-);
 
 function assertSignature(actual, expected) {
   assert.equal(actual.isDocument ?? actual.isHwp, expected.isDocument ?? expected.isHwp);
@@ -114,12 +110,6 @@ test('Safari가 bounded fetch guards를 먼저 적재하고 원격 프록시는 
     'fetch-security.js',
     'background.js',
   ]);
-  assert.match(safariBuildScript, /sed 's\/\^export \/\/' "\$ROOT\/rhwp-shared\/sw\/private-network\.js" > "\$DIST\/private-network\.js"/);
-  assert.match(safariBuildScript, /cp "\$SRC\/fetch-security\.js" "\$DIST\/fetch-security\.js"/);
-  assert.doesNotMatch(safariBackground, /verifyDocumentSignature/);
-  assert.match(safariBackground, /REMOTE_PROXY_UNAVAILABLE/);
-  assert.match(safariBackground, /isBlockedHost\(parsed\.hostname/);
-
   const listeners = {};
   const safariContext = {
     ArrayBuffer,

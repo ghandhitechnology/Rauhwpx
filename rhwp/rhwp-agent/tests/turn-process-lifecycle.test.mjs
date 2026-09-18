@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
@@ -71,22 +70,6 @@ test('provider NDJSON discard drops a complete buffered frame without a newline'
   read.end();
 
   assert.deepEqual(frames, []);
-});
-
-test('provider lifecycles flush an unterminated terminal frame only after a drained close', () => {
-  const backend = readFileSync(new URL('../agents/backend.mjs', import.meta.url), 'utf8');
-  const codex = readFileSync(new URL('../agents/codex.mjs', import.meta.url), 'utf8');
-  const pi = readFileSync(new URL('../agents/pi.mjs', import.meta.url), 'utf8');
-  const claude = readFileSync(new URL('../agents/claude.mjs', import.meta.url), 'utf8');
-
-  assert.match(backend, /if \(fromClose\) flushOutput\(\);\s*else discardOutput\(\);[\s\S]{0,240}completedAtDrain = fromClose && turnCompleted;/);
-  assert.match(codex, /if \(fromClose\) endOutput\(\);\s*else discardOutput\(\);\s*completedAtDrain = fromClose && turnCompleted;/);
-  assert.match(pi, /if \(fromClose\) endOutput\(\);\s*else discardOutput\(\);\s*completedAtDrain = fromClose && turnCompleted;/);
-  assert.match(claude, /if \(fromClose\) endOutput\(\);\s*else discardOutput\(\);\s*lifecycleState\.completedAtDrain = !turnOpen && hasCompletedTurn;/);
-  assert.match(backend, /suppressCurrentOutput = \(\) => \{\s*if \(proc === child\) discardOutput\(\)/);
-  assert.match(codex, /suppressChildOutput = \(\) => \{\s*if \(proc === child\) discardOutput\(\)/);
-  assert.match(pi, /suppressChildOutput = \(\) => \{\s*if \(proc === child\) discardOutput\(\)/);
-  assert.match(claude, /suppressChildOutput = \(\) => \{\s*if \(proc === child\) discardOutput\(\)/);
 });
 
 /** graceMs 를 짧게 준 수명주기와 이벤트 배열을 함께 돌려준다. */

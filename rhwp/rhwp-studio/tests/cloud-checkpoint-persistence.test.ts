@@ -1,16 +1,7 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { captureCloudOriginSha256, checkpointMatchesActiveDocument, persistCheckpointToBrowserOrigin } from '../src/cloud/checkpoint-origin.ts';
 import { parseCloudCheckpoint } from '../src/cloud/desktop-cloud.ts';
-
-const main = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
-function sourceBetween(startMarker: string, endMarker: string): string {
-  const start = main.indexOf(startMarker);
-  const end = main.indexOf(endMarker, start + startMarker.length);
-  assert.ok(start >= 0 && end > start, `${startMarker} source range must exist`);
-  return main.slice(start, end);
-}
 
 test('same-digest checkpoint writes still require the exact active editor document', () => {
   const checkpoint = { originOnThisDevice: true, documentId: 'document-b' };

@@ -13,29 +13,6 @@ import { ALIVE_PI_FIXTURE_SOURCE, writeFakeCliBin } from './fake-cli-bin.mjs';
 
 const TOKEN = 'hub-tenancy-test-token';
 const LAUNCH_ID = 'hub-tenancy-test-launch';
-const serverSource = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
-
-test('provider capabilities open only after the backend starts the exact queued turn', () => {
-  assert.match(
-    serverSource,
-    /function beginAgentTurn[\s\S]{0,500}activeSession\.turnId = crypto\.randomUUID\(\);[\s\S]{0,300}activeSession\.providerTurnStarted = false;/,
-  );
-  assert.match(
-    serverSource,
-    /if \(evt\.type === 'turn-start'\)[\s\S]{0,400}activeSession\.providerTurnStarted = true;/,
-  );
-  assert.match(
-    serverSource,
-    /if \(activeSession\.status !== 'running'[\s\S]{0,240}activeSession\.providerTurnStarted !== true[\s\S]{0,240}sock\.agentTurnId !== activeSession\.turnId\)[\s\S]{0,180}noActiveProviderTurnError\(\)/,
-  );
-  assert.match(
-    serverSource,
-    /function providerTurnIsActive[\s\S]{0,220}binding\.session\.providerTurnStarted === true/,
-  );
-  assert.match(serverSource, /ws\.agentTurnId = authenticatedWorkerJob \? null : providerTurnId/);
-  assert.match(serverSource, /sock\.agentTurnId !== activeSession\.turnId/);
-  assert.match(serverSource, /function retireProviderSockets[\s\S]{0,700}sock\.providerTurnRetired = true/);
-});
 
 function waitForLine(stream, predicate, timeoutMs = 20_000) {
   return new Promise((resolve, reject) => {

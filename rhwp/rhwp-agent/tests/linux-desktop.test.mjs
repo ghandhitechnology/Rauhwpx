@@ -22,10 +22,6 @@ const releaseWorkflow = readFileSync(
   new URL('../../../.github/workflows/release.yml', import.meta.url),
   'utf8',
 );
-const desktopMain = readFileSync(
-  new URL('../../../desktop/main.mjs', import.meta.url),
-  'utf8',
-);
 
 function fakeSafeStorage(backend) {
   return {
