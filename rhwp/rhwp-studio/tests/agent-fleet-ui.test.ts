@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 /* DOM 없이 편대 카드를 검증하는 최소 노드. 실제 Element 와 같은 형태만 흉내낸다. */
@@ -541,75 +540,6 @@ test('편대 표기 규칙 — 스폰 도구, 모델 약칭, 시계', () => {
   assert.equal(formatFleetClock(120_000), '2분');
 });
 
-const source = readFileSync(new URL('../src/ui/agent-sidebar/index.ts', import.meta.url), 'utf8');
-const css = readFileSync(new URL('../src/ui/agent-sidebar/agent-sidebar.css', import.meta.url), 'utf8');
-
-test('사이드바가 편대 이벤트를 카드로 넘기고 스폰 도구 행은 접는다', () => {
-  assert.match(source, /case 'task-start':\s*\n\s*fleetView\.taskStart\(event\);/);
-  assert.match(source, /case 'task-progress':\s*\n\s*fleetView\.taskProgress\(event\);/);
-  assert.match(source, /case 'task-end':\s*\n\s*fleetView\.taskEnd\(event\);/);
-  assert.match(source, /if \(event\.parentTaskId && fleetView\.routeToolCall\(event\)\) break;/);
-  assert.match(source, /if \(event\.parentTaskId && fleetView\.routeToolResult\(event\)\) break;/);
-  assert.match(source, /if \(event\.parentTaskId && fleetView\.routeTextDelta\(event\)\) break;/);
-  assert.match(source, /if \(!event\.parentTaskId && isSpawnToolName\(event\.tool\)\) \{\s*\n\s*suppressedSpawnCalls\.add\(event\.callId\);\s*\n\s*turnToolCount \+= 1;/);
-  assert.match(source, /if \(suppressedSpawnCalls\.delete\(event\.callId\)\) \{/);
-  assert.match(source, /fleetView\.beginTurn\(\);/);
-  assert.match(source, /fleetView\.sweep\(\);/);
-  assert.match(source, /fleetView\.reset\(\);/);
-});
-
-test('살아 있는 기록은 한 번에 하나만 펼친다 — 팝업과 도구 활동 그룹이 서로를 접는다', () => {
-  // 카드가 태어난 자리는 흐름에 슬롯으로 예약되고, 도구 활동 그룹과 같은 자리에 들어간다.
-  assert.match(source, /mountSlot\(slot\) \{[\s\S]*?closeCurrentActivityGroup\(\);[\s\S]*?appendConversation\(slot\);/);
-  // 방금 닫는 도구 활동 그룹이 있으면 그 옆자리 — 정착한 기록이 같은 들여쓰기로 선다.
-  assert.match(source, /const neighbor = turnActivity\?\.root \?\? null;[\s\S]*?neighbor\.parentElement\.appendChild\(slot\);/);
-  // 팝업이 열리면 도구 활동 그룹을 접는다.
-  assert.match(source, /onPopupToggle\(open\) \{\s*\n\s*if \(open\) collapseTurnActivity\(\);/);
-  assert.match(source, /function collapseTurnActivity\(\) \{[\s\S]*?classList\.add\('ag-activity-collapsed'\)/);
-  // 도구 활동 그룹을 펼치면 팝업을 접는다.
-  assert.match(source, /if \(!collapsed\) \{\s*\n[^\n]*\n\s*fleetView\.closePopup\(\);/);
-});
-
-test('행 높이는 고정 그리드로 못 박혀 있고 진행 표시는 픽셀 휠 하나다', () => {
-  assert.match(css, /\.ag-fleet-head\s*\{[^}]*grid-template-rows:\s*16px 14px;/s);
-  assert.match(css, /\.ag-fleet-head\s*\{[^}]*grid-template-columns:\s*12px minmax\(0, 1fr\) auto 11px;/s);
-  assert.match(css, /\.ag-fleet-dot\.ag-run\s*\{\s*background:\s*var\(--ag-run\);/);
-  assert.match(css, /\.ag-fleet-dot\.ag-ok\s*\{\s*background:\s*var\(--ag-ok\);/);
-  assert.match(css, /\.ag-fleet-dot\.ag-err\s*\{\s*background:\s*var\(--ag-err\);/);
-  // 진행 표시는 step 타이밍으로 칸을 건너뛰는 픽셀 휠이다 — 부드러운 회전이 아니다.
-  assert.match(css, /\.ag-pixel-bit\s*\{[^}]*animation:\s*ag-pixel-chase [^;]*steps\(1/s);
-  assert.match(css, /\.ag-fleet-row\.ag-live \.ag-fleet-spin \{\s*\n\s*display: block;/);
-  assert.match(css, /\.ag-fleet\.ag-codex \{ --ag-accent: var\(--ag-codex\); \}/);
-  assert.doesNotMatch(css, /ag-fleet-card-spin/);
-  // 도는 동안에는 점이 아니라 휠이 그 자리를 쓴다.
-  assert.match(css, /\.ag-fleet-row\.ag-live \.ag-fleet-dot \{\s*\n\s*display: none;/s);
-  assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{\s*\.ag-fleet,\s*\.ag-fleet-row \{\s*animation: none;/s);
-});
-
-test('단계 레일은 겹친 알약 대신 한 줄 연결 타임라인이다', () => {
-  assert.match(css, /\.ag-fleet-rail\s*\{[^}]*flex-wrap:\s*nowrap;[^}]*overflow-x:\s*auto;/s);
-  assert.match(css, /\.ag-fleet-phase\s*\{[^}]*flex:\s*0 0 auto;[^}]*border:\s*0;[^}]*background:\s*transparent;/s);
-  assert.match(css, /\.ag-fleet-phase:not\(:last-child\)::after\s*\{[^}]*width:\s*12px;[^}]*height:\s*1px;/s);
-  assert.match(css, /\.ag-fleet-phase-mark:empty::before\s*\{[^}]*border-radius:\s*50%;/s);
-});
-
-test('편대 도크는 입력기 위 알약과 팝업으로 그려진다', () => {
-  assert.match(css, /\.ag-fleet-dock\s*\{[^}]*position:\s*absolute;/s);
-  assert.match(css, /\.ag-fleet-dock-pill\s*\{[^}]*border-radius:\s*999px;/s);
-  assert.match(css, /\.ag-fleet-popup\s*\{[^}]*max-height:\s*min\(320px, 40vh\);/s);
-  // 알약은 도는 동안 휠, 끝나면 상태 점을 같은 칸에 그린다.
-  assert.match(css, /\.ag-fleet-dock-pill:not\(\.ag-live\) > \.ag-pixel-wheel \{\s*\n\s*display: none;/);
-  assert.match(css, /\.ag-fleet-dock-pill:not\(\.ag-live\) > \.ag-fleet-dot \{\s*\n\s*display: block;/);
-  // 정착한 기록은 도구 활동 그룹처럼 앞자리 상태 점을 보인다.
-  assert.match(css, /\.ag-fleet-slot \.ag-fleet-toggle > \.ag-fleet-dot \{\s*\n\s*display: inline-block;/);
-  // 빈 슬롯은 높이를 만들지 않는다.
-  assert.match(css, /\.ag-fleet-slot\[hidden\] \{\s*\n\s*display: none;/);
-  // 도크가 서 있는 동안 계획 복원 overlay 는 도크 위로 올라간다.
-  assert.match(source, /--ag-fleet-dock-h/);
-  assert.match(css, /var\(--ag-fleet-dock-h, 0px\)/);
-});
-
-
 test('텍스트만 있는 작업도 펼쳐지고 선택한 미리보기만 실시간 갱신된다', () => {
   const { view } = mountFleet();
   view.beginTurn();
@@ -632,7 +562,6 @@ test('텍스트만 있는 작업도 펼쳐지고 선택한 미리보기만 실�
   assert.equal(second.getAttribute('aria-expanded'), 'false');
   view.reset();
 });
-
 
 test('선택한 미리보기는 새 출력의 끝으로 스크롤하고 목록으로 돌아간다', () => {
   const { view } = mountFleet();

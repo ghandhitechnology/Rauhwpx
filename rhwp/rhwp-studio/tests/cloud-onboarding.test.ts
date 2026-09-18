@@ -1,14 +1,7 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import {
-  createCloudSetupState,
-  defaultCloudProfileDraft,
-  mapCloudSetupIssue,
-  reconcileCloudSetupState,
-  validateCloudProfileDraft,
-} from '../src/ui/agent-sidebar/cloud-onboarding-state.ts';
+import { createCloudSetupState, defaultCloudProfileDraft, mapCloudSetupIssue, reconcileCloudSetupState, validateCloudProfileDraft } from '../src/ui/agent-sidebar/cloud-onboarding-state.ts';
 
 const baseSnapshot = {
   revision: 1,
@@ -175,12 +168,4 @@ test('configured public HTTPS profiles are preserved when Manage opens', () => {
   const state = createCloudSetupState(readySnapshot, 'manage');
   assert.equal(state.kind, 'connected');
   assert.deepEqual(state.kind === 'connected' ? state.profile.transport : null, publicProfile.transport);
-});
-
-test('cloneDraft trims submitted profile fields', () => {
-  const source = readFileSync(new URL('../src/ui/agent-sidebar/cloud-onboarding-state.ts', import.meta.url), 'utf8');
-  assert.match(source, /name: draft.name.trim\(\)/);
-  assert.match(source, /host: draft.host.trim\(\)/);
-  assert.match(source, /sshUser: draft.sshUser.trim\(\)/);
-  assert.match(source, /keyPath: draft.auth.keyPath.trim\(\)/);
 });

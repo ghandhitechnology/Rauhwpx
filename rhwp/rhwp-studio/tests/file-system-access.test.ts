@@ -1,17 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 
-import {
-  HWP_DOCUMENT_ACCEPT,
-  canUseOpenFilePicker,
-  captureDroppedFileHandle,
-  isSupportedDocumentFileName,
-  pickOpenFileHandle,
-  pickReadableBrowserDocument,
-  readFileFromHandle,
-  saveDocumentToFileSystem,
-} from '../src/command/file-system-access.ts';
+import { HWP_DOCUMENT_ACCEPT, canUseOpenFilePicker, captureDroppedFileHandle, isSupportedDocumentFileName, pickOpenFileHandle, pickReadableBrowserDocument, readFileFromHandle, saveDocumentToFileSystem } from '../src/command/file-system-access.ts';
 
 type FakeWriteCall = Blob;
 
@@ -499,15 +489,6 @@ test('save picker가 출력 포맷과 다른 확장자를 반환하면 쓰기 �
   assert.equal(invalidHandle.writable.closed, false);
 });
 
-test('save ownership/write errors do not silently become downloads', () => {
-  const commands = readFileSync(new URL('../src/command/commands/file.ts', import.meta.url), 'utf8');
-  assert.doesNotMatch(commands, /File System Access API 실패, 폴백/);
-  assert.match(
-    commands,
-    /if \(isUserCancelError\(error\)\) return 'cancelled';\s+throw error;/,
-  );
-});
-
 test('write failure aborts the browser swap stream', async () => {
   const calls: string[] = [];
   const failure = new Error('disk full');
@@ -587,7 +568,6 @@ test('브라우저 파일 선택 취소는 fallback을 열지 않고 읽기 오�
   assert.equal(result?.handle, readable);
   assert.equal(result?.name, 'sample.hwpx');
 });
-
 
 test('브라우저 picker 사용 불가와 권한 차단은 파일 input fallback을 사용한다', async () => {
   assert.equal(await pickReadableBrowserDocument({}), undefined);

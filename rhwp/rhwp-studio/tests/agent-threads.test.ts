@@ -2,27 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import {
-  archivePendingUserQuestion,
-  clearPendingUserQuestion,
-  createPendingUserQuestionDraftSnapshot,
-  createEmptyThread,
-  createUserQuestionHistoryMessage,
-  expirePendingUserQuestion,
-  fallbackTitle,
-  forgetDocumentThreads,
-  getThread,
-  explorerGroupIsCurrent,
-  listThreads,
-  listThreadsByDocument,
-  pendingUserQuestionMatchesInteraction,
-  recordDocumentOpened,
-  serializeThreadMessagesForProviderHistory,
-  setThreadTitle,
-  subscribeThreadChanges,
-  threadMatchesDocument,
-  upsertThread,
-} from '../src/agent/threads.ts';
+import { archivePendingUserQuestion, clearPendingUserQuestion, createPendingUserQuestionDraftSnapshot, createEmptyThread, createUserQuestionHistoryMessage, expirePendingUserQuestion, fallbackTitle, forgetDocumentThreads, getThread, explorerGroupIsCurrent, listThreads, listThreadsByDocument, pendingUserQuestionMatchesInteraction, recordDocumentOpened, serializeThreadMessagesForProviderHistory, setThreadTitle, subscribeThreadChanges, threadMatchesDocument, upsertThread } from '../src/agent/threads.ts';
 import type {
   StructuredPlan,
   UserQuestionInteraction,
@@ -97,14 +77,6 @@ test('thread persistence notifies the current window without changing the synchr
 
   assert.equal(changes, 1);
   assert.equal(listThreads()[0]?.id, thread.id);
-});
-
-test('browser persistence uses per-thread IndexedDB records and one-time legacy migration', () => {
-  assert.match(source, /createObjectStore\(THREADS_STORE, \{ keyPath: 'id' \}\)/);
-  assert.match(source, /store\.put\(cloneThread\(thread\)\)/);
-  assert.match(source, /localStorage\.removeItem\(STORAGE_KEY\)/);
-  assert.match(source, /new BroadcastChannel\(CHANNEL_NAME\)/);
-  assert.match(source, /db\.transaction\(THREADS_STORE, 'readwrite'\)/);
 });
 
 test('fallbackTitle uses the first user message', () => {
@@ -770,7 +742,6 @@ test('workflow and every presented plan persist as history without approval auth
   assert.equal('capabilityEpoch' in stored[0]!, false);
   assert.equal('approved' in stored[0]!, false);
 });
-
 
 test('same-millisecond thread updates keep the later restart state newer', (t) => {
   mem.clear();

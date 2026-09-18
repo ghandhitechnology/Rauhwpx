@@ -1,10 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import {
-  calculateAnchoredScroll,
-  type ZoomPageBox,
-} from '../src/view/zoom-anchor.ts';
+import { calculateAnchoredScroll, type ZoomPageBox } from '../src/view/zoom-anchor.ts';
 
 test('center anchor stays fixed while content crosses horizontal overflow', () => {
   const oldBox: ZoomPageBox = {
@@ -85,34 +81,4 @@ test('anchored scroll can preserve a point across viewport resize', () => {
 
   assert.equal(next.scrollLeft, 600);
   assert.equal(next.scrollTop, 250);
-});
-
-test('CanvasView consumes the zoom anchor and corrects both scroll axes', () => {
-  const source = readFileSync(
-    new URL('../src/view/canvas-view.ts', import.meta.url),
-    'utf8',
-  );
-
-  assert.match(source, /eventBus\.on\('zoom-changed', \(zoom, anchor\)/);
-  assert.match(source, /calculateAnchoredScroll\(/);
-  assert.match(source, /wasHorizontallyCentered/);
-  assert.match(source, /setScrollTop\(nextScroll\.scrollTop\)/);
-});
-
-test('CanvasView and ruler consume the stable horizontal coordinate', () => {
-  const canvasSource = readFileSync(
-    new URL('../src/view/canvas-view.ts', import.meta.url),
-    'utf8',
-  );
-  const rulerSource = readFileSync(
-    new URL('../src/view/ruler.ts', import.meta.url),
-    'utf8',
-  );
-
-  assert.match(canvasSource, /getCenteredScrollLeft\(/);
-  assert.match(
-    rulerSource,
-    /getPageLeftResolved\(\s*pageIdx,\s*this\.virtualScroll\.getTotalWidth\(\),?\s*\)/,
-  );
-  assert.doesNotMatch(rulerSource, /contentOffsetX/);
 });

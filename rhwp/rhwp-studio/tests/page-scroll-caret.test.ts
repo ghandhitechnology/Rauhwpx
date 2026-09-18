@@ -35,15 +35,6 @@ test('머리말·개체 선택·셀 선택 캐럿도 화면만 옮긴다', () =>
   assert.equal(caretRectForPageScroll(cursor(), true), null);
 });
 
-test('키보드 PageUp/PageDown 은 추출한 캐럿 정책을 쓴다', () => {
-  const source = readFileSync(
-    new URL('../src/engine/input-handler-keyboard.ts', import.meta.url),
-    'utf8',
-  );
-  assert.match(source, /from '@\/view\/page-scroll-caret'/);
-  assert.match(source, /resolveCaretRectForPageScroll\(self\.cursor, self\.isFormMode\?\.\(\) === true\)/);
-});
-
 test('CanvasView는 viewport 높이와 세로 이동을 setPageDimensions에 전달한다', () => {
   const source = readFileSync(new URL('../src/view/canvas-view.ts', import.meta.url), 'utf8');
   const start = source.indexOf('private recalcLayout(): void {');

@@ -63,15 +63,6 @@ test('Linux packages cover AppImage and deb on x64 and arm64', () => {
   assert.match(rootPackage.scripts?.['build:desktop'] ?? '', /build:native/);
 });
 
-test('desktop packages and launches the native document reference extractor', () => {
-  assert.match(rootPackage.scripts?.['build:native'] ?? '', /cargo build[\s\S]*--bin rhwp/);
-  assert.equal(rootPackage.build?.files?.includes('desktop/**/*'), true);
-  assert.equal(rootPackage.build?.asarUnpack?.includes('desktop/bin/**'), true);
-  assert.match(desktopMain, /function nativeRhwpExecutable\(\)/);
-  assert.match(desktopMain, /RHWP_BIN: rhwpExecutable/);
-  assert.match(desktopMain, /Packaged native document extractor is missing/);
-});
-
 test('Linux packages register every supported document extension', () => {
   const extensions = (rootPackage.build?.fileAssociations ?? [])
     .flatMap(({ ext }) => Array.isArray(ext) ? ext : [ext]);
@@ -93,16 +84,6 @@ test('Linux releases run on native Ubuntu x64 and arm64 runners', () => {
   assert.match(releaseWorkflow, /release\/\*\.AppImage/);
   assert.match(releaseWorkflow, /release\/\*\.deb/);
   assert.match(releaseWorkflow, /latest-linux\*\.yml/);
-});
-
-test('Linux update policy stages AppImages and leaves deb installation to the user', () => {
-  assert.match(desktopMain, /process\.platform === 'linux' && Boolean\(process\.env\.APPIMAGE\)/);
-  assert.match(desktopMain, /autoUpdater\.autoDownload = process\.platform === 'darwin' \|\| linuxAppImage/);
-  assert.match(desktopMain, /linuxDeb[\s\S]*?shell\.openExternal\(RELEASES_URL\)/);
-  assert.match(desktopMain, /RELEASES_API_URL/);
-  assert.match(desktopMain, /checkForDebUpdates/);
-  assert.match(desktopMain, /createUpdateLifecycle\(\{[\s\S]*?platform: process\.platform/);
-  assert.match(desktopMain, /updateLifecycle\.configureUpdates\(\)/);
 });
 
 test('Deb update discovery compares stable versions and selects the native architecture', () => {

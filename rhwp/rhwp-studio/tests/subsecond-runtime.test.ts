@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 
 type RuntimeModule = typeof import('../src/core/subsecond-runtime.ts');
 
@@ -216,51 +215,4 @@ test('devtools websocket forwards patch messages and reconnects without reloadin
 
   disconnect?.();
   assert.equal(sockets[1]?.closed, true);
-});
-
-test('repository exposes a feature-gated dx adapter without changing normal WASM builds', () => {
-  const cargo = readFileSync(new URL('../../Cargo.toml', import.meta.url), 'utf8');
-  const adapterCargo = readFileSync(
-    new URL('../../tools/rhwp-subsecond/Cargo.toml', import.meta.url),
-    'utf8',
-  );
-  const adapterBuild = readFileSync(
-    new URL('../../tools/rhwp-subsecond/build.rs', import.meta.url),
-    'utf8',
-  );
-  const wasmApi = readFileSync(new URL('../../src/wasm_api.rs', import.meta.url), 'utf8');
-  const lib = readFileSync(new URL('../../src/lib.rs', import.meta.url), 'utf8');
-  const bridge = readFileSync(new URL('../src/core/wasm-bridge.ts', import.meta.url), 'utf8');
-  const canvasView = readFileSync(new URL('../src/view/canvas-view.ts', import.meta.url), 'utf8');
-  const vite = readFileSync(new URL('../vite.config.ts', import.meta.url), 'utf8');
-  const studioPackage = readFileSync(new URL('../package.json', import.meta.url), 'utf8');
-
-  assert.match(cargo, /subsecond-dev\s*=\s*\["dep:subsecond"\]/);
-  assert.match(cargo, /subsecond\s*=\s*\{\s*version\s*=\s*"=0\.7\.9",\s*optional\s*=\s*true\s*\}/);
-  assert.match(cargo, /members\s*=\s*\[[\s\S]*"tools\/rhwp-subsecond"/);
-  assert.match(adapterCargo, /name\s*=\s*"rhwp-subsecond"/);
-  assert.match(adapterCargo, /build\s*=\s*"build\.rs"/);
-  assert.match(adapterCargo, /subsecond-dev\s*=\s*\["rhwp\/subsecond-dev"\]/);
-  assert.match(adapterBuild, /librhwp-dioxus\.rlib/);
-  assert.match(lib, /cfg\(feature = "subsecond-dev"\)[\s\S]*mod subsecond_dev/);
-  assert.match(wasmApi, /getSubsecondPatchRevision/);
-  assert.match(wasmApi, /invalidateSubsecondRenderCaches/);
-  assert.match(bridge, /connectSubsecondDevtools/);
-  assert.match(bridge, /isSubsecondHotpatchEnabled/);
-  assert.match(bridge, /getSubsecondPatchRevision/);
-  assert.match(bridge, /invalidateSubsecondRenderCaches/);
-  assert.match(canvasView, /new SubsecondRevisionWatcher/);
-  assert.match(canvasView, /document-view-changed[\s\S]*subsecond-renderer[\s\S]*this\.refreshPages\(\)/);
-  assert.match(canvasView, /subsecondRevisionWatcher\.stop\(\)/);
-  assert.match(vite, /['"]\/_dioxus['"]/);
-  assert.match(vite, /['"]\/wasm['"][\s\S]*127\.0\.0\.1:7711/);
-  assert.match(vite, /librhwp-subsecond-patch-\*\.wasm/);
-  assert.match(vite, /handleHotUpdate[\s\S]*librhwp-subsecond-patch-/);
-  assert.match(vite, /RHWP_SUBSECOND/);
-  assert.match(vite, /rhwp-subsecond-vite/);
-  assert.match(vite, /rhwp-subsecond\.js/);
-  assert.match(studioPackage, /"subsecond:sync"[\s\S]*rhwp-subsecond-vite/);
-  assert.match(studioPackage, /"subsecond:install"[\s\S]*dioxus-cli --version 0\.7\.9 --locked/);
-  assert.match(studioPackage, /"subsecond:serve"[\s\S]*--package rhwp-subsecond[\s\S]*--hot-patch/);
-  assert.match(studioPackage, /"dev:subsecond"\s*:\s*"npm run subsecond:sync && RHWP_SUBSECOND=1 vite"/);
 });

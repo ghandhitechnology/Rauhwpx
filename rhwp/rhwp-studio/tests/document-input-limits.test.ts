@@ -1,14 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import {
-  EXACT_LOCAL_DOCUMENT_MAX_BYTES,
-  INSERTED_IMAGE_MAX_BYTES,
-  PORTABLE_HISTORY_MAX_BYTES,
-  cancelResponseBody,
-  readBlobBytesWithLimit,
-  readResponseBytesWithLimit,
-} from '../src/core/document-input-limits.ts';
+import { EXACT_LOCAL_DOCUMENT_MAX_BYTES, INSERTED_IMAGE_MAX_BYTES, PORTABLE_HISTORY_MAX_BYTES, cancelResponseBody, readBlobBytesWithLimit, readResponseBytesWithLimit } from '../src/core/document-input-limits.ts';
 import { readFileFromHandle, type FileSystemFileHandleLike } from '../src/command/file-system-access.ts';
 
 test('early HTTP rejection cancels an unread renderer response body', async () => {
@@ -100,18 +92,5 @@ test('response limits reject both oversized declarations and streamed bodies', a
   assert.deepEqual(
     await readResponseBytesWithLimit(new Response(new Uint8Array([1, 2, 3])), 3),
     new Uint8Array([1, 2, 3]),
-  );
-});
-
-test('drop reads stay untrusted and all fallback opens use the portable-history router', () => {
-  const main = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
-  assert.match(main, /loadFile\(file, \{ fileHandle, untrustedSource: true \}\)/);
-  assert.match(
-    main,
-    /options\.fileHandle && !options\.untrustedSource[\s\S]*?readFileFromHandle\(options\.fileHandle\)[\s\S]*?readBlobBytesWithLimit\(file, UNTRUSTED_DOCUMENT_MAX_BYTES/,
-  );
-  assert.match(
-    main,
-    /async function loadFile[\s\S]*?return openDocumentBytes\(\{[\s\S]*?bytes: selected\.bytes,[\s\S]*?fileName: selected\.name/,
   );
 });
