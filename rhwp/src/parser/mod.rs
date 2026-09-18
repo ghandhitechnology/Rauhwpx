@@ -439,6 +439,17 @@ fn parse_hwp_with_cfb(
         normalize_variant_paragraph_vpos(&mut doc);
     }
 
+    if let Some(idx) = doc
+        .extra_streams
+        .iter()
+        .position(|(p, _)| p == crate::model::hyperlink_format::HWP_STREAM)
+    {
+        let (_, bytes) = doc.extra_streams.remove(idx);
+        if bytes.len() <= 16 * 1024 * 1024 {
+            crate::model::hyperlink_format::decode(&mut doc, &bytes);
+        }
+    }
+
     Ok(doc)
 }
 
@@ -742,6 +753,17 @@ fn parse_hwp_with_lenient(lenient: cfb_reader::LenientCfbReader) -> Result<Docum
     // paragraph 의 line_segs.vpos 에서 cumulative spacing_before 차감.
     if doc.is_hwp3_variant {
         normalize_variant_paragraph_vpos(&mut doc);
+    }
+
+    if let Some(idx) = doc
+        .extra_streams
+        .iter()
+        .position(|(p, _)| p == crate::model::hyperlink_format::HWP_STREAM)
+    {
+        let (_, bytes) = doc.extra_streams.remove(idx);
+        if bytes.len() <= 16 * 1024 * 1024 {
+            crate::model::hyperlink_format::decode(&mut doc, &bytes);
+        }
     }
 
     Ok(doc)

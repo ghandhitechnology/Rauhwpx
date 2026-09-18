@@ -45,9 +45,12 @@ test('finishLineEndpointDrag 는 끝점 이동을 executeOperation record 로 �
 });
 
 test('onMouseUp 은 직선 끝점 종료를 finishLineEndpointDrag 로 위임한다(인라인 정리 금지)', () => {
-  const body = fnBody(mouseSrc, 'export function onMouseUp');
+  const wrapper = fnBody(mouseSrc, 'export function onMouseUp');
+  assert.match(wrapper, /finishMouseUp\.call\(this,\s*e\)/,
+    'onMouseUp 하이퍼링크 래퍼가 본문을 삼키지 않고 finishMouseUp 에 위임해야 함');
+  const body = fnBody(mouseSrc, 'function finishMouseUp');
   assert.match(body, /if \(this\.isLineEndpointDragging\)\s*{\s*this\.finishLineEndpointDrag\(\);/,
-    'onMouseUp 은 상태 인라인 초기화가 아니라 finishLineEndpointDrag 로 위임해야 함(기록 경로 확보)');
+    'finishMouseUp 은 상태 인라인 초기화가 아니라 finishLineEndpointDrag 로 위임해야 함(기록 경로 확보)');
 });
 
 // ── 결함 3: 클릭 z순서 변경 ────────────────────────────────────────────────

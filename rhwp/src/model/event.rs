@@ -150,6 +150,14 @@ pub enum DocumentEvent {
         section: usize,
         para: usize,
     },
+
+    /// 본문·표 셀·글상자의 하이퍼링크를 삽입·수정·해제했다.
+    HyperlinkChanged {
+        section: usize,
+        para: usize,
+        cell_path: Vec<(usize, usize, usize)>,
+        field_id: u32,
+    },
 }
 
 impl DocumentEvent {
@@ -179,7 +187,8 @@ impl DocumentEvent {
             | DocumentEvent::PictureResized { section, .. }
             | DocumentEvent::FootnoteDeleted { section, .. }
             | DocumentEvent::ContentPasted { section, .. }
-            | DocumentEvent::HtmlImported { section, .. } => *section,
+            | DocumentEvent::HtmlImported { section, .. }
+            | DocumentEvent::HyperlinkChanged { section, .. } => *section,
         }
     }
 
@@ -209,7 +218,8 @@ impl DocumentEvent {
             | DocumentEvent::PictureResized { para, .. }
             | DocumentEvent::FootnoteDeleted { para, .. }
             | DocumentEvent::ContentPasted { para, .. }
-            | DocumentEvent::HtmlImported { para, .. } => *para,
+            | DocumentEvent::HtmlImported { para, .. }
+            | DocumentEvent::HyperlinkChanged { para, .. } => *para,
         }
     }
 
@@ -439,6 +449,30 @@ impl DocumentEvent {
                 r#"{{"type":"HtmlImported","section":{},"para":{}}}"#,
                 section, para
             ),
+            DocumentEvent::HyperlinkChanged {
+                section,
+                para,
+                cell_path,
+                field_id,
+            } => {
+                let mut cell_path_json = String::from("[");
+                for (i, &(control_index, cell_index, cell_para_index)) in
+                    cell_path.iter().enumerate()
+                {
+                    if i != 0 {
+                        cell_path_json.push(',');
+                    }
+                    cell_path_json.push_str(&format!(
+                        r#"{{"controlIndex":{},"cellIndex":{},"cellParaIndex":{}}}"#,
+                        control_index, cell_index, cell_para_index
+                    ));
+                }
+                cell_path_json.push(']');
+                format!(
+                    r#"{{"type":"HyperlinkChanged","section":{},"para":{},"cellPath":{},"fieldId":{}}}"#,
+                    section, para, cell_path_json, field_id
+                )
+            }
         }
     }
 }
