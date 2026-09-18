@@ -857,6 +857,14 @@ impl DocumentCore {
                 svg.insert_str(pos + 1, &insert);
             }
         }
+        if !profile.shows_editor_visuals() {
+            let links = self
+                .hyperlinks_in_layer_tree(&layer_tree)?
+                .iter()
+                .map(|l| l.pdf_link())
+                .collect::<Vec<_>>();
+            crate::renderer::hyperlinks::append_svg_links(&mut svg, &links);
+        }
         Ok(svg)
     }
 
@@ -894,10 +902,17 @@ impl DocumentCore {
         }
 
         let mut svg_pages = Vec::with_capacity(page_nums.len());
+        let mut page_links = Vec::with_capacity(page_nums.len());
         for &page_num in page_nums {
             svg_pages.push(self.render_page_svg_native(page_num)?);
+            page_links.push(
+                self.page_hyperlinks_native(page_num, RenderProfile::Print)?
+                    .iter()
+                    .map(|l| l.pdf_link())
+                    .collect(),
+            );
         }
-        crate::renderer::pdf::svgs_to_pdf_with_options(&svg_pages, options)
+        crate::renderer::pdf::svgs_to_pdf_with_links(&svg_pages, &page_links, options)
             .map_err(HwpError::RenderError)
     }
 
@@ -916,10 +931,17 @@ impl DocumentCore {
         }
 
         let mut svg_pages = Vec::with_capacity(page_nums.len());
+        let mut page_links = Vec::with_capacity(page_nums.len());
         for &page_num in page_nums {
             svg_pages.push(self.render_page_svg_layer_with_profile_native(page_num, profile)?);
+            page_links.push(
+                self.page_hyperlinks_native(page_num, profile)?
+                    .iter()
+                    .map(|l| l.pdf_link())
+                    .collect(),
+            );
         }
-        crate::renderer::pdf::svgs_to_pdf_with_options(&svg_pages, options)
+        crate::renderer::pdf::svgs_to_pdf_with_links(&svg_pages, &page_links, options)
             .map_err(HwpError::RenderError)
     }
 
@@ -988,10 +1010,18 @@ impl DocumentCore {
         }
 
         let mut layer_trees = Vec::with_capacity(page_nums.len());
+        let mut page_links = Vec::with_capacity(page_nums.len());
         for &page_num in page_nums {
-            layer_trees.push(self.build_page_layer_tree_with_profile(page_num, profile)?);
+            let tree = self.build_page_layer_tree_with_profile(page_num, profile)?;
+            page_links.push(
+                self.hyperlinks_in_layer_tree(&tree)?
+                    .iter()
+                    .map(|l| l.pdf_link())
+                    .collect(),
+            );
+            layer_trees.push(tree);
         }
-        crate::renderer::pdf::layer_trees_to_pdf_with_options(&layer_trees, options)
+        crate::renderer::pdf::layer_trees_to_pdf_with_links(&layer_trees, &page_links, options)
             .map_err(HwpError::RenderError)
     }
 

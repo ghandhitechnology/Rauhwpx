@@ -335,7 +335,11 @@ fn inactive_field_end_insertions(
         .iter()
         .filter_map(|fr| {
             match para.controls.get(fr.control_idx) {
-                Some(Control::Field(field)) if field.field_type == FieldType::ClickHere => {}
+                Some(Control::Field(field))
+                    if matches!(
+                        field.field_type,
+                        FieldType::ClickHere | FieldType::Hyperlink
+                    ) => {}
                 _ => return None,
             }
             // 빈 누름틀은 active 상태가 아직 반영되기 전 첫 입력도 값으로 받아야 한다.
@@ -521,7 +525,11 @@ fn inactive_field_start_insertions(
         .iter()
         .filter_map(|fr| {
             match para.controls.get(fr.control_idx) {
-                Some(Control::Field(field)) if field.field_type == FieldType::ClickHere => {}
+                Some(Control::Field(field))
+                    if matches!(
+                        field.field_type,
+                        FieldType::ClickHere | FieldType::Hyperlink
+                    ) => {}
                 _ => return None,
             }
             // 빈 누름틀은 시작/끝 경계가 없고 첫 입력이 필드 값이어야 한다.
@@ -588,7 +596,11 @@ fn has_clickhere_field_range(para: &Paragraph) -> bool {
     para.field_ranges.iter().any(|fr| {
         matches!(
             para.controls.get(fr.control_idx),
-            Some(Control::Field(field)) if field.field_type == FieldType::ClickHere
+            Some(Control::Field(field))
+                if matches!(
+                    field.field_type,
+                    FieldType::ClickHere | FieldType::Hyperlink
+                )
         )
     })
 }
