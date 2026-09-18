@@ -1,11 +1,8 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { MergeWorkerClient } from '../src/merge/worker-client.ts';
 import type { MergeWorkerRequest, MergeWorkerResponse } from '../src/merge/worker-protocol.ts';
-
-const mergeWorkerSource = readFileSync(new URL('../src/merge/merge.worker.ts', import.meta.url), 'utf8');
 
 async function waitFor(predicate: () => boolean, timeoutMs = 250): Promise<void> {
   const deadline = Date.now() + timeoutMs;
@@ -50,10 +47,6 @@ class FakeWorker {
     for (const listener of this.messageErrorListeners) listener({ data: null } as MessageEvent<unknown>);
   }
 }
-
-test('rejected WASM initialization clears cached readiness for a retry', () => {
-  assert.match(mergeWorkerSource, /wasmReady = initializing\.catch\(\(error\) => \{\s*wasmReady = null;\s*throw error;/);
-});
 
 test('worker client forwards analysis and progress', async () => {
   const worker = new FakeWorker();

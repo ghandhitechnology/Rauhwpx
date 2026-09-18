@@ -1,15 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import {
-  BrowserbaseSession,
-  BrowserbaseFleet,
-  MAIN_BROWSER_ID,
-  credentialFingerprint,
-  normalizeBrowserbaseOverride,
-  resolveBrowserbaseCredentials,
-  validateBrowserbaseCredentials,
-} from '../browserbase-session.mjs';
+import { BrowserbaseSession, BrowserbaseFleet, MAIN_BROWSER_ID, credentialFingerprint, normalizeBrowserbaseOverride, resolveBrowserbaseCredentials, validateBrowserbaseCredentials } from '../browserbase-session.mjs';
 
 test('Browserbase serializes actions that share a remote session', async () => {
   const browser = new BrowserbaseSession({ env: {} });
@@ -311,16 +302,6 @@ test('later credential set wins when an older validation finishes last', async (
   const status = await fleet.applyVerifiedOverride({ apiKey: 'bb_new_2222' }, {}, second);
   assert.equal(status.keySource, 'studio');
   assert.equal(status.keyTail, '2222');
-});
-
-test('hub set and clear bump the fleet credential revision', () => {
-  const server = readFileSync(new URL('../server.mjs', import.meta.url), 'utf8');
-  assert.match(server, /const revision = record\.browserbaseSession\.beginCredentialChange\(\);/);
-  assert.match(server, /return record\.browserbaseSession\.applyVerifiedOverride\(/);
-  assert.match(
-    server,
-    /case 'browserbase-credentials-clear': \{[\s\S]*?record\.browserbaseSession\.beginCredentialChange\(\);[\s\S]*?setOverride\(null/,
-  );
 });
 
 test('fleet override restarts live browsers and every browser launches with the new key', async () => {

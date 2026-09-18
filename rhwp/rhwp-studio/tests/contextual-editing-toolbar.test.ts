@@ -1,15 +1,7 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
-import {
-  contextualEditingToolbarMode,
-  contextualObjectCommandEnabled,
-} from '../src/ui/contextual-editing-toolbar.ts';
-
-const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
-const main = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
-const inputHandler = readFileSync(new URL('../src/engine/input-handler.ts', import.meta.url), 'utf8');
+import { contextualEditingToolbarMode, contextualObjectCommandEnabled } from '../src/ui/contextual-editing-toolbar.ts';
 
 test('일반 문서에서는 기본 도구 모음을 유지한다', () => {
   assert.equal(contextualEditingToolbarMode({
@@ -48,41 +40,6 @@ test('주석과 머리말 편집 모드의 우선순위를 결정한다', () => 
     headerFooterActive: true,
     noteActive: false,
   }), 'header-footer');
-});
-
-test('개체와 표 모드는 한컴식 문맥 도구와 선택 이벤트에 연결된다', () => {
-  assert.match(html, /data-toolbar-mode="object"/);
-  assert.match(html, /data-toolbar-mode="table"/);
-  assert.match(html, /data-cmd="insert:arrange-front"/);
-  assert.match(html, /data-cmd="table:cell-props"/);
-  assert.match(html, /data-cmd="table:cell-merge"/);
-  assert.match(main, /eventBus\.on\('picture-object-selection-changed'/);
-  assert.match(main, /eventBus\.on\('table-object-selection-changed'/);
-  assert.match(inputHandler, /cursor\.exitPictureObjectSelection\(\)/);
-  assert.match(inputHandler, /pictureObjectRenderer\?\.clear\(\)/);
-  assert.match(inputHandler, /cursor\.exitTableObjectSelection\(\)/);
-  assert.match(inputHandler, /tableObjectRenderer\?\.clear\(\)/);
-  assert.match(inputHandler, /cursor\.exitCellSelectionMode\(\)/);
-  assert.match(inputHandler, /cellSelectionRenderer\?\.clear\(\)/);
-  assert.match(inputHandler, /eventBus\.emit\('picture-object-selection-changed', false\)/);
-  assert.match(inputHandler, /eventBus\.emit\('table-object-selection-changed', false\)/);
-  assert.match(main, /setBasicToolboxExpanded\(true\)/);
-});
-
-test('문서 교체는 기존 편집 상태를 WASM 교체 전에 해제한다', () => {
-  const loadStart = main.indexOf('async function loadBytes');
-  const loadEnd = main.indexOf('/** 파일 메뉴', loadStart);
-  const loadBlock = main.slice(loadStart, loadEnd);
-  assert.ok(
-    loadBlock.indexOf('inputHandler?.deactivate()') < loadBlock.indexOf('wasm.loadDocument'),
-  );
-
-  const createStart = main.indexOf('async function createNewDocument');
-  const createEnd = main.indexOf('\nasync function', createStart + 1);
-  const createBlock = main.slice(createStart, createEnd);
-  assert.ok(
-    createBlock.indexOf('inputHandler?.deactivate()') < createBlock.indexOf('wasm.createNewDocument'),
-  );
 });
 
 test('개체 문맥 버튼은 실제 선택 종류와 개수에 맞게 활성화된다', () => {

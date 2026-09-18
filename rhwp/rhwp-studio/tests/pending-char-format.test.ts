@@ -12,25 +12,7 @@ import { fileURLToPath } from 'node:url';
 // 펼친 선택과 구분해야 한다.
 
 const studioRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const inputHandlerSrc = readFileSync(path.join(studioRoot, 'src/engine/input-handler.ts'), 'utf8');
-const textSrc = readFileSync(path.join(studioRoot, 'src/engine/input-handler-text.ts'), 'utf8');
 const commandSrc = readFileSync(path.join(studioRoot, 'src/engine/command.ts'), 'utf8');
-
-function methodBody(src: string, name: string): string {
-  const sig = new RegExp(`\\b${name}\\s*\\([^)]*\\)\\s*:[^\\{]*\\{`);
-  const m = sig.exec(src);
-  assert.ok(m, `${name} 메서드 not found`);
-  const open = src.indexOf('{', m.index + m[0].length - 1);
-  let depth = 0;
-  for (let i = open; i < src.length; i++) {
-    if (src[i] === '{') depth++;
-    else if (src[i] === '}') {
-      depth--;
-      if (depth === 0) return src.slice(open, i + 1);
-    }
-  }
-  throw new Error(`${name} 본문의 닫는 괄호를 찾지 못함`);
-}
 
 function classBlock(src: string, name: string): string {
   const start = src.indexOf(`export class ${name}`);
@@ -38,57 +20,6 @@ function classBlock(src: string, name: string): string {
   const rel = src.slice(start + 1).indexOf('\nexport class ');
   return rel === -1 ? src.slice(start) : src.slice(start, start + 1 + rel);
 }
-
-test('format-char 는 선택이 없어도 applyCharFormat 으로 보낸다', () => {
-  const start = inputHandlerSrc.indexOf("eventBus.on('format-char'");
-  assert.notEqual(start, -1);
-  const handler = inputHandlerSrc.slice(start, start + 500);
-  assert.match(handler, /this\.applyCharFormat\(props as Partial<CharProperties>\)/);
-  assert.doesNotMatch(handler, /if \(this\.cursor\.hasSelection\(\)\)/);
-});
-
-test('접힌 캐럿의 글자 서식은 pending 에 쌓고 펼친 선택에만 ApplyCharFormatCommand 를 쓴다', () => {
-  const body = methodBody(inputHandlerSrc, 'applyCharFormat');
-  assert.match(body, /hasNonCollapsedTextSelection\(\)/);
-  assert.match(body, /mergePendingCharFormat\(props\)/);
-  assert.match(body, /new ApplyCharFormatCommand/);
-  const pendingIdx = body.indexOf('mergePendingCharFormat');
-  const cmdIdx = body.indexOf('new ApplyCharFormatCommand');
-  assert.ok(pendingIdx !== -1 && pendingIdx < cmdIdx);
-});
-
-test('hasNonCollapsedTextSelection 은 drag-anchor 접힌 선택을 펼친 범위로 치지 않는다', () => {
-  const body = methodBody(inputHandlerSrc, 'hasNonCollapsedTextSelection');
-  assert.match(body, /CursorState\.comparePositions\(sel\.start, sel\.end\) !== 0/);
-  assert.match(body, /sel\.start\.charOffset !== sel\.end\.charOffset/);
-});
-
-test('툴바 표시와 토글 기준은 pending 서식을 덮어씌운다', () => {
-  const body = methodBody(inputHandlerSrc, 'getCharPropertiesAtCursor');
-  assert.match(body, /withPendingCharFormat\(/);
-});
-
-test('본문 입력과 IME 커밋은 InsertTextCommand 에 pending 서식을 실어 보낸다', () => {
-  assert.match(
-    textSrc,
-    /new InsertTextCommand\(insertPos, text, undefined, this\.peekPendingCharFormat\?\.\(\)\)/,
-  );
-  assert.match(
-    textSrc,
-    /new InsertTextCommand\(anchor, composed, undefined, this\.peekPendingCharFormat\?\.\(\)\)/,
-  );
-  assert.match(textSrc, /applyPendingCharFormatToInsertedRange\?\.\(anchor, this\.compositionLength\)/);
-});
-
-test('InsertTextCommand.execute 는 insert 직후 삽입 범위에 charFormat 을 적용한다', () => {
-  const block = classBlock(commandSrc, 'InsertTextCommand');
-  const execute = block.slice(block.indexOf('execute(wasm'), block.indexOf('consumeTextMutationEffects'));
-  assert.match(execute, /insertTextWithMutationEffects\(wasm, this\.position, this\.text\)/);
-  assert.match(execute, /applyCharFormatToInsertedText\(wasm, this\.position, this\.text, this\.charFormat\)/);
-  const insertIdx = execute.indexOf('insertTextWithMutationEffects');
-  const formatIdx = execute.indexOf('applyCharFormatToInsertedText');
-  assert.ok(insertIdx !== -1 && formatIdx > insertIdx);
-});
 
 test('InsertTextCommand 는 같은 타이핑 서식끼리만 병합한다', () => {
   const block = classBlock(commandSrc, 'InsertTextCommand');

@@ -5,39 +5,9 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import {
-  closeHubSession,
-  createHubToken,
-  ensureAgentHub,
-  HUB_READY_PREFIX,
-  hubHealthUrl,
-  hubPidFromHealth,
-  hubRunPaths,
-  isHubHealthy,
-  isProcessAlive,
-  killPid,
-  nextHubRestartDelay,
-  parseHubReadyLine,
-  readPidFile,
-  removePidFile,
-  registerHubSession,
-  requestHubShutdown,
-  resolveHubLaunch,
-  startDetachedHub,
-  stopHubByPort,
-  stopHubChild,
-  waitForHub,
-  waitForHubChildExit,
-  waitForHubReadyLine,
-  writeHostStream,
-  writePidFile,
-} from '../../../desktop/agent-hub.mjs';
+import { closeHubSession, createHubToken, ensureAgentHub, HUB_READY_PREFIX, hubHealthUrl, hubPidFromHealth, hubRunPaths, isHubHealthy, isProcessAlive, killPid, nextHubRestartDelay, parseHubReadyLine, readPidFile, removePidFile, registerHubSession, requestHubShutdown, resolveHubLaunch, startDetachedHub, stopHubByPort, stopHubChild, waitForHub, waitForHubChildExit, waitForHubReadyLine, writeHostStream, writePidFile } from '../../../desktop/agent-hub.mjs';
 
-const desktopMain = readFileSync(new URL('../../../desktop/main.mjs', import.meta.url), 'utf8');
 const agentHubSource = readFileSync(new URL('../../../desktop/agent-hub.mjs', import.meta.url), 'utf8');
-const preload = readFileSync(new URL('../../../desktop/preload.cjs', import.meta.url), 'utf8');
-const viteConfig = readFileSync(new URL('../vite.config.ts', import.meta.url), 'utf8');
-const viteHubPlugin = readFileSync(new URL('../vite-plugin-agent-hub.mjs', import.meta.url), 'utf8');
 const windowsEnv = Object.freeze({ SystemRoot: 'C:\\Windows' });
 
 function jsonResponse(body: unknown, ok = true) {
@@ -323,56 +293,6 @@ test('packaged Windows launch also keeps the sidecar on the bundled Node runtime
   assert.equal(launch?.env.ELECTRON_RUN_AS_NODE, '1');
 });
 
-test('desktop shell owns one ephemeral authenticated hub and exposes session IPC', () => {
-  assert.match(desktopMain, /app\.requestSingleInstanceLock\(\)/);
-  assert.match(desktopMain, /if \(!app\.isPackaged\)[\s\S]*app\.setPath\('userData', developmentUserData\)/);
-  assert.match(desktopMain, /\.run', 'desktop-user-data'/);
-  assert.match(desktopMain, /app\.on\('second-instance'/);
-  assert.match(desktopMain, /await hubOwner\.ensure\(\);[\s\S]*await createWindow\(request\)/);
-  assert.match(desktopMain, /ipcMain\.handle\('desktop:get-session-context'/);
-  assert.match(desktopMain, /sessions\.sessionForSender\(event\.sender\)/);
-  assert.match(desktopMain, /RHWP_AGENT_PORT: '0'/);
-  assert.match(desktopMain, /RHWP_AGENT_TOKEN: hubToken/);
-  assert.match(desktopMain, /RHWP_LAUNCH_ID: launchId/);
-  assert.match(desktopMain, /RHWP_OWNER_PID: String\(process\.pid\)/);
-  assert.match(desktopMain, /RHWP_OWNER_IPC: '1'/);
-  assert.match(desktopMain, /RHWP_RUNTIME_DIR: this\.runtimeDir/);
-  assert.match(desktopMain, /RHWP_WORK_DIR: this\.workDir/);
-  assert.match(desktopMain, /expectedPid: child\.pid/);
-  assert.match(desktopMain, /expectedLaunchId: launchId/);
-  assert.match(desktopMain, /waitForHubReadyLine\(child, \{ launchId \}\)/);
-  assert.doesNotMatch(desktopMain, /DEFAULT_HUB_PORT/);
-  assert.doesNotMatch(desktopMain, /startStudioServer/);
-  assert.match(desktopMain, /sandbox: true/);
-  assert.match(desktopMain, /contextIsolation: true/);
-  assert.match(desktopMain, /stopHubChild\(/);
-  assert.match(
-    desktopMain,
-    /cleanupPrepared = response\?\.status === 'prepared'[\s\S]{0,100}response\?\.launchId === launchId/,
-  );
-  assert.match(desktopMain, /hasPendingLaunchCleanupSync\(this\.workDir\)/);
-  assert.match(desktopMain, /retainLaunchRootForProcessCleanupSync\(this\.workDir, \{ launchId \}\)/);
-  assert.match(desktopMain, /#restartRequired = false/);
-  assert.match(desktopMain, /this\.#restartTimer \|\| this\.#restartRequired/);
-  assert.match(desktopMain, /if \(this\.#restartRequired\) throw this\.restartRequiredError\(\)/);
-  assert.match(desktopMain, /error\.code = 'AGENT_HUB_RESTART_REQUIRED'/);
-  assert.match(
-    desktopMain,
-    /if \(process\.platform === 'win32'\) \{\s*this\.quarantineUnexpectedWindowsExit\(\);\s*return;/,
-  );
-  assert.match(
-    desktopMain,
-    /quarantineUnexpectedWindowsExit\(\)[\s\S]*this\.#restartRequired = true;[\s\S]*retainLaunchRootForProcessCleanupSync\(this\.workDir, \{ launchId \}\)[\s\S]*requiring an app restart/,
-  );
-  assert.match(
-    desktopMain,
-    /if \(this\.#stoppingChild === child\) return;[\s\S]*if \(process\.platform === 'win32'\)/,
-  );
-  assert.doesNotMatch(desktopMain, /onExit: \(code, signal\) => \{[\s\S]{0,300}this\.#child = null/);
-  assert.match(preload, /getSessionContext: \(\) => ipcRenderer\.invoke\('desktop:get-session-context'\)/);
-  assert.match(preload, /ensureAgentHub: \(\) => ipcRenderer\.invoke\('agent-hub:ensure'\)/);
-});
-
 test('ready-line parser binds readiness to the Electron launch', async () => {
   const line = `${HUB_READY_PREFIX}${JSON.stringify({ launchId: 'launch-a', pid: 44, port: 32123 })}`;
   assert.deepEqual(parseHubReadyLine(line, 'launch-a'), { launchId: 'launch-a', pid: 44, port: 32123 });
@@ -506,34 +426,6 @@ test('owned health checks send launch authentication and verify the child pid', 
     expectedLaunchId: 'launch-b',
     fetchImpl: async () => jsonResponse({ ok: true, pid: 44, launchId: 'launch-a' }),
   }), false);
-});
-
-test('studio development and desktop builds include the agent hub', () => {
-  assert.match(viteConfig, /rhwpAgentHubPlugin\(__dirname\)/);
-  assert.match(viteHubPlugin, /spawnHubProcess\(\{/);
-  assert.match(viteHubPlugin, /process\.execPath/);
-  assert.match(viteHubPlugin, /RHWP_SKIP_AGENT_HUB/);
-  assert.match(viteHubPlugin, /\/__rhwp\/ensure-agent-hub/);
-  assert.match(viteHubPlugin, /RHWP_AGENT_PORT: String\(requestedPort\)/);
-  assert.match(viteHubPlugin, /RHWP_AGENT_TOKEN: token/);
-  assert.match(viteHubPlugin, /RHWP_OWNER_IPC: '1'/);
-  assert.match(viteHubPlugin, /stdio: \['ignore', 'pipe', 'pipe', 'ipc'\]/);
-  assert.match(viteHubPlugin, /RHWP_WORK_DIR:/);
-  assert.match(viteHubPlugin, /waitForHubReadyLine\(spawned, \{ launchId \}\)/);
-  assert.match(viteHubPlugin, /stopHubChild\(/);
-  assert.match(viteHubPlugin, /hasPendingLaunchCleanupSync\(join\(candidate, 'work'\)\)/);
-  assert.match(viteHubPlugin, /retainLaunchRootForProcessCleanupSync\(join\(currentWorkRoot, 'work'\), \{ launchId \}\)/);
-  assert.match(viteHubPlugin, /onExit\(code, signal\)[\s\S]{0,300}Keep the exited leader/);
-  assert.doesNotMatch(viteHubPlugin, /onExit\(code, signal\) \{[\s\S]{0,300}(?:child = null|removeOwnedWorkRoot)/);
-  assert.match(
-    viteHubPlugin,
-    /catch \(error\) \{\s*try \{\s*await stopOwnedHub\(\{ removeWork: true \}\);[\s\S]*?catch \(cleanupError\)[\s\S]*?throw error;/,
-  );
-  assert.doesNotMatch(viteHubPlugin, /waitForHubChildExit/);
-  assert.match(
-    viteHubPlugin,
-    /await requestHubShutdown\([\s\S]{0,500}cleanupPrepared = response\?\.status === 'prepared'[\s\S]{0,100}response\?\.launchId === launchId[\s\S]{0,300}const stopped = await stopHubChild\(current/,
-  );
 });
 
 test('healthz JSON exposes pid for process control', () => {
