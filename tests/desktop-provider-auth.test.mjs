@@ -5,7 +5,10 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { PROVIDER_AUTH_FILES, PROVIDER_KEY_ENV } from '../cloud/src/provider-credentials.mjs';
-import { DESKTOP_PROVIDER_AUTH as TRANSFER_PROVIDER_AUTH } from '../desktop/cloud-provider-auth.mjs';
+import {
+  DESKTOP_PROVIDER_AUTH as TRANSFER_PROVIDER_AUTH,
+  collectProviderAuth as collectTransferAuth,
+} from '../desktop/cloud-provider-auth.mjs';
 import {
   PROVIDER_AUTH_FILES as DESKTOP_AUTH_FILES,
   PROVIDER_API_KEY_ENV,
@@ -111,4 +114,122 @@ test('every provider can supply a cloud seed payload', async (t) => {
     })),
     { code: 'PROVIDER_KEY_REQUIRED' },
   );
+});
+
+test('a Keychain-only Claude login still reaches the cloud transfer payload', async (t) => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-provider-claude-keychain-'));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  const claudeCredential = JSON.stringify({
+    claudeAiOauth: { accessToken: 'keychain-access', refreshToken: 'keychain-refresh' },
+  });
+  let keychainCalls = 0;
+  const readClaudeKeychain = async () => {
+    keychainCalls += 1;
+    return JSON.parse(claudeCredential);
+  };
+
+  const auth = await collectProviderAuth('claude', {
+    vault: memoryVault(),
+    homeDir: home,
+    cliRoot: path.join(home, 'cli'),
+    platform: 'darwin',
+    readClaudeKeychain,
+  });
+  assert.deepEqual(auth.files, [{ path: '.claude/.credentials.json', content: claudeCredential }]);
+
+  const transfer = await collectTransferAuth('claude', {
+    homeDir: home,
+    env: {},
+    platform: 'darwin',
+    readClaudeKeychain,
+  });
+  assert.deepEqual(transfer, { secrets: {}, files: { '.claude/.credentials.json': claudeCredential } });
+  assert.equal(keychainCalls, 2);
+});
+
+test('the profile credential file wins over the Keychain item', async (t) => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-provider-claude-file-'));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  await fs.mkdir(path.join(home, '.claude'), { recursive: true });
+  await fs.writeFile(
+    path.join(home, '.claude', '.credentials.json'),
+    '{"claudeAiOauth":{"accessToken":"file-access"}}',
+  );
+  let keychainCalls = 0;
+  const readClaudeKeychain = async () => {
+    keychainCalls += 1;
+    return { claudeAiOauth: { accessToken: 'keychain-access' } };
+  };
+
+  const auth = await collectProviderAuth('claude', {
+    vault: memoryVault(),
+    homeDir: home,
+    cliRoot: path.join(home, 'cli'),
+    platform: 'darwin',
+    readClaudeKeychain,
+  });
+  assert.deepEqual(auth.files, [{
+    path: '.claude/.credentials.json',
+    content: '{"claudeAiOauth":{"accessToken":"file-access"}}',
+  }]);
+  assert.equal(keychainCalls, 0, 'the Keychain is not consulted when the profile file exists');
+
+  const transfer = await collectTransferAuth('claude', {
+    homeDir: home,
+    env: {},
+    platform: 'darwin',
+    readClaudeKeychain,
+  });
+  assert.deepEqual(transfer.files, {
+    '.claude/.credentials.json': '{"claudeAiOauth":{"accessToken":"file-access"}}',
+  });
+  assert.equal(keychainCalls, 0);
+});
+
+test('a CLAUDE_CONFIG_DIR profile is collected from its own directory', async (t) => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-provider-claude-custom-'));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  const custom = path.join(home, 'custom-claude');
+  await fs.mkdir(custom, { recursive: true });
+  await fs.writeFile(
+    path.join(custom, '.credentials.json'),
+    '{"claudeAiOauth":{"accessToken":"custom-access"}}',
+  );
+  const env = { CLAUDE_CONFIG_DIR: custom };
+
+  const auth = await collectProviderAuth('claude', {
+    vault: memoryVault(),
+    homeDir: home,
+    cliRoot: path.join(home, 'cli'),
+    env,
+  });
+  assert.deepEqual(auth.files, [{
+    path: '.claude/.credentials.json',
+    content: '{"claudeAiOauth":{"accessToken":"custom-access"}}',
+  }]);
+
+  const transfer = await collectTransferAuth('claude', { homeDir: home, env });
+  assert.deepEqual(transfer.files, {
+    '.claude/.credentials.json': '{"claudeAiOauth":{"accessToken":"custom-access"}}',
+  });
+});
+
+test('a profile with no login and no Keychain item collects nothing', async (t) => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-provider-claude-empty-'));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  const readClaudeKeychain = async () => null;
+  const auth = await collectProviderAuth('claude', {
+    vault: memoryVault(),
+    homeDir: home,
+    cliRoot: path.join(home, 'cli'),
+    platform: 'darwin',
+    readClaudeKeychain,
+  });
+  assert.deepEqual(auth, { provider: 'claude', apiKey: null, files: [] });
+  assert.equal(await collectTransferAuth('claude', {
+    homeDir: home,
+    env: {},
+    platform: 'darwin',
+    readClaudeKeychain,
+  }), null);
 });

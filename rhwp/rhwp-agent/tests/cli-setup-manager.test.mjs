@@ -1489,32 +1489,95 @@ test('a Windows Claude custom-dir conflict wins before app auth commit', async (
   assert.equal(existsSync(path.join(rootDir, 'config.json')), false);
 });
 
-test('macOS Claude OAuth fails before spawning and leaves API-key setup available', async (t) => {
+test('macOS Claude OAuth stages the isolated profile and publishes the login', async (t) => {
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-claude-darwin-'));
   t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
-  let spawnCount = 0;
+  const lifecycle = [];
+  const stagedHome = path.join(
+    rootDir,
+    'claude-oauth-staging',
+    'run-1',
+  );
+  const credentialFile = path.join(stagedHome, '.credentials.json');
+  const transaction = oauthTransactionStub(stagedHome, stagedHome, lifecycle);
+  transaction.credentialFile = credentialFile;
+  let preparedWith = null;
+  let keychainReads = 0;
+  const spawnArgs = [];
   const manager = await createCliSetupManager({
     rootDir,
     platform: 'darwin',
     baseEnv: { PATH: '/usr/bin' },
     fetchImpl: acceptingFetch,
-    spawnProcess: () => {
-      spawnCount += 1;
+    homeDir: path.join(rootDir, 'no-home'),
+    // Claude Code authors the login itself; the Keychain must not be consulted
+    // when the staged profile already holds the credential file.
+    readClaudeKeychain: async () => {
+      keychainReads += 1;
+      return null;
+    },
+    spawnProcess: (command, argv) => {
+      spawnArgs.push(argv);
       const proc = new FakeProcess();
-      queueMicrotask(() => proc.emit('close', 0, null));
+      queueMicrotask(() => {
+        // The CLI writes into the staged config dir it was given.
+        mkdirSync(path.dirname(credentialFile), { recursive: true });
+        writeFileSync(credentialFile, '{"claudeAiOauth":{"accessToken":"mac-token"}}');
+        proc.emit('close', 0, null);
+      });
       return proc;
+    },
+    prepareOAuthCredential: async (options) => {
+      preparedWith = options;
+      return transaction;
     },
   }).init();
 
-  await assert.rejects(manager.authenticate('claude', 'oauth'), (error) => {
-    assert.equal(error.code, 'AGENT_AUTH_OAUTH_UNSUPPORTED');
-    assert.match(error.message, /API 키/);
-    return true;
-  });
-  assert.equal(spawnCount, 0);
-  const apiStatus = await manager.authenticate('claude', 'api-key', 'sk-ant-safe-alternative');
-  assert.equal(apiStatus.authMethod, 'api-key');
-  assert.equal(manager.envFor('claude').ANTHROPIC_API_KEY, 'sk-ant-safe-alternative');
+  const status = await manager.authenticate('claude', 'oauth');
+  assert.ok(spawnArgs.some((argv) => argv.join(' ') === 'auth login'), 'the login CLI is spawned on macOS');
+  assert.equal(preparedWith.sourceFile, path.join(rootDir, 'no-home', '.claude', '.credentials.json'));
+  assert.equal(preparedWith.relativeCredentialPath, '.credentials.json');
+  assert.deepEqual(lifecycle, ['publish', 'cleanup', 'mark-committed']);
+  assert.equal(status.authMethod, 'oauth');
+  assert.equal(keychainReads, 0);
+});
+
+test('macOS Claude OAuth harvests a Keychain-only login into the staged profile', async (t) => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-cli-claude-keychain-'));
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const lifecycle = [];
+  const stagedHome = path.join(rootDir, 'claude-oauth-staging', 'run-2');
+  const credentialFile = path.join(stagedHome, '.credentials.json');
+  const transaction = oauthTransactionStub(stagedHome, stagedHome, lifecycle);
+  transaction.credentialFile = credentialFile;
+  const keychainServices = [];
+  const manager = await createCliSetupManager({
+    rootDir,
+    platform: 'darwin',
+    baseEnv: { PATH: '/usr/bin' },
+    fetchImpl: acceptingFetch,
+    homeDir: path.join(rootDir, 'no-home'),
+    readClaudeKeychain: async ({ configDir, hasConfigDir }) => {
+      keychainServices.push({ configDir, hasConfigDir });
+      return { claudeAiOauth: { accessToken: 'keychain-token' } };
+    },
+    spawnProcess: () => {
+      const proc = new FakeProcess();
+      // A Keychain-only build leaves the staged file untouched.
+      queueMicrotask(() => proc.emit('close', 0, null));
+      return proc;
+    },
+    prepareOAuthCredential: async () => transaction,
+  }).init();
+
+  const status = await manager.authenticate('claude', 'oauth');
+  assert.deepEqual(keychainServices, [{ configDir: stagedHome, hasConfigDir: true }]);
+  assert.deepEqual(
+    JSON.parse(await fs.readFile(credentialFile, 'utf8')),
+    { claudeAiOauth: { accessToken: 'keychain-token' } },
+  );
+  assert.deepEqual(lifecycle, ['publish', 'cleanup', 'mark-committed']);
+  assert.equal(status.authMethod, 'oauth');
 });
 
 test('Grok installs through the shared npm prefix and stores the API key securely', async () => {

@@ -2,6 +2,9 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { AppServerError } from './cloud-app-server.mjs';
+import {
+  readClaudeKeychainCredential,
+} from '../rhwp/rhwp-agent/claude-credentials.mjs';
 
 export const PROVIDER_AUTH_FILES = Object.freeze({
   claude: Object.freeze(['.claude.json', '.claude/.credentials.json']),
@@ -97,11 +100,26 @@ export function defaultCliRoot(homeDir = os.homedir(), env = process.env, platfo
   return path.join(env.XDG_DATA_HOME || path.join(homeDir, '.local', 'share'), 'rhwp', 'cli');
 }
 
+const CLAUDE_CREDENTIAL_DESTINATION = '.claude/.credentials.json';
+
+/**
+ * Claude Code's live config directory, which a CLAUDE_CONFIG_DIR override moves
+ * away from the default `~/.claude`. The override also decides which Keychain
+ * service owns the login, so both travel together.
+ */
+function claudeProfile({ homeDir, env }) {
+  const configured = typeof env?.CLAUDE_CONFIG_DIR === 'string' ? env.CLAUDE_CONFIG_DIR.trim() : '';
+  return {
+    configDir: configured ? path.resolve(configured) : path.join(homeDir, '.claude'),
+    hasConfigDir: configured !== '',
+  };
+}
+
 function sourceCandidates(provider, { homeDir, cliRoot, env }) {
   if (provider === 'claude') {
     return [
       { path: path.join(homeDir, '.claude.json'), dest: '.claude.json' },
-      { path: path.join(homeDir, '.claude', '.credentials.json'), dest: '.claude/.credentials.json' },
+      { path: path.join(claudeProfile({ homeDir, env }).configDir, '.credentials.json'), dest: CLAUDE_CREDENTIAL_DESTINATION },
     ];
   }
   if (provider === 'codex') {
@@ -153,6 +171,8 @@ export async function collectProviderAuth(provider, {
   homeDir = os.homedir(),
   cliRoot = defaultCliRoot(homeDir),
   env = process.env,
+  platform = process.platform,
+  readClaudeKeychain = readClaudeKeychainCredential,
 } = {}) {
   const name = assertProvider(provider);
   const storedKey = await readSecret(vault, PROVIDER_SECRET_IDS[name]);
@@ -167,6 +187,21 @@ export async function collectProviderAuth(provider, {
     if (!file) continue;
     seen.add(file.path);
     files.push(file);
+  }
+  // A macOS profile can hold its Claude login only in the Keychain, where the
+  // file scan above cannot see it. The cloud accepts the same credential file,
+  // so the item is materialized into that destination. The Keychain itself is
+  // never written — only the CLI may author that item.
+  if (name === 'claude' && !seen.has(CLAUDE_CREDENTIAL_DESTINATION)) {
+    const profile = claudeProfile({ homeDir, env });
+    const fromKeychain = await readClaudeKeychain({
+      configDir: profile.configDir,
+      hasConfigDir: profile.hasConfigDir,
+      platform,
+    }).catch(() => null);
+    if (fromKeychain) {
+      files.push({ path: CLAUDE_CREDENTIAL_DESTINATION, content: JSON.stringify(fromKeychain) });
+    }
   }
   return {
     provider: name,
