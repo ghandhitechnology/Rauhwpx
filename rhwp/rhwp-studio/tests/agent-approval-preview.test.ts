@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { PreparedSnapshotCommand } from '../src/engine/prepared-snapshot-command.ts';
+
+const pendingSrc = readFileSync(new URL('../src/agent/pending-edits.ts', import.meta.url), 'utf8');
 
 test('prepared snapshot command adopts current preview and round-trips snapshots', () => {
   let document = 'preview-with-original-formatting';

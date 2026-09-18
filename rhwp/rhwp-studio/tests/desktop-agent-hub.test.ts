@@ -7,6 +7,7 @@ import { join } from 'node:path';
 
 import { closeHubSession, createHubToken, ensureAgentHub, HUB_READY_PREFIX, hubHealthUrl, hubPidFromHealth, hubRunPaths, isHubHealthy, isProcessAlive, killPid, nextHubRestartDelay, parseHubReadyLine, readPidFile, removePidFile, registerHubSession, requestHubShutdown, resolveHubLaunch, startDetachedHub, stopHubByPort, stopHubChild, waitForHub, waitForHubChildExit, waitForHubReadyLine, writeHostStream, writePidFile } from '../../../desktop/agent-hub.mjs';
 
+const agentHubSource = readFileSync(new URL('../../../desktop/agent-hub.mjs', import.meta.url), 'utf8');
 const windowsEnv = Object.freeze({ SystemRoot: 'C:\\Windows' });
 
 function jsonResponse(body: unknown, ok = true) {
@@ -333,6 +334,7 @@ test('ready-line waiter bounds an unterminated stdout line while waiting', async
   child.stdout.emit('data', 'x'.repeat(256 * 1024));
   child.stdout.emit('data', `\n${HUB_READY_PREFIX}${JSON.stringify(ready)}\n`);
   assert.deepEqual(await pending, ready);
+  assert.match(agentHubSource, /buffer = buffer\.slice\(-MAX_HUB_READY_LINE_BUFFER_CHARS\)/);
 });
 
 test('hub stdio forwarding writes normally and skips unusable host streams', () => {
@@ -429,6 +431,10 @@ test('owned health checks send launch authentication and verify the child pid', 
 test('healthz JSON exposes pid for process control', () => {
   assert.equal(hubPidFromHealth({ ok: true, pid: 1234 }), 1234);
   assert.equal(hubPidFromHealth({ ok: true, pid: 'nope' }), null);
+  const server = readFileSync(new URL('../../rhwp-agent/server.mjs', import.meta.url), 'utf8');
+  assert.match(server, /function healthzBody\(\)/);
+  assert.match(server, /pid: process\.pid/);
+  assert.match(server, /name: HUB_NAME/);
 });
 
 test('pid files round-trip and ignore junk', () => {

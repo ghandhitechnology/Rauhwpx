@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   BoundedThumbnailCache,
   THUMBNAIL_CACHE_MAX_ENTRIES,
@@ -28,5 +29,12 @@ assert.equal(byBytes.get('a'), undefined);
 assert.equal(byBytes.size, 1);
 assert.equal(byBytes.set('b', { dataUri: 'x'.repeat(100) }), false);
 assert.equal(byBytes.size, 0);
+
+const content = readFileSync(new URL('../content-script.js', import.meta.url), 'utf8');
+assert.match(content, /const PREFETCH_URL_LIMIT = 20/);
+assert.match(content, /prefetchedUrls\.size >= PREFETCH_URL_LIMIT/);
+assert.match(content, /THUMBNAIL_CACHE_MAX_ESTIMATED_BYTES = 32 \* 1024 \* 1024/);
+assert.match(content, /value\.dataUri\.length \* 2/);
+assert.doesNotMatch(content, /const thumbnailCache = new Map\(/);
 
 console.log('Firefox bounded thumbnail-cache tests passed');

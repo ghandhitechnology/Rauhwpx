@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   FETCH_TRANSFER_CHUNK_BYTES,
   FETCH_TRANSFER_IDLE_TTL_MS,
@@ -97,5 +98,12 @@ expiring.reserve(owner, { onExpire: () => { expired += 1; } });
 clock += 6;
 assert.equal(expiring.activeCount, 0);
 assert.equal(expired, 1);
+
+const routerSource = readFileSync(new URL('./message-router.js', import.meta.url), 'utf8');
+assert.match(routerSource, /'fetch-file-start'/);
+assert.match(routerSource, /'fetch-file-chunk'/);
+assert.match(routerSource, /'fetch-file-close'/);
+assert.doesNotMatch(routerSource, /Array\.from\(bytes\)/);
+assert.doesNotMatch(routerSource, /'fetch-file'\s*:/);
 
 console.log('Chrome bounded fetch-transfer tests passed');

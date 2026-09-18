@@ -1,10 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { dirname } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createTestModuleServer } from './support/module-server.ts';
 
 const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
+const src = (rel: string): string => readFileSync(join(rootDir, rel), 'utf8');
 
 test('#6453 HF 커서 위치 API는 대표 편집 페이지를 바꾸지 않는다', async () => {
   const vite = await createTestModuleServer(rootDir);

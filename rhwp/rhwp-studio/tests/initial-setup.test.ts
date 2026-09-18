@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { AGENT_MODELS, setOpenCodeModels } from '../src/agent/models.ts';
@@ -6,6 +7,11 @@ import type { AccountSessionStatus, AgentName, AgentSetupStatus } from '../src/a
 import { PROVIDER_ORDER } from '../src/ui/agent-sidebar/providers.ts';
 import { BYOK_AGENTS, isProviderConfigured, isRauFirstRunFailure, previewModelLabels, PROVIDER_VENDOR, RAU_FAILURE_FORWARD_COPY, rauSignInFeedback, SUGGESTED_AGENT } from '../src/ui/initial-setup/catalog.ts';
 import { completeInitialSetup, defaultInitialSetup, isInitialSetupComplete, loadInitialSetup, shouldForceInitialSetup, shouldForceRauFailurePreview, shouldShowInitialSetup, shouldSuppressInitialSetup } from '../src/ui/initial-setup/state.ts';
+
+const readSource = (relativePath: string) => readFileSync(
+  new URL(relativePath, import.meta.url),
+  'utf8',
+).replace(/\r\n/g, '\n');
 
 function memoryStore(seed: Record<string, string> = {}) {
   const store = new Map(Object.entries(seed));
@@ -125,6 +131,20 @@ test('Rau 로그인·민트 실패는 같은 화면의 BYOK 경로로 접는다'
   assert.match(RAU_FAILURE_FORWARD_COPY.body, /문서는 그대로 열고 저장할 수 있습니다/);
   assert.equal(RAU_FAILURE_FORWARD_COPY.skip, '편집기로 계속');
   assert.doesNotMatch(RAU_FAILURE_FORWARD_COPY.body, /설정에서만|Settings-only|설정 탭에서만/);
+
+  const setup = readSource('../src/ui/initial-setup/initial-setup.ts');
+  assert.match(setup, /event\.type === 'agent-setup-error'/);
+  assert.match(setup, /isRauFirstRunFailure\(event\)/);
+  assert.match(setup, /closeAgentSetup\?\.\(\)/);
+  assert.doesNotMatch(setup, /if \(!already\) closeAgentSetup/);
+  assert.match(setup, /closingSetupForRecovery/);
+  assert.match(
+    setup,
+    /if \(!closingSetupForRecovery\) \{\s*\n\s*closingSetupForRecovery = true;\s*\n\s*try \{\s*\n\s*closeAgentSetup\?\.\(\)/,
+  );
+  assert.match(setup, /if \(rauFailureActive\) \{\s*\n\s*skipToEditor\(\)/);
+  assert.match(setup, /dataset\.recoveryOption = rauFailureActive && isByokAgent\(agent\)/);
+  assert.match(setup, /dataset\.byok = 'true'/);
 });
 
 test('Rau 카드가 generic account snapshot의 로그인 진행과 완료를 정확히 보여 준다', () => {
@@ -166,8 +186,26 @@ test('Rau 카드가 generic account snapshot의 로그인 진행과 완료를 �
   });
   assert.equal(rauSignInFeedback({ ...base, error: 'cancelled' }, '다시 시도').state, 'idle');
   assert.equal(rauSignInFeedback({ ...base, error: 'failed' }, '다시 시도').label, '다시 시도');
+
+  const setup = readSource('../src/ui/initial-setup/initial-setup.ts');
+  const css = readSource('../src/ui/initial-setup/initial-setup.css');
+  assert.match(setup, /event\.type === 'account-status'/);
+  assert.match(setup, /event\.type === 'account-login-progress'/);
+  assert.match(setup, /event\.type === 'account-error'/);
+  assert.doesNotMatch(setup, /accountStatus\?\.signedIn === true[\s\S]{0,80}goNext\(\)/);
+  assert.match(setup, /isProviderConfigured\('rau', setupStatuses\)[\s\S]{0,80}goNext\(\)/);
+  assert.match(setup, /requestAccountStatus\(\)/);
+  assert.match(css, /data-account-state='signed-in'[\s\S]*background: #b7c9ad/);
+  assert.doesNotMatch(setup, /Raucloud|Railway|quota|allowance|크레딧|한도|60분|\$5/);
 });
 
 test('실패 경로의 건너뛰기는 보정 단계 없이 편집기로 끝낸다', () => {
+  const setup = readSource('../src/ui/initial-setup/initial-setup.ts');
+  assert.match(
+    setup,
+    /function skipToEditor\(\): void \{\s*\n\s*finish\(\{\s*\n\s*providerStep: configuredCount\(\) > 0 \? 'configured' : 'skipped',\s*\n\s*calibrationStep: 'skipped',/,
+  );
+  assert.match(setup, /if \(rauFailureActive\) \{\s*\n\s*skipToEditor\(\);\s*\n\s*return;/);
+  assert.match(setup, /RAU_FAILURE_FORWARD_COPY\.skip/);
   assert.equal(RAU_FAILURE_FORWARD_COPY.skip, '편집기로 계속');
 });

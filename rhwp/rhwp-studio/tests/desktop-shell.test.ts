@@ -17,6 +17,7 @@ import { CREDENTIAL_RETENTION_DIR, LEGACY_CLEANUP_MARKER_FILE, LAUNCH_OWNER_FILE
 import { resolveStudioAsset, STUDIO_URL } from '../../../desktop/studio-protocol.mjs';
 import { LAUNCH_CLEANUP_RETENTION_FILE } from '../../rhwp-agent/credential-mirror.mjs';
 
+const desktopMain = readFileSync(new URL('../../../desktop/main.mjs', import.meta.url), 'utf8');
 const rootPackage = JSON.parse(readFileSync(new URL('../../../package.json', import.meta.url), 'utf8'));
 
 function fakeWindow(id: number) {
@@ -190,6 +191,11 @@ test('launch routing accepts only supported document paths', () => {
     source: 'open-file',
     openFiles: ['/tmp/a.hwp'],
   });
+  assert.match(desktopMain, /app\.on\('open-file'/);
+  assert.match(desktopMain, /source: 'second-instance'/);
+  assert.match(desktopMain, /label: 'New Window'/);
+  assert.match(desktopMain, /CmdOrCtrl\+Shift\+N/);
+  assert.match(desktopMain, /x: bounds\.x \+ 28, y: bounds\.y \+ 28/);
 });
 
 test('desktop owns Cmd/Ctrl+Shift+V in its native Edit menu', () => {
@@ -205,6 +211,11 @@ test('desktop owns Cmd/Ctrl+Shift+V in its native Edit menu', () => {
   assert.deepEqual(sent, [['desktop:paste-plain-text', 'plain text']]);
   assert.equal(deliverPlainTextPaste(window, () => ''), false);
   assert.equal(deliverPlainTextPaste(null, () => 'ignored'), false);
+
+  assert.match(desktopMain, /id: 'edit-paste-without-formatting'/);
+  assert.match(desktopMain, /accelerator: 'CmdOrCtrl\+Shift\+V'/);
+  assert.match(desktopMain, /deliverPlainTextPaste\(/);
+  assert.match(desktopMain, /clipboard\.readText\(\)/);
 });
 
 test('desktop packages register as an HWPX editor with the operating system', () => {
@@ -252,6 +263,11 @@ test('packaged Studio uses a secure path-safe standard scheme', () => {
   );
   assert.equal(resolveStudioAsset('/app/dist', '/../secrets.txt'), null);
   assert.equal(resolveStudioAsset('/app/dist', '/%E0%A4%A'), null);
+  assert.match(desktopMain, /if \(!devUrl\) installStudioProtocol/);
+  assert.match(desktopMain, /window\.loadURL\(devUrl \|\| STUDIO_URL\)/);
+  assert.match(desktopMain, /\['will-navigate', 'will-redirect'\]/);
+  assert.match(desktopMain, /function sessionForEvent\(event\)[\s\S]*Untrusted renderer IPC sender/);
+  assert.doesNotMatch(desktopMain, /createServer/);
 });
 
 test('bookmark persistence serializes writes and close queues a latest-state flush', async () => {
@@ -301,6 +317,15 @@ test('bookmark persistence serializes writes and close queues a latest-state flu
   }), true);
   assert.deepEqual(closed, ['closed']);
   assert.equal(started.at(-1), 'retry');
+
+  assert.match(
+    desktopMain,
+    /desktop:remember-native-document'[\s\S]*?await persistNativeBookmarks\(\)/,
+  );
+  assert.match(
+    desktopMain,
+    /desktop:close-response'[\s\S]*?completeWindowClose\(\{[\s\S]*?persistBookmarks: \(\) => persistNativeBookmarks\(\{ rejectOnError: true \}\)/,
+  );
 });
 
 test('generated artifact opening is bound to the sender hub and session', () => {
@@ -328,6 +353,10 @@ test('generated artifact opening is bound to the sender hub and session', () => 
     hubUrl: 'ws://127.0.0.1:34567',
     sessionId: 'session-a',
   }), /does not belong to this app/);
+  assert.match(
+    desktopMain,
+    /if \(!response\.ok\)[\s\S]*?response\.body\?\.cancel\?\./,
+  );
 });
 
 test('generated artifact responses enforce declared and observed limits before allocation', async () => {
@@ -376,6 +405,8 @@ test('desktop dev cache is disabled and cleared before loading the Studio', asyn
     setCodeCachePath: (path: string) => { calls.push(`path:${path}`); },
   }, '/runtime/active/code-cache');
   assert.deepEqual(calls, ['http', 'code', 'path:/runtime/active/code-cache']);
+  assert.match(desktopMain, /if \(devUrl\) app\.commandLine\.appendSwitch\('disable-http-cache'\)/);
+  assert.match(desktopMain, /'development browser cache',[\s\S]*prepareDevelopmentCaches\([\s\S]*electronSession\.defaultSession,[\s\S]*join\(runtimeDir, 'code-cache'\)/);
 });
 
 test('launch roots are isolated by the canonical userData profile', () => {
@@ -454,6 +485,11 @@ test('startup cleanup requires an old owner record and a confirmed dead PID', as
   });
   assert.deepEqual(result, [stale]);
   assert.deepEqual(removed, [path.join('/launch-work', stale)]);
+  assert.match(desktopMain, /removeStaleLaunchDirectories\(runtimeRoot, launchId,/);
+  assert.match(desktopMain, /removeStaleLaunchDirectories\(workRoot, launchId,/);
+  assert.match(desktopMain, /launchStoragePaths\(/);
+  assert.match(desktopMain, /writeLaunchOwnerMetadata\(runtimeDir, owner\)/);
+  assert.match(desktopMain, /expectedProfileId: userDataProfileId/);
 });
 
 test('startup cleanup bounds launch enumeration and retains oversized metadata', async (t) => {

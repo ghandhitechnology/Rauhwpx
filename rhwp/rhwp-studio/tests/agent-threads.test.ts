@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { archivePendingUserQuestion, clearPendingUserQuestion, createPendingUserQuestionDraftSnapshot, createEmptyThread, createUserQuestionHistoryMessage, expirePendingUserQuestion, fallbackTitle, forgetDocumentThreads, getThread, explorerGroupIsCurrent, listThreads, listThreadsByDocument, pendingUserQuestionMatchesInteraction, recordDocumentOpened, serializeThreadMessagesForProviderHistory, setThreadTitle, subscribeThreadChanges, threadMatchesDocument, upsertThread } from '../src/agent/threads.ts';
@@ -8,6 +9,7 @@ import type {
   UserQuestionOutcome,
 } from '../src/agent/types.ts';
 
+const source = readFileSync(new URL('../src/agent/threads.ts', import.meta.url), 'utf8');
 const mem = new Map<string, string>();
 const storage = {
   getItem: (k: string) => mem.get(k) ?? null,
@@ -144,6 +146,8 @@ test('clickable plan presentations keep their plan identity in thread history', 
   upsertThread(t);
   assert.equal(getThread(t.id)?.messages[1]?.kind, 'plan');
   assert.equal(getThread(t.id)?.messages[1]?.planId, 'plan-1');
+  assert.match(source, /if \(message\.kind === 'plan'\)/);
+  assert.match(source, /typeof message\.planId !== 'string'/);
 });
 
 test('pending user-question drafts persist selections, custom text, position, and update time', () => {

@@ -23,6 +23,9 @@ for (const browser of ['chrome', 'firefox']) {
       ['wasm/*', 'fonts/*', 'icons/*', 'dev-tools-inject.js'],
     );
 
+    const viteConfig = readFileSync(path.join(sourceDir, 'vite.config.ts'), 'utf8');
+    assert.match(viteConfig, /publicDir:\s*false/);
+
     const viewerHtml = readFileSync(path.join(distDir, 'viewer.html'), 'utf8');
     const inlineScripts = findInlineScriptTags(viewerHtml);
     assert.equal(inlineScripts.length, 0, 'viewer.html must not contain inline scripts');
