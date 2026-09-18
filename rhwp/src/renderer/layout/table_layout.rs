@@ -1123,6 +1123,7 @@ impl LayoutEngine {
         native_saved_text_frame_outer_box: bool,
         wrapper_margin_already_applied: bool,
     ) -> f64 {
+        let column_is_empty_on_entry = col_node.children.is_empty();
         if table.cells.is_empty() {
             if depth == 0 {
                 return y_start;
@@ -1207,6 +1208,7 @@ impl LayoutEngine {
                                 0.0,
                                 para_y,
                                 allow_para_top_bleed,
+                                column_is_empty_on_entry,
                             )
                         } else {
                             y_start
@@ -1541,6 +1543,7 @@ impl LayoutEngine {
                 caption_spacing,
                 para_y,
                 allow_para_top_bleed,
+                column_is_empty_on_entry,
             );
             if depth > 0 && render_caption {
                 computed_y + top_caption_flow_extra(&table.caption, caption_height, caption_spacing)
@@ -2911,6 +2914,7 @@ impl LayoutEngine {
         caption_spacing: f64,
         para_y: Option<f64>,
         allow_para_top_bleed: bool,
+        column_is_empty: bool,
     ) -> f64 {
         let table_treat_as_char = table.common.treat_as_char;
         let table_text_wrap = if depth == 0 {
@@ -3020,9 +3024,19 @@ impl LayoutEngine {
                         && declared_height > 0.0
                         && table_height
                             > declared_height + ROWBREAK_OBJECT_BOTTOM_BLEED_TOLERANCE_PX;
+                let anchor_at_column_top = (anchor_y - col_area.y).abs() <= 0.5;
+                let push_floor = if anchor_at_column_top
+                    && column_is_empty
+                    && matches!(vert_align, crate::model::shape::VertAlign::Top)
+                    && v_offset > 0.0
+                {
+                    anchor_y
+                } else {
+                    y_start
+                };
                 let pushed =
                     if matches!(table_text_wrap, crate::model::shape::TextWrap::TopAndBottom) {
-                        raw_y.max(y_start)
+                        raw_y.max(push_floor)
                     } else {
                         raw_y
                     };
@@ -10017,6 +10031,7 @@ mod row_cut_tests {
             0.0,
             Some(col_area.y),
             false,
+            false,
         );
 
         assert!((table_x - (col_area.x + outer_left)).abs() < 0.001);
@@ -10080,6 +10095,7 @@ mod row_cut_tests {
             0.0,
             Some(area.y),
             false,
+            false,
         );
         assert!((x - area.x - margin).abs() < 0.001, "x={x}");
         assert!((y - area.y - margin).abs() < 0.001, "y={y}");
@@ -10109,6 +10125,7 @@ mod row_cut_tests {
             0.0,
             0.0,
             Some(area.y),
+            false,
             false,
         );
         assert!((x - area.x - margin).abs() < 0.001, "converted HWPX x={x}");
@@ -10159,6 +10176,7 @@ mod row_cut_tests {
             0.0,
             0.0,
             Some(col_area.y),
+            false,
             false,
         );
 
@@ -10305,6 +10323,7 @@ mod row_cut_tests {
             0.0,
             Some(col_area.y),
             false,
+            false,
         );
 
         assert!((table_x - (col_area.x + outer_margin)).abs() < 0.001);
@@ -10331,6 +10350,7 @@ mod row_cut_tests {
             0.0,
             0.0,
             Some(col_area.y),
+            false,
             false,
         );
 
