@@ -22,6 +22,9 @@ function makeHost(
         host.calls.push(pageHint);
         return impl(sec, ppi, ci, pageHint);
       },
+      getTableCellBboxesByPath(): Bbox[] {
+        throw new Error('flat cache tests must not call getTableCellBboxesByPath');
+      },
     },
     cachedTableRef: null,
     cachedCellBboxes: null,

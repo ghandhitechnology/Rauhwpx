@@ -36,6 +36,7 @@ export const MUTATING_METHODS: readonly string[] = [
   'createTable', 'createTableEx', 'deleteTableControl', 'insertTableRow',
   'insertTableColumn', 'deleteTableRow', 'deleteTableColumn', 'mergeTableCells',
   'splitTableCell', 'splitTableCellInto', 'splitTableCellsInRange', 'resizeTableCells',
+  'resizeTableCellsByPath', // [#7189] 중첩 표는 평면 resizeTableCells 로 닿지 않는다
   'moveTableOffset', 'setTableProperties', 'setCellProperties', 'setCellZoneProperties',
   'pasteTableCellsTransposed', 'transposeTableCellsInPlace', 'pasteTableCellsTransposedAsTable',
   'evaluateTableFormula', 'evaluateTableFormulaEx',
