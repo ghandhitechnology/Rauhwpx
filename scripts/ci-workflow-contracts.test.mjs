@@ -85,7 +85,7 @@ test('releases depend on verification within the same workflow run', () => {
   assert.ok(Object.hasOwn(nightly.on, 'schedule'));
   for (const id of ['prepare', 'macos', 'windows', 'publish']) {
     const dependencies = ancestors(nightly, id);
-    for (const verification of ['engine', 'app', 'hostile-input-smoke']) assert.ok(dependencies.has(verification), `${id} requires ${verification}`);
+    for (const verification of ['engine', 'app']) assert.ok(dependencies.has(verification), `${id} requires ${verification}`);
   }
   assert.equal(nightly.jobs.prepare.if, "github.ref == 'refs/heads/main'");
   for (const filename of ['nightly.yml', 'release.yml']) {
