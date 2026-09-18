@@ -22,6 +22,8 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
     teardown: 0, refresh: 0, referenceReads: 0, prepareRestart: 0, reconnect: 0, recreate: 0,
     stop: 0, display: 0, inputs: 0, transfers: [] as CloudTransferRequest[] };
   let refreshFails = false;
+  let reconnectBlocked = false;
+  let releaseReconnect: (() => void) | null = null;
   let spawnFailures = 0;
   let sandboxStatusRecovers = false;
   let queueAckFailures = 0;
@@ -131,6 +133,7 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
       calls.reconnect++;
       const generation = ++recoveryGeneration;
       setLink('reconnecting');
+      if (reconnectBlocked) await new Promise<void>((resolve) => { releaseReconnect = resolve; });
       await wait(300);
       if (generation !== recoveryGeneration) throw new DOMException('Cancelled', 'AbortError');
       setLink('ready');
@@ -370,6 +373,10 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
     blockRefresh(blocked: boolean) {
       refreshBlocked = blocked;
       if (!blocked) { releaseRefresh?.(); releaseRefresh = null; }
+    },
+    blockReconnect(blocked: boolean) {
+      reconnectBlocked = blocked;
+      if (!blocked) { releaseReconnect?.(); releaseReconnect = null; }
     },
     publish,
     setRefreshFailure(failed: boolean) { refreshFails = failed; },

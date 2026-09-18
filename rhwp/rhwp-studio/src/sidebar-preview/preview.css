@@ -3,6 +3,12 @@
 .preview-cloud #cloud-workspace { padding-left: 225px; }
 .preview-cloud #preview-controls { width: 180px; }
 #cloud-preview-controls[hidden] { display: none; }
+#cloud-preview-controls label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
 #editor-area {
   position: fixed;
   inset: 0;

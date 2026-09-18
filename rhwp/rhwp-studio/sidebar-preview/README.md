@@ -87,6 +87,8 @@ Click the document’s Cloud icon again for execution options. In Cloud chats,
 **Cloud 변경 병합** appears beside it when a completed checkpoint is ready. **Disconnect
 Cloud** pauses the connection while retaining the last frame; the production
 Cloud controls reconnect, rebuild from the same conversation, or stop the worker.
+**Hold reconnect** keeps the link down for as long as it stays checked, which is how to
+watch the reconnect ETA bar crawl instead of resolving in the fixture's 300ms.
 The fixture records transfers and session scope in `window.sidebarPreview.cloud`.
 
 The Cloud settings dashboard's **크게 보기** button opens the production full-screen
