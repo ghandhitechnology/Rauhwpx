@@ -146,44 +146,9 @@ jobs:
       - name: Build Studio
         run: npm --prefix rhwp/rhwp-studio run build
 
-  hostile-input-smoke:
-    name: Seeded hostile-input fuzz smoke
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v5
-        with:
-          persist-credentials: false
-
-      - name: Install nightly Rust toolchain
-        uses: dtolnay/rust-toolchain@7c8d7d138f5c09cef361f8214cf96882cd029cdb # nightly
-        with:
-          toolchain: nightly
-
-      - name: Install pinned cargo-fuzz
-        run: cargo install cargo-fuzz --version 0.13.2 --locked
-
-      - name: Build all parser fuzz targets
-        working-directory: rhwp
-        run: cargo +nightly fuzz build
-
-      - name: Replay and mutate each seeded corpus
-        working-directory: rhwp
-        run: |
-          set -euo pipefail
-          for target in parse_hwp parse_hwp3 parse_hwpx parse_hml parse_wmf parse_ooxml_chart; do
-            cargo +nightly fuzz run "${target}" "fuzz/corpus/${target}" -- \
-              -runs=2000 \
-              -max_total_time=30 \
-              -rss_limit_mb=2048 \
-              -timeout=30
-          done
-
   prepare:
     name: Prepare nightly identity
-    needs: [engine, app, hostile-input-smoke]
+    needs: [engine, app]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 15

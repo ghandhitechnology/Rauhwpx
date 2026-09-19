@@ -306,6 +306,7 @@ hwp5rb	issue3257/webhangul_product_spec_v1.1.hwp	sections[].paragraphs[].control
 hwp5rb	issue6882/synth_cell_enter_table_growth.hwp	sections[].paragraphs[].controls[].section_def.extra_child_records.len	1
 hwp5rb	issue6882/synth_cell_enter_table_growth.hwp	sections[].section_def.extra_child_records.len	1
 hwp5rb	issue6929/148776468_search_ad_terms_press_release.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	92
+hwp5rb	issue7235/156467175_press_release_header_logo_p1.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	11
 hwp5rb	issue_1133.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	15
 hwp5rb	issues/2809/jubo_20260104.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	174
 hwp5rb	k-water-rfp-2024.hwp	sections[].paragraphs[].controls[].cells[].list_header_width_ref	457

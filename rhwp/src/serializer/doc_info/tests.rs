@@ -495,6 +495,7 @@ fn test_serialize_border_fill_image_fill_mode_uses_hwp5_values() {
         (ImageFillMode::TileVertLeft, 3),
         (ImageFillMode::TileVertRight, 4),
         (ImageFillMode::FitToSize, 5),
+        (ImageFillMode::Zoom, 5),
         (ImageFillMode::Center, 6),
         (ImageFillMode::CenterTop, 7),
         (ImageFillMode::CenterBottom, 8),

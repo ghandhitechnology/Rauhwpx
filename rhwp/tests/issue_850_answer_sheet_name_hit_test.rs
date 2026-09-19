@@ -78,7 +78,7 @@ fn assert_name_insert_by_path(
     expected_path: &[(usize, usize, usize)],
 ) {
     // 1쪽 상단 답안지 `성명` 오른쪽 빈 입력칸 내부 좌표.
-    let hit = hit_json(doc, 0, 250.0, 210.0);
+    let hit = hit_json(doc, 0, 250.0, 230.0);
     assert_answer_sheet_name_hit(&hit, outer_control_index, expected_path);
 
     let path = path_tuples(&hit);
