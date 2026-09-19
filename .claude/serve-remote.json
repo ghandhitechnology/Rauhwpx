@@ -1,6 +1,15 @@
 {
   "services": [
     {
+      "name": "website",
+      "cmd": "python3 -m http.server 7860 --bind 127.0.0.1",
+      "cwd": "website",
+      "port": 7860,
+      "match": "http.server",
+      "health": "/",
+      "https_port": 8446
+    },
+    {
       "name": "studio",
       "cmd": "npm run dev",
       "cwd": "rhwp/rhwp-studio",
