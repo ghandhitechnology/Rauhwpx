@@ -15,7 +15,6 @@ const CELL_Y: f64 = 100.267;
 const CELL_W: f64 = 253.373;
 const CELL_H: f64 = 57.107;
 
-/// 원본 로고 픽셀 크기.
 const IMG_W: f64 = 1628.0;
 const IMG_H: f64 = 563.0;
 
@@ -30,7 +29,6 @@ fn page_svg() -> String {
     doc.render_page_svg_native(0).expect("1쪽 SVG 렌더 실패")
 }
 
-/// `<image ...>` 태그에서 x·y·width·height·preserveAspectRatio를 뽑는다.
 fn image_tags(svg: &str) -> Vec<(f64, f64, f64, f64, String)> {
     let mut out = Vec::new();
     for tag in svg.split("<image ").skip(1) {

@@ -1502,7 +1502,6 @@ export class CanvasKitLayerRenderer {
       drawImage(op.bbox.x, op.bbox.y, op.bbox.width, op.bbox.height);
       return;
     }
-    // [#7235] none·zoom은 디코딩된 픽셀 크기로 contain·가운데. originalSize가 아니다.
     if (canvasKitImageFillModeContains(fillMode)) {
       const fit = canvasKitImageContainRect(op.bbox, imageWidth, imageHeight);
       drawImage(fit.x, fit.y, fit.width, fit.height);

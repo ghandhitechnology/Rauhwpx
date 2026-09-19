@@ -3555,7 +3555,6 @@ impl WebCanvasRenderer {
                 self.draw_image(data, bbox.x, bbox.y, bbox.width, bbox.height);
             }
             ImageFillMode::Zoom => {
-                // 디코딩된 픽셀 크기로 contain·가운데. 크기 없으면 dest 상자.
                 let (img_w, img_h) = match parse_image_dimensions_canvas(data) {
                     Some((w, h)) if w > 0 && h > 0 => (w as f64, h as f64),
                     _ => {

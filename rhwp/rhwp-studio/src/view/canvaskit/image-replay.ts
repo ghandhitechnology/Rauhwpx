@@ -137,14 +137,10 @@ export function canvasKitImageFillModeStretches(fillMode: string | undefined): b
   return fillMode === undefined || fillMode === 'fitToSize' || fillMode === 'total';
 }
 
-/** Binary type 15 (`none`) and HWPX `ZOOM` contain and center inside the box. */
 export function canvasKitImageFillModeContains(fillMode: string | undefined): boolean {
   return fillMode === 'zoom' || fillMode === 'none';
 }
 
-/**
- * xMidYMid meet rectangle. Invalid decoded size falls back to the full bbox.
- */
 export function canvasKitImageContainRect(
   bbox: CanvasKitImageBounds,
   imageWidth: number,

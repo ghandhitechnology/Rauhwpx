@@ -226,7 +226,6 @@ pub fn draw_image_bytes(
         return true;
     }
 
-    // [#7235] Zoom은 영역에 맞춰 종횡비를 지키며 축소해 가운데 놓는다.
     // 칸 채우기 None은 ImageNode 호출부가 Zoom으로 넘긴다. 쪽 배경 None은 위 늘려 채우기다.
     if mode == ImageFillMode::Zoom {
         if is_valid_image_size(decoded_width, decoded_height) {
