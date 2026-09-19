@@ -1069,7 +1069,14 @@ impl WebCanvasRenderer {
             self.draw_image_with_fill_mode(
                 render_data.as_ref(),
                 &eff_bbox,
-                img.fill_mode,
+                // 칸·도형 None만 contain. 쪽 배경 호출은 None을 그대로 넘긴다.
+                img.fill_mode.map(|mode| {
+                    if mode == ImageFillMode::None {
+                        ImageFillMode::Zoom
+                    } else {
+                        mode
+                    }
+                }),
                 img.original_size,
                 img.crop,
                 img.original_size_hu,
@@ -3546,6 +3553,39 @@ impl WebCanvasRenderer {
                     }
                 }
                 self.draw_image(data, bbox.x, bbox.y, bbox.width, bbox.height);
+            }
+            ImageFillMode::Zoom => {
+                let (img_w, img_h) = match parse_image_dimensions_canvas(data) {
+                    Some((w, h)) if w > 0 && h > 0 => (w as f64, h as f64),
+                    _ => {
+                        self.draw_image(data, bbox.x, bbox.y, bbox.width, bbox.height);
+                        return;
+                    }
+                };
+                let scale = (bbox.width / img_w).min(bbox.height / img_h);
+                let fit_w = img_w * scale;
+                let fit_h = img_h * scale;
+                let fit_x = bbox.x + (bbox.width - fit_w) / 2.0;
+                let fit_y = bbox.y + (bbox.height - fit_h) / 2.0;
+                if let Some(crop_rect) = crop {
+                    let (src_x, src_y, src_w, src_h) = crate::renderer::svg::compute_image_crop_src(
+                        crop_rect,
+                        original_size_hu,
+                        img_w,
+                        img_h,
+                    );
+                    let is_cropped = src_x > 0.5
+                        || src_y > 0.5
+                        || (src_w - img_w).abs() > 1.0
+                        || (src_h - img_h).abs() > 1.0;
+                    if is_cropped {
+                        self.draw_image_cropped(
+                            data, src_x, src_y, src_w, src_h, fit_x, fit_y, fit_w, fit_h,
+                        );
+                        return;
+                    }
+                }
+                self.draw_image(data, fit_x, fit_y, fit_w, fit_h);
             }
             _ => {
                 // 원본 크기: HWP shape_attr 기반(우선) 또는 이미지 픽셀 크기(폴백)

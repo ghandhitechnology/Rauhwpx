@@ -1432,6 +1432,13 @@ impl SvgRenderer {
                     bbox.x, bbox.y, bbox.width, bbox.height, data_uri,
                 ));
             }
+            // 쪽 배경 None은 위 늘려 채우기를 유지한다. Zoom만 contain이다.
+            ImageFillMode::Zoom => {
+                self.output.push_str(&format!(
+                    "<image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"xMidYMid meet\" href=\"{}\"/>\n",
+                    bbox.x, bbox.y, bbox.width, bbox.height, data_uri,
+                ));
+            }
             ImageFillMode::TileAll => {
                 self.render_tiled_image(&render_bytes, &data_uri, bbox, true, true, None);
             }
@@ -1622,6 +1629,14 @@ impl SvgRenderer {
                         bbox.x, bbox.y, bbox.width, bbox.height, data_uri,
                     ));
                 }
+            }
+            // [#7235] 칸·도형 채우기 None(이진 15)과 Zoom은 원본 크기 배치가 아니다.
+            // 쪽 배경 None은 늘려 채우기를 유지한다.
+            ImageFillMode::Zoom | ImageFillMode::None => {
+                self.output.push_str(&format!(
+                    "<image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"xMidYMid meet\" href=\"{}\"/>\n",
+                    bbox.x, bbox.y, bbox.width, bbox.height, data_uri,
+                ));
             }
             ImageFillMode::TileAll => {
                 // 바둑판식으로-모두: 원래 크기로 전체 타일링
