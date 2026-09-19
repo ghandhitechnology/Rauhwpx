@@ -226,6 +226,26 @@ pub fn draw_image_bytes(
         return true;
     }
 
+    // [#7235] Zoom은 영역에 맞춰 종횡비를 지키며 축소해 가운데 놓는다.
+    // 칸 채우기 None은 ImageNode 호출부가 Zoom으로 넘긴다. 쪽 배경 None은 위 늘려 채우기다.
+    if mode == ImageFillMode::Zoom {
+        if is_valid_image_size(decoded_width, decoded_height) {
+            let scale = (width / decoded_width).min(height / decoded_height);
+            let fit_w = decoded_width * scale;
+            let fit_h = decoded_height * scale;
+            let fit = Rect::from_xywh(
+                x + (width - fit_w) / 2.0,
+                y + (height - fit_h) / 2.0,
+                fit_w,
+                fit_h,
+            );
+            draw_image_rect(crop_src, fit);
+        } else {
+            draw_image_rect(crop_src, dst);
+        }
+        return true;
+    }
+
     let image_width = original_size
         .map(|(width, _)| width as f32)
         .unwrap_or_else(|| image.width() as f32);

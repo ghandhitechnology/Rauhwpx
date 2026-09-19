@@ -12,6 +12,8 @@ import {
 } from '../src/view/render-backend.ts';
 import {
   canvasKitImageCacheKey,
+  canvasKitImageContainRect,
+  canvasKitImageFillModeContains,
   canvasKitImageFillModeTiles,
   canvasKitImageFillModeStretches,
   canvasKitImagePlacement,
@@ -596,6 +598,37 @@ test('CanvasKit image TOTAL fill stretches like fitToSize', () => {
   for (const mode of ['none', 'center', 'leftTop', 'tileAll']) {
     assert.equal(canvasKitImageFillModeStretches(mode), false);
   }
+});
+
+test('CanvasKit image NONE/ZOOM fill contains instead of placing at original size', () => {
+  for (const mode of ['none', 'zoom']) {
+    assert.equal(canvasKitImageFillModeContains(mode), true);
+    assert.equal(canvasKitImageFillModeStretches(mode), false);
+    assert.equal(canvasKitImageFillModeTiles(mode), false);
+  }
+  for (const mode of [undefined, 'fitToSize', 'total', 'center', 'leftTop', 'tileAll']) {
+    assert.equal(canvasKitImageFillModeContains(mode), false);
+  }
+});
+
+test('CanvasKit contain rect matches the Hancom cell-fill geometry', () => {
+  const cell = {
+    x: 466.6133333333333,
+    y: 100.26666666666667,
+    width: 253.3733333333333,
+    height: 57.10666666666667,
+  };
+  const fit = canvasKitImageContainRect(cell, 1628, 563);
+  assert.ok(Math.abs(fit.width - 165.16) < 0.05, `width=${fit.width}`);
+  assert.ok(Math.abs(fit.height - cell.height) < 1e-9, `height=${fit.height}`);
+  assert.ok(Math.abs(fit.x - 510.72) < 0.05, `x=${fit.x}`);
+  assert.ok(Math.abs(fit.x + fit.width - 675.88) < 0.05, `right=${fit.x + fit.width}`);
+  assert.ok(Math.abs(fit.y - cell.y) < 1e-9, `y=${fit.y}`);
+  assert.notEqual(Math.round(fit.width), 1628);
+  assert.notEqual(Math.round(fit.x), Math.round(cell.x));
+  assert.deepEqual(canvasKitImageContainRect(cell, 0, 0), {
+    x: cell.x, y: cell.y, width: cell.width, height: cell.height,
+  });
 });
 
 test('GlyphOutline advanced payload gates reject richer payloads by default', () => {

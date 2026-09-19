@@ -137,6 +137,35 @@ export function canvasKitImageFillModeStretches(fillMode: string | undefined): b
   return fillMode === undefined || fillMode === 'fitToSize' || fillMode === 'total';
 }
 
+/** Binary type 15 (`none`) and HWPX `ZOOM` contain and center inside the box. */
+export function canvasKitImageFillModeContains(fillMode: string | undefined): boolean {
+  return fillMode === 'zoom' || fillMode === 'none';
+}
+
+/**
+ * xMidYMid meet rectangle. Invalid decoded size falls back to the full bbox.
+ */
+export function canvasKitImageContainRect(
+  bbox: CanvasKitImageBounds,
+  imageWidth: number,
+  imageHeight: number,
+): { x: number; y: number; width: number; height: number } {
+  const usable = Number.isFinite(imageWidth) && Number.isFinite(imageHeight)
+    && imageWidth > 0 && imageHeight > 0;
+  if (!usable) {
+    return { x: bbox.x, y: bbox.y, width: bbox.width, height: bbox.height };
+  }
+  const scale = Math.min(bbox.width / imageWidth, bbox.height / imageHeight);
+  const width = imageWidth * scale;
+  const height = imageHeight * scale;
+  return {
+    x: bbox.x + (bbox.width - width) / 2,
+    y: bbox.y + (bbox.height - height) / 2,
+    width,
+    height,
+  };
+}
+
 function fnv1a32(value: string): string {
   let hash = 2166136261;
   for (let i = 0; i < value.length; i += 1) {
