@@ -109,7 +109,7 @@ test('consolidated checks retain Cloud contracts and browser handoff', () => {
   assert.match(browserCommands, /e2e:cloud-display/);
 });
 
-test('only release and image publishing receive write permissions', () => {
+test('only release, image publishing, and GitHub Pages receive write permissions', () => {
   for (const [filename, workflow] of Object.entries(workflows)) {
     assert.deepEqual(workflow.permissions, { contents: 'read' }, filename);
     for (const [id, job] of Object.entries(workflow.jobs)) {
@@ -119,7 +119,8 @@ test('only release and image publishing receive write permissions', () => {
             || scope === 'packages' && (
               filename === 'cloud-sandbox-image.yml' && id === 'publish'
               || filename === 'release.yml' && ['cloud', 'cloud-image'].includes(id)
-            ) || filename === 'release.yml' && id === 'cloud' && scope === 'id-token';
+            ) || filename === 'release.yml' && id === 'cloud' && scope === 'id-token'
+            || filename === 'pages.yml' && id === 'deploy' && (scope === 'pages' || scope === 'id-token');
           assert.ok(allowed, `${filename}/${id}/${scope}`);
         }
       }

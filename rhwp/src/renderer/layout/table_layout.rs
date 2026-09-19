@@ -1893,6 +1893,12 @@ impl LayoutEngine {
                     &mut self.auto_counter.borrow_mut(),
                     bin_data_content,
                     cap_cell_ctx,
+                    CaptionOwner::new(
+                        Some(section_index),
+                        table_meta.map(|(pi, _)| pi),
+                        table_meta.map(|(_, ci)| ci),
+                        CaptionControlKind::Table,
+                    ),
                 );
             }
         }

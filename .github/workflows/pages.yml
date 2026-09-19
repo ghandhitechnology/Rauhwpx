@@ -12,8 +12,6 @@ on:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: pages
@@ -21,6 +19,10 @@ concurrency:
 
 jobs:
   deploy:
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -28,6 +30,8 @@ jobs:
     steps:
       - name: Check out website source
         uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5

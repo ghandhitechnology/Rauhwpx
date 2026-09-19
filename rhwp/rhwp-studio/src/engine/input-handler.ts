@@ -47,6 +47,7 @@ import { computeHangingIndentPx } from './hanging-indent';
 import { isPageLocalTextEditCommand, type PageLocalTextEditOptions } from './input-edit-invalidation';
 import type { NavigationKeyInput } from './navigation-keymap';
 import { isPointNearBoxBorder } from './table-border-hit';
+import { isBodyControl } from './picture-hit-policy';
 import { DeferredPaginationRunner } from './deferred-pagination-runner';
 import { ImeSession } from './ime-session';
 import { CaretLayoutReveal } from './caret-layout-reveal';
@@ -1814,7 +1815,7 @@ export class InputHandler {
     sec: number, paragraphIndex: number,
   ): { sec: number; ppi: number; ci: number } | null {
     try {
-      const layout = this.wasm.getPageControlLayout(pageIdx);
+      const layout = { controls: this.wasm.getPageControlLayout(pageIdx).controls.filter(isBodyControl) };
       const isNearBorder = (x: number, y: number, w: number, h: number): boolean => {
         return isPointNearBoxBorder(pageX, pageY, { x, y, width: w, height: h });
       };
