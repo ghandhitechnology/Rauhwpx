@@ -787,6 +787,17 @@ export const ENGINE_EDIT_CAPABILITIES = [
     "signature": "insertFootnote(sec: number, para: number, charOffset: number)"
   },
   {
+    "method": "insertHyperlink",
+    "kind": "document",
+    "parameters": [
+      "target",
+      "start",
+      "end",
+      "uri"
+    ],
+    "signature": "insertHyperlink(target: HyperlinkTarget, start: number, end: number, uri: string)"
+  },
+  {
     "method": "insertNewNumber",
     "kind": "document",
     "parameters": [
@@ -1171,6 +1182,16 @@ export const ENGINE_EDIT_CAPABILITIES = [
     "signature": "pasteTableCellsTransposedAsTable(sec: number, para: number, charOffset: number,)"
   },
   {
+    "method": "promoteOleEquation",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "para",
+      "ci"
+    ],
+    "signature": "promoteOleEquation(sec: number, para: number, ci: number)"
+  },
+  {
     "method": "reflowLinesegs",
     "kind": "document",
     "parameters": [],
@@ -1183,6 +1204,16 @@ export const ENGINE_EDIT_CAPABILITIES = [
       "pos"
     ],
     "signature": "removeFieldAt(pos: DocumentPosition)"
+  },
+  {
+    "method": "removeHyperlink",
+    "kind": "document",
+    "parameters": [
+      "target",
+      "fieldId",
+      "restoreFormatting"
+    ],
+    "signature": "removeHyperlink(target: HyperlinkTarget, fieldId: number, restoreFormatting = false)"
   },
   {
     "method": "renameBookmark",
@@ -1216,6 +1247,16 @@ export const ENGINE_EDIT_CAPABILITIES = [
       "text"
     ],
     "signature": "replaceBodyTextLocal(sec: number, para: number, charOffset: number, deleteCount: number, text: string,)"
+  },
+  {
+    "method": "replaceHyperlinkText",
+    "kind": "document",
+    "parameters": [
+      "target",
+      "fieldId",
+      "text"
+    ],
+    "signature": "replaceHyperlinkText(target: HyperlinkTarget, fieldId: number, text: string)"
   },
   {
     "method": "replaceOne",
@@ -1876,6 +1917,16 @@ export const ENGINE_EDIT_CAPABILITIES = [
       "sec"
     ],
     "signature": "updateConnectorsInSection(sec: number)"
+  },
+  {
+    "method": "updateHyperlink",
+    "kind": "document",
+    "parameters": [
+      "target",
+      "fieldId",
+      "uri"
+    ],
+    "signature": "updateHyperlink(target: HyperlinkTarget, fieldId: number, uri: string)"
   },
   {
     "method": "updateStyle",

@@ -1882,10 +1882,14 @@ export class InputHandler {
       { type: 'command', commandId: 'edit:paste' },
       { type: 'separator' },
     ];
-    // 수식 객체: "수식 편집..." 항목 추가
-    if (ref?.type === 'equation') {
+    // 수식 객체: "수식 편집..." 항목 추가. OLE 레거시 수식은 먼저 native 로 전환한다.
+    if (ref?.type === 'equation' || ref?.type === 'ole') {
       items.push(
-        { type: 'command', commandId: 'insert:equation-edit', label: '수식 편집...' },
+        {
+          type: 'command',
+          commandId: 'insert:equation-edit',
+          label: ref.type === 'ole' ? '수식으로 변환하여 편집...' : '수식 편집...',
+        },
         { type: 'separator' },
       );
     }

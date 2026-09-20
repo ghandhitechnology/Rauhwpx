@@ -47,7 +47,7 @@ export const MUTATING_METHODS: readonly string[] = [
   'setCellShapePropertiesByPath', 'deletePictureControl', 'deleteCellPictureControlByPath',
   'createShapeControl', 'setShapeProperties', 'deleteShapeControl', 'changeObjectZOrder',
   'groupShapes', 'ungroupShape', 'moveLineEndpoint', 'updateConnectorsInSection',
-  'insertEquation', 'setEquationProperties', 'setNoteEquationProperties', 'deleteEquationControl',
+  'insertEquation', 'promoteOleEquation', 'setEquationProperties', 'setNoteEquationProperties', 'deleteEquationControl',
   'insertEquationInCell', 'deleteEquationControlInCell',
   // 각주/미주
   'insertFootnote', 'insertEndnote', 'deleteFootnote', 'applyEndnoteShape',
