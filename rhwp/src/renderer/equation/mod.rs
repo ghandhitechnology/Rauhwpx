@@ -7,6 +7,7 @@ pub mod ast;
 #[cfg(target_arch = "wasm32")]
 pub mod canvas_render;
 pub mod layout;
+pub(crate) mod legacy_hwpeq;
 pub mod parser;
 pub mod svg_render;
 pub mod symbols;

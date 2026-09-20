@@ -9,7 +9,131 @@ use crate::model::event::DocumentEvent;
 use crate::model::paragraph::Paragraph;
 use crate::model::shape::{common_obj_offsets, ShapeObject};
 
+/// [#7105] 수식 편집 명령이 대상이 수식이 아닐 때 낼 오류.
+///
+/// 한/글 5.x·97 계열이 `hwpeq5X.ocx` 로 저장한 수식은 native `$eqed` 컨트롤이 아니라
+/// **OLE 개체**(`Control::Shape(ShapeObject::Ole)`)다. 스크립트는 `Contents` 에서 읽을 수
+/// 있지만 되쓰는 경로가 없다 — 편집분은 native 수식으로 옮긴 뒤에만 고친다.
+fn not_an_equation_error(ctrl: &Control) -> HwpError {
+    if let Control::Shape(shape) = ctrl {
+        if matches!(shape.as_ref(), ShapeObject::Ole(_)) {
+            return HwpError::RenderError(
+                "지정된 컨트롤은 OLE 개체입니다 — 한/글 5.x·97 계열이 저장한 수식을 포함해 \
+                 OLE 개체는 먼저 native 수식으로 변환해야 내용을 편집할 수 있습니다(#7105). \
+                 개체 삭제·이동은 도형 명령(delete-control · delete-shape)을 쓰십시오."
+                    .to_string(),
+            );
+        }
+    }
+    HwpError::RenderError("지정된 컨트롤이 수식이 아닙니다".to_string())
+}
+
 impl DocumentCore {
+    /// 레거시 `hwpeq5X` OLE 수식을 native equation으로 승격한다.
+    ///
+    /// 같은 문단·컨트롤 슬롯에서 `Control::Shape(Ole)` 를 `Control::Equation` 으로
+    /// 교체한다. 인라인 문자 위치와 뒤 컨트롤 인덱스는 변하지 않는다.
+    pub fn promote_ole_equation_native(
+        &mut self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        control_idx: usize,
+    ) -> Result<String, HwpError> {
+        use crate::model::control::Equation;
+        use crate::parser::tags::CTRL_EQUATION;
+
+        let (mut common, bin_data_id) = {
+            let section = self.document.sections.get(section_idx).ok_or_else(|| {
+                HwpError::RenderError(format!("구역 인덱스 {} 범위 초과", section_idx))
+            })?;
+            let paragraph = section.paragraphs.get(parent_para_idx).ok_or_else(|| {
+                HwpError::RenderError(format!("문단 인덱스 {} 범위 초과", parent_para_idx))
+            })?;
+            let control = paragraph.controls.get(control_idx).ok_or_else(|| {
+                HwpError::RenderError(format!("컨트롤 인덱스 {} 범위 초과", control_idx))
+            })?;
+            let Control::Shape(shape) = control else {
+                return Err(HwpError::RenderError(
+                    "지정된 컨트롤이 OLE 수식이 아닙니다".to_string(),
+                ));
+            };
+            let ShapeObject::Ole(ole) = shape.as_ref() else {
+                return Err(HwpError::RenderError(
+                    "지정된 컨트롤이 OLE 수식이 아닙니다".to_string(),
+                ));
+            };
+            (ole.common.clone(), ole.bin_data_id)
+        };
+
+        let ole_bytes = crate::renderer::layout::find_bin_data(
+            &self.document.bin_data_content,
+            u16::try_from(bin_data_id).map_err(|_| {
+                HwpError::RenderError("OLE BinData 참조가 허용 범위를 벗어났습니다".to_string())
+            })?,
+        )
+        .and_then(|content| {
+            content
+                .data
+                .load_limited(crate::parser::limits::MAX_BINARY_BYTES)
+        })
+        .ok_or_else(|| HwpError::RenderError("OLE 수식 BinData를 읽을 수 없습니다".to_string()))?;
+        let legacy_script = crate::parser::ole_container::parse_ole_container(&ole_bytes)
+            .and_then(|container| container.raw_contents)
+            .and_then(|contents| {
+                crate::parser::ole_container::parse_equation_contents_script(&contents)
+            })
+            .ok_or_else(|| {
+                HwpError::RenderError(
+                    "지정된 OLE 개체는 편집 가능한 한/글 수식이 아닙니다".to_string(),
+                )
+            })?;
+        let script = crate::renderer::equation::legacy_hwpeq::normalize(&legacy_script)
+            .unwrap_or(legacy_script);
+
+        let (_, base_height) = crate::renderer::equation::intrinsic_size_hwp(&script, 1000);
+        let font_size = if base_height > 0 && common.height > 0 {
+            ((u64::from(common.height) * 1000) / u64::from(base_height)).clamp(200, 40_000) as u32
+        } else {
+            1000
+        };
+        common.ctrl_id = CTRL_EQUATION;
+        if common.description.is_empty() {
+            common.description = "레거시 OLE 수식에서 변환한 수식입니다.".to_string();
+        }
+        let equation = Equation {
+            common,
+            script: script.clone(),
+            font_size,
+            color: 0,
+            baseline: 85,
+            version_info: "Equation Version 60".to_string(),
+            font_name: "HYhwpEQ".to_string(),
+            ..Default::default()
+        };
+
+        let section = &mut self.document.sections[section_idx];
+        let paragraph = &mut section.paragraphs[parent_para_idx];
+        while paragraph.ctrl_data_records.len() < paragraph.controls.len() {
+            paragraph.ctrl_data_records.push(None);
+        }
+        paragraph.controls[control_idx] = Control::Equation(Box::new(equation));
+        if control_idx < paragraph.ctrl_data_records.len() {
+            paragraph.ctrl_data_records[control_idx] = None;
+        }
+        section.raw_stream = None;
+        self.reflow_paragraph(section_idx, parent_para_idx);
+        self.recompose_section(section_idx);
+        self.paginate_if_needed();
+        self.invalidate_page_tree_cache();
+
+        Ok(format!(
+            "{{\"ok\":true,\"paraIdx\":{},\"controlIdx\":{},\"script\":\"{}\"}}",
+            parent_para_idx,
+            control_idx,
+            crate::document_core::helpers::json_escape(&script),
+        ))
+    }
+
     /// 수식 컨트롤의 속성을 조회한다 (네이티브).
     /// 표 셀 내 또는 본문의 수식 컨트롤을 찾아 불변 참조를 반환한다.
     fn find_equation_ref(
@@ -64,9 +188,7 @@ impl DocumentCore {
 
         match ctrl {
             Control::Equation(e) => Ok(e),
-            _ => Err(HwpError::RenderError(
-                "지정된 컨트롤이 수식이 아닙니다".to_string(),
-            )),
+            other => Err(not_an_equation_error(other)),
         }
     }
     /// 표 셀 내 또는 본문의 수식 컨트롤을 찾아 가변 참조를 반환한다.
@@ -121,9 +243,7 @@ impl DocumentCore {
 
         match ctrl {
             Control::Equation(e) => Ok(e),
-            _ => Err(HwpError::RenderError(
-                "지정된 컨트롤이 수식이 아닙니다".to_string(),
-            )),
+            other => Err(not_an_equation_error(other)),
         }
     }
     pub(crate) fn equation_properties_json(eq: &crate::model::control::Equation) -> String {
@@ -317,9 +437,7 @@ impl DocumentCore {
                 "{{\"ok\":true,\"script\":\"{}\"}}",
                 crate::document_core::helpers::json_escape(&eq.script)
             )),
-            Some(_) => Err(HwpError::RenderError(
-                "지정된 컨트롤이 수식이 아닙니다".to_string(),
-            )),
+            Some(other) => Err(not_an_equation_error(other)),
             None => Err(HwpError::RenderError(format!(
                 "컨트롤 인덱스 {} 범위 초과",
                 eq_control_idx
@@ -432,9 +550,7 @@ impl DocumentCore {
             )));
         }
         if !matches!(&para.controls[control_idx], Control::Equation(_)) {
-            return Err(HwpError::RenderError(
-                "지정된 컨트롤이 수식이 아닙니다".to_string(),
-            ));
+            return Err(not_an_equation_error(&para.controls[control_idx]));
         }
 
         Self::remove_equation_control_and_shift(para, control_idx);
@@ -796,9 +912,7 @@ impl DocumentCore {
             )));
         }
         if !matches!(&cell_para.controls[eq_control_idx], Control::Equation(_)) {
-            return Err(HwpError::RenderError(
-                "지정된 컨트롤이 수식이 아닙니다".to_string(),
-            ));
+            return Err(not_an_equation_error(&cell_para.controls[eq_control_idx]));
         }
         let local_contribution_before =
             crate::renderer::layout::LayoutEngine::paragraph_contributes_to_table_nested_text_flag(

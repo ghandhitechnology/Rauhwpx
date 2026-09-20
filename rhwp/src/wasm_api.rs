@@ -4656,6 +4656,21 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    #[wasm_bindgen(js_name = promoteOleEquation)]
+    pub fn promote_ole_equation(
+        &mut self,
+        section_idx: u32,
+        para_idx: u32,
+        control_idx: u32,
+    ) -> Result<String, JsValue> {
+        self.promote_ole_equation_native(
+            section_idx as usize,
+            para_idx as usize,
+            control_idx as usize,
+        )
+        .map_err(|e| e.into())
+    }
+
     /// 표 셀 문단에 수식을 삽입한다.
     ///
     /// 반환: JSON `{"ok":true, "cellParaIdx":N, "controlIdx":N}`
