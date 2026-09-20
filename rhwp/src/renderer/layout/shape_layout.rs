@@ -2246,6 +2246,39 @@ impl LayoutEngine {
                                     rendered = true;
                                 }
                             }
+
+                            // CONTENTS 는 u32 길이 접두가 붙을 수 있다. contents_emf_payload 가
+                            // EMR_HEADER 부터 자른다. 미리보기 EMF/WMF/native 가 못 그렸을 때만 탄다.
+                            if !rendered {
+                                if let Some(raw) = container.raw_contents.as_deref() {
+                                    if let Some(contents_emf) =
+                                        crate::parser::ole_container::contents_emf_payload(raw)
+                                    {
+                                        let render_rect = (
+                                            render_x as f32,
+                                            render_y as f32,
+                                            render_w as f32,
+                                            render_h as f32,
+                                        );
+                                        if let Ok(svg_fragment) =
+                                            crate::emf::convert_to_svg(contents_emf, render_rect)
+                                        {
+                                            push_ole_raw_svg_render_node(
+                                                tree,
+                                                parent,
+                                                BoundingBox::new(
+                                                    render_x, render_y, render_w, render_h,
+                                                ),
+                                                svg_fragment,
+                                                section_index,
+                                                para_index,
+                                                control_index,
+                                            );
+                                            rendered = true;
+                                        }
+                                    }
+                                }
+                            }
                         }
                         if !rendered
                             && self.push_hwpx_hmapsi_preview_clip_node(
