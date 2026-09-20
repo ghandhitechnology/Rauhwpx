@@ -405,7 +405,6 @@ impl Player {
     }
 
     /// 페이지 변환(논리 → 장치). map mode 는 파일 중간에도 바뀌므로 emit 시점에 감싼다.
-    /// 항등이면 `<g>` 를 만들지 않는다.
     fn page_wrap(&self, node: &str) -> String {
         let Some(m) = page_xform(self.dc_stack.current()) else {
             return node.to_string();
@@ -427,7 +426,6 @@ impl Player {
 /// `MM_TEXT`(1) 은 1:1. `MM_ISOTROPIC`(7)·`MM_ANISOTROPIC`(8) 만 window/viewport
 /// extent 로 비율을 정한다. `MM_ISOTROPIC` 은 절댓값이 작은 쪽 배율을 두 축에 쓰고
 /// 부호만 살린다. `MM_LOMETRIC`..`MM_TWIPS`(2..6) 는 코퍼스 표본이 없어 항등.
-/// 항등이면 `None` — 감싸는 `<g>` 를 만들지 않는다.
 fn page_xform(dc: &super::device_context::DeviceContext) -> Option<[f32; 6]> {
     const MM_ISOTROPIC: u32 = 7;
     const MM_ANISOTROPIC: u32 = 8;

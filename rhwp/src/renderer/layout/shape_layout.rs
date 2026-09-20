@@ -2247,8 +2247,6 @@ impl LayoutEngine {
                                 }
                             }
 
-                            // CONTENTS 는 u32 길이 접두가 붙을 수 있다. contents_emf_payload 가
-                            // EMR_HEADER 부터 자른다. 미리보기 EMF/WMF/native 가 못 그렸을 때만 탄다.
                             if !rendered {
                                 if let Some(raw) = container.raw_contents.as_deref() {
                                     if let Some(contents_emf) =

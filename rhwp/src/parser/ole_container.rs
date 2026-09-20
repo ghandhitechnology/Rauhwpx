@@ -326,7 +326,7 @@ pub fn contents_emf_payload(data: &[u8]) -> Option<&[u8]> {
     None
 }
 
-/// [#5724] `Contents` 페이로드가 EMF 인지 판별 (EMR_HEADER: type=1, offset 40 `" EMF"`).
+/// [#5724] `Contents` 가 EMF 인지 — `contents_emf_payload` 와 같다.
 pub fn raw_contents_is_emf(data: &[u8]) -> bool {
     contents_emf_payload(data).is_some()
 }
@@ -408,9 +408,7 @@ fn wmf_start_offset(data: &[u8]) -> Option<usize> {
 /// 박힌다. 복원본이 첫 청크의 `EnhancedMetafileDataSize` 선언값과 `EMR_HEADER` 서명을
 /// **함께** 만족할 때만 채택한다. 아니면 `None` 을 돌려 종전 바이트 스캔으로 내려간다.
 fn emf_from_wmf_comment_chunks(data: &[u8]) -> Option<Vec<u8>> {
-    /// WMF 레코드 함수 코드 META_ESCAPE.
     const META_ESCAPE: u16 = 0x0626;
-    /// Escape 함수 META_ESCAPE_ENHANCED_METAFILE.
     const ENHANCED_METAFILE: u16 = 0x000F;
     /// `EmfComment` 헤더: WMFC(4) + Type(4) + Version(4) + Checksum(2) + Flags(4)
     /// + RecordCount(4) + CurrentRecordSize(4) + RemainingBytes(4) + TotalSize(4).
@@ -464,7 +462,6 @@ fn emf_from_wmf_comment_chunks(data: &[u8]) -> Option<Vec<u8>> {
     if emf.len() < 44 || declared != Some(emf.len()) {
         return None;
     }
-    // EMR_HEADER: type=1, offset 40 에 `" EMF"`.
     if u32::from_le_bytes([emf[0], emf[1], emf[2], emf[3]]) != 1 || &emf[40..44] != b" EMF" {
         return None;
     }
