@@ -507,6 +507,105 @@ fn test_page_background_image_fit_to_size_preserves_bbox_output() {
 }
 
 #[test]
+fn test_page_background_image_none_stretches() {
+    let png = bmp_bytes_to_png_bytes(&make_minimal_bmp_2x2()).expect("BMP->PNG 변환 실패");
+    let image = PageBackgroundImage {
+        data: png.into(),
+        fill_mode: ImageFillMode::None,
+        brightness: 0,
+        contrast: 0,
+        effect: crate::model::image::ImageEffect::RealPic,
+    };
+    let bbox = BoundingBox::new(10.0, 20.0, 100.0, 50.0);
+    let mut renderer = SvgRenderer::new();
+    renderer.begin_page(200.0, 100.0);
+
+    renderer.render_page_background_image(&image, &bbox);
+
+    let output = renderer.output();
+    assert!(
+        output.contains(
+            "<image x=\"10\" y=\"20\" width=\"100\" height=\"50\" preserveAspectRatio=\"none\""
+        ),
+        "쪽 배경 None은 늘려 채우기다: {output}"
+    );
+}
+
+#[test]
+fn test_page_background_image_zoom_contains() {
+    let png = bmp_bytes_to_png_bytes(&make_minimal_bmp_2x2()).expect("BMP->PNG 변환 실패");
+    let image = PageBackgroundImage {
+        data: png.into(),
+        fill_mode: ImageFillMode::Zoom,
+        brightness: 0,
+        contrast: 0,
+        effect: crate::model::image::ImageEffect::RealPic,
+    };
+    let bbox = BoundingBox::new(10.0, 20.0, 100.0, 50.0);
+    let mut renderer = SvgRenderer::new();
+    renderer.begin_page(200.0, 100.0);
+
+    renderer.render_page_background_image(&image, &bbox);
+
+    let output = renderer.output();
+    assert!(
+        output.contains(
+            "<image x=\"10\" y=\"20\" width=\"100\" height=\"50\" preserveAspectRatio=\"xMidYMid meet\""
+        ),
+        "쪽 배경 Zoom은 contain이다: {output}"
+    );
+}
+
+fn render_image_node_fill_svg(mode: ImageFillMode) -> String {
+    let png = bmp_bytes_to_png_bytes(&make_minimal_bmp_2x2()).expect("BMP->PNG 변환 실패");
+    let mut image = ImageNode::new(1, Some(png));
+    image.fill_mode = Some(mode);
+    let bbox = BoundingBox::new(10.0, 20.0, 100.0, 50.0);
+    let mut renderer = SvgRenderer::new();
+    renderer.begin_page(200.0, 100.0);
+    renderer.render_image_node(&image, &bbox);
+    renderer.output().to_string()
+}
+
+#[test]
+fn test_image_node_none_contains_in_bbox() {
+    let output = render_image_node_fill_svg(ImageFillMode::None);
+    assert!(
+        output.contains(
+            "<image x=\"10\" y=\"20\" width=\"100\" height=\"50\" preserveAspectRatio=\"xMidYMid meet\""
+        ),
+        "ImageNode None은 상자 contain이다: {output}"
+    );
+    assert!(
+        !output.contains("fill-clip"),
+        "ImageNode None은 배치 clip이 아니다: {output}"
+    );
+    assert!(
+        !output.contains("width=\"2\" height=\"2\""),
+        "ImageNode None은 원본 2x2로 그리지 않는다: {output}"
+    );
+}
+
+#[test]
+fn test_image_node_zoom_contains_in_bbox() {
+    let output = render_image_node_fill_svg(ImageFillMode::Zoom);
+    assert!(
+        output.contains(
+            "<image x=\"10\" y=\"20\" width=\"100\" height=\"50\" preserveAspectRatio=\"xMidYMid meet\""
+        ),
+        "ImageNode Zoom은 상자 contain이다: {output}"
+    );
+    assert!(
+        !output.contains("fill-clip"),
+        "ImageNode Zoom은 배치 clip이 아니다: {output}"
+    );
+    assert!(
+        !output.contains("width=\"2\" height=\"2\""),
+        "ImageNode Zoom은 원본 2x2로 그리지 않는다: {output}"
+    );
+}
+
+#[test]
 fn test_page_background_image_center_uses_original_image_size() {
     let png = bmp_bytes_to_png_bytes(&make_minimal_bmp_2x2()).expect("BMP->PNG 변환 실패");
     let image = PageBackgroundImage {

@@ -54,6 +54,8 @@ import {
 } from './render-backend';
 import {
   canvasKitImageCacheKey,
+  canvasKitImageContainRect,
+  canvasKitImageFillModeContains,
   canvasKitImageFillModeTiles,
   canvasKitImageFillModeStretches,
   canvasKitImagePlacement,
@@ -1498,6 +1500,11 @@ export class CanvasKitLayerRenderer {
     const fillMode = op.fillMode ?? 'fitToSize';
     if (canvasKitImageFillModeStretches(fillMode)) {
       drawImage(op.bbox.x, op.bbox.y, op.bbox.width, op.bbox.height);
+      return;
+    }
+    if (canvasKitImageFillModeContains(fillMode)) {
+      const fit = canvasKitImageContainRect(op.bbox, imageWidth, imageHeight);
+      drawImage(fit.x, fit.y, fit.width, fit.height);
       return;
     }
 

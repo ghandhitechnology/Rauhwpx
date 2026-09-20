@@ -1028,6 +1028,12 @@ impl LayoutEngine {
                 &mut self.auto_counter.borrow_mut(),
                 bin_data_content,
                 None,
+                CaptionOwner::new(
+                    Some(section_index),
+                    Some(para_index),
+                    Some(control_index),
+                    CaptionControlKind::Shape,
+                ),
             );
         }
     }
@@ -2244,6 +2250,37 @@ impl LayoutEngine {
                                         control_index,
                                     );
                                     rendered = true;
+                                }
+                            }
+
+                            if !rendered {
+                                if let Some(raw) = container.raw_contents.as_deref() {
+                                    if let Some(contents_emf) =
+                                        crate::parser::ole_container::contents_emf_payload(raw)
+                                    {
+                                        let render_rect = (
+                                            render_x as f32,
+                                            render_y as f32,
+                                            render_w as f32,
+                                            render_h as f32,
+                                        );
+                                        if let Ok(svg_fragment) =
+                                            crate::emf::convert_to_svg(contents_emf, render_rect)
+                                        {
+                                            push_ole_raw_svg_render_node(
+                                                tree,
+                                                parent,
+                                                BoundingBox::new(
+                                                    render_x, render_y, render_w, render_h,
+                                                ),
+                                                svg_fragment,
+                                                section_index,
+                                                para_index,
+                                                control_index,
+                                            );
+                                            rendered = true;
+                                        }
+                                    }
                                 }
                             }
                         }

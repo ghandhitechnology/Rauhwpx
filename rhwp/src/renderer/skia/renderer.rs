@@ -7,6 +7,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::error::HwpError;
 use crate::model::image::ImageEffect;
+use crate::model::style::ImageFillMode;
 use crate::model::ColorRef;
 use crate::paint::replay_order::layer_node_has_replay_plane;
 use crate::paint::{
@@ -1209,7 +1210,15 @@ impl SkiaLayerRenderer {
                                 let rendered = draw_image(
                                     data,
                                     effective_bbox,
-                                    image.fill_mode,
+                                    // [#7235] 칸·도형 채우기 None은 배치가 아니라 contain이다.
+                                    // 쪽 배경 경로의 None은 늘려 채우기를 유지한다.
+                                    image.fill_mode.map(|mode| {
+                                        if mode == ImageFillMode::None {
+                                            ImageFillMode::Zoom
+                                        } else {
+                                            mode
+                                        }
+                                    }),
                                     image.original_size,
                                     image.crop,
                                     image.original_size_hu,

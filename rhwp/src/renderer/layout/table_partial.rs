@@ -2192,6 +2192,12 @@ impl LayoutEngine {
                     &mut self.auto_counter.borrow_mut(),
                     bin_data_content,
                     cap_cell_ctx.clone(),
+                    CaptionOwner::new(
+                        Some(section_index),
+                        Some(para_index),
+                        Some(control_index),
+                        CaptionControlKind::Table,
+                    ),
                 );
             }
         }
@@ -2216,6 +2222,12 @@ impl LayoutEngine {
                     &mut self.auto_counter.borrow_mut(),
                     bin_data_content,
                     cap_cell_ctx.clone(),
+                    CaptionOwner::new(
+                        Some(section_index),
+                        Some(para_index),
+                        Some(control_index),
+                        CaptionControlKind::Table,
+                    ),
                 );
             }
         }
@@ -2248,6 +2260,12 @@ impl LayoutEngine {
                     &mut self.auto_counter.borrow_mut(),
                     bin_data_content,
                     cap_cell_ctx.clone(),
+                    CaptionOwner::new(
+                        Some(section_index),
+                        Some(para_index),
+                        Some(control_index),
+                        CaptionControlKind::Table,
+                    ),
                 );
             }
         }

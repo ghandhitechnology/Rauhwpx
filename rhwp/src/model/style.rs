@@ -685,6 +685,8 @@ pub enum ImageFillMode {
     TileVertLeft,
     TileVertRight,
     FitToSize,
+    /// HWPX `imgBrush mode="ZOOM"` — 영역에 맞춰 종횡비를 지키며 축소한다.
+    Zoom,
     Total,
     Center,
     CenterTop,

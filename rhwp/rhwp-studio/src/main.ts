@@ -1,4 +1,5 @@
 import { WasmBridge, type PreparedWasmDocument } from '@/core/wasm-bridge';
+import { installDocumentTitle } from '@/ui/document-title';
 import { FALLBACK_DOCUMENT_FILE_NAME } from '@/core/document-names';
 import type { DocumentInfo } from '@/core/types';
 import { browserOriginSyncDigest, browserOriginPublishedRevision, setBrowserOriginSyncDigest } from '@/cloud/browser-cloud';
@@ -173,6 +174,7 @@ import {
 } from '@/core/object-address';
 
 const wasm = new WasmBridge();
+installDocumentTitle(wasm);
 const eventBus = new EventBus();
 const documentState = new DocumentDirtyState(eventBus);
 documentState.installBeforeUnload(window);
