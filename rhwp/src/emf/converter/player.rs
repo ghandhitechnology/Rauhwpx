@@ -196,7 +196,7 @@ impl Player {
             escape_xml(&family), size, weight, italic, color,
             escape_xml(&t.text),
         );
-        self.svg.push(&node);
+        self.push_drawn(&node);
     }
 
     fn emit_bitmap(&mut self, bmp: &StretchDIBits) {
@@ -206,7 +206,7 @@ impl Player {
             "<image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"none\" href=\"{data_url}\"/>",
             bmp.x_dest, bmp.y_dest, bmp.cx_dest, bmp.cy_dest,
         );
-        self.svg.push(&node);
+        self.push_drawn(&node);
     }
 
     fn select_object(&mut self, handle: u32) {
@@ -271,7 +271,7 @@ impl Player {
             }
             let _ = write!(self.path_d, "L{} {} ", to.x, to.y);
         } else {
-            self.svg.push(&node);
+            self.push_drawn(&node);
         }
         self.dc_stack.current_mut().current_pos = (to.x, to.y);
     }
@@ -288,7 +288,7 @@ impl Player {
             "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\"{rx_attr}{ry_attr} fill=\"{fill}\" stroke=\"{stroke_color}\" stroke-width=\"{:.2}\"/>",
             r.left, r.top, r.width(), r.height(), stroke.width,
         );
-        self.svg.push(&node);
+        self.push_drawn(&node);
     }
 
     fn emit_ellipse(&mut self, r: &RectL) {
@@ -303,7 +303,7 @@ impl Player {
             "<ellipse cx=\"{cx}\" cy=\"{cy}\" rx=\"{rx}\" ry=\"{ry}\" fill=\"{fill}\" stroke=\"{stroke_color}\" stroke-width=\"{:.2}\"/>",
             stroke.width,
         );
-        self.svg.push(&node);
+        self.push_drawn(&node);
     }
 
     fn emit_arc_like(&mut self, r: &RectL, start: &PointL, end: &PointL, kind: ArcKind) {
@@ -332,7 +332,7 @@ impl Player {
             "<path d=\"{d}\" fill=\"{fill}\" stroke=\"{stroke_color}\" stroke-width=\"{:.2}\"/>",
             stroke.width,
         );
-        self.svg.push(&node);
+        self.push_drawn(&node);
     }
 
     fn emit_polyline16(&mut self, points: &[(i16, i16)], close: bool) {
@@ -356,7 +356,7 @@ impl Player {
             "<{tag} points=\"{pts}\" fill=\"{fill}\" stroke=\"{stroke_color}\" stroke-width=\"{:.2}\"/>",
             stroke.width,
         );
-        self.svg.push(&node);
+        self.push_drawn(&node);
     }
 
     fn emit_polybezier16(&mut self, points: &[(i16, i16)]) {
@@ -379,7 +379,7 @@ impl Player {
             "<path d=\"{d}\" fill=\"none\" stroke=\"{stroke_color}\" stroke-width=\"{:.2}\"/>",
             stroke.width,
         );
-        self.svg.push(&node);
+        self.push_drawn(&node);
     }
 
     fn emit_path(&mut self, fill: Option<String>, stroke: Option<StrokeSpec>) {
@@ -395,9 +395,70 @@ impl Player {
             self.path_d.trim(),
             stroke_width,
         );
-        self.svg.push(&node);
+        self.push_drawn(&node);
         self.path_d.clear();
     }
+
+    fn push_drawn(&mut self, node: &str) {
+        let wrapped = self.page_wrap(node);
+        self.svg.push(&wrapped);
+    }
+
+    /// 페이지 변환(논리 → 장치). map mode 는 파일 중간에도 바뀌므로 emit 시점에 감싼다.
+    fn page_wrap(&self, node: &str) -> String {
+        let Some(m) = page_xform(self.dc_stack.current()) else {
+            return node.to_string();
+        };
+        format!(
+            "<g transform=\"matrix({} {} {} {} {} {})\">{node}</g>",
+            fmt_f32(m[0]),
+            fmt_f32(m[1]),
+            fmt_f32(m[2]),
+            fmt_f32(m[3]),
+            fmt_f32(m[4]),
+            fmt_f32(m[5]),
+        )
+    }
+}
+
+/// DC 의 map mode + window/viewport 로 페이지 변환(논리 → 장치)을 만든다.
+///
+/// `MM_TEXT`(1) 은 1:1. `MM_ISOTROPIC`(7)·`MM_ANISOTROPIC`(8) 만 window/viewport
+/// extent 로 비율을 정한다. `MM_ISOTROPIC` 은 절댓값이 작은 쪽 배율을 두 축에 쓰고
+/// 부호만 살린다. `MM_LOMETRIC`..`MM_TWIPS`(2..6) 는 코퍼스 표본이 없어 항등.
+fn page_xform(dc: &super::device_context::DeviceContext) -> Option<[f32; 6]> {
+    const MM_ISOTROPIC: u32 = 7;
+    const MM_ANISOTROPIC: u32 = 8;
+
+    let (mut sx, mut sy) = (1.0_f32, 1.0_f32);
+    if matches!(dc.map_mode, MM_ISOTROPIC | MM_ANISOTROPIC) {
+        if dc.window_ext.0 == 0 || dc.window_ext.1 == 0 {
+            return None;
+        }
+        sx = dc.viewport_ext.0 as f32 / dc.window_ext.0 as f32;
+        sy = dc.viewport_ext.1 as f32 / dc.window_ext.1 as f32;
+        if !sx.is_finite() || !sy.is_finite() {
+            return None;
+        }
+        if dc.map_mode == MM_ISOTROPIC {
+            let unit = sx.abs().min(sy.abs());
+            sx = unit.copysign(sx);
+            sy = unit.copysign(sy);
+        }
+    }
+    let tx = dc.viewport_org.0 as f32 - dc.window_org.0 as f32 * sx;
+    let ty = dc.viewport_org.1 as f32 - dc.window_org.1 as f32 * sy;
+
+    let identity =
+        (sx - 1.0).abs() < 1e-6 && (sy - 1.0).abs() < 1e-6 && tx.abs() < 1e-6 && ty.abs() < 1e-6;
+    if identity {
+        return None;
+    }
+    Some([sx, 0.0, 0.0, sy, tx, ty])
+}
+
+fn fmt_f32(v: f32) -> String {
+    format!("{v:.6}")
 }
 
 #[derive(Copy, Clone)]
