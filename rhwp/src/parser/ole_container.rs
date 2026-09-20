@@ -342,15 +342,16 @@ pub fn raw_contents_is_emf(data: &[u8]) -> bool {
 /// 이 OLE 들의 `\x02OlePres000` 은 전부 28바이트 스텁(헤더만)이라 미리보기
 /// 폴백으로는 그릴 것이 없다 — 스크립트가 유일한 출처다.
 pub fn parse_equation_contents_script(data: &[u8]) -> Option<String> {
-    const SIG: &[u8] = b"Hwp 5.0 Equation Editor";
+    const SIG: &[u8] = b"Hwp 5.0 Equation Editor(HwpEq5x)";
     if data.len() < 72 || !data.starts_with(SIG) {
         return None;
     }
     let len = u32::from_le_bytes([data[68], data[69], data[70], data[71]]) as usize;
-    if len == 0 || !len.is_multiple_of(2) || data.len() < 72 + len {
+    let end = 72usize.checked_add(len)?;
+    if len == 0 || !len.is_multiple_of(2) || end > data.len() {
         return None;
     }
-    let units: Vec<u16> = data[72..72 + len]
+    let units: Vec<u16> = data[72..end]
         .chunks_exact(2)
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .collect();
@@ -538,21 +539,37 @@ mod tests {
         assert!(parse_ole_container(&[0u8; 4]).is_none());
     }
 
-    #[test]
-    fn parse_equation_contents_script_reads_utf16le_after_envelope() {
-        let mut data = vec![0u8; 72];
-        data[..23].copy_from_slice(b"Hwp 5.0 Equation Editor");
-        let script: Vec<u8> = "a over b"
+    fn equation_contents_envelope(sig: &[u8], script: &str, len: Option<u32>) -> Vec<u8> {
+        let script_bytes: Vec<u8> = script
             .encode_utf16()
             .flat_map(|u| u.to_le_bytes())
             .collect();
-        data[68..72].copy_from_slice(&(script.len() as u32).to_le_bytes());
-        data.extend_from_slice(&script);
+        let mut data = vec![0u8; 72];
+        data[..sig.len()].copy_from_slice(sig);
+        data[68..72].copy_from_slice(&len.unwrap_or(script_bytes.len() as u32).to_le_bytes());
+        data.extend_from_slice(&script_bytes);
+        data
+    }
+
+    #[test]
+    fn parse_equation_contents_script_reads_utf16le_after_envelope() {
+        const SIG: &[u8] = b"Hwp 5.0 Equation Editor(HwpEq5x)";
+        let data = equation_contents_envelope(SIG, "a over b", None);
         assert_eq!(
             parse_equation_contents_script(&data).as_deref(),
             Some("a over b")
         );
         assert!(parse_equation_contents_script(b"not an equation envelope").is_none());
+        let prefix_only = equation_contents_envelope(b"Hwp 5.0 Equation Editor", "a over b", None);
+        assert!(
+            parse_equation_contents_script(&prefix_only).is_none(),
+            "prefix without (HwpEq5x) is not a hwpeq5x envelope"
+        );
+        let wrap_len = equation_contents_envelope(SIG, "a over b", Some(0xFFFF_FFFE));
+        assert!(
+            parse_equation_contents_script(&wrap_len).is_none(),
+            "script length that overflows 72+len must not slice"
+        );
     }
 
     #[test]

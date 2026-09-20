@@ -87,8 +87,15 @@ impl DocumentCore {
                     "지정된 OLE 개체는 편집 가능한 한/글 수식이 아닙니다".to_string(),
                 )
             })?;
-        let script = crate::renderer::equation::legacy_hwpeq::normalize(&legacy_script)
-            .unwrap_or(legacy_script);
+        let script = if crate::renderer::equation::legacy_hwpeq::has_tab_command(&legacy_script) {
+            crate::renderer::equation::legacy_hwpeq::normalize(&legacy_script).ok_or_else(|| {
+                HwpError::RenderError(
+                    "레거시 수식 스크립트를 현행 문법으로 변환할 수 없습니다".to_string(),
+                )
+            })?
+        } else {
+            legacy_script
+        };
 
         let (_, base_height) = crate::renderer::equation::intrinsic_size_hwp(&script, 1000);
         let font_size = if base_height > 0 && common.height > 0 {

@@ -396,6 +396,7 @@ export const insertCommands: CommandDef[] = [
       let ref = ih.getSelectedPictureRef();
       if (!ref || (ref.type !== 'equation' && ref.type !== 'ole')) return;
       if (ref.type === 'ole') {
+        if ((ref.cellPath?.length ?? 0) > 0 || ref.headerFooter) return;
         const oleRef = ref;
         let promoted: { ok: boolean; paraIdx: number; controlIdx: number } | undefined;
         recordObjectMutation(ih, 'promoteOleEquation', (wasm) => {

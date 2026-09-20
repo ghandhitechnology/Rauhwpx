@@ -68,9 +68,11 @@ test('레거시 수식 OLE는 메뉴와 더블클릭에서 native 수식 전환 
     '#7105: 선택한 정확한 OLE 슬롯을 전환해야 한다');
   assert.match(command, /selectPictureObject\([^\n]*'equation'\)/,
     '#7105: 전환 뒤 편집기는 native equation 선택을 받아야 한다');
+  assert.match(command, /cellPath\?\.length \?\? 0\) > 0 \|\| ref\.headerFooter/,
+    '#7105: 셀/머리말·꼬리말 OLE 는 본문 전용 promote API 로 보내면 안 된다');
 
-  assert.match(inputSrc, /ref\?\.type === 'equation' \|\| ref\?\.type === 'ole'/,
-    '#7105: OLE 선택 메뉴에도 수식 전환·편집 항목이 있어야 한다');
+  assert.match(inputSrc, /ref\?\.type === 'equation' \|\| bodyOle/,
+    '#7105: 본문 OLE 선택 메뉴에도 수식 전환·편집 항목이 있어야 한다');
   assert.match(inputSrc, /수식으로 변환하여 편집\.\.\./,
     '#7105: OLE 편집은 변환 동작임을 메뉴에서 알려야 한다');
   assert.match(mouseSrc, /if \(ref && ref\.type === 'ole'\)[\s\S]{0,1200}this\.eventBus\.emit\('equation-edit-request'/,

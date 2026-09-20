@@ -1883,7 +1883,9 @@ export class InputHandler {
       { type: 'separator' },
     ];
     // 수식 객체: "수식 편집..." 항목 추가. OLE 레거시 수식은 먼저 native 로 전환한다.
-    if (ref?.type === 'equation' || ref?.type === 'ole') {
+    // 본문 슬롯만 promoteOleEquation 이 받는다 — 셀/머리말·꼬리말 OLE 는 범위 밖.
+    const bodyOle = ref?.type === 'ole' && !(ref.cellPath?.length) && !ref.headerFooter;
+    if (ref?.type === 'equation' || bodyOle) {
       items.push(
         {
           type: 'command',

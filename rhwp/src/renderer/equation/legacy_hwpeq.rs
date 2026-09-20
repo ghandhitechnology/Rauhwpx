@@ -56,7 +56,7 @@ pub(crate) fn normalize(script: &str) -> Option<String> {
 }
 
 /// `\TAB` 명령이 들어 있는지. `\TABLE` 같은 더 긴 이름은 세지 않는다.
-fn has_tab_command(script: &str) -> bool {
+pub(crate) fn has_tab_command(script: &str) -> bool {
     let bytes: Vec<char> = script.chars().collect();
     let mut quoted = false;
     let mut i = 0;
@@ -202,5 +202,38 @@ impl Cursor {
             }
         }
         Some(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_skips_scripts_without_tab() {
+        assert_eq!(normalize("a over b"), None);
+        assert!(!has_tab_command("a over b"));
+    }
+
+    #[test]
+    fn normalize_converts_sub_tab_dialect() {
+        assert_eq!(normalize(r"I \SUB E \TAB").as_deref(), Some("I_{E}"));
+    }
+
+    #[test]
+    fn eof_closes_the_last_unterminated_argument() {
+        let out = normalize(r"A \SUB B \TAB + C \SUB D").expect("EOF closes last \\SUB");
+        assert!(out.contains("_{B}"), "got {out}");
+        assert!(out.contains("_{D}"), "got {out}");
+    }
+
+    #[test]
+    fn normalize_fails_when_parse_depth_exceeded() {
+        let mut script = String::from("X");
+        for _ in 0..super::super::parser::MAX_PARSE_DEPTH + 1 {
+            script = format!(r"\BAR {script} \TAB");
+        }
+        assert!(has_tab_command(&script));
+        assert_eq!(normalize(&script), None);
     }
 }
