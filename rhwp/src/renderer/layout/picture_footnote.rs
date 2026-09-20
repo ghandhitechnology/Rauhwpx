@@ -647,6 +647,12 @@ impl LayoutEngine {
                 &mut self.auto_counter.borrow_mut(),
                 bin_data_content,
                 Some(cell_ctx),
+                CaptionOwner::new(
+                    Some(section_index),
+                    Some(para_index),
+                    Some(control_index),
+                    CaptionControlKind::Image,
+                ),
             );
         }
 
@@ -699,6 +705,7 @@ impl LayoutEngine {
         auto_counter: &mut AutoNumberCounter,
         bin_data_content: &[BinDataContent],
         cell_ctx: Option<super::CellContext>,
+        caption_owner: Option<CaptionOwner>,
     ) {
         if caption.paragraphs.is_empty() {
             return;
@@ -713,6 +720,7 @@ impl LayoutEngine {
 
         let mut para_y = y_start;
         for (pi, para) in caption.paragraphs.iter().enumerate() {
+            let first_caption_node = parent_node.children.len();
             let para_y_before_layout = para_y;
             // 먼저 문단을 조합
             let mut composed = compose_paragraph(para);
@@ -749,6 +757,16 @@ impl LayoutEngine {
                 Some(bin_data_content),
                 None, // 캡션 컨텍스트 — wrap zone 무관
             );
+
+            // 이 캡션 문단이 만든 줄만 표시한다. 중첩 컨트롤·이전 형제는 제외한다.
+            for node in &mut parent_node.children[first_caption_node..] {
+                if let RenderNodeType::TextLine(line) = &mut node.node_type {
+                    line.caption_owner = caption_owner.map(|owner| CaptionOwner {
+                        caption_ordinal: pi,
+                        ..owner
+                    });
+                }
+            }
 
             self.layout_caption_topbottom_pictures(
                 tree,

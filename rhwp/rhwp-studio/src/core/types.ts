@@ -568,6 +568,7 @@ export interface ControlLayoutItem {
   outerTableControlIdx?: number;
   /** 표 셀/글상자/캡션 내부 컨트롤의 전체 컨테이너 경로. */
   cellPath?: CellPathLike;
+  /** HF 원본 서브리스트. secIdx는 표시 페이지 절이 아니라 소유 원본 절. */
   headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number };
   /**
    * [Task #1280 v2] 렌더 정렬키 — 겹침 클릭 시 "최상단 개체" 판정용.
@@ -586,6 +587,18 @@ export interface ControlLayoutItem {
    * 더블클릭 시 그림 지정(파일 선택) 진입 분기 근거.
    */
   missing?: boolean;
+}
+
+export interface CaptionOwner {
+  secIdx: number;
+  paraIdx: number;
+  controlIdx: number;
+  controlKind: 'table' | 'image' | 'shape';
+  captionOrdinal: number;
+}
+
+export interface TextLine {
+  captionOwner?: CaptionOwner;
 }
 
 /** 개체 참조 (그림/글상자 공용) */
