@@ -454,10 +454,28 @@ export class SessionStore {
       }
       const result = this.#applyCommand(device, session, command);
       event = result.event;
+      const humanEdit = result.response?._humanEdit ?? null;
+      if (humanEdit) delete result.response._humanEdit;
       this.database.prepare(`
         INSERT INTO commands(id, session_id, device_id, type, payload_json, response_json, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
       `).run(command.commandId, sessionId, device.id, command.type, JSON.stringify(command.payload), JSON.stringify(result.response), this.now());
+      if (humanEdit) {
+        this.database.prepare(`
+          INSERT INTO session_human_edits(
+            id, session_id, command_id, from_operation_id, from_revision,
+            to_operation_id, to_revision, blob_sha256, size, change_summary,
+            created_by_device_id, paused_state_version, writer_generation, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          humanEdit.editSessionId, sessionId, command.commandId,
+          humanEdit.source.operationId, humanEdit.source.revision,
+          humanEdit.operationId, humanEdit.revision,
+          humanEdit.editedDocument.blobId, humanEdit.editedDocument.size,
+          humanEdit.changeSummary, device.id, humanEdit.pausedStateVersion,
+          humanEdit.writerGeneration, this.now(),
+        );
+      }
       return result.response;
     });
     if (event) this.#notify(event);
@@ -597,8 +615,88 @@ export class SessionStore {
       }
       // The duration budget covers agent work, not wall time spent suspended;
       // clearing started_at lets the next claim restamp a fresh run.
-      this.database.prepare('UPDATE sessions SET pause_requested_at = NULL, started_at = NULL WHERE id = ?').run(session.id);
+      this.database.prepare(`
+        UPDATE sessions SET pause_requested_at = NULL, paused_writer_generation = NULL, started_at = NULL WHERE id = ?
+      `).run(session.id);
       return updateStatus('queued', 'session.queued', { resumed: true }, now + STAGED_RETENTION_MS);
+    }
+    if (command.type === 'session.resume_edited') {
+      if (session.status !== 'suspended') throw new CloudError('INVALID_SESSION_STATE', 'Session is not suspended', 409);
+      if (session.protocol_version !== ROOM_PROTOCOL_VERSION) {
+        throw new CloudError('EDIT_RESUME_UNSUPPORTED', 'Edited resume requires a persistent Cloud conversation', 409);
+      }
+      const reason = session.suspended_reason && JSON.parse(session.suspended_reason);
+      if (reason?.code !== 'USER_PAUSED') {
+        throw new CloudError('EDIT_RESUME_NOT_ALLOWED', 'Only a user-paused Cloud draft can be edited and resumed', 409);
+      }
+      const provider = this.providerStatus(session.provider);
+      if (!provider.available) throw new CloudError('PROVIDER_UNAVAILABLE', `${session.provider} is not ready on this VPS`, 409, provider);
+      if (!provider.authenticated) throw new CloudError('AUTH_REQUIRED', `${session.provider} must be authenticated on this VPS`, 409, provider);
+      const { editSessionId, expectedWriterGeneration, expectedBoundary, editedDocument, changeSummary = null } = command.payload;
+      if (typeof editSessionId !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(editSessionId)
+        || !expectedBoundary || typeof expectedBoundary !== 'object' || Array.isArray(expectedBoundary)
+        || typeof expectedBoundary.operationId !== 'string'
+        || !/^[A-Za-z0-9._:-]{1,160}$/.test(expectedBoundary.operationId)
+        || !Number.isSafeInteger(expectedBoundary.revision) || expectedBoundary.revision < 0
+        || !Number.isSafeInteger(expectedWriterGeneration) || expectedWriterGeneration < 1
+        || !editedDocument || typeof editedDocument !== 'object' || Array.isArray(editedDocument)
+        || typeof editedDocument.blobId !== 'string' || !/^[a-f0-9]{64}$/.test(editedDocument.blobId)
+        || !Number.isSafeInteger(editedDocument.size) || editedDocument.size < 1
+          || editedDocument.size > TRANSFER_LIMITS.maxDocumentBytes
+        || changeSummary !== null && (typeof changeSummary !== 'string' || changeSummary.length > 8_192)) {
+        throw new CloudError('INVALID_REQUEST', 'Edited resume payload is invalid');
+      }
+      this.#requireBlob(editedDocument, 'Edited Cloud document');
+      if (session.paused_writer_generation !== expectedWriterGeneration) {
+        throw new CloudError('EDIT_WRITER_STALE', 'The paused Cloud writer changed before this edit was resumed', 409, {
+          expectedWriterGeneration,
+          currentWriterGeneration: session.paused_writer_generation,
+        });
+      }
+      const source = this.#boundaryRow(session.id);
+      if (!source || source.operationId !== expectedBoundary.operationId || source.revision !== expectedBoundary.revision) {
+        throw new CloudError('EDIT_BOUNDARY_STALE', 'The paused Cloud draft changed before this edit was resumed', 409, {
+          expectedBoundary,
+          currentBoundary: source ? { operationId: source.operationId, revision: source.revision } : null,
+        });
+      }
+      const operationId = `human-edit:${editSessionId}`;
+      const existingEdit = this.database.prepare('SELECT * FROM session_human_edits WHERE id = ?').get(editSessionId);
+      if (existingEdit) throw new CloudError('EDIT_SESSION_CONFLICT', 'Edit session ID was already used', 409);
+      const revision = source.revision + 1;
+      this.database.prepare(`
+        INSERT INTO session_checkpoints(
+          session_id, operation_id, turn_number, revision, blob_sha256, stable,
+          timeline_blob_sha256, timeline_size, boundary_kind, created_at
+        ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, 'operation', ?)
+      `).run(session.id, operationId, source.turnNumber, revision, editedDocument.blobId,
+        source.timelineBlobId, source.timelineSize, now);
+      this.database.prepare('UPDATE blobs SET ref_count = ref_count + 1 WHERE sha256 = ?').run(editedDocument.blobId);
+      if (source.timelineBlobId) {
+        this.database.prepare('UPDATE blobs SET ref_count = ref_count + 1 WHERE sha256 = ?').run(source.timelineBlobId);
+      }
+      // The commands row is inserted by executeCommand after this method. A
+      // deferred foreign key is not available in the existing schema, so the
+      // edit record is completed there once the durable command receipt exists.
+      this.database.prepare(`
+        UPDATE sessions SET latest_human_edit_id = ?, pause_requested_at = NULL, paused_writer_generation = NULL, started_at = NULL,
+          status = 'queued', state_version = state_version + 1, suspended_reason = NULL,
+          execution_phase = CASE WHEN protocol_version = 2 THEN 'waiting' ELSE execution_phase END,
+          expires_at = ?, updated_at = ? WHERE id = ?
+      `).run(editSessionId, now + STAGED_RETENTION_MS, now, session.id);
+      const event = this.#appendEventInTransaction(session.id, 'session.edited_resume_queued', {
+        status: 'queued', editSessionId, writerGeneration: expectedWriterGeneration, changeSummary,
+        from: { operationId: source.operationId, revision: source.revision },
+        to: { operationId, revision },
+        checkpoint: { blobId: editedDocument.blobId, size: editedDocument.size },
+      });
+      return { response: {
+        session: this.getSession(session.id), eventSeq: event.seq,
+        resume: { editSessionId, operationId, revision, writerGeneration: expectedWriterGeneration,
+          checkpoint: { blobId: editedDocument.blobId, size: editedDocument.size } },
+        _humanEdit: { editSessionId, operationId, revision, source, editedDocument, changeSummary,
+          pausedStateVersion: session.state_version, writerGeneration: expectedWriterGeneration },
+      }, event };
     }
     if (command.type === 'message.queue') {
       if (!['queued', 'running'].includes(session.status)) throw new CloudError('INVALID_SESSION_STATE', 'Session is not accepting messages', 409);
@@ -795,7 +893,8 @@ export class SessionStore {
       if (!row) return null;
       const now = this.now();
       const updated = this.database.prepare(`
-        UPDATE sessions SET status = 'running', configuration_restart_requested_at = NULL, configuration_restart_after_revision = NULL, state_version = state_version + 1,
+        UPDATE sessions SET status = 'running', configuration_restart_requested_at = NULL, configuration_restart_after_revision = NULL,
+          paused_writer_generation = NULL, state_version = state_version + 1,
           execution_phase = CASE WHEN protocol_version = 2 THEN 'working' ELSE execution_phase END,
           started_at = COALESCE(started_at, ?), worker_heartbeat_at = ?, updated_at = ?
         WHERE id = ? AND status = 'queued'
@@ -1365,27 +1464,52 @@ export class SessionStore {
       }
       if (row.takeover_requested_at) throw new CloudError('TAKEOVER_PENDING', 'Takeover superseded the pause request', 409);
       const now = this.now();
+      const writerGeneration = this.database.prepare(`
+        SELECT generation FROM session_runtime_leases WHERE session_id = ?
+      `).get(sessionId)?.generation ?? null;
       const reason = { code: 'USER_PAUSED', message: 'Paused at a stable worker boundary' };
       const turnRecovery = this.#recoverInterruptedTurnInTransaction(row, now);
       this.database.prepare(`
         UPDATE sessions SET status = 'suspended', pause_requested_at = NULL, state_version = state_version + 1,
           suspended_reason = ?, expires_at = ?, finishing_at = NULL, sandbox_id = NULL, worker_token_hash = NULL,
           worker_heartbeat_at = NULL, current_turn_id = NULL, current_wait_id = NULL,
+          paused_writer_generation = ?,
           execution_phase = CASE WHEN protocol_version = 2 THEN 'waiting' ELSE execution_phase END,
           updated_at = ? WHERE id = ?
-      `).run(JSON.stringify(reason), now + SUSPENDED_RETENTION_MS, now, sessionId);
+      `).run(JSON.stringify(reason), now + SUSPENDED_RETENTION_MS, writerGeneration, now, sessionId);
       this.database.prepare(`
         UPDATE session_messages SET status = 'queued', delivered_at = NULL
         WHERE session_id = ? AND status = 'delivered'
       `).run(sessionId);
       event = this.#appendEventInTransaction(sessionId, 'session.suspended', {
-        status: 'suspended', reason, safeBoundary: true, turnRecovery,
+        status: 'suspended', reason, safeBoundary: true, turnRecovery, writerGeneration,
       });
       return this.getSession(sessionId);
     });
     if (event) this.#notify(event);
     if (session.status !== 'running') this.#invalidateRuntime(sessionId);
     return session;
+  }
+
+  requestShutdownDrain() {
+    const events = [];
+    const sessionIds = transaction(this.database, () => {
+      const rows = this.database.prepare(`SELECT * FROM sessions WHERE status = 'running'`).all();
+      const now = this.now();
+      for (const row of rows) {
+        if (row.pause_requested_at || row.takeover_requested_at || row.finishing_at) continue;
+        this.database.prepare(`
+          UPDATE sessions SET pause_requested_at = ?, state_version = state_version + 1, updated_at = ?
+          WHERE id = ? AND status = 'running'
+        `).run(now, now, row.id);
+        events.push(this.#appendEventInTransaction(row.id, 'session.pause_requested', {
+          status: 'running', reason: 'CONTROL_PLANE_SHUTDOWN', safeBoundaryPending: true,
+        }));
+      }
+      return rows.map(({ id }) => id);
+    });
+    for (const event of events) this.#notify(event);
+    return sessionIds;
   }
 
   acknowledgeSleep(sessionId) {
@@ -1483,6 +1607,13 @@ export class SessionStore {
       WHERE session_id = ? AND stable = 1 AND turn_number > 0
       ORDER BY created_at DESC, revision DESC LIMIT 1
     `).get(sessionId) ?? null;
+    const humanEdit = session.latest_human_edit_id ? this.database.prepare(`
+      SELECT id AS editSessionId, from_operation_id AS fromOperationId,
+        from_revision AS fromRevision, to_operation_id AS toOperationId,
+        to_revision AS toRevision, blob_sha256 AS blobId, size,
+        change_summary AS changeSummary, created_at AS createdAt
+      FROM session_human_edits WHERE session_id = ? AND id = ?
+    `).get(sessionId, session.latest_human_edit_id) ?? null : null;
     return {
       sessionId,
       provider: session.provider,
@@ -1498,6 +1629,7 @@ export class SessionStore {
       currentWait: this.#publicSession(session).currentWait,
       resources,
       latestCheckpoint: checkpoint ? { ...checkpoint, stable: Boolean(checkpoint.stable) } : null,
+      resumeContext: humanEdit ? { humanEdit } : null,
       limits: { maxDurationSeconds: session.max_duration_seconds, maxTurns: session.max_turns, turnsUsed: session.turns_used },
     };
   }

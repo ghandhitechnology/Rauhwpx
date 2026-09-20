@@ -469,7 +469,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     { id: 'editing', label: '편집' },
     { id: 'ai', label: 'AI 설정' },
     { id: 'connections', label: 'AI 연결' },
-    { id: 'cloud', label: 'Cloud 연결' },
+    { id: 'cloud', label: 'Cloud 작업' },
   ];
   for (const destination of destinations) {
     const button = el('button', 'ag-settings-nav-button', destination.label);

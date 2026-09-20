@@ -25,6 +25,7 @@ export type MergeWorkerRequest =
   | {
       id: number;
       operation: 'analyze-document';
+      review?: boolean;
       base: Uint8Array;
       current: Uint8Array;
       incoming: Uint8Array;
@@ -39,6 +40,7 @@ export type MergeWorkerRequest =
   | {
       id: number;
       operation: 'materialize-document';
+      review?: boolean;
       base: Uint8Array;
       current: Uint8Array;
       incoming: Uint8Array;

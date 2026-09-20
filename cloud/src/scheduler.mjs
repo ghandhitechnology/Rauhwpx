@@ -157,4 +157,18 @@ export class Scheduler {
     this.timer = null;
     await this.ticking;
   }
+
+  async drainForShutdown({ timeoutMs = 30_000, pollMs = 50 } = {}) {
+    await this.stop();
+    const requested = this.sessionStore.requestShutdownDrain?.() ?? [];
+    const deadline = Date.now() + timeoutMs;
+    let running = [];
+    while (true) {
+      running = this.sessionStore.database.prepare(`SELECT id FROM sessions WHERE status = 'running'`).all()
+        .map(({ id }) => id);
+      if (running.length === 0 || Date.now() >= deadline) break;
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+    return { requested, drained: requested.filter((id) => !running.includes(id)), forced: running };
+  }
 }

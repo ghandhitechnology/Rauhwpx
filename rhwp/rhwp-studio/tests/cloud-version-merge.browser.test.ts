@@ -168,6 +168,8 @@ async function openCloudDocument(page: import('puppeteer-core').Page, format: 'h
 }
 
 async function finishReview(page: import('puppeteer-core').Page) {
+  await page.waitForSelector('.merge-resolver-header-actions button:first-child');
+  await page.click('.merge-resolver-header-actions button:first-child');
   await page.waitForFunction(() => {
     const button = document.querySelector<HTMLButtonElement>('.merge-resolver-footer .merge-primary-button');
     return button && !button.disabled;
@@ -274,10 +276,8 @@ test('committing local edits on the current branch opens real conflicts and reje
     await page.waitForSelector('.merge-conflict-item');
     if (process.env.CLOUD_MERGE_CONFLICT_SCREENSHOT) await page.screenshot({ path: process.env.CLOUD_MERGE_CONFLICT_SCREENSHOT });
     assert.equal(await page.$eval('.merge-resolver-footer .merge-primary-button', (button) => (button as HTMLButtonElement).disabled), true);
-    await page.click('.merge-resolution-button:nth-child(3)');
+    await page.click('.merge-resolution-button:nth-child(2)');
     assert.equal(await page.$$eval('.merge-resolution-button[aria-pressed="true"]', (buttons) => buttons.length), 1);
-    await page.click('.merge-conflict-tools > summary');
-    await page.click('.merge-bulk-actions button:nth-child(2)');
     await finishReview(page);
     const result = await page.evaluate(async () => {
       const { controller, store } = (window as any).__cloud;
@@ -351,7 +351,7 @@ test('successive cloud turns merge into the active local branch and older signal
     await page.click('.version-merge-preparation input[value="commit"]');
     await page.click('.version-merge-preparation button[type="submit"]');
     await page.waitForSelector('.merge-resolver-window');
-    assert.equal(await page.$('.merge-conflict-item'), null, 'inherited paragraph identities must survive the first merge');
+    assert.equal(await page.$$eval('.merge-conflict-state', (items) => items.some((item) => item.textContent === '선택 필요')), false, 'inherited paragraph identities must survive the first merge');
     await finishReview(page);
     const final = await page.evaluate(() => (window as any).__cloud.inspect());
     assert.equal(final.state.activeBranch, '검토');
@@ -493,6 +493,8 @@ test('stash application rolls the editor back on a failed transaction and can be
       };
       await controller.applyShelf(controller.getState().shelves[0].id, true);
     });
+    await page.waitForSelector('.merge-resolver-header-actions button:first-child');
+    await page.click('.merge-resolver-header-actions button:first-child');
     await page.waitForFunction(() => !document.querySelector<HTMLButtonElement>('.merge-resolver-footer .merge-primary-button')?.disabled);
     await page.click('.merge-resolver-footer .merge-primary-button');
     await page.waitForSelector('.merge-action-status[data-kind="error"]');

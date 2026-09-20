@@ -67,6 +67,7 @@ import {
 import { CloudCoordinator } from './cloud-coordinator.mjs';
 import { installCloudContinuityTriggers } from './cloud-continuity-triggers.mjs';
 import { CloudDisplayRegistry } from './cloud-display-registry.mjs';
+import { CloudEditDraftStore } from './cloud-edit-drafts.mjs';
 import { CloudHandoffStore } from './cloud-handoff.mjs';
 import { collectProviderAuth as collectImportedProviderAuth } from './cloud-provider-auth.mjs';
 import { CloudProvisioner } from './cloud-provisioner.mjs';
@@ -474,6 +475,10 @@ const sessions = new SessionManager({
 const documentLeases = new DocumentLeaseManager();
 const nativeFiles = new NativeFileHandleRegistry();
 const nativeBookmarkFile = join(app.getPath('userData'), 'native-document-bookmarks.json');
+const cloudEditDraftStore = new CloudEditDraftStore({
+  root: join(app.getPath('userData'), 'cloud', 'edit-drafts'),
+});
+const pendingCloudEditDraftSaves = new Map();
 let uniqueInstallSnapshot = {
   uniqueInstalls: null,
   publicUrl: uniqueInstallsPublicUrl(),
@@ -547,6 +552,41 @@ async function scopedCloudSnapshot(session, operation = null, { refresh = false 
   return applyCloudSnapshot(session, snapshot);
 }
 
+function cloudEditDraftWindow(sessionId, editSessionId) {
+  return sessions.windows().find((candidate) => {
+    const candidateSession = sessions.sessionForSender(candidate.webContents);
+    return candidateSession.cloudEditDraft?.sessionId === sessionId
+      && candidateSession.cloudEditDraft?.editSessionId === editSessionId;
+  }) ?? null;
+}
+
+async function requestCloudEditDraftSave(window) {
+  const editorSession = sessions.sessionForSender(window.webContents);
+  if (!editorSession.cloudEditDraft) throw new Error('Cloud edit window has no draft identity');
+  const requestId = randomUUID();
+  let timer;
+  const saved = new Promise((resolve, reject) => {
+    pendingCloudEditDraftSaves.set(requestId, {
+      senderId: editorSession.senderId,
+      resolve,
+      reject,
+    });
+    timer = setTimeout(() => {
+      const pending = pendingCloudEditDraftSaves.get(requestId);
+      if (!pending) return;
+      pendingCloudEditDraftSaves.delete(requestId);
+      reject(new Error('Cloud edit draft save timed out'));
+    }, 30_000);
+  });
+  window.webContents.send('cloud:edit-draft-save-requested', { requestId });
+  try {
+    await saved;
+  } finally {
+    clearTimeout(timer);
+    pendingCloudEditDraftSaves.delete(requestId);
+  }
+}
+
 async function broadcastCloudEvent(payload) {
   await Promise.all(sessions.windows().map(async (window) => {
     if (window.isDestroyed()) return;
@@ -559,6 +599,31 @@ async function broadcastCloudEvent(payload) {
 
 const pendingMergeNotifications = new Map();
 let mergeNotificationTimer = null;
+
+async function openCloudNotification(payload) {
+  const windows = sessions.windows().filter((candidate) => !candidate.isDestroyed());
+  if (!windows.length) return;
+  const target = windows.find((candidate) => {
+    const candidateSession = sessions.sessionForSender(candidate.webContents);
+    return payload.documentId && candidateSession.cloudScope?.documentId === payload.documentId;
+  }) ?? windows[0];
+  const targetSession = sessions.sessionForSender(target.webContents);
+  targetSession.cloudScope = {
+    ...(targetSession.cloudScope ?? { threadId: '', documentId: payload.documentId ?? null }),
+    selectedSessionId: payload.sessionId,
+  };
+  if (target.isMinimized()) target.restore();
+  target.show();
+  target.focus();
+  const snapshot = await scopedCloudSnapshot(targetSession).catch(() => null);
+  if (!snapshot || target.isDestroyed()) return;
+  target.webContents.send('cloud:event', {
+    type: 'notification-open',
+    sessionId: payload.sessionId,
+    operationId: payload.operationId ?? null,
+    snapshot,
+  });
+}
 
 /**
  * A completed Cloud turn has to reach the user while they are in another app.
@@ -589,11 +654,9 @@ function notifyCloudMergeReady(payload) {
             : '검토할 Cloud 변경이 도착했습니다.',
       });
       notification.on('click', () => {
-        const [target] = sessions.windows().filter((candidate) => !candidate.isDestroyed());
-        if (!target) return;
-        if (target.isMinimized()) target.restore();
-        target.show();
-        target.focus();
+        void openCloudNotification(first).catch((error) => {
+          console.warn('[rauhwpx] cloud notification open failed:', error);
+        });
       });
       notification.show();
     } catch (error) {
@@ -910,6 +973,7 @@ async function createWindow(launch = launchRequest(), { generatedDocument = null
   session.generatedDocument = generatedDocument
     ? { launchDocumentId: randomUUID(), ...generatedDocument }
     : null;
+  session.cloudEditDraft = session.generatedDocument?.cloudEditDraft ?? null;
   session.allowCloseOnce = false;
   session.pendingCloseRequestId = null;
   session.cloudLocked = false;
@@ -932,6 +996,11 @@ async function createWindow(launch = launchRequest(), { generatedDocument = null
     });
   });
   window.on('closed', () => {
+    for (const [requestId, pending] of pendingCloudEditDraftSaves) {
+      if (pending.senderId !== session.senderId) continue;
+      pendingCloudEditDraftSaves.delete(requestId);
+      pending.reject(new Error('Cloud edit window closed before saving'));
+    }
     closeDisplayConnection();
     documentLeases.releaseSession(session.sessionId);
     nativeFiles.releaseSession(session.sessionId);
@@ -1426,6 +1495,112 @@ ipcMain.handle('cloud:command', async (event, payload) => {
   const session = sessionForEvent(event);
   const operation = await requireCloudCoordinator().command(payload);
   return scopedCloudSnapshot(session, operation);
+});
+ipcMain.handle('cloud:begin-edit', async (event, payload = {}) => {
+  const session = sessionForEvent(event);
+  const sessionId = String(payload?.sessionId ?? '');
+  if (!/^[A-Za-z0-9_-]{8,128}$/.test(sessionId)) throw new Error('Invalid cloud session id');
+  let draft = await cloudEditDraftStore.get(sessionId);
+  let operation = null;
+  if (!draft) {
+    const prepared = await requireCloudCoordinator().prepareEditDraft({ sessionId });
+    draft = await cloudEditDraftStore.save(prepared.draft);
+    operation = prepared.operation ?? null;
+  }
+  const existing = cloudEditDraftWindow(sessionId, draft.editSessionId);
+  if (existing) {
+    if (existing.isMinimized()) existing.restore();
+    existing.show();
+    existing.focus();
+  } else {
+    await createWindow(
+      launchRequest({ source: 'cloud-edit-draft' }),
+      {
+        generatedDocument: {
+          fileName: draft.fileName,
+          bytes: draft.bytes,
+          readOnly: false,
+          cloudEditDraft: {
+            sessionId,
+            editSessionId: draft.editSessionId,
+            boundary: draft.boundary,
+          },
+        },
+      },
+    );
+  }
+  return {
+    snapshot: await scopedCloudSnapshot(session, operation),
+    editDraft: {
+      sessionId,
+      editSessionId: draft.editSessionId,
+      boundary: draft.boundary,
+      fileName: draft.fileName,
+      savedAt: draft.savedAt,
+    },
+  };
+});
+ipcMain.handle('cloud:edit-draft-save', async (event, payload = {}) => {
+  const session = sessionForEvent(event);
+  const identity = session.cloudEditDraft;
+  const requestId = typeof payload?.requestId === 'string' ? payload.requestId : null;
+  const pending = requestId ? pendingCloudEditDraftSaves.get(requestId) : null;
+  try {
+    if (!identity
+      || payload?.sessionId !== identity.sessionId
+      || payload?.editSessionId !== identity.editSessionId
+      || payload?.boundary?.operationId !== identity.boundary?.operationId
+      || payload?.boundary?.revision !== identity.boundary?.revision
+      || payload?.boundary?.writerGeneration !== identity.boundary?.writerGeneration
+      || payload?.boundary?.stateVersion !== identity.boundary?.stateVersion) {
+      throw new Error('Cloud edit draft identity does not match this window');
+    }
+    const saved = await cloudEditDraftStore.save({
+      ...identity,
+      fileName: payload.fileName,
+      bytes: payload.bytes,
+    });
+    if (pending && pending.senderId === session.senderId) pending.resolve(saved);
+    return { savedAt: saved.savedAt, sha256: saved.sha256, size: saved.size };
+  } catch (error) {
+    if (pending && pending.senderId === session.senderId) pending.reject(error);
+    throw error;
+  }
+});
+ipcMain.handle('cloud:continue-edit', async (event, payload = {}) => {
+  const session = sessionForEvent(event);
+  const sessionId = String(payload?.sessionId ?? '');
+  const editSessionId = String(payload?.editSessionId ?? '');
+  if (!/^[A-Za-z0-9_-]{8,128}$/.test(sessionId)
+    || !/^[A-Za-z0-9._:-]{1,160}$/.test(editSessionId)) {
+    throw new Error('Invalid cloud edit identity');
+  }
+  const editorWindow = cloudEditDraftWindow(sessionId, editSessionId);
+  if (editorWindow) await requestCloudEditDraftSave(editorWindow);
+  const draft = await cloudEditDraftStore.get(sessionId);
+  if (!draft || draft.editSessionId !== editSessionId) {
+    throw new Error('Saved Cloud edit draft is unavailable');
+  }
+  const operation = await requireCloudCoordinator().resumeEditedDocument({
+    sessionId,
+    editSessionId,
+    boundary: draft.boundary,
+    bytes: draft.bytes,
+    fileName: draft.fileName,
+    changeSummary: typeof payload?.changeSummary === 'string'
+      ? payload.changeSummary.trim().slice(0, 4000)
+      : '',
+  });
+  await cloudEditDraftStore.remove(sessionId, editSessionId);
+  if (editorWindow && !editorWindow.isDestroyed()) {
+    const editorSession = sessions.sessionForSender(editorWindow.webContents);
+    editorSession.allowCloseOnce = true;
+    editorWindow.close();
+  }
+  return {
+    snapshot: await scopedCloudSnapshot(session, operation),
+    editDraft: null,
+  };
 });
 ipcMain.handle('cloud:dismiss-session', async (event, payload) => {
   const session = sessionForEvent(event);

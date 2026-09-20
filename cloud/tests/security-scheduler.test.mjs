@@ -275,6 +275,31 @@ test('scheduler inventory failures propagate before session recovery mutates sta
   assert.deepEqual(mutations, [], 'neither recovery nor maintenance may mutate state from an incomplete inventory');
 });
 
+test('scheduler shutdown drain stops admission and distinguishes acknowledged boundaries from forced stops', async () => {
+  let status = 'running';
+  let requested = 0;
+  const sessionStore = {
+    requestShutdownDrain() {
+      requested += 1;
+      queueMicrotask(() => { status = 'suspended'; });
+      return ['session-drain'];
+    },
+    database: {
+      prepare() { return { all: () => status === 'running' ? [{ id: 'session-drain' }] : [] }; },
+    },
+  };
+  const scheduler = new Scheduler(sessionStore, {});
+  const receipt = await scheduler.drainForShutdown({ timeoutMs: 100, pollMs: 1 });
+  assert.equal(requested, 1);
+  assert.deepEqual(receipt, { requested: ['session-drain'], drained: ['session-drain'], forced: [] });
+
+  status = 'running';
+  sessionStore.requestShutdownDrain = () => ['session-forced'];
+  sessionStore.database.prepare = () => ({ all: () => [{ id: 'session-forced' }] });
+  const forced = await scheduler.drainForShutdown({ timeoutMs: 2, pollMs: 1 });
+  assert.deepEqual(forced, { requested: ['session-forced'], drained: [], forced: ['session-forced'] });
+});
+
 test('scheduler does not requeue a running session whose full sandbox ID is still live', async () => {
   const fullSandboxId = 'b'.repeat(64);
   const requeues = [];

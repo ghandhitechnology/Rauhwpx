@@ -149,139 +149,130 @@ try {
     () => checkCloudStream(page, origin, artifacts));
   await step('Durable Cloud merge recovery, review persistence, and account isolation',
     () => checkCloudMergeRecovery(page, origin, artifacts));
-  await step('Cloud dashboard, usage gaps, conversations, configuration and responsive settings', async () => {
+  await step('Cloud inbox navigation, honest connection state, settings and narrow layout', async () => {
     await open('cloud=1&dashboard=1&page=settings&destination=cloud&controls=0');
-    await page.waitForSelector('.ag-cd-quota .ag-cd-stat-value');
-    assert.equal(await page.$eval('.ag-cd-quota .ag-cd-stat-value', (node) => node.textContent), '84분');
-    assert.deepEqual(await page.$$eval('.ag-cd-stat-label', (nodes) => nodes.map((node) => node.textContent)), ['오늘 남은 Raucloud 시간', '연결된 Cloud 박스']);
-    assert.doesNotMatch(await page.$eval('.ag-cd-stats', (node) => node.textContent), /세션 실행 중|앱당 서버/);
-    assert.match(await page.$eval('.ag-cd-quota .ag-cd-reset', (node) => node.textContent), /(?:\d+시간(?: \d+분)?|\d+분) 후 초기화|1분 이내 초기화/);
-    assert.equal(await page.$eval('.ag-cd-pixel-cloud', (node) => node.complete && node.naturalWidth > 0), true);
-    assert.equal(await page.$$eval('.ag-cd-point', (nodes) => nodes.length), 7);
-    await page.click('[data-destination="connections"][role="tab"]');
-    assert.equal(await page.$eval('.ag-cloud-dashboard', (node) => node.checkVisibility()), false);
-    await page.click('[data-destination="cloud"][role="tab"]');
-    await clickText('.ag-cd-button', '30일');
-    assert.match(await page.$eval('.ag-cd-usage-total', (node) => node.textContent), /30일 중 7일 기록/);
-    assert.equal(await page.$$eval('.ag-cd-point', (nodes) => nodes.length), 7, 'missing days must not become zero points');
-    await page.click('.ag-cd-data summary');
-    assert.equal(await page.$$eval('.ag-cd-data tbody tr', (nodes) => nodes.length), 30);
-    await page.click('.ag-cd-data summary');
-    await page.click('.ag-cd-segment button');
-    assert.equal(await page.$$eval('.ag-cd-chat', (nodes) => nodes.length), 4);
+    await page.waitForSelector('.ag-cd-task');
+    assert.equal(await page.$$eval('.ag-cd-task', nodes => nodes.length), 4);
+    assert.equal(await page.$$eval('.ag-cd-stats, .ag-cd-chart, .ag-cd-content h3', nodes => nodes.some(node => node.checkVisibility())), false);
+    const initialStatuses = await page.$$eval('.ag-cd-task-status', nodes => nodes.map(node => node.textContent));
+    await page.focus('.ag-cd-task');
     await page.evaluate(() => window.sidebarPreview.cloud.publish());
-    assert.equal(await page.$eval('.ag-cd-segment button[aria-pressed="true"]', (node) => node === document.activeElement), true, 'snapshot refresh preserves range focus');
+    assert.equal(await page.$eval('.ag-cd-task', node => node === document.activeElement), true);
+    await screenshot('cloud-inbox-sidebar');
+    await page.evaluate(() => window.sidebarPreview.cloud.setLink('failed'));
+    assert.deepEqual(await page.$$eval('.ag-cd-task-status', nodes => nodes.map(node => node.textContent)), initialStatuses,
+      'viewing connection loss must not change saved task states');
+    await page.click('.ag-cd-settings-toggle');
+    assert.equal(await page.$eval('.ag-cd-config', node => node.hidden), false);
     await page.click('.ag-cloud-settings-action');
     await page.waitForSelector('.ag-cloud-setup-overlay:not([hidden])');
     await page.click('.ag-cloud-setup-close');
-    await page.$eval('#ag-settings-pane-cloud', (node) => node.scrollTo({ top: 0 }));
-    await screenshot('cloud-dashboard-sidebar');
-    await page.setViewport({ width: 1440, height: 1000, deviceScaleFactor: 1 });
-    await page.click('.ag-cd-expand');
-    await page.waitForSelector('.ag-fullscreen.ag-settings-open #ag-settings-pane-cloud:not([hidden])');
-    assert.equal(await page.$eval('.ag-cd-grid', (node) => getComputedStyle(node).gridTemplateColumns.split(' ').length), 2);
-    await screenshot('cloud-dashboard-fullscreen');
-    await page.evaluate(() => window.sidebarPreview.cloud.blockRefresh(true));
-    const refreshCount = await page.evaluate(() => window.sidebarPreview.cloud.calls.refresh);
-    await clickText('.ag-cd-button', '새로고침');
-    assert.equal(await page.$eval('.ag-cd-refresh', (node) => node.disabled), true);
-    await page.evaluate(() => document.querySelector('.ag-cd-refresh').click());
-    assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.refresh), refreshCount + 1);
-    const countdowns = await page.evaluate(() => {
-      const originalNow = Date.now;
-      const resetAt = Date.parse(window.sidebarPreview.cloud.controller.getSnapshot().account.quota.resetAt);
-      try {
-        return [5_400_000, 3_600_000, 60_000, 0, -60_000].map((remainingMs) => {
-          Date.now = () => resetAt - remainingMs;
-          // Returning to the tab must update the clock even while a refresh is blocked.
-          document.dispatchEvent(new Event('visibilitychange'));
-          return {
-            eta: document.querySelector('.ag-cd-reset').textContent,
-            quota: document.querySelector('.ag-cd-quota .ag-cd-stat-value').textContent,
-            meterHidden: document.querySelector('.ag-cd-meter').hidden,
-          };
-        });
-      } finally {
-        Date.now = originalNow;
-        document.dispatchEvent(new Event('visibilitychange'));
-      }
-    });
-    assert.deepEqual(countdowns, [
-      { eta: '1시간 30분 후 초기화', quota: '84분', meterHidden: false },
-      { eta: '1시간 후 초기화', quota: '84분', meterHidden: false },
-      { eta: '1분 이내 초기화', quota: '84분', meterHidden: false },
-      { eta: '초기화 확인 중', quota: '—분', meterHidden: true },
-      { eta: '초기화 확인 중', quota: '—분', meterHidden: true },
-    ]);
-    assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.refresh), refreshCount + 1, 'countdown does not depend on a new server response');
-    await page.evaluate(() => window.sidebarPreview.cloud.blockRefresh(false));
-    await page.waitForFunction(() => !document.querySelector('.ag-cd-refresh').disabled);
-    await page.evaluate(() => window.sidebarPreview.cloud.setRefreshFailure(true));
-    await clickText('.ag-cd-button', '새로고침');
-    await page.waitForSelector('.ag-cd-feedback[data-kind="error"]');
-    assert.match(await page.$eval('.ag-cd-quota .ag-cd-stat-value', (node) => node.textContent), /—/);
-    await page.evaluate(() => window.sidebarPreview.cloud.setRefreshFailure(false));
-    await clickText('.ag-cd-button', '새로고침');
-    await page.waitForSelector('.ag-cd-feedback[data-kind="success"]');
-    await page.evaluate(() => window.sidebarPreview.cloud.setLink('failed'));
-    await page.waitForSelector('.ag-cd-status[data-state="failed"]');
-    assert.match(await page.$eval('.ag-cloud-settings-status', (node) => node.textContent), /문제/);
-    await page.select('#theme', 'dark');
-    await page.$eval('#ag-settings-pane-cloud', (node) => node.scrollTo({ top: 270 }));
-    await screenshot('cloud-dashboard-disconnected');
     await page.evaluate(() => window.sidebarPreview.cloud.blockReconnect(true));
     await page.click('.ag-cd-reconnect');
     await page.waitForSelector('.ag-cd-content .ag-cloud-link-progress:not([hidden])');
-    const dashboardReconnect = await page.evaluate(async () => {
-      const node = document.querySelector('.ag-cd-content .ag-cloud-link-progress');
-      const width = () => Number.parseFloat(node.querySelector('.ag-cloud-link-progress-fill').style.width);
-      const first = width();
-      await new Promise((resolve) => setTimeout(resolve, 250));
-      return { eta: node.querySelector('.ag-cloud-link-progress-eta').textContent, first, width: width() };
-    });
-    assert.match(dashboardReconnect.eta, /^약 \d+초 남음$/);
-    assert.ok(dashboardReconnect.width > dashboardReconnect.first && dashboardReconnect.width < 40,
-      `the dashboard bar must crawl without filling up, got ${dashboardReconnect.first}% → ${dashboardReconnect.width}%`);
-    await screenshot('cloud-dashboard-reconnect-eta');
+    assert.equal(await page.$eval('.ag-cd-content [role="progressbar"]', node => node.hasAttribute('aria-valuenow')), false);
+    assert.match(await page.$eval('.ag-cd-content .ag-cloud-link-progress-eta', node => node.textContent), /경과$/);
     await page.evaluate(() => window.sidebarPreview.cloud.blockReconnect(false));
-    await page.waitForSelector('.ag-cd-status[data-state="ready"]');
-    await page.evaluate(() => window.sidebarPreview.cloud.setDashboardState('exhausted'));
-    assert.equal(await page.$eval('.ag-cd-quota .ag-cd-stat-value', (node) => node.textContent), '0분');
-    assert.equal(await page.$eval('.ag-cd-quota', (node) => node.dataset.low), 'true');
-    await page.evaluate(() => window.sidebarPreview.cloud.setDashboardState('self-hosted'));
-    assert.match(await page.$eval('.ag-cd-server', (node) => node.textContent), /SSH 터널/);
-    assert.match(await page.$eval('.ag-cd-config', (node) => node.textContent), /내 서버는 Raucloud 한도 제외/);
-    assert.doesNotMatch(await page.$eval('.ag-cd-server', (node) => node.textContent), /시간을 모두 사용/);
-    await page.evaluate(() => window.sidebarPreview.cloud.setDashboardState('unknown'));
-    assert.equal(await page.$eval('.ag-cd-status', (node) => node.dataset.state), 'unknown');
+    await page.waitForFunction(() => !document.querySelector('.ag-cd-refresh').disabled);
+    await page.evaluate(() => window.sidebarPreview.cloud.setRefreshFailure(true));
+    await page.click('.ag-cd-refresh');
+    await page.waitForSelector('.ag-cd-feedback[data-kind="error"]:not([hidden])');
+    assert.equal(await page.$$eval('.ag-cd-task', nodes => nodes.length), 4);
+    await page.evaluate(() => window.sidebarPreview.cloud.setRefreshFailure(false));
+    await page.click('.ag-cd-refresh');
+    await page.waitForFunction(() => !document.querySelector('.ag-cd-refresh').disabled);
     await page.evaluate(() => window.sidebarPreview.cloud.setDashboardState('logged-out'));
-    assert.equal(await page.$$eval('.ag-cd-point', (nodes) => nodes.length), 0, 'sign-out hides the previous account history');
-    assert.match(await page.$eval('.ag-cd-quota', (node) => node.textContent), /로그인하면/);
-    assert.equal(await page.$eval('.ag-cd-reset', (node) => node.checkVisibility()), false, 'unknown reset time has no countdown');
-    assert.equal(await page.$eval('.ag-cd-login', (node) => node.checkVisibility()), true, 'signed-out users can log in from Cloud Connections');
+    assert.equal(await page.$eval('.ag-cd-login', node => node.checkVisibility()), true);
     await page.evaluate(() => {
       window.previewOriginalOpen = window.open;
-      window.open = (url) => { window.previewLoginUrl = url; return null; };
+      window.open = url => { window.previewLoginUrl = url; return null; };
     });
     await page.click('.ag-cd-login');
     await page.waitForFunction(() => window.previewLoginUrl === 'https://accounts.example.invalid/preview');
-    await page.waitForFunction(() => !document.querySelector('.ag-cd-login').checkVisibility());
     await page.evaluate(() => { window.open = window.previewOriginalOpen; });
-    await page.evaluate(() => window.sidebarPreview.cloud.setDashboardState('logged-out'));
-    await page.click('.ag-cd-setup');
-    await page.waitForSelector('.ag-cloud-setup-overlay:not([hidden])');
-    await page.click('.ag-cloud-setup-close');
-    await page.evaluate(() => window.sidebarPreview.cloud.setDashboardState('unavailable'));
-    assert.equal(await page.$eval('.ag-cd-refresh', (node) => node.disabled), true);
-    await page.setViewport({ width: 1280, height: 900, deviceScaleFactor: 1 });
     await open('cloud=1&dashboard=1&page=settings&destination=cloud&width=280&theme=dark&controls=0');
-    const overflow = await page.$eval('#ag-settings-pane-cloud', (node) => node.scrollWidth > node.clientWidth);
-    assert.equal(overflow, false, 'minimum-width dashboard must not scroll horizontally');
-    const clipped = await page.$$eval('.ag-cd-button, .ag-settings-nav-button', (nodes) => nodes.filter((node) => node.checkVisibility() && node.scrollWidth > node.clientWidth + 1).map((node) => node.textContent));
-    assert.deepEqual(clipped, []);
-    await page.click('[data-destination="cloud"][role="tab"]');
-    await page.keyboard.press('ArrowLeft');
-    assert.equal(await page.$eval('[data-destination="connections"][role="tab"]', (node) => node.getAttribute('aria-selected')), 'true');
+    assert.equal(await page.$eval('#ag-settings-pane-cloud', node => node.scrollWidth > node.clientWidth), false);
+    await screenshot('cloud-inbox-narrow');
+    for (const [index, outcome] of ['cancelled', 'failed'].entries()) {
+      await page.evaluate(value => { window.sidebarPreview.documentNavigation.outcome = value; }, outcome);
+      await page.click('.ag-cd-task');
+      await page.waitForFunction(count => window.sidebarPreview.documentNavigation.calls.length === count, {}, index + 1);
+      assert.equal(await page.$eval('.ag-root', node => node.classList.contains('ag-settings-open')), true);
+      assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.getScope().documentId), 'preview-proposal');
+      assert.equal(await page.evaluate(() => window.sidebarPreview.workspace.cloudBinding()), null);
+    }
+    await page.evaluate(() => { window.sidebarPreview.documentNavigation.outcome = 'moved'; });
+    await page.click('.ag-cd-task');
+    await page.waitForFunction(() => !document.querySelector('.ag-root').classList.contains('ag-settings-open'));
+    assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.getScope().selectedSessionId), 'dashboard-session-0');
+    assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.getScope().documentId), 'dashboard-doc-0');
+    assert.match(await page.$eval('.ag-messages', node => node.textContent), /사업 제안서/);
+    await page.evaluate(() => {
+      window.sidebarPreview.documentNavigation.outcome = 'cancelled';
+      window.sidebarPreview.cloud.openNotification('dashboard-session-2');
+    });
+    await page.waitForFunction(() => window.sidebarPreview.documentNavigation.calls.length === 4
+      && window.sidebarPreview.cloud.controller.getSnapshot().session.sessionId === 'dashboard-session-0');
+    assert.equal(await page.evaluate(() => window.sidebarPreview.workspace.cloudBinding().sessionId), 'dashboard-session-0');
+    await page.evaluate(() => {
+      window.sidebarPreview.documentNavigation.outcome = 'moved';
+      window.sidebarPreview.cloud.openNotification('dashboard-session-2');
+    });
+    await page.waitForFunction(() => window.sidebarPreview.workspace.cloudBinding()?.sessionId === 'dashboard-session-2');
+    assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.getScope().documentId), 'dashboard-doc-2');
+    assert.match(await page.$eval('.ag-messages', node => node.textContent), /팀 회의록/);
+  });
+  await step('Cloud pause/edit continues the same task and persists follow-up drafts', async () => {
+    await open('cloud=1&reset=1');
+    await page.click('[aria-label="프로바이더 선택"]');
+    await page.click('.ag-provider-item[data-agent="codex"]');
+    await page.click('.ag-header [data-workspace-mode="cloud"]');
+    await page.type('.ag-input', '문서를 검토해 주세요.');
+    await page.click('.ag-send');
+    await page.waitForFunction(() => window.sidebarPreview.cloud.controller.getSnapshot().session.kind === 'running');
+    const identity = await page.evaluate(() => {
+      const task = window.sidebarPreview.cloud.controller.getSnapshot().session;
+      return { sessionId: task.sessionId, threadId: task.threadId };
+    });
+    await page.type('.ag-input', '표의 제목도 다듬어 주세요.');
+    await page.waitForFunction(async (threadId) => {
+      const { loadCloudComposerDraft } = await import('/src/agent/cloud-chat-drafts.ts');
+      return (await loadCloudComposerDraft(`thread:${threadId}`))?.text === '표의 제목도 다듬어 주세요.';
+    }, {}, identity.threadId);
+    await page.click('.ag-header [data-workspace-mode="cloud"]');
+    await clickText('.ag-cloud-panel-actions button', '일시 중지하고 편집');
+    await page.waitForFunction(() => window.sidebarPreview.cloud.controller.getSnapshot().session.kind === 'suspended');
+    await page.click('.ag-header [data-workspace-mode="cloud"]');
+    await screenshot('cloud-paused-edit');
+    await clickText('.ag-cloud-panel-actions button', '계속하기');
+    await page.waitForFunction(() => window.sidebarPreview.cloud.controller.getSnapshot().session.kind === 'running');
+    assert.deepEqual(await page.evaluate(() => {
+      const task = window.sidebarPreview.cloud.controller.getSnapshot().session;
+      return { sessionId: task.sessionId, threadId: task.threadId };
+    }), identity);
+    await page.click('.ag-cloud-panel-close');
+    await page.click('.ag-send');
+    await page.waitForFunction(() => document.querySelector('.ag-input').value === '');
+    await page.waitForFunction(async (threadId) => {
+      const { loadCloudComposerDraft } = await import('/src/agent/cloud-chat-drafts.ts');
+      return await loadCloudComposerDraft(`thread:${threadId}`) === null;
+    }, {}, identity.threadId);
+    await page.evaluate((sessionId) => {
+      window.sidebarPreview.cloud.commitTurn();
+      window.sidebarPreview.cloud.openNotification(sessionId, 'preview-turn-2');
+    }, identity.sessionId);
+    await page.waitForFunction(() => window.sidebarPreview.cloud.calls.merges.length === 1);
+    assert.equal(await page.evaluate(() => window.sidebarPreview.cloud.calls.merges[0].checkpoint.operationId), 'preview-turn-2');
+    await page.type('.ag-input', '다음에 이어서 보낼 내용');
+    await page.waitForFunction(async (threadId) => {
+      const { loadCloudComposerDraft } = await import('/src/agent/cloud-chat-drafts.ts');
+      return (await loadCloudComposerDraft(`thread:${threadId}`))?.text === '다음에 이어서 보낼 내용';
+    }, {}, identity.threadId);
+    await page.evaluate(() => window.sidebarPreview.threadStore.waitForThreadsPersistence());
+    await open('cloud=1');
+    await page.click('.ag-header .ag-threads-btn');
+    await page.click(`[data-thread-id="${identity.threadId}"]`);
+    await page.waitForFunction(() => document.querySelector('.ag-input').value === '다음에 이어서 보낼 내용');
   });
   await step(
     'Production shell, light/dark themes, resize and collapse',

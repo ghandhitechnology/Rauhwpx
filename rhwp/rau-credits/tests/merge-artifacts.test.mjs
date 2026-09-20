@@ -60,7 +60,7 @@ for (const backend of ['memory', 'file', ...(process.env.RAU_TEST_POSTGRES_URL ?
   });
 }
 
-test('conversation writes hold the worker assignment fence until their durable receipt', async () => {
+test('conversation verification releases the global state lock and fences only durable publication', async () => {
   const token = 'worker-scoped-token';
   const state = createMemoryStore({ raucloud: { accounts: { account: { worker: {
     id: 'worker', runId: 'run', workerTokenHash: sha(token), status: 'active',
@@ -70,19 +70,23 @@ test('conversation writes hold the worker assignment fence until their durable r
   let writes = 0;
   const broker = createRaucloudBroker({ store: state, mutate: (task) => state.mutate(task),
     authenticateAccessToken: async () => 'account', conversationArtifacts: {
-      async upload(accountId) { writes++; assert.equal(accountId, 'account'); entered.resolve(); await release.promise; return { complete: true }; },
+      async upload(accountId, _runId, _input, { withPublishFence }) {
+        assert.equal(accountId, 'account');
+        entered.resolve();
+        await release.promise;
+        return withPublishFence(async () => { writes++; return { complete: true }; });
+      },
     } });
   const upload = broker.uploadCloudConversation(token, 'run', { kind: 'conversation' });
   await entered.promise;
   let replaced = false;
   const replace = state.mutate((value) => { value.raucloud.accounts.account.worker = null; replaced = true; });
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(replaced, false);
-  release.resolve();
-  assert.equal((await upload).complete, true);
   await replace;
+  assert.equal(replaced, true);
+  release.resolve();
+  await assert.rejects(upload, { code: 'CLOUD_WORKER_UNAUTHORIZED' });
+  assert.equal(writes, 0);
   await assert.rejects(broker.uploadCloudConversation(token, 'run', { kind: 'conversation' }), { code: 'CLOUD_WORKER_UNAUTHORIZED' });
-  assert.equal(writes, 1);
 });
 
 for (const backend of ['memory', 'file', ...(process.env.RAU_TEST_POSTGRES_URL ? ['postgres'] : [])]) {
@@ -145,6 +149,47 @@ test('validation, digest verification, and storage quota reject without publishi
   assert.deepEqual((await api.list('account', 'session-1')).mergeRequests, []);
   await api.upload('account', 'run', input(bytes));
   await assert.rejects(api.upload('account', 'run', input(bytes, 0, { operationId: 'another' })), { code: 'CLOUD_MERGE_CAPACITY' });
+});
+
+test('a full account can replace a conversation with a smaller generation and publish a purge tombstone', async () => {
+  const resourceBytes = Buffer.from('12345678');
+  const snapshotBytes = Buffer.from('12');
+  const replacementBytes = Buffer.from('x');
+  const store = createMemoryMergeStore();
+  const options = { store, sessionSecret: secret, accountBytes: 10, accountCount: 2 };
+  const resources = createMergeArtifacts({ ...options, kind: 'conversation-resource' });
+  const snapshots = createMergeArtifacts({ ...options, kind: 'conversation' });
+  await resources.upload('full-account', 'run-1', input(resourceBytes, 0, {
+    kind: 'conversation-resource', operationId: 'resource-full', revision: 1,
+  }));
+  const descriptor = (bytes, revision, state = 'suspended') => input(bytes, 0, {
+    kind: 'conversation', operationId: `snapshot-${revision}`, revision, state,
+    pendingWork: state !== 'purged', retentionUntil: Date.now() + MERGE_RETENTION_MS,
+  });
+  await snapshots.upload('full-account', 'run-1', descriptor(snapshotBytes, 1));
+  const replacement = await snapshots.upload('full-account', 'run-2', descriptor(replacementBytes, 2));
+  assert.equal(replacement.complete, true);
+  assert.deepEqual((await snapshots.list('full-account')).mergeRequests.map(({ revision }) => revision), [2]);
+  const tombstone = await snapshots.upload('full-account', 'run-3', descriptor(replacementBytes, 3, 'purged'));
+  assert.equal(tombstone.complete, true);
+  assert.equal((await resources.list('full-account')).mergeRequests.length, 0);
+  assert.deepEqual((await snapshots.list('full-account')).mergeRequests.map(({ state }) => state), ['purged']);
+});
+
+test('memory artifact transactions do not serialize unrelated accounts', async () => {
+  const store = createMemoryMergeStore();
+  const entered = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const first = store.transaction('slow-account', async () => {
+    entered.resolve();
+    await release.promise;
+  });
+  await entered.promise;
+  let secondFinished = false;
+  await store.transaction('other-account', async () => { secondFinished = true; });
+  assert.equal(secondFinished, true);
+  release.resolve();
+  await first;
 });
 
 test('HTTP account authentication retrieves a checkpoint after worker deletion and broker restart', async (t) => {

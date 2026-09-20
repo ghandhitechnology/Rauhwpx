@@ -286,11 +286,10 @@ export async function checkCloudRecovery(page, origin, artifacts) {
       stripEta: document.querySelector('.ag-cloud-recovery-strip .ag-cloud-link-progress-eta').textContent,
     };
   });
-  assert.match(reconnectProgress.eta, /^약 \d+초 남음$/);
+  assert.match(reconnectProgress.eta, /^\d+초 경과$/);
   assert.equal(reconnectProgress.spoken, reconnectProgress.eta);
-  assert.match(reconnectProgress.stripEta, /^약 \d+초 남음$/, 'the composer strip shows its own estimate');
-  assert.ok(reconnectProgress.width > reconnectProgress.first && reconnectProgress.width < 40,
-    `the bar must crawl without filling up, got ${reconnectProgress.first}% → ${reconnectProgress.width}%`);
+  assert.match(reconnectProgress.stripEta, /^\d+초 경과$/, 'the composer strip shows elapsed time');
+  assert.equal(await page.$eval('.ag-cloud-recovery [role="progressbar"]', node => node.hasAttribute('aria-valuenow')), false);
   await page.screenshot({ path: resolve(artifacts, 'cloud-reconnect-eta.png') });
   const releasedAt = performance.now();
   await page.click('#cloud-hold-reconnect');
@@ -388,10 +387,9 @@ export async function checkCloudRecovery(page, origin, artifacts) {
       width: width(),
     };
   });
-  assert.match(recreateProgress.eta, /^약 (?:\d+초|\d+분(?:\s\d+초)?) 남음$/);
+  assert.match(recreateProgress.eta, /^\d+초 경과$/);
   assert.equal(recreateProgress.label, 'Cloud 서버 다시 만들기 진행');
-  assert.ok(recreateProgress.width > recreateProgress.first && recreateProgress.width <= 20,
-    `a rebuild bar must start near zero and crawl, got ${recreateProgress.first}% → ${recreateProgress.width}%`);
+  assert.equal(await page.$eval('.ag-cloud-recovery [role="progressbar"]', node => node.hasAttribute('aria-valuenow')), false);
   await page.screenshot({ path: resolve(artifacts, 'cloud-recreate-eta.png') });
   await page.evaluate(() => window.sidebarPreview.cloud.setLink('ready'));
 

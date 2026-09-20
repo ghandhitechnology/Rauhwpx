@@ -16,7 +16,7 @@ import {
   type MergeAppliedReceipt,
   type MaterializedMergeResult,
 } from '../merge/index.ts';
-import { MERGE_ANALYSIS_VERSION, MERGE_MANIFEST_VERSION } from '../merge/manifest.ts';
+import { MERGE_MANIFEST_VERSION } from '../merge/manifest.ts';
 import { getHistoryPayload, listHistoryMeta } from '../history/idb-store.ts';
 import { showPendingAgentEditsDialog } from '../ui/pending-agent-edits-dialog.ts';
 import { prepareUncommittedMerge } from '../ui/version-merge-preparation.ts';
@@ -1240,6 +1240,7 @@ export class DocumentVersionController implements VersionManagerController {
       current.blob.bytes,
       incoming.blob.bytes,
       {
+        review: true,
         manifests: {
           // 합성한 가상 문서에는 단일 소스 경로 맵이 없다. 빈 Base 힌트로 보수적으로
           // 일치시키고, 각 HEAD 매니페스트는 이전 기록의 안정적인 식별자를 계속 전달한다.
@@ -1283,10 +1284,8 @@ export class DocumentVersionController implements VersionManagerController {
       sourceBranchRevision: sourceBranch.revision,
       targetBranchGeneration: targetBranch.generation,
       sourceBranchGeneration: sourceBranch.generation,
-      mode: relation.relation === 'fast-forward'
-        ? previousDraft?.mode === 'explicit-checkpoint' ? 'explicit-checkpoint' : 'fast-forward'
-        : 'diverged',
-      analysisVersion: MERGE_ANALYSIS_VERSION,
+      mode: relation.relation === 'fast-forward' ? 'explicit-checkpoint' : 'diverged',
+      analysisVersion: analysis.analysisVersion,
       conflicts: analysis.conflicts,
       resolutions,
       automaticResult: analysis.result,
@@ -1310,6 +1309,7 @@ export class DocumentVersionController implements VersionManagerController {
         incoming.blob.bytes,
         hydratedResolutions,
         {
+          review: true,
           manifests: {
             base: baseManifests.length === 1 ? baseManifests[0] : { entries: [] },
             current: currentManifest,
@@ -1319,9 +1319,9 @@ export class DocumentVersionController implements VersionManagerController {
           onProgress: (progress) => this.#eventBus.emit('merge-progress', progress),
         },
       );
-      // Fast-forward adopts the source commit itself, so retain its exact bytes.
-      // The structural engine still materializes and validates above.
-      const bytes = relation.relation === 'fast-forward' ? incoming.blob.bytes : output.bytes;
+      // A review can reject or edit incoming changes even on a linear history.
+      // Always commit the reviewed bytes as an explicit checkpoint.
+      const bytes = output.bytes;
       try {
         await this.#validateMergeDocument(bytes, this.#wasm.fileName);
         return {
@@ -1378,6 +1378,18 @@ export class DocumentVersionController implements VersionManagerController {
         materialize: ({ analysis: nextAnalysis, resolutions: nextResolutions, signal }) => (
           materialize(nextAnalysis, nextResolutions, signal)
         ),
+        materializeReplacement: async () => {
+          await this.#validateMergeDocument(incoming.blob.bytes, this.#wasm.fileName);
+          return {
+            tree: analysis.result,
+            document: { bytes: incoming.blob.bytes, fileName: this.#wasm.fileName, label: '가져온 문서' },
+            validation: { valid: true, errors: [] },
+          };
+        },
+        reanalyze: async () => {
+          await this.#mergeResolver.close();
+          await this.resumeMerge(storedDraft.id);
+        },
         saveDraft: async (nextDraft) => {
           await this.#enqueue(async () => {
             const existing = await this.#store.getMergeDraft(nextDraft.id);
@@ -1481,6 +1493,9 @@ export class DocumentVersionController implements VersionManagerController {
   }
 
   async #completeMerge(request: MergeApplicationRequest): Promise<MergeAppliedReceipt> {
+    if (request.draft.analysisVersion >= 2 && request.mode === 'fast-forward') {
+      request = { ...request, mode: 'explicit-checkpoint', draft: { ...request.draft, mode: 'explicit-checkpoint' } };
+    }
     if (!request.materialized.validation.valid || !request.materialized.document) {
       throw new VersionError('MERGE_VALIDATION_FAILED', '해결한 병합 결과가 올바른 문서가 아닙니다.');
     }
@@ -1572,6 +1587,9 @@ export class DocumentVersionController implements VersionManagerController {
     const analysis = analyzeVersionDiff(currentSnapshot.snapshot, captured.compareSnapshot);
     const handler = this.#requireInputHandler();
     const original = captureVersionSnapshot(this.#wasm);
+    if (original.fingerprint !== currentCommit.contentFingerprint) {
+      throw new VersionError('STALE_WORKSPACE', '검토하는 동안 문서가 바뀌었습니다. 최신 문서로 다시 검토하세요.');
+    }
     const wasDirty = this.#documentState.isDirty();
     handler.prepareSnapshotCapacity(4);
     let mergeCommitted = false;
@@ -1625,7 +1643,7 @@ export class DocumentVersionController implements VersionManagerController {
             sourceBranchAtMerge: sourceBranch.name,
             targetBranchAtMerge: targetBranch.name,
             baseCommitIds: [...request.draft.baseCommitIds],
-            conflictCount: request.draft.conflicts.length,
+            conflictCount: request.draft.conflicts.filter((item) => item.automatic !== true).length,
           },
         }),
       rollbackEditor: () => {

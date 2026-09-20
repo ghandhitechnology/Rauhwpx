@@ -114,6 +114,7 @@ import {
   getNativeFileHandleVerifiedDocumentId,
   getRendererSessionContext,
   installDesktopCloseHandling,
+  installDesktopCloudEditDraftSaveHandling,
   installDesktopFileHandling,
   installDesktopGeneratedDocumentHandling,
   installDesktopPlainTextPasteHandling,
@@ -123,6 +124,7 @@ import {
   isLegacyPortableHistoryFolderHandle,
   pickDesktopNativeOpenFile,
   pickDesktopNativeSaveFile,
+  persistDesktopCloudEditDraft,
   releaseDesktopDocument,
   releaseReplacedNativeFileHandle,
   rememberNativeDocument,
@@ -176,6 +178,42 @@ const documentState = new DocumentDirtyState(eventBus);
 documentState.installBeforeUnload(window);
 const rendererSessionContextPromise = getRendererSessionContext();
 let disposeAgentSidebar = (): void => {};
+let cloudEditDraftIdentity: import('@/desktop-integration').CloudEditDraftIdentity | null = null;
+let cloudEditDraftSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+async function persistCloudEditDraft(requestId?: string): Promise<void> {
+  if (!cloudEditDraftIdentity || wasm.pageCount < 1) return;
+  inputHandler?.finalizeCompositionBeforeCursorMove();
+  const sourceFormat = wasm.getSourceFormat();
+  if (sourceFormat !== 'hwp' && sourceFormat !== 'hwpx') {
+    throw new Error('Cloud edit drafts require HWP or HWPX');
+  }
+  await persistDesktopCloudEditDraft({
+    ...cloudEditDraftIdentity,
+    bytes: exportDocumentForFormat(wasm, sourceFormat),
+    fileName: wasm.fileName,
+    ...(requestId ? { requestId } : {}),
+  });
+}
+
+function scheduleCloudEditDraftSave(): void {
+  if (!cloudEditDraftIdentity) return;
+  if (cloudEditDraftSaveTimer) clearTimeout(cloudEditDraftSaveTimer);
+  cloudEditDraftSaveTimer = setTimeout(() => {
+    cloudEditDraftSaveTimer = null;
+    void persistCloudEditDraft().catch((error) => {
+      console.warn('[cloud-edit] draft persistence failed:', error);
+    });
+  }, 900);
+}
+
+const disposeCloudEditDraftSaveHandling = installDesktopCloudEditDraftSaveHandling(async (requestId) => {
+  if (cloudEditDraftSaveTimer) {
+    clearTimeout(cloudEditDraftSaveTimer);
+    cloudEditDraftSaveTimer = null;
+  }
+  await persistCloudEditDraft(requestId);
+});
 const autosaveManager = new AutosaveManager({
   exportBytes: () => wasm.exportHwp(),
   schedule: autosaveScheduleFromUserSettings(),
@@ -189,6 +227,7 @@ void rendererSessionContextPromise.then((context) => {
 autosaveManager.connect(eventBus);
 window.addEventListener('pagehide', (event) => {
   if (!event.persisted) {
+    disposeCloudEditDraftSaveHandling();
     disposeAgentSidebar();
     autosaveManager.dispose();
   }
@@ -818,6 +857,7 @@ const commandServices: CommandServices = {
 installDesktopCloseHandling(async () => {
   try {
     await awaitPendingCloudTransferForClose();
+    if (cloudEditDraftIdentity) await persistCloudEditDraft();
   } catch {
     return false;
   }
@@ -1150,7 +1190,8 @@ async function initialize(): Promise<void> {
           if (!(error instanceof DocumentOwnedElsewhereError)) showLoadError(error);
         });
     });
-    installDesktopGeneratedDocumentHandling(({ bytes, fileName, readOnly }) => {
+    installDesktopGeneratedDocumentHandling(({ bytes, fileName, readOnly, cloudEditDraft }) => {
+      cloudEditDraftIdentity = cloudEditDraft ?? null;
       if (readOnly) setDocumentReadOnly(true);
       eventBus.emit('open-document-bytes', { bytes, fileName });
     });
@@ -1253,8 +1294,8 @@ async function initialize(): Promise<void> {
               sourceFormat: wasm.getSourceFormat(),
             };
           },
-          moveToLibraryDocument: (target) => {
-            void runLibraryMove(commandServices, target, () => activeDocumentId);
+          moveToLibraryDocument: async (target) => {
+            await runLibraryMove(commandServices, target, () => activeDocumentId);
           },
           prepareCloudTransfer: prepareCloudTransferDocument,
           beginCloudAuthorityTransition,
@@ -1532,6 +1573,7 @@ function setupEventListeners(): void {
 
   eventBus.on('document-changed', (reason) => {
     documentState.markDirty(typeof reason === 'string' ? reason : 'document-changed');
+    scheduleCloudEditDraftSave();
   });
 
   eventBus.on('renderer-selection-changed', (payload) => {

@@ -48,7 +48,7 @@ test('database migrates with WAL, FULL sync, and foreign keys', async (t) => {
     journalMode: 'wal',
     synchronous: 2,
     foreignKeys: 1,
-    migrationVersion: 14,
+    migrationVersion: 15,
   });
 });
 
@@ -94,7 +94,7 @@ test('existing version-one state upgrades without losing resources or event sequ
 
   const upgraded = openDatabase(filename);
   t.after(() => upgraded.close());
-  assert.equal(databasePragmas(upgraded).migrationVersion, 14);
+  assert.equal(databasePragmas(upgraded).migrationVersion, 15);
   assert.equal(upgraded.prepare(`SELECT next_event_seq FROM sessions WHERE id = 'session'`).get().next_event_seq, 8);
   assert.equal(upgraded.prepare(`SELECT name FROM session_resources WHERE session_id = 'session'`).get().name, 'doc.hwp');
   assert.deepEqual(upgraded.prepare(`
@@ -109,6 +109,7 @@ test('existing version-one state upgrades without losing resources or event sequ
   assert.equal(upgraded.prepare(`SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name IN ('session_turns', 'session_waits', 'session_attachment_versions', 'session_message_attachments', 'session_presence', 'session_runtime_leases')`).get().count, 6);
   assert.equal(upgraded.prepare(`SELECT COUNT(*) AS count FROM pragma_table_info('sessions') WHERE name IN ('takeover_requested_at', 'takeover_requested_by', 'frozen_checkpoint_operation_id')`).get().count, 3);
   assert.equal(upgraded.prepare(`SELECT COUNT(*) AS count FROM pragma_table_info('session_checkpoints') WHERE name IN ('timeline_blob_sha256', 'timeline_size')`).get().count, 2);
+  assert.equal(upgraded.prepare(`SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'session_human_edits'`).get().count, 1);
   assert.equal(upgraded.prepare(`SELECT blob_sha256 FROM session_checkpoints WHERE operation_id = 'migration-handoff:session'`).get().blob_sha256, 'a'.repeat(64));
   assert.equal(upgraded.prepare(`SELECT ref_count FROM blobs WHERE sha256 = ?`).get('a'.repeat(64)).ref_count, 2);
 });
@@ -1312,6 +1313,111 @@ for (const messageId of [null, 'unfinished_followup']) {
     assert.equal(sessions.beginTurn(session.id, { turnNumber: 1, messageId }).status, 'running');
   });
 }
+
+test('edited resume atomically imports one paused draft revision and preserves its context across worker replacement', async (t) => {
+  const { sessions, blobs, origin, session, database } = await persistentRoomFixture(t);
+  sessions.beginTurn(session.id, { turnNumber: 1 });
+  const checkpoint = await upload(blobs, origin.device.id, Buffer.from('cloud draft before local edit'));
+  const timeline = await upload(blobs, origin.device.id, Buffer.from('{"history":"unfinished work"}'), {
+    name: 'timeline.json', kind: 'timeline',
+  });
+  await sessions.commitBoundary(session.id, {
+    operationId: 'before_human_edit', turnNumber: 1, revision: 4, kind: 'operation',
+    checkpoint: { blobId: checkpoint.id, size: checkpoint.size },
+    timeline: { blobId: timeline.id, size: timeline.size },
+  });
+  sessions.executeCommand(origin.device, session.id, parseCommand({
+    commandId: 'pause_before_human_edit', type: 'session.pause',
+    payload: { expectedVersion: sessions.getSession(session.id).stateVersion },
+  }));
+  sessions.acknowledgePause(session.id);
+  const pausedVersion = sessions.getSession(session.id).stateVersion;
+  const writerGeneration = sessions.getSession(session.id).writerGeneration;
+  assert.equal(writerGeneration, 1);
+  const edited = await upload(blobs, origin.device.id, Buffer.from('locally edited cloud draft'), {
+    name: 'document.hwpx', kind: 'document', sessionId: session.id,
+  });
+  const command = parseCommand({
+    commandId: 'resume_edited_operation', type: 'session.resume_edited', payload: {
+      expectedVersion: pausedVersion,
+      expectedWriterGeneration: writerGeneration,
+      editSessionId: 'local_edit_001',
+      expectedBoundary: { operationId: 'before_human_edit', revision: 4 },
+      editedDocument: { blobId: edited.id, size: edited.size },
+      changeSummary: 'Updated the table heading and corrected two dates.',
+    },
+  });
+  const resumed = sessions.executeCommand(origin.device, session.id, command);
+  assert.equal(resumed.session.status, 'queued');
+  assert.equal(resumed.resume.operationId, 'human-edit:local_edit_001');
+  assert.equal(resumed.resume.revision, 5);
+  assert.deepEqual(sessions.executeCommand(origin.device, session.id, command), resumed, 'lost acknowledgements replay one receipt');
+  assert.equal(database.prepare(`SELECT COUNT(*) AS count FROM session_human_edits WHERE session_id = ?`).get(session.id).count, 1);
+  assert.throws(() => sessions.executeCommand(origin.device, session.id, parseCommand({
+    commandId: 'stale_edit_writer', type: 'session.resume_edited', payload: {
+      ...command.payload, editSessionId: 'local_edit_002', expectedVersion: pausedVersion,
+    },
+  })), { code: 'STATE_VERSION_CONFLICT' });
+  sessions.claimNextSession();
+  const manifest = sessions.workerManifest(session.id);
+  assert.equal(manifest.latestCheckpoint.blobId, edited.id);
+  assert.equal(manifest.latestCheckpoint.revision, 5);
+  assert.deepEqual({ ...manifest.resumeContext.humanEdit }, {
+    editSessionId: 'local_edit_001',
+    fromOperationId: 'before_human_edit',
+    fromRevision: 4,
+    toOperationId: 'human-edit:local_edit_001',
+    toRevision: 5,
+    blobId: edited.id,
+    size: edited.size,
+    changeSummary: 'Updated the table heading and corrected two dates.',
+    createdAt: manifest.resumeContext.humanEdit.createdAt,
+  });
+});
+
+test('edited resume rejects stale writer and checkpoint fences before importing a revision', async (t) => {
+  const { sessions, blobs, origin, session, database } = await persistentRoomFixture(t);
+  sessions.beginTurn(session.id, { turnNumber: 1 });
+  const checkpoint = await upload(blobs, origin.device.id, Buffer.from('cloud draft at pause boundary'));
+  const timeline = await upload(blobs, origin.device.id, Buffer.from('{"history":"pause boundary"}'), {
+    name: 'timeline.json', kind: 'timeline',
+  });
+  await sessions.commitBoundary(session.id, {
+    operationId: 'pause_boundary', turnNumber: 1, revision: 3, kind: 'operation',
+    checkpoint: { blobId: checkpoint.id, size: checkpoint.size },
+    timeline: { blobId: timeline.id, size: timeline.size },
+  });
+  sessions.executeCommand(origin.device, session.id, parseCommand({
+    commandId: 'pause_for_stale_fences', type: 'session.pause',
+    payload: { expectedVersion: sessions.getSession(session.id).stateVersion },
+  }));
+  sessions.acknowledgePause(session.id);
+  const paused = sessions.getSession(session.id);
+  const edited = await upload(blobs, origin.device.id, Buffer.from('edited draft'));
+  const payload = {
+    expectedVersion: paused.stateVersion,
+    expectedWriterGeneration: paused.writerGeneration,
+    editSessionId: 'stale_fence_edit',
+    expectedBoundary: { operationId: 'pause_boundary', revision: 3 },
+    editedDocument: { blobId: edited.id, size: edited.size },
+  };
+  const checkpointCount = database.prepare(
+    `SELECT COUNT(*) AS count FROM session_checkpoints WHERE session_id = ?`,
+  ).get(session.id).count;
+
+  assert.throws(() => sessions.executeCommand(origin.device, session.id, parseCommand({
+    commandId: 'wrong_writer_generation', type: 'session.resume_edited',
+    payload: { ...payload, expectedWriterGeneration: paused.writerGeneration + 1 },
+  })), { code: 'EDIT_WRITER_STALE' });
+  assert.throws(() => sessions.executeCommand(origin.device, session.id, parseCommand({
+    commandId: 'wrong_checkpoint_boundary', type: 'session.resume_edited',
+    payload: { ...payload, expectedBoundary: { operationId: 'older_boundary', revision: 2 } },
+  })), { code: 'EDIT_BOUNDARY_STALE' });
+
+  assert.equal(database.prepare(`SELECT COUNT(*) AS count FROM session_human_edits WHERE session_id = ?`).get(session.id).count, 0);
+  assert.equal(database.prepare(`SELECT COUNT(*) AS count FROM session_checkpoints WHERE session_id = ?`).get(session.id).count, checkpointCount);
+  assert.equal(sessions.getSession(session.id).status, 'suspended');
+});
 
 test('merge recovery selects the last completed turn while a later operation is still in progress', async (t) => {
   const { blobs, auth, sessions } = await fixture(t);

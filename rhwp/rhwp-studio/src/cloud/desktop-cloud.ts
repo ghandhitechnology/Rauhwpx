@@ -71,6 +71,12 @@ export interface CloudDesktopApi {
   cloudCloseDisplay?: (payload: { connectionId: string }) => Promise<unknown>;
   cloudDisplayInput?: (payload: { connectionId: string; event: CloudDisplayInputEvent }) => Promise<unknown>;
   cloudResolveResult?: (payload: { sessionId: string; action: CloudResultAction }) => Promise<unknown>;
+  cloudBeginEdit?: (payload: { sessionId: string }) => Promise<unknown>;
+  cloudContinueEdit?: (payload: {
+    sessionId: string;
+    editSessionId: string;
+    changeSummary?: string;
+  }) => Promise<unknown>;
   onCloudEvent?: (callback: (event: unknown) => void) => (() => void) | void;
   onCloudDisplayEvent?: (callback: (event: unknown) => void) => (() => void) | void;
 }
@@ -104,9 +110,19 @@ export interface CloudController {
   publishCheckpoint(sessionId: string, operationId?: string): Promise<CloudCheckpointPayload>;
   openDisplay(sessionId: string, listener: (event: CloudDisplayEvent) => void): Promise<CloudDisplayConnection>;
   resolveResult(sessionId: string, action: CloudResultAction): Promise<CloudResultResolution>;
+  beginEdit(sessionId: string): Promise<CloudEditDraftSession>;
+  continueEdit(sessionId: string, editSessionId: string, changeSummary?: string): Promise<CloudSnapshot>;
   subscribe(listener: (snapshot: CloudSnapshot) => void): () => void;
   subscribeEvents(listener: (event: unknown) => void): () => void;
   dispose(): void;
+}
+
+export interface CloudEditDraftSession {
+  sessionId: string;
+  editSessionId: string;
+  boundary: { operationId: string; revision: number; writerGeneration: number; stateVersion: number };
+  fileName: string;
+  savedAt: string;
 }
 
 const ISO_FALLBACK = '1970-01-01T00:00:00.000Z';
@@ -1068,6 +1084,42 @@ export function createCloudController(
       publish(resolution.snapshot);
       return resolution;
     },
+    async beginEdit(sessionId) {
+      const fn = resolvedApi?.cloudBeginEdit;
+      if (typeof fn !== 'function') throw new Error('이 앱 빌드는 Cloud 초안 편집을 지원하지 않습니다.');
+      const raw = record(await fn({ sessionId }));
+      const next = unwrapSnapshot(raw);
+      const editDraft = record(raw?.editDraft);
+      const boundary = record(editDraft?.boundary);
+      if (!next || typeof editDraft?.sessionId !== 'string'
+        || typeof editDraft.editSessionId !== 'string'
+        || typeof editDraft.fileName !== 'string'
+        || typeof editDraft.savedAt !== 'string'
+        || typeof boundary?.operationId !== 'string'
+        || !Number.isSafeInteger(boundary.revision)
+        || !Number.isSafeInteger(boundary.writerGeneration)
+        || !Number.isSafeInteger(boundary.stateVersion)) {
+        throw new Error('Cloud 초안 편집 정보가 올바르지 않습니다.');
+      }
+      publish(next);
+      return {
+        sessionId: editDraft.sessionId,
+        editSessionId: editDraft.editSessionId,
+        boundary: {
+          operationId: boundary.operationId,
+          revision: Number(boundary.revision),
+          writerGeneration: Number(boundary.writerGeneration),
+          stateVersion: Number(boundary.stateVersion),
+        },
+        fileName: editDraft.fileName,
+        savedAt: editDraft.savedAt,
+      };
+    },
+    continueEdit: (sessionId, editSessionId, changeSummary) => call('cloudContinueEdit', {
+      sessionId,
+      editSessionId,
+      ...(changeSummary ? { changeSummary } : {}),
+    }),
     subscribe(listener) {
       listeners.add(listener);
       listener(snapshot);

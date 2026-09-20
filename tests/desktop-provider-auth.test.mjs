@@ -47,7 +47,12 @@ test('collectProviderAuth reads only the selected provider secret', async (t) =>
   const codex = await collectProviderAuth('codex', { vault, homeDir: home, cliRoot: path.join(home, 'cli') });
   assert.equal(codex.apiKey, 'sk-proj-codex');
   assert.deepEqual(codex.files, [{ path: '.codex/auth.json', content: '{"token":"codex"}' }]);
-  const claude = await collectProviderAuth('claude', { vault, homeDir: home, cliRoot: path.join(home, 'cli') });
+  const claude = await collectProviderAuth('claude', {
+    vault,
+    homeDir: home,
+    cliRoot: path.join(home, 'cli'),
+    readClaudeKeychain: async () => null,
+  });
   assert.equal(claude.apiKey, 'sk-ant-claude');
   assert.deepEqual(claude.files, []);
   const variables = sandboxCredentialVariables(codex);

@@ -39,6 +39,7 @@ export async function checkCloudSetup(page, origin, artifacts) {
     await title('Raucloud 준비 중');
     await click('숨기기');
     await page.waitForFunction(() => window.sidebarPreview.cloud.controller.getSnapshot().server.lifecycle === 'ready');
+    if (await page.$eval('.ag-cd-config', node => node.hidden)) await page.click('.ag-cd-settings-toggle');
     await page.click('.ag-cloud-settings-action');
     await title('Raucloud가 준비되었습니다');
     await click('상태 확인');

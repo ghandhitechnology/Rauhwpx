@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import test from 'node:test';
 
-import puppeteer, { type Browser } from 'puppeteer-core';
+import puppeteer, { type Browser, type Page } from 'puppeteer-core';
 import { createServer, type ViteDevServer } from 'vite';
 
 const executablePath = browserExecutable();
@@ -16,6 +16,17 @@ requireWasmPackage(wasmPackageRoot);
 let server: ViteDevServer | null = null;
 let browser: Browser | null = null;
 let baseUrl = '';
+
+async function acceptReviewChanges(page: Page): Promise<void> {
+  await page.click('.merge-resolver-header-actions button:first-child');
+  await page.evaluate(() => {
+    const ids = [...document.querySelectorAll<HTMLButtonElement>('.merge-conflict-item:not(.is-resolved)')].map((node) => node.dataset.conflictId);
+    for (const id of ids) {
+      [...document.querySelectorAll<HTMLButtonElement>('.merge-conflict-item')].find((node) => node.dataset.conflictId === id)?.click();
+      [...document.querySelectorAll<HTMLButtonElement>('.merge-resolution-button')].find((node) => node.textContent?.startsWith('✓'))?.click();
+    }
+  });
+}
 
 test.before(async () => {
   server = await createServer({
@@ -173,7 +184,8 @@ test('dirty merge entry commits only after the user chooses the current branch',
   }
 });
 
-test('clean fast-forward is reviewed and keeps the source branch by default', { timeout: 30_000 }, async (context) => {
+for (const reviewAction of ['accept', 'reject', 'replace'] as const) {
+test(`linear history ${reviewAction} saves a recoverable review checkpoint`, { timeout: 60_000 }, async (context) => {
   assert.ok(browser, 'Browser setup did not complete');
   const page = await browser.newPage();
   try {
@@ -260,7 +272,7 @@ test('clean fast-forward is reviewed and keeps the source branch by default', { 
       });
       await controller.enable();
       await controller.startMerge('source');
-      Object.assign(window, { __mergeController: controller, __mergeStore: store, __mergeWasm: wasm });
+      Object.assign(window, { __mergeController: controller, __mergeStore: store, __mergeWasm: wasm, __mergeRootCommit: created.commit.id });
     });
     await page.waitForSelector('.merge-resolver-window');
     // 실제 테마 토큰으로 열린 병합 창과 입력, 미리보기 배경을 확인한다.
@@ -289,7 +301,14 @@ test('clean fast-forward is reviewed and keeps the source branch by default', { 
       assert.equal(colors.workspace, dark ? 'rgb(15, 15, 17)' : 'rgb(228, 228, 234)');
       assert.equal(colors.paper, 'rgb(255, 255, 255)');
     }
-    assert.equal(await page.$eval('.merge-mode-select', (select) => (select as HTMLSelectElement).value), 'fast-forward');
+    assert.equal(await page.$('.merge-mode-select'), null);
+    assert.ok((await page.$$('.merge-conflict-item')).length > 0);
+    assert.equal(await page.$eval('.merge-primary-button', (button) => (button as HTMLButtonElement).disabled), true);
+    await acceptReviewChanges(page);
+    if (reviewAction === 'reject') {
+      await page.click('.merge-conflict-tools > summary');
+      await page.click('.merge-bulk-actions button:first-child');
+    }
     try {
       await page.waitForFunction(() => {
         const button = document.querySelector<HTMLButtonElement>('.merge-resolver-footer .merge-primary-button');
@@ -304,7 +323,14 @@ test('clean fast-forward is reviewed and keeps the source branch by default', { 
       }));
       throw new Error(`Diverged merge did not become completable: ${JSON.stringify(diagnostic)}`, { cause: error });
     }
-    await page.click('.merge-resolver-footer .merge-primary-button');
+    if (reviewAction === 'replace') {
+      page.once('dialog', (dialog) => void dialog.accept());
+      await page.click('.merge-options > summary');
+      await page.evaluate(() => [...document.querySelectorAll<HTMLButtonElement>('.merge-options button')]
+        .find((button) => button.textContent?.startsWith('가져온 문서로 교체'))!.click());
+    } else {
+      await page.click('.merge-resolver-footer .merge-primary-button');
+    }
 
     await page.waitForSelector('.merge-resolver-window', { hidden: true });
     const result = await page.evaluate(async () => {
@@ -316,20 +342,28 @@ test('clean fast-forward is reviewed and keeps the source branch by default', { 
       const main = await store.getBranch(repository.id, 'main');
       const source = await store.getBranch(repository.id, 'source');
       const commits = await store.listCommits(repository.id);
+      const mainCommit = await store.getCommit(main.target);
+      const recoverable = mainCommit.parents.includes((window as any).__mergeRootCommit);
+      const text = wasm.getTextRange(0, 0, 0, 1000);
       controller.dispose();
       wasm.releaseDocument();
       return {
         mainHead: main?.target,
         sourceHead: source?.target,
         reasons: commits.map((commit: { reason: string }) => commit.reason),
+        recoverable,
+        text,
       };
     });
-    assert.equal(result.mainHead, result.sourceHead);
-    assert.deepEqual(result.reasons.sort(), ['initial', 'manual']);
+    assert.notEqual(result.mainHead, result.sourceHead);
+    assert.deepEqual(result.reasons.sort(), ['initial', 'manual', 'merge']);
+    assert.equal(result.recoverable, true);
+    assert.equal(result.text.includes('incoming clean change'), reviewAction !== 'reject');
   } finally {
     await page.close();
   }
 });
+}
 
 test('diverged clean merge creates ordered parents and Undo/Redo moves bytes with refs', { timeout: 45_000 }, async (context) => {
   assert.ok(browser, 'Browser setup did not complete');
@@ -486,11 +520,8 @@ test('diverged clean merge creates ordered parents and Undo/Redo moves bytes wit
     await page.waitForSelector('.merge-resolver-window');
     assert.equal(await page.$eval('.merge-direction', (node) => node.textContent), 'source → main');
     assert.equal(await page.$('.merge-mode-select'), null, 'diverged merges cannot bypass a merge checkpoint');
-    assert.match(
-      await page.$eval('.merge-clean-message', (node) => node.textContent ?? ''),
-      /충돌이 없습니다/,
-      'disjoint current/incoming edits must stay mandatory but conflict-free in review',
-    );
+    assert.ok((await page.$$('.merge-conflict-item')).length > 0);
+    await acceptReviewChanges(page);
     try {
       await page.waitForFunction(() => {
         const button = document.querySelector<HTMLButtonElement>('.merge-resolver-footer .merge-primary-button');
@@ -817,12 +848,12 @@ test('HWPX controller durably completes clean and conflicted merges with composi
       const conflictCount = await page.$$eval('.merge-conflict-item', (items) => items.length);
       if (conflicted) {
         assert.ok(conflictCount > 0, 'same-position HWPX edits must require explicit resolution');
-        await page.click('.merge-conflict-tools > summary');
-        await page.click('.merge-bulk-actions button:nth-child(2)');
+        await page.click('.merge-resolver-header-actions button:first-child');
+        assert.equal(await page.$eval('.merge-primary-button', (button) => (button as HTMLButtonElement).disabled), true);
       } else {
-        assert.equal(conflictCount, 0, 'disjoint HWPX edits must merge cleanly');
-        assert.match(await page.$eval('.merge-clean-message', (node) => node.textContent ?? ''), /충돌이 없습니다/);
+        assert.ok(conflictCount > 0, 'compatible changes remain reviewable');
       }
+      await acceptReviewChanges(page);
       await page.waitForFunction(() => {
         const button = document.querySelector<HTMLButtonElement>('.merge-resolver-footer .merge-primary-button');
         return Boolean(button && !button.disabled);
@@ -859,7 +890,7 @@ test('HWPX controller durably completes clean and conflicted merges with composi
       assert.equal(merged.reason, 'merge');
       assert.equal(merged.merge.sourceBranchAtMerge, 'source');
       assert.equal(merged.merge.targetBranchAtMerge, 'main');
-      assert.equal(merged.merge.conflictCount, conflictCount);
+      assert.equal(merged.merge.conflictCount > 0, conflicted);
       assert.equal(merged.sourceHead, merged.incomingHead);
       assert.equal(merged.manifestCoverage, 'full-document');
       for (const kind of [
@@ -1095,14 +1126,13 @@ test('real resolver completes clean and conflicted HWP/HWPX worker merges', { ti
         if (conflicted) {
           assert.ok(setup.conflictCount > 0, `${format} fixture must produce a typed conflict`);
           assert.equal(
-            await page.$$eval('.merge-conflict-state', (nodes) => nodes.every((node) => node.textContent === '미해결')),
+            await page.$$eval('.merge-conflict-state', (nodes) => nodes.every((node) => node.textContent === '검토 전')),
             true,
           );
-          await page.click('.merge-conflict-tools > summary');
-        await page.click('.merge-bulk-actions button:nth-child(2)');
+          await acceptReviewChanges(page);
         } else {
           assert.equal(setup.conflictCount, 0, `${format} disjoint edits must merge cleanly`);
-          assert.match(await page.$eval('.merge-clean-message', (node) => node.textContent ?? ''), /충돌이 없습니다/);
+          assert.match(await page.$eval('.merge-clean-message', (node) => node.textContent ?? ''), /검토할 변경이 없습니다/);
         }
         await page.waitForFunction(() => {
           const button = document.querySelector<HTMLButtonElement>('.merge-resolver-footer .merge-primary-button');

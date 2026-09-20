@@ -113,6 +113,17 @@ test('reference paths are explicit untrusted data in the provider prompt', () =>
   assert.match(prompt, /Perform every document mutation through the Rauhwpx MCP tools/);
 });
 
+test('a locally edited paused draft invalidates stale editor state in the resumed provider prompt', () => {
+  const prompt = composeTurnPrompt('Finish the report', [], { humanEdit: {
+    fromRevision: 7,
+    toRevision: 8,
+    changeSummary: 'Corrected the totals in the final table.',
+  } });
+  assert.match(prompt, /current document is authoritative at revision 8/);
+  assert.match(prompt, /discard stale selections, coordinates, and editor references/);
+  assert.match(prompt, /Corrected the totals in the final table/);
+});
+
 test('agent hub environment cannot inherit worker control-plane credentials', () => {
   const filtered = safeHubBaseEnvironment({
     LANG: 'C.UTF-8',

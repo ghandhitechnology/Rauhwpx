@@ -8,7 +8,7 @@ const labelsSource = await readFile(new URL('../src/merge/merge-labels.ts', impo
 test('resolver exposes all four mandatory previews and unambiguous merge direction', () => {
   assert.match(source, /\['base', 'current', 'incoming', 'result'\]/);
   assert.match(source, /sourceBranch} → \${options\.currentBranch/);
-  assert.match(source, /자동 변경은 모두 결과에 포함됩니다/);
+  assert.match(source, /item\.automatic === true/);
 });
 
 test('resolver contract includes keyboard, accessibility, validation and explicit discard safeguards', () => {
@@ -17,15 +17,14 @@ test('resolver contract includes keyboard, accessibility, validation and explici
   assert.match(source, /window\.confirm\('이 병합 초안/);
   assert.match(source, /this\.validation\?\.valid/);
   assert.match(source, /conflict\.supportsBoth/);
-  assert.match(source, /해결하지 않은 충돌/);
-  assert.match(source, /경로나 종류로 충돌 검색/);
+  assert.match(source, /검토 전 변경/);
+  assert.match(source, /경로나 종류로 변경 검색/);
   assert.match(source, /aria-controls/);
   assert.match(source, /configureTabPanel/);
-  assert.match(source, /details\.append\(summary, groupActions\)/);
-  assert.doesNotMatch(source, /summary\.appendChild\(groupActions\)/);
+  assert.match(source, /list\.appendChild\(button\)/);
   assert.match(labelsSource, /base64 이미지/);
-  assert.match(source, /이 값은 나누어 병합할 수 없습니다/);
-  assert.match(source, /mergeTokenLabel\(conflict\.kind/);
+  assert.match(source, /연결된 변경을 함께 선택합니다/);
+  assert.match(source, /거절/);
   assert.match(source, /mergePathLabel\(conflict\.path/);
 });
 

@@ -188,7 +188,17 @@ export function createCloudRuntime(config, dependencies = {}) {
     },
     async stop() {
       if (backupTimer) clearInterval(backupTimer);
-      await scheduler.stop();
+      const drain = typeof scheduler.drainForShutdown === 'function'
+        ? await scheduler.drainForShutdown()
+        : (await scheduler.stop(), { requested: [], drained: [], forced: [] });
+      for (const sessionId of drain.forced) {
+        sessionStore.suspend(sessionId, {
+          code: 'CONTROL_PLANE_SHUTDOWN_FORCED',
+          message: 'Cloud stopped before the worker acknowledged a saved boundary',
+        });
+        logger.error('session.shutdown_forced', { safeBoundary: false }, sessionId);
+      }
+      for (const sessionId of drain.drained) logger.info('session.shutdown_drained', { safeBoundary: true }, sessionId);
       await conversationBackup.flush().catch((error) => logger.error('conversation.backup_failed', { code: error.code, message: error.message }));
       await raucloudLease.release('CONTROL_PLANE_SHUTDOWN').catch((error) => {
         logger.error('raucloud.release_failed', { code: error.code, message: error.message });
