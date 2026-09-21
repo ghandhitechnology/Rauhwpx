@@ -1832,7 +1832,14 @@ fn measure_char_width_with_policy(
         // 강제 시 한컴 대비 약 4px (font-size 20px 기준, 0.5→0.3 em 차) 과대.
         // glyph_w 가 비정상 fullwidth (>= em_size) 일 때만 0.3 em 강제 — 함초롬
         // 바탕 (0.32) / Pretendard (0.22) 등 정상 DB 값은 조건 미충족으로 영향 없음.
-        let is_narrow_unicode_punct = matches!(c, '\u{2018}' | '\u{2019}' | '\u{2027}');
+        // [#7092] 고정폭 표의 `‘`·`’` 는 글꼴이 지닌 전각이 진짜 값이다.
+        // `·` 는 이미 `is_monospace_metric` 으로 이 갈래를 빼 두었는데, 따옴표는
+        // face 를 보지 않고 0.3em 으로 눌러 왔다. 비고정폭 face 는 TrueType/HFT
+        // 실현이 갈려 종전 폭을 유지한다 (#7092 잔여).
+        let quote_width_is_authentic =
+            matches!(c, '\u{2018}' | '\u{2019}') && is_monospace_metric(mm.metric);
+        let is_narrow_unicode_punct =
+            matches!(c, '\u{2018}' | '\u{2019}' | '\u{2027}') && !quote_width_is_authentic;
         // [U+00B7 .notdef 위장값 정정] 비례폰트(휴먼명조 등)가 `·` (가운뎃점)
         // 글리프를 갖지 않으면 cmap 이 .notdef(glyph 0) 로 매핑돼 advance 가
         // em_size(전각) 로 기록된다. 한컴은 이 경우 점 글리프를 가진 대체
@@ -1845,7 +1852,9 @@ fn measure_char_width_with_policy(
             c == '\u{00B7}' && glyph_w >= mm.metric.em_size && !is_monospace_metric(mm.metric);
         if (is_narrow_unicode_punct && glyph_w >= mm.metric.em_size) || is_b7_notdef_artifact {
             (mm.metric.em_size as f64 * 0.3) as u16
-        } else if (is_halfwidth_punct || is_halfwidth_cjk_quote(c)) && glyph_w >= mm.metric.em_size
+        } else if (is_halfwidth_punct || is_halfwidth_cjk_quote(c))
+            && !quote_width_is_authentic
+            && glyph_w >= mm.metric.em_size
         {
             mm.metric.em_size / 2
         } else {
