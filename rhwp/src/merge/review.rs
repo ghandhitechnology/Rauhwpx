@@ -38,7 +38,11 @@ enum Target {
 }
 
 fn paragraph_value(p: &Paragraph) -> Value {
-    json!({ "text": p.text, "contentHash": dh(p).to_hex().to_string(), "controls": p.controls.len() })
+    json!({
+        "text": p.text,
+        "contentHash": paragraph_hash(p).to_hex().to_string(),
+        "controls": p.controls.len()
+    })
 }
 
 fn paragraph_hash(p: &Paragraph) -> blake3::Hash {
@@ -62,7 +66,7 @@ fn value_text(value: &Value) -> Option<&str> {
 
 fn texts_support_both(base: &Value, current: &Value, incoming: &Value) -> bool {
     match (value_text(base), value_text(current), value_text(incoming)) {
-        (Some(base), Some(current), Some(incoming)) => {
+        (Some(base), Some(current), Some(incoming)) if current != incoming => {
             merge_text(base, current, incoming).is_some()
                 || both_text(base, current, incoming, false).is_some()
         }
@@ -70,8 +74,15 @@ fn texts_support_both(base: &Value, current: &Value, incoming: &Value) -> bool {
     }
 }
 
-fn review_choice(choices: &BTreeMap<String, MergeResolution>, id: &str) -> MergeResolution {
-    choices.get(id).cloned().unwrap_or(MergeResolution::Current)
+fn review_choice(
+    choices: &BTreeMap<String, MergeResolution>,
+    unit: &ReviewUnit,
+) -> MergeResolution {
+    choices
+        .get(&unit.value.id)
+        .or_else(|| choices.get(&unit.value.fingerprint))
+        .cloned()
+        .unwrap_or(MergeResolution::Current)
 }
 
 fn unit(
@@ -302,12 +313,11 @@ fn apply_review(
     choices: &BTreeMap<String, MergeResolution>,
 ) -> Result<Document, String> {
     let (mut output, analysis, targets) = review_documents(b, c, i)?;
-    if analysis.conflicts.iter().all(|unit| {
-        matches!(
-            review_choice(choices, &unit.value.id),
-            MergeResolution::Current
-        )
-    }) {
+    if analysis
+        .conflicts
+        .iter()
+        .all(|unit| matches!(review_choice(choices, unit), MergeResolution::Current))
+    {
         validate_resource_dependencies(c)?;
         return Ok(c.clone());
     }
@@ -326,10 +336,7 @@ fn apply_review(
             .collect::<BTreeMap<_, _>>();
         for (unit, target) in analysis.conflicts.iter().zip(&targets) {
             if matches!(target, Target::Conflict) {
-                structural_choices.insert(
-                    unit.value.id.clone(),
-                    review_choice(choices, &unit.value.id),
-                );
+                structural_choices.insert(unit.value.id.clone(), review_choice(choices, unit));
             }
         }
         output = merge_doc(b, c, i, Some(&structural_choices))?.0;
@@ -338,7 +345,7 @@ fn apply_review(
         if matches!(target, Target::Conflict) {
             continue;
         }
-        match review_choice(choices, &unit.value.id) {
+        match review_choice(choices, unit) {
             MergeResolution::Incoming => {}
             MergeResolution::Current => match target {
                 Target::Document => output = c.clone(),
@@ -769,6 +776,70 @@ mod tests {
         assert!(
             merged.contains("UNSAVED_CLOUD_HANDOFF"),
             "missing handoff text: {merged}"
+        );
+        assert!(
+            analysis.conflicts.iter().any(|unit| {
+                unit.value.supports_both
+                    && value_text(&unit.value.incoming)
+                        .is_some_and(|text| text.contains("CLOUD_FINISHED"))
+            }),
+            "Cloud paragraph should support both"
+        );
+        assert!(
+            analysis
+                .conflicts
+                .iter()
+                .filter(|unit| unit.value.supports_both)
+                .all(|unit| value_text(&unit.value.incoming)
+                    .is_some_and(|text| text.contains("CLOUD_FINISHED"))),
+            "empty table paragraphs must not offer both"
+        );
+        let all_both = analysis
+            .conflicts
+            .iter()
+            .map(|unit| {
+                (
+                    unit.value.id.clone(),
+                    if unit.value.supports_both {
+                        MergeResolution::Both {
+                            order: "current-first".into(),
+                        }
+                    } else {
+                        MergeResolution::Incoming
+                    },
+                )
+            })
+            .collect();
+        let both_output = apply_review(&base, &current, &incoming, &all_both)
+            .unwrap_or_else(|error| panic!("all-both review: {error}"));
+        let both_merged = joined(&both_output);
+        assert!(
+            both_merged.contains("CLOUD_FINISHED"),
+            "all-both missing cloud text: {both_merged}"
+        );
+        let by_fingerprint = analysis
+            .conflicts
+            .iter()
+            .map(|unit| {
+                (
+                    unit.value.fingerprint.clone(),
+                    choices
+                        .get(&unit.value.id)
+                        .cloned()
+                        .unwrap_or(MergeResolution::Current),
+                )
+            })
+            .collect();
+        let fingerprint_output = apply_review(&base, &current, &incoming, &by_fingerprint)
+            .unwrap_or_else(|error| panic!("fingerprint choices: {error}"));
+        let fingerprint_merged = joined(&fingerprint_output);
+        assert!(
+            fingerprint_merged.contains("CLOUD_FINISHED"),
+            "fingerprint choices missing cloud text: {fingerprint_merged}"
+        );
+        assert!(
+            fingerprint_merged.contains("LOCAL_DURING_CLOUD"),
+            "fingerprint choices missing local text: {fingerprint_merged}"
         );
     }
 
