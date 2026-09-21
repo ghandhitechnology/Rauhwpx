@@ -3356,6 +3356,53 @@ mod tests {
         );
     }
 
+    fn quote_advances_em(font_family: &str, font_size: f64) -> (f64, f64) {
+        let m = EmbeddedTextMeasurer;
+        let style = TextStyle {
+            font_family: font_family.to_string(),
+            font_size,
+            ratio: 1.0,
+            ..Default::default()
+        };
+        let positions = m.compute_char_positions("\u{2018}가\u{2019}", &style);
+        assert_eq!(
+            positions.len(),
+            4,
+            "{font_family} 따옴표 클러스터 경계가 4개여야 함, got {:?}",
+            positions
+        );
+        (
+            (positions[1] - positions[0]) / font_size,
+            (positions[3] - positions[2]) / font_size,
+        )
+    }
+
+    /// [#7092 / rhwp#7272] 고정폭 표의 `‘`·`’` 는 적힌 전각으로 전진한다.
+    /// 수정 전에는 face 와 무관하게 0.3em 으로 눌렸다.
+    #[test]
+    fn test_7092_monospace_quotes_advance_full_width() {
+        for family in ["굴림체", "돋움체", "바탕체"] {
+            let (left, right) = quote_advances_em(family, 20.0);
+            assert!(
+                left >= 0.9 && right >= 0.9,
+                "{family} 따옴표는 정본대로 전각이어야 한다(수정 전 0.300). \
+                 ‘={left:.4}em ’={right:.4}em"
+            );
+        }
+    }
+
+    /// 반례 — 비고정폭 face 는 종전 0.3em 을 유지한다.
+    /// 휴먼명조는 TrueType/HFT 실현이 갈려 #7092 잔여로 남긴다.
+    #[test]
+    fn test_7092_proportional_quotes_keep_narrow_width() {
+        let (left, right) = quote_advances_em("휴먼명조", 20.0);
+        assert!(
+            left <= 0.4 && right <= 0.4,
+            "휴먼명조 따옴표는 이 변경의 범위 밖이라 종전 0.300 em 이어야 한다. \
+             ‘={left:.4}em ’={right:.4}em"
+        );
+    }
+
     // Stage 4 검증으로 native tab_type 정정 (정정 2) 은 회귀 발견되어 철회.
     // HWP5 의 `tab_extended[0]` 가 이미 right-tab 결과 위치 (= 우측 끝 - 한컴_seg_w)
     // 로 저장되어 있어 LEFT fallback 이 인코딩 의도와 정합. 본 테스트는 합성 데이터
