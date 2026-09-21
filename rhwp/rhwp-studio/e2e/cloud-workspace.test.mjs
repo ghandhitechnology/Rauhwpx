@@ -903,7 +903,7 @@ try {
   console.log('PASS restored Cloud conversation transfer, double-click protection, read-only question workflow, multi-turn cloud messages, and unchanged local document');
   // Edit through the real local input while the Cloud conversation remains selected.
   await page.click('[data-document-view="local"]');
-  await page.evaluate(() => window.__inputHandler.moveCursorTo({ sectionIndex: 0, paragraphIndex: 0, charOffset: 0 }));
+  await page.evaluate(() => window.__inputHandler.moveCursorTo({ sectionIndex: 0, paragraphIndex: 1, charOffset: 0 }));
   await page.keyboard.type('LOCAL_DURING_CLOUD ');
   await page.waitForFunction(async () => {
     const { captureVersionSnapshot } = await import('/src/versioning/snapshot.ts');
@@ -973,9 +973,15 @@ try {
       const choices = [...document.querySelectorAll('.merge-resolution-button')];
       const both = choices.find((button) =>
         (button.textContent ?? '').startsWith('둘 다 유지: 현재 변경 먼저'));
+      const accept = choices.find((button) =>
+        (button.textContent ?? '').startsWith('✓ 수락'));
       const keepLocal = choices.find((button) =>
         (button.textContent ?? '').startsWith('✕ 거절'));
-      const target = both ?? keepLocal;
+      const incomingCard = [...document.querySelectorAll('.merge-value-card')]
+        .find((card) => card.querySelector('h3')?.textContent === '가져올 변경');
+      const incomingText = (incomingCard?.querySelector('pre')?.textContent ?? '').trim();
+      const incomingUseful = incomingText.includes('CLOUD_FINISHED');
+      const target = both ?? (incomingUseful ? accept : keepLocal);
       if (!target) {
         throw new Error(`No merge resolution for ${document.querySelector('.merge-conflict-editor')?.textContent}`);
       }
