@@ -25,7 +25,7 @@ struct ReviewUnit {
     position: Option<ReviewPosition>,
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, PartialEq, Eq, Serialize)]
 struct ReviewPosition {
     section: usize,
     paragraph: usize,
@@ -52,6 +52,28 @@ fn paragraph_hash(p: &Paragraph) -> blake3::Hash {
     dh(&value)
 }
 
+fn value_text(value: &Value) -> Option<&str> {
+    match value {
+        Value::String(text) => Some(text),
+        Value::Object(object) => object.get("text").and_then(Value::as_str),
+        _ => None,
+    }
+}
+
+fn texts_support_both(base: &Value, current: &Value, incoming: &Value) -> bool {
+    match (value_text(base), value_text(current), value_text(incoming)) {
+        (Some(base), Some(current), Some(incoming)) => {
+            merge_text(base, current, incoming).is_some()
+                || both_text(base, current, incoming, false).is_some()
+        }
+        _ => false,
+    }
+}
+
+fn review_choice(choices: &BTreeMap<String, MergeResolution>, id: &str) -> MergeResolution {
+    choices.get(id).cloned().unwrap_or(MergeResolution::Current)
+}
+
 fn unit(
     path: Vec<String>,
     b: Value,
@@ -60,13 +82,14 @@ fn unit(
     dependencies: Vec<String>,
     manual: bool,
 ) -> ReviewUnit {
+    let both = texts_support_both(&b, &c, &i);
     let mut value = conflict(
         &path,
         MergeConflictReason::SameFieldChanged,
         &b,
         &c,
         &i,
-        false,
+        both,
     );
     value.id = format!("review:{}", value.fingerprint);
     value.supports_manual = manual;
@@ -269,11 +292,12 @@ fn apply_review(
     choices: &BTreeMap<String, MergeResolution>,
 ) -> Result<Document, String> {
     let (mut output, analysis, targets) = review_documents(b, c, i)?;
-    if analysis
-        .conflicts
-        .iter()
-        .all(|unit| matches!(choices.get(&unit.value.id), Some(MergeResolution::Current)))
-    {
+    if analysis.conflicts.iter().all(|unit| {
+        matches!(
+            review_choice(choices, &unit.value.id),
+            MergeResolution::Current
+        )
+    }) {
         validate_resource_dependencies(c)?;
         return Ok(c.clone());
     }
@@ -292,10 +316,10 @@ fn apply_review(
             .collect::<BTreeMap<_, _>>();
         for (unit, target) in analysis.conflicts.iter().zip(&targets) {
             if matches!(target, Target::Conflict) {
-                let choice = choices
-                    .get(&unit.value.id)
-                    .ok_or_else(|| format!("{} is unresolved", unit.value.id))?;
-                structural_choices.insert(unit.value.id.clone(), choice.clone());
+                structural_choices.insert(
+                    unit.value.id.clone(),
+                    review_choice(choices, &unit.value.id),
+                );
             }
         }
         output = merge_doc(b, c, i, Some(&structural_choices))?.0;
@@ -304,10 +328,7 @@ fn apply_review(
         if matches!(target, Target::Conflict) {
             continue;
         }
-        match choices
-            .get(&unit.value.id)
-            .ok_or_else(|| format!("{} is unresolved", unit.value.id))?
-        {
+        match review_choice(choices, &unit.value.id) {
             MergeResolution::Incoming => {}
             MergeResolution::Current => match target {
                 Target::Document => output = c.clone(),
@@ -316,6 +337,35 @@ fn apply_review(
                 }
                 Target::Conflict => unreachable!(),
             },
+            MergeResolution::Both { order } => {
+                let Target::Paragraph(s, p) = target else {
+                    return Err(format!("{} does not support this selection", unit.value.id));
+                };
+                let inc_first = match order.as_str() {
+                    "incoming-first" => true,
+                    "current-first" => false,
+                    _ => return Err("invalid both order".into()),
+                };
+                let combined = merge_text(
+                    &b.sections[s].paragraphs[p].text,
+                    &c.sections[s].paragraphs[p].text,
+                    &i.sections[s].paragraphs[p].text,
+                )
+                .or_else(|| {
+                    both_text(
+                        &b.sections[s].paragraphs[p].text,
+                        &c.sections[s].paragraphs[p].text,
+                        &i.sections[s].paragraphs[p].text,
+                        inc_first,
+                    )
+                })
+                .ok_or("unsafe both text")?;
+                output.sections[s].paragraphs[p] = c.sections[s].paragraphs[p].clone();
+                let para = &mut output.sections[s].paragraphs[p];
+                para.text = combined;
+                para.line_segs.clear();
+                crate::document_core::queries::field_query::rebuild_char_offsets(para);
+            }
             MergeResolution::Manual { payload } if unit.value.supports_manual => {
                 let Target::Paragraph(s, p) = target else {
                     return Err("manual document replacement is unsupported".into());
@@ -451,7 +501,10 @@ mod tests {
         incoming.sections[0].paragraphs[0].text = "remote".into();
         let (_, analysis, _) = review_documents(&base, &current, &incoming).unwrap();
         assert!(analysis.conflicts.iter().any(|v| !v.automatic));
-        assert!(apply_review(&base, &current, &incoming, &BTreeMap::new()).is_err());
+        assert_eq!(
+            dh(&apply_review(&base, &current, &incoming, &BTreeMap::new()).unwrap()),
+            dh(&current)
+        );
         let choices = analysis
             .conflicts
             .iter()
@@ -460,7 +513,10 @@ mod tests {
         let rejected = apply_review(&base, &current, &incoming, &choices).unwrap();
         assert_eq!(dh(&rejected), dh(&current));
         current.sections[0].paragraphs[0].text = "new local".into();
-        assert!(apply_review(&base, &current, &incoming, &choices).is_err());
+        assert_eq!(
+            dh(&apply_review(&base, &current, &incoming, &choices).unwrap()),
+            dh(&current)
+        );
     }
 
     #[test]
@@ -540,5 +596,119 @@ mod tests {
         let output = apply_review(&base, &base, &incoming, &choices).unwrap();
         assert_eq!(output.sections[0].paragraphs[1].text, "직접 수정");
         assert_eq!(output.sections[0].paragraphs[2].text, "직접 수정");
+    }
+
+    fn form002_edited_bytes() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let bytes = std::fs::read("samples/hwpx/form-002.hwpx").expect("form-002.hwpx");
+        let mut current = crate::wasm_api::HwpDocument::from_bytes(&bytes).expect("current");
+        current
+            .insert_text_native(0, 0, 0, "UNSAVED_CLOUD_HANDOFF ")
+            .expect("handoff");
+        current
+            .insert_text_native(0, 0, 0, "LOCAL_DURING_CLOUD ")
+            .expect("local");
+        let current_bytes = current.export_hwpx_native().expect("export current");
+        let mut incoming = crate::wasm_api::HwpDocument::from_bytes(&bytes).expect("incoming");
+        incoming
+            .insert_text_native(0, 0, 0, "UNSAVED_CLOUD_HANDOFF ")
+            .expect("incoming handoff");
+        let length = incoming
+            .get_paragraph_length_native(0, 0)
+            .expect("paragraph length");
+        incoming
+            .insert_text_native(0, 0, length, " CLOUD_FINISHED")
+            .expect("cloud");
+        let incoming_bytes = incoming.export_hwpx_native().expect("export incoming");
+        (bytes, current_bytes, incoming_bytes)
+    }
+
+    #[test]
+    fn form002_review_materialize_roundtrips_inserted_text() {
+        let (base_bytes, current_bytes, incoming_bytes) = form002_edited_bytes();
+        let base = parse(&base_bytes, "base").expect("parse base");
+        let current = parse(&current_bytes, "current").expect("parse current");
+        let incoming = parse(&incoming_bytes, "incoming").expect("parse incoming");
+        validate_resource_dependencies(&base).expect("base resources");
+        validate_resource_dependencies(&current).expect("current resources");
+        validate_resource_dependencies(&incoming).expect("incoming resources");
+        let (_, analysis, _) =
+            review_documents(&base, &current, &incoming).expect("review analysis");
+        let reject = analysis
+            .conflicts
+            .iter()
+            .map(|unit| (unit.value.id.clone(), MergeResolution::Current))
+            .collect();
+        let output = apply_review(&base, &current, &incoming, &reject)
+            .unwrap_or_else(|error| panic!("all-current review materialize: {error}"));
+        let serialized =
+            serialize_hwpx(&output).unwrap_or_else(|error| panic!("serialize: {error}"));
+        let loaded = parse_regenerated_document(&serialized)
+            .unwrap_or_else(|error| panic!("reload: {error}"));
+        validate_resource_dependencies(&loaded)
+            .unwrap_or_else(|error| panic!("reloaded resources: {error}"));
+        assert_eq!(
+            counts(&loaded),
+            counts(&output),
+            "review result failed structural validation"
+        );
+        let accept = analysis
+            .conflicts
+            .iter()
+            .map(|unit| (unit.value.id.clone(), MergeResolution::Incoming))
+            .collect();
+        apply_review(&base, &current, &incoming, &accept)
+            .unwrap_or_else(|error| panic!("all-incoming review materialize: {error}"));
+    }
+
+    #[test]
+    fn review_paragraph_both_keeps_prefix_and_suffix() {
+        let base = fixture();
+        let mut current = base.clone();
+        current.sections[0].paragraphs[0].text = format!(
+            "LOCAL_DURING_CLOUD {}",
+            current.sections[0].paragraphs[0].text
+        );
+        let mut incoming = base.clone();
+        incoming.sections[0].paragraphs[0].text =
+            format!("{} CLOUD_FINISHED", incoming.sections[0].paragraphs[0].text);
+        let (_, analysis, _) = review_documents(&base, &current, &incoming).unwrap();
+        let paragraph = analysis
+            .conflicts
+            .iter()
+            .find(|unit| {
+                unit.position
+                    == Some(ReviewPosition {
+                        section: 0,
+                        paragraph: 0,
+                    })
+            })
+            .expect("paragraph 0 review unit");
+        assert!(paragraph.value.supports_both);
+        let mut choices = analysis
+            .conflicts
+            .iter()
+            .map(|unit| (unit.value.id.clone(), MergeResolution::Current))
+            .collect::<BTreeMap<_, _>>();
+        choices.insert(
+            paragraph.value.id.clone(),
+            MergeResolution::Both {
+                order: "current-first".into(),
+            },
+        );
+        let output = apply_review(&base, &current, &incoming, &choices).unwrap();
+        assert!(
+            output.sections[0].paragraphs[0]
+                .text
+                .contains("LOCAL_DURING_CLOUD"),
+            "{}",
+            output.sections[0].paragraphs[0].text
+        );
+        assert!(
+            output.sections[0].paragraphs[0]
+                .text
+                .contains("CLOUD_FINISHED"),
+            "{}",
+            output.sections[0].paragraphs[0].text
+        );
     }
 }
