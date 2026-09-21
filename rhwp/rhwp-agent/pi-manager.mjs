@@ -5,7 +5,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { RAU_DEFAULT_MODEL_ID, RAU_LOCKED_MODELS } from '../rau-credits/catalog.mjs';
 import { readUtf8FileBounded } from './bounded-file.mjs';
 import { createOpenRouter } from './openrouter.mjs';
 import {
@@ -65,20 +64,7 @@ const INSTALL_STDERR_LIMIT_BYTES = 64 * 1024;
 /** 진행 이벤트는 이 간격으로만 내보낸다 — 청크마다 WS 를 두드리지 않는다. */
 const PROGRESS_INTERVAL_MS = 150;
 export const PI_SECRET_ID = 'rhwp.pi.openrouter-api-key';
-export const RAU_SECRET_ID = 'rhwp.rau.openrouter-api-key';
 const OPENROUTER_SECRET_ID = PI_SECRET_ID;
-export { RAU_DEFAULT_MODEL_ID, RAU_LOCKED_MODELS };
-
-// Early Rau builds stored a proxy bearer here instead of an OpenRouter key.
-// The proxy route is retired, so carrying this token across an upgrade makes
-// the provider look configured while every request targets a dead endpoint.
-const RETIRED_RAU_PROXY_CREDENTIAL = /^rau_v1_[A-Za-z0-9_-]{43}$/;
-
-function isRetiredRauCredential(secretId, value) {
-  return secretId === RAU_SECRET_ID
-    && typeof value === 'string'
-    && RETIRED_RAU_PROXY_CREDENTIAL.test(value);
-}
 const INSTALL_PROGRESS = Object.freeze({
   preparing: 8,
   downloadStart: 12,
@@ -255,16 +241,6 @@ export function defaultPiRoot(env = process.env, platform = process.platform, ho
   return platformPath.join(env.XDG_DATA_HOME || platformPath.join(home, '.local', 'share'), 'rhwp', 'pi');
 }
 
-export function defaultRauRoot(env = process.env, platform = process.platform, home = os.homedir()) {
-  const platformPath = platform === 'win32' ? path.win32 : path.posix;
-  if (env.RHWP_RAU_DIR) return platformPath.resolve(env.RHWP_RAU_DIR);
-  if (platform === 'darwin') return platformPath.join(home, 'Library', 'Application Support', 'rhwp', 'rau');
-  if (platform === 'win32') {
-    return platformPath.join(env.APPDATA || platformPath.join(home, 'AppData', 'Roaming'), 'rhwp', 'rau');
-  }
-  return platformPath.join(env.XDG_DATA_HOME || platformPath.join(home, '.local', 'share'), 'rhwp', 'rau');
-}
-
 /**
  * pi CLI 설치본과 그 에이전트 홈(모델·키·스킬)을 관리한다.
  * 설치는 single-flight 이고, 루트가 없어도 status() 는 그냥 미설치로 답한다.
@@ -273,7 +249,6 @@ export function defaultRauRoot(env = process.env, platform = process.platform, h
  *           now?: () => number, openRouter?: ReturnType<typeof createOpenRouter>,
  *           npmCommand?: string, nodeCommand?: string, packageSpec?: string, platform?: string,
  *           baseEnv?: NodeJS.ProcessEnv, secretStore?: object, secretId?: string,
- *           lockedModels?: readonly object[] | null, skipLegacyKey?: boolean,
  *           tarballMaxBytes?: number, oauthExchangeTimeoutMs?: number,
  *           replaceFile?: typeof replaceFileAtomically,
  *           writeNodeHostFile?: typeof import('node:fs/promises').writeFile }} [deps]
@@ -292,8 +267,6 @@ export function createPiManager({
   baseEnv = process.env,
   secretStore = null,
   secretId = OPENROUTER_SECRET_ID,
-  lockedModels = null,
-  skipLegacyKey = false,
   tarballMaxBytes = PI_TARBALL_MAX_BYTES,
   oauthExchangeTimeoutMs = OAUTH_EXCHANGE_TIMEOUT_MS,
   replaceFile = replaceFileAtomically,
@@ -306,10 +279,7 @@ export function createPiManager({
     ? Math.min(oauthExchangeTimeoutMs, OAUTH_EXCHANGE_TIMEOUT_MS)
     : OAUTH_EXCHANGE_TIMEOUT_MS;
   const prefixDir = prefixDirOverride ?? path.join(rootDir, 'prefix');
-  const locked = Array.isArray(lockedModels) && lockedModels.length > 0
-    ? lockedModels.map((model) => ({ ...model, pricing: { ...model.pricing } }))
-    : null;
-  const modelCap = locked ? locked.length : MAX_MODELS;
+  const modelCap = MAX_MODELS;
   const agentDir = path.join(rootDir, 'agent');
   const sessionsDir = path.join(rootDir, 'sessions');
   const configPath = path.join(rootDir, CONFIG_FILE);
@@ -330,7 +300,7 @@ export function createPiManager({
     version: CONFIG_VERSION,
     installedVersion: null,
     keyTail: null,
-    /** 로그인한 계정 이메일 — Rau 체험 로그인이 알려 준다. */
+    /** Optional account email associated with the OpenRouter key. */
     account: null,
     models: [],
     defaultModelId: null,
@@ -346,7 +316,6 @@ export function createPiManager({
   let latestVersion = null;
   let updateRequired = false;
   let secretStoreError = null;
-  let retiredRauCredential = false;
   /** @type {Promise<PiStatus> | null} */
   let installInFlight = null;
   let installProcess = null;
@@ -466,7 +435,7 @@ export function createPiManager({
     } catch {
       // 설정 파일이 없거나 깨졌으면 빈 상태로 시작한다.
     }
-    const legacyKey = skipLegacyKey ? null : await readLegacyStoredKey();
+    const legacyKey = await readLegacyStoredKey();
     if (secretStore?.available) {
       try {
         const stored = await secretStore.get(secretId);
@@ -474,12 +443,7 @@ export function createPiManager({
           throw piError('OPENROUTER_KEY_TOO_LARGE', '저장된 OpenRouter 키가 허용된 길이를 넘었어요');
         }
         const storedKey = stored?.trim() || null;
-        retiredRauCredential = isRetiredRauCredential(secretId, storedKey);
-        apiKey = retiredRauCredential ? null : storedKey;
-        if (retiredRauCredential) {
-          config.keyTail = null;
-          config.account = null;
-        }
+        apiKey = storedKey;
         if (!apiKey && legacyKey) {
           await secretStore.set(secretId, legacyKey);
           const migrated = await secretStore.get(secretId);
@@ -493,12 +457,6 @@ export function createPiManager({
     } else {
       // Preserve access until the desktop vault can migrate it; new keys are never stored here.
       apiKey = legacyKey;
-    }
-    if (locked) {
-      config.models = locked.map((model) => normalizeStoredModel(model)).filter(Boolean);
-      config.defaultModelId = config.models.some((model) => model.id === config.defaultModelId)
-        ? config.defaultModelId
-        : (config.models.find((model) => model.id === RAU_DEFAULT_MODEL_ID)?.id ?? config.models[0]?.id ?? null);
     }
     installedVersion = await readInstalledVersion();
     config.setupComplete = Boolean(apiKey) && config.models.length > 0;
@@ -555,7 +513,6 @@ export function createPiManager({
   function snapshotSettingsState() {
     return {
       apiKey,
-      retiredRauCredential,
       config: structuredClone(config),
       secretStoreError,
       vaultSnapshot: /** @type {{ present: boolean, value: unknown } | null} */ (null),
@@ -577,7 +534,6 @@ export function createPiManager({
     clearClientCache = false,
   } = {}) {
     apiKey = previous.apiKey;
-    retiredRauCredential = previous.retiredRauCredential;
     config = structuredClone(previous.config);
     secretStoreError = previous.secretStoreError;
     const rollbackErrors = [];
@@ -870,9 +826,6 @@ export function createPiManager({
       latestVersion,
       updateRequired,
       error: lastError ?? secretStoreError,
-      ...(retiredRauCredential && !lastError && !secretStoreError
-        ? { error: 'Rau 연결을 다시 완료해 주세요.' }
-        : {}),
     };
   }
 
@@ -885,8 +838,7 @@ export function createPiManager({
       enableInstallTelemetry: false,
       extensions: [EXTENSION_PATH, SUBAGENT_EXTENSION_PATH],
     }, null, 2)}\n`);
-    // Rebuild the provider file on every startup. This repairs installs that
-    // still point at Rau's retired hosted proxy before any chat can spawn.
+    // Rebuild the provider file on every startup so settings stay in sync.
     await writeModelsJson();
     try {
       await fs.cp(SKILLS_SOURCE_DIR, skillsDir, { recursive: true, force: true });
@@ -1062,7 +1014,6 @@ export function createPiManager({
      *
      * @param {string} key
      * @param {{ account?: string|null, signal?: AbortSignal, onCommitted?: () => void }} [opts]
-     * 로그인한 계정 이메일과 취소 신호 (Rau 체험 로그인).
      */
     async setApiKey(key, { account = null, signal, onCommitted } = {}) {
       if (typeof key !== 'string') {
@@ -1101,16 +1052,10 @@ export function createPiManager({
           throwIfAuthCancelled(signal);
           commitStarted = true;
           apiKey = trimmed;
-          retiredRauCredential = false;
           secretStoreError = null;
           config.keyTail = keyTailOf(trimmed);
           // 계정이 함께 오면 갱신한다. 없으면(API 키 직접 입력) 이전 값을 지운다.
           config.account = storedAccount(account);
-          if (locked && config.models.length === 0) {
-            config.models = locked.map((model) => normalizeStoredModel(model)).filter(Boolean);
-            config.defaultModelId = config.models.find((model) => model.id === RAU_DEFAULT_MODEL_ID)?.id
-              ?? config.models[0]?.id ?? null;
-          }
           config.setupComplete = config.models.length > 0;
           throwIfAuthCancelled(signal);
           await writeModelsJson();
@@ -1236,7 +1181,7 @@ export function createPiManager({
       }
     },
 
-    /** 로컬 키만 지운다. 호스티드 $5 키는 서버에 남는다. */
+    /** Clear the local OpenRouter key. */
     async clearApiKey() {
       await load();
       return serialized(async () => {
@@ -1260,7 +1205,6 @@ export function createPiManager({
           }
           stateMutated = true;
           apiKey = null;
-          retiredRauCredential = false;
           config.keyTail = null;
           config.account = null;
           config.setupComplete = false;
@@ -1314,9 +1258,6 @@ export function createPiManager({
       await load();
       const requested = Array.isArray(models) ? models : [];
       if (requested.length === 0) throw piError('PI_MODELS_EMPTY', '모델을 하나 이상 고르세요');
-      if (locked) {
-        throw piError('PI_MODELS_LOCKED', 'Rau 모델은 앱이 정해 둔 목록만 씁니다');
-      }
       if (requested.length > MAX_MODELS) {
         throw piError('PI_TOO_MANY_MODELS', `모델은 최대 ${MAX_MODELS}개까지 고를 수 있어요`);
       }

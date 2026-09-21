@@ -30,21 +30,9 @@ export function redactDiagnosticText(value, secrets = []) {
 }
 
 /**
- * OpenCode model identifiers are provider-qualified, but the model portion is
- * provider-defined. Keep the transport boundary bounded and single-line so
- * future catalog forms are not rejected by an unnecessarily narrow parser.
- */
-export function isOpenCodeModelId(value) {
-  if (typeof value !== 'string' || value.length > 256) return false;
-  if (/\s|[\u0000-\u001f\u007f]/u.test(value)) return false;
-  const separator = value.indexOf('/');
-  return separator > 0 && separator < value.length - 1;
-}
-
-/**
  * Shared helpers for agent CLI backends.
  *
- * @typedef {'claude' | 'codex' | 'pi' | 'grok' | 'cursor' | 'opencode' | 'rau'} AgentName
+ * @typedef {'claude' | 'codex' | 'pi'} AgentName
  *
  * parentTaskId: 서브에이전트/워크플로가 낸 이벤트를 스폰한 task 카드에 귀속시키는
  * 선택 필드. 하니스가 CLI 의 parent 식별자(claude: parent_tool_use_id)를 taskId 로
@@ -109,19 +97,11 @@ export function isOpenCodeModelId(value) {
  * @property {string} [codexAuthPath]
  * @property {string} [codexBin]
  * @property {string} [claudeBin]
- * @property {string} [grokBin]
- * @property {string} [grokHome]
- * @property {string} [grokAuthPath]
- * @property {string} [cursorBin]
- * @property {string} [cursorSourceDir]
- * @property {string} [openCodeBin]
- * @property {string|(() => string|null|undefined)} [openCodeAuthPath]
  * @property {string} [piBin]
  * @property {string} [piRoot]
  * @property {string} [openRouterApiKey]
  * @property {boolean} [reasoning]
  * @property {Record<string, string>} [providerEnv]
- * @property {() => Record<string, string>} [openCodeProviderEnv]
  * @property {string} [model]
  * @property {string} [effort]
  * @property {'standard'|'fast'} [serviceTier]
@@ -348,8 +328,7 @@ function editLifecycleFor(profile) {
 }
 
 /**
- * rhwp 전용 서브에이전트 정의. claude 는 --agents 로, grok 도 동일한 JSON 을
- * --agents 로 받는다 (grok 1.0.5 에서 claude 호환 스키마 검증됨). tools 는
+ * rhwp 전용 서브에이전트 정의. Claude는 --agents로, Pi는 확장 도구로 받는다. tools 는
  * 상속(미지정) — 파일시스템 경계는 샌드박스가, 문서 편집 경계는 studio
  * 캐퍼빌리티 게이트와 이 프롬프트가 진다.
  */
