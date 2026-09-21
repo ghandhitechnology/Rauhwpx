@@ -259,6 +259,7 @@ impl DocumentCore {
         para_idx: usize,
         char_offset: usize,
     ) -> Result<String, HwpError> {
+        let _font_scope = self.resolved_shaping_font_scope();
         use crate::renderer::layout::{
             compute_char_positions, estimate_text_width, resolved_to_text_style,
         };
@@ -1358,6 +1359,7 @@ impl DocumentCore {
 
     /// 페이지 좌표에서 문서 위치 찾기 (네이티브)
     pub fn hit_test_native(&self, page_num: u32, x: f64, y: f64) -> Result<String, HwpError> {
+        let _font_scope = self.resolved_shaping_font_scope();
         use crate::renderer::layout::{compute_char_positions, CellContext, CellPathEntry};
         use crate::renderer::render_tree::{RenderNode, RenderNodeType};
 
@@ -2572,6 +2574,7 @@ impl DocumentCore {
         cell_para_idx: usize,
         char_offset: usize,
     ) -> Result<String, HwpError> {
+        let _font_scope = self.resolved_shaping_font_scope();
         use crate::renderer::layout::compute_char_positions;
         use crate::renderer::render_tree::{RenderNode, RenderNodeType};
 
@@ -2941,6 +2944,7 @@ impl DocumentCore {
         char_offset: usize,
         hint_page: Option<u32>,
     ) -> Result<String, HwpError> {
+        let _font_scope = self.resolved_shaping_font_scope();
         use crate::renderer::layout::{compute_char_positions, CellContext, CellPathEntry};
         use crate::renderer::render_tree::{RenderNode, RenderNodeType};
 
@@ -3274,6 +3278,34 @@ impl DocumentCore {
         ))
     }
 
+    /// Resolve a logical table coordinate to an editable model position. This deliberately
+    /// reads the rebuilt model grid rather than render fragments, which may repeat across pages.
+    pub fn get_table_cell_target_by_path_native(
+        &self,
+        section_idx: usize,
+        parent_para_idx: usize,
+        path_json: &str,
+        row: u16,
+        col: u16,
+        preferred_para_idx: usize,
+    ) -> Result<String, HwpError> {
+        let path = Self::parse_cell_path(path_json)?;
+        let table = self.resolve_table_by_path(section_idx, parent_para_idx, &path)?;
+        let cell_idx = table
+            .cell_index_at(row, col)
+            .ok_or_else(|| HwpError::RenderError(format!("셀 ({row},{col})을 찾을 수 없습니다")))?;
+        let cell = &table.cells[cell_idx];
+        let cell_para_idx = preferred_para_idx.min(cell.paragraphs.len().saturating_sub(1));
+        let char_count = cell
+            .paragraphs
+            .get(cell_para_idx)
+            .map(navigable_text_len)
+            .unwrap_or(0);
+        Ok(format!(
+            "{{\"cellIndex\":{cell_idx},\"cellParaIndex\":{cell_para_idx},\"charCount\":{char_count}}}"
+        ))
+    }
+
     /// 경로 기반 표 셀 바운딩박스 조회 (네이티브).
     pub(crate) fn get_table_cell_bboxes_by_path_native(
         &self,
@@ -3391,6 +3423,7 @@ impl DocumentCore {
         delta: i32,
         preferred_x: f64,
     ) -> Result<String, HwpError> {
+        let _font_scope = self.resolved_shaping_font_scope();
         use crate::renderer::layout::compute_char_positions;
 
         let path = Self::parse_cell_path(path_json)?;
@@ -3726,6 +3759,7 @@ impl DocumentCore {
         char_offset: usize,
         preview_page_hint: i32,
     ) -> Result<String, HwpError> {
+        let _font_scope = self.resolved_shaping_font_scope();
         use crate::renderer::layout::compute_char_positions;
         use crate::renderer::render_tree::{RenderNode, RenderNodeType};
 
@@ -4064,6 +4098,7 @@ impl DocumentCore {
         x: f64,
         y: f64,
     ) -> Result<String, HwpError> {
+        let _font_scope = self.resolved_shaping_font_scope();
         use crate::renderer::layout::compute_char_positions;
         use crate::renderer::render_tree::{RenderNode, RenderNodeType};
 
@@ -4346,6 +4381,7 @@ impl DocumentCore {
         end_hf_para_idx: usize,
         end_char_offset: usize,
     ) -> Result<String, HwpError> {
+        let _font_scope = self.resolved_shaping_font_scope();
         use crate::renderer::layout::compute_char_positions;
         use crate::renderer::render_tree::{RenderNode, RenderNodeType};
 
@@ -4602,6 +4638,7 @@ impl DocumentCore {
         x: f64,
         y: f64,
     ) -> Result<String, HwpError> {
+        let _font_scope = self.resolved_shaping_font_scope();
         use crate::renderer::layout::compute_char_positions;
         use crate::renderer::render_tree::{RenderNode, RenderNodeType};
 
@@ -4832,6 +4869,7 @@ impl DocumentCore {
         end_fn_para_idx: usize,
         end_char_offset: usize,
     ) -> Result<String, HwpError> {
+        let _font_scope = self.resolved_shaping_font_scope();
         use crate::renderer::layout::compute_char_positions;
         use crate::renderer::render_tree::{RenderNode, RenderNodeType};
 
@@ -4970,6 +5008,7 @@ impl DocumentCore {
         para_idx: usize,
         char_offset: usize,
     ) -> Result<Option<String>, HwpError> {
+        let _font_scope = self.resolved_shaping_font_scope();
         use crate::renderer::layout::compute_char_positions;
         use crate::renderer::render_tree::{RenderNode, RenderNodeType};
 
@@ -5247,6 +5286,7 @@ impl DocumentCore {
         fn_para_idx: usize,
         char_offset: usize,
     ) -> Result<String, HwpError> {
+        let _font_scope = self.resolved_shaping_font_scope();
         use crate::renderer::layout::compute_char_positions;
         use crate::renderer::render_tree::{RenderNode, RenderNodeType};
 

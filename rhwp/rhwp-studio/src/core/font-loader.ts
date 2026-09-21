@@ -39,6 +39,13 @@ export interface CanvasKitFontPlan {
   unavailableFonts: string[];
 }
 
+export interface RegisteredFontFaceIdentity {
+  requestedFamily: string;
+  loadedFamily: string;
+  source: string;
+  substituted: boolean;
+}
+
 // 함초롬체 CDN (눈누 jsdelivr — 비상업적 사용 허용, 한컴 라이선스)
 const CDN_HAMCHOB_R = 'https://cdn.jsdelivr.net/gh/projectnoonnu/noonfonts_2104@1.0/HANBatang.woff';
 const CDN_HAMCHOB_B = 'https://cdn.jsdelivr.net/gh/projectnoonnu/noonfonts_2104@1.0/HANBatangB.woff';
@@ -147,6 +154,40 @@ const FONT_LIST: FontEntry[] = [
 
 /** @font-face에 등록된 폰트 이름 Set */
 export const REGISTERED_FONTS = new Set(FONT_LIST.map(f => f.name));
+
+const FONT_FILE_FACE_NAMES = new Map<string, string>([
+  [CDN_HAMCHOB_R, '함초롬바탕'],
+  [CDN_HAMCHOB_B, '함초롬바탕 Bold'],
+  [CDN_HAMCHOD_R, '함초롬돋움'],
+  ['fonts/NotoSansKR-Bold.woff2', 'Noto Sans KR Bold'],
+  ['fonts/NotoSansKR-Regular.woff2', 'Noto Sans KR'],
+  ['fonts/NotoSansKR-ExtraLight.woff2', 'Noto Sans KR ExtraLight'],
+  ['fonts/NotoSerifKR-Bold.woff2', 'Noto Serif KR Bold'],
+  ['fonts/NotoSerifKR-Regular.woff2', 'Noto Serif KR'],
+  ['fonts/Pretendard-Regular.woff2', 'Pretendard'],
+  ['fonts/D2Coding-Regular.woff2', 'D2Coding'],
+  ['fonts/NanumGothic-Regular.woff2', '나눔고딕'],
+  ['fonts/NanumMyeongjo-Regular.woff2', '나눔명조'],
+  ['fonts/NanumGothicCoding-Regular.woff2', '나눔고딕코딩'],
+  ['fonts/GowunBatang-Regular.woff2', '고운바탕'],
+  ['fonts/GowunDodum-Regular.woff2', '고운돋움'],
+]);
+
+/** The physical web-font face behind a registered CSS family alias. */
+export function resolveRegisteredFontFaceIdentity(
+  requestedFamily: string,
+): RegisteredFontFaceIdentity | null {
+  const normalized = normalizeFontFamily(requestedFamily);
+  const entry = FONT_LIST.find(font => normalizeFontFamily(font.name) === normalized);
+  if (!entry) return null;
+  const loadedFamily = FONT_FILE_FACE_NAMES.get(entry.file) ?? entry.name;
+  return {
+    requestedFamily: entry.name,
+    loadedFamily,
+    source: entry.file,
+    substituted: normalizeFontFamily(loadedFamily) !== normalizeFontFamily(entry.name),
+  };
+}
 
 /** 초기 렌더링에 필수인 폰트 (대부분의 HWP 문서 기본 서체) */
 const CRITICAL_FONTS = new Set(['함초롬바탕', '함초롬돋움']);

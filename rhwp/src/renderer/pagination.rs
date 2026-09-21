@@ -490,9 +490,9 @@ fn projected_inline_control_line_seg_index(para: &Paragraph, ctrl_idx: usize) ->
 }
 
 fn tac_object_owning_line_seg_index(para: &Paragraph, ctrl_idx: usize) -> Option<usize> {
-    const MIN_OBJECT_LINE_HU: i32 =
-        (crate::renderer::MIN_TAC_OBJECT_HEIGHT_PX * crate::renderer::HWPUNIT_PER_INCH / 96.0)
-            as i32;
+    const MIN_OBJECT_LINE_HU: i32 = (crate::renderer::MIN_TAC_OBJECT_HEIGHT_PX
+        * crate::renderer::HWPUNIT_PER_INCH
+        / 96.0) as i32;
 
     if para.line_segs.len() < 2 {
         return None;

@@ -1,4 +1,4 @@
-import { REGISTERED_FONTS } from './font-loader.ts';
+import { REGISTERED_FONTS, resolveRegisteredFontFaceIdentity } from './font-loader.ts';
 import { resolveFont } from './font-substitution.ts';
 import {
   getDetectedLocalFonts,
@@ -21,6 +21,7 @@ export interface DocumentFontStatusItem {
   status: DocumentFontAvailability;
   source: DocumentFontSource;
   substituteFont: string | null;
+  loadedFace: string | null;
 }
 
 export interface DocumentFontStatusSummary {
@@ -104,12 +105,28 @@ export function analyzeDocumentFonts(
     const localRecord = options.localFonts === undefined ? resolveLocalFont(fontName) : null;
     if (localSet.has(fontName) || localRecord) {
       summary.available++;
-      return { fontName, status: 'available', source: 'local', substituteFont: null };
+      return { fontName, status: 'available', source: 'local', substituteFont: null, loadedFace: fontName };
     }
 
-    if (GENERIC_FONTS.has(fontName) || REGISTERED_FONTS.has(fontName)) {
+    if (GENERIC_FONTS.has(fontName)) {
       summary.available++;
-      return { fontName, status: 'available', source: GENERIC_FONTS.has(fontName) ? 'generic' : 'web', substituteFont: null };
+      return { fontName, status: 'available', source: 'generic', substituteFont: null, loadedFace: fontName };
+    }
+
+    const registeredFace = resolveRegisteredFontFaceIdentity(fontName);
+    if (registeredFace) {
+      if (registeredFace.substituted) {
+        summary.webSubstitute++;
+        return {
+          fontName,
+          status: 'web-substitute',
+          source: 'web',
+          substituteFont: registeredFace.loadedFamily,
+          loadedFace: registeredFace.loadedFamily,
+        };
+      }
+      summary.available++;
+      return { fontName, status: 'available', source: 'web', substituteFont: null, loadedFace: registeredFace.loadedFamily };
     }
 
     const substituteFont = resolveWebSubstitute(fontName);
@@ -124,16 +141,25 @@ export function analyzeDocumentFonts(
         status: 'needs-local-check',
         source: 'unknown',
         substituteFont,
+        loadedFace: substituteFont
+          ? resolveRegisteredFontFaceIdentity(substituteFont)?.loadedFamily ?? substituteFont
+          : null,
       };
     }
 
     if (substituteFont) {
       summary.webSubstitute++;
-      return { fontName, status: 'web-substitute', source: 'web', substituteFont };
+      return {
+        fontName,
+        status: 'web-substitute',
+        source: 'web',
+        substituteFont,
+        loadedFace: resolveRegisteredFontFaceIdentity(substituteFont)?.loadedFamily ?? substituteFont,
+      };
     }
 
     summary.missing++;
-    return { fontName, status: 'missing', source: 'unknown', substituteFont: null };
+    return { fontName, status: 'missing', source: 'unknown', substituteFont: null, loadedFace: null };
   });
 
   const shouldPromptLocalAccess = localSupported && summary.needsLocalCheck > 0;

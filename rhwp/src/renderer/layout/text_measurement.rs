@@ -7,6 +7,138 @@ use crate::model::provenance::FontMetricsPolicy;
 use crate::model::style::UnderlineType;
 use unicode_segmentation::UnicodeSegmentation;
 
+#[derive(Clone)]
+pub(crate) struct ResolvedShapingFont {
+    pub family: String,
+    pub bytes: std::sync::Arc<[u8]>,
+    pub face_index: u32,
+}
+
+thread_local! {
+    static ACTIVE_SHAPING_FONTS: std::cell::RefCell<Vec<ResolvedShapingFont>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+}
+
+pub(crate) struct ResolvedShapingFontScope(Vec<ResolvedShapingFont>);
+
+impl Drop for ResolvedShapingFontScope {
+    fn drop(&mut self) {
+        ACTIVE_SHAPING_FONTS.with(|active| {
+            active.replace(std::mem::take(&mut self.0));
+        });
+    }
+}
+
+pub(crate) fn enter_resolved_shaping_fonts(
+    fonts: Vec<ResolvedShapingFont>,
+) -> ResolvedShapingFontScope {
+    let previous = ACTIVE_SHAPING_FONTS.with(|active| active.replace(fonts));
+    ResolvedShapingFontScope(previous)
+}
+
+pub(crate) fn with_resolved_shaping_fonts<T>(
+    fonts: Vec<ResolvedShapingFont>,
+    action: impl FnOnce() -> T,
+) -> T {
+    let _scope = enter_resolved_shaping_fonts(fonts);
+    action()
+}
+
+fn shaped_char_positions(text: &str, style: &TextStyle) -> Option<Vec<f64>> {
+    if text.is_empty()
+        || style.font_metrics_policy == FontMetricsPolicy::HcrDeclared
+        || font_family_has_metrics(&style.font_family, style.bold, style.italic)
+        || text.contains('\t')
+        || text
+            .chars()
+            .any(|ch| matches!(ch, '\u{FFFC}' | '\u{F081C}'))
+    {
+        return None;
+    }
+    ACTIVE_SHAPING_FONTS.with(|active| {
+        let active = active.borrow();
+        let font = active
+            .iter()
+            .find(|font| font.family.eq_ignore_ascii_case(&style.font_family))?;
+        let face = rustybuzz::Face::from_slice(&font.bytes, font.face_index)?;
+        let units_per_em = f64::from(face.units_per_em());
+        if units_per_em <= 0.0 {
+            return None;
+        }
+        let mut buffer = rustybuzz::UnicodeBuffer::new();
+        buffer.push_str(text);
+        buffer.guess_segment_properties();
+        let features = if style.kerning {
+            Vec::new()
+        } else {
+            vec!["kern=0".parse().ok()?]
+        };
+        let glyphs = rustybuzz::shape(&face, &features, buffer);
+        if glyphs.is_empty() || glyphs.glyph_infos().iter().any(|glyph| glyph.glyph_id == 0) {
+            return None;
+        }
+
+        let scale = style.font_size.max(0.0) / units_per_em;
+        let mut cluster_advances = std::collections::BTreeMap::<usize, f64>::new();
+        for (info, position) in glyphs.glyph_infos().iter().zip(glyphs.glyph_positions()) {
+            *cluster_advances.entry(info.cluster as usize).or_default() +=
+                f64::from(position.x_advance) * scale * style.ratio.max(0.0);
+        }
+        let cluster_starts = cluster_advances.keys().copied().collect::<Vec<_>>();
+        let char_boundaries = text
+            .char_indices()
+            .map(|(byte, _)| byte)
+            .chain(std::iter::once(text.len()))
+            .collect::<Vec<_>>();
+        let mut positions = vec![0.0; char_boundaries.len()];
+        let mut x = 0.0;
+        for (cluster_index, byte_start) in cluster_starts.iter().copied().enumerate() {
+            let byte_end = cluster_starts
+                .get(cluster_index + 1)
+                .copied()
+                .unwrap_or(text.len());
+            let boundary_indices = char_boundaries
+                .iter()
+                .enumerate()
+                .filter_map(|(index, byte)| {
+                    ((*byte > byte_start) && (*byte <= byte_end)).then_some(index)
+                })
+                .collect::<Vec<_>>();
+            if boundary_indices.is_empty() {
+                continue;
+            }
+            let cluster_text = &text[byte_start..byte_end];
+            let mut advance = cluster_advances[&byte_start];
+            advance += glyph_letter_spacing(style.letter_spacing, advance, style.font_size)
+                + style.extra_char_spacing;
+            if cluster_text == " " {
+                advance += style.extra_word_spacing;
+            }
+            let mut relative_end = 0usize;
+            let grapheme_ends = cluster_text
+                .graphemes(true)
+                .map(|grapheme| {
+                    relative_end += grapheme.len();
+                    relative_end
+                })
+                .collect::<Vec<_>>();
+            let grapheme_count = grapheme_ends.len().max(1) as f64;
+            for boundary_index in boundary_indices {
+                let relative_byte = char_boundaries[boundary_index] - byte_start;
+                let completed = grapheme_ends
+                    .iter()
+                    .take_while(|end| **end <= relative_byte)
+                    .count();
+                positions[boundary_index] = x + advance * (completed as f64 / grapheme_count);
+            }
+            x += advance;
+        }
+        positions.last_mut().map(|last| *last = x);
+        Some(positions)
+    })
+}
+
 // ── TextMeasurer trait ──────────────────────────────────────────────
 
 /// 텍스트 폭 측정 추상화 트레이트
@@ -300,7 +432,7 @@ pub fn extract_tab_leaders_with_extended(
 /// WASM의 동일한 줄바꿈을 우선한다.
 /// [#2132] 공용 글자-워크 — Embedded/Wasm measurer 의 compute_char_positions 중복 소거.
 /// 폭 산출원(char_px_raw)과 인라인 탭 divergent 경로(inline_tab_x)만 measurer 별 훅.
-/// 나머지(특수문자, dash leader, 자간 클램프, 공백, 커스텀/기본 탭)는 1벌.
+/// 나머지(특수문자, 자간 클램프, 공백, 커스텀/기본 탭)는 1벌.
 fn compute_char_positions_walk(
     text: &str,
     style: &TextStyle,
@@ -332,22 +464,12 @@ fn compute_char_positions_walk(
         if c == '\u{F081C}' {
             return 0.0;
         }
-        let char_px_raw = char_px_raw(i, c, &chars, &cluster_len);
-        // Task #352: dash leader 좁은 base 0.3 em + extra_dash_advance.
-        let is_leader = is_dash_leader_run(&chars, i);
-        let char_px = if is_leader {
-            char_px_raw.min(font_size * 0.3)
-        } else {
-            char_px_raw
-        };
+        let char_px = char_px_raw(i, c, &chars, &cluster_len);
         let mut w = char_px * ratio
             + glyph_letter_spacing(style.letter_spacing, char_px * ratio, font_size)
             + style.extra_char_spacing;
         if c == ' ' {
             w += style.extra_word_spacing;
-        }
-        if is_leader {
-            w += style.extra_dash_advance;
         }
         // 음수 자간(letter_spacing + extra_char_spacing < 0) 시
         // per-char 최소 advance 클램프로 narrow glyph 역진 방지.
@@ -516,24 +638,12 @@ impl TextMeasurer for EmbeddedTextMeasurer {
             } else {
                 font_size * 0.5
             };
-            // Task #352: 3+ 연속 dash 시퀀스(빈칸/leader) 는 좁은 폭으로 재산출.
-            // HY신명조 등 한글 폰트 메트릭의 ASCII '-' 폭(0.83 em) 부풀림 회피.
-            // 좁은 base 0.3 em 위에 paragraph_layout 가 라인 슬랙을 분배한
-            // extra_dash_advance 를 추가하여 PDF 의 elastic leader 동작 모방.
-            let is_leader = is_dash_leader_run(&chars, i);
-            let base_w = if is_leader {
-                base_w_raw.min(font_size * 0.3)
-            } else {
-                base_w_raw
-            };
+            let base_w = base_w_raw;
             let mut w = base_w * ratio
                 + glyph_letter_spacing(style.letter_spacing, base_w * ratio, font_size)
                 + style.extra_char_spacing;
             if c == ' ' {
                 w += style.extra_word_spacing;
-            }
-            if is_leader {
-                w += style.extra_dash_advance;
             }
             // 음수 자간(letter_spacing + extra_char_spacing < 0) 시
             // per-char 최소 advance = base*ratio*0.5 로 클램프하여 narrow
@@ -1122,21 +1232,12 @@ impl TextMeasurer for WasmTextMeasurer {
                     style.font_metrics_policy,
                 )
             };
-            // Task #352: dash leader 좁은 base 0.3 em + extra_dash_advance.
-            let is_leader = is_dash_leader_run(&chars, i);
-            let char_px = if is_leader {
-                char_px_raw.min(font_size * 0.3)
-            } else {
-                char_px_raw
-            };
+            let char_px = char_px_raw;
             let mut w = char_px * ratio
                 + glyph_letter_spacing(style.letter_spacing, char_px * ratio, font_size)
                 + style.extra_char_spacing;
             if c == ' ' {
                 w += style.extra_word_spacing;
-            }
-            if is_leader {
-                w += style.extra_dash_advance;
             }
             // 음수 자간(letter_spacing + extra_char_spacing < 0) 시
             // per-char 최소 advance 클램프로 narrow glyph 역진 방지.
@@ -1657,6 +1758,28 @@ fn measure_char_width_embedded(
     )
 }
 
+pub(super) fn measure_known_font_run_width(
+    font_family: &str,
+    italic: bool,
+    text: &str,
+    font_size: f64,
+) -> Option<f64> {
+    let shaped_style = TextStyle {
+        font_family: font_family.to_string(),
+        font_size,
+        italic,
+        kerning: true,
+        ..Default::default()
+    };
+    if let Some(positions) = shaped_char_positions(text, &shaped_style) {
+        return positions.last().copied();
+    }
+    text.chars().try_fold(0.0, |width, ch| {
+        measure_char_width_embedded(font_family, false, italic, ch, font_size)
+            .map(|advance| width + advance)
+    })
+}
+
 fn measure_char_width_with_policy(
     font_family: &str,
     bold: bool,
@@ -1767,6 +1890,9 @@ fn measure_char_width_with_policy(
 /// WASM: WasmTextMeasurer (JS Canvas + HWP 양자화)
 /// 네이티브: EmbeddedTextMeasurer (내장 메트릭 + 휴리스틱)
 pub(crate) fn estimate_text_width(text: &str, style: &TextStyle) -> f64 {
+    if let Some(positions) = shaped_char_positions(text, style) {
+        return positions.last().copied().unwrap_or(0.0).round();
+    }
     default_measurer().estimate_text_width(text, style)
 }
 
@@ -1776,6 +1902,9 @@ pub(crate) fn estimate_text_width(text: &str, style: &TextStyle) -> f64 {
 /// 한컴은 HWPUNIT 정수로 폭을 누적하므로, round 없이 px를 합산한 뒤
 /// 줄바꿈 비교 시점에서 available_width와 비교하는 것이 더 정확하다.
 pub(crate) fn estimate_text_width_unrounded(text: &str, style: &TextStyle) -> f64 {
+    if let Some(positions) = shaped_char_positions(text, style) {
+        return positions.last().copied().unwrap_or(0.0);
+    }
     let (font_size, ratio, tab_w) = style_params(style);
     let chars: Vec<char> = text.chars().collect();
     let cluster_len = build_cluster_len(&chars);
@@ -1818,21 +1947,12 @@ pub(crate) fn estimate_text_width_unrounded(text: &str, style: &TextStyle) -> f6
         } else {
             font_size * 0.5
         };
-        // Task #352: 3+ 연속 dash leader 좁은 base 0.3 em + 라인 슬랙 분배.
-        let is_leader = is_dash_leader_run(&chars, i);
-        let base_w = if is_leader {
-            base_w_raw.min(font_size * 0.3)
-        } else {
-            base_w_raw
-        };
+        let base_w = base_w_raw;
         let mut w = base_w * ratio
             + glyph_letter_spacing(style.letter_spacing, base_w * ratio, font_size)
             + style.extra_char_spacing;
         if c == ' ' {
             w += style.extra_word_spacing;
-        }
-        if is_leader {
-            w += style.extra_dash_advance;
         }
         // 음수 자간(letter_spacing + extra_char_spacing < 0) 시
         // per-char 최소 advance 클램프로 narrow glyph 역진 방지.
@@ -1865,7 +1985,23 @@ pub(crate) fn estimate_text_width_unrounded(text: &str, style: &TextStyle) -> f6
 /// N글자 → N+1개 경계값을 반환한다 (0번째는 0.0, N번째는 전체 폭).
 /// run 내부 상대 좌표이며, 절대 좌표는 run.bbox.x + charX[i]로 계산한다.
 pub(crate) fn compute_char_positions(text: &str, style: &TextStyle) -> Vec<f64> {
+    if let Some(positions) = shaped_char_positions(text, style) {
+        return positions;
+    }
     default_measurer().compute_char_positions(text, style)
+}
+
+/// Glyph ink fitting advances, excluding placement-only spacing.
+///
+/// Tracking and justification move the next glyph; they must not widen the
+/// current glyph when Canvas/SVG fit browser text to the calibrated advance.
+pub(crate) fn compute_glyph_positions(text: &str, style: &TextStyle) -> Vec<f64> {
+    let mut glyph_style = style.clone();
+    glyph_style.letter_spacing = 0.0;
+    glyph_style.extra_char_spacing = 0.0;
+    glyph_style.extra_word_spacing = 0.0;
+    glyph_style.extra_dash_advance = 0.0;
+    compute_char_positions(text, &glyph_style)
 }
 
 // ── 문자 분류 함수 ──────────────────────────────────────────────────
@@ -1928,40 +2064,6 @@ fn is_narrow_paren_for_font(font_family: &str, c: char) -> bool {
 /// 본문 조판에서는 법령명 낫표 뒤에 전각 공백처럼 보이는 간격이 생기지 않는다.
 pub(crate) fn is_halfwidth_cjk_quote(c: char) -> bool {
     matches!(c, '\u{300C}' | '\u{300D}')
-}
-
-/// 3 개 이상 연속하는 dash leader 시퀀스의 일부 여부 (Task #352).
-///
-/// 한컴 문서의 빈칸/구분선은 ASCII '-' 반복으로 구성되며, PDF 도 좁은
-/// advance 로 렌더된다. 그러나 일부 한글 폰트(HY신명조 등) 의 메트릭 DB 가
-/// '-' 글리프 폭을 0.83 em 으로 저장하고 있어 반복 시 자연 폭이
-/// 사용 가능 폭을 크게 초과한다. 본 헬퍼로 leader 시퀀스를 식별해
-/// 좁은 advance(`font_size * 0.3`) 로 재산출한다.
-///
-/// 자연 텍스트의 단발 dash(예: "stimulus-driven", "32.-") 는 ≥3 조건을
-/// 만족하지 않으므로 영향 없음.
-fn is_dash_leader_run(chars: &[char], i: usize) -> bool {
-    if chars[i] != '-' {
-        return false;
-    }
-    let mut count = 1usize;
-    let mut j = i;
-    while j > 0 && chars[j - 1] == '-' {
-        count += 1;
-        j -= 1;
-        if count >= 3 {
-            return true;
-        }
-    }
-    let mut j = i;
-    while j + 1 < chars.len() && chars[j + 1] == '-' {
-        count += 1;
-        j += 1;
-        if count >= 3 {
-            return true;
-        }
-    }
-    false
 }
 
 /// 한컴이 전각으로 처리하는 기호 (메트릭 폴백 시 font_size 사용)
@@ -2489,6 +2591,48 @@ mod tests {
     }
 
     #[test]
+    fn glyph_positions_exclude_tracking_and_justification_spacing() {
+        let base = TextStyle {
+            font_family: "Arial".to_string(),
+            font_size: 16.0,
+            ratio: 0.8,
+            ..Default::default()
+        };
+        let spaced = TextStyle {
+            letter_spacing: 3.0,
+            extra_char_spacing: 2.0,
+            extra_word_spacing: 4.0,
+            ..base.clone()
+        };
+
+        let base_glyphs = compute_glyph_positions("AV i", &base);
+        let spaced_glyphs = compute_glyph_positions("AV i", &spaced);
+        assert_eq!(base_glyphs, spaced_glyphs);
+
+        let placement = compute_char_positions("AV i", &spaced);
+        assert!(placement.last().unwrap() > spaced_glyphs.last().unwrap());
+    }
+
+    #[test]
+    fn literal_line_characters_keep_glyph_advances_across_run_boundaries() {
+        let style = TextStyle {
+            font_family: "Arial".to_string(),
+            font_size: 16.0,
+            extra_dash_advance: 100.0,
+            ..Default::default()
+        };
+        for (whole_text, scalar) in [("---", "-"), ("_____", "_")] {
+            let whole = compute_char_positions(whole_text, &style);
+            let single = compute_char_positions(scalar, &style);
+
+            assert_eq!(whole.len(), whole_text.chars().count() + 1);
+            for index in 1..whole.len() {
+                assert!((whole[index] - whole[index - 1] - single[1]).abs() < 0.001);
+            }
+        }
+    }
+
+    #[test]
     fn test_mock_measurer_extra_word_spacing() {
         let m = MockTextMeasurer { char_width: 10.0 };
         let style = TextStyle {
@@ -2788,6 +2932,43 @@ mod tests {
             estimate_text_width_unrounded("e\u{301}x", &style),
             *positions.last().unwrap()
         );
+    }
+
+    #[test]
+    fn embedded_shaping_scope_uses_face_advances_and_restores_after_panic() {
+        let bytes = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/fonts/RHWPShapingFixture.ttf"
+        ));
+        let font = ResolvedShapingFont {
+            family: "RHWP Shaping Fixture".to_string(),
+            bytes: std::sync::Arc::from(bytes.as_slice()),
+            face_index: 0,
+        };
+        let style = TextStyle {
+            font_family: font.family.clone(),
+            font_size: 20.0,
+            kerning: true,
+            ..Default::default()
+        };
+        assert!(shaped_char_positions("AV", &style).is_none());
+
+        let unwind = std::panic::catch_unwind(|| {
+            let _scope = enter_resolved_shaping_fonts(vec![font]);
+            let positions =
+                shaped_char_positions("AV", &style).expect("embedded face should shape");
+            assert_eq!(positions.len(), 3);
+            assert!(positions[1] > positions[0]);
+            assert!(positions[2] > positions[1]);
+            let accent = shaped_char_positions("e\u{301}", &style).unwrap();
+            assert_eq!(accent[0], accent[1]);
+            assert!(accent[2] > accent[1]);
+            let mixed = shaped_char_positions("A한V", &style).unwrap();
+            assert!(mixed.windows(2).all(|pair| pair[1] > pair[0]));
+            panic!("exercise scope restoration");
+        });
+        assert!(unwind.is_err());
+        assert!(shaped_char_positions("AV", &style).is_none());
     }
 
     #[test]

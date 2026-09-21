@@ -12,14 +12,28 @@ use super::symbols::{DecoKind, FontStyleKind};
 /// Cambria Math 는 Windows 에서 "볼드 인상" 을 유발해 제외. Pretendard 는 산세리프라 수식 부적합으로 제외. (Task #280)
 pub const DEFAULT_EQUATION_FONT_FAMILY_ATTR: &str =
     "font-family=\"'Latin Modern Math', 'STIX Two Text', 'STIX Two Math', 'Times New Roman', 'Times', serif\"";
-const EQ_FONT_FAMILY: &str = " font-family=\"'Latin Modern Math', 'STIX Two Text', 'STIX Two Math', 'Times New Roman', 'Times', serif\"";
+const EQ_FONT_FAMILY: &str = "";
 
 /// 수식을 SVG 조각 문자열로 렌더링
 ///
 /// 진입점 default: italic=true (hwpeq 변수 기본 스타일). FontStyle::Roman(`rm`)
 /// 적용 영역에서는 자식 렌더링 시 italic=false 로 전환된다.
 pub fn render_equation_svg(layout: &LayoutBox, color: &str, base_font_size: f64) -> String {
+    render_equation_svg_with_font(layout, color, base_font_size, None)
+}
+
+pub fn render_equation_svg_with_font(
+    layout: &LayoutBox,
+    color: &str,
+    base_font_size: f64,
+    font_name: Option<&str>,
+) -> String {
     let mut svg = String::new();
+    let family = font_name.filter(|name| !name.trim().is_empty()).map_or_else(
+        || "'Latin Modern Math', 'STIX Two Text', 'STIX Two Math', 'Times New Roman', 'Times', serif".to_string(),
+        |name| format!("'{}', 'Latin Modern Math', 'STIX Two Math', serif", escape_xml(name)),
+    );
+    svg.push_str(&format!("<g font-family=\"{}\">", family));
     render_box(
         &mut svg,
         layout,
@@ -30,6 +44,7 @@ pub fn render_equation_svg(layout: &LayoutBox, color: &str, base_font_size: f64)
         true,
         false,
     );
+    svg.push_str("</g>");
     svg
 }
 

@@ -125,6 +125,7 @@ const PROPERTY_ARGUMENT_TYPES: Readonly<Record<string, string>> = {
   setHeaderFooterPictureProperties: 'Partial<PictureProperties>',
   setCellPicturePropertiesByPath: 'Partial<PictureProperties>',
   setEquationProperties: 'Partial<EquationProperties>',
+  setEquationPropertiesByPath: 'Partial<EquationProperties>',
   setNoteEquationProperties: 'Partial<EquationProperties>',
 };
 

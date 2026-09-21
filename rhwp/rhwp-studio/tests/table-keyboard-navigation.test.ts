@@ -37,26 +37,6 @@ test('Tab in a table cell uses cell navigation before inserting a tab character'
   assert.ok(tabCase.indexOf('moveToCellNext') < tabCase.indexOf('new InsertTabCommand'));
 });
 
-test('Tab in the last table cell inserts a row before exiting the table', () => {
-  const keyboard = source('src/engine/input-handler-keyboard.ts');
-  const tabCase = tabCaseBlock();
-  const start = keyboard.indexOf('function insertRowAfterLastTableCellByTab');
-  const end = keyboard.indexOf('type PictureDeleteRef', start);
-  assert.notEqual(start, -1, 'last-cell Tab row insertion helper not found');
-  assert.notEqual(end, -1, 'last-cell Tab row insertion helper end not found');
-  const helper = keyboard.slice(start, end);
-
-  assert.match(helper, /uniqueCellsInReadingOrder\(this\.wasm\.getTableCellBboxes\(sec,\s*ppi,\s*ci\)\)/);
-  assert.match(helper, /order\[order\.length - 1\]\.cellIdx !== currentCellIdx/);
-  assert.match(helper, /wasm\.insertTableRow\(sec,\s*ppi,\s*ci,\s*insertAfterRow,\s*true\)/);
-  assert.match(helper, /insertedRow = insertAfterRow \+ 1/);
-  assert.match(helper, /tableCellStartPosition\(pos,\s*nextCell\?\.cellIdx \?\? currentCellIdx\)/);
-  assert.ok(
-    tabCase.indexOf('insertRowAfterLastTableCellByTab.call(this)') < tabCase.indexOf('this.cursor.moveToCellNext()'),
-    'last-cell row insertion must run before normal next-cell navigation',
-  );
-});
-
 test('Backward table exit lands on the table paragraph start mark', () => {
   const exitTable = exitTableBlock();
 

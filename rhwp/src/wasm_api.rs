@@ -1628,6 +1628,25 @@ impl HwpDocument {
             .map_err(|e| e.into())
     }
 
+    #[wasm_bindgen(js_name = logicalToTextOffsetInCellByPath)]
+    pub fn logical_to_text_offset_in_cell_by_path_api(
+        &self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        path_json: &str,
+        logical_offset: u32,
+    ) -> Result<u32, JsValue> {
+        let path = DocumentCore::parse_cell_path(path_json)?;
+        let para = self
+            .resolve_paragraph_by_path(section_idx as usize, parent_para_idx as usize, &path)
+            .map_err(|e| -> JsValue { e.into() })?;
+        Ok(crate::document_core::helpers::logical_to_text_offset(
+            para,
+            logical_offset as usize,
+        )
+        .0 as u32)
+    }
+
     /// 머리말/꼬리말 생성 (빈 문단 1개 포함)
     ///
     /// 반환: JSON `{"ok":true,"kind":"header/footer","applyTo":N,...}`
@@ -1875,6 +1894,26 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    #[wasm_bindgen(js_name = insertTableRowByPath)]
+    pub fn insert_table_row_by_path(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        path_json: &str,
+        row_idx: u32,
+        below: bool,
+    ) -> Result<String, JsValue> {
+        let path = DocumentCore::parse_cell_path(path_json)?;
+        self.insert_table_row_by_cell_path_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            &path,
+            row_idx as u16,
+            below,
+        )
+        .map_err(Into::into)
+    }
+
     /// 표에 열을 삽입한다.
     ///
     /// 반환값: JSON `{"ok":true,"rowCount":<N>,"colCount":<M>}`
@@ -1897,6 +1936,26 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    #[wasm_bindgen(js_name = insertTableColumnByPath)]
+    pub fn insert_table_column_by_path(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        path_json: &str,
+        col_idx: u32,
+        right: bool,
+    ) -> Result<String, JsValue> {
+        let path = DocumentCore::parse_cell_path(path_json)?;
+        self.insert_table_column_by_cell_path_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            &path,
+            col_idx as u16,
+            right,
+        )
+        .map_err(Into::into)
+    }
+
     /// 표에서 행을 삭제한다.
     ///
     /// 반환값: JSON `{"ok":true,"rowCount":<N>,"colCount":<M>}`
@@ -1917,6 +1976,24 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    #[wasm_bindgen(js_name = deleteTableRowByPath)]
+    pub fn delete_table_row_by_path(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        path_json: &str,
+        row_idx: u32,
+    ) -> Result<String, JsValue> {
+        let path = DocumentCore::parse_cell_path(path_json)?;
+        self.delete_table_row_by_cell_path_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            &path,
+            row_idx as u16,
+        )
+        .map_err(Into::into)
+    }
+
     /// 표에서 열을 삭제한다.
     ///
     /// 반환값: JSON `{"ok":true,"rowCount":<N>,"colCount":<M>}`
@@ -1935,6 +2012,24 @@ impl HwpDocument {
             col_idx as u16,
         )
         .map_err(|e| e.into())
+    }
+
+    #[wasm_bindgen(js_name = deleteTableColumnByPath)]
+    pub fn delete_table_column_by_path(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        path_json: &str,
+        col_idx: u32,
+    ) -> Result<String, JsValue> {
+        let path = DocumentCore::parse_cell_path(path_json)?;
+        self.delete_table_column_by_cell_path_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            &path,
+            col_idx as u16,
+        )
+        .map_err(Into::into)
     }
 
     /// 표의 셀을 병합한다.
@@ -1961,6 +2056,31 @@ impl HwpDocument {
             end_col as u16,
         )
         .map_err(|e| e.into())
+    }
+
+    #[wasm_bindgen(js_name = mergeTableCellsByPath)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn merge_table_cells_by_path(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        path_json: &str,
+        start_row: u32,
+        start_col: u32,
+        end_row: u32,
+        end_col: u32,
+    ) -> Result<String, JsValue> {
+        let path = DocumentCore::parse_cell_path(path_json)?;
+        self.merge_table_cells_by_cell_path_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            &path,
+            start_row as u16,
+            start_col as u16,
+            end_row as u16,
+            end_col as u16,
+        )
+        .map_err(Into::into)
     }
 
     /// `mergeTableCells` 의 options object 변형 (#1413).
@@ -2004,6 +2124,26 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    #[wasm_bindgen(js_name = splitTableCellByPath)]
+    pub fn split_table_cell_by_path(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        path_json: &str,
+        row: u32,
+        col: u32,
+    ) -> Result<String, JsValue> {
+        let path = DocumentCore::parse_cell_path(path_json)?;
+        self.split_table_cell_by_cell_path_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            &path,
+            row as u16,
+            col as u16,
+        )
+        .map_err(Into::into)
+    }
+
     /// 셀을 N줄 × M칸으로 분할한다.
     ///
     /// 반환값: JSON `{"ok":true,"cellCount":<N>}`
@@ -2032,6 +2172,35 @@ impl HwpDocument {
             merge_first,
         )
         .map_err(|e| e.into())
+    }
+
+    #[wasm_bindgen(js_name = splitTableCellIntoByPath)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn split_table_cell_into_by_path(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        path_json: &str,
+        row: u32,
+        col: u32,
+        n_rows: u32,
+        m_cols: u32,
+        equal_row_height: bool,
+        merge_first: bool,
+    ) -> Result<String, JsValue> {
+        let path = DocumentCore::parse_cell_path(path_json)?;
+        self.split_table_cell_into_by_cell_path_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            &path,
+            row as u16,
+            col as u16,
+            n_rows as u16,
+            m_cols as u16,
+            equal_row_height,
+            merge_first,
+        )
+        .map_err(Into::into)
     }
 
     /// `splitTableCellInto` 의 options object 변형 (#1413).
@@ -2085,6 +2254,37 @@ impl HwpDocument {
             equal_row_height,
         )
         .map_err(|e| e.into())
+    }
+
+    #[wasm_bindgen(js_name = splitTableCellsInRangeByPath)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn split_table_cells_in_range_by_path(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        path_json: &str,
+        start_row: u32,
+        start_col: u32,
+        end_row: u32,
+        end_col: u32,
+        n_rows: u32,
+        m_cols: u32,
+        equal_row_height: bool,
+    ) -> Result<String, JsValue> {
+        let path = DocumentCore::parse_cell_path(path_json)?;
+        self.split_table_cells_in_range_by_cell_path_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            &path,
+            start_row as u16,
+            start_col as u16,
+            end_row as u16,
+            end_col as u16,
+            n_rows as u16,
+            m_cols as u16,
+            equal_row_height,
+        )
+        .map_err(Into::into)
     }
 
     /// `splitTableCellsInRange` 의 options object 변형 (#1413).
@@ -2772,6 +2972,32 @@ impl HwpDocument {
     pub fn hit_test_header_footer(&self, page_num: u32, x: f64, y: f64) -> Result<String, JsValue> {
         self.hit_test_header_footer_native(page_num, x, y)
             .map_err(|e| e.into())
+    }
+
+    #[wasm_bindgen(js_name = logicalToTextOffsetInCell)]
+    pub fn logical_to_text_offset_in_cell(
+        &self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        control_idx: u32,
+        cell_idx: u32,
+        cell_para_idx: u32,
+        logical_offset: u32,
+    ) -> Result<u32, JsValue> {
+        let para = self
+            .get_cell_paragraph_ref(
+                section_idx as usize,
+                parent_para_idx as usize,
+                control_idx as usize,
+                cell_idx as usize,
+                cell_para_idx as usize,
+            )
+            .ok_or_else(|| JsValue::from_str("셀 문단 접근 실패"))?;
+        Ok(crate::document_core::helpers::logical_to_text_offset(
+            para,
+            logical_offset as usize,
+        )
+        .0 as u32)
     }
 
     /// 이 쪽에서 머리말/꼬리말을 편집할 때 대상이 되는 (구역, applyTo) 를 반환한다.
@@ -4133,6 +4359,24 @@ impl HwpDocument {
         .map_err(|e| e.into())
     }
 
+    /// 중첩 표 셀 문단에서 정확한 수식 컨트롤을 삭제한다.
+    #[wasm_bindgen(js_name = deleteEquationControlInCellByPath)]
+    pub fn delete_equation_control_in_cell_by_path(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        cell_path_json: &str,
+        eq_control_idx: u32,
+    ) -> Result<String, JsValue> {
+        self.delete_equation_control_in_cell_by_path_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            cell_path_json,
+            eq_control_idx as usize,
+        )
+        .map_err(|e| e.into())
+    }
+
     /// 수식 컨트롤의 속성을 조회한다.
     ///
     /// 반환: JSON `{ script, fontSize, color, baseline, fontName }`
@@ -4161,6 +4405,46 @@ impl HwpDocument {
             control_idx as usize,
             ci,
             cpi,
+        )
+        .map_err(|e| e.into())
+    }
+
+    /// 표 셀 문단의 특정 수식 컨트롤 속성을 조회한다.
+    #[wasm_bindgen(js_name = getEquationPropertiesAt)]
+    pub fn get_equation_properties_at(
+        &self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        control_idx: u32,
+        cell_idx: i32,
+        cell_para_idx: i32,
+        inner_control_idx: i32,
+    ) -> Result<String, JsValue> {
+        self.get_equation_properties_at_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            control_idx as usize,
+            (cell_idx >= 0).then_some(cell_idx as usize),
+            (cell_para_idx >= 0).then_some(cell_para_idx as usize),
+            (inner_control_idx >= 0).then_some(inner_control_idx as usize),
+        )
+        .map_err(|e| e.into())
+    }
+
+    /// 중첩 표 셀 문단의 정확한 수식 컨트롤 속성을 조회한다.
+    #[wasm_bindgen(js_name = getEquationPropertiesByPath)]
+    pub fn get_equation_properties_by_path(
+        &self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        cell_path_json: &str,
+        inner_control_idx: u32,
+    ) -> Result<String, JsValue> {
+        self.get_equation_properties_by_path_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            cell_path_json,
+            inner_control_idx as usize,
         )
         .map_err(|e| e.into())
     }
@@ -4194,6 +4478,50 @@ impl HwpDocument {
             control_idx as usize,
             ci,
             cpi,
+            props_json,
+        )
+        .map_err(|e| e.into())
+    }
+
+    /// 표 셀 문단의 특정 수식 컨트롤 속성을 변경한다.
+    #[wasm_bindgen(js_name = setEquationPropertiesAt)]
+    pub fn set_equation_properties_at(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        control_idx: u32,
+        cell_idx: i32,
+        cell_para_idx: i32,
+        inner_control_idx: i32,
+        props_json: &str,
+    ) -> Result<String, JsValue> {
+        self.set_equation_properties_at_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            control_idx as usize,
+            (cell_idx >= 0).then_some(cell_idx as usize),
+            (cell_para_idx >= 0).then_some(cell_para_idx as usize),
+            (inner_control_idx >= 0).then_some(inner_control_idx as usize),
+            props_json,
+        )
+        .map_err(|e| e.into())
+    }
+
+    /// 중첩 표 셀 문단의 정확한 수식 컨트롤 속성을 변경한다.
+    #[wasm_bindgen(js_name = setEquationPropertiesByPath)]
+    pub fn set_equation_properties_by_path(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        cell_path_json: &str,
+        inner_control_idx: u32,
+        props_json: &str,
+    ) -> Result<String, JsValue> {
+        self.set_equation_properties_by_path_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            cell_path_json,
+            inner_control_idx as usize,
             props_json,
         )
         .map_err(|e| e.into())
@@ -4282,6 +4610,23 @@ impl HwpDocument {
     ) -> Result<String, JsValue> {
         self.render_equation_preview_native(script, font_size_hwpunit, color)
             .map_err(|e| e.into())
+    }
+
+    #[wasm_bindgen(js_name = renderEquationPreviewWithFont)]
+    pub fn render_equation_preview_with_font(
+        &self,
+        script: &str,
+        font_size_hwpunit: u32,
+        color: u32,
+        font_name: &str,
+    ) -> Result<String, JsValue> {
+        self.render_equation_preview_with_font_native(
+            script,
+            font_size_hwpunit,
+            color,
+            Some(font_name),
+        )
+        .map_err(|e| e.into())
     }
 
     /// 표 셀 문단에서 지정 인덱스의 수식 스크립트를 조회한다 (드리프트 프로브용).
@@ -4678,6 +5023,30 @@ impl HwpDocument {
             control_idx as usize,
             cell_idx as usize,
             cell_para_idx as usize,
+            char_offset as usize,
+            script,
+            font_size,
+            color,
+        )
+        .map_err(|e| e.into())
+    }
+
+    /// 중첩 표 셀 문단에 수식을 삽입한다.
+    #[wasm_bindgen(js_name = insertEquationInCellByPath)]
+    pub fn insert_equation_in_cell_by_path(
+        &mut self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        cell_path_json: &str,
+        char_offset: u32,
+        script: &str,
+        font_size: u32,
+        color: u32,
+    ) -> Result<String, JsValue> {
+        self.insert_equation_in_cell_by_path_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            cell_path_json,
             char_offset as usize,
             script,
             font_size,
@@ -6027,6 +6396,28 @@ impl HwpDocument {
             path_json,
         )
         .map_err(|e| e.into())
+    }
+
+    /// Resolve a logical row/column to a stable editable model target after a structural edit.
+    #[wasm_bindgen(js_name = getTableCellTargetByPath)]
+    pub fn get_table_cell_target_by_path(
+        &self,
+        section_idx: u32,
+        parent_para_idx: u32,
+        path_json: &str,
+        row: u32,
+        col: u32,
+        preferred_para_idx: u32,
+    ) -> Result<String, JsValue> {
+        self.get_table_cell_target_by_path_native(
+            section_idx as usize,
+            parent_para_idx as usize,
+            path_json,
+            row as u16,
+            col as u16,
+            preferred_para_idx as usize,
+        )
+        .map_err(Into::into)
     }
 
     /// 경로 기반 표 셀 바운딩박스 조회 (중첩 표용).

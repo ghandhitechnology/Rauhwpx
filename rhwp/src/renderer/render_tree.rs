@@ -1311,12 +1311,16 @@ pub struct EquationNode {
     pub color: u32,
     /// 수식 글자 크기 (HWPUNIT → px 변환 후)
     pub font_size: f64,
+    /// 문서에 선언된 수식 글꼴 이름
+    pub font_name: String,
     /// 소속 구역 인덱스
     pub section_index: Option<usize>,
     /// 수식 컨트롤을 소유한 문단 인덱스
     pub para_index: Option<usize>,
     /// 문단 내 컨트롤 인덱스
     pub control_index: Option<usize>,
+    /// 컨테이너 문단 내 수식 자체의 컨트롤 인덱스
+    pub inner_control_index: Option<usize>,
     /// 표 셀 내 수식인 경우: 셀 인덱스
     pub cell_index: Option<usize>,
     /// 표 셀 내 수식인 경우: 셀 내 문단 인덱스

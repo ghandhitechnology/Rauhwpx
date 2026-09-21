@@ -868,7 +868,10 @@ mod tests {
         let mut search_start = 0;
         while let Some(pos) = svg[search_start..].find(needle) {
             let abs_pos = search_start + pos;
-            let context_start = abs_pos.saturating_sub(2000);
+            let mut context_start = abs_pos.saturating_sub(2000);
+            while !svg.is_char_boundary(context_start) {
+                context_start += 1;
+            }
             let context = &svg[context_start..abs_pos];
             // 가장 가까운 직전 `<g transform="translate(X` 패턴 찾기
             if let Some(g_rel) = context.rfind("<g transform=\"translate(") {

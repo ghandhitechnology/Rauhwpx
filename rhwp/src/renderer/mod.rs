@@ -45,6 +45,7 @@ pub mod svg;
 pub mod svg_fragment;
 pub mod svg_layer;
 pub mod typeset;
+mod text_replay_policy;
 #[cfg(target_arch = "wasm32")]
 pub mod web_canvas;
 
@@ -173,9 +174,8 @@ pub struct TextStyle {
     pub extra_word_spacing: f64,
     /// 배분/나눔 정렬용: 글자당 추가 간격 (px)
     pub extra_char_spacing: f64,
-    /// Task #352: dash leader (3+ 연속 '-') 시퀀스의 글자당 추가 간격 (px).
-    /// PDF 와 같이 라인 슬랙을 dash leader 가 흡수하도록 하여, 공백 분배
-    /// 부담을 줄이고 자연스러운 단어 간격을 유지한다. 0 이면 미적용.
+    /// Legacy compatibility spacing retained in serialized styles.
+    /// Literal hyphens are ordinary text; real leaders use `tab_leaders`.
     pub extra_dash_advance: f64,
     /// 외곽선 종류 (0=없음, 1~6=종류)
     pub outline_type: u8,
@@ -391,7 +391,9 @@ pub enum StrokeDash {
     #[default]
     Solid,
     Dash,
+    LongDash,
     Dot,
+    Circle,
     DashDot,
     DashDotDot,
 }

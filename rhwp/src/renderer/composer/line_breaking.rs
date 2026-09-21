@@ -1746,7 +1746,11 @@ fn inline_control_metrics_hwp(ctrl: &Control) -> Option<InlineControlMetricsHwp>
         }
         Control::Equation(eq) if eq.common.treat_as_char => {
             let (natural_width, natural_height, natural_baseline) =
-                crate::renderer::equation::intrinsic_metrics_hwp(&eq.script, eq.font_size);
+                crate::renderer::equation::intrinsic_metrics_hwp_with_font(
+                    &eq.script,
+                    eq.font_size,
+                    &eq.font_name,
+                );
             let width = (eq.common.width as i32).max(natural_width as i32);
             let stored_height = eq.common.height as i32;
             let natural_height = natural_height as i32;
