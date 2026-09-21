@@ -122,11 +122,15 @@ fn review_documents(
     i: &Document,
 ) -> Result<(Document, ReviewAnalysis, Vec<Target>), String> {
     let (automatic_candidate, mut initial) = merge_doc(b, c, i, None)?;
-    // Cached thumbnails/text are regenerated from the chosen document; they
-    // must not turn independent content edits into a document-wide conflict.
-    initial
-        .conflicts
-        .retain(|item| item.path.first().map(String::as_str) != Some("preview"));
+    // Cached thumbnails/text and HWPX aux zip entries are regenerated from the
+    // chosen document; they must not turn independent content edits into a
+    // document-wide conflict.
+    initial.conflicts.retain(|item| {
+        !matches!(
+            item.path.first().map(String::as_str),
+            Some("preview" | "hwpx_aux_entries")
+        ) && item.kind != "line-layout"
+    });
     let incoming_choices = initial
         .conflicts
         .iter()
@@ -146,7 +150,6 @@ fn review_documents(
         || dh(&b.doc_info) != dh(&i.doc_info)
         || dh(&b.bin_data_content) != dh(&i.bin_data_content)
         || dh(&b.extra_streams) != dh(&i.extra_streams)
-        || dh(&b.hwpx_aux_entries) != dh(&i.hwpx_aux_entries)
         || [
             b.doc_properties.page_start_num,
             b.doc_properties.footnote_start_num,
@@ -202,18 +205,25 @@ fn review_documents(
                     .get(6..10)
                     .map(|v| u32::from_le_bytes(v.try_into().unwrap()))
                     .filter(|id| *id != 0);
-                let path = vec![
+                let index_path = vec![
                     "sections".into(),
                     s.to_string(),
                     "paragraphs".into(),
-                    paragraph_id
-                        .map(|id| format!("@{id}"))
-                        .unwrap_or_else(|| p.to_string()),
+                    p.to_string(),
                 ];
+                let path = paragraph_id
+                    .map(|id| {
+                        let mut identity_path = index_path.clone();
+                        identity_path[3] = format!("@{id}");
+                        identity_path
+                    })
+                    .unwrap_or_else(|| index_path.clone());
                 let dependencies: Vec<String> = initial
                     .conflicts
                     .iter()
-                    .filter(|item| item.path.starts_with(&path))
+                    .filter(|item| {
+                        item.path.starts_with(&index_path) || item.path.starts_with(&path)
+                    })
                     .map(|item| item.id.clone())
                     .collect();
                 if !dependencies.is_empty()
@@ -622,6 +632,44 @@ mod tests {
         (bytes, current_bytes, incoming_bytes)
     }
 
+    fn form002_cloud_workspace_bytes() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let bytes = std::fs::read("samples/hwpx/form-002.hwpx").expect("form-002.hwpx");
+        let mut current = crate::wasm_api::HwpDocument::from_bytes(&bytes).expect("current");
+        current
+            .insert_text_native(0, 0, 0, "UNSAVED_CLOUD_HANDOFF ")
+            .expect("handoff");
+        current
+            .insert_text_native(0, 1, 0, "LOCAL_DURING_CLOUD ")
+            .expect("local");
+        let current_bytes = current.export_hwpx_native().expect("export current");
+        let mut incoming = crate::wasm_api::HwpDocument::from_bytes(&bytes).expect("incoming");
+        incoming
+            .insert_text_native(0, 0, 0, "UNSAVED_CLOUD_HANDOFF ")
+            .expect("incoming handoff");
+        let length = incoming
+            .get_paragraph_length_native(0, 0)
+            .expect("paragraph length");
+        incoming
+            .insert_text_native(0, 0, length, " CLOUD_FINISHED")
+            .expect("cloud");
+        let incoming_bytes = incoming.export_hwpx_native().expect("export incoming");
+        (bytes, current_bytes, incoming_bytes)
+    }
+
+    fn paragraph_texts(document: &Document) -> Vec<String> {
+        document
+            .sections
+            .first()
+            .map(|section| {
+                section
+                    .paragraphs
+                    .iter()
+                    .map(|para| para.text.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     #[test]
     fn form002_review_materialize_roundtrips_inserted_text() {
         let (base_bytes, current_bytes, incoming_bytes) = form002_edited_bytes();
@@ -658,6 +706,70 @@ mod tests {
             .collect();
         apply_review(&base, &current, &incoming, &accept)
             .unwrap_or_else(|error| panic!("all-incoming review materialize: {error}"));
+    }
+
+    #[test]
+    fn form002_disjoint_paragraph_edits_keep_local_and_cloud_text() {
+        let (base_bytes, current_bytes, incoming_bytes) = form002_cloud_workspace_bytes();
+        let base = parse(&base_bytes, "base").expect("parse base");
+        let current = parse(&current_bytes, "current").expect("parse current");
+        let incoming = parse(&incoming_bytes, "incoming").expect("parse incoming");
+        let joined = |document: &Document| paragraph_texts(document).join("\n");
+        let (_, analysis, _) =
+            review_documents(&base, &current, &incoming).expect("review analysis");
+        assert!(
+            analysis
+                .conflicts
+                .iter()
+                .all(|unit| unit.position.is_some()),
+            "text-only Cloud edits collapsed to document-wide review: {:?}",
+            analysis
+                .conflicts
+                .iter()
+                .map(|unit| (
+                    &unit.value.path,
+                    &unit.value.kind,
+                    unit.position
+                        .as_ref()
+                        .map(|pos| (pos.section, pos.paragraph))
+                ))
+                .collect::<Vec<_>>()
+        );
+        let mut choices = analysis
+            .conflicts
+            .iter()
+            .map(|unit| (unit.value.id.clone(), MergeResolution::Current))
+            .collect::<BTreeMap<_, _>>();
+        for unit in &analysis.conflicts {
+            let incoming_text = value_text(&unit.value.incoming).unwrap_or("");
+            if incoming_text.contains("CLOUD_FINISHED") {
+                choices.insert(
+                    unit.value.id.clone(),
+                    if unit.value.supports_both {
+                        MergeResolution::Both {
+                            order: "current-first".into(),
+                        }
+                    } else {
+                        MergeResolution::Incoming
+                    },
+                );
+            }
+        }
+        let output = apply_review(&base, &current, &incoming, &choices)
+            .unwrap_or_else(|error| panic!("mixed review: {error}"));
+        let merged = joined(&output);
+        assert!(
+            merged.contains("LOCAL_DURING_CLOUD"),
+            "missing local text: {merged}"
+        );
+        assert!(
+            merged.contains("CLOUD_FINISHED"),
+            "missing cloud text: {merged}"
+        );
+        assert!(
+            merged.contains("UNSAVED_CLOUD_HANDOFF"),
+            "missing handoff text: {merged}"
+        );
     }
 
     #[test]
