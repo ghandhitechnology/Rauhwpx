@@ -961,15 +961,28 @@ try {
   if (process.env.CLOUD_MERGE_SCREENSHOT) await page.screenshot({ path: process.env.CLOUD_MERGE_SCREENSHOT, fullPage: true });
   // The shared unsaved handoff and table layout can both require review.
   while (await page.$('.merge-conflict-item:not(.is-resolved)')) {
+    const unresolved = await page.$$eval(
+      '.merge-conflict-item:not(.is-resolved)',
+      (items) => items.length,
+    );
     await page.click('.merge-conflict-item:not(.is-resolved)');
     await page.waitForFunction(() =>
       [...document.querySelectorAll('.merge-resolution-button')]
-        .some((button) => (button.textContent ?? '').startsWith('✓')));
+        .some((button) => (button.textContent ?? '').startsWith('✕ 거절')));
     await page.evaluate(() => {
-      [...document.querySelectorAll('.merge-resolution-button')]
-        .find((button) => (button.textContent ?? '').startsWith('✓'))
-        ?.click();
+      const choices = [...document.querySelectorAll('.merge-resolution-button')];
+      const both = choices.find((button) =>
+        (button.textContent ?? '').startsWith('둘 다 유지: 현재 변경 먼저'));
+      const keepLocal = choices.find((button) =>
+        (button.textContent ?? '').startsWith('✕ 거절'));
+      const target = both ?? keepLocal;
+      if (!target) {
+        throw new Error(`No merge resolution for ${document.querySelector('.merge-conflict-editor')?.textContent}`);
+      }
+      target.click();
     });
+    await page.waitForFunction((count) =>
+      document.querySelectorAll('.merge-conflict-item:not(.is-resolved)').length < count, {}, unresolved);
   }
   await page.waitForFunction(() => !document.querySelector('.merge-resolver-footer .merge-primary-button').disabled, { timeout: 30_000 }).catch(async (error) => {
     throw new Error(`Merge review: ${JSON.stringify(await page.evaluate(() => ({
