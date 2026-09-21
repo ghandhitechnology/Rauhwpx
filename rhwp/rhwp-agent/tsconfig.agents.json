@@ -1,5 +1,5 @@
 {
-  "//": "Checks the shared backend event/lifecycle contract and Grok, Cursor, and OpenCode ACP adapters with their local imports. Other provider SDKs and server.mjs are outside this JSDoc boundary.",
+  "//": "Checks the shared backend event/lifecycle contract and the supported ACP adapter with its local imports. Other provider SDKs and server.mjs are outside this JSDoc boundary.",
   "compilerOptions": {
     "noEmit": true,
     "allowJs": true,
@@ -17,11 +17,7 @@
   },
   "include": [
     "agents/backend.mjs",
-    "agents/grok.mjs",
-    "agents/cursor.mjs",
     "agents/acp-session.mjs",
-    "agents/grok-session-tail.mjs",
-    "agents/provider-user-input.mjs",
-    "agents/opencode.mjs"
+    "agents/provider-user-input.mjs"
   ]
 }

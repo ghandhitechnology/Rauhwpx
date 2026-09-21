@@ -35,6 +35,10 @@ const eventBus = new EventBus();
 const versions = createMockVersions(report, params.get('history') === 'branches');
 let documentId: string | null = 'preview-proposal';
 let documentName: string | null = '사업 제안서.hwpx';
+const documentNavigation = {
+  outcome: 'moved' as 'moved' | 'cancelled' | 'failed',
+  calls: [] as Array<{ documentId: string | null; fileName: string | null }>,
+};
 
 if (!params.has('initial-setup'))
   completeInitialSetup({
@@ -83,7 +87,9 @@ const sidebar = initAgentSidebar({
     selectionLabel: null,
     sourceFormat: 'hwpx', isNewDocument: false,
   }),
-  moveToLibraryDocument: (target) => {
+  moveToLibraryDocument: async (target) => {
+    documentNavigation.calls.push(target);
+    if (documentNavigation.outcome !== 'moved') return;
     documentId = target.documentId;
     documentName = target.fileName;
     eventBus.emit('document-context-changed');
@@ -218,6 +224,7 @@ if (params.get('page') === 'versions') sidebar.openVersions();
 
 // Typed hooks for browser checks and custom scenario scripts.
 const preview = { ...mock, sidebar, versions, eventBus, cloud, workspace,
+  documentNavigation,
   threadStore: { listThreads, getThread, waitForThreadsPersistence } };
 export type SidebarPreview = typeof preview;
 Object.assign(window, { sidebarPreview: preview });

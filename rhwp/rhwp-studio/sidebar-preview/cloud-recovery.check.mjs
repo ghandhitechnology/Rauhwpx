@@ -16,7 +16,7 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   await page.click('.ag-header [data-workspace-mode="cloud"]');
   await page.waitForFunction(() => window.sidebarPreview.workspace.mode() === 'cloud');
   await page.click('[aria-label="프로바이더 선택"]');
-  assert.deepEqual(await page.$eval('.ag-provider-item[data-agent="rau"]', (node) => ({ visible: node.checkVisibility(), disabled: node.disabled })), { visible: true, disabled: true }, 'Rau stays discoverable but unavailable in Cloud');
+  assert.deepEqual(await page.$eval('.ag-provider-item[data-agent="codex"]', (node) => ({ visible: node.checkVisibility(), disabled: node.disabled })), { visible: true, disabled: false }, 'Codex remains available in Cloud');
   await page.click('[aria-label="프로바이더 선택"]');
   assert.deepEqual(await page.$$eval('.ag-header .ag-execution-location-option', (nodes) => nodes.filter((node) => node.checkVisibility()).map((node) => node.textContent)), ['Local', 'Cloud']);
   assert.equal(await page.$eval('.ag-header .ag-execution-location', (root) => {
@@ -34,7 +34,7 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   await page.click('.ag-header [data-workspace-mode="local"]');
   await page.waitForFunction(() => document.querySelector('.ag-send').dataset.icon === 'send');
   await page.click('[aria-label="프로바이더 선택"]');
-  assert.deepEqual(await page.$eval('.ag-provider-item[data-agent="rau"]', (node) => ({ visible: node.checkVisibility(), disabled: node.disabled })), { visible: true, disabled: false }, 'Rau becomes selectable again in Local');
+  assert.deepEqual(await page.$eval('.ag-provider-item[data-agent="codex"]', (node) => ({ visible: node.checkVisibility(), disabled: node.disabled })), { visible: true, disabled: false }, 'Codex remains selectable in Local');
   await page.click('[aria-label="프로바이더 선택"]');
   await page.click('.ag-header [data-workspace-mode="cloud"]');
   await page.waitForFunction(() => document.querySelector('.ag-send').dataset.icon === 'cloudSend');
@@ -286,11 +286,10 @@ export async function checkCloudRecovery(page, origin, artifacts) {
       stripEta: document.querySelector('.ag-cloud-recovery-strip .ag-cloud-link-progress-eta').textContent,
     };
   });
-  assert.match(reconnectProgress.eta, /^약 \d+초 남음$/);
+  assert.match(reconnectProgress.eta, /^\d+초 경과$/);
   assert.equal(reconnectProgress.spoken, reconnectProgress.eta);
-  assert.match(reconnectProgress.stripEta, /^약 \d+초 남음$/, 'the composer strip shows its own estimate');
-  assert.ok(reconnectProgress.width > reconnectProgress.first && reconnectProgress.width < 40,
-    `the bar must crawl without filling up, got ${reconnectProgress.first}% → ${reconnectProgress.width}%`);
+  assert.match(reconnectProgress.stripEta, /^\d+초 경과$/, 'the composer strip shows elapsed time');
+  assert.equal(await page.$eval('.ag-cloud-recovery [role="progressbar"]', node => node.hasAttribute('aria-valuenow')), false);
   await page.screenshot({ path: resolve(artifacts, 'cloud-reconnect-eta.png') });
   const releasedAt = performance.now();
   await page.click('#cloud-hold-reconnect');
@@ -388,10 +387,9 @@ export async function checkCloudRecovery(page, origin, artifacts) {
       width: width(),
     };
   });
-  assert.match(recreateProgress.eta, /^약 (?:\d+초|\d+분(?:\s\d+초)?) 남음$/);
+  assert.match(recreateProgress.eta, /^\d+초 경과$/);
   assert.equal(recreateProgress.label, 'Cloud 서버 다시 만들기 진행');
-  assert.ok(recreateProgress.width > recreateProgress.first && recreateProgress.width <= 20,
-    `a rebuild bar must start near zero and crawl, got ${recreateProgress.first}% → ${recreateProgress.width}%`);
+  assert.equal(await page.$eval('.ag-cloud-recovery [role="progressbar"]', node => node.hasAttribute('aria-valuenow')), false);
   await page.screenshot({ path: resolve(artifacts, 'cloud-recreate-eta.png') });
   await page.evaluate(() => window.sidebarPreview.cloud.setLink('ready'));
 

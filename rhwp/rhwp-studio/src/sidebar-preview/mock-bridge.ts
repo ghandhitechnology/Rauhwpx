@@ -4,8 +4,6 @@ import { deriveAgentEditingLease } from '../agent/editing-lease.ts';
 import {
   defaultModelForAgent,
   setPiModels,
-  setCursorModels,
-  setOpenCodeModels,
 } from '../agent/models.ts';
 import { loadAgentPrefs } from '../agent/agent-prefs.ts';
 import { createFixtures, samplePlan, timestamp, agents } from './fixtures.ts';
@@ -121,10 +119,8 @@ export function createMockBridge(report: (message: string) => void) {
       emit({ type: 'writing-style-result', requestId, status: data.writing }),
     );
   let terminalRun: { id: string; agent: T.AgentName; step: number; choice: number } | null = null;
-  const terminalMenu = () => terminalRun?.agent !== 'opencode'
-    ? `\x1b[2J\x1b[H${terminalRun?.agent ?? 'CLI'} 로그인\r\n\r\n브라우저에서 계정을 연결하세요.\r\n미리보기: Enter 키로 계속합니다.`
-    : '\x1b[2J\x1b[H\x1b[36m◆  OpenCode 로그인\x1b[0m\r\n\r\n'
-    + ['OpenCode', 'OpenAI', 'Anthropic'].map((name, index) => `  ${index === terminalRun?.choice ? '❯' : ' '} ${name}`).join('\r\n')
+  const terminalMenu = () => `\x1b[2J\x1b[H\x1b[36m◆  ${terminalRun?.agent ?? 'CLI'} 로그인\x1b[0m\r\n\r\n`
+    + ['Anthropic', 'OpenAI'].map((name, index) => `  ${index === terminalRun?.choice ? '❯' : ' '} ${name}`).join('\r\n')
     + '\r\n\r\n  Enter 키로 선택하세요.';
   const authenticate = (provider: T.AgentName) => {
     if (provider === 'pi') {
@@ -1171,8 +1167,6 @@ export function createMockBridge(report: (message: string) => void) {
     setHold: (value: boolean) => { holdReply = value; },
     boot: () => {
       setPiModels(data.pi.models);
-      setCursorModels(data.setups.cursor.models ?? []);
-      setOpenCodeModels(data.setups.opencode.models ?? []);
       emit({ type: 'pi-status', status: data.pi });
       emit({ type: 'provider-status', providers: data.providers });
       setupChanged();

@@ -1261,13 +1261,22 @@ export function createRaucloudBroker({
     },
 
     async uploadCloudConversation(secret, runId, input) {
-      // Hold the assignment mutation lock through the durable artifact commit.
-      // A retired worker cannot finish an upload after a replacement is assigned.
-      return mutate(async (state) => {
-        const { accountId, run } = workerAccount(state, secret, validId(runId, 'runId'));
-        const artifacts = input.kind === 'conversation-resource' ? conversationResources : conversationArtifacts;
-        if (!artifacts) throw cloudError('CLOUD_UNAVAILABLE', 'Conversation storage is unavailable');
-        return artifacts.upload(accountId, run.id, input);
+      const validRunId = validId(runId, 'runId');
+      const { accountId, run } = await currentWorkerAccount(secret);
+      if (run.id !== validRunId) throw cloudError('CLOUD_WORKER_UNAUTHORIZED', 'This worker no longer owns the Raucloud run');
+      const artifacts = input.kind === 'conversation-resource' ? conversationResources : conversationArtifacts;
+      if (!artifacts) throw cloudError('CLOUD_UNAVAILABLE', 'Conversation storage is unavailable');
+      // Encryption, chunk IO, and full digest verification happen outside the
+      // global policy-state lock. Only the short metadata publication is
+      // fenced against worker replacement.
+      return artifacts.upload(accountId, run.id, input, {
+        withPublishFence: (publish) => mutate(async (state) => {
+          const current = workerAccount(state, secret, validRunId);
+          if (current.accountId !== accountId || current.run.id !== run.id) {
+            throw cloudError('CLOUD_WORKER_UNAUTHORIZED', 'This worker no longer owns the Raucloud run');
+          }
+          return publish();
+        }),
       });
     },
 

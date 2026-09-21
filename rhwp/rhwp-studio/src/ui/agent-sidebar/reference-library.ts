@@ -64,7 +64,7 @@ export interface ReferenceLibraryOptions {
   bridge: SidebarBridge;
   getContext(): ReferenceLibraryContext;
   onOpenChange?(open: boolean): void;
-  onDraftStateChange?(change: 'content' | 'status'): void;
+  onDraftStateChange?(change: 'content' | 'status' | 'context'): void;
   onFileDeleted?(fileId: string): void;
 }
 
@@ -683,7 +683,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     fileInput.click();
   }
 
-  function discardDrafts(): void {
+  function discardDrafts(change: 'content' | 'context' = 'content'): void {
     for (const chip of draftUploads.splice(0)) {
       chip.cancelled = true;
       releaseChip(chip);
@@ -691,7 +691,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
         void bridge.discardStagedReference(chip.target.scopeId, chip.staged.id).catch(() => undefined);
       }
     }
-    options.onDraftStateChange?.('content');
+    options.onDraftStateChange?.(change);
   }
 
   function takeReadyDrafts(): StagedReference[] {
@@ -836,7 +836,7 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
       contextRevision++;
       requestRevision++;
       countRevision++;
-      discardDrafts();
+      discardDrafts('context');
       filesByScope.clear();
       if (activeScope === 'document' && !options.getContext().documentId) activeScope = 'chat';
       updateTabs();

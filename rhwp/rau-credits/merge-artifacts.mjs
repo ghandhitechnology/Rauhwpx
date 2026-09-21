@@ -73,7 +73,7 @@ export function createMergeArtifacts({ store, sessionSecret, now = Date.now,
   };
   const publicRecord = ({ complete, ...record }) => record;
   return {
-    async upload(accountId, runId, input) {
+    async upload(accountId, runId, input, { withPublishFence = null } = {}) {
       const { metadata, bytes, index } = validate(input, kind);
       const id = `merge_${hash(JSON.stringify([accountId, metadata.sessionId, metadata.operationId, ...(kind === 'turn' ? [] : [kind])]))}`;
       return store.transaction(accountId, async (repo) => {
@@ -91,8 +91,24 @@ export function createMergeArtifacts({ store, sessionSecret, now = Date.now,
             throw fail('CLOUD_MERGE_CONFLICT', 'This operation already has different checkpoint metadata');
           }
         } else {
-          const records = await repo.list();
-          if (records.length >= accountCount || records.reduce((sum, item) => sum + item.size, 0) + metadata.size > accountBytes) {
+          let records = await repo.list();
+          // Conversation generations replace the previous durable snapshot. A
+          // full account must still be able to publish a smaller generation or
+          // a purge tombstone. Keep the previous generation until this upload
+          // is verified, but reserve against the resulting retained set.
+          let replaceable = [];
+          if (kind === 'conversation') {
+            replaceable = records.filter((item) => item.sessionId === metadata.sessionId
+              && (item.kind === kind || metadata.state === 'purged' && item.kind === 'conversation-resource'));
+            for (const abandoned of replaceable.filter((item) => !item.complete)) await repo.remove(abandoned);
+            records = await repo.list();
+            replaceable = records.filter((item) => item.sessionId === metadata.sessionId
+              && item.complete && (item.kind === kind || metadata.state === 'purged' && item.kind === 'conversation-resource'));
+          }
+          const replacedIds = new Set(replaceable.map((item) => item.id));
+          const retained = records.filter((item) => !replacedIds.has(item.id));
+          if (retained.length + 1 > accountCount
+            || retained.reduce((sum, item) => sum + item.size, 0) + metadata.size > accountBytes) {
             throw fail('CLOUD_MERGE_CAPACITY', 'Checkpoint storage allowance is full');
           }
           record = { id, runId, ...metadata, createdAt: now(),
@@ -118,16 +134,20 @@ export function createMergeArtifacts({ store, sessionSecret, now = Date.now,
           }
           if (complete) {
             if (total !== record.size || digest.digest('hex') !== record.sha256) throw fail('CLOUD_MERGE_DIGEST_MISMATCH', 'Checkpoint digest does not match');
-            record.complete = true;
-            await repo.put(record);
-            if (kind === 'conversation') {
-              for (const previous of await repo.list()) {
-                if (previous.sessionId === record.sessionId && previous.id !== record.id
-                  && (previous.kind === kind || record.state === 'purged' && previous.kind === 'conversation-resource')) {
-                  await repo.remove(previous);
+            const publish = async () => {
+              record.complete = true;
+              await repo.put(record);
+              if (kind === 'conversation') {
+                for (const previous of await repo.list()) {
+                  if (previous.sessionId === record.sessionId && previous.id !== record.id
+                    && (previous.kind === kind || record.state === 'purged' && previous.kind === 'conversation-resource')) {
+                    await repo.remove(previous);
+                  }
                 }
               }
-            }
+            };
+            if (withPublishFence) await withPublishFence(publish);
+            else await publish();
           }
         }
         if (kind === 'conversation-resource' && record.complete) {
@@ -157,28 +177,37 @@ export function createMergeArtifacts({ store, sessionSecret, now = Date.now,
   };
 }
 
-function serialized() {
-  let tail = Promise.resolve();
-  return (task) => {
-    const result = tail.then(task, task);
-    tail = result.catch(() => {});
+function serializedByKey() {
+  const queues = new Map();
+  return (key, task) => {
+    const previous = queues.get(key) ?? Promise.resolve();
+    const result = previous.then(task, task);
+    const tail = result.catch(() => {});
+    queues.set(key, tail);
+    void tail.finally(() => {
+      if (queues.get(key) === tail) queues.delete(key);
+    });
     return result;
   };
 }
 
 export function createMemoryMergeStore() {
   const accounts = new Map();
-  const queue = serialized();
+  const queue = serializedByKey();
   return {
     transaction(accountId, task) {
-      return queue(async () => {
+      return queue(accountId, async () => {
         const state = structuredClone(accounts.get(accountId) ?? { records: {}, chunks: {} });
         const result = await task(objectRepository(state));
         accounts.set(accountId, state);
         return result;
       });
     },
-    cleanup(at) { return queue(async () => { for (const state of accounts.values()) await objectRepository(state).expire(at); }); },
+    cleanup(at) {
+      return Promise.all([...accounts.keys()].map((accountId) => queue(accountId, () => (
+        objectRepository(accounts.get(accountId) ?? { records: {}, chunks: {} }).expire(at)
+      ))));
+    },
   };
 }
 
@@ -209,7 +238,7 @@ export function createFileMergeStore(directory, {
   platform = process.platform,
   syncDirectoryImpl = syncDirectory,
 } = {}) {
-  const queue = serialized();
+  const queue = serializedByKey();
   async function read(file) {
     await recoverReplacedFile(file, platform);
     try { return JSON.parse(await fs.readFile(file, 'utf8')); }
@@ -277,11 +306,11 @@ export function createFileMergeStore(directory, {
     return result;
   }
   return {
-    transaction(accountId, task) { return queue(() => transaction(hash(accountId), task)); },
+    transaction(accountId, task) { const key = hash(accountId); return queue(key, () => transaction(key, task)); },
     cleanup(at) {
-      return queue(async () => {
+      return (async () => {
         const directories = await fs.readdir(directory).catch((error) => { if (error.code === 'ENOENT') return []; throw error; });
-        for (const name of directories.filter((name) => /^[a-f0-9]{64}$/.test(name))) {
+        await Promise.all(directories.filter((name) => /^[a-f0-9]{64}$/.test(name)).map((name) => queue(name, async () => {
           await transaction(name, (repo) => repo.expire(at));
           const location = path.join(directory, name);
           const records = await read(path.join(location, 'metadata.json'));
@@ -289,8 +318,8 @@ export function createFileMergeStore(directory, {
             const match = file.match(/^(merge_[a-f0-9]{64})\.\d+\.enc$/);
             if ((match && !records[match[1]]) || file.endsWith('.tmp')) await fs.rm(path.join(location, file), { force: true });
           }
-        }
-      });
+        })));
+      })();
     },
   };
 }

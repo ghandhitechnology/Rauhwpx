@@ -20,6 +20,7 @@ const migrations = [
   { version: 12, sql: readFileSync(path.join(migrationsDirectory, '012_message_queue_order.sql'), 'utf8') },
   { version: 13, sql: readFileSync(path.join(migrationsDirectory, '013_question_workflow.sql'), 'utf8') },
   { version: 14, sql: readFileSync(path.join(migrationsDirectory, '014_conversation_configuration.sql'), 'utf8') },
+  { version: 15, sql: readFileSync(path.join(migrationsDirectory, '015_human_edit_resume.sql'), 'utf8') },
 ];
 
 export function transaction(database, callback) {

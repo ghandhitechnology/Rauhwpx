@@ -9,7 +9,6 @@ import test from 'node:test';
 import { buildClaudeArgv, createClaudeSession } from '../agents/claude.mjs';
 import { createCodexSession } from '../agents/codex.mjs';
 import { createPersistentAcpSession } from '../agents/acp-session.mjs';
-import { buildGrokArgv } from '../agents/grok.mjs';
 import { buildPiArgv, createPiSession } from '../agents/pi.mjs';
 import {
   applyManagedCliLaunch,
@@ -85,18 +84,7 @@ test('realistic Claude argv exceeds the Windows cmd.exe ceiling through a .cmd s
   );
 });
 
-test('Grok unrestricted and Pi node_modules/.bin shims also overflow cmd.exe', () => {
-  const grok = buildGrokArgv(
-    { ...claudeOpts, permissionProfile: 'unrestricted' },
-    sessionId,
-    false,
-    '/tmp/prompt.txt',
-  );
-  assert.ok(
-    windowsCmdExeCommandLineLength('grok.cmd', grok) > WINDOWS_CMD_LINE_LIMIT,
-    'unrestricted grok should overflow cmd.exe',
-  );
-
+test('Pi node_modules/.bin shims also overflow cmd.exe', () => {
   const pi = [...buildPiArgv({ ...claudeOpts, piRoot: '/tmp/pi', model: 'x' }, sessionId), 'review'];
   assert.ok(
     windowsCmdExeCommandLineLength(
@@ -485,75 +473,4 @@ test('createPiSession unwraps a Windows .cmd bin before spawn', async (t) => {
   assert.equal(spawns[0].argv[0], scriptPath);
   assert.equal(/\.(?:cmd|bat)$/i.test(spawns[0].command), false);
   assert.equal(events.some((event) => event.type === 'turn-start'), true);
-});
-
-test('ACP OpenCode launch unwraps a Windows .cmd bin before spawn', async (t) => {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-acp-unwrap-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const { cmdPath, scriptPath } = writeNpmCmdShim(root, 'opencode', 'cli.js');
-  const electron = path.join(root, 'Rauhwpx.exe');
-  const spawns = [];
-  const session = createPersistentAcpSession({
-    clientName: 'rhwp-opencode',
-    command: cmdPath,
-    args: ['acp', '--pure'],
-    cwd: root,
-    env: { PATH: 'C:\\Windows\\System32' },
-  }, {
-    platform: 'win32',
-    nodeCommand: electron,
-    spawnProcess(command, argv, options) {
-      const proc = new FakeProcess();
-      spawns.push({ command, argv, options, proc });
-      queueMicrotask(() => {
-        proc.exitCode = 1;
-        proc.emit('exit', 1, null);
-        proc.emit('close', 1, null);
-      });
-      return proc;
-    },
-    terminateProcess() { return true; },
-  });
-  t.after(() => session.dispose());
-  await session.start().catch(() => {});
-  assert.equal(spawns.length, 1);
-  assert.equal(spawns[0].command, electron);
-  assert.equal(spawns[0].argv[0], scriptPath);
-  assert.deepEqual(spawns[0].argv.slice(1), ['acp', '--pure']);
-  assert.equal(spawns[0].options.env.ELECTRON_RUN_AS_NODE, '1');
-  assert.equal(spawns[0].options.env.PATH, 'C:\\Windows\\System32');
-  assert.equal(/\.(?:cmd|bat)$/i.test(spawns[0].command), false);
-});
-
-test('ACP launch without env does not pass an empty env object', async (t) => {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'rhwp-acp-inherit-env-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const { cmdPath, scriptPath } = writeNpmCmdShim(root, 'opencode', 'cli.js');
-  const spawns = [];
-  const session = createPersistentAcpSession({
-    clientName: 'rhwp-opencode',
-    command: cmdPath,
-    args: ['acp'],
-    cwd: root,
-  }, {
-    platform: 'win32',
-    nodeCommand: process.execPath,
-    spawnProcess(command, argv, options) {
-      const proc = new FakeProcess();
-      spawns.push({ command, argv, options, proc });
-      queueMicrotask(() => {
-        proc.exitCode = 1;
-        proc.emit('exit', 1, null);
-        proc.emit('close', 1, null);
-      });
-      return proc;
-    },
-    terminateProcess() { return true; },
-  });
-  t.after(() => session.dispose());
-  await session.start().catch(() => {});
-  assert.equal(spawns.length, 1);
-  assert.equal(spawns[0].command, process.execPath);
-  assert.equal(spawns[0].argv[0], scriptPath);
-  assert.equal(spawns[0].options.env, undefined);
 });

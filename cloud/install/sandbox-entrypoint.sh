@@ -40,9 +40,7 @@ if [[ ${RAUHWpx_SANDBOX_INSTALL_PROVIDER:-1} == 1 ]]; then
 fi
 seed_provider claude RAUHWpx_PROVIDER_KEY_CLAUDE
 seed_provider codex RAUHWpx_PROVIDER_KEY_CODEX
-seed_provider grok RAUHWpx_PROVIDER_KEY_GROK
 seed_provider pi RAUHWpx_PROVIDER_KEY_PI
-seed_provider cursor RAUHWpx_PROVIDER_KEY_CURSOR
 
 if [[ -n ${RAUHWpx_PROVIDER_SESSION:-} ]]; then
   if node "$CLOUD_ROOT/src/cli.mjs" provider seed-session >/dev/null; then

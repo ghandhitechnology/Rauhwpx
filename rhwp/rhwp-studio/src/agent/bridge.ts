@@ -26,8 +26,6 @@ import { PendingRequestRegistry } from './pending-requests.ts';
 import { AgentTypewriterReveal } from './typewriter-reveal.ts';
 import { deriveAgentEditingLease, planModeAllowsUserEditing } from './editing-lease.ts';
 import {
-  setCursorModels as setCursorModelRegistry,
-  setOpenCodeModels as setOpenCodeModelRegistry,
   setPiModels as setPiModelRegistry,
 } from './models.ts';
 import {
@@ -323,8 +321,7 @@ const STUDIO_INSTANCE_ID = globalThis.crypto?.randomUUID?.()
   ?? `studio-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
 function isAgentName(v: unknown): v is AgentName {
-  return v === 'claude' || v === 'codex' || v === 'pi' || v === 'grok'
-    || v === 'cursor' || v === 'opencode' || v === 'rau';
+  return v === 'claude' || v === 'codex' || v === 'pi';
 }
 
 function isBoundedText(value: unknown, max: number): value is string {
@@ -749,14 +746,10 @@ function readProviderHealth(value: unknown): ProviderHealth {
 function readProviderStatus(value: unknown): ProviderStatusMap {
   const src = (value ?? {}) as Record<string, unknown>;
   return {
-    rau: readProviderHealth(src['rau']),
     claude: readProviderHealth(src['claude']),
     codex: readProviderHealth(src['codex']),
     pi: readProviderHealth(src['pi']),
-    grok: readProviderHealth(src['grok']),
-    cursor: readProviderHealth(src['cursor']),
-    opencode: readProviderHealth(src['opencode']),
-  };
+  } as ProviderStatusMap;
 }
 
 function readAgentSetupStatus(value: unknown, agent: AgentName): AgentSetupStatus {
@@ -788,22 +781,16 @@ function readAgentSetupStatus(value: unknown, agent: AgentName): AgentSetupStatu
     latestVersion: typeof src['latestVersion'] === 'string' ? src['latestVersion'] : null,
     updateRequired: src['updateRequired'] === true,
     error: typeof src['error'] === 'string' ? src['error'] : null,
-    // Cursor와 OpenCode는 CLI가 알려 주는 모델 목록을 함께 싣는다.
-    ...(isStringArray(src['models']) ? { models: src['models'] } : {}),
   };
 }
 
 function readAgentSetupStatuses(value: unknown): AgentSetupStatusMap {
   const src = (value ?? {}) as Record<string, unknown>;
   return {
-    rau: readAgentSetupStatus(src['rau'], 'rau'),
     claude: readAgentSetupStatus(src['claude'], 'claude'),
     codex: readAgentSetupStatus(src['codex'], 'codex'),
     pi: readAgentSetupStatus(src['pi'], 'pi'),
-    grok: readAgentSetupStatus(src['grok'], 'grok'),
-    cursor: readAgentSetupStatus(src['cursor'], 'cursor'),
-    opencode: readAgentSetupStatus(src['opencode'], 'opencode'),
-  };
+  } as AgentSetupStatusMap;
 }
 
 function readAccountSessionStatus(value: unknown): AccountSessionStatus {
@@ -958,25 +945,16 @@ function readUsageSummary(value: unknown): UsageSummary | null {
   const plans = (src['plans'] ?? {}) as Record<string, unknown>;
   const providers = (src['providers'] ?? {}) as Record<string, unknown>;
   const openrouter = readOpenRouterCredits(src['openrouter']);
-  const rau = readOpenRouterCredits(src['rau']);
   return {
     plans: {
       claude: typeof plans['claude'] === 'string' ? plans['claude'] : 'pro',
       codex: typeof plans['codex'] === 'string' ? plans['codex'] : 'plus',
       pi: typeof plans['pi'] === 'string' ? plans['pi'] : 'api',
-      grok: typeof plans['grok'] === 'string' ? plans['grok'] : 'api',
-      cursor: typeof plans['cursor'] === 'string' ? plans['cursor'] : 'api',
-      opencode: typeof plans['opencode'] === 'string' ? plans['opencode'] : 'api',
-      rau: typeof plans['rau'] === 'string' ? plans['rau'] : 'api',
     },
     providers: {
       claude: readProviderUsage(providers['claude']),
       codex: readProviderUsage(providers['codex']),
       pi: readProviderUsage(providers['pi']),
-      grok: readProviderUsage(providers['grok']),
-      cursor: readProviderUsage(providers['cursor']),
-      opencode: readProviderUsage(providers['opencode']),
-      rau: readProviderUsage(providers['rau']),
     },
     cliproxy: readCliproxyStatus(src['cliproxy']),
     ...(src['limits'] && typeof src['limits'] === 'object' ? {
@@ -986,13 +964,12 @@ function readUsageSummary(value: unknown): UsageSummary | null {
       },
     } : {}),
     ...(src['balances'] && typeof src['balances'] === 'object' ? {
-      balances: Object.fromEntries(['openrouter', 'grok', 'opencode']
+      balances: Object.fromEntries(['openrouter']
         .filter((provider) => provider in (src['balances'] as Record<string, unknown>))
         .map((provider) => [provider, readRemoteBalance((src['balances'] as Record<string, unknown>)[provider])])),
     } : {}),
     ...(openrouter ? { openrouter } : {}),
-    ...(rau ? { rau } : {}),
-  };
+  } as UsageSummary;
 }
 
 function isStringArray(value: unknown): value is string[] {
@@ -1109,7 +1086,7 @@ function readCheckpointTitleResult(value: unknown): CheckpointTitleResult | null
   const provider = src['provider'];
   const title = src['title'];
   const revision = src['titleRevision'];
-  if (provider !== 'pi' && provider !== 'codex' && provider !== 'grok' && provider !== 'claude') return null;
+  if (provider !== 'pi' && provider !== 'codex' && provider !== 'claude') return null;
   if (typeof src['commitId'] !== 'string' || !src['commitId']) return null;
   if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 0) return null;
   if (typeof title !== 'string' || !title || title.trim() !== title
@@ -2239,10 +2216,6 @@ export class AgentBridgeImpl implements AgentBridge {
       }
       case 'agent-setup-status': {
         const statuses = readAgentSetupStatuses(msg.statuses);
-        // 동적 모델 레지스트리를 이벤트 발행 전에 갱신해, 리스너가 목록을
-        // 즉시 최신 상태로 읽을 수 있게 한다.
-        if (statuses.cursor.models) setCursorModelRegistry(statuses.cursor.models);
-        if (statuses.opencode.models) setOpenCodeModelRegistry(statuses.opencode.models);
         if (typeof msg.requestId === 'string') this.requests.settle(msg.requestId, statuses);
         this.emit({ type: 'agent-setup-status', statuses });
         break;
@@ -3487,7 +3460,7 @@ export class AgentBridgeImpl implements AgentBridge {
 
   authenticateAgent(agent: AgentName, method: AgentAuthMethod, key?: string): Promise<AgentSetupAuthStart | null> {
     return this.request<AgentSetupAuthStart>(
-      { type: 'agent-setup-auth', agent, method, terminal: method === 'oauth' && !['rau', 'pi'].includes(agent), ...(key ? { key } : {}) },
+      { type: 'agent-setup-auth', agent, method, terminal: method === 'oauth' && agent === 'claude', ...(key ? { key } : {}) },
       'agent-setup-auth',
       30_000,
     );

@@ -142,7 +142,7 @@ import type {
   CloudTransferReference,
 } from '../../cloud/types.ts';
 import { cloudProviderSettingsTarget } from '../../cloud/provider-settings.ts';
-import { createCloudAgentUi } from './cloud-ui.ts';
+import { createCloudAgentUi, type CloudCommandTarget } from './cloud-ui.ts';
 import { createExecutionLocation } from './execution-location.ts';
 import { createCloudWorkspace } from '../cloud-workspace.ts';
 import {
@@ -188,7 +188,7 @@ export interface AgentSidebarDeps {
   moveToLibraryDocument?: (target: {
     documentId: string | null;
     fileName: string | null;
-  }) => void;
+  }) => Promise<void>;
   cloudController?: CloudController;
   workspace?: WorkspaceController;
   prepareCloudTransfer?: (startId: string, restart?: { document: CloudDocumentPayload; sourceStartId?: string }) => Promise<CloudDocumentPayload | null>;
@@ -206,6 +206,9 @@ export interface AgentSidebarDeps {
     documentId: string;
     fileName: string;
   } | null>;
+  pauseAndEditCloud?: (target: CloudCommandTarget) => Promise<void>;
+  continueCloudEditing?: (target: CloudCommandTarget) => Promise<void>;
+  isEditingCloudDraft?: (sessionId: string) => boolean;
   /** 현재 문서의 로컬 커밋과 브랜치를 관리한다. */
   versionController?: VersionManagerController;
   /** 기존 RHWP 문서 이력 대화상자를 연다. */
@@ -744,6 +747,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   let localThreadId = currentThread.id;
   let localThreadSnapshot = structuredClone(currentThread);
   const threadComposerDrafts = new Map<string, { text: string; files: File[] }>();
+  const composerDraftWrites = new Map<string, Promise<void>>();
+  const cloudEditSessions = new Map<string, string>();
   const editorCloudScope = createCloudEditorScope({
     threadId: currentThread.id,
     documentId: currentDocumentId,
@@ -1653,6 +1658,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   let cloudWorkspaceSwitchVisible = false;
 
   function syncWorkspaceMode(mode: WorkspaceMode, target: ComposerTarget): void {
+    root.dataset.executionMode = mode;
     localModeButton.setAttribute('aria-pressed', mode === 'local' ? 'true' : 'false');
     cloudModeButton.setAttribute('aria-pressed', mode === 'cloud' ? 'true' : 'false');
     workspaceModeSwitch.dataset.mode = mode;
@@ -1709,6 +1715,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     const files = referenceLibrary.snapshotDraftFiles();
     if (input.value || files.length) threadComposerDrafts.set(currentThread.id, { text: input.value, files });
     else threadComposerDrafts.delete(currentThread.id);
+    persistComposerDraft();
   }
 
   function restoreThreadComposerDraft(): void {
@@ -1716,16 +1723,16 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     input.value = draft?.text ?? '';
     if (draft?.files.length) referenceLibrary.stageDraftFiles(draft.files);
     resizeComposerInput();
+    if (!draft) void restoreComposerDraft();
   }
 
   function persistComposerDraft(): void {
-    if (!currentDocumentId || currentThread.messages.length > 0) return;
-    if (workspace.mode() !== 'cloud' && !input.value && !referenceLibrary.hasDrafts()) {
-      void deleteCloudComposerDraft(currentDocumentId);
-      return;
-    }
+    if (!currentDocumentId || readOnlyDocLabel !== null) return;
+    const key = currentThread.messages.length > 0 ? `thread:${currentThread.id}` : currentDocumentId;
+    const remove = !input.value && !referenceLibrary.hasDrafts()
+      && (currentThread.messages.length > 0 || workspace.mode() !== 'cloud');
     const draft = {
-      documentId: currentDocumentId,
+      documentId: key,
       docKey: currentDocKey,
       text: input.value,
       mode: workspace.mode(),
@@ -1733,22 +1740,28 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       updatedAt: Date.now(),
     };
     const files = referenceLibrary.snapshotDraftFiles();
-    void Promise.all(files.map(async (file) => ({
+    const write = (composerDraftWrites.get(key) ?? Promise.resolve()).then(async () => {
+      if (remove) { await deleteCloudComposerDraft(key); return; }
+      const attachments = await Promise.all(files.map(async (file) => ({
       name: file.name,
       mimeType: file.type || 'application/octet-stream',
       size: file.size,
       bytes: new Uint8Array(await file.arrayBuffer()),
-    }))).then((attachments) => saveCloudComposerDraft({
-      ...draft,
-      attachments,
-    })).catch(() => undefined);
+      })));
+      await saveCloudComposerDraft({ ...draft, attachments });
+    }).catch(() => undefined);
+    composerDraftWrites.set(key, write);
+    void write.finally(() => { if (composerDraftWrites.get(key) === write) composerDraftWrites.delete(key); });
   }
 
   async function restoreComposerDraft(): Promise<void> {
-    if (!currentDocumentId || currentThread.messages.length > 0) return;
+    if (!currentDocumentId || readOnlyDocLabel !== null) return;
     const documentId = currentDocumentId;
-    const draft = await loadCloudComposerDraft(documentId);
-    if (!draft || currentDocumentId !== documentId || currentThread.messages.length > 0) return;
+    const threadId = currentThread.id;
+    const key = currentThread.messages.length > 0 ? `thread:${threadId}` : documentId;
+    await composerDraftWrites.get(key);
+    const draft = await loadCloudComposerDraft(key);
+    if (!draft || currentDocumentId !== documentId || currentThread.id !== threadId) return;
     if (input.value && input.value !== draft.text) return;
     input.value = draft.text;
     chatWorkflow = draft.workflow;
@@ -1759,7 +1772,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
         { type: attachment.mimeType },
       )));
     }
-    if (draft.mode === 'cloud' && currentThread.executionMode !== 'cloud') {
+    if (currentThread.messages.length === 0 && draft.mode === 'cloud' && currentThread.executionMode !== 'cloud') {
       workspace.select('cloud');
     }
     resizeComposerInput();
@@ -1791,10 +1804,16 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       : `${AGENT_LABEL[selectedAgent]}는 아직 Cloud에서 사용할 수 없습니다. 로컬에서 계속하거나 Claude, Codex, pi, Grok, Cursor를 선택해 주세요.`;
   }
 
+  function correctCloudProvider(): void {
+    setConfigPanelOpen(true);
+    providerTrigger.focus();
+    providerTrigger.title = 'Cloud에서 사용할 에이전트를 선택해 주세요.';
+  }
+
   function openCloudWorkspace(trigger: HTMLElement = cloudModeButton): void {
     const providerMessage = cloudProviderUnavailableMessage();
     if (providerMessage && cloudController.getSnapshot().session.kind === 'idle') {
-      systemMessage(providerMessage);
+      correctCloudProvider();
       return;
     }
     if (!canSelectCloudWorkspace(workspace.mode(), bridge.isTurnRunning(), {
@@ -1993,6 +2012,57 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       syncWorkspaceModeAvailability();
     },
     onCloseSettings: () => setSettingsPanelOpen(false),
+    onOpenInbox: () => setSettingsPanelOpen(true, 'cloud'),
+    onOpenTask: async (task) => {
+      if (task.documentId !== currentDocumentId) {
+        if (!moveToLibraryDocument) throw new Error('이 Cloud 작업의 문서를 열 수 없습니다.');
+        await moveToLibraryDocument({ documentId: task.documentId, fileName: task.documentName });
+        updateDocumentContext();
+        // A cancelled save or failed open leaves the current document in place.
+        if (task.documentId !== currentDocumentId) return false;
+      }
+      const saved = getThread(task.threadId);
+      const next = await cloudController.refresh({ threadId: task.threadId,
+        documentId: task.documentId, selectedSessionId: task.sessionId }).catch((error) => {
+          if (saved?.cloudSessionId === task.sessionId) return null;
+          throw error;
+        });
+      if (next && (next.session.kind === 'idle' || next.session.sessionId !== task.sessionId)) {
+        throw new Error('선택한 Cloud 작업을 불러오지 못했습니다.');
+      }
+      if (next?.timeline && next.timeline.thread.id === task.threadId) {
+        const imported = importCloudTimeline(next.timeline, {
+          id: task.threadId, documentId: task.documentId, docKey: task.documentName,
+        });
+        if (imported) {
+          imported.executionMode = 'cloud';
+          imported.cloudSessionId = task.sessionId;
+          const previous = getThread(task.threadId);
+          imported.cloudStartId = previous?.cloudStartId ?? imported.cloudStartId;
+          imported.cloudRestartSourceSessionId = previous?.cloudRestartSourceSessionId;
+          imported.cloudRestartSourceStartId = previous?.cloudRestartSourceStartId;
+          upsertThread(imported);
+        }
+      }
+      if (!getThread(task.threadId)) throw new Error('저장된 대화를 불러오지 못했습니다. 다시 시도해 주세요.');
+      if (task.documentId !== currentDocumentId) return false;
+      openThread(task.threadId);
+      if (currentThread.id !== task.threadId) return false;
+      workspace.select('cloud');
+      return true;
+    },
+    onPauseAndEdit: deps.pauseAndEditCloud ?? (async (target) => {
+      const edit = await cloudController.beginEdit(target.sessionId);
+      cloudEditSessions.set(target.sessionId, edit.editSessionId);
+    }),
+    onContinueEditing: deps.continueCloudEditing ?? (async (target) => {
+      const editSessionId = cloudEditSessions.get(target.sessionId);
+      if (!editSessionId) throw new Error('편집 중인 Cloud 문서를 먼저 열어 주세요.');
+      await cloudController.continueEdit(target.sessionId, editSessionId);
+      cloudEditSessions.delete(target.sessionId);
+    }),
+    isEditingCloudDraft: deps.isEditingCloudDraft ?? ((sessionId) => cloudEditSessions.has(sessionId)),
+    onMonitor: () => workspace.setWorkspaceView('cloud'),
     isCloudMode: () => workspace.mode() === 'cloud',
     onWorkspaceLock: (reason) => beginAuthorityTransition(reason),
     onBeginAuthorityTransition: () => beginAuthorityTransition('authority-transition'),
@@ -2536,7 +2606,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     }
     const providerMessage = cloudProviderUnavailableMessage();
     if (providerMessage) {
-      systemMessage(providerMessage);
+      correctCloudProvider();
       return;
     }
     if (!deps.prepareCloudTransfer) {
@@ -3208,8 +3278,8 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
       chatPage.inert = open;
     },
     onDraftStateChange(change) {
-      if (change === 'content') cloudMessageRetry = null;
-      persistComposerDraft();
+      if (change !== 'status') cloudMessageRetry = null;
+      if (change !== 'context') persistComposerDraft();
       updateComposer();
     },
     onFileDeleted(fileId) {
@@ -4885,6 +4955,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
           if (cloudMessageRetry?.messageId === messageId) cloudMessageRetry = null;
           if (currentThread.id === targetThread.id) workspace.setWorkspaceView('cloud');
           if (input.value === submittedDraft) input.value = '';
+          persistComposerDraft();
           resizeComposerInput();
           if (result.committed.inserted && currentThread.id === targetThread.id) {
             const userBubble = renderUserMessage(result.committed.message);
@@ -5073,6 +5144,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     setComposerSkill(null);
     setSlashMenuOpen(false);
     input.style.height = 'auto';
+    persistComposerDraft();
   });
 
   // resizeHandle 을 마지막에 두어 왼쪽 가장자리 히트 테스트를 확실히 가져간다.
@@ -5815,6 +5887,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
 
     const btn = el('button', 'ag-threads-item');
     btn.type = 'button';
+    btn.dataset.threadId = thread.id;
     if (thread.id === currentThread.id) btn.classList.add('ag-active');
     // 상태 점은 제목 들여쓰기 여백에 겹쳐 앉는다 — 행 배치는 그대로다.
     const status = getChatStatus(thread.id);
@@ -8419,7 +8492,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   updateWorkflowControl();
   updateDocumentContext();
   recoverCloudStartIfNeeded();
-  if (currentThread.messages.length === 0) void restoreComposerDraft();
+  void restoreComposerDraft();
   rebuildReview();
 
   /**

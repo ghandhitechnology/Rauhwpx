@@ -342,7 +342,7 @@ test('Railway keeps timeout and caller cancellation active while reading respons
     fetchImpl: stalledFetch,
     probeHealth: async () => ({ ok: true, serverPublicKey: SERVER_KEY }),
     acquireReceipt: async () => ({}),
-    requestTimeoutMs: 20,
+    requestTimeoutMs: 80,
     queryMaxAttempts: 1,
   });
 

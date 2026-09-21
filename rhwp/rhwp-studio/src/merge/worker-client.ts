@@ -22,6 +22,7 @@ export interface MergeWorkerCallOptions {
 
 export interface MergeDocumentWorkerCallOptions extends MergeWorkerCallOptions {
   manifests?: MergeDocumentManifests;
+  review?: boolean;
 }
 
 export interface MergeMaterializeOutput {
@@ -194,7 +195,7 @@ export class MergeWorkerClient {
     // document merge. Its internal budget converts uncertain regions into
     // compatible conflicts, so the external soft budget reports but waits.
     return this.request(
-      { id: 0, operation: 'analyze-document', base, current, incoming, manifests: options.manifests },
+      { id: 0, operation: 'analyze-document', base, current, incoming, manifests: options.manifests, review: options.review },
       options,
     );
   }
@@ -214,6 +215,7 @@ export class MergeWorkerClient {
       incoming,
       resolutions,
       manifests: options.manifests,
+      review: options.review,
     }, options);
   }
 

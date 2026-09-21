@@ -469,7 +469,7 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
     { id: 'editing', label: '편집' },
     { id: 'ai', label: 'AI 설정' },
     { id: 'connections', label: 'AI 연결' },
-    { id: 'cloud', label: 'Cloud 연결' },
+    { id: 'cloud', label: 'Cloud 작업' },
   ];
   for (const destination of destinations) {
     const button = el('button', 'ag-settings-nav-button', destination.label);
@@ -1770,7 +1770,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   function selectableAgents(): readonly AgentName[] {
     return PROVIDER_ORDER.filter((agent) => {
       if (agent === 'pi') return piStatus?.setupComplete === true;
-      if (agent === 'rau') return setupStatuses?.rau?.setupComplete === true;
       return true;
     });
   }

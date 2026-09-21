@@ -637,3 +637,11 @@
   color: var(--ag-text-secondary);
   font-size: 11px;
 }
+.ag-cloud-more-actions { flex-basis: 100%; width: 100%; }
+.ag-cloud-more-actions > summary { width: fit-content; padding: 8px 0; color: var(--ag-text-secondary); cursor: pointer; font-size: 11px; }
+.ag-cloud-more-actions > summary:focus-visible { outline: 2px solid var(--accent-primary); outline-offset: 2px; }
+.ag-cloud-more-actions[open] { display: flex; flex-wrap: wrap; gap: 6px; }
+.ag-cloud-more-actions[open] > summary { width: 100%; }
+.ag-root[data-execution-mode='cloud'] .ag-conn,
+.ag-root[data-execution-mode='cloud'] .ag-conn-banner,
+.ag-root[data-execution-mode='cloud'] .ag-takeover-btn { display: none; }

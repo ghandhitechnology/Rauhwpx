@@ -77,6 +77,8 @@ export interface MergeResolverOpenOptions {
   };
   canDeleteSource?: boolean;
   materialize(request: MergeMaterializeRequest): Promise<MaterializedMergeResult>;
+  materializeReplacement?(): Promise<MaterializedMergeResult>;
+  reanalyze?(): Promise<void>;
   saveDraft(draft: VersionMergeDraft): Promise<void>;
   discardDraft(draftId: VersionMergeDraft['id']): Promise<void>;
   complete(request: MergeApplicationRequest): Promise<MergeAppliedReceipt>;

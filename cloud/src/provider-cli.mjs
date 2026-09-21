@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
-import { chmodSync, createReadStream, lstatSync, mkdirSync, readFileSync } from 'node:fs';
-import { access, copyFile, mkdir, mkdtemp, readlink, rename, rm, symlink } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { chmodSync, lstatSync, mkdirSync, readFileSync } from 'node:fs';
+import { copyFile, mkdir, readlink, rename, rm, symlink } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CloudError, PROVIDERS } from './protocol.mjs';
@@ -39,12 +39,6 @@ function ensurePrivateDirectory(directoryPath) {
   }
   chmodSync(directoryPath, 0o700);
   return directoryPath;
-}
-
-async function fileSha256(filename) {
-  const hash = createHash('sha256');
-  for await (const chunk of createReadStream(filename)) hash.update(chunk);
-  return hash.digest('hex');
 }
 
 export class ProviderCliManager {
@@ -103,17 +97,15 @@ export class ProviderCliManager {
       // CLAUDE_CONFIG_DIR the Cloud host process happens to carry.
       CLAUDE_CONFIG_DIR: ensurePrivateDirectory(path.join(home, '.claude')),
       CODEX_HOME: ensurePrivateDirectory(path.join(home, '.codex')),
-      GROK_HOME: ensurePrivateDirectory(path.join(home, '.grok')),
       PI_CODING_AGENT_DIR: ensurePrivateDirectory(path.join(piHome, 'agent')),
     };
     ensurePrivateDirectory(path.join(local, 'bin'));
     const binDirectory = path.join(this.config.providerCliDirectory, 'current', 'node_modules', '.bin');
-    const cursorBin = path.join(this.config.providerAuthDirectory, 'cursor', '.local', 'bin');
     return {
       ...process.env,
       HOME: home,
       ...state,
-      PATH: `${binDirectory}:${cursorBin}:${path.dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin`,
+      PATH: `${binDirectory}:${path.dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin`,
     };
   }
 
@@ -123,42 +115,6 @@ export class ProviderCliManager {
     const env = this.environment(provider);
     if (item.kind === 'npm') {
       await this.#installNpmBundle(env);
-    } else if (item.kind === 'archive') {
-      const archiveArchitecture = process.platform === 'darwin' && process.arch === 'arm64'
-        ? 'arm64'
-        : process.platform === 'linux' && ['x64', 'arm64'].includes(process.arch)
-          ? process.arch
-          : null;
-      if (!archiveArchitecture) {
-        throw new CloudError('PROVIDER_PLATFORM_UNSUPPORTED', `${provider} is not available on this Cloud host architecture`);
-      }
-      const versionRoot = path.join(env.HOME, '.local', 'share', 'cursor-agent', 'versions');
-      await mkdir(versionRoot, { recursive: true, mode: 0o700 });
-      const temporary = await mkdtemp(path.join(versionRoot, '.install-'));
-      const archive = path.join(temporary, 'cursor-agent.tar.gz');
-      const extracted = path.join(temporary, 'extracted');
-      const destination = path.join(versionRoot, item.version);
-      try {
-        await mkdir(extracted, { mode: 0o700 });
-        await run('curl', ['--fail', '--location', '--silent', '--show-error', item.urls[archiveArchitecture], '--output', archive], { env });
-        const actualDigest = await fileSha256(archive);
-        if (actualDigest !== item.sha256[archiveArchitecture]) {
-          throw new CloudError('PROVIDER_ARCHIVE_INVALID', `${provider} archive digest did not match`, 502);
-        }
-        await run('tar', ['-xzf', archive, '--strip-components=1', '-C', extracted], { env });
-        await access(path.join(extracted, item.bin));
-        await rm(destination, { recursive: true, force: true });
-        await rename(extracted, destination);
-        const binDirectory = path.join(env.HOME, '.local', 'bin');
-        await mkdir(binDirectory, { recursive: true, mode: 0o700 });
-        for (const name of ['agent', 'cursor-agent']) {
-          const link = path.join(binDirectory, name);
-          await rm(link, { force: true });
-          await symlink(path.relative(binDirectory, path.join(destination, item.bin)), link);
-        }
-      } finally {
-        await rm(temporary, { recursive: true, force: true });
-      }
     } else {
       throw new CloudError('PROVIDER_INSTALL_INVALID', `${provider} has an unsupported install asset`);
     }
@@ -195,27 +151,10 @@ export class ProviderCliManager {
     const argumentsByProvider = {
       claude: ['auth', 'login'],
       codex: ['login', '--device-auth'],
-      grok: ['login'],
-      cursor: ['login'],
     };
     const env = this.environment(provider);
-    if (item.kind === 'archive' && process.platform === 'darwin') {
-      await run('podman', [
-        ...(this.config.podmanConnection ? ['--connection', this.config.podmanConnection] : []),
-        'run', '--rm', '--interactive',
-        '--volume', `${env.HOME}:/workspace/home`,
-        '--entrypoint', item.bin,
-        this.config.workerImage,
-        ...argumentsByProvider[provider],
-      ], { env: { ...env, NO_OPEN_BROWSER: '1' } });
-    } else {
-      const command = item.kind === 'npm'
-        ? path.join(this.config.providerCliDirectory, 'current', 'node_modules', '.bin', item.bin)
-        : path.join(this.config.providerAuthDirectory, 'cursor', '.local', 'bin', item.bin);
-      await run(command, argumentsByProvider[provider], {
-        env: { ...env, NO_OPEN_BROWSER: '1' },
-      });
-    }
+    const command = path.join(this.config.providerCliDirectory, 'current', 'node_modules', '.bin', item.bin);
+    await run(command, argumentsByProvider[provider], { env: { ...env, NO_OPEN_BROWSER: '1' } });
     return this.providerManager.probe(provider);
   }
 

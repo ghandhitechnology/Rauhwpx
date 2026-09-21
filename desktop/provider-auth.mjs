@@ -10,33 +10,25 @@ export const PROVIDER_AUTH_FILES = Object.freeze({
   claude: Object.freeze(['.claude.json', '.claude/.credentials.json']),
   codex: Object.freeze(['.codex/auth.json']),
   pi: Object.freeze([]),
-  grok: Object.freeze(['.grok/auth.json', 'auth.json']),
-  cursor: Object.freeze(['.cursor/cli-config.json']),
 });
 
 export const PROVIDER_KEY_ENV = Object.freeze({
   claude: 'RAUHWpx_PROVIDER_KEY_CLAUDE',
   codex: 'RAUHWpx_PROVIDER_KEY_CODEX',
-  grok: 'RAUHWpx_PROVIDER_KEY_GROK',
   pi: 'RAUHWpx_PROVIDER_KEY_PI',
-  cursor: 'RAUHWpx_PROVIDER_KEY_CURSOR',
 });
 
 export const PROVIDER_SESSION_ENV = 'RAUHWpx_PROVIDER_SESSION';
 export const PROVIDER_SECRET_IDS = Object.freeze({
   claude: 'rhwp.claude.api-key',
   codex: 'rhwp.codex.api-key',
-  grok: 'rhwp.grok.api-key',
-  cursor: 'rhwp.cursor.api-key',
   pi: 'rhwp.pi.openrouter-api-key',
 });
 
 export const PROVIDER_API_KEY_ENV = Object.freeze({
   claude: 'ANTHROPIC_API_KEY',
   codex: 'OPENAI_API_KEY',
-  grok: 'XAI_API_KEY',
   pi: 'OPENROUTER_API_KEY',
-  cursor: 'CURSOR_API_KEY',
 });
 
 const PROVIDERS = Object.freeze(Object.keys(PROVIDER_AUTH_FILES));
@@ -126,19 +118,6 @@ function sourceCandidates(provider, { homeDir, cliRoot, env }) {
     return [
       env.CODEX_HOME ? { path: path.join(env.CODEX_HOME, 'auth.json'), dest: '.codex/auth.json' } : null,
       { path: path.join(homeDir, '.codex', 'auth.json'), dest: '.codex/auth.json' },
-    ];
-  }
-  if (provider === 'grok') {
-    return [
-      env.GROK_HOME ? { path: path.join(env.GROK_HOME, 'auth.json'), dest: '.grok/auth.json' } : null,
-      { path: path.join(homeDir, '.grok', 'auth.json'), dest: '.grok/auth.json' },
-      { path: path.join(cliRoot, 'grok', 'auth.json'), dest: '.grok/auth.json' },
-    ];
-  }
-  if (provider === 'cursor') {
-    return [
-      { path: path.join(homeDir, '.cursor', 'cli-config.json'), dest: '.cursor/cli-config.json' },
-      { path: path.join(cliRoot, 'cursor-home', '.cursor', 'cli-config.json'), dest: '.cursor/cli-config.json' },
     ];
   }
   return [];

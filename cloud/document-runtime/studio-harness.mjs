@@ -14,8 +14,6 @@ const KNOWN_CREDENTIALS = new Set([
   'ANTHROPIC_API_KEY',
   'OPENAI_API_KEY',
   'OPENROUTER_API_KEY',
-  'XAI_API_KEY',
-  'CURSOR_API_KEY',
 ]);
 const SAFE_HUB_ENVIRONMENT = new Set([
   'ALL_PROXY',
@@ -305,55 +303,6 @@ async function preparePiRuntime({ workspace, credentials, model, effort }) {
     },
   })}\n`, { mode: 0o600 });
   return piRoot;
-}
-
-export async function seedCursorRuntime(workspace) {
-  const cursorBin = path.join(workspace, 'home', '.local', 'bin', 'cursor-agent');
-  const versionsRoot = path.join(workspace, 'home', '.local', 'share', 'cursor-agent', 'versions');
-  const [resolvedVersionsRoot, resolvedCursorBin] = await Promise.all([
-    fs.realpath(versionsRoot).catch(() => null),
-    fs.realpath(cursorBin).catch(() => null),
-  ]);
-  const relativeBinary = resolvedVersionsRoot && resolvedCursorBin
-    ? path.relative(resolvedVersionsRoot, resolvedCursorBin)
-    : '';
-  if (
-    !resolvedVersionsRoot
-    || !resolvedCursorBin
-    || !relativeBinary
-    || relativeBinary.startsWith(`..${path.sep}`)
-    || path.isAbsolute(relativeBinary)
-    || !(await isPlainFile(resolvedCursorBin))
-  ) {
-    throw runtimeError(
-      'PROVIDER_RUNTIME_UNAVAILABLE',
-      'Cursor is unavailable in this worker because the VPS did not provide a verified cursor-agent binary',
-    );
-  }
-  const [version] = relativeBinary.split(path.sep);
-  if (!version || version === '.' || version === '..') {
-    throw runtimeError('PROVIDER_RUNTIME_UNAVAILABLE', 'Cursor runtime version directory is invalid');
-  }
-  const sourceVersionRoot = path.join(resolvedVersionsRoot, version);
-  const relativeWithinVersion = path.relative(sourceVersionRoot, resolvedCursorBin);
-  if (!relativeWithinVersion || relativeWithinVersion.startsWith(`..${path.sep}`) || path.isAbsolute(relativeWithinVersion)) {
-    throw runtimeError('PROVIDER_RUNTIME_UNAVAILABLE', 'Cursor binary is outside its verified version directory');
-  }
-  const setupRoot = path.join(workspace, 'provider-cli-state');
-  const sourceConfig = path.join(workspace, 'home', '.cursor');
-  const targetHome = path.join(setupRoot, 'cursor-home');
-  const targetBinDirectory = path.join(targetHome, '.local', 'bin');
-  const targetVersionRoot = path.join(targetHome, '.local', 'share', 'cursor-agent', 'versions', version);
-  await fs.mkdir(targetBinDirectory, { recursive: true, mode: 0o700 });
-  await fs.mkdir(path.dirname(targetVersionRoot), { recursive: true, mode: 0o700 });
-  await fs.cp(sourceVersionRoot, targetVersionRoot, { recursive: true, force: false });
-  const targetBinary = path.join(targetVersionRoot, relativeWithinVersion);
-  const targetLink = path.join(targetBinDirectory, 'cursor-agent');
-  await fs.symlink(path.relative(targetBinDirectory, targetBinary), targetLink);
-  if (await fs.lstat(sourceConfig).then((stat) => stat.isDirectory() && !stat.isSymbolicLink()).catch(() => false)) {
-    await fs.cp(sourceConfig, path.join(targetHome, '.cursor'), { recursive: true, force: false });
-  }
-  return { setupRoot, cursorBin: targetLink };
 }
 
 function resourceUrl(origin, bootstrap, id) {
@@ -699,11 +648,6 @@ export async function createStudioHarness({
     if (manifest.provider === 'pi') env.RHWP_PI_DIR = await preparePiRuntime({
       workspace, credentials, model: execution.model, effort: execution.effort,
     });
-    if (manifest.provider === 'cursor') {
-      const cursor = await seedCursorRuntime(workspace);
-      env.RHWP_CLI_DIR = cursor.setupRoot;
-      env.PATH = `${path.dirname(cursor.cursorBin)}:${env.PATH}`;
-    }
     await fs.mkdir(env.RHWP_WORK_DIR, { recursive: true, mode: 0o700 });
     hub = spawn(process.execPath, [path.join(agentRoot, 'server.mjs')], {
       cwd: agentRoot,

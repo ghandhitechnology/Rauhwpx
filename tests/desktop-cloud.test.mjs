@@ -739,6 +739,153 @@ test('desktop checkpoints carry the immutable handoff document identity', async 
   assert.equal(checkpoint.expectedOriginSha256, 'a'.repeat(64));
 });
 
+test('desktop pause-edit resumes the exact saved boundary and edited bytes', async (t) => {
+  const sessionId = 'cloud-edit-contract';
+  const checkpointBytes = Buffer.from('paused cloud draft');
+  const editedBytes = Buffer.from('locally edited cloud draft');
+  const commands = [];
+  const uploads = [];
+  let remote = {
+    id: sessionId,
+    status: 'running',
+    stateVersion: 8,
+    writerGeneration: null,
+    suspendedReason: null,
+    clientContext: { documentId: 'document-edit', threadId: 'thread-edit' },
+  };
+  const client = {
+    loadProfile: async () => null,
+    isPaired: async () => false,
+    session: async () => remote,
+    downloadCheckpoint: async () => ({
+      name: 'cloud-draft.hwpx',
+      bytes: checkpointBytes,
+      size: checkpointBytes.length,
+      sha256: sha256Hex(checkpointBytes),
+      revision: 6,
+      turn: 2,
+      boundaryOperation: 'saved_pause_boundary',
+      boundaryKind: 'operation',
+    }),
+    uploadBlob: async (input) => {
+      uploads.push(input);
+      return { blobId: sha256Hex(input.bytes), size: input.bytes.length };
+    },
+    command: async (id, type, payload, commandId) => {
+      commands.push({ id, type, payload, commandId });
+      if (type === 'session.pause') {
+        remote = {
+          ...remote,
+          status: 'suspended',
+          stateVersion: 9,
+          writerGeneration: 4,
+          suspendedReason: { code: 'USER_PAUSED', message: 'Paused for editing.' },
+        };
+        return { session: remote };
+      }
+      return {
+        session: { ...remote, status: 'queued', stateVersion: 10, suspendedReason: null },
+        resume: { editSessionId: payload.editSessionId, operationId: `human-edit:${payload.editSessionId}`, revision: 7 },
+      };
+    },
+  };
+  const coordinator = new CloudCoordinator({
+    client,
+    store: { list: async () => [] },
+    provisioner: {},
+  });
+  t.after(() => coordinator.stop());
+
+  const prepared = await coordinator.prepareEditDraft({ sessionId });
+  assert.deepEqual(Buffer.from(prepared.draft.bytes), checkpointBytes);
+  assert.deepEqual(prepared.draft.boundary, {
+    operationId: 'saved_pause_boundary', revision: 6, writerGeneration: 4, stateVersion: 9,
+  });
+
+  await coordinator.resumeEditedDocument({
+    sessionId,
+    editSessionId: prepared.draft.editSessionId,
+    boundary: prepared.draft.boundary,
+    bytes: editedBytes,
+    fileName: prepared.draft.fileName,
+    changeSummary: 'Updated the title.',
+  });
+
+  assert.equal(uploads.length, 1);
+  assert.deepEqual(Buffer.from(uploads[0].bytes), editedBytes);
+  assert.deepEqual(commands.map(({ type }) => type), ['session.pause', 'session.resume_edited']);
+  assert.deepEqual(commands[0].payload, { expectedVersion: 8 });
+  assert.equal(commands[0].commandId, `pause-edit_${sessionId}_8`);
+  assert.deepEqual(commands[1].payload, {
+    expectedVersion: 9,
+    editSessionId: prepared.draft.editSessionId,
+    expectedWriterGeneration: 4,
+    expectedBoundary: { operationId: 'saved_pause_boundary', revision: 6 },
+    editedDocument: { blobId: sha256Hex(editedBytes), size: editedBytes.length },
+    changeSummary: 'Updated the title.',
+  });
+  assert.match(commands[1].commandId, /^resume-edit_[a-f0-9]{64}$/);
+});
+
+test('desktop edited-resume retry reuses the durable command after its response is lost', async (t) => {
+  const sessionId = 'cloud-edit-lost-response';
+  const editSessionId = 'edit-lost-response';
+  const bytes = Buffer.from('edited draft committed before disconnect');
+  const blobId = sha256Hex(bytes);
+  const attempts = [];
+  let committed = false;
+  let sessionReads = 0;
+  const receipt = {
+    session: { id: sessionId, status: 'queued', stateVersion: 18, suspendedReason: null },
+    resume: { editSessionId, operationId: `human-edit:${editSessionId}`, revision: 12 },
+  };
+  const client = {
+    loadProfile: async () => null,
+    isPaired: async () => false,
+    session: async () => {
+      sessionReads += 1;
+      return receipt.session;
+    },
+    uploadBlob: async () => ({ blobId, size: bytes.length }),
+    command: async (id, type, payload, commandId) => {
+      attempts.push({ id, type, payload, commandId });
+      if (!committed) {
+        committed = true;
+        throw Object.assign(new Error('connection closed after commit'), { code: 'ECONNRESET' });
+      }
+      return receipt;
+    },
+  };
+  const coordinator = new CloudCoordinator({
+    client,
+    store: { list: async () => [] },
+    provisioner: {},
+  });
+  t.after(() => coordinator.stop());
+  const input = {
+    sessionId,
+    editSessionId,
+    boundary: {
+      operationId: 'pause-boundary-11',
+      revision: 11,
+      writerGeneration: 5,
+      stateVersion: 17,
+    },
+    bytes,
+    fileName: 'draft.hwpx',
+    changeSummary: 'Corrected the totals.',
+  };
+
+  await assert.rejects(coordinator.resumeEditedDocument(input), { code: 'ECONNRESET' });
+  const recovered = await coordinator.resumeEditedDocument(input);
+
+  assert.equal(recovered.editResume.operationId, `human-edit:${editSessionId}`);
+  assert.equal(sessionReads, 0, 'a committed queued session must not invalidate the paused retry receipt');
+  assert.equal(attempts.length, 2);
+  assert.deepEqual(attempts[1], attempts[0], 'the retry must address the same durable command receipt');
+  assert.equal(attempts[0].payload.expectedVersion, 17);
+});
+
 test('loading legacy terminal handoffs removes their staged payloads', async (t) => {
   const directory = await mkdtemp(path.join(tmpdir(), 'rauhwpx-cloud-terminal-migration-'));
   t.after(() => rm(directory, { recursive: true, force: true }));

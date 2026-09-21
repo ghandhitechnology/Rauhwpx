@@ -518,14 +518,38 @@ test('manual editor resolutions participate in resolver Undo/Redo and validation
 test('default source stays selected in collapsed merge options and cannot be deleted', async (context) => {
   const result = await withPage(context, (page) => page.evaluate(async () => {
     const { MergeResolverWindow } = await import('/src/merge/merge-resolver-window.ts');
-    const resolver = new MergeResolverWindow();
-    Object.assign(resolver as any, { options: { sourceBranch: 'main', currentBranch: 'feature', mode: 'diverged', canDeleteSource: false } });
-    const footer = (resolver as any).buildFooter() as HTMLElement;
-    const select = footer.querySelector<HTMLSelectElement>('.merge-source-select')!;
-    return { selected: select.value, deleteDisabled: select.querySelector<HTMLOptionElement>('option[value="delete"]')!.disabled,
-      optionsOpen: footer.querySelector<HTMLDetailsElement>('.merge-options')!.open };
+    const analysis = { analysisVersion: 2, result: {}, conflicts: [], automaticOperationCount: 0 };
+    const footerFor = (canDeleteSource: boolean) => {
+      const resolver = new MergeResolverWindow();
+      Object.assign(resolver as any, {
+        options: {
+          sourceBranch: 'main',
+          currentBranch: 'feature',
+          mode: 'diverged',
+          canDeleteSource,
+          analysis,
+        },
+      });
+      return (resolver as any).buildFooter() as HTMLElement;
+    };
+    const locked = footerFor(false);
+    const allowed = footerFor(true);
+    const allowedSelect = allowed.querySelector<HTMLSelectElement>('.merge-source-select')!;
+    return {
+      lockedSelectPresent: Boolean(locked.querySelector('.merge-source-select')),
+      lockedOptionsOpen: locked.querySelector<HTMLDetailsElement>('.merge-options')!.open,
+      selected: allowedSelect.value,
+      deleteDisabled: allowedSelect.querySelector<HTMLOptionElement>('option[value="delete"]')!.disabled,
+      optionsOpen: allowed.querySelector<HTMLDetailsElement>('.merge-options')!.open,
+    };
   }));
-  assert.deepEqual(result, { selected: 'keep', deleteDisabled: true, optionsOpen: false });
+  assert.deepEqual(result, {
+    lockedSelectPresent: false,
+    lockedOptionsOpen: false,
+    selected: 'keep',
+    deleteDisabled: false,
+    optionsOpen: false,
+  });
 });
 
 test('resolver desktop controls click, report failures, retry, and fit macOS chrome', async (context) => {
@@ -616,7 +640,13 @@ test('resolver desktop controls click, report failures, retry, and fit macOS chr
         ];
         const hitTargets = controls.map((button) => {
           const rect = button.getBoundingClientRect();
-          return document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)?.closest('button') === button;
+          return {
+            label: button.textContent,
+            hittable: document.elementFromPoint(
+              rect.left + rect.width / 2,
+              rect.top + rect.height / 2,
+            )?.closest('button') === button,
+          };
         });
         return {
           noHorizontalOverflow: root.scrollWidth <= window.innerWidth,
@@ -631,15 +661,19 @@ test('resolver desktop controls click, report failures, retry, and fit macOS chr
       assert.equal(geometry.noHorizontalOverflow, true, `${viewport.width}px resolver overflow`);
       assert.equal(geometry.headingClearsTrafficLights, true, `${viewport.width}px traffic-light overlap`);
       assert.equal(geometry.controlsInside, true, `${viewport.width}px control outside viewport`);
-      assert.deepEqual(geometry.hitTargets, [true, true]);
-      await page.click('.merge-resolver-header-actions .merge-secondary-button');
+      assert.deepEqual(geometry.hitTargets, [
+        { label: '모두 적용', hittable: true },
+        { label: '저장하고 닫기', hittable: true },
+        { label: '선택한 변경 적용', hittable: true },
+      ]);
+      await page.click('.merge-resolver-header-actions button[aria-label="병합 초안을 저장하고 닫기"]');
       await page.waitForSelector('.merge-resolver-window', { hidden: true });
     }
 
     await page.setViewport({ width: 1440, height: 900, deviceScaleFactor: 1 });
     await page.evaluate(() => (window as any).__mergeResolverHarness.open());
     await page.waitForFunction(() => !document.querySelector<HTMLButtonElement>('.merge-primary-button')?.disabled);
-    await page.click('.merge-resolver-header-actions .merge-secondary-button');
+    await page.click('.merge-resolver-header-actions button[aria-label="병합 초안을 저장하고 닫기"]');
     await page.waitForSelector('.merge-resolver-window', { hidden: true });
 
     await page.evaluate(() => {

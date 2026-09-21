@@ -2,6 +2,8 @@ import { createCloudController, type CloudDesktopApi } from '../cloud/desktop-cl
 import type { AgentName, AgentStreamEvent } from '../agent/types.ts';
 import type { CloudSessionState, CloudLinkKind, CloudSessionScope, CloudSnapshot, CloudTransferRequest, CloudCheckpointPayload, CloudCommandRequest } from '../cloud/types.ts';
 import { recordCloudUsage } from '../cloud/usage-history.ts';
+import { createEmptyThread } from '../agent/threads.ts';
+import { exportCloudTimeline } from '../cloud/timeline.ts';
 
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -16,6 +18,8 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
   let refreshBlocked = false;
   let sequence = 0;
   const checkpoints = new Map<string, CloudCheckpointPayload>();
+  const dashboardTimelines = new Map<string, CloudSnapshot['timeline']>();
+  const editSessions = new Map<string, string>();
   const merges: Array<{ startId: string; checkpoint: CloudCheckpointPayload }> = [];
   const calls = { commands: [] as CloudCommandRequest[], merges, downloads: 0, spawn: 0,
     spawnPayloads: [] as Array<{ providerId?: string; selectedProvider?: AgentName }>,
@@ -68,6 +72,25 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
       sessionId: `dashboard-session-${index}`, threadId: `dashboard-chat-${index}`, documentId: `dashboard-doc-${index}`,
       documentName, version: 1, reason: '사용자가 일시 정지했습니다.', resumable: true,
       selection: { agent: index % 2 === 0 ? 'codex' : 'claude', model: index % 2 === 0 ? 'gpt-5.4' : 'claude-sonnet-4-6', effort: 'high' } }));
+    state.sessions = state.sessions.map((task, index): Exclude<CloudSessionState, { kind: 'idle' }> => {
+      if (index === 3) return task;
+      if (index === 2) return { ...task, kind: 'completed', completedAt: now.toISOString(),
+        result: { fileName: task.documentName, byteLength: 2048, sha256: 'a'.repeat(64),
+          downloaded: true, availableOnThisDevice: true, expiresAt: null, conflict: 'none', preservedCopyName: null } };
+      return { ...task, kind: 'running', startedAt: now.toISOString(), turn: 1, turnLimit: 100,
+        elapsedMs: 42000, timeLimitMs: 3600000, currentActivity: '문서 검토 중',
+        phase: index === 1 ? 'awaiting-question-answer' : 'working',
+        wait: index === 1 ? { id: 'preview-question', kind: 'question', payload: { prompt: '어떤 독자를 위한 문서인가요?' } } : null };
+    });
+    state.sessions.forEach(task => {
+      const thread = createEmptyThread({ agent: task.selection!.agent, model: task.selection!.model,
+        effort: task.selection!.effort, docKey: task.documentName, documentId: task.documentId });
+      thread.id = task.threadId;
+      thread.executionMode = 'cloud';
+      thread.cloudSessionId = task.sessionId;
+      thread.messages = [{ role: 'user', text: `${task.documentName}의 내용을 검토해 주세요.` }];
+      dashboardTimelines.set(task.sessionId, exportCloudTimeline(thread));
+    });
   }
   function snapshot(): CloudSnapshot {
     state.revision++;
@@ -76,7 +99,7 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
       : state.sessions.find((session) => session.threadId === scope.threadId && session.documentId === scope.documentId);
     return structuredClone({ ...state,
       session: selected ?? { kind: 'idle' },
-      timeline: selected ? state.timeline : null,
+      timeline: selected ? dashboardTimelines.get(selected.sessionId) ?? state.timeline : null,
     });
   }
   function publish() { listener?.({ snapshot: snapshot() }); }
@@ -98,6 +121,30 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
     state.lease = { owner: 'local' };
   }
   const api: CloudDesktopApi = {
+    async cloudBeginEdit({ sessionId }) {
+      const task = state.sessions.find(entry => entry.sessionId === sessionId);
+      if (!task) throw new Error('작업을 찾을 수 없습니다.');
+      const editSessionId = editSessions.get(sessionId) ?? `preview-edit-${sessionId}`;
+      editSessions.set(sessionId, editSessionId);
+      state.session = { ...task, kind: 'suspended', version: task.version + 1,
+        reason: '문서 편집 중', resumable: true };
+      state.sessions = state.sessions.map(entry => entry.sessionId === sessionId ? state.session as Exclude<CloudSessionState, {kind: 'idle'}> : entry);
+      publish();
+      return { snapshot: snapshot(), editDraft: { sessionId, editSessionId,
+        boundary: { operationId: 'preview-pause', revision: 1, writerGeneration: 1, stateVersion: state.session.version },
+        fileName: task.documentName, savedAt: new Date().toISOString() } };
+    },
+    async cloudContinueEdit({ sessionId, editSessionId }) {
+      const task = state.sessions.find(entry => entry.sessionId === sessionId);
+      if (!task || editSessions.get(sessionId) !== editSessionId) throw new Error('편집 세션이 바뀌었습니다.');
+      state.session = { ...task, kind: 'running', version: task.version + 1,
+        startedAt: new Date().toISOString(), turn: 1, turnLimit: 100, elapsedMs: 0, timeLimitMs: 3600000,
+        currentActivity: '수정한 문서에서 이어서 작업 중', phase: 'working', wait: null };
+      state.sessions = state.sessions.map(entry => entry.sessionId === sessionId ? state.session as Exclude<CloudSessionState, {kind: 'idle'}> : entry);
+      editSessions.delete(sessionId);
+      publish();
+      return snapshot();
+    },
     async cloudGetState(next) {
       calls.refresh++;
       scope = next;
@@ -301,6 +348,9 @@ export function createMockCloud(options: { dashboard?: boolean } = {}) {
       publish();
     },
     emitAgentEvent,
+    openNotification(sessionId: string, operationId?: string) {
+      listener?.({ type: 'notification-open', sessionId, ...(operationId ? { operationId } : {}) });
+    },
     publishTimeline(timeline: NonNullable<CloudSnapshot['timeline']>) {
       state.timeline = structuredClone(timeline);
       publish();

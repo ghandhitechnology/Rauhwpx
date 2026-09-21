@@ -155,6 +155,12 @@ function transferError(message, code) {
   return Object.assign(new Error(message), { code, retryable: false });
 }
 
+function assertCloudSessionId(value) {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(value)) {
+    throw new Error('Cloud session id is invalid');
+  }
+}
+
 function validateTakeoverCompletion(input) {
   const sessionId = typeof input?.sessionId === 'string' ? input.sessionId : '';
   const operationId = typeof input?.operationId === 'string' ? input.operationId : '';
@@ -2668,6 +2674,138 @@ export class CloudCoordinator extends EventEmitter {
       await this.#ensureConversationWorker(input.sessionId);
     }
     return this.#withProfileOperation((profileEpoch) => this.#command(input, profileEpoch));
+  }
+
+  prepareEditDraft(input) {
+    return this.#withProfileOperation((profileEpoch) => this.#prepareEditDraft(input, profileEpoch));
+  }
+
+  async #prepareEditDraft({ sessionId }, profileEpoch) {
+    assertCloudSessionId(sessionId);
+    let remote = await this.#client.session(sessionId);
+    this.#assertProfileEpoch(profileEpoch);
+    if (remote.status === 'queued' || remote.status === 'running') {
+      const commandId = `pause-edit_${sessionId}_${remote.stateVersion}`;
+      const paused = await this.#client.command(sessionId, 'session.pause', {
+        expectedVersion: remote.stateVersion,
+      }, commandId);
+      this.#assertProfileEpoch(profileEpoch);
+      remote = paused.session ?? remote;
+    }
+    const deadline = Date.now() + 5 * 60_000;
+    let attempt = 0;
+    while (remote.status !== 'suspended' && Date.now() < deadline) {
+      await delay(Math.min(2_000, 250 * (2 ** Math.min(attempt, 3))));
+      remote = await this.#client.session(sessionId);
+      this.#assertProfileEpoch(profileEpoch);
+      attempt += 1;
+    }
+    if (remote.status !== 'suspended') {
+      throw transferError('Cloud did not reach a saved pause boundary in time', 'CLOUD_EDIT_PAUSE_TIMEOUT');
+    }
+    if (remote.suspendedReason?.code !== 'USER_PAUSED'
+      || !Number.isSafeInteger(remote.writerGeneration) || remote.writerGeneration < 1) {
+      throw transferError('Cloud is paused for a reason that cannot be edited locally', 'CLOUD_EDIT_UNAVAILABLE');
+    }
+    const checkpoint = await this.#downloadCheckpoint({ sessionId }, profileEpoch);
+    if (!checkpoint.operationId || !Number.isSafeInteger(checkpoint.revision)
+      || checkpoint.revision < 0 || !(checkpoint.bytes instanceof Uint8Array)) {
+      throw new Error('Cloud pause boundary did not include a valid document checkpoint');
+    }
+    const handoff = await this.#handoffForSession(sessionId, profileEpoch);
+    if (handoff) {
+      await this.#store.patch(handoff.id, {
+        state: 'suspended',
+        serverVersion: remote.stateVersion,
+        suspendedCode: 'USER_PAUSED',
+        statusMessage: remote.suspendedReason?.message ?? 'Paused for local editing.',
+      });
+    } else {
+      this.#remoteSessions.set(sessionId, remote);
+    }
+    const editSessionId = randomUUID();
+    const snapshot = await this.snapshot({ selectedSessionId: sessionId });
+    return {
+      operation: snapshot,
+      draft: {
+        sessionId,
+        editSessionId,
+        boundary: {
+          operationId: checkpoint.operationId,
+          revision: checkpoint.revision,
+          writerGeneration: remote.writerGeneration,
+          stateVersion: remote.stateVersion,
+        },
+        fileName: checkpoint.fileName,
+        bytes: checkpoint.bytes,
+      },
+    };
+  }
+
+  async resumeEditedDocument(input) {
+    await this.#ensureConversationWorker(input?.sessionId);
+    return this.#withProfileOperation((profileEpoch) => this.#resumeEditedDocument(input, profileEpoch));
+  }
+
+  async #resumeEditedDocument({
+    sessionId,
+    editSessionId,
+    boundary,
+    bytes: inputBytes,
+    fileName,
+    changeSummary = '',
+  }, profileEpoch) {
+    assertCloudSessionId(sessionId);
+    if (typeof editSessionId !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(editSessionId)
+      || !boundary || !Number.isSafeInteger(boundary.writerGeneration) || boundary.writerGeneration < 1
+      || !Number.isSafeInteger(boundary.stateVersion) || boundary.stateVersion < 0) {
+      throw new Error('Cloud edit identity is invalid');
+    }
+    const bytes = Buffer.from(inputBytes ?? []);
+    if (!bytes.length || bytes.length > 64 * 1024 * 1024) {
+      throw new Error('Cloud edit draft size is invalid');
+    }
+    const uploaded = await this.#client.uploadBlob({
+      bytes,
+      name: String(fileName ?? 'cloud-draft.hwpx'),
+      kind: 'document',
+      sessionId,
+    });
+    this.#assertProfileEpoch(profileEpoch);
+    const commandId = `resume-edit_${sha256Hex(Buffer.from(`${sessionId}\0${editSessionId}\0${uploaded.blobId}`))}`;
+    const result = await this.#client.command(sessionId, 'session.resume_edited', {
+      // Retain the version captured at the pause boundary. If the server
+      // committed this command but its response was lost, the retry remains
+      // byte-identical and returns the existing durable receipt.
+      expectedVersion: boundary.stateVersion,
+      editSessionId,
+      expectedWriterGeneration: boundary.writerGeneration,
+      expectedBoundary: {
+        operationId: boundary.operationId,
+        revision: boundary.revision,
+      },
+      editedDocument: { blobId: uploaded.blobId, size: uploaded.size },
+      changeSummary: changeSummary || null,
+    }, commandId);
+    this.#assertProfileEpoch(profileEpoch);
+    const handoff = await this.#handoffForSession(sessionId, profileEpoch);
+    if (handoff && result.session) {
+      await this.#store.patch(handoff.id, {
+        state: cloudState(result.session.status, 'queued'),
+        serverVersion: result.session.stateVersion ?? handoff.serverVersion,
+        suspendedCode: null,
+        statusMessage: null,
+        pauseRequested: false,
+      });
+    } else if (result.session) {
+      this.#remoteSessions.set(sessionId, result.session);
+    }
+    const snapshot = await this.snapshot({
+      selectedSessionId: sessionId,
+      extra: { commandResult: result, editResume: result.resume ?? null },
+    });
+    this.#emit({ type: 'edited-resume-completed', sessionId, editSessionId, snapshot });
+    return snapshot;
   }
 
   async #ensureConversationWorker(sessionId) {

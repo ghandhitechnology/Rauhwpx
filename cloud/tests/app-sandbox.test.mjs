@@ -138,7 +138,7 @@ test('config gates the local runner and keeps the control socket outside the dat
   assert.equal(local.workerControlSocket, '/run/rauhwpx/control.sock');
   assert.equal(local.maxRunningSessions, 1);
   assert.equal(parseConfig({ ...base, RAUHWpx_MAX_RUNNING: '8' }).maxRunningSessions, 8);
-  assert.deepEqual(local.startupProviders, ['claude', 'codex', 'pi', 'grok', 'cursor']);
+  assert.deepEqual(local.startupProviders, ['claude', 'codex', 'pi']);
   assert.deepEqual(local.browserOrigins, []);
   assert.deepEqual(parseConfig({
     ...base,

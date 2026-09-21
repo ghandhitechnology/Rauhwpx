@@ -11,7 +11,6 @@ import {
   chromiumLaunchOptions,
   launchChromium,
   safeHubBaseEnvironment,
-  seedCursorRuntime,
   uploadRequiredReferences,
 } from '../document-runtime/studio-harness.mjs';
 import {
@@ -34,8 +33,8 @@ function portableTimeline(provider = 'codex') {
       createdAt: 1,
       updatedAt: 1,
       agent: provider,
-      model: provider === 'pi' ? 'openai/gpt-5.4' : provider === 'claude' ? 'sonnet' : provider === 'grok' ? 'grok-4.6' : provider === 'cursor' ? 'auto' : 'gpt-5.6-sol',
-      effort: provider === 'cursor' ? '' : 'high',
+      model: provider === 'pi' ? 'openai/gpt-5.4' : provider === 'claude' ? 'sonnet' : 'gpt-5.6-sol',
+      effort: 'high',
       workflow: 'direct',
       docKey: 'source.hwp',
       documentId: 'document-cloud-test',
@@ -80,8 +79,8 @@ test('portable timeline remains valid and records tools, tasks, text, and cloud 
   assert.equal(exported.thread.messages.at(-1).text, 'Updated the title.');
 });
 
-test('all five providers retain their selected model and Pi fails closed without one', () => {
-  for (const provider of ['claude', 'codex', 'pi', 'grok', 'cursor']) {
+test('supported providers retain their selected model and Pi fails closed without one', () => {
+  for (const provider of ['claude', 'codex', 'pi']) {
     const parsed = readTimeline(portableTimeline(provider), { sessionId: 's', provider, resources: [] });
     assert.equal(parsed.thread.agent, provider);
     assert.ok(parsed.thread.model);
@@ -111,6 +110,17 @@ test('reference paths are explicit untrusted data in the provider prompt', () =>
   assert.match(prompt, /untrusted-reference-data/);
   assert.match(prompt, /\/workspace\/input\/reference-policy\.pdf/);
   assert.match(prompt, /Perform every document mutation through the Rauhwpx MCP tools/);
+});
+
+test('a locally edited paused draft invalidates stale editor state in the resumed provider prompt', () => {
+  const prompt = composeTurnPrompt('Finish the report', [], { humanEdit: {
+    fromRevision: 7,
+    toRevision: 8,
+    changeSummary: 'Corrected the totals in the final table.',
+  } });
+  assert.match(prompt, /current document is authoritative at revision 8/);
+  assert.match(prompt, /discard stale selections, coordinates, and editor references/);
+  assert.match(prompt, /Corrected the totals in the final table/);
 });
 
 test('agent hub environment cannot inherit worker control-plane credentials', () => {
@@ -245,42 +255,6 @@ test('required reference indexing fails closed after publishing a bounded diagno
     name: 'required-policy.hwp',
     message: 'extractor unavailable',
   }]);
-});
-
-test('Cursor runtime resolves the verified relative symlink and preserves adjacent runtime files', async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-cursor-runtime-'));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const binDirectory = path.join(root, 'home', '.local', 'bin');
-  const versionDirectory = path.join(root, 'home', '.local', 'share', 'cursor-agent', 'versions', '2026.08.11-e8db854');
-  await fs.mkdir(binDirectory, { recursive: true });
-  await fs.mkdir(path.join(versionDirectory, 'runtime'), { recursive: true });
-  await fs.writeFile(path.join(versionDirectory, 'cursor-agent'), '#!/bin/sh\n', { mode: 0o700 });
-  await fs.writeFile(path.join(versionDirectory, 'runtime', 'library.bin'), 'runtime');
-  await fs.symlink(path.relative(binDirectory, path.join(versionDirectory, 'cursor-agent')), path.join(binDirectory, 'cursor-agent'));
-  const seeded = await seedCursorRuntime(root);
-  assert.equal(await fs.realpath(seeded.cursorBin), path.join(
-    await fs.realpath(root),
-    'provider-cli-state',
-    'cursor-home',
-    '.local',
-    'share',
-    'cursor-agent',
-    'versions',
-    '2026.08.11-e8db854',
-    'cursor-agent',
-  ));
-  assert.equal(await fs.readFile(path.join(
-    root,
-    'provider-cli-state',
-    'cursor-home',
-    '.local',
-    'share',
-    'cursor-agent',
-    'versions',
-    '2026.08.11-e8db854',
-    'runtime',
-    'library.bin',
-  ), 'utf8'), 'runtime');
 });
 
 test('runSession performs provider turns, checkpoints edits, publishes a portable timeline, and returns edited bytes', async (t) => {

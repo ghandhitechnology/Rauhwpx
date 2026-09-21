@@ -96,6 +96,9 @@ contextBridge.exposeInMainWorld('rhwpDesktop', {
   cloudCloseDisplay: (payload) => ipcRenderer.invoke('cloud:display-close', payload),
   cloudDisplayInput: (payload) => ipcRenderer.invoke('cloud:display-input', payload),
   cloudResolveResult: (payload) => ipcRenderer.invoke('cloud:resolve-result', payload),
+  cloudBeginEdit: (payload) => ipcRenderer.invoke('cloud:begin-edit', payload),
+  cloudContinueEdit: (payload) => ipcRenderer.invoke('cloud:continue-edit', payload),
+  cloudPersistEditDraft: (payload) => ipcRenderer.invoke('cloud:edit-draft-save', payload),
   onCloudEvent: (callback) => {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on('cloud:event', listener);
@@ -105,6 +108,11 @@ contextBridge.exposeInMainWorld('rhwpDesktop', {
     const listener = (_event, payload) => callback(payload);
     ipcRenderer.on('cloud:display-event', listener);
     return () => ipcRenderer.removeListener('cloud:display-event', listener);
+  },
+  onCloudEditDraftSaveRequested: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on('cloud:edit-draft-save-requested', listener);
+    return () => ipcRenderer.removeListener('cloud:edit-draft-save-requested', listener);
   },
   ensureAgentHub: () => ipcRenderer.invoke('agent-hub:ensure'),
   respondToCloseRequest: (requestId, allowClose) => (

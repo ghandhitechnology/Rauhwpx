@@ -262,7 +262,7 @@ function validPortableTimeline(value) {
     && Number.isFinite(thread.createdAt)
     && typeof thread.updatedAt === 'number'
     && Number.isFinite(thread.updatedAt)
-    && ['claude', 'codex', 'pi', 'grok', 'cursor'].includes(thread.agent)
+    && ['claude', 'codex', 'pi'].includes(thread.agent)
     && typeof thread.model === 'string'
     && typeof thread.effort === 'string'
     && Array.isArray(thread.messages)

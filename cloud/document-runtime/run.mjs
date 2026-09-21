@@ -541,7 +541,7 @@ export async function runSession({
         await client.event('turn.dispatched', { turnNumber: nextTurnNumber, messageId: message.id ?? null });
         const checkpointBoundary = (kind) => saveBoundary(kind, nextTurnNumber, kind === 'turn');
         const runProvider = (resume = null) => harness.runTurn(
-          resume ? '' : composeTurnPrompt(content, references),
+          resume ? '' : composeTurnPrompt(content, references, manifest.resumeContext),
           {
             timeoutMs: Math.max(1_000, deadline - Date.now()),
             resume,

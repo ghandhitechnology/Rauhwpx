@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 
 export async function checkCliTerminalDefaults(page, origin) {
-  for (const provider of ['claude', 'codex', 'grok', 'cursor']) {
+  for (const provider of ['claude', 'codex']) {
     await page.goto(`${origin}/?page=settings&destination=connections&surface=provider-setup&provider=${provider}&services=setup`, { waitUntil: 'networkidle0' });
     await page.waitForSelector('.ag-agent-setup-overlay.ag-open');
     await page.$$eval('.ag-agent-setup-primary', buttons => buttons.find(b => b.textContent === '설치하고 계속').click());

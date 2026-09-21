@@ -23,10 +23,11 @@
   height: 100%;
   border-radius: inherit;
   background: var(--accent-primary);
-  transition: width 200ms linear;
+  animation: ag-cloud-connecting 1.8s ease-in-out infinite alternate;
 }
 
 .ag-cloud-link-progress[data-state='done'] .ag-cloud-link-progress-fill {
+  animation: none;
   transition: width 320ms ease-out;
 }
 
@@ -39,6 +40,12 @@
 
 @media (prefers-reduced-motion: reduce) {
   .ag-cloud-link-progress-fill {
+    animation: none;
     transition: none;
   }
+}
+
+@keyframes ag-cloud-connecting {
+  from { transform: translateX(0); }
+  to { transform: translateX(230%); }
 }

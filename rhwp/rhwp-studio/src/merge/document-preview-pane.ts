@@ -110,7 +110,7 @@ export class DocumentPreviewPane {
     this.source = source;
     const token = ++this.loadingToken;
     if (!source) {
-      this.statusEl.textContent = '충돌을 해결하면 결과 미리보기가 나타납니다.';
+      this.statusEl.textContent = '결과 미리보기를 준비합니다.';
       this.clearCanvas();
       return;
     }
@@ -149,8 +149,8 @@ export class DocumentPreviewPane {
     else if (fallbackPosition && this.wasm) {
       try {
         const rect = this.wasm.getCursorRect(fallbackPosition.section, fallbackPosition.paragraph, 0);
+        this.anchor = { ...rect, width: 12 };
         this.setPage(rect.pageIndex);
-        this.statusEl.textContent += ' / 관련 문단으로 이동함 (표시 위치 없음)';
       } catch {
         this.statusEl.textContent = '위치 정보가 없어 문서 미리보기만 표시합니다.';
         this.clearCanvas();

@@ -1,5 +1,7 @@
 //! Deterministic three-way structural merging and conservative HWP/HWPX adapters.
 
+mod review;
+
 use crate::model::{
     bin_data::{BinDataBytes, BinDataContent},
     control::{Control, Equation, FormObject},
