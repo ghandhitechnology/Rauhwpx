@@ -106,6 +106,7 @@ export function createMockBridge(report: (message: string) => void) {
   };
   const setupChanged = () =>
     emit({ type: 'agent-setup-status', statuses: data.setups });
+  const skillTrash = new Map();
   const skillsChanged = () => {
     emit({ type: 'skills-catalog', catalog: data.skills });
   };
@@ -897,9 +898,18 @@ export function createMockBridge(report: (message: string) => void) {
           );
           if (row && row.kind === 'skill') row.enabled = change.enabled;
         } else if (change.action === 'delete') {
+          const row = data.skills.rows.find((item) => item.name === change.name);
+          if (row) skillTrash.set(change.name, row);
           data.skills.rows = data.skills.rows.filter(
             (item) => item.name !== change.name,
           );
+        } else if (change.action === 'restore') {
+          const row = skillTrash.get(change.name);
+          if (row && !data.skills.rows.some((item) => item.name === change.name)) {
+            data.skills.rows.push(row);
+            data.skills.rows.sort((left, right) => left.name.localeCompare(right.name));
+            skillTrash.delete(change.name);
+          }
         }
         emit({
           type: 'skill-commit-result',
