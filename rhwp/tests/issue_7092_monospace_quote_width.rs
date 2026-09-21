@@ -1,14 +1,3 @@
-//! [#7092] 고정폭 표의 작은따옴표 `‘`·`’` 를 적힌 전각 폭으로 잰다.
-//!
-//! 업스트림 [edwardkim/rhwp#7272](https://github.com/edwardkim/rhwp/pull/7272)
-//! 의 `issue_7092_monospace_quote_width` 계약을 Rauhwpx 측정 경로에 옮긴다.
-//!
-//! `measure_char_width_with_policy` 의 `is_narrow_unicode_punct` 분기는 전각으로
-//! 적힌 값을 face 와 무관하게 `em × 0.3` 으로 눌러 왔다. 같은 분기의 `·` 는
-//! `#630` 에서 이미 고정폭 표를 예외로 두었는데, 따옴표에는 그 예외가 없었다.
-//!
-//! 비고정폭 face 는 이 변경의 범위 밖이다. `휴먼명조` 단위 시험이 종전 폭을 잠근다.
-
 #![cfg(not(target_arch = "wasm32"))]
 
 use std::path::Path;
@@ -70,7 +59,6 @@ fn advances_for(font: &str, samples: &[(&str, u32)]) -> Vec<f64> {
     out
 }
 
-/// 고정폭 표의 따옴표는 전각으로 전진한다. 수정 전에는 전건 0.300 em 이었다.
 #[test]
 fn monospace_quotes_advance_full_width() {
     for (font, samples) in [

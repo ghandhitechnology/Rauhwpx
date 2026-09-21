@@ -1832,10 +1832,6 @@ fn measure_char_width_with_policy(
         // 강제 시 한컴 대비 약 4px (font-size 20px 기준, 0.5→0.3 em 차) 과대.
         // glyph_w 가 비정상 fullwidth (>= em_size) 일 때만 0.3 em 강제 — 함초롬
         // 바탕 (0.32) / Pretendard (0.22) 등 정상 DB 값은 조건 미충족으로 영향 없음.
-        // [#7092] 고정폭 표의 `‘`·`’` 는 글꼴이 지닌 전각이 진짜 값이다.
-        // `·` 는 이미 `is_monospace_metric` 으로 이 갈래를 빼 두었는데, 따옴표는
-        // face 를 보지 않고 0.3em 으로 눌러 왔다. 비고정폭 face 는 TrueType/HFT
-        // 실현이 갈려 종전 폭을 유지한다 (#7092 잔여).
         let quote_width_is_authentic =
             matches!(c, '\u{2018}' | '\u{2019}') && is_monospace_metric(mm.metric);
         let is_narrow_unicode_punct =
@@ -3386,8 +3382,6 @@ mod tests {
         )
     }
 
-    /// [#7092 / rhwp#7272] 고정폭 표의 `‘`·`’` 는 적힌 전각으로 전진한다.
-    /// 수정 전에는 face 와 무관하게 0.3em 으로 눌렸다.
     #[test]
     fn test_7092_monospace_quotes_advance_full_width() {
         for family in ["굴림체", "돋움체", "바탕체"] {
@@ -3400,8 +3394,6 @@ mod tests {
         }
     }
 
-    /// 반례 — 비고정폭 face 는 종전 0.3em 을 유지한다.
-    /// 휴먼명조는 TrueType/HFT 실현이 갈려 #7092 잔여로 남긴다.
     #[test]
     fn test_7092_proportional_quotes_keep_narrow_width() {
         let (left, right) = quote_advances_em("휴먼명조", 20.0);
