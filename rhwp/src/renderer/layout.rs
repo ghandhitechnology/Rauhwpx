@@ -2098,6 +2098,7 @@ pub struct LayoutEngine {
     /// `cell_units_uncached` 안에서 계산되어 52,694 셀 표에서 O(셀²)(≈28억) 로 폭증했다.
     /// `cell_units_cache` 와 동일 조판 경계에서 clear 한다.
     table_nested_text_flag_cache: std::cell::RefCell<std::collections::HashMap<usize, bool>>,
+    resolved_shaping_fonts: std::cell::RefCell<Vec<ResolvedShapingFont>>,
     /// Issue #2214 test-only: cache miss가 실제 table-wide scan으로 이어진 횟수.
     #[cfg(test)]
     table_nested_text_flag_scan_count: std::cell::Cell<usize>,
@@ -2111,14 +2112,25 @@ mod table_cell_content;
 mod table_layout;
 mod table_partial;
 mod text_measurement;
+
+pub(crate) fn measure_known_font_run_width(
+    font_family: &str,
+    italic: bool,
+    text: &str,
+    font_size: f64,
+) -> Option<f64> {
+    text_measurement::measure_known_font_run_width(font_family, italic, text, font_size)
+}
 mod utils;
 
 pub(crate) use paragraph_layout::ensure_min_baseline;
 pub(crate) use table_layout::border_style_has_diagonal;
 pub(crate) use text_measurement::{
-    compute_char_positions, estimate_text_width, estimate_text_width_unrounded,
-    extract_tab_leaders_with_extended, find_next_tab_stop, is_cjk_char, is_halfwidth_cjk_quote,
-    resolved_to_text_style, split_into_clusters,
+    compute_char_positions, compute_glyph_positions, enter_resolved_shaping_fonts,
+    estimate_text_width, estimate_text_width_unrounded, extract_tab_leaders_with_extended,
+    find_next_tab_stop, is_cjk_char, is_halfwidth_cjk_quote, resolved_to_text_style,
+    split_into_clusters, with_resolved_shaping_fonts, ResolvedShapingFont,
+    ResolvedShapingFontScope,
 };
 // [Task #826] map_pua_bullet_char 는 통합 테스트 (tests/issue_826.rs) 에서 직접 검증
 // (PUA substitution 매핑 정합) — pub 노출.
@@ -2175,6 +2187,7 @@ impl LayoutEngine {
             hwpx_page_preview: std::cell::RefCell::new(None),
             cell_units_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
             table_nested_text_flag_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
+            resolved_shaping_fonts: std::cell::RefCell::new(Vec::new()),
             #[cfg(test)]
             table_nested_text_flag_scan_count: std::cell::Cell::new(0),
         }
@@ -2185,6 +2198,14 @@ impl LayoutEngine {
     pub fn clear_layout_caches(&self) {
         self.cell_units_cache.borrow_mut().clear();
         self.table_nested_text_flag_cache.borrow_mut().clear();
+    }
+
+    pub(crate) fn set_resolved_shaping_fonts(&self, fonts: Vec<ResolvedShapingFont>) {
+        *self.resolved_shaping_fonts.borrow_mut() = fonts;
+    }
+
+    pub(crate) fn resolved_shaping_fonts(&self) -> Vec<ResolvedShapingFont> {
+        self.resolved_shaping_fonts.borrow().clone()
     }
 
     pub(crate) fn set_render_normalization_overlay(
@@ -4783,8 +4804,8 @@ impl LayoutEngine {
             3 => StrokeDash::Dot,
             4 => StrokeDash::DashDot,
             5 => StrokeDash::DashDotDot,
-            6 => StrokeDash::Dash,
-            7 => StrokeDash::Dot,
+            6 => StrokeDash::LongDash,
+            7 => StrokeDash::Circle,
             _ => StrokeDash::Solid,
         };
         for i in 0..zone_layout.column_areas.len() - 1 {

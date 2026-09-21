@@ -47,6 +47,7 @@ impl DocumentCore {
         &self,
         tree: &PageLayerTree,
     ) -> Result<Vec<PageHyperlink>, HwpError> {
+        let _font_scope = self.resolved_shaping_font_scope();
         let mut links = Vec::new();
         let page = BoundingBox {
             x: 0.0,

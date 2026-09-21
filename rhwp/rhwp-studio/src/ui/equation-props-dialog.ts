@@ -1,6 +1,6 @@
 import type { WasmBridge } from '@/core/wasm-bridge';
 import type { EventBus } from '@/core/event-bus';
-import type { EquationProperties, NoteControlRef } from '@/core/types';
+import type { CellPathLike, EquationProperties, NoteControlRef } from '@/core/types';
 import type { CommandServices } from '@/command/types';
 import { EquationEditorDialog } from './equation-editor-dialog';
 import { enableDialogDrag } from './dialog-drag';
@@ -46,6 +46,8 @@ export class EquationPropertiesDialog {
   private ci = 0;
   private cellIdx?: number;
   private cellParaIdx?: number;
+  private innerControlIdx?: number;
+  private cellPath?: CellPathLike;
   private noteRef?: NoteControlRef;
   private props: EquationProperties | null = null;
 
@@ -73,19 +75,23 @@ export class EquationPropertiesDialog {
     private services?: CommandServices,
   ) {}
 
-  open(sec: number, para: number, ci: number, cellIdx?: number, cellParaIdx?: number, noteRef?: NoteControlRef): void {
+  open(sec: number, para: number, ci: number, cellIdx?: number, cellParaIdx?: number, noteRef?: NoteControlRef, innerControlIdx?: number, cellPath?: CellPathLike): void {
     this.build();
     this.sec = sec;
     this.para = para;
     this.ci = ci;
     this.cellIdx = cellIdx;
     this.cellParaIdx = cellParaIdx;
+    this.innerControlIdx = innerControlIdx;
+    this.cellPath = cellPath;
     this.noteRef = noteRef;
 
     try {
       this.props = noteRef
         ? this.wasm.getNoteEquationProperties(noteRef)
-        : this.wasm.getEquationProperties(sec, para, ci, cellIdx, cellParaIdx);
+        : cellPath?.length && innerControlIdx !== undefined
+          ? this.wasm.getEquationPropertiesByPath(sec, para, cellPath, innerControlIdx)
+          : this.wasm.getEquationProperties(sec, para, ci, cellIdx, cellParaIdx, innerControlIdx);
     } catch (err) {
       console.warn('[EquationProperties] 수식 속성 가져오기 실패:', err);
       return;
@@ -344,8 +350,12 @@ export class EquationPropertiesDialog {
       const applyProps = () => {
         if (this.noteRef) {
           this.wasm.setNoteEquationProperties(this.noteRef, updated);
+        } else if (this.cellPath?.length && this.innerControlIdx !== undefined) {
+          this.wasm.setEquationPropertiesByPath(
+            this.sec, this.para, this.cellPath, this.innerControlIdx, updated,
+          );
         } else {
-          this.wasm.setEquationProperties(this.sec, this.para, this.ci, this.cellIdx, this.cellParaIdx, updated);
+          this.wasm.setEquationProperties(this.sec, this.para, this.ci, this.cellIdx, this.cellParaIdx, updated, this.innerControlIdx);
         }
       };
       try {
@@ -377,7 +387,7 @@ export class EquationPropertiesDialog {
   private openEditor(): void {
     this.hide();
     const editor = new EquationEditorDialog(this.wasm, this.eventBus, this.services);
-    editor.open(this.sec, this.para, this.ci, this.cellIdx, this.cellParaIdx, this.noteRef);
+    editor.open(this.sec, this.para, this.ci, this.cellIdx, this.cellParaIdx, this.noteRef, this.innerControlIdx, this.cellPath);
   }
 
   private captionPositionLabel(): string {

@@ -136,6 +136,7 @@ export type SidebarBridge = Omit<AgentBridge, 'pendingEdits'> & {
 
 export interface AgentBridge {
   readonly pendingEdits: PendingEditManager;
+  getDocumentSelectionIdentity(): { documentId: string | null; revision: number };
   getConnectionState(): 'connecting' | 'connected' | 'disconnected' | 'replaced';
   getActiveAgent(): AgentName | null;
   isTurnRunning(): boolean;
@@ -204,7 +205,13 @@ export interface AgentBridge {
   requestTitle(threadId: string, preview: string): string;
   /** 커밋 메시지는 부수 정보다. 오프라인, 실패, 타임아웃이면 null. */
   requestCheckpointTitle(input: CheckpointTitleRequest): Promise<CheckpointTitleResult | null>;
-  sendUserMessage(text: string, skillName?: string, stagedReferenceIds?: string[]): Promise<string | null>;
+  sendUserMessage(
+    text: string,
+    skillName?: string,
+    stagedReferenceIds?: string[],
+    requireReceipt?: boolean,
+    signal?: AbortSignal,
+  ): Promise<string | null>;
   listTemplates(): Promise<TemplateCatalog>;
   addTemplate(file: File, name?: string): Promise<DocumentTemplate>;
   renameTemplate(id: string, name: string): Promise<DocumentTemplate>;
@@ -1278,6 +1285,10 @@ export class AgentBridgeImpl implements AgentBridge {
     document.addEventListener('visibilitychange', this.onVisibility);
     this.setState('connecting');
     void this.initializeConnection();
+  }
+
+  getDocumentSelectionIdentity(): { documentId: string | null; revision: number } {
+    return { documentId: this.documentId, revision: this.revision.revision };
   }
 
   private async initializeConnection() {
@@ -2832,11 +2843,33 @@ export class AgentBridgeImpl implements AgentBridge {
     );
   }
 
-  sendUserMessage(text: string, skillName?: string, stagedReferenceIds: string[] = []): Promise<string | null> {
+  sendUserMessage(
+    text: string,
+    skillName?: string,
+    stagedReferenceIds: string[] = [],
+    requireReceipt = false,
+    signal?: AbortSignal,
+  ): Promise<string | null> {
     const context = this.referenceContext();
-    const messageId = stagedReferenceIds.length > 0 ? `message-${++this.requestSeq}` : undefined;
+    const messageId = stagedReferenceIds.length > 0 || requireReceipt ? `message-${++this.requestSeq}` : undefined;
     return new Promise((resolve) => {
-      const message = { text, skillName, context, messageId, stagedReferenceIds: [...stagedReferenceIds], resolve };
+      if (signal?.aborted) {
+        resolve(null);
+        return;
+      }
+      let message: (typeof this.queuedMessages)[number];
+      const cancel = (): void => {
+        const index = this.queuedMessages.indexOf(message);
+        if (index < 0) return;
+        this.queuedMessages.splice(index, 1);
+        settle(null);
+      };
+      const settle = (result: string | null): void => {
+        signal?.removeEventListener('abort', cancel);
+        resolve(result);
+      };
+      message = { text, skillName, context, messageId, stagedReferenceIds: [...stagedReferenceIds], resolve: settle };
+      signal?.addEventListener('abort', cancel, { once: true });
       if (this.pendingChatStart || this.workflowSwitchPending || this.activeAgent === null || this.queuedMessages.length > 0) {
         this.queuedMessages.push(message);
         if (this.activeAgent === null) {

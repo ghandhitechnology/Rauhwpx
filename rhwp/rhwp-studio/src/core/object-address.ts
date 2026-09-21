@@ -14,6 +14,7 @@ export interface AddressedObjectRef {
   type: string;
   cellIdx?: number;
   cellParaIdx?: number;
+  innerControlIdx?: number;
   outerTableControlIdx?: number;
   cellPath?: CellPathLike;
   headerFooter?: unknown;
@@ -91,6 +92,7 @@ export function sameAddressedObject(a: AddressedObjectRef, b: AddressedObjectRef
     && a.ppi === b.ppi
     && a.ci === b.ci
     && a.type === b.type
+    && a.innerControlIdx === b.innerControlIdx
     && stableCellPath(a.cellPath) === stableCellPath(b.cellPath)
     && stableAddressPart(a.headerFooter) === stableAddressPart(b.headerFooter)
     && stableAddressPart(a.noteRef) === stableAddressPart(b.noteRef)

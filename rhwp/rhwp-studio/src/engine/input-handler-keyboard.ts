@@ -12,7 +12,7 @@ import {
   type NavigationAction,
   type NavigationKeyInput,
 } from './navigation-keymap';
-import type { DocumentPosition, CellBbox, CellPathLike, CursorRect } from '@/core/types';
+import type { DocumentPosition, CellPathLike, CursorRect } from '@/core/types';
 import type { WasmBridge } from '@/core/wasm-bridge';
 import { INSERTED_IMAGE_MAX_BYTES, readBlobBytesWithLimit } from '@/core/document-input-limits';
 import { canDeleteObjectControl } from './input-handler-picture';
@@ -26,6 +26,7 @@ import { caretRectForPageScroll as resolveCaretRectForPageScroll } from '@/view/
 import { inlinePictureInsertionTarget } from './inline-picture-target';
 import { inlineOfficeClipboardImages, liftImagesToBlockLevel, needsRtfImageInlining } from './office-clipboard-images';
 import { extractHwpJsonModel, HWPJSON_PASTE_MAX_CHARS, sanitizeOfficeHtmlForCore } from './office-html-sanitize';
+import { isLastTableCell, remapTableCellPosition, tableModelPathJson } from '@/core/table-structural-cursor';
 
 const RHWP_CLIPBOARD_MARKER_RE = /<!--\s*rhwp-studio-clipboard:([A-Za-z0-9._:-]+)\s*-->/;
 const PAGINATION_BOUNDARY_KEYS = new Set([
@@ -113,30 +114,6 @@ function isNestedCellPosition(pos: DocumentPosition): boolean {
   return pos.parentParaIndex !== undefined && (pos.cellPath?.length ?? 0) > 1;
 }
 
-function uniqueCellsInReadingOrder(bboxes: CellBbox[]): CellBbox[] {
-  const seen = new Set<number>();
-  const unique: CellBbox[] = [];
-  for (const bbox of bboxes) {
-    if (seen.has(bbox.cellIdx)) continue;
-    seen.add(bbox.cellIdx);
-    unique.push(bbox);
-  }
-  unique.sort((a, b) => a.row !== b.row ? a.row - b.row : a.col - b.col);
-  return unique;
-}
-
-function tableCellStartPosition(pos: DocumentPosition, cellIndex: number): DocumentPosition {
-  return {
-    sectionIndex: pos.sectionIndex,
-    paragraphIndex: 0,
-    charOffset: 0,
-    parentParaIndex: pos.parentParaIndex,
-    controlIndex: pos.controlIndex,
-    cellIndex,
-    cellParaIndex: 0,
-  };
-}
-
 function insertRowAfterLastTableCellByTab(this: any): boolean {
   const pos = this.cursor.getPosition() as DocumentPosition;
   const sec = pos.sectionIndex;
@@ -144,27 +121,28 @@ function insertRowAfterLastTableCellByTab(this: any): boolean {
   const ci = pos.controlIndex;
   const currentCellIdx = pos.cellIndex;
   if (ppi === undefined || ci === undefined || currentCellIdx === undefined) return false;
-  if (isNestedCellPosition(pos)) return false;
+  const pathJson = pos.cellPath?.length ? JSON.stringify(pos.cellPath) : null;
+  const modelPathJson = tableModelPathJson(pos);
 
   try {
-    const order = uniqueCellsInReadingOrder(this.wasm.getTableCellBboxes(sec, ppi, ci));
-    if (order.length === 0 || order[order.length - 1].cellIdx !== currentCellIdx) {
-      return false;
-    }
-
-    const info = this.wasm.getCellInfo(sec, ppi, ci, currentCellIdx);
+    const info = pathJson
+      ? this.wasm.getCellInfoByPath(sec, ppi, pathJson)
+      : this.wasm.getCellInfo(sec, ppi, ci, currentCellIdx);
+    const dims = pathJson
+      ? this.wasm.getTableDimensionsByPath(sec, ppi, pathJson)
+      : this.wasm.getTableDimensions(sec, ppi, ci);
+    if (!isLastTableCell(info, dims)) return false;
     const insertAfterRow = info.row + Math.max(1, info.rowSpan || 1) - 1;
     this.executeOperation({
       kind: 'snapshot',
       operationType: 'insertTableRow',
       operation: (wasm: WasmBridge) => {
-        wasm.insertTableRow(sec, ppi, ci, insertAfterRow, true);
-        const nextOrder = uniqueCellsInReadingOrder(wasm.getTableCellBboxes(sec, ppi, ci));
+        pathJson
+          ? wasm.insertTableRowByPath(sec, ppi, pathJson, insertAfterRow, true)
+          : wasm.insertTableRow(sec, ppi, ci, insertAfterRow, true);
         const insertedRow = insertAfterRow + 1;
-        const nextCell = nextOrder.find(cell => cell.row === insertedRow)
-          ?? nextOrder.find(cell => cell.row > insertAfterRow)
-          ?? nextOrder[nextOrder.length - 1];
-        return tableCellStartPosition(pos, nextCell?.cellIdx ?? currentCellIdx);
+        const nextCell = wasm.getTableCellTargetByPath(sec, ppi, modelPathJson, insertedRow, 0, 0);
+        return remapTableCellPosition(pos, nextCell, true);
       },
     });
     return true;
@@ -180,6 +158,9 @@ type PictureDeleteRef = {
   ci: number;
   type: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole';
   cellPath?: CellPathLike;
+  cellIdx?: number;
+  cellParaIdx?: number;
+  innerControlIdx?: number;
   noteRef?: unknown;
   memoRef?: unknown;
   headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number };
@@ -194,7 +175,15 @@ function deleteSelectedObject(wasm: WasmBridge, ref: PictureDeleteRef): void {
       wasm.deletePictureControl(ref.sec, ref.ppi, ref.ci);
     }
   } else if (ref.type === 'equation') {
-    wasm.deleteEquationControl(ref.sec, ref.ppi, ref.ci);
+    if (ref.cellPath?.length && ref.innerControlIdx !== undefined) {
+      wasm.deleteEquationControlInCellByPath(ref.sec, ref.ppi, ref.cellPath, ref.innerControlIdx);
+    } else if (ref.cellIdx !== undefined && ref.cellParaIdx !== undefined && ref.innerControlIdx !== undefined) {
+      wasm.deleteEquationControlInCell(
+        ref.sec, ref.ppi, ref.ci, ref.cellIdx, ref.cellParaIdx, ref.innerControlIdx,
+      );
+    } else {
+      wasm.deleteEquationControl(ref.sec, ref.ppi, ref.ci);
+    }
   } else {
     wasm.deleteShapeControl(ref.sec, ref.ppi, ref.ci);
   }
@@ -429,7 +418,7 @@ async function convertToPngBlob(data: Uint8Array, mime: string): Promise<Blob> {
 /** [Task #1161] 선택된 picture ref 의 cellPath 를 native cellPathJson 인자로 변환.
  * 셀/글상자 밖 picture(본문)는 빈 문자열 → native 가 본문 경로로 처리. */
 export function pictureCellPathJson(
-  ref: { cellPath?: Array<{ controlIndex: number; cellIndex: number; cellParaIndex: number }> } | null,
+  ref: { cellPath?: CellPathLike } | null,
 ): string {
   return ref && ref.cellPath && ref.cellPath.length > 0 ? JSON.stringify(ref.cellPath) : '';
 }

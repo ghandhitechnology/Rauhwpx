@@ -22,10 +22,10 @@ type AuditAction = (button: HTMLButtonElement) => void | Promise<unknown>;
 
 const fontReport: DocumentFontStatusReport = {
   fonts: [
-    { fontName: '함초롬바탕', status: 'available', source: 'web', substituteFont: null },
-    { fontName: '한컴바탕', status: 'needs-local-check', source: 'unknown', substituteFont: null },
-    { fontName: '신명조', status: 'web-substitute', source: 'web', substituteFont: '함초롬바탕' },
-    { fontName: '문서 전용 글꼴', status: 'missing', source: 'unknown', substituteFont: null },
+    { fontName: '함초롬바탕', status: 'available', source: 'web', substituteFont: null, loadedFace: '함초롬바탕' },
+    { fontName: '한컴바탕', status: 'needs-local-check', source: 'unknown', substituteFont: null, loadedFace: null },
+    { fontName: '신명조', status: 'web-substitute', source: 'web', substituteFont: '함초롬바탕', loadedFace: '함초롬바탕' },
+    { fontName: '문서 전용 글꼴', status: 'missing', source: 'unknown', substituteFont: null, loadedFace: null },
   ],
   summary: { available: 1, needsLocalCheck: 1, webSubstitute: 1, missing: 1 },
   total: 4,

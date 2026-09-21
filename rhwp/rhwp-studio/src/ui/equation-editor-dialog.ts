@@ -1,9 +1,16 @@
 import type { WasmBridge } from '@/core/wasm-bridge';
 import type { EventBus } from '@/core/event-bus';
-import type { EquationProperties, NoteControlRef } from '@/core/types';
+import type { CellPathLike, EquationProperties, NoteControlRef, ObjectRef } from '@/core/types';
 import type { CommandServices } from '@/command/types';
 import { appendSvgMarkup } from './dom-utils';
 import { enableDialogDrag } from './dialog-drag';
+import {
+  equationScriptForStorage,
+  fatalEquationDiagnostics,
+  parseEquationPreview,
+  type EquationPreview,
+} from '@/core/equation-preview';
+import type { DocumentPosition } from '@/core/types';
 
 /**
  * 수식 편집 대화상자
@@ -28,6 +35,12 @@ import { enableDialogDrag } from './dialog-drag';
 export const MAX_EQUATION_SCRIPT_LEN = 8000;
 
 type InputMode = 'hwp' | 'latex';
+
+export interface EquationInsertIntent {
+  position: DocumentPosition;
+  fontSizeHwpunit?: number;
+  color?: number;
+}
 
 interface TemplateEntry { label: string; hwp: string; latex: string }
 interface TemplateGroup { id: string; name: string; items: TemplateEntry[] }
@@ -247,7 +260,13 @@ export class EquationEditorDialog {
   private ci = 0;
   private cellIdx?: number;
   private cellParaIdx?: number;
+  private cellPath?: CellPathLike;
+  private innerControlIdx?: number;
   private noteRef?: NoteControlRef;
+  private insertIntent: EquationInsertIntent | null = null;
+  private acceptedWarningScript: string | null = null;
+  private insertionInvalidated = false;
+  private insertionWatchers: Array<() => void> = [];
 
   // 원본 속성 (비교용)
   private origProps: EquationProperties | null = null;
@@ -265,19 +284,26 @@ export class EquationEditorDialog {
   }
 
   /** 대화상자 열기 */
-  open(sec: number, para: number, ci: number, cellIdx?: number, cellParaIdx?: number, noteRef?: NoteControlRef): void {
+  open(sec: number, para: number, ci: number, cellIdx?: number, cellParaIdx?: number, noteRef?: NoteControlRef, innerControlIdx?: number, cellPath?: CellPathLike): void {
     this.build();
     this.sec = sec;
     this.para = para;
     this.ci = ci;
     this.cellIdx = cellIdx;
     this.cellParaIdx = cellParaIdx;
+    this.cellPath = cellPath;
+    this.innerControlIdx = innerControlIdx;
     this.noteRef = noteRef;
+    this.insertIntent = null;
+    this.acceptedWarningScript = null;
+    this.clearInsertionWatchers();
 
     try {
       this.origProps = noteRef
         ? this.wasm.getNoteEquationProperties(noteRef)
-        : this.wasm.getEquationProperties(sec, para, ci, cellIdx, cellParaIdx);
+        : cellPath?.length && innerControlIdx !== undefined
+          ? this.wasm.getEquationPropertiesByPath(sec, para, cellPath, innerControlIdx)
+          : this.wasm.getEquationProperties(sec, para, ci, cellIdx, cellParaIdx, innerControlIdx);
     } catch (err) {
       console.warn('[EquationEditor] 수식 속성 가져오기 실패:', err);
       return;
@@ -307,6 +333,39 @@ export class EquationEditorDialog {
     }, 50);
   }
 
+  /** Open a draft without mutating the document. Confirmation inserts once. */
+  openCreate(intent: EquationInsertIntent): void {
+    this.build();
+    this.insertIntent = intent;
+    this.acceptedWarningScript = null;
+    this.insertionInvalidated = false;
+    this.clearInsertionWatchers();
+    const invalidate = () => { this.insertionInvalidated = true; };
+    this.insertionWatchers = [
+      this.eventBus.on('document-changed', invalidate),
+      this.eventBus.on('document-mutated', invalidate),
+    ];
+    this.noteRef = undefined;
+    this.cellPath = intent.position.cellPath;
+    this.innerControlIdx = undefined;
+    this.origProps = {
+      script: '',
+      fontSize: intent.fontSizeHwpunit ?? 1000,
+      color: intent.color ?? 0,
+      baseline: 0,
+      fontName: '',
+    } as EquationProperties;
+    this.scriptArea.value = '';
+    this.scriptErrorLabel.style.display = 'none';
+    this.fontSizeInput.value = String(Math.round(this.origProps.fontSize / 100));
+    this.colorInput.value = colorRefToHex(this.origProps.color);
+    this.searchInput.value = '';
+    this.searchResults.style.display = 'none';
+    this.setMode('hwp');
+    document.body.appendChild(this.overlay);
+    setTimeout(() => this.scriptArea.focus(), 20);
+  }
+
   /** 대화상자 닫기 */
   hide(): void {
     if (this.previewTimer) {
@@ -314,7 +373,12 @@ export class EquationEditorDialog {
       this.previewTimer = null;
     }
     this.hideAutocomplete();
+    this.clearInsertionWatchers();
     this.overlay?.remove();
+  }
+
+  private clearInsertionWatchers(): void {
+    this.insertionWatchers.splice(0).forEach(dispose => dispose());
   }
 
   /** 한 번만 DOM 구성 */
@@ -686,27 +750,39 @@ export class EquationEditorDialog {
     this.previewTimer = setTimeout(() => this.updatePreview(), 300);
   }
 
+  private readPreview(script: string): EquationPreview {
+    const fontSizePt = parseInt(this.fontSizeInput.value, 10) || 10;
+    return parseEquationPreview(this.wasm.renderEquationPreview(
+      script,
+      fontSizePt * 100,
+      hexToColorRef(this.colorInput.value),
+      this.origProps?.fontName,
+    ));
+  }
+
+  private showDiagnostics(preview: EquationPreview): void {
+    if (preview.diagnostics.length === 0) {
+      this.scriptErrorLabel.style.display = 'none';
+      return;
+    }
+    this.scriptErrorLabel.textContent = preview.diagnostics.map(diagnostic => diagnostic.message).join(' · ');
+    this.scriptErrorLabel.style.color = fatalEquationDiagnostics(preview).length > 0 ? '#c00' : '#8a5a00';
+    this.scriptErrorLabel.style.display = '';
+  }
+
   private updatePreview(): void {
     const script = this.scriptArea.value.trim();
     if (!script) {
       this.showPreviewMessage('eq-preview-empty', '수식을 입력하세요');
+      this.scriptErrorLabel.style.display = 'none';
       return;
     }
 
-    const fontSizePt = parseInt(this.fontSizeInput.value, 10) || 10;
-    const fontSizeHwpunit = fontSizePt * 100;
-    const color = hexToColorRef(this.colorInput.value);
-
     try {
-      const raw = this.wasm.renderEquationPreview(script, fontSizeHwpunit, color);
-      // 신규 wasm 은 {"svg",widthPx,...} JSON 문자열 — 구버전은 SVG 문자열을 직접 반환
-      let svg = raw;
-      try {
-        const parsed = JSON.parse(raw) as { svg?: unknown };
-        if (parsed && typeof parsed.svg === 'string') svg = parsed.svg;
-      } catch { /* 구버전 wasm — raw 자체가 SVG 문자열이다 */ }
+      const preview = this.readPreview(script);
       this.previewContainer.replaceChildren();
-      appendSvgMarkup(this.previewContainer, svg);
+      appendSvgMarkup(this.previewContainer, preview.svg);
+      this.showDiagnostics(preview);
     } catch (err) {
       this.showPreviewMessage('eq-preview-error', '미리보기 오류');
       console.warn('[EquationEditor] 미리보기 오류:', err);
@@ -725,8 +801,48 @@ export class EquationEditorDialog {
   private handleOk(): void {
     if (!this.origProps) return;
 
-    const script = this.scriptArea.value;
-    if (script.length > MAX_EQUATION_SCRIPT_LEN) {
+    const script = this.scriptArea.value.trim();
+    if (!script || script.length > MAX_EQUATION_SCRIPT_LEN) {
+      this.scriptErrorLabel.textContent = !script
+        ? '수식을 입력하세요.'
+        : `수식 스크립트는 ${MAX_EQUATION_SCRIPT_LEN}자를 넘을 수 없습니다.`;
+      this.scriptErrorLabel.style.color = '#c00';
+      this.scriptErrorLabel.style.display = '';
+      return;
+    }
+    let preview: EquationPreview;
+    try {
+      preview = this.readPreview(script);
+    } catch {
+      this.scriptErrorLabel.textContent = '수식을 확인할 수 없습니다.';
+      this.scriptErrorLabel.style.display = '';
+      return;
+    }
+    if (fatalEquationDiagnostics(preview).length > 0) {
+      this.showDiagnostics(preview);
+      return;
+    }
+    if (preview.diagnostics.length > 0 && this.acceptedWarningScript !== script) {
+      this.acceptedWarningScript = script;
+      this.scriptErrorLabel.textContent = `${preview.diagnostics.map(d => d.message).join(' · ')} · 그대로 저장하려면 확인을 다시 누르세요.`;
+      this.scriptErrorLabel.style.color = '#8a5a00';
+      this.scriptErrorLabel.style.display = '';
+      return;
+    }
+    const storedScript = equationScriptForStorage(
+      script, this.origProps.script, this.mode === 'latex', preview,
+    );
+    if (storedScript === undefined) {
+      this.scriptErrorLabel.textContent = preview.canonicalError
+        ? '이 LaTeX 서식은 한컴 수식으로 저장할 수 없습니다.'
+        : 'LaTeX 수식을 한컴 수식으로 변환할 수 없습니다.';
+      this.scriptErrorLabel.style.color = '#c00';
+      this.scriptErrorLabel.style.display = '';
+      return;
+    }
+    if (storedScript.length > MAX_EQUATION_SCRIPT_LEN) {
+      this.scriptErrorLabel.textContent = `변환된 수식 스크립트는 ${MAX_EQUATION_SCRIPT_LEN}자를 넘을 수 없습니다.`;
+      this.scriptErrorLabel.style.color = '#c00';
       this.scriptErrorLabel.style.display = '';
       return;
     }
@@ -735,8 +851,79 @@ export class EquationEditorDialog {
     const fontSizeHwpunit = fontSizePt * 100;
     const color = hexToColorRef(this.colorInput.value);
 
+    if (this.insertIntent) {
+      if (this.insertionInvalidated) {
+        this.scriptErrorLabel.textContent = '문서가 변경되었습니다. 수식 삽입을 다시 시작하세요.';
+        this.scriptErrorLabel.style.color = '#c00';
+        this.scriptErrorLabel.style.display = '';
+        return;
+      }
+      const intent = this.insertIntent;
+      const pos = intent.position;
+      const inputHandler = this.services?.getInputHandler();
+      if (!inputHandler) return;
+      let insertedRef: ObjectRef | null = null;
+      inputHandler.executeOperation({
+        kind: 'snapshot',
+        operationType: 'insertEquation',
+        operation: (wasm) => {
+          if (pos.cellPath?.length && pos.parentParaIndex !== undefined) {
+            const result = wasm.insertEquationInCellByPath(
+              pos.sectionIndex, pos.parentParaIndex, pos.cellPath,
+              pos.charOffset, storedScript, fontSizeHwpunit, color,
+            );
+            if (!result.ok) throw new Error('[insert:equation] 중첩 셀 삽입 실패');
+            const finalPath = pos.cellPath[pos.cellPath.length - 1];
+            insertedRef = {
+              sec: pos.sectionIndex,
+              ppi: pos.parentParaIndex,
+              ci: pos.controlIndex ?? pos.cellPath[0]!.controlIndex,
+              type: 'equation',
+              cellIdx: finalPath.cellIndex,
+              cellParaIdx: finalPath.cellParaIndex,
+              innerControlIdx: result.controlIdx,
+              cellPath: pos.cellPath,
+            };
+          } else if (pos.cellIndex !== undefined && pos.parentParaIndex !== undefined
+            && pos.controlIndex !== undefined && pos.cellParaIndex !== undefined) {
+            const result = wasm.insertEquationInCell(
+              pos.sectionIndex, pos.parentParaIndex, pos.controlIndex, pos.cellIndex,
+              pos.cellParaIndex, pos.charOffset, storedScript, fontSizeHwpunit, color,
+            );
+            if (!result.ok) throw new Error('[insert:equation] 셀 삽입 실패');
+            insertedRef = {
+              sec: pos.sectionIndex,
+              ppi: pos.parentParaIndex,
+              ci: pos.controlIndex,
+              type: 'equation',
+              cellIdx: pos.cellIndex,
+              cellParaIdx: pos.cellParaIndex,
+              innerControlIdx: result.controlIdx,
+              cellPath: pos.cellPath,
+            };
+          } else {
+            const result = wasm.insertEquation(
+              pos.sectionIndex, pos.paragraphIndex, pos.charOffset, storedScript, fontSizeHwpunit, color,
+            );
+            if (!result.ok) throw new Error('[insert:equation] 삽입 실패');
+            insertedRef = {
+              sec: pos.sectionIndex,
+              ppi: result.paraIdx,
+              ci: result.controlIdx,
+              type: 'equation',
+            };
+          }
+          return { ...pos, charOffset: pos.charOffset + 8 };
+        },
+      });
+      if (insertedRef) inputHandler.selectPictureObjectRef(insertedRef);
+      this.eventBus.emit('document-mutated', 'insert-equation');
+      this.hide();
+      return;
+    }
+
     const updated: Record<string, unknown> = {};
-    if (script !== this.origProps.script) updated.script = script;
+    if (storedScript !== this.origProps.script) updated.script = storedScript;
     if (fontSizeHwpunit !== this.origProps.fontSize) updated.fontSize = fontSizeHwpunit;
     if (color !== this.origProps.color) updated.color = color;
 
@@ -744,6 +931,10 @@ export class EquationEditorDialog {
       const applyProps = () => {
         if (this.noteRef) {
           this.wasm.setNoteEquationProperties(this.noteRef, updated);
+        } else if (this.cellPath?.length && this.innerControlIdx !== undefined) {
+          this.wasm.setEquationPropertiesByPath(
+            this.sec, this.para, this.cellPath, this.innerControlIdx, updated,
+          );
         } else {
           this.wasm.setEquationProperties(
             this.sec,
@@ -752,6 +943,7 @@ export class EquationEditorDialog {
             this.cellIdx,
             this.cellParaIdx,
             updated,
+            this.innerControlIdx,
           );
         }
       };

@@ -4,6 +4,7 @@ use rhwp::document_core::DocumentCore;
 use rhwp::model::control::Control;
 use rhwp::model::document::{Document, Section};
 use rhwp::model::paragraph::Paragraph;
+use rhwp::model::shape::{CommonObjAttr, DrawingObjAttr, RectangleShape, ShapeObject, TextBox};
 use rhwp::model::table::{Cell, Table};
 
 const OUTER_CELL_WIDTH: u32 = 30000;
@@ -95,6 +96,56 @@ fn inner_table(core: &DocumentCore) -> &Table {
         Some(Control::Table(table)) => table,
         _ => panic!("안쪽 표를 찾지 못했다"),
     }
+}
+
+fn table_in_textbox_core() -> (DocumentCore, Vec<(usize, usize, usize)>) {
+    let cell = |col| Cell {
+        row: 0,
+        col,
+        col_span: 1,
+        row_span: 1,
+        width: 5_000,
+        height: 3_000,
+        paragraphs: vec![Paragraph::new_empty()],
+        ..Default::default()
+    };
+    let table = Control::Table(Box::new(Table {
+        row_count: 1,
+        col_count: 2,
+        cells: vec![cell(0), cell(1)],
+        ..Default::default()
+    }));
+    let shape = Control::Shape(Box::new(ShapeObject::Rectangle(RectangleShape {
+        common: CommonObjAttr {
+            width: 20_000,
+            height: 12_000,
+            treat_as_char: true,
+            ..Default::default()
+        },
+        drawing: DrawingObjAttr {
+            text_box: Some(TextBox {
+                max_width: 20_000,
+                paragraphs: vec![Paragraph {
+                    controls: vec![table],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        ..Default::default()
+    })));
+    let mut document = Document::default();
+    document.sections.push(Section {
+        paragraphs: vec![Paragraph {
+            controls: vec![shape],
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    let mut core = DocumentCore::new_empty();
+    core.set_document(document);
+    (core, vec![(0, 0, 0), (0, 0, 0)])
 }
 
 #[test]
@@ -230,4 +281,164 @@ fn resize_limit_properties_belong_to_the_same_nested_table() {
     assert!(core
         .get_cell_properties_by_cell_path_native(0, 0, &[], 0)
         .is_err());
+}
+
+#[test]
+fn nested_structural_edits_change_only_the_target_table() {
+    let (mut core, path) = nested_core();
+
+    core.insert_table_row_by_cell_path_native(0, 0, &path, 0, true)
+        .expect("insert inner row");
+    assert_eq!(
+        (inner_table(&core).row_count, inner_table(&core).col_count),
+        (2, 2)
+    );
+    assert_eq!(
+        (outer_table(&core).row_count, outer_table(&core).col_count),
+        (1, 1)
+    );
+
+    core.delete_table_row_by_cell_path_native(0, 0, &path, 1)
+        .expect("delete inner row");
+    core.insert_table_column_by_cell_path_native(0, 0, &path, 1, true)
+        .expect("insert inner column");
+    assert_eq!(
+        (inner_table(&core).row_count, inner_table(&core).col_count),
+        (1, 3)
+    );
+
+    core.delete_table_column_by_cell_path_native(0, 0, &path, 2)
+        .expect("delete inner column");
+    core.merge_table_cells_by_cell_path_native(0, 0, &path, 0, 0, 0, 1)
+        .expect("merge inner cells");
+    assert_eq!(inner_table(&core).cells.len(), 1);
+    assert_eq!(outer_table(&core).cells.len(), 1);
+
+    core.split_table_cell_by_cell_path_native(0, 0, &path, 0, 0)
+        .expect("split inner merged cell");
+    assert_eq!(inner_table(&core).cells.len(), 2);
+    assert_eq!(
+        (outer_table(&core).row_count, outer_table(&core).col_count),
+        (1, 1)
+    );
+}
+
+#[test]
+fn nested_advanced_split_paths_preserve_the_outer_table() {
+    let (mut core, path) = nested_core();
+    core.split_table_cell_into_by_cell_path_native(0, 0, &path, 0, 0, 2, 2, true, false)
+        .expect("split inner cell into grid");
+
+    let inner_after_one = inner_table(&core).cells.len();
+    assert!(inner_after_one > 2, "the inner table must gain cells");
+    assert_eq!(outer_table(&core).cells.len(), 1);
+
+    core.split_table_cells_in_range_by_cell_path_native(0, 0, &path, 0, 0, 0, 0, 1, 2, true)
+        .expect("split an inner range");
+    assert!(inner_table(&core).cells.len() > inner_after_one);
+    assert_eq!(
+        (outer_table(&core).row_count, outer_table(&core).col_count),
+        (1, 1)
+    );
+}
+
+#[test]
+fn rejected_nested_structural_edit_is_atomic() {
+    let (mut core, path) = nested_core();
+    let before = (inner_table(&core).row_count, inner_table(&core).cells.len());
+
+    assert!(core
+        .delete_table_row_by_cell_path_native(0, 0, &path, 0)
+        .is_err());
+    assert!(core
+        .insert_table_row_by_cell_path_native(0, 0, &[(0, 0, 0), (99, 0, 0)], 0, true)
+        .is_err());
+
+    assert_eq!(
+        (inner_table(&core).row_count, inner_table(&core).cells.len()),
+        before
+    );
+    assert_eq!(
+        (outer_table(&core).row_count, outer_table(&core).col_count),
+        (1, 1)
+    );
+}
+
+#[test]
+fn logical_cell_target_tracks_reordered_nested_cells() {
+    let (mut core, path) = nested_core();
+    core.insert_table_column_by_cell_path_native(0, 0, &path, 0, false)
+        .expect("insert before the original cell");
+
+    let path_json = serde_json::json!([
+        { "controlIndex": 0, "cellIndex": 0, "cellParaIndex": 0 },
+        { "controlIndex": 0, "cellIndex": 0, "cellParaIndex": 0 }
+    ])
+    .to_string();
+    let target: serde_json::Value = serde_json::from_str(
+        &core
+            .get_table_cell_target_by_path_native(0, 0, &path_json, 0, 1, 0)
+            .expect("resolve shifted original cell"),
+    )
+    .unwrap();
+
+    assert_eq!(target["cellIndex"], 1);
+    assert_eq!(target["cellParaIndex"], 0);
+    assert!(target["charCount"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn structural_path_reaches_a_table_inside_a_textbox() {
+    let (mut core, path) = table_in_textbox_core();
+    core.merge_table_cells_by_cell_path_native(0, 0, &path, 0, 0, 0, 1)
+        .expect("merge table inside textbox");
+
+    let shape = match &core.document().sections[0].paragraphs[0].controls[0] {
+        Control::Shape(shape) => shape,
+        _ => panic!("textbox shape"),
+    };
+    let rectangle = match shape.as_ref() {
+        ShapeObject::Rectangle(rectangle) => rectangle,
+        _ => panic!("rectangle textbox"),
+    };
+    let table = match &rectangle.drawing.text_box.as_ref().unwrap().paragraphs[0].controls[0] {
+        Control::Table(table) => table,
+        _ => panic!("table in textbox"),
+    };
+    assert_eq!(table.cells.len(), 1);
+}
+
+#[test]
+fn structural_path_reaches_three_table_levels() {
+    let (mut core, _) = nested_core();
+    let deepest = inner_table(&core).clone();
+    let outer = match &mut core.document_mut().sections[0].paragraphs[0].controls[0] {
+        Control::Table(table) => table,
+        _ => panic!("outer table"),
+    };
+    let middle = match &mut outer.cells[0].paragraphs[0].controls[0] {
+        Control::Table(table) => table,
+        _ => panic!("middle table"),
+    };
+    middle.cells[0].paragraphs[0]
+        .controls
+        .push(Control::Table(Box::new(deepest)));
+    core.set_document(core.document().clone());
+
+    let path = [(0, 0, 0), (0, 0, 0), (0, 0, 0)];
+    core.merge_table_cells_by_cell_path_native(0, 0, &path, 0, 0, 0, 1)
+        .expect("merge third-level table");
+
+    let outer = outer_table(&core);
+    let middle = match &outer.cells[0].paragraphs[0].controls[0] {
+        Control::Table(table) => table,
+        _ => panic!("middle table"),
+    };
+    let deepest = match &middle.cells[0].paragraphs[0].controls[0] {
+        Control::Table(table) => table,
+        _ => panic!("deepest table"),
+    };
+    assert_eq!(deepest.cells.len(), 1);
+    assert_eq!(middle.cells.len(), 2);
+    assert_eq!(outer.cells.len(), 1);
 }

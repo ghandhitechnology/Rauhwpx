@@ -24,6 +24,7 @@ import type {
   LayerTextRunOp,
   PageInfo,
   DocumentInfo,
+  ObjectRef,
 } from '@/core/types';
 import type { CommandDispatcher } from '@/command/dispatcher';
 import type { EditorEditMode } from '@/command/types';
@@ -4842,10 +4843,10 @@ export class InputHandler {
   isInPictureObjectSelection(): boolean { return this.cursor.isInPictureObjectSelection(); }
 
   /** 선택된 그림/글상자 참조 반환 ([Task #825] headerFooter 동반 시 머리말/꼬리말 picture marker) */
-  getSelectedPictureRef(): { sec: number; ppi: number; ci: number; type: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole'; cellIdx?: number; cellParaIdx?: number; outerTableControlIdx?: number; cellPath?: Array<{ controlIndex: number; cellIndex: number; cellParaIndex: number }>; noteRef?: any; memoRef?: any; headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number } } | null { return this.cursor.getSelectedPictureRef(); }
+  getSelectedPictureRef(): ObjectRef | null { return this.cursor.getSelectedPictureRef(); }
 
   /** 다중 선택된 개체 목록 */
-  getSelectedPictureRefs(): { sec: number; ppi: number; ci: number; type: string; cellPath?: CellPathLike; noteRef?: unknown; memoRef?: unknown; headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number } }[] { return this.cursor.getSelectedPictureRefs(); }
+  getSelectedPictureRefs(): ObjectRef[] { return this.cursor.getSelectedPictureRefs(); }
 
   /** 다중 선택 상태인가? */
   isMultiPictureSelection(): boolean { return this.cursor.isMultiPictureSelection(); }
@@ -4853,6 +4854,12 @@ export class InputHandler {
   /** 지정 개체를 선택 상태로 진입 */
   selectPictureObject(sec: number, ppi: number, ci: number, type: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole'): void {
     this.cursor.enterPictureObjectSelectionDirect(sec, ppi, ci, type);
+    this.renderPictureObjectSelection();
+    this.eventBus.emit('picture-object-selection-changed', true);
+  }
+
+  selectPictureObjectRef(ref: ObjectRef): void {
+    this.cursor.enterPictureObjectSelectionRef(ref as Parameters<CursorState['enterPictureObjectSelectionRef']>[0]);
     this.renderPictureObjectSelection();
     this.eventBus.emit('picture-object-selection-changed', true);
   }
@@ -5597,16 +5604,8 @@ export class InputHandler {
         this.cursor.moveOutOfSelectedPicture();
         this.pictureObjectRenderer?.clear();
         this.eventBus.emit('picture-object-selection-changed', false);
-        this.executeOperation({ kind: 'snapshot', operationType: 'cutObject', operation: (wasm: WasmBridge) => {
-          if (ref.type === 'image' && ref.cellPath && ref.cellPath.length > 0) {
-            wasm.deleteCellPictureControlByPath(ref.sec, ref.ppi, ref.cellPath, ref.ci);
-          } else if (ref.type === 'image') {
-            wasm.deletePictureControl(ref.sec, ref.ppi, ref.ci);
-          } else if (ref.type === 'equation') {
-            wasm.deleteEquationControl(ref.sec, ref.ppi, ref.ci);
-          } else {
-            wasm.deleteShapeControl(ref.sec, ref.ppi, ref.ci);
-          }
+        this.executeOperation({ kind: 'snapshot', operationType: 'cutObject', operation: () => {
+          this.deleteObjectControl(ref);
           return this.cursor.getPosition();
         }});
       }

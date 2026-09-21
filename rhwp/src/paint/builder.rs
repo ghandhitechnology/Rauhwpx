@@ -4,7 +4,10 @@ use crate::paint::layer_tree::{
 };
 use crate::paint::paint_op::{PaintOp, TextDecorationKind};
 use crate::paint::profile::RenderProfile;
-use crate::paint::{lower_font_native_glyph_sidecars, EmbeddedFontFace};
+use crate::paint::{
+    lower_font_native_glyph_sidecars, register_embedded_font_resources, EmbeddedFontFace,
+    EmbeddedFontResolver, TextShapeLowerer,
+};
 use crate::renderer::render_tree::{PageRenderTree, RenderNode, RenderNodeType};
 
 /// semantic render tree를 visual layer tree로 내린다.
@@ -52,6 +55,8 @@ impl LayerBuilder {
         let mut layer_tree =
             PageLayerTree::with_profile(page_width, page_height, root, self.profile)
                 .with_output_options(self.output_options);
+        register_embedded_font_resources(&mut layer_tree.resources, fonts);
+        TextShapeLowerer::new(&EmbeddedFontResolver::new(fonts)).lower_root(&mut layer_tree.root);
         lower_font_native_glyph_sidecars(&mut layer_tree.root, &mut layer_tree.resources, fonts);
         layer_tree
     }
@@ -343,6 +348,7 @@ mod tests {
         let bbox = BoundingBox::new(10.0, 20.0, 16.0, 16.0);
         let mut run = text_run("\u{E100}");
         run.char_shape_id = Some(2);
+        run.style.font_family = "RHWP Bitmap SVG Glyph Smoke".to_string();
         run.style.font_size = 16.0;
         run.baseline = 12.0;
         let mut tree = PageRenderTree::new(0, 100.0, 100.0);
@@ -372,11 +378,15 @@ mod tests {
         };
         assert!(matches!(
             ops.as_slice(),
-            [PaintOp::TextRun { .. }, PaintOp::GlyphOutline { .. }]
+            [
+                PaintOp::TextRun { .. },
+                PaintOp::GlyphOutline { .. },
+                PaintOp::GlyphRun { .. }
+            ]
         ));
         assert_eq!(layer_tree.resources.image_count(), 1);
-        assert!(layer_tree.resources.font_resources().blobs.is_empty());
-        assert!(layer_tree.resources.font_resources().faces.is_empty());
+        assert_eq!(layer_tree.resources.font_resources().blobs.len(), 1);
+        assert_eq!(layer_tree.resources.font_resources().faces.len(), 1);
     }
 
     #[test]
@@ -1168,9 +1178,11 @@ mod tests {
             color_str: "#000000".to_string(),
             color: 0x00000000,
             font_size: 12.0,
+            font_name: "serif".to_string(),
             section_index: None,
             para_index: None,
             control_index: None,
+            inner_control_index: None,
             cell_index: None,
             cell_para_index: None,
             note_ref: None,

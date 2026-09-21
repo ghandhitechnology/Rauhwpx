@@ -16,6 +16,7 @@ pub fn render_equation_canvas(
     origin_y: f64,
     color: &str,
     base_font_size: f64,
+    font_family: &str,
 ) {
     // 진입점 default: italic=true (hwpeq 변수 기본 스타일).
     // FontStyle::Roman(`rm`) 적용 영역에서는 자식 렌더링 시 italic=false 로 전환된다.
@@ -28,6 +29,7 @@ pub fn render_equation_canvas(
         base_font_size,
         true,
         false,
+        font_family,
     );
 }
 
@@ -40,6 +42,7 @@ fn render_box(
     fs: f64,
     italic: bool,
     bold: bool,
+    font_family: &str,
 ) {
     let x = parent_x + lb.x;
     let y = parent_y + lb.y;
@@ -47,7 +50,7 @@ fn render_box(
     match &lb.kind {
         LayoutKind::Row(children) => {
             for child in children {
-                render_box(ctx, child, x, y, color, fs, italic, bold);
+                render_box(ctx, child, x, y, color, fs, italic, bold, font_family);
             }
         }
         LayoutKind::Text(text) => {
@@ -62,21 +65,21 @@ fn render_box(
                     '\u{3000}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}' | '\u{AC00}'..='\u{D7AF}'
                 )
             });
-            set_font(ctx, fi, !has_cjk && italic, bold);
+            set_font(ctx, fi, !has_cjk && italic, bold, font_family);
             ctx.set_fill_style_str(color);
             let _ = ctx.fill_text(text, x, y + lb.baseline);
         }
         LayoutKind::Number(text) => {
             // [Issue #900] svg_render.rs Number arm 과 동기화 — fs 사용.
             let fi = fs;
-            set_font(ctx, fi, false, bold);
+            set_font(ctx, fi, false, bold, font_family);
             ctx.set_fill_style_str(color);
             let _ = ctx.fill_text(text, x, y + lb.baseline);
         }
         LayoutKind::Symbol(text) => {
             // [Issue #900] svg_render.rs Symbol arm 과 동기화 — fs 사용.
             let fi = fs;
-            set_font(ctx, fi, false, false);
+            set_font(ctx, fi, false, false, font_family);
             ctx.set_fill_style_str(color);
             ctx.set_text_align("center");
             let _ = ctx.fill_text(text, x + lb.width / 2.0, y + lb.baseline);
@@ -89,7 +92,7 @@ fn render_box(
             if super::layout::is_integral_symbol(text) {
                 draw_integral(ctx, x, y, fs, color);
             } else {
-                set_font(ctx, fs, false, false);
+                set_font(ctx, fs, false, false, font_family);
                 ctx.set_fill_style_str(color);
                 let _ = ctx.fill_text(text, x, y + lb.baseline);
             }
@@ -97,12 +100,12 @@ fn render_box(
         LayoutKind::Function(name) => {
             // [Issue #900] svg_render.rs Function arm 과 동기화 — fs 사용.
             let fi = fs;
-            set_font(ctx, fi, false, false);
+            set_font(ctx, fi, false, false, font_family);
             ctx.set_fill_style_str(color);
             let _ = ctx.fill_text(name, x, y + lb.baseline);
         }
         LayoutKind::Fraction { numer, denom } => {
-            render_box(ctx, numer, x, y, color, fs, italic, bold);
+            render_box(ctx, numer, x, y, color, fs, italic, bold, font_family);
             // 분수선 — baseline에서 axis_height 위에 배치 (SVG 경로와 동일)
             let line_y = y + lb.baseline - fs * super::layout::AXIS_HEIGHT;
             let line_thick = fs * 0.04;
@@ -112,11 +115,11 @@ fn render_box(
             ctx.move_to(x + fs * 0.05, line_y);
             ctx.line_to(x + lb.width - fs * 0.05, line_y);
             ctx.stroke();
-            render_box(ctx, denom, x, y, color, fs, italic, bold);
+            render_box(ctx, denom, x, y, color, fs, italic, bold, font_family);
         }
         LayoutKind::Atop { top, bottom } => {
-            render_box(ctx, top, x, y, color, fs, italic, bold);
-            render_box(ctx, bottom, x, y, color, fs, italic, bold);
+            render_box(ctx, top, x, y, color, fs, italic, bold, font_family);
+            render_box(ctx, bottom, x, y, color, fs, italic, bold, font_family);
         }
         LayoutKind::Sqrt { index, body } => {
             let sign_h = lb.height;
@@ -141,22 +144,72 @@ fn render_box(
             ctx.stroke();
 
             if let Some(idx) = index {
-                render_box(ctx, idx, sign_x, y, color, fs * SCRIPT_SCALE, false, false);
+                render_box(
+                    ctx,
+                    idx,
+                    sign_x,
+                    y,
+                    color,
+                    fs * SCRIPT_SCALE,
+                    false,
+                    false,
+                    font_family,
+                );
             }
-            render_box(ctx, body, x, y, color, fs, italic, bold);
+            render_box(ctx, body, x, y, color, fs, italic, bold, font_family);
         }
         LayoutKind::Superscript { base, sup } => {
-            render_box(ctx, base, x, y, color, fs, italic, bold);
-            render_box(ctx, sup, x, y, color, fs * SCRIPT_SCALE, italic, bold);
+            render_box(ctx, base, x, y, color, fs, italic, bold, font_family);
+            render_box(
+                ctx,
+                sup,
+                x,
+                y,
+                color,
+                fs * SCRIPT_SCALE,
+                italic,
+                bold,
+                font_family,
+            );
         }
         LayoutKind::Subscript { base, sub } => {
-            render_box(ctx, base, x, y, color, fs, italic, bold);
-            render_box(ctx, sub, x, y, color, fs * SCRIPT_SCALE, italic, bold);
+            render_box(ctx, base, x, y, color, fs, italic, bold, font_family);
+            render_box(
+                ctx,
+                sub,
+                x,
+                y,
+                color,
+                fs * SCRIPT_SCALE,
+                italic,
+                bold,
+                font_family,
+            );
         }
         LayoutKind::SubSup { base, sub, sup } => {
-            render_box(ctx, base, x, y, color, fs, italic, bold);
-            render_box(ctx, sub, x, y, color, fs * SCRIPT_SCALE, italic, bold);
-            render_box(ctx, sup, x, y, color, fs * SCRIPT_SCALE, italic, bold);
+            render_box(ctx, base, x, y, color, fs, italic, bold, font_family);
+            render_box(
+                ctx,
+                sub,
+                x,
+                y,
+                color,
+                fs * SCRIPT_SCALE,
+                italic,
+                bold,
+                font_family,
+            );
+            render_box(
+                ctx,
+                sup,
+                x,
+                y,
+                color,
+                fs * SCRIPT_SCALE,
+                italic,
+                bold,
+                font_family,
+            );
         }
         LayoutKind::BigOp { symbol, sub, sup } => {
             // [Issue #900] svg_render.rs BigOp arm 과 동기화 (commit 292dbbef).
@@ -170,7 +223,7 @@ fn render_box(
                 } else {
                     BIG_OP_SCALE
                 };
-            set_font(ctx, op_fs, false, false);
+            set_font(ctx, op_fs, false, false, font_family);
             ctx.set_fill_style_str(color);
             if is_integral {
                 // Task #1317: 적분 기호는 stroke path 로 렌더(geom SSOT).
@@ -189,10 +242,30 @@ fn render_box(
             }
             // 위/아래 첨자 — LayoutBox 자식 좌표 사용 (적분/일반 공통)
             if let Some(sup_box) = sup {
-                render_box(ctx, sup_box, x, y, color, fs * SCRIPT_SCALE, false, false);
+                render_box(
+                    ctx,
+                    sup_box,
+                    x,
+                    y,
+                    color,
+                    fs * SCRIPT_SCALE,
+                    false,
+                    false,
+                    font_family,
+                );
             }
             if let Some(sub_box) = sub {
-                render_box(ctx, sub_box, x, y, color, fs * SCRIPT_SCALE, false, false);
+                render_box(
+                    ctx,
+                    sub_box,
+                    x,
+                    y,
+                    color,
+                    fs * SCRIPT_SCALE,
+                    false,
+                    false,
+                    font_family,
+                );
             }
         }
         LayoutKind::Limit { is_upper, sub } => {
@@ -201,11 +274,21 @@ fn render_box(
             // 전체 높이라 base 의 1.5~2 배가 되어 lim 글자가 비정상으로 커지는 정황.
             let name = if *is_upper { "Lim" } else { "lim" };
             let fi = fs;
-            set_font(ctx, fi, false, false);
+            set_font(ctx, fi, false, false, font_family);
             ctx.set_fill_style_str(color);
             let _ = ctx.fill_text(name, x, y + fi * 0.8);
             if let Some(sub_box) = sub {
-                render_box(ctx, sub_box, x, y, color, fs * SCRIPT_SCALE, false, false);
+                render_box(
+                    ctx,
+                    sub_box,
+                    x,
+                    y,
+                    color,
+                    fs * SCRIPT_SCALE,
+                    false,
+                    false,
+                    font_family,
+                );
             }
         }
         LayoutKind::Matrix { cells, style } => {
@@ -230,21 +313,21 @@ fn render_box(
             }
             for row in cells {
                 for cell in row {
-                    render_box(ctx, cell, x, y, color, fs, italic, bold);
+                    render_box(ctx, cell, x, y, color, fs, italic, bold, font_family);
                 }
             }
         }
         LayoutKind::Rel { arrow, over, under } => {
-            render_box(ctx, over, x, y, color, fs, italic, bold);
-            render_box(ctx, arrow, x, y, color, fs, italic, bold);
+            render_box(ctx, over, x, y, color, fs, italic, bold, font_family);
+            render_box(ctx, arrow, x, y, color, fs, italic, bold, font_family);
             if let Some(u) = under {
-                render_box(ctx, u, x, y, color, fs, italic, bold);
+                render_box(ctx, u, x, y, color, fs, italic, bold, font_family);
             }
         }
         LayoutKind::EqAlign { rows } => {
             for (left, right) in rows {
-                render_box(ctx, left, x, y, color, fs, italic, bold);
-                render_box(ctx, right, x, y, color, fs, italic, bold);
+                render_box(ctx, left, x, y, color, fs, italic, bold, font_family);
+                render_box(ctx, right, x, y, color, fs, italic, bold, font_family);
             }
         }
         LayoutKind::Paren { left, right, body } => {
@@ -253,18 +336,18 @@ fn render_box(
             let paren_w = if use_glyph { fs * 0.333 } else { fs * 0.27 };
             if !left.is_empty() {
                 if use_glyph && (left == "(" || left == ")") {
-                    set_font(ctx, fs, false, false);
+                    set_font(ctx, fs, false, false, font_family);
                     ctx.set_fill_style_str(color);
                     let _ = ctx.fill_text(left, x, y + lb.baseline);
                 } else {
                     draw_stretch_bracket(ctx, left, x, y, paren_w, lb.height, color, fs);
                 }
             }
-            render_box(ctx, body, x, y, color, fs, italic, bold);
+            render_box(ctx, body, x, y, color, fs, italic, bold, font_family);
             if !right.is_empty() {
                 let right_x = x + lb.width - paren_w;
                 if use_glyph && (right == "(" || right == ")") {
-                    set_font(ctx, fs, false, false);
+                    set_font(ctx, fs, false, false, font_family);
                     ctx.set_fill_style_str(color);
                     let _ = ctx.fill_text(right, right_x, y + lb.baseline);
                 } else {
@@ -273,7 +356,7 @@ fn render_box(
             }
         }
         LayoutKind::Decoration { kind, body } => {
-            render_box(ctx, body, x, y, color, fs, italic, bold);
+            render_box(ctx, body, x, y, color, fs, italic, bold, font_family);
             let deco_y = y + fs * 0.05;
             let mid_x = x + body.x + body.width / 2.0;
             draw_decoration(ctx, *kind, mid_x, deco_y, body.width, color, fs);
@@ -288,19 +371,35 @@ fn render_box(
                 FontStyleKind::Blackboard => (false, true),
                 FontStyleKind::Calligraphy | FontStyleKind::Fraktur => (false, false),
             };
-            render_box(ctx, body, x, y, color, fs, new_italic, new_bold);
+            render_box(
+                ctx,
+                body,
+                x,
+                y,
+                color,
+                fs,
+                new_italic,
+                new_bold,
+                font_family,
+            );
         }
         LayoutKind::Space(_) | LayoutKind::Newline | LayoutKind::Empty => {}
     }
 }
 
-fn set_font(ctx: &CanvasRenderingContext2d, size: f64, italic: bool, bold: bool) {
+fn set_font(
+    ctx: &CanvasRenderingContext2d,
+    size: f64,
+    italic: bool,
+    bold: bool,
+    font_family: &str,
+) {
     let style = if italic { "italic " } else { "" };
     let weight = if bold { "bold " } else { "" };
     // svg_render.rs 의 EQ_FONT_FAMILY 와 동일 스택 유지. (Task #280)
     ctx.set_font(&format!(
-        "{}{}{:.1}px 'Latin Modern Math', 'STIX Two Text', 'STIX Two Math', 'Times New Roman', 'Times', serif",
-        style, weight, size,
+        "{}{}{:.1}px \"{}\", 'Latin Modern Math', 'STIX Two Text', 'STIX Two Math', 'Times New Roman', 'Times', serif",
+        style, weight, size, font_family.replace(['\\', '"'], ""),
     ));
 }
 
@@ -445,7 +544,7 @@ fn draw_stretch_bracket(
         }
         _ => {
             // 기타 괄호: 텍스트로 렌더링
-            set_font(ctx, h, false, false);
+            set_font(ctx, h, false, false, "serif");
             ctx.set_fill_style_str(color);
             ctx.set_text_align("center");
             let _ = ctx.fill_text(bracket, mid_x, y + h * 0.7);

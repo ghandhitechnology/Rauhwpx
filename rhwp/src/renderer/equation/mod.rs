@@ -4,6 +4,7 @@
 //! 참조: openhwp/docs/hwpx/appendix-i-formula.md
 
 pub mod ast;
+pub mod canonical;
 #[cfg(target_arch = "wasm32")]
 pub mod canvas_render;
 pub mod layout;
@@ -26,10 +27,19 @@ pub struct IntrinsicMetrics {
 
 /// Measure an EqEdit script with the exact parser/layout path used for paint.
 pub fn intrinsic_metrics_px(script: &str, font_size: u32, dpi: f64) -> IntrinsicMetrics {
+    intrinsic_metrics_px_with_font(script, font_size, dpi, "")
+}
+
+pub fn intrinsic_metrics_px_with_font(
+    script: &str,
+    font_size: u32,
+    dpi: f64,
+    font_name: &str,
+) -> IntrinsicMetrics {
     let font_size_px = super::hwpunit_to_px(font_size.max(1) as i32, dpi);
     let tokens = tokenizer::tokenize(script);
     let ast = parser::EqParser::new(tokens).parse();
-    let layout = layout::EqLayout::new(font_size_px).layout(&ast);
+    let layout = layout::EqLayout::with_font(font_size_px, font_name).layout(&ast);
     IntrinsicMetrics {
         width: layout.width,
         height: layout.height,
@@ -39,7 +49,15 @@ pub fn intrinsic_metrics_px(script: &str, font_size: u32, dpi: f64) -> Intrinsic
 
 /// Natural equation box metrics in HWPUNIT, used by line composition.
 pub fn intrinsic_metrics_hwp(script: &str, font_size: u32) -> (u32, u32, u32) {
-    let metrics = intrinsic_metrics_px(script, font_size, super::DEFAULT_DPI);
+    intrinsic_metrics_hwp_with_font(script, font_size, "")
+}
+
+pub fn intrinsic_metrics_hwp_with_font(
+    script: &str,
+    font_size: u32,
+    font_name: &str,
+) -> (u32, u32, u32) {
+    let metrics = intrinsic_metrics_px_with_font(script, font_size, super::DEFAULT_DPI, font_name);
     let height = super::px_to_hwpunit(metrics.height, super::DEFAULT_DPI).max(1) as u32;
     let baseline =
         super::px_to_hwpunit(metrics.baseline, super::DEFAULT_DPI).clamp(0, height as i32) as u32;
@@ -53,6 +71,11 @@ pub fn intrinsic_metrics_hwp(script: &str, font_size: u32) -> (u32, u32, u32) {
 /// 수식 스크립트와 BaseUnit에서 레이아웃이 소비할 intrinsic HWPUNIT 크기를 계산한다.
 pub fn intrinsic_size_hwp(script: &str, font_size: u32) -> (u32, u32) {
     let (width, height, _) = intrinsic_metrics_hwp(script, font_size);
+    (width, height)
+}
+
+pub fn intrinsic_size_hwp_with_font(script: &str, font_size: u32, font_name: &str) -> (u32, u32) {
+    let (width, height, _) = intrinsic_metrics_hwp_with_font(script, font_size, font_name);
     (width, height)
 }
 

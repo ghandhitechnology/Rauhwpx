@@ -10,7 +10,7 @@ import { FieldInsertDialog } from '@/ui/field-insert-dialog';
 import { showShapePicker } from '@/ui/shape-picker';
 import { showToast } from '@/ui/toast';
 import type { ShapeType } from '@/ui/shape-picker';
-import type { CellPathLike } from '@/core/types';
+import type { CellPathLike, DocumentPosition } from '@/core/types';
 import type { WasmBridge } from '@/core/wasm-bridge';
 import { INSERTED_IMAGE_MAX_BYTES, readBlobBytesWithLimit } from '@/core/document-input-limits';
 import type { InputHandler } from '@/engine/input-handler';
@@ -189,32 +189,15 @@ export const insertCommands: CommandDef[] = [
     id: 'insert:equation',
     label: '수식',
     shortcutLabel: 'Ctrl+M,M',
-    canExecute: (ctx) => ctx.hasDocument && !ctx.inTable,
+    canExecute: (ctx) => ctx.hasDocument,
     execute(services) {
       const ih = services.getInputHandler();
       if (!ih) return;
-      const pos = ih.getPosition();
-      // 본문 전용 — 표 셀 내부에서는 실행하지 않음
-      if ((pos as any).cellIndex !== undefined && (pos as any).cellIndex >= 0) return;
+      const pos = ih.getPosition() as DocumentPosition;
       const defaultFontSize = 1000; // 10pt → HWPUNIT
       const defaultColor = 0x00000000; // 검정
-      // [Task #3207] 수식 삽입도 본문 문자 수를 바꾸므로 snapshot 으로 기록한다(각주/미주와 동형).
-      let result: { ok: boolean; paraIdx: number; controlIdx: number } | undefined;
-      ih.executeOperation({
-        kind: 'snapshot',
-        operationType: 'insertEquation',
-        operation: (wasm) => {
-          result = wasm.insertEquation(
-            pos.sectionIndex, pos.paragraphIndex, pos.charOffset,
-            '', defaultFontSize, defaultColor,
-          );
-          if (!result.ok) throw new Error('[insert:equation] 삽입 실패');
-          return pos;
-        },
-      });
-      if (!result) return;
       equationEditorDialog ??= new EquationEditorDialog(services.wasm, services.eventBus, services);
-      equationEditorDialog.open(pos.sectionIndex, result.paraIdx, result.controlIdx);
+      equationEditorDialog.openCreate({ position: pos, fontSizeHwpunit: defaultFontSize, color: defaultColor });
     },
   },
   {
@@ -353,7 +336,7 @@ export const insertCommands: CommandDef[] = [
         if (!equationPropsDialog) {
           equationPropsDialog = new EquationPropertiesDialog(services.wasm, services.eventBus, services);
         }
-        equationPropsDialog.open(ref.sec, ref.ppi, ref.ci, ref.cellIdx, ref.cellParaIdx, ref.noteRef);
+        equationPropsDialog.open(ref.sec, ref.ppi, ref.ci, ref.cellIdx, ref.cellParaIdx, ref.noteRef, ref.innerControlIdx, ref.cellPath);
         return;
       }
       if (!picturePropsDialog) {
@@ -398,7 +381,7 @@ export const insertCommands: CommandDef[] = [
       if (!equationEditorDialog) {
         equationEditorDialog = new EquationEditorDialog(services.wasm, services.eventBus, services);
       }
-      equationEditorDialog.open(ref.sec, ref.ppi, ref.ci, ref.cellIdx, ref.cellParaIdx, ref.noteRef);
+      equationEditorDialog.open(ref.sec, ref.ppi, ref.ci, ref.cellIdx, ref.cellParaIdx, ref.noteRef, ref.innerControlIdx, ref.cellPath);
     },
   },
   {

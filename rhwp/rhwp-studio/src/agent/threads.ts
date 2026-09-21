@@ -16,6 +16,7 @@ import type {
   UserQuestionInteraction,
   UserQuestionOutcome,
 } from './types.ts';
+import type { InlineObjectAddress, InlinePromptItem } from './inline-prompt-context.ts';
 
 const STORAGE_KEY = 'rhwp-agent-threads';
 const NOTIFY_KEY = 'rhwp-agent-threads-notify';
@@ -38,7 +39,13 @@ interface ThreadMessageBase {
   delivery?: 'queued-cloud' | 'accepted-cloud';
   attachments?: ThreadAttachment[];
   /** 인라인 프롬프트로 보낸 메시지에 붙는 문서 선택 컨텍스트 (표시용). */
-  selection?: { label: string; excerpt: string };
+  selection?: {
+    label: string;
+    excerpt: string;
+    items?: InlinePromptItem[];
+    documentId?: string | null;
+    revision?: number;
+  };
 }
 
 export interface ThreadToolRecord {
@@ -516,6 +523,153 @@ function normalizePendingUserQuestionDraft(
   };
 }
 
+function storedInteger(value: unknown): number | undefined {
+  const number = Number(value);
+  return Number.isInteger(number) && number >= 0 ? number : undefined;
+}
+
+function storedString(value: unknown, limit: number): string | undefined {
+  return typeof value === 'string' ? value.slice(0, limit) : undefined;
+}
+
+function normalizeInlineAddress(value: unknown): InlineObjectAddress | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  const sectionIdx = storedInteger(raw.sectionIdx);
+  const paraIdx = storedInteger(raw.paraIdx);
+  const controlIdx = storedInteger(raw.controlIdx);
+  if (sectionIdx === undefined || paraIdx === undefined || controlIdx === undefined) return undefined;
+  const cellPath = Array.isArray(raw.cellPath)
+    ? raw.cellPath.slice(0, 16).flatMap((entry) => {
+      if (!entry || typeof entry !== 'object') return [];
+      const path = entry as Record<string, unknown>;
+      const controlIndex = storedInteger(path.controlIndex);
+      const cellIndex = storedInteger(path.cellIndex);
+      const cellParaIndex = storedInteger(path.cellParaIndex);
+      return controlIndex === undefined || cellIndex === undefined || cellParaIndex === undefined
+        ? []
+        : [{ controlIndex, cellIndex, cellParaIndex }];
+    })
+    : undefined;
+  const optionalNumber = (key: string) => storedInteger(raw[key]);
+  return {
+    sectionIdx,
+    paraIdx,
+    controlIdx,
+    ...(cellPath?.length ? { cellPath } : {}),
+    ...(optionalNumber('cellIdx') !== undefined ? { cellIdx: optionalNumber('cellIdx') } : {}),
+    ...(optionalNumber('cellParaIdx') !== undefined ? { cellParaIdx: optionalNumber('cellParaIdx') } : {}),
+    ...(optionalNumber('endCellParaIdx') !== undefined ? { endCellParaIdx: optionalNumber('endCellParaIdx') } : {}),
+    ...(optionalNumber('innerControlIdx') !== undefined ? { innerControlIdx: optionalNumber('innerControlIdx') } : {}),
+    ...(optionalNumber('logicalOffset') !== undefined ? { logicalOffset: optionalNumber('logicalOffset') } : {}),
+  };
+}
+
+function normalizeSelectionPoint(value: unknown): { sectionIdx: number; paraIdx: number; charOffset: number } | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  const sectionIdx = storedInteger(raw.sectionIdx);
+  const paraIdx = storedInteger(raw.paraIdx);
+  const charOffset = storedInteger(raw.charOffset);
+  return sectionIdx === undefined || paraIdx === undefined || charOffset === undefined
+    ? undefined
+    : { sectionIdx, paraIdx, charOffset };
+}
+
+function normalizeStoredInlineItem(value: unknown): InlinePromptItem | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  if (raw.kind === 'text') {
+    const selection = raw.selection as Record<string, unknown> | undefined;
+    const start = normalizeSelectionPoint(selection?.start);
+    const end = normalizeSelectionPoint(selection?.end);
+    const text = storedString(selection?.text, 4000);
+    if (!start || !end || text === undefined) return undefined;
+    const address = normalizeInlineAddress(raw.address);
+    return {
+      kind: 'text',
+      selection: { start, end, text, truncated: selection?.truncated === true },
+      ...(address ? { address } : {}),
+      ...(raw.offsetConvention === 'logical' || raw.offsetConvention === 'text'
+        ? { offsetConvention: raw.offsetConvention }
+        : {}),
+    };
+  }
+  const address = normalizeInlineAddress(raw.address);
+  if (!address) return undefined;
+  if (raw.kind === 'table') {
+    const rowCount = storedInteger(raw.rowCount);
+    const colCount = storedInteger(raw.colCount);
+    if (rowCount === undefined || colCount === undefined || !Array.isArray(raw.cells)) return undefined;
+    const cells = raw.cells.slice(0, 512).flatMap((value) => {
+      if (!value || typeof value !== 'object') return [];
+      const cell = value as Record<string, unknown>;
+      const row = storedInteger(cell.row);
+      const col = storedInteger(cell.col);
+      const rowSpan = storedInteger(cell.rowSpan);
+      const colSpan = storedInteger(cell.colSpan);
+      const text = storedString(cell.text, 4000);
+      return row === undefined || col === undefined || rowSpan === undefined || colSpan === undefined || text === undefined
+        ? []
+        : [{ row, col, rowSpan, colSpan, text }];
+    });
+    const range = raw.selectedRange as Record<string, unknown> | undefined;
+    const selectedRange = range ? {
+      startRow: storedInteger(range.startRow), startCol: storedInteger(range.startCol),
+      endRow: storedInteger(range.endRow), endCol: storedInteger(range.endCol),
+    } : undefined;
+    const validRange = selectedRange && Object.values(selectedRange).every(value => value !== undefined)
+      ? selectedRange as { startRow: number; startCol: number; endRow: number; endCol: number }
+      : undefined;
+    return { kind: 'table', address, rowCount, colCount, cells, truncated: raw.truncated === true,
+      ...(validRange ? { selectedRange: validRange } : {}) };
+  }
+  if (raw.kind === 'equation') {
+    const script = storedString(raw.script, 16384);
+    if (script === undefined) return undefined;
+    return { kind: 'equation', address, script,
+      ...(storedString(raw.fontName, 200) !== undefined ? { fontName: storedString(raw.fontName, 200) } : {}),
+      ...(storedInteger(raw.fontSize) !== undefined ? { fontSize: storedInteger(raw.fontSize) } : {}),
+      ...(storedString(raw.description, 1000) !== undefined ? { description: storedString(raw.description, 1000) } : {}),
+      ...(storedString(raw.attachmentName, 500) !== undefined ? { attachmentName: storedString(raw.attachmentName, 500) } : {}) };
+  }
+  if (raw.kind === 'object') {
+    const objectType = storedString(raw.objectType, 50);
+    if (!objectType) return undefined;
+    const number = (key: string) => typeof raw[key] === 'number' && Number.isFinite(raw[key])
+      ? raw[key] as number : undefined;
+    return { kind: 'object', objectType, address,
+      ...(storedString(raw.description, 1000) !== undefined ? { description: storedString(raw.description, 1000) } : {}),
+      ...(number('width') !== undefined ? { width: number('width') } : {}),
+      ...(number('height') !== undefined ? { height: number('height') } : {}),
+      ...(storedString(raw.attachmentName, 500) !== undefined ? { attachmentName: storedString(raw.attachmentName, 500) } : {}) };
+  }
+  return undefined;
+}
+
+function normalizeStoredSelection(value: unknown): ThreadMessageBase['selection'] {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = value as Record<string, unknown>;
+  const label = storedString(raw.label, 200);
+  const excerpt = storedString(raw.excerpt, 500);
+  if (label === undefined || excerpt === undefined) return undefined;
+  const items = Array.isArray(raw.items)
+    ? raw.items.slice(0, 32).flatMap(item => {
+      const normalized = normalizeStoredInlineItem(item);
+      return normalized ? [normalized] : [];
+    })
+    : undefined;
+  return {
+    label,
+    excerpt,
+    ...(items?.length ? { items } : {}),
+    ...(raw.documentId === null || typeof raw.documentId === 'string'
+      ? { documentId: raw.documentId as string | null }
+      : {}),
+    ...(storedInteger(raw.revision) !== undefined ? { revision: storedInteger(raw.revision) } : {}),
+  };
+}
+
 function normalizeStoredThread(thread: StoredChatThread): ChatThread {
   const latestPlan = isStructuredPlan(thread.latestPlan) ? thread.latestPlan : undefined;
   const plans = Array.isArray(thread.plans) ? thread.plans.filter(isStructuredPlan) : [];
@@ -562,6 +716,7 @@ function normalizeStoredThread(thread: StoredChatThread): ChatThread {
       || message.delivery === 'accepted-cloud'
       ? message.delivery
       : undefined;
+    const selection = normalizeStoredSelection(message.selection);
     const metadata = {
       ...(agent ? { agent } : {}),
       ...(typeof message.skillName === 'string' && /^[a-z0-9-]+$/.test(message.skillName)
@@ -571,6 +726,7 @@ function normalizeStoredThread(thread: StoredChatThread): ChatThread {
       ...(typeof message.messageId === 'string' ? { messageId: message.messageId } : {}),
       ...(delivery ? { delivery } : {}),
       ...(attachments?.length ? { attachments } : {}),
+      ...(selection ? { selection } : {}),
     };
     if (message.kind === 'user-question') {
       if (message.role !== 'assistant') return [];

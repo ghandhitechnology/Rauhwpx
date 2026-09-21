@@ -144,6 +144,56 @@ test('skill invocation icon survives thread persistence', () => {
   assert.equal(getThread(t.id)?.messages[0]?.skillIcon, undefined);
 });
 
+test('mixed document selection context survives thread persistence', () => {
+  mem.clear();
+  const t = createEmptyThread({ agent: 'codex', model: 'gpt-5.6-sol', effort: 'medium' });
+  const items = [
+    {
+      kind: 'table' as const,
+      address: { sectionIdx: 0, paraIdx: 2, controlIdx: 1 },
+      rowCount: 2,
+      colCount: 2,
+      cells: [{ row: 0, col: 0, rowSpan: 1, colSpan: 1, text: '표 셀' }],
+      truncated: false,
+    },
+    {
+      kind: 'equation' as const,
+      address: {
+        sectionIdx: 0,
+        paraIdx: 2,
+        controlIdx: 1,
+        cellPath: [{ controlIndex: 1, cellIndex: 0, cellParaIndex: 0 }],
+        innerControlIdx: 3,
+      },
+      script: 'x^2',
+      attachmentName: 'equation.png',
+    },
+    {
+      kind: 'object' as const,
+      objectType: 'image',
+      address: { sectionIdx: 0, paraIdx: 4, controlIdx: 0 },
+      description: '도표',
+      width: 320,
+      height: 180,
+      attachmentName: 'image.png',
+    },
+  ];
+  t.messages.push({
+    role: 'user',
+    text: '이 요소들을 정리해줘',
+    selection: {
+      label: '표 1개 · 수식 1개 · 이미지 1개',
+      excerpt: '표 셀 · x^2 · 도표',
+      items,
+      documentId: 'doc-1',
+      revision: 7,
+    },
+  });
+  upsertThread(t);
+
+  assert.deepEqual(getThread(t.id)?.messages[0]?.selection, t.messages[0]?.selection);
+});
+
 test('setThreadTitle updates a persisted thread', () => {
   mem.clear();
   const t = createEmptyThread({ agent: 'codex', model: 'gpt-5.6-sol', effort: 'high' });

@@ -28,9 +28,10 @@ pub use font::{
 };
 pub use font_glyph::{
     decode_font_bitmap_glyph_payload, decode_font_svg_glyph_payload,
-    lower_font_native_glyph_sidecars, resolve_embedded_font_face_index, EmbeddedFontFace,
-    FontBitmapGlyphDecodeError, FontBitmapGlyphDecodeOptions, FontGlyphLoweringReport,
-    FontSvgGlyphDecodeError, FontSvgGlyphDecodeOptions,
+    lower_font_native_glyph_sidecars, resolve_embedded_font_face_aliases,
+    resolve_embedded_font_face_index, EmbeddedFontFace, FontBitmapGlyphDecodeError,
+    FontBitmapGlyphDecodeOptions, FontGlyphLoweringReport, FontSvgGlyphDecodeError,
+    FontSvgGlyphDecodeOptions,
 };
 pub use layer_tree::{
     CacheHint, ClipKind, GroupKind, LayerNode, LayerNodeKind, LayerOutputOptions, PageLayerTree,
@@ -66,8 +67,9 @@ pub use schema::{
     PAGE_LAYER_TREE_SCHEMA_MINOR_VERSION, PAGE_LAYER_TREE_SCHEMA_VERSION, PAGE_LAYER_TREE_UNIT,
 };
 pub use text_shape::{
-    FontRequest, FontResolver, GlyphRunQuality, NoopFontResolver, ResolvedFontFace,
-    ResolvedGlyphRun, TextShapeDiagnostic, TextShapeLowerer, TextShapeReport,
+    register_embedded_font_resources, EmbeddedFontResolver, FontRequest, FontResolver,
+    GlyphRunQuality, NoopFontResolver, ResolvedFontFace, ResolvedGlyphRun, TextShapeDiagnostic,
+    TextShapeLowerer, TextShapeReport,
 };
 pub use text_v2::{
     TextV2CompatibilityProfile, TextV2Diagnostics, TextV2LineBreakRisk, TextV2LineBreakRiskLevel,

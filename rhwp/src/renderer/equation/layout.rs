@@ -122,6 +122,7 @@ pub enum LayoutKind {
 pub struct EqLayout {
     /// 기본 글꼴 크기 (px)
     pub font_size: f64,
+    font_family: Option<String>,
 }
 
 /// 비율 상수
@@ -195,7 +196,28 @@ const TEXT_BASELINE: f64 = 0.8;
 
 impl EqLayout {
     pub fn new(font_size: f64) -> Self {
-        Self { font_size }
+        Self {
+            font_size,
+            font_family: None,
+        }
+    }
+
+    pub fn with_font(font_size: f64, font_family: &str) -> Self {
+        Self {
+            font_size,
+            font_family: (!font_family.trim().is_empty()).then(|| font_family.to_string()),
+        }
+    }
+
+    fn text_width(&self, text: &str, font_size: f64, italic: bool) -> f64 {
+        self.font_family
+            .as_deref()
+            .and_then(|family| {
+                crate::renderer::layout::measure_known_font_run_width(
+                    family, italic, text, font_size,
+                )
+            })
+            .unwrap_or_else(|| estimate_text_width(text, font_size, italic))
     }
 
     /// AST를 레이아웃 박스로 변환
@@ -310,7 +332,7 @@ impl EqLayout {
                 '\u{3000}'..='\u{9FFF}' | '\u{F900}'..='\u{FAFF}' | '\u{AC00}'..='\u{D7AF}'
             )
         });
-        let w = estimate_text_width(text, fs, !has_cjk);
+        let w = self.text_width(text, fs, !has_cjk);
         LayoutBox {
             x: 0.0,
             y: 0.0,
@@ -322,7 +344,7 @@ impl EqLayout {
     }
 
     fn layout_number(&self, text: &str, fs: f64) -> LayoutBox {
-        let w = estimate_text_width(text, fs, false);
+        let w = self.text_width(text, fs, false);
         LayoutBox {
             x: 0.0,
             y: 0.0,
@@ -379,7 +401,7 @@ impl EqLayout {
     }
 
     fn layout_function(&self, name: &str, fs: f64) -> LayoutBox {
-        let w = estimate_text_width(name, fs, false);
+        let w = self.text_width(name, fs, false);
         LayoutBox {
             x: 0.0,
             y: 0.0,
@@ -1514,6 +1536,20 @@ mod tests {
             "Korean text width ({:.1}) should be larger than Latin ({:.1})",
             korean.width,
             latin.width
+        );
+    }
+
+    #[test]
+    fn known_equation_font_uses_its_proportional_advances() {
+        let layout = EqLayout::with_font(20.0, "함초롬돋움");
+        let narrow = layout.layout(&EqNode::Text("iiii".to_string()));
+        let wide = layout.layout(&EqNode::Text("WWWW".to_string()));
+
+        assert!(
+            wide.width > narrow.width * 1.5,
+            "resolved font advances should distinguish iii ({}) from WWW ({})",
+            narrow.width,
+            wide.width,
         );
     }
 }
