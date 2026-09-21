@@ -3,133 +3,322 @@ import test from 'node:test';
 import { promises as fs, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { SkillRegistry, parseSkillMarkdown } from '../skills.mjs';
+import { SkillRegistry, projectSkillMarkdown } from '../skills.mjs';
 import { buildClaudeArgv, formatClaudeExitError } from '../agents/claude.mjs';
 import { buildCodexArgv } from '../agents/codex.mjs';
 
 const MARKDOWN = (name, description = 'Use this skill for representative testing.', icon) => `---\nname: ${name}\ndescription: ${description}${icon ? `\nicon: ${icon}` : ''}\n---\n\nFollow the requested workflow.\n`;
 
-test('parseSkillMarkdown accepts portable icon metadata and rejects unknown values or keys', () => {
-  assert.equal(parseSkillMarkdown(MARKDOWN('good-skill')).name, 'good-skill');
-  assert.equal(parseSkillMarkdown(MARKDOWN('pencil-skill', undefined, 'pencil')).icon, 'pencil');
+async function tempRegistry(t, { bundled = {}, user = {}, ...options } = {}) {
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-skills-test-'));
+  t.after(() => fs.rm(temp, { recursive: true, force: true }));
+  const bundledRoot = path.join(temp, 'bundled');
+  const userRoot = path.join(temp, 'user');
+  await fs.mkdir(bundledRoot, { recursive: true });
+  await writeTree(bundledRoot, bundled);
+  await writeTree(userRoot, user);
+  const registry = await new SkillRegistry({
+    bundledRoot,
+    userRoot,
+    home: path.join(temp, 'home'),
+    ...options,
+  }).init();
+  return { temp, bundledRoot, userRoot, registry };
+}
+
+async function writeTree(root, tree) {
+  for (const [name, files] of Object.entries(tree)) {
+    for (const [rel, content] of Object.entries(files)) {
+      const file = path.join(root, name, rel);
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, content);
+    }
+  }
+}
+
+function change(registry, raw) {
+  return registry.commit(registry.parseChange(raw));
+}
+
+test('projectSkillMarkdown reads YAML frontmatter without rewriting bytes', () => {
+  assert.equal(projectSkillMarkdown(MARKDOWN('good-skill')).name, 'good-skill');
+  assert.equal(projectSkillMarkdown(MARKDOWN('pencil-skill', undefined, 'pencil')).icon, 'pencil');
   const windowsMarkdown = `\uFEFF${MARKDOWN('windows-skill').replace(/\n/g, '\r\n')}`;
-  assert.deepEqual(parseSkillMarkdown(windowsMarkdown), {
+  assert.deepEqual(projectSkillMarkdown(windowsMarkdown), {
     name: 'windows-skill',
     description: 'Use this skill for representative testing.',
-    body: 'Follow the requested workflow.',
+    icon: null,
   });
-  assert.throws(() => parseSkillMarkdown(MARKDOWN('bad-icon', undefined, 'sparkles')), /pencil, bot, or system/);
-  assert.throws(() => parseSkillMarkdown('---\nname: bad\ndescription: x\nfoo: bar\n---\n\nDo it.\n'), /only name, description, and icon/);
-  assert.throws(() => parseSkillMarkdown(MARKDOWN('skill-create')), /reserved/);
+  assert.equal(projectSkillMarkdown('---\nname: bad-icon\ndescription: x\nicon: sparkles\n---\n\nDo it.\n').icon, null);
+  assert.equal(projectSkillMarkdown('---\nname: extra\ndescription: x\nfoo: bar\nmetadata:\n  rhwp:\n    icon: bot\n---\n\nDo it.\n').icon, 'bot');
+  assert.throws(() => projectSkillMarkdown(MARKDOWN('skill-create')), /reserved/);
+  assert.throws(
+    () => projectSkillMarkdown('---\nname: alias-skill\ndescription: &a [x]\nfoo: *a\n---\n\nDo it.\n'),
+    /YAML/,
+  );
 });
 
-test('bundled present-plan skill ends planning through the structured presentation tool', async (t) => {
+test('bundled present-plan stays sealed and a user directory of that name is quarantined', async (t) => {
   const markdown = readFileSync(new URL('../skills/present-plan/SKILL.md', import.meta.url), 'utf8');
-  assert.equal(parseSkillMarkdown(markdown, 'present-plan').name, 'present-plan');
+  assert.equal(projectSkillMarkdown(markdown, 'present-plan').name, 'present-plan');
   assert.match(markdown, /present_implementation_plan/);
   assert.match(markdown, /only when the user asked you to write, draft, or present a plan/);
   assert.match(markdown, /Do not tell the user the plan is ready/);
   assert.match(markdown, /renewed discovery/);
   assert.doesNotMatch(markdown, /revise the complete plan and present its replacement through the same tool/i);
 
-  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-required-skill-test-'));
-  t.after(() => fs.rm(temp, { recursive: true, force: true }));
-  const bundledRoot = path.join(temp, 'bundled');
-  await fs.mkdir(path.join(bundledRoot, 'present-plan'), { recursive: true });
-  await fs.writeFile(path.join(bundledRoot, 'present-plan', 'SKILL.md'), markdown);
-  const registry = await new SkillRegistry({ bundledRoot, userRoot: path.join(temp, 'user') }).init();
-  const skill = (await registry.list()).skills.find((item) => item.name === 'present-plan');
-  assert.equal(skill.required, true);
-  assert.equal(skill.enabled, true);
-  await assert.rejects(() => registry.setEnabled('present-plan', false), /required by the planning workflow/);
-});
-
-test('SkillRegistry saves, disables, reads, and recoverably deletes user skills', async (t) => {
-  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-skills-test-'));
-  t.after(() => fs.rm(temp, { recursive: true, force: true }));
-  const bundledRoot = path.join(temp, 'bundled');
-  const userRoot = path.join(temp, 'user');
-  await fs.mkdir(path.join(bundledRoot, 'starter'), { recursive: true });
-  await fs.writeFile(path.join(bundledRoot, 'starter', 'SKILL.md'), MARKDOWN('starter'));
-  const registry = await new SkillRegistry({ bundledRoot, userRoot }).init();
-
-  const payload = { name: 'my-skill', files: [
-    { path: 'SKILL.md', content: MARKDOWN('my-skill', undefined, 'bot') },
-    { path: 'scripts/check.js', content: 'process.stdout.write("ok")' },
-  ] };
-  const validation = await registry.validate(payload);
-  assert.equal(validation.valid, true);
-  assert.equal(validation.hasScripts, true);
-  assert.equal(validation.warnings.length, 1);
-  await registry.save(payload);
-  let catalog = await registry.list();
-  assert.deepEqual(catalog.skills.map((skill) => skill.name), ['starter', 'my-skill']);
-  assert.equal(catalog.skills.find((skill) => skill.name === 'my-skill').hasScripts, true);
-  assert.equal(catalog.skills.find((skill) => skill.name === 'my-skill').icon, 'bot');
-
-  await registry.setEnabled('my-skill', false);
-  catalog = await registry.list();
-  assert.equal(catalog.skills.find((skill) => skill.name === 'my-skill').enabled, false);
-  const detail = await registry.read('my-skill');
-  assert.equal(detail.skill.files.find((file) => file.path === 'SKILL.md').encoding, 'utf8');
-  await assert.rejects(() => registry.readResource('my-skill'), /disabled/);
-  await registry.setEnabled('my-skill', true);
-  assert.match((await registry.readResource('my-skill')).content, /name: my-skill/);
-  await assert.rejects(() => registry.readResource('my-skill', '../outside.txt'), /escapes its folder/);
-
-  const deleted = await registry.delete('my-skill');
-  assert.equal(deleted.recoverable, true);
-  assert.equal((await registry.list()).skills.some((skill) => skill.name === 'my-skill'), false);
-  assert.ok((await fs.readdir(path.join(userRoot, '.trash'))).some((name) => name.endsWith('-my-skill')));
-});
-
-test('SkillRegistry rejects traversal and bundled overwrites', async (t) => {
-  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-skills-test-'));
-  t.after(() => fs.rm(temp, { recursive: true, force: true }));
-  const bundledRoot = path.join(temp, 'bundled');
-  await fs.mkdir(path.join(bundledRoot, 'starter'), { recursive: true });
-  await fs.writeFile(path.join(bundledRoot, 'starter', 'SKILL.md'), MARKDOWN('starter'));
-  const registry = await new SkillRegistry({ bundledRoot, userRoot: path.join(temp, 'user') }).init();
-  await assert.rejects(() => registry.save({ name: 'escape-test', files: [
-    { path: 'SKILL.md', content: MARKDOWN('escape-test') },
-    { path: '../outside.txt', content: 'no' },
-  ] }), /escapes its folder/);
-  await assert.rejects(() => registry.save({ name: 'starter', files: [{ path: 'SKILL.md', content: MARKDOWN('starter') }] }), /cannot be overwritten/);
-});
-
-test('SkillRegistry restores the previous skill when post-rename verification fails', async (t) => {
-  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-skill-rollback-test-'));
-  t.after(() => fs.rm(temp, { recursive: true, force: true }));
-  const bundledRoot = path.join(temp, 'bundled');
-  const userRoot = path.join(temp, 'user');
-  await fs.mkdir(bundledRoot, { recursive: true });
-  const registry = await new SkillRegistry({ bundledRoot, userRoot }).init();
-  await registry.save({
-    name: 'rollback-skill',
-    files: [{ path: 'SKILL.md', content: MARKDOWN('rollback-skill', 'Original version') }],
+  const bundledBody = `${markdown}\nBUNDLED_PRESENT_PLAN_BODY\n`;
+  const { userRoot, registry } = await tempRegistry(t, {
+    bundled: { 'present-plan': { 'SKILL.md': bundledBody } },
+    user: { 'present-plan': { 'SKILL.md': MARKDOWN('present-plan', 'user copy') } },
   });
+  assert.equal(await pathExists(path.join(userRoot, 'present-plan')), false);
+  const trash = await fs.readdir(path.join(userRoot, '.trash', 'deleted'));
+  assert.equal(trash.filter((name) => name.endsWith('-present-plan')).length, 1);
+  const again = await new SkillRegistry({
+    bundledRoot: path.join(path.dirname(userRoot), 'bundled'),
+    userRoot,
+    home: path.join(path.dirname(userRoot), 'home'),
+  }).init();
+  const trashAfter = await fs.readdir(path.join(userRoot, '.trash', 'deleted'));
+  assert.equal(trashAfter.filter((name) => name.endsWith('-present-plan')).length, 1);
 
-  const originalRead = registry.read.bind(registry);
-  let failVerification = true;
-  registry.read = async (...args) => {
-    if (failVerification) {
-      failVerification = false;
-      throw new Error('injected post-rename verification failure');
-    }
-    return originalRead(...args);
-  };
-  await assert.rejects(() => registry.save({
-    name: 'rollback-skill',
-    files: [{ path: 'SKILL.md', content: MARKDOWN('rollback-skill', 'Replacement version') }],
-  }), /injected post-rename verification failure/);
-  registry.read = originalRead;
+  const row = (await registry.catalog()).rows.find((item) => item.name === 'present-plan');
+  assert.equal(row.kind, 'sealed');
+  assert.equal(row.origin, 'sealed');
+  assert.equal(row.enabled, true);
+  assert.equal(row.digest, null);
+  const refused = await change(registry, { action: 'enable', name: 'present-plan', enabled: false });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.code, 'SEALED');
+  const planning = await again.promptContext('계획', undefined, { phase: 'planning' });
+  assert.match(planning, /BUNDLED_PRESENT_PLAN_BODY/);
+  assert.doesNotMatch(planning, /user copy/);
+  assert.match(planning, /<activated_product_skill name="present-plan">/);
+  assert.doesNotMatch(planning, /root=/);
+});
 
-  const restored = await registry.read('rollback-skill');
-  const markdown = restored.skill.files.find((file) => file.path === 'SKILL.md').content;
-  assert.match(markdown, /Original version/);
-  assert.doesNotMatch(markdown, /Replacement version/);
-  const trash = await fs.readdir(path.join(userRoot, '.trash'));
-  assert.ok(trash.some((entry) => entry.includes('-rollback-skill-failed-')));
+test('promptContext keeps the writing discipline on implementing and omits it while planning', async (t) => {
+  const { registry } = await tempRegistry(t);
+  const implementing = await registry.promptContext('문장', undefined, { phase: 'implementing' });
+  assert.match(implementing, /<korean_writing_discipline>/);
+  const planning = await registry.promptContext('문장', undefined, { phase: 'planning' });
+  assert.doesNotMatch(planning, /<korean_writing_discipline>/);
+});
+
+test('SkillRegistry creates, disables, reads, and recoverably deletes user skills', async (t) => {
+  const { userRoot, registry } = await tempRegistry(t, {
+    bundled: { starter: { 'SKILL.md': MARKDOWN('starter') } },
+  });
+  const created = await change(registry, {
+    action: 'create',
+    name: 'my-skill',
+    description: 'Use this skill for representative testing.',
+    body: 'Follow the requested workflow.',
+  });
+  assert.equal(created.ok, true);
+  const script = await change(registry, {
+    action: 'write',
+    name: 'my-skill',
+    path: 'scripts/check.js',
+    content: 'process.stdout.write("ok")',
+    base: created.digest,
+  });
+  assert.equal(script.ok, true);
+  const scriptMode = (await fs.stat(path.join(userRoot, 'my-skill', 'scripts', 'check.js'))).mode & 0o777;
+  assert.equal(scriptMode, 0o700);
+  let catalog = await registry.catalog();
+  assert.deepEqual(catalog.rows.map((row) => row.name), ['my-skill', 'starter']);
+  assert.equal(catalog.rows.find((row) => row.name === 'my-skill').icon, null);
+
+  const disabled = await change(registry, { action: 'enable', name: 'my-skill', enabled: false });
+  assert.equal(disabled.ok, true);
+  catalog = await registry.catalog();
+  assert.equal(catalog.rows.find((row) => row.name === 'my-skill').enabled, false);
+  await assert.rejects(() => registry.readResource('my-skill'), (error) => error.code === 'SKILL_DISABLED');
+  const enabled = await change(registry, { action: 'enable', name: 'my-skill', enabled: true });
+  assert.equal(enabled.ok, true);
+  const resource = await registry.readResource('my-skill');
+  assert.match(resource.content, /name: my-skill/);
+  assert.equal(resource.digest, enabled.digest);
+  assert.deepEqual(resource.files, ['SKILL.md', 'scripts/check.js']);
+  assert.throws(() => registry.parseChange({
+    action: 'write',
+    name: 'my-skill',
+    path: '../outside.txt',
+    content: 'no',
+    base: enabled.digest,
+  }), /escapes its folder/);
+
+  const same = await change(registry, { action: 'enable', name: 'my-skill', enabled: true });
+  assert.equal(same.unchanged, true);
+  const deleted = await change(registry, { action: 'delete', name: 'my-skill', base: enabled.digest });
+  assert.equal(deleted.ok, true);
+  assert.equal((await registry.catalog()).rows.some((row) => row.name === 'my-skill'), false);
+  assert.ok((await fs.readdir(path.join(userRoot, '.trash', 'deleted'))).some((name) => name.endsWith('-my-skill')));
+  const restored = await change(registry, { action: 'restore', name: 'my-skill' });
+  assert.equal(restored.ok, true);
+  assert.equal((await registry.catalog()).rows.some((row) => row.name === 'my-skill' && row.origin === 'user'), true);
+});
+
+test('identical writes are unchanged before the base check and a stale digest leaves the newer bytes', async (t) => {
+  const { userRoot, registry } = await tempRegistry(t);
+  const created = await change(registry, {
+    action: 'create',
+    name: 'edit-skill',
+    description: 'First',
+    body: 'First body.',
+  });
+  const file = path.join(userRoot, 'edit-skill', 'SKILL.md');
+  const current = await fs.readFile(file);
+  const before = await fs.stat(file);
+  const unchanged = await change(registry, {
+    action: 'write',
+    name: 'edit-skill',
+    path: 'SKILL.md',
+    content: current.toString('utf8'),
+    base: '0'.repeat(64),
+  });
+  assert.equal(unchanged.ok, true);
+  assert.equal(unchanged.unchanged, true);
+  assert.equal(unchanged.digest, created.digest);
+  const after = await fs.stat(file);
+  assert.equal(before.mtimeMs, after.mtimeMs);
+
+  const newer = await change(registry, {
+    action: 'body',
+    name: 'edit-skill',
+    body: 'Second body.',
+    base: created.digest,
+  });
+  assert.equal(newer.ok, true);
+  const stale = await change(registry, {
+    action: 'body',
+    name: 'edit-skill',
+    body: 'Third body.',
+    base: created.digest,
+  });
+  assert.equal(stale.ok, false);
+  assert.equal(stale.code, 'STALE');
+  const text = await fs.readFile(file, 'utf8');
+  assert.match(text, /Second body\./);
+  assert.doesNotMatch(text, /Third body\./);
+});
+
+test('import copies a harness directory verbatim and refuses a real path inside pi skills', async (t) => {
+  const folded = [
+    '---',
+    'name: folded-skill',
+    'description: >',
+    '  한 주 업무를',
+    '  문단으로 정리한다',
+    'extra: keep',
+    'metadata:',
+    '  rhwp:',
+    '    icon: pencil',
+    '---',
+    '',
+    '본문입니다.',
+    '',
+  ].join('\n');
+  const { temp, userRoot, registry } = await tempRegistry(t);
+  const harness = path.join(temp, 'harness');
+  await fs.mkdir(path.join(harness, 'folded-skill'), { recursive: true });
+  await fs.writeFile(path.join(harness, 'folded-skill', 'SKILL.md'), folded);
+  await fs.writeFile(path.join(harness, 'folded-skill', 'notes.txt'), '같은 바이트\n');
+  registry.harnessRoots = { cursor: harness };
+  const imported = await change(registry, {
+    action: 'import',
+    harness: 'cursor',
+    name: 'folded-skill',
+    mode: 'adopt',
+  });
+  assert.equal(imported.ok, true);
+  assert.equal(await fs.readFile(path.join(userRoot, 'folded-skill', 'SKILL.md'), 'utf8'), folded);
+  assert.equal(await fs.readFile(path.join(userRoot, 'folded-skill', 'notes.txt'), 'utf8'), '같은 바이트\n');
+  assert.equal(projectSkillMarkdown(folded).icon, 'pencil');
+  const again = await change(registry, {
+    action: 'import',
+    harness: 'cursor',
+    name: 'folded-skill',
+    mode: 'adopt',
+  });
+  assert.equal(again.unchanged, true);
+
+  const blocked = path.join(temp, 'agent', 'pi', 'skills', 'hidden-skill');
+  await fs.mkdir(blocked, { recursive: true });
+  await fs.writeFile(path.join(blocked, 'SKILL.md'), MARKDOWN('hidden-skill'));
+  const blockedRegistry = await new SkillRegistry({
+    bundledRoot: path.join(temp, 'agent', 'skills'),
+    userRoot: path.join(temp, 'blocked-user'),
+    home: path.join(temp, 'home'),
+    harnessRoots: { cursor: path.join(temp, 'agent', 'pi', 'skills') },
+  }).init();
+  const refused = await change(blockedRegistry, {
+    action: 'import',
+    harness: 'cursor',
+    name: 'hidden-skill',
+    mode: 'adopt',
+  });
+  assert.equal(refused.ok, false);
+  assert.equal(await pathExists(path.join(temp, 'blocked-user', 'hidden-skill')), false);
+});
+
+test('SkillRegistry rejects traversal and bundled creates', async (t) => {
+  const { bundledRoot, registry } = await tempRegistry(t, {
+    bundled: { starter: { 'SKILL.md': MARKDOWN('starter') } },
+  });
+  assert.throws(() => registry.parseChange({
+    action: 'write',
+    name: 'escape-test',
+    path: '../outside.txt',
+    content: 'no',
+    base: 'a'.repeat(64),
+  }), /escapes its folder/);
+  const overwritten = await change(registry, {
+    action: 'create',
+    name: 'starter',
+    description: 'Replacement',
+    body: 'Replacement body.',
+  });
+  assert.equal(overwritten.ok, false);
+  assert.equal(overwritten.code, 'EXISTS');
+  assert.match(await fs.readFile(path.join(bundledRoot, 'starter', 'SKILL.md'), 'utf8'), /representative testing/);
+});
+
+test('init recovers a ready staging directory and restores a backup when staging is incomplete', async (t) => {
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-skill-journal-'));
+  t.after(() => fs.rm(temp, { recursive: true, force: true }));
+  const userRoot = path.join(temp, 'user');
+  const bundledRoot = path.join(temp, 'bundled');
+  await fs.mkdir(bundledRoot, { recursive: true });
+  const staging = path.join(userRoot, '.staging', 'recover-id');
+  await fs.mkdir(staging, { recursive: true });
+  await fs.writeFile(path.join(staging, 'SKILL.md'), MARKDOWN('recover-skill', 'Recovered body'));
+  await fs.writeFile(`${staging}.ready`, '');
+  await fs.mkdir(userRoot, { recursive: true });
+  await fs.writeFile(path.join(userRoot, '.commit.json'), `${JSON.stringify({
+    name: 'recover-skill',
+    staging,
+    backup: null,
+  })}\n`);
+  await new SkillRegistry({ bundledRoot, userRoot, home: path.join(temp, 'home') }).init();
+  assert.match(await fs.readFile(path.join(userRoot, 'recover-skill', 'SKILL.md'), 'utf8'), /Recovered body/);
+  assert.equal(await pathExists(path.join(userRoot, '.commit.json')), false);
+
+  const backup = path.join(userRoot, '.trash', 'deleted', `1-${'a'.repeat(8)}-4000-8000-8000-${'b'.repeat(12)}-backup-skill`);
+  await fs.mkdir(backup, { recursive: true });
+  await fs.writeFile(path.join(backup, 'SKILL.md'), MARKDOWN('backup-skill', 'Backup body'));
+  const incomplete = path.join(userRoot, '.staging', 'incomplete');
+  await fs.mkdir(incomplete, { recursive: true });
+  await fs.writeFile(path.join(userRoot, '.commit.json'), `${JSON.stringify({
+    name: 'backup-skill',
+    staging: incomplete,
+    backup,
+  })}\n`);
+  await new SkillRegistry({ bundledRoot, userRoot, home: path.join(temp, 'home') }).init();
+  assert.match(await fs.readFile(path.join(userRoot, 'backup-skill', 'SKILL.md'), 'utf8'), /Backup body/);
+  assert.equal(await pathExists(path.join(userRoot, '.commit.json')), false);
 });
 
 function failOnceRename() {
@@ -144,167 +333,153 @@ function failOnceRename() {
 }
 
 test('SkillRegistry retries a briefly locked Windows skill replace', async (t) => {
-  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-skill-win-replace-'));
-  t.after(() => fs.rm(temp, { recursive: true, force: true }));
-  const bundledRoot = path.join(temp, 'bundled');
-  const userRoot = path.join(temp, 'user');
-  await fs.mkdir(bundledRoot, { recursive: true });
-  const registry = await new SkillRegistry({
-    bundledRoot,
-    userRoot,
-    platform: 'win32',
-    lockRetryDelays: [0],
-  }).init();
-  await registry.save({
+  const { registry } = await tempRegistry(t, { platform: 'win32', lockRetryDelays: [0] });
+  const created = await change(registry, {
+    action: 'create',
     name: 'locked-skill',
-    files: [{ path: 'SKILL.md', content: MARKDOWN('locked-skill', 'Original version') }],
+    description: 'Original version',
+    body: 'Original body.',
   });
-
   registry.fileOperations.rename = failOnceRename();
-  await registry.save({
+  const replaced = await change(registry, {
+    action: 'body',
     name: 'locked-skill',
-    files: [{ path: 'SKILL.md', content: MARKDOWN('locked-skill', 'Replacement version') }],
+    body: 'Replacement body.',
+    base: created.digest,
   });
-
-  const replaced = await registry.read('locked-skill');
-  const markdown = replaced.skill.files.find((file) => file.path === 'SKILL.md').content;
-  assert.match(markdown, /Replacement version/);
-  assert.doesNotMatch(markdown, /Original version/);
+  assert.equal(replaced.ok, true);
+  assert.match((await registry.readResource('locked-skill')).content, /Replacement body/);
+  assert.doesNotMatch((await registry.readResource('locked-skill')).content, /Original body/);
 });
 
 test('SkillRegistry retries a briefly locked Windows skill delete', async (t) => {
-  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-skill-win-delete-'));
-  t.after(() => fs.rm(temp, { recursive: true, force: true }));
-  const bundledRoot = path.join(temp, 'bundled');
-  const userRoot = path.join(temp, 'user');
-  await fs.mkdir(bundledRoot, { recursive: true });
-  const registry = await new SkillRegistry({
-    bundledRoot,
-    userRoot,
-    platform: 'win32',
-    lockRetryDelays: [0],
-  }).init();
-  await registry.save({
+  const { registry } = await tempRegistry(t, { platform: 'win32', lockRetryDelays: [0] });
+  const created = await change(registry, {
+    action: 'create',
     name: 'locked-skill',
-    files: [{ path: 'SKILL.md', content: MARKDOWN('locked-skill') }],
+    description: 'Original version',
+    body: 'Original body.',
   });
-
   registry.fileOperations.rename = failOnceRename();
-  const deleted = await registry.delete('locked-skill');
+  const deleted = await change(registry, { action: 'delete', name: 'locked-skill', base: created.digest });
+  assert.equal(deleted.ok, true);
   assert.equal(deleted.name, 'locked-skill');
-  assert.equal((await registry.list()).skills.some((skill) => skill.name === 'locked-skill'), false);
+  assert.equal((await registry.catalog()).rows.some((row) => row.name === 'locked-skill'), false);
 });
 
 test('SkillRegistry serializes concurrent catalog mutations and recovers Windows state', async (t) => {
-  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-skill-mutation-test-'));
-  t.after(() => fs.rm(temp, { recursive: true, force: true }));
-  const bundledRoot = path.join(temp, 'bundled');
-  const userRoot = path.join(temp, 'user');
-  await fs.mkdir(bundledRoot, { recursive: true });
-  const registry = await new SkillRegistry({ bundledRoot, userRoot, platform: 'win32' }).init();
-  const payload = (name) => ({
-    name,
-    files: [{ path: 'SKILL.md', content: MARKDOWN(name) }],
-  });
-  await Promise.all([registry.save(payload('first-skill')), registry.save(payload('second-skill'))]);
+  const { registry, bundledRoot, userRoot } = await tempRegistry(t, { platform: 'win32' });
   await Promise.all([
-    registry.setEnabled('first-skill', false),
-    registry.setEnabled('second-skill', false),
+    change(registry, { action: 'create', name: 'first-skill', description: 'First', body: 'First body.' }),
+    change(registry, { action: 'create', name: 'second-skill', description: 'Second', body: 'Second body.' }),
   ]);
-  let catalog = await registry.list();
-  assert.equal(catalog.skills.find((skill) => skill.name === 'first-skill').enabled, false);
-  assert.equal(catalog.skills.find((skill) => skill.name === 'second-skill').enabled, false);
+  await Promise.all([
+    change(registry, { action: 'enable', name: 'first-skill', enabled: false }),
+    change(registry, { action: 'enable', name: 'second-skill', enabled: false }),
+  ]);
+  let catalog = await registry.catalog();
+  assert.equal(catalog.rows.find((row) => row.name === 'first-skill').enabled, false);
+  assert.equal(catalog.rows.find((row) => row.name === 'second-skill').enabled, false);
 
   await fs.rename(registry.statePath, `${registry.statePath}.previous-write`);
-  const recovered = await new SkillRegistry({ bundledRoot, userRoot, platform: 'win32' }).init();
-  catalog = await recovered.list();
-  assert.equal(catalog.skills.find((skill) => skill.name === 'first-skill').enabled, false);
-  assert.equal(catalog.skills.find((skill) => skill.name === 'second-skill').enabled, false);
+  const recovered = await new SkillRegistry({ bundledRoot, userRoot, platform: 'win32', home: path.join(path.dirname(userRoot), 'home') }).init();
+  catalog = await recovered.catalog();
+  assert.equal(catalog.rows.find((row) => row.name === 'first-skill').enabled, false);
+  assert.equal(catalog.rows.find((row) => row.name === 'second-skill').enabled, false);
 });
 
 test('corrupt or oversized catalog state fails closed without re-enabling or rewriting skills', async (t) => {
-  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-skill-state-test-'));
-  t.after(() => fs.rm(temp, { recursive: true, force: true }));
-  const bundledRoot = path.join(temp, 'bundled');
-  const userRoot = path.join(temp, 'user');
-  await fs.mkdir(path.join(userRoot, 'scripted-skill'), { recursive: true });
-  await fs.mkdir(bundledRoot, { recursive: true });
-  await fs.writeFile(path.join(userRoot, 'scripted-skill', 'SKILL.md'), MARKDOWN('scripted-skill'));
-  await fs.mkdir(path.join(userRoot, 'scripted-skill', 'scripts'));
-  await fs.writeFile(path.join(userRoot, 'scripted-skill', 'scripts', 'run.js'), 'process.exit(0)');
+  const { registry, userRoot } = await tempRegistry(t, {
+    user: {
+      'scripted-skill': {
+        'SKILL.md': MARKDOWN('scripted-skill'),
+        'scripts/run.js': 'process.exit(0)',
+      },
+    },
+  });
   const statePath = path.join(userRoot, '.catalog-state.json');
   await fs.writeFile(statePath, '{"disabled":["scripted-skill"]}\n');
-  const registry = await new SkillRegistry({ bundledRoot, userRoot }).init();
-  assert.equal((await registry.list()).skills.find((skill) => skill.name === 'scripted-skill').enabled, false);
+  assert.equal((await registry.catalog()).rows.find((row) => row.name === 'scripted-skill').enabled, false);
 
   const corrupt = '{"disabled":';
   await fs.writeFile(statePath, corrupt);
-  await assert.rejects(() => registry.list(), (error) => error.code === 'SKILL_STATE_CORRUPT');
-  await assert.rejects(() => registry.setEnabled('scripted-skill', true), (error) => error.code === 'SKILL_STATE_CORRUPT');
+  await assert.rejects(() => registry.catalog(), (error) => error.code === 'SKILL_STATE_CORRUPT');
+  await assert.rejects(
+    () => change(registry, { action: 'enable', name: 'scripted-skill', enabled: true }),
+    (error) => error.code === 'SKILL_STATE_CORRUPT',
+  );
   assert.equal(await fs.readFile(statePath, 'utf8'), corrupt);
 
   await fs.writeFile(statePath, JSON.stringify({ disabled: ['scripted-skill'], padding: 'x'.repeat(70 * 1024) }));
   await assert.rejects(
-    () => new SkillRegistry({ bundledRoot, userRoot }).init(),
+    () => new SkillRegistry({
+      bundledRoot: path.join(path.dirname(userRoot), 'bundled'),
+      userRoot,
+      home: path.join(path.dirname(userRoot), 'home'),
+    }).init(),
     (error) => error.code === 'SKILL_STATE_CORRUPT',
   );
 });
 
 test('disabled-skill state never writes past its cap and deletion removes stale state', async (t) => {
-  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-skill-state-cap-test-'));
-  t.after(() => fs.rm(temp, { recursive: true, force: true }));
-  const bundledRoot = path.join(temp, 'bundled');
-  const userRoot = path.join(temp, 'user');
-  await fs.mkdir(bundledRoot, { recursive: true });
-  const registry = await new SkillRegistry({ bundledRoot, userRoot }).init();
-  await registry.save({
+  const { registry } = await tempRegistry(t);
+  const created = await change(registry, {
+    action: 'create',
     name: 'cap-target',
-    files: [{ path: 'SKILL.md', content: MARKDOWN('cap-target') }],
+    description: 'Cap',
+    body: 'Cap body.',
   });
   const disabled = Array.from({ length: 1_000 }, (_, index) => `ghost-${String(index).padStart(4, '0')}`);
   const originalState = `${JSON.stringify({ disabled }, null, 2)}\n`;
   await fs.writeFile(registry.statePath, originalState);
 
-  await assert.rejects(
-    registry.setEnabled('cap-target', false),
-    { code: 'SKILL_STATE_TOO_LARGE' },
-  );
+  const capped = await change(registry, { action: 'enable', name: 'cap-target', enabled: false });
+  assert.equal(capped.ok, false);
+  assert.equal(capped.code, 'SKILL_STATE_TOO_LARGE');
   assert.equal(await fs.readFile(registry.statePath, 'utf8'), originalState);
 
   await fs.writeFile(registry.statePath, '{"disabled":["cap-target"]}\n');
-  await registry.delete('cap-target');
+  const deleted = await change(registry, { action: 'delete', name: 'cap-target', base: created.digest });
+  assert.equal(deleted.ok, true);
   assert.deepEqual(JSON.parse(await fs.readFile(registry.statePath, 'utf8')), { disabled: [] });
-  assert.equal((await registry.list()).skills.some((skill) => skill.name === 'cap-target'), false);
+  assert.equal((await registry.catalog()).rows.some((row) => row.name === 'cap-target'), false);
 });
 
 test('promptContext appends provider tool notes only for a known activated agent', async (t) => {
-  const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'rhwp-skill-notes-test-'));
-  t.after(() => fs.rm(temp, { recursive: true, force: true }));
-  const bundledRoot = path.join(temp, 'bundled');
-  await fs.mkdir(path.join(bundledRoot, 'starter'), { recursive: true });
-  await fs.writeFile(path.join(bundledRoot, 'starter', 'SKILL.md'), MARKDOWN('starter'));
-  const registry = await new SkillRegistry({ bundledRoot, userRoot: path.join(temp, 'user') }).init();
+  const { registry } = await tempRegistry(t, {
+    bundled: { starter: { 'SKILL.md': MARKDOWN('starter') } },
+  });
 
-  // 스킬 본문은 provider 중립 카탈로그 텍스트다 — 활성 시점에 각 provider 의
-  // 실제 협업/수거 수단이 한 문장으로 보정된다.
-  const grok = await registry.promptContext('복사', 'starter', { agent: 'grok' });
-  assert.match(grok, /<provider_tool_notes agent="grok">/);
-  assert.match(grok, /get_command_or_subagent_output/);
-  assert.match(grok, /<activated_product_skill name="starter"/);
+  const claude = await registry.promptContext('복사', 'starter', { agent: 'claude' });
+  assert.match(claude, /<provider_tool_notes agent="claude">/);
+  assert.match(claude, /never poll or wait for them/);
+  assert.match(claude, /<activated_product_skill name="starter"/);
+  assert.doesNotMatch(claude, /<rhwp_product_skills[^>]*revision=/);
 
   const pi = await registry.promptContext('복사', 'starter', { agent: 'pi' });
   assert.match(pi, /<provider_tool_notes agent="pi">/);
   assert.match(pi, /subagent_spawn\/subagent_wait\/subagent_check\/subagent_list\/subagent_cancel/);
   assert.match(pi, /Background hub jobs .* are not collaboration agents/);
 
-  // 미활성·미지정·미지 에이전트에는 주석이 붙지 않는다 — 기존 프롬프트 모양 유지.
-  const noSkill = await registry.promptContext('복사', undefined, { agent: 'grok' });
+  const removed = await registry.promptContext('복사', 'starter', { agent: 'grok' });
+  assert.doesNotMatch(removed, /provider_tool_notes/);
+  const noSkill = await registry.promptContext('복사', undefined, { agent: 'claude' });
   assert.doesNotMatch(noSkill, /provider_tool_notes/);
   const neutral = await registry.promptContext('복사', 'starter');
   assert.doesNotMatch(neutral, /provider_tool_notes/);
   const unknown = await registry.promptContext('복사', 'starter', { agent: 'mystery' });
   assert.doesNotMatch(unknown, /provider_tool_notes/);
 });
+
+async function pathExists(file) {
+  try {
+    await fs.lstat(file);
+    return true;
+  } catch (error) {
+    if (error?.code === 'ENOENT') return false;
+    throw error;
+  }
+}
 
 const backendOpts = {
   rootDir: '/tmp/rhwp', isolatedHome: '/tmp/rhwp-home',

@@ -217,11 +217,64 @@ const BASE_TOOL_DEFINITIONS = [
   },
   {
     name: 'read_product_skill',
-    description: 'Read an enabled rhwp product skill or one of its supporting text resources. Use this after the enabled-skill catalog says a skill matches the request. Start with SKILL.md, then read only the referenced files needed for the current task. This never reads provider-global skills or arbitrary filesystem paths.',
+    description: 'Read an enabled rhwp product skill or one of its supporting text resources. The result includes the directory digest and the relative file list. Use this after the enabled-skill catalog says a skill matches the request. Start with SKILL.md, then read only the referenced files needed for the current task. This never reads provider-global skills or arbitrary filesystem paths.',
     shape: {
       name: z.string().regex(/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/),
       resourcePath: z.string().min(1).max(500).default('SKILL.md').optional(),
     },
+  },
+  {
+    name: 'commit_product_skill',
+    description: 'Create, replace one file, replace the instruction body, import a harness skill, or delete a user skill in the rhwp product skill library. Send only the fields for the chosen action. Pass the current digest as base for write, body, delete, and replace. Equal bytes are unchanged and do not require a matching base. Do not write provider-global skill directories or ask for a Studio form.',
+    shape: {
+      action: z.enum(['create', 'write', 'body', 'import', 'delete']),
+      name: z.string().optional(),
+      description: z.string().optional(),
+      body: z.string().optional(),
+      path: z.string().optional(),
+      content: z.string().optional(),
+      encoding: z.enum(['utf8', 'base64']).optional(),
+      base: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+      harness: z.enum(['claude', 'codex', 'cursor', 'pi']).optional(),
+      mode: z.enum(['adopt', 'replace']).optional(),
+    },
+    validate(args) {
+      switch (args.action) {
+        case 'create':
+          if (!args.name || args.description === undefined || args.body === undefined) {
+            throw invalidArgs('create requires name, description, and body');
+          }
+          return;
+        case 'write':
+          if (!args.name || !args.path || args.content === undefined || !args.base) {
+            throw invalidArgs('write requires name, path, content, and base');
+          }
+          return;
+        case 'body':
+          if (!args.name || args.body === undefined || !args.base) {
+            throw invalidArgs('body requires name, body, and base');
+          }
+          return;
+        case 'import':
+          if (!args.harness || !args.name || !args.mode) {
+            throw invalidArgs('import requires harness, name, and mode');
+          }
+          if (args.mode === 'replace' && !args.base) throw invalidArgs('replace requires base');
+          return;
+        case 'delete':
+          if (!args.name || !args.base) throw invalidArgs('delete requires name and base');
+          return;
+        default: {
+          const unknown = args.action;
+          throw invalidArgs(`Unknown skill change: ${String(unknown)}`);
+        }
+      }
+    },
+  },
+  {
+    name: 'list_harness_skills',
+    description: 'List skill names and descriptions found in the Claude, Codex, Cursor, and Pi skill directories. Returns no filesystem paths. Unreadable folders are skipped.',
+    shape: {},
   },
   {
     name: 'list_reference_files',
@@ -1099,6 +1152,8 @@ export const TOOL_CLASSIFICATIONS = Object.freeze({
   read_agent_instructions: 'instruction-read',
   update_agent_instructions: 'instruction-write',
   read_product_skill: 'document-read',
+  commit_product_skill: 'instruction-write',
+  list_harness_skills: 'instruction-read',
   list_reference_files: 'reference-read',
   search_reference_files: 'reference-read',
   read_reference_chunk: 'reference-read',
