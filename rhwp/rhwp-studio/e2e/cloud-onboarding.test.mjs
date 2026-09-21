@@ -849,7 +849,7 @@ try {
   assert.match(await page.$eval('.ag-cloud-setup-technical pre', (node) => node.textContent), /reports crashed/);
   assert.deepEqual(
     await page.evaluate(() => window.__cloudHarness.calls.filter((call) => call.method === 'cloudSpawnSandbox').map((call) => call.payload)),
-    [{ providerId: 'railway', selectedProvider: 'rau' }],
+    [{ providerId: 'railway', selectedProvider: 'claude' }],
   );
   console.log('  PASS a failed sandbox spawn reports the provider detail and stays recoverable');
 
