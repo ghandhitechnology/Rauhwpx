@@ -1375,7 +1375,7 @@ test('a paired device can seed provider credentials for every agent', async (t) 
     },
   });
   const tokens = await pairOverHttp(auth, base);
-  for (const provider of ['claude', 'codex', 'grok', 'pi', 'cursor']) {
+  for (const provider of ['claude', 'codex', 'pi']) {
     const response = await publicFetch(`${base}/v1/providers/${provider}/credentials`, {
       method: 'POST',
       headers: {
@@ -1387,8 +1387,8 @@ test('a paired device can seed provider credentials for every agent', async (t) 
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), { provider, available: true, authenticated: true });
   }
-  assert.deepEqual(seeded.map((item) => item.provider), ['claude', 'codex', 'grok', 'pi', 'cursor']);
-  assert.deepEqual(seeded.map((item) => item.apiKey), ['key-claude', 'key-codex', 'key-grok', 'key-pi', 'key-cursor']);
+  assert.deepEqual(seeded.map((item) => item.provider), ['claude', 'codex', 'pi']);
+  assert.deepEqual(seeded.map((item) => item.apiKey), ['key-claude', 'key-codex', 'key-pi']);
 
   const missing = await publicFetch(`${base}/v1/providers/codex/credentials`, {
     method: 'POST',

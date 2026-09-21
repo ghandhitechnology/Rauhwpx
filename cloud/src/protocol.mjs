@@ -1,6 +1,6 @@
 export const PROTOCOL_VERSION = 1;
 export const ROOM_PROTOCOL_VERSION = 2;
-export const PROVIDERS = Object.freeze(['claude', 'codex', 'pi', 'grok', 'cursor']);
+export const PROVIDERS = Object.freeze(['claude', 'codex', 'pi']);
 export const SESSION_STATES = Object.freeze([
   'staged',
   'queued',
@@ -193,17 +193,14 @@ export function parseProviderSelection(value) {
   const models = {
     claude: ['opus', 'fable', 'sonnet', 'haiku'],
     codex: ['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-6-astra'],
-    grok: ['grok-4.6', 'grok-4.5'],
   };
   if (models[provider] && !models[provider].includes(model)) {
     throw new CloudError('INVALID_MODEL', 'Model is not supported by this provider');
   }
   const effort = string(input.effort, 'effort', { min: 0, max: 64 });
-  const efforts = provider === 'cursor' ? ['']
-    : provider === 'pi' ? ['', 'low', 'medium', 'high']
-      : provider === 'grok' ? ['low', 'medium', 'high', 'xhigh']
-        : provider === 'claude' && model === 'haiku' ? ['low', 'medium', 'high']
-          : ['low', 'medium', 'high', 'xhigh', 'max'];
+  const efforts = provider === 'pi' ? ['', 'low', 'medium', 'high']
+    : provider === 'claude' && model === 'haiku' ? ['low', 'medium', 'high']
+      : ['low', 'medium', 'high', 'xhigh', 'max'];
   if (!efforts.includes(effort)) throw new CloudError('INVALID_EFFORT', 'Reasoning effort is not supported by this model');
   return { provider, model, effort };
 }

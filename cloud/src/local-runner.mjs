@@ -224,7 +224,6 @@ export class LocalRunner {
       env: workerEnvironment(process.env, {
         HOME: home,
         CODEX_HOME: path.join(home, '.codex'),
-        GROK_HOME: path.join(home, '.grok'),
         PI_CODING_AGENT_DIR: path.join(home, '.pi', 'agent'),
         TMPDIR: temporaryDirectory,
         RAUHWpx_SESSION_ID: session.id,

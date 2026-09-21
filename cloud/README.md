@@ -80,7 +80,7 @@ sudo rauhwpx-cloud provider status codex
 sudo rauhwpx-cloud doctor
 ```
 
-The same commands support `claude`, `codex`, `pi`, `grok`, and `cursor`. API-key login reads only standard input.
+The same commands support `claude`, `codex`, and `pi`. API-key login reads only standard input.
 
 ```bash
 read -rsp 'OpenRouter API key: ' key
@@ -127,7 +127,7 @@ The broker requires all three connection values before it advertises allocation 
 
 Each spawn generates a fresh 32-byte bootstrap token, sets it as a service variable, waits for the deployment and the health route, then redeems one pairing code through `POST /v1/pairing/bootstrap`. The desktop pins the server key returned by the health route and rejects a mismatch. A failed allocation attempts teardown and retains a durable cleanup request when deletion cannot be confirmed. An ambiguous create response is reconciled by the deterministic service name rather than replayed; read-only provider queries may retry transient failures. Teardown refuses while cloud work is live unless the caller forces it, deletes the service, and forgets the stored profile and tokens.
 
-Provider credentials cannot be entered interactively in a sandbox. The entrypoint installs the CLI named by `RAUHWpx_SANDBOX_PROVIDER` and seeds any of `RAUHWpx_PROVIDER_KEY_CLAUDE`, `RAUHWpx_PROVIDER_KEY_CODEX`, `RAUHWpx_PROVIDER_KEY_GROK`, `RAUHWpx_PROVIDER_KEY_PI`, and `RAUHWpx_PROVIDER_KEY_CURSOR` through `provider login <name> --api-key-stdin`, so keys never appear in a process argument list.
+Provider credentials cannot be entered interactively in a sandbox. The entrypoint installs the CLI named by `RAUHWpx_SANDBOX_PROVIDER` and seeds any of `RAUHWpx_PROVIDER_KEY_CLAUDE`, `RAUHWpx_PROVIDER_KEY_CODEX`, and `RAUHWpx_PROVIDER_KEY_PI` through `provider login <name> --api-key-stdin`, so keys never appear in a process argument list.
 
 ## Worker boundary
 

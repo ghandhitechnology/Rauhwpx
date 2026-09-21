@@ -2,13 +2,11 @@ import { randomUUID } from 'node:crypto';
 
 export const TIMELINE_SCHEMA = 'rauhwpx.cloud.timeline';
 export const TIMELINE_VERSION = 1;
-export const PROVIDERS = Object.freeze(['claude', 'codex', 'pi', 'grok', 'cursor']);
+export const PROVIDERS = Object.freeze(['claude', 'codex', 'pi']);
 
 const DEFAULT_MODEL = Object.freeze({
   claude: 'sonnet',
   codex: 'gpt-5.6-sol',
-  grok: 'grok-4.6',
-  cursor: 'auto',
 });
 
 function boundedText(value, maximum = 64 * 1024) {
@@ -47,7 +45,7 @@ export function readTimeline(value, manifest, now = Date.now) {
     updatedAt: timestamp,
     agent: provider,
     model: DEFAULT_MODEL[provider] ?? '',
-    effort: provider === 'cursor' ? '' : 'high',
+    effort: 'high',
     workflow: 'direct',
     docKey: manifest?.resources?.find((resource) => resource.kind === 'document')?.name ?? null,
     documentId: manifest?.clientContext?.documentId ?? null,
@@ -62,7 +60,7 @@ export function readTimeline(value, manifest, now = Date.now) {
     : (thread.model || DEFAULT_MODEL[provider] || '');
   thread.effort = typeof execution?.effort === 'string'
     ? execution.effort
-    : (thread.effort || (provider === 'cursor' ? '' : 'high'));
+    : (thread.effort || 'high');
   if (provider === 'pi' && !thread.model) {
     throw Object.assign(new Error('Pi cloud sessions require the selected OpenRouter model in the portable timeline'), {
       code: 'MODEL_REQUIRED',

@@ -34,14 +34,6 @@ const AUTH_BUNDLES = Object.freeze({
     secrets: { OPENROUTER_API_KEY: 'sk-or-v1-test' },
     files: {},
   },
-  grok: {
-    secrets: { XAI_API_KEY: 'xai-test' },
-    files: { '.grok/auth.json': '{"token":"grok"}' },
-  },
-  cursor: {
-    secrets: { CURSOR_API_KEY: 'cur-test' },
-    files: { '.cursor/cli-config.json': '{"auth":"cursor"}' },
-  },
 });
 
 function versionProcess(command) {

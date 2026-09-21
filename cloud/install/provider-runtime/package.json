@@ -5,7 +5,6 @@
   "dependencies": {
     "@anthropic-ai/claude-code": "2.1.241",
     "@earendil-works/pi-coding-agent": "0.84.2",
-    "@openai/codex": "0.149.0",
-    "@xai-official/grok": "1.0.5"
+    "@openai/codex": "0.149.0"
   }
 }

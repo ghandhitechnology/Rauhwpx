@@ -29,16 +29,16 @@ async function fixture(t) {
 test('provider vault encrypts at rest with a mode-0600 key and authenticated context', async (t) => {
   const { root, database } = await fixture(t);
   const vault = new SecretVault(database, { dataDirectory: root });
-  vault.set('cursor', 'CURSOR_API_KEY', 'cursor-secret-value');
-  assert.equal(vault.get('cursor', 'CURSOR_API_KEY'), 'cursor-secret-value');
+  vault.set('codex', 'OPENAI_API_KEY', 'codex-secret-value');
+  assert.equal(vault.get('codex', 'OPENAI_API_KEY'), 'codex-secret-value');
   assert.deepEqual(vault.list().map(({ provider, name }) => ({ provider, name })), [
-    { provider: 'cursor', name: 'CURSOR_API_KEY' },
+    { provider: 'codex', name: 'OPENAI_API_KEY' },
   ]);
   const stored = database.prepare('SELECT * FROM provider_credentials').get();
-  assert.equal(Buffer.from(stored.ciphertext).includes(Buffer.from('cursor-secret-value')), false);
+  assert.equal(Buffer.from(stored.ciphertext).includes(Buffer.from('codex-secret-value')), false);
   assert.equal((await fs.stat(vault.keyPath)).mode & 0o777, 0o600);
   database.prepare(`UPDATE provider_credentials SET credential_name = 'OTHER'`).run();
-  assert.throws(() => vault.get('cursor', 'OTHER'), { code: 'VAULT_DECRYPT_FAILED' });
+  assert.throws(() => vault.get('codex', 'OTHER'), { code: 'VAULT_DECRYPT_FAILED' });
 });
 
 test('service logs redact credentials, content, and bearer tokens before persistence', async (t) => {
@@ -386,8 +386,6 @@ test('doctor separates managed CLI health from optional provider authentication'
     ['claude', { provider: 'claude', available: true, authenticated: false }],
     ['codex', { provider: 'codex', available: true, authenticated: true }],
     ['pi', { provider: 'pi', available: true, authenticated: false }],
-    ['grok', { provider: 'grok', available: true, authenticated: false }],
-    ['cursor', { provider: 'cursor', available: true, authenticated: false }],
   ]);
   const providerManager = { probe: async (provider) => states.get(provider) };
   const manager = new ProviderCliManager({ providerAuthDirectory: '/tmp/auth', providerCliDirectory: '/tmp/cli' }, providerManager, {});
@@ -397,7 +395,7 @@ test('doctor separates managed CLI health from optional provider authentication'
   const authNeeded = await manager.doctor('claude');
   assert.equal(authNeeded.ok, true);
   assert.equal(authNeeded.selectedProviderReady, false);
-  states.set('cursor', { provider: 'cursor', available: false, authenticated: false });
+  states.set('codex', { provider: 'codex', available: false, authenticated: false });
   assert.equal((await manager.doctor()).ok, false);
 });
 
@@ -408,7 +406,7 @@ test('provider environments precreate every private CLI state directory', async 
   const providerCliDirectory = path.join(root, 'cli');
   await fs.mkdir(path.join(providerAuthDirectory, 'codex', '.codex'), { recursive: true, mode: 0o755 });
   const manager = new ProviderCliManager({ providerAuthDirectory, providerCliDirectory }, { probe: async () => ({}) }, {});
-  for (const provider of ['claude', 'codex', 'pi', 'grok', 'cursor']) {
+  for (const provider of ['claude', 'codex', 'pi']) {
     const environment = manager.environment(provider);
     const expected = [
       environment.HOME,
@@ -418,7 +416,6 @@ test('provider environments precreate every private CLI state directory', async 
       environment.XDG_STATE_HOME,
       environment.CLAUDE_CONFIG_DIR,
       environment.CODEX_HOME,
-      environment.GROK_HOME,
       environment.PI_CODING_AGENT_DIR,
       path.join(environment.HOME, '.local'),
       path.join(environment.HOME, '.local', 'bin'),

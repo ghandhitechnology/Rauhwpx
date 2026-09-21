@@ -1246,7 +1246,6 @@ test('provider configuration rejects busy, unconnected, invalid and overlapping 
     [{ model: 'sonnet' }, 'INVALID_MODEL'],
     [{ effort: 'ultra' }, 'INVALID_EFFORT'],
     [{ model: '--unsafe-option' }, 'INVALID_REQUEST'],
-    [{ provider: 'cursor', model: 'auto', effort: 'high' }, 'INVALID_EFFORT'],
     [{ provider: 'claude', model: 'haiku', effort: 'max' }, 'INVALID_EFFORT'],
   ]) {
     assert.throws(() => configure(selection), { code });

@@ -26,7 +26,6 @@ COPY install/provider-runtime/package.json install/provider-runtime/package-lock
 RUN npm ci --omit=dev --no-audit --no-fund \
   && ./node_modules/.bin/claude --version \
   && ./node_modules/.bin/codex --version \
-  && ./node_modules/.bin/grok --version \
   && ./node_modules/.bin/pi --version
 
 WORKDIR /app

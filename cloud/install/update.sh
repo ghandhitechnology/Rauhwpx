@@ -123,11 +123,12 @@ ln -sfn "$DESTINATION" /opt/rauhwpx-cloud/current
 temporary=$(mktemp)
 grep -Ev '^(RAUHWpx_WORKER_IMAGE|PATH)=' /etc/rauhwpx-cloud.env >"$temporary" || true
 printf 'RAUHWpx_WORKER_IMAGE=%s\n' "$WORKER_IMAGE" >>"$temporary"
-printf 'PATH=%s\n' '/opt/rauhwpx-cloud/provider-cli/current/node_modules/.bin:/var/lib/rauhwpx-cloud/provider-auth/cursor/.local/bin:/opt/rauhwpx-node/bin:/usr/local/bin:/usr/bin:/bin' >>"$temporary"
+printf 'PATH=%s\n' '/opt/rauhwpx-cloud/provider-cli/current/node_modules/.bin:/opt/rauhwpx-node/bin:/usr/local/bin:/usr/bin:/bin' >>"$temporary"
 install -m 0600 "$temporary" /etc/rauhwpx-cloud.env
 rm -f "$temporary"
 /usr/local/bin/rauhwpx-cloud provider install claude
-/usr/local/bin/rauhwpx-cloud provider install cursor
+/usr/local/bin/rauhwpx-cloud provider install codex
+/usr/local/bin/rauhwpx-cloud provider install pi
 install -m 0644 "$DESTINATION/install/rauhwpx-cloud.service" /etc/systemd/system/rauhwpx-cloud.service
 install -m 0644 "$DESTINATION/install/rauhwpx-cloud-update.service" /etc/systemd/system/rauhwpx-cloud-update.service
 install -m 0644 "$DESTINATION/install/rauhwpx-cloud-update.timer" /etc/systemd/system/rauhwpx-cloud-update.timer
