@@ -12,7 +12,7 @@ import type {
 
 export const CLOUD_UNSAVED_MESSAGE = '클라우드 사용 전 문서를 저장해주세요';
 
-export const CLOUD_SUPPORTED_AGENTS = ['claude', 'codex', 'pi', 'grok', 'cursor'] as const;
+export const CLOUD_SUPPORTED_AGENTS = ['claude', 'codex', 'pi'] as const;
 
 export function isCloudSupportedAgent(agent: AgentName): boolean {
   return CLOUD_SUPPORTED_AGENTS.some((supported) => supported === agent);
@@ -136,7 +136,7 @@ export function buildCloudStartTransfer(input: {
   workflow: AgentWorkflow;
 }): CloudTransferRequest {
   if (!isCloudSupportedAgent(input.agent)) {
-    throw new Error(`Cloud does not support the ${input.agent} provider. Choose Claude, Codex, pi, Grok, or Cursor.`);
+    throw new Error(`Cloud does not support the ${input.agent} provider. Choose Claude, Codex, or Pi.`);
   }
   const timeline = exportCloudTimeline(input.thread);
   if (!initialMessageMatchesTimeline(timeline, input.initialMessage.id)) {

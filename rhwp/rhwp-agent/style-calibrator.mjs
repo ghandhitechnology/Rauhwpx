@@ -780,10 +780,10 @@ export function renderStyleMarkdown({
  */
 export async function calibrateWritingStyle(input, { run = runCodex, ...deps } = {}) {
   const requestedAgent = input?.agent ?? input?.provider;
-  const agent = ['codex', 'claude', 'pi', 'rau'].includes(requestedAgent)
+  const agent = ['codex', 'claude', 'pi'].includes(requestedAgent)
     ? requestedAgent
     : (openRouterReady(deps) ? 'pi' : 'codex');
-  const viaOpenRouter = agent === 'pi' || agent === 'rau';
+  const viaOpenRouter = agent === 'pi';
   const model = typeof input?.model === 'string' && input.model.trim() ? input.model.trim() : null;
   const effort = typeof input?.effort === 'string' && input.effort.trim() ? input.effort.trim() : null;
   if (viaOpenRouter && !openRouterReady({ ...deps, useOpenRouter: true })) {

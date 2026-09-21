@@ -29,10 +29,6 @@
   --ag-pending-ink: 53, 105, 168;
 }
 
-.ag-pending-rect.ag-grok {
-  --ag-pending-ink: 92, 114, 136;
-}
-
 .ag-pending-rect.ag-cursor {
   --ag-pending-ink: 127, 124, 164;
 }
@@ -100,10 +96,6 @@
 
 .ag-pending-enter.ag-codex {
   --ag-pending-ink: 53, 105, 168;
-}
-
-.ag-pending-enter.ag-grok {
-  --ag-pending-ink: 92, 114, 136;
 }
 
 .ag-pending-enter.ag-cursor {
@@ -278,10 +270,6 @@
 
 .ag-typewriter-caret.ag-codex {
   --ag-pending-ink: 53, 105, 168;
-}
-
-.ag-typewriter-caret.ag-grok {
-  --ag-pending-ink: 92, 114, 136;
 }
 
 .ag-typewriter-caret.ag-cursor {

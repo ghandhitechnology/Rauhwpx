@@ -87,8 +87,7 @@ function createClaudeInputQueue() {
   };
 }
 
-// rhwp 전용 서브에이전트 정의(RHWP_SUBAGENTS)는 backend.mjs 로 이동했다 —
-// grok 도 같은 정의를 --agents 로 공유한다.
+// rhwp 전용 서브에이전트 정의(RHWP_SUBAGENTS)는 backend.mjs 로 이동했다.
 
 const claudeMirrorsByHome = new Map();
 

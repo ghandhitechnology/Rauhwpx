@@ -350,7 +350,7 @@ export interface AgentSetupStatus {
   authenticated: boolean;
   authMethod: AgentAuthMethod | null;
   keyTail: string | null;
-  /** 로그인한 계정 이메일 — Rau 체험 로그인이 알려 준다. */
+  /** 로그인한 계정 이메일 — hosted account login may provide it. */
   account?: string | null;
   authenticating: boolean;
   /** Whether this Studio session owns the provider's current authentication run. */
@@ -362,15 +362,10 @@ export interface AgentSetupStatus {
   pairingCode?: string;
   authExpiresAt?: string;
   setupComplete: boolean;
-  /** Rau 체험 잔액이 0 일 때. 다른 프로바이더는 보내지 않는다. */
   exhausted?: boolean;
   latestVersion: string | null;
   updateRequired: boolean;
   error: string | null;
-  /**
-   * CLI 가 직접 알려 주는 모델 목록. Cursor와 OpenCode가 사용한다.
-   * 로그인 전이거나 조회에 실패하면 빈 배열.
-   */
   models?: readonly string[];
 }
 
@@ -416,7 +411,6 @@ export interface AccountLoginStart {
 /** 요금제 — 한도 계산의 기준이 되므로 프로바이더별로 값이 다르다. */
 export type ClaudeUsagePlan = 'pro' | 'max5x' | 'max20x' | 'api';
 export type CodexUsagePlan = 'plus' | 'pro' | 'api';
-/** pi · grok · cursor · opencode 는 사용량 기반 API 한 가지뿐이다. */
 export type ApiOnlyUsagePlan = 'api';
 export type UsagePlan = ClaudeUsagePlan | CodexUsagePlan | ApiOnlyUsagePlan;
 
@@ -517,7 +511,7 @@ export interface UsageSummary {
   balances?: Partial<Record<'openrouter' | 'grok' | 'opencode', RemoteBalance>>;
   /** pi(OpenRouter) 가 설정돼 있을 때만 온다. */
   openrouter?: OpenRouterCredits;
-  /** Rau 체험 키 잔액. */
+  /** Legacy account balance retained for migration reads only. */
   rau?: OpenRouterCredits;
 }
 
@@ -596,7 +590,7 @@ export interface OpenRouterCredits {
 }
 
 export type CheckpointTitleChange = 'added' | 'removed' | 'modified';
-export type CheckpointTitleProvider = 'pi' | 'codex' | 'grok' | 'claude';
+export type CheckpointTitleProvider = 'pi' | 'codex' | 'claude';
 
 export interface CheckpointTitleSummaryItem {
   change: CheckpointTitleChange;
@@ -806,9 +800,9 @@ export type SidebarEvent =
       percent?: number;
       detail?: string;
       authUrl?: string;
-      /** 기기 인증 코드 — 브라우저에서 확인시켜야 하는 CLI(codex · grok)에만 온다. */
+      /** Device authentication code for CLI login flows. */
       userCode?: string;
-      /** Short code that identifies the hosted Rau login session. */
+      /** Short code that identifies the hosted account login session. */
       pairingCode?: string;
       expiresAt?: string;
       activity?: boolean;

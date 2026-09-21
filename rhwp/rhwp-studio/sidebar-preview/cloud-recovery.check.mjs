@@ -16,7 +16,7 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   await page.click('.ag-header [data-workspace-mode="cloud"]');
   await page.waitForFunction(() => window.sidebarPreview.workspace.mode() === 'cloud');
   await page.click('[aria-label="프로바이더 선택"]');
-  assert.deepEqual(await page.$eval('.ag-provider-item[data-agent="rau"]', (node) => ({ visible: node.checkVisibility(), disabled: node.disabled })), { visible: true, disabled: true }, 'Rau stays discoverable but unavailable in Cloud');
+  assert.deepEqual(await page.$eval('.ag-provider-item[data-agent="codex"]', (node) => ({ visible: node.checkVisibility(), disabled: node.disabled })), { visible: true, disabled: false }, 'Codex remains available in Cloud');
   await page.click('[aria-label="프로바이더 선택"]');
   assert.deepEqual(await page.$$eval('.ag-header .ag-execution-location-option', (nodes) => nodes.filter((node) => node.checkVisibility()).map((node) => node.textContent)), ['Local', 'Cloud']);
   assert.equal(await page.$eval('.ag-header .ag-execution-location', (root) => {
@@ -34,7 +34,7 @@ export async function checkCloudRecovery(page, origin, artifacts) {
   await page.click('.ag-header [data-workspace-mode="local"]');
   await page.waitForFunction(() => document.querySelector('.ag-send').dataset.icon === 'send');
   await page.click('[aria-label="프로바이더 선택"]');
-  assert.deepEqual(await page.$eval('.ag-provider-item[data-agent="rau"]', (node) => ({ visible: node.checkVisibility(), disabled: node.disabled })), { visible: true, disabled: false }, 'Rau becomes selectable again in Local');
+  assert.deepEqual(await page.$eval('.ag-provider-item[data-agent="codex"]', (node) => ({ visible: node.checkVisibility(), disabled: node.disabled })), { visible: true, disabled: false }, 'Codex remains selectable in Local');
   await page.click('[aria-label="프로바이더 선택"]');
   await page.click('.ag-header [data-workspace-mode="cloud"]');
   await page.waitForFunction(() => document.querySelector('.ag-send').dataset.icon === 'cloudSend');

@@ -32,14 +32,10 @@ import {
   buildCodexAppServerArgv,
   sandboxPolicy as codexAppServerSandboxPolicy,
 } from '../agents/codex-app-server.mjs';
-import { buildCursorCliConfig } from '../agents/cursor.mjs';
-import { buildGrokArgv } from '../agents/grok.mjs';
 import { buildPiArgv, buildPiEnv } from '../agents/pi.mjs';
 import {
-  isOpenCodeModelId,
   mcpCapabilityEnv,
   mcpRuntimeFor,
-  normalizeUsageTokens,
   parallelWorkBriefFor,
   providerInteractionMode,
   providerToolNoteFor,
@@ -47,14 +43,6 @@ import {
   systemBriefFor,
   validateExecutionMode,
 } from '../agents/backend.mjs';
-
-test('OpenCode model ids preserve provider-defined catalog names without accepting unsafe lines', () => {
-  assert.equal(isOpenCodeModelId('openrouter/~anthropic/claude-fable-latest'), true);
-  assert.equal(isOpenCodeModelId('opencode/big-pickle'), true);
-  assert.equal(isOpenCodeModelId('missing-provider-separator'), false);
-  assert.equal(isOpenCodeModelId('openrouter/model\nnext'), false);
-  assert.equal(isOpenCodeModelId(`openrouter/${'x'.repeat(300)}`), false);
-});
 
 const testHome = mkdtempSync(path.join(os.tmpdir(), 'rhwp-backend-test-'));
 test.after(() => rmSync(testHome, { recursive: true, force: true }));
@@ -218,16 +206,6 @@ test('safe copy-layout workers have job-local reads and no native write, shell, 
   }
   assert.deepEqual(codexAppServerSandboxPolicy(opts), { type: 'readOnly', networkAccess: false });
 
-  const cursor = buildCursorCliConfig(opts, {});
-  assert.equal(cursor.permissions.allow.some((rule) => /^(?:Write|Shell|WebFetch)/.test(rule)), false);
-  assert.deepEqual(cursor.permissions.deny, ['Write(**)']);
-
-  const grok = buildGrokArgv(opts, 'session', false, '/tmp/prompt');
-  const grokAllow = grok.flatMap((value, index) => (value === '--allow' ? [grok[index + 1]] : []));
-  const grokDeny = grok.flatMap((value, index) => (value === '--deny' ? [grok[index + 1]] : []));
-  assert.equal(grokAllow.some((rule) => /^(?:Edit|WebFetch|WebSearch)/.test(rule)), false);
-  assert.deepEqual(grokDeny, ['Bash', 'Edit', 'Write']);
-
   const pi = buildPiArgv({ ...opts, piRoot: '/tmp/pi' }, 'session');
   assert.equal(pi[pi.indexOf('--exclude-tools') + 1], 'bash,edit,write');
 });
@@ -293,16 +271,7 @@ test('hub-private paths are readable but never writable across every provider pr
     if (!planning) assert.deepEqual(appPolicy.writableRoots, [baseOpts.rootDir]);
     else assert.equal(appPolicy.type, 'readOnly');
 
-    const cursor = buildCursorCliConfig(profile, {});
-    assert.ok(cursor.permissions.allow.includes('Read(**)'));
-    assert.equal(cursor.permissions.allow.some((rule) => rule.startsWith(`Write(${privateRoot}`)), false);
-
-    const grok = buildGrokArgv(profile, 'session', false, '/tmp/prompt');
-    const grokAllows = grok.flatMap((value, index) => (value === '--allow' ? [grok[index + 1]] : []));
-    assert.ok(grokAllows.includes('Read(/tmp/Rau hub private/snapshots/**)'));
-    assert.equal(grokAllows.some((rule) => rule.startsWith(`Edit(${privateRoot}`)), false);
-
-    for (const agentName of ['pi', 'rau']) {
+    for (const agentName of ['pi']) {
       const env = buildPiEnv({ ...profile, piRoot: '/tmp/pi', agentName }, { PATH: '/usr/bin' });
       assert.equal(env.RHWP_READONLY_ROOTS, privateRoot);
       assert.equal(env.RHWP_ROOT_DIR, baseOpts.rootDir);
@@ -552,25 +521,6 @@ test('parallel-work guidance is tuned to each provider surface', () => {
   assert.match(pi, /subagent_wait until every agent/);
   assert.match(pi, /ONE apply_edits call/, '배치가 pi 의 대체 병렬성이다');
 
-  const grok = parallelWorkBriefFor('grok');
-  assert.match(grok, /spawn_subagent/);
-  assert.match(grok, /get_command_or_subagent_output/);
-  assert.match(
-    grok,
-    /Never use get_command_or_subagent_output on the hub background job delegate_copy_layout/,
-    '수거 지시가 허브 백그라운드 작업을 집어 오는 사고를 막는다',
-  );
-
-  const cursor = parallelWorkBriefFor('cursor');
-  assert.match(cursor, /transcript arrives only when it finishes/);
-  assert.match(cursor, /tightly bounded objective/, '전사 재생 상한을 고려한 목표 경계');
-
-  const opencode = parallelWorkBriefFor('opencode');
-  assert.match(opencode, /use the Task tool/);
-  assert.match(opencode, /general subagent/);
-  assert.match(opencode, /explore subagent/);
-  assert.match(opencode, /Collect every Task result/);
-
   const codex = parallelWorkBriefFor('codex');
   assert.match(codex, /wait_agent until every agent/);
   assert.match(codex, /Never call wait_agent for an MCP-managed background job such as delegate_copy_layout/);
@@ -583,9 +533,6 @@ test('provider tool notes correct activated skill text per collaboration surface
   for (const [agent, fragment] of [
     ['claude', /never poll or wait for them/],
     ['codex', /never call wait_agent or list_agents for one/],
-    ['grok', /never collect them with get_command_or_subagent_output/],
-    ['cursor', /there is no polling tool/],
-    ['opencode', /collaboration tool is Task/],
     ['pi', /never call subagent_wait or subagent_list for one/],
   ]) {
     const note = providerToolNoteFor(agent);
@@ -594,20 +541,6 @@ test('provider tool notes correct activated skill text per collaboration surface
     assert.match(note, /hub will start a new turn carrying/, agent);
   }
   assert.equal(providerToolNoteFor('mystery'), '', '알 수 없는 provider 는 주석을 붙이지 않는다');
-});
-
-test('OpenCode cached token fields normalize to the common usage shape', () => {
-  assert.deepEqual(normalizeUsageTokens({
-    inputTokens: 12,
-    outputTokens: 3,
-    cachedReadTokens: 40,
-    cachedWriteTokens: 5,
-  }), {
-    inputTokens: 12,
-    outputTokens: 3,
-    cacheReadTokens: 40,
-    cacheCreationTokens: 5,
-  });
 });
 
 test('every write-capable brief directs batched writes through apply_edits', () => {

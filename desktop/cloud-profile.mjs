@@ -1,7 +1,7 @@
 import { createPublicKey } from 'node:crypto';
 import { isIP } from 'node:net';
 
-export const CLOUD_PROVIDERS = Object.freeze(['claude', 'codex', 'pi', 'grok', 'cursor']);
+export const CLOUD_PROVIDERS = Object.freeze(['claude', 'codex', 'pi']);
 export const CLOUD_SERVER_MODES = Object.freeze(['self-hosted', 'app-hosted']);
 export const SANDBOX_LIFECYCLES = Object.freeze([
   'idle',

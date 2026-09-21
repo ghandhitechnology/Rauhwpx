@@ -86,17 +86,11 @@ test('every provider can supply a cloud seed payload', async (t) => {
   await fs.writeFile(path.join(home, '.claude', '.credentials.json'), '{"token":"claude"}');
   await fs.mkdir(path.join(home, '.codex'), { recursive: true });
   await fs.writeFile(path.join(home, '.codex', 'auth.json'), '{"token":"codex"}');
-  await fs.mkdir(path.join(home, '.grok'), { recursive: true });
-  await fs.writeFile(path.join(home, '.grok', 'auth.json'), '{"token":"grok"}');
-  await fs.mkdir(path.join(cliRoot, 'cursor-home', '.cursor'), { recursive: true });
-  await fs.writeFile(path.join(cliRoot, 'cursor-home', '.cursor', 'cli-config.json'), '{"token":"cursor"}');
   const vault = memoryVault({ [PROVIDER_SECRET_IDS.pi]: 'sk-or-pi' });
 
   const expected = {
     claude: ['.claude.json', '.claude/.credentials.json'],
     codex: ['.codex/auth.json'],
-    grok: ['.grok/auth.json'],
-    cursor: ['.cursor/cli-config.json'],
     pi: [],
   };
   for (const [provider, paths] of Object.entries(expected)) {
@@ -110,6 +104,12 @@ test('every provider can supply a cloud seed payload', async (t) => {
       assert.equal(auth.apiKey, null);
       assert.equal(hasProviderAuth(auth), true);
     }
+  }
+  for (const provider of ['grok', 'cursor', 'opencode', 'rau']) {
+    await assert.rejects(
+      () => collectProviderAuth(provider, { vault, homeDir: home, cliRoot }),
+      { code: 'INVALID_PROVIDER' },
+    );
   }
   await assert.rejects(
     async () => requireProviderAuth(await collectProviderAuth('codex', {
