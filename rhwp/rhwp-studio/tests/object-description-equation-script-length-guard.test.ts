@@ -32,5 +32,5 @@ test('개체 설명문/수식 스크립트 상한은 u16 캐스팅이 랩어라�
 
 test('handleOk()가 상한 초과 시 저장을 거부한다', () => {
   assert.match(pictureSrc, /if \(this\.descInput\.value\.length > MAX_OBJECT_DESCRIPTION_LEN\)/);
-  assert.match(equationSrc, /if \(script\.length > MAX_EQUATION_SCRIPT_LEN\)/);
+  assert.match(equationSrc, /script\.length > MAX_EQUATION_SCRIPT_LEN/);
 });

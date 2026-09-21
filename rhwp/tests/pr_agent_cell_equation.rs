@@ -252,6 +252,94 @@ fn get_equation_script_in_cell_at_returns_indexed_script() {
     assert_eq!(sv["script"].as_str(), Some("a over b"));
 }
 
+#[test]
+fn cell_equation_properties_target_the_requested_inner_control() {
+    let (mut core, para_idx, table_idx) = doc_with_table();
+    core.insert_text_in_cell_native(0, para_idx, table_idx, 0, 0, 0, "xy")
+        .expect("cell text");
+    let first: Value = serde_json::from_str(
+        &core
+            .insert_equation_in_cell_native(0, para_idx, table_idx, 0, 0, 0, "first", 1000, 0)
+            .expect("first equation"),
+    )
+    .expect("first result");
+    let second: Value = serde_json::from_str(
+        &core
+            .insert_equation_in_cell_native(0, para_idx, table_idx, 0, 0, 2, "second", 1000, 0)
+            .expect("second equation"),
+    )
+    .expect("second result");
+    let first_idx = first["controlIdx"].as_u64().unwrap() as usize;
+    let second_idx = second["controlIdx"].as_u64().unwrap() as usize;
+
+    core.set_equation_properties_at_native(
+        0,
+        para_idx,
+        table_idx,
+        Some(0),
+        Some(0),
+        Some(second_idx),
+        r#"{"script":"changed"}"#,
+    )
+    .expect("edit second equation");
+
+    let first_props: Value = serde_json::from_str(
+        &core
+            .get_equation_properties_at_native(
+                0,
+                para_idx,
+                table_idx,
+                Some(0),
+                Some(0),
+                Some(first_idx),
+            )
+            .expect("read first"),
+    )
+    .expect("first properties");
+    let second_props: Value = serde_json::from_str(
+        &core
+            .get_equation_properties_at_native(
+                0,
+                para_idx,
+                table_idx,
+                Some(0),
+                Some(0),
+                Some(second_idx),
+            )
+            .expect("read second"),
+    )
+    .expect("second properties");
+    assert_eq!(first_props["script"], "first");
+    assert_eq!(second_props["script"], "changed");
+
+    let page: Value = serde_json::from_str(
+        &core
+            .get_page_control_layout_native(0)
+            .expect("page controls"),
+    )
+    .expect("page layout JSON");
+    let equations: Vec<&Value> = page["controls"]
+        .as_array()
+        .expect("controls")
+        .iter()
+        .filter(|control| control["type"] == "equation" && control["cellIdx"] == 0)
+        .collect();
+    assert_eq!(equations.len(), 2, "both cell equations must be selectable");
+    assert!(equations
+        .iter()
+        .all(|control| control["controlIdx"] == table_idx));
+    let mut inner: Vec<u64> = equations
+        .iter()
+        .map(|control| {
+            control["innerControlIdx"]
+                .as_u64()
+                .expect("inner equation index")
+        })
+        .collect();
+    inner.sort_unstable();
+    assert_eq!(inner, vec![first_idx as u64, second_idx as u64]);
+}
+
 /// getEquationScriptInCellAt: 범위 밖 좌표·타입 불일치는 모두 오류다.
 #[test]
 fn get_equation_script_in_cell_at_errors() {

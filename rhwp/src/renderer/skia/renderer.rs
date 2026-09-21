@@ -610,7 +610,12 @@ impl SkiaLayerRenderer {
             let intervals: Option<[f32; 6]> = match dash {
                 StrokeDash::Solid => None,
                 StrokeDash::Dash => Some([6.0, 3.0, 0.0, 0.0, 0.0, 0.0]),
+                StrokeDash::LongDash => Some([10.0, 3.0, 0.0, 0.0, 0.0, 0.0]),
                 StrokeDash::Dot => Some([2.0, 2.0, 0.0, 0.0, 0.0, 0.0]),
+                StrokeDash::Circle => {
+                    paint.set_stroke_cap(paint::Cap::Round);
+                    Some([0.1, 3.0, 0.0, 0.0, 0.0, 0.0])
+                }
                 StrokeDash::DashDot => Some([6.0, 3.0, 2.0, 3.0, 0.0, 0.0]),
                 StrokeDash::DashDotDot => Some([6.0, 3.0, 2.0, 3.0, 2.0, 3.0]),
             };
@@ -3167,6 +3172,74 @@ mod tests {
     }
 
     #[test]
+    fn repeated_hyphens_render_as_separate_literal_glyphs() {
+        let run = TextRunNode {
+            text: "---".to_string(),
+            style: TextStyle {
+                font_family: "Arial".to_string(),
+                font_size: 30.0,
+                color: 0x00000000,
+                ..Default::default()
+            },
+            char_shape_id: None,
+            para_shape_id: None,
+            section_index: None,
+            para_index: None,
+            char_start: None,
+            cell_context: None,
+            is_para_end: false,
+            is_line_break_end: false,
+            rotation: 0.0,
+            is_vertical: false,
+            char_overlap: None,
+            border_fill_id: 0,
+            baseline: 32.0,
+            field_marker: Default::default(),
+            display_text: None,
+        };
+        let combined = PageLayerTree::new(
+            100.0,
+            48.0,
+            LayerNode::leaf(
+                BoundingBox::new(0.0, 0.0, 100.0, 48.0),
+                None,
+                vec![PaintOp::text_run(
+                    BoundingBox::new(4.0, 4.0, 92.0, 40.0),
+                    run.clone(),
+                )],
+            ),
+        );
+        let positions = crate::renderer::layout::compute_char_positions("---", &run.style);
+        let separate = PageLayerTree::new(
+            100.0,
+            48.0,
+            LayerNode::leaf(
+                BoundingBox::new(0.0, 0.0, 100.0, 48.0),
+                None,
+                (0..3)
+                    .map(|index| {
+                        let mut single = run.clone();
+                        single.text = "-".to_string();
+                        PaintOp::text_run(
+                            BoundingBox::new(4.0 + positions[index], 4.0, 92.0, 40.0),
+                            single,
+                        )
+                    })
+                    .collect(),
+            ),
+        );
+        let renderer = SkiaLayerRenderer::new();
+        let combined = renderer
+            .render_raster_with_options(&combined, RasterRenderOptions::default())
+            .expect("render literal hyphens");
+        let separate = renderer
+            .render_raster_with_options(&separate, RasterRenderOptions::default())
+            .expect("render separate hyphens");
+
+        assert_eq!(decode_rgba(&combined.bytes), decode_rgba(&separate.bytes));
+    }
+
+    #[test]
     fn renders_output_control_marks_as_ink() {
         let run = TextRunNode {
             text: " \t".to_string(),
@@ -3277,9 +3350,11 @@ mod tests {
             color_str: "#ff0000".to_string(),
             color: 0x000000ff,
             font_size,
+            font_name: "serif".to_string(),
             section_index: Some(0),
             para_index: Some(0),
             control_index: Some(0),
+            inner_control_index: None,
             cell_index: None,
             cell_para_index: None,
             note_ref: None,
@@ -3324,9 +3399,11 @@ mod tests {
             color_str: "#00aa00".to_string(),
             color: 0x0000aa00,
             font_size,
+            font_name: "serif".to_string(),
             section_index: Some(0),
             para_index: Some(0),
             control_index: Some(0),
+            inner_control_index: None,
             cell_index: None,
             cell_para_index: None,
             note_ref: None,

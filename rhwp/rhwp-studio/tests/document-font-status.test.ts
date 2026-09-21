@@ -72,4 +72,17 @@ test('로컬 감지 미지원 환경에서는 prompt 없이 웹 대체와 누락
     ['없는글꼴', 'missing', null],
     ['휴먼명조', 'web-substitute', 'HY신명조'],
   ]);
+  assert.equal(report.fonts[1].loadedFace, 'Noto Serif KR');
+});
+
+test('등록 별칭이 실제로 가리키는 물리 웹 글꼴을 대체로 보고한다', () => {
+  const report = analyzeDocumentFonts(['HY신명조', 'Noto Serif KR'], {
+    localFonts: [],
+    localSupported: false,
+  });
+
+  assert.deepEqual(report.fonts.map(font => [font.fontName, font.status, font.loadedFace]), [
+    ['HY신명조', 'web-substitute', 'Noto Serif KR'],
+    ['Noto Serif KR', 'available', 'Noto Serif KR'],
+  ]);
 });

@@ -24,6 +24,7 @@ type PictureObjectRef = {
   type: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole';
   cellIdx?: number;
   cellParaIdx?: number;
+  innerControlIdx?: number;
   outerTableControlIdx?: number;
   cellPath?: CellPathLike;
   noteRef?: any;
@@ -62,7 +63,8 @@ function matchesControlRef(ctrl: any, ref: PictureObjectRef, layoutType: string)
     return false;
   }
   if (hasCellPath(ref)) {
-    return sameCellPath(ctrl.cellPath, ref.cellPath);
+    return sameCellPath(ctrl.cellPath, ref.cellPath)
+      && (ref.innerControlIdx === undefined || ctrl.innerControlIdx === ref.innerControlIdx);
   }
   if (Array.isArray(ctrl.cellPath) && ctrl.cellPath.length > 0 &&
       ref.cellIdx === undefined && ref.cellParaIdx === undefined) {
@@ -129,7 +131,7 @@ function isAboveControl(a: any, b: any): boolean {
 function controlToRef(ctrl: any): PictureObjectRef {
   const ref: PictureObjectRef = {
     sec: ctrl.secIdx, ppi: ctrl.paraIdx, ci: ctrl.controlIdx, type: ctrl.type,
-    cellIdx: ctrl.cellIdx, cellParaIdx: ctrl.cellParaIdx, outerTableControlIdx: ctrl.outerTableControlIdx,
+    cellIdx: ctrl.cellIdx, cellParaIdx: ctrl.cellParaIdx, innerControlIdx: ctrl.innerControlIdx, outerTableControlIdx: ctrl.outerTableControlIdx,
     cellPath: ctrl.cellPath, noteRef: ctrl.noteRef, memoRef: ctrl.memoRef,
     headerFooter: ctrl.headerFooter, missing: ctrl.missing,
   };
@@ -350,7 +352,7 @@ export function findPictureAtClick(this: any,
 
 /** 선택된 개체의 bbox를 페이지 레이아웃에서 찾는다. */
 export function findPictureBbox(this: any,
-  ref: { sec: number; ppi: number; ci: number; type?: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole'; cellIdx?: number; cellParaIdx?: number; cellPath?: CellPathLike; noteRef?: any },
+  ref: { sec: number; ppi: number; ci: number; type?: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole'; cellIdx?: number; cellParaIdx?: number; innerControlIdx?: number; cellPath?: CellPathLike; noteRef?: any },
 ): { pageIndex: number; x: number; y: number; w: number; h: number; x1?: number; y1?: number; x2?: number; y2?: number } | null {
   const matchType = ref.type ?? 'image';
   // line은 shape의 하위 타입 → layout에서 'line'으로 반환됨
@@ -363,7 +365,8 @@ export function findPictureBbox(this: any,
         if (matchesControlRef(ctrl, { ...ref, type: matchType } as PictureObjectRef, layoutType)) {
           // 표 셀 내 수식: cellIdx/cellParaIdx도 매칭
           if (matchType === 'equation' && ref.cellIdx !== undefined) {
-            if (ctrl.cellIdx !== ref.cellIdx || ctrl.cellParaIdx !== ref.cellParaIdx) continue;
+            if (ctrl.cellIdx !== ref.cellIdx || ctrl.cellParaIdx !== ref.cellParaIdx
+              || (ref.innerControlIdx !== undefined && ctrl.innerControlIdx !== ref.innerControlIdx)) continue;
           }
           if (matchType === 'equation' && ref.noteRef) {
             const nr = ctrl.noteRef;
@@ -444,7 +447,8 @@ export function renderPictureObjectSelection(this: any): void {
         if (matchesControlRef(ctrl, ref as PictureObjectRef, layoutType)) {
           // 표 셀 내 수식: cellIdx/cellParaIdx도 매칭
           if (matchType === 'equation' && ref.cellIdx !== undefined) {
-            if (ctrl.cellIdx !== ref.cellIdx || ctrl.cellParaIdx !== ref.cellParaIdx) continue;
+            if (ctrl.cellIdx !== ref.cellIdx || ctrl.cellParaIdx !== ref.cellParaIdx
+              || (ref.innerControlIdx !== undefined && ctrl.innerControlIdx !== ref.innerControlIdx)) continue;
           }
           if (matchType === 'equation' && ref.noteRef) {
             const nr = ctrl.noteRef;
@@ -606,7 +610,8 @@ export function isObjectSizeProtected(this: any, ref: PictureObjectRef | null | 
 /** 개체를 타입에 따라 삭제한다. */
 export function canDeleteObjectControl(ref: PictureObjectRef): boolean {
   const scope = objectAddressScope(ref);
-  return scope === 'body' || (scope === 'cell' && ref.type === 'image');
+  return scope === 'body' || (scope === 'cell' && (ref.type === 'image'
+    || (ref.type === 'equation' && ref.innerControlIdx !== undefined)));
 }
 
 /**
@@ -621,7 +626,17 @@ export function deleteObjectControl(this: any, ref: PictureObjectRef): boolean {
   if (ref.type === 'shape' || ref.type === 'group' || ref.type === 'line' || ref.type === 'ole') {
     this.wasm.deleteShapeControl(ref.sec, ref.ppi, ref.ci);
   } else if (ref.type === 'equation') {
-    this.wasm.deleteEquationControl(ref.sec, ref.ppi, ref.ci);
+    if (ref.cellPath?.length && ref.innerControlIdx !== undefined) {
+      this.wasm.deleteEquationControlInCellByPath(
+        ref.sec, ref.ppi, ref.cellPath, ref.innerControlIdx,
+      );
+    } else if (ref.cellIdx !== undefined && ref.cellParaIdx !== undefined && ref.innerControlIdx !== undefined) {
+      this.wasm.deleteEquationControlInCell(
+        ref.sec, ref.ppi, ref.ci, ref.cellIdx, ref.cellParaIdx, ref.innerControlIdx,
+      );
+    } else {
+      this.wasm.deleteEquationControl(ref.sec, ref.ppi, ref.ci);
+    }
   } else {
     if (hasCellPath(ref)) {
       this.wasm.deleteCellPictureControlByPath(ref.sec, ref.ppi, ref.cellPath, ref.ci);

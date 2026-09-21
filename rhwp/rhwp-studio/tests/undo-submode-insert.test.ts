@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const src = (rel: string): string => readFileSync(join(rootDir, rel), 'utf8');
 const insertSrc = src('src/command/commands/insert.ts');
+const equationDialogSrc = src('src/ui/equation-editor-dialog.ts');
 const pageSrc = src('src/command/commands/page.ts');
 const cmdSrc = src('src/engine/command.ts');
 const ihSrc = src('src/engine/input-handler.ts');
@@ -45,7 +46,8 @@ test('각주/미주/수식 삽입은 snapshot 으로 라우팅된다', () => {
   assert.match(note, /if \(!result\.ok\) throw/, '실패 시 throw(no-op 엔트리 방지)');
   assert.match(note, /if \(result\) enterNoteEditing\(/, '기록 성공 시에만 노트 모드 진입');
 
-  const eq = slice(insertSrc, "id: 'insert:equation'", "id: 'insert:field'");
+  const eq = slice(equationDialogSrc, 'if (this.insertIntent)', 'const updated:');
+  assert.match(eq, /kind:\s*'snapshot'/, '수식 삽입 snapshot 라우팅');
   assert.match(eq, /operationType:\s*'insertEquation'/, '수식 삽입 snapshot 라우팅');
 
   // 미라우팅 흔적 금지.

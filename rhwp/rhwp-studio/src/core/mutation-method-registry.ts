@@ -36,6 +36,10 @@ export const MUTATING_METHODS: readonly string[] = [
   'createTable', 'createTableEx', 'deleteTableControl', 'insertTableRow',
   'insertTableColumn', 'deleteTableRow', 'deleteTableColumn', 'mergeTableCells',
   'splitTableCell', 'splitTableCellInto', 'splitTableCellsInRange', 'resizeTableCells',
+  'insertTableRowByPath', 'insertTableColumnByPath',
+  'deleteTableRowByPath', 'deleteTableColumnByPath',
+  'mergeTableCellsByPath', 'splitTableCellByPath',
+  'splitTableCellIntoByPath', 'splitTableCellsInRangeByPath',
   'resizeTableCellsByPath', // [#7189] 중첩 표는 평면 resizeTableCells 로 닿지 않는다
   'moveTableOffset', 'setTableProperties', 'setCellProperties', 'setCellZoneProperties',
   'pasteTableCellsTransposed', 'transposeTableCellsInPlace', 'pasteTableCellsTransposedAsTable',
@@ -47,8 +51,8 @@ export const MUTATING_METHODS: readonly string[] = [
   'setCellShapePropertiesByPath', 'deletePictureControl', 'deleteCellPictureControlByPath',
   'createShapeControl', 'setShapeProperties', 'deleteShapeControl', 'changeObjectZOrder',
   'groupShapes', 'ungroupShape', 'moveLineEndpoint', 'updateConnectorsInSection',
-  'insertEquation', 'promoteOleEquation', 'setEquationProperties', 'setNoteEquationProperties', 'deleteEquationControl',
-  'insertEquationInCell', 'deleteEquationControlInCell',
+  'insertEquation', 'promoteOleEquation', 'setEquationProperties', 'setEquationPropertiesByPath', 'setNoteEquationProperties', 'deleteEquationControl',
+  'insertEquationInCell', 'insertEquationInCellByPath', 'deleteEquationControlInCell', 'deleteEquationControlInCellByPath',
   // 각주/미주
   'insertFootnote', 'insertEndnote', 'deleteFootnote', 'applyEndnoteShape',
   'insertTextInFootnote', 'deleteTextInFootnote', 'splitParagraphInFootnote',

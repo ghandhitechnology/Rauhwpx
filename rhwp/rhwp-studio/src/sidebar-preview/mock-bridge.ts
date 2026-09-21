@@ -191,6 +191,7 @@ export function createMockBridge(report: (message: string) => void) {
         report('Sample document changes rejected');
       },
     },
+    getDocumentSelectionIdentity: () => ({ documentId: 'sidebar-preview', revision: 0 }),
     getConnectionState: () => connection,
     getActiveAgent: () => agent,
     isTurnRunning: () => running,

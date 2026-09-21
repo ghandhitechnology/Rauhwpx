@@ -6,7 +6,7 @@ import type { HyperlinkTarget, HyperlinkContext } from './hyperlink';
 import * as wasmExports from '@wasm/rhwp.js';
 import { blake3 } from '@noble/hashes/blake3.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
-import type { DocumentInfo, PageInfo, PageDef, SectionDef, PageBorderFillSettings, EndnoteShapeSettings, NoteEditInfo, CursorRect, HitTestResult, BodyFootnoteMarkerHit, FootnoteAtCursorResult, DeleteFootnoteResult, LineInfo, TableDimensions, CellInfo, CellBbox, CellProperties, TableProperties, DocumentPosition, MoveVerticalResult, SelectionRect, CharProperties, ParaProperties, CellPathEntry, CellPathLike, NavContextEntry, FieldInfoResult, BookmarkInfo, LayerRenderProfile, PageLayerTree, CanvasKitDocumentPreflight } from './types';
+import type { DocumentInfo, PageInfo, PageDef, SectionDef, PageBorderFillSettings, EndnoteShapeSettings, NoteEditInfo, CursorRect, HitTestResult, BodyFootnoteMarkerHit, FootnoteAtCursorResult, DeleteFootnoteResult, LineInfo, TableDimensions, CellInfo, TableCellTarget, CellBbox, CellProperties, TableProperties, DocumentPosition, MoveVerticalResult, SelectionRect, CharProperties, ParaProperties, CellPathEntry, CellPathLike, NavContextEntry, FieldInfoResult, BookmarkInfo, LayerRenderProfile, PageLayerTree, CanvasKitDocumentPreflight } from './types';
 import { parseCanvasKitDocumentPreflight } from './canvaskit-document-preflight';
 import { fontMetricsPolicyForEnvironment } from './font-metrics-policy';
 import {
@@ -1631,6 +1631,18 @@ export class WasmBridge {
     return (this.doc as any).getTextInCellByPath(sec, parentPara, pathJson, charOffset, count);
   }
 
+  logicalToTextOffsetInCell(sec: number, parentPara: number, controlIdx: number, cellIdx: number, cellParaIdx: number, logicalOffset: number): number {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return (this.doc as any).logicalToTextOffsetInCell(
+      sec, parentPara, controlIdx, cellIdx, cellParaIdx, logicalOffset,
+    );
+  }
+
+  logicalToTextOffsetInCellByPath(sec: number, parentPara: number, pathJson: string, logicalOffset: number): number {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return (this.doc as any).logicalToTextOffsetInCellByPath(sec, parentPara, pathJson, logicalOffset);
+  }
+
   getCellParagraphLength(sec: number, parentPara: number, controlIdx: number, cellIdx: number, cellParaIdx: number): number {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return this.doc.getCellParagraphLength(sec, parentPara, controlIdx, cellIdx, cellParaIdx);
@@ -1853,9 +1865,19 @@ export class WasmBridge {
     return JSON.parse(this.doc.mergeTableCells(sec, parentPara, controlIdx, startRow, startCol, endRow, endCol));
   }
 
+  mergeTableCellsByPath(sec: number, parentPara: number, pathJson: string, startRow: number, startCol: number, endRow: number, endCol: number): { ok: boolean; cellCount: number } {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse((this.doc as any).mergeTableCellsByPath(sec, parentPara, pathJson, startRow, startCol, endRow, endCol));
+  }
+
   splitTableCell(sec: number, parentPara: number, controlIdx: number, row: number, col: number): { ok: boolean; cellCount: number } {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return JSON.parse(this.doc.splitTableCell(sec, parentPara, controlIdx, row, col));
+  }
+
+  splitTableCellByPath(sec: number, parentPara: number, pathJson: string, row: number, col: number): { ok: boolean; cellCount: number } {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse((this.doc as any).splitTableCellByPath(sec, parentPara, pathJson, row, col));
   }
 
   splitTableCellInto(
@@ -1869,6 +1891,16 @@ export class WasmBridge {
     return JSON.parse((this.doc as any).splitTableCellInto(sec, parentPara, controlIdx, row, col, nRows, mCols, equalRowHeight, mergeFirst));
   }
 
+  splitTableCellIntoByPath(
+    sec: number, parentPara: number, pathJson: string,
+    row: number, col: number,
+    nRows: number, mCols: number,
+    equalRowHeight: boolean, mergeFirst: boolean,
+  ): { ok: boolean; cellCount: number } {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse((this.doc as any).splitTableCellIntoByPath(sec, parentPara, pathJson, row, col, nRows, mCols, equalRowHeight, mergeFirst));
+  }
+
   splitTableCellsInRange(
     sec: number, parentPara: number, controlIdx: number,
     startRow: number, startCol: number, endRow: number, endCol: number,
@@ -1877,6 +1909,15 @@ export class WasmBridge {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return JSON.parse((this.doc as any).splitTableCellsInRange(sec, parentPara, controlIdx, startRow, startCol, endRow, endCol, nRows, mCols, equalRowHeight));
+  }
+
+  splitTableCellsInRangeByPath(
+    sec: number, parentPara: number, pathJson: string,
+    startRow: number, startCol: number, endRow: number, endCol: number,
+    nRows: number, mCols: number, equalRowHeight: boolean,
+  ): { ok: boolean; cellCount: number } {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse((this.doc as any).splitTableCellsInRangeByPath(sec, parentPara, pathJson, startRow, startCol, endRow, endCol, nRows, mCols, equalRowHeight));
   }
 
   copyTableCellsTransposed(
@@ -1945,9 +1986,19 @@ export class WasmBridge {
     return JSON.parse(this.doc.insertTableRow(sec, parentPara, controlIdx, rowIdx, below));
   }
 
+  insertTableRowByPath(sec: number, parentPara: number, pathJson: string, rowIdx: number, below: boolean): { ok: boolean; rowCount: number; colCount: number } {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse((this.doc as any).insertTableRowByPath(sec, parentPara, pathJson, rowIdx, below));
+  }
+
   insertTableColumn(sec: number, parentPara: number, controlIdx: number, colIdx: number, right: boolean): { ok: boolean; rowCount: number; colCount: number } {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return JSON.parse(this.doc.insertTableColumn(sec, parentPara, controlIdx, colIdx, right));
+  }
+
+  insertTableColumnByPath(sec: number, parentPara: number, pathJson: string, colIdx: number, right: boolean): { ok: boolean; rowCount: number; colCount: number } {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse((this.doc as any).insertTableColumnByPath(sec, parentPara, pathJson, colIdx, right));
   }
 
   deleteTableRow(sec: number, parentPara: number, controlIdx: number, rowIdx: number): { ok: boolean; rowCount: number; colCount: number } {
@@ -1955,9 +2006,19 @@ export class WasmBridge {
     return JSON.parse(this.doc.deleteTableRow(sec, parentPara, controlIdx, rowIdx));
   }
 
+  deleteTableRowByPath(sec: number, parentPara: number, pathJson: string, rowIdx: number): { ok: boolean; rowCount: number; colCount: number } {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse((this.doc as any).deleteTableRowByPath(sec, parentPara, pathJson, rowIdx));
+  }
+
   deleteTableColumn(sec: number, parentPara: number, controlIdx: number, colIdx: number): { ok: boolean; rowCount: number; colCount: number } {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return JSON.parse(this.doc.deleteTableColumn(sec, parentPara, controlIdx, colIdx));
+  }
+
+  deleteTableColumnByPath(sec: number, parentPara: number, pathJson: string, colIdx: number): { ok: boolean; rowCount: number; colCount: number } {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse((this.doc as any).deleteTableColumnByPath(sec, parentPara, pathJson, colIdx));
   }
 
   createTable(sec: number, para: number, charOffset: number, rows: number, cols: number): { ok: boolean; paraIdx: number; controlIdx: number } {
@@ -2160,9 +2221,19 @@ export class WasmBridge {
   }
 
   // ── 수식 속성 API ─────────────────────────────────────
-  getEquationProperties(sec: number, para: number, ci: number, cellIdx?: number, cellParaIdx?: number): import('./types').EquationProperties {
+  getEquationProperties(sec: number, para: number, ci: number, cellIdx?: number, cellParaIdx?: number, innerControlIdx?: number): import('./types').EquationProperties {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    if (innerControlIdx !== undefined && typeof (this.doc as any).getEquationPropertiesAt === 'function') {
+      return JSON.parse((this.doc as any).getEquationPropertiesAt(sec, para, ci, cellIdx ?? -1, cellParaIdx ?? -1, innerControlIdx));
+    }
     return JSON.parse(this.doc.getEquationProperties(sec, para, ci, cellIdx ?? -1, cellParaIdx ?? -1));
+  }
+
+  getEquationPropertiesByPath(sec: number, parentPara: number, cellPath: CellPathLike, innerControlIdx: number): import('./types').EquationProperties {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse((this.doc as any).getEquationPropertiesByPath(
+      sec, parentPara, JSON.stringify(cellPath), innerControlIdx,
+    ));
   }
 
   getNoteEquationProperties(noteRef: import('./types').NoteControlRef): import('./types').EquationProperties {
@@ -2177,9 +2248,19 @@ export class WasmBridge {
     ));
   }
 
-  setEquationProperties(sec: number, para: number, ci: number, cellIdx: number | undefined, cellParaIdx: number | undefined, props: Record<string, unknown>): { ok: boolean } {
+  setEquationProperties(sec: number, para: number, ci: number, cellIdx: number | undefined, cellParaIdx: number | undefined, props: Record<string, unknown>, innerControlIdx?: number): { ok: boolean } {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    if (innerControlIdx !== undefined && typeof (this.doc as any).setEquationPropertiesAt === 'function') {
+      return JSON.parse((this.doc as any).setEquationPropertiesAt(sec, para, ci, cellIdx ?? -1, cellParaIdx ?? -1, innerControlIdx, JSON.stringify(props)));
+    }
     return JSON.parse(this.doc.setEquationProperties(sec, para, ci, cellIdx ?? -1, cellParaIdx ?? -1, JSON.stringify(props)));
+  }
+
+  setEquationPropertiesByPath(sec: number, parentPara: number, cellPath: CellPathLike, innerControlIdx: number, props: Record<string, unknown>): { ok: boolean } {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse((this.doc as any).setEquationPropertiesByPath(
+      sec, parentPara, JSON.stringify(cellPath), innerControlIdx, JSON.stringify(props),
+    ));
   }
 
   setNoteEquationProperties(noteRef: import('./types').NoteControlRef, props: Record<string, unknown>): { ok: boolean } {
@@ -2195,8 +2276,11 @@ export class WasmBridge {
     ));
   }
 
-  renderEquationPreview(script: string, fontSizeHwpunit: number, color: number): string {
+  renderEquationPreview(script: string, fontSizeHwpunit: number, color: number, fontName?: string): string {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    if (fontName && typeof (this.doc as any).renderEquationPreviewWithFont === 'function') {
+      return (this.doc as any).renderEquationPreviewWithFont(script, fontSizeHwpunit, color, fontName);
+    }
     return this.doc.renderEquationPreview(script, fontSizeHwpunit, color);
   }
 
@@ -2277,10 +2361,24 @@ export class WasmBridge {
     return JSON.parse((this.doc as any).insertEquationInCell(sec, parentPara, controlIdx, cellIdx, cellParaIdx, charOffset, script, fontSizeHwpunit, color));
   }
 
+  insertEquationInCellByPath(sec: number, parentPara: number, cellPath: CellPathLike, charOffset: number, script: string, fontSizeHwpunit: number, color: number): { ok: boolean; cellParaIdx: number; controlIdx: number } {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse((this.doc as any).insertEquationInCellByPath(
+      sec, parentPara, JSON.stringify(cellPath), charOffset, script, fontSizeHwpunit, color,
+    ));
+  }
+
   /** 셀 문단의 수식 컨트롤 삭제 (insertEquationInCell 의 역연산) */
   deleteEquationControlInCell(sec: number, parentPara: number, controlIdx: number, cellIdx: number, cellParaIdx: number, eqControlIdx: number): { ok: boolean } {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return JSON.parse((this.doc as any).deleteEquationControlInCell(sec, parentPara, controlIdx, cellIdx, cellParaIdx, eqControlIdx));
+  }
+
+  deleteEquationControlInCellByPath(sec: number, parentPara: number, cellPath: CellPathLike, eqControlIdx: number): { ok: boolean } {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse((this.doc as any).deleteEquationControlInCellByPath(
+      sec, parentPara, JSON.stringify(cellPath), eqControlIdx,
+    ));
   }
 
   /**
@@ -2497,6 +2595,20 @@ export class WasmBridge {
   getTableDimensionsByPath(sec: number, parentPara: number, pathJson: string): TableDimensions {
     if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
     return JSON.parse(this.doc.getTableDimensionsByPath(sec, parentPara, pathJson));
+  }
+
+  getTableCellTargetByPath(
+    sec: number,
+    parentPara: number,
+    pathJson: string,
+    row: number,
+    col: number,
+    preferredParaIdx: number,
+  ): TableCellTarget {
+    if (!this.doc) throw new Error('문서가 로드되지 않았습니다');
+    return JSON.parse((this.doc as any).getTableCellTargetByPath(
+      sec, parentPara, pathJson, row, col, preferredParaIdx,
+    ));
   }
 
   getTableCellBboxesByPath(sec: number, parentPara: number, pathJson: string): CellBbox[] {

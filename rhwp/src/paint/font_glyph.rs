@@ -410,6 +410,29 @@ pub fn resolve_embedded_font_face_index(
     }
 }
 
+/// Resolve a collection face once, then bind every document alias to that face.
+///
+/// A substitute font name identifies the physical TTC face. The declared HWP
+/// family is only an alias for that same face and must not be resolved against
+/// the collection independently.
+pub fn resolve_embedded_font_face_aliases(
+    bytes: &[u8],
+    face_family: &str,
+    aliases: &[&str],
+) -> Option<Vec<(String, u32)>> {
+    let face_index = resolve_embedded_font_face_index(bytes, face_family, None)?;
+    let mut names = Vec::with_capacity(aliases.len() + 1);
+    for name in std::iter::once(face_family).chain(aliases.iter().copied()) {
+        if !names
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(name))
+        {
+            names.push(name.to_string());
+        }
+    }
+    Some(names.into_iter().map(|name| (name, face_index)).collect())
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FontGlyphLoweringReport {
     pub attempted_runs: usize,
@@ -868,6 +891,24 @@ mod tests {
         assert_eq!(
             resolve_embedded_font_face_index(fixture_ttc(), "Missing Family", None),
             None
+        );
+    }
+
+    #[test]
+    fn collection_substitute_resolves_once_and_shares_its_face_with_declared_alias() {
+        let aliases = resolve_embedded_font_face_aliases(
+            fixture_ttc(),
+            "RHWP Exact Face One",
+            &["Legacy Declared Family", "RHWP Exact Face One"],
+        )
+        .expect("substitute face resolves");
+
+        assert_eq!(
+            aliases,
+            vec![
+                ("RHWP Exact Face One".to_string(), 1),
+                ("Legacy Declared Family".to_string(), 1),
+            ]
         );
     }
 
