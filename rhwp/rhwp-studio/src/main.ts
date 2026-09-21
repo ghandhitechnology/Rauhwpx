@@ -1296,8 +1296,8 @@ async function initialize(): Promise<void> {
               sourceFormat: wasm.getSourceFormat(),
             };
           },
-          moveToLibraryDocument: async (target) => {
-            await runLibraryMove(commandServices, target, () => activeDocumentId);
+          moveToLibraryDocument: (target) => {
+            return runLibraryMove(commandServices, target, () => activeDocumentId);
           },
           prepareCloudTransfer: prepareCloudTransferDocument,
           beginCloudAuthorityTransition,
