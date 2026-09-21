@@ -1463,7 +1463,6 @@ function writingStyleCatalog(record) {
   return buildWritingStyleCatalog({
     health: providerHealth.cached(),
     piStatus,
-    rauStatus,
     currentSelection: activeSession ? { agent: activeSession.agent, model: activeSession.model, effort: activeSession.effort } : null,
   });
 }
@@ -1499,7 +1498,6 @@ function usageSnapshot() {
   const credits = keyId && keyId === openRouterCreditsKey ? openRouterCredits : null;
   if (credits) usage.openrouter = credits;
   usage.balances = {
-    ...providerBalances.snapshot(),
     openrouter: {
       status: credits ? (credits.error ? 'error' : 'ok') : 'unavailable',
       balanceUsd: credits && !credits.error ? credits.balanceUsd : null,
@@ -1511,7 +1509,6 @@ function usageSnapshot() {
         : !credits ? (currentKey ? '잔액을 새로고침해 주세요.' : 'Pi에서 OpenRouter 계정을 연결해 주세요.') : null,
     },
   };
-  if (rauCreditsBalance) usage.rau = rauCreditsBalance;
   return usage;
 }
 
@@ -1543,21 +1540,11 @@ async function refreshOpenRouterCredits(refresh = false) {
       openRouterCreditsKey = crypto.createHash('sha256').update(key).digest('hex');
     }
   }
-  if (!rauStatus.keyConfigured) {
-    rauCreditsBalance = null;
-    return;
-  }
-  try {
-    rauCreditsBalance = await rauManager.credits(refresh === true);
-  } catch (error) {
-    rauCreditsBalance = emptyCreditsError(error);
-  }
 }
 
 async function usageSnapshotRefreshing(refresh = false) {
   await Promise.all([
     providerLimits.refresh(refresh === true),
-    providerBalances.refresh(refresh === true),
     refreshOpenRouterCredits(refresh),
   ]);
   return usageSnapshot();
@@ -4034,7 +4021,6 @@ async function handleStudioMessage(record, sock, msg) {
           {
             health: providerHealth.cached(),
             piStatus,
-            rauStatus,
             currentSelection: record.agentSession ? { agent: record.agentSession.agent, model: record.agentSession.model, effort: record.agentSession.effort } : null,
           },
         );
