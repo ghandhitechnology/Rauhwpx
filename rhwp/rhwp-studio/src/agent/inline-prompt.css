@@ -82,6 +82,58 @@ body:not(.ag-sidebar-open) .ag-inline-box {
   max-height: 96px;
 }
 
+.ag-inline-selection-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.ag-inline-selection-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 5px 2px 7px;
+  border: 1px solid var(--ui-border);
+  border-radius: 999px;
+  color: var(--ui-text-secondary);
+  font-family: var(--font-family-ui);
+  font-size: 10px;
+  max-width: 210px;
+}
+
+.ag-inline-selection-item img {
+  width: 22px;
+  height: 18px;
+  margin-left: -4px;
+  border-radius: 4px;
+  object-fit: cover;
+}
+
+.ag-inline-selection-item-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ag-inline-selection-item button {
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: 12px;
+  cursor: pointer;
+}
+
+.ag-inline-selection-item button:hover {
+  background: var(--ui-hover);
+  color: var(--ui-text);
+}
+
 .ag-inline-input::placeholder {
   color: var(--ui-text-placeholder);
 }

@@ -11,8 +11,8 @@ use crate::model::document::{Document, Section};
 use crate::model::page::ColumnDef;
 use crate::model::paragraph::{ColumnBreakType, Paragraph};
 use crate::paint::{
-    resolve_embedded_font_face_index, EmbeddedFontFace, LayerBuilder, LayerOutputOptions,
-    PageLayerTree, RenderProfile,
+    resolve_embedded_font_face_aliases, resolve_embedded_font_face_index, EmbeddedFontFace,
+    LayerBuilder, LayerOutputOptions, PageLayerTree, RenderProfile,
 };
 use crate::renderer::canvas::CanvasRenderer;
 use crate::renderer::composer::{compose_paragraph, compose_section, ComposedParagraph};
@@ -655,17 +655,16 @@ impl DocumentCore {
                 else {
                     continue;
                 };
-                let mut characters = run.text.chars();
-                let (Some(character), None, Some(char_shape_id)) =
-                    (characters.next(), characters.next(), run.char_shape_id)
-                else {
+                let Some(char_shape_id) = run.char_shape_id else {
                     continue;
                 };
-                let language_index =
-                    crate::renderer::style_resolver::detect_lang_category(character);
-                let slot = (char_shape_id, language_index);
-                if !used_font_slots.contains(&slot) {
-                    used_font_slots.push(slot);
+                for character in run.text.chars() {
+                    let language_index =
+                        crate::renderer::style_resolver::detect_lang_category(character);
+                    let slot = (char_shape_id, language_index);
+                    if !used_font_slots.contains(&slot) {
+                        used_font_slots.push(slot);
+                    }
                 }
             }
 
@@ -819,6 +818,7 @@ impl DocumentCore {
     }
 
     pub fn render_page_svg_legacy_native(&self, page_num: u32) -> Result<String, HwpError> {
+        let _font_scope = self.resolved_shaping_font_scope();
         let tree = self.build_page_tree(page_num)?;
         let _overflows = self.layout_engine.take_overflows();
         let mut renderer = SvgRenderer::new();
@@ -838,6 +838,7 @@ impl DocumentCore {
         page_num: u32,
         profile: RenderProfile,
     ) -> Result<String, HwpError> {
+        let _font_scope = self.resolved_shaping_font_scope();
         let layer_tree = self.build_page_layer_tree_with_profile(page_num, profile)?;
         let mut renderer = SvgLayerRenderer::new();
         // WASM에서도 문서 내장 face 사용량을 수집한다. 실제 CSS 생성은 아래의
@@ -896,6 +897,7 @@ impl DocumentCore {
         page_nums: &[u32],
         options: &crate::renderer::pdf::PdfExportOptions,
     ) -> Result<Vec<u8>, HwpError> {
+        let _font_scope = self.resolved_shaping_font_scope();
         if page_nums.is_empty() {
             return Err(HwpError::RenderError(
                 "PDF export requires at least one page".to_string(),
@@ -1004,6 +1006,7 @@ impl DocumentCore {
         profile: RenderProfile,
         options: &crate::renderer::pdf::DirectPdfExportOptions,
     ) -> Result<Vec<u8>, HwpError> {
+        let _font_scope = self.resolved_shaping_font_scope();
         if page_nums.is_empty() {
             return Err(HwpError::RenderError(
                 "PDF export requires at least one page".to_string(),
@@ -1080,6 +1083,92 @@ impl DocumentCore {
         map
     }
 
+    pub(crate) fn collect_resolved_shaping_fonts(
+        &self,
+    ) -> Vec<crate::renderer::layout::ResolvedShapingFont> {
+        let mut requested = Vec::<(String, Vec<String>, u16)>::new();
+        for shape in &self.document.doc_info.char_shapes {
+            for (language_index, font_id) in shape.font_ids.iter().copied().enumerate() {
+                let Some(font) = self
+                    .document
+                    .doc_info
+                    .font_faces
+                    .get(language_index)
+                    .and_then(|faces| faces.get(font_id as usize))
+                else {
+                    continue;
+                };
+                if font.is_embedded {
+                    if let Some(bin_data_id) = font.resolved_bin_data_id {
+                        requested.push((font.name.clone(), vec![font.name.clone()], bin_data_id));
+                    }
+                }
+                if let Some(substitute) = font
+                    .subst_font
+                    .as_ref()
+                    .filter(|substitute| substitute.is_embedded)
+                {
+                    if let Some(bin_data_id) = substitute.resolved_bin_data_id {
+                        requested.push((
+                            substitute.face.clone(),
+                            vec![substitute.face.clone(), font.name.clone()],
+                            bin_data_id,
+                        ));
+                    }
+                }
+            }
+        }
+        requested.sort();
+        requested.dedup();
+        let ids = requested.iter().map(|(_, _, id)| *id).collect::<Vec<_>>();
+        let bytes_by_id = load_bounded_embedded_font_bytes(
+            &self.document.bin_data_content,
+            &ids,
+            MAX_EMBEDDED_FONT_BYTES,
+            MAX_EMBEDDED_FONT_BYTES_PER_PAGE,
+        );
+        let mut resolved = requested
+            .into_iter()
+            .flat_map(|(face_family, aliases, bin_data_id)| {
+                let bytes = bytes_by_id.get(&bin_data_id)?;
+                let aliases = aliases.iter().map(String::as_str).collect::<Vec<_>>();
+                resolve_embedded_font_face_aliases(bytes, &face_family, &aliases).map(
+                    |resolved_aliases| {
+                        resolved_aliases
+                            .into_iter()
+                            .map(move |(family, face_index)| {
+                                crate::renderer::layout::ResolvedShapingFont {
+                                    family,
+                                    bytes: std::sync::Arc::clone(bytes),
+                                    face_index,
+                                }
+                            })
+                    },
+                )
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        resolved.sort_by(|left, right| {
+            left.family
+                .cmp(&right.family)
+                .then(left.face_index.cmp(&right.face_index))
+        });
+        resolved.dedup_by(|left, right| {
+            left.family.eq_ignore_ascii_case(&right.family)
+                && left.face_index == right.face_index
+                && std::sync::Arc::ptr_eq(&left.bytes, &right.bytes)
+        });
+        resolved
+    }
+
+    pub(crate) fn resolved_shaping_font_scope(
+        &self,
+    ) -> crate::renderer::layout::ResolvedShapingFontScope {
+        crate::renderer::layout::enter_resolved_shaping_fonts(
+            self.layout_engine.resolved_shaping_fonts(),
+        )
+    }
+
     /// SVG 렌더링 (폰트 임베딩 옵션 포함)
     #[cfg(not(target_arch = "wasm32"))]
     pub fn render_page_svg_with_fonts(
@@ -1088,6 +1177,7 @@ impl DocumentCore {
         font_embed_mode: crate::renderer::svg::FontEmbedMode,
         font_paths: &[std::path::PathBuf],
     ) -> Result<String, HwpError> {
+        let _font_scope = self.resolved_shaping_font_scope();
         let tree = self.build_page_tree(page_num)?;
         let _overflows = self.layout_engine.take_overflows();
         let mut renderer = SvgRenderer::new();
@@ -1119,6 +1209,7 @@ impl DocumentCore {
 
     /// HTML 렌더링 (네이티브 에러 타입)
     pub fn render_page_html_native(&self, page_num: u32) -> Result<String, HwpError> {
+        let _font_scope = self.resolved_shaping_font_scope();
         let tree = self.build_page_tree(page_num)?;
         let _overflows = self.layout_engine.take_overflows();
         let mut renderer = HtmlRenderer::new();
@@ -1130,6 +1221,7 @@ impl DocumentCore {
 
     /// Canvas 렌더링 (네이티브 에러 타입)
     pub fn render_page_canvas_native(&self, page_num: u32) -> Result<u32, HwpError> {
+        let _font_scope = self.resolved_shaping_font_scope();
         let tree = self.build_page_layer_tree(page_num)?;
         let mut renderer = CanvasRenderer::new();
         renderer.render_page(&tree)?;
@@ -1137,6 +1229,7 @@ impl DocumentCore {
     }
 
     pub fn render_page_canvas_legacy_native(&self, page_num: u32) -> Result<u32, HwpError> {
+        let _font_scope = self.resolved_shaping_font_scope();
         let tree = self.build_page_tree(page_num)?;
         let _overflows = self.layout_engine.take_overflows();
         let mut renderer = CanvasRenderer::new();
@@ -1224,6 +1317,7 @@ impl DocumentCore {
         use crate::renderer::layer_renderer::LayerRasterRenderer;
         use crate::renderer::skia::SkiaLayerRenderer;
 
+        let _font_scope = self.resolved_shaping_font_scope();
         let layer_tree = self.build_page_layer_tree(page_num)?;
         SkiaLayerRenderer::new().render_png(&layer_tree)
     }
@@ -1239,6 +1333,7 @@ impl DocumentCore {
         use crate::renderer::layer_renderer::LayerRasterRenderer;
         use crate::renderer::skia::SkiaLayerRenderer;
 
+        let _font_scope = self.resolved_shaping_font_scope();
         let layer_tree = self.build_page_layer_tree(page_num)?;
         SkiaLayerRenderer::new()
             .with_font_paths(font_paths)
@@ -1270,6 +1365,7 @@ impl DocumentCore {
         use crate::renderer::layer_renderer::{LayerRasterRenderer, RasterRenderOptions};
         use crate::renderer::skia::SkiaLayerRenderer;
 
+        let _font_scope = self.resolved_shaping_font_scope();
         let layer_tree = self.build_page_layer_tree_with_profile(page_num, profile)?;
 
         // 페이지 크기에서 effective scale + max_dimension 결정
@@ -2760,7 +2856,11 @@ impl DocumentCore {
                     };
                     let cell_coords = match (eq_node.cell_index, eq_node.cell_para_index) {
                         (Some(ci), Some(cpi)) => {
-                            format!(",\"cellIdx\":{},\"cellParaIdx\":{}", ci, cpi)
+                            let inner =
+                                eq_node.inner_control_index.map_or_else(String::new, |idx| {
+                                    format!(",\"innerControlIdx\":{}", idx)
+                                });
+                            format!(",\"cellIdx\":{},\"cellParaIdx\":{}{}", ci, cpi, inner)
                         }
                         _ => String::new(),
                     };
@@ -3313,6 +3413,16 @@ impl DocumentCore {
         &mut self,
         fragment_budget: usize,
     ) -> DeferredPaginationStepResult {
+        let fonts = self.layout_engine.resolved_shaping_fonts();
+        crate::renderer::layout::with_resolved_shaping_fonts(fonts, || {
+            self.begin_deferred_pagination_with_active_fonts(fragment_budget)
+        })
+    }
+
+    fn begin_deferred_pagination_with_active_fonts(
+        &mut self,
+        fragment_budget: usize,
+    ) -> DeferredPaginationStepResult {
         self.pending_pagination_job = None;
         let Some(descriptor) = self.deferred_pagination_descriptor.clone() else {
             return DeferredPaginationStepResult {
@@ -3445,6 +3555,16 @@ impl DocumentCore {
     /// [#2424] shadow job에서 fragment budget만큼 전진한다.
     /// 완료 전에는 기존 공개 pagination과 render tree cache를 유지한다.
     pub fn step_deferred_pagination(
+        &mut self,
+        fragment_budget: usize,
+    ) -> DeferredPaginationStepResult {
+        let fonts = self.layout_engine.resolved_shaping_fonts();
+        crate::renderer::layout::with_resolved_shaping_fonts(fonts, || {
+            self.step_deferred_pagination_with_active_fonts(fragment_budget)
+        })
+    }
+
+    fn step_deferred_pagination_with_active_fonts(
         &mut self,
         fragment_budget: usize,
     ) -> DeferredPaginationStepResult {
@@ -3659,6 +3779,14 @@ impl DocumentCore {
     /// 측정 통일(B). `paginate_pass` 의 `force_break_before` 훅과 `LayoutOverflow` 의
     /// section_index/is_first_in_column 계측은 측정 통일 작업의 진단·후속용으로 유지한다.
     pub(crate) fn paginate(&mut self) {
+        let fonts = self.collect_resolved_shaping_fonts();
+        self.layout_engine.set_resolved_shaping_fonts(fonts.clone());
+        crate::renderer::layout::with_resolved_shaping_fonts(fonts, || {
+            self.paginate_with_resolved_shaping_fonts()
+        });
+    }
+
+    fn paginate_with_resolved_shaping_fonts(&mut self) {
         self.header_footer_preview_tree_cache.borrow_mut().take();
         self.pending_pagination_job = None;
         let sec_count = self.document.sections.len().max(1);
@@ -5421,6 +5549,17 @@ impl DocumentCore {
         page_num: u32,
         build: impl FnOnce(&PageRenderTree) -> Result<T, HwpError>,
     ) -> Result<T, HwpError> {
+        let fonts = self.layout_engine.resolved_shaping_fonts();
+        crate::renderer::layout::with_resolved_shaping_fonts(fonts, || {
+            self.with_page_tree_cached_with_active_fonts(page_num, build)
+        })
+    }
+
+    fn with_page_tree_cached_with_active_fonts<T>(
+        &self,
+        page_num: u32,
+        build: impl FnOnce(&PageRenderTree) -> Result<T, HwpError>,
+    ) -> Result<T, HwpError> {
         let idx = page_num as usize;
         let cached = self
             .page_tree_cache
@@ -5531,6 +5670,17 @@ impl DocumentCore {
     }
 
     fn build_page_tree_with_header_footer_override(
+        &self,
+        page_num: u32,
+        header_footer_override: Option<(usize, bool, u8)>,
+    ) -> Result<PageRenderTree, HwpError> {
+        let fonts = self.layout_engine.resolved_shaping_fonts();
+        crate::renderer::layout::with_resolved_shaping_fonts(fonts, || {
+            self.build_page_tree_with_active_shaping_fonts(page_num, header_footer_override)
+        })
+    }
+
+    fn build_page_tree_with_active_shaping_fonts(
         &self,
         page_num: u32,
         header_footer_override: Option<(usize, bool, u8)>,
@@ -7223,6 +7373,52 @@ mod tests {
             Some("glyphOutline")
         );
         assert!(!plan.text_variants[0].fallback_required);
+    }
+
+    #[test]
+    fn ttc_substitute_binds_declared_and_substitute_names_to_one_face() {
+        use crate::model::style::{CharShape, Font, SubstFont};
+
+        let mut document = crate::model::document::Document::default();
+        document.doc_info.font_faces = vec![Vec::new(); 7];
+        document.doc_info.font_faces[0].push(Font {
+            name: "Legacy Declared Family".to_string(),
+            subst_font: Some(SubstFont {
+                face: "RHWP Exact Face One".to_string(),
+                font_type: 1,
+                is_embedded: true,
+                bin_item_id_ref: "font-ttc".to_string(),
+                resolved_bin_data_id: Some(1),
+            }),
+            ..Default::default()
+        });
+        document.doc_info.char_shapes.push(CharShape {
+            font_ids: [0; 7],
+            ..Default::default()
+        });
+        document.bin_data_content.push(BinDataContent {
+            id: 1,
+            data: include_bytes!("../../../tests/fixtures/fonts/RHWPExactFaceSmoke.ttc")
+                .to_vec()
+                .into(),
+            extension: "ttc".to_string(),
+        });
+        let mut core = DocumentCore::new_empty();
+        core.document = document;
+
+        let fonts = core.collect_resolved_shaping_fonts();
+        let declared = fonts
+            .iter()
+            .find(|font| font.family == "Legacy Declared Family")
+            .expect("declared alias");
+        let substitute = fonts
+            .iter()
+            .find(|font| font.family == "RHWP Exact Face One")
+            .expect("substitute family");
+
+        assert_eq!(declared.face_index, 1);
+        assert_eq!(substitute.face_index, 1);
+        assert!(std::sync::Arc::ptr_eq(&declared.bytes, &substitute.bytes));
     }
 
     #[test]

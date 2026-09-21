@@ -4082,16 +4082,19 @@ impl LayoutEngine {
                             let tokens = super::super::equation::tokenizer::tokenize(&eq.script);
                             let ast = super::super::equation::parser::EqParser::new(tokens).parse();
                             let font_size_px = hwpunit_to_px(eq.font_size as i32, self.dpi);
-                            let layout_box =
-                                super::super::equation::layout::EqLayout::new(font_size_px)
-                                    .layout(&ast);
+                            let layout_box = super::super::equation::layout::EqLayout::with_font(
+                                font_size_px,
+                                &eq.font_name,
+                            )
+                            .layout(&ast);
                             let color_str =
                                 super::super::equation::svg_render::eq_color_to_svg(eq.color);
                             let svg_content =
-                                super::super::equation::svg_render::render_equation_svg(
+                                super::super::equation::svg_render::render_equation_svg_with_font(
                                     &layout_box,
                                     &color_str,
                                     font_size_px,
+                                    Some(&eq.font_name),
                                 );
 
                             let eq_node = RenderNode::new(
@@ -4102,9 +4105,11 @@ impl LayoutEngine {
                                     color_str,
                                     color: eq.color,
                                     font_size: font_size_px,
+                                    font_name: eq.font_name.clone(),
                                     section_index: Some(section_index),
                                     para_index: table_meta.map(|(pi, _)| pi),
-                                    control_index: Some(ctrl_idx),
+                                    control_index: table_meta.map(|(_, ci)| ci),
+                                    inner_control_index: Some(ctrl_idx),
                                     cell_index: Some(cell_idx),
                                     cell_para_index: Some(cp_idx),
                                     note_ref: None,

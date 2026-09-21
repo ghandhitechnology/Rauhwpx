@@ -942,10 +942,11 @@ impl PaintOp {
                 write_bbox(buf, *bbox);
                 let _ = write!(
                     buf,
-                    ",\"svgContent\":{},\"color\":{},\"fontSize\":{:.3},\"layoutBox\":",
+                    ",\"svgContent\":{},\"color\":{},\"fontSize\":{:.3},\"fontName\":{},\"layoutBox\":",
                     json_escape(&equation.svg_content),
                     json_escape(&equation.color_str),
-                    equation.font_size
+                    equation.font_size,
+                    json_escape(&equation.font_name)
                 );
                 write_equation_layout_box(buf, &equation.layout_box);
                 buf.push('}');
@@ -2944,7 +2945,9 @@ fn stroke_dash_str(value: StrokeDash) -> &'static str {
     match value {
         StrokeDash::Solid => "solid",
         StrokeDash::Dash => "dash",
+        StrokeDash::LongDash => "longDash",
         StrokeDash::Dot => "dot",
+        StrokeDash::Circle => "circle",
         StrokeDash::DashDot => "dashDot",
         StrokeDash::DashDotDot => "dashDotDot",
     }
@@ -4375,9 +4378,11 @@ mod tests {
                             color_str: "#000000".to_string(),
                             color: 0x00000000,
                             font_size: 12.0,
+                            font_name: "serif".to_string(),
                             section_index: None,
                             para_index: None,
                             control_index: None,
+                            inner_control_index: None,
                             cell_index: None,
                             cell_para_index: None,
                             note_ref: None,

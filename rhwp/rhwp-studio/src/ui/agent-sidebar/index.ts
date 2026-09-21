@@ -164,7 +164,7 @@ import {
   withSkillIconFrontmatter,
 } from './skill-presentation.ts';
 import type {
-  InlinePromptSendResult,
+  InlinePromptSendResponse,
   InlinePromptSubmission,
 } from '../../agent/inline-prompt-context.ts';
 import { createUserQuestionController } from './user-question-controller.ts';
@@ -616,7 +616,7 @@ function createSketchFilterDefs(): SVGSVGElement {
 export function initAgentSidebar(deps: AgentSidebarDeps): {
   root: HTMLElement;
   openVersions(): void;
-  sendInlinePrompt(submission: InlinePromptSubmission): InlinePromptSendResult;
+  sendInlinePrompt(submission: InlinePromptSubmission): InlinePromptSendResponse;
   awaitPendingCloudTransferForClose(): Promise<void>;
   dispose(): void;
 } {
@@ -5242,7 +5242,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
   function recordUserMessage(
     text: string,
     attachments: ThreadAttachment[] = [],
-    selection?: { label: string; excerpt: string },
+    selection?: NonNullable<ThreadMessage['selection']>,
     skillName?: string,
     skillIcon?: ProductSkillIcon,
     delivery?: 'queued-cloud' | 'accepted-cloud',
@@ -8499,7 +8499,7 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
    * 인라인 프롬프트(문서 선택 위 입력 상자)에서 온 지시를 채팅으로 보낸다.
    * 말풍선에는 지시만 보이고, 에이전트에게는 선택 컨텍스트 블록을 함께 보낸다.
    */
-  function sendInlinePrompt(submission: InlinePromptSubmission): InlinePromptSendResult {
+  async function sendInlinePrompt(submission: InlinePromptSubmission): Promise<Awaited<InlinePromptSendResponse>> {
     const prompt = submission.prompt.trim();
     if (!prompt) return { ok: false, reason: '지시를 입력해 주세요' };
     if (mergeResolverLocked) return { ok: false, reason: '병합 검토를 먼저 완료하거나 닫아 주세요' };
@@ -8528,17 +8528,68 @@ export function initAgentSidebar(deps: AgentSidebarDeps): {
     if (skillsPanelOpen) setSkillsPanelOpen(false);
     if (settingsPanelOpen) setSettingsPanelOpen(false);
     if (versionsPanelOpen) setVersionsPanelOpen(false);
-    const userMessage = recordUserMessage(prompt, [], {
+    const files = submission.selection.attachments ?? [];
+    let staged: Awaited<ReturnType<typeof referenceLibrary.stageInlineFiles>> = [];
+    if (files.length > 0) {
+      attachmentsSending = true;
+      updateComposer();
+      try {
+        staged = await referenceLibrary.stageInlineFiles(files, submission.signal);
+      } catch (caught) {
+        attachmentsSending = false;
+        updateComposer();
+        return { ok: false, reason: caught instanceof Error ? caught.message : '선택 이미지를 첨부하지 못했습니다' };
+      }
+    }
+    if (submission.signal?.aborted) {
+      await referenceLibrary.discardInlineFiles(staged);
+      attachmentsSending = false;
+      updateComposer();
+      return { ok: false, reason: '선택 자료 전송이 취소되었습니다.' };
+    }
+    const messageAttachments: ThreadAttachment[] = staged.map((file) => ({
+      stageId: file.id,
+      name: file.name,
+      mimeType: file.mimeType,
+      size: file.size,
+      status: 'processing',
+    }));
+    let messageId: string | null;
+    try {
+      messageId = await bridge.sendUserMessage(
+        `${submission.selection.contextBlock}\n\n${prompt}`,
+        undefined,
+        staged.map((file) => file.id),
+        true,
+        submission.signal,
+      );
+    } catch (caught) {
+      await referenceLibrary.discardInlineFiles(staged);
+      attachmentsSending = false;
+      updateComposer();
+      return { ok: false, reason: caught instanceof Error ? caught.message : '선택 자료를 보내지 못했습니다' };
+    }
+    if (!messageId) {
+      await referenceLibrary.discardInlineFiles(staged);
+      attachmentsSending = false;
+      updateComposer();
+      return { ok: false, reason: '선택 자료를 보내지 못했습니다. 다시 시도해 주세요.' };
+    }
+    const userMessage = recordUserMessage(prompt, messageAttachments, {
       label: submission.selection.label,
       excerpt: submission.selection.excerpt,
-    });
+      items: submission.selection.items,
+      documentId: submission.selection.documentId,
+      revision: submission.selection.revision,
+    }, undefined, undefined, undefined, messageId);
     const userBubble = renderUserMessage(userMessage);
     followConversation = true;
     replyPending = true;
     appendConversation(userBubble);
     updateTurnPending(selectedAgent);
     scrollConversationToMessage(userBubble, { smooth: true });
-    void bridge.sendUserMessage(`${submission.selection.contextBlock}\n\n${prompt}`);
+    attachmentsSending = false;
+    updateComposer();
     return { ok: true };
   }
 

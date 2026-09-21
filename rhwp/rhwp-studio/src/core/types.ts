@@ -284,6 +284,13 @@ export interface CellInfo {
   colSpan: number;
 }
 
+/** Structural table edits use this model target to remap the caret without render geometry. */
+export interface TableCellTarget {
+  cellIndex: number;
+  cellParaIndex: number;
+  charCount: number;
+}
+
 /** WASM getTableCellBboxes() 반환 타입 */
 export interface CellBbox {
   cellIdx: number;
@@ -561,6 +568,8 @@ export interface ControlLayoutItem {
   cellIdx?: number;
   /** 표 셀 내 수식인 경우: 셀 내 문단 인덱스 */
   cellParaIdx?: number;
+  /** 컨테이너 문단 안에서 수식 자체의 컨트롤 인덱스 */
+  innerControlIdx?: number;
   /** 각주/미주 내부 컨트롤인 경우 원본 위치 */
   noteRef?: NoteControlRef;
   /** 메모 내부 컨트롤인 경우 원본 위치 (현재 편집 API는 미지원). */
@@ -611,10 +620,16 @@ export interface ObjectRef {
   cellIdx?: number;
   /** 표 셀 내 수식인 경우: 셀 내 문단 인덱스 */
   cellParaIdx?: number;
+  /** 컨테이너 문단 안에서 수식 자체의 컨트롤 인덱스 */
+  innerControlIdx?: number;
+  /** 중첩 셀 개체의 최상위 표 컨트롤 인덱스. */
+  outerTableControlIdx?: number;
   noteRef?: NoteControlRef;
   memoRef?: unknown;
   cellPath?: CellPathLike;
   headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number };
+  /** 이미지 데이터가 없는 placeholder 개체. */
+  missing?: boolean;
 }
 
 /** WASM getShapeProperties() 반환 타입 */
@@ -1248,6 +1263,7 @@ export interface LayerEquationOp {
   svgContent?: string;
   color?: string;
   fontSize?: number;
+  fontName?: string;
   layoutBox?: LayerEquationLayoutBox;
 }
 

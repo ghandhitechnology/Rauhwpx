@@ -26,6 +26,7 @@ import {
   type EngineEditOperation,
 } from './engine-edit.ts';
 import { inferExportFormat } from '../command/save-target.ts';
+import { fatalEquationDiagnostics, parseEquationPreview, type EquationPreview } from '../core/equation-preview.ts';
 
 export interface AgentToolExecutorDeps {
   wasm: WasmBridge;
@@ -207,33 +208,6 @@ function pxToMm(px: number): number {
  * 구버전(스테일 pkg)은 SVG 문자열을 그대로 반환한다 → 파싱 실패/svg 키 부재 시
  * raw 를 SVG 로 간주한다 (메트릭 없음, warnings 빈 배열).
  */
-interface EquationPreview {
-  svg: string;
-  widthPx?: number;
-  heightPx?: number;
-  baselinePx?: number;
-  warnings: string[];
-}
-
-function parseEquationPreview(raw: string): EquationPreview {
-  try {
-    const parsed = JSON.parse(raw) as Partial<EquationPreview> | null;
-    if (parsed && typeof parsed.svg === 'string') {
-      return {
-        svg: parsed.svg,
-        ...(typeof parsed.widthPx === 'number' ? { widthPx: parsed.widthPx } : {}),
-        ...(typeof parsed.heightPx === 'number' ? { heightPx: parsed.heightPx } : {}),
-        ...(typeof parsed.baselinePx === 'number' ? { baselinePx: parsed.baselinePx } : {}),
-        warnings: Array.isArray(parsed.warnings)
-          ? parsed.warnings.filter((w): w is string => typeof w === 'string')
-          : [],
-      };
-    }
-  } catch { /* 파싱 실패 = 구버전 wasm — raw 문자열 자체가 SVG */ }
-  // JSON 이지만 svg 키가 없으면 구버전(bare SVG) 응답으로 간주한다
-  return { svg: raw, warnings: [] };
-}
-
 /** PNG 바이트 → base64 (브라우저/Node 공용) */
 function bytesToBase64(bytes: Uint8Array): string {
   let bin = '';
@@ -3484,6 +3458,7 @@ export class AgentToolExecutor {
       ...(preview.heightPx !== undefined ? { heightMm: pxToMm(preview.heightPx) } : {}),
       ...(preview.baselinePx !== undefined ? { baselineMm: pxToMm(preview.baselinePx) } : {}),
       warnings: preview.warnings,
+      diagnostics: preview.diagnostics,
       note: PENDING_NOTE,
     };
   }
@@ -3542,6 +3517,10 @@ export class AgentToolExecutor {
     }
     if (!preview.svg.includes('<svg')) {
       throw new AgentToolError('INVALID_SCRIPT', 'equation script rendered no output — check HWP equation syntax (over, sqrt {}, int _{a} ^{b}, PMATRIX{a & b # c & d}, …)');
+    }
+    const fatal = fatalEquationDiagnostics(preview);
+    if (fatal.length > 0) {
+      throw new AgentToolError('INVALID_SCRIPT', fatal.map(diagnostic => diagnostic.message).join('; '));
     }
     return { script, fontSizeHu, fontSizePt: pt, colorRef, preview };
   }

@@ -2,7 +2,7 @@
 
 use super::super::render_tree::*;
 use super::super::style_resolver::ResolvedBorderStyle;
-use super::super::{LineStyle, StrokeDash};
+use super::super::{LineStyle, PathCommand, ShapeStyle, StrokeDash};
 use crate::model::style::{BorderLine, BorderLineType, CenterLine};
 use crate::model::table::Table;
 
@@ -494,6 +494,14 @@ pub(crate) fn create_border_line_nodes(
     match border.line_type {
         BorderLineType::None => vec![],
 
+        BorderLineType::Wave => {
+            create_wave_line_nodes(tree, border.color, base_width, x1, y1, x2, y2, false)
+        }
+
+        BorderLineType::DoubleWave => {
+            create_wave_line_nodes(tree, border.color, base_width, x1, y1, x2, y2, true)
+        }
+
         // 이중선 (동일 굵기)
         BorderLineType::Double => {
             let total = base_width.max(3.0);
@@ -724,6 +732,76 @@ fn create_single_line(
     )]
 }
 
+fn create_wave_line_nodes(
+    tree: &mut PageRenderTree,
+    color: u32,
+    width: f64,
+    x1: f64,
+    y1: f64,
+    x2: f64,
+    y2: f64,
+    double: bool,
+) -> Vec<RenderNode> {
+    let dx = x2 - x1;
+    let dy = y2 - y1;
+    let len = dx.hypot(dy);
+    if len < 0.01 {
+        return vec![];
+    }
+    let (ux, uy) = (dx / len, dy / len);
+    let (nx, ny) = (-uy, ux);
+    let stroke_width = width.max(0.5);
+    let amplitude = (stroke_width * 0.8).max(0.8);
+    let period = (stroke_width * 6.0).max(6.0);
+    let step = period / 4.0;
+    let samples = (len / step).ceil().max(1.0) as usize;
+    let offsets: &[f64] = if double {
+        &[-amplitude, amplitude]
+    } else {
+        &[0.0]
+    };
+
+    offsets
+        .iter()
+        .map(|center_offset| {
+            let mut commands = Vec::with_capacity(samples + 1);
+            for index in 0..=samples {
+                let distance = (index as f64 * len / samples as f64).min(len);
+                let wave =
+                    (distance * std::f64::consts::TAU / period).sin() * amplitude + center_offset;
+                let point = (
+                    x1 + ux * distance + nx * wave,
+                    y1 + uy * distance + ny * wave,
+                );
+                commands.push(if index == 0 {
+                    PathCommand::MoveTo(point.0, point.1)
+                } else {
+                    PathCommand::LineTo(point.0, point.1)
+                });
+            }
+            let extent = amplitude + center_offset.abs() + stroke_width;
+            RenderNode::new(
+                tree.next_id(),
+                RenderNodeType::Path(PathNode::new(
+                    commands,
+                    ShapeStyle {
+                        stroke_color: Some(color),
+                        stroke_width,
+                        ..Default::default()
+                    },
+                    None,
+                )),
+                BoundingBox::new(
+                    x1.min(x2) - extent,
+                    y1.min(y2) - extent,
+                    dx.abs() + extent * 2.0,
+                    dy.abs() + extent * 2.0,
+                ),
+            )
+        })
+        .collect()
+}
+
 fn create_editor_only_line(
     tree: &mut PageRenderTree,
     color: u32,
@@ -781,6 +859,12 @@ fn create_diagonal_line_nodes(
     let base_width = border_width_to_px(width_index);
     match line_type {
         BorderLineType::None => vec![],
+        BorderLineType::Wave => {
+            create_wave_line_nodes(tree, color, base_width, x1, y1, x2, y2, false)
+        }
+        BorderLineType::DoubleWave => {
+            create_wave_line_nodes(tree, color, base_width, x1, y1, x2, y2, true)
+        }
         BorderLineType::Double => {
             let total = base_width.max(3.0);
             let sub_w = (total * 0.3).max(0.4);
@@ -960,8 +1044,10 @@ fn border_line_type_to_dash(lt: BorderLineType) -> Option<StrokeDash> {
     match lt {
         BorderLineType::None => None,
         BorderLineType::Solid => Some(StrokeDash::Solid),
-        BorderLineType::Dash | BorderLineType::LongDash => Some(StrokeDash::Dash),
-        BorderLineType::Dot | BorderLineType::Circle => Some(StrokeDash::Dot),
+        BorderLineType::Dash => Some(StrokeDash::Dash),
+        BorderLineType::LongDash => Some(StrokeDash::LongDash),
+        BorderLineType::Dot => Some(StrokeDash::Dot),
+        BorderLineType::Circle => Some(StrokeDash::Circle),
         BorderLineType::DashDot => Some(StrokeDash::DashDot),
         BorderLineType::DashDotDot => Some(StrokeDash::DashDotDot),
         _ => Some(StrokeDash::Solid), // Double, Wave 등은 Solid로 대체
@@ -1105,6 +1191,70 @@ mod tests {
             cells,
             ..Default::default()
         }
+    }
+
+    fn border(line_type: BorderLineType) -> BorderLine {
+        BorderLine {
+            line_type,
+            width: 4,
+            color: 0x0012_3456,
+        }
+    }
+
+    #[test]
+    fn preserves_distinct_long_dash_and_circle_border_patterns() {
+        let mut tree = PageRenderTree::new(0, 100.0, 100.0);
+        let long_dash = create_border_line_nodes(
+            &mut tree,
+            &border(BorderLineType::LongDash),
+            0.0,
+            0.0,
+            50.0,
+            0.0,
+        );
+        let circle = create_border_line_nodes(
+            &mut tree,
+            &border(BorderLineType::Circle),
+            0.0,
+            10.0,
+            50.0,
+            10.0,
+        );
+
+        assert_eq!(line_node(&long_dash[0]).style.dash, StrokeDash::LongDash);
+        assert_eq!(line_node(&circle[0]).style.dash, StrokeDash::Circle);
+    }
+
+    #[test]
+    fn wave_borders_use_oriented_path_geometry() {
+        let mut tree = PageRenderTree::new(0, 100.0, 100.0);
+        let horizontal = create_border_line_nodes(
+            &mut tree,
+            &border(BorderLineType::Wave),
+            5.0,
+            10.0,
+            65.0,
+            10.0,
+        );
+        let vertical = create_border_line_nodes(
+            &mut tree,
+            &border(BorderLineType::DoubleWave),
+            10.0,
+            5.0,
+            10.0,
+            65.0,
+        );
+
+        assert_eq!(horizontal.len(), 1);
+        assert!(matches!(horizontal[0].node_type, RenderNodeType::Path(_)));
+        assert_eq!(vertical.len(), 2);
+        assert!(vertical
+            .iter()
+            .all(|node| matches!(node.node_type, RenderNodeType::Path(_))));
+        assert!(horizontal[0].bbox.height > border_width_to_px(4));
+        assert!(vertical
+            .iter()
+            .all(|node| node.bbox.width > border_width_to_px(4)));
     }
 
     #[test]

@@ -4,6 +4,8 @@ mod cursor_nav;
 pub(crate) use cursor_nav::SelCellAddr;
 mod cursor_rect;
 pub(crate) mod doc_tree_nav;
+#[cfg(test)]
+mod shaping_tests;
 // [#3281] `fields` CLI 가 필드 위치(NestedEntry)를 읽어야 하므로 공개한다.
 // 읽기 전용 질의 모듈이며 `structure`·`rendering` 과 같은 가시성이다.
 pub mod field_query;

@@ -1,4 +1,4 @@
-import type { DocumentPosition, CursorRect, LineInfo, CellPathEntry, NavContextEntry, CellBbox } from '@/core/types';
+import type { DocumentPosition, CursorRect, LineInfo, CellPathEntry, NavContextEntry, CellBbox, ObjectRef } from '@/core/types';
 import type { WasmBridge } from '@/core/wasm-bridge';
 import { sameAddressedObject } from '@/core/object-address';
 // [#2756] 셀 좌표 축 헬퍼는 command.ts 와 단일 정의를 공유한다(축 유도 복제 금지).
@@ -14,21 +14,7 @@ export type HeaderFooterTextPosition = {
   charOffset: number;
 };
 
-type PictureSelectionRef = {
-  sec: number;
-  ppi: number;
-  ci: number;
-  type: 'image' | 'shape' | 'equation' | 'group' | 'line' | 'ole';
-  cellIdx?: number;
-  cellParaIdx?: number;
-  outerTableControlIdx?: number;
-  cellPath?: CellPathEntry[];
-  noteRef?: any;
-  memoRef?: any;
-  headerFooter?: { kind: 'header' | 'footer'; outerParaIdx: number; outerControlIdx: number };
-  /** [Task #2230] 그림 미지정 placeholder — 더블클릭 시 그림 지정 진입. */
-  missing?: boolean;
-};
+type PictureSelectionRef = Omit<ObjectRef, 'cellPath'> & { cellPath?: CellPathEntry[] };
 
 /** 커서 상태를 관리한다 */
 export class CursorState {
@@ -1652,11 +1638,12 @@ export class CursorState {
     noteRef?: any,
     missing?: boolean,
     memoRef?: any,
+    innerControlIdx?: number,
   ): void {
     this.exitTableObjectSelection();
     this._pictureObjectSelected = true;
     this.selectedPictureRef = {
-      sec, ppi, ci, type, cellIdx, cellParaIdx, outerTableControlIdx,
+      sec, ppi, ci, type, cellIdx, cellParaIdx, innerControlIdx, outerTableControlIdx,
       cellPath, noteRef, memoRef, headerFooter, missing,
     };
     this.selectedPictureRefs = [{ ...this.selectedPictureRef }];
@@ -1677,6 +1664,7 @@ export class CursorState {
       ref.noteRef,
       ref.missing,
       ref.memoRef,
+      ref.innerControlIdx,
     );
   }
 

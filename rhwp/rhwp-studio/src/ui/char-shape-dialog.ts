@@ -31,8 +31,23 @@ import type { CharProperties } from '@/core/types';
 import { REGISTERED_FONTS } from '@/core/font-loader';
 import { getLocalFonts } from '@/core/local-fonts';
 import { enableDialogDrag } from './dialog-drag';
+import {
+  DECORATION_LINE_SHAPES,
+  changedFiniteSelectValue,
+} from './decoration-line-shapes';
 
 const LANG_NAMES = ['대표', '한글', '영문', '한자', '일어', '외국어', '기호', '사용자'];
+
+function selectPreservingUnknown(select: HTMLSelectElement, value: number): void {
+  const stringValue = String(value);
+  if (![...select.options].some(option => option.value === stringValue)) {
+    const option = document.createElement('option');
+    option.value = stringValue;
+    option.textContent = `지원하지 않는 모양 (${stringValue})`;
+    select.appendChild(option);
+  }
+  select.value = stringValue;
+}
 
 /** 웹폰트 + 로컬 글꼴을 합친 목록 (정렬됨) */
 function buildFontList(): string[] {
@@ -500,13 +515,7 @@ export class CharShapeDialog {
     this.ulShapeSelect = document.createElement('select');
     this.ulShapeSelect.className = 'dialog-select';
     this.ulShapeSelect.style.width = '90px';
-    for (const [val, lbl] of [
-      ['0', '━━━━ 실선'], ['1', '- - - 긴점선'], ['2', '········ 점선'],
-      ['3', '━·━· 일점쇄선'], ['4', '━··━ 이점쇄선'],
-      ['5', '━━━ 긴파선'], ['6', '●●●● 원형점'],
-      ['7', '══ 이중선'], ['8', '━═ 가는+굵은'],
-      ['9', '═━ 굵은+가는'], ['10', '≡≡ 삼중선'],
-    ] as const) {
+    for (const [val, lbl] of DECORATION_LINE_SHAPES) {
       const o = document.createElement('option');
       o.value = val; o.textContent = lbl;
       this.ulShapeSelect.appendChild(o);
@@ -530,13 +539,7 @@ export class CharShapeDialog {
     this.strikeShapeSelect = document.createElement('select');
     this.strikeShapeSelect.className = 'dialog-select';
     this.strikeShapeSelect.style.width = '90px';
-    for (const [val, lbl] of [
-      ['0', '━━━━ 실선'], ['1', '- - - 긴점선'], ['2', '········ 점선'],
-      ['3', '━·━· 일점쇄선'], ['4', '━··━ 이점쇄선'],
-      ['5', '━━━ 긴파선'], ['6', '●●●● 원형점'],
-      ['7', '══ 이중선'], ['8', '━═ 가는+굵은'],
-      ['9', '═━ 굵은+가는'], ['10', '≡≡ 삼중선'],
-    ] as const) {
+    for (const [val, lbl] of DECORATION_LINE_SHAPES) {
       const o = document.createElement('option');
       o.value = val; o.textContent = lbl;
       this.strikeShapeSelect.appendChild(o);
@@ -869,9 +872,9 @@ export class CharShapeDialog {
     this.shadowXInput.value = String(p.shadowOffsetX || 10);
     this.shadowYInput.value = String(p.shadowOffsetY || 10);
     this.ulPosSelect.value = p.underlineType || 'None';
-    this.ulShapeSelect.value = String(p.underlineShape ?? 0);
+    selectPreservingUnknown(this.ulShapeSelect, p.underlineShape ?? 0);
     this.ulColorInput.value = p.underlineColor || '#000000';
-    this.strikeShapeSelect.value = String(p.strikeShape ?? 0);
+    selectPreservingUnknown(this.strikeShapeSelect, p.strikeShape ?? 0);
     this.strikeColorInput.value = p.strikeColor || '#000000';
     this.outlineTypeSelect.value = String(p.outlineType || 0);
     this.emphasisSelect.value = String(p.emphasisDot ?? 0);
@@ -977,16 +980,16 @@ export class CharShapeDialog {
     if (this.ulColorInput.value !== (p.underlineColor || '#000000')) mods.underlineColor = this.ulColorInput.value;
 
     // 확장 탭 — 밑줄 모양
-    const ulShape = parseInt(this.ulShapeSelect.value);
-    if (ulShape !== (p.underlineShape ?? 0)) mods.underlineShape = ulShape;
+    const ulShape = changedFiniteSelectValue(this.ulShapeSelect.value, p.underlineShape ?? 0);
+    if (ulShape !== undefined) mods.underlineShape = ulShape;
     // 밑줄 위치/모양/색이 변경되면 underline 자동 활성화
     if ((mods.underlineType !== undefined || mods.underlineShape !== undefined || mods.underlineColor !== undefined) && !p.underline) {
       mods.underline = true;
     }
 
     // 확장 탭 — 취소선
-    const strikeShape = parseInt(this.strikeShapeSelect.value);
-    if (strikeShape !== (p.strikeShape ?? 0)) mods.strikeShape = strikeShape;
+    const strikeShape = changedFiniteSelectValue(this.strikeShapeSelect.value, p.strikeShape ?? 0);
+    if (strikeShape !== undefined) mods.strikeShape = strikeShape;
     if (this.strikeColorInput.value !== (p.strikeColor || '#000000')) mods.strikeColor = this.strikeColorInput.value;
     // 취소선 모양/색이 변경되면 strikethrough 자동 활성화
     if ((mods.strikeShape !== undefined || mods.strikeColor !== undefined) && !p.strikethrough) {

@@ -139,7 +139,12 @@ export class LocalFontsModal {
     for (const item of this.report.fonts.slice(0, maxShow)) {
       const line = document.createElement('div');
       const substitute = item.substituteFont ? ` → ${item.substituteFont}` : '';
-      line.textContent = `${item.fontName}: ${STATUS_LABEL[item.status]}${substitute}`;
+      const loadedFace = item.loadedFace
+        && item.loadedFace !== item.fontName
+        && item.loadedFace !== item.substituteFont
+        ? ` (실제 ${item.loadedFace})`
+        : '';
+      line.textContent = `${item.fontName}: ${STATUS_LABEL[item.status]}${substitute}${loadedFace}`;
       detailList.appendChild(line);
     }
     if (this.report.fonts.length > maxShow) {

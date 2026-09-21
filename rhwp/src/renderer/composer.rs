@@ -14,8 +14,8 @@ use unicode_segmentation::UnicodeSegmentation;
 
 mod stale_metrics;
 mod stale_spacing;
-pub(crate) use stale_spacing::doubled_body_spacing_projection;
 pub(crate) use stale_metrics::repair_metric_stale_cell_lines;
+pub(crate) use stale_spacing::doubled_body_spacing_projection;
 
 /// 글자겹침(CharOverlap) 렌더링 정보
 #[derive(Debug, Clone, serde::Serialize)]
@@ -2975,11 +2975,7 @@ mod p1_text_reflow_tests {
                     let mut widths = vec![-1.0, 0.0, f64::NAN, f64::INFINITY];
                     for threshold in [1.05, 1.5, 1.8] {
                         let boundary = max_width / threshold;
-                        widths.extend([
-                            boundary * (1.0 - 1e-8),
-                            boundary,
-                            boundary * (1.0 + 1e-8),
-                        ]);
+                        widths.extend([boundary * (1.0 - 1e-8), boundary, boundary * (1.0 + 1e-8)]);
                     }
                     for width in widths {
                         let expected = !stored_line_segs_structurally_coherent(&para)
@@ -2988,7 +2984,9 @@ mod p1_text_reflow_tests {
                                     estimate_composed_line_width(line, &styles) > width * 1.5
                                 }))
                             || masked_stored_lines_stale(&composed, &para, width, &styles)
-                            || compact_tac_marker_stored_lines_stale(&composed, &para, width, &styles);
+                            || compact_tac_marker_stored_lines_stale(
+                                &composed, &para, width, &styles,
+                            );
                         assert_eq!(
                             stored_lines_stale_for_body(&composed, &para, width, &styles),
                             expected,

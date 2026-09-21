@@ -84,6 +84,8 @@ export interface ReferenceLibraryUi {
   takeReadyCloudDrafts(): Promise<Array<StagedReference & { bytes: Uint8Array }>>;
   discardDrafts(): void;
   stageDraftFiles(files: File[]): void;
+  stageInlineFiles(files: File[], signal?: AbortSignal): Promise<StagedReference[]>;
+  discardInlineFiles(files: StagedReference[]): Promise<void>;
   hasImageDrafts(): boolean;
   allDraftsAreImages(): boolean;
   openFile(fileId: string): Promise<void>;
@@ -109,6 +111,28 @@ function extensionOf(name: string): string {
 function isImageFile(file: Pick<File, 'name' | 'type'>): boolean {
   return (IMAGE_EXTENSIONS as readonly string[]).includes(extensionOf(file.name))
     || ['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(file.type.toLowerCase());
+}
+
+/** Stage one inline-selection batch atomically; partial and cancelled batches are discarded. */
+export async function stageInlineReferences(
+  bridge: Pick<SidebarBridge, 'stageReference' | 'discardStagedReference'>,
+  scopeId: string,
+  files: File[],
+  signal?: AbortSignal,
+): Promise<StagedReference[]> {
+  const discard = async (staged: StagedReference[]): Promise<void> => {
+    await Promise.all(staged.map((file) => bridge.discardStagedReference(file.scopeId, file.id).catch(() => undefined)));
+  };
+  if (signal?.aborted) throw new DOMException('선택 자료 전송이 취소되었습니다.', 'AbortError');
+  const settled = await Promise.allSettled(files.map((file) => bridge.stageReference(scopeId, file)));
+  const staged = settled.flatMap((entry) => entry.status === 'fulfilled' ? [entry.value] : []);
+  const failed = settled.find((entry): entry is PromiseRejectedResult => entry.status === 'rejected');
+  if (failed || signal?.aborted) {
+    await discard(staged);
+    if (signal?.aborted) throw new DOMException('선택 자료 전송이 취소되었습니다.', 'AbortError');
+    throw failed!.reason;
+  }
+  return staged;
 }
 
 export function createReferenceLibrary(options: ReferenceLibraryOptions): ReferenceLibraryUi {
@@ -620,6 +644,21 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     }
   }
 
+  /** 인라인 선택이 만든 이미지 파일을 현재 턴 전용으로 올린다. */
+  async function stageInlineFiles(files: File[], signal?: AbortSignal): Promise<StagedReference[]> {
+    const target = targetFor('chat', options.getContext());
+    if (!target || connectionState !== 'connected') {
+      throw new Error('현재 채팅에 선택 이미지를 첨부할 수 없습니다.');
+    }
+    const accepted = validateFiles(files);
+    if (accepted.length !== files.length) throw new Error('선택 이미지 파일을 첨부할 수 없습니다.');
+    return stageInlineReferences(bridge, target.scopeId, accepted, signal);
+  }
+
+  async function discardInlineFiles(files: StagedReference[]): Promise<void> {
+    await Promise.all(files.map((file) => bridge.discardStagedReference(file.scopeId, file.id).catch(() => undefined)));
+  }
+
   async function uploadFiles(files: File[], target: ScopeTarget): Promise<void> {
     const accepted = validateFiles(files);
     if (accepted.length === 0) return;
@@ -811,6 +850,8 @@ export function createReferenceLibrary(options: ReferenceLibraryOptions): Refere
     takeReadyCloudDrafts,
     discardDrafts,
     stageDraftFiles: stageFiles,
+    stageInlineFiles,
+    discardInlineFiles,
     hasImageDrafts: () => draftUploads.some((chip) => isImageFile(chip.file)),
     allDraftsAreImages: () => draftUploads.length > 0 && draftUploads.every((chip) => isImageFile(chip.file)),
     openFile,

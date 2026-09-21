@@ -23,6 +23,9 @@ use super::render_tree::{
     REAL_PICTURE_WATERMARK_CONTRAST, REAL_PICTURE_WATERMARK_FILL_OPACITY,
     REAL_PICTURE_WATERMARK_PAGE_OPACITY, REAL_PICTURE_WATERMARK_SATURATION,
 };
+use super::text_replay_policy::{
+    canvas_uses_native_run_shaping, web_canvas_supports_positioned_glyph_replay,
+};
 use super::{
     clamp_tab_leader_end_x, GradientFillInfo, LineStyle, PathCommand, PatternFillInfo, Renderer,
     ShapeStyle, StrokeDash, TextStyle,
@@ -92,7 +95,9 @@ use super::composer::{
 };
 use super::form_caption::display_form_caption;
 #[cfg(target_arch = "wasm32")]
-use super::layout::{compute_char_positions, is_halfwidth_cjk_quote, split_into_clusters};
+use super::layout::{
+    compute_char_positions, compute_glyph_positions, is_halfwidth_cjk_quote, split_into_clusters,
+};
 use crate::model::control::FormType;
 
 #[cfg(target_arch = "wasm32")]
@@ -458,6 +463,9 @@ pub struct WebCanvasRenderer {
     /// independent of raw tree child order.
     active_replay_plane: Option<PaintReplayPlane>,
     render_profile: RenderProfile,
+    /// The current TextRun has a shaped glyph sidecar. Canvas cannot address
+    /// its glyph ids, so replay the Unicode fallback as one browser-shaped run.
+    native_run_shaping: bool,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -480,6 +488,7 @@ impl WebCanvasRenderer {
             transparent_page_background: false,
             active_replay_plane: None,
             render_profile: RenderProfile::Screen,
+            native_run_shaping: false,
         })
     }
 
@@ -742,9 +751,10 @@ impl WebCanvasRenderer {
             PaintOp::RawSvg { bbox, raw } => {
                 self.render_raw_svg(bbox, raw);
             }
-            PaintOp::GlyphRun { .. }
-            | PaintOp::GlyphOutline { .. }
-            | PaintOp::CharOverlap { .. }
+            PaintOp::GlyphRun { .. } | PaintOp::GlyphOutline { .. } => {
+                debug_assert!(!web_canvas_supports_positioned_glyph_replay());
+            }
+            PaintOp::CharOverlap { .. }
             | PaintOp::TextControlMark { .. }
             | PaintOp::TabLeader { .. }
             | PaintOp::TextDecoration { .. } => {}
@@ -1201,6 +1211,7 @@ impl WebCanvasRenderer {
             0.0,
             &eq.color_str,
             eq.font_size,
+            &eq.font_name,
         );
         self.ctx.restore();
     }
@@ -1449,13 +1460,19 @@ impl WebCanvasRenderer {
                 }
             },
             LayerNodeKind::Leaf { ops } => {
-                for op in ops {
+                for (index, op) in ops.iter().enumerate() {
                     // Task #1197: 다층 레이어 필터 — RenderNode.layer 또는 이미지 wrap 기반
                     // replay plane 에 따라 skip.
                     if !self.should_render_op(op, active_layer) {
                         continue;
                     }
+                    self.native_run_shaping = matches!(op, PaintOp::TextRun { .. })
+                        && ops[index + 1..]
+                            .iter()
+                            .take_while(|candidate| !matches!(candidate, PaintOp::TextRun { .. }))
+                            .any(|candidate| matches!(candidate, PaintOp::GlyphRun { .. }));
                     self.render_paint_op(op);
+                    self.native_run_shaping = false;
                 }
             }
         }
@@ -1563,6 +1580,12 @@ impl WebCanvasRenderer {
 
     /// 선 대시 패턴 설정
     fn set_line_dash(&self, dash: &StrokeDash) {
+        self.ctx
+            .set_line_cap(if matches!(dash, StrokeDash::Circle) {
+                "round"
+            } else {
+                "butt"
+            });
         let pattern: js_sys::Array = match dash {
             StrokeDash::Solid => js_sys::Array::new(),
             StrokeDash::Dash => {
@@ -1571,10 +1594,22 @@ impl WebCanvasRenderer {
                 arr.push(&JsValue::from_f64(3.0));
                 arr
             }
+            StrokeDash::LongDash => {
+                let arr = js_sys::Array::new();
+                arr.push(&JsValue::from_f64(10.0));
+                arr.push(&JsValue::from_f64(3.0));
+                arr
+            }
             StrokeDash::Dot => {
                 let arr = js_sys::Array::new();
                 arr.push(&JsValue::from_f64(2.0));
                 arr.push(&JsValue::from_f64(2.0));
+                arr
+            }
+            StrokeDash::Circle => {
+                let arr = js_sys::Array::new();
+                arr.push(&JsValue::from_f64(0.1));
+                arr.push(&JsValue::from_f64(3.0));
                 arr
             }
             StrokeDash::DashDot => {
@@ -2312,6 +2347,7 @@ impl Renderer for WebCanvasRenderer {
 
         // 레이아웃 메트릭 기준으로 글자 위치 계산 (줄바꿈 결정과 동일한 메트릭 사용)
         let char_positions = compute_char_positions(text, style);
+        let glyph_positions = compute_glyph_positions(text, style);
 
         // 형광펜 배경 (CharShape.shade_color 기반 — 편집기에서 적용한 형광펜)
         let shade_rgb = style.shade_color & 0x00FFFFFF;
@@ -2328,56 +2364,11 @@ impl Renderer for WebCanvasRenderer {
         let has_effect =
             style.outline_type > 0 || style.shadow_type > 0 || style.emboss || style.engrave;
 
-        // Task #352: 3+ 연속 '-' 시퀀스를 단일 가로선으로 통합 (svg.rs 와 동일).
-        // underline 이 있으면 dash leader 라인 생략 (이중선 방지).
-        let suppress_dash_leader_line = !matches!(style.underline, UnderlineType::None);
-        let dash_run_groups: Vec<(usize, usize)> = {
-            let mut groups = Vec::new();
-            let mut run_start: Option<usize> = None;
-            for (idx, (_, cs)) in clusters.iter().enumerate() {
-                if cs == "-" {
-                    if run_start.is_none() {
-                        run_start = Some(idx);
-                    }
-                } else if let Some(s) = run_start.take() {
-                    if idx - s >= 3 {
-                        groups.push((s, idx));
-                    }
-                }
-            }
-            if let Some(s) = run_start {
-                if clusters.len() - s >= 3 {
-                    groups.push((s, clusters.len()));
-                }
-            }
-            groups
-        };
-        let dash_line_y_offset = -font_size * 0.32;
-        let dash_line_stroke_w = (font_size * 0.07).max(0.5f64);
-        let cluster_in_dash_run = |cluster_idx: usize| -> Option<(f64, f64)> {
-            for &(s, e) in &dash_run_groups {
-                if cluster_idx == s {
-                    let start_char_idx = clusters[s].0;
-                    let last = &clusters[e - 1];
-                    let end_char_idx = last.0 + last.1.chars().count();
-                    let x1 = char_positions.get(start_char_idx).copied().unwrap_or(0.0);
-                    let x2 = char_positions
-                        .get(end_char_idx)
-                        .copied()
-                        .unwrap_or_else(|| *char_positions.last().unwrap_or(&0.0));
-                    return Some((x1, x2));
-                }
-                if cluster_idx > s && cluster_idx < e {
-                    return Some((f64::NAN, f64::NAN));
-                }
-            }
-            None
-        };
-
         if has_effect {
             self.draw_text_with_effects(
                 &clusters,
                 &char_positions,
+                &glyph_positions,
                 x,
                 y,
                 style,
@@ -2390,22 +2381,6 @@ impl Renderer for WebCanvasRenderer {
         } else {
             // 기본 렌더링 (효과 없음)
             self.ctx.set_fill_style_str(&color_to_css(style.color));
-            // dash leader 라인 먼저 그리기 (underline 이 없을 때만)
-            if !suppress_dash_leader_line {
-                for &(s, _) in &dash_run_groups {
-                    if let Some((x1_rel, x2_rel)) = cluster_in_dash_run(s) {
-                        if x1_rel.is_finite() {
-                            let line_y = y + dash_line_y_offset;
-                            self.ctx.set_stroke_style_str(&color_to_css(style.color));
-                            self.ctx.set_line_width(dash_line_stroke_w);
-                            self.ctx.begin_path();
-                            self.ctx.move_to(x + x1_rel, line_y);
-                            self.ctx.line_to(x + x2_rel, line_y);
-                            self.ctx.stroke();
-                        }
-                    }
-                }
-            }
             // 합성 굵기: 웹폰트는 regular 웨이트만 등록되고 Canvas2D 는 CSS 와 달리
             // faux bold 를 합성하지 않으므로, ctx.font 의 "bold" 만으로는 굵게가
             // 그려지지 않는다. 글리프 fill 위에 동일 색 얇은 stroke 를 덧그려 근사한다.
@@ -2415,104 +2390,122 @@ impl Renderer for WebCanvasRenderer {
                 self.ctx.set_line_width((font_size * 0.04).clamp(0.25, 1.4));
                 self.ctx.set_line_join("round");
             }
-            for (cluster_idx, (char_idx, cluster_str)) in clusters.iter().enumerate() {
-                if cluster_str == " " || cluster_str == "\t" || cluster_str == "\u{2007}" {
-                    continue;
+            if canvas_uses_native_run_shaping(self.native_run_shaping, text, style) {
+                self.ctx.set_font(&font);
+                let target_advance = *glyph_positions.last().unwrap_or(&0.0);
+                let fit_scale = self
+                    .ctx
+                    .measure_text(text)
+                    .ok()
+                    .and_then(|metrics| {
+                        canvas_cluster_fit_scale(target_advance, metrics.width(), 0.0, true)
+                    })
+                    .unwrap_or(1.0);
+                self.ctx.save();
+                self.ctx.translate(x, y).unwrap_or(());
+                self.ctx.scale(fit_scale, 1.0).unwrap_or(());
+                let _ = self.ctx.fill_text(text, 0.0, 0.0);
+                if synthetic_bold {
+                    let _ = self.ctx.stroke_text(text, 0.0, 0.0);
                 }
-                if super::contains_old_hangul_jamo(cluster_str) {
-                    self.ctx.set_font(&old_hangul_font);
-                } else {
-                    self.ctx.set_font(&font);
-                }
-                // dash leader 시퀀스: 글리프 스킵 (라인이 위에서 이미 그려짐)
-                if cluster_in_dash_run(cluster_idx).is_some() {
-                    continue;
-                }
-                // XML/HTML 무효 제어문자 건너뜀 (SVG의 escape_xml과 동일)
-                if cluster_str
-                    .starts_with(|c: char| c < '\u{0020}' && !matches!(c, '\t' | '\n' | '\r'))
-                {
-                    continue;
-                }
-                let char_x = x + char_positions[*char_idx];
-
-                let ch = cluster_str.chars().next().unwrap_or(' ');
-
-                // 통화 기호 등 글리프 미포함 문자: 폴백 폰트로 임시 전환
-                let needs_font_fallback = matches!(
-                    ch,
-                    '\u{20A9}' | '\u{20AC}' | '\u{00A3}' | '\u{00A5}' // ₩€£¥
-                );
-                if needs_font_fallback {
-                    self.ctx.save();
-                    let fallback_font = format!(
-                        "{}{}{:.3}px 'Malgun Gothic','맑은 고딕',sans-serif",
-                        if style.italic { "italic " } else { "" },
-                        if style.bold { "bold " } else { "" },
-                        font_size
-                    );
-                    self.ctx.set_font(&fallback_font);
-                    let _ = self.ctx.fill_text(cluster_str, char_x, y);
-                    if synthetic_bold {
-                        let _ = self.ctx.stroke_text(cluster_str, char_x, y);
+                self.ctx.restore();
+            } else {
+                for (char_idx, cluster_str) in &clusters {
+                    if cluster_str == " " || cluster_str == "\t" || cluster_str == "\u{2007}" {
+                        continue;
                     }
-                    self.ctx.restore();
-                    self.ctx.set_font(&font); // 원래 폰트 복원
-                    continue;
-                }
-
-                // 반각 강제 구두점: 폰트 글리프가 전각이지만 반각 공간에 배치
-                let needs_halfwidth_scale = (matches!(ch, '\u{2018}'..='\u{2027}' | '\u{00B7}')
-                    || is_halfwidth_cjk_quote(ch))
-                    && !has_ratio;
-
-                if needs_halfwidth_scale {
-                    self.ctx.save();
-                    self.ctx.translate(char_x, y).unwrap_or(());
-                    self.ctx.scale(0.5, 1.0).unwrap_or(());
-                    let _ = self.ctx.fill_text(cluster_str, 0.0, 0.0);
-                    if synthetic_bold {
-                        let _ = self.ctx.stroke_text(cluster_str, 0.0, 0.0);
-                    }
-                    self.ctx.restore();
-                } else {
-                    let cluster_advance = {
-                        let end = *char_idx + cluster_str.chars().count();
-                        if end < char_positions.len() {
-                            char_positions[end] - char_positions[*char_idx]
-                        } else {
-                            0.0
-                        }
-                    };
-                    let pin_ascii_advance =
-                        cluster_str.chars().any(|ch| ch.is_ascii_alphanumeric());
-                    let fit_scale = if cluster_advance > 0.0 {
-                        self.ctx
-                            .measure_text(cluster_str)
-                            .ok()
-                            .map(|metrics| metrics.width())
-                            .and_then(|actual_w| {
-                                canvas_cluster_fit_scale(
-                                    cluster_advance,
-                                    actual_w * ratio,
-                                    style.letter_spacing,
-                                    pin_ascii_advance,
-                                )
-                            })
+                    if super::contains_old_hangul_jamo(cluster_str) {
+                        self.ctx.set_font(&old_hangul_font);
                     } else {
-                        None
-                    };
-
-                    self.ctx.save();
-                    self.ctx.translate(char_x, y).unwrap_or(());
-                    self.ctx
-                        .scale(ratio * fit_scale.unwrap_or(1.0), 1.0)
-                        .unwrap_or(());
-                    let _ = self.ctx.fill_text(cluster_str, 0.0, 0.0);
-                    if synthetic_bold {
-                        let _ = self.ctx.stroke_text(cluster_str, 0.0, 0.0);
+                        self.ctx.set_font(&font);
                     }
-                    self.ctx.restore();
+                    // XML/HTML 무효 제어문자 건너뜀 (SVG의 escape_xml과 동일)
+                    if cluster_str
+                        .starts_with(|c: char| c < '\u{0020}' && !matches!(c, '\t' | '\n' | '\r'))
+                    {
+                        continue;
+                    }
+                    let char_x = x + char_positions[*char_idx];
+
+                    let ch = cluster_str.chars().next().unwrap_or(' ');
+
+                    // 통화 기호 등 글리프 미포함 문자: 폴백 폰트로 임시 전환
+                    let needs_font_fallback = matches!(
+                        ch,
+                        '\u{20A9}' | '\u{20AC}' | '\u{00A3}' | '\u{00A5}' // ₩€£¥
+                    );
+                    if needs_font_fallback {
+                        self.ctx.save();
+                        let fallback_font = format!(
+                            "{}{}{:.3}px 'Malgun Gothic','맑은 고딕',sans-serif",
+                            if style.italic { "italic " } else { "" },
+                            if style.bold { "bold " } else { "" },
+                            font_size
+                        );
+                        self.ctx.set_font(&fallback_font);
+                        let _ = self.ctx.fill_text(cluster_str, char_x, y);
+                        if synthetic_bold {
+                            let _ = self.ctx.stroke_text(cluster_str, char_x, y);
+                        }
+                        self.ctx.restore();
+                        self.ctx.set_font(&font); // 원래 폰트 복원
+                        continue;
+                    }
+
+                    // 반각 강제 구두점: 폰트 글리프가 전각이지만 반각 공간에 배치
+                    let needs_halfwidth_scale =
+                        (matches!(ch, '\u{2018}'..='\u{2027}' | '\u{00B7}')
+                            || is_halfwidth_cjk_quote(ch))
+                            && !has_ratio;
+
+                    if needs_halfwidth_scale {
+                        self.ctx.save();
+                        self.ctx.translate(char_x, y).unwrap_or(());
+                        self.ctx.scale(0.5, 1.0).unwrap_or(());
+                        let _ = self.ctx.fill_text(cluster_str, 0.0, 0.0);
+                        if synthetic_bold {
+                            let _ = self.ctx.stroke_text(cluster_str, 0.0, 0.0);
+                        }
+                        self.ctx.restore();
+                    } else {
+                        let glyph_advance = {
+                            let end = *char_idx + cluster_str.chars().count();
+                            if end < glyph_positions.len() {
+                                glyph_positions[end] - glyph_positions[*char_idx]
+                            } else {
+                                0.0
+                            }
+                        };
+                        let pin_ascii_advance =
+                            cluster_str.chars().any(|ch| ch.is_ascii_alphanumeric());
+                        let fit_scale = if glyph_advance > 0.0 {
+                            self.ctx
+                                .measure_text(cluster_str)
+                                .ok()
+                                .map(|metrics| metrics.width())
+                                .and_then(|actual_w| {
+                                    canvas_cluster_fit_scale(
+                                        glyph_advance,
+                                        actual_w * ratio,
+                                        style.letter_spacing,
+                                        pin_ascii_advance,
+                                    )
+                                })
+                        } else {
+                            None
+                        };
+
+                        self.ctx.save();
+                        self.ctx.translate(char_x, y).unwrap_or(());
+                        self.ctx
+                            .scale(ratio * fit_scale.unwrap_or(1.0), 1.0)
+                            .unwrap_or(());
+                        let _ = self.ctx.fill_text(cluster_str, 0.0, 0.0);
+                        if synthetic_bold {
+                            let _ = self.ctx.stroke_text(cluster_str, 0.0, 0.0);
+                        }
+                        self.ctx.restore();
+                    }
                 }
             }
             if synthetic_bold {
@@ -2941,6 +2934,7 @@ impl WebCanvasRenderer {
         &self,
         clusters: &[(usize, String)],
         char_positions: &[f64],
+        glyph_positions: &[f64],
         x: f64,
         y: f64,
         style: &TextStyle,
@@ -2981,10 +2975,30 @@ impl WebCanvasRenderer {
                 let char_x = x + char_positions[*char_idx] + dx;
                 let char_y = y + dy;
 
-                if has_ratio {
+                let end = *char_idx + cs.chars().count();
+                let glyph_advance = glyph_positions
+                    .get(end)
+                    .zip(glyph_positions.get(*char_idx))
+                    .map(|(end, start)| end - start)
+                    .unwrap_or(0.0);
+                let pin_ascii_advance = cs.chars().any(|ch| ch.is_ascii_alphanumeric());
+                let fit_scale = ctx
+                    .measure_text(cs)
+                    .ok()
+                    .and_then(|metrics| {
+                        canvas_cluster_fit_scale(
+                            glyph_advance,
+                            metrics.width() * ratio,
+                            style.letter_spacing,
+                            pin_ascii_advance,
+                        )
+                    })
+                    .unwrap_or(1.0);
+
+                if has_ratio || (fit_scale - 1.0).abs() > 0.001 {
                     ctx.save();
                     ctx.translate(char_x, char_y).unwrap_or(());
-                    ctx.scale(ratio, 1.0).unwrap_or(());
+                    ctx.scale(ratio * fit_scale, 1.0).unwrap_or(());
                     let _ = ctx.fill_text(cs, 0.0, 0.0);
                     if stroke {
                         let _ = ctx.stroke_text(cs, 0.0, 0.0);

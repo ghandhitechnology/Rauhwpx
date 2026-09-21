@@ -394,8 +394,12 @@ fn line_equation_metrics_px(
             continue;
         }
 
-        let metrics =
-            crate::renderer::equation::intrinsic_metrics_px(&eq.script, eq.font_size, dpi);
+        let metrics = crate::renderer::equation::intrinsic_metrics_px_with_font(
+            &eq.script,
+            eq.font_size,
+            dpi,
+            &eq.font_name,
+        );
         let stored_height = hwpunit_to_px(eq.common.height as i32, dpi);
         let extra = (stored_height - metrics.height).max(0.0);
         let top_leading = extra / 2.0;
@@ -1505,7 +1509,7 @@ pub(crate) fn right_tab_block_width(
 }
 
 /// [Task #2067] 정렬(양쪽/배분/나눔)·오버플로우·셀 underflow 에 따른 여분 간격 계산.
-/// 반환 = (extra_word_sp, extra_char_sp, extra_dash_sp). Task #352 dash leader 분배 포함.
+/// 반환 = (extra_word_sp, extra_char_sp, extra_dash_sp).
 #[allow(clippy::too_many_arguments)]
 fn compute_line_extra_spacing(
     comp_line: &ComposedLine,
@@ -1546,29 +1550,6 @@ fn compute_line_extra_spacing(
         0.0
     };
 
-    // Task #352: 라인 내 dash leader (3+ 연속 '-') 글자 수 카운트.
-    // visible_count 까지의 chars 에서만 카운트 (후행 공백 제외).
-    let count_dash_leaders = |chars: &[char]| -> usize {
-        let mut count = 0;
-        let n = chars.len();
-        let mut i = 0;
-        while i < n {
-            if chars[i] == '-' {
-                let mut j = i;
-                while j < n && chars[j] == '-' {
-                    j += 1;
-                }
-                let run_len = j - i;
-                if run_len >= 3 {
-                    count += run_len;
-                }
-                i = j;
-            } else {
-                i += 1;
-            }
-        }
-        count
-    };
     if needs_justify {
         // 양쪽 정렬: 후행 공백 제외한 내부 공백에 분배
         let all_chars: Vec<char> = comp_line.runs.iter().flat_map(|r| r.text.chars()).collect();
@@ -1578,7 +1559,6 @@ fn compute_line_extra_spacing(
             .iter()
             .filter(|c| **c == ' ')
             .count();
-        let leader_dashes = count_dash_leaders(&all_chars[..visible_count]);
         // A selection can leave trailing spaces in several font/style runs.
         // Measure each in its own style, including for a single visible word.
         let measure_trailing_spaces = |extra_word: f64, extra_char: f64| -> f64 {
@@ -1607,12 +1587,7 @@ fn compute_line_extra_spacing(
             };
             let effective_used = total_text_width - trailing_width + split_ink_overhang;
             let slack = available_width - effective_used;
-            if leader_dashes > 0 && slack > 0.0 {
-                // Task #352: 라인에 dash leader 가 있고 슬랙이 양수면
-                // dash 가 흡수 (PDF elastic leader 동작 모방). 공백·일반
-                // 글자 자연 폭 유지.
-                (0.0, 0.0, slack / leader_dashes as f64)
-            } else if suppress_cell_overflow_spacing && slack < 0.0 {
+            if suppress_cell_overflow_spacing && slack < 0.0 {
                 // 셀 내부 폭이 글자 자연 폭보다 작아도 한컴처럼 글자를 압축하지 않는다.
                 // 줄바꿈은 LINE_SEG/리플로우가 결정하고, 그린 글자는 셀 경계에서만 클리핑한다.
                 (0.0, 0.0, 0.0)
@@ -1674,9 +1649,7 @@ fn compute_line_extra_spacing(
             let visible_char_count = total_char_count - trailing_spaces;
             let visible_width = total_text_width - measure_trailing_spaces(0.0, 0.0);
             let slack = available_width - visible_width;
-            if leader_dashes > 0 && slack > 0.0 {
-                (0.0, 0.0, slack / leader_dashes as f64)
-            } else if suppress_cell_overflow_spacing && slack < 0.0 {
+            if suppress_cell_overflow_spacing && slack < 0.0 {
                 // 셀의 좁은 내부 폭은 줄바꿈 기준일 뿐, 숫자/문자를 수평 압축하지 않는다.
                 (0.0, 0.0, 0.0)
             } else {
@@ -3099,15 +3072,20 @@ impl LayoutEngine {
                     let tokens = crate::renderer::equation::tokenizer::tokenize(&eq.script);
                     let ast = crate::renderer::equation::parser::EqParser::new(tokens).parse();
                     let font_size_px = hwpunit_to_px(eq.font_size as i32, self.dpi);
-                    let layout_box =
-                        crate::renderer::equation::layout::EqLayout::new(font_size_px).layout(&ast);
+                    let layout_box = crate::renderer::equation::layout::EqLayout::with_font(
+                        font_size_px,
+                        &eq.font_name,
+                    )
+                    .layout(&ast);
                     let color_str =
                         crate::renderer::equation::svg_render::eq_color_to_svg(eq.color);
-                    let svg_content = crate::renderer::equation::svg_render::render_equation_svg(
-                        &layout_box,
-                        &color_str,
-                        font_size_px,
-                    );
+                    let svg_content =
+                        crate::renderer::equation::svg_render::render_equation_svg_with_font(
+                            &layout_box,
+                            &color_str,
+                            font_size_px,
+                            Some(&eq.font_name),
+                        );
                     let hwp_eq_h = hwpunit_to_px(eq.common.height as i32, self.dpi);
                     let eq_h = hwp_eq_h.max(layout_box.height);
                     let tac_row = tac_row_for(tac_k).min(row_inline_x.len() - 1);
@@ -3137,6 +3115,7 @@ impl LayoutEngine {
                             color_str,
                             color: eq.color,
                             font_size: font_size_px,
+                            font_name: eq.font_name.clone(),
                             section_index: note_ref
                                 .as_ref()
                                 .map(|r| r.section_index)
@@ -3151,6 +3130,7 @@ impl LayoutEngine {
                             } else {
                                 Some(tac_ci)
                             },
+                            inner_control_index: cell_ctx.as_ref().map(|_| tac_ci),
                             cell_index: eq_cell_idx,
                             cell_para_index: eq_cell_para_idx,
                             note_ref,
@@ -5835,15 +5815,19 @@ impl LayoutEngine {
                                 crate::renderer::equation::parser::EqParser::new(tokens).parse();
                             let font_size_px = hwpunit_to_px(eq.font_size as i32, self.dpi);
                             let layout_box =
-                                crate::renderer::equation::layout::EqLayout::new(font_size_px)
-                                    .layout(&ast);
+                                crate::renderer::equation::layout::EqLayout::with_font(
+                                    font_size_px,
+                                    &eq.font_name,
+                                )
+                                .layout(&ast);
                             let color_str =
                                 crate::renderer::equation::svg_render::eq_color_to_svg(eq.color);
                             let svg_content =
-                                crate::renderer::equation::svg_render::render_equation_svg(
+                                crate::renderer::equation::svg_render::render_equation_svg_with_font(
                                     &layout_box,
                                     &color_str,
                                     font_size_px,
+                                    Some(&eq.font_name),
                                 );
                             // HWP 저장 높이를 우선 사용 (한컴 조판 결과 기준)
                             let hwp_eq_h = hwpunit_to_px(eq.common.height as i32, self.dpi);
@@ -5874,6 +5858,7 @@ impl LayoutEngine {
                                         color_str,
                                         color: eq.color,
                                         font_size: font_size_px,
+                                        font_name: eq.font_name.clone(),
                                         section_index: note_ref
                                             .as_ref()
                                             .map(|r| r.section_index)
@@ -5888,6 +5873,7 @@ impl LayoutEngine {
                                         } else {
                                             Some(tac_ci)
                                         },
+                                        inner_control_index: cell_ctx.as_ref().map(|_| tac_ci),
                                         cell_index: eq_cell_idx,
                                         cell_para_index: eq_cell_para_idx,
                                         note_ref,

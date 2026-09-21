@@ -411,6 +411,17 @@ export const ENGINE_EDIT_CAPABILITIES = [
     "signature": "deleteEquationControlInCell(sec: number, parentPara: number, controlIdx: number, cellIdx: number, cellParaIdx: number, eqControlIdx: number)"
   },
   {
+    "method": "deleteEquationControlInCellByPath",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "parentPara",
+      "cellPath",
+      "eqControlIdx"
+    ],
+    "signature": "deleteEquationControlInCellByPath(sec: number, parentPara: number, cellPath: CellPathLike, eqControlIdx: number)"
+  },
+  {
     "method": "deleteFootnote",
     "kind": "document",
     "parameters": [
@@ -533,6 +544,17 @@ export const ENGINE_EDIT_CAPABILITIES = [
     "signature": "deleteTableColumn(sec: number, parentPara: number, controlIdx: number, colIdx: number)"
   },
   {
+    "method": "deleteTableColumnByPath",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "parentPara",
+      "pathJson",
+      "colIdx"
+    ],
+    "signature": "deleteTableColumnByPath(sec: number, parentPara: number, pathJson: string, colIdx: number)"
+  },
+  {
     "method": "deleteTableControl",
     "kind": "document",
     "parameters": [
@@ -552,6 +574,17 @@ export const ENGINE_EDIT_CAPABILITIES = [
       "rowIdx"
     ],
     "signature": "deleteTableRow(sec: number, parentPara: number, controlIdx: number, rowIdx: number)"
+  },
+  {
+    "method": "deleteTableRowByPath",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "parentPara",
+      "pathJson",
+      "rowIdx"
+    ],
+    "signature": "deleteTableRowByPath(sec: number, parentPara: number, pathJson: string, rowIdx: number)"
   },
   {
     "method": "deleteText",
@@ -764,6 +797,20 @@ export const ENGINE_EDIT_CAPABILITIES = [
     "signature": "insertEquationInCell(sec: number, parentPara: number, controlIdx: number, cellIdx: number, cellParaIdx: number, charOffset: number, script: string, fontSizeHwpunit: number, color: number)"
   },
   {
+    "method": "insertEquationInCellByPath",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "parentPara",
+      "cellPath",
+      "charOffset",
+      "script",
+      "fontSizeHwpunit",
+      "color"
+    ],
+    "signature": "insertEquationInCellByPath(sec: number, parentPara: number, cellPath: CellPathLike, charOffset: number, script: string, fontSizeHwpunit: number, color: number)"
+  },
+  {
     "method": "insertFieldInHf",
     "kind": "document",
     "parameters": [
@@ -785,6 +832,17 @@ export const ENGINE_EDIT_CAPABILITIES = [
       "charOffset"
     ],
     "signature": "insertFootnote(sec: number, para: number, charOffset: number)"
+  },
+  {
+    "method": "insertHyperlink",
+    "kind": "document",
+    "parameters": [
+      "target",
+      "start",
+      "end",
+      "uri"
+    ],
+    "signature": "insertHyperlink(target: HyperlinkTarget, start: number, end: number, uri: string)"
   },
   {
     "method": "insertNewNumber",
@@ -850,6 +908,18 @@ export const ENGINE_EDIT_CAPABILITIES = [
     "signature": "insertTableColumn(sec: number, parentPara: number, controlIdx: number, colIdx: number, right: boolean)"
   },
   {
+    "method": "insertTableColumnByPath",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "parentPara",
+      "pathJson",
+      "colIdx",
+      "right"
+    ],
+    "signature": "insertTableColumnByPath(sec: number, parentPara: number, pathJson: string, colIdx: number, right: boolean)"
+  },
+  {
     "method": "insertTableRow",
     "kind": "document",
     "parameters": [
@@ -860,6 +930,18 @@ export const ENGINE_EDIT_CAPABILITIES = [
       "below"
     ],
     "signature": "insertTableRow(sec: number, parentPara: number, controlIdx: number, rowIdx: number, below: boolean)"
+  },
+  {
+    "method": "insertTableRowByPath",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "parentPara",
+      "pathJson",
+      "rowIdx",
+      "below"
+    ],
+    "signature": "insertTableRowByPath(sec: number, parentPara: number, pathJson: string, rowIdx: number, below: boolean)"
   },
   {
     "method": "insertText",
@@ -1015,6 +1097,20 @@ export const ENGINE_EDIT_CAPABILITIES = [
       "endCol"
     ],
     "signature": "mergeTableCells(sec: number, parentPara: number, controlIdx: number, startRow: number, startCol: number, endRow: number, endCol: number)"
+  },
+  {
+    "method": "mergeTableCellsByPath",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "parentPara",
+      "pathJson",
+      "startRow",
+      "startCol",
+      "endRow",
+      "endCol"
+    ],
+    "signature": "mergeTableCellsByPath(sec: number, parentPara: number, pathJson: string, startRow: number, startCol: number, endRow: number, endCol: number)"
   },
   {
     "method": "moveLineEndpoint",
@@ -1185,6 +1281,16 @@ export const ENGINE_EDIT_CAPABILITIES = [
     "signature": "removeFieldAt(pos: DocumentPosition)"
   },
   {
+    "method": "removeHyperlink",
+    "kind": "document",
+    "parameters": [
+      "target",
+      "fieldId",
+      "restoreFormatting"
+    ],
+    "signature": "removeHyperlink(target: HyperlinkTarget, fieldId: number, restoreFormatting = false)"
+  },
+  {
     "method": "renameBookmark",
     "kind": "document",
     "parameters": [
@@ -1216,6 +1322,16 @@ export const ENGINE_EDIT_CAPABILITIES = [
       "text"
     ],
     "signature": "replaceBodyTextLocal(sec: number, para: number, charOffset: number, deleteCount: number, text: string,)"
+  },
+  {
+    "method": "replaceHyperlinkText",
+    "kind": "document",
+    "parameters": [
+      "target",
+      "fieldId",
+      "text"
+    ],
+    "signature": "replaceHyperlinkText(target: HyperlinkTarget, fieldId: number, text: string)"
   },
   {
     "method": "replaceOne",
@@ -1477,9 +1593,22 @@ export const ENGINE_EDIT_CAPABILITIES = [
       "ci",
       "cellIdx",
       "cellParaIdx",
+      "props",
+      "innerControlIdx"
+    ],
+    "signature": "setEquationProperties(sec: number, para: number, ci: number, cellIdx: number | undefined, cellParaIdx: number | undefined, props: Record<string, unknown>, innerControlIdx?: number)"
+  },
+  {
+    "method": "setEquationPropertiesByPath",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "parentPara",
+      "cellPath",
+      "innerControlIdx",
       "props"
     ],
-    "signature": "setEquationProperties(sec: number, para: number, ci: number, cellIdx: number | undefined, cellParaIdx: number | undefined, props: Record<string, unknown>)"
+    "signature": "setEquationPropertiesByPath(sec: number, parentPara: number, cellPath: CellPathLike, innerControlIdx: number, props: Record<string, unknown>)"
   },
   {
     "method": "setFieldValue",
@@ -1796,6 +1925,18 @@ export const ENGINE_EDIT_CAPABILITIES = [
     "signature": "splitTableCell(sec: number, parentPara: number, controlIdx: number, row: number, col: number)"
   },
   {
+    "method": "splitTableCellByPath",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "parentPara",
+      "pathJson",
+      "row",
+      "col"
+    ],
+    "signature": "splitTableCellByPath(sec: number, parentPara: number, pathJson: string, row: number, col: number)"
+  },
+  {
     "method": "splitTableCellInto",
     "kind": "document",
     "parameters": [
@@ -1810,6 +1951,22 @@ export const ENGINE_EDIT_CAPABILITIES = [
       "mergeFirst"
     ],
     "signature": "splitTableCellInto(sec: number, parentPara: number, controlIdx: number, row: number, col: number, nRows: number, mCols: number, equalRowHeight: boolean, mergeFirst: boolean,)"
+  },
+  {
+    "method": "splitTableCellIntoByPath",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "parentPara",
+      "pathJson",
+      "row",
+      "col",
+      "nRows",
+      "mCols",
+      "equalRowHeight",
+      "mergeFirst"
+    ],
+    "signature": "splitTableCellIntoByPath(sec: number, parentPara: number, pathJson: string, row: number, col: number, nRows: number, mCols: number, equalRowHeight: boolean, mergeFirst: boolean,)"
   },
   {
     "method": "splitTableCellsInRange",
@@ -1827,6 +1984,23 @@ export const ENGINE_EDIT_CAPABILITIES = [
       "equalRowHeight"
     ],
     "signature": "splitTableCellsInRange(sec: number, parentPara: number, controlIdx: number, startRow: number, startCol: number, endRow: number, endCol: number, nRows: number, mCols: number, equalRowHeight: boolean,)"
+  },
+  {
+    "method": "splitTableCellsInRangeByPath",
+    "kind": "document",
+    "parameters": [
+      "sec",
+      "parentPara",
+      "pathJson",
+      "startRow",
+      "startCol",
+      "endRow",
+      "endCol",
+      "nRows",
+      "mCols",
+      "equalRowHeight"
+    ],
+    "signature": "splitTableCellsInRangeByPath(sec: number, parentPara: number, pathJson: string, startRow: number, startCol: number, endRow: number, endCol: number, nRows: number, mCols: number, equalRowHeight: boolean,)"
   },
   {
     "method": "toggleHideHeaderFooter",
@@ -1876,6 +2050,16 @@ export const ENGINE_EDIT_CAPABILITIES = [
       "sec"
     ],
     "signature": "updateConnectorsInSection(sec: number)"
+  },
+  {
+    "method": "updateHyperlink",
+    "kind": "document",
+    "parameters": [
+      "target",
+      "fieldId",
+      "uri"
+    ],
+    "signature": "updateHyperlink(target: HyperlinkTarget, fieldId: number, uri: string)"
   },
   {
     "method": "updateStyle",
