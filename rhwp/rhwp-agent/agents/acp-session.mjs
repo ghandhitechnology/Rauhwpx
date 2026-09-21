@@ -245,8 +245,8 @@ export function createPersistentAcpSession({
         getUnrestricted() || isRhwpAcpPermissionRequest(ctx.params),
       );
     });
-    // Register this as a custom parser as well as a typed method. Grok has shipped private
-    // sessionUpdate variants; a pass-through parser keeps those extensions observable.
+    // Register this as a custom parser as well as a typed method so provider
+    // sessionUpdate extensions remain observable.
     generationApp.onNotification(String(methods.client.session.update), PASSTHROUGH, (ctx) => {
       if (!promptIsCurrent()) return;
       const notification = ctx.params;

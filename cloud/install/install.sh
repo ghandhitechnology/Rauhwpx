@@ -160,11 +160,12 @@ if [[ "$TRANSPORT" == tailscale ]]; then
 fi
 upsert_env RAUHWpx_PROVIDER_CLI_DIR /opt/rauhwpx-cloud/provider-cli
 upsert_env RAUHWpx_WORKER_IMAGE "ghcr.io/ghandhitechnology/rauhwpx-cloud-worker:${CHANNEL}"
-upsert_env PATH "/opt/rauhwpx-cloud/provider-cli/current/node_modules/.bin:/var/lib/rauhwpx-cloud/provider-auth/cursor/.local/bin:/opt/rauhwpx-node/bin:/usr/local/bin:/usr/bin:/bin"
+upsert_env PATH "/opt/rauhwpx-cloud/provider-cli/current/node_modules/.bin:/opt/rauhwpx-node/bin:/usr/local/bin:/usr/bin:/bin"
 
 systemctl daemon-reload
 /usr/local/bin/rauhwpx-cloud provider install claude
-/usr/local/bin/rauhwpx-cloud provider install cursor
+/usr/local/bin/rauhwpx-cloud provider install codex
+/usr/local/bin/rauhwpx-cloud provider install pi
 
 (
   cd /var/lib/rauhwpx-cloud

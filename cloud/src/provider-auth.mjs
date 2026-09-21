@@ -15,14 +15,6 @@ export const PROVIDER_AUTH = Object.freeze({
     secretName: 'OPENROUTER_API_KEY',
     files: Object.freeze([]),
   }),
-  grok: Object.freeze({
-    secretName: 'XAI_API_KEY',
-    files: Object.freeze(['.grok/auth.json', 'auth.json']),
-  }),
-  cursor: Object.freeze({
-    secretName: 'CURSOR_API_KEY',
-    files: Object.freeze(['.cursor/cli-config.json']),
-  }),
 });
 
 function object(value, label) {

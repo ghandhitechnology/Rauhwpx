@@ -30,21 +30,9 @@ export function redactDiagnosticText(value, secrets = []) {
 }
 
 /**
- * OpenCode model identifiers are provider-qualified, but the model portion is
- * provider-defined. Keep the transport boundary bounded and single-line so
- * future catalog forms are not rejected by an unnecessarily narrow parser.
- */
-export function isOpenCodeModelId(value) {
-  if (typeof value !== 'string' || value.length > 256) return false;
-  if (/\s|[\u0000-\u001f\u007f]/u.test(value)) return false;
-  const separator = value.indexOf('/');
-  return separator > 0 && separator < value.length - 1;
-}
-
-/**
  * Shared helpers for agent CLI backends.
  *
- * @typedef {'claude' | 'codex' | 'pi' | 'grok' | 'cursor' | 'opencode' | 'rau'} AgentName
+ * @typedef {'claude' | 'codex' | 'pi'} AgentName
  *
  * parentTaskId: 서브에이전트/워크플로가 낸 이벤트를 스폰한 task 카드에 귀속시키는
  * 선택 필드. 하니스가 CLI 의 parent 식별자(claude: parent_tool_use_id)를 taskId 로
@@ -109,19 +97,11 @@ export function isOpenCodeModelId(value) {
  * @property {string} [codexAuthPath]
  * @property {string} [codexBin]
  * @property {string} [claudeBin]
- * @property {string} [grokBin]
- * @property {string} [grokHome]
- * @property {string} [grokAuthPath]
- * @property {string} [cursorBin]
- * @property {string} [cursorSourceDir]
- * @property {string} [openCodeBin]
- * @property {string|(() => string|null|undefined)} [openCodeAuthPath]
  * @property {string} [piBin]
  * @property {string} [piRoot]
  * @property {string} [openRouterApiKey]
  * @property {boolean} [reasoning]
  * @property {Record<string, string>} [providerEnv]
- * @property {() => Record<string, string>} [openCodeProviderEnv]
  * @property {string} [model]
  * @property {string} [effort]
  * @property {'standard'|'fast'} [serviceTier]
@@ -278,7 +258,6 @@ export function normalizeUsageTokens(raw) {
       raw.cacheReadTokens,
       raw.cachedReadTokens,
     ),
-    // cursor 는 캐시 생성분을 cacheWriteTokens 로 보고한다.
     cacheCreationTokens: usageCount(
       raw.cache_creation_input_tokens,
       raw.cacheCreationInputTokens,
@@ -348,8 +327,7 @@ function editLifecycleFor(profile) {
 }
 
 /**
- * rhwp 전용 서브에이전트 정의. claude 는 --agents 로, grok 도 동일한 JSON 을
- * --agents 로 받는다 (grok 1.0.5 에서 claude 호환 스키마 검증됨). tools 는
+ * rhwp 전용 서브에이전트 정의. Claude는 --agents로, Pi는 확장 도구로 받는다. tools 는
  * 상속(미지정) — 파일시스템 경계는 샌드박스가, 문서 편집 경계는 studio
  * 캐퍼빌리티 게이트와 이 프롬프트가 진다.
  */
@@ -388,31 +366,12 @@ ${PARALLEL_WORK_SHARED}
 - Never call subagent_wait for an MCP-managed background job such as delegate_copy_layout. It is not a Pi child; end the turn and let the hub inject its completion into a new owning-chat turn.
 - When you already know two or more independent edits you will do yourself, send them as ONE apply_edits call instead of a chain of single writes.`;
   }
-  if (agentName === 'grok') {
-    return `PARALLEL WORK:
-- For large document tasks, spawn subagents with spawn_subagent: subagent_type doc-editor for edits, doc-researcher for research. Give each editor ONE contiguous paragraph range (for example one page or one section) and state that range plus the goal in its prompt. Each subagent re-reads its own region before writing.
-${PARALLEL_WORK_SHARED}
-- Collect every subagent's result with get_command_or_subagent_output before you summarize the turn.
-- Never use get_command_or_subagent_output on the hub background job delegate_copy_layout. It is not one of your subagents; end the turn and let the hub inject its completion into a new owning-chat turn.`;
-  }
   if (agentName === 'codex') {
     return `PARALLEL WORK:
 - For large document tasks, spawn agents with your collaboration tools (spawn_agent). Give each agent ONE contiguous paragraph range (for example one page or one section) and state that range plus the goal in its message. Each agent re-reads its own region before writing.
 ${PARALLEL_WORK_SHARED}
 - Call wait_agent until every agent you explicitly created with spawn_agent has finished before ending the turn; agents still running when the turn ends are killed.
 - Never call wait_agent for an MCP-managed background job such as delegate_copy_layout. It is not a collaboration agent; end the turn and let the hub inject its completion into a new owning-chat turn.`;
-  }
-  if (agentName === 'cursor') {
-    return `PARALLEL WORK:
-- For large document tasks, delegate to subagents. Give each subagent ONE contiguous paragraph range (for example one page or one section) and state that range plus the goal in its prompt. Each subagent re-reads its own region before writing.
-${PARALLEL_WORK_SHARED}
-- Child activity is not streamed: each subagent's transcript arrives only when it finishes, and long transcripts are replayed in a bounded window. Give every subagent a tightly bounded objective so nothing important is cut.`;
-  }
-  if (agentName === 'opencode') {
-    return `PARALLEL WORK:
-- For large document tasks, use the Task tool. Use a general subagent for a tightly bounded editing or implementation task and an explore subagent for read-only research. Give each editing subagent ONE contiguous paragraph range and a standalone goal. Each subagent re-reads its own region before writing.
-${PARALLEL_WORK_SHARED}
-- Collect every Task result before summarizing the turn. Background hub jobs such as delegate_copy_layout are not Task subagents: end your turn and let the hub start a new turn carrying their completion.`;
   }
   return PARALLEL_WORK_BRIEF;
 }
@@ -422,13 +381,7 @@ export const PARALLEL_WORK_BRIEF = `PARALLEL WORK:
 ${PARALLEL_WORK_SHARED}
 - Use the Workflow tool only when the user explicitly asks for a large orchestrated run; otherwise a few Agent spawns are enough.`;
 
-/**
- * 브리프 끝에 붙는 PARALLEL WORK 구간. grok 1.0.5 의 dontAsk(안전·계획)는
- * spawn_subagent 를 headless 에서 자동 취소하므로(하니스가 --no-subagents 로
- * 도구 자체를 끈다) grok 편대 안내는 전체 접근에서만 싣는다.
- */
 function parallelWorkSectionFor(agentName, profile) {
-  if (agentName === 'grok' && profile !== 'unrestricted') return '';
   return `\n\n${parallelWorkBriefFor(agentName)}`;
 }
 
@@ -445,9 +398,6 @@ export function providerToolNoteFor(agentName = 'claude') {
   const notes = {
     claude: 'Your collaboration tools are the native Agent and Workflow tools, and their results arrive automatically as task notifications. Background hub jobs such as delegate_copy_layout are not Agent tasks: never poll or wait for them — end your turn and the hub will start a new turn carrying their completion.',
     codex: 'Your collaboration tools are spawn_agent/wait_agent, and they manage collaboration agents only. Background hub jobs such as delegate_copy_layout are not collaboration agents: never call wait_agent or list_agents for one — end your turn and the hub will start a new turn carrying its completion.',
-    grok: 'Your collaboration tools are spawn_subagent/get_command_or_subagent_output, available only under full access. Background hub jobs such as delegate_copy_layout are not your subagents: never collect them with get_command_or_subagent_output — end your turn and the hub will start a new turn carrying their completion.',
-    cursor: 'Subagents run as native task calls whose transcripts arrive when each finishes; there is no polling tool. Background hub jobs such as delegate_copy_layout are not Task subagents: end your turn and the hub will start a new turn carrying their completion.',
-    opencode: 'Your collaboration tool is Task. Its result returns to the owning turn when the subagent finishes. Background hub jobs such as delegate_copy_layout are not Task subagents: end your turn and the hub will start a new turn carrying their completion.',
     pi: 'Your collaboration tools are subagent_spawn/subagent_wait/subagent_check/subagent_list/subagent_cancel, and they manage Pi children only. Background hub jobs such as delegate_copy_layout are not collaboration agents: never call subagent_wait or subagent_list for one — end your turn and the hub will start a new turn carrying its completion.',
   };
   return notes[agentName] ?? '';
@@ -633,7 +583,7 @@ const STDERR_TAIL_LIMIT = 16_000;
 const EXIT_CLOSE_GRACE_MS = 2_000;
 
 /**
- * 턴마다 CLI 를 새로 스폰하는 하니스(grok/cursor)의 공통 프로세스 수명주기.
+ * Provider process lifecycle helpers.
  * 턴 개폐, stderr 꼬리 수집, 종료 판정, 모드 전환 대기, 인터럽트/폐기를 한곳에서
  * 관리한다. 와이어 포맷 파싱은 하니스가 그대로 소유한다.
  *

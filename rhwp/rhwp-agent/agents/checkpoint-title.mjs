@@ -23,7 +23,7 @@ export const CHECKPOINT_TITLE_OVERALL_TIMEOUT_MS = 40_000;
 
 const MAX_CLI_OUTPUT_BYTES = 64 * 1024;
 const CHANGE_KINDS = ['added', 'removed', 'modified'];
-const PROVIDER_ORDER = ['pi', 'codex', 'grok', 'claude'];
+const PROVIDER_ORDER = ['pi', 'codex', 'claude'];
 
 /** Use an authenticated CLI whether it came from the app installer or the user's PATH. */
 export function resolveCheckpointTitleCliRoute(provider, health, setup, managedCommand) {
@@ -194,22 +194,6 @@ export function buildCheckpointTitleCliSpec(provider, {
         '-m', 'gpt-5.6-luna', '-c', 'model_reasoning_effort="low"', '-',
       ],
       stdin: true,
-    };
-  }
-  if (provider === 'grok') {
-    if (!promptFilePath) throw new Error('Grok checkpoint titles require a prompt file');
-    return {
-      provider,
-      command: command ?? 'grok',
-      argv: [
-        '--prompt-file', promptFilePath,
-        '--output-format', 'streaming-messages-json', '--include-partial-messages',
-        '--no-auto-update', '-s', sessionId,
-        '-m', 'grok-4.6', '--reasoning-effort', 'low',
-        '--permission-mode', 'dontAsk', '--deny', 'Bash', '--deny', 'Edit', '--deny', 'Write',
-        '--no-subagents',
-      ],
-      stdin: false,
     };
   }
   if (provider === 'claude') {
@@ -424,10 +408,6 @@ async function prepareCliWorkspace(provider, prompt, deps) {
   const tempRoot = await makeTemp(path.join(os.tmpdir(), 'rhwp-checkpoint-title-'));
   try {
     let promptFilePath;
-    if (provider === 'grok') {
-      promptFilePath = path.join(tempRoot, 'prompt.txt');
-      await fs.writeFile(promptFilePath, prompt, { encoding: 'utf8', mode: 0o600 });
-    }
     return {
       tempRoot,
       spec: buildCheckpointTitleCliSpec(provider, {

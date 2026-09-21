@@ -1770,7 +1770,6 @@ export function createSettingsPanel(deps: SettingsPanelDeps): SettingsPanel {
   function selectableAgents(): readonly AgentName[] {
     return PROVIDER_ORDER.filter((agent) => {
       if (agent === 'pi') return piStatus?.setupComplete === true;
-      if (agent === 'rau') return setupStatuses?.rau?.setupComplete === true;
       return true;
     });
   }

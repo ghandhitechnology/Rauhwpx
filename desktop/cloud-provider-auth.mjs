@@ -52,28 +52,6 @@ export const DESKTOP_PROVIDER_AUTH = Object.freeze({
     envName: 'OPENROUTER_API_KEY',
     files: Object.freeze([]),
   }),
-  grok: Object.freeze({
-    secretId: 'rhwp.grok.api-key',
-    secretName: 'XAI_API_KEY',
-    envName: 'XAI_API_KEY',
-    files: Object.freeze([
-      Object.freeze({
-        destination: '.grok/auth.json',
-        resolve: ({ homeDir, env }) => path.join(env.GROK_HOME || path.join(homeDir, '.grok'), 'auth.json'),
-      }),
-    ]),
-  }),
-  cursor: Object.freeze({
-    secretId: 'rhwp.cursor.api-key',
-    secretName: 'CURSOR_API_KEY',
-    envName: 'CURSOR_API_KEY',
-    files: Object.freeze([
-      Object.freeze({
-        destination: '.cursor/cli-config.json',
-        resolve: ({ homeDir }) => path.join(homeDir, '.cursor', 'cli-config.json'),
-      }),
-    ]),
-  }),
 });
 
 export async function collectProviderAuth(provider, {

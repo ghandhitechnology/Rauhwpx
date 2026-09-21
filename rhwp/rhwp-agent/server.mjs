@@ -23,22 +23,7 @@ import {
   flushCodexCredentialMirror,
   prepareCodexHome,
 } from './agents/codex.mjs';
-import { createPiSession, isOpenRouterCreditError } from './agents/pi.mjs';
-import {
-  createGrokSession,
-  flushGrokCredentialMirror,
-  prepareGrokHome,
-} from './agents/grok.mjs';
-import {
-  createCursorSession,
-  flushCursorCredentialMirrors,
-  prepareCursorHome,
-} from './agents/cursor.mjs';
-import {
-  createOpenCodeSession,
-  flushOpenCodeCredentialMirror,
-} from './agents/opencode.mjs';
-import { isOpenCodeModelId } from './agents/backend.mjs';
+import { createPiSession } from './agents/pi.mjs';
 import { generateChatTitle } from './agents/title.mjs';
 import {
   CHECKPOINT_TITLE_OVERALL_TIMEOUT_MS,
@@ -70,17 +55,12 @@ import { BrowserbaseFleet, normalizeBrowserbaseOverride, validateBrowserbaseCred
 import { createProviderHealth } from './provider-health.mjs';
 import { createUsageStore } from './usage-store.mjs';
 import { createProviderLimitsClient } from './provider-limits.mjs';
-import { createProviderBalancesClient } from './provider-balances.mjs';
 import {
   createPiManager,
   defaultPiRoot,
-  defaultRauRoot,
-  RAU_LOCKED_MODELS,
-  RAU_SECRET_ID,
 } from './pi-manager.mjs';
 import { createRauCreditsClient } from './rau-credits-client.mjs';
 import { createAccountSession } from './account-session.mjs';
-import { createRauAccountSession } from './rau-account-session.mjs';
 import { AuthRunRegistry } from './auth-run-registry.mjs';
 import { createCliSetupManager } from './cli-setup-manager.mjs';
 import { createOpenRouter, creditBalanceEmpty } from './openrouter.mjs';
@@ -262,9 +242,7 @@ const writingStyleStore = await new WritingStyleStore().init();
 const agentInstructionsStore = await new AgentInstructionsStore().init();
 const skillRegistry = await new SkillRegistry({ bundledRoot: BUNDLED_SKILLS, writingStyleStore }).init();
 const PI_ROOT = defaultPiRoot();
-const RAU_ROOT = defaultRauRoot();
 const openRouter = createOpenRouter({ cacheDir: PI_ROOT });
-const rauOpenRouter = createOpenRouter({ cacheDir: RAU_ROOT });
 const secretStore = createIpcSecretStore();
 if (process.env.RHWP_AGENT_MODE === 'production' && !secretStore.available) {
   throw Object.assign(new Error('The packaged hub requires the desktop secure-secret broker.'), {
@@ -272,29 +250,9 @@ if (process.env.RHWP_AGENT_MODE === 'production' && !secretStore.available) {
   });
 }
 const piManager = await createPiManager({ rootDir: PI_ROOT, openRouter, secretStore }).init();
-const rauManager = await createPiManager({
-  rootDir: RAU_ROOT,
-  prefixDir: piManager.prefixDir,
-  openRouter: rauOpenRouter,
+const accountSession = createAccountSession({
   secretStore,
-  secretId: RAU_SECRET_ID,
-  lockedModels: RAU_LOCKED_MODELS,
-  skipLegacyKey: true,
-}).init();
-const rauCredits = createRauCreditsClient();
-const accountSession = createRauAccountSession({
-  accountSession: createAccountSession({ secretStore, creditsClient: rauCredits }),
-  secretStore,
-  rauManager,
-  beforeProviderChange: disposeRauSessions,
-  onProviderChanged(status, { error }) {
-    if (status) rauStatus = status;
-    rauAccountLinkError = error ? 'Rau 연결을 완료하지 못했어요. 다시 연결해 주세요.' : null;
-    void broadcastFreshAgentSetupStatuses().catch(() => {});
-  },
-  installProvider() {
-    void ensureRauInstalled();
-  },
+  creditsClient: createRauCreditsClient(),
 });
 const authRuns = new AuthRunRegistry();
 let npmPrefixMutationQueue = Promise.resolve();
@@ -361,83 +319,30 @@ function claudeRuntimeEnv(isolatedHome) {
 process.env.PATH = [cliSetup.nodeHostDir(), cliSetup.binDir, process.env.PATH]
   .filter(Boolean)
   .join(path.delimiter);
-const [initialClaudeSetup, initialCodexSetup, initialGrokSetup, initialCursorSetup, initialOpenCodeSetup] = await Promise.all([
+const [initialClaudeSetup, initialCodexSetup] = await Promise.all([
   cliSetup.status('claude'),
   cliSetup.status('codex'),
-  cliSetup.status('grok'),
-  cliSetup.status('cursor'),
-  cliSetup.status('opencode'),
 ]);
 let cliSetupStatus = {
   claude: initialClaudeSetup,
   codex: initialCodexSetup,
-  grok: initialGrokSetup,
-  cursor: initialCursorSetup,
-  opencode: initialOpenCodeSetup,
 };
-// grok 세션 시딩용 auth.json 원본 — 발견 순서는 cli-setup-manager 와 같다
-// (env GROK_HOME → ~/.grok → 관리형 홈, 심볼릭 링크 원본은 제외).
-let sourceGrokAuthPath = (await cliSetup.grokAuthPath()) ?? undefined;
-let sourceOpenCodeAuthPath = (await cliSetup.openCodeAuthPath()) ?? undefined;
-/** cursor-agent 가 보고한 모델 id 목록 — 인증된 setup-status 갱신 때 채워진다. */
-let cursorModelIds = [];
-/** OpenCode가 보고한 provider/model 목록. */
-let openCodeModelIds = [];
 /** pi 상태는 동기 경로(resolveModel/startSession)에서도 필요해 캐시해 둔다. */
 let piStatus = await piManager.status();
-let rauStatus = await rauManager.status();
-let rauAccountLinkError = null;
-let rauInstallPromise = null;
 /** OpenRouter 잔액. 키가 있을 때만 채워지고 사용량 리포트에 얹힌다. */
 let openRouterCredits = null;
 let openRouterCreditsKey = null;
-let rauCreditsBalance = null;
-if (piStatus.installed || rauStatus.installed) {
+if (piStatus.installed) {
   // 저장소가 갱신되면 확장/스킬도 따라와야 한다 — 실패해도 허브는 그대로 뜬다.
   await piManager.syncAssets().catch((error) => log(`pi asset sync failed: ${error?.message ?? error}`));
-  await rauManager.syncAssets().catch((error) => log(`rau asset sync failed: ${error?.message ?? error}`));
 }
 const providerHealth = createProviderHealth({
   piBin: () => (piStatus.installed ? piManager.piBin : null),
   cliBin: (agent) => (cliSetupStatus[agent]?.installed ? cliSetup.binPath(agent) : null),
-  // Version probes can write provider config. Keep Cursor, Claude, and OpenCode in
-  // app-owned probe homes instead of inheriting a live profile override.
   probeEnv: (agent) => {
-    if (agent === 'cursor') {
-      return {
-        ...process.env,
-        HOME: cliSetup.cursorHomeDir,
-        CURSOR_CONFIG_DIR: path.join(cliSetup.cursorHomeDir, '.cursor-probe'),
-      };
-    }
     if (agent === 'claude') {
       const probeHome = path.join(cliSetup.rootDir, 'claude-probe');
       return claudeRuntimeEnv(probeHome);
-    }
-    if (agent === 'opencode') {
-      const probeHome = cliSetup.openCodeProbeHomeDir;
-      const env = {
-        ...cliSetup.envFor('opencode'),
-        HOME: probeHome,
-        USERPROFILE: probeHome,
-        XDG_CONFIG_HOME: path.join(probeHome, '.config'),
-        XDG_DATA_HOME: path.join(probeHome, '.local', 'share'),
-        XDG_CACHE_HOME: path.join(probeHome, '.cache'),
-        XDG_STATE_HOME: path.join(probeHome, '.local', 'state'),
-        OPENCODE_CONFIG_DIR: path.join(probeHome, '.config', 'opencode'),
-        OPENCODE_CONFIG_CONTENT: '{}',
-        OPENCODE_DISABLE_PROJECT_CONFIG: '1',
-        OPENCODE_DISABLE_EXTERNAL_SKILLS: '1',
-        OPENCODE_DISABLE_CLAUDE_CODE: '1',
-        OPENCODE_DISABLE_DEFAULT_PLUGINS: '1',
-        OPENCODE_DISABLE_AUTOUPDATE: '1',
-        OPENCODE_DISABLE_LSP_DOWNLOAD: '1',
-      };
-      delete env.OPENCODE_CONFIG;
-      delete env.OPENCODE_DB;
-      delete env.OPENCODE_AUTH_CONTENT;
-      delete env.OPENCODE_PERMISSION;
-      return env;
     }
     return undefined;
   },
@@ -449,17 +354,6 @@ const providerLimits = createProviderLimitsClient({
   getProviderEnv: (agent) => cliSetup.envFor(agent),
   getAuthMethod: (agent) => cliSetupStatus[agent]?.authMethod,
   getCodexBin: () => cliSetupStatus.codex?.installed ? cliSetup.binPath('codex') : 'codex',
-});
-const providerBalances = createProviderBalancesClient({
-  getGrokAuthPath: () => cliSetup.grokAuthPath(),
-  getOpenCodeAuthPath: () => cliSetup.openCodeAuthPath(),
-  getProviderEnv: (agent) => ({
-    ...cliSetup.envFor(agent),
-    ...(agent === 'grok' ? {
-      XAI_MANAGEMENT_API_KEY: process.env.XAI_MANAGEMENT_API_KEY,
-      XAI_TEAM_ID: process.env.XAI_TEAM_ID,
-    } : {}),
-  }),
 });
 const referenceStore = await new ReferenceStore({ projectRoot: ROOT }).init();
 const templateStore = await new TemplateStore().init();
@@ -489,14 +383,10 @@ const sessions = new HubSessionRegistry({
     const hubStorageDir = path.join(recordRoot, 'hub-storage');
     const isolatedHome = path.join(recordRoot, 'home');
     const codexHome = path.join(isolatedHome, '.codex');
-    const grokHome = path.join(isolatedHome, '.grok');
-    const cursorHome = path.join(isolatedHome, '.cursor');
     mkdirSync(workDir, { recursive: true, mode: 0o700 });
     mkdirSync(hubStorageDir, { recursive: true, mode: 0o700 });
     prepareCodexHome(codexHome, sourceCodexAuthPath);
     prepareClaudeHome(isolatedHome, sourceClaudeAuth);
-    prepareGrokHome(grokHome, sourceGrokAuthPath);
-    prepareCursorHome(cursorHome, cliSetup.cursorSourceDir);
     const downloadManager = new DownloadManager({ rootDir: hubStorageDir, writableRoot: workDir });
     const documentSnapshotManager = new DocumentSnapshotManager({
       rootDir: hubStorageDir,
@@ -552,8 +442,6 @@ const sessions = new HubSessionRegistry({
       copyLayoutGeneratedRoot,
       isolatedHome,
       codexHome,
-      grokHome,
-      cursorHome,
     };
   },
 });
@@ -669,14 +557,6 @@ function refreshSessionCredentials(agent) {
   for (const record of sessions.values()) {
     if (agent === 'codex') prepareCodexHome(record.codexHome, sourceCodexAuthPath);
     if (agent === 'claude') prepareClaudeHome(record.isolatedHome, sourceClaudeAuth);
-    if (agent === 'grok') prepareGrokHome(record.grokHome, sourceGrokAuthPath);
-    if (agent === 'cursor') prepareCursorHome(record.cursorHome, cliSetup.cursorSourceDir);
-    if (agent === 'opencode') {
-      record.agentSession?.backend.refreshCredentials?.();
-      for (const job of record.templateJobs.values()) {
-        job.backend?.refreshCredentials?.();
-      }
-    }
   }
 }
 
@@ -686,9 +566,6 @@ function flushProviderCredentialHomes(homes) {
   const flushes = [
     ['claude', () => flushClaudeCredentialMirrors(homes.isolatedHome)],
     ['codex', () => flushCodexCredentialMirror(homes.codexHome)],
-    ['grok', () => flushGrokCredentialMirror(homes.grokHome)],
-    ['cursor', () => flushCursorCredentialMirrors(homes.cursorHome)],
-    ['opencode', () => flushOpenCodeCredentialMirror(homes.isolatedHome)],
   ];
   let settled = true;
   for (const [agent, flush] of flushes) {
@@ -703,54 +580,32 @@ function flushProviderCredentialHomes(homes) {
 }
 
 /** CLI 설치·인증을 cli-setup-manager 가 관리하는 에이전트들. */
-const CLI_SETUP_AGENTS = ['claude', 'codex', 'grok', 'cursor', 'opencode'];
-const KNOWN_AGENTS = new Set([...CLI_SETUP_AGENTS, 'pi', 'rau']);
-const OPENROUTER_AGENTS = new Set(['pi', 'rau']);
+const CLI_SETUP_AGENTS = ['claude', 'codex'];
+const KNOWN_AGENTS = new Set([...CLI_SETUP_AGENTS, 'pi']);
+const OPENROUTER_AGENTS = new Set(['pi']);
 const AGENT_INSTRUCTION_DRAFT_TTL_MS = 5 * 60 * 1000;
 
 const CLAUDE_MODELS = new Set(['opus', 'fable', 'sonnet', 'haiku']);
 const CODEX_MODELS = new Set(['gpt-5.6-luna', 'gpt-5.6-terra', 'gpt-5.6-sol', 'gpt-6-astra']);
-const GROK_MODELS = new Set(['grok-4.6', 'grok-4.5']);
 const DEFAULT_MODEL = {
   claude: 'sonnet',
   codex: 'gpt-5.6-sol',
-  grok: 'grok-4.6',
-  cursor: 'auto',
-  opencode: 'opencode/big-pickle',
 };
 const CLAUDE_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 const CLAUDE_EFFORTS_HAIKU = new Set(['low', 'medium', 'high']);
 const CODEX_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
-const GROK_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh']);
-const DEFAULT_EFFORT = { claude: 'high', codex: 'medium', grok: 'high' };
+const DEFAULT_EFFORT = { claude: 'high', codex: 'medium' };
 
 /** 알 수 없는 에이전트가 코덱스/클로드로 조용히 넘어가지 않도록 명시 테이블로 찾는다. */
 const SESSION_FACTORIES = {
   claude: createClaudeSession,
   codex: createCodexSession,
   pi: createPiSession,
-  rau: createPiSession,
-  grok: createGrokSession,
-  cursor: createCursorSession,
-  opencode: createOpenCodeSession,
 };
 
-function openRouterManager(agent) {
-  if (agent === 'rau') return rauManager;
-  if (agent === 'pi') return piManager;
-  return null;
-}
+function openRouterManager(agent) { return agent === 'pi' ? piManager : null; }
 
-function openRouterStatus(agent) {
-  if (agent === 'rau') return rauStatus;
-  if (agent === 'pi') return piStatus;
-  return null;
-}
-
-function rauTrialEmpty() {
-  if (!rauStatus.setupComplete) return false;
-  return creditBalanceEmpty(rauCreditsBalance);
-}
+function openRouterStatus(agent) { return agent === 'pi' ? piStatus : null; }
 
 function unknownAgentError(agent) {
   return Object.assign(new Error(`unknown agent: ${String(agent)}`), { code: 'INVALID_REQUEST' });
@@ -766,28 +621,6 @@ async function refreshPiStatus() {
   return piStatus;
 }
 
-async function refreshRauStatus() {
-  rauStatus = await rauManager.status();
-  return rauStatus;
-}
-
-function ensureRauInstalled() {
-  if (rauStatus.installed) return Promise.resolve();
-  if (rauInstallPromise) return rauInstallPromise;
-  rauInstallPromise = mutateSharedNpmPrefix(() => rauManager.install(() => {}))
-    .then(async (status) => {
-      rauStatus = status;
-      piStatus = await piManager.status();
-    })
-    .catch(() => {
-      rauAccountLinkError = 'Rau 설치를 완료하지 못했어요. 다시 설치해 주세요.';
-    })
-    .finally(async () => {
-      rauInstallPromise = null;
-      await broadcastFreshAgentSetupStatuses().catch(() => {});
-    });
-  return rauInstallPromise;
-}
 
 function openRouterAgentSetupStatus(agent) {
   const status = openRouterStatus(agent);
@@ -814,13 +647,6 @@ function piAgentSetupStatus() {
   return openRouterAgentSetupStatus('pi');
 }
 
-function rauAgentSetupStatus() {
-  const status = openRouterAgentSetupStatus('rau');
-  if (status.authenticated) status.authMethod = 'oauth';
-  if (rauAccountLinkError) status.error = rauAccountLinkError;
-  if (rauTrialEmpty()) status.exhausted = true;
-  return status;
-}
 
 function withAuthRunStatus(statuses, ownerSessionId = null) {
   return Object.fromEntries(Object.entries(statuses).map(([agent, status]) => {
@@ -843,57 +669,12 @@ function broadcastAgentSetupStatuses(statuses) {
   }
 }
 
-/** 모델 목록 조회가 상태 응답을 붙잡아 둘 수 있는 상한. */
-const CURSOR_MODELS_SOFT_DEADLINE_MS = 2_500;
-
-/**
- * cursor 모델 목록을 짧은 상한 안에서만 기다린다. 늦거나 실패하면 null 을 돌려주고
- * 이번 응답은 직전 목록으로 넘어간다 — 뒤늦게 도착한 결과는 cursorModels 의 TTL
- * 캐시에 남아 다음 집계에서 즉시 쓰인다.
- */
-function cursorModelsSoon(refresh = false) {
-  const probe = cliSetup.cursorModels({ refresh }).catch(() => null);
-  const deadline = new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(null), CURSOR_MODELS_SOFT_DEADLINE_MS);
-    timer.unref?.();
-  });
-  return Promise.race([probe, deadline]);
-}
-
-function openCodeModelsSoon(refresh = false) {
-  const probe = cliSetup.openCodeModels({ refresh }).catch(() => null);
-  const deadline = new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(null), CURSOR_MODELS_SOFT_DEADLINE_MS);
-    timer.unref?.();
-  });
-  return Promise.race([probe, deadline]);
-}
 
 async function agentSetupStatuses(ownerSessionId = null, refresh = false) {
-  const openCodeWasAuthenticated = cliSetupStatus.opencode?.authenticated === true;
-  const previousOpenCodeAuthPath = sourceOpenCodeAuthPath;
-  // cursor 프로브(status + --list-models)는 CLI 를 스폰해 초 단위로 걸린다 —
-  // 클로드/코덱스 설정 UI 가 그만큼 늦지 않도록 전부 병렬로 돌린다.
-  const [
-    claudeSetup,
-    codexSetup,
-    grokSetup,
-    cursorSetup,
-    openCodeSetup,
-    health,
-    cursorModelProbe,
-    openCodeModelProbe,
-    openCodeAuthPathProbe,
-  ] = await Promise.all([
+  const [claudeSetup, codexSetup, health] = await Promise.all([
     cliSetup.status('claude'),
     cliSetup.status('codex'),
-    cliSetup.status('grok'),
-    cliSetup.status('cursor'),
-    cliSetup.status('opencode'),
-    providerHealth.check(),
-    cursorModelsSoon(refresh),
-    openCodeModelsSoon(refresh),
-    cliSetup.openCodeAuthPath(),
+    providerHealth.check(refresh),
   ]);
   const withDetectedHarness = (status, provider) => {
     const available = provider?.available === true;
@@ -908,25 +689,9 @@ async function agentSetupStatuses(ownerSessionId = null, refresh = false) {
   };
   const claude = withDetectedHarness(claudeSetup, health.claude);
   const codex = withDetectedHarness(codexSetup, health.codex);
-  const grok = withDetectedHarness(grokSetup, health.grok);
-  const cursor = withDetectedHarness(cursorSetup, health.cursor);
-  const opencode = withDetectedHarness(openCodeSetup, health.opencode);
-  sourceOpenCodeAuthPath = openCodeAuthPathProbe ?? undefined;
-  const openCodeBecameAuthenticated = !openCodeWasAuthenticated && opencode.authenticated;
-  const openCodeCredentialsChanged = openCodeWasAuthenticated !== opencode.authenticated
-    || previousOpenCodeAuthPath !== sourceOpenCodeAuthPath;
-  if (openCodeCredentialsChanged) refreshSessionCredentials('opencode');
-  // cursor 모델 목록은 인증된 CLI 에서만 나온다 — 실패해도 상태 응답은 막지 않는다.
-  cursorModelIds = cursor.authenticated ? (cursorModelProbe ?? cursorModelIds) : [];
-  cursor.models = [...cursorModelIds];
-  const refreshedOpenCodeModels = openCodeBecameAuthenticated && !openCodeModelProbe?.length
-    ? await openCodeModelsSoon(true)
-    : openCodeModelProbe;
-  openCodeModelIds = opencode.authenticated ? (refreshedOpenCodeModels ?? openCodeModelIds) : [];
-  opencode.models = [...openCodeModelIds];
-  cliSetupStatus = { claude, codex, grok, cursor, opencode };
+  cliSetupStatus = { claude, codex };
   return withAuthRunStatus(
-    { claude, codex, grok, cursor, opencode, pi: piAgentSetupStatus(), rau: rauAgentSetupStatus() },
+    { claude, codex, pi: piAgentSetupStatus() },
     typeof ownerSessionId === 'string' ? ownerSessionId : null,
   );
 }
@@ -956,17 +721,11 @@ async function runAutomaticHarnessUpdates() {
   const before = {
     claude: cliSetupStatus.claude?.version ?? null,
     codex: cliSetupStatus.codex?.version ?? null,
-    grok: cliSetupStatus.grok?.version ?? null,
-    cursor: cliSetupStatus.cursor?.version ?? null,
-    opencode: cliSetupStatus.opencode?.version ?? null,
     pi: piStatus.version ?? null,
   };
   try {
     cliSetupStatus.claude = await cliSetup.automaticUpdate('claude', { canActivate });
     cliSetupStatus.codex = await cliSetup.automaticUpdate('codex', { canActivate });
-    cliSetupStatus.grok = await cliSetup.automaticUpdate('grok', { canActivate });
-    cliSetupStatus.cursor = await cliSetup.automaticUpdate('cursor', { canActivate });
-    cliSetupStatus.opencode = await cliSetup.automaticUpdate('opencode', { canActivate });
     piStatus = await mutateSharedNpmPrefix(() => piManager.automaticUpdate({ canActivate }));
     const statuses = await agentSetupStatuses();
     if (Object.values(statuses).some((status) => status.updateRequired)) {
@@ -975,9 +734,6 @@ async function runAutomaticHarnessUpdates() {
     broadcastAgentSetupStatuses(statuses);
     const changed = before.claude !== statuses.claude.version
       || before.codex !== statuses.codex.version
-      || before.grok !== statuses.grok.version
-      || before.cursor !== statuses.cursor.version
-      || before.opencode !== statuses.opencode.version
       || before.pi !== statuses.pi.version;
     if (changed) {
       const providers = await providerHealth.check(true);
@@ -1094,23 +850,10 @@ async function broadcastAccountStatus() {
   }
 }
 
-async function disposeRauSessions() {
-  if ([...sessions.values()].some((session) => session.processCleanupUncertain)) {
-    throw agentProcessCleanupUncertain();
-  }
-  const rauSessions = [...sessions.values()]
-    .filter((session) => session.agentSession?.agent === 'rau');
-  const cleaned = await Promise.all(rauSessions.map(disposeSession));
-  if (cleaned.some((stopped) => stopped === false)) throw agentProcessCleanupUncertain();
-}
-
-async function logoutRauAccount() {
+async function logoutAccount() {
   try {
     return await accountSession.logout();
   } finally {
-    if (!rauManager.apiKey()) {
-      await disposeRauSessions();
-    }
     await broadcastFreshAgentSetupStatuses().catch(() => {});
     await broadcastAccountStatus().catch(() => {});
   }
@@ -1258,7 +1001,7 @@ function beginAccountLogin(record, sock, requestId) {
     },
     async (error) => {
       authRuns.finish(authRun);
-      if (!['AGENT_AUTH_CANCELLED', 'ACCOUNT_LOGIN_CANCELLED', 'RAU_LOGIN_CANCELLED'].includes(error?.code)) {
+      if (!['AGENT_AUTH_CANCELLED', 'ACCOUNT_LOGIN_CANCELLED'].includes(error?.code)) {
         sendAccountRunError(authRun, error);
       }
       await broadcastAccountStatus().catch((statusError) => {
@@ -1275,41 +1018,13 @@ function resolveModel(agent, requested) {
     if (status.defaultModelId && piModelConfig(status.defaultModelId, agent)) return status.defaultModelId;
     return status.models[0]?.id ?? null;
   }
-  if (agent === 'cursor') {
-    // auto 는 CLI 기본 모델. 캐시된 목록의 id 는 그대로 받고, 목록이 아직 비어
-    // 있으면(미인증/미조회) 요청값을 신뢰한다 — 단, 다른 프로바이더의 모델 id 는 거른다.
-    if (requested === 'auto') return 'auto';
-    const foreignModel = typeof requested === 'string'
-      && (CLAUDE_MODELS.has(requested) || CODEX_MODELS.has(requested) || GROK_MODELS.has(requested));
-    if (typeof requested === 'string' && requested && !foreignModel
-      && (cursorModelIds.length === 0 || cursorModelIds.includes(requested))) {
-      return requested;
-    }
-    return DEFAULT_MODEL.cursor;
-  }
-  if (agent === 'opencode') {
-    if (isOpenCodeModelId(requested)
-      && (openCodeModelIds.length === 0 || openCodeModelIds.includes(requested))) {
-      return requested;
-    }
-    const configured = process.env.RHWP_OPENCODE_MODEL;
-    if (isOpenCodeModelId(configured)
-      && (openCodeModelIds.length === 0 || openCodeModelIds.includes(configured))) {
-      return configured;
-    }
-    if (openCodeModelIds.length > 0 && !openCodeModelIds.includes(DEFAULT_MODEL.opencode)) {
-      return openCodeModelIds[0];
-    }
-    return DEFAULT_MODEL.opencode;
-  }
-  const tables = { claude: CLAUDE_MODELS, codex: CODEX_MODELS, grok: GROK_MODELS };
+  const tables = { claude: CLAUDE_MODELS, codex: CODEX_MODELS };
   const allowed = tables[agent];
   if (!allowed) throw unknownAgentError(agent);
   if (typeof requested === 'string' && allowed.has(requested)) return requested;
   const envDefaults = {
     claude: process.env.RHWP_CLAUDE_MODEL,
     codex: process.env.RHWP_CODEX_MODEL,
-    grok: process.env.RHWP_GROK_MODEL,
   };
   const envDefault = envDefaults[agent];
   if (typeof envDefault === 'string' && allowed.has(envDefault)) return envDefault;
@@ -1325,11 +1040,8 @@ function resolveEffort(agent, model, requested) {
     const preferred = piModelConfig(model, agent)?.defaultEffort;
     return efforts.includes(preferred) ? preferred : efforts[0];
   }
-  // Cursor와 OpenCode ACP에는 공통 reasoning effort 선택이 없다.
-  if (agent === 'cursor' || agent === 'opencode') return null;
   const tables = {
     codex: CODEX_EFFORTS,
-    grok: GROK_EFFORTS,
     claude: model === 'haiku' ? CLAUDE_EFFORTS_HAIKU : CLAUDE_EFFORTS,
   };
   const allowed = tables[agent];
@@ -1938,9 +1650,6 @@ function checkpointTitleDeps(record, health, signal) {
   const codex = resolveCheckpointTitleCliRoute(
     'codex', health?.codex, cliSetupStatus.codex, cliSetup.binPath('codex'),
   );
-  const grok = resolveCheckpointTitleCliRoute(
-    'grok', health?.grok, cliSetupStatus.grok, cliSetup.binPath('grok'),
-  );
   const claude = resolveCheckpointTitleCliRoute(
     'claude', health?.claude, cliSetupStatus.claude, cliSetup.binPath('claude'),
   );
@@ -1956,7 +1665,6 @@ function checkpointTitleDeps(record, health, signal) {
         model: deepSeek?.id ?? '',
       },
       codex: { ready: codex.ready, model: 'gpt-5.6-luna' },
-      grok: { ready: grok.ready, model: 'grok-4.6' },
       claude: { ready: claude.ready, model: 'haiku' },
     },
     piManager,
@@ -1966,17 +1674,10 @@ function checkpointTitleDeps(record, health, signal) {
     sessionId: record.sessionId,
     commands: {
       codex: codex.command,
-      grok: grok.command,
       claude: claude.command,
     },
     providerEnvs: {
       codex: { ...cliSetup.envFor('codex'), CODEX_HOME: record.codexHome },
-      grok: {
-        ...cliSetup.envFor('grok'),
-        GROK_HOME: record.grokHome,
-        GROK_DISABLE_AUTOUPDATER: '1',
-        GROK_MEMORY: '0',
-      },
       claude: claudeRuntimeEnv(record.isolatedHome),
     },
     spawnProcess: (command, args, options) => spawnAuxiliaryProcess(record, command, args, options),
@@ -1987,18 +1688,17 @@ function checkpointTitleDeps(record, health, signal) {
 }
 
 function auxDeps(record, requestedAgent, cliAgent) {
-  const agent = requestedAgent === 'pi' || requestedAgent === 'rau'
+  const agent = requestedAgent === 'pi'
     || requestedAgent === 'claude' || requestedAgent === 'codex'
     ? requestedAgent
     : (record.agentSession?.agent ?? null);
-  const manager = agent === 'rau' ? rauManager : piManager;
-  const router = agent === 'rau' ? rauOpenRouter : openRouter;
+  const manager = piManager;
+  const router = openRouter;
   const health = providerHealth.cached();
   // 프로브 전이면 CLI 가 있다고 보고 기존 경로를 먼저 태운다.
   const cliAvailable = health ? health[cliAgent]?.available !== false : true;
   return {
-    useOpenRouter: (agent === 'rau' && rauStatus.setupComplete)
-      || (piStatus.setupComplete && (agent === 'pi' || !cliAvailable)),
+    useOpenRouter: (piStatus.setupComplete && (agent === 'pi' || !cliAvailable)),
     piManager: manager,
     openRouter: router,
     workDir: record.workDir,
@@ -2424,16 +2124,12 @@ async function launchTemplateJob(record, job) {
   const providerRoot = path.join(record.recordRoot, 'copy-layout-providers', job.jobId);
   const isolatedHome = path.join(providerRoot, 'home');
   const codexHome = path.join(isolatedHome, '.codex');
-  const grokHome = path.join(isolatedHome, '.grok');
-  const cursorHome = path.join(isolatedHome, '.cursor');
-  job.providerHomes = { isolatedHome, codexHome, grokHome, cursorHome };
+  job.providerHomes = { isolatedHome, codexHome };
   job.providerRoot = providerRoot;
   await fs.mkdir(jobDir, { recursive: true, mode: 0o700 });
   await fs.mkdir(providerRoot, { recursive: true, mode: 0o700 });
   prepareCodexHome(codexHome, sourceCodexAuthPath);
   prepareClaudeHome(isolatedHome, sourceClaudeAuth);
-  prepareGrokHome(grokHome, sourceGrokAuthPath);
-  prepareCursorHome(cursorHome, cliSetup.cursorSourceDir);
   job.jobDir = jobDir;
   job.generatedRoot = jobGeneratedRoot;
   job.snapshotRoot = jobSnapshotRoot;
@@ -2457,21 +2153,11 @@ async function launchTemplateJob(record, job) {
     isolatedHome,
     codexHome,
     codexAuthPath: sourceCodexAuthPath,
-    grokHome,
-    grokAuthPath: sourceGrokAuthPath,
-    cursorSourceDir: cliSetup.cursorSourceDir,
-    openCodeAuthPath: () => sourceOpenCodeAuthPath,
     codexBin: cliSetupStatus.codex?.installed ? cliSetup.binPath('codex') : 'codex',
     claudeBin: cliSetupStatus.claude?.installed ? cliSetup.binPath('claude') : 'claude',
-    grokBin: cliSetupStatus.grok?.installed ? cliSetup.binPath('grok') : 'grok',
-    cursorBin: cliSetupStatus.cursor?.installed ? cliSetup.binPath('cursor') : 'cursor-agent',
-    openCodeBin: cliSetupStatus.opencode?.installed ? cliSetup.binPath('opencode') : 'opencode',
     providerEnv: job.agent === 'claude'
       ? claudeRuntimeEnv(isolatedHome)
-      : job.agent === 'opencode'
-        ? {}
-        : (CLI_SETUP_AGENTS.includes(job.agent) ? cliSetup.envFor(job.agent) : {}),
-    ...(job.agent === 'opencode' ? { openCodeProviderEnv: () => cliSetup.envFor('opencode') } : {}),
+      : (CLI_SETUP_AGENTS.includes(job.agent) ? cliSetup.envFor(job.agent) : {}),
     onEvent: makeTemplateWorkerEventHandler(record, job),
     workflow: 'direct',
     phase: 'implementing',
@@ -2483,8 +2169,8 @@ async function launchTemplateJob(record, job) {
       binding: job.binding,
       jobDir,
     }),
-    piBin: (job.agent === 'rau' ? rauManager : piManager).piBin,
-    piRoot: job.agent === 'rau' ? rauManager.rootDir : piManager.rootDir,
+    piBin: piManager.piBin,
+    piRoot: piManager.rootDir,
     openRouterApiKey: openRouterManager(job.agent)?.apiKey() ?? undefined,
     agentName: OPENROUTER_AGENTS.has(job.agent) ? job.agent : 'pi',
     reasoning: OPENROUTER_AGENTS.has(job.agent)
@@ -2613,16 +2299,6 @@ function makeBackendEventHandler(record, generation) {
       });
       sendJson(record.studioSocket, { v: 1, type: 'usage-report', usage: usageSnapshot() });
       return;
-    }
-    if (evt.type === 'error' && activeSession.agent === 'rau' && isOpenRouterCreditError(evt.message)) {
-      rauCreditsBalance = {
-        balanceUsd: 0,
-        totalCreditsUsd: Number(rauCreditsBalance?.totalCreditsUsd) || 5,
-        totalUsageUsd: Number(rauCreditsBalance?.totalUsageUsd) || 5,
-        checkedAt: Date.now(),
-        error: null,
-      };
-      sendJson(record.studioSocket, { v: 1, type: 'usage-report', usage: usageSnapshot() });
     }
     const providerTurnId = activeSession.turnId;
     if (evt.type === 'turn-start') {
@@ -3016,21 +2692,11 @@ async function startSession(
     isolatedHome: record.isolatedHome,
     codexHome: record.codexHome,
     codexAuthPath: sourceCodexAuthPath,
-    grokHome: record.grokHome,
-    grokAuthPath: sourceGrokAuthPath,
-    cursorSourceDir: cliSetup.cursorSourceDir,
-    openCodeAuthPath: () => sourceOpenCodeAuthPath,
     codexBin: cliSetupStatus.codex?.installed ? cliSetup.binPath('codex') : 'codex',
     claudeBin: cliSetupStatus.claude?.installed ? cliSetup.binPath('claude') : 'claude',
-    grokBin: cliSetupStatus.grok?.installed ? cliSetup.binPath('grok') : 'grok',
-    cursorBin: cliSetupStatus.cursor?.installed ? cliSetup.binPath('cursor') : 'cursor-agent',
-    openCodeBin: cliSetupStatus.opencode?.installed ? cliSetup.binPath('opencode') : 'opencode',
     providerEnv: agent === 'claude'
       ? claudeRuntimeEnv(record.isolatedHome)
-      : agent === 'opencode'
-        ? {}
-        : (CLI_SETUP_AGENTS.includes(agent) ? cliSetup.envFor(agent) : {}),
-    ...(agent === 'opencode' ? { openCodeProviderEnv: () => cliSetup.envFor('opencode') } : {}),
+      : (CLI_SETUP_AGENTS.includes(agent) ? cliSetup.envFor(agent) : {}),
     onEvent: makeBackendEventHandler(record, generation),
     requestUserInput: (request, signal) => requestUserQuestion(record, request, {
       source: 'native',
@@ -3043,9 +2709,8 @@ async function startSession(
     capabilityEpoch: planning.capabilityEpoch,
     // Chat tool profiles follow the current workflow/phase after each provider
     // restart. A fixed toolProfile would keep approved plans read-only.
-    // pi · rau 전용 — 설치 경로와 영속 루트, 그리고 선택한 모델의 추론 지원 여부.
-    piBin: (agent === 'rau' ? rauManager : piManager).piBin,
-    piRoot: agent === 'rau' ? rauManager.rootDir : piManager.rootDir,
+    piBin: piManager.piBin,
+    piRoot: piManager.rootDir,
     openRouterApiKey: openRouterManager(agent)?.apiKey() ?? undefined,
     agentName: OPENROUTER_AGENTS.has(agent) ? agent : 'pi',
     reasoning: OPENROUTER_AGENTS.has(agent) ? Boolean(piModelConfig(model, agent)?.reasoning) : false,
@@ -3406,20 +3071,6 @@ async function handleStudioMessage(record, sock, msg) {
         sendJson(sock, {
           v: 1, type: 'chat-error', requestId, session: sessionInfo(record), code: 'PI_NOT_CONFIGURED',
           message: 'Pi 설정을 먼저 끝내 주세요 (설치 · OpenRouter 키 · 모델 선택).',
-        });
-        return;
-      }
-      if (agent === 'rau' && !rauStatus.setupComplete) {
-        sendJson(sock, {
-          v: 1, type: 'chat-error', requestId, session: sessionInfo(record), code: 'RAU_NOT_CONFIGURED',
-          message: 'Rau 연결을 먼저 끝내 주세요.',
-        });
-        return;
-      }
-      if (agent === 'rau' && rauTrialEmpty()) {
-        sendJson(sock, {
-          v: 1, type: 'chat-error', requestId, session: sessionInfo(record), code: 'RAU_CREDITS_EMPTY',
-          message: 'Rau 체험 크레딧이 다 됐어요. 다른 모델을 연결해 주세요.',
         });
         return;
       }
@@ -3858,7 +3509,6 @@ async function handleStudioMessage(record, sock, msg) {
         sendJson(sock, { v: 1, type: 'skills-error', requestId: msg.requestId ?? null, code: 'INVALID_REQUEST', message: 'Skill goal is required.' });
         return;
       }
-      // grok/cursor 는 스킬 초안 러너가 아니다 — claude 가 없으면 codex 로 내려보낸다.
       const skillHealth = providerHealth.cached();
       const agent = msg.agent === 'codex' || msg.agent === 'pi' || msg.agent === 'claude'
         ? msg.agent
@@ -3971,7 +3621,7 @@ async function handleStudioMessage(record, sock, msg) {
         });
         return;
       }
-      void logoutRauAccount()
+      void logoutAccount()
         .then(async () => {
           const status = await accountStatusForOwner(record.sessionId);
           replyToStudio(record, sock, { v: 1, type: 'account-status', requestId, status });
@@ -4016,13 +3666,7 @@ async function handleStudioMessage(record, sock, msg) {
       const installing = agent === 'pi'
         ? mutateSharedNpmPrefix(() => piManager.install(progress)).then(async (status) => {
           piStatus = status;
-          rauStatus = await rauManager.status();
         })
-        : agent === 'rau'
-          ? mutateSharedNpmPrefix(() => rauManager.install(progress)).then(async (status) => {
-            rauStatus = status;
-            piStatus = await piManager.status();
-          })
         : cliSetup.install(agent, progress).then((status) => { cliSetupStatus[agent] = status; });
       void installing
         .then(() => agentSetupStatuses(record.sessionId))
@@ -4050,18 +3694,9 @@ async function handleStudioMessage(record, sock, msg) {
         rejectProof?.(agentAuthCancelled());
         rejectProof = null;
         if (agent === 'pi') void piManager.cancelSetup();
-        else if (agent === 'rau') {
-          void rauManager.cancelSetup();
-          if (authRun?.accountLoginId) void accountSession.cancelLogin(authRun.accountLoginId);
-        }
         else if (CLI_SETUP_AGENTS.includes(agent)) void cliSetup.cancel(agent);
       };
       try {
-        if (agent === 'rau' && authRuns.get('account')) {
-          throw Object.assign(new Error('진행 중인 계정 로그인을 먼저 마쳐 주세요.'), {
-            code: 'AGENT_AUTH_BUSY',
-          });
-        }
         authRun = authRuns.begin({
           agent,
           ownerSessionId: record.sessionId,
@@ -4130,83 +3765,13 @@ async function handleStudioMessage(record, sock, msg) {
         authRuns.finish(authRun);
         if (error && credentialsCommitted) {
           log(`post-auth ${agent} refresh failed: ${error?.message ?? error}`);
-        } else if (error && !['AGENT_AUTH_CANCELLED', 'RAU_LOGIN_CANCELLED'].includes(error?.code)) {
+        } else if (error && error?.code !== 'AGENT_AUTH_CANCELLED') {
           sendAuthRunError(authRun, error);
         }
         await broadcastFreshAgentSetupStatuses().catch((statusError) => {
           log(`agent setup status refresh failed: ${statusError?.message ?? statusError}`);
         });
       };
-
-      if (agent === 'rau' && method === 'oauth') {
-        void (async () => {
-          const existing = await accountSession.status({ signal: abort.signal });
-          if (!isLiveAuthRun()) throw agentAuthCancelled();
-          if (existing.signedIn) {
-            started();
-            const linked = await accountSession.synchronizeProvider({ signal: abort.signal });
-            if (!isLiveAuthRun()) throw agentAuthCancelled();
-            commitAuthRun();
-            if (linked.provider?.state === 'error') {
-              sendAuthRunError(authRun, new Error('Rau 연결을 완료하지 못했어요. 다시 연결해 주세요.'));
-            }
-            return;
-          }
-          const callbackState = crypto.randomBytes(24).toString('base64url');
-          const session = await accountSession.startLogin({
-            signal: abort.signal,
-            redirectUri: `http://127.0.0.1:${hubPort}/oauth/rau/callback`,
-            callbackState,
-            returnMode: 'hybrid',
-            clientVersion: `hub-protocol-${PROTOCOL_VERSION}`,
-          });
-          if (!isLiveAuthRun()) throw agentAuthCancelled();
-          authRun.accountLoginId = session.loginId;
-          authRun.callbackState = callbackState;
-          const authDetails = {
-            authUrl: session.authUrl,
-            pairingCode: session.pairingCode,
-            expiresAt: session.expiresAt,
-          };
-          started(authDetails);
-          progress({ state: 'authorizing', ...authDetails });
-
-          let completed = false;
-          while (!completed) {
-            const proof = await new Promise((resolve, reject) => {
-              rejectProof = reject;
-              authRun.submitProof = (candidate) => {
-                rejectProof = null;
-                authRun.submitProof = null;
-                resolve(candidate);
-              };
-            });
-            if (!isLiveAuthRun()) throw agentAuthCancelled();
-            authRuns.update(authRun, { phase: 'redeeming' });
-            try {
-              const linked = await accountSession.completeLogin(session.loginId, proof, {
-                signal: abort.signal,
-                onCommitted: commitAuthRun,
-              });
-              completed = true;
-              if (linked.provider?.state === 'error') {
-                sendAuthRunError(authRun, new Error('Rau 연결을 완료하지 못했어요. 다시 연결해 주세요.'));
-              }
-            } catch (error) {
-              if (error?.code !== 'DEVICE_PROOF_INVALID') throw error;
-              if (!isLiveAuthRun()) throw agentAuthCancelled();
-              authRuns.update(authRun, { phase: 'authorizing' });
-              sendAuthRunError(authRun, error, 'DEVICE_PROOF_INVALID');
-              progress({ state: 'authorizing', ...authDetails });
-            }
-          }
-          await refreshOpenRouterCredits(true);
-          sendAuthRunFrame(authRun, { type: 'usage-report', usage: usageSnapshot() });
-        })().then(() => finish(), finish).finally(() => {
-          void broadcastAccountStatus().catch(() => {});
-        });
-        return;
-      }
 
       let run;
       if (agent === 'pi' && method === 'oauth') {
@@ -4237,16 +3802,7 @@ async function handleStudioMessage(record, sock, msg) {
             cliSetupStatus[agent] = status;
             if (agent === 'codex') sourceCodexAuthPath = await findSourceCodexAuthPath();
             if (agent === 'claude') sourceClaudeAuth = await resolveSourceClaudeAuth();
-            if (agent === 'grok') sourceGrokAuthPath = (await cliSetup.grokAuthPath()) ?? undefined;
-            if (agent === 'opencode') sourceOpenCodeAuthPath = (await cliSetup.openCodeAuthPath()) ?? undefined;
             refreshSessionCredentials(agent);
-            if (agent === 'grok' || agent === 'opencode') {
-              providerBalances.invalidate();
-              broadcastToStudios({ v: 1, type: 'usage-report', usage: usageSnapshot() });
-              void providerBalances.refresh(true).then(() => {
-                broadcastToStudios({ v: 1, type: 'usage-report', usage: usageSnapshot() });
-              }).catch(() => log('provider balance refresh after sign-in failed'));
-            }
             if (agent === 'claude' || agent === 'codex') {
               providerLimits.invalidate();
               broadcastToStudios({ v: 1, type: 'usage-report', usage: usageSnapshot() });
@@ -4300,10 +3856,6 @@ async function handleStudioMessage(record, sock, msg) {
         sendAgentSetupError(record, sock, null, agent, error, 'AGENT_AUTH_FAILED');
         return;
       }
-      if (agent === 'rau' && typeof authRun.submitProof === 'function') {
-        authRun.submitProof({ kind: 'manual', code });
-        return;
-      }
       if (agent !== 'claude' && agent !== 'codex') {
         sendAgentSetupError(record, sock, null, agent, new Error('인증 코드 요청을 확인하지 못했어요.'));
         return;
@@ -4327,23 +3879,7 @@ async function handleStudioMessage(record, sock, msg) {
       return;
     }
     case 'agent-setup-disconnect': {
-      const requestId = typeof msg.requestId === 'string' ? msg.requestId : null;
-      if (msg.agent !== 'rau') {
-        sendAgentSetupError(record, sock, requestId, msg.agent, new Error('연결 해제 요청을 확인하지 못했어요.'));
-        return;
-      }
-      if (authRuns.get('account') || authRuns.get('rau')) {
-        sendAgentSetupError(record, sock, requestId, 'rau', new Error('진행 중인 로그인을 먼저 마쳐 주세요.'));
-        return;
-      }
-      void logoutRauAccount()
-        .then(async () => {
-          await refreshOpenRouterCredits(true);
-          const statuses = await agentSetupStatuses(record.sessionId);
-          replyToStudio(record, sock, { v: 1, type: 'agent-setup-status', requestId, statuses });
-          replyToStudio(record, sock, { v: 1, type: 'usage-report', usage: usageSnapshot() });
-        })
-        .catch((e) => sendAgentSetupError(record, sock, requestId, 'rau', e, 'AGENT_SETUP_FAILED'));
+      sendAgentSetupError(record, sock, msg.requestId ?? null, msg.agent, new Error('Provider disconnect is not supported.'));
       return;
     }
     case 'usage-request': {
@@ -4541,9 +4077,9 @@ async function handleStudioMessage(record, sock, msg) {
               effort: selection.effort,
             },
             {
-              useOpenRouter: selection.agent === 'pi' || selection.agent === 'rau',
-              piManager: selection.agent === 'rau' ? rauManager : piManager,
-              openRouter: selection.agent === 'rau' ? rauOpenRouter : openRouter,
+              useOpenRouter: selection.agent === 'pi',
+              piManager,
+              openRouter,
               projectRoot: ROOT,
               workDir: record.workDir,
               isolatedHome: record.isolatedHome,
@@ -6442,7 +5978,7 @@ httpServer.listen(REQUESTED_PORT, '127.0.0.1', () => {
   hubPort = address.port;
   process.stdout.write(`RHWP_HUB_READY ${JSON.stringify({ port: hubPort, pid: process.pid, launchId: LAUNCH_ID })}\n`);
   log(`rhwp-agent hub listening on ws://127.0.0.1:${hubPort} (protocol v${PROTOCOL_VERSION})`);
-  log('claude/codex/pi/grok/cursor/opencode can be installed and authenticated from Studio settings');
+  log('claude/codex/pi can be installed and authenticated from Studio settings');
   scheduleHarnessUpdates(HARNESS_UPDATE_INITIAL_DELAY_MS);
 });
 

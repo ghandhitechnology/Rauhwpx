@@ -6,24 +6,18 @@ export const PROVIDER_AUTH_FILES = Object.freeze({
   claude: Object.freeze(['.claude.json', '.claude/.credentials.json']),
   codex: Object.freeze(['.codex/auth.json']),
   pi: Object.freeze([]),
-  grok: Object.freeze(['.grok/auth.json', 'auth.json']),
-  cursor: Object.freeze(['.cursor/cli-config.json']),
 });
 
 export const PROVIDER_KEY_NAMES = Object.freeze({
   claude: 'ANTHROPIC_API_KEY',
   codex: 'OPENAI_API_KEY',
   pi: 'OPENROUTER_API_KEY',
-  grok: 'XAI_API_KEY',
-  cursor: 'CURSOR_API_KEY',
 });
 
 export const PROVIDER_KEY_ENV = Object.freeze({
   claude: 'RAUHWpx_PROVIDER_KEY_CLAUDE',
   codex: 'RAUHWpx_PROVIDER_KEY_CODEX',
-  grok: 'RAUHWpx_PROVIDER_KEY_GROK',
   pi: 'RAUHWpx_PROVIDER_KEY_PI',
-  cursor: 'RAUHWpx_PROVIDER_KEY_CURSOR',
 });
 
 export const PROVIDER_SESSION_ENV = 'RAUHWpx_PROVIDER_SESSION';

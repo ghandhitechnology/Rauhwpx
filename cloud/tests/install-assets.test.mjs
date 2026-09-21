@@ -39,8 +39,9 @@ test('installer is streamable, channel-aware, preserves Serve routes, and emits 
   assert.match(source, /podman --cgroup-manager=cgroupfs run --rm[\s\S]*--uidmap 0:1:1000[\s\S]*--gidmap 1000:0:1[\s\S]*--entrypoint \/app\/bin\/rhwp/);
   assert.doesNotMatch(source, /(^|\s)(?:exec\s+)?runuser\s+--user/m);
   assert.match(source, /provider install claude/);
-  assert.match(source, /provider install cursor/);
-  assert.doesNotMatch(source, /for provider in claude codex pi grok cursor/);
+  assert.match(source, /provider install codex/);
+  assert.match(source, /provider install pi/);
+  assert.doesNotMatch(source, /provider install (?:grok|cursor)/);
   assert.ok(source.includes('github\\.com/ghandhitechnology/Rauhwpx/\\.github/workflows/release\\.yml@refs/tags/'));
   assert.doesNotMatch(source, /refs\/\(heads\|tags\)/);
   assert.match(source, /Strict-Transport-Security "max-age=31536000; includeSubDomains"/);
@@ -147,18 +148,10 @@ test('macOS installer uses launchd, a dedicated Podman machine, and verified rel
 test('all provider installers are allowlisted and version-pinned', async () => {
   const lock = JSON.parse(await fs.readFile(path.join(root, 'install/providers.lock.json'), 'utf8'));
   const runtimePackage = JSON.parse(await fs.readFile(path.join(root, 'install/provider-runtime/package.json'), 'utf8'));
-  assert.deepEqual(Object.keys(lock).sort(), ['claude', 'codex', 'cursor', 'grok', 'pi']);
+  assert.deepEqual(Object.keys(lock).sort(), ['claude', 'codex', 'pi']);
   for (const [provider, item] of Object.entries(lock)) {
     assert.ok(['npm', 'archive'].includes(item.kind), provider);
     if (item.kind === 'npm') assert.match(item.version, /^\d+\.\d+\.\d+$/, provider);
-    if (item.kind === 'archive') {
-      assert.match(item.version, /^\d{4}\.\d{2}\.\d{2}-[a-f0-9]+$/, provider);
-      assert.deepEqual(Object.keys(item.urls).sort(), ['arm64', 'x64']);
-      for (const architecture of ['arm64', 'x64']) {
-        assert.match(item.urls[architecture], /^https:\/\/downloads\.cursor\.com\/lab\//);
-        assert.match(item.sha256[architecture], /^[a-f0-9]{64}$/);
-      }
-    }
   }
   const npmProviders = Object.values(lock).filter((item) => item.kind === 'npm');
   assert.deepEqual(

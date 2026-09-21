@@ -173,7 +173,8 @@ CLI_ENV=(env "RAUHWpx_DATA_DIR=${DATA_ROOT}" "RAUHWpx_PROVIDER_CLI_DIR=${DATA_RO
   "RAUHWpx_WORKER_IMAGE=${WORKER_IMAGE}" "RAUHWpx_PODMAN_CONNECTION=${MACHINE}" \
   "PATH=/opt/homebrew/bin:$(dirname "${NODE}"):/usr/local/bin:/usr/bin:/bin")
 sudo -u "${SERVICE_USER}" -H "${CLI_ENV[@]}" "${NODE}" "${DESTINATION}/src/cli.mjs" provider install claude >/dev/null
-sudo -u "${SERVICE_USER}" -H "${CLI_ENV[@]}" "${NODE}" "${DESTINATION}/src/cli.mjs" provider install cursor >/dev/null
+sudo -u "${SERVICE_USER}" -H "${CLI_ENV[@]}" "${NODE}" "${DESTINATION}/src/cli.mjs" provider install codex >/dev/null
+sudo -u "${SERVICE_USER}" -H "${CLI_ENV[@]}" "${NODE}" "${DESTINATION}/src/cli.mjs" provider install pi >/dev/null
 
 LAUNCHER="${INSTALL_ROOT}/service-wrapper"
 install -m 0755 "${DESTINATION}/install/macos-service-wrapper" "${LAUNCHER}"

@@ -364,7 +364,7 @@ function parseSessionBase(state: Record<string, unknown>): CloudSessionBase | nu
       : undefined;
   if (!sessionId || !threadId || !documentName || version === null || documentId === undefined) return null;
   const selection = record(state.selection);
-  const validSelection = selection && ['claude', 'codex', 'pi', 'grok', 'cursor'].includes(String(selection.agent))
+  const validSelection = selection && ['claude', 'codex', 'pi'].includes(String(selection.agent))
     && typeof selection.model === 'string' && typeof selection.effort === 'string';
   return {
     ...(validSelection ? { selection: {

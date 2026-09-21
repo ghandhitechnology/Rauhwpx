@@ -9,8 +9,6 @@ const COMMANDS = Object.freeze({
   claude: 'claude',
   codex: 'codex',
   pi: 'pi',
-  grok: 'grok',
-  cursor: 'cursor-agent',
 });
 
 function firstLine(value) {

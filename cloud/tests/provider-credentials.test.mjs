@@ -7,6 +7,7 @@ import test from 'node:test';
 
 import { ProviderManager } from '../src/provider-manager.mjs';
 import { ProviderCliManager } from '../src/provider-cli.mjs';
+import { PROVIDERS } from '../src/protocol.mjs';
 import {
   PROVIDER_KEY_ENV,
   encodeProviderSession,
@@ -16,7 +17,7 @@ import {
   writeProviderAuthFiles,
 } from '../src/provider-credentials.mjs';
 
-const PROVIDERS = ['claude', 'codex', 'grok', 'pi', 'cursor'];
+assert.deepEqual(PROVIDERS, ['claude', 'codex', 'pi']);
 
 function fakeVersion() {
   const child = new EventEmitter();
@@ -52,6 +53,15 @@ test('credential body requires a key or an auth file', () => {
   );
 });
 
+test('unsupported provider names are rejected at every credential boundary', () => {
+  for (const provider of ['grok', 'cursor', 'opencode', 'raw']) {
+    assert.throws(() => parseProviderCredentialBody(provider, { apiKey: 'key' }), { code: 'INVALID_PROVIDER' });
+    assert.throws(() => parseProviderSession(Buffer.from(JSON.stringify({
+      v: 1, providers: [{ provider, files: [] }],
+    })).toString('base64url')), { code: 'INVALID_PROVIDER' });
+  }
+});
+
 test('a provider session round-trips every auth file the probe accepts', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'rauhwpx-provider-session-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));
@@ -61,15 +71,13 @@ test('a provider session round-trips every auth file the probe accepts', async (
       { path: '.claude/.credentials.json', content: '{"token":"claude"}' },
     ],
     codex: [{ path: '.codex/auth.json', content: '{"token":"codex"}' }],
-    grok: [{ path: '.grok/auth.json', content: '{"token":"grok"}' }],
-    cursor: [{ path: '.cursor/cli-config.json', content: '{"token":"cursor"}' }],
   };
   const encoded = encodeProviderSession(Object.entries(files).map(([provider, list]) => ({
     provider,
     files: list,
   })));
   const session = parseProviderSession(encoded);
-  assert.equal(session.providers.length, 4);
+  assert.equal(session.providers.length, 2);
   for (const item of session.providers) {
     writeProviderAuthFiles(root, item.provider, item.files);
   }

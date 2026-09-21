@@ -26,7 +26,6 @@ COPY install/provider-runtime/package.json install/provider-runtime/package-lock
 RUN npm ci --omit=dev --no-audit --no-fund \
   && ./node_modules/.bin/claude --version \
   && ./node_modules/.bin/codex --version \
-  && ./node_modules/.bin/grok --version \
   && ./node_modules/.bin/pi --version
 
 WORKDIR /app
@@ -37,7 +36,6 @@ COPY runtime-assets/rhwp-agent/package.json runtime-assets/rhwp-agent/package-lo
 RUN npm --prefix /app/rhwp-agent ci --omit=dev --ignore-scripts --no-audit --no-fund
 COPY runtime-assets/studio /app/studio
 COPY runtime-assets/rhwp-agent /app/rhwp-agent
-COPY runtime-assets/rau-credits /app/rau-credits
 COPY runtime-assets/bin/rhwp /app/bin/rhwp
 COPY worker /app/worker
 COPY document-runtime /app/document-runtime

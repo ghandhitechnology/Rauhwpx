@@ -573,8 +573,7 @@ function installCloudDocumentRuntimeApi(agentBridge: AgentBridge): boolean {
     }) {
       requireSecret(secret);
       const agent = input?.agent;
-      if (agent !== 'claude' && agent !== 'codex' && agent !== 'pi'
-        && agent !== 'grok' && agent !== 'cursor') throw new Error('Cloud runtime provider is unsupported');
+      if (agent !== 'claude' && agent !== 'codex' && agent !== 'pi') throw new Error('Cloud runtime provider is unsupported');
       const threadId = String(input?.threadId ?? '');
       if (!threadId || threadId.length > 256) throw new Error('Cloud runtime thread id is invalid');
       const workflow = input?.workflow === 'plan' || input?.workflow === 'question' ? input.workflow : 'direct';

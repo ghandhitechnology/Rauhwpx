@@ -3,12 +3,7 @@ import {
   validateUserQuestionAnswers,
 } from '../user-question.mjs';
 
-export const CURSOR_ASK_QUESTION_METHOD = 'cursor/ask_question';
 export const CODEX_REQUEST_USER_INPUT_METHOD = 'item/tool/requestUserInput';
-export const GROK_ASK_USER_QUESTION_METHODS = Object.freeze([
-  'x.ai/ask_user_question',
-  '_x.ai/ask_user_question',
-]);
 
 export class ProviderUserInputCodecError extends Error {
   constructor(provider, message, code = 'INVALID_PROVIDER_USER_QUESTION') {
@@ -208,66 +203,6 @@ function rpcResult(id, result) {
   return { jsonrpc: '2.0', id, result };
 }
 
-export function decodeCursorAskQuestionFrame(frame) {
-  const provider = 'cursor';
-  const rpc = rpcRequest(frame, provider, [CURSOR_ASK_QUESTION_METHOD]);
-  const toolCallId = string(rpc.params.toolCallId, provider, 'params.toolCallId');
-  const questions = array(rpc.params.questions, provider, 'params.questions');
-  const request = providerRequest({
-    providerRequestId: toolCallId,
-    questions: questions.map((value, questionIndex) => {
-      const question = record(value, provider, `questions[${questionIndex}]`);
-      const questionId = stableId(question.id, `question-${questionIndex + 1}`, provider, `questions[${questionIndex}].id`);
-      return {
-        id: questionId,
-        header: compactHeader(rpc.params.title, `Question ${questionIndex + 1}`),
-        question: string(question.prompt, provider, `questions[${questionIndex}].prompt`),
-        mode: question.allowMultiple === true ? 'multiple' : 'single',
-        options: boundedOptions(question.options, provider, `questions[${questionIndex}].options`).map((value, optionIndex) => {
-          const option = record(value, provider, `questions[${questionIndex}].options[${optionIndex}]`);
-          const label = string(option.label, provider, `questions[${questionIndex}].options[${optionIndex}].label`);
-          return {
-            id: stableId(option.id, `option-${optionIndex + 1}`, provider, `questions[${questionIndex}].options[${optionIndex}].id`),
-            label,
-            description: label,
-          };
-        }),
-        // Cursor ACP has no free-text answer channel. Do not offer an answer
-        // that cannot be represented in the native response.
-        allowOther: false,
-      };
-    }),
-  }, provider);
-  return { id: rpc.id, method: rpc.method, params: structuredClone(rpc.params), request };
-}
-
-export function encodeCursorAskQuestionFrame(decoded, outcome) {
-  const answers = answeredOutcome(outcome, 'cursor');
-  if (!answers) {
-    return rpcResult(decoded.id, {
-      outcome: outcome?.status === 'cancelled'
-        ? { outcome: 'cancelled' }
-        : { outcome: 'skipped', reason: 'The user question expired.' },
-    });
-  }
-  assertCompleteAnswers(decoded.request, answers, 'cursor');
-  return rpcResult(decoded.id, {
-    outcome: {
-      outcome: 'answered',
-      answers: decoded.request.questions.map((question) => ({
-        questionId: question.id,
-        selectedOptionIds: [...answers[question.id].selectedOptionIds],
-      })),
-    },
-  });
-}
-
-export async function handleCursorAskQuestionFrame(opts, frame, signal, context = {}) {
-  const decoded = decodeCursorAskQuestionFrame(frame);
-  const outcome = await requestProviderUserInput(opts, decoded.request, signal, context);
-  return encodeCursorAskQuestionFrame(decoded, outcome);
-}
-
 export function decodeCodexRequestUserInputFrame(frame) {
   const provider = 'codex';
   const rpc = rpcRequest(frame, provider, [CODEX_REQUEST_USER_INPUT_METHOD]);
@@ -318,76 +253,6 @@ export async function handleCodexRequestUserInputFrame(opts, frame, signal, cont
   return encodeCodexRequestUserInputFrame(decoded, outcome);
 }
 
-export function decodeGrokAskUserQuestionFrame(frame) {
-  const provider = 'grok';
-  const rpc = rpcRequest(frame, provider, GROK_ASK_USER_QUESTION_METHODS);
-  // Grok 1.0.x has emitted both direct params and a private-extension wrapper
-  // containing the logical method plus params. Accept either captured shape.
-  const params = rpc.params.params && typeof rpc.params.method === 'string'
-    ? (() => {
-      if (!GROK_ASK_USER_QUESTION_METHODS.includes(rpc.params.method)) {
-        fail(provider, `unsupported wrapped method ${rpc.params.method}`);
-      }
-      return record(rpc.params.params, provider, 'params.params');
-    })()
-    : rpc.params;
-  const toolCallId = string(params.toolCallId, provider, 'params.toolCallId');
-  const questions = array(params.questions, provider, 'params.questions');
-  const request = providerRequest({
-    providerRequestId: toolCallId,
-    questions: questions.map((value, questionIndex) => {
-      const question = record(value, provider, `questions[${questionIndex}]`);
-      return {
-        id: stableId(question.id, `question-${questionIndex + 1}`, provider, `questions[${questionIndex}].id`),
-        header: compactHeader(undefined, `Question ${questionIndex + 1}`),
-        question: string(question.question, provider, `questions[${questionIndex}].question`),
-        mode: question.multiSelect === true ? 'multiple' : 'single',
-        options: boundedOptions(question.options, provider, `questions[${questionIndex}].options`).map((value, optionIndex) => {
-          const option = record(value, provider, `questions[${questionIndex}].options[${optionIndex}]`);
-          return {
-            id: stableId(option.id, `option-${optionIndex + 1}`, provider, `questions[${questionIndex}].options[${optionIndex}].id`),
-            label: string(option.label, provider, `questions[${questionIndex}].options[${optionIndex}].label`),
-            description: typeof option.description === 'string' && option.description.trim()
-              ? option.description.trim()
-              : string(option.label, provider, `questions[${questionIndex}].options[${optionIndex}].label`),
-          };
-        }),
-        allowOther: true,
-      };
-    }),
-  }, provider);
-  assertUniqueQuestionText(request, provider);
-  return { id: rpc.id, method: rpc.method, params: structuredClone(params), request };
-}
-
-export function encodeGrokAskUserQuestionFrame(decoded, outcome) {
-  const answers = answeredOutcome(outcome, 'grok');
-  if (!answers) return rpcResult(decoded.id, { outcome: 'cancelled' });
-  assertCompleteAnswers(decoded.request, answers, 'grok');
-  const providerAnswers = {};
-  const annotations = {};
-  for (const question of decoded.request.questions) {
-    const answer = answers[question.id];
-    const labels = answer.selectedOptionIds.map((id) => question.options.find((option) => option.id === id)?.label).filter(Boolean);
-    if (answer.otherText) {
-      labels.push('Other');
-      annotations[question.question] = { notes: answer.otherText };
-    }
-    providerAnswers[question.question] = labels;
-  }
-  return rpcResult(decoded.id, {
-    outcome: 'accepted',
-    answers: providerAnswers,
-    ...(Object.keys(annotations).length ? { annotations } : {}),
-  });
-}
-
-export async function handleGrokAskUserQuestionFrame(opts, frame, signal, context = {}) {
-  const decoded = decodeGrokAskUserQuestionFrame(frame);
-  const outcome = await requestProviderUserInput(opts, decoded.request, signal, context);
-  return encodeGrokAskUserQuestionFrame(decoded, outcome);
-}
-
 function methodAvailable(capabilities, method) {
   if (!capabilities) return false;
   if (capabilities === true) return true;
@@ -417,22 +282,4 @@ export function selectCodexUserInputTransport(opts, capabilities = {}) {
     || (opts.workflow === 'question' && opts.phase === 'questioning');
   if (!nativePlanPhase && !codexDefaultModeUserInputEnabled(capabilities.features)) return 'legacy-mcp';
   return 'native-app-server';
-}
-
-export function selectCursorUserInputTransport(opts, capabilities = {}) {
-  if (typeof opts?.requestUserInput !== 'function' || !isRootUserInputContext({ agentRole: opts.agentRole })) return 'legacy-mcp';
-  return capabilities.transport === 'acp' && methodAvailable(capabilities, CURSOR_ASK_QUESTION_METHOD)
-    ? 'native-acp'
-    : 'legacy-mcp';
-}
-
-export function selectGrokUserInputTransport(opts, capabilities = {}) {
-  if (typeof opts?.requestUserInput !== 'function' || !isRootUserInputContext({ agentRole: opts.agentRole })) {
-    return { transport: 'legacy-mcp' };
-  }
-  if (capabilities.transport !== 'acp' || capabilities.askUserTimeoutDisabled !== true) {
-    return { transport: 'legacy-mcp' };
-  }
-  const method = GROK_ASK_USER_QUESTION_METHODS.find((candidate) => methodAvailable(capabilities, candidate));
-  return method ? { transport: 'native-acp', method } : { transport: 'legacy-mcp' };
 }

@@ -13,7 +13,7 @@ export function createSetupTerminal(options: {
   const header = document.createElement('div');
   header.className = 'ag-setup-terminal-header';
   const title = document.createElement('span');
-  title.textContent = 'OpenCode 로그인';
+  title.textContent = 'Claude 로그인';
   const cancel = document.createElement('button');
   cancel.type = 'button';
   cancel.className = 'ag-settings-btn';
@@ -25,7 +25,7 @@ export function createSetupTerminal(options: {
   hint.textContent = '↑ ↓ 선택 · Enter 확인';
   const screen = document.createElement('div');
   screen.className = 'ag-setup-terminal-screen';
-  screen.setAttribute('aria-label', 'OpenCode 로그인 터미널');
+  screen.setAttribute('aria-label', 'Claude 로그인 터미널');
   root.append(header, hint, screen);
   let terminal: Terminal | null = null;
   let pending = '';
@@ -40,7 +40,7 @@ export function createSetupTerminal(options: {
   themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme'] });
   themeObserver.observe(document.body, { attributes: true, attributeFilter: ['class', 'data-theme'] });
 
-  async function open(provider = 'OpenCode') {
+  async function open(provider = 'Claude') {
     title.textContent = `${provider} 로그인`;
     screen.setAttribute('aria-label', `${provider} 로그인 터미널`);
     root.hidden = false;

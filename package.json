@@ -29,6 +29,7 @@
     "dist:mac": "npm run build:desktop && npm run package:mac --",
     "dist:win": "npm run build:desktop && npm run package:win --",
     "verify:package": "node scripts/verify-desktop-package.mjs",
+    "check:provider-surface": "node scripts/check-provider-surface.mjs",
     "setup": "npm ci && npm --prefix rhwp/rhwp-studio ci && npm --prefix rhwp/rhwp-agent ci",
     "build:clean": "npm run setup && npm run build:desktop",
     "package:mac": "electron-builder --mac dmg zip --arm64 --publish never",
@@ -80,16 +81,14 @@
       "!rhwp/rhwp-agent/tsconfig.agents.json",
       "!rhwp/rhwp-agent/node_modules/.bin/tsc{,.cmd,.ps1}",
       "!rhwp/rhwp-agent/node_modules/typescript/**",
-      "!rhwp/rhwp-agent/node_modules/@typescript/typescript-*/**",
-      "rhwp/rau-credits/catalog.mjs"
+      "!rhwp/rhwp-agent/node_modules/@typescript/typescript-*/**"
     ],
     "asarUnpack": [
       "rhwp/rhwp-agent/**",
       "desktop/bin/**",
       "cloud/install/install.sh",
       "cloud/install/install-macos.sh",
-      "cloud/release/rauhwpx-cloud-bootstrap-linux-*.tar.gz",
-      "rhwp/rau-credits/catalog.mjs"
+      "cloud/release/rauhwpx-cloud-bootstrap-linux-*.tar.gz"
     ],
     "extraResources": [
       {

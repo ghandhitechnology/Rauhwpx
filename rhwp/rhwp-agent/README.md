@@ -1,6 +1,6 @@
 # rhwp-agent
 
-Local WebSocket hub. A Claude, Codex, Pi, Grok, Cursor, or OpenCode CLI reads and edits the document open in rhwp-studio through MCP. The hub owns chat workflow, downloads, and the Browserbase sidecar. Document logic stays in the browser.
+Local WebSocket hub. Claude, Codex, and Pi read and edit the document open in rhwp-studio through MCP. The hub owns chat workflow, downloads, and the Browserbase sidecar. Document logic stays in the browser.
 
 ```text
 agent CLI ──spawn──► mcp-stdio.mjs ──ws──► server.mjs ◄──ws── rhwp-studio
@@ -12,7 +12,7 @@ agent CLI ──spawn──► mcp-stdio.mjs ──ws──► server.mjs ◄─
 - Node 22.18 or newer
 - The dependency setup and WASM build in [CONTRIBUTING.md](../../CONTRIBUTING.md)
 
-Install a provider from Studio **Settings → Connection**. OpenCode accepts an API key in Studio and can reuse credentials created by `opencode auth login`.
+Install a provider from Studio **Settings → Connection**.
 
 ## Run
 
@@ -58,11 +58,11 @@ Unknown slash text is sent as a normal message. `//` sends a message that starts
 
 **Settings → AI 연결 → 사용량** reads Claude and Codex subscription quotas from the local CLI login. Claude uses its OAuth credentials in Keychain or `CLAUDE_CONFIG_DIR/.credentials.json`. Codex reads `account/rateLimits/read` through a short-lived app-server and supplements missing windows and banked reset balances through the account usage API. `CODEX_HOME` is respected. API-key billing keeps local token records without showing subscription quota estimates.
 
-Claude, Codex, Grok, Cursor, and OpenCode log in from **Settings → AI 연결**, including on macOS. A profile already signed in to Claude Code or Codex is picked up automatically: the hub copies the existing login into each isolated session, so the provider is usable without signing in again. A Claude login that exists only in the macOS Keychain is materialized into a hub-owned seed file, because `security add-generic-password` needs an interactive authorization that the hub cannot satisfy — the hub only ever reads that item, and Claude Code stays its sole author.
+Claude and Codex log in from **Settings → AI 연결**, including on macOS. A profile already signed in to Claude Code or Codex is picked up automatically: the hub copies the existing login into each isolated session, so the provider is usable without signing in again. A Claude login that exists only in the macOS Keychain is materialized into a hub-owned seed file, because `security add-generic-password` needs an interactive authorization that the hub cannot satisfy — the hub only ever reads that item, and Claude Code stays its sole author.
 
 Remaining-quota bars refresh while Connections is visible, and each card’s refresh icon forces a new read. Codex banked resets require confirmation and bind the request to the displayed account. The hub saves reset request IDs in `codex-reset-ledger.json` under the usage data directory so an interrupted reset can be retried safely. Credentials stay in the hub. CLIProxyAPI configuration is no longer used.
 
-OpenRouter credit balances, Grok billing, and OpenCode Go usage windows also come from their remote APIs. Unknown values remain unavailable. See [remote provider balances](docs/provider-balances.md) for authentication, supported account types, and endpoint details.
+Unknown provider values remain unavailable.
 
 ## Environment variables
 `RHWP_STUDIO_ORIGINS` (default empty) is a comma-separated list of exact HTTPS Studio origins allowed for operator-run remote previews.
@@ -77,7 +77,6 @@ Browserbase credentials come from the variables below or from Studio **Settings 
 | `RHWP_AGENT_TOKEN` | `dev` | Shared token for WS connections (`?token=`) |
 | `RHWP_CLAUDE_MODEL` | `sonnet` | Claude model |
 | `RHWP_CODEX_MODEL` | `gpt-5.6-sol` | Codex model |
-| `RHWP_OPENCODE_MODEL` | `opencode/big-pickle` | OpenCode `provider/model` fallback before discovery |
 | `RHWP_SKILLS_DIR` | OS application-data directory | Product skill directory |
 | `RHWP_USAGE_DIR` | OS application-data directory | Token-usage log directory |
 | `RHWP_REFERENCES_DIR` | OS application-data directory | Reference file store |
@@ -106,7 +105,7 @@ npm test
 npm run typecheck:acp
 ```
 
-`typecheck:acp` checks the shared backend contract and Grok, Cursor, and OpenCode ACP modules. Install Studio dependencies first.
+`typecheck:acp` checks the shared backend contract. Install Studio dependencies first.
 
 ## Files
 

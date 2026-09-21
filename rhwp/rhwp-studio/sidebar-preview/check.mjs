@@ -363,8 +363,7 @@ try {
     assert.equal(await page.$eval('.ag-llm-name', (node) => node.textContent), 'Astra');
     assert.equal(await page.$$eval('.ag-msg-user', (nodes) => nodes.length), messageCount);
     await screenshot('provider-settings-after-reply');
-    await page.click('.ag-provider-item[data-agent="cursor"]');
-    assert.equal(await page.$eval('.ag-effort', (node) => node.hidden), true);
+    await page.click('.ag-provider-item[data-agent="pi"]');
     await page.click('.ag-provider-item[data-agent="claude"]');
     await page.click('.ag-llm-item[data-model="haiku"]');
     assert.equal(await page.$eval('.ag-eslider', (node) => node.getAttribute('aria-valuemax')), '2');
@@ -415,15 +414,11 @@ try {
     );
   });
   await step('New CLI installs default to terminal login', () => checkCliTerminalDefaults(page, origin));
-  await step('Embedded OpenCode login terminal', () => checkSetupTerminal(page, origin));
+  await step('Embedded CLI login terminal', () => checkSetupTerminal(page, origin));
   await step('Provider picker only lists connected providers', async () => {
     await open();
     const visible = () => page.$$eval('.ag-provider-item', items => items.filter(item => !item.hidden).map(item => item.dataset.agent));
-    assert.equal((await visible()).length, 7);
-    await page.evaluate(() => window.sidebarPreview.bridge.disconnectAgent('grok'));
-    assert(!(await visible()).includes('grok'));
-    await page.evaluate(() => window.sidebarPreview.bridge.submitAgentAuthCode('grok', 'preview'));
-    assert((await visible()).includes('grok'));
+    assert.equal((await visible()).length, 3);
     await page.evaluate(() => window.sidebarPreview.setServices(false));
     assert.deepEqual(await visible(), []);
   });
@@ -453,15 +448,7 @@ try {
   await step('All provider/model catalogs and skill library', async () => {
     await open();
     await page.click('[aria-label="프로바이더 선택"]');
-    for (const agent of [
-      'rau',
-      'claude',
-      'codex',
-      'pi',
-      'grok',
-      'cursor',
-      'opencode',
-    ]) {
+    for (const agent of ['claude', 'codex', 'pi']) {
       await page.click(`.ag-provider-item[data-agent="${agent}"]`);
       await page.waitForFunction(
         (agent) => window.sidebarPreview.bridge.getActiveAgent() === agent,
