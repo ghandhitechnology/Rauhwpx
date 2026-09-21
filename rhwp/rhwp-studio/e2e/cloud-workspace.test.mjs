@@ -962,10 +962,13 @@ try {
   // The shared unsaved handoff and table layout can both require review.
   while (await page.$('.merge-conflict-item:not(.is-resolved)')) {
     await page.click('.merge-conflict-item:not(.is-resolved)');
+    await page.waitForFunction(() =>
+      [...document.querySelectorAll('.merge-resolution-button')]
+        .some((button) => (button.textContent ?? '').startsWith('✓')));
     await page.evaluate(() => {
-      const choices = [...document.querySelectorAll('.merge-resolution-button')];
-      const both = choices.find((button) => button.textContent.startsWith('둘 다 유지: 현재 변경 먼저'));
-      (both ?? choices.find((button) => button.textContent.startsWith('현재 변경 사용'))).click();
+      [...document.querySelectorAll('.merge-resolution-button')]
+        .find((button) => (button.textContent ?? '').startsWith('✓'))
+        ?.click();
     });
   }
   await page.waitForFunction(() => !document.querySelector('.merge-resolver-footer .merge-primary-button').disabled, { timeout: 30_000 }).catch(async (error) => {
