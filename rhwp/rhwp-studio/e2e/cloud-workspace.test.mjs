@@ -970,6 +970,11 @@ try {
       [...document.querySelectorAll('.merge-resolution-button')]
         .some((button) => (button.textContent ?? '').startsWith('✕ 거절')));
     await page.evaluate(() => {
+      const cardText = (label) => {
+        const card = [...document.querySelectorAll('.merge-value-card')]
+          .find((node) => node.querySelector('h3')?.textContent === label);
+        return (card?.querySelector('pre')?.textContent ?? '').trim();
+      };
       const choices = [...document.querySelectorAll('.merge-resolution-button')];
       const both = choices.find((button) =>
         (button.textContent ?? '').startsWith('둘 다 유지: 현재 변경 먼저'));
@@ -977,11 +982,13 @@ try {
         (button.textContent ?? '').startsWith('✓ 수락'));
       const keepLocal = choices.find((button) =>
         (button.textContent ?? '').startsWith('✕ 거절'));
-      const incomingCard = [...document.querySelectorAll('.merge-value-card')]
-        .find((card) => card.querySelector('h3')?.textContent === '가져올 변경');
-      const incomingText = (incomingCard?.querySelector('pre')?.textContent ?? '').trim();
-      const incomingUseful = incomingText.includes('CLOUD_FINISHED');
-      const target = both ?? (incomingUseful ? accept : keepLocal);
+      const incomingText = cardText('가져올 변경');
+      const currentText = cardText('현재');
+      const incomingUseful = incomingText !== ''
+        && incomingText !== '(빈 문자열)'
+        && incomingText !== '(삭제됨 / 없음)';
+      const keepLocalText = currentText.includes('LOCAL_DURING_CLOUD');
+      const target = both ?? (keepLocalText || !incomingUseful ? keepLocal : accept);
       if (!target) {
         throw new Error(`No merge resolution for ${document.querySelector('.merge-conflict-editor')?.textContent}`);
       }
@@ -990,6 +997,7 @@ try {
     await page.waitForFunction((count) =>
       document.querySelectorAll('.merge-conflict-item:not(.is-resolved)').length < count, {}, unresolved);
   }
+  console.log('Merge review list', await page.$eval('.merge-conflict-list', (node) => node.textContent));
   await page.waitForFunction(() => !document.querySelector('.merge-resolver-footer .merge-primary-button').disabled, { timeout: 30_000 }).catch(async (error) => {
     throw new Error(`Merge review: ${JSON.stringify(await page.evaluate(() => ({
       status: document.querySelector('.merge-validation-label')?.textContent,
