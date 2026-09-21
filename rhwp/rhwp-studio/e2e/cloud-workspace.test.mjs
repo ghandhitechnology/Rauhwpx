@@ -596,17 +596,13 @@ try {
   });
   await page.click('[aria-label="프로바이더 선택"]');
   await page.waitForSelector('.ag-config-panel.ag-open');
-  assert.equal(await page.$eval('.ag-provider-item[data-agent="opencode"]', (node) => node.disabled), true);
-  // Local-only providers stay discoverable but cannot configure Cloud sessions.
-  await page.$eval('.ag-provider-item[data-agent="opencode"]', (node) => node.click());
-  await page.$eval('.ag-provider-item[data-agent="rau"]', (node) => node.click());
-  assert.equal(await page.evaluate(() => window.__cloudWorkspaceHarness.calls
-    .filter((call) => call.method === 'cloudCommand' && call.payload.command === 'configure').length), 0);
+  const providerAgents = await page.$$eval('.ag-provider-item', (nodes) => nodes.map((node) => node.dataset.agent));
+  assert.deepEqual(providerAgents, ['claude', 'codex', 'pi']);
   await page.evaluate(() => window.__cloudWorkspaceHarness.holdNextConfiguration());
   await page.$eval('.ag-provider-item[data-agent="claude"]', (node) => node.click());
   await page.waitForFunction(() => document.querySelector('[aria-label="프로바이더 선택"]').disabled);
   assert.equal(await page.$eval('.ag-input', (node) => node.value), 'Keep this unsent draft while changing providers.');
-  await page.$eval('.ag-provider-item[data-agent="grok"]', (node) => node.click());
+  await page.$eval('.ag-provider-item[data-agent="pi"]', (node) => node.click());
   assert.equal(await page.evaluate(() => window.__cloudWorkspaceHarness.calls
     .filter((call) => call.method === 'cloudCommand' && call.payload.command === 'configure').length), 1);
   await page.evaluate(() => window.__cloudWorkspaceHarness.releaseConfiguration());
@@ -635,7 +631,7 @@ try {
   }), { agent: 'claude', model: 'haiku', effort: 'low' }, 'confirmed settings must be saved with the existing conversation');
   await page.evaluate(() => window.__cloudWorkspaceHarness.failNextConfiguration());
   await page.click('[aria-label="프로바이더 선택"]');
-  await page.$eval('.ag-provider-item[data-agent="grok"]', (node) => node.click());
+  await page.$eval('.ag-provider-item[data-agent="pi"]', (node) => node.click());
   await page.waitForFunction(() => document.querySelector('.ag-messages').textContent.includes('Provider is not connected on Cloud'));
   assert.equal(await page.$eval('.ag-root', (node) => node.dataset.agent), 'claude');
   assert.equal(await page.$eval('.ag-llm-name', (node) => node.textContent), 'Haiku 4.5');
