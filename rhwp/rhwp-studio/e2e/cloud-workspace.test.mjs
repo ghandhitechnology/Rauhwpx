@@ -984,7 +984,7 @@ try {
         (button.textContent ?? '').startsWith('✕ 거절'));
       const incomingText = cardText('가져올 변경');
       const incomingHasCloud = incomingText.includes('CLOUD_FINISHED');
-      const target = incomingHasCloud ? (both ?? accept) : keepLocal;
+      const target = incomingHasCloud ? (accept ?? both) : keepLocal;
       if (!target) {
         throw new Error(`No merge resolution for ${document.querySelector('.merge-conflict-editor')?.textContent}`);
       }

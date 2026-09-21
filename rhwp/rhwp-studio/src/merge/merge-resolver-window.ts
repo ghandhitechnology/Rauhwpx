@@ -602,7 +602,17 @@ export class MergeResolverWindow {
         analysis: this.options.analysis,
         resolutions: Object.fromEntries(this.options.analysis.conflicts.flatMap((item) => {
           const resolution = this.state!.get(item.id) ?? { kind: 'current' };
-          return [[item.id, resolution], [item.fingerprint, resolution]];
+          const keys: Array<[string, MergeResolution]> = [
+            [item.id, resolution],
+            [item.fingerprint, resolution],
+          ];
+          if (item.position) {
+            keys.push([
+              `review-pos:${item.position.section}:${item.position.paragraph}`,
+              resolution,
+            ]);
+          }
+          return keys;
         })),
         signal: abort.signal,
       });

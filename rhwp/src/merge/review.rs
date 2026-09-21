@@ -74,6 +74,10 @@ fn texts_support_both(base: &Value, current: &Value, incoming: &Value) -> bool {
     }
 }
 
+fn review_position_key(position: &ReviewPosition) -> String {
+    format!("review-pos:{}:{}", position.section, position.paragraph)
+}
+
 fn review_choice(
     choices: &BTreeMap<String, MergeResolution>,
     unit: &ReviewUnit,
@@ -81,6 +85,11 @@ fn review_choice(
     choices
         .get(&unit.value.id)
         .or_else(|| choices.get(&unit.value.fingerprint))
+        .or_else(|| {
+            unit.position
+                .as_ref()
+                .and_then(|position| choices.get(&review_position_key(position)))
+        })
         .cloned()
         .unwrap_or(MergeResolution::Current)
 }
@@ -840,6 +849,30 @@ mod tests {
         assert!(
             fingerprint_merged.contains("LOCAL_DURING_CLOUD"),
             "fingerprint choices missing local text: {fingerprint_merged}"
+        );
+        let by_position = analysis
+            .conflicts
+            .iter()
+            .filter_map(|unit| {
+                Some((
+                    review_position_key(unit.position.as_ref()?),
+                    choices
+                        .get(&unit.value.id)
+                        .cloned()
+                        .unwrap_or(MergeResolution::Current),
+                ))
+            })
+            .collect();
+        let position_output = apply_review(&base, &current, &incoming, &by_position)
+            .unwrap_or_else(|error| panic!("position choices: {error}"));
+        let position_merged = joined(&position_output);
+        assert!(
+            position_merged.contains("CLOUD_FINISHED"),
+            "position choices missing cloud text: {position_merged}"
+        );
+        assert!(
+            position_merged.contains("LOCAL_DURING_CLOUD"),
+            "position choices missing local text: {position_merged}"
         );
     }
 
