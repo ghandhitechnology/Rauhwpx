@@ -983,12 +983,8 @@ try {
       const keepLocal = choices.find((button) =>
         (button.textContent ?? '').startsWith('✕ 거절'));
       const incomingText = cardText('가져올 변경');
-      const currentText = cardText('현재');
-      const incomingUseful = incomingText !== ''
-        && incomingText !== '(빈 문자열)'
-        && incomingText !== '(삭제됨 / 없음)';
-      const keepLocalText = currentText.includes('LOCAL_DURING_CLOUD');
-      const target = both ?? (keepLocalText || !incomingUseful ? keepLocal : accept);
+      const incomingHasCloud = incomingText.includes('CLOUD_FINISHED');
+      const target = incomingHasCloud ? (both ?? accept) : keepLocal;
       if (!target) {
         throw new Error(`No merge resolution for ${document.querySelector('.merge-conflict-editor')?.textContent}`);
       }

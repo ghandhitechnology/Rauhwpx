@@ -600,7 +600,10 @@ export class MergeResolverWindow {
     try {
       const materialized = await this.options.materialize({
         analysis: this.options.analysis,
-        resolutions: Object.fromEntries(this.options.analysis.conflicts.map((item) => [item.id, this.state!.get(item.id) ?? { kind: 'current' }])),
+        resolutions: Object.fromEntries(this.options.analysis.conflicts.flatMap((item) => {
+          const resolution = this.state!.get(item.id) ?? { kind: 'current' };
+          return [[item.id, resolution], [item.fingerprint, resolution]];
+        })),
         signal: abort.signal,
       });
       if (abort.signal.aborted || sequence !== this.materializeSequence) return;
