@@ -650,34 +650,60 @@ export function isUsagePlanForAgent(agent: AgentName, value: unknown): boolean {
   return USAGE_PLAN_GUARDS[agent](value);
 }
 
-export interface ProductSkillFile {
-  path: string;
-  size?: number;
-  encoding?: 'utf8' | 'base64';
-  content?: string;
-}
-
 export type ProductSkillIcon = 'pencil' | 'bot' | 'system';
 
-export interface ProductSkill {
+export type SkillHarnessId = 'claude' | 'codex' | 'cursor' | 'pi';
+
+interface CatalogSkillFields {
   name: string;
   description: string;
-  /** Optional for compatibility with skills created before icon selection. */
-  icon?: ProductSkillIcon;
-  origin: 'bundled' | 'user';
-  enabled: boolean;
-  required?: boolean;
-  invalid?: boolean;
-  hasScripts: boolean;
-  hasAssets: boolean;
-  fileCount: number;
-  files: ProductSkillFile[];
 }
 
+export type CatalogRow =
+  | (CatalogSkillFields & {
+      kind: 'sealed';
+      enabled: true;
+      origin: 'sealed';
+      digest: null;
+      icon: ProductSkillIcon | null;
+    })
+  | (CatalogSkillFields & {
+      kind: 'skill';
+      enabled: boolean;
+      origin: 'bundled' | 'user';
+      digest: string;
+      icon: ProductSkillIcon | null;
+    })
+  | (CatalogSkillFields & {
+      kind: 'broken';
+      enabled: false;
+      origin: 'user';
+      digest: string;
+      icon: null;
+    });
+
 export interface SkillCatalog {
-  revision: number;
-  skills: ProductSkill[];
+  rows: CatalogRow[];
 }
+
+export interface HarnessSkillRow {
+  harness: SkillHarnessId;
+  name: string;
+  description: string;
+}
+
+export type SkillCommitChange =
+  | { action: 'create'; name: string; description: string; body: string; base?: string }
+  | { action: 'write'; name: string; path: string; content: string; encoding?: 'utf8' | 'base64'; base: string }
+  | { action: 'body'; name: string; body: string; base: string }
+  | { action: 'enable'; name: string; enabled: boolean }
+  | { action: 'delete'; name: string; base: string }
+  | { action: 'import'; harness: SkillHarnessId; name: string; mode: 'adopt' | 'replace'; base?: string }
+  | { action: 'restore'; name: string };
+
+export type SkillCommitOutcome =
+  | { ok: true; name: string; digest: string; unchanged: boolean; notice: string | null }
+  | { ok: false; code: string; message: string; digest: string | null };
 
 export class AgentToolError extends Error {
   // 파라미터 프로퍼티 대신 명시적 할당 (node --test strip-only 모드 호환).
@@ -777,12 +803,8 @@ export type SidebarEvent =
   | ({ type: 'implementation-started'; planId: string } & AgentWorkflowState)
   | { type: 'planning-document-saved'; revision: number }
   | { type: 'skills-catalog'; catalog: SkillCatalog }
-  | { type: 'skill-detail'; requestId: string; revision: number; skill: ProductSkill }
-  | { type: 'skill-saved'; requestId: string; revision: number; skill: ProductSkill }
-  | { type: 'skill-validated'; requestId: string; result: { valid: boolean; name: string; warnings: string[]; hasScripts: boolean; hasAssets: boolean; fileCount: number } }
-  | { type: 'skill-deleted'; requestId: string; name: string; recoverable: boolean }
-  | { type: 'skill-draft-progress'; requestId: string; state: 'generating' }
-  | { type: 'skill-draft-result'; requestId: string; draft: { name: string; files: Array<{ path: string; content: string }> } }
+  | { type: 'harness-list-result'; requestId: string; rows: HarnessSkillRow[] }
+  | { type: 'skill-commit-result'; requestId: string; outcome: SkillCommitOutcome }
   | { type: 'skills-error'; requestId: string; code: string; message: string }
   | { type: 'writing-style-status'; requestId: string; status: WritingStyleStatus }
   | ({ type: 'writing-style-progress'; requestId: string } & WritingStyleProgress)

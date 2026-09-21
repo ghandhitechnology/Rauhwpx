@@ -107,7 +107,6 @@ export function createMockBridge(report: (message: string) => void) {
   const setupChanged = () =>
     emit({ type: 'agent-setup-status', statuses: data.setups });
   const skillsChanged = () => {
-    data.skills.revision++;
     emit({ type: 'skills-catalog', catalog: data.skills });
   };
   const templateChanged = () => {
@@ -886,93 +885,34 @@ export function createMockBridge(report: (message: string) => void) {
     },
     listSkills: () =>
       later(() => emit({ type: 'skills-catalog', catalog: data.skills })),
-    readSkill: (name) =>
-      request((requestId) => {
-        const skill = data.skills.skills.find((item) => item.name === name);
-        if (skill)
-          emit({
-            type: 'skill-detail',
-            requestId,
-            revision: data.skills.revision,
-            skill,
-          });
-      }),
-    validateSkill: (skill) =>
+    listHarnessSkills: () =>
       request((requestId) =>
-        emit({
-          type: 'skill-validated',
-          requestId,
-          result: {
-            valid:
-              /^[a-z0-9-]+$/.test(skill.name) &&
-              skill.files.some((file) => file.path === 'SKILL.md'),
-            name: skill.name,
-            warnings: [],
-            hasScripts: false,
-            hasAssets: false,
-            fileCount: skill.files.length,
-          },
-        }),
+        emit({ type: 'harness-list-result', requestId, rows: [] }),
       ),
-    saveSkill: (input) =>
+    commitSkill: (change) =>
       request((requestId) => {
-        const skill: T.ProductSkill = {
-          ...input,
-          description:
-            input.files[0]?.content?.match(/description: (.+)/)?.[1] ??
-            input.name,
-          origin: 'user',
-          enabled: true,
-          hasScripts: false,
-          hasAssets: false,
-          fileCount: input.files.length,
-        };
-        data.skills.skills = data.skills.skills.filter(
-          (item) => item.name !== input.name,
-        );
-        data.skills.skills.push(skill);
-        skillsChanged();
+        if (change.action === 'enable') {
+          const row = data.skills.rows.find(
+            (item) => item.name === change.name && item.kind === 'skill',
+          );
+          if (row && row.kind === 'skill') row.enabled = change.enabled;
+        } else if (change.action === 'delete') {
+          data.skills.rows = data.skills.rows.filter(
+            (item) => item.name !== change.name,
+          );
+        }
         emit({
-          type: 'skill-saved',
+          type: 'skill-commit-result',
           requestId,
-          revision: data.skills.revision,
-          skill,
+          outcome: {
+            ok: true,
+            name: change.name,
+            digest: 'a'.repeat(64),
+            unchanged: false,
+            notice: null,
+          },
         });
-      }),
-    setSkillEnabled: (name, enabled) =>
-      request(() => {
-        const skill = data.skills.skills.find((item) => item.name === name);
-        if (skill) skill.enabled = enabled;
         skillsChanged();
-      }),
-    deleteSkill: (name) =>
-      request((requestId) => {
-        data.skills.skills = data.skills.skills.filter(
-          (item) => item.name !== name,
-        );
-        skillsChanged();
-        emit({ type: 'skill-deleted', requestId, name, recoverable: false });
-      }),
-    generateSkillDraft: (input) =>
-      request((requestId) => {
-        emit({ type: 'skill-draft-progress', requestId, state: 'generating' });
-        later(
-          () =>
-            emit({
-              type: 'skill-draft-result',
-              requestId,
-              draft: {
-                name: 'sample-skill',
-                files: [
-                  {
-                    path: 'SKILL.md',
-                    content: `---\nname: sample-skill\ndescription: ${input.goal.replace(/\n/g, ' ')}\n---\n\n${input.goal}`,
-                  },
-                ],
-              },
-            }),
-          500,
-        );
       }),
     requestWritingStyleStatus: () =>
       request((requestId) =>

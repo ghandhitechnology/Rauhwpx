@@ -5,10 +5,11 @@ import test from 'node:test';
 import {
   skillGlyphForName,
   skillGlyphForSkill,
-  withSkillIconFrontmatter,
 } from '../src/ui/agent-sidebar/skill-presentation.ts';
 
 const sidebar = readFileSync(new URL('../src/ui/agent-sidebar/index.ts', import.meta.url), 'utf8');
+const shelf = readFileSync(new URL('../src/ui/agent-sidebar/skills-shelf.ts', import.meta.url), 'utf8');
+const presentation = readFileSync(new URL('../src/ui/agent-sidebar/skill-presentation.ts', import.meta.url), 'utf8');
 const icons = readFileSync(new URL('../src/ui/agent-sidebar/icons.ts', import.meta.url), 'utf8');
 
 test('document-writing skills use the pencil glyph', () => {
@@ -47,17 +48,14 @@ test('explicit creator icon choices override name-based defaults', () => {
   assert.equal(skillGlyphForSkill({ name: 'my-skill', icon: 'system' }), 'skillSystem');
 });
 
-test('icon selection is inserted into or updates SKILL.md frontmatter', () => {
-  const markdown = '---\nname: my-skill\ndescription: Test\n---\n\nDo it.\n';
-  assert.match(withSkillIconFrontmatter(markdown, 'pencil'), /description: Test\nicon: pencil\n---/);
-  assert.match(withSkillIconFrontmatter(withSkillIconFrontmatter(markdown, 'pencil'), 'bot'), /icon: bot/);
-  const windows = markdown.replace(/\n/g, '\r\n');
-  assert.match(withSkillIconFrontmatter(windows, 'system'), /description: Test\r\nicon: system\r\n---/);
-  assert.equal(withSkillIconFrontmatter('No frontmatter', 'system'), 'No frontmatter');
+test('the shelf does not rewrite SKILL.md frontmatter for an icon', () => {
+  assert.doesNotMatch(presentation, /function withSkillIconFrontmatter/);
+  assert.doesNotMatch(sidebar, /withSkillIconFrontmatter/);
+  assert.doesNotMatch(shelf, /withSkillIconFrontmatter/);
 });
 
 test('the skill glyph appears in every skill surface', () => {
-  assert.match(sidebar, /copyIcon\.appendChild\(createIcon\(skillGlyphForSkill\(skill\)\)\)/);
+  assert.match(shelf, /copyIcon\.appendChild\(createIcon\(skillGlyphForSkill\(skill\)\)\)/);
   assert.match(sidebar, /composerSkillIcon\.appendChild\(createIcon\(skillGlyphForSkill\(skill\)\)\)/);
   assert.match(sidebar, /ag-slash-skill-icon[\s\S]*skillGlyphForSkill\(\{ name: option\.skillName, icon: option\.skillIcon \}\)/);
   assert.match(sidebar, /ag-skill-token-icon[\s\S]*skillGlyphForSkill\(\{ name: message\.skillName, icon: message\.skillIcon \}\)/);

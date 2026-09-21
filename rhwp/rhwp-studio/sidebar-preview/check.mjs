@@ -467,18 +467,21 @@ try {
     await page.waitForSelector('.ag-root.ag-skills-open');
     await page.type('.ag-skills-search', 'proofread');
     await page.waitForFunction(
-      () => document.querySelectorAll('.ag-skill-copy').length === 1,
+      () => {
+        const rows = [...document.querySelectorAll('.ag-skill-copy')];
+        return rows.length === 1 && rows[0].textContent.includes('proofread-korean');
+      },
     );
     await screenshot('skills');
+    const pressed = await page.$eval('.ag-skill-toggle', (element) =>
+      element.getAttribute('aria-pressed'),
+    );
     await page.click('.ag-skill-toggle');
     await page.waitForFunction(
-      () =>
-        document.querySelector('.ag-skill-toggle').textContent !== '사용 중',
-    );
-    await page.click('.ag-skill-copy');
-    await page.waitForFunction(
-      () =>
-        document.querySelector('.ag-skill-name').value === 'proofread-korean',
+      (before) =>
+        document.querySelector('.ag-skill-toggle')?.getAttribute('aria-pressed') !== before,
+      {},
+      pressed,
     );
   });
   await step('Reference upload, search, and deletion', async () => {

@@ -69,7 +69,13 @@ import type {
   BrowserbaseCredentialSource,
   BrowserbaseOverride,
   BrowserbaseStatus,
-  ProductSkillFile,
+  CatalogRow,
+  HarnessSkillRow,
+  ProductSkillIcon,
+  SkillCatalog,
+  SkillCommitChange,
+  SkillCommitOutcome,
+  SkillHarnessId,
   ProviderHealth,
   ProviderStatusMap,
   ProviderUsage,
@@ -103,6 +109,72 @@ import type {
   UserQuestionInteraction,
   UserQuestionOutcome,
 } from './types.ts';
+
+function isProductSkillIcon(value: unknown): value is ProductSkillIcon | null {
+  return value === null || value === 'pencil' || value === 'bot' || value === 'system';
+}
+
+function isSkillHarnessId(value: unknown): value is SkillHarnessId {
+  return value === 'claude' || value === 'codex' || value === 'cursor' || value === 'pi';
+}
+
+function isCatalogRow(value: unknown): value is CatalogRow {
+  if (!value || typeof value !== 'object') return false;
+  const row = value as Record<string, unknown>;
+  if (typeof row.name !== 'string' || typeof row.description !== 'string') return false;
+  switch (row.kind) {
+    case 'sealed':
+      return row.enabled === true && row.origin === 'sealed' && row.digest === null && isProductSkillIcon(row.icon);
+    case 'skill':
+      return typeof row.enabled === 'boolean'
+        && (row.origin === 'bundled' || row.origin === 'user')
+        && typeof row.digest === 'string'
+        && isProductSkillIcon(row.icon);
+    case 'broken':
+      return row.enabled === false && row.origin === 'user' && typeof row.digest === 'string' && row.icon === null;
+    default:
+      return false;
+  }
+}
+
+function readSkillCatalog(value: unknown): SkillCatalog {
+  const rows = value && typeof value === 'object' && Array.isArray((value as { rows?: unknown }).rows)
+    ? (value as { rows: unknown[] }).rows
+    : [];
+  return { rows: rows.filter(isCatalogRow) };
+}
+
+function isHarnessSkillRow(value: unknown): value is HarnessSkillRow {
+  if (!value || typeof value !== 'object') return false;
+  const row = value as Record<string, unknown>;
+  return isSkillHarnessId(row.harness) && typeof row.name === 'string' && typeof row.description === 'string';
+}
+
+function readSkillCommitOutcome(value: unknown): SkillCommitOutcome | null {
+  if (!value || typeof value !== 'object') return null;
+  const outcome = value as Record<string, unknown>;
+  if (outcome.ok === true
+    && typeof outcome.name === 'string'
+    && typeof outcome.digest === 'string'
+    && typeof outcome.unchanged === 'boolean') {
+    return {
+      ok: true,
+      name: outcome.name,
+      digest: outcome.digest,
+      unchanged: outcome.unchanged,
+      notice: typeof outcome.notice === 'string' ? outcome.notice : null,
+    };
+  }
+  if (outcome.ok === false && typeof outcome.code === 'string' && typeof outcome.message === 'string') {
+    return {
+      ok: false,
+      code: outcome.code,
+      message: outcome.message,
+      digest: typeof outcome.digest === 'string' ? outcome.digest : null,
+    };
+  }
+  return null;
+}
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const copy = new Uint8Array(bytes.byteLength);
@@ -232,12 +304,8 @@ export interface AgentBridge {
   setPermissionProfile(profile: PermissionProfile): void;
   setServiceTier(tier: ServiceTier): void;
   listSkills(): void;
-  readSkill(name: string): string;
-  validateSkill(skill: { name: string; files: ProductSkillFile[] }): string;
-  saveSkill(skill: { name: string; files: ProductSkillFile[] }): string;
-  setSkillEnabled(name: string, enabled: boolean): string;
-  deleteSkill(name: string): string;
-  generateSkillDraft(input: { goal: string; triggerExamples?: string; nonTriggerExamples?: string; resourceNotes?: string; existingSkill?: string }): string;
+  listHarnessSkills(): string;
+  commitSkill(change: SkillCommitChange): string;
   requestWritingStyleStatus(): string;
   requestAgentInstructions(): Promise<AgentInstructionsStatus | null>;
   saveAgentInstructions(content: string, expectedRevision: number): Promise<AgentInstructionsStatus | null>;
@@ -2100,7 +2168,7 @@ export class AgentBridgeImpl implements AgentBridge {
         break;
       }
       case 'skills-catalog': {
-        this.emit({ type: 'skills-catalog', catalog: { revision: Number(msg.revision ?? 0), skills: Array.isArray(msg.skills) ? msg.skills : [] } });
+        this.emit({ type: 'skills-catalog', catalog: readSkillCatalog(msg.catalog) });
         break;
       }
       case 'templates-catalog': {
@@ -2167,24 +2235,20 @@ export class AgentBridgeImpl implements AgentBridge {
         });
         break;
       }
-      case 'skill-detail':
-        this.emit({ type: 'skill-detail', requestId: String(msg.requestId ?? ''), revision: Number(msg.revision ?? 0), skill: msg.skill });
+      case 'harness-list-result':
+        this.emit({
+          type: 'harness-list-result',
+          requestId: String(msg.requestId ?? ''),
+          rows: Array.isArray(msg.rows) ? msg.rows.filter(isHarnessSkillRow) : [],
+        });
         break;
-      case 'skill-saved':
-        this.emit({ type: 'skill-saved', requestId: String(msg.requestId ?? ''), revision: Number(msg.revision ?? 0), skill: msg.skill });
+      case 'skill-commit-result': {
+        const outcome = readSkillCommitOutcome(msg.outcome);
+        if (outcome) {
+          this.emit({ type: 'skill-commit-result', requestId: String(msg.requestId ?? ''), outcome });
+        }
         break;
-      case 'skill-validated':
-        this.emit({ type: 'skill-validated', requestId: String(msg.requestId ?? ''), result: msg.result });
-        break;
-      case 'skill-deleted':
-        this.emit({ type: 'skill-deleted', requestId: String(msg.requestId ?? ''), name: String(msg.name ?? ''), recoverable: Boolean(msg.recoverable) });
-        break;
-      case 'skill-draft-progress':
-        this.emit({ type: 'skill-draft-progress', requestId: String(msg.requestId ?? ''), state: 'generating' });
-        break;
-      case 'skill-draft-result':
-        this.emit({ type: 'skill-draft-result', requestId: String(msg.requestId ?? ''), draft: msg.draft });
-        break;
+      }
       case 'skills-error':
         this.emit({ type: 'skills-error', requestId: String(msg.requestId ?? ''), code: String(msg.code ?? 'SKILLS_ERROR'), message: String(msg.message ?? 'Skill request failed') });
         break;
@@ -3234,39 +3298,15 @@ export class AgentBridgeImpl implements AgentBridge {
     this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'skills-list', requestId: `skills-${++this.requestSeq}` });
   }
 
-  readSkill(name: string): string {
-    const requestId = `skill-read-${++this.requestSeq}`;
-    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'skill-read', requestId, name });
+  listHarnessSkills(): string {
+    const requestId = `harness-list-${++this.requestSeq}`;
+    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'harness-list', requestId });
     return requestId;
   }
 
-  saveSkill(skill: { name: string; files: ProductSkillFile[] }): string {
-    const requestId = `skill-save-${++this.requestSeq}`;
-    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'skill-save', requestId, skill });
-    return requestId;
-  }
-
-  validateSkill(skill: { name: string; files: ProductSkillFile[] }): string {
-    const requestId = `skill-validate-${++this.requestSeq}`;
-    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'skill-validate', requestId, skill });
-    return requestId;
-  }
-
-  setSkillEnabled(name: string, enabled: boolean): string {
-    const requestId = `skill-enable-${++this.requestSeq}`;
-    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'skill-enable', requestId, name, enabled });
-    return requestId;
-  }
-
-  deleteSkill(name: string): string {
-    const requestId = `skill-delete-${++this.requestSeq}`;
-    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'skill-delete', requestId, name });
-    return requestId;
-  }
-
-  generateSkillDraft(input: { goal: string; triggerExamples?: string; nonTriggerExamples?: string; resourceNotes?: string; existingSkill?: string }): string {
-    const requestId = `skill-draft-${++this.requestSeq}`;
-    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'skill-draft-request', requestId, agent: this.selectedAgent, model: this.selectedModel, ...input });
+  commitSkill(change: SkillCommitChange): string {
+    const requestId = `skill-commit-${++this.requestSeq}`;
+    this.sendJson({ v: AGENT_PROTOCOL_VERSION, type: 'skill-commit', requestId, change });
     return requestId;
   }
 

@@ -171,27 +171,18 @@ export function createFixtures() {
     })),
   };
   const skills: T.SkillCatalog = {
-    revision: 1,
-    skills: [
+    rows: [
       ['proofread-korean', '한국어 문서의 맞춤법과 문장을 다듬습니다.'],
       ['summarize-document', '문서의 핵심 내용을 요약합니다.'],
       ['draft-document', '요청에 맞는 새 문서의 초안을 작성합니다.'],
     ].map(([name, description]) => ({
+      kind: 'skill' as const,
       name,
       description,
-      origin: 'user',
-      icon: 'pencil',
+      origin: 'user' as const,
+      icon: 'pencil' as const,
       enabled: true,
-      hasScripts: false,
-      hasAssets: false,
-      fileCount: 1,
-      files: [
-        {
-          path: 'SKILL.md',
-          encoding: 'utf8',
-          content: `---\nname: ${name}\ndescription: ${description}\n---\n\n${description}\n`,
-        },
-      ],
+      digest: 'a'.repeat(64),
     })),
   };
   const writing: T.WritingStyleStatus = {

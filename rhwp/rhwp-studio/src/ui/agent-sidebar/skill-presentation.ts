@@ -35,26 +35,11 @@ export function skillGlyphForIcon(icon: ProductSkillIcon): SkillGlyph {
   return 'skillSystem';
 }
 
-export function skillGlyphForSkill(skill: { name: string; icon?: ProductSkillIcon }): SkillGlyph {
+export function skillGlyphForSkill(skill: { name: string; icon?: ProductSkillIcon | null }): SkillGlyph {
   return skillGlyphForIcon(skill.icon ?? defaultSkillIconForName(skill.name));
 }
 
 /** Wire 요청만 비어 있지 않게 만들고, 대화 기록용 후속 문장은 그대로 둔다. */
 export function requestTextForSkillInvocation(text: string, skillName?: string): string {
   return !text && skillName ? `/${skillName}` : text;
-}
-
-/** Keep the picker authoritative while leaving malformed drafts for validation to explain. */
-export function withSkillIconFrontmatter(markdown: string, icon: ProductSkillIcon): string {
-  const opening = markdown.match(/^(\uFEFF?---\r?\n)/);
-  if (!opening) return markdown;
-  const newline = opening[0].endsWith('\r\n') ? '\r\n' : '\n';
-  const body = markdown.slice(opening[0].length);
-  const closing = body.match(/\r?\n---\r?\n/);
-  if (!closing || closing.index == null) return markdown;
-  const frontmatter = body.slice(0, closing.index);
-  const nextFrontmatter = /^icon:\s*.*$/m.test(frontmatter)
-    ? frontmatter.replace(/^icon:\s*.*$/m, `icon: ${icon}`)
-    : `${frontmatter}${newline}icon: ${icon}`;
-  return `${opening[0]}${nextFrontmatter}${body.slice(closing.index)}`;
 }
